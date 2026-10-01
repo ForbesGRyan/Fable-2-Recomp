@@ -52,6 +52,18 @@ class GenTests(unittest.TestCase):
         self.assertNotIn("Swap2", out)
         self.assertNotIn("sub_82BA2000", out)
 
+    def test_duplicate_symbol_hooked_once(self):
+        d = Path(self.tmp.name)
+        m = d / "dup.json"
+        m.write_text(json.dumps([
+            {"name": "A", "ref": 1, "target": 0x82BA0000, "confidence": "loose", "candidates": []},
+            {"name": "B", "ref": 2, "target": None, "confidence": "none", "candidates": [0x82BA0000], "score": 0.9},
+        ]))
+        out = gen.generate(m, self.init, self.src)
+        self.assertEqual(out.count("sub_82BA0000)"), 2)  # one hook + one skip comment
+        self.assertEqual(out.count("FABLE2_D3D_CENSUS_HOOK("), 1)
+        self.assertIn("// skipped B? (sub_82BA0000): symbol already hooked by A", out)
+
 
 if __name__ == "__main__":
     unittest.main()

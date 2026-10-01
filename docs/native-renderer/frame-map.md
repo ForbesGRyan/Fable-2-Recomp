@@ -1,6 +1,6 @@
 # Fable 2 frame map and sub-project 3 recommendation
 
-Status: menu capture (static + 3D scene) and gameplay census complete; pitch ablation and the tiling counter are still pending (see "Pending"). Sections 1b, 2c, 3, 5, 6b and 7 carry the gameplay results.
+Status: menu capture, gameplay census and pitch ablation complete; the tiling counter and the uncapped F3 reading are still pending (see "Pending"). Sections 1b, 2c, 3, 5, 6b and 7 carry the gameplay results.
 Gameplay capture: `out\build\win-amd64-release\logs\d3d_census_20261001_140912.jsonl` (900 rows, 30 s walking in the world, armed after 90 s; no repeated `gpu_frame`).
 Menu capture used: `out\build\win-amd64-release\logs\d3d_census_20261001_130522.jsonl` (600 rows). Row 1 accumulates every call since process start and is dropped by `summarize_census.py`. The capture has two distinct segments (section 2): frames 2-480 are a static screen (likely splash/loading/title) and frames 481-600 are a 3D scene. Treat the 3D segment as the one that matters. This capture predates `gpu.gpu_frame`, so repeated GPU frames could not be dropped.
 
@@ -379,7 +379,23 @@ Consequence for sub-project 3: on the PC there is no EDRAM limit, so a native pa
 
 ## 4. Pass list
 
-Pending pitch ablation (Pending, item 1). Pitches 1120 and 1040 are most likely the tiled main scene: they carry most of the draws, and the other pitches together are too few to hold the 2x excess (section 3). Their odd widths could be per-tile surface pitches or a sub-720p scene; the ablation decides.
+Pitch ablation, 2026-10-01, in the world (Bowerstone Old Town, night, snow), one run per pitch with `--native_render_suppress_debug=true --native_render_suppress_pitches=<p>`, vsync on. Draw counts are gameplay medians from section 2c.
+
+| Pitch | Draws | Observed effect when suppressed | Pass |
+|---|---|---|---|
+| 1120 | 1779 | No world at all; the last loading-screen image stays on screen in horizontal bands with the live HUD over it; game keeps running (audio) | Main 3D scene (tiled). The 1280 composite samples it, so a stale scene texture stays visible |
+| 1040 | 340 | World, characters and HUD fine; shadows wrong | Shadow maps |
+| 320 | 139 | Base scene fine; garbage (uninitialised-memory patterns, cyan smears) in rectangular regions and horizontal bands where glow/fog blends; one green checkered character | Quarter-resolution post buffer (1280/4): glow / fog / blur |
+| 1280 | 133 | Black screen, game keeps running (audio) | Final composite: post, UI, scan-out resolve |
+| 560 | 114 | Washed-out, overexposed image with a ghost of a stale frame | Half-resolution scene downsample (1120/2) for bloom / HDR glow |
+| 280 | 112 | Looks almost normal; a purple outline glow on one NPC and a semi-transparent crate near the camera (not yet compared against a baseline) | Quarter-resolution step (1120/4) of the bloom chain or a small glow/highlight mask; minor |
+
+Reading:
+- The scene chain 1120 -> 560 -> 280 halves cleanly, so 1120 is most likely the real width of the 3D scene (a sub-720p world, scaled up in the 1280 composite), not only a tile surface pitch. Confirm from the 1120 render-target height when the tiling counter lands.
+- Horizontal banding in the 1120 and 320 runs fits a horizontally split tiled scene.
+- Native replacement order follows: 1120 (world) first, 1040 (shadows) next; keep 1280 emulated (`native_render_keep_pitches=1280`) so UI and post still work, and leave the post chain (560/320/280) emulated until sub-project 7.
+
+F3 in the world (vsync on; each run had one pitch suppressed): guest work 5.8-6.5 ms per frame, GPU-emulation busy 13.9-21.2 ms. The GPU emulation does about 3x the guest's work, so uncapped gameplay is GPU-emulation-bound (roughly 50-70 FPS ceiling), which is the case a native world pass addresses.
 
 ## 5. CPU vs GPU emulation
 
@@ -453,7 +469,7 @@ Based on the gameplay capture (sections 2c, 3, 5) and the static emitter scan (s
 
 ## Pending
 
-1. **Pitch ablation** (user, in the world). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):
+1. **Pitch ablation** (done 2026-10-01, results in section 4; kept for re-runs). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):
 ```
 cd out\build\win-amd64-release
 & .\fable_2.exe --fullscreen=false --native_render_suppress_debug=true --native_render_suppress_pitches=<p>

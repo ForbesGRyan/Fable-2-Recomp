@@ -29,6 +29,7 @@
 #include "alloc_watch.h"
 #include "dir_manifest_heal.h"
 #include "fable2_config.h"
+#include "fable2_native_render.h"
 #include "fable2_patches.h"
 // #include "fable2_deadbeef_overlay.h"
 // 30fps-cap instrumentation (writes fps_probe.log next to the exe). Disabled
@@ -262,6 +263,9 @@ class Fable2App : public rex::ReXApp {
       }
       return stats;
     });
+
+    // Native guest-output renderer (registers SDK callbacks if enabled).
+    fable2::native::Install();
   }
 
   // Load the recomp's own user config (fable2_config.toml) next to the exe,
@@ -307,6 +311,7 @@ class Fable2App : public rex::ReXApp {
     seed_cvar("keyboard_gamepad_map", cfg.keyboard_gamepad_map);
     seed_cvar("mouse_look", cfg.mouse_look ? "true" : "false");
     seed_cvar("mouse_look_scale", std::to_string(cfg.mouse_look_scale));
+    seed_cvar("fable2_native_render", cfg.native_render ? "true" : "false");
     // NOTE: the hero/dog readback fix (readback_resolve_force_addresses) is a
     // GPU-PLUGIN cvar, so it is seeded in OnPostSetup() (after the plugin is
     // loaded) rather than here - see plans/hero-dog-texture-readback.md.

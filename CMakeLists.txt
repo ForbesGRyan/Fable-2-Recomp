@@ -72,12 +72,16 @@ endif()
 # glob recursively so new categories are picked up automatically.
 file(GLOB_RECURSE HOTFUNC_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/core/hotfunc/*.cpp)
 
+# Native guest-output renderer plumbing (docs/superpowers/specs/2026-10-01-native-renderer-foundation-design.md)
+file(GLOB FABLE2_NATIVE_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/native/*.cpp)
+
 set(FABLE2_SOURCES
     src/main.cpp
     src/core/fable2_config.cpp
     src/core/fable2_patches.cpp
     src/core/fable2_hooks.cpp
     ${HOTFUNC_SOURCES}
+    ${FABLE2_NATIVE_SOURCES}
 )
 
 if(WIN32)
@@ -92,7 +96,8 @@ endif()
 set(FABLE2_HEADER_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     ${CMAKE_CURRENT_SOURCE_DIR}/src/diagnostics
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/input)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/input
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native)
 target_include_directories(fable_2 PRIVATE ${FABLE2_HEADER_DIRS})
 if(TARGET fable_2_recomp)
     target_include_directories(fable_2_recomp PRIVATE ${FABLE2_HEADER_DIRS})

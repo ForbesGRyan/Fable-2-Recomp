@@ -23,6 +23,7 @@
 #include <rex/ppc/func.h>
 
 #include "fable2_func_trace.h"
+#include "fable2_native_render.h"
 #include "fable2_f5_lua.h"  // F5 external-Lua run (polled per frame)
 
 namespace fable2::functrace_window {
@@ -137,6 +138,8 @@ extern "C" void MainRenderLoop_82B9CD68(PPCContext& ctx, uint8_t* base) {
     }
   }
   // F5 (host) -> run the external Lua file (per-frame, responsive).
+  // F6 native-renderer toggle + overlay request (per frame).
+  fable2::native::PollFrame();
   fable2::f5lua::poll_mainloop(ctx, base);
   __imp__MainRenderLoop_82B9CD68(ctx, base);
 }

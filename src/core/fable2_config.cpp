@@ -114,6 +114,14 @@ hero_dog_texture_readback = true
 # every call); 0 = never yield; larger = fewer context switches.
 # Default: 8
 hotfunc_yield_every = 8
+
+[native]
+# Experimental native renderer (docs/superpowers/specs/
+# 2026-10-01-native-renderer-foundation-design.md). true = register the native
+# renderer at startup; F6 toggles it live. Mode is the cvar
+# fable2_native_render_mode (overlay | replace).
+# Default: false
+enabled = false
 )TOML_EOF";
 
 std::string_view TypeName(toml::node_type t) {
@@ -223,6 +231,13 @@ bool Load(const std::filesystem::path& path) {
     values.hotfunc_yield_every = static_cast<int32_t>(Read<int64_t>(
         perf_table, "perf", "hotfunc_yield_every", "integer",
         values.hotfunc_yield_every));
+  }
+  const toml::path native_path{"native"};
+  const auto native = root[native_path];
+  if (native.is_table()) {
+    const toml::table& native_table = *native.as_table();
+    values.native_render =
+        Read<bool>(native_table, "native", "enabled", "boolean", values.native_render);
   }
 
   g_values = values;

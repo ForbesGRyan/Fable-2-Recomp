@@ -62,6 +62,9 @@ struct Values {
   // Fable II. This seeds the SDK cvar readback_resolve_force_addresses in
   // Fable2App; readback then happens only for that resolve, not every frame.
   bool hero_dog_texture_readback = true;
+  // [native] enabled: register the native guest-output renderer (seeds cvar
+  // fable2_native_render). Experimental; see docs/superpowers/specs/.
+  bool native_render = false;
   // [perf] - hot-function override tuning.
   // hotfunc_yield_every: NtYieldExecution batching factor for the hotfunc
   // overrides (see src/core/hotfunc/hotfunc_yield.h). Every Nth call does

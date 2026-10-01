@@ -12,12 +12,15 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <filesystem>
 #include <map>
 #include <mutex>
 #include <string>
 #include <vector>
 
 #include <rex/cvar.h>
+#include <rex/filesystem.h>
+#include <rex/logging/macros.h>
 #include <rex/ppc/func.h>
 #include <rex/graphics/native_guest_renderer.h>
 
@@ -42,22 +45,48 @@ inline std::mutex& Mutex() { static std::mutex m; return m; }
 inline std::map<uint32_t, FuncFrame>& Current() { static std::map<uint32_t, FuncFrame> m; return m; }
 inline std::atomic<int>& FramesWritten() { static std::atomic<int> n{0}; return n; }
 
-inline bool Active() {
-  return FramesRequested() > 0 && FramesWritten().load(std::memory_order_relaxed) < FramesRequested();
+inline std::atomic<bool>& Armed() { static std::atomic<bool> a{false}; return a; }
+inline std::atomic<bool>& Failed() { static std::atomic<bool> a{false}; return a; }
+
+inline double DelaySeconds() {
+  static const double d = [] {
+    const char* v = std::getenv("FABLE2_D3D_CENSUS_DELAY");
+    return v ? std::max(0.0, std::atof(v)) : 0.0;
+  }();
+  return d;
 }
 
+inline bool Active() {
+  return FramesRequested() > 0 && !Failed().load(std::memory_order_relaxed) &&
+         FramesWritten().load(std::memory_order_relaxed) < FramesRequested();
+}
+
+inline std::filesystem::path& LogPath() { static std::filesystem::path p; return p; }
+
+// <exe folder>/logs/d3d_census_<timestamp>.jsonl, independent of the CWD.
 inline std::FILE* Log() {
   static std::FILE* f = [] {
-    char name[96];
+    char name[64];
     const std::time_t t = std::time(nullptr);
-    std::strftime(name, sizeof(name), "logs/d3d_census_%Y%m%d_%H%M%S.jsonl", std::localtime(&t));
-    return std::fopen(name, "w");
+    std::strftime(name, sizeof(name), "d3d_census_%Y%m%d_%H%M%S.jsonl", std::localtime(&t));
+    const std::filesystem::path dir = rex::filesystem::GetExecutableFolder() / "logs";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    LogPath() = dir / name;
+    std::FILE* fp = std::fopen(LogPath().string().c_str(), "w");
+    if (!fp) {
+      REXSYS_WARN("[census] cannot open {}; census disabled", LogPath().string());
+      Failed().store(true);
+    } else {
+      REXSYS_INFO("[census] writing {} frames to {}", FramesRequested(), LogPath().string());
+    }
+    return fp;
   }();
   return f;
 }
 
 inline void OnCall(uint32_t id, const char* name, const PPCContext& ctx) {
-  if (!Active()) return;
+  if (!Armed().load(std::memory_order_relaxed) || !Active()) return;
   std::lock_guard<std::mutex> lock(Mutex());
   FuncFrame& f = Current()[id];
   f.name = name;
@@ -69,20 +98,31 @@ inline void OnCall(uint32_t id, const char* name, const PPCContext& ctx) {
 }
 
 // Per guest frame (MainRenderLoop override). Writes one JSON line and flushes.
+// Frame pairing: `funcs` = hooked calls since the previous OnFrame (i.e. the
+// previous guest iteration); `gpu` = the last swap the GPU thread closed, which
+// may repeat or skip relative to guest iterations (use gpu.gpu_frame to detect).
 inline void OnFrame() {
   if (!Active()) return;
-  static bool stats_enabled = [] {
-    rex::cvar::SetFlagByName("native_render_collect_stats", "true");
-    return true;
-  }();
-  (void)stats_enabled;
-  static auto last = std::chrono::steady_clock::now();
+  static const auto start = std::chrono::steady_clock::now();
+  static auto last = start;
   const auto now = std::chrono::steady_clock::now();
+  if (!Armed().load(std::memory_order_relaxed)) {
+    const double elapsed = std::chrono::duration<double>(now - start).count();
+    if (elapsed < DelaySeconds()) return;
+    rex::cvar::SetFlagByName("native_render_collect_stats", "true");
+    {
+      std::lock_guard<std::mutex> lock(Mutex());
+      Current().clear();
+    }
+    last = now;
+    Armed().store(true);
+    REXSYS_INFO("[census] armed after {:.1f} s", elapsed);
+  }
   const double guest_ms = std::chrono::duration<double, std::milli>(now - last).count();
   last = now;
 
   std::string line;
-  char buf[256];
+  char buf[384];
   const int frame = FramesWritten().fetch_add(1) + 1;
   std::snprintf(buf, sizeof(buf), "{\"frame\":%d,\"guest_ms\":%.3f", frame, guest_ms);
   line += buf;
@@ -90,8 +130,8 @@ inline void OnFrame() {
   rex::graphics::EmulatedFrameStats gpu;
   if (rex::graphics::GetLastEmulatedFrameStats(&gpu)) {
     std::snprintf(buf, sizeof(buf),
-                  ",\"gpu\":{\"draws\":%u,\"draw_cpu_ms\":%.3f,\"copies\":%u,\"copy_cpu_ms\":%.3f,\"swap_interval_ms\":%.3f,\"pitches\":{",
-                  gpu.draws, gpu.draw_cpu_ns / 1e6, gpu.copies, gpu.copy_cpu_ns / 1e6, gpu.swap_interval_ns / 1e6);
+                  ",\"gpu\":{\"gpu_frame\":%llu,\"draws\":%u,\"draw_cpu_ms\":%.3f,\"copies\":%u,\"copy_cpu_ms\":%.3f,\"swap_interval_ms\":%.3f,\"pitches\":{",
+                  (unsigned long long)gpu.frame, gpu.draws, gpu.draw_cpu_ns / 1e6, gpu.copies, gpu.copy_cpu_ns / 1e6, gpu.swap_interval_ns / 1e6);
     line += buf;
     for (uint32_t i = 0; i < gpu.pitch_count; ++i) {
       std::snprintf(buf, sizeof(buf), "%s\"%u\":%u", i ? "," : "", gpu.pitches[i], gpu.pitch_draws[i]);
@@ -134,6 +174,10 @@ inline void OnFrame() {
   if (std::FILE* f = Log()) {
     std::fputs(line.c_str(), f);
     std::fflush(f);
+    if (frame >= FramesRequested()) {
+      rex::cvar::SetFlagByName("native_render_collect_stats", "false");
+      REXSYS_INFO("[census] complete: {} frames written to {}", frame, LogPath().string());
+    }
   }
 }
 

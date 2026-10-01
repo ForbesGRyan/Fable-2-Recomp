@@ -1,7 +1,8 @@
 # Fable 2 frame map and sub-project 3 recommendation
 
-Status: capture half complete (static + 3D scene segments); gameplay half pending (see "Pending: gameplay capture").
-Capture used: `out\build\win-amd64-release\logs\d3d_census_20261001_130522.jsonl` (600 rows). Row 1 accumulates every call since process start and is dropped by `summarize_census.py`. The capture has two distinct segments (section 2): frames 2-480 are a static screen (likely splash/loading/title) and frames 481-600 are a 3D scene. Treat the 3D segment as the one that matters. This capture predates `gpu.gpu_frame`, so repeated GPU frames could not be dropped.
+Status: menu capture (static + 3D scene) and gameplay census complete; pitch ablation and the tiling counter are still pending (see "Pending"). Sections 1b, 2c, 3, 5, 6b and 7 carry the gameplay results.
+Gameplay capture: `out\build\win-amd64-release\logs\d3d_census_20261001_140912.jsonl` (900 rows, 30 s walking in the world, armed after 90 s; no repeated `gpu_frame`).
+Menu capture used: `out\build\win-amd64-release\logs\d3d_census_20261001_130522.jsonl` (600 rows). Row 1 accumulates every call since process start and is dropped by `summarize_census.py`. The capture has two distinct segments (section 2): frames 2-480 are a static screen (likely splash/loading/title) and frames 481-600 are a 3D scene. Treat the 3D segment as the one that matters. This capture predates `gpu.gpu_frame`, so repeated GPU frames could not be dropped.
 
 ## 1. D3D function map
 
@@ -91,9 +92,13 @@ Caveat: the argument "DrawVertices calls SetRenderState" is weak. An XDK draw fu
 
 Recommendation (no hook edits made in this task): re-run `gen_census_hooks` with an annotation promoting `0x8221E0F0` and `0x8221C518` to named draw hooks, add census hooks for `0x82217EE8` and `0x8221C9C8`, and capture a gameplay run. If `0x8221E0F0` still never fires, the indexed draw is inlined at its call sites or reached through a different entry.
 
+**Gameplay update (capture `d3d_census_20261001_140912`).** `0x8221E0F0` fires 975.5 times per frame in gameplay (correlation with `gpu.draws` +0.951), mostly from `0x8221BCC8` (822/frame) and `0x82B21448` (135/frame). Sampled arguments look like an indexed draw: `r3` = device (`0x4413A780`), `r4` = 6 (`D3DPT_TRIANGLESTRIP` on Xenos), `r7` = an index count (e.g. `0x557`), `r8` = `0x30`. The menu simply never takes this path. Treat `0x8221E0F0` as `D3DDevice_DrawIndexedVertices` (confidence high: size, 0.969 similarity, gameplay rate, arguments, and it builds a `DRAW_INDX` header, section 6b).
+
+**Complete draw-emitter set (static scan, `tools\xdk_sigmatch\pm4_emitters.py out\xdk\fable2`).** The scan lists every `.pdata` function that builds a PM4 type-3 header with `lis rX,0xC0xx` + `ori/addi`. Exactly seven functions build `DRAW_INDX` (0x22) and seven build `DRAW_INDX_2` (0x36, indices in the packet: clears, resolves, rect lists). Section 6b has the table. Hooking these 14 covers every guest draw that the game emits directly.
+
 ## 2. Frame statistics by segment (real capture)
 
-The capture is two segments, summarized with `summarize_census.py --from-frame/--to-frame` (row 1 dropped):
+The menu capture is two segments (gameplay is section 2c), summarized with `summarize_census.py --from-frame/--to-frame` (row 1 dropped):
 
 - Frames 2-480 (479 frames): static screen, likely splash/loading/title.
 - Frames 481-600 (120 frames): 3D scene. Frame 481 (19.5 ms IssueDraw CP time, 9.7 ms resolve CP time, 244 draws) is the first 3D frame and most likely pipeline/shader creation, so steady-state claims below use frames 482-600 (119 frames).
@@ -104,7 +109,7 @@ python tools\xdk_sigmatch\summarize_census.py <capture> --from-frame 2 --to-fram
 python tools\xdk_sigmatch\summarize_census.py <capture> --from-frame 482 --to-frame 600
 ```
 
-### 2a. 3D scene (frames 482-600, steady state; the segment that matters)
+### 2a. Menu 3D scene (frames 482-600 of the menu capture, steady state)
 
 | Quantity | Median | Mean | p90 / max |
 |---|---|---|---|
@@ -120,6 +125,23 @@ Draws per render-target pitch (median per frame): 1280: 158, 560: 79, 320: 37, 2
 Hooked draw calls / emulated draws: median 0.118, total (sum over frames) 0.126, so about 87-88% of emulated draws have no hooked draw call. `DrawVertices?` fires in 115 of the 120 frames 481-600 (4401 calls in total, up to 59 per frame, all from LR `0x821CB18C`); `DrawIndexedVertices?` (0x8221E0F0) never fires.
 
 Frame 481 for reference: 244 draws, `draw_cpu_ms` 19.53, `copy_cpu_ms` 9.69 (excluded above).
+
+### 2c. Gameplay (capture `d3d_census_20261001_140912`, 899 frames)
+
+`python tools\xdk_sigmatch\summarize_census.py out\build\win-amd64-release\logs\d3d_census_20261001_140912.jsonl`
+
+| Quantity | Median | Mean | p90 / max |
+|---|---|---|---|
+| emulated draws per frame | 2560 | 2911.1 | p90 4011, max 4127 |
+| resolves (copies) per frame | 39 | | p90 43 |
+| guest frame time (`guest_ms`) | 33.31 ms | | p90 35.83, p99 37.51, max 38.99 |
+| swap interval (`swap_interval_ms`) | 33.26 ms | | p90 35.13, max 37.50 |
+| emulated IssueDraw CP time (`draw_cpu_ms`) | 6.65 ms | | p90 8.22, max 12.29 |
+| resolve CP time (`copy_cpu_ms`) | 1.27 ms | | p90 1.76, max 3.58 |
+
+Draws per render-target pitch (median per frame): 1120: 1779, 1040: 340, 320: 139, 1280: 133, 560: 114, 280: 112, 0: 49, 80: 37, 640: 11, 160: 7, 520: 2.
+
+Hooked draw calls / emulated draws: median 0.359, total 0.373. Gameplay is roughly ten times the menu's 3D scene (2560 vs 281 draws, 39 vs 18 resolves), and the main scene moves from pitch 1280 to pitches 1120 and 1040.
 
 ### 2b. Static screen (frames 2-480)
 
@@ -330,9 +352,34 @@ Reading the numbers:
 - `DrawVertices?` fires in 115 of the 120 3D-segment frames (and never in the static segment). Even there the hooked draw functions explain only about 12-13% of `gpu.draws`; about 87-88% of 3D-scene draws are unhooked, so the real draw submission path is mostly not covered by the current hooks.
 - `DrawIndexedVertices?` (0x8221E0F0) never fires, even in the 3D scene. SetIndices only appears as null resets (section 1b).
 
-## 3. Gameplay frame / 4. Pass list
+## 3. Gameplay frame
 
-See "Pending: gameplay capture" below.
+Statistics are in section 2c. Where the draws come from (per frame, gameplay; caller LRs mapped to their containing `.pdata` function):
+
+| Draw function | Calls/frame | Main callers |
+|---|---|---|
+| `0x8221E0F0` DrawIndexedVertices | 975.5 | `0x8221BCC8` 822, `0x82B21448` 135, `0x8221EBC0` 9, `0x821DDF70` 9 |
+| `0x8221C9C8` (unhooked) | ~211 (proxy) | `0x8221FD60` (only static caller) |
+| `0x8221C518` DrawVertices | 110.0 | `0x82219870` 43, `0x8222EA68` 37, `0x8222C788` 22, `0x821CA7E8` 6 |
+| `0x82207C30` (unhooked) | ~53-82 (proxy) | `0x82A82F10` |
+| `0x82217EE8` (unhooked) | ~51-90 (proxy) | `0x821D71E8`, `0x8220A528`, `0x8222E168`, `0x82A9B3F8` |
+| `0x822060A0` (hooked as `BeginVertices?`) | 15.8 | `0x821EBDA0`, `0x82242C18` |
+| `0x82B9C068` (unhooked) | unknown | `0x82BA0220` (XDK internal, see 6b) |
+
+"Proxy" counts are the hooked `SetRenderState` / `SetPending_AluConstants?` calls made from inside that function, which track its call rate but are not exact. Sum of hooked draws plus proxies: about 1430 per frame (mean), against 2911 emulated draws.
+
+**Emulated draws are about twice the guest draw calls.** Per frame, `gpu.draws / (hooked + proxy draws)` has median 2.07 (p10 1.83, p90 2.37), and the excess sits almost entirely on pitches 1120 and 1040. Likely cause: Xenos predicated tiling. The main scene does not fit in 10 MB of EDRAM, so the XDK records it once and replays it per screen tile. Evidence (static, section 6b):
+- `0x822A6318` builds `SET_BIN_SELECT_LO/HI` and `SET_BIN_MASK` headers and is called from the XDK Swap `0x82B9CD68`.
+- `0x82B9ED28` calls `0x82B9E848` (builds `SET_BIN_SELECT_LO`) and calls `0x82286248` (the only `INDIRECT_BUFFER` builder) twice, which is consistent with a two-tile replay loop.
+- Six of the seven `DRAW_INDX` functions also build a `SET_BIN_MASK_LO` header (draws are predicated per tile).
+
+The command processor executes a predicated packet whenever `bin_select & bin_mask` is non-zero (`command_processor.cpp`, `ExecutePacketType3`), so each tile replay reaches `IssueDraw` again. Unconfirmed at runtime: a per-frame counter of `SET_BIN_SELECT` packets and predicated draws is needed (Pending, item 2).
+
+Consequence for sub-project 3: on the PC there is no EDRAM limit, so a native pass can draw the tiled scene once instead of once per tile. That roughly halves the emulated main-scene draw work in gameplay.
+
+## 4. Pass list
+
+Pending pitch ablation (Pending, item 1). Pitches 1120 and 1040 are most likely the tiled main scene: they carry most of the draws, and the other pitches together are too few to hold the 2x excess (section 3). Their odd widths could be per-tile surface pitches or a sub-720p scene; the ablation decides.
 
 ## 5. CPU vs GPU emulation
 
@@ -346,6 +393,8 @@ What the capture supports (3D segment, frames 482-600; the static screen is simi
 | resolve CP time (`copy_cpu_ms`) | 0.077 ms | 0.079 ms |
 
 Scope of the timing counters: `draw_cpu_ms` is command-processor CPU time inside `IssueDraw` only. It excludes PM4 packet parsing, the present path and GPU execution time, so it is not a measure of total command-processor or GPU cost. The data therefore supports only this claim: the menu and early 3D scene are vsync-locked (guest frame time tracks the 33.3 ms swap interval at both median and mean, a 30 Hz lock) and not emulation-bound there. It does not say how expensive gameplay emulation is: the 3D scene has 281 draws per frame, gameplay will have more, and `draw_cpu_ms` scales with draws (frame 481 spiked to 19.5 ms).
+
+**Gameplay (section 2c).** Median `guest_ms` 33.31 ms tracks the 33.26 ms swap interval, so gameplay is still held at the 30 Hz lock most of the time. But 261 of 899 frames (29%) exceed 34 ms (p90 35.83 ms, max 38.99 ms), so gameplay misses the lock where the menu did not. IssueDraw plus resolve CP time is about 8 ms per frame (median 6.65 + 1.27 ms), roughly 25x the menu's and well under the 33 ms budget, but it is only part of the CP's work. The census does not carry the full CP busy/wait/idle split; the F3 overlay does (GPU emu line and Verdict). Read F3 in the world with `--vsync=false --guest_vblank_pacing=false` to attribute the over-budget frames (Pending, item 3).
 
 Pending gameplay rule (narrowed): compare `guest_ms` to `swap_interval_ms` in gameplay. If `guest_ms` stays at the swap interval, the frame is vsync-locked; if `guest_ms` is well above the swap interval, the guest or emulation cannot keep up, but the census cannot tell which. A full command-processor busy-time counter (PM4 parse plus draw plus present plus GPU) is a sub-project 3 prerequisite before claiming emulation-bound or GPU-bound.
 
@@ -366,41 +415,51 @@ Top callers of the hooked functions, mapped to the containing `.pdata` function 
 
 `0x821CA7E8` is the first engine submission function to capture for sub-project 3 (observed draw path).
 
-## 7. Recommendation for sub-project 3 (PROVISIONAL, pending gameplay data)
+### 6b. PM4 emitters (static scan, gameplay-relevant)
 
-Based on the 3D segment (frames 482-600) and the identified functions. Do not base pitch decisions on the static screen (frames 2-480).
+From `python tools\xdk_sigmatch\pm4_emitters.py out\xdk\fable2`. Six of the seven `DRAW_INDX` functions (all but `0x82B9C068`) also build a `SET_BIN_MASK_LO` header (predicated per tile).
 
-1. **Draw coverage first (function-trace fallback).** About 87-88% of 3D-scene draws are unhooked and `DrawIndexedVertices?` never fires even in 3D. Put the function-trace call-count correlation fallback first in sub-project 3: correlate per-frame call counts of candidate functions (all functions, not just the mapped ones) against `gpu.draws` to find the real draw submission path, before building any capture on `0x8221C518` or `0x8221E0F0` alone. The census already holds the strong symbols (`FABLE2_D3D_CENSUS_HOOK` overrides with callers and r3-r8 samples) that sub-project 3 will need; plan a shared dispatch so the census becomes an observer called from the capture hooks rather than a second set of overrides on the same functions.
-2. **Draw function to capture first:** `D3DDevice_DrawVertices?` at `0x8221C518`, reached from `0x821CA7E8` (LR `0x821CB18C`), is the only draw entry that provably executes (115 of 120 3D frames). Verify `0x8221E0F0` as DrawIndexedVertices in gameplay before building an indexed path on it.
-3. **Pitches:** the 3D scene has the largest draw count on pitch 1280 (158 median per frame) and secondary targets 560 (79), 320 (37), 280 (4), 160 (2). Which of these is plain world geometry, shadow maps or post is unknown until the gameplay ablation (pending section). Use `--native_render_suppress_pitches=1280` only after that confirms the world pass has its own pitch; if shadow or scene targets share 1280, suppression must be narrowed by draw index. For `native_render_keep_pitches`, start from the secondary pitches (560/320/280/160) that must still present, not from pitch 640, which only appears on the static screen.
-4. The emulation-cost data are inconclusive for the performance case (section 5): `draw_cpu_ms` excludes most command-processor work. A full CP busy-time counter is a sub-project 3 prerequisite.
+| Packet | Function | Instrs | Hooked as | Static callers |
+|---|---|---|---|---|
+| DRAW_INDX | 0x8221E0F0 | 276 | DrawIndexedVertices? | 8 (`0x8221BCC8`, `0x82B21448`, ...) |
+| DRAW_INDX | 0x8221C518 | 252 | DrawVertices? | 8 (`0x82219870`, `0x8222EA68`, `0x821CA7E8`, ...) |
+| DRAW_INDX | 0x822060A0 | 294 | BeginVertices? | 5 (`0x821EBDA0`, `0x82242C18`, ...) |
+| DRAW_INDX | 0x8221C9C8 | 259 | no | 1 (`0x8221FD60`) |
+| DRAW_INDX | 0x82217EE8 | 327 | no | 4 (`0x821D71E8`, `0x8220A528`, `0x8222E168`, `0x82A9B3F8`) |
+| DRAW_INDX | 0x82207C30 | 330 | no | 1 function (`0x82A82F10`, two sites) |
+| DRAW_INDX | 0x82B9C068 | 96 | no | 1 (`0x82BA0220`, XDK internal; also calls `0x822A6318` and `0x82B928A8`) |
+| DRAW_INDX_2 | 0x821EF988 | 188 | no | `0x821EF6F8` (3 sites) |
+| DRAW_INDX_2 | 0x82B928A8 | 102 | no | `0x82BA0220` |
+| DRAW_INDX_2 | 0x82B98770 | 85 | no | `0x821968B8`, `0x821969E0` |
+| DRAW_INDX_2 | 0x82B988C8 | 226 | no | `0x821969E0` |
+| DRAW_INDX_2 | 0x82BA29B8 | 580 | no | `0x82BA32C8` |
+| DRAW_INDX_2 | 0x82BA5448 | 552 | no | `0x82BA6250` |
+| DRAW_INDX_2 | 0x82BA5CE8 | 345 | no | `0x82BA6820` |
+| INDIRECT_BUFFER | 0x82286248 | 121 | no | `0x82286430`, `0x82B9E610`, `0x82B9ED28` (2 sites) |
+| SET_BIN_SELECT_LO/HI | 0x822A6318 | 61 | no | `0x82B9CD68` (XDK Swap), `0x82BA0220`, `0x822A5F80`, `0x82193120`, `0x821C64E8`, `0x8227F0B0` |
+| SET_BIN_SELECT_LO | 0x82B9E848 | 56 | no | `0x82B9ED28` (likely the tile replay loop) |
 
-All of the above is provisional until the pending gameplay capture is filled in.
+Limits: the scan only sees headers built with `lis 0xC0xx` + `ori/addi` within 16 instructions. A header loaded from a table or a precompiled command buffer in a data section is not listed; the data sections hold one `SET_BIN_MASK`, one `SET_BIN_SELECT` and seven `DRAW_INDX_2`-shaped words, which have not been inspected. Note that `0x82286430`, which calls the `INDIRECT_BUFFER` builder, is the structurally named `SetRenderState.callee1.callee1.callee2` row in section 1; that name is unverified.
 
-## Pending: gameplay capture
+## 7. Recommendation for sub-project 3
 
-Needs the user to load a save in the game (cannot be automated). Results fill sections 3, 4, the gameplay half of 5, and finalise 7.
+Based on the gameplay capture (sections 2c, 3, 5) and the static emitter scan (section 6b). Pitch assignments stay provisional until the ablation (Pending, item 1).
 
-1. Capture (separate run). The census log goes to the exe folder, so run from there; the arming delay lets you load a save first (frames before it are not recorded or counted):
+1. **Draw coverage: hook the 14 emitters, not more correlation.** The static scan gives the complete list of functions that build draw packets (seven `DRAW_INDX`, seven `DRAW_INDX_2`). Three are hooked today. Add census hooks for `0x8221C9C8`, `0x82217EE8`, `0x82207C30`, `0x82B9C068` and the seven `DRAW_INDX_2` builders, and re-capture: hooked guest draws times the tile count should then account for `gpu.draws`. The census already holds the strong symbols sub-project 3 needs; plan a shared dispatch so the census becomes an observer called from the capture hooks rather than a second set of overrides on the same functions.
+2. **Indexed draw to capture first:** `D3DDevice_DrawIndexedVertices` at `0x8221E0F0` (975 calls per frame, about two thirds of guest draws), reached mainly from `0x8221BCC8` (822/frame). `0x8221C518` (DrawVertices, 110/frame) is second.
+3. **Tiling is the main performance lever.** If the tiling counter (Pending, item 2) confirms two tiles, the emulator issues the main scene twice per frame. A native pass that draws the tiled scene once (no EDRAM limit on PC) removes that duplication. Sub-project 3 must therefore capture at the guest draw call (once per call), not at `IssueDraw` (once per tile), and suppress the emulated draws for every tile of the replaced pass.
+4. **Pitches:** gameplay's main scene draws to pitches 1120 (1779 draws/frame) and 1040 (340); 1280 (133), 320 (139), 560 (114) and 280 (112) are secondary. Do not reuse the menu's pitch-1280 conclusion. Name the passes by ablation before choosing `native_render_suppress_pitches` / `native_render_keep_pitches`.
+5. **Performance case:** gameplay misses the 30 Hz lock in 29% of frames (section 5). Whether the guest CPU or the GPU emulation is responsible comes from the F3 overlay (Pending, item 3), not from the census.
+
+## Pending
+
+1. **Pitch ablation** (user, in the world). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):
 ```
 cd out\build\win-amd64-release
-$env:FABLE2_D3D_CENSUS = "900"
-$env:FABLE2_D3D_CENSUS_DELAY = "90"   # seconds from the first guest frame until you are standing in the world
-& .\fable_2.exe
+& .\fable_2.exe --fullscreen=false --native_render_suppress_debug=true --native_render_suppress_pitches=<p>
 ```
-   Completion shows as `[census] complete: 900 frames written to ...` in the game log (`out\build\win-amd64-release\logs\fable_2_<n>.log`); stop the process after that. The file is `out\build\win-amd64-release\logs\d3d_census_<timestamp>.jsonl` (the `[census] writing` line gives the exact path). Clear both env vars afterwards.
-2. Summarize (add `--from-frame N --to-frame N` to isolate a segment, e.g. to skip a load hitch):
-```
-python tools\xdk_sigmatch\summarize_census.py out\build\win-amd64-release\logs\d3d_census_<gameplay>.jsonl > gameplay.md
-```
-   Paste `gameplay.md` into section 3.
-3. Ablation, one run per significant pitch `<p>` from gameplay.md (emulated frames, no native renderer):
-```
-& .\out\build\win-amd64-release\fable_2.exe --native_render_suppress_debug=true --native_render_suppress_pitches=<p>
-```
-   Record, per pitch, its median draw count and what disappears or breaks on screen; name each pass (shadow map, main scene, water, post, UI). Note: suppression debug mode also fakes all occlusion queries, so objects that are normally culled may appear.
-4. Fill in:
-   - Section 4: table `pitch | draws | observed effect when suppressed | pass name`.
-   - Section 5: compare `guest_ms_median` to `swap_interval_ms_median` (vsync-locked or not); a CP busy-time counter is needed to attribute any shortfall.
-   - Section 6: gameplay top callers (check whether `0x8221E0F0` is hit, and by which LR).
-   - Section 7: replace the provisional text with the largest plain-world-geometry pass, its pitch for `native_render_suppress_pitches`, the pitches for `native_render_keep_pitches`, and the draw function plus caller to capture first.
+   Record what disappears or breaks on screen and name the pass (shadow map, main scene, water, post, UI). Fill section 4 with `pitch | draws | observed effect when suppressed | pass name`. Suppression debug mode also fakes all occlusion queries, so objects that are normally culled may appear.
+2. **Tiling counter** (SDK). Count, per emulated frame, `SET_BIN_SELECT*` packets and the `IssueDraw` calls reached through a predicated packet (`packet & 1`), add them to `EmulatedFrameStats` and the census `gpu` object, and re-capture with the extra draw hooks from section 7 item 1. Confirms or refutes the tiling explanation in section 3 and gives the tile count.
+3. **F3 attribution** (user, in the world). Run `fable_2.exe --fullscreen=false --vsync=false --guest_vblank_pacing=false`, open F3, and record the Guest line, the GPU emu line and the Verdict. Fills the gameplay attribution in section 5.
+
+Capture procedure, for re-runs: from `out\build\win-amd64-release`, set `FABLE2_D3D_CENSUS=900` and `FABLE2_D3D_CENSUS_DELAY=<seconds until in the world>`, run `fable_2.exe`, wait for `[census] complete` in the game log, then clear both variables. Summarize with `python tools\xdk_sigmatch\summarize_census.py <capture> [--from-frame N --to-frame N]`.

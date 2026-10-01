@@ -26,6 +26,9 @@
 #include "fable2_native_render.h"
 #include "fable2_f5_lua.h"  // F5 external-Lua run (polled per frame)
 
+// Defined in fable2_d3d_census.h (included by main.cpp after this header).
+namespace fable2::d3dcensus { inline void OnFrame(); }
+
 namespace fable2::functrace_window {
 
 // Traces a bounded time window of the (unfiltered) guest call stream, armed
@@ -139,6 +142,8 @@ extern "C" void MainRenderLoop_82B9CD68(PPCContext& ctx, uint8_t* base) {
   }
   // F6 native-renderer toggle + overlay request (per frame).
   fable2::native::PollFrame();
+  // D3D census (FABLE2_D3D_CENSUS=<frames>); inert otherwise.
+  fable2::d3dcensus::OnFrame();
   // F5 (host) -> run the external Lua file (per-frame, responsive).
   fable2::f5lua::poll_mainloop(ctx, base);
   __imp__MainRenderLoop_82B9CD68(ctx, base);

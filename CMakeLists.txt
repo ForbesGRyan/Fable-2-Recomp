@@ -450,7 +450,7 @@ if(WIN32)
     )
 
     # XDK signature matching input (docs/superpowers/plans/2026-10-01-native-renderer-discovery.md).
-    add_executable(fable_2_xex_image_dump tools/xdk_sigmatch/xex_image_dump.cpp)
+    add_executable(fable_2_xex_image_dump EXCLUDE_FROM_ALL tools/xdk_sigmatch/xex_image_dump.cpp)
     target_include_directories(fable_2_xex_image_dump PRIVATE ${FABLE2_SDK_ROOT}/include)
     target_link_libraries(fable_2_xex_image_dump PRIVATE ${FABLE2_SDK_ROOT}/lib/rexruntime.lib)
     target_compile_definitions(fable_2_xex_image_dump PRIVATE SPDLOG_COMPILED_LIB SPDLOG_FMT_EXTERNAL FMT_HEADER_ONLY=1)

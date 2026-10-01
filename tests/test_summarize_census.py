@@ -29,6 +29,31 @@ class SummarizeTests(unittest.TestCase):
         self.assertEqual(s["pitches"]["640"], 20)
         self.assertEqual(s["top_callers"]["D3DDevice_DrawIndexedVertices"][0], ("0x82000010", 130))
         self.assertAlmostEqual(s["draw_call_ratio"], 105 / 110, places=3)
+        self.assertAlmostEqual(s["draws_mean"], 110.0)
+        self.assertEqual(s["draws_p90"], 120)
+        self.assertAlmostEqual(s["draw_call_ratio_total"], (95 + 105 + 115) / (100 + 110 + 120), places=6)
+
+    def test_repeated_gpu_frame_counted_once(self):
+        a = row(2, 16.0, 100, 4.0, {"1280": 100}, 95, {"0x1": 1})
+        b = row(3, 16.0, 999, 4.0, {"1280": 999}, 95, {"0x1": 1})
+        c = row(4, 16.0, 200, 4.0, {"1280": 200}, 95, {"0x1": 1})
+        a["gpu"]["gpu_frame"] = 7
+        b["gpu"]["gpu_frame"] = 7
+        c["gpu"]["gpu_frame"] = 8
+        s = summ.summarize([a, b, c])
+        self.assertEqual(s["frames"], 2)
+        self.assertAlmostEqual(s["draws_mean"], 150.0)
+
+    def test_filter_rows(self):
+        rows = [{"frame": f} for f in range(1, 11)]
+        self.assertEqual([r["frame"] for r in summ.filter_rows(rows, 3, 5)], [3, 4, 5])
+        self.assertEqual(len(summ.filter_rows(rows, None, None)), 10)
+        self.assertEqual([r["frame"] for r in summ.filter_rows(rows, 9, None)], [9, 10])
+        self.assertEqual([r["frame"] for r in summ.filter_rows(rows, None, 2)], [1, 2])
+
+    def test_draws_p90_nearest_rank(self):
+        rows = [row(i, 16.0, d, 1.0, {"1280": d}, d, {}) for i, d in enumerate(range(10, 110, 10), 2)]
+        self.assertEqual(summ.summarize(rows)["draws_p90"], 90)
 
     def test_rows_without_gpu_are_tolerated(self):
         s = summ.summarize([{"frame": 1, "guest_ms": 16.0, "funcs": {}}])

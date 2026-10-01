@@ -39,4 +39,6 @@ clang++ -std=c++23 "%~dp0native\test_geometry_cache_index.cpp" -o "%OUT%\geometr
 "%OUT%\geometry_cache_index.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_discovery_format.cpp" -o "%OUT%\discovery_format.exe" || exit /b 1
 "%OUT%\discovery_format.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_page_cache.cpp" -o "%OUT%\page_cache.exe" || exit /b 1
+"%OUT%\page_cache.exe" || exit /b 1
 exit /b 0

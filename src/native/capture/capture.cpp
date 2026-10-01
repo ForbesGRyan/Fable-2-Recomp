@@ -251,6 +251,7 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
 
 void OnSwap() {
   g_swaps.fetch_add(1, std::memory_order_relaxed);
+  detail::CacheGeneration().fetch_add(1, std::memory_order_relaxed);
   if (FramesRequested() <= 0 || g_failed.load(std::memory_order_relaxed)) return;
   static const auto start = std::chrono::steady_clock::now();
   if (!g_armed.load(std::memory_order_relaxed)) {

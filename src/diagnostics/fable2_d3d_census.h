@@ -137,8 +137,29 @@ inline void OnFrame() {
       std::snprintf(buf, sizeof(buf), "%s\"%u\":%u", i ? "," : "", gpu.pitches[i], gpu.pitch_draws[i]);
       line += buf;
     }
-    std::snprintf(buf, sizeof(buf), "},\"other\":%u}", gpu.other_pitch_draws);
+    std::snprintf(buf, sizeof(buf),
+                  "},\"other\":%u,\"bin_selects\":%u,\"tiles\":%u,\"pred_draws\":%u,\"pred_skips\":%u,\"tile_selects\":[",
+                  gpu.other_pitch_draws, gpu.bin_select_writes, gpu.tiles, gpu.predicated_draws,
+                  gpu.predicated_skips);
     line += buf;
+    for (uint32_t i = 0; i < gpu.tiles; ++i) {
+      std::snprintf(buf, sizeof(buf), "%s\"0x%llX\"", i ? "," : "",
+                    (unsigned long long)gpu.tile_selects[i]);
+      line += buf;
+    }
+    line += "],\"extents\":{";
+    // Per pitch: [window scissor BR x, y, viewport w, h] (max over the frame).
+    bool first_extent = true;
+    for (uint32_t i = 0; i < gpu.pitch_count; ++i) {
+      const auto& w = gpu.pitch_window_br[i];
+      const auto& sc = gpu.pitch_viewport[i];
+      if (!(w[0] | w[1] | sc[0] | sc[1])) continue;
+      std::snprintf(buf, sizeof(buf), "%s\"%u\":[%u,%u,%u,%u]", first_extent ? "" : ",",
+                    gpu.pitches[i], w[0], w[1], sc[0], sc[1]);
+      line += buf;
+      first_extent = false;
+    }
+    line += "}}";
   }
 
   line += ",\"funcs\":{";

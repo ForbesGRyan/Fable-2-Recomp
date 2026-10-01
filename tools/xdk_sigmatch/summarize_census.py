@@ -8,6 +8,12 @@ from collections import Counter, defaultdict
 
 DRAW_FUNCS = ("D3DDevice_DrawIndexedVertices", "D3DDevice_DrawVertices",
               "D3DDevice_DrawIndexedVertices?", "D3DDevice_DrawVertices?")
+# Extra hooks named by pm4_emitters.py: functions that build draw packets.
+DRAW_PREFIXES = ("DrawIndx:", "DrawIndx2:")
+
+
+def is_draw_func(name):
+    return name in DRAW_FUNCS or name.startswith(DRAW_PREFIXES)
 
 
 def _median(values):
@@ -58,12 +64,17 @@ def summarize(rows):
     hooked_total = 0
     draws_total = 0
     for r in gpu_rows:
-        hooked = sum(r["funcs"].get(n, {}).get("calls", 0) for n in DRAW_FUNCS)
+        hooked = sum(f.get("calls", 0) for n, f in r["funcs"].items() if is_draw_func(n))
         hooked_total += hooked
         draws_total += r["gpu"]["draws"]
         if r["gpu"]["draws"]:
             ratios.append(hooked / r["gpu"]["draws"])
     draws = [r["gpu"]["draws"] for r in gpu_rows]
+    tiled = [r["gpu"] for r in gpu_rows if "tiles" in r["gpu"]]
+    extents = {}
+    for g in gpu_rows:
+        for p, e in g["gpu"].get("extents", {}).items():
+            extents[p] = [max(a, b) for a, b in zip(extents.get(p, [0, 0, 0, 0]), e)]
     return {
         "frames": len(rows),
         "guest_ms_median": _median([r["guest_ms"] for r in rows]),
@@ -77,6 +88,12 @@ def summarize(rows):
         "top_callers": {n: c.most_common(10) for n, c in callers.items()},
         "draw_call_ratio": _median(ratios),
         "draw_call_ratio_total": (hooked_total / draws_total) if draws_total else None,
+        "tiles_median": _median([g["tiles"] for g in tiled]),
+        "bin_selects_median": _median([g.get("bin_selects", 0) for g in tiled]),
+        "pred_draws_median": _median([g.get("pred_draws", 0) for g in tiled]),
+        "pred_skips_median": _median([g.get("pred_skips", 0) for g in tiled]),
+        "tile_select_sets": Counter(tuple(g.get("tile_selects", [])) for g in tiled).most_common(3),
+        "extents": dict(sorted(extents.items(), key=lambda kv: -int(kv[0]))),
     }
 
 
@@ -95,6 +112,18 @@ def to_markdown(s):
            "## Draws per render-target pitch (median per frame)", "",
            "| Pitch | Draws |", "|---|---|"]
     out += [f"| {p} | {d} |" for p, d in s["pitches"].items()]
+    if s["tiles_median"] is not None:
+        out += ["", "## Tiling (median per frame)", "",
+                f"- Tiles (distinct non-zero bin selects): {s['tiles_median']}",
+                f"- SET_BIN_SELECT writes: {s['bin_selects_median']}",
+                f"- Predicated draw packets executed: {s['pred_draws_median']}",
+                f"- Predicated packets skipped: {s['pred_skips_median']}",
+                "- Most common bin-select sets (frames): " + "; ".join(
+                    f"[{', '.join(sel)}] x{n}" for sel, n in s["tile_select_sets"])]
+    if s["extents"]:
+        out += ["", "## Extents per pitch (max over capture; 8192 = scissor disabled)", "",
+                "| Pitch | Window scissor BR (tile) | Viewport |", "|---|---|---|"]
+        out += [f"| {p} | {e[0]} x {e[1]} | {e[2]} x {e[3]} |" for p, e in s["extents"].items()]
     out += ["", "## Top call sites", ""]
     for name, top in s["top_callers"].items():
         out += [f"### {name}", "", "| Caller (LR) | Calls |", "|---|---|"]

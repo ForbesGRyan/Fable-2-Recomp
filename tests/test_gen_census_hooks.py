@@ -64,6 +64,30 @@ class GenTests(unittest.TestCase):
         self.assertEqual(out.count("FABLE2_D3D_CENSUS_HOOK("), 1)
         self.assertIn("// skipped B? (sub_82BA0000): symbol already hooked by A", out)
 
+    def test_extra_hooks_emitted_with_offset_ids(self):
+        d = Path(self.tmp.name)
+        extra = d / "extra.json"
+        extra.write_text(json.dumps([
+            {"name": "DrawIndx:82BA1000", "address": "0x82BA1000"},
+            {"name": "SetBinSelect:82B9CD68", "address": "0x82B9CD68"},
+            {"name": "Missing:82FFFFFF", "address": "0x82FFFFFF"},
+        ]))
+        empty = d / "empty.json"
+        empty.write_text("[]")
+        out = gen.generate(empty, self.init, self.src, extra)
+        self.assertIn(f'FABLE2_D3D_CENSUS_HOOK({gen.EXTRA_ID_BASE}, "DrawIndx:82BA1000", sub_82BA1000)', out)
+        self.assertIn("// skipped SetBinSelect:82B9CD68 (MainRenderLoop_82B9CD68): already overridden in", out)
+        self.assertIn("// skipped Missing:82FFFFFF: no generated symbol at 0x82FFFFFF", out)
+
+    def test_extra_hook_not_duplicated_with_map(self):
+        d = Path(self.tmp.name)
+        extra = d / "extra.json"
+        extra.write_text(json.dumps([{"name": "DrawIndx:82BA0000", "address": "0x82BA0000"}]))
+        out = gen.generate(self.map, self.init, self.src, extra)
+        self.assertEqual(out.count('", sub_82BA0000)'), 1)  # hooked once, by the map entry
+        self.assertIn("// skipped DrawIndx:82BA0000 (sub_82BA0000): symbol already hooked by D3DDevice_DrawIndexedVertices", out)
+
+
 
 if __name__ == "__main__":
     unittest.main()

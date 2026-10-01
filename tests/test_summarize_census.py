@@ -61,5 +61,37 @@ class SummarizeTests(unittest.TestCase):
         self.assertIsNone(s["draws_median"])
 
 
+class TilingAndEmitterTests(unittest.TestCase):
+    def test_emitter_hooks_count_as_draws(self):
+        r = row(2, 33.0, 100, 1.0, {"1120": 100}, 30, {"0x1": 30})
+        r["funcs"]["DrawIndx:8221C9C8"] = {"calls": 10, "callers": {"0x2": 10}, "args": []}
+        r["funcs"]["DrawIndx2:821EF988"] = {"calls": 5, "callers": {"0x3": 5}, "args": []}
+        r["funcs"]["SetBinSelect:822A6318"] = {"calls": 99, "callers": {"0x4": 99}, "args": []}
+        s = summ.summarize([r])
+        self.assertAlmostEqual(s["draw_call_ratio_total"], 45 / 100)
+
+    def test_tiling_medians_and_extents(self):
+        rows = []
+        for i, (tiles, pred) in enumerate([(2, 1500), (2, 1700), (3, 1600)]):
+            r = row(2 + i, 33.0, 3000, 6.0, {"1120": 1800}, 0, {})
+            r["gpu"].update({"bin_selects": 4, "tiles": tiles, "pred_draws": pred, "pred_skips": 10,
+                             "tile_selects": ["0x1", "0x2"] if tiles == 2 else ["0x1", "0x2", "0x4"],
+                             "extents": {"1120": [1120, 320 + i, 1120, 630 + i]}})
+            rows.append(r)
+        s = summ.summarize(rows)
+        self.assertEqual(s["tiles_median"], 2)
+        self.assertEqual(s["pred_draws_median"], 1600)
+        self.assertEqual(s["extents"]["1120"], [1120, 322, 1120, 632])
+        self.assertEqual(s["tile_select_sets"][0], (("0x1", "0x2"), 2))
+        md = summ.to_markdown(s)
+        self.assertIn("| 1120 | 1120 x 322 | 1120 x 632 |", md)
+
+    def test_tiling_absent_in_old_captures(self):
+        s = summ.summarize([row(2, 33.0, 10, 1.0, {"1280": 10}, 5, {})])
+        self.assertIsNone(s["tiles_median"])
+        self.assertEqual(s["extents"], {})
+        self.assertNotIn("## Tiling", summ.to_markdown(s))
+
+
 if __name__ == "__main__":
     unittest.main()

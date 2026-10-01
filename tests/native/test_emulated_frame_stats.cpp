@@ -30,6 +30,32 @@ int main() {
   if (f5.cp_busy_ns != 150 || f5.cp_wait_reg_ns != 30 || f5.cp_idle_ns != 6 || f5.cp_present_ns != 10) return 10;
   auto f6 = acc.CloseFrame(21'000'000);
   if (f6.cp_busy_ns != 0 || f6.cp_wait_reg_ns != 0 || f6.cp_idle_ns != 0 || f6.cp_present_ns != 0) return 11;
-  std::cout << "PASS: per-frame draws, time, intervals, pitch histogram + overflow\n";
+  // Predicated tiling: bin-select writes, distinct non-zero selects = tiles.
+  acc.AddBinSelect(0x1);
+  acc.AddBinSelect(0x2);
+  acc.AddBinSelect(0x1);  // repeat: not a new tile
+  acc.AddBinSelect(0x0);  // zero select: not a tile
+  acc.AddPredicatedPacket(true, true);
+  acc.AddPredicatedPacket(true, false);
+  acc.AddPredicatedPacket(false, true);
+  auto f7 = acc.CloseFrame(22'000'000);
+  if (f7.bin_select_writes != 4 || f7.tiles != 2) return 12;
+  if (f7.tile_selects[0] != 0x1 || f7.tile_selects[1] != 0x2) return 20;
+  if (f7.predicated_draws != 1 || f7.predicated_skips != 1) return 13;
+  auto f8 = acc.CloseFrame(23'000'000);
+  if (f8.bin_select_writes != 0 || f8.tiles != 0 || f8.predicated_draws != 0 || f8.predicated_skips != 0) return 14;
+  for (uint64_t s = 1; s <= 20; ++s) acc.AddBinSelect(s);  // distinct tiles saturate
+  auto f9 = acc.CloseFrame(24'000'000);
+  if (f9.tiles != rex::graphics::EmulatedFrameStats::kMaxTiles || f9.bin_select_writes != 20) return 15;
+  // Per-pitch extents: max window-scissor corner and viewport size.
+  acc.AddDraw(1120, 1, 1120, 320, 1120, 320);
+  acc.AddDraw(1120, 1, 1120, 312, 1120, 632);
+  acc.AddDraw(640, 1);  // no extent recorded
+  auto f10 = acc.CloseFrame(25'000'000);
+  if (f10.pitch_count != 2 || f10.pitches[0] != 1120) return 16;
+  if (f10.pitch_window_br[0][0] != 1120 || f10.pitch_window_br[0][1] != 320) return 17;
+  if (f10.pitch_viewport[0][0] != 1120 || f10.pitch_viewport[0][1] != 632) return 18;
+  if (f10.pitch_window_br[1][0] != 0 || f10.pitch_viewport[1][1] != 0) return 19;
+  std::cout << "PASS: per-frame draws, time, intervals, pitch histogram + overflow, tiling, extents\n";
   return 0;
 }

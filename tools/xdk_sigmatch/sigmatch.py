@@ -79,3 +79,130 @@ def matches(ref_words, cand_words, level):
         if (r & m) != (c & m):
             return False
     return True
+
+
+PREFIX_WORDS = 16
+
+
+def _candidates(ref_words, tgt_img, tgt_funcs, level, prefix=False):
+    out = []
+    for start, length in sorted(tgt_funcs.items()):
+        if prefix:
+            if length < 4 * len(ref_words):
+                continue
+            cand = function_words(tgt_img, start, 4 * len(ref_words))
+        else:
+            if length != 4 * len(ref_words):
+                continue
+            cand = function_words(tgt_img, start, length)
+        if matches(ref_words, cand, level):
+            out.append(start)
+    return out
+
+
+def _match_one(name, ref_addr, ref_img, ref_funcs, tgt_img, tgt_funcs):
+    result = {"name": name, "ref": ref_addr, "target": None, "confidence": "none", "candidates": []}
+    length = ref_funcs.get(ref_addr)
+    if length is None:
+        result["confidence"] = "no-ref-function"
+        return result
+    words = function_words(ref_img, ref_addr, length)
+    for level, prefix in (("strict", False), ("loose", False), ("loose", True)):
+        ws = words[:PREFIX_WORDS] if prefix else words
+        if prefix and len(words) <= PREFIX_WORDS:
+            continue
+        cands = _candidates(ws, tgt_img, tgt_funcs, level, prefix)
+        if len(cands) == 1:
+            result.update(target=cands[0], confidence="prefix" if prefix else level)
+            return result
+        if len(cands) > 1:
+            result.update(confidence="ambiguous", candidates=cands)
+            return result
+    return result
+
+
+def match_references(ref_img, ref_funcs, tgt_img, tgt_funcs, references):
+    return [_match_one(name, addr, ref_img, ref_funcs, tgt_img, tgt_funcs)
+            for name, addr in references.items()]
+
+
+def call_targets(image, start, length):
+    targets = []
+    for addr in range(start, start + length, 4):
+        w = image.word(addr)
+        if (w >> 26) == 18 and (w & 3) == 1:  # bl (LK=1, AA=0)
+            disp = w & 0x03FFFFFC
+            if disp & 0x02000000:
+                disp -= 0x04000000
+            targets.append(addr + disp)
+    return targets
+
+
+def propagate(ref_img, ref_funcs, tgt_img, tgt_funcs, results):
+    results = list(results)
+    by_ref = {r["ref"]: r for r in results if r["target"] is not None}
+    implied = {}  # ref callee -> set of target callees
+    names = {}
+    changed = True
+    while changed:
+        changed = False
+        for r in list(by_ref.values()):
+            if r["confidence"] not in ("strict", "loose", "callgraph"):
+                continue
+            rc = call_targets(ref_img, r["ref"], ref_funcs[r["ref"]])
+            tc = call_targets(tgt_img, r["target"], tgt_funcs[r["target"]])
+            if len(rc) != len(tc):
+                continue
+            for i, (a, b) in enumerate(zip(rc, tc)):
+                if a not in ref_funcs or b not in tgt_funcs:
+                    continue
+                implied.setdefault(a, set()).add(b)
+                names.setdefault(a, f'{r["name"]}.callee{i}')
+                if a not in by_ref:
+                    entry = {"name": names[a], "ref": a, "target": b, "confidence": "callgraph",
+                             "candidates": []}
+                    by_ref[a] = entry
+                    results.append(entry)
+                    changed = True
+    for a, targets in implied.items():
+        if len(targets) > 1 and a in by_ref and by_ref[a]["confidence"] == "callgraph":
+            by_ref[a].update(target=None, confidence="conflict", candidates=sorted(targets))
+    return results
+
+
+def render_markdown(results):
+    lines = ["| Name | Skate 3 TU3 | Fable 2 | Confidence | Notes |",
+             "|---|---|---|---|---|"]
+    for r in results:
+        tgt = f'0x{r["target"]:08X}' if r["target"] is not None else "-"
+        notes = ", ".join(f"0x{c:08X}" for c in r["candidates"])
+        lines.append(f'| {r["name"]} | 0x{r["ref"]:08X} | {tgt} | {r["confidence"]} | {notes} |')
+    return "\n".join(lines) + "\n"
+
+
+def main():
+    import argparse
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--ref", required=True)
+    p.add_argument("--target", required=True)
+    p.add_argument("--refs", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--markdown", required=True)
+    a = p.parse_args()
+    ref_img, tgt_img = load_image(a.ref), load_image(a.target)
+    rp, tp = ref_img.meta["pdata"], tgt_img.meta["pdata"]
+    ref_funcs = parse_pdata(ref_img, rp["address"], rp["size"])
+    tgt_funcs = parse_pdata(tgt_img, tp["address"], tp["size"])
+    refs = {k: int(v, 16) for k, v in json.loads(Path(a.refs).read_text()).items()}
+    results = propagate(ref_img, ref_funcs, tgt_img, tgt_funcs,
+                        match_references(ref_img, ref_funcs, tgt_img, tgt_funcs, refs))
+    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(a.out).write_text(json.dumps(results, indent=2))
+    Path(a.markdown).write_text(render_markdown(results))
+    found = sum(1 for r in results if r["target"] is not None)
+    print(f"{found}/{len(results)} functions mapped "
+          f"({len(ref_funcs)} ref / {len(tgt_funcs)} target functions)")
+
+
+if __name__ == "__main__":
+    main()

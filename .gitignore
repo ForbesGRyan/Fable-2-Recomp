@@ -46,6 +46,7 @@ __pycache__/
 # helpers are invoked by CMake at build time. A fresh clone must have them or the
 # build fails. Everything else matching the rules above stays out of the repo.
 !tools/repro/*.py
+!tools/xdk_sigmatch/*.py
 !tools/apply_recomp_patches.py
 !tools/fable2_control.py
 !tools/prepare_runtime_sdk.py

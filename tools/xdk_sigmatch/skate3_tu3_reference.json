@@ -1,0 +1,15 @@
+{
+  "D3DDevice_SetIndices": "0x82B79190",
+  "D3DDevice_SetStreamSource": "0x82B78FF0",
+  "D3DDevice_DrawIndexedVertices": "0x82B7AD68",
+  "D3DDevice_DrawVertices": "0x82B7A970",
+  "D3DDevice_BeginVertices": "0x82B79FC0",
+  "D3DDevice_SetPixelShader": "0x82B7F408",
+  "D3DDevice_SetVertexShader": "0x82B7F150",
+  "D3DDevice_SetRenderState": "0x82B83C48",
+  "D3DDevice_SetViewport": "0x82B74310",
+  "D3DDevice_SetScissorRect": "0x82B769C0",
+  "D3DDevice_SetPending_AluConstants": "0x82B83FE0",
+  "D3DDevice_Swap": "0x82B82E08",
+  "RegisterTexture": "0x82C9A618"
+}

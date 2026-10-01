@@ -65,6 +65,74 @@ class PdataTests(unittest.TestCase):
         self.assertEqual(funcs, {BASE + 0x1000: 16})
 
 
+def two_images(ref_code, tgt_code, ref_pdata, tgt_pdata):
+    r, ra, rs = make_image(ref_code, pdata=ref_pdata)
+    t, ta, ts = make_image(tgt_code, pdata=tgt_pdata)
+    return r, sm.parse_pdata(r, ra, rs), t, sm.parse_pdata(t, ta, ts)
+
+
+class ReferenceTests(unittest.TestCase):
+    def test_unique_loose_match(self):
+        ref = [0x3D608200, 0x816B1234, 0x4E800020]
+        tgt = [0x60000000, 0x3D608300, 0x816B5678, 0x4E800020]
+        r, rf, t, tf = two_images(ref, tgt, [(BASE + 0x1000, 3)], [(BASE + 0x1000, 1), (BASE + 0x1004, 3)])
+        res = sm.match_references(r, rf, t, tf, {"SetIndices": BASE + 0x1000})
+        self.assertEqual(res[0]["target"], BASE + 0x1004)
+        self.assertEqual(res[0]["confidence"], "loose")
+
+    def test_ambiguous_candidates_reported(self):
+        f = [0x38600000, 0x4E800020]
+        r, rf, t, tf = two_images(f, f + f, [(BASE + 0x1000, 2)], [(BASE + 0x1000, 2), (BASE + 0x1008, 2)])
+        res = sm.match_references(r, rf, t, tf, {"Dup": BASE + 0x1000})
+        self.assertIsNone(res[0]["target"])
+        self.assertEqual(res[0]["confidence"], "ambiguous")
+        self.assertEqual(res[0]["candidates"], [BASE + 0x1000, BASE + 0x1008])
+
+    def test_no_match_reported(self):
+        r, rf, t, tf = two_images([0x38600000, 0x4E800020], [0x38800001, 0x4E800020],
+                                  [(BASE + 0x1000, 2)], [(BASE + 0x1000, 2)])
+        res = sm.match_references(r, rf, t, tf, {"Gone": BASE + 0x1000})
+        self.assertEqual(res[0]["confidence"], "none")
+
+
+class CallgraphTests(unittest.TestCase):
+    def test_callee_propagated(self):
+        # parent at +0x1000 calls child at +0x1010 (ref) / +0x1020 (target)
+        p = BASE + 0x1000
+        ref = [bl(p, BASE + 0x1010), 0x4E800020, 0x60000000, 0x60000000, 0x38600007, 0x4E800020]
+        tgt = [bl(p, BASE + 0x1020), 0x4E800020] + [0x60000000] * 6 + [0x38600007, 0x4E800020]
+        r, rf, t, tf = two_images(ref, tgt, [(p, 2), (BASE + 0x1010, 2)], [(p, 2), (BASE + 0x1020, 2)])
+        res = sm.match_references(r, rf, t, tf, {"Parent": p})
+        res = sm.propagate(r, rf, t, tf, res)
+        child = [x for x in res if x["name"] == "Parent.callee0"][0]
+        self.assertEqual(child["target"], BASE + 0x1020)
+        self.assertEqual(child["confidence"], "callgraph")
+
+    def test_callgraph_conflict_dropped(self):
+        # A (2 words) and B (3 words, distinct shape) both call C in the
+        # reference; in the target A calls X and B calls Y.
+        a, b = BASE + 0x1000, BASE + 0x1008
+        c = BASE + 0x1014
+        li1, li2, blr = 0x38600001, 0x38600002, 0x4E800020
+        ref = [bl(a, c), blr, li2, bl(b + 4, c), blr, li1, blr]
+        x, y = BASE + 0x1014, BASE + 0x101C
+        tgt = [bl(a, x), blr, li2, bl(b + 4, y), blr, li1, blr, li1, blr]
+        r, rf, t, tf = two_images(ref, tgt, [(a, 2), (b, 3), (c, 2)], [(a, 2), (b, 3), (x, 2), (y, 2)])
+        res = sm.match_references(r, rf, t, tf, {"A": a, "B": b})
+        res = sm.propagate(r, rf, t, tf, res)
+        conflicts = [e for e in res if e["confidence"] == "conflict"]
+        self.assertEqual(len(conflicts), 1)
+        self.assertIsNone(conflicts[0]["target"])
+
+    def test_markdown_lists_every_result(self):
+        md = sm.render_markdown([
+            {"name": "SetIndices", "ref": BASE, "target": BASE + 4, "confidence": "loose", "candidates": []},
+            {"name": "Gone", "ref": BASE + 8, "target": None, "confidence": "none", "candidates": []},
+        ])
+        self.assertIn("| SetIndices | 0x82000000 | 0x82000004 | loose |", md)
+        self.assertIn("| Gone | 0x82000008 | - | none |", md)
+
+
 class MatchTests(unittest.TestCase):
     def test_relocated_copy_matches_loose_not_strict(self):
         a = [0x3D608200, 0x816B1234, 0x4E800020]

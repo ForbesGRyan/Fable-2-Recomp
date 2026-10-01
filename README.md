@@ -80,7 +80,8 @@ Foundation for a native D3D12 renderer (see
 Enable with `[native] enabled = true` in `fable2_config.toml`. Modes (cvar
 `fable2_native_render_mode`): `overlay` (default) draws a grid over the
 emulated frame; `replace` draws a test pattern instead of the game. F6 toggles
-it live. Any native failure falls back to the emulated image. D3D12 only.
+it live. From the command line use `--fable2_native_render=true` (restart
+required; F6 then toggles `fable2_native_render_active` live). Any native failure falls back to the emulated image. D3D12 only.
 
 ## User config (fable2_config.toml)
 

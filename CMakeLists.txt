@@ -73,7 +73,7 @@ endif()
 file(GLOB_RECURSE HOTFUNC_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/core/hotfunc/*.cpp)
 
 # Native guest-output renderer plumbing (docs/superpowers/specs/2026-10-01-native-renderer-foundation-design.md)
-file(GLOB FABLE2_NATIVE_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/native/*.cpp)
+file(GLOB FABLE2_NATIVE_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/native/*.cpp)
 
 set(FABLE2_SOURCES
     src/main.cpp

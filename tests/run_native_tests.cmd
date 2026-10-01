@@ -29,4 +29,6 @@ clang++ -std=c++23 -I"%SDK%\include" "%~dp0native\test_pacing_stats.cpp" -o "%OU
 "%OUT%\pacing.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_position_decode.cpp" -o "%OUT%\position_decode.exe" || exit /b 1
 "%OUT%\position_decode.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_index_convert.cpp" -o "%OUT%\index_convert.exe" || exit /b 1
+"%OUT%\index_convert.exe" || exit /b 1
 exit /b 0

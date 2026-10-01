@@ -288,6 +288,18 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver {
       cursor_hidden_ = false;
     }
 
+    // Don't recenter while the user drags/resizes the window: Windows moves the
+    // window to keep the grab point under the cursor, so pinning the cursor to
+    // the client center each poll walks the window off screen.
+    if (looking && hwnd) {
+      GUITHREADINFO gti{};
+      gti.cbSize = sizeof(gti);
+      if (GetGUIThreadInfo(GetWindowThreadProcessId(hwnd, nullptr), &gti) &&
+          (gti.flags & GUI_INMOVESIZE)) {
+        looking = false;
+      }
+    }
+
     if (looking) {
       RECT rc;
       POINT p;

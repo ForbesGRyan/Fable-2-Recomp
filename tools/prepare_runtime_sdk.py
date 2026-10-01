@@ -22,8 +22,12 @@ def check_revision(source):
     head = git(source, "rev-parse", "HEAD").stdout.strip()
     if head == SDK_PIN:
         return
-    if git(source, "merge-base", "--is-ancestor", SDK_PIN, "HEAD", check=False).returncode == 0:
+    rc = git(source, "merge-base", "--is-ancestor", SDK_PIN, "HEAD", check=False).returncode
+    if rc == 0:
         return
+    if rc == 128:
+        raise SystemExit(f"Cannot check SDK revision: pin {SDK_PIN} is not available "
+                         f"(shallow clone?). Run: git -C {source} fetch --unshallow")
     raise SystemExit(f"Expected SDK commit {SDK_PIN} or a descendant; got {head}.")
 
 

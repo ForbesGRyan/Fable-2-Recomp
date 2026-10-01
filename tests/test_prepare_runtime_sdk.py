@@ -64,6 +64,12 @@ class CheckRevisionTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             prep.check_revision(self.repo)
 
+    def test_missing_pin_reports_unavailable(self):
+        prep.SDK_PIN = "0" * 40
+        with self.assertRaises(SystemExit) as cm:
+            prep.check_revision(self.repo)
+        self.assertIn("not available", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

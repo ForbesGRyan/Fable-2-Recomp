@@ -23,4 +23,6 @@ clang++ -std=c++23 "%~dp0native\test_native_render_state.cpp" -o "%OUT%\native_s
 "%OUT%\native_state.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_native_shaders.cpp" -ld3dcompiler -o "%OUT%\native_shaders.exe" || exit /b 1
 "%OUT%\native_shaders.exe" || exit /b 1
+clang++ -std=c++23 -I"%SDK%\include" "%~dp0native\test_emulated_frame_stats.cpp" -o "%OUT%\frame_stats.exe" || exit /b 1
+"%OUT%\frame_stats.exe" || exit /b 1
 exit /b 0

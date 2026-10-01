@@ -8,6 +8,7 @@
 
 #include "fable_2_app.h"
 #include "fps_meter.h"
+#include "guest_wait_timer.h"
 #include "fable2_d3d_census.h"
 #include "fable2_text_probe.h"
 #include "fable2_glyph_probe.h"

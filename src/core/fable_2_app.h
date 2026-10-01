@@ -264,10 +264,18 @@ class Fable2App : public rex::ReXApp {
       if (ft_us > 0) {
         stats.frame_time_ms = double(ft_us) / 1000.0;
         stats.fps = 1000000.0 / double(ft_us);
-        stats.frame_count = 1;  // non-zero = "has data" (gates overlay text)
+        auto& raw = fable2::guest_frame_rate::raw();
+        // Real per-frame counter (drives the overlay history); >= 1 once
+        // there is data, which also gates the overlay text.
+        stats.frame_count = std::max<uint64_t>(1, raw.count.load(std::memory_order_acquire));
+        stats.guest_frame_raw_ms = double(raw.frame_us.load(std::memory_order_relaxed)) / 1000.0;
+        stats.guest_swap_raw_ms = double(raw.swap_us.load(std::memory_order_relaxed)) / 1000.0;
+        stats.guest_wait_raw_ms = double(raw.wait_us.load(std::memory_order_relaxed)) / 1000.0;
         const double swap_ms = double(fable2::guest_frame_rate::swap_us()) / 1000.0;
+        const double wait_ms = double(fable2::guest_frame_rate::wait_us()) / 1000.0;
         stats.guest_swap_ms = swap_ms;
-        stats.guest_work_ms = std::max(0.0, stats.frame_time_ms - swap_ms);
+        stats.guest_wait_ms = wait_ms;
+        stats.guest_work_ms = std::max(0.0, stats.frame_time_ms - swap_ms - wait_ms);
       }
       return stats;
     });

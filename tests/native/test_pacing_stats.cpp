@@ -36,12 +36,19 @@ int main() {
   auto d = SummarizePacing(w.data(), w.size());
   if (!Near(d.low1, 50.0f)) return 6;
 
-  if (std::strcmp(PacingVerdict(9, 24, 4, 0, 7), "paced (vsync/vblank)") != 0) return 7;
-  if (std::strcmp(PacingVerdict(30, 3, 10, 0, 0), "guest-CPU-bound") != 0) return 8;
-  if (std::strcmp(PacingVerdict(5, 2, 20, 0, 0), "GPU-emulation-bound") != 0) return 9;
-  if (std::strcmp(PacingVerdict(0, 0, 0, 0, 0), "") != 0) return 10;
+  // (work, swap, limiter, cp_busy, cp_wait_reg, cp_present, cp_idle)
+  if (std::strcmp(PacingVerdict(9, 24, 0, 4, 0, 0, 7), "paced (vsync/vblank)") != 0) return 7;
+  if (std::strcmp(PacingVerdict(30, 3, 0, 10, 0, 0, 0), "guest-CPU-bound") != 0) return 8;
+  if (std::strcmp(PacingVerdict(5, 2, 0, 20, 0, 0, 0), "GPU-emulation-bound") != 0) return 9;
+  if (std::strcmp(PacingVerdict(0, 0, 0, 0, 0, 0, 0), "") != 0) return 10;
   // GPU wait_reg counts toward pacing.
-  if (std::strcmp(PacingVerdict(10, 1, 5, 15, 0), "paced (vsync/vblank)") != 0) return 11;
+  if (std::strcmp(PacingVerdict(10, 1, 0, 5, 15, 0, 0), "paced (vsync/vblank)") != 0) return 11;
+  // Limiter/fence wait counts as guest waiting.
+  if (std::strcmp(PacingVerdict(5, 1, 25, 3, 0, 0, 0), "paced (vsync/vblank)") != 0) return 12;
+  // CP present time counts as waiting.
+  if (std::strcmp(PacingVerdict(10, 1, 0, 5, 0, 15, 0), "paced (vsync/vblank)") != 0) return 13;
+  // Without the limiter bucket the same frame is CPU-bound.
+  if (std::strcmp(PacingVerdict(25, 1, 0, 3, 0, 0, 0), "guest-CPU-bound") != 0) return 14;
   std::cout << "PASS: pacing summary + verdict\n";
   return 0;
 }

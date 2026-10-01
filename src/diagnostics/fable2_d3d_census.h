@@ -203,12 +203,3 @@ inline void OnFrame() {
 }
 
 }  // namespace fable2::d3dcensus
-
-#define FABLE2_D3D_CENSUS_HOOK(ID, NAME, SYM)                                  \
-  extern "C" void __imp__##SYM(PPCContext& ctx, uint8_t* base);               \
-  extern "C" void SYM(PPCContext& __restrict ctx, uint8_t* base) {            \
-    fable2::d3dcensus::OnCall(ID, NAME, ctx);                                 \
-    __imp__##SYM(ctx, base);                                                  \
-  }
-#include "fable2_d3d_census_hooks.inc"
-#undef FABLE2_D3D_CENSUS_HOOK

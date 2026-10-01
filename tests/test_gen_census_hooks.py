@@ -33,11 +33,11 @@ class GenTests(unittest.TestCase):
 
     def test_emits_hook_for_mapped_function(self):
         out = gen.generate(self.map, self.init, self.src)
-        self.assertIn('FABLE2_D3D_CENSUS_HOOK(0, "D3DDevice_DrawIndexedVertices", sub_82BA0000)', out)
+        self.assertIn('FABLE2_XDK_HOOK(0, "D3DDevice_DrawIndexedVertices", sub_82BA0000)', out)
 
     def test_skips_existing_override(self):
         out = gen.generate(self.map, self.init, self.src)
-        self.assertNotIn("FABLE2_D3D_CENSUS_HOOK(1", out)
+        self.assertNotIn("FABLE2_XDK_HOOK(1", out)
         self.assertIn("// skipped D3DDevice_Swap (MainRenderLoop_82B9CD68): already overridden in", out)
 
     def test_unmapped_omitted(self):
@@ -45,7 +45,7 @@ class GenTests(unittest.TestCase):
 
     def test_near_miss_high_score_emitted(self):
         out = gen.generate(self.map, self.init, self.src)
-        self.assertIn('FABLE2_D3D_CENSUS_HOOK(3, "D3DDevice_DrawVertices?", sub_82BA1000)', out)
+        self.assertIn('FABLE2_XDK_HOOK(3, "D3DDevice_DrawVertices?", sub_82BA1000)', out)
 
     def test_near_miss_low_score_not_emitted(self):
         out = gen.generate(self.map, self.init, self.src)
@@ -61,7 +61,7 @@ class GenTests(unittest.TestCase):
         ]))
         out = gen.generate(m, self.init, self.src)
         self.assertEqual(out.count("sub_82BA0000)"), 2)  # one hook + one skip comment
-        self.assertEqual(out.count("FABLE2_D3D_CENSUS_HOOK("), 1)
+        self.assertEqual(out.count("FABLE2_XDK_HOOK("), 1)
         self.assertIn("// skipped B? (sub_82BA0000): symbol already hooked by A", out)
 
     def test_extra_hooks_emitted_with_offset_ids(self):
@@ -75,7 +75,7 @@ class GenTests(unittest.TestCase):
         empty = d / "empty.json"
         empty.write_text("[]")
         out = gen.generate(empty, self.init, self.src, extra)
-        self.assertIn(f'FABLE2_D3D_CENSUS_HOOK({gen.EXTRA_ID_BASE}, "DrawIndx:82BA1000", sub_82BA1000)', out)
+        self.assertIn(f'FABLE2_XDK_HOOK({gen.EXTRA_ID_BASE}, "DrawIndx:82BA1000", sub_82BA1000)', out)
         self.assertIn("// skipped SetBinSelect:82B9CD68 (MainRenderLoop_82B9CD68): already overridden in", out)
         self.assertIn("// skipped Missing:82FFFFFF: no generated symbol at 0x82FFFFFF", out)
 
@@ -87,6 +87,17 @@ class GenTests(unittest.TestCase):
         self.assertEqual(out.count('", sub_82BA0000)'), 1)  # hooked once, by the map entry
         self.assertIn("// skipped DrawIndx:82BA0000 (sub_82BA0000): symbol already hooked by D3DDevice_DrawIndexedVertices", out)
 
+    def test_hook_ids_header(self):
+        d = Path(self.tmp.name)
+        extra = d / "extra.json"
+        extra.write_text(json.dumps([{"name": "TileReplay?:82BA1000", "address": "0x82BA1000"}]))
+        empty = d / "empty.json"
+        empty.write_text("[]")
+        ids = gen.generate_ids(empty, self.init, self.src, extra)
+        self.assertIn(f"constexpr uint32_t kHook_TileReplay_82BA1000 = {gen.EXTRA_ID_BASE};", ids)
+        out = gen.generate_ids(self.map, self.init, self.src)
+        self.assertIn("constexpr uint32_t kHook_D3DDevice_DrawIndexedVertices = 0;", out)
+        self.assertIn("constexpr uint32_t kHook_D3DDevice_DrawVertices = 3;", out)  # near-miss '?' stripped
 
 
 if __name__ == "__main__":

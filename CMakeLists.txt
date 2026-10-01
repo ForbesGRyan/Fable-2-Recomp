@@ -73,7 +73,7 @@ endif()
 file(GLOB_RECURSE HOTFUNC_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/core/hotfunc/*.cpp)
 
 # Native guest-output renderer plumbing (docs/superpowers/specs/2026-10-01-native-renderer-foundation-design.md)
-file(GLOB FABLE2_NATIVE_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/native/*.cpp)
+file(GLOB_RECURSE FABLE2_NATIVE_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/native/*.cpp)
 
 set(FABLE2_SOURCES
     src/main.cpp
@@ -97,7 +97,9 @@ set(FABLE2_HEADER_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     ${CMAKE_CURRENT_SOURCE_DIR}/src/diagnostics
     ${CMAKE_CURRENT_SOURCE_DIR}/src/input
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/native)
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native/capture
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/native/render)
 target_include_directories(fable_2 PRIVATE ${FABLE2_HEADER_DIRS})
 if(TARGET fable_2_recomp)
     target_include_directories(fable_2_recomp PRIVATE ${FABLE2_HEADER_DIRS})

@@ -10,6 +10,7 @@
 #include "fps_meter.h"
 #include "guest_wait_timer.h"
 #include "fable2_d3d_census.h"
+#include "xdk_dispatch.h"
 #include "fable2_text_probe.h"
 #include "fable2_glyph_probe.h"
 #include "fable2_hotfuncs.h"

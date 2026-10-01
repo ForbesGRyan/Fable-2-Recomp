@@ -118,6 +118,7 @@ void DrawFullscreen(const NativeGuestOutputRenderContext& ctx, nrhi::Pipeline* p
   const float w = float(ctx.guest_output_width);
   const float h = float(ctx.guest_output_height);
   cmd->Barrier(out, nrhi::ResourceState::kGuestOutput, nrhi::ResourceState::kRenderTarget);
+  cmd->FlushBarriers();
   cmd->SetRenderTargets(out, nullptr);
   cmd->SetViewport({0.0f, 0.0f, w, h, 0.0f, 1.0f});
   cmd->SetScissor({0, 0, int32_t(w), int32_t(h)});
@@ -128,6 +129,7 @@ void DrawFullscreen(const NativeGuestOutputRenderContext& ctx, nrhi::Pipeline* p
   cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
   cmd->Draw(3, 0);
   cmd->Barrier(out, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kGuestOutput);
+  cmd->FlushBarriers();
 }
 
 bool Usable(const NativeGuestOutputRenderContext& ctx) {
@@ -180,10 +182,15 @@ void PollFrame() {
 #ifdef _WIN32
   const bool down = WindowFocused() && (GetAsyncKeyState(kToggleVk) & 0x8000) != 0;
   if (g_toggle.Update(down)) {
-    const bool now_active = !REXCVAR_GET(fable2_native_render_active);
-    REXCVAR_SET(fable2_native_render_active, now_active);
-    g_latch.Clear();
-    REXLOG_INFO("[native] F6: native renderer {}", now_active ? "on" : "off");
+    if (g_latch.IsFailed()) {
+      g_latch.Clear();
+      REXCVAR_SET(fable2_native_render_active, true);
+      REXLOG_INFO("[native] F6: retrying native renderer");
+    } else {
+      const bool now_active = !REXCVAR_GET(fable2_native_render_active);
+      REXCVAR_SET(fable2_native_render_active, now_active);
+      REXLOG_INFO("[native] F6: native renderer {}", now_active ? "on" : "off");
+    }
   }
 #endif
   rex::graphics::RequestNativeGuestOutputPostProcess(

@@ -6,6 +6,7 @@ masked: branch displacements always; at the "loose" level also the 16-bit
 immediates of D-form instructions whose base register is not r1 (absolute
 addresses, globals, struct offsets that moved between XDK builds).
 """
+import difflib
 import json
 import struct
 from pathlib import Path
@@ -100,6 +101,34 @@ def _candidates(ref_words, tgt_img, tgt_funcs, level, prefix=False):
     return out
 
 
+FUZZY_MIN_SCORE = 0.85
+FUZZY_MIN_MARGIN = 0.30
+
+
+def opcode_seq(words):
+    return [w >> 26 for w in words]
+
+
+def fuzzy_score(ref_words, cand_words):
+    return difflib.SequenceMatcher(None, opcode_seq(ref_words), opcode_seq(cand_words),
+                                   autojunk=False).ratio()
+
+
+def _fuzzy(result, words, length, tgt_img, tgt_funcs):
+    tol = max(16, length // 10)
+    scored = sorted(((fuzzy_score(words, function_words(tgt_img, s, l)), s)
+                     for s, l in tgt_funcs.items() if abs(l - length) <= tol), reverse=True)
+    if not scored:
+        return
+    best, best_addr = scored[0]
+    runner = scored[1][0] if len(scored) > 1 else 0.0
+    result.update(score=round(best, 3), runner_up=round(runner, 3))
+    if best >= FUZZY_MIN_SCORE and best - runner >= FUZZY_MIN_MARGIN:
+        result.update(target=best_addr, confidence="fuzzy")
+    else:
+        result["candidates"] = [best_addr]
+
+
 def _match_one(name, ref_addr, ref_img, ref_funcs, tgt_img, tgt_funcs):
     result = {"name": name, "ref": ref_addr, "target": None, "confidence": "none", "candidates": []}
     length = ref_funcs.get(ref_addr)
@@ -118,6 +147,7 @@ def _match_one(name, ref_addr, ref_img, ref_funcs, tgt_img, tgt_funcs):
         if len(cands) > 1:
             result.update(confidence="ambiguous", candidates=cands)
             return result
+    _fuzzy(result, words, length, tgt_img, tgt_funcs)
     return result
 
 
@@ -147,7 +177,7 @@ def propagate(ref_img, ref_funcs, tgt_img, tgt_funcs, results):
     while changed:
         changed = False
         for r in list(by_ref.values()):
-            if r["confidence"] not in ("strict", "loose", "callgraph"):
+            if r["confidence"] not in ("strict", "loose", "fuzzy", "callgraph"):
                 continue
             rc = call_targets(ref_img, r["ref"], ref_funcs[r["ref"]])
             tc = call_targets(tgt_img, r["target"], tgt_funcs[r["target"]])
@@ -171,12 +201,13 @@ def propagate(ref_img, ref_funcs, tgt_img, tgt_funcs, results):
 
 
 def render_markdown(results):
-    lines = ["| Name | Skate 3 TU3 | Fable 2 | Confidence | Notes |",
-             "|---|---|---|---|---|"]
+    lines = ["| Name | Skate 3 TU3 | Fable 2 | Confidence | Score | Notes |",
+             "|---|---|---|---|---|---|"]
     for r in results:
         tgt = f'0x{r["target"]:08X}' if r["target"] is not None else "-"
         notes = ", ".join(f"0x{c:08X}" for c in r["candidates"])
-        lines.append(f'| {r["name"]} | 0x{r["ref"]:08X} | {tgt} | {r["confidence"]} | {notes} |')
+        score = f'{r["score"]:.3f}' if "score" in r else ""
+        lines.append(f'| {r["name"]} | 0x{r["ref"]:08X} | {tgt} | {r["confidence"]} | {score} | {notes} |')
     return "\n".join(lines) + "\n"
 
 

@@ -89,7 +89,7 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(res[0]["candidates"], [BASE + 0x1000, BASE + 0x1008])
 
     def test_no_match_reported(self):
-        r, rf, t, tf = two_images([0x38600000, 0x4E800020], [0x38800001, 0x4E800020],
+        r, rf, t, tf = two_images([0x38600000, 0x4E800020], [0x80800001, 0x4E800020],
                                   [(BASE + 0x1000, 2)], [(BASE + 0x1000, 2)])
         res = sm.match_references(r, rf, t, tf, {"Gone": BASE + 0x1000})
         self.assertEqual(res[0]["confidence"], "none")
@@ -158,6 +158,69 @@ class MatchTests(unittest.TestCase):
             self.assertEqual(loaded.word(BASE + 0x1000), 0x4E800020)
             self.assertTrue(loaded.is_executable(BASE + 0x1000))
             self.assertFalse(loaded.is_executable(BASE + 0x100))
+
+
+# Distinct primary opcodes: addi, lwz, stw, ori, rlwinm, and (31), lbz, stb
+OPS = [0x38600001, 0x80610004, 0x90610008, 0x60630010, 0x54630000, 0x7C632378, 0x88610001, 0x98610002]
+
+
+def body(n=20, shift=0):
+    return [OPS[(i * 3 + shift + i // 5) % len(OPS)] for i in range(n - 1)] + [0x4E800020]
+
+
+class FuzzyTests(unittest.TestCase):
+    def test_swapped_instructions_and_register_accepted(self):
+        ref = body()
+        tgt = list(ref)
+        i = next(k for k in range(3, 15) if (ref[k] >> 26) != (ref[k + 1] >> 26))
+        tgt[i], tgt[i + 1] = tgt[i + 1], tgt[i]
+        tgt[0] ^= 0x00200000  # different register, same opcode
+        r, rf, t, tf = two_images(ref, [0x60000000] * 3 + tgt, [(BASE + 0x1000, 20)],
+                                  [(BASE + 0x1000, 3), (BASE + 0x100C, 20)])
+        res = sm.match_references(r, rf, t, tf, {"F": BASE + 0x1000})
+        self.assertEqual(res[0]["confidence"], "fuzzy")
+        self.assertEqual(res[0]["target"], BASE + 0x100C)
+        self.assertGreaterEqual(res[0]["score"], sm.FUZZY_MIN_SCORE)
+
+    def test_two_near_identical_candidates_not_accepted(self):
+        ref = body()
+        a = list(ref); a[5], a[6] = a[6], a[5]
+        b = list(ref); b[8], b[9] = b[9], b[8]
+        r, rf, t, tf = two_images(ref, a + b, [(BASE + 0x1000, 20)],
+                                  [(BASE + 0x1000, 20), (BASE + 0x1050, 20)])
+        res = sm.match_references(r, rf, t, tf, {"F": BASE + 0x1000})
+        self.assertEqual(res[0]["confidence"], "none")
+        self.assertIsNone(res[0]["target"])
+        self.assertEqual(len(res[0]["candidates"]), 1)
+        self.assertIn("score", res[0])
+
+    def test_dissimilar_function_scores_low(self):
+        ref = body()
+        other = [OPS[(i * 5 + 1) % len(OPS)] if i % 2 else 0x48000000 for i in range(19)] + [0x4E800020]
+        r, rf, t, tf = two_images(ref, other, [(BASE + 0x1000, 20)], [(BASE + 0x1000, 20)])
+        res = sm.match_references(r, rf, t, tf, {"F": BASE + 0x1000})
+        self.assertEqual(res[0]["confidence"], "none")
+        self.assertLess(res[0]["score"], sm.FUZZY_MIN_SCORE)
+
+    def test_fuzzy_match_seeds_callgraph(self):
+        p = BASE + 0x1000
+        child_r, child_t = BASE + 0x1100, BASE + 0x1200
+        ref = body()
+        ref[10] = bl(p + 40, child_r)
+        tgt = list(ref)
+        tgt[10] = bl(p + 40, child_t)
+        k = next(k for k in range(12, 18) if (ref[k] >> 26) != (ref[k + 1] >> 26))
+        tgt[k], tgt[k + 1] = tgt[k + 1], tgt[k]
+        pad = [0x60000000] * (0x40 - 20)
+        ref_all = ref + pad + [0x38600007, 0x4E800020] + [0x60000000] * (0x40 - 2)
+        tgt_all = tgt + pad + [0x60000000] * 0x40 + [0x38600007, 0x4E800020]
+        r, rf, t, tf = two_images(ref_all, tgt_all, [(p, 20), (child_r, 2)], [(p, 20), (child_t, 2)])
+        res = sm.match_references(r, rf, t, tf, {"Parent": p})
+        self.assertEqual(res[0]["confidence"], "fuzzy")
+        res = sm.propagate(r, rf, t, tf, res)
+        child = [x for x in res if x["name"] == "Parent.callee0"][0]
+        self.assertEqual(child["target"], child_t)
+        self.assertEqual(child["confidence"], "callgraph")
 
 
 if __name__ == "__main__":

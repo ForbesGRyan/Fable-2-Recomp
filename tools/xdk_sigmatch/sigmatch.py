@@ -168,6 +168,15 @@ def call_targets(image, start, length):
     return targets
 
 
+def _fuzzy_pair_ok(ref_img, ref_funcs, a, tgt_img, tgt_funcs, b):
+    """Length window + opcode-sequence score check for callees of fuzzy parents."""
+    la, lb = ref_funcs[a], tgt_funcs[b]
+    if abs(lb - la) > max(16, la // 10):
+        return None
+    score = fuzzy_score(function_words(ref_img, a, la), function_words(tgt_img, b, lb))
+    return score if score >= FUZZY_MIN_SCORE else None
+
+
 def propagate(ref_img, ref_funcs, tgt_img, tgt_funcs, results):
     results = list(results)
     by_ref = {r["ref"]: r for r in results if r["target"] is not None}
@@ -179,6 +188,7 @@ def propagate(ref_img, ref_funcs, tgt_img, tgt_funcs, results):
         for r in list(by_ref.values()):
             if r["confidence"] not in ("strict", "loose", "fuzzy", "callgraph"):
                 continue
+            via = r.get("via", r["confidence"])
             rc = call_targets(ref_img, r["ref"], ref_funcs[r["ref"]])
             tc = call_targets(tgt_img, r["target"], tgt_funcs[r["target"]])
             if len(rc) != len(tc):
@@ -186,11 +196,18 @@ def propagate(ref_img, ref_funcs, tgt_img, tgt_funcs, results):
             for i, (a, b) in enumerate(zip(rc, tc)):
                 if a not in ref_funcs or b not in tgt_funcs:
                     continue
+                score = None
+                if via == "fuzzy":
+                    score = _fuzzy_pair_ok(ref_img, ref_funcs, a, tgt_img, tgt_funcs, b)
+                    if score is None:
+                        continue
                 implied.setdefault(a, set()).add(b)
                 names.setdefault(a, f'{r["name"]}.callee{i}')
                 if a not in by_ref:
                     entry = {"name": names[a], "ref": a, "target": b, "confidence": "callgraph",
-                             "candidates": []}
+                             "via": via, "candidates": []}
+                    if score is not None:
+                        entry["score"] = round(score, 3)
                     by_ref[a] = entry
                     results.append(entry)
                     changed = True
@@ -200,15 +217,39 @@ def propagate(ref_img, ref_funcs, tgt_img, tgt_funcs, results):
     return results
 
 
+def apply_annotations(results, annotations):
+    """Merge {name: {verified, note}} into results by entry name."""
+    for r in results:
+        if r["name"] in annotations:
+            r.update(annotations[r["name"]])
+    return results
+
+
+MARKDOWN_FOOTER = """
+Notes:
+- `Score` is the opcode-sequence similarity for fuzzy matches and for near misses; a `none` row with a
+  candidate in Notes is a rejected near miss (best candidate too close to the runner-up), not a match.
+- `Via` is `strict`/`loose` when every ancestor of a call-graph row was an exact match, else `fuzzy`;
+  call-graph rows under a fuzzy ancestor are accepted only if the callee pair itself scores >= 0.85.
+- `Verified` is yes when the row was compared by side-by-side disassembly.
+- Rows with confidence `none` have no confirmed Fable 2 address.
+"""
+
+
 def render_markdown(results):
-    lines = ["| Name | Skate 3 TU3 | Fable 2 | Confidence | Score | Notes |",
-             "|---|---|---|---|---|---|"]
+    lines = ["| Name | Skate 3 TU3 | Fable 2 | Confidence | Score | Runner-up | Via | Verified | Notes |",
+             "|---|---|---|---|---|---|---|---|---|"]
     for r in results:
         tgt = f'0x{r["target"]:08X}' if r["target"] is not None else "-"
         notes = ", ".join(f"0x{c:08X}" for c in r["candidates"])
+        if r.get("note"):
+            notes = f'{notes}; {r["note"]}' if notes else r["note"]
         score = f'{r["score"]:.3f}' if "score" in r else ""
-        lines.append(f'| {r["name"]} | 0x{r["ref"]:08X} | {tgt} | {r["confidence"]} | {score} | {notes} |')
-    return "\n".join(lines) + "\n"
+        runner = f'{r["runner_up"]:.3f}' if "runner_up" in r else ""
+        ver = "" if "verified" not in r else ("yes" if r["verified"] else "no")
+        lines.append(f'| {r["name"]} | 0x{r["ref"]:08X} | {tgt} | {r["confidence"]} | {score} | '
+                     f'{runner} | {r.get("via", "")} | {ver} | {notes} |')
+    return "\n".join(lines) + "\n" + MARKDOWN_FOOTER
 
 
 def disasm(prefix, addr, count):
@@ -233,6 +274,7 @@ def main():
     p.add_argument("--refs", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--markdown", required=True)
+    p.add_argument("--annotations", help="JSON {name: {verified, note}} merged into results")
     a = p.parse_args()
     ref_img, tgt_img = load_image(a.ref), load_image(a.target)
     rp, tp = ref_img.meta["pdata"], tgt_img.meta["pdata"]
@@ -241,8 +283,10 @@ def main():
     refs = {k: int(v, 16) for k, v in json.loads(Path(a.refs).read_text()).items()}
     results = propagate(ref_img, ref_funcs, tgt_img, tgt_funcs,
                         match_references(ref_img, ref_funcs, tgt_img, tgt_funcs, refs))
+    if a.annotations:
+        apply_annotations(results, json.loads(Path(a.annotations).read_text()))
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
-    Path(a.out).write_text(json.dumps(results, indent=2))
+    Path(a.out).write_text(json.dumps(results, indent=2) + "\n")
     Path(a.markdown).write_text(render_markdown(results))
     found = sum(1 for r in results if r["target"] is not None)
     print(f"{found}/{len(results)} functions mapped "

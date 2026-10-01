@@ -93,6 +93,7 @@ class ReferenceTests(unittest.TestCase):
                                   [(BASE + 0x1000, 2)], [(BASE + 0x1000, 2)])
         res = sm.match_references(r, rf, t, tf, {"Gone": BASE + 0x1000})
         self.assertEqual(res[0]["confidence"], "none")
+        self.assertLess(res[0].get("score", 0.0), sm.FUZZY_MIN_SCORE)
 
 
 class CallgraphTests(unittest.TestCase):
@@ -221,6 +222,60 @@ class FuzzyTests(unittest.TestCase):
         child = [x for x in res if x["name"] == "Parent.callee0"][0]
         self.assertEqual(child["target"], child_t)
         self.assertEqual(child["confidence"], "callgraph")
+
+
+    def _two_callee_case(self, swap_calls):
+        p = BASE + 0x1000
+        ra, rb = BASE + 0x1100, BASE + 0x1200
+        ta, tb = BASE + 0x1300, BASE + 0x1400
+        blr = 0x4E800020
+        parent = body()
+        parent[6] = bl(p + 24, ra)
+        parent[12] = bl(p + 48, rb)
+        tparent = list(parent)
+        tparent[6] = bl(p + 24, tb if swap_calls else ta)
+        tparent[12] = bl(p + 48, ta if swap_calls else tb)
+        k = next(k for k in range(13, 18) if (parent[k] >> 26) != (parent[k + 1] >> 26))
+        tparent[k], tparent[k + 1] = tparent[k + 1], tparent[k]
+        child_a = [0x80610004] * 11 + [blr]
+        child_b = [0x90610008] * 11 + [blr]
+
+        def build(par, a_at, b_at):
+            code = [0x60000000] * 0x200
+            for i, w in enumerate(par):
+                code[i] = w
+            for i, w in enumerate(child_a):
+                code[(a_at - p) // 4 + i] = w
+            for i, w in enumerate(child_b):
+                code[(b_at - p) // 4 + i] = w
+            return code
+        r, rf, t, tf = two_images(build(parent, ra, rb), build(tparent, ta, tb),
+                                  [(p, 20), (ra, 12), (rb, 12)], [(p, 20), (ta, 12), (tb, 12)])
+        res = sm.match_references(r, rf, t, tf, {"Parent": p})
+        self.assertEqual(res[0]["confidence"], "fuzzy")
+        res = sm.propagate(r, rf, t, tf, res)
+        return {x["ref"]: x for x in res}, ra, rb, ta, tb
+
+    def test_fuzzy_parent_correct_call_order_accepted_via_fuzzy(self):
+        by_ref, ra, rb, ta, tb = self._two_callee_case(False)
+        self.assertEqual(by_ref[ra]["target"], ta)
+        self.assertEqual(by_ref[rb]["target"], tb)
+        self.assertEqual(by_ref[ra]["via"], "fuzzy")
+        self.assertGreaterEqual(by_ref[ra]["score"], sm.FUZZY_MIN_SCORE)
+
+    def test_fuzzy_parent_swapped_call_order_rejected(self):
+        by_ref, ra, rb, ta, tb = self._two_callee_case(True)
+        self.assertNotIn(ra, by_ref)
+        self.assertNotIn(rb, by_ref)
+
+    def test_exact_parent_callgraph_via_exact(self):
+        p = BASE + 0x1000
+        ref = [bl(p, BASE + 0x1010), 0x4E800020, 0x60000000, 0x60000000, 0x38600007, 0x4E800020]
+        tgt = [bl(p, BASE + 0x1020), 0x4E800020] + [0x60000000] * 6 + [0x38600007, 0x4E800020]
+        r, rf, t, tf = two_images(ref, tgt, [(p, 2), (BASE + 0x1010, 2)], [(p, 2), (BASE + 0x1020, 2)])
+        res = sm.propagate(r, rf, t, tf, sm.match_references(r, rf, t, tf, {"Parent": p}))
+        child = [x for x in res if x["name"] == "Parent.callee0"][0]
+        self.assertIn(child["via"], ("strict", "loose"))
 
 
 if __name__ == "__main__":

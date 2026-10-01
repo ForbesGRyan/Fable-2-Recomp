@@ -1,0 +1,34 @@
+{
+  "D3DDevice_SetIndices": {
+    "verified": true,
+    "note": "verified by disassembly (36/36 instrs same mnemonics order-swapped; offsets/regs differ)"
+  },
+  "D3DDevice_SetStreamSource": {
+    "verified": true,
+    "note": "verified by disassembly (same body; Fable 2 variant takes one extra arg, stride/offset math differs)"
+  },
+  "D3DDevice_DrawIndexedVertices": {
+    "verified": false,
+    "note": "unmatched: best candidate rejected by margin rule (sibling draw functions are near-identical); trace correlation inconclusive (menu only)"
+  },
+  "D3DDevice_DrawVertices": {
+    "verified": false,
+    "note": "unmatched: best candidate rejected by margin rule (sibling draw functions are near-identical); trace correlation inconclusive (menu only)"
+  },
+  "D3DDevice_SetRenderState": {
+    "verified": true,
+    "note": "verified by disassembly (48 instrs, 45 identical positions; one mr/lwz reorder)"
+  },
+  "D3DDevice_SetViewport": {
+    "verified": true,
+    "note": "verified by disassembly (same shape; reorder, struct offsets 0xc->8, 0x4228->0x4158, arg r4 literal 0x420)"
+  },
+  "D3DDevice_SetScissorRect": {
+    "verified": true,
+    "note": "verified by disassembly (150 instrs, 144 identical positions; struct offsets 0x3148->0x3098)"
+  },
+  "D3DDevice_SetIndices.callee1": {
+    "verified": true,
+    "note": "verified by disassembly (callgraph; 48 vs 49 instrs, one extra li r5,0 before call)"
+  }
+}

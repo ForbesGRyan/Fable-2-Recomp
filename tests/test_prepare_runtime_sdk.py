@@ -43,6 +43,13 @@ class CheckRevisionTests(unittest.TestCase):
         commit(self.repo, "renderer-work")
         prep.check_revision(self.repo)
 
+    def test_should_apply_patches_on_exact_pin(self):
+        self.assertTrue(prep.should_apply_patches(self.repo))
+
+    def test_should_not_apply_patches_on_descendant(self):
+        commit(self.repo, "renderer-work")
+        self.assertFalse(prep.should_apply_patches(self.repo))
+
     def test_rejects_unrelated_history(self):
         git(self.repo, "checkout", "-q", "--orphan", "other")
         commit(self.repo, "unrelated")

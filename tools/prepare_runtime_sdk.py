@@ -27,6 +27,11 @@ def check_revision(source):
     raise SystemExit(f"Expected SDK commit {SDK_PIN} or a descendant; got {head}.")
 
 
+def should_apply_patches(source):
+    """Patches are applied only at the exact pin; descendants carry them as commits."""
+    return git(source, "rev-parse", "HEAD").stdout.strip() == SDK_PIN
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
@@ -35,17 +40,20 @@ def main():
     source = args.source.resolve()
     patch_directory = Path(__file__).resolve().parents[1] / "thirdparty"
     check_revision(source)
-    # Keep follow-up fixes separate so existing patched SDK checkouts can upgrade.
-    for name in ("rexglue-sdk-runtime-fixes.patch", "rexglue-sdk-debug-exports.patch"):
-        patch = patch_directory / name
-        if git(source, "apply", "--reverse", "--check", str(patch), check=False).returncode == 0:
-            print(f"Already applied: {name}")
-            continue
-        result = git(source, "apply", "--check", str(patch), check=False)
-        if result.returncode:
-            raise SystemExit(f"SDK patch {name} conflicts with local edits:\n" + result.stderr)
-        git(source, "apply", str(patch))
-        print(f"Applied: {name}")
+    if should_apply_patches(source):
+        # Keep follow-up fixes separate so existing patched SDK checkouts can upgrade.
+        for name in ("rexglue-sdk-runtime-fixes.patch", "rexglue-sdk-debug-exports.patch"):
+            patch = patch_directory / name
+            if git(source, "apply", "--reverse", "--check", str(patch), check=False).returncode == 0:
+                print(f"Already applied: {name}")
+                continue
+            result = git(source, "apply", "--check", str(patch), check=False)
+            if result.returncode:
+                raise SystemExit(f"SDK patch {name} conflicts with local edits:\n" + result.stderr)
+            git(source, "apply", str(patch))
+            print(f"Applied: {name}")
+    else:
+        print("SDK HEAD descends from the pin; runtime patches are committed on the branch - skipping patch application")
     if not args.skip_dependencies:
         # git submodule update reads the index, not the patched worktree gitlink.
         # The original SDK pin for libmspack is unavailable on its public remote.

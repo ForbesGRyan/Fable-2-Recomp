@@ -448,6 +448,18 @@ if(WIN32)
               ${FABLE2_SDK_ROOT}/bin/rexruntime.dll
               $<TARGET_FILE_DIR:fable_2_vulkan_smoke>
     )
+
+    # XDK signature matching input (docs/superpowers/plans/2026-10-01-native-renderer-discovery.md).
+    add_executable(fable_2_xex_image_dump tools/xdk_sigmatch/xex_image_dump.cpp)
+    target_include_directories(fable_2_xex_image_dump PRIVATE ${FABLE2_SDK_ROOT}/include)
+    target_link_libraries(fable_2_xex_image_dump PRIVATE ${FABLE2_SDK_ROOT}/lib/rexruntime.lib)
+    target_compile_definitions(fable_2_xex_image_dump PRIVATE SPDLOG_COMPILED_LIB SPDLOG_FMT_EXTERNAL FMT_HEADER_ONLY=1)
+    target_compile_features(fable_2_xex_image_dump PRIVATE cxx_std_23)
+    add_custom_command(TARGET fable_2_xex_image_dump POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              ${FABLE2_SDK_ROOT}/bin/rexruntime.dll
+              $<TARGET_FILE_DIR:fable_2_xex_image_dump>
+    )
 endif()
 
 # Opt out of the stable-hash PE cleaning below (keeps the linker's real

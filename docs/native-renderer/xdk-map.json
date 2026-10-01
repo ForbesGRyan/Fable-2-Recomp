@@ -1,0 +1,325 @@
+[
+  {
+    "name": "D3DDevice_SetIndices",
+    "ref": 2193068432,
+    "target": 2182728920,
+    "confidence": "fuzzy",
+    "candidates": [],
+    "score": 0.972,
+    "runner_up": 0.647,
+    "verified": "verified by disassembly (36/36 instrs same mnemonics order-swapped; offsets/regs differ)"
+  },
+  {
+    "name": "D3DDevice_SetStreamSource",
+    "ref": 2193068016,
+    "target": 2182835616,
+    "confidence": "fuzzy",
+    "candidates": [],
+    "score": 0.958,
+    "runner_up": 0.571,
+    "verified": "verified by disassembly (same body; Fable 2 variant takes one extra arg, stride/offset math differs)"
+  },
+  {
+    "name": "D3DDevice_DrawIndexedVertices",
+    "ref": 2193075560,
+    "target": null,
+    "confidence": "none",
+    "candidates": [
+      2183258352
+    ],
+    "score": 0.969,
+    "runner_up": 0.87,
+    "note": "unmatched: best candidate rejected by margin rule (sibling draw functions are near-identical); trace correlation inconclusive (menu only)"
+  },
+  {
+    "name": "D3DDevice_DrawVertices",
+    "ref": 2193074544,
+    "target": null,
+    "confidence": "none",
+    "candidates": [
+      2183251224
+    ],
+    "score": 0.986,
+    "runner_up": 0.851,
+    "note": "unmatched: best candidate rejected by margin rule (sibling draw functions are near-identical); trace correlation inconclusive (menu only)"
+  },
+  {
+    "name": "D3DDevice_BeginVertices",
+    "ref": 2193072064,
+    "target": null,
+    "confidence": "none",
+    "candidates": [
+      2183159968
+    ],
+    "score": 0.961,
+    "runner_up": 0.721
+  },
+  {
+    "name": "D3DDevice_SetPixelShader",
+    "ref": 2193093640,
+    "target": null,
+    "confidence": "none",
+    "candidates": [
+      2183341280
+    ],
+    "score": 0.983,
+    "runner_up": 0.903
+  },
+  {
+    "name": "D3DDevice_SetVertexShader",
+    "ref": 2193092944,
+    "target": null,
+    "confidence": "none",
+    "candidates": [
+      2183171304
+    ],
+    "score": 0.973,
+    "runner_up": 0.894
+  },
+  {
+    "name": "D3DDevice_SetRenderState",
+    "ref": 2193112136,
+    "target": 2183252232,
+    "confidence": "fuzzy",
+    "candidates": [],
+    "score": 0.979,
+    "runner_up": 0.598,
+    "verified": "verified by disassembly (48 instrs, 45 identical positions; one mr/lwz reorder)"
+  },
+  {
+    "name": "D3DDevice_SetViewport",
+    "ref": 2193048336,
+    "target": 2182943344,
+    "confidence": "fuzzy",
+    "candidates": [],
+    "score": 0.915,
+    "runner_up": 0.587,
+    "verified": "verified by disassembly (same shape; reorder, struct offsets 0xc->8, 0x4228->0x4158, arg r4 literal 0x420)"
+  },
+  {
+    "name": "D3DDevice_SetScissorRect",
+    "ref": 2193058240,
+    "target": 2183109584,
+    "confidence": "fuzzy",
+    "candidates": [],
+    "score": 0.98,
+    "runner_up": 0.421,
+    "verified": "verified by disassembly (150 instrs, 144 identical positions; struct offsets 0x3148->0x3098)"
+  },
+  {
+    "name": "D3DDevice_SetPending_AluConstants",
+    "ref": 2193113056,
+    "target": null,
+    "confidence": "none",
+    "candidates": [
+      2183258008
+    ],
+    "score": 0.911,
+    "runner_up": 0.635
+  },
+  {
+    "name": "D3DDevice_Swap",
+    "ref": 2193108488,
+    "target": null,
+    "confidence": "none",
+    "candidates": [
+      2187370728
+    ],
+    "score": 0.311,
+    "runner_up": 0.308
+  },
+  {
+    "name": "RegisterTexture",
+    "ref": 2194253336,
+    "target": null,
+    "confidence": "none",
+    "candidates": [
+      2197948400
+    ],
+    "score": 0.614,
+    "runner_up": 0.614
+  },
+  {
+    "name": "D3DDevice_SetIndices.callee1",
+    "ref": 2193119368,
+    "target": 2193208128,
+    "confidence": "callgraph",
+    "candidates": [],
+    "verified": "verified by disassembly (callgraph; 48 vs 49 instrs, one extra li r5,0 before call)"
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1",
+    "ref": 2193110528,
+    "target": 2183719664,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetViewport.callee0",
+    "ref": 2193049664,
+    "target": 2183161888,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetScissorRect.callee1",
+    "ref": 2193067768,
+    "target": 2183109336,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1",
+    "ref": 2193052864,
+    "target": 2183040288,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetViewport.callee0.callee1",
+    "ref": 2193049104,
+    "target": 2183161328,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetScissorRect.callee1.callee0",
+    "ref": 2193057488,
+    "target": 2183108584,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee0",
+    "ref": 2193051512,
+    "target": 2183673136,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee2",
+    "ref": 2193052648,
+    "target": 2183685168,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee3",
+    "ref": 2193052256,
+    "target": 2183039896,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee4",
+    "ref": 2193053120,
+    "target": 2183407144,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetViewport.callee0.callee1.callee1",
+    "ref": 2193048920,
+    "target": 2183161144,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee2.callee2",
+    "ref": 2193048632,
+    "target": 2183835576,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee2.callee4",
+    "ref": 2193050984,
+    "target": 2183684680,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee3.callee1",
+    "ref": 2193119560,
+    "target": 2193208328,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee3.callee3",
+    "ref": 2193052016,
+    "target": 2183758320,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee3.callee5",
+    "ref": 2193050080,
+    "target": 2182944696,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee4.callee2",
+    "ref": 2193055872,
+    "target": 2193211280,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee4.callee3",
+    "ref": 2193055672,
+    "target": 2193211080,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee2.callee4.callee1",
+    "ref": 2193050504,
+    "target": 2183684480,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee3.callee5.callee1",
+    "ref": 2193048800,
+    "target": 2193209200,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee4.callee2.callee2",
+    "ref": 2193125120,
+    "target": 2193231488,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee4.callee2.callee2.callee1",
+    "ref": 2193124272,
+    "target": 2193230640,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee4.callee2.callee2.callee1.callee14",
+    "ref": 2193123312,
+    "target": 2193229680,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee4.callee2.callee2.callee1.callee20",
+    "ref": 2193123440,
+    "target": 2193229808,
+    "confidence": "callgraph",
+    "candidates": []
+  },
+  {
+    "name": "D3DDevice_SetRenderState.callee1.callee1.callee4.callee2.callee2.callee1.callee32",
+    "ref": 2193124056,
+    "target": 2193230424,
+    "confidence": "callgraph",
+    "candidates": []
+  }
+]

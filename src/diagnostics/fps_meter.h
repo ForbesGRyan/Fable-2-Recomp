@@ -25,6 +25,7 @@
 #include "fable2_func_trace.h"
 #include "fable2_native_render.h"
 #include "fable2_f5_lua.h"  // F5 external-Lua run (polled per frame)
+#include "guest_frame_rate.h"
 
 // Defined in fable2_d3d_census.h (included by main.cpp after this header).
 namespace fable2::d3dcensus { inline void OnFrame(); }
@@ -104,11 +105,14 @@ inline bool enabled() {
 }  // namespace fable2::fpsmeter
 
 extern "C" void MainRenderLoop_82B9CD68(PPCContext& ctx, uint8_t* base) {
-  // Bounded unfiltered trace window (FABLE2_TRACE_WINDOW=1); see above.
-  fable2::functrace_window::run_window(
+  const int64_t frame_us =
       std::chrono::duration_cast<std::chrono::microseconds>(
           std::chrono::steady_clock::now().time_since_epoch())
-          .count());
+          .count();
+  // Guest frame time for the F3 overlay (see guest_frame_rate.h).
+  fable2::guest_frame_rate::record_frame(frame_us);
+  // Bounded unfiltered trace window (FABLE2_TRACE_WINDOW=1); see above.
+  fable2::functrace_window::run_window(frame_us);
   if (fable2::fpsmeter::enabled()) {
     static std::atomic<uint64_t> calls{0};
     static std::atomic<int64_t> window_start_us{0};

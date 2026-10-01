@@ -31,6 +31,7 @@
 #include "fable2_config.h"
 #include "fable2_native_render.h"
 #include "fable2_patches.h"
+#include "guest_frame_rate.h"
 // #include "fable2_deadbeef_overlay.h"
 // 30fps-cap instrumentation (writes fps_probe.log next to the exe). Disabled
 // now that the cap is lifted via REX_VSYNC=0 (see tools/fable2-uncapped.cmd).
@@ -256,6 +257,10 @@ class Fable2App : public rex::ReXApp {
       rex::ui::FrameStats stats;
       auto ft_us =
           rex::perf::GetSnapshotCounter(rex::perf::CounterId::kFrameTimeUs);
+      // The vsync-present-gate SDK never sets kFrameTimeUs (and compiles
+      // perf counters out of Release); fall back to our own per-frame
+      // measurement from MainRenderLoop_82B9CD68.
+      if (ft_us <= 0) ft_us = fable2::guest_frame_rate::frame_time_us();
       if (ft_us > 0) {
         stats.frame_time_ms = double(ft_us) / 1000.0;
         stats.fps = 1000000.0 / double(ft_us);

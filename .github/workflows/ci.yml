@@ -1,0 +1,79 @@
+# Source-only CI: everything that builds and tests without game content.
+#
+# The recompiled fable_2 executable is NOT built here: codegen needs the
+# original default.xex, which must never be committed or uploaded. Build that
+# locally with build.cmd.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-tests:
+    name: Tests + launcher (Windows)
+    runs-on: windows-latest
+    steps:
+      # Top-level submodule only: the native tests need the patched SDK headers
+      # and frame_limiter.cpp, not the SDK's own (large) nested submodules.
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      # clang++ on Windows links against the MSVC STL/CRT.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Toolchain versions
+        shell: cmd
+        run: |
+          set "PATH=C:\Program Files\LLVM\bin;%PATH%"
+          clang++ --version
+          python --version
+          dotnet --version
+
+      - name: Game-version constants up to date
+        run: python tools/generate_game_versions.py --check
+
+      - name: Python tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Apply SDK runtime patches
+        run: python tools/prepare_runtime_sdk.py thirdparty/rexglue-sdk --skip-dependencies
+
+      - name: Native synthetic tests
+        shell: cmd
+        run: |
+          set "PATH=C:\Program Files\LLVM\bin;%PATH%"
+          call tests\run_native_tests.cmd
+
+      - name: Launcher config tests
+        run: dotnet run --project tests/Fable2.Launcher.ConfigTests -c Release
+
+      - name: Build launcher
+        shell: cmd
+        run: call launcher\build-launcher.cmd
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Fable2Launcher
+          path: out/tests/launcher-build/Fable2Launcher.exe
+          if-no-files-found: error

@@ -1,2 +1,4 @@
 # Unified-diff context lines representing blank source lines contain one space.
-thirdparty/rexglue-sdk-runtime-fixes.patch text eol=lf whitespace=-blank-at-eol
+# Patches must keep LF: git apply against the LF SDK checkout rejects CRLF hunks
+# (Git for Windows defaults to core.autocrlf=true, including on CI runners).
+*.patch text eol=lf whitespace=-blank-at-eol

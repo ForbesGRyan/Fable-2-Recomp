@@ -73,6 +73,15 @@ Optional command-line overrides (all normal `--cvar value` args):
 | `--window_width` / `--window_height` / `--fullscreen` | Presentation options |
 | `--keyboard_gamepad_map <map>` | Host keyboard -> guest gamepad button map (see below) |
 
+### Experimental native renderer
+
+Foundation for a native D3D12 renderer (see
+`docs/superpowers/specs/2026-10-01-native-renderer-foundation-design.md`).
+Enable with `[native] enabled = true` in `fable2_config.toml`. Modes (cvar
+`fable2_native_render_mode`): `overlay` (default) draws a grid over the
+emulated frame; `replace` draws a test pattern instead of the game. F6 toggles
+it live. Any native failure falls back to the emulated image. D3D12 only.
+
 ## User config (fable2_config.toml)
 
 The recomp has its own human-readable user config, `fable2_config.toml`, next

@@ -35,4 +35,6 @@ clang++ -std=c++23 "%~dp0native\test_vfetch_decode.cpp" -o "%OUT%\vfetch_decode.
 "%OUT%\vfetch_decode.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_frame_scene.cpp" -o "%OUT%\frame_scene.exe" || exit /b 1
 "%OUT%\frame_scene.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_geometry_cache_index.cpp" -o "%OUT%\geometry_cache_index.exe" || exit /b 1
+"%OUT%\geometry_cache_index.exe" || exit /b 1
 exit /b 0

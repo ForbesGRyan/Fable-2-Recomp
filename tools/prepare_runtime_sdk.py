@@ -1,4 +1,4 @@
-"""Apply the source-only runtime fixes to the exact tested SDK revision.
+"""Apply the source-only runtime fixes to the tested SDK revision (or a descendant).
 
 No game content is read. Conflicting SDK edits are rejected, not overwritten.
 Use --skip-dependencies for patch validation without network/dependency setup.
@@ -17,6 +17,16 @@ def git(source, *args, check=True):
                           capture_output=True, text=True)
 
 
+def check_revision(source):
+    """Accept the pinned SDK commit or any commit that descends from it."""
+    head = git(source, "rev-parse", "HEAD").stdout.strip()
+    if head == SDK_PIN:
+        return
+    if git(source, "merge-base", "--is-ancestor", SDK_PIN, "HEAD", check=False).returncode == 0:
+        return
+    raise SystemExit(f"Expected SDK commit {SDK_PIN} or a descendant; got {head}.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path)
@@ -24,8 +34,7 @@ def main():
     args = parser.parse_args()
     source = args.source.resolve()
     patch_directory = Path(__file__).resolve().parents[1] / "thirdparty"
-    if git(source, "rev-parse", "HEAD").stdout.strip() != SDK_PIN:
-        raise SystemExit(f"Expected SDK commit {SDK_PIN}; refusing to patch another revision.")
+    check_revision(source)
     # Keep follow-up fixes separate so existing patched SDK checkouts can upgrade.
     for name in ("rexglue-sdk-runtime-fixes.patch", "rexglue-sdk-debug-exports.patch"):
         patch = patch_directory / name

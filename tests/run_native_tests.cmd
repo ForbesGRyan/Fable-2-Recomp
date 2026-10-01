@@ -31,4 +31,6 @@ clang++ -std=c++23 "%~dp0native\test_position_decode.cpp" -o "%OUT%\position_dec
 "%OUT%\position_decode.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_index_convert.cpp" -o "%OUT%\index_convert.exe" || exit /b 1
 "%OUT%\index_convert.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_vfetch_decode.cpp" -o "%OUT%\vfetch_decode.exe" || exit /b 1
+"%OUT%\vfetch_decode.exe" || exit /b 1
 exit /b 0

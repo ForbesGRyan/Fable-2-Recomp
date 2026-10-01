@@ -27,4 +27,6 @@ clang++ -std=c++23 -I"%SDK%\include" "%~dp0native\test_emulated_frame_stats.cpp"
 "%OUT%\frame_stats.exe" || exit /b 1
 clang++ -std=c++23 -I"%SDK%\include" "%~dp0native\test_pacing_stats.cpp" -o "%OUT%\pacing.exe" || exit /b 1
 "%OUT%\pacing.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_position_decode.cpp" -o "%OUT%\position_decode.exe" || exit /b 1
+"%OUT%\position_decode.exe" || exit /b 1
 exit /b 0

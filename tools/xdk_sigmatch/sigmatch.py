@@ -233,6 +233,7 @@ Notes:
   call-graph rows under a fuzzy ancestor are accepted only if the callee pair itself scores >= 0.85.
 - `Verified` is yes when the row was compared by side-by-side disassembly.
 - Rows with confidence `none` have no confirmed Fable 2 address.
+- Callgraph rows are named structurally (.calleeN) and are unverified unless the Verified column says yes.
 """
 
 

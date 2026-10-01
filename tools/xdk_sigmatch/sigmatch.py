@@ -180,7 +180,21 @@ def render_markdown(results):
     return "\n".join(lines) + "\n"
 
 
+def disasm(prefix, addr, count):
+    """Print `count` instructions at `addr` (requires: pip install capstone)."""
+    import capstone
+    img = load_image(prefix)
+    md = capstone.Cs(capstone.CS_ARCH_PPC, capstone.CS_MODE_32 | capstone.CS_MODE_BIG_ENDIAN)
+    code = img.data[addr - img.base: addr - img.base + 4 * count]
+    for ins in md.disasm(code, addr):
+        print(f"0x{ins.address:08X}: {ins.mnemonic:8} {ins.op_str}")
+
+
 def main():
+    import sys
+    if len(sys.argv) >= 2 and sys.argv[1] == "disasm":
+        disasm(sys.argv[2], int(sys.argv[3], 16), int(sys.argv[4]) if len(sys.argv) > 4 else 24)
+        return
     import argparse
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--ref", required=True)

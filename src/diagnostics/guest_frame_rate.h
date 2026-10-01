@@ -42,6 +42,25 @@ inline void record_frame(int64_t now_us) {
   last_us = now_us;
 }
 
+// Smoothed time spent inside the guest's swap/present call per frame (us).
+inline std::atomic<int64_t>& smoothed_swap_us() {
+  static std::atomic<int64_t> v{0};
+  return v;
+}
+
+// Called once per guest frame with the duration of the original
+// MainRenderLoop call (render thread only).
+inline void record_swap(int64_t dt_us) {
+  static double ema_us = 0.0;
+  if (dt_us < 0 || dt_us >= 1'000'000) return;
+  ema_us = ema_us == 0.0 ? double(dt_us) : ema_us + (double(dt_us) - ema_us) * 0.1;
+  smoothed_swap_us().store(int64_t(ema_us), std::memory_order_relaxed);
+}
+
+inline int64_t swap_us() {
+  return smoothed_swap_us().load(std::memory_order_relaxed);
+}
+
 inline int64_t frame_time_us() {
   return smoothed_us().load(std::memory_order_relaxed);
 }

@@ -24,6 +24,12 @@ int main() {
   if (f4.copies != 2 || f4.copy_cpu_ns != 42) return 7;
   if (f4.draws != 1 || f4.draw_cpu_ns != 5) return 8;
   if (f4.pitch_count != 1 || f4.pitch_draws[0] != 1 || f4.other_pitch_draws != 0) return 9;
+  acc.AddCpTime(100, 20, 5);
+  acc.AddCpTime(50, 10, 1);
+  auto f5 = acc.CloseFrame(20'000'000);
+  if (f5.cp_busy_ns != 150 || f5.cp_wait_reg_ns != 30 || f5.cp_idle_ns != 6) return 10;
+  auto f6 = acc.CloseFrame(21'000'000);
+  if (f6.cp_busy_ns != 0 || f6.cp_wait_reg_ns != 0 || f6.cp_idle_ns != 0) return 11;
   std::cout << "PASS: per-frame draws, time, intervals, pitch histogram + overflow\n";
   return 0;
 }

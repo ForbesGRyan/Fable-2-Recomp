@@ -150,5 +150,10 @@ extern "C" void MainRenderLoop_82B9CD68(PPCContext& ctx, uint8_t* base) {
   fable2::d3dcensus::OnFrame();
   // F5 (host) -> run the external Lua file (per-frame, responsive).
   fable2::f5lua::poll_mainloop(ctx, base);
+  const auto swap_t0 = std::chrono::steady_clock::now();
   __imp__MainRenderLoop_82B9CD68(ctx, base);
+  fable2::guest_frame_rate::record_swap(
+      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                            swap_t0)
+          .count());
 }

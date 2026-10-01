@@ -265,6 +265,9 @@ class Fable2App : public rex::ReXApp {
         stats.frame_time_ms = double(ft_us) / 1000.0;
         stats.fps = 1000000.0 / double(ft_us);
         stats.frame_count = 1;  // non-zero = "has data" (gates overlay text)
+        const double swap_ms = double(fable2::guest_frame_rate::swap_us()) / 1000.0;
+        stats.guest_swap_ms = swap_ms;
+        stats.guest_work_ms = std::max(0.0, stats.frame_time_ms - swap_ms);
       }
       return stats;
     });

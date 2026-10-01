@@ -12,6 +12,7 @@
 #include <rex/graphics/native_rhi.h>
 #include <rex/logging.h>
 
+#include "capture.h"
 #include "fable2_native_shaders.h"
 #include "native_render_state.h"
 
@@ -165,7 +166,8 @@ bool WindowFocused() {
 
 }  // namespace
 
-void Install() {
+void Install(rex::memory::Memory* memory) {
+  capture::SetMemory(memory);  // always: discovery works with the renderer off
   if (!REXCVAR_GET(fable2_native_render)) {
     REXLOG_INFO("[native] native renderer disabled (fable2_native_render=false)");
     return;

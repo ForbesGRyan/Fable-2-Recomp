@@ -281,7 +281,7 @@ class Fable2App : public rex::ReXApp {
     });
 
     // Native guest-output renderer (registers SDK callbacks if enabled).
-    fable2::native::Install();
+    fable2::native::Install(runtime()->memory());
   }
 
   // Load the recomp's own user config (fable2_config.toml) next to the exe,

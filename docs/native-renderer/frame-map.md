@@ -1,6 +1,6 @@
 # Fable 2 frame map and sub-project 3 recommendation
 
-Status: menu capture, gameplay census and pitch ablation complete; the tiling counter and the uncapped F3 reading are still pending (see "Pending"). Sections 1b, 2c, 3, 5, 6b and 7 carry the gameplay results.
+Status: menu capture, gameplay census, pitch ablation and tiling capture complete; only the uncapped F3 reading is pending (see "Pending"). Sections 1b, 2c, 3, 5, 6b and 7 carry the gameplay results.
 Gameplay capture: `out\build\win-amd64-release\logs\d3d_census_20261001_140912.jsonl` (900 rows, 30 s walking in the world, armed after 90 s; no repeated `gpu_frame`).
 Menu capture used: `out\build\win-amd64-release\logs\d3d_census_20261001_130522.jsonl` (600 rows). Row 1 accumulates every call since process start and is dropped by `summarize_census.py`. The capture has two distinct segments (section 2): frames 2-480 are a static screen (likely splash/loading/title) and frames 481-600 are a 3D scene. Treat the 3D segment as the one that matters. This capture predates `gpu.gpu_frame`, so repeated GPU frames could not be dropped.
 
@@ -377,6 +377,41 @@ The command processor executes a predicated packet whenever `bin_select & bin_ma
 
 Consequence for sub-project 3: on the PC there is no EDRAM limit, so a native pass can draw the tiled scene once instead of once per tile. That roughly halves the emulated main-scene draw work in gameplay.
 
+### 3b. Tiling confirmed (capture `d3d_census_20261001_145058`)
+
+Second gameplay capture, 899 frames, with every PM4 draw emitter hooked and the SDK tiling counters on. The player stood still in a dense area, so per-frame counts are nearly constant (draws 6970 or 6973).
+
+| Quantity (per frame) | Value |
+|---|---|
+| Emulated draws (`IssueDraw`, excluding resolves) | 6970 |
+| Guest draw calls (all hooked emitters) | 3174: DrawIndexedVertices 2483, `0x8221C9C8` 328, DrawVertices 200, `0x82217EE8` 59, `0x82207C30` 50, `0x821EF988` 30, BeginVertices 18, `0x82B98770` 3, `0x82B988C8` 3 |
+| Emulated / guest draws | 2.20 |
+| Predicated draw packets executed | 6536 |
+| Non-predicated draws (6970 - 6536) | 434 |
+| Predicated packets skipped by the bin check | 12826 |
+| SET_BIN_SELECT writes / distinct values | 11 / 6 (`0xFFFFFFFF`, `0x80000003`, `0x80000001`, `0x2`, `0xC`, `0x8`, identical every frame) |
+| `TileReplay?` `0x82B9ED28` / `SetBinSelect` `0x82B9E848` calls | 3 / 9 |
+| Indirect-buffer inserts (`0x82286248`) | 39 |
+| Resolves | 34 |
+
+`0x82B9C068`, `0x82B928A8`, `0x82BA29B8`, `0x82BA5448` and `0x82BA5CE8` were hooked but never called in this capture.
+
+Reading:
+- Every guest draw is now accounted for. About 434 draws per frame run once (not predicated), and about 2740 run under predication; those execute 6536 times, about 2.4 times each. The replay function runs 3 times per frame with 3 bin selects per run, which fits three screen tiles where each draw runs once for every tile its bounds touch.
+- Pitch 1120 carries 5497 of the 6970 emulated draws, so the tiled pass is the main scene.
+- A native main-scene pass that draws each guest call once would issue about 2740 draws instead of 6536, removing about 3800 of the 6970 emulated draws per frame (55%).
+
+Extents per pitch (max window-scissor corner / max viewport with scaling enabled):
+
+| Pitch | Viewport | Reading |
+|---|---|---|
+| 1280 | 1280 x 720 | final composite at output resolution |
+| 1120 | 1120 x 720 | main scene: 1120 x 720, stretched horizontally to 1280 in the composite |
+| 1040 | 1024 x 1024 | shadow map 1024 x 1024 (pitch padded) |
+| 560 | 560 x 360 | half-resolution scene (1120 x 720 / 2) |
+| 320 | 280 x 256 | quarter-resolution scene (280 x 180) and a 256 x 256 target share the padded pitch |
+| 280 / 160 / 80 | 256 / 128 / 64 square | likely luminance downsample chain (HDR adaptation) |
+
 ## 4. Pass list
 
 Pitch ablation, 2026-10-01, in the world (Bowerstone Old Town, night, snow), one run per pitch with `--native_render_suppress_debug=true --native_render_suppress_pitches=<p>`, vsync on. Draw counts are gameplay medians from section 2c.
@@ -475,7 +510,7 @@ cd out\build\win-amd64-release
 & .\fable_2.exe --fullscreen=false --native_render_suppress_debug=true --native_render_suppress_pitches=<p>
 ```
    Record what disappears or breaks on screen and name the pass (shadow map, main scene, water, post, UI). Fill section 4 with `pitch | draws | observed effect when suppressed | pass name`. Suppression debug mode also fakes all occlusion queries, so objects that are normally culled may appear.
-2. **Tiling re-capture** (user, in the world). The counters and hooks are in place: census rows now carry `gpu.bin_selects` (SET_BIN_SELECT* writes), `gpu.tiles` and `gpu.tile_selects` (distinct non-zero bin-select values; LO/HI half-writes can add an intermediate value), `gpu.pred_draws` (predicated draw packets executed), `gpu.pred_skips` (predicated packets skipped) and `gpu.extents` (per pitch: max window-scissor corner, i.e. tile size in EDRAM, and max viewport size). The 15 extra hooks from section 7 item 1 come from `tools\xdk_sigmatch\fable2_extra_hooks.json` (`0x822A6318` is skipped: `src/diagnostics/fps_probe.h` already overrides it). Regenerate with:
+2. **Tiling re-capture** (done 2026-10-01, results in section 3b; kept for re-runs). The counters and hooks are in place: census rows now carry `gpu.bin_selects` (SET_BIN_SELECT* writes), `gpu.tiles` and `gpu.tile_selects` (distinct non-zero bin-select values; LO/HI half-writes can add an intermediate value), `gpu.pred_draws` (predicated draw packets executed), `gpu.pred_skips` (predicated packets skipped) and `gpu.extents` (per pitch: max window-scissor corner, i.e. tile size in EDRAM, and max viewport size). The 15 extra hooks from section 7 item 1 come from `tools\xdk_sigmatch\fable2_extra_hooks.json` (`0x822A6318` is skipped: `src/diagnostics/fps_probe.h` already overrides it). Regenerate with:
 ```
 python tools\xdk_sigmatch\gen_census_hooks.py --map docs\native-renderer\xdk-map.json --init generated\default\fable_2_init.cpp --src src --out src\diagnostics\fable2_d3d_census_hooks.inc --extra tools\xdk_sigmatch\fable2_extra_hooks.json
 ```

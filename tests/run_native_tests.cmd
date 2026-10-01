@@ -19,4 +19,6 @@ for %%P in (goty-compatible goty-us-eu goty-german) do (
 )
 clang++ -std=c++23 -I"%SDK%\include" "%~dp0native\test_native_suppress_policy.cpp" -o "%OUT%\suppress.exe" || exit /b 1
 "%OUT%\suppress.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_native_render_state.cpp" -o "%OUT%\native_state.exe" || exit /b 1
+"%OUT%\native_state.exe" || exit /b 1
 exit /b 0

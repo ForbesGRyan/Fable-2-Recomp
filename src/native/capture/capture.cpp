@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -23,6 +24,7 @@
 
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
+#include <rex/graphics/pipeline/texture/util.h>
 #include <rex/logging/macros.h>
 #include <rex/ppc/context.h>
 
@@ -45,6 +47,7 @@
 #include "window_stats.h"
 #include "xdk_hook_ids.h"
 #include "xdk_layout.h"
+#include "../render/texture_decode.h"
 
 REXCVAR_DECLARE(bool, fable2_native_render);
 
@@ -211,6 +214,11 @@ SceneEvidence g_evidence;
 uint32_t g_unsupported_by_hook[kMaxHookIds] = {};  // kUnsupportedPrim records per hook id this frame
 std::filesystem::path g_path;
 std::FILE* g_file = nullptr;
+// Discovery texture dumps (caller holds g_mutex): the capture's dump folder,
+// the (base address, identity) pairs already dumped and how many were written.
+std::filesystem::path g_tex_dir;
+std::set<std::pair<uint32_t, uint64_t>> g_tex_seen;
+uint32_t g_tex_count = 0;
 
 int FramesRequested() {
   static const int frames = [] {
@@ -824,6 +832,91 @@ void AppendPs(std::string& row, const DeviceSnapshot& dev) {
   row += buf;
 }
 
+// Discovery only (caller holds g_mutex with g_file open). Dumps the raw guest
+// bytes of a 2D fetch constant's base level once per (base address, identity)
+// to logs/native_tex_<stamp>/<BASE>_<IDENTITY16>.bin and writes a "texture"
+// row. Bounded: kMaxTextures per capture, kMaxTextureBytes each, kMaxUnsupportedBytes
+// for formats the renderer does not decode (the census needs them). The extent
+// is the tiled address upper bound / linear rows of the base level.
+constexpr uint32_t kMaxTextures = 768;
+constexpr uint32_t kMaxTextureBytes = 8u << 20;
+constexpr uint32_t kMaxUnsupportedBytes = 64u << 10;
+
+void DumpTexture(const uint32_t fc[6]) {
+  if (g_tex_dir.empty() || g_tex_count >= kMaxTextures) return;
+  render::TextureFetch t;
+  const render::FetchError err = render::DecodeTextureFetch(fc, &t);
+  uint64_t bytes = 0;
+  uint32_t base = fc[1] & 0xFFFFF000u;
+  if (err == render::FetchError::kNone) {
+    const render::TexFormatInfo fi = render::FormatInfo(t.format);
+    const uint32_t wb = (t.width + fi.block - 1) / fi.block;
+    const uint32_t hb = (t.height + fi.block - 1) / fi.block;
+    const uint32_t pitch_blocks = t.pitch_texels / fi.block;
+    base = t.base_phys;
+    bytes = t.tiled ? rex::graphics::texture_util::GetTiledAddressUpperBound2D(wb, hb, pitch_blocks,
+                                                                               fi.bpb_log2)
+                    : uint64_t(pitch_blocks) * fi.bytes_per_block * (hb - 1) +
+                          uint64_t(wb) * fi.bytes_per_block;
+    bytes = std::min<uint64_t>(bytes, kMaxTextureBytes);
+  } else if (err == render::FetchError::kFormat && base) {
+    bytes = kMaxUnsupportedBytes;
+  } else {
+    return;
+  }
+  const uint64_t identity = render::TextureIdentity(fc);
+  if (!g_tex_seen.insert({base, identity}).second || bytes == 0) return;
+  const uint8_t* src = ReadPhysical(base, uint32_t(bytes));
+  if (!src) return;
+  char name[48];
+  std::snprintf(name, sizeof(name), "%08X_%016llX.bin", base, static_cast<unsigned long long>(identity));
+  std::error_code ec;
+  std::filesystem::create_directories(g_tex_dir, ec);
+  std::FILE* f = std::fopen((g_tex_dir / name).string().c_str(), "wb");
+  if (!f) return;
+  const bool ok = std::fwrite(src, 1, size_t(bytes), f) == size_t(bytes);
+  std::fclose(f);
+  if (!ok) return;
+  ++g_tex_count;
+  char buf[160];
+  std::snprintf(buf, sizeof(buf), "{\"kind\":\"texture\",\"file\":\"%s/%s\",\"bytes\":%llu,\"fc\":",
+                g_tex_dir.filename().string().c_str(), name, static_cast<unsigned long long>(bytes));
+  std::string row = buf;
+  row += HexDwords(fc, 6);
+  row += "}\n";
+  std::fputs(row.c_str(), g_file);
+}
+
+// Discovery evidence: the texture fetch constants (host-order dwords, read like
+// the terrain heightmap fetch) of every slot the pixel shader samples, and a
+// dump of each distinct 2D texture. Writes "tf":{"<slot>":[6 dwords] | null}.
+void AppendTextureFetches(std::string& row, uint32_t device, const DeviceSnapshot& dev) {
+  uint32_t obj = 0;
+  std::vector<uint32_t> slots;
+  if (ChoosePs(dev, &obj)) {
+    if (const PsInfo* ps = LookupPs(obj)) slots = ps->tex_slots;  // copy: not held across calls
+  }
+  row += ",\"tf\":{";
+  char buf[32];
+  bool first = true;
+  for (uint32_t slot : slots) {
+    if (slot >= 32) continue;
+    const uint32_t at =
+        device + xdk::kDeviceVertexFetchOffset + xdk::kDeviceTextureFetchStride * slot;
+    const uint8_t* p = device ? ReadVirtual(at, 24) : nullptr;
+    uint32_t v[6] = {};
+    if (p) {
+      for (int i = 0; i < 6; ++i) v[i] = LoadBe32(p + 4 * i);
+      DumpTexture(v);
+    }
+    std::snprintf(buf, sizeof(buf), "%s\"%u\":", first ? "" : ",", slot);
+    row += buf;
+    row += p ? HexDwords(v, 6) : "null";
+    first = false;
+  }
+  row += "}";
+}
+
 // Caller holds g_mutex. One decoded "draw" row (frame-map section 8) for
 // DrawVertices / DrawIndexedVertices; other draw hooks have no VB objects.
 // `in_scene`: the draw is inside the main-scene bracket.
@@ -878,6 +971,7 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
 
   // Pixel shader: also independent of the vertex shader.
   AppendPs(row, dev);
+  AppendTextureFetches(row, device, dev);
 
   // Vertex shader and its microcode.
   VsChoice vc;
@@ -1494,6 +1588,13 @@ bool OpenLog() {
     return false;
   }
   g_file = fp;
+  {
+    std::string stamp = g_path.stem().string();  // native_discovery_<date>_<time>
+    stamp.erase(0, std::string("native_discovery_").size());
+    g_tex_dir = dir / ("native_tex_" + stamp);
+    g_tex_seen.clear();
+    g_tex_count = 0;
+  }
   REXSYS_INFO("[native-discovery] writing {} frames to {}", FramesRequested(), g_path.string());
   return true;
 }

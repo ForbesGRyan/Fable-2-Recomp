@@ -103,6 +103,7 @@ inline bool SelectPosition(const std::vector<VertexFetch>& fetches, int override
   l.offset_bytes = uint32_t(f->offset_dwords) * 4;
   l.stride_bytes = f->stride_dwords * 4;
   l.fetch_slot = f->fetch_slot;
+  l.swizzle = f->dst_swizzle;
   *out = l;
   return true;
 }

@@ -40,6 +40,11 @@ int main() {
   if (!SelectPosition(f, -1, &pos)) return 5;
   if (pos.format != PosFormat::kFloat3 || pos.stride_bytes != 32 || pos.offset_bytes != 0 || pos.fetch_slot != 1) return 6;
   if (!SelectPosition(f, 2, &pos) || pos.format != PosFormat::kHalf4 || pos.offset_bytes != 4) return 7;
+  // The fetch's destination swizzle is carried into the layout.
+  if (f[2].dst_swizzle != 0x688 || pos.swizzle != 0x688) return 13;
+  std::vector<VertexFetch> swz = {f[2]};
+  swz[0].dst_swizzle = 0xAC1;  // yxw1
+  if (!SelectPosition(swz, -1, &pos) || pos.swizzle != 0xAC1) return 14;
   if (SelectPosition(f, 9, &pos)) return 8;
   // A program whose first fetch is a mini fetch, or with no fetches, has no position.
   std::vector<VertexFetch> only_mini = {f[1]};

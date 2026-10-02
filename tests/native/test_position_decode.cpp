@@ -57,6 +57,38 @@ int main() {
   if (DecodePositions(vb, sizeof(vb), bad, 0, 1, out)) return 20;
   f3.stride_bytes = 0;
   if (DecodePositions(vb, sizeof(vb), f3, 0, 1, out)) return 21;
+
+  // Fetch destination swizzle and 8in32 pair swap (frame-map section 9): a
+  // half4 position fetched as r.yxw1 from a stream with endian 8in32. The GPU
+  // sees each dword's halves swapped, s = (m1, m0, m3, m2); yxw1 restores
+  // (m0, m1, m2) and forces w = 1 (the memory w holds other data).
+  PutBe16(hb + 6, 0x4800);  // 8.0, not a position w
+  h4.swap16 = true;
+  h4.swizzle = 1u | (0u << 3) | (3u << 6) | (5u << 9);  // yxw1
+  if (!DecodePositions(hb, sizeof(hb), h4, 0, 1, out)) return 22;
+  if (out[0].x != 1.0f || out[0].y != 2.0f || out[0].z != -2.0f || out[0].w != 1.0f) return 23;
+  // Without the pair swap the same swizzle reads (m1, m0, m3, 1).
+  h4.swap16 = false;
+  if (!DecodePositions(hb, sizeof(hb), h4, 0, 1, out)) return 24;
+  if (out[0].x != 2.0f || out[0].y != 1.0f || out[0].z != 8.0f || out[0].w != 1.0f) return 25;
+  // Constant 0 (4) and "keep" (7: 0 for x/y/z, 1 for w). float3 ignores swap16.
+  PosLayout g3; g3.format = PosFormat::kFloat3; g3.stride_bytes = 16; g3.swap16 = true;
+  g3.swizzle = 2u | (4u << 3) | (7u << 6) | (7u << 9);  // z0__
+  if (!DecodePositions(vb + 20, 12, g3, 0, 1, out)) return 26;
+  if (out[0].x != 3.0f || out[0].y != 0.0f || out[0].z != 0.0f || out[0].w != 1.0f) return 27;
+  // The default swizzle is the identity xyzw.
+  if (PosLayout{}.swizzle != 0x688 || PosLayout{}.swap16) return 28;
+
+  // Fetch constant endian -> layout: 16-bit components read big-endian with
+  // 8in16 (no pair swap) or 8in32 (pair swap); 32-bit components only with
+  // 8in32. Other combinations are rejected.
+  PosLayout e = h4;
+  if (!ApplyFetchEndian(&e, 1) || e.swap16) return 30;
+  if (!ApplyFetchEndian(&e, 2) || !e.swap16) return 31;
+  if (ApplyFetchEndian(&e, 0) || ApplyFetchEndian(&e, 3)) return 32;
+  e = f3;
+  if (!ApplyFetchEndian(&e, 2) || e.swap16) return 33;
+  if (ApplyFetchEndian(&e, 1) || ApplyFetchEndian(&e, 0)) return 34;
   std::cout << "PASS: position decode\n";
   return 0;
 }

@@ -1,15 +1,16 @@
 #pragma once
 
 // Bounds-checked guest memory reads for the capture layer. The guest can hand
-// us stale or garbage pointers, so every range is verified with VirtualQuery
-// before the host pointer is returned.
+// us stale or garbage pointers, so every range is checked against the guest
+// heap page tables (committed and readable) before the host pointer is
+// returned. The heaps commit host memory together with their page tables, so
+// a readable guest page is a readable host page. (VirtualQuery on the guest
+// arena's file-mapped views was the first check; it costs about 0.5 ms per call
+// there, which made per-draw capture run at 2-3 fps.)
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
-
-#ifdef _WIN32
-#include <windows.h>
-#endif
 
 #include <rex/system/xmemory.h>
 
@@ -23,61 +24,56 @@ inline rex::memory::Memory*& GuestMemory() {
 }
 
 namespace detail {
-// Bumped once per guest frame by capture::OnSwap(); the per-thread page cache
-// is per-frame and clears itself when this changes.
+// Bumped once per guest frame by capture::OnSwap(); the per-thread region
+// caches are per-frame and clear themselves when this changes.
 inline std::atomic<uint32_t>& CacheGeneration() {
   static std::atomic<uint32_t> generation{1};
   return generation;
 }
 
-inline bool ProbeHostPage(uintptr_t page_base) {
-#ifdef _WIN32
-  MEMORY_BASIC_INFORMATION mbi;
-  if (VirtualQuery(reinterpret_cast<LPCVOID>(page_base), &mbi, sizeof(mbi)) == sizeof(mbi) &&
-      mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
-    constexpr DWORD kReadable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
-                                PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
-                                PAGE_EXECUTE_WRITECOPY;
-    return (mbi.Protect & kReadable) != 0;
-  }
-  return false;
-#else
-  (void)page_base;
-  return true;
-#endif
+// The heap region (page-table attributes) containing guest address `a`.
+inline ReadRegion ProbeHeapRegion(rex::memory::BaseHeap* heap, uint64_t a) {
+  const uint64_t heap_end = uint64_t(heap->heap_base()) + heap->heap_size();
+  if (a < heap->heap_base() || a >= heap_end) return {};
+  const uint32_t page = uint32_t(a) & ~(heap->page_size() - 1);
+  rex::memory::HeapAllocationInfo info{};
+  if (!heap->QueryRegionInfo(page, &info) || info.region_size == 0) return {};
+  ReadRegion r;
+  r.begin = page;
+  r.end = std::min<uint64_t>(uint64_t(page) + info.region_size, heap_end);
+  r.readable = (info.state & rex::memory::kMemoryAllocationCommit) &&
+               (info.protect & rex::memory::kMemoryProtectRead);
+  return r;
 }
 
-inline bool HostPageReadable(uintptr_t page_base) {
-  thread_local PageReadCache cache;
-  return cache.Query(page_base, CacheGeneration().load(std::memory_order_relaxed),
-                     ProbeHostPage);
-}
-
-inline const uint8_t* CheckHostRange(const uint8_t* host, uint32_t size) {
-  if (!host) return nullptr;
-  constexpr uintptr_t kPage = 4096;
-  const uintptr_t first = reinterpret_cast<uintptr_t>(host) & ~(kPage - 1);
-  const uintptr_t last =
-      (reinterpret_cast<uintptr_t>(host) + (size ? size : 1) - 1) & ~(kPage - 1);
-  for (uintptr_t p = first; p <= last; p += kPage) {
-    if (!HostPageReadable(p)) return nullptr;
-  }
-  return host;
+inline bool HeapRangeReadable(rex::memory::BaseHeap* heap, RegionReadCache& cache, uint32_t addr,
+                              uint32_t size) {
+  if (!heap) return false;
+  return cache.RangeReadable(addr, size, CacheGeneration().load(std::memory_order_relaxed),
+                             [heap](uint64_t a) { return ProbeHeapRegion(heap, a); });
 }
 }  // namespace detail
 
-// Host pointer for [guest_virtual, +size) or nullptr if any page is not committed+readable.
+// Host pointer for [guest_virtual, +size) or nullptr if any page is not
+// committed and readable in its guest heap.
 inline const uint8_t* ReadVirtual(uint32_t guest_virtual, uint32_t size) {
   rex::memory::Memory* memory = GuestMemory();
   if (!memory || uint64_t(guest_virtual) + size > 0x100000000ull) return nullptr;
-  return detail::CheckHostRange(memory->TranslateVirtual<const uint8_t*>(guest_virtual), size);
+  thread_local RegionReadCache cache;
+  // One heap per call: a range that leaves the heap fails its region probe.
+  if (!detail::HeapRangeReadable(memory->LookupHeap(guest_virtual), cache, guest_virtual, size)) {
+    return nullptr;
+  }
+  return memory->TranslateVirtual<const uint8_t*>(guest_virtual);
 }
 
 inline const uint8_t* ReadPhysical(uint32_t guest_physical, uint32_t size) {
   rex::memory::Memory* memory = GuestMemory();
   if (!memory || !PhysicalRangeInWindow(guest_physical, size)) return nullptr;
-  return detail::CheckHostRange(
-      memory->TranslatePhysical<const uint8_t*>(guest_physical & 0x1FFFFFFF), size);
+  thread_local RegionReadCache cache;
+  const uint32_t addr = guest_physical & 0x1FFFFFFF;
+  if (!detail::HeapRangeReadable(memory->GetPhysicalHeap(), cache, addr, size)) return nullptr;
+  return memory->TranslatePhysical<const uint8_t*>(addr);
 }
 
 inline uint32_t LoadBe32(const uint8_t* p) {

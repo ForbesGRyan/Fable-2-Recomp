@@ -1,0 +1,364 @@
+{
+  "0x1E6798C9D0F65784": {
+    "base": 0,
+    "layout": "dot",
+    "pos_fetch": -1,
+    "manual": true,
+    "evidence": "dump: oPos = dp4(c0..c3, fetched position) (instr 4-7 into r0, then max oPos, r0, r0)",
+    "finder": {
+      "20261002_111154+111917": {
+        "base": 0,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 18
+      },
+      "20261002_115507": {
+        "base": 0,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 7
+      }
+    }
+  },
+  "0x29B6506FBACEB93A": {
+    "manual": true,
+    "rejected": "dump: dp4(c0..c3) of a derived position; base-0 check 0.600; finder window 10 contradicts the dump",
+    "finder": {
+      "20261002_111154+111917": {
+        "base": 10,
+        "layout": "dot",
+        "score": 0.9611,
+        "samples": 5
+      },
+      "20261002_115507": "no window"
+    }
+  },
+  "0x3A0F9098B839DDBC": {
+    "base": 0,
+    "layout": "dot",
+    "pos_fetch": -1,
+    "manual": true,
+    "evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: bone blend from vf3); base-0 check 1.000",
+    "finder": {
+      "20261002_111154+111917": {
+        "base": 0,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 87
+      },
+      "20261002_115507": {
+        "base": 0,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 34
+      }
+    }
+  },
+  "0x432563420047C96C": {
+    "base": 0,
+    "layout": "dot",
+    "pos_fetch": -1,
+    "manual": true,
+    "evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: procedural displacement (sin/frc)); base-0 check 1.000",
+    "finder": {
+      "20261002_111154+111917": {
+        "base": 1,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 21
+      },
+      "20261002_115507": {
+        "base": 1,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 8
+      }
+    }
+  },
+  "0x475EC9F795E5EDBB": {
+    "manual": true,
+    "rejected": "dump: computed position; base-0 check 0.719; finder window 51 combine contradicts the dump",
+    "finder": {
+      "20261002_111154+111917": {
+        "base": 51,
+        "layout": "combine",
+        "score": 0.9806,
+        "samples": 74
+      },
+      "20261002_115507": {
+        "base": 51,
+        "layout": "combine",
+        "score": 0.9652,
+        "samples": 33
+      }
+    }
+  },
+  "0x563E3BE17857DB59": {
+    "manual": true,
+    "rejected": "dump: dp4(c0..c3) of a computed position (fetch indexed by a computed index, c[116+a0] relative constants); base-0 check 0.429; finder window 3 combine contradicts the dump",
+    "finder": {
+      "20261002_111154+111917": "no window",
+      "20261002_115507": {
+        "base": 3,
+        "layout": "combine",
+        "score": 1.0,
+        "samples": 7
+      }
+    }
+  },
+  "0x57818A7FD1C4F026": {
+    "base": 0,
+    "layout": "dot",
+    "pos_fetch": -1,
+    "manual": true,
+    "evidence": "dump: oPos = dp4(c0..c3, fetched position) (instr 5-8)",
+    "finder": {
+      "20261002_111154+111917": {
+        "base": 0,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 39
+      },
+      "20261002_115507": {
+        "base": 0,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 19
+      }
+    }
+  },
+  "0x5F4416192E87005F": {
+    "base": 0,
+    "layout": "dot",
+    "pos_fetch": -1,
+    "manual": true,
+    "evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: bone blend from vf3); base-0 check 0.938",
+    "finder": {
+      "20261002_111154+111917": {
+        "base": 14,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 275
+      },
+      "20261002_115507": {
+        "base": 14,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 121
+      }
+    }
+  },
+  "0x65834A8405D40E53": {
+    "base": 0,
+    "layout": "dot",
+    "pos_fetch": -1,
+    "manual": true,
+    "evidence": "dump: oPos = dp4(c0..c3, fetched position) (instr 8-11)",
+    "finder": {
+      "20261002_111154+111917": {
+        "base": 0,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 70
+      },
+      "20261002_115507": {
+        "base": 0,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 36
+      }
+    }
+  },
+  "0x695413A9831D88DA": {
+    "manual": true,
+    "rejected": "dump: memexport particle pass (mad eA ..., instr 319), oPos is a dummy (sgt oPos, instr 321); point-list draws",
+    "finder": {
+      "20261002_111154+111917": "no window",
+      "20261002_115507": "no window"
+    }
+  },
+  "0x775C6085FBB9D676": {
+    "manual": true,
+    "rejected": "1 sample; dump: dp4(c0..c3) of a derived position; finder window 51 combine contradicts the dump",
+    "finder": {
+      "20261002_111154+111917": {
+        "base": 51,
+        "layout": "combine",
+        "score": 1.0,
+        "samples": 1
+      },
+      "20261002_115507": {
+        "base": 51,
+        "layout": "combine",
+        "score": 1.0,
+        "samples": 4
+      }
+    }
+  },
+  "0x79EAC49585797037": {
+    "manual": true,
+    "rejected": "dump: dp4(c0..c3) of cndeq-permuted fetch (r6 = r2.zwy1); fetch swizzle alone does not give the position; base-0 check 0.204",
+    "finder": {
+      "20261002_111154+111917": "no window",
+      "20261002_115507": "no window"
+    }
+  },
+  "0x82F6433A69263C75": {
+    "base": 0,
+    "layout": "dot",
+    "pos_fetch": -1,
+    "manual": true,
+    "evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: bone blend from vf3); base-0 check 1.000",
+    "finder": {
+      "20261002_111154+111917": {
+        "base": 0,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 39
+      },
+      "20261002_115507": {
+        "base": 0,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 19
+      }
+    }
+  },
+  "0x87D4404FB36AF71D": {
+    "manual": true,
+    "rejected": "dump: position assembled from vf0/vf1/vf2 fetches; base-0 check 0.000",
+    "finder": {
+      "20261002_111154+111917": "no window",
+      "20261002_115507": "no window"
+    }
+  },
+  "0x9ED0BA440DBD51D4": {
+    "base": 0,
+    "layout": "dot",
+    "pos_fetch": -1,
+    "manual": true,
+    "evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: bone blend from vf3); base-0 check 1.000",
+    "finder": {
+      "20261002_111154+111917": {
+        "base": 0,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 52
+      },
+      "20261002_115507": {
+        "base": 0,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 23
+      }
+    }
+  },
+  "0xA1F7E9885EC466DF": {
+    "manual": true,
+    "rejected": "dump: dp4(c0..c3) of bone-blended position; base-0 check 0.477 (bones carry placement)",
+    "finder": {
+      "20261002_111154+111917": "no window",
+      "20261002_115507": "no window"
+    }
+  },
+  "0xA5846836C90E1192": {
+    "manual": true,
+    "rejected": "dump: computed position; base-0 check 0.773; finder window contradicts the dump",
+    "finder": {
+      "20261002_111154+111917": {
+        "base": 15,
+        "layout": "combine",
+        "score": 1.0,
+        "samples": 28
+      },
+      "20261002_115507": {
+        "base": 15,
+        "layout": "combine",
+        "score": 1.0,
+        "samples": 12
+      }
+    }
+  },
+  "0xBEAD84BD72072E0E": {
+    "base": 0,
+    "layout": "dot",
+    "pos_fetch": -1,
+    "manual": true,
+    "evidence": "dump: oPos = dp4(c0..c3, fetched position) (instr 5-8)",
+    "finder": {
+      "20261002_111154+111917": {
+        "base": 2,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 34
+      },
+      "20261002_115507": {
+        "base": 2,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 15
+      }
+    }
+  },
+  "0xD4D558DA6A82BDC8": {
+    "manual": true,
+    "rejected": "dump: dp4(c0..c3) of bone-blended position; base-0 check 0.534; finder window 10 contradicts the dump",
+    "finder": {
+      "20261002_111154+111917": {
+        "base": 10,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 131
+      },
+      "20261002_115507": {
+        "base": 10,
+        "layout": "dot",
+        "score": 1.0,
+        "samples": 61
+      }
+    }
+  },
+  "0xECD66A10092E6562": {
+    "base": 0,
+    "layout": "dot",
+    "pos_fetch": -1,
+    "manual": true,
+    "evidence": "dump: oPos = dp4(c0..c3, fetched position) (instr 10-13); GPU register file c0..c3 equal the device bank in 1191/1308 sampled main-scene draws (others: VB not in the GPU sample)",
+    "finder": {
+      "20261002_111154+111917": "no window",
+      "20261002_115507": "no window"
+    }
+  },
+  "0xF160B4DA459A6D40": {
+    "base": 0,
+    "layout": "dot",
+    "pos_fetch": -1,
+    "manual": true,
+    "evidence": "dump: oPos = dp4(c0..c3, fetched position) (instr 4-7)",
+    "finder": {
+      "20261002_111154+111917": "no window",
+      "20261002_115507": "no window"
+    }
+  },
+  "0xFBD39C64463E180B": {
+    "base": 0,
+    "layout": "dot",
+    "pos_fetch": -1,
+    "manual": true,
+    "evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: procedural displacement (sin/frc)); base-0 check 1.000",
+    "finder": {
+      "20261002_111154+111917": {
+        "base": 70,
+        "layout": "combine",
+        "score": 1.0,
+        "samples": 17
+      },
+      "20261002_115507": {
+        "base": 70,
+        "layout": "combine",
+        "score": 1.0,
+        "samples": 7
+      }
+    }
+  }
+}

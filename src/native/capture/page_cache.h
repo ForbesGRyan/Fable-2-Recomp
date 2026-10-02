@@ -1,38 +1,63 @@
 #pragma once
 
-// Pure helpers behind guest_read.h: a small page-readability cache that clears
-// itself when the global generation changes (bumped once per guest frame, so
-// the cache is per-frame), and the physical-window bounds check.
+// Pure helpers behind guest_read.h: a small readability cache of guest memory
+// regions that clears itself when the global generation changes (bumped once
+// per guest frame, so the cache is per-frame), and the physical-window bounds
+// check.
 
 #include <cstdint>
 
 namespace fable2::native::capture {
 
-class PageReadCache {
+// [begin, end) with uniform readability, as reported by a probe.
+struct ReadRegion {
+  uint64_t begin = 0;
+  uint64_t end = 0;
+  bool readable = false;
+};
+
+class RegionReadCache {
  public:
-  // Returns the cached readability of `page`, calling `probe(page)` on a miss.
+  // True if every byte of [addr, addr + size) (at least `addr` for size 0)
+  // lies in readable regions. `probe(a)` returns the region containing `a`;
+  // one probe covers a whole region, so a long range costs one probe per
+  // region it crosses. A probe that does not contain `a` counts as unreadable.
   // The cache is dropped whenever `generation` differs from the one it was
   // filled under. (This does not remove the inherent query-then-read race.)
   template <typename Probe>
-  bool Query(uintptr_t page, uint32_t generation, Probe&& probe) {
+  bool RangeReadable(uint64_t addr, uint64_t size, uint32_t generation, Probe&& probe) {
     if (generation != generation_) {
       for (Entry& e : entries_) e.valid = false;
       next_ = 0;
       generation_ = generation;
     }
-    for (const Entry& e : entries_) {
-      if (e.valid && e.page == page) return e.readable;
+    const uint64_t last = addr + (size ? size - 1 : 0);
+    uint64_t at = addr;
+    for (;;) {
+      const ReadRegion* r = Find(at);
+      if (!r) {
+        const ReadRegion got = probe(at);
+        if (got.begin > at || got.end <= at) return false;
+        entries_[next_] = {got, true};
+        r = &entries_[next_].region;
+        next_ = (next_ + 1) & 63;
+      }
+      if (!r->readable) return false;
+      if (r->end > last) return true;
+      at = r->end;
     }
-    const bool readable = probe(page);
-    entries_[next_] = {page, readable, true};
-    next_ = (next_ + 1) & 63;
-    return readable;
   }
 
  private:
+  const ReadRegion* Find(uint64_t a) const {
+    for (const Entry& e : entries_) {
+      if (e.valid && e.region.begin <= a && a < e.region.end) return &e.region;
+    }
+    return nullptr;
+  }
+
   struct Entry {
-    uintptr_t page = 0;
-    bool readable = false;
+    ReadRegion region;
     bool valid = false;
   };
   Entry entries_[64];

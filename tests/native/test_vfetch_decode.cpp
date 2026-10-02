@@ -62,5 +62,18 @@ int main() {
   // Truncated input never reads out of bounds.
   if (!DecodeVertexFetches(ucode, 2).empty()) return 12;
   std::cout << "PASS: vfetch decode\n";
+  // Texture fetch slots: a tfetch (opcode 1) with const_index 5 and one with 2,
+  // between vertex fetches; each slot listed once, ascending.
+  {
+    uint32_t tu[3 * 6] = {};
+    PackCf(Exec(2, 2, 4, 0b01010101), 0, tu);
+    Vfetch(tu + 6, 0, 0, 1, 57, true, true, 0, false, 8, 0);
+    tu[9] = 1u | (5u << 20);    // tfetch, tf5
+    tu[12] = 1u | (2u << 20);   // tfetch, tf2
+    tu[15] = 1u | (5u << 20);   // tf5 again
+    const std::vector<uint32_t> slots = TextureFetchSlots(tu, 18);
+    if (slots.size() != 2 || slots[0] != 2 || slots[1] != 5) return 40;  // pick unused return codes
+    if (!TextureFetchSlots(nullptr, 0).empty()) return 41;
+  }
   return 0;
 }

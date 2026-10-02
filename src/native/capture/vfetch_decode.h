@@ -5,6 +5,7 @@
 // VertexFetchInstruction): per fetch the slot, destination, format, sign,
 // normalization, exponent bias, stride and offset.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -81,6 +82,43 @@ inline std::vector<VertexFetch> DecodeVertexFetches(const uint32_t* ucode, size_
     }
     if (ended) break;
   }
+  return out;
+}
+
+// Texture fetch constant indices (tf<n>) used by a shader's texture fetch
+// instructions (ucode.h TextureFetchInstruction: opcode bits 0-4 nonzero,
+// const_index bits 20-24 of dword 0), sorted and unique.
+inline std::vector<uint32_t> TextureFetchSlots(const uint32_t* ucode, size_t dword_count) {
+  std::vector<uint32_t> out;
+  if (!ucode || dword_count < 3) return out;
+  size_t cf_end = dword_count;
+  for (size_t cf = 0; cf + 3 <= cf_end; cf += 3) {
+    const uint32_t* dw = ucode + cf;
+    const uint64_t pair[2] = {uint64_t(dw[0]) | (uint64_t(dw[1] & 0xFFFF) << 32),
+                              uint64_t(dw[1] >> 16) | (uint64_t(dw[2]) << 16)};
+    bool ended = false;
+    for (uint64_t ins : pair) {
+      const uint32_t op = uint32_t(ins >> 44) & 0xF;
+      if (!detail::IsExec(op)) continue;
+      const uint32_t address = uint32_t(ins) & 0xFFF;
+      const uint32_t count = uint32_t(ins >> 12) & 0x7;
+      const uint32_t sequence = uint32_t(ins >> 16) & 0xFFF;
+      if (size_t(address) * 3 < cf_end) cf_end = size_t(address) * 3;
+      for (uint32_t i = 0; i < count; ++i) {
+        if (!((sequence >> (2 * i)) & 1)) continue;  // ALU
+        const size_t at = (size_t(address) + i) * 3;
+        if (at + 3 > dword_count) break;
+        const uint32_t d0 = ucode[at];
+        const uint32_t opcode = d0 & 0x1F;
+        if (opcode == 0) continue;  // vertex fetch
+        out.push_back((d0 >> 20) & 0x1F);
+      }
+      if (detail::IsExecEnd(op)) { ended = true; break; }
+    }
+    if (ended) break;
+  }
+  std::sort(out.begin(), out.end());
+  out.erase(std::unique(out.begin(), out.end()), out.end());
   return out;
 }
 

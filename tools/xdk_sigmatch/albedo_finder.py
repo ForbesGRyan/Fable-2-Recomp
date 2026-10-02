@@ -163,11 +163,26 @@ def main(argv=None):
                         if not isinstance(r, st.Unsupported):
                             uv[f"o{_interp(inp)}.{inp[-1]}"] = r
                     if uv:
-                        v = vs_out.setdefault(vs, {"uv": {}, "proposed": True, "evidence": ""})
-                        v["uv"].update(uv)
-                        v["evidence"] = f"{cap.name}: used with ps {ps[2:]} ({n} draws)"
+                        v = vs_out.setdefault(vs, {"uv": {}, "proposed": True, "evidence": "",
+                                                   "_src": {}, "_conf": []})
+                        for key, r in uv.items():
+                            if key not in v["uv"]:
+                                v["uv"][key] = r
+                                v["_src"][key] = (ps, n)
+                            elif v["uv"][key] != r:
+                                kept = v["_src"][key][0]
+                                msg = f"{key}: ps {ps[2:]} needs a different trace than kept ps {kept[2:]}"
+                                v["_conf"].append(msg)
+                                print(f"  conflict vs {vs[2:]} {msg}")
                 covered += e["draws"]
         print(f"  ps {ps[2:]}  draws {e['draws']:6d}  cumulative {cum} of {total}  {status}")
+    for vs, v in vs_out.items():
+        src = v.pop("_src")
+        conf = v.pop("_conf")
+        parts = sorted({f"ps {p[2:]} ({n} draws)" for p, n in src.values()})
+        v["evidence"] = f"{cap.name}: kept traces from " + ", ".join(parts)
+        if conf:
+            v["evidence"] += "; conflicts: " + "; ".join(conf)
     print(f"covered {covered} of {total} draws ({100.0 * covered / total if total else 0:.1f}%)")
     Path(a.out).write_text(json.dumps({"ps_albedo": ps_out, "vs_transforms": vs_out}, indent=2) + "\n")
     return 0

@@ -82,6 +82,30 @@ class FinderTest(unittest.TestCase):
         self.assertEqual(data["ps_albedo"], {})
         self.assertIn("covered 0 of 2 draws", text)
 
+    def test_shared_vs_dominant_wins_and_conflict_noted(self):
+        ps2 = "0x00000000000000A2"
+        (self.dir / "dump" / "shader_00000000000000A2.ucode.frag").write_text(PS)
+        rows = [json.loads(l) for l in self.cap.read_text().splitlines()]
+        self.cap.write_text("".join(json.dumps(r) + "\n" for r in [draw(ps=ps2)] + rows))
+        orig = af.st.trace_vs_export
+        calls = []
+
+        def fake(instrs, interp, comp):
+            r = orig(instrs, interp, comp)
+            calls.append(1)
+            if len(calls) > 2 and isinstance(r, dict):  # second PS (A2, 1 draw): a different trace
+                r = dict(r, offset=r["offset"] + 1)
+            return r
+
+        af.st.trace_vs_export = fake
+        self.addCleanup(setattr, af.st, "trace_vs_export", orig)
+        text, data = self.run_finder()
+        vs = data["vs_transforms"][VS_HASH]
+        self.assertEqual(vs["uv"]["o0.x"]["offset"], 3)  # dominant PS A1 (2 draws) kept
+        self.assertIn("conflict", text)
+        self.assertIn("00000000000000A1 (2 draws)", vs["evidence"])
+        self.assertIn("conflicts", vs["evidence"])
+        self.assertIn("00000000000000A2", vs["evidence"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -65,6 +65,14 @@ class ThumbTest(unittest.TestCase):
             tt.write_png(p, 512, 512, bytes(512 * 512 * 4), max_edge=256)
             self.assertEqual(struct.unpack(">II", p.read_bytes()[16:24]), (256, 256))
 
+    def test_linear_rows_padded_to_256(self):
+        # 8888 linear, 4x2, pitch 32 texels = 128 bytes -> rows padded to 256.
+        buf = bytearray(512)
+        buf[0:4] = bytes([1, 2, 3, 4])
+        buf[256:260] = bytes([9, 8, 7, 6])  # row 1 starts at 256, not 128
+        w, h, rgba = tt.decode_rgba(bytes(buf), fc_for(6, 4, 2, 32, False, endian=0))
+        self.assertEqual(rgba[4 * 4:4 * 4 + 4], bytes([9, 8, 7, 6]))
+
 
 if __name__ == "__main__":
     unittest.main()

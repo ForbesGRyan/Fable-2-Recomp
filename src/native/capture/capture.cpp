@@ -856,7 +856,7 @@ void DumpTexture(const uint32_t fc[6]) {
     base = t.base_phys;
     bytes = t.tiled ? rex::graphics::texture_util::GetTiledAddressUpperBound2D(wb, hb, pitch_blocks,
                                                                                fi.bpb_log2)
-                    : uint64_t(pitch_blocks) * fi.bytes_per_block * (hb - 1) +
+                    : uint64_t((pitch_blocks * fi.bytes_per_block + 255) & ~255u) * (hb - 1) +
                           uint64_t(wb) * fi.bytes_per_block;
     bytes = std::min<uint64_t>(bytes, kMaxTextureBytes);
   } else if (err == render::FetchError::kFormat && base) {

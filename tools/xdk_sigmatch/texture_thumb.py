@@ -81,10 +81,11 @@ def decode_rgba(data, fc):
         block, bpb, log2 = 4, 16, 4
     wb, hb = (w + block - 1) // block, (h + block - 1) // block
     pitch_blocks = max(pitch // block, wb)
+    row_pitch = (pitch_blocks * bpb + 255) & ~255  # linear rows are padded to 256 bytes
     out = bytearray(w * h * 4)
     for by in range(hb):
         for bx in range(wb):
-            o = tiled_offset_2d(bx, by, pitch_blocks, log2) if tiled else (by * pitch_blocks + bx) * bpb
+            o = tiled_offset_2d(bx, by, pitch_blocks, log2) if tiled else by * row_pitch + bx * bpb
             raw = data[o:o + bpb]
             raw = _swap(raw + bytes(bpb - len(raw)), endian)
             if fmt == 6:

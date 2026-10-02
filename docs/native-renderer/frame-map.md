@@ -552,6 +552,11 @@ Task 8's empty fields had two causes. `ib.obj` was 0 because the menu capture he
 | `kVsUcodeAddressDword` | 0 (of the record) | `0x8221B7E0 lwz r11,0x368(r11)` + base: microcode = GpuAddress(obj dword 8 + record dword 0) |
 | `kVsUcodeSizeDword` / `kVsUcodeSizeShift` | 1 / 0 (bytes) | `0x8221B80C lwz r11,0x36C(r11); srwi r11,r11,2` into the `IM_LOAD` size field. Gameplay: XXH3_64bits over those bytes equals `[vbind] vs=` with `[vbind] dwords` = size / 4 for 9751 draws (9335 `gpu_load`, 416 `object`) |
 | `kDeviceCommandWriteOffset`, `kImLoadImmediateHeader` | 0x30, 0xC0002B00 | patched-copy path below |
+| `kDevicePsConstantsOffset` | 0x1780 | DrawIndexedVertices `0x8221E148`/`0x8221E14C` and DrawVertices `0x8221C56C`/`0x8221C570` pass r6 = device+0x1780, r5 = 0x4400 to SetPending_AluConstants (`0x8221DF98`): the pixel bank follows the vertex bank (0x780 + 256 * 16). Gameplay: r6 = device+0x1780 in all 15792 raw rows (`ps_bank_ptr`) |
+| `kPsDeviceFieldOffset` | 0x3194 | real SetPixelShader store `0x82208D6C`, flush load `0x8221B18C`. Used only when device+0x3198 (vertex) is set; see "Pixel shader microcode" |
+| `kPsHeaderOffset`, `kPsRecordOffsetField` | 0x28, 0x18 | record = obj + obj[0x40] + 0x28 (`0x8221B32C lwz r11,0x40(r29)`, `0x8221B334 add`, `0x8221B338 lwz r11,0x28(r11)`; `0x82221A24..0x82221A30` in GpuLoadShaders); header = obj+0x28 also at `0x8221B2F8`/`0x82221BEC` (`addi r4,rN,0x28`) and `0x82208D90`. One record, no variants |
+| `kPsUcodeBaseDword` | 6 | `0x8221B330 lwz r10,0x18(r29)`, `0x82221A28 lwz r10,0x18(r30)` |
+| `kPsUcodeAddressDword` / `kPsUcodeSizeDword` / `kPsUcodeSizeShift` | 0 / 1 / 0 (bytes) | microcode = GpuAddress(obj dword 6 + record dword 0) (`0x8221B33C..0x8221B354`, `ori r11,r11,1` = `IM_LOAD` type 1); size `0x8221B364 lwz r11,0x2C(r11); srwi r11,r11,2` (`0x82221A5C`/`0x82221A60`). Same record shape as the vertex shader. Gameplay: the hash names a dump for every nonzero `ps_hash` (see below) |
 
 ### Vertex shader microcode: three sources
 
@@ -560,6 +565,35 @@ The object's microcode is a template whose vertex fetches the XDK rewrites for t
 - `gpu_load` (gameplay `DrawIndexedVertices`): the template, loaded by `GpuLoadShaders`; hashes match `[vbind]` directly.
 - `object` (`DrawVertices` with the device field set, patched in place): the object's microcode; hashes match.
 - `immediate` (menu, and whenever device byte +0x2ABC has bit 0x80, `0x8221B4F0..0x8221B504`): `0x821DFDE0` (r3 device, r5 object, r10 variant) copies the template into the command buffer as `IM_LOAD_IMMEDIATE` (header `0xC0002B00 | (dwords + 1) << 16`, then 0, then the dword count; `0x821DFE34..0x821DFE6C`) and patches the copy; on return device+0x30 (`0x821DFF30`) points at the copy's last dword. The copy differs from the template in 14 dwords (menu, all 197) or 14/30 (gameplay), and its hash is the `[vbind]` one (197/197 menu, 194/194 gameplay).
+
+### Pixel shader microcode
+
+Discovery D1 of sub-project 4 (2026-10-02, textures Task 7). Constants `kPs*` and `kDevicePsConstantsOffset` in `xdk_layout.h`; reader `ReadPsUcode`, choice `ChoosePs`, per-object cache `LookupPs` (hash + `TextureFetchSlots`), pixel bank `ReadPsBankRegisters` in `capture.cpp`.
+
+**Static evidence.**
+
+| What | Instructions |
+|---|---|
+| The flush emits the pixel shader with `IM_LOAD` type 1 | `0x8221B18C lwz r29,0x3194(r30)`; only with dirty bit 0x00100000 (`0x8221B2AC rlwinm r8,r20,0,11,11`, set by SetPixelShader `0x82208D78 oris r11,r11,0x10`); `0x8221B32C..0x8221B36C`: address = GpuAddress(obj[0x18] + record dword 0) \| 1, size = record dword 1 >> 2 |
+| GpuLoadShaders `0x82221978` emits r5 the same way | `0x82221A24..0x82221A64`, before the vertex shader (`0x82221AA4..0x82221B1C`). It never stores device+0x3194 |
+| Microcode loaded unpatched | the only other use of the header, `0x8222BFF8` (called at `0x8221B304` and `0x82221BF4`), uploads the shader's literal constants from the table at header dword 5; nothing rewrites the pixel microcode |
+| The flush is skipped without a device vertex shader | `0x8221B190 cmplwi cr6,r31,0` (r31 = device+0x3198), `0x8221B194 beq 0x8221B9C4`: no `IM_LOAD` of either shader, so the GPU keeps what GpuLoadShaders loaded |
+| No pixel shader = depth only | GpuLoadShaders writes RB_MODECONTROL with `SET_CONSTANT 0x00040208` (`0x82221B34..0x82221B3C`): 5 (depth) without r5 (`0x822219C0`), 4 (color + depth) with it (`0x82221A18`). The flush puts the same 5 / 4 in the low bits of device+0x2954 (`0x8221B228..0x8221B248` without, `0x8221B370..0x8221B3A4` with a pixel shader) |
+
+So the pixel shader a draw runs is: device+0x3198 null (vertex shader from GpuLoadShaders) -> the last GpuLoadShaders r5 on the drawing thread; device+0x3198 set -> device+0x3194. Zero means depth only: `ps_hash` 0, no shader. The brief's first hypothesis (device field first, else the GpuLoadShaders r5) is wrong: in gameplay device+0x3194 is set but stale in about 2700 of every 9300 sampled draws.
+
+**Runtime evidence.** Gameplay, `.\tools\drive_game.ps1 -Total 120 -GameArgs "--dump_shaders=C:\Users\Ryan\code\Fable-2-Recomp\out\shader_dump" -Env @{FABLE2_NATIVE_DISCOVERY="120"; FABLE2_NATIVE_DISCOVERY_DELAY="55"; FABLE2_NATIVE_DISCOVERY_EVERY="16"}`, capture **`native_discovery_20261002_192837`** (120 frames), dumps in `out\shader_dump` (111 `shader_<HASH>.ucode.frag`). Draw and tess rows carry `"ps":{"obj","source","dev_obj","gpu_obj","phys","bytes","tex_slots",["alt_hash"]}` and `"ps_hash"`; raw rows carry `ps_bank_ptr`.
+
+| Rows | Total | In scene | Nonzero `ps_hash` | In scene with nonzero `ps_hash` | Distinct PS hashes | With a `.ucode.frag` dump |
+|---|---|---|---|---|---|---|
+| `draw` (DrawVertices, DrawIndexedVertices) | 9327 | 2890 | 5211 | 2890 (100%) | 22 | 22 of 22 (5211 of 5211 rows) |
+| `tess` (DrawIndx 8221C9C8 / 82207C30) | 4676 | 4253 | 4676 | 4253 (100%) | 8 | 8 of 8 |
+
+The hash is XXH3_64bits over the record's microcode bytes as stored (big-endian guest bytes), the emulator's `ucode_data_hash`. The 4116 zero rows are all outside the scene and all depth only (`ps.obj` 0: 3089 with device+0x3198 set and device+0x3194 null, 1027 GpuLoadShaders with r5 null).
+
+Which candidate the GPU ran: dumps cannot tell (both candidates are real shaders with dumps), so the rows' (vertex hash, pixel hash) pairs were checked against the emulator's pipeline storage (`cache\shaders\shareable\4D5307F1.rtv.d3d12.xpso`: a 12-byte header, then 72-byte records of hash + `PipelineDescription`, `vertex_shader_hash` at +8 and `pixel_shader_hash` at +24; 181 distinct pairs). With the rule above, 8421 of 9327 draw rows and 4676 of 4676 tess rows form a stored pair. That includes all 2890 + 4253 in-scene rows and all 2708 draws where the device field and the GpuLoadShaders r5 differ under a GpuLoadShaders vertex shader. Under the brief's rule (first capture `native_discovery_20261002_192055`) the 2722 such rows paired with the GpuLoadShaders shader and never with the device field. The other 906 rows (out of scene, immediate vertex shaders, pixel shader `0xA4A965C189287B99`) pair only with pixel hash 0 in storage. The emulator drops a pixel shader that writes no unmasked color target (`IsPixelShaderNeededWithRasterization`), so these are color-masked passes and do not discriminate.
+
+`ps_bank_ptr - device` = 0x1780 in all 15792 raw rows that saw a `0x4400` upload.
 
 ### Limits
 

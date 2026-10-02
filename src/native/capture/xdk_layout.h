@@ -40,6 +40,11 @@ inline constexpr uint32_t kDeviceIndexBufferOffset = 0x3094;
 // DrawVertices 0x8221C554 pass r6 = device + 0x780 with r5 = 0x4000 to
 // SetPending_AluConstants.
 inline constexpr uint32_t kDeviceVsConstantsOffset = 0x780;
+// Pixel constant bank (256 x float4): DrawIndexedVertices 0x8221E148/0x8221E14C
+// and DrawVertices 0x8221C56C/0x8221C570 pass r6 = device + 0x1780 with
+// r5 = 0x4400 to SetPending_AluConstants (0x8221DF98), right after the vertex
+// bank: the two banks are contiguous (0x780 + 256 * 16 = 0x1780).
+inline constexpr uint32_t kDevicePsConstantsOffset = 0x1780;
 
 // --- Main-scene bracket (frame-map section 8, "Main-scene bracket") ---------
 // Device flag byte +0x2ABC; bit 0x20 = inside BeginTiling/EndTiling (the
@@ -180,6 +185,46 @@ inline constexpr uint32_t kVsUcodeSizeShift = 0;  // bytes
 // 197/197 sampled draws; the copy differs from the template in 14 dwords).
 inline constexpr uint32_t kDeviceCommandWriteOffset = 0x30;
 inline constexpr uint32_t kImLoadImmediateHeader = 0xC0002B00u;  // | (dwords + 1) << 16, bit 0 = predicate
+
+// --- Pixel shader object -----------------------------------------------------
+// The real SetPixelShader ("SetVertexShader?" 0x82208CE8) stores r4 at device +
+// 0x3194 (0x82208D6C) and sets dirty bit 0x00100000 (0x82208D78); the shader
+// flush 0x8221B140 loads the field (0x8221B18C) and, with that bit set
+// (0x8221B2AC `rlwinm r8,r20,0,11,11`), emits the microcode with IM_LOAD type 1
+// (0x8221B32C..0x8221B36C). GpuLoadShaders 0x82221978 emits its r5 the same way
+// (0x82221A24..0x82221A64) and does not store the device field. The flush
+// skips everything, the pixel shader included, when device + 0x3198 (vertex)
+// is null (0x8221B190 `cmplwi cr6,r31,0`, 0x8221B194 `beq 0x8221B9C4`), so then
+// the GPU runs the last GpuLoadShaders pixel shader even if the device field is
+// set. A null pixel shader means depth only: GpuLoadShaders writes
+// RB_MODECONTROL (SET_CONSTANT 0x00040208, 0x82221B34..0x82221B3C) = 5 (depth)
+// without r5 (0x822219C0) and 4 (color + depth) with it (0x82221A18); the flush
+// sets the same 5 / 4 in the low bits of device + 0x2954 (0x8221B228..0x8221B248,
+// 0x8221B370..0x8221B3A4). Runtime: the draws' (vertex, pixel) hash pairs
+// against the emulator's pipeline storage (frame-map section 8).
+inline constexpr uint32_t kPsDeviceFieldOffset = 0x3194;
+// Same layout as the vertex shader object with a different header and base
+// dword and no variants. Header at object + kPsHeaderOffset (0x8221B2F8 /
+// 0x82221BEC `addi r4,rN,0x28` hand it to the literal-constant upload
+// 0x8222BFF8; SetPixelShader 0x82208D8C/0x82208D90 reads header dword 5 the
+// same way); header + kPsRecordOffsetField holds the byte offset (from the
+// header) of the single microcode record (0x8221B32C `lwz r11,0x40(r29)`,
+// 0x8221B334 `add r11,r11,r29`: record = obj + obj[0x40] + 0x28). Base =
+// object dword kPsUcodeBaseDword (0x8221B330 `lwz r10,0x18(r29)`, 0x82221A28
+// `lwz r10,0x18(r30)`).
+inline constexpr uint32_t kPsHeaderOffset = 0x28;
+inline constexpr uint32_t kPsRecordOffsetField = 0x18;
+inline constexpr uint32_t kPsUcodeBaseDword = 6;
+// Record dwords: microcode offset from the base (0x8221B338 `lwz r11,0x28(r11)`,
+// then `add r11,r11,r10` and the inline GpuAddress, 0x8221B340..0x8221B354
+// `ori r11,r11,1`) and its size in bytes (0x8221B364/0x8221B368 `lwz
+// r11,0x2C(r11); srwi r11,r11,2` into the IM_LOAD size field; same at
+// 0x82221A30 / 0x82221A5C..0x82221A60). The microcode is loaded unpatched
+// (0x8222BFF8 only uploads the shader's literal constants). Runtime: see
+// frame-map section 8, "Pixel shader microcode".
+inline constexpr uint32_t kPsUcodeAddressDword = 0;
+inline constexpr uint32_t kPsUcodeSizeDword = 1;
+inline constexpr uint32_t kPsUcodeSizeShift = 0;  // bytes
 
 // XDK CPU-virtual -> GPU physical address conversion, as inlined at every
 // fetch-constant / IM_LOAD site (e.g. SetStreamSource 0x821B6DD8..0x821B6DF4):

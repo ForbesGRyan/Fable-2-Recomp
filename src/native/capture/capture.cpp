@@ -73,6 +73,7 @@ struct DrawState {
   uint32_t vs_obj = 0;  // "SetPixelShader?" r4: the real SetVertexShader (xdk_layout.h)
   uint32_t ps_obj = 0;  // "SetVertexShader?" r4: the real SetPixelShader
   uint32_t vs_bank_ptr = 0;
+  uint32_t ps_bank_ptr = 0;
 };
 
 // Binding state read from the guest device at draw time (xdk_layout.h).
@@ -87,9 +88,8 @@ struct DeviceSnapshot {
 
 constexpr uint32_t kDeviceDumpOffset = 0x480;
 constexpr uint32_t kDeviceDumpDwords = 24;
-constexpr uint32_t kDevicePsFieldOffset = 0x3194;  // SetPixelShader 0x82208D6C
 constexpr uint32_t kDeviceSnapshotBytes = xdk::kVsDeviceFieldOffset + 4;  // highest field read
-static_assert(kDevicePsFieldOffset < xdk::kVsDeviceFieldOffset &&
+static_assert(xdk::kPsDeviceFieldOffset < xdk::kVsDeviceFieldOffset &&
               xdk::kDeviceStreamStrideOffset + xdk::kMaxStreams <= kDeviceSnapshotBytes);
 
 std::atomic<bool> g_enabled{false};    // native renderer on, or discovery requested
@@ -109,6 +109,7 @@ std::atomic<int> g_frames_written{0};  // discovery frames completed
 std::atomic<uint64_t> g_draw_count{0};
 std::atomic<uint64_t> g_nested_draws{0};  // draw hooks entered inside another draw hook
 std::atomic<uint32_t> g_vs_bank_ptr{0};   // vertex constant bank pointer (lock-free, records)
+std::atomic<uint32_t> g_ps_bank_ptr{0};   // pixel constant bank pointer (lock-free, records)
 
 std::mutex g_mutex;  // DrawState + discovery file
 DrawState g_state;
@@ -409,14 +410,19 @@ bool ReadDevice(uint32_t device, DeviceSnapshot* s) {
   }
   s->ib_obj = LoadBe32(d + xdk::kDeviceIndexBufferOffset);
   s->vs_obj = LoadBe32(d + xdk::kVsDeviceFieldOffset);
-  s->ps_obj = LoadBe32(d + kDevicePsFieldOffset);
+  s->ps_obj = LoadBe32(d + xdk::kPsDeviceFieldOffset);
   return true;
 }
 
 void UpdateState(uint32_t id, const PPCContext& ctx) {
-  // Records read only the vertex constant bank pointer, lock-free.
-  if (id == kHook_D3DDevice_SetPending_AluConstants && ctx.r5.u32 == 0x4000) {
-    g_vs_bank_ptr.store(ctx.r6.u32, std::memory_order_relaxed);
+  // Records read only the constant bank pointers, lock-free (r5 0x4000 vertex,
+  // 0x4400 pixel; xdk_layout.h kDeviceVsConstantsOffset / kDevicePsConstantsOffset).
+  if (id == kHook_D3DDevice_SetPending_AluConstants) {
+    if (ctx.r5.u32 == 0x4000) {
+      g_vs_bank_ptr.store(ctx.r6.u32, std::memory_order_relaxed);
+    } else if (ctx.r5.u32 == 0x4400) {
+      g_ps_bank_ptr.store(ctx.r6.u32, std::memory_order_relaxed);
+    }
   }
   // The rest is evidence for discovery rows only.
   if (!g_discovery_active.load(std::memory_order_relaxed)) return;
@@ -446,6 +452,7 @@ void UpdateState(uint32_t id, const PPCContext& ctx) {
       break;
     case kHook_D3DDevice_SetPending_AluConstants:
       if (ctx.r5.u32 == 0x4000) g_state.vs_bank_ptr = ctx.r6.u32;
+      if (ctx.r5.u32 == 0x4400) g_state.ps_bank_ptr = ctx.r6.u32;
       break;
     default:
       break;
@@ -509,8 +516,9 @@ void WriteRawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devic
                 s.stream_obj[0], s.stream_offset[0], s.stream_args[0][0], s.stream_args[0][1],
                 s.ib_obj, s.vs_obj, s.ps_obj);
   row += buf;
-  std::snprintf(buf, sizeof(buf), ",\"vs_bank_ptr\":\"0x%08X\",\"device_dwords\":{\"0x%X\":",
-                s.vs_bank_ptr, kDeviceDumpOffset);
+  std::snprintf(buf, sizeof(buf),
+                ",\"vs_bank_ptr\":\"0x%08X\",\"ps_bank_ptr\":\"0x%08X\",\"device_dwords\":{\"0x%X\":",
+                s.vs_bank_ptr, s.ps_bank_ptr, kDeviceDumpOffset);
   row += buf;
   row += device ? ObjectDwords(device + kDeviceDumpOffset, kDeviceDumpDwords) : "null";
   row += "}}\n";
@@ -526,31 +534,56 @@ struct UcodeRef {
   std::vector<uint32_t> dwords;  // host order
 };
 
-// Variant `v` of a vertex shader object's microcode (xdk_layout.h).
-UcodeRef ReadVsUcode(uint32_t obj, uint32_t v) {
-  UcodeRef u;
+// Microcode location of a shader object (xdk_layout.h): the record sits at
+// header + *(header + record_field); microcode = GpuAddress(base + record
+// address dword), size from the record's size dword.
+struct UcodeLayout {
+  uint32_t base_dword, header_offset, record_field, address_dword, size_dword, size_shift;
+};
+constexpr UcodeLayout kVsLayout = {xdk::kVsUcodeBaseDword,    xdk::kVsHeaderOffset,
+                                   xdk::kVsRecordOffsetField, xdk::kVsUcodeAddressDword,
+                                   xdk::kVsUcodeSizeDword,    xdk::kVsUcodeSizeShift};
+constexpr UcodeLayout kPsLayout = {xdk::kPsUcodeBaseDword,    xdk::kPsHeaderOffset,
+                                   xdk::kPsRecordOffsetField, xdk::kPsUcodeAddressDword,
+                                   xdk::kPsUcodeSizeDword,    xdk::kPsUcodeSizeShift};
+
+// The record's microcode address and size, without reading the microcode.
+// `record_index` selects the vertex shader variant (8 bytes per entry).
+bool ReadUcodeRecord(const UcodeLayout& l, uint32_t obj, uint32_t record_index, UcodeRef* u) {
   uint32_t base = 0, rec_off = 0, offset = 0, size = 0;
-  const uint32_t header = obj + xdk::kVsHeaderOffset;
-  if (!ReadVirtualBe32(obj + 4 * xdk::kVsUcodeBaseDword, &base) ||
-      !ReadVirtualBe32(header + xdk::kVsRecordOffsetField + 8 * v, &rec_off)) {
-    return u;
+  const uint32_t header = obj + l.header_offset;
+  if (!ReadVirtualBe32(obj + 4 * l.base_dword, &base) ||
+      !ReadVirtualBe32(header + l.record_field + 8 * record_index, &rec_off)) {
+    return false;
   }
-  u.record = header + rec_off;
-  if (!ReadVirtualBe32(u.record + 4 * xdk::kVsUcodeAddressDword, &offset) ||
-      !ReadVirtualBe32(u.record + 4 * xdk::kVsUcodeSizeDword, &size)) {
-    return u;
+  u->record = header + rec_off;
+  if (!ReadVirtualBe32(u->record + 4 * l.address_dword, &offset) ||
+      !ReadVirtualBe32(u->record + 4 * l.size_dword, &size)) {
+    return false;
   }
-  u.bytes = size << xdk::kVsUcodeSizeShift;
-  u.phys = xdk::GpuAddress(base + offset);
-  if (u.bytes == 0 || u.bytes % 4 || u.bytes > 0x40000) return u;
+  u->bytes = size << l.size_shift;
+  u->phys = xdk::GpuAddress(base + offset);
+  return u->bytes != 0 && u->bytes % 4 == 0 && u->bytes <= 0x40000;
+}
+
+UcodeRef ReadUcode(const UcodeLayout& l, uint32_t obj, uint32_t record_index) {
+  UcodeRef u;
+  if (!ReadUcodeRecord(l, obj, record_index, &u)) return u;
   const uint8_t* p = ReadPhysical(u.phys, u.bytes);
   if (!p) return u;
-  u.hash = XXH3_64bits(p, u.bytes);
+  u.hash = XXH3_64bits(p, u.bytes);  // the emulator's ucode_data_hash (raw guest bytes)
   u.dwords.resize(u.bytes / 4);
   for (size_t i = 0; i < u.dwords.size(); ++i) u.dwords[i] = LoadBe32(p + 4 * i);
   u.ok = true;
   return u;
 }
+
+// Variant `v` of a vertex shader object's microcode (xdk_layout.h).
+UcodeRef ReadVsUcode(uint32_t obj, uint32_t v) { return ReadUcode(kVsLayout, obj, v); }
+
+// A pixel shader object's microcode (xdk_layout.h, kPs*; one record, loaded
+// unpatched by both the shader flush and GpuLoadShaders).
+UcodeRef ReadPsUcode(uint32_t obj) { return ReadUcode(kPsLayout, obj, 0); }
 
 // Microcode size in bytes of variant `v` of a vertex shader object, from its
 // variant record (xdk_layout.h) without reading the microcode.
@@ -637,10 +670,13 @@ struct GpuVsLoad {
   uint32_t variant = 0;
 };
 thread_local GpuVsLoad t_gpu_vs;
+// The pixel shader of that GpuLoadShaders call (r5; 0 = none loaded).
+thread_local uint32_t t_gpu_ps = 0;
 
 void OnGpuLoadShaders(const LastArgs& a) {
   const uint32_t vs = a.r[1], ps = a.r[2];
   uint32_t flags = 0;
+  t_gpu_ps = ps;
   t_gpu_vs = {};
   if (!vs || !ReadVirtualBe32(vs + xdk::kVsHeaderOffset, &flags)) return;
   t_gpu_vs.obj = vs;
@@ -695,6 +731,51 @@ bool ChooseVs(const DeviceSnapshot& dev, VsChoice* c) {
   return true;
 }
 
+// The pixel shader a draw runs (xdk_layout.h, kPsDeviceFieldOffset). With the
+// device's vertex shader field null the shader flush is skipped, so the GPU
+// runs the last GpuLoadShaders r5 on this thread; otherwise the device field
+// (a stale device field does not apply then: frame-map section 8). A null
+// pixel shader means depth-only (RB_MODECONTROL 5): false, no shader.
+bool ChoosePs(const DeviceSnapshot& dev, uint32_t* obj) {
+  *obj = dev.vs_obj ? dev.ps_obj : t_gpu_ps;
+  return *obj != 0;
+}
+
+// Per pixel-shader object: its microcode hash and the texture fetch slots it
+// samples, kept until the record's microcode address or size changes.
+struct PsInfo {
+  uint64_t hash = 0;
+  std::vector<uint32_t> tex_slots;     // TextureFetchSlots (vfetch_decode.h)
+  const AlbedoSpec* albedo = nullptr;  // material.h; filled by the albedo table lookup
+  bool no_albedo = false;
+  uint32_t phys = 0;
+  uint32_t bytes = 0;
+};
+thread_local std::unordered_map<uint32_t, PsInfo> t_ps_cache;
+
+const PsInfo* LookupPs(uint32_t obj) {
+  if (!obj) return nullptr;
+  if (t_ps_cache.size() > 4096) t_ps_cache.clear();
+  UcodeRef rec;
+  if (!ReadUcodeRecord(kPsLayout, obj, 0, &rec)) {
+    t_ps_cache.erase(obj);
+    return nullptr;
+  }
+  PsInfo& e = t_ps_cache[obj];
+  if (e.hash && e.phys == rec.phys && e.bytes == rec.bytes) return &e;
+  const UcodeRef u = ReadPsUcode(obj);
+  if (!u.ok) {
+    t_ps_cache.erase(obj);
+    return nullptr;
+  }
+  e = PsInfo{};
+  e.hash = u.hash;
+  e.tex_slots = TextureFetchSlots(u.dwords.data(), u.dwords.size());
+  e.phys = u.phys;
+  e.bytes = u.bytes;
+  return &e;
+}
+
 // The vertex buffer feeding a fetch slot (stream_resolve.h): nullptr, or the
 // reason the stream cannot be resolved.
 const char* ResolveStream(const DeviceSnapshot& dev, uint32_t fetch_slot, StreamView* v) {
@@ -705,6 +786,42 @@ const char* ResolveStream(const DeviceSnapshot& dev, uint32_t fetch_slot, Stream
   StreamFromFetch(LoadBe32(vbo + 4 * xdk::kVbFetchDword), LoadBe32(vbo + 4 * xdk::kVbFetchDword + 4),
                   dev.stream_fc[v->stream][0], dev.stream_fc[v->stream][1], v);
   return nullptr;
+}
+
+// Discovery evidence for the pixel shader (frame-map section 8, "Pixel shader
+// microcode"): the chosen object and both candidates (device field, last
+// GpuLoadShaders r5), the record, the texture fetch slots and "ps_hash"
+// (0 when unknown or depth-only), which must name a shader_<HASH>.ucode.frag
+// dump.
+void AppendPs(std::string& row, const DeviceSnapshot& dev) {
+  char buf[256];
+  uint32_t obj = 0;
+  const PsInfo* ps = ChoosePs(dev, &obj) ? LookupPs(obj) : nullptr;
+  std::snprintf(buf, sizeof(buf),
+                ",\"ps\":{\"obj\":\"0x%08X\",\"source\":\"%s\",\"dev_obj\":\"0x%08X\","
+                "\"gpu_obj\":\"0x%08X\",\"phys\":\"0x%08X\",\"bytes\":%u,\"tex_slots\":[",
+                obj, dev.vs_obj ? "device" : "gpu_load", dev.ps_obj, t_gpu_ps, ps ? ps->phys : 0,
+                ps ? ps->bytes : 0);
+  row += buf;
+  if (ps) {
+    for (size_t i = 0; i < ps->tex_slots.size(); ++i) {
+      std::snprintf(buf, sizeof(buf), "%s%u", i ? "," : "", ps->tex_slots[i]);
+      row += buf;
+    }
+  }
+  row += "]";
+  // The candidate not chosen, when set and different: evidence for the choice
+  // (checked offline against the emulator's (vertex, pixel) pipeline pairs).
+  const uint32_t other = dev.vs_obj ? t_gpu_ps : dev.ps_obj;
+  if (other && other != obj) {
+    const UcodeRef alt = ReadPsUcode(other);
+    std::snprintf(buf, sizeof(buf), ",\"alt_hash\":\"0x%016llX\"",
+                  static_cast<unsigned long long>(alt.ok ? alt.hash : 0));
+    row += buf;
+  }
+  std::snprintf(buf, sizeof(buf), "},\"ps_hash\":\"0x%016llX\"",
+                static_cast<unsigned long long>(ps ? ps->hash : 0));
+  row += buf;
 }
 
 // Caller holds g_mutex. One decoded "draw" row (frame-map section 8) for
@@ -758,6 +875,9 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
       row += ",\"ib\":null";
     }
   }
+
+  // Pixel shader: also independent of the vertex shader.
+  AppendPs(row, dev);
 
   // Vertex shader and its microcode.
   VsChoice vc;
@@ -919,6 +1039,7 @@ void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
                   static_cast<unsigned long long>(hash));
     row += buf;
   }
+  AppendPs(row, dev);
   const uint32_t bank_ptr =
       g_state.vs_bank_ptr ? g_state.vs_bank_ptr : device + xdk::kDeviceVsConstantsOffset;
   row += ",\"consts\":{";
@@ -1042,21 +1163,34 @@ const VsInfo* LookupVs(const VsChoice& c) {
   return &e;
 }
 
-// Vertex constants, host floats; only the registers a draw needs are filled.
+// Vertex / pixel constants, host floats; only the registers a draw needs are filled.
 thread_local float t_bank[1024];
+thread_local float t_ps_bank[1024];
 
-// Converts vertex constants [reg, reg + count) of the device's bank into t_bank.
-bool ReadBankRegisters(uint32_t device, uint32_t reg, uint32_t count) {
+// Converts constants [reg, reg + count) of a 256 x float4 bank at `bank` into `out`.
+bool ReadConstantRegisters(uint32_t bank, uint32_t reg, uint32_t count, float* out) {
   if (reg + count > 256) return false;
-  const uint32_t bank_ptr = g_vs_bank_ptr.load(std::memory_order_relaxed);
-  const uint32_t at = (bank_ptr ? bank_ptr : device + xdk::kDeviceVsConstantsOffset) + 16 * reg;
-  const uint8_t* p = ReadVirtual(at, 16 * count);
+  const uint8_t* p = ReadVirtual(bank + 16 * reg, 16 * count);
   if (!p) return false;
   for (uint32_t i = 0; i < 4 * count; ++i) {
     const uint32_t bits = LoadBe32(p + 4 * i);
-    std::memcpy(&t_bank[4 * reg + i], &bits, 4);
+    std::memcpy(&out[4 * reg + i], &bits, 4);
   }
   return true;
+}
+
+// Converts vertex constants [reg, reg + count) of the device's bank into t_bank.
+bool ReadBankRegisters(uint32_t device, uint32_t reg, uint32_t count) {
+  const uint32_t bank_ptr = g_vs_bank_ptr.load(std::memory_order_relaxed);
+  return ReadConstantRegisters(bank_ptr ? bank_ptr : device + xdk::kDeviceVsConstantsOffset, reg,
+                               count, t_bank);
+}
+
+// Converts pixel constants [reg, reg + count) of the device's bank into t_ps_bank.
+[[maybe_unused]] bool ReadPsBankRegisters(uint32_t device, uint32_t reg, uint32_t count) {
+  const uint32_t bank_ptr = g_ps_bank_ptr.load(std::memory_order_relaxed);
+  return ReadConstantRegisters(bank_ptr ? bank_ptr : device + xdk::kDevicePsConstantsOffset, reg,
+                               count, t_ps_bank);
 }
 
 // Fills `in` for DrawIndexedVertices / DrawVertices (prim and counts already

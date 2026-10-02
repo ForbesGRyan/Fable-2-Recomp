@@ -33,6 +33,34 @@ inline constexpr uint32_t kDeviceIndexBufferOffset = 0x3094;
 // SetPending_AluConstants.
 inline constexpr uint32_t kDeviceVsConstantsOffset = 0x780;
 
+// --- Main-scene bracket (Task 10) --------------------------------------------
+// Device flag byte +0x2ABC; bit 0x20 = inside BeginTiling/EndTiling (the
+// predicated-tiling pass). BeginTiling 0x822A5F80 (only static caller
+// 0x821A19B0, engine 0x821A17A8) sets it (0x822A61C0 `lbz`, 0x822A61D0
+// `ori r9,r9,0x20`, 0x822A61FC `stb`); EndTiling 0x8227F0B0 clears it
+// (0x8227F418 `lbz`, 0x8227F41C `andi. r11,r11,0xDF`, 0x8227F43C `stb`).
+// Bit 0x01 of the same byte is the guard the six DRAW_INDX builders test
+// before their SET_BIN_MASK_LO header (0x8221E41C `lbz r11,0x2ABC(r31)`,
+// 0x8221E420 `clrlwi. r11,r11,31`, 0x8221E424 `bne` to the 0xC0006000 header;
+// same test at 0x8221C7B4, 0x822063EC, 0x82208048, 0x822182BC, 0x8221CCA8):
+// per-draw bin masks, set by BeginTiling only when device bits 0x08/0x04 and
+// byte +0x2F9B are clear (0x822A6204..0x822A626C) and cleared by an explicit
+// bin mask (0x822655B0: 0x822656C0 `rlwinm r11,r11,0,0,30`), so it misses part
+// of the pass. Runtime (frame rows, frame-map section 8): gameplay capture
+// native_discovery_20261002_104938, 120 frames: 1460-1477 draws per frame have
+// bit 0x20 (byte 0x20/0x21/0x60/0x61), all of them on pitch 1120 and none of
+// the 950 others (pitches 1040, 320, 280, 1280, 560, 640, 80, 160); 274 of the
+// 1477 have bit 0x01 clear. One open and one close per frame.
+inline constexpr uint32_t kDeviceTilingFlagOffset = 0x2ABC;  // byte
+inline constexpr uint8_t kDeviceTilingFlagMask = 0x20;
+// Shadow of RB_SURFACE_INFO (register 0x2000; bits 0-13 = color surface pitch
+// in pixels): DrawIndexedVertices 0x8221E200..0x8221E210 (`addi r6,r31,0x2880;
+// li r5,0x2000; bl 0x8221C908`); 0x8221C908 writes one type-0 packet per run of
+// mask bits, register r5 + n taken from r6 + 4*n (0x8221C98C..0x8221C9AC).
+// Used as evidence only (frame rows "pitch_in"/"pitch_out").
+inline constexpr uint32_t kDeviceSurfaceInfoOffset = 0x2880;
+inline constexpr uint32_t kSurfacePitchMask = 0x3FFF;
+
 // --- Vertex buffer object (D3DVertexBuffer, SetStreamSource r5) -------------
 // Dwords 6-7 hold the vertex fetch constant: dword 6 = CPU virtual address |
 // type 3, dword 7 = size in dwords << 2 | endian. SetStreamSource 0x821B6DC4

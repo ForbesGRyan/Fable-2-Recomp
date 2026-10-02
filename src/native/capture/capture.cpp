@@ -27,6 +27,7 @@
 
 #include "discovery_format.h"
 #include "guest_read.h"
+#include "main_scene.h"
 #include "position_decode.h"
 #include "vfetch_decode.h"
 #include "xdk_hook_ids.h"
@@ -80,6 +81,44 @@ std::atomic<uint64_t> g_draw_count{0};
 
 std::mutex g_mutex;  // DrawState + discovery file
 DrawState g_state;
+
+// Draws per color-surface pitch (first 16 distinct pitches, the rest in `other`).
+struct PitchHistogram {
+  uint32_t pitch[16] = {};
+  uint32_t count[16] = {};
+  uint32_t n = 0;
+  uint32_t other = 0;
+  void Add(uint32_t p) {
+    for (uint32_t i = 0; i < n; ++i) {
+      if (pitch[i] == p) {
+        ++count[i];
+        return;
+      }
+    }
+    if (n == 16) {
+      ++other;
+      return;
+    }
+    pitch[n] = p;
+    count[n++] = 1;
+  }
+};
+
+// Per-frame evidence for the bracket, written in the frame row.
+struct SceneEvidence {
+  uint32_t flag_bytes[256] = {};  // draws per device tiling flag byte value
+  uint32_t flag_unread = 0;       // draws whose flag byte could not be read
+  PitchHistogram pitch_in;        // RB_SURFACE_INFO pitch of draws in the bracket
+  PitchHistogram pitch_out;       // ... and outside it
+  uint32_t ib_in = 0;             // IndirectBuffer:82286248 inserts in the bracket
+  uint32_t ib_out = 0;
+};
+
+// Main-scene bracket (main_scene.h), driven by every hooked guest draw.
+std::mutex g_scene_mutex;  // builder + per-frame bracket counts and evidence
+render::FrameBuilder g_builder;
+BracketStats g_bracket;
+SceneEvidence g_evidence;
 std::filesystem::path g_path;
 std::FILE* g_file = nullptr;
 
@@ -575,6 +614,91 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
   finish(nullptr);
 }
 
+// Device tiling flag byte, or nullptr if unreadable.
+const uint8_t* ReadTilingFlag(uint32_t device) {
+  return device ? ReadVirtual(device + xdk::kDeviceTilingFlagOffset, 1) : nullptr;
+}
+
+// Reads the device tiling flag at a guest draw (the draw functions only read
+// it) and moves the main-scene bracket. Evidence is collected while discovery
+// is armed.
+void ObserveMainScene(uint32_t device) {
+  const uint8_t* flag = ReadTilingFlag(device);
+  const bool tiling = flag && TilingActive(*flag);
+  if (!g_armed.load(std::memory_order_relaxed)) {
+    std::lock_guard<std::mutex> lock(g_scene_mutex);
+    ObserveDraw(g_builder, tiling, g_bracket);
+    return;
+  }
+  const uint8_t* surface = device ? ReadVirtual(device + xdk::kDeviceSurfaceInfoOffset, 4) : nullptr;
+  const uint32_t pitch = surface ? LoadBe32(surface) & xdk::kSurfacePitchMask : 0;
+  std::lock_guard<std::mutex> lock(g_scene_mutex);
+  if (flag) {
+    ++g_evidence.flag_bytes[*flag];
+  } else {
+    ++g_evidence.flag_unread;
+  }
+  const bool in = ObserveDraw(g_builder, tiling, g_bracket);
+  (in ? g_evidence.pitch_in : g_evidence.pitch_out).Add(pitch);
+}
+
+// IndirectBuffer:82286248 (r3 device): evidence only.
+void ObserveIndirectBuffer(uint32_t device) {
+  if (!g_armed.load(std::memory_order_relaxed)) return;
+  const uint8_t* flag = ReadTilingFlag(device);
+  std::lock_guard<std::mutex> lock(g_scene_mutex);
+  ++(flag && TilingActive(*flag) ? g_evidence.ib_in : g_evidence.ib_out);
+}
+
+void AppendPitches(std::string& row, const char* key, const PitchHistogram& h) {
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), ",\"%s\":{", key);
+  row += buf;
+  for (uint32_t i = 0; i < h.n; ++i) {
+    std::snprintf(buf, sizeof(buf), "%s\"%u\":%u", i ? "," : "", h.pitch[i], h.count[i]);
+    row += buf;
+  }
+  if (h.other) {
+    std::snprintf(buf, sizeof(buf), "%s\"other\":%u", h.n ? "," : "", h.other);
+    row += buf;
+  }
+  row += "}";
+}
+
+// Ends the frame's bracket; with `write` (discovery armed, caller holds
+// g_mutex with g_file open) writes the frame row (frame-map section 8):
+// captured = hooked guest draw calls, in_bracket = those in the main scene.
+void EndMainSceneFrame(bool write, int frame) {
+  BracketStats s;
+  SceneEvidence e;
+  {
+    std::lock_guard<std::mutex> lock(g_scene_mutex);
+    s = EndFrame(g_builder, g_bracket);
+    e = g_evidence;
+    g_evidence = {};
+  }
+  if (!write) return;
+  char buf[256];
+  std::snprintf(buf, sizeof(buf),
+                "{\"kind\":\"frame\",\"frame\":%d,\"captured\":%u,\"in_bracket\":%u,"
+                "\"main_scene\":{\"opens\":%u,\"closes\":%u,\"ib_in\":%u,\"ib_out\":%u,"
+                "\"flag_unread\":%u,\"flag_bytes\":{",
+                frame, s.draws, s.in_bracket, s.opens, s.closes, e.ib_in, e.ib_out, e.flag_unread);
+  std::string row = buf;
+  bool first = true;
+  for (int v = 0; v < 256; ++v) {
+    if (!e.flag_bytes[v]) continue;
+    std::snprintf(buf, sizeof(buf), "%s\"0x%02X\":%u", first ? "" : ",", v, e.flag_bytes[v]);
+    row += buf;
+    first = false;
+  }
+  row += "}";
+  AppendPitches(row, "pitch_in", e.pitch_in);
+  AppendPitches(row, "pitch_out", e.pitch_out);
+  row += "}}\n";
+  std::fputs(row.c_str(), g_file);
+}
+
 // Caller holds g_mutex.
 bool OpenLog() {
   char name[64];
@@ -637,11 +761,17 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
     OnGpuLoadShaders(t_last_args[id]);
     return;
   }
-  if (!g_armed.load(std::memory_order_relaxed) || !IsDrawId(id)) return;
-  const uint64_t n = g_draw_count.fetch_add(1, std::memory_order_relaxed);
-  if (n % Every() != 0) return;
+  if (id == kHook_IndirectBuffer_82286248) {
+    ObserveIndirectBuffer(t_last_args[id].r[0]);
+    return;
+  }
+  if (!IsDrawId(id)) return;
   const LastArgs& args = t_last_args[id];
   const uint32_t device = args.r[0];  // r3 of every draw hook is the device
+  ObserveMainScene(device);
+  if (!g_armed.load(std::memory_order_relaxed)) return;
+  const uint64_t n = g_draw_count.fetch_add(1, std::memory_order_relaxed);
+  if (n % Every() != 0) return;
   DeviceSnapshot dev;
   const bool have_dev = ReadDevice(device, &dev);
   std::lock_guard<std::mutex> lock(g_mutex);
@@ -656,6 +786,7 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
 void OnSwap() {
   g_swaps.fetch_add(1, std::memory_order_relaxed);
   detail::CacheGeneration().fetch_add(1, std::memory_order_relaxed);
+  if (!g_armed.load(std::memory_order_relaxed)) EndMainSceneFrame(false, 0);
   if (FramesRequested() <= 0 || g_failed.load(std::memory_order_relaxed)) return;
   static const auto start = std::chrono::steady_clock::now();
   if (!g_armed.load(std::memory_order_relaxed)) {
@@ -674,6 +805,7 @@ void OnSwap() {
   // One guest frame of rows has completed.
   const int frame = g_frames_written.fetch_add(1) + 1;
   std::lock_guard<std::mutex> lock(g_mutex);
+  EndMainSceneFrame(g_file != nullptr, frame);
   if (g_file) std::fflush(g_file);
   if (frame >= FramesRequested()) {
     g_armed.store(false);

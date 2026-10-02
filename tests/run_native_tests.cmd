@@ -43,6 +43,8 @@ clang++ -std=c++23 "%~dp0native\test_page_cache.cpp" -o "%OUT%\page_cache.exe" |
 "%OUT%\page_cache.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_xdk_layout.cpp" -o "%OUT%\xdk_layout.exe" || exit /b 1
 "%OUT%\xdk_layout.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_main_scene.cpp" -o "%OUT%\main_scene.exe" || exit /b 1
+"%OUT%\main_scene.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_autoplay.cpp" -o "%OUT%\autoplay.exe" || exit /b 1
 "%OUT%\autoplay.exe" || exit /b 1
 exit /b 0

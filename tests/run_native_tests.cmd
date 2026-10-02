@@ -66,4 +66,6 @@ clang++ -std=c++23 "%~dp0native\test_texture_decode.cpp" -o "%OUT%\texture_decod
 "%OUT%\texture_decode.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_uv_decode.cpp" -o "%OUT%\uv_decode.exe" || exit /b 1
 "%OUT%\uv_decode.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_material.cpp" -o "%OUT%\material.exe" || exit /b 1
+"%OUT%\material.exe" || exit /b 1
 exit /b 0

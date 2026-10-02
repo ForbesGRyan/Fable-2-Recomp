@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "index_convert.h"
+#include "material.h"
 #include "position_decode.h"
 #include "rigid_skin.h"
 #include "terrain_patch.h"
@@ -42,11 +43,6 @@ inline const char* SkipReasonName(SkipReason r) {
 // kDot: clip[i] = dot(row[i], p).  kCombine: clip = p.x*row0 + p.y*row1 + p.z*row2 + p.w*row3.
 enum class TransformLayout : uint8_t { kDot = 0, kCombine = 1 };
 
-struct BufferRef {
-  uint32_t phys_addr = 0;
-  uint32_t size = 0;
-};
-
 struct DrawRecord {
   uint32_t seq = 0;
   uint32_t func_id = 0;
@@ -68,6 +64,8 @@ struct DrawRecord {
   // A heightmap terrain patch run (terrain_patch.h): no vertex or index buffer;
   // the renderer builds the grid from the heightmap.
   TerrainPatch terrain;
+  // Albedo texture and UVs (material.h); status says why a draw stays clay.
+  Material material;
   SkipReason skip = SkipReason::kNone;
 };
 
@@ -103,6 +101,7 @@ struct DrawInputs {
   // is active when its patch was built (heightmap handled).
   bool terrain_shader = false;
   TerrainPatch terrain;
+  Material material;
 };
 
 inline DrawRecord AssembleRecord(const DrawInputs& in, uint32_t seq) {
@@ -119,6 +118,7 @@ inline DrawRecord AssembleRecord(const DrawInputs& in, uint32_t seq) {
   r.vb = in.vb;
   r.pos = in.pos;
   r.vs_hash = in.vs_hash;
+  r.material = in.material;
   auto skip = [&](SkipReason why) { r.skip = why; return r; };
   // Terrain: a tessellated patch draw whose shader has a terrain entry.
   const bool terrain = in.prim == kPrimQuadPatch && in.terrain_shader;

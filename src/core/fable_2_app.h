@@ -18,7 +18,9 @@
 #include <cstdlib>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <sstream>
+#include <stop_token>
 #include <thread>
 #include <vector>
 
@@ -27,6 +29,7 @@
 #endif
 
 #include "alloc_watch.h"
+#include "autoplay.h"
 #include "dir_manifest_heal.h"
 #include "fable2_config.h"
 #include "fable2_native_render.h"
@@ -38,9 +41,9 @@
 // Re-enable to re-measure the frame pacing:
 // #include "fps_probe.h"
 #include "keyboard_gamepad.h"
+#include "remote_gamepad_driver.h"
 #ifdef FABLE2_REMOTE_CONTROL
 #include "remote_control_server.h"
-#include "remote_gamepad_driver.h"
 // 1-second game-state classifier (src/diagnostics/fable2_state_probe.h, single-TU inline).
 // Forward-declared here; the inline definitions live in the state probe header
 // (included once, in main.cpp), so the app can start/stop it alongside the
@@ -80,6 +83,19 @@ class Fable2App : public rex::ReXApp {
                                                &remote_pad_enabled_};
 #endif  // FABLE2_REMOTE_CONTROL
 
+  // Autoplay (FABLE2_AUTOPLAY, see src/input/autoplay.h): a scripted button
+  // sequence published from a host thread into a dedicated store that its own
+  // remote-style pad driver (registered in OnPreSetup, focus independent)
+  // presents to the guest. Not gated on FABLE2_REMOTE_CONTROL and opens no
+  // port. The plan is parsed in OnPostInitLogging (logging is up there); the
+  // clock origin is this member, initialised at app construction (process start).
+  std::chrono::steady_clock::time_point autoplay_t0_ = std::chrono::steady_clock::now();
+  fable2::remote::InputStateStore autoplay_state_;
+  std::atomic<bool> autoplay_enabled_{true};
+  std::vector<fable2::autoplay::Step> autoplay_plan_;
+  double autoplay_hold_s_ = 0.1;
+  std::jthread autoplay_thread_;  // last member: joined before the above die
+
   // Emulate the Xbox 360 Xenos GPU. Two plugins are staged next to the exe:
   //   rexgpu-xenos[d].dll        -> D3D12 (prebuilt SDK plugin; the default)
   //   rexgpu-xenos-vulkan[d].dll -> Vulkan (built from the SDK source via
@@ -115,6 +131,12 @@ class Fable2App : public rex::ReXApp {
       system->AddDriver(std::make_unique<fable2::remote::GamepadDriver>(
           system->window(), 0, remote_state_.get(), &remote_pad_enabled_));
 #endif  // FABLE2_REMOTE_CONTROL
+      if (!autoplay_plan_.empty()) {
+        // Scripted pad: same focus-independent driver as the remote pad, fed
+        // by autoplay_state_. OR-merges with the other pads.
+        system->AddDriver(std::make_unique<fable2::remote::GamepadDriver>(
+            system->window(), 0, &autoplay_state_, &autoplay_enabled_));
+      }
       return system;  // C++14 unique_ptr<Derived> -> unique_ptr<Base>
     };
   }
@@ -290,6 +312,7 @@ class Fable2App : public rex::ReXApp {
   // Plain settings are read via fable2::config::Get(); settings that back a
   // cvar are seeded into it below so the console/overlay keep working.
   void OnPostInitLogging() override {
+    StartAutoplay();
     // This describes the linked build, not a guarantee about DLLs replaced later.
     REXSYS_INFO("[native-build] configuration={} linked_sdk={}",
                 FABLE2_NATIVE_CONFIGURATION, FABLE2_NATIVE_SDK);
@@ -357,14 +380,67 @@ class Fable2App : public rex::ReXApp {
 #endif  // FABLE2_REMOTE_CONTROL
   }
 
-#ifdef FABLE2_REMOTE_CONTROL
-  // Stop the state classifier thread, then the remote control server threads,
-  // before anything else tears down.
+  // Stop the autoplay thread; in debug builds also the state classifier
+  // thread, then the remote control server threads, before anything else
+  // tears down.
   void OnShutdown() override {
+    autoplay_thread_.request_stop();
+    if (autoplay_thread_.joinable()) autoplay_thread_.join();
+#ifdef FABLE2_REMOTE_CONTROL
     fable2::stateprobe::stop();
     remote_server_.Stop();
-  }
 #endif  // FABLE2_REMOTE_CONTROL
+  }
+
+  // Parse FABLE2_AUTOPLAY / FABLE2_AUTOPLAY_HOLD_MS and start the press thread.
+  // Unset or empty: nothing is registered and no thread runs. An invalid spec
+  // logs one warning naming the bad token and runs nothing.
+  void StartAutoplay() {
+    const char* spec_env = std::getenv("FABLE2_AUTOPLAY");
+    const std::string spec = spec_env ? spec_env : "";
+    if (spec.find_first_not_of(" \t,") == std::string::npos) return;
+
+    std::string bad;
+    auto plan = fable2::autoplay::Parse(spec, &bad);
+    if (!plan) {
+      REXSYS_WARN("[autoplay] invalid FABLE2_AUTOPLAY, bad token '{}'; autoplay disabled", bad);
+      return;
+    }
+    if (plan->empty()) return;
+
+    int hold_ms = 100;
+    if (const char* hold_env = std::getenv("FABLE2_AUTOPLAY_HOLD_MS")) {
+      const long v = std::strtol(hold_env, nullptr, 10);
+      if (v > 0 && v <= 10000) {
+        hold_ms = static_cast<int>(v);
+      } else {
+        REXSYS_WARN("[autoplay] bad FABLE2_AUTOPLAY_HOLD_MS '{}'; using {} ms", hold_env, hold_ms);
+      }
+    }
+    autoplay_plan_ = std::move(*plan);
+    autoplay_hold_s_ = hold_ms / 1000.0;
+    REXSYS_INFO("[autoplay] armed: {} steps, hold {} ms", autoplay_plan_.size(), hold_ms);
+
+    autoplay_thread_ = std::jthread([this](std::stop_token stop) {
+      using namespace fable2::autoplay;
+      const double end = EndTime(autoplay_plan_, autoplay_hold_s_);
+      size_t next_log = 0;  // plan is sorted by time
+      while (!stop.stop_requested()) {
+        const double t = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - autoplay_t0_).count();
+        while (next_log < autoplay_plan_.size() && autoplay_plan_[next_log].t_seconds <= t) {
+          REXSYS_INFO("[autoplay] {} at {:.1f} s", autoplay_plan_[next_log].name, t);
+          ++next_log;
+        }
+        autoplay_state_.Publish({.buttons = ButtonsAt(autoplay_plan_, t, autoplay_hold_s_)});
+        if (t >= end) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
+      autoplay_state_.Publish({});
+      if (!stop.stop_requested()) REXSYS_INFO("[autoplay] sequence complete");
+    });
+  }
+
   // Apply the game patches (see src/core/fable2_patches.h) once the SDK has
   // decrypted default.xex into the guest arena, before the module launches.
   // The patch table is data-driven: fable2_patches.toml next to the exe

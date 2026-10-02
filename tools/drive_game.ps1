@@ -3,11 +3,18 @@
 # Default sequence (from the user): E at 23 s skips the intro, S at 27 s moves
 # to Continue, E at 30 s and 35 s load the save. Verified 2026-10-02: the world
 # is fading in at 40 s and fully up by 50 s, so start captures at >= 50 s.
-# Keys are tapped for HoldMs (50 ms); longer holds auto-repeat in the menus.
+# Default (autoplay) mode: the keys are translated to gamepad buttons (E/SPACE->A,
+# S->Down, W->Up, A->Left, D->Right, ESC->B, ENTER->Start) and handed to the game
+# in FABLE2_AUTOPLAY / FABLE2_AUTOPLAY_HOLD_MS, so it presses them itself from
+# inside the process. No focus is needed and this script never touches the
+# foreground window or the keyboard; screenshots use PrintWindow on the game
+# window handle. Buttons are held HoldMs (default 100); longer holds auto-repeat
+# in the menus.
 #
-# Keys are sent with keybd_event, which targets whatever window has focus, so
-# each key is sent only if the game window is in the foreground; otherwise it
-# is skipped and logged (it never types into another window).
+# -KeyboardInput: the old path. Keys are sent with keybd_event (HoldMs default
+# 50), which targets whatever window has focus, so each key is sent only if the
+# game window is in the foreground; otherwise it is skipped and logged (it never
+# types into another window).
 #
 # Examples (from the repo root, PowerShell):
 #   .\tools\drive_game.ps1 -Total 120
@@ -21,10 +28,12 @@ param(
   [string[]]$GameArgs = @(),                 # extra fable_2.exe arguments
   [hashtable]$Env = @{},                     # environment variables for the game process
   [string]$ExeDir = "",                      # default: out\build\win-amd64-release
-  [int]$HoldMs = 50                          # key-down time; long holds auto-repeat in menus
+  [int]$HoldMs = 0,                          # press time; default 100 (autoplay) / 50 (-KeyboardInput)
+  [switch]$KeyboardInput                     # send keys with keybd_event instead of in-process autoplay
 )
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
+if ($HoldMs -le 0) { $HoldMs = if ($KeyboardInput) { 50 } else { 100 } }
 if (-not $ExeDir) { $ExeDir = Join-Path $Root "out\build\win-amd64-release" }
 if (-not $ShotDir) { $ShotDir = Join-Path $ExeDir "logs\shots" }
 
@@ -45,12 +54,27 @@ $vk = @{
   "UP"=0x26; "DOWN"=0x28; "LEFT"=0x25; "RIGHT"=0x27; "F1"=0x70; "F2"=0x71; "F3"=0x72; "F6"=0x75
 }
 
+$padButton = @{
+  "E"="A"; "SPACE"="A"; "S"="Down"; "W"="Up"; "A"="Left"; "D"="Right"; "ESC"="B"; "ENTER"="Start"
+}
+
 $events = @()
+$autoplaySteps = @()
 foreach ($e in $Plan.Split(",")) {
   if (-not $e) { continue }
   $t, $k = $e.Split(":")
-  if (-not $vk.ContainsKey($k.ToUpper())) { throw "unknown key '$k' (known: $($vk.Keys -join ', '))" }
-  $events += [pscustomobject]@{ t = [double]$t; k = $k.ToUpper(); shot = $false }
+  if ($KeyboardInput) {
+    if (-not $vk.ContainsKey($k.ToUpper())) { throw "unknown key '$k' (known: $($vk.Keys -join ', '))" }
+    $events += [pscustomobject]@{ t = [double]$t; k = $k.ToUpper(); shot = $false }
+  } else {
+    if (-not $padButton.ContainsKey($k.ToUpper())) { throw "key '$k' has no pad button in autoplay mode (known: $($padButton.Keys -join ', '))" }
+    $autoplaySteps += "${t}:$($padButton[$k.ToUpper()])"
+  }
+}
+if (-not $KeyboardInput) {
+  $Env = @{} + $Env
+  $Env["FABLE2_AUTOPLAY"] = $autoplaySteps -join ","
+  $Env["FABLE2_AUTOPLAY_HOLD_MS"] = [string]$HoldMs
 }
 foreach ($t in $Shots.Split(",")) {
   if ($t) { $events += [pscustomobject]@{ t = [double]$t; k = ""; shot = $true } }
@@ -68,7 +92,7 @@ foreach ($name in $Env.Keys) { [Environment]::SetEnvironmentVariable($name, $sav
 "started pid $($p.Id): $($argList -join ' ')"
 
 $sw = [Diagnostics.Stopwatch]::StartNew()
-$shell = New-Object -ComObject WScript.Shell
+$shell = if ($KeyboardInput) { New-Object -ComObject WScript.Shell } else { $null }
 try {
   foreach ($ev in $events) {
     while ($sw.Elapsed.TotalSeconds -lt $ev.t) { Start-Sleep -Milliseconds 100 }
@@ -76,9 +100,11 @@ try {
     $p.Refresh()
     $hwnd = $p.MainWindowHandle
     if ($hwnd -eq [IntPtr]::Zero) { "no game window yet at $($ev.t) s; skipped"; continue }
-    [void]$shell.AppActivate($p.Id)
-    [void][DriveGameNative]::SetForegroundWindow($hwnd)
-    Start-Sleep -Milliseconds 150
+    if ($KeyboardInput) {
+      [void]$shell.AppActivate($p.Id)
+      [void][DriveGameNative]::SetForegroundWindow($hwnd)
+      Start-Sleep -Milliseconds 150
+    }
     if ($ev.shot) {
       New-Item -ItemType Directory -Force $ShotDir | Out-Null
       $r = New-Object DriveGameNative+RECT

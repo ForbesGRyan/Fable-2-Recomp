@@ -24,9 +24,11 @@ int main() {
   if (!Compile("fullscreen_vs", kFullscreenVs, "vs_5_0")) return 1;
   if (!Compile("pattern_ps", kPatternPs, "ps_5_0")) return 2;
   if (!Compile("grid_ps", kGridPs, "ps_5_0")) return 3;
+  if (!Compile("clay_vs", kClayVs, "vs_5_0")) return 5;
+  if (!Compile("clay_ps", kClayPs, "ps_5_0")) return 6;
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS compile; broken shader rejected\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS compile; broken shader rejected\n";
   return 0;
 }

@@ -299,6 +299,8 @@ class Fable2App : public rex::ReXApp {
         stats.guest_wait_ms = wait_ms;
         stats.guest_work_ms = std::max(0.0, stats.frame_time_ms - swap_ms - wait_ms);
       }
+      // Native renderer status lines (published copy; empty when off).
+      stats.extra_text = fable2::native::StatusText();
       return stats;
     });
 

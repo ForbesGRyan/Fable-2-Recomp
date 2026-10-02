@@ -43,4 +43,40 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 }
 )hlsl";
 
+// Clay pass (native scene, Task 12): vertex pulling from StructuredBuffers
+// (float4 positions, uint32 triangle-list indices), transformed by the
+// draw's captured rows; flat shading from screen-space derivatives.
+inline constexpr const char* kClayVs = R"hlsl(
+cbuffer Draw : register(b0) {
+  float4 r0; float4 r1; float4 r2; float4 r3;   // captured rows
+  uint layout;        // 0 dot, 1 combine
+  int base_vertex;
+  uint vertex_count;  // positions in the buffer
+  uint color;         // 0xRRGGBB
+};
+StructuredBuffer<float4> positions : register(t0);
+StructuredBuffer<uint> indices : register(t1);
+struct VsOut { float4 pos : SV_Position; float3 ndc : TEXCOORD0; };
+VsOut main(uint vid : SV_VertexID) {
+  VsOut o;
+  int v = int(indices[vid]) + base_vertex;
+  float4 p = (v >= 0 && uint(v) < vertex_count) ? positions[v] : float4(0, 0, 0, 0);
+  float4 c = layout == 0 ? float4(dot(r0, p), dot(r1, p), dot(r2, p), dot(r3, p))
+                         : p.x * r0 + p.y * r1 + p.z * r2 + p.w * r3;
+  o.pos = c;
+  o.ndc = float3(c.xy / max(abs(c.w), 1e-6), c.w * 0.01);
+  return o;
+}
+)hlsl";
+
+inline constexpr const char* kClayPs = R"hlsl(
+cbuffer Draw : register(b0) { float4 r0; float4 r1; float4 r2; float4 r3; uint layout; int base_vertex; uint vertex_count; uint color; };
+float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0) : SV_Target {
+  float3 n = normalize(cross(ddx(ndc), ddy(ndc)));
+  float shade = 0.35 + 0.65 * saturate(abs(dot(n, normalize(float3(0.4, 0.6, -0.7)))));
+  float3 base = float3((color >> 16) & 255, (color >> 8) & 255, color & 255) / 255.0;
+  return float4(base * shade, 1.0);
+}
+)hlsl";
+
 }  // namespace fable2::native::shaders

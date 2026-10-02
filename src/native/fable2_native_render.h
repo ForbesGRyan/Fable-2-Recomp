@@ -5,6 +5,8 @@
 // grid over the emulated frame) with the SDK. Off unless the
 // fable2_native_render cvar is true at startup.
 
+#include <string>
+
 namespace rex::memory {
 class Memory;
 }
@@ -18,5 +20,9 @@ void Install(rex::memory::Memory* memory);
 // Per guest frame (MainRenderLoop override): F6 toggle and the overlay
 // post-process request flag.
 void PollFrame();
+
+// F3 status lines from the clay pass (empty while the renderer is not
+// installed). Thread-safe copy.
+std::string StatusText();
 
 }  // namespace fable2::native

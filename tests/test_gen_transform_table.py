@@ -62,6 +62,15 @@ class GenTransformTableTest(unittest.TestCase):
         text = gtt.generate({"0x2": {"base": 4, "layout": "combine", "pos_fetch": 1, "deformed": True}})
         self.assertEqual(text.splitlines()[1:], ["FABLE2_VS_TRANSFORM(0x2ull, 4, 1, 1, 1)"])
 
+    def test_uv_entries(self):
+        data = {"0xECD66A10092E6562": {"base": 0, "layout": "dot", "pos_fetch": -1,
+                                       "uv": {"o0.x": {"fetch": 2, "src": "y", "format": 31, "offset": 3, "stages": []},
+                                              "o0.y": {"fetch": 2, "src": "x", "format": 31, "offset": 3,
+                                                       "stages": [{"scale": "c10.y", "offset": "-c10.w"}]}}}}
+        out = gtt.generate(data).splitlines()
+        self.assertIn("FABLE2_VS_UV(0xECD66A10092E6562ull, 0, 0, 2, 1, 31, 3, -1, -1, -1, -1)", out)
+        self.assertIn(f"FABLE2_VS_UV(0xECD66A10092E6562ull, 0, 1, 2, 0, 31, 3, {41}, {(1 << 11) | 43}, -1, -1)", out)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,11 +10,20 @@ and, when the entry has them (frame-map section 9):
                     patch_offset, height_fetch)
       "terrain": {"grid": "c11.xy", ..., "patch_offset": null | "c113.x", "height_fetch": 16}
       registers as register * 4 + component; -1 = no patch offset.
+  FABLE2_VS_UV(hash, interp, comp, fetch_index, src_comp, xenos_format, offset_dwords, s0, o0, s1, o1)
+      "uv": {"o0.x": {"fetch": 2, "src": "y", "format": 31, "offset": 3, "stages": [...]}, ...}
+      Stage refs use uv_refs notation with bank 0 (vertex constants).
 """
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
+
+# Ensure we can import uv_refs from the same directory
+sys.path.insert(0, str(Path(__file__).parent))
+
+import uv_refs
 
 _SWZ = {"x": 0, "y": 1, "z": 2, "w": 3, "0": 4, "1": 5, "_": 7}
 _COMP = "xyzw"
@@ -68,6 +77,12 @@ def generate(data):
                       reg_comp(t["tex_scale"], pair=True), -1 if po is None else reg_comp(po),
                       int(t["height_fetch"])]
             extras.append(f"FABLE2_VS_TERRAIN({vs}ull, {', '.join(str(f) for f in fields)})")
+        for name, u in sorted(e.get("uv", {}).items()):
+            interp, comp = uv_refs.input_comp(name)
+            src = _COMP.index(u["src"])
+            refs = ", ".join(str(r) for r in uv_refs.stages(u.get("stages", []), 0))
+            extras.append(f"FABLE2_VS_UV({vs}ull, {interp}, {comp}, {int(u['fetch'])}, {src}, "
+                          f"{int(u['format'])}, {int(u['offset'])}, {refs})")
     return "\n".join(lines + extras) + "\n"
 
 

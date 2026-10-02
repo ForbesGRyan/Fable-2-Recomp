@@ -47,8 +47,12 @@ public static class DriveGameNative {
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 }
 "@
+# Without this, GetWindowRect returns DPI-virtualised (scaled-down) sizes on a scaled display
+# and the PrintWindow bitmap crops the window (e.g. to its left 75% at 133%).
+[void][DriveGameNative]::SetProcessDPIAware()
 $vk = @{
   "E"=0x45; "S"=0x53; "W"=0x57; "A"=0x41; "D"=0x44; "ESC"=0x1B; "ENTER"=0x0D; "SPACE"=0x20;
   "UP"=0x26; "DOWN"=0x28; "LEFT"=0x25; "RIGHT"=0x27; "F1"=0x70; "F2"=0x71; "F3"=0x72; "F6"=0x75

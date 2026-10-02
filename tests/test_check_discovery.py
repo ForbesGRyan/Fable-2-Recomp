@@ -43,6 +43,16 @@ class CheckDiscoveryTests(unittest.TestCase):
         row["vb"]["offset"] = 0x80
         self.assertEqual(cd.check_rows([row], b), (1, 0))
 
+    def test_object_fetch_constant_mismatch_fails(self):
+        # vb.offset comes from the device shadow, so phys_addr + offset always
+        # equals the logged fc; fc_match is the check of the object's dwords.
+        b = cd.parse_vbind(LOG.splitlines())
+        row = draw()
+        row["vb"]["fc_match"] = True
+        self.assertEqual(cd.check_rows([row], b), (1, 1))
+        row["vb"]["fc_match"] = False
+        self.assertEqual(cd.check_rows([row], b), (1, 0))
+
     def test_repeated_shader_blocks_accumulate_bindings(self):
         # The SDK logs one block per distinct (shader, fetch constants) pair.
         log = LOG + LOG.replace("0x10002003", "0x10004003")

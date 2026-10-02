@@ -37,6 +37,11 @@ def parse_vbind(lines):
 
 def _match(row, bindings):
     p, vb = row["pos"], row["vb"]
+    # vb.offset is derived from the device shadow, so the address comparison
+    # below cannot catch a wrong object layout; fc_match (the object's fetch
+    # constant dwords plus the offset equal the shadow) does.
+    if not vb.get("fc_match", True):
+        return False
     # The XDK folds the SetStreamSource offset into the fetch constant address
     # (frame-map section 8), so compare base + offset with the logged address.
     address = vb["phys_addr"] + vb.get("offset", 0)

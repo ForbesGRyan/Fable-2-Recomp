@@ -113,6 +113,8 @@ def main(argv=None):
             row = json.loads(line)
             if row.get("kind") != "draw" or "bank" not in row or not row.get("positions"):
                 continue
+            if row.get("pos_suspect"):  # indexed past its stream: not positions
+                continue
             by_shader[row["vs_hash"]].append((row["bank"], row["positions"]))
     out = Path(a.out)
     data = json.loads(out.read_text()) if out.exists() else {}

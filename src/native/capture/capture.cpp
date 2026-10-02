@@ -381,7 +381,9 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
 
   // Index buffer (DrawIndexedVertices: r4 prim, r5 base vertex, r6 start, r7 count).
   // Written first: it does not depend on the vertex shader being readable.
-  if (id == kHook_D3DDevice_DrawIndexedVertices) {
+  const bool indexed = id == kHook_D3DDevice_DrawIndexedVertices;
+  int64_t ib_max_index = -1;  // largest non-reset index read, -1 if unknown
+  if (indexed) {
     const uint32_t ib = dev.ib_obj;
     const uint8_t* ibo = ib ? ReadVirtual(ib, 4 * (xdk::kIbSizeDword + 1)) : nullptr;
     if (ibo) {
@@ -420,6 +422,7 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
           }
         }
       }
+      ib_max_index = max_index;
       std::snprintf(buf, sizeof(buf),
                     ",\"ib\":{\"obj\":\"0x%08X\",\"common\":\"0x%08X\",\"phys_addr\":%u,\"size\":%u,"
                     "\"index32\":%s,\"endian\":%u,\"base_vertex\":%u,\"start\":%u,\"count\":%u,"
@@ -514,13 +517,21 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
   const uint32_t fc0 = dev.stream_fc[stream][0], fc1 = dev.stream_fc[stream][1];
   const uint32_t offset = (fc0 & ~3u) - base;
   const bool fc_match = (fc0 & 3) == 3 && offset < size && fc1 == d1 - offset;
+  const uint32_t vertices = offset < size ? (size - offset) / pos.stride_bytes : 0;
   std::snprintf(buf, sizeof(buf),
                 ",\"vb\":{\"stream\":%u,\"obj\":\"0x%08X\",\"phys_addr\":%u,\"size\":%u,\"offset\":%u,"
                 "\"fc\":[\"0x%08X\",\"0x%08X\"],\"fc_match\":%s,\"stride_dw\":%u,\"vertices\":%u}",
                 stream, vb, base, size, offset, fc0, fc1, fc_match ? "true" : "false",
-                dev.stream_stride_dw[stream],
-                offset < size ? (size - offset) / pos.stride_bytes : 0);
+                dev.stream_stride_dw[stream], vertices);
   row += buf;
+  // The draw reads past the stream the position element was taken from, so
+  // that stream is not the per-vertex one (e.g. per-instance data fetched
+  // first): flag the row and leave its positions out. DrawVertices
+  // (0x8221C518): r4 prim, r5 start vertex, r6 count.
+  const bool pos_suspect =
+      indexed ? (ib_max_index >= 0 && ib_max_index + int64_t(args.r[2]) >= int64_t(vertices))
+              : uint64_t(args.r[2]) + args.r[3] > vertices;
+  if (pos_suspect) row += ",\"pos_suspect\":true";
 
   // Vertex constant bank (host floats).
   const uint32_t bank_ptr = g_state.vs_bank_ptr ? g_state.vs_bank_ptr
@@ -544,7 +555,7 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
   if (pos.stride_bytes && avail >= pos.offset_bytes + elem) {
     count = std::min<uint32_t>(64, (avail - pos.offset_bytes - elem) / pos.stride_bytes + 1);
   }
-  const uint8_t* src = count ? ReadPhysical(base + offset, avail) : nullptr;
+  const uint8_t* src = count && !pos_suspect ? ReadPhysical(base + offset, avail) : nullptr;
   Float4 verts[64];
   if (src && DecodePositions(src, avail, pos, 0, count, verts)) {
     row += ",\"positions\":[";

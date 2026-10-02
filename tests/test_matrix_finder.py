@@ -74,6 +74,9 @@ class FinderTests(unittest.TestCase):
             log = d / "disc.jsonl"
             rows = [{"kind": "draw", "vs_hash": "0x1", "bank": bank_with(M, 12, "dot", s), "positions": verts(s),
                      "viewport": [1120, 720]} for s in range(2)]
+            # Decoded from a stream the draw indexes past: not a position sample.
+            rows.append({"kind": "draw", "vs_hash": "0x1", "bank": bank_with(M, 12, "dot", 7),
+                         "positions": verts(7), "pos_suspect": True, "viewport": [1120, 720]})
             rows.append({"kind": "meta"})
             log.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
             out = d / "vs.json"

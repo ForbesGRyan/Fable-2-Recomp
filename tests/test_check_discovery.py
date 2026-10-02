@@ -18,7 +18,7 @@ LOG = """[2026-10-01 10:00:00.000] [info] [gpu] [vbind] vs=0x00000000000000AB dw
 def draw(ok=True):
     return {"kind": "draw", "vs_hash": "0x00000000000000AB",
             "pos": {"fetch_slot": 1, "offset_bytes": 0, "stride_bytes": 32, "format": 57},
-            "vb": {"phys_addr": 0x10002000 if ok else 0x10003000, "size": 2048}}
+            "vb": {"phys_addr": 0x10002000 if ok else 0x10003000, "size": 2048, "fc_match": True}}
 
 
 class CheckDiscoveryTests(unittest.TestCase):
@@ -38,7 +38,7 @@ class CheckDiscoveryTests(unittest.TestCase):
         # (frame-map section 8), so a row's base plus its offset must match.
         b = cd.parse_vbind(LOG.splitlines())
         row = draw()
-        row["vb"] = {"phys_addr": 0x10001F00, "offset": 0x100, "size": 2304}
+        row["vb"] = {"phys_addr": 0x10001F00, "offset": 0x100, "size": 2304, "fc_match": True}
         self.assertEqual(cd.check_rows([row], b), (1, 1))
         row["vb"]["offset"] = 0x80
         self.assertEqual(cd.check_rows([row], b), (1, 0))
@@ -52,6 +52,20 @@ class CheckDiscoveryTests(unittest.TestCase):
         self.assertEqual(cd.check_rows([row], b), (1, 1))
         row["vb"]["fc_match"] = False
         self.assertEqual(cd.check_rows([row], b), (1, 0))
+
+    def test_missing_fc_match_is_not_a_match(self):
+        # Rows without the field (older captures, a decode that stopped early)
+        # are not evidence of a correct object layout.
+        b = cd.parse_vbind(LOG.splitlines())
+        row = draw()
+        del row["vb"]["fc_match"]
+        self.assertEqual(cd.check_rows([row], b), (1, 0))
+
+    def test_binding_without_fc_line_is_not_a_match(self):
+        # Without its fc line a logged binding has no address to compare.
+        b = cd.parse_vbind(LOG.splitlines()[:2])
+        self.assertIsNone(b["0x00000000000000AB"][0]["fc"])
+        self.assertEqual(cd.check_rows([draw()], b), (1, 0))
 
     def test_repeated_shader_blocks_accumulate_bindings(self):
         # The SDK logs one block per distinct (shader, fetch constants) pair.

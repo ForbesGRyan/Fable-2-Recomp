@@ -6,7 +6,8 @@ The game log must come from a run with --native_render_log_vertex_bindings=true.
 A "draw" row matches when its decoded position element (fetch slot, offset,
 stride, format) is an attribute of one of the same shader's logged bindings and
 its vertex-buffer address (base + stream offset) equals that binding's fetch
-constant address. Exit code 0 when at least 20 draws were checked and all matched.
+constant address (rows without fc_match and bindings without an fc line never
+match). Exit code 0 when at least 20 draws were checked and all matched.
 """
 import argparse
 import json
@@ -39,8 +40,9 @@ def _match(row, bindings):
     p, vb = row["pos"], row["vb"]
     # vb.offset is derived from the device shadow, so the address comparison
     # below cannot catch a wrong object layout; fc_match (the object's fetch
-    # constant dwords plus the offset equal the shadow) does.
-    if not vb.get("fc_match", True):
+    # constant dwords plus the offset equal the shadow) does. A row without
+    # the field is not evidence of a match.
+    if not vb.get("fc_match", False):
         return False
     # The XDK folds the SetStreamSource offset into the fetch constant address
     # (frame-map section 8), so compare base + offset with the logged address.
@@ -50,7 +52,8 @@ def _match(row, bindings):
             continue
         if not any(4 * off == p["offset_bytes"] and fmt == p["format"] for off, fmt, *_ in b["attrs"]):
             continue
-        if b["fc"] is None or (b["fc"][0] & ~3) == address:
+        # A binding logged without its fc line has no address to compare.
+        if b["fc"] is not None and (b["fc"][0] & ~3) == address:
             return True
     return False
 

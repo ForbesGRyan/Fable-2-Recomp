@@ -38,6 +38,7 @@
 #include "main_scene.h"
 #include "position_decode.h"
 #include "rigid_skin.h"
+#include "shader_tally.h"
 #include "stream_resolve.h"
 #include "terrain_patch.h"
 #include "vfetch_decode.h"
@@ -1355,6 +1356,53 @@ bool OpenLog() {
   return true;
 }
 
+// "0xHASH: n" pairs of a tally's top entries of one kind.
+template <size_t N>
+std::string FormatTop(const ShaderTally<N>& t, uint8_t kind, size_t k,
+                      const char* (*tag)(uint64_t hash) = nullptr) {
+  typename ShaderTally<N>::Entry top[N];
+  const size_t m = t.Top(kind, top, std::min(k, N));
+  std::string out;
+  char buf[96];
+  for (size_t i = 0; i < m; ++i) {
+    const char* suffix = tag ? tag(top[i].hash) : "";
+    std::snprintf(buf, sizeof(buf), "%s0x%016llX%s: %u", i ? ", " : "",
+                  static_cast<unsigned long long>(top[i].hash), suffix, top[i].count);
+    out += buf;
+  }
+  return out;
+}
+
+// Per-shader coverage (the periodic log): the vertex shaders behind each skip
+// reason (unsupported-prim is broken down by hook) and the most frequent
+// drawable shaders, tagged by how their positions are formed.
+void LogShaderBreakdown(const render::FrameScene& sc) {
+  constexpr size_t kTopSkipped = 5;
+  constexpr size_t kTopDrawable = 10;
+  for (size_t i = 1; i < size_t(SkipReason::kCount); ++i) {
+    const SkipReason why = SkipReason(i);
+    if (!sc.skipped[i] || why == SkipReason::kUnsupportedPrim) continue;
+    const std::string top = FormatTop(sc.skipped_by_vs, uint8_t(i), kTopSkipped);
+    if (top.empty()) continue;
+    REXSYS_INFO("[native] capture: frame {} {} by vs {{{}}}", sc.frame, SkipReasonName(why), top);
+  }
+  if (sc.skipped_by_vs.Other()) {
+    REXSYS_INFO("[native] capture: frame {} skipped by vs: {} draws past the {}-shader tally",
+                sc.frame, sc.skipped_by_vs.Other(), render::kSkippedTallySize);
+  }
+  if (sc.draws.empty()) return;
+  ShaderTally<64> drawable;
+  for (const DrawRecord& r : sc.draws) drawable.Add(r.vs_hash, 0);
+  const std::string top = FormatTop(drawable, 0, kTopDrawable, [](uint64_t hash) {
+    if (FindTerrain(hash)) return "(terrain)";
+    if (FindSkin(hash)) return "(skin)";
+    const TransformInfo* t = FindTransform(hash);
+    return t && t->deformed ? "(deformed)" : "";
+  });
+  REXSYS_INFO("[native] capture: frame {} drawable by vs {{{}}}{}", sc.frame, top,
+              drawable.Other() ? " (+ more shaders)" : "");
+}
+
 // Publishes the frame's scene (none for a frame without records, so a
 // consumer never draws a stale one); every 300 guest frames logs its coverage
 // (frame-map section 9) and the guest-thread capture time, with any view.
@@ -1394,6 +1442,7 @@ void PublishScene(const FinishedScene& done) {
   if (!unsupported.empty()) {
     REXSYS_INFO("[native] capture: frame {} unsupported by hook {{{}}}", sc.frame, unsupported);
   }
+  LogShaderBreakdown(sc);
 }
 
 }  // namespace

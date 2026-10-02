@@ -10,14 +10,20 @@
 #include <vector>
 
 #include "../capture/draw_record.h"
+#include "../capture/shader_tally.h"
 
 namespace fable2::native::render {
+
+inline constexpr size_t kSkippedTallySize = 32;
 
 struct FrameScene {
   uint64_t frame = 0;
   std::vector<capture::DrawRecord> draws;
   uint32_t captured = 0;
   uint32_t skipped[size_t(capture::SkipReason::kCount)] = {};
+  // Skipped draws per (vertex shader hash, skip reason as the kind), for the
+  // coverage log; unsupported-prim draws are broken down by hook instead.
+  capture::ShaderTally<kSkippedTallySize> skipped_by_vs;
   // False when no consumer wanted records this frame (debug view off): the
   // main-scene draws were only counted (captured), draws/skipped are empty.
   bool records = true;
@@ -39,6 +45,9 @@ class FrameBuilder {
       draws_.push_back(r);
     } else {
       ++skipped_[size_t(r.skip)];
+      if (r.skip != capture::SkipReason::kUnsupportedPrim) {
+        skipped_by_vs_.Add(r.vs_hash, uint8_t(r.skip));
+      }
     }
   }
 
@@ -53,6 +62,8 @@ class FrameBuilder {
     s->frame = frame;
     s->captured = captured_;
     std::copy(std::begin(skipped_), std::end(skipped_), std::begin(s->skipped));
+    s->skipped_by_vs = skipped_by_vs_;
+    skipped_by_vs_.Clear();
     const size_t reserve = draws_.size();
     s->draws = std::move(draws_);
     draws_ = {};
@@ -67,6 +78,7 @@ class FrameBuilder {
   bool open_ = false;
   uint32_t captured_ = 0;
   uint32_t skipped_[size_t(capture::SkipReason::kCount)] = {};
+  capture::ShaderTally<kSkippedTallySize> skipped_by_vs_;
   std::vector<capture::DrawRecord> draws_;
 };
 

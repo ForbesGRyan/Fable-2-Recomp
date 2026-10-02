@@ -40,6 +40,8 @@ clang++ -std=c++23 "%~dp0native\test_rigid_skin.cpp" -o "%OUT%\rigid_skin.exe" |
 "%OUT%\rigid_skin.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_frame_scene.cpp" -o "%OUT%\frame_scene.exe" || exit /b 1
 "%OUT%\frame_scene.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_shader_tally.cpp" -o "%OUT%\shader_tally.exe" || exit /b 1
+"%OUT%\shader_tally.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_geometry_cache_index.cpp" -o "%OUT%\geometry_cache_index.exe" || exit /b 1
 "%OUT%\geometry_cache_index.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_clay_logic.cpp" -o "%OUT%\clay_logic.exe" || exit /b 1

@@ -15,6 +15,14 @@ namespace fable2::native::capture::xdk {
 // 0x821B6E00 stores dword 1 at 0x6F4 + (0x11 - index) * 8 = 0x77C - 8*index,
 // i.e. slot 95 - index at +0x480. SetPixelShader 0x82208DD8 also uses +0x480.
 inline constexpr uint32_t kDeviceVertexFetchOffset = 0x480;
+// Texture fetch constant t shares the same shadow: its 6 dwords are vertex
+// slots 3t..3t+2, i.e. +0x480 + 24*t (the GPU's register layout, xenos
+// xe_gpu_texture_fetch_t). Runtime (frame-map section 9): the 6 dwords of
+// t = 16..19 read there at every sampled DrawIndx:8221C9C8 equal the GPU
+// register file's texture fetch constants of a draw with the same constants
+// and patch index (1275/1275 rows, capture native_discovery_20261002_130248
+// with fable_2_108.log).
+inline constexpr uint32_t kDeviceTextureFetchStride = 24;
 // Stream i is bound to vertex fetch slot 95 - i (same instructions; [vbind]
 // shows fetch=95 for stream 0 draws).
 inline constexpr uint32_t kStreamFetchSlotBase = 95;
@@ -60,6 +68,17 @@ inline constexpr uint8_t kDeviceTilingFlagMask = 0x20;
 // Used as evidence only (frame rows "pitch_in"/"pitch_out").
 inline constexpr uint32_t kDeviceSurfaceInfoOffset = 0x2880;
 inline constexpr uint32_t kSurfacePitchMask = 0x3FFF;
+// Shadow of VGT_HOS_CNTL (register 0x2285; bits 0-1 = tessellation mode, 2 =
+// adaptive). Registers 0x2280.. are shadowed from +0x2964 (0x82207E9C..
+// 0x82207EA4: `addi r6,r31,0x2964; li r5,0x2280` to the register-run writer),
+// so 0x2285 is +0x2978. DrawIndx:82207C30 tests it (0x82207C78 `lwz
+// r10,0x2978(r31)`, 0x82207C7C `clrlwi r10,r10,30`, 0x82207C80 `cmplwi r10,2`)
+// and in adaptive mode draws r7 patches with r7 * 4 tessellation factors
+// (0x82207FD0 `mullw r8,r27,r21`, r21 = 4). Runtime: every [vtess] GPU draw of
+// that builder's shader has VGT_HOS_CNTL = 2 and num_indices = 4 * r7
+// (290/290 sampled rows, frame-map section 9).
+inline constexpr uint32_t kDeviceHosCntlOffset = 0x2978;
+inline constexpr uint32_t kHosCntlAdaptive = 2;
 
 // --- Vertex buffer object (D3DVertexBuffer, SetStreamSource r5) -------------
 // Dwords 6-7 hold the vertex fetch constant: dword 6 = CPU virtual address |

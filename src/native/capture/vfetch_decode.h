@@ -83,7 +83,11 @@ inline std::vector<VertexFetch> DecodeVertexFetches(const uint32_t* ucode, size_
   return out;
 }
 
-inline bool SelectPosition(const std::vector<VertexFetch>& fetches, int override_index, PosLayout* out) {
+// `swizzle_override` (vs-transforms.json "pos_swizzle", nonzero) replaces the
+// fetch's destination swizzle when the shader rearranges the fetched
+// components before transforming them (frame-map section 9).
+inline bool SelectPosition(const std::vector<VertexFetch>& fetches, int override_index, PosLayout* out,
+                           uint32_t swizzle_override = 0) {
   const VertexFetch* f = nullptr;
   if (override_index >= 0) {
     if (size_t(override_index) >= fetches.size()) return false;
@@ -103,7 +107,7 @@ inline bool SelectPosition(const std::vector<VertexFetch>& fetches, int override
   l.offset_bytes = uint32_t(f->offset_dwords) * 4;
   l.stride_bytes = f->stride_dwords * 4;
   l.fetch_slot = f->fetch_slot;
-  l.swizzle = f->dst_swizzle;
+  l.swizzle = swizzle_override ? swizzle_override : f->dst_swizzle;
   *out = l;
   return true;
 }

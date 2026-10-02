@@ -32,6 +32,8 @@
 #include "guest_read.h"
 #include "main_scene.h"
 #include "position_decode.h"
+#include "rigid_skin.h"
+#include "terrain_patch.h"
 #include "vfetch_decode.h"
 #include "xdk_hook_ids.h"
 #include "xdk_layout.h"
@@ -158,7 +160,10 @@ thread_local std::array<LastArgs, 128> t_last_args;  // indexed by hook id (< 12
 thread_local DrawNesting t_nesting;  // only the outermost draw of a call chain is recorded
 
 // World-view-projection constants per vertex shader hash, found offline by
-// tools/xdk_sigmatch/matrix_finder.py (frame-map section 9).
+// tools/xdk_sigmatch/matrix_finder.py or confirmed by hand from the shader's
+// disassembly (docs/native-renderer/vs-transforms.json, frame-map section 9).
+// The generated table also holds per-shader position swizzles, rigid skin
+// layouts and terrain parameters.
 struct TableEntry {
   uint64_t hash;
   uint32_t base;
@@ -168,9 +173,63 @@ struct TableEntry {
 };
 static constexpr TableEntry kTransformTable[] = {
 #define FABLE2_VS_TRANSFORM(H, B, L, P, D) {H, B, L, P, D},
+#define FABLE2_VS_POS_SWIZZLE(H, S)
+#define FABLE2_VS_SKIN(H, I, C, R0, R1, R2)
+#define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
+#undef FABLE2_VS_POS_SWIZZLE
+#undef FABLE2_VS_SKIN
+#undef FABLE2_VS_TERRAIN
 };
+
+struct PosSwizzleEntry {
+  uint64_t hash;
+  uint32_t swizzle;
+};
+static constexpr PosSwizzleEntry kPosSwizzleTable[] = {
+#define FABLE2_VS_TRANSFORM(H, B, L, P, D)
+#define FABLE2_VS_POS_SWIZZLE(H, S) {H, S},
+#define FABLE2_VS_SKIN(H, I, C, R0, R1, R2)
+#define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
+#include "vs_transform_table.inc"
+#undef FABLE2_VS_TRANSFORM
+#undef FABLE2_VS_POS_SWIZZLE
+#undef FABLE2_VS_SKIN
+#undef FABLE2_VS_TERRAIN
+    {0, 0}};
+
+struct SkinEntry {
+  uint64_t hash;
+  SkinSpec spec;
+};
+static constexpr SkinEntry kSkinTable[] = {
+#define FABLE2_VS_TRANSFORM(H, B, L, P, D)
+#define FABLE2_VS_POS_SWIZZLE(H, S)
+#define FABLE2_VS_SKIN(H, I, C, R0, R1, R2) {H, {I, C, {R0, R1, R2}}},
+#define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
+#include "vs_transform_table.inc"
+#undef FABLE2_VS_TRANSFORM
+#undef FABLE2_VS_POS_SWIZZLE
+#undef FABLE2_VS_SKIN
+#undef FABLE2_VS_TERRAIN
+    {0, {-1, 0, {-1, -1, -1}}}};
+
+struct TerrainEntry {
+  uint64_t hash;
+  TerrainSpec spec;
+};
+static constexpr TerrainEntry kTerrainTable[] = {
+#define FABLE2_VS_TRANSFORM(H, B, L, P, D)
+#define FABLE2_VS_POS_SWIZZLE(H, S)
+#define FABLE2_VS_SKIN(H, I, C, R0, R1, R2)
+#define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F) {H, {G, CE, HS, O, TO, TS, PO, F}},
+#include "vs_transform_table.inc"
+#undef FABLE2_VS_TRANSFORM
+#undef FABLE2_VS_POS_SWIZZLE
+#undef FABLE2_VS_SKIN
+#undef FABLE2_VS_TERRAIN
+    {0, {0, 0, 0, 0, 0, 0, -1, 0}}};
 
 const TransformInfo* FindTransform(uint64_t hash) {
   static const std::unordered_map<uint64_t, TransformInfo> table = [] {
@@ -178,10 +237,27 @@ const TransformInfo* FindTransform(uint64_t hash) {
     for (const TableEntry& e : kTransformTable) {
       m[e.hash] = TransformInfo{e.base, TransformLayout(e.layout), e.pos_fetch, e.deformed != 0};
     }
+    for (const PosSwizzleEntry& e : kPosSwizzleTable) {
+      if (auto it = m.find(e.hash); e.hash && it != m.end()) it->second.pos_swizzle = e.swizzle;
+    }
     return m;
   }();
   const auto it = table.find(hash);
   return it == table.end() ? nullptr : &it->second;
+}
+
+const SkinSpec* FindSkin(uint64_t hash) {
+  for (const SkinEntry& e : kSkinTable) {
+    if (e.hash && e.hash == hash) return &e.spec;
+  }
+  return nullptr;
+}
+
+const TerrainSpec* FindTerrain(uint64_t hash) {
+  for (const TerrainEntry& e : kTerrainTable) {
+    if (e.hash && e.hash == hash) return &e.spec;
+  }
+  return nullptr;
 }
 
 bool IsDrawId(uint32_t id) {
@@ -735,6 +811,69 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
   finish(nullptr);
 }
 
+// Caller holds g_mutex. One "tess" row (frame-map section 9) for the
+// tessellated-patch builders DrawIndx:8221C9C8 (r5 first patch, r6 patch
+// count, auto-indexed quad patches) and DrawIndx:82207C30 (adaptive: r7
+// patches, r7 * 4 tessellation factors from the bound index buffer at r6): the
+// vertex shader, the constants the terrain shaders read and texture fetch
+// constants 16-19 from the device shadow.
+void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const DeviceSnapshot& dev,
+                  bool in_scene) {
+  char buf[512];
+  std::string row;
+  std::snprintf(buf, sizeof(buf),
+                "{\"kind\":\"tess\",\"frame\":%d,\"func\":\"%s\",\"args\":[\"0x%08X\",\"0x%08X\","
+                "\"0x%08X\",\"0x%08X\"],\"device\":\"0x%08X\",\"in_scene\":%s",
+                g_frames_written.load(std::memory_order_relaxed) + 1, HookName(id), args.r[1],
+                args.r[2], args.r[3], args.r[4], device, in_scene ? "true" : "false");
+  row += buf;
+  VsChoice vc;
+  if (ChooseVs(dev, &vc)) {
+    const UcodeRef u = vc.immediate ? UcodeRef{} : ReadVsUcode(vc.obj, vc.variant);
+    const uint64_t hash = vc.immediate ? t_vs_load.hash : u.hash;
+    std::snprintf(buf, sizeof(buf),
+                  ",\"vs\":{\"obj\":\"0x%08X\",\"source\":\"%s\",\"hash\":\"0x%016llX\"}", vc.obj,
+                  vc.immediate ? "immediate" : (vc.gpu_owned ? "gpu_load" : "object"),
+                  static_cast<unsigned long long>(hash));
+    row += buf;
+  }
+  const uint32_t bank_ptr =
+      g_state.vs_bank_ptr ? g_state.vs_bank_ptr : device + xdk::kDeviceVsConstantsOffset;
+  row += ",\"consts\":{";
+  bool first = true;
+  for (uint32_t c : {0u, 1u, 2u, 3u, 8u, 11u, 46u, 47u, 72u, 113u, 114u, 115u, 252u, 253u, 254u,
+                     255u}) {
+    const uint8_t* p = ReadVirtual(bank_ptr + 16 * c, 16);
+    if (!p) continue;
+    std::snprintf(buf, sizeof(buf), "%s\"c%u\":[", first ? "" : ",", c);
+    row += buf;
+    for (int i = 0; i < 4; ++i) {
+      const uint32_t bits = LoadBe32(p + 4 * i);
+      float f;
+      std::memcpy(&f, &bits, 4);
+      if (i) row += ",";
+      AppendFloat(row, f);
+    }
+    row += "]";
+    first = false;
+  }
+  row += "},\"tf\":{";
+  for (uint32_t t = 16; t < 20; ++t) {
+    const uint32_t at =
+        device + xdk::kDeviceVertexFetchOffset + xdk::kDeviceTextureFetchStride * t;
+    const uint8_t* p = device ? ReadVirtual(at, 24) : nullptr;
+    uint32_t v[6] = {};
+    if (p) {
+      for (int i = 0; i < 6; ++i) v[i] = LoadBe32(p + 4 * i);
+    }
+    std::snprintf(buf, sizeof(buf), "%s\"%u\":", t == 16 ? "" : ",", t);
+    row += buf;
+    row += p ? HexDwords(v, 6) : "null";
+  }
+  row += "}}\n";
+  std::fputs(row.c_str(), g_file);
+}
+
 // --- Draw records (native renderer) ------------------------------------------
 
 // Per vertex-shader object: what the record needs from its microcode, kept
@@ -751,6 +890,13 @@ struct VsInfo {
   const TransformInfo* transform = nullptr;
   bool have_pos = false;
   PosLayout pos;
+  // vs-transforms.json "skin": the layout (endians unset) and the bone
+  // stream's fetch slot; skin_required with !have_skin = layout not handled.
+  bool skin_required = false;
+  bool have_skin = false;
+  RigidSkin skin;
+  uint32_t skin_slot = 0;
+  const TerrainSpec* terrain = nullptr;  // vs-transforms.json "terrain"
 };
 thread_local std::unordered_map<uint32_t, VsInfo> t_vs_cache;
 
@@ -758,7 +904,13 @@ void FillShader(VsInfo& e, const uint32_t* ucode, size_t dwords, uint64_t hash) 
   e.hash = hash;
   e.transform = FindTransform(hash);
   const std::vector<VertexFetch> fetches = DecodeVertexFetches(ucode, dwords);
-  e.have_pos = SelectPosition(fetches, e.transform ? e.transform->pos_fetch : -1, &e.pos);
+  e.have_pos = SelectPosition(fetches, e.transform ? e.transform->pos_fetch : -1, &e.pos,
+                              e.transform ? e.transform->pos_swizzle : 0);
+  if (const SkinSpec* spec = FindSkin(hash)) {
+    e.skin_required = true;
+    e.have_skin = e.have_pos && SelectSkin(fetches, *spec, e.pos, &e.skin, &e.skin_slot);
+  }
+  e.terrain = FindTerrain(hash);
 }
 
 const VsInfo* LookupVs(const VsChoice& c) {
@@ -802,7 +954,22 @@ const VsInfo* LookupVs(const VsChoice& c) {
   return &e;
 }
 
-thread_local float t_bank[1024];  // vertex constants, host floats (only the transform window is filled)
+// Vertex constants, host floats; only the registers a draw needs are filled.
+thread_local float t_bank[1024];
+
+// Converts vertex constants [reg, reg + count) of the device's bank into t_bank.
+bool ReadBankRegisters(uint32_t device, uint32_t reg, uint32_t count) {
+  if (reg + count > 256) return false;
+  const uint32_t bank_ptr = g_vs_bank_ptr.load(std::memory_order_relaxed);
+  const uint32_t at = (bank_ptr ? bank_ptr : device + xdk::kDeviceVsConstantsOffset) + 16 * reg;
+  const uint8_t* p = ReadVirtual(at, 16 * count);
+  if (!p) return false;
+  for (uint32_t i = 0; i < 4 * count; ++i) {
+    const uint32_t bits = LoadBe32(p + 4 * i);
+    std::memcpy(&t_bank[4 * reg + i], &bits, 4);
+  }
+  return true;
+}
 
 // Fills `in` for DrawIndexedVertices / DrawVertices (prim and counts already
 // set). Returns a skip reason AssembleRecord does not check (garbage counts,
@@ -850,29 +1017,93 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in) {
   } else if (uint64_t(in.start) + in.count > vertices) {
     extra = SkipReason::kBadIndex;
   }
-  // Bank: only the transform's four registers are converted.
-  if (in.transform && in.transform->base_reg <= 252) {
-    const uint32_t bank_ptr = g_vs_bank_ptr.load(std::memory_order_relaxed);
-    const uint32_t at = (bank_ptr ? bank_ptr : device + xdk::kDeviceVsConstantsOffset) +
-                        16 * in.transform->base_reg;
-    if (const uint8_t* p = ReadVirtual(at, 64)) {
-      float* rows = t_bank + 4 * in.transform->base_reg;
-      for (uint32_t i = 0; i < 16; ++i) {
-        const uint32_t bits = LoadBe32(p + 4 * i);
-        std::memcpy(&rows[i], &bits, 4);
-      }
-      in.bank = t_bank;
+  // Rigid skin (vs-transforms.json "skin"): the bone palette is the stream
+  // feeding the rows' fetch slot; endians come from the two fetch constants.
+  if (vs->skin_required) {
+    SkipReason why = SkipReason::kNone;
+    StreamView bones;
+    RigidSkin s = vs->skin;
+    if (!vs->have_skin) {
+      why = SkipReason::kUnknownPosFormat;
+    } else if (ResolveStream(dev, vs->skin_slot, &bones) || !bones.fc_match) {
+      why = SkipReason::kNoStream;
     } else {
-      extra = SkipReason::kBadMemory;
+      s.index_endian = sv.fc1 & 3;
+      bool ok = s.index_endian == 0 || s.index_endian == 2;
+      for (PosLayout& row : s.rows) ok = ok && ApplyFetchEndian(&row, bones.fc1 & 3);
+      s.palette_addr = bones.base + bones.offset;
+      s.palette_size = bones.size - bones.offset;
+      if (ok) {
+        in.skin = s;
+      } else {
+        why = SkipReason::kUnknownPosFormat;
+      }
     }
+    if (extra == SkipReason::kNone) extra = why;
+  }
+  // Bank: only the transform's four registers are converted.
+  if (in.transform && in.transform->base_reg <= 252 &&
+      !ReadBankRegisters(device, in.transform->base_reg, 4)) {
+    extra = SkipReason::kBadMemory;
+  } else if (in.transform && in.transform->base_reg <= 252) {
+    in.bank = t_bank;
   }
   return extra;
+}
+
+// Fills `in` for a tessellated terrain draw (DrawIndx:8221C9C8, the adaptive
+// DrawIndx:82207C30): patches [first, first + patches) of the bound vertex
+// shader's terrain grid (terrain_patch.h). A shader without a terrain entry
+// leaves the draw unsupported; an unhandled heightmap leaves `terrain`
+// inactive (kUnknownPosFormat).
+SkipReason FillTerrainInputs(uint32_t device, uint32_t first, uint32_t patches, DrawInputs& in) {
+  if (const SkipReason c = CountSkip(patches); c != SkipReason::kNone) return c;
+  DeviceSnapshot dev;
+  if (!ReadDevice(device, &dev)) return SkipReason::kNone;
+  VsChoice vc;
+  const VsInfo* vs = ChooseVs(dev, &vc) ? LookupVs(vc) : nullptr;
+  if (!vs) return SkipReason::kNone;
+  in.have_shader = true;
+  in.vs_hash = vs->hash;
+  in.transform = vs->transform;
+  if (!vs->terrain) return SkipReason::kNone;
+  in.terrain_shader = true;
+  const TerrainSpec& s = *vs->terrain;
+  // The spec's registers (each a component index reg * 4 + c) and the
+  // transform rows, into t_bank.
+  for (uint32_t c : {uint32_t(s.grid), uint32_t(s.cell), uint32_t(s.height_scale),
+                     uint32_t(s.origin), uint32_t(s.tex_offset), uint32_t(s.tex_scale)}) {
+    if (c >= 1024 || !ReadBankRegisters(device, c / 4, 1)) return SkipReason::kBadMemory;
+  }
+  if (s.patch_offset >= 0 &&
+      (s.patch_offset >= 1024 || !ReadBankRegisters(device, uint32_t(s.patch_offset) / 4, 1))) {
+    return SkipReason::kBadMemory;
+  }
+  if (in.transform && in.transform->base_reg <= 252) {
+    if (!ReadBankRegisters(device, in.transform->base_reg, 4)) return SkipReason::kBadMemory;
+    in.bank = t_bank;
+  }
+  // The heightmap's texture fetch constant (device shadow, 6 dwords per
+  // texture constant; xdk_layout.h kDeviceTextureFetchStride).
+  const uint8_t* p =
+      s.height_fetch < 32 ? ReadVirtual(device + xdk::kDeviceVertexFetchOffset +
+                                            xdk::kDeviceTextureFetchStride * s.height_fetch,
+                                        24)
+                          : nullptr;
+  if (!p) return SkipReason::kBadMemory;
+  uint32_t fc[6];
+  for (int i = 0; i < 6; ++i) fc[i] = LoadBe32(p + 4 * i);
+  MakeTerrainPatch(s, t_bank, fc, first, patches, &in.terrain);
+  return SkipReason::kNone;
 }
 
 // One outermost guest draw inside the main scene, as a DrawRecord in the frame.
 // Draw-argument mapping (frame-map section 8): DrawIndexedVertices r4 prim, r5
 // base vertex, r6 start index, r7 index count; DrawVertices r4 prim, r5 start
-// vertex, r6 vertex count. Other draw hooks: argument mapping unconfirmed, so
+// vertex, r6 vertex count; DrawIndx:8221C9C8 (auto-indexed quad patches) r5
+// first patch, r6 patch count; DrawIndx:82207C30 in adaptive tessellation
+// (device VGT_HOS_CNTL shadow = 2) r7 patch count from patch 0. Other draw
+// hooks (and 82207C30 in other modes): argument mapping unconfirmed, so
 // recorded as unsupported (prim 0).
 void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   DrawInputs in;
@@ -888,6 +1119,19 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
     in.prim = a.r[1];
     in.start = a.r[2];
     in.count = a.r[3];
+  } else if (id == kHook_DrawIndx_8221C9C8) {
+    in.prim = kPrimQuadPatch;
+    in.start = a.r[2];
+    in.count = a.r[3];
+    extra = FillTerrainInputs(device, in.start, in.count, in);
+  } else if (id == kHook_DrawIndx_82207C30) {
+    const uint8_t* hos = device ? ReadVirtual(device + xdk::kDeviceHosCntlOffset, 4) : nullptr;
+    if (hos && (LoadBe32(hos) & 3) == xdk::kHosCntlAdaptive) {
+      in.prim = kPrimQuadPatch;
+      in.start = 0;
+      in.count = a.r[4];
+      extra = FillTerrainInputs(device, 0, in.count, in);
+    }
   }
   if (IsSupportedPrim(in.prim)) extra = FillDrawInputs(device, in);
   std::lock_guard<std::mutex> lock(g_scene_mutex);
@@ -1123,6 +1367,8 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
   if (have_dev &&
       (id == kHook_D3DDevice_DrawVertices || id == kHook_D3DDevice_DrawIndexedVertices)) {
     WriteDrawRow(id, args, device, dev, in_scene);
+  } else if (have_dev && (id == kHook_DrawIndx_8221C9C8 || id == kHook_DrawIndx_82207C30)) {
+    WriteTessRow(id, args, device, dev, in_scene);
   }
 }
 

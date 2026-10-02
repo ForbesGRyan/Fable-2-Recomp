@@ -44,13 +44,25 @@ class GeometryCache {
     nrhi::Buffer* buffer = nullptr;
     uint32_t count = 0;      // vertices or indices
     uint32_t max_index = 0;  // indices only
+    uint64_t bytes = 0;      // allocation size
   };
+  // Replaced buffers, reused by Upload (animated skinned streams re-decode
+  // every frame; creating a buffer costs far more than filling one).
+  static constexpr uint64_t kPoolBudgetBytes = 32ull << 20;
 
   nrhi::Buffer* Upload(nrhi::Device* dev, const void* data, uint64_t bytes, uint64_t* alloc_bytes);
+  // Content hash of a guest range, computed once per frame.
+  uint64_t FrameHash(uint32_t phys_addr, uint32_t size, const uint8_t* data);
+  nrhi::Buffer* TerrainPositions(nrhi::Device* dev, const capture::DrawRecord& r,
+                                 uint32_t* vertex_count, ClayStats& st);
   uint32_t Insert(nrhi::Device* dev, const GeoKey& key, uint64_t hash, const Entry& e,
                   uint64_t bytes);
 
+  void Retire(nrhi::Device* dev, nrhi::Buffer* buffer, uint64_t bytes);
+
   GeometryCacheIndex index_;
+  RetirePool<nrhi::Buffer*> pool_{kPoolBudgetBytes};
+  std::vector<nrhi::Buffer*> destroy_;
   std::unordered_map<uint32_t, Entry> entries_;
   // Content hash per guest range, computed once per frame (many draws share
   // one vertex stream).

@@ -5,6 +5,8 @@
 // entry used in the current frame.
 
 #include <cstdint>
+#include <deque>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -90,6 +92,61 @@ class GeometryCacheIndex {
   uint64_t resident_ = 0;
   uint64_t frame_ = 0;
   uint32_t next_id_ = 1;
+};
+
+// Buffers whose cache entry was replaced, kept for reuse instead of being
+// destroyed and created again (buffer creation dominates re-decoding
+// animated streams). A buffer is reused only for the same size and only once
+// the submission it was retired in has completed. Over the byte budget the
+// oldest are handed back for destruction.
+template <typename T>
+class RetirePool {
+ public:
+  explicit RetirePool(uint64_t budget_bytes) : budget_(budget_bytes) {}
+
+  void Retire(T obj, uint64_t bytes, uint64_t submission, std::vector<T>* destroy) {
+    if (bytes > budget_) {
+      destroy->push_back(obj);
+      return;
+    }
+    items_.push_back({obj, bytes, submission});
+    bytes_ += bytes;
+    while (bytes_ > budget_ && !items_.empty()) {
+      bytes_ -= items_.front().bytes;
+      destroy->push_back(items_.front().obj);
+      items_.pop_front();
+    }
+  }
+
+  std::optional<T> Take(uint64_t bytes, uint64_t completed_submission) {
+    for (auto it = items_.begin(); it != items_.end(); ++it) {
+      if (it->bytes == bytes && it->submission <= completed_submission) {
+        T obj = it->obj;
+        bytes_ -= it->bytes;
+        items_.erase(it);
+        return obj;
+      }
+    }
+    return std::nullopt;
+  }
+
+  void Drain(std::vector<T>* out) {
+    for (const Item& i : items_) out->push_back(i.obj);
+    items_.clear();
+    bytes_ = 0;
+  }
+
+  uint64_t bytes() const { return bytes_; }
+
+ private:
+  struct Item {
+    T obj;
+    uint64_t bytes;
+    uint64_t submission;
+  };
+  std::deque<Item> items_;
+  uint64_t budget_;
+  uint64_t bytes_ = 0;
 };
 
 }  // namespace fable2::native::render

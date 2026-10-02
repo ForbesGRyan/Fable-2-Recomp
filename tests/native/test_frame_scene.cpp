@@ -69,6 +69,40 @@ int main() {
   if (capture::ResolveSkip(capture::AssembleRecord(in, 0).skip, capture::CountSkip(in.count)) !=
       SkipReason::kUnsupportedPrim) return 49;
 
+  // Terrain patches (tessellated quad patches, no vertex buffer): drawable
+  // when the shader has a terrain entry and the patch was built.
+  {
+    capture::DrawInputs t{};
+    t.func_id = 3; t.prim = capture::kPrimQuadPatch; t.start = 1; t.count = 1;
+    t.have_shader = true; t.vs_hash = 0xC30A;
+    t.transform = Good().transform; t.bank = Good().bank;
+    t.terrain_shader = true;
+    t.terrain.active = true; t.terrain.patch = 1; t.terrain.patches = 1; t.terrain.map.size = 4096;
+    const auto rt = capture::AssembleRecord(t, 5);
+    if (rt.skip != SkipReason::kNone || !rt.terrain.active || rt.terrain.patch != 1.0f) return 50;
+    if (rt.rows[0] != 1.0f) return 51;
+    // The shader is a terrain shader but the patch could not be built
+    // (unsupported heightmap): unknown position format.
+    auto t2 = t; t2.terrain.active = false;
+    if (capture::AssembleRecord(t2, 0).skip != SkipReason::kUnknownPosFormat) return 52;
+    // A patch draw whose shader has no terrain entry stays unsupported.
+    t2 = t; t2.terrain_shader = false; t2.terrain.active = false;
+    if (capture::AssembleRecord(t2, 0).skip != SkipReason::kUnsupportedPrim) return 53;
+    // Terrain still needs the transform.
+    t2 = t; t2.transform = nullptr;
+    if (capture::AssembleRecord(t2, 0).skip != SkipReason::kNoTransform) return 54;
+    // Terrain fields on an ordinary draw are ignored.
+    auto o = Good(); o.terrain.active = true;
+    if (capture::AssembleRecord(o, 0).terrain.active) return 55;
+  }
+  // A rigid skin layout travels with the record.
+  {
+    auto s = Good();
+    s.skin.active = true; s.skin.palette_addr = 0x3000; s.skin.palette_size = 168;
+    const auto rs = capture::AssembleRecord(s, 0);
+    if (rs.skip != SkipReason::kNone || !rs.skin.active || rs.skin.palette_size != 168) return 56;
+  }
+
   render::FrameBuilder b;
   b.Add(r);                         // outside bracket: ignored
   b.Close();                        // close while closed: ignored

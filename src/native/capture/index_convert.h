@@ -17,6 +17,9 @@ enum : uint32_t {
   kPrimTriangleStrip = 6,
   kPrimRectangleList = 8,
   kPrimQuadList = 13,
+  // Tessellated quad patches (xenos::PrimitiveType::kQuadPatch): drawn only as
+  // terrain (terrain_patch.h), never through BuildTriangleList.
+  kPrimQuadPatch = 0x12,
 };
 
 struct IndexSource {

@@ -33,6 +33,10 @@ clang++ -std=c++23 "%~dp0native\test_index_convert.cpp" -o "%OUT%\index_convert.
 "%OUT%\index_convert.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_vfetch_decode.cpp" -o "%OUT%\vfetch_decode.exe" || exit /b 1
 "%OUT%\vfetch_decode.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_terrain_patch.cpp" -o "%OUT%\terrain_patch.exe" || exit /b 1
+"%OUT%\terrain_patch.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_rigid_skin.cpp" -o "%OUT%\rigid_skin.exe" || exit /b 1
+"%OUT%\rigid_skin.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_frame_scene.cpp" -o "%OUT%\frame_scene.exe" || exit /b 1
 "%OUT%\frame_scene.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_geometry_cache_index.cpp" -o "%OUT%\geometry_cache_index.exe" || exit /b 1

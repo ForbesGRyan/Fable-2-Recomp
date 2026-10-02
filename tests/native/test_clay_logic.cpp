@@ -212,6 +212,61 @@ int main() {
     CHECK(49, DrawVertexCount(100, 40) == 40);
     CHECK(50, DrawVertexCount(0, 100) == 0);
   }
+  // 60-69: terrain records: vertex count, position and index keys.
+  {
+    capture::DrawRecord t = BaseRecord();
+    t.prim = capture::kPrimQuadPatch;
+    t.indexed = false;
+    t.vb = {};
+    t.terrain.active = true;
+    t.terrain.patch = 2;
+    t.terrain.patches = 3;
+    t.terrain.cols = 2;
+    t.terrain.inv_cols = 0.5f;
+    t.terrain.cell[0] = t.terrain.cell[1] = 8;
+    t.terrain.map.phys_addr = 0x1BD0C000;
+    t.terrain.map.size = 0x5000;
+    constexpr uint32_t kPts = (capture::kTerrainGrid + 1) * (capture::kTerrainGrid + 1);
+    CHECK(60, RecordVertexCount(t) == 3 * kPts);
+    CHECK(61, RecordVertexCount(BaseRecord()) == 100);
+    const GeoKey k = PositionKey(t);
+    CHECK(62, k.addr == 0x1BD0C000 && k.size == 0x5000 && k.kind == 2 && k.stride == capture::kTerrainGrid);
+    capture::DrawRecord a = t;
+    a.terrain.patch = 3;
+    CHECK(63, !(PositionKey(a) == k));
+    a = t;
+    a.terrain.origin[1] = 16;
+    CHECK(64, !(PositionKey(a) == k));
+    a = t;
+    a.terrain.height_scale = 2;
+    CHECK(65, !(PositionKey(a) == k));
+    a = t;
+    a.terrain.map.endian = 1;
+    CHECK(66, !(PositionKey(a) == k));
+    const GeoKey ik = IndexKey(t);
+    CHECK(67, ik.kind == 3 && ik.stride == capture::kTerrainGrid && ik.addr == 0);
+    a = t;
+    a.terrain.patch = 9;  // same grid shape: same indices
+    CHECK(68, IndexKey(a) == ik);
+    a.terrain.patches = 1;
+    CHECK(69, !(IndexKey(a) == ik));
+  }
+  // 70-72: rigid skin layouts are part of the position key.
+  {
+    capture::DrawRecord r = BaseRecord();
+    capture::DrawRecord s = r;
+    s.skin.active = true;
+    s.skin.palette_addr = 0x3000;
+    s.skin.palette_size = 168;
+    s.skin.bone_stride = 24;
+    CHECK(70, !(PositionKey(s) == PositionKey(r)) && PositionKey(s).kind == 0);
+    capture::DrawRecord s2 = s;
+    s2.skin.palette_addr = 0x4000;
+    CHECK(71, !(PositionKey(s2) == PositionKey(s)));
+    s2 = s;
+    s2.skin.index_offset_bytes = 12;
+    CHECK(72, !(PositionKey(s2) == PositionKey(s)));
+  }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text\n";
   return 0;

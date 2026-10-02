@@ -45,6 +45,10 @@ int main() {
   std::vector<VertexFetch> swz = {f[2]};
   swz[0].dst_swizzle = 0xAC1;  // yxw1
   if (!SelectPosition(swz, -1, &pos) || pos.swizzle != 0xAC1) return 14;
+  // A table swizzle (vs-transforms.json "pos_swizzle") replaces the fetch's;
+  // 0 keeps it.
+  if (!SelectPosition(f, 2, &pos, 0xAC1) || pos.swizzle != 0xAC1 || pos.offset_bytes != 4) return 15;
+  if (!SelectPosition(f, 2, &pos, 0) || pos.swizzle != 0x688) return 16;
   if (SelectPosition(f, 9, &pos)) return 8;
   // A program whose first fetch is a mini fetch, or with no fetches, has no position.
   std::vector<VertexFetch> only_mini = {f[1]};

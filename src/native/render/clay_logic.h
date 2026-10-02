@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <initializer_list>
 #include <iterator>
 #include <string>
@@ -85,22 +86,73 @@ inline uint32_t PositionCount(uint32_t vb_size, const capture::PosLayout& l) {
   return uint32_t((vb_size - need) / l.stride_bytes + 1);
 }
 
+// Vertices the record's position buffer holds: the terrain grid points, or
+// every position in the stream.
+inline uint32_t RecordVertexCount(const capture::DrawRecord& r) {
+  if (r.terrain.active) {
+    constexpr uint32_t kPoints = (capture::kTerrainGrid + 1) * (capture::kTerrainGrid + 1);
+    return r.terrain.patches * kPoints;
+  }
+  return PositionCount(r.vb.size, r.pos);
+}
+
+inline uint32_t FloatBits(float f) {
+  uint32_t u;
+  std::memcpy(&u, &f, 4);
+  return u;
+}
+
+inline uint32_t LayoutHash(const capture::PosLayout& l) {
+  return HashCombine32({l.offset_bytes, uint32_t(l.format), uint32_t(l.exp_adjust), l.swizzle,
+                        uint32_t(l.swap16), uint32_t(l.is_signed), uint32_t(l.normalized),
+                        l.stride_bytes});
+}
+
 // Cache key of a decoded position stream: the stream plus every layout field
-// that changes the decode (the content hash covers the raw bytes only).
+// that changes the decode (the content hash covers the raw bytes only). A
+// skinned stream adds its bone layout and palette range (kind 0); a terrain
+// patch run is keyed by its heightmap and every patch parameter (kind 2).
 inline GeoKey PositionKey(const capture::DrawRecord& r) {
-  const capture::PosLayout& l = r.pos;
   GeoKey k;
+  if (r.terrain.active) {
+    const capture::TerrainPatch& t = r.terrain;
+    const capture::HeightMap& m = t.map;
+    k.addr = m.phys_addr;
+    k.size = m.size;
+    k.stride = capture::kTerrainGrid;
+    k.extra = HashCombine32(
+        {FloatBits(t.patch), t.patches, FloatBits(t.cols), FloatBits(t.inv_cols),
+         FloatBits(t.cell[0]), FloatBits(t.cell[1]), FloatBits(t.height_scale),
+         FloatBits(t.origin[0]), FloatBits(t.origin[1]), FloatBits(t.tex_offset[0]),
+         FloatBits(t.tex_offset[1]), FloatBits(t.tex_scale[0]), FloatBits(t.tex_scale[1]), m.width,
+         m.height, m.pitch, m.endian, uint32_t(m.tiled), uint32_t(m.clamp_x), uint32_t(m.clamp_y)});
+    k.kind = 2;
+    return k;
+  }
+  const capture::PosLayout& l = r.pos;
   k.addr = r.vb.phys_addr;
   k.size = r.vb.size;
   k.stride = l.stride_bytes;
-  k.extra = HashCombine32({l.offset_bytes, uint32_t(l.format), uint32_t(l.exp_adjust), l.swizzle,
-                           uint32_t(l.swap16), uint32_t(l.is_signed), uint32_t(l.normalized)});
+  k.extra = LayoutHash(l);
+  if (r.skin.active) {
+    const capture::RigidSkin& s = r.skin;
+    k.extra = HashCombine32({k.extra, s.index_offset_bytes, s.index_shift, s.index_endian,
+                             s.palette_addr, s.palette_size, s.bone_stride, LayoutHash(s.rows[0]),
+                             LayoutHash(s.rows[1]), LayoutHash(s.rows[2])});
+  }
   k.kind = 0;
   return k;
 }
 
 inline GeoKey IndexKey(const capture::DrawRecord& r) {
   GeoKey k;
+  if (r.terrain.active) {
+    // The grid's triangle list depends only on its shape.
+    k.stride = capture::kTerrainGrid;
+    k.extra = r.terrain.patches;
+    k.kind = 3;
+    return k;
+  }
   k.addr = r.indexed ? r.ib.phys_addr : 0;
   k.size = r.indexed ? r.ib.size : 0;
   k.stride = r.index32 ? 1 : 0;

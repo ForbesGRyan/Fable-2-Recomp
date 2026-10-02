@@ -4,6 +4,11 @@ namespace xdk = fable2::native::capture::xdk;
 static_assert(xdk::GpuAddress(0xE0000000u) == 0x00001000u);  // 4 KB view: +0x1000
 static_assert(xdk::GpuAddress(0xDFFFF000u) == 0x1FFFF000u);  // 16 MB view: no offset
 static_assert(xdk::GpuAddress(0xA0001000u) == 0x00001000u);  // 64 KB view: no offset
+// Texture fetch constant 16 occupies vertex fetch slots 48-50 of the shadow.
+static_assert(xdk::kDeviceVertexFetchOffset + xdk::kDeviceTextureFetchStride * 16 ==
+              xdk::kDeviceVertexFetchOffset + 8 * 48);
+// VGT_HOS_CNTL (0x2285) in the 0x2280 run shadowed from +0x2964.
+static_assert(xdk::kDeviceHosCntlOffset == 0x2964 + 4 * (0x2285 - 0x2280));
 int main() {
   // Real evidence (frame-map section 8): VB object 0x401288C8 dword 6/7 =
   // 0xFA63AD03 / 0x10012C02, stream offset 0x7E0 -> [vbind] fc=0x1A63C4E3 0x10012422.

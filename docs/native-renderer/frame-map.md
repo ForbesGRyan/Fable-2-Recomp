@@ -523,7 +523,9 @@ The XDK converts a CPU virtual address to a GPU physical one inline at every fet
 | `D3DDevice_SetVertexShader?` `0x82208CE8` | **the real SetPixelShader**: r4 stored at device+0x3194 | `0x82208D6C`; emitted with `IM_LOAD` type 1 (`0x8221B354 ori r11,r11,1`) |
 | `D3DDevice_DrawIndexedVertices` `0x8221E0F0` | r4 primitive type, r5 base vertex, r6 start index, r7 index count | Task 9 (index buffer rows: `(start + count) * 2 <= size` in 9335/9335 gameplay draws); caller `0x8221BCC8` builds r6/r7 from the primitive group (`0x8221BDD4..0x8221BE18`) |
 | `D3DDevice_DrawVertices` `0x8221C518` | r4 primitive type, r5 start vertex, r6 vertex count | Task 11, gameplay discovery `native_discovery_20261002_104938`: start + count <= vertices of the position stream in 204/204 draw rows with a vertex buffer; prim 4 rows advance r5 by r6 between consecutive calls (r5 864, r6 48, next r7 912); prim 1 (point list) rows have r5 = 0, r6 = vertices. Census `d3d_census_20261002_104938` args agree (r4 1, r5 0, r6 0x10/0x14) |
-| `DrawIndx:8221C9C8`, `DrawIndx:82217EE8`, `DrawIndx:82207C30`, `BeginVertices?`, the seven `DrawIndx2` builders | not confirmed | Sampled r4 values do not read as a Xenos primitive type for `8221C9C8` / `82207C30` (0x12 in all 476 census samples) and the register meaning of r5-r8 was not traced; draw records give them `kUnsupportedPrim` (section 9) |
+| `DrawIndx:8221C9C8` (Task 11b) | tessellated quad patches, auto-indexed: r5 first patch (written to VGT_INDX_OFFSET), r6 patch count (`num_indices`). r4 = 0x12 (`D3DTPT_QUADPATCH`) is not read: the draw initiator is built as the constant `0x192` (prim 0x12 `kQuadPatch`, source select 2 auto-index, explicit major mode). No index buffer, no streams: the terrain shaders fetch no vertices (section 9, "Tessellated terrain") | `0x8221CA28`/`0x8221CA30` (r5 -> r24, r6 -> r25; r4 is overwritten at `0x8221CA50` before any use); `0x8221CC80..0x8221CC90` type-0 write of register 0x2102 (VGT_INDX_OFFSET) = r24; `0x8221CCD0..0x8221CCEC` DRAW_INDX `0xC0012201` with initiator `0x192 \| r25 << 16` (chunks of 0xFFFE, `0x8221CC8C..0x8221CCA0`); `0x8221C9D8..0x8221C9FC` sets VGT_OUTPUT_PATH_CNTL (shadow +0x2974) to 1 (tessellation). Single caller `0x8221FD60` draws sub-patches 0-3 of a tile, one each: `0x8222057C..0x8222058C` (r4 0x12, r5 = loop index, r6 1). Runtime (temporary SDK `[vtess]` register-file log, `fable_2_108.log`, against capture `native_discovery_20261002_130248`): all 1275 sampled rows match a GPU draw with prim 18, `num_indices` 1 = r6, VGT_INDX_OFFSET = r5 and the same constants and texture fetch constants; for the 475 rows whose tile draws a strict subset of its four sub-patches, r5 is in the GPU's set in 475/475 |
+| `DrawIndx:82207C30` (Task 11b, adaptive only) | tessellated quad patches when VGT_HOS_CNTL (device shadow +0x2978) is 2 (adaptive): r7 patches, numbered from 0 (VGT_INDX_OFFSET 0); the bound index buffer (+0x3094) at r6 holds r7 * 4 tessellation factors (32-bit). Other tessellation modes (DMA patch indices) are not mapped | `0x82207C78..0x82207C84` (mode test), `0x82207F6C..0x82207F80` (VGT_INDX_OFFSET = 0), `0x82207FD0..0x82207FE8` (adaptive branch: `mullw r8,r27,r21` with r21 = 4 from `0x82207CC0`, so `num_indices` = 4 * r7, initiator `0x912`; index address = IB dword 6 + r6 * 4, converted at `0x82208030..0x82208044`). Runtime: 290/290 sampled rows match a GPU draw with VGT_HOS_CNTL 2, `num_indices` = 4 * r7 and the same constants (control `num_indices` = r7: 0/290) |
+| `DrawIndx:82217EE8`, `BeginVertices?`, the seven `DrawIndx2` builders | not confirmed | The register meaning of r4-r8 was not traced; draw records give them `kUnsupportedPrim` (section 9). Together 17 main-scene draws per frame in gameplay |
 
 Task 8's empty fields had two causes. `ib.obj` was 0 because the menu capture held no `DrawIndexedVertices` at all (its draws are `DrawIndx:82217EE8`, `DrawIndx2:821EF988`, `BeginVertices` and 224 `DrawVertices`); `SetIndices` r4 was right. Stream `obj_dwords` were null outside `DrawVertices` for the same reason: the engine's own emitters do not bind streams through `SetStreamSource`. The real mistake was the shader mapping above. Draw rows now read the bindings from the device fields at draw time (covers inlined binds); the hook view is kept under `"hook"` in raw rows and agrees with the device fields in every sampled D3D draw.
 
@@ -561,7 +563,7 @@ The object's microcode is a template whose vertex fetches the XDK rewrites for t
 
 ### Limits
 
-- Draw rows cover `D3DDevice_DrawVertices` and `D3DDevice_DrawIndexedVertices` only. The menu's 3D scene is drawn by the engine emitter `DrawIndx:82217EE8` (1260 of 1470 sampled menu draws in `native_discovery_20261002_094059`), which binds neither streams nor shaders through the D3D calls; how many `DrawVertices` a menu capture sees depends on timing (0 or 197 in two runs with the same settings).
+- Draw rows cover `D3DDevice_DrawVertices` and `D3DDevice_DrawIndexedVertices` only; `"kind":"tess"` rows (Task 11b) cover `DrawIndx:8221C9C8` and `DrawIndx:82207C30`. The menu's 3D scene is drawn by the engine emitter `DrawIndx:82217EE8` (1260 of 1470 sampled menu draws in `native_discovery_20261002_094059`), which binds neither streams nor shaders through the D3D calls; how many `DrawVertices` a menu capture sees depends on timing (0 or 197 in two runs with the same settings).
 - `SelectPosition(..., -1, ...)` takes the shader's first full vertex fetch. For the 17 instanced gameplay draws above that is the per-instance stream, not the per-vertex position. Draw rows that read past the selected stream (indexed: max index + base vertex >= vertices; non-indexed: start + count > vertices) are written with `"pos_suspect": true` and no `positions`; `matrix_finder.py` skips them and `check_discovery.py` also requires `vb.fc_match` (13 such rows in gameplay capture `native_discovery_20261002_102615`).
 - 32-bit indices and shader variant 1 were not sampled; those two fields rest on the disassembly.
 
@@ -636,19 +638,72 @@ The first gameplay matrix-finder pass (on `native_discovery_20261002_104938`) le
 - Accepted, base 0, dot, `pos_fetch` -1:
   - exact shaders, on the disassembly alone: `0xECD66A10092E6562` (also the GPU check), `0xF160B4DA459A6D40`, `0x65834A8405D40E53`, `0x57818A7FD1C4F026`, `0xBEAD84BD72072E0E`, `0x1E6798C9D0F65784`.
   - derived positions (skinned or displaced), where at least 90% of samples keep half their vertices inside the clip volume with `c0..c3`: `0x5F4416192E87005F` (0.938), `0x3A0F9098B839DDBC`, `0x82F6433A69263C75`, `0x9ED0BA440DBD51D4`, `0x432563420047C96C`, `0xFBD39C64463E180B` (1.0 each). These entries carry `"deformed": true`: skinned meshes are drawn in their bind pose and foliage without wind, which sub-project 3 accepts. `gen_transform_table.py` emits the flag as the fifth `FABLE2_VS_TRANSFORM` argument; it reaches `TransformInfo::deformed` and `DrawRecord::deformed`, and the coverage line counts deformed drawable records separately.
-- Rejected (`"rejected"` gives the reason): `0x79EAC49585797037` (position permuted by `cndeq` after the fetch, 0.204), `0xA1F7E9885EC466DF` (skinned with placement in the bones, 0.477), `0x87D4404FB36AF71D` (position from three fetches, 0.0), `0xD4D558DA6A82BDC8` (0.534), `0x695413A9831D88DA` (memexport particle pass, point lists), `0x475EC9F795E5EDBB` (0.719), `0xA5846836C90E1192` (0.773), `0x29B6506FBACEB93A` (0.600), `0x775C6085FBB9D676` (1 sample), `0x563E3BE17857DB59` (computed index and relative constants, 0.429).
+- Added in Task 11b (section "Task 11b" below): `0x79EAC49585797037` (position swizzle), `0xA1F7E9885EC466DF` (rigid skin), the terrain shaders `0xC30A97D946FA2BE4`, `0xFB68A7F2301210E1` and `0x5003700B7C9B1C16`. Their Task 11 rejections are kept as `"task11_rejected"`.
+- Rejected (`"rejected"` gives the reason): `0x87D4404FB36AF71D` (position from three fetches, 0.0), `0xD4D558DA6A82BDC8` (0.534), `0x695413A9831D88DA` (memexport particle pass, point lists), `0x475EC9F795E5EDBB` (0.719), `0xA5846836C90E1192` (0.773), `0x29B6506FBACEB93A` (0.600), `0x775C6085FBB9D676` (1 sample), `0x563E3BE17857DB59` (computed index and relative constants, 0.429).
 
-`gen_transform_table.py` writes 12 entries to `src/native/capture/vs_transform_table.inc`.
+`gen_transform_table.py` writes 17 `FABLE2_VS_TRANSFORM` entries to `src/native/capture/vs_transform_table.inc`, plus `FABLE2_VS_POS_SWIZZLE`, `FABLE2_VS_SKIN` and `FABLE2_VS_TERRAIN` lines for the entries that have them (test `tests/test_gen_transform_table.py`).
+
+### Task 11b: tessellated terrain, position swizzle, rigid skin
+
+Evidence for the three additions comes from one gameplay discovery run (`tools\drive_game.ps1 -Total 110 -GameArgs "--native_render_log_vertex_bindings=true" -Env @{FABLE2_NATIVE_DISCOVERY="40"; FABLE2_NATIVE_DISCOVERY_DELAY="55"; FABLE2_NATIVE_DISCOVERY_EVERY="8"}`, capture `native_discovery_20261002_130248`, log `fable_2_108.log`). Three temporary diagnostics were used and then reverted (not committed):
+
+- an SDK `[vtess]` line at `IssueDraw` (beside `[vbind]`): the draw initiator, VGT_INDX_OFFSET, VGT_OUTPUT_PATH_CNTL, VGT_HOS_CNTL, the tessellation levels, `c0..c3`, `c8`, `c11`, `c46`, `c47`, `c72`, `c113..c115`, `c252..c255` from the GPU register file, texture fetch constants 16-19 and the shader's vertex fetch constants (bool constants 0-31 were added for a second run, `fable_2_109.log`). It logged every 8th tessellated draw and every 16th draw of `0x79EA...` / `0xA1F7...`;
+- in discovery, a one-time dump of the textures behind tf16-19;
+- in discovery, raw vertex bytes and the other streams' first 2 KB in `0xA1F7...` draw rows.
+
+The `"kind":"tess"` discovery row (shader, the constants above, tf16-19 from the device shadow) is committed.
+
+**Tessellated terrain (`DrawIndx:8221C9C8`, 255 main-scene draws per frame; adaptive `DrawIndx:82207C30`, 31).** The builders draw tessellated quad patches (section 8). Their shaders, `0xC30A97D946FA2BE4` / `0xFB68A7F2301210E1` (8221C9C8, continuous tessellation, VGT_HOS_CNTL 1, maximum level 15) and `0x5003700B7C9B1C16` (82207C30, adaptive), have no vertex fetch at all. The SDK passes the patch index in `r0.x` and the domain point in `r0.yz` (xenia `kQuadDomainPatchIndexed`). The shader places the point on a grid and lifts it by a height read from tf16 (instruction numbers in `vs-transforms.json`):
+
+- `row = floor(p * c11.y)`, `col = p - row * c11.x` (gameplay: 2 x 2 sub-patches per tile for 8221C9C8, 4 or 5 columns for 82207C30, where instr 5 adds `c113.x` to `p`);
+- `world.xy = (col + u, row + v) * c46.xy + c113.xy` (cell 8 x 8 world units);
+- `h = tfetch2D(tf16, (world.xy - c47.zw) * c47.xy).x * c46.z` (scale 1/288, height scale 88.98);
+- `oPos = dp4(c0..c3 .zxyw, cndeq(c254.xxxy, (h, world.x, world.y), c254.yyyy))`. The GPU register file holds `c254 = (0, 1, 3, 2)` (`c255` for `0x5003...`; the device bank holds zeros there, these are shader literals), so `oPos = dp4(c0..c3, (world.x, world.y, h, 1))`.
+
+The heightmap is tf16 = `84C04802 1BD0C058 00480240 01001400 00000000 00000218`: tiled, 577 x 577, pitch 608, `k_16` unsigned normalized, endian 8in16, clamp to edge, point magnification filter. Untiled with xenia's `GetTiledOffset2D` and read big-endian, the dumped texture is a smooth heightmap of Bowerstone (mean neighbour step 0.0016, against 0.004 / 0.076 read linearly). The capture's constants and tf16-19 (device shadow at +0x480 + 24 * t) equal the GPU's in all 1275 sampled `8221C9C8` rows, with VGT_INDX_OFFSET = r5. The 290 `82207C30` rows all match a GPU draw with `num_indices` = 4 * r7.
+
+Rebuilding a 16 x 16 grid per patch from the dumped heightmap and projecting it with the row's `c0..c3` puts 83% of the points inside the clip volume, with 1215 of the 1275 patches having a visible point. With x and y swapped the figure is 34%; with zero height it is 15%. For the `82207C30` main-scene draws it is 80%; the control without the `c113.x` patch offset gives 79%, so that offset rests on the disassembly alone.
+
+Not modelled: the hole mask. When `tf18.w < c114.x` the shader writes `c255`/NaN as the position (instr 37-47), cutting holes in the ground. tf18 is a `k_DXT5A` atlas addressed through `c115`; the first decode attempt did not produce a recognisable image. Clay ground is therefore drawn where the game may cut holes. Next action: decode tf18 (DXT5A, tiled per 4 x 4 block) and drop the grid triangles whose corners are holes.
+
+**Position swizzle (`0x79EAC49585797037`, about 95 draws per frame).** This shader is the static-mesh shader `0xECD66A10...` with a different register allocation:
+
+- `vfetch_full r2.zxwy` (instr 5);
+- `r6 = cndeq(c255.xxxy, r2.zwyy, c255.yyyy)` (instr 10), with GPU `c255 = (0, 1, 3, 2)`;
+- `oPos = dp4(c0..c3 .zxyw, r6)`.
+
+Together these are `dp4(c0..c3, (src.y, src.x, src.w, 1))`, the fetch read with swizzle `yxw1`. `vs-transforms.json` gives `"pos_swizzle": "yxw1"`. The capture applies it through `SelectPosition`'s swizzle override (test `test_vfetch_decode.cpp` 15-16).
+
+Checks on 475 main-scene rows:
+
+- GPU `c0..c3` equal the device bank in 474 of them;
+- the remapped positions put 93.6% of vertices inside the clip volume, against 85.3% as fetched;
+- every remapped vertex is in front of the camera with depth in [0, 1];
+- bool constant 0 is 0 in all 21881 logged draws (`fable_2_109.log`).
+
+**Rigid skin (`0xA1F7E9885EC466DF`, about 92 draws per frame).** Task 11 rejected this shader on the theory that the bones carry the object placement. They do not.
+
+- Each vertex has one bone, in byte x of an integer 8_8_8_8 at dword 3 (fetch 2, read as `r5.z`). Under 8in32 that is the dword's last byte.
+- The bone's three half4 rows are full fetches of slot 92 (stream 3), stride 24 bytes, indexed by that bone (fetches 6-8, instr 13-15).
+- `world_k = dot(row_k, (p.xyz, 1))` (instr 22-25), then `oPos = dp4(c0..c3, (world, 1))` (instr 46-50).
+
+Palettes hold 4-8 bones. Their rotation part deviates from identity by at most 0.05 at p99 (max 1.27, translation p99 0.18), consistent with sway and small animation. The device bank `c0..c3` equals the GPU's in 460/460 main-scene rows. 310 of the 460 rows are entirely in front of the camera and 150 entirely behind; `0xECD66A10...` also has 100 fully-behind rows of 4480, so drawing objects behind the camera is normal here. Bool constant 0, which selects a uv-space position at instr 45, is 0 in all 21176 logged draws (`fable_2_109.log`).
+
+`"skin": {"index_fetch": 2, "index_component": "z", "row_fetches": [6, 7, 8]}` plus `"pos_swizzle": "yxw1"` give the exact skinned position (`rigid_skin.h`, test `test_rigid_skin.cpp`). A vertex whose bone lies past its palette becomes NaN and is culled.
+
+**Renderer cost.** Animated palettes (about 10 skinned streams per frame) re-decode every frame. Creating a new upload buffer for each one took the clay pass's decode time from 0.3 ms to 4.5 ms per frame and gameplay from 30 to 26.9 fps. Replaced buffers now go to a `RetirePool` (32 MB, `geometry_cache_index.h`, test `test_geometry_cache_index.cpp`). A buffer is reused for the same size once its retiring submission has completed. Decode is back to 0.2-0.4 ms.
 
 ### Draw records
 
 `capture.cpp` builds one `DrawRecord` per outermost hooked draw inside the main-scene bracket while `fable2_native_render` is true. At each Swap, `capture::Publisher()` publishes `FrameBuilder::Finish(frame)`. Inputs:
 
 - **Shader.** The device field, or the `GpuLoadShaders` fallback, or the immediate copy (section 8). A per-thread cache is keyed by shader object; it is refreshed when the microcode address, size or variant changes, when object dword 10 (the patched-declaration id) changes, or (immediate path) when the copy's hash changes. A steady-state draw does five small reads and no hashing.
-- **Position.** `SelectPosition` with the table's `pos_fetch`, then `ApplyFetchEndian`.
+- **Position.** `SelectPosition` with the table's `pos_fetch` and `pos_swizzle`, then `ApplyFetchEndian`.
+- **Rigid skin** (table `"skin"`). `SelectSkin` takes the bone-index element and the three bone-row fetches from the shader's fetch list. At draw time the bone palette is the stream behind the rows' fetch slot (needs `fc_match`); the index endian comes from the position stream's fetch constant, the rows' from the palette's. Missing palette: `kNoStream`; an unhandled layout or endian: `kUnknownPosFormat`. The renderer transforms each vertex by its bone (`rigid_skin.h`) before the rows.
+- **Terrain** (table `"terrain"`). `FillTerrainInputs` reads the spec's registers and the heightmap's texture fetch constant from the device shadow and builds a `TerrainPatch` (`terrain_patch.h`). A patch draw whose shader has no terrain entry stays `kUnsupportedPrim`; an unhandled heightmap is `kUnknownPosFormat`. The renderer builds the grid (`kTerrainGrid` = 16 quads per patch edge) from the heightmap, keyed by the map's bytes and every patch parameter.
 - **Vertex and index buffers.** The vertex buffer comes from the position slot's stream object (dwords 6/7) plus the stream offset, and needs `fc_match`. The index buffer comes from object dwords 0/6/7. Records carry big-endian indices (`index_convert.h`), so a 16-bit buffer must be 8in16 and a 32-bit one 8in32; any other endian is `kBadIndex`.
 - **Bank.** Only the transform's four registers are converted, into a per-thread 1024-float buffer.
-- **Argument mapping (section 8).** `DrawIndexedVertices` and `DrawVertices` as mapped. All other draw hooks get prim 0, which becomes `kUnsupportedPrim`.
+- **Argument mapping (section 8).** `DrawIndexedVertices`, `DrawVertices`, `DrawIndx:8221C9C8` and adaptive `DrawIndx:82207C30` as mapped. All other draw hooks get prim 0, which becomes `kUnsupportedPrim`.
 
 Capture-side skip reasons replace `AssembleRecord`'s reason, unless that reason is unsupported-prim (`ResolveSkip`, `CountSkip` and `kMaxDrawCount` in `draw_record.h`, tested in `test_frame_scene.cpp`). The capture stops filling inputs at the first problem, so `AssembleRecord` alone would report, for example, an oversized draw as unknown-shader. The capture-side reasons are:
 
@@ -667,22 +722,32 @@ Capture-side skip reasons replace `AssembleRecord`'s reason, unless that reason 
 
 ### Coverage (gameplay)
 
-Run with `.\tools\drive_game.ps1 -Total 120 -GameArgs "--fable2_native_render=true"` (`fable_2_097.log` and `fable_2_099.log`; after Task 11 fix round 1, `fable_2_100.log`, with identical counts and the deformed count added). Every 300 frames:
+Task 11 (`.\tools\drive_game.ps1 -Total 120 -GameArgs "--fable2_native_render=true"`, `fable_2_097.log`, `fable_2_099.log`, `fable_2_100.log`):
 
 ```
 [native] capture: frame 1200 captured 1477 drawable 921 (deformed 5) skipped {no-transform: 229, unsupported-prim: 324, bad-index: 3} nested_total 0
 [native] capture: frame 1200 unsupported by hook {D3DDevice_DrawVertices?: 21, D3DDevice_BeginVertices?: 3, DrawIndx:8221C9C8: 255, DrawIndx:82217EE8: 10, DrawIndx:82207C30: 31, DrawIndx2:821EF988: 4}
 ```
 
-Frames 1200 to 3300 all report the same counts (the player stands still). The menu and loading frames have no main-scene draws, apart from 2 `DrawIndx2:821EF988` draws per frame from frame 600. D / C = 921 / 1477 = 0.62, below the 0.9 target. The shortfall by reason:
+D / C = 921 / 1477 = 0.62.
+
+Task 11b (`.\tools\drive_game.ps1 -Total 125 -Shots "75,95" -GameArgs "--fable2_native_render=true","--fable2_native_view=split"`, `fable_2_112.log`, release build without diagnostics). Frames 1200 to 3600 all report:
+
+```
+[native] capture: frame 3300 captured 1477 drawable 1394 (deformed 5) skipped {no-transform: 42, unsupported-prim: 38, bad-index: 3} nested_total 0
+[native] capture: frame 3300 unsupported by hook {D3DDevice_DrawVertices?: 21, D3DDevice_BeginVertices?: 3, DrawIndx:82217EE8: 10, DrawIndx2:821EF988: 4}
+[native] clay: drawn 1394 (deformed 5) of 1394 drawable, skipped_bad_index 0 other 0 | 10 uploads, 2778 hits, 10.8 MB resident | hash 0.62 ms, decode 0.21 ms, record 0.26 ms (max total 1.55 ms over 300) | scene frame 3313
+```
+
+D / C = 1394 / 1477 = 0.944, above the 0.9 target. Frames 1200 to 3300 took 69.97 s, which is 30.0 fps. The split view's clay half now shows the street surface and snow drifts under the buildings and the character; the Task 12 clay dump had empty background there. The remaining skips:
 
 | Reason | Draws per frame | Share of C | Cause | Next action |
 |---|---|---|---|---|
-| unsupported-prim | 324 | 21.9% | `DrawIndx:8221C9C8` 255 (single caller `0x8221FD60`, r4 = 0x12), `82207C30` 31, `82217EE8` 10, `DrawIndx2:821EF988` 4, `BeginVertices` 3: argument mapping not confirmed. `DrawVertices` 21: point and rectangle lists | Trace `8221C9C8`'s arguments (how r4-r8 reach its `DRAW_INDX` header and which streams/shader it binds). It is the single largest gap |
-| no-transform | 229 | 15.5% | Rejected shaders, mainly `0x79EAC49585797037` (~95/frame, permuted position) and `0xA1F7E9885EC466DF` (~90/frame, skinned with placement in the bones) | Per-shader position remap for `0x79EA...`; bone-aware transform (or keep skipping) for skinned meshes |
-| bad-index | 3 | 0.2% | Instanced draws whose first fetch is per-instance data (`pos_suspect`) | Instancing support, later |
+| no-transform | 42 | 2.8% | Rejected shaders. `0xD4D558DA6A82BDC8` (16): four-bone blended skinning. Bone indices are `r2.xyzw` (integer 8_8_8_8 at dword 3), weights `r4` (8_8_8_8 at dword 4), and the rows come from slot 92 as in `0xA1F7...` (instr 9-35, `oPos` at 71-74). `0x29B6506FBACEB93A` (14, `DrawVertices` quad lists): the fetch index is computed from `r0.x` (instr 9) and the position is derived from two 32-bit fetches. `0x475EC9F795E5EDBB` (7, `max oPos, r2, r2` at instr 97) and `0xA5846836C90E1192` (2, `max oPos, r1, r1` at instr 147): positions computed by long ALU sequences. `0x563E3BE17857DB59` (2): computed index and relative constants. `0x775C6085FBB9D676` (1) | `0xD4D5...`: extend `RigidSkin` to weighted four-bone blends (same palette layout as `0xA1F7...`). The others need per-shader position derivation from their dumps; at 25 draws together they are below the target's margin |
+| unsupported-prim | 38 | 2.6% | `DrawVertices` 21: shader `0x19A01C01290E20A7`, point lists with no vertex fetch. `DrawIndx:82217EE8` 10, `DrawIndx2:821EF988` 4, `BeginVertices` 3: argument mapping not traced | Trace `82217EE8` (the menu's main emitter, section 8 "Limits") the same way as `8221C9C8`. Point lists stay skipped (no geometry to draw as clay) |
+| bad-index | 3 | 0.2% | `0x8123C16DBF583F92`: instanced draws whose first fetch is per-instance data (`pos_suspect`) | Instancing support, later |
 
-Only 22 shaders were sampled, all from one spot in Bowerstone. Other areas will bring shaders that are not in the table yet. Every sampled shader that draws uses `c0..c3`, so a default of base 0 dot for unknown shaders would cover most of them. That is a design decision for Tasks 12-14, not taken here.
+Only Bowerstone was sampled. Other areas will bring shaders that are not in the table yet.
 
 ## Pending
 

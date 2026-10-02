@@ -114,6 +114,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     return false;
   }
   ready_ = true;
+  ++targets_generation_;
   return true;
 }
 
@@ -138,9 +139,11 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
 
   for (const capture::DrawRecord& r : scene.draws) {
-    nrhi::Buffer* positions = geometry_.Positions(dev, r, st);
+    uint32_t buffer_vertices = 0;
+    nrhi::Buffer* positions = geometry_.Positions(dev, r, &buffer_vertices, st);
     if (!positions) continue;
-    const uint32_t vertex_count = PositionCount(r.vb.size, r.pos);
+    const uint32_t vertex_count =
+        DrawVertexCount(buffer_vertices, PositionCount(r.vb.size, r.pos));
     uint32_t index_count = 0;
     nrhi::Buffer* indices = geometry_.Indices(dev, r, vertex_count, &index_count, st);
     if (!indices) continue;

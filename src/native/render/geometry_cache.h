@@ -23,12 +23,13 @@ namespace nrhi = rex::graphics::nrhi;
 
 class GeometryCache {
  public:
-  GeometryCache();
+  explicit GeometryCache(uint64_t budget_bytes);
 
   // Returns the GPU buffer holding float4 positions / uint32 indices, or
-  // nullptr (draw skipped). The position buffer holds
-  // PositionCount(r.vb.size, r.pos) vertices.
-  nrhi::Buffer* Positions(nrhi::Device* dev, const capture::DrawRecord& r, ClayStats& st);
+  // nullptr (draw skipped). *vertex_count receives the number of positions
+  // the returned buffer actually holds.
+  nrhi::Buffer* Positions(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t* vertex_count,
+                          ClayStats& st);
   nrhi::Buffer* Indices(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t vertex_count,
                         uint32_t* index_count, ClayStats& st);
   void BeginFrame(uint64_t frame, uint64_t budget_bytes);

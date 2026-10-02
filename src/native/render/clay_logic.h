@@ -124,6 +124,13 @@ inline bool ReferencedIndexBytes(const capture::DrawRecord& r, IndexBytes* out) 
   return true;
 }
 
+// Vertex count the shader and the kBadIndex check may use: never more than
+// the uploaded buffer holds (root SRVs have no hardware bounds check, and a
+// key collision could pair a record with a smaller decoded stream).
+inline uint32_t DrawVertexCount(uint32_t buffer_count, uint32_t record_count) {
+  return std::min(buffer_count, record_count);
+}
+
 // The renderer's kBadIndex rule: the highest referenced vertex
 // (max_index + base_vertex) must lie inside the position stream. Lower
 // vertices below 0 are left to the shader's per-vertex bounds check.

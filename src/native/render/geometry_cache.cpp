@@ -24,7 +24,7 @@ uint64_t RoundUp256(uint64_t v) { return (v + 255) & ~uint64_t(255); }
 
 }  // namespace
 
-GeometryCache::GeometryCache() : index_(512ull << 20) {}
+GeometryCache::GeometryCache(uint64_t budget_bytes) : index_(budget_bytes) {}
 
 void GeometryCache::BeginFrame(uint64_t frame, uint64_t budget_bytes) {
   index_.set_budget_bytes(budget_bytes);
@@ -74,7 +74,7 @@ uint32_t GeometryCache::Insert(nrhi::Device* dev, const GeoKey& key, uint64_t ha
 }
 
 nrhi::Buffer* GeometryCache::Positions(nrhi::Device* dev, const capture::DrawRecord& r,
-                                       ClayStats& st) {
+                                       uint32_t* vertex_count, ClayStats& st) {
   const uint32_t count = PositionCount(r.vb.size, r.pos);
   if (count == 0) {
     ++st.skipped_other;
@@ -102,6 +102,7 @@ nrhi::Buffer* GeometryCache::Positions(nrhi::Device* dev, const capture::DrawRec
   if (found.hit) {
     if (auto it = entries_.find(found.id); it != entries_.end()) {
       ++st.hits;
+      *vertex_count = it->second.count;
       return it->second.buffer;
     }
   }
@@ -114,6 +115,7 @@ nrhi::Buffer* GeometryCache::Positions(nrhi::Device* dev, const capture::DrawRec
   }
   if (buffer) {
     Insert(dev, key, hash, {buffer, count, 0}, alloc);
+    *vertex_count = count;
     ++st.uploads;
   } else {
     ++st.skipped_other;

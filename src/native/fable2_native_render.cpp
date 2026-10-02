@@ -31,7 +31,7 @@ REXCVAR_DEFINE_STRING(fable2_native_render_mode, "overlay", "Fable2",
 REXCVAR_DEFINE_STRING(fable2_native_clay_color, "clay", "Fable2",
                       "Native clay pass color: clay = one clay color; draw = a color per "
                       "draw; shader = a color per vertex shader.");
-REXCVAR_DEFINE_INT32(fable2_native_geometry_budget_mb, 512, "Fable2",
+REXCVAR_DEFINE_INT32(fable2_native_geometry_budget_mb, 256, "Fable2",
                      "GPU memory budget (MB) for decoded native geometry; least recently "
                      "used buffers are evicted above it.");
 
@@ -62,8 +62,9 @@ EdgeDetector g_toggle;
 std::atomic<uint32_t> g_frame{0};
 
 // Clay pass state: command-processor thread only.
-render::ClayPass g_clay;
+std::unique_ptr<render::ClayPass> g_clay;  // created on first use (cvars parsed)
 std::shared_ptr<const render::FrameScene> g_clay_scene;  // last scene rendered
+uint64_t g_clay_targets = 0;  // targets generation g_clay_scene was drawn into
 uint64_t g_clay_frames = 0;
 double g_clay_window_max_ms = 0;  // worst hash+decode+record over the log window
 
@@ -91,6 +92,10 @@ void Fail(const char* what) {
     REXLOG_ERROR("[native] {} failed; falling back to emulated output (F6 retries)", what);
     SetStatus(std::string("Native: ") + what + " failed (F6 retries)");
   }
+}
+
+uint64_t GeometryBudgetBytes() {
+  return uint64_t(std::max<int32_t>(16, REXCVAR_GET(fable2_native_geometry_budget_mb))) << 20;
 }
 
 render::ClayColor CurrentClayColor() {
@@ -191,17 +196,20 @@ bool RenderCallback(const NativeGuestOutputRenderContext& ctx, void*) {
 bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   std::shared_ptr<const render::FrameScene> scene = capture::Publisher().Latest();
   if (!scene) return true;
-  if (!g_clay.Ensure(ctx.device)) {
+  if (!g_clay) g_clay = std::make_unique<render::ClayPass>(GeometryBudgetBytes());
+  if (!g_clay->Ensure(ctx.device)) {
     Fail("clay pass");
     return false;
   }
-  if (scene == g_clay_scene) return true;
+  // New targets (F6 retry, device change) start undefined: redraw even if
+  // the scene has not changed.
+  if (scene == g_clay_scene && g_clay->targets_generation() == g_clay_targets) return true;
   g_clay_scene = scene;
+  g_clay_targets = g_clay->targets_generation();
   ++g_clay_frames;
-  const int32_t budget_mb = std::max<int32_t>(16, REXCVAR_GET(fable2_native_geometry_budget_mb));
-  g_clay.geometry().BeginFrame(g_clay_frames, uint64_t(budget_mb) << 20);
+  g_clay->geometry().BeginFrame(g_clay_frames, GeometryBudgetBytes());
   render::ClayStats st;
-  g_clay.Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), st);
+  g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), st);
   SetStatus(render::FormatStatusText(*scene, st));
   const double cpu_ms = st.hash_ms + st.decode_ms + st.record_ms;
   g_clay_window_max_ms = std::max(g_clay_window_max_ms, cpu_ms);

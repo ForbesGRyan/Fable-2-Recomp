@@ -205,6 +205,13 @@ int main() {
     const std::string ot = FormatStatusText(o, so);
     CHECK(46, ot.find("skipped 4 (top: render-other 4)") != std::string::npos);
   }
+  // 47-50: the shader's vertex count never exceeds the uploaded buffer.
+  {
+    CHECK(47, DrawVertexCount(100, 100) == 100);
+    CHECK(48, DrawVertexCount(60, 100) == 60);   // smaller buffer under a key collision
+    CHECK(49, DrawVertexCount(100, 40) == 40);
+    CHECK(50, DrawVertexCount(0, 100) == 0);
+  }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text\n";
   return 0;

@@ -21,9 +21,14 @@ class ClayPass {
   static constexpr uint32_t kWidth = 1120;
   static constexpr uint32_t kHeight = 720;
 
+  explicit ClayPass(uint64_t geometry_budget_bytes) : geometry_(geometry_budget_bytes) {}
+
   // Targets, binding layout, shaders and pipeline. False on any failure
   // (logged); call again to retry.
   bool Ensure(nrhi::Device* dev);
+  // Bumped each time Ensure creates new targets: their contents are
+  // undefined until the next Render.
+  uint64_t targets_generation() const { return targets_generation_; }
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
               ClayStats& st);
   nrhi::Texture* color() const { return color_; }  // left in kPixelShaderResource after Render
@@ -35,6 +40,7 @@ class ClayPass {
 
   nrhi::Device* device_ = nullptr;
   bool ready_ = false;
+  uint64_t targets_generation_ = 0;
   nrhi::BindingLayout* layout_ = nullptr;  // the RHI has no layout destruction
   nrhi::Shader* vs_ = nullptr;
   nrhi::Shader* ps_ = nullptr;

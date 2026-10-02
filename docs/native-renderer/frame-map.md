@@ -1,6 +1,6 @@
 # Fable 2 frame map and sub-project 3 recommendation
 
-Status: menu capture, gameplay census, pitch ablation and tiling capture complete; only the uncapped F3 reading is pending (see "Pending"). Sections 1b, 2c, 3, 5, 6b and 7 carry the gameplay results.
+Status: sub-project 3 (capture layer and clay pass) implemented. Census, pitch ablation, tiling capture and discovery (D1-D4, sections 8 and 9) are complete; gameplay coverage D / C = 0.944 (section 9, "Coverage"). Validation (spec success criteria, plan Task 14: alignment at three locations, 10-minute stability, capture cost) is pending, as is the uncapped F3 reading (see "Pending"). Sections 1b, 2c, 3, 5, 6b and 7 carry the gameplay census results.
 Gameplay capture: `out\build\win-amd64-release\logs\d3d_census_20261001_140912.jsonl` (900 rows, 30 s walking in the world, armed after 90 s; no repeated `gpu_frame`).
 Menu capture used: `out\build\win-amd64-release\logs\d3d_census_20261001_130522.jsonl` (600 rows). Row 1 accumulates every call since process start and is dropped by `summarize_census.py`. The capture has two distinct segments (section 2): frames 2-480 are a static screen (likely splash/loading/title) and frames 481-600 are a 3D scene. Treat the 3D segment as the one that matters. This capture predates `gpu.gpu_frame`, so repeated GPU frames could not be dropped.
 
@@ -695,7 +695,7 @@ Palettes hold 4-8 bones. Their rotation part deviates from identity by at most 0
 
 ### Draw records
 
-`capture.cpp` builds one `DrawRecord` per outermost hooked draw inside the main-scene bracket while `fable2_native_render` is true. At each Swap, `capture::Publisher()` publishes `FrameBuilder::Finish(frame)`. Inputs:
+`capture.cpp` builds one `DrawRecord` per outermost hooked draw inside the main-scene bracket while `fable2_native_render` is true and a consumer wants records: `PollFrame` sets the flag each guest frame to "composite view (overlay, split, native) and failure latch clear" (`RecordsWanted`, `native_render_state.h`), and the capture latches it at each Swap, so records start and stop at frame boundaries. Without a consumer the bracket is still observed and main-scene draws are only counted (`FrameBuilder::CountUnrecorded`), so the coverage line still reports `captured`; such frames publish no scene, and the clay pass shows the emulated frame until the first frame with records. Immediate shader loads made without a consumer are not hashed; a draw that still runs such a load when records resume gets no shader (`kUnknownShader`) until the shader is reloaded. At each Swap, `capture::Publisher()` publishes `FrameBuilder::Finish(frame)`. Inputs:
 
 - **Shader.** The device field, or the `GpuLoadShaders` fallback, or the immediate copy (section 8). A per-thread cache is keyed by shader object; it is refreshed when the microcode address, size or variant changes, when object dword 10 (the patched-declaration id) changes, or (immediate path) when the copy's hash changes. A steady-state draw does five small reads and no hashing.
 - **Position.** `SelectPosition` with the table's `pos_fetch` and `pos_swizzle`, then `ApplyFetchEndian`.
@@ -718,7 +718,19 @@ Capture-side skip reasons replace `AssembleRecord`'s reason, unless that reason 
 
 ### Read cost
 
-`guest_read.h` checked every page with `VirtualQuery`. On the guest arena's file-mapped views that took about 0.47 ms per call (25k calls = 11.6 s in a timed run). Per-draw records then ran the game at 2.5 frames/s (census `guest_ms` 390-410 ms), and discovery wrote about one frame per second. Reads now check the guest heap page tables instead. `BaseHeap::QueryRegionInfo` reports committed and readable for a whole region, through `Memory::LookupHeap` for virtual addresses and `Memory::GetPhysicalHeap` for physical ones. Those two SDK symbols were added to `rexruntime.def`. A per-thread, per-frame `RegionReadCache` (`page_cache.h`, test `test_page_cache.cpp`) holds 64 regions. Measured cost: records 1.2 ms per gameplay frame (1477 records); discovery 60 frames every 16th draw in 2.3 s.
+`guest_read.h` checked every page with `VirtualQuery`. On the guest arena's file-mapped views that took about 0.47 ms per call (25k calls = 11.6 s in a timed run). Per-draw records then ran the game at 2.5 frames/s (census `guest_ms` 390-410 ms), and discovery wrote about one frame per second. Reads now check the guest heap page tables instead. `BaseHeap::QueryRegionInfo` reports committed and readable for a whole region, through `Memory::LookupHeap` for virtual addresses and `Memory::GetPhysicalHeap` for physical ones. Those two SDK symbols were added to `rexruntime.def`. A per-thread, per-frame `RegionReadCache` (`page_cache.h`, test `test_page_cache.cpp`) holds 64 regions and checks the most recently hit one first. Measured cost: records 1.2 ms per gameplay frame (1477 records); discovery 60 frames every 16th draw in 2.3 s.
+
+**Capture timer.** The guest-thread capture work (hook returns, the discovery-only binding state, the swap) is timed with the TSC (calibrated against `steady_clock` at startup) and accumulated per guest frame into `FrameScene::capture_ms`. The `[native] capture:` line prints it every 300 frames with any view (`capture X ms (median, p90, max over N frames)`, plus `records on/off`), and F3 shows `Capture: X ms guest time per frame` in composite views. The per-hook argument copy in `OnXdkCall` (eight stores) is not timed. With `fable2_native_render` or discovery on, or `FABLE2_GUEST_WORK_LOG=1`, a `[frame] guest` line every 300 frames gives the fps and the medians of the raw per-frame frame, work (frame minus swap and limiter waits, as F3), swap and wait times.
+
+**Gameplay A/B (2026-10-02, `.\tools\drive_game.ps1 -Total 120`, Bowerstone after loading the save, 30 fps lock).** Seven 300-frame windows per run from frame 1500 (about 50 s in):
+
+| Run | Guest work, median per window (mean of 7) | Capture time per frame, median | fps |
+|---|---|---|---|
+| `--fable2_native_render=false` (`FABLE2_GUEST_WORK_LOG=1`, `fable_2_118.log`) | 5.36-5.43 ms (5.39) | - | 30.0 |
+| `--fable2_native_render=true --fable2_native_view=off` (`fable_2_119.log`) | 5.48-5.57 ms (5.52) | 0.051 ms (p90 0.053-0.055, max 0.137) | 30.0 |
+| `--fable2_native_render=true --fable2_native_view=split` (`fable_2_120.log`) | 6.87-7.47 ms (7.11) | 1.05-1.18 ms (max 2.71) | 30.0 |
+
+With the view off the capture costs 0.05 ms by the timer and about 0.12 ms of guest work against the renderer disabled, under the 0.5 ms criterion. The remaining view-off cost is the bracket observation per guest draw (tiling flag read and the scene mutex, about 2400 draws per frame) and the untimed hook argument copies. With records (split) the timer reads about 1.1 ms (record building: device snapshot, shader lookup, index scan per draw) and guest work rises by about 1.7 ms; the difference is timer overhead, cache effects and untimed hook work.
 
 ### Coverage (gameplay)
 

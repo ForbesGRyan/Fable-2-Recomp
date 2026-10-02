@@ -79,6 +79,26 @@ Foundation for a native D3D12 renderer (see
 `docs/superpowers/specs/2026-10-01-native-renderer-foundation-design.md`).
 Start with `--fable2_native_render=true` (or `[native] enabled = true` in `fable2_config.toml`; restart required). Choose a debug view with `--fable2_native_view=overlay|split|native|pattern` (default `off`) or cycle off, overlay, split, native, pattern with F6. Clay geometry is a debug view: the emulated frame keeps rendering underneath (`overlay` blends the native image at 50%, `split` shows it on the right half, `native` shows it full screen, `pattern` replaces the frame with a test pattern). Any native failure falls back to the emulated image (F6 retries). D3D12 only.
 
+| Setting | Effect |
+|---|---|
+| `--fable2_native_clay_color=clay\|draw\|shader` | Clay color: one clay color (default), a color per draw, or a color per vertex shader (shows which shader drew what) |
+| `--fable2_native_geometry_budget_mb=<MB>` | GPU memory for decoded native geometry (default 256, minimum 16); least recently used buffers are evicted above it |
+
+F3 (in overlay, split and native views) adds three native lines: `Native: captured C, drawn D (deformed N), skipped S (top: ...)` (main-scene guest draws, the ones drawn as clay, and the top three skip reasons), `Geometry: ...` (geometry cache uploads, hits, resident MB, and the GPU-thread hash/decode/record times), and `Capture: X ms guest time per frame` (time the capture layer spends on the game thread). The game log gets a `[native] capture:` line every 300 frames in every view (captured/drawable counts, skip reasons, `records on|off` and the capture time with its median, p90 and max), a `[native] clay:` line while a composite view is shown, and a `[frame] guest` line (fps and median frame/work/swap/wait times; also with `FABLE2_GUEST_WORK_LOG=1` when the renderer is off). Draw records are only built while a composite view is shown, so the view `off` costs well under a millisecond per frame.
+
+Developer environment variables (set before launching `fable_2.exe`):
+
+| Variable | Effect |
+|---|---|
+| `FABLE2_NATIVE_DISCOVERY=<frames>` | Write `logs\native_discovery_<timestamp>.jsonl` (raw hook rows, decoded draw rows, frame rows) for that many guest frames; works with the renderer off |
+| `FABLE2_NATIVE_DISCOVERY_DELAY=<seconds>` | Start discovery that many seconds after the first frame (e.g. 50 to reach gameplay) |
+| `FABLE2_NATIVE_DISCOVERY_EVERY=<n>` | Sample one draw in n (default 64) |
+| `FABLE2_AUTOPLAY=<s:Button,...>` | Press gamepad buttons from inside the game at the given seconds since start, e.g. `23:A,27:Down,30:A,35:A` (buttons: A B X Y Up Down Left Right Start Back LB RB L3 R3) |
+| `FABLE2_AUTOPLAY_HOLD_MS=<ms>` | How long each autoplay press is held (default 100) |
+| `FABLE2_GUEST_WORK_LOG=1` | `[frame] guest` log line with the renderer off (A/B baseline) |
+
+`tools\drive_game.ps1` launches the game with autoplay into gameplay (loads the save; world fully up at about 50 s), optionally takes window screenshots, and closes it, without touching the keyboard or the foreground window. From the repo root, e.g. `.\tools\drive_game.ps1 -Total 120 -Shots "95" -GameArgs "--fable2_native_render=true","--fable2_native_view=split"` (screenshots in `out\build\win-amd64-release\logs\shots`), or `-Env @{FABLE2_NATIVE_DISCOVERY="300"; FABLE2_NATIVE_DISCOVERY_DELAY="50"}` for a gameplay discovery capture.
+
 ## User config (fable2_config.toml)
 
 The recomp has its own human-readable user config, `fable2_config.toml`, next

@@ -215,3 +215,34 @@ scale above 1120x720.
 - **Geometry deforming in the vertex shader** (wind, water, skinning): shows as
   misaligned clay for those draws; acceptable for sub-project 3 and tagged by the
   `shader` color mode.
+
+## Implementation notes (deviations)
+
+Where the implementation differs from the design above (evidence in
+`docs/native-renderer/frame-map.md` sections 8 and 9):
+
+- **Primitives.** The RHI only has 16-bit index buffers, so every supported type
+  (triangle list, strip, fan, quad list) is converted on the CPU to a uint32
+  triangle list (`index_convert.h`) and the clay vertex shader pulls positions by
+  index from a StructuredBuffer; there is no index-buffer copy. Rect lists are not
+  supported (skip reason).
+- **Files.** `draw_state.h` and `frame_builder.{h,cpp}` were folded into
+  `src/native/capture/capture.cpp` (binding state, bracket, discovery) and
+  `src/native/render/frame_scene.h` (`FrameBuilder`, `ScenePublisher`).
+- **Transforms.** `matrix_finder.py` did not find the matrices on gameplay data;
+  the transform table entries were confirmed by hand from the shaders'
+  disassembly (manual entries in `vs-transforms.json`).
+- **Terrain.** Tessellated terrain patches fetch no vertices; their grids are
+  rebuilt from the heightmap texture and the shader's constants
+  (`terrain_patch.h`).
+- **Skinning.** One rigid-skin shader (one bone per vertex) is transformed on the
+  CPU (`rigid_skin.h`); blended skinning stays skipped.
+- **Deformed flag.** Records whose shader moves the position before the transform
+  are drawn undeformed and flagged `deformed` (counted in F3 and the logs).
+- **Menu.** The menu does not exercise the main-scene path, so main-scene checks
+  run in gameplay, reached with in-process autoplay (`tools\drive_game.ps1`,
+  `FABLE2_AUTOPLAY`).
+- **Capture cost.** Draw records are built only while a composite view
+  (overlay, split, native) is shown; with the view off the capture only counts
+  main-scene draws. Guest-thread capture time is timed per frame (F3 and the
+  `[native] capture:` log line).

@@ -2340,11 +2340,11 @@ git commit -m "Native render: debug views, composite, F6 view cycling"
 **Files:**
 - Modify: `docs/native-renderer/frame-map.md` (section 10 "Clay pass validation"), `docs/superpowers/specs/2026-10-01-native-renderer-clay-pass-design.md` (status line only)
 
-- [ ] **Step 1: Automated checks** (agent): full native and Python test suites green; game build exit 0; 10-minute menu run with `--fable2_native_render=true --fable2_native_view=overlay` without crash or latch failure (record the last `[native] capture:` and `[native] clay:` lines); A/B capture overhead in the menu: F3 numbers cannot be read by an agent, so compare `[native] capture:` record-time stats (`record_ms` per frame) — expected < 0.5 ms median.
+- [ ] **Step 1: Automated checks** (agent): full native and Python test suites green; game build exit 0; 10-minute menu run with `--fable2_native_render=true --fable2_native_view=overlay` without crash or latch failure (record the last `[native] capture:` and `[native] clay:` lines); A/B capture overhead in gameplay with the guest-thread capture timer: three runs of about 120 s each via `.\tools\drive_game.ps1 -Total 120` (in-process autoplay; world fully up at about 50 s) with `--fable2_native_render=false` (plus `-Env @{FABLE2_GUEST_WORK_LOG="1"}`), `--fable2_native_render=true --fable2_native_view=off`, and `--fable2_native_render=true --fable2_native_view=split`; compare the `[frame] guest` work medians and the `[native] capture:` `capture` median — expected < 0.5 ms per frame with the view off.
 - [ ] **Step 2: User checks** (hand to the user as a checklist; the task completes when the user reports back):
   1. `--fable2_native_render=true --fable2_native_view=split`, then F6 through overlay/native at three spots (town, open field, interior): clay lines up with the emulated image (same camera, shapes in place within a couple of pixels).
   2. F3 in the world: `Native: captured C, drawn D` with D/C >= 0.9; note the top skip reasons.
-  3. 10 minutes of play with the view on: no crash, no latch failure.
+  3. 10 minutes of play with the view on: no crash, no latch failure; include at least one area transition (walk through a loading boundary).
   4. With the view off: capture overhead visible in F3 guest work time vs a run with `--fable2_native_render=false` (< 0.5 ms difference).
   5. With the view off: the image looks exactly like a normal run; the suppression and census flags still work.
   A gameplay discovery capture (`FABLE2_NATIVE_DISCOVERY=300`, `FABLE2_NATIVE_DISCOVERY_DELAY=90`) plus a rerun of `matrix_finder.py` and `gen_transform_table.py` is the follow-up if coverage is below 90% in the world.

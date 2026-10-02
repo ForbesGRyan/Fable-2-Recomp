@@ -34,7 +34,7 @@ int main() {
   capture::ObserveDraw(b, false, s);
   if (capture::EndFrame(b, s).closes != 0) return 35;
 
-  // Finish (Task 11, at Swap) closes the builder; a draw that is still tiled
+  // Finish (at Swap) closes the builder; a draw that is still tiled
   // reopens it.
   capture::ObserveDraw(b, true, s);
   b.Finish(1);

@@ -1,7 +1,7 @@
 #pragma once
 
-// Guest XDK D3D object and device layouts for Fable 2, found in Task 9
-// (frame-map section 8). Every constant names its evidence: an instruction
+// Guest XDK D3D object and device layouts for Fable 2, found by disassembly
+// and discovery captures (frame-map section 8). Every constant names its evidence: an instruction
 // address in the guest image (`sigmatch.py disasm out\xdk\fable2 <addr> <n>`)
 // and/or a discovery/[vbind] cross-check.
 
@@ -41,7 +41,7 @@ inline constexpr uint32_t kDeviceIndexBufferOffset = 0x3094;
 // SetPending_AluConstants.
 inline constexpr uint32_t kDeviceVsConstantsOffset = 0x780;
 
-// --- Main-scene bracket (Task 10) --------------------------------------------
+// --- Main-scene bracket (frame-map section 8, "Main-scene bracket") ---------
 // Device flag byte +0x2ABC; bit 0x20 = inside BeginTiling/EndTiling (the
 // predicated-tiling pass). BeginTiling 0x822A5F80 (only static caller
 // 0x821A19B0, engine 0x821A17A8) sets it (0x822A61C0 `lbz`, 0x822A61D0

@@ -43,7 +43,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 }
 )hlsl";
 
-// Clay pass (native scene, Task 12): vertex pulling from StructuredBuffers
+// Clay pass (native scene, render/clay_pass.cpp): vertex pulling from StructuredBuffers
 // (float4 positions, uint32 triangle-list indices), transformed by the
 // draw's captured rows; flat shading from screen-space derivatives.
 inline constexpr const char* kClayVs = R"hlsl(
@@ -79,7 +79,7 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0) : SV_Target {
 }
 )hlsl";
 
-// Debug views (Task 13): the clay target drawn over the guest output.
+// Debug views (render/composite.cpp, fable2_native_view): the clay target drawn over the guest output.
 // mode 1 overlay (alpha 0.5), 2 split (right half only), 3 native (opaque).
 inline constexpr const char* kCompositePs = R"hlsl(
 cbuffer C : register(b0) { float out_w; float out_h; uint mode; float alpha; };

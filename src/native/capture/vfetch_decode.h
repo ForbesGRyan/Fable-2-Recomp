@@ -2,7 +2,8 @@
 
 // Xenos shader microcode -> vertex fetch list (pure: no SDK/GPU deps). Bit
 // layouts mirror rex/graphics/format/ucode.h (ControlFlowExecInstruction,
-// VertexFetchInstruction); see the plan's Task 3 for the field list.
+// VertexFetchInstruction): per fetch the slot, destination, format, sign,
+// normalization, exponent bias, stride and offset.
 
 #include <cstddef>
 #include <cstdint>

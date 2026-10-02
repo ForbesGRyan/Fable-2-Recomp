@@ -52,6 +52,17 @@ inline const char* ViewName(View v) {
   return "off";
 }
 
+// Views that draw the clay pass over the guest output.
+inline bool IsCompositeView(View v) {
+  return v == View::kOverlay || v == View::kSplit || v == View::kNative;
+}
+
+// Whether the capture layer builds draw records: only for a consumer (a
+// composite view while the failure latch is clear).
+inline bool RecordsWanted(View v, bool latch_failed) {
+  return !latch_failed && IsCompositeView(v);
+}
+
 class EdgeDetector {
  public:
   bool Update(bool down) {

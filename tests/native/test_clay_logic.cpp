@@ -184,12 +184,14 @@ int main() {
     st.hash_ms = 0.84;
     st.decode_ms = 0.126;
     st.record_ms = 0.5;
+    s.capture_ms = 0.4251;
     const std::string t = FormatStatusText(s, st);
     const std::string want =
         "Native: captured 1477, drawn 915 (deformed 5), skipped 562 "
         "(top: unsupported-prim 324, no-transform 229, bad-index 5)\n"
         "Geometry: 12 uploads, 1818 hits, 45.5 MB resident | hash 0.84 ms, decode 0.13 ms, "
-        "record 0.50 ms";
+        "record 0.50 ms\n"
+        "Capture: 0.43 ms guest time per frame";
     CHECK(44, t == want);
     if (t != want) std::cerr << "got:  " << t << "\nwant: " << want << "\n";
     FrameScene empty;

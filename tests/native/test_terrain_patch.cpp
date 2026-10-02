@@ -179,6 +179,20 @@ int main() {
     if (MakeTerrainPatch(past, bank, kTf16, 0, 1, &tp)) return 68;
   }
 
+  // --- Texel index of non-finite coordinates (garbage constants) ---
+  {
+    volatile float inf = INFINITY;  // volatile: no constant folding
+    volatile float nan = NAN;
+    for (uint8_t clamp : {uint8_t(0), uint8_t(1), uint8_t(2)}) {
+      if (detail::TexelIndex(inf, 8, clamp) != 0) return 70 + clamp;
+      if (detail::TexelIndex(-inf, 8, clamp) != 0) return 73 + clamp;
+      if (detail::TexelIndex(nan, 8, clamp) != 0) return 76 + clamp;
+    }
+    // Finite coordinates are unchanged: wrap, mirror, clamp.
+    if (detail::TexelIndex(1.25f, 8, 0) != 2 || detail::TexelIndex(-0.125f, 8, 0) != 7) return 79;
+    if (detail::TexelIndex(1.25f, 8, 1) != 5 || detail::TexelIndex(2.0f, 8, 2) != 7) return 80;
+  }
+
   std::cout << "PASS: terrain patch\n";
   return 0;
 }

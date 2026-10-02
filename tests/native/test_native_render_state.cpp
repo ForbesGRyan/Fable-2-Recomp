@@ -34,6 +34,14 @@ int main() {
   if (latch.IsFailed()) return 15;
   if (!latch.Fail()) return 16;
 
+  // Capture builds draw records only for a consumer: a composite view with
+  // the latch clear.
+  if (IsCompositeView(View::kOff) || IsCompositeView(View::kPattern)) return 17;
+  if (!IsCompositeView(View::kOverlay) || !IsCompositeView(View::kSplit) ||
+      !IsCompositeView(View::kNative)) return 18;
+  if (!RecordsWanted(View::kSplit, false) || RecordsWanted(View::kSplit, true)) return 19;
+  if (RecordsWanted(View::kOff, false) || RecordsWanted(View::kPattern, false)) return 20;
+
   std::cout << "PASS: view parsing/cycling, F6 edge detection, failure latch\n";
   return 0;
 }

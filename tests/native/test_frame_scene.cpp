@@ -121,6 +121,20 @@ int main() {
   if (b.InMainScene()) return 16;   // Finish closes
   auto s2 = b.Finish(43);
   if (s2->captured != 0 || !s2->draws.empty()) return 17;
+  if (!s->records || s->capture_ms != 0.0) return 20;  // defaults: records built, untimed
+
+  // Records off (no consumer): draws are counted inside the bracket only, no
+  // records are kept, and the next Finish starts clean.
+  b.CountUnrecorded();              // outside bracket: ignored
+  b.Open();
+  b.CountUnrecorded();
+  b.CountUnrecorded();
+  auto c = b.Finish(44);
+  if (c->captured != 2 || !c->draws.empty()) return 21;
+  for (uint32_t n : c->skipped) {
+    if (n) return 22;
+  }
+  if (b.Finish(45)->captured != 0) return 23;
 
   render::ScenePublisher pub;
   if (pub.Latest()) return 18;

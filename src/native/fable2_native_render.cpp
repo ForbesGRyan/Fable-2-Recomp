@@ -51,7 +51,10 @@ struct Resources {
   nrhi::Pipeline* pattern = nullptr;
 };
 
-bool g_installed = false;
+std::atomic<bool> g_installed{false};
+// The parsed fable2_native_view. The string cvar is read and written only on
+// the game thread (Install, F6 in PollFrame); the GPU and UI threads read this.
+std::atomic<View> g_view{View::kOff};
 Resources g_res;  // command-processor thread only
 FailureLatch g_latch;
 EdgeDetector g_toggle;
@@ -74,19 +77,18 @@ void SetStatus(std::string text) {
   g_status = std::move(text);
 }
 
-View CurrentView() {
-  static std::atomic<bool> warned{false};
-  const ParsedView parsed = ParseView(REXCVAR_GET(fable2_native_view));
-  if (!parsed.recognized && !warned.exchange(true)) {
-    REXLOG_WARN("[native] unknown fable2_native_view '{}', using off",
-                REXCVAR_GET(fable2_native_view));
+// Game thread only: parses the string cvar.
+View ParseViewCvar() {
+  const std::string text = REXCVAR_GET(fable2_native_view);
+  const ParsedView parsed = ParseView(text);
+  if (!parsed.recognized) {
+    REXLOG_WARN("[native] unknown fable2_native_view '{}', using off", text);
   }
   return parsed.view;
 }
 
-bool IsCompositeView(View v) {
-  return v == View::kOverlay || v == View::kSplit || v == View::kNative;
-}
+// Any thread.
+View CurrentView() { return g_view.load(std::memory_order_relaxed); }
 
 void Fail(const char* what) {
   if (g_latch.Fail()) {
@@ -189,7 +191,13 @@ bool RenderCallback(const NativeGuestOutputRenderContext& ctx, void*) {
 // failure (latched).
 bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   std::shared_ptr<const render::FrameScene> scene = capture::Publisher().Latest();
-  if (!scene) return true;
+  if (!scene) {
+    // No records yet (just switched from a view without a consumer): show the
+    // emulated frame rather than a stale clay target (or stale F3 stats).
+    if (g_clay_scene) SetStatus({});
+    g_clay_scene = nullptr;
+    return true;
+  }
   if (!g_clay) g_clay = std::make_unique<render::ClayPass>(GeometryBudgetBytes());
   if (!g_clay->Ensure(ctx.device)) {
     Fail("clay pass");
@@ -246,7 +254,7 @@ bool WindowFocused() {
 }  // namespace
 
 std::string StatusText() {
-  if (!g_installed) return {};
+  if (!g_installed.load(std::memory_order_acquire)) return {};
   // No native drawing in off/pattern view: never show stale clay stats.
   if (!g_latch.IsFailed() && !IsCompositeView(CurrentView())) return {};
   std::lock_guard<std::mutex> lock(g_status_mutex);
@@ -259,15 +267,16 @@ void Install(rex::memory::Memory* memory) {
     REXLOG_INFO("[native] native renderer disabled (fable2_native_render=false)");
     return;
   }
+  g_view.store(ParseViewCvar(), std::memory_order_relaxed);
   rex::graphics::SetNativeGuestOutputRenderer(&RenderCallback, nullptr);
   rex::graphics::SetNativeGuestOutputPostProcessor(&OverlayCallback, nullptr);
-  g_installed = true;
+  g_installed.store(true, std::memory_order_release);
   REXLOG_INFO("[native] native renderer installed (view={}, F6 cycles views)",
               ViewName(CurrentView()));
 }
 
 void PollFrame() {
-  if (!g_installed) return;
+  if (!g_installed.load(std::memory_order_acquire)) return;
 #ifdef _WIN32
   const bool down = WindowFocused() && (GetAsyncKeyState(kToggleVk) & 0x8000) != 0;
   if (g_toggle.Update(down)) {
@@ -278,12 +287,14 @@ void PollFrame() {
     } else {
       const View next = NextView(CurrentView());
       REXCVAR_SET(fable2_native_view, std::string(ViewName(next)));
+      g_view.store(next, std::memory_order_relaxed);
       REXLOG_INFO("[native] F6: view {}", ViewName(next));
     }
   }
 #endif
-  rex::graphics::RequestNativeGuestOutputPostProcess(
-      !g_latch.IsFailed() && IsCompositeView(CurrentView()));
+  const bool wanted = RecordsWanted(CurrentView(), g_latch.IsFailed());
+  capture::SetRecordsWanted(wanted);
+  rex::graphics::RequestNativeGuestOutputPostProcess(wanted);
 }
 
 }  // namespace fable2::native

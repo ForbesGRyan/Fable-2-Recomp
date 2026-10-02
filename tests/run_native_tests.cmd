@@ -33,7 +33,8 @@ clang++ -std=c++23 "%~dp0native\test_index_convert.cpp" -o "%OUT%\index_convert.
 "%OUT%\index_convert.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_vfetch_decode.cpp" -o "%OUT%\vfetch_decode.exe" || exit /b 1
 "%OUT%\vfetch_decode.exe" || exit /b 1
-clang++ -std=c++23 "%~dp0native\test_terrain_patch.cpp" -o "%OUT%\terrain_patch.exe" || exit /b 1
+rem Float-to-int casts of NaN/infinity trap here (UB that otherwise passes silently).
+clang++ -std=c++23 -fsanitize=float-cast-overflow -fsanitize-trap=float-cast-overflow "%~dp0native\test_terrain_patch.cpp" -o "%OUT%\terrain_patch.exe" || exit /b 1
 "%OUT%\terrain_patch.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_rigid_skin.cpp" -o "%OUT%\rigid_skin.exe" || exit /b 1
 "%OUT%\rigid_skin.exe" || exit /b 1
@@ -53,6 +54,10 @@ clang++ -std=c++23 "%~dp0native\test_main_scene.cpp" -o "%OUT%\main_scene.exe" |
 "%OUT%\main_scene.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_draw_nesting.cpp" -o "%OUT%\draw_nesting.exe" || exit /b 1
 "%OUT%\draw_nesting.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_window_stats.cpp" -o "%OUT%\window_stats.exe" || exit /b 1
+"%OUT%\window_stats.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_stream_resolve.cpp" -o "%OUT%\stream_resolve.exe" || exit /b 1
+"%OUT%\stream_resolve.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_autoplay.cpp" -o "%OUT%\autoplay.exe" || exit /b 1
 "%OUT%\autoplay.exe" || exit /b 1
 exit /b 0

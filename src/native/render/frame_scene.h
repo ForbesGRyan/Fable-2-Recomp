@@ -18,6 +18,11 @@ struct FrameScene {
   std::vector<capture::DrawRecord> draws;
   uint32_t captured = 0;
   uint32_t skipped[size_t(capture::SkipReason::kCount)] = {};
+  // False when no consumer wanted records this frame (debug view off): the
+  // main-scene draws were only counted (captured), draws/skipped are empty.
+  bool records = true;
+  // Guest-thread time spent in the capture layer during this frame.
+  double capture_ms = 0;
 };
 
 class FrameBuilder {
@@ -37,7 +42,13 @@ class FrameBuilder {
     }
   }
 
-  std::shared_ptr<const FrameScene> Finish(uint64_t frame) {
+  // A main-scene draw counted without a record (no consumer this frame).
+  void CountUnrecorded() {
+    if (open_) ++captured_;
+  }
+
+  // The caller may fill the scene's remaining fields before publishing it.
+  std::shared_ptr<FrameScene> Finish(uint64_t frame) {
     auto s = std::make_shared<FrameScene>();
     s->frame = frame;
     s->captured = captured_;

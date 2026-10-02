@@ -103,7 +103,9 @@ namespace detail {
 // Point-filter texel index for normalized coordinate t on an axis of n texels.
 inline uint32_t TexelIndex(float t, uint32_t n, uint8_t clamp) {
   const double f = std::floor(double(t) * n);
-  if (!(f == f)) return 0;  // NaN
+  // NaN or infinity (garbage constants): fmod would give NaN, and converting
+  // that to an integer is undefined.
+  if (!std::isfinite(f)) return 0;
   if (clamp == 0 || clamp == 1) {
     const double period = clamp == 0 ? double(n) : 2.0 * n;
     double r = std::fmod(f, period);

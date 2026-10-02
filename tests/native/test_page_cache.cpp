@@ -34,6 +34,21 @@ int main() {
   // More regions than entries: wraps without losing correctness.
   for (uint64_t p = 0; p < 70; ++p) c.RangeReadable(0x40000 + p * 0x1000, 4, 2, probe);
   if (!c.RangeReadable(0x40000, 4, 2, probe)) return 11;
+  // The most recently hit region answers first; other cached regions are
+  // still found, and the last hit never survives a new generation.
+  flip = false;
+  RegionReadCache m;
+  probes = 0;
+  if (!m.RangeReadable(0x10000, 4, 7, probe) || !m.RangeReadable(0x45000, 4, 7, probe)) return 12;
+  for (int i = 0; i < 4; ++i) {
+    if (!m.RangeReadable(0x45000 + 16 * i, 4, 7, probe)) return 13;  // last hit
+    if (!m.RangeReadable(0x10000 + 16 * i, 4, 7, probe)) return 14;  // scanned
+    if (m.RangeReadable(0x30000 + 16 * i, 4, 7, probe)) return 15;   // cached unreadable
+  }
+  if (probes != 3) return 16;
+  flip = true;
+  if (m.RangeReadable(0x10000, 4, 8, probe) || probes != 4) return 17;  // re-probed
+  if (!m.RangeReadable(0x45000, 4, 8, probe) || probes != 5) return 18;
 
   if (!PhysicalRangeInWindow(0x1FFFFFF0, 16)) return 20;
   if (PhysicalRangeInWindow(0x1FFFFFF0, 17)) return 21;

@@ -16,6 +16,11 @@
 #include <unordered_map>
 #include <vector>
 
+#if defined(_M_X64) || defined(__x86_64__)
+#include <intrin.h>
+#endif
+#include <thread>
+
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
 #include <rex/logging/macros.h>
@@ -33,8 +38,10 @@
 #include "main_scene.h"
 #include "position_decode.h"
 #include "rigid_skin.h"
+#include "stream_resolve.h"
 #include "terrain_patch.h"
 #include "vfetch_decode.h"
+#include "window_stats.h"
 #include "xdk_hook_ids.h"
 #include "xdk_layout.h"
 
@@ -42,6 +49,13 @@ REXCVAR_DECLARE(bool, fable2_native_render);
 
 namespace fable2::native::capture {
 namespace {
+
+// Per-hook arrays are indexed by hook id; every generated id must fit.
+constexpr uint32_t kMaxHookIds = 128;
+#define FABLE2_XDK_HOOK(ID, NAME, SYM) \
+  static_assert((ID) < kMaxHookIds, "hook id " #ID " does not fit the per-hook arrays");
+#include "xdk_hooks.inc"
+#undef FABLE2_XDK_HOOK
 
 struct LastArgs {
   uint32_t r[8] = {};  // r3..r10
@@ -80,15 +94,80 @@ static_assert(kDevicePsFieldOffset < xdk::kVsDeviceFieldOffset &&
 std::atomic<bool> g_enabled{false};    // native renderer on, or discovery requested
 std::atomic<bool> g_render{false};     // native renderer on: build DrawRecords
 std::atomic<bool> g_armed{false};      // discovery rows are being written
+// Discovery requested and not finished: the hook-side DrawState evidence the
+// rows carry is maintained (under g_mutex) only while this is set.
+std::atomic<bool> g_discovery_active{false};
+// A consumer wants draw records (SetRecordsWanted, from PollFrame), and the
+// value latched for the current guest frame at the previous swap. With it
+// clear, main-scene draws are only counted.
+std::atomic<bool> g_records_wanted{false};
+std::atomic<bool> g_records_frame{false};
 std::atomic<bool> g_failed{false};
 std::atomic<uint64_t> g_swaps{0};      // guest frames since start (while enabled)
 std::atomic<int> g_frames_written{0};  // discovery frames completed
 std::atomic<uint64_t> g_draw_count{0};
 std::atomic<uint64_t> g_nested_draws{0};  // draw hooks entered inside another draw hook
-std::atomic<uint32_t> g_vs_bank_ptr{0};   // mirror of DrawState::vs_bank_ptr for records
+std::atomic<uint32_t> g_vs_bank_ptr{0};   // vertex constant bank pointer (lock-free, records)
 
 std::mutex g_mutex;  // DrawState + discovery file
 DrawState g_state;
+
+// --- Guest-thread capture timer ---------------------------------------------
+// The capture work done on guest threads (hook returns, discovery state
+// updates, the swap) is timed with the TSC, which is cheap enough to read
+// around every draw; g_ticks_per_ms is calibrated against steady_clock in
+// SetMemory. Ticks accumulate per guest frame in g_capture_ticks.
+std::atomic<uint64_t> g_capture_ticks{0};
+double g_ticks_per_ms = 1e6;  // written once in SetMemory, before any hook runs
+fable2::diagnostics::WindowStats g_capture_window(300);  // OnSwap thread only
+
+inline uint64_t Ticks() {
+#if defined(_M_X64) || defined(__x86_64__)
+  return __rdtsc();
+#else
+  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      std::chrono::steady_clock::now().time_since_epoch())
+                      .count());
+#endif
+}
+
+void CalibrateTicks() {
+#if defined(_M_X64) || defined(__x86_64__)
+  const auto t0 = std::chrono::steady_clock::now();
+  const uint64_t c0 = Ticks();
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  const uint64_t c1 = Ticks();
+  const double ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  if (ms > 0 && c1 > c0) g_ticks_per_ms = double(c1 - c0) / ms;
+#endif
+}
+
+// Adds the scope's duration to the frame's capture time.
+struct CaptureTimer {
+  uint64_t t0 = Ticks();
+  ~CaptureTimer() { g_capture_ticks.fetch_add(Ticks() - t0, std::memory_order_relaxed); }
+  CaptureTimer() = default;
+  CaptureTimer(const CaptureTimer&) = delete;
+  CaptureTimer& operator=(const CaptureTimer&) = delete;
+};
+
+// The swap's own capture work: everything up to the frame's end counts for
+// that frame (TakeFrame), the rest (publishing, logging) for the next one.
+struct SwapTimer {
+  uint64_t t0 = Ticks();
+  ~SwapTimer() { g_capture_ticks.fetch_add(Ticks() - t0, std::memory_order_relaxed); }
+  // The finished frame's capture time in ms; restarts the scope's clock.
+  double TakeFrameMs() {
+    const uint64_t now = Ticks();
+    const uint64_t total = g_capture_ticks.exchange(0, std::memory_order_relaxed) + (now - t0);
+    t0 = now;
+    return double(total) / g_ticks_per_ms;
+  }
+  SwapTimer() = default;
+  SwapTimer(const SwapTimer&) = delete;
+  SwapTimer& operator=(const SwapTimer&) = delete;
+};
 
 // Draws per color-surface pitch (first 16 distinct pitches, the rest in `other`).
 struct PitchHistogram {
@@ -127,7 +206,7 @@ std::mutex g_scene_mutex;  // builder + per-frame bracket counts and evidence
 render::FrameBuilder g_builder;
 BracketStats g_bracket;
 SceneEvidence g_evidence;
-uint32_t g_unsupported_by_hook[128] = {};  // kUnsupportedPrim records per hook id this frame
+uint32_t g_unsupported_by_hook[kMaxHookIds] = {};  // kUnsupportedPrim records per hook id this frame
 std::filesystem::path g_path;
 std::FILE* g_file = nullptr;
 
@@ -156,7 +235,7 @@ uint64_t Every() {
   return n;
 }
 
-thread_local std::array<LastArgs, 128> t_last_args;  // indexed by hook id (< 128)
+thread_local std::array<LastArgs, kMaxHookIds> t_last_args;  // indexed by hook id
 thread_local DrawNesting t_nesting;  // only the outermost draw of a call chain is recorded
 
 // World-view-projection constants per vertex shader hash, found offline by
@@ -326,6 +405,13 @@ bool ReadDevice(uint32_t device, DeviceSnapshot* s) {
 }
 
 void UpdateState(uint32_t id, const PPCContext& ctx) {
+  // Records read only the vertex constant bank pointer, lock-free.
+  if (id == kHook_D3DDevice_SetPending_AluConstants && ctx.r5.u32 == 0x4000) {
+    g_vs_bank_ptr.store(ctx.r6.u32, std::memory_order_relaxed);
+  }
+  // The rest is evidence for discovery rows only.
+  if (!g_discovery_active.load(std::memory_order_relaxed)) return;
+  CaptureTimer timer;
   std::lock_guard<std::mutex> lock(g_mutex);
   g_state.device = ctx.r3.u32;
   switch (id) {
@@ -350,10 +436,7 @@ void UpdateState(uint32_t id, const PPCContext& ctx) {
       g_state.ps_obj = ctx.r4.u32;
       break;
     case kHook_D3DDevice_SetPending_AluConstants:
-      if (ctx.r5.u32 == 0x4000) {
-        g_state.vs_bank_ptr = ctx.r6.u32;
-        g_vs_bank_ptr.store(ctx.r6.u32, std::memory_order_relaxed);
-      }
+      if (ctx.r5.u32 == 0x4000) g_state.vs_bank_ptr = ctx.r6.u32;
       break;
     default:
       break;
@@ -460,35 +543,81 @@ UcodeRef ReadVsUcode(uint32_t obj, uint32_t v) {
   return u;
 }
 
+// Microcode size in bytes of variant `v` of a vertex shader object, from its
+// variant record (xdk_layout.h) without reading the microcode.
+bool ReadVsUcodeBytes(uint32_t obj, uint32_t v, uint32_t* bytes) {
+  uint32_t rec_off = 0, size = 0;
+  const uint32_t header = obj + xdk::kVsHeaderOffset;
+  if (!ReadVirtualBe32(header + xdk::kVsRecordOffsetField + 8 * v, &rec_off) ||
+      !ReadVirtualBe32(header + rec_off + 4 * xdk::kVsUcodeSizeDword, &size)) {
+    return false;
+  }
+  *bytes = size << xdk::kVsUcodeSizeShift;
+  return *bytes != 0 && *bytes % 4 == 0 && *bytes <= 0x40000;
+}
+
 // The last vertex shader the XDK loaded with IM_LOAD_IMMEDIATE on this thread
 // (patched copy in the command buffer, xdk_layout.h). Draws that do not reload
 // the shader keep using it on the GPU.
 struct VsLoad {
-  uint32_t obj = 0;
+  uint32_t obj = 0;   // the GPU runs this object's immediate copy (0: none)
   uint32_t copy = 0;  // guest virtual address of the copy
+  uint32_t bytes = 0;
+  bool usable = false;  // copy validated and hashed at load time
   uint64_t hash = 0;
-  std::vector<uint32_t> dwords;  // host order
+  bool have_dwords = false;      // `dwords` converted for this load
+  std::vector<uint32_t> dwords;  // host order, reused across loads
 };
 thread_local VsLoad t_vs_load;
 
 void OnVsLoadImmediate(const LastArgs& a) {
   const uint32_t device = a.r[0], obj = a.r[2], variant = a.r[7];
   t_vs_load.obj = 0;
-  const UcodeRef tmpl = obj && variant < 2 ? ReadVsUcode(obj, variant) : UcodeRef{};
-  uint32_t write = 0;
-  if (!tmpl.ok || !ReadVirtualBe32(device + xdk::kDeviceCommandWriteOffset, &write)) return;
-  const uint32_t n = tmpl.bytes / 4;
-  const uint32_t copy = write + 4 - tmpl.bytes;
-  const uint8_t* p = ReadVirtual(copy - 12, tmpl.bytes + 12);
+  t_vs_load.usable = false;
+  t_vs_load.have_dwords = false;
+  if (!obj || variant >= 2) return;
+  if (!g_records_frame.load(std::memory_order_relaxed) &&
+      !g_discovery_active.load(std::memory_order_relaxed)) {
+    // Nobody reads the copy this frame: only remember that the GPU runs this
+    // object's immediate copy, so its draws are never decoded from the
+    // object's own microcode. They get no shader until it is reloaded.
+    t_vs_load.obj = obj;
+    return;
+  }
+  uint32_t bytes = 0, write = 0;
+  if (!ReadVsUcodeBytes(obj, variant, &bytes) ||
+      !ReadVirtualBe32(device + xdk::kDeviceCommandWriteOffset, &write)) {
+    return;
+  }
+  const uint32_t n = bytes / 4;
+  const uint32_t copy = write + 4 - bytes;
+  const uint8_t* p = ReadVirtual(copy - 12, bytes + 12);
   if (!p) return;
   const uint32_t header = xdk::kImLoadImmediateHeader | ((n + 1) << 16);
   if ((LoadBe32(p) & ~1u) != header || LoadBe32(p + 4) != 0 || LoadBe32(p + 8) != n) return;
-  p += 12;
   t_vs_load.obj = obj;
   t_vs_load.copy = copy;
-  t_vs_load.hash = XXH3_64bits(p, tmpl.bytes);
-  t_vs_load.dwords.resize(n);
-  for (uint32_t i = 0; i < n; ++i) t_vs_load.dwords[i] = LoadBe32(p + 4 * i);
+  t_vs_load.bytes = bytes;
+  t_vs_load.hash = XXH3_64bits(p + 12, bytes);
+  t_vs_load.usable = true;
+}
+
+// The current immediate copy's microcode (host order), converted on first use
+// (a shader-cache miss or a discovery row); nullptr if the load is not usable
+// or the copy no longer hashes to what was loaded.
+const std::vector<uint32_t>* VsLoadDwords() {
+  VsLoad& l = t_vs_load;
+  if (!l.usable) return nullptr;
+  if (l.have_dwords) return &l.dwords;
+  const uint8_t* p = ReadVirtual(l.copy, l.bytes);
+  if (!p || XXH3_64bits(p, l.bytes) != l.hash) {
+    l.usable = false;
+    return nullptr;
+  }
+  l.dwords.resize(l.bytes / 4);
+  for (size_t i = 0; i < l.dwords.size(); ++i) l.dwords[i] = LoadBe32(p + 4 * i);
+  l.have_dwords = true;
+  return &l.dwords;
 }
 
 // The last vertex shader GpuLoadShaders (0x82221978: r3 device, r4 vertex
@@ -511,15 +640,6 @@ void OnGpuLoadShaders(const LastArgs& a) {
   t_gpu_vs.variant = (!ps && (flags & xdk::kVsVariantFlagMask)) ? 1 : 0;
 }
 
-// Index buffer object fields (xdk_layout.h).
-struct IbView {
-  uint32_t common = 0;
-  uint32_t addr = 0;  // GPU physical
-  uint32_t size = 0;  // bytes
-  uint32_t endian = 0;
-  bool index32 = false;
-};
-
 bool ReadIb(uint32_t ib, IbView* v) {
   const uint8_t* o = ib ? ReadVirtual(ib, 4 * (xdk::kIbSizeDword + 1)) : nullptr;
   if (!o) return false;
@@ -531,41 +651,15 @@ bool ReadIb(uint32_t ib, IbView* v) {
   return true;
 }
 
-struct IndexScan {
-  int64_t max_index = -1;  // largest non-reset index, -1 if none
-  uint32_t restarts = 0;
-  uint32_t n_first = 0;  // first non-reset indices, for discovery positions
-  uint32_t first[64] = {};
-};
-
-// Reads indices [start, start + count) as the GPU fetches them: little-endian
-// words with the buffer's endian swap applied. False if the range is empty,
-// too large, outside the buffer or unreadable.
+// Reads indices [start, start + count) as the GPU fetches them
+// (stream_resolve.h). False if the range is empty, too large, outside the
+// buffer or unreadable.
 bool ScanIndices(const IbView& ib, uint32_t start, uint32_t count, IndexScan* out) {
+  if (!IndexRangeFits(ib, start, count)) return false;
   const uint32_t isize = ib.index32 ? 4 : 2;
-  if (!count || count > kMaxDrawCount || (uint64_t(start) + count) * isize > ib.size) return false;
   const uint8_t* idx = ReadPhysical(ib.addr + start * isize, count * isize);
   if (!idx) return false;
-  for (uint32_t i = 0; i < count; ++i) {
-    const uint8_t* e = idx + isize * i;
-    uint32_t v = ib.index32 ? uint32_t(e[0]) | uint32_t(e[1]) << 8 | uint32_t(e[2]) << 16 |
-                                  uint32_t(e[3]) << 24
-                            : uint32_t(e[0]) | uint32_t(e[1]) << 8;
-    if (ib.endian == 1) {  // 8in16
-      v = ((v & 0x00FF00FFu) << 8) | ((v >> 8) & 0x00FF00FFu);
-    } else if (ib.endian == 2) {  // 8in32
-      v = (v >> 24) | ((v >> 8) & 0xFF00u) | ((v << 8) & 0xFF0000u) | (v << 24);
-    } else if (ib.endian == 3) {  // 16in32
-      v = (v >> 16) | (v << 16);
-    }
-    // Strips are cut with the all-ones reset index; it is not a vertex.
-    if (v == (ib.index32 ? 0xFFFFFFFFu : 0xFFFFu)) {
-      ++out->restarts;
-      continue;
-    }
-    out->max_index = std::max<int64_t>(out->max_index, v);
-    if (out->n_first < 64) out->first[out->n_first++] = v;
-  }
+  ScanIndexWords(idx, count, ib.index32, ib.endian, out);
   return true;
 }
 
@@ -592,37 +686,15 @@ bool ChooseVs(const DeviceSnapshot& dev, VsChoice* c) {
   return true;
 }
 
-// The vertex buffer feeding a fetch slot: stream i feeds slot 95 - i; its
-// object's fetch constant (base) plus the stream offset must equal the device
-// shadow (fc_match).
-struct StreamView {
-  uint32_t stream = 0;
-  uint32_t obj = 0;
-  uint32_t base = 0;  // GPU physical, without the stream offset
-  uint32_t size = 0;  // bytes from base
-  uint32_t offset = 0;
-  uint32_t fc0 = 0, fc1 = 0;
-  bool fc_match = false;
-};
-
-// nullptr, or the reason the stream cannot be resolved.
+// The vertex buffer feeding a fetch slot (stream_resolve.h): nullptr, or the
+// reason the stream cannot be resolved.
 const char* ResolveStream(const DeviceSnapshot& dev, uint32_t fetch_slot, StreamView* v) {
-  if (fetch_slot > xdk::kStreamFetchSlotBase ||
-      xdk::kStreamFetchSlotBase - fetch_slot >= xdk::kMaxStreams) {
-    return "slot_not_a_stream";
-  }
-  v->stream = xdk::kStreamFetchSlotBase - fetch_slot;
+  if (!StreamForFetchSlot(fetch_slot, &v->stream)) return "slot_not_a_stream";
   v->obj = dev.stream_obj[v->stream];
   const uint8_t* vbo = v->obj ? ReadVirtual(v->obj, 4 * (xdk::kVbFetchDword + 2)) : nullptr;
   if (!vbo) return "no_vb";
-  const uint32_t d0 = LoadBe32(vbo + 4 * xdk::kVbFetchDword);
-  const uint32_t d1 = LoadBe32(vbo + 4 * xdk::kVbFetchDword + 4);
-  v->base = xdk::GpuAddress(d0 & ~3u);
-  v->size = ((d1 >> 2) & 0xFFFFFF) * 4;
-  v->fc0 = dev.stream_fc[v->stream][0];
-  v->fc1 = dev.stream_fc[v->stream][1];
-  v->offset = (v->fc0 & ~3u) - v->base;
-  v->fc_match = (v->fc0 & 3) == 3 && v->offset < v->size && v->fc1 == d1 - v->offset;
+  StreamFromFetch(LoadBe32(vbo + 4 * xdk::kVbFetchDword), LoadBe32(vbo + 4 * xdk::kVbFetchDword + 4),
+                  dev.stream_fc[v->stream][0], dev.stream_fc[v->stream][1], v);
   return nullptr;
 }
 
@@ -694,17 +766,18 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
     row += buf;
   }
   const bool immediate = vc.immediate;
+  const std::vector<uint32_t>* copy = immediate ? VsLoadDwords() : nullptr;
   std::snprintf(buf, sizeof(buf), "],\"source\":\"%s\",\"copy\":\"0x%08X\"",
                 immediate ? "immediate" : (vc.gpu_owned ? "gpu_load" : "object"),
-                immediate ? t_vs_load.copy : 0);
+                copy ? t_vs_load.copy : 0);
   row += buf;
   // Evidence for the template location: the copy differs from the object's
   // microcode only in the patched vertex fetch dwords.
-  if (immediate && cand[variant].ok && cand[variant].dwords.size() == t_vs_load.dwords.size()) {
+  if (copy && cand[variant].ok && cand[variant].dwords.size() == copy->size()) {
     row += ",\"template_diff\":[";
     int shown = 0;
-    for (size_t i = 0; i < t_vs_load.dwords.size(); ++i) {
-      if (t_vs_load.dwords[i] == cand[variant].dwords[i]) continue;
+    for (size_t i = 0; i < copy->size(); ++i) {
+      if ((*copy)[i] == cand[variant].dwords[i]) continue;
       std::snprintf(buf, sizeof(buf), "%s%zu", shown ? "," : "", i);
       row += buf;
       if (++shown == 32) break;
@@ -712,9 +785,9 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
     row += "]";
   }
   row += "}";
+  if (immediate ? !copy : !cand[variant].ok) return finish("no_ucode");
   const uint64_t hash = immediate ? t_vs_load.hash : cand[variant].hash;
-  const std::vector<uint32_t>& ucode = immediate ? t_vs_load.dwords : cand[variant].dwords;
-  if (!immediate && !cand[variant].ok) return finish("no_ucode");
+  const std::vector<uint32_t>& ucode = immediate ? *copy : cand[variant].dwords;
   std::snprintf(buf, sizeof(buf), ",\"vs_hash\":\"0x%016llX\",\"vs_dwords\":%zu",
                 static_cast<unsigned long long>(hash), ucode.size());
   row += buf;
@@ -830,7 +903,7 @@ void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
   VsChoice vc;
   if (ChooseVs(dev, &vc)) {
     const UcodeRef u = vc.immediate ? UcodeRef{} : ReadVsUcode(vc.obj, vc.variant);
-    const uint64_t hash = vc.immediate ? t_vs_load.hash : u.hash;
+    const uint64_t hash = vc.immediate ? (t_vs_load.usable ? t_vs_load.hash : 0) : u.hash;
     std::snprintf(buf, sizeof(buf),
                   ",\"vs\":{\"obj\":\"0x%08X\",\"source\":\"%s\",\"hash\":\"0x%016llX\"}", vc.obj,
                   vc.immediate ? "immediate" : (vc.gpu_owned ? "gpu_load" : "object"),
@@ -917,10 +990,16 @@ const VsInfo* LookupVs(const VsChoice& c) {
   if (t_vs_cache.size() > 4096) t_vs_cache.clear();
   VsInfo& e = t_vs_cache[c.obj];
   if (c.immediate) {
+    if (!t_vs_load.usable) return nullptr;  // loaded while no consumer: unknown
     if (e.immediate && e.hash && e.hash == t_vs_load.hash) return &e;
+    const std::vector<uint32_t>* ucode = VsLoadDwords();
+    if (!ucode) {
+      t_vs_cache.erase(c.obj);
+      return nullptr;
+    }
     e = VsInfo{};
     e.immediate = true;
-    FillShader(e, t_vs_load.dwords.data(), t_vs_load.dwords.size(), t_vs_load.hash);
+    FillShader(e, ucode->data(), ucode->size(), t_vs_load.hash);
     return &e;
   }
   // The variant's record (xdk_layout.h), read without touching the microcode.
@@ -1140,7 +1219,7 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   // A capture-side reason (garbage count, bad index memory) replaces
   // AssembleRecord's, which only sees the inputs filled before it.
   r.skip = ResolveSkip(r.skip, extra);
-  if (r.skip == SkipReason::kUnsupportedPrim && id < 128) ++g_unsupported_by_hook[id];
+  if (r.skip == SkipReason::kUnsupportedPrim && id < kMaxHookIds) ++g_unsupported_by_hook[id];
   g_builder.Add(r);
 }
 
@@ -1151,13 +1230,17 @@ const uint8_t* ReadTilingFlag(uint32_t device) {
 
 // Reads the device tiling flag at a guest draw (the draw functions only read
 // it), moves the main-scene bracket and returns whether the draw is in it.
-// Evidence is collected while discovery is armed.
-bool ObserveMainScene(uint32_t device) {
+// `count_unrecorded`: a main-scene draw is counted in the frame's scene
+// without a record (no consumer this frame). Evidence is collected while
+// discovery is armed.
+bool ObserveMainScene(uint32_t device, bool count_unrecorded) {
   const uint8_t* flag = ReadTilingFlag(device);
   const bool tiling = flag && TilingActive(*flag);
   if (!g_armed.load(std::memory_order_relaxed)) {
     std::lock_guard<std::mutex> lock(g_scene_mutex);
-    return ObserveDraw(g_builder, tiling, g_bracket);
+    const bool in = ObserveDraw(g_builder, tiling, g_bracket);
+    if (in && count_unrecorded) g_builder.CountUnrecorded();
+    return in;
   }
   const uint8_t* surface = device ? ReadVirtual(device + xdk::kDeviceSurfaceInfoOffset, 4) : nullptr;
   const uint32_t pitch = surface ? LoadBe32(surface) & xdk::kSurfacePitchMask : 0;
@@ -1168,6 +1251,7 @@ bool ObserveMainScene(uint32_t device) {
     ++g_evidence.flag_unread;
   }
   const bool in = ObserveDraw(g_builder, tiling, g_bracket);
+  if (in && count_unrecorded) g_builder.CountUnrecorded();
   (in ? g_evidence.pitch_in : g_evidence.pitch_out).Add(pitch);
   return in;
 }
@@ -1197,14 +1281,17 @@ void AppendPitches(std::string& row, const char* key, const PitchHistogram& h) {
 
 struct FinishedScene {
   std::shared_ptr<const render::FrameScene> scene;  // null with the renderer off
-  uint32_t unsupported_by_hook[128] = {};
+  uint32_t unsupported_by_hook[kMaxHookIds] = {};
 };
 
 // Ends the frame's bracket and, with the renderer on, finishes the frame's
-// scene (`swap` = guest frame number). With `write` (discovery armed, caller
-// holds g_mutex with g_file open) writes the frame row (frame-map section 8):
-// captured = hooked guest draw calls, in_bracket = those in the main scene.
-void EndMainSceneFrame(bool write, int frame, uint64_t swap, FinishedScene* done) {
+// scene (`swap` = guest frame number) with its capture time from `timer`,
+// then latches whether the next frame builds records. With `write`
+// (discovery armed, caller holds g_mutex with g_file open) writes the frame
+// row (frame-map section 8): captured = hooked guest draw calls, in_bracket =
+// those in the main scene.
+void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
+                       FinishedScene* done) {
   BracketStats s;
   SceneEvidence e;
   {
@@ -1212,11 +1299,18 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, FinishedScene* done
     s = EndFrame(g_builder, g_bracket);
     e = g_evidence;
     g_evidence = {};
+    const double capture_ms = timer.TakeFrameMs();  // also with discovery only
     if (g_render.load(std::memory_order_relaxed)) {
-      done->scene = g_builder.Finish(swap);
+      std::shared_ptr<render::FrameScene> scene = g_builder.Finish(swap);
+      scene->records = g_records_frame.load(std::memory_order_relaxed);
+      scene->capture_ms = capture_ms;
+      done->scene = std::move(scene);
       std::copy(std::begin(g_unsupported_by_hook), std::end(g_unsupported_by_hook),
                 std::begin(done->unsupported_by_hook));
       std::fill(std::begin(g_unsupported_by_hook), std::end(g_unsupported_by_hook), 0u);
+      // Records start or stop at a frame boundary, never mid-frame.
+      g_records_frame.store(g_records_wanted.load(std::memory_order_relaxed),
+                            std::memory_order_relaxed);
     }
   }
   if (!write) return;
@@ -1261,12 +1355,14 @@ bool OpenLog() {
   return true;
 }
 
-// Publishes the frame's scene; every 300 guest frames logs its coverage
-// (frame-map section 9).
+// Publishes the frame's scene (none for a frame without records, so a
+// consumer never draws a stale one); every 300 guest frames logs its coverage
+// (frame-map section 9) and the guest-thread capture time, with any view.
 void PublishScene(const FinishedScene& done) {
   if (!done.scene) return;
-  Publisher().Publish(done.scene);
   const render::FrameScene& sc = *done.scene;
+  Publisher().Publish(sc.records ? done.scene : nullptr);
+  g_capture_window.Add(sc.capture_ms);
   if (sc.frame % 300 != 0) return;
   std::string skipped, unsupported;
   char buf[96];
@@ -1276,7 +1372,7 @@ void PublishScene(const FinishedScene& done) {
                   SkipReasonName(SkipReason(i)), sc.skipped[i]);
     skipped += buf;
   }
-  for (uint32_t id = 0; id < 128; ++id) {
+  for (uint32_t id = 0; id < kMaxHookIds; ++id) {
     if (!done.unsupported_by_hook[id]) continue;
     std::snprintf(buf, sizeof(buf), "%s%s: %u", unsupported.empty() ? "" : ", ", HookName(id),
                   done.unsupported_by_hook[id]);
@@ -1284,10 +1380,17 @@ void PublishScene(const FinishedScene& done) {
   }
   size_t deformed = 0;
   for (const DrawRecord& r : sc.draws) deformed += r.deformed ? 1 : 0;
+  // capture: guest-thread capture time of this frame, then the median, p90
+  // and max over the frames since the last line. With records off (no
+  // composite view) only `captured` is counted.
   REXSYS_INFO(
-      "[native] capture: frame {} captured {} drawable {} (deformed {}) skipped {{{}}} nested_total {}",
+      "[native] capture: frame {} captured {} drawable {} (deformed {}) skipped {{{}}} nested_total {} "
+      "| records {} | capture {:.3f} ms (median {:.3f}, p90 {:.3f}, max {:.3f} over {} frames)",
       sc.frame, sc.captured, sc.draws.size(), deformed, skipped,
-      g_nested_draws.load(std::memory_order_relaxed));
+      g_nested_draws.load(std::memory_order_relaxed), sc.records ? "on" : "off", sc.capture_ms,
+      g_capture_window.Median(), g_capture_window.Percentile(0.9), g_capture_window.Max(),
+      g_capture_window.size());
+  g_capture_window.Reset();
   if (!unsupported.empty()) {
     REXSYS_INFO("[native] capture: frame {} unsupported by hook {{{}}}", sc.frame, unsupported);
   }
@@ -1303,12 +1406,21 @@ render::ScenePublisher& Publisher() {
 void SetMemory(rex::memory::Memory* memory) {
   GuestMemory() = memory;
   g_render.store(REXCVAR_GET(fable2_native_render), std::memory_order_relaxed);
-  g_enabled.store(REXCVAR_GET(fable2_native_render) || FramesRequested() > 0,
-                  std::memory_order_relaxed);
+  g_discovery_active.store(FramesRequested() > 0, std::memory_order_relaxed);
+  const bool enabled = REXCVAR_GET(fable2_native_render) || FramesRequested() > 0;
+  if (enabled) CalibrateTicks();  // before the hooks see g_enabled
+  g_enabled.store(enabled, std::memory_order_release);
+}
+
+bool Enabled() { return g_enabled.load(std::memory_order_relaxed); }
+
+void SetRecordsWanted(bool wanted) {
+  g_records_wanted.store(wanted, std::memory_order_relaxed);
 }
 
 void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t*) {
   if (!g_enabled.load(std::memory_order_relaxed) || id >= t_last_args.size()) return;
+  // Not timed: eight stores, cheaper than the timer itself.
   LastArgs& a = t_last_args[id];
   a.r[0] = ctx.r3.u32;
   a.r[1] = ctx.r4.u32;
@@ -1325,7 +1437,7 @@ void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t*) {
     case kHook_D3DDevice_SetVertexShader:
     case kHook_D3DDevice_SetPixelShader:
     case kHook_D3DDevice_SetPending_AluConstants:
-      UpdateState(id, ctx);
+      UpdateState(id, ctx);  // timed inside while discovery needs the state
       break;
     default:
       break;
@@ -1335,27 +1447,33 @@ void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t*) {
 void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
   if (!g_enabled.load(std::memory_order_relaxed) || id >= t_last_args.size()) return;
   if (id == kHook_VsLoadImmediate_821DFDE0) {
+    CaptureTimer timer;
     OnVsLoadImmediate(t_last_args[id]);
     return;
   }
   if (id == kHook_GpuLoadShaders_82221978) {
+    CaptureTimer timer;
     OnGpuLoadShaders(t_last_args[id]);
     return;
   }
   if (id == kHook_IndirectBuffer_82286248) {
+    if (!g_armed.load(std::memory_order_relaxed)) return;
+    CaptureTimer timer;
     ObserveIndirectBuffer(t_last_args[id].r[0]);
     return;
   }
   if (!IsDrawId(id)) return;
+  CaptureTimer timer;
   const bool outermost = t_nesting.Leave();
   const LastArgs& args = t_last_args[id];
   const uint32_t device = args.r[0];  // r3 of every draw hook is the device
-  const bool in_scene = ObserveMainScene(device);
   // Records: only the outermost draw of a nested call chain, so geometry is
-  // never captured twice.
-  if (in_scene && outermost && g_render.load(std::memory_order_relaxed)) {
-    RecordDraw(id, args, device);
-  }
+  // never captured twice, and only for a frame a consumer wants records for;
+  // otherwise the draw is only counted.
+  const bool render = outermost && g_render.load(std::memory_order_relaxed);
+  const bool records = render && g_records_frame.load(std::memory_order_relaxed);
+  const bool in_scene = ObserveMainScene(device, render && !records);
+  if (in_scene && records) RecordDraw(id, args, device);
   if (!g_armed.load(std::memory_order_relaxed)) return;
   const uint64_t n = g_draw_count.fetch_add(1, std::memory_order_relaxed);
   if (n % Every() != 0) return;
@@ -1373,12 +1491,13 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
 }
 
 void OnSwap() {
-  if (!g_enabled.load(std::memory_order_relaxed)) return;
+  if (!g_enabled.load(std::memory_order_acquire)) return;
+  SwapTimer timer;
   const uint64_t swap = g_swaps.fetch_add(1, std::memory_order_relaxed) + 1;
   detail::CacheGeneration().fetch_add(1, std::memory_order_relaxed);
   if (!g_armed.load(std::memory_order_relaxed)) {
     FinishedScene done;
-    EndMainSceneFrame(false, 0, swap, &done);
+    EndMainSceneFrame(false, 0, swap, timer, &done);
     PublishScene(done);
   }
   if (FramesRequested() <= 0 || g_failed.load(std::memory_order_relaxed)) return;
@@ -1390,7 +1509,10 @@ void OnSwap() {
     if (elapsed < DelaySeconds()) return;
     {
       std::lock_guard<std::mutex> lock(g_mutex);
-      if (!g_file && !OpenLog()) return;
+      if (!g_file && !OpenLog()) {
+        g_discovery_active.store(false, std::memory_order_relaxed);
+        return;
+      }
     }
     g_armed.store(true);
     REXSYS_INFO("[native-discovery] armed after {:.1f} s", elapsed);
@@ -1400,10 +1522,11 @@ void OnSwap() {
   const int frame = g_frames_written.fetch_add(1) + 1;
   FinishedScene done;
   std::unique_lock<std::mutex> lock(g_mutex);
-  EndMainSceneFrame(g_file != nullptr, frame, swap, &done);
+  EndMainSceneFrame(g_file != nullptr, frame, swap, timer, &done);
   if (g_file) std::fflush(g_file);
   if (frame >= FramesRequested()) {
     g_armed.store(false);
+    g_discovery_active.store(false, std::memory_order_relaxed);
     if (g_file) {
       std::fclose(g_file);
       g_file = nullptr;

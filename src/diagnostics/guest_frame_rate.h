@@ -17,7 +17,20 @@
 #include <atomic>
 #include <cstdint>
 
+#include "window_stats.h"
+
 namespace fable2::guest_frame_rate {
+
+// Raw per-frame times (ms) over a 300-frame window for the periodic
+// "[frame] guest" log line (fps_meter.h). Render thread only. Work is the
+// frame interval minus the swap and the limiter/fence waits, as in F3.
+struct Windows {
+  diagnostics::WindowStats frame_ms{300}, work_ms{300}, swap_ms{300}, wait_ms{300};
+};
+inline Windows& windows() {
+  static Windows w;
+  return w;
+}
 
 // Smoothed frame time in microseconds (0 = no data yet).
 inline std::atomic<int64_t>& smoothed_us() {
@@ -87,6 +100,14 @@ inline void record_frame(int64_t now_us) {
                         ? double(pending_wait_us())
                         : wait_ema_us + (double(pending_wait_us()) - wait_ema_us) * 0.1;
       smoothed_wait_us().store(int64_t(wait_ema_us), std::memory_order_relaxed);
+      if (dt < 1'000'000) {  // loading hitches excluded, as below
+        const int64_t work = dt - pending_swap_us() - pending_wait_us();
+        Windows& w = windows();
+        w.frame_ms.Add(double(dt) / 1000.0);
+        w.work_ms.Add(double(work > 0 ? work : 0) / 1000.0);
+        w.swap_ms.Add(double(pending_swap_us()) / 1000.0);
+        w.wait_ms.Add(double(pending_wait_us()) / 1000.0);
+      }
     }
     pending_wait_us() = 0;
     pending_swap_us() = 0;

@@ -29,6 +29,7 @@ class RegionReadCache {
     if (generation != generation_) {
       for (Entry& e : entries_) e.valid = false;
       next_ = 0;
+      last_ = 0;
       generation_ = generation;
     }
     const uint64_t last = addr + (size ? size - 1 : 0);
@@ -40,6 +41,7 @@ class RegionReadCache {
         if (got.begin > at || got.end <= at) return false;
         entries_[next_] = {got, true};
         r = &entries_[next_].region;
+        last_ = next_;
         next_ = (next_ + 1) & 63;
       }
       if (!r->readable) return false;
@@ -49,9 +51,17 @@ class RegionReadCache {
   }
 
  private:
-  const ReadRegion* Find(uint64_t a) const {
-    for (const Entry& e : entries_) {
-      if (e.valid && e.region.begin <= a && a < e.region.end) return &e.region;
+  // The most recently hit entry first (consecutive reads of a draw mostly hit
+  // the same region), then a scan.
+  const ReadRegion* Find(uint64_t a) {
+    const Entry& m = entries_[last_];
+    if (m.valid && m.region.begin <= a && a < m.region.end) return &m.region;
+    for (uint32_t i = 0; i < 64; ++i) {
+      const Entry& e = entries_[i];
+      if (e.valid && e.region.begin <= a && a < e.region.end) {
+        last_ = i;
+        return &e.region;
+      }
     }
     return nullptr;
   }
@@ -62,6 +72,7 @@ class RegionReadCache {
   };
   Entry entries_[64];
   uint32_t next_ = 0;
+  uint32_t last_ = 0;  // most recently hit or filled entry
   uint32_t generation_ = 0;
 };
 

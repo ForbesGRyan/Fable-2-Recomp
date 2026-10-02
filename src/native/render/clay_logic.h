@@ -212,8 +212,9 @@ inline ClayConstants MakeClayConstants(const capture::DrawRecord& r, uint32_t ve
   return c;
 }
 
-// Two F3 lines: capture/draw counts with the top three skip reasons, then
-// the geometry cache counters and CPU timings.
+// Three F3 lines: capture/draw counts with the top three skip reasons, the
+// geometry cache counters and GPU-thread CPU timings, then the guest-thread
+// capture time of the scene's frame.
 inline std::string FormatStatusText(const FrameScene& scene, const ClayStats& st) {
   std::vector<std::pair<std::string, uint64_t>> reasons;
   for (size_t i = 0; i < size_t(capture::SkipReason::kCount); ++i) {
@@ -236,12 +237,12 @@ inline std::string FormatStatusText(const FrameScene& scene, const ClayStats& st
     }
     text += ")";
   }
-  char geo[200];
+  char geo[256];
   std::snprintf(geo, sizeof(geo),
                 "\nGeometry: %u uploads, %u hits, %.1f MB resident | hash %.2f ms, decode %.2f ms, "
-                "record %.2f ms",
+                "record %.2f ms\nCapture: %.2f ms guest time per frame",
                 st.uploads, st.hits, double(st.resident_bytes) / (1024.0 * 1024.0), st.hash_ms,
-                st.decode_ms, st.record_ms);
+                st.decode_ms, st.record_ms, scene.capture_ms);
   return text + geo;
 }
 

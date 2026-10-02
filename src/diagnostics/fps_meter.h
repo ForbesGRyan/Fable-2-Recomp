@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <fstream>
 
+#include <rex/logging/macros.h>
 #include <rex/ppc/func.h>
 
 #include "fable2_func_trace.h"
@@ -105,6 +106,38 @@ inline bool enabled() {
 
 }  // namespace fable2::fpsmeter
 
+namespace fable2::guest_work_log {
+
+// "[frame] guest" log line every 300 guest frames (raw per-frame medians from
+// guest_frame_rate.h), for A/B runs read from the log: on with the native
+// renderer or discovery (capture layer enabled), or FABLE2_GUEST_WORK_LOG=1.
+inline bool enabled() {
+  static const bool env = [] {
+    const char* v = std::getenv("FABLE2_GUEST_WORK_LOG");
+    return v && v[0] == '1';
+  }();
+  return env || fable2::native::capture::Enabled();
+}
+
+inline void poll() {
+  auto& w = fable2::guest_frame_rate::windows();
+  if (!w.work_ms.full()) return;
+  if (enabled()) {
+    const double mean_frame = w.frame_ms.Mean();
+    REXSYS_INFO(
+        "[frame] guest {} frames: {:.1f} fps, frame median {:.2f} ms, work median {:.2f} ms "
+        "(p90 {:.2f}), swap median {:.2f} ms, wait median {:.2f} ms",
+        w.work_ms.size(), mean_frame > 0 ? 1000.0 / mean_frame : 0.0, w.frame_ms.Median(),
+        w.work_ms.Median(), w.work_ms.Percentile(0.9), w.swap_ms.Median(), w.wait_ms.Median());
+  }
+  w.frame_ms.Reset();
+  w.work_ms.Reset();
+  w.swap_ms.Reset();
+  w.wait_ms.Reset();
+}
+
+}  // namespace fable2::guest_work_log
+
 extern "C" void MainRenderLoop_82B9CD68(PPCContext& ctx, uint8_t* base) {
   const int64_t frame_us =
       std::chrono::duration_cast<std::chrono::microseconds>(
@@ -112,6 +145,8 @@ extern "C" void MainRenderLoop_82B9CD68(PPCContext& ctx, uint8_t* base) {
           .count();
   // Guest frame time for the F3 overlay (see guest_frame_rate.h).
   fable2::guest_frame_rate::record_frame(frame_us);
+  // Periodic guest work log line (A/B measurements, see guest_work_log).
+  fable2::guest_work_log::poll();
   // Bounded unfiltered trace window (FABLE2_TRACE_WINDOW=1); see above.
   fable2::functrace_window::run_window(frame_us);
   if (fable2::fpsmeter::enabled()) {
@@ -147,8 +182,10 @@ extern "C" void MainRenderLoop_82B9CD68(PPCContext& ctx, uint8_t* base) {
   }
   // F6 native-renderer toggle + overlay request (per frame).
   fable2::native::PollFrame();
-  // D3D census (FABLE2_D3D_CENSUS=<frames>); inert otherwise.
+  // Native capture frame end: finishes and publishes the frame's scene and
+  // advances discovery (inert unless the native renderer or discovery is on).
   fable2::native::capture::OnSwap();
+  // D3D census (FABLE2_D3D_CENSUS=<frames>); inert otherwise.
   fable2::d3dcensus::OnFrame();
   // F5 (host) -> run the external Lua file (per-frame, responsive).
   fable2::f5lua::poll_mainloop(ctx, base);

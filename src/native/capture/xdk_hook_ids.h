@@ -46,4 +46,6 @@ constexpr uint32_t kHook_DrawIndx2_82BA5CE8 = 110;
 constexpr uint32_t kHook_SetBinSelect_82B9E848 = 112;
 constexpr uint32_t kHook_IndirectBuffer_82286248 = 113;
 constexpr uint32_t kHook_TileReplay_82B9ED28 = 114;
+constexpr uint32_t kHook_VsLoadImmediate_821DFDE0 = 115;
+constexpr uint32_t kHook_GpuLoadShaders_82221978 = 116;
 }  // namespace fable2::native::capture

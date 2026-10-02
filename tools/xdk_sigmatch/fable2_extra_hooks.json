@@ -13,5 +13,7 @@
   {"name": "SetBinSelect:822A6318", "address": "0x822A6318"},
   {"name": "SetBinSelect:82B9E848", "address": "0x82B9E848"},
   {"name": "IndirectBuffer:82286248", "address": "0x82286248"},
-  {"name": "TileReplay?:82B9ED28", "address": "0x82B9ED28"}
+  {"name": "TileReplay?:82B9ED28", "address": "0x82B9ED28"},
+  {"name": "VsLoadImmediate:821DFDE0", "address": "0x821DFDE0"},
+  {"name": "GpuLoadShaders:82221978", "address": "0x82221978"}
 ]

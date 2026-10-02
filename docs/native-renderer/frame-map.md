@@ -635,7 +635,7 @@ The first gameplay matrix-finder pass (on `native_discovery_20261002_104938`) le
 
 - Accepted, base 0, dot, `pos_fetch` -1:
   - exact shaders, on the disassembly alone: `0xECD66A10092E6562` (also the GPU check), `0xF160B4DA459A6D40`, `0x65834A8405D40E53`, `0x57818A7FD1C4F026`, `0xBEAD84BD72072E0E`, `0x1E6798C9D0F65784`.
-  - derived positions (skinned or displaced), where at least 90% of samples keep half their vertices inside the clip volume with `c0..c3`: `0x5F4416192E87005F` (0.938), `0x3A0F9098B839DDBC`, `0x82F6433A69263C75`, `0x9ED0BA440DBD51D4`, `0x432563420047C96C`, `0xFBD39C64463E180B` (1.0 each). Skinned meshes are drawn in their bind pose and foliage without wind.
+  - derived positions (skinned or displaced), where at least 90% of samples keep half their vertices inside the clip volume with `c0..c3`: `0x5F4416192E87005F` (0.938), `0x3A0F9098B839DDBC`, `0x82F6433A69263C75`, `0x9ED0BA440DBD51D4`, `0x432563420047C96C`, `0xFBD39C64463E180B` (1.0 each). These entries carry `"deformed": true`: skinned meshes are drawn in their bind pose and foliage without wind, which sub-project 3 accepts. `gen_transform_table.py` emits the flag as the fifth `FABLE2_VS_TRANSFORM` argument; it reaches `TransformInfo::deformed` and `DrawRecord::deformed`, and the coverage line counts deformed drawable records separately.
 - Rejected (`"rejected"` gives the reason): `0x79EAC49585797037` (position permuted by `cndeq` after the fetch, 0.204), `0xA1F7E9885EC466DF` (skinned with placement in the bones, 0.477), `0x87D4404FB36AF71D` (position from three fetches, 0.0), `0xD4D558DA6A82BDC8` (0.534), `0x695413A9831D88DA` (memexport particle pass, point lists), `0x475EC9F795E5EDBB` (0.719), `0xA5846836C90E1192` (0.773), `0x29B6506FBACEB93A` (0.600), `0x775C6085FBB9D676` (1 sample), `0x563E3BE17857DB59` (computed index and relative constants, 0.429).
 
 `gen_transform_table.py` writes 12 entries to `src/native/capture/vs_transform_table.inc`.
@@ -650,7 +650,7 @@ The first gameplay matrix-finder pass (on `native_discovery_20261002_104938`) le
 - **Bank.** Only the transform's four registers are converted, into a per-thread 1024-float buffer.
 - **Argument mapping (section 8).** `DrawIndexedVertices` and `DrawVertices` as mapped. All other draw hooks get prim 0, which becomes `kUnsupportedPrim`.
 
-Extra skip reasons, applied when `AssembleRecord` returns none or no-transform:
+Capture-side skip reasons replace `AssembleRecord`'s reason, unless that reason is unsupported-prim (`ResolveSkip`, `CountSkip` and `kMaxDrawCount` in `draw_record.h`, tested in `test_frame_scene.cpp`). The capture stops filling inputs at the first problem, so `AssembleRecord` alone would report, for example, an oversized draw as unknown-shader. The capture-side reasons are:
 
 - index or vertex count above 4,194,304: `kBadMemory`, before any index read;
 - indices unreadable: `kBadMemory`;
@@ -667,10 +667,10 @@ Extra skip reasons, applied when `AssembleRecord` returns none or no-transform:
 
 ### Coverage (gameplay)
 
-Run with `.\tools\drive_game.ps1 -Total 120 -GameArgs "--fable2_native_render=true"` (`fable_2_097.log`, repeated after the final build as `fable_2_099.log` with identical counts). Every 300 frames:
+Run with `.\tools\drive_game.ps1 -Total 120 -GameArgs "--fable2_native_render=true"` (`fable_2_097.log` and `fable_2_099.log`; after Task 11 fix round 1, `fable_2_100.log`, with identical counts and the deformed count added). Every 300 frames:
 
 ```
-[native] capture: frame 1200 captured 1477 drawable 921 skipped {no-transform: 229, unsupported-prim: 324, bad-index: 3} nested_total 0
+[native] capture: frame 1200 captured 1477 drawable 921 (deformed 5) skipped {no-transform: 229, unsupported-prim: 324, bad-index: 3} nested_total 0
 [native] capture: frame 1200 unsupported by hook {D3DDevice_DrawVertices?: 21, D3DDevice_BeginVertices?: 3, DrawIndx:8221C9C8: 255, DrawIndx:82217EE8: 10, DrawIndx:82207C30: 31, DrawIndx2:821EF988: 4}
 ```
 

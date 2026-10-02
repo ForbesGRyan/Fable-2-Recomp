@@ -80,7 +80,8 @@ class FinderTests(unittest.TestCase):
             rows.append({"kind": "meta"})
             log.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
             out = d / "vs.json"
-            out.write_text(json.dumps({"0x2": {"base": 4, "layout": "combine", "manual": True, "pos_fetch": 1}}))
+            out.write_text(json.dumps({"0x2": {"base": 4, "layout": "combine", "manual": True, "pos_fetch": 1,
+                                               "deformed": True}}))
             mf.main([str(log), "--out", str(out)])
             data = json.loads(out.read_text())
             self.assertEqual(data["0x1"]["base"], 12)
@@ -89,8 +90,8 @@ class FinderTests(unittest.TestCase):
             inc = d / "t.inc"
             gtt.main(["--json", str(out), "--out", str(inc)])
             text = inc.read_text()
-            self.assertIn("FABLE2_VS_TRANSFORM(0x1ull, 12, 0, -1)", text)
-            self.assertIn("FABLE2_VS_TRANSFORM(0x2ull, 4, 1, 1)", text)
+            self.assertIn("FABLE2_VS_TRANSFORM(0x1ull, 12, 0, -1, 0)", text)
+            self.assertIn("FABLE2_VS_TRANSFORM(0x2ull, 4, 1, 1, 1)", text)
             self.assertLess(text.index("0x1ull"), text.index("0x2ull"))
 
 

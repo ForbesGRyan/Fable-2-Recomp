@@ -38,6 +38,7 @@
     "layout": "dot",
     "pos_fetch": -1,
     "manual": true,
+    "deformed": true,
     "evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: bone blend from vf3); base-0 check 1.000",
     "finder": {
       "20261002_111154+111917": {
@@ -59,6 +60,7 @@
     "layout": "dot",
     "pos_fetch": -1,
     "manual": true,
+    "deformed": true,
     "evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: procedural displacement (sin/frc)); base-0 check 1.000",
     "finder": {
       "20261002_111154+111917": {
@@ -132,6 +134,7 @@
     "layout": "dot",
     "pos_fetch": -1,
     "manual": true,
+    "deformed": true,
     "evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: bone blend from vf3); base-0 check 0.938",
     "finder": {
       "20261002_111154+111917": {
@@ -208,6 +211,7 @@
     "layout": "dot",
     "pos_fetch": -1,
     "manual": true,
+    "deformed": true,
     "evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: bone blend from vf3); base-0 check 1.000",
     "finder": {
       "20261002_111154+111917": {
@@ -237,6 +241,7 @@
     "layout": "dot",
     "pos_fetch": -1,
     "manual": true,
+    "deformed": true,
     "evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: bone blend from vf3); base-0 check 1.000",
     "finder": {
       "20261002_111154+111917": {
@@ -345,6 +350,7 @@
     "layout": "dot",
     "pos_fetch": -1,
     "manual": true,
+    "deformed": true,
     "evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: procedural displacement (sin/frc)); base-0 check 1.000",
     "finder": {
       "20261002_111154+111917": {

@@ -60,6 +60,7 @@ struct DrawRecord {
   uint64_t vs_hash = 0;
   float rows[16] = {};
   TransformLayout layout = TransformLayout::kDot;
+  bool deformed = false;  // the shader moves the position first; drawn undeformed
   SkipReason skip = SkipReason::kNone;
 };
 
@@ -67,6 +68,9 @@ struct TransformInfo {
   uint32_t base_reg;
   TransformLayout layout;
   int pos_fetch;  // -1 = first full vertex fetch
+  // The shader moves the fetched position (skinning, displacement) before
+  // applying this transform: records draw it undeformed (bind pose, no wind).
+  bool deformed = false;
 };
 
 struct DrawInputs {
@@ -111,7 +115,24 @@ inline DrawRecord AssembleRecord(const DrawInputs& in, uint32_t seq) {
   if (!in.transform || !in.bank || in.transform->base_reg > 252) return skip(SkipReason::kNoTransform);
   std::memcpy(r.rows, in.bank + size_t(in.transform->base_reg) * 4, sizeof(r.rows));
   r.layout = in.transform->layout;
+  r.deformed = in.transform->deformed;
   return r;
+}
+
+// Index/vertex counts above this are garbage arguments, not draws.
+inline constexpr uint32_t kMaxDrawCount = 4194304;
+
+// Capture-side rejection of a draw's count, checked before any index read.
+inline SkipReason CountSkip(uint32_t count) {
+  return count > kMaxDrawCount ? SkipReason::kBadMemory : SkipReason::kNone;
+}
+
+// Final skip reason: a capture-side reason (garbage count, unreadable or
+// out-of-range indices) replaces AssembleRecord's, which may only reflect the
+// inputs the capture stopped filling; an unsupported primitive always wins.
+inline SkipReason ResolveSkip(SkipReason assembled, SkipReason capture) {
+  if (capture == SkipReason::kNone || assembled == SkipReason::kUnsupportedPrim) return assembled;
+  return capture;
 }
 
 }  // namespace fable2::native::capture

@@ -43,6 +43,32 @@ int main() {
   if (capture::AssembleRecord(in, 0).skip != SkipReason::kBadMemory) return 11;
   if (std::string(capture::SkipReasonName(SkipReason::kBadIndex)) != "bad-index") return 12;
 
+  // A deformed transform (the shader moves the fetched position: skinning,
+  // displacement) marks the drawable record; plain transforms do not.
+  static const capture::TransformInfo td{0, capture::TransformLayout::kDot, -1, true};
+  in = Good(); in.transform = &td;
+  const auto rd = capture::AssembleRecord(in, 0);
+  if (rd.skip != SkipReason::kNone || !rd.deformed) return 40;
+  if (r.deformed) return 41;
+
+  // Skip-reason precedence: a capture-side reason (garbage count, bad index
+  // memory) replaces AssembleRecord's, except for unsupported primitives.
+  if (capture::CountSkip(capture::kMaxDrawCount) != SkipReason::kNone) return 42;
+  if (capture::CountSkip(capture::kMaxDrawCount + 1) != SkipReason::kBadMemory) return 43;
+  if (capture::ResolveSkip(SkipReason::kNoTransform, SkipReason::kBadIndex) != SkipReason::kBadIndex) return 44;
+  if (capture::ResolveSkip(SkipReason::kNone, SkipReason::kBadMemory) != SkipReason::kBadMemory) return 45;
+  if (capture::ResolveSkip(SkipReason::kUnsupportedPrim, SkipReason::kBadMemory) != SkipReason::kUnsupportedPrim) return 46;
+  if (capture::ResolveSkip(SkipReason::kNoStream, SkipReason::kNone) != SkipReason::kNoStream) return 47;
+  // An oversized draw is rejected before the shader is read, so AssembleRecord
+  // alone would call it kUnknownShader; the final reason is kBadMemory.
+  in = Good(); in.count = capture::kMaxDrawCount + 1; in.have_shader = false;
+  if (capture::ResolveSkip(capture::AssembleRecord(in, 0).skip, capture::CountSkip(in.count)) !=
+      SkipReason::kBadMemory) return 48;
+  // ... but an unsupported primitive with a garbage count stays unsupported.
+  in.prim = 8;
+  if (capture::ResolveSkip(capture::AssembleRecord(in, 0).skip, capture::CountSkip(in.count)) !=
+      SkipReason::kUnsupportedPrim) return 49;
+
   render::FrameBuilder b;
   b.Add(r);                         // outside bracket: ignored
   b.Close();                        // close while closed: ignored

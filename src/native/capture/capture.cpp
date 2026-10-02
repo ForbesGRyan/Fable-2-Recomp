@@ -164,9 +164,10 @@ struct TableEntry {
   uint32_t base;
   uint8_t layout;
   int pos_fetch;
+  uint8_t deformed;  // the shader moves the position first (vs-transforms.json "deformed")
 };
 static constexpr TableEntry kTransformTable[] = {
-#define FABLE2_VS_TRANSFORM(H, B, L, P) {H, B, L, P},
+#define FABLE2_VS_TRANSFORM(H, B, L, P, D) {H, B, L, P, D},
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 };
@@ -175,7 +176,7 @@ const TransformInfo* FindTransform(uint64_t hash) {
   static const std::unordered_map<uint64_t, TransformInfo> table = [] {
     std::unordered_map<uint64_t, TransformInfo> m;
     for (const TableEntry& e : kTransformTable) {
-      m[e.hash] = TransformInfo{e.base, TransformLayout(e.layout), e.pos_fetch};
+      m[e.hash] = TransformInfo{e.base, TransformLayout(e.layout), e.pos_fetch, e.deformed != 0};
     }
     return m;
   }();
@@ -433,9 +434,6 @@ void OnGpuLoadShaders(const LastArgs& a) {
   // shader; 0x82221A10 forces variant 0 otherwise.
   t_gpu_vs.variant = (!ps && (flags & xdk::kVsVariantFlagMask)) ? 1 : 0;
 }
-
-// Index/vertex counts above this are garbage arguments, not draws.
-constexpr uint32_t kMaxDrawCount = 4194304;
 
 // Index buffer object fields (xdk_layout.h).
 struct IbView {
@@ -810,7 +808,7 @@ thread_local float t_bank[1024];  // vertex constants, host floats (only the tra
 // set). Returns a skip reason AssembleRecord does not check (garbage counts,
 // indices outside the position stream), or kNone.
 SkipReason FillDrawInputs(uint32_t device, DrawInputs& in) {
-  if (in.count > kMaxDrawCount) return SkipReason::kBadMemory;
+  if (const SkipReason c = CountSkip(in.count); c != SkipReason::kNone) return c;
   DeviceSnapshot dev;
   if (!ReadDevice(device, &dev)) return SkipReason::kNone;  // have_shader stays false
   VsChoice vc;
@@ -895,12 +893,9 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   std::lock_guard<std::mutex> lock(g_scene_mutex);
   if (!g_builder.InMainScene()) return;
   DrawRecord r = AssembleRecord(in, g_builder.NextSeq());
-  // Bad memory / bad index outrank a missing transform (AssembleRecord checks
-  // the transform last).
-  if (extra != SkipReason::kNone &&
-      (r.skip == SkipReason::kNone || r.skip == SkipReason::kNoTransform)) {
-    r.skip = extra;
-  }
+  // A capture-side reason (garbage count, bad index memory) replaces
+  // AssembleRecord's, which only sees the inputs filled before it.
+  r.skip = ResolveSkip(r.skip, extra);
   if (r.skip == SkipReason::kUnsupportedPrim && id < 128) ++g_unsupported_by_hook[id];
   g_builder.Add(r);
 }
@@ -1043,9 +1038,12 @@ void PublishScene(const FinishedScene& done) {
                   done.unsupported_by_hook[id]);
     unsupported += buf;
   }
-  REXSYS_INFO("[native] capture: frame {} captured {} drawable {} skipped {{{}}} nested_total {}",
-              sc.frame, sc.captured, sc.draws.size(), skipped,
-              g_nested_draws.load(std::memory_order_relaxed));
+  size_t deformed = 0;
+  for (const DrawRecord& r : sc.draws) deformed += r.deformed ? 1 : 0;
+  REXSYS_INFO(
+      "[native] capture: frame {} captured {} drawable {} (deformed {}) skipped {{{}}} nested_total {}",
+      sc.frame, sc.captured, sc.draws.size(), deformed, skipped,
+      g_nested_draws.load(std::memory_order_relaxed));
   if (!unsupported.empty()) {
     REXSYS_INFO("[native] capture: frame {} unsupported by hook {{{}}}", sc.frame, unsupported);
   }

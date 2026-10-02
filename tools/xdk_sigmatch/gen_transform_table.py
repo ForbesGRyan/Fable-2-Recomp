@@ -10,7 +10,10 @@ def generate(data):
         if "base" not in e or "base2" in e:
             continue
         layout = 0 if e["layout"] == "dot" else 1
-        lines.append(f"FABLE2_VS_TRANSFORM({vs}ull, {e['base']}, {layout}, {e.get('pos_fetch', -1)})")
+        # deformed: the shader moves the fetched position (skinning, displacement)
+        # before the transform, so the record draws it undeformed.
+        deformed = 1 if e.get("deformed") else 0
+        lines.append(f"FABLE2_VS_TRANSFORM({vs}ull, {e['base']}, {layout}, {e.get('pos_fetch', -1)}, {deformed})")
     return "\n".join(lines) + "\n"
 
 

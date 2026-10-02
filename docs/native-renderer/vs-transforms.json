@@ -359,8 +359,14 @@
     "evidence": "dump (instr 8-22, r10 at 51, oPos 52-55): no vertex fetch; r0.x = patch index, r0.yz = domain (u, v) (xenia kQuadDomainPatchIndexed); row = floor(p * c11.y), col = p - row * c11.x, world.xy = (col + u, row + v) * c46.xy + c113.xy, h = tfetch2D(tf16, (world.xy - c47.zw) * c47.xy).x * c46.z; position = cndeq(c254.xxxy, (h, world.xy), c254.yyyy) with GPU c254 = (0, 1, 3, 2), oPos = dp4(c0..c3 .zxyw, position) = dp4(c0..c3, (world.x, world.y, h, 1)). Drawn by DrawIndx:8221C9C8 (quad patches, auto-indexed). [vtess] GPU register file matches the capture's constants, tf16-19 and indx_offset = r5 in 1275/1275 rows (native_discovery_20261002_130248 + fable_2_108.log); the rebuilt grid puts 83% of points inside the clip volume (axes swapped 34%, height 0 15%). Hole mask (tf18.w < c114.x: NaN position, instr 37-47) not applied"
   },
   "0xD4D558DA6A82BDC8": {
+    "base": 0,
+    "layout": "dot",
+    "pos_fetch": -1,
     "manual": true,
-    "rejected": "dump: dp4(c0..c3) of bone-blended position; base-0 check 0.534; finder window 10 contradicts the dump",
+    "deformed": true,
+    "pos_swizzle": "yxw1",
+    "evidence": "dump: four-bone blend, oPos = dp4(c0..c3, blended position) (instr 71-74); undeformed position = bind pose, already placed by c0..c3 (weighted 4-bone skinning is a later sub-project). The fetch's own swizzle 0x4C1 reads w from the bone-index dword (0, 4 or 8), which exploded the clay mesh, so the fetch is read as yxw1 (0xAC1, the swizzle 0x3A0F... has on the same vertices). Matrix-finder base 0 / dot: score 1.000 on 480 samples (native_discovery_20261002_155634.jsonl, 30 frames, 16 draws per frame, first 64 decoded vertices of each draw projected with that draw's own device-bank c0..c3, at least half inside clip; all in front 1.000). Draws land on the hero body (frame 16, VBs 470020672, 470507008, 468799552) and Rose; the same VBs are redrawn by deformed 0x3A0F.../0x82F6... (glow pass). Report: .superpowers/sdd/2026-10-01-native-renderer-clay-pass/character-bug-report.md",
+    "task11_rejected": "base-0 check 0.534 on early captures that read the first vertices of the stream, not of the draw; finder window 10 contradicts the dump",
     "finder": {
       "20261002_111154+111917": {
         "base": 10,

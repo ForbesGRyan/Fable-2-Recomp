@@ -5,13 +5,16 @@
 using namespace fable2::native;
 
 int main() {
-  // ParseMode
-  if (ParseMode("overlay").mode != Mode::kOverlay || !ParseMode("overlay").recognized) return 1;
-  if (ParseMode(" Replace ").mode != Mode::kReplace || !ParseMode(" Replace ").recognized) return 2;
-  if (ParseMode("REPLACE").mode != Mode::kReplace) return 3;
-  ParsedMode unknown = ParseMode("foo");
-  if (unknown.mode != Mode::kOverlay || unknown.recognized) return 4;
-  if (ParseMode("").recognized) return 5;
+  // View parsing and cycling
+  auto pv = ParseView("  Split ");
+  if (pv.view != View::kSplit || !pv.recognized) return 1;
+  pv = ParseView("bogus");
+  if (pv.view != View::kOff || pv.recognized) return 2;
+  if (ParseView("pattern").view != View::kPattern) return 3;
+  View v = View::kOff;
+  const View expect[] = {View::kOverlay, View::kSplit, View::kNative, View::kPattern, View::kOff};
+  for (View e : expect) { v = NextView(v); if (v != e) return 4; }
+  if (std::string(ViewName(View::kNative)) != "native") return 5;
 
   // EdgeDetector: only up->down transitions fire.
   EdgeDetector edge;
@@ -31,6 +34,6 @@ int main() {
   if (latch.IsFailed()) return 15;
   if (!latch.Fail()) return 16;
 
-  std::cout << "PASS: mode parsing, F6 edge detection, failure latch\n";
+  std::cout << "PASS: view parsing/cycling, F6 edge detection, failure latch\n";
   return 0;
 }

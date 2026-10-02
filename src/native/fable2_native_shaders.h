@@ -79,4 +79,17 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0) : SV_Target {
 }
 )hlsl";
 
+// Debug views (Task 13): the clay target drawn over the guest output.
+// mode 1 overlay (alpha 0.5), 2 split (right half only), 3 native (opaque).
+inline constexpr const char* kCompositePs = R"hlsl(
+cbuffer C : register(b0) { float out_w; float out_h; uint mode; float alpha; };
+Texture2D clay : register(t0);
+SamplerState s : register(s0);
+float4 main(float4 pos : SV_Position) : SV_Target {
+  float2 uv = pos.xy / float2(out_w, out_h);
+  if (mode == 2 && uv.x < 0.5) discard;   // split: left half stays emulated
+  return float4(clay.Sample(s, uv).rgb, alpha);
+}
+)hlsl";
+
 }  // namespace fable2::native::shaders

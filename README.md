@@ -77,11 +77,7 @@ Optional command-line overrides (all normal `--cvar value` args):
 
 Foundation for a native D3D12 renderer (see
 `docs/superpowers/specs/2026-10-01-native-renderer-foundation-design.md`).
-Enable with `[native] enabled = true` in `fable2_config.toml`. Modes (cvar
-`fable2_native_render_mode`): `overlay` (default) draws a grid over the
-emulated frame; `replace` draws a test pattern instead of the game. F6 toggles
-it live. From the command line use `--fable2_native_render=true` (restart
-required; F6 then toggles `fable2_native_render_active` live). Any native failure falls back to the emulated image. D3D12 only.
+Start with `--fable2_native_render=true` (or `[native] enabled = true` in `fable2_config.toml`; restart required). Choose a debug view with `--fable2_native_view=overlay|split|native|pattern` (default `off`) or cycle off, overlay, split, native, pattern with F6. Clay geometry is a debug view: the emulated frame keeps rendering underneath (`overlay` blends the native image at 50%, `split` shows it on the right half, `native` shows it full screen, `pattern` replaces the frame with a test pattern). Any native failure falls back to the emulated image (F6 retries). D3D12 only.
 
 ## User config (fable2_config.toml)
 

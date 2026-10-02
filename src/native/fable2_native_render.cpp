@@ -17,17 +17,15 @@
 
 #include "capture.h"
 #include "clay_pass.h"
+#include "composite.h"
 #include "fable2_native_shaders.h"
 #include "native_render_state.h"
 
 REXCVAR_DEFINE_BOOL(fable2_native_render, false, "Fable2",
                     "Register the native guest-output renderer at startup (restart "
                     "required). Seeded from fable2_config.toml [native] enabled.");
-REXCVAR_DEFINE_BOOL(fable2_native_render_active, true, "Fable2",
-                    "Live switch for the native renderer (F6 toggles).");
-REXCVAR_DEFINE_STRING(fable2_native_render_mode, "overlay", "Fable2",
-                      "overlay = grid drawn over the emulated frame; replace = native "
-                      "test pattern replaces the frame.");
+REXCVAR_DEFINE_STRING(fable2_native_view, "off", "Fable2",
+                      "Native debug view: off, overlay, split, native, pattern (F6 cycles).");
 REXCVAR_DEFINE_STRING(fable2_native_clay_color, "clay", "Fable2",
                       "Native clay pass color: clay = one clay color; draw = a color per "
                       "draw; shader = a color per vertex shader.");
@@ -50,9 +48,7 @@ struct Resources {
   nrhi::BindingLayout* layout = nullptr;
   nrhi::Shader* vs = nullptr;
   nrhi::Shader* pattern_ps = nullptr;
-  nrhi::Shader* grid_ps = nullptr;
   nrhi::Pipeline* pattern = nullptr;
-  nrhi::Pipeline* grid = nullptr;
 };
 
 bool g_installed = false;
@@ -62,6 +58,7 @@ EdgeDetector g_toggle;
 std::atomic<uint32_t> g_frame{0};
 
 // Clay pass state: command-processor thread only.
+render::Composite g_composite;
 std::unique_ptr<render::ClayPass> g_clay;  // created on first use (cvars parsed)
 std::shared_ptr<const render::FrameScene> g_clay_scene;  // last scene rendered
 uint64_t g_clay_targets = 0;  // targets generation g_clay_scene was drawn into
@@ -77,14 +74,18 @@ void SetStatus(std::string text) {
   g_status = std::move(text);
 }
 
-Mode CurrentMode() {
+View CurrentView() {
   static std::atomic<bool> warned{false};
-  const ParsedMode parsed = ParseMode(REXCVAR_GET(fable2_native_render_mode));
+  const ParsedView parsed = ParseView(REXCVAR_GET(fable2_native_view));
   if (!parsed.recognized && !warned.exchange(true)) {
-    REXLOG_WARN("[native] unknown fable2_native_render_mode '{}', using overlay",
-                REXCVAR_GET(fable2_native_render_mode));
+    REXLOG_WARN("[native] unknown fable2_native_view '{}', using off",
+                REXCVAR_GET(fable2_native_view));
   }
-  return parsed.mode;
+  return parsed.view;
+}
+
+bool IsCompositeView(View v) {
+  return v == View::kOverlay || v == View::kSplit || v == View::kNative;
 }
 
 void Fail(const char* what) {
@@ -111,7 +112,7 @@ render::ClayColor CurrentClayColor() {
 }
 
 bool EnsureResources(nrhi::Device* device, nrhi::Format format) {
-  if (g_res.device == device && g_res.format == format && g_res.pattern && g_res.grid) {
+  if (g_res.device == device && g_res.format == format && g_res.pattern) {
     return true;
   }
   g_res = {};
@@ -138,8 +139,7 @@ bool EnsureResources(nrhi::Device* device, nrhi::Format format) {
   };
   g_res.vs = make_shader(nrhi::ShaderStage::kVertex, "fable2_fullscreen_vs", shaders::kFullscreenVs);
   g_res.pattern_ps = make_shader(nrhi::ShaderStage::kPixel, "fable2_pattern_ps", shaders::kPatternPs);
-  g_res.grid_ps = make_shader(nrhi::ShaderStage::kPixel, "fable2_grid_ps", shaders::kGridPs);
-  if (!g_res.vs || !g_res.pattern_ps || !g_res.grid_ps) return Fail("shader compile"), false;
+  if (!g_res.vs || !g_res.pattern_ps) return Fail("shader compile"), false;
 
   nrhi::GraphicsPipelineDesc pipe;
   pipe.layout = g_res.layout;
@@ -147,12 +147,7 @@ bool EnsureResources(nrhi::Device* device, nrhi::Format format) {
   pipe.rtv_format = format;
   pipe.ps = g_res.pattern_ps;
   g_res.pattern = device->CreateGraphicsPipeline(pipe);
-  pipe.ps = g_res.grid_ps;
-  pipe.blend.enable = true;
-  pipe.blend.src = nrhi::BlendFactor::kSrcAlpha;
-  pipe.blend.dst = nrhi::BlendFactor::kInvSrcAlpha;
-  g_res.grid = device->CreateGraphicsPipeline(pipe);
-  if (!g_res.pattern || !g_res.grid) return Fail("pipeline creation"), false;
+  if (!g_res.pattern) return Fail("pipeline creation"), false;
   return true;
 }
 
@@ -177,13 +172,12 @@ void DrawFullscreen(const NativeGuestOutputRenderContext& ctx, nrhi::Pipeline* p
 }
 
 bool Usable(const NativeGuestOutputRenderContext& ctx) {
-  return REXCVAR_GET(fable2_native_render_active) && !g_latch.IsFailed() &&
-         ctx.backend == NativeGuestOutputBackend::kD3D12 && ctx.device && ctx.cmd &&
+  return !g_latch.IsFailed() && ctx.backend == NativeGuestOutputBackend::kD3D12 && ctx.device && ctx.cmd &&
          ctx.guest_output;
 }
 
 bool RenderCallback(const NativeGuestOutputRenderContext& ctx, void*) {
-  if (!Usable(ctx) || CurrentMode() != Mode::kReplace) return false;
+  if (!Usable(ctx) || CurrentView() != View::kPattern) return false;
   if (!EnsureResources(ctx.device, ctx.guest_output->format())) return false;
   DrawFullscreen(ctx, g_res.pattern);
   g_frame.fetch_add(1, std::memory_order_relaxed);
@@ -191,7 +185,7 @@ bool RenderCallback(const NativeGuestOutputRenderContext& ctx, void*) {
 }
 
 // Clay pass into its own native target (the guest output is not touched;
-// the composite comes later). Renders each published scene once. False on
+// the composite draws it). Renders each published scene once. False on
 // failure (latched).
 bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   std::shared_ptr<const render::FrameScene> scene = capture::Publisher().Latest();
@@ -227,10 +221,15 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
 }
 
 void OverlayCallback(const NativeGuestOutputRenderContext& ctx, void*) {
-  if (!Usable(ctx) || CurrentMode() != Mode::kOverlay) return;
+  const View view = CurrentView();
+  if (!Usable(ctx) || !IsCompositeView(view)) return;  // off/pattern: record nothing
   if (!RenderClay(ctx)) return;
-  if (!EnsureResources(ctx.device, ctx.guest_output->format())) return;
-  DrawFullscreen(ctx, g_res.grid);
+  if (!g_clay_scene) return;  // no scene captured yet: leave the emulated frame
+  if (!g_composite.Ensure(ctx.device, ctx.guest_output->format())) {
+    Fail("composite");
+    return;
+  }
+  g_composite.Draw(ctx.cmd, ctx, g_clay->color(), view);
   g_frame.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -248,6 +247,8 @@ bool WindowFocused() {
 
 std::string StatusText() {
   if (!g_installed) return {};
+  // No native drawing in off/pattern view: never show stale clay stats.
+  if (!g_latch.IsFailed() && !IsCompositeView(CurrentView())) return {};
   std::lock_guard<std::mutex> lock(g_status_mutex);
   return g_status;
 }
@@ -261,8 +262,8 @@ void Install(rex::memory::Memory* memory) {
   rex::graphics::SetNativeGuestOutputRenderer(&RenderCallback, nullptr);
   rex::graphics::SetNativeGuestOutputPostProcessor(&OverlayCallback, nullptr);
   g_installed = true;
-  REXLOG_INFO("[native] native renderer installed (mode={}, F6 toggles)",
-              REXCVAR_GET(fable2_native_render_mode));
+  REXLOG_INFO("[native] native renderer installed (view={}, F6 cycles views)",
+              ViewName(CurrentView()));
 }
 
 void PollFrame() {
@@ -272,18 +273,17 @@ void PollFrame() {
   if (g_toggle.Update(down)) {
     if (g_latch.IsFailed()) {
       g_latch.Clear();
-      REXCVAR_SET(fable2_native_render_active, true);
+      SetStatus({});
       REXLOG_INFO("[native] F6: retrying native renderer");
     } else {
-      const bool now_active = !REXCVAR_GET(fable2_native_render_active);
-      REXCVAR_SET(fable2_native_render_active, now_active);
-      REXLOG_INFO("[native] F6: native renderer {}", now_active ? "on" : "off");
+      const View next = NextView(CurrentView());
+      REXCVAR_SET(fable2_native_view, std::string(ViewName(next)));
+      REXLOG_INFO("[native] F6: view {}", ViewName(next));
     }
   }
 #endif
   rex::graphics::RequestNativeGuestOutputPostProcess(
-      REXCVAR_GET(fable2_native_render_active) && !g_latch.IsFailed() &&
-      CurrentMode() == Mode::kOverlay);
+      !g_latch.IsFailed() && IsCompositeView(CurrentView()));
 }
 
 }  // namespace fable2::native

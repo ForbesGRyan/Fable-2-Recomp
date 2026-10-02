@@ -118,8 +118,8 @@ hotfunc_yield_every = 8
 [native]
 # Experimental native renderer (docs/superpowers/specs/
 # 2026-10-01-native-renderer-foundation-design.md). true = register the native
-# renderer at startup; F6 toggles it live. Mode is the cvar
-# fable2_native_render_mode (overlay | replace).
+# renderer at startup. The debug view is the cvar fable2_native_view
+# (off | overlay | split | native | pattern); F6 cycles it live.
 # Default: false
 enabled = false
 )TOML_EOF";

@@ -55,6 +55,7 @@ __pycache__/
 !tools/prepare_renderer_mspack.py
 !tools/stage_renderer_sdk.py
 !tools/create_app_icon.ps1
+!tools/drive_game.ps1
 !assets/app-icon.png
 !docs/screenshots/launcher.png
 

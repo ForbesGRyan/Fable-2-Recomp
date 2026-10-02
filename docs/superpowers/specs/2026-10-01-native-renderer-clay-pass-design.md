@@ -1,6 +1,7 @@
 # Native renderer sub-project 3: capture layer and clay pass
 
-Status: approved design (brainstorming, 2026-10-01). Implements sub-project 3 of
+Status: implemented (sub-project 3), validation results in docs/native-renderer/frame-map.md section 10.
+Approved design (brainstorming, 2026-10-01). Implements sub-project 3 of
 `docs/superpowers/specs/2026-10-01-native-renderer-foundation-design.md`, using the
 findings in `docs/native-renderer/frame-map.md`.
 

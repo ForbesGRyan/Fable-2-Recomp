@@ -1,6 +1,6 @@
 # Fable 2 frame map and sub-project 3 recommendation
 
-Status: sub-project 3 (capture layer and clay pass) implemented. Census, pitch ablation, tiling capture and discovery (D1-D4, sections 8 and 9) are complete; gameplay coverage D / C = 0.944 (section 9, "Coverage"). Validation (spec success criteria, plan Task 14: alignment at three locations, 10-minute stability, capture cost) is pending, as is the uncapped F3 reading (see "Pending"). Sections 1b, 2c, 3, 5, 6b and 7 carry the gameplay census results.
+Status: sub-project 3 (capture layer and clay pass) implemented and validated. Census, pitch ablation, tiling capture and discovery (D1-D4, sections 8 and 9) are complete. Validation (spec success criteria, plan Task 14) is in section 10: alignment passed at three locations, gameplay coverage D / C = 0.949 over a 25-minute run, no crash, view-off capture 0.04 ms per frame. The uncapped F3 reading is still pending (see "Pending"). Sections 1b, 2c, 3, 5, 6b and 7 carry the gameplay census results.
 Gameplay capture: `out\build\win-amd64-release\logs\d3d_census_20261001_140912.jsonl` (900 rows, 30 s walking in the world, armed after 90 s; no repeated `gpu_frame`).
 Menu capture used: `out\build\win-amd64-release\logs\d3d_census_20261001_130522.jsonl` (600 rows). Row 1 accumulates every call since process start and is dropped by `summarize_census.py`. The capture has two distinct segments (section 2): frames 2-480 are a static screen (likely splash/loading/title) and frames 481-600 are a 3D scene. Treat the 3D segment as the one that matters. This capture predates `gpu.gpu_frame`, so repeated GPU frames could not be dropped.
 
@@ -639,7 +639,7 @@ The first gameplay matrix-finder pass (on `native_discovery_20261002_104938`) le
   - exact shaders, on the disassembly alone: `0xECD66A10092E6562` (also the GPU check), `0xF160B4DA459A6D40`, `0x65834A8405D40E53`, `0x57818A7FD1C4F026`, `0xBEAD84BD72072E0E`, `0x1E6798C9D0F65784`.
   - derived positions (skinned or displaced), where at least 90% of samples keep half their vertices inside the clip volume with `c0..c3`: `0x5F4416192E87005F` (0.938), `0x3A0F9098B839DDBC`, `0x82F6433A69263C75`, `0x9ED0BA440DBD51D4`, `0x432563420047C96C`, `0xFBD39C64463E180B` (1.0 each). These entries carry `"deformed": true`: skinned meshes are drawn in their bind pose and foliage without wind, which sub-project 3 accepts. `gen_transform_table.py` emits the flag as the fifth `FABLE2_VS_TRANSFORM` argument; it reaches `TransformInfo::deformed` and `DrawRecord::deformed`, and the coverage line counts deformed drawable records separately.
 - Added in Task 11b (section "Task 11b" below): `0x79EAC49585797037` (position swizzle), `0xA1F7E9885EC466DF` (rigid skin), the terrain shaders `0xC30A97D946FA2BE4`, `0xFB68A7F2301210E1` and `0x5003700B7C9B1C16`. Their Task 11 rejections are kept as `"task11_rejected"`.
-- Character bodies, `0xD4D558DA6A82BDC8` (four-bone skinning, hero and NPCs): accepted as base 0, dot, `deformed`, `pos_swizzle` `yxw1`, bind pose (character fix). The fetch's own swizzle 0x4C1 takes w from the bone-index dword (0, 4 or 8), which exploded the clay mesh into a screen-wide fan; `yxw1` (0xAC1, what `0x3A0F...` has on the same vertices) gives w = 1. The Task 11 rejection (0.534) came from early captures that read the wrong vertices. With `native_discovery_20261002_155634.jsonl` the base-0 check scores 1.000 on 480 samples, and the microcode has `oPos = dp4(c0..c3, ...)` at instructions 71-74. Before this, all 16 body draws per frame were skipped as no-transform, so only the eyes and sword (`0x79EA...`) and glow-pass characters were drawn. Weighted four-bone skinning is a later sub-project.
+- Character bodies, `0xD4D558DA6A82BDC8` (four-bone skinning, hero and NPCs): accepted as base 0, dot, `deformed`, `pos_swizzle` `yxw1`, bind pose (character fix). The fetch's own swizzle 0x4C1 takes w from the bone-index dword (0, 4 or 8), which exploded the clay mesh into a screen-wide fan; the override `yxw1` (0xAC1, the same override `0x79EA...` and `0xA1F7...` carry) gives w = 1. The Task 11 rejection (0.534) came from early captures that read the wrong vertices. The microcode has `oPos = dp4(c0..c3, ...)` at instructions 71-74. The base-0 check on `native_discovery_20261002_155634.jsonl` scores 1.000 on 480 samples, but that is weak evidence: discovery rows decode positions without the table's `pos_swizzle`, and a bind-pose mesh sits near its model origin, so most matrices that place the object on screen pass the half-inside test. The confirmation is visual: with the entry in place the bodies line up with the emulated image in split and overlay views (user check, section 10). Before this, all 16 body draws per frame were skipped as no-transform, so only the eyes and sword (`0x79EA...`) and glow-pass characters were drawn. Weighted four-bone skinning is a later sub-project.
 - Rejected (`"rejected"` gives the reason): `0x87D4404FB36AF71D` (position from three fetches, 0.0), `0x695413A9831D88DA` (memexport particle pass, point lists), `0x475EC9F795E5EDBB` (0.719), `0xA5846836C90E1192` (0.773), `0x29B6506FBACEB93A` (0.600), `0x775C6085FBB9D676` (1 sample), `0x563E3BE17857DB59` (computed index and relative constants, 0.429).
 
 `gen_transform_table.py` writes 18 `FABLE2_VS_TRANSFORM` entries to `src/native/capture/vs_transform_table.inc`, plus `FABLE2_VS_POS_SWIZZLE`, `FABLE2_VS_SKIN` and `FABLE2_VS_TERRAIN` lines for the entries that have them (test `tests/test_gen_transform_table.py`).
@@ -760,7 +760,34 @@ D / C = 1394 / 1477 = 0.944, above the 0.9 target. Frames 1200 to 3300 took 69.9
 | unsupported-prim | 38 | 2.6% | `DrawVertices` 21: shader `0x19A01C01290E20A7`, point lists with no vertex fetch. `DrawIndx:82217EE8` 10, `DrawIndx2:821EF988` 4, `BeginVertices` 3: argument mapping not traced | Trace `82217EE8` (the menu's main emitter, section 8 "Limits") the same way as `8221C9C8`. Point lists stay skipped (no geometry to draw as clay) |
 | bad-index | 3 | 0.2% | `0x8123C16DBF583F92`: instanced draws whose first fetch is per-instance data (`pos_suspect`) | Instancing support, later |
 
-Only Bowerstone was sampled. Other areas will bring shaders that are not in the table yet.
+Only Bowerstone was sampled here; section 10 covers other areas.
+
+## 10. Validation (plan Task 14, 2026-10-02)
+
+Build: `native-renderer` 3fc54d9 with SDK `renderer` 0c6d1de, release. The user played by hand from `out\build\win-amd64-release` with `--fable2_native_render=true --fable2_native_view=split` and used F6 to cycle views. Logs: `fable_2_133.log` (4 min), `fable_2_134.log` (5 min) and `fable_2_135.log` (25 min).
+
+| Spec criterion | Result | Evidence |
+|---|---|---|
+| 1. Alignment | Pass | User: split, overlay and native views line up in town (Bowerstone), in an open field and in an interior. |
+| 2. Coverage >= 0.9 | Pass on aggregate; single frames dip lower | Bowerstone: 1066 / 1117 = 0.954 (`fable_2_133.log`), 1940 / 2008 = 0.966 (F3, `fable_2_134.log`). `fable_2_135.log`: 34 logged windows with records on, aggregate 0.949, 3 below 0.9, minimum 289 / 350 = 0.826 (frame 40200). An F3 screenshot at the lakeside jetty (quest "The Birth of a Hero") read 749 / 985 = 0.76 with 128 bad-index draws. That frame fell between the 300-frame log samples, so the log shows at most 22 bad-index draws. |
+| 3. Stability | Pass, with one unexplained event | `fable_2_135.log`: 17:09:47-17:34:54, in the world from 17:11:10, several loading boundaries (captured count drops to 0-36 at 17:15:00, 17:20:20, 17:28:51 and 17:33:57) and many F6 switches. No warning or error lines apart from the start-up `BaseHeap::AllocFixed` ones; every 300-frame window after loading ran at 28.7-30.0 fps. F3 showed a worst frame of 381.6 ms at a transition. |
+| 4. Capture cost, view off < 0.5 ms | Pass | `fable_2_135.log`: median of the per-window capture medians with records off is 0.040 ms (115 windows). Final fix wave A/B (autoplay, 120 s per run): 0.051 ms median, guest work +0.12 ms against the renderer disabled. With a clay view on, records are built and capture costs 0.5-2.0 ms per frame. |
+| 5. View off looks normal | Pass | User check. |
+| Performance | Pass | 30 fps held with the renderer on in every run. |
+
+**The unexplained event** (`fable_2_133.log`): at 16:58:50, about 35 s into the world, the world draw list froze. Every frame drew the same 1117 draws for 2 minutes, until the user closed the game, and guest work rose from about 6 ms to 38.8 ms per frame with no swap wait. That is the main menu's signature, so a menu or prompt over a frozen world is the likely explanation; the screenshot shows text starting "Pre" behind the F3 window. There were no errors and no capture warnings, and it did not recur in about 28 minutes of later play. If it recurs, take a screenshot with F3 hidden and compare against a run with `--fable2_native_render=false`.
+
+**Skip reasons outside Bowerstone** (the per-shader and per-hook log lines of the sampled windows). Section 9 lists Bowerstone's.
+- no-transform: `0x29B6506FBACEB93A` (up to 20 per frame), `0x7C5710DEF3EE33C4` (15, new), `0x475EC9F795E5EDBB` (13), `0x83569F66D81A3549` (6, new), `0xA5846836C90E1192` (5), `0x8123C16DBF583F92` (2), `0x2D40B53C926109BE` (1, new).
+- bad-index: `0x8123C16DBF583F92`, instanced (up to 22 in the log, 128 in the F3 screenshot).
+- unsupported-prim: `DrawVertices` 14-27, `BeginVertices` 2-16, `DrawIndx:82217EE8` 6-12, `DrawIndx2:821EF988` 4.
+- Next action: run a gameplay discovery capture at the lake and add table entries for the new shaders; instancing for `0x8123...`.
+
+**Known limitations:**
+- Characters are drawn in their bind pose. Rigid attachments are drawn by `0x79EA...` with their own per-object `c0..c3`, which places them at the animated bone, so the eyes and the sword on the back sit apart from the body. Weighted four-bone skinning (`0xD4D5...`) is sub-project 5.
+- Terrain hole masks are ignored.
+- Shaders loaded while records are off are counted as unknown-shader after F6 until they are loaded again.
+- A view change from the console no longer applies at runtime; use F6 or the start-up flags.
 
 ## Pending
 

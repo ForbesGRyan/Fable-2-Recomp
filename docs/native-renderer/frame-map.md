@@ -860,9 +860,9 @@ Thumbnails (tf0): building-trim and wood-plank atlases, a character-part atlas (
 | Vertex shader | Fetch ordinal | Offset (dwords) | Trace | Albedo draws |
 |---|---|---|---|---|
 | `0xECD66A10092E6562` | 2 | 3 | `shader_trace.py` | 4545 |
-| `0xD4D558DA6A82BDC8` | 4 | 5 | by hand (tool: `control flow: cexec`); `o0.xy = max(r5.xy, r5.xy)` at instr 79 in an unconditional exec, `r5` written only by `vfetch_mini r5.yx__` (instr 13); the cexec at 5.0 writes `r4` | 1018 |
+| `0xD4D558DA6A82BDC8` | 4 | 5 | by hand (tool: `control flow: cexec`, since the final-review fix `control flow before export: cexec`); `o0.xy = max(r5.xy, r5.xy)` at instr 79 in an unconditional exec, `r5` written only by `vfetch_mini r5.yx__` (instr 13); the cexec at 5.0 writes `r4` | 1018 |
 | `0x79EAC49585797037` | 2 | 3 | `shader_trace.py` | 148 |
-| `0xA1F7E9885EC466DF` | 3 | 5 | by hand (tool: `control flow: cexec`); `o0.xy` at instr 55, `r5.xy` written only by `vfetch_mini r5.yx__` (instr 10; ordinal 2 is `r5.__x_`, the skin index); the cexec at 3.1 writes `r4` | 100 |
+| `0xA1F7E9885EC466DF` | 3 | 5 | by hand (tool: `control flow: cexec`, since the final-review fix `control flow before export: cexec`); `o0.xy` at instr 55, `r5.xy` written only by `vfetch_mini r5.yx__` (instr 10; ordinal 2 is `r5.__x_`, the skin index); the cexec at 3.1 writes `r4` | 100 |
 
 Not added: `475E...` (rejected) and `7C57...` (no entry) had finder proposals; the finder's `BEAD...` proposal (`o3.xy`, 32_32_FLOAT) serves only `no_albedo` shaders.
 
@@ -888,10 +888,10 @@ Autoplay validation, 2026-10-02/03, release build, `tools\drive_game.ps1` 120 s 
 | Success criterion (spec) | Autoplay measurement | User check |
 |---|---|---|
 | 1. Clay textures match the emulated image in split/overlay (town, open field, interior) | Split screenshot at 95 s (bridge scene): planks, rope, hero clothing and dog textured, correctly oriented, no tiling garbage; terrain is untextured clay by design | pending (user check): town, open field, interior alignment |
-| 2. At least 80% of drawn non-terrain draws textured (Bowerstone, Bower Lake) | Bridge scene: 156-160 of ~182 drawn non-terrain draws textured (about 87%); Task 12 gameplay 160 of 184. Overall share 20-21% because terrain is 567 of ~749 drawn | pending (user check): Bowerstone streets and Bower Lake |
+| 2. At least 80% of drawn non-terrain draws textured (Bowerstone, Bower Lake) | Bridge scene: 156-160 of ~182 drawn non-terrain draws textured (about 87%); Task 12 gameplay 160 of 184. Overall share 20-21% because terrain is 567 of ~749 drawn. Since the final-review fix the F3 and `[native] clay:` texture line also print this share: `Textures: textured 160 of 751 drawn (21%, 86% non-terrain)` (`fable_2_149`, split view; integer percent, 160/184 = 86.96% truncates to 86) | pending (user check): Bowerstone streets and Bower Lake |
 | 3a. 30 fps with a clay view on | 30.0 guest fps in both view-off and split windows; work median 7.1 ms in split | none needed |
 | 3b. View-off capture overhead under 0.5 ms | View-off capture median 0.044 ms (max 0.16 ms), about 11x margin. Guest work median: renderer off 5.92 ms (`fable_2_148`), view off ~6.0 ms (+0.08 ms), split ~7.1 ms (+1.1 ms, matching the 1.09 ms capture median) | none needed |
-| 4a. Texture memory within budget | 46 textures resident, 12.3 MB (budget 512 MB); 0 uploads per frame steady, about 1650 cache hits per frame; upload burst at world load is spread by the per-frame budget and done in 0.84 s; no `[native] textures:` latch or "texture path off" line in any log | none needed |
+| 4a. Texture memory within budget | 46 textures resident, 12.3 MB (budget 512 MB); 0 uploads per frame steady, about 1650 cache hits per frame; upload burst at world load is spread by the per-frame budget and done in 0.84 s; no `[native] textures:` latch or "texture path off" line in logs fable_2_145/146 | none needed |
 | 4b. 10-minute run with an area transition, no crash or latch | Only 120 s runs measured, no area transition | pending (user check) |
 
 Other split-view costs (300-frame windows): texture decode ~0.4 ms, hash 0.3-0.4 ms, record build 0.12-0.16 ms, clay pass max total 1.2-1.3 ms (one 4.57 ms spike). Run 144/147 (renderer off, no `[frame] guest` lines) was not a stall: that line needs `FABLE2_GUEST_WORK_LOG=1` and the unflushed tail was lost when the run was stopped; `fable_2_148` is the valid baseline.
@@ -901,17 +901,19 @@ Other split-view costs (300-frame windows): texture decode ~0.4 ms, hash 0.3-0.4
 | Reason | Draws | Why | Next action |
 |---|---|---|---|
 | `terrain` | 567 | Tessellated terrain stays clay by design (non-goal) | Terrain colour in a later sub-project (blended layers) |
-| `no-albedo` | 24 | Two pixel shaders, `0xA17D8AEC3A817D45` x12 and `0xF6D98C7B4D98438B` x12, whose only traced fetch is a single-component `k_8` mask; the 8_8_8_8 fetches are predicated and zero at first use (likely render targets) | Capture a frame where those textures are populated and re-run `albedo_finder.py`; otherwise leave as clay |
+| `no-albedo` | 24 | Two pixel shaders, `0xA17D8AEC3A817D45` x12 and `0xF6D98C7B4D98438B` x12, whose only traced fetch is a single-component `k_8` mask; the 8_8_8_8 fetches are predicated and zero at first use (possibly render targets; unverified) | Capture a frame where those textures are populated and re-run `albedo_finder.py`; otherwise leave as clay |
 
-All other reasons (`ps-unknown`, `uv-unsupported`, `format-unsupported`, `texture-pending`, `texture-dynamic`, `texture-bad`) were 0 in these windows.
+All other reasons (`ps-unknown`, `uv-unsupported`, `format-unsupported`, `texture-pending`, `texture-dynamic`, `texture-bad`) were not seen in the logged untextured lists of these windows (the lists show the top three reasons).
 
 **Known limitations (non-goals in practice)**
 
 - Terrain stays untextured clay.
-- Alpha test and blending are ignored (foliage and sprite cut-outs draw opaque).
+- Alpha test and blending are ignored (foliage and sprite cut-outs draw opaque). This is a design consequence (the clay pass has no alpha path), not something checked in the screenshots.
 - Gamma is ignored (albedo shown as stored, the shaders square it).
 - Characters are drawn in bind pose (animation is sub-project 5).
 - Mirror clamp addressing is approximated.
+- Textures written by the GPU (render-target resolves into texture memory) may never change in CPU-visible guest memory, so they show stale or black contents instead of becoming `texture-dynamic` (the change check samples guest memory). The all-zero 8_8_8_8 fetches of `A17D...`/`F6D9...` fit this (unverified).
+- Linear base levels use the SDK's row pitch (`GetGuestTextureLayout`: the fetch pitch aligned to 32 blocks, no 256-byte row padding; mips are 256-byte aligned) in the texture cache, the discovery dump extent and `texture_thumb.py`. An earlier ruling padded linear base rows to 256 bytes from "terrain evidence"; that was wrong (the terrain heightmap is tiled, its linear branch never ran). The only linear albedo textures in the Bowerstone capture (five 16x16 8_8_8_8, `8D90...` tf0) have pitch 64 texels, 256-byte rows under both rules, so nothing observed changes; the rules differ only for 8_8_8_8 pitches that are an odd multiple of 32 texels and DXT2_3/DXT4_5 pitches whose block count rounds up to an odd multiple of 16 (DXT1 rows agree always).
 
 **Deviation.** Shader tracing is done in Python over the SDK's shader disassembly dumps (`tools/xdk_sigmatch/shader_trace.py`, `--dump_shaders`) instead of the C++ headers `tfetch_decode.h` and `uv_trace.h` listed in the spec; the runtime only needs the texture fetch slots a pixel shader uses (`TextureFetchSlots` in `vfetch_decode.h`).
 

@@ -2,7 +2,7 @@
 
 // Pure helpers for the clay pass and its geometry cache (no SDK/GPU deps):
 // cache keys, vertex counts, index range checks, draw colors, the root
-// constant block and the F3 status text.
+// constant block, texture counters and the F3 status text.
 
 #include <algorithm>
 #include <cctype>
@@ -32,6 +32,14 @@ struct ClayStats {
   // Renderer-side skips other than bad indices: unreadable guest memory, a
   // failed decode or upload, or an empty triangle list.
   uint32_t skipped_other = 0;
+};
+
+// Albedo texture counters of one clay frame (TextureCache and the clay pass).
+struct TextureStats {
+  uint32_t textured = 0, resident = 0, uploads = 0, mirror = 0, base_only = 0;
+  uint64_t resident_bytes = 0, upload_bytes = 0;
+  double decode_ms = 0;
+  uint32_t status[size_t(capture::MaterialStatus::kCount)] = {};  // final statuses of drawn records
 };
 
 enum class ClayColor : uint8_t { kClay, kDraw, kShader };
@@ -161,6 +169,33 @@ inline GeoKey IndexKey(const capture::DrawRecord& r) {
   return k;
 }
 
+// Cache key of a decoded UV stream (kind 4; kind 3 is the terrain grid's
+// index list): the stream holding the UV element plus every layout field that
+// changes the decode.
+inline GeoKey UvKey(const capture::DrawRecord& r) {
+  const capture::Material& m = r.material;
+  const capture::UvLayout& l = m.uv;
+  GeoKey k;
+  k.addr = m.uv_vb.phys_addr;
+  k.size = m.uv_vb.size;
+  k.stride = l.stride_bytes;
+  k.extra = HashCombine32({l.offset_bytes, uint32_t(l.format), uint32_t(l.comp_u),
+                           uint32_t(l.comp_v), uint32_t(l.swap16), uint32_t(l.normalized),
+                           uint32_t(l.is_signed), uint32_t(l.exp_adjust)});
+  k.kind = 4;
+  return k;
+}
+
+// UVs in a stream of `vb_size` bytes: every vertex whose UV element lies
+// fully inside the stream.
+inline uint32_t UvCount(uint32_t vb_size, const capture::UvLayout& l) {
+  const uint32_t n = capture::UvComponents(l.format);
+  if (n == 0 || l.stride_bytes == 0) return 0;
+  const uint64_t need = uint64_t(l.offset_bytes) + n * (capture::UvSixteen(l.format) ? 2u : 4u);
+  if (need > vb_size) return 0;
+  return uint32_t((vb_size - need) / l.stride_bytes + 1);
+}
+
 struct IndexBytes {
   uint32_t offset = 0, size = 0;
 };
@@ -191,31 +226,69 @@ inline bool IndexRangeValid(uint32_t max_index, int32_t base_vertex, uint32_t ve
   return hi >= 0 && hi < int64_t(vertex_count);
 }
 
-// Root constants, laid out as the clay HLSL cbuffer (20 dwords).
+// Root constants, laid out as the clay HLSL cbuffer (28 dwords).
 struct ClayConstants {
   float rows[16];
   uint32_t layout;
   int32_t base_vertex;
   uint32_t vertex_count;
   uint32_t color;
+  float uv[4];        // u * uv[0] + uv[2], v * uv[1] + uv[3]
+  uint32_t textured;  // 1: sample the albedo at t3
+  uint32_t sampler;   // static sampler s0-s3 (SamplerIndex)
+  uint32_t pad[2];
 };
-static_assert(sizeof(ClayConstants) == 80);
+static_assert(sizeof(ClayConstants) == 112);
 
 inline ClayConstants MakeClayConstants(const capture::DrawRecord& r, uint32_t vertex_count,
-                                       uint32_t color) {
+                                       uint32_t color, const float uv[4], bool textured,
+                                       uint32_t sampler) {
   ClayConstants c{};
   std::copy(std::begin(r.rows), std::end(r.rows), std::begin(c.rows));
   c.layout = r.layout == capture::TransformLayout::kCombine ? 1u : 0u;
   c.base_vertex = r.base_vertex;
   c.vertex_count = vertex_count;
   c.color = color;
+  std::copy(uv, uv + 4, std::begin(c.uv));
+  c.textured = textured ? 1u : 0u;
+  c.sampler = sampler;
   return c;
 }
 
-// Three F3 lines: capture/draw counts with the top three skip reasons, the
-// geometry cache counters and GPU-thread CPU timings, then the guest-thread
-// capture time of the scene's frame.
-inline std::string FormatStatusText(const FrameScene& scene, const ClayStats& st) {
+// The F3 texture line: textured share of the drawn records, cache counters
+// and the top three final statuses other than textured.
+inline std::string FormatTextureText(const TextureStats& ts, uint32_t drawn) {
+  std::vector<std::pair<const char*, uint32_t>> reasons;
+  for (size_t i = 0; i < size_t(capture::MaterialStatus::kCount); ++i) {
+    if (i == size_t(capture::MaterialStatus::kTextured) || ts.status[i] == 0) continue;
+    reasons.emplace_back(capture::MaterialStatusName(capture::MaterialStatus(i)), ts.status[i]);
+  }
+  std::stable_sort(reasons.begin(), reasons.end(),
+                   [](const auto& a, const auto& b) { return a.second > b.second; });
+  const uint32_t share = drawn ? uint32_t(uint64_t(ts.textured) * 100 / drawn) : 0;
+  char buf[256];
+  std::snprintf(buf, sizeof(buf),
+                "Textures: textured %u of %u drawn (%u%%), resident %u (%.1f MB), uploads %u "
+                "(%.1f MB), decode %.2f ms",
+                ts.textured, drawn, share, ts.resident,
+                double(ts.resident_bytes) / (1024.0 * 1024.0), ts.uploads,
+                double(ts.upload_bytes) / (1024.0 * 1024.0), ts.decode_ms);
+  std::string text = buf;
+  if (!reasons.empty()) {
+    text += " | top untextured:";
+    for (size_t i = 0; i < reasons.size() && i < 3; ++i) {
+      text += std::string(i ? ", " : " ") + reasons[i].first + " " + std::to_string(reasons[i].second);
+    }
+  }
+  return text;
+}
+
+// Four F3 lines: capture/draw counts with the top three skip reasons, the
+// geometry cache counters and GPU-thread CPU timings, the guest-thread
+// capture time of the scene's frame, then the texture line (tex nullptr: the
+// texture path is off).
+inline std::string FormatStatusText(const FrameScene& scene, const ClayStats& st,
+                                    const TextureStats* tex) {
   std::vector<std::pair<std::string, uint64_t>> reasons;
   for (size_t i = 0; i < size_t(capture::SkipReason::kCount); ++i) {
     uint64_t n = scene.skipped[i];
@@ -243,7 +316,7 @@ inline std::string FormatStatusText(const FrameScene& scene, const ClayStats& st
                 "record %.2f ms\nCapture: %.2f ms guest time per frame",
                 st.uploads, st.hits, double(st.resident_bytes) / (1024.0 * 1024.0), st.hash_ms,
                 st.decode_ms, st.record_ms, scene.capture_ms);
-  return text + geo;
+  return text + geo + "\n" + (tex ? FormatTextureText(*tex, st.drawn) : std::string("Textures: off"));
 }
 
 }  // namespace fable2::native::render

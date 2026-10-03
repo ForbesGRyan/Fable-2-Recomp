@@ -148,22 +148,91 @@ int main() {
     CHECK(38, !IndexRangeValid(0xFFFFFFFFu, 0x7FFFFFFF, 0xFFFFFFFFu));
     CHECK(39, !IndexRangeValid(0, 0, 0));
   }
-  // 40-43: root constants match the HLSL cbuffer (20 dwords).
+  // 40-43, 80-82: root constants match the HLSL cbuffer (28 dwords).
   {
-    static_assert(sizeof(ClayConstants) == 80);
+    static_assert(sizeof(ClayConstants) == 112);
     capture::DrawRecord r = BaseRecord();
     r.layout = capture::TransformLayout::kCombine;
     r.base_vertex = -3;
-    const ClayConstants c = MakeClayConstants(r, 100, 0xB8B0A0u);
-    uint32_t dw[20];
+    const float uv[4] = {2.0f, -1.0f, 0.25f, 0.5f};
+    const ClayConstants c = MakeClayConstants(r, 100, 0xB8B0A0u, uv, true, 3);
+    uint32_t dw[28];
     std::memcpy(dw, &c, sizeof(dw));
     float f5;
     std::memcpy(&f5, &dw[5], 4);
     CHECK(40, f5 == 5.0f);
     CHECK(41, dw[16] == 1 && int32_t(dw[17]) == -3);
     CHECK(42, dw[18] == 100 && dw[19] == 0xB8B0A0u);
+    float fuv[4];
+    std::memcpy(fuv, &dw[20], sizeof(fuv));
+    CHECK(80, fuv[0] == 2.0f && fuv[1] == -1.0f && fuv[2] == 0.25f && fuv[3] == 0.5f);
+    CHECK(81, dw[24] == 1 && dw[25] == 3 && dw[26] == 0 && dw[27] == 0);
     r.layout = capture::TransformLayout::kDot;
-    CHECK(43, MakeClayConstants(r, 1, 0).layout == 0);
+    const ClayConstants flat = MakeClayConstants(r, 1, 0, uv, false, 2);
+    CHECK(43, flat.layout == 0);
+    CHECK(82, flat.textured == 0 && flat.sampler == 2);
+  }
+  // 83-86: UV stream keys.
+  {
+    capture::DrawRecord r = BaseRecord();
+    r.material.uv_vb = {0x5000, 3200};
+    r.material.uv.format = capture::UvFormat::kHalf2;
+    r.material.uv.offset_bytes = 12;
+    r.material.uv.stride_bytes = 32;
+    r.material.uv.comp_u = 0;
+    r.material.uv.comp_v = 1;
+    const GeoKey k = UvKey(r);
+    CHECK(83, k.addr == 0x5000 && k.size == 3200 && k.stride == 32);
+    capture::DrawRecord same = r;
+    CHECK(84, UvKey(same) == k);
+    capture::DrawRecord a = r;
+    a.material.uv.comp_u = 1;
+    CHECK(85, !(UvKey(a) == k));
+    a = r;
+    a.material.uv.swap16 = true;
+    CHECK(86, !(UvKey(a) == k));
+    // Never the key of positions or indices of the same stream, nor of a
+    // terrain grid's indices.
+    capture::DrawRecord s = r;
+    s.material.uv_vb = s.vb;
+    s.material.uv.stride_bytes = s.pos.stride_bytes;
+    capture::DrawRecord t = BaseRecord();
+    t.terrain.active = true;
+    t.terrain.patches = 1;
+    CHECK(87, !(UvKey(s) == PositionKey(s)) && !(UvKey(s) == IndexKey(s)) &&
+                  UvKey(s).kind != IndexKey(t).kind && UvKey(s).kind != PositionKey(t).kind);
+  }
+  // 88-90: F3 texture line.
+  {
+    TextureStats ts;
+    ts.textured = 80;
+    ts.status[size_t(capture::MaterialStatus::kTextured)] = 80;
+    ts.status[size_t(capture::MaterialStatus::kPsUnknown)] = 15;
+    ts.status[size_t(capture::MaterialStatus::kTexturePending)] = 5;
+    ts.resident = 42;
+    ts.resident_bytes = 12ull * 1024 * 1024;
+    ts.uploads = 3;
+    ts.upload_bytes = 2ull * 1024 * 1024;
+    ts.decode_ms = 1.234;
+    const std::string t = FormatTextureText(ts, 100);
+    CHECK(88, t.find("textured 80 of 100 drawn (80%)") != std::string::npos);
+    CHECK(89, t.find("top untextured: ps-unknown 15, texture-pending 5") != std::string::npos);
+    const std::string want =
+        "Textures: textured 80 of 100 drawn (80%), resident 42 (12.0 MB), uploads 3 (2.0 MB), "
+        "decode 1.23 ms | top untextured: ps-unknown 15, texture-pending 5";
+    CHECK(90, t == want);
+    if (t != want) std::cerr << "got:  " << t << "\nwant: " << want << "\n";
+    TextureStats none;
+    CHECK(91, FormatTextureText(none, 0).find("textured 0 of 0 drawn (0%)") != std::string::npos);
+    // Top three only, by count.
+    TextureStats many;
+    many.status[size_t(capture::MaterialStatus::kTerrain)] = 4;
+    many.status[size_t(capture::MaterialStatus::kNoAlbedo)] = 9;
+    many.status[size_t(capture::MaterialStatus::kUvUnsupported)] = 2;
+    many.status[size_t(capture::MaterialStatus::kTextureBad)] = 1;
+    CHECK(92, FormatTextureText(many, 16).find(
+                  "top untextured: no-albedo 9, terrain 4, uv-unsupported 2") != std::string::npos &&
+                  FormatTextureText(many, 16).find("texture-bad") == std::string::npos);
   }
   // 44-48: F3 status text.
   {
@@ -185,26 +254,34 @@ int main() {
     st.decode_ms = 0.126;
     st.record_ms = 0.5;
     s.capture_ms = 0.4251;
-    const std::string t = FormatStatusText(s, st);
+    TextureStats ts;
+    ts.textured = 900;
+    ts.status[size_t(capture::MaterialStatus::kTextured)] = 900;
+    ts.status[size_t(capture::MaterialStatus::kTerrain)] = 15;
+    const std::string t = FormatStatusText(s, st, &ts);
     const std::string want =
         "Native: captured 1477, drawn 915 (deformed 5), skipped 562 "
         "(top: unsupported-prim 324, no-transform 229, bad-index 5)\n"
         "Geometry: 12 uploads, 1818 hits, 45.5 MB resident | hash 0.84 ms, decode 0.13 ms, "
         "record 0.50 ms\n"
-        "Capture: 0.43 ms guest time per frame";
+        "Capture: 0.43 ms guest time per frame\n"
+        "Textures: textured 900 of 915 drawn (98%), resident 0 (0.0 MB), uploads 0 (0.0 MB), "
+        "decode 0.00 ms | top untextured: terrain 15";
     CHECK(44, t == want);
     if (t != want) std::cerr << "got:  " << t << "\nwant: " << want << "\n";
     FrameScene empty;
     ClayStats none;
-    const std::string e = FormatStatusText(empty, none);
+    const std::string e = FormatStatusText(empty, none, nullptr);
     CHECK(45, e.rfind("Native: captured 0, drawn 0 (deformed 0), skipped 0\n", 0) == 0);
+    // Texture path off (fable2_native_textures=false or latched).
+    CHECK(93, e.size() > 14 && e.compare(e.size() - 14, 14, "\nTextures: off") == 0);
     // Renderer-side "other" skips appear as their own reason.
     FrameScene o;
     o.captured = 10;
     ClayStats so;
     so.drawn = 6;
     so.skipped_other = 4;
-    const std::string ot = FormatStatusText(o, so);
+    const std::string ot = FormatStatusText(o, so, nullptr);
     CHECK(46, ot.find("skipped 4 (top: render-other 4)") != std::string::npos);
   }
   // 47-50: the shader's vertex count never exceeds the uploaded buffer.
@@ -270,6 +347,7 @@ int main() {
     CHECK(72, !(PositionKey(s2) == PositionKey(s)));
   }
   if (g_fail) return g_fail;
-  std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text\n";
+  std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
+               "uv keys, texture text\n";
   return 0;
 }

@@ -1,7 +1,7 @@
 #pragma once
 
-// Decoded guest geometry on the GPU for the clay pass: float4 positions and
-// uint32 triangle-list indices in persistently mapped upload-heap buffers,
+// Decoded guest geometry on the GPU for the clay pass: float4 positions,
+// float2 UVs and uint32 triangle-list indices in persistently mapped upload-heap buffers,
 // read by the vertex shader as StructuredBuffers (the RHI has 16-bit index
 // buffers only and no buffer-to-buffer copy). Keyed by GeometryCacheIndex
 // (guest range + layout + content hash) with an LRU byte budget.
@@ -32,6 +32,12 @@ class GeometryCache {
                           ClayStats& st);
   nrhi::Buffer* Indices(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t vertex_count,
                         uint32_t* index_count, ClayStats& st);
+  // float2 UVs of the record's material (material.uv_vb / material.uv), one
+  // per vertex of the UV stream; nullptr when the stream is unreadable, does
+  // not decode or holds fewer than `vertex_count` UVs (the shader reads
+  // uvs[v] for every v < vertex_count). Reads are bounded by uv_vb.size.
+  nrhi::Buffer* Uvs(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t vertex_count,
+                    ClayStats& st);
   void BeginFrame(uint64_t frame, uint64_t budget_bytes);
   // DestroyDeferred all (dev may be nullptr: forget the buffers without
   // destroying them, e.g. after a device change).
@@ -68,6 +74,7 @@ class GeometryCache {
   // one vertex stream).
   std::unordered_map<uint64_t, uint64_t> frame_hashes_;
   std::vector<capture::Float4> positions_;
+  std::vector<capture::Float2> uvs_;
   std::vector<uint32_t> indices_;
   std::vector<uint32_t> evicted_;
 };

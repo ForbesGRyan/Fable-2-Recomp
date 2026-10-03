@@ -27,9 +27,10 @@ int main() {
   if (!Compile("clay_vs", kClayVs, "vs_5_0")) return 5;
   if (!Compile("clay_ps", kClayPs, "ps_5_0")) return 6;
   if (!Compile("composite_ps", kCompositePs, "ps_5_0")) return 7;
+  if (!Compile("clay_textured_ps", kClayTexturedPs, "ps_5_0")) return 8;
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS, composite PS compile; broken shader rejected\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; broken shader rejected\n";
   return 0;
 }

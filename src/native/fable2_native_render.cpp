@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -32,6 +33,15 @@ REXCVAR_DEFINE_STRING(fable2_native_clay_color, "clay", "Fable2",
 REXCVAR_DEFINE_INT32(fable2_native_geometry_budget_mb, 256, "Fable2",
                      "GPU memory budget (MB) for decoded native geometry; least recently "
                      "used buffers are evicted above it.");
+REXCVAR_DEFINE_BOOL(fable2_native_textures, true, "Fable2",
+                    "Native clay pass: draw albedo textures on draws whose material was "
+                    "resolved (false = flat clay).");
+REXCVAR_DEFINE_INT32(fable2_native_texture_upload_mb, 8, "Fable2",
+                     "Guest texture bytes (MB) decoded and uploaded per frame by the native "
+                     "clay pass; draws over it stay clay this frame (texture-pending).");
+REXCVAR_DEFINE_INT32(fable2_native_texture_budget_mb, 512, "Fable2",
+                     "GPU memory budget (MB) for native albedo textures; least recently used "
+                     "textures are evicted above it.");
 
 namespace fable2::native {
 namespace nrhi = rex::graphics::nrhi;
@@ -67,6 +77,13 @@ std::shared_ptr<const render::FrameScene> g_clay_scene;  // last scene rendered
 uint64_t g_clay_targets = 0;  // targets generation g_clay_scene was drawn into
 uint64_t g_clay_frames = 0;
 double g_clay_window_max_ms = 0;  // worst hash+decode+record over the log window
+// Texture upload burst (frames with uploads or pending textures in a row),
+// logged so area loads show how uploads spread over frames.
+struct UploadBurst {
+  uint64_t frames = 0, uploads = 0, bytes = 0;
+  std::chrono::steady_clock::time_point start;
+};
+UploadBurst g_burst;
 
 // F3 status text, written on the command-processor thread, read by the UI.
 std::mutex g_status_mutex;
@@ -99,6 +116,14 @@ void Fail(const char* what) {
 
 uint64_t GeometryBudgetBytes() {
   return uint64_t(std::max<int32_t>(16, REXCVAR_GET(fable2_native_geometry_budget_mb))) << 20;
+}
+
+uint64_t TextureBudgetBytes() {
+  return uint64_t(std::max<int32_t>(16, REXCVAR_GET(fable2_native_texture_budget_mb))) << 20;
+}
+
+uint64_t TextureUploadBytes() {
+  return uint64_t(std::max<int32_t>(1, REXCVAR_GET(fable2_native_texture_upload_mb))) << 20;
 }
 
 render::ClayColor CurrentClayColor() {
@@ -198,8 +223,12 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
     g_clay_scene = nullptr;
     return true;
   }
-  if (!g_clay) g_clay = std::make_unique<render::ClayPass>(GeometryBudgetBytes());
-  if (!g_clay->Ensure(ctx.device)) {
+  if (!g_clay) {
+    g_clay = std::make_unique<render::ClayPass>(GeometryBudgetBytes(), TextureBudgetBytes());
+  }
+  // Read once per frame: picks the pixel shader (Ensure) and the draw path.
+  const bool textures = REXCVAR_GET(fable2_native_textures);
+  if (!g_clay->Ensure(ctx.device, textures)) {
     Fail("clay pass");
     return false;
   }
@@ -210,19 +239,41 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   g_clay_targets = g_clay->targets_generation();
   ++g_clay_frames;
   g_clay->geometry().BeginFrame(g_clay_frames, GeometryBudgetBytes());
+  g_clay->textures().BeginFrame(g_clay_frames, TextureBudgetBytes(), TextureUploadBytes());
   render::ClayStats st;
-  g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), st);
-  SetStatus(render::FormatStatusText(*scene, st));
-  const double cpu_ms = st.hash_ms + st.decode_ms + st.record_ms;
+  render::TextureStats tst;
+  g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, st, tst);
+  SetStatus(render::FormatStatusText(*scene, st, textures ? &tst : nullptr));
+  const double cpu_ms = st.hash_ms + st.decode_ms + st.record_ms + tst.decode_ms;
+  const uint32_t pending = tst.status[size_t(capture::MaterialStatus::kTexturePending)];
+  if (textures && (tst.uploads || pending)) {
+    if (g_burst.frames == 0) g_burst.start = std::chrono::steady_clock::now();
+    ++g_burst.frames;
+    g_burst.uploads += tst.uploads;
+    g_burst.bytes += tst.upload_bytes;
+    if (g_burst.frames <= 8 || g_burst.frames % 30 == 0) {
+      REXLOG_INFO("[native] textures: burst frame {}: uploads {} ({:.1f} MB), pending {}",
+                  g_burst.frames, tst.uploads, double(tst.upload_bytes) / (1024.0 * 1024.0),
+                  pending);
+    }
+  } else if (g_burst.frames) {
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                                      g_burst.start).count();
+    REXLOG_INFO("[native] textures: burst done: {} frames ({:.2f} s), {} uploads ({:.1f} MB)",
+                g_burst.frames, secs, g_burst.uploads, double(g_burst.bytes) / (1024.0 * 1024.0));
+    g_burst = {};
+  }
   g_clay_window_max_ms = std::max(g_clay_window_max_ms, cpu_ms);
   if (g_clay_frames % 300 == 0) {
     REXLOG_INFO(
         "[native] clay: drawn {} (deformed {}) of {} drawable, skipped_bad_index {} other {} | "
-        "{} uploads, {} hits, {:.1f} MB resident | hash {:.2f} ms, decode {:.2f} ms, record "
-        "{:.2f} ms (max total {:.2f} ms over 300) | scene frame {}",
+        "textured {} of {} | {} uploads, {} hits, {:.1f} MB resident | hash {:.2f} ms, decode "
+        "{:.2f} ms, record {:.2f} ms (max total {:.2f} ms over 300) | scene frame {}",
         st.drawn, st.deformed, scene->draws.size(), st.skipped_bad_index, st.skipped_other,
-        st.uploads, st.hits, double(st.resident_bytes) / (1024.0 * 1024.0), st.hash_ms,
-        st.decode_ms, st.record_ms, g_clay_window_max_ms, scene->frame);
+        tst.textured, st.drawn, st.uploads, st.hits,
+        double(st.resident_bytes) / (1024.0 * 1024.0), st.hash_ms, st.decode_ms, st.record_ms,
+        g_clay_window_max_ms, scene->frame);
+    if (textures) REXLOG_INFO("[native] clay: {}", render::FormatTextureText(tst, st.drawn));
     g_clay_window_max_ms = 0;
   }
   return true;

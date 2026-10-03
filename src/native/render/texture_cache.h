@@ -17,6 +17,7 @@
 #include <rex/graphics/native_rhi.h>
 
 #include "../capture/material.h"
+#include "clay_logic.h"  // TextureStats
 #include "geometry_cache_index.h"
 #include "texture_decode.h"
 #include "texture_residency.h"
@@ -24,13 +25,6 @@
 namespace fable2::native::render {
 
 namespace nrhi = rex::graphics::nrhi;
-
-struct TextureStats {
-  uint32_t textured = 0, resident = 0, uploads = 0, mirror = 0, base_only = 0;
-  uint64_t resident_bytes = 0, upload_bytes = 0;
-  double decode_ms = 0;
-  uint32_t status[size_t(capture::MaterialStatus::kCount)] = {};  // final statuses of drawn records
-};
 
 class TextureCache {
  public:

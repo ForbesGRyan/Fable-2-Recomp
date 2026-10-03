@@ -204,6 +204,44 @@ nrhi::Buffer* GeometryCache::Positions(nrhi::Device* dev, const capture::DrawRec
   return buffer;
 }
 
+nrhi::Buffer* GeometryCache::Uvs(nrhi::Device* dev, const capture::DrawRecord& r,
+                                 uint32_t vertex_count, ClayStats& st) {
+  const capture::BufferRef& vb = r.material.uv_vb;
+  const uint32_t count = UvCount(vb.size, r.material.uv);
+  if (count == 0 || count < vertex_count) return nullptr;
+  const auto t0 = Clock::now();
+  // The UV stream may differ from the position stream and is not range
+  // checked at capture: read exactly uv_vb, decode within it.
+  const uint8_t* src = capture::ReadPhysical(vb.phys_addr, vb.size);
+  if (!src) {
+    st.hash_ms += Ms(t0, Clock::now());
+    return nullptr;
+  }
+  const uint64_t hash = FrameHash(vb.phys_addr, vb.size, src);
+  const GeoKey key = UvKey(r);
+  const LookupResult found = index_.Lookup(key, hash);
+  const auto t1 = Clock::now();
+  st.hash_ms += Ms(t0, t1);
+  if (found.hit) {
+    if (auto it = entries_.find(found.id); it != entries_.end() && it->second.count >= vertex_count) {
+      ++st.hits;
+      return it->second.buffer;
+    }
+  }
+  uvs_.resize(count);
+  nrhi::Buffer* buffer = nullptr;
+  uint64_t alloc = 0;
+  if (capture::DecodeUvs(src, vb.size, r.material.uv, 0, count, uvs_.data())) {
+    buffer = Upload(dev, uvs_.data(), uint64_t(count) * sizeof(capture::Float2), &alloc);
+  }
+  if (buffer) {
+    Insert(dev, key, hash, {buffer, count, 0, alloc}, alloc);
+    ++st.uploads;
+  }
+  st.decode_ms += Ms(t1, Clock::now());
+  return buffer;
+}
+
 nrhi::Buffer* GeometryCache::Indices(nrhi::Device* dev, const capture::DrawRecord& r,
                                      uint32_t vertex_count, uint32_t* index_count, ClayStats& st) {
   const auto t0 = Clock::now();

@@ -38,6 +38,7 @@
 #include "draw_record.h"
 #include "guest_read.h"
 #include "main_scene.h"
+#include "material.h"
 #include "position_decode.h"
 #include "rigid_skin.h"
 #include "shader_tally.h"
@@ -327,6 +328,48 @@ static constexpr TerrainEntry kTerrainTable[] = {
 #undef FABLE2_VS_TERRAIN
 #undef FABLE2_VS_UV
     {0, {0, 0, 0, 0, 0, 0, -1, 0}}};
+
+// Albedo texture slot and UV interpolators per pixel shader hash
+// (docs/native-renderer/ps-albedo.json, tools/xdk_sigmatch/gen_albedo_table.py)
+// and the vertex fetch behind each UV interpolator component per vertex
+// shader hash (vs-transforms.json "uv"). Either may be empty.
+const std::vector<AlbedoSpec> kAlbedoTable = {
+#define FABLE2_PS_ALBEDO(H, SL, UI, UC, US0, UO0, US1, UO1, VI, VC, VS0, VO0, VS1, VO1) \
+  {H, int8_t(SL), UI, UC, VI, VC, {{US0, UO0}, {US1, UO1}}, {{VS0, VO0}, {VS1, VO1}}},
+#define FABLE2_PS_NO_ALBEDO(H) {H, int8_t(-1), 0, 0, 0, 0, {}, {}},
+#include "ps_albedo_table.inc"
+#undef FABLE2_PS_ALBEDO
+#undef FABLE2_PS_NO_ALBEDO
+};
+const std::vector<VsUvSpec> kVsUvTable = {
+#define FABLE2_VS_TRANSFORM(H, B, L, P, D)
+#define FABLE2_VS_POS_SWIZZLE(H, S)
+#define FABLE2_VS_SKIN(H, I, C, R0, R1, R2)
+#define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
+#define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1) \
+  {H, I, C, int8_t(F), S, FM, O, {{S0, O0}, {S1, O1}}},
+#include "vs_transform_table.inc"
+#undef FABLE2_VS_TRANSFORM
+#undef FABLE2_VS_POS_SWIZZLE
+#undef FABLE2_VS_SKIN
+#undef FABLE2_VS_TERRAIN
+#undef FABLE2_VS_UV
+};
+
+// Linear scans; callers cache the result per shader (PsInfo, VsInfo).
+const AlbedoSpec* FindAlbedo(uint64_t ps_hash) {
+  for (const AlbedoSpec& e : kAlbedoTable) {
+    if (e.ps_hash == ps_hash) return &e;
+  }
+  return nullptr;
+}
+
+const VsUvSpec* FindVsUv(uint64_t vs_hash, uint8_t interp, uint8_t comp) {
+  for (const VsUvSpec& e : kVsUvTable) {
+    if (e.vs_hash == vs_hash && e.interp == interp && e.comp == comp) return &e;
+  }
+  return nullptr;
+}
 
 const TransformInfo* FindTransform(uint64_t hash) {
   static const std::unordered_map<uint64_t, TransformInfo> table = [] {
@@ -754,8 +797,7 @@ bool ChoosePs(const DeviceSnapshot& dev, uint32_t* obj) {
 struct PsInfo {
   uint64_t hash = 0;
   std::vector<uint32_t> tex_slots;     // TextureFetchSlots (vfetch_decode.h)
-  const AlbedoSpec* albedo = nullptr;  // material.h; filled by the albedo table lookup
-  bool no_albedo = false;
+  const AlbedoSpec* albedo = nullptr;  // FindAlbedo; slot -1 = samples no albedo
   uint32_t phys = 0;
   uint32_t bytes = 0;
 };
@@ -779,6 +821,7 @@ const PsInfo* LookupPs(uint32_t obj) {
   e = PsInfo{};
   e.hash = u.hash;
   e.tex_slots = TextureFetchSlots(u.dwords.data(), u.dwords.size());
+  e.albedo = FindAlbedo(u.hash);
   e.phys = u.phys;
   e.bytes = u.bytes;
   return &e;
@@ -1194,13 +1237,18 @@ struct VsInfo {
   RigidSkin skin;
   uint32_t skin_slot = 0;
   const TerrainSpec* terrain = nullptr;  // vs-transforms.json "terrain"
+  // vs-transforms.json "uv" per interpolator component (FindVsUv), and the
+  // decoded vertex fetches its fetch_index refers to (ResolveUvFetch).
+  const VsUvSpec* uv[16][4] = {};
+  std::vector<VertexFetch> fetches;
 };
 thread_local std::unordered_map<uint32_t, VsInfo> t_vs_cache;
 
 void FillShader(VsInfo& e, const uint32_t* ucode, size_t dwords, uint64_t hash) {
   e.hash = hash;
   e.transform = FindTransform(hash);
-  const std::vector<VertexFetch> fetches = DecodeVertexFetches(ucode, dwords);
+  e.fetches = DecodeVertexFetches(ucode, dwords);
+  const std::vector<VertexFetch>& fetches = e.fetches;
   e.have_pos = SelectPosition(fetches, e.transform ? e.transform->pos_fetch : -1, &e.pos,
                               e.transform ? e.transform->pos_swizzle : 0);
   if (const SkinSpec* spec = FindSkin(hash)) {
@@ -1208,6 +1256,9 @@ void FillShader(VsInfo& e, const uint32_t* ucode, size_t dwords, uint64_t hash) 
     e.have_skin = e.have_pos && SelectSkin(fetches, *spec, e.pos, &e.skin, &e.skin_slot);
   }
   e.terrain = FindTerrain(hash);
+  for (uint8_t i = 0; i < 16; ++i) {
+    for (uint8_t c = 0; c < 4; ++c) e.uv[i][c] = FindVsUv(hash, i, c);
+  }
 }
 
 const VsInfo* LookupVs(const VsChoice& c) {
@@ -1281,21 +1332,32 @@ bool ReadBankRegisters(uint32_t device, uint32_t reg, uint32_t count) {
 }
 
 // Converts pixel constants [reg, reg + count) of the device's bank into t_ps_bank.
-[[maybe_unused]] bool ReadPsBankRegisters(uint32_t device, uint32_t reg, uint32_t count) {
+bool ReadPsBankRegisters(uint32_t device, uint32_t reg, uint32_t count) {
   const uint32_t bank_ptr = g_ps_bank_ptr.load(std::memory_order_relaxed);
   return ReadConstantRegisters(bank_ptr ? bank_ptr : device + xdk::kDevicePsConstantsOffset, reg,
                                count, t_ps_bank);
 }
 
+// The device snapshot and vertex shader FillDrawInputs used, for FillMaterial
+// (the device is read once per draw). `vs` points into t_vs_cache: valid
+// until the next LookupVs.
+struct DrawShaders {
+  bool have_dev = false;
+  DeviceSnapshot dev;
+  const VsInfo* vs = nullptr;
+};
+
 // Fills `in` for DrawIndexedVertices / DrawVertices (prim and counts already
 // set). Returns a skip reason AssembleRecord does not check (garbage counts,
 // indices outside the position stream), or kNone.
-SkipReason FillDrawInputs(uint32_t device, DrawInputs& in) {
+SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders) {
   if (const SkipReason c = CountSkip(in.count); c != SkipReason::kNone) return c;
-  DeviceSnapshot dev;
-  if (!ReadDevice(device, &dev)) return SkipReason::kNone;  // have_shader stays false
+  DeviceSnapshot& dev = shaders->dev;
+  shaders->have_dev = ReadDevice(device, &dev);
+  if (!shaders->have_dev) return SkipReason::kNone;  // have_shader stays false
   VsChoice vc;
   const VsInfo* vs = ChooseVs(dev, &vc) ? LookupVs(vc) : nullptr;
+  shaders->vs = vs;
   if (!vs) return SkipReason::kNone;
   in.have_shader = true;
   in.vs_hash = vs->hash;
@@ -1413,6 +1475,63 @@ SkipReason FillTerrainInputs(uint32_t device, uint32_t first, uint32_t patches, 
   return SkipReason::kNone;
 }
 
+// Albedo texture and UVs for a recorded draw (material.h). Never changes the
+// draw's skip reason. Terrain draws need no lookups; a draw whose device was
+// not read stays ps-unknown.
+void FillMaterial(uint32_t device, const DrawShaders& shaders, DrawInputs& in) {
+  Material& m = in.material;
+  if (in.terrain_shader) {
+    m.status = MaterialStatus::kTerrain;
+    return;
+  }
+  m.status = MaterialStatus::kPsUnknown;
+  if (!shaders.have_dev) return;
+  const DeviceSnapshot& dev = shaders.dev;
+  uint32_t ps_obj = 0;
+  const PsInfo* ps = ChoosePs(dev, &ps_obj) ? LookupPs(ps_obj) : nullptr;
+  if (!ps) return;
+  // Copied at once: ps points into t_ps_cache (the table entry is stable).
+  m.ps_hash = ps->hash;
+  const AlbedoSpec* albedo = ps->albedo;
+  if (!albedo) return;
+  const AlbedoSpec& a = *albedo;
+  if (a.slot < 0) {
+    m.status = MaterialStatus::kNoAlbedo;
+    return;
+  }
+  m.status = MaterialStatus::kUvUnsupported;
+  const VsInfo* vs = shaders.vs;
+  if (!vs || a.slot >= 32 || a.u_interp >= 16 || a.v_interp >= 16 || a.u_comp >= 4 || a.v_comp >= 4) return;
+  const VsUvSpec* u = vs->uv[a.u_interp][a.u_comp];
+  const VsUvSpec* v = vs->uv[a.v_interp][a.v_comp];
+  UvLayout uv;
+  StreamView sv;
+  if (!u || !v || !ResolveUvFetch(vs->fetches, *u, *v, &uv) || ResolveStream(dev, uv.fetch_slot, &sv) ||
+      !sv.fc_match || !ApplyUvEndian(&uv, sv.fc1 & 3)) {
+    return;
+  }
+  // Constants named by the four stage lists, then the albedo fetch constant.
+  // t_bank: only the named registers are written, the transform rows stay.
+  bool ok = true;
+  auto need = [&](int32_t ref) {
+    const uint32_t reg = uint32_t(ref & 0x3FF) / 4;
+    ok = ok && (((ref >> 10) & 1) ? ReadPsBankRegisters(device, reg, 1) : ReadBankRegisters(device, reg, 1));
+  };
+  ForEachRef(u->stages, 2, need);
+  ForEachRef(v->stages, 2, need);
+  ForEachRef(a.u_stages, 2, need);
+  ForEachRef(a.v_stages, 2, need);
+  const uint8_t* fc =
+      ReadVirtual(device + xdk::kDeviceVertexFetchOffset + xdk::kDeviceTextureFetchStride * uint32_t(a.slot), 24);
+  if (!ok || !fc) return;
+  for (int i = 0; i < 6; ++i) m.fetch[i] = LoadBe32(fc + 4 * i);
+  ComposeAxis(u->stages, a.u_stages, t_bank, t_ps_bank, &m.uv_xform[0], &m.uv_xform[2]);
+  ComposeAxis(v->stages, a.v_stages, t_bank, t_ps_bank, &m.uv_xform[1], &m.uv_xform[3]);
+  m.uv = uv;
+  m.uv_vb = {sv.base + sv.offset, sv.size - sv.offset};
+  m.status = MaterialStatus::kTextured;
+}
+
 // One outermost guest draw inside the main scene, as a DrawRecord in the frame.
 // Draw-argument mapping (frame-map section 8): DrawIndexedVertices r4 prim, r5
 // base vertex, r6 start index, r7 index count; DrawVertices r4 prim, r5 start
@@ -1449,7 +1568,9 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
       extra = FillTerrainInputs(device, 0, in.count, in);
     }
   }
-  if (IsSupportedPrim(in.prim)) extra = FillDrawInputs(device, in);
+  DrawShaders shaders;
+  if (IsSupportedPrim(in.prim)) extra = FillDrawInputs(device, in, &shaders);
+  FillMaterial(device, shaders, in);
   std::lock_guard<std::mutex> lock(g_scene_mutex);
   if (!g_builder.InMainScene()) return;
   DrawRecord r = AssembleRecord(in, g_builder.NextSeq());
@@ -1671,17 +1792,38 @@ void PublishScene(const FinishedScene& done) {
   }
   size_t deformed = 0;
   for (const DrawRecord& r : sc.draws) deformed += r.deformed ? 1 : 0;
+  // Capture-side material statuses of the drawable records (records on only).
+  std::string untextured;
+  for (size_t i = 0; i < size_t(MaterialStatus::kCount); ++i) {
+    if (!sc.material[i] || MaterialStatus(i) == MaterialStatus::kTextured) continue;
+    std::snprintf(buf, sizeof(buf), "%s%s: %u", untextured.empty() ? "" : ", ",
+                  MaterialStatusName(MaterialStatus(i)), sc.material[i]);
+    untextured += buf;
+  }
   // capture: guest-thread capture time of this frame, then the median, p90
   // and max over the frames since the last line. With records off (no
   // composite view) only `captured` is counted.
   REXSYS_INFO(
       "[native] capture: frame {} captured {} drawable {} (deformed {}) skipped {{{}}} nested_total {} "
-      "| records {} | capture {:.3f} ms (median {:.3f}, p90 {:.3f}, max {:.3f} over {} frames)",
+      "| records {} | capture {:.3f} ms (median {:.3f}, p90 {:.3f}, max {:.3f} over {} frames) "
+      "| textured {} untextured by reason {{{}}}",
       sc.frame, sc.captured, sc.draws.size(), deformed, skipped,
       g_nested_draws.load(std::memory_order_relaxed), sc.records ? "on" : "off", sc.capture_ms,
       g_capture_window.Median(), g_capture_window.Percentile(0.9), g_capture_window.Max(),
-      g_capture_window.size());
+      g_capture_window.size(), sc.material[size_t(MaterialStatus::kTextured)], untextured);
   g_capture_window.Reset();
+  if (!sc.untextured_ps.empty()) {
+    // Tagged by what the albedo table knows of the shader: absent (ps-unknown),
+    // "(no-albedo)", or "(uv)" (has an albedo; the UVs did not resolve).
+    std::string top;
+    for (const auto& [hash, n] : sc.untextured_ps) {
+      const AlbedoSpec* a = FindAlbedo(hash);
+      std::snprintf(buf, sizeof(buf), "%s0x%016llX%s: %u", top.empty() ? "" : ", ",
+                    static_cast<unsigned long long>(hash), !a ? "" : a->slot < 0 ? "(no-albedo)" : "(uv)", n);
+      top += buf;
+    }
+    REXSYS_INFO("[native] capture: frame {} untextured by ps {{{}}}", sc.frame, top);
+  }
   if (!unsupported.empty()) {
     REXSYS_INFO("[native] capture: frame {} unsupported by hook {{{}}}", sc.frame, unsupported);
   }

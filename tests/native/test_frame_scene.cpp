@@ -136,6 +136,32 @@ int main() {
   }
   if (b.Finish(45)->captured != 0) return 23;
 
+  // Material tallies: capture-side statuses of drawable records only, and the
+  // untextured PS hashes (ps-unknown / no-albedo / uv-unsupported) by count.
+  {
+    using capture::MaterialStatus;
+    auto tex = r; tex.material.status = MaterialStatus::kTextured; tex.material.ps_hash = 0x7;
+    auto unk = r; unk.material.status = MaterialStatus::kPsUnknown; unk.material.ps_hash = 0xA;
+    auto sk = r; sk.skip = SkipReason::kNoTransform;
+    sk.material.status = MaterialStatus::kPsUnknown; sk.material.ps_hash = 0xB;
+    b.Open();
+    b.Add(tex); b.Add(unk); b.Add(unk); b.Add(sk);
+    auto m = b.Finish(46);
+    if (m->material[size_t(MaterialStatus::kTextured)] != 1) return 60;
+    if (m->material[size_t(MaterialStatus::kPsUnknown)] != 2) return 61;
+    uint32_t total = 0;
+    for (uint32_t n : m->material) total += n;
+    if (total != 3) return 62;
+    const std::vector<std::pair<uint64_t, uint32_t>> want = {{0xA, 2}};
+    if (m->untextured_ps != want) return 63;
+    // The next frame starts clean.
+    auto m2 = b.Finish(47);
+    for (uint32_t n : m2->material) {
+      if (n) return 64;
+    }
+    if (!m2->untextured_ps.empty()) return 65;
+  }
+
   render::ScenePublisher pub;
   if (pub.Latest()) return 18;
   pub.Publish(s);

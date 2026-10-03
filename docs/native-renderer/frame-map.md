@@ -881,6 +881,40 @@ No other format occurs in an albedo slot (the 8_8_8_8 one is a 16x16 linear text
 
 Bower Lake: pending (user capture).
 
+### Validation (plan Task 13)
+
+Autoplay validation, 2026-10-02/03, release build, `tools\drive_game.ps1` 120 s runs (logs `fable_2_145` view off, `fable_2_146` split view with shot at 95 s, `fable_2_148` renderer off with `FABLE2_GUEST_WORK_LOG=1`; gameplay coverage and upload burst from Task 12). Note: the autoplay save now loads the outdoor bridge scene (quest "The Birth of a Hero"), not Bowerstone's streets, so the Bowerstone share below is measured in the bridge scene and the town, field and interior checks are left to the user.
+
+| Success criterion (spec) | Autoplay measurement | User check |
+|---|---|---|
+| 1. Clay textures match the emulated image in split/overlay (town, open field, interior) | Split screenshot at 95 s (bridge scene): planks, rope, hero clothing and dog textured, correctly oriented, no tiling garbage; terrain is untextured clay by design | pending (user check): town, open field, interior alignment |
+| 2. At least 80% of drawn non-terrain draws textured (Bowerstone, Bower Lake) | Bridge scene: 156-160 of ~182 drawn non-terrain draws textured (about 87%); Task 12 gameplay 160 of 184. Overall share 20-21% because terrain is 567 of ~749 drawn | pending (user check): Bowerstone streets and Bower Lake |
+| 3a. 30 fps with a clay view on | 30.0 guest fps in both view-off and split windows; work median 7.1 ms in split | none needed |
+| 3b. View-off capture overhead under 0.5 ms | View-off capture median 0.044 ms (max 0.16 ms), about 11x margin. Guest work median: renderer off 5.92 ms (`fable_2_148`), view off ~6.0 ms (+0.08 ms), split ~7.1 ms (+1.1 ms, matching the 1.09 ms capture median) | none needed |
+| 4a. Texture memory within budget | 46 textures resident, 12.3 MB (budget 512 MB); 0 uploads per frame steady, about 1650 cache hits per frame; upload burst at world load is spread by the per-frame budget and done in 0.84 s; no `[native] textures:` latch or "texture path off" line in any log | none needed |
+| 4b. 10-minute run with an area transition, no crash or latch | Only 120 s runs measured, no area transition | pending (user check) |
+
+Other split-view costs (300-frame windows): texture decode ~0.4 ms, hash 0.3-0.4 ms, record build 0.12-0.16 ms, clay pass max total 1.2-1.3 ms (one 4.57 ms spike). Run 144/147 (renderer off, no `[frame] guest` lines) was not a stall: that line needs `FABLE2_GUEST_WORK_LOG=1` and the unflushed tail was lost when the run was stopped; `fable_2_148` is the valid baseline.
+
+**Remaining untextured draws (bridge scene, split view), by reason**
+
+| Reason | Draws | Why | Next action |
+|---|---|---|---|
+| `terrain` | 567 | Tessellated terrain stays clay by design (non-goal) | Terrain colour in a later sub-project (blended layers) |
+| `no-albedo` | 24 | Two pixel shaders, `0xA17D8AEC3A817D45` x12 and `0xF6D98C7B4D98438B` x12, whose only traced fetch is a single-component `k_8` mask; the 8_8_8_8 fetches are predicated and zero at first use (likely render targets) | Capture a frame where those textures are populated and re-run `albedo_finder.py`; otherwise leave as clay |
+
+All other reasons (`ps-unknown`, `uv-unsupported`, `format-unsupported`, `texture-pending`, `texture-dynamic`, `texture-bad`) were 0 in these windows.
+
+**Known limitations (non-goals in practice)**
+
+- Terrain stays untextured clay.
+- Alpha test and blending are ignored (foliage and sprite cut-outs draw opaque).
+- Gamma is ignored (albedo shown as stored, the shaders square it).
+- Characters are drawn in bind pose (animation is sub-project 5).
+- Mirror clamp addressing is approximated.
+
+**Deviation.** Shader tracing is done in Python over the SDK's shader disassembly dumps (`tools/xdk_sigmatch/shader_trace.py`, `--dump_shaders`) instead of the C++ headers `tfetch_decode.h` and `uv_trace.h` listed in the spec; the runtime only needs the texture fetch slots a pixel shader uses (`TextureFetchSlots` in `vfetch_decode.h`).
+
 ## Pending
 
 1. **Pitch ablation** (done 2026-10-01, results in section 4; kept for re-runs). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):

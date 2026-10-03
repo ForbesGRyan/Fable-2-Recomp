@@ -1,6 +1,6 @@
 # Native renderer sub-project 4: albedo textures
 
-Status: approved design (brainstorming, 2026-10-02). Implements sub-project 4 of
+Status: implemented (sub-project 4); autoplay validation in docs/native-renderer/frame-map.md section 11, user checks pending. Implements sub-project 4 of
 `docs/superpowers/specs/2026-10-01-native-renderer-foundation-design.md`, building on
 sub-project 3 (`docs/superpowers/specs/2026-10-01-native-renderer-clay-pass-design.md`,
 validation in `docs/native-renderer/frame-map.md` section 10).
@@ -232,3 +232,17 @@ animated characters (sub-project 5), frame replacement, performance gains.
   keeps the cache consistent once a change is seen.
 - **Upload hitch on area loads:** bounded by the per-frame upload budget; draws show as
   clay until their textures arrive.
+
+## Implementation notes (deviations)
+
+- Shader tracing is done in Python over the SDK's shader disassembly dumps
+  (`tools/xdk_sigmatch/shader_trace.py`) instead of the C++ headers `tfetch_decode.h`
+  and `uv_trace.h`; the runtime only needs the texture fetch slots a pixel shader uses
+  (`TextureFetchSlots` in `vfetch_decode.h`).
+- ChoosePs rule, from evidence: if the device vertex shader is null, use the pixel
+  shader from `GpuLoadShaders` (r5), else the one at device `+0x3194`.
+- UV and texture keys: the pixel shader table names the albedo fetch slot, the vertex
+  shader table (`"uv"` key) names the UV vertex fetch element; a UV entry whose decoded
+  fetch differs from the recorded format/offset makes the draw `uv-unsupported`.
+- Task 9 was split: the Bowerstone table part is done (from the autoplay capture), Bower
+  Lake is pending a user capture.

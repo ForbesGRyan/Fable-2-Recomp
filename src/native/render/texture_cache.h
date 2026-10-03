@@ -67,7 +67,7 @@ class TextureCache {
     uint32_t levels = 0;
     uint32_t base_extent = 0;  // guest bytes read from the base address
     uint32_t mip_extent = 0;   // guest bytes read from the mip address (0 = none)
-    bool base_only = false;    // mip layout failed: base level only
+    bool base_only = false;    // mip layout failed or mip region unreadable: base level only
     LevelSource src[kMaxLevels];
   };
   struct Entry {

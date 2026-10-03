@@ -880,7 +880,8 @@ void AppendPs(std::string& row, const DeviceSnapshot& dev) {
 // to logs/native_tex_<stamp>/<BASE>_<IDENTITY16>.bin and writes a "texture"
 // row. Bounded: kMaxTextures per capture, kMaxTextureBytes each, kMaxUnsupportedBytes
 // for formats the renderer does not decode (the census needs them). The extent
-// is the tiled address upper bound / linear rows of the base level.
+// is the tiled address upper bound / linear rows of the base level (row pitch
+// by the SDK's base-level rule, render::BaseLevelLinear).
 constexpr uint32_t kMaxTextures = 768;
 constexpr uint32_t kMaxTextureBytes = 8u << 20;
 constexpr uint32_t kMaxUnsupportedBytes = 64u << 10;
@@ -899,7 +900,7 @@ void DumpTexture(const uint32_t fc[6]) {
     base = t.base_phys;
     bytes = t.tiled ? rex::graphics::texture_util::GetTiledAddressUpperBound2D(wb, hb, pitch_blocks,
                                                                                fi.bpb_log2)
-                    : uint64_t((pitch_blocks * fi.bytes_per_block + 255) & ~255u) * (hb - 1) +
+                    : uint64_t(render::BaseLevelLinear(t).row_pitch_bytes) * (hb - 1) +
                           uint64_t(wb) * fi.bytes_per_block;
     bytes = std::min<uint64_t>(bytes, kMaxTextureBytes);
   } else if (err == render::FetchError::kFormat && base) {

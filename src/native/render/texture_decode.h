@@ -112,12 +112,16 @@ inline uint32_t UploadRowPitch(uint32_t width_blocks, uint32_t bytes_per_block) 
   return (width_blocks * bytes_per_block + 255) & ~255u;
 }
 
-// The base level of a linear texture (rows padded to 256 bytes).
+// The base level of a linear texture. Row pitch as the SDK's
+// texture_util::GetGuestTextureLayout computes it for the base level
+// (thirdparty/rexglue-sdk/src/graphics/pipeline/texture/util.cpp): the fetch
+// pitch in blocks aligned to 32 blocks (xenos::kTextureTileWidthHeight). Only
+// mip levels get the extra 256-byte linear row alignment.
 inline LevelLayout BaseLevelLinear(const TextureFetch& t) {
   const TexFormatInfo fi = FormatInfo(t.format);
   LevelLayout l;
   l.pitch_blocks = t.pitch_texels / fi.block;
-  l.row_pitch_bytes = (l.pitch_blocks * fi.bytes_per_block + 255) & ~255u;
+  l.row_pitch_bytes = ((l.pitch_blocks + 31) & ~31u) * fi.bytes_per_block;
   l.width_blocks = (t.width + fi.block - 1) / fi.block;
   l.height_blocks = (t.height + fi.block - 1) / fi.block;
   return l;

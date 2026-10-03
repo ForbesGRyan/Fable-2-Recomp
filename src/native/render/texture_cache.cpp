@@ -26,8 +26,10 @@ double Ms(Clock::time_point a, Clock::time_point b) {
 // D3D12 placed-footprint offsets must be 512-byte aligned.
 constexpr uint64_t kCopyOffsetAlignment = 512;
 // Guest bytes per region (base or mips) above which a fetch constant is taken
-// as garbage (texture-bad / base only): a 4096x4096 8_8_8_8 base is 64 MB.
-constexpr uint64_t kMaxRegionBytes = 256ull << 20;
+// as garbage (texture-bad / base only). The D4 census's largest albedo is
+// 1024x1024 DXT1 (512 KB); a 2048x2048 8_8_8_8 base (16 MB) and a 4096x4096
+// one (64 MB) still fit.
+constexpr uint64_t kMaxRegionBytes = 64ull << 20;
 
 uint64_t AlignUp(uint64_t v, uint64_t a) { return (v + a - 1) / a * a; }
 
@@ -143,8 +145,9 @@ bool TextureCache::BuildPlan(const TextureFetch& t, Plan* plan) {
       t.packed_mips, true, levels - 1);
   const bool has_packed = layout.packed_level != UINT32_MAX;
 
-  // Guest bytes a storage level may touch (0 = layout failed). Linear rows
-  // are 256-byte aligned (also the base, whose pitch comes from the fetch).
+  // Guest bytes a storage level may touch (0 = layout failed). Linear row
+  // pitches are the SDK's (GetGuestTextureLayout): the base level's is the
+  // fetch pitch aligned to 32 blocks, the mips' are also 256-byte aligned.
   auto storage = [&](const texture_util::TextureGuestLayout::Level& s, LevelLayout* l) -> uint64_t {
     if (!s.row_pitch_bytes || !s.x_extent_blocks || !s.y_extent_blocks) return 0;
     if (t.tiled) {
@@ -153,7 +156,7 @@ bool TextureCache::BuildPlan(const TextureFetch& t, Plan* plan) {
       return texture_util::GetTiledAddressUpperBound2D(s.x_extent_blocks, s.y_extent_blocks,
                                                        l->pitch_blocks, fi.bpb_log2);
     }
-    l->row_pitch_bytes = uint32_t(AlignUp(s.row_pitch_bytes, 256));
+    l->row_pitch_bytes = s.row_pitch_bytes;
     l->pitch_blocks = l->row_pitch_bytes >> fi.bpb_log2;
     return uint64_t(l->row_pitch_bytes) * (s.y_extent_blocks - 1) +
            uint64_t(s.x_extent_blocks) * fi.bytes_per_block;
@@ -234,13 +237,23 @@ nrhi::TextureView* TextureCache::ResolveImpl(nrhi::Cmd* cmd, nrhi::Device* dev,
   const GeoKey key{t.base_phys, plan.base_extent, t.xenos_format | (t.width << 8),
                    uint32_t(TextureIdentity(m.fetch)), 2};
 
-  // Guest bytes, bounds-checked against the physical heap.
+  // Guest bytes, bounds-checked against the physical heap. An unreadable mip
+  // region falls back to the base level only (like a failed mip layout).
   const uint8_t* base = nullptr;
   const uint8_t* mips = nullptr;
   auto read = [&]() {
     base = capture::ReadPhysical(t.base_phys, plan.base_extent);
-    if (plan.mip_extent) mips = capture::ReadPhysical(t.mip_phys, plan.mip_extent);
-    return base && (!plan.mip_extent || mips);
+    if (!base) return false;
+    if (plan.mip_extent) {
+      mips = capture::ReadPhysical(t.mip_phys, plan.mip_extent);
+      if (!mips) {
+        plan.levels = 1;
+        plan.mip_extent = 0;
+        plan.base_only = true;
+        ++st.base_only;
+      }
+    }
+    return true;
   };
 
   // The sample hash is taken once per frame per texture (many draws share one).
@@ -252,6 +265,7 @@ nrhi::TextureView* TextureCache::ResolveImpl(nrhi::Cmd* cmd, nrhi::Device* dev,
     NoteSample(state, hash, frame_);
   }
   if (state.dynamic) return fail(MaterialStatus::kTextureDynamic);
+  if (KnownBad(state)) return fail(MaterialStatus::kTextureBad);  // these contents failed to decode
 
   nrhi::TextureView* view = nullptr;
   const LookupResult found = index_.Lookup(key, state.sample_hash);
@@ -268,7 +282,12 @@ nrhi::TextureView* TextureCache::ResolveImpl(nrhi::Cmd* cmd, nrhi::Device* dev,
     const uint64_t guest_bytes = uint64_t(plan.base_extent) + plan.mip_extent;
     if (!upload_.TryTake(guest_bytes)) return fail(MaterialStatus::kTexturePending);
     view = Upload(cmd, dev, t, plan, base, mips, key, state.sample_hash, uv_fix, status);
-    if (!view) return nullptr;  // Upload set *status
+    if (!view) {
+      // Upload set *status. A decode failure is not retried (nor charged to
+      // the upload budget again) until the contents change; RHI failures latch.
+      if (!latched_) MarkBad(state);
+      return nullptr;
+    }
     ++st.uploads;
     st.upload_bytes += guest_bytes;
   }

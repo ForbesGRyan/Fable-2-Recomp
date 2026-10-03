@@ -65,13 +65,20 @@ class ThumbTest(unittest.TestCase):
             tt.write_png(p, 512, 512, bytes(512 * 512 * 4), max_edge=256)
             self.assertEqual(struct.unpack(">II", p.read_bytes()[16:24]), (256, 256))
 
-    def test_linear_rows_padded_to_256(self):
-        # 8888 linear, 4x2, pitch 32 texels = 128 bytes -> rows padded to 256.
+    def test_linear_base_pitch_follows_sdk(self):
+        # SDK GetGuestTextureLayout base level: row pitch = fetch pitch in blocks aligned to 32 blocks.
+        # 8888 linear, 4x2, pitch 32 texels -> 128-byte rows (no 256-byte padding).
         buf = bytearray(512)
         buf[0:4] = bytes([1, 2, 3, 4])
-        buf[256:260] = bytes([9, 8, 7, 6])  # row 1 starts at 256, not 128
+        buf[128:132] = bytes([9, 8, 7, 6])  # row 1 starts at 128
         w, h, rgba = tt.decode_rgba(bytes(buf), fc_for(6, 4, 2, 32, False, endian=0))
         self.assertEqual(rgba[4 * 4:4 * 4 + 4], bytes([9, 8, 7, 6]))
+        # DXT4_5 linear, 4x8 (two block rows), pitch 32 texels = 8 blocks -> 32 blocks * 16 = 512 bytes.
+        red = bytes([255, 255]) + bytes(6) + struct.pack("<HHI", 0xF800, 0xF800, 0)
+        buf = bytearray(1024)
+        buf[512:528] = red  # block row 1 starts at 512, not 256
+        w, h, rgba = tt.decode_rgba(bytes(buf), fc_for(20, 4, 8, 32, False, endian=0))
+        self.assertEqual(rgba[(4 * 4) * 4:(4 * 4) * 4 + 4], bytes([255, 0, 0, 255]))
 
 
 if __name__ == "__main__":

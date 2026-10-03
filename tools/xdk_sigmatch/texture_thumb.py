@@ -81,7 +81,8 @@ def decode_rgba(data, fc):
         block, bpb, log2 = 4, 16, 4
     wb, hb = (w + block - 1) // block, (h + block - 1) // block
     pitch_blocks = max(pitch // block, wb)
-    row_pitch = (pitch_blocks * bpb + 255) & ~255  # linear rows are padded to 256 bytes
+    # Linear base level (SDK GetGuestTextureLayout): fetch pitch aligned to 32 blocks, no 256-byte padding.
+    row_pitch = ((pitch_blocks + 31) & ~31) * bpb
     out = bytearray(w * h * 4)
     for by in range(hb):
         for bx in range(wb):

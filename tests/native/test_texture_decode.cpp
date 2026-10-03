@@ -57,6 +57,12 @@ int main() {
   a = {}; a.tiled = false; MakeFc(a, fc); DecodeTextureFetch(fc, &t);
   const LevelLayout base = BaseLevelLinear(t);
   if (base.pitch_blocks != 64 || base.width_blocks != 64 || base.height_blocks != 32 || base.row_pitch_bytes != 512) return 18;
+  // SDK rule (GetGuestTextureLayout): base row pitch = fetch pitch in blocks
+  // aligned to 32 blocks, no 256-byte row alignment.
+  a = {}; a.tiled = false; a.format = 6; a.w = 96; a.pitch = 96; MakeFc(a, fc); DecodeTextureFetch(fc, &t);
+  if (BaseLevelLinear(t).row_pitch_bytes != 384) return 35;  // 96 texels * 4 bytes, not 512
+  a = {}; a.tiled = false; a.format = 20; a.w = 32; a.pitch = 32; MakeFc(a, fc); DecodeTextureFetch(fc, &t);
+  if (BaseLevelLinear(t).row_pitch_bytes != 512) return 36;  // 8 blocks -> 32 blocks * 16 bytes, not 256
 
   // --- endian swaps ---
   const uint8_t s[4] = {1, 2, 3, 4};
@@ -66,7 +72,7 @@ int main() {
   CopySwapped(d, s, 4, 2); if (std::memcmp(d, "\x04\x03\x02\x01", 4)) return 21;
   CopySwapped(d, s, 4, 3); if (std::memcmp(d, "\x03\x04\x01\x02", 4)) return 22;
 
-  // --- linear 8888 untile: 4x2 texels, guest rows padded to 256 bytes, 8in32 ---
+  // --- linear 8888 untile: 4x2 texels, guest rows of 256 bytes (pitch 64 texels), 8in32 ---
   {
     std::vector<uint8_t> src(256 + 16, 0);
     for (uint32_t y = 0; y < 2; ++y)
@@ -75,7 +81,7 @@ int main() {
         p[0] = 0xAA; p[1] = uint8_t(y); p[2] = uint8_t(x); p[3] = 0x55;  // big-endian dword
       }
     LevelLayout l;
-    l.pitch_blocks = 32; l.width_blocks = 4; l.height_blocks = 2; l.row_pitch_bytes = 256;
+    l.pitch_blocks = 64; l.width_blocks = 4; l.height_blocks = 2; l.row_pitch_bytes = 256;
     std::vector<uint8_t> dst(2 * 256, 0);
     if (!UntileLevel(src.data(), src.size(), l, FormatInfo(TexFormat::k8888), false, 2, dst.data(), 256)) return 23;
     const uint8_t* q = dst.data() + 1 * 256 + 3 * 4;  // texel (3, 1), swapped to little-endian

@@ -43,7 +43,17 @@ struct TextureState {
   uint64_t last_change = 0;
   uint32_t streak = 0;       // consecutive observed frames with a change
   bool dynamic = false;
+  bool bad = false;          // decoding the contents with sample hash bad_hash failed
+  uint64_t bad_hash = 0;
 };
+
+// A decode failure (e.g. a level outside the guest region) of the current
+// contents: not retried, and no upload budget taken, until the sample hash changes.
+inline void MarkBad(TextureState& s) {
+  s.bad = true;
+  s.bad_hash = s.sample_hash;
+}
+inline bool KnownBad(const TextureState& s) { return s.bad && s.bad_hash == s.sample_hash; }
 
 // Records this frame's sample hash. Returns true if the contents changed
 // (always on the first observation).

@@ -44,6 +44,17 @@ int main() {
   NoteSample(gap, 3, 10);                       // not observed in frames 3-9
   if (gap.streak != 1) return 12;
 
+  // --- a failed decode is remembered until the contents change ---
+  TextureState bad;
+  NoteSample(bad, 5, 1);
+  if (KnownBad(bad)) return 21;
+  MarkBad(bad);
+  if (!KnownBad(bad)) return 22;
+  NoteSample(bad, 5, 2);                        // same contents next frame: still bad, no retry
+  if (!KnownBad(bad)) return 23;
+  NoteSample(bad, 6, 3);                        // changed contents: try again
+  if (KnownBad(bad)) return 24;
+
   // --- upload budget ---
   UploadBudget b(100);
   b.BeginFrame(100);

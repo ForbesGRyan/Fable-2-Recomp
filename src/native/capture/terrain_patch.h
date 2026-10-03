@@ -65,7 +65,9 @@ inline bool DecodeHeightMap(const uint32_t fc[6], HeightMap* out) {
     m.size = uint32_t(TiledOffset2D(int32_t((m.width - 1) & ~31u), int32_t((m.height - 1) & ~31u),
                                     m.pitch, 1)) + 0xC00;
   } else {
-    // Linear rows are padded to 256 bytes.
+    // Linear rows padded to 256 bytes: unverified (every heightmap observed is
+    // tiled, so this branch has never run; the SDK's base-level rule aligns the
+    // pitch to 32 texels instead, see render::BaseLevelLinear).
     const uint32_t row = (m.pitch * 2 + 255) & ~255u;
     m.size = row * (m.height - 1) + m.width * 2;
   }

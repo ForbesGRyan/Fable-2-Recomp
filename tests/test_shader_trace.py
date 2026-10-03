@@ -85,6 +85,52 @@ class TraceTest(unittest.TestCase):
         self.assertEqual(t["u"], {"input": "r0.x", "stages": [{"scale": "c3.x", "offset": None},
                                                               {"scale": None, "offset": "-c4.z"}]})
 
+    def test_vs_export_in_conditional_region_unsupported(self):
+        # The fetch and the export share one cexec region: the walk meets no control-flow line
+        # between them, but the export is conditional.
+        text = """/*    0.0 */       cexec b135
+/*    5   */          vfetch_mini r6.yx__, Offset=3, DataFormat=FMT_16_16_FLOAT, Signed=true
+/*   23   */          max o0.xy__, r6.xyyy, r6.xyyy
+/*    1.0 */       alloc interpolators
+"""
+        r = st.trace_vs_export(st.parse(text), 0, 0)
+        self.assertIsInstance(r, st.Unsupported)
+        self.assertIn("cexec", r.reason)
+        # A conditional region anywhere before the export (here before the fetch, outside the
+        # backward walk) also rejects it.
+        text = """/*    0.0 */       cexec b134
+/*    2   */          mul r4.xy__, r4.xyyy, c3.xyyy
+/*    1.0 */       exec
+/*    5   */          vfetch_mini r6.yx__, Offset=3, DataFormat=FMT_16_16_FLOAT, Signed=true
+/*   23   */          max o0.xy__, r6.xyyy, r6.xyyy
+"""
+        self.assertIsInstance(st.trace_vs_export(st.parse(text), 0, 0), st.Unsupported)
+
+    def test_vs_export_two_writers_unsupported(self):
+        text = """/*    0.0 */       exec
+/*    5   */          vfetch_mini r6.yx__, Offset=3, DataFormat=FMT_16_16_FLOAT, Signed=true
+/*   23   */          max o0.xy__, r6.xyyy, r6.xyyy
+/*   24   */          mov o0.x___, r6.yyyy
+"""
+        ins = st.parse(text)
+        r = st.trace_vs_export(ins, 0, 0)  # o0.x written twice
+        self.assertIsInstance(r, st.Unsupported)
+        self.assertIn("writ", r.reason)
+        self.assertEqual(st.trace_vs_export(ins, 0, 1)["src"], "x")  # o0.y has one writer
+
+    def test_fetch_coordinate_attributes_unsupported(self):
+        for attrs in ("UnnormalizedTextureCoords=true", "OffsetX=0.5", "OffsetY=-1"):
+            text = ("/*    0.0 */       exec\n/*    1   */          mul r1.xy__, r0.xyyy, c3.xyyy\n"
+                    f"/*    3   */          tfetch2D r2, r1.xy, tf1, {attrs}\n")
+            ins = st.parse(text)
+            r = st.trace_ps_albedo(ins, st.texture_fetches(ins)[0])
+            self.assertIsInstance(r, st.Unsupported, attrs)
+        # Filter and validity overrides do not move the coordinate.
+        text = ("/*    0.0 */       exec\n/*    1   */          mul r1.xy__, r0.xyyy, c3.xyyy\n"
+                "/*    3   */          tfetch2D r2, r1.xy, tf1, FetchValidOnly=false, MagFilter=linear\n")
+        ins = st.parse(text)
+        self.assertNotIsInstance(st.trace_ps_albedo(ins, st.texture_fetches(ins)[0]), st.Unsupported)
+
     def test_predicated_and_sat_unsupported(self):
         for line in ("mul_sat r1.xy__, r0.xyyy, c3.xyyy", "(p0) mul r1.xy__, r0.xyyy, c3.xyyy"):
             text = f"/*    0.0 */       exec\n/*    1   */          {line}\n/*    3   */          tfetch2D r2, r1.xy, tf1\n"

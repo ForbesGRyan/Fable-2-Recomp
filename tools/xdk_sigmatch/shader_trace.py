@@ -37,6 +37,7 @@ _SRC = re.compile(r"^(-?)(r|c)(_abs)?(?:\[([^\]]*)\]|(\d+))(?:\.([xyzw]+))?$")
 _DEST = re.compile(r"^(?:(r)(\d+)|(o)(\d+)|(oPos)|(oDepth))(?:\.([xyzw_01]+))?$")
 _COMPS = "xyzw"
 _SAFE_CF = ("exec", "exece", "alloc", "cnop")
+_COORD_OFFSETS = ("OffsetX", "OffsetY", "OffsetZ")
 
 
 def _split_operands(text):
@@ -282,6 +283,19 @@ def trace_ps_albedo(instrs, tfetch):
     pos = _find_pos(instrs, tfetch.index)
     if pos is None or instrs[pos].pred:
         return Unsupported("predicated or missing fetch")
+    # Attributes that move the sampled coordinate (the disassembler prints them only when
+    # non-default); filter, LOD and FetchValidOnly overrides do not.
+    attrs = instrs[pos].attrs
+    if attrs.get("UnnormalizedTextureCoords", "false") != "false":
+        return Unsupported("unnormalized texture coordinates")
+    for name in _COORD_OFFSETS:
+        if name in attrs:
+            try:
+                nonzero = float(attrs[name]) != 0.0
+            except ValueError:
+                nonzero = True
+            if nonzero:
+                return Unsupported(f"fetch {name}={attrs[name]}")
     out = {}
     for axis, comp in zip("uv", tfetch.coord_swz):
         r = trace_component(instrs, tfetch.index, tfetch.coord_reg, comp)
@@ -299,14 +313,19 @@ def trace_vs_export(instrs, interp, comp):
     """Trace export o<interp>.<comp> (comp: 0-3 or 'x'-'w') back to a vertex fetch component."""
     if isinstance(comp, int):
         comp = _COMPS[comp]
-    pos = None
-    for i in range(len(instrs) - 1, -1, -1):
-        ins = instrs[i]
-        if ins.dest_kind == "o" and ins.dest == interp and comp in ins.mask:
-            pos = i
-            break
-    if pos is None:
+    writers = [i for i, ins in enumerate(instrs)
+               if ins.dest_kind == "o" and ins.dest == interp and comp in ins.mask]
+    if not writers:
         return Unsupported(f"o{interp}.{comp} is not exported")
+    if len(writers) > 1:
+        return Unsupported(f"o{interp}.{comp} has {len(writers)} writers")
+    pos = writers[0]
+    # A conditional region (cexec, jumps, loops) anywhere before the export: the export or its
+    # inputs may be conditional even when the fetch and the export share one region, where the
+    # backward walk below meets no control-flow line.
+    for ins in instrs[:pos]:
+        if ins.op.startswith("cf:") and ins.op[3:] not in _SAFE_CF:
+            return Unsupported(f"control flow before export: {ins.op[3:]}")
     r = _step(instrs[pos], comp)
     if isinstance(r, Unsupported):
         return Unsupported(f"export: {r.reason}")

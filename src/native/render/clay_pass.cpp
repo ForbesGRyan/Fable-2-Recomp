@@ -195,7 +195,9 @@ bool ClayPass::Ensure(nrhi::Device* dev, bool textured) {
 void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
                       bool textured, ClayStats& st, TextureStats& tst) {
   if (!ready_ || dev != device_) return;
-  textured = textured && textured_ps_;
+  // A latched texture cache (RHI failure) resolves nothing: skip the UV decode
+  // too, and report the latch on F3.
+  textured = textured && textured_ps_ && !textures_.latched();
   const auto t0 = std::chrono::steady_clock::now();
   const double hash0 = st.hash_ms, decode0 = st.decode_ms, tex0 = tst.decode_ms;
 
@@ -282,6 +284,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
 
   st.resident_bytes = geometry_.resident_bytes();
   tst.resident_bytes = textures_.resident_bytes();
+  tst.latched = textures_.latched();
   const double total =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   st.record_ms += std::max(0.0, total - (st.hash_ms - hash0) - (st.decode_ms - decode0) -

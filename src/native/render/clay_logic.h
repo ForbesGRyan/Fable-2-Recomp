@@ -40,6 +40,7 @@ struct TextureStats {
   uint64_t resident_bytes = 0, upload_bytes = 0;
   double decode_ms = 0;
   uint32_t status[size_t(capture::MaterialStatus::kCount)] = {};  // final statuses of drawn records
+  bool latched = false;  // an RHI failure turned the texture path off
 };
 
 enum class ClayColor : uint8_t { kClay, kDraw, kShader };
@@ -255,9 +256,12 @@ inline ClayConstants MakeClayConstants(const capture::DrawRecord& r, uint32_t ve
   return c;
 }
 
-// The F3 texture line: textured share of the drawn records, cache counters
-// and the top three final statuses other than textured.
+// The F3 texture line: textured share of the drawn records and of the drawn
+// non-terrain records (spec success criterion 2), cache counters and the top
+// three final statuses other than textured. "Textures: off (latched)" once an
+// RHI failure turned the texture path off.
 inline std::string FormatTextureText(const TextureStats& ts, uint32_t drawn) {
+  if (ts.latched) return "Textures: off (latched)";
   std::vector<std::pair<const char*, uint32_t>> reasons;
   for (size_t i = 0; i < size_t(capture::MaterialStatus::kCount); ++i) {
     if (i == size_t(capture::MaterialStatus::kTextured) || ts.status[i] == 0) continue;
@@ -266,11 +270,14 @@ inline std::string FormatTextureText(const TextureStats& ts, uint32_t drawn) {
   std::stable_sort(reasons.begin(), reasons.end(),
                    [](const auto& a, const auto& b) { return a.second > b.second; });
   const uint32_t share = drawn ? uint32_t(uint64_t(ts.textured) * 100 / drawn) : 0;
+  const uint32_t terrain = ts.status[size_t(capture::MaterialStatus::kTerrain)];
+  const uint32_t non_terrain = drawn > terrain ? drawn - terrain : 0;
+  const uint32_t share_nt = non_terrain ? uint32_t(uint64_t(ts.textured) * 100 / non_terrain) : 0;
   char buf[256];
   std::snprintf(buf, sizeof(buf),
-                "Textures: textured %u of %u drawn (%u%%), resident %u (%.1f MB), uploads %u "
-                "(%.1f MB), decode %.2f ms",
-                ts.textured, drawn, share, ts.resident,
+                "Textures: textured %u of %u drawn (%u%%, %u%% non-terrain), resident %u (%.1f MB), "
+                "uploads %u (%.1f MB), decode %.2f ms",
+                ts.textured, drawn, share, share_nt, ts.resident,
                 double(ts.resident_bytes) / (1024.0 * 1024.0), ts.uploads,
                 double(ts.upload_bytes) / (1024.0 * 1024.0), ts.decode_ms);
   std::string text = buf;

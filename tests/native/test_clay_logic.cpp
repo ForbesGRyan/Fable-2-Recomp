@@ -215,15 +215,16 @@ int main() {
     ts.upload_bytes = 2ull * 1024 * 1024;
     ts.decode_ms = 1.234;
     const std::string t = FormatTextureText(ts, 100);
-    CHECK(88, t.find("textured 80 of 100 drawn (80%)") != std::string::npos);
+    CHECK(88, t.find("textured 80 of 100 drawn (80%, 80% non-terrain)") != std::string::npos);
     CHECK(89, t.find("top untextured: ps-unknown 15, texture-pending 5") != std::string::npos);
     const std::string want =
-        "Textures: textured 80 of 100 drawn (80%), resident 42 (12.0 MB), uploads 3 (2.0 MB), "
+        "Textures: textured 80 of 100 drawn (80%, 80% non-terrain), resident 42 (12.0 MB), uploads 3 (2.0 MB), "
         "decode 1.23 ms | top untextured: ps-unknown 15, texture-pending 5";
     CHECK(90, t == want);
     if (t != want) std::cerr << "got:  " << t << "\nwant: " << want << "\n";
     TextureStats none;
-    CHECK(91, FormatTextureText(none, 0).find("textured 0 of 0 drawn (0%)") != std::string::npos);
+    CHECK(91, FormatTextureText(none, 0).find("textured 0 of 0 drawn (0%, 0% non-terrain)") !=
+                  std::string::npos);
     // Top three only, by count.
     TextureStats many;
     many.status[size_t(capture::MaterialStatus::kTerrain)] = 4;
@@ -233,6 +234,28 @@ int main() {
     CHECK(92, FormatTextureText(many, 16).find(
                   "top untextured: no-albedo 9, terrain 4, uv-unsupported 2") != std::string::npos &&
                   FormatTextureText(many, 16).find("texture-bad") == std::string::npos);
+    // Success criterion 2 counts non-terrain draws: the bridge scene draws
+    // 567 terrain patches, so the overall share alone reads about 13%.
+    TextureStats bridge;
+    bridge.textured = 87;
+    bridge.status[size_t(capture::MaterialStatus::kTextured)] = 87;
+    bridge.status[size_t(capture::MaterialStatus::kTerrain)] = 567;
+    bridge.status[size_t(capture::MaterialStatus::kNoAlbedo)] = 13;
+    CHECK(94, FormatTextureText(bridge, 667).find("textured 87 of 667 drawn (13%, 87% non-terrain)") !=
+                  std::string::npos);
+    // Only terrain drawn: no division by zero.
+    TextureStats terrain_only;
+    terrain_only.status[size_t(capture::MaterialStatus::kTerrain)] = 5;
+    CHECK(95, FormatTextureText(terrain_only, 5).find("(0%, 0% non-terrain)") != std::string::npos);
+    // A latched texture path (RHI failure) is visible on F3.
+    TextureStats latched;
+    latched.latched = true;
+    latched.textured = 3;
+    CHECK(96, FormatTextureText(latched, 10) == "Textures: off (latched)");
+    FrameScene ls;
+    ClayStats lst;
+    const std::string lt = FormatStatusText(ls, lst, &latched);
+    CHECK(97, lt.size() > 24 && lt.compare(lt.size() - 24, 24, "\nTextures: off (latched)") == 0);
   }
   // 44-48: F3 status text.
   {
@@ -265,7 +288,7 @@ int main() {
         "Geometry: 12 uploads, 1818 hits, 45.5 MB resident | hash 0.84 ms, decode 0.13 ms, "
         "record 0.50 ms\n"
         "Capture: 0.43 ms guest time per frame\n"
-        "Textures: textured 900 of 915 drawn (98%), resident 0 (0.0 MB), uploads 0 (0.0 MB), "
+        "Textures: textured 900 of 915 drawn (98%, 100% non-terrain), resident 0 (0.0 MB), uploads 0 (0.0 MB), "
         "decode 0.00 ms | top untextured: terrain 15";
     CHECK(44, t == want);
     if (t != want) std::cerr << "got:  " << t << "\nwant: " << want << "\n";

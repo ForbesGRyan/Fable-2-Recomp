@@ -226,7 +226,25 @@
     "pos_fetch": -1,
     "pos_swizzle": "yxw1",
     "evidence": "dump: vfetch_full r2.zxwy (instr 5), r6 = cndeq(c255.xxxy, r2.zwyy, c255.yyyy) (instr 10), oPos = dp4(c0..c3 .zxyw, r6) (instr 11-14). GPU c255 = (0, 1, 3, 2) ([vtess]), so oPos = dp4(c0..c3, (src.y, src.x, src.w, 1)): the fetch read with swizzle yxw1 (as ECD66A10). GPU c0..c3 equal the device bank in 474/475 main-scene draw rows (native_discovery_20261002_130248 + fable_2_108.log); remapped samples put 93.6% of vertices inside the clip volume (85.3% as fetched)",
-    "task11_rejected": "dump: dp4(c0..c3) of cndeq-permuted fetch (r6 = r2.zwy1); fetch swizzle alone does not give the position; base-0 check 0.204"
+    "task11_rejected": "dump: dp4(c0..c3) of cndeq-permuted fetch (r6 = r2.zwy1); fetch swizzle alone does not give the position; base-0 check 0.204",
+    "uv": {
+      "o0.x": {
+        "fetch": 2,
+        "src": "y",
+        "format": 31,
+        "offset": 3,
+        "stages": []
+      },
+      "o0.y": {
+        "fetch": 2,
+        "src": "x",
+        "format": 31,
+        "offset": 3,
+        "stages": []
+      }
+    },
+    "uv_manual": true,
+    "uv_evidence": "native_discovery_20261002_194918.jsonl: shader_trace: o0.xy = r7.xy <- vfetch_mini r7.yx__ Offset=3 FMT_16_16_FLOAT (instr 7, fetch ordinal 2). Used by albedo PS 2FD24989AB04A475 (75 draws) and 648B965C200A5113 (73); both read r0.xy"
   },
   "0x82F6433A69263C75": {
     "base": 0,
@@ -300,7 +318,25 @@
       ]
     },
     "evidence": "dump: position vfetch_full r1.yxwz (instr 7); bone index r5.z = x of the integer 8_8_8_8 at dword 3 (instr 9, fetch 2); bone rows r4/r9/r8 = vfetch_full of slot 92 indexed by r5.z at dwords 0/2/4 (instr 13-15, fetches 6-8); r0 = cndeq(c255.xxxy, r1.zxyy, c255.yyyy) = (p.xyz, 1) (instr 22), world = dp4(row.zxyw, r0) per row (instr 23-25), oPos = dp4(c0..c3 .zxyw, cndeq(c255.xxxy, world.zxyy, c255.yyyy)) (instr 46-50): clip = c0..c3 (dot) x bone x (p, 1). The bones are per-vertex rigid transforms near identity (palettes of 4-8 bones, p99 rotation deviation 0.05, max 1.27), not the placement. GPU c0..c3 equal the device bank in 460/460 main-scene rows (native_discovery_20261002_130248 + fable_2_108.log); the cexec b0 branch (instr 45, uv-space position) is not taken: bool constant 0 = 0 in all 21176 logged draws (fable_2_109.log)",
-    "task11_rejected": "dump: dp4(c0..c3) of bone-blended position; base-0 check 0.477 (bones carry placement)"
+    "task11_rejected": "dump: dp4(c0..c3) of bone-blended position; base-0 check 0.477 (bones carry placement)",
+    "uv": {
+      "o0.x": {
+        "fetch": 3,
+        "src": "y",
+        "format": 31,
+        "offset": 5,
+        "stages": []
+      },
+      "o0.y": {
+        "fetch": 3,
+        "src": "x",
+        "format": 31,
+        "offset": 5,
+        "stages": []
+      }
+    },
+    "uv_manual": true,
+    "uv_evidence": "native_discovery_20261002_194918.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow: cexec'): o0.xy = max(r5.xy, r5.xy) (instr 55, unconditional exec 5.1) <- vfetch_mini r5.yx__ Offset=5 FMT_16_16_FLOAT (instr 10, fetch ordinal 3; ordinal 2 is vfetch_mini r5.__x_ at instr 9, which writes only r5.z); the only other r5.xy reader is instr 45 inside cexec b0 (3.1), which writes r4; no instruction writes r5 after instr 10. Used by albedo PS 8D900846800943C8 (100 draws), reads r0.xy"
   },
   "0xA5846836C90E1192": {
     "manual": true,
@@ -380,7 +416,25 @@
         "score": 1.0,
         "samples": 61
       }
-    }
+    },
+    "uv": {
+      "o0.x": {
+        "fetch": 4,
+        "src": "y",
+        "format": 31,
+        "offset": 5,
+        "stages": []
+      },
+      "o0.y": {
+        "fetch": 4,
+        "src": "x",
+        "format": 31,
+        "offset": 5,
+        "stages": []
+      }
+    },
+    "uv_manual": true,
+    "uv_evidence": "native_discovery_20261002_194918.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow: cexec'): o0.xy = max(r5.xy, r5.xy) (instr 79, unconditional exec 7.0) <- vfetch_mini r5.yx__ Offset=5 FMT_16_16_FLOAT (instr 13, fetch ordinal 4); the only other r5 reader is instr 69 inside cexec b0 (5.0), which writes r4 (and co-issued sgts r4.z); no instruction writes r5 after instr 13. Same dest-swizzle convention as the tool's ECD66A10092E6562 trace. Used by albedo PS 8D900846800943C8 (639 draws) and 401A01FD4E5F8757 (379); both read r0.xy"
   },
   "0xECD66A10092E6562": {
     "base": 0,
@@ -391,7 +445,25 @@
     "finder": {
       "20261002_111154+111917": "no window",
       "20261002_115507": "no window"
-    }
+    },
+    "uv": {
+      "o0.x": {
+        "fetch": 2,
+        "src": "y",
+        "format": 31,
+        "offset": 3,
+        "stages": []
+      },
+      "o0.y": {
+        "fetch": 2,
+        "src": "x",
+        "format": 31,
+        "offset": 3,
+        "stages": []
+      }
+    },
+    "uv_manual": true,
+    "uv_evidence": "native_discovery_20261002_194918.jsonl: shader_trace: o0.xy = r6.xy (instr 23 max) <- vfetch_mini r6.yx__ Offset=3 FMT_16_16_FLOAT (instr 7, fetch ordinal 2). Used by albedo PS 8D900846800943C8 (3761 draws), 789266C3E42D7E59 (377), 648B965C200A5113 (332), 401A01FD4E5F8757 (75); all read r0.xy"
   },
   "0xF160B4DA459A6D40": {
     "base": 0,

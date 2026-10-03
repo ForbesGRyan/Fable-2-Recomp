@@ -576,7 +576,7 @@ Discovery D1 of sub-project 4 (2026-10-02, textures Task 7). Constants `kPs*` an
 |---|---|
 | The flush emits the pixel shader with `IM_LOAD` type 1 | `0x8221B18C lwz r29,0x3194(r30)`; only with dirty bit 0x00100000 (`0x8221B2AC rlwinm r8,r20,0,11,11`, set by SetPixelShader `0x82208D78 oris r11,r11,0x10`); `0x8221B32C..0x8221B36C`: address = GpuAddress(obj[0x18] + record dword 0) \| 1, size = record dword 1 >> 2 |
 | GpuLoadShaders `0x82221978` emits r5 the same way | `0x82221A24..0x82221A64`, before the vertex shader (`0x82221AA4..0x82221B1C`). It never stores device+0x3194 |
-| Microcode loaded unpatched | the only other use of the header, `0x8222BFF8` (called at `0x8221B304` and `0x82221BF4`), uploads the shader's literal constants from the table at header dword 5; nothing rewrites the pixel microcode |
+| Microcode loaded unpatched | the only other uses of the header upload the shader's literal constants from the table at header dword 5: `0x8222BFF8` (called by the flush at `0x8221B304`) and, in GpuLoadShaders, `0x82221CB0` (called at `0x82221BF4`; it emits `LOAD_ALU_CONSTANT` at `0x82221D30..0x82221D4C`); nothing rewrites the pixel microcode |
 | The flush is skipped without a device vertex shader | `0x8221B190 cmplwi cr6,r31,0` (r31 = device+0x3198), `0x8221B194 beq 0x8221B9C4`: no `IM_LOAD` of either shader, so the GPU keeps what GpuLoadShaders loaded |
 | No pixel shader = depth only | GpuLoadShaders writes RB_MODECONTROL with `SET_CONSTANT 0x00040208` (`0x82221B34..0x82221B3C`): 5 (depth) without r5 (`0x822219C0`), 4 (color + depth) with it (`0x82221A18`). The flush puts the same 5 / 4 in the low bits of device+0x2954 (`0x8221B228..0x8221B248` without, `0x8221B370..0x8221B3A4` with a pixel shader) |
 
@@ -822,6 +822,64 @@ Build: `native-renderer` 3fc54d9 with SDK `renderer` 0c6d1de, release. The user 
 - Terrain hole masks are ignored.
 - Shaders loaded while records are off are counted as unknown-shader after F6 until they are loaded again.
 - A view change from the console no longer applies at runtime; use F6 or the start-up flags.
+
+## 11. Albedo table (D3, D4)
+
+Discovery D3/D4 of sub-project 4 (2026-10-02, textures Task 9). Per pixel shader, `docs/native-renderer/ps-albedo.json` names the albedo texture fetch slot and the UV path back to an interpolator (`src/native/capture/ps_albedo_table.inc`, `gen_albedo_table.py`); per vertex shader, the `"uv"` key of `vs-transforms.json` traces that interpolator back to a vertex fetch element (`FABLE2_VS_UV` rows in `vs_transform_table.inc`, `gen_transform_table.py`). Proposals come from `tools\xdk_sigmatch\albedo_finder.py`; every entry was confirmed by hand from a thumbnail (`texture_thumb.py`, colour content judged, the thumbnail ignores the fetch swizzle) and the shader disassembly, and carries `"manual": true` and an evidence string. A traced albedo fetch is followed into the shader body: in the lit object shaders (`8D900846...` and the same shape) tf0 is squared into the diffuse term and tf1 is scalar-squared as the specular colour, tf2 is a DXN normal map, tf8 a screen-sized `k_8` mask, tf4/tf5 1D lookups, tf14 a cube map. A VS `"uv"` entry carries its own `"uv_manual"` and `"uv_evidence"`; the VS entries' other fields are unchanged.
+
+### Bowerstone (autoplay)
+
+Capture: `.\tools\drive_game.ps1 -Total 180 -GameArgs "--dump_shaders=C:\Users\Ryan\code\Fable-2-Recomp\out\shader_dump" -Env @{FABLE2_NATIVE_DISCOVERY="300"; FABLE2_NATIVE_DISCOVERY_DELAY="55"; FABLE2_NATIVE_DISCOVERY_EVERY="8"}`, **`native_discovery_20261002_194918`** (300 frames, every 8th draw; 140 textures, 20 MB in `native_tex_20261002_194918`). Finder: `python tools\xdk_sigmatch\albedo_finder.py out\build\win-amd64-release\logs\native_discovery_20261002_194918.jsonl --dumps out\shader_dump --out out\albedo_proposals_bowerstone.json --thumbs out\albedo_thumbs_bowerstone`. 14391 in-scene `draw` rows (terrain is `tess`, excluded), 17 pixel shaders, all dumped.
+
+| Pixel shader | Draws | Cumulative | Decision | Vertex shaders (draws, table state) |
+|---|---|---|---|---|
+| `0x8D900846800943C8` | 4500 | 31.3% | albedo tf0 | `ECD6` 3761 (uv), `D4D5` 639 (uv), `A1F7` 100 (uv) |
+| `0xA7E45D07F5CF6627` | 2506 | 48.7% | albedo tf0 | `8123` 2472 (no entry), `FC4F` 34 (no entry) |
+| `0x165EDCD2CB963868` | 1446 | 58.7% | albedo tf0 (finder said tf1) | `B636` 1164, `6AD4` 216, `33C0` 34, `36B5` 32 (no entries) |
+| `0x00E09D1BC5295D52` | 1149 | 66.7% | albedo tf0 | `475E` 1149 (rejected) |
+| `0x7CD57B81550F19E3` | 834 | 72.5% | no_albedo | `A584` 834 (rejected) |
+| `0x014F8A02DB7B19CA` | 571 | 76.5% | no_albedo | `7C57` 571 (no entry) |
+| `0xE99F4ACC7A3C78B4` | 549 | 80.3% | albedo tf0 | `8123` 485, `FC4F` 64 (no entries) |
+| `0x401A01FD4E5F8757` | 454 | 83.4% | albedo tf0 | `D4D5` 379 (uv), `ECD6` 75 (uv) |
+| `0xA17D8AEC3A817D45` | 450 | 86.6% | no_albedo | `BEAD` 450 (transform, no uv) |
+| `0xF6D98C7B4D98438B` | 447 | 89.7% | no_albedo | `BEAD` 447 (transform, no uv) |
+| `0x648B965C200A5113` | 405 | 92.5% | albedo tf0 | `ECD6` 332 (uv), `79EA` 73 (uv) |
+| `0xF525E023E08AC9BB` | 389 | 95.2% | albedo tf0 | `B636` 260, `6AD4` 83, `33C0` 46 (no entries) |
+| `0x789266C3E42D7E59` | 377 | 97.8% | albedo tf0 | `ECD6` 377 (uv) |
+| `0x26052DEFBA688AF2` | 157 | 98.9% | albedo tf0 | `48D3` 157 (no entry) |
+| `0x2FD24989AB04A475` | 75 | 99.4% | albedo tf0 | `79EA` 75 (uv) |
+| `0xDBFD88A80EDBCE36` | 42 | 99.7% | albedo tf0 | `29B6` 42 (rejected) |
+| `0xC300519EC8915346` | 40 | 100.0% | albedo tf0 (finder said tf1) | `775C` 35, `29B6` 5 (rejected) |
+
+Thumbnails (tf0): building-trim and wood-plank atlases, a character-part atlas (faces, eyes, cloth), leaves, ferns, a grass/bark/stone atlas, a feather/fur atlas, an eye iris, a glow sprite and a flame sprite. `no_albedo`: `7CD5...` (only colour fetch tf0 untraceable, scalar co-issue `mulsc`), `014F...` (tf14/tf15 8_8_8_8 all-zero at first use, tf13 8_8 two-channel, likely water), `A17D...`/`F6D9...` (only traced fetch is a single-component `k_8` mask; their 8_8_8_8 fetches are predicated and all-zero at first use). All 8_8_8_8 256x256/128x128 textures of those shaders read as zero bytes when first dumped, so they look like render targets.
+
+**Coverage.** Every in-scene draw has a table decision (17 of 17 shaders, 100%); 12089 of 14391 draws (84.0%) are on albedo shaders (80% was reached at `E99F...`). The draws drawn today are those whose vertex shader has a transform: 6708 (46.6%); of these, 5811 (86.6%) have an albedo entry and a VS `"uv"` entry, the other 897 are `BEAD...` draws with `no_albedo` shaders. The other 7683 draws are on vertex shaders without a transform (characters and instanced foliage `8123`/`B636`, `pos_suspect`; `475E`, `A584`, `7C57`, `48D3`, `29B6`, `775C`, `FC4F`, `6AD4`, `33C0`, `36B5`), so they are not drawn and got no `"uv"`.
+
+**VS `"uv"` entries.** All four read `o0.xy` from one `FMT_16_16_FLOAT` element with the dest swizzle `yx__` (so `o0.x` = element `y`), no stages:
+
+| Vertex shader | Fetch ordinal | Offset (dwords) | Trace | Albedo draws |
+|---|---|---|---|---|
+| `0xECD66A10092E6562` | 2 | 3 | `shader_trace.py` | 4545 |
+| `0xD4D558DA6A82BDC8` | 4 | 5 | by hand (tool: `control flow: cexec`); `o0.xy = max(r5.xy, r5.xy)` at instr 79 in an unconditional exec, `r5` written only by `vfetch_mini r5.yx__` (instr 13); the cexec at 5.0 writes `r4` | 1018 |
+| `0x79EAC49585797037` | 2 | 3 | `shader_trace.py` | 148 |
+| `0xA1F7E9885EC466DF` | 3 | 5 | by hand (tool: `control flow: cexec`); `o0.xy` at instr 55, `r5.xy` written only by `vfetch_mini r5.yx__` (instr 10; ordinal 2 is `r5.__x_`, the skin index); the cexec at 3.1 writes `r4` | 100 |
+
+Not added: `475E...` (rejected) and `7C57...` (no entry) had finder proposals; the finder's `BEAD...` proposal (`o3.xy`, 32_32_FLOAT) serves only `no_albedo` shaders.
+
+**Format census (D4).** Formats of the albedo slot's fetch constant over the albedo shaders' draws (textures = distinct base address and size):
+
+| Format | All albedo-shader draws: textures | Draws | Share | Drawn today (transform + uv): textures | Draws | Share |
+|---|---|---|---|---|---|---|
+| DXT1 (18) | 36 | 11479 | 95.0% | 26 | 5283 | 90.9% |
+| DXT4_5 (20) | 6 | 463 | 3.8% | 3 | 381 | 6.6% |
+| 8_8_8_8 (6) | 1 | 74 | 0.6% | 1 | 74 | 1.3% |
+| DXT2_3 (19) | 1 | 73 | 0.6% | 1 | 73 | 1.3% |
+
+No other format occurs in an albedo slot (the 8_8_8_8 one is a 16x16 linear texture in `8D90...` tf0), so no decoder is missing. UV element formats of the confirmed VS entries: `FMT_16_16_FLOAT` (31) only, 5811 draws.
+
+### Bower Lake
+
+Bower Lake: pending (user capture).
 
 ## Pending
 

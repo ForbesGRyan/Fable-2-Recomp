@@ -204,9 +204,12 @@ inline constexpr uint32_t kImLoadImmediateHeader = 0xC0002B00u;  // | (dwords + 
 // against the emulator's pipeline storage (frame-map section 8).
 inline constexpr uint32_t kPsDeviceFieldOffset = 0x3194;
 // Same layout as the vertex shader object with a different header and base
-// dword and no variants. Header at object + kPsHeaderOffset (0x8221B2F8 /
-// 0x82221BEC `addi r4,rN,0x28` hand it to the literal-constant upload
-// 0x8222BFF8; SetPixelShader 0x82208D8C/0x82208D90 reads header dword 5 the
+// dword and no variants. Header at object + kPsHeaderOffset (0x8221B2F8
+// `addi r4,r29,0x28` hands it to the flush's literal-constant upload
+// 0x8222BFF8, called at 0x8221B304; 0x82221BEC `addi r4,r30,0x28` hands it to
+// GpuLoadShaders' own upload 0x82221CB0, called at 0x82221BF4, which emits
+// LOAD_ALU_CONSTANT at 0x82221D30..0x82221D4C; SetPixelShader
+// 0x82208D8C/0x82208D90 reads header dword 5 the
 // same way); header + kPsRecordOffsetField holds the byte offset (from the
 // header) of the single microcode record (0x8221B32C `lwz r11,0x40(r29)`,
 // 0x8221B334 `add r11,r11,r29`: record = obj + obj[0x40] + 0x28). Base =
@@ -220,7 +223,7 @@ inline constexpr uint32_t kPsUcodeBaseDword = 6;
 // `ori r11,r11,1`) and its size in bytes (0x8221B364/0x8221B368 `lwz
 // r11,0x2C(r11); srwi r11,r11,2` into the IM_LOAD size field; same at
 // 0x82221A30 / 0x82221A5C..0x82221A60). The microcode is loaded unpatched
-// (0x8222BFF8 only uploads the shader's literal constants). Runtime: see
+// (0x8222BFF8 and 0x82221CB0 only upload the shader's literal constants). Runtime: see
 // frame-map section 8, "Pixel shader microcode".
 inline constexpr uint32_t kPsUcodeAddressDword = 0;
 inline constexpr uint32_t kPsUcodeSizeDword = 1;

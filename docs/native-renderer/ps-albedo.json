@@ -1,1 +1,301 @@
-{}
+{
+  "0x8D900846800943C8": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "manual": true,
+    "evidence": "native_discovery_20261002_194918.jsonl: 4500 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/8D900846800943C8_tf0.png: DXT1 1024x1024 atlas of painted wood planks, red/gold trimmed panels and green boards (building facades); shader squares tf0 into the diffuse term, tf1 is the scalar-squared specular colour, tf2 DXN normal"
+  },
+  "0xA7E45D07F5CF6627": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "manual": true,
+    "evidence": "native_discovery_20261002_194918.jsonl: 2506 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/A7E45D07F5CF6627_tf0.png: DXT1 atlas of character parts (skin, faces, eyes, cloth patches)"
+  },
+  "0x165EDCD2CB963868": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "manual": true,
+    "evidence": "native_discovery_20261002_194918.jsonl: 1446 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/165EDCD2CB963868_tf0.png: DXT1 green and autumn-red leaves on a cut-out background (foliage); the finder proposed slot 1 (shader-order tie at score 4.5), but tf1 is a 16x16 all-zero 8_8_8_8 or a DXT4_5 specular map (thumbnail blank), so slot 0 was chosen"
+  },
+  "0x00E09D1BC5295D52": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "manual": true,
+    "evidence": "native_discovery_20261002_194918.jsonl: 1149 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/00E09D1BC5295D52_tf0.png: DXT1 atlas of grass tufts, bark, stone, wood and roof tiles"
+  },
+  "0x7CD57B81550F19E3": {
+    "no_albedo": "only colour candidate tf0 (DXT1, xyzw) has an untraceable UV: shader_trace Unsupported('u: scalar co-issue mulsc writes component'); tf8 k_8 screen mask (r_abs), tf11/tf12 1x1 8_8_8_8 (predicated / cndgt). VS 0xA5846836C90E1192 is rejected in vs-transforms.json, so the draws are not drawn anyway",
+    "manual": true,
+    "evidence": "native_discovery_20261002_194918.jsonl: 834 draws; disassembly out/shader_dump/shader_7CD57B81550F19E3.ucode.frag"
+  },
+  "0x014F8A02DB7B19CA": {
+    "no_albedo": "traced fetches tf14/tf15 (8_8_8_8 128x128, one texture each) read all-zero guest memory at first use (render-target-like; thumbnails 014F8A02DB7B19CA_tf14/tf15.png blank); tf13 is 8_8 two-channel (15 animated 128x128 textures, normal-map-like); tf4/tf5 1D lookups. VS 0x7C5710DEF3EE33C4 has no vs-transforms entry, so the draws are not drawn anyway",
+    "manual": true,
+    "evidence": "native_discovery_20261002_194918.jsonl: 571 draws; disassembly out/shader_dump/shader_014F8A02DB7B19CA.ucode.frag"
+  },
+  "0xE99F4ACC7A3C78B4": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "manual": true,
+    "evidence": "native_discovery_20261002_194918.jsonl: 549 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/E99F4ACC7A3C78B4_tf0.png: DXT1 character-part atlas (same texture as PS A7E45D07F5CF6627 slot 0)"
+  },
+  "0x401A01FD4E5F8757": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "manual": true,
+    "evidence": "native_discovery_20261002_194918.jsonl: 454 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/401A01FD4E5F8757_tf0.png: DXT4_5 256x512 atlas of feathers, fur and small props with alpha; shader squares tf0 (instr 81) into the diffuse term like PS 8D900846800943C8, tf1 (DXT1) squared is the specular colour"
+  },
+  "0xA17D8AEC3A817D45": {
+    "no_albedo": "only traced fetch tf1 writes a single component (mask .w) of a k_8 (format 2) texture (12 textures, 64x64/32x32/8x16: a mask, not colour; thumbnail tool does not decode format 2); colour-format fetches tf13/tf14 (8_8_8_8 256x256) are predicated (shader_trace Unsupported) and read all-zero guest memory at first use (thumbnails A17D8AEC3A817D45_tf13/tf14.png blank)",
+    "manual": true,
+    "evidence": "native_discovery_20261002_194918.jsonl: 450 draws; disassembly out/shader_dump/shader_A17D8AEC3A817D45.ucode.frag"
+  },
+  "0xF6D98C7B4D98438B": {
+    "no_albedo": "same shader shape as PS A17D8AEC3A817D45: only traced fetch tf1 is single-component k_8 (format 2, mask .w, 12 textures); tf13/tf14 8_8_8_8 256x256 predicated (shader_trace Unsupported) and all-zero at first use (thumbnails F6D98C7B4D98438B_tf13/tf14.png blank)",
+    "manual": true,
+    "evidence": "native_discovery_20261002_194918.jsonl: 447 draws; disassembly out/shader_dump/shader_F6D98C7B4D98438B.ucode.frag"
+  },
+  "0x648B965C200A5113": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "manual": true,
+    "evidence": "native_discovery_20261002_194918.jsonl: 405 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/648B965C200A5113_tf0.png: DXT1 atlas of dark wood planks, rope coils and nailed boards"
+  },
+  "0xF525E023E08AC9BB": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "manual": true,
+    "evidence": "native_discovery_20261002_194918.jsonl: 389 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/F525E023E08AC9BB_tf0.png: DXT1 fern fronds on a cut-out background (foliage)"
+  },
+  "0x789266C3E42D7E59": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "manual": true,
+    "evidence": "native_discovery_20261002_194918.jsonl: 377 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/789266C3E42D7E59_tf0.png: DXT1 wood plank / rope atlas (same texture as PS 648B965C200A5113 slot 0)"
+  },
+  "0x26052DEFBA688AF2": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "manual": true,
+    "evidence": "native_discovery_20261002_194918.jsonl: 157 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/26052DEFBA688AF2_tf0.png: DXT1 grass/bark/stone atlas (same texture as PS 00E09D1BC5295D52 slot 0)"
+  },
+  "0x2FD24989AB04A475": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "manual": true,
+    "evidence": "native_discovery_20261002_194918.jsonl: 75 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/2FD24989AB04A475_tf0.png: DXT1 brown eye iris; shader squares tf0 into the diffuse term, tf1 (DXT4_5 iris variant) is scalar-squared as specular colour"
+  },
+  "0xDBFD88A80EDBCE36": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": []
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": []
+    },
+    "manual": true,
+    "evidence": "native_discovery_20261002_194918.jsonl: 42 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/DBFD88A80EDBCE36_tf0.png: DXT4_5 orange glow/flare sprite (effect colour)"
+  },
+  "0xC300519EC8915346": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": []
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": []
+    },
+    "manual": true,
+    "evidence": "native_discovery_20261002_194918.jsonl: 40 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/C300519EC8915346_tf0.png: DXT4_5 yellow flame sprite; shader lerps tf0 -> tf1 (flipbook, instr 6-7), slot 0 is the base frame; the finder proposed slot 1 by shader order"
+  }
+}

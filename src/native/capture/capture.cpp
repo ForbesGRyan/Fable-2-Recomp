@@ -41,6 +41,7 @@
 #include "material.h"
 #include "position_decode.h"
 #include "bone_skin.h"
+#include "instance_expand.h"
 #include "shader_tally.h"
 #include "stream_resolve.h"
 #include "terrain_patch.h"
@@ -264,13 +265,15 @@ struct TableEntry {
 static constexpr TableEntry kTransformTable[] = {
 #define FABLE2_VS_TRANSFORM(H, B, L, P, D) {H, B, L, P, D},
 #define FABLE2_VS_POS_SWIZZLE(H, S)
-#define FABLE2_VS_SKIN(H, I, C, R0, R1, R2)
+#define FABLE2_VS_SKIN(H, I, W, R0, R1, R2, S0, S1, S2, N, IC0, WC0, IC1, WC1, IC2, WC2, IC3, WC3)
+#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
 #undef FABLE2_VS_SKIN
+#undef FABLE2_VS_INSTANCE
 #undef FABLE2_VS_TERRAIN
 #undef FABLE2_VS_UV
 };
@@ -282,13 +285,15 @@ struct PosSwizzleEntry {
 static constexpr PosSwizzleEntry kPosSwizzleTable[] = {
 #define FABLE2_VS_TRANSFORM(H, B, L, P, D)
 #define FABLE2_VS_POS_SWIZZLE(H, S) {H, S},
-#define FABLE2_VS_SKIN(H, I, C, R0, R1, R2)
+#define FABLE2_VS_SKIN(H, I, W, R0, R1, R2, S0, S1, S2, N, IC0, WC0, IC1, WC1, IC2, WC2, IC3, WC3)
+#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
 #undef FABLE2_VS_SKIN
+#undef FABLE2_VS_INSTANCE
 #undef FABLE2_VS_TERRAIN
 #undef FABLE2_VS_UV
     {0, 0}};
@@ -300,16 +305,40 @@ struct SkinEntry {
 static constexpr SkinEntry kSkinTable[] = {
 #define FABLE2_VS_TRANSFORM(H, B, L, P, D)
 #define FABLE2_VS_POS_SWIZZLE(H, S)
-#define FABLE2_VS_SKIN(H, I, C, R0, R1, R2) {H, {I, -1, {R0, R1, R2}, {0, 0, 0}, 1, {C, 0, 0, 0}, {0, 0, 0, 0}}},
+#define FABLE2_VS_SKIN(H, I, W, R0, R1, R2, S0, S1, S2, N, IC0, WC0, IC1, WC1, IC2, WC2, IC3, WC3) \
+  {H, {I, W, {R0, R1, R2}, {S0, S1, S2}, N, {IC0, IC1, IC2, IC3}, {WC0, WC1, WC2, WC3}}},
+#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
 #undef FABLE2_VS_SKIN
+#undef FABLE2_VS_INSTANCE
 #undef FABLE2_VS_TERRAIN
 #undef FABLE2_VS_UV
     {0, {-1, -1, {-1, -1, -1}, {0, 0, 0}, 1, {0, 0, 0, 0}, {0, 0, 0, 0}}}};
+
+struct InstanceEntry {
+  uint64_t hash;
+  InstanceSpec spec;
+};
+static constexpr InstanceEntry kInstanceTable[] = {
+#define FABLE2_VS_TRANSFORM(H, B, L, P, D)
+#define FABLE2_VS_POS_SWIZZLE(H, S)
+#define FABLE2_VS_SKIN(H, I, W, R0, R1, R2, S0, S1, S2, N, IC0, WC0, IC1, WC1, IC2, WC2, IC3, WC3)
+#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF) \
+  {H, {{R0, R1, R2}, {S0, S1, S2}, INV, CNT, FIRST, BIAS, OFF}},
+#define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
+#define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
+#include "vs_transform_table.inc"
+#undef FABLE2_VS_TRANSFORM
+#undef FABLE2_VS_POS_SWIZZLE
+#undef FABLE2_VS_SKIN
+#undef FABLE2_VS_INSTANCE
+#undef FABLE2_VS_TERRAIN
+#undef FABLE2_VS_UV
+    {0, {{-1, -1, -1}, {0, 0, 0}, 0, 0, 0, 0.0f, 0}}};
 
 struct TerrainEntry {
   uint64_t hash;
@@ -318,13 +347,15 @@ struct TerrainEntry {
 static constexpr TerrainEntry kTerrainTable[] = {
 #define FABLE2_VS_TRANSFORM(H, B, L, P, D)
 #define FABLE2_VS_POS_SWIZZLE(H, S)
-#define FABLE2_VS_SKIN(H, I, C, R0, R1, R2)
+#define FABLE2_VS_SKIN(H, I, W, R0, R1, R2, S0, S1, S2, N, IC0, WC0, IC1, WC1, IC2, WC2, IC3, WC3)
+#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F) {H, {G, CE, HS, O, TO, TS, PO, F}},
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
 #undef FABLE2_VS_SKIN
+#undef FABLE2_VS_INSTANCE
 #undef FABLE2_VS_TERRAIN
 #undef FABLE2_VS_UV
     {0, {0, 0, 0, 0, 0, 0, -1, 0}}};
@@ -344,7 +375,8 @@ const std::vector<AlbedoSpec> kAlbedoTable = {
 const std::vector<VsUvSpec> kVsUvTable = {
 #define FABLE2_VS_TRANSFORM(H, B, L, P, D)
 #define FABLE2_VS_POS_SWIZZLE(H, S)
-#define FABLE2_VS_SKIN(H, I, C, R0, R1, R2)
+#define FABLE2_VS_SKIN(H, I, W, R0, R1, R2, S0, S1, S2, N, IC0, WC0, IC1, WC1, IC2, WC2, IC3, WC3)
+#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1) \
   {H, I, C, int8_t(F), S, FM, O, {{S0, O0}, {S1, O1}}},
@@ -352,6 +384,7 @@ const std::vector<VsUvSpec> kVsUvTable = {
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
 #undef FABLE2_VS_SKIN
+#undef FABLE2_VS_INSTANCE
 #undef FABLE2_VS_TERRAIN
 #undef FABLE2_VS_UV
 };
@@ -388,6 +421,13 @@ const TransformInfo* FindTransform(uint64_t hash) {
 
 const SkinSpec* FindSkin(uint64_t hash) {
   for (const SkinEntry& e : kSkinTable) {
+    if (e.hash && e.hash == hash) return &e.spec;
+  }
+  return nullptr;
+}
+
+[[maybe_unused]] const InstanceSpec* FindInstance(uint64_t hash) {
+  for (const InstanceEntry& e : kInstanceTable) {
     if (e.hash && e.hash == hash) return &e.spec;
   }
   return nullptr;

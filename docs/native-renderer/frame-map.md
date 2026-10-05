@@ -917,6 +917,89 @@ All other reasons (`ps-unknown`, `uv-unsupported`, `format-unsupported`, `textur
 
 **Deviation.** Shader tracing is done in Python over the SDK's shader disassembly dumps (`tools/xdk_sigmatch/shader_trace.py`, `--dump_shaders`) instead of the C++ headers `tfetch_decode.h` and `uv_trace.h` listed in the spec; the runtime only needs the texture fetch slots a pixel shader uses (`TextureFetchSlots` in `vfetch_decode.h`).
 
+## 12. Coverage and skinning
+
+Sub-project 5 (spec `docs/superpowers/specs/2026-10-05-native-renderer-coverage-skinning-design.md`, 2026-10-05). Evidence capture for every entry of this section: **`native_discovery_20261005_103213`** (autoplay, bridge scene, 120 frames, every 4th draw, 11523 in-scene draw rows, 17 vertex shaders), with the vertex streams of its rows in `native_geo_20261005_103213`. Entries are replayed offline by `tools\xdk_sigmatch\position_check.py <capture> --json docs\native-renderer\vs-transforms.json [--entry <candidates.json>]`. A draw passes when at least half of its sampled vertices are inside the clip volume under its own `c0..c3`; a shader is accepted when its share of passing draws reaches the capture's baseline (the share of the trusted `0xECD66A10092E6562`) minus 0.10, floor 0.60. This capture: baseline 0.810, accept at 0.710 or more.
+
+### Wind and displacement
+
+| Vertex shader | Rows | Draws per frame | Pixel shader (albedo table) | Candidate | In-clip share (200 draws) | Verdict | Table |
+|---|---|---|---|---|---|---|---|
+| `0x7C5710DEF3EE33C4` | 452 | 15 | `0x014F8A02DB7B19CA` (no_albedo) | base 0, dot, `pos_fetch` 0, deformed | 1.000 | ACCEPT | entry, with `"uv"` |
+| `0x475EC9F795E5EDBB` | 910 | 30 | `0x00E09D1BC5295D52` (albedo tf0) | base 0, dot, `pos_fetch` 0, `pos_swizzle` `yxw1`, deformed | 0.455 | REJECT | stays rejected |
+| `0xA5846836C90E1192` | 649 | 22 | `0x7CD57B81550F19E3` (no_albedo) | base 0, dot, `pos_fetch` 0, `pos_swizzle` `yxw1`, deformed | 0.530 | REJECT | stays rejected |
+| `0x2D40B53C926109BE` | 0 | - | - | none | - | not in the capture | rejected, disassembly only |
+
+**Readings** (`out\shader_dump\shader_<HASH>.ucode.vert`, instruction numbers as printed). All four end in `dp4` with `c0..c3` into a temporary that `max oPos, rT, rT` copies out. Where the two operands of the `dp4` carry different swizzles (`c0.zxyw` against `r9.xzyw`), the product is `dot(c0, (r9.z, r9.y, r9.x, r9.w))`.
+
+- **`0x7C57...` (fur shells).**
+  - Position: `vfetch_full r2.xyz_` of vf0, `FMT_32_32_32_FLOAT`, stride 5 dwords (instr 5, fetch ordinal 0). `w` is not fetched and reads as 1; 32-bit components need no pair swap.
+  - `r5.xyz = r2.xyz + r2.w * r1.yzw` (instr 16). `r1.yzw` is the 2_10_10_10 normal (instr 7, fetch 2). `r2.w = (c46.x + r0.z - c255.x) * c8.x` (instr 12, 14, 15), where `r0.z` is `w` of the vf1 8_8_8_8 (instr 8, fetch 3). `r5.w = 1` (`sges`, instr 15).
+  - `r3 = dp4(c0..c3 .zxyw, r5.zxyw) = dp4(c0..c3, r5)` (instr 17-20), `oPos = r3` (instr 34).
+  - In the capture one vertex buffer (4337 vertices, 9576 indices) is drawn 15 times per frame with `c46.x` = 1/16 to 15/16 and `c8.x` = 0.0254: shells pushed out along the normal. The buffer holds posed positions and its bytes change every frame (120 contents in 120 frames). The entry draws it without the push (`deformed`), a few hundredths of a unit (`c8.x` times a factor of order 1; `c255.x` is a shader literal the dump does not show).
+- **`0x475E...` (tree trunks and branches, wind).**
+  - Position: `vfetch_full r1.wxyz` of vf0, `FMT_16_16_16_16_FLOAT`, stride 9 (instr 11, fetch ordinal 0). Under 8in32 the swizzle `wxyz` gives `r1 = (m2, m1, m0, m3)` of the memory order `m` (section 9).
+  - `r9.xyz = r5.xyz + r1.xyz` (instr 65). `r5` is the wind offset: `sin`/`frc` chains over `c15..c17` weighted by the 8_8_8_8 of fetch 4 (instr 17-58). `r9.w = 1` (`sges`, instr 68).
+  - `r2 = dp4(c0..c3 .zxyw, r9.xzyw) = dp4(c0..c3, (r9.z, r9.y, r9.x, 1))` (instr 69-72), `oPos = r2` (instr 97). The undeformed position is `(m0, m1, m2, 1)`: the fetch read as `yxw1`, the override `0x79EA...`, `0xA1F7...` and `0xD4D5...` carry.
+  - The fetch's `w` (`m3`; `truncs r0.w` at instr 31, `maxas` at instr 65) only selects `c[28+a0]..c[31+a0]` for `o8` (instr 66-68, 77).
+- **`0xA584...` (leaf clumps, wind about a pivot).**
+  - Position `P`: `vfetch_full r6.yxwz` of vf0, `FMT_16_16_16_16_FLOAT`, stride 9 (instr 15, fetch ordinal 0): `(m0, m1, m2, m3)`. Pivot `Q`: `vfetch_mini r5.wxy_`, offset 5, same format (instr 18, fetch ordinal 3), held reversed.
+  - `r6.xyz = P - Q` (instr 26); `r4.z = |P - Q|` (instr 35, 40); `r5.xyz = Q + wind offset` (instr 74); `r0` = `P - Q` with a wind term added to z, renormalised (instr 93-97).
+  - `r8.xyz = r0.zyx * r4.z + r5.xyz` (instr 98), `r8.w = 1` (`sges`, instr 92); `r1 = dp4(c0..c3 .zxyw, r8.xzyw)` (instr 99, 100, 106, 109), `oPos = r1` (instr 147).
+  - The position is rebuilt as pivot plus length times direction. With the wind terms at zero that is `P`, the fetch read as `yxw1`. The fetch's `w` (instr 31, 113) again only indexes `c[28+a0]`.
+- **`0x2D40...`** has the fetch layout and the position of `0xA584...` (fetches at instr 17 and 20, `P - Q` at 28, rebuilt position at 102, `dp4` at 103, 104, 110, 113). It is not in this capture and not in `native_discovery_20261002_194918`; it was seen once per frame in the user's play log `fable_2_135.log` (section 10). A rebuilt position is not "the fetched position plus a displacement", so the disassembly alone gives no entry. `user-checks.md` asks for a capture that contains it.
+
+**Controls** (`--entry`, same capture, 200 draws each). The share separates a wrong matrix but not a wrong component order for these shaders:
+
+| Shader | Entry | Share |
+|---|---|---|
+| `0x7C57...` | candidate | 1.000 |
+| | base 4 | 0.000 |
+| | layout combine | 1.000 |
+| | `pos_swizzle` `yxz1` (x and y swapped) | 1.000 |
+| `0x475E...` | candidate (`yxw1`) | 0.455 |
+| | the fetch's own swizzle `wxyz` | 0.420 |
+| | `wxy1` (x and z swapped) | 0.525 |
+| `0xA584...` | candidate (`yxw1`) | 0.530 |
+| | the fetch's own swizzle `yxwz` (`w` = the constant index) | 0.440 |
+| | `wxy1` | 0.495 |
+| | the pivot element (`pos_fetch` 3, `yxw1`) | 0.530 |
+
+**Why the two tree shaders score low.** The scene, not the transform:
+
+- `c4..c6` is the world matrix in these shaders and in `0xECD6...`: each computes `dp4(c4..c6, position)` (`0xECD6...` exports it as `o2`, instr 24-26; the three shaders here subtract it from `c9`, which holds one value, the camera position, in every row). `c0..c3 * inverse(c4..c6)` is then the view-projection, which must be the same for every draw of a frame. Against the per-frame median of 3000 `0xECD6...` rows, the largest element difference over 200 sampled rows is 2.7e-05 (`0x475E...`), 2.9e-05 (`0xA584...`) and 7.1e-06 (`0x7C57...`); `0xECD6...` rows differ from their own median by up to 3.6e-05. So `c0..c3` is the draw's world-view-projection, base 0, dot.
+- Every world matrix of the three shaders is a rotation about z with a uniform scale (off-axis terms under 1e-06, scale 0.65 to 1.48). Read as `yxw1`, the meshes are upright: z spans -2.0 to 18.4 (`0x475E...`) and 3.8 to 22.0 (`0xA584...`), x and y stay within 12.3 of the axis.
+- The failing draws are whole meshes outside the view. `0x475E...`: 109 of 200 fail, 54 wholly beside the view, 41 mostly behind the camera, 14 across an edge. `0xA584...`: 94 fail, 27 beside, 33 behind, 34 across an edge. The frame's 30 `0x475E...` draws are static (the autoplay camera does not move): 13 pass and 15 have no sampled vertex on screen. The game draws every part of a tree whose bound touches the view, and trees behind the camera (section 9 found the same for `0xA1F7...`: 150 of 460 rows behind).
+- Projection onto the emulated frame. The replayed positions of every distinct draw, projected with the row's `c0..c3` and plotted over a view-off screenshot of the same autoplay scene (window shot at 95 s): with `yxw1` the `0x475E...` points are vertical lines on the birch trunks left of the bridge and on the sapling behind the hero, and the `0xA584...` points sit on the leaf clumps of the same trees. One group of stems and leaves projects onto the bridge deck beside the left post: a shrub under the bridge. The deck hides its stems in the emulated frame and in the clay view alike, and its top shows through the railing in the emulated frame. With `wxy1` the trunks lie horizontal across the bridge; with the fetch's own `w` the `0xA584...` meshes collapse into dots. The 4337 vertices of the `0x7C57...` buffer cover the sitting dog.
+
+The acceptance rule decides the table: `0x7C57...` is added, `0x475E...` and `0xA584...` stay rejected with the candidate, the reading and these measurements in their `"rejected"` text. Next action: a ruling on the two candidates. The share cannot accept them in any scene where half the tree parts drawn are outside the view; the checks above and the trial below are the evidence for them.
+
+**Trial with all three candidates (not committed).** `fable_2_153.log` (split) and a native-view run of the same build:
+
+```
+[native] capture: frame 2700 captured 987 drawable 816 (deformed 96) skipped {no-transform: 13, unsupported-prim: 30, bad-index: 128} nested_total 0
+[native] capture: frame 2700 no-transform by vs {0x8123C16DBF583F92: 7, 0x29B6506FBACEB93A: 5, 0x775C6085FBB9D676: 1}
+```
+
+D / C = 816 / 987 = 0.827, textured 188 (the 30 `0x475E...` draws through the UV trace below). Native view against view off, 95 s: the birch trunks and leaf cards left of the bridge and the large leaves at the top of the frame stand where the emulated frame has them, with no stray mesh on the bridge or in the sky. Leaf cards are opaque clay (no alpha test; `0x7CD5...` is no_albedo).
+
+**Measured (committed table).** `.\tools\drive_game.ps1 -Total 120 -Shots "70,95" -GameArgs "--fable2_native_render=true","--fable2_native_view=split"`, before `fable_2_150.log`, after `fable_2_157.log`:
+
+```
+before  [native] capture: frame 2700 captured 987 drawable 749 (deformed 29) skipped {no-transform: 80, unsupported-prim: 30, bad-index: 128} nested_total 0
+before  [native] capture: frame 2700 no-transform by vs {0x475EC9F795E5EDBB: 30, 0xA5846836C90E1192: 22, 0x7C5710DEF3EE33C4: 15, 0x8123C16DBF583F92: 7, 0x29B6506FBACEB93A: 5}
+after   [native] capture: frame 2700 captured 986 drawable 764 (deformed 44) skipped {no-transform: 64, unsupported-prim: 30, bad-index: 128} nested_total 0
+after   [native] capture: frame 2700 no-transform by vs {0x475EC9F795E5EDBB: 30, 0xA5846836C90E1192: 22, 0x8123C16DBF583F92: 7, 0x29B6506FBACEB93A: 4, 0x775C6085FBB9D676: 1}
+```
+
+D / C goes from 749 / 987 = 0.759 to 764 / 986 = 0.775: the 15 shell draws, counted `(deformed)`. Textured stays 158; the 15 draws are `no-albedo`. 30 fps in both runs, capture median 1.13 and 1.15 ms. Split screenshots at 70 s and 95 s: the clay half shows the dog's coat as a flat clay shape in the dog's real pose (sitting, as in the emulated frame), behind the bind-pose body that `0xD4D5...` draws standing; nothing else changes. The split view's clay half is the right half of the frame and the trees are in the left half, so the tree trial was judged in native view.
+
+**UV.**
+
+- `0x7C57...`: `shader_trace.py` gives `o0.xy = r4.xy` (instr 38) from `vfetch_mini r4.yx__`, offset 3, `FMT_16_16_FLOAT` (instr 6, fetch ordinal 1); added as `"uv"`. `o0.zw` (instr 11, a `mad` with a fetched addend) is refused and left out. Its only pixel shader is no_albedo, so the entry is not used yet.
+- `0x475E...`: `shader_trace.py` gives `o0.xy` from `vfetch_mini r4.yx__`, offset 3, `FMT_16_16_FLOAT` (instr 13, fetch ordinal 2; `max o0.xy__, r4.xyyy` at instr 98), for the albedo fetch tf0 of `0x00E0...`. Not added while the shader is rejected.
+- `0xA584...`: `0x7CD5...` is no_albedo (its tf0 coordinate is refused: `scalar co-issue mulsc writes component`); the UV leaves the vertex shader in `o1.w` and `o2.w` (instr 148, 153, 154). No entry.
+
 ## Pending
 
 1. **Pitch ablation** (done 2026-10-01, results in section 4; kept for re-runs). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):

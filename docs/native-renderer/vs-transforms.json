@@ -33,6 +33,10 @@
       "20261002_115507": "no window"
     }
   },
+  "0x2D40B53C926109BE": {
+    "manual": true,
+    "rejected": "disassembly only, no entry: not in native_discovery_20261005_103213.jsonl (bridge scene) nor in native_discovery_20261002_194918.jsonl (Bowerstone, which has no stream dumps anyway); seen only in the user's play log fable_2_135.log (frame-map section 10, 1 draw per frame, no-transform). dump: the same fetch layout and position as 0xA5846836C90E1192: P = vfetch_full r6.yxwz of vf0, FMT_16_16_16_16_FLOAT, Stride=9 (instr 17, fetch ordinal 0), pivot Q = vfetch_mini r5.wxy_ Offset=5 (instr 20, fetch ordinal 3), r6.xyz = P - Q (instr 28), r7.xyz = direction * |P - Q| + Q + wind (instr 102), r6 = dp4(c0..c3 .zxyw, r7.xzyw) (instr 103, 104, 110, 113). The position is rebuilt, not the fetched position plus a displacement, so the disassembly-only rule does not apply, and 0xA584... is itself REJECT. position_check pending a capture containing it (user-checks.md)"
+  },
   "0x3A0F9098B839DDBC": {
     "base": 0,
     "layout": "dot",
@@ -79,7 +83,7 @@
   },
   "0x475EC9F795E5EDBB": {
     "manual": true,
-    "rejected": "dump: computed position; base-0 check 0.719; finder window 51 combine contradicts the dump",
+    "rejected": "position_check REJECT (native_discovery_20261005_103213.jsonl): candidate base 0, dot, pos_fetch 0, pos_swizzle yxw1, deformed: draws 200 of 910 rows, in-clip share 0.455, baseline 0.810, accept >= 0.710. Controls: the fetch's own swizzle wxyz 0.420, wxy1 0.525, so the share does not separate the readings of this shader. dump: position vfetch_full r1.wxyz of vf0, FMT_16_16_16_16_FLOAT, Stride=9 (instr 11, fetch ordinal 0); r9.xyz = r5.xyz + r1.xyz (instr 65), r5 = wind offset (sin/frc of c15..c17 and the 8_8_8_8 weights of fetch 4, instr 17-58); r9.w = 1 (sges, instr 68); r2 = dp4(c0..c3 .zxyw, r9.xzyw) = dp4(c0..c3, (r9.z, r9.y, r9.x, 1)) (instr 69-72), oPos = max(r2, r2) (instr 97): the fetch read as yxw1, plus wind. The fetch's w (truncs r0.w, instr 31; maxas, instr 65) only indexes c[28+a0] for o8. The low share is the scene, not the transform: c0..c3 * inverse(c4..c6) equals the view-projection of 0xECD66A10092E6562 in the same frame within 2.7e-05 in 200/200 rows; of the 109 failing draws 54 are whole meshes beside the view and 41 behind the camera; with the candidate the trunks project onto the trees of the emulated screenshot and the clay view shows them in place (frame-map section 12). Kept rejected under the acceptance rule. Task 11: base-0 check 0.719 with the fetch's own swizzle; finder window 51 combine contradicts the dump",
     "finder": {
       "20261002_111154+111917": {
         "base": 51,
@@ -246,6 +250,32 @@
     "uv_manual": true,
     "uv_evidence": "native_discovery_20261002_194918.jsonl: shader_trace: o0.xy = r7.xy <- vfetch_mini r7.yx__ Offset=3 FMT_16_16_FLOAT (instr 7, fetch ordinal 2). Used by albedo PS 2FD24989AB04A475 (75 draws) and 648B965C200A5113 (73); both read r0.xy"
   },
+  "0x7C5710DEF3EE33C4": {
+    "base": 0,
+    "layout": "dot",
+    "pos_fetch": 0,
+    "manual": true,
+    "deformed": true,
+    "evidence": "dump: position vfetch_full r2.xyz_ of vf0, FMT_32_32_32_FLOAT, Stride=5 (instr 5, fetch ordinal 0; w is not fetched and reads as 1); r5.xyz = r2.xyz + r2.w * r1.yzw (instr 16), r1.yzw = the 2_10_10_10 normal (instr 7, fetch 2), r2.w = (c46.x + r0.z - c255.x) * c8.x (instr 12, 14, 15) with r0.z = w of the vf1 8_8_8_8 (instr 8, fetch 3); r5.w = 1 (sges, instr 15); r3 = dp4(c0..c3 .zxyw, r5.zxyw) = dp4(c0..c3, r5) (instr 17-20), oPos = max(r3, r3) (instr 34). Fur shells: one vertex buffer drawn 15 times per frame with c46.x = 1/16..15/16 and c8.x = 0.0254; the buffer holds posed positions (the dog; its bytes change every frame). Drawn without the push along the normal. position_check native_discovery_20261005_103213.jsonl: draws 200 of 452 rows, in-clip share 1.000, baseline 0.810, accept >= 0.710, ACCEPT. Controls: base 4 0.000; layout combine 1.000 and swizzle yxz1 1.000 (a small mesh in mid view, the share is weak here). c0..c3 * inverse(c4..c6) equals the view-projection of 0xECD66A10092E6562 in the same frame within 7.1e-06 in 200/200 rows; the buffer's 4337 vertices project onto the dog of the emulated screenshot (frame-map section 12)",
+    "uv": {
+      "o0.x": {
+        "fetch": 1,
+        "src": "y",
+        "format": 31,
+        "offset": 3,
+        "stages": []
+      },
+      "o0.y": {
+        "fetch": 1,
+        "src": "x",
+        "format": 31,
+        "offset": 3,
+        "stages": []
+      }
+    },
+    "uv_manual": true,
+    "uv_evidence": "native_discovery_20261005_103213.jsonl: shader_trace: o0.xy = r4.xy (instr 38 max o0, r4, r4) <- vfetch_mini r4.yx__ Offset=3 FMT_16_16_FLOAT (instr 6, fetch ordinal 1); o0.zw (instr 11, a mad whose addend is fetched) is refused and left out. Only pixel shader in the capture: 014F8A02DB7B19CA (452 draws), no_albedo in ps-albedo.json, so the draws are flat clay (no-albedo) and the entry is not used yet"
+  },
   "0x82F6433A69263C75": {
     "base": 0,
     "layout": "dot",
@@ -340,7 +370,7 @@
   },
   "0xA5846836C90E1192": {
     "manual": true,
-    "rejected": "dump: computed position; base-0 check 0.773; finder window contradicts the dump",
+    "rejected": "position_check REJECT (native_discovery_20261005_103213.jsonl): candidate base 0, dot, pos_fetch 0, pos_swizzle yxw1, deformed: draws 200 of 649 rows, in-clip share 0.530, baseline 0.810, accept >= 0.710. Controls: the fetch's own swizzle yxwz (w = the constant index) 0.440, wxy1 0.495, the pivot element (pos_fetch 3) 0.530. dump: position P = vfetch_full r6.yxwz of vf0, FMT_16_16_16_16_FLOAT, Stride=9 (instr 15, fetch ordinal 0); pivot Q = vfetch_mini r5.wxy_ Offset=5 FMT_16_16_16_16_FLOAT (instr 18, fetch ordinal 3); r6.xyz = P - Q (instr 26), r4.z = |P - Q| (instr 35, 40); r5.xyz = Q + wind offset (instr 74); r0 = (P - Q) with a wind term added to z, renormalised (instr 93-97); r8.xyz = r0.zyx * r4.z + r5.xyz (instr 98), r8.w = 1 (sges, instr 92); r1 = dp4(c0..c3 .zxyw, r8.xzyw) = dp4(c0..c3, (r8.z, r8.y, r8.x, 1)) (instr 99, 100, 106, 109), oPos = max(r1, r1) (instr 147): the position is rebuilt as Q + |P - Q| * direction, which is P (the fetch read as yxw1) when the wind terms are zero. The fetch's w (truncs r5.w, instr 31; maxas, instr 113) only indexes c[28+a0]. The low share is the scene, not the transform: c0..c3 * inverse(c4..c6) equals the view-projection of 0xECD66A10092E6562 in the same frame within 2.9e-05 in 200/200 rows; of the 94 failing draws 27 are whole meshes beside the view and 33 behind the camera; with the candidate the leaf clumps project onto the trees of the emulated screenshot and the clay view shows them in place (frame-map section 12). Kept rejected under the acceptance rule. Task 11: base-0 check 0.773 with the fetch's own swizzle; finder window 15 combine contradicts the dump",
     "finder": {
       "20261002_111154+111917": {
         "base": 15,

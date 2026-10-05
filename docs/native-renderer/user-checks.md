@@ -22,5 +22,14 @@ Spec: `docs/superpowers/specs/2026-10-02-native-renderer-textures-design.md` (su
 ### Other open items
 6. **DebugView with `--d3d12_debug=true`.** Watch for D3D12 debug-layer errors (texture copies for mips smaller than 4 texels are the newest risk).
 
+### Sub-project 5: coverage and skinning
+Spec: `docs/superpowers/specs/2026-10-05-native-renderer-coverage-skinning-design.md`. Results go in `docs/native-renderer/frame-map.md` section 12.
+
+7. **Capture containing vertex shader `0x2D40B53C926109BE`** (wind; same layout as `0xA584...`). It was skipped once per frame in `fable_2_135.log` during play outside Bowerstone and is absent from the autoplay bridge scene; where it is drawn is not known. Before launching:
+   ```powershell
+   $env:FABLE2_NATIVE_DISCOVERY="120"; $env:FABLE2_NATIVE_DISCOVERY_DELAY="<seconds until you stand where it is drawn>"; $env:FABLE2_NATIVE_DISCOVERY_EVERY="4"
+   ```
+   run `.\fable_2.exe --fullscreen=false --fable2_native_render=true --fable2_native_view=split` and stand still from the delay on for a minute, then `Remove-Item Env:FABLE2_NATIVE_DISCOVERY*`. To find the place first, play with the same command and no variables and look for `0x2D40B53C926109BE` in the log's `[native] capture: ... no-transform by vs` lines (one every 300 frames); the Bower Lake capture of check 4 may already contain it. Expected: `Select-String 2D40B53C926109BE logs\native_discovery_<stamp>.jsonl` finds rows, and `logs\native_geo_<stamp>` exists. Tell the agent; it runs `position_check.py` on the capture.
+
 ## Done
 - Sub-project 3 validation (alignment, coverage 0.949, 25-minute stability, view-off cost): frame-map section 10.

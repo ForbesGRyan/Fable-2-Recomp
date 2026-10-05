@@ -130,7 +130,7 @@ class PlainTest(Base):
         rep = pc.check(self.capture(rows), entries, max_draws=4)
         self.assertEqual((rep["0xAAAA"]["rows"], rep["0xAAAA"]["draws"]), (10, 4))
         rep = pc.check(self.capture(rows), entries, only_vs="0xbbbb")
-        self.assertEqual(list(rep), ["0xBBBB"])
+        self.assertEqual([k for k in rep if not k.startswith("_")], ["0xBBBB"])
 
 
 class InstanceTest(Base):
@@ -296,7 +296,11 @@ class CliTest(Base):
         self.assertIn("VS 0x00000000000000CC no entry: rows 1", text)
         code, text = self.run_main(cap, "--json", table, "--entry", overlay, "--cpp-fixture", "0x00000000000000CC")
         self.assertEqual(code, 0)
-        self.assertIn("VS 0x00000000000000CC skin: draws 1, in-clip share 1.000 (accept >= 0.90)", text)
+        self.assertEqual(text.splitlines()[0],
+                         "baseline 0xECD66A10092E6562: no draws in this capture, accept >= 0.750 (fallback)")
+        # One vertex and no primitive type: no edge to judge the skin by.
+        self.assertIn("VS 0x00000000000000CC skin: draws 1, in-clip share 1.000 (accept >= 0.750) REJECT", text)
+        self.assertIn("bone ortho max 0.000 (<= 0.05), edge ok share n/a (>= 0.98) of 0 edges, edge nan 0", text)
         self.assertIn("weight sum min/median/max 1.000/1.000/1.000", text)
         self.assertIn("bone index max 1 / palette bones 2", text)
         self.assertIn("VS 0x00000000000000DD no entry: rows 1", text)
@@ -330,6 +334,197 @@ class CliTest(Base):
         self.assertIn("first copy rebased from 2 to 0", text)
         self.assertIn("{0.75f, 0.0f, 0.0f, 1.0f},", text)
         self.assertIn("{1.0f, 0.0f, 0.0f, 1.0f},", text)
+
+
+BASELINE = "0xECD66A10092E6562"
+PLAIN = {"base": 0, "layout": "dot"}
+
+
+class BaselineTest(Base):
+    run_main = CliTest.run_main
+
+    def draws(self, vs, passing, failing):
+        """`passing` draws of one vertex inside the clip volume and `failing` draws of one outside it."""
+        mesh = be_floats(0, 0, 0, 1) + be_floats(9, 9, 0, 1)
+        s = self.stream(95, 0x1000, mesh, 16)
+        return [self.row(vs, [fetch(0, 95, 38, 0, 4)], [s], [0 if k < passing else 1])
+                for k in range(passing + failing)]
+
+    def test_threshold_is_the_trusted_share_minus_a_tenth(self):
+        rows = self.draws(BASELINE, 8, 2) + self.draws("0xAAAA", 7, 3) + self.draws("0xBBBB", 6, 4)
+        rep = pc.check(self.capture(rows), {BASELINE: PLAIN, "0xAAAA": PLAIN, "0xBBBB": PLAIN})
+        self.assertAlmostEqual(rep["_baseline"]["share"], 0.8)
+        self.assertAlmostEqual(rep["_baseline"]["threshold"], 0.7)
+        self.assertEqual((rep["_baseline"]["draws"], rep["_baseline"]["fallback"]), (10, False))
+        # 0xAAAA sits exactly on the threshold (0.7): accepted.
+        self.assertEqual([rep[k]["accepted"] for k in (BASELINE, "0xAAAA", "0xBBBB")], [True, True, False])
+
+    def test_threshold_never_below_the_floor(self):
+        rows = self.draws(BASELINE, 6, 4) + self.draws("0xAAAA", 11, 9)      # baseline 0.6, candidate 0.55
+        rep = pc.check(self.capture(rows), {BASELINE: PLAIN, "0xAAAA": PLAIN})
+        self.assertAlmostEqual(rep["_baseline"]["threshold"], 0.6)
+        self.assertEqual((rep[BASELINE]["accepted"], rep["0xAAAA"]["accepted"]), (True, False))
+
+    def test_fallback_threshold_without_baseline_draws(self):
+        rows = self.draws("0xAAAA", 3, 1) + self.draws("0xBBBB", 2, 2)       # 0.75 and 0.5
+        for entries in ({"0xAAAA": PLAIN, "0xBBBB": PLAIN}, {BASELINE: PLAIN, "0xAAAA": PLAIN, "0xBBBB": PLAIN}):
+            rep = pc.check(self.capture(rows), entries)
+            self.assertEqual(rep["_baseline"], {"share": None, "threshold": 0.75, "draws": 0, "fallback": True})
+            self.assertEqual((rep["0xAAAA"]["accepted"], rep["0xBBBB"]["accepted"]), (True, False))
+
+    def test_baseline_comes_from_the_table_not_from_the_overlay(self):
+        rows = self.draws(BASELINE, 8, 2)
+        wrong = {"base": 4, "layout": "dot"}                                 # c4..c7 are zero: nothing in clip
+        rep = pc.check(self.capture(rows), {BASELINE: wrong}, baseline_entries={BASELINE: PLAIN})
+        self.assertAlmostEqual(rep["_baseline"]["share"], 0.8)
+        self.assertEqual((rep[BASELINE]["share"], rep[BASELINE]["accepted"]), (0.0, False))
+
+    def test_baseline_is_computed_when_another_shader_is_selected(self):
+        rows = self.draws(BASELINE, 8, 2) + self.draws("0xAAAA", 7, 3)
+        rep = pc.check(self.capture(rows), {BASELINE: PLAIN, "0xAAAA": PLAIN}, only_vs="0xAAAA")
+        self.assertEqual(sorted(rep), ["0xAAAA", "_baseline"])
+        self.assertAlmostEqual(rep["_baseline"]["share"], 0.8)
+        self.assertTrue(rep["0xAAAA"]["accepted"])
+
+    def test_printed_baseline_and_verdicts(self):
+        rows = self.draws(BASELINE, 8, 2) + self.draws("0x00000000000000AA", 7, 3) + \
+            self.draws("0x00000000000000BB", 6, 4)
+        table = self.dir / "table.json"
+        table.write_text(json.dumps({BASELINE: PLAIN, "0x00000000000000AA": PLAIN, "0x00000000000000BB": PLAIN}))
+        overlay = self.dir / "entry.json"
+        overlay.write_text(json.dumps({BASELINE: {"base": 4, "layout": "dot"}}))
+        code, text = self.run_main(self.capture(rows), "--json", table)
+        self.assertEqual(code, 0)
+        self.assertEqual(text.splitlines()[0], "baseline 0xECD66A10092E6562: share 0.800, accept >= 0.700")
+        self.assertIn("VS 0x00000000000000AA plain: draws 10, in-clip share 0.700 (accept >= 0.700) ACCEPT", text)
+        self.assertIn("VS 0x00000000000000BB plain: draws 10, in-clip share 0.600 (accept >= 0.700) REJECT", text)
+        self.assertIn("accepted 2 of 3 judged", text)
+        # An overlay of the trusted shader is judged against the table's entry.
+        code, text = self.run_main(self.capture(rows), "--json", table, "--entry", overlay)
+        self.assertEqual(text.splitlines()[0], "baseline 0xECD66A10092E6562: share 0.800, accept >= 0.700")
+        self.assertIn("VS 0xECD66A10092E6562 plain: draws 10, in-clip share 0.000 (accept >= 0.700) REJECT", text)
+        code, text = self.run_main(self.capture(self.draws("0x00000000000000AA", 3, 1)), "--json", table)
+        self.assertEqual(text.splitlines()[0],
+                         "baseline 0xECD66A10092E6562: no draws in this capture, accept >= 0.750 (fallback)")
+        self.assertIn("in-clip share 0.750 (accept >= 0.750) ACCEPT", text)
+
+
+def translation(dx):
+    return [(1, 0, 0, dx), (0, 1, 0, 0), (0, 0, 1, 0)]
+
+
+class SkinStructureTest(Base):
+    ENTRY = {"base": 0, "layout": "dot", "skin": {"index_fetch": 1, "index_component": "x", "row_fetches": [2, 3, 4]}}
+
+    def test_bone_ortho(self):
+        self.assertEqual(pc.bone_ortho(translation(5)), 0.0)
+        c, s = math.cos(0.3), math.sin(0.3)
+        self.assertAlmostEqual(pc.bone_ortho([(c, -s, 0, 1), (s, c, 0, 2), (0, 0, 1, 3)]), 0.0, places=9)
+        self.assertAlmostEqual(pc.bone_ortho([(1, 0.5, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0)]), 0.5)   # sheared: row0.row1
+        self.assertAlmostEqual(pc.bone_ortho([(2, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0)]), 1.0)     # scaled: |row0| - 1
+        self.assertEqual(pc.bone_ortho([(math.nan, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0)]), math.inf)
+
+    def test_triangles_from_lists_strips_and_fans_with_a_restart(self):
+        # Triangles are ordinals into the indices that are not restarts (the positions the replay returns).
+        idx = [10, 11, 12, 13, -1, 20, 21, 22]
+        self.assertEqual(pc.triangles(6, idx), [(0, 1, 2), (1, 2, 3), (4, 5, 6)])
+        self.assertEqual(pc.triangles(5, idx), [(0, 1, 2), (0, 2, 3), (4, 5, 6)])
+        self.assertEqual(pc.triangles(4, [10, 11, 12, -1, 13, 14, 15, 16]), [(0, 1, 2), (3, 4, 5)])
+        self.assertEqual(pc.triangles(4, [10, 11, -1, 12, 13, 14]), [(2, 3, 4)])    # a restart cuts the list too
+        self.assertEqual(pc.triangles(6, [1, 2, -1, 3]), [])
+        self.assertIsNone(pc.triangles(13, idx))                                    # quad list: not judged
+
+    def test_edge_stats(self):
+        bind = [(0, 0, 0, 1), (1, 0, 0, 1), (0, 1, 0, 1), (1, 1, 0, 1)]
+        moved = [(x + 5, y, z, 1.0) for x, y, z, _ in bind]
+        self.assertEqual(pc.edge_stats([(0, 1, 2)], [7, 8, 9, 10], bind, moved), (3, 3, 0))
+        # Two triangles sharing an edge: five distinct edges.
+        self.assertEqual(pc.edge_stats([(0, 1, 2), (1, 2, 3)], [7, 8, 9, 10], bind, moved), (5, 5, 0))
+        stretched = moved[:2] + [(5.0, 40.0, 0.0, 1.0)] + moved[3:]
+        self.assertEqual(pc.edge_stats([(0, 1, 2)], [7, 8, 9, 10], bind, stretched), (1, 3, 0))
+        halved = [(x / 2, y / 2, z / 2, 1.0) for x, y, z, _ in bind]               # ratio 0.5: still inside
+        self.assertEqual(pc.edge_stats([(0, 1, 2)], [7, 8, 9, 10], bind, halved), (3, 3, 0))
+        culled = moved[:2] + [(math.nan, math.nan, math.nan, 1.0)] + moved[3:]
+        self.assertEqual(pc.edge_stats([(0, 1, 2)], [7, 8, 9, 10], bind, culled), (1, 1, 2))
+        # A degenerate strip triangle (one vertex twice) and a zero-length bind edge are not edges.
+        self.assertEqual(pc.edge_stats([(0, 1, 2)], [7, 7, 8, 10], bind, moved), (1, 1, 0))
+        same = [bind[0], bind[0], bind[2], bind[3]]
+        self.assertEqual(pc.edge_stats([(0, 1, 2)], [7, 8, 9, 10], same, moved), (2, 2, 0))
+
+    def triangle(self, bones, palette, prim="0x00000004", idx=(0, 1, 2)):
+        """A small right triangle; vertex k is rigidly bound to palette bone bones[k]."""
+        vb = b"".join(be_floats(x, y, 0, 1) + struct.pack(">I", bone)
+                      for (x, y), bone in zip(((0, 0), (0.1, 0), (0, 0.1)), bones))
+        pal = b"".join(be_floats(*r) for bone in palette for r in bone)
+        fetches = [fetch(0, 95, 38, 0, 5), fetch(1, 95, 6, 4, 5, norm=False, mini=True),
+                   fetch(2, 92, 38, 0, 12), fetch(3, 92, 38, 4, 12, mini=True), fetch(4, 92, 38, 8, 12, mini=True)]
+        row = self.row("0xCCCC", fetches, [self.stream(95, 0x4000, vb, 20), self.stream(92, 0x5000, pal, 48)],
+                       list(idx))
+        row["args"] = [prim, "0x00000000", "0x00000000", "0x00000003"]
+        return row
+
+    def result(self, row, entry=None):
+        return pc.check(self.capture([row]), {"0xCCCC": entry or self.ENTRY})["0xCCCC"]
+
+    def test_rigidly_moved_triangle_is_accepted(self):
+        r = self.result(self.triangle((1, 1, 1), [translation(0), translation(0.3)]))
+        self.assertEqual((r["draws"], r["passed"], r["edge_draws"], r["edges"], r["edge_nan"]), (1, 1, 1, 3, 0))
+        self.assertEqual((r["edge_ok_share"], r["bone_ortho_max"], r["accepted"]), (1.0, 0.0, True))
+
+    def test_vertex_on_a_far_bone_fails_the_edge_rule(self):
+        r = self.result(self.triangle((1, 1, 2), [translation(0), translation(0.3), translation(0.9)]))
+        self.assertEqual((r["draws"], r["passed"]), (1, 1))             # still inside the clip volume
+        self.assertAlmostEqual(r["edge_ok_share"], 1 / 3)
+        self.assertEqual((r["bone_ortho_max"], r["accepted"]), (0.0, False))
+
+    def test_sheared_bone_fails_the_orthonormality_rule(self):
+        sheared = [(1, 0.5, 0, 0.3), (0, 1, 0, 0), (0, 0, 1, 0)]
+        r = self.result(self.triangle((1, 1, 1), [translation(0), sheared, [(9, 9, 9, 9)] * 3]))
+        self.assertAlmostEqual(r["bone_ortho_max"], 0.5)               # bone 2 is not referenced: not judged
+        self.assertEqual((r["passed"], r["edge_ok_share"], r["accepted"]), (1, 1.0, False))
+
+    def test_orthonormality_is_judged_under_the_row_swizzles(self):
+        stored = [(0.3, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)]         # translation first: rows are "yzwx"
+        row = self.triangle((0, 0, 0), [stored])
+        entry = json.loads(json.dumps(self.ENTRY))
+        self.assertGreater(self.result(row)["bone_ortho_max"], 0.05)
+        entry["skin"]["row_swizzles"] = ["yzwx", "yzwx", "yzwx"]
+        r = self.result(row, entry)
+        self.assertEqual((r["bone_ortho_max"], r["edge_ok_share"], r["accepted"]), (0.0, 1.0, True))
+
+    def test_strip_with_a_restart_index_in_the_row(self):
+        row = self.triangle((1, 1, 1), [translation(0), translation(0.3)], "0x00000006", (0, 1, 2, -1, 2, 1, 0))
+        row["idx_resets"] = 1
+        self.assertEqual(len(pc.positions_for(row, self.ENTRY, self.dir)), 6)      # the restart is not a vertex
+        r = self.result(row)
+        self.assertEqual((r["passed"], r["edges"], r["edge_ok_share"], r["accepted"]), (1, 3, 1.0, True))
+
+    def test_draws_whose_triangles_are_unknown_are_not_judged(self):
+        palette = [translation(0), translation(0.3)]
+        r = self.result(self.triangle((1, 1, 1), palette, "0x0000000D"))             # quad list
+        self.assertEqual((r["passed"], r["edge_draws"], r["edge_ok_share"], r["accepted"]), (1, 0, None, False))
+        # A capture from before restart indices were kept in "idx": a strip with restarts has lost its cuts.
+        old = self.triangle((1, 1, 1), palette, "0x00000006")
+        old["ib"] = {"restarts": 2, "max_index": 2}
+        r = self.result(old)
+        self.assertEqual((r["edge_draws"], r["accepted"]), (0, False))
+        old["idx_resets"] = 0
+        self.assertEqual((self.result(old)["edge_draws"], self.result(old)["accepted"]), (1, True))
+
+    def test_plain_entries_have_no_skin_metrics(self):
+        mesh = be_floats(0, 0, 0, 1)
+        row = self.row("0xAAAA", [fetch(0, 95, 38, 0, 4)], [self.stream(95, 0x1000, mesh, 16)], [0])
+        r = pc.check(self.capture([row]), {"0xAAAA": PLAIN})["0xAAAA"]
+        self.assertTrue(r["accepted"])
+        self.assertNotIn("bone_ortho_max", r)
+        self.assertNotIn("edge_ok_share", r)
+
+    def test_skin_line_prints_the_three_numbers(self):
+        r = self.result(self.triangle((1, 1, 2), [translation(0), translation(0.3), translation(0.9)]))
+        line = pc.format_line("0xCCCC", r, 0.75)
+        self.assertIn("in-clip share 1.000 (accept >= 0.750) REJECT", line)
+        self.assertIn("bone ortho max 0.000 (<= 0.05)", line)
+        self.assertIn("edge ok share 0.333 (>= 0.98) of 3 edges, edge nan 0", line)
 
 
 if __name__ == "__main__":

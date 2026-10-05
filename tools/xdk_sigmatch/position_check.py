@@ -10,8 +10,21 @@ them and projected with the draw's own constants:
   instance  mesh vertex x per-copy rows + offset     (src/native/capture/instance_expand.h)
   skin      weighted bone rows applied per vertex    (src/native/capture/bone_skin.h)
 A vertex is inside the clip volume when w > 0, |x| <= w, |y| <= w and 0 <= z <= w; a draw
-passes when at least half of its sampled vertices are inside (NaN counts as outside). An
-entry is accepted when at least 90% of its sampled draws pass.
+passes when at least half of its sampled vertices are inside (NaN counts as outside). The
+in-clip share is the share of sampled draws that pass.
+
+Acceptance is relative to the capture, because the game draws many objects that are mostly
+off screen: the threshold is the in-clip share of the trusted shader 0xECD66A10092E6562 in
+the same capture (the table's own entry, same sampling) minus 0.10, never below 0.60, and
+0.75 when the capture has no draws of it. A skin entry must also pass two structural
+checks, since a wrong skin of a small on-screen object stays inside the clip volume:
+  bone ortho max  over the bones the sampled vertices use, the largest deviation of the
+                  bone's 3x3 part from orthonormal under the entry's row swizzles
+                  (| |row| - 1 | and |row_i . row_j|); pass at <= 0.05
+  edge ok share   over the distinct triangle edges of the sampled draws (triangle lists,
+                  fans and strips, cut at restart indices), the share whose skinned length
+                  is 0.5 to 2.0 times the bind-pose length; pass at >= 0.98
+Every line ends its threshold with the verdict, ACCEPT or REJECT.
 
 Rows that cannot be judged are counted apart from the draws:
   unreadable   a stream dump or a constant the replay needs is not in the capture
@@ -37,7 +50,15 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from gen_transform_table import reg_comp, swizzle_bits  # noqa: E402
 
-ACCEPT = 0.90
+BASELINE_VS = "0xECD66A10092E6562"   # trusted plain shader: its in-clip share is the capture's baseline
+BASELINE_MARGIN = 0.10               # accept at the baseline share minus this ...
+THRESHOLD_FLOOR = 0.60               # ... and never below this
+THRESHOLD_FALLBACK = 0.75            # the capture has no baseline draws
+ORTHO_MAX = 0.05                     # skin: bone orthonormality
+EDGE_RATIO = (0.5, 2.0)              # skin: skinned / bind-pose edge length
+EDGE_OK_MIN = 0.98                   # skin: share of edges within EDGE_RATIO
+EDGE_MIN_LENGTH = 1e-6               # bind-pose edges shorter than this are not measured
+RESTART = -1                         # a restart (reset) index in a row's "idx"
 MAX_INSTANCE_COPIES = 65536          # instance_expand.h kMaxInstanceCopies
 FIXTURE_POSITIONS = 16
 _BYTES = {57: 12, 38: 16, 32: 8, 26: 8}   # PositionBytes: float3, float4, half4, short4
@@ -360,10 +381,11 @@ def _skin(row, spec, pos, vb, get, flat, info):
     if not bones:
         raise Unsupported("the palette holds no whole bone")
     info.update(palette_bones=len(bones), bone_max=-1, weight_sums=[], palette_slot=rows[0].slot,
-                bone_stride=rows[0].stride)
+                bone_stride=rows[0].stride, bind=[], bones_used={})
     out = []
     for v in flat:
         p = decode_position(vb, pos, v)
+        info["bind"].append(p or NAN_POSITION)
         iw = skin_word(vb, v * pos.stride + index_offset, vb.endian) if p else None
         ww = skin_word(vb, v * pos.stride + weight_offset, vb.endian) if p and weighted else 0
         if p is None or iw is None or ww is None:
@@ -381,6 +403,7 @@ def _skin(row, spec, pos, vb, get, flat, info):
                 bad = True
                 break
             info["bone_max"] = max(info["bone_max"], bone)
+            info["bones_used"][bone] = bones[bone]
             for r in range(3):
                 for c in range(4):
                     m[r][c] = f32(m[r][c] + f32(w * bones[bone][r][c]))
@@ -391,10 +414,10 @@ def _skin(row, spec, pos, vb, get, flat, info):
 
 
 def replay(row, spec, get):
-    """Positions for the row's indices (base vertex added) and what the replay saw.
+    """Positions for the row's indices that are not restarts (base vertex added) and what the replay saw.
     `get(slot)` returns the Stream of a fetch slot or raises Unreadable."""
     fetches = row.get("fetches")
-    idx = row.get("idx")
+    idx = [int(i) for i in row.get("idx") or [] if int(i) >= 0]   # negative: a restart index, not a vertex
     if not fetches or not idx:
         raise Unreadable("no fetches or indices in the row")
     pos = select_position(fetches, spec["pos_fetch"], spec["pos_swizzle"])
@@ -404,7 +427,7 @@ def replay(row, spec, get):
     if not apply_fetch_endian(pos, vb.endian):
         raise Unsupported("position endian")
     base = int(row.get("base_vertex", 0))
-    flat = [int(i) + base for i in idx]
+    flat = [i + base for i in idx]
     info = {"pos": pos, "flat": flat}
     if spec["kind"] == "instance":
         return _instance(row, spec, pos, vb, get, flat, info), info
@@ -446,7 +469,7 @@ def stream_reader(row, capture_dir, read=None):
 
 
 def positions_for(row, entry, capture_dir):
-    """Pre-transform positions (x, y, z, w) for the row's "idx", base vertex added."""
+    """Pre-transform positions (x, y, z, w) for the row's "idx" (restart indices left out), base vertex added."""
     return replay(row, parse_entry(entry), stream_reader(row, capture_dir))[0]
 
 
@@ -495,64 +518,182 @@ def unlisted(capture_path, entries, index=None):
     return {f"0x{h:016X}": n for h, n in sorted(rows.items(), key=lambda kv: (-kv[1], kv[0]))}
 
 
-def check(capture_path, entries, max_draws=200, only_vs=None, index=None, fixture_vs=None):
+def bone_ortho(rows):
+    """How far a bone's 3x3 part (its three rows' xyz) is from orthonormal: the largest of
+    | |row_k| - 1 | and |row_i . row_j|; infinity if a component is not finite."""
+    r = [tuple(row[:3]) for row in rows]
+    if not all(math.isfinite(x) for row in r for x in row):
+        return math.inf
+    worst = 0.0
+    for k in range(3):
+        other = r[(k + 1) % 3]
+        worst = max(worst, abs(math.sqrt(sum(x * x for x in r[k])) - 1.0), abs(sum(a * b for a, b in zip(r[k], other))))
+    return worst
+
+
+def triangles(prim, idx):
+    """Triangles of a draw's indices as ordinals into the indices that are not restarts (the order
+    of the replayed positions). `prim` is the Xenos primitive type: 4 triangle list, 5 triangle fan,
+    6 triangle strip; None for any other type. A restart index (negative in "idx") cuts the run."""
+    if prim not in (4, 5, 6):
+        return None
+    out, run, n = [], [], 0
+    for i in list(idx) + [RESTART]:
+        if int(i) >= 0:
+            run.append(n)
+            n += 1
+            continue
+        if prim == 4:
+            out += [tuple(run[k:k + 3]) for k in range(0, len(run) - 2, 3)]
+        elif prim == 6:
+            out += [tuple(run[k:k + 3]) for k in range(len(run) - 2)]
+        else:
+            out += [(run[0], run[k], run[k + 1]) for k in range(1, len(run) - 1)]
+        run = []
+    return out
+
+
+def edge_stats(tris, flat, bind, skinned):
+    """(edges whose skinned / bind-pose length is within EDGE_RATIO, edges measured, edges touching a
+    NaN vertex) over the distinct edges of `tris`. `flat` names the vertex behind each position;
+    edges shorter than EDGE_MIN_LENGTH in the bind pose are not measured."""
+    def length(p, q):
+        return math.sqrt(sum((a - b) ** 2 for a, b in zip(p[:3], q[:3])))
+
+    seen = set()
+    ok = measured = nan = 0
+    for t in tris:
+        for a, b in ((t[0], t[1]), (t[1], t[2]), (t[0], t[2])):
+            edge = (min(flat[a], flat[b]), max(flat[a], flat[b]))
+            if edge[0] == edge[1] or edge in seen:
+                continue
+            seen.add(edge)
+            if not all(math.isfinite(x) for p in (bind[a], bind[b], skinned[a], skinned[b]) for x in p[:3]):
+                nan += 1
+                continue
+            rest = length(bind[a], bind[b])
+            if rest < EDGE_MIN_LENGTH:
+                continue
+            measured += 1
+            ok += EDGE_RATIO[0] - 1e-9 <= length(skinned[a], skinned[b]) / rest <= EDGE_RATIO[1] + 1e-9
+    return ok, measured, nan
+
+
+def _row_triangles(row):
+    """The row's triangles, or None when they cannot be built: a primitive type other than list,
+    fan or strip, or a capture from before restart indices were kept in "idx" (no "idx_resets")
+    whose draw has restarts, so the cuts between its strips are lost."""
+    args = row.get("args") or []
+    try:
+        prim = int(str(args[0]), 16)
+    except (IndexError, ValueError):
+        return None
+    if "idx_resets" not in row and ((row.get("ib") or {}).get("restarts") or 0) > 0:
+        return None
+    return triangles(prim, row["idx"])
+
+
+def accepted(r, threshold):
+    """The verdict: the in-clip share reaches the capture's threshold and, for a skin entry, the bones
+    used are orthonormal within ORTHO_MAX and at least EDGE_OK_MIN of the edges keep their length."""
+    if r["kind"] == "error" or not r["draws"] or r["share"] < threshold - 1e-9:
+        return False
+    if r["kind"] != "skin":
+        return True
+    return (r["bone_ortho_max"] is not None and r["bone_ortho_max"] <= ORTHO_MAX and
+            r["edge_ok_share"] is not None and r["edge_ok_share"] >= EDGE_OK_MIN - 1e-9)
+
+
+def _judge(f, capture_path, key, spec, offsets, max_draws, read, want_fixture):
+    """Replays one shader's sampled draws (`max_draws` rows spread evenly over `offsets`)."""
+    r = {"kind": spec["kind"], "rows": len(offsets), "draws": 0, "passed": 0, "share": 0.0, "unreadable": 0,
+         "unsupported": 0, "bad_index": 0, "reasons": {}}
+    if spec["kind"] == "skin":
+        r.update(bone_ortho_max=None, edge_ok_share=None, edges=0, edge_ok=0, edge_nan=0, edge_draws=0)
+    weight_sums, per_copy, fixture = [], [], None
+    n = min(max(int(max_draws), 0), len(offsets))
+    for k in range(n):
+        f.seek(offsets[k * len(offsets) // n])
+        row = json.loads(f.readline())
+        get = stream_reader(row, capture_path.parent, read)
+        try:
+            positions, info = replay(row, spec, get)
+            inside = sum(1 for p in positions if in_clip(project(row, spec, p)))
+        except (Unreadable, Unsupported, BadIndex) as e:
+            which = {Unreadable: "unreadable", Unsupported: "unsupported", BadIndex: "bad_index"}[type(e)]
+            r[which] += 1
+            r["reasons"][str(e)] = r["reasons"].get(str(e), 0) + 1
+            continue
+        r["draws"] += 1
+        passed = inside * 2 >= len(positions)
+        r["passed"] += passed
+        if spec["kind"] == "skin":
+            weight_sums += info["weight_sums"]
+            if info["bone_max"] > r.get("bone_max", -1) or "palette_bones" not in r:
+                r["bone_max"], r["palette_bones"] = info["bone_max"], info["palette_bones"]
+            for bone in info["bones_used"].values():
+                r["bone_ortho_max"] = max(r["bone_ortho_max"] or 0.0, bone_ortho(bone))
+            tris = _row_triangles(row)
+            if tris is not None:
+                ok, measured, nan = edge_stats(tris, info["flat"], info["bind"], positions)
+                r["edge_draws"] += 1
+                r["edge_ok"] += ok
+                r["edges"] += measured
+                r["edge_nan"] += nan
+        elif spec["kind"] == "instance":
+            per_copy.append(info["vertices_per_copy"])
+            copy_max = max((cv[0] for cv in info["pairs"] if cv), default=-1)
+            if copy_max > r.get("copies_max", -1) or "copies_available" not in r:
+                r["copies_max"], r["copies_available"] = copy_max, info["copies_available"]
+        if want_fixture:
+            finite = all(math.isfinite(x) for p in positions[:FIXTURE_POSITIONS] for x in p)
+            rank = (passed, finite)
+            if fixture is None or rank > fixture[0]:
+                fixture = (rank, row, positions, info, get)
+    r["share"] = r["passed"] / r["draws"] if r["draws"] else 0.0
+    if r.get("edges"):
+        r["edge_ok_share"] = r["edge_ok"] / r["edges"]
+    if weight_sums:
+        r["weight_sum_min"], r["weight_sum_max"] = min(weight_sums), max(weight_sums)
+        r["weight_sum_median"] = statistics.median(weight_sums)
+    if per_copy:
+        r["vertices_per_copy"] = [min(per_copy), max(per_copy)]
+    if fixture:
+        r["fixture"] = cpp_fixture(key, capture_path.name, spec, *fixture[1:])
+    return r
+
+
+def check(capture_path, entries, max_draws=200, only_vs=None, index=None, fixture_vs=None, baseline_entries=None):
     """Replays every entry on its sampled in-scene draws: entry key -> {kind, rows, draws, passed,
-    share, unreadable, unsupported, bad_index, ...}. With `fixture_vs` the result of that shader also
-    holds "fixture": the C++ text of one of its draws."""
+    share, accepted, unreadable, unsupported, bad_index, ...}; a skin entry also has bone_ortho_max,
+    edge_ok_share, edges, edge_nan and edge_draws. "_baseline" holds the capture's acceptance
+    threshold: {"share", "threshold", "draws", "fallback"}, from the BASELINE_VS entry of
+    `baseline_entries` (the table; default `entries`) under the same sampling. With `fixture_vs` the
+    result of that shader also holds "fixture": the C++ text of one of its draws."""
     capture_path = Path(capture_path)
     index = scan(capture_path) if index is None else index
-    report = {}
     read = lru_cache(maxsize=256)(lambda path: Path(path).read_bytes())
+    trusted = _specs(entries if baseline_entries is None else baseline_entries).get(_hash(BASELINE_VS))
+    baseline = {"share": None, "threshold": THRESHOLD_FALLBACK, "draws": 0, "fallback": True}
+    report = {"_baseline": baseline}
     with open(capture_path, "rb") as f:
+        if trusted and not isinstance(trusted[1], str):
+            b = _judge(f, capture_path, trusted[0], trusted[1], index.get(_hash(BASELINE_VS), []), max_draws, read,
+                       False)
+            if b["draws"]:
+                baseline.update(share=b["share"], threshold=max(b["share"] - BASELINE_MARGIN, THRESHOLD_FLOOR),
+                                draws=b["draws"], fallback=False)
         for h, (key, spec) in _specs(entries).items():
             if only_vs is not None and h != _hash(only_vs):
                 continue
             offsets = index.get(h, [])
             if isinstance(spec, str):
-                report[key] = {"kind": "error", "error": spec, "rows": len(offsets), "draws": 0, "passed": 0,
-                               "share": 0.0, "unreadable": 0, "unsupported": 0, "bad_index": 0}
-                continue
-            r = {"kind": spec["kind"], "rows": len(offsets), "draws": 0, "passed": 0, "share": 0.0, "unreadable": 0,
-                 "unsupported": 0, "bad_index": 0, "reasons": {}}
-            weight_sums, per_copy, fixture = [], [], None
-            n = min(max(int(max_draws), 0), len(offsets))
-            for k in range(n):
-                f.seek(offsets[k * len(offsets) // n])
-                row = json.loads(f.readline())
-                get = stream_reader(row, capture_path.parent, read)
-                try:
-                    positions, info = replay(row, spec, get)
-                    inside = sum(1 for p in positions if in_clip(project(row, spec, p)))
-                except (Unreadable, Unsupported, BadIndex) as e:
-                    which = {Unreadable: "unreadable", Unsupported: "unsupported", BadIndex: "bad_index"}[type(e)]
-                    r[which] += 1
-                    r["reasons"][str(e)] = r["reasons"].get(str(e), 0) + 1
-                    continue
-                r["draws"] += 1
-                passed = inside * 2 >= len(positions)
-                r["passed"] += passed
-                if spec["kind"] == "skin":
-                    weight_sums += info["weight_sums"]
-                    if info["bone_max"] > r.get("bone_max", -1) or "palette_bones" not in r:
-                        r["bone_max"], r["palette_bones"] = info["bone_max"], info["palette_bones"]
-                elif spec["kind"] == "instance":
-                    per_copy.append(info["vertices_per_copy"])
-                    copy_max = max((cv[0] for cv in info["pairs"] if cv), default=-1)
-                    if copy_max > r.get("copies_max", -1) or "copies_available" not in r:
-                        r["copies_max"], r["copies_available"] = copy_max, info["copies_available"]
-                if fixture_vs is not None and h == _hash(fixture_vs):
-                    finite = all(math.isfinite(x) for p in positions[:FIXTURE_POSITIONS] for x in p)
-                    rank = (passed, finite)
-                    if fixture is None or rank > fixture[0]:
-                        fixture = (rank, row, positions, info, get)
-            r["share"] = r["passed"] / r["draws"] if r["draws"] else 0.0
-            if weight_sums:
-                r["weight_sum_min"], r["weight_sum_max"] = min(weight_sums), max(weight_sums)
-                r["weight_sum_median"] = statistics.median(weight_sums)
-            if per_copy:
-                r["vertices_per_copy"] = [min(per_copy), max(per_copy)]
-            if fixture:
-                r["fixture"] = cpp_fixture(key, capture_path.name, spec, *fixture[1:])
+                r = {"kind": "error", "error": spec, "rows": len(offsets), "draws": 0, "passed": 0, "share": 0.0,
+                     "unreadable": 0, "unsupported": 0, "bad_index": 0}
+            else:
+                r = _judge(f, capture_path, key, spec, offsets, max_draws, read,
+                           fixture_vs is not None and h == _hash(fixture_vs))
+            r["accepted"] = accepted(r, baseline["threshold"])
             report[key] = r
     return report
 
@@ -662,12 +803,27 @@ def cpp_fixture(key, capture_name, spec, row, positions, info, get):
 # --- CLI ----------------------------------------------------------------------
 
 
-def format_line(key, r):
+def format_baseline(baseline):
+    if baseline["fallback"]:
+        return f"baseline {BASELINE_VS}: no draws in this capture, accept >= {baseline['threshold']:.3f} (fallback)"
+    return f"baseline {BASELINE_VS}: share {baseline['share']:.3f}, accept >= {baseline['threshold']:.3f}"
+
+
+def format_line(key, r, threshold):
     if r["kind"] == "error":
         return f"VS {key} entry error: {r['error']} (rows {r['rows']})"
-    line = (f"VS {key} {r['kind']}: draws {r['draws']}, in-clip share {r['share']:.3f} (accept >= {ACCEPT:.2f}), "
+
+    def number(x):
+        return "n/a" if x is None else f"{x:.3f}"
+
+    line = (f"VS {key} {r['kind']}: draws {r['draws']}, in-clip share {r['share']:.3f} (accept >= {threshold:.3f}) "
+            f"{'ACCEPT' if accepted(r, threshold) else 'REJECT'}, "
             f"passed {r['passed']}, unreadable {r['unreadable']}, unsupported {r['unsupported']}, "
             f"bad-index {r['bad_index']}, rows {r['rows']}")
+    if r["kind"] == "skin":
+        line += (f", bone ortho max {number(r['bone_ortho_max'])} (<= {ORTHO_MAX:.2f}), edge ok share "
+                 f"{number(r['edge_ok_share'])} (>= {EDGE_OK_MIN:.2f}) of {r['edges']} edges, edge nan {r['edge_nan']}, "
+                 f"edge draws {r['edge_draws']}")
     if "weight_sum_median" in r:
         line += (f", weight sum min/median/max {r['weight_sum_min']:.3f}/{r['weight_sum_median']:.3f}/"
                  f"{r['weight_sum_max']:.3f}")
@@ -691,21 +847,24 @@ def main(argv=None):
     ap.add_argument("--max-draws", type=int, default=200, help="draws sampled per shader, spread over the capture")
     ap.add_argument("--cpp-fixture", metavar="HASH", help="print C++ arrays for one sampled draw of this shader")
     a = ap.parse_args(argv)
-    entries = json.loads(Path(a.json).read_text())
+    table = json.loads(Path(a.json).read_text())
+    entries = dict(table)
     if a.entry:
         entries.update(json.loads(Path(a.entry).read_text()))
     index = scan(a.capture)
-    report = check(a.capture, entries, a.max_draws, a.vs, index, a.cpp_fixture)
+    report = check(a.capture, entries, a.max_draws, a.vs, index, a.cpp_fixture, table)
+    baseline = report.pop("_baseline")
+    print(format_baseline(baseline))
     seen = {k: r for k, r in report.items() if r["rows"]}
     for key, r in sorted(seen.items(), key=lambda kv: -kv[1]["rows"]):
-        print(format_line(key, r))
+        print(format_line(key, r, baseline["threshold"]))
     missing = {} if a.vs else unlisted(a.capture, entries, index)
     for key, rows in missing.items():
         print(f"VS {key} no entry: rows {rows}")
     judged = [r for r in seen.values() if r["draws"]]
     print(f"totals: in-scene draw rows {sum(len(o) for o in index.values())}, shaders {len(index)}; with an entry "
           f"{len(seen)} ({sum(r['rows'] for r in seen.values())} rows), accepted "
-          f"{sum(1 for r in judged if r['share'] >= ACCEPT)} of {len(judged)} judged; no entry {len(missing)} "
+          f"{sum(1 for r in judged if r['accepted'])} of {len(judged)} judged; no entry {len(missing)} "
           f"({sum(missing.values())} rows)")
     for key, r in report.items():
         if "fixture" in r:

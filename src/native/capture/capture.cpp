@@ -1055,9 +1055,10 @@ std::string DumpStream(uint32_t phys, uint32_t bytes) {
 // ("streams": bytes from the stream's offset, at most kMaxGeoStreamBytes;
 // "total" is the stream's full extent when the dump is shorter; "file" is
 // left out when a cap is hit), the draw's first indices after the index
-// endian swap, reset indices dropped and base vertex not added ("idx",
-// "base_vertex"; DrawVertices lists its own vertices), and vertex constants
-// c0..c15 as host floats ("vconst").
+// endian swap, base vertex not added ("idx", "base_vertex"; DrawVertices lists
+// its own vertices), and vertex constants c0..c15 as host floats ("vconst").
+// A reset index is written as -1 and counted in "idx_resets": it is not a
+// vertex, but it cuts the strip or fan, which the checker's edge metric needs.
 void AppendGeometry(std::string& row, bool indexed, const LastArgs& args, uint32_t device,
                     const DeviceSnapshot& dev, const std::vector<VertexFetch>& fetches) {
   char buf[256];
@@ -1111,8 +1112,9 @@ void AppendGeometry(std::string& row, bool indexed, const LastArgs& args, uint32
   // DrawVertices: r5 start vertex, r6 vertex count.
   row += "],\"idx\":[";
   bool first = true;
-  auto add_index = [&](uint32_t v) {
-    std::snprintf(buf, sizeof(buf), "%s%u", first ? "" : ",", v);
+  uint32_t resets = 0;
+  auto add_index = [&](int64_t v) {
+    std::snprintf(buf, sizeof(buf), "%s%lld", first ? "" : ",", static_cast<long long>(v));
     row += buf;
     first = false;
   };
@@ -1125,15 +1127,17 @@ void AppendGeometry(std::string& row, bool indexed, const LastArgs& args, uint32
                              ? ReadPhysical(ib.addr + args.r[3] * isize, n * isize)
                              : nullptr;
     for (uint32_t i = 0; idx && i < n; ++i) {
-      IndexScan one;  // one word through the scan the records use (reset indices dropped)
+      IndexScan one;  // one word through the scan the records use
       ScanIndexWords(idx + isize * i, 1, ib.index32, ib.endian, &one);
-      if (one.n_first) add_index(one.first[0]);
+      add_index(one.n_first ? int64_t(one.first[0]) : -1);
+      resets += one.restarts;
     }
   } else {
     const uint32_t n = std::min(args.r[3], kMaxGeoIndices);
     for (uint32_t i = 0; i < n; ++i) add_index(args.r[2] + i);
   }
-  std::snprintf(buf, sizeof(buf), "],\"base_vertex\":%d", indexed ? int32_t(args.r[2]) : 0);
+  std::snprintf(buf, sizeof(buf), "],\"idx_resets\":%u,\"base_vertex\":%d", resets,
+                indexed ? int32_t(args.r[2]) : 0);
   row += buf;
   const uint32_t bank_ptr =
       g_state.vs_bank_ptr ? g_state.vs_bank_ptr : device + xdk::kDeviceVsConstantsOffset;

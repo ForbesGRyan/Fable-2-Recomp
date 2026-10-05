@@ -70,4 +70,6 @@ clang++ -std=c++23 "%~dp0native\test_material.cpp" -o "%OUT%\material.exe" || ex
 "%OUT%\material.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_texture_residency.cpp" -o "%OUT%\texture_residency.exe" || exit /b 1
 "%OUT%\texture_residency.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_instance_expand.cpp" -o "%OUT%\instance_expand.exe" || exit /b 1
+"%OUT%\instance_expand.exe" || exit /b 1
 exit /b 0

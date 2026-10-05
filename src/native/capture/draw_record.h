@@ -9,7 +9,7 @@
 #include "index_convert.h"
 #include "material.h"
 #include "position_decode.h"
-#include "rigid_skin.h"
+#include "bone_skin.h"
 #include "terrain_patch.h"
 
 namespace fable2::native::capture {
@@ -59,8 +59,8 @@ struct DrawRecord {
   float rows[16] = {};
   TransformLayout layout = TransformLayout::kDot;
   bool deformed = false;  // the shader moves the position first; drawn undeformed
-  // Positions are bone-transformed per vertex (rigid_skin.h) before rows.
-  RigidSkin skin;
+  // Positions are bone-transformed per vertex (bone_skin.h) before rows.
+  BoneSkin skin;
   // A heightmap terrain patch run (terrain_patch.h): no vertex or index buffer;
   // the renderer builds the grid from the heightmap.
   TerrainPatch terrain;
@@ -96,7 +96,7 @@ struct DrawInputs {
   bool index32 = false;
   const TransformInfo* transform = nullptr;
   const float* bank = nullptr;  // 256 registers * 4 floats, host order
-  RigidSkin skin;               // active: per-vertex bone transform
+  BoneSkin skin;               // active: per-vertex bone transform
   // The shader is a terrain shader (vs-transforms.json "terrain"); `terrain`
   // is active when its patch was built (heightmap handled).
   bool terrain_shader = false;

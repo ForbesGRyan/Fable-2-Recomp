@@ -36,8 +36,8 @@ clang++ -std=c++23 "%~dp0native\test_vfetch_decode.cpp" -o "%OUT%\vfetch_decode.
 rem Float-to-int casts of NaN/infinity trap here (UB that otherwise passes silently).
 clang++ -std=c++23 -fsanitize=float-cast-overflow -fsanitize-trap=float-cast-overflow "%~dp0native\test_terrain_patch.cpp" -o "%OUT%\terrain_patch.exe" || exit /b 1
 "%OUT%\terrain_patch.exe" || exit /b 1
-clang++ -std=c++23 "%~dp0native\test_rigid_skin.cpp" -o "%OUT%\rigid_skin.exe" || exit /b 1
-"%OUT%\rigid_skin.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_bone_skin.cpp" -o "%OUT%\bone_skin.exe" || exit /b 1
+"%OUT%\bone_skin.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_frame_scene.cpp" -o "%OUT%\frame_scene.exe" || exit /b 1
 "%OUT%\frame_scene.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_shader_tally.cpp" -o "%OUT%\shader_tally.exe" || exit /b 1

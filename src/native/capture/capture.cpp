@@ -40,7 +40,7 @@
 #include "main_scene.h"
 #include "material.h"
 #include "position_decode.h"
-#include "rigid_skin.h"
+#include "bone_skin.h"
 #include "shader_tally.h"
 #include "stream_resolve.h"
 #include "terrain_patch.h"
@@ -300,7 +300,7 @@ struct SkinEntry {
 static constexpr SkinEntry kSkinTable[] = {
 #define FABLE2_VS_TRANSFORM(H, B, L, P, D)
 #define FABLE2_VS_POS_SWIZZLE(H, S)
-#define FABLE2_VS_SKIN(H, I, C, R0, R1, R2) {H, {I, C, {R0, R1, R2}}},
+#define FABLE2_VS_SKIN(H, I, C, R0, R1, R2) {H, {I, -1, {R0, R1, R2}, {0, 0, 0}, 1, {C, 0, 0, 0}, {0, 0, 0, 0}}},
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
 #include "vs_transform_table.inc"
@@ -309,7 +309,7 @@ static constexpr SkinEntry kSkinTable[] = {
 #undef FABLE2_VS_SKIN
 #undef FABLE2_VS_TERRAIN
 #undef FABLE2_VS_UV
-    {0, {-1, 0, {-1, -1, -1}}}};
+    {0, {-1, -1, {-1, -1, -1}, {0, 0, 0}, 1, {0, 0, 0, 0}, {0, 0, 0, 0}}}};
 
 struct TerrainEntry {
   uint64_t hash;
@@ -1235,7 +1235,7 @@ struct VsInfo {
   // stream's fetch slot; skin_required with !have_skin = layout not handled.
   bool skin_required = false;
   bool have_skin = false;
-  RigidSkin skin;
+  BoneSkin skin;
   uint32_t skin_slot = 0;
   const TerrainSpec* terrain = nullptr;  // vs-transforms.json "terrain"
   // vs-transforms.json "uv" per interpolator component (FindVsUv), and the
@@ -1401,7 +1401,7 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders)
   if (vs->skin_required) {
     SkipReason why = SkipReason::kNone;
     StreamView bones;
-    RigidSkin s = vs->skin;
+    BoneSkin s = vs->skin;
     if (!vs->have_skin) {
       why = SkipReason::kUnknownPosFormat;
     } else if (ResolveStream(dev, vs->skin_slot, &bones) || !bones.fc_match) {

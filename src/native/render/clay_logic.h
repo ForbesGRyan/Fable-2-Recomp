@@ -144,10 +144,12 @@ inline GeoKey PositionKey(const capture::DrawRecord& r) {
   k.stride = l.stride_bytes;
   k.extra = LayoutHash(l);
   if (r.skin.active) {
-    const capture::RigidSkin& s = r.skin;
-    k.extra = HashCombine32({k.extra, s.index_offset_bytes, s.index_shift, s.index_endian,
-                             s.palette_addr, s.palette_size, s.bone_stride, LayoutHash(s.rows[0]),
-                             LayoutHash(s.rows[1]), LayoutHash(s.rows[2])});
+    const capture::BoneSkin& s = r.skin;
+    k.extra = HashCombine32({k.extra, s.bones, s.index_offset_bytes, s.index_shift[0], s.index_shift[1],
+                             s.index_shift[2], s.index_shift[3], s.index_endian, uint32_t(s.weighted),
+                             s.weight_offset_bytes, s.weight_shift[0], s.weight_shift[1], s.weight_shift[2],
+                             s.weight_shift[3], s.palette_addr, s.palette_size, s.bone_stride,
+                             LayoutHash(s.rows[0]), LayoutHash(s.rows[1]), LayoutHash(s.rows[2])});
   }
   k.kind = 0;
   return k;

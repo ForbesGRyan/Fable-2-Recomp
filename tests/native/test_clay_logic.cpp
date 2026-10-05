@@ -368,6 +368,9 @@ int main() {
     s2 = s;
     s2.skin.index_offset_bytes = 12;
     CHECK(72, !(PositionKey(s2) == PositionKey(s)));
+    s2 = s;
+    s2.skin.weight_shift[1] = 8;
+    CHECK(73, !(PositionKey(s2) == PositionKey(s)));
   }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "

@@ -110,5 +110,41 @@ int main() {
   if (SelectInstanceRows(two, spec, 95, &sel, &slot)) return 32;
   std::vector<VertexFetch> fmt = f; fmt[1].format = 6;
   if (SelectInstanceRows(fmt, spec, 95, &sel, &slot)) return 33;
+
+  // --- bounds: every index maps inside its own copy, not only the largest ---
+  // inv_count 0.2475 agrees with count 4 within 1%, but t = trunc((i + 0.5) *
+  // 0.2475) falls behind i / 4 from index 52 on: the shader's own math sends
+  // index 399 to copy 98, vertex 7 of a 4-vertex mesh.
+  InstanceSet d = s;
+  d.first = 0.0f; d.inv_count = 0.2475f;
+  if (!InstanceIndex(d, 399, &copy, &vertex) || copy != 98 || vertex != 7) return 34;
+  if (InstanceBoundsOk(d, 399, 100, 4)) return 35;
+  if (InstanceBoundsOk(d, 399, 100, 400)) return 36;   // nor with a mesh that happens to hold a vertex 7
+  if (!InstanceBoundsOk(d, 51, 100, 4)) return 37;     // indices 0..51 map exactly
+  if (InstanceBoundsOk(d, 52, 100, 4)) return 38;      // index 52 -> copy 12, vertex 4
+  // An inverse that runs ahead: the largest index (52, first of copy 13) maps
+  // well, but index 51 is taken into copy 13 too (vertex -1).
+  d.inv_count = 0.2525f;
+  if (!InstanceIndex(d, 52, &copy, &vertex) || copy != 13 || vertex != 0) return 39;
+  if (InstanceIndex(d, 51, &copy, &vertex)) return 40;
+  if (InstanceBoundsOk(d, 52, 100, 4)) return 41;
+  if (!InstanceBoundsOk(d, 50, 100, 4)) return 42;
+  // The rounded inverse of the index-math case above (count 3, inv_count
+  // 0.3333f, bias 0.5) maps exactly for indices 0..5000, that is 5001 indices
+  // or 1667 copies; index 5001 is the first it sends to the wrong copy.
+  if (!InstanceBoundsOk(t, 5000, 2000, 3)) return 43;
+  if (InstanceBoundsOk(t, 5001, 2000, 3)) return 44;
+  // The float nearest 1/3 has no such limit: exact up to the copy cap.
+  InstanceSet e = t;
+  e.inv_count = 1.0f / 3.0f;
+  if (!InstanceBoundsOk(e, 3 * kMaxInstanceCopies - 1, kMaxInstanceCopies, 3)) return 45;
+  if (InstanceBoundsOk(e, 3 * kMaxInstanceCopies, 70000, 3)) return 46;
+  // Large indices: index + 0.5 is exact in a float below 2^23 only. Past it
+  // the sum rounds up, and the last index of a copy lands in the next one.
+  InstanceSet w = t;
+  w.count = 1024.0f; w.inv_count = 1.0f / 1024.0f;
+  if (!InstanceBoundsOk(w, 8388607, 20000, 1024)) return 47;    // copy 8191, vertex 1023
+  if (InstanceIndex(w, 16777215, &copy, &vertex)) return 48;    // t = 16384: vertex -1
+  if (InstanceBoundsOk(w, 16777215, 20000, 1024)) return 49;
   return 0;
 }

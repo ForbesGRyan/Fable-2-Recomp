@@ -347,6 +347,17 @@ def _instance(row, spec, pos, vb, get, flat, info):
     last = instance_index(largest, bias, inv_count, count, first) if largest >= 0 else None
     if last is None or last[0] >= copies:
         raise BadIndex("copy past the instance stream")
+    # Every index must map inside its own copy: the first and the last index of each copy reached
+    # (t never decreases with the index, so the ones between follow).
+    n = int(count)
+    reached = largest // n
+    first_copy = last[0] - reached
+    for k in range(reached + 1):
+        lo = k * n
+        hi = min(lo + n - 1, largest)
+        if instance_index(lo, bias, inv_count, count, first) != (first_copy + k, 0) or \
+                instance_index(hi, bias, inv_count, count, first) != (first_copy + k, hi - lo):
+            raise BadIndex("an index maps outside its copy")
     info.update(copies_available=copies, vertices_per_copy=int(count), first=first, rows_slot=rows[0].slot,
                 rows_stride=rows[0].stride, first_ref=spec["first"], pairs=[])
     out = []

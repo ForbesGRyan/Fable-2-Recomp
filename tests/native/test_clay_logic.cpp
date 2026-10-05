@@ -465,6 +465,23 @@ int main() {
     a = i;
     a.instances.flat_count = 153;
     CHECK(120, !(UvKey(a) == uk));
+    // The mesh stream on its own (decoded once per frame for all the draws
+    // that expand it): the plain keys, whatever the instance set.
+    CHECK(122, MeshPositionKey(i) == PositionKey(r) && MeshPositionKey(i).kind == 0);
+    CHECK(123, MeshUvKey(i) == UvKey(r) && MeshUvKey(i).kind == 4);
+    a = i;
+    a.instances.first = 3.0f;
+    a.instances.flat_count = 99;
+    a.instances.rows_addr = 0x9000;
+    CHECK(124, MeshPositionKey(a) == MeshPositionKey(i) && MeshUvKey(a) == MeshUvKey(i));
+    a = i;
+    a.pos.swizzle = 0x11;
+    a.material.uv.comp_u = 1;
+    CHECK(125, !(MeshPositionKey(a) == MeshPositionKey(i)) && !(MeshUvKey(a) == MeshUvKey(i)));
+    a = i;
+    a.vb.size = 3200;
+    a.material.uv_vb.size = 3200;
+    CHECK(126, !(MeshPositionKey(a) == MeshPositionKey(i)) && !(MeshUvKey(a) == MeshUvKey(i)));
     // The renderer's index rule runs on the flat count: index 151 is the last.
     CHECK(121, IndexRangeValid(151, 0, RecordVertexCount(i)) &&
                    !IndexRangeValid(152, 0, RecordVertexCount(i)));

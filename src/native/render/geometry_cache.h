@@ -71,6 +71,14 @@ class GeometryCache {
                                    uint32_t* vertex_count, ClayStats& st);
   nrhi::Buffer* InstancedUvs(nrhi::Device* dev, const capture::DrawRecord& r,
                              uint32_t vertex_count, ClayStats& st);
+  // The record's whole mesh stream decoded (`count` positions / UVs; `mesh`
+  // and `mesh_hash` are the stream's bytes and frame hash), or nullptr if it
+  // does not decode. Decoded once per frame per stream and layout however
+  // many instanced draws expand it; valid until the next call.
+  const capture::Float4* MeshPositions(const capture::DrawRecord& r, const uint8_t* mesh,
+                                       uint64_t mesh_hash, uint32_t count);
+  const capture::Float2* MeshUvs(const capture::DrawRecord& r, const uint8_t* mesh,
+                                 uint64_t mesh_hash, uint32_t count);
   uint32_t Insert(nrhi::Device* dev, const GeoKey& key, uint64_t hash, const Entry& e,
                   uint64_t bytes);
 
@@ -85,7 +93,14 @@ class GeometryCache {
   std::unordered_map<uint64_t, uint64_t> frame_hashes_;
   std::vector<capture::Float4> positions_;
   std::vector<capture::Float2> uvs_;
-  // An instanced draw's decoded mesh, before it is expanded into the above.
+  // Decoded mesh streams of this frame's instanced draws (cleared in
+  // BeginFrame): every draw of a mesh has its own flat stream (key kinds 5
+  // and 6), but the mesh is decoded once. 64 MB together; a mesh that does
+  // not fit is decoded into the scratch vectors below for its draw alone.
+  static constexpr uint64_t kMeshPositionMemoBytes = 48ull << 20;
+  static constexpr uint64_t kMeshUvMemoBytes = 16ull << 20;
+  FrameMemo<capture::Float4> mesh_position_memo_{kMeshPositionMemoBytes};
+  FrameMemo<capture::Float2> mesh_uv_memo_{kMeshUvMemoBytes};
   std::vector<capture::Float4> mesh_positions_;
   std::vector<capture::Float2> mesh_uvs_;
   std::vector<uint32_t> indices_;

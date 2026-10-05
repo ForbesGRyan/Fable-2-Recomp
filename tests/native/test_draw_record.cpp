@@ -75,16 +75,37 @@ int main() {
   in.instance_shader = true;  // the table entry did not match the decoded fetches
   r = AssembleRecord(in, 0);
   if (r.skip != SkipReason::kInstanceUnsupported || r.instances.active) return 12;
-  // Reasons found earlier keep their names.
+  // An unsupported primitive and an unread shader are found first.
   in.prim = 8;
   if (AssembleRecord(in, 0).skip != SkipReason::kUnsupportedPrim) return 13;
   in = Good(); in.instance_shader = true; in.have_shader = false;
   if (AssembleRecord(in, 0).skip != SkipReason::kUnknownShader) return 14;
+  // Every other way the instanced draw is not established is
+  // instance-unsupported, whatever the capture stopped at: the entry's mesh
+  // fetch is not a position (or its endian is not readable) ...
   in = Good(); in.instance_shader = true; in.have_pos = false;
-  if (AssembleRecord(in, 0).skip != SkipReason::kUnknownPosFormat) return 15;
+  if (AssembleRecord(in, 0).skip != SkipReason::kInstanceUnsupported) return 15;
+  // ... the mesh stream does not resolve ...
   in = Good(); in.instance_shader = true; in.have_vb = false;
-  if (AssembleRecord(in, 0).skip != SkipReason::kNoStream) return 16;
-  // ... and it comes before the transform: the positions are the problem.
+  if (AssembleRecord(in, 0).skip != SkipReason::kInstanceUnsupported) return 16;
+  in = Good(); in.instance_shader = true; in.have_pos = false; in.have_vb = false; in.have_ib = false;
+  if (AssembleRecord(in, 0).skip != SkipReason::kInstanceUnsupported) return 22;
+  // ... there is no index buffer, or the draw is not indexed at all ...
+  in = Good(); in.instance_shader = true; in.have_ib = false;
+  if (AssembleRecord(in, 0).skip != SkipReason::kInstanceUnsupported) return 23;
+  in = Good(); in.instance_shader = true; in.indexed = false; in.have_ib = false;
+  if (AssembleRecord(in, 0).skip != SkipReason::kInstanceUnsupported) return 24;
+  // ... or the mesh stream is empty.
+  in = Good(); in.instance_shader = true; in.vb.size = 0;
+  if (AssembleRecord(in, 0).skip != SkipReason::kInstanceUnsupported) return 25;
+  // The same inputs of a shader without an instance entry keep their reasons.
+  in = Good(); in.have_pos = false;
+  if (AssembleRecord(in, 0).skip != SkipReason::kUnknownPosFormat) return 26;
+  in = Good(); in.have_vb = false;
+  if (AssembleRecord(in, 0).skip != SkipReason::kNoStream) return 27;
+  in = Good(); in.have_ib = false;
+  if (AssembleRecord(in, 0).skip != SkipReason::kNoStream) return 28;
+  // It also comes before the transform: the positions are the problem.
   in = Good(); in.instance_shader = true; in.transform = nullptr;
   if (AssembleRecord(in, 0).skip != SkipReason::kInstanceUnsupported) return 17;
   // A built set with no transform is no-transform, with no set in the record.
@@ -140,6 +161,12 @@ int main() {
   if (InstanceRangeSkip(&s, 7, 0, 4) != SkipReason::kBadIndex || s.flat_count != 0) return 50;
   s = Set(4); s.count = std::numeric_limits<float>::infinity(); s.inv_count = 0.0f;
   if (InstanceRangeSkip(&s, 7, 0, 4) != SkipReason::kBadIndex || s.flat_count != 0) return 51;
+  // An inverse inside the 1% agreement that sends an index past the mesh
+  // (count 4, inv_count 0.2475: index 399 -> vertex 7; instance_expand.h).
+  s = Set(100); s.first = 0.0f; s.inv_count = 0.2475f;
+  if (InstanceRangeSkip(&s, 399, 0, 4) != SkipReason::kBadIndex || s.flat_count != 0) return 52;
+  s = Set(100); s.first = 0.0f; s.inv_count = 0.2475f;
+  if (InstanceRangeSkip(&s, 51, 0, 4) != SkipReason::kNone || s.flat_count != 52) return 53;
   // A 32-bit index plus the base vertex does not wrap into range.
   s = Set(4);
   if (InstanceRangeSkip(&s, 0xFFFFFFFFll, 0x7FFFFFFF, 4) != SkipReason::kBadIndex || s.flat_count != 0) return 46;

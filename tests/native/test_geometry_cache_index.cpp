@@ -60,6 +60,36 @@ int main() {
     pool.Drain(&all);
     if (all.size() != 2 || pool.bytes() != 0) return 26;
   }
+  // FrameMemo: a decoded stream is kept for the frame under (key, content
+  // hash), so many draws of one mesh decode it once; over the byte budget
+  // nothing is stored and the caller keeps its own buffer.
+  {
+    FrameMemo<uint32_t> memo(40);  // 10 elements
+    const GeoKey m1{0x1000, 64, 16, 7, 0}, m2{0x2000, 64, 16, 7, 0};
+    if (memo.Find(m1, 5) || memo.bytes() != 0 || !memo.Fits(10) || memo.Fits(11)) return 30;
+    const std::vector<uint32_t>* v = memo.Store(m1, 5, std::vector<uint32_t>{1, 2, 3, 4});
+    if (!v || v->size() != 4 || (*v)[3] != 4 || memo.bytes() != 16) return 31;
+    if (memo.Find(m1, 5) != v) return 32;                        // the same vector for every later draw
+    if (memo.Find(m1, 6) || memo.Find(m2, 5)) return 33;         // other content, other stream
+    GeoKey layout = m1;
+    layout.extra = 8;                                            // same range, other layout
+    if (memo.Find(layout, 5)) return 34;
+    // A second stream; the first one's vector stays where it was.
+    const std::vector<uint32_t>* v2 = memo.Store(m2, 9, std::vector<uint32_t>(6, 11));
+    if (!v2 || memo.bytes() != 40 || memo.Find(m1, 5) != v || (*v)[0] != 1) return 35;
+    // Full: nothing more is stored, what is there stays, the caller's vector is untouched.
+    std::vector<uint32_t> big(3, 2);
+    if (memo.Fits(1) || memo.Store(layout, 5, std::move(big)) || big.size() != 3) return 36;
+    if (memo.bytes() != 40 || memo.Find(layout, 5) || memo.Find(m2, 9) != v2) return 37;
+    // New content under a stored key replaces it (and frees its bytes first).
+    const std::vector<uint32_t>* v3 = memo.Store(m2, 10, std::vector<uint32_t>(2, 3));
+    if (!v3 || memo.bytes() != 24 || memo.Find(m2, 9) || memo.Find(m2, 10) != v3) return 38;
+    // A vector larger than the whole budget is never stored.
+    if (memo.Store(layout, 1, std::vector<uint32_t>(11, 0)) || memo.bytes() != 24) return 39;
+    // The next frame starts empty.
+    memo.Clear();
+    if (memo.bytes() != 0 || memo.Find(m1, 5) || memo.Find(m2, 10) || !memo.Fits(10)) return 40;
+  }
   std::cout << "PASS: geometry cache index\n";
   return 0;
 }

@@ -149,4 +149,54 @@ class RetirePool {
   uint64_t bytes_ = 0;
 };
 
+// Decoded streams kept for the current frame only, keyed like the cache (key
+// plus content hash): a mesh that many instanced draws expand is decoded once
+// per frame, not once per draw. Under a byte budget; what does not fit is not
+// stored and the caller decodes into its own buffer. Stored vectors stay
+// where they are until Clear or until their key is stored again.
+template <typename T>
+class FrameMemo {
+ public:
+  explicit FrameMemo(uint64_t budget_bytes) : budget_(budget_bytes) {}
+
+  void Clear() {
+    entries_.clear();
+    bytes_ = 0;
+  }
+
+  const std::vector<T>* Find(const GeoKey& key, uint64_t content_hash) const {
+    const auto it = entries_.find(key);
+    return it != entries_.end() && it->second.hash == content_hash ? &it->second.data : nullptr;
+  }
+
+  // Whether a vector of `count` elements would be stored now.
+  bool Fits(uint64_t count) const { return bytes_ + count * sizeof(T) <= budget_; }
+
+  // Stores `data` (replacing what the key held) and returns the stored
+  // vector, or nullptr with `data` untouched if it does not fit.
+  const std::vector<T>* Store(const GeoKey& key, uint64_t content_hash, std::vector<T>&& data) {
+    if (const auto it = entries_.find(key); it != entries_.end()) {
+      bytes_ -= uint64_t(it->second.data.size()) * sizeof(T);
+      entries_.erase(it);
+    }
+    if (!Fits(data.size())) return nullptr;
+    Entry& e = entries_[key];
+    e.hash = content_hash;
+    e.data = std::move(data);
+    bytes_ += uint64_t(e.data.size()) * sizeof(T);
+    return &e.data;
+  }
+
+  uint64_t bytes() const { return bytes_; }
+
+ private:
+  struct Entry {
+    uint64_t hash = 0;
+    std::vector<T> data;
+  };
+  std::unordered_map<GeoKey, Entry, GeoKeyHash> entries_;
+  uint64_t budget_;
+  uint64_t bytes_ = 0;
+};
+
 }  // namespace fable2::native::render

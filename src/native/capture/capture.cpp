@@ -1561,10 +1561,12 @@ struct DrawShaders {
 // behind the rows' fetch slot, the constants the entry names (through t_bank)
 // and the range check on the draw's largest index (`scan`); `vertices` is
 // what the mesh stream holds. in.instances becomes active only when all of it
-// holds. Returns why not: kNone when the entry does not match the shader's
-// fetches (AssembleRecord then gives instance-unsupported), bad-index for
-// garbage constants or indices, bad-memory for unreadable constants or a flat
-// stream over the draw-count cap.
+// holds. Returns why not: instance-unsupported when the instance stream does
+// not resolve or a constant reference is not a vertex constant (kNone when
+// the rows do not match the shader's fetches: AssembleRecord gives the same
+// reason for any unbuilt set), bad-index for garbage constants or indices,
+// bad-memory for unreadable constants or a flat stream over the draw-count
+// cap.
 SkipReason FillInstanceSet(uint32_t device, const DeviceSnapshot& dev, const VsInfo& vs,
                            const IndexScan& scan, uint32_t vertices, DrawInputs& in) {
   if (!vs.have_instance) return SkipReason::kNone;
@@ -1621,7 +1623,10 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders)
   in.vs_hash = vs->hash;
   in.transform = vs->transform;
   // An instancing shader: `pos` is the mesh position; the draw is recorded
-  // only with its instance set (FillInstanceSet).
+  // only with its instance set (FillInstanceSet). Every return below that
+  // leaves the set unbuilt (mesh position not selectable, mesh stream or
+  // index buffer not resolved, an endian the decoder cannot read) is
+  // instance-unsupported in AssembleRecord, not the plain draw's reason.
   in.instance_shader = vs->instance != nullptr;
   if (!vs->have_pos) return SkipReason::kNone;
   in.pos = vs->pos;

@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <utility>
 
 #ifndef XXH_INLINE_ALL
 #define XXH_INLINE_ALL
@@ -34,6 +35,8 @@ void GeometryCache::BeginFrame(uint64_t frame, uint64_t budget_bytes) {
   index_.set_budget_bytes(budget_bytes);
   index_.BeginFrame(frame);
   frame_hashes_.clear();
+  mesh_position_memo_.Clear();
+  mesh_uv_memo_.Clear();
 }
 
 void GeometryCache::Release(nrhi::Device* dev) {
@@ -46,6 +49,8 @@ void GeometryCache::Release(nrhi::Device* dev) {
   destroy_.clear();
   entries_.clear();
   frame_hashes_.clear();
+  mesh_position_memo_.Clear();
+  mesh_uv_memo_.Clear();
   index_ = GeometryCacheIndex(index_.budget_bytes());
 }
 
@@ -147,6 +152,51 @@ nrhi::Buffer* GeometryCache::TerrainPositions(nrhi::Device* dev, const capture::
   return buffer;
 }
 
+// An instanced draw's mesh stream, decoded whole. Many draws expand one mesh
+// (each with its own instance set and flat stream), so the decoded stream is
+// kept for the frame under its own key and content hash; a stream past the
+// memo's budget is decoded into the scratch vector for this draw alone.
+const capture::Float4* GeometryCache::MeshPositions(const capture::DrawRecord& r,
+                                                    const uint8_t* mesh, uint64_t mesh_hash,
+                                                    uint32_t count) {
+  const GeoKey key = MeshPositionKey(r);
+  // (the size check guards a layout-hash collision: other layout, other count)
+  if (const auto* found = mesh_position_memo_.Find(key, mesh_hash); found && found->size() == count) {
+    return found->data();
+  }
+  if (mesh_position_memo_.Fits(count)) {
+    std::vector<capture::Float4> decoded(count);
+    if (!capture::DecodePositions(mesh, r.vb.size, r.pos, 0, count, decoded.data())) return nullptr;
+    if (const auto* stored = mesh_position_memo_.Store(key, mesh_hash, std::move(decoded))) {
+      return stored->data();
+    }
+  }
+  mesh_positions_.resize(count);
+  return capture::DecodePositions(mesh, r.vb.size, r.pos, 0, count, mesh_positions_.data())
+             ? mesh_positions_.data()
+             : nullptr;
+}
+
+const capture::Float2* GeometryCache::MeshUvs(const capture::DrawRecord& r, const uint8_t* mesh,
+                                              uint64_t mesh_hash, uint32_t count) {
+  const capture::BufferRef& vb = r.material.uv_vb;
+  const GeoKey key = MeshUvKey(r);
+  if (const auto* found = mesh_uv_memo_.Find(key, mesh_hash); found && found->size() == count) {
+    return found->data();
+  }
+  if (mesh_uv_memo_.Fits(count)) {
+    std::vector<capture::Float2> decoded(count);
+    if (!capture::DecodeUvs(mesh, vb.size, r.material.uv, 0, count, decoded.data())) return nullptr;
+    if (const auto* stored = mesh_uv_memo_.Store(key, mesh_hash, std::move(decoded))) {
+      return stored->data();
+    }
+  }
+  mesh_uvs_.resize(count);
+  return capture::DecodeUvs(mesh, vb.size, r.material.uv, 0, count, mesh_uvs_.data())
+             ? mesh_uvs_.data()
+             : nullptr;
+}
+
 // Instanced draws: positions[i] = rows(copy(i)) * mesh[vertex(i)] + offset for
 // every flat index i (instance_expand.h). The content hash covers the mesh
 // stream and the instance stream; the key holds the constants.
@@ -168,8 +218,8 @@ nrhi::Buffer* GeometryCache::InstancedPositions(nrhi::Device* dev, const capture
     ++st.skipped_other;
     return nullptr;
   }
-  const uint64_t hash = FrameHash(r.vb.phys_addr, r.vb.size, mesh) ^
-                        (FrameHash(s.rows_addr, s.rows_size, rows) * kSecondStreamMix);
+  const uint64_t mesh_hash = FrameHash(r.vb.phys_addr, r.vb.size, mesh);
+  const uint64_t hash = mesh_hash ^ (FrameHash(s.rows_addr, s.rows_size, rows) * kSecondStreamMix);
   const GeoKey key = PositionKey(r);
   const LookupResult found = index_.Lookup(key, hash);
   const auto t1 = Clock::now();
@@ -182,13 +232,12 @@ nrhi::Buffer* GeometryCache::InstancedPositions(nrhi::Device* dev, const capture
       return it->second.buffer;
     }
   }
-  mesh_positions_.resize(mesh_count);
   positions_.resize(s.flat_count);
   nrhi::Buffer* buffer = nullptr;
   uint64_t alloc = 0;
-  if (capture::DecodePositions(mesh, r.vb.size, r.pos, 0, mesh_count, mesh_positions_.data()) &&
-      capture::ExpandInstances(mesh_positions_.data(), mesh_count, rows, s.rows_size, s,
-                               s.flat_count, positions_.data())) {
+  const capture::Float4* decoded = MeshPositions(r, mesh, mesh_hash, mesh_count);
+  if (decoded && capture::ExpandInstances(decoded, mesh_count, rows, s.rows_size, s, s.flat_count,
+                                          positions_.data())) {
     buffer = Upload(dev, positions_.data(), uint64_t(s.flat_count) * sizeof(capture::Float4), &alloc);
   }
   if (buffer) {
@@ -286,8 +335,8 @@ nrhi::Buffer* GeometryCache::InstancedUvs(nrhi::Device* dev, const capture::Draw
     st.hash_ms += Ms(t0, Clock::now());
     return nullptr;
   }
-  const uint64_t hash = FrameHash(vb.phys_addr, vb.size, mesh) ^
-                        (FrameHash(s.rows_addr, s.rows_size, rows) * kSecondStreamMix);
+  const uint64_t mesh_hash = FrameHash(vb.phys_addr, vb.size, mesh);
+  const uint64_t hash = mesh_hash ^ (FrameHash(s.rows_addr, s.rows_size, rows) * kSecondStreamMix);
   const GeoKey key = UvKey(r);
   const LookupResult found = index_.Lookup(key, hash);
   const auto t1 = Clock::now();
@@ -298,13 +347,13 @@ nrhi::Buffer* GeometryCache::InstancedUvs(nrhi::Device* dev, const capture::Draw
       return it->second.buffer;
     }
   }
-  mesh_uvs_.resize(mesh_count);
   uvs_.resize(s.flat_count);
   nrhi::Buffer* buffer = nullptr;
   uint64_t alloc = 0;
-  if (s.flat_count != 0 &&
-      capture::DecodeUvs(mesh, vb.size, r.material.uv, 0, mesh_count, mesh_uvs_.data())) {
-    capture::ExpandInstanceUvs(mesh_uvs_.data(), mesh_count, s, s.flat_count, uvs_.data());
+  const capture::Float2* decoded =
+      s.flat_count != 0 ? MeshUvs(r, mesh, mesh_hash, mesh_count) : nullptr;
+  if (decoded) {
+    capture::ExpandInstanceUvs(decoded, mesh_count, s, s.flat_count, uvs_.data());
     buffer = Upload(dev, uvs_.data(), uint64_t(s.flat_count) * sizeof(capture::Float2), &alloc);
   }
   if (buffer) {

@@ -131,6 +131,20 @@ inline uint32_t InstanceHash(const capture::InstanceSet& s) {
                         FloatBits(s.offset[1]), FloatBits(s.offset[2]), s.flat_count});
 }
 
+// Key of the record's vertex stream decoded on its own (kind 0): the stream
+// plus every layout field that changes the decode, whatever is built from it
+// afterwards. An instanced draw's mesh is decoded under this key once per
+// frame for all the draws that expand it (FrameMemo).
+inline GeoKey MeshPositionKey(const capture::DrawRecord& r) {
+  GeoKey k;
+  k.addr = r.vb.phys_addr;
+  k.size = r.vb.size;
+  k.stride = r.pos.stride_bytes;
+  k.extra = LayoutHash(r.pos);
+  k.kind = 0;
+  return k;
+}
+
 // Cache key of a decoded position stream: the stream plus every layout field
 // that changes the decode (the content hash covers the raw bytes only). A
 // skinned stream adds its bone layout and palette range (kind 0); a terrain
@@ -154,11 +168,7 @@ inline GeoKey PositionKey(const capture::DrawRecord& r) {
     k.kind = 2;
     return k;
   }
-  const capture::PosLayout& l = r.pos;
-  k.addr = r.vb.phys_addr;
-  k.size = r.vb.size;
-  k.stride = l.stride_bytes;
-  k.extra = LayoutHash(l);
+  k = MeshPositionKey(r);
   if (r.instances.active) {
     k.extra = HashCombine32({k.extra, InstanceHash(r.instances)});
     k.kind = 5;
@@ -193,11 +203,11 @@ inline GeoKey IndexKey(const capture::DrawRecord& r) {
   return k;
 }
 
-// Cache key of a decoded UV stream (kind 4; kind 3 is the terrain grid's
-// index list): the stream holding the UV element plus every layout field that
-// changes the decode. An instanced draw's flat UVs (kind 6) add its instance
-// set, like its flat positions.
-inline GeoKey UvKey(const capture::DrawRecord& r) {
+// Key of the record's UV stream decoded on its own (kind 4; kind 3 is the
+// terrain grid's index list): the stream holding the UV element plus every
+// layout field that changes the decode. Like MeshPositionKey, also the
+// per-frame key of an instanced draw's mesh UVs.
+inline GeoKey MeshUvKey(const capture::DrawRecord& r) {
   const capture::Material& m = r.material;
   const capture::UvLayout& l = m.uv;
   GeoKey k;
@@ -208,6 +218,13 @@ inline GeoKey UvKey(const capture::DrawRecord& r) {
                            uint32_t(l.comp_v), uint32_t(l.swap16), uint32_t(l.normalized),
                            uint32_t(l.is_signed), uint32_t(l.exp_adjust)});
   k.kind = 4;
+  return k;
+}
+
+// Cache key of a decoded UV stream: MeshUvKey; an instanced draw's flat UVs
+// (kind 6) add its instance set, like its flat positions.
+inline GeoKey UvKey(const capture::DrawRecord& r) {
+  GeoKey k = MeshUvKey(r);
   if (r.instances.active) {
     k.extra = HashCombine32({k.extra, InstanceHash(r.instances)});
     k.kind = 6;

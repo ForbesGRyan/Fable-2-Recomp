@@ -175,6 +175,20 @@ class InstanceTest(Base):
             rep = pc.check(self.capture([row]), {"0xBBBB": entry})
             self.assertEqual((rep["0xBBBB"]["draws"], rep["0xBBBB"]["bad_index"]), (0, 1), c12)
 
+    def test_an_index_mapped_outside_its_copy_is_bad_index(self):
+        # count 2, inv_count 0.495 (inside the 1% agreement), no rounding bias: index 2 gives
+        # t = trunc(0.99) = 0, vertex 2 of a 2-vertex mesh, although the largest index (3) maps to copy 1.
+        row, entry = self.instanced([0.495, 2.0, 0.0, 0.0], [0, 1, 2, 3])
+        entry["instance"]["bias"] = 0.0
+        self.assertEqual(pc.instance_index(3, 0.0, pc.f32(0.495), 2.0, 0.0), (1, 1))
+        self.assertEqual(pc.instance_index(2, 0.0, pc.f32(0.495), 2.0, 0.0), (0, 2))
+        rep = pc.check(self.capture([row]), {"0xBBBB": entry})
+        self.assertEqual((rep["0xBBBB"]["draws"], rep["0xBBBB"]["bad_index"]), (0, 1))
+        # With the shader's bias the same constants map every index of both copies.
+        row, entry = self.instanced([0.495, 2.0, 0.0, 0.0], [0, 1, 2, 3])
+        rep = pc.check(self.capture([row]), {"0xBBBB": entry})
+        self.assertEqual((rep["0xBBBB"]["draws"], rep["0xBBBB"]["bad_index"]), (1, 0))
+
     def test_copy_past_the_instance_stream_is_bad_index(self):
         row, entry = self.instanced([0.5, 2.0, 0.0, 0.0], [0, 1, 4])     # index 4 -> copy 2 of 2
         rep = pc.check(self.capture([row]), {"0xBBBB": entry})

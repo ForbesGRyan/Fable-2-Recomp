@@ -111,8 +111,9 @@ struct DrawInputs {
   bool terrain_shader = false;
   TerrainPatch terrain;
   // The shader is an instancing shader (vs-transforms.json "instance");
-  // `instances` is active when its set was built (rows selected, streams and
-  // constants read, range checked). vb/pos are then the mesh stream.
+  // `instances` is active when its set was built (mesh position and rows
+  // selected, both streams and the constants read, range checked). vb/pos are
+  // then the mesh stream. Without the set the draw is instance-unsupported.
   bool instance_shader = false;
   InstanceSet instances;
   Material material;
@@ -141,15 +142,19 @@ inline DrawRecord AssembleRecord(const DrawInputs& in, uint32_t seq) {
   if (terrain) {
     if (!in.terrain.active) return skip(SkipReason::kUnknownPosFormat);
   } else {
+    // An instancing shader whose set was not built: whatever the capture
+    // stopped at (the entry's mesh fetch is not a readable position, the
+    // mesh or the instance stream does not resolve, the rows do not match the
+    // decoded fetches, the draw has no indices), the instanced draw is not
+    // established and nothing is drawn from the parts that were found. The
+    // capture's own reasons (bad-index, bad-memory) replace this one
+    // (ResolveSkip).
+    if (in.instance_shader && !in.instances.active) return skip(SkipReason::kInstanceUnsupported);
     if (!in.have_pos) return skip(SkipReason::kUnknownPosFormat);
     if (!in.have_vb || (in.indexed && !in.have_ib)) return skip(SkipReason::kNoStream);
     if (in.vb.size == 0) return skip(SkipReason::kBadMemory);
     if (in.indexed && (uint64_t(in.start) + in.count) * (in.index32 ? 4 : 2) > in.ib.size)
       return skip(SkipReason::kBadMemory);
-    // An instancing shader whose set was not built (the table entry does not
-    // match the decoded fetches, or the capture stopped before it): the mesh
-    // stream alone is not the draw, so nothing is drawn from it.
-    if (in.instance_shader && !in.instances.active) return skip(SkipReason::kInstanceUnsupported);
   }
   if (!in.transform || !in.bank || in.transform->base_reg > 252) return skip(SkipReason::kNoTransform);
   if (terrain) r.terrain = in.terrain;

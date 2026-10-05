@@ -97,16 +97,38 @@ inline uint32_t InstanceCopies(const InstanceSet& s) {
 }
 
 // Capture-side check before a draw is recorded: sane constants, and every
-// index up to max_index stays inside the copies and mesh vertices that exist.
+// index up to max_index maps to a vertex of its own copy (index - copy *
+// count, below count and so inside the mesh's `vertices`) in a copy the
+// instance stream holds.
+//
+// The 1% agreement of inv_count with 1 / count is not enough for that: with
+// count 4 and inv_count 0.2475 the shader's t falls behind index / 4 from
+// index 52 on, and index 399 maps to vertex 7. So the mapping itself is
+// checked. t = trunc((index + bias) * inv_count) never decreases as the index
+// grows (inv_count > 0, and float conversion, addition, multiplication and
+// trunc all keep order), so once the first and the last index of a copy both
+// map to that copy, every index between them does. Both are checked for each
+// copy the draw reaches: at most 2 * kMaxInstanceCopies evaluations, with the
+// same InstanceIndex the expansion uses.
 inline bool InstanceBoundsOk(const InstanceSet& s, uint32_t max_index, uint32_t copies, uint32_t vertices) {
   if (!std::isfinite(s.count) || !std::isfinite(s.inv_count) || !std::isfinite(s.first)) return false;
   if (s.count < 1.0f || s.count != std::trunc(s.count) || s.first < 0.0f) return false;
   if (std::fabs(s.count * s.inv_count - 1.0f) > 0.01f) return false;
   // (a count past 2^32 is past any mesh, and must not reach the cast)
   if (s.count >= 4294967296.0f || uint64_t(s.count) > vertices) return false;
+  const uint32_t count = uint32_t(s.count);
+  const uint32_t last = max_index / count;  // copies past the first one drawn
   uint32_t copy = 0, vertex = 0;
-  if (!InstanceIndex(s, max_index, &copy, &vertex)) return false;  // copy grows with the index
-  return copy < copies;
+  if (!InstanceIndex(s, max_index, &copy, &vertex) || vertex != max_index - last * count) return false;
+  if (copy >= copies || copy < last) return false;
+  const uint32_t first = copy - last;  // trunc(s.first); copy < kMaxInstanceCopies bounds the loop
+  for (uint32_t k = 0; k <= last; ++k) {
+    const uint32_t lo = k * count;
+    const uint32_t hi = max_index - lo >= count - 1 ? lo + (count - 1) : max_index;
+    if (!InstanceIndex(s, lo, &copy, &vertex) || copy != first + k || vertex != 0) return false;
+    if (!InstanceIndex(s, hi, &copy, &vertex) || copy != first + k || vertex != hi - lo) return false;
+  }
+  return true;
 }
 
 inline bool ExpandInstances(const Float4* mesh, uint32_t mesh_count, const uint8_t* rows, size_t rows_size,

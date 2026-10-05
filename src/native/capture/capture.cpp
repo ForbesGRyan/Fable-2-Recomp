@@ -10,6 +10,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -221,6 +222,12 @@ std::FILE* g_file = nullptr;
 std::filesystem::path g_tex_dir;
 std::set<std::pair<uint32_t, uint64_t>> g_tex_seen;
 uint32_t g_tex_count = 0;
+// Discovery stream dumps (caller holds g_mutex): the capture's dump folder, the
+// content hashes already dumped per (address, size), files and bytes written.
+std::filesystem::path g_geo_dir;
+std::map<std::pair<uint32_t, uint32_t>, std::vector<uint64_t>> g_geo_seen;
+uint32_t g_geo_count = 0;
+uint64_t g_geo_bytes = 0;
 
 int FramesRequested() {
   static const int frames = [] {
@@ -1001,6 +1008,148 @@ void AppendTextureFetches(std::string& row, uint32_t device, const DeviceSnapsho
   row += "}";
 }
 
+// Discovery only (caller holds g_mutex with g_file open). Dumps `bytes` of a
+// vertex stream at GPU physical `phys` to logs/native_geo_<stamp>/ and returns
+// the file name, or "" if the bytes are unreadable or a cap is hit. A stream is
+// written once per content: <PHYS8>_<SIZE8>.bin holds the first bytes seen at
+// (phys, bytes); other contents of the same range (per-frame bone palettes,
+// reused dynamic buffers) get <PHYS8>_<SIZE8>_<XXH3>.bin, so a row never names
+// bytes other than the ones its draw read.
+constexpr uint32_t kMaxGeoFiles = 4096;
+constexpr uint32_t kMaxGeoStreamBytes = 1u << 20;
+constexpr uint64_t kMaxGeoTotalBytes = 512ull << 20;
+constexpr uint32_t kMaxGeoIndices = 512;
+
+std::string DumpStream(uint32_t phys, uint32_t bytes) {
+  if (g_geo_dir.empty() || bytes == 0) return {};
+  const uint8_t* src = ReadPhysical(phys, bytes);
+  if (!src) return {};
+  const uint64_t hash = XXH3_64bits(src, bytes);
+  std::vector<uint64_t>& seen = g_geo_seen[{phys, bytes}];
+  const size_t at = size_t(std::find(seen.begin(), seen.end(), hash) - seen.begin());
+  char name[64];
+  if (at == 0) {
+    std::snprintf(name, sizeof(name), "%08X_%08X.bin", phys, bytes);
+  } else {
+    std::snprintf(name, sizeof(name), "%08X_%08X_%016llX.bin", phys, bytes,
+                  static_cast<unsigned long long>(hash));
+  }
+  if (at < seen.size()) return name;
+  if (g_geo_count >= kMaxGeoFiles || g_geo_bytes + bytes > kMaxGeoTotalBytes) return {};
+  std::error_code ec;
+  std::filesystem::create_directories(g_geo_dir, ec);
+  std::FILE* f = std::fopen((g_geo_dir / name).string().c_str(), "wb");
+  if (!f) return {};
+  const bool ok = std::fwrite(src, 1, bytes, f) == bytes;
+  std::fclose(f);
+  if (!ok) return {};
+  seen.push_back(hash);
+  ++g_geo_count;
+  g_geo_bytes += bytes;
+  return name;
+}
+
+// Discovery evidence for tools/xdk_sigmatch/position_check.py (in-scene draw
+// rows; caller holds g_mutex): the shader's vertex fetches in
+// DecodeVertexFetches order ("fetches"), a dump of every stream they read
+// ("streams": bytes from the stream's offset, at most kMaxGeoStreamBytes;
+// "total" is the stream's full extent when the dump is shorter; "file" is
+// left out when a cap is hit), the draw's first indices after the index
+// endian swap, reset indices dropped and base vertex not added ("idx",
+// "base_vertex"; DrawVertices lists its own vertices), and vertex constants
+// c0..c15 as host floats ("vconst").
+void AppendGeometry(std::string& row, bool indexed, const LastArgs& args, uint32_t device,
+                    const DeviceSnapshot& dev, const std::vector<VertexFetch>& fetches) {
+  char buf[256];
+  row += ",\"fetches\":[";
+  for (size_t i = 0; i < fetches.size(); ++i) {
+    const VertexFetch& f = fetches[i];
+    std::snprintf(buf, sizeof(buf),
+                  "%s{\"i\":%zu,\"instr\":%u,\"slot\":%u,\"reg\":%u,\"fmt\":%u,\"off\":%d,\"stride\":%u,"
+                  "\"mini\":%s,\"signed\":%s,\"norm\":%s,\"exp\":%d,\"swz\":%u}",
+                  i ? "," : "", i, f.instr_index, f.fetch_slot, f.dst_reg, f.format, f.offset_dwords,
+                  f.stride_dwords, f.mini ? "true" : "false", f.is_signed ? "true" : "false",
+                  f.normalized ? "true" : "false", f.exp_adjust, f.dst_swizzle);
+    row += buf;
+  }
+  row += "],\"streams\":[";
+  uint32_t slots[16];  // distinct fetch slots, in fetch order
+  uint32_t n_slots = 0;
+  for (const VertexFetch& f : fetches) {
+    if (n_slots == 16 || std::find(slots, slots + n_slots, f.fetch_slot) != slots + n_slots) continue;
+    slots[n_slots++] = f.fetch_slot;
+    StreamView sv;
+    if (const char* error = ResolveStream(dev, f.fetch_slot, &sv)) {
+      std::snprintf(buf, sizeof(buf), "%s{\"slot\":%u,\"error\":\"%s\"}", n_slots > 1 ? "," : "",
+                    f.fetch_slot, error);
+      row += buf;
+      continue;
+    }
+    const uint32_t total = sv.size - std::min(sv.offset, sv.size);
+    const uint32_t bytes = std::min(total, kMaxGeoStreamBytes);
+    const uint32_t phys = sv.base + sv.offset;
+    std::snprintf(buf, sizeof(buf),
+                  "%s{\"slot\":%u,\"phys\":%u,\"size\":%u,\"stride\":%u,\"endian\":%u",
+                  n_slots > 1 ? "," : "", f.fetch_slot, phys, bytes,
+                  dev.stream_stride_dw[sv.stream] * 4, sv.fc1 & 3);
+    row += buf;
+    if (bytes < total) {
+      std::snprintf(buf, sizeof(buf), ",\"total\":%u", total);
+      row += buf;
+    }
+    const std::string file = DumpStream(phys, bytes);
+    if (!file.empty()) {
+      row += ",\"file\":\"";
+      row += g_geo_dir.filename().string();
+      row += "/";
+      row += file;
+      row += "\"";
+    }
+    row += "}";
+  }
+  // DrawIndexedVertices: r5 base vertex, r6 start index, r7 index count.
+  // DrawVertices: r5 start vertex, r6 vertex count.
+  row += "],\"idx\":[";
+  bool first = true;
+  auto add_index = [&](uint32_t v) {
+    std::snprintf(buf, sizeof(buf), "%s%u", first ? "" : ",", v);
+    row += buf;
+    first = false;
+  };
+  if (indexed) {
+    IbView ib;
+    const bool have_ib = ReadIb(dev.ib_obj, &ib);
+    const uint32_t n = std::min(args.r[4], kMaxGeoIndices);
+    const uint32_t isize = ib.index32 ? 4 : 2;
+    const uint8_t* idx = have_ib && IndexRangeFits(ib, args.r[3], n)
+                             ? ReadPhysical(ib.addr + args.r[3] * isize, n * isize)
+                             : nullptr;
+    for (uint32_t i = 0; idx && i < n; ++i) {
+      IndexScan one;  // one word through the scan the records use (reset indices dropped)
+      ScanIndexWords(idx + isize * i, 1, ib.index32, ib.endian, &one);
+      if (one.n_first) add_index(one.first[0]);
+    }
+  } else {
+    const uint32_t n = std::min(args.r[3], kMaxGeoIndices);
+    for (uint32_t i = 0; i < n; ++i) add_index(args.r[2] + i);
+  }
+  std::snprintf(buf, sizeof(buf), "],\"base_vertex\":%d", indexed ? int32_t(args.r[2]) : 0);
+  row += buf;
+  const uint32_t bank_ptr =
+      g_state.vs_bank_ptr ? g_state.vs_bank_ptr : device + xdk::kDeviceVsConstantsOffset;
+  if (const uint8_t* bank = ReadVirtual(bank_ptr, 16 * 16)) {
+    row += ",\"vconst\":[";
+    for (uint32_t i = 0; i < 64; ++i) {
+      const uint32_t bits = LoadBe32(bank + 4 * i);
+      float f;
+      std::memcpy(&f, &bits, 4);
+      if (i) row += ",";
+      AppendFloat(row, f);
+    }
+    row += "]";
+  }
+}
+
 // Caller holds g_mutex. One decoded "draw" row (frame-map section 8) for
 // DrawVertices / DrawIndexedVertices; other draw hooks have no VB objects.
 // `in_scene`: the draw is inside the main-scene bracket.
@@ -1102,6 +1251,7 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
   // Position element.
   PosLayout pos;
   std::vector<VertexFetch> fetches = DecodeVertexFetches(ucode.data(), ucode.size());
+  if (in_scene) AppendGeometry(row, indexed, args, device, dev, fetches);
   const VertexFetch* pf = nullptr;
   for (const auto& f : fetches) {
     if (!f.mini) { pf = &f; break; }
@@ -1756,6 +1906,10 @@ bool OpenLog() {
     g_tex_dir = dir / ("native_tex_" + stamp);
     g_tex_seen.clear();
     g_tex_count = 0;
+    g_geo_dir = dir / ("native_geo_" + stamp);
+    g_geo_seen.clear();
+    g_geo_count = 0;
+    g_geo_bytes = 0;
   }
   REXSYS_INFO("[native-discovery] writing {} frames to {}", FramesRequested(), g_path.string());
   return true;
@@ -2006,7 +2160,8 @@ void OnSwap() {
       std::fclose(g_file);
       g_file = nullptr;
     }
-    REXSYS_INFO("[native-discovery] complete: {} frames written to {}", frame, g_path.string());
+    REXSYS_INFO("[native-discovery] complete: {} frames written to {}; {} stream dumps, {} bytes",
+                frame, g_path.string(), g_geo_count, g_geo_bytes);
   }
   lock.unlock();
   PublishScene(done);

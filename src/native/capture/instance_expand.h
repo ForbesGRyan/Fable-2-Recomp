@@ -102,7 +102,8 @@ inline bool InstanceBoundsOk(const InstanceSet& s, uint32_t max_index, uint32_t 
   if (!std::isfinite(s.count) || !std::isfinite(s.inv_count) || !std::isfinite(s.first)) return false;
   if (s.count < 1.0f || s.count != std::trunc(s.count) || s.first < 0.0f) return false;
   if (std::fabs(s.count * s.inv_count - 1.0f) > 0.01f) return false;
-  if (uint64_t(s.count) > vertices) return false;
+  // (a count past 2^32 is past any mesh, and must not reach the cast)
+  if (s.count >= 4294967296.0f || uint64_t(s.count) > vertices) return false;
   uint32_t copy = 0, vertex = 0;
   if (!InstanceIndex(s, max_index, &copy, &vertex)) return false;  // copy grows with the index
   return copy < copies;

@@ -72,4 +72,7 @@ clang++ -std=c++23 "%~dp0native\test_texture_residency.cpp" -o "%OUT%\texture_re
 "%OUT%\texture_residency.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_instance_expand.cpp" -o "%OUT%\instance_expand.exe" || exit /b 1
 "%OUT%\instance_expand.exe" || exit /b 1
+rem Garbage instance constants must be rejected before any float-to-int cast (trap as above).
+clang++ -std=c++23 -fsanitize=float-cast-overflow -fsanitize-trap=float-cast-overflow "%~dp0native\test_draw_record.cpp" -o "%OUT%\draw_record.exe" || exit /b 1
+"%OUT%\draw_record.exe" || exit /b 1
 exit /b 0

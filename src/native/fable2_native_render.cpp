@@ -267,12 +267,13 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   if (g_clay_frames % 300 == 0) {
     REXLOG_INFO(
         "[native] clay: drawn {} (deformed {}) of {} drawable, skipped_bad_index {} other {} | "
-        "textured {} of {} | {} uploads, {} hits, {:.1f} MB resident | hash {:.2f} ms, decode "
-        "{:.2f} ms, record {:.2f} ms (max total {:.2f} ms over 300) | scene frame {}",
+        "textured {} of {} | {} uploads, {} hits, {:.1f} MB resident, instanced {}, skinned {} | "
+        "hash {:.2f} ms, decode {:.2f} ms, record {:.2f} ms (max total {:.2f} ms over 300) | "
+        "scene frame {}",
         st.drawn, st.deformed, scene->draws.size(), st.skipped_bad_index, st.skipped_other,
         tst.textured, st.drawn, st.uploads, st.hits,
-        double(st.resident_bytes) / (1024.0 * 1024.0), st.hash_ms, st.decode_ms, st.record_ms,
-        g_clay_window_max_ms, scene->frame);
+        double(st.resident_bytes) / (1024.0 * 1024.0), st.instanced, st.skinned, st.hash_ms,
+        st.decode_ms, st.record_ms, g_clay_window_max_ms, scene->frame);
     if (textures) REXLOG_INFO("[native] clay: {}", render::FormatTextureText(tst, st.drawn));
     g_clay_window_max_ms = 0;
   }

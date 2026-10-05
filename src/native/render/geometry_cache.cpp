@@ -22,6 +22,10 @@ double Ms(Clock::time_point a, Clock::time_point b) {
 
 uint64_t RoundUp256(uint64_t v) { return (v + 255) & ~uint64_t(255); }
 
+// Content hash of a buffer built from two guest ranges (vertex stream and
+// bone palette, mesh stream and instance stream): first ^ (second * this).
+constexpr uint64_t kSecondStreamMix = 0x9E3779B97F4A7C15ull;
+
 }  // namespace
 
 GeometryCache::GeometryCache(uint64_t budget_bytes) : index_(budget_bytes) {}
@@ -143,9 +147,66 @@ nrhi::Buffer* GeometryCache::TerrainPositions(nrhi::Device* dev, const capture::
   return buffer;
 }
 
+// Instanced draws: positions[i] = rows(copy(i)) * mesh[vertex(i)] + offset for
+// every flat index i (instance_expand.h). The content hash covers the mesh
+// stream and the instance stream; the key holds the constants.
+nrhi::Buffer* GeometryCache::InstancedPositions(nrhi::Device* dev, const capture::DrawRecord& r,
+                                                uint32_t* vertex_count, ClayStats& st) {
+  const capture::InstanceSet& s = r.instances;
+  const uint32_t mesh_count = PositionCount(r.vb.size, r.pos);
+  // The capture caps flat_count (InstanceRangeSkip); nothing larger is built.
+  if (mesh_count == 0 || s.rows_size == 0 || s.flat_count == 0 ||
+      s.flat_count > capture::kMaxDrawCount) {
+    ++st.skipped_other;
+    return nullptr;
+  }
+  const auto t0 = Clock::now();
+  const uint8_t* mesh = capture::ReadPhysical(r.vb.phys_addr, r.vb.size);
+  const uint8_t* rows = mesh ? capture::ReadPhysical(s.rows_addr, s.rows_size) : nullptr;
+  if (!rows) {
+    st.hash_ms += Ms(t0, Clock::now());
+    ++st.skipped_other;
+    return nullptr;
+  }
+  const uint64_t hash = FrameHash(r.vb.phys_addr, r.vb.size, mesh) ^
+                        (FrameHash(s.rows_addr, s.rows_size, rows) * kSecondStreamMix);
+  const GeoKey key = PositionKey(r);
+  const LookupResult found = index_.Lookup(key, hash);
+  const auto t1 = Clock::now();
+  st.hash_ms += Ms(t0, t1);
+  if (found.hit) {
+    if (auto it = entries_.find(found.id); it != entries_.end()) {
+      ++st.hits;
+      ++st.instanced;
+      *vertex_count = it->second.count;
+      return it->second.buffer;
+    }
+  }
+  mesh_positions_.resize(mesh_count);
+  positions_.resize(s.flat_count);
+  nrhi::Buffer* buffer = nullptr;
+  uint64_t alloc = 0;
+  if (capture::DecodePositions(mesh, r.vb.size, r.pos, 0, mesh_count, mesh_positions_.data()) &&
+      capture::ExpandInstances(mesh_positions_.data(), mesh_count, rows, s.rows_size, s,
+                               s.flat_count, positions_.data())) {
+    buffer = Upload(dev, positions_.data(), uint64_t(s.flat_count) * sizeof(capture::Float4), &alloc);
+  }
+  if (buffer) {
+    Insert(dev, key, hash, {buffer, s.flat_count, 0, alloc}, alloc);
+    *vertex_count = s.flat_count;
+    ++st.uploads;
+    ++st.instanced;
+  } else {
+    ++st.skipped_other;
+  }
+  st.decode_ms += Ms(t1, Clock::now());
+  return buffer;
+}
+
 nrhi::Buffer* GeometryCache::Positions(nrhi::Device* dev, const capture::DrawRecord& r,
                                        uint32_t* vertex_count, ClayStats& st) {
   if (r.terrain.active) return TerrainPositions(dev, r, vertex_count, st);
+  if (r.instances.active) return InstancedPositions(dev, r, vertex_count, st);
   const uint32_t count = PositionCount(r.vb.size, r.pos);
   if (count == 0) {
     ++st.skipped_other;
@@ -168,7 +229,7 @@ nrhi::Buffer* GeometryCache::Positions(nrhi::Device* dev, const capture::DrawRec
       ++st.skipped_other;
       return nullptr;
     }
-    hash ^= XXH3_64bits(palette, r.skin.palette_size) * 0x9E3779B97F4A7C15ull;
+    hash ^= XXH3_64bits(palette, r.skin.palette_size) * kSecondStreamMix;
   }
   const GeoKey key = PositionKey(r);
   const LookupResult found = index_.Lookup(key, hash);
@@ -177,6 +238,7 @@ nrhi::Buffer* GeometryCache::Positions(nrhi::Device* dev, const capture::DrawRec
   if (found.hit) {
     if (auto it = entries_.find(found.id); it != entries_.end()) {
       ++st.hits;
+      if (r.skin.active) ++st.skinned;
       *vertex_count = it->second.count;
       return it->second.buffer;
     }
@@ -197,6 +259,7 @@ nrhi::Buffer* GeometryCache::Positions(nrhi::Device* dev, const capture::DrawRec
     Insert(dev, key, hash, {buffer, count, 0, alloc}, alloc);
     *vertex_count = count;
     ++st.uploads;
+    if (r.skin.active) ++st.skinned;
   } else {
     ++st.skipped_other;
   }
@@ -204,8 +267,57 @@ nrhi::Buffer* GeometryCache::Positions(nrhi::Device* dev, const capture::DrawRec
   return buffer;
 }
 
+// Instanced draws: uvs[i] = mesh_uv[vertex(i)] for every flat index i. Same
+// content hash as the flat positions (the capture takes the UVs from the mesh
+// stream only).
+nrhi::Buffer* GeometryCache::InstancedUvs(nrhi::Device* dev, const capture::DrawRecord& r,
+                                          uint32_t vertex_count, ClayStats& st) {
+  const capture::BufferRef& vb = r.material.uv_vb;
+  const capture::InstanceSet& s = r.instances;
+  const uint32_t mesh_count = UvCount(vb.size, r.material.uv);
+  if (mesh_count == 0 || s.rows_size == 0 || s.flat_count < vertex_count ||
+      s.flat_count > capture::kMaxDrawCount) {
+    return nullptr;
+  }
+  const auto t0 = Clock::now();
+  const uint8_t* mesh = capture::ReadPhysical(vb.phys_addr, vb.size);
+  const uint8_t* rows = mesh ? capture::ReadPhysical(s.rows_addr, s.rows_size) : nullptr;
+  if (!rows) {
+    st.hash_ms += Ms(t0, Clock::now());
+    return nullptr;
+  }
+  const uint64_t hash = FrameHash(vb.phys_addr, vb.size, mesh) ^
+                        (FrameHash(s.rows_addr, s.rows_size, rows) * kSecondStreamMix);
+  const GeoKey key = UvKey(r);
+  const LookupResult found = index_.Lookup(key, hash);
+  const auto t1 = Clock::now();
+  st.hash_ms += Ms(t0, t1);
+  if (found.hit) {
+    if (auto it = entries_.find(found.id); it != entries_.end() && it->second.count >= vertex_count) {
+      ++st.hits;
+      return it->second.buffer;
+    }
+  }
+  mesh_uvs_.resize(mesh_count);
+  uvs_.resize(s.flat_count);
+  nrhi::Buffer* buffer = nullptr;
+  uint64_t alloc = 0;
+  if (s.flat_count != 0 &&
+      capture::DecodeUvs(mesh, vb.size, r.material.uv, 0, mesh_count, mesh_uvs_.data())) {
+    capture::ExpandInstanceUvs(mesh_uvs_.data(), mesh_count, s, s.flat_count, uvs_.data());
+    buffer = Upload(dev, uvs_.data(), uint64_t(s.flat_count) * sizeof(capture::Float2), &alloc);
+  }
+  if (buffer) {
+    Insert(dev, key, hash, {buffer, s.flat_count, 0, alloc}, alloc);
+    ++st.uploads;
+  }
+  st.decode_ms += Ms(t1, Clock::now());
+  return buffer;
+}
+
 nrhi::Buffer* GeometryCache::Uvs(nrhi::Device* dev, const capture::DrawRecord& r,
                                  uint32_t vertex_count, ClayStats& st) {
+  if (r.instances.active) return InstancedUvs(dev, r, vertex_count, st);
   const capture::BufferRef& vb = r.material.uv_vb;
   const uint32_t count = UvCount(vb.size, r.material.uv);
   if (count == 0 || count < vertex_count) return nullptr;

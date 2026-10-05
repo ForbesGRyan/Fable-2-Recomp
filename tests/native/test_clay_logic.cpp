@@ -285,8 +285,8 @@ int main() {
     const std::string want =
         "Native: captured 1477, drawn 915 (deformed 5), skipped 562 "
         "(top: unsupported-prim 324, no-transform 229, bad-index 5)\n"
-        "Geometry: 12 uploads, 1818 hits, 45.5 MB resident | hash 0.84 ms, decode 0.13 ms, "
-        "record 0.50 ms\n"
+        "Geometry: 12 uploads, 1818 hits, 45.5 MB resident, instanced 0, skinned 0 | hash 0.84 ms, "
+        "decode 0.13 ms, record 0.50 ms\n"
         "Capture: 0.43 ms guest time per frame\n"
         "Textures: textured 900 of 915 drawn (98%, 100% non-terrain), resident 0 (0.0 MB), uploads 0 (0.0 MB), "
         "decode 0.00 ms | top untextured: terrain 15";
@@ -306,6 +306,19 @@ int main() {
     so.skipped_other = 4;
     const std::string ot = FormatStatusText(o, so, nullptr);
     CHECK(46, ot.find("skipped 4 (top: render-other 4)") != std::string::npos);
+    // Draws built by the instanced and skinned position paths.
+    ClayStats paths;
+    paths.instanced = 3;
+    paths.skinned = 2;
+    const std::string pt = FormatStatusText(empty, paths, nullptr);
+    CHECK(98, pt.find("MB resident, instanced 3, skinned 2 | hash") != std::string::npos);
+    // The new skip reasons are counted and named like the others.
+    FrameScene n;
+    n.captured = 9;
+    n.skipped[size_t(capture::SkipReason::kInstanceUnsupported)] = 5;
+    n.skipped[size_t(capture::SkipReason::kSkinUnsupported)] = 4;
+    CHECK(99, FormatStatusText(n, none, nullptr)
+                      .find("skipped 9 (top: instance-unsupported 5, skin-unsupported 4)") != std::string::npos);
   }
   // 47-50: the shader's vertex count never exceeds the uploaded buffer.
   {
@@ -372,8 +385,92 @@ int main() {
     s2.skin.weight_shift[1] = 8;
     CHECK(73, !(PositionKey(s2) == PositionKey(s)));
   }
+  // 100-101: the skip reasons of sub-project 5.
+  {
+    CHECK(100, std::string(capture::SkipReasonName(capture::SkipReason::kInstanceUnsupported)) ==
+                   "instance-unsupported");
+    CHECK(101, std::string(capture::SkipReasonName(capture::SkipReason::kSkinUnsupported)) ==
+                   "skin-unsupported");
+  }
+  // 102-121: instanced records: a flat stream of flat_count positions / UVs,
+  // keyed by both streams, the row layouts, every constant and the flat count.
+  {
+    capture::DrawRecord r = BaseRecord();
+    r.material.uv_vb = r.vb;
+    r.material.uv.format = capture::UvFormat::kHalf2;
+    r.material.uv.offset_bytes = 12;
+    r.material.uv.stride_bytes = 16;
+    capture::DrawRecord i = r;
+    i.instances.active = true;
+    i.instances.rows_addr = 0x7000;
+    i.instances.rows_size = 28 * 40;
+    for (int k = 0; k < 3; ++k) {
+      i.instances.rows[k].format = capture::PosFormat::kHalf4;
+      i.instances.rows[k].stride_bytes = 28;
+      i.instances.rows[k].offset_bytes = uint32_t(8 * k);
+    }
+    i.instances.inv_count = 0.25f;
+    i.instances.count = 4.0f;
+    i.instances.first = 2.0f;
+    i.instances.bias = 0.5f;
+    i.instances.flat_count = 152;
+    const GeoKey k = PositionKey(i);
+    CHECK(102, k.kind == 5 && k.addr == 0x2000 && k.size == 1600 && k.stride == 16);
+    CHECK(103, PositionKey(r).kind == 0 && !(PositionKey(r) == k));
+    capture::DrawRecord a = i;
+    a.instances.first = 3.0f;  // identical except the first copy
+    CHECK(104, PositionKey(a).kind == 5 && !(PositionKey(a) == k));
+    a = i;
+    a.instances.rows_addr = 0x8000;
+    CHECK(105, !(PositionKey(a) == k));
+    a = i;
+    a.instances.rows_size = 28 * 41;
+    CHECK(106, !(PositionKey(a) == k));
+    a = i;
+    a.instances.rows[2].swizzle = 0x11;
+    CHECK(107, !(PositionKey(a) == k));
+    a = i;
+    a.instances.inv_count = 0.2f;
+    CHECK(108, !(PositionKey(a) == k));
+    a = i;
+    a.instances.count = 5.0f;
+    CHECK(109, !(PositionKey(a) == k));
+    a = i;
+    a.instances.bias = 0.25f;
+    CHECK(110, !(PositionKey(a) == k));
+    a = i;
+    a.instances.offset[1] = 8.0f;
+    CHECK(111, !(PositionKey(a) == k));
+    a = i;
+    a.instances.flat_count = 153;
+    CHECK(112, !(PositionKey(a) == k));
+    a = i;
+    a.pos.swizzle = 0x11;  // the mesh layout still counts
+    CHECK(113, !(PositionKey(a) == k));
+    a = i;
+    a.seq = 99;  // irrelevant to the flat stream
+    CHECK(114, PositionKey(a) == k);
+    // The flat stream holds flat_count positions, not the mesh's.
+    CHECK(115, RecordVertexCount(i) == 152 && RecordVertexCount(r) == 100);
+    // Flat UVs: their own kind, never the mesh's UV buffer or the flat positions.
+    const GeoKey uk = UvKey(i);
+    CHECK(116, uk.kind == 6 && uk.addr == 0x2000 && uk.size == 1600 && uk.stride == 16);
+    CHECK(117, UvKey(r).kind == 4 && !(UvKey(r) == uk) && !(uk == k));
+    a = i;
+    a.instances.first = 3.0f;
+    CHECK(118, !(UvKey(a) == uk));
+    a = i;
+    a.material.uv.comp_u = 1;
+    CHECK(119, !(UvKey(a) == uk));
+    a = i;
+    a.instances.flat_count = 153;
+    CHECK(120, !(UvKey(a) == uk));
+    // The renderer's index rule runs on the flat count: index 151 is the last.
+    CHECK(121, IndexRangeValid(151, 0, RecordVertexCount(i)) &&
+                   !IndexRangeValid(152, 0, RecordVertexCount(i)));
+  }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
-               "uv keys, texture text\n";
+               "uv keys, texture text, instanced keys\n";
   return 0;
 }

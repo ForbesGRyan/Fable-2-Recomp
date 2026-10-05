@@ -27,7 +27,9 @@ class GeometryCache {
 
   // Returns the GPU buffer holding float4 positions / uint32 indices, or
   // nullptr (draw skipped). *vertex_count receives the number of positions
-  // the returned buffer actually holds.
+  // the returned buffer actually holds. An instanced record's buffer is its
+  // flat stream (instance_expand.h): instances.flat_count positions, indexed
+  // like any other draw.
   nrhi::Buffer* Positions(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t* vertex_count,
                           ClayStats& st);
   nrhi::Buffer* Indices(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t vertex_count,
@@ -35,7 +37,8 @@ class GeometryCache {
   // float2 UVs of the record's material (material.uv_vb / material.uv), one
   // per vertex of the UV stream; nullptr when the stream is unreadable, does
   // not decode or holds fewer than `vertex_count` UVs (the shader reads
-  // uvs[v] for every v < vertex_count). Reads are bounded by uv_vb.size.
+  // uvs[v] for every v < vertex_count). Reads are bounded by uv_vb.size. An
+  // instanced record gets flat UVs: the mesh vertex's UV per flat position.
   nrhi::Buffer* Uvs(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t vertex_count,
                     ClayStats& st);
   void BeginFrame(uint64_t frame, uint64_t budget_bytes);
@@ -61,6 +64,13 @@ class GeometryCache {
   uint64_t FrameHash(uint32_t phys_addr, uint32_t size, const uint8_t* data);
   nrhi::Buffer* TerrainPositions(nrhi::Device* dev, const capture::DrawRecord& r,
                                  uint32_t* vertex_count, ClayStats& st);
+  // Instanced records: the flat position / UV stream built from the mesh
+  // stream and the instance stream, rebuilt when either's bytes or the
+  // instance set (the key) change.
+  nrhi::Buffer* InstancedPositions(nrhi::Device* dev, const capture::DrawRecord& r,
+                                   uint32_t* vertex_count, ClayStats& st);
+  nrhi::Buffer* InstancedUvs(nrhi::Device* dev, const capture::DrawRecord& r,
+                             uint32_t vertex_count, ClayStats& st);
   uint32_t Insert(nrhi::Device* dev, const GeoKey& key, uint64_t hash, const Entry& e,
                   uint64_t bytes);
 
@@ -75,6 +85,9 @@ class GeometryCache {
   std::unordered_map<uint64_t, uint64_t> frame_hashes_;
   std::vector<capture::Float4> positions_;
   std::vector<capture::Float2> uvs_;
+  // An instanced draw's decoded mesh, before it is expanded into the above.
+  std::vector<capture::Float4> mesh_positions_;
+  std::vector<capture::Float2> mesh_uvs_;
   std::vector<uint32_t> indices_;
   std::vector<uint32_t> evicted_;
 };

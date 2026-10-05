@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "index_convert.h"
+#include "instance_expand.h"
 #include "material.h"
 #include "position_decode.h"
 #include "bone_skin.h"
@@ -23,6 +24,8 @@ enum class SkipReason : uint8_t {
   kBadMemory,
   kBadIndex,
   kNoStream,
+  kInstanceUnsupported,
+  kSkinUnsupported,
   kCount
 };
 
@@ -36,6 +39,8 @@ inline const char* SkipReasonName(SkipReason r) {
     case SkipReason::kBadMemory: return "bad-memory";
     case SkipReason::kBadIndex: return "bad-index";
     case SkipReason::kNoStream: return "no-stream";
+    case SkipReason::kInstanceUnsupported: return "instance-unsupported";
+    case SkipReason::kSkinUnsupported: return "skin-unsupported";
     default: return "?";
   }
 }
@@ -61,6 +66,10 @@ struct DrawRecord {
   bool deformed = false;  // the shader moves the position first; drawn undeformed
   // Positions are bone-transformed per vertex (bone_skin.h) before rows.
   BoneSkin skin;
+  // An instanced draw (instance_expand.h): vb/pos are the mesh stream; the
+  // renderer builds `instances.flat_count` positions indexed by the guest
+  // index (plus base vertex), so the index path is unchanged.
+  InstanceSet instances;
   // A heightmap terrain patch run (terrain_patch.h): no vertex or index buffer;
   // the renderer builds the grid from the heightmap.
   TerrainPatch terrain;
@@ -101,6 +110,11 @@ struct DrawInputs {
   // is active when its patch was built (heightmap handled).
   bool terrain_shader = false;
   TerrainPatch terrain;
+  // The shader is an instancing shader (vs-transforms.json "instance");
+  // `instances` is active when its set was built (rows selected, streams and
+  // constants read, range checked). vb/pos are then the mesh stream.
+  bool instance_shader = false;
+  InstanceSet instances;
   Material material;
 };
 
@@ -132,10 +146,15 @@ inline DrawRecord AssembleRecord(const DrawInputs& in, uint32_t seq) {
     if (in.vb.size == 0) return skip(SkipReason::kBadMemory);
     if (in.indexed && (uint64_t(in.start) + in.count) * (in.index32 ? 4 : 2) > in.ib.size)
       return skip(SkipReason::kBadMemory);
+    // An instancing shader whose set was not built (the table entry does not
+    // match the decoded fetches, or the capture stopped before it): the mesh
+    // stream alone is not the draw, so nothing is drawn from it.
+    if (in.instance_shader && !in.instances.active) return skip(SkipReason::kInstanceUnsupported);
   }
   if (!in.transform || !in.bank || in.transform->base_reg > 252) return skip(SkipReason::kNoTransform);
   if (terrain) r.terrain = in.terrain;
   r.skin = in.skin;
+  if (!terrain) r.instances = in.instances;
   std::memcpy(r.rows, in.bank + size_t(in.transform->base_reg) * 4, sizeof(r.rows));
   r.layout = in.transform->layout;
   r.deformed = in.transform->deformed;
@@ -148,6 +167,27 @@ inline constexpr uint32_t kMaxDrawCount = 4194304;
 // Capture-side rejection of a draw's count, checked before any index read.
 inline SkipReason CountSkip(uint32_t count) {
   return count > kMaxDrawCount ? SkipReason::kBadMemory : SkipReason::kNone;
+}
+
+// Capture-side range check of an instanced indexed draw, before it is
+// recorded (instance_expand.h). `s` has its rows, stream and constants;
+// `max_index` is the draw's largest non-reset index (-1: none) and `vertices`
+// what the mesh stream holds. The largest vertex index the shader maps
+// (max_index + base_vertex) must land inside the copies in the instance
+// stream and the mesh; garbage constants or indices are kBadIndex. On success
+// s->flat_count is the flat stream's length; one past the draw-count cap is
+// kBadMemory, so nothing larger than kMaxDrawCount positions is ever built.
+inline SkipReason InstanceRangeSkip(InstanceSet* s, int64_t max_index, int32_t base_vertex,
+                                    uint32_t vertices) {
+  s->flat_count = 0;
+  if (max_index < 0 || base_vertex < 0) return SkipReason::kBadIndex;
+  const uint64_t max = uint64_t(max_index) + uint32_t(base_vertex);
+  if (max >= 0xFFFFFFFFull || !InstanceBoundsOk(*s, uint32_t(max), InstanceCopies(*s), vertices)) {
+    return SkipReason::kBadIndex;
+  }
+  if (max >= kMaxDrawCount) return SkipReason::kBadMemory;
+  s->flat_count = uint32_t(max) + 1;
+  return SkipReason::kNone;
 }
 
 // Final skip reason: a capture-side reason (garbage count, unreadable or

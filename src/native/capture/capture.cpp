@@ -433,7 +433,7 @@ const SkinSpec* FindSkin(uint64_t hash) {
   return nullptr;
 }
 
-[[maybe_unused]] const InstanceSpec* FindInstance(uint64_t hash) {
+const InstanceSpec* FindInstance(uint64_t hash) {
   for (const InstanceEntry& e : kInstanceTable) {
     if (e.hash && e.hash == hash) return &e.spec;
   }
@@ -1431,6 +1431,15 @@ struct VsInfo {
   bool have_skin = false;
   BoneSkin skin;
   uint32_t skin_slot = 0;
+  // vs-transforms.json "instance" (the table entry is stable): the row
+  // layouts and bias (endians, stream and constants unset) and the instance
+  // stream's fetch slot; `pos` is then the mesh position (the entry's
+  // mesh_fetch is the transform's pos_fetch). instance with !have_instance =
+  // the entry does not match the decoded fetches.
+  const InstanceSpec* instance = nullptr;
+  bool have_instance = false;
+  InstanceSet instance_rows;
+  uint32_t instance_slot = 0;
   const TerrainSpec* terrain = nullptr;  // vs-transforms.json "terrain"
   // vs-transforms.json "uv" per interpolator component (FindVsUv), and the
   // decoded vertex fetches its fetch_index refers to (ResolveUvFetch).
@@ -1449,6 +1458,11 @@ void FillShader(VsInfo& e, const uint32_t* ucode, size_t dwords, uint64_t hash) 
   if (const SkinSpec* spec = FindSkin(hash)) {
     e.skin_required = true;
     e.have_skin = e.have_pos && SelectSkin(fetches, *spec, e.pos, &e.skin, &e.skin_slot);
+  }
+  e.instance = FindInstance(hash);
+  if (e.instance) {
+    e.have_instance = e.have_pos && SelectInstanceRows(fetches, *e.instance, e.pos.fetch_slot,
+                                                       &e.instance_rows, &e.instance_slot);
   }
   e.terrain = FindTerrain(hash);
   for (uint8_t i = 0; i < 16; ++i) {
@@ -1542,6 +1556,55 @@ struct DrawShaders {
   const VsInfo* vs = nullptr;
 };
 
+// Builds the instance set of an indexed draw of an instancing shader
+// (vs-transforms.json "instance", instance_expand.h): the instance stream
+// behind the rows' fetch slot, the constants the entry names (through t_bank)
+// and the range check on the draw's largest index (`scan`); `vertices` is
+// what the mesh stream holds. in.instances becomes active only when all of it
+// holds. Returns why not: kNone when the entry does not match the shader's
+// fetches (AssembleRecord then gives instance-unsupported), bad-index for
+// garbage constants or indices, bad-memory for unreadable constants or a flat
+// stream over the draw-count cap.
+SkipReason FillInstanceSet(uint32_t device, const DeviceSnapshot& dev, const VsInfo& vs,
+                           const IndexScan& scan, uint32_t vertices, DrawInputs& in) {
+  if (!vs.have_instance) return SkipReason::kNone;
+  const InstanceSpec& spec = *vs.instance;
+  InstanceSet set = vs.instance_rows;
+  StreamView rows;
+  if (ResolveStream(dev, vs.instance_slot, &rows) || !rows.fc_match) {
+    return SkipReason::kInstanceUnsupported;
+  }
+  for (PosLayout& row : set.rows) {
+    if (!ApplyFetchEndian(&row, rows.fc1 & 3)) return SkipReason::kInstanceUnsupported;
+  }
+  set.rows_addr = rows.base + rows.offset;
+  set.rows_size = rows.size - rows.offset;
+  // Constant references are register * 4 + component; the offset's y and z
+  // follow its x. Only the registers named are converted.
+  if (spec.offset_ref < 0 || spec.offset_ref > 1021) return SkipReason::kInstanceUnsupported;
+  const struct {
+    int32_t ref;
+    float* out;
+  } consts[] = {{spec.inv_count_ref, &set.inv_count}, {spec.count_ref, &set.count},
+                {spec.first_ref, &set.first},         {spec.offset_ref, &set.offset[0]},
+                {spec.offset_ref + 1, &set.offset[1]}, {spec.offset_ref + 2, &set.offset[2]}};
+  uint32_t have_reg = 256;  // the register t_bank was last filled for
+  for (const auto& c : consts) {
+    if (c.ref < 0 || c.ref >= 1024) return SkipReason::kInstanceUnsupported;
+    const uint32_t reg = uint32_t(c.ref) / 4;
+    if (reg != have_reg && !ReadBankRegisters(device, reg, 1)) return SkipReason::kBadMemory;
+    have_reg = reg;
+    *c.out = t_bank[c.ref];
+  }
+  // Sets flat_count; the draw-count cap on the flat stream is enforced here.
+  if (const SkipReason why = InstanceRangeSkip(&set, scan.max_index, in.base_vertex, vertices);
+      why != SkipReason::kNone) {
+    return why;
+  }
+  in.instances = set;
+  return SkipReason::kNone;
+}
+
 // Fills `in` for DrawIndexedVertices / DrawVertices (prim and counts already
 // set). Returns a skip reason AssembleRecord does not check (garbage counts,
 // indices outside the position stream), or kNone.
@@ -1557,6 +1620,9 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders)
   in.have_shader = true;
   in.vs_hash = vs->hash;
   in.transform = vs->transform;
+  // An instancing shader: `pos` is the mesh position; the draw is recorded
+  // only with its instance set (FillInstanceSet).
+  in.instance_shader = vs->instance != nullptr;
   if (!vs->have_pos) return SkipReason::kNone;
   in.pos = vs->pos;
   in.have_pos = true;
@@ -1579,14 +1645,20 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders)
     // 8in16 or 32-bit words with 8in32 (every sampled buffer is 8in16).
     if (ib.endian != (ib.index32 ? 2u : 1u)) return SkipReason::kBadIndex;
     // Indices that reach past the position stream (pos_suspect: instanced
-    // draws whose first fetch is per-instance data) or are unreadable.
+    // draws whose first fetch is per-instance data) or are unreadable. An
+    // instancing shader's index names a copy and a mesh vertex instead: its
+    // range check is the instance set's.
     IndexScan scan;
     if (!ScanIndices(ib, in.start, in.count, &scan)) {
       extra = SkipReason::kBadMemory;
+    } else if (in.instance_shader) {
+      extra = FillInstanceSet(device, dev, *vs, scan, vertices, in);
     } else if (scan.max_index >= 0 &&
                (scan.max_index + in.base_vertex >= int64_t(vertices) || in.base_vertex < 0)) {
       extra = SkipReason::kBadIndex;
     }
+  } else if (in.instance_shader) {
+    extra = SkipReason::kInstanceUnsupported;  // the index encodes the copy: no index, no instancing
   } else if (uint64_t(in.start) + in.count > vertices) {
     extra = SkipReason::kBadIndex;
   }
@@ -1705,6 +1777,9 @@ void FillMaterial(uint32_t device, const DrawShaders& shaders, DrawInputs& in) {
       !sv.fc_match || !ApplyUvEndian(&uv, sv.fc1 & 3)) {
     return;
   }
+  // An instanced draw's flat UVs are the mesh vertex's (ExpandInstanceUvs):
+  // the UV element must sit in the mesh stream, not the per-instance one.
+  if (in.instance_shader && uv.fetch_slot != in.pos.fetch_slot) return;
   // Constants named by the four stage lists, then the albedo fetch constant.
   // t_bank: only the named registers are written, the transform rows stay.
   bool ok = true;
@@ -1958,6 +2033,7 @@ void LogShaderBreakdown(const render::FrameScene& sc) {
   for (const DrawRecord& r : sc.draws) drawable.Add(r.vs_hash, 0);
   const std::string top = FormatTop(drawable, 0, kTopDrawable, [](uint64_t hash) {
     if (FindTerrain(hash)) return "(terrain)";
+    if (FindInstance(hash)) return "(instanced)";
     if (FindSkin(hash)) return "(skin)";
     const TransformInfo* t = FindTransform(hash);
     return t && t->deformed ? "(deformed)" : "";

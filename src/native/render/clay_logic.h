@@ -32,6 +32,9 @@ struct ClayStats {
   // Renderer-side skips other than bad indices: unreadable guest memory, a
   // failed decode or upload, or an empty triangle list.
   uint32_t skipped_other = 0;
+  // Records whose positions came from the instanced (flat stream) and the
+  // bone-skinned builders this frame, cache hits included.
+  uint32_t instanced = 0, skinned = 0;
 };
 
 // Albedo texture counters of one clay frame (TextureCache and the clay pass).
@@ -95,13 +98,14 @@ inline uint32_t PositionCount(uint32_t vb_size, const capture::PosLayout& l) {
   return uint32_t((vb_size - need) / l.stride_bytes + 1);
 }
 
-// Vertices the record's position buffer holds: the terrain grid points, or
-// every position in the stream.
+// Vertices the record's position buffer holds: the terrain grid points, an
+// instanced draw's flat stream, or every position in the stream.
 inline uint32_t RecordVertexCount(const capture::DrawRecord& r) {
   if (r.terrain.active) {
     constexpr uint32_t kPoints = (capture::kTerrainGrid + 1) * (capture::kTerrainGrid + 1);
     return r.terrain.patches * kPoints;
   }
+  if (r.instances.active) return r.instances.flat_count;
   return PositionCount(r.vb.size, r.pos);
 }
 
@@ -117,10 +121,22 @@ inline uint32_t LayoutHash(const capture::PosLayout& l) {
                         l.stride_bytes});
 }
 
+// Everything of an instance set that changes the flat stream built from a
+// mesh: the instance stream's range and row layouts, the four index constants,
+// the offset and the flat count (the content hash covers both streams' bytes).
+inline uint32_t InstanceHash(const capture::InstanceSet& s) {
+  return HashCombine32({s.rows_addr, s.rows_size, LayoutHash(s.rows[0]), LayoutHash(s.rows[1]),
+                        LayoutHash(s.rows[2]), FloatBits(s.inv_count), FloatBits(s.count),
+                        FloatBits(s.first), FloatBits(s.bias), FloatBits(s.offset[0]),
+                        FloatBits(s.offset[1]), FloatBits(s.offset[2]), s.flat_count});
+}
+
 // Cache key of a decoded position stream: the stream plus every layout field
 // that changes the decode (the content hash covers the raw bytes only). A
 // skinned stream adds its bone layout and palette range (kind 0); a terrain
-// patch run is keyed by its heightmap and every patch parameter (kind 2).
+// patch run is keyed by its heightmap and every patch parameter (kind 2); an
+// instanced draw's flat stream is keyed by its mesh stream and its instance
+// set (kind 5).
 inline GeoKey PositionKey(const capture::DrawRecord& r) {
   GeoKey k;
   if (r.terrain.active) {
@@ -143,6 +159,11 @@ inline GeoKey PositionKey(const capture::DrawRecord& r) {
   k.size = r.vb.size;
   k.stride = l.stride_bytes;
   k.extra = LayoutHash(l);
+  if (r.instances.active) {
+    k.extra = HashCombine32({k.extra, InstanceHash(r.instances)});
+    k.kind = 5;
+    return k;
+  }
   if (r.skin.active) {
     const capture::BoneSkin& s = r.skin;
     k.extra = HashCombine32({k.extra, s.bones, s.index_offset_bytes, s.index_shift[0], s.index_shift[1],
@@ -174,7 +195,8 @@ inline GeoKey IndexKey(const capture::DrawRecord& r) {
 
 // Cache key of a decoded UV stream (kind 4; kind 3 is the terrain grid's
 // index list): the stream holding the UV element plus every layout field that
-// changes the decode.
+// changes the decode. An instanced draw's flat UVs (kind 6) add its instance
+// set, like its flat positions.
 inline GeoKey UvKey(const capture::DrawRecord& r) {
   const capture::Material& m = r.material;
   const capture::UvLayout& l = m.uv;
@@ -186,6 +208,10 @@ inline GeoKey UvKey(const capture::DrawRecord& r) {
                            uint32_t(l.comp_v), uint32_t(l.swap16), uint32_t(l.normalized),
                            uint32_t(l.is_signed), uint32_t(l.exp_adjust)});
   k.kind = 4;
+  if (r.instances.active) {
+    k.extra = HashCombine32({k.extra, InstanceHash(r.instances)});
+    k.kind = 6;
+  }
   return k;
 }
 
@@ -321,10 +347,10 @@ inline std::string FormatStatusText(const FrameScene& scene, const ClayStats& st
   }
   char geo[256];
   std::snprintf(geo, sizeof(geo),
-                "\nGeometry: %u uploads, %u hits, %.1f MB resident | hash %.2f ms, decode %.2f ms, "
-                "record %.2f ms\nCapture: %.2f ms guest time per frame",
-                st.uploads, st.hits, double(st.resident_bytes) / (1024.0 * 1024.0), st.hash_ms,
-                st.decode_ms, st.record_ms, scene.capture_ms);
+                "\nGeometry: %u uploads, %u hits, %.1f MB resident, instanced %u, skinned %u | "
+                "hash %.2f ms, decode %.2f ms, record %.2f ms\nCapture: %.2f ms guest time per frame",
+                st.uploads, st.hits, double(st.resident_bytes) / (1024.0 * 1024.0), st.instanced,
+                st.skinned, st.hash_ms, st.decode_ms, st.record_ms, scene.capture_ms);
   return text + geo + "\n" + (tex ? FormatTextureText(*tex, st.drawn) : std::string("Textures: off"));
 }
 

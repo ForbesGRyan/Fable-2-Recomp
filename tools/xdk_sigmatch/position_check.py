@@ -2,6 +2,7 @@
 
   position_check.py <capture.jsonl> --json docs\\native-renderer\\vs-transforms.json
                     [--entry <file.json>] [--vs <HASH>] [--max-draws 200] [--cpp-fixture <HASH>]
+                    [--bones <N>]
 
 For every vertex shader with a transform entry, the positions of each sampled in-scene
 draw's first indices (row "idx", at most 512) are built the way the native renderer builds
@@ -18,13 +19,21 @@ off screen: the threshold is the in-clip share of the trusted shader 0xECD66A100
 the same capture (the table's own entry, same sampling) minus 0.10, never below 0.60, and
 0.75 when the capture has no draws of it. A skin entry must also pass two structural
 checks, since a wrong skin of a small on-screen object stays inside the clip volume:
-  bone ortho max  over the bones the sampled vertices use, the largest deviation of the
-                  bone's 3x3 part from orthonormal under the entry's row swizzles
-                  (| |row| - 1 | and |row_i . row_j|); pass at <= 0.05
-  edge ok share   over the distinct triangle edges of the sampled draws (triangle lists,
-                  fans and strips, cut at restart indices), the share whose skinned length
-                  is 0.5 to 2.0 times the bind-pose length; pass at >= 0.98
-Every line ends its threshold with the verdict, ACCEPT or REJECT.
+  bone ortho share  the share of bone uses whose bone is orthonormal: the deviation of its
+                    3x3 part under the entry's row swizzles (the largest of | |row| - 1 |
+                    and |row_i . row_j|) is at most 0.05; pass at >= 0.98. A bone use is
+                    one palette bone that one sampled draw's vertices reference with a
+                    nonzero weight: a bone counts once per draw, however many of the
+                    draw's vertices use it, and again in every other draw that uses it.
+                    The largest deviation is printed too ("max") but is not a gate: the
+                    game scales single bones on purpose, while a wrong row order or
+                    swizzle breaks nearly every bone.
+  edge ok share     over the distinct triangle edges of the sampled draws (triangle lists,
+                    fans and strips, cut at restart indices), the share whose skinned
+                    length is 0.5 to 2.0 times the bind-pose length; pass at >= 0.98
+Every line ends its threshold with the verdict, ACCEPT or REJECT. --bones N lists, under a
+skin entry's line, its N bone uses that deviate most (frame, vertex stream, index range,
+bone, row lengths).
 
 An instance entry with a distance cut ("cut": the game's shader gives a NaN position to a vertex
 whose flat position is farther from the eye constant than the square root of the distance
@@ -61,7 +70,8 @@ BASELINE_VS = "0xECD66A10092E6562"   # trusted plain shader: its in-clip share i
 BASELINE_MARGIN = 0.10               # accept at the baseline share minus this ...
 THRESHOLD_FLOOR = 0.60               # ... and never below this
 THRESHOLD_FALLBACK = 0.75            # the capture has no baseline draws
-ORTHO_MAX = 0.05                     # skin: bone orthonormality
+ORTHO_MAX = 0.05                     # skin: a bone within this of orthonormal is orthonormal
+ORTHO_SHARE_MIN = 0.98               # skin: share of bone uses that must be orthonormal
 EDGE_RATIO = (0.5, 2.0)              # skin: skinned / bind-pose edge length
 EDGE_OK_MIN = 0.98                   # skin: share of edges within EDGE_RATIO
 EDGE_MIN_LENGTH = 1e-6               # bind-pose edges shorter than this are not measured
@@ -641,25 +651,38 @@ def _row_triangles(row):
 
 
 def accepted(r, threshold):
-    """The verdict: the in-clip share reaches the capture's threshold and, for a skin entry, the bones
-    used are orthonormal within ORTHO_MAX and at least EDGE_OK_MIN of the edges keep their length."""
+    """The verdict: the in-clip share reaches the capture's threshold and, for a skin entry, at least
+    ORTHO_SHARE_MIN of the bone uses are orthonormal within ORTHO_MAX and at least EDGE_OK_MIN of the
+    edges keep their length. The largest bone deviation is reported, not judged."""
     if r["kind"] == "error" or not r["draws"] or r["share"] < threshold - 1e-9:
         return False
     if r["kind"] != "skin":
         return True
-    return (r["bone_ortho_max"] is not None and r["bone_ortho_max"] <= ORTHO_MAX and
+    return (r["bone_ortho_share"] is not None and r["bone_ortho_share"] >= ORTHO_SHARE_MIN - 1e-9 and
             r["edge_ok_share"] is not None and r["edge_ok_share"] >= EDGE_OK_MIN - 1e-9)
 
 
-def _judge(f, capture_path, key, spec, offsets, max_draws, read, want_fixture):
-    """Replays one shader's sampled draws (`max_draws` rows spread evenly over `offsets`)."""
+def _bone_use(row, info, bone, rows, deviation):
+    """One bone use for the --bones listing: where it is and what its rows look like."""
+    vb = row.get("vb") or {}
+    ib = row.get("ib") or {}
+    return {"deviation": deviation, "frame": row.get("frame"), "vb": vb.get("phys_addr"), "start": ib.get("start"),
+            "count": ib.get("count"), "bone": bone, "palette_bones": info["palette_bones"],
+            "row_lengths": [math.sqrt(sum(x * x for x in r[:3])) for r in rows]}
+
+
+def _judge(f, capture_path, key, spec, offsets, max_draws, read, want_fixture, worst_bones=0):
+    """Replays one shader's sampled draws (`max_draws` rows spread evenly over `offsets`). With
+    `worst_bones` the result of a skin entry also holds "bone_worst": its bone uses that deviate most
+    from orthonormal, worst first."""
     r = {"kind": spec["kind"], "rows": len(offsets), "draws": 0, "passed": 0, "share": 0.0, "unreadable": 0,
          "unsupported": 0, "bad_index": 0, "reasons": {}}
     if spec.get("cut_eye", -1) >= 0:
         r.update(cut=0, kept_vertices=0, sampled_vertices=0)
     if spec["kind"] == "skin":
-        r.update(bone_ortho_max=None, edge_ok_share=None, edges=0, edge_ok=0, edge_nan=0, edge_draws=0)
-    weight_sums, per_copy, fixture = [], [], None
+        r.update(bone_ortho_max=None, bone_ortho_share=None, bone_uses=0, bone_ortho_ok=0, edge_ok_share=None,
+                 edges=0, edge_ok=0, edge_nan=0, edge_draws=0)
+    weight_sums, per_copy, fixture, worst = [], [], None, []
     n = min(max(int(max_draws), 0), len(offsets))
     for k in range(n):
         f.seek(offsets[k * len(offsets) // n])
@@ -693,8 +716,16 @@ def _judge(f, capture_path, key, spec, offsets, max_draws, read, want_fixture):
             weight_sums += info["weight_sums"]
             if info["bone_max"] > r.get("bone_max", -1) or "palette_bones" not in r:
                 r["bone_max"], r["palette_bones"] = info["bone_max"], info["palette_bones"]
-            for bone in info["bones_used"].values():
-                r["bone_ortho_max"] = max(r["bone_ortho_max"] or 0.0, bone_ortho(bone))
+            # One bone use per bone the draw's sampled vertices reference with a nonzero weight.
+            for bone, bone_rows in info["bones_used"].items():
+                deviation = bone_ortho(bone_rows)
+                r["bone_uses"] += 1
+                r["bone_ortho_ok"] += deviation <= ORTHO_MAX
+                r["bone_ortho_max"] = max(r["bone_ortho_max"] or 0.0, deviation)
+                if worst_bones > 0:
+                    worst.append(_bone_use(row, info, bone, bone_rows, deviation))
+            if len(worst) > 4 * max(worst_bones, 64):               # keep the list short while scanning
+                worst = sorted(worst, key=lambda u: -u["deviation"])[:worst_bones]
             tris = _row_triangles(row)
             if tris is not None:
                 ok, measured, nan = edge_stats(tris, info["flat"], info["bind"], positions)
@@ -710,6 +741,10 @@ def _judge(f, capture_path, key, spec, offsets, max_draws, read, want_fixture):
     r["share"] = r["passed"] / r["draws"] if r["draws"] else 0.0
     if r.get("edges"):
         r["edge_ok_share"] = r["edge_ok"] / r["edges"]
+    if r.get("bone_uses"):
+        r["bone_ortho_share"] = r["bone_ortho_ok"] / r["bone_uses"]
+    if spec["kind"] == "skin" and worst_bones > 0:
+        r["bone_worst"] = sorted(worst, key=lambda u: -u["deviation"])[:worst_bones]
     if weight_sums:
         r["weight_sum_min"], r["weight_sum_max"] = min(weight_sums), max(weight_sums)
         r["weight_sum_median"] = statistics.median(weight_sums)
@@ -720,10 +755,12 @@ def _judge(f, capture_path, key, spec, offsets, max_draws, read, want_fixture):
     return r
 
 
-def check(capture_path, entries, max_draws=200, only_vs=None, index=None, fixture_vs=None, baseline_entries=None):
+def check(capture_path, entries, max_draws=200, only_vs=None, index=None, fixture_vs=None, baseline_entries=None,
+          worst_bones=0):
     """Replays every entry on its sampled in-scene draws: entry key -> {kind, rows, draws, passed,
-    share, accepted, unreadable, unsupported, bad_index, ...}; a skin entry also has bone_ortho_max,
-    edge_ok_share, edges, edge_nan and edge_draws. "_baseline" holds the capture's acceptance
+    share, accepted, unreadable, unsupported, bad_index, ...}; a skin entry also has bone_uses,
+    bone_ortho_ok, bone_ortho_share, bone_ortho_max, edge_ok_share, edges, edge_nan and edge_draws, and
+    with `worst_bones` "bone_worst" (its bone uses that deviate most). "_baseline" holds the capture's acceptance
     threshold: {"share", "threshold", "draws", "fallback"}, from the BASELINE_VS entry of
     `baseline_entries` (the table; default `entries`) under the same sampling. With `fixture_vs` the
     result of that shader also holds "fixture": the C++ text of one of its draws."""
@@ -749,7 +786,7 @@ def check(capture_path, entries, max_draws=200, only_vs=None, index=None, fixtur
                      "unreadable": 0, "unsupported": 0, "bad_index": 0}
             else:
                 r = _judge(f, capture_path, key, spec, offsets, max_draws, read,
-                           fixture_vs is not None and h == _hash(fixture_vs))
+                           fixture_vs is not None and h == _hash(fixture_vs), worst_bones)
             r["accepted"] = accepted(r, baseline["threshold"])
             report[key] = r
     return report
@@ -878,7 +915,9 @@ def format_line(key, r, threshold):
             f"passed {r['passed']}, unreadable {r['unreadable']}, unsupported {r['unsupported']}, "
             f"bad-index {r['bad_index']}, rows {r['rows']}")
     if r["kind"] == "skin":
-        line += (f", bone ortho max {number(r['bone_ortho_max'])} (<= {ORTHO_MAX:.2f}), edge ok share "
+        share = "n/a" if r["bone_ortho_share"] is None else f"{r['bone_ortho_share']:.4f}"
+        line += (f", bone ortho share {share} ({r['bone_ortho_ok']} of {r['bone_uses']}, >= {ORTHO_SHARE_MIN:.2f}), "
+                 f"max {number(r['bone_ortho_max'])}, edge ok share "
                  f"{number(r['edge_ok_share'])} (>= {EDGE_OK_MIN:.2f}) of {r['edges']} edges, edge nan {r['edge_nan']}, "
                  f"edge draws {r['edge_draws']}")
     if "weight_sum_median" in r:
@@ -898,6 +937,17 @@ def format_line(key, r, threshold):
     return line
 
 
+def format_bones(worst):
+    """The --bones lines: one bone use each, worst first."""
+    def hexa(x):
+        return "?" if x is None else f"0x{x:08X}"
+
+    return [f"  bone use: deviation {u['deviation']:.3f}, frame {u['frame'] if u['frame'] is not None else '?'}, "
+            f"vb {hexa(u['vb'])}, indices {u['start'] if u['start'] is not None else '?'}+"
+            f"{u['count'] if u['count'] is not None else '?'}, bone {u['bone']} of {u['palette_bones']}, "
+            f"row lengths {' '.join(f'{x:.3f}' for x in u['row_lengths'])}" for u in worst]
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("capture")
@@ -906,18 +956,22 @@ def main(argv=None):
     ap.add_argument("--vs", help="check only this vertex shader hash")
     ap.add_argument("--max-draws", type=int, default=200, help="draws sampled per shader, spread over the capture")
     ap.add_argument("--cpp-fixture", metavar="HASH", help="print C++ arrays for one sampled draw of this shader")
+    ap.add_argument("--bones", type=int, default=0, metavar="N",
+                    help="list each skin entry's N bone uses that deviate most from orthonormal")
     a = ap.parse_args(argv)
     table = json.loads(Path(a.json).read_text())
     entries = dict(table)
     if a.entry:
         entries.update(json.loads(Path(a.entry).read_text()))
     index = scan(a.capture)
-    report = check(a.capture, entries, a.max_draws, a.vs, index, a.cpp_fixture, table)
+    report = check(a.capture, entries, a.max_draws, a.vs, index, a.cpp_fixture, table, max(a.bones, 0))
     baseline = report.pop("_baseline")
     print(format_baseline(baseline))
     seen = {k: r for k, r in report.items() if r["rows"]}
     for key, r in sorted(seen.items(), key=lambda kv: -kv[1]["rows"]):
         print(format_line(key, r, baseline["threshold"]))
+        for line in format_bones(r.get("bone_worst") or []):
+            print(line)
     missing = {} if a.vs else unlisted(a.capture, entries, index)
     for key, rows in missing.items():
         print(f"VS {key} no entry: rows {rows}")

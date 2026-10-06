@@ -371,7 +371,8 @@ class CliTest(Base):
                          "baseline 0xECD66A10092E6562: no draws in this capture, accept >= 0.750 (fallback)")
         # One vertex and no primitive type: no edge to judge the skin by.
         self.assertIn("VS 0x00000000000000CC skin: draws 1, in-clip share 1.000 (accept >= 0.750) REJECT", text)
-        self.assertIn("bone ortho max 0.000 (<= 0.05), edge ok share n/a (>= 0.98) of 0 edges, edge nan 0", text)
+        self.assertIn("bone ortho share 1.0000 (2 of 2, >= 0.98), max 0.000, edge ok share n/a (>= 0.98) of 0 edges, "
+                      "edge nan 0", text)
         self.assertIn("weight sum min/median/max 1.000/1.000/1.000", text)
         self.assertIn("bone index max 1 / palette bones 2", text)
         self.assertIn("VS 0x00000000000000DD no entry: rows 1", text)
@@ -522,15 +523,16 @@ class SkinStructureTest(Base):
         same = [bind[0], bind[0], bind[2], bind[3]]
         self.assertEqual(pc.edge_stats([(0, 1, 2)], [7, 8, 9, 10], same, moved), (2, 2, 0))
 
-    def triangle(self, bones, palette, prim="0x00000004", idx=(0, 1, 2)):
-        """A small right triangle; vertex k is rigidly bound to palette bone bones[k]."""
+    def triangle(self, bones, palette, prim="0x00000004", idx=(0, 1, 2), phys=0):
+        """A small right triangle; vertex k is rigidly bound to palette bone bones[k]. `phys` moves the
+        row's streams, so rows with other bytes can share a capture."""
         vb = b"".join(be_floats(x, y, 0, 1) + struct.pack(">I", bone)
                       for (x, y), bone in zip(((0, 0), (0.1, 0), (0, 0.1)), bones))
         pal = b"".join(be_floats(*r) for bone in palette for r in bone)
         fetches = [fetch(0, 95, 38, 0, 5), fetch(1, 95, 6, 4, 5, norm=False, mini=True),
                    fetch(2, 92, 38, 0, 12), fetch(3, 92, 38, 4, 12, mini=True), fetch(4, 92, 38, 8, 12, mini=True)]
-        row = self.row("0xCCCC", fetches, [self.stream(95, 0x4000, vb, 20), self.stream(92, 0x5000, pal, 48)],
-                       list(idx))
+        row = self.row("0xCCCC", fetches, [self.stream(95, 0x4000 + phys, vb, 20),
+                                           self.stream(92, 0x5000 + phys, pal, 48)], list(idx))
         row["args"] = [prim, "0x00000000", "0x00000000", "0x00000003"]
         return row
 
@@ -552,6 +554,7 @@ class SkinStructureTest(Base):
         sheared = [(1, 0.5, 0, 0.3), (0, 1, 0, 0), (0, 0, 1, 0)]
         r = self.result(self.triangle((1, 1, 1), [translation(0), sheared, [(9, 9, 9, 9)] * 3]))
         self.assertAlmostEqual(r["bone_ortho_max"], 0.5)               # bone 2 is not referenced: not judged
+        self.assertEqual((r["bone_uses"], r["bone_ortho_ok"], r["bone_ortho_share"]), (1, 0, 0.0))
         self.assertEqual((r["passed"], r["edge_ok_share"], r["accepted"]), (1, 1.0, False))
 
     def test_orthonormality_is_judged_under_the_row_swizzles(self):
@@ -562,6 +565,73 @@ class SkinStructureTest(Base):
         entry["skin"]["row_swizzles"] = ["yzwx", "yzwx", "yzwx"]
         r = self.result(row, entry)
         self.assertEqual((r["bone_ortho_max"], r["edge_ok_share"], r["accepted"]), (0.0, 1.0, True))
+        self.assertEqual((r["bone_uses"], r["bone_ortho_ok"], r["bone_ortho_share"]), (1, 1, 1.0))
+
+    # --- Orthonormality by share of bone uses (a bone use: one palette bone that one sampled draw's
+    # vertices reference with a nonzero weight) ---
+
+    SCALED = [(0.6, 0, 0, 0.3), (0, 1, 0, 0), (0, 0, 1, 0)]      # x scaled to 0.6: deviation 0.4, edges kept
+
+    def uses(self, good, scaled):
+        """A capture of `good` draws on an orthonormal bone and `scaled` draws on the scaled one (one bone
+        use each), judged as one shader."""
+        palette = [translation(0.3), self.SCALED]
+        rows = [self.triangle((0, 0, 0), palette)] * good + [self.triangle((1, 1, 1), palette, phys=0x100)] * scaled
+        return pc.check(self.capture(rows), {"0xCCCC": self.ENTRY})["0xCCCC"]
+
+    def test_one_scaled_bone_among_many_is_accepted_and_the_maximum_reported(self):
+        r = self.uses(99, 1)
+        self.assertEqual((r["draws"], r["passed"], r["edge_ok_share"]), (100, 100, 1.0))
+        self.assertEqual((r["bone_uses"], r["bone_ortho_ok"]), (100, 99))
+        self.assertAlmostEqual(r["bone_ortho_share"], 0.99)
+        self.assertAlmostEqual(r["bone_ortho_max"], 0.4)
+        self.assertTrue(r["accepted"])
+        line = pc.format_line("0xCCCC", r, 0.75)
+        self.assertIn("ACCEPT", line)
+        self.assertIn("bone ortho share 0.9900 (99 of 100, >= 0.98), max 0.400, edge ok share 1.000", line)
+
+    def test_most_bones_failing_is_rejected_on_the_share(self):
+        # Everything else passes (in clip, edges kept): the share alone rejects.
+        r = self.uses(3, 7)
+        self.assertEqual((r["passed"], r["edge_ok_share"]), (10, 1.0))
+        self.assertAlmostEqual(r["bone_ortho_share"], 0.3)
+        self.assertFalse(r["accepted"])
+        self.assertIn("REJECT", pc.format_line("0xCCCC", r, 0.75))
+        # Rows stored translation first and read as fetched (scrambled): every bone use fails.
+        stored = [(0.3, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1)]
+        rows = [self.triangle((0, 0, 0), [stored, stored]), self.triangle((1, 1, 1), [stored, stored], phys=0x100)]
+        r = pc.check(self.capture(rows), {"0xCCCC": self.ENTRY})["0xCCCC"]
+        self.assertEqual((r["bone_uses"], r["bone_ortho_ok"], r["bone_ortho_share"], r["accepted"]), (2, 0, 0.0, False))
+
+    def test_the_share_boundary(self):
+        self.assertEqual(pc.ORTHO_SHARE_MIN, 0.98)
+        r = self.uses(49, 1)                                         # 49 of 50 = 0.98 exactly: passes
+        self.assertAlmostEqual(r["bone_ortho_share"], 0.98)
+        self.assertTrue(r["accepted"])
+        r = self.uses(48, 1)                                         # 48 of 49 = 0.9796: fails
+        self.assertLess(r["bone_ortho_share"], 0.98)
+        self.assertFalse(r["accepted"])
+
+    def test_a_bone_is_counted_once_per_draw_and_only_with_a_nonzero_weight(self):
+        # Three vertices on bones 0, 0 and 1: two bone uses; palette bone 2 is not referenced.
+        r = self.result(self.triangle((0, 0, 1), [translation(0.3), translation(0.3), [(9, 9, 9, 9)] * 3]))
+        self.assertEqual((r["bone_uses"], r["bone_ortho_ok"]), (2, 2))
+
+    def test_worst_bone_uses_are_listed(self):
+        palette = [translation(0.3), self.SCALED]
+        good = self.triangle((0, 0, 0), palette)
+        bad = dict(self.triangle((1, 1, 1), palette, phys=0x100), frame=7)
+        rep = pc.check(self.capture([good, bad, good]), {"0xCCCC": self.ENTRY}, worst_bones=2)
+        worst = rep["0xCCCC"]["bone_worst"]
+        self.assertEqual(len(worst), 2)
+        self.assertAlmostEqual(worst[0]["deviation"], 0.4)
+        self.assertEqual((worst[0]["frame"], worst[0]["bone"], worst[0]["palette_bones"]), (7, 1, 2))
+        self.assertEqual([round(x, 3) for x in worst[0]["row_lengths"]], [0.6, 1.0, 1.0])
+        self.assertEqual(worst[1]["deviation"], 0.0)
+        text = pc.format_bones(worst)
+        self.assertIn("deviation 0.400, frame 7, ", text[0])
+        self.assertIn("bone 1 of 2, row lengths 0.600 1.000 1.000", text[0])
+        self.assertNotIn("bone_worst", pc.check(self.capture([good, bad]), {"0xCCCC": self.ENTRY})["0xCCCC"])
 
     def test_strip_with_a_restart_index_in_the_row(self):
         row = self.triangle((1, 1, 1), [translation(0), translation(0.3)], "0x00000006", (0, 1, 2, -1, 2, 1, 0))
@@ -594,7 +664,7 @@ class SkinStructureTest(Base):
         r = self.result(self.triangle((1, 1, 2), [translation(0), translation(0.3), translation(0.9)]))
         line = pc.format_line("0xCCCC", r, 0.75)
         self.assertIn("in-clip share 1.000 (accept >= 0.750) REJECT", line)
-        self.assertIn("bone ortho max 0.000 (<= 0.05)", line)
+        self.assertIn("bone ortho share 1.0000 (2 of 2, >= 0.98), max 0.000, edge ok share", line)
         self.assertIn("edge ok share 0.333 (>= 0.98) of 3 edges, edge nan 0", line)
 
 

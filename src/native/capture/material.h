@@ -4,6 +4,7 @@
 // texture's fetch constant, the UV element and a per-draw UV scale/offset
 // folded from shader constants (ps-albedo.json, vs-transforms.json "uv").
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -47,15 +48,30 @@ inline const char* MaterialStatusName(MaterialStatus s) {
 
 // Where the pixel shader's output alpha comes from (ps-albedo.json "alpha"): the literal 1, a
 // component of the albedo fetch, or a component of another 2D fetch at the same UV. scale_ref
-// is the pixel constant component the alpha is multiplied by, register * 4 + component (no
-// bank or negate bit: always a pixel constant), -1 for none.
+// are up to two pixel constant components the alpha is multiplied by, register * 4 + component
+// (no bank or negate bit: always pixel constants), -1 for none. divide_colour: the shader divides
+// its colour by the alpha, so the sampled colour is premultiplied by it.
 enum class AlphaSource : uint8_t { kNone, kOne, kAlbedo, kFetch };
 
 struct AlphaSpec {
   AlphaSource source = AlphaSource::kNone;
   uint8_t slot = 0, component = 3;  // texture fetch constant slot; 0-3 = x-w
-  int32_t scale_ref = -1;
+  int32_t scale_ref[2] = {-1, -1};
+  bool divide_colour = false;
 };
+
+// The product of `n` (0 to 2) constants read for an alpha recipe's scale. False, leaving *out
+// untouched, if any is not finite or the product overflows.
+inline bool ComposeAlphaScale(const float* consts, int n, float* out) {
+  float p = 1.0f;
+  for (int i = 0; i < n; ++i) {
+    if (!std::isfinite(consts[i])) return false;
+    p *= consts[i];
+  }
+  if (!std::isfinite(p)) return false;
+  *out = p;
+  return true;
+}
 
 // ps-albedo.json "kind": what the shader draws (terrain entries get texture slots later).
 enum class MaterialKind : uint8_t { kPlain, kTerrainLayer, kTerrainFar };

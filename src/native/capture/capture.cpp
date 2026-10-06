@@ -376,7 +376,7 @@ const std::vector<AlbedoSpec> kAlbedoTable = {
 #define FABLE2_PS_ALBEDO(H, SL, UI, UC, US0, UO0, US1, UO1, VI, VC, VS0, VO0, VS1, VO1) \
   {H, int8_t(SL), UI, UC, VI, VC, {{US0, UO0}, {US1, UO1}}, {{VS0, VO0}, {VS1, VO1}}},
 #define FABLE2_PS_NO_ALBEDO(H) {H, int8_t(-1), 0, 0, 0, 0, {}, {}},
-#define FABLE2_PS_ALPHA(H, S, SL, C, SR)
+#define FABLE2_PS_ALPHA(H, S, SL, C, SR0, SR1, DC)
 #define FABLE2_PS_KIND(H, K)
 #include "ps_albedo_table.inc"
 #undef FABLE2_PS_ALBEDO
@@ -386,7 +386,7 @@ const std::vector<AlbedoSpec> kAlbedoTable = {
 };
 
 // Alpha recipe per pixel shader hash (ps-albedo.json "alpha"); the source is the generated
-// 0 one, 1 albedo, 2 fetch, scale_ref is the pixel constant register * 4 + component or -1.
+// 0 one, 1 albedo, 2 fetch; the two scale refs are pixel constant register * 4 + component or -1.
 struct PsAlphaEntry {
   uint64_t ps_hash;
   AlphaSpec spec;
@@ -394,8 +394,8 @@ struct PsAlphaEntry {
 const std::vector<PsAlphaEntry> kAlphaTable = {
 #define FABLE2_PS_ALBEDO(H, SL, UI, UC, US0, UO0, US1, UO1, VI, VC, VS0, VO0, VS1, VO1)
 #define FABLE2_PS_NO_ALBEDO(H)
-#define FABLE2_PS_ALPHA(H, S, SL, C, SR) \
-  {H, {AlphaSource((S) + 1), uint8_t(SL), uint8_t(C), int32_t(SR)}},
+#define FABLE2_PS_ALPHA(H, S, SL, C, SR0, SR1, DC) \
+  {H, {AlphaSource((S) + 1), uint8_t(SL), uint8_t(C), {int32_t(SR0), int32_t(SR1)}, (DC) != 0}},
 #define FABLE2_PS_KIND(H, K)
 #include "ps_albedo_table.inc"
 #undef FABLE2_PS_ALBEDO
@@ -412,7 +412,7 @@ struct PsKindEntry {
 const std::vector<PsKindEntry> kKindTable = {
 #define FABLE2_PS_ALBEDO(H, SL, UI, UC, US0, UO0, US1, UO1, VI, VC, VS0, VO0, VS1, VO1)
 #define FABLE2_PS_NO_ALBEDO(H)
-#define FABLE2_PS_ALPHA(H, S, SL, C, SR)
+#define FABLE2_PS_ALPHA(H, S, SL, C, SR0, SR1, DC)
 #define FABLE2_PS_KIND(H, K) {H, MaterialKind(K)},
 #include "ps_albedo_table.inc"
 #undef FABLE2_PS_ALBEDO
@@ -1913,15 +1913,20 @@ void FillMaterial(uint32_t device, const DrawShaders& shaders, DrawInputs& in) {
   m.ps_hash = ps->hash;
   m.kind = ps->kind;
   if (ps->alpha.source != AlphaSource::kNone) {
-    // The recipe's scale constant (register * 4 + component) at this draw; a constant that
-    // cannot be read, or is not finite, leaves the draw without a recipe.
-    const int32_t ref = ps->alpha.scale_ref;
-    if (ref < 0) {
+    // The recipe's scale constants (register * 4 + component) at this draw, multiplied; a
+    // constant that cannot be read or is not finite leaves the draw without a recipe.
+    float vals[2];
+    int n = 0;
+    bool ok = true;
+    for (const int32_t ref : ps->alpha.scale_ref) {
+      if (ref < 0) continue;
+      ok = ok && ref < 1024 && ReadPsBankRegisters(device, uint32_t(ref) / 4, 1);
+      if (ok) vals[n++] = t_ps_bank[ref];
+    }
+    float scale = 1.0f;
+    if (ok && ComposeAlphaScale(vals, n, &scale)) {
       m.alpha = ps->alpha;
-    } else if (ref < 1024 && ReadPsBankRegisters(device, uint32_t(ref) / 4, 1) &&
-               std::isfinite(t_ps_bank[ref])) {
-      m.alpha = ps->alpha;
-      m.alpha_scale = t_ps_bank[ref];
+      m.alpha_scale = scale;
     }
   }
   const AlbedoSpec* albedo = ps->albedo;

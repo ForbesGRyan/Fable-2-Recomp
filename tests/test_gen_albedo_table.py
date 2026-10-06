@@ -68,16 +68,25 @@ class GenAlphaKindTest(unittest.TestCase):
         self.assertEqual(len(self._gen(_albedo())), 2)
 
     def test_alpha_forms(self):
-        s = (1 << 10)  # unused; scale_ref is register * 4 + component, no bank bit
-        del s
+        # scale refs are register * 4 + component (no bank bit: always pixel constants)
+        a = "FABLE2_PS_ALPHA(0x00000000000000AAull, "
         out = self._gen(_albedo(alpha={"source": "one"}))
-        self.assertEqual(out[2], "FABLE2_PS_ALPHA(0x00000000000000AAull, 0, 0, 3, -1)")
+        self.assertEqual(out[2], a + "0, 0, 3, -1, -1, 0)")
         out = self._gen(_albedo(alpha={"source": "albedo", "component": "w", "scale": "c15.w"}))
-        self.assertEqual(out[2], "FABLE2_PS_ALPHA(0x00000000000000AAull, 1, 3, 3, 63)")
+        self.assertEqual(out[2], a + "1, 3, 3, 63, -1, 0)")
         out = self._gen(_albedo(alpha={"source": "albedo", "component": "x"}))
-        self.assertEqual(out[2], "FABLE2_PS_ALPHA(0x00000000000000AAull, 1, 3, 0, -1)")
+        self.assertEqual(out[2], a + "1, 3, 0, -1, -1, 0)")
         out = self._gen(_albedo(alpha={"source": "fetch", "slot": 8, "component": "y", "scale": "c2.z"}))
-        self.assertEqual(out[2], "FABLE2_PS_ALPHA(0x00000000000000AAull, 2, 8, 1, 10)")
+        self.assertEqual(out[2], a + "2, 8, 1, 10, -1, 0)")
+        out = self._gen(_albedo(alpha={"source": "fetch", "slot": 0, "component": "w", "scale": ["c26.w"]}))
+        self.assertEqual(out[2], a + "2, 0, 3, 107, -1, 0)")
+        out = self._gen(_albedo(alpha={"source": "albedo", "component": "w", "scale": ["c26.w", "c15.w"]}))
+        self.assertEqual(out[2], a + "1, 3, 3, 107, 63, 0)")
+        out = self._gen(_albedo(alpha={"source": "albedo", "component": "w", "scale": ["c26.w", "c15.w"],
+                                       "divide_by_alpha": True}))
+        self.assertEqual(out[2], a + "1, 3, 3, 107, 63, 1)")
+        out = self._gen(_albedo(alpha={"source": "fetch", "slot": 2, "component": "x", "divide_by_alpha": False}))
+        self.assertEqual(out[2], a + "2, 2, 0, -1, -1, 0)")
 
     def test_kind(self):
         self.assertEqual(len(self._gen(_albedo(kind="plain"))), 2)
@@ -102,6 +111,15 @@ class GenAlphaKindTest(unittest.TestCase):
             _albedo(alpha={"source": "fetch", "component": "x"}),
             _albedo(alpha={"source": "fetch", "slot": 32, "component": "x"}),
             _albedo(alpha={"source": "one", "scale": "c1.x"}),
+            _albedo(alpha={"source": "albedo", "component": "x", "scale": []}),
+            _albedo(alpha={"source": "albedo", "component": "x", "scale": ["c1.x", "c2.x", "c3.x"]}),
+            _albedo(alpha={"source": "albedo", "component": "x", "scale": ["c1.x", "c1.x"]}),
+            _albedo(alpha={"source": "albedo", "component": "x", "scale": ["c1.x", "r2.x"]}),
+            _albedo(alpha={"source": "albedo", "component": "x", "scale": ["c1.x", None]}),
+            _albedo(alpha={"source": "albedo", "component": "x", "scale": 5}),
+            _albedo(alpha={"source": "albedo", "component": "x", "divide_by_alpha": 1}),
+            _albedo(alpha={"source": "albedo", "component": "x", "divide_by_alpha": "true"}),
+            _albedo(alpha={"source": "one", "divide_by_alpha": True}),
             _albedo(kind="water"),
             {"no_albedo": "fog", "manual": True, "evidence": "e", "alpha": {"source": "one"}},
         ]

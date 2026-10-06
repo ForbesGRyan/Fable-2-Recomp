@@ -1,6 +1,7 @@
 """Trace albedo texture coordinates through SDK shader disassembly dumps.
 
 Usage: shader_trace.py <dump_dir> <PS_HASH> [--vs <VS_HASH>]
+       shader_trace.py <dump_dir> <PS_HASH> --alpha     (output alpha trace and kill instructions only)
 
 Input is the text written by `fable_2.exe --dump_shaders=<dir>`
 (`shader_<HASH>.ucode.frag` / `.ucode.vert`). Output shapes match ps-albedo.json
@@ -318,17 +319,29 @@ def trace_ps_albedo(instrs, tfetch):
 
 
 _JUMPS = ("jmp", "cjmp")
+_COND_EXEC = ("cexec", "cexece")
+_MAX_ALPHA_SCALES = 2
 
 
 def _flow_problem(instrs, pos):
-    """Why the instruction at `pos` may not run on every path through the shader, or None: a forward
-    jump taken before it that lands only after it, a backward jump (loop) or any other control flow."""
+    """Why the instruction at `pos` may not run on every path through the shader, or None.
+
+    An instruction is unconditional when (a) the nearest exec line governing it (the last
+    control-flow line before it that starts a block of instructions) is a plain exec/exece, not a
+    cexec (a cexec block ends at the next control-flow line, so an earlier cexec block that has
+    closed does not matter); (b) every forward jump (jmp/cjmp) before it has landed on its label
+    before it, so it is not inside a jumped-over region; and (c) nothing before it is a loop, a
+    backward jump or any other control flow (call, ret, ...). Predication (p0) is the caller's check
+    (Instr.pred)."""
     pending, seen = set(), set()
+    governing = None
     for ins in instrs[:pos]:
         if not ins.op.startswith("cf:"):
             continue
         word = ins.op[3:]
-        if word in _SAFE_CF:
+        if word in _SAFE_CF or word in _COND_EXEC:
+            if word in ("exec", "exece", "cexec", "cexece"):
+                governing = word
             continue
         target = ins.raw.split("//")[0].split()[-1]
         if word == "label":
@@ -340,89 +353,128 @@ def _flow_problem(instrs, pos):
             pending.add(target)
         else:
             return f"control flow: {word}"
+    if governing in _COND_EXEC:
+        return f"inside a conditional exec ({governing})"
     if pending:
         return f"inside a jumped-over region (to {', '.join(sorted(pending))})"
     return None
 
 
-def _alpha_operand(src, scalar, kind):
-    """The one component a src contributes to the alpha write -> (reg, comp) or Unsupported."""
-    if src.kind != kind or src.reg is None or src.neg or src.abs:
-        return Unsupported(f"alpha operand is not a plain {kind} register")
-    if len(src.swizzle) != (1 if scalar else 4):
-        return Unsupported("alpha operand swizzle")
-    return src.reg, src.swizzle[0 if scalar else 3]
+def _alpha_step(p, comp):
+    """One producer `p` of the traced component -> (temp reg, temp comp, scale ref|None) or Unsupported.
+    Accepts mov, max/maxs of a register with itself, and mul/mulsc by exactly one pixel constant
+    component; a multiply of two registers is a computed term."""
+    if p.sat:
+        return Unsupported("_sat in the alpha chain")
+    scalar = p.op.startswith("s:")
+    op = p.op[2:] if scalar else p.op
+    srcs = p.srcs
+    idx = _COMPS.index(comp)
+
+    def pick(src):  # component of a vector src that lines up with the destination component
+        if src.kind not in ("r", "c") or src.reg is None or src.neg or src.abs:
+            return Unsupported(f"alpha operand is not a plain register or constant ({op})")
+        if len(src.swizzle) != (1 if scalar else 4):
+            return Unsupported("alpha operand swizzle")
+        return src.reg, src.swizzle[0 if scalar else idx]
+
+    if op == "maxs" and len(srcs) == 1 and srcs[0].kind == "r" and len(srcs[0].swizzle) == 2 \
+            and srcs[0].swizzle[0] == srcs[0].swizzle[1] and srcs[0].reg is not None \
+            and not srcs[0].neg and not srcs[0].abs:
+        return srcs[0].reg, srcs[0].swizzle[0], None
+    if (op == "mov" and len(srcs) == 1) or (op == "max" and len(srcs) == 2 and srcs[0] == srcs[1]):
+        t = pick(srcs[0])
+        if isinstance(t, Unsupported):
+            return t
+        if srcs[0].kind != "r":
+            return Unsupported("alpha is moved from a constant")
+        return t[0], t[1], None
+    if op in ("mul", "mulsc") and len(srcs) == 2:
+        kinds = sorted(s.kind for s in srcs)
+        if kinds == ["r", "r"]:
+            return Unsupported("alpha is multiplied by a computed term (dissolve or fade)")
+        if kinds != ["c", "r"]:
+            return Unsupported(f"alpha {op} operands are not one register and one constant")
+        c = pick(next(s for s in srcs if s.kind == "c"))
+        t = pick(next(s for s in srcs if s.kind == "r"))
+        if isinstance(c, Unsupported):
+            return c
+        if isinstance(t, Unsupported):
+            return t
+        if c[0] > 255:
+            return Unsupported("constant register out of range")
+        return t[0], t[1], f"c{c[0]}.{c[1]}"
+    return Unsupported(f"alpha chain passes through {op}")
 
 
 def trace_ps_alpha(instrs):
-    """Where the pixel shader's output alpha (oC0.w) comes from: {"source": "one"} when it is the
-    literal 1; {"source": "fetch", "slot", "component", "scale"} when it is one component of a 2D
-    texture fetch, optionally multiplied by one pixel constant component ("cN.c", else None).
-    "fetch" does not say whether the slot is the albedo: the table author compares the slot.
-    Anything else (predicated or repeated writes, other ops, control flow between the fetch and the
-    write, a fetch that moves the coordinate) is Unsupported."""
+    """Where the pixel shader's output alpha (oC0.w) comes from.
+
+    Returns {"source": "one", ...} for the literal 1, or {"source": "fetch", "slot", "component",
+    "scale": [...]}: one component of a 2D texture fetch ("component" is the texture channel, after
+    the destination swizzle: in `tfetch2D rD.wxyz` the letter at position i is the source channel
+    written to destination component i), multiplied by 0 to 2 pixel constant components ("cN.c",
+    in the order applied, fetch first). The caller decides whether the slot is the albedo's.
+
+    The chain is walked back from oC0.w through mov, max/maxs of a register with itself and
+    mul/mulsc by exactly one constant to the fetch. Every instruction on it, and the oC0.w write,
+    must be unconditional and unpredicated (see _flow_problem: control-flow blocks that closed before
+    them do not matter) and must be the nearest earlier writer of the traced component, so a
+    conditional overwrite in between refuses. Refused: predicated, repeated or _sat writes, more than
+    two constants, a multiply by a register ("computed term"), non-2D or coordinate-moving fetches,
+    a constant fetch channel, any other op."""
     writers = [i for i, ins in enumerate(instrs) if ins.dest_kind == "oc" and ins.dest == 0 and "w" in ins.mask]
     if not writers:
         return Unsupported("oC0.w is not written")
     if len(writers) > 1:
         return Unsupported(f"oC0.w has {len(writers)} writers")
-    w = writers[0]
-    ins = instrs[w]
-    if ins.pred:
-        return Unsupported("predicated write of oC0.w")
-    if ins.sat:
-        return Unsupported("_sat on the oC0.w write")
-    flow = _flow_problem(instrs, w)
-    if flow:
-        return Unsupported(f"oC0.w write is conditional: {flow}")
+    pos = writers[0]
+    ins = instrs[pos]
     dc = ins.dest_swz[3] if len(ins.dest_swz) == 4 else "?"
-    if dc == "1":
-        return {"source": "one", "slot": None, "component": None, "scale": None}
-    if dc != "w":
+    if dc not in ("1", "w"):
         return Unsupported(f"oC0.w is written as {dc!r}")
-    scalar = ins.op.startswith("s:")
-    op = ins.op[2:] if scalar else ins.op
-    srcs = ins.srcs
-    scale = None
-    if (op == "mov" and len(srcs) == 1) or (op == "max" and len(srcs) == 2 and srcs[0] == srcs[1]):
-        t = _alpha_operand(srcs[0], scalar, "r")
-    elif op in ("mul", "mulsc") and len(srcs) == 2 and sorted(s.kind for s in srcs) == ["c", "r"]:
-        c = _alpha_operand(next(s for s in srcs if s.kind == "c"), scalar, "c")
-        t = _alpha_operand(next(s for s in srcs if s.kind == "r"), scalar, "r")
-        if isinstance(c, Unsupported):
-            return c
-        if c[0] > 255:
-            return Unsupported("constant register out of range")
-        scale = f"c{c[0]}.{c[1]}"
-    else:
-        return Unsupported(f"oC0.w written by {op}")
-    if isinstance(t, Unsupported):
-        return t
-    reg, comp = t
-    # Producer: the nearest earlier write of reg.comp (writes at this instruction's own index land
-    # after its reads); control flow in between could make an earlier or later write the live one.
-    for i in range(w - 1, -1, -1):
-        p = instrs[i]
-        if p.op.startswith("cf:"):
-            if p.op[3:] not in _SAFE_CF:
-                return Unsupported(f"control flow between the alpha source write and oC0.w: {p.op[3:]}")
-            continue
-        if p.index == ins.index or not (p.dest_kind == "r" and p.dest == reg and comp in p.mask):
-            continue
-        if not p.op.startswith("tfetch"):
-            return Unsupported(f"alpha source r{reg}.{comp} is written by {p.op}, not a texture fetch")
-        if p.op != "tfetch2D":
-            return Unsupported(f"alpha source is a {p.op[len('tfetch'):]} fetch")
-        if p.pred:
-            return Unsupported("predicated alpha fetch")
-        bad = _coord_attr_problem(p.attrs)
-        if bad:
-            return Unsupported(bad)
-        src = p.dest_swz[_COMPS.index(comp)] if len(p.dest_swz) == 4 else None
-        if src not in tuple(_COMPS) or p.fetch_slot is None:
-            return Unsupported(f"fetch component {src!r} is constant or unwritten")
-        return {"source": "fetch", "slot": p.fetch_slot, "component": src, "scale": scale}
-    return Unsupported(f"alpha source r{reg}.{comp} is not written by a texture fetch")
+    scales = []  # outermost first
+    comp = "w"
+    cur = ins
+    cur_pos = pos
+    while True:
+        if cur.pred:
+            return Unsupported("predicated write in the alpha chain")
+        flow = _flow_problem(instrs, cur_pos)
+        if flow:
+            return Unsupported(f"alpha chain write at {cur.index} is conditional: {flow}")
+        if cur_pos == pos and dc == "1":
+            return {"source": "one", "slot": None, "component": None, "scale": []}
+        if cur.op.startswith("tfetch"):
+            if cur.op != "tfetch2D":
+                return Unsupported(f"alpha source is a {cur.op[len('tfetch'):]} fetch")
+            bad = _coord_attr_problem(cur.attrs)
+            if bad:
+                return Unsupported(bad)
+            src = cur.dest_swz[_COMPS.index(comp)] if len(cur.dest_swz) == 4 else None
+            if src not in tuple(_COMPS) or cur.fetch_slot is None:
+                return Unsupported(f"fetch channel {src!r} is constant or unwritten")
+            return {"source": "fetch", "slot": cur.fetch_slot, "component": src, "scale": list(reversed(scales))}
+        r = _alpha_step(cur, comp)
+        if isinstance(r, Unsupported):
+            return r
+        reg, comp, scale = r
+        if scale is not None:
+            scales.append(scale)
+            if len(scales) > _MAX_ALPHA_SCALES:
+                return Unsupported("alpha has more than two constant scales")
+        # The nearest earlier write of reg.comp; writes at the consumer's own index land after its reads.
+        found = None
+        for i in range(cur_pos - 1, -1, -1):
+            p = instrs[i]
+            if p.op.startswith("cf:") or p.index == cur.index:
+                continue
+            if p.dest_kind == "r" and p.dest == reg and comp in p.mask:
+                found = i
+                break
+        if found is None:
+            return Unsupported(f"alpha source r{reg}.{comp} is not written by a texture fetch")
+        cur, cur_pos = instrs[found], found
 
 
 def find_kills(instrs):
@@ -478,8 +530,14 @@ def main(argv=None):
     ap.add_argument("dump_dir")
     ap.add_argument("ps_hash")
     ap.add_argument("--vs", dest="vs_hash")
+    ap.add_argument("--alpha", action="store_true", help="print trace_ps_alpha and find_kills only")
     args = ap.parse_args(argv)
     ps = _load(args.dump_dir, "frag", args.ps_hash)
+    if args.alpha:
+        t = trace_ps_alpha(ps)
+        print(f"alpha: unsupported: {t.reason}" if isinstance(t, Unsupported) else f"alpha: {t}")
+        print(f"kills: {find_kills(ps)}")
+        return 0
     vs = _load(args.dump_dir, "vert", args.vs_hash) if args.vs_hash else None
     for tf in texture_fetches(ps):
         print(f"tfetch{tf.dim} tf{tf.slot} -> r{tf.dest}.{tf.mask} coord r{tf.coord_reg}.{tf.coord_swz} @ {tf.index}")

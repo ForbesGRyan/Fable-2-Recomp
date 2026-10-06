@@ -145,31 +145,92 @@ def _alpha(body):
     return st.trace_ps_alpha(st.parse(HEAD + body))
 
 
+def _fetch(slot=8, comp="x", scale=()):
+    return {"source": "fetch", "slot": slot, "component": comp, "scale": list(scale)}
+
+
 class AlphaTraceTest(unittest.TestCase):
     def test_literal_one(self):
         r = _alpha("/*    5   */          mul oC0.xyz1, r0.xzww, c20.wwww\n")
-        self.assertEqual(r, {"source": "one", "slot": None, "component": None, "scale": None})
+        self.assertEqual(r, {"source": "one", "slot": None, "component": None, "scale": []})
 
     def test_fetch_component_unscaled(self):
+        # tfetch2D r0.___x writes the texture's x into r0.w.
         r = _alpha("/*    1   */          tfetch2D r0.___x, r6.zw, tf8\n"
                    "/*    5   */          max oC0.___w, r0.wwww, r0.wwww\n")
-        self.assertEqual(r, {"source": "fetch", "slot": 8, "component": "x", "scale": None})
+        self.assertEqual(r, _fetch())
 
-    def test_fetch_component_scaled_vector_mul(self):
+    def test_scalar_max_of_one_register(self):
+        r = _alpha("/*    1   */          tfetch2D r0.___w, r6.zw, tf0\n"
+                   "/*    5   */          maxs oC0.___w, r0.ww\n")
+        self.assertEqual(r, _fetch(0, "w"))
+
+    def test_destination_swizzle_moves_alpha_component(self):
+        # r2.wxyz: the texture's w lands in r2.x, x in r2.y.
         r = _alpha("/*    1   */          tfetch2D r2.wxyz, r6.yx, tf0\n"
                    "/*    5   */          mul oC0.___w, r2.xxxx, c15.wwww\n")
-        self.assertEqual(r, {"source": "fetch", "slot": 0, "component": "w", "scale": "c15.w"})
+        self.assertEqual(r, _fetch(0, "w", ["c15.w"]))
+        r = _alpha("/*    1   */          tfetch2D r2.wxyz, r6.yx, tf0\n"
+                   "/*    5   */          mul oC0.___w, r2.yyyy, c15.wwww\n")
+        self.assertEqual(r, _fetch(0, "x", ["c15.w"]))
 
-    def test_fetch_component_scaled_scalar_mul(self):
-        r = _alpha("/*    1   */          tfetch2D r0.x___, r6.zw, tf8\n"
-                   "/*    5   */          mul oC0.xyz_, r1.xyzz, r2.xyzz\n"
-                   "              +       mulsc oC0.___w, c15.w, r0.x\n")
-        self.assertEqual(r, {"source": "fetch", "slot": 8, "component": "x", "scale": "c15.w"})
+    def test_two_constants_through_a_temp(self):
+        r = _alpha("/*    1   */          tfetch2D r0.wxyz, r0.yx, tf0\n"
+                   "/*    8   */          mul r1.xyz_, r2.xyzz, r3.xyzz\n"
+                   "              +       mulsc r8.x___, c26.w, r0.x\n"
+                   "/*    9   */          mul oC0.xyz_, r1.xyzz, r2.xyzz\n"
+                   "              +       mulsc oC0.___w, c15.w, r8.x\n")
+        self.assertEqual(r, _fetch(0, "w", ["c26.w", "c15.w"]))
+
+    def test_vector_mul_chain_and_mov(self):
+        r = _alpha("/*    1   */          tfetch2D r0.wxyz, r0.yx, tf0\n"
+                   "/*    2   */          mul r1.x___, r0.xxxx, c26.wwww\n"
+                   "/*    3   */          max r2.___w, r1.xxxx, r1.xxxx\n"
+                   "/*    5   */          mul oC0.___w, c15.wwww, r2.wwww\n")
+        self.assertEqual(r, _fetch(0, "w", ["c26.w", "c15.w"]))
+
+    def test_three_constants_refused(self):
+        r = _alpha("/*    1   */          tfetch2D r0.wxyz, r0.yx, tf0\n"
+                   "/*    2   */          mul r1.x___, r0.xxxx, c26.wwww\n"
+                   "/*    3   */          mul r2.x___, r1.xxxx, c27.xxxx\n"
+                   "/*    5   */          mul oC0.___w, c15.wwww, r2.xxxx\n")
+        self.assertIsInstance(r, st.Unsupported)
+        self.assertIn("more than two", r.reason)
+
+    def test_multiply_by_register_is_a_computed_term(self):
+        r = _alpha("/*    1   */          tfetch2D r0.wxyz, r0.yx, tf0\n"
+                   "/*    5   */          mul oC0.___w, r0.xxxx, r1.wwww\n")
+        self.assertIsInstance(r, st.Unsupported)
+        self.assertIn("computed term (dissolve or fade)", r.reason)
 
     def test_join_label_before_unconditional_write_is_fine(self):
         r = _alpha("/*    1.0 */       cjmp !b3, L9\n/*    2   */          mul r1.x___, r1.xxxx, r1.xxxx\n"
                    "                label L9\n/*    5   */          mul oC0.xyz1, r0.xzww, c20.wwww\n")
         self.assertEqual(r["source"], "one")
+
+    def test_closed_conditional_block_before_the_write_is_tolerated(self):
+        # The cexec block ends at the next exec; the fetch and the write are unconditional.
+        r = _alpha("/*    1   */          tfetch2D r0.x___, r6.zw, tf8\n"
+                   "/*    1.0 */       cexec b3\n"
+                   "/*    2   */          mul r1.x___, r1.xxxx, r1.xxxx\n"
+                   "/*    2.0 */       exec\n"
+                   "/*    5   */          mul oC0.___w, r0.xxxx, c1.xxxx\n")
+        self.assertEqual(r, _fetch(8, "x", ["c1.x"]))
+
+    def test_write_inside_open_conditional_block_refused(self):
+        r = _alpha("/*    1   */          tfetch2D r0.x___, r6.zw, tf8\n"
+                   "/*    1.0 */       cexec b3\n"
+                   "/*    5   */          mul oC0.___w, r0.xxxx, c1.xxxx\n")
+        self.assertIsInstance(r, st.Unsupported)
+        self.assertIn("conditional", r.reason)
+
+    def test_fetch_overwritten_in_conditional_block_refused(self):
+        r = _alpha("/*    1   */          tfetch2D r0.x___, r6.zw, tf8\n"
+                   "/*    1.0 */       cexec b3\n"
+                   "/*    2   */          mul r0.x___, r1.xxxx, r1.xxxx\n"
+                   "/*    2.0 */       exec\n"
+                   "/*    5   */          mul oC0.___w, r0.xxxx, c1.xxxx\n")
+        self.assertIsInstance(r, st.Unsupported)
 
     def test_refused_shapes(self):
         fetch = "/*    1   */          tfetch2D r0.___x, r6.zw, tf8\n"
@@ -186,6 +247,7 @@ class AlphaTraceTest(unittest.TestCase):
             "1D fetch": "/*    1   */          tfetch1D r0.___x, r6.x, tf8\n/*    5   */          mul oC0.___w, r0.wwww, c1.xxxx\n",
             "cube fetch": "/*    1   */          tfetchCube r0.___x, r6.xyz, tf8\n/*    5   */          mul oC0.___w, r0.wwww, c1.xxxx\n",
             "predicated fetch": "/*    1   */    (p0) tfetch2D r0.___x, r6.zw, tf8\n/*    5   */          mul oC0.___w, r0.wwww, c1.xxxx\n",
+            "predicated intermediate": fetch + "/*    2   */    (p0) mul r0.___w, r0.wwww, c2.xxxx\n/*    5   */          mul oC0.___w, r0.wwww, c1.xxxx\n",
             "constant fetch component": "/*    1   */          tfetch2D r0.___1, r6.zw, tf8\n/*    5   */          mul oC0.___w, r0.wwww, c1.xxxx\n",
             "no fetch writer": "/*    5   */          mul oC0.___w, r0.wwww, c1.xxxx\n",
             "other writer": fetch + "/*    2   */          mul r0.___w, r1.wwww, r1.wwww\n/*    5   */          mul oC0.___w, r0.wwww, c1.xxxx\n",
@@ -204,12 +266,11 @@ class AlphaTraceTest(unittest.TestCase):
         self.assertIsInstance(r, st.Unsupported)
 
     def test_same_instruction_register_write_is_not_the_producer(self):
-        # r0.w is read by the alpha write before this instruction's own write lands, so the
-        # producer is the tfetch above: the other write at the same index must not hide it.
+        # The scalar op reads r0.x before the vector op's write of r0.x at the same index lands.
         r = _alpha("/*    1   */          tfetch2D r0.x___, r6.zw, tf8\n"
                    "/*    5   */          mul r0.x___, r1.xxxx, r1.xxxx\n"
                    "              +       mulsc oC0.___w, c15.w, r0.x\n")
-        self.assertEqual(r, {"source": "fetch", "slot": 8, "component": "x", "scale": "c15.w"})
+        self.assertEqual(r, _fetch(8, "x", ["c15.w"]))
 
 
 class FindKillsTest(unittest.TestCase):
@@ -235,23 +296,31 @@ def _dump(hash_):
 
 class RealDumpAlphaTest(unittest.TestCase):
     def test_7DDAD5C29B3F56EE_alpha_one(self):
-        self.assertEqual(st.trace_ps_alpha(_dump("7DDAD5C29B3F56EE")),
-                         {"source": "one", "slot": None, "component": None, "scale": None})
+        self.assertEqual(st.trace_ps_alpha(_dump("7DDAD5C29B3F56EE"))["source"], "one")
 
-    def test_7CD57B81550F19E3_unsupported(self):
-        # oC0.w = c15.w x r0.x, and r0.x = c26.w x r6.x (instruction 68, scalar mulsc): not a fetch.
-        r = st.trace_ps_alpha(_dump("7CD57B81550F19E3"))
-        self.assertIsInstance(r, st.Unsupported)
-        self.assertIn("not a texture fetch", r.reason)
+    def test_00E09D1BC5295D52_grass(self):
+        # 14 tfetch2D r0.wxyz -> r0.x = tf0.w; 88 mulsc r8.x = c26.w * r0.x; 89 oC0.w = c15.w * r8.x
+        self.assertEqual(st.trace_ps_alpha(_dump("00E09D1BC5295D52")), _fetch(0, "w", ["c26.w", "c15.w"]))
 
-    def test_00E09D1BC5295D52_unsupported(self):
-        # Same shape: oC0.w = c15.w x r8.x, and r8.x = c26.w x r0.x (instruction 88).
-        r = st.trace_ps_alpha(_dump("00E09D1BC5295D52"))
+    def test_7CD57B81550F19E3_leaves(self):
+        # 13 tfetch2D r6.wxyz -> r6.x = tf0.w; 68 mulsc r0.x = c26.w * r6.x; 69 oC0.w = c15.w * r0.x
+        self.assertEqual(st.trace_ps_alpha(_dump("7CD57B81550F19E3")), _fetch(0, "w", ["c26.w", "c15.w"]))
+
+    def test_8D900846800943C8_props(self):
+        self.assertEqual(st.trace_ps_alpha(_dump("8D900846800943C8")), _fetch(0, "w", ["c26.w"]))
+
+    def test_26052DEFBA688AF2_unscaled(self):
+        self.assertEqual(st.trace_ps_alpha(_dump("26052DEFBA688AF2")), _fetch(0, "w", []))
+
+    def test_A7E45D07F5CF6627_dissolve_refused(self):
+        r = st.trace_ps_alpha(_dump("A7E45D07F5CF6627"))
         self.assertIsInstance(r, st.Unsupported)
-        self.assertIn("not a texture fetch", r.reason)
+        self.assertIn("computed term (dissolve or fade)", r.reason)
 
     def test_A17D8AEC3A817D45_kill(self):
-        self.assertEqual(st.find_kills(_dump("A17D8AEC3A817D45")), [{"index": 16, "op": "kill_gt", "pred": True}])
+        ins = _dump("A17D8AEC3A817D45")
+        self.assertIsInstance(st.trace_ps_alpha(ins), st.Unsupported)
+        self.assertEqual(st.find_kills(ins), [{"index": 16, "op": "kill_gt", "pred": True}])
 
 
 if __name__ == "__main__":

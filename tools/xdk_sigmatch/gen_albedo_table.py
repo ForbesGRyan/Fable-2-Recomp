@@ -3,11 +3,13 @@
   FABLE2_PS_ALBEDO(hash, slot, u_interp, u_comp, u_s0, u_o0, u_s1, u_o1,
                    v_interp, v_comp, v_s0, v_o0, v_s1, v_o1)
   FABLE2_PS_NO_ALBEDO(hash)
-  FABLE2_PS_ALPHA(hash, source, slot, component, scale_ref)   (optional "alpha")
+  FABLE2_PS_ALPHA(hash, source, slot, component, scale_ref0, scale_ref1, divide_colour)  (optional "alpha")
   FABLE2_PS_KIND(hash, kind)                                  (optional "kind" other than "plain")
 Stage refs use uv_refs notation with bank 1 (pixel constants). Alpha: source 0 one, 1 albedo,
 2 fetch; slot is the albedo's slot for "albedo" and the entry's own for "fetch"; component 0-3
-(x-w); scale_ref is the pixel constant register * 4 + component (no bank or negate bit), -1 none.
+(x-w); scale_ref0/1 are the up to two pixel constants (register * 4 + component, no bank or negate
+bit) the alpha is multiplied by, in the order applied, -1 none; divide_colour 1 when the shader
+divides its colour by the alpha ("divide_by_alpha").
 Kind: 0 plain, 1 terrain-layer, 2 terrain-far. All ALPHA and KIND lines follow the albedo lines.
 """
 import argparse
@@ -30,16 +32,29 @@ def _scale_ref(ps, text):
     return int(m.group(1)) * 4 + _COMP.index(m.group(2))
 
 
+def _scale_refs(ps, scale):
+    """"scale": one reference or a list of one or two -> [ref0, ref1] (-1 absent)."""
+    if scale is None:
+        return [-1, -1]
+    items = scale if isinstance(scale, list) else [scale]
+    if not 1 <= len(items) <= 2:
+        raise ValueError(f"{ps}: alpha scale list must hold one or two references, not {len(items)}")
+    refs = [_scale_ref(ps, t) for t in items]
+    if len(refs) == 2 and refs[0] == refs[1]:
+        raise ValueError(f"{ps}: alpha scale names {items[0]!r} twice")
+    return refs + [-1] * (2 - len(refs))
+
+
 def _alpha_fields(ps, e):
-    """(source, slot, component, scale_ref) of an albedo entry's "alpha"."""
+    """(source, slot, component, scale_ref0, scale_ref1, divide_colour) of an entry's "alpha"."""
     a = e["alpha"]
     src = a.get("source") if isinstance(a, dict) else None
     if src not in _ALPHA_SOURCES:
         raise ValueError(f"{ps}: unknown alpha source {src!r}")
     if src == "one":
-        if "scale" in a or "component" in a or "slot" in a:
-            raise ValueError(f"{ps}: alpha source one takes no slot, component or scale")
-        return 0, 0, 3, -1
+        if any(k in a for k in ("scale", "component", "slot", "divide_by_alpha")):
+            raise ValueError(f"{ps}: alpha source one takes no slot, component, scale or divide_by_alpha")
+        return 0, 0, 3, -1, -1, 0
     comp = a.get("component")
     if comp not in tuple(_COMP):
         raise ValueError(f"{ps}: bad alpha component {comp!r}")
@@ -47,12 +62,15 @@ def _alpha_fields(ps, e):
         if "slot" not in a:
             raise ValueError(f"{ps}: alpha source fetch needs a slot")
         slot = a["slot"]
-        if not isinstance(slot, int) or not 0 <= slot <= 31:
+        if not isinstance(slot, int) or isinstance(slot, bool) or not 0 <= slot <= 31:
             raise ValueError(f"{ps}: bad alpha fetch slot {slot!r}")
     else:
         slot = int(e["slot"])
-    scale = _scale_ref(ps, a["scale"]) if a.get("scale") is not None else -1
-    return _ALPHA_SOURCES[src], slot, _COMP.index(comp), scale
+    divide = a.get("divide_by_alpha", False)
+    if not isinstance(divide, bool):
+        raise ValueError(f"{ps}: divide_by_alpha must be a JSON boolean, not {divide!r}")
+    r0, r1 = _scale_refs(ps, a.get("scale"))
+    return _ALPHA_SOURCES[src], slot, _COMP.index(comp), r0, r1, int(divide)
 
 
 def generate(data):

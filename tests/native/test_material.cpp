@@ -1,6 +1,7 @@
 // Synthetic standalone test; no game or GPU.
 #include "../../src/native/capture/draw_record.h"
 #include <cmath>
+#include <limits>
 #include <cstring>
 #include <vector>
 
@@ -84,24 +85,45 @@ int main() {
   DrawRecord r = AssembleRecord(in, 7);
   if (r.skip != SkipReason::kNone || r.material.status != MaterialStatus::kTextured || r.material.uv_xform[0] != 4.0f) return 14;
   // The alpha recipe, its scale and the kind ride along too.
-  in.material.alpha = {AlphaSource::kFetch, 8, 1, Ref(0, 15, 3) & 0x3FF};
+  in.material.alpha = {AlphaSource::kFetch, 8, 1, {26 * 4 + 3, 15 * 4 + 3}, true};
   in.material.alpha_scale = 0.25f;
   in.material.kind = MaterialKind::kTerrainFar;
   r = AssembleRecord(in, 7);
   if (r.material.alpha.source != AlphaSource::kFetch || r.material.alpha.slot != 8 ||
-      r.material.alpha.component != 1 || r.material.alpha.scale_ref != 15 * 4 + 3 ||
+      r.material.alpha.component != 1 || r.material.alpha.scale_ref[0] != 26 * 4 + 3 ||
+      r.material.alpha.scale_ref[1] != 15 * 4 + 3 || !r.material.alpha.divide_colour ||
       r.material.alpha_scale != 0.25f || r.material.kind != MaterialKind::kTerrainFar) {
     return 16;
   }
   // Default material status is ps-unknown.
   if (Material{}.status != MaterialStatus::kPsUnknown) return 15;
   {
-    // Defaults: no alpha recipe (scale ref -1, component w), scale 1, plain.
+    // Defaults: no alpha recipe (scale refs -1, component w, colour not divided), scale 1, plain.
     const Material d;
     if (d.alpha.source != AlphaSource::kNone || d.alpha.slot != 0 || d.alpha.component != 3 ||
-        d.alpha.scale_ref != -1 || d.alpha_scale != 1.0f || d.kind != MaterialKind::kPlain) {
+        d.alpha.scale_ref[0] != -1 || d.alpha.scale_ref[1] != -1 || d.alpha.divide_colour ||
+        d.alpha_scale != 1.0f || d.kind != MaterialKind::kPlain) {
       return 17;
     }
+  }
+  // ComposeAlphaScale: the product of the constants read; nothing finite-unsafe is accepted.
+  {
+    float out = 7.0f;
+    const float inf = std::numeric_limits<float>::infinity();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float two[2] = {0.5f, 4.0f};
+    if (!ComposeAlphaScale(two, 0, &out) || out != 1.0f) return 50;
+    if (!ComposeAlphaScale(two, 1, &out) || out != 0.5f) return 51;
+    if (!ComposeAlphaScale(two, 2, &out) || out != 2.0f) return 52;
+    out = 7.0f;
+    const float bad_nan[2] = {0.5f, nan}, bad_inf[2] = {inf, 2.0f}, bad_ninf[2] = {-inf, 2.0f};
+    if (ComposeAlphaScale(bad_nan, 2, &out) || ComposeAlphaScale(bad_inf, 2, &out) ||
+        ComposeAlphaScale(bad_ninf, 2, &out)) {
+      return 53;
+    }
+    const float big[2] = {1e30f, 1e30f};  // finite factors whose product overflows
+    if (ComposeAlphaScale(big, 2, &out)) return 54;
+    if (out != 7.0f) return 55;           // out untouched on failure
   }
   // DecideAlpha, every input: (test or mask, blend, colour known, has recipe).
   for (int bits = 0; bits < 16; ++bits) {

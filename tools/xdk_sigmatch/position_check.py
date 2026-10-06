@@ -36,6 +36,13 @@ Every line ends its threshold with the verdict, ACCEPT or REJECT. --bones N list
 skin entry's line, its N bone uses that deviate most (frame, vertex stream, index range,
 bone, row lengths).
 
+The shares are taken over the draws judged, so two rules judge what leaves them; either one
+rejects the entry whatever its shares, and the reason is printed after REJECT:
+  - a sampled row the runtime would skip (unsupported or bad-index, below) rejects the entry;
+  - the draws judged must be at least 20 and at least a tenth of the sampled rows (an entry
+    whose draws are mostly wholly cut, below, is not judged on the few that remain).
+Unreadable rows do not enter either rule.
+
 An instance entry with a distance cut ("cut": the game's shader gives a NaN position to a vertex
 whose flat position is farther from the eye constant than the square root of the distance
 constant; src/native/fable2_native_shaders.h kClayVs does the same) is judged on the vertices
@@ -71,6 +78,8 @@ BASELINE_VS = "0xECD66A10092E6562"   # trusted plain shader: its in-clip share i
 BASELINE_MARGIN = 0.10               # accept at the baseline share minus this ...
 THRESHOLD_FLOOR = 0.60               # ... and never below this
 THRESHOLD_FALLBACK = 0.75            # the capture has no baseline draws
+MIN_JUDGED_DRAWS = 20                # an entry judged on fewer draws than this is rejected ...
+MIN_JUDGED_SHARE = 0.10              # ... and so is one judged on less than this share of its sampled rows
 ORTHO_MAX = 0.05                     # skin: a bone within this of orthonormal is orthonormal
 ORTHO_SHARE_MIN = 0.90               # skin: share of bone uses that must be orthonormal
 EDGE_RATIO = (0.5, 2.0)              # skin: skinned / bind-pose edge length
@@ -231,7 +240,13 @@ def _row_swizzles(items):
 
 def parse_entry(entry):
     """A vs-transforms.json entry as the generated table holds it (gen_transform_table.py);
-    None if the entry has no transform or is a terrain entry (not a draw row)."""
+    None if the entry has no transform or is a terrain entry (not a draw row). Raises ValueError for
+    the entries the generator refuses: "instance" without "base", "skin" together with "instance", a
+    skin with "pairs" but no "weight_fetch"."""
+    if "instance" in entry and "base" not in entry:
+        raise ValueError("instance entry without base")
+    if "skin" in entry and "instance" in entry:
+        raise ValueError("entry has both skin and instance")
     if "base" not in entry or "base2" in entry or "terrain" in entry:
         return None
     spec = {"kind": "plain", "base": int(entry["base"]), "combine": entry["layout"] != "dot",
@@ -257,6 +272,8 @@ def parse_entry(entry):
         rows = [int(r) for r in skin["row_fetches"]]
         if len(rows) != 3:
             raise ValueError("skin needs three row fetches")
+        if "pairs" in skin and "weight_fetch" not in skin:
+            raise ValueError("skin has pairs but no weight_fetch")
         if "weight_fetch" in skin:
             pairs = [(_COMP.index(i), _COMP.index(w)) for i, w in skin["pairs"]]
             if not 1 <= len(pairs) <= 4:
@@ -651,11 +668,31 @@ def _row_triangles(row):
     return triangles(prim, row["idx"])
 
 
+def reject_reason(r):
+    """Why an entry is rejected whatever its shares, or None. The in-clip share is taken over the draws
+    judged, so what leaves it is judged here:
+      - a sampled row the runtime would skip (unsupported or bad-index) rejects the entry: the game
+        draws that row and the native renderer would not;
+      - the draws judged must be at least MIN_JUDGED_DRAWS and at least MIN_JUDGED_SHARE of the sampled
+        rows (wholly cut draws are sampled rows that are not judged).
+    Unreadable rows (a dump missing from the capture) say nothing about the entry: they are left out
+    of the sampled rows here and only printed."""
+    if r["kind"] == "error":
+        return None
+    skipped = r["unsupported"] + r["bad_index"]
+    if skipped:
+        return f"the runtime would skip {skipped} of {r['sampled']} sampled rows"
+    floor = math.ceil(max(MIN_JUDGED_DRAWS, MIN_JUDGED_SHARE * (r["sampled"] - r["unreadable"])) - 1e-9)
+    if r["draws"] < floor:
+        return f"judged on {r['draws']} draws, fewer than {floor}"
+    return None
+
+
 def accepted(r, threshold):
-    """The verdict: the in-clip share reaches the capture's threshold and, for a skin entry, at least
-    ORTHO_SHARE_MIN of the bone uses are orthonormal within ORTHO_MAX and at least EDGE_OK_MIN of the
-    edges keep their length. The largest bone deviation is reported, not judged."""
-    if r["kind"] == "error" or not r["draws"] or r["share"] < threshold - 1e-9:
+    """The verdict: no reject_reason, the in-clip share reaches the capture's threshold and, for a skin
+    entry, at least ORTHO_SHARE_MIN of the bone uses are orthonormal within ORTHO_MAX and at least
+    EDGE_OK_MIN of the edges keep their length. The largest bone deviation is reported, not judged."""
+    if r["kind"] == "error" or not r["draws"] or reject_reason(r) or r["share"] < threshold - 1e-9:
         return False
     if r["kind"] != "skin":
         return True
@@ -676,15 +713,15 @@ def _judge(f, capture_path, key, spec, offsets, max_draws, read, want_fixture, w
     """Replays one shader's sampled draws (`max_draws` rows spread evenly over `offsets`). With
     `worst_bones` the result of a skin entry also holds "bone_worst": its bone uses that deviate most
     from orthonormal, worst first."""
-    r = {"kind": spec["kind"], "rows": len(offsets), "draws": 0, "passed": 0, "share": 0.0, "unreadable": 0,
-         "unsupported": 0, "bad_index": 0, "reasons": {}}
+    n = min(max(int(max_draws), 0), len(offsets))
+    r = {"kind": spec["kind"], "rows": len(offsets), "sampled": n, "draws": 0, "passed": 0, "share": 0.0,
+         "unreadable": 0, "unsupported": 0, "bad_index": 0, "reasons": {}}
     if spec.get("cut_eye", -1) >= 0:
         r.update(cut=0, kept_vertices=0, sampled_vertices=0)
     if spec["kind"] == "skin":
         r.update(bone_ortho_max=None, bone_ortho_share=None, bone_uses=0, bone_ortho_ok=0, edge_ok_share=None,
                  edges=0, edge_ok=0, edge_nan=0, edge_draws=0)
     weight_sums, per_copy, fixture, worst = [], [], None, []
-    n = min(max(int(max_draws), 0), len(offsets))
     for k in range(n):
         f.seek(offsets[k * len(offsets) // n])
         row = json.loads(f.readline())
@@ -758,7 +795,7 @@ def _judge(f, capture_path, key, spec, offsets, max_draws, read, want_fixture, w
 
 def check(capture_path, entries, max_draws=200, only_vs=None, index=None, fixture_vs=None, baseline_entries=None,
           worst_bones=0):
-    """Replays every entry on its sampled in-scene draws: entry key -> {kind, rows, draws, passed,
+    """Replays every entry on its sampled in-scene draws: entry key -> {kind, rows, sampled, draws, passed,
     share, accepted, unreadable, unsupported, bad_index, ...}; a skin entry also has bone_uses,
     bone_ortho_ok, bone_ortho_share, bone_ortho_max, edge_ok_share, edges, edge_nan and edge_draws, and
     with `worst_bones` "bone_worst" (its bone uses that deviate most). "_baseline" holds the capture's acceptance
@@ -783,8 +820,8 @@ def check(capture_path, entries, max_draws=200, only_vs=None, index=None, fixtur
                 continue
             offsets = index.get(h, [])
             if isinstance(spec, str):
-                r = {"kind": "error", "error": spec, "rows": len(offsets), "draws": 0, "passed": 0, "share": 0.0,
-                     "unreadable": 0, "unsupported": 0, "bad_index": 0}
+                r = {"kind": "error", "error": spec, "rows": len(offsets), "sampled": 0, "draws": 0, "passed": 0,
+                     "share": 0.0, "unreadable": 0, "unsupported": 0, "bad_index": 0}
             else:
                 r = _judge(f, capture_path, key, spec, offsets, max_draws, read,
                            fixture_vs is not None and h == _hash(fixture_vs), worst_bones)
@@ -911,8 +948,9 @@ def format_line(key, r, threshold):
     def number(x):
         return "n/a" if x is None else f"{x:.3f}"
 
+    reason = reject_reason(r)
     line = (f"VS {key} {r['kind']}: draws {r['draws']}, in-clip share {r['share']:.3f} (accept >= {threshold:.3f}) "
-            f"{'ACCEPT' if accepted(r, threshold) else 'REJECT'}, "
+            f"{'ACCEPT' if accepted(r, threshold) else 'REJECT'}{f' ({reason})' if reason else ''}, "
             f"passed {r['passed']}, unreadable {r['unreadable']}, unsupported {r['unsupported']}, "
             f"bad-index {r['bad_index']}, rows {r['rows']}")
     if r["kind"] == "skin":

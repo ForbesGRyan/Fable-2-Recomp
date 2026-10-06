@@ -121,6 +121,29 @@ class GenTransformTableTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             gtt.generate({"0x1": bad})
 
+    # --- Contradictory entries raise, naming the shader ---
+
+    INSTANCE = {"mesh_fetch": 4, "row_fetches": [0, 1, 2], "inv_count": "c12.x", "count": "c12.y",
+                "first": "c12.z", "bias": 0.5, "offset": "c7.xyz"}
+
+    def test_entry_with_both_skin_and_instance_is_rejected(self):
+        entry = {"base": 0, "layout": "dot", "instance": dict(self.INSTANCE),
+                 "skin": {"index_fetch": 2, "index_component": "z", "row_fetches": [6, 7, 8]}}
+        with self.assertRaisesRegex(ValueError, "0xABC1.*skin.*instance"):
+            gtt.generate({"0xABC1": entry})
+
+    def test_skin_with_pairs_but_no_weight_fetch_is_rejected(self):
+        # Without the check the entry silently became a rigid skin (or a bare KeyError without index_component).
+        skin = {"index_fetch": 1, "row_fetches": [3, 4, 5], "pairs": [["x", "z"], ["y", "y"]]}
+        for extra in ({}, {"index_component": "x"}):
+            with self.assertRaisesRegex(ValueError, "0xABC2.*pairs.*weight_fetch"):
+                gtt.generate({"0xABC2": {"base": 0, "layout": "dot", "skin": dict(skin, **extra)}})
+
+    def test_instance_entry_without_base_is_rejected(self):
+        # Without the check the entry was dropped from the table without a word.
+        with self.assertRaisesRegex(ValueError, "0xABC3.*instance.*base"):
+            gtt.generate({"0xABC3": {"layout": "dot", "instance": dict(self.INSTANCE)}})
+
     def test_plain_entries_unchanged(self):
         text = gtt.generate({"0x2": {"base": 4, "layout": "combine", "pos_fetch": 1, "deformed": True}})
         self.assertEqual(text.splitlines()[1:], ["FABLE2_VS_TRANSFORM(0x2ull, 4, 1, 1, 1)"])

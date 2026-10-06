@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools" / "xdk_sigmatch"))
 
@@ -25,10 +26,19 @@ def fetch(i, slot, fmt, off, stride, swz=0x688, norm=True, signed=False, mini=Fa
 
 
 class Base(unittest.TestCase):
+    # These captures hold a handful of draws, so the tests of the other rules run with the floor on the
+    # judged draws (position_check.MIN_JUDGED_DRAWS) lowered to one draw; None keeps the real floor
+    # (SkippedRowsVerdictTest).
+    MIN_JUDGED = 1
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
         (self.dir / "native_geo_x").mkdir()
+        if self.MIN_JUDGED is not None:
+            floor = mock.patch.object(pc, "MIN_JUDGED_DRAWS", self.MIN_JUDGED)
+            floor.start()
+            self.addCleanup(floor.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -479,6 +489,116 @@ class BaselineTest(Base):
         self.assertEqual(text.splitlines()[0],
                          "baseline 0xECD66A10092E6562: no draws in this capture, accept >= 0.750 (fallback)")
         self.assertIn("in-clip share 0.750 (accept >= 0.750) ACCEPT", text)
+
+
+class ContradictoryEntryTest(Base):
+    """parse_entry raises on the entries gen_transform_table.py refuses; check() reports them as entry errors."""
+
+    INSTANCE = {"mesh_fetch": 3, "row_fetches": [0, 1, 2], "inv_count": "c12.x", "count": "c12.y",
+                "first": "c12.z", "bias": 0.5, "offset": "c7.xyz"}
+
+    def error_line(self, entry):
+        mesh = be_floats(0, 0, 0, 1)
+        rows = [self.row("0xAAAA", [fetch(0, 95, 38, 0, 4)], [self.stream(95, 0x1000, mesh, 16)], [0])]
+        r = pc.check(self.capture(rows), {"0xAAAA": entry})["0xAAAA"]
+        self.assertEqual((r["kind"], r["accepted"]), ("error", False))
+        return pc.format_line("0xAAAA", r, 0.75)
+
+    def test_entry_with_both_skin_and_instance_is_an_entry_error(self):
+        entry = {"base": 0, "layout": "dot", "instance": dict(self.INSTANCE),
+                 "skin": {"index_fetch": 2, "index_component": "z", "row_fetches": [6, 7, 8]}}
+        with self.assertRaisesRegex(ValueError, "skin.*instance"):
+            pc.parse_entry(entry)
+        self.assertRegex(self.error_line(entry), "VS 0xAAAA entry error: ValueError: .*skin.*instance")
+
+    def test_skin_with_pairs_but_no_weight_fetch_is_an_entry_error(self):
+        skin = {"index_fetch": 1, "row_fetches": [3, 4, 5], "pairs": [["x", "z"], ["y", "y"]]}
+        for extra in ({}, {"index_component": "x"}):
+            entry = {"base": 0, "layout": "dot", "skin": dict(skin, **extra)}
+            with self.assertRaisesRegex(ValueError, "pairs.*weight_fetch"):
+                pc.parse_entry(entry)
+            self.assertRegex(self.error_line(entry), "VS 0xAAAA entry error: ValueError: .*pairs.*weight_fetch")
+
+    def test_instance_entry_without_base_is_an_entry_error(self):
+        entry = {"layout": "dot", "instance": dict(self.INSTANCE)}
+        with self.assertRaisesRegex(ValueError, "instance.*base"):
+            pc.parse_entry(entry)
+        self.assertRegex(self.error_line(entry), "VS 0xAAAA entry error: ValueError: .*instance.*base")
+        # An entry without a transform and without "instance" is still no entry at all.
+        self.assertIsNone(pc.parse_entry({"manual": True, "rejected": "no transform"}))
+
+
+class SkippedRowsVerdictTest(Base):
+    """The verdict counts what leaves the in-clip share: rows the runtime would skip reject the entry,
+    and so does a share judged on too few draws. Runs with the real floor."""
+
+    MIN_JUDGED = None
+    instanced = InstanceTest.instanced
+
+    def plain(self, endian=2, file=True):
+        mesh = be_floats(0, 0, 0, 1)
+        s = self.stream(95, 0x1000, mesh, 16, endian)
+        if not file:
+            del s["file"]
+        return self.row("0x00000000000000AA", [fetch(0, 95, 38, 0, 4)], [s], [0])
+
+    def judge(self, rows, entry=PLAIN, max_draws=200):
+        r = pc.check(self.capture(rows), {"0x00000000000000AA": entry}, max_draws=max_draws)["0x00000000000000AA"]
+        return r, pc.format_line("0x00000000000000AA", r, 0.75)
+
+    def test_rows_the_runtime_would_skip_reject_the_entry(self):
+        good = self.plain()
+        r, line = self.judge([good] * 30)
+        self.assertEqual((r["draws"], r["sampled"], r["share"], r["accepted"]), (30, 30, 1.0, True))
+        self.assertIn("in-clip share 1.000 (accept >= 0.750) ACCEPT, passed 30", line)
+        # One row whose position endian the decoder cannot read: the runtime would not draw it.
+        r, line = self.judge([good] * 30 + [self.plain(endian=1)])
+        self.assertEqual((r["draws"], r["passed"], r["unsupported"], r["share"]), (30, 30, 1, 1.0))
+        self.assertFalse(r["accepted"])
+        self.assertIn("in-clip share 1.000 (accept >= 0.750) REJECT (the runtime would skip 1 of 31 sampled rows), "
+                      "passed 30, unreadable 0, unsupported 1, bad-index 0", line)
+        # 190 of 200 draws bad-index (garbage instance constants) and the other 10 in clip.
+        ok, entry = self.instanced([0.5, 2.0, 0.0, 0.0], [0, 1])
+        bad, _ = self.instanced([0.0, 0.0, 0.0, 0.0], [0, 1])
+        ok["vs_hash"] = bad["vs_hash"] = "0x00000000000000AA"
+        r, line = self.judge([bad] * 19 + [ok] + [bad] * 171 + [ok] * 9, entry)
+        self.assertEqual((r["draws"], r["passed"], r["bad_index"], r["share"]), (10, 10, 190, 1.0))
+        self.assertFalse(r["accepted"])
+        self.assertIn("REJECT (the runtime would skip 190 of 200 sampled rows), passed 10", line)
+        # A stream dump missing from the capture says nothing about the entry: counted, printed, not judged.
+        r, line = self.judge([good] * 30 + [self.plain(file=False)] * 5)
+        self.assertEqual((r["draws"], r["unreadable"], r["sampled"], r["accepted"]), (30, 5, 35, True))
+        self.assertIn("ACCEPT, passed 30, unreadable 5, unsupported 0, bad-index 0", line)
+
+    def test_too_few_judged_draws_reject_the_entry(self):
+        self.assertEqual((pc.MIN_JUDGED_DRAWS, pc.MIN_JUDGED_SHARE), (20, 0.10))
+        good = self.plain()
+        r, line = self.judge([good] * 20)
+        self.assertEqual((r["draws"], r["accepted"]), (20, True))
+        r, line = self.judge([good] * 19)
+        self.assertEqual((r["draws"], r["share"], r["accepted"]), (19, 1.0, False))
+        self.assertIn("in-clip share 1.000 (accept >= 0.750) REJECT (judged on 19 draws, fewer than 20), passed 19",
+                      line)
+        # Unreadable rows are no judged draws: 19 judged of 60 sampled is still too few.
+        r, line = self.judge([good] * 19 + [self.plain(file=False)] * 41)
+        self.assertEqual((r["draws"], r["unreadable"], r["accepted"]), (19, 41, False))
+        # Wholly cut draws leave the share: an entry with a cut must be judged on a tenth of its sampled rows.
+        kept, entry = self.instanced([0.5, 2.0, 0.0, 0.0], [0, 1])
+        entry["instance"]["cut"] = {"eye": "c9.xyz", "dist2": "c13.z"}
+        kept["vs_hash"] = "0x00000000000000AA"
+        kept["vconst"][13 * 4 + 2] = 100.0                                   # eye at the origin, radius 10
+        gone = json.loads(json.dumps(kept))
+        gone["vconst"][9 * 4] = 50.0                                         # eye 50 away: nothing kept
+        r, line = self.judge([kept] * 29 + [gone] * 271, entry, max_draws=300)
+        self.assertEqual((r["draws"], r["passed"], r["cut"], r["sampled"]), (29, 29, 271, 300))
+        self.assertFalse(r["accepted"])
+        self.assertIn("REJECT (judged on 29 draws, fewer than 30), passed 29", line)
+        r, line = self.judge([kept] * 30 + [gone] * 270, entry, max_draws=300)
+        self.assertEqual((r["draws"], r["cut"], r["accepted"]), (30, 270, True))
+        # No draw judged at all: the same reason, never an ACCEPT.
+        r, line = self.judge([gone] * 40, entry)
+        self.assertEqual((r["draws"], r["cut"], r["accepted"]), (0, 40, False))
+        self.assertIn("REJECT (judged on 0 draws, fewer than 20)", line)
 
 
 def translation(dx):

@@ -344,8 +344,17 @@ Instancing:
     its end.
   - `instanced` and `skinned` are counted beside `drawn`, not when positions are built.
   These four are unit-tested where they are pure (`test_geometry_cache_index.cpp`,
-  `test_clay_logic.cpp`); their release build and gameplay run follow the fix wave's tool
-  and documentation commits.
+  `test_clay_logic.cpp`) and were built and run on 2026-10-06 (frame-map section 12,
+  "After the final fix wave"). The bridge scene is drawn as before: the split run
+  `fable_2_193.log` has the drawn, textured, uploads, hits, instanced and skinned figures
+  of `fable_2_177.log` in every logged frame, 30.0 fps in all seven windows, and the clay
+  half of its screenshots is unchanged outside the animated dog. Geometry resident is
+  22.5 to 24.4 MB against 25.1 MB. The slow frame near scene frame 3016 is still there
+  (4.40 and 3.82 ms against 4.12 to 7.12 ms), so these fixes are not its cause, or only
+  part of it. With a geometry budget below what one frame needs (16 and 20 MB,
+  `fable_2_195.log` and `fable_2_197.log`) everything is still drawn at 30 fps, but the
+  cache rebuilds about 650 to 860 buffers in every frame (6 to 9 ms of decode): the case
+  the eviction rule does not solve.
 
 Skinning:
 

@@ -327,10 +327,15 @@ Instancing:
   old entry leaves only by eviction at the 256 MB budget.
   - Eviction: at the budget every insert searched the whole index for one victim (measured
     in a scratch program at 43.7 ms for 270 new keys in a frame with 24,403 entries). An
-    insert that would pass the budget now evicts least recently used entries in one pass
-    down to 15/16 of the budget, so the inserts after it find room; an entry used in the
-    current frame is still never evicted. The texture cache shares the index and behaves
-    the same at its own budget.
+    insert that would pass the budget now evicts in one pass, least recently used first.
+    Entries that neither the current frame nor the previous one used go until the total is
+    at 15/16 of the budget, so the inserts after it find room. Entries last used in the
+    previous frame go only as far as the insert needs, because a later draw of the current
+    frame may still look them up (taking them to the mark as well rebuilt a live set near
+    the budget in every frame; found by the re-review of the fix wave). An entry used in
+    the current frame is still never evicted. When the entries of the last two frames alone
+    pass the budget, every insert past it still searches the index, as before. The texture
+    cache shares the index and behaves the same at its own budget.
   - Flat UV buffers no longer depend on the instance stream: their key is the mesh UV key
     plus `inv_count`, `count`, the bias and the flat count, and their content hash is the
     mesh UV stream's. The first copy, the instance stream, its row layouts and the offset

@@ -10,6 +10,8 @@
 # foreground window or the keyboard; screenshots use PrintWindow on the game
 # window handle. Buttons are held HoldMs (default 100); longer holds auto-repeat
 # in the menus.
+# A plan entry "55:LS=0/100/3000" (or RS=...) holds a stick at x/y percent (-100..100,
+# positive y forward, positive x right) for that many ms; it is passed through unchanged.
 #
 # -KeyboardInput: the old path. Keys are sent with keybd_event (HoldMs default
 # 50), which targets whatever window has focus, so each key is sent only if the
@@ -67,6 +69,10 @@ $autoplaySteps = @()
 foreach ($e in $Plan.Split(",")) {
   if (-not $e) { continue }
   $t, $k = $e.Split(":")
+  if (-not $KeyboardInput -and $k -match '^(?i:LS|RS)=-?\d+/-?\d+/\d+$') {
+    $autoplaySteps += "${t}:$k"
+    continue
+  }
   if ($KeyboardInput) {
     if (-not $vk.ContainsKey($k.ToUpper())) { throw "unknown key '$k' (known: $($vk.Keys -join ', '))" }
     $events += [pscustomobject]@{ t = [double]$t; k = $k.ToUpper(); shot = $false }

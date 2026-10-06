@@ -96,7 +96,7 @@ Developer environment variables (set before launching `fable_2.exe`):
 | `FABLE2_NATIVE_DISCOVERY=<frames>` | Write `logs\native_discovery_<timestamp>.jsonl` (raw hook rows, decoded draw rows, frame rows) for that many guest frames; works with the renderer off |
 | `FABLE2_NATIVE_DISCOVERY_DELAY=<seconds>` | Start discovery that many seconds after the first frame (e.g. 50 to reach gameplay) |
 | `FABLE2_NATIVE_DISCOVERY_EVERY=<n>` | Sample one draw in n (default 64) |
-| `FABLE2_AUTOPLAY=<s:Button,...>` | Press gamepad buttons from inside the game at the given seconds since start, e.g. `23:A,27:Down,30:A,35:A` (buttons: A B X Y Up Down Left Right Start Back LB RB L3 R3) |
+| `FABLE2_AUTOPLAY=<s:Button,...>` | Press gamepad buttons from inside the game at the given seconds since start, e.g. `23:A,27:Down,30:A,35:A` (buttons: A B X Y Up Down Left Right Start Back LB RB L3 R3). A stick entry `s:LS=x/y/ms` or `s:RS=x/y/ms` holds that stick at x/y percent (-100..100, positive y forward, positive x right) for ms (1..60000), e.g. `55:LS=0/100/3000,60:RS=60/0/1500`; a malformed entry rejects the whole plan |
 | `FABLE2_AUTOPLAY_HOLD_MS=<ms>` | How long each autoplay press is held (default 100) |
 | `FABLE2_GUEST_WORK_LOG=1` | `[frame] guest` log line with the renderer off (A/B baseline) |
 

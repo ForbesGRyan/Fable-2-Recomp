@@ -434,7 +434,10 @@ class Fable2App : public rex::ReXApp {
           REXSYS_INFO("[autoplay] {} at {:.1f} s", autoplay_plan_[next_log].name, t);
           ++next_log;
         }
-        autoplay_state_.Publish({.buttons = ButtonsAt(autoplay_plan_, t, autoplay_hold_s_)});
+        const Sticks sticks = SticksAt(autoplay_plan_, t);
+        autoplay_state_.Publish({.buttons = ButtonsAt(autoplay_plan_, t, autoplay_hold_s_),
+                                 .stk_lx = sticks.lx, .stk_ly = sticks.ly,
+                                 .stk_rx = sticks.rx, .stk_ry = sticks.ry});
         if (t >= end) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
       }

@@ -55,5 +55,57 @@ int main() {
   if (!UvLayoutFromFetch(g, 0, 1, &l) || ApplyUvEndian(&l, 1)) return 17;  // 32-bit needs 8in32
   VertexFetch zero = g; zero.stride_dwords = 0;
   if (UvLayoutFromFetch(zero, 0, 1, &l)) return 18;
+
+  // u and v in two elements of one vertex: the instancing shaders (0x8123C16DBF583F92
+  // and relatives) keep u in the fourth half of the position element (dword 0) and
+  // v in the fourth half of the normal element (dword 2); both read source z,
+  // stride 6 dwords, endian 8in32. Vertices 0-2 of a grass mesh
+  // (native_geo_20261005_103213/1C07BDC0_00000120.bin).
+  static const uint8_t grass[72] = {
+      0x32, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x3B, 0xFE, 0xA8, 0xF8, 0x3C, 0x00,
+      0xBC, 0x00, 0x00, 0x00, 0x00, 0x00, 0xBC, 0x00,
+      0xA5, 0x9E, 0x24, 0xF8, 0x38, 0x00, 0x34, 0xFD, 0x80, 0x00, 0x3B, 0xFE, 0xA8, 0xF8, 0x00, 0x00,
+      0xBC, 0x00, 0x00, 0x00, 0x00, 0x00, 0xBC, 0x00,
+      0xB2, 0x66, 0x00, 0x00, 0x00, 0x00, 0x38, 0xFD, 0x80, 0x00, 0x3B, 0xFE, 0xA8, 0xF8, 0x3C, 0x00,
+      0xBC, 0x00, 0x00, 0x00, 0x00, 0x00, 0xBC, 0x00,
+  };
+  VertexFetch pos;
+  pos.format = 32; pos.fetch_slot = 95; pos.stride_dwords = 6; pos.offset_dwords = 0;
+  VertexFetch nrm = pos;
+  nrm.offset_dwords = 2; nrm.mini = true;
+  if (!UvLayoutFromFetches(pos, nrm, 2, 2, &l) || !ApplyUvEndian(&l, 2)) return 19;
+  if (l.offset_bytes != 0 || l.v_element_delta != 8 || l.stride_bytes != 24 || l.fetch_slot != 95) return 20;
+  if (UvElementEnd(l) != 16) return 21;
+  Float2 guv[3];
+  if (!DecodeUvs(grass, sizeof(grass), l, 0, 3, guv)) return 22;
+  if (!Near(guv[0].u, 0.0f) || !Near(guv[0].v, 1.0f)) return 23;
+  if (std::fabs(guv[1].u - 0.3118f) > 1e-3f || !Near(guv[1].v, 0.0f)) return 24;
+  if (std::fabs(guv[2].u - 0.6235f) > 1e-3f || !Near(guv[2].v, 1.0f)) return 25;
+  // The v element of the last vertex must lie inside the buffer too.
+  if (DecodeUvs(grass, 48 + 8, l, 0, 3, guv) || !DecodeUvs(grass, 48 + 16, l, 0, 3, guv)) return 26;
+  // The other way round (u from the later element): a negative step.
+  if (!UvLayoutFromFetches(nrm, pos, 2, 2, &l) || !ApplyUvEndian(&l, 2)) return 27;
+  if (l.offset_bytes != 8 || l.v_element_delta != -8 || UvElementEnd(l) != 16) return 28;
+  if (!DecodeUvs(grass, sizeof(grass), l, 1, 1, guv) || !Near(guv[0].u, 0.0f) ||
+      std::fabs(guv[0].v - 0.3118f) > 1e-3f) {
+    return 29;
+  }
+  // One fetch for both axes is the single-element layout.
+  UvLayout one, two;
+  if (!UvLayoutFromFetch(f, 1, 0, &one) || !UvLayoutFromFetches(f, f, 1, 0, &two)) return 30;
+  if (two.v_element_delta != 0 || two.offset_bytes != one.offset_bytes || two.comp_u != 1 || two.comp_v != 0 ||
+      UvElementEnd(one) != 16) {
+    return 31;
+  }
+  // Two elements must share the stream, the stride and the element format.
+  VertexFetch other = nrm; other.fetch_slot = 94;
+  if (UvLayoutFromFetches(pos, other, 2, 2, &l)) return 32;
+  other = nrm; other.stride_dwords = 7;
+  if (UvLayoutFromFetches(pos, other, 2, 2, &l)) return 33;
+  other = nrm; other.format = 26;
+  if (UvLayoutFromFetches(pos, other, 2, 2, &l)) return 34;
+  other = nrm; other.format = 6;
+  if (UvLayoutFromFetches(pos, other, 2, 2, &l) || UvLayoutFromFetches(other, pos, 2, 2, &l)) return 35;
+  if (UvLayoutFromFetches(pos, nrm, 2, 4, &l) || UvLayoutFromFetches(pos, nrm, 4, 2, &l)) return 36;
   return 0;
 }

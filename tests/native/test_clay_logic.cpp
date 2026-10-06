@@ -191,6 +191,15 @@ int main() {
     a = r;
     a.material.uv.swap16 = true;
     CHECK(86, !(UvKey(a) == k));
+    // 127-129: v taken from another element of the vertex changes the key,
+    // and the count covers the later of the two elements.
+    a = r;
+    a.material.uv.v_element_delta = 8;
+    CHECK(127, !(UvKey(a) == k));
+    CHECK(128, UvCount(3200, r.material.uv) == 100 && UvCount(3200 - 16, r.material.uv) == 100 &&
+                   UvCount(3200 - 17, r.material.uv) == 99);
+    CHECK(129, UvCount(3200, a.material.uv) == 100 && UvCount(3200 - 8, a.material.uv) == 100 &&
+                   UvCount(3200 - 9, a.material.uv) == 99 && UvCount(23, a.material.uv) == 0);
     // Never the key of positions or indices of the same stream, nor of a
     // terrain grid's indices.
     capture::DrawRecord s = r;

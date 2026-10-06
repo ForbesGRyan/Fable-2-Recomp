@@ -3,7 +3,9 @@
 // UV vertex elements -> float2 (pure: no SDK/GPU deps). A table entry names
 // the vertex fetch and the two GPU source components the shader routes into
 // the albedo coordinates (vs-transforms.json "uv"); the scale/offset is
-// applied later, per draw, from shader constants.
+// applied later, per draw, from shader constants. u and v usually share one
+// element; the instancing shaders (frame-map section 12) take them from two
+// elements of the same vertex.
 
 #include <cmath>
 #include <cstddef>
@@ -25,7 +27,9 @@ struct UvLayout {
   bool is_signed = true;      // kShort* only
   bool normalized = true;     // kShort* only
   int exp_adjust = 0;         // kShort* only
-  uint32_t offset_bytes = 0;  // within one vertex
+  uint32_t offset_bytes = 0;  // of the element holding u, within one vertex
+  // Bytes from that element to the one holding v (same format); 0: one element.
+  int32_t v_element_delta = 0;
   uint32_t stride_bytes = 0;
   uint32_t fetch_slot = 0;
   uint8_t comp_u = 0, comp_v = 1;  // GPU source components
@@ -75,6 +79,32 @@ inline bool UvLayoutFromFetch(const VertexFetch& f, uint8_t comp_u, uint8_t comp
   return true;
 }
 
+// u from `fu` and v from `fv`: one fetch, or two elements of one vertex, which
+// must share the stream, the stride and the element format.
+inline bool UvLayoutFromFetches(const VertexFetch& fu, const VertexFetch& fv, uint8_t comp_u,
+                                uint8_t comp_v, UvLayout* out) {
+  UvLayout l, lv;
+  if (!UvLayoutFromFetch(fu, comp_u, 0, &l) || !UvLayoutFromFetch(fv, 0, comp_v, &lv)) return false;
+  if (lv.fetch_slot != l.fetch_slot || lv.stride_bytes != l.stride_bytes || lv.format != l.format ||
+      lv.is_signed != l.is_signed || lv.normalized != l.normalized || lv.exp_adjust != l.exp_adjust) {
+    return false;
+  }
+  l.comp_v = comp_v;
+  l.v_element_delta = int32_t(lv.offset_bytes) - int32_t(l.offset_bytes);
+  *out = l;
+  return true;
+}
+
+// Bytes from the start of a vertex to the end of its UV element (the later
+// one when u and v sit in two elements); 0 for a layout that cannot be read.
+inline uint32_t UvElementEnd(const UvLayout& l) {
+  const uint32_t n = UvComponents(l.format);
+  const int64_t u_offset = l.offset_bytes;
+  const int64_t v_offset = u_offset + l.v_element_delta;
+  if (n == 0 || v_offset < 0 || v_offset > 0x7FFFFFFF || u_offset > 0x7FFFFFFF) return 0;
+  return uint32_t(v_offset > u_offset ? v_offset : u_offset) + n * (UvSixteen(l.format) ? 2u : 4u);
+}
+
 // Same endian rules as ApplyFetchEndian (position_decode.h).
 inline bool ApplyUvEndian(UvLayout* l, uint32_t endian) {
   if (UvSixteen(l->format) && (endian == 1 || endian == 2)) {
@@ -113,14 +143,16 @@ inline float UvComponent(const uint8_t* p, const UvLayout& l, uint32_t memory_co
 inline bool DecodeUvs(const uint8_t* src, size_t src_size, const UvLayout& l, uint32_t first_vertex,
                       uint32_t count, Float2* out) {
   const uint32_t n = UvComponents(l.format);
-  if (!src || n == 0 || l.stride_bytes == 0) return false;
-  const uint32_t bytes = n * (UvSixteen(l.format) ? 2 : 4);
+  const uint32_t end = UvElementEnd(l);  // 0: the v element would start before the vertex
+  if (!src || n == 0 || l.stride_bytes == 0 || end == 0) return false;
   const uint32_t mu = l.swap16 && UvSixteen(l.format) ? (l.comp_u ^ 1u) : l.comp_u;
   const uint32_t mv = l.swap16 && UvSixteen(l.format) ? (l.comp_v ^ 1u) : l.comp_v;
+  const uint32_t v_offset = uint32_t(int64_t(l.offset_bytes) + l.v_element_delta);
   for (uint32_t i = 0; i < count; ++i) {
-    const uint64_t at = uint64_t(first_vertex + i) * l.stride_bytes + l.offset_bytes;
-    if (at + bytes > src_size) return false;
-    out[i] = {detail::UvComponent(src + at, l, mu), detail::UvComponent(src + at, l, mv)};
+    const uint64_t vertex = uint64_t(first_vertex + i) * l.stride_bytes;
+    if (vertex + end > src_size) return false;
+    out[i] = {detail::UvComponent(src + vertex + l.offset_bytes, l, mu),
+              detail::UvComponent(src + vertex + v_offset, l, mv)};
   }
   return true;
 }

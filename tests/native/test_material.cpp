@@ -46,9 +46,26 @@ int main() {
   VsUvSpec wrong_off = v; wrong_off.offset_dwords = 0;
   if (ResolveUvFetch(f, u, wrong_off, &l)) return 10;
   VsUvSpec other = v; other.fetch_index = 0; other.xenos_format = 32; other.offset_dwords = 0;
-  if (ResolveUvFetch(f, u, other, &l)) return 11;           // u and v from different fetches
+  if (ResolveUvFetch(f, u, other, &l)) return 11;           // u and v from fetches of different formats
   VsUvSpec past = u; past.fetch_index = 5;
   if (ResolveUvFetch(f, past, v, &l)) return 12;
+  if (ResolveUvFetch(f, u, past, &l)) return 30;
+  // u and v from two fetches of one stream with the same element format (the
+  // instancing shaders: source z of the position element and of the normal element).
+  std::vector<VertexFetch> g(3);
+  g[0].format = 32; g[0].fetch_slot = 95; g[0].stride_dwords = 6; g[0].offset_dwords = 0;
+  g[1] = g[0]; g[1].offset_dwords = 2; g[1].mini = true;
+  g[2] = g[1]; g[2].offset_dwords = 4;
+  VsUvSpec gu{0x2, 0, 0, 0, 2, 32, 0, {}};
+  VsUvSpec gv{0x2, 0, 1, 1, 2, 32, 2, {}};
+  if (!ResolveUvFetch(g, gu, gv, &l) || l.comp_u != 2 || l.comp_v != 2 || l.offset_bytes != 0 ||
+      l.v_element_delta != 8 || l.stride_bytes != 24 || l.fetch_slot != 95) {
+    return 31;
+  }
+  VsUvSpec gv_wrong = gv; gv_wrong.offset_dwords = 4;       // the table names another element
+  if (ResolveUvFetch(g, gu, gv_wrong, &l)) return 32;
+  g[1].fetch_slot = 94;                                     // v in another stream
+  if (ResolveUvFetch(g, gu, gv, &l)) return 33;
 
   // Refs visited by ForEachRef (the capture reads only these registers).
   std::vector<int32_t> seen;

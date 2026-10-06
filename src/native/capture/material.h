@@ -119,16 +119,19 @@ inline void ComposeAxis(const UvStage* vs, const UvStage* ps, const float* vs_ba
   *offset = b;
 }
 
-// Both axes must come from the same vertex fetch, which must match the format
-// and offset the tool recorded (guards against a different fetch order).
+// Each axis's vertex fetch must match the format and offset the tool recorded
+// (guards against a different fetch order). The axes come from one fetch, or
+// from two fetches of one stream with the same element format
+// (UvLayoutFromFetches).
 inline bool ResolveUvFetch(const std::vector<VertexFetch>& fetches, const VsUvSpec& u, const VsUvSpec& v,
                            UvLayout* out) {
-  if (u.fetch_index != v.fetch_index || u.fetch_index < 0 || size_t(u.fetch_index) >= fetches.size()) return false;
-  const VertexFetch& f = fetches[size_t(u.fetch_index)];
   for (const VsUvSpec* s : {&u, &v}) {
+    if (s->fetch_index < 0 || size_t(s->fetch_index) >= fetches.size()) return false;
+    const VertexFetch& f = fetches[size_t(s->fetch_index)];
     if (f.format != s->xenos_format || f.offset_dwords != s->offset_dwords) return false;
   }
-  return UvLayoutFromFetch(f, u.src_comp, v.src_comp, out);
+  return UvLayoutFromFetches(fetches[size_t(u.fetch_index)], fetches[size_t(v.fetch_index)], u.src_comp,
+                             v.src_comp, out);
 }
 
 }  // namespace fable2::native::capture

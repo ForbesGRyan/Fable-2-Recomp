@@ -216,7 +216,8 @@ inline GeoKey MeshUvKey(const capture::DrawRecord& r) {
   k.stride = l.stride_bytes;
   k.extra = HashCombine32({l.offset_bytes, uint32_t(l.format), uint32_t(l.comp_u),
                            uint32_t(l.comp_v), uint32_t(l.swap16), uint32_t(l.normalized),
-                           uint32_t(l.is_signed), uint32_t(l.exp_adjust)});
+                           uint32_t(l.is_signed), uint32_t(l.exp_adjust),
+                           uint32_t(l.v_element_delta)});
   k.kind = 4;
   return k;
 }
@@ -232,13 +233,11 @@ inline GeoKey UvKey(const capture::DrawRecord& r) {
   return k;
 }
 
-// UVs in a stream of `vb_size` bytes: every vertex whose UV element lies
-// fully inside the stream.
+// UVs in a stream of `vb_size` bytes: every vertex whose UV element (both
+// elements when u and v sit apart) lies fully inside the stream.
 inline uint32_t UvCount(uint32_t vb_size, const capture::UvLayout& l) {
-  const uint32_t n = capture::UvComponents(l.format);
-  if (n == 0 || l.stride_bytes == 0) return 0;
-  const uint64_t need = uint64_t(l.offset_bytes) + n * (capture::UvSixteen(l.format) ? 2u : 4u);
-  if (need > vb_size) return 0;
+  const uint32_t need = capture::UvElementEnd(l);
+  if (need == 0 || l.stride_bytes == 0 || need > vb_size) return 0;
   return uint32_t((vb_size - need) / l.stride_bytes + 1);
 }
 

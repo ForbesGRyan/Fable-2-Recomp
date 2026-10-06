@@ -527,6 +527,14 @@ class ContradictoryEntryTest(Base):
         # An entry without a transform and without "instance" is still no entry at all.
         self.assertIsNone(pc.parse_entry({"manual": True, "rejected": "no transform"}))
 
+    def test_skin_entry_without_base_is_an_entry_error(self):
+        entry = {"layout": "dot", "skin": {"index_fetch": 2, "index_component": "z", "row_fetches": [6, 7, 8]}}
+        with self.assertRaisesRegex(ValueError, "skin.*base"):
+            pc.parse_entry(entry)
+        self.assertRegex(self.error_line(entry), "VS 0xAAAA entry error: ValueError: .*skin.*base")
+        # A two-window product ("base2", matrix_finder.py --products) is no table entry: not judged, no error.
+        self.assertIsNone(pc.parse_entry({"base": 8, "base2": 20, "layout": "dot"}))
+
 
 class SkippedRowsVerdictTest(Base):
     """The verdict counts what leaves the in-clip share: rows the runtime would skip reject the entry,
@@ -582,6 +590,12 @@ class SkippedRowsVerdictTest(Base):
         # Unreadable rows are no judged draws: 19 judged of 60 sampled is still too few.
         r, line = self.judge([good] * 19 + [self.plain(file=False)] * 41)
         self.assertEqual((r["draws"], r["unreadable"], r["accepted"]), (19, 41, False))
+        # And they do not raise the floor: a tenth is taken of the sampled rows that could be read.
+        # 25 judged of 300 sampled, 275 of them unreadable, is 25 of 25 (floor 20), not 25 of 300 (floor 30).
+        r, line = self.judge([good] * 25 + [self.plain(file=False)] * 275, max_draws=300)
+        self.assertEqual((r["draws"], r["unreadable"], r["sampled"], r["accepted"]), (25, 275, 300, True))
+        self.assertIn("ACCEPT, passed 25, unreadable 275", line)
+        # Wholly cut draws, by contrast, are sampled rows (below): 29 of 300 is too few.
         # Wholly cut draws leave the share: an entry with a cut must be judged on a tenth of its sampled rows.
         kept, entry = self.instanced([0.5, 2.0, 0.0, 0.0], [0, 1])
         entry["instance"]["cut"] = {"eye": "c9.xyz", "dist2": "c13.z"}

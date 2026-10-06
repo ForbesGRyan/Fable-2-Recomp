@@ -240,11 +240,13 @@ def _row_swizzles(items):
 
 def parse_entry(entry):
     """A vs-transforms.json entry as the generated table holds it (gen_transform_table.py);
-    None if the entry has no transform or is a terrain entry (not a draw row). Raises ValueError for
-    the entries the generator refuses: "instance" without "base", "skin" together with "instance", a
-    skin with "pairs" but no "weight_fetch"."""
-    if "instance" in entry and "base" not in entry:
-        raise ValueError("instance entry without base")
+    None if the entry has no transform, is a two-window product of the finder ("base2", no table
+    line) or is a terrain entry (not a draw row). Raises ValueError for the entries the generator
+    refuses: "skin" or "instance" without "base", "skin" together with "instance", a skin with
+    "pairs" but no "weight_fetch"."""
+    for layout_key in ("skin", "instance"):
+        if layout_key in entry and "base" not in entry:
+            raise ValueError(f"{layout_key} entry without base")
     if "skin" in entry and "instance" in entry:
         raise ValueError("entry has both skin and instance")
     if "base" not in entry or "base2" in entry or "terrain" in entry:

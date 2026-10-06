@@ -144,6 +144,21 @@ class GenTransformTableTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "0xABC3.*instance.*base"):
             gtt.generate({"0xABC3": {"layout": "dot", "instance": dict(self.INSTANCE)}})
 
+    def test_skin_entry_without_base_is_rejected(self):
+        # Without the check the entry was dropped from the table without a word, like the instance one.
+        skin = {"index_fetch": 2, "index_component": "z", "row_fetches": [6, 7, 8]}
+        with self.assertRaisesRegex(ValueError, "0xABC4.*skin.*base"):
+            gtt.generate({"0xABC4": {"layout": "dot", "skin": skin}})
+
+    def test_two_window_product_entries_are_left_out(self):
+        # "base2" is what matrix_finder.py --products writes for a shader whose transform is the
+        # product of two constant windows. The table has one base per shader, so such an entry is a
+        # finder result to read, not a table line; it is left out on purpose and does not raise.
+        text = gtt.generate({"0xABC5": {"base": 8, "base2": 20, "layout": "dot", "score": 1.0, "samples": 4},
+                             "0xABC6": {"base": 0, "layout": "dot"}})
+        self.assertNotIn("0xABC5", text)
+        self.assertIn("FABLE2_VS_TRANSFORM(0xABC6ull, 0, 0, -1, 0)", text)
+
     def test_plain_entries_unchanged(self):
         text = gtt.generate({"0x2": {"base": 4, "layout": "combine", "pos_fetch": 1, "deformed": True}})
         self.assertEqual(text.splitlines()[1:], ["FABLE2_VS_TRANSFORM(0x2ull, 4, 1, 1, 1)"])

@@ -852,6 +852,8 @@ Capture: `.\tools\drive_game.ps1 -Total 180 -GameArgs "--dump_shaders=C:\Users\R
 | `0xDBFD88A80EDBCE36` | 42 | 99.7% | albedo tf0 | `29B6` 42 (rejected) |
 | `0xC300519EC8915346` | 40 | 100.0% | albedo tf0 (finder said tf1) | `775C` 35, `29B6` 5 (rejected) |
 
+**Table state since sub-project 5 (added 2026-10-06; section 12).** The last column and the "Coverage" paragraph below are as measured on 2026-10-02. Every vertex shader marked "no entry" or "rejected" above now has a transform entry, except the billboards `29B6` and `775C`: `8123`, `B636`, `6AD4`, `48D3`, `FC4F`, `33C0` and `36B5` (instanced, with `"uv"`), `475E` and `7C57` (with `"uv"`), `A584` (no `"uv"`). So the draws of `0x7CD5...` and `0x014F...` are drawn, as flat clay counted `no-albedo`: 22 and 15 per frame in the bridge scene (`untextured by ps` lines of `fable_2_184.log`). `ps-albedo.json` said of both that their draws "are not drawn anyway" until this date. `0x014F...` is not water, as the next paragraph guesses: in the bridge capture its draws are the dog's fur shells (section 12, "Wind and displacement").
+
 Thumbnails (tf0): building-trim and wood-plank atlases, a character-part atlas (faces, eyes, cloth), leaves, ferns, a grass/bark/stone atlas, a feather/fur atlas, an eye iris, a glow sprite and a flame sprite. `no_albedo`: `7CD5...` (only colour fetch tf0 untraceable, scalar co-issue `mulsc`), `014F...` (tf14/tf15 8_8_8_8 all-zero at first use, tf13 8_8 two-channel, likely water), `A17D...`/`F6D9...` (only traced fetch is a single-component `k_8` mask; their 8_8_8_8 fetches are predicated and all-zero at first use). All 8_8_8_8 256x256/128x128 textures of those shaders read as zero bytes when first dumped, so they look like render targets.
 
 **Coverage.** Every in-scene draw has a table decision (17 of 17 shaders, 100%); 12089 of 14391 draws (84.0%) are on albedo shaders (80% was reached at `E99F...`). The draws drawn today are those whose vertex shader has a transform: 6708 (46.6%); of these, 5811 (86.6%) have an albedo entry and a VS `"uv"` entry, the other 897 are `BEAD...` draws with `no_albedo` shaders. The other 7683 draws are on vertex shaders without a transform (characters and instanced foliage `8123`/`B636`, `pos_suspect`; `475E`, `A584`, `7C57`, `48D3`, `29B6`, `775C`, `FC4F`, `6AD4`, `33C0`, `36B5`), so they are not drawn and got no `"uv"`.
@@ -1179,7 +1181,7 @@ What `0xD4D5...` draws in the bridge scene (capture rows by vertex buffer, with 
   | `r2.w` | `r1`, `r9`, `r6` | 25-27 | 16-18 | `r4.w` | 29, 30, 31 |
 
   So the (index, weight) register components pair as (x, z), (y, y), (z, x), (w, w). The weight fetch is `zyxw`, so that is byte k of the index word with byte k of the weight word.
-- `r2 = cndeq(c255.xxxy, r7.zxyy, c255.yyyy) = (p.z, p.x, p.y, 1)` (instr 28; `c255 = (0, 1, 0.5, 0)`, "Literals" above), with `p = r7` as fetched.
+- `r2 = cndeq(c255.xxxy, r7.zxyy, c255.yyyy) = (p.z, p.x, p.y, 1)` (instr 28), with `p = r7` as fetched. `c255 = (0, 1, 0.5, 0)`: the `vs_literals` field of this shader's draw row in `native_discovery_20261005_123635.jsonl` (file line 1606; registers 252-255, sixteen dwords, the last four `00000000 3F800000 3F000000 00000000`), written by the temporary diagnostic that "Literals" under "Instancing" describes; that section lists only the instancing shaders in its tables and quotes this row in its last paragraph. `c255` of the four shaders not drawn in scene ("The other four shaders" below) was not read: that capture has `vs_literals` only on in-scene draw rows (15 shaders). `(0, 1, ...)` is assumed for them from the identical `cndeq(c255.xxxy, ..., c255.yyyy)` idiom in their dumps.
 - The three sums are held permuted and the `dp4` operands undo it. Row 0 in `r1`: as fetched (29), `yxzw` (34, 35), as fetched again (40: `mad r1, r10, r4.zzzz, r1.yxzw`). Row 1 in `r9`: `xzyw` (30, 33, 36), then `wxzy` (39: `mad r9, r11.wxzy, r4.zzzz, r9.wxyz`). Row 2 in `r6`: `xzyw` throughout (31, 32, 37, 38). Then `r4.x = dp4(r1.zxyw, r2)`, `r4.y = dp4(r9.zywx, r2)`, `r4.z = dp4(r6.yxzw, r2)` (41-43), and each is `A.z p.z + A.x p.x + A.y p.y + A.w` for the summed row `A` in the order it was fetched.
 - `r4 = cndeq(c255.xxxy, r4.zxyy, c255.yyyy)` (70), `oPos = dp4(c0..c3 .zxyw, r4)` (71-74): `c0..c3` (dot) on `(dot(M0, p), dot(M1, p), dot(M2, p), 1)`, `M_k = sum_j w_j row_k(bone_j)`.
 - Under 8in32 a half4 fetched `yxwz` is the memory order `(m0, m1, m2, m3)` (section 9). So the rows are read `yxwz` (the fetches' own swizzle) and the position `yxw1` (the entry's existing `pos_swizzle`; the fetch's own `w` is replaced by 1 at instr 28).
@@ -1278,6 +1280,8 @@ What the gate has to separate is far apart: a correct skin scores 0.972 to 0.976
 
 The checker accepts the two permutations of the rows: they keep every bone orthonormal and every edge rigid, as Task 4 found. They are ruled out by the dump reading and by the game's posed stream above, where they are 0.914 and 0.818 units off at the median.
 
+The figures above pool every mesh, and the posed-stream check is on the dog. For the hero the Task 9 review gives per-mesh numbers (the reviewer's, not reproduced in Task 10: `position_check.py` has no per-buffer option): the edge share is 0.994 to 1.000 for each of the twelve vertex buffers `0xD4D5...` draws, and on the hero's body buffer `0x1BF18DC0` the wrong pairings score 0.677 to 0.886.
+
 **Regression case.** `test_bone_skin.cpp` `RealDraw` (cases 90-108): eight vertices of the dog's draw in frame 3 of the capture with one, two, three and four influences (224 bytes of vertices, the palette cut after bone 26), printed by `position_check.py`'s `cpp_fixture()`. The test selects the skin from the shader's 19 fetches with the table's arguments, skins the vertices and compares them within 1e-5 with the checker's positions and with the game's posed stream of the next frame; it also checks that the bind pose, the straight pairing, the first two rows exchanged and the rows read `yxzw` give other positions.
 
 **Runtime.** The weighted path of Task 2 and Task 8 (`SelectSkin` with pairs, `SkinPositions` with four influences, the index and weight words under 8in32) needed no change: it reproduces the fixture at once and the runs below show no skip. One fix folded in from Task 8's review: a palette that holds no whole bone made `SkinPositions` fail in the renderer, counted `render-other`. `PaletteBones` (`bone_skin.h`, tests 80-86) counts the whole bones of a palette, and `FillDrawInputs` skips the draw as `skin-unsupported` when there is none.
@@ -1308,6 +1312,175 @@ Screenshots (window shots of the committed build, against the view-off shot of t
 - **Cost in a crowd was not measured.** The figures above are for about 29 skinned draws; skinning is per vertex on the CPU, re-done for a mesh whenever its palette bytes change.
 - **Four shaders rest on their dump readings alone** (`0x3A0F...`, `0x82F6...`, `0x9ED0...`, `0x5F44...`): no stream dumps, no `position_check.py` line, no screenshot. The posed-stream check covers `0xD4D5...` only. `user-checks.md` checks 10 and 11.
 - **The offline metrics accept a permuted skin** (controls table). For `0xD4D5...` the game's posed stream closes that gap; a future skin entry without such a stream has the dump reading and the screenshot only.
+
+### Validation (plan Task 10)
+
+Autoplay validation, 2026-10-06, release build of commit 5de47df (`fable_2.exe` written 11:38:01; the later commits change the plan document only), `tools\drive_game.ps1` 120 s runs, no other input sent. The autoplay save loads the bridge scene (quest "The Birth of a Hero") and the camera does not move, so everything below is one scene from one viewpoint; town, field, interior, motion and a crowd are user checks.
+
+**The runs.** Someone was using the machine during this validation (measured, below), and the game world froze in six of today's seven runs. A window of 300 frames is called live when the guest paces on the swap (30.0 fps, swap median 24 to 27 ms) and frozen when every window logs the same captured and drawable counts, the clay pass has 0 uploads and 0.00 ms decode (no vertex or palette byte changes: nothing animates) and the guest runs at 23 to 26 fps with a work median of 39 to 41 ms and no swap wait. Only live windows are used for figures. Because today's split run froze, the split figures and the split screenshots are Task 9's run of the same `fable_2.exe`, `fable_2_177.log` (started 11:38:02), re-read for this section; `fable_2_178.log` is Task 9's native-view run of it.
+
+| Log | Started | Run | Live windows after the world is up | Used |
+|---|---|---|---|---|
+| `fable_2_177.log` | 11:38 | split, `-Shots "70,95"` (Task 9) | 7 of 7 | split figures and shots |
+| `fable_2_178.log` | 11:40 | native, `-Total 110 -Shots "95"` (Task 9) | 6 of 6 | native figures |
+| `fable_2_179.log` | 12:01 | renderer off, `-Env @{FABLE2_GUEST_WORK_LOG="1"}` | 0: frozen from about 50 s | the freeze only |
+| `fable_2_180.log` | 12:04 | renderer off, `-Shots "95"` | 3, frozen from about 77 s; the 95 s shot shows the F3 Debug window open and the camera in another place, so input reached the game | fps windows only |
+| `fable_2_181.log` | 12:08 | renderer off, `-Shots "95"` | 2, frozen from about 72 s | renderer-off figures |
+| `fable_2_182.log` | 12:10 | view off, `-Shots "95"` | 4, frozen from about 91 s | view-off figures, reference shot |
+| `fable_2_183.log` | 12:13 | split, `-Shots "70,95"` | 0: frozen from about 47 s | the freeze only |
+| `fable_2_184.log` | 12:17 | native, `-Shots "95"` | 7 of 7; from 114.7 s the drawn set changes (input arriving with the game in the foreground) | native figures and shot, to scene frame 3016 |
+| `fable_2_185.log` | 12:19 | renderer off, `-Shots "95"` | 0: frozen from about 50 s | the freeze only |
+
+The split, view-off and renderer-off runs were not repeated: two waits, of 7 and 9.5 minutes, for the machine to go 60 s (then 45 s) without input ended with a longest idle stretch of 16 s and 29 s.
+
+The time a freeze begins is read from the log's once-a-second `vsync present gate` lines: about 30 host presents a second while live, 25 to 26 frozen, and two to five irregular seconds between, sometimes with a second or two without frames.
+
+Commands: `.\tools\drive_game.ps1 -Total 120 [-Shots ...] -GameArgs "--fable2_native_render=false" -Env @{FABLE2_GUEST_WORK_LOG="1"}`, `-GameArgs "--fable2_native_render=true","--fable2_native_view=off"`, `...,"--fable2_native_view=split"`, `...,"--fable2_native_view=native"`. Shots of the runs used are in `logs\shots\task10_native` and `logs\shots\task9_split`; those of the other runs in `logs\shots\task10_discarded`.
+
+**The freeze.** It is the "unexplained event" of section 10 (`fable_2_133.log`: the same draws every frame, guest work near 39 ms, no swap wait), now seen in seven more runs: the six above and Task 8's split run `fable_2_172.log`, frozen from about 61 s, which was not noticed then (its frame-2700 figures, captured 981 and drawable 949, are the frozen frame's; the same frozen counts as `fable_2_183.log`). What was measured:
+
+- For `fable_2_183.log`, `fable_2_184.log` and `fable_2_185.log` a sampler beside the run recorded once a second which process owned the foreground window and how long ago the machine last received an input event (`GetForegroundWindow`, `GetLastInputInfo`; it sends nothing and touches no window).
+  - `fable_2_184.log`, live: the game was the foreground window from 3 s to the end, and the machine received no input from 172 s before the run until about 115 s into it. At that input the drawn set starts to change, as it would when the camera turns: the last clay window has 882 drawn and 511 terrain draws against 949 and 567, and textures upload from 114.7 s.
+  - `fable_2_183.log` and `fable_2_185.log`, frozen: another program owned the foreground window in every sample and the game never did (in `fable_2_183.log` the terminal, `warp`; in `fable_2_185.log` that process and, for the first half minute, another), and input was arriving: in 98 of 125 samples for `fable_2_185.log`; for `fable_2_183.log` at 35 to 37 s and 41 to 46 s of the log's time, the last event at 46.2 s and the freeze beginning between 46.4 and 47.4 s.
+- `fable_2_181.log` and `fable_2_182.log` had no sampler; their 95 s window shots show the title bar in its inactive colour. The shots of the live runs show it active.
+- No warning, error or other log line marks the onset, and the frozen frame shows no menu or message: the shots look like the live scene.
+- The renderer is not needed for it: four of the frozen runs had `--fable2_native_render=false`.
+
+What this supports: the world froze in every run in which the game window was seen out of the foreground or input was arriving at the machine, and in none of the three live runs (`fable_2_184.log`: the game measured in the foreground with no input arriving; `fable_2_177.log` and `fable_2_178.log`: active title bar in the shots, nothing else known). Being out of the foreground and input arriving came together in every case, so the data cannot say which of them matters, or whether something else the person did does. What it does not show is the mechanism. The pad drivers of `src\input` read the keyboard only while the game is the foreground window (`keyboard_gamepad.h`), no host code was found that pauses the guest when focus is lost (`ReXApp::OnWindowFocusChanged` is not overridden; the SDK's pad drivers then report an untouched pad), and whether focus alone does it was not tested: autoplay must not touch the foreground window. `user-checks.md` check 15.
+
+**Against the success criteria.**
+
+| Success criterion (spec) | Autoplay measurement (bridge scene) | Result |
+|---|---|---|
+| 1. At least 90% of main-scene non-terrain draws drawn | `(drawable - terrain) / (captured - terrain)`: 0.914 to 0.924 over the 20 logged frames from 1500 on of `fable_2_177.log`, `fable_2_178.log` and `fable_2_184.log`. `fable_2_184.log`: frame 1500 386 / 418 = 0.923, frame 2100 386 / 421 = 0.917, frame 2700 384 / 418 = 0.919, frame 3000 382 / 416 = 0.918; `fable_2_177.log` frame 2700 384 / 420 = 0.914. Terrain is 567 in every one of these frames: the three `(terrain)` shaders of the `drawable by vs` line, 340 + 152 + 75, which is also the `terrain: 567` of the untextured list; no terrain draw is among the skips | met for this scene; Bowerstone streets: user check 14 |
+| 2. Split and overlay screenshots show the hero and the dog in their animated pose with eyes and sword attached | pose met for the bridge scene (hero from behind in one idle stance, dog, crow, continuity across the split seam, the dog's rigid eye mesh numerically 0.011 against 0.18 units); the hero's eyes, a sword, motion, a crowd and the overlay view are not evidenced by autoplay and are user check 11 | partly evidenced, not closed |
+| 3. Screenshots show instanced meshes lined up with the emulated image | placement met for this scene: no clay instanced mesh where the emulated image clearly has none (native-view shot at 95 s against the view-off shot). The silhouettes differ, because the clay pass has no alpha test: every card is an opaque rectangle. The four near-field shaders could not be judged from the bridge | met for placement in this scene; user checks 9 and 12 |
+| 4a. 30 fps with a clay view on | 30.0 fps in every live window after the world is up: native view 7 of 7 (`fable_2_184.log`) and 6 of 6 (`fable_2_178.log`), split 7 of 7 (`fable_2_177.log`). Today's split run has no live window | met in the undisturbed runs; see "Frame rate" |
+| 4b. View-off capture overhead under 0.5 ms per frame | capture median 0.045 ms in each of the four live windows (frames 1500 to 2400, `fable_2_182.log`; p90 0.048 to 0.096 ms, slowest frame 0.116 to 0.364 ms) | met |
+| 5. User checks | none done | pending: `user-checks.md` checks 7 to 15 |
+
+**Logs** (`fable_2_184.log`, native view, frame 2700; `fable_2_182.log`, view off, frame 2400, the last live window; `fable_2_181.log`, renderer off):
+
+```
+native   [native] capture: frame 2700 captured 985 drawable 951 (deformed 194) skipped {no-transform: 4, unsupported-prim: 30} nested_total 0 | records on | capture 1.174 ms (median 1.200, p90 1.860, max 2.041 over 300 frames) | textured 323 untextured by reason {terrain: 567, no-albedo: 61}
+native   [native] capture: frame 2700 untextured by ps {0x7CD57B81550F19E3(no-albedo): 22, 0x014F8A02DB7B19CA(no-albedo): 15, 0xA17D8AEC3A817D45(no-albedo): 12, 0xF6D98C7B4D98438B(no-albedo): 12}
+native   [native] capture: frame 2700 unsupported by hook {D3DDevice_BeginVertices?: 16, DrawIndx:82217EE8: 10, DrawIndx2:821EF988: 4}
+native   [native] capture: frame 2700 no-transform by vs {0x29B6506FBACEB93A: 3, 0x775C6085FBB9D676: 1}
+native   [native] capture: frame 2700 drawable by vs {0xC30A97D946FA2BE4(terrain): 340, 0xFB68A7F2301210E1(terrain): 152, 0xECD66A10092E6562: 122, 0x5003700B7C9B1C16(terrain): 75, 0x8123C16DBF583F92(instanced): 73, 0xB636821F95DC9D8E(instanced): 38, 0x475EC9F795E5EDBB(deformed): 30, 0xD4D558DA6A82BDC8(skin): 29, 0xBEAD84BD72072E0E: 24, 0xA5846836C90E1192(deformed): 22}
+native   [native] clay: drawn 951 (deformed 194) of 951 drawable, skipped_bad_index 0 other 0 | textured 323 of 951 | 5 uploads, 2220 hits, 25.1 MB resident, instanced 135, skinned 32 | hash 0.72 ms, decode 0.12 ms, record 0.33 ms (max total 2.56 ms over 300) | scene frame 2716
+native   [native] clay: Textures: textured 323 of 951 drawn (33%, 84% non-terrain), resident 69 (16.1 MB), uploads 0 (0.0 MB), decode 0.53 ms | top untextured: terrain 567, no-albedo 61
+view off [native] capture: frame 2400 captured 985 drawable 0 (deformed 0) skipped {} nested_total 0 | records off | capture 0.044 ms (median 0.045, p90 0.049, max 0.116 over 300 frames) | textured 0 untextured by reason {}
+view off [frame] guest 300 frames: 30.0 fps, frame median 33.30 ms, work median 6.47 ms (p90 7.10), swap median 26.71 ms, wait median 0.00 ms
+off      [frame] guest 300 frames: 30.0 fps, frame median 33.37 ms, work median 6.27 ms (p90 6.87), swap median 27.08 ms, wait median 0.00 ms
+```
+
+The scene repeats from run to run frame for frame: `fable_2_177.log`, `fable_2_178.log` and `fable_2_184.log` log the same drawn and skinned counts at the same scene frames (953 and 34 at 1516, 947 and 28 at 1816, 953 and 34 at 2116, 951 and 32 at 2416 and 2716, 949 and 30 at 3016). `skinned` is consistent with the `0xD4D5...` count plus the 3 `0xA1F7...` draws: the capture line of frame 2700 has 29 and the clay line of scene frame 2716 has 32, and the same holds at 1500, 2100, 2400 and 3000; at 1800 the two lines read 23 and 28. They are logged 16 frames apart and birds come and go, so this is a consistency check, not a count of one frame. `instanced` is 135 throughout. `skin-unsupported`, `instance-unsupported` and `bad-index` appear in none of today's logs, and the clay pass skips nothing (`skipped_bad_index 0 other 0`).
+
+**Cost** (live windows after the world is up; ranges over those windows):
+
+| | Renderer off | View off | Split | Native view | Native view |
+|---|---|---|---|---|---|
+| Log | `fable_2_181.log` | `fable_2_182.log` | `fable_2_177.log` | `fable_2_178.log` | `fable_2_184.log` |
+| Live windows | 2 | 4 | 7 | 6 | 6 (to scene frame 3016) |
+| Guest fps | 30.0 | 30.0 | 30.0 | 30.0 | 30.0 |
+| Guest work median, ms | 6.27, 6.33 | 6.44 to 6.62 | 7.42 to 7.68 | 7.39 to 7.52 | 7.99 to 8.77 |
+| Capture median, ms | - | 0.045 | 1.137 to 1.152 | 1.138 to 1.144 | 1.166 to 1.227 |
+| Clay hash, ms | - | - | 0.36 to 0.68 | 0.47 to 0.66 | 0.39 to 0.73 |
+| Clay decode, ms | - | - | 0.15 to 0.28 | 0.10 to 0.24 | 0.10 to 0.22 |
+| Clay record, ms | - | - | 0.15 to 0.31 | 0.15 to 0.30 | 0.14 to 0.33 |
+| Slowest clay frame of a window, ms | - | - | 1.97 to 2.32, one 5.22, one 8.00 | 1.96 to 2.37, one 4.12 | 2.03 to 2.56, one 4.46 |
+| Frame that first builds the scene, ms | - | - | 235 | 237 | 318 |
+| Geometry resident, MB | - | - | 25.0 to 25.1 | 25.1 to 25.2 | 25.1 |
+
+- Renderer off against view off: 6.27 and 6.33 ms against 6.44 to 6.62 ms, on two and four windows of two runs made while the machine was in use. Task 9's renderer-off run `fable_2_173.log` (a discovery capture; its five live windows outside the capture) has 6.36 to 6.76 ms. So the view-off cost is not separable from run-to-run variation here; the capture's own timer says 0.045 ms. Section 11 measured 5.92 ms with the renderer off in this scene (`fable_2_148.log`).
+- `fable_2_184.log` ran with the first version of the sampler beside it (a PowerShell job listing processes twice a second) and on a machine that had just been in use; its guest work is 0.5 to 1.3 ms above `fable_2_178.log`'s and its work p90 reaches 11.6 ms against 8.2 ms. Its clay-pass times are inside the ranges of the other two runs.
+- **Skinning.** With 28 to 34 skinned draws the clay decode is 0.10 to 0.28 ms per frame over the 19 live windows of the three runs, against 0.02 to 0.04 ms with 3 skinned draws before the entries (`fable_2_176.log`, seven windows). The difference is the re-skinning: in the frozen run `fable_2_183.log`, where no palette changes, the same 30 skinned draws cost 0.00 ms with 0 uploads in every window. Uploads are 3 to 7 per logged frame against 2.
+- Textures: 317 to 327 of 945 to 955 drawn draws textured, 83 to 84% of the non-terrain ones; 69 textures, 16.1 MB resident; no upload after the burst at world load until the drawn set changes at 114.7 s.
+
+**Frame rate** (the question left open after Task 7b: three runs in a row, `fable_2_169.log` to `fable_2_171.log`, had one or two 300-frame windows at 29.8 fps, one of them with the view off). Every window after the world is up in today's four runs:
+
+| Run | Window ends at (s): guest fps |
+|---|---|
+| Renderer off, `fable_2_181.log` | 53.6: 30.0, 63.6: 30.0, 75.1: 25.9 (the freeze begins), 87.5: 24.3, 99.3: 25.3, 111.3: 25.0 |
+| View off, `fable_2_182.log` | 53.5: 30.0, 63.5: 30.0, 73.5: 30.0, 83.5: 30.0, 97.6: 23.2 (the freeze begins), 110.4: 23.4 |
+| Split, `fable_2_183.log` | 56.6: 23.4 (frozen from about 47 s), 68.9: 24.5, 81.1: 24.5, 93.3: 24.6, 105.5: 24.6, 117.7: 24.6 |
+| Native, `fable_2_184.log` | 54.5, 64.5, 74.5, 84.5, 94.5, 104.5 and 114.5: 30.0 each |
+
+- No window reads 29.8. Today's windows are 30.0 (13 live ones, and 3 more in `fable_2_180.log`) or 23 to 26 (frozen, or the window in which the freeze begins). The window that ends near 44 s is the load in every run (26.7 to 28.1 fps) and is not counted.
+- Over every log from `fable_2_164.log` to `fable_2_185.log`, 29.8 occurs four times, all in `fable_2_169.log` (2), `fable_2_170.log` (1) and `fable_2_171.log` (1): three runs started within seven minutes (10:03 to 10:10). The builds after them all contain Task 7b's change, and `fable_2_174.log` to `fable_2_178.log` and `fable_2_184.log` have 40 live windows without one. So the windows do not follow the code.
+- A 29.8 window is 300 frames in about 10.07 s, two frame periods lost somewhere in it; its frame, work and swap medians and its work p90 are those of a 30.0 window (`fable_2_169.log`: 7.59 ms work median, p90 8.18).
+- One of the four is in the view-off run, where no records are built and nothing is drawn by the native renderer. None was seen with the renderer off, on ten live windows (`fable_2_173.log` 5, `fable_2_180.log` 3, `fable_2_181.log` 2), none of them from that stretch.
+- The same logs hold larger disturbances that were not reported when they were made: the freeze in `fable_2_172.log`, and one window at 26.4 fps with normal medians in `fable_2_165.log` (about 1.4 s lost).
+- What the data supports: the 29.8 windows are confined to one eight-minute stretch, do not depend on the view, and did not recur; these runs are sensitive to what else the machine is doing, which today was measured to be a person using it. What the machine was doing at 10:03 is not in any log. The windows are not explained.
+
+**Slow frames.** The slowest clay frame of each window (`max total`), by the scene frame the window ends at:
+
+| Log | 1516 | 1816 | 2116 | 2416 | 2716 | 3016 | 3316 |
+|---|---|---|---|---|---|---|---|
+| `fable_2_177.log` (split) | 8.00 | 2.32 | 1.99 | 1.97 | 2.22 | 5.22 | 2.00 |
+| `fable_2_178.log` (native) | 2.37 | 2.08 | 1.96 | 2.12 | 1.98 | 4.12 | - |
+| `fable_2_184.log` (native) | 2.45 | 2.43 | 2.03 | 2.45 | 2.56 | 4.46 | (12.61, drawn set changing) |
+
+- **The frame near scene frame 3016 recurs**: 4.46 ms today. It is in every live run whose instanced draws are textured, eleven of eleven (`fable_2_166.log` to `fable_2_170.log`, `fable_2_174.log` to `fable_2_178.log`, `fable_2_184.log`: 4.12 to 7.12 ms), always in the window that ends at scene frame 3016 to 3018, and in neither run without instanced UVs (`fable_2_164.log`, no instancing entries: 1.48 ms; `fable_2_165.log`, entries without `"uv"`: 1.74 ms).
+- The scene repeats frame for frame (above), so something the game does between scene frames 2716 and 3016 is the likely trigger; that is an inference from the recurrence. In that window `0x8123...` goes from 73 to 70 drawable draws and `0xD4D5...` from 29 to 27 (`drawable by vs` at frames 2700 and 3000), which fits the reviewer's lead that changing instance batches rebuild flat streams. But the counts also change in windows without a slow frame, and by more (`0x8123...` 80, 79, 79, 78, 73 at frames 1500 to 2700 of `fable_2_184.log`), and the log cannot confirm it: the `clay` line gives uploads and decode for the window's last frame only (6 uploads and 0.16 ms at 3016, like any other window), and no `[native] textures: burst` line falls in the window, so no texture was uploaded.
+- The 95 s window shot is taken in the same window, 0.1 to 0.8 s after it begins (file times of the shots against the `clay` lines of `fable_2_177.log`, `fable_2_178.log` and `fable_2_184.log`). A shot alone does not cause such a frame: the 70 s shots of the three split runs with instanced UVs leave no mark in their windows (2.04, 1.75 and 1.99 ms in `fable_2_167.log`, `fable_2_170.log` and `fable_2_177.log`), and `fable_2_165.log`, without `"uv"`, had the 95 s shot in the same window and 1.74 ms. A run without a shot at 95 s and with instanced UVs was not made, so the shot is not excluded as a part of the cause.
+- **The 8.00 ms frame near scene frame 1516 did not recur**: 2.45 ms today, 2.37 ms in `fable_2_178.log`; it is in one of the fourteen runs that have that window (1.42 to 2.60 ms in the other thirteen). The two windows in which a freeze begins have a frame of 6.67 ms (`fable_2_172.log`) and 4.15 ms (`fable_2_183.log`); nothing shows that the 8.00 ms frame was of that kind.
+- Both stay unexplained. Neither shows in the guest frame rate: the windows that contain them are at 30.0 fps.
+
+**Screenshots** (window shots; each was opened and compared with the emulated frame of the same scene: `logs\shots\task10_discarded\fable_2_182_viewoff_95s.png`, the view-off run, world frozen since about 91 s, and Task 7b's live view-off shot `logs\shots\task7b_off\shot_95s.png`).
+
+- **Native view, 95 s** (`logs\shots\task10_native\shot_95s.png`, `fable_2_184.log`).
+  - The hero stands where the emulated hero stands, seen from behind, in the same stance: arms hanging with the elbows slightly bent, gloved hands beside the thighs, feet together; shirt, waistcoat, striped trousers and boots textured. Nothing is stretched, detached or left in the spread-arm bind pose.
+  - The dog sits where the emulated dog sits, to the right of the hero. It is worse to look at than before the skinning entries: a white shape with a few dark patches, where the emulated dog is dark brown. That is the 15 fur-shell draws, opaque and untextured, lying on the posed body ("Known limitations").
+  - The crow on the right-hand railing is a small dark perched bird with folded wings, in the place of the emulated one.
+  - Left of the bridge: ferns stand between the fence posts beside the big trunk, where the emulated ferns are, and a band of grass runs along the edge of the path. Right bank: a row of leafy cards behind the fence, where the emulated frame has low bushes. Every card carries its texture on a black rectangle (no alpha test), so the plants read as dark blocks, larger than the emulated plants.
+  - The big trunk, the birches and their leaf cards are in the emulated places; the leaf cards are pale untextured clay and the large leaves at the top left are flat pale cards.
+  - Not in the clay frame: the lake (pale clay terrain where the water is), the sky, the distant forest, the sparkles on the deck, the quest text and the HUD.
+  - Cannot be judged from this shot: the hero's face and eyes (he is seen from behind), a weapon (he carries none), the four near-field instancing shaders (their plants are under and beside the bridge), the small bird flock, and anything in motion.
+- **Split, 70 s and 95 s** (`logs\shots\task9_split`, `fable_2_177.log`; today's split shots are of the frozen world and were not used).
+  - The seam runs through the hero: the clay right half continues the emulated left half at the head, the shoulder, the belt, the leg and the boot, in both shots.
+  - The dog is in the clay half, sitting, mostly white at 95 s and with more of the dark textured body showing at 70 s; the pattern changes between the shots, as the shells and the body fight for depth.
+  - The crow, the right-bank row of cards and the grass under the planks are in the clay half; the ferns, the grass band and all trees are in the emulated half, which is why they are judged in native view.
+- **Overlay view**: no shot was taken; alignment while the camera moves is a user check (8, 9, 11, 12).
+
+**Remaining skips** (bridge scene, per frame; `fable_2_184.log`, the same in `fable_2_177.log` and `fable_2_178.log`):
+
+| Reason | Draws | What | Next action |
+|---|---|---|---|
+| `unsupported-prim` | 30 | `D3DDevice_BeginVertices?` 16, `DrawIndx:82217EE8` 10, `DrawIndx2:821EF988` 4 (`unsupported by hook`) | A non-goal of this sub-project (billboards, particles, point lists, the two unmapped draw builders). They are 7% of the non-terrain draws here and the reason the share is 0.92, not higher: map the two builders and the immediate-mode vertices in a later sub-project |
+| `no-transform` | 2 to 6 | `0x29B6506FBACEB93A` 1 to 5 and `0x775C6085FBB9D676` 1: billboards, corners computed from relative constants | With the particles; needs the corner maths, not a table entry |
+| `instance-unsupported`, `skin-unsupported`, `bad-index` | 0 | not seen in any run | - |
+
+Not skipped but untextured: `terrain` 567 (clay by design) and `no-albedo` 61: `0x7CD57B81550F19E3` 22 (leaf clumps of `0xA584...`; its colour fetch has an untraceable UV), `0x014F8A02DB7B19CA` 15 (the fur shells; its colour textures read all zero in guest memory), `0xA17D8AEC3A817D45` 12 and `0xF6D98C7B4D98438B` 12 (section 11). Next action for the first two: trace the UV of `0x7CD5...` by hand as was done for the instancing shaders; the shells need the translucency follow-up below, not a texture.
+
+**Known limitations.**
+
+- **Wind sway and the push away from characters are not animated.** 194 of the 951 drawn draws are `deformed`: trees and plants stand still while the emulated ones move, and the leaf clumps of `0xA584...` are drawn at the stored position, not the one the shader rebuilds about its pivot. The size of the error was not measured.
+- **Plant and leaf cards are opaque.** The clay pass has no alpha test: alpha is a non-goal of this sub-project and the capture records no alpha-test state, so a clip in the clay pixel shader would be drawing from guessed data. Textured cards show the texture's black background; untextured ones are pale rectangles.
+- **The dog's fur shells** make the dog a white blotch ("Skinning", "Known limitations").
+- **CPU skinning cost in a crowd is unmeasured.** 0.10 to 0.28 ms is for about 30 skinned draws of one hero, one dog and some birds.
+- **Instancing cost while the camera moves is unmeasured.** The autoplay camera stands still. In play the engine re-sorts copies by distance and the flat streams are rebuilt. The one window in which the drawn set changed, the last of `fable_2_184.log` (input arrived at the game window in its last second), has a slowest frame of 12.61 ms and 9 uploads in its last frame; that is one uncontrolled observation, and what moved was not seen.
+- **Six of the seven instancing entries and both tree entries are on the exception path** of the in-clip rule: `position_check.py` prints REJECT for these eight table entries, and what places them is the view-projection identity, the face normals and the screenshots. The four near-field instancing shaders were not judged on screen at all.
+- **Four skin shaders rest on dump readings and on decoder resolution only** (`0x3A0F...`, `0x82F6...`, `0x9ED0...`, `0x5F44...`): they are not drawn in the main scene here. The runtime decoder resolves them to the same skin and position layout as `0xD4D5...` and `0xA1F7...` (Task 9 review; reproduced for this section by running `DecodeVertexFetches`, `SelectPosition` and `SelectSkin` on the dumped microcode with the generated table, in a scratch program that is not committed). That shows that table and decoder agree with each other, not that the reading is right.
+- **The skin metrics are blind to permutations**: a skin whose rows or axes are permuted passes the orthonormality and edge checks. `0xD4D5...` is covered by the game's own posed stream; the four shaders above are not.
+- **`0x2D40B53C926109BE` is in no capture** and not in the table (check 7).
+- **Characters and plants were seen in one scene, from one side, standing still.** Criterion 2 is not closed.
+- **The freeze**, the slow frame near scene frame 3016 and the 29.8 fps windows of 10:03 to 10:12 are unexplained (above). The freeze does not need the native renderer.
+- **Statistics.** `instanced` and `skinned` are counted when positions are built, before the index buffer can fail, so a draw dropped later would still count; no such draw occurred here (`other 0`).
+
+**Follow-up candidates.**
+
+1. Alpha test and translucent layers from captured state: record the alpha-test and blend state per draw, then clip plant and leaf cards and treat the fur shells as the layers they are. This is what would make the plants and the dog look like the emulated frame.
+2. Billboards and particles: `0x29B6...`, `0x775C...` and the 30 `unsupported-prim` draws.
+3. The freeze: settle check 15, then find what stops the guest's world when the window is not in front.
+4. A run without a window shot, and a `clay` log line that reports the window's uploads and decode maxima, to explain the frame near scene frame 3016.
+5. A UV entry for `0xA584...` through a hand trace of `0x7CD5...`, and captures for `0x2D40...` and the four unsampled skin shaders (checks 7 and 10).
+6. Deferred by the reviews (ledger of the plan, final fix wave), none of which changes a result above:
+   - `position_check.py`: a marker for exception-path entries, so the tool does not print a bare REJECT for eight table entries; a floor on the judged draws once wholly cut draws leave the denominator; the matrix-identity and face-normal checks as options; an unreadable index or weight word skips the draw as the runtime does instead of becoming NaN; a committed golden test of the float32 equivalence.
+   - `gen_transform_table.py`: reject a skin entry with `"pairs"` but no `"weight_fetch"` (it silently becomes rigid); record the row fetches' format and offset.
+   - Runtime: count `instanced` and `skinned` beside `drawn`; drop the rows, first copy and offset from the flat UV key (identical UV buffers are rebuilt when only the rows change); a shader with both a skin and an instance entry is not handled (none exists); a rounded reciprocal such as 0.3333 for 3 becomes `bad-index` past index 5000 (not seen on a real draw).
+   - Tests: `InstanceBoundsOk` with NaN counts, a non-integer count and index `0xFFFFFFFF`; `SelectSkin` with a weight fetch past the list or of another format; `PaletteBones` with a 32-byte stride; that an instanced record keeps `deformed`; the bias cases of `test_instance_expand.cpp` take the bias from the table.
+   - Docs: "Checker" under "Instancing" should say that the in-clip share is no evidence for the cut constants; the `0x2D40...` record in `vs-transforms.json` still argues from `0xA584...` being rejected.
 
 ## Pending
 

@@ -92,12 +92,12 @@
     "evidence": "native_discovery_20261002_194918.jsonl: 1149 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/00E09D1BC5295D52_tf0.png: DXT1 atlas of grass tufts, bark, stone, wood and roof tiles"
   },
   "0x7CD57B81550F19E3": {
-    "no_albedo": "only colour candidate tf0 (DXT1, xyzw) has an untraceable UV: shader_trace Unsupported('u: scalar co-issue mulsc writes component'); tf8 k_8 screen mask (r_abs), tf11/tf12 1x1 8_8_8_8 (predicated / cndgt). VS 0xA5846836C90E1192 is rejected in vs-transforms.json, so the draws are not drawn anyway",
+    "no_albedo": "only colour candidate tf0 (DXT1, xyzw) has an untraceable UV: shader_trace Unsupported('u: scalar co-issue mulsc writes component'); tf8 k_8 screen mask (r_abs), tf11/tf12 1x1 8_8_8_8 (predicated / cndgt). VS 0xA5846836C90E1192 has a transform entry since sub-project 5 (frame-map section 12, Wind and displacement; no uv entry), so its 22 draws per frame in the bridge scene are drawn as flat clay, counted no-albedo (corrected 2026-10-06; this text first said the shader was rejected and the draws were not drawn)",
     "manual": true,
     "evidence": "native_discovery_20261002_194918.jsonl: 834 draws; disassembly out/shader_dump/shader_7CD57B81550F19E3.ucode.frag"
   },
   "0x014F8A02DB7B19CA": {
-    "no_albedo": "traced fetches tf14/tf15 (8_8_8_8 128x128, one texture each) read all-zero guest memory at first use (render-target-like; thumbnails 014F8A02DB7B19CA_tf14/tf15.png blank); tf13 is 8_8 two-channel (15 animated 128x128 textures, normal-map-like); tf4/tf5 1D lookups. VS 0x7C5710DEF3EE33C4 has no vs-transforms entry, so the draws are not drawn anyway",
+    "no_albedo": "traced fetches tf14/tf15 (8_8_8_8 128x128, one texture each) read all-zero guest memory at first use (render-target-like; thumbnails 014F8A02DB7B19CA_tf14/tf15.png blank); tf13 is 8_8 two-channel (15 animated 128x128 textures, normal-map-like); tf4/tf5 1D lookups. VS 0x7C5710DEF3EE33C4 has a transform entry and a uv entry since sub-project 5 (frame-map section 12, Wind and displacement), so its 15 draws per frame in the bridge scene (the dog's fur shells) are drawn as flat clay, counted no-albedo (corrected 2026-10-06; this text first said the shader had no entry and the draws were not drawn)",
     "manual": true,
     "evidence": "native_discovery_20261002_194918.jsonl: 571 draws; disassembly out/shader_dump/shader_014F8A02DB7B19CA.ucode.frag"
   },

@@ -1,6 +1,9 @@
 # Native renderer sub-project 5: coverage and skinning
 
-Status: approved design (brainstorming, 2026-10-05). Implements sub-project 5 of
+Status: implemented (sub-project 5); autoplay validation in
+`docs/native-renderer/frame-map.md` section 12, user checks pending. What differs from this
+design is listed under "Implementation notes (deviations)" at the end. (Design approved in
+brainstorming, 2026-10-05.) Implements sub-project 5 of
 `docs/superpowers/specs/2026-10-01-native-renderer-foundation-design.md` ("skinned
 characters"), widened to the main-scene draws that are still not drawn. Builds on
 sub-projects 3 and 4 (`2026-10-01-native-renderer-clay-pass-design.md`,
@@ -229,3 +232,124 @@ lighting, alpha, frame replacement.
 - **The autoplay save loads the bridge scene, not the town:** instanced scenery may be
   sparse there; evidence then rests on the Bowerstone capture through the offline check,
   and the on-screen check is a user check.
+
+## Implementation notes (deviations)
+
+Written by plan Task 10 (2026-10-06) from the rulings recorded during implementation.
+Evidence and numbers are in `docs/native-renderer/frame-map.md` section 12; the results
+against the success criteria are in its "Validation" subsection.
+
+Acceptance of table entries ("Evidence and checks"):
+
+- **The fixed 90% in-clip share was replaced by a share relative to the capture.** A
+  candidate is accepted when its share is at least the share of the trusted shader
+  `0xECD66A10092E6562` in the same capture minus 0.10, and never below 0.60. The game
+  draws many objects that are off screen: trusted shaders score 0.81 to 0.87 in the bridge
+  captures and deliberately wrong entries 0.24 to 0.32, so 0.90 would reject correct
+  entries. Each entry's evidence quotes its own capture's baseline, which moves between
+  runs (0.870, 0.810).
+- **An exception path was added, and eight of the ten new non-skin entries are on it.**
+  A world-space shader whose meshes are spread around the camera may be entered although
+  `position_check.py` prints REJECT, when its evidence records that its `c0..c3` equals the
+  trusted shader's view-projection in the same frames, where the failing draws are
+  (outside the view), and a component-order check that does not use the in-clip share (the
+  dump reading plus face-normal agreement or a native-view screenshot). On it: the tree
+  shaders `0x475E...` (0.455) and `0xA584...` (0.530), and the instancing shaders
+  `0xB636...` (0.689), `0x6AD4...` (0.422), `0x48D3...` (0.229), `0xFC4F...` (0.000),
+  `0x33C0...` (0.426) and `0x36B5...` (0.000). Only `0x7C57...` (1.000) and `0x8123...`
+  (0.802) pass the rule. The tool has no marker for an exception: it prints REJECT for
+  these eight table entries, and the matrix and face-normal checks are not tool options.
+- **`0xA584...` is in the table although its offline check says REJECT.** This design said
+  it stays rejected unless the offline check and a screenshot show it lands correctly. It
+  is entered on the exception path, drawing the stored position, not the position the
+  shader rebuilds about its pivot.
+- **Skin entries are judged by two structural metrics that this design did not have**,
+  because the in-clip share cannot tell a posed mesh from a bind-pose one: the share of
+  bone uses whose 3x3 part is orthonormal within 0.05, and the share of triangle edges
+  whose skinned length is 0.5 to 2.0 times the bind-pose length (at least 0.98). The first
+  was amended twice on `0xD4D5...`: from "the largest deviation over every bone at most
+  0.05" (the game scales one bone of a bird mesh, deviation 0.764) to "at least 0.98 of
+  the bone uses" (set on a misread count; the correct entry scores 0.972 to 0.976) to "at
+  least 0.90 of the bone uses". Wrong row orders or swizzles that were measured score
+  exactly 0.
+- **A skin entry also needs a component-order check that does not rest on those metrics**
+  (they accept a skin whose rows or axes are permuted): a match against a posed stream the
+  game itself wrote, the distance of a rigid attachment to the skinned body, or a
+  native-view screenshot. `0xD4D5...` has the first two.
+- **Four skin shaders are in the table without any replay on captured bytes**:
+  `0x3A0F...`, `0x82F6...`, `0x9ED0...` and `0x5F44...` are not drawn inside the main scene
+  of the autoplay save. They rest on their dump readings and on the runtime decoder
+  resolving them to the same skin layout as `0xD4D5...` (the first three) and `0xA1F7...`
+  (`0x5F44...`). User checks 10 and 11.
+
+Instancing:
+
+- **The distance cut was added** (Task 7b; the "Distance cut" paragraph above was written
+  then). It is applied in the clay vertex shader from two per-draw constants, so the line
+  "clay pass ... (unchanged)" of the architecture sketch no longer holds: the clay
+  constants grew to 32 dwords and the clay vertex shader writes a NaN position for a cut
+  vertex.
+- **The predicate was misread** in "Context" as an optional sway; it is the distance cut
+  and the sway is the normal path (corrected in place on 2026-10-06).
+- **The bias literal's provenance.** The value 0.5 was read from each shader's own
+  constant table with a temporary discovery diagnostic that was reverted, in a capture
+  that is not committed (`native_discovery_20261005_123635`); the raw dwords are quoted in
+  the frame-map. The committed second source is the offline control: with bias 0.0, 24 of
+  200 `0xB636...` draws and 105 of 200 `0x6AD4...` draws become `bad-index`, with 0.5 none.
+- **UVs come from two vertex elements.** The instanced meshes keep u in the fourth half of
+  the position and v in the fourth half of the normal. The runtime's UV layout described
+  one element, so it was extended (`uv_decode.h`, `material.h`, the UV cache key in
+  `clay_logic.h`), files this design does not list.
+- **The generator does not record each fetch's format and offset**, as "Instancing" says
+  it would. The runtime checks that the three row fetches have a format the position
+  decoder knows, share one stream and one stride, and are not on the mesh's stream
+  (`SelectInstanceRows`); a mismatch is `instance-unsupported`.
+- All seven instancing shaders were entered, not "`0x8123...` and `0xB636...` first".
+- Added in the geometry cache: a per-frame memo of the decoded mesh positions and UVs, so
+  N instanced draws of one mesh decode it once.
+
+Skinning:
+
+- **`cexec b0`.** Discovery rows record the vertex bool constants (`"vbool"`). The block
+  is not taken by any in-scene draw (0 in 400 of 400 `0xD4D5...` rows), so the "those
+  draws stay in bind pose" branch was not built: the record carries no flag for it. The
+  value is read from the device's shadow copy, not from the GPU register file.
+- **`skin-unsupported` also covers a palette that holds no whole bone** (it was counted
+  `render-other`).
+
+Wind and displacement, textures:
+
+- `0x7C57...` turned out to be the dog's fur shells, not scenery. Drawn as opaque
+  untextured layers over the posed body they make the dog a white blotch; the entry was
+  kept (removing a correct entry would misreport the frame).
+- `0x2D40B53C926109BE`, a wind shader with the layout of `0xA584...` seen once per frame
+  in an earlier play log, is not in the table: it is in no capture (user check 7).
+- "Each new vertex shader gets a `"uv"` entry" does not hold for `0xA584...` (its only
+  pixel shader has no albedo) nor for the four skin shaders not drawn in scene.
+
+Checks and success criteria:
+
+- **Screenshots are judged in native view as well as split view.** The clay half of the
+  split view is the right half of the frame, and the trees and ferns of the bridge scene
+  are in the left half.
+- **Criterion 2 is only partly evidenced.** Pose is shown for the bridge scene: the hero
+  from behind in one idle stance, the dog, a crow, continuity across the split seam, and
+  the dog's rigid eye mesh numerically (0.011 units from the skinned body against 0.18
+  from the bind-pose body). The hero's eyes, a sword (this save's hero carries none),
+  motion, a crowd and the overlay view are not evidenced by autoplay: user check 11.
+- **Criterion 3 is met for placement only.** No clay instanced mesh stands where the
+  emulated image clearly has none, but the silhouettes differ: the clay pass has no alpha
+  test (alpha is a non-goal and the capture records no alpha-test state), so plant cards
+  are opaque rectangles.
+- **Criterion 1 was computed on the bridge scene only**: 0.914 to 0.924 of the non-terrain
+  draws over 20 logged frames of three runs. What is left is the 30 draws of the unmapped
+  builders and immediate-mode vertices and 2 to 6 billboards, all non-goals here.
+- **The validation runs of Task 10 were disturbed.** A person was using the machine, and
+  in six of seven runs the game world froze some seconds after loading (also with the
+  native renderer disabled; cause not established, user check 15). The figures come from
+  the live windows of those runs and from Task 9's two runs of the same binary; the
+  split-view frame rate is Task 9's run.
+- **"CPU skinning cost in crowds: measured and reported" (Risks) was not done.** The
+  autoplay scene has about 30 skinned draws. User check 11.
+- **The cost of instancing while the camera moves was not measured** (the autoplay camera
+  stands still; the engine re-sorts copies by distance in play). User check 9.

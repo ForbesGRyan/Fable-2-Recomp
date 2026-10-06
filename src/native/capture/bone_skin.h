@@ -136,6 +136,21 @@ inline bool BoneIndex(const uint8_t* vb, size_t vb_size, uint32_t vertex_byte_of
   return true;
 }
 
+// Whole bones (all three rows readable) in a palette of `palette_size` bytes,
+// at most 256 (the index is 8 bits): the bones SkinPositions decodes. 0 means
+// the draw cannot be skinned (the capture skips it as skin-unsupported).
+inline uint32_t PaletteBones(const BoneSkin& s, size_t palette_size) {
+  uint32_t end = 0;  // bytes one bone's rows need
+  for (const PosLayout& r : s.rows) {
+    const uint32_t bytes = PositionBytes(r.format);
+    if (bytes == 0 || r.stride_bytes == 0) return 0;
+    if (r.offset_bytes + bytes > end) end = r.offset_bytes + bytes;
+  }
+  if (s.bone_stride == 0 || palette_size < end) return 0;
+  const size_t bones = (palette_size - end) / s.bone_stride + 1;
+  return bones < 256 ? uint32_t(bones) : 256;
+}
+
 // Replaces positions[0, count) of vertices first_vertex.. (already decoded
 // with w = 1) by their skinned positions. A vertex with a nonzero-weight bone
 // past the palette (another mesh's vertex in a shared stream), or with every

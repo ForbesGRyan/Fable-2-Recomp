@@ -1700,7 +1700,9 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders)
       for (PosLayout& row : s.rows) ok = ok && ApplyFetchEndian(&row, bones.fc1 & 3);
       s.palette_addr = bones.base + bones.offset;
       s.palette_size = bones.size - bones.offset;
-      if (ok) {
+      // A palette without one whole bone cannot skin anything (SkinPositions
+      // would fail in the renderer, counted render-other).
+      if (ok && PaletteBones(s, s.palette_size) > 0) {
         in.skin = s;
       } else {
         why = SkipReason::kSkinUnsupported;

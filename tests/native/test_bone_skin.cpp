@@ -228,6 +228,28 @@ int main() {
     SkinSpec five = spec; five.bones = 5;
     if (SelectSkin(sf, five, sp, &sel, &slot)) return 73;
   }
+  // --- PaletteBones: the whole bones a palette holds; none = the draw cannot be skinned ---
+  {
+    // `s`: three half4 rows at bytes 0, 8, 16 of 24-byte bones.
+    if (PaletteBones(s, 0) != 0 || PaletteBones(s, 23) != 0) return 80;
+    if (PaletteBones(s, 24) != 1 || PaletteBones(s, 47) != 1 || PaletteBones(s, 48) != 2) return 81;
+    if (PaletteBones(s, 24 * 300) != 256) return 82;  // the index is 8 bits
+    // It is 0 exactly where SkinPositions fails for want of a bone (vertex 1 uses bone 0).
+    for (size_t size : {size_t(0), size_t(10), size_t(23), size_t(24), size_t(48)}) {
+      Float4 p[1] = {{1, 2, 3, 1}};
+      const bool skinned = SkinPositions(vb.data(), vb.size(), pal.data(), size, s, stride, 1, 1, p);
+      if (skinned != (PaletteBones(s, size) > 0)) return 83;
+    }
+    BoneSkin broken = s;
+    broken.rows[1].stride_bytes = 0;
+    if (PaletteBones(broken, 48) != 0) return 84;
+    broken = s;
+    broken.rows[2].format = PosFormat::kUnknown;
+    if (PaletteBones(broken, 48) != 0) return 85;
+    broken = s;
+    broken.bone_stride = 0;
+    if (PaletteBones(broken, 48) != 0) return 86;
+  }
 
   std::cout << "PASS: bone skin\n";
   return 0;

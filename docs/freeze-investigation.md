@@ -54,7 +54,9 @@ Copies are kept in `out\native-evidence\freeze-logs\` (git-ignored, like all of
 | `fable_2_185.log` | autoplay, native renderer off | from about 50 s; watched by the sampler |
 | `fable_2_186.log` | user session | from about 119 s; window closed 40 to 55 s later |
 | `fable_2_188.log` | user session | from about 59 s; window closed 40 to 55 s later |
+| `fable_2_197.log` | autoplay, native view, 20 MB geometry budget | two live windows, then frozen from about 68 s; the game was never in front and input was arriving (final fix wave, round 3) |
 | `fable_2_184.log`, `177`, `187`, `189` | controls | never freeze |
+| `fable_2_196.log` | autoplay, native view, 16 MB texture budget | never froze although another program was in front for most of the run and input was arriving: being out of the foreground with input arriving is not sufficient |
 
 Not examined: `fable_2_173.log` to `176`, `178`.
 

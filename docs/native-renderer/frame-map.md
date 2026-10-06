@@ -1543,6 +1543,185 @@ Not skipped but untextured: `terrain` 567 (clay by design) and `no-albedo` 61: `
    - Not measured: other scenes, a crowd, what the skipped post passes cost individually, and whether a suppressed pass breaks anything the game reads back (the hero and dog resolve readback is at stake when the main scene is skipped).
    - **Parked by the user (2026-10-06): the 12.5 ms floor.** A correction to the column names first: `Work` is the game's logic and all of its draw calls (everything outside the guest's swap call, `MainRenderLoop_82B9CD68`); `Render-loop call` is the time inside that swap call, which is waiting, not draw submission. The swap time is the same 6.3 to 6.7 ms in the menus (frame 8.4 ms, work 1.6 ms) and in the world with every emulated pass skipped (frame 12.5 ms, work 6.1 ms), so about 6.5 ms per frame is a fixed wait. Two known mechanisms could produce it and which one sets the 4.17 ms step is not established: the game waits for a GPU counter to advance two units per frame (`docs/FPS_CAP_INVESTIGATION.md`), and presentation appears locked to the display's refresh steps. If it can be removed the floor falls to roughly 6 to 8 ms; it may also be worth something with emulation in place (the crowd overlay of `fable_2_200.log` shows the emulated GPU thread 13.3 ms per frame in `present` of a 49.9 ms present interval). The remaining 4.5 ms of world work over the menus' 1.6 ms is simulation plus the draw calls through the recompiled console code; the split needs profiling. Frame = work + swap, so the two run serially on one thread. Cheapest tests when this is picked up: one unlimited autoplay run with the display at 120 Hz (if the menus fall from about 115 to about 60 fps the wait follows the refresh; if not it is the counter wait), or the emulated GPU's present and wait times added to the `[frame]` log line.
 
+## 13. Materials
+
+Sub-project 6 (spec `docs/superpowers/specs/2026-10-06-native-renderer-materials-design.md`, 2026-10-06). Evidence files of this section are in `out\native-evidence\materials\` (git-ignored); the names below are files of that folder unless a path is given.
+
+### Render state
+
+Plan Task 2 (2026-10-06). The game's D3D library keeps the pending GPU register values in its device object. This section establishes where, proves the values against the emulated GPU's register file draw by draw, and lists the states the game uses.
+
+**Result.** The ten registers read from the device shadow after a draw builder returns are the GPU's registers at that draw in every execution of the draw, with one exception that is not a fault of the shadow: in the depth pre-pass of the tiled main scene the D3D library itself forces `RB_COLOR_MASK` to 0, while the shadow keeps the game's value (0xF), which is what every colour pass uses. All sampled rows were paired (100% in both captures). By the letter of the task ("every register equal in every sampled draw") the proof therefore fails for `RB_COLOR_MASK` and holds for the other nine registers; what to do about the pre-pass is not decided here.
+
+| | Bridge, standing still | After walking, camera moving |
+|---|---|---|
+| Capture | `native_discovery_20261006_164805.jsonl` | `native_discovery_20261006_165738.jsonl` |
+| GPU log | `gpu_state_bridge_20261006_164805.log.gz` | `gpu_state_walk_20261006_165738.log.gz` |
+| Checker output | `task2_render_state_check_bridge.txt` | `task2_render_state_check_walk.txt` |
+| Sampled rows (draw + tess), every one with `"rs"` | 55,279 (36,613 + 18,666) | 44,726 (30,679 + 14,047) |
+| Paired with a GPU draw | 55,279 (100.00%) | 44,726 (100.00%) |
+| GPU executions compared (1 / 2 / 3 per row) | 92,847 (29,922 / 13,146 / 12,211 rows) | 80,449 (22,587 / 8,555 / 13,584 rows) |
+| `RB_ALPHA_REF`, `RB_DEPTHCONTROL`, `RB_BLENDCONTROL0`, `RB_COLORCONTROL`, `PA_SU_SC_MODE_CNTL`, `RB_BLEND_RED..ALPHA`: unequal executions | 0 of 92,847, each | 0 of 80,449, each |
+| `RB_COLOR_MASK`: unequal executions | 12,294, all at bin select `0x80000001` (device 0xF, GPU 0) | 13,688, all at bin select `0x80000001` (device 0xF, GPU 0) |
+| `RB_COLOR_MASK` outside bin select `0x80000001` | 80,553 of 80,553 equal | 66,761 of 66,761 equal |
+| Rows with an unequal execution | 12,294 (colour mask only) | 13,688 (colour mask only) |
+| Checker exit code | 1 (`RESULT: UNEQUAL registers: 2104`) | 1 (`RESULT: UNEQUAL registers: 2104`) |
+
+**Shadow offsets (static).** The draw builders flush eight register ranges from the device with the register-run writer `0x8221C908` (r3 device, r4 a dirty mask whose top bit is the first register, r5 the first register, r6 device + offset; register r5 + n is taken from r6 + 4 * n, section 8). The eight calls of `DrawIndexedVertices` (`0x8221E0F0`, `generated/default/fable_2_recomp.201.cpp` lines 1198 to 1411) agree with the fact sheet in every pair:
+
+| `addi r6,r31,<offset>` | `li r5,<first register>` | Mask width (registers) | Call |
+|---|---|---|---|
+| `0x8221E1B4` +0x2934 (10548) | `0x8221E1B8` 0x2200 (8704) | 12 (`0x8221E1BC rldicr r4,r30,52,11`) | `0x8221E1C4` |
+| `0x8221E1D4` +0x2920 (10528) | `0x8221E1D8` 0x2180 (8576) | 5 (`rldicr r4,r30,47,4`) | `0x8221E1E4` |
+| `0x8221E200` +0x2880 (10368) | `0x8221E204` 0x2000 (8192) | 16 (`rldicr r4,r30,6,15`) | `0x8221E210` |
+| `0x8221E228` +0x28CC (10444) | `0x8221E22C` 0x2100 (8448) | 21 (`0x8221E230 rldicr r4,r30,22,20`) | `0x8221E238` |
+| `0x8221E278` +0x2964 (10596) | `0x8221E27C` 0x2280 (8832) | 21 (`rldicr r4,r28,9,20`) | `0x8221E288` |
+| `0x8221E2A4` +0x29B8 (10680) | `0x8221E2A8` 0x2300 (8960) | 38 (`rldicr r4,r27,26,37`) | `0x8221E2B4` |
+| `0x8221E2CC` +0x2A50 (10832) | `0x8221E2D0` 0x2380 (9088) | 8 (`rldicr r4,r27,18,7`) | `0x8221E2DC` |
+| `0x8221E314` +0x2780 (10112) | `0x8221E318` 0x4900 (18688) | 40 (`lis r4,-256`) | `0x8221E324` |
+
+The same `addi r6,r31,0x2934` / `li r5,0x2200` and `addi r6,r31,0x28CC` / `li r5,0x2100` pairs are in ten functions of the generated code: the six draw builders (`0x8221C518`, `0x822060A0`, `0x82217EE8`, `0x8221E0F0`, `0x8221C9C8`, `0x82207C30`, eight calls of the writer each) and `0x822069C0`, `0x82BA5448`, `0x8222B948`, `0x82BA29B8` (six calls each). Constants: `kDeviceRegShadowBase2100` = 0x28CC, `kDeviceRegShadowBase2200` = 0x2934 and `DeviceRegShadowOffset(reg)` in `xdk_layout.h` (test `tests/native/test_xdk_layout.cpp`).
+
+| Register | Name (SDK `register_table.inc`) | Device offset |
+|---|---|---|
+| 0x2104 | `RB_COLOR_MASK` | +0x28DC |
+| 0x2105..0x2108 | `RB_BLEND_RED`, `_GREEN`, `_BLUE`, `_ALPHA` (floats) | +0x28E0..+0x28EC |
+| 0x210E | `RB_ALPHA_REF` (float) | +0x2904 |
+| 0x2200 | `RB_DEPTHCONTROL` | +0x2934 |
+| 0x2201 | `RB_BLENDCONTROL0` | +0x2938 |
+| 0x2202 | `RB_COLORCONTROL` | +0x293C |
+| 0x2205 | `PA_SU_SC_MODE_CNTL` | +0x2948 |
+| 0x2208 | `RB_MODECONTROL` (not in the proof; the offset agrees with the shader flush's device + 0x2954, `xdk_layout.h`) | +0x2954 |
+
+Register numbers and bit layouts were checked against the SDK (`register_table.inc`, `registers.h`, `xenos.h`); they are as the plan gives them, nothing differs. `RB_COLORCONTROL`: bits 0-2 alpha function, 3 alpha test enable, 4 alpha-to-mask enable (bits 24-31 are the four alpha-to-mask offsets, set in real words such as `0x8700001C`). `RB_BLENDCONTROL0`: bits 0-4 colour source factor, 5-7 colour operation, 8-12 colour destination factor, 16-20 alpha source, 21-23 alpha operation, 24-28 alpha destination. `RB_DEPTHCONTROL`: bit 0 stencil enable, 1 depth test, 2 depth write, 4-6 depth function (bits 8 and up are the stencil functions and operations). `PA_SU_SC_MODE_CNTL`: bit 0 cull front, 1 cull back, 2 front face (0 counter-clockwise, 1 clockwise). `RB_COLOR_MASK`: bits 0-3 target 0 (R, G, B, A). Compare functions 0-7: never, less, equal, less-equal, greater, not-equal, greater-equal, always. Blend factors: 0 zero, 1 one, 4/5 source colour and its inverse, 6/7 source alpha, 8/9 destination colour, 10/11 destination alpha, 12/13 constant colour, 14/15 constant alpha, 16 source alpha saturate. Blend operations: 0 add, 1 subtract, 2 min, 3 max, 4 reverse subtract.
+
+**Discovery rows.** `"draw"` and `"tess"` rows carry `"rs": {"2104": "0x...", "210E", "2200", "2201", "2202", "2205", "2105", "2106", "2107", "2108"}`, each read from the device at `DeviceRegShadowOffset(reg)` when the row is written, which is after the builder returned (a float register as its bits; a register that cannot be read is left out). They also carry `"cmd"`, the device's command write pointer at that moment (`kDeviceCommandWriteOffset`, the last dword the builder wrote), which the proof uses to find the draw's packet. Both are written only while discovery is armed (`AppendRenderState` in `capture.cpp`). A four-frame capture of the final build (`task2_final_build_native_discovery_20261006_171520.jsonl`) has the ten registers and `cmd` in all 1,861 draw and tess rows.
+
+**GPU side (temporary diagnostic, reverted).** A patch to the SDK's command processor (`task2_sdk_gpu_state_log.patch`, 97 added lines in `src/graphics/command_processor.cpp`, not committed; the SDK is back at `0c6d1de` and the installed runtime was rebuilt from it) wrote one line per `DRAW_INDX` packet handed to the backend, to the file named by `FABLE2_GPU_STATE_LOG`: the GPU frame (swaps executed), the draw ordinal in the frame, the physical address just past the packet, index count, primitive type, bin select and bin mask, vertex and pixel shader hashes, surface pitch, `RB_MODECONTROL`, vertex constant `c0` and the ten registers from the register file; and one short line per draw packet skipped by the bin predicate. It sits in `CommandProcessor::ExecutePacketType3Draw` at the call of `IssueDraw`, not inside the D3D12 `IssueDraw` as the plan says: the packet address is only known there, and the register file is the same object. It logged 240 frames starting 2 s before discovery armed.
+
+**Pairing** (`tools\xdk_sigmatch\render_state_check.py <capture> --gpu <gpu log>`, test `tests/test_render_state_check.py`). The emulated GPU executes a frame's commands after the guest wrote them and executes a tiled draw several times, so draws are not matched by order. A row and a GPU line are the same draw when:
+
+- the GPU frame is the capture frame plus one offset for the whole capture, the one with the most confirmed pairs;
+- the packet ends at the row's write pointer + 4 (the draw packet is the last thing the builder wrote), or 24 bytes before it (with per-draw bin masks, section 8, seven more dwords follow the packet); `GpuAddress` of `xdk_layout.h` converts the pointer;
+- the packet's index count is the one the builder's arguments give (`DrawIndexedVertices` r7, `DrawVertices` r6, `8221C9C8` r6 patches, `82207C30` 4 * r7);
+- the GPU ran the row's vertex shader, or its `c0` has the row's bits (the depth pre-pass runs the same packet with other shaders, below).
+
+Every confirmed execution of the packet in that frame is compared. A packet at the address that fails the last two tests is counted as not confirmed and never compared (the tests pin a packet with another index count, and one with another shader and other constants, as not paired).
+
+What the pairing rests on, per capture:
+
+| | Bridge | Walking |
+|---|---|---|
+| Frame offset; rows confirmed at it; at the runner-up offset | +1587; 6,143 of 6,143 probed; +1617: 467 | +1888; 6,390 of 6,390 probed; +1898: 188 |
+| Rows with no packet at the address / skipped by the bin predicate / packet not confirmed | 0 / 0 / 0 | 0 / 0 / 0 |
+| Executions confirmed by index count and: vertex shader and `c0` / `c0` alone | 82,463 / 10,384 | 67,226 / 13,223 |
+| Frames whose view differs from the frame before (most common main-scene `c0`; `task2_pass_sequences_*.txt`) | 0 of 120 | 118 of 120 |
+| Control: each row compared with the GPU executions of the previous sampled row instead (`task2_shifted_control_*.txt`) | 13,237 of 55,076 rows unequal | 16,951 of 44,502 rows unequal |
+
+The offset found is the one the two delays predict: capture frame 1 is GPU frame 1588 and 1889, 62 frames after the GPU log's first frames (1526 and 1827), and the GPU log starts 2 s before discovery arms. At another offset the command buffer holds other draws at the same addresses: the best wrong offset confirms 467 and 188 of the probed rows. In the walking capture the view changes in 118 of the 120 frames, so the `c0` test there also pins the frame; on the bridge every frame has the same view and a neighbouring frame would hold the same draws with the same state. The control shows that the registers do differ between neighbouring draws (a quarter to a third of the rows), so the equality is not the equality of a constant. Its limit: the blend constant registers hold 1.0 in every row of the bridge capture, so for `0x2105..0x2108` only the walking capture is a test (62 rows differ in the control, 0 in the proof).
+
+**Captures.** Both through `tools\drive_game.ps1` with `-Env @{FABLE2_NATIVE_DISCOVERY="120"; FABLE2_NATIVE_DISCOVERY_EVERY="4"; FABLE2_GPU_STATE_LOG="<file>"; FABLE2_GPU_STATE_LOG_FRAMES="240"; ...}`:
+
+- Bridge: `-Total 110 -Shots "52,90"`, `FABLE2_NATIVE_DISCOVERY_DELAY="55"`, `FABLE2_GPU_STATE_LOG_DELAY="53"`. Log `task2_bridge_fable_2_209.log`: 30.0 fps with work medians of 6.2 to 6.4 ms in the windows around the capture (live; the window that contains the capture reads 19.8 fps, the capture's own cost). `task2_bridge_shot_52s.png` and `task2_bridge_shot_90s.png` show the bridge view over the lake.
+- Walking: `-Total 110 -Shots "65,71,84" -GameArgs "--dump_shaders=C:\Users\Ryan\code\Fable-2-Recomp\out\shader_dump"`, `-Plan "23:E,27:S,30:E,35:E,55:LS=0/100/3000,59:RS=-60/0/1500,62:LS=0/100/2500,69:RS=-60/0/600,72:RS=60/0/600"`, `FABLE2_NATIVE_DISCOVERY_DELAY="65"`, `FABLE2_GPU_STATE_LOG_DELAY="63"`. The hero walks off the bridge, the camera turns left, he walks on to a fence of posts under the trees; discovery arms after the walk (66.3 s on the plan's clock, complete at 76.2 s), and the two short camera turns at 69 s and 72 s fall inside it. Log `task2_walk_fable_2_212.log`: 30.0 fps, work 5.3 to 6.2 ms around the capture (live). `task2_walk_shot_65s.png` (just before arming): the hero at the fence, tree crowns over the upper half of the view, thin pale trunks left of centre and at the right edge, ferns and grass in front. `task2_walk_shot_71s.png` (inside the capture, after the left turn): the same place seen further left, more trunks and a path with lanterns behind the fence. `task2_walk_shot_84s.png`: the first view again, darker, with the quest banner. The delay differs from the plan's 55 s because the walk has to come first. The plan was found in two tries: `task2_planA_shot_74s.png` (the plan up to the second walk, without discovery) already shows this view. A stick deflection of 30% for 10 s from 70 s did not turn the camera (`task2_planB_shot_69s.png`, `_75s.png` and `_82s.png` show one view), so the two turns inside the capture use 60%.
+
+**The depth pre-pass and `RB_COLOR_MASK`.** The tiled main scene (pitch 1120) is executed under five bin selects, the values section 3b lists. Executions of the sampled main-scene rows, and all GPU draws at that pitch, by bin select:
+
+| Bin select | Bridge: executions of sampled rows; unequal | Walking: executions; unequal | GPU draws at pitch 1120 in the 240 logged frames (bridge): colour mask |
+|---|---|---|---|
+| `0x80000001` | 12,294; `RB_COLOR_MASK` 12,294 | 13,688; `RB_COLOR_MASK` 13,688 | 102,039 draws, mask 0 in all of them |
+| `0x80000003` | 15,899; none | 14,561; none | 131,089: 0xF in 129,985, 0 in 1,104 |
+| `0x0000000C` | 12,803; none | 8,346; none | 106,369: 0xF in 105,265, 0 in 1,104 |
+| `0x00000002` | 12,554; none | 13,793; none | 104,439: 0xF in all |
+| `0x00000008` | 12,554; none | 13,793; none | 103,719: 0xF in all |
+
+- Bin select `0x80000001` is a depth pre-pass: no draw in it writes colour. Of the 12,294 bridge executions there, 10,384 run a vertex shader other than the row's (5,604 with `RB_MODECONTROL` 4, colour and depth; 4,780 with 5, depth only) and 1,910 run the row's own shader depth-only (tessellated terrain). Example from the checker: `frame 1 (GPU frame 1588, draw 988) D3DDevice_DrawIndexedVertices? vs 0xBEAD84BD72072E0E ps 0xF6D98C7B4D98438B: device 0x0000000F, GPU 0x00000000 (pitch 1120, bin select 80000001, mode 4, GPU vs 0xC47236E5A9B00356 ps 0x37CAF82F552893EE)`. The same packet then runs at bin selects `0x2` and `0x8` with the row's shaders and colour mask 0xF.
+- Rows fall into fixed groups by the bin selects they execute in (`task2_pass_sequences_*.txt`; bridge / walking rows): `0x80000001` + `0x2` + `0x8`: 12,211 / 13,584 (pre-pass, then colour); `0x80000003` + `0xC`: 12,803 / 8,346 and `0x80000003` alone: 3,096 / 6,215 (no pre-pass: all terrain layer draws of `8221C9C8`, every blended mesh, 89 / 33 rows without blending); `0x2` + `0x8` without pre-pass: 343 / 209 (adaptive terrain `82207C30`, blend off); `0x80000001` alone: 83 / 104.
+- The 83 / 104 rows that execute only in the pre-pass are all adaptive terrain draws (`82207C30`, vertex shader `0x5003700B7C9B1C16`, pixel shader `0x2F8A0341E8C09698`, words `2200=0x00708766 2201=0x00010001 2202=0x00000004 2205=0x00218002 2104=0x0000000F`). The game never draws them in colour, and the shadow says colour mask 0xF. Per-draw bin masks decide this, and the capture does not read them. A native pass that draws every captured draw once draws these too.
+- Where the 0 comes from (static): the D3D library's tiling state emitter `0x822155E0`, which the builders call when the pending dirty mask intersects the mask at device + 40 (`DrawIndexedVertices` `0x8221E184 ld r11,40(r31)` .. `0x8221E1A0 bl 0x822155E0`; the emitter returns the bits still to flush). For a dirty colour mask it first writes the shadow's value with a type-0 packet (`0x822158A8 li r10,0x2104`, `0x822158B8 lwz r10,0x28DC(r31)`, stored at `0x822158B0` / `0x822158C4`) and sets r20 = 0 (`0x822158B4`). Then it writes `SET_BIN_MASK_HI` 0 and `SET_BIN_MASK_LO` `0x15555555` (headers `0xC0006100` / `0xC0006000` from `0x82215630` / `0x82215634`; `0x822158E8 lis r8,0x1555`, `0x822158F0 ori r8,r8,0x5555`), a predicated `SET_CONSTANT` (header `0xC0012D01` from `0x82215638`) of `0x00040104` = `RB_COLOR_MASK` with the value r20 = 0 (`0x82215938`..`0x82215948`), and restores the bin mask from device + 0x31A4 / + 0x31A8 (`0x8221594C`..`0x82215960`). The same block overrides `RB_SURFACE_INFO` and `RB_HIZCONTROL` for those bins (`0x82215904`..`0x8221592C`). Bin select `0x80000001` has bit 0, which is in `0x15555555`; `0x2` and `0x8` do not intersect it.
+- So the failures are not draws whose state the engine writes straight into the command buffer. They are the library's own override for the pre-pass bins, written after the shadow's value, and the shadow is never changed by it.
+- Not established: why bin select `0x80000003`, which also has bit 0, shows the shadow's colour mask in all 15,899 (14,561) executions (inference: the rows executed there take another path through the emitter, since none of them has a pre-pass execution); which part of the screen each bin select covers; and the 1,104 GPU draws with colour mask 0 at `0x80000003` and `0xC`, which are not draws of the four sampled builders with another shadow value (every sampled execution there is equal).
+- Outside the main scene every sampled draw executes once (bin select `0xFFFFFFFF`) and all ten registers are equal (26,743 bridge and 16,268 walking executions; pitches 160, 280, 320, 560, 1040, 1280, with `RB_MODECONTROL` 4 and 5).
+
+**Limits.**
+
+- Rows exist for four builders (`DrawVertices`, `DrawIndexedVertices`, `8221C9C8`, `82207C30`). The other draw hooks (`BeginVertices` `0x822060A0`, `0x82217EE8`, the `DrawIndx2` emitters) flush the same shadows with the same code but were not sampled.
+- One draw in four was sampled, in two scenes of one region (Bower Lake by the bridge), 120 frames each.
+- The proof is about the register words. What the emulator's backend derives from them (its normalized depth control and colour mask) is not part of it.
+- Stencil: `RB_DEPTHCONTROL` bit 0 is set in most main-scene words (`0x00708767`: stencil function always, pass operation replace). The stencil reference (`RB_STENCILREFMASK`) is not captured and the native pass has no stencil.
+
+**Census** (main-scene rows, sampled one draw in four over 120 frames: 28,536 bridge, 28,458 walking; from the checker outputs named above, which also list every value's shader pairs and the rows of the other passes). Shader pairs are vertex / pixel shader hashes, the largest first.
+
+| Alpha test (`RB_COLORCONTROL`) | Bridge | Walking | Largest shader pairs |
+|---|---|---|---|
+| off | 21,981 | 21,380 | `0xC30A97D946FA2BE4` / `0x9C2144E42E95A76F`, `0xECD66A10092E6562` / `0x8D900846800943C8`, `0xFB68A7F2301210E1` / `0x4755A2E4A05BA678` |
+| on, greater, with alpha-to-mask | 5,100 | 5,101 | `0x8123C16DBF583F92` / `0xA7E45D07F5CF6627`, `0xA5846836C90E1192` / `0x7CD57B81550F19E3`, `0x475EC9F795E5EDBB` / `0x00E09D1BC5295D52` |
+| on, greater | 1,005 | 1,526 | `0xBEAD84BD72072E0E` / `0xA17D8AEC3A817D45` and `0xF6D98C7B4D98438B`, `0x563E3BE17857DB59` / `0xFF19CE696F916E0C` |
+| on, greater-equal | 450 | 451 | `0x7C5710DEF3EE33C4` / `0x014F8A02DB7B19CA` |
+
+Alpha-to-mask never occurs without the alpha test. Alpha references of the rows with the test on (bridge / walking): 0.501961 (128/255) 4,034 / 2,875; 0 1,127 / 2,726; 0.0588235 (15/255) 720 / 131; 0.0627451 (16/255) 450 / 451; 0.996078 (254/255) 172 / 380; 0.00392157 (1/255) 52 / 515.
+
+| Blend (`RB_BLENDCONTROL0`; colour and alpha use the same triple in every row) | Word | Bridge | Walking | Largest shader pairs |
+|---|---|---|---|---|
+| off (one, add, zero) | `0x00010001` | 12,726 | 13,930 | `0xECD66A10092E6562` / `0x8D900846800943C8`, `0x8123C16DBF583F92` / `0xA7E45D07F5CF6627`, `0x475EC9F795E5EDBB` / `0x00E09D1BC5295D52` |
+| source alpha, add, one | `0x01060106` | 13,954 | 12,149 | terrain layers: `0xC30A97D946FA2BE4` / `0x9C2144E42E95A76F`, `0xFB68A7F2301210E1` / `0x4755A2E4A05BA678`, `0xC30A97D946FA2BE4` / `0x45243B758F9272AB` |
+| source alpha, add, zero | `0x00060006` | 806 | 959 | terrain layers: `0xC30A97D946FA2BE4` / `0x9C2144E42E95A76F`, `0x45243B758F9272AB`, `0x04F23292B2F44077` |
+| source alpha, add, inverse source alpha | `0x07060706` | 810 | 520 | `0x7C5710DEF3EE33C4` / `0x014F8A02DB7B19CA`, `0xBEAD84BD72072E0E` / `0xA17D8AEC3A817D45` |
+| one, add, inverse source alpha | `0x07010701` | 188 | 683 | `0xD4D558DA6A82BDC8` / `0x401A01FD4E5F8757`, `0x563E3BE17857DB59` / `0xFF19CE696F916E0C`, `0xA1F7E9885EC466DF` / `0x401A01FD4E5F8757` |
+| one, add, one | `0x01010101` | 52 | 186 | `0x29B6506FBACEB93A` / `0xDBFD88A80EDBCE36` and `0xC300519EC8915346`, `0x775C6085FBB9D676` / `0xC300519EC8915346` |
+| constant colour, add, inverse constant colour | `0x0D0C0D0C` | 0 | 31 | `0xECD66A10092E6562` / `0x401A01FD4E5F8757` |
+
+The blend constant is used: by no row on the bridge and by 31 walking rows (the last line of the table). The constant registers hold 1.0 in all bridge rows and in 28,427 walking rows; the other 31 are exactly the 31 rows with the constant factors, and hold one grey value in all four registers, between 0.188 and 0.902 (0.902 in 16 rows; `task2_blend_constant_rows.txt`), which looks like an object fading in or out (inference). The only blend operation is add.
+
+| Depth (`RB_DEPTHCONTROL`) | Bridge | Walking | Largest shader pairs |
+|---|---|---|---|
+| test on, write on, greater-equal | 27,936 | 27,520 | everything opaque, alpha-tested, and the terrain layers |
+| test on, write on, greater | 360 | 69 | `0xBEAD84BD72072E0E` / `0xA17D8AEC3A817D45` |
+| test on, write off, greater | 188 | 354 | `0xD4D558DA6A82BDC8`, `0xA1F7E9885EC466DF`, `0xECD66A10092E6562` / `0x401A01FD4E5F8757` |
+| test on, write off, greater-equal | 52 | 515 | `0x563E3BE17857DB59` / `0xFF19CE696F916E0C`, `0x29B6506FBACEB93A` / `0xDBFD88A80EDBCE36` |
+
+| Cull (`PA_SU_SC_MODE_CNTL`) | Bridge | Walking | Rows |
+|---|---|---|---|
+| back, front face clockwise | 10,833 | 12,918 | every mesh draw (`"draw"` rows) that culls |
+| back, front face counter-clockwise | 17,013 | 13,782 | every terrain draw (`"tess"` rows of both builders) |
+| none (front face bit 0) | 690 | 1,758 | `0xA5846836C90E1192`, `0xD7DD31B9BF194DE8`, `0x2D40B53C926109BE` / `0x7CD57B81550F19E3`; `0x563E3BE17857DB59`, `0x29B6506FBACEB93A`, `0x775C6085FBB9D676` |
+
+No row culls front faces and none sets both cull bits.
+
+Colour mask (the shadow's value): RGBA in all 28,536 bridge rows and 28,425 walking rows; none in 33 walking rows (`0xF160B4DA459A6D40` with no pixel shader, depth-only draws the game itself issues; they execute at `0x80000003` and `0xC` with `RB_MODECONTROL` 5, all equal). Outside the main scene the mask is 0 in 19,957 of the 26,743 bridge rows (shadow maps and other depth passes).
+
+State combinations (the five words together; 15 distinct in the bridge capture's main-scene rows, 18 in the walking capture's, 18 in both together), for the pipeline key and as real words for tests:
+
+| `2200` depth | `2201` blend | `2202` alpha | `2205` cull | `2104` mask | Bridge | Walking | Rows | Largest shader pair |
+|---|---|---|---|---|---|---|---|---|
+| `0x00708767` | `0x01060106` | `0x00000004` | `0x00218002` | `0xF` | 13,954 | 12,149 | tess | `0xC30A97D946FA2BE4` / `0x9C2144E42E95A76F` (terrain layer, additive) |
+| `0x00708767` | `0x00010001` | `0x00000004` | `0x00218006` | `0xF` | 4,351 | 6,484 | draw | `0xECD66A10092E6562` / `0x8D900846800943C8` (opaque) |
+| `0x00708767` | `0x00010001` | `0x8700001C` | `0x00218006` | `0xF` | 4,268 | 3,804 | draw | `0x8123C16DBF583F92` / `0xA7E45D07F5CF6627` (alpha test greater, alpha-to-mask) |
+| `0x00708766` | `0x00010001` | `0x00000004` | `0x00218002` | `0xF` | 2,253 | 674 | tess | `0x5003700B7C9B1C16` / `0x7DDAD5C29B3F56EE` (adaptive terrain, opaque) |
+| `0x00708767` | `0x00060006` | `0x00000004` | `0x00218002` | `0xF` | 806 | 959 | tess | `0xC30A97D946FA2BE4` / `0x45243B758F9272AB` (terrain layer, source alpha over nothing) |
+| `0x00708767` | `0x07060706` | `0x0000000E` | `0x00218006` | `0xF` | 450 | 451 | draw | `0x7C5710DEF3EE33C4` / `0x014F8A02DB7B19CA` (blended, alpha test greater-equal) |
+| `0x00708767` | `0x00010001` | `0xAA000004` | `0x00218006` | `0xF` | 429 | 696 | draw | `0x475EC9F795E5EDBB` / `0x00E09D1BC5295D52` (opaque; alpha-to-mask offsets set, enable clear) |
+| `0x00708767` | `0x00010001` | `0xAA00001C` | `0x00218000` | `0xF` | 367 | 365 | draw | `0xA5846836C90E1192` / `0x7CD57B81550F19E3` (alpha test, no cull) |
+| `0x00708746` | `0x07060706` | `0x0000000C` | `0x00018006` | `0xF` | 360 | 69 | draw | `0xBEAD84BD72072E0E` / `0xA17D8AEC3A817D45` (blended, depth greater with write) |
+| `0x00708766` | `0x00010001` | `0x0000000C` | `0x00018006` | `0xF` | 360 | 62 | draw | `0xBEAD84BD72072E0E` / `0xF6D98C7B4D98438B` (alpha test greater) |
+| `0x00708767` | `0x00010001` | `0x8700001C` | `0x00218000` | `0xF` | 271 | 878 | draw | `0xA5846836C90E1192` / `0x7CD57B81550F19E3` |
+| `0x00708767` | `0x00010001` | `0x0000000C` | `0x00218006` | `0xF` | 233 | 880 | draw | `0xD4D558DA6A82BDC8` / `0x401A01FD4E5F8757` |
+| `0x00708767` | `0x00010001` | `0xAA00001C` | `0x00218006` | `0xF` | 194 | 54 | draw | `0x475EC9F795E5EDBB` / `0x00E09D1BC5295D52` |
+| `0x00708743` | `0x07010701` | `0x00000004` | `0x00218006` | `0xF` | 188 | 354 | draw | `0xD4D558DA6A82BDC8` / `0x401A01FD4E5F8757` (premultiplied blend, depth greater, no write) |
+| `0x00708763` | `0x01010101` | `0x0000000C` | `0x00218000` | `0xF` | 52 | 186 | draw | `0x775C6085FBB9D676` / `0xC300519EC8915346` (additive, no write, no cull) |
+| `0x00708763` | `0x07010701` | `0x0000000C` | `0x00218000` | `0xF` | 0 | 329 | draw | `0x563E3BE17857DB59` / `0xFF19CE696F916E0C` |
+| `0x00708767` | `0x00010001` | `0x00000004` | `0x00218006` | `0x0` | 0 | 33 | draw | `0xF160B4DA459A6D40`, no pixel shader (depth only) |
+| `0x00708767` | `0x0D0C0D0C` | `0x00000004` | `0x00218006` | `0xF` | 0 | 31 | draw | `0xECD66A10092E6562` / `0x401A01FD4E5F8757` (blend constant) |
+
+**What the census means for the later tasks.**
+
+- *Blend factors, operations and compare functions that must exist* (input to Task 4). Factors: zero, one, source alpha, inverse source alpha, constant colour, inverse constant colour (the last two for 31 rows of one shader pair, with the blend constant as pipeline or dynamic state). Operation: add only. Depth compare: greater-equal and greater. Alpha test compare (a `discard` in the pixel shader): greater and greater-equal. Colour and alpha always use the same triple. No row uses a colour factor of source or destination colour, destination alpha, constant alpha or saturate, and none uses subtract, min or max.
+- *Depth convention.* Every row with blending off has depth test on, write on, greater-equal (12,726 of 12,726 bridge rows, 13,930 of 13,930 walking rows); so do the terrain layers, which is what lets a layer draw over the base at equal depth. The depth range is reversed by the viewport, not by the projection: a third, eight-frame capture with the viewport registers added to `"rs"` for that run only (`task2_viewport_z_native_discovery_20261006_171030.jsonl`, summary `task2_viewport_z.txt`) reads `PA_CL_VPORT_ZSCALE` = -1 and `PA_CL_VPORT_ZOFFSET` = 1 from the shadow (+0x2918 / +0x291C, the same run as the proven registers; these two were not compared with the GPU) in all 3,729 rows, main scene and other passes. Window depth is 1 - z/w, so the game's greater-equal is less-equal on the clip z/w that the native pass feeds its own depth test today (Less), and greater is less. A pass that keeps unreversed depth has to mirror the compare function; a pass that adopts the game's function has to reverse its depth range and clear depth to 0. Which one is Task 6's choice.
+- *Cull.* The mode is uniform per kind of draw, not over all opaque geometry: mesh draws cull back faces with clockwise front faces (9,835 of the 12,726 bridge rows with blending off; 12,013 of 13,930 walking), terrain patches cull back faces with counter-clockwise front faces (2,253; 674), two-sided foliage and particles cull nothing (638; 1,243). The front-face bit has to travel with the cull bits. Whether the captured modes remove faces the emulated image shows was not checked here; it needs the native pass (Task 6), and for terrain it also depends on the winding of the grid the renderer builds itself.
+- *Colour mask and the pre-pass.* The shadow's mask is the colour passes' mask. The pre-pass state never reaches the capture, which is right for a pass that draws each draw once in colour, except for the pre-pass-only terrain draws above (about 0.7 and 0.9 sampled rows per frame, so roughly 3 draws per frame) and for whatever else per-draw bin masks exclude from the colour passes.
+- *Terrain* (Tasks 9 and 10). Every layer draw of `8221C9C8` blends: `0x01060106` (source alpha, add, one; 13,954 / 12,149 rows) or `0x00060006` (source alpha, add, zero; 806 / 959), with depth `0x00708767`, cull `0x00218002`, no alpha test, and no pre-pass execution. The adaptive builder `82207C30` draws opaque (`0x00708766`, `0x00010001`), with its pre-pass and colour executions in separate draws. All of these rows are in the proof (18,666 and 14,047 tess rows, all paired, equal outside the pre-pass).
+- *Pipeline count.* 18 distinct combinations of the five words over both captures; the alpha reference is not part of them (six values).
+
 ## Pending
 
 1. **Pitch ablation** (done 2026-10-01, results in section 4; kept for re-runs). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):

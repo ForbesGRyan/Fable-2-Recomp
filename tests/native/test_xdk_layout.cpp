@@ -16,6 +16,32 @@ static_assert(xdk::kDevicePsConstantsOffset == xdk::kDeviceVsConstantsOffset + 2
 // The bool constants (registers 0x4900..0x4907) follow the pixel bank.
 static_assert(xdk::kDeviceBoolConstantsOffset == 0x2780);
 static_assert(xdk::kDeviceBoolConstantsOffset == xdk::kDevicePsConstantsOffset + 256 * 16);
+// Render-state register shadows (frame-map section 13, "Render state"): the
+// 0x2100 run (21 registers) from +0x28CC and the 0x2200 run (12) from +0x2934.
+static_assert(xdk::DeviceRegShadowOffset(xdk::kRegColorMask) == 0x28DC);
+static_assert(xdk::DeviceRegShadowOffset(xdk::kRegBlendRed) == 0x28E0);
+static_assert(xdk::DeviceRegShadowOffset(xdk::kRegAlphaRef) == 0x2904);
+static_assert(xdk::DeviceRegShadowOffset(xdk::kRegDepthControl) == 0x2934);
+static_assert(xdk::DeviceRegShadowOffset(xdk::kRegBlendControl0) == 0x2938);
+static_assert(xdk::DeviceRegShadowOffset(xdk::kRegColorControl) == 0x293C);
+static_assert(xdk::DeviceRegShadowOffset(xdk::kRegSuScModeCntl) == 0x2948);
+// RB_MODECONTROL: the shader flush's device + 0x2954 (0x8221B228..0x8221B248).
+static_assert(xdk::DeviceRegShadowOffset(0x2208) == 0x2954);
+// First and last register of each run, and the registers just outside them.
+static_assert(xdk::DeviceRegShadowOffset(0x2100) == xdk::kDeviceRegShadowBase2100);
+static_assert(xdk::DeviceRegShadowOffset(0x2114) == 0x28CC + 4 * 20);
+static_assert(xdk::DeviceRegShadowOffset(0x2115) == 0);
+static_assert(xdk::DeviceRegShadowOffset(0x20FF) == 0);
+static_assert(xdk::DeviceRegShadowOffset(0x2200) == xdk::kDeviceRegShadowBase2200);
+static_assert(xdk::DeviceRegShadowOffset(0x220B) == 0x2934 + 4 * 11);
+static_assert(xdk::DeviceRegShadowOffset(0x220C) == 0);
+static_assert(xdk::DeviceRegShadowOffset(0x21FF) == 0);
+// Other runs are not covered by this function (VGT_HOS_CNTL has its own constant).
+static_assert(xdk::DeviceRegShadowOffset(0x2285) == 0);
+// The 0x2100 run ends where the 0x2180 run's shadow starts (+0x2920), and the
+// 0x2200 run ends where the 0x2280 run's starts (+0x2964).
+static_assert(xdk::kDeviceRegShadowBase2100 + 4 * 21 == 0x2920);
+static_assert(xdk::kDeviceRegShadowBase2200 + 4 * 12 == 0x2964);
 // Pixel shader object (frame-map section 8, "Pixel shader microcode"): the
 // shader flush reads obj[0x40] (record offset, 0x8221B32C), obj[0x18] (base,
 // 0x8221B330), record dword 0 at obj + rec + 0x28 (0x8221B338) and the byte size

@@ -1154,6 +1154,36 @@ void AppendGeometry(std::string& row, bool indexed, const LastArgs& args, uint32
   }
 }
 
+// Discovery evidence (frame-map section 13, "Render state"): the render-state
+// registers from the device's register shadows as the draw builder left them
+// ("rs": register -> dword, a float register as its bits; a register whose
+// shadow cannot be read is left out), and the device's command write pointer
+// after the draw ("cmd": the last dword the builder wrote), which
+// tools/xdk_sigmatch/render_state_check.py pairs with the address of the
+// DRAW_INDX packet the GPU executes.
+void AppendRenderState(std::string& row, uint32_t device) {
+  static constexpr uint32_t kRegs[] = {
+      xdk::kRegColorMask,    xdk::kRegAlphaRef,     xdk::kRegDepthControl, xdk::kRegBlendControl0,
+      xdk::kRegColorControl, xdk::kRegSuScModeCntl, xdk::kRegBlendRed,     xdk::kRegBlendRed + 1,
+      xdk::kRegBlendRed + 2, xdk::kRegBlendRed + 3};
+  char buf[40];
+  row += ",\"rs\":{";
+  bool first = true;
+  for (uint32_t reg : kRegs) {
+    const uint8_t* p = device ? ReadVirtual(device + xdk::DeviceRegShadowOffset(reg), 4) : nullptr;
+    if (!p) continue;
+    std::snprintf(buf, sizeof(buf), "%s\"%04X\":\"0x%08X\"", first ? "" : ",", reg, LoadBe32(p));
+    row += buf;
+    first = false;
+  }
+  row += "}";
+  uint32_t write = 0;
+  if (device && ReadVirtualBe32(device + xdk::kDeviceCommandWriteOffset, &write)) {
+    std::snprintf(buf, sizeof(buf), ",\"cmd\":\"0x%08X\"", write);
+    row += buf;
+  }
+}
+
 // Caller holds g_mutex. One decoded "draw" row (frame-map section 8) for
 // DrawVertices / DrawIndexedVertices; other draw hooks have no VB objects.
 // `in_scene`: the draw is inside the main-scene bracket.
@@ -1174,6 +1204,7 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
     std::snprintf(buf, sizeof(buf), ",\"vbool\":\"0x%08X\"", LoadBe32(bools));
     row += buf;
   }
+  AppendRenderState(row, device);
   auto finish = [&](const char* error) {
     if (error) {
       row += ",\"error\":\"";
@@ -1367,6 +1398,7 @@ void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
                 g_frames_written.load(std::memory_order_relaxed) + 1, HookName(id), args.r[1],
                 args.r[2], args.r[3], args.r[4], device, in_scene ? "true" : "false");
   row += buf;
+  AppendRenderState(row, device);
   VsChoice vc;
   if (ChooseVs(dev, &vc)) {
     const UcodeRef u = vc.immediate ? UcodeRef{} : ReadVsUcode(vc.obj, vc.variant);

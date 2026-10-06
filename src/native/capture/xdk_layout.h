@@ -98,6 +98,46 @@ inline constexpr uint32_t kSurfacePitchMask = 0x3FFF;
 inline constexpr uint32_t kDeviceHosCntlOffset = 0x2978;
 inline constexpr uint32_t kHosCntlAdaptive = 2;
 
+// --- Render-state register shadows (frame-map section 13, "Render state") ----
+// The draw builders flush the device's register shadows with the register-run
+// writer 0x8221C908 (r5 first register, r6 device + offset, r4 a dirty mask,
+// register r5 + n from r6 + 4*n). DrawIndexedVertices:
+//   0x8221E228 `addi r6,r31,0x28CC`, 0x8221E22C `li r5,0x2100`, 21-bit mask
+//   (0x8221E230 `rldicr r4,r30,22,20`): 0x2100..0x2114;
+//   0x8221E1B4 `addi r6,r31,0x2934`, 0x8221E1B8 `li r5,0x2200`, 12-bit mask
+//   (0x8221E1BC `rldicr r4,r30,52,11`): 0x2200..0x220B.
+// Runtime (frame-map section 13; tools/xdk_sigmatch/render_state_check.py pairs
+// each discovery row with the GPU's DRAW_INDX packet by command-buffer address,
+// index count and shader or c0): the ten registers of the rows' "rs", read here
+// after the builder returned, equal the GPU register file in every execution of
+// the draw outside the depth pre-pass. Bridge capture
+// native_discovery_20261006_164805: 55,279 rows, all paired, 80,553 executions;
+// walking capture native_discovery_20261006_165738: 44,726 rows, all paired,
+// 66,761 executions. In the depth pre-pass (bin select 0x80000001 of the tiled
+// main scene; 12,294 and 13,688 executions) nine registers are equal and the
+// GPU's RB_COLOR_MASK is 0 where the shadow holds 0xF: the library's tiling
+// state emitter 0x822155E0 (called by the builders, 0x8221E1A0) writes the
+// shadow's value with a type-0 packet (0x822158A8 `li r10,0x2104` ..
+// 0x822158C4) and then, under bin mask 0x15555555 (0x822158E8/0x822158F0), a
+// predicated SET_CONSTANT of RB_COLOR_MASK = 0 (0x82215938..0x82215948, r20 = 0
+// from 0x822158B4). The shadow is the value of the colour passes.
+inline constexpr uint32_t kDeviceRegShadowBase2100 = 0x28CC;  // register 0x2100
+inline constexpr uint32_t kDeviceRegShadowBase2200 = 0x2934;  // register 0x2200
+inline constexpr uint32_t kRegColorMask = 0x2104;      // RB_COLOR_MASK
+inline constexpr uint32_t kRegBlendRed = 0x2105;       // RB_BLEND_RED (green, blue, alpha follow)
+inline constexpr uint32_t kRegAlphaRef = 0x210E;       // RB_ALPHA_REF (float)
+inline constexpr uint32_t kRegDepthControl = 0x2200;   // RB_DEPTHCONTROL
+inline constexpr uint32_t kRegBlendControl0 = 0x2201;  // RB_BLENDCONTROL0
+inline constexpr uint32_t kRegColorControl = 0x2202;   // RB_COLORCONTROL
+inline constexpr uint32_t kRegSuScModeCntl = 0x2205;   // PA_SU_SC_MODE_CNTL
+// Device offset of the shadow of `reg` for the two runs above; 0 for any other
+// register (not shadowed here).
+constexpr uint32_t DeviceRegShadowOffset(uint32_t reg) {
+  if (reg >= 0x2100 && reg <= 0x2114) return kDeviceRegShadowBase2100 + 4 * (reg - 0x2100);
+  if (reg >= 0x2200 && reg <= 0x220B) return kDeviceRegShadowBase2200 + 4 * (reg - 0x2200);
+  return 0;
+}
+
 // --- Vertex buffer object (D3DVertexBuffer, SetStreamSource r5) -------------
 // Dwords 6-7 hold the vertex fetch constant: dword 6 = CPU virtual address |
 // type 3, dword 7 = size in dwords << 2 | endian. SetStreamSource 0x821B6DC4

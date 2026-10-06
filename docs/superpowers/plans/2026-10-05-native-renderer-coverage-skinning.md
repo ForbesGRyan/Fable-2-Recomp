@@ -1045,6 +1045,33 @@ git commit -m "Native coverage: instanced shader entries"
 
 ---
 
+### Task 7b: Instance distance cut
+
+Added 2026-10-06 after Task 7: all seven instancing shaders write the NaN literal `c255.xyz` as the position of a vertex whose world position (rows times position plus `c7.xyz`, before sway or push) is farther than `sqrt(c13.z)` from `c9.xyz` (strict `>` on squared distance). Unmodelled, the clay view draws 123,396 of 257,804 instanced positions per frame that the game drops (40 of 135 draws wholly). Spec: "Instancing", the "Distance cut" bullet.
+
+**Files:**
+- Modify: `tools/xdk_sigmatch/gen_transform_table.py`, `tests/test_gen_transform_table.py`, `docs/native-renderer/vs-transforms.json`, `src/native/capture/vs_transform_table.inc` (generated), `src/native/capture/instance_expand.h`, `src/native/capture/draw_record.h`, `src/native/capture/capture.cpp`, `src/native/render/clay_logic.h`, `src/native/render/clay_pass.cpp`, `src/native/fable2_native_shaders.h`, `tools/xdk_sigmatch/position_check.py`, `tests/test_position_check.py`, `tests/native/test_clay_logic.cpp`, `tests/native/test_draw_record.cpp`, `docs/native-renderer/frame-map.md`
+
+**Interfaces:**
+- Table: `"instance"` gains an optional `"cut": {"eye": "c9.xyz", "dist2": "c13.z"}`; `FABLE2_VS_INSTANCE` gains two trailing references (`cut_eye_ref`, `cut_dist2_ref`, `-1` when absent); every table block in `capture.cpp` that defines the macro follows.
+- `InstanceSpec` gains `int32_t cut_eye_ref, cut_dist2_ref`. `DrawRecord` gains `float cut[4]` (eye xyz, squared distance); records without a cut (every non-instanced record, and an instance entry without `"cut"`) carry `cut[3] = +inf`. A non-finite or negative `dist2` read from the constants also gives `+inf` (never cut on garbage).
+- `ClayConstants` grows by `float cut[4]` (32 dwords; update the `static_assert`, `kConstantCount` and both HLSL `cbuffer Draw` declarations together). `kClayVs`: after reading `p`, `if (dot(cut.xyz - p.xyz, cut.xyz - p.xyz) > cut.w) c = asfloat(0x7FC00000)` on all four components (a NaN position, not a clip distance: the game drops the whole triangle). The comparison is false for `+inf`, so other draws are untouched.
+- Cache: the cut constants are not in any `GeometryCache` key or content hash.
+- `position_check.py`: mirrors the test in float32; a draw's in-clip verdict uses the vertices kept; a draw with no vertex kept is counted `cut` and leaves the share's denominator; the line prints `cut N` and the kept-vertex share. `0xB636...` then scores 0.689 (REJECT): its evidence must state the exception conditions (the reviewer verified they are already recorded).
+
+- [ ] **Step 1: Failing tests.** Generator: an entry with `"cut"` emits the two references, one without emits `-1, -1`, a malformed `"cut"` (missing key, not a constant reference) raises. `MakeClayConstants`: carries `cut`; a default record has `cut[3] == +inf`. Record assembly: an instanced `DrawInputs` with cut constants yields them in the record; a NaN or negative `dist2` yields `+inf`. Checker: a synthetic draw half past the cut scores on the kept half; a draw wholly past is `cut`.
+- [ ] **Step 2: Implement.**
+- [ ] **Step 3: Entries.** Add `"cut"` to the seven entries with the instruction numbers of the test in each dump (Task 7's report lists them in the "Cut" column); regenerate; rerun the checker and update the verdict lines and evidence strings (including the kept-vertex shares).
+- [ ] **Step 4: Verify.** Suites and build green; autoplay native-view screenshot: the row of cards behind the right-hand fence that the emulated frame does not have is gone, ferns and the grass band stay; F3 and log numbers as Task 7 (drawable, instanced and textured unchanged: the cut drops triangles on the GPU, not records); frame time and geometry resident unchanged within noise; view-off capture overhead still under 0.5 ms.
+- [ ] **Step 5: Docs and commit.** Frame-map section 12 "Instancing": the cut is modelled (constants, where it is applied, what the checker now scores).
+
+```bash
+git add tools/xdk_sigmatch tests docs/native-renderer src/native
+git commit -m "Native coverage: instance distance cut"
+```
+
+---
+
 ### Task 8: Weighted skinning runtime
 
 **Files:**

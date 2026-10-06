@@ -32,10 +32,12 @@ Shader facts (SDK dumps in `out\shader_dump`):
 - `0x8123...` (instanced): `copy = trunc((idx + c254.z) * c12.x) + trunc(c12.z)`,
   `vertex = idx - trunc((idx + c254.z) * c12.x) * c12.y`; three `16_16_16_16_FLOAT` rows
   fetched from vf1 at `[copy]` (stride 7 dwords, offsets 0, 2, 4, plus an `8_8_8_8` at 6);
-  mesh position from vf0 at `[vertex]` (stride 6); `world = rows * p + c7.xyz`; an
-  optional sway (predicated); `oPos = dp4(c0..c3, world)`. Sampled `c12 = (0.0625, 16,
-  26, 0.3333)`. `c254`/`c255` are shader literals (zero in the device bank).
-  `0xB636...` follows the same scheme with one more vf0 fetch.
+  mesh position from vf0 at `[vertex]` (stride 6); `world = rows * p + c7.xyz`; a
+  per-vertex distance cut (predicated: `|c9.xyz - world|^2 > c13.z` writes the NaN literal
+  `c255.xyz` as the position), then a sway on the default path; `oPos = dp4(c0..c3,
+  world)`. Sampled `c12 = (0.0625, 16, 26, 0.3333)`. `c254`/`c255` are shader literals
+  (zero in the device bank). `0xB636...` follows the same scheme with one more vf0 fetch.
+  (Corrected 2026-10-06 after Task 7: the predicate was first read as an optional sway.)
 - `0xD4D5...` (four-bone blend): bone indices are an integer `8_8_8_8` at dword 3, weights
   a normalized `8_8_8_8` at dword 4 (all four explicit), three `16_16_16_16_FLOAT` rows
   per bone from vf3 (slot 92, 6 dwords per bone, offsets 0, 2, 4); the rows are blended by
@@ -107,8 +109,10 @@ clay pass, texture cache, composite views (unchanged)
   "c12.x", "count": "c12.y", "first": "c12.z", "bias": <literal>, "offset": "c7.xyz"}`.
   Fetch numbers are `DecodeVertexFetches` ordinals; the generator records each fetch's
   format and offset so a mismatch at runtime rejects the entry.
-- `bias` is the shader literal `c254.z`; its value comes from the GPU register log (as the
-  terrain literals did) and is recorded in the evidence.
+- `bias` is a shader literal (`c254.z`, or `c254.w` in `0xB636...` and `0x36B5...`); its
+  value comes from the literal table the game uploads with the shader (read in Task 7 with
+  a discovery diagnostic, raw dwords in frame-map section 12) and is recorded in the
+  evidence.
 - Capture: read the named constants, resolve the instance stream and the mesh stream,
   compute the copies available (`instance stream bytes / stride`) and mesh vertices, and
   reject (`bad-index`) when the largest index maps past either. Non-finite or
@@ -118,7 +122,18 @@ clay pass, texture cache, composite views (unchanged)
   constants; content hash = both streams' bytes.
 - Shaders: `0x8123...` and `0xB636...` first; the other five when their dumps show the
   same scheme, otherwise `instance-unsupported` with the reason recorded.
-- A draw whose sway is active is drawn without it and counted `deformed`.
+- A shader that moves the position after the rows (sway, push) is drawn without the move
+  and counted `deformed`.
+- Distance cut (added 2026-10-06 after Task 7 measured that 48% of the instanced positions
+  in the bridge scene are ones the game drops, 40 of 135 draws wholly): the table entry
+  names the two constants, `"cut": {"eye": "c9.xyz", "dist2": "c13.z"}` inside
+  `"instance"`. Capture copies them into the record per draw. The clay vertex shader tests
+  the flat world position it reads (the same point the game tests, before sway or push)
+  and writes a NaN position when `|eye - world|^2 > dist2`, so a triangle with a cut
+  vertex is dropped as in the game. Records without a cut carry `dist2 = +inf`. The two
+  constants are not part of the flat-stream cache key or content hash: the camera moving
+  does not rebuild buffers. `position_check.py` applies the same test and scores the
+  in-clip share on the vertices the game keeps.
 
 ## Skinning
 

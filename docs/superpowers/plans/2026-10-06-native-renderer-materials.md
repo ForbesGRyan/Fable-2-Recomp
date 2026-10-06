@@ -170,6 +170,7 @@ struct StateWords {
   uint32_t color_mask = 0xF;    // RB_COLOR_MASK
   uint32_t depth_control = 0;   // RB_DEPTHCONTROL
   uint32_t su_sc_mode = 0;      // PA_SU_SC_MODE_CNTL
+  uint32_t vport_z_scale = 0x3F800000;  // PA_CL_VPORT_ZSCALE (register 0x2113), a float's bits; negative: depth is reversed
   bool read = false;            // false: the words could not be read
 };
 enum class Compare : uint8_t { kNever, kLess, kEqual, kLessEqual, kGreater, kNotEqual, kGreaterEqual, kAlways };
@@ -186,18 +187,20 @@ struct RenderState {
   uint8_t color_mask = 0xF;
   bool depth_test = true, depth_write = true; Compare depth_func = Compare::kLess;
   Cull cull = Cull::kNone;
+  bool front_cw = false;         // PA_SU_SC_MODE_CNTL front-face bit, as Task 2 established its meaning
+  bool depth_reversed = false;   // viewport Z scale negative: Task 6 mirrors depth_func
 };
 RenderState DefaultRenderState();          // valid, opaque, depth Less with write, no cull, mask 0xF
 RenderState DecodeRenderState(const StateWords& w);
 ```
 
-  Rules of `DecodeRenderState`: `!w.read` gives `DefaultRenderState()` with `valid = false`. A factor value outside the enum (2, 3, 17 and up), an operation above 4, or a non-finite alpha reference gives the default state with `valid = false`. `blend` is true unless colour and alpha are both (One, Zero, Add). Alpha-to-mask sets `alpha_to_mask`; it does not set `alpha_test`. `cull`: both cull bits give `kNone` and `valid = false` (nothing would be drawn; treat as unknown); otherwise front or back as the bits say (the front-face bit is stored in Task 6's key through `su_sc_mode`, not interpreted here).
+  Rules of `DecodeRenderState`: `!w.read` gives `DefaultRenderState()` with `valid = false`. A factor value outside the enum (2, 3, 17 and up), an operation above 4, or a non-finite alpha reference gives the default state with `valid = false`. `blend` is true unless colour and alpha are both (One, Zero, Add). Alpha-to-mask sets `alpha_to_mask`; it does not set `alpha_test`. `cull`: both cull bits give `kNone` and `valid = false` (nothing would be drawn; treat as unknown); otherwise front or back as the bits say; `front_cw` is the front-face bit as Task 2's write-up defines it; `depth_reversed` is true when the viewport Z scale is a negative finite float (a non-finite scale gives the default state with `valid = false`).
   - `DrawRecord::state_words` (`StateWords`), `DrawInputs::state_words`; `AssembleRecord` copies it for every drawn record (terrain, instanced, skinned, plain).
 
 - [ ] **Step 1: Failing tests** in `tests/native/test_render_state.cpp` (new; add to `run_native_tests.cmd` beside the other pure tests): the default state; real words from Task 2's census (take at least four distinct real combinations from the frame map: an opaque draw, an alpha-tested draw, a blended draw, a terrain layer) with the expected decoded fields; unread words; factor 2, factor 17, operation 5, alpha reference NaN and infinity (default, invalid); both cull bits; colour mask 0; alpha-to-mask without alpha test. In `test_draw_record.cpp`: `AssembleRecord` carries `state_words` for a plain, an instanced and a terrain input.
 - [ ] **Step 2: Run**: compile failures (`render_state.h` not found).
 - [ ] **Step 3: Implement** `render_state.h` (std headers only) and the record fields.
-- [ ] **Step 4: Capture.** In `FillDrawInputs` and the terrain path read the six words from the device at `DeviceRegShadowOffset(reg)` with the existing bounded device read; a failed read leaves `read = false`. Only when records are built.
+- [ ] **Step 4: Capture.** In `FillDrawInputs` and the terrain path read the seven words from the device (the six state registers and `PA_CL_VPORT_ZSCALE`, register 0x2113, through `DeviceRegShadowOffset`) at `DeviceRegShadowOffset(reg)` with the existing bounded device read; a failed read leaves `read = false`. Only when records are built.
 - [ ] **Step 5: Verify.** Native tests and Python tests green; release build; one split run of the bridge scene: counts unchanged from the last run before this task (captured, drawable, instanced, skinned, textured), view-off capture median still under 0.5 ms in a view-off run.
 - [ ] **Step 6: Commit**
 
@@ -208,7 +211,9 @@ git commit -m "Native materials: render state words in the draw record and their
 
 ---
 
-### Task 4: RHI blend factors, operations and compare functions (SDK)
+### Task 4: RHI blend factors, operations and compare functions (SDK) — DROPPED
+
+**Dropped by ruling, 2026-10-06, after Task 2's census:** the game's draws in both captures use only blend factors (zero, one, source alpha, inverse source alpha), the blend operation (add) and, after mirroring for the reversed depth, compare functions (Less, LessEqual) that the RHI already has; alpha test is a shader `discard`. The one exception, constant-colour blend factors on about one draw per frame of the walking scene, is handled in Task 6 by leaving such draws out (`blend-unknown`). The text below is kept for the record and is not executed.
 
 **Files (in `thirdparty/rexglue-sdk`, branch `renderer`):**
 - Modify: `include/rex/graphics/native_rhi.h` (enums `BlendFactor` about lines 151 to 156, `BlendOp` 158 to 161, `CompareFunc` 139 to 143), `src/graphics/d3d12/native_rhi_d3d12.cpp` (`ToBlend`, `ToBlendOp`, `ToCompare` about lines 239 to 267)
@@ -262,7 +267,7 @@ git commit -m "Native materials: alpha recipe and kind in the material table, al
 - Modify: `src/native/render/clay_logic.h`, `src/native/render/clay_pass.cpp`, `src/native/render/clay_pass.h`, `src/native/fable2_native_shaders.h`, `tests/native/test_clay_logic.cpp`, `tests/native/test_native_shaders.cpp`, `README.md` (F3 lines)
 
 **Interfaces:**
-- Consumes: `RenderState`, `DecodeRenderState`, `StateWords` (Task 3); `Material::alpha`, `alpha_scale`, `kind`, `DecideAlpha` (Task 5); the RHI enums (Task 4).
+- Consumes: `RenderState`, `DecodeRenderState`, `StateWords` (Task 3); `Material::alpha`, `alpha_scale`, `kind`, `DecideAlpha` (Task 5); the RHI enums as they are today (`nrhi::BlendFactor` Zero, One, SrcAlpha, InvSrcAlpha; `BlendOp` Add, Min; `CompareFunc` Always, Less, LessEqual): Task 4 was dropped.
 - Produces (pure, `clay_logic.h`):
 
 ```cpp
@@ -288,6 +293,7 @@ size_t FindOrAddPipelineSlot(std::vector<PipelineKey>& keys, const PipelineKey& 
   - The pass keeps `std::vector<std::pair<PipelineKey, Pipeline>>` (linear search, at most `kMaxClayPipelines`); a key beyond the bound uses the default pipeline of its `textured` value and counts `pipeline_overflow`. Pipelines are never evicted within a run.
   - Per record: `rs = DecodeRenderState(r.state_words)`; `rule = DecideAlpha(rs.alpha_test || rs.alpha_to_mask, rs.blend, colour_known, material.alpha.source != kNone)`; `kSkipBlendUnknown`: the record is not drawn and counts `blend_unknown` (and as skipped with that reason on the `Native:` line); `kDrawAlphaUnknown`: drawn with the test off and alpha 1, counted; `kApply`: constants carry the mode, reference and scale. `colour_known` is: the record will be drawn textured this frame, or its material is a terrain kind with usable textures (Task 10). A colour mask of 0 with depth write on draws depth only (keep the pipeline, it writes no colour).
   - HLSL (`kClayTexturedPs`, and the terrain shaders in Task 10): after sampling, `float a = alpha_from(t) * alpha_scale;` then, if the test bit is set, `if (!cmp(a, alpha_ref, func)) discard;` with all eight compare functions; alpha-to-mask is passed as a test `a >= 0.5`. Output alpha is `a` when blending, else 1. The flat-colour shader (`kClayPs`) has no alpha source: an alpha-tested or blended flat draw can only come through `kDrawAlphaUnknown`.
+  - Mapping to the RHI: when `depth_reversed`, mirror the depth function (Greater to Less, GreaterEqual to LessEqual, Less to Greater, LessEqual to GreaterEqual; Equal, NotEqual, Always, Never unchanged) because the clay pass keeps its own non-reversed depth; a blend factor, blend operation or (mirrored) depth function the RHI cannot express makes the state unsupported: a blended draw with an unsupported blend state is left out and counted `blend-unknown`, an unsupported depth function falls back to the default depth state and counts `state_invalid`. Task 2's census: opaque draws use GreaterEqual with write on under a reversed viewport; terrain layers blend with (SrcAlpha, One) or (SrcAlpha, Zero).
   - Depth and cull from the key. Culling: use the captured mode with the front-face convention established in Task 2's write-up; if Task 2 left it open, start with culling as captured, compare a native-view screenshot of the bridge scene with the emulated frame, and if faces the emulated image shows are missing, flip the convention once, globally, and record the evidence.
 
 - [ ] **Step 1: Failing tests.** `test_clay_logic.cpp`: `MakePipelineKey` for the default state, for an invalid state (equals the default key), for two states that differ only in alpha reference (same key: the reference is a constant, not pipeline state), for states that differ in each key field (different keys); `FindOrAddPipelineSlot` returns the same index for an equal key, appends until `max`, then returns `kNoPipelineSlot` for a new key while still finding the existing ones (Review Focus 2); `MakeClayConstants` carries mode, reference and scale and leaves them zero/one for an opaque draw; the stats text with the new counters. `test_native_shaders.cpp`: the textured pixel shader compiles and contains a `discard`; the cbuffer declarations of all clay shaders declare the new fields (as the cut test does).

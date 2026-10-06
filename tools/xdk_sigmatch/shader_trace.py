@@ -34,7 +34,7 @@ _CF = re.compile(r"^/\*\s*\d+\.\d+\s*\*/\s*(.*)$")
 _CONT = re.compile(r"^\s+\+\s+(.*)$")
 _PRED = re.compile(r"^\((!?)p0\)\s*")
 _SRC = re.compile(r"^(-?)(r|c)(_abs)?(?:\[([^\]]*)\]|(\d+))(?:\.([xyzw]+))?$")
-_DEST = re.compile(r"^(?:(r)(\d+)|(o)(\d+)|(oPos)|(oDepth))(?:\.([xyzw_01]+))?$")
+_DEST = re.compile(r"^(?:(r)(\d+)|(o)(\d+)|(oPos)|(oDepth)|oC(\d+))(?:\.([xyzw_01]+))?$")
 _COMPS = "xyzw"
 _SAFE_CF = ("exec", "exece", "alloc", "cnop")
 _COORD_OFFSETS = ("OffsetX", "OffsetY", "OffsetZ")
@@ -72,12 +72,14 @@ def _parse_dest(text):
     m = _DEST.match(text)
     if not m:
         return None, None, "", ""
-    swz = m.group(7) or "xyzw"
+    swz = m.group(8) or "xyzw"
     mask = "".join(_COMPS[i] for i, ch in enumerate(swz[:4]) if ch != "_")
     if m.group(1):
         return int(m.group(2)), "r", mask, swz
     if m.group(3):
         return int(m.group(4)), "o", mask, swz
+    if m.group(7) is not None:  # colour export oC<n>
+        return int(m.group(7)), "oc", mask, swz
     return -1, "pos" if m.group(5) else "depth", mask, swz
 
 
@@ -275,6 +277,22 @@ def trace_component(instrs, before_index, reg, comp):
     return r if isinstance(r, Unsupported) else r[0]
 
 
+def _coord_attr_problem(attrs):
+    """Why a fetch's attributes move the sampled coordinate, or None. The disassembler prints
+    them only when non-default; filter, LOD and FetchValidOnly overrides do not move it."""
+    if attrs.get("UnnormalizedTextureCoords", "false") != "false":
+        return "unnormalized texture coordinates"
+    for name in _COORD_OFFSETS:
+        if name in attrs:
+            try:
+                nonzero = float(attrs[name]) != 0.0
+            except ValueError:
+                nonzero = True
+            if nonzero:
+                return f"fetch {name}={attrs[name]}"
+    return None
+
+
 def trace_ps_albedo(instrs, tfetch):
     if tfetch.dim != "2D":
         return Unsupported(f"texture dimension {tfetch.dim}")
@@ -283,19 +301,9 @@ def trace_ps_albedo(instrs, tfetch):
     pos = _find_pos(instrs, tfetch.index)
     if pos is None or instrs[pos].pred:
         return Unsupported("predicated or missing fetch")
-    # Attributes that move the sampled coordinate (the disassembler prints them only when
-    # non-default); filter, LOD and FetchValidOnly overrides do not.
-    attrs = instrs[pos].attrs
-    if attrs.get("UnnormalizedTextureCoords", "false") != "false":
-        return Unsupported("unnormalized texture coordinates")
-    for name in _COORD_OFFSETS:
-        if name in attrs:
-            try:
-                nonzero = float(attrs[name]) != 0.0
-            except ValueError:
-                nonzero = True
-            if nonzero:
-                return Unsupported(f"fetch {name}={attrs[name]}")
+    bad = _coord_attr_problem(instrs[pos].attrs)
+    if bad:
+        return Unsupported(bad)
     out = {}
     for axis, comp in zip("uv", tfetch.coord_swz):
         r = trace_component(instrs, tfetch.index, tfetch.coord_reg, comp)
@@ -307,6 +315,120 @@ def trace_ps_albedo(instrs, tfetch):
             return Unsupported(f"{axis}: input r{r.base_reg} is not an interpolator")
         out[axis] = {"input": f"r{r.base_reg}.{r.base_comp}", "stages": r.stages}
     return out
+
+
+_JUMPS = ("jmp", "cjmp")
+
+
+def _flow_problem(instrs, pos):
+    """Why the instruction at `pos` may not run on every path through the shader, or None: a forward
+    jump taken before it that lands only after it, a backward jump (loop) or any other control flow."""
+    pending, seen = set(), set()
+    for ins in instrs[:pos]:
+        if not ins.op.startswith("cf:"):
+            continue
+        word = ins.op[3:]
+        if word in _SAFE_CF:
+            continue
+        target = ins.raw.split("//")[0].split()[-1]
+        if word == "label":
+            seen.add(target)
+            pending.discard(target)
+        elif word in _JUMPS:
+            if target in seen:
+                return f"backward jump to {target}"
+            pending.add(target)
+        else:
+            return f"control flow: {word}"
+    if pending:
+        return f"inside a jumped-over region (to {', '.join(sorted(pending))})"
+    return None
+
+
+def _alpha_operand(src, scalar, kind):
+    """The one component a src contributes to the alpha write -> (reg, comp) or Unsupported."""
+    if src.kind != kind or src.reg is None or src.neg or src.abs:
+        return Unsupported(f"alpha operand is not a plain {kind} register")
+    if len(src.swizzle) != (1 if scalar else 4):
+        return Unsupported("alpha operand swizzle")
+    return src.reg, src.swizzle[0 if scalar else 3]
+
+
+def trace_ps_alpha(instrs):
+    """Where the pixel shader's output alpha (oC0.w) comes from: {"source": "one"} when it is the
+    literal 1; {"source": "fetch", "slot", "component", "scale"} when it is one component of a 2D
+    texture fetch, optionally multiplied by one pixel constant component ("cN.c", else None).
+    "fetch" does not say whether the slot is the albedo: the table author compares the slot.
+    Anything else (predicated or repeated writes, other ops, control flow between the fetch and the
+    write, a fetch that moves the coordinate) is Unsupported."""
+    writers = [i for i, ins in enumerate(instrs) if ins.dest_kind == "oc" and ins.dest == 0 and "w" in ins.mask]
+    if not writers:
+        return Unsupported("oC0.w is not written")
+    if len(writers) > 1:
+        return Unsupported(f"oC0.w has {len(writers)} writers")
+    w = writers[0]
+    ins = instrs[w]
+    if ins.pred:
+        return Unsupported("predicated write of oC0.w")
+    if ins.sat:
+        return Unsupported("_sat on the oC0.w write")
+    flow = _flow_problem(instrs, w)
+    if flow:
+        return Unsupported(f"oC0.w write is conditional: {flow}")
+    dc = ins.dest_swz[3] if len(ins.dest_swz) == 4 else "?"
+    if dc == "1":
+        return {"source": "one", "slot": None, "component": None, "scale": None}
+    if dc != "w":
+        return Unsupported(f"oC0.w is written as {dc!r}")
+    scalar = ins.op.startswith("s:")
+    op = ins.op[2:] if scalar else ins.op
+    srcs = ins.srcs
+    scale = None
+    if (op == "mov" and len(srcs) == 1) or (op == "max" and len(srcs) == 2 and srcs[0] == srcs[1]):
+        t = _alpha_operand(srcs[0], scalar, "r")
+    elif op in ("mul", "mulsc") and len(srcs) == 2 and sorted(s.kind for s in srcs) == ["c", "r"]:
+        c = _alpha_operand(next(s for s in srcs if s.kind == "c"), scalar, "c")
+        t = _alpha_operand(next(s for s in srcs if s.kind == "r"), scalar, "r")
+        if isinstance(c, Unsupported):
+            return c
+        if c[0] > 255:
+            return Unsupported("constant register out of range")
+        scale = f"c{c[0]}.{c[1]}"
+    else:
+        return Unsupported(f"oC0.w written by {op}")
+    if isinstance(t, Unsupported):
+        return t
+    reg, comp = t
+    # Producer: the nearest earlier write of reg.comp (writes at this instruction's own index land
+    # after its reads); control flow in between could make an earlier or later write the live one.
+    for i in range(w - 1, -1, -1):
+        p = instrs[i]
+        if p.op.startswith("cf:"):
+            if p.op[3:] not in _SAFE_CF:
+                return Unsupported(f"control flow between the alpha source write and oC0.w: {p.op[3:]}")
+            continue
+        if p.index == ins.index or not (p.dest_kind == "r" and p.dest == reg and comp in p.mask):
+            continue
+        if not p.op.startswith("tfetch"):
+            return Unsupported(f"alpha source r{reg}.{comp} is written by {p.op}, not a texture fetch")
+        if p.op != "tfetch2D":
+            return Unsupported(f"alpha source is a {p.op[len('tfetch'):]} fetch")
+        if p.pred:
+            return Unsupported("predicated alpha fetch")
+        bad = _coord_attr_problem(p.attrs)
+        if bad:
+            return Unsupported(bad)
+        src = p.dest_swz[_COMPS.index(comp)] if len(p.dest_swz) == 4 else None
+        if src not in tuple(_COMPS) or p.fetch_slot is None:
+            return Unsupported(f"fetch component {src!r} is constant or unwritten")
+        return {"source": "fetch", "slot": p.fetch_slot, "component": src, "scale": scale}
+    return Unsupported(f"alpha source r{reg}.{comp} is not written by a texture fetch")
+
+
+def find_kills(instrs):
+    """Every pixel kill instruction: [{"index", "op", "pred"}] in program order."""
+    return [{"index": i.index, "op": i.op.removeprefix("s:"), "pred": bool(i.pred)}
+            for i in instrs if i.op.removeprefix("s:").startswith("kill")]
 
 
 def trace_vs_export(instrs, interp, comp):

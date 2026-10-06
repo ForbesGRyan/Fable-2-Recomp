@@ -376,9 +376,49 @@ const std::vector<AlbedoSpec> kAlbedoTable = {
 #define FABLE2_PS_ALBEDO(H, SL, UI, UC, US0, UO0, US1, UO1, VI, VC, VS0, VO0, VS1, VO1) \
   {H, int8_t(SL), UI, UC, VI, VC, {{US0, UO0}, {US1, UO1}}, {{VS0, VO0}, {VS1, VO1}}},
 #define FABLE2_PS_NO_ALBEDO(H) {H, int8_t(-1), 0, 0, 0, 0, {}, {}},
+#define FABLE2_PS_ALPHA(H, S, SL, C, SR)
+#define FABLE2_PS_KIND(H, K)
 #include "ps_albedo_table.inc"
 #undef FABLE2_PS_ALBEDO
 #undef FABLE2_PS_NO_ALBEDO
+#undef FABLE2_PS_ALPHA
+#undef FABLE2_PS_KIND
+};
+
+// Alpha recipe per pixel shader hash (ps-albedo.json "alpha"); the source is the generated
+// 0 one, 1 albedo, 2 fetch, scale_ref is the pixel constant register * 4 + component or -1.
+struct PsAlphaEntry {
+  uint64_t ps_hash;
+  AlphaSpec spec;
+};
+const std::vector<PsAlphaEntry> kAlphaTable = {
+#define FABLE2_PS_ALBEDO(H, SL, UI, UC, US0, UO0, US1, UO1, VI, VC, VS0, VO0, VS1, VO1)
+#define FABLE2_PS_NO_ALBEDO(H)
+#define FABLE2_PS_ALPHA(H, S, SL, C, SR) \
+  {H, {AlphaSource((S) + 1), uint8_t(SL), uint8_t(C), int32_t(SR)}},
+#define FABLE2_PS_KIND(H, K)
+#include "ps_albedo_table.inc"
+#undef FABLE2_PS_ALBEDO
+#undef FABLE2_PS_NO_ALBEDO
+#undef FABLE2_PS_ALPHA
+#undef FABLE2_PS_KIND
+};
+
+// Kind per pixel shader hash (ps-albedo.json "kind", only entries other than plain).
+struct PsKindEntry {
+  uint64_t ps_hash;
+  MaterialKind kind;
+};
+const std::vector<PsKindEntry> kKindTable = {
+#define FABLE2_PS_ALBEDO(H, SL, UI, UC, US0, UO0, US1, UO1, VI, VC, VS0, VO0, VS1, VO1)
+#define FABLE2_PS_NO_ALBEDO(H)
+#define FABLE2_PS_ALPHA(H, S, SL, C, SR)
+#define FABLE2_PS_KIND(H, K) {H, MaterialKind(K)},
+#include "ps_albedo_table.inc"
+#undef FABLE2_PS_ALBEDO
+#undef FABLE2_PS_NO_ALBEDO
+#undef FABLE2_PS_ALPHA
+#undef FABLE2_PS_KIND
 };
 const std::vector<VsUvSpec> kVsUvTable = {
 #define FABLE2_VS_TRANSFORM(H, B, L, P, D)
@@ -403,6 +443,20 @@ const AlbedoSpec* FindAlbedo(uint64_t ps_hash) {
     if (e.ps_hash == ps_hash) return &e;
   }
   return nullptr;
+}
+
+AlphaSpec FindAlpha(uint64_t ps_hash) {
+  for (const PsAlphaEntry& e : kAlphaTable) {
+    if (e.ps_hash == ps_hash) return e.spec;
+  }
+  return {};
+}
+
+MaterialKind FindKind(uint64_t ps_hash) {
+  for (const PsKindEntry& e : kKindTable) {
+    if (e.ps_hash == ps_hash) return e.kind;
+  }
+  return MaterialKind::kPlain;
 }
 
 const VsUvSpec* FindVsUv(uint64_t vs_hash, uint8_t interp, uint8_t comp) {
@@ -846,6 +900,8 @@ struct PsInfo {
   uint64_t hash = 0;
   std::vector<uint32_t> tex_slots;     // TextureFetchSlots (vfetch_decode.h)
   const AlbedoSpec* albedo = nullptr;  // FindAlbedo; slot -1 = samples no albedo
+  AlphaSpec alpha;                     // FindAlpha; kNone = no recipe
+  MaterialKind kind = MaterialKind::kPlain;
   uint32_t phys = 0;
   uint32_t bytes = 0;
 };
@@ -870,6 +926,8 @@ const PsInfo* LookupPs(uint32_t obj) {
   e.hash = u.hash;
   e.tex_slots = TextureFetchSlots(u.dwords.data(), u.dwords.size());
   e.albedo = FindAlbedo(u.hash);
+  e.alpha = FindAlpha(u.hash);
+  e.kind = FindKind(u.hash);
   e.phys = u.phys;
   e.bytes = u.bytes;
   return &e;
@@ -1843,6 +1901,9 @@ void FillMaterial(uint32_t device, const DrawShaders& shaders, DrawInputs& in) {
     return;
   }
   m.status = MaterialStatus::kPsUnknown;
+  m.alpha = {};
+  m.alpha_scale = 1.0f;
+  m.kind = MaterialKind::kPlain;
   if (!shaders.have_dev) return;
   const DeviceSnapshot& dev = shaders.dev;
   uint32_t ps_obj = 0;
@@ -1850,6 +1911,19 @@ void FillMaterial(uint32_t device, const DrawShaders& shaders, DrawInputs& in) {
   if (!ps) return;
   // Copied at once: ps points into t_ps_cache (the table entry is stable).
   m.ps_hash = ps->hash;
+  m.kind = ps->kind;
+  if (ps->alpha.source != AlphaSource::kNone) {
+    // The recipe's scale constant (register * 4 + component) at this draw; a constant that
+    // cannot be read, or is not finite, leaves the draw without a recipe.
+    const int32_t ref = ps->alpha.scale_ref;
+    if (ref < 0) {
+      m.alpha = ps->alpha;
+    } else if (ref < 1024 && ReadPsBankRegisters(device, uint32_t(ref) / 4, 1) &&
+               std::isfinite(t_ps_bank[ref])) {
+      m.alpha = ps->alpha;
+      m.alpha_scale = t_ps_bank[ref];
+    }
+  }
   const AlbedoSpec* albedo = ps->albedo;
   if (!albedo) return;
   const AlbedoSpec& a = *albedo;

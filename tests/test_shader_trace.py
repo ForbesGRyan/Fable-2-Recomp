@@ -138,5 +138,121 @@ class TraceTest(unittest.TestCase):
             self.assertIsInstance(st.trace_ps_albedo(ins, st.texture_fetches(ins)[0]), st.Unsupported, line)
 
 
+HEAD = "/*    0.0 */       exec\n"
+
+
+def _alpha(body):
+    return st.trace_ps_alpha(st.parse(HEAD + body))
+
+
+class AlphaTraceTest(unittest.TestCase):
+    def test_literal_one(self):
+        r = _alpha("/*    5   */          mul oC0.xyz1, r0.xzww, c20.wwww\n")
+        self.assertEqual(r, {"source": "one", "slot": None, "component": None, "scale": None})
+
+    def test_fetch_component_unscaled(self):
+        r = _alpha("/*    1   */          tfetch2D r0.___x, r6.zw, tf8\n"
+                   "/*    5   */          max oC0.___w, r0.wwww, r0.wwww\n")
+        self.assertEqual(r, {"source": "fetch", "slot": 8, "component": "x", "scale": None})
+
+    def test_fetch_component_scaled_vector_mul(self):
+        r = _alpha("/*    1   */          tfetch2D r2.wxyz, r6.yx, tf0\n"
+                   "/*    5   */          mul oC0.___w, r2.xxxx, c15.wwww\n")
+        self.assertEqual(r, {"source": "fetch", "slot": 0, "component": "w", "scale": "c15.w"})
+
+    def test_fetch_component_scaled_scalar_mul(self):
+        r = _alpha("/*    1   */          tfetch2D r0.x___, r6.zw, tf8\n"
+                   "/*    5   */          mul oC0.xyz_, r1.xyzz, r2.xyzz\n"
+                   "              +       mulsc oC0.___w, c15.w, r0.x\n")
+        self.assertEqual(r, {"source": "fetch", "slot": 8, "component": "x", "scale": "c15.w"})
+
+    def test_join_label_before_unconditional_write_is_fine(self):
+        r = _alpha("/*    1.0 */       cjmp !b3, L9\n/*    2   */          mul r1.x___, r1.xxxx, r1.xxxx\n"
+                   "                label L9\n/*    5   */          mul oC0.xyz1, r0.xzww, c20.wwww\n")
+        self.assertEqual(r["source"], "one")
+
+    def test_refused_shapes(self):
+        fetch = "/*    1   */          tfetch2D r0.___x, r6.zw, tf8\n"
+        cases = {
+            "no writer": "/*    5   */          mul oC0.xyz_, r0.xzww, c20.wwww\n",
+            "predicated": "/*    4   */          setp_eq r1._, r1.x\n/*    5   */    (p0) mul oC0.xyz1, r0.xzww, c20.wwww\n",
+            "two writers": "/*    5   */          mul oC0.xyz1, r0.xzww, c20.wwww\n/*    6   */          mul oC0.___w, r0.wwww, c1.xxxx\n",
+            "literal zero": "/*    5   */          mul oC0.xyz0, r0.xzww, c20.wwww\n",
+            "sat": fetch + "/*    5   */          mul_sat oC0.___w, r0.wwww, c1.xxxx\n",
+            "add": fetch + "/*    5   */          add oC0.___w, r0.wwww, c1.xxxx\n",
+            "two temps": fetch + "/*    5   */          mul oC0.___w, r0.wwww, r1.wwww\n",
+            "negated const": fetch + "/*    5   */          mul oC0.___w, r0.wwww, -c1.xxxx\n",
+            "abs temp": fetch + "/*    5   */          mul oC0.___w, r_abs[0].wwww, c1.xxxx\n",
+            "1D fetch": "/*    1   */          tfetch1D r0.___x, r6.x, tf8\n/*    5   */          mul oC0.___w, r0.wwww, c1.xxxx\n",
+            "cube fetch": "/*    1   */          tfetchCube r0.___x, r6.xyz, tf8\n/*    5   */          mul oC0.___w, r0.wwww, c1.xxxx\n",
+            "predicated fetch": "/*    1   */    (p0) tfetch2D r0.___x, r6.zw, tf8\n/*    5   */          mul oC0.___w, r0.wwww, c1.xxxx\n",
+            "constant fetch component": "/*    1   */          tfetch2D r0.___1, r6.zw, tf8\n/*    5   */          mul oC0.___w, r0.wwww, c1.xxxx\n",
+            "no fetch writer": "/*    5   */          mul oC0.___w, r0.wwww, c1.xxxx\n",
+            "other writer": fetch + "/*    2   */          mul r0.___w, r1.wwww, r1.wwww\n/*    5   */          mul oC0.___w, r0.wwww, c1.xxxx\n",
+            "write in skipped region": "/*    1.0 */       cjmp !b3, L9\n/*    5   */          mul oC0.xyz1, r0.xzww, c20.wwww\n"
+                                       "                label L9\n",
+            "fetch overwritten in branch": fetch + "/*    1.1 */       cjmp !b3, L9\n/*    2   */          mul r0.___w, r1.wwww, r1.wwww\n"
+                                           "                label L9\n/*    5   */          mul oC0.___w, r0.wwww, c1.xxxx\n",
+            "loop": "/*    1.0 */       loop i0, L9\n/*    5   */          mul oC0.xyz1, r0.xzww, c20.wwww\n",
+        }
+        for name, body in cases.items():
+            self.assertIsInstance(_alpha(body), st.Unsupported, name)
+
+    def test_fetch_coordinate_offset_unsupported(self):
+        r = _alpha("/*    1   */          tfetch2D r0.___x, r6.zw, tf8, OffsetX=0.5\n"
+                   "/*    5   */          mul oC0.___w, r0.wwww, c1.xxxx\n")
+        self.assertIsInstance(r, st.Unsupported)
+
+    def test_same_instruction_register_write_is_not_the_producer(self):
+        # r0.w is read by the alpha write before this instruction's own write lands, so the
+        # producer is the tfetch above: the other write at the same index must not hide it.
+        r = _alpha("/*    1   */          tfetch2D r0.x___, r6.zw, tf8\n"
+                   "/*    5   */          mul r0.x___, r1.xxxx, r1.xxxx\n"
+                   "              +       mulsc oC0.___w, c15.w, r0.x\n")
+        self.assertEqual(r, {"source": "fetch", "slot": 8, "component": "x", "scale": "c15.w"})
+
+
+class FindKillsTest(unittest.TestCase):
+    def test_synthetic(self):
+        ins = st.parse(HEAD + "/*    3   */          mul r1.x___, r0.xxxx, r0.xxxx\n"
+                       "/*    4   */    (p0) kill_gt r0._, c254.xxxx, c255.yyyy\n"
+                       "/*    5   */          kill_ge r0._, r1.x, c1.x\n")
+        self.assertEqual(st.find_kills(ins), [{"index": 4, "op": "kill_gt", "pred": True},
+                                              {"index": 5, "op": "kill_ge", "pred": False}])
+        self.assertEqual(st.find_kills(st.parse(HEAD + "/*    3   */          mul r1.x___, r0.xxxx, r0.xxxx\n")), [])
+
+
+DUMP_DIR = Path(__file__).resolve().parent.parent / "out" / "shader_dump"
+
+
+def _dump(hash_):
+    path = DUMP_DIR / f"shader_{hash_}.ucode.frag"
+    if not path.exists():
+        raise unittest.SkipTest(f"real shader dump {path} is absent (out/shader_dump is git-ignored); "
+                                f"run the game with --dump_shaders to produce it")
+    return st.parse(path.read_text(errors="replace"))
+
+
+class RealDumpAlphaTest(unittest.TestCase):
+    def test_7DDAD5C29B3F56EE_alpha_one(self):
+        self.assertEqual(st.trace_ps_alpha(_dump("7DDAD5C29B3F56EE")),
+                         {"source": "one", "slot": None, "component": None, "scale": None})
+
+    def test_7CD57B81550F19E3_unsupported(self):
+        # oC0.w = c15.w x r0.x, and r0.x = c26.w x r6.x (instruction 68, scalar mulsc): not a fetch.
+        r = st.trace_ps_alpha(_dump("7CD57B81550F19E3"))
+        self.assertIsInstance(r, st.Unsupported)
+        self.assertIn("not a texture fetch", r.reason)
+
+    def test_00E09D1BC5295D52_unsupported(self):
+        # Same shape: oC0.w = c15.w x r8.x, and r8.x = c26.w x r0.x (instruction 88).
+        r = st.trace_ps_alpha(_dump("00E09D1BC5295D52"))
+        self.assertIsInstance(r, st.Unsupported)
+        self.assertIn("not a texture fetch", r.reason)
+
+    def test_A17D8AEC3A817D45_kill(self):
+        self.assertEqual(st.find_kills(_dump("A17D8AEC3A817D45")), [{"index": 16, "op": "kill_gt", "pred": True}])
+
+
 if __name__ == "__main__":
     unittest.main()

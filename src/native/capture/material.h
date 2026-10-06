@@ -45,6 +45,21 @@ inline const char* MaterialStatusName(MaterialStatus s) {
   }
 }
 
+// Where the pixel shader's output alpha comes from (ps-albedo.json "alpha"): the literal 1, a
+// component of the albedo fetch, or a component of another 2D fetch at the same UV. scale_ref
+// is the pixel constant component the alpha is multiplied by, register * 4 + component (no
+// bank or negate bit: always a pixel constant), -1 for none.
+enum class AlphaSource : uint8_t { kNone, kOne, kAlbedo, kFetch };
+
+struct AlphaSpec {
+  AlphaSource source = AlphaSource::kNone;
+  uint8_t slot = 0, component = 3;  // texture fetch constant slot; 0-3 = x-w
+  int32_t scale_ref = -1;
+};
+
+// ps-albedo.json "kind": what the shader draws (terrain entries get texture slots later).
+enum class MaterialKind : uint8_t { kPlain, kTerrainLayer, kTerrainFar };
+
 struct Material {
   MaterialStatus status = MaterialStatus::kPsUnknown;
   uint64_t ps_hash = 0;
@@ -52,7 +67,26 @@ struct Material {
   BufferRef uv_vb;         // stream holding the UV element
   UvLayout uv;
   float uv_xform[4] = {1.0f, 1.0f, 0.0f, 0.0f};  // u*x + z, v*y + w
+  AlphaSpec alpha;                               // kNone: no recipe
+  float alpha_scale = 1.0f;                      // the scale constant's value at the draw; 1 without one
+  MaterialKind kind = MaterialKind::kPlain;
 };
+
+// What the pass does with a draw's alpha, from the captured render state and the material:
+// `alpha_test_or_mask` is alpha test or alpha-to-mask on, `colour_known` is that the draw's colour
+// is the shader's own (a textured material), `has_recipe` is alpha.source != kNone.
+enum class AlphaRule : uint8_t {
+  kOpaque,             // neither test nor blend: alpha is ignored
+  kApply,              // apply the test and/or the blend with the recipe's alpha
+  kDrawAlphaUnknown,   // test or blend on without a recipe: drawn without the test / with alpha 1
+  kSkipBlendUnknown    // blended and the colour unknown: not drawn
+};
+
+inline AlphaRule DecideAlpha(bool alpha_test_or_mask, bool blend, bool colour_known, bool has_recipe) {
+  if (!alpha_test_or_mask && !blend) return AlphaRule::kOpaque;
+  if (blend && !colour_known) return AlphaRule::kSkipBlendUnknown;
+  return has_recipe ? AlphaRule::kApply : AlphaRule::kDrawAlphaUnknown;
+}
 
 // Constant reference in a UV transform: (negate << 11) | (bank << 10) | (reg * 4 + comp),
 // bank 0 = vertex constants, 1 = pixel constants; kNoRef = identity.

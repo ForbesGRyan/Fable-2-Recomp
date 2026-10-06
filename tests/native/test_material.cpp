@@ -83,7 +83,42 @@ int main() {
   in.material.uv_xform[0] = 4.0f;
   DrawRecord r = AssembleRecord(in, 7);
   if (r.skip != SkipReason::kNone || r.material.status != MaterialStatus::kTextured || r.material.uv_xform[0] != 4.0f) return 14;
+  // The alpha recipe, its scale and the kind ride along too.
+  in.material.alpha = {AlphaSource::kFetch, 8, 1, Ref(0, 15, 3) & 0x3FF};
+  in.material.alpha_scale = 0.25f;
+  in.material.kind = MaterialKind::kTerrainFar;
+  r = AssembleRecord(in, 7);
+  if (r.material.alpha.source != AlphaSource::kFetch || r.material.alpha.slot != 8 ||
+      r.material.alpha.component != 1 || r.material.alpha.scale_ref != 15 * 4 + 3 ||
+      r.material.alpha_scale != 0.25f || r.material.kind != MaterialKind::kTerrainFar) {
+    return 16;
+  }
   // Default material status is ps-unknown.
   if (Material{}.status != MaterialStatus::kPsUnknown) return 15;
+  {
+    // Defaults: no alpha recipe (scale ref -1, component w), scale 1, plain.
+    const Material d;
+    if (d.alpha.source != AlphaSource::kNone || d.alpha.slot != 0 || d.alpha.component != 3 ||
+        d.alpha.scale_ref != -1 || d.alpha_scale != 1.0f || d.kind != MaterialKind::kPlain) {
+      return 17;
+    }
+  }
+  // DecideAlpha, every input: (test or mask, blend, colour known, has recipe).
+  for (int bits = 0; bits < 16; ++bits) {
+    const bool test = bits & 1, blend = bits & 2, colour = bits & 4, recipe = bits & 8;
+    AlphaRule want;
+    if (!test && !blend) want = AlphaRule::kOpaque;
+    else if (blend && !colour) want = AlphaRule::kSkipBlendUnknown;
+    else if (recipe) want = AlphaRule::kApply;
+    else want = AlphaRule::kDrawAlphaUnknown;
+    if (DecideAlpha(test, blend, colour, recipe) != want) return 100 + bits;
+  }
+  // Spot checks of the named cases, so the loop above cannot mirror a wrong rule.
+  if (DecideAlpha(false, false, false, false) != AlphaRule::kOpaque) return 40;
+  if (DecideAlpha(true, false, false, false) != AlphaRule::kDrawAlphaUnknown) return 41;   // test, no recipe
+  if (DecideAlpha(true, false, false, true) != AlphaRule::kApply) return 42;               // colour unknown only matters for blend
+  if (DecideAlpha(false, true, false, true) != AlphaRule::kSkipBlendUnknown) return 43;
+  if (DecideAlpha(false, true, true, false) != AlphaRule::kDrawAlphaUnknown) return 44;    // blend, colour, no recipe
+  if (DecideAlpha(false, true, true, true) != AlphaRule::kApply) return 45;
   return 0;
 }

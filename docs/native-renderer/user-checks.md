@@ -24,7 +24,7 @@ Spec: `docs/superpowers/specs/2026-10-02-native-renderer-textures-design.md` (su
 ### Other open items
 6. **DebugView with `--d3d12_debug=true`.** Watch for D3D12 debug-layer errors (texture copies for mips smaller than 4 texels are the newest risk).
 
-### Sub-project 5: coverage and skinning
+### Sub-project 5: coverage and skinning (merged 2026-10-06)
 Spec: `docs/superpowers/specs/2026-10-05-native-renderer-coverage-skinning-design.md`. Results go in `docs/native-renderer/frame-map.md` section 12.
 
 7. **Capture containing vertex shader `0x2D40B53C926109BE`** (wind; same layout as `0xA584...`). It was skipped once per frame in `fable_2_135.log` during play outside Bowerstone and is absent from the autoplay bridge scene; where it is drawn is not known. Before launching:

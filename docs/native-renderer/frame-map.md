@@ -1006,6 +1006,127 @@ Screenshots:
 - `0x475E...`: `shader_trace.py` gives `o0.xy` from `vfetch_mini r4.yx__`, offset 3, `FMT_16_16_FLOAT` (instr 13, fetch ordinal 2; `max o0.xy__, r4.xyyy` at instr 98), for the albedo fetch tf0 of `0x00E0...` (which reads `r0.xy` through its `c8` scale and offset stage); added as `"uv"`. No other instruction writes `r4.xy` (instr 24, 26, 35, 36, 87 and 89 write `r4.z` or `r4.w`). The 30 draws per frame are textured with it.
 - `0xA584...`: `0x7CD5...` is no_albedo (its tf0 coordinate is refused: `scalar co-issue mulsc writes component`); the UV leaves the vertex shader in `o1.w` and `o2.w` (instr 148, 153, 154). No entry.
 
+### Instancing
+
+Seven vertex shaders draw many copies of a small mesh (grass, ferns, low plants) in one indexed draw: 135 draws per frame in the bridge scene, 4,039 of the capture's 11,523 in-scene rows. All seven follow one scheme and all seven are in the table (Task 7, 2026-10-05). Two pass the in-clip rule; five are in on the rule's exception path, with the evidence that path asks for.
+
+| Vertex shader | Rows | Distinct draws | Pixel shaders (albedo table) | Moves the position | Bias literal | In-clip share | In-clip verdict | Table |
+|---|---|---|---|---|---|---|---|---|
+| `0x8123C16DBF583F92` | 2354 | 79 | `0xA7E4...`, `0xE99F...` (tf0) | sway | `c254.z` | 0.835 (200 draws) | ACCEPT | entry, deformed, `"uv"` |
+| `0xB636821F95DC9D8E` | 1128 | 38 | `0x165E...`, `0xF525...` (tf0) | sway | `c254.w` | 0.720 (200) | ACCEPT | entry, deformed, `"uv"` |
+| `0x6AD4108C3FF07966` | 247 | 8 | `0x165E...`, `0xF525...` (tf0) | nothing | `c254.z` | 0.705 (200) | REJECT | entry (exception), `"uv"` |
+| `0x48D30ECCF684F488` | 109 | 4 | `0x2605...` (tf0) | sway and push | `c254.z` | 0.229 (109) | REJECT | entry (exception), deformed, `"uv"` |
+| `0xFC4F2EF6930768BE` | 105 | 3 | `0xE99F...`, `0xA7E4...` (tf0) | sway and push | `c254.z` | 0.000 (105) | REJECT | entry (exception), deformed, `"uv"` |
+| `0x33C00226C154C1F2` | 61 | 2 | `0x165E...`, `0xF525...` (tf0) | sway and push | `c254.z` | 0.426 (61) | REJECT | entry (exception), deformed, `"uv"` |
+| `0x36B543CECAE5C781` | 35 | 1 | `0x165E...` (tf0) | push | `c254.w` | 0.000 (35) | REJECT | entry (exception), deformed, `"uv"` |
+
+Every entry is `base 0`, `dot`, `"pos_swizzle": "yxw1"` and `"instance": {"mesh_fetch": 4, "row_fetches": [0, 1, 2], "row_swizzles": ["yxwz", "yxwz", "yxwz"], "inv_count": "c12.x", "count": "c12.y", "first": "c12.z", "bias": 0.5, "offset": "c7.xyz"}`. `position_check.py` on `native_discovery_20261005_103213.jsonl` (baseline 0.810, accept at 0.710 or more) reports `bad-index 0`, `unsupported 0`, `unreadable 0` for all seven; the full lines are in each entry's evidence string.
+
+**The scheme** (`out\shader_dump\shader_<HASH>.ucode.vert`; instruction numbers of `0x8123...`, the other six are in their evidence strings).
+
+- Index (instr 10-13, 18, 19): `t = trunc((index + bias) * c12.x)`, `copy = trunc(c12.z) + t`, `vertex = index + trunc(-(c12.y * t))`. `c12 = (1 / count, count, first copy, 1 / copies drawn)`.
+- Per copy, three half4 rows from stream 1 (slot 94) at `[copy]`, stride 7 dwords, offsets 0, 2, 4 (fetch ordinals 0-2; ordinal 3 is an 8_8_8_8 at offset 6, a colour). Per vertex, a half4 position from stream 0 (slot 95) at `[vertex]`, stride 6 dwords (ordinal 4), and a half4 normal at offset 2 (ordinal 5). `0xB636...`, `0x33C0...` and `0x36B5...` also fetch a half4 tangent at offset 4 (ordinal 6).
+- `r11 = cndeq(c254.xxxy, r0.xzww, c254.yyyy)` (instr 25) is the position with `w = 1`; `r10 = (dp4(r4.zxyw, r11), dp4(r2.yxwz, r11), dp4(r5.wxyz, r11))` (26-28); `r5.xyz = r10.xyz + c7.xyz` (31).
+- Component order. Under 8in32 the GPU's source of a half4 is `(m1, m0, m3, m2)` of the memory order `m` (section 9). The position fetch `r0.wzyx` gives `r0 = (m2, m3, m0, m1)`, so `r11 = (m2, m0, m1, 1)`. The row fetches `r4.yxwz`, `r2.ywzx`, `r5.yxzw` give `(A0, A1, A2, A3)`, `(B0, B2, B3, B1)`, `(C0, C1, C3, C2)` for the stored rows `A`, `B`, `C`. Each `dp4` pairs the components back: `dp4(r2.yxwz, r11) = B2 m2 + B0 m0 + B1 m1 + B3`. So the position before `c7` is `(A.p, B.p, C.p)` with `p = (m0, m1, m2, 1)`: every row read as `yxwz` and the position as `yxw1`. The shaders differ in which rows they fetch in another order (that is why the table overrides all three row swizzles), never in the result. The position's `m3` is a texture coordinate, so the fetch's own `w` must not be used.
+- Distance cut (32, 34-37): when `|c9.xyz - world|^2 > c13.z` the position becomes `c255.xyz`. `c9` is the camera position, as in the wind shaders.
+- Otherwise (38-61) a sway is added: `r2.xyz = r5.xyz + r1.y * sway` (58). `0x48D3...`, `0xFC4F...`, `0x33C0...` and `0x36B5...` then loop over `c[56+a0]..c[59+a0]` and push `xy` away from up to four points (plants bending around characters); `0x36B5...` has the push without the sway and `0x6AD4...` has neither.
+- `r4 = cndeq(c254.xxxy, r2.zxyy, c254.yyyy)` (64), `r0 = dp4(c0..c3 .zxyw, r4) = dp4(c0..c3, (r2.xyz, 1))` (65-68), `oPos = r0` (69).
+
+The spec's reading of the predicate ("an optional sway") was wrong: the sway is the normal path and the predicate is the distance cut.
+
+**Literals.** `c252..c255` are shader literals, zero in the device bank. They were read from each shader object's own constant table, the one `GpuLoadShaders` uploads (`0x82221CB0`, section 8), by a temporary discovery diagnostic (reverted, not committed) in capture `native_discovery_20261005_123635` (6 frames, every draw). The table is at `header + *(header + 0x14 + 8 * variant)`: dword `+0x10` is its size, then from `+0x14` entries of `{u16 first register, u16 dword count, u32 offset}` up to a zero count (`0x82221CD4..0x82221D6C`); the values are big-endian floats at `GpuAddress(object dword 8 + offset)`, uploaded with `LOAD_ALU_CONSTANT`. All seven shaders have one entry, registers 252-255.
+
+| Shader | `c253` | `c254` | `c255` | Bias |
+|---|---|---|---|---|
+| `0x8123...` | (-pi, 2 pi, 1 / (2 pi), 0) | (0, 1, 0.5, 0.1) | (NaN, NaN, NaN, 5) | `c254.z` = 0.5 |
+| `0xB636...` | (-pi, 5, 1 / (2 pi), 0) | (0, 1, 2 pi, 0.5) | (NaN, NaN, NaN, 0.1) | `c254.w` = 0.5 |
+| `0x6AD4...` | 0 | (0, 1, 0.5, 0) | (NaN, NaN, NaN, 0) | `c254.z` = 0.5 |
+| `0x48D3...`, `0xFC4F...` | (-pi, 4, 2 pi, 1 / (2 pi)) | (0, 1, 0.5, 0.1) | (NaN, NaN, NaN, 5) | `c254.z` = 0.5 |
+| `0x33C0...` | (-pi, 4, 1 / (2 pi), 2 pi) | (0, 1, 0.5, 0.1) | (NaN, NaN, NaN, 5) | `c254.z` = 0.5 |
+| `0x36B5...` | 0 | (0, 1, 4, 0.5) | (NaN, NaN, NaN, 0) | `c254.w` = 0.5 |
+
+So the bias is 0.5 in all seven and `c254.xy = (0, 1)`, as the `cndeq` idiom needs. The offline check agrees with 0.5 independently: with bias 0.0, 24 of the 200 sampled `0xB636...` draws and 105 of the 200 `0x6AD4...` draws become `bad-index` (an index maps outside its copy; their 86 to 692 vertices per copy have no exact reciprocal), with 0.5 none. No sampled draw hits the bounds rule with 0.5: the largest index of any draw is 6,839. The same dump gives literals other sections left open: `c255 = (1, 0.3, 0.01, 0)` for `0x7C57...`, and `c255 = (0, 1, 0.5, 0)` for `0x79EA...`, `0xA1F7...` and `0xD4D5...`. Section 9 quotes `(0, 1, 3, 2)` for `0x79EA...` from the `[vtess]` register log; the two agree in the `x` and `y` that shader uses, and the difference in `z` and `w` was not looked into.
+
+**Not modelled: the distance cut.** `c255.xyz` is NaN, so a vertex farther than `sqrt(c13.z)` from the camera gets a NaN position and its triangles are dropped (the terrain shaders cut holes the same way, section 9). `c13.z` is set per draw: 26.6 to 66.3 units in this capture. The game submits whole batches and lets the shader cut them. Over the 135 distinct draws (257,804 flat positions per frame) 123,396 positions, 48%, are past their draw's distance, and 40 of the draws lie wholly past it (rows: 37% of `0x8123...`, 18% of `0xB636...`, 48% of `0x6AD4...`; none of the four near-field shaders). The table has no field for it, so the clay view draws those vertices: plants out to 60 to 88 units where the game stops at 27 to 66. A projection of the replayed positions over a view-off screenshot puts the kept vertices on the grass band left of the bridge, on the ground under it and on the near right bank, and the cut ones on the far bank behind the right-hand fence, where the emulated frame shows ground and a few bushes but no plant cards. The cut depends on the camera, so on the CPU it would rebuild every flat buffer whenever the camera moves; the cheap place is the clay vertex shader, with the camera and the squared distance as two per-draw constants named by the entry. That is a table and renderer change of its own and is not part of this task.
+
+**Near and far shaders.** The four shaders with the push are used for the copies nearest the camera, the three others for the rest, out of the same streams. `0xFC4F...` draws copies 0-35, 0-31 and 14-23 of three instance streams whose later copies `0x8123...` draws with the same mesh streams in the same frame (first copy 72, 108, 156; 32, 64; 24). `0x33C0...` pairs with `0xB636...` the same way and `0x36B5...` with `0x6AD4...`; the four meshes of `0x48D3...` are also drawn by `0x8123...`. Every vertex of the four near-field shaders is 5.6 to 18.5 units from the camera, which stands on a bridge above that ground. That is why their in-clip shares are low.
+
+**Why the shares are low, and what settles each question.**
+
+- The matrix. `c0..c3` of every instanced row equals the view-projection of `0xECD6...` in the same frame (its `c0..c3` times `inverse(c4..c6)`, per-frame median) within 5.1e-06 (`0x8123...`, `0xB636...`, `0x6AD4...`, `0x48D3...`, `0x33C0...`) and 3.8e-06 (`0xFC4F...`, `0x36B5...`), in all 4,039 rows. So the rows and `c7` produce world positions and `c0..c3` is base 0, dot. A wrong offset register is caught by the share: `c14.xyz` instead of `c7.xyz` gives 0.000 for all seven.
+- Where the failing draws are (the checker's own sample, first 512 indices of each draw):
+
+  | Shader | Failing | Mostly behind the camera | Wholly below the view | Wholly beside the view | Across an edge |
+  |---|---|---|---|---|---|
+  | `0x8123...` | 33 of 200 | 0 | 16 | 5 | 12 |
+  | `0xB636...` | 56 of 200 | 0 | 20 | 27 | 9 |
+  | `0x6AD4...` | 59 of 200 | 0 | 0 | 26 | 33 |
+  | `0x48D3...` | 84 of 109 | 32 | 26 | 26 | 0 |
+  | `0xFC4F...` | 105 of 105 | 35 | 0 | 35 | 35 |
+  | `0x33C0...` | 35 of 61 | 0 | 35 | 0 | 0 |
+  | `0x36B5...` | 35 of 35 | 35 | 0 | 0 | 0 |
+
+  No failing draw has a NaN or a vertex past the far plane. The near-field rows are few draws repeated every frame: three for `0xFC4F...`, two for `0x33C0...`, one for `0x36B5...`.
+- The share also counts draws the game does not show. Of the sampled draws, 84 (`0x8123...`), 65 (`0xB636...`) and 98 (`0x6AD4...`) have every sampled vertex past the distance cut. Without them the shares are 92 of 116 (0.793), 93 of 135 (0.689) and 43 of 102 (0.422).
+- The component order. The share does not settle it: the rows hold small offsets inside a batch (the batch origin is `c7`), so a wrong order moves a mesh by a few units and often keeps it on screen.
+
+  | Control (`--entry`, 200 draws) | `0x8123...` | `0xB636...` | `0x6AD4...` |
+  |---|---|---|---|
+  | candidate | 0.835 | 0.720 | 0.705 |
+  | row fetches `[1, 0, 2]` | 0.690 | 0.580 | 1.000 |
+  | row fetches `[0, 2, 1]` | 0.840 | 0.670 | 0.705 |
+  | row swizzles `yxzw` (z and w swapped) | 0.755 | 0.665 | 0.870 |
+  | the row fetches' own swizzles | 0.890 | 0.730 | 0.760 |
+  | the position fetch's own swizzle | 0.740 | 0.590 | 0.870 |
+  | `pos_swizzle` `xyw1` | 0.835 | 0.720 | 0.870 |
+  | offset `c14.xyz` | 0.000 | 0.000 | 0.000 |
+  | bias 0.0 | 0.835 | 24 bad-index | 105 bad-index |
+  | bias 1.0 | 200 bad-index | 187 bad-index | 175 bad-index |
+
+  What settles it is the dump reading, and two checks that do not use it, run on every distinct draw of the capture:
+
+  | Shader | Copies | Largest cosine between two rows, `yxwz` | Row lengths, max / min | Determinant | Mesh z on world z, median | Largest cosine, the fetches' own swizzles (median) | Face normals against stored normals, `yxw1` | Best other order |
+  |---|---|---|---|---|---|---|---|---|
+  | `0x8123...` | 2129 | 0.0007 | 1.0009 | +1.000 | 1.000 | 0.905 | 0.988 (1317 triangles, 7 meshes) | 0.493 |
+  | `0xB636...` | 218 | 0.0005 | 1.0009 | +1.000 | 0.982 | 0.919 | 0.965 (2476, 9) | 0.682 |
+  | `0x6AD4...` | 33 | 0.0003 | 1.0007 | +1.000 | 0.962 | 0.979 | 0.966 (873, 3) | 0.629 |
+  | `0x48D3...` | 112 | 0.0003 | 1.0008 | +1.000 | 0.999 | 0.901 | 0.999 (671, 4) | 0.468 |
+  | `0xFC4F...` | 78 | 0.0002 | 1.0007 | +1.000 | 1.000 | 0.900 | 0.988 (634, 3) | 0.684 |
+  | `0x33C0...` | 23 | 0.0003 | 1.0006 | +1.000 | 0.984 | 0.806 | 0.962 (598, 2) | 0.661 |
+  | `0x36B5...` | 5 | 0.0004 | 1.0004 | +1.000 | 0.942 | as fetched | 0.937 (361, 1) | 0.621 |
+
+  Read as `yxwz`, the three rows of every copy are a rotation with one scale (0.6 to 11.7) that keeps the mesh upright: the mesh's z axis, the one the shaders weight the sway by, lands on world z. A swapped pair of rows would give determinant -1 and a rotated order would tip the plants over. The face-normal figure is the mean |cos| between the triangle normals of the mesh positions and the stored vertex normals (fetch ordinal 5, read `yxwz`), for the candidate and the five other orders of x, y, z.
+- On screen: the native-view screenshot below.
+
+**UV.** `shader_trace.py` refuses all seven (`control flow before export: jmp`), so the entries are hand traces of both predicate branches, recorded per shader in `uv_evidence`. In each, `o0.x` is source z of the mesh position fetch (ordinal 4, format 32, offset 0) and `o0.y` is source z of the normal fetch (ordinal 5, format 32, offset 2): the texture coordinate rides in the fourth halves of the position and of the normal. Over the capture's 19 distinct mesh dumps u runs from -0.001 to 1.016 and v from -0.001 to 1.006 (a grass card: (0, 1), (0.312, 0), (0.624, 1)); the tangent's fourth half is +1 or -1. The five pixel shaders were already in the albedo table (tf0 through `c8`).
+
+The runtime could not read this: `ResolveUvFetch` required one vertex fetch for both axes and `UvLayout` described one element, so the 135 draws came out `uv-unsupported` (flat clay; `fable_2_165.log`). `UvLayout` now carries `v_element_delta`, the byte step from the element holding u to the one holding v, and `UvLayoutFromFetches` accepts two fetches of one stream with the same stride and element format (`uv_decode.h`, `material.h`; `clay_logic.h` adds the step to the UV cache key and counts vertices by the later element). Two fetches of different streams or formats are still `uv-unsupported`. Tests: `test_uv_decode.cpp` 19-36 (real grass vertices), `test_material.cpp` 30-33, `test_clay_logic.cpp` 127-129, `test_instance_expand.cpp` 65-68.
+
+**Regression case.** `test_instance_expand.cpp` `RealDraw` (50-68): a `0x8123...` draw of the capture (12 vertices per copy, copies 32 and 33 rebased to 0 and 1, `c12.x` = 0.0833333358), printed by `position_check.py`'s `cpp_fixture()` for that draw. The CLI's `--cpp-fixture` picks the first passing draw of the sample, a 190-vertex mesh that stays inside copy 0; this one crosses a copy boundary with an inexact reciprocal in 344 bytes. The test selects the rows and the position with the generated table's arguments, expands 16 indices and compares with the checker's positions within 1e-3, and checks that the rows' own swizzles give other positions.
+
+**Measured.** `.\tools\drive_game.ps1 -Total 120 -Shots "70,95" -GameArgs "--fable2_native_render=true","--fable2_native_view=<view>"`: before `fable_2_164.log` (split); entries without `"uv"` `fable_2_165.log` (native); final `fable_2_166.log` (native), `fable_2_167.log` (split) and `fable_2_168.log` (native).
+
+```
+before   [native] capture: frame 2700 captured 987 drawable 816 (deformed 96) skipped {no-transform: 13, unsupported-prim: 30, bad-index: 128} nested_total 0 | ... | textured 188 untextured by reason {terrain: 567, no-albedo: 61}
+no uv    [native] capture: frame 2700 captured 987 drawable 951 (deformed 223) skipped {no-transform: 6, unsupported-prim: 30} nested_total 0 | ... | textured 188 untextured by reason {terrain: 567, no-albedo: 61, uv-unsupported: 135}
+final    [native] capture: frame 2700 captured 987 drawable 951 (deformed 223) skipped {no-transform: 6, unsupported-prim: 30} nested_total 0 | ... | textured 323 untextured by reason {terrain: 567, no-albedo: 61}
+final    [native] capture: frame 2700 no-transform by vs {0x29B6506FBACEB93A: 5, 0x775C6085FBB9D676: 1}
+final    [native] capture: frame 2700 drawable by vs {0xC30A97D946FA2BE4(terrain): 340, 0xFB68A7F2301210E1(terrain): 152, 0xECD66A10092E6562: 122, 0x5003700B7C9B1C16(terrain): 75, 0x8123C16DBF583F92(instanced): 73, 0xB636821F95DC9D8E(instanced): 38, 0x475EC9F795E5EDBB(deformed): 30, 0xD4D558DA6A82BDC8(deformed): 29, 0xBEAD84BD72072E0E: 24, 0xA5846836C90E1192(deformed): 22}
+final    [native] clay: drawn 951 (deformed 223) of 951 drawable, skipped_bad_index 0 other 0 | textured 323 of 951 | 2 uploads, 2223 hits, 24.4 MB resident, instanced 135, skinned 3 | hash 0.65 ms, decode 0.03 ms, record 0.24 ms (max total 1.94 ms over 300)
+```
+
+D / C goes from 816 / 987 = 0.827 to 951 / 987 = 0.964. The 128 `bad-index` draws and 7 of the 13 `no-transform` draws were the instanced ones: 135 per frame, none `bad-index` or `instance-unsupported` in any of the four runs with the entries. 127 of them count as deformed (223 against 96); the 8 of `0x6AD4...` do not. Textured goes from 188 to 323, 84% of the non-terrain draws. What is still skipped is the two billboard shaders (6) and the unmapped draw builders (30).
+
+Cost: 30.0 fps in every 300-frame window after the world is up, in all four runs with the entries. Clay pass in the steady state: hash 0.39 to 0.68 ms (0.34 to 0.49 before; two more streams are hashed per instanced draw), decode 0.02 to 0.04 ms (0.02 to 0.03), slowest frame of a window 1.8 to 2.2 ms (1.4 to 1.6). Each of the three final runs also has one frame of 4.8 to 5.5 ms in the window that ends at scene frame 3016 (about 100 s); the run before and the run without `"uv"` do not. Its cause was not found. The frame that first builds the scene takes 246 to 306 ms against 177 ms before: the 135 flat streams (257,804 positions, and as many UVs) are built once. Geometry resident 22.4 to 24.4 MB (16.9). Capture median 1.15 ms (1.11); guest work median 7.5 to 8.0 ms (7.4 to 7.5). The autoplay camera does not move. In play the engine re-sorts the copies by distance, which changes the instance streams and `c12.z` and rebuilds flat streams; that cost was not measured (`user-checks.md` check 9).
+
+Screenshots (window shots, native view at 95 s, against the view-off shot of the same autoplay scene):
+
+- **Left of the bridge.** The ferns stand where the emulated frame has them, between the fence posts beside the big trunk, with the fronds' outline and texture. The band of grass along the edge of the path runs under the same posts, from the trunk to the bridge post, at the height of the emulated band. Grass also shows through the gaps between the bridge planks, where the kept vertices project.
+- **Right bank.** A row of leafy cards runs behind the right-hand fence. The emulated frame has bushes at its right end and beside the fence post; in between it shows bare grass ground. Part of the row is plants past the distance cut.
+- Every card is an opaque rectangle with the texture's black cut-out background: the clay pass has no alpha test. The plants stand still (no sway, no push).
+- Before the UV change the same meshes were pale clay on pale clay ground and could hardly be told apart from the terrain (`fable_2_165.log` run).
+- **Split, 70 s and 95 s.** The clay half is the right half: it shows the right-bank row and the grass under the planks; the ferns and the grass band are in the emulated half.
+
 ## Pending
 
 1. **Pitch ablation** (done 2026-10-01, results in section 4; kept for re-runs). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):

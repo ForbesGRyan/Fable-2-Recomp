@@ -46,6 +46,9 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 // Clay pass (native scene, render/clay_pass.cpp): vertex pulling from StructuredBuffers
 // (float4 positions, uint32 triangle-list indices, float2 UVs), transformed by the
 // draw's captured rows; flat shading from screen-space derivatives. Textured
+// A vertex farther from `cut.xyz` than sqrt(cut.w) gets a NaN position, which
+// drops every triangle it belongs to, as the game's instancing shaders do
+// (DrawRecord::cut); cut.w is +inf for every other draw. Textured
 // draws (kClayTexturedPs) sample the albedo at t3 with static sampler
 // s<sampler_index> (bit 0 linear, bit 1 clamp) and keep a softened facet shade.
 inline constexpr const char* kClayVs = R"hlsl(
@@ -59,6 +62,7 @@ cbuffer Draw : register(b0) {
   uint textured;      // 1: uvs holds this draw's UVs
   uint sampler_index;
   uint2 pad;
+  float4 cut;         // eye xyz, squared distance (+inf: no cut)
 };
 StructuredBuffer<float4> positions : register(t0);
 StructuredBuffer<uint> indices : register(t1);
@@ -71,6 +75,8 @@ VsOut main(uint vid : SV_VertexID) {
   float4 p = in_range ? positions[v] : float4(0, 0, 0, 0);
   float4 c = layout == 0 ? float4(dot(r0, p), dot(r1, p), dot(r2, p), dot(r3, p))
                          : p.x * r0 + p.y * r1 + p.z * r2 + p.w * r3;
+  float3 to_eye = cut.xyz - p.xyz;
+  if (dot(to_eye, to_eye) > cut.w) c = asfloat(uint4(0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000));
   o.pos = c;
   o.ndc = float3(c.xy / max(abs(c.w), 1e-6), c.w * 0.01);
   o.uv = float2(0, 0);
@@ -91,7 +97,8 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0) : SV_Target {
 
 inline constexpr const char* kClayTexturedPs = R"hlsl(
 cbuffer Draw : register(b0) { float4 r0; float4 r1; float4 r2; float4 r3; uint layout; int base_vertex;
-                              uint vertex_count; uint color; float4 uv_xform; uint textured; uint sampler_index; uint2 pad; };
+                              uint vertex_count; uint color; float4 uv_xform; uint textured; uint sampler_index; uint2 pad;
+                              float4 cut; };
 Texture2D albedo : register(t3);
 SamplerState s_point_wrap : register(s0);
 SamplerState s_linear_wrap : register(s1);

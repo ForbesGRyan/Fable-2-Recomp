@@ -40,13 +40,16 @@ struct InstanceSet {
 // index in DecodeVertexFetches order, a destination swizzle override per row
 // (0 = the fetch's own), vertex-constant references as register * 4 +
 // component, the shader's literal rounding bias, and the offset's x reference
-// (y and z follow).
+// (y and z follow). "cut" (optional, -1 without): the x reference of the eye
+// position and the reference of the squared distance past which the shader
+// drops a vertex (draw_record.h DrawRecord::cut).
 struct InstanceSpec {
   int row_fetch[3];
   uint32_t row_swizzle[3];
   int32_t inv_count_ref, count_ref, first_ref;
   float bias;
   int32_t offset_ref;
+  int32_t cut_eye_ref = -1, cut_dist2_ref = -1;
 };
 
 // The three rows must be position-format fetches of one stream that is not

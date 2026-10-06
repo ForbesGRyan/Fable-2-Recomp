@@ -273,7 +273,7 @@ static constexpr TableEntry kTransformTable[] = {
 #define FABLE2_VS_TRANSFORM(H, B, L, P, D) {H, B, L, P, D},
 #define FABLE2_VS_POS_SWIZZLE(H, S)
 #define FABLE2_VS_SKIN(H, I, W, R0, R1, R2, S0, S1, S2, N, IC0, WC0, IC1, WC1, IC2, WC2, IC3, WC3)
-#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF)
+#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF, CE, CD)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
 #include "vs_transform_table.inc"
@@ -293,7 +293,7 @@ static constexpr PosSwizzleEntry kPosSwizzleTable[] = {
 #define FABLE2_VS_TRANSFORM(H, B, L, P, D)
 #define FABLE2_VS_POS_SWIZZLE(H, S) {H, S},
 #define FABLE2_VS_SKIN(H, I, W, R0, R1, R2, S0, S1, S2, N, IC0, WC0, IC1, WC1, IC2, WC2, IC3, WC3)
-#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF)
+#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF, CE, CD)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
 #include "vs_transform_table.inc"
@@ -314,7 +314,7 @@ static constexpr SkinEntry kSkinTable[] = {
 #define FABLE2_VS_POS_SWIZZLE(H, S)
 #define FABLE2_VS_SKIN(H, I, W, R0, R1, R2, S0, S1, S2, N, IC0, WC0, IC1, WC1, IC2, WC2, IC3, WC3) \
   {H, {I, W, {R0, R1, R2}, {S0, S1, S2}, N, {IC0, IC1, IC2, IC3}, {WC0, WC1, WC2, WC3}}},
-#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF)
+#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF, CE, CD)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
 #include "vs_transform_table.inc"
@@ -334,8 +334,8 @@ static constexpr InstanceEntry kInstanceTable[] = {
 #define FABLE2_VS_TRANSFORM(H, B, L, P, D)
 #define FABLE2_VS_POS_SWIZZLE(H, S)
 #define FABLE2_VS_SKIN(H, I, W, R0, R1, R2, S0, S1, S2, N, IC0, WC0, IC1, WC1, IC2, WC2, IC3, WC3)
-#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF) \
-  {H, {{R0, R1, R2}, {S0, S1, S2}, INV, CNT, FIRST, BIAS, OFF}},
+#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF, CE, CD) \
+  {H, {{R0, R1, R2}, {S0, S1, S2}, INV, CNT, FIRST, BIAS, OFF, CE, CD}},
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
 #include "vs_transform_table.inc"
@@ -345,7 +345,7 @@ static constexpr InstanceEntry kInstanceTable[] = {
 #undef FABLE2_VS_INSTANCE
 #undef FABLE2_VS_TERRAIN
 #undef FABLE2_VS_UV
-    {0, {{-1, -1, -1}, {0, 0, 0}, 0, 0, 0, 0.0f, 0}}};
+    {0, {{-1, -1, -1}, {0, 0, 0}, 0, 0, 0, 0.0f, 0, -1, -1}}};
 
 struct TerrainEntry {
   uint64_t hash;
@@ -355,7 +355,7 @@ static constexpr TerrainEntry kTerrainTable[] = {
 #define FABLE2_VS_TRANSFORM(H, B, L, P, D)
 #define FABLE2_VS_POS_SWIZZLE(H, S)
 #define FABLE2_VS_SKIN(H, I, W, R0, R1, R2, S0, S1, S2, N, IC0, WC0, IC1, WC1, IC2, WC2, IC3, WC3)
-#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF)
+#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF, CE, CD)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F) {H, {G, CE, HS, O, TO, TS, PO, F}},
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
 #include "vs_transform_table.inc"
@@ -383,7 +383,7 @@ const std::vector<VsUvSpec> kVsUvTable = {
 #define FABLE2_VS_TRANSFORM(H, B, L, P, D)
 #define FABLE2_VS_POS_SWIZZLE(H, S)
 #define FABLE2_VS_SKIN(H, I, W, R0, R1, R2, S0, S1, S2, N, IC0, WC0, IC1, WC1, IC2, WC2, IC3, WC3)
-#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF)
+#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF, CE, CD)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1) \
   {H, I, C, int8_t(F), S, FM, O, {{S0, O0}, {S1, O1}}},
@@ -1561,7 +1561,9 @@ struct DrawShaders {
 // behind the rows' fetch slot, the constants the entry names (through t_bank)
 // and the range check on the draw's largest index (`scan`); `vertices` is
 // what the mesh stream holds. in.instances becomes active only when all of it
-// holds. Returns why not: instance-unsupported when the instance stream does
+// holds; the entry's distance cut constants (eye, squared distance) go to
+// in.cut as read (AssembleRecord sanitizes them). Returns why not:
+// instance-unsupported when the instance stream does
 // not resolve or a constant reference is not a vertex constant (kNone when
 // the rows do not match the shader's fetches: AssembleRecord gives the same
 // reason for any unbuilt set), bad-index for garbage constants or indices,
@@ -1602,6 +1604,20 @@ SkipReason FillInstanceSet(uint32_t device, const DeviceSnapshot& dev, const VsI
   if (const SkipReason why = InstanceRangeSkip(&set, scan.max_index, in.base_vertex, vertices);
       why != SkipReason::kNone) {
     return why;
+  }
+  // The distance cut ("cut": both references or neither): the eye's x
+  // reference (y and z follow) and the squared distance.
+  if (spec.cut_eye_ref >= 0 || spec.cut_dist2_ref >= 0) {
+    if (spec.cut_eye_ref < 0 || spec.cut_eye_ref > 1021 || spec.cut_dist2_ref < 0 ||
+        spec.cut_dist2_ref >= 1024) {
+      return SkipReason::kInstanceUnsupported;
+    }
+    const uint32_t eye_reg = uint32_t(spec.cut_eye_ref) / 4;
+    const uint32_t last_reg = uint32_t(spec.cut_eye_ref + 2) / 4;
+    if (!ReadBankRegisters(device, eye_reg, last_reg - eye_reg + 1)) return SkipReason::kBadMemory;
+    for (int k = 0; k < 3; ++k) in.cut[k] = t_bank[spec.cut_eye_ref + k];
+    if (!ReadBankRegisters(device, uint32_t(spec.cut_dist2_ref) / 4, 1)) return SkipReason::kBadMemory;
+    in.cut[3] = t_bank[spec.cut_dist2_ref];
   }
   in.instances = set;
   return SkipReason::kNone;

@@ -169,6 +169,63 @@ class InstanceTest(Base):
                               "first": "c12.z", "bias": 0.5, "offset": "c7.xyz"}}
         return row, entry
 
+    def cut_draw(self, eye, dist2, idx, cut=True):
+        """Positions x = 0.6, 0.85 (copy 0) and 1.1, 1.35 (copy 1): the first two are inside the clip volume."""
+        row, entry = self.instanced([0.5, 2.0, 0.0, 0.0], idx)
+        row["vconst"][7 * 4] = 0.6                                          # c7.x
+        row["vconst"][9 * 4:9 * 4 + 3] = eye                                # c9.xyz
+        row["vconst"][13 * 4 + 2] = dist2                                   # c13.z
+        if cut:
+            entry["instance"]["cut"] = {"eye": "c9.xyz", "dist2": "c13.z"}
+        return row, entry, pc.check(self.capture([row]), {"0xBBBB": entry})["0xBBBB"]
+
+    def test_distance_cut_scores_the_vertices_kept(self):
+        idx = [0, 2, 3, 2, 3]                                                # one vertex inside, four outside
+        row, entry, r = self.cut_draw([0.5, 0.0, 0.0], 0.25, idx, cut=False)
+        self.assertEqual((r["draws"], r["passed"]), (1, 0))
+        self.assertNotIn("cut", r)
+        # Eye at x = 0.5, radius 0.5: 0.6 is kept, 1.1 and 1.35 are cut.
+        row, entry, r = self.cut_draw([0.5, 0.0, 0.0], 0.25, idx)
+        self.assertEqual((r["draws"], r["passed"], r["cut"]), (1, 1, 0))
+        self.assertEqual((r["kept_vertices"], r["sampled_vertices"]), (1, 5))
+        # The flat positions themselves are not changed: the cut is the vertex shader's.
+        self.assertAlmostEqual(pc.positions_for(row, entry, self.dir)[1][0], 1.1, places=5)
+        # A kept vertex outside the clip volume still counts against the draw.
+        row, entry, r = self.cut_draw([1.0, 0.0, 0.0], 0.0625, [0, 2, 2])    # keeps 1.1 only (twice)
+        self.assertEqual((r["draws"], r["passed"], r["kept_vertices"], r["sampled_vertices"]), (1, 0, 2, 3))
+
+    def test_distance_cut_is_strict_and_in_float32(self):
+        # x = 0.85 is the float32 nearest 0.6f + 0.25f; from eye 0.35 that is 0.5 away up to rounding.
+        x = pc.f32(pc.f32(0.25) + pc.f32(0.6))
+        d = pc.f32(pc.f32(0.35) - x)
+        d2 = pc.f32(d * d)
+        row, entry, r = self.cut_draw([0.35, 0.0, 0.0], d2, [1])
+        self.assertEqual((r["draws"], r["cut"], r["kept_vertices"]), (1, 0, 1))  # equal: kept
+        below = struct.unpack("<f", struct.pack("<I", struct.unpack("<I", struct.pack("<f", d2))[0] - 1))[0]
+        row, entry, r = self.cut_draw([0.35, 0.0, 0.0], below, [1])
+        self.assertEqual((r["draws"], r["cut"]), (0, 1))                          # one ulp less: cut
+
+    def test_draw_wholly_past_the_cut_leaves_the_share(self):
+        row, entry, r = self.cut_draw([50.0, 0.0, 0.0], 1.0, [0, 1, 2, 3])
+        self.assertEqual((r["draws"], r["passed"], r["cut"], r["bad_index"]), (0, 0, 1, 0))
+        self.assertEqual((r["kept_vertices"], r["sampled_vertices"]), (0, 4))
+        self.assertFalse(pc.accepted(dict(r, share=0.0), 0.5))
+        line = pc.format_line("0xBBBB", r, 0.71)
+        self.assertIn("cut 1", line)
+        self.assertIn("kept vertices 0 of 4", line)
+
+    def test_garbage_cut_constants_cut_nothing(self):
+        for eye, dist2 in (([0.5, 0.0, 0.0], float("nan")), ([0.5, 0.0, 0.0], -1.0), ([0.5, 0.0, 0.0], float("inf")),
+                           ([float("nan"), 0.0, 0.0], 0.25), ([float("inf"), 0.0, 0.0], 0.25)):
+            row, entry, r = self.cut_draw(eye, dist2, [0, 1, 2, 3])
+            self.assertEqual((r["draws"], r["cut"], r["kept_vertices"]), (1, 0, 4), (eye, dist2))
+
+    def test_malformed_cut_is_an_entry_error(self):
+        row, entry = self.instanced([0.5, 2.0, 0.0, 0.0], [0, 1])
+        entry["instance"]["cut"] = {"eye": "c9.xy", "dist2": "c13.z"}
+        r = pc.check(self.capture([row]), {"0xBBBB": entry})["0xBBBB"]
+        self.assertEqual(r["kind"], "error")
+
     def test_garbage_instance_constants_are_bad_index(self):
         for c12 in ([0.0, 0.0, 0.0, 0.0], [0.5, 3.0, 0.0, 0.0], [math.nan, 2.0, 0.0, 0.0], [0.5, 2.0, 70000.0, 0.0]):
             row, entry = self.instanced(c12, [0, 1, 2, 3])

@@ -87,7 +87,26 @@ class GenTransformTableTest(unittest.TestCase):
                                                     "offset": "c7.xyz"}}}
         out = gtt.generate(data).splitlines()
         self.assertIn("FABLE2_VS_TRANSFORM(0x8123C16DBF583F92ull, 0, 0, 4, 0)", out)
-        self.assertIn("FABLE2_VS_INSTANCE(0x8123C16DBF583F92ull, 0, 1, 2, 0x0, 0x0, 0x0, 48, 49, 50, 0.5f, 28)", out)
+        self.assertIn("FABLE2_VS_INSTANCE(0x8123C16DBF583F92ull, 0, 1, 2, 0x0, 0x0, 0x0, 48, 49, 50, 0.5f, 28, -1, -1)",
+                      out)
+
+    def test_instance_cut(self):
+        inst = {"mesh_fetch": 4, "row_fetches": [0, 1, 2], "inv_count": "c12.x", "count": "c12.y", "first": "c12.z",
+                "bias": 0.5, "offset": "c7.xyz"}
+
+        def lines(cut):
+            return gtt.generate({"0x1": {"base": 0, "layout": "dot", "instance": dict(inst, cut=cut)}}).splitlines()
+
+        # eye c9.xyz -> 9 * 4, squared distance c13.z -> 13 * 4 + 2
+        self.assertIn("FABLE2_VS_INSTANCE(0x1ull, 0, 1, 2, 0x0, 0x0, 0x0, 48, 49, 50, 0.5f, 28, 36, 54)",
+                      lines({"eye": "c9.xyz", "dist2": "c13.z"}))
+        for bad in ({"eye": "c9.xyz"}, {"dist2": "c13.z"}, {"eye": "c9.xy", "dist2": "c13.z"},
+                    {"eye": "c9.yzw", "dist2": "c13.z"}, {"eye": "c9.xyz", "dist2": "c13.zw"},
+                    {"eye": "c9.xyz", "dist2": "r13.z"}, {"eye": "c9.xyz", "dist2": 1062.4},
+                    {"eye": "c256.xyz", "dist2": "c13.z"}, {"eye": "c9.xyz", "dist2": "c13.z", "near": "c13.w"},
+                    "c9.xyz", []):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                lines(bad)
 
     def test_instance_rejects_conflicts(self):
         base = {"base": 0, "layout": "dot",

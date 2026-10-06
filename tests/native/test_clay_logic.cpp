@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <string>
 
 using namespace fable2::native;
@@ -148,9 +149,41 @@ int main() {
     CHECK(38, !IndexRangeValid(0xFFFFFFFFu, 0x7FFFFFFF, 0xFFFFFFFFu));
     CHECK(39, !IndexRangeValid(0, 0, 0));
   }
-  // 40-43, 80-82: root constants match the HLSL cbuffer (28 dwords).
+  // 40-43, 80-82, 130-133: root constants match the HLSL cbuffer (32 dwords).
   {
-    static_assert(sizeof(ClayConstants) == 112);
+    static_assert(sizeof(ClayConstants) == 128);
+    {
+      const float inf = std::numeric_limits<float>::infinity();
+      const float one[4] = {1.0f, 1.0f, 0.0f, 0.0f};
+      capture::DrawRecord plain = BaseRecord();
+      const ClayConstants p = MakeClayConstants(plain, 10, 0, one, false, 0);
+      // 130: a record without a cut never cuts: the squared distance is +inf.
+      CHECK(130, plain.cut[3] == inf && p.cut[3] == inf && !(1e30f > p.cut[3]));
+      capture::DrawRecord cut = BaseRecord();
+      cut.cut[0] = 82.0f; cut.cut[1] = 157.25f; cut.cut[2] = 50.0f; cut.cut[3] = 1062.5f;
+      const ClayConstants c = MakeClayConstants(cut, 10, 0, one, false, 0);
+      uint32_t dw[32];
+      std::memcpy(dw, &c, sizeof(dw));
+      float f[4];
+      std::memcpy(f, &dw[28], sizeof(f));
+      // 131: the cut is the last float4 of the cbuffer.
+      CHECK(131, f[0] == 82.0f && f[1] == 157.25f && f[2] == 50.0f && f[3] == 1062.5f);
+      // 132, 133: the camera moving must not rebuild anything: no cache key
+      // (and so no content hash, which follows the keyed streams) takes it.
+      capture::DrawRecord a = BaseRecord();
+      a.material.uv_vb = a.vb;
+      a.material.uv.format = capture::UvFormat::kHalf2;
+      a.material.uv.stride_bytes = 16;
+      a.instances.active = true;
+      a.instances.rows_addr = 0x7000;
+      a.instances.rows_size = 28 * 40;
+      a.instances.flat_count = 64;
+      capture::DrawRecord b = a;
+      b.cut[0] = 82.0f; b.cut[1] = 157.25f; b.cut[2] = 50.0f; b.cut[3] = 1062.5f;
+      CHECK(132, PositionKey(a) == PositionKey(b) && UvKey(a) == UvKey(b) && IndexKey(a) == IndexKey(b));
+      CHECK(133, MeshPositionKey(a) == MeshPositionKey(b) && MeshUvKey(a) == MeshUvKey(b) &&
+                     InstanceHash(a.instances) == InstanceHash(b.instances));
+    }
     capture::DrawRecord r = BaseRecord();
     r.layout = capture::TransformLayout::kCombine;
     r.base_vertex = -3;

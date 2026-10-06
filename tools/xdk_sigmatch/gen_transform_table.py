@@ -9,10 +9,14 @@ and, when the entry has them (frame-map section 9):
       weighted: "skin": {"index_fetch": 1, "weight_fetch": 2, "row_fetches": [3, 4, 5],
                          "row_swizzles": [...] (optional), "pairs": [["x", "z"], ...]}  (1 to 4 index/weight pairs)
       Row swizzles are vfetch swizzle bits in hex (0x0 = keep); unused pairs are 0; weight_fetch -1 = rigid.
-  FABLE2_VS_INSTANCE(hash, r0, r1, r2, s0, s1, s2, inv_count_ref, count_ref, first_ref, bias, offset_ref)
+  FABLE2_VS_INSTANCE(hash, r0, r1, r2, s0, s1, s2, inv_count_ref, count_ref, first_ref, bias, offset_ref,
+                     cut_eye_ref, cut_dist2_ref)
       "instance": {"mesh_fetch": 4, "row_fetches": [0, 1, 2], "row_swizzles": [...] (optional),
-                   "inv_count": "c12.x", "count": "c12.y", "first": "c12.z", "bias": 0.5, "offset": "c7.xyz"}
-      mesh_fetch becomes the transform line's pos_fetch; refs are register * 4 + component.
+                   "inv_count": "c12.x", "count": "c12.y", "first": "c12.z", "bias": 0.5, "offset": "c7.xyz",
+                   "cut": {"eye": "c9.xyz", "dist2": "c13.z"} (optional)}
+      mesh_fetch becomes the transform line's pos_fetch; refs are register * 4 + component (the offset's and
+      the eye's x). "cut": the shader drops a vertex whose squared distance from `eye` is above `dist2`
+      (frame-map section 12); -1, -1 without it.
   FABLE2_VS_TERRAIN(hash, grid, cell, height_scale, origin, tex_offset, tex_scale,
                     patch_offset, height_fetch)
       "terrain": {"grid": "c11.xy", ..., "patch_offset": null | "c113.x", "height_fetch": 16}
@@ -81,6 +85,19 @@ def _skin_line(vs, s):
     return f"FABLE2_VS_SKIN({vs}ull, {', '.join(str(f) for f in fields)})"
 
 
+def cut_refs(inst):
+    """An "instance" entry's optional "cut" as (eye x reference, squared-distance reference); (-1, -1) without."""
+    if "cut" not in inst:
+        return -1, -1
+    cut = inst["cut"]
+    if not isinstance(cut, dict) or set(cut) != {"eye", "dist2"}:
+        raise ValueError('instance cut must be {"eye": "c<N>.xyz", "dist2": "c<N>.<c>"}')
+    m = re.fullmatch(r"c(\d+)\.xyz", cut["eye"]) if isinstance(cut["eye"], str) else None
+    if not m or int(m.group(1)) > 255 or not isinstance(cut["dist2"], str):
+        raise ValueError('instance cut must be {"eye": "c<N>.xyz", "dist2": "c<N>.<c>"}')
+    return int(m.group(1)) * 4, reg_comp(cut["dist2"])
+
+
 def _instance_line(vs, e):
     inst = e["instance"]
     rows = inst["row_fetches"]
@@ -89,8 +106,12 @@ def _instance_line(vs, e):
     m = re.fullmatch(r"c(\d+)\.xyz", inst["offset"])
     if not m or int(m.group(1)) > 255:
         raise ValueError(f"{vs}: instance offset must be c<N>.xyz")
+    try:
+        cut = cut_refs(inst)
+    except ValueError as err:
+        raise ValueError(f"{vs}: {err}") from None
     fields = [*rows, *_swizzles(inst.get("row_swizzles")), reg_comp(inst["inv_count"]), reg_comp(inst["count"]),
-              reg_comp(inst["first"]), repr(float(inst["bias"])) + "f", int(m.group(1)) * 4]
+              reg_comp(inst["first"]), repr(float(inst["bias"])) + "f", int(m.group(1)) * 4, *cut]
     return f"FABLE2_VS_INSTANCE({vs}ull, {', '.join(str(f) for f in fields)})"
 
 

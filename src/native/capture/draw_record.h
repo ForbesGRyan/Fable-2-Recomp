@@ -2,9 +2,11 @@
 
 // One captured guest draw call (pure: no SDK/GPU deps).
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 
 #include "index_convert.h"
 #include "instance_expand.h"
@@ -45,6 +47,19 @@ inline const char* SkipReasonName(SkipReason r) {
   }
 }
 
+// DrawRecord::cut[3] of a draw without a distance cut: no squared distance is above it.
+inline constexpr float kNoCut = std::numeric_limits<float>::infinity();
+
+// The cut constants as read from the vertex constants -> the record's cut.
+// Anything that is not a finite eye and a finite squared distance of at least
+// zero means no cut: garbage must never remove geometry.
+inline void SanitizeCut(const float in[4], float out[4]) {
+  const bool ok = std::isfinite(in[0]) && std::isfinite(in[1]) && std::isfinite(in[2]) &&
+                  std::isfinite(in[3]) && in[3] >= 0.0f;
+  for (int k = 0; k < 3; ++k) out[k] = ok ? in[k] : 0.0f;
+  out[3] = ok ? in[3] : kNoCut;
+}
+
 // kDot: clip[i] = dot(row[i], p).  kCombine: clip = p.x*row0 + p.y*row1 + p.z*row2 + p.w*row3.
 enum class TransformLayout : uint8_t { kDot = 0, kCombine = 1 };
 
@@ -70,6 +85,13 @@ struct DrawRecord {
   // renderer builds `instances.flat_count` positions indexed by the guest
   // index (plus base vertex), so the index path is unchanged.
   InstanceSet instances;
+  // The instancing shaders' distance cut (frame-map section 12): eye x, y, z
+  // and a squared distance. The game's shader writes a NaN position for a
+  // vertex whose world position, the flat position the renderer builds, is
+  // farther than that from the eye; the clay vertex shader does the same.
+  // cut[3] = +inf: no cut (every other draw, an entry without "cut", garbage
+  // constants). Not part of any geometry cache key: the eye moves every frame.
+  float cut[4] = {0.0f, 0.0f, 0.0f, kNoCut};
   // A heightmap terrain patch run (terrain_patch.h): no vertex or index buffer;
   // the renderer builds the grid from the heightmap.
   TerrainPatch terrain;
@@ -116,6 +138,9 @@ struct DrawInputs {
   // then the mesh stream. Without the set the draw is instance-unsupported.
   bool instance_shader = false;
   InstanceSet instances;
+  // The entry's "cut" constants as read (eye x, y, z, squared distance); taken
+  // into the record, sanitized, only with an active instance set.
+  float cut[4] = {0.0f, 0.0f, 0.0f, kNoCut};
   Material material;
 };
 
@@ -160,6 +185,7 @@ inline DrawRecord AssembleRecord(const DrawInputs& in, uint32_t seq) {
   if (terrain) r.terrain = in.terrain;
   r.skin = in.skin;
   if (!terrain) r.instances = in.instances;
+  if (r.instances.active) SanitizeCut(in.cut, r.cut);
   std::memcpy(r.rows, in.bank + size_t(in.transform->base_reg) * 4, sizeof(r.rows));
   r.layout = in.transform->layout;
   r.deformed = in.transform->deformed;

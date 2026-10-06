@@ -11,8 +11,8 @@ namespace fable2::native::render {
 
 namespace {
 constexpr float kClearColor[4] = {0.08f, 0.08f, 0.1f, 1.0f};
-constexpr uint32_t kConstantCount = sizeof(ClayConstants) / 4;  // 28
-static_assert(kConstantCount == 28);
+constexpr uint32_t kConstantCount = sizeof(ClayConstants) / 4;  // 32
+static_assert(kConstantCount == 32);
 // Binding parameters (see Ensure).
 constexpr uint32_t kParamConstants = 0, kParamPositions = 1, kParamIndices = 2, kParamUvs = 3,
                    kParamAlbedo = 4;

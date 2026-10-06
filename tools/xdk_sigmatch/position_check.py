@@ -26,6 +26,13 @@ checks, since a wrong skin of a small on-screen object stays inside the clip vol
                   is 0.5 to 2.0 times the bind-pose length; pass at >= 0.98
 Every line ends its threshold with the verdict, ACCEPT or REJECT.
 
+An instance entry with a distance cut ("cut": the game's shader gives a NaN position to a vertex
+whose flat position is farther from the eye constant than the square root of the distance
+constant; src/native/fable2_native_shaders.h kClayVs does the same) is judged on the vertices
+kept: a draw passes when at least half of its kept vertices are inside. A draw with no vertex
+kept is not drawn by the game; it is counted `cut` and is not part of the share. The line
+prints the cut draws and the kept share of the sampled vertices.
+
 Rows that cannot be judged are counted apart from the draws:
   unreadable   a stream dump or a constant the replay needs is not in the capture
   unsupported  the runtime would not draw it: the entry does not match the decoded fetches
@@ -48,7 +55,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from gen_transform_table import reg_comp, swizzle_bits  # noqa: E402
+from gen_transform_table import cut_refs, reg_comp, swizzle_bits  # noqa: E402
 
 BASELINE_VS = "0xECD66A10092E6562"   # trusted plain shader: its in-clip share is the capture's baseline
 BASELINE_MARGIN = 0.10               # accept at the baseline share minus this ...
@@ -233,6 +240,7 @@ def parse_entry(entry):
                     inv_count=reg_comp(inst["inv_count"]), count=reg_comp(inst["count"]),
                     first=reg_comp(inst["first"]), bias=float(inst["bias"]),
                     offset=reg_comp(inst["offset"][:-2]))
+        spec["cut_eye"], spec["cut_dist2"] = cut_refs(inst)
     elif "skin" in entry:
         skin = entry["skin"]
         rows = [int(r) for r in skin["row_fetches"]]
@@ -319,6 +327,28 @@ def instance_index(index, bias, inv_count, count, first):
     return int(c), int(v)
 
 
+def sanitize_cut(eye, dist2):
+    """draw_record.h SanitizeCut: (eye, squared distance) as float32, or None when the constants are not a
+    finite eye and a finite squared distance of at least zero (garbage never cuts)."""
+    eye = [f32(x) for x in eye]
+    dist2 = f32(dist2)
+    if not all(math.isfinite(x) for x in eye) or not math.isfinite(dist2) or dist2 < 0.0:
+        return None
+    return eye, dist2
+
+
+def is_cut(p, cut):
+    """kClayVs: dot(eye - p, eye - p) > dist2 in float32; false for a NaN position and without a cut."""
+    if cut is None:
+        return False
+    eye, dist2 = cut
+    d = [f32(eye[k] - p[k]) for k in range(3)]
+    s = f32(d[0] * d[0])
+    s = f32(s + f32(d[1] * d[1]))
+    s = f32(s + f32(d[2] * d[2]))
+    return s > dist2
+
+
 def _instance(row, spec, pos, vb, get, flat, info):
     fetches = row["fetches"]
     rows = _rows(fetches, spec, pos.slot)
@@ -370,6 +400,12 @@ def _instance(row, spec, pos, vb, get, flat, info):
             out.append(NAN_POSITION)
             continue
         out.append(tuple(f32(_dot4(r[k], p) + offset[k]) for k in range(3)) + (1.0,))
+    # The distance cut is the vertex shader's: the flat positions stay as built, and info["cut"] marks
+    # the vertices the shader drops (absent for an entry without a cut).
+    if spec["cut_eye"] >= 0:
+        k = _constants(row, max(spec["cut_eye"] + 2, spec["cut_dist2"]))
+        cut = sanitize_cut(k[spec["cut_eye"]:spec["cut_eye"] + 3], k[spec["cut_dist2"]])
+        info["cut"] = [is_cut(p, cut) for p in out]
     return out
 
 
@@ -619,6 +655,8 @@ def _judge(f, capture_path, key, spec, offsets, max_draws, read, want_fixture):
     """Replays one shader's sampled draws (`max_draws` rows spread evenly over `offsets`)."""
     r = {"kind": spec["kind"], "rows": len(offsets), "draws": 0, "passed": 0, "share": 0.0, "unreadable": 0,
          "unsupported": 0, "bad_index": 0, "reasons": {}}
+    if spec.get("cut_eye", -1) >= 0:
+        r.update(cut=0, kept_vertices=0, sampled_vertices=0)
     if spec["kind"] == "skin":
         r.update(bone_ortho_max=None, edge_ok_share=None, edges=0, edge_ok=0, edge_nan=0, edge_draws=0)
     weight_sums, per_copy, fixture = [], [], None
@@ -629,14 +667,27 @@ def _judge(f, capture_path, key, spec, offsets, max_draws, read, want_fixture):
         get = stream_reader(row, capture_path.parent, read)
         try:
             positions, info = replay(row, spec, get)
-            inside = sum(1 for p in positions if in_clip(project(row, spec, p)))
+            dropped = info.get("cut") or [False] * len(positions)
+            kept = len(positions) - sum(dropped)
+            inside = sum(1 for p, gone in zip(positions, dropped) if not gone and in_clip(project(row, spec, p)))
         except (Unreadable, Unsupported, BadIndex) as e:
             which = {Unreadable: "unreadable", Unsupported: "unsupported", BadIndex: "bad_index"}[type(e)]
             r[which] += 1
             r["reasons"][str(e)] = r["reasons"].get(str(e), 0) + 1
             continue
+        if spec["kind"] == "instance":
+            per_copy.append(info["vertices_per_copy"])
+            copy_max = max((cv[0] for cv in info["pairs"] if cv), default=-1)
+            if copy_max > r.get("copies_max", -1) or "copies_available" not in r:
+                r["copies_max"], r["copies_available"] = copy_max, info["copies_available"]
+        if "cut" in r:
+            r["kept_vertices"] += kept
+            r["sampled_vertices"] += len(positions)
+            if kept == 0:             # the game draws nothing of it: not part of the share
+                r["cut"] += 1
+                continue
         r["draws"] += 1
-        passed = inside * 2 >= len(positions)
+        passed = inside * 2 >= kept
         r["passed"] += passed
         if spec["kind"] == "skin":
             weight_sums += info["weight_sums"]
@@ -651,11 +702,6 @@ def _judge(f, capture_path, key, spec, offsets, max_draws, read, want_fixture):
                 r["edge_ok"] += ok
                 r["edges"] += measured
                 r["edge_nan"] += nan
-        elif spec["kind"] == "instance":
-            per_copy.append(info["vertices_per_copy"])
-            copy_max = max((cv[0] for cv in info["pairs"] if cv), default=-1)
-            if copy_max > r.get("copies_max", -1) or "copies_available" not in r:
-                r["copies_max"], r["copies_available"] = copy_max, info["copies_available"]
         if want_fixture:
             finite = all(math.isfinite(x) for p in positions[:FIXTURE_POSITIONS] for x in p)
             rank = (passed, finite)
@@ -844,6 +890,9 @@ def format_line(key, r, threshold):
         lo, hi = r["vertices_per_copy"]
         line += (f", copies max {r['copies_max']} / available {r['copies_available']}, vertices per copy "
                  f"{lo if lo == hi else f'{lo}-{hi}'}")
+    if "cut" in r:
+        share = r["kept_vertices"] / r["sampled_vertices"] if r["sampled_vertices"] else 0.0
+        line += f", cut {r['cut']}, kept vertices {r['kept_vertices']} of {r['sampled_vertices']} ({share:.3f})"
     if r.get("reasons"):
         line += " [" + "; ".join(f"{k}: {v}" for k, v in sorted(r["reasons"].items())) + "]"
     return line

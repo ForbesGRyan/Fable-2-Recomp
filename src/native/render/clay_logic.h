@@ -271,7 +271,7 @@ inline bool IndexRangeValid(uint32_t max_index, int32_t base_vertex, uint32_t ve
   return hi >= 0 && hi < int64_t(vertex_count);
 }
 
-// Root constants, laid out as the clay HLSL cbuffer (28 dwords).
+// Root constants, laid out as the clay HLSL cbuffer (32 dwords).
 struct ClayConstants {
   float rows[16];
   uint32_t layout;
@@ -282,8 +282,9 @@ struct ClayConstants {
   uint32_t textured;  // 1: sample the albedo at t3
   uint32_t sampler;   // static sampler s0-s3 (SamplerIndex)
   uint32_t pad[2];
+  float cut[4];       // eye xyz, squared distance (DrawRecord::cut; +inf: no cut)
 };
-static_assert(sizeof(ClayConstants) == 112);
+static_assert(sizeof(ClayConstants) == 128);
 
 inline ClayConstants MakeClayConstants(const capture::DrawRecord& r, uint32_t vertex_count,
                                        uint32_t color, const float uv[4], bool textured,
@@ -297,6 +298,7 @@ inline ClayConstants MakeClayConstants(const capture::DrawRecord& r, uint32_t ve
   std::copy(uv, uv + 4, std::begin(c.uv));
   c.textured = textured ? 1u : 0u;
   c.sampler = sampler;
+  std::copy(std::begin(r.cut), std::end(r.cut), std::begin(c.cut));
   return c;
 }
 

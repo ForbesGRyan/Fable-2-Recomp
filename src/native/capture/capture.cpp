@@ -1644,6 +1644,7 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders)
   // index buffer not resolved, an endian the decoder cannot read) is
   // instance-unsupported in AssembleRecord, not the plain draw's reason.
   in.instance_shader = vs->instance != nullptr;
+  in.skin_shader = vs->skin_required;
   if (!vs->have_pos) return SkipReason::kNone;
   in.pos = vs->pos;
   in.have_pos = true;
@@ -1690,9 +1691,9 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders)
     StreamView bones;
     BoneSkin s = vs->skin;
     if (!vs->have_skin) {
-      why = SkipReason::kUnknownPosFormat;
+      why = SkipReason::kSkinUnsupported;
     } else if (ResolveStream(dev, vs->skin_slot, &bones) || !bones.fc_match) {
-      why = SkipReason::kNoStream;
+      why = SkipReason::kSkinUnsupported;
     } else {
       s.index_endian = sv.fc1 & 3;
       bool ok = s.index_endian == 0 || s.index_endian == 2;
@@ -1702,7 +1703,7 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders)
       if (ok) {
         in.skin = s;
       } else {
-        why = SkipReason::kUnknownPosFormat;
+        why = SkipReason::kSkinUnsupported;
       }
     }
     if (extra == SkipReason::kNone) extra = why;

@@ -138,6 +138,10 @@ struct DrawInputs {
   // then the mesh stream. Without the set the draw is instance-unsupported.
   bool instance_shader = false;
   InstanceSet instances;
+  // The shader has a skin entry (vs-transforms.json "skin"); `skin.active` is
+  // set when its layout matched the decoded fetches and the palette stream
+  // resolved. Without it the draw is skin-unsupported, never a bind-pose draw.
+  bool skin_shader = false;
   // The entry's "cut" constants as read (eye x, y, z, squared distance); taken
   // into the record, sanitized, only with an active instance set.
   float cut[4] = {0.0f, 0.0f, 0.0f, kNoCut};
@@ -175,6 +179,10 @@ inline DrawRecord AssembleRecord(const DrawInputs& in, uint32_t seq) {
     // capture's own reasons (bad-index, bad-memory) replace this one
     // (ResolveSkip).
     if (in.instance_shader && !in.instances.active) return skip(SkipReason::kInstanceUnsupported);
+    // Same for a skin shader whose skin was not established (checked after the
+    // instance entry; no shader has both). The capture's own bad-index and
+    // bad-memory reasons still replace it (ResolveSkip).
+    if (in.skin_shader && !in.skin.active) return skip(SkipReason::kSkinUnsupported);
     if (!in.have_pos) return skip(SkipReason::kUnknownPosFormat);
     if (!in.have_vb || (in.indexed && !in.have_ib)) return skip(SkipReason::kNoStream);
     if (in.vb.size == 0) return skip(SkipReason::kBadMemory);
@@ -188,7 +196,8 @@ inline DrawRecord AssembleRecord(const DrawInputs& in, uint32_t seq) {
   if (r.instances.active) SanitizeCut(in.cut, r.cut);
   std::memcpy(r.rows, in.bank + size_t(in.transform->base_reg) * 4, sizeof(r.rows));
   r.layout = in.transform->layout;
-  r.deformed = in.transform->deformed;
+  // An active skin replaces the table's bind-pose approximation.
+  r.deformed = in.transform->deformed && !in.skin.active;
   return r;
 }
 

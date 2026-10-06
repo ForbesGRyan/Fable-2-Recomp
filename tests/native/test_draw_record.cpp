@@ -230,6 +230,29 @@ int main() {
   const InstanceSpec cut_spec{{0, 1, 2}, {0, 0, 0}, 48, 49, 50, 0.5f, 28, 36, 54};
   if (plain_spec.cut_eye_ref != -1 || plain_spec.cut_dist2_ref != -1) return 68;
   if (cut_spec.cut_eye_ref != 36 || cut_spec.cut_dist2_ref != 54) return 69;
-  std::puts("PASS: record assembly with instance sets, instance range check and cap, distance cut");
+  // --- weighted skinning: an active skin is not deformed; a skin shader without one is skin-unsupported ---
+  static const TransformInfo deformed_t{4, TransformLayout::kDot, -1, true};
+  in = Good();
+  in.transform = &deformed_t;
+  r = AssembleRecord(in, 0);
+  if (r.skip != SkipReason::kNone || !r.deformed) return 70;  // no skin: the table flag applies
+  in.skin.active = true;
+  r = AssembleRecord(in, 0);
+  if (r.skip != SkipReason::kNone || r.deformed || !r.skin.active || r.cut[3] != inf) return 71;
+  in = Good();
+  in.skin_shader = true;                                    // layout or palette not established
+  r = AssembleRecord(in, 0);
+  if (r.skip != SkipReason::kSkinUnsupported) return 72;
+  in.have_pos = false;                                      // whatever the capture stopped at
+  if (AssembleRecord(in, 0).skip != SkipReason::kSkinUnsupported) return 73;
+  in = Good(); in.skin_shader = true; in.have_vb = false;
+  if (AssembleRecord(in, 0).skip != SkipReason::kSkinUnsupported) return 74;
+  in = Good(); in.skin_shader = true; in.skin.active = true;
+  if (AssembleRecord(in, 0).skip != SkipReason::kNone) return 75;
+  in = Good(); in.skin_shader = true; in.have_shader = false;
+  if (AssembleRecord(in, 0).skip != SkipReason::kUnknownShader) return 76;
+  in = Good(); in.skin_shader = true; in.prim = 0xFFFF;
+  if (AssembleRecord(in, 0).skip != SkipReason::kUnsupportedPrim) return 77;
+  std::puts("PASS: record assembly with instance sets, instance range check and cap, distance cut, skin");
   return 0;
 }

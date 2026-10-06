@@ -247,7 +247,16 @@ Acceptance of table entries ("Evidence and checks"):
   draws many objects that are off screen: trusted shaders score 0.81 to 0.87 in the bridge
   captures and deliberately wrong entries 0.24 to 0.32, so 0.90 would reject correct
   entries. Each entry's evidence quotes its own capture's baseline, which moves between
-  runs (0.870, 0.810).
+  runs (0.870, 0.810). The cost of the ruling: an entry that is right on most draws and
+  wrong on some passes. As first built the rule also looked only at the draws it could
+  judge: rows the runtime would skip (`unsupported`, `bad-index`) and wholly cut draws
+  left the share, so an entry that made 190 of 200 draws `bad-index` and passed the other
+  10 printed ACCEPT. The final fix wave closed that: a sampled row the runtime would skip
+  rejects the entry, and so does a share judged on fewer than 20 draws or on less than a
+  tenth of the sampled rows; the reason is printed. No verdict changed in the capture the
+  entries were accepted on (`native_discovery_20261005_103213`). The floor of 20 draws
+  does bite in a smaller capture: in `native_discovery_20261005_123635` `0xA1F7...` has
+  18 sampled draws and its line reads REJECT for that reason alone.
 - **An exception path was added, and eight of the ten new non-skin entries are on it.**
   A world-space shader whose meshes are spread around the camera may be entered although
   `position_check.py` prints REJECT, when its evidence records that its `c0..c3` equals the
@@ -259,6 +268,11 @@ Acceptance of table entries ("Evidence and checks"):
   `0x33C0...` (0.426) and `0x36B5...` (0.000). Only `0x7C57...` (1.000) and `0x8123...`
   (0.802) pass the rule. The tool has no marker for an exception: it prints REJECT for
   these eight table entries, and the matrix and face-normal checks are not tool options.
+  The cost of the ruling: these eight entries bypass the tool. Their offline gate is the
+  manual evidence recorded with each entry (the matrix identity, where the failing draws
+  are, the face normals), which no command reproduces, and a later change to one of them
+  gets no verdict from `position_check.py`. A machine-readable exception marker is the
+  first follow-up (frame-map section 12, "Follow-up candidates").
 - **`0xA584...` is in the table although its offline check says REJECT.** This design said
   it stays rejected unless the offline check and a screenshot show it lands correctly. It
   is entered on the exception path, drawing the stored position, not the position the
@@ -266,12 +280,12 @@ Acceptance of table entries ("Evidence and checks"):
 - **Skin entries are judged by two structural metrics that this design did not have**,
   because the in-clip share cannot tell a posed mesh from a bind-pose one: the share of
   bone uses whose 3x3 part is orthonormal within 0.05, and the share of triangle edges
-  whose skinned length is 0.5 to 2.0 times the bind-pose length (at least 0.98). The first
-  was amended twice on `0xD4D5...`: from "the largest deviation over every bone at most
-  0.05" (the game scales one bone of a bird mesh, deviation 0.764) to "at least 0.98 of
-  the bone uses" (set on a misread count; the correct entry scores 0.972 to 0.976) to "at
-  least 0.90 of the bone uses". Wrong row orders or swizzles that were measured score
-  exactly 0.
+  whose skinned length is 0.5 to 2.0 times the bind-pose length (at least 0.98 of edges).
+  The bone-use share was amended twice on `0xD4D5...`: from "the largest deviation over
+  every bone at most 0.05" (the game scales one bone of a bird mesh, deviation 0.764) to
+  "at least 0.98 of the bone uses" (set on a misread count; the correct entry scores 0.972
+  to 0.976) to "at least 0.90 of the bone uses". Wrong row orders or swizzles that were
+  measured score exactly 0.
 - **A skin entry also needs a component-order check that does not rest on those metrics**
   (they accept a skin whose rows or axes are permuted): a match against a posed stream the
   game itself wrote, the distance of a rigid attachment to the skinned body, or a
@@ -307,6 +321,26 @@ Instancing:
 - All seven instancing shaders were entered, not "`0x8123...` and `0xB636...` first".
 - Added in the geometry cache: a per-frame memo of the decoded mesh positions and UVs, so
   N instanced draws of one mesh decode it once.
+- **Geometry cache changes of the final fix wave** (2026-10-06, after the final review;
+  none is in this design). The flat streams of instanced draws are keyed per draw, on the
+  instance stream and every constant, so a changed instance batch gets a new key and its
+  old entry leaves only by eviction at the 256 MB budget.
+  - Eviction: at the budget every insert searched the whole index for one victim (measured
+    in a scratch program at 43.7 ms for 270 new keys in a frame with 24,403 entries). An
+    insert that would pass the budget now evicts least recently used entries in one pass
+    down to 15/16 of the budget, so the inserts after it find room; an entry used in the
+    current frame is still never evicted. The texture cache shares the index and behaves
+    the same at its own budget.
+  - Flat UV buffers no longer depend on the instance stream: their key is the mesh UV key
+    plus `inv_count`, `count`, the bias and the flat count, and their content hash is the
+    mesh UV stream's. The first copy, the instance stream, its row layouts and the offset
+    only place the copies, so a changed batch rebuilt identical UV buffers before.
+  - The mesh stream of an instanced draw is decoded up to the vertices of one copy, not to
+    its end.
+  - `instanced` and `skinned` are counted beside `drawn`, not when positions are built.
+  These four are unit-tested where they are pure (`test_geometry_cache_index.cpp`,
+  `test_clay_logic.cpp`); their release build and gameplay run follow the fix wave's tool
+  and documentation commits.
 
 Skinning:
 
@@ -316,6 +350,15 @@ Skinning:
   value is read from the device's shadow copy, not from the GPU register file.
 - **`skin-unsupported` also covers a palette that holds no whole bone** (it was counted
   `render-other`).
+
+Failure handling:
+
+- **Unreadable streams are not `bad-memory`**, although "Failure handling" above says so.
+  An instance stream or a bone palette that does not resolve at capture makes the draw
+  `instance-unsupported` or `skin-unsupported`; a stream that resolved at capture and
+  cannot be read when the renderer builds the buffer is counted `render-other`.
+  `bad-memory` is what unreadable constants and a flat stream over the draw-count cap
+  give.
 
 Wind and displacement, textures:
 

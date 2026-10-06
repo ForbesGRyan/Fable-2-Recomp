@@ -43,7 +43,8 @@ int main() {
   if (std::strcmp(SkipReasonName(SkipReason::kInstanceUnsupported), "instance-unsupported") != 0) return 1;
   if (std::strcmp(SkipReasonName(SkipReason::kSkinUnsupported), "skin-unsupported") != 0) return 2;
   if (uint8_t(SkipReason::kNoStream) != 7 || uint8_t(SkipReason::kInstanceUnsupported) != 8 ||
-      uint8_t(SkipReason::kSkinUnsupported) != 9 || uint8_t(SkipReason::kCount) != 10) {
+      uint8_t(SkipReason::kSkinUnsupported) != 9 || uint8_t(SkipReason::kDepthOnly) != 10 ||
+      uint8_t(SkipReason::kCount) != 11) {
     return 3;
   }
   if (std::strcmp(SkipReasonName(SkipReason::kNoStream), "no-stream") != 0) return 4;
@@ -261,6 +262,54 @@ int main() {
   in.instances.flat_count = 8;
   r = AssembleRecord(in, 0);
   if (r.skip != SkipReason::kNone || !r.instances.active || r.skin.active || !r.deformed) return 78;
-  std::puts("PASS: record assembly with instance sets, instance range check and cap, distance cut, skin");
+  // --- render state words and depth-only draws ---
+  {
+    StateWords w;
+    w.read = true;
+    w.color_control = 0x8700001C; w.alpha_ref = 0x3F008081; w.blend_control = 0x07060706;
+    w.color_mask = 0x5; w.depth_control = 0x00708767; w.su_sc_mode = 0x00218006;
+    w.vport_z_scale = 0xBF800000; w.vte_cntl = 0x0000043F; w.bin_mask_lo = 0x15555555;
+    auto same = [&](const StateWords& a) {
+      return a.read && a.color_control == w.color_control && a.alpha_ref == w.alpha_ref &&
+             a.blend_control == w.blend_control && a.color_mask == w.color_mask &&
+             a.depth_control == w.depth_control && a.su_sc_mode == w.su_sc_mode &&
+             a.vport_z_scale == w.vport_z_scale && a.vte_cntl == w.vte_cntl && a.bin_mask_lo == w.bin_mask_lo;
+    };
+    if (DrawRecord{}.state_words.read || DrawInputs{}.state_words.read || DrawInputs{}.depth_only) return 80;
+    in = Good(); in.state_words = w;                        // plain
+    r = AssembleRecord(in, 0);
+    if (r.skip != SkipReason::kNone || !same(r.state_words)) return 81;
+    in = Good(); in.state_words = w;                        // instanced
+    in.instance_shader = true; in.instances = Set(4); in.instances.flat_count = 8;
+    r = AssembleRecord(in, 0);
+    if (r.skip != SkipReason::kNone || !r.instances.active || !same(r.state_words)) return 82;
+    in = Good(); in.state_words = w;                        // skinned
+    in.skin_shader = true; in.skin.active = true;
+    r = AssembleRecord(in, 0);
+    if (r.skip != SkipReason::kNone || !same(r.state_words)) return 83;
+    in = Good(); in.state_words = w;                        // terrain
+    in.prim = kPrimQuadPatch; in.terrain_shader = true; in.terrain.active = true; in.indexed = false;
+    r = AssembleRecord(in, 0);
+    if (r.skip != SkipReason::kNone || !same(r.state_words)) return 84;
+    // A depth-only draw is skipped; the reason is named and counted like the others.
+    if (std::strcmp(SkipReasonName(SkipReason::kDepthOnly), "depth-only") != 0) return 85;
+    in = Good(); in.depth_only = true; in.state_words = w;
+    r = AssembleRecord(in, 0);
+    if (r.skip != SkipReason::kDepthOnly || !same(r.state_words)) return 86;
+    in.prim = 0xFFFF;                                       // unsupported-prim wins
+    if (AssembleRecord(in, 0).skip != SkipReason::kUnsupportedPrim) return 87;
+    in = Good(); in.depth_only = true; in.have_shader = false;
+    if (AssembleRecord(in, 0).skip != SkipReason::kUnknownShader) return 88;  // unknown-shader wins
+    // Before the instance and skin checks.
+    in = Good(); in.depth_only = true; in.instance_shader = true;
+    if (AssembleRecord(in, 0).skip != SkipReason::kDepthOnly) return 89;
+    in = Good(); in.depth_only = true; in.skin_shader = true;
+    if (AssembleRecord(in, 0).skip != SkipReason::kDepthOnly) return 90;
+    in = Good(); in.depth_only = true; in.prim = kPrimQuadPatch; in.terrain_shader = true;  // terrain inactive
+    if (AssembleRecord(in, 0).skip != SkipReason::kDepthOnly) return 91;
+    // Capture-side reasons replace it like any other assembled reason.
+    if (ResolveSkip(SkipReason::kDepthOnly, SkipReason::kBadIndex) != SkipReason::kBadIndex) return 92;
+  }
+  std::puts("PASS: record assembly with instance sets, instance range check and cap, distance cut, skin, render state, depth-only");
   return 0;
 }

@@ -41,6 +41,7 @@
 #include "main_scene.h"
 #include "material.h"
 #include "position_decode.h"
+#include "render_state.h"
 #include "bone_skin.h"
 #include "instance_expand.h"
 #include "shader_tally.h"
@@ -1195,6 +1196,22 @@ void AppendRenderState(std::string& row, uint32_t device) {
   }
 }
 
+// The nine words of a draw's render state (render_state.h) from the device's
+// register shadows, as AppendRenderState reads them, and the low word of its bin
+// mask. `read` stays false when any of them cannot be read.
+void ReadStateWords(uint32_t device, StateWords* w) {
+  *w = StateWords{};
+  if (!device) return;
+  auto reg = [&](uint32_t r, uint32_t* out) {
+    return ReadVirtualBe32(device + xdk::DeviceRegShadowOffset(r), out);
+  };
+  w->read = reg(xdk::kRegColorControl, &w->color_control) && reg(xdk::kRegAlphaRef, &w->alpha_ref) &&
+            reg(xdk::kRegBlendControl0, &w->blend_control) && reg(xdk::kRegColorMask, &w->color_mask) &&
+            reg(xdk::kRegDepthControl, &w->depth_control) && reg(xdk::kRegSuScModeCntl, &w->su_sc_mode) &&
+            reg(xdk::kRegVportZScale, &w->vport_z_scale) && reg(xdk::kRegVteCntl, &w->vte_cntl) &&
+            ReadVirtualBe32(device + xdk::kDeviceBinMaskLoOffset, &w->bin_mask_lo);
+}
+
 // Caller holds g_mutex. One decoded "draw" row (frame-map section 8) for
 // DrawVertices / DrawIndexedVertices; other draw hooks have no VB objects.
 // `in_scene`: the draw is inside the main-scene bracket.
@@ -1915,8 +1932,13 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   DrawShaders shaders;
   if (IsSupportedPrim(in.prim)) extra = FillDrawInputs(device, in, &shaders);
   FillMaterial(device, shaders, in);
+  ReadStateWords(device, &in.state_words);
   std::lock_guard<std::mutex> lock(g_scene_mutex);
   if (!g_builder.InMainScene()) return;
+  // HasColourPass is proved only for draws of the tiled main scene (xdk_layout.h);
+  // RecordDraw is reached only for those (OnDraw: in_scene) and the bracket is
+  // checked again just above. Unreadable words leave the draw a colour draw.
+  in.depth_only = in.state_words.read && !xdk::HasColourPass(in.state_words.bin_mask_lo);
   DrawRecord r = AssembleRecord(in, g_builder.NextSeq());
   // A capture-side reason (garbage count, bad index memory) replaces
   // AssembleRecord's, which only sees the inputs filled before it.

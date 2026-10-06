@@ -12,6 +12,7 @@
 #include "instance_expand.h"
 #include "material.h"
 #include "position_decode.h"
+#include "render_state.h"
 #include "bone_skin.h"
 #include "terrain_patch.h"
 
@@ -28,6 +29,7 @@ enum class SkipReason : uint8_t {
   kNoStream,
   kInstanceUnsupported,
   kSkinUnsupported,
+  kDepthOnly,
   kCount
 };
 
@@ -43,6 +45,7 @@ inline const char* SkipReasonName(SkipReason r) {
     case SkipReason::kNoStream: return "no-stream";
     case SkipReason::kInstanceUnsupported: return "instance-unsupported";
     case SkipReason::kSkinUnsupported: return "skin-unsupported";
+    case SkipReason::kDepthOnly: return "depth-only";
     default: return "?";
   }
 }
@@ -97,6 +100,9 @@ struct DrawRecord {
   TerrainPatch terrain;
   // Albedo texture and UVs (material.h); status says why a draw stays clay.
   Material material;
+  // The draw's GPU render-state words as the device held them (render_state.h);
+  // DecodeRenderState turns them into the state the native pass draws with.
+  StateWords state_words;
   SkipReason skip = SkipReason::kNone;
 };
 
@@ -146,6 +152,11 @@ struct DrawInputs {
   // into the record, sanitized, only with an active instance set.
   float cut[4] = {0.0f, 0.0f, 0.0f, kNoCut};
   Material material;
+  StateWords state_words;
+  // A main-scene draw whose device bin mask has no colour-pass bit (HasColourPass
+  // in xdk_layout.h): the game executes it only in its depth pre-pass, so the
+  // native pass, which draws each record once as colour, skips it.
+  bool depth_only = false;
 };
 
 inline DrawRecord AssembleRecord(const DrawInputs& in, uint32_t seq) {
@@ -163,11 +174,13 @@ inline DrawRecord AssembleRecord(const DrawInputs& in, uint32_t seq) {
   r.pos = in.pos;
   r.vs_hash = in.vs_hash;
   r.material = in.material;
+  r.state_words = in.state_words;
   auto skip = [&](SkipReason why) { r.skip = why; return r; };
   // Terrain: a tessellated patch draw whose shader has a terrain entry.
   const bool terrain = in.prim == kPrimQuadPatch && in.terrain_shader;
   if (!terrain && !IsSupportedPrim(in.prim)) return skip(SkipReason::kUnsupportedPrim);
   if (!in.have_shader) return skip(SkipReason::kUnknownShader);
+  if (in.depth_only) return skip(SkipReason::kDepthOnly);
   if (terrain) {
     if (!in.terrain.active) return skip(SkipReason::kUnknownPosFormat);
   } else {

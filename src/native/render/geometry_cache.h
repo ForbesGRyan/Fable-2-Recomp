@@ -64,17 +64,20 @@ class GeometryCache {
   uint64_t FrameHash(uint32_t phys_addr, uint32_t size, const uint8_t* data);
   nrhi::Buffer* TerrainPositions(nrhi::Device* dev, const capture::DrawRecord& r,
                                  uint32_t* vertex_count, ClayStats& st);
-  // Instanced records: the flat position / UV stream built from the mesh
-  // stream and the instance stream, rebuilt when either's bytes or the
-  // instance set (the key) change.
+  // Instanced records: the flat position stream built from the mesh stream
+  // and the instance stream, rebuilt when either's bytes or the instance set
+  // (the key) change; the flat UV stream built from the mesh's UVs alone,
+  // rebuilt when their bytes or the index mapping (UvKey) change.
   nrhi::Buffer* InstancedPositions(nrhi::Device* dev, const capture::DrawRecord& r,
                                    uint32_t* vertex_count, ClayStats& st);
   nrhi::Buffer* InstancedUvs(nrhi::Device* dev, const capture::DrawRecord& r,
                              uint32_t vertex_count, ClayStats& st);
-  // The record's whole mesh stream decoded (`count` positions / UVs; `mesh`
-  // and `mesh_hash` are the stream's bytes and frame hash), or nullptr if it
-  // does not decode. Decoded once per frame per stream and layout however
-  // many instanced draws expand it; valid until the next call.
+  // The first `count` positions / UVs of the record's mesh stream, decoded
+  // (`mesh` and `mesh_hash` are the stream's bytes and frame hash), or
+  // nullptr if they do not decode. Kept for the frame per stream and layout,
+  // so the instanced draws that expand one mesh decode it once (a draw with
+  // another count of the same stream decodes again); valid until the next
+  // call.
   const capture::Float4* MeshPositions(const capture::DrawRecord& r, const uint8_t* mesh,
                                        uint64_t mesh_hash, uint32_t count);
   const capture::Float2* MeshUvs(const capture::DrawRecord& r, const uint8_t* mesh,
@@ -94,8 +97,8 @@ class GeometryCache {
   std::vector<capture::Float4> positions_;
   std::vector<capture::Float2> uvs_;
   // Decoded mesh streams of this frame's instanced draws (cleared in
-  // BeginFrame): every draw of a mesh has its own flat stream (key kinds 5
-  // and 6), but the mesh is decoded once. 64 MB together; a mesh that does
+  // BeginFrame): every draw of a mesh has its own flat positions (key kind
+  // 5), but the mesh is decoded once. 64 MB together; a mesh that does
   // not fit is decoded into the scratch vectors below for its draw alone.
   static constexpr uint64_t kMeshPositionMemoBytes = 48ull << 20;
   static constexpr uint64_t kMeshUvMemoBytes = 16ull << 20;

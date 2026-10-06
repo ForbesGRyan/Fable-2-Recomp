@@ -260,8 +260,8 @@ thread_local DrawNesting t_nesting;  // only the outermost draw of a call chain 
 // World-view-projection constants per vertex shader hash, found offline by
 // tools/xdk_sigmatch/matrix_finder.py or confirmed by hand from the shader's
 // disassembly (docs/native-renderer/vs-transforms.json, frame-map section 9).
-// The generated table also holds per-shader position swizzles, rigid skin
-// layouts and terrain parameters.
+// The generated table also holds per-shader position swizzles, skin layouts
+// (one bone or weighted), instance layouts and terrain parameters.
 struct TableEntry {
   uint64_t hash;
   uint32_t base;
@@ -1690,8 +1690,9 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders)
   } else if (uint64_t(in.start) + in.count > vertices) {
     extra = SkipReason::kBadIndex;
   }
-  // Rigid skin (vs-transforms.json "skin"): the bone palette is the stream
-  // feeding the rows' fetch slot; endians come from the two fetch constants.
+  // Skin (vs-transforms.json "skin", one bone or weighted): the bone palette
+  // is the stream feeding the rows' fetch slot; endians come from the two
+  // fetch constants.
   if (vs->skin_required) {
     SkipReason why = SkipReason::kNone;
     StreamView bones;

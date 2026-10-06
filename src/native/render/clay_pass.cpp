@@ -274,6 +274,14 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     cmd->Draw(p.index_count, 0);
     ++st.drawn;
     if (r.deformed) ++st.deformed;
+    // Which builder made the positions (the order of GeometryCache::Positions).
+    if (!r.terrain.active) {
+      if (r.instances.active) {
+        ++st.instanced;
+      } else if (r.skin.active) {
+        ++st.skinned;
+      }
+    }
   }
 
   cmd->Barrier(color_, nrhi::ResourceState::kRenderTarget,

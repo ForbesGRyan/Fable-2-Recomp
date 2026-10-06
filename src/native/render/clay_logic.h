@@ -32,8 +32,9 @@ struct ClayStats {
   // Renderer-side skips other than bad indices: unreadable guest memory, a
   // failed decode or upload, or an empty triangle list.
   uint32_t skipped_other = 0;
-  // Records whose positions came from the instanced (flat stream) and the
-  // bone-skinned builders this frame, cache hits included.
+  // Drawn records whose positions came from the instanced (flat stream) and
+  // the bone-skinned builders, cache hits included. Counted with `drawn`: a
+  // record whose index list fails afterwards is in neither.
   uint32_t instanced = 0, skinned = 0;
 };
 
@@ -222,15 +223,43 @@ inline GeoKey MeshUvKey(const capture::DrawRecord& r) {
   return k;
 }
 
+// Everything of an instance set that changes the flat UVs built from a mesh's
+// UVs: uvs[i] = mesh_uv[vertex(i)] (ExpandInstanceUvs), and vertex(i) takes
+// the index, the bias, inv_count and count. The first copy, the instance
+// stream, its row layouts and the offset only place the copies; they stay out,
+// so a draw whose instance batch changed keeps its UV buffer.
+// ExpandInstanceUvs never reads the instance stream. It writes a zero UV in
+// two cases only: InstanceIndex fails (the copy number, which is where the
+// first copy enters, is negative, not finite or at least 65,536), or the
+// vertex is past the mesh UVs decoded. InstanceRangeSkip records no draw with
+// the first case: every index below flat_count maps to a copy below 65,536
+// and to a vertex below count. The second depends on count and on the mesh UV
+// stream, which are in the key.
+inline uint32_t InstanceUvHash(const capture::InstanceSet& s) {
+  return HashCombine32({FloatBits(s.inv_count), FloatBits(s.count), FloatBits(s.bias), s.flat_count});
+}
+
 // Cache key of a decoded UV stream: MeshUvKey; an instanced draw's flat UVs
-// (kind 6) add its instance set, like its flat positions.
+// (kind 6) add InstanceUvHash. Their content hash is the mesh UV stream's.
 inline GeoKey UvKey(const capture::DrawRecord& r) {
   GeoKey k = MeshUvKey(r);
   if (r.instances.active) {
-    k.extra = HashCombine32({k.extra, InstanceHash(r.instances)});
+    k.extra = HashCombine32({k.extra, InstanceUvHash(r.instances)});
     k.kind = 6;
   }
   return k;
+}
+
+// Mesh vertices (positions or UVs) to decode for an instanced draw, of the
+// `stream_count` its stream holds: every index maps to a vertex below
+// s.count (InstanceIndex, checked at capture by InstanceBoundsOk), so one
+// copy's vertices are enough when the stream holds more. 0 for a count that
+// is not at least 1 (NaN included), no bound from a count past 2^32: the
+// capture records neither, and neither reaches the cast.
+inline uint32_t InstanceMeshCount(uint32_t stream_count, const capture::InstanceSet& s) {
+  if (!(s.count >= 1.0f)) return 0;
+  if (s.count >= 4294967296.0f) return stream_count;
+  return std::min(stream_count, uint32_t(s.count));
 }
 
 // UVs in a stream of `vb_size` bytes: every vertex whose UV element (both

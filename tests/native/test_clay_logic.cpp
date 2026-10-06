@@ -433,8 +433,9 @@ int main() {
     CHECK(101, std::string(capture::SkipReasonName(capture::SkipReason::kSkinUnsupported)) ==
                    "skin-unsupported");
   }
-  // 102-121: instanced records: a flat stream of flat_count positions / UVs,
-  // keyed by both streams, the row layouts, every constant and the flat count.
+  // 102-121, 134-141: instanced records: a flat stream of flat_count positions
+  // keyed by both streams, the row layouts, every constant and the flat count;
+  // flat UVs keyed by the mesh UVs and what maps an index to a mesh vertex.
   {
     capture::DrawRecord r = BaseRecord();
     r.material.uv_vb = r.vb;
@@ -497,15 +498,47 @@ int main() {
     const GeoKey uk = UvKey(i);
     CHECK(116, uk.kind == 6 && uk.addr == 0x2000 && uk.size == 1600 && uk.stride == 16);
     CHECK(117, UvKey(r).kind == 4 && !(UvKey(r) == uk) && !(uk == k));
+    // uvs[i] = mesh_uv[vertex(i)], and vertex(i) takes the index, the bias,
+    // inv_count and count only (instance_expand.h): what places the copies
+    // (the first copy, the instance stream, its row layouts, the offset)
+    // leaves the flat UVs as they are, so those draws share one UV buffer
+    // while their flat positions differ.
     a = i;
     a.instances.first = 3.0f;
-    CHECK(118, !(UvKey(a) == uk));
+    CHECK(118, UvKey(a) == uk && !(PositionKey(a) == k));
+    a = i;
+    a.instances.rows_addr = 0x8000;
+    CHECK(134, UvKey(a) == uk && !(PositionKey(a) == k));
+    a = i;
+    a.instances.rows_size = 28 * 41;
+    CHECK(135, UvKey(a) == uk && !(PositionKey(a) == k));
+    a = i;
+    a.instances.rows[2].swizzle = 0x11;
+    a.instances.rows[1].offset_bytes = 12;
+    CHECK(136, UvKey(a) == uk && !(PositionKey(a) == k));
+    a = i;
+    a.instances.offset[1] = 8.0f;
+    CHECK(137, UvKey(a) == uk && !(PositionKey(a) == k));
+    // What changes the vertex an index maps to, or how many UVs are built, changes the key.
+    a = i;
+    a.instances.inv_count = 0.2f;
+    CHECK(138, UvKey(a).kind == 6 && !(UvKey(a) == uk));
+    a = i;
+    a.instances.count = 5.0f;
+    CHECK(139, !(UvKey(a) == uk));
+    a = i;
+    a.instances.bias = 0.25f;
+    CHECK(140, !(UvKey(a) == uk));
+    a = i;
+    a.instances.flat_count = 153;
+    CHECK(120, !(UvKey(a) == uk));
+    // The mesh's UV layout and stream still count.
     a = i;
     a.material.uv.comp_u = 1;
     CHECK(119, !(UvKey(a) == uk));
     a = i;
-    a.instances.flat_count = 153;
-    CHECK(120, !(UvKey(a) == uk));
+    a.material.uv_vb.phys_addr = 0x6000;
+    CHECK(141, !(UvKey(a) == uk));
     // The mesh stream on its own (decoded once per frame for all the draws
     // that expand it): the plain keys, whatever the instance set.
     CHECK(122, MeshPositionKey(i) == PositionKey(r) && MeshPositionKey(i).kind == 0);
@@ -526,6 +559,29 @@ int main() {
     // The renderer's index rule runs on the flat count: index 151 is the last.
     CHECK(121, IndexRangeValid(151, 0, RecordVertexCount(i)) &&
                    !IndexRangeValid(152, 0, RecordVertexCount(i)));
+  }
+  // 142-149: an instanced draw decodes no more of its mesh stream than one
+  // copy has vertices (every index maps to a vertex below count), and never
+  // more than the stream holds.
+  {
+    capture::InstanceSet s;
+    s.count = 12.0f;
+    CHECK(142, InstanceMeshCount(100, s) == 12);
+    CHECK(143, InstanceMeshCount(8, s) == 8 && InstanceMeshCount(0, s) == 0);
+    s.count = 100.0f;
+    CHECK(144, InstanceMeshCount(100, s) == 100);
+    // Counts the capture rejects (InstanceBoundsOk) never reach the cast: no
+    // vertex below a count under one or a NaN, no bound from one past 2^32.
+    s.count = 0.5f;
+    CHECK(145, InstanceMeshCount(100, s) == 0);
+    s.count = std::numeric_limits<float>::quiet_NaN();
+    CHECK(146, InstanceMeshCount(100, s) == 0);
+    s.count = -4.0f;
+    CHECK(147, InstanceMeshCount(100, s) == 0);
+    s.count = 4294967296.0f;
+    CHECK(148, InstanceMeshCount(100, s) == 100);
+    s.count = std::numeric_limits<float>::infinity();
+    CHECK(149, InstanceMeshCount(100, s) == 100);
   }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "

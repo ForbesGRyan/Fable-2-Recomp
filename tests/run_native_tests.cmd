@@ -44,7 +44,8 @@ clang++ -std=c++23 "%~dp0native\test_shader_tally.cpp" -o "%OUT%\shader_tally.ex
 "%OUT%\shader_tally.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_geometry_cache_index.cpp" -o "%OUT%\geometry_cache_index.exe" || exit /b 1
 "%OUT%\geometry_cache_index.exe" || exit /b 1
-clang++ -std=c++23 "%~dp0native\test_clay_logic.cpp" -o "%OUT%\clay_logic.exe" || exit /b 1
+rem InstanceMeshCount must not cast a NaN or out-of-range count (trap as above).
+clang++ -std=c++23 -fsanitize=float-cast-overflow -fsanitize-trap=float-cast-overflow "%~dp0native\test_clay_logic.cpp" -o "%OUT%\clay_logic.exe" || exit /b 1
 "%OUT%\clay_logic.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_discovery_format.cpp" -o "%OUT%\discovery_format.exe" || exit /b 1
 "%OUT%\discovery_format.exe" || exit /b 1

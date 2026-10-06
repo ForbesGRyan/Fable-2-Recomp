@@ -253,6 +253,14 @@ int main() {
   if (AssembleRecord(in, 0).skip != SkipReason::kUnknownShader) return 76;
   in = Good(); in.skin_shader = true; in.prim = 0xFFFF;
   if (AssembleRecord(in, 0).skip != SkipReason::kUnsupportedPrim) return 77;
+  // An instanced record keeps the table's flag (wind sway is not modelled): only a skin clears it.
+  in = Good();
+  in.transform = &deformed_t;
+  in.instance_shader = true;
+  in.instances = Set(4);
+  in.instances.flat_count = 8;
+  r = AssembleRecord(in, 0);
+  if (r.skip != SkipReason::kNone || !r.instances.active || r.skin.active || !r.deformed) return 78;
   std::puts("PASS: record assembly with instance sets, instance range check and cap, distance cut, skin");
   return 0;
 }

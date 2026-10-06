@@ -420,6 +420,15 @@ int main() {
     if (PaletteBones(s, 0) != 0 || PaletteBones(s, 23) != 0) return 80;
     if (PaletteBones(s, 24) != 1 || PaletteBones(s, 47) != 1 || PaletteBones(s, 48) != 2) return 81;
     if (PaletteBones(s, 24 * 300) != 256) return 82;  // the index is 8 bits
+    // A stride larger than the rows' end (32-byte bones, rows ending at byte
+    // 24): the last bone needs its rows, not a whole stride.
+    BoneSkin wide = s;
+    wide.bone_stride = 32;
+    for (PosLayout& row : wide.rows) row.stride_bytes = 32;
+    if (PaletteBones(wide, 23) != 0 || PaletteBones(wide, 24) != 1 || PaletteBones(wide, 55) != 1 ||
+        PaletteBones(wide, 56) != 2) {
+      return 87;
+    }
     // It is 0 exactly where SkinPositions fails for want of a bone (vertex 1 uses bone 0).
     for (size_t size : {size_t(0), size_t(10), size_t(23), size_t(24), size_t(48)}) {
       Float4 p[1] = {{1, 2, 3, 1}};

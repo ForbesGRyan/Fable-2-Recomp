@@ -121,6 +121,12 @@ inline constexpr uint32_t kHosCntlAdaptive = 2;
 // 0x822158C4) and then, under bin mask 0x15555555 (0x822158E8/0x822158F0), a
 // predicated SET_CONSTANT of RB_COLOR_MASK = 0 (0x82215938..0x82215948, r20 = 0
 // from 0x822158B4). The shadow is the value of the colour passes.
+// Second round (captures native_discovery_20261006_174553 and _174802, with
+// PA_CL_VPORT_ZSCALE, PA_CL_VPORT_ZOFFSET and PA_CL_VTE_CNTL added): all
+// thirteen registers equal in all 80,490 and 66,802 colour-pass executions;
+// in the 12,299 and 13,652 pre-pass executions twelve are equal and
+// RB_COLOR_MASK is 0. Every row has VTE 0x0000043F (Z scale and offset on),
+// scale -1 and offset 1: window depth is 1 - z/w, the depth range is reversed.
 inline constexpr uint32_t kDeviceRegShadowBase2100 = 0x28CC;  // register 0x2100
 inline constexpr uint32_t kDeviceRegShadowBase2200 = 0x2934;  // register 0x2200
 inline constexpr uint32_t kRegColorMask = 0x2104;      // RB_COLOR_MASK
@@ -130,6 +136,13 @@ inline constexpr uint32_t kRegDepthControl = 0x2200;   // RB_DEPTHCONTROL
 inline constexpr uint32_t kRegBlendControl0 = 0x2201;  // RB_BLENDCONTROL0
 inline constexpr uint32_t kRegColorControl = 0x2202;   // RB_COLORCONTROL
 inline constexpr uint32_t kRegSuScModeCntl = 0x2205;   // PA_SU_SC_MODE_CNTL
+inline constexpr uint32_t kRegVportZScale = 0x2113;    // PA_CL_VPORT_ZSCALE (float)
+inline constexpr uint32_t kRegVportZOffset = 0x2114;   // PA_CL_VPORT_ZOFFSET (float)
+inline constexpr uint32_t kRegVteCntl = 0x2206;        // PA_CL_VTE_CNTL
+// PA_CL_VTE_CNTL bits 4 and 5 (SDK registers.h): the viewport Z scale and
+// offset apply; window depth = z/w * scale + offset.
+inline constexpr uint32_t kVteZScaleEnable = 0x10;
+inline constexpr uint32_t kVteZOffsetEnable = 0x20;
 // Device offset of the shadow of `reg` for the two runs above; 0 for any other
 // register (not shadowed here).
 constexpr uint32_t DeviceRegShadowOffset(uint32_t reg) {
@@ -137,6 +150,37 @@ constexpr uint32_t DeviceRegShadowOffset(uint32_t reg) {
   if (reg >= 0x2200 && reg <= 0x220B) return kDeviceRegShadowBase2200 + 4 * (reg - 0x2200);
   return 0;
 }
+
+// --- Bin mask (frame-map section 13, "Pre-pass draws and the depth range") ---
+// The device's explicit bin mask, low and high word. SetPredication 0x822655B0
+// (r3 device, r4 mask) stores r4 at +0x31A4 for a non-zero mask (0x822656BC
+// `stw r4,12708(r31)`) and 0xFFFFFFFF for r4 = 0 (0x822656A8 `li r10,-1`,
+// 0x822656AC), 0 at +0x31A8 (0x822656D4 `stw r9,12712(r31)`), and emits
+// SET_BIN_MASK_LO with the stored word (0x822656F0..0x82265700). The tiling
+// state emitter 0x822155E0 restores SET_BIN_MASK_LO / _HI from the two words
+// (0x8221594C..0x82215960). A predicated draw packet executes in a pass when
+// the pass's bin select intersects the mask.
+// Runtime (frame-map section 13; render_state_check.py on captures
+// native_discovery_20261006_174553 and _174802): the high word is 0 in every
+// row; the low word is 0xFFFFFFFF, 0x15555555, 0x2AAAAAAA, 0x0003000A or
+// 0x00030002; and "a main-scene draw has a colour-pass execution iff its low
+// word has a bit of 0x2AAAAAAA" holds for every sampled main-scene row (28,431
+// with and 93 without on the bridge, 28,361 and 107 after walking, none wrong). The
+// rows without are adaptive terrain draws (0x82207C30, pixel shader
+// 0x2F8A0341E8C09698) under 0x15555555, executed once, depth only. Outside
+// the main scene the bin select is all ones and every draw executes whatever
+// its mask (121 rows under 0x15555555 / 0x2AAAAAAA at pitch 280).
+inline constexpr uint32_t kDeviceBinMaskLoOffset = 0x31A4;
+inline constexpr uint32_t kDeviceBinMaskHiOffset = 0x31A8;
+// Odd bits are colour bins, even bits depth pre-pass bins: the emitter forces
+// RB_COLOR_MASK to 0 under bin mask 0x15555555 (0x822158E8/0x822158F0), and
+// draws under 0x15555555 execute only under bin select 0x80000001, draws under
+// 0x2AAAAAAA only under 0x2 and 0x8 (same captures).
+inline constexpr uint32_t kColourBins = 0x2AAAAAAAu;
+inline constexpr uint32_t kPrePassBins = 0x15555555u;
+// Whether a draw of the tiled main scene issued under this bin mask (low word)
+// is drawn in colour; false: it only fills depth in the pre-pass.
+constexpr bool HasColourPass(uint32_t bin_mask_lo) { return (bin_mask_lo & kColourBins) != 0; }
 
 // --- Vertex buffer object (D3DVertexBuffer, SetStreamSource r5) -------------
 // Dwords 6-7 hold the vertex fetch constant: dword 6 = CPU virtual address |

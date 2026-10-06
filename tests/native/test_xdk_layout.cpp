@@ -42,6 +42,23 @@ static_assert(xdk::DeviceRegShadowOffset(0x2285) == 0);
 // 0x2200 run ends where the 0x2280 run's starts (+0x2964).
 static_assert(xdk::kDeviceRegShadowBase2100 + 4 * 21 == 0x2920);
 static_assert(xdk::kDeviceRegShadowBase2200 + 4 * 12 == 0x2964);
+// Viewport Z scale and offset and the viewport transform control, in the same
+// two runs (frame-map section 13, "Pre-pass draws and the depth range").
+static_assert(xdk::DeviceRegShadowOffset(xdk::kRegVportZScale) == 0x2918);
+static_assert(xdk::DeviceRegShadowOffset(xdk::kRegVportZOffset) == 0x291C);
+static_assert(xdk::DeviceRegShadowOffset(xdk::kRegVteCntl) == 0x294C);
+static_assert(xdk::kVteZScaleEnable == 0x10 && xdk::kVteZOffsetEnable == 0x20);
+// The explicit bin mask: SetPredication 0x822655B0 stores r4 at 12708(r31) and
+// 0 at 12712(r31); the tiling emitter restores SET_BIN_MASK_LO / _HI from them.
+static_assert(xdk::kDeviceBinMaskLoOffset == 12708 && xdk::kDeviceBinMaskHiOffset == 12712);
+static_assert(xdk::kDeviceBinMaskHiOffset == xdk::kDeviceBinMaskLoOffset + 4);
+// Colour bins are the odd bits, depth pre-pass bins the even bits.
+static_assert(xdk::kColourBins == 0x2AAAAAAAu && xdk::kPrePassBins == 0x15555555u);
+static_assert((xdk::kColourBins & xdk::kPrePassBins) == 0);
+static_assert(xdk::HasColourPass(0xFFFFFFFFu));   // no explicit predication
+static_assert(xdk::HasColourPass(0x2AAAAAAAu));   // colour passes only
+static_assert(!xdk::HasColourPass(0x15555555u));  // depth pre-pass only
+static_assert(!xdk::HasColourPass(0));
 // Pixel shader object (frame-map section 8, "Pixel shader microcode"): the
 // shader flush reads obj[0x40] (record offset, 0x8221B32C), obj[0x18] (base,
 // 0x8221B330), record dword 0 at obj + rec + 0x28 (0x8221B338) and the byte size

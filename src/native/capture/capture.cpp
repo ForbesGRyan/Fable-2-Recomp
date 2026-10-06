@@ -1157,7 +1157,8 @@ void AppendGeometry(std::string& row, bool indexed, const LastArgs& args, uint32
 // Discovery evidence (frame-map section 13, "Render state"): the render-state
 // registers from the device's register shadows as the draw builder left them
 // ("rs": register -> dword, a float register as its bits; a register whose
-// shadow cannot be read is left out), and the device's command write pointer
+// shadow cannot be read is left out; "bin_mask_lo" / "bin_mask_hi" are the
+// device's explicit bin mask), and the device's command write pointer
 // after the draw ("cmd": the last dword the builder wrote), which
 // tools/xdk_sigmatch/render_state_check.py pairs with the address of the
 // DRAW_INDX packet the GPU executes.
@@ -1165,7 +1166,8 @@ void AppendRenderState(std::string& row, uint32_t device) {
   static constexpr uint32_t kRegs[] = {
       xdk::kRegColorMask,    xdk::kRegAlphaRef,     xdk::kRegDepthControl, xdk::kRegBlendControl0,
       xdk::kRegColorControl, xdk::kRegSuScModeCntl, xdk::kRegBlendRed,     xdk::kRegBlendRed + 1,
-      xdk::kRegBlendRed + 2, xdk::kRegBlendRed + 3};
+      xdk::kRegBlendRed + 2, xdk::kRegBlendRed + 3, xdk::kRegVportZScale,  xdk::kRegVportZOffset,
+      xdk::kRegVteCntl};
   char buf[40];
   row += ",\"rs\":{";
   bool first = true;
@@ -1175,6 +1177,15 @@ void AppendRenderState(std::string& row, uint32_t device) {
     std::snprintf(buf, sizeof(buf), "%s\"%04X\":\"0x%08X\"", first ? "" : ",", reg, LoadBe32(p));
     row += buf;
     first = false;
+  }
+  // The explicit bin mask (SetPredication): which passes the draw executes in.
+  uint32_t lo = 0, hi = 0;
+  if (device && ReadVirtualBe32(device + xdk::kDeviceBinMaskLoOffset, &lo) &&
+      ReadVirtualBe32(device + xdk::kDeviceBinMaskHiOffset, &hi)) {
+    std::snprintf(buf, sizeof(buf), "%s\"bin_mask_lo\":\"0x%08X\"", first ? "" : ",", lo);
+    row += buf;
+    std::snprintf(buf, sizeof(buf), ",\"bin_mask_hi\":\"0x%08X\"", hi);
+    row += buf;
   }
   row += "}";
   uint32_t write = 0;

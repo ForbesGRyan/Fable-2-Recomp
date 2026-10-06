@@ -21,13 +21,14 @@ the same capture (the table's own entry, same sampling) minus 0.10, never below 
 checks, since a wrong skin of a small on-screen object stays inside the clip volume:
   bone ortho share  the share of bone uses whose bone is orthonormal: the deviation of its
                     3x3 part under the entry's row swizzles (the largest of | |row| - 1 |
-                    and |row_i . row_j|) is at most 0.05; pass at >= 0.98. A bone use is
+                    and |row_i . row_j|) is at most 0.05; pass at >= 0.90. A bone use is
                     one palette bone that one sampled draw's vertices reference with a
                     nonzero weight: a bone counts once per draw, however many of the
                     draw's vertices use it, and again in every other draw that uses it.
                     The largest deviation is printed too ("max") but is not a gate: the
-                    game scales single bones on purpose, while a wrong row order or
-                    swizzle breaks nearly every bone.
+                    game scales single bones on purpose, and such a bone can belong to a
+                    mesh drawn many times a frame (a correct skin measured 0.972 to
+                    0.976), while a wrong row order or swizzle breaks every bone (0).
   edge ok share     over the distinct triangle edges of the sampled draws (triangle lists,
                     fans and strips, cut at restart indices), the share whose skinned
                     length is 0.5 to 2.0 times the bind-pose length; pass at >= 0.98
@@ -71,7 +72,7 @@ BASELINE_MARGIN = 0.10               # accept at the baseline share minus this .
 THRESHOLD_FLOOR = 0.60               # ... and never below this
 THRESHOLD_FALLBACK = 0.75            # the capture has no baseline draws
 ORTHO_MAX = 0.05                     # skin: a bone within this of orthonormal is orthonormal
-ORTHO_SHARE_MIN = 0.98               # skin: share of bone uses that must be orthonormal
+ORTHO_SHARE_MIN = 0.90               # skin: share of bone uses that must be orthonormal
 EDGE_RATIO = (0.5, 2.0)              # skin: skinned / bind-pose edge length
 EDGE_OK_MIN = 0.98                   # skin: share of edges within EDGE_RATIO
 EDGE_MIN_LENGTH = 1e-6               # bind-pose edges shorter than this are not measured

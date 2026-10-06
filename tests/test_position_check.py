@@ -371,7 +371,7 @@ class CliTest(Base):
                          "baseline 0xECD66A10092E6562: no draws in this capture, accept >= 0.750 (fallback)")
         # One vertex and no primitive type: no edge to judge the skin by.
         self.assertIn("VS 0x00000000000000CC skin: draws 1, in-clip share 1.000 (accept >= 0.750) REJECT", text)
-        self.assertIn("bone ortho share 1.0000 (2 of 2, >= 0.98), max 0.000, edge ok share n/a (>= 0.98) of 0 edges, "
+        self.assertIn("bone ortho share 1.0000 (2 of 2, >= 0.90), max 0.000, edge ok share n/a (>= 0.98) of 0 edges, "
                       "edge nan 0", text)
         self.assertIn("weight sum min/median/max 1.000/1.000/1.000", text)
         self.assertIn("bone index max 1 / palette bones 2", text)
@@ -588,7 +588,7 @@ class SkinStructureTest(Base):
         self.assertTrue(r["accepted"])
         line = pc.format_line("0xCCCC", r, 0.75)
         self.assertIn("ACCEPT", line)
-        self.assertIn("bone ortho share 0.9900 (99 of 100, >= 0.98), max 0.400, edge ok share 1.000", line)
+        self.assertIn("bone ortho share 0.9900 (99 of 100, >= 0.90), max 0.400, edge ok share 1.000", line)
 
     def test_most_bones_failing_is_rejected_on_the_share(self):
         # Everything else passes (in clip, edges kept): the share alone rejects.
@@ -604,13 +604,17 @@ class SkinStructureTest(Base):
         self.assertEqual((r["bone_uses"], r["bone_ortho_ok"], r["bone_ortho_share"], r["accepted"]), (2, 0, 0.0, False))
 
     def test_the_share_boundary(self):
-        self.assertEqual(pc.ORTHO_SHARE_MIN, 0.98)
-        r = self.uses(49, 1)                                         # 49 of 50 = 0.98 exactly: passes
-        self.assertAlmostEqual(r["bone_ortho_share"], 0.98)
+        self.assertEqual(pc.ORTHO_SHARE_MIN, 0.90)
+        r = self.uses(9, 1)                                          # 9 of 10 = 0.90 exactly: passes
+        self.assertAlmostEqual(r["bone_ortho_share"], 0.90)
         self.assertTrue(r["accepted"])
-        r = self.uses(48, 1)                                         # 48 of 49 = 0.9796: fails
-        self.assertLess(r["bone_ortho_share"], 0.98)
+        r = self.uses(8, 1)                                          # 8 of 9 = 0.889: fails
+        self.assertLess(r["bone_ortho_share"], 0.90)
         self.assertFalse(r["accepted"])
+        # One scaled bone in a mesh drawn often (the bridge scene's birds: 0.972 to 0.976) passes.
+        r = self.uses(39, 1)
+        self.assertAlmostEqual(r["bone_ortho_share"], 0.975)
+        self.assertTrue(r["accepted"])
 
     def test_a_bone_is_counted_once_per_draw_and_only_with_a_nonzero_weight(self):
         # Three vertices on bones 0, 0 and 1: two bone uses; palette bone 2 is not referenced.
@@ -664,7 +668,7 @@ class SkinStructureTest(Base):
         r = self.result(self.triangle((1, 1, 2), [translation(0), translation(0.3), translation(0.9)]))
         line = pc.format_line("0xCCCC", r, 0.75)
         self.assertIn("in-clip share 1.000 (accept >= 0.750) REJECT", line)
-        self.assertIn("bone ortho share 1.0000 (2 of 2, >= 0.98), max 0.000, edge ok share", line)
+        self.assertIn("bone ortho share 1.0000 (2 of 2, >= 0.90), max 0.000, edge ok share", line)
         self.assertIn("edge ok share 0.333 (>= 0.98) of 3 edges, edge nan 0", line)
 
 

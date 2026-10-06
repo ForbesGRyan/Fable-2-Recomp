@@ -45,7 +45,7 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 
 // Clay pass (native scene, render/clay_pass.cpp): vertex pulling from StructuredBuffers
 // (float4 positions, uint32 triangle-list indices, float2 UVs), transformed by the
-// draw's captured rows; flat shading from screen-space derivatives. Textured
+// draw's captured rows; flat shading from screen-space derivatives.
 // A vertex farther from `cut.xyz` than sqrt(cut.w) gets a NaN position, which
 // drops every triangle it belongs to, as the game's instancing shaders do
 // (DrawRecord::cut); cut.w is +inf for every other draw. Textured

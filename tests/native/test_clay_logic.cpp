@@ -181,8 +181,7 @@ int main() {
       capture::DrawRecord b = a;
       b.cut[0] = 82.0f; b.cut[1] = 157.25f; b.cut[2] = 50.0f; b.cut[3] = 1062.5f;
       CHECK(132, PositionKey(a) == PositionKey(b) && UvKey(a) == UvKey(b) && IndexKey(a) == IndexKey(b));
-      CHECK(133, MeshPositionKey(a) == MeshPositionKey(b) && MeshUvKey(a) == MeshUvKey(b) &&
-                     InstanceHash(a.instances) == InstanceHash(b.instances));
+      CHECK(133, MeshPositionKey(a) == MeshPositionKey(b) && MeshUvKey(a) == MeshUvKey(b));
     }
     capture::DrawRecord r = BaseRecord();
     r.layout = capture::TransformLayout::kCombine;

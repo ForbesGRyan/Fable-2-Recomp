@@ -55,8 +55,8 @@ int main() {
   if (!Compile("clay_textured_ps", kClayTexturedPs, "ps_5_0")) return 8;
   // The clay vertex shader drops a vertex past the instancing shaders'
   // distance cut by writing a NaN position: the compiled code must still hold
-  // the four NaN dwords (a compiler may fold NaN expressions away), and it
-  // reads the cut from the cbuffer's eighth register.
+  // the four NaN dwords (a compiler may fold NaN expressions away), and both
+  // shaders that declare the full cbuffer must declare the cut.
   if (!CompiledHas("clay_vs", kClayVs, "vs_5_0", 0x7FC00000u, 4)) return 9;
   if (CompiledHas("clay_ps", kClayPs, "ps_5_0", 0x7FC00000u, 1)) return 10;   // control: no NaN elsewhere
   if (!strstr(kClayVs, "float4 cut;") || !strstr(kClayTexturedPs, "float4 cut;")) return 11;

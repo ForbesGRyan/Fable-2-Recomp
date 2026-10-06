@@ -287,5 +287,23 @@ int main() {
   if (!InstanceBoundsOk(w, 8388607, 20000, 1024)) return 47;    // copy 8191, vertex 1023
   if (InstanceIndex(w, 16777215, &copy, &vertex)) return 48;    // t = 16384: vertex -1
   if (InstanceBoundsOk(w, 16777215, 20000, 1024)) return 49;
+  // Real constants whose reciprocal rounds down: a draw of 0xB636821F95DC9D8E in
+  // native_discovery_20261005_103213.jsonl has c12 = (0x3C064B8A = 0.008196720853,
+  // 122, 2): 122 vertices per copy, first copy 2, largest index 365. That float
+  // is below 1 / 122, so index 122 reaches copy 3 only through the shader's 0.5
+  // (its literal c254.w); without it the index stays in copy 2 as vertex 122.
+  InstanceSet b;
+  b.active = true;
+  const uint32_t inv_bits = 0x3C064B8A;
+  std::memcpy(&b.inv_count, &inv_bits, 4);
+  b.count = 122.0f; b.first = 2.0f; b.bias = 0.5f;
+  if (!InstanceIndex(b, 121, &copy, &vertex) || copy != 2 || vertex != 121) return 70;
+  if (!InstanceIndex(b, 122, &copy, &vertex) || copy != 3 || vertex != 0) return 71;
+  if (!InstanceIndex(b, 365, &copy, &vertex) || copy != 4 || vertex != 121) return 72;
+  if (!InstanceBoundsOk(b, 365, 5, 122)) return 73;
+  InstanceSet nb = b;
+  nb.bias = 0.0f;
+  if (!InstanceIndex(nb, 122, &copy, &vertex) || copy != 2 || vertex != 122) return 74;
+  if (InstanceBoundsOk(nb, 365, 5, 122)) return 75;
   return RealDraw();
 }

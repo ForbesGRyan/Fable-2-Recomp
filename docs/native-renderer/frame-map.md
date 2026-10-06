@@ -553,6 +553,7 @@ Task 8's empty fields had two causes. `ib.obj` was 0 because the menu capture he
 | `kVsUcodeSizeDword` / `kVsUcodeSizeShift` | 1 / 0 (bytes) | `0x8221B80C lwz r11,0x36C(r11); srwi r11,r11,2` into the `IM_LOAD` size field. Gameplay: XXH3_64bits over those bytes equals `[vbind] vs=` with `[vbind] dwords` = size / 4 for 9751 draws (9335 `gpu_load`, 416 `object`) |
 | `kDeviceCommandWriteOffset`, `kImLoadImmediateHeader` | 0x30, 0xC0002B00 | patched-copy path below |
 | `kDevicePsConstantsOffset` | 0x1780 | DrawIndexedVertices `0x8221E148`/`0x8221E14C` and DrawVertices `0x8221C56C`/`0x8221C570` pass r6 = device+0x1780, r5 = 0x4400 to SetPending_AluConstants (`0x8221DF98`): the pixel bank follows the vertex bank (0x780 + 256 * 16). Gameplay: r6 = device+0x1780 in all 15792 raw rows (`ps_bank_ptr`) |
+| `kDeviceBoolConstantsOffset` | 0x2780 | DrawIndexedVertices `0x8221E314..0x8221E324` (`addi r6,r31,0x2780; li r5,0x4900; lis r4,-0x100; bl 0x8221C908`): the register-run writer takes a 40-bit mask here, so registers `0x4900..0x4927` (8 dwords of bool constants, then the loop constants) are shadowed from +0x2780, right after the pixel bank; the other five draw builders make the same call (`0x8221C738`, `0x82206304`, `0x82207F38`, `0x82218164`, `0x8221CC4C`). Runtime (section 12, "The `cexec b0` block"): bit 0 of the first dword, vertex `b0`, is set in 32 of the 19,256 draw rows of `native_discovery_20261006_110021`, all of two shaders with a `cexec b0` block. The loop constants read 0 in every row, also for shaders with a loop; that part is not established |
 | `kPsDeviceFieldOffset` | 0x3194 | real SetPixelShader store `0x82208D6C`, flush load `0x8221B18C`. Used only when device+0x3198 (vertex) is set; see "Pixel shader microcode" |
 | `kPsHeaderOffset`, `kPsRecordOffsetField` | 0x28, 0x18 | record = obj + obj[0x40] + 0x28 (`0x8221B32C lwz r11,0x40(r29)`, `0x8221B334 add`, `0x8221B338 lwz r11,0x28(r11)`; `0x82221A24..0x82221A30` in GpuLoadShaders); header = obj+0x28 also at `0x8221B2F8`/`0x82221BEC` (`addi r4,rN,0x28`) and `0x82208D90`. One record, no variants |
 | `kPsUcodeBaseDword` | 6 | `0x8221B330 lwz r10,0x18(r29)`, `0x82221A28 lwz r10,0x18(r30)` |
@@ -1156,6 +1157,136 @@ Screenshots (window shots, native view at 95 s, against the view-off shot of the
 - Every card is an opaque rectangle with the texture's black cut-out background: the clay pass has no alpha test. The plants stand still (no sway, no push).
 - Before the UV change the same meshes were pale clay on pale clay ground and could hardly be told apart from the terrain (`fable_2_165.log` run).
 - **Split, 70 s and 95 s.** The clay half is the right half: it shows the right-bank row and the grass under the planks; the ferns and the grass band are in the emulated half.
+
+### Skinning
+
+Task 9 (2026-10-06). Five vertex shaders blend bone rows from the palette on fetch slot 92: `0xD4D558DA6A82BDC8` (four bones per vertex; 23 to 31 draws per frame in the bridge scene, 826 of the capture's in-scene rows), `0x3A0F9098B839DDBC`, `0x82F6433A69263C75`, `0x9ED0BA440DBD51D4` (four bones) and `0x5F4416192E87005F` (one bone).
+
+**Status: no skin entry is in the table yet.** The reading below gives the game's own skinned positions vertex for vertex, the runtime reproduces them, and a trial build draws the characters in their pose. But `position_check.py` prints REJECT for the `0xD4D5...` candidate, on the bone orthonormality maximum: one bone of one mesh is scaled by the game ("The checker" below). The evidence rule has an exception path for the in-clip share only, so adding the entry needs a ruling. Until then `0xD4D5...` keeps its bind-pose entry (`deformed`) and the other four keep theirs. The candidates are quoted under "Candidate entries".
+
+What `0xD4D5...` draws in the bridge scene (capture rows by vertex buffer, with the candidate's positions projected over the view-off screenshot): the hero (body `0x1BF18DC0`, 5163 vertices, 87-bone palette, five index ranges; head `0x1CD2C040`, 3482 vertices, 90 bones; hair `0x1BED81C0`, 5224 vertices, 36 bones; five smaller meshes with palettes of 38 to 90 bones, by their place on screen the boots, the belt, the hands and one at the eyes), the dog (`0x1C0F0040`, 4337 vertices, 90 bones, 80 used), the crows on the right-hand railing (`0x1AA74600`, 2334 vertices, 22 bones, two draws per frame), a flock of small birds among the birches (`0x1C13A380`, 412 vertices, 3 bones, about six draws per frame), and one mesh below the view that was not identified (`0x1A972940`, 3347 vertices, 4 bones, three draws per frame). Pixel shaders `0x8D90...` (521 rows) and `0x401A...` (305 rows: the hair, the small mesh at the eyes, the small birds).
+
+**Reading of `0xD4D5...`** (`out\shader_dump\shader_D4D558DA6A82BDC8.ucode.vert`; fetch ordinals in `DecodeVertexFetches` order).
+
+- Fetches from vf0 (slot 95, 7 dwords per vertex): position `vfetch_full r7.yxwz`, half4 (instr 9, fetch 0); bone indices `vfetch_mini r2`, integer 8_8_8_8 at dword 3 (instr 11, fetch 2); weights `vfetch_mini r4.zyxw`, normalized 8_8_8_8 at dword 4 (instr 12, fetch 3).
+- Rows from vf3 (slot 92, 6 dwords per bone, half4 at dwords 0, 2, 4), every one fetched `yxwz`:
+
+  | Bone index | Row 0, 1, 2 | Instr | Fetches | Weight | Instr of the three `mul`/`mad` |
+  |---|---|---|---|---|---|
+  | `r2.x` | `r10`, `r11`, `r12` | 16-18 | 7-9 | `r4.z` | 40, 39, 38 |
+  | `r2.y` | `r15`, `r14`, `r13` | 19-21 | 10-12 | `r4.y` | 35, 36, 37 |
+  | `r2.z` | `r16`, `r17`, `r18` | 22-24 | 13-15 | `r4.x` | 34, 33, 32 |
+  | `r2.w` | `r1`, `r9`, `r6` | 25-27 | 16-18 | `r4.w` | 29, 30, 31 |
+
+  So the (index, weight) register components pair as (x, z), (y, y), (z, x), (w, w). The weight fetch is `zyxw`, so that is byte k of the index word with byte k of the weight word.
+- `r2 = cndeq(c255.xxxy, r7.zxyy, c255.yyyy) = (p.z, p.x, p.y, 1)` (instr 28; `c255 = (0, 1, 0.5, 0)`, "Literals" above), with `p = r7` as fetched.
+- The three sums are held permuted and the `dp4` operands undo it. Row 0 in `r1`: as fetched (29), `yxzw` (34, 35), as fetched again (40: `mad r1, r10, r4.zzzz, r1.yxzw`). Row 1 in `r9`: `xzyw` (30, 33, 36), then `wxzy` (39: `mad r9, r11.wxzy, r4.zzzz, r9.wxyz`). Row 2 in `r6`: `xzyw` throughout (31, 32, 37, 38). Then `r4.x = dp4(r1.zxyw, r2)`, `r4.y = dp4(r9.zywx, r2)`, `r4.z = dp4(r6.yxzw, r2)` (41-43), and each is `A.z p.z + A.x p.x + A.y p.y + A.w` for the summed row `A` in the order it was fetched.
+- `r4 = cndeq(c255.xxxy, r4.zxyy, c255.yyyy)` (70), `oPos = dp4(c0..c3 .zxyw, r4)` (71-74): `c0..c3` (dot) on `(dot(M0, p), dot(M1, p), dot(M2, p), 1)`, `M_k = sum_j w_j row_k(bone_j)`.
+- Under 8in32 a half4 fetched `yxwz` is the memory order `(m0, m1, m2, m3)` (section 9). So the rows are read `yxwz` (the fetches' own swizzle) and the position `yxw1` (the entry's existing `pos_swizzle`; the fetch's own `w` is replaced by 1 at instr 28).
+
+**Candidate entries** (not in `vs-transforms.json`):
+
+| Vertex shader | `"skin"` | Generated line |
+|---|---|---|
+| `0xD4D5...` | `{"index_fetch": 2, "weight_fetch": 3, "row_fetches": [7, 8, 9], "row_swizzles": ["yxwz", "yxwz", "yxwz"], "pairs": [["x", "z"], ["y", "y"], ["z", "x"], ["w", "w"]]}`, `pos_swizzle` `yxw1` kept, `deformed` removed | `FABLE2_VS_SKIN(0xD4D558DA6A82BDC8ull, 2, 3, 7, 8, 9, 0x4C1, 0x4C1, 0x4C1, 4, 0, 2, 1, 1, 2, 0, 3, 3)` |
+| `0x3A0F...` | the same with `index_fetch` 1, `weight_fetch` 2, `row_fetches` `[4, 5, 6]` | `(..., 1, 2, 4, 5, 6, 0x4C1, 0x4C1, 0x4C1, 4, 0, 2, 1, 1, 2, 0, 3, 3)` |
+| `0x82F6...`, `0x9ED0...` | the same with `index_fetch` 1, `weight_fetch` 2, `row_fetches` `[3, 4, 5]` | `(..., 1, 2, 3, 4, 5, 0x4C1, 0x4C1, 0x4C1, 4, 0, 2, 1, 1, 2, 0, 3, 3)` |
+| `0x5F44...` | `{"index_fetch": 1, "index_component": "x", "row_fetches": [2, 3, 4], "row_swizzles": ["yxwz", "yxwz", "yxwz"]}` | `(..., 1, -1, 2, 3, 4, 0x4C1, 0x4C1, 0x4C1, 1, 0, 0, 0, 0, 0, 0, 0, 0)` |
+
+**The other four shaders.** Each fetches the position `yxw1` from vf0 (so no `pos_swizzle`), the index word at dword 3, and its rows `yxwz` from vf3; none is drawn in the main scene of the bridge capture, so none has stream dumps or a `position_check.py` line.
+
+| Vertex shader | Fetches (instr; ordinals) | Blend (instr) | Final `dp4` (instr) | `cexec b0` | Where it is drawn |
+|---|---|---|---|---|---|
+| `0x3A0F...` | position `r2` (6; 0), indices `r3` (7; 1), weights `r5.zyxw` (8; 2); rows by `r3.x` `r6`/`r7`/`r8` (10-12; 4-6), `r3.y` `r11`/`r10`/`r9` (13-15), `r3.z` `r12`/`r13`/`r14` (16-18), `r3.w` `r1`/`r4`/`r3` (19-21) | `r3.w` with `r5.w` (22-24), `r3.z` with `r5.x` (25-27), `r3.y` with `r5.y` (28-30), `r3.x` with `r5.z` (31-33); row 0 held `xzyw`, `yzxw` (27, 28), `xzyw` (33), rows 1 and 2 `xzyw` | `dp4(r1/r4/r3 .yxzw, r2.zxyw)` (34-36); `oPos` 38-42 | 37: position replaced by the texture coordinate | 1303 rows, all outside the scene, pixel shader `0x3347...`; its 4 vertex buffers are all also drawn by `0xD4D5...` in scene |
+| `0x82F6...` | position `r1` (5; 0), indices `r2` (6; 1), weights `r4.zyxw` (7; 2); rows by `r2.x` `r5`/`r6`/`r7` (8-10; 3-5), `r2.y` `r10`/`r9`/`r8` (11-13), `r2.z` `r11`/`r12`/`r13` (14-16), `r2.w` `r0`/`r3`/`r2` (17-19) | `r2.w` with `r4.w` (20-22), `r2.z` with `r4.x` (23-25), `r2.y` with `r4.y` (26-28), `r2.x` with `r4.z` (29-31); row 0 held `xzyw`, `yzxw` (25, 26), `xzyw` (31), rows 1 and 2 `xzyw` | `dp4(r0/r3/r2 .yxzw, r1.zxyw)` (32-34); `oPos` 36-40 | 35: position set to zero | 489 rows, all outside the scene, depth only; its 8 vertex buffers are all also drawn by `0xD4D5...` in scene |
+| `0x9ED0...` | as `0x82F6...` (5-19) | the same pairs (20-31); row 0 held as fetched, `yxzw` (25, 26), as fetched (31), rows 1 and 2 `xzyw` | `dp4(r0.zxyw, r1.zxyw)`, `dp4(r3/r2 .yxzw, r1.zxyw)` (32-34); `r0` 36-40, `oPos = r0` (41) | 35: position set to zero | not in this capture or in `native_discovery_20261002_194918` |
+| `0x5F44...` | position `r1` (4; 0), index `r2.x___` (5; 1); rows `r0`/`r3`/`r2` (6-8; 2-4) | none: one bone, weight 1 | `dp4(r0/r3/r2 .zxyw, r1.zxyw)` (9-11); `oPos` 13-17 | 12: position set to zero | 25 rows, all outside the scene, depth only; its one vertex buffer (`0x1C138900`, 240 vertices, the dog's eyes) is drawn in scene by `0xA1F7...` |
+
+All four give `dot(row_k as fetched, (p, 1))` with the pairs of `0xD4D5...`; `0x5F44...` is the depth-only form of `0xA1F7...`. In the older capture `native_discovery_20261002_155634` `0x3A0F...` and `0x82F6...` had in-scene rows (90 of 270 and 60 of 150), so they can reach the clay pass; `user-checks.md` check 10 asks for a capture with stream dumps.
+
+**The `cexec b0` block.** With `b0` set, `0xD4D5...` replaces the blended position by the texture coordinate: `r4.xy = r5.xy` (the `16_16_FLOAT` of instr 13), `r4.z = 0` (instr 69, `sgts` of `-|r0.x|`), so the mesh is drawn flat in its UV space.
+
+- Where the constant is. The device shadows registers `0x4900..0x4927` (8 dwords of bool constants, then the loop constants) at +0x2780, right after the pixel constant bank. `DrawIndexedVertices` flushes it with the register-run writer: `0x8221E314 addi r6,r31,0x2780; li r5,0x4900; lis r4,-0x100; bl 0x8221C908` (a 40-bit mask); the other five draw builders do the same (`0x8221C738`, `0x82206304`, `0x82207F38`, `0x82218164`, `0x8221CC4C`). `xdk_layout.h` `kDeviceBoolConstantsOffset`; vertex `b0` is bit 0 of the first dword.
+- Discovery draw rows now carry `"vbool"`, that dword. Capture **`native_discovery_20261006_110021`** (autoplay, bridge scene, 16 frames, every draw): 19,256 draw rows, `vbool` 1 in 32 of them and 0 in all others. The 32 are two consecutive draws per frame outside the main scene, both of the dog's body mesh (`0x1C0F0040`, 9576 indices): one of vertex shader `0xEBA6CC6389B0548D` and one of `0xD4D5...` (pixel shader `0x401A...`). Both shaders have the block; no other row has the bit.
+- In scene: `b0` is 0 in 400 of 400 `0xD4D5...` rows (23, 25 or 27 per frame) and in 48 of 48 `0xA1F7...` rows. Outside the scene it is 0 in all 560 `0x3A0F...`, 208 `0x82F6...` and 16 `0x5F44...` rows.
+- So the block is not taken by any draw the clay pass records, and the record needs no flag for it. Limits: this is the device shadow, not the GPU register file (the SDK is not changed by this plan). That the bit shows exactly on draws of shaders that test it, in a pass that draws one mesh, is the evidence that the shadow is live; section 9's GPU-side log read 0 for `0xA1F7...` as well. The loop constants in the same shadow read 0 in every row, also for the four shaders with a `loop i0`; that part is not established and is not in the rows.
+
+**The game's own skinning** (the independent check of pairs, row order and component order). The stream the dog's fur shells draw (`0x7C57...`, slot 95, float3, 20 bytes per vertex, 4337 vertices; "Wind and displacement" above found that it holds posed positions and changes every frame) is the game's posed copy of the dog's body mesh: same vertex count and order as the `0xD4D5...` draw of `0x1C0F0040`, and both draws have the same `c0..c3` (32 of 32 frames). How the game fills it was not traced. For each of the 32 frames in which the capture sampled the dog's `0xD4D5...` draw, the candidate's positions of all 4337 vertices were compared with that stream:
+
+| Compared with the stream of | Vertices | Distance: median | p99 | Largest |
+|---|---|---|---|---|
+| the next frame | 138,784 | 0.0000 | 0.0000 | 0.0000 (largest component difference 2.4e-07) |
+| the same frame | 138,784 | 0.0009 | 0.0126 | 0.290 |
+| the frame before | 138,784 | 0.0018 | 0.0313 | 0.427 |
+| two frames later | 138,784 | 0.0008 | 0.0223 | 0.350 |
+
+The stream drawn in frame N + 1 is what the candidate computes in frame N, to float rounding, in every vertex (80 of the palette's 90 bones are used). The mesh is 1.4 units long. Controls against the next frame's stream, each a single change to the candidate:
+
+| Control | Median | p99 |
+|---|---|---|
+| bind pose (no skin) | 0.593 | 0.883 |
+| pairs (x, x), (y, y), (z, z), (w, w) | 0.324 | 0.747 |
+| pairs (y, z), (x, y), (z, x), (w, w) | 0.013 | 0.747 |
+| the fourth pair left out | 0.000 | 0.060 |
+| row fetches `[7, 9, 8]` / `[8, 7, 9]` / `[8, 9, 7]` / `[9, 7, 8]` / `[9, 8, 7]` | 0.351 / 0.914 / 0.818 / 0.818 / 0.604 | 0.829 / 1.498 / 1.301 / 1.301 / 0.936 |
+| row swizzles `xywz` / `yxzw` / `wxyz` / `xwyz` / `wyxz` / `ywxz` | 0.719 / 0.284 / 1.160 / 1.065 / 1.067 / 0.471 | 1.024 / 1.689 / 1.489 / 1.680 / 1.658 / 1.920 |
+| `pos_swizzle` `xyw1` / `wxy1` / `yxz1` / `wyx1` / `xwy1` / `ywx1` | 0.719 / 1.160 / 3.591 / 1.065 / 1.067 / 0.471 | 1.024 / 1.489 / 7.988 / 1.680 / 1.658 / 1.920 |
+
+This covers what the offline metrics cannot see: every other row order and component order tried is off by 0.28 units or more at the median.
+
+A second check with a rigid attachment: the dog's eyes are a mesh of `0xA1F7...` (`0x1C138900`, 240 vertices, 0.10 units wide), placed by its own bone and `c0..c3`. In the 16 frames of `native_discovery_20261006_110021`, in world space (`c4..c6` of each draw), an eye vertex is 0.011 units (median; 0.021 at most) from the nearest vertex of the dog's body skinned with the candidate, and 0.18 (0.20 at most) from the bind-pose body. The hero has no `0xA1F7...` part in this scene: the save's hero carries no weapon, and the scene's other two `0xA1F7...` draws are parts of one mesh 141 units away, at the hut on the island. So the check the task was written around, the hero's eyes and sword, has no subject here; the dog's eyes are its equivalent.
+
+**The checker.** `python tools\xdk_sigmatch\position_check.py out\build\win-amd64-release\logs\native_discovery_20261005_103213.jsonl --json docs\native-renderer\vs-transforms.json --entry <candidate> --vs D4D558DA6A82BDC8`:
+
+```
+baseline 0xECD66A10092E6562: share 0.810, accept >= 0.710
+VS 0xD4D558DA6A82BDC8 skin: draws 200, in-clip share 0.825 (accept >= 0.710) REJECT, passed 165, unreadable 0, unsupported 0, bad-index 0, rows 826, bone ortho max 0.764 (<= 0.05), edge ok share 0.998 (>= 0.98) of 95474 edges, edge nan 0, edge draws 200, weight sum min/median/max 1.000/1.000/1.000, bone index max 87 / palette bones 90
+```
+
+The in-clip share (0.825, the same as the bind-pose entry's), the edge share, the weight sums and the bone indices pass. The verdict is REJECT because of the orthonormality maximum, and that maximum is one bone:
+
+- Over all 826 rows the sampled vertices use a bone 5730 times. 5539 of those uses, every bone but one, deviate from orthonormal by at most 0.00072 (median 0.0004).
+- The other 191 are bone 2 of the small birds' mesh (`0x1C13A380`, 3-bone palette), in every one of its rows. Its row 0 has length 0.24 to 1.00 (median 0.63) while rows 1 and 2 have length 0.98 to 1.00: the game scales that bone along one axis. The same bone (row lengths 0.630, 0.998, 0.998) is in 71 rows from frame 14 to frame 119, probably a perched bird; in other rows the factor changes from frame to frame. 159 of the 191 deviate by more than 0.05.
+- No bone has a negative determinant.
+
+The metric was added to catch a row read with the translation inside its 3x3 part. That case looks different: with the rows read `yxzw`, 0 of the 1427 bones of the sample are within 0.05 (median deviation 0.85), against 1392 of 1427 for the candidate. A maximum over all bones cannot tell a wrong reading from one scaled bone.
+
+| Control (`--entry`, 200 draws) | In-clip share | Ortho max | Bones within 0.05 | Edge ok share | Verdict |
+|---|---|---|---|---|---|
+| candidate | 0.825 | 0.764 | 1392 of 1427 | 0.998 | REJECT |
+| pairs (x, x), (y, y), (z, z), (w, w) | 0.825 | 0.764 | 1429 of 1464 | 0.840 | REJECT |
+| pairs (x, w), (y, x), (z, y), (w, z) | 0.825 | 0.001 | 1086 of 1086 | 0.935 | REJECT |
+| row fetches `[8, 7, 9]` | 0.825 | 0.764 | 1392 of 1427 | 0.998 | REJECT |
+| row fetches `[9, 7, 8]` | 0.825 | 0.764 | 1392 of 1427 | 0.998 | REJECT |
+| row swizzles `xywz` | 0.825 | 0.764 | 1392 of 1427 | 0.925 | REJECT |
+| row swizzles `yxzw` | 0.830 | 1.186 | 0 of 1427 | 0.759 | REJECT |
+| `pos_swizzle` `xyw1` | 0.825 | 0.764 | 1392 of 1427 | 0.925 | REJECT |
+| `pos_swizzle` `wxy1` | 0.825 | 0.764 | 1392 of 1427 | 0.851 | REJECT |
+
+The edge share separates the wrong pairings and most wrong orders; a permutation of the rows passes it, as Task 4 found, and is settled by the dump reading and by the game's posed stream above.
+
+**Regression case.** `test_bone_skin.cpp` `RealDraw` (cases 90-108): eight vertices of the dog's draw in frame 3 of the capture with one, two, three and four influences (224 bytes of vertices, the palette cut after bone 26), printed by `position_check.py`'s `cpp_fixture()`. The test selects the skin from the shader's 19 fetches with the candidate's arguments, skins the vertices and compares them within 1e-5 with the checker's positions and with the game's posed stream of the next frame; it also checks that the bind pose, the straight pairing, the first two rows exchanged and the rows read `yxzw` give other positions.
+
+**Runtime.** The weighted path of Task 2 and Task 8 (`SelectSkin` with pairs, `SkinPositions` with four influences, the index and weight words under 8in32) needed no change: it reproduces the fixture at once and the trial build below shows no skip. One fix folded in from Task 8's review: a palette that holds no whole bone made `SkinPositions` fail in the renderer, counted `render-other`. `PaletteBones` (`bone_skin.h`, tests 80-86) counts the whole bones of a palette, and `FillDrawInputs` skips the draw as `skin-unsupported` when there is none.
+
+**Trial build** (the candidate entries applied and built, then removed again; not committed). `.\tools\drive_game.ps1 -Total 120 -Shots "70,95" -GameArgs "--fable2_native_render=true","--fable2_native_view=split"`: committed state `fable_2_176.log`; trial `fable_2_174.log` (split) and `fable_2_175.log` (native view, `-Total 110 -Shots "95"`).
+
+```
+committed [native] capture: frame 2700 captured 987 drawable 951 (deformed 223) skipped {no-transform: 6, unsupported-prim: 30} nested_total 0 | ... | textured 323 untextured by reason {terrain: 567, no-albedo: 61}
+committed [native] clay: drawn 951 (deformed 223) of 951 drawable, skipped_bad_index 0 other 0 | textured 323 of 951 | 2 uploads, 2223 hits, 24.4 MB resident, instanced 135, skinned 3 | hash 0.63 ms, decode 0.03 ms, record 0.25 ms (max total 1.83 ms over 300)
+trial     [native] capture: frame 2700 captured 987 drawable 951 (deformed 194) skipped {no-transform: 6, unsupported-prim: 30} nested_total 0 | ... | textured 323 untextured by reason {terrain: 567, no-albedo: 61}
+trial     [native] capture: frame 2700 drawable by vs {..., 0x475EC9F795E5EDBB(deformed): 30, 0xD4D558DA6A82BDC8(skin): 29, 0xBEAD84BD72072E0E: 24, 0xA5846836C90E1192(deformed): 22}
+trial     [native] clay: drawn 951 (deformed 194) of 951 drawable, skipped_bad_index 0 other 0 | textured 323 of 951 | 5 uploads, 2220 hits, 25.1 MB resident, instanced 135, skinned 32 | hash 0.67 ms, decode 0.12 ms, record 0.26 ms (max total 2.04 ms over 300)
+```
+
+At frame 2700 both runs have 29 `0xD4D5...` draws: `skinned` goes from 3 to 32 and `deformed` from 223 to 194. Captured, drawable, instanced, textured and the skips do not change; `skin-unsupported` appears in neither log. Over the windows of the trial runs `skinned` is 28 to 34 (25 to 31 `0xD4D5...` draws, as birds come and go) and `deformed` stays 194. Cost: 30.0 fps in every 300-frame window after the world is up, in all three runs. Clay pass in the steady state: decode 0.10 to 0.18 ms (0.02 to 0.04 in the committed run), 3 to 7 uploads per logged frame (2), hash 0.38 to 0.67 ms (0.36 to 0.67), slowest frame of a window 1.7 to 3.1 ms (1.8 to 2.0), geometry resident 25.0 to 25.1 MB (24.4), capture median 1.14 to 1.17 ms (1.14 to 1.17), guest work median 7.8 to 8.1 ms (7.6 to 7.9). The one slow frame near scene frame 3016 is in all three (5.1 ms committed, 4.5 and 7.1 ms trial). Not measured: a crowd of characters, and the pose while the hero walks; both need a person at the game once the entries are in.
+
+Screenshots of the trial build (window shots, against the view-off shot of the same autoplay scene at 95 s and the Task 7b native-view shot):
+
+- **Native view, 95 s.** The hero stands as in the emulated frame, seen from behind: arms hanging at his sides with the elbows slightly bent, gloved hands beside the thighs, legs together. In the Task 7b shot his arms are spread wide in the bind pose. The dog sits where the emulated dog sits, with its head raised; before it stood on four legs beside the white outline of its own fur shells. The crow on the right-hand railing is perched with folded wings, the emulated silhouette; before its wings were spread. Nothing is smeared or exploded and nothing new floats in the scene.
+- What looks worse: the dog is now a blotchy mix of its dark textured body and the untextured white fur shells. The shells (`0x7C57...`, drawn without their push along the normal) now lie on the body they belong to and fight it for depth; before they were a separate white shape.
+- Not shown by these shots: the hero's eyes (the camera is behind him) and a sword (this save's hero has none). The small birds are a few pixels each. The hero's head is turned slightly more to the right than in the view-off shot; the shots are from different runs and the idle animation moves the head, so that was not judged.
+- **Split, 70 s and 95 s.** The split runs through the hero: his clay right half continues the emulated left half at the shoulder, the belt, the leg and the boot. Between the two shots the clay half changes in the dog (about 11,000 pixels) and slightly in the hero (about 200), so the clay characters are re-posed as the palettes change.
 
 ## Pending
 

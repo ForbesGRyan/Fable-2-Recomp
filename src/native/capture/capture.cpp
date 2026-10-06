@@ -1168,6 +1168,12 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
                 g_frames_written.load(std::memory_order_relaxed) + 1, HookName(id), args.r[1],
                 args.r[2], args.r[3], args.r[4], device, in_scene ? "true" : "false");
   row += buf;
+  // Vertex bool constants b0..b31 from the device shadow (frame-map section
+  // 12, "The cexec b0 block"): bit 0 of "vbool" is b0.
+  if (const uint8_t* bools = ReadVirtual(device + xdk::kDeviceBoolConstantsOffset, 4)) {
+    std::snprintf(buf, sizeof(buf), ",\"vbool\":\"0x%08X\"", LoadBe32(bools));
+    row += buf;
+  }
   auto finish = [&](const char* error) {
     if (error) {
       row += ",\"error\":\"";

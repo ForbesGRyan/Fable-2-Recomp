@@ -13,6 +13,9 @@ static_assert(xdk::kDeviceHosCntlOffset == 0x2964 + 4 * (0x2285 - 0x2280));
 // after the 256 x float4 vertex bank.
 static_assert(xdk::kDevicePsConstantsOffset == 0x1780);
 static_assert(xdk::kDevicePsConstantsOffset == xdk::kDeviceVsConstantsOffset + 256 * 16);
+// The bool constants (registers 0x4900..0x4907) follow the pixel bank.
+static_assert(xdk::kDeviceBoolConstantsOffset == 0x2780);
+static_assert(xdk::kDeviceBoolConstantsOffset == xdk::kDevicePsConstantsOffset + 256 * 16);
 // Pixel shader object (frame-map section 8, "Pixel shader microcode"): the
 // shader flush reads obj[0x40] (record offset, 0x8221B32C), obj[0x18] (base,
 // 0x8221B330), record dword 0 at obj + rec + 0x28 (0x8221B338) and the byte size

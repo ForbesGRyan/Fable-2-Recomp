@@ -45,6 +45,19 @@ inline constexpr uint32_t kDeviceVsConstantsOffset = 0x780;
 // r5 = 0x4400 to SetPending_AluConstants (0x8221DF98), right after the vertex
 // bank: the two banks are contiguous (0x780 + 256 * 16 = 0x1780).
 inline constexpr uint32_t kDevicePsConstantsOffset = 0x1780;
+// Shadow of the bool constants (registers 0x4900..0x4907; vertex b0..b31 are
+// bits 0-31 of the first dword), right after the pixel bank. All six draw
+// builders flush it with the register-run writer when its dirty bit is set:
+// DrawIndexedVertices 0x8221E314..0x8221E324 (`addi r6,r31,0x2780;
+// li r5,0x4900; lis r4,-0x100; bl 0x8221C908`: a 40-bit mask, register r5 + n
+// from r6 + 4*n, so the 32 loop constants 0x4908.. follow at +0x27A0), and the
+// same at 0x8221C738 (DrawVertices), 0x82206304, 0x82207F38, 0x82218164,
+// 0x8221CC4C. Runtime (frame-map section 12): bit 0 is set in 32 of 19,256
+// draw rows, all of two shaders with a `cexec b0` block. The loop constants
+// read 0 in every row, also for the four shaders with a `loop i0`, so that
+// part of the shadow is not established. Used as evidence only (discovery
+// draw rows "vbool").
+inline constexpr uint32_t kDeviceBoolConstantsOffset = 0x2780;
 
 // --- Main-scene bracket (frame-map section 8, "Main-scene bracket") ---------
 // Device flag byte +0x2ABC; bit 0x20 = inside BeginTiling/EndTiling (the

@@ -138,8 +138,40 @@
     "layout": "dot",
     "pos_fetch": -1,
     "manual": true,
-    "deformed": true,
-    "evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: bone blend from vf3); base-0 check 1.000",
+    "skin": {
+      "index_fetch": 1,
+      "weight_fetch": 2,
+      "row_fetches": [
+        4,
+        5,
+        6
+      ],
+      "row_swizzles": [
+        "yxwz",
+        "yxwz",
+        "yxwz"
+      ],
+      "pairs": [
+        [
+          "x",
+          "z"
+        ],
+        [
+          "y",
+          "y"
+        ],
+        [
+          "z",
+          "x"
+        ],
+        [
+          "w",
+          "w"
+        ]
+      ]
+    },
+    "evidence": "dump: position vfetch_full r2.yxw1 of vf0 (instr 6, fetch 0); indices r3 = integer 8_8_8_8 at dword 3 (instr 7, fetch 1); weights r5.zyxw = normalized 8_8_8_8 at dword 4 (instr 8, fetch 2); rows from vf3 (slot 92), all fetched yxwz: bone r3.x rows r6/r7/r8 (instr 10-12, fetches 4-6), r3.y r11/r10/r9 (13-15), r3.z r12/r13/r14 (16-18), r3.w r1/r4/r3 (19-21). Blend: bone r3.w times r5.w (22-24), r3.z times r5.x (25-27), r3.y times r5.y (28-30), r3.x times r5.z (31-33): pairs (x, z), (y, y), (z, x), (w, w). Row 0 is held xzyw, yzxw (27-28), xzyw (33), rows 1 and 2 xzyw; r1.x/y/z = dp4(r1/r4/r3 .yxzw, r2.zxyw) (34-36) = dot(row k as fetched, (p, 1)); oPos = dp4(c0..c3 .zxyw, cndeq(c255.xxxy, r1.zxyy, c255.yyyy)) (38-42). cexec b0 (instr 37): uv-space position, as 0xD4D5.... Layout identical to 0xD4D5...: the pairs and the row and position orders are the ones the game's own posed copy of the dog's mesh confirms there (frame-map section 12, Skinning). Not sampled in scene: 1303 rows of native_discovery_20261005_103213.jsonl, all outside the main-scene bracket (no stream dumps, so no position_check line); its 4 vertex buffers are all also drawn by 0xD4D5... in scene; vertex bool constant 0 is 0 in 560 of 560 rows (native_discovery_20261006_110021)",
+    "bind_pose_evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: bone blend from vf3); base-0 check 1.000",
     "finder": {
       "20261002_111154+111917": {
         "base": 0,
@@ -323,8 +355,22 @@
     "layout": "dot",
     "pos_fetch": -1,
     "manual": true,
-    "deformed": true,
-    "evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: bone blend from vf3); base-0 check 0.938",
+    "skin": {
+      "index_fetch": 1,
+      "index_component": "x",
+      "row_fetches": [
+        2,
+        3,
+        4
+      ],
+      "row_swizzles": [
+        "yxwz",
+        "yxwz",
+        "yxwz"
+      ]
+    },
+    "evidence": "dump: position vfetch_full r1.yxw1 of vf0 (instr 4, fetch 0); bone index r2.x = x of the integer 8_8_8_8 at dword 3 (instr 5, fetch 1); the bone's rows r0/r3/r2 from vf3 (slot 92), fetched yxwz (instr 6-8, fetches 2-4); r0.x/y/z = dp4(r0/r3/r2 .zxyw, r1.zxyw) (9-11) = dot(row k as fetched, (p, 1)): one bone, weight 1; oPos = dp4(c0..c3 .zxyw, cndeq(c255.xxxy, r0.zxyy, c255.yyyy)) (13-17). cexec b0 (instr 12) zeroes the position. The depth-only form of 0xA1F7... (same index dword, same rows). Not sampled in scene: 25 rows of native_discovery_20261005_103213.jsonl, all outside the main-scene bracket and depth-only (no stream dumps, so no position_check line); its one vertex buffer (240 vertices, the dog's eyes) is drawn in scene by 0xA1F7..., whose skin entry passes (ortho 0.001, edges 1.000); vertex bool constant 0 is 0 in 16 of 16 rows (native_discovery_20261006_110021)",
+    "bind_pose_evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: bone blend from vf3); base-0 check 0.938",
     "finder": {
       "20261002_111154+111917": {
         "base": 14,
@@ -544,8 +590,40 @@
     "layout": "dot",
     "pos_fetch": -1,
     "manual": true,
-    "deformed": true,
-    "evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: bone blend from vf3); base-0 check 1.000",
+    "skin": {
+      "index_fetch": 1,
+      "weight_fetch": 2,
+      "row_fetches": [
+        3,
+        4,
+        5
+      ],
+      "row_swizzles": [
+        "yxwz",
+        "yxwz",
+        "yxwz"
+      ],
+      "pairs": [
+        [
+          "x",
+          "z"
+        ],
+        [
+          "y",
+          "y"
+        ],
+        [
+          "z",
+          "x"
+        ],
+        [
+          "w",
+          "w"
+        ]
+      ]
+    },
+    "evidence": "dump: position vfetch_full r1.yxw1 of vf0 (instr 5, fetch 0); indices r2 = integer 8_8_8_8 at dword 3 (instr 6, fetch 1); weights r4.zyxw = normalized 8_8_8_8 at dword 4 (instr 7, fetch 2); rows from vf3 (slot 92), all fetched yxwz: bone r2.x rows r5/r6/r7 (instr 8-10, fetches 3-5), r2.y r10/r9/r8 (11-13), r2.z r11/r12/r13 (14-16), r2.w r0/r3/r2 (17-19). Blend: bone r2.w times r4.w (20-22), r2.z times r4.x (23-25), r2.y times r4.y (26-28), r2.x times r4.z (29-31): pairs (x, z), (y, y), (z, x), (w, w). Row 0 is held xzyw, yzxw (25-26), xzyw (31), rows 1 and 2 xzyw; r0.x/y/z = dp4(r0/r3/r2 .yxzw, r1.zxyw) (32-34) = dot(row k as fetched, (p, 1)); oPos = dp4(c0..c3 .zxyw, cndeq(c255.xxxy, r0.zxyy, c255.yyyy)) (36-40). cexec b0 (instr 35) zeroes the position. Layout identical to 0xD4D5...: the pairs and the row and position orders are the ones the game's own posed copy of the dog's mesh confirms there (frame-map section 12, Skinning). Not sampled in scene: 489 rows of native_discovery_20261005_103213.jsonl, all outside the main-scene bracket and depth-only (no stream dumps, so no position_check line); its 8 vertex buffers are all also drawn by 0xD4D5... in scene; vertex bool constant 0 is 0 in 208 of 208 rows (native_discovery_20261006_110021)",
+    "bind_pose_evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: bone blend from vf3); base-0 check 1.000",
     "finder": {
       "20261002_111154+111917": {
         "base": 0,
@@ -574,8 +652,40 @@
     "layout": "dot",
     "pos_fetch": -1,
     "manual": true,
-    "deformed": true,
-    "evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: bone blend from vf3); base-0 check 1.000",
+    "skin": {
+      "index_fetch": 1,
+      "weight_fetch": 2,
+      "row_fetches": [
+        3,
+        4,
+        5
+      ],
+      "row_swizzles": [
+        "yxwz",
+        "yxwz",
+        "yxwz"
+      ],
+      "pairs": [
+        [
+          "x",
+          "z"
+        ],
+        [
+          "y",
+          "y"
+        ],
+        [
+          "z",
+          "x"
+        ],
+        [
+          "w",
+          "w"
+        ]
+      ]
+    },
+    "evidence": "dump: position vfetch_full r1.yxw1 of vf0 (instr 5, fetch 0); indices r2 = integer 8_8_8_8 at dword 3 (instr 6, fetch 1); weights r4.zyxw = normalized 8_8_8_8 at dword 4 (instr 7, fetch 2); rows from vf3 (slot 92), all fetched yxwz: bone r2.x rows r5/r6/r7 (instr 8-10, fetches 3-5), r2.y r10/r9/r8 (11-13), r2.z r11/r12/r13 (14-16), r2.w r0/r3/r2 (17-19). Blend: bone r2.w times r4.w (20-22), r2.z times r4.x (23-25), r2.y times r4.y (26-28), r2.x times r4.z (29-31): pairs (x, z), (y, y), (z, x), (w, w). Row 0 is held as fetched, yxzw (25-26), as fetched (31), rows 1 and 2 xzyw; r0.x = dp4(r0.zxyw, r1.zxyw), r0.y/z = dp4(r3/r2 .yxzw, r1.zxyw) (32-34) = dot(row k as fetched, (p, 1)); r0 = dp4(c0..c3 .zxyw, cndeq(c255.xxxy, r0.zxyy, c255.yyyy)) (36-40), oPos = r0 (41). cexec b0 (instr 35) zeroes the position. Layout identical to 0xD4D5...: the pairs and the row and position orders are the ones the game's own posed copy of the dog's mesh confirms there (frame-map section 12, Skinning). Not sampled: no row in native_discovery_20261005_103213.jsonl or native_discovery_20261002_194918 (out of scene in native_discovery_20261002_155634)",
+    "bind_pose_evidence": "dump: oPos = dp4(c0..c3, position derived from the fetch: bone blend from vf3); base-0 check 1.000",
     "finder": {
       "20261002_111154+111917": {
         "base": 0,
@@ -746,9 +856,41 @@
     "layout": "dot",
     "pos_fetch": -1,
     "manual": true,
-    "deformed": true,
     "pos_swizzle": "yxw1",
-    "evidence": "dump: four-bone blend, oPos = dp4(c0..c3, blended position) (instr 71-74); undeformed position = bind pose, already placed by c0..c3 (weighted 4-bone skinning is a later sub-project). The fetch's own swizzle 0x4C1 reads w from the bone-index dword (0, 4 or 8), which exploded the clay mesh, so the fetch is read as yxw1 (0xAC1, the override 0x79EA... and 0xA1F7... carry). Confirmed visually: bodies line up with the emulated image in split/overlay (user, frame-map section 10). Matrix-finder base 0 / dot, weak evidence (discovery rows decode without pos_swizzle; a bind-pose mesh near its origin passes for most placing matrices): score 1.000 on 480 samples (native_discovery_20261002_155634.jsonl, 30 frames, 16 draws per frame, first 64 decoded vertices of each draw projected with that draw's own device-bank c0..c3, at least half inside clip; all in front 1.000). Draws land on the hero body (frame 16, VBs 470020672, 470507008, 468799552) and Rose; the same VBs are redrawn by deformed 0x3A0F.../0x82F6... (glow pass). Report: .superpowers/sdd/2026-10-01-native-renderer-clay-pass/character-bug-report.md",
+    "skin": {
+      "index_fetch": 2,
+      "weight_fetch": 3,
+      "row_fetches": [
+        7,
+        8,
+        9
+      ],
+      "row_swizzles": [
+        "yxwz",
+        "yxwz",
+        "yxwz"
+      ],
+      "pairs": [
+        [
+          "x",
+          "z"
+        ],
+        [
+          "y",
+          "y"
+        ],
+        [
+          "z",
+          "x"
+        ],
+        [
+          "w",
+          "w"
+        ]
+      ]
+    },
+    "evidence": "dump: position vfetch_full r7.yxwz of vf0 (instr 9, fetch 0); bone indices r2 = the integer 8_8_8_8 at dword 3 (instr 11, fetch 2); weights r4.zyxw = the normalized 8_8_8_8 at dword 4 (instr 12, fetch 3); three half4 rows per bone from vf3 (slot 92), 6 dwords per bone, offsets 0/2/4, all twelve fetched yxwz: bone r2.x rows r10/r11/r12 (instr 16-18, fetches 7-9), r2.y r15/r14/r13 (19-21), r2.z r16/r17/r18 (22-24), r2.w r1/r9/r6 (25-27). r2 = cndeq(c255.xxxy, r7.zxyy, c255.yyyy) = (p.z, p.x, p.y, 1) (instr 28). Blend: the rows of bone r2.w times r4.w (29-31), of r2.z times r4.x (32-34), of r2.y times r4.y (35-37), of r2.x times r4.z (38-40), so the (index, weight) register pairs are (x, z), (y, y), (z, x), (w, w): byte k of the index word with byte k of the weight word. The sums are held permuted (row 0 in r1: yxzw at 34-35, as fetched after 40; row 1 in r9: xzyw at 30-36, wxzy after 39; row 2 in r6: xzyw) and the dp4 operands undo it: r4.x = dp4(r1.zxyw, r2), r4.y = dp4(r9.zywx, r2), r4.z = dp4(r6.yxzw, r2) (41-43), each dot(row k as fetched, (p.x, p.y, p.z, 1)). oPos = dp4(c0..c3 .zxyw, cndeq(c255.xxxy, r4.zxyy, c255.yyyy)) (70-74): clip = c0..c3 (dot) x blended rows x (p, 1), rows read yxwz, position yxw1. cexec b0 (instr 69, uv-space position): vertex bool constant 0 (device shadow +0x2780) is 0 in 400 of 400 in-scene rows and 1 only in the one draw per frame outside the scene (native_discovery_20261006_110021, 16 frames, every draw). position_check on native_discovery_20261005_103213.jsonl (baseline 0.810, accept >= 0.710): draws 200, in-clip share 0.825, bone ortho share 0.9755 (1392 of 1427, >= 0.90), max 0.764, edge ok share 0.998 (>= 0.98) of 95474 edges, weight sum min/median/max 1.000/1.000/1.000, bone index max 87 / palette bones 90, unreadable 0, unsupported 0: ACCEPT (all 826 rows: share 0.9723, 5571 of 5730). The gate is the share of bone uses within 0.05 of orthonormal, at least 0.90 (the rule as amended twice in Task 9: a maximum over every bone, then 0.98 of the uses, could not pass a correct skin). The uses outside 0.05 and the maximum are one bone: bone 2 of the small birds' mesh (vertex buffer 0x1C13A380, 412 vertices, 3-bone palette, drawn about six times a frame), which the game scales along one axis (row 0 length 0.24 to 1.00, rows 1 and 2 0.98 to 1.00; 159 of its 191 uses deviate by more than 0.05). Every other bone, 5539 uses in the capture's 826 rows, deviates by at most 0.0007, no bone has a negative determinant, and 138 of the 139 distinct (vertex buffer, bone) pairs are orthonormal in every use. Independent of the reading: the stream the dog's fur shells (0x7C57...) draw in frame N + 1 holds the game's own posed copy of the dog's 4337 vertices, and the entry's positions of frame N equal it within 2.4e-07 in all 138784 vertices of 32 frames (bind pose: median 0.59 units away; the straight pairing 0.32; the other row orders and row swizzles tried 0.28 to 1.16). Fallback if the pose is ever wrong: remove \"skin\" and set \"deformed\": true (bind pose, see bind_pose_evidence)",
+    "bind_pose_evidence": "dump: four-bone blend, oPos = dp4(c0..c3, blended position) (instr 71-74); undeformed position = bind pose, already placed by c0..c3 (weighted 4-bone skinning is a later sub-project). The fetch's own swizzle 0x4C1 reads w from the bone-index dword (0, 4 or 8), which exploded the clay mesh, so the fetch is read as yxw1 (0xAC1, the override 0x79EA... and 0xA1F7... carry). Confirmed visually: bodies line up with the emulated image in split/overlay (user, frame-map section 10). Matrix-finder base 0 / dot, weak evidence (discovery rows decode without pos_swizzle; a bind-pose mesh near its origin passes for most placing matrices): score 1.000 on 480 samples (native_discovery_20261002_155634.jsonl, 30 frames, 16 draws per frame, first 64 decoded vertices of each draw projected with that draw's own device-bank c0..c3, at least half inside clip; all in front 1.000). Draws land on the hero body (frame 16, VBs 470020672, 470507008, 468799552) and Rose; the same VBs are redrawn by deformed 0x3A0F.../0x82F6... (glow pass). Report: .superpowers/sdd/2026-10-01-native-renderer-clay-pass/character-bug-report.md",
     "task11_rejected": "base-0 check 0.534 on early captures that read the first vertices of the stream, not of the draw; finder window 10 contradicts the dump",
     "finder": {
       "20261002_111154+111917": {

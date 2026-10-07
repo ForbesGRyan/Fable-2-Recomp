@@ -31,7 +31,8 @@
 #
 # -BootSave Hero003: the game loads that save itself, with no menu input (FABLE2_BOOT_SAVE,
 # src/core/boot_save.h). The default key plan is dropped (give -Plan to add steps; times are
-# still seconds since start). If <ExeDir>\saves-pristine\Hero003 exists, the live save folder
+# still seconds since start), and a line says which plan the game is given ("plan for the
+# game: none" without -Plan). If <ExeDir>\saves-pristine\Hero003 exists, the live save folder
 # is first moved to <ExeDir>\saves-replaced\<timestamp>\Hero003 and the pristine copy is put in
 # its place, so every run starts from the same save. Nothing is ever deleted. The boot logo
 # videos are skipped (FABLE2_SKIP_LOGOS=1) unless -Env sets FABLE2_SKIP_LOGOS to 0. Measured
@@ -100,8 +101,11 @@
 #    -UserPresent was used). Nothing is written into an -ExeDir the driver refused.
 #  Exit codes: 0 clean (or unchecked with -UserPresent), 2 refused before the gate (an option
 #  combination, any unknown or positional argument, an -ExeDir that is not allowed, a bad plan,
-#  -Shots or -PlanShift), 10 gate refused (nothing launched), 11 disturbed, 12 aborted, 13 game
-#  exited early; 1 is a script error before launch (an ambiguous abbreviation, a missing library).
+#  -Shots or -PlanShift, a -BootSave name that is not HeroNNN, -BootSave with -KeyboardInput or
+#  in test mode, -BootSave without exactly one such save), 10 gate refused (nothing launched),
+#  11 disturbed, 12 aborted (also, with nothing launched: the pristine save could not be put in
+#  place, or the game's log folder could not be listed for the plan check), 13 game exited
+#  early; 1 is a script error before launch (an ambiguous abbreviation, a missing library).
 #  -UserPresent (spelled in full; abbreviations are rejected): ONLY for the person at the keyboard
 #  running this script themselves. It skips the gate and the watch and prints a prominent line
 #  saying so. AGENTS MUST NEVER PASS IT. -KeyboardInput (the user driving with real key presses)
@@ -112,7 +116,7 @@
 #  DISTURBED, RUN ABORTED, GAME EXITED EARLY) starts with "TEST HARNESS " and so does every line
 #  of the run log. They are refused (exit 2) unless -TestHarness and -TestExe are given together
 #  with an explicit -ExeDir that contains no fable_2.exe, never together with -UserPresent,
-#  -KeyboardInput, -GameArgs or -Env, and refused when -TestExe is named like the game (any name
+#  -KeyboardInput, -BootSave, -GameArgs or -Env, and refused when -TestExe is named like the game (any name
 #  containing "fable"), is the built fable_2.exe (same path or same bytes), or sits in a folder
 #  with rexruntime.dll or fable_2.toml. This is a guard against accidents, not against someone who
 #  deliberately builds a disguised copy of the game: the rule that agents start the game only
@@ -216,8 +220,9 @@ if ($Rest.Count) {
   Exit-Run 2
 }
 if ($BootSave) {
-  if ($BootSave -cnotmatch '^Hero\d{3}$') {
-    Write-Output "REFUSED: -BootSave must be HeroNNN (for example Hero003), got '$BootSave'. Nothing launched."
+  # \z and [0-9]: "$" would let a final line feed through, and \d any Unicode digit.
+  if ($BootSave -cnotmatch '^Hero[0-9]{3}\z') {
+    Write-Output (Format-OneLine "REFUSED: -BootSave must be HeroNNN (for example Hero003), got '$BootSave'. Nothing launched.")
     Exit-Run 2
   }
   if ($KeyboardInput) {
@@ -231,7 +236,7 @@ if ($BootSave) {
   # Refused here, before the gate: with a wrong name the game would sit at the menu for the whole run.
   $liveSaves = @(Get-ChildItem -Path (Join-Path $ExeDir "saves\*\4D5307F1\00000001\$BootSave\mainsave.bin") -File -ErrorAction SilentlyContinue)
   if ($liveSaves.Count -ne 1) {
-    Write-Output "REFUSED: -BootSave $BootSave needs exactly one save folder saves\<profile>\4D5307F1\00000001\$BootSave with a mainsave.bin under $ExeDir; found $($liveSaves.Count). Nothing launched."
+    Write-Output (Format-OneLine "REFUSED: -BootSave $BootSave needs exactly one save folder saves\<profile>\4D5307F1\00000001\$BootSave with a mainsave.bin under $ExeDir; found $($liveSaves.Count). Nothing launched.")
     Exit-Run 2
   }
   if (-not $PSBoundParameters.ContainsKey('Plan')) { $Plan = "" }
@@ -418,6 +423,10 @@ if (-not $KeyboardInput) {
   $Env["FABLE2_AUTOPLAY_HOLD_MS"] = [string]$HoldMs
   $planSteps = $parsedPlan.Count
 }
+if ($BootSave) {
+  $planText = if ($planSteps -gt 0) { $parsedPlan.Autoplay } else { "none" }
+  Write-Output (Format-OneLine "-BootSave ${BootSave}: the game loads the save itself; plan for the game: $planText")
+}
 $events = $events | Sort-Object t
 # The run lasts until -Total, or until the last screenshot time when that is later.
 $lastEvent = if ($events) { [double](($events | Measure-Object -Property t -Maximum).Maximum) } else { 0.0 }
@@ -468,6 +477,23 @@ if ($UserPresent) {
   if (-not $Env.ContainsKey("SDL_AUDIO_DRIVER")) { $Env["SDL_AUDIO_DRIVER"] = "fable-test-unavailable-backend" }
 }
 
+# The game's logs that exist before the launch: a log that appears during the run is this run's (Test-PlanArmed).
+# A missing folder holds no logs. A folder that cannot be listed means the check cannot be made (every old log would
+# pass for this run's): the run ends here, before the pristine save is put in place and before anything is launched.
+$logsBefore = @{}
+if ($planSteps -gt 0) {
+  $logDir = Join-Path $ExeDir "logs"
+  try {
+    foreach ($f in @(Get-ChildItem -LiteralPath $logDir -Filter "fable_2_*.log" -File -ErrorAction Stop)) { $logsBefore[$f.Name] = $true }
+  } catch {
+    if ($_.Exception -isnot [System.Management.Automation.ItemNotFoundException]) {
+      $script:GateText += "; ABORTED"
+      Write-Output (Format-OneLine "${Label}RUN ABORTED: cannot list the game's logs in $logDir ($($_.Exception.Message)), so whether the game takes the plan could not be checked. Nothing launched.")
+      Exit-Run 12
+    }
+  }
+}
+
 # -BootSave with a pristine copy: put it in place of the live save (moved aside, never deleted).
 if ($BootSave) {
   $pristine = Join-Path $ExeDir "saves-pristine\$BootSave"
@@ -494,7 +520,7 @@ if ($BootSave) {
         catch { $why += "; THE LIVE SAVE IS NOW IN $(Join-Path $aside $BootSave): move it back to $livePath by hand" }
       }
       $script:GateText += "; ABORTED"
-      Write-Output "${Label}RUN ABORTED: could not restore the pristine save $BootSave ($why). Nothing launched."
+      Write-Output (Format-OneLine "${Label}RUN ABORTED: could not restore the pristine save $BootSave ($why). Nothing launched.")
       Exit-Run 12
     }
   }
@@ -616,11 +642,6 @@ function Move-RunShots([string]$Prefix) {
   return $moved
 }
 
-# The game's logs that exist before the launch: a log that appears during the run is this run's (Test-PlanArmed).
-$logsBefore = @{}
-if ($planSteps -gt 0) {
-  foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $ExeDir "logs") -Filter "fable_2_*.log" -File -ErrorAction SilentlyContinue)) { $logsBefore[$f.Name] = $true }
-}
 # True when a game log that did not exist before the launch holds the line the game writes when it has taken the
 # plan ("[autoplay] armed: N steps", written at start; a rejected plan logs "[autoplay] invalid FABLE2_AUTOPLAY"
 # instead and the game then runs without input). Anything unreadable counts as not armed.

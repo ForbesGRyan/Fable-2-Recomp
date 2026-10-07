@@ -176,6 +176,35 @@ def _steep_fields(ps, e, kind, slots):
     return [str(side), f"{threshold!r}f", f"{epsilon!r}f"]
 
 
+def _axis_fields(ps, axis, a):
+    """(interpolator, component, four stage refs) of an albedo entry's "u" or "v": an object with
+    "input" and "stages" and nothing else; a stage has "scale" and "offset" and nothing else."""
+    if not isinstance(a, dict):
+        raise ValueError(f"{ps}: {axis} is not an object with input and stages")
+    unknown = [k for k in a if k not in ("input", "stages")]
+    if unknown:
+        raise ValueError(f"{ps}: unknown key {', '.join(sorted(map(str, unknown)))} in {axis}")
+    if "input" not in a:
+        raise ValueError(f"{ps}: {axis} has no input")
+    stages = a.get("stages")
+    if not isinstance(stages, list):
+        raise ValueError(f"{ps}: stages of {axis} is not a list")
+    for s in stages:
+        if not isinstance(s, dict):
+            raise ValueError(f"{ps}: a stage of {axis} is not an object")
+        unknown = [k for k in s if k not in ("scale", "offset")]
+        if unknown:
+            raise ValueError(f"{ps}: unknown key {', '.join(sorted(map(str, unknown)))} in a stage of {axis}")
+    try:
+        if not isinstance(a["input"], str):
+            raise ValueError(f"bad interpolator component {a['input']!r}")
+        interp, comp = uv_refs.input_comp(a["input"])
+        refs = uv_refs.stages(stages, 1)
+    except (ValueError, TypeError) as err:   # uv_refs does not know the shader
+        raise ValueError(f"{ps}: {axis}: {err}") from None
+    return [str(interp), str(comp)] + [str(r) for r in refs]
+
+
 def _check_hashes(data):
     """Every key is "0x" and 16 hex digits, and no shader is named twice (in another spelling)."""
     seen = {}
@@ -213,6 +242,9 @@ def generate(data):
             if extra:
                 raise ValueError(f"{ps}: a no_albedo entry takes no {', '.join(extra)}")
             _check_entry(ps, e, "no_albedo")
+            reason = e["no_albedo"]
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError(f"{ps}: no_albedo is not a reason (a non-empty string), but {reason!r}")
             lines.append(f"FABLE2_PS_NO_ALBEDO({h})")
             continue
         _check_entry(ps, e, "albedo")
@@ -221,8 +253,9 @@ def generate(data):
             raise ValueError(f"{ps}: bad texture fetch slot {slot!r}")
         fields = [str(slot)]
         for axis in ("u", "v"):
-            interp, comp = uv_refs.input_comp(e[axis]["input"])
-            fields += [str(interp), str(comp)] + [str(r) for r in uv_refs.stages(e[axis]["stages"], 1)]
+            fields += _axis_fields(ps, axis, e.get(axis))
+        if "alpha" in e and e.get("alpha_manual") is not True:
+            raise ValueError(f"{ps}: alpha_manual is not true")
         lines.append(f"FABLE2_PS_ALBEDO({h}, {', '.join(fields)})")
         if "alpha" in e:
             alpha_lines.append(f"FABLE2_PS_ALPHA({h}, {', '.join(str(f) for f in _alpha_fields(ps, e))})")

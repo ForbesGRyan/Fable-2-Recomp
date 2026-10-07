@@ -12,7 +12,7 @@ _COMP = "xyzw"
 def encode_ref(text, bank):
     if text is None:
         return -1
-    m = re.fullmatch(r"(-?)c(\d+)\.([xyzw])", text)
+    m = re.fullmatch(r"(-?)c([0-9]+)\.([xyzw])", text) if isinstance(text, str) else None
     if not m or int(m.group(2)) > 255:
         raise ValueError(f"bad constant ref {text!r}")
     neg = 1 if m.group(1) else 0

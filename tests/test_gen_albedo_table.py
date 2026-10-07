@@ -292,6 +292,52 @@ class GenAlphaKindTest(unittest.TestCase):
         self.assertEqual(len(self._gen(_albedo(slot=31))), 2)
         self.assertEqual(len(self._gen(dict(fog, kind="plain"))), 2)
 
+    def test_rejects_loose_coordinates_and_flags(self):
+        # What still got through after the first pass: u and v were indexed without a look (a missing
+        # one was a KeyError without the hash, a mistyped key inside was dropped), "alpha_manual":
+        # false passed, and "no_albedo": false still made a no-albedo line.
+        u = {"input": "r0.x", "stages": [{"scale": "c8.x", "offset": "c8.z"}]}
+        fog = {"no_albedo": "fog", "manual": True, "evidence": "e"}
+        bad = [
+            ({k: v for k, v in _albedo().items() if k != "u"}, "u is not an object"),
+            ({k: v for k, v in _albedo().items() if k != "v"}, "v is not an object"),
+            (_albedo(u="r0.x"), "u is not an object"),
+            (_albedo(v=["r0.y"]), "v is not an object"),
+            (_albedo(u=None), "u is not an object"),
+            (_albedo(u=dict(u, stage=[])), "unknown key stage in u"),
+            (_albedo(v=dict(u, inputs="r0.y")), "unknown key inputs in v"),
+            (_albedo(u={"stages": []}), "u has no input"),
+            (_albedo(u={"input": "r0.x"}), "stages of u"),
+            (_albedo(u=dict(u, input="r0.xy")), "bad interpolator component"),
+            (_albedo(u=dict(u, input=3)), "bad interpolator component"),
+            (_albedo(u=dict(u, stages={"scale": "c8.x"})), "stages of u"),
+            (_albedo(u=dict(u, stages="c8.x")), "stages of u"),
+            (_albedo(v=dict(u, stages=[{"scal": "c8.x"}])), "unknown key scal in a stage of v"),
+            (_albedo(u=dict(u, stages=["c8.x"])), "a stage of u is not an object"),
+            (_albedo(u=dict(u, stages=[{"scale": "r8.x"}])), "bad constant ref"),
+            (_albedo(u=dict(u, stages=[{"scale": 8}])), "bad constant ref"),
+            (_albedo(u=dict(u, stages=[{}, {}, {}])), "more than two UV stages"),
+            (_albedo(alpha={"source": "one"}, alpha_manual=False), "alpha_manual is not true"),
+            (_albedo(alpha={"source": "one"}, alpha_manual="true"), "alpha_manual is not true"),
+            ({k: v for k, v in _albedo(alpha={"source": "one"}).items() if k != "alpha_manual"}, "alpha_manual is not true"),
+            (dict(fog, no_albedo=False), "no_albedo is not a reason"),
+            (dict(fog, no_albedo=True), "no_albedo is not a reason"),
+            (dict(fog, no_albedo=None), "no_albedo is not a reason"),
+            (dict(fog, no_albedo=""), "no_albedo is not a reason"),
+            (dict(fog, no_albedo=0), "no_albedo is not a reason"),
+        ]
+        for entry, why in bad:
+            with self.assertRaises(ValueError, msg=repr(entry)) as cm:
+                self._gen(entry)
+            self.assertTrue(str(cm.exception).startswith(self.H + ": "), str(cm.exception))
+            self.assertIn(why, str(cm.exception), repr(entry))
+        self.assertEqual(len(self._gen(_albedo(u=dict(u, stages=[{"scale": None}, {"offset": "-c8.w"}])))), 2)
+        # The committed entries carry both alpha flags and a reason: nothing new is asked of them.
+        import json
+        data = json.loads((Path(__file__).resolve().parent.parent / "docs" / "native-renderer" / "ps-albedo.json").read_text())
+        self.assertTrue(all(e.get("alpha_manual") is True for e in data.values() if "alpha" in e))
+        self.assertTrue(all(isinstance(e["no_albedo"], str) and e["no_albedo"].strip() for e in data.values() if "no_albedo" in e))
+
     def test_the_steep_epsilon_bound_is_one_number(self):
         # Generator, replay and the C++ inputs refuse the same small terms (0.01 or more).
         import terrain_replay

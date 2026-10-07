@@ -938,6 +938,35 @@ class DriverRunPathTest(unittest.TestCase):
         r, pid = self.drive("clean", total=4, plan="1:E", command=self.game_script([self.ARMED], log_name="fable_2_6.log"))
         self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
 
+    def test_armed_line_of_the_boot_save_is_not_the_plans(self):
+        # With -BootSave the game also logs "[boot-save] armed: Hero000". That line says nothing about the plan.
+        boot = "[2026-10-07 15:43:57.719] [info] [sys] [t50204] [boot-save] armed: Hero000"
+        r, pid = self.drive("clean", total=4, plan="1:E", command=self.game_script([self.REJECTED, boot]))
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertRegex(self.last(r), r"^TEST HARNESS RUN ABORTED: the game did not accept the plan")
+        r, pid = self.drive("clean", total=4, plan="1:E", command=self.game_script([boot, self.ARMED], log_name="fable_2_8.log"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_log_folder_that_cannot_be_listed_is_an_abort_before_launch(self):
+        # The plan check knows this run's log as one that was not there before the launch. If the folder
+        # exists and cannot be listed, every old log would pass for this run's: nothing is launched. Here the
+        # folder is a junction whose target is gone (it exists, and listing it fails in both PowerShells).
+        logs, gone = self.exe / "logs", self.tmp / "gone"
+        gone.mkdir()
+        made = subprocess.run(["cmd", "/c", "mklink", "/J", str(logs), str(gone)], capture_output=True, text=True)
+        self.addCleanup(lambda: subprocess.run(["cmd", "/c", "rmdir", str(logs)], capture_output=True))
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        gone.rmdir()
+        r, pid = self.drive("clean", total=3, plan="1:E", command=self.game_script())
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertIsNone(pid, "nothing may be launched")
+        self.assertRegex(self.last(r), r"^TEST HARNESS RUN ABORTED: cannot list the game's logs in .*, so whether "
+                                       r"the game takes the plan could not be checked\. Nothing launched\.$")
+        self.assertFalse((self.tmp / "plan.txt").exists(), "the stand-in ran")
+        # Without a plan there is nothing to check, and the run is not held up.
+        r, pid = self.drive("clean", total=3, command=self.game_script())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_no_plan_needs_no_armed_line(self):
         r, pid = self.drive("clean", total=3, plan=" , ", command=self.game_script(None))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -1045,6 +1074,55 @@ class DriverGateTest(unittest.TestCase):
             self.assertIn("-BootSave must be HeroNNN", r.stdout)
             self.assertNotIn("started pid", r.stdout)
 
+    def test_bootsave_name_refusal_is_one_line(self):
+        # "Hero003<LF>" used to pass the name check ($ matches before a final line feed) and was then
+        # refused by the save lookup with the line feed inside the message. Digits are ASCII digits.
+        for bad in ("Hero003\n", "Hero003\r\n", "\nHero003", "Hero00\u0663", "Hero003 "):
+            r = self.drive("-BootSave", bad)
+            self.assertEqual(r.returncode, 2, (bad, r.stdout, r.stderr))
+            lines = r.stdout.strip().splitlines()
+            self.assertRegex(lines[-1], r"^REFUSED: -BootSave must be HeroNNN .*Nothing launched\.$", (bad, r.stdout))
+            self.assertEqual(sum("REFUSED" in l for l in lines), 1, (bad, r.stdout))
+            self.assertNotIn("needs exactly one save folder", r.stdout)
+            self.assertNotIn("started pid", r.stdout)
+
+    def boot_tree(self, hero="Hero003"):
+        """A drifted live save and its pristine copy under the -ExeDir."""
+        live = Path(self.tmp) / "saves" / "B13EBABEBABEBABE" / "4D5307F1" / "00000001" / hero
+        live.mkdir(parents=True)
+        (live / "mainsave.bin").write_text("drifted")
+        pristine = Path(self.tmp) / "saves-pristine" / hero
+        pristine.mkdir(parents=True)
+        (pristine / "mainsave.bin").write_text("pristine")
+        return live
+
+    def test_bootsave_refusals_move_no_save(self):
+        # A run that is refused (a bad plan, shift or shot time; the gate) has not touched the saves: the
+        # pristine copy is put in place only after the gate has passed.
+        live = self.boot_tree()
+        for extra, code in ((["-Plan", "x:E"], 2), (["-Plan", "33:E:1"], 2), (["-PlanShift", "31"], 2),
+                            (["-Shots", "NaN"], 2), (["-IdleWaitSeconds", "0"], 10)):
+            r = self.drive("-BootSave", "Hero003", *extra)          # the hook forces "present"
+            self.assertEqual(r.returncode, code, (extra, r.stdout, r.stderr))
+            self.assertRegex(r.stdout.strip().splitlines()[-1], r"^REFUSED: .*Nothing launched\.$")
+            self.assertNotIn("restored pristine save", r.stdout)
+            self.assertEqual((live / "mainsave.bin").read_text(), "drifted", extra)
+            self.assertFalse((Path(self.tmp) / "saves-replaced").exists(), extra)
+            self.assertNotIn("started pid", r.stdout)
+
+    def test_bootsave_drops_the_default_key_plan(self):
+        # With -BootSave the menu presses of the default plan would land in the loaded game: the plan is
+        # empty unless -Plan is given, and the driver says which plan the game is given.
+        self.boot_tree()
+        r = run_ps([self.drv, "-ExeDir", self.tmp, "-Total", "5", "-UserPresent", "-BootSave", "Hero003"])
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)     # nothing to launch in this folder
+        self.assertIn("-BootSave Hero003: the game loads the save itself; plan for the game: none", r.stdout)
+        self.assertNotIn("23:A", r.stdout)
+        r = run_ps([self.drv, "-ExeDir", self.tmp, "-Total", "5", "-UserPresent", "-BootSave", "Hero003",
+                    "-Plan", "33:E,40:VIEW=native", "-PlanShift", "2"])
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertIn("plan for the game: 35:A,42:VIEW=native", r.stdout)
+
     def test_bootsave_restores_the_pristine_save_and_keeps_the_replaced_one(self):
         live = Path(self.tmp) / "saves" / "B13EBABEBABEBABE" / "4D5307F1" / "00000001" / "Hero003"
         live.mkdir(parents=True)
@@ -1095,6 +1173,8 @@ class DriverGateTest(unittest.TestCase):
             k32.CloseHandle(h)
         self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
         self.assertIn("could not restore the pristine save", r.stdout)
+        self.assertRegex(r.stdout.strip().splitlines()[-1],
+                         r"^RUN ABORTED: could not restore the pristine save Hero003 \(.*\)\. Nothing launched\.$")
         self.assertNotIn("started pid", r.stdout)
         self.assertEqual((live / "mainsave.bin").read_text(), "drifted")   # the live save was never moved
         self.assertEqual(list((Path(self.tmp) / "saves-replaced").glob("*/Hero003")), [])
@@ -1240,6 +1320,7 @@ class DriverGateTest(unittest.TestCase):
             ("together", ["-ExeDir", exe_ok, "-TestHarness", h]),
             ("together", ["-ExeDir", exe_ok, "-TestExe", plain]),
             ("-UserPresent", ["-ExeDir", exe_ok, "-TestHarness", h, "-TestExe", plain, "-UserPresent"]),
+            ("test mode refuses -BootSave", ["-ExeDir", exe_ok, "-TestHarness", h, "-TestExe", plain, "-BootSave", "Hero003"]),
         ]
         if REAL_GAME.exists():
             copy = t / "standin_bytes.exe"
@@ -1376,6 +1457,37 @@ class InSessionTest(unittest.TestCase):
         self.assertRegex(lines[-2], r"^REFUSED: bad plan: .*Nothing launched\.$", r.stdout + r.stderr)
         self.assertEqual(lines[-1], "after: 2")
         self.assertNotIn("forced-present", r.stdout)
+
+    def bootsave(self, shell):
+        # -BootSave from a session, in both PowerShells: a name with a line feed is refused on one line; a good
+        # name says which plan the game is given, and the gate's refusal then leaves the save where it is.
+        live = self.tmp / "exe" / "saves" / "B13EBABEBABEBABE" / "4D5307F1" / "00000001" / "Hero003"
+        live.mkdir(parents=True)
+        (live / "mainsave.bin").write_text("drifted")
+        pristine = self.tmp / "exe" / "saves-pristine" / "Hero003"
+        pristine.mkdir(parents=True)
+        (pristine / "mainsave.bin").write_text("pristine")
+        base = "& %s -ExeDir %s -IdleWaitSeconds 0 " % (self.q(self.drv), self.q(self.tmp / "exe"))
+        hook = {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"}
+        r = run_cmd(shell, base + "-BootSave ('Hero003' + [char]10); 'after: ' + $LASTEXITCODE", hook)
+        lines = r.stdout.strip().splitlines()
+        self.assertRegex(lines[-2], r"^REFUSED: -BootSave must be HeroNNN .*Nothing launched\.$", r.stdout + r.stderr)
+        self.assertEqual(lines[-1], "after: 2")
+        r = run_cmd(shell, base + "-BootSave Hero003 -Plan '33:E,40:VIEW=native'; 'after: ' + $LASTEXITCODE", hook)
+        self.assertIn("-BootSave Hero003: the game loads the save itself; plan for the game: 33:A,40:VIEW=native",
+                      r.stdout, r.stdout + r.stderr)
+        self.assertIn("forced-present", r.stdout)
+        self.assertEqual(r.stdout.strip().splitlines()[-1], "after: 10")
+        self.assertEqual((live / "mainsave.bin").read_text(), "drifted")
+        self.assertFalse((self.tmp / "exe" / "saves-replaced").exists())
+        self.assertNotIn("started pid", r.stdout)
+
+    def test_bootsave_in_session_pwsh(self):
+        self.bootsave(PWSH)
+
+    @unittest.skipUnless(PS51, "Windows PowerShell 5.1 not available")
+    def test_bootsave_in_session_ps51(self):
+        self.bootsave(PS51)
 
     def test_bad_plan_in_session_pwsh(self):
         self.bad_plan(PWSH)

@@ -72,27 +72,27 @@ class FinderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             log = d / "disc.jsonl"
-            rows = [{"kind": "draw", "vs_hash": "0x1", "bank": bank_with(M, 12, "dot", s), "positions": verts(s),
+            rows = [{"kind": "draw", "vs_hash": "0x0000000000000001", "bank": bank_with(M, 12, "dot", s), "positions": verts(s),
                      "viewport": [1120, 720]} for s in range(2)]
             # Decoded from a stream the draw indexes past: not a position sample.
-            rows.append({"kind": "draw", "vs_hash": "0x1", "bank": bank_with(M, 12, "dot", 7),
+            rows.append({"kind": "draw", "vs_hash": "0x0000000000000001", "bank": bank_with(M, 12, "dot", 7),
                          "positions": verts(7), "pos_suspect": True, "viewport": [1120, 720]})
             rows.append({"kind": "meta"})
             log.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
             out = d / "vs.json"
-            out.write_text(json.dumps({"0x2": {"base": 4, "layout": "combine", "manual": True, "pos_fetch": 1,
+            out.write_text(json.dumps({"0x0000000000000002": {"base": 4, "layout": "combine", "manual": True, "pos_fetch": 1,
                                                "deformed": True}}))
             mf.main([str(log), "--out", str(out)])
             data = json.loads(out.read_text())
-            self.assertEqual(data["0x1"]["base"], 12)
-            self.assertEqual(data["0x1"]["samples"], 2)
-            self.assertTrue(data["0x2"]["manual"])
+            self.assertEqual(data["0x0000000000000001"]["base"], 12)
+            self.assertEqual(data["0x0000000000000001"]["samples"], 2)
+            self.assertTrue(data["0x0000000000000002"]["manual"])
             inc = d / "t.inc"
             gtt.main(["--json", str(out), "--out", str(inc)])
             text = inc.read_text()
-            self.assertIn("FABLE2_VS_TRANSFORM(0x1ull, 12, 0, -1, 0)", text)
-            self.assertIn("FABLE2_VS_TRANSFORM(0x2ull, 4, 1, 1, 1)", text)
-            self.assertLess(text.index("0x1ull"), text.index("0x2ull"))
+            self.assertIn("FABLE2_VS_TRANSFORM(0x0000000000000001ull, 12, 0, -1, 0)", text)
+            self.assertIn("FABLE2_VS_TRANSFORM(0x0000000000000002ull, 4, 1, 1, 1)", text)
+            self.assertLess(text.index("0x0000000000000001ull"), text.index("0x0000000000000002ull"))
 
 
 if __name__ == "__main__":

@@ -152,6 +152,18 @@ int main() {
     if (Parse(bad, &err)) return 95;
     if (Parse(std::string("10:A,") + bad + ",20:B", &err)) return 96;  // the whole plan
   }
+  {
+    // The README's FABLE2_AUTOPLAY example is written with the game's button names. The driver's key
+    // names (-Plan "23:E,27:S,...") are translated by the driver and are not names the game knows:
+    // given to the game as they are, the first one rejects the whole plan.
+    const std::string tail = ",52:VIEW=off,56:VIEW=native,60:VIEW=split,64:VIEW=overlay,66:DISC=60/4";
+    auto readme = Parse("23:A,27:Down,30:A,35:A" + tail, &err);
+    if (!readme || readme->size() != 9) return 101;
+    if (ButtonsAt(*readme, 27.05, 0.1) != 0x0002 || (*readme)[4].name != "VIEW=off" || (*readme)[8].name != "DISC=60/4") return 102;
+    err.clear();
+    if (Parse("23:E,27:S,30:E,35:E" + tail, &err)) return 103;
+    if (err != "23:E") return 104;
+  }
   std::cout << "autoplay ok\n";
   return 0;
 }

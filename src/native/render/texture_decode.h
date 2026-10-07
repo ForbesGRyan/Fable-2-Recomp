@@ -9,12 +9,14 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <utility>
+#include <vector>
 
 #include "../capture/xenos_tiling.h"
 
 namespace fable2::native::render {
 
-enum class TexFormat : uint8_t { kUnsupported, kDxt1, kDxt23, kDxt45, k8888 };
+enum class TexFormat : uint8_t { kUnsupported, kDxt1, kDxt23, kDxt45, k8888, kDxt3a };
 
 struct TexFormatInfo {
   uint32_t block = 1;            // texels per block edge
@@ -28,13 +30,15 @@ inline TexFormat TexFormatFromXenos(uint32_t xenos_format) {
     case 19: return TexFormat::kDxt23;  // k_DXT2_3
     case 20: return TexFormat::kDxt45;  // k_DXT4_5
     case 6: return TexFormat::k8888;    // k_8_8_8_8
+    case 58: return TexFormat::kDxt3a;  // k_DXT3A: no BC equivalent, decoded to R8 (DecodeDxt3aLevel)
     default: return TexFormat::kUnsupported;
   }
 }
 
 inline TexFormatInfo FormatInfo(TexFormat f) {
   switch (f) {
-    case TexFormat::kDxt1: return {4, 8, 3};
+    case TexFormat::kDxt1:
+    case TexFormat::kDxt3a: return {4, 8, 3};
     case TexFormat::kDxt23:
     case TexFormat::kDxt45: return {4, 16, 4};
     case TexFormat::k8888: return {1, 4, 2};
@@ -166,6 +170,43 @@ inline bool UntileLevel(const uint8_t* src, size_t src_size, const LevelLayout& 
                   fi.bytes_per_block, endian);
     }
   }
+  return true;
+}
+
+// k_DXT3A (Xenos format 58) -> an 8-bit single-channel image, width * height bytes row-major. The format is the
+// explicit-alpha half of a DXT3 block: 8 bytes per 4 x 4 block, four rows of 16 bits, texel i of a row in nibble i
+// (low nibble first), after the GPU's endian swap of the 8-byte block (SDK:
+// thirdparty/rexglue-sdk/src/graphics/pipeline/texture/conversion.cpp:80-85 ConvertTexelDXT3AToDXT3 and the
+// texture_load_dxt3a compute shader). Each 4-bit value v becomes v * 17. Blocks sit like DXT1's: tiled at
+// TiledOffset2D(bx, by, pitch_blocks, 3) or linear with rows of pitch_blocks aligned to 32 blocks (the SDK's base
+// level rule) times 8 bytes. pitch_blocks is the fetch pitch in blocks (any value; it is aligned to 32 here as
+// the SDK aligns it). False, with out_r8 left empty, for a null source, an empty image or when any block the image
+// needs lies outside src_size (nothing is read past it). Only the base level is decoded.
+inline bool DecodeDxt3aLevel(const uint8_t* src, size_t src_size, uint32_t width, uint32_t height,
+                             uint32_t pitch_blocks, bool tiled, uint32_t endian, std::vector<uint8_t>* out_r8) {
+  if (!out_r8) return false;
+  out_r8->clear();
+  if (!src || width == 0 || height == 0) return false;
+  const uint32_t wb = (width + 3) / 4, hb = (height + 3) / 4;
+  const uint64_t row_pitch_bytes = uint64_t((std::max(pitch_blocks, wb) + 31) & ~31u) * 8;
+  std::vector<uint8_t> out(size_t(width) * height);
+  for (uint32_t by = 0; by < hb; ++by) {
+    for (uint32_t bx = 0; bx < wb; ++bx) {
+      const uint64_t o = tiled ? uint64_t(uint32_t(capture::TiledOffset2D(int32_t(bx), int32_t(by),
+                                                                          std::max(pitch_blocks, wb), 3)))
+                               : uint64_t(by) * row_pitch_bytes + uint64_t(bx) * 8;
+      if (o + 8 > src_size) return false;
+      uint8_t blk[8];
+      CopySwapped(blk, src + o, 8, endian);
+      for (uint32_t r = 0; r < 4 && by * 4 + r < height; ++r) {
+        const uint32_t row = uint32_t(blk[2 * r]) | (uint32_t(blk[2 * r + 1]) << 8);
+        for (uint32_t i = 0; i < 4 && bx * 4 + i < width; ++i) {
+          out[size_t(by * 4 + r) * width + bx * 4 + i] = uint8_t(((row >> (4 * i)) & 15) * 17);
+        }
+      }
+    }
+  }
+  *out_r8 = std::move(out);
   return true;
 }
 

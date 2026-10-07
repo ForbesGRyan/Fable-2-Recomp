@@ -39,6 +39,7 @@ nrhi::Format HostFormat(TexFormat f) {
     case TexFormat::kDxt23: return nrhi::Format::kBC2_UNORM;
     case TexFormat::kDxt45: return nrhi::Format::kBC3_UNORM;
     case TexFormat::k8888: return nrhi::Format::kR8G8B8A8_UNORM;
+    case TexFormat::kDxt3a: return nrhi::Format::kR8_UNORM;  // CPU-decoded (DecodeDxt3aLevel)
     default: return nrhi::Format::kUnknown;
   }
 }
@@ -53,6 +54,10 @@ nrhi::Swizzle HostSwizzle(uint8_t s) {
     default: return nrhi::Swizzle::kZero;
   }
 }
+
+// The view swizzle of a single-channel (R8) texture: the Xenos replicates the one component into the unused
+// ones (the SDK's GetHostFormatSwizzle for k_DXT3A is RRRR), so fetch channels 0-3 all read R; 4 / 5 stay 0 / 1.
+nrhi::Swizzle HostSwizzleR8(uint8_t s) { return s <= 3 ? nrhi::Swizzle::kX : HostSwizzle(s); }
 
 // One host level: size in blocks, staging row pitch and offset.
 struct HostLevel {
@@ -138,7 +143,8 @@ nrhi::Texture* TextureCache::TakeRetired(nrhi::Device* dev, const nrhi::TextureD
 // tail, mips[packed] otherwise), at the block offset GetPackedMipOffset gives.
 bool TextureCache::BuildPlan(const TextureFetch& t, Plan* plan) {
   const TexFormatInfo fi = FormatInfo(t.format);
-  const uint32_t levels = std::min(LevelCount(t), kMaxLevels);
+  // k_DXT3A is decoded on the CPU, base level only (the terrain weight map has no mips in use).
+  const uint32_t levels = t.format == TexFormat::kDxt3a ? 1u : std::min(LevelCount(t), kMaxLevels);
   const xenos::TextureFormat format = xenos::TextureFormat(t.xenos_format);
   const texture_util::TextureGuestLayout layout = texture_util::GetGuestTextureLayout(
       xenos::DataDimension::k2DOrStacked, t.pitch_texels >> 5, t.width, t.height, 1, t.tiled, format,
@@ -303,8 +309,11 @@ nrhi::TextureView* TextureCache::Upload(nrhi::Cmd* cmd, nrhi::Device* dev, const
                                         const GeoKey& key, uint64_t hash, float* uv_fix,
                                         MaterialStatus* status) {
   const TexFormatInfo fi = FormatInfo(t.format);
-  const uint32_t host_w = (t.width + fi.block - 1) / fi.block * fi.block;
-  const uint32_t host_h = (t.height + fi.block - 1) / fi.block * fi.block;
+  // k_DXT3A uploads as R8 (1 byte per texel, no 4 x 4 alignment); everything else as its guest block format.
+  const bool r8 = t.format == TexFormat::kDxt3a;
+  const TexFormatInfo hf = r8 ? TexFormatInfo{1, 1, 0} : fi;
+  const uint32_t host_w = (t.width + hf.block - 1) / hf.block * hf.block;
+  const uint32_t host_h = (t.height + hf.block - 1) / hf.block * hf.block;
 
   // Staging layout: each level at a 512-byte aligned offset, rows of
   // UploadRowPitch bytes, host-sized (guest blocks beyond the host size are
@@ -313,16 +322,31 @@ nrhi::TextureView* TextureCache::Upload(nrhi::Cmd* cmd, nrhi::Device* dev, const
   uint64_t staging_bytes = 0, tex_bytes = 0;
   for (uint32_t lv = 0; lv < plan.levels; ++lv) {
     HostLevel& h = host[lv];
-    h.blocks_w = (LevelExtent(host_w, lv) + fi.block - 1) / fi.block;
-    h.blocks_h = (LevelExtent(host_h, lv) + fi.block - 1) / fi.block;
-    h.row_pitch = UploadRowPitch(h.blocks_w, fi.bytes_per_block);
+    h.blocks_w = (LevelExtent(host_w, lv) + hf.block - 1) / hf.block;
+    h.blocks_h = (LevelExtent(host_h, lv) + hf.block - 1) / hf.block;
+    h.row_pitch = UploadRowPitch(h.blocks_w, hf.bytes_per_block);
     h.offset = AlignUp(staging_bytes, kCopyOffsetAlignment);
     staging_bytes = h.offset + uint64_t(h.row_pitch) * h.blocks_h;
-    tex_bytes += uint64_t(h.blocks_w) * h.blocks_h * fi.bytes_per_block;
+    tex_bytes += uint64_t(h.blocks_w) * h.blocks_h * hf.bytes_per_block;
   }
 
   scratch_.assign(size_t(staging_bytes), 0);
-  for (uint32_t lv = 0; lv < plan.levels; ++lv) {
+  if (r8) {
+    // One base level (plan.levels == 1): decode to a tight R8 image, then copy it into the staging rows. A source
+    // smaller than the layout needs is refused (kTextureBad) and read nowhere out of range.
+    const LevelLayout& l = plan.src[0].layout;
+    if (!DecodeDxt3aLevel(base, plan.base_extent, t.width, t.height, l.pitch_blocks, t.tiled, t.endian,
+                          &r8_image_)) {
+      *status = MaterialStatus::kTextureBad;
+      return nullptr;
+    }
+    for (uint32_t y = 0; y < t.height; ++y) {
+      std::memcpy(scratch_.data() + host[0].offset + size_t(y) * host[0].row_pitch,
+                  r8_image_.data() + size_t(y) * t.width, t.width);
+    }
+    if (r8_image_.capacity() > (32u << 20)) r8_image_ = {};
+  }
+  for (uint32_t lv = 0; lv < plan.levels && !r8; ++lv) {
     LevelLayout l = plan.src[lv].layout;
     l.width_blocks = std::min(l.width_blocks, host[lv].blocks_w);
     l.height_blocks = std::min(l.height_blocks, host[lv].blocks_h);
@@ -375,7 +399,7 @@ nrhi::TextureView* TextureCache::Upload(nrhi::Cmd* cmd, nrhi::Device* dev, const
   vd.format = nrhi::Format::kUnknown;
   vd.base_mip = 0;
   vd.mip_levels = ~0u;
-  for (int i = 0; i < 4; ++i) vd.swizzle[i] = HostSwizzle(t.swizzle[i]);
+  for (int i = 0; i < 4; ++i) vd.swizzle[i] = r8 ? HostSwizzleR8(t.swizzle[i]) : HostSwizzle(t.swizzle[i]);
   nrhi::TextureView* view = dev->CreateTextureView(tex, vd);
   if (!view) {
     dev->DestroyDeferred(staging);
@@ -387,7 +411,7 @@ nrhi::TextureView* TextureCache::Upload(nrhi::Cmd* cmd, nrhi::Device* dev, const
   cmd->FlushBarriers();
   for (uint32_t lv = 0; lv < plan.levels; ++lv) {
     cmd->CopyBufferToTexture(tex, lv, 0, staging, host[lv].offset, host[lv].row_pitch,
-                             host[lv].blocks_w * fi.block, host[lv].blocks_h * fi.block, 1);
+                             host[lv].blocks_w * hf.block, host[lv].blocks_h * hf.block, 1);
   }
   cmd->Barrier(tex, nrhi::ResourceState::kCopyDest, nrhi::ResourceState::kPixelShaderResource);
   cmd->FlushBarriers();

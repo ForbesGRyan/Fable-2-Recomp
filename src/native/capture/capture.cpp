@@ -1501,7 +1501,8 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
 // count, auto-indexed quad patches) and DrawIndx:82207C30 (adaptive: r7
 // patches, r7 * 4 tessellation factors from the bound index buffer at r6): the
 // vertex shader, the constants the terrain shaders read and texture fetch
-// constants 16-19 from the device shadow.
+// constants 16-19 and every slot the vertex and pixel shaders sample from the device shadow (each 2D
+// texture also dumped, discovery only).
 void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const DeviceSnapshot& dev,
                   bool in_scene) {
   char buf[512];
@@ -1514,7 +1515,8 @@ void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
   row += buf;
   AppendRenderState(row, device);
   VsChoice vc;
-  if (ChooseVs(dev, &vc)) {
+  const bool vc_ok = ChooseVs(dev, &vc);
+  if (vc_ok) {
     const UcodeRef u = vc.immediate ? UcodeRef{} : ReadVsUcode(vc.obj, vc.variant);
     const uint64_t hash = vc.immediate ? (t_vs_load.usable ? t_vs_load.hash : 0) : u.hash;
     std::snprintf(buf, sizeof(buf),
@@ -1544,16 +1546,37 @@ void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
     row += "]";
     first = false;
   }
+  // Texture fetch constants: 16-19 always (the terrain vertex shaders' heightmap and weight map; tf18 is the
+  // k_DXT3A layer-weight and hole map), plus every slot the chosen vertex shader's microcode and the pixel
+  // shader sample (the terrain pixel shaders' colour textures). Each 2D texture is dumped once through
+  // DumpTexture (discovery only: it does nothing without the texture folder; bounded by kMaxTextures).
+  std::vector<uint32_t> slots = {16, 17, 18, 19};
+  if (vc_ok && !vc.immediate) {
+    const UcodeRef u = ReadVsUcode(vc.obj, vc.variant);
+    for (uint32_t slot : TextureFetchSlots(u.dwords.data(), u.dwords.size())) slots.push_back(slot);
+  }
+  uint32_t ps_obj = 0;
+  if (ChoosePs(dev, &ps_obj)) {
+    if (const PsInfo* ps = LookupPs(ps_obj)) {
+      for (uint32_t slot : ps->tex_slots) slots.push_back(slot);
+    }
+  }
+  std::sort(slots.begin(), slots.end());
+  slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
   row += "},\"tf\":{";
-  for (uint32_t t = 16; t < 20; ++t) {
+  first = true;
+  for (uint32_t t : slots) {
+    if (t >= 32) continue;
     const uint32_t at =
         device + xdk::kDeviceVertexFetchOffset + xdk::kDeviceTextureFetchStride * t;
     const uint8_t* p = device ? ReadVirtual(at, 24) : nullptr;
     uint32_t v[6] = {};
     if (p) {
       for (int i = 0; i < 6; ++i) v[i] = LoadBe32(p + 4 * i);
+      DumpTexture(v);
     }
-    std::snprintf(buf, sizeof(buf), "%s\"%u\":", t == 16 ? "" : ",", t);
+    std::snprintf(buf, sizeof(buf), "%s\"%u\":", first ? "" : ",", t);
+    first = false;
     row += buf;
     row += p ? HexDwords(v, 6) : "null";
   }

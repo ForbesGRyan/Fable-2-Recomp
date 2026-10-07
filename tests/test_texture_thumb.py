@@ -1,4 +1,5 @@
 import json
+import os
 import struct
 import sys
 import tempfile
@@ -120,6 +121,90 @@ class ThumbTest(unittest.TestCase):
             self.assertEqual(len(tt.main([str(cap), "--out", str(out2)])), 2)
             self.assertEqual(len(list(out2.iterdir())), 2)
             self.assertFalse(any(p.name.endswith("_alpha.png") for p in out2.iterdir()))
+
+
+# k_DXT3A (format 58): the explicit-alpha half of a DXT3 block, 8 bytes per 4x4 block, four rows of 16 bits
+# (after the endian swap, little-endian), texel i of a row in nibble i (low first), each value v -> v * 17.
+# SDK: ConvertTexelDXT3AToDXT3 (conversion.cpp:80-85) and the texture_load_dxt3a compute shader.
+def dxt3a_value(x, y):
+    """The synthetic image's texel value (4 bits). The same rule and expected hash are in
+    tests/native/test_texture_decode.cpp (the C++ decoder must give identical bytes)."""
+    return (x * 5 + y * 3 + ((x * y) >> 2)) & 15
+
+
+DXT3A_W, DXT3A_H, DXT3A_PITCH_BLOCKS = 70, 45, 32
+DXT3A_FNV = 0x8382B24A4858EC9E  # FNV-1a 64 of the decoded R8 image, row-major
+
+
+def dxt3a_guest_image(tiled, endian):
+    """The synthetic image as guest memory: blocks at their tiled (or linear, pitch 32 blocks) offsets,
+    each 8-byte block stored so the GPU's endian swap yields the little-endian rows."""
+    wb, hb = (DXT3A_W + 3) // 4, (DXT3A_H + 3) // 4
+    if tiled:
+        size = max(tt.tiled_offset_2d(bx, by, DXT3A_PITCH_BLOCKS, 3) for bx in range(wb) for by in range(hb)) + 8
+    else:
+        size = (hb - 1) * DXT3A_PITCH_BLOCKS * 8 + wb * 8
+    buf = bytearray(size)
+    for by in range(hb):
+        for bx in range(wb):
+            post = bytearray()
+            for r in range(4):
+                v = sum(dxt3a_value(bx * 4 + i, by * 4 + r) << (4 * i) for i in range(4))
+                post += bytes([v & 255, v >> 8])
+            guest = tt._swap(bytes(post), endian)  # the swaps are their own inverses
+            o = tt.tiled_offset_2d(bx, by, DXT3A_PITCH_BLOCKS, 3) if tiled else by * DXT3A_PITCH_BLOCKS * 8 + bx * 8
+            buf[o:o + 8] = guest
+    return bytes(buf)
+
+
+def fnv1a64(data):
+    h = 0xCBF29CE484222325
+    for b in data:
+        h = ((h ^ b) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+class Dxt3aTest(unittest.TestCase):
+    def test_hand_built_block_8in16(self):
+        # Rows (texels 0..3): 0 1 2 3 / 4 5 6 7 / 8 9 10 11 / 12 13 14 15 -> post-swap row words
+        # 0x3210 0x7654 0xBA98 0xFEDC, little-endian bytes 10 32 54 76 98 BA DC FE; guest (8in16) 32 10 76 54 BA 98 FE DC.
+        guest = bytes([0x32, 0x10, 0x76, 0x54, 0xBA, 0x98, 0xFE, 0xDC])
+        w, h, r8 = tt.decode_r8(guest, fc_for(58, 4, 4, 32, False, endian=1))
+        self.assertEqual((w, h), (4, 4))
+        self.assertEqual(r8, bytes(v * 17 for v in range(16)))
+
+    def test_rgba_view_is_grey(self):
+        guest = bytes([0x32, 0x10, 0x76, 0x54, 0xBA, 0x98, 0xFE, 0xDC])
+        w, h, rgba = tt.decode_rgba(guest, fc_for(58, 4, 4, 32, False, endian=1))
+        self.assertEqual(rgba[4 * 5:4 * 5 + 4], bytes([85, 85, 85, 255]))
+
+    def test_synthetic_images_match_rule_and_hash(self):
+        for tiled, endian in ((False, 1), (True, 2), (True, 0), (False, 3)):
+            fc = fc_for(58, DXT3A_W, DXT3A_H, 128, tiled, endian=endian)
+            w, h, r8 = tt.decode_r8(dxt3a_guest_image(tiled, endian), fc)
+            self.assertEqual((w, h), (DXT3A_W, DXT3A_H))
+            want = bytes(dxt3a_value(x, y) * 17 for y in range(DXT3A_H) for x in range(DXT3A_W))
+            self.assertEqual(r8, want)
+        self.assertEqual(fnv1a64(want), DXT3A_FNV)
+
+    def test_real_tf18_dump_matches_cpp_decoder(self):
+        """The terrain weight map, once a discovery capture has dumped it (tf18, fetch dword 1 0x1BA0207A).
+        Needs FABLE2_TF18_BIN and FABLE2_TF18_FC (see tests/native/test_texture_decode.cpp) and the C++ test's
+        output FABLE2_TF18_BIN + '.cpp.r8'; SKIPS (never passes silently) when any is missing."""
+        bin_path, fcs = os.environ.get("FABLE2_TF18_BIN"), os.environ.get("FABLE2_TF18_FC")
+        if not bin_path or not fcs or not Path(bin_path).is_file():
+            self.skipTest("no tf18 dump: set FABLE2_TF18_BIN and FABLE2_TF18_FC after a discovery capture")
+        cpp = Path(bin_path + ".cpp.r8")
+        if not cpp.is_file():
+            self.skipTest("run tests/run_native_tests.cmd with the same variables first (writes " + str(cpp) + ")")
+        fc = [int(x, 16) for x in fcs.split(",")]
+        w, h, r8 = tt.decode_r8(Path(bin_path).read_bytes(), fc)
+        self.assertEqual(fc[1] & 0x3F, 58)
+        self.assertEqual(r8, cpp.read_bytes())
+
+    def test_format_name_in_cli_summary(self):
+        self.assertEqual(tt._FORMAT_NAMES[58], "DXT3A")
+
 
 
 def png_pixel(path):

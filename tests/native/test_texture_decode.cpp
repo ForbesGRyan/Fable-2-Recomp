@@ -1,6 +1,10 @@
 // Synthetic standalone test; no game or GPU.
 #include "../../src/native/render/texture_decode.h"
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 using namespace fable2::native;
@@ -141,5 +145,129 @@ int main() {
   if (TextureIdentity(f1) != TextureIdentity(f2)) return 33;
   a = {}; a.base = 0x1B000000; MakeFc(a, f2);
   if (TextureIdentity(f1) == TextureIdentity(f2)) return 34;
+  // --- k_DXT3A (format 58): the explicit-alpha half of a DXT3 block, one 4-bit channel -> R8 ---
+  // Layout from the SDK: ConvertTexelDXT3AToDXT3 (conversion.cpp:80-85) swaps the 8-byte block like any
+  // other and the texture_load_dxt3a shader reads four 16-bit rows, texel i in nibble i, low first.
+  {
+    // The terrain's weight map: tf18 of the terrain vertex shaders, fetch dword 1 0x1BA0207A, 1650 x 1815, tiled.
+    const uint32_t tf18[6] = {2u | (52u << 22) | (1u << 31), 0x1BA0207A, 1649u | (1814u << 13), 0x00000000, 0, 1u << 9};
+    if (DecodeTextureFetch(tf18, &t) != FetchError::kNone) return 37;
+    if (t.format != TexFormat::kDxt3a || t.xenos_format != 58 || t.width != 1650 || t.height != 1815) return 38;
+    if (t.endian != 1 || t.base_phys != 0x1BA02000 || !t.tiled) return 39;
+    if (FormatInfo(TexFormat::kDxt3a).block != 4 || FormatInfo(TexFormat::kDxt3a).bytes_per_block != 8 ||
+        FormatInfo(TexFormat::kDxt3a).bpb_log2 != 3) return 40;
+
+    std::vector<uint8_t> out(3, 0x77);
+    // Block A rows (texels 0..3): 0 1 2 3 / 4 5 6 7 / 8 9 10 11 / 12 13 14 15. Little-endian row words 0x3210
+    // 0x7654 0xBA98 0xFEDC; guest bytes under 8in16 (endian 1) are those with each byte pair swapped.
+    // Block B rows: 15 15 0 0 / 1 2 3 4 / 10 11 12 13 / 0 15 0 15 (words 0x00FF 0x4321 0xDCBA 0xF0F0).
+    const uint8_t guest_a[8] = {0x32, 0x10, 0x76, 0x54, 0xBA, 0x98, 0xFE, 0xDC};
+    const uint8_t guest_b[8] = {0x00, 0xFF, 0x43, 0x21, 0xDC, 0xBA, 0xF0, 0xF0};
+    std::vector<uint8_t> want(8 * 4);
+    {
+      const int rows_a[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+      const int rows_b[16] = {15, 15, 0, 0, 1, 2, 3, 4, 10, 11, 12, 13, 0, 15, 0, 15};
+      for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) {
+          want[y * 8 + x] = uint8_t(rows_a[y * 4 + x] * 17);
+          want[y * 8 + 4 + x] = uint8_t(rows_b[y * 4 + x] * 17);
+        }
+    }
+    // Linear, pitch 32 blocks (256-byte rows), blocks at 0 and 8.
+    std::vector<uint8_t> lin(16);
+    std::memcpy(lin.data(), guest_a, 8);
+    std::memcpy(lin.data() + 8, guest_b, 8);
+    if (!DecodeDxt3aLevel(lin.data(), lin.size(), 8, 4, 32, false, 1, &out)) return 41;
+    if (out != want) return 42;
+    // One byte short: refused, output empty (the pre-filled contents are cleared).
+    out.assign(3, 0x77);
+    if (DecodeDxt3aLevel(lin.data(), lin.size() - 1, 8, 4, 32, false, 1, &out) || !out.empty()) return 43;
+    if (DecodeDxt3aLevel(nullptr, 16, 8, 4, 32, false, 1, &out) || !out.empty()) return 44;
+    if (DecodeDxt3aLevel(lin.data(), lin.size(), 0, 4, 32, false, 1, &out) || !out.empty()) return 45;
+    // Tiled: blocks (0,0) and (1,0) sit at 0 and 8 as well. Both endians the game uses (8in16 above; 8in32 and
+    // none below, bytes re-swapped from the post-swap form).
+    for (uint32_t endian : {0u, 1u, 2u, 3u}) {
+      uint8_t post[16];
+      CopySwapped(post, guest_a, 8, 1);  // guest 8in16 -> post-swap little-endian form
+      CopySwapped(post + 8, guest_b, 8, 1);
+      std::vector<uint8_t> g(16);
+      CopySwapped(g.data(), post, 16, endian);  // the swaps are their own inverses
+      if (!DecodeDxt3aLevel(g.data(), g.size(), 8, 4, 32, true, endian, &out) || out != want) return 46 + int(endian);
+    }
+  }
+  // A 70 x 45 image (edge blocks cropped), blocks placed by the tiled / linear rule, must decode to the rule and to
+  // the bytes tests/test_texture_thumb.py pins with the same rule (FNV-1a 64 below equals its DXT3A_FNV).
+  {
+    const uint32_t W = 70, H = 45, PITCH = 32, WB = 18, HB = 12;
+    auto value = [](uint32_t x, uint32_t y) { return (x * 5 + y * 3 + ((x * y) >> 2)) & 15; };
+    std::vector<uint8_t> want(W * H);
+    for (uint32_t y = 0; y < H; ++y)
+      for (uint32_t x = 0; x < W; ++x) want[y * W + x] = uint8_t(value(x, y) * 17);
+    uint64_t h = 0xCBF29CE484222325ull;
+    for (uint8_t b : want) h = (h ^ b) * 0x100000001B3ull;
+    if (h != 0x8382B24A4858EC9Eull) return 50;
+    for (bool tiled : {false, true}) {
+      for (uint32_t endian : {1u, 2u, 0u, 3u}) {
+        uint32_t size = 0;
+        for (uint32_t by = 0; by < HB; ++by)
+          for (uint32_t bx = 0; bx < WB; ++bx) {
+            const uint32_t o = tiled ? uint32_t(capture::TiledOffset2D(int(bx), int(by), PITCH, 3))
+                                     : by * PITCH * 8 + bx * 8;
+            size = std::max(size, o + 8);
+          }
+        std::vector<uint8_t> g(size, 0);
+        for (uint32_t by = 0; by < HB; ++by)
+          for (uint32_t bx = 0; bx < WB; ++bx) {
+            uint8_t post[8];
+            for (uint32_t r = 0; r < 4; ++r) {
+              uint32_t row = 0;
+              for (uint32_t i = 0; i < 4; ++i) row |= value(bx * 4 + i, by * 4 + r) << (4 * i);
+              post[2 * r] = uint8_t(row & 255);
+              post[2 * r + 1] = uint8_t(row >> 8);
+            }
+            const uint32_t o = tiled ? uint32_t(capture::TiledOffset2D(int(bx), int(by), PITCH, 3))
+                                     : by * PITCH * 8 + bx * 8;
+            CopySwapped(g.data() + o, post, 8, endian);
+          }
+        std::vector<uint8_t> out;
+        if (!DecodeDxt3aLevel(g.data(), g.size(), W, H, PITCH, tiled, endian, &out)) return 51;
+        if (out != want) return 52;
+        // The decoder must not read past the source: any shorter source is refused (the last block is needed).
+        if (DecodeDxt3aLevel(g.data(), g.size() - 1, W, H, PITCH, tiled, endian, &out) || !out.empty()) return 53;
+        // An unaligned pitch behaves as its 32-block alignment (both the SDK layout and TiledOffset2D align).
+        if (!DecodeDxt3aLevel(g.data(), g.size(), W, H, 20, tiled, endian, &out) || out != want) return 54;
+      }
+    }
+  }
+  // --- the real terrain weight map, when a discovery dump of tf18 is on disk (else SKIPPED, loudly) ---
+  // FABLE2_TF18_BIN: the dumped base-level bytes (native_tex_<stamp>/<BASE>_<IDENTITY>.bin of the tess row's tf18);
+  // FABLE2_TF18_FC: its six fetch dwords as hex, comma separated (the "texture" row's "fc"). The decoded R8 image is
+  // written to FABLE2_TF18_BIN + ".cpp.r8" for tests/test_texture_thumb.py's real-dump test to compare with.
+  {
+    const char* bin = std::getenv("FABLE2_TF18_BIN");
+    const char* fcs = std::getenv("FABLE2_TF18_FC");
+    if (!bin || !fcs) {
+      std::printf("SKIPPED: real tf18 dump test (set FABLE2_TF18_BIN and FABLE2_TF18_FC after a discovery capture)\n");
+    } else {
+      uint32_t rfc[6] = {};
+      if (std::sscanf(fcs, "%x,%x,%x,%x,%x,%x", &rfc[0], &rfc[1], &rfc[2], &rfc[3], &rfc[4], &rfc[5]) != 6) return 60;
+      TextureFetch rt;
+      if (DecodeTextureFetch(rfc, &rt) != FetchError::kNone || rt.format != TexFormat::kDxt3a) return 61;
+      std::FILE* f = std::fopen(bin, "rb");
+      if (!f) return 62;
+      std::vector<uint8_t> bytes;
+      uint8_t chunk[65536];
+      for (size_t n; (n = std::fread(chunk, 1, sizeof(chunk), f)) > 0;) bytes.insert(bytes.end(), chunk, chunk + n);
+      std::fclose(f);
+      std::vector<uint8_t> r8;
+      if (!DecodeDxt3aLevel(bytes.data(), bytes.size(), rt.width, rt.height, rt.pitch_texels / 4, rt.tiled,
+                            rt.endian, &r8) || r8.size() != size_t(rt.width) * rt.height) return 63;
+      const std::string outp = std::string(bin) + ".cpp.r8";
+      std::FILE* o = std::fopen(outp.c_str(), "wb");
+      if (!o || std::fwrite(r8.data(), 1, r8.size(), o) != r8.size()) return 64;
+      std::fclose(o);
+      std::printf("tf18 dump decoded: %ux%u, wrote %s\n", rt.width, rt.height, outp.c_str());
+    }
+  }
   return 0;
 }

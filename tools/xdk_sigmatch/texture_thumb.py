@@ -1,6 +1,6 @@
 """Decode Xenos 2D texture base levels dumped by the native capture (discovery D3) and write PNG thumbnails.
 
-Supported formats: DXT1 (18), DXT2_3 (19), DXT4_5 (20), 8888 (6). Others raise ValueError("format N").
+Supported formats: DXT1 (18), DXT2_3 (19), DXT4_5 (20), 8888 (6), DXT3A (58, one 4-bit channel, shown as grey). Others raise ValueError("format N").
 The fetch constant is six host-order dwords (xenos::xe_gpu_texture_fetch_t).
 
 Usage: texture_thumb.py <capture.jsonl> --out <dir> [--alpha] [--base 0x<fetch dword 1> ...] [--max-edge N]
@@ -71,6 +71,37 @@ def _alpha_dxt5(blk):
     return [pal[(bits >> (3 * i)) & 7] for i in range(16)]
 
 
+def decode_r8(data, fc):
+    """Base level of a k_DXT3A (58) fetch constant -> (width, height, R8 bytes). The format is the
+    explicit-alpha half of a DXT3 block: 8 bytes per 4x4 block, four rows of 16 bits (little-endian after
+    the endian swap), texel i of a row in nibble i (low first), each 4-bit value v -> v * 17 (SDK:
+    ConvertTexelDXT3AToDXT3 and the texture_load_dxt3a shader). Data past the end reads as zero."""
+    fmt = fc[1] & 0x3F
+    if fmt != 58:
+        raise ValueError(f"format {fmt}")
+    endian = (fc[1] >> 6) & 3
+    w = (fc[2] & 0x1FFF) + 1
+    h = ((fc[2] >> 13) & 0x1FFF) + 1
+    pitch = ((fc[0] >> 22) & 0x1FF) << 5
+    tiled = (fc[0] >> 31) != 0
+    wb, hb = (w + 3) // 4, (h + 3) // 4
+    pitch_blocks = max(pitch // 4, wb)
+    row_pitch = ((pitch_blocks + 31) & ~31) * 8
+    out = bytearray(w * h)
+    for by in range(hb):
+        for bx in range(wb):
+            o = tiled_offset_2d(bx, by, pitch_blocks, 3) if tiled else by * row_pitch + bx * 8
+            raw = data[o:o + 8]
+            raw = _swap(raw + bytes(8 - len(raw)), endian)
+            for r in range(4):
+                row = raw[2 * r] | (raw[2 * r + 1] << 8)
+                for i in range(4):
+                    x, y = bx * 4 + i, by * 4 + r
+                    if x < w and y < h:
+                        out[y * w + x] = ((row >> (4 * i)) & 15) * 17
+    return w, h, bytes(out)
+
+
 def decode_rgba(data, fc):
     """Base level of a 2D fetch constant -> (width, height, RGBA bytes). Data past the end reads as zero."""
     fmt = fc[1] & 0x3F
@@ -79,6 +110,14 @@ def decode_rgba(data, fc):
     h = ((fc[2] >> 13) & 0x1FFF) + 1
     pitch = ((fc[0] >> 22) & 0x1FF) << 5
     tiled = (fc[0] >> 31) != 0
+    if fmt == 58:
+        w, h, r8 = decode_r8(data, fc)
+        rgba = bytearray(w * h * 4)
+        rgba[0::4] = r8
+        rgba[1::4] = r8
+        rgba[2::4] = r8
+        rgba[3::4] = bytes([255]) * (w * h)
+        return w, h, bytes(rgba)
     if fmt not in (6, 18, 19, 20):
         raise ValueError(f"format {fmt}")
     if fmt == 6:
@@ -159,7 +198,7 @@ def alpha_stats(rgba):
     return {"zero": zero / n, "full": full / n, "between": (n - zero - full) / n}
 
 
-_FORMAT_NAMES = {6: "8888", 18: "DXT1", 19: "DXT2_3", 20: "DXT4_5"}
+_FORMAT_NAMES = {6: "8888", 18: "DXT1", 19: "DXT2_3", 20: "DXT4_5", 58: "DXT3A"}
 
 
 def main(argv=None):

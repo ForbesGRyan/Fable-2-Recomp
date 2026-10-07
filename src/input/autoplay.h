@@ -4,6 +4,9 @@
 // (seconds since process start). The runtime side lives in fable_2_app.h.
 // Stick entries "55:LS=0/100/3000" / "60:RS=60/0/1500" hold a stick at x/y percent
 // (positive y forward, positive x right) for the given milliseconds.
+// Action entries "56:VIEW=native" (off|split|overlay|native|pattern) and "66:DISC=60/4"
+// (discovery capture of 60 frames, every 4th draw) press nothing; the app's autoplay
+// thread runs them (ActionsBetween) against the renderer and the capture.
 
 #pragma once
 
@@ -24,6 +27,10 @@ struct Step {
   uint8_t stick = 0;  // 0 button step, 1 left stick, 2 right stick
   int8_t x = 0, y = 0;  // percent of full deflection, [-100, 100]
   uint32_t stick_ms = 0;  // how long the stick is held, [1, 60000]
+  uint8_t action = 0;  // 0 none, 1 set the native view, 2 arm a discovery capture
+  uint8_t view = 0;  // action 1: 0 off, 1 split, 2 overlay, 3 native, 4 pattern
+  uint32_t disc_frames = 0;  // action 2: frames, [1, 100000]
+  uint32_t disc_every = 0;  // action 2: sample every Nth draw, [1, 64]
 };
 
 // Stick axes in the driver's units (-32767..32767, positive y forward).
@@ -107,6 +114,41 @@ inline bool ParseStick(std::string_view name, Step* step) {
   return true;
 }
 
+// "VIEW=name" or "DISC=frames/every" (case-insensitive prefix); false when malformed.
+inline bool ParseAction(std::string_view name, Step* step) {
+  const size_t eq = name.find('=');
+  if (eq == std::string_view::npos) return false;
+  const std::string_view key = name.substr(0, eq), val = name.substr(eq + 1);
+  if (IEquals(key, "VIEW")) {
+    static constexpr const char* kViews[] = {"off", "split", "overlay", "native", "pattern"};
+    for (uint8_t i = 0; i < 5; ++i) {
+      if (!IEquals(val, kViews[i])) continue;
+      step->buttons = 0;
+      step->action = 1;
+      step->view = i;
+      step->name = std::string("VIEW=") + kViews[i];
+      return true;
+    }
+    return false;
+  }
+  if (IEquals(key, "DISC")) {
+    const size_t slash = val.find('/');
+    if (slash == std::string_view::npos) return false;
+    int frames = 0, every = 0;
+    if (!ParseInt(val.substr(0, slash), false, &frames) ||
+        !ParseInt(val.substr(slash + 1), false, &every))  // a second '/' is not a digit
+      return false;
+    if (frames < 1 || frames > 100000 || every < 1 || every > 64) return false;
+    step->buttons = 0;
+    step->action = 2;
+    step->disc_frames = static_cast<uint32_t>(frames);
+    step->disc_every = static_cast<uint32_t>(every);
+    step->name = "DISC=" + std::to_string(frames) + "/" + std::to_string(every);
+    return true;
+  }
+  return false;
+}
+
 }  // namespace detail
 
 // Parses "23:A,27:Down". Returns nullopt and sets *error (the bad token) on failure.
@@ -125,9 +167,12 @@ inline std::optional<std::vector<Step>> Parse(std::string_view spec, std::string
       double t = 0;
       if (!detail::ParseSeconds(detail::Trim(token.substr(0, colon)), &t)) return fail();
       const std::string_view bname = detail::Trim(token.substr(colon + 1));
-      if (bname.size() >= 3 && bname[2] == '=') {
+      if (bname.find('=') != std::string_view::npos) {
         Step st{t, 0, {}};
-        if (!detail::ParseStick(bname, &st)) return fail();
+        const bool ok = (bname.size() >= 3 && bname[2] == '=')
+                            ? detail::ParseStick(bname, &st)
+                            : detail::ParseAction(bname, &st);
+        if (!ok) return fail();
         steps.push_back(std::move(st));
         if (comma == std::string_view::npos) break;
         spec.remove_prefix(comma + 1);
@@ -151,7 +196,7 @@ inline std::optional<std::vector<Step>> Parse(std::string_view spec, std::string
 inline uint16_t ButtonsAt(const std::vector<Step>& steps, double t, double hold_seconds) {
   uint16_t mask = 0;
   for (const Step& s : steps)
-    if (s.stick == 0 && s.t_seconds <= t && t < s.t_seconds + hold_seconds) mask |= s.buttons;
+    if (s.stick == 0 && s.action == 0 && s.t_seconds <= t && t < s.t_seconds + hold_seconds) mask |= s.buttons;
   return mask;
 }
 
@@ -177,8 +222,18 @@ inline Sticks SticksAt(const std::vector<Step>& steps, double t_seconds) {
 inline double EndTime(const std::vector<Step>& steps, double hold_seconds) {
   double end = 0;
   for (const Step& s : steps)
-    end = std::max(end, s.t_seconds + (s.stick ? s.stick_ms / 1000.0 : hold_seconds));
+    end = std::max(end, s.t_seconds + (s.stick ? s.stick_ms / 1000.0 : s.action ? 0.0 : hold_seconds));
   return end;
+}
+
+// Action steps (view, discovery) with t0 < t_step <= t1, in plan order (time order for a
+// sorted plan, plan order for equal times). A poller calling it with consecutive times
+// runs each action exactly once. Valid while `steps` is not modified.
+inline std::vector<const Step*> ActionsBetween(const std::vector<Step>& steps, double t0, double t1) {
+  std::vector<const Step*> out;
+  for (const Step& s : steps)
+    if (s.action != 0 && t0 < s.t_seconds && s.t_seconds <= t1) out.push_back(&s);
+  return out;
 }
 
 }  // namespace fable2::autoplay

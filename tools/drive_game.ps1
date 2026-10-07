@@ -11,7 +11,11 @@
 # window handle. Buttons are held HoldMs (default 100); longer holds auto-repeat
 # in the menus.
 # A plan entry "55:LS=0/100/3000" (or RS=...) holds a stick at x/y percent (-100..100,
-# positive y forward, positive x right) for that many ms; it is passed through unchanged.
+# positive y forward, positive x right) for that many ms (x, y -100..100, ms 1..60000; a bad
+# entry throws here instead of the game rejecting the whole plan). "56:VIEW=native"
+# (off|split|overlay|native|pattern) switches the native view and "66:DISC=60/4" arms a
+# discovery capture of 60 frames, every 4th draw (frames 1..100000, every 1..64); both
+# are run by the game's autoplay thread and passed through unchanged.
 #
 # -KeyboardInput: the old path. Keys are sent with keybd_event (HoldMs default
 # 50), which targets whatever window has focus, so each key is sent only if the
@@ -69,7 +73,25 @@ $autoplaySteps = @()
 foreach ($e in $Plan.Split(",")) {
   if (-not $e) { continue }
   $t, $k = $e.Split(":")
-  if (-not $KeyboardInput -and $k -match '^(?i:LS|RS)=-?\d+/-?\d+/\d+$') {
+  if (-not $KeyboardInput -and $k -match '^(?i:LS|RS)=(-?\d+)/(-?\d+)/(\d+)$') {
+    # Same ranges as src/input/autoplay.h: the game rejects the whole plan on a bad one.
+    $sx = [long]$Matches[1]; $sy = [long]$Matches[2]; $sms = [long]$Matches[3]
+    if ($sx -lt -100 -or $sx -gt 100 -or $sy -lt -100 -or $sy -gt 100 -or $sms -lt 1 -or $sms -gt 60000) {
+      throw "bad stick entry '$k': x and y must be -100..100 and ms 1..60000"
+    }
+    $autoplaySteps += "${t}:$k"
+    continue
+  }
+  # View switch and timed discovery capture, run by the game's autoplay thread.
+  if (-not $KeyboardInput -and $k -match '^(?i:VIEW)=(?i:off|split|overlay|native|pattern)$') {
+    $autoplaySteps += "${t}:$k"
+    continue
+  }
+  if (-not $KeyboardInput -and $k -match '^(?i:DISC)=(\d+)/(\d+)$') {
+    $df = [long]$Matches[1]; $de = [long]$Matches[2]
+    if ($df -lt 1 -or $df -gt 100000 -or $de -lt 1 -or $de -gt 64) {
+      throw "bad capture entry '$k': frames must be 1..100000 and every 1..64"
+    }
     $autoplaySteps += "${t}:$k"
     continue
   }

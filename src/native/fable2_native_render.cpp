@@ -65,6 +65,12 @@ std::atomic<bool> g_installed{false};
 // The parsed fable2_native_view. The string cvar is read and written only on
 // the game thread (Install, F6 in PollFrame); the GPU and UI threads read this.
 std::atomic<View> g_view{View::kOff};
+// SetView (autoplay thread) leaves the requested view here; PollFrame applies it on the
+// game thread like an F6 press. -1 = none.
+std::atomic<int> g_pending_view{-1};
+// Number of view changes applied, and its value at the last [native] clay: line.
+std::atomic<uint32_t> g_view_changes{0};
+uint32_t g_view_changes_logged = 0;  // command-processor thread only
 Resources g_res;  // command-processor thread only
 FailureLatch g_latch;
 EdgeDetector g_toggle;
@@ -265,12 +271,17 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   }
   g_clay_window_max_ms = std::max(g_clay_window_max_ms, cpu_ms);
   if (g_clay_frames % 300 == 0) {
+    // The window's view: the view at its end, marked when it changed during the window.
+    const uint32_t view_changes = g_view_changes.load(std::memory_order_relaxed);
+    const bool view_changed = view_changes != g_view_changes_logged;
+    g_view_changes_logged = view_changes;
     REXLOG_INFO(
-        "[native] clay: drawn {} (deformed {}) of {} drawable, skipped_bad_index {} other {} | "
+        "[native] clay: view {}{} | drawn {} (deformed {}) of {} drawable, skipped_bad_index {} other {} | "
         "textured {} of {} | {} uploads, {} hits, {:.1f} MB resident, instanced {}, skinned {} | "
         "hash {:.2f} ms, decode {:.2f} ms, record {:.2f} ms (max total {:.2f} ms over 300) | "
         "scene frame {}",
-        st.drawn, st.deformed, scene->draws.size(), st.skipped_bad_index, st.skipped_other,
+        ViewName(CurrentView()), view_changed ? " (changed)" : "", st.drawn, st.deformed,
+        scene->draws.size(), st.skipped_bad_index, st.skipped_other,
         tst.textured, st.drawn, st.uploads, st.hits,
         double(st.resident_bytes) / (1024.0 * 1024.0), st.instanced, st.skinned, st.hash_ms,
         st.decode_ms, st.record_ms, g_clay_window_max_ms, scene->frame);
@@ -337,8 +348,31 @@ void Install(rex::memory::Memory* memory) {
               ViewName(CurrentView()));
 }
 
+// Game thread only: the string cvar is touched here only.
+void ApplyView(View next, const char* source) {
+  REXCVAR_SET(fable2_native_view, std::string(ViewName(next)));
+  g_view.store(next, std::memory_order_relaxed);
+  g_view_changes.fetch_add(1, std::memory_order_relaxed);
+  REXLOG_INFO("[native] {}: view {}", source, ViewName(next));
+}
+
+void SetView(View view) {
+  if (!g_installed.load(std::memory_order_acquire)) {
+    REXLOG_INFO("[native] SetView({}): native renderer not installed; ignored", ViewName(view));
+    return;
+  }
+  g_pending_view.store(int(view), std::memory_order_release);
+}
+
+bool ArmDiscovery(uint32_t frames, uint32_t every) {
+  return capture::ArmDiscoveryNow(frames, every);
+}
+
 void PollFrame() {
   if (!g_installed.load(std::memory_order_acquire)) return;
+  if (const int pending = g_pending_view.exchange(-1, std::memory_order_acq_rel); pending >= 0) {
+    ApplyView(View(pending), "autoplay");
+  }
 #ifdef _WIN32
   const bool down = WindowFocused() && (GetAsyncKeyState(kToggleVk) & 0x8000) != 0;
   if (g_toggle.Update(down)) {
@@ -347,10 +381,7 @@ void PollFrame() {
       SetStatus({});
       REXLOG_INFO("[native] F6: retrying native renderer");
     } else {
-      const View next = NextView(CurrentView());
-      REXCVAR_SET(fable2_native_view, std::string(ViewName(next)));
-      g_view.store(next, std::memory_order_relaxed);
-      REXLOG_INFO("[native] F6: view {}", ViewName(next));
+      ApplyView(NextView(CurrentView()), "F6");
     }
   }
 #endif

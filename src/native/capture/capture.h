@@ -24,6 +24,12 @@ bool Enabled();
 // per guest frame by fable2::native::PollFrame; takes effect from the next
 // guest frame. Without it main-scene draws are only counted.
 void SetRecordsWanted(bool wanted);
+// Starts a discovery capture of `frames` guest frames (1..100000) sampling every `every`th
+// draw (1..64) at the next guest frame, into a new file, like FABLE2_NATIVE_DISCOVERY
+// after its delay. Callable from any thread. Returns false, with a log line, when the
+// arguments are out of range, the capture layer is off, or a capture is running or still
+// waiting for its environment delay (no queue).
+bool ArmDiscoveryNow(uint32_t frames, uint32_t every);
 // The main-scene FrameScene, published at each OnSwap while the native
 // renderer is on (fable2_native_render). Frames without records publish
 // nullptr.

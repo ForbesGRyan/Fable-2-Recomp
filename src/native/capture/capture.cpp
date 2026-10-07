@@ -230,13 +230,31 @@ std::map<std::pair<uint32_t, uint32_t>, std::vector<uint64_t>> g_geo_seen;
 uint32_t g_geo_count = 0;
 uint64_t g_geo_bytes = 0;
 
-int FramesRequested() {
-  static const int frames = [] {
+// Frames to capture and the draw sampling: seeded from the environment, replaced by
+// ArmDiscoveryNow. Written only by OnSwap (guest thread), always before g_armed is set.
+std::atomic<int>& FramesTarget() {
+  static std::atomic<int> frames = [] {
     const char* v = std::getenv("FABLE2_NATIVE_DISCOVERY");
     return v ? std::max(0, std::atoi(v)) : 0;
   }();
   return frames;
 }
+
+int FramesRequested() { return FramesTarget().load(std::memory_order_relaxed); }
+
+std::atomic<uint64_t>& EverySetting() {
+  static std::atomic<uint64_t> n = [] {
+    const char* v = std::getenv("FABLE2_NATIVE_DISCOVERY_EVERY");
+    const long long x = v ? std::atoll(v) : 64;
+    return uint64_t(x > 0 ? x : 64);
+  }();
+  return n;
+}
+
+// A run-time capture request (ArmDiscoveryNow): (frames << 16) | every, 0 = none. Taken
+// by OnSwap, which opens the file and arms; it ignores the environment delay.
+std::atomic<uint64_t> g_runtime_request{0};
+std::atomic<bool> g_runtime_capture{false};  // current capture came from a request
 
 double DelaySeconds() {
   static const double d = [] {
@@ -246,14 +264,7 @@ double DelaySeconds() {
   return d;
 }
 
-uint64_t Every() {
-  static const uint64_t n = [] {
-    const char* v = std::getenv("FABLE2_NATIVE_DISCOVERY_EVERY");
-    const long long x = v ? std::atoll(v) : 64;
-    return uint64_t(x > 0 ? x : 64);
-  }();
-  return n;
-}
+uint64_t Every() { return EverySetting().load(std::memory_order_relaxed); }
 
 thread_local std::array<LastArgs, kMaxHookIds> t_last_args;  // indexed by hook id
 thread_local DrawNesting t_nesting;  // only the outermost draw of a call chain is recorded
@@ -2315,6 +2326,26 @@ void SetMemory(rex::memory::Memory* memory) {
 
 bool Enabled() { return g_enabled.load(std::memory_order_relaxed); }
 
+bool ArmDiscoveryNow(uint32_t frames, uint32_t every) {
+  if (frames < 1 || frames > 100000 || every < 1 || every > 64) {
+    REXSYS_WARN("[native-discovery] refused: frames {} every {} out of range", frames, every);
+    return false;
+  }
+  if (!g_enabled.load(std::memory_order_acquire)) {
+    REXSYS_WARN("[native-discovery] refused: capture layer off (needs fable2_native_render=true)");
+    return false;
+  }
+  // Claims the discovery state; set while a capture is armed, open, or waiting for its
+  // environment delay, so any of those refuses the request (no queue).
+  if (g_discovery_active.exchange(true)) {
+    REXSYS_WARN("[native-discovery] refused: a capture is still running or pending");
+    return false;
+  }
+  g_runtime_request.store((uint64_t(frames) << 16) | every);
+  REXSYS_INFO("[native-discovery] capture requested: {} frames, every {}", frames, every);
+  return true;
+}
+
 void SetRecordsWanted(bool wanted) {
   g_records_wanted.store(wanted, std::memory_order_relaxed);
 }
@@ -2395,6 +2426,18 @@ void OnSwap() {
   if (!g_enabled.load(std::memory_order_acquire)) return;
   SwapTimer timer;
   const uint64_t swap = g_swaps.fetch_add(1, std::memory_order_relaxed) + 1;
+  // A run-time request: g_discovery_active was claimed by ArmDiscoveryNow, so no capture
+  // is running or waiting for its delay; set the parameters up and let the code below
+  // open the file and arm exactly as the environment path does.
+  if (const uint64_t req = g_runtime_request.exchange(0); req != 0 &&
+                                                          !g_armed.load(std::memory_order_relaxed)) {
+    FramesTarget().store(int(req >> 16), std::memory_order_relaxed);
+    EverySetting().store(req & 0xFFFF, std::memory_order_relaxed);
+    g_frames_written.store(0, std::memory_order_relaxed);
+    g_draw_count.store(0, std::memory_order_relaxed);
+    g_failed.store(false);
+    g_runtime_capture.store(true, std::memory_order_relaxed);
+  }
   detail::CacheGeneration().fetch_add(1, std::memory_order_relaxed);
   if (!g_armed.load(std::memory_order_relaxed)) {
     FinishedScene done;
@@ -2407,10 +2450,11 @@ void OnSwap() {
     if (g_frames_written.load(std::memory_order_relaxed) >= FramesRequested()) return;
     const double elapsed =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-    if (elapsed < DelaySeconds()) return;
+    if (!g_runtime_capture.load(std::memory_order_relaxed) && elapsed < DelaySeconds()) return;
     {
       std::lock_guard<std::mutex> lock(g_mutex);
       if (!g_file && !OpenLog()) {
+        g_runtime_capture.store(false, std::memory_order_relaxed);
         g_discovery_active.store(false, std::memory_order_relaxed);
         return;
       }
@@ -2427,6 +2471,7 @@ void OnSwap() {
   if (g_file) std::fflush(g_file);
   if (frame >= FramesRequested()) {
     g_armed.store(false);
+    g_runtime_capture.store(false, std::memory_order_relaxed);
     g_discovery_active.store(false, std::memory_order_relaxed);
     if (g_file) {
       std::fclose(g_file);

@@ -427,13 +427,29 @@ class Fable2App : public rex::ReXApp {
       using namespace fable2::autoplay;
       const double end = EndTime(autoplay_plan_, autoplay_hold_s_);
       size_t next_log = 0;  // plan is sorted by time
+      double last_t = 0;    // actions run once: those in (last_t, t]
       while (!stop.stop_requested()) {
         const double t = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - autoplay_t0_).count();
         while (next_log < autoplay_plan_.size() && autoplay_plan_[next_log].t_seconds <= t) {
-          REXSYS_INFO("[autoplay] {} at {:.1f} s", autoplay_plan_[next_log].name, t);
+          if (autoplay_plan_[next_log].action == 0)
+            REXSYS_INFO("[autoplay] {} at {:.1f} s", autoplay_plan_[next_log].name, t);
           ++next_log;
         }
+        for (const Step* a : ActionsBetween(autoplay_plan_, last_t, t)) {
+          REXSYS_INFO("[autoplay] {} (planned {:.1f} s) at {:.1f} s", a->name, a->t_seconds, t);
+          if (a->action == 1) {
+            // Plan codes: 0 off, 1 split, 2 overlay, 3 native, 4 pattern.
+            static constexpr fable2::native::View kViews[] = {
+                fable2::native::View::kOff, fable2::native::View::kSplit,
+                fable2::native::View::kOverlay, fable2::native::View::kNative,
+                fable2::native::View::kPattern};
+            fable2::native::SetView(kViews[a->view < 5 ? a->view : 0]);
+          } else if (a->action == 2) {
+            fable2::native::ArmDiscovery(a->disc_frames, a->disc_every);
+          }
+        }
+        last_t = t;
         const Sticks sticks = SticksAt(autoplay_plan_, t);
         autoplay_state_.Publish({.buttons = ButtonsAt(autoplay_plan_, t, autoplay_hold_s_),
                                  .stk_lx = sticks.lx, .stk_ly = sticks.ly,

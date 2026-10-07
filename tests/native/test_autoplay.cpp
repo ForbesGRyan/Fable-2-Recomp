@@ -75,6 +75,69 @@ int main() {
                           "5:LS=", "5:LS=0//100"}) {
     if (fable2::autoplay::Parse(bad, &err)) return 73;   // the whole plan is rejected
   }
+  {  // view and discovery actions
+    auto v = Parse("1:VIEW=Off,2:view=SPLIT,3:View=overlay,4:VIEW=nAtIvE,5:VIEW=pattern", &err);
+    if (!v || v->size() != 5) return 74;
+    const uint8_t want[5] = {0, 1, 2, 3, 4};
+    const char* names[5] = {"VIEW=off", "VIEW=split", "VIEW=overlay", "VIEW=native", "VIEW=pattern"};
+    for (int i = 0; i < 5; ++i) {
+      const Step& st = (*v)[i];
+      if (st.action != 1 || st.view != want[i] || st.name != names[i] || st.buttons != 0 ||
+          st.stick != 0) return 75;
+    }
+    auto d = Parse("5:disc=120/4", &err);
+    if (!d || d->size() != 1) return 76;
+    if ((*d)[0].action != 2 || (*d)[0].disc_frames != 120 || (*d)[0].disc_every != 4 ||
+        (*d)[0].name != "DISC=120/4") return 77;
+    auto lim = Parse("1:DISC=1/1,2:DISC=100000/64", &err);
+    if (!lim || (*lim)[1].disc_frames != 100000 || (*lim)[1].disc_every != 64) return 78;
+  }
+  {  // a mixed plan stays in time order; actions press nothing and move no stick
+    auto m = Parse("60:VIEW=native,23:A,50:LS=0/100/4000,66:DISC=60/4,52:VIEW=off,30:Down", &err);
+    if (!m || m->size() != 6) return 79;
+    const double order[6] = {23, 30, 50, 52, 60, 66};
+    for (int i = 0; i < 6; ++i)
+      if ((*m)[i].t_seconds != order[i]) return 80;
+    if ((*m)[3].action != 1 || (*m)[4].action != 1 || (*m)[5].action != 2) return 81;
+    if (ButtonsAt(*m, 52.0, 1.0) != 0 || ButtonsAt(*m, 60.0, 1.0) != 0 ||
+        ButtonsAt(*m, 66.0, 1.0) != 0) return 82;
+    if (SticksAt(*m, 60.0).ly != 0 || SticksAt(*m, 66.0).lx != 0) return 83;
+    if (SticksAt(*m, 52.0).ly != 32767) return 84;  // the stick entry still holds at 52 s
+    auto tail = Parse("10:A,20:VIEW=native", &err);
+    if (EndTime(*tail, 0.1) != 20.0) return 85;     // covers a trailing action
+    auto only = Parse("90:DISC=10/1", &err);
+    if (EndTime(*only, 0.1) != 90.0) return 86;
+  }
+  {  // ActionsBetween: each action exactly once across consecutive 5 ms polls
+    auto m = *Parse("1:A,1.0:VIEW=native,1.0:DISC=5/2,1.5:VIEW=off,2:LS=0/10/100,0.005:VIEW=split", &err);
+    // 0.005 is exactly t1 of the first poll (0, 0.005]; 1.0 twice (plan order); 1.5.
+    std::vector<std::string> seen;
+    double last = 0;
+    for (int i = 1; i <= 500; ++i) {  // 5 ms steps up to 2.5 s
+      const double t = i * 0.005;
+      for (const Step* s : ActionsBetween(m, last, t)) seen.push_back(s->name);
+      last = t;
+    }
+    if (seen.size() != 4) return 87;
+    if (seen[0] != "VIEW=split" || seen[1] != "VIEW=native" || seen[2] != "DISC=5/2" ||
+        seen[3] != "VIEW=off") return 88;
+    // boundaries: t1 inclusive, t0 exclusive
+    auto b = *Parse("10:VIEW=off,10:VIEW=native", &err);
+    if (ActionsBetween(b, 9.0, 10.0).size() != 2) return 89;
+    if (!ActionsBetween(b, 10.0, 11.0).empty()) return 90;
+    if (!ActionsBetween(b, 9.0, 9.999).empty()) return 91;
+    const auto both = ActionsBetween(b, 0.0, 20.0);
+    if (both.size() != 2 || both[0]->view != 0 || both[1]->view != 3) return 92;  // plan order
+    if (!ActionsBetween(*Parse("10:A,11:LS=1/1/100", &err), 0, 20).empty()) return 93;
+    if (!ActionsBetween({}, 0, 20).empty()) return 94;
+  }
+  for (const char* bad : {"5:VIEW=", "5:VIEW=sideways", "5:VIEW=native/1", "5:DISC=120", "5:DISC=0/4",
+                          "5:DISC=120/0", "5:DISC=120/65", "5:DISC=100001/4", "5:DISC=a/4",
+                          "5:DISC=120/4/1", "5:DISC=", "5:DISC=/4", "5:DISC=120/", "5:VIEWS=off",
+                          "5:VIEW"}) {
+    if (Parse(bad, &err)) return 95;
+    if (Parse(std::string("10:A,") + bad + ",20:B", &err)) return 96;  // the whole plan
+  }
   std::cout << "autoplay ok\n";
   return 0;
 }

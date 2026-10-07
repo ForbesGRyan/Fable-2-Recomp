@@ -21,7 +21,10 @@
 # src/core/boot_save.h). The default key plan is dropped (give -Plan to add steps; times are
 # still seconds since start). If <ExeDir>\saves-pristine\Hero003 exists, the live save folder
 # is first moved to <ExeDir>\saves-replaced\<timestamp>\Hero003 and the pristine copy is put in
-# its place, so every run starts from the same save. Nothing is ever deleted.
+# its place, so every run starts from the same save. Nothing is ever deleted. The boot logo
+# videos are skipped (FABLE2_SKIP_LOGOS=1) unless -Env sets FABLE2_SKIP_LOGOS to 0. Measured
+# 2026-10-07: the world starts drawing at about 23 s (40 s with the default key plan), so
+# start captures at >= 33 s.
 #
 # -KeyboardInput: the old path. Keys are sent with keybd_event (HoldMs default
 # 50), which targets whatever window has focus, so each key is sent only if the
@@ -101,7 +104,7 @@
 #   .\tools\drive_game.ps1 -Total 120
 #   .\tools\drive_game.ps1 -Total 150 -Env @{FABLE2_NATIVE_DISCOVERY="300"; FABLE2_NATIVE_DISCOVERY_DELAY="50"}
 #   .\tools\drive_game.ps1 -GameArgs "--native_render_log_vertex_bindings=true" -Shots "50,80"
-#   .\tools\drive_game.ps1 -BootSave Hero003 -Total 60 -Shots "25,40"
+#   .\tools\drive_game.ps1 -BootSave Hero003 -Total 60 -Shots "35,50"
 [CmdletBinding(PositionalBinding = $false)]
 param(
   [int]$Total = 120,                         # seconds before the game is closed
@@ -198,6 +201,7 @@ if ($BootSave) {
   if (-not $PSBoundParameters.ContainsKey('Plan')) { $Plan = "" }
   $Env = @{} + $Env
   $Env["FABLE2_BOOT_SAVE"] = $BootSave
+  if (-not $Env.ContainsKey("FABLE2_SKIP_LOGOS")) { $Env["FABLE2_SKIP_LOGOS"] = "1" }   # -Env @{FABLE2_SKIP_LOGOS="0"} keeps the logos
 }
 if ($KeyboardInput -and -not $UserPresent) {
   Write-Output "REFUSED: -KeyboardInput means the user is driving; it requires -UserPresent. Nothing launched."

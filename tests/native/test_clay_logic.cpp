@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <cmath>
 #include <limits>
 #include <string>
 
@@ -702,6 +703,26 @@ int main() {
     CHECK(171, subtract.valid && subtract.blend && !BlendSupported(subtract) &&
                    MakePipelineKey(subtract, 1) == k && BlendSupported(opaque) &&
                    BlendSupported(State(0x00708767, 0x07060706, 0x0000000E, 0x00218006)));
+    // 214-216: exactly the factors and operations the RHI has (zero, one, source
+    // alpha and its inverse; add, min), over every value the decoder accepts.
+    for (uint32_t f : {0u, 1u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u, 16u}) {
+      const bool want = f == 0 || f == 1 || f == 6 || f == 7;
+      CHECK(214, RhiFactor(Factor(f)) == want);
+      // In each of the four factor positions of a blend word that is otherwise expressible.
+      for (uint32_t shift : {0u, 8u, 16u, 24u}) {
+        const uint32_t word = (0x07060706u & ~(0x1Fu << shift)) | (f << shift);
+        const capture::RenderState st = State(0x00708767, word, 0x00000004, 0x00218006);
+        CHECK(215, st.valid && BlendSupported(st) == want);
+      }
+    }
+    for (uint32_t o = 0; o <= 4; ++o) {
+      const bool want = o == 0 || o == 2;
+      CHECK(216, RhiBlendOp(capture::BlendOp(o)) == want);
+      for (uint32_t shift : {5u, 21u}) {
+        const capture::RenderState st = State(0x00708767, 0x07060706u | (o << shift), 0x00000004, 0x00218006);
+        CHECK(216, st.valid && BlendSupported(st) == want);
+      }
+    }
   }
   // 172-177: the pipeline cache's slots are bounded (Review Focus 2).
   {
@@ -774,8 +795,10 @@ int main() {
                    d.alpha.ref == 128.0f / 255.0f && d.alpha.scale == 0.75f && d.key.blend == 0);
     // Alpha-to-mask is a second test; the fur shells blend and test with greater-equal.
     d = DecideDrawState(foliage, recipe, 1, false);
-    CHECK(187, d.alpha_tested && d.alpha.mode == (4u | kAlphaTest | kAlphaFromAlbedo | (3u << 5) | kAlphaToMask) &&
-                   d.alpha.ref == 0.0f && d.key.cull == 0);
+    // The four dither offsets of the state (0x87 here) travel in bits 16-23.
+    CHECK(187, d.alpha_tested &&
+                   d.alpha.mode == (4u | kAlphaTest | kAlphaFromAlbedo | (3u << 5) | kAlphaToMask | (0x87u << 16)) &&
+                   d.alpha.ref == 0.0f && d.key.cull == 0 && kAlphaToMaskShift == 16);
     d = DecideDrawState(fur, recipe, 1, false);
     CHECK(188, !d.skip && d.alpha_tested && d.blended && !d.alpha_unknown &&
                    d.alpha.mode == (6u | kAlphaTest | kAlphaFromAlbedo | (3u << 5) | kAlphaBlend) &&
@@ -786,7 +809,17 @@ int main() {
     capture::Material red = recipe;
     red.alpha.component = 0;
     d = DecideDrawState(mask_only, red, 1, false);
+    // Offsets 0: the threshold is 1.0 at every pixel; the flag alone says the mask is on.
     CHECK(189, d.alpha_tested && !d.alpha_unknown && d.alpha.mode == (kAlphaFromAlbedo | kAlphaToMask));
+    mask_only.alpha_to_mask_offsets = 0xAA;
+    d = DecideDrawState(mask_only, red, 1, false);
+    CHECK(217, d.alpha_tested && d.alpha.mode == (kAlphaFromAlbedo | kAlphaToMask | (0xAAu << 16)));
+    // Offsets without the enable never reach the constants.
+    mask_only.alpha_to_mask = false;
+    mask_only.alpha_test = true;
+    mask_only.alpha_func = capture::Compare::kGreater;
+    d = DecideDrawState(mask_only, red, 1, false);
+    CHECK(218, d.alpha.mode == (4u | kAlphaTest | kAlphaFromAlbedo));
     capture::Material one;
     one.alpha.source = AlphaSource::kOne;
     one.alpha_scale = 0.25f;
@@ -824,18 +857,81 @@ int main() {
     d = DecideDrawState(equal, none, 1, false);
     CHECK(196, !d.skip && d.state_invalid && d.key.depth_func == uint8_t(capture::Compare::kLess) &&
                    d.key.depth_write == 1 && d.key.cull == uint8_t(capture::Cull::kBack));
+    // With the depth test off the function is not used: nothing is invalid.
+    equal.depth_test = false;
+    d = DecideDrawState(equal, none, 1, false);
+    CHECK(219, DepthSupported(equal) && !d.skip && !d.state_invalid && d.key.depth_test == 0 &&
+                   d.key.depth_write == 0 && d.key.depth_func == PipelineKey{}.depth_func);
     // Colour mask 0 with depth write: a depth-only draw is drawn, also when its
     // state blends and its colour is unknown (it writes none).
     d = DecideDrawState(State(0x00708767, 0x00010001, 0x00000004, 0x00218006, 0x0), none, 0, false);
     CHECK(197, !d.skip && d.key.color_mask == 0 && d.key.depth_write == 1 && !d.blended);
     d = DecideDrawState(State(0x00708767, 0x07060706, 0x00000004, 0x00218006, 0x0), none, 0, false);
-    CHECK(198, !d.skip && d.key.color_mask == 0 && d.key.blend == 0 && !d.blended && !d.alpha_unknown);
+    PipelineKey depth_only;  // nothing of the captured blend stays in the key
+    depth_only.color_mask = 0;
+    depth_only.depth_func = uint8_t(capture::Compare::kLessEqual);
+    depth_only.cull = uint8_t(capture::Cull::kBack);
+    CHECK(198, !d.skip && d.key == depth_only && !d.blended && !d.alpha_unknown);
     // A terrain patch drawn as flat clay is drawn opaque: its blend is the
     // layer's own, which flat clay does not have.
     d = DecideDrawState(layer, none, 0, true);
-    CHECK(199, !d.skip && !d.blended && !d.alpha_unknown && d.key.blend == 0 &&
-                   d.key.depth_func == uint8_t(capture::Compare::kLessEqual) &&
-                   d.key.cull == uint8_t(capture::Cull::kFront) && DecideDrawState(layer, none, 0, false).skip);
+    PipelineKey flat;  // the layer's depth and cull, none of its blend factors
+    flat.depth_func = uint8_t(capture::Compare::kLessEqual);
+    flat.cull = uint8_t(capture::Cull::kFront);
+    CHECK(199, !d.skip && !d.blended && !d.alpha_unknown && d.key == flat &&
+                   DecideDrawState(layer, none, 0, false).skip);
+  }
+  // 220-226: alpha-to-mask as the GPU does it without multisampling: a pixel is
+  // covered iff alpha >= 1 - offset / 4, with the offset of its parity
+  // (index = (x & 1) * 2 + (y & 1), two bits each from bit 0).
+  {
+    const float below = 0.99999994f;  // the float just below 1
+    auto at = [](float t, float* lo, float* hi) {
+      *lo = std::nextafter(t, 0.0f);
+      *hi = std::nextafter(t, 2.0f);
+    };
+    // 0xAA: 0.5 at every pixel.
+    for (uint32_t x = 0; x < 2; ++x) {
+      for (uint32_t y = 0; y < 2; ++y) {
+        float lo, hi;
+        at(0.5f, &lo, &hi);
+        CHECK(220, !AlphaToMaskCovers(0xAA, x, y, lo) && AlphaToMaskCovers(0xAA, x, y, 0.5f) &&
+                       AlphaToMaskCovers(0xAA, x, y, hi));
+      }
+    }
+    // 0x87: 0.25 (x even, y even), 0.75 (even, odd), 1.0 (odd, even), 0.5 (odd, odd).
+    const struct { uint32_t x, y; float t; } dither[] = {{0, 0, 0.25f}, {0, 1, 0.75f}, {1, 0, 1.0f}, {1, 1, 0.5f}};
+    for (const auto& c : dither) {
+      float lo, hi;
+      at(c.t, &lo, &hi);
+      CHECK(221, !AlphaToMaskCovers(0x87, c.x, c.y, lo) && AlphaToMaskCovers(0x87, c.x, c.y, c.t) &&
+                     AlphaToMaskCovers(0x87, c.x, c.y, hi));
+      // Only the parity of the pixel counts.
+      CHECK(222, AlphaToMaskCovers(0x87, c.x + 1118, c.y + 718, c.t) &&
+                     !AlphaToMaskCovers(0x87, c.x + 1118, c.y + 718, lo));
+    }
+    // How many of a 2x2 block a fading draw keeps: none below 0.25, then one, two, three, all at 1.
+    auto covered = [](uint8_t offsets, float a) {
+      int n = 0;
+      for (uint32_t x = 0; x < 2; ++x) {
+        for (uint32_t y = 0; y < 2; ++y) n += AlphaToMaskCovers(offsets, x, y, a) ? 1 : 0;
+      }
+      return n;
+    };
+    CHECK(223, covered(0x87, 0.1878f) == 0 && covered(0x87, 0.2599f) == 1 && covered(0x87, 0.4910f) == 1 &&
+                   covered(0x87, 0.5f) == 2 && covered(0x87, 0.884f) == 3 && covered(0x87, below) == 3 &&
+                   covered(0x87, 1.0f) == 4 && covered(0xAA, 0.4910f) == 0 && covered(0xAA, 0.5f) == 4);
+    // The alpha is not clamped; a NaN covers nothing; offsets 0 need alpha 1.
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    CHECK(224, covered(0x87, nan) == 0 && covered(0xAA, nan) == 0 && covered(0xFF, nan) == 0);
+    CHECK(225, covered(0x87, 7.5f) == 4 && covered(0x87, -1.0f) == 0 &&
+                   covered(0x87, std::numeric_limits<float>::infinity()) == 4);
+    CHECK(226, covered(0x00, below) == 0 && covered(0x00, 1.0f) == 4 && covered(0xFF, 0.25f) == 4 &&
+                   covered(0xFF, std::nextafter(0.25f, 0.0f)) == 0 &&
+                   // each pixel its own offset: 3, 2, 1, 0 for indices 0 to 3
+                   AlphaToMaskCovers(0x1B, 0, 0, 0.25f) && !AlphaToMaskCovers(0x1B, 0, 1, 0.25f) &&
+                   AlphaToMaskCovers(0x1B, 0, 1, 0.5f) && !AlphaToMaskCovers(0x1B, 1, 0, 0.5f) &&
+                   AlphaToMaskCovers(0x1B, 1, 0, 0.75f) && !AlphaToMaskCovers(0x1B, 1, 1, 0.75f));
   }
   // 200-204: the alpha fields of the root constants (36 dwords).
   {
@@ -924,6 +1020,7 @@ int main() {
   }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
-               "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants\n";
+               "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
+               "alpha-to-mask\n";
   return 0;
 }

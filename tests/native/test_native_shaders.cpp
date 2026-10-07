@@ -92,6 +92,17 @@ int main() {
   }
   if (!strstr(kClayTexturedPs, "discard;") || strstr(kClayPs, "discard")) return 13;
   if (!DisassemblyHas("clay_textured_ps", kClayTexturedPs, "ps_5_0", "discard")) return 14;
+  // Alpha-to-mask is the GPU's rule (clay_logic.h, AlphaToMaskCovers): the pixel's parity picks
+  // one of four offsets from bits 16-23 of alpha_mode, the pixel is kept iff alpha >= 1 - offset / 4,
+  // and it comes after the alpha test. No flat 0.5.
+  {
+    const char* test = strstr(kClayTexturedPs, "!alpha_passes(a, alpha_ref, alpha_mode & 7)");
+    const char* index = strstr(kClayTexturedPs, "uint index = ((p.x & 1) << 1) | (p.y & 1);");
+    const char* offset = strstr(kClayTexturedPs, "uint offset = (alpha_mode >> (16 + 2 * index)) & 3;");
+    const char* mask = strstr(kClayTexturedPs, "if (!(a >= 1.0 - offset * 0.25)) discard;");
+    if (!test || !index || !offset || !mask || !(test < index && index < offset && offset < mask)) return 17;
+    if (!strstr(kClayTexturedPs, "uint2 p = uint2(pos.xy);") || strstr(kClayTexturedPs, "a < 0.5")) return 18;
+  }
   if (DisassemblyHas("clay_ps", kClayPs, "ps_5_0", "discard")) return 15;   // control
   if (!DisassemblyHas("grid_ps", kGridPs, "ps_5_0", "discard")) return 16;  // control: a known discard
   // Negative control: broken HLSL must fail (proves the harness reports errors).

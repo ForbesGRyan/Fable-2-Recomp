@@ -42,12 +42,15 @@ struct ClayStats {
   // Render state (DecideDrawState). Of the drawn records: those drawn with the
   // alpha test (or alpha-to-mask) applied, with a blend, with a test or blend
   // the material has no alpha for (drawn without the test, with alpha 1), and
-  // with a state that was not read or not expressible (drawn with the default
-  // state). blend_unknown: records left out because their state blends and
-  // their colour is not known, or the RHI cannot express the blend.
+  // with a state that was not read (drawn with the default state) or a depth
+  // function the RHI cannot express (the default depth state only; blend,
+  // colour mask and cull stay). blend_unknown: records left out because their
+  // state blends and their colour is not known, or the RHI cannot express the
+  // blend.
   uint32_t alpha_tested = 0, blended = 0, alpha_unknown = 0, blend_unknown = 0, state_invalid = 0;
-  // Pipelines in the pass's cache, and drawn records that used the default
-  // pipeline because the cache was full or their pipeline could not be created.
+  // Pipelines created in the pass's cache (a slot whose creation failed is not
+  // counted), and drawn records that used the default pipeline because the
+  // cache was full or their pipeline could not be created.
   uint32_t pipelines = 0, pipeline_overflow = 0;
   // alpha_unknown and blend_unknown by pixel shader (kTallyAlphaUnknown, kTallyBlendUnknown).
   capture::ShaderTally<32> unknown_by_ps;
@@ -422,12 +425,28 @@ inline size_t FindOrAddPipelineSlot(std::vector<PipelineKey>& keys, const Pipeli
 
 // ClayConstants::alpha_mode: bits 0-2 the alpha test's compare function
 // (capture::Compare), then the flags below; bits 5-6 are the albedo component
-// (0-3 = x-w) that is the alpha.
+// (0-3 = x-w) that is the alpha; bits 16-23 the alpha-to-mask dither offsets
+// (RenderState::alpha_to_mask_offsets).
 inline constexpr uint32_t kAlphaTest = 1u << 3;        // discard unless alpha <func> alpha_ref
 inline constexpr uint32_t kAlphaFromAlbedo = 1u << 4;  // alpha is an albedo component (else the literal 1)
 inline constexpr uint32_t kAlphaBlend = 1u << 7;       // write the alpha (else 1)
-inline constexpr uint32_t kAlphaToMask = 1u << 8;      // discard unless alpha >= 0.5
+inline constexpr uint32_t kAlphaToMask = 1u << 8;      // discard unless AlphaToMaskCovers
 inline constexpr uint32_t kAlphaDivide = 1u << 9;      // the colour is the albedo's divided by its alpha
+inline constexpr uint32_t kAlphaToMaskShift = 16;      // the four 2-bit offsets
+
+// Alpha-to-mask as the GPU does it without multisampling, which is what the
+// textured pixel shader does after the alpha test (the emulator's rule, SDK
+// dxbc_translator_om.cpp CompletePixelShader_AlphaToMask): the pixel (x, y) is
+// covered iff alpha >= 1 - offset / 4, with the offset of its parity,
+// index (x & 1) * 2 + (y & 1), two bits each from bit 0 of `offsets`. The alpha
+// is not clamped and a NaN covers nothing. 0xAA: 0.5 at every pixel; the dither
+// pattern 0x87: 0.25, 0.75, 1.0, 0.5 for indices 0 to 3, so a fading draw keeps
+// none, one, two, three or all of each 2x2 block.
+inline bool AlphaToMaskCovers(uint8_t offsets, uint32_t x, uint32_t y, float alpha) {
+  const uint32_t index = ((x & 1u) << 1) | (y & 1u);
+  const uint32_t offset = (uint32_t(offsets) >> (2 * index)) & 3u;
+  return alpha >= 1.0f - float(offset) * 0.25f;
+}
 
 // The alpha fields of the root constants; the default is an opaque draw.
 struct ClayAlpha {
@@ -491,7 +510,9 @@ inline DrawState DecideDrawState(const capture::RenderState& rs, const capture::
       d.alpha_tested = test;
       d.blended = blend;
       if (rs.alpha_test) d.alpha.mode |= (uint32_t(rs.alpha_func) & 7u) | kAlphaTest;
-      if (rs.alpha_to_mask) d.alpha.mode |= kAlphaToMask;
+      if (rs.alpha_to_mask) {
+        d.alpha.mode |= kAlphaToMask | (uint32_t(rs.alpha_to_mask_offsets) << kAlphaToMaskShift);
+      }
       if (a.source == capture::AlphaSource::kAlbedo) {
         d.alpha.mode |= kAlphaFromAlbedo | (uint32_t(a.component & 3) << 5);
       }

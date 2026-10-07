@@ -69,6 +69,8 @@ int main() {
     const RenderState s = DecodeRenderState(w);
     if (!s.valid || !s.alpha_test || s.alpha_func != Compare::kGreater || !s.alpha_to_mask) return 20;
     if (s.alpha_ref != 128.0f / 255.0f || s.blend) return 21;
+    // Bits 24-31: the four alpha-to-mask dither offsets (the dither pattern 0x87).
+    if (s.alpha_to_mask_offsets != 0x87) return 23;
   }
   {  // alpha test, no cull: 0xA5846836C90E1192 / 0x7CD57B81550F19E3
     StateWords w = Opaque();
@@ -76,6 +78,20 @@ int main() {
     w.su_sc_mode = 0x00218000;
     const RenderState s = DecodeRenderState(w);
     if (!s.valid || !s.alpha_test || s.cull != Cull::kNone || s.front_cw) return 22;
+    if (!s.alpha_to_mask || s.alpha_to_mask_offsets != 0xAA) return 24;  // 0.5 at every pixel
+  }
+  {  // offsets set, enable clear (0x475EC9F795E5EDBB / 0x00E09D1BC5295D52): the offsets mean nothing
+    StateWords w = Opaque();
+    w.color_control = 0xAA000004;
+    const RenderState s = DecodeRenderState(w);
+    if (!s.valid || s.alpha_to_mask || s.alpha_to_mask_offsets != 0) return 25;
+    if (DefaultRenderState().alpha_to_mask_offsets != 0 || DecodeRenderState(Opaque()).alpha_to_mask_offsets != 0) {
+      return 26;
+    }
+    // Garbage words give the default state, without offsets.
+    w.color_control = 0x8700001C;
+    w.alpha_ref = Bits(std::numeric_limits<float>::quiet_NaN());
+    if (!GarbageIsDefault(w) || DecodeRenderState(w).alpha_to_mask_offsets != 0) return 27;
   }
   {  // blended with alpha test greater-equal: 0x7C5710DEF3EE33C4 / 0x014F8A02DB7B19CA
     StateWords w = Opaque();
@@ -200,6 +216,9 @@ int main() {
     w.color_control = 0x00000014;  // bit 4 set, test bit clear, function 4
     const RenderState s = DecodeRenderState(w);
     if (!s.valid || !s.alpha_to_mask || s.alpha_test || s.alpha_func != Compare::kAlways) return 90;
+    if (s.alpha_to_mask_offsets != 0) return 91;  // enabled with offsets 0: threshold 1.0 everywhere
+    w.color_control = 0x1B000010;                 // each pixel its own offset: 3, 2, 1, 0
+    if (DecodeRenderState(w).alpha_to_mask_offsets != 0x1B) return 92;
   }
   // --- depth range: the viewport Z scale enabled by VTE bit 4 ---
   {

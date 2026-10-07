@@ -33,6 +33,10 @@ enum class Cull : uint8_t { kNone, kFront, kBack };
 struct RenderState {
   bool valid = false;
   bool alpha_test = false; Compare alpha_func = Compare::kAlways; float alpha_ref = 0.0f; bool alpha_to_mask = false;
+  // RB_COLORCONTROL bits 24-31, kept only with alpha_to_mask: four 2-bit dither offsets by pixel
+  // parity, index (x & 1) * 2 + (y & 1) from bit 0. Without multisampling a pixel is covered iff
+  // alpha >= 1 - offset / 4 (0xAA: 0.5 everywhere; 0x87: 0.25, 0.75, 1.0, 0.5 for indices 0 to 3).
+  uint8_t alpha_to_mask_offsets = 0;
   bool blend = false; Factor src = Factor::kOne, dst = Factor::kZero; BlendOp op = BlendOp::kAdd;
   Factor src_alpha = Factor::kOne, dst_alpha = Factor::kZero; BlendOp op_alpha = BlendOp::kAdd;
   uint8_t color_mask = 0xF;
@@ -74,13 +78,14 @@ inline RenderState DecodeRenderState(const StateWords& w) {
   if (!w.read) return detail::InvalidRenderState();
   RenderState s = DefaultRenderState();
 
-  // RB_COLORCONTROL: bits 0-2 alpha function, 3 test enable, 4 alpha-to-mask.
+  // RB_COLORCONTROL: bits 0-2 alpha function, 3 test enable, 4 alpha-to-mask, 24-31 its offsets.
   const float ref = detail::BitsToFloat(w.alpha_ref);
   if (!std::isfinite(ref)) return detail::InvalidRenderState();
   s.alpha_test = (w.color_control & 0x8) != 0;
   s.alpha_func = s.alpha_test ? Compare(w.color_control & 7) : Compare::kAlways;
   s.alpha_ref = ref;
   s.alpha_to_mask = (w.color_control & 0x10) != 0;
+  s.alpha_to_mask_offsets = s.alpha_to_mask ? uint8_t(w.color_control >> 24) : uint8_t(0);
 
   // RB_BLENDCONTROL0: colour source 0-4, operation 5-7, destination 8-12;
   // alpha source 16-20, operation 21-23, destination 24-28.

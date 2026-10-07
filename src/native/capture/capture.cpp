@@ -1252,6 +1252,13 @@ void AppendRenderState(std::string& row, uint32_t device) {
     std::snprintf(buf, sizeof(buf), ",\"cmd\":\"0x%08X\"", write);
     row += buf;
   }
+  // RB_SURFACE_INFO as the device holds it: pitch in bits 0-13, the surface's
+  // multisampling in bits 16-17 (0 none, 1 two samples, 2 four).
+  uint32_t surface = 0;
+  if (device && ReadVirtualBe32(device + xdk::kDeviceSurfaceInfoOffset, &surface)) {
+    std::snprintf(buf, sizeof(buf), ",\"surface_info\":\"0x%08X\"", surface);
+    row += buf;
+  }
 }
 
 // The nine words of a draw's render state (render_state.h) from the device's

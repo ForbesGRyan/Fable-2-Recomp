@@ -1,5 +1,6 @@
 #include "clay_pass.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 
@@ -315,7 +316,9 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     }
     prepared_.push_back(p);
   }
-  st.pipelines = uint32_t(pipelines_.size());
+  // A slot whose creation failed holds no pipeline.
+  st.pipelines = uint32_t(pipelines_.size() - std::count(pipelines_.begin(), pipelines_.end(),
+                                                             static_cast<nrhi::Pipeline*>(nullptr)));
 
   if (white_staging_) {
     cmd->CopyBufferToTexture(white_, 0, 0, white_staging_, 0, nrhi::kRowPitchAlignment, 1, 1, 1);

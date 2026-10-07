@@ -53,10 +53,12 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 // s<sampler_index> (bit 0 linear, bit 1 clamp) and keep a softened facet shade.
 // Their alpha (clay_logic.h, ClayAlpha) is an albedo component or 1, times
 // alpha_scale; alpha_mode says whether it is tested against alpha_ref (bits 0-2
-// the compare function, bit 3 the test), tested as alpha-to-mask (bit 8, alpha
-// >= 0.5), written for blending (bit 7; else 1 is written), and whether the
-// colour is first divided by the albedo's alpha (bit 9). Flat draws (kClayPs)
-// have no alpha. The three shaders declare one cbuffer (ClayConstants).
+// the compare function, bit 3 the test), then tested as alpha-to-mask (bit 8:
+// kept iff alpha >= 1 - offset / 4, the offset being the two bits of bits 16-23
+// that the pixel's parity picks, AlphaToMaskCovers in clay_logic.h), written for
+// blending (bit 7; else 1 is written), and whether the colour is first divided
+// by the albedo's alpha (bit 9). Flat draws (kClayPs) have no alpha. The three
+// shaders declare one cbuffer (ClayConstants).
 inline constexpr const char* kClayVs = R"hlsl(
 cbuffer Draw : register(b0) {
   float4 r0; float4 r1; float4 r2; float4 r3;   // captured rows
@@ -142,7 +144,12 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
       a *= comp == 0 ? t.x : comp == 1 ? t.y : comp == 2 ? t.z : t.w;
     }
     if ((alpha_mode & 0x8) && !alpha_passes(a, alpha_ref, alpha_mode & 7)) discard;
-    if ((alpha_mode & 0x100) && a < 0.5) discard;
+    if (alpha_mode & 0x100) {
+      uint2 p = uint2(pos.xy);
+      uint index = ((p.x & 1) << 1) | (p.y & 1);
+      uint offset = (alpha_mode >> (16 + 2 * index)) & 3;
+      if (!(a >= 1.0 - offset * 0.25)) discard;
+    }
     return float4(t.rgb * (0.75 + 0.25 * facet), (alpha_mode & 0x80) ? a : 1.0);
   }
   base = float3((color >> 16) & 255, (color >> 8) & 255, color & 255) / 255.0;

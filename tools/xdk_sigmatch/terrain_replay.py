@@ -19,7 +19,8 @@ a 0 lies beside a value of 2 or more. --weight-sums prints how the layer weights
 add up over the frame's squares. --patch K --locate prints where the square's corners are in the
 1120 x 720 frame (the row's c0..c3). --check-dumps lists every texture the frame's tess rows name
 with the size of its dump against the size of its base level (a dump cut short by the capture
-shows as SHORT).
+shows as SHORT). Only textures the replay reads count; the others are listed as
+not needed by the replay.
 
 What is evaluated (the shaders' colour with the lighting factor 1 and the additive light, sun and
 fog terms dropped):
@@ -73,8 +74,17 @@ FADING_FAR = "0x2F8A0341E8C09698"
 CLIFF_SHADERS = ("0x9C2144E42E95A76F", "0x45243B758F9272AB", "0x04F23292B2F44077")
 COLOUR_BINS = 0x2AAAAAAA
 UNCOVERED = (255, 0, 255)
-_PALETTE = [(60, 160, 60), (150, 110, 60), (200, 190, 150), (110, 110, 120), (40, 100, 40), (190, 150, 90),
-            (90, 70, 50), (160, 200, 120), (220, 220, 220), (70, 130, 160), (130, 60, 60), (200, 120, 40)]
+# Legend colours of --weights, one per detail texture in order of appearance: a fixed palette, the
+# first 16 at least 60 apart from each other, from magenta (UNCOVERED) and from black.
+_PALETTE = [(230, 25, 75), (60, 180, 75), (255, 225, 25), (0, 130, 200), (245, 130, 48), (145, 30, 180),
+            (70, 240, 240), (250, 190, 212), (210, 245, 60), (0, 128, 128), (110, 110, 255), (170, 110, 40),
+            (128, 0, 0), (170, 255, 195), (128, 128, 0), (0, 0, 160), (128, 128, 128), (255, 255, 255)]
+
+# The textures the replay reads, by fetch-constant slot (what _replay asks _Textures for). A layer draw
+# (builder 8221C9C8) is read through these; the heightmap only for the distance fade (draws[0]).
+LAYER_TEXTURES = {0: "detail colour", 3: "base map", 18: "layer weights", 16: "heightmap"}
+# An underlay draw: the adaptive builder's colour pass (underlay_of).
+FAR_TEXTURES = {13: "far colour", 3: "base map", 18: "far u table", 19: "far v table"}
 
 
 class MissingInput(Exception):
@@ -510,16 +520,17 @@ def _replay(a, rows, textures, lines):
     layers, problems = [], []
     for r in draws:
         try:
-            layers.append(Layer(layer_inputs(r["consts"], r.get("pconst")), tex.get(r, 0, "detail colour"),
-                                tex.get(r, 3, "base map"), tex.get(r, 18, "layer weights"), blend_of(r["rs"]["2201"])))
+            layers.append(Layer(layer_inputs(r["consts"], r.get("pconst")), tex.get(r, 0, LAYER_TEXTURES[0]),
+                                tex.get(r, 3, LAYER_TEXTURES[3]), tex.get(r, 18, LAYER_TEXTURES[18]), blend_of(r["rs"]["2201"])))
         except MissingInput as e:
             problems.append(str(e))
     under = underlay_of(rows, square)
     far = None
     if under is not None:
         try:
-            far = Far(far_inputs(under["consts"], under.get("pconst")), tex.get(under, 13, "far colour"),
-                      tex.get(under, 3, "base map"), tex.get(under, 18, "far u table"), tex.get(under, 19, "far v table"),
+            far = Far(far_inputs(under["consts"], under.get("pconst")), tex.get(under, 13, FAR_TEXTURES[13]),
+                      tex.get(under, 3, FAR_TEXTURES[3]), tex.get(under, 18, FAR_TEXTURES[18]),
+                      tex.get(under, 19, FAR_TEXTURES[19]),
                       under.get("ps_hash") == FADING_FAR)
         except MissingInput as e:
             problems.append(str(e))
@@ -527,7 +538,7 @@ def _replay(a, rows, textures, lines):
         raise MissingInput("; ".join(sorted(set(problems))))
     height = None
     if not a.no_fade:
-        height = tex.get(draws[0], 16, "heightmap")
+        height = tex.get(draws[0], 16, LAYER_TEXTURES[16])
     cliff = sum(r.get("ps_hash") in CLIFF_SHADERS for r in draws)
     lines.append(f"square ({square[0]:g}, {square[1]:g}) {square[2]:g} x {square[3]:g}: {len(draws)} layer draws"
                  f" ({cliff} of them with the tf13 blend on steep ground, not evaluated), underlay "
@@ -608,35 +619,52 @@ def _weights(a, rows, textures, lines):
         lines.append(f"    detail {key}: colour {colour}")
 
 
+def _read_slots(row):
+    """The fetch-constant slots of a tess row that the replay reads (see LAYER_TEXTURES and FAR_TEXTURES)."""
+    if row.get("func") == LAYER_BUILDER:
+        return LAYER_TEXTURES
+    if row.get("func") == FAR_BUILDER and int(row.get("rs", {}).get("bin_mask_lo", "0xFFFFFFFF"), 16) & COLOUR_BINS:
+        return FAR_TEXTURES
+    return {}
+
+
 def _check_dumps(rows, textures, lines):
-    """One line per texture the frame's tess rows name: whether its dump holds the whole base level."""
-    seen = {}
+    """One line per texture the frame's tess rows name: whether its dump holds the whole base level. Only
+    the textures the replay reads count; one it does not read (the fog tables, the sun mask) that is short,
+    missing or of unknown size is listed as not needed."""
+    seen, needed = {}, set()
     for r in rows:
+        read = _read_slots(r)
         for slot, fc in sorted((r.get("tf") or {}).items(), key=lambda kv: int(kv[0])):
             if fc:
                 key = tuple(int(x, 16) for x in fc)
                 seen.setdefault(key[1:3], (int(slot), key))
+                if int(slot) in read:
+                    needed.add(key[1:3])
     bad = 0
     for (slot, fc) in sorted(seen.values()):
         head = f"tf{slot} 0x{fc[1]:08X} format {fc[1] & 0x3F} {(fc[2] & 0x1FFF) + 1} x {((fc[2] >> 13) & 0x1FFF) + 1}: "
         path = textures.get(fc[1:3])
+        problem = None
         if path is None or not Path(path).is_file():
-            lines.append(head + ("NO TEXTURE ROW" if path is None else "NO DUMP FILE"))
-            bad += 1
-            continue
-        have = Path(path).stat().st_size
-        try:
-            need = base_level_need(list(fc), size_only=True)
-        except ValueError:
-            lines.append(head + f"size not known to this tool, {have} bytes")
-            bad += 1
-            continue
-        if have < need:
-            lines.append(head + f"SHORT, {have} of {need} bytes")
+            problem = "NO TEXTURE ROW" if path is None else "NO DUMP FILE"
+        else:
+            have = Path(path).stat().st_size
+            try:
+                need = base_level_need(list(fc), size_only=True)
+            except ValueError:
+                problem = f"size not known to this tool, {have} bytes"
+            else:
+                if have < need:
+                    problem = f"SHORT, {have} of {need} bytes"
+        if problem is None:
+            lines.append(head + f"ok, {have} bytes (needs {need})")
+        elif fc[1:3] in needed:
+            lines.append(head + problem)
             bad += 1
         else:
-            lines.append(head + f"ok, {have} bytes (needs {need})")
-    lines.append(f"{bad} of {len(seen)} textures short, missing or of unknown size")
+            lines.append(head + f"not needed by the replay ({problem})")
+    lines.append(f"{bad} of {len(needed)} textures short, missing or of unknown size")
 
 
 def _cell_texel(row, square, wt):

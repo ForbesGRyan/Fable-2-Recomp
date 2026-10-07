@@ -405,6 +405,19 @@ def png_size_and_pixels(path):
     return w, h, rows
 
 
+class LegendTest(unittest.TestCase):
+    def test_first_sixteen_legend_colours_are_visibly_distinct(self):
+        pal = tr._PALETTE
+        self.assertGreaterEqual(len(pal), 16)
+        self.assertEqual(len(set(pal)), len(pal))
+        others = [tr.UNCOVERED, (0, 0, 0)]    # the map's own marks: uncovered and the black background
+        for i in range(16):
+            for j in list(range(i)) + others:
+                other = pal[j] if isinstance(j, int) else j
+                d = math.dist(pal[i], other)
+                self.assertGreaterEqual(d, 60, (i, j, pal[i], other, d))
+
+
 class CaptureTest(unittest.TestCase):
     """The tool on a capture: tess rows, texture rows and dump files as discovery writes them."""
 
@@ -532,6 +545,66 @@ class CaptureTest(unittest.TestCase):
             # k_DXN is not decoded here but its size is known: 4 x 4 is one 16-byte block; the file has 64.
             self.assertRegex(text, r"tf0 0x1A600071 format 49 4 x 4: ok, 64 bytes \(needs 16\)")
             self.assertIn("2 of 5 textures short, missing or of unknown size", lines[-1])
+
+    def _edit_rows(self, cap, edit):
+        rows = [json.loads(line) for line in cap.read_text().splitlines()]
+        edit(rows)
+        cap.write_text("".join(json.dumps(r) + chr(10) for r in rows))
+
+    def test_check_dumps_counts_only_textures_the_replay_reads(self):
+        fog = fc_for(29, 64, 1, base=0x1B000000)      # like the session-1 fog tables: no texture row
+        fog2 = fc_for(6, 256, 1, base=0x1B100000)
+        sun = fc_for(2, 1120, 720, base=0x1B200000)   # a format whose size this tool does not know; has a row
+        hx = lambda fc: [f"0x{x:08X}" for x in fc]
+
+        def unneeded(rows):
+            rows.insert(1, {"kind": "texture", "file": "native_tex_x/sun.bin", "bytes": 1, "fc": hx(sun)})
+            last = [r for r in rows if r.get("kind") == "tess"][-1]
+            last["tf"].update({"4": hx(fog), "5": hx(fog2), "8": hx(sun)})
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root, pconst=False)
+            (root / "native_tex_x" / "sun.bin").write_bytes(bytes(100))
+            self._edit_rows(cap, unneeded)
+            lines = tr.main([str(cap), "--frame", "1", "--check-dumps"])
+            text = chr(10).join(lines)
+            self.assertEqual(sum("not needed by the replay" in line for line in lines), 3, lines)
+            self.assertRegex(text, r"tf4 0x1B00005D format 29 64 x 1: .*not needed by the replay")
+            self.assertRegex(text, r"tf8 0x1B200042 format 2 1120 x 720: .*not needed by the replay")
+            self.assertEqual(lines[-1], "0 of 5 textures short, missing or of unknown size")
+
+        # The same texture named by a slot the replay reads is needed: missing, it counts.
+        def needed(rows):
+            last = [r for r in rows if r.get("kind") == "tess"][-1]
+            last["tf"].update({"4": hx(fog), "0": hx(fog)})
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root, pconst=False)
+            self._edit_rows(cap, needed)
+            lines = tr.main([str(cap), "--frame", "1", "--check-dumps"])
+            self.assertTrue(any("tf0 0x1B00005D" in line and line.endswith("NO TEXTURE ROW") for line in lines), lines)
+            self.assertEqual(lines[-1], "1 of 5 textures short, missing or of unknown size", lines)
+
+    def test_check_dumps_far_rows_are_read_only_in_the_colour_pass(self):
+        miss = fc_for(6, 4, 4, base=0x1C000000)
+        hx = [f"0x{x:08X}" for x in miss]
+
+        def far(mask):
+            def edit(rows):
+                rows.append({"kind": "tess", "frame": 1, "func": "DrawIndx:82207C30", "in_scene": True,
+                             "args": ["0x0", "0x0", "0x0", "0x1"], "rs": {"bin_mask_lo": mask}, "consts": {},
+                             "tf": {"13": hx}})
+            return edit
+
+        for mask, want in (("0x00000001", "0 of 5"), ("0x2AAAAAAA", "1 of 6")):
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                cap = self._capture(root, pconst=False)
+                self._edit_rows(cap, far(mask))
+                lines = tr.main([str(cap), "--frame", "1", "--check-dumps"])
+                self.assertTrue(lines[-1].startswith(want + " textures"), (mask, lines))
 
     def test_texture_is_found_by_address_format_and_size(self):
         with tempfile.TemporaryDirectory() as d:

@@ -41,6 +41,19 @@
 #  - Dead-man switch: if the main loop has not polled the watch for more than 5 s while the game
 #    runs (for example a hung screenshot call), a background thread terminates the job; the run
 #    ends "RUN ABORTED: dead-man switch ..." (exit 12).
+#    The main thread checks itself too: a gap of more than 5 s between polls, or one poll that
+#    takes more than 5 s, aborts the run; a trip of the thread after the last poll is checked in
+#    the verdict; and a run that lasted more than 5 s longer than -Total (or the last screenshot
+#    time) is "RUN ABORTED: run overran (...)", never clean.
+#  - Continuity: in the gate, two polls more than 5 s apart (suspend, stall) restart every
+#    observation; in the watch a jump of the clock between polls is "RUN DISTURBED: watch-gap".
+#  - -ExeDir outside test mode must be one of the folders in $AllowedExeDirs (default: this
+#    repository's out\build\win-amd64-release), else exit 2. The "started pid" line (printed and
+#    logged) names the full path of the executable. Verdict and mode variables are constants.
+#  - Test-suite guard: with FABLE2_DRIVER_NO_REAL_GATE=1 in the environment (set by
+#    tests\test_idle_gate.py) the driver refuses (exit 2) to evaluate the real gate or to launch,
+#    except with the forced-present hook, the labelled harness, or -UserPresent in a folder
+#    without fable_2.exe. It can only restrict.
 #  - From launch to the end it polls the same signals (about every 100 ms plus the probe time,
 #    between its timing and screenshot steps; the pad and audio latches are sampled every 10 and
 #    50 ms by a background thread; the game's own in-process autoplay and the PrintWindow
@@ -102,31 +115,55 @@ param(
   [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest = @()   # catches positional and unknown arguments: refused
 )
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "cmdline_quote.ps1")
 $Root = Split-Path -Parent $PSScriptRoot
+# Paths are resolved once, against the caller's current location (not the process directory), and used everywhere.
+function Resolve-AbsolutePath([string]$Path) {
+  if (-not $Path) { return $Path }
+  if (-not [IO.Path]::IsPathRooted($Path)) { $Path = Join-Path $PWD.ProviderPath $Path }
+  return [IO.Path]::GetFullPath($Path)
+}
 $exeDirGiven = $PSBoundParameters.ContainsKey('ExeDir')
 if ($HoldMs -le 0) { $HoldMs = if ($KeyboardInput) { 50 } else { 100 } }
 if (-not $ExeDir) { $ExeDir = Join-Path $Root "out\build\win-amd64-release" }
+$ExeDir = Resolve-AbsolutePath $ExeDir
 if (-not $ShotDir) { $ShotDir = Join-Path $ExeDir "logs\shots" }
-$RequiredAbsenceSeconds = 300   # the idle requirement; nothing lowers it
-$DeadManSeconds = 5             # the main loop must poll the watch at least this often
-$testMode = [bool]($TestHarness -or $TestExe -or $TestExeArgs)
-$Label = if ($testMode) { "TEST HARNESS " } else { "" }   # prefix of every verdict and log line of a harness run
+$ShotDir = Resolve-AbsolutePath $ShotDir
+$TestExe = Resolve-AbsolutePath $TestExe
+$TestHarness = Resolve-AbsolutePath $TestHarness
+# The only folders (relative to the repository root) whose fable_2.exe this script will start outside test mode.
+$AllowedExeDirs = @("out\build\win-amd64-release")   # allow-list: add a path here on purpose, never at the command line
+# Constants: harness code running inside the driver cannot blank or change them.
+New-Variable -Name RequiredAbsenceSeconds -Value 300 -Option Constant   # the idle requirement; nothing lowers it
+New-Variable -Name DeadManSeconds -Value 5 -Option Constant             # the main loop must poll the watch at least this often
+New-Variable -Name testMode -Value ([bool]($TestHarness -or $TestExe -or $TestExeArgs)) -Option Constant
+New-Variable -Name Label -Value $(if ($testMode) { "TEST HARNESS " } else { "" }) -Option Constant   # prefix of every verdict and log line of a harness run
+$script:job = $null; $script:hProc = $null; $script:p = $null
 $script:GateText = "not evaluated"
 $script:sampledNative = $null
 
 # Appends one line to the durable run log (harness runs: labelled, and never into a default folder).
 function Add-RunLog([string]$Text) {
   if ($testMode -and -not $exeDirGiven) { return }
+  $Text = ($Text -replace '[\x00-\x1f\x7f]+', ' | ')   # one line per run event, whatever the message holds
   try {
     $dir = Join-Path $ExeDir "logs"
     New-Item -ItemType Directory -Force $dir | Out-Null
     Add-Content -LiteralPath (Join-Path $dir "drive_game_runs.log") -Value ("{0}{1:yyyy-MM-dd HH:mm:ss}  {2}" -f $Label, (Get-Date), $Text)
   } catch { }
 }
-# Ends the script: the final line in the run log, the sampler stopped, then exit.
+# Closing the job handle kills whatever is still in the job (kill on close), so nothing survives the call even when
+# the caller is a session that keeps running; the process and thread handles are closed too.
+function Close-RunHandles {
+  if ($script:p) { try { $script:p.Dispose() } catch { } }
+  if ($null -ne $script:hProc -and $script:hProc -ne [IntPtr]::Zero) { try { [DriveGameNative]::Close($script:hProc) } catch { }; $script:hProc = $null }
+  if ($null -ne $script:job -and $script:job -ne [IntPtr]::Zero) { try { [DriveGameNative]::Close($script:job) } catch { }; $script:job = $null }
+}
+# Ends the script: the final line in the run log, the sampler stopped, the handles closed, then exit.
 function Exit-Run([int]$Code) {
   Add-RunLog ("exit={0}  gate={1}" -f $Code, $script:GateText)
   try { if ($script:sampledNative) { $script:sampledNative.StopSampler() } } catch { }
+  Close-RunHandles
   exit $Code
 }
 if ($UserPresentAbbreviationGuard) {
@@ -140,6 +177,24 @@ if ($Rest.Count) {
 if ($KeyboardInput -and -not $UserPresent) {
   Write-Output "REFUSED: -KeyboardInput means the user is driving; it requires -UserPresent. Nothing launched."
   Exit-Run 2
+}
+if (-not $testMode) {
+  $allowedFull = @($AllowedExeDirs | ForEach-Object { (Resolve-AbsolutePath $(if ([IO.Path]::IsPathRooted($_)) { $_ } else { Join-Path $Root $_ })).TrimEnd('\') })
+  if ($allowedFull -notcontains $ExeDir.TrimEnd('\')) {
+    Write-Output "REFUSED: -ExeDir '$ExeDir' is not an allowed build output directory (allowed: $($allowedFull -join '; ')). Nothing launched."
+    Exit-Run 2
+  }
+  # Test-suite guard: tests/test_idle_gate.py sets FABLE2_DRIVER_NO_REAL_GATE=1 so that no test can ever reach the real gate
+  # or a real launch, whatever is mutated: only the forced-present hook (the gate can only refuse), or -UserPresent in a
+  # folder that has no fable_2.exe, is accepted.
+  if ($env:FABLE2_DRIVER_NO_REAL_GATE -eq "1") {
+    $hookOk = ($env:FABLE2_IDLE_GATE_FORCE_PRESENT -eq "1")
+    $emptyOk = ($UserPresent -and -not (Test-Path -LiteralPath (Join-Path $ExeDir "fable_2.exe")))
+    if (-not ($hookOk -or $emptyOk)) {
+      Write-Output "REFUSED: test-suite guard (FABLE2_DRIVER_NO_REAL_GATE=1): the real gate and a real launch are not allowed in this process. Nothing launched."
+      Exit-Run 2
+    }
+  }
 }
 if ($testMode) {
   $why = $null
@@ -228,6 +283,7 @@ public static class DriveGameNative {
     hProcess = pi.hProcess; hThread = pi.hThread;
     return pi.dwProcessId;
   }
+  public static void Close(IntPtr h) { CloseHandle(h); }
   public static bool Resume(IntPtr hThread) { return ResumeThread(hThread) != 0xFFFFFFFF; }
   // Kills a process that was created suspended and never ran.
   public static void Abort(IntPtr hProcess, IntPtr hThread) { TerminateProcess(hProcess, 1); CloseHandle(hThread); CloseHandle(hProcess); }
@@ -371,19 +427,20 @@ if ($script:job -eq [IntPtr]::Zero) {
   Exit-Run 12
 }
 
-$script:p = $null
 $script:disturbAt = 0.0
+$script:lastPollAt = -1.0; $script:lastNativeStamp = $null; $script:lastWall = $null; $script:stalledBetween = $false
 $script:shotFiles = New-Object System.Collections.ArrayList
 $testCtx = @{ ShotDir = $(if ($Shots) { $ShotDir } else { $null }); ShotFiles = $script:shotFiles; shotMade = $false }
 $sw = [Diagnostics.Stopwatch]::StartNew()
 
 # Kills the game through the process handle and waits for it to be gone.
 function Stop-Game {
-  if (-not $script:p) { return }
   if ($harness -and $harness.NoKill) { return }   # test mode only: simulates a game that cannot be killed
+  $wasAlive = $false
+  try { if ($script:p) { $wasAlive = -not $script:p.HasExited } } catch { }
+  try { [void][DriveGameNative]::TerminateJob($script:job) } catch { }   # the game and its children, even before the process object exists
+  if (-not $script:p) { return }
   try {
-    $wasAlive = -not $script:p.HasExited
-    [void][DriveGameNative]::TerminateJob($script:job)   # the game and its children
     if (-not $script:p.HasExited) { $script:p.Kill() }
     if ($wasAlive) { "closed game at $([int]$sw.Elapsed.TotalSeconds) s" }
   } catch {
@@ -392,35 +449,86 @@ function Stop-Game {
   try { [void]$script:p.WaitForExit(5000) } catch { }
 }
 
-# Polls the presence signals; on one it kills the game at once and throws. No-op with -UserPresent.
+# Kills the game and its children at once.
+function Stop-RunNow { try { [void][DriveGameNative]::TerminateJob($script:job); if ($script:p -and -not $script:p.HasExited) { $script:p.Kill() } } catch { } }
+
+# Polls the presence signals; on one it kills the game at once and throws. Also the main thread's own dead-man check:
+# a gap between polls, or a poll that itself takes longer than the limit, aborts the run. No signals with -UserPresent.
 function Invoke-WatchPoll {
   if ([DriveGameNative]::IsDeadManTripped()) {
     throw "dead-man switch: the driver did not poll the watch for more than $DeadManSeconds s; the game was terminated"
   }
+  $pollStart = $sw.Elapsed.TotalSeconds
+  if ($script:lastPollAt -ge 0 -and ($pollStart - $script:lastPollAt) -gt $DeadManSeconds) {
+    Stop-RunNow
+    throw ("dead-man switch: the driver did not poll the watch for {0:N1} s (limit {1} s); the game was terminated" -f ($pollStart - $script:lastPollAt), $DeadManSeconds)
+  }
   [DriveGameNative]::PetDeadMan()
   if ($harness -and $harness.Tick) { & $harness.Tick $sw.Elapsed.TotalSeconds $testCtx }
-  if ($UserPresent) { return }
-  $sig = $null
-  try {
-    $s = Get-Fable2Snapshot -Native $native
-    $gamePid = if ($script:p) { $script:p.Id } else { 0 }
-    $sig = Get-Fable2WatchSignal -LastInputTick $s.LastInputTick -BaselineInputTick $baselineTick `
-      -PadActivityStamp $s.PadActivityStamp -PadChangeStamp $s.PadChangeStamp -AudioStamp $s.AudioStamp `
-      -BaselineStamp $baselineStamp -NotificationState $s.NotificationState -ForegroundPid $s.ForegroundPid `
-      -GamePid $gamePid -ProbeFailed $s.ProbeFailed -Session0 $s.Session0 -ForcePresent $s.ForcePresent
-  } catch { $sig = "watch-error" }
-  if ($sig) {
-    $script:disturbAt = $sw.Elapsed.TotalSeconds
-    try { [void][DriveGameNative]::TerminateJob($script:job); if ($script:p -and -not $script:p.HasExited) { $script:p.Kill() } } catch { }
-    throw "FABLE2-DISTURBED:$sig"
+  if (($sw.Elapsed.TotalSeconds - $pollStart) -gt $DeadManSeconds) {
+    Stop-RunNow
+    throw ("dead-man switch: one watch poll took {0:N1} s (limit {1} s); the game was terminated" -f ($sw.Elapsed.TotalSeconds - $pollStart), $DeadManSeconds)
+  }
+  if (-not $UserPresent) {
+    $sig = $null
+    try {
+      $s = Get-Fable2Snapshot -Native $native
+      $wall = [DateTime]::UtcNow
+      # Continuity: a jump of the clock (machine suspended) between two polls is a disturbance, never absence.
+      $gap = $false
+      if ($null -ne $script:lastNativeStamp) {
+        $gap = (Test-Fable2PollGap -Previous $script:lastNativeStamp -Current $s.Now -LimitSeconds $DeadManSeconds) -or
+               (Test-Fable2PollGap -Previous 0 -Current ($wall - $script:lastWall).TotalSeconds -LimitSeconds $DeadManSeconds)
+      }
+      $script:lastNativeStamp = $s.Now; $script:lastWall = $wall
+      $gamePid = if ($script:p) { $script:p.Id } else { 0 }
+      $sig = Get-Fable2WatchSignal -LastInputTick $s.LastInputTick -BaselineInputTick $baselineTick `
+        -PadActivityStamp $s.PadActivityStamp -PadChangeStamp $s.PadChangeStamp -AudioStamp $s.AudioStamp `
+        -BaselineStamp $baselineStamp -NotificationState $s.NotificationState -ForegroundPid $s.ForegroundPid `
+        -GamePid $gamePid -ProbeFailed $s.ProbeFailed -Session0 $s.Session0 -ForcePresent $s.ForcePresent
+      if ($gap) { $sig = "watch-gap" }
+    } catch { $sig = "watch-error" }
+    if ($sig) {
+      $script:disturbAt = $sw.Elapsed.TotalSeconds
+      Stop-RunNow
+      throw "FABLE2-DISTURBED:$sig"
+    }
+  }
+  $script:lastPollAt = $sw.Elapsed.TotalSeconds
+}
+# The pause between two polls (test mode only: a harness can stall it once, to prove the main thread notices a gap).
+function Pause-Loop {
+  Start-Sleep -Milliseconds 100
+  if ($harness -and $harness.StallBetweenPollsMs -and -not $script:stalledBetween -and $sw.Elapsed.TotalSeconds -ge 1) {
+    $script:stalledBetween = $true
+    Start-Sleep -Milliseconds $harness.StallBetweenPollsMs
   }
 }
 function Wait-Until([double]$seconds) {
-  while ($sw.Elapsed.TotalSeconds -lt $seconds) { Invoke-WatchPoll; Start-Sleep -Milliseconds 100 }
+  while ($sw.Elapsed.TotalSeconds -lt $seconds) {
+    if ($script:p -and $script:p.HasExited) { return }
+    Invoke-WatchPoll
+    Pause-Loop
+  }
+}
+
+# Moves this run's screenshots into <ShotDir>\<prefix>_<timestamp>\ so a later run in the same folder cannot be mistaken for them.
+function Move-RunShots([string]$Prefix) {
+  $moved = @()
+  try {
+    if ($script:shotFiles.Count) {
+      $sub = Join-Path $ShotDir ("{0}_{1}" -f $Prefix, (Get-Date -Format "yyyyMMdd_HHmmss"))
+      New-Item -ItemType Directory -Force $sub | Out-Null
+      foreach ($f in $script:shotFiles) {
+        if (Test-Path -LiteralPath $f) { Move-Item -LiteralPath $f -Destination $sub -Force; $moved += (Join-Path $sub (Split-Path -Leaf $f)) }
+      }
+    }
+  } catch { Write-Host "WARNING: could not move the run's screenshots ($($_.Exception.Message))" }
+  return $moved
 }
 
 $saved = @{}
-$disturbSignal = $null; $abortMessage = $null; $earlyExit = $false
+$disturbSignal = $null; $abortMessage = $null; $earlyExit = $false; $runSeconds = 0.0
 try {
   foreach ($name in $Env.Keys) {
     $saved[$name] = [Environment]::GetEnvironmentVariable($name)
@@ -432,7 +540,7 @@ try {
   if ($testMode) { $exePath = $TestExe; $workDir = Split-Path -Parent $TestExe; $argList = @($TestExeArgs.Split("|") | Where-Object { $_ }) }
   # The only place the game is started: created suspended, assigned to the job, then resumed.
   if (-not ($UserPresent -or $gatePassed)) { throw "internal error: launch without a passed idle gate" }
-  $cmdArgs = (@($argList | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } })) -join ' '
+  $cmdArgs = (@($argList | ForEach-Object { ConvertTo-CommandLineArgument $_ })) -join ' '
   $hProc = [IntPtr]::Zero; $hThr = [IntPtr]::Zero
   $newPid = [DriveGameNative]::StartSuspended($exePath, $cmdArgs, $workDir, [ref]$hProc, [ref]$hThr)
   if ($newPid -eq 0) { throw "could not start $exePath (Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))" }
@@ -442,16 +550,20 @@ try {
     [DriveGameNative]::Abort($hProc, $hThr)
     throw "could not assign the game to the kill-on-close job object (the game was killed before it ran)"
   }
+  # The dead-man switch is armed before the game runs a single instruction.
+  if (-not ($harness -and $harness.NoDeadManThread)) { [DriveGameNative]::StartDeadMan($script:job, $DeadManSeconds) }   # NoDeadManThread: test mode only, to test the main thread's own checks
   if (-not [DriveGameNative]::Resume($hThr)) { [DriveGameNative]::Abort($hProc, $hThr); throw "could not resume the game" }
+  $script:hProc = $hProc
+  [DriveGameNative]::Close($hThr)
   $script:p = [Diagnostics.Process]::GetProcessById($newPid)
   $p = $script:p
   foreach ($name in $Env.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
-  "started pid $($p.Id): $($argList -join ' ')"
-  Add-RunLog "started pid $($p.Id)"
+  Add-RunLog "started pid $($p.Id) exe=$exePath"   # logged first: a pipeline may stop the script at the next line
+  "started pid $($p.Id): $exePath $($argList -join ' ')"
   $testCtx.Pid = $p.Id
-  [DriveGameNative]::StartDeadMan($script:job, $DeadManSeconds)
 
   $sw.Restart()
+  $script:lastPollAt = 0.0
   $shell = if ($KeyboardInput) { New-Object -ComObject WScript.Shell } else { $null }
   foreach ($ev in $events) {
     Wait-Until $ev.t
@@ -486,12 +598,14 @@ try {
     }
     Invoke-WatchPoll
   }
-  while (-not $p.HasExited -and $sw.Elapsed.TotalSeconds -lt $Total) { Invoke-WatchPoll; Start-Sleep -Milliseconds 100 }
+  while (-not $p.HasExited -and $sw.Elapsed.TotalSeconds -lt $Total) { Invoke-WatchPoll; Pause-Loop }
   if ($p.HasExited -and $sw.Elapsed.TotalSeconds -lt $Total) {
     $earlyExit = $true
     "${Label}GAME EXITED EARLY at $([int]$sw.Elapsed.TotalSeconds) s"
   }
   Invoke-WatchPoll
+  if ($harness -and $harness.StallAfterLoopMs) { Start-Sleep -Milliseconds $harness.StallAfterLoopMs }   # test mode only: a stall after the last poll
+  $runSeconds = $sw.Elapsed.TotalSeconds
 } catch {
   if ($_.Exception.Message -like "FABLE2-DISTURBED:*") { $disturbSignal = $_.Exception.Message.Substring("FABLE2-DISTURBED:".Length) }
   else { $abortMessage = $_.Exception.Message }
@@ -503,22 +617,16 @@ try {
   foreach ($name in $saved.Keys) { try { [Environment]::SetEnvironmentVariable($name, $saved[$name]) } catch { } }
 }
 
+$deadManTripped = [DriveGameNative]::IsDeadManTripped()
 $gameClosed = $true
 if ($script:p) { try { $gameClosed = $script:p.HasExited } catch { $gameClosed = $false } }
+$lastEvent = if ($events) { [double](($events | Measure-Object -Property t -Maximum).Maximum) } else { 0.0 }
+$expectedSeconds = [Math]::Max([double]$Total, $lastEvent)
 
 if ($disturbSignal) {
   $line = "${Label}RUN DISTURBED: $disturbSignal at {0:N1} s" -f $script:disturbAt
   $script:GateText += "; DISTURBED: $disturbSignal"
-  $moved = @()
-  try {
-    if ($script:shotFiles.Count) {
-      $sub = Join-Path $ShotDir ("disturbed_{0}" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
-      New-Item -ItemType Directory -Force $sub | Out-Null
-      foreach ($f in $script:shotFiles) {
-        if (Test-Path -LiteralPath $f) { Move-Item -LiteralPath $f -Destination $sub -Force; $moved += (Join-Path $sub (Split-Path -Leaf $f)) }
-      }
-    }
-  } catch { "WARNING: could not move the run's screenshots ($($_.Exception.Message))" }
+  $moved = @(Move-RunShots "disturbed")
   try {
     New-Item -ItemType Directory -Force $markerDir | Out-Null
     $text = @(
@@ -534,8 +642,15 @@ if ($disturbSignal) {
   Write-Output $line
   Exit-Run 11
 }
+# A dead-man trip is an abort whatever else happened, and a run that lasted far longer than asked is never clean.
+if (-not $abortMessage -and $deadManTripped) { $abortMessage = "dead-man switch: the driver stopped polling the watch for more than $DeadManSeconds s and the game was terminated" }
+if (-not $abortMessage -and $gameClosed -and -not $earlyExit -and $runSeconds -gt ($expectedSeconds + 5)) {
+  $abortMessage = "run overran ({0} s for a {1} s run)" -f [int]$runSeconds, $Total
+}
 if ($abortMessage) {
   $script:GateText += "; ABORTED"
+  $moved = @(Move-RunShots "aborted")
+  if ($moved.Count) { "screenshots of the aborted run moved to $(Split-Path -Parent $moved[0]): do not use them" }
   Write-Output "${Label}RUN ABORTED: $abortMessage"
   Exit-Run 12
 }
@@ -544,7 +659,12 @@ if (-not $gameClosed) {
   Write-Output "${Label}RUN ABORTED: the game is still running after the kill"
   Exit-Run 12
 }
-if ($earlyExit) { $script:GateText += "; EARLY EXIT"; Exit-Run 13 }
+if ($earlyExit) {
+  $script:GateText += "; EARLY EXIT"
+  $moved = @(Move-RunShots "early_exit")
+  if ($moved.Count) { "screenshots of the early-exit run moved to $(Split-Path -Parent $moved[0]): do not use them" }
+  Exit-Run 13
+}
 if ($UserPresent) { Write-Output "RUN UNCHECKED: -UserPresent given, no idle gate and no watch" }
 else { Write-Output ("${Label}RUN CLEAN: no user input for {0} s" -f [int]$sw.Elapsed.TotalSeconds) }
 Exit-Run 0

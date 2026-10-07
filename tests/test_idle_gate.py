@@ -18,6 +18,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# Suite-level guard: with this set the driver refuses to evaluate the real gate (it allows only the forced-present hook,
+# the labelled harness, or -UserPresent in a folder without a fable_2.exe), so no test can reach a real launch.
+os.environ["FABLE2_DRIVER_NO_REAL_GATE"] = "1"
 TOOLS = Path(os.environ.get("FABLE2_TOOLS_DIR") or ROOT / "tools")
 IDLE = TOOLS / "idle_check.ps1"
 DRIVE = TOOLS / "drive_game.ps1"
@@ -139,7 +142,9 @@ $out = foreach ($sc in $scenarios) {
     }
   }.GetNewClosure()
   $clock = { $t.v }.GetNewClosure()
-  $sleep = { param($ms) $t.v += $ms / 1000.0 }.GetNewClosure()
+  $done = @{}
+  $sleep = { param($ms) $t.v += $ms / 1000.0
+    foreach ($j in @($sc.jump)) { if (-not $done.ContainsKey([string]$j[0]) -and ($t.v - 1000.0) -ge $j[0]) { $done[[string]$j[0]] = $true; $t.v += $j[1] } } }.GetNewClosure()
   try {
     $r = Wait-Fable2Away -MinIdleSeconds $sc.min -MaxWaitSeconds $sc.wait -Probe $probe -Clock $clock -Sleep $sleep
     [pscustomobject]@{ name = $sc.name; passed = $r.Passed; at = ($t.v - 1000.0); signals = (@($r.Signals) -join ',') }
@@ -152,7 +157,7 @@ $out | ConvertTo-Json -Compress -AsArray""" % json.dumps(scenarios)
     @staticmethod
     def sc(name, **kw):
         base = dict(name=name, min=60, wait=400, input=[], idle_fail=[], pad_connected=[], pad_activity=[],
-                    pad_change=[], audio=[], fullscreen=[], fail=[], running=False)
+                    pad_change=[], audio=[], fullscreen=[], fail=[], running=False, jump=[])
         base.update(kw)
         return base
 
@@ -175,6 +180,9 @@ $out | ConvertTo-Json -Compress -AsArray""" % json.dumps(scenarios)
             sc("running", running=True, wait=30),
             sc("audio", audio=[5, 12]),
             sc("floor", min=30),
+            sc("jump", jump=[[10, 3600]], wait=10000),            # the machine sleeps for an hour after 10 s of polling
+            sc("jump_small", jump=[[10, 4]], wait=10000),         # a 4 s hiccup is below the 5 s continuity limit
+            sc("jump_out_of_wait", jump=[[10, 3600]], wait=100),
         ])
         self.assertTrue(res["clean"]["passed"]); self.assertTrue(59.9 <= res["clean"]["at"] <= 61, res["clean"])   # audio needs the whole 60 s
         self.assertTrue(res["pad_quiet"]["passed"]); self.assertTrue(59.9 <= res["pad_quiet"]["at"] <= 61, res["pad_quiet"])
@@ -196,6 +204,10 @@ $out | ConvertTo-Json -Compress -AsArray""" % json.dumps(scenarios)
         self.assertTrue(res["probe_fail"]["passed"] and 109 <= res["probe_fail"]["at"] <= 111, res["probe_fail"])
         self.assertFalse(res["running"]["passed"]); self.assertIn("fable2-running", res["running"]["signals"])
         self.assertTrue(res["audio"]["passed"]); self.assertTrue(71.5 <= res["audio"]["at"] <= 73.5, res["audio"])   # sound at 12 s, then 60 s
+        # a clock jump (suspend) is not observed absence: every observation restarts and a full 60 s is needed again
+        self.assertTrue(res["jump"]["passed"]); self.assertTrue(3669 <= res["jump"]["at"] <= 3672, res["jump"])
+        self.assertTrue(res["jump_small"]["passed"]); self.assertTrue(59.5 <= res["jump_small"]["at"] <= 66, res["jump_small"])
+        self.assertFalse(res["jump_out_of_wait"]["passed"])
         self.assertIn("THREW", res["floor"]["signals"]); self.assertIn("at least 60", res["floor"]["signals"])
 
 
@@ -403,6 +415,13 @@ try { $null = Get-Fable2GateDecision -IdleSeconds 5 -ErrorAction Stop; 'no error
         for (case, want), g in zip(cases, got):
             self.assertEqual(g, want, case)
 
+    def test_poll_gap_table(self):
+        cases = [(0, 4.9, True, False), (0, 5.0, True, False), (0, 5.1, True, True), (10, 9, True, True), (100, 3700, True, True)]
+        body = "$out = @(" + ",".join("(Test-Fable2PollGap -Previous %s -Current %s -LimitSeconds 5)" % (a, b) for a, b, _, _ in cases) + "); $out -join ','"
+        got = run_lib(body).strip().split(",")
+        for (a, b, _, want), g in zip(cases, got):
+            self.assertEqual(g, str(want), (a, b))
+
     def test_type_is_versioned(self):
         out = run_lib("[Fable2IdleProbeV3]::ProbeVersion")
         self.assertEqual(out.strip(), "3")
@@ -446,8 +465,15 @@ $st.level = 0.5; $c.Step(16.0); Show 'sound' $c.Latch()
 HARNESS = r"""
 # Test harness for drive_game.ps1: a scripted probe, a fake gate clock and test hooks.
 $scenario = $env:TEST_SCENARIO
+if ($scenario -eq 'multiline') { throw "first line`nsecond line" }
+if ($scenario -eq 'blank_at_load') {
+  foreach ($scp in 1, 2, 3, 'Script', 'Global') {
+    try { Set-Variable -Name Label -Value '' -Scope $scp -Force -ErrorAction SilentlyContinue } catch { }
+    try { Set-Variable -Name testMode -Value $false -Scope $scp -Force -ErrorAction SilentlyContinue } catch { }
+  }
+}
 $fake = @{ adv = 0.0; sw = [Diagnostics.Stopwatch]::StartNew(); tick = 1000; pad = $false; padchg = $false; audio = $false
-           fs = $false; fgThrow = $false; written = $false; stalled = $false }
+           fs = $false; fgThrow = $false; written = $false; stalled = $false; jumped = $false }
 $n = New-Object psobject
 $n | Add-Member ScriptMethod Now { 1000.0 + $fake.adv + $fake.sw.Elapsed.TotalSeconds }.GetNewClosure()
 $n | Add-Member ScriptMethod LastInputInfo {
@@ -479,6 +505,7 @@ $tick = {
     Set-Content -LiteralPath $f -Value 'x'
     [void]$ctx.ShotFiles.Add($f)
   }
+  if ($env:TEST_SCENARIO -eq 'slowpoll' -and $elapsed -ge 1) { Start-Sleep -Seconds 4 }
   if ($elapsed -ge 2) {
     switch ($env:TEST_SCENARIO) {
       'disturb_input' { $fake.tick = 99999 }
@@ -487,6 +514,13 @@ $tick = {
       'disturb_audio' { $fake.audio = $true }
       'disturb_fullscreen' { $fake.fs = $true }
       'disturb_probe' { $fake.fgThrow = $true }
+      'jump_watch' { if (-not $fake.jumped) { $fake.jumped = $true; $fake.adv += 3600 } }
+      'blank_label' {
+        foreach ($sc in 'Script', 'Global', 0, 1, 2, 3, 4) {
+          try { Set-Variable -Name Label -Value '' -Scope $sc -Force -ErrorAction SilentlyContinue } catch { }
+          try { Set-Variable -Name testMode -Value $false -Scope $sc -Force -ErrorAction SilentlyContinue } catch { }
+        }
+      }
       'abort' { throw 'boom (test abort)' }
       'stall' {
         if (-not $fake.stalled) {
@@ -506,6 +540,9 @@ $tick = {
    NoKill = ($env:TEST_SCENARIO -eq 'unkillable')
    FailJobCreate = ($env:TEST_SCENARIO -eq 'job_create_fail')
    FailJobAssign = ($env:TEST_SCENARIO -eq 'job_assign_fail')
+   StallAfterLoopMs = $(if ($env:TEST_SCENARIO -eq 'stall_after') { 7000 } else { 0 })
+   NoDeadManThread = ($env:TEST_SCENARIO -eq 'stall_between')
+   StallBetweenPollsMs = $(if ($env:TEST_SCENARIO -eq 'stall_between') { 7000 } else { 0 })
    HoldAfterKillMs = $(if ($env:TEST_SCENARIO -eq 'clean_hold') { 4000 } else { 0 })
    AssignDelayMs = $(if ($env:TEST_SCENARIO -eq 'job_assign_fail') { 1500 } else { 0 }) }
 """
@@ -720,6 +757,85 @@ class DriverRunPathTest(unittest.TestCase):
         self.assertTrue(wait_gone(pid, 3))
         self.assertLabelled(r)
 
+    def test_stall_with_short_total_never_ends_clean(self):
+        r, pid = self.drive("stall", total=2)
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertRegex(self.last(r), r"^TEST HARNESS RUN ABORTED: dead-man switch")
+        self.assertNotIn("RUN CLEAN", r.stdout)
+
+    def test_dead_man_trip_after_the_last_poll_is_not_clean(self):
+        # the thread fires during a stall that follows the final poll: only the verdict check can see it
+        r, pid = self.drive("stall_after", total=2)
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertRegex(self.last(r), r"^TEST HARNESS RUN ABORTED: dead-man switch")
+        self.assertNotIn("RUN CLEAN", r.stdout)
+
+    def test_overrun_is_not_clean(self):
+        # every poll takes 4 s (below the dead-man limit) but the run lasts far longer than -Total
+        r, pid = self.drive("slowpoll", total=2)
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertRegex(self.last(r), r"^TEST HARNESS RUN ABORTED: run overran \(\d+ s for a 2 s run\)")
+        self.assertNotIn("RUN CLEAN", r.stdout)
+
+    def test_clock_jump_during_the_watch_is_a_disturbance(self):
+        self.disturbed("jump_watch", "watch-gap")
+
+    def test_aborted_run_moves_its_screenshots(self):
+        shots = self.tmp / "shots"
+        r, pid = self.drive("abort", total=30, extra=("-Shots", "50", "-ShotDir", shots))
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertFalse((shots / "shot_1s.png").exists())
+        self.assertEqual(len(list(shots.glob("aborted_*/shot_1s.png"))), 1)
+
+    def test_early_exit_moves_its_screenshots(self):
+        shots = self.tmp / "shots"
+        r, pid = self.drive("clean", sleep=3, total=30, extra=("-Shots", "50", "-ShotDir", shots))
+        self.assertEqual(r.returncode, 13, r.stdout + r.stderr)
+        self.assertFalse((shots / "shot_1s.png").exists())
+        self.assertEqual(len(list(shots.glob("early_exit_*/shot_1s.png"))), 1)
+
+    def test_log_lines_are_single_line(self):
+        r, pid = self.drive("multiline", total=3)
+        self.assertEqual(r.returncode, 10, r.stdout + r.stderr)
+        lines = self.runlog().splitlines()
+        for line in lines:
+            self.assertTrue(line.startswith("TEST HARNESS "), line)
+        exit_lines = [l for l in lines if "exit=10" in l]
+        self.assertEqual(len(exit_lines), 1)
+        self.assertIn("first line", exit_lines[0])
+        self.assertIn("second line", exit_lines[0])
+
+    def test_started_line_names_the_executable(self):
+        r, pid = self.drive("clean", total=3)
+        exe = (shutil.which("pwsh") or PWSH).lower()
+        started = [l for l in r.stdout.splitlines() if l.startswith("started pid")]
+        self.assertEqual(len(started), 1)
+        self.assertIn(exe, started[0].lower())
+        logged = [l for l in self.runlog().splitlines() if "started pid" in l]
+        self.assertEqual(len(logged), 1)
+        self.assertIn(exe, logged[0].lower())
+
+    def test_stall_between_polls_is_caught_without_the_thread(self):
+        # no background thread at all: the main thread's own gap check must still abort the run
+        r, pid = self.drive("stall_between", total=2)
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertRegex(self.last(r), r"^TEST HARNESS RUN ABORTED: dead-man switch: the driver did not poll the watch for")
+        self.assertNotIn("RUN CLEAN", r.stdout)
+
+    def test_harness_code_cannot_blank_the_mode_at_load(self):
+        # harness code that runs inside the driver before the launch tries to clear testMode and the label
+        r, pid = self.drive("blank_at_load", total=3)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        started = [l for l in r.stdout.splitlines() if l.startswith("started pid")]
+        self.assertEqual(len(started), 1)
+        self.assertIn((shutil.which("pwsh") or PWSH).lower(), started[0].lower())   # still the stand-in, not ExeDirable_2.exe
+        self.assertLabelled(r)
+
+    def test_label_cannot_be_blanked_by_harness_code(self):
+        r, pid = self.drive("blank_label", total=4)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertLabelled(r)
+
     def test_game_dies_with_the_driver(self):
         """C1: killing the driver process itself must take the game with it (job object)."""
         env = dict(os.environ, **{"TEST_SCENARIO": "clean", "TEST_OUT": str(self.out), "TEST_OUT2": str(self.out2)})
@@ -746,17 +862,36 @@ class DriverRunPathTest(unittest.TestCase):
         self.assertIn("started pid %d" % pid, self.runlog())   # a killed driver leaves a trace
 
 
+def patched_driver(root_dir, allow, with_idle=True):
+    """A copy of the driver (and its libraries) whose allow-list constant also names `allow`, so tests can use a
+    scratch -ExeDir outside test mode. The unpatched driver refuses any such -ExeDir."""
+    d = Path(root_dir) / "ptools"
+    d.mkdir(exist_ok=True)
+    for name in ("drive_game.ps1", "idle_check.ps1", "cmdline_quote.ps1"):
+        if name == "idle_check.ps1" and not with_idle:
+            continue
+        src = (TOOLS / name).read_text(encoding="utf-8")
+        if name == "drive_game.ps1":
+            new = re.sub(r'(?m)^\$AllowedExeDirs = @\(.*?\)[ \t]*(#.*)?$',
+                         lambda m: '$AllowedExeDirs = @(%s)' % ",".join('"%s"' % a for a in allow), src, count=1)
+            assert new != src, "allow-list constant not found"
+            src = new
+        (d / name).write_text(src, encoding="utf-8", newline="\n")
+    return d / "drive_game.ps1"
+
+
 @unittest.skipUnless(PWSH, "PowerShell not available")
 class DriverGateTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="drive_gate_")
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.assertFalse((Path(self.tmp) / "fable_2.exe").exists())
+        self.drv = patched_driver(self.tmp, [self.tmp])
 
     def drive(self, *extra, force=True, exedir=True):
         env = {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"} if force else {}
         pre = ["-ExeDir", self.tmp] if exedir else []
-        return run_ps([DRIVE, *pre, "-Total", "5", *extra], env)
+        return run_ps([self.drv, *pre, "-Total", "5", *extra], env)
 
     def test_refuses_when_present(self):
         before = fable_pids()
@@ -769,6 +904,19 @@ class DriverGateTest(unittest.TestCase):
         self.assertNotIn("RUN CLEAN", r.stdout)
         self.assertEqual(fable_pids(), before)
         self.assertIn("exit=10", (Path(self.tmp) / "logs" / "drive_game_runs.log").read_text())
+
+    def test_exedir_outside_the_allow_list_is_refused(self):
+        r = run_ps([DRIVE, "-ExeDir", self.tmp, "-Total", "5"], {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"})
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("not an allowed build output directory", r.stdout)
+        self.assertNotIn("started pid", r.stdout)
+
+    def test_suite_guard_refuses_a_real_gate(self):
+        # FABLE2_DRIVER_NO_REAL_GATE is set by this module: without the hook the driver refuses to evaluate the real gate
+        r = run_ps([self.drv, "-ExeDir", self.tmp, "-IdleWaitSeconds", "0"], {})
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("test-suite guard", r.stdout)
+        self.assertNotIn("started pid", r.stdout)
 
     def test_keyboard_input_requires_user_present(self):
         r = self.drive("-KeyboardInput", force=False)
@@ -784,40 +932,39 @@ class DriverGateTest(unittest.TestCase):
         self.assertNotIn("started pid", r.stdout)
 
     def test_positional_arguments_are_refused(self):
-        r = run_ps([DRIVE, "5", "23:E", "", "", "x", "-ExeDir", self.tmp])
+        r = run_ps([self.drv, "5", "23:E", "", "", "x", "-ExeDir", self.tmp, "-IdleWaitSeconds", "0"],
+                   {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"})
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("unknown arguments", r.stdout)
         self.assertNotIn("started pid", r.stdout)
 
     def test_user_present_must_be_spelled_in_full(self):
         for abbr in ("-UserP", "-UserPres", "-UserPresen"):
-            r = self.drive(abbr, force=False)
+            r = self.drive(abbr, force=True)
             self.assertNotEqual(r.returncode, 0, abbr)
             self.assertNotIn("SKIPPED", r.stdout, abbr)
             self.assertNotIn("started pid", r.stdout, abbr)
-        r = self.drive("-UserPresentAbbreviationGuard", force=False)
+        r = self.drive("-UserPresentAbbreviationGuard", force=True)
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
 
     def test_user_present_skips_gate_and_reports_aborted_without_exe(self):
         # an empty folder: the launch cannot happen, so this proves the skip and the aborted path only
-        r = self.drive("-UserPresent")
+        r = self.drive("-UserPresent", force=False)
         self.assertIn("SKIPPED", r.stdout)
         self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
         self.assertIn("RUN ABORTED", r.stdout.strip().splitlines()[-1])
         self.assertIn("USER PRESENT OVERRIDE", (Path(self.tmp) / "logs" / "drive_game_runs.log").read_text())
 
     def test_gate_failure_is_a_refusal(self):
-        d = Path(self.tmp) / "tools"
-        d.mkdir()
-        shutil.copy(DRIVE, d / "drive_game.ps1")
-        r = run_ps([d / "drive_game.ps1", "-ExeDir", self.tmp, "-IdleWaitSeconds", "0"])
+        (Path(self.tmp) / "noidle").mkdir()
+        d = patched_driver(Path(self.tmp) / "noidle", [self.tmp], with_idle=False)
+        r = run_ps([d, "-ExeDir", self.tmp, "-IdleWaitSeconds", "0"], {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"})
         self.assertEqual(r.returncode, 10, r.stdout + r.stderr)
         self.assertIn("idle gate failed", r.stdout)
 
     def test_test_mode_cannot_launch_the_game(self):
         """Every guard of the test parameters, each with real files so no other guard can mask it."""
         t = Path(self.tmp)
-        pw = shutil.which("pwsh") or PWSH
         h = t / "h.ps1"
         h.write_text("@{}", encoding="utf-8")
         exe_ok = t / "exe_ok"; exe_ok.mkdir()
@@ -852,18 +999,66 @@ class DriverGateTest(unittest.TestCase):
         self.assertEqual(len(starts), 1, "the driver must have exactly one launch path")
         self.assertLess(src.index("Wait-Fable2Away"), starts[0], "the gate must come before the launch")
         self.assertLess(starts[0], src.index("AssignToJob(", starts[0]))
-        self.assertLess(src.index("AssignToJob(", starts[0]), src.index("Resume(", starts[0]))
+        self.assertLess(src.index("AssignToJob(", starts[0]), src.index("StartDeadMan(", starts[0]))   # armed before the game runs
+        self.assertLess(src.index("StartDeadMan(", starts[0]), src.index("Resume(", starts[0]))
         self.assertNotRegex(src, r"\[int\]\$IdleSeconds\b")
         for text in ("RUN CLEAN: no user input for", "RUN DISTURBED:", "RUN_DISTURBED.txt", "GAME EXITED EARLY", "TEST HARNESS "):
             self.assertIn(text, src)
 
 
-def run_cmd(shell, command, env_extra=None, timeout=300):
+QUOTE_CASES = [
+    "plain", "a b", "a b\\", "c:\\path with space\\", "say \"hi\"", "", "x=y", "a,b", "\"", "\\", "\\\\", "a\\\\\"b",
+    "tab\there", "--fullscreen=false", "--opt=a b", "end\\\\", "\"quoted\"", "a \"b c\" d", "-NoProfile", "x;y",
+]
+
+
+@unittest.skipUnless(PWSH, "PowerShell not available")
+class QuotingTest(unittest.TestCase):
+    """ConvertTo-CommandLineArgument round-trips through the real CommandLineToArgvW."""
+
+    def test_round_trip(self):
+        q = str(TOOLS / "cmdline_quote.ps1").replace("\\", "/")
+        body = (r"""
+. '%s'
+Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public static class Fable2Argv {
+  [DllImport("shell32.dll", SetLastError = true)] static extern IntPtr CommandLineToArgvW([MarshalAs(UnmanagedType.LPWStr)] string cl, out int n);
+  public static string[] Split(string cl) {
+    int n; IntPtr p = CommandLineToArgvW(cl, out n); string[] r = new string[n];
+    for (int i = 0; i < n; i++) r[i] = Marshal.PtrToStringUni(Marshal.ReadIntPtr(p, i * IntPtr.Size));
+    return r; }
+}
+'@
+$cases = '%s' | ConvertFrom-Json
+$bad = @()
+foreach ($c in $cases) {
+  $line = 'prog ' + (ConvertTo-CommandLineArgument $c)
+  $argv = [Fable2Argv]::Split($line)
+  if ($argv.Count -ne 2 -or $argv[1] -ne $c) { $bad += "single [$c] -> [$line]" }
+}
+$all = 'prog ' + (($cases | ForEach-Object { ConvertTo-CommandLineArgument $_ }) -join ' ')
+$argv = [Fable2Argv]::Split($all)
+if ($argv.Count -ne $cases.Count + 1) { $bad += "table count" } else { for ($i = 0; $i -lt $cases.Count; $i++) { if ($argv[$i + 1] -ne $cases[$i]) { $bad += "table [$($cases[$i])]" } } }
+'bad: ' + $bad.Count
+$bad
+""" % (q, json.dumps(QUOTE_CASES).replace("'", "''")))
+        out = run_lib_plain(body)
+        self.assertIn("bad: 0", out, out)
+
+
+def run_lib_plain(body, timeout=120):
+    r = subprocess.run([PWSH, "-NoProfile", "-NonInteractive", "-Command", body], capture_output=True, text=True, timeout=timeout)
+    assert r.returncode == 0, r.stdout + r.stderr
+    return r.stdout
+
+
+def run_cmd(shell, command, env_extra=None, timeout=300, cwd=None):
     env = dict(os.environ)
     env.pop("FABLE2_IDLE_GATE_FORCE_PRESENT", None)
     env.update(env_extra or {})
     return subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command", command],
-                          capture_output=True, text=True, timeout=timeout, env=env, cwd=str(ROOT))
+                          capture_output=True, text=True, timeout=timeout, env=env, cwd=str(cwd or ROOT))
 
 
 PS51 = shutil.which("powershell")
@@ -879,32 +1074,48 @@ class InSessionTest(unittest.TestCase):
         (self.tmp / "exe").mkdir()
         self.harness = self.tmp / "harness.ps1"
         self.harness.write_text(HARNESS, encoding="utf-8")
+        self.drv = patched_driver(self.tmp, [self.tmp / "exe"])
+        self.env = {"TEST_OUT": str(self.tmp / "o.txt"), "TEST_OUT2": str(self.tmp / "o2.txt")}
 
     def q(self, p):
         return "'%s'" % str(p).replace("'", "''")
 
     def refusal(self, shell):
-        cmd = ("& %s -ExeDir %s -IdleWaitSeconds 0 -Env @{A='b'}; 'after: ' + $LASTEXITCODE" % (self.q(DRIVE), self.q(self.tmp / "exe")))
+        cmd = ("& %s -ExeDir %s -IdleWaitSeconds 0 -Env @{A='b'}; 'after: ' + $LASTEXITCODE" % (self.q(self.drv), self.q(self.tmp / "exe")))
         r = run_cmd(shell, cmd, {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"})
         self.assertIn("forced-present", r.stdout, r.stdout + r.stderr)       # the hook's signal ...
         self.assertNotIn("not recognized", r.stdout + r.stderr)              # ... not a scope error
         self.assertIn("after: 10", r.stdout)                                  # exit does not kill the session
         self.assertNotIn("started pid", r.stdout)
 
-    def harness_clean(self, shell):
+    def harness_run(self, shell, scenario, total, sleep=30):
         pw = shutil.which("pwsh") or PWSH
-        cmd = ("& %s -ExeDir %s -Total 3 -Plan '' -TestHarness %s -TestExe %s -TestExeArgs '-NoProfile|-Command|Start-Sleep 30'; "
-               "'after: ' + $LASTEXITCODE" % (self.q(DRIVE), self.q(self.tmp / "exe"), self.q(self.harness), self.q(pw)))
-        r = run_cmd(shell, cmd, {"TEST_SCENARIO": "clean", "TEST_OUT": str(self.tmp / "o.txt"), "TEST_OUT2": str(self.tmp / "o2.txt")})
+        cmd = ("& %s -ExeDir %s -Total %d -Plan '' -TestHarness %s -TestExe %s -TestExeArgs '|-NoProfile|-Command|Start-Sleep %d'; "
+               "'after: ' + $LASTEXITCODE" % (self.q(DRIVE), self.q(self.tmp / "exe"), total, self.q(self.harness), self.q(pw), sleep))
+        return run_cmd(shell, cmd, dict(self.env, TEST_SCENARIO=scenario))
+
+    def harness_clean(self, shell):
+        r = self.harness_run(shell, "clean", 3)
         lines = r.stdout.strip().splitlines()
         self.assertRegex(lines[-2], r"^TEST HARNESS RUN CLEAN: no user input for \d+ s$", r.stdout + r.stderr)
         self.assertEqual(lines[-1], "after: 0")
+
+    def stall_total2(self, shell):
+        # the dead-man thread kills the stand-in during the stall; the run must still not end clean
+        r = self.harness_run(shell, "stall", 2, sleep=60)
+        lines = r.stdout.strip().splitlines()
+        self.assertRegex(lines[-2], r"^TEST HARNESS RUN ABORTED: dead-man switch", r.stdout + r.stderr)
+        self.assertNotIn("RUN CLEAN", r.stdout)
+        self.assertEqual(lines[-1], "after: 12")
 
     def test_refusal_in_session_pwsh(self):
         self.refusal(PWSH)
 
     def test_harness_run_in_session_pwsh(self):
         self.harness_clean(PWSH)
+
+    def test_stall_with_short_total_in_session_pwsh(self):
+        self.stall_total2(PWSH)
 
     @unittest.skipUnless(PS51, "Windows PowerShell 5.1 not available")
     def test_refusal_in_session_ps51(self):
@@ -914,6 +1125,10 @@ class InSessionTest(unittest.TestCase):
     def test_harness_run_in_session_ps51(self):
         self.harness_clean(PS51)
 
+    @unittest.skipUnless(PS51, "Windows PowerShell 5.1 not available")
+    def test_stall_with_short_total_in_session_ps51(self):
+        self.stall_total2(PS51)
+
     def test_env_is_refused_in_test_mode(self):
         pw = shutil.which("pwsh") or PWSH
         cmd = ("& %s -ExeDir %s -Env @{A='b'} -TestHarness %s -TestExe %s; 'after: ' + $LASTEXITCODE"
@@ -922,6 +1137,44 @@ class InSessionTest(unittest.TestCase):
         self.assertIn("-Env", r.stdout)
         self.assertIn("after: 2", r.stdout)
         self.assertNotIn("started pid", r.stdout)
+
+    def test_surviving_game_is_killed_when_the_driver_returns_in_session(self):
+        """m2: the job handle is closed on the way out, so a game that could not be killed does not outlive the call."""
+        pw = shutil.which("pwsh") or PWSH
+        cmd = ("$o = & %s -ExeDir %s -Total 2 -Plan '' -TestHarness %s -TestExe %s -TestExeArgs '|-NoProfile|-Command|Start-Sleep 60'; "
+               "$m = [regex]::Match(($o -join \"`n\"), 'started pid (\\d+)'); Start-Sleep -Milliseconds 800; "
+               "'alive: ' + [bool](Get-Process -Id ([int]$m.Groups[1].Value) -ErrorAction SilentlyContinue)"
+               % (self.q(DRIVE), self.q(self.tmp / "exe"), self.q(self.harness), self.q(pw)))
+        r = run_cmd(PWSH, cmd, dict(self.env, TEST_SCENARIO="unkillable"))
+        self.assertIn("alive: False", r.stdout, r.stdout + r.stderr)
+
+    def test_relative_exedir_matches_the_allow_list_after_resolution(self):
+        cmd = ("Set-Location %s; & %s -ExeDir .\\exe -IdleWaitSeconds 0; 'after: ' + $LASTEXITCODE" % (self.q(self.tmp), self.q(self.drv)))
+        r = run_cmd(PWSH, cmd, {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"}, cwd=ROOT)
+        self.assertIn("forced-present", r.stdout, r.stdout + r.stderr)   # reached the gate: the relative path was resolved first
+        self.assertIn("after: 10", r.stdout)
+
+    def test_started_line_is_logged_before_it_is_printed(self):
+        """m3: a pipeline that stops the script at the started line still leaves the log line."""
+        pw = shutil.which("pwsh") or PWSH
+        cmd = ("& %s -ExeDir %s -Total 30 -Plan '' -TestHarness %s -TestExe %s -TestExeArgs '|-NoProfile|-Command|Start-Sleep 60' "
+               "| Select-Object -First 3; 'done'" % (self.q(DRIVE), self.q(self.tmp / "exe"), self.q(self.harness), self.q(pw)))
+        r = run_cmd(PWSH, cmd, dict(self.env, TEST_SCENARIO="clean"))
+        self.assertIn("started pid", r.stdout, r.stdout + r.stderr)
+        log = (self.tmp / "exe" / "logs" / "drive_game_runs.log").read_text()
+        self.assertIn("started pid", log)
+
+    def test_relative_paths_resolve_against_the_session_location(self):
+        """m4: -ExeDir, -TestHarness and -TestExe are resolved once, against the caller's location (not the process directory)."""
+        shutil.copy(SORT, self.tmp / "standin.exe")
+        cmd = ("Set-Location %s; & %s -ExeDir .\\exe -Total 3 -Plan '' -TestHarness .\\harness.ps1 -TestExe .\\standin.exe; "
+               "'after: ' + $LASTEXITCODE" % (self.q(self.tmp), self.q(DRIVE)))
+        r = run_cmd(PWSH, cmd, dict(self.env, TEST_SCENARIO="clean"), cwd=ROOT)
+        self.assertNotIn("REFUSED", r.stdout, r.stdout + r.stderr)
+        started = [l for l in r.stdout.splitlines() if l.startswith("started pid")]
+        self.assertEqual(len(started), 1, r.stdout + r.stderr)
+        self.assertIn(str(self.tmp / "standin.exe").lower(), started[0].lower())      # the absolute path in the started line
+        self.assertTrue((self.tmp / "exe" / "logs" / "drive_game_runs.log").exists())  # the log is under the resolved -ExeDir
 
 
 @unittest.skipUnless(PWSH, "PowerShell not available")

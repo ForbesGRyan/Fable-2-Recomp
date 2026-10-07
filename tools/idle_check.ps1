@@ -290,6 +290,14 @@ function Test-Fable2PadActive {
   return [Fable2IdleProbeV3]::PadActive($Buttons, $LeftTrigger, $RightTrigger, $ThumbLX, $ThumbLY, $ThumbRX, $ThumbRY)
 }
 
+# True when two consecutive polls are more than LimitSeconds apart (or the clock went backwards):
+# the time in between was not observed.
+function Test-Fable2PollGap {
+  param([Parameter(Mandatory)][double]$Previous, [Parameter(Mandatory)][double]$Current, [Parameter(Mandatory)][double]$LimitSeconds)
+  $d = $Current - $Previous
+  return ($d -gt $LimitSeconds -or $d -lt 0)
+}
+
 # Gate decision before a run. Present = any signal. A negative, non-finite or too long idle time
 # is unknown. PadObserved: a pad is or was seen during the observation; PadQuietSeconds is the time
 # since its last activity, connect or disconnect.
@@ -399,9 +407,18 @@ function Wait-Fable2Away {
   if ($null -eq $Sleep) { $Sleep = { param($ms) Start-Sleep -Milliseconds $ms } }
   $t0 = [double](& $Clock)
   $quietSince = $t0; $audioSince = $t0; $lastLog = $t0
+  $prevNow = $t0; $prevWall = [DateTime]::UtcNow
   while ($true) {
     $snap = & $Probe
     $now = [double]$snap.Now
+    # Continuity: polls more than 5 s apart (by the loop's clock or the wall clock) mean the machine
+    # slept or the process stalled; that time was not observed, so every observation restarts.
+    $wall = [DateTime]::UtcNow
+    $wallGap = ($wall - $prevWall).TotalSeconds
+    if ((Test-Fable2PollGap -Previous $prevNow -Current $now -LimitSeconds 5) -or (Test-Fable2PollGap -Previous 0 -Current $wallGap -LimitSeconds 5)) {
+      $quietSince = $now; $audioSince = $now
+    }
+    $prevNow = $now; $prevWall = $wall
     # A pad connecting, unplugged or active (latched between polls) restarts the observation.
     if ($snap.PadChangeStamp -gt $quietSince) { $quietSince = $snap.PadChangeStamp }
     if ($snap.PadActivityStamp -gt $quietSince) { $quietSince = $snap.PadActivityStamp }

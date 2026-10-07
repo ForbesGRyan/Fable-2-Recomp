@@ -138,6 +138,11 @@ inline void poll() {
 
 }  // namespace fable2::guest_work_log
 
+// Defined in src/core/fable2_boot_save.h, which main.cpp includes after this header.
+namespace fable2::bootsave {
+inline void OnFrame(PPCContext& ctx, uint8_t* base);
+}
+
 extern "C" void MainRenderLoop_82B9CD68(PPCContext& ctx, uint8_t* base) {
   const int64_t frame_us =
       std::chrono::duration_cast<std::chrono::microseconds>(
@@ -189,6 +194,8 @@ extern "C" void MainRenderLoop_82B9CD68(PPCContext& ctx, uint8_t* base) {
   fable2::d3dcensus::OnFrame();
   // F5 (host) -> run the external Lua file (per-frame, responsive).
   fable2::f5lua::poll_mainloop(ctx, base);
+  // FABLE2_BOOT_SAVE: load a named save from the front end (inert when unset).
+  fable2::bootsave::OnFrame(ctx, base);
   const auto swap_t0 = std::chrono::steady_clock::now();
   fable2::guest_frame_rate::in_swap() = true;
   __imp__MainRenderLoop_82B9CD68(ctx, base);

@@ -1038,6 +1038,77 @@ class DriverGateTest(unittest.TestCase):
         self.assertEqual(fable_pids(), before)
         self.assertIn("exit=10", (Path(self.tmp) / "logs" / "drive_game_runs.log").read_text())
 
+    def test_bootsave_bad_name_is_refused(self):
+        for bad in ("..\\Hero000", "Hero1", "Hero0003", "hero003x"):
+            r = self.drive("-BootSave", bad)
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("-BootSave must be HeroNNN", r.stdout)
+            self.assertNotIn("started pid", r.stdout)
+
+    def test_bootsave_restores_the_pristine_save_and_keeps_the_replaced_one(self):
+        live = Path(self.tmp) / "saves" / "B13EBABEBABEBABE" / "4D5307F1" / "00000001" / "Hero003"
+        live.mkdir(parents=True)
+        (live / "mainsave.bin").write_text("drifted")
+        (live / "extra.bin").write_text("only in the live folder")
+        pristine = Path(self.tmp) / "saves-pristine" / "Hero003"
+        pristine.mkdir(parents=True)
+        (pristine / "mainsave.bin").write_text("pristine")
+        # -UserPresent in a folder without fable_2.exe: the gate is skipped and the launch itself fails.
+        r = run_ps([self.drv, "-ExeDir", self.tmp, "-Total", "5", "-UserPresent", "-BootSave", "Hero003"])
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertIn("restored pristine save Hero003", r.stdout)
+        self.assertEqual((live / "mainsave.bin").read_text(), "pristine")
+        self.assertFalse((live / "extra.bin").exists())
+        replaced = list((Path(self.tmp) / "saves-replaced").glob("*/Hero003/mainsave.bin"))
+        self.assertEqual(len(replaced), 1)
+        self.assertEqual(replaced[0].read_text(), "drifted")
+
+    def test_bootsave_without_that_save_is_refused_before_the_gate(self):
+        other = Path(self.tmp) / "saves" / "B13EBABEBABEBABE" / "4D5307F1" / "00000001" / "Hero003"
+        other.mkdir(parents=True)
+        (other / "mainsave.bin").write_text("x")
+        r = self.drive("-BootSave", "Hero004")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("needs exactly one save folder", r.stdout)
+        self.assertIn("found 0", r.stdout)
+        self.assertNotIn("started pid", r.stdout)
+
+    def test_bootsave_failed_pristine_copy_leaves_the_live_save_in_place(self):
+        import ctypes
+        live = Path(self.tmp) / "saves" / "B13EBABEBABEBABE" / "4D5307F1" / "00000001" / "Hero003"
+        live.mkdir(parents=True)
+        (live / "mainsave.bin").write_text("drifted")
+        pristine = Path(self.tmp) / "saves-pristine" / "Hero003"
+        pristine.mkdir(parents=True)
+        (pristine / "mainsave.bin").write_text("pristine")
+        # Hold the pristine file open with no sharing, so the driver's copy of it fails.
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = ctypes.c_void_p
+        k32.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+                                    ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        h = k32.CreateFileW(str(pristine / "mainsave.bin"), 0x80000000, 0, None, 3, 0, None)   # GENERIC_READ, OPEN_EXISTING
+        self.assertNotIn(h, (None, ctypes.c_void_p(-1).value))
+        try:
+            r = run_ps([self.drv, "-ExeDir", self.tmp, "-Total", "5", "-UserPresent", "-BootSave", "Hero003"])
+        finally:
+            k32.CloseHandle(h)
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertIn("could not restore the pristine save", r.stdout)
+        self.assertNotIn("started pid", r.stdout)
+        self.assertEqual((live / "mainsave.bin").read_text(), "drifted")   # the live save was never moved
+        self.assertEqual(list((Path(self.tmp) / "saves-replaced").glob("*/Hero003")), [])
+
+    def test_bootsave_without_a_pristine_copy_leaves_the_save_alone(self):
+        live = Path(self.tmp) / "saves" / "B13EBABEBABEBABE" / "4D5307F1" / "00000001" / "Hero003"
+        live.mkdir(parents=True)
+        (live / "mainsave.bin").write_text("live")
+        r = run_ps([self.drv, "-ExeDir", self.tmp, "-Total", "5", "-UserPresent", "-BootSave", "Hero003"])
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertNotIn("restored pristine save", r.stdout)
+        self.assertEqual((live / "mainsave.bin").read_text(), "live")
+        self.assertFalse((Path(self.tmp) / "saves-replaced").exists())
+
     def test_exedir_outside_the_allow_list_is_refused(self):
         # (-IdleWaitSeconds 0: a driver without the check would end at the gate at once, not after the test's timeout)
         r = run_ps([DRIVE, "-ExeDir", self.tmp, "-Total", "5", "-IdleWaitSeconds", "0"], {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"})

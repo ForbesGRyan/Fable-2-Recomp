@@ -29,6 +29,15 @@
 # plan expects: the title screen comes a few seconds later when the machine is busy, the
 # first press is then lost and the run stops in the main menu (README, the paragraph on this script).
 #
+# -BootSave Hero003: the game loads that save itself, with no menu input (FABLE2_BOOT_SAVE,
+# src/core/boot_save.h). The default key plan is dropped (give -Plan to add steps; times are
+# still seconds since start). If <ExeDir>\saves-pristine\Hero003 exists, the live save folder
+# is first moved to <ExeDir>\saves-replaced\<timestamp>\Hero003 and the pristine copy is put in
+# its place, so every run starts from the same save. Nothing is ever deleted. The boot logo
+# videos are skipped (FABLE2_SKIP_LOGOS=1) unless -Env sets FABLE2_SKIP_LOGOS to 0. Measured
+# 2026-10-07: the world starts drawing at about 23 s (40 s with the default key plan), so
+# start captures at >= 33 s.
+#
 # -KeyboardInput: the old path. Keys are sent with keybd_event (HoldMs default
 # 50), which targets whatever window has focus, so each key is sent only if the
 # game window is in the foreground; otherwise it is skipped and logged (it never
@@ -114,10 +123,12 @@
 #   .\tools\drive_game.ps1 -Total 150 -Env @{FABLE2_NATIVE_DISCOVERY="300"; FABLE2_NATIVE_DISCOVERY_DELAY="50"}
 #   .\tools\drive_game.ps1 -GameArgs "--native_render_log_vertex_bindings=true" -Shots "50,80"
 #   .\tools\drive_game.ps1 -Total 100 -Shots "60,90" -PlanShift 6     # everything 6 s later
+#   .\tools\drive_game.ps1 -BootSave Hero003 -Total 60 -Shots "35,50"
 [CmdletBinding(PositionalBinding = $false)]
 param(
   [int]$Total = 120,                         # seconds before the game is closed
   [string]$Plan = "23:E,27:S,30:E,35:E",     # second:key list
+  [string]$BootSave = "",                    # HeroNNN: load this save without menu input; drops the default key plan
   [string]$Shots = "",                       # seconds for window screenshots, e.g. "50,80"
   [string]$PlanShift = "0",                  # whole seconds, 0..30, added to every plan time, every -Shots time and -Total
   [string]$ShotDir = "",                     # default: <exe folder>\logs\shots
@@ -203,6 +214,30 @@ if ($UserPresentAbbreviationGuard) {
 if ($Rest.Count) {
   Write-Output (Format-OneLine "REFUSED: unknown arguments ($($Rest -join ' ')); positional and unknown arguments are never ignored silently. Nothing launched.")
   Exit-Run 2
+}
+if ($BootSave) {
+  if ($BootSave -cnotmatch '^Hero\d{3}$') {
+    Write-Output "REFUSED: -BootSave must be HeroNNN (for example Hero003), got '$BootSave'. Nothing launched."
+    Exit-Run 2
+  }
+  if ($KeyboardInput) {
+    Write-Output "REFUSED: -BootSave loads the save without input; it cannot be combined with -KeyboardInput. Nothing launched."
+    Exit-Run 2
+  }
+  if ($testMode) {
+    Write-Output "REFUSED: test mode refuses -BootSave. Nothing launched."
+    Exit-Run 2
+  }
+  # Refused here, before the gate: with a wrong name the game would sit at the menu for the whole run.
+  $liveSaves = @(Get-ChildItem -Path (Join-Path $ExeDir "saves\*\4D5307F1\00000001\$BootSave\mainsave.bin") -File -ErrorAction SilentlyContinue)
+  if ($liveSaves.Count -ne 1) {
+    Write-Output "REFUSED: -BootSave $BootSave needs exactly one save folder saves\<profile>\4D5307F1\00000001\$BootSave with a mainsave.bin under $ExeDir; found $($liveSaves.Count). Nothing launched."
+    Exit-Run 2
+  }
+  if (-not $PSBoundParameters.ContainsKey('Plan')) { $Plan = "" }
+  $Env = @{} + $Env
+  $Env["FABLE2_BOOT_SAVE"] = $BootSave
+  if (-not $Env.ContainsKey("FABLE2_SKIP_LOGOS")) { $Env["FABLE2_SKIP_LOGOS"] = "1" }   # -Env @{FABLE2_SKIP_LOGOS="0"} keeps the logos
 }
 if ($KeyboardInput -and -not $UserPresent) {
   Write-Output "REFUSED: -KeyboardInput means the user is driving; it requires -UserPresent. Nothing launched."
@@ -431,6 +466,38 @@ if ($UserPresent) {
   # Silence the game so its own sound does not trip the audio signal (an explicit -Env value wins).
   $Env = @{} + $Env
   if (-not $Env.ContainsKey("SDL_AUDIO_DRIVER")) { $Env["SDL_AUDIO_DRIVER"] = "fable-test-unavailable-backend" }
+}
+
+# -BootSave with a pristine copy: put it in place of the live save (moved aside, never deleted).
+if ($BootSave) {
+  $pristine = Join-Path $ExeDir "saves-pristine\$BootSave"
+  if (Test-Path -LiteralPath $pristine -PathType Container) {
+    $aside = Join-Path $ExeDir ("saves-replaced\{0}" -f (Get-Date -Format "yyyyMMdd_HHmmss_fff"))
+    $livePath = $null; $movedLive = $false
+    try {
+      $live = @(Get-ChildItem -Path (Join-Path $ExeDir "saves\*\4D5307F1\00000001\$BootSave") -Directory -ErrorAction Stop)
+      if ($live.Count -ne 1) { throw "expected one live save folder $BootSave, found $($live.Count)" }
+      $livePath = $live[0].FullName
+      New-Item -ItemType Directory -Force $aside | Out-Null
+      # The copy is made next to its destination first: the live save is not touched until it is complete.
+      $incoming = Join-Path $aside "incoming"
+      Copy-Item -Recurse -LiteralPath $pristine -Destination $incoming
+      Move-Item -LiteralPath $livePath -Destination (Join-Path $aside $BootSave)
+      $movedLive = $true
+      Move-Item -LiteralPath $incoming -Destination $livePath
+      Write-Output "restored pristine save $BootSave (previous one moved to $aside)"
+      Add-RunLog "restored pristine save $BootSave; previous moved to $aside"
+    } catch {
+      $why = $_.Exception.Message
+      if ($movedLive -and -not (Test-Path -LiteralPath $livePath)) {
+        try { Move-Item -LiteralPath (Join-Path $aside $BootSave) -Destination $livePath; $why += "; the live save was put back" }
+        catch { $why += "; THE LIVE SAVE IS NOW IN $(Join-Path $aside $BootSave): move it back to $livePath by hand" }
+      }
+      $script:GateText += "; ABORTED"
+      Write-Output "${Label}RUN ABORTED: could not restore the pristine save $BootSave ($why). Nothing launched."
+      Exit-Run 12
+    }
+  }
 }
 
 # Marker file location: next to the screenshots, or next to the log when none are requested.

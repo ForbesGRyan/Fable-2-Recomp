@@ -17,6 +17,12 @@
 # discovery capture of 60 frames, every 4th draw (frames 1..100000, every 1..64); both
 # are run by the game's autoplay thread and passed through unchanged.
 #
+# -BootSave Hero003: the game loads that save itself, with no menu input (FABLE2_BOOT_SAVE,
+# src/core/boot_save.h). The default key plan is dropped (give -Plan to add steps; times are
+# still seconds since start). If <ExeDir>\saves-pristine\Hero003 exists, the live save folder
+# is first moved to <ExeDir>\saves-replaced\<timestamp>\Hero003 and the pristine copy is put in
+# its place, so every run starts from the same save. Nothing is ever deleted.
+#
 # -KeyboardInput: the old path. Keys are sent with keybd_event (HoldMs default
 # 50), which targets whatever window has focus, so each key is sent only if the
 # game window is in the foreground; otherwise it is skipped and logged (it never
@@ -95,10 +101,12 @@
 #   .\tools\drive_game.ps1 -Total 120
 #   .\tools\drive_game.ps1 -Total 150 -Env @{FABLE2_NATIVE_DISCOVERY="300"; FABLE2_NATIVE_DISCOVERY_DELAY="50"}
 #   .\tools\drive_game.ps1 -GameArgs "--native_render_log_vertex_bindings=true" -Shots "50,80"
+#   .\tools\drive_game.ps1 -BootSave Hero003 -Total 60 -Shots "25,40"
 [CmdletBinding(PositionalBinding = $false)]
 param(
   [int]$Total = 120,                         # seconds before the game is closed
   [string]$Plan = "23:E,27:S,30:E,35:E",     # second:key list
+  [string]$BootSave = "",                    # HeroNNN: load this save without menu input; drops the default key plan
   [string]$Shots = "",                       # seconds for window screenshots, e.g. "50,80"
   [string]$ShotDir = "",                     # default: <exe folder>\logs\shots
   [string[]]$GameArgs = @(),                 # extra fable_2.exe arguments
@@ -173,6 +181,23 @@ if ($UserPresentAbbreviationGuard) {
 if ($Rest.Count) {
   Write-Output "REFUSED: unknown arguments ($($Rest -join ' ')); positional and unknown arguments are never ignored silently. Nothing launched."
   Exit-Run 2
+}
+if ($BootSave) {
+  if ($BootSave -cnotmatch '^Hero\d{3}$') {
+    Write-Output "REFUSED: -BootSave must be HeroNNN (for example Hero003), got '$BootSave'. Nothing launched."
+    Exit-Run 2
+  }
+  if ($KeyboardInput) {
+    Write-Output "REFUSED: -BootSave loads the save without input; it cannot be combined with -KeyboardInput. Nothing launched."
+    Exit-Run 2
+  }
+  if ($testMode) {
+    Write-Output "REFUSED: test mode refuses -BootSave. Nothing launched."
+    Exit-Run 2
+  }
+  if (-not $PSBoundParameters.ContainsKey('Plan')) { $Plan = "" }
+  $Env = @{} + $Env
+  $Env["FABLE2_BOOT_SAVE"] = $BootSave
 }
 if ($KeyboardInput -and -not $UserPresent) {
   Write-Output "REFUSED: -KeyboardInput means the user is driving; it requires -UserPresent. Nothing launched."
@@ -409,6 +434,27 @@ if ($UserPresent) {
   # Silence the game so its own sound does not trip the audio signal (an explicit -Env value wins).
   $Env = @{} + $Env
   if (-not $Env.ContainsKey("SDL_AUDIO_DRIVER")) { $Env["SDL_AUDIO_DRIVER"] = "fable-test-unavailable-backend" }
+}
+
+# -BootSave with a pristine copy: put it in place of the live save (moved aside, never deleted).
+if ($BootSave) {
+  $pristine = Join-Path $ExeDir "saves-pristine\$BootSave"
+  if (Test-Path -LiteralPath $pristine -PathType Container) {
+    try {
+      $live = @(Get-ChildItem -Path (Join-Path $ExeDir "saves\*\4D5307F1\00000001\$BootSave") -Directory -ErrorAction Stop)
+      if ($live.Count -ne 1) { throw "expected one live save folder $BootSave, found $($live.Count)" }
+      $aside = Join-Path $ExeDir ("saves-replaced\{0}" -f (Get-Date -Format "yyyyMMdd_HHmmss_fff"))
+      New-Item -ItemType Directory -Force $aside | Out-Null
+      Move-Item -LiteralPath $live[0].FullName -Destination (Join-Path $aside $BootSave)
+      Copy-Item -Recurse -LiteralPath $pristine -Destination $live[0].FullName
+      Write-Output "restored pristine save $BootSave (previous one moved to $aside)"
+      Add-RunLog "restored pristine save $BootSave; previous moved to $aside"
+    } catch {
+      $script:GateText += "; ABORTED"
+      Write-Output "${Label}RUN ABORTED: could not restore the pristine save $BootSave ($($_.Exception.Message)). Nothing launched."
+      Exit-Run 12
+    }
+  }
 }
 
 # Marker file location: next to the screenshots, or next to the log when none are requested.

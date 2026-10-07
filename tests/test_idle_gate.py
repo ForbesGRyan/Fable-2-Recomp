@@ -905,6 +905,41 @@ class DriverGateTest(unittest.TestCase):
         self.assertEqual(fable_pids(), before)
         self.assertIn("exit=10", (Path(self.tmp) / "logs" / "drive_game_runs.log").read_text())
 
+    def test_bootsave_bad_name_is_refused(self):
+        for bad in ("..\\Hero000", "Hero1", "Hero0003", "hero003x"):
+            r = self.drive("-BootSave", bad)
+            self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+            self.assertIn("-BootSave must be HeroNNN", r.stdout)
+            self.assertNotIn("started pid", r.stdout)
+
+    def test_bootsave_restores_the_pristine_save_and_keeps_the_replaced_one(self):
+        live = Path(self.tmp) / "saves" / "B13EBABEBABEBABE" / "4D5307F1" / "00000001" / "Hero003"
+        live.mkdir(parents=True)
+        (live / "mainsave.bin").write_text("drifted")
+        (live / "extra.bin").write_text("only in the live folder")
+        pristine = Path(self.tmp) / "saves-pristine" / "Hero003"
+        pristine.mkdir(parents=True)
+        (pristine / "mainsave.bin").write_text("pristine")
+        # -UserPresent in a folder without fable_2.exe: the gate is skipped and the launch itself fails.
+        r = run_ps([self.drv, "-ExeDir", self.tmp, "-Total", "5", "-UserPresent", "-BootSave", "Hero003"])
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertIn("restored pristine save Hero003", r.stdout)
+        self.assertEqual((live / "mainsave.bin").read_text(), "pristine")
+        self.assertFalse((live / "extra.bin").exists())
+        replaced = list((Path(self.tmp) / "saves-replaced").glob("*/Hero003/mainsave.bin"))
+        self.assertEqual(len(replaced), 1)
+        self.assertEqual(replaced[0].read_text(), "drifted")
+
+    def test_bootsave_without_a_pristine_copy_leaves_the_save_alone(self):
+        live = Path(self.tmp) / "saves" / "B13EBABEBABEBABE" / "4D5307F1" / "00000001" / "Hero003"
+        live.mkdir(parents=True)
+        (live / "mainsave.bin").write_text("live")
+        r = run_ps([self.drv, "-ExeDir", self.tmp, "-Total", "5", "-UserPresent", "-BootSave", "Hero003"])
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertNotIn("restored pristine save", r.stdout)
+        self.assertEqual((live / "mainsave.bin").read_text(), "live")
+        self.assertFalse((Path(self.tmp) / "saves-replaced").exists())
+
     def test_exedir_outside_the_allow_list_is_refused(self):
         r = run_ps([DRIVE, "-ExeDir", self.tmp, "-Total", "5"], {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"})
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)

@@ -51,7 +51,7 @@ The load itself takes about 17 s here against about 6 s after the last key press
 ## Not verified
 
 - `-BootSave` with the logos kept (`FABLE2_SKIP_LOGOS=0`) on the final build.
-- That a second hero loads its own content was seen once but not proven: `-BootSave Hero003` logged `loading Hero003 (attempt 1, ..., valid 1)` at 6.4 s (`fable_2_010.log`, build with the retry cap) and the game opened in the opening cutscene, where `Hero000` opens on the bridge. `Hero001`-`Hero005` are 130 KB saves made minutes apart (new games), `Hero000` is 180 KB, so the opening is what that save should hold; loading `Hero003` from the menu by hand would confirm it.
+- Other heroes, checked against the save files rather than by a menu load: `-BootSave Hero003` and `-BootSave Hero001` each logged `loading <hero> (attempt 1, ..., valid 1)` (`fable_2_010.log`, `fable_2_012.log`, build with the retry cap) and opened in the opening cutscene, where `Hero000` opens on the bridge. Each save's `chaptersave.bin` is plain XML after a 4-byte length: `Hero000` says chapter 2, level `BowerLake`, quest `QC060_NewBeginning`; `Hero001`-`Hero005` say chapter 1, level `BWSSlums`, quest `QC010_Childhood`, and their `herosave.bin` files are byte-identical. So those five are new-game saves and the opening is what they hold. Loading one from the menu by hand would be the direct proof.
 - The German GOTY version (same code group, not run).
 - A run under the idle gate (all runs so far were `-UserPresent`).
 

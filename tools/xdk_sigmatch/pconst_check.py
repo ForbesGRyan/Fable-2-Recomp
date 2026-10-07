@@ -55,7 +55,7 @@ the first draws of a replay, the value the replay before it ended with unless th
 again; the game loads a light set only for a draw whose shader uses one. With --dumps (a
 --dump_shaders folder), a difference in a register that the pixel shader the GPU ran does not
 name in its microcode (shader_<HASH>.ucode.frag) is counted apart ("different where the pixel
-shader does not read it") and does not decide; for the vertex keys the vertex shader and its
+shader does not read it") and does not decide (a depth-only execution, mode 5, reads none); for the vertex keys the vertex shader and its
 .ucode.vert, where c[N+a0] (a palette) counts as every register from N on. Without the option,
 or without that shader's dump, every difference counts.
 
@@ -94,6 +94,7 @@ LIGHT_BLOCK = (0, 19, 20, 21, 22, 23, 80, 87, 94, 109, 112)
 # b133 / b134 (emissive and cube blocks), b135 (the per-light shadow map), b136 (water).
 BOOL_BITS = (128, 129, 132, 133, 134, 135, 136)
 MAX_MISMATCHES = 3
+DEPTH_ONLY_MODE = 5  # RB_MODECONTROL & 7: depth only, no pixel shader (frame-map section 8)
 _HEX = set("0123456789ABCDEFabcdef")
 
 
@@ -494,7 +495,9 @@ def main(argv=None):
             kind = 1 if pre_pass else (0 if r["in_scene"] else 2)
             n_exec[kind] += 1
             gpu = ex["P"]
-            reads = shader_reads.reads(ex[shader_key])
+            # A depth-only execution (RB_MODECONTROL 5) runs no pixel shader, whatever shader the
+            # GPU loaded last.
+            reads = shader_reads.reads(0 if not vertex and ex["mode"] == DEPTH_ONLY_MODE else ex[shader_key])
             bool_reads = reads if not vertex else None
             for reg in range(REGISTERS):
                 device = expected(r, reg, ex["bs"])

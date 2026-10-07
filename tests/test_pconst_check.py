@@ -474,6 +474,14 @@ class UnreadTest(Base):
         self.assertEqual(code, 0, text)
         self.assertIn("different where the pixel shader does not read it 1", self.line(text, "register c87 "))
 
+    def test_a_depth_only_execution_runs_no_pixel_shader(self):
+        # RB_MODECONTROL 5: the register file still names the pixel shader loaded last, which reads c87.
+        rows, lines, dumps = self.case("/* 1 */ mul r0, r1, c87.xyzz\n")
+        lines[1] = gpu_line(1 + OFFSET, 1, 0xFF500100, n=12, ps=self.OTHER_PS, mode=5, regs={87: (9.0, 9.0, 9.0, 0.0)})
+        code, text = self.run_check(rows, lines, "--dumps", dumps)
+        self.assertEqual(code, 0, text)
+        self.assertIn("different where the pixel shader does not read it 1", self.line(text, "register c87 "))
+
     def test_bool_bits_the_shader_does_not_test_are_told_apart(self):
         rows, lines, dumps = self.case("/* 1 */ mad r0, r1, c19.xyzz, c100.wwww\n         cexec b136\n")
         lines[1] = gpu_line(1 + OFFSET, 1, 0xFF500100, n=12, ps=self.OTHER_PS, pb=0x010)  # b132 set, b136 clear
@@ -695,6 +703,16 @@ class VertexTest(Base):
                                     "--dumps", str(d))
         self.assertEqual(code, 0, text)
         self.assertIn("different where the vertex shader does not read it 1", self.line(text, "register c200 "))
+
+    def test_a_depth_only_execution_still_runs_its_vertex_shader(self):
+        d = self.dir / "dumps"
+        d.mkdir()
+        (d / f"shader_{int(VS, 16):016X}.ucode.vert").write_text("/* 1 */ mul r0, r1, c200.xyzz\n")
+        lines = self.lines()
+        lines[1] = self.gpu(1 + OFFSET, 1, 0xFF500100, n=12, over={200: (1.0, 0.0, 0.0, 0.0)}).replace(" mode=4 ", " mode=5 ")
+        code, text = self.run_check(self.rows(), lines, "--key", "vfull", "--dumps", str(d))
+        self.assertEqual(code, 1, text)
+        self.assertIn("compared 3, equal 2, different 1", self.line(text, "register c200 "))
 
     def test_an_indexed_constant_reads_every_register_from_its_base(self):
         # A skin palette: c[28+a0] can be any register from 28 on.

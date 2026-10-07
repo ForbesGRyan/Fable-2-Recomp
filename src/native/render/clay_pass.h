@@ -38,8 +38,9 @@ class ClayPass {
 
   // Targets, binding layout, shaders (the four pixel shaders: kClayPs for flat
   // draws, kClayTexturedPs for textured ones, kClayTerrainLayerPs and
-  // kClayTerrainFarPs for terrain) and their four default pipelines.
-  // False on any failure (logged); call again to retry.
+  // kClayTerrainFarPs for terrain), their four default pipelines and the
+  // default pipeline of a flat terrain draw. False on any failure (logged);
+  // call again to retry.
   bool Ensure(nrhi::Device* dev);
   // Bumped each time Ensure creates new targets: their contents are
   // undefined until the next Render.
@@ -88,14 +89,19 @@ class ClayPass {
 
   void DestroyObjects();
   nrhi::Pipeline* CreatePipeline(nrhi::Device* dev, const PipelineKey& key);
-  // The cached pipeline of `key`, created on first use. The default pipeline
-  // of the key's `textured` (counted in st.pipeline_overflow) when the cache
+  // The cached pipeline of `key`, created on first use; nullptr when the cache
   // is full or the pipeline could not be created.
-  nrhi::Pipeline* PipelineFor(nrhi::Device* dev, const PipelineKey& key, ClayStats& st);
+  nrhi::Pipeline* TryPipeline(nrhi::Device* dev, const PipelineKey& key);
+  // TryPipeline, or else (counted in st.pipeline_overflow) `fallback`, by
+  // default the default pipeline of the key's `textured`.
+  nrhi::Pipeline* PipelineFor(nrhi::Device* dev, const PipelineKey& key, ClayStats& st,
+                              nrhi::Pipeline* fallback = nullptr);
   bool CreateWhite(nrhi::Device* dev);
   // Terrain records (Render). PrepareTerrain: geometry, and with textures on the
-  // textures, far coordinates and status of the record's material; adds its
-  // entry to prepared_ and terrain_items_. FinishTerrain, after every record:
+  // textures, far coordinates, pipeline and status of the record's material
+  // (a record whose state cannot be drawn as captured, or that finds no
+  // pipeline, has none); adds its entry to prepared_ and terrain_items_.
+  // FinishTerrain, after every record:
   // which records are drawn with the material, as flat clay or not at all
   // (PlanTerrain), their pipelines, constants and counters.
   void PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::DrawRecord& r, bool textured,
@@ -116,7 +122,8 @@ class ClayPass {
   nrhi::Shader* ps_[kClayPixelShaders] = {};
   // The pipeline cache: pipelines_[i] draws pipeline_keys_[i] (nullptr: its
   // creation failed). Slots 0 to 3 are the default pipelines of `textured` 0
-  // to 3 (Ensure). At most kMaxClayPipelines, never evicted within a run.
+  // to 3, slot 4 that of a flat terrain draw (TerrainFlatDefaultKey; Ensure).
+  // At most kMaxClayPipelines, never evicted within a run.
   std::vector<PipelineKey> pipeline_keys_;
   std::vector<nrhi::Pipeline*> pipelines_;
   nrhi::Texture* color_ = nullptr;
@@ -137,6 +144,7 @@ class ClayPass {
   // at the end of Render.
   static constexpr uint64_t kTerrainPoolBytes = 4ull << 20;
   std::vector<TerrainPlanItem> terrain_items_;
+  TerrainPlanScratch terrain_scratch_;  // PlanTerrain's storage, kept between frames
   std::vector<TerrainTexture> terrain_textures_;
   std::vector<std::pair<nrhi::TextureView*, nrhi::TextureView*>> terrain_pairs_;
   RetirePool<nrhi::Buffer*> terrain_pool_{kTerrainPoolBytes};

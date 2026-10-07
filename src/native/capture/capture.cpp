@@ -1989,8 +1989,10 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders)
 // layer builder, a far shader on the adaptive one. The registers
 // MakeTerrainMaterialInputs names are read into t_bank and t_ps_bank (the pixel
 // bank as FillMaterial reads an alpha recipe's scale) and at most four fetch
-// constants from the device shadow: bounded reads, and anything unreadable
-// leaves in.terrain.material invalid. Also records the pixel shader and its
+// constants from the device shadow: bounded reads, and anything the material
+// reads that is unreadable leaves in.terrain.material invalid. The base map's
+// fetch constant and its two registers (vs c14, ps c21) are light, not material:
+// when one cannot be read only base_valid stays false. Also records the pixel shader and its
 // kind in the material; the clay pass draws the record with them (clay_logic.h,
 // "Terrain material") and as flat clay when they are not valid.
 void FillTerrainMaterial(uint32_t device, const DeviceSnapshot& dev, bool adaptive, DrawInputs& in) {
@@ -2004,13 +2006,21 @@ void FillTerrainMaterial(uint32_t device, const DeviceSnapshot& dev, bool adapti
   if (!entry) return;
   in.material.kind = entry->kind;
   if ((entry->kind != MaterialKind::kTerrainLayer) != adaptive) return;
-  bool ok = ReadBankRegisters(device, kTerrainVsBaseScaleReg, 1) && ReadBankRegisters(device, kTerrainVsCullReg, 2);
+  bool ok = ReadBankRegisters(device, kTerrainVsCullReg, 2);
   ok = ok && (adaptive ? ReadBankRegisters(device, kTerrainVsFarKnotReg, 1)
                        : ReadBankRegisters(device, kTerrainVsDetailReg, 1) && ReadBankRegisters(device, kTerrainVsWorldReg, 3));
-  for (uint32_t reg : {kTerrainPsEyeReg, kTerrainPsBaseReg, kTerrainPsFadeReg}) {
+  for (uint32_t reg : {kTerrainPsEyeReg, kTerrainPsFadeReg}) {
     ok = ok && ReadPsBankRegisters(device, reg, 1);
   }
   if (!ok) return;
+  // An unread base register is handed on as not finite (never as what the bank held before).
+  const float unread = std::numeric_limits<float>::quiet_NaN();
+  if (!ReadBankRegisters(device, kTerrainVsBaseScaleReg, 1)) {
+    std::fill_n(t_bank + 4 * kTerrainVsBaseScaleReg, 4, unread);
+  }
+  if (!ReadPsBankRegisters(device, kTerrainPsBaseReg, 1)) {
+    std::fill_n(t_ps_bank + 4 * kTerrainPsBaseReg, 4, unread);
+  }
   uint32_t fc[4][6];
   auto fetch = [&](uint32_t slot, uint32_t* out) -> const uint32_t* {
     const uint8_t* p =

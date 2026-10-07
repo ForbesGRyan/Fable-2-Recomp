@@ -280,6 +280,54 @@ int main() {
     if (!Near(TerrainEyeDistance2(turned, 88.0f, 152.0f, 20.0f), 3249.0f + 64.0f + 100.0f, 1e-2f)) return 121;
     set(vs, 4, 1, 0, 0, 0);
 
+    // The base map (tf3) and its constants are light, which the material does not read (the unlit
+    // rule): they are kept when they can be read (base_valid) and never decide the material.
+    if (!in.base_valid) return 170;
+    TerrainFetches nb = f;
+    nb.base = nullptr;  // no texture in the base map's slot
+    TerrainMaterialInputs no_base;
+    if (!MakeTerrainMaterialInputs(tp, false, vs, ps, nb, &no_base) || !no_base.valid || no_base.base_valid) return 171;
+    if (no_base.base_fetch[0] != 0 || std::memcmp(no_base.detail_fetch, kTf0, 24) ||
+        no_base.fade[0] != 0.0005f || !Near(no_base.weight_uv[0], 2.0f / 66, 1e-6f)) return 172;
+    {
+      volatile float not_finite = NAN;  // volatile: no constant folding
+      uint32_t not_texture3[6];
+      std::memcpy(not_texture3, kTf3, sizeof(not_texture3));
+      not_texture3[0] &= ~3u;
+      nb.base = not_texture3;
+      if (!MakeTerrainMaterialInputs(tp, false, vs, ps, nb, &no_base) || !no_base.valid || no_base.base_valid) return 173;
+      ps[21 * 4 + 1] = not_finite;  // ps c21.y, the tint
+      TerrainMaterialInputs no_tint;
+      if (!MakeTerrainMaterialInputs(tp, false, vs, ps, f, &no_tint) || !no_tint.valid || no_tint.base_valid) return 174;
+      ps[21 * 4 + 1] = 1.0f;
+      ps[21 * 4 + 3] = not_finite;  // ps c21.w, the exponent
+      if (!MakeTerrainMaterialInputs(tp, false, vs, ps, f, &no_tint) || !no_tint.valid || no_tint.base_valid) return 175;
+      ps[21 * 4 + 3] = 2.0f;
+      vs[14 * 4] = not_finite;  // vs c14.x, the base map's scale
+      if (!MakeTerrainMaterialInputs(tp, false, vs, ps, f, &no_tint) || !no_tint.valid || no_tint.base_valid) return 176;
+      vs[14 * 4] = 1.0f / 384;
+      // Everything the material does read still invalidates: the eye, the fade, the cull reference,
+      // the detail scale, the weight cell, the matrix.
+      TerrainMaterialInputs gone = in;
+      const int ps_read[] = {19 * 4, 19 * 4 + 2, 31 * 4, 31 * 4 + 1};
+      for (int at : ps_read) {
+        const float keep = ps[at];
+        ps[at] = not_finite;
+        gone = in;
+        if (MakeTerrainMaterialInputs(tp, false, vs, ps, f, &gone) || gone.valid) return 177;
+        ps[at] = keep;
+      }
+      const int vs_read[] = {114 * 4, 8 * 4 + 1, 115 * 4, 115 * 4 + 3, 4 * 4, 6 * 4 + 3};
+      for (int at : vs_read) {
+        const float keep = vs[at];
+        vs[at] = not_finite;
+        gone = in;
+        if (MakeTerrainMaterialInputs(tp, false, vs, ps, f, &gone) || gone.valid) return 178;
+        vs[at] = keep;
+      }
+      if (!MakeTerrainMaterialInputs(tp, false, vs, ps, f, &gone) || !gone.valid || !gone.base_valid) return 179;
+    }
+
     // Nothing is made from missing or garbage data: every failure leaves the inputs invalid.
     TerrainMaterialInputs bad = in;
     if (MakeTerrainMaterialInputs(tp, false, nullptr, ps, f, &bad) || bad.valid) return 122;
@@ -348,6 +396,14 @@ int main() {
     if (!Near(knot[0], (1.0f + 0.5f / 17) / 2, 1e-6f) || !Near(knot[1], 0.75f, 1e-6f)) return 141;
     TerrainFarKnot(fm, 1.0f, 1.0f, 16, knot);
     if (uint32_t(knot[0] * 34) != 33 || uint32_t(knot[1] * 2) != 1) return 137;
+    // The far kind does not need the base map either.
+    {
+      TerrainFetches fb = ff;
+      fb.base = nullptr;
+      TerrainMaterialInputs far_no_base;
+      if (!MakeTerrainMaterialInputs(fp, true, vs, ps, fb, &far_no_base) || !far_no_base.valid ||
+          far_no_base.base_valid || !fm.base_valid) return 180;
+    }
     // The far kind needs both tables and no weight map.
     TerrainFetches fg = ff;
     fg.far_v = nullptr;
@@ -410,6 +466,18 @@ int main() {
     TerrainPatch not_far = one;
     not_far.material.adaptive = false;
     if (BuildTerrainFarUvs(not_far, um, tu.data(), tu.size(), vm, tv.data(), tv.size(), kTerrainGrid, &uvs)) return 166;
+    // One bound for the patches of a record, for positions and coordinates alike.
+    TerrainPatch many = one;
+    many.patches = kMaxTerrainPatches + 1;
+    if (kMaxTerrainPatches != 4096 ||
+        BuildTerrainFarUvs(many, um, tu.data(), tu.size(), vm, tv.data(), tv.size(), kTerrainGrid, &uvs)) return 167;
+    // (the 64 x 64 map of the position cases clamps, so every patch of a long run finds its heights)
+    TerrainPatch run = t;
+    run.patches = kMaxTerrainPatches;
+    std::vector<Float4> grid;
+    if (!BuildTerrainPositions(run, tex.data(), tex.size(), 4, &grid) || grid.size() != size_t(kMaxTerrainPatches) * 25) return 168;
+    run.patches = kMaxTerrainPatches + 1;
+    if (BuildTerrainPositions(run, tex.data(), tex.size(), 4, &grid) || !grid.empty()) return 169;
   }
 
   std::cout << "PASS: terrain patch\n";

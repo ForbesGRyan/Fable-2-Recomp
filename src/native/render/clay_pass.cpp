@@ -22,6 +22,8 @@ constexpr uint32_t kParamConstants = 0, kParamPositions = 1, kParamIndices = 2, 
 // The terrain constant buffer's size is a multiple of this (256 slots), so the
 // pool's same-size reuse holds while the number of terrain draws moves.
 constexpr uint64_t kTerrainBufferStep = 256ull * kClayTerrainSlotBytes;
+// Cache slot of the flat terrain default pipeline, after the four of `textured`.
+constexpr size_t kTerrainFlatSlot = kClayPixelShaders;
 
 // PipelineKey values (capture enums) as the RHI's. A key holds only values the
 // RHI has (MakePipelineKey); the defaults below are never reached with one.
@@ -109,19 +111,23 @@ nrhi::Pipeline* ClayPass::CreatePipeline(nrhi::Device* dev, const PipelineKey& k
   return dev->CreateGraphicsPipeline(pipe);
 }
 
-nrhi::Pipeline* ClayPass::PipelineFor(nrhi::Device* dev, const PipelineKey& key, ClayStats& st) {
+nrhi::Pipeline* ClayPass::TryPipeline(nrhi::Device* dev, const PipelineKey& key) {
   const size_t slot = FindOrAddPipelineSlot(pipeline_keys_, key);
-  if (slot != kNoPipelineSlot) {
-    if (slot == pipelines_.size()) {  // a new key
-      pipelines_.push_back(CreatePipeline(dev, key));
-      if (!pipelines_.back()) {
-        REXLOG_ERROR("[native] clay: pipeline creation failed for a render state (its draws use the default)");
-      }
+  if (slot == kNoPipelineSlot) return nullptr;
+  if (slot == pipelines_.size()) {  // a new key
+    pipelines_.push_back(CreatePipeline(dev, key));
+    if (!pipelines_.back()) {
+      REXLOG_ERROR("[native] clay: pipeline creation failed for a render state (its draws use the default)");
     }
-    if (pipelines_[slot]) return pipelines_[slot];
   }
+  return pipelines_[slot];
+}
+
+nrhi::Pipeline* ClayPass::PipelineFor(nrhi::Device* dev, const PipelineKey& key, ClayStats& st,
+                                      nrhi::Pipeline* fallback) {
+  if (nrhi::Pipeline* pipeline = TryPipeline(dev, key)) return pipeline;
   ++st.pipeline_overflow;
-  return pipelines_[key.textured < kClayPixelShaders ? key.textured : 0];
+  return fallback ? fallback : pipelines_[key.textured < kClayPixelShaders ? key.textured : 0];
 }
 
 // The 1x1 white albedo for untextured draws. Its texel is staged here and
@@ -240,10 +246,14 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
       return false;
     }
   }
-  // Cache slots 0 to 3: the default pipelines (PipelineFor falls back to them).
-  for (uint8_t textured = 0; textured < kClayPixelShaders; ++textured) {
-    PipelineKey key;
-    key.textured = textured;
+  // Cache slots 0 to 3: the default pipelines (PipelineFor falls back to them);
+  // slot 4: the default of a flat terrain draw (kTerrainFlatSlot).
+  for (uint8_t slot = 0; slot <= kClayPixelShaders; ++slot) {
+    PipelineKey key = TerrainFlatDefaultKey();
+    if (slot < kClayPixelShaders) {
+      key = PipelineKey{};
+      key.textured = slot;
+    }
     pipeline_keys_.push_back(key);
     pipelines_.push_back(CreatePipeline(dev, key));
     if (!pipelines_.back()) {
@@ -329,10 +339,12 @@ void ClayPass::PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::
   if (textured && item.drawable) {
     const capture::TerrainMaterialInputs& m = r.terrain.material;
     const capture::MaterialKind kind = r.material.kind;
+    const capture::RenderState rs = capture::DecodeRenderState(r.state_words);
     MaterialStatus colour = MaterialStatus::kTextured, weight = MaterialStatus::kTextured;
     bool far_uvs = true;
-    // Nothing is asked of the caches for a record whose inputs are not usable.
-    if (TerrainMaterialStatus(m, kind, adaptive, colour, weight, far_uvs) == MaterialStatus::kTextured) {
+    // Nothing is asked of the caches for a record whose state or inputs are not usable.
+    if (TerrainStateUsable(rs) &&
+        TerrainMaterialStatus(m, kind, adaptive, colour, weight, far_uvs) == MaterialStatus::kTextured) {
       // The layers share a few detail textures and one weight atlas; most far draws have their own colour.
       p.albedo = ResolveTerrainTexture(cmd, dev, m.detail_fetch, !adaptive, &p.sampler, p.uv_fix, &colour, tst);
       if (adaptive) {
@@ -343,14 +355,17 @@ void ClayPass::PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::
         p.weights = ResolveTerrainTexture(cmd, dev, m.weight_fetch, true, &p.weight_sampler, fix, &weight, tst);
       }
     }
-    p.status = TerrainMaterialStatus(m, kind, adaptive, colour, weight, far_uvs);
-    // A blend the RHI cannot express (no terrain row has one) leaves the record
-    // without a material too: left out of its square's sum it would darken it.
-    if (p.status == MaterialStatus::kTextured &&
-        DecideDrawState(capture::DecodeRenderState(r.state_words), r.material, TerrainTextured(kind), false).skip) {
-      p.status = MaterialStatus::kTerrainInputs;
+    p.status = TerrainStateUsable(rs) ? TerrainMaterialStatus(m, kind, adaptive, colour, weight, far_uvs)
+                                      : MaterialStatus::kTerrainInputs;
+    if (p.status == MaterialStatus::kTextured) {
+      // The pipeline of its state. Without one (the cache is full, its creation
+      // failed) the record cannot be drawn as captured either: the default
+      // pipeline would draw a layer opaque with depth less.
+      p.pipeline = TryPipeline(dev, DecideDrawState(rs, r.material, TerrainTextured(kind), false).key);
+      if (!p.pipeline) p.status = MaterialStatus::kTerrainInputs;
     }
     item.usable = p.status == MaterialStatus::kTextured;
+    if (!item.usable) ++st.terrain_unusable[size_t(p.status)];
   }
   p.plan = uint32_t(terrain_items_.size());
   terrain_items_.push_back(item);
@@ -381,11 +396,14 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
       dev->DestroyDeferred(terrain_cb_);
       terrain_cb_ = nullptr;
       for (Prepared& p : prepared_) {
-        if (p.terrain && p.status == MaterialStatus::kTextured) p.status = MaterialStatus::kTextureBad;
+        if (p.terrain && p.status == MaterialStatus::kTextured) {
+          p.status = MaterialStatus::kTextureBad;
+          ++st.terrain_unusable[size_t(p.status)];
+        }
       }
       for (TerrainPlanItem& item : terrain_items_) item.usable = false;
     }
-    PlanTerrain(terrain_items_);
+    PlanTerrain(terrain_items_, &terrain_scratch_);
   } else {
     // The texture path is off: every terrain record is flat clay, drawn opaque.
     for (TerrainPlanItem& item : terrain_items_) {
@@ -401,6 +419,7 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
     if (item.action == TerrainAction::kSkip) {
       // (a record without geometry was counted by the geometry cache)
       if (item.drawable) ++st.terrain_skipped;
+      p.pipeline = nullptr;
       continue;
     }
     const bool material = item.action == TerrainAction::kMaterial;
@@ -412,7 +431,10 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
     }
     const DrawState d = DecideDrawState(capture::DecodeRenderState(r.state_words), r.material, p.textured, !material);
     p.alpha = d.alpha;
-    p.pipeline = PipelineFor(dev, d.key, st);
+    // With the material: the pipeline PrepareTerrain found. Flat: the layer's
+    // depth and cull without its blend, or else the flat terrain default, which
+    // also tests less-equal (the flat draw lies at its underlay's depth).
+    if (!material) p.pipeline = PipelineFor(dev, d.key, st, pipelines_[kTerrainFlatSlot]);
     if (d.alpha_tested) ++st.alpha_tested;
     if (d.blended) ++st.blended;
     if (d.state_invalid) ++st.state_invalid;

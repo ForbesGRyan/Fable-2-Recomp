@@ -22,6 +22,54 @@ int main() {
   small[500] = 4;
   if (SampleHash(small.data(), 1000) == s0) return 4;
   if (SampleHash(nullptr, 0) != SampleHash(nullptr, 0)) return 5;
+  // Which bytes are sampled: 16 ranges of 256 bytes spread evenly, the first at 0 and the last
+  // ending at the last byte. A change of any one sampled byte changes the hash; a byte between two
+  // ranges is not read.
+  {
+    const uint32_t size = uint32_t(tex.size());
+    const uint64_t span = size - kSampleBytes;
+    for (uint32_t r = 0; r < kSampleCount; ++r) {
+      const uint32_t from = uint32_t(span * r / (kSampleCount - 1));
+      for (uint32_t i = 0; i < kSampleBytes; ++i) {
+        tex[from + i] ^= 0x80;
+        const bool changed = SampleHash(tex.data(), size) != h0;
+        tex[from + i] ^= 0x80;
+        if (!changed) return 30;
+      }
+    }
+    tex[kSampleBytes] ^= 0xFF;         // the first byte after the first range
+    tex[size - kSampleBytes - 1] ^= 0xFF;  // the last byte before the last range
+    if (SampleHash(tex.data(), size) != h0) return 31;
+    tex[kSampleBytes] ^= 0xFF;
+    tex[size - kSampleBytes - 1] ^= 0xFF;
+    // Two changes do not cancel: the same bit of two words, and two bytes of one word exchanged.
+    tex[7] ^= 0x80;
+    tex[15] ^= 0x80;
+    if (SampleHash(tex.data(), size) == h0) return 32;
+    tex[7] ^= 0x80;
+    tex[15] ^= 0x80;
+    tex[3] = 0x12;
+    const uint64_t a = SampleHash(tex.data(), size);
+    tex[3] = 0x11;
+    tex[4] = 0x12;
+    if (SampleHash(tex.data(), size) == a || a == h0) return 33;
+    tex[4] = 0x11;
+    if (SampleHash(tex.data(), size) != h0) return 34;
+  }
+  // A small texture is hashed whole whatever its length: every byte counts, the last ones of a
+  // length that is no multiple of 8 too, and so does the length.
+  for (uint32_t n : {1u, 7u, 8u, 9u, 1001u, kSampleCount * kSampleBytes}) {
+    std::vector<uint8_t> t(n, 0);
+    const uint64_t z = SampleHash(t.data(), n);
+    for (uint32_t i = 0; i < n; ++i) {
+      t[i] = 1;
+      const bool changed = SampleHash(t.data(), n) != z;
+      t[i] = 0;
+      if (!changed) return 35;
+    }
+    std::vector<uint8_t> longer(n + 1, 0);
+    if (SampleHash(longer.data(), n + 1) == z) return 36;
+  }
 
   // --- change streaks ---
   TextureState st;

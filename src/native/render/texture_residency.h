@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 
 namespace fable2::native::render {
 
@@ -17,13 +18,37 @@ inline constexpr uint32_t kDynamicStreak = 8;
 // without a change.
 inline constexpr uint32_t kDynamicClearFrames = 60;
 
-// FNV-1a over kSampleCount ranges of kSampleBytes spread evenly over
-// [0, size), always including the first and last bytes; textures of at most
-// kSampleCount * kSampleBytes bytes are hashed whole.
+// A hash of kSampleCount ranges of kSampleBytes spread evenly over [0, size),
+// always including the first and last bytes; textures of at most
+// kSampleCount * kSampleBytes bytes are hashed whole. The bytes are mixed eight
+// at a time (it runs for the base and the mips of every texture in use, every
+// frame; byte by byte it was half a millisecond per hundred textures): each
+// word goes through a bijection and is folded into the state by steps that are
+// bijections of the state (the round of XXH64), so a change of any one sampled
+// byte changes the hash, and no change of one bit in two words cancels. A last
+// partial word is padded with zeros; the size is part of the hash.
 inline uint64_t SampleHash(const uint8_t* data, uint32_t size) {
+  constexpr uint64_t kP1 = 0x9E3779B185EBCA87ull, kP2 = 0xC2B2AE3D27D4EB4Full, kP4 = 0x85EBCA77C2B2AE63ull;
   uint64_t h = 1469598103934665603ull ^ size;
+  auto word = [&](uint64_t w) {
+    w *= kP2;
+    w = (w << 31) | (w >> 33);
+    w *= kP1;
+    h ^= w;
+    h = ((h << 27) | (h >> 37)) * kP1 + kP4;
+  };
   auto mix = [&](uint32_t from, uint32_t n) {
-    for (uint32_t i = 0; i < n; ++i) h = (h ^ data[from + i]) * 1099511628211ull;
+    uint32_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+      uint64_t w;
+      std::memcpy(&w, data + from + i, 8);
+      word(w);
+    }
+    if (i < n) {
+      uint64_t w = 0;
+      std::memcpy(&w, data + from + i, n - i);
+      word(w);
+    }
   };
   if (!data || size == 0) return h;
   if (size <= kSampleCount * kSampleBytes) {

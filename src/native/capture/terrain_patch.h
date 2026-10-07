@@ -152,10 +152,15 @@ inline bool SampleHeight(const uint8_t* data, size_t size, const HeightMap& m, f
 //
 // The clay pass draws the colour texture alone (the unlit rule of the frame
 // map: tf3 is baked light and base_tint an ambient tint, both lighting): it
-// does not read base_fetch, base_uv, base_pow or base_tint, which stay
-// captured for the lighting sub-project.
+// does not read base_fetch, base_uv, base_pow or base_tint. They are kept for
+// the lighting sub-project when they could be read (base_valid) and are no part
+// of `valid`: a draw without a texture in the base map's slot, or with a ps c21
+// that is not finite, still has its material.
 struct TerrainMaterialInputs {
-  bool valid = false;  // false: something could not be read or is not finite; nothing below is usable
+  // false: something the material reads could not be read or is not finite; nothing below is usable
+  bool valid = false;
+  // base_fetch, base_uv, base_pow and base_tint were read and are finite (else they hold their defaults)
+  bool base_valid = false;
   bool adaptive = false;  // a draw of the adaptive builder (the far kinds)
   uint32_t detail_fetch[6] = {};  // layer: tf0, the layer's detail colour; far: tf13, the far colour
   uint32_t base_fetch[6] = {};    // tf3, the base map
@@ -271,8 +276,8 @@ inline constexpr uint32_t kTerrainPsEyeReg = 19, kTerrainPsBaseReg = 21, kTerrai
 inline constexpr uint32_t kTerrainWeightFetch = 18, kTerrainFarUFetch = 18, kTerrainFarVFetch = 19;
 
 // The fetch constants of a terrain draw (six host-order dwords each), nullptr
-// for one that could not be read. A layer needs detail, base and weight; a far
-// draw detail (the far colour), base, far_u and far_v.
+// for one that could not be read. A layer needs detail and weight; a far draw
+// detail (the far colour), far_u and far_v. The base map is optional (base_valid).
 struct TerrainFetches {
   const uint32_t* detail = nullptr;
   const uint32_t* base = nullptr;
@@ -285,7 +290,9 @@ struct TerrainFetches {
 // (256 x float4, host order; only the registers named above are read) and its
 // fetch constants. False, with out->valid false, when the patch is not active,
 // a bank or a needed fetch constant is missing or not a texture fetch constant,
-// a value is not finite, or the patch has no cell size.
+// a value the material reads is not finite, or the patch has no cell size. The
+// base map's fetch constant, vs c14 and ps c21 decide base_valid only (a caller
+// that could not read one of the two registers passes values that are not finite).
 inline bool MakeTerrainMaterialInputs(const TerrainPatch& patch, bool adaptive, const float* vs_bank,
                                       const float* ps_bank, const TerrainFetches& f,
                                       TerrainMaterialInputs* out) {
@@ -298,16 +305,32 @@ inline bool MakeTerrainMaterialInputs(const TerrainPatch& patch, bool adaptive, 
     for (int i = 0; i < 6; ++i) dst[i] = fc[i];
     return true;
   };
-  if (!fetch(f.detail, m.detail_fetch) || !fetch(f.base, m.base_fetch)) return false;
+  if (!fetch(f.detail, m.detail_fetch)) return false;
   if (adaptive ? !(fetch(f.far_u, m.far_u_fetch) && fetch(f.far_v, m.far_v_fetch)) : !fetch(f.weight, m.weight_fetch)) {
     return false;
   }
   auto vs = [&](uint32_t reg, uint32_t comp) { return vs_bank[4 * reg + comp]; };
   auto ps = [&](uint32_t reg, uint32_t comp) { return ps_bank[4 * reg + comp]; };
-  m.base_uv[0] = vs(kTerrainVsBaseScaleReg, 0);
-  m.base_uv[1] = vs(kTerrainVsBaseScaleReg, 1);
-  m.base_uv[2] = -patch.tex_offset[0] * m.base_uv[0];
-  m.base_uv[3] = -patch.tex_offset[1] * m.base_uv[1];
+  {
+    // The base map's part: all of it or none.
+    TerrainMaterialInputs b;
+    b.base_uv[0] = vs(kTerrainVsBaseScaleReg, 0);
+    b.base_uv[1] = vs(kTerrainVsBaseScaleReg, 1);
+    b.base_uv[2] = -patch.tex_offset[0] * b.base_uv[0];
+    b.base_uv[3] = -patch.tex_offset[1] * b.base_uv[1];
+    b.base_pow = ps(kTerrainPsBaseReg, 3);
+    for (uint32_t i = 0; i < 3; ++i) b.base_tint[i] = ps(kTerrainPsBaseReg, i);
+    bool ok = fetch(f.base, b.base_fetch) && std::isfinite(b.base_pow);
+    for (float v : b.base_uv) ok = ok && std::isfinite(v);
+    for (float v : b.base_tint) ok = ok && std::isfinite(v);
+    if (ok) {
+      for (int i = 0; i < 6; ++i) m.base_fetch[i] = b.base_fetch[i];
+      for (int i = 0; i < 4; ++i) m.base_uv[i] = b.base_uv[i];
+      for (int i = 0; i < 3; ++i) m.base_tint[i] = b.base_tint[i];
+      m.base_pow = b.base_pow;
+      m.base_valid = true;
+    }
+  }
   if (adaptive) {
     m.far_table[0] = vs(kTerrainVsFarKnotReg, 0);
     m.far_table[1] = vs(kTerrainVsFarKnotReg, 1);
@@ -329,18 +352,14 @@ inline bool MakeTerrainMaterialInputs(const TerrainPatch& patch, bool adaptive, 
     m.hole_ref = vs(kTerrainVsCullReg, 0);
     for (uint32_t i = 0; i < 12; ++i) m.world[i] = vs_bank[4 * kTerrainVsWorldReg + i];
   }
-  m.base_pow = ps(kTerrainPsBaseReg, 3);
-  for (uint32_t i = 0; i < 3; ++i) m.base_tint[i] = ps(kTerrainPsBaseReg, i);
   m.fade[0] = ps(kTerrainPsFadeReg, 0);
   m.fade[1] = ps(kTerrainPsFadeReg, 1);
   for (uint32_t i = 0; i < 3; ++i) m.eye[i] = ps(kTerrainPsEyeReg, i);
-  bool finite = std::isfinite(m.base_pow) && std::isfinite(m.hole_ref);
+  bool finite = std::isfinite(m.hole_ref);
   for (float v : m.detail_uv) finite = finite && std::isfinite(v);
-  for (float v : m.base_uv) finite = finite && std::isfinite(v);
   for (float v : m.weight_uv) finite = finite && std::isfinite(v);
   for (float v : m.far_table) finite = finite && std::isfinite(v);
   for (float v : m.far_patch) finite = finite && std::isfinite(v);
-  for (float v : m.base_tint) finite = finite && std::isfinite(v);
   for (float v : m.fade) finite = finite && std::isfinite(v);
   for (float v : m.eye) finite = finite && std::isfinite(v);
   for (float v : m.world) finite = finite && std::isfinite(v);
@@ -393,6 +412,10 @@ inline void TerrainFarKnot(const TerrainMaterialInputs& m, float col, float row,
 // Quads per patch edge. A patch spans 16 heightmap texels in gameplay (cell 8,
 // 0.5 world units per texel) and the GPU tessellates it at most 15 times.
 inline constexpr uint32_t kTerrainGrid = 16;
+// Patches of one record a grid is built for (the largest draw seen has 36; the
+// capture admits any count up to kMaxDrawCount). A record with more has no
+// positions, no far coordinates and, in the clay pass's plan, no squares.
+inline constexpr uint32_t kMaxTerrainPatches = 4096;
 
 // Far: the far colour (tf13) coordinate of every grid point of the draw's
 // patches, in the order of BuildTerrainPositions: (n + 1)^2 per patch, v outer.
@@ -410,7 +433,9 @@ inline bool BuildTerrainFarUvs(const TerrainPatch& t, const HeightMap& um, const
                                std::vector<Float2>* out) {
   out->clear();
   const TerrainMaterialInputs& m = t.material;
-  if (!t.active || !m.valid || !m.adaptive || n != 16 || t.patches == 0 || t.patches > 4096) return false;
+  if (!t.active || !m.valid || !m.adaptive || n != 16 || t.patches == 0 || t.patches > kMaxTerrainPatches) {
+    return false;
+  }
   out->reserve(size_t(t.patches) * (n + 1) * (n + 1));
   for (uint32_t k = 0; k < t.patches; ++k) {
     const float p = t.patch + float(k);
@@ -437,7 +462,7 @@ inline bool BuildTerrainFarUvs(const TerrainPatch& t, const HeightMap& um, const
 inline bool BuildTerrainPositions(const TerrainPatch& t, const uint8_t* data, size_t size,
                                   uint32_t n, std::vector<Float4>* out) {
   out->clear();
-  if (n == 0 || t.patches == 0 || t.patches > 4096) return false;
+  if (n == 0 || t.patches == 0 || t.patches > kMaxTerrainPatches) return false;
   out->reserve(size_t(t.patches) * (n + 1) * (n + 1));
   for (uint32_t k = 0; k < t.patches; ++k) {
     const float p = t.patch + float(k);

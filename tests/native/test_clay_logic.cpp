@@ -1185,13 +1185,30 @@ int main() {
                         kTexturedTerrainLayer, false);
     CHECK(248, !d.skip && d.alpha_tested && d.blended && !d.alpha_unknown &&
                    d.alpha.mode == (4u | kAlphaTest | kAlphaBlend) && d.alpha.ref == 0.25f);
-    // An invalid state: the default state with the terrain shader, counted (Review Focus 1).
+    // A state that cannot be used as captured (unread, a depth function or a blend the RHI cannot
+    // express) leaves a terrain record without its material: the default pipeline is opaque with
+    // depth less, under which a layer over its underlay fails the depth test at equal depth and a
+    // first layer writes its colour unweighted. The record is then one of a square that falls back.
     capture::RenderState bad = add;
     bad.valid = false;
-    d = DecideDrawState(bad, none, kTexturedTerrainLayer, false);
-    PipelineKey def2;
-    def2.textured = kTexturedTerrainLayer;
-    CHECK(249, !d.skip && d.state_invalid && d.key == def2 && d.alpha.mode == 0 && !d.blended && !d.alpha_unknown);
+    capture::RenderState equal = add;
+    equal.depth_func = Compare::kEqual;
+    const capture::RenderState constant = State(0x00708767, 0x0D0C0D0C, 0x00000004, 0x00218002);
+    CHECK(249, TerrainStateUsable(add) && TerrainStateUsable(replace) && TerrainStateUsable(far_state) &&
+                   !TerrainStateUsable(bad) && !TerrainStateUsable(equal) && !TerrainStateUsable(constant));
+    // Its flat draw tests less-equal with depth write, not the default less: it lies at the depth
+    // of the underlay it has to cover. Everything else of an unread state is the default.
+    d = DecideDrawState(bad, none, 0, true);
+    PipelineKey flat_default;
+    flat_default.depth_func = uint8_t(Compare::kLessEqual);
+    CHECK(294, !d.skip && d.state_invalid && d.key == flat_default && d.key == TerrainFlatDefaultKey() &&
+                   d.key.depth_test == 1 && d.key.depth_write == 1 && d.key.blend == 0 && d.alpha.mode == 0);
+    d = DecideDrawState(equal, none, 0, true);
+    CHECK(295, !d.skip && d.state_invalid && d.key.depth_func == uint8_t(Compare::kLessEqual) &&
+                   d.key.depth_write == 1 && d.key.cull == uint8_t(Cull::kFront) && d.key.blend == 0);
+    // Any other flat draw with an unread state keeps the default state (Review Focus 1).
+    CHECK(296, DecideDrawState(bad, none, 0, false).key == PipelineKey{} &&
+                   DecideDrawState(bad, none, 0, false).state_invalid);
     // The same record as flat clay (its square fell back): opaque, with the layer's depth and cull.
     d = DecideDrawState(add, none, 0, true);
     CHECK(250, !d.skip && !d.blended && !d.alpha_unknown && d.key.textured == 0 && d.key.blend == 0 &&
@@ -1379,6 +1396,33 @@ int main() {
     CHECK(277, plan({item(a, L), item(ab, L), item(b, L, false), item(b, L)}) == "FFSS" &&
                    plan({item(a, L), item(ab, L), item(b, L), item(b, L)}) == "MMMM");
     CHECK(278, plan({}).empty());
+    // A record with more patches than a grid is built for (kMaxTerrainPatches; the capture admits
+    // counts up to 4,194,304) has no geometry and no squares: it is not walked, and it makes no
+    // square fall back, as a layer or as an underlay.
+    const capture::TerrainPatch huge = patch_of(80, 144, 0, 4194304, 2, 8);
+    const capture::TerrainPatch over = patch_of(80, 144, 0, capture::kMaxTerrainPatches + 1, 2, 8);
+    const capture::TerrainPatch most = patch_of(80, 144, 0, capture::kMaxTerrainPatches, 2, 8);
+    CHECK(297, capture::kMaxTerrainPatches == 4096 && plan({item(huge, L, false, false), item(a, L)}) == "SM" &&
+                   plan({item(huge, F, false, false), item(a, L)}) == "SM" &&
+                   plan({item(over, L, false, false), item(a, L)}) == "SM" &&
+                   plan({item(over, F, false, false), item(a, L)}) == "SM");
+    // At the bound the record still has its squares (A is its first patch).
+    CHECK(298, plan({item(most, L, false), item(a, L)}) == "FS" && plan({item(most, F, false), item(a, L)}) == "FS");
+    // The plan's storage can be kept between frames: a second plan in the same scratch object
+    // sees nothing of the first.
+    {
+      TerrainPlanScratch scratch;
+      std::vector<TerrainPlanItem> one = {item(under, F, false), item(a, L), item(b, L)};
+      PlanTerrain(one, &scratch);
+      std::vector<TerrainPlanItem> two = {item(a, L), item(b, L), item(a, L)};
+      PlanTerrain(two, &scratch);
+      std::vector<TerrainPlanItem> three = {item(a, L), item(a, L, false), item(out, L)};
+      PlanTerrain(three, &scratch);
+      CHECK(299, one[0].action == TerrainAction::kFlat && one[1].action == TerrainAction::kSkip &&
+                     two[0].action == TerrainAction::kMaterial && two[1].action == TerrainAction::kMaterial &&
+                     two[2].action == TerrainAction::kMaterial && three[0].action == TerrainAction::kFlat &&
+                     three[1].action == TerrainAction::kSkip && three[2].action == TerrainAction::kMaterial);
+    }
     // The underlay of a square is found by the square's centre: a coarser patch covers the 8-unit
     // squares inside it and no square beside it.
     CHECK(279, plan({item(coarse, F, false), item(a, L), item(a3, L), item(out, L)}) == "FSSM");
@@ -1415,6 +1459,14 @@ int main() {
     st.terrain_tuples = 78;
     CHECK(285, FormatTerrainText(st, ts) ==
                    "Terrain: material 560 of 567 drawn, flat 7, left out 7, texture pairs 78");
+    // Every terrain record that could not have its material is named with its own reason, also
+    // when it was left out or its square's flat draw is another record (those show as
+    // terrain-square elsewhere): most first.
+    st.terrain_unusable[size_t(MaterialStatus::kTexturePending)] = 2;
+    st.terrain_unusable[size_t(MaterialStatus::kTerrainInputs)] = 3;
+    CHECK(300, FormatTerrainText(st, ts) ==
+                   "Terrain: material 560 of 567 drawn, flat 7, left out 7, texture pairs 78 | "
+                   "without material: terrain-inputs 3, texture-pending 2");
     CHECK(286, FormatTerrainText(ClayStats{}, TextureStats{}) ==
                    "Terrain: material 0 of 0 drawn, flat 0, left out 0, texture pairs 0");
 

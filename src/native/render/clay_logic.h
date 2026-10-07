@@ -61,6 +61,10 @@ struct ClayStats {
   // clay by another record (PlanTerrain), and the distinct (colour, weights)
   // texture pairs bound for the terrain records drawn with their material.
   uint32_t terrain_skipped = 0, terrain_tuples = 0;
+  // Terrain records that could not have their material this frame, by their own
+  // reason (TerrainMaterialStatus), whatever the plan then did with them: drawn
+  // flat under that reason, drawn flat or left out under terrain-square.
+  uint32_t terrain_unusable[size_t(capture::MaterialStatus::kCount)] = {};
 };
 
 inline constexpr uint8_t kTallyAlphaUnknown = 0, kTallyBlendUnknown = 1;
@@ -528,11 +532,19 @@ struct DrawState {
 // a recipe that needs another fetch) is drawn without the test and with alpha
 // 1; an invalid state or an inexpressible depth function draws with the default
 // state. A colour mask of 0 writes no colour, so its blend does not matter.
+// A flat terrain draw whose depth state cannot be used tests less-equal with
+// depth write instead of the default less (TerrainFlatDefaultKey): it has to
+// cover the underlay of its square, which lies at the same depth.
 inline DrawState DecideDrawState(const capture::RenderState& rs, const capture::Material& m,
                                  uint8_t textured, bool flat_terrain) {
   DrawState d;
   d.key = MakePipelineKey(rs, textured);
   d.state_invalid = !rs.valid || !DepthSupported(rs);
+  if (flat_terrain && d.state_invalid) {
+    d.key.depth_test = 1;
+    d.key.depth_write = 1;
+    d.key.depth_func = uint8_t(capture::Compare::kLessEqual);
+  }
   if (!rs.valid) return d;
   const bool blend = rs.blend && rs.color_mask != 0 && !flat_terrain;
   if (!blend) {
@@ -648,6 +660,27 @@ inline constexpr uint32_t kClayTerrainSlotBytes = 256;  // the RHI's constant bu
 // kind terrain-far-fade, shader 2F8A: the underlay the layers add to).
 inline constexpr uint32_t kTerrainFadeIn = 1u;
 
+// The pipeline of a flat terrain draw whose state could not be read: the default
+// state with depth less-equal. The pass keeps it as a default pipeline, so that
+// a flat terrain draw that finds no pipeline of its own in a full cache still
+// passes the depth test over its underlay.
+inline PipelineKey TerrainFlatDefaultKey() {
+  PipelineKey k;
+  k.depth_func = uint8_t(capture::Compare::kLessEqual);
+  return k;
+}
+
+// Whether a terrain record's captured state can be drawn as captured: it was
+// read, its depth function and its blend are ones the RHI has. If not, the
+// record is not drawn with its material (reason terrain-inputs): the pass's
+// default state is opaque with depth less, under which a layer over its
+// underlay fails the depth test at equal depth and a first layer writes its
+// colour unweighted, and a layer left out of its square's sum darkens it. The
+// square then falls back as a whole (PlanTerrain).
+inline bool TerrainStateUsable(const capture::RenderState& rs) {
+  return rs.valid && DepthSupported(rs) && !(rs.blend && rs.color_mask != 0 && !BlendSupported(rs));
+}
+
 // PipelineKey::textured of a terrain kind.
 inline uint8_t TerrainTextured(capture::MaterialKind kind) {
   return kind == capture::MaterialKind::kTerrainLayer ? kTexturedTerrainLayer : kTexturedTerrainFar;
@@ -751,8 +784,11 @@ struct TerrainPlanItem {
 //  - a layer draw of several patches ties its squares together: when one is bad
 //    all are (a square can then lie under two opaque flat draws, never under a
 //    material layer over flat clay).
-// A draw of the adaptive builder never depends on another draw.
-inline void PlanTerrain(std::vector<TerrainPlanItem>& items) {
+// A draw of the adaptive builder never depends on another draw. A record with
+// more than capture::kMaxTerrainPatches patches has no grid (no positions are
+// built for it), so it has no squares and covers none: it is not walked.
+// `scratch`: storage a caller keeps between frames (nullptr: local).
+struct TerrainPlanScratch {
   struct Square {
     TerrainRect rect;
     bool bad = false, covered = false;
@@ -765,11 +801,28 @@ inline void PlanTerrain(std::vector<TerrainPlanItem>& items) {
   std::vector<Square> squares;
   std::unordered_map<TerrainRect, uint32_t, RectHash> index;
   // link[first[i] .. first[i + 1]): the squares of layer item i, one per patch.
-  std::vector<uint32_t> link, first(items.size() + 1, 0);
+  std::vector<uint32_t> link, first;
+};
+
+inline void PlanTerrain(std::vector<TerrainPlanItem>& items, TerrainPlanScratch* scratch = nullptr) {
+  using Square = TerrainPlanScratch::Square;
+  TerrainPlanScratch local;
+  TerrainPlanScratch& w = scratch ? *scratch : local;
+  std::vector<Square>& squares = w.squares;
+  auto& index = w.index;
+  std::vector<uint32_t>& link = w.link;
+  std::vector<uint32_t>& first = w.first;
+  squares.clear();
+  index.clear();
+  link.clear();
+  first.assign(items.size() + 1, 0);
+  auto has_grid = [](const TerrainPlanItem& it) {
+    return it.patch && it.patch->patches <= capture::kMaxTerrainPatches;
+  };
   for (size_t i = 0; i < items.size(); ++i) {
     first[i] = uint32_t(link.size());
     const TerrainPlanItem& it = items[i];
-    if (!it.layer || !it.patch) continue;
+    if (!it.layer || !has_grid(it)) continue;
     for (uint32_t k = 0; k < it.patch->patches; ++k) {
       const TerrainRect rect = TerrainPatchRect(*it.patch, k);
       const auto found = index.try_emplace(rect, uint32_t(squares.size()));
@@ -789,7 +842,7 @@ inline void PlanTerrain(std::vector<TerrainPlanItem>& items) {
       continue;
     }
     it.action = !it.drawable ? TerrainAction::kSkip : it.usable ? TerrainAction::kMaterial : TerrainAction::kFlat;
-    if (whole || !it.patch) continue;
+    if (whole || !has_grid(it)) continue;
     // The squares over this draw have no underlay to add to: bad, and under its flat draw if it has one.
     for (uint32_t k = 0; k < it.patch->patches; ++k) {
       const TerrainRect f = TerrainPatchRect(*it.patch, k);
@@ -889,11 +942,26 @@ inline std::string FormatStateText(const ClayStats& st) {
 // material and as flat clay, the layer records left out with their square, and
 // the distinct texture pairs bound (each takes two slots of the RHI's
 // shader-visible view heap until one of its views is destroyed).
+// Then, when there are any, the records that could not have their material by
+// their own reason, most first (ClayStats::terrain_unusable): the cause of a
+// square's fallback, which the other lines show only as terrain-square when the
+// record is not the square's flat draw.
 inline std::string FormatTerrainText(const ClayStats& st, const TextureStats& ts) {
   const uint32_t flat = ts.terrain > ts.terrain_textured ? ts.terrain - ts.terrain_textured : 0;
-  return "Terrain: material " + std::to_string(ts.terrain_textured) + " of " + std::to_string(ts.terrain) +
-         " drawn, flat " + std::to_string(flat) + ", left out " + std::to_string(st.terrain_skipped) +
-         ", texture pairs " + std::to_string(st.terrain_tuples);
+  std::string text = "Terrain: material " + std::to_string(ts.terrain_textured) + " of " +
+                     std::to_string(ts.terrain) + " drawn, flat " + std::to_string(flat) + ", left out " +
+                     std::to_string(st.terrain_skipped) + ", texture pairs " + std::to_string(st.terrain_tuples);
+  std::vector<std::pair<const char*, uint32_t>> reasons;
+  for (size_t i = 0; i < size_t(capture::MaterialStatus::kCount); ++i) {
+    if (st.terrain_unusable[i]) {
+      reasons.emplace_back(capture::MaterialStatusName(capture::MaterialStatus(i)), st.terrain_unusable[i]);
+    }
+  }
+  std::stable_sort(reasons.begin(), reasons.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+  for (size_t i = 0; i < reasons.size(); ++i) {
+    text += std::string(i ? ", " : " | without material: ") + reasons[i].first + " " + std::to_string(reasons[i].second);
+  }
+  return text;
 }
 
 // The log's breakdown of alpha-unknown and blend-unknown by pixel shader (top

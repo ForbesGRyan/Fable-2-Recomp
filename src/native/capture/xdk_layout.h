@@ -201,6 +201,10 @@ inline constexpr uint32_t kDeviceBinMaskHiOffset = 0x31A8;
 // RB_COLOR_MASK to 0 under bin mask 0x15555555 (0x822158E8/0x822158F0), and
 // draws under 0x15555555 execute only under bin select 0x80000001, draws under
 // 0x2AAAAAAA only under 0x2 and 0x8 (same captures).
+// The width of kColourBins is static, not observed: the bin selects of the
+// tiled main scene in the captures use bins 0 to 3 only, which shows bins 1
+// and 3 as colour bins; that every odd bin is one rests on the library's own
+// pre-pass mask 0x15555555 (above), of which it is the complement in 30 bits.
 inline constexpr uint32_t kColourBins = 0x2AAAAAAAu;
 inline constexpr uint32_t kPrePassBins = 0x15555555u;
 // Whether a draw of the tiled main scene issued under this bin mask (low word)

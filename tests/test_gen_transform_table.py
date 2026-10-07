@@ -276,7 +276,7 @@ class GenTransformTableTest(unittest.TestCase):
 
 class CommittedLeafEntriesTest(unittest.TestCase):
     """The table as committed. The leaf vertex shaders 0xA584..., 0xD7DD... and 0x2D40... are one
-    shader with one, two and four point lights (frame-map section 13): the same position and the
+    shader with one, two and four lights (frame-map section 13): the same position and the
     same UV export, so the three entries carry one layout, and the .inc is a fresh generator run."""
 
     LEAVES = ("0xA5846836C90E1192", "0xD7DD31B9BF194DE8", "0x2D40B53C926109BE")

@@ -398,8 +398,9 @@ the known limitations are in `docs/native-renderer/frame-map.md` section 13,
 in short: criteria 1 to 5 are met at three spots of one region. Flat ground, cut-outs,
 trees, coverage and cost were measured in gated runs up to `6a027bc`. The last commit,
 `4d74e0e`, was run on 2026-10-07 from 12:32 to 12:44 with the user present ("Process",
-below): the steep-ground rock shows in four small areas where the emulated frame has rock,
-the flat ground is unchanged, 98 to 99% of the drawn draws are textured and every window
+below): the steep-ground rock shows in four small areas; in the two where the emulated
+frame is readable it has rock in the same place (in the other two it is too dark to tell).
+The flat ground is unchanged, 98 to 99% of the drawn draws are textured and every window
 without a capture reads 30.0 fps. The user checks are pending.
 
 ### Success criteria as ruled
@@ -448,7 +449,8 @@ The list under "Success criteria" was changed by rulings. What was validated is 
   job object and dead-man switch in `tools/drive_game.ps1`, `tests/test_idle_gate.py`,
   README "Rule for automated agents". "Ruling (R9): wording fix [the gate's
   `user present (audio)` progress line while it is only observing] deferred to the final
-  fix wave with Task 7b's minors."
+  fix wave with Task 7b's minors." Done there: the line now reads `idle gate: observing:
+  N of 300 s without sound; waited ...` ("Final fix wave", below).
 - "Ruling: add a small task (Task 7a) after Task 7: autoplay plan tokens that switch the
   native view mid-run (`seconds:VIEW=off|split|overlay|native`) and arm a discovery capture
   at a given time, so one run can tour bridge / trees / a third spot in every view with
@@ -461,16 +463,24 @@ The list under "Success criteria" was changed by rulings. What was validated is 
   (five, the user being at the machine). On the user's word ("run it anyways. i'm fine
   with it", 2026-10-07) the controller started six runs in the user's session between
   12:29 and 12:44 with `tools/drive_game.ps1 -UserPresent`, the switch the rules reserve
-  for the person at the keyboard. They are not gated runs: their verdict is `RUN
+  for the person at the keyboard. The authorisation covered the runs then pending for
+  this validation and nothing else: the rule that agents never pass `-UserPresent` and
+  run the game only while the user is away stands unchanged, and no agent started these
+  runs. They are not gated runs: their verdict is `RUN
   UNCHECKED: -UserPresent given, no idle gate and no watch`, nothing watched for input,
   F6 presses reached the game in two of them and one froze. Each was checked window by
   window for the freeze signature, and for the camera position, before anything of it was
   used (frame-map section 13, "Validation").
-- **The plans were shifted by 6 s** for those runs. With the machine in use the game's
-  loading phase ended 1.8 s later than in the gated runs; the plans' first menu press at
-  23.0 s, which has 0.1 to 0.2 s of margin in the gated runs, was lost, and the first run
-  stopped in the main menu at a "New Game" dialog. Fixed-time plans are a limitation and a
-  follow-up.
+- **The plans were shifted by 6 s for four of those runs.** In the first run the game's
+  loading phase ended at 24.70 s (22.74 to 22.91 s in the gated runs), 1.7 s after the
+  plans' first menu press at 23.0 s: the press was lost and the run stopped in the main
+  menu at a "New Game" dialog. The four runs with a native view were then started with
+  every plan time 6 s later. The renderer-off run was started with the default plan, not
+  shifted; its loading phase ended 0.02 s after the press, which was still taken. In the
+  gated runs the press comes 0.09 to 0.26 s after the end of the loading phase; where
+  between 0.02 s and 1.7 s before that end a press starts to be lost is not known.
+  Fixed-time plans are a limitation. The driver's `-PlanShift` (final fix wave) moves a
+  plan by whole seconds; waiting for the menu is a follow-up.
 - "Ruling: the next sub-project is lighting and shadows (roadmap 6) ...; post-processing
   and 2D replay (roadmap 7, with the user's native menus/cutscenes TODO) follows." It
   takes over what this sub-project left to lighting (below).
@@ -675,3 +685,38 @@ contradicted the fact sheet this design was written from in five places; frame-m
   single-window dips in the native view are an accepted limitation of the debug view (the
   native pass adds about 1.6 ms of guest-thread work and GPU load on top of the emulated
   GPU)."
+
+### Final fix wave
+
+After the whole-branch review (2026-10-07; three commits after `0244c8d`: code and tools,
+the driver, documents). "Ruling (fix wave scope): done in the wave: I1 for both generators,
+minors 1, 2, 3, 5, 6, 8, 9, Task 7c m1, Task 10 n1-n4, Task 10b p4 and p5, Task 7a (t = 0,
+'(changed)'), Task 9 (_locate, _cull_edges), the driver's plan validation, verdict wording
+and Task 7b minors m3-m10, a -PlanShift option for slow starts, and every documentation
+item of the Task 11 review and of the earlier doc minors. Not done, recorded as follow-ups
+in the frame map: moving TerrainMaterialInputs out of DrawRecord (minor 7), the per-square
+allocation (minor 4), a full hash of the weight atlas, heap-exhaustion behaviour,
+pixel-level shader tests, Task 7b m1 / m2 (millisecond gaps), the older test gaps of Tasks
+2, 5, 8."
+
+What a user of the debug view or of the driver sees of it:
+
+- The table generators refuse malformed entries by name (an unknown key, a shader named
+  twice, a slot that is not an integer, a missing `"manual": true` or evidence); the
+  generated tables did not change.
+- The log's `Terrain:` line also names ground draws without geometry (`no-positions`,
+  `no-indices`), and the State line's overflow counts a ground draw that found no pipeline.
+- The ground's plan has a work budget; over it, and when a far draw has more patches than a
+  grid is built for, the near ground of that frame is flat clay as a whole.
+- `tools/drive_game.ps1` refuses a plan the game would reject before anything is launched
+  (exit 2), ends `RUN ABORTED: the game did not accept the plan` when the game's log lacks
+  its `[autoplay] armed` line, has `-PlanShift N` for a slow start, always prints its
+  verdict as the last line, and its gate reports what it has observed (`idle gate:
+  observing: N of 300 s without sound; ...`) where it used to print `user present (audio)`.
+- A plan entry at second 0 runs; a `VIEW=` entry naming the view the game is in is logged
+  as unchanged.
+
+The game check of the final code was not made: the gated driver refused both launches of
+2026-10-07 (14:31 and 14:45; the user was at the machine: input and sound). The wave's
+changes to the capture and the clay pass rest on unit tests and reading, and two gated runs
+(bridge and trees) are pending: frame-map section 13, "Final fix wave".

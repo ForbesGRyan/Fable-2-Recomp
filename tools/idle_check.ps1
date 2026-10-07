@@ -325,6 +325,32 @@ function Get-Fable2GateDecision {
   return [pscustomobject]@{ Present = ($signals.Count -gt 0); Signals = @($signals) }
 }
 
+# One progress line of the gate loop. A gate that is still waiting has not seen a user: mostly it is
+# still counting. So each open signal is worded as what has been observed: for the three with a
+# required time "N of M s without ..." (the count restarts when the thing happens), for the others
+# the state that holds now.
+function Get-Fable2GateProgressText {
+  param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Signals, [Parameter(Mandatory)][double]$IdleSeconds,
+        [Parameter(Mandatory)][double]$PadQuietSeconds, [Parameter(Mandatory)][double]$AudioQuietSeconds,
+        [Parameter(Mandatory)][int]$MinIdleSeconds, [Parameter(Mandatory)][double]$WaitedSeconds,
+        [Parameter(Mandatory)][int]$MaxWaitSeconds)
+  $whole = { param($v) [long][Math]::Floor([Math]::Max(0.0, [Math]::Min($v, 1e15))) }
+  $parts = New-Object System.Collections.ArrayList
+  foreach ($s in $Signals) {
+    switch ($s) {
+      "input" { [void]$parts.Add(("{0} of {1} s without keyboard or mouse input" -f (& $whole $IdleSeconds), $MinIdleSeconds)) }
+      "controller" { [void]$parts.Add(("{0} of {1} s without controller activity" -f (& $whole $PadQuietSeconds), $MinIdleSeconds)) }
+      "audio" { [void]$parts.Add(("{0} of {1} s without sound" -f (& $whole $AudioQuietSeconds), $MinIdleSeconds)) }
+      "fullscreen" { [void]$parts.Add("another program is fullscreen or presenting now") }
+      "fable2-running" { [void]$parts.Add("a fable_2.exe is running now") }
+      "forced-present" { [void]$parts.Add("the test hook forces present") }
+      "unknown" { [void]$parts.Add("the state is unknown now (a probe failed or gave no usable value)") }
+      default { [void]$parts.Add("$s now") }
+    }
+  }
+  return ("idle gate: observing: {0}; waited {1} of at most {2} s" -f ($parts -join ", "), (& $whole $WaitedSeconds), $MaxWaitSeconds)
+}
+
 # Watch decision during a run: the first presence signal's name, or $null. Input is any change
 # (up or down) of the last-input tick from the baseline taken when the gate passed. Pad and audio
 # stamps count when later than BaselineStamp (the gate's pass time on the sampler's clock). A
@@ -436,7 +462,11 @@ function Wait-Fable2Away {
       -Fable2Running $snap.Fable2Running -ProbeFailed $snap.ProbeFailed -Session0 $snap.Session0 -ForcePresent $snap.ForcePresent
     if (-not $d.Present) { return [pscustomobject]@{ Passed = $true; Signals = @(); Snapshot = $snap } }
     if (($now - $t0) -ge $MaxWaitSeconds) { return [pscustomobject]@{ Passed = $false; Signals = $d.Signals; Snapshot = $snap } }
-    if ($now - $lastLog -ge 60) { $lastLog = $now; Write-Host ("idle gate: user present ({0}), waiting ({1:N0} of {2} s)" -f ($d.Signals -join ", "), ($now - $t0), $MaxWaitSeconds) }
+    if ($now - $lastLog -ge 60) {
+      $lastLog = $now
+      Write-Host (Get-Fable2GateProgressText -Signals @($d.Signals) -IdleSeconds $snap.IdleSeconds -PadQuietSeconds ($now - $quietSince) `
+        -AudioQuietSeconds ($now - $audioSince) -MinIdleSeconds $MinIdleSeconds -WaitedSeconds ($now - $t0) -MaxWaitSeconds $MaxWaitSeconds)
+    }
     & $Sleep ([int][Math]::Min(250, [Math]::Max(1, ($MaxWaitSeconds - ($now - $t0)) * 1000)))
   }
 }

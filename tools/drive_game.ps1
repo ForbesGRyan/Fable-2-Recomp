@@ -11,11 +11,23 @@
 # window handle. Buttons are held HoldMs (default 100); longer holds auto-repeat
 # in the menus.
 # A plan entry "55:LS=0/100/3000" (or RS=...) holds a stick at x/y percent (-100..100,
-# positive y forward, positive x right) for that many ms (x, y -100..100, ms 1..60000; a bad
-# entry throws here instead of the game rejecting the whole plan). "56:VIEW=native"
-# (off|split|overlay|native|pattern) switches the native view and "66:DISC=60/4" arms a
-# discovery capture of 60 frames, every 4th draw (frames 1..100000, every 1..64); both
-# are run by the game's autoplay thread and passed through unchanged.
+# positive y forward, positive x right) for that many ms (x, y -100..100, ms 1..60000).
+# "56:VIEW=native" (off|split|overlay|native|pattern) switches the native view and
+# "66:DISC=60/4" arms a discovery capture of 60 frames, every 4th draw (frames 1..100000,
+# every 1..64); both are run by the game's autoplay thread.
+# The plan is checked here before anything is launched (tools\autoplay_plan.ps1): the game
+# rejects the WHOLE plan on one bad entry and then runs without input, so an entry the game
+# would not take (a time that is not plain decimal seconds, anything after a second ':', a
+# key without a pad button, a stick, view or capture entry out of form or range) is refused:
+# "REFUSED: bad plan: ... Nothing launched.", exit 2. So are a -Shots time that is not a
+# plain number of seconds and a -PlanShift that is not a whole number from 0 to 30.
+# After a run with a plan the game's own log of that run (<ExeDir>\logs\fable_2_<n>.log, a
+# file that did not exist before the launch) must hold the game's "[autoplay] armed" line;
+# without it the run ends "RUN ABORTED: the game did not accept the plan", never clean.
+# -PlanShift N (whole seconds, 0..30): adds N to every plan time, every -Shots time and to
+# -Total (screenshot files are named by the moved time). For a start that is slower than the
+# plan expects: the title screen comes a few seconds later when the machine is busy, the
+# first press is then lost and the run stops in the main menu (README, the paragraph on this script).
 #
 # -KeyboardInput: the old path. Keys are sent with keybd_event (HoldMs default
 # 50), which targets whatever window has focus, so each key is sent only if the
@@ -64,17 +76,23 @@
 #    the moved files to the marker file RUN_DISTURBED.txt (in -ShotDir when -Shots is given, else
 #    in <ExeDir>\logs) and exits 11. A watch error counts as a disturbance (fail closed).
 #  - A run with no disturbance ends with the last output line "RUN CLEAN: no user input for
-#    <seconds> s" (seconds from launch to close) and exit 0, printed only after the game is
-#    confirmed closed. An error during the run closes the game and ends with
-#    "RUN ABORTED: <message>" and exit 12. A game that exits before -Total prints
-#    "GAME EXITED EARLY at <seconds> s" and exits 13 (never RUN CLEAN). A stale marker from an
-#    earlier run is renamed to RUN_DISTURBED.<timestamp>.previous.txt before launch.
+#    <seconds> s" (seconds from launch to the moment the game was closed) and exit 0, printed
+#    only after the game is confirmed closed. An error during the run closes the game and ends
+#    with "RUN ABORTED: <message>" and exit 12. A game that exits before -Total, or before the
+#    last -Shots time when that is later, ends "GAME EXITED EARLY at <seconds> s", exit 13 (never
+#    RUN CLEAN). A stale marker from an earlier run is renamed to
+#    RUN_DISTURBED.<timestamp>.previous.txt before launch.
+#  - The verdict (RUN CLEAN, RUN UNCHECKED, RUN DISTURBED, RUN ABORTED, GAME EXITED EARLY) or the
+#    refusal (REFUSED: ...) is the LAST line of the output and always one line, whatever an error
+#    message holds. A caller checks that line as well as the exit code: in a PowerShell session a
+#    script error before the launch leaves $LASTEXITCODE as an earlier command set it.
 #  - Every run appends lines to <ExeDir>\logs\drive_game_runs.log: "started pid <n>" at launch and
 #    at the end time, exit code, gate result and signals ("USER PRESENT OVERRIDE" when
-#    -UserPresent was used).
-#  Exit codes: 0 clean (or unchecked with -UserPresent), 2 refused option combination (also any
-#  unknown or positional argument), 10 gate refused (nothing launched), 11 disturbed, 12 aborted,
-#  13 game exited early; 1 is a script error before launch (bad plan, ambiguous abbreviation).
+#    -UserPresent was used). Nothing is written into an -ExeDir the driver refused.
+#  Exit codes: 0 clean (or unchecked with -UserPresent), 2 refused before the gate (an option
+#  combination, any unknown or positional argument, an -ExeDir that is not allowed, a bad plan,
+#  -Shots or -PlanShift), 10 gate refused (nothing launched), 11 disturbed, 12 aborted, 13 game
+#  exited early; 1 is a script error before launch (an ambiguous abbreviation, a missing library).
 #  -UserPresent (spelled in full; abbreviations are rejected): ONLY for the person at the keyboard
 #  running this script themselves. It skips the gate and the watch and prints a prominent line
 #  saying so. AGENTS MUST NEVER PASS IT. -KeyboardInput (the user driving with real key presses)
@@ -95,11 +113,13 @@
 #   .\tools\drive_game.ps1 -Total 120
 #   .\tools\drive_game.ps1 -Total 150 -Env @{FABLE2_NATIVE_DISCOVERY="300"; FABLE2_NATIVE_DISCOVERY_DELAY="50"}
 #   .\tools\drive_game.ps1 -GameArgs "--native_render_log_vertex_bindings=true" -Shots "50,80"
+#   .\tools\drive_game.ps1 -Total 100 -Shots "60,90" -PlanShift 6     # everything 6 s later
 [CmdletBinding(PositionalBinding = $false)]
 param(
   [int]$Total = 120,                         # seconds before the game is closed
   [string]$Plan = "23:E,27:S,30:E,35:E",     # second:key list
   [string]$Shots = "",                       # seconds for window screenshots, e.g. "50,80"
+  [string]$PlanShift = "0",                  # whole seconds, 0..30, added to every plan time, every -Shots time and -Total
   [string]$ShotDir = "",                     # default: <exe folder>\logs\shots
   [string[]]$GameArgs = @(),                 # extra fable_2.exe arguments
   [hashtable]$Env = @{},                     # environment variables for the game process
@@ -116,6 +136,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "cmdline_quote.ps1")
+. (Join-Path $PSScriptRoot "autoplay_plan.ps1")
 $Root = Split-Path -Parent $PSScriptRoot
 # Paths are resolved once, against the caller's current location (not the process directory), and used everywhere.
 function Resolve-AbsolutePath([string]$Path) {
@@ -141,11 +162,20 @@ New-Variable -Name Label -Value $(if ($testMode) { "TEST HARNESS " } else { "" }
 $script:job = $null; $script:hProc = $null; $script:p = $null
 $script:GateText = "not evaluated"
 $script:sampledNative = $null
+# Whether -ExeDir is a folder this run may use (the refusals are below): outside test mode one on the allow-list, in
+# test mode an explicit one without fable_2.exe. Nothing is written into a folder that is refused.
+$allowedFull = @($AllowedExeDirs | ForEach-Object { (Resolve-AbsolutePath $(if ([IO.Path]::IsPathRooted($_)) { $_ } else { Join-Path $Root $_ })).TrimEnd('\') })
+New-Variable -Name exeDirAllowed -Option Constant -Value ([bool]$(
+  if ($testMode) { $exeDirGiven -and -not (Test-Path -LiteralPath (Join-Path $ExeDir "fable_2.exe")) }
+  else { $allowedFull -contains $ExeDir.TrimEnd('\') }))
 
-# Appends one line to the durable run log (harness runs: labelled, and never into a default folder).
+# One line, whatever the text holds: a verdict or a refusal is the last line of the output, and a run-log entry is one line.
+function Format-OneLine([string]$Text) { return (($Text -replace '[\x00-\x1f\x7f]+', ' | ').Trim()) }
+
+# Appends one line to the durable run log (harness runs: labelled; never into a folder the driver refuses).
 function Add-RunLog([string]$Text) {
-  if ($testMode -and -not $exeDirGiven) { return }
-  $Text = ($Text -replace '[\x00-\x1f\x7f]+', ' | ')   # one line per run event, whatever the message holds
+  if (-not $exeDirAllowed) { return }
+  $Text = Format-OneLine $Text   # one line per run event, whatever the message holds
   try {
     $dir = Join-Path $ExeDir "logs"
     New-Item -ItemType Directory -Force $dir | Out-Null
@@ -171,7 +201,7 @@ if ($UserPresentAbbreviationGuard) {
   Exit-Run 2
 }
 if ($Rest.Count) {
-  Write-Output "REFUSED: unknown arguments ($($Rest -join ' ')); positional and unknown arguments are never ignored silently. Nothing launched."
+  Write-Output (Format-OneLine "REFUSED: unknown arguments ($($Rest -join ' ')); positional and unknown arguments are never ignored silently. Nothing launched.")
   Exit-Run 2
 }
 if ($KeyboardInput -and -not $UserPresent) {
@@ -179,9 +209,8 @@ if ($KeyboardInput -and -not $UserPresent) {
   Exit-Run 2
 }
 if (-not $testMode) {
-  $allowedFull = @($AllowedExeDirs | ForEach-Object { (Resolve-AbsolutePath $(if ([IO.Path]::IsPathRooted($_)) { $_ } else { Join-Path $Root $_ })).TrimEnd('\') })
   if ($allowedFull -notcontains $ExeDir.TrimEnd('\')) {
-    Write-Output "REFUSED: -ExeDir '$ExeDir' is not an allowed build output directory (allowed: $($allowedFull -join '; ')). Nothing launched."
+    Write-Output (Format-OneLine "REFUSED: -ExeDir '$ExeDir' is not an allowed build output directory (allowed: $($allowedFull -join '; ')). Nothing launched.")
     Exit-Run 2
   }
   # Test-suite guard: tests/test_idle_gate.py sets FABLE2_DRIVER_NO_REAL_GATE=1 so that no test can ever reach the real gate
@@ -218,7 +247,7 @@ if ($testMode) {
     if (-not $why -and ((Test-Path (Join-Path $sd "rexruntime.dll")) -or (Test-Path (Join-Path $sd "fable_2.toml")))) { $why = "the stand-in sits in a game folder" }
   }
   if ($why) {
-    Write-Output "REFUSED: test mode: $why. Nothing launched."
+    Write-Output (Format-OneLine "REFUSED: test mode: $why. Nothing launched.")
     Exit-Run 2
   }
   Write-Output "*** TEST MODE: scripted probe and stand-in process '$TestExe', not the game ***"
@@ -321,50 +350,43 @@ $padButton = @{
   "E"="A"; "SPACE"="A"; "S"="Down"; "W"="Up"; "A"="Left"; "D"="Right"; "ESC"="B"; "ENTER"="Start"
 }
 
+# The plan, the screenshot times and the shift, read strictly (tools\autoplay_plan.ps1): what the game would reject, or
+# this script would have to guess at, is refused here, before the gate and before any launch.
 $events = @()
-$autoplaySteps = @()
-foreach ($e in $Plan.Split(",")) {
-  if (-not $e) { continue }
-  $t, $k = $e.Split(":")
-  if (-not $KeyboardInput -and $k -match '^(?i:LS|RS)=(-?\d+)/(-?\d+)/(\d+)$') {
-    # Same ranges as src/input/autoplay.h: the game rejects the whole plan on a bad one.
-    $sx = [long]$Matches[1]; $sy = [long]$Matches[2]; $sms = [long]$Matches[3]
-    if ($sx -lt -100 -or $sx -gt 100 -or $sy -lt -100 -or $sy -gt 100 -or $sms -lt 1 -or $sms -gt 60000) {
-      throw "bad stick entry '$k': x and y must be -100..100 and ms 1..60000"
-    }
-    $autoplaySteps += "${t}:$k"
-    continue
-  }
-  # View switch and timed discovery capture, run by the game's autoplay thread.
-  if (-not $KeyboardInput -and $k -match '^(?i:VIEW)=(?i:off|split|overlay|native|pattern)$') {
-    $autoplaySteps += "${t}:$k"
-    continue
-  }
-  if (-not $KeyboardInput -and $k -match '^(?i:DISC)=(\d+)/(\d+)$') {
-    $df = [long]$Matches[1]; $de = [long]$Matches[2]
-    if ($df -lt 1 -or $df -gt 100000 -or $de -lt 1 -or $de -gt 64) {
-      throw "bad capture entry '$k': frames must be 1..100000 and every 1..64"
-    }
-    $autoplaySteps += "${t}:$k"
-    continue
-  }
-  if ($KeyboardInput) {
-    if (-not $vk.ContainsKey($k.ToUpper())) { throw "unknown key '$k' (known: $($vk.Keys -join ', '))" }
-    $events += [pscustomobject]@{ t = [double]$t; k = $k.ToUpper(); shot = $false }
-  } else {
-    if (-not $padButton.ContainsKey($k.ToUpper())) { throw "key '$k' has no pad button in autoplay mode (known: $($padButton.Keys -join ', '))" }
-    $autoplaySteps += "${t}:$($padButton[$k.ToUpper()])"
-  }
+$planSteps = 0   # entries handed to the game in FABLE2_AUTOPLAY; with any, the game must log that it armed the plan
+$refusal = $null
+try {
+  $shift = ConvertTo-Fable2PlanShift -Text $PlanShift
+} catch { $refusal = $_.Exception.Message }
+if (-not $refusal) {
+  try {
+    $parsedPlan = ConvertTo-Fable2Plan -Plan $Plan -KeyboardInput ([bool]$KeyboardInput) -Shift $shift -PadButtons $padButton -Keys $vk
+    foreach ($ev in $parsedPlan.Events) { $events += [pscustomobject]@{ t = [double]$ev.t; k = $ev.k; shot = $false } }
+  } catch { $refusal = "bad plan: $($_.Exception.Message)" }
+}
+if (-not $refusal) {
+  try {
+    foreach ($t in @(ConvertTo-Fable2ShotTimes -Shots $Shots -Shift $shift)) { $events += [pscustomobject]@{ t = [double]$t; k = ""; shot = $true } }
+  } catch { $refusal = "bad -Shots: $($_.Exception.Message)" }
+}
+if ($refusal) {
+  Write-Output (Format-OneLine "REFUSED: $refusal. Nothing launched.")
+  Exit-Run 2
+}
+if ($shift -gt 0) {
+  $Total += $shift
+  Write-Output "plan shift: $shift s (every plan time and -Shots time is $shift s later; -Total is now $Total s)"
 }
 if (-not $KeyboardInput) {
   $Env = @{} + $Env
-  $Env["FABLE2_AUTOPLAY"] = $autoplaySteps -join ","
+  $Env["FABLE2_AUTOPLAY"] = $parsedPlan.Autoplay
   $Env["FABLE2_AUTOPLAY_HOLD_MS"] = [string]$HoldMs
-}
-foreach ($t in $Shots.Split(",")) {
-  if ($t) { $events += [pscustomobject]@{ t = [double]$t; k = ""; shot = $true } }
+  $planSteps = $parsedPlan.Count
 }
 $events = $events | Sort-Object t
+# The run lasts until -Total, or until the last screenshot time when that is later.
+$lastEvent = if ($events) { [double](($events | Measure-Object -Property t -Maximum).Maximum) } else { 0.0 }
+$expectedSeconds = [Math]::Max([double]$Total, $lastEvent)
 
 # ---- Idle gate: no path below launches the game unless this passed or -UserPresent was given ----
 $gatePassed = $false
@@ -398,11 +420,11 @@ if ($UserPresent) {
       $script:GateText = "passed (no user input for at least $RequiredAbsenceSeconds s)"
     } else {
       $script:GateText = "refused: $($gate.Signals -join ',')"
-      Write-Output "REFUSED: user present or state unknown ($($gate.Signals -join ', ')) after waiting up to $IdleWaitSeconds s. Every gate needs $RequiredAbsenceSeconds s of observed absence: use -IdleWaitSeconds $RequiredAbsenceSeconds or more. Nothing launched."
+      Write-Output (Format-OneLine "REFUSED: user present or state unknown ($($gate.Signals -join ', ')) after waiting up to $IdleWaitSeconds s. Every gate needs $RequiredAbsenceSeconds s of observed absence: use -IdleWaitSeconds $RequiredAbsenceSeconds or more. Nothing launched.")
     }
   } catch {
     $script:GateText = "refused: gate error ($($_.Exception.Message))"
-    Write-Output "REFUSED: idle gate failed ($($_.Exception.Message)); counted as user present. Nothing launched."
+    Write-Output (Format-OneLine "REFUSED: idle gate failed ($($_.Exception.Message)); counted as user present. Nothing launched.")
   }
   if (-not $gatePassed) { Exit-Run 10 }
   Write-Output "idle gate passed: no user input for at least $RequiredAbsenceSeconds s"
@@ -418,8 +440,8 @@ if (-not $UserPresent -and (Test-Path -LiteralPath $markerFile)) {
   Move-Item -LiteralPath $markerFile -Destination (Join-Path $markerDir ("RUN_DISTURBED.{0}.previous.txt" -f (Get-Date -Format "yyyyMMdd_HHmmss"))) -Force
 }
 
-# The OS kills the game when this process dies for any reason: the job handle is held for the
-# life of the script and is never closed explicitly.
+# The OS kills the game when this process dies for any reason: the job handle is held until the
+# script ends (Exit-Run closes it then, which kills whatever is still in the job).
 $script:job = if ($harness -and $harness.FailJobCreate) { [IntPtr]::Zero } else { [DriveGameNative]::CreateKillOnCloseJob() }
 if ($script:job -eq [IntPtr]::Zero) {
   $script:GateText += "; ABORTED"
@@ -527,8 +549,27 @@ function Move-RunShots([string]$Prefix) {
   return $moved
 }
 
+# The game's logs that exist before the launch: a log that appears during the run is this run's (Test-PlanArmed).
+$logsBefore = @{}
+if ($planSteps -gt 0) {
+  foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $ExeDir "logs") -Filter "fable_2_*.log" -File -ErrorAction SilentlyContinue)) { $logsBefore[$f.Name] = $true }
+}
+# True when a game log that did not exist before the launch holds the line the game writes when it has taken the
+# plan ("[autoplay] armed: N steps", written at start; a rejected plan logs "[autoplay] invalid FABLE2_AUTOPLAY"
+# instead and the game then runs without input). Anything unreadable counts as not armed.
+function Test-PlanArmed {
+  try {
+    foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $ExeDir "logs") -Filter "fable_2_*.log" -File -ErrorAction Stop)) {
+      if ($logsBefore.ContainsKey($f.Name)) { continue }
+      $head = @(Get-Content -LiteralPath $f.FullName -TotalCount 5000 -ErrorAction Stop)
+      if (@($head | Where-Object { $_ -like "*[[]autoplay] armed:*" }).Count -gt 0) { return $true }
+    }
+  } catch { }
+  return $false
+}
+
 $saved = @{}
-$disturbSignal = $null; $abortMessage = $null; $earlyExit = $false; $runSeconds = 0.0
+$disturbSignal = $null; $abortMessage = $null; $earlyExit = $false; $earlyLine = $null; $runSeconds = 0.0; $closedSeconds = 0.0
 try {
   foreach ($name in $Env.Keys) {
     $saved[$name] = [Environment]::GetEnvironmentVariable($name)
@@ -599,9 +640,10 @@ try {
     Invoke-WatchPoll
   }
   while (-not $p.HasExited -and $sw.Elapsed.TotalSeconds -lt $Total) { Invoke-WatchPoll; Pause-Loop }
-  if ($p.HasExited -and $sw.Elapsed.TotalSeconds -lt $Total) {
+  # Early: before -Total, or before the last screenshot time when that is later (its screenshot was not taken).
+  if ($p.HasExited -and $sw.Elapsed.TotalSeconds -lt $expectedSeconds) {
     $earlyExit = $true
-    "${Label}GAME EXITED EARLY at $([int]$sw.Elapsed.TotalSeconds) s"
+    $earlyLine = "${Label}GAME EXITED EARLY at $([int]$sw.Elapsed.TotalSeconds) s"
   }
   Invoke-WatchPoll
   if ($harness -and $harness.StallAfterLoopMs) { Start-Sleep -Milliseconds $harness.StallAfterLoopMs }   # test mode only: a stall after the last poll
@@ -613,6 +655,7 @@ try {
   # Every exit path closes the game; the environment is restored.
   [DriveGameNative]::StopDeadMan()
   Stop-Game
+  $closedSeconds = $sw.Elapsed.TotalSeconds   # launch to close: the time the verdict reports
   if ($harness -and $harness.HoldAfterKillMs) { Start-Sleep -Milliseconds $harness.HoldAfterKillMs }   # test mode only: lets a test look at the machine while the driver is still alive
   foreach ($name in $saved.Keys) { try { [Environment]::SetEnvironmentVariable($name, $saved[$name]) } catch { } }
 }
@@ -620,8 +663,6 @@ try {
 $deadManTripped = [DriveGameNative]::IsDeadManTripped()
 $gameClosed = $true
 if ($script:p) { try { $gameClosed = $script:p.HasExited } catch { $gameClosed = $false } }
-$lastEvent = if ($events) { [double](($events | Measure-Object -Property t -Maximum).Maximum) } else { 0.0 }
-$expectedSeconds = [Math]::Max([double]$Total, $lastEvent)
 
 if ($disturbSignal) {
   $line = "${Label}RUN DISTURBED: $disturbSignal at {0:N1} s" -f $script:disturbAt
@@ -639,7 +680,7 @@ if ($disturbSignal) {
     "marker written: $markerFile"
   } catch { "WARNING: could not write the marker file $markerFile ($($_.Exception.Message))" }
   if (-not $gameClosed) { "WARNING: the game process is still running after the kill" }
-  Write-Output $line
+  Write-Output (Format-OneLine $line)
   Exit-Run 11
 }
 # A dead-man trip is an abort whatever else happened, and a run that lasted far longer than asked is never clean.
@@ -647,11 +688,15 @@ if (-not $abortMessage -and $deadManTripped) { $abortMessage = "dead-man switch:
 if (-not $abortMessage -and $gameClosed -and -not $earlyExit -and $runSeconds -gt ($expectedSeconds + 5)) {
   $abortMessage = "run overran ({0} s for a {1} s run)" -f [int]$runSeconds, $Total
 }
+# A plan was handed to the game: unless the game logged that it armed it, the run had no input and is never clean.
+if (-not $abortMessage -and $gameClosed -and -not $earlyExit -and $planSteps -gt 0 -and -not (Test-PlanArmed)) {
+  $abortMessage = "the game did not accept the plan (no ""[autoplay] armed"" line in a game log of this run under $(Join-Path $ExeDir "logs"))"
+}
 if ($abortMessage) {
   $script:GateText += "; ABORTED"
   $moved = @(Move-RunShots "aborted")
   if ($moved.Count) { "screenshots of the aborted run moved to $(Split-Path -Parent $moved[0]): do not use them" }
-  Write-Output "${Label}RUN ABORTED: $abortMessage"
+  Write-Output (Format-OneLine "${Label}RUN ABORTED: $abortMessage")
   Exit-Run 12
 }
 if (-not $gameClosed) {
@@ -663,8 +708,9 @@ if ($earlyExit) {
   $script:GateText += "; EARLY EXIT"
   $moved = @(Move-RunShots "early_exit")
   if ($moved.Count) { "screenshots of the early-exit run moved to $(Split-Path -Parent $moved[0]): do not use them" }
+  Write-Output (Format-OneLine $earlyLine)   # the verdict is the last line
   Exit-Run 13
 }
 if ($UserPresent) { Write-Output "RUN UNCHECKED: -UserPresent given, no idle gate and no watch" }
-else { Write-Output ("${Label}RUN CLEAN: no user input for {0} s" -f [int]$sw.Elapsed.TotalSeconds) }
+else { Write-Output ("${Label}RUN CLEAN: no user input for {0} s" -f [int]$closedSeconds) }
 Exit-Run 0

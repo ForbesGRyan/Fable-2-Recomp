@@ -24,6 +24,7 @@ os.environ["FABLE2_DRIVER_NO_REAL_GATE"] = "1"
 TOOLS = Path(os.environ.get("FABLE2_TOOLS_DIR") or ROOT / "tools")
 IDLE = TOOLS / "idle_check.ps1"
 DRIVE = TOOLS / "drive_game.ps1"
+PLAN = TOOLS / "autoplay_plan.ps1"
 PWSH = shutil.which("pwsh") or shutil.which("powershell")
 
 
@@ -144,20 +145,23 @@ $out = foreach ($sc in $scenarios) {
   $clock = { $t.v }.GetNewClosure()
   $done = @{}
   $sleep = { param($ms) $t.v += $ms / 1000.0
-    foreach ($j in @($sc.jump)) { if (-not $done.ContainsKey([string]$j[0]) -and ($t.v - 1000.0) -ge $j[0]) { $done[[string]$j[0]] = $true; $t.v += $j[1] } } }.GetNewClosure()
+    foreach ($j in @($sc.jump)) { if (-not $done.ContainsKey([string]$j[0]) -and ($t.v - 1000.0) -ge $j[0]) { $done[[string]$j[0]] = $true; $t.v += $j[1] } }
+    # real_stall [at, seconds]: the process really stands still once (the loop's own clock does not move)
+    if (@($sc.real_stall).Count -eq 2 -and -not $done.ContainsKey("stall") -and ($t.v - 1000.0) -ge $sc.real_stall[0]) { $done["stall"] = $true; Start-Sleep -Milliseconds ([int]($sc.real_stall[1] * 1000)) } }.GetNewClosure()
   try {
     $r = Wait-Fable2Away -MinIdleSeconds $sc.min -MaxWaitSeconds $sc.wait -Probe $probe -Clock $clock -Sleep $sleep
     [pscustomobject]@{ name = $sc.name; passed = $r.Passed; at = ($t.v - 1000.0); signals = (@($r.Signals) -join ',') }
   } catch { [pscustomobject]@{ name = $sc.name; passed = $false; at = -1; signals = 'THREW: ' + $_.Exception.Message } }
 }
 $out | ConvertTo-Json -Compress -AsArray""" % json.dumps(scenarios)
-        res = json.loads(run_lib(body).strip().splitlines()[-1])
+        self.stdout = run_lib(body)
+        res = json.loads(self.stdout.strip().splitlines()[-1])
         return {r["name"]: r for r in res}
 
     @staticmethod
     def sc(name, **kw):
         base = dict(name=name, min=60, wait=400, input=[], idle_fail=[], pad_connected=[], pad_activity=[],
-                    pad_change=[], audio=[], fullscreen=[], fail=[], running=False, jump=[])
+                    pad_change=[], audio=[], fullscreen=[], fail=[], running=False, jump=[], real_stall=[])
         base.update(kw)
         return base
 
@@ -183,6 +187,7 @@ $out | ConvertTo-Json -Compress -AsArray""" % json.dumps(scenarios)
             sc("jump", jump=[[10, 3600]], wait=10000),            # the machine sleeps for an hour after 10 s of polling
             sc("jump_small", jump=[[10, 4]], wait=10000),         # a 4 s hiccup is below the 5 s continuity limit
             sc("jump_out_of_wait", jump=[[10, 3600]], wait=100),
+            sc("wall_stall", real_stall=[10, 5.6]),               # the process stands still for 5.6 real seconds; the loop's clock does not show it
         ])
         self.assertTrue(res["clean"]["passed"]); self.assertTrue(59.9 <= res["clean"]["at"] <= 61, res["clean"])   # audio needs the whole 60 s
         self.assertTrue(res["pad_quiet"]["passed"]); self.assertTrue(59.9 <= res["pad_quiet"]["at"] <= 61, res["pad_quiet"])
@@ -208,7 +213,26 @@ $out | ConvertTo-Json -Compress -AsArray""" % json.dumps(scenarios)
         self.assertTrue(res["jump"]["passed"]); self.assertTrue(3669 <= res["jump"]["at"] <= 3672, res["jump"])
         self.assertTrue(res["jump_small"]["passed"]); self.assertTrue(59.5 <= res["jump_small"]["at"] <= 66, res["jump_small"])
         self.assertFalse(res["jump_out_of_wait"]["passed"])
+        # the wall clock is compared too: 5.6 s that the loop's own clock did not count restart every observation (10 s + 60 s)
+        self.assertTrue(res["wall_stall"]["passed"]); self.assertTrue(69.5 <= res["wall_stall"]["at"] <= 71.5, res["wall_stall"])
         self.assertIn("THREW", res["floor"]["signals"]); self.assertIn("at least 60", res["floor"]["signals"])
+
+    def test_progress_lines_report_observation(self):
+        # Sound at 5 s and 12 s; the gate needs 60 s without it and passes at about 72 s. The line printed
+        # after 60 s says what has been observed so far: it does not call a user present who made no sign.
+        self.run_scenarios([self.sc("audio", audio=[5, 12])])
+        lines = [l for l in self.stdout.splitlines() if l.startswith("idle gate:")]
+        self.assertEqual(len(lines), 1, self.stdout)
+        self.assertRegex(lines[0], r"^idle gate: observing: 4[78] of 60 s without sound; waited 60 of at most 400 s$")
+        self.assertNotIn("user present", self.stdout)
+        # Nothing at all happens: the only open point is the audio observation itself.
+        self.run_scenarios([self.sc("clean", min=90, wait=400)])
+        lines = [l for l in self.stdout.splitlines() if l.startswith("idle gate:")]
+        self.assertEqual(lines, ["idle gate: observing: 60 of 90 s without sound; waited 60 of at most 400 s"])
+        # A state that holds now is named as such.
+        self.run_scenarios([self.sc("running", running=True, wait=70)])
+        self.assertIn("a fable_2.exe is running now", self.stdout)
+        self.assertNotIn("user present", self.stdout)
 
 
 @unittest.skipUnless(PWSH, "PowerShell not available")
@@ -426,6 +450,28 @@ try { $null = Get-Fable2GateDecision -IdleSeconds 5 -ErrorAction Stop; 'no error
         out = run_lib("[Fable2IdleProbeV3]::ProbeVersion")
         self.assertEqual(out.strip(), "3")
 
+    def test_progress_text_table(self):
+        # What the gate loop prints while it waits: every open signal, as what has been observed.
+        cases = [
+            (["audio"], "idle gate: observing: 61 of 300 s without sound; waited 61 of at most 1800 s"),
+            (["input", "audio"], "idle gate: observing: 12 of 300 s without keyboard or mouse input, "
+                                 "61 of 300 s without sound; waited 61 of at most 1800 s"),
+            (["controller"], "idle gate: observing: 200 of 300 s without controller activity; waited 61 of at most 1800 s"),
+            (["fullscreen"], "idle gate: observing: another program is fullscreen or presenting now; waited 61 of at most 1800 s"),
+            (["fable2-running"], "idle gate: observing: a fable_2.exe is running now; waited 61 of at most 1800 s"),
+            (["forced-present"], "idle gate: observing: the test hook forces present; waited 61 of at most 1800 s"),
+            (["unknown", "audio"], "idle gate: observing: the state is unknown now (a probe failed or gave no usable value), "
+                                   "61 of 300 s without sound; waited 61 of at most 1800 s"),
+            (["something-new"], "idle gate: observing: something-new now; waited 61 of at most 1800 s"),
+        ]
+        body = ("$cases = '%s' | ConvertFrom-Json\n"
+                "foreach ($c in $cases) { Get-Fable2GateProgressText -Signals @($c) -IdleSeconds 12.9 -PadQuietSeconds 200.2 "
+                "-AudioQuietSeconds 61.7 -MinIdleSeconds 300 -WaitedSeconds 61.9 -MaxWaitSeconds 1800 }" % json.dumps([c[0] for c in cases]))
+        got = run_lib(body).strip().splitlines()
+        self.assertEqual(got, [c[1] for c in cases])
+        for line in got:
+            self.assertNotIn("user present", line)
+
 
 @unittest.skipUnless(PWSH, "PowerShell not available")
 class SamplerCoreTest(unittest.TestCase):
@@ -522,6 +568,7 @@ $tick = {
         }
       }
       'abort' { throw 'boom (test abort)' }
+      'abort_multiline' { throw "boom (test abort)`nits second line" }
       'stall' {
         if (-not $fake.stalled) {
           $fake.stalled = $true
@@ -572,7 +619,7 @@ class DriverRunPathTest(unittest.TestCase):
         for p in self.pids:
             kill_pid(p)
 
-    def args(self, scenario, sleep=60, total=4, extra=(), command=None):
+    def args(self, scenario, sleep=60, total=4, extra=(), command=None, plan=""):
         self.env = {"TEST_SCENARIO": scenario, "TEST_OUT": str(self.out), "TEST_OUT2": str(self.out2)}
         if command:   # a stand-in script file keeps quoting out of the command line
             script = self.tmp / "standin.ps1"
@@ -580,7 +627,7 @@ class DriverRunPathTest(unittest.TestCase):
             exe_args = "|-NoProfile|-File|%s" % script   # leading | so the value never looks like a parameter (a ":" would)
         else:
             exe_args = "|-NoProfile|-Command|Start-Sleep %d" % sleep
-        return [DRIVE, "-ExeDir", self.exe, "-Total", str(total), "-Plan", "", "-IdleWaitSeconds", "1800",
+        return [DRIVE, "-ExeDir", self.exe, "-Total", str(total), "-Plan", plan, "-IdleWaitSeconds", "1800",
                 "-TestHarness", self.harness, "-TestExe", shutil.which("pwsh") or PWSH,
                 "-TestExeArgs", exe_args, *extra]
 
@@ -836,6 +883,92 @@ class DriverRunPathTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertLabelled(r)
 
+    # --- the plan: accepted by the game, moved by -PlanShift ---
+
+    def game_script(self, log_lines=None, log_name="fable_2_7.log", sleep=60):
+        """A stand-in that behaves like the game at start: it writes its log into <ExeDir>\\logs (when log_lines
+        is given) and the plan it was handed into plan.txt, then idles."""
+        q = lambda p: str(p).replace("'", "''")
+        text = "Set-Content -LiteralPath '%s' -Value $env:FABLE2_AUTOPLAY\n" % q(self.tmp / "plan.txt")
+        if log_lines is not None:
+            text += "New-Item -ItemType Directory -Force '%s' | Out-Null\n" % q(self.exe / "logs")
+            text += "Set-Content -LiteralPath '%s' -Value @(%s)\n" % (
+                q(self.exe / "logs" / log_name), ", ".join("'%s'" % l.replace("'", "''") for l in log_lines))
+        return text + "Start-Sleep %d\n" % sleep
+
+    ARMED = "[2026-10-07 12:42:20.758] [info] [sys] [t32872] [autoplay] armed: 3 steps, hold 100 ms"
+    REJECTED = "[2026-10-07 12:42:20.758] [warning] [sys] [t32872] [autoplay] invalid FABLE2_AUTOPLAY, bad token 'x:A'; autoplay disabled"
+
+    def test_accepted_plan_is_clean_and_reaches_the_game_shifted(self):
+        # Keys become pad buttons, times are plain decimals, and -PlanShift moves the plan, the shots and the total.
+        r, pid = self.drive("clean", total=3, plan="1:E, 2.50:s,3:LS=0/100/500", command=self.game_script([self.ARMED]),
+                            extra=("-PlanShift", "2", "-Shots", "1", "-ShotDir", self.tmp / "shots"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual((self.tmp / "plan.txt").read_text().strip(), "3:A,4.5:Down,5:LS=0/100/500")
+        self.assertIn("plan shift: 2 s", r.stdout)
+        self.assertIn("no game window yet at 3 s", r.stdout)                 # the shot of 1 s, at 3 s
+        m = re.match(r"^TEST HARNESS RUN CLEAN: no user input for (\d+) s$", self.last(r))
+        self.assertTrue(m, self.last(r))
+        self.assertGreaterEqual(int(m.group(1)), 5)                          # -Total 3 and the shift
+        self.assertLabelled(r)
+
+    def test_plan_the_game_rejected_is_never_clean(self):
+        r, pid = self.drive("clean", total=4, plan="1:E", command=self.game_script([self.REJECTED]))
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertRegex(self.last(r), r"^TEST HARNESS RUN ABORTED: the game did not accept the plan")
+        self.assertNotIn("RUN CLEAN", r.stdout)
+        self.assertIn("exit=12", self.runlog())
+        self.assertTrue(wait_gone(pid, 3))
+        self.assertLabelled(r)
+
+    def test_plan_without_a_game_log_is_never_clean(self):
+        r, pid = self.drive("clean", total=4, plan="1:E", command=self.game_script(None))
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertRegex(self.last(r), r"^TEST HARNESS RUN ABORTED: the game did not accept the plan")
+        self.assertNotIn("RUN CLEAN", r.stdout)
+
+    def test_armed_line_of_an_earlier_run_does_not_count(self):
+        logs = self.exe / "logs"
+        logs.mkdir()
+        (logs / "fable_2_6.log").write_text(self.ARMED + "\n")               # the log of an earlier run
+        r, pid = self.drive("clean", total=4, plan="1:E", command=self.game_script([self.REJECTED]))
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertRegex(self.last(r), r"^TEST HARNESS RUN ABORTED: the game did not accept the plan")
+        # ... and a log of that name written again by this run does not either (only a new file is this run's)
+        r, pid = self.drive("clean", total=4, plan="1:E", command=self.game_script([self.ARMED], log_name="fable_2_6.log"))
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+
+    def test_no_plan_needs_no_armed_line(self):
+        r, pid = self.drive("clean", total=3, plan=" , ", command=self.game_script(None))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual((self.tmp / "plan.txt").read_text().strip(), "")
+
+    def test_shifted_shot_after_the_total_keeps_the_game_running(self):
+        # m4: a game that exits between -Total and the last screenshot time ended early; it is not a clean run.
+        shots = self.tmp / "shots"
+        r, pid = self.drive("clean", sleep=4, total=2, extra=("-Shots", "9", "-ShotDir", shots))
+        self.assertEqual(r.returncode, 13, r.stdout + r.stderr)
+        self.assertRegex(self.last(r), r"^TEST HARNESS GAME EXITED EARLY at \d+ s$")
+        self.assertNotIn("RUN CLEAN", r.stdout)
+        self.assertLabelled(r)
+
+    def test_verdict_is_the_last_line_and_one_line(self):
+        # m5: an error message of several lines cannot push the verdict off the last line.
+        r, pid = self.drive("abort_multiline", total=30)
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertEqual(self.last(r), "TEST HARNESS RUN ABORTED: boom (test abort) | its second line")
+        r, pid = self.drive("multiline", total=3)                            # the harness fails while it loads: a gate error
+        self.assertEqual(r.returncode, 10, r.stdout + r.stderr)
+        self.assertRegex(self.last(r), r"^REFUSED: idle gate failed \(first line \| second line\); counted as user present\. Nothing launched\.$")
+
+    def test_clean_seconds_are_launch_to_close(self):
+        # m8: the driver stays alive 4 s after it closed the game in this scenario; the verdict's time is the game's.
+        r, pid = self.drive("clean_hold", total=3)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        m = re.match(r"^TEST HARNESS RUN CLEAN: no user input for (\d+) s$", self.last(r))
+        self.assertTrue(m, self.last(r))
+        self.assertIn(int(m.group(1)), (3, 4))
+
     def test_game_dies_with_the_driver(self):
         """C1: killing the driver process itself must take the game with it (job object)."""
         env = dict(os.environ, **{"TEST_SCENARIO": "clean", "TEST_OUT": str(self.out), "TEST_OUT2": str(self.out2)})
@@ -867,7 +1000,7 @@ def patched_driver(root_dir, allow, with_idle=True):
     scratch -ExeDir outside test mode. The unpatched driver refuses any such -ExeDir."""
     d = Path(root_dir) / "ptools"
     d.mkdir(exist_ok=True)
-    for name in ("drive_game.ps1", "idle_check.ps1", "cmdline_quote.ps1"):
+    for name in ("drive_game.ps1", "idle_check.ps1", "cmdline_quote.ps1", "autoplay_plan.ps1"):
         if name == "idle_check.ps1" and not with_idle:
             continue
         src = (TOOLS / name).read_text(encoding="utf-8")
@@ -906,10 +1039,65 @@ class DriverGateTest(unittest.TestCase):
         self.assertIn("exit=10", (Path(self.tmp) / "logs" / "drive_game_runs.log").read_text())
 
     def test_exedir_outside_the_allow_list_is_refused(self):
-        r = run_ps([DRIVE, "-ExeDir", self.tmp, "-Total", "5"], {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"})
+        # (-IdleWaitSeconds 0: a driver without the check would end at the gate at once, not after the test's timeout)
+        r = run_ps([DRIVE, "-ExeDir", self.tmp, "-Total", "5", "-IdleWaitSeconds", "0"], {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"})
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("not an allowed build output directory", r.stdout)
         self.assertNotIn("started pid", r.stdout)
+        # m9: nothing is written into a folder the driver refused: no run log, no logs folder
+        self.assertFalse((Path(self.tmp) / "logs").exists())
+        for extra in (["stray"], ["-KeyboardInput"], ["-Plan", "x:E"]):      # refusals that come before or after it
+            r = run_ps([DRIVE, "-ExeDir", self.tmp, "-Total", "5", "-IdleWaitSeconds", "0", *extra],
+                       {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"})
+            self.assertEqual(r.returncode, 2, (extra, r.stdout, r.stderr))
+            self.assertFalse((Path(self.tmp) / "logs").exists(), extra)
+
+    def test_suite_guard_holds_for_user_present_beside_a_game(self):
+        # m7: -UserPresent is let through the suite guard only in a folder WITHOUT fable_2.exe. Here the allowed
+        # folder holds one (a harmless stand-in under the game's name): the guard must refuse before any launch.
+        shutil.copy(SORT, Path(self.tmp) / "fable_2.exe")
+        for extra in ([], ["-KeyboardInput"]):
+            r = run_ps([self.drv, "-ExeDir", self.tmp, "-Total", "2", "-Plan", "", "-UserPresent", *extra], {})
+            self.assertEqual(r.returncode, 2, (extra, r.stdout, r.stderr))
+            self.assertIn("test-suite guard", r.stdout)
+            self.assertNotIn("started pid", r.stdout)
+            self.assertNotIn("RUN UNCHECKED", r.stdout)
+
+    def bad(self, *extra):
+        """A refusal before the gate: exit 2, one REFUSED line last, the gate not evaluated, nothing launched."""
+        r = self.drive("-IdleWaitSeconds", "0", *extra)
+        self.assertEqual(r.returncode, 2, (extra, r.stdout, r.stderr))
+        last = r.stdout.strip().splitlines()[-1]
+        self.assertRegex(last, r"^REFUSED: .*Nothing launched\.$", (extra, r.stdout))
+        self.assertNotIn("forced-present", r.stdout, extra)                  # refused before the gate ran
+        self.assertNotIn("started pid", r.stdout, extra)
+        self.assertIn("exit=2", (Path(self.tmp) / "logs" / "drive_game_runs.log").read_text().splitlines()[-1])
+        return last
+
+    def test_plan_the_game_would_reject_is_refused_before_the_gate(self):
+        # The game rejects the whole plan on one bad token and then runs without input: the driver refuses it.
+        self.assertIn("bad plan", self.bad("-Plan", "23:E,x:S"))                       # a time that is no number
+        self.assertIn("exactly one ':'", self.bad("-Plan", "23:E:27"))                 # (was: the rest dropped)
+        self.assertIn("bad stick entry", self.bad("-Plan", "55:LS=0/101/3000"))
+        self.assertIn("23:LS=0000050/0/100", self.bad("-Plan", "23:LS=0000050/0/100")) # seven digits: the game's limit is six
+        self.assertIn("no pad button", self.bad("-Plan", "23:Q"))
+        # a plan the game takes reaches the gate (which the hook refuses: exit 10)
+        r = self.drive("-IdleWaitSeconds", "0", "-Plan", "23:E, 27.5:S,55:LS=0/100/3000,56:VIEW=native,66:DISC=60/4")
+        self.assertEqual(r.returncode, 10, r.stdout + r.stderr)
+
+    def test_bad_shots_are_refused(self):
+        # m3: 'NaN' used to parse as a time and switched the overrun rule off
+        for shots in ("NaN", "50,NaN", "-5", "abc", "1e2", "Infinity", "5;6"):
+            self.assertIn("-Shots", self.bad("-Shots", shots), shots)
+        r = self.drive("-IdleWaitSeconds", "0", "-Shots", " 50 ,,80.5")
+        self.assertEqual(r.returncode, 10, r.stdout + r.stderr)
+
+    def test_plan_shift_is_a_whole_number_from_0_to_30(self):
+        for shift in ("31", "-1", "2.5", "x", "", "100"):
+            self.assertIn("-PlanShift", self.bad("-PlanShift", shift), shift)
+        for shift in ("0", "6", "30"):
+            r = self.drive("-IdleWaitSeconds", "0", "-PlanShift", shift)
+            self.assertEqual(r.returncode, 10, (shift, r.stdout, r.stderr))
 
     def test_suite_guard_refuses_a_real_gate(self):
         # FABLE2_DRIVER_NO_REAL_GATE is set by this module: without the hook the driver refuses to evaluate the real gate
@@ -1108,6 +1296,23 @@ class InSessionTest(unittest.TestCase):
         self.assertNotIn("RUN CLEAN", r.stdout)
         self.assertEqual(lines[-1], "after: 12")
 
+    def bad_plan(self, shell):
+        # a bad plan is a refusal with exit code 2 (not a script error that leaves a stale $LASTEXITCODE behind)
+        cmd = ("$global:LASTEXITCODE = 0; & %s -ExeDir %s -IdleWaitSeconds 0 -Plan '23:E:27' -Shots '50'; 'after: ' + $LASTEXITCODE"
+               % (self.q(self.drv), self.q(self.tmp / "exe")))
+        r = run_cmd(shell, cmd, {"FABLE2_IDLE_GATE_FORCE_PRESENT": "1"})
+        lines = r.stdout.strip().splitlines()
+        self.assertRegex(lines[-2], r"^REFUSED: bad plan: .*Nothing launched\.$", r.stdout + r.stderr)
+        self.assertEqual(lines[-1], "after: 2")
+        self.assertNotIn("forced-present", r.stdout)
+
+    def test_bad_plan_in_session_pwsh(self):
+        self.bad_plan(PWSH)
+
+    @unittest.skipUnless(PS51, "Windows PowerShell 5.1 not available")
+    def test_bad_plan_in_session_ps51(self):
+        self.bad_plan(PS51)
+
     def test_refusal_in_session_pwsh(self):
         self.refusal(PWSH)
 
@@ -1177,10 +1382,128 @@ class InSessionTest(unittest.TestCase):
         self.assertTrue((self.tmp / "exe" / "logs" / "drive_game_runs.log").exists())  # the log is under the resolved -ExeDir
 
 
+PLAN_TABLE_PS = r"""
+. '%s'
+$pad = @{ "E"="A"; "SPACE"="A"; "S"="Down"; "W"="Up"; "A"="Left"; "D"="Right"; "ESC"="B"; "ENTER"="Start" }
+$keys = @{ "E"=0x45; "S"=0x53; "F6"=0x75 }
+$cases = '%s' | ConvertFrom-Json
+$out = foreach ($c in $cases) {
+  try {
+    if ($c.kind -eq 'plan') {
+      $r = ConvertTo-Fable2Plan -Plan $c.text -KeyboardInput ([bool]$c.keyboard) -Shift ([double]$c.shift) -PadButtons $pad -Keys $keys
+      $got = if ($c.keyboard) { (@($r.Events | ForEach-Object { "$($_.t)=$($_.k)" }) -join ';') } else { "$($r.Count)|$($r.Autoplay)" }
+    } elseif ($c.kind -eq 'shots') {
+      $got = (@(ConvertTo-Fable2ShotTimes -Shots $c.text -Shift ([double]$c.shift)) -join ';')
+    } else {
+      $got = [string](ConvertTo-Fable2PlanShift -Text $c.text)
+    }
+    [pscustomobject]@{ ok = $true; got = $got }
+  } catch { [pscustomobject]@{ ok = $false; got = $_.Exception.Message } }
+}
+ConvertTo-Json -Compress -InputObject @($out)
+"""
+
+
+@unittest.skipUnless(PWSH, "PowerShell not available")
+class PlanTableTest(unittest.TestCase):
+    """tools/autoplay_plan.ps1: the driver's reading of -Plan, -Shots and -PlanShift, in both PowerShells.
+    The driver accepts what the game's parser accepts (src/input/autoplay.h; its rejected tokens are those of
+    tests/native/test_autoplay.cpp) and refuses the rest by name."""
+
+    ACCEPT = [
+        ("plan", "23:E,27:S,30:E,35:E", 0, False, "4|23:A,27:Down,30:A,35:A"),
+        ("plan", " 23 : e ,, 27.50:s ,", 0, False, "2|23:A,27.5:Down"),              # blanks and empty entries, as the game
+        ("plan", "5.:W,.5:D,0:ESC,7:enter,8:Space,9:a", 0, False, "6|5:Up,0.5:Right,0:B,7:Start,8:A,9:Left"),
+        ("plan", "55:LS=0/100/3000,59:rs=-60/0/1500,52:VIEW=Off,66:disc=60/4,70:view=PATTERN", 0, False,
+         "5|55:LS=0/100/3000,59:rs=-60/0/1500,52:VIEW=Off,66:disc=60/4,70:view=PATTERN"),
+        ("plan", "1:LS=-100/100/60000,2:RS=000100/-0/000001,3:DISC=100000/64,4:DISC=1/1", 0, False,
+         "4|1:LS=-100/100/60000,2:RS=000100/-0/000001,3:DISC=100000/64,4:DISC=1/1"),
+        ("plan", "23:E,27:S,54.25:VIEW=native,55:LS=0/100/3000", 6, False, "4|29:A,33:Down,60.25:VIEW=native,61:LS=0/100/3000"),
+        ("plan", "0:E,86400:S", 30, False, "2|30:A,86430:Down"),
+        ("plan", "", 0, False, "0|"),
+        ("plan", " , ,", 6, False, "0|"),
+        ("plan", "1:e,2.5:F6", 2, True, "3=E;4.5=F6"),
+        ("shots", "50,80", 0, False, "50;80"),
+        ("shots", " 54 ,,58.5,", 6, False, "60;64.5"),
+        ("shots", "", 6, False, ""),
+        ("shift", "0", 0, False, "0"), ("shift", "6", 0, False, "6"), ("shift", " 30 ", 0, False, "30"), ("shift", "06", 0, False, "6"),
+    ]
+    REJECT = [
+        # the time field: digits with at most one '.', nothing else
+        ("plan", "x:E", "not a time in seconds"), ("plan", "-1:E", "not a time in seconds"), ("plan", "+1:E", "not a time in seconds"),
+        ("plan", "1e3:E", "not a time in seconds"), ("plan", "NaN:E", "not a time in seconds"), ("plan", "Infinity:E", "not a time in seconds"),
+        ("plan", "1.2.3:E", "not a time in seconds"), ("plan", ":E", "not a time in seconds"), ("plan", ".:E", "not a time in seconds"),
+        ("plan", "0x10:E", "not a time in seconds"), ("plan", "1 0:E", "not a time in seconds"), ("plan", "100000:E", "more than 86400"),
+        # exactly seconds:key
+        ("plan", "23", "exactly one ':'"), ("plan", "23:E:extra", "exactly one ':'"), ("plan", "23:E:", "exactly one ':'"),
+        ("plan", "23:LS=0/100/3000:1", "exactly one ':'"),
+        ("plan", "23:", "no pad button"), ("plan", "23:Q", "no pad button"), ("plan", "23:Down", "no pad button"),
+        # one bad entry refuses the plan
+        ("plan", "23:E,x:S,30:E", "not a time in seconds"),
+        # sticks (the game's rejects, and its digit limit)
+        ("plan", "5:LS=0/100", "none of"), ("plan", "5:LS=0/100/0", "bad stick entry"), ("plan", "5:LS=101/0/100", "bad stick entry"),
+        ("plan", "5:LS=0/-101/100", "bad stick entry"), ("plan", "5:LS=0/100/60001", "bad stick entry"),
+        ("plan", "5:LS=0/100/10/1", "none of"), ("plan", "5:LS=a/0/100", "none of"), ("plan", "5:XS=0/0/100", "none of"),
+        ("plan", "5:LS=", "none of"), ("plan", "5:LS=0//100", "none of"), ("plan", "5:LS=0000050/0/100", "none of"),
+        ("plan", "5:LS=0/0/0000100", "none of"), ("plan", "5:LS=+5/0/100", "none of"), ("plan", "5:LS=0/0/-100", "none of"),
+        ("plan", "5:LS=0 /0/100", "none of"),
+        # view and capture
+        ("plan", "5:VIEW=", "none of"), ("plan", "5:VIEW=sideways", "none of"), ("plan", "5:VIEW=native/1", "none of"),
+        ("plan", "5:VIEWS=off", "none of"), ("plan", "5:DISC=120", "none of"), ("plan", "5:DISC=0/4", "bad capture entry"),
+        ("plan", "5:DISC=120/0", "bad capture entry"), ("plan", "5:DISC=120/65", "bad capture entry"),
+        ("plan", "5:DISC=100001/4", "bad capture entry"), ("plan", "5:DISC=a/4", "none of"), ("plan", "5:DISC=120/4/1", "none of"),
+        ("plan", "5:DISC=", "none of"), ("plan", "5:DISC=/4", "none of"), ("plan", "5:DISC=120/", "none of"),
+        ("plan", "5:DISC=1234567/4", "none of"), ("plan", "5:X=1", "none of"),
+        ("plan", "5:VIEW", "no pad button"),                                  # (without "=" it is a key name here)
+        # shots and the shift
+        ("shots", "NaN", "-Shots time"), ("shots", "50,NaN", "-Shots time"), ("shots", "-5", "-Shots time"),
+        ("shots", "abc", "-Shots time"), ("shots", "1e2", "-Shots time"), ("shots", "Infinity", "-Shots time"),
+        ("shots", "5;6", "-Shots time"), ("shots", "90000", "more than 86400"),
+        ("shift", "31", "-PlanShift"), ("shift", "-1", "-PlanShift"), ("shift", "2.5", "-PlanShift"), ("shift", "x", "-PlanShift"),
+        ("shift", "", "-PlanShift"), ("shift", "100", "-PlanShift"), ("shift", "1e1", "-PlanShift"), ("shift", "NaN", "-PlanShift"),
+    ]
+    KEYBOARD_REJECT = [("plan", "1:LS=0/0/100", "unknown key"), ("plan", "1:Q", "unknown key"), ("plan", "x:E", "not a time in seconds")]
+
+    def table(self, shell):
+        cases = [dict(kind=k, text=t, shift=s, keyboard=kb) for k, t, s, kb, _ in self.ACCEPT]
+        cases += [dict(kind=k, text=t, shift=0, keyboard=False) for k, t, _ in self.REJECT]
+        cases += [dict(kind=k, text=t, shift=0, keyboard=True) for k, t, _ in self.KEYBOARD_REJECT]
+        body = PLAN_TABLE_PS % (str(PLAN).replace("\\", "/"), json.dumps(cases).replace("'", "''"))
+        r = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command", body], capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        got = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertEqual(len(got), len(cases))
+        n = len(self.ACCEPT)
+        for (kind, text, shift, kb, want), g in zip(self.ACCEPT, got[:n]):
+            self.assertTrue(g["ok"], (kind, text, g))
+            self.assertEqual(g["got"], want, (kind, text, shift))
+        for (kind, text, why), g in zip(self.REJECT + self.KEYBOARD_REJECT, got[n:]):
+            self.assertFalse(g["ok"], (kind, text, g))
+            self.assertIn(why, g["got"], (kind, text))
+            self.assertNotIn("\n", g["got"])
+
+    def test_table_pwsh(self):
+        self.table(PWSH)
+
+    @unittest.skipUnless(PS51, "Windows PowerShell 5.1 not available")
+    def test_table_ps51(self):
+        self.table(PS51)
+
+    def test_the_games_rejected_tokens_are_in_the_table(self):
+        # Every token tests/native/test_autoplay.cpp expects the game to reject is refused here too.
+        src = (ROOT / "tests" / "native" / "test_autoplay.cpp").read_text(encoding="utf-8")
+        tokens = set()
+        for block in re.findall(r"for \(const char\* bad : \{(.*?)\}\)", src, re.S):
+            tokens |= set(re.findall(r'"([^"]*)"', block))
+        self.assertGreaterEqual(len(tokens), 20)
+        mine = {t for _, t, _ in self.REJECT}
+        self.assertEqual(sorted(t for t in tokens if t not in mine), [])
+
+
 @unittest.skipUnless(PWSH, "PowerShell not available")
 class SyntaxTest(unittest.TestCase):
     def test_scripts_parse(self):
-        for script in (IDLE, DRIVE):
+        for script in (IDLE, DRIVE, PLAN):
             code = ("$e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile('%s', [ref]$null, [ref]$e); "
                     "$e.Count" % str(script).replace("\\", "/"))
             r = subprocess.run([PWSH, "-NoProfile", "-Command", code], capture_output=True, text=True)

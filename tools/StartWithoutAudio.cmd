@@ -1,4 +1,5 @@
 @echo off
+rem AUTOMATED AGENTS: do not run this launcher. Agents start the game only through tools\drive_game.ps1 (without -UserPresent); this one is for a person at the keyboard.
 rem Exercise SDL3's missing-device failure path in this process only.
 rem Does not disable or alter any Windows audio device.
 setlocal

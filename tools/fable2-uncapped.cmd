@@ -1,4 +1,5 @@
 @echo off
+rem AUTOMATED AGENTS: do not run this launcher. Agents start the game only through tools\drive_game.ps1 (without -UserPresent); this one is for a person at the keyboard.
 rem ===========================================================================
 rem Fable 2 - UNCAPPED launcher (60fps+, no frame cap).
 rem

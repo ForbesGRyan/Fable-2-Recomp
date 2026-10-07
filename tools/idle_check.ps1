@@ -8,22 +8,30 @@
 #
 # Presence signals (each means "the user is present"; anything unknown counts as present):
 #   input           keyboard or mouse input within the required idle time (GetLastInputInfo)
-#   controller      a connected XInput pad (slots 0..3) showed activity: any button, a trigger
-#                   above 30, a thumbstick beyond 8000 from centre. Pads have no "last input"
-#                   time, so with a pad connected the gate samples every 250 ms for the whole
-#                   required idle time; activity restarts that observation
+#   controller      an XInput pad (slots 0..3) showed activity (any button, a trigger above 30,
+#                   a thumbstick more than 8000 from centre), or connected, or was unplugged.
+#                   A background thread samples the pads every 10 ms (empty slots are re-scanned
+#                   once a second) and latches the time of the last activity and of the last
+#                   connect or disconnect, so a short tap between two polls is not missed. Once a
+#                   pad has been seen, the gate needs the full idle time without activity or
+#                   change; each activity, connect or disconnect restarts that observation
+#   audio           sound is playing on the default playback device (Core Audio peak meter above
+#                   0.005, sampled every 50 ms by the same thread). The gate needs 10 s without
+#                   it; the watch trips on any sample after the gate passed
 #   fullscreen      SHQueryUserNotificationState says busy (2), Direct3D fullscreen (3),
 #                   presentation mode (4) or a fullscreen app (7: stricter choice)
 #   fable2-running  a fable_2.exe is already running (the user may be playing); gate only
-#   unknown         a probe failed, an API returned something unexpected (including a
-#                   notification state outside 1..7 or an XInput error other than "no
-#                   controller"), or this is session 0
+#   unknown         a probe failed (including the sampler thread stalling), an API returned
+#                   something unexpected (a notification state outside 1..7, an XInput error other
+#                   than "no controller", no audio device), an idle time that is negative,
+#                   not finite or longer than the uptime, or this is session 0
 #   forced-present  the test hook FABLE2_IDLE_GATE_FORCE_PRESENT=1 is set. It can only ADD
 #                   this signal; nothing removes a signal
 # Notification state 1 (not present: screen saver running or workstation locked) is "away";
 # 5 (accepts notifications) and 6 (quiet time) are neutral.
-# Only a controller observation spans the whole idle time; the other non-input signals are
-# instantaneous, but a gate that sees one restarts the controller observation.
+# Limits: only XInput pads are seen (not DirectInput or other controllers); a user who is
+# silent and motionless for the whole idle time reads as away.
+# Sampling: the gate loop sleeps 250 ms plus the probe time (a few ms) between decisions.
 #
 # CLI (exit codes: 0 away, 1 present, 2 usage error or unknown state; never 0 by default):
 #   .\tools\idle_check.ps1                                  # usage, exit 2
@@ -32,8 +40,9 @@
 #   .\tools\idle_check.ps1 -Report                          # print the signals, exit 0
 #                                                           # (for humans; NOT a permission to run)
 #   .\tools\idle_check.ps1 -WatchSeconds 20                 # watch; exit 1 at the first signal
-# -MinIdleSeconds must be at least 60. Library use: dot-source this file
-# (`. .\tools\idle_check.ps1`); the CLI does not run when dot-sourced.
+# -MinIdleSeconds must be at least 60 here (drive_game.ps1 always uses 300). -Report cannot be
+# combined with another mode. Library use: dot-source this file (`. .\tools\idle_check.ps1`);
+# the CLI does not run when dot-sourced.
 param(
   [int]$MinIdleSeconds = 0,     # required idle time, at least 60; gates
   [int]$MaxWaitSeconds = 0,     # how long the gate may take to see the user away
@@ -43,17 +52,43 @@ param(
 $ErrorActionPreference = "Stop"
 $script:GateGiven = $PSBoundParameters.ContainsKey('MinIdleSeconds')
 
-if (-not ('Fable2IdleProbe' -as [type])) {
+# The type name carries the version: a stale or look-alike type from earlier in the session is
+# never reused (and a type of this name without the right ProbeVersion is an error).
+if (-not ('Fable2IdleProbeV2' -as [type])) {
   Add-Type -TypeDefinition @"
 using System;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
-public static class Fable2IdleProbe {
+using System.Threading;
+
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+class Fable2MMDeviceEnumeratorCom { }
+
+[ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IFable2MMDeviceEnumerator {
+  [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr devices);
+  [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IFable2MMDevice device);
+}
+
+[ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IFable2MMDevice {
+  [PreserveSig] int Activate(ref Guid iid, int clsCtx, IntPtr activationParams, [MarshalAs(UnmanagedType.IUnknown)] out object iface);
+}
+
+[ComImport, Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IFable2AudioMeter {
+  [PreserveSig] int GetPeakValue(out float peak);
+}
+
+public sealed class Fable2IdleProbeV2 {
+  public const int ProbeVersion = 2;
   [StructLayout(LayoutKind.Sequential)]
   struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
   [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LASTINPUTINFO info);
   [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("shell32.dll")] static extern int SHQueryUserNotificationState(out int state);
+  [DllImport("kernel32.dll")] static extern ulong GetTickCount64();
   [StructLayout(LayoutKind.Sequential)]
   struct XINPUT_GAMEPAD {
     public ushort wButtons; public byte bLeftTrigger; public byte bRightTrigger;
@@ -63,68 +98,175 @@ public static class Fable2IdleProbe {
   struct XINPUT_STATE { public uint dwPacketNumber; public XINPUT_GAMEPAD Gamepad; }
   [DllImport("xinput1_4.dll")] static extern uint XInputGetState(uint index, out XINPUT_STATE state);
 
-  // Seconds since the last keyboard or mouse input and that input's tick; idle -1 on failure.
-  public static double LastInput(out uint tick) {
+  // One pad state is activity: any button, a trigger above 30, a stick more than 8000 from centre.
+  public static bool PadActive(int buttons, int lt, int rt, int lx, int ly, int rx, int ry) {
+    if (buttons != 0 || lt > 30 || rt > 30) return true;
+    long limit = 8000L * 8000L;
+    if ((long)lx * lx + (long)ly * ly > limit) return true;
+    if ((long)rx * rx + (long)ry * ry > limit) return true;
+    return false;
+  }
+
+  // Monotonic seconds; the sampler stamps and the callers' baselines use this same clock.
+  public double Now() { return (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency; }
+
+  // { idle seconds (-1 on failure), tick of the last input }
+  public double[] LastInputInfo() {
     LASTINPUTINFO info = new LASTINPUTINFO();
     info.cbSize = (uint)Marshal.SizeOf(info);
-    tick = 0;
-    if (!GetLastInputInfo(ref info)) return -1.0;
-    tick = info.dwTime;
-    return unchecked((uint)Environment.TickCount - info.dwTime) / 1000.0;
+    if (!GetLastInputInfo(ref info)) return new double[] { -1.0, 0.0 };
+    double idle = unchecked((uint)Environment.TickCount - info.dwTime) / 1000.0;
+    return new double[] { idle, (double)info.dwTime };
   }
+  public double UptimeSeconds() { return GetTickCount64() / 1000.0; }
   // SHQueryUserNotificationState value 1..7, or -1 when the call fails.
-  public static int NotificationState() {
+  public int NotificationState() {
     int s;
     if (SHQueryUserNotificationState(out s) != 0) return -1;
     return s;
   }
-  public static int ForegroundPid() {
+  public int ForegroundPid() {
     IntPtr h = GetForegroundWindow();
     if (h == IntPtr.Zero) return 0;
     uint pid;
     GetWindowThreadProcessId(h, out pid);
     return (int)pid;
   }
-  // null: no controller in that slot. Else buttons, left and right trigger, LX, LY, RX, RY.
-  // Any other XInput result is an error and throws (the caller treats it as "unknown").
-  public static int[] Pad(int index) {
-    XINPUT_STATE st;
-    uint r = XInputGetState((uint)index, out st);
-    if (r == 1167) return null;
-    if (r != 0) throw new InvalidOperationException("XInputGetState(" + index + ") returned " + r);
-    XINPUT_GAMEPAD g = st.Gamepad;
-    return new int[] { g.wButtons, g.bLeftTrigger, g.bRightTrigger, g.sThumbLX, g.sThumbLY, g.sThumbRX, g.sThumbRY };
+  public bool Session0() { return Process.GetCurrentProcess().SessionId == 0; }
+  public bool Fable2Running() { return Process.GetProcessesByName("fable_2").Length > 0; }
+
+  // ---- background sampler: pads every 10 ms, audio every 50 ms ----
+  static readonly object Lk = new object();
+  static Thread th;
+  static volatile bool stopFlag;
+  static double heartbeat = -1, padActivity = -1, padChange = -1, audioStamp = -1, padErr = -1, audioErr = -1;
+  static int padMask = 0;
+
+  public void StartSampler() {
+    lock (Lk) {
+      if (th != null && th.IsAlive) return;
+      stopFlag = false;
+      padActivity = -1; padChange = -1; audioStamp = -1; padErr = -1; audioErr = -1; padMask = 0;
+      heartbeat = Now();
+      th = new Thread(SampleLoop);
+      th.IsBackground = true;
+      th.Name = "Fable2IdleSampler";
+      th.Start();
+    }
+  }
+  public void StopSampler() {
+    Thread t;
+    lock (Lk) { t = th; stopFlag = true; }
+    if (t != null) t.Join(2000);
+    lock (Lk) { th = null; heartbeat = -1; }
+  }
+  // { pad connected 0/1, pad activity stamp, pad change stamp, audio stamp, pad error stamp,
+  //   audio error stamp, sampler heartbeat stamp, sampler running 0/1 }; -1 stamps: never
+  public double[] Latch() {
+    lock (Lk) {
+      bool run = th != null && th.IsAlive;
+      return new double[] { padMask != 0 ? 1.0 : 0.0, padActivity, padChange, audioStamp, padErr, audioErr, heartbeat, run ? 1.0 : 0.0 };
+    }
+  }
+
+  static double NowS() { return (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency; }
+
+  static IFable2AudioMeter AcquireMeter() {
+    IFable2MMDeviceEnumerator en = (IFable2MMDeviceEnumerator)new Fable2MMDeviceEnumeratorCom();
+    IFable2MMDevice dev;
+    int hr = en.GetDefaultAudioEndpoint(0, 0, out dev);   // eRender, eConsole
+    if (hr != 0 || dev == null) throw new InvalidOperationException("no default playback device (0x" + hr.ToString("X") + ")");
+    Guid iid = new Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064");
+    object o;
+    hr = dev.Activate(ref iid, 23, IntPtr.Zero, out o);
+    if (hr != 0 || o == null) throw new InvalidOperationException("no audio meter (0x" + hr.ToString("X") + ")");
+    return (IFable2AudioMeter)o;
+  }
+
+  static void SampleLoop() {
+    int mask = 0;
+    double nextScan = 0, nextAudio = 0, meterAcquired = 0;
+    IFable2AudioMeter meter = null;
+    while (!stopFlag) {
+      double t = NowS();
+      try {
+        int nm = mask;
+        bool rescan = t >= nextScan;
+        for (int i = 0; i < 4; i++) {
+          if ((mask & (1 << i)) == 0 && !rescan) continue;
+          XINPUT_STATE st;
+          uint r = XInputGetState((uint)i, out st);
+          if (r == 0) {
+            nm |= (1 << i);
+            XINPUT_GAMEPAD g = st.Gamepad;
+            if (PadActive(g.wButtons, g.bLeftTrigger, g.bRightTrigger, g.sThumbLX, g.sThumbLY, g.sThumbRX, g.sThumbRY)) lock (Lk) { padActivity = t; }
+          } else if (r == 1167) {
+            nm &= ~(1 << i);
+          } else {
+            lock (Lk) { padErr = t; }
+          }
+        }
+        if (rescan) nextScan = t + 1.0;
+        if (nm != mask) { mask = nm; lock (Lk) { padMask = mask; padChange = t; } }
+      } catch (Exception) { lock (Lk) { padErr = t; } }
+      if (t >= nextAudio) {
+        nextAudio = t + 0.05;
+        try {
+          if (meter == null || t - meterAcquired > 5.0) {
+            if (meter != null) { try { Marshal.ReleaseComObject(meter); } catch (Exception) { } meter = null; }
+            meter = AcquireMeter(); meterAcquired = t;
+          }
+          float pk;
+          int hr = meter.GetPeakValue(out pk);
+          if (hr != 0) throw new InvalidOperationException("GetPeakValue 0x" + hr.ToString("X"));
+          if (pk > 0.005f) lock (Lk) { audioStamp = t; }
+        } catch (Exception) {
+          lock (Lk) { audioErr = t; }
+          if (meter != null) { try { Marshal.ReleaseComObject(meter); } catch (Exception) { } meter = null; }
+        }
+      }
+      lock (Lk) { heartbeat = t; }
+      Thread.Sleep(10);
+    }
+    if (meter != null) { try { Marshal.ReleaseComObject(meter); } catch (Exception) { } }
   }
 }
 "@
 }
+if ([Fable2IdleProbeV2]::ProbeVersion -ne 2) { throw "Fable2IdleProbeV2 has an unexpected version" }
+if ($null -eq $script:Fable2Native) { $script:Fable2Native = New-Object Fable2IdleProbeV2 }
 
 # ---- Pure decision logic (no Win32 calls; tested with synthetic values) ----
 
+$script:AudioQuietRequired = 10.0   # seconds without sound before the gate passes
+
 # One pad state is "activity": any button, a trigger above 30, a stick beyond 8000 from centre.
 function Test-Fable2PadActive {
-  param([int]$Buttons = 0, [int]$LeftTrigger = 0, [int]$RightTrigger = 0,
-        [int]$ThumbLX = 0, [int]$ThumbLY = 0, [int]$ThumbRX = 0, [int]$ThumbRY = 0)
-  if ($Buttons -ne 0) { return $true }
-  if ($LeftTrigger -gt 30 -or $RightTrigger -gt 30) { return $true }
-  foreach ($v in @($ThumbLX, $ThumbLY, $ThumbRX, $ThumbRY)) {
-    if ([Math]::Abs($v) -gt 8000) { return $true }
-  }
-  return $false
+  param([Parameter(Mandatory)][int]$Buttons, [Parameter(Mandatory)][int]$LeftTrigger,
+        [Parameter(Mandatory)][int]$RightTrigger, [Parameter(Mandatory)][int]$ThumbLX,
+        [Parameter(Mandatory)][int]$ThumbLY, [Parameter(Mandatory)][int]$ThumbRX,
+        [Parameter(Mandatory)][int]$ThumbRY)
+  return [Fable2IdleProbeV2]::PadActive($Buttons, $LeftTrigger, $RightTrigger, $ThumbLX, $ThumbLY, $ThumbRX, $ThumbRY)
 }
 
-# Gate decision before a run. Present = any signal. IdleSeconds < 0 means the probe failed.
-# ControllerQuietSeconds is how long the caller has observed the connected pads quiet.
+# Gate decision before a run. Present = any signal. A negative, non-finite or too long idle time
+# is unknown. PadObserved: a pad is or was seen during the observation; PadQuietSeconds is the time
+# since its last activity, connect or disconnect.
 function Get-Fable2GateDecision {
-  param([double]$IdleSeconds, [int]$MinIdleSeconds,
-        [bool]$ControllerConnected = $false, [double]$ControllerQuietSeconds = 0,
-        [int]$NotificationState = 5, [bool]$Fable2Running = $false,
-        [bool]$ProbeFailed = $false, [bool]$Session0 = $false, [bool]$ForcePresent = $false)
+  param([Parameter(Mandatory)][double]$IdleSeconds, [Parameter(Mandatory)][double]$UptimeSeconds,
+        [Parameter(Mandatory)][int]$MinIdleSeconds, [Parameter(Mandatory)][bool]$PadObserved,
+        [Parameter(Mandatory)][double]$PadQuietSeconds, [Parameter(Mandatory)][double]$AudioQuietSeconds,
+        [Parameter(Mandatory)][int]$NotificationState, [Parameter(Mandatory)][bool]$Fable2Running,
+        [Parameter(Mandatory)][bool]$ProbeFailed, [Parameter(Mandatory)][bool]$Session0,
+        [Parameter(Mandatory)][bool]$ForcePresent)
   $signals = New-Object System.Collections.ArrayList
-  if ($ProbeFailed -or $Session0 -or $IdleSeconds -lt 0) { [void]$signals.Add("unknown") }
+  $idleBad = ([double]::IsNaN($IdleSeconds) -or [double]::IsInfinity($IdleSeconds) -or $IdleSeconds -lt 0 `
+              -or [double]::IsNaN($UptimeSeconds) -or $IdleSeconds -gt ($UptimeSeconds + 1.0))
+  if ($ProbeFailed -or $Session0 -or $idleBad) { [void]$signals.Add("unknown") }
   if ($ForcePresent) { [void]$signals.Add("forced-present") }
-  if ($IdleSeconds -ge 0 -and $IdleSeconds -lt $MinIdleSeconds) { [void]$signals.Add("input") }
-  if ($ControllerConnected -and $ControllerQuietSeconds -lt $MinIdleSeconds) { [void]$signals.Add("controller") }
+  if (-not $idleBad -and $IdleSeconds -lt $MinIdleSeconds) { [void]$signals.Add("input") }
+  if ($PadObserved -and $PadQuietSeconds -lt $MinIdleSeconds) { [void]$signals.Add("controller") }
+  if ($AudioQuietSeconds -lt $script:AudioQuietRequired) { [void]$signals.Add("audio") }
   switch ($NotificationState) {
     { $_ -in 2, 3, 4, 7 } { [void]$signals.Add("fullscreen") }
     { $_ -in 1, 5, 6 } { }
@@ -135,16 +277,21 @@ function Get-Fable2GateDecision {
 }
 
 # Watch decision during a run: the first presence signal's name, or $null. Input is any change
-# of the last-input tick from the baseline taken when the gate passed. A fullscreen state while
-# the game window is in front is the game's own and is ignored.
+# (up or down) of the last-input tick from the baseline taken when the gate passed. Pad and audio
+# stamps count when later than BaselineStamp (the gate's pass time on the sampler's clock). A
+# fullscreen state while the game window is in front is the game's own and is ignored.
 function Get-Fable2WatchSignal {
-  param([long]$LastInputTick, [long]$BaselineInputTick, [bool]$ControllerActive = $false,
-        [int]$NotificationState = 5, [int]$ForegroundPid = 0, [int]$GamePid = 0,
-        [bool]$ProbeFailed = $false, [bool]$Session0 = $false, [bool]$ForcePresent = $false)
+  param([Parameter(Mandatory)][long]$LastInputTick, [Parameter(Mandatory)][long]$BaselineInputTick,
+        [Parameter(Mandatory)][double]$PadActivityStamp, [Parameter(Mandatory)][double]$PadChangeStamp,
+        [Parameter(Mandatory)][double]$AudioStamp, [Parameter(Mandatory)][double]$BaselineStamp,
+        [Parameter(Mandatory)][int]$NotificationState, [Parameter(Mandatory)][int]$ForegroundPid,
+        [Parameter(Mandatory)][int]$GamePid, [Parameter(Mandatory)][bool]$ProbeFailed,
+        [Parameter(Mandatory)][bool]$Session0, [Parameter(Mandatory)][bool]$ForcePresent)
   if ($ProbeFailed -or $Session0) { return "unknown" }
   if ($ForcePresent) { return "forced-present" }
   if ($LastInputTick -ne $BaselineInputTick) { return "input" }
-  if ($ControllerActive) { return "controller" }
+  if ($PadActivityStamp -gt $BaselineStamp -or $PadChangeStamp -gt $BaselineStamp) { return "controller" }
+  if ($AudioStamp -gt $BaselineStamp) { return "audio" }
   switch ($NotificationState) {
     { $_ -in 2, 3, 4, 7 } { if ($GamePid -eq 0 -or $ForegroundPid -ne $GamePid) { return "fullscreen" } }
     { $_ -in 1, 5, 6 } { }
@@ -153,39 +300,42 @@ function Get-Fable2WatchSignal {
   return $null
 }
 
-# ---- Win32 probing ----
+# ---- probing ----
 
-# One reading of every signal. Each probe is isolated; a failing one sets ProbeFailed (fail closed).
+# One reading of every signal through $Native (default: the real probe; tests pass a fake with the
+# same methods). Each probe is isolated; a failing one sets ProbeFailed (fail closed).
 function Get-Fable2Snapshot {
-  param([switch]$CheckProcess)
+  param([switch]$CheckProcess, $Native = $null)
+  if ($null -eq $Native) { $Native = $script:Fable2Native }
   $failed = @()
-  $idle = -1.0; $tick = [uint32]0
-  try { $idle = [Fable2IdleProbe]::LastInput([ref]$tick) } catch { $failed += "input: $($_.Exception.Message)" }
-  if ($idle -lt 0) { $failed += "GetLastInputInfo failed" }
-  $connected = $false; $active = $false
+  $now = 0.0; $idle = -1.0; $tick = [long]0; $uptime = 0.0
+  $padConn = $false; $padAct = -1.0; $padChg = -1.0; $aud = -1.0
+  try { $now = [double]$Native.Now() } catch { $failed += "clock: $($_.Exception.Message)" }
   try {
-    for ($i = 0; $i -lt 4; $i++) {
-      $s = [Fable2IdleProbe]::Pad($i)
-      if ($null -eq $s) { continue }
-      $connected = $true
-      if (Test-Fable2PadActive -Buttons $s[0] -LeftTrigger $s[1] -RightTrigger $s[2] `
-            -ThumbLX $s[3] -ThumbLY $s[4] -ThumbRX $s[5] -ThumbRY $s[6]) { $active = $true }
-    }
-  } catch { $failed += "xinput: $($_.Exception.Message)" }
+    $li = $Native.LastInputInfo(); $idle = [double]$li[0]; $tick = [long]$li[1]
+    if ($idle -lt 0) { $failed += "GetLastInputInfo failed" }
+  } catch { $failed += "input: $($_.Exception.Message)"; $idle = -1.0 }
+  try { $uptime = [double]$Native.UptimeSeconds() } catch { $failed += "uptime: $($_.Exception.Message)" }
+  try {
+    $l = $Native.Latch()
+    $padConn = ($l[0] -eq 1); $padAct = [double]$l[1]; $padChg = [double]$l[2]; $aud = [double]$l[3]
+    if ($l[7] -ne 1 -or $l[6] -lt 0 -or ($now - $l[6]) -gt 2.0) { $failed += "sampler thread not running or stalled" }
+    if ($l[4] -ge 0 -and ($now - $l[4]) -lt 2.0) { $failed += "XInput probe failed" }
+    if ($l[5] -ge 0 -and ($now - $l[5]) -lt 2.0) { $failed += "audio probe failed" }
+  } catch { $failed += "sampler: $($_.Exception.Message)" }
   $ns = -1
-  try { $ns = [Fable2IdleProbe]::NotificationState() } catch { $failed += "notification: $($_.Exception.Message)" }
+  try { $ns = [int]$Native.NotificationState() } catch { $failed += "notification: $($_.Exception.Message)" }
   $fg = 0
-  try { $fg = [Fable2IdleProbe]::ForegroundPid() } catch { $failed += "foreground: $($_.Exception.Message)" }
-  $s0 = $false
-  try { $s0 = ([Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0) } catch { $failed += "session: $($_.Exception.Message)"; $s0 = $true }
+  try { $fg = [int]$Native.ForegroundPid() } catch { $failed += "foreground: $($_.Exception.Message)" }
+  $s0 = $true
+  try { $s0 = [bool]$Native.Session0() } catch { $failed += "session: $($_.Exception.Message)" }
   $running = $false
   if ($CheckProcess) {
-    try { $running = (@([Diagnostics.Process]::GetProcessesByName("fable_2")).Count -gt 0) }
-    catch { $failed += "process list: $($_.Exception.Message)" }
+    try { $running = [bool]$Native.Fable2Running() } catch { $failed += "process list: $($_.Exception.Message)" }
   }
   return [pscustomobject]@{
-    IdleSeconds = $idle; LastInputTick = [long]$tick
-    ControllerConnected = $connected; ControllerActive = $active
+    Now = $now; IdleSeconds = $idle; LastInputTick = $tick; UptimeSeconds = $uptime
+    PadConnected = $padConn; PadActivityStamp = $padAct; PadChangeStamp = $padChg; AudioStamp = $aud
     NotificationState = $ns; ForegroundPid = $fg; Session0 = $s0
     Fable2Running = $running
     ForcePresent = ($env:FABLE2_IDLE_GATE_FORCE_PRESENT -eq "1")
@@ -193,48 +343,63 @@ function Get-Fable2Snapshot {
   }
 }
 
-# Waits until the user has been away for MinIdleSeconds, at most MaxWaitSeconds (a controller
-# observation needs MinIdleSeconds of that). Returns Passed, Signals and the last snapshot.
+# Waits until the user has been away for MinIdleSeconds (and sound has been off for 10 s), at most
+# MaxWaitSeconds; a pad observation needs MinIdleSeconds of that. Returns Passed, Signals and the
+# last snapshot. -Probe, -Clock and -Sleep are injectable for tests; the 60 s floor is always in force.
 function Wait-Fable2Away {
-  param([int]$MinIdleSeconds, [int]$MaxWaitSeconds = 0)
+  param([int]$MinIdleSeconds, [int]$MaxWaitSeconds = 0, [scriptblock]$Probe = $null,
+        [scriptblock]$Clock = $null, [scriptblock]$Sleep = $null)
   if ($MinIdleSeconds -lt 60) { throw "MinIdleSeconds must be at least 60 (got $MinIdleSeconds)" }
-  $sw = [Diagnostics.Stopwatch]::StartNew()
-  $quietSince = 0.0; $wasConnected = $false; $lastLog = 0.0
+  if ($null -eq $Probe) {
+    $script:Fable2Native.StartSampler()
+    $Probe = { Get-Fable2Snapshot -CheckProcess }
+  }
+  if ($null -eq $Clock) { $Clock = { $script:Fable2Native.Now() } }
+  if ($null -eq $Sleep) { $Sleep = { param($ms) Start-Sleep -Milliseconds $ms } }
+  $t0 = [double](& $Clock)
+  $quietSince = $t0; $lastLog = $t0
   while ($true) {
-    $snap = Get-Fable2Snapshot -CheckProcess
-    $now = $sw.Elapsed.TotalSeconds
-    if ($snap.ControllerConnected -and -not $wasConnected) { $quietSince = $now }
-    $wasConnected = $snap.ControllerConnected
-    # Any signal other than input or a quiet pad restarts the controller observation.
-    $others = Get-Fable2GateDecision -IdleSeconds $snap.IdleSeconds -MinIdleSeconds 0 `
-      -NotificationState $snap.NotificationState -Fable2Running $snap.Fable2Running `
-      -ProbeFailed $snap.ProbeFailed -Session0 $snap.Session0 -ForcePresent $snap.ForcePresent
-    if ($snap.ControllerActive -or $others.Present) { $quietSince = $now }
-    $d = Get-Fable2GateDecision -IdleSeconds $snap.IdleSeconds -MinIdleSeconds $MinIdleSeconds `
-      -ControllerConnected $snap.ControllerConnected -ControllerQuietSeconds ($now - $quietSince) `
-      -NotificationState $snap.NotificationState -Fable2Running $snap.Fable2Running `
-      -ProbeFailed $snap.ProbeFailed -Session0 $snap.Session0 -ForcePresent $snap.ForcePresent
+    $snap = & $Probe
+    $now = [double]$snap.Now
+    # A pad connecting, unplugged or active (latched between polls) restarts the observation.
+    if ($snap.PadChangeStamp -gt $quietSince) { $quietSince = $snap.PadChangeStamp }
+    if ($snap.PadActivityStamp -gt $quietSince) { $quietSince = $snap.PadActivityStamp }
+    $audioSince = [Math]::Max($t0, $snap.AudioStamp)
+    # Any other instantaneous signal restarts the pad observation too.
+    $others = Get-Fable2GateDecision -IdleSeconds $snap.IdleSeconds -UptimeSeconds $snap.UptimeSeconds -MinIdleSeconds 0 `
+      -PadObserved $false -PadQuietSeconds 0 -AudioQuietSeconds 1e9 -NotificationState $snap.NotificationState `
+      -Fable2Running $snap.Fable2Running -ProbeFailed $snap.ProbeFailed -Session0 $snap.Session0 -ForcePresent $snap.ForcePresent
+    if ($others.Present) { $quietSince = $now }
+    $d = Get-Fable2GateDecision -IdleSeconds $snap.IdleSeconds -UptimeSeconds $snap.UptimeSeconds -MinIdleSeconds $MinIdleSeconds `
+      -PadObserved ($snap.PadConnected -or $snap.PadChangeStamp -ge 0) -PadQuietSeconds ($now - $quietSince) `
+      -AudioQuietSeconds ($now - $audioSince) -NotificationState $snap.NotificationState `
+      -Fable2Running $snap.Fable2Running -ProbeFailed $snap.ProbeFailed -Session0 $snap.Session0 -ForcePresent $snap.ForcePresent
     if (-not $d.Present) { return [pscustomobject]@{ Passed = $true; Signals = @(); Snapshot = $snap } }
-    if ($now -ge $MaxWaitSeconds) { return [pscustomobject]@{ Passed = $false; Signals = $d.Signals; Snapshot = $snap } }
-    if ($now - $lastLog -ge 60) { $lastLog = $now; Write-Host ("idle gate: user present ({0}), waiting ({1:N0} of {2} s)" -f ($d.Signals -join ", "), $now, $MaxWaitSeconds) }
-    Start-Sleep -Milliseconds ([int][Math]::Min(250, [Math]::Max(1, ($MaxWaitSeconds - $now) * 1000)))
+    if (($now - $t0) -ge $MaxWaitSeconds) { return [pscustomobject]@{ Passed = $false; Signals = $d.Signals; Snapshot = $snap } }
+    if ($now - $lastLog -ge 60) { $lastLog = $now; Write-Host ("idle gate: user present ({0}), waiting ({1:N0} of {2} s)" -f ($d.Signals -join ", "), ($now - $t0), $MaxWaitSeconds) }
+    & $Sleep ([int][Math]::Min(250, [Math]::Max(1, ($MaxWaitSeconds - ($now - $t0)) * 1000)))
   }
 }
 
 # ---- CLI ----
 
 function Invoke-Fable2IdleCli {
-  if (-not ($script:GateGiven -or $Report -or $WatchSeconds -gt 0)) {
+  $modes = @($script:GateGiven, [bool]$Report, ($WatchSeconds -gt 0)) | Where-Object { $_ }
+  if (@($modes).Count -eq 0) {
     Write-Host "usage: idle_check.ps1 -MinIdleSeconds N [-MaxWaitSeconds M]   gate: exit 0 only if the user has been away N s (N >= 60), 1 if present, 2 unknown or usage"
     Write-Host "       idle_check.ps1 -Report                                  print the signals, exit 0 (NOT a permission to run the game)"
     Write-Host "       idle_check.ps1 -WatchSeconds N                          watch N s, exit 1 at the first presence signal"
     return 2
   }
+  if (@($modes).Count -gt 1) { Write-Host "usage error: -MinIdleSeconds, -Report and -WatchSeconds are separate modes; give one"; return 2 }
+  $n = $script:Fable2Native
   try {
     if ($Report) {
+      $n.StartSampler(); Start-Sleep -Milliseconds 300
       $s = Get-Fable2Snapshot -CheckProcess
       Write-Host ("idle: {0:N0} s since keyboard or mouse input" -f $s.IdleSeconds)
-      Write-Host ("controller: connected={0} active={1}" -f $s.ControllerConnected, $s.ControllerActive)
+      Write-Host ("controller: connected={0}; last activity {1}; last connect/disconnect {2}" -f $s.PadConnected, $(if ($s.PadActivityStamp -ge 0) { "{0:N1} s ago" -f ($s.Now - $s.PadActivityStamp) } else { "never seen" }), $(if ($s.PadChangeStamp -ge 0) { "{0:N1} s ago" -f ($s.Now - $s.PadChangeStamp) } else { "never seen" }))
+      Write-Host ("audio: last sound {0}" -f $(if ($s.AudioStamp -ge 0) { "{0:N1} s ago" -f ($s.Now - $s.AudioStamp) } else { "not heard" }))
       Write-Host ("notification state: {0} (1 away, 2 busy, 3 D3D fullscreen, 4 presentation, 5 accepts, 6 quiet, 7 app, -1 failed)" -f $s.NotificationState)
       Write-Host ("fable_2.exe running: {0}; session 0: {1}; forced present: {2}; probe failed: {3}" -f $s.Fable2Running, $s.Session0, $s.ForcePresent, $s.ProbeFailed)
       foreach ($f in $s.Failures) { Write-Host "probe failure: $f" }
@@ -242,16 +407,17 @@ function Invoke-Fable2IdleCli {
       return 0
     }
     if ($WatchSeconds -gt 0) {
+      $n.StartSampler(); Start-Sleep -Milliseconds 300
       $base = Get-Fable2Snapshot
       $sw = [Diagnostics.Stopwatch]::StartNew()
       while ($sw.Elapsed.TotalSeconds -lt $WatchSeconds) {
         $s = Get-Fable2Snapshot
         $sig = Get-Fable2WatchSignal -LastInputTick $s.LastInputTick -BaselineInputTick $base.LastInputTick `
-          -ControllerActive $s.ControllerActive -NotificationState $s.NotificationState `
-          -ForegroundPid $s.ForegroundPid -ProbeFailed ($s.ProbeFailed -or $base.ProbeFailed) `
-          -Session0 $s.Session0 -ForcePresent $s.ForcePresent
+          -PadActivityStamp $s.PadActivityStamp -PadChangeStamp $s.PadChangeStamp -AudioStamp $s.AudioStamp `
+          -BaselineStamp $base.Now -NotificationState $s.NotificationState -ForegroundPid $s.ForegroundPid -GamePid 0 `
+          -ProbeFailed ($s.ProbeFailed -or $base.ProbeFailed) -Session0 $s.Session0 -ForcePresent $s.ForcePresent
         if ($sig) { Write-Host ("presence signal: {0} at {1:N1} s" -f $sig, $sw.Elapsed.TotalSeconds); return 1 }
-        Start-Sleep -Milliseconds 250
+        Start-Sleep -Milliseconds 100
       }
       Write-Host ("no presence signal for {0} s" -f $WatchSeconds)
       return 0
@@ -265,6 +431,8 @@ function Invoke-Fable2IdleCli {
   } catch {
     Write-Host "unknown state: $($_.Exception.Message)"
     return 2
+  } finally {
+    try { $n.StopSampler() } catch { }
   }
 }
 

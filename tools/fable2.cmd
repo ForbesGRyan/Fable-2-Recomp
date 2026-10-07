@@ -1,4 +1,5 @@
 @echo off
+rem AUTOMATED AGENTS: do not run this launcher. Agents start the game only through tools\drive_game.ps1 (without -UserPresent); this one is for a person at the keyboard.
 rem ===========================================================================
 rem Fable 2 launcher - picks the GPU backend and stages the matching
 rem rexruntime.dll + rexgpu-xenos.dll before launching fable_2.exe.

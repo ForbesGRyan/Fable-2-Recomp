@@ -1,4 +1,5 @@
 @echo off
+rem AUTOMATED AGENTS: do not run this launcher. Agents start the game only through tools\drive_game.ps1 (without -UserPresent); this one is for a person at the keyboard.
 rem ===========================================================================
 rem Crash capture: run fable_2.exe under LLDB and dump full backtraces when
 rem the process stops (unhandled access violation or rex::debug::Break).

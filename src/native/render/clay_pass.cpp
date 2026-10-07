@@ -337,6 +337,9 @@ void ClayPass::PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::
   item.patch = &r.terrain;
   item.layer = !adaptive;
   item.drawable = p.positions && p.indices;
+  // A record without geometry makes its square fall back like one without its
+  // material: the Terrain line names it by what was missing.
+  if (textured && !item.drawable) ++(p.positions ? st.terrain_no_indices : st.terrain_no_positions);
   if (textured && item.drawable) {
     const capture::TerrainMaterialInputs& m = r.terrain.material;
     const capture::MaterialKind kind = r.material.kind;
@@ -371,9 +374,14 @@ void ClayPass::PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::
     if (p.status == MaterialStatus::kTextured) {
       // The pipeline of its state. Without one (the cache is full, its creation
       // failed) the record cannot be drawn as captured either: the default
-      // pipeline would draw a layer opaque with depth less.
+      // pipeline would draw a layer opaque with depth less. Counted in the
+      // State line's overflow, as a record that draws with a default pipeline is.
       p.pipeline = TryPipeline(dev, DecideDrawState(rs, r.material, TerrainTextured(kind), false).key);
-      if (!p.pipeline) p.status = MaterialStatus::kTerrainInputs;
+      if (!p.pipeline) {
+        p.status = MaterialStatus::kTerrainInputs;
+        p.no_pipeline = true;
+        ++st.pipeline_overflow;
+      }
     }
     item.usable = p.status == MaterialStatus::kTextured;
     if (!item.usable) ++st.terrain_unusable[size_t(p.status)];
@@ -444,8 +452,14 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
     p.alpha = d.alpha;
     // With the material: the pipeline PrepareTerrain found. Flat: the layer's
     // depth and cull without its blend, or else the flat terrain default, which
-    // also tests less-equal (the flat draw lies at its underlay's depth).
-    if (!material) p.pipeline = PipelineFor(dev, d.key, st, pipelines_[kTerrainFlatSlot]);
+    // also tests less-equal (the flat draw lies at its underlay's depth). A
+    // record that found no pipeline for its material is in the overflow count
+    // already and is not counted again here.
+    if (!material) {
+      const uint32_t counted = st.pipeline_overflow;
+      p.pipeline = PipelineFor(dev, d.key, st, pipelines_[kTerrainFlatSlot]);
+      if (p.no_pipeline) st.pipeline_overflow = counted;
+    }
     if (d.alpha_tested) ++st.alpha_tested;
     if (d.blended) ++st.blended;
     if (d.state_invalid) ++st.state_invalid;

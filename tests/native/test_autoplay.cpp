@@ -130,6 +130,20 @@ int main() {
     if (both.size() != 2 || both[0]->view != 0 || both[1]->view != 3) return 92;  // plan order
     if (!ActionsBetween(*Parse("10:A,11:LS=1/1/100", &err), 0, 20).empty()) return 93;
     if (!ActionsBetween({}, 0, 20).empty()) return 94;
+    // An action at 0 s: a poller that starts at kBeforePlan has it in its first interval, once
+    // (starting at 0 it never ran: t0 is exclusive), and nothing runs twice afterwards.
+    auto z = *Parse("0:VIEW=native,0:DISC=5/2,0.0:A,0.005:VIEW=off", &err);
+    if (!(kBeforePlan < 0.0)) return 97;
+    seen.clear();
+    last = kBeforePlan;
+    for (int i = 0; i <= 100; ++i) {  // the first poll is at t = 0 (or any time after it)
+      const double t = i * 0.005;
+      for (const Step* s : ActionsBetween(z, last, t)) seen.push_back(s->name + "@" + std::to_string(i));
+      last = t;
+    }
+    if (seen.size() != 3 || seen[0] != "VIEW=native@0" || seen[1] != "DISC=5/2@0" || seen[2] != "VIEW=off@1") return 98;
+    if (ActionsBetween(z, kBeforePlan, 0.25).size() != 3) return 99;  // a late first poll runs them all
+    if (ActionsBetween(z, 0.0, 0.25).size() != 1) return 100;         // (what a start at 0 did)
   }
   for (const char* bad : {"5:VIEW=", "5:VIEW=sideways", "5:VIEW=native/1", "5:DISC=120", "5:DISC=0/4",
                           "5:DISC=120/0", "5:DISC=120/65", "5:DISC=100001/4", "5:DISC=a/4",

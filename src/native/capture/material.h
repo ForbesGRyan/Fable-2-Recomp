@@ -60,6 +60,10 @@ inline const char* MaterialStatusName(MaterialStatus s) {
 // (no bank or negate bit: always pixel constants), -1 for none. divide_colour: the shader divides
 // its colour by the alpha, so the sampled colour is premultiplied by it.
 enum class AlphaSource : uint8_t { kNone, kOne, kAlbedo, kFetch };
+// The generated table writes the source as 0 one, 1 albedo, 2 fetch (gen_albedo_table.py,
+// _ALPHA_SOURCES) and capture.cpp casts it as AlphaSource(code + 1).
+static_assert(AlphaSource(0 + 1) == AlphaSource::kOne && AlphaSource(1 + 1) == AlphaSource::kAlbedo &&
+              AlphaSource(2 + 1) == AlphaSource::kFetch);
 
 struct AlphaSpec {
   AlphaSource source = AlphaSource::kNone;
@@ -86,6 +90,10 @@ inline bool ComposeAlphaScale(const float* consts, int n, float* out) {
 // the opaque far ground, and the far ground multiplied by the fade the layers leave (the underlay
 // the layers add to); frame-map section 13, "Terrain".
 enum class MaterialKind : uint8_t { kPlain, kTerrainLayer, kTerrainFar, kTerrainFarFade };
+// The generated table writes the kind as 1 terrain-layer, 2 terrain-far, 3 terrain-far-fade
+// (gen_albedo_table.py, _KINDS; 0 plain has no line) and capture.cpp casts it as MaterialKind(code).
+static_assert(MaterialKind(0) == MaterialKind::kPlain && MaterialKind(1) == MaterialKind::kTerrainLayer &&
+              MaterialKind(2) == MaterialKind::kTerrainFar && MaterialKind(3) == MaterialKind::kTerrainFarFade);
 
 struct Material {
   MaterialStatus status = MaterialStatus::kPsUnknown;

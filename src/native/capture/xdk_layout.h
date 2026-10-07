@@ -368,7 +368,9 @@ inline constexpr uint32_t kPsUcodeSizeShift = 0;  // bytes
 // GpuAddress(base + offset), loaded with LOAD_ALU_CONSTANT at dword index
 // first * 4 (0x82221D30..0x82221D6C). Runtime: sub-project 5 read seven vertex
 // shaders' tables this way with a temporary diagnostic (frame-map section 12,
-// "Literals": one entry each, registers 252-255); the pixel side has not run.
+// "Literals": one entry each, registers 252-255). The pixel side ran in game
+// session 1 of sub-project 6: the tess rows' "ps_lit" hold the terrain pixel
+// shaders' tables, registers 252 to 255 (frame-map section 13, "Terrain").
 inline constexpr uint32_t kShaderLiteralTableField = 0x14;
 inline constexpr uint32_t kLiteralTableSizeOffset = 0x10;
 inline constexpr uint32_t kLiteralTableEntriesOffset = 0x14;

@@ -1349,8 +1349,9 @@ void AppendTerrainPixelConstants(std::string& row, uint32_t device) {
 // The nine words of a draw's render state (render_state.h) from the device's
 // register shadows, as AppendRenderState reads them, and the low word of its bin
 // mask. `read` stays false when any of them cannot be read. RB_SURFACE_INFO
-// (the sample count alpha-to-mask works under) is read apart from them: a word
-// that cannot be read stays 0, no multisampling, and makes nothing invalid.
+// (the sample count alpha-to-mask works under) is read apart from them and only
+// for a draw with alpha-to-mask on (NeedsSurfaceInfo): a word that was not or
+// cannot be read stays 0, no multisampling, and makes nothing invalid.
 void ReadStateWords(uint32_t device, StateWords* w) {
   *w = StateWords{};
   if (!device) return;
@@ -1362,7 +1363,7 @@ void ReadStateWords(uint32_t device, StateWords* w) {
             reg(xdk::kRegDepthControl, &w->depth_control) && reg(xdk::kRegSuScModeCntl, &w->su_sc_mode) &&
             reg(xdk::kRegVportZScale, &w->vport_z_scale) && reg(xdk::kRegVteCntl, &w->vte_cntl) &&
             ReadVirtualBe32(device + xdk::kDeviceBinMaskLoOffset, &w->bin_mask_lo);
-  if (!reg(xdk::kRegSurfaceInfo, &w->surface_info)) w->surface_info = 0;
+  if (!NeedsSurfaceInfo(*w) || !reg(xdk::kRegSurfaceInfo, &w->surface_info)) w->surface_info = 0;
 }
 
 // Caller holds g_mutex. One decoded "draw" row (frame-map section 8) for
@@ -2033,7 +2034,7 @@ void FillTerrainMaterial(uint32_t device, const DeviceSnapshot& dev, bool adapti
   if (!ReadPsBankRegisters(device, kTerrainPsBaseReg, 1)) {
     std::fill_n(t_ps_bank + 4 * kTerrainPsBaseReg, 4, unread);
   }
-  uint32_t fc[5][6];
+  uint32_t fc[6][6];  // 2 and 3: the far tables or (2) the weights; 4 and 5: the steep block's
   auto fetch = [&](uint32_t slot, uint32_t* out) -> const uint32_t* {
     const uint8_t* p =
         slot < 32 ? ReadVirtual(device + xdk::kDeviceVertexFetchOffset + xdk::kDeviceTextureFetchStride * slot, 24)
@@ -2052,8 +2053,8 @@ void FillTerrainMaterial(uint32_t device, const DeviceSnapshot& dev, bool adapti
     f.weight = fetch(kTerrainWeightFetch, fc[2]);
   }
   if (steep) {
-    f.side = fetch(steep->side_slot, fc[3]);
-    f.normal = fetch(kTerrainNormalFetch, fc[4]);
+    f.side = fetch(steep->side_slot, fc[4]);
+    f.normal = fetch(kTerrainNormalFetch, fc[5]);
   }
   MakeTerrainMaterialInputs(in.terrain, adaptive, t_bank, t_ps_bank, f, &in.terrain.material, steep);
 }
@@ -2460,6 +2461,11 @@ void PublishScene(const FinishedScene& done) {
   size_t deformed = 0;
   for (const DrawRecord& r : sc.draws) deformed += r.deformed ? 1 : 0;
   // Capture-side material statuses of the drawable records (records on only).
+  // This is what the capture knows, before the renderer: every terrain record
+  // is listed as "terrain" here, under "untextured by reason", also when the
+  // clay pass then draws it with its terrain material (the clay log's Terrain
+  // line and "textured N of M drawn" say how many it did). The log text is kept
+  // as it is: the frame map quotes these lines.
   std::string untextured;
   for (size_t i = 0; i < size_t(MaterialStatus::kCount); ++i) {
     if (!sc.material[i] || MaterialStatus(i) == MaterialStatus::kTextured) continue;

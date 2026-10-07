@@ -427,7 +427,7 @@ class Fable2App : public rex::ReXApp {
       using namespace fable2::autoplay;
       const double end = EndTime(autoplay_plan_, autoplay_hold_s_);
       size_t next_log = 0;  // plan is sorted by time
-      double last_t = 0;    // actions run once: those in (last_t, t]
+      double last_t = kBeforePlan;  // actions run once: those in (last_t, t], one at 0 s in the first
       while (!stop.stop_requested()) {
         const double t = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - autoplay_t0_).count();

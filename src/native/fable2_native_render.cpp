@@ -351,10 +351,12 @@ void Install(rex::memory::Memory* memory) {
 
 // Game thread only: the string cvar is touched here only.
 void ApplyView(View next, const char* source) {
+  // Setting the view it is in changes nothing: the clay line is not marked "(changed)" for it.
+  const bool changes = ViewChanges(CurrentView(), next);
   REXCVAR_SET(fable2_native_view, std::string(ViewName(next)));
   g_view.store(next, std::memory_order_relaxed);
-  g_view_changes.fetch_add(1, std::memory_order_relaxed);
-  REXLOG_INFO("[native] {}: view {}", source, ViewName(next));
+  if (changes) g_view_changes.fetch_add(1, std::memory_order_relaxed);
+  REXLOG_INFO("[native] {}: view {}{}", source, ViewName(next), changes ? "" : " (unchanged)");
 }
 
 void SetView(View view) {

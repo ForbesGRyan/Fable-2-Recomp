@@ -828,7 +828,7 @@ class DriverRunPathTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         started = [l for l in r.stdout.splitlines() if l.startswith("started pid")]
         self.assertEqual(len(started), 1)
-        self.assertIn((shutil.which("pwsh") or PWSH).lower(), started[0].lower())   # still the stand-in, not ExeDirable_2.exe
+        self.assertIn((shutil.which("pwsh") or PWSH).lower(), started[0].lower())   # still the stand-in, not ExeDir/fable_2.exe
         self.assertLabelled(r)
 
     def test_label_cannot_be_blanked_by_harness_code(self):

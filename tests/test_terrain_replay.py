@@ -247,6 +247,48 @@ class TexTest(unittest.TestCase):
         worst = max(max(abs(p[0] - got[2 * i]), abs(p[1] - got[2 * i + 1])) for i, p in enumerate(xy))
         self.assertLess(worst, 1e-6)       # the C++ decode works in single precision
 
+    def test_real_tf17_grid_matches_cpp_normals(self):
+        """The vertex normals the clay pass draws the steep-ground block with (BuildTerrainNormals,
+        terrain_patch.h) against this tool's SquareGrid, on the real normal map: every grid point of
+        every 8-unit square of the map (48 x 48 squares, 17 x 17 points each), with the layer rows'
+        constants of the session-1 captures (c46.xy = (8, 8), c47 = (1/384, 1/384, 0, 0)). Needs
+        FABLE2_TF17_BIN and FABLE2_TF17_FC and the C++ test's output FABLE2_TF17_BIN + '.cpp.grid'
+        (tests/native/test_terrain_patch.cpp); SKIPS (never passes silently) when any is missing.
+        To run it (PowerShell, from the repository; the dump is the layer tess rows' tf17 of a
+        discovery capture, the dwords its "tf" entry 17):
+          $env:FABLE2_TF17_BIN = "<capture folder>\\native_tex_<stamp>\\1B8AA000_<identity>.bin"
+          $env:FABLE2_TF17_FC = "87004802,1B8AA071,00600300,01000D10,00000000,00000218"
+          & .\\tests\\run_native_tests.cmd
+          python -m unittest discover -s tests -p "test_terrain_replay.py" -k real_tf17
+        """
+        bin_path, fcs = os.environ.get("FABLE2_TF17_BIN"), os.environ.get("FABLE2_TF17_FC")
+        if not bin_path or not fcs or not Path(bin_path).is_file():
+            self.skipTest("no tf17 dump: set FABLE2_TF17_BIN and FABLE2_TF17_FC after a discovery capture")
+        cpp = Path(bin_path + ".cpp.grid")
+        if not cpp.is_file():
+            self.skipTest("run tests/run_native_tests.cmd with the same variables first (writes " + str(cpp) + ")")
+        fc = [int(x, 16) for x in fcs.split(",")]
+        normal_tex = tr.decode_texture(Path(bin_path).read_bytes(), fc, "normal map")
+        scale = struct.unpack("<f", struct.pack("<f", 1 / 384))[0]   # the constant as the vertex bank holds it
+        row = {"consts": {"c46": [8.0, 8.0, 1.0, 1.0], "c47": [scale, scale, 0.0, 0.0]}}
+        flat = solid((0.0, 0.0, 0.0, 0.0), linear=False)             # the heights are not compared
+        got = struct.unpack(f"<{2 * 48 * 48 * 289}f", cpp.read_bytes())
+        worst, at, steep = 0.0, 0, 0
+        for ty in range(48):
+            for tx in range(48):
+                grid = tr.SquareGrid((8.0 * tx, 8.0 * ty, 8.0, 8.0), row, flat, normal_tex)
+                self.assertEqual(len(grid.points), 289)
+                for p in grid.points:
+                    d = max(abs(p[0] - got[at]), abs(p[1] - got[at + 1]))
+                    worst = max(worst, d)
+                    steep += p[2] < 0.866   # steeper than 30 degrees: the points the block changes
+                    at += 2
+        self.assertEqual(at, len(got))
+        print(f"real tf17 grid: {at // 2} points of 2304 squares, largest difference {worst:.3g}, "
+              f"{steep} points steeper than 30 degrees")
+        self.assertLess(worst, 1e-6)       # the C++ side works in single precision
+        self.assertGreater(steep, 0)       # (a map without a slope would compare nothing of interest)
+
     def test_short_dump_is_refused_with_the_sizes(self):
         # Linear 34 x 2 k_16, pitch 64: one row of 128 bytes and 34 texels of the second: 196 bytes.
         fc = fc_for(24, 34, 2, linear=False)
@@ -355,6 +397,36 @@ class WeightChecksTest(unittest.TestCase):
         self.assertEqual(tr.cull_edge_pairs(ones, 0, 0, 2), (0, 4))
         # The window: only the 2 x 2 texels from (1, 1): 0 2 / 0 0: across (0, 2), down (2, 0): 2 of 4.
         self.assertEqual(tr.cull_edge_pairs(t, 1, 1, 2), (2, 4))
+
+    def test_cull_edges_leave_out_a_layer_that_is_never_culled(self):
+        # A 17 x 17 block whose first column is 0 and whose others are 5: the 17 pairs across columns 0
+        # and 1 have a 0 beside a value of 2 or more (of 2 * 17 * 16 = 544 pairs).
+        block = tr.Tex(17, 17, [((0 if x == 0 else 5) / 15,) * 4 for y in range(17) for x in range(17)])
+
+        class OneTexture:
+            def get(self, row, slot, what):
+                return block
+
+        consts = dict(LAYER_CONSTS, c115=[1.0, 1.0, 0.0, 0.0])   # the block starts at texel (0, 0) of the square
+        square = (80.0, 144.0, 8.0, 8.0)
+        culled = {"consts": consts}                               # c114.x = 1 / 255: a 0 texel is culled
+        never = {"consts": dict(consts, c114=[-1.0, 0, 0, 0])}    # a square's first layer: no texel is below -1
+
+        def edges(draws):
+            lines = []
+            tr._cull_edges([(square, draws)], OneTexture(), lines)
+            return lines[0]
+
+        self.assertIn("cull edges: 17 of 544 neighbouring texel pairs in the 1 17 x 17 weight blocks", edges([culled]))
+        # The layer that is never culled has no cull to differ: its block is not counted,
+        self.assertIn("cull edges: 0 of 0 neighbouring texel pairs in the 0 17 x 17 weight blocks", edges([never]))
+        # also when a layer that can be culled reads the same block after it (that one is counted once).
+        self.assertIn("cull edges: 17 of 544 neighbouring texel pairs in the 1 17 x 17 weight blocks",
+                      edges([never, culled, culled]))
+        self.assertIn("cull edges: 17 of 544 neighbouring texel pairs in the 1 17 x 17 weight blocks",
+                      edges([culled, never]))
+        # A reference of 0 culls nothing either (no texel value is below 0).
+        self.assertIn("0 of 0", edges([{"consts": dict(consts, c114=[0.0, 0, 0, 0])}]))
 
     def test_weight_sum_bins(self):
         sums = [0.5, 0.9, 0.97, 0.98, 1.0, 1.02, 1.05, 1.1, 1.5]
@@ -885,16 +957,41 @@ class CaptureTest(unittest.TestCase):
             self.assertIn("1 squares whose first layer replaces", text)
             self.assertIn("below 0.9: 0, 0.9 to 0.98: 0, 0.98 to 1.02: 0, 1.02 to 1.1: 0, above 1.1: 289", text)
             self.assertIn("0 squares whose first layer adds", text)
-            # Cull edges (printed with the weight map) over the two 17 x 17 blocks the frame uses: the
-            # texels of this sub-patch (16 to 32 of each cell) hold no 0: 0 of 2 * 2 * 17 * 16 pairs.
+            # Cull edges (printed with the weight map) over the one 17 x 17 block of a layer that can be
+            # culled (the second layer's; the first has c114.x = -1 and is never culled): the texels of
+            # this sub-patch (16 to 32 of its cell) hold no 0: 0 of 2 * 17 * 16 pairs.
             lines = tr.main([str(cap), "--frame", "1", "--weights", str(root / "w.png")])
-            self.assertTrue(any("cull edges: 0 of 1088 neighbouring texel pairs in the 2 17 x 17" in line for line in lines), lines)
+            self.assertTrue(any("cull edges: 0 of 544 neighbouring texel pairs in the 1 17 x 17" in line for line in lines), lines)
             lines = tr.main([str(cap), "--frame", "1", "--patch", "0", "--locate"])
             # c0 = (0.01, 0, 0, -1), c1 = (0, 0.01, 0, -1.5), w = 1: corner (88, 152) is ndc (-0.12, 0.02):
             # pixel (492.8, 352.8); corner (96, 160) is ndc (-0.04, 0.10): pixel (537.6, 324.0).
             text = " ".join(lines)
             self.assertIn("(88, 152) -> (492.8, 352.8)", text)
             self.assertIn("(96, 160) -> (537.6, 324.0)", text)
+            self.assertNotIn("height 0", text)
+
+    def test_locate_refuses_a_heightmap_it_cannot_read(self):
+        # The corners are projected at the ground's height: without the heightmap they are not printed
+        # at height 0 instead; the missing input is named, as the replay names it.
+        argv = ["--frame", "1", "--patch", "0", "--locate"]
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root, pconst=False, height_bytes=100)   # the level needs 200 bytes
+            with self.assertRaisesRegex(tr.MissingInput, r"heightmap.*has 100 bytes.*needs 200"):
+                tr.main([str(cap)] + argv)
+            err, out = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+                self.assertEqual(tr.cli([str(cap)] + argv), 2)
+            self.assertIn("cannot replay", err.getvalue())
+            self.assertIn("heightmap", err.getvalue())
+            self.assertNotIn("->", out.getvalue())
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root, pconst=False)
+            (root / "native_tex_x" / "h.bin").unlink()                  # the texture row without its file
+            self._edit_rows(cap, lambda rows: [r["tf"].pop("16") for r in rows if r.get("kind") == "tess"])
+            with self.assertRaisesRegex(tr.MissingInput, r"tf16 \(heightmap\)"):
+                tr.main([str(cap)] + argv)
 
     def test_underlay_is_the_adaptive_draw_with_a_colour_pass_over_the_square(self):
         def far_row(bins, origin, name):

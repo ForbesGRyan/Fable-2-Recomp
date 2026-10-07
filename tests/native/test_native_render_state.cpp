@@ -42,6 +42,14 @@ int main() {
   if (!RecordsWanted(View::kSplit, false) || RecordsWanted(View::kSplit, true)) return 19;
   if (RecordsWanted(View::kOff, false) || RecordsWanted(View::kPattern, false)) return 20;
 
+  // Setting the view to what it already is (a plan's VIEW= token) is no change: it is not counted
+  // for the clay log's "(changed)" mark. Every F6 step is one.
+  if (ViewChanges(View::kNative, View::kNative) || ViewChanges(View::kOff, View::kOff)) return 21;
+  if (!ViewChanges(View::kOff, View::kNative) || !ViewChanges(View::kSplit, View::kOverlay)) return 22;
+  for (View from : {View::kOff, View::kOverlay, View::kSplit, View::kNative, View::kPattern}) {
+    if (!ViewChanges(from, NextView(from))) return 23;
+  }
+
   std::cout << "PASS: view parsing/cycling, F6 edge detection, failure latch\n";
   return 0;
 }

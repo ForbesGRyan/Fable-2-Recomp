@@ -46,14 +46,16 @@ class GenAlbedoTest(unittest.TestCase):
                                  f"0, 0, {s | 32}, {s | 34}, -1, -1)")
 
     def test_rejects_bad_slot(self):
-        with self.assertRaises(ValueError):
-            gen_albedo_table.generate({"0x1": {"slot": 32, "u": {"input": "r0.x", "stages": []},
-                                                "v": {"input": "r0.y", "stages": []}}})
+        with self.assertRaisesRegex(ValueError, "0x0000000000000001.*slot"):
+            gen_albedo_table.generate({"0x0000000000000001": _albedo(slot=32)})
 
 
 def _albedo(**extra):
     e = {"slot": 3, "manual": True, "evidence": "e",
          "u": {"input": "r0.x", "stages": []}, "v": {"input": "r0.y", "stages": []}}
+    if "alpha" in extra:
+        # an alpha recipe has its own evidence (the committed entries also carry "alpha_manual")
+        e.update(alpha_manual=True, alpha_evidence="e")
     e.update(extra)
     return e
 
@@ -169,7 +171,8 @@ class GenAlphaKindTest(unittest.TestCase):
         self.assertEqual(inc, lines)
 
     def test_order_alpha_then_terrain_after_albedo_lines(self):
-        data = {"0x3": _terrain(), "0x2": _albedo(alpha={"source": "one"}), "0x1": _albedo(), "0x4": _terrain()}
+        data = {"0x0000000000000003": _terrain(), "0x0000000000000002": _albedo(alpha={"source": "one"}),
+                "0x0000000000000001": _albedo(), "0x0000000000000004": _terrain()}
         out = gen_albedo_table.generate(data).splitlines()
         self.assertEqual([l.split("(")[0] for l in out[1:]],
                          ["FABLE2_PS_ALBEDO", "FABLE2_PS_ALBEDO", "FABLE2_PS_ALPHA", "FABLE2_PS_TERRAIN",
@@ -220,6 +223,145 @@ class GenAlphaKindTest(unittest.TestCase):
             with self.assertRaises(ValueError, msg=repr(entry)) as cm:
                 self._gen(entry)
             self.assertIn(self.H, str(cm.exception))
+
+    def test_rejects_malformed_entries(self):
+        # An entry the generator used to accept and that changed a draw without a word (or kept a
+        # typing mistake out of sight): each is refused with the shader's hash and the fault named.
+        fog = {"no_albedo": "fog", "manual": True, "evidence": "e"}
+        steep = {"threshold": 0.99609375, "epsilon": 0.0001, "side_slot": 13}
+        bad = [
+            # keys no form has, per form (ENTRY_KEYS)
+            (_albedo(sloot=1), "unknown key sloot"),
+            (_albedo(alpha_evidense="e"), "unknown key alpha_evidense"),
+            (_albedo(uv={"o0.x": {}}), "unknown key uv"),
+            (_terrain(side_slot=13), "unknown key side_slot"),
+            (_terrain(alpha_evidence="e"), "unknown key alpha_evidence"),
+            (dict(fog, rejected="no"), "unknown key rejected"),
+            (dict(fog, alpha_manual=True), "unknown key alpha_manual"),
+            # a no_albedo entry is the whole entry
+            (dict(fog, slot=0), "a no_albedo entry takes no slot"),
+            (dict(fog, u={"input": "r0.x", "stages": []}), "a no_albedo entry takes no u"),
+            # keys "alpha" does not have; "slot" is the fetch source's
+            (_albedo(alpha={"source": "albedo", "component": "w", "scales": "c26.w"}), "unknown alpha key scales"),
+            (_albedo(alpha={"source": "fetch", "slot": 2, "component": "w", "divide": True}),
+             "unknown alpha key divide"),
+            (_albedo(alpha={"source": "one", "evidence": "e"}), "unknown alpha key evidence"),
+            (_albedo(alpha={"source": "albedo", "component": "w", "slot": 3}), "slot only with source fetch"),
+            # the albedo slot is a JSON integer 0 to 31
+            (_albedo(slot=3.9), "bad texture fetch slot 3.9"),
+            (_albedo(slot=3.0), "bad texture fetch slot 3.0"),
+            (_albedo(slot="3"), "bad texture fetch slot '3'"),
+            (_albedo(slot=True), "bad texture fetch slot True"),
+            (_albedo(slot=None), "bad texture fetch slot None"),
+            (_albedo(slot=-1), "bad texture fetch slot -1"),
+            (_albedo(slot=32), "bad texture fetch slot 32"),
+            ({k: v for k, v in _albedo().items() if k != "slot"}, "bad texture fetch slot None"),
+            # hand-confirmed and with its evidence, in every form
+            ({k: v for k, v in _albedo().items() if k != "manual"}, "manual is not true"),
+            (_albedo(manual=False), "manual is not true"),
+            (_albedo(manual="true"), "manual is not true"),
+            (_albedo(manual=1), "manual is not true"),
+            (_terrain(manual=False), "manual is not true"),
+            ({"no_albedo": "fog", "evidence": "e"}, "manual is not true"),
+            ({k: v for k, v in _albedo().items() if k != "evidence"}, "no evidence"),
+            (_albedo(evidence=""), "no evidence"),
+            (_albedo(evidence="  "), "no evidence"),
+            (_albedo(evidence=["seen"]), "no evidence"),
+            (_terrain(evidence=""), "no evidence"),
+            ({"no_albedo": "fog", "manual": True}, "no evidence"),
+            ({k: v for k, v in _albedo(alpha={"source": "one"}).items() if k != "alpha_evidence"},
+             "alpha without alpha_evidence"),
+            (_albedo(alpha={"source": "one"}, alpha_evidence=""), "alpha without alpha_evidence"),
+            (_albedo(alpha={"source": "one"}, alpha_evidence=None), "alpha without alpha_evidence"),
+            # the small term of the steep weights: the bound terrain_replay.py and terrain_patch.h use
+            (_terrain(steep=dict(steep, epsilon=0.01)), "steep epsilon"),
+            (_terrain(steep=dict(steep, epsilon=0.5)), "steep epsilon"),
+            # not an entry at all
+            ("fog", "not an object"),
+            ([], "not an object"),
+            (None, "not an object"),
+        ]
+        for entry, why in bad:
+            with self.assertRaises(ValueError, msg=repr(entry)) as cm:
+                self._gen(entry)
+            self.assertIn(self.H, str(cm.exception))
+            self.assertIn(why, str(cm.exception), repr(entry))
+        # just inside the bounds
+        self.assertEqual(len(self._gen(_terrain(steep=dict(steep, epsilon=0.0099)))), 2)
+        self.assertEqual(len(self._gen(_albedo(slot=0))), 2)
+        self.assertEqual(len(self._gen(_albedo(slot=31))), 2)
+        self.assertEqual(len(self._gen(dict(fog, kind="plain"))), 2)
+
+    def test_the_steep_epsilon_bound_is_one_number(self):
+        # Generator, replay and the C++ inputs refuse the same small terms (0.01 or more).
+        import terrain_replay
+        self.assertEqual(gen_albedo_table.STEEP_EPSILON_MAX, 0.01)
+        self.assertIs(terrain_replay.STEEP_EPSILON_MAX, gen_albedo_table.STEEP_EPSILON_MAX)
+        header = (Path(__file__).resolve().parent.parent / "src" / "native" / "capture" / "terrain_patch.h").read_text()
+        self.assertIn("inline constexpr float kTerrainSteepEpsMax = 0.01f;", header)
+        self.assertIn("m.steep_eps < kTerrainSteepEpsMax", header)
+
+    def test_rejects_bad_and_repeated_hashes(self):
+        # The key is 0x and sixteen hex digits; one shader has one entry, whatever the letters' case.
+        for key in ("0xAA", "00000000000000AA", "0x00000000000000AG", "0X00000000000000AA", "0x000000000000000AA",
+                    "0x00000000000000AA ", "0x_0000000000000AA", ""):
+            with self.assertRaises(ValueError, msg=key) as cm:
+                gen_albedo_table.generate({key: _albedo()})
+            self.assertIn(repr(key), str(cm.exception))
+            self.assertIn("16 hex digits", str(cm.exception))
+        with self.assertRaises(ValueError) as cm:
+            gen_albedo_table.generate({"0x00000000000000AB": _albedo(), "0x00000000000000ab": _albedo(slot=4)})
+        self.assertIn("0x00000000000000AB", str(cm.exception))
+        self.assertIn("0x00000000000000ab", str(cm.exception))
+        self.assertIn("twice", str(cm.exception))
+        # lower case alone is fine and is written in upper case
+        self.assertIn("(0x00000000000000ABull,", gen_albedo_table.generate({"0x00000000000000ab": _albedo()}))
+
+    def test_load_refuses_a_key_written_twice(self):
+        # json.loads keeps the last of two equal keys without a word: the loader refuses them, at any
+        # depth (two entries of one shader, or one field given twice).
+        import json
+        import tempfile
+        entry = json.dumps(_albedo())
+        twice = '{"0x00000000000000AA": %s, "0x00000000000000AA": %s}' % (entry, entry)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "t.json"
+            path.write_text(twice)
+            with self.assertRaisesRegex(ValueError, "0x00000000000000AA.*twice"):
+                gen_albedo_table.load(path)
+            with self.assertRaisesRegex(ValueError, "0x00000000000000AA.*twice"):
+                gen_albedo_table.main(["--json", str(path), "--out", str(Path(tmp) / "t.inc")])
+            self.assertFalse((Path(tmp) / "t.inc").exists())
+            path.write_text('{"0x00000000000000AA": {"slot": 3, "slot": 4}}')
+            with self.assertRaisesRegex(ValueError, "slot.*twice"):
+                gen_albedo_table.load(path)
+            path.write_text('{"0x00000000000000AA": %s}' % entry)
+            self.assertEqual(gen_albedo_table.load(path), {"0x00000000000000AA": _albedo()})
+
+    def test_the_committed_table_uses_the_allowed_keys_and_generates_its_inc(self):
+        # The per-form lists are the committed file's: every key of every entry is in its form's list
+        # and every listed key but "kind" on the forms it only selects is used by some entry (a list
+        # wider than the file would hide a typing mistake).
+        root = Path(__file__).resolve().parent.parent
+        data = gen_albedo_table.load(root / "docs" / "native-renderer" / "ps-albedo.json")
+        used = {form: set() for form in gen_albedo_table.ENTRY_KEYS}
+        alpha_used = set()
+        for e in data.values():
+            form = "terrain" if e.get("kind", "plain") != "plain" else "no_albedo" if "no_albedo" in e else "albedo"
+            used[form] |= set(e)
+            alpha_used |= set(e.get("alpha", {}))
+        self.assertEqual({f: sorted(k) for f, k in used.items()},
+                         {"albedo": sorted(["slot", "u", "v", "alpha", "alpha_manual", "alpha_evidence", "manual",
+                                            "evidence"]),
+                          "no_albedo": sorted(["no_albedo", "manual", "evidence"]),
+                          "terrain": sorted(["kind", "base_slot", "detail_slot", "steep", "manual", "evidence"])})
+        for form, keys in used.items():
+            self.assertEqual(keys | {"kind"}, set(gen_albedo_table.ENTRY_KEYS[form]), form)
+        # ("slot" is the fetch source's: no committed recipe uses that source)
+        self.assertEqual(alpha_used | {"slot"}, set(gen_albedo_table.ALPHA_KEYS))
+        # byte for byte (text mode on both sides: main() writes the platform's line ends)
+        inc = root / "src" / "native" / "capture" / "ps_albedo_table.inc"
+        self.assertEqual(inc.read_text(), gen_albedo_table.generate(data))
 
 
 if __name__ == "__main__":

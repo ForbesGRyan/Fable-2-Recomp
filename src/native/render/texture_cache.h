@@ -97,7 +97,10 @@ class TextureCache {
   std::vector<nrhi::Texture*> destroy_;
   std::vector<uint32_t> evicted_;
   std::vector<uint8_t> scratch_;  // untiled levels, copied into the staging buffer
-  std::vector<uint8_t> r8_image_;  // k_DXT3A decode target (DecodeDxt3aLevel), reused across uploads
+  // k_DXT3A decode target. DecodeDxt3aLevel hands back a newly allocated image on
+  // every decode (nothing is reused between uploads); it stays here until the
+  // next one, and is dropped at once when it is larger than 32 MB.
+  std::vector<uint8_t> r8_image_;
   uint64_t frame_ = 1;            // caller frame + 1 (NoteSample: 0 = never observed)
   bool latched_ = false;
 };

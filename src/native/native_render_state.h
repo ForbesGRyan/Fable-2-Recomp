@@ -57,6 +57,10 @@ inline bool IsCompositeView(View v) {
   return v == View::kOverlay || v == View::kSplit || v == View::kNative;
 }
 
+// Whether setting the view to `next` changes it. Only a change is counted for
+// the "(changed)" mark of the clay log line (a plan may set the view it is in).
+inline bool ViewChanges(View current, View next) { return current != next; }
+
 // Whether the capture layer builds draw records: only for a consumer (a
 // composite view while the failure latch is clear).
 inline bool RecordsWanted(View v, bool latch_failed) {

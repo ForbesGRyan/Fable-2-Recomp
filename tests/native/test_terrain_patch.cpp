@@ -2,8 +2,11 @@
 #include "../../src/native/capture/terrain_patch.h"
 #include <cmath>
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <string>
 #include <vector>
 
 using namespace fable2::native::capture;
@@ -484,12 +487,20 @@ int main() {
         vs[8 * 4] = keep;
       }
       // Literals that cannot be the block's (the table is checked when it is generated; this is the
-      // last line): a threshold outside (0, 1], a small term that is not positive, either not finite.
+      // last line): a threshold outside (0, 1], a small term that is not positive or not small (the
+      // table's and the replay's bound, kTerrainSteepEpsMax), either not finite.
       for (const TerrainSteepSpec& bad_spec :
            {TerrainSteepSpec{13, 0.0f, 0.0001f}, TerrainSteepSpec{13, 1.5f, 0.0001f}, TerrainSteepSpec{13, 0.99609375f, 0.0f},
+            TerrainSteepSpec{13, 0.99609375f, -0.0001f}, TerrainSteepSpec{13, 0.99609375f, 0.01f},
+            TerrainSteepSpec{13, 0.99609375f, 0.5f},
             TerrainSteepSpec{13, float(not_finite), 0.0001f}, TerrainSteepSpec{13, 0.99609375f, float(not_finite)}}) {
         gone = sm;
         if (MakeTerrainMaterialInputs(tp, false, vs, ps, sf, &gone, &bad_spec) || gone.valid) return 213;
+      }
+      if (kTerrainSteepEpsMax != 0.01f) return 242;
+      {
+        const TerrainSteepSpec just_inside{13, 0.99609375f, 0.0099f};
+        if (!MakeTerrainMaterialInputs(tp, false, vs, ps, sf, &gone, &just_inside) || !gone.valid || !gone.steep) return 243;
       }
       if (!MakeTerrainMaterialInputs(tp, false, vs, ps, sf, &gone, &spec) || !gone.valid || !gone.steep) return 214;
 
@@ -726,6 +737,61 @@ int main() {
     if (!BuildTerrainPositions(run, tex.data(), tex.size(), 4, &grid) || grid.size() != size_t(kMaxTerrainPatches) * 25) return 168;
     run.patches = kMaxTerrainPatches + 1;
     if (BuildTerrainPositions(run, tex.data(), tex.size(), 4, &grid) || !grid.empty()) return 169;
+  }
+
+  // --- BuildTerrainNormals on the real normal map, when a discovery dump of tf17 is on disk (else SKIPPED,
+  // loudly) --- FABLE2_TF17_BIN: the dumped base-level bytes (native_tex_<stamp>/<BASE>_<IDENTITY>.bin of
+  // the layer tess rows' tf17); FABLE2_TF17_FC: its six fetch dwords as hex, comma separated (the tess
+  // row's "tf" entry 17), as for test_texture_decode.cpp. The grid points of every 8-unit square of the
+  // map are written to FABLE2_TF17_BIN + ".cpp.grid" (two little-endian floats per point: n.x, n.y) for
+  // tests/test_terrain_replay.py's real-dump test, which builds the same points with the replay tool's
+  // SquareGrid. The layers' constants are those of every layer row of the session-1 captures:
+  // c46.xy = (8, 8) (the cell), c47 = (1/384, 1/384, 0, 0) (the maps' scale and offset): 48 x 48
+  // squares over the map's 384 units, row by row, 17 x 17 points each.
+  {
+    const char* bin = std::getenv("FABLE2_TF17_BIN");
+    const char* fcs = std::getenv("FABLE2_TF17_FC");
+    if (!bin || !fcs) {
+      std::printf("SKIPPED: real tf17 grid test (set FABLE2_TF17_BIN and FABLE2_TF17_FC after a discovery capture)\n");
+    } else {
+      uint32_t rfc[6] = {};
+      if (std::sscanf(fcs, "%x,%x,%x,%x,%x,%x", &rfc[0], &rfc[1], &rfc[2], &rfc[3], &rfc[4], &rfc[5]) != 6) return 250;
+      NormalMap real;
+      if (!DecodeNormalMap(rfc, &real)) return 251;
+      std::FILE* f = std::fopen(bin, "rb");
+      if (!f) return 252;
+      std::vector<uint8_t> bytes;
+      uint8_t chunk[65536];
+      for (size_t n; (n = std::fread(chunk, 1, sizeof(chunk), f)) > 0;) bytes.insert(bytes.end(), chunk, chunk + n);
+      std::fclose(f);
+      TerrainPatch row;
+      row.active = true;
+      row.patch = 0;
+      row.patches = 48;
+      row.cols = 64;  // one row of squares per call; a power of two, so that inv_cols is exact
+      row.inv_cols = 1.0f / 64;
+      row.cell[0] = row.cell[1] = 8;
+      row.tex_scale[0] = row.tex_scale[1] = 1.0f / 384;
+      row.material.valid = true;
+      row.material.steep = true;
+      std::vector<float> all;
+      std::vector<Float2> part;
+      for (uint32_t r = 0; r < 48; ++r) {
+        row.origin[1] = 8.0f * float(r);
+        if (!BuildTerrainNormals(row, real, bytes.data(), bytes.size(), kTerrainGrid, &part) ||
+            part.size() != size_t(48) * 17 * 17) return 253;
+        for (const Float2& p : part) {
+          all.push_back(p.u);
+          all.push_back(p.v);
+        }
+      }
+      const std::string outp = std::string(bin) + ".cpp.grid";
+      std::FILE* o = std::fopen(outp.c_str(), "wb");
+      if (!o || std::fwrite(all.data(), sizeof(float), all.size(), o) != all.size()) return 254;
+      std::fclose(o);
+      std::printf("tf17 grid built: %ux%u map, %zu points of 2304 squares, wrote %s\n", real.width, real.height,
+                  all.size() / 2, outp.c_str());
+    }
   }
 
   std::cout << "PASS: terrain patch\n";

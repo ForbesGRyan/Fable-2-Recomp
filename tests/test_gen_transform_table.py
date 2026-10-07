@@ -173,6 +173,106 @@ class GenTransformTableTest(unittest.TestCase):
         self.assertIn("FABLE2_VS_UV(0xECD66A10092E6562ull, 0, 0, 2, 1, 31, 3, -1, -1, -1, -1)", out)
         self.assertIn(f"FABLE2_VS_UV(0xECD66A10092E6562ull, 0, 1, 2, 0, 31, 3, {41}, {(1 << 11) | 43}, -1, -1)", out)
 
+    # --- Malformed entries raise, naming the shader, instead of being read loosely ---
+
+    SKIN = {"index_fetch": 2, "index_component": "z", "row_fetches": [6, 7, 8]}
+    TERRAIN = {"grid": "c11.xy", "cell": "c46.xy", "height_scale": "c46.z", "origin": "c113.xy",
+               "tex_offset": "c47.zw", "tex_scale": "c47.xy", "patch_offset": None, "height_fetch": 16}
+    UV = {"fetch": 2, "src": "y", "format": 31, "offset": 3, "stages": []}
+
+    def test_unknown_keys_are_rejected(self):
+        # A mistyped key used to be dropped without a word (a "deformd" entry drew as undeformed, a
+        # "weight_fetchh" skin became rigid by KeyError or silently, a "patch_ofset" lost its offset).
+        base = {"base": 0, "layout": "dot"}
+        bad = [
+            (dict(base, deformd=True), "unknown key deformd"),
+            (dict(base, pos_fetchh=0), "unknown key pos_fetchh"),
+            ({"rejeted": "no"}, "unknown key rejeted"),
+            (dict(base, skin=dict(self.SKIN, index_componentt="z")), "unknown skin key index_componentt"),
+            (dict(base, instance=dict(self.INSTANCE, biass=0.5)), "unknown instance key biass"),
+            (dict(base, terrain=dict(self.TERRAIN, patch_ofset="c113.x")), "unknown terrain key patch_ofset"),
+            (dict(base, uv={"o0.x": dict(self.UV, stage=[])}), "unknown uv key stage"),
+            (dict(base, skin=[2, 6, 7, 8]), "skin is not an object"),
+            (dict(base, instance="c12"), "instance is not an object"),
+            (dict(base, terrain=16), "terrain is not an object"),
+            (dict(base, uv=[self.UV]), "uv is not an object"),
+            (dict(base, uv={"o0.x": 2}), "uv is not an object"),
+            ("rejected", "not an object"),
+        ]
+        for entry, why in bad:
+            with self.assertRaises(ValueError, msg=repr(entry)) as cm:
+                gtt.generate({"0xABC8": entry})
+            self.assertIn("0xABC8", str(cm.exception))
+            self.assertIn(why, str(cm.exception), repr(entry))
+        # What the finder writes for a shader (matrix_finder.py) is still read.
+        self.assertIn("FABLE2_VS_TRANSFORM(0xABC8ull, 8, 1, -1, 0)",
+                      gtt.generate({"0xABC8": {"base": 8, "layout": "combine", "score": 0.97, "samples": 12,
+                                               "pos_fetch": -1}}))
+
+    def test_unknown_layout_is_rejected(self):
+        # Anything but "dot" used to mean "combine".
+        for layout in ("dott", "Dot", "", None, 0, 1, ["dot"]):
+            with self.assertRaisesRegex(ValueError, "0xABC9.*layout", msg=repr(layout)):
+                gtt.generate({"0xABC9": {"base": 0, "layout": layout}})
+        with self.assertRaisesRegex(ValueError, "0xABC9.*layout"):
+            gtt.generate({"0xABC9": {"base": 0}})
+        self.assertIn("FABLE2_VS_TRANSFORM(0xABC9ull, 0, 0, -1, 0)", gtt.generate({"0xABC9": {"base": 0, "layout": "dot"}}))
+        self.assertIn("FABLE2_VS_TRANSFORM(0xABC9ull, 0, 1, -1, 0)",
+                      gtt.generate({"0xABC9": {"base": 0, "layout": "combine"}}))
+
+    def test_base_is_an_integer_in_range(self):
+        # Four constant registers from `base`: 0 to 252, a JSON integer.
+        for base in (3.5, 4.0, "4", True, None, -1, 253, 1024, [4]):
+            with self.assertRaisesRegex(ValueError, "0xABCA.*base", msg=repr(base)):
+                gtt.generate({"0xABCA": {"base": base, "layout": "dot"}})
+        self.assertIn("FABLE2_VS_TRANSFORM(0xABCAull, 252, 0, -1, 0)",
+                      gtt.generate({"0xABCA": {"base": 252, "layout": "dot"}}))
+
+    def test_one_shader_has_one_entry(self):
+        # The same hash in two spellings used to give two table lines.
+        entry = {"base": 0, "layout": "dot"}
+        for other in ("0xabcb", "0x0ABCB", "0x000000000000ABCB", "ABCB"):
+            with self.assertRaises(ValueError, msg=other) as cm:
+                gtt.generate({"0xABCB": entry, other: dict(entry, base=4)})
+            self.assertIn("0xABCB", str(cm.exception))
+            self.assertIn(other, str(cm.exception))
+            self.assertIn("twice", str(cm.exception))
+        with self.assertRaisesRegex(ValueError, "'0xABCG'.*not a hex number"):
+            gtt.generate({"0xABCG": entry})
+
+    def test_load_refuses_a_key_written_twice(self):
+        # json.loads keeps the last of two equal keys without a word.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "t.json"
+            path.write_text('{"0xABCC": {"base": 0, "layout": "dot"}, "0xABCC": {"base": 4, "layout": "dot"}}')
+            with self.assertRaisesRegex(ValueError, "0xABCC.*twice"):
+                gtt.load(path)
+            with self.assertRaisesRegex(ValueError, "0xABCC.*twice"):
+                gtt.main(["--json", str(path), "--out", str(Path(tmp) / "t.inc")])
+            self.assertFalse((Path(tmp) / "t.inc").exists())
+            path.write_text('{"0xABCC": {"base": 0, "base": 4, "layout": "dot"}}')
+            with self.assertRaisesRegex(ValueError, "base.*twice"):
+                gtt.load(path)
+            path.write_text('{"0xABCC": {"base": 0, "layout": "dot"}}')
+            self.assertEqual(gtt.load(path), {"0xABCC": {"base": 0, "layout": "dot"}})
+
+    def test_the_committed_table_uses_the_allowed_keys(self):
+        # The lists are the committed file's keys plus the three the finder writes.
+        table = gtt.load(ROOT / "docs" / "native-renderer" / "vs-transforms.json")
+        used = {"entry": set(), "skin": set(), "instance": set(), "terrain": set(), "uv": set()}
+        for e in table.values():
+            used["entry"] |= set(e)
+            for part in ("skin", "instance", "terrain"):
+                used[part] |= set(e.get(part, {}))
+            for u in e.get("uv", {}).values():
+                used["uv"] |= set(u)
+        self.assertEqual(used["entry"] | {"base2", "score", "samples"}, set(gtt.ENTRY_KEYS))
+        self.assertEqual(used["skin"], set(gtt.SKIN_KEYS))
+        self.assertEqual(used["instance"], set(gtt.INSTANCE_KEYS))
+        self.assertEqual(used["terrain"], set(gtt.TERRAIN_KEYS))
+        self.assertEqual(used["uv"], set(gtt.UV_KEYS))
+
 
 class CommittedLeafEntriesTest(unittest.TestCase):
     """The table as committed. The leaf vertex shaders 0xA584..., 0xD7DD... and 0x2D40... are one

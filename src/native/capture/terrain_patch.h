@@ -365,6 +365,9 @@ struct TerrainSteepSpec {
   float threshold;    // 255/256: the block runs where the slope value is below it
   float epsilon;      // 0.0001: the small term of the weights
 };
+// A small term of this much or more is not the block's literal: the bound of the
+// table generator and of the replay (STEEP_EPSILON_MAX in gen_albedo_table.py).
+inline constexpr float kTerrainSteepEpsMax = 0.01f;
 
 // The fetch constants of a terrain draw (six host-order dwords each), nullptr
 // for one that could not be read. A layer needs detail and weight; a far draw
@@ -391,7 +394,8 @@ struct TerrainFetches {
 // has none. With it the inputs are valid only if the block's can be read too:
 // the side texture's and the normal map's fetch constants are texture fetch
 // constants, vs c8.x and ps c45.xy are finite, and the two literals can be the
-// block's (a threshold in (0, 1], a positive small term); the block is the
+// block's (a threshold in (0, 1], a positive small term below
+// kTerrainSteepEpsMax); the block is the
 // layers', so with a draw of the adaptive builder it is refused.
 inline bool MakeTerrainMaterialInputs(const TerrainPatch& patch, bool adaptive, const float* vs_bank,
                                       const float* ps_bank, const TerrainFetches& f,
@@ -463,8 +467,8 @@ inline bool MakeTerrainMaterialInputs(const TerrainPatch& patch, bool adaptive, 
     m.steep_eps = steep->epsilon;
     // (comparisons with a value that is not finite are false)
     if (!std::isfinite(m.side_uv[0]) || !std::isfinite(m.slope[0]) || !std::isfinite(m.slope[1]) ||
-        !(m.steep_threshold > 0.0f && m.steep_threshold <= 1.0f) || !(m.steep_eps > 0.0f) ||
-        !std::isfinite(m.steep_eps)) {
+        !(m.steep_threshold > 0.0f && m.steep_threshold <= 1.0f) ||
+        !(m.steep_eps > 0.0f && m.steep_eps < kTerrainSteepEpsMax)) {
       return false;
     }
     m.steep = true;

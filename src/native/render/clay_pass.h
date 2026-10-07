@@ -76,8 +76,9 @@ class ClayPass {
     // steep-ground block also has `side`, its side texture with `side_sampler`
     // and `side_fix`, and in `uvs` the vertex normals of its grid points.
     // `status`: kTextured when the material is usable, else why not
-    // (TerrainMaterialStatus, TerrainSteepStatus).
-    bool terrain = false;
+    // (TerrainMaterialStatus, TerrainSteepStatus). `no_pipeline`: it was usable
+    // but for a pipeline of its state (counted in the pipeline overflow).
+    bool terrain = false, no_pipeline = false;
     uint8_t textured = 0;  // PipelineKey::textured when drawn with the terrain material
     nrhi::TextureView* weights = nullptr;
     nrhi::TextureView* side = nullptr;

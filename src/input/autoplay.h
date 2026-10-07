@@ -228,7 +228,10 @@ inline double EndTime(const std::vector<Step>& steps, double hold_seconds) {
 
 // Action steps (view, discovery) with t0 < t_step <= t1, in plan order (time order for a
 // sorted plan, plan order for equal times). A poller calling it with consecutive times
-// runs each action exactly once. Valid while `steps` is not modified.
+// runs each action exactly once; it starts with t0 = kBeforePlan, so that its first
+// interval holds an action at 0 s (no step is earlier: Parse refuses negative times).
+// Valid while `steps` is not modified.
+inline constexpr double kBeforePlan = -1.0;
 inline std::vector<const Step*> ActionsBetween(const std::vector<Step>& steps, double t0, double t1) {
   std::vector<const Step*> out;
   for (const Step& s : steps)

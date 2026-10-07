@@ -1,5 +1,6 @@
 // Compiles the native renderer's HLSL with D3DCompile (no GPU needed).
 #include "../../src/native/fable2_native_shaders.h"
+#include "../../src/native/render/clay_logic.h"  // ClayConstants (before windows.h: its min and max macros)
 #include <windows.h>
 #include <initguid.h>  // before d3d11shader.h: defines IID_ID3D11ShaderReflection here
 #include <d3d11shader.h>
@@ -98,6 +99,72 @@ static int TerrainLayoutMismatch(const char* name, const char* src) {
         D3D11_SHADER_VARIABLE_DESC vd{};
         if (!var || FAILED(var->GetDesc(&vd)) || vd.StartOffset != kClayTerrainFields[i].offset ||
             vd.Size != kClayTerrainFields[i].bytes) {
+          result = 10 + int(i);
+        }
+      }
+    }
+  }
+  if (refl) refl->Release();
+  code->Release();
+  return result;
+}
+
+// The clay shaders' cbuffer Draw (register b0) as the root constants fill it: every variable of
+// ClayConstants (clay_logic.h) under its HLSL name, at the struct's offset, with its size.
+struct DrawField {
+  const char* name;
+  size_t offset, bytes;
+};
+using fable2::native::render::ClayConstants;
+static const DrawField kDrawFields[] = {
+    {"r0", offsetof(ClayConstants, rows), 16},
+    {"r1", offsetof(ClayConstants, rows) + 16, 16},
+    {"r2", offsetof(ClayConstants, rows) + 32, 16},
+    {"r3", offsetof(ClayConstants, rows) + 48, 16},
+    {"layout", offsetof(ClayConstants, layout), sizeof(ClayConstants::layout)},
+    {"base_vertex", offsetof(ClayConstants, base_vertex), sizeof(ClayConstants::base_vertex)},
+    {"vertex_count", offsetof(ClayConstants, vertex_count), sizeof(ClayConstants::vertex_count)},
+    {"color", offsetof(ClayConstants, color), sizeof(ClayConstants::color)},
+    {"uv_xform", offsetof(ClayConstants, uv), sizeof(ClayConstants::uv)},
+    {"textured", offsetof(ClayConstants, textured), sizeof(ClayConstants::textured)},
+    {"sampler_index", offsetof(ClayConstants, sampler), sizeof(ClayConstants::sampler)},
+    {"alpha_mode", offsetof(ClayConstants, alpha_mode), sizeof(ClayConstants::alpha_mode)},
+    {"alpha_ref", offsetof(ClayConstants, alpha_ref), sizeof(ClayConstants::alpha_ref)},
+    {"cut", offsetof(ClayConstants, cut), sizeof(ClayConstants::cut)},
+    {"alpha_scale", offsetof(ClayConstants, alpha_scale), sizeof(ClayConstants::alpha_scale)},
+    {"pad2", offsetof(ClayConstants, pad2), sizeof(ClayConstants::pad2)},
+};
+
+// 0 when `src` compiles for `target` and its cbuffer Draw has exactly the variables of kDrawFields, each at
+// the struct's byte offset with its size, in a buffer of sizeof(ClayConstants). Otherwise as
+// TerrainLayoutMismatch: 1 no compile, 2 no reflection, 3 no such buffer, 4 another size or variable
+// count, 10 + i for entry i.
+static int DrawLayoutMismatch(const char* name, const char* src, const char* target) {
+  ID3DBlob* code = nullptr;
+  ID3DBlob* errors = nullptr;
+  HRESULT hr = D3DCompile(src, strlen(src), name, nullptr, nullptr, "main", target,
+                          D3DCOMPILE_ENABLE_STRICTNESS, 0, &code, &errors);
+  if (errors) errors->Release();
+  if (FAILED(hr) || !code) return 1;
+  ID3D11ShaderReflection* refl = nullptr;
+  int result = 0;
+  if (FAILED(D3DReflect(code->GetBufferPointer(), code->GetBufferSize(), IID_ID3D11ShaderReflection,
+                        reinterpret_cast<void**>(&refl))) || !refl) {
+    result = 2;
+  } else {
+    ID3D11ShaderReflectionConstantBuffer* cb = refl->GetConstantBufferByName("Draw");
+    D3D11_SHADER_BUFFER_DESC bd{};
+    const unsigned count = sizeof(kDrawFields) / sizeof(kDrawFields[0]);
+    if (!cb || FAILED(cb->GetDesc(&bd))) {
+      result = 3;
+    } else if (bd.Size != sizeof(ClayConstants) || bd.Variables != count) {
+      result = 4;
+    } else {
+      for (unsigned i = 0; i < count && !result; ++i) {
+        ID3D11ShaderReflectionVariable* var = cb->GetVariableByName(kDrawFields[i].name);
+        D3D11_SHADER_VARIABLE_DESC vd{};
+        if (!var || FAILED(var->GetDesc(&vd)) || vd.StartOffset != kDrawFields[i].offset ||
+            vd.Size != kDrawFields[i].bytes) {
           result = 10 + int(i);
         }
       }
@@ -280,9 +347,45 @@ int main() {
     }
     if (!side_uv || !slope || !threshold || !eps || !sampler) return 47;
   }
+  // The draw constants (cbuffer Draw, register b0) lie where ClayConstants has them, in the compiled
+  // vertex shader and in each of the four compiled pixel shaders: the text checks above say that the
+  // shaders declare the same fields, this says that the declaration is the struct's layout (144 bytes,
+  // 16 variables). Controls: a source with two fields exchanged, and one with a field too few, are reported.
+  {
+    static_assert(sizeof(ClayConstants) == 144 && sizeof(kDrawFields) / sizeof(kDrawFields[0]) == 16);
+    const struct {
+      const char* name;
+      const char* src;
+      const char* target;
+    } shaders[] = {{"clay_vs", kClayVs, "vs_5_0"},
+                   {"clay_ps", kClayPs, "ps_5_0"},
+                   {"clay_textured_ps", kClayTexturedPs, "ps_5_0"},
+                   {"clay_terrain_layer_ps", kClayTerrainLayerPs, "ps_5_0"},
+                   {"clay_terrain_far_ps", kClayTerrainFarPs, "ps_5_0"}};
+    for (int i = 0; i < 5; ++i) {
+      if (int at = DrawLayoutMismatch(shaders[i].name, shaders[i].src, shaders[i].target)) {
+        // (the exit code has no room for both numbers)
+        std::cerr << "cbuffer Draw of " << shaders[i].name << " is not ClayConstants: " << at
+                  << (at >= 10 ? std::string(" (") + kDrawFields[at - 10].name + ")" : std::string()) << "\n";
+        return 52 + i;
+      }
+    }
+    std::string swapped = kClayTexturedPs;
+    const std::string good = "uint alpha_mode; float alpha_ref;";
+    size_t at = swapped.find(good);
+    if (at == std::string::npos) return 48;
+    swapped.replace(at, good.size(), "float alpha_ref; uint alpha_mode;");
+    if (DrawLayoutMismatch("swapped_draw_ps", swapped.c_str(), "ps_5_0") != 10 + 11) return 49;  // alpha_mode
+    std::string shorter = kClayTexturedPs;
+    const std::string tail = "float alpha_scale; uint3 pad2;";
+    at = shorter.find(tail);
+    if (at == std::string::npos) return 50;
+    shorter.replace(at, tail.size(), "float alpha_scale;");
+    if (DrawLayoutMismatch("shorter_draw_ps", shorter.c_str(), "ps_5_0") != 4) return 51;
+  }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; broken shader rejected\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; broken shader rejected\n";
   return 0;
 }

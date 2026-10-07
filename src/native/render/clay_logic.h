@@ -52,8 +52,10 @@ struct ClayStats {
   // blend.
   uint32_t alpha_tested = 0, blended = 0, alpha_unknown = 0, blend_unknown = 0, state_invalid = 0;
   // Pipelines created in the pass's cache (a slot whose creation failed is not
-  // counted), and drawn records that used the default pipeline because the
-  // cache was full or their pipeline could not be created.
+  // counted), and records that found no pipeline for their state because the
+  // cache was full or the pipeline could not be created: drawn records that
+  // used the default pipeline, and terrain records that lost their material
+  // for it (terrain-inputs; counted once, also when their flat draw finds none).
   uint32_t pipelines = 0, pipeline_overflow = 0;
   // alpha_unknown and blend_unknown by pixel shader (kTallyAlphaUnknown, kTallyBlendUnknown).
   capture::ShaderTally<32> unknown_by_ps;
@@ -65,6 +67,11 @@ struct ClayStats {
   // reason (TerrainMaterialStatus), whatever the plan then did with them: drawn
   // flat under that reason, drawn flat or left out under terrain-square.
   uint32_t terrain_unusable[size_t(capture::MaterialStatus::kCount)] = {};
+  // The same for terrain records whose geometry could not be built (their squares
+  // fall back too), by what was missing: the positions (the heightmap could not
+  // be read, the upload failed) or, with positions, the indices. Counted while the
+  // texture path is on, like terrain_unusable.
+  uint32_t terrain_no_positions = 0, terrain_no_indices = 0;
 };
 
 inline constexpr uint8_t kTallyAlphaUnknown = 0, kTallyBlendUnknown = 1;
@@ -846,8 +853,26 @@ struct TerrainPlanItem {
 //    material layer over flat clay).
 // A draw of the adaptive builder never depends on another draw. A record with
 // more than capture::kMaxTerrainPatches patches has no grid (no positions are
-// built for it), so it has no squares and covers none: it is not walked.
+// built for it) and is not walked: as a layer it has no squares; as an underlay
+// it cannot say which squares it lies under and draws nothing, so every square
+// of the frame is bad (the treatment of an underlay without geometry).
+//
+// The work is bounded (records come from guest memory: 16 layer records of 4096
+// patches over an underlay without material took 218 ms). Linking one patch of
+// a layer record to its square counts kTerrainPlanLinkCost steps (a table
+// lookup), testing one square against one patch of an underlay without its
+// material one step. A frame that would take more than kTerrainPlanBudget steps
+// is not planned by squares: every square is bad without the walk, which here
+// means every layer record that has geometry is flat clay (several opaque flat
+// draws of one square show the same clay) and every far draw is what it is by
+// itself. A real frame is far below the budget: the bridge (session-1 capture)
+// has 492 layer records of one patch each (31,488 steps) and 75 far records of
+// 1,606 patches under about 100 squares (about 160,000 steps more if none of
+// them had its material).
 // `scratch`: storage a caller keeps between frames (nullptr: local).
+inline constexpr uint64_t kTerrainPlanBudget = 1u << 20;
+inline constexpr uint64_t kTerrainPlanLinkCost = 64;
+
 struct TerrainPlanScratch {
   struct Square {
     TerrainRect rect;
@@ -879,6 +904,21 @@ inline void PlanTerrain(std::vector<TerrainPlanItem>& items, TerrainPlanScratch*
   auto has_grid = [](const TerrainPlanItem& it) {
     return it.patch && it.patch->patches <= capture::kMaxTerrainPatches;
   };
+  auto own_action = [](const TerrainPlanItem& it) {
+    return !it.drawable ? TerrainAction::kSkip : it.usable ? TerrainAction::kMaterial : TerrainAction::kFlat;
+  };
+  // Over the budget: every square is bad without the walk.
+  auto unplanned = [&] {
+    for (TerrainPlanItem& it : items) {
+      it.action = !it.layer ? own_action(it) : it.drawable ? TerrainAction::kFlat : TerrainAction::kSkip;
+    }
+  };
+  uint64_t steps = 0;
+  for (const TerrainPlanItem& it : items) {
+    if (it.layer && has_grid(it)) steps += kTerrainPlanLinkCost * it.patch->patches;
+  }
+  if (steps > kTerrainPlanBudget) return unplanned();
+  bool every_bad = false;
   for (size_t i = 0; i < items.size(); ++i) {
     first[i] = uint32_t(link.size());
     const TerrainPlanItem& it = items[i];
@@ -901,9 +941,15 @@ inline void PlanTerrain(std::vector<TerrainPlanItem>& items, TerrainPlanScratch*
       }
       continue;
     }
-    it.action = !it.drawable ? TerrainAction::kSkip : it.usable ? TerrainAction::kMaterial : TerrainAction::kFlat;
-    if (whole || !has_grid(it)) continue;
+    it.action = own_action(it);
+    if (it.patch && !has_grid(it)) {
+      every_bad = true;  // over the patch bound: no grid to find its squares by
+      continue;
+    }
+    if (whole || !it.patch) continue;
     // The squares over this draw have no underlay to add to: bad, and under its flat draw if it has one.
+    steps += uint64_t(it.patch->patches) * squares.size();
+    if (steps > kTerrainPlanBudget) return unplanned();
     for (uint32_t k = 0; k < it.patch->patches; ++k) {
       const TerrainRect f = TerrainPatchRect(*it.patch, k);
       for (Square& s : squares) {
@@ -914,6 +960,9 @@ inline void PlanTerrain(std::vector<TerrainPlanItem>& items, TerrainPlanScratch*
         }
       }
     }
+  }
+  if (every_bad) {
+    for (Square& s : squares) s.bad = true;
   }
   // A layer draw with a bad square makes all its squares bad.
   for (bool changed = true; changed;) {
@@ -938,7 +987,7 @@ inline void PlanTerrain(std::vector<TerrainPlanItem>& items, TerrainPlanScratch*
     }
     if (!bad) {
       // (a layer without a patch has no square: it is drawn on its own)
-      it.action = !it.drawable ? TerrainAction::kSkip : it.usable ? TerrainAction::kMaterial : TerrainAction::kFlat;
+      it.action = own_action(it);
     } else if (it.drawable && open) {
       it.action = TerrainAction::kFlat;
       for (uint32_t l = first[i]; l < first[i + 1]; ++l) squares[link[l]].covered = true;
@@ -1004,7 +1053,8 @@ inline std::string FormatStateText(const ClayStats& st) {
 // three slots of the RHI's shader-visible view heap until one of its views is
 // destroyed).
 // Then, when there are any, the records that could not have their material by
-// their own reason, most first (ClayStats::terrain_unusable): the cause of a
+// their own reason, most first (ClayStats::terrain_unusable, and no-positions
+// and no-indices for records whose geometry could not be built): the cause of a
 // square's fallback, which the other lines show only as terrain-square when the
 // record is not the square's flat draw.
 inline std::string FormatTerrainText(const ClayStats& st, const TextureStats& ts) {
@@ -1018,6 +1068,8 @@ inline std::string FormatTerrainText(const ClayStats& st, const TextureStats& ts
       reasons.emplace_back(capture::MaterialStatusName(capture::MaterialStatus(i)), st.terrain_unusable[i]);
     }
   }
+  if (st.terrain_no_positions) reasons.emplace_back("no-positions", st.terrain_no_positions);
+  if (st.terrain_no_indices) reasons.emplace_back("no-indices", st.terrain_no_indices);
   std::stable_sort(reasons.begin(), reasons.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
   for (size_t i = 0; i < reasons.size(); ++i) {
     text += std::string(i ? ", " : " | without material: ") + reasons[i].first + " " + std::to_string(reasons[i].second);

@@ -1214,6 +1214,42 @@ int main() {
     CHECK(250, !d.skip && !d.blended && !d.alpha_unknown && d.key.textured == 0 && d.key.blend == 0 &&
                    d.key.depth_func == uint8_t(Compare::kLessEqual) && d.key.cull == uint8_t(Cull::kFront) &&
                    d.alpha.mode == 0);
+    // 329-332: combinations the comments of DecideDrawState state (no captured terrain row has them).
+    // A layer with the alpha test and alpha-to-mask (the foliage words, two samples) on its blend:
+    // both apply to the shader's own alpha, with the offsets and the sample count; the record's
+    // recipe adds no albedo component, no scale and no division; the pipeline is the layer's.
+    capture::RenderState masked = State(0x00708767, 0x01060106, 0x8700001C, 0x00218002, 0xF, 0.25f);
+    masked.alpha_to_mask_samples = 1;
+    d = DecideDrawState(masked, recipe, kTexturedTerrainLayer, false);
+    CHECK(329, !d.skip && d.alpha_tested && d.blended && !d.alpha_unknown && !d.state_invalid &&
+                   d.alpha.mode == (4u | kAlphaTest | kAlphaToMask | (0x87u << kAlphaToMaskShift) |
+                                    (1u << kAlphaToMaskSamplesShift) | kAlphaBlend) &&
+                   d.alpha.ref == 0.25f && d.alpha.scale == 1.0f && d.key == ka);
+    // Alpha-to-mask alone, on the far shader (alpha 1): applied and counted as a test, nothing else.
+    capture::RenderState far_masked = State(0x00708766, 0x00010001, 0xAA000014, 0x00218002);
+    d = DecideDrawState(far_masked, none, kTexturedTerrainFar, false);
+    CHECK(330, !d.skip && d.alpha_tested && !d.blended && !d.alpha_unknown &&
+                   d.alpha.mode == (kAlphaToMask | (0xAAu << kAlphaToMaskShift)) && d.key == kf);
+    // A colour mask of 0 writes no colour, so the blend does not matter: the record is drawn for
+    // its depth with the opaque factors, is not counted as blended and is not left out.
+    d = DecideDrawState(State(0x00708767, 0x01060106, 0x00000004, 0x00218002, 0x0), none, kTexturedTerrainLayer, false);
+    {
+      PipelineKey depth_only;  // opaque factors, the layer's depth and cull
+      depth_only.textured = kTexturedTerrainLayer;
+      depth_only.color_mask = 0;
+      depth_only.depth_func = ka.depth_func;
+      depth_only.cull = ka.cull;
+      CHECK(331, !d.skip && !d.blended && !d.alpha_unknown && !d.alpha_tested && !d.state_invalid &&
+                     d.alpha.mode == 0 && d.key == depth_only && d.key.depth_write == 1);
+    }
+    // The flat fallback of an alpha-tested layer: flat clay has no alpha to test, so it is drawn
+    // without the test, opaque, with the layer's depth and cull, and counted alpha-unknown like
+    // any flat draw whose state tests (the recipe, its scale and its division are not used).
+    d = DecideDrawState(masked, recipe, 0, true);
+    CHECK(332, !d.skip && !d.alpha_tested && !d.blended && d.alpha_unknown && !d.state_invalid &&
+                   d.alpha.mode == 0 && d.alpha.ref == 0.0f && d.alpha.scale == 1.0f && d.key.textured == 0 &&
+                   d.key.blend == 0 && d.key.depth_func == uint8_t(Compare::kLessEqual) && d.key.depth_write == 1 &&
+                   d.key.cull == uint8_t(Cull::kFront) && d.key == DecideDrawState(add, none, 0, true).key);
 
     // 251-258: the terrain constant block (register b1) holds the inputs at the offsets the HLSL
     // declares: the table beside the HLSL (shaders::kClayTerrainFields; test_native_shaders.cpp
@@ -1438,15 +1474,24 @@ int main() {
                    plan({item(a, L), item(ab, L), item(b, L), item(b, L)}) == "MMMM");
     CHECK(278, plan({}).empty());
     // A record with more patches than a grid is built for (kMaxTerrainPatches; the capture admits
-    // counts up to 4,194,304) has no geometry and no squares: it is not walked, and it makes no
-    // square fall back, as a layer or as an underlay.
+    // counts up to 4,194,304) has no geometry and no squares: it is not walked. As a layer it
+    // makes no square fall back.
     const capture::TerrainPatch huge = patch_of(80, 144, 0, 4194304, 2, 8);
     const capture::TerrainPatch over = patch_of(80, 144, 0, capture::kMaxTerrainPatches + 1, 2, 8);
     const capture::TerrainPatch most = patch_of(80, 144, 0, capture::kMaxTerrainPatches, 2, 8);
     CHECK(297, capture::kMaxTerrainPatches == 4096 && plan({item(huge, L, false, false), item(a, L)}) == "SM" &&
-                   plan({item(huge, F, false, false), item(a, L)}) == "SM" &&
-                   plan({item(over, L, false, false), item(a, L)}) == "SM" &&
-                   plan({item(over, F, false, false), item(a, L)}) == "SM");
+                   plan({item(over, L, false, false), item(a, L)}) == "SM");
+    // As an underlay it cannot say which squares it lies under, and it draws nothing: every square
+    // of the frame is bad, as the squares over an underlay without geometry are (276), also one a
+    // grid of its first patches would not have reached (`out`). Other far draws keep their own state.
+    CHECK(319, plan({item(huge, F, false, false), item(a, L)}) == "SF" &&
+                   plan({item(over, F, false, false), item(a, L)}) == "SF" &&
+                   plan({item(over, F, false, false), item(away, F), item(a, L), item(a, L), item(out, L), item(b, L, true, false)}) ==
+                       "SMFSFS" &&
+                   plan({item(a, L), item(over, F, true, false), item(out, L)}) == "FSF");
+    // (No geometry is built above the bound, so such a record is never drawable; were it, the rule
+    // would be the same: it is no underlay to add to.)
+    CHECK(333, plan({item(over, F), item(a, L)}) == "MF");
     // At the bound the record still has its squares (A is its first patch).
     CHECK(298, plan({item(most, L, false), item(a, L)}) == "FS" && plan({item(most, F, false), item(a, L)}) == "FS");
     // The plan's storage can be kept between frames: a second plan in the same scratch object
@@ -1467,6 +1512,60 @@ int main() {
     // The underlay of a square is found by the square's centre: a coarser patch covers the 8-unit
     // squares inside it and no square beside it.
     CHECK(279, plan({item(coarse, F, false), item(a, L), item(a3, L), item(out, L)}) == "FSSM");
+    // 320-325: the work budget. Linking a layer patch to its square costs kTerrainPlanLinkCost steps,
+    // testing one square against one patch of an underlay without its material one step; a frame
+    // that would take more than kTerrainPlanBudget steps is not walked: every square is bad (each
+    // layer that has geometry is flat clay, the far draws keep their own state). A real frame is
+    // far below it: the bridge has 492 layer records of one patch (31,488 steps) and, were all its
+    // 75 far records (1,606 patches) without material under its about 100 squares, about 160,000 more.
+    CHECK(320, kTerrainPlanBudget == 1048576 && kTerrainPlanLinkCost == 64 &&
+                   492 * kTerrainPlanLinkCost + 1606 * 100 < kTerrainPlanBudget / 5);
+    {
+      // 16,384 layer patches are the most a frame can link (4 records of 4096): walked as before.
+      // `row` is 4096 squares in one row, x 0 to 32768; `one` is a square away from it.
+      const capture::TerrainPatch row = patch_of(0, 0, 0, 4096, 4096, 8);
+      const capture::TerrainPatch one = patch_of(0, 512, 0, 1, 1, 8);
+      TerrainPlanScratch scratch;
+      std::vector<TerrainPlanItem> at(4, item(row, L));
+      PlanTerrain(at, &scratch);
+      CHECK(321, scratch.squares.size() == 4096 && at[0].action == TerrainAction::kMaterial &&
+                     at[3].action == TerrainAction::kMaterial);
+      // One patch more: nothing is walked (no square is made), every layer is flat or, without
+      // geometry, left out; the far draws are what they are by themselves.
+      std::vector<TerrainPlanItem> more(4, item(row, L));
+      more.push_back(item(one, L));
+      more.push_back(item(one, L, true, false));
+      more.push_back(item(away, F));
+      more.push_back(item(away, F, false));
+      more.push_back(item(away, F, true, false));
+      PlanTerrain(more, &scratch);
+      CHECK(322, scratch.squares.empty() && scratch.link.empty());
+      CHECK(323, more[0].action == TerrainAction::kFlat && more[3].action == TerrainAction::kFlat &&
+                     more[4].action == TerrainAction::kFlat && more[5].action == TerrainAction::kSkip &&
+                     more[6].action == TerrainAction::kMaterial && more[7].action == TerrainAction::kFlat &&
+                     more[8].action == TerrainAction::kSkip);
+      // The underlay's part: 4096 squares (a row of 4095 and `one`) cost 262,144 steps to link; an
+      // underlay without material of 192 patches under the row's first squares tests 786,432
+      // square-patch pairs: 1,048,576 steps, the budget exactly, walked. The row's one layer draw
+      // ties its squares together and is the flat draw of those the underlay does not cover; `one`
+      // lies under no underlay and keeps its material.
+      const capture::TerrainPatch row4095 = patch_of(0, 0, 0, 4095, 4096, 8);
+      const capture::TerrainPatch under192 = patch_of(0, 0, 0, 192, 4096, 8), under193 = patch_of(0, 0, 0, 193, 4096, 8);
+      std::vector<TerrainPlanItem> fits = {item(under192, F, false), item(row4095, L), item(one, L)};
+      PlanTerrain(fits, &scratch);
+      CHECK(324, scratch.squares.size() == 4096 && fits[0].action == TerrainAction::kFlat &&
+                     fits[1].action == TerrainAction::kFlat && fits[2].action == TerrainAction::kMaterial);
+      // One patch more is over it: the frame is not planned by squares, every layer is flat.
+      std::vector<TerrainPlanItem> not_fits = {item(under193, F, false), item(row4095, L), item(one, L)};
+      PlanTerrain(not_fits, &scratch);
+      CHECK(325, not_fits[0].action == TerrainAction::kFlat && not_fits[1].action == TerrainAction::kFlat &&
+                     not_fits[2].action == TerrainAction::kFlat);
+      // An underlay with its material costs nothing: the same frame with it usable is planned.
+      std::vector<TerrainPlanItem> usable = {item(under193, F), item(row4095, L), item(one, L)};
+      PlanTerrain(usable, &scratch);
+      CHECK(326, usable[0].action == TerrainAction::kMaterial && usable[1].action == TerrainAction::kMaterial &&
+                     usable[2].action == TerrainAction::kMaterial);
+    }
     // 313-315: a layer with the steep-ground block whose side texture is not usable this frame, or whose
     // normals could not be built (TerrainSteepStatus), is a layer without its material: its square is
     // one flat draw, its other layers are left out, and the neighbouring square keeps its material.
@@ -1518,6 +1617,20 @@ int main() {
     CHECK(300, FormatTerrainText(st, ts) ==
                    "Terrain: material 560 of 567 drawn, flat 7, left out 7, texture sets 78 | "
                    "without material: terrain-inputs 3, texture-pending 2");
+    // A record whose geometry could not be built makes its square fall back as well: it is named
+    // by what was missing, its positions (the heightmap or the upload) or its indices, in the
+    // same list (equal counts: the material reasons first).
+    st.terrain_no_positions = 4;
+    st.terrain_no_indices = 2;
+    CHECK(327, FormatTerrainText(st, ts) ==
+                   "Terrain: material 560 of 567 drawn, flat 7, left out 7, texture sets 78 | "
+                   "without material: no-positions 4, terrain-inputs 3, texture-pending 2, no-indices 2");
+    {
+      ClayStats geo;
+      geo.terrain_no_indices = 1;
+      CHECK(328, FormatTerrainText(geo, TextureStats{}) ==
+                     "Terrain: material 0 of 0 drawn, flat 0, left out 0, texture sets 0 | without material: no-indices 1");
+    }
     CHECK(286, FormatTerrainText(ClayStats{}, TextureStats{}) ==
                    "Terrain: material 0 of 0 drawn, flat 0, left out 0, texture sets 0");
 

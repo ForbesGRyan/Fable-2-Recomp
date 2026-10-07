@@ -21,10 +21,16 @@ struct StateWords {
   uint32_t vte_cntl = 0;        // PA_CL_VTE_CNTL (register 0x2206); bit 4 enables the viewport Z scale
   uint32_t bin_mask_lo = 0x2AAAAAAA;  // device +0x31A4, low word of the tiling bin mask (HasColourPass)
   // RB_SURFACE_INFO (register 0x2000); bits 16-17 are the surface's sample count. Read apart
-  // from `read`: a word that cannot be read stays 0, no multisampling.
+  // from `read`, and only for a draw that needs it (NeedsSurfaceInfo): a word that was not or
+  // cannot be read stays 0, no multisampling.
   uint32_t surface_info = 0;
   bool read = false;            // false: the words could not be read
 };
+
+// Only alpha-to-mask (RB_COLORCONTROL bit 4) works under the surface's sample count, so the
+// capture reads RB_SURFACE_INFO for such draws alone (about 18% of the rows of the session-1
+// captures) and DecodeRenderState looks at it for no other.
+inline bool NeedsSurfaceInfo(const StateWords& w) { return w.read && (w.color_control & 0x10) != 0; }
 
 enum class Compare : uint8_t { kNever, kLess, kEqual, kLessEqual, kGreater, kNotEqual, kGreaterEqual, kAlways };
 enum class Factor : uint8_t { kZero = 0, kOne = 1, kSrcColor = 4, kInvSrcColor = 5, kSrcAlpha = 6, kInvSrcAlpha = 7,
@@ -42,8 +48,10 @@ struct RenderState {
   uint8_t alpha_to_mask_offsets = 0;
   // RB_SURFACE_INFO bits 16-17 (SDK registers.h msaa_samples, xenos.h MsaaSamples), kept only
   // with alpha_to_mask: 0 no multisampling, 1 two samples per pixel, 2 four. The field's fourth
-  // value, 3, is no sample count and reads as 0. The thresholds per count: AlphaToMaskCovers
-  // in clay_logic.h.
+  // value, 3, is no sample count and reads as 0 here, by ruling: the emulator treats every value
+  // from 2 up as four samples (the SDK's d3d12 command_processor.cpp: msaa_samples >= k4X), and
+  // no capture has a 3 to decide by.
+  // The thresholds per count: AlphaToMaskCovers in clay_logic.h.
   uint8_t alpha_to_mask_samples = 0;
   bool blend = false; Factor src = Factor::kOne, dst = Factor::kZero; BlendOp op = BlendOp::kAdd;
   Factor src_alpha = Factor::kOne, dst_alpha = Factor::kZero; BlendOp op_alpha = BlendOp::kAdd;

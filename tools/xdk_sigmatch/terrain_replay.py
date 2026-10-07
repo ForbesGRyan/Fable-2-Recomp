@@ -68,6 +68,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import texture_thumb as tt  # noqa: E402
+from gen_albedo_table import STEEP_EPSILON_MAX  # noqa: E402  (the table's bound on the small term)
 
 # c253.w and c253.y of the layer vertex shaders: shader literals, zero in the device bank. Values
 # from the GPU's register file ([vtess] log, frame-map section 13 "Terrain"): the weight of the
@@ -320,7 +321,7 @@ def steep_inputs(consts, pc, ps_lit, ps_hash):
     if threshold is None or eps is None:
         raise MissingInput('the tess row has no "ps_lit" with the pixel shader\'s literals c254 and c255: the capture '
                            "was taken before terrain rows recorded them")
-    if not (0.0 < threshold <= 1.0 and 0.0 < eps < 0.01):
+    if not (0.0 < threshold <= 1.0 and 0.0 < eps < STEEP_EPSILON_MAX):
         raise MissingInput(f"the literals of {ps_hash} do not look like the block's: slope threshold {threshold!r}, "
                            f"small term {eps!r}")
     return {
@@ -897,6 +898,8 @@ def _cull_edges(squares, tex, lines):
     for square, draws in squares:
         for r in draws:
             _need(r["consts"], ("c46", "c113", "c114", "c115"))
+            if r["consts"]["c114"][0] <= 0.0:
+                continue  # never culled (a square's first layer has c114.x = -1): no cull to differ
             wt = tex.get(r, 18, "layer weights")
             x0, y0 = _cell_texel(r, square, wt)
             if (id(wt.texels), x0, y0) in seen:
@@ -906,8 +909,8 @@ def _cull_edges(squares, tex, lines):
             bad += b
             total += t
     lines.append(f"cull edges: {bad} of {total} neighbouring texel pairs in the {len(seen)} 17 x 17 weight blocks of "
-                 "the frame's layer draws have a 0 beside a value of 2 or more (where a per-pixel cull and the "
-                 "game's per-vertex cull differ)")
+                 "the frame's layer draws that can be culled have a 0 beside a value of 2 or more (where a "
+                 "per-pixel cull and the game's per-vertex cull differ)")
 
 
 def _weight_sums(a, rows, textures, lines):
@@ -983,20 +986,16 @@ def _locate(a, rows, textures, lines):
     row = draws[0]
     _need(row["consts"], ("c0", "c1", "c2", "c3"))
     c = [row["consts"][k] for k in ("c0", "c1", "c2", "c3")]
-    try:
-        height = _Textures(textures).get(row, 16, "heightmap")
-        note = ""
-    except MissingInput as e:
-        height = None
-        note = f" (at height 0: {e})"
+    # The corners are projected at the ground's height: a heightmap that is missing or cut is
+    # refused by name (MissingInput), as the replay refuses it; nothing is placed at height 0.
+    height = _Textures(textures).get(row, 16, "heightmap")
     parts = []
     for dx, dy in ((0, 0), (1, 0), (1, 1), (0, 1)):
         x, y = square[0] + dx * square[2], square[1] + dy * square[3]
-        h = _height(height, row, False, x, y) if height is not None else 0.0
-        at = project(c, x, y, h)
+        at = project(c, x, y, _height(height, row, False, x, y))
         parts.append(f"({x:g}, {y:g}) -> " + (f"({at[0]:.1f}, {at[1]:.1f})" if at else "behind the eye"))
     lines.append(f"square {a.patch} corners in a 1120 x 720 frame (x right, y down; scale to the screenshot's size)"
-                 f"{note}: " + ", ".join(parts))
+                 ": " + ", ".join(parts))
 
 
 def main(argv=None):

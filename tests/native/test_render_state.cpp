@@ -255,6 +255,19 @@ int main() {
     w.read = true;
     w.alpha_ref = Bits(std::numeric_limits<float>::quiet_NaN());
     if (!GarbageIsDefault(w) || DecodeRenderState(w).alpha_to_mask_samples != 0) return 119;
+    // So the capture reads the word only for a draw whose words were read and have alpha-to-mask
+    // on (RB_COLORCONTROL bit 4), and leaves it 0 for every other draw.
+    w = Opaque();
+    if (NeedsSurfaceInfo(w)) return 120;              // opaque: 0x00000004
+    w.color_control = 0x8700000C;                     // alpha test alone
+    if (NeedsSurfaceInfo(w)) return 121;
+    w.color_control = 0x8700001C;
+    if (!NeedsSurfaceInfo(w)) return 122;
+    w.color_control = 0x00000010;                     // alpha-to-mask without the test
+    if (!NeedsSurfaceInfo(w)) return 123;
+    w.read = false;                                   // words that were not read are not looked at
+    if (NeedsSurfaceInfo(w)) return 124;
+    if (NeedsSurfaceInfo(StateWords{})) return 125;
   }
   // --- depth range: the viewport Z scale enabled by VTE bit 4 ---
   {

@@ -20,6 +20,13 @@ block of the layer shaders that blend a side texture in where the ground is stee
 {"threshold": the slope value below which the block runs, "epsilon": the small term of its weights
 (both literals of the shader), "side_slot": the texture fetch slot of the side texture}; without it
 the line ends in -1, 0.0f, 0.0f. All ALPHA lines, then all TERRAIN lines, follow the albedo lines.
+
+An entry is refused (ValueError naming the shader) rather than read loosely: a key is "0x" and 16
+hex digits and names its shader once, whatever the letters' case (load() also refuses a key written
+twice in the file); every entry has "manual": true and a non-empty "evidence", an "alpha" its
+"alpha_evidence"; a slot is a JSON integer 0 to 31; and an entry has only the keys of its form
+(ENTRY_KEYS, ALPHA_KEYS: the keys the committed table uses), so a mistyped key cannot be dropped
+without a word.
 """
 import argparse
 import json
@@ -35,6 +42,36 @@ _TERRAIN_SLOTS = ("base_slot", "detail_slot")
 _STEEP_KEYS = ("threshold", "epsilon", "side_slot")
 _ALBEDO_KEYS = ("slot", "u", "v", "alpha", "no_albedo")
 _COMP = "xyzw"
+# The keys an entry may have, by form: an albedo entry, a "no_albedo" entry, an entry of a terrain
+# kind. "kind" selects the form ("plain", the default, for the first two).
+_COMMON_KEYS = ("kind", "manual", "evidence")
+ENTRY_KEYS = {
+    "albedo": _COMMON_KEYS + ("slot", "u", "v", "alpha", "alpha_manual", "alpha_evidence"),
+    "no_albedo": _COMMON_KEYS + ("no_albedo",),
+    "terrain": _COMMON_KEYS + _TERRAIN_SLOTS + ("steep",),
+}
+ALPHA_KEYS = ("source", "component", "slot", "scale", "divide_by_alpha")  # "slot" only with source "fetch"
+# The small term of the steep weights is a literal like 0.0001: this much or more is not one. One
+# bound for the table, for terrain_replay.py's reading of a capture (it imports this) and for
+# MakeTerrainMaterialInputs (kTerrainSteepEpsMax in terrain_patch.h).
+STEEP_EPSILON_MAX = 0.01
+
+
+def _slot_ok(slot):
+    return isinstance(slot, int) and not isinstance(slot, bool) and 0 <= slot <= 31
+
+
+def _check_entry(ps, e, form):
+    """What every entry needs: only its form's keys, "manual": true, a non-empty "evidence"."""
+    unknown = [k for k in e if k not in ENTRY_KEYS[form]]
+    if unknown:
+        raise ValueError(f"{ps}: unknown key {', '.join(sorted(map(str, unknown)))} in "
+                         f"{'an' if form == 'albedo' else 'a'} {form} entry")
+    if e.get("manual") is not True:
+        raise ValueError(f"{ps}: manual is not true")
+    evidence = e.get("evidence")
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise ValueError(f"{ps}: no evidence")
 
 
 def _scale_ref(ps, text):
@@ -61,8 +98,14 @@ def _alpha_fields(ps, e):
     """(source, slot, component, scale_ref0, scale_ref1, divide_colour) of an entry's "alpha"."""
     a = e["alpha"]
     src = a.get("source") if isinstance(a, dict) else None
-    if src not in _ALPHA_SOURCES:
+    if not isinstance(src, str) or src not in _ALPHA_SOURCES:
         raise ValueError(f"{ps}: unknown alpha source {src!r}")
+    unknown = [k for k in a if k not in ALPHA_KEYS]
+    if unknown:
+        raise ValueError(f"{ps}: unknown alpha key {', '.join(sorted(map(str, unknown)))}")
+    evidence = e.get("alpha_evidence")
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise ValueError(f"{ps}: alpha without alpha_evidence")
     if src == "one":
         if any(k in a for k in ("scale", "component", "slot", "divide_by_alpha")):
             raise ValueError(f"{ps}: alpha source one takes no slot, component, scale or divide_by_alpha")
@@ -74,10 +117,13 @@ def _alpha_fields(ps, e):
         if "slot" not in a:
             raise ValueError(f"{ps}: alpha source fetch needs a slot")
         slot = a["slot"]
-        if not isinstance(slot, int) or isinstance(slot, bool) or not 0 <= slot <= 31:
+        if not _slot_ok(slot):
             raise ValueError(f"{ps}: bad alpha fetch slot {slot!r}")
     else:
-        slot = int(e["slot"])
+        if "slot" in a:
+            raise ValueError(f"{ps}: an alpha recipe takes a slot only with source fetch (source albedo reads "
+                             "the entry's own)")
+        slot = e["slot"]
     divide = a.get("divide_by_alpha", False)
     if not isinstance(divide, bool):
         raise ValueError(f"{ps}: divide_by_alpha must be a JSON boolean, not {divide!r}")
@@ -93,7 +139,7 @@ def _terrain_fields(ps, e):
     slots = []
     for key in _TERRAIN_SLOTS:
         slot = e.get(key)
-        if not isinstance(slot, int) or isinstance(slot, bool) or not 0 <= slot <= 31:
+        if not _slot_ok(slot):
             raise ValueError(f"{ps}: bad terrain {key} {slot!r}")
         slots.append(slot)
     if slots[0] == slots[1]:
@@ -117,7 +163,7 @@ def _steep_fields(ps, e, kind, slots):
     if not isinstance(s, dict) or sorted(s) != sorted(_STEEP_KEYS):
         raise ValueError(f"{ps}: steep must have exactly {', '.join(_STEEP_KEYS)}")
     side = s["side_slot"]
-    if not isinstance(side, int) or isinstance(side, bool) or not 0 <= side <= 31:
+    if not _slot_ok(side):
         raise ValueError(f"{ps}: bad steep side_slot {side!r}")
     if side in slots:
         raise ValueError(f"{ps}: steep side_slot {side} is the base map's or the detail texture's slot")
@@ -125,22 +171,37 @@ def _steep_fields(ps, e, kind, slots):
     # (a value that is not finite fails both comparisons)
     if not 0.0 < threshold <= 1.0:
         raise ValueError(f"{ps}: steep threshold {threshold!r} is not above 0 and at most 1")
-    if not 0.0 < epsilon < 1.0:
-        raise ValueError(f"{ps}: steep epsilon {epsilon!r} is not above 0 and below 1")
+    if not 0.0 < epsilon < STEEP_EPSILON_MAX:
+        raise ValueError(f"{ps}: steep epsilon {epsilon!r} is not above 0 and below {STEEP_EPSILON_MAX!r}")
     return [str(side), f"{threshold!r}f", f"{epsilon!r}f"]
 
 
+def _check_hashes(data):
+    """Every key is "0x" and 16 hex digits, and no shader is named twice (in another spelling)."""
+    seen = {}
+    for ps in data:
+        if not isinstance(ps, str) or not re.fullmatch(r"0x[0-9A-Fa-f]{16}", ps):
+            raise ValueError(f"{ps!r}: a key is not 0x and 16 hex digits")
+        if int(ps, 16) in seen:
+            raise ValueError(f"{seen[int(ps, 16)]} and {ps}: the same shader twice")
+        seen[int(ps, 16)] = ps
+
+
 def generate(data):
+    _check_hashes(data)
     lines = ["// Generated by tools/xdk_sigmatch/gen_albedo_table.py - do not edit."]
     alpha_lines, terrain_lines = [], []
     for ps, e in sorted(data.items(), key=lambda kv: int(kv[0], 16)):
         h = f"0x{int(ps, 16):016X}ull"
+        if not isinstance(e, dict):
+            raise ValueError(f"{ps}: the entry is not an object")
         kind = e.get("kind", "plain")
-        if kind not in _KINDS:
+        if not isinstance(kind, str) or kind not in _KINDS:
             raise ValueError(f"{ps}: unknown kind {kind!r}")
         if kind != "plain":
             base, detail = _terrain_fields(ps, e)
             steep = _steep_fields(ps, e, kind, (base, detail))
+            _check_entry(ps, e, "terrain")
             terrain_lines.append(f"FABLE2_PS_TERRAIN({h}, {_KINDS[kind]}, {base}, {detail}, {', '.join(steep)})")
             continue
         if any(k in e for k in _TERRAIN_SLOTS + ("steep",)):
@@ -148,11 +209,16 @@ def generate(data):
         if "no_albedo" in e:
             if "alpha" in e:
                 raise ValueError(f"{ps}: alpha on a no_albedo entry")
+            extra = [k for k in ("slot", "u", "v") if k in e]
+            if extra:
+                raise ValueError(f"{ps}: a no_albedo entry takes no {', '.join(extra)}")
+            _check_entry(ps, e, "no_albedo")
             lines.append(f"FABLE2_PS_NO_ALBEDO({h})")
             continue
-        slot = int(e["slot"])
-        if not 0 <= slot <= 31:
-            raise ValueError(f"{ps}: bad texture fetch slot {slot}")
+        _check_entry(ps, e, "albedo")
+        slot = e.get("slot")
+        if not _slot_ok(slot):
+            raise ValueError(f"{ps}: bad texture fetch slot {slot!r}")
         fields = [str(slot)]
         for axis in ("u", "v"):
             interp, comp = uv_refs.input_comp(e[axis]["input"])
@@ -163,12 +229,27 @@ def generate(data):
     return "\n".join(lines + alpha_lines + terrain_lines) + "\n"
 
 
+def _no_repeats(pairs):
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError(f"{key}: the key is written twice in one object of the file")
+        out[key] = value
+    return out
+
+
+def load(path):
+    """The table file as generate() takes it. A key written twice in one object (two entries of one
+    shader, a field given twice) is refused: json would keep the last and say nothing."""
+    return json.loads(Path(path).read_text(), object_pairs_hook=_no_repeats)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--json", required=True)
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
-    Path(a.out).write_text(generate(json.loads(Path(a.json).read_text())))
+    Path(a.out).write_text(generate(load(a.json)))
 
 
 if __name__ == "__main__":

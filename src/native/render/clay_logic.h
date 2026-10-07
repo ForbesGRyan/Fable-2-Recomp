@@ -426,26 +426,44 @@ inline size_t FindOrAddPipelineSlot(std::vector<PipelineKey>& keys, const Pipeli
 // ClayConstants::alpha_mode: bits 0-2 the alpha test's compare function
 // (capture::Compare), then the flags below; bits 5-6 are the albedo component
 // (0-3 = x-w) that is the alpha; bits 16-23 the alpha-to-mask dither offsets
-// (RenderState::alpha_to_mask_offsets).
+// (RenderState::alpha_to_mask_offsets), bits 24-25 the sample count they are
+// applied under (RenderState::alpha_to_mask_samples). None of this is pipeline
+// state: the pixel shader computes the thresholds.
 inline constexpr uint32_t kAlphaTest = 1u << 3;        // discard unless alpha <func> alpha_ref
 inline constexpr uint32_t kAlphaFromAlbedo = 1u << 4;  // alpha is an albedo component (else the literal 1)
 inline constexpr uint32_t kAlphaBlend = 1u << 7;       // write the alpha (else 1)
 inline constexpr uint32_t kAlphaToMask = 1u << 8;      // discard unless AlphaToMaskCovers
 inline constexpr uint32_t kAlphaDivide = 1u << 9;      // the colour is the albedo's divided by its alpha
 inline constexpr uint32_t kAlphaToMaskShift = 16;      // the four 2-bit offsets
+inline constexpr uint32_t kAlphaToMaskSamplesShift = 24;  // the surface's sample count, 2 bits
 
-// Alpha-to-mask as the GPU does it without multisampling, which is what the
-// textured pixel shader does after the alpha test (the emulator's rule, SDK
-// dxbc_translator_om.cpp CompletePixelShader_AlphaToMask): the pixel (x, y) is
-// covered iff alpha >= 1 - offset / 4, with the offset of its parity,
-// index (x & 1) * 2 + (y & 1), two bits each from bit 0 of `offsets`. The alpha
-// is not clamped and a NaN covers nothing. 0xAA: 0.5 at every pixel; the dither
-// pattern 0x87: 0.25, 0.75, 1.0, 0.5 for indices 0 to 3, so a fading draw keeps
-// none, one, two, three or all of each 2x2 block.
-inline bool AlphaToMaskCovers(uint8_t offsets, uint32_t x, uint32_t y, float alpha) {
+// Alpha-to-mask, which the textured pixel shader does after the alpha test.
+// The GPU covers a sample iff alpha >= base - offset * scale (the emulator's
+// rule, SDK dxbc_translator_om.cpp CompletePixelShader_AlphaToMask), with the
+// offset of the pixel's parity, index (x & 1) * 2 + (y & 1), two bits each from
+// bit 0 of `offsets`, and per sample count of the surface (`samples`,
+// RB_SURFACE_INFO bits 16-17):
+//   0, no multisampling: one sample, base 1, scale 1/4;
+//   1, two samples: bases 0.5 and 1, scale 1/8;
+//   2, four samples: bases 0.75, 0.25, 0.5 and 1, scale 1/16.
+// The clay target has one sample per pixel: the pixel (x, y) is kept iff at
+// least half of the game's samples would be covered (ruling, 2026-10-07):
+//   0: alpha >= 1 - offset / 4;
+//   1: alpha >= 0.5 - offset / 8;
+//   2: alpha >= 0.5 - offset / 16.
+// Any other count is taken as 0. The alpha is not clamped and a NaN covers
+// nothing. Under two samples, the main scene's count, 0xAA cuts at 0.25 at
+// every pixel and the dither pattern 0x87 at 0.125, 0.375, 0.5, 0.25 for
+// indices 0 to 3: a texel of alpha 0.5 or more is kept at every pixel, and a
+// fading draw keeps none, one, two, three or all of each 2x2 block below that.
+// A pixel of which the game covers one sample of two is drawn whole here: more
+// solid than the game, never a hole the game does not have.
+inline bool AlphaToMaskCovers(uint8_t offsets, uint32_t x, uint32_t y, float alpha, uint32_t samples = 0) {
   const uint32_t index = ((x & 1u) << 1) | (y & 1u);
   const uint32_t offset = (uint32_t(offsets) >> (2 * index)) & 3u;
-  return alpha >= 1.0f - float(offset) * 0.25f;
+  const float mask_base = (samples == 1u || samples == 2u) ? 0.5f : 1.0f;
+  const float per_offset = samples == 1u ? 0.125f : samples == 2u ? 0.0625f : 0.25f;
+  return alpha >= mask_base - float(offset) * per_offset;
 }
 
 // The alpha fields of the root constants; the default is an opaque draw.
@@ -511,7 +529,8 @@ inline DrawState DecideDrawState(const capture::RenderState& rs, const capture::
       d.blended = blend;
       if (rs.alpha_test) d.alpha.mode |= (uint32_t(rs.alpha_func) & 7u) | kAlphaTest;
       if (rs.alpha_to_mask) {
-        d.alpha.mode |= kAlphaToMask | (uint32_t(rs.alpha_to_mask_offsets) << kAlphaToMaskShift);
+        d.alpha.mode |= kAlphaToMask | (uint32_t(rs.alpha_to_mask_offsets) << kAlphaToMaskShift) |
+                        (uint32_t(rs.alpha_to_mask_samples & 3) << kAlphaToMaskSamplesShift);
       }
       if (a.source == capture::AlphaSource::kAlbedo) {
         d.alpha.mode |= kAlphaFromAlbedo | (uint32_t(a.component & 3) << 5);

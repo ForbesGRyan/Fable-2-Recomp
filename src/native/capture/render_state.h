@@ -20,6 +20,9 @@ struct StateWords {
   uint32_t vport_z_scale = 0x3F800000;  // PA_CL_VPORT_ZSCALE (register 0x2113), a float's bits
   uint32_t vte_cntl = 0;        // PA_CL_VTE_CNTL (register 0x2206); bit 4 enables the viewport Z scale
   uint32_t bin_mask_lo = 0x2AAAAAAA;  // device +0x31A4, low word of the tiling bin mask (HasColourPass)
+  // RB_SURFACE_INFO (register 0x2000); bits 16-17 are the surface's sample count. Read apart
+  // from `read`: a word that cannot be read stays 0, no multisampling.
+  uint32_t surface_info = 0;
   bool read = false;            // false: the words could not be read
 };
 
@@ -37,6 +40,11 @@ struct RenderState {
   // parity, index (x & 1) * 2 + (y & 1) from bit 0. Without multisampling a pixel is covered iff
   // alpha >= 1 - offset / 4 (0xAA: 0.5 everywhere; 0x87: 0.25, 0.75, 1.0, 0.5 for indices 0 to 3).
   uint8_t alpha_to_mask_offsets = 0;
+  // RB_SURFACE_INFO bits 16-17 (SDK registers.h msaa_samples, xenos.h MsaaSamples), kept only
+  // with alpha_to_mask: 0 no multisampling, 1 two samples per pixel, 2 four. The field's fourth
+  // value, 3, is no sample count and reads as 0. The thresholds per count: AlphaToMaskCovers
+  // in clay_logic.h.
+  uint8_t alpha_to_mask_samples = 0;
   bool blend = false; Factor src = Factor::kOne, dst = Factor::kZero; BlendOp op = BlendOp::kAdd;
   Factor src_alpha = Factor::kOne, dst_alpha = Factor::kZero; BlendOp op_alpha = BlendOp::kAdd;
   uint8_t color_mask = 0xF;
@@ -86,6 +94,9 @@ inline RenderState DecodeRenderState(const StateWords& w) {
   s.alpha_ref = ref;
   s.alpha_to_mask = (w.color_control & 0x10) != 0;
   s.alpha_to_mask_offsets = s.alpha_to_mask ? uint8_t(w.color_control >> 24) : uint8_t(0);
+  // RB_SURFACE_INFO: bits 16-17 the sample count alpha-to-mask works under.
+  const uint32_t samples = (w.surface_info >> 16) & 3;
+  s.alpha_to_mask_samples = s.alpha_to_mask && samples != 3 ? uint8_t(samples) : uint8_t(0);
 
   // RB_BLENDCONTROL0: colour source 0-4, operation 5-7, destination 8-12;
   // alpha source 16-20, operation 21-23, destination 24-28.

@@ -1343,7 +1343,9 @@ void AppendTerrainPixelConstants(std::string& row, uint32_t device) {
 
 // The nine words of a draw's render state (render_state.h) from the device's
 // register shadows, as AppendRenderState reads them, and the low word of its bin
-// mask. `read` stays false when any of them cannot be read.
+// mask. `read` stays false when any of them cannot be read. RB_SURFACE_INFO
+// (the sample count alpha-to-mask works under) is read apart from them: a word
+// that cannot be read stays 0, no multisampling, and makes nothing invalid.
 void ReadStateWords(uint32_t device, StateWords* w) {
   *w = StateWords{};
   if (!device) return;
@@ -1355,6 +1357,7 @@ void ReadStateWords(uint32_t device, StateWords* w) {
             reg(xdk::kRegDepthControl, &w->depth_control) && reg(xdk::kRegSuScModeCntl, &w->su_sc_mode) &&
             reg(xdk::kRegVportZScale, &w->vport_z_scale) && reg(xdk::kRegVteCntl, &w->vte_cntl) &&
             ReadVirtualBe32(device + xdk::kDeviceBinMaskLoOffset, &w->bin_mask_lo);
+  if (!reg(xdk::kRegSurfaceInfo, &w->surface_info)) w->surface_info = 0;
 }
 
 // Caller holds g_mutex. One decoded "draw" row (frame-map section 8) for

@@ -38,6 +38,7 @@ static_assert(xdk::DeviceRegShadowOffset(0x20FF) == 0);
 // The 0x2000 run: sixteen registers from device + 0x2880 (DrawIndexedVertices 0x8221E200..0x8221E210,
 // mask width 16). RB_SURFACE_INFO is its first word, RB_COLOR_INFO (the colour target's format) the second.
 static_assert(xdk::DeviceRegShadowOffset(0x2000) == xdk::kDeviceSurfaceInfoOffset);
+static_assert(xdk::kRegSurfaceInfo == 0x2000 && xdk::DeviceRegShadowOffset(xdk::kRegSurfaceInfo) == 0x2880);
 static_assert(xdk::kRegColorInfo == 0x2001 && xdk::DeviceRegShadowOffset(xdk::kRegColorInfo) == 0x2884);
 static_assert(xdk::DeviceRegShadowOffset(0x200F) == 0x2880 + 4 * 15);
 static_assert(xdk::DeviceRegShadowOffset(0x2010) == 0);

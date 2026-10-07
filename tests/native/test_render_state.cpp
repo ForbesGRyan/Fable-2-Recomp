@@ -52,6 +52,7 @@ int main() {
     if (RenderState{}.valid) return 6;  // not valid until a decoder says so
     const StateWords w;
     if (w.read || w.color_mask != 0xF || w.blend_control != 0x00010001 || w.bin_mask_lo != 0x2AAAAAAA) return 7;
+    if (w.surface_info != 0 || d.alpha_to_mask_samples != 0) return 8;  // no multisampling until read
   }
   // --- real census words ---
   {  // opaque mesh draw: 0xECD66A10092E6562 / 0x8D900846800943C8
@@ -219,6 +220,41 @@ int main() {
     if (s.alpha_to_mask_offsets != 0) return 91;  // enabled with offsets 0: threshold 1.0 everywhere
     w.color_control = 0x1B000010;                 // each pixel its own offset: 3, 2, 1, 0
     if (DecodeRenderState(w).alpha_to_mask_offsets != 0x1B) return 92;
+  }
+  // --- the surface's sample count for alpha-to-mask: RB_SURFACE_INFO bits 16-17 ---
+  {
+    // Real words (session-1 captures): the main scene 0x11810460 (pitch 1120, two samples), the
+    // pitch-280 pass 0x04020118 (four), the pitch-1040 pass 0x10000410 (none).
+    StateWords w = Opaque();
+    w.color_control = 0x8700001C;
+    w.surface_info = 0x11810460;
+    RenderState s = DecodeRenderState(w);
+    if (!s.valid || !s.alpha_to_mask || s.alpha_to_mask_samples != 1) return 110;
+    w.surface_info = 0x04020118;
+    if (DecodeRenderState(w).alpha_to_mask_samples != 2) return 111;
+    w.surface_info = 0x10000410;
+    if (DecodeRenderState(w).alpha_to_mask_samples != 0) return 112;
+    // Only bits 16-17 count: the pitch below and the hierarchical-Z pitch above do not leak in.
+    w.surface_info = 0xFFFCFFFF;
+    if (DecodeRenderState(w).alpha_to_mask_samples != 0) return 113;
+    w.surface_info = 0xFFFDFFFF;
+    if (DecodeRenderState(w).alpha_to_mask_samples != 1) return 114;
+    w.surface_info = 0x00020000;
+    if (DecodeRenderState(w).alpha_to_mask_samples != 2) return 115;
+    // The field's fourth value is no sample count: no multisampling, and the state stays valid.
+    w.surface_info = 0x11830460;
+    s = DecodeRenderState(w);
+    if (!s.valid || !s.alpha_to_mask || s.alpha_to_mask_samples != 0 || s.alpha_to_mask_offsets != 0x87) return 116;
+    // Kept only with alpha-to-mask, as the offsets are; unread and garbage words give none.
+    w = Opaque();
+    w.surface_info = 0x11810460;
+    if (DecodeRenderState(w).alpha_to_mask_samples != 0) return 117;
+    w.color_control = 0x8700001C;
+    w.read = false;
+    if (DecodeRenderState(w).alpha_to_mask_samples != 0) return 118;
+    w.read = true;
+    w.alpha_ref = Bits(std::numeric_limits<float>::quiet_NaN());
+    if (!GarbageIsDefault(w) || DecodeRenderState(w).alpha_to_mask_samples != 0) return 119;
   }
   // --- depth range: the viewport Z scale enabled by VTE bit 4 ---
   {

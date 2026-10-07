@@ -54,8 +54,10 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 // Their alpha (clay_logic.h, ClayAlpha) is an albedo component or 1, times
 // alpha_scale; alpha_mode says whether it is tested against alpha_ref (bits 0-2
 // the compare function, bit 3 the test), then tested as alpha-to-mask (bit 8:
-// kept iff alpha >= 1 - offset / 4, the offset being the two bits of bits 16-23
-// that the pixel's parity picks, AlphaToMaskCovers in clay_logic.h), written for
+// kept iff alpha >= mask_base - offset * per_offset, the offset being the two bits
+// of bits 16-23 that the pixel's parity picks, mask_base and per_offset those of the
+// surface's sample count in bits 24-25: 0.5 and 1/8 for two samples, 0.5 and
+// 1/16 for four, else 1 and 1/4; AlphaToMaskCovers in clay_logic.h), written for
 // blending (bit 7; else 1 is written), and whether the colour is first divided
 // by the albedo's alpha (bit 9). Flat draws (kClayPs) have no alpha. The three
 // shaders declare one cbuffer (ClayConstants).
@@ -148,7 +150,10 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
       uint2 p = uint2(pos.xy);
       uint index = ((p.x & 1) << 1) | (p.y & 1);
       uint offset = (alpha_mode >> (16 + 2 * index)) & 3;
-      if (!(a >= 1.0 - offset * 0.25)) discard;
+      uint samples = (alpha_mode >> 24) & 3;
+      float mask_base = (samples == 1 || samples == 2) ? 0.5 : 1.0;
+      float per_offset = samples == 1 ? 0.125 : samples == 2 ? 0.0625 : 0.25;
+      if (!(a >= mask_base - offset * per_offset)) discard;
     }
     return float4(t.rgb * (0.75 + 0.25 * facet), (alpha_mode & 0x80) ? a : 1.0);
   }

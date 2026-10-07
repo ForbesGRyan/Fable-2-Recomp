@@ -933,6 +933,119 @@ int main() {
                    AlphaToMaskCovers(0x1B, 0, 1, 0.5f) && !AlphaToMaskCovers(0x1B, 1, 0, 0.5f) &&
                    AlphaToMaskCovers(0x1B, 1, 0, 0.75f) && !AlphaToMaskCovers(0x1B, 1, 1, 0.75f));
   }
+  // 227-236: alpha-to-mask under the surface's own sample count (RB_SURFACE_INFO bits 16-17:
+  // 0 none, 1 two samples, 2 four). The clay target has one sample per pixel: a pixel is kept
+  // iff at least half of the game's samples would be covered. Two samples:
+  // alpha >= 0.5 - offset / 8; four: alpha >= 0.5 - offset / 16; none: alpha >= 1 - offset / 4.
+  {
+    // Offsets byte, pixel, sample count, threshold: kept at the threshold, not one float below.
+    const struct { uint8_t offsets; uint32_t x, y, samples; float t; } table[] = {
+        // 0x87: offsets 3, 1, 0, 2 for indices 0 to 3.
+        {0x87, 0, 0, 0, 0.25f},   {0x87, 0, 1, 0, 0.75f},   {0x87, 1, 0, 0, 1.0f}, {0x87, 1, 1, 0, 0.5f},
+        {0x87, 0, 0, 1, 0.125f},  {0x87, 0, 1, 1, 0.375f},  {0x87, 1, 0, 1, 0.5f}, {0x87, 1, 1, 1, 0.25f},
+        {0x87, 0, 0, 2, 0.3125f}, {0x87, 0, 1, 2, 0.4375f}, {0x87, 1, 0, 2, 0.5f}, {0x87, 1, 1, 2, 0.375f},
+        // 0xAA: offset 2 at every pixel.
+        {0xAA, 0, 0, 0, 0.5f},    {0xAA, 1, 1, 0, 0.5f},    {0xAA, 0, 0, 1, 0.25f}, {0xAA, 0, 1, 1, 0.25f},
+        {0xAA, 1, 0, 1, 0.25f},   {0xAA, 1, 1, 1, 0.25f},   {0xAA, 0, 0, 2, 0.375f}, {0xAA, 1, 0, 2, 0.375f},
+        // 0x1B: each pixel its own offset, 3, 2, 1, 0; 0x00 and 0xFF: the ends of the range.
+        {0x1B, 0, 0, 1, 0.125f},  {0x1B, 0, 1, 1, 0.25f},   {0x1B, 1, 0, 1, 0.375f}, {0x1B, 1, 1, 1, 0.5f},
+        {0x1B, 0, 0, 2, 0.3125f}, {0x1B, 0, 1, 2, 0.375f},  {0x1B, 1, 0, 2, 0.4375f}, {0x1B, 1, 1, 2, 0.5f},
+        {0x00, 1, 1, 0, 1.0f},    {0x00, 1, 1, 1, 0.5f},    {0x00, 1, 1, 2, 0.5f},
+        {0xFF, 0, 1, 0, 0.25f},   {0xFF, 0, 1, 1, 0.125f},  {0xFF, 0, 1, 2, 0.3125f},
+        // The field's fourth value is no sample count: the no-multisampling form.
+        {0x87, 0, 0, 3, 0.25f},   {0x87, 0, 1, 3, 0.75f},   {0x87, 1, 0, 3, 1.0f}, {0x87, 1, 1, 3, 0.5f},
+    };
+    for (const auto& c : table) {
+      const float lo = std::nextafter(c.t, 0.0f), hi = std::nextafter(c.t, 2.0f);
+      CHECK(227, AlphaToMaskCovers(c.offsets, c.x, c.y, c.t, c.samples) &&
+                     !AlphaToMaskCovers(c.offsets, c.x, c.y, lo, c.samples) &&
+                     AlphaToMaskCovers(c.offsets, c.x, c.y, hi, c.samples));
+      // Only the parity of the pixel counts, under every sample count.
+      CHECK(228, AlphaToMaskCovers(c.offsets, c.x + 1118, c.y + 718, c.t, c.samples) &&
+                     !AlphaToMaskCovers(c.offsets, c.x + 1118, c.y + 718, lo, c.samples));
+    }
+    // The sample count defaults to none.
+    CHECK(229, AlphaToMaskCovers(0x87, 1, 0, 1.0f) && !AlphaToMaskCovers(0x87, 1, 0, 0.99f) &&
+                   AlphaToMaskCovers(0x87, 1, 0, 0.99f, 1));
+    auto covered = [](uint8_t offsets, float a, uint32_t samples) {
+      int n = 0;
+      for (uint32_t x = 0; x < 2; ++x) {
+        for (uint32_t y = 0; y < 2; ++y) n += AlphaToMaskCovers(offsets, x, y, a, samples) ? 1 : 0;
+      }
+      return n;
+    };
+    // The main scene's case (two samples, 0x87): a texel with alpha 0.5 or 0.99 keeps all four
+    // pixel positions, where the one-sample form opens one or two holes per 2x2 block.
+    CHECK(230, covered(0x87, 0.5f, 1) == 4 && covered(0x87, 0.99f, 1) == 4 && covered(0x87, 1.0f, 1) == 4 &&
+                   covered(0x87, 0.5f, 0) == 2 && covered(0x87, 0.99f, 0) == 3 &&
+                   covered(0x87, 0.5f, 2) == 4 && covered(0x87, 0.99f, 2) == 4);
+    // A fading draw under two samples: none below 0.125, then one more pixel every eighth; under
+    // four from 0.3125 every sixteenth; 0xAA cuts at 0.25 and at 0.375.
+    CHECK(231, covered(0x87, 0.1249f, 1) == 0 && covered(0x87, 0.125f, 1) == 1 && covered(0x87, 0.25f, 1) == 2 &&
+                   covered(0x87, 0.375f, 1) == 3 && covered(0x87, 0.4999f, 1) == 3 &&
+                   covered(0x87, 0.3124f, 2) == 0 && covered(0x87, 0.3125f, 2) == 1 && covered(0x87, 0.375f, 2) == 2 &&
+                   covered(0x87, 0.4375f, 2) == 3 && covered(0x87, 0.4999f, 2) == 3);
+    CHECK(232, covered(0xAA, 0.2499f, 1) == 0 && covered(0xAA, 0.25f, 1) == 4 && covered(0xAA, 0.3749f, 2) == 0 &&
+                   covered(0xAA, 0.375f, 2) == 4);
+    // The alpha is not clamped and a NaN covers nothing, under every sample count.
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    for (uint32_t samples = 0; samples < 4; ++samples) {
+      CHECK(233, covered(0x87, nan, samples) == 0 && covered(0xFF, nan, samples) == 0 &&
+                     covered(0x87, -1.0f, samples) == 0 && covered(0x87, 7.5f, samples) == 4 &&
+                     covered(0x00, std::numeric_limits<float>::infinity(), samples) == 4);
+    }
+    // The rule against the emulator's own per-sample thresholds (SDK dxbc_translator_om.cpp
+    // CompletePixelShader_AlphaToMask: a sample is covered iff alpha >= base - offset * scale;
+    // one sample base 1 scale 1/4, two bases 0.5 and 1 scale 1/8, four bases 0.75, 0.25, 0.5
+    // and 1 scale 1/16): kept iff at least half of the samples are covered, for every offset
+    // and every alpha on a grid of sixty-fourths, one float below and one above.
+    const struct { int count; float base[4]; float scale; } forms[] = {
+        {1, {1.0f, 0.0f, 0.0f, 0.0f}, 0.25f},
+        {2, {0.5f, 1.0f, 0.0f, 0.0f}, 0.125f},
+        {4, {0.75f, 0.25f, 0.5f, 1.0f}, 0.0625f},
+    };
+    bool agrees = true;
+    for (uint32_t samples = 0; samples < 3; ++samples) {
+      const auto& f = forms[samples];
+      for (uint32_t offset = 0; offset < 4; ++offset) {
+        for (int k = -4; k <= 68; ++k) {
+          const float grid = float(k) / 64.0f;
+          for (float a : {std::nextafter(grid, -1.0f), grid, std::nextafter(grid, 2.0f)}) {
+            int n = 0;
+            for (int s = 0; s < f.count; ++s) n += a >= f.base[s] - float(offset) * f.scale ? 1 : 0;
+            // Index 3 (x odd, y odd) reads bits 6-7 of the offsets byte.
+            agrees = agrees && AlphaToMaskCovers(uint8_t(offset << 6), 1, 1, a, samples) == (2 * n >= f.count);
+          }
+        }
+      }
+    }
+    CHECK(234, agrees);
+    // The sample count travels in bits 24-25 of the mode, only with alpha-to-mask, and is no
+    // part of the pipeline key: it adds no pipeline.
+    capture::Material recipe;
+    recipe.alpha.source = capture::AlphaSource::kAlbedo;
+    recipe.alpha.component = 3;
+    capture::RenderState foliage = State(0x00708767, 0x00010001, 0x8700001C, 0x00218000, 0xF, 0.0f);
+    const DrawState none = DecideDrawState(foliage, recipe, 1, false);
+    const uint32_t base_mode = 4u | kAlphaTest | kAlphaFromAlbedo | (3u << 5) | kAlphaToMask | (0x87u << 16);
+    foliage.alpha_to_mask_samples = 1;
+    const DrawState two = DecideDrawState(foliage, recipe, 1, false);
+    foliage.alpha_to_mask_samples = 2;
+    const DrawState four = DecideDrawState(foliage, recipe, 1, false);
+    CHECK(235, kAlphaToMaskSamplesShift == 24 && none.alpha.mode == base_mode &&
+                   two.alpha.mode == (base_mode | (1u << 24)) && four.alpha.mode == (base_mode | (2u << 24)) &&
+                   two.alpha_tested && !two.alpha_unknown && !two.state_invalid && two.key == none.key &&
+                   four.key == none.key && MakePipelineKey(foliage, 1) == none.key);
+    std::vector<PipelineKey> keys;
+    FindOrAddPipelineSlot(keys, none.key);
+    FindOrAddPipelineSlot(keys, two.key);
+    FindOrAddPipelineSlot(keys, four.key);
+    capture::RenderState prop = State(0x00708767, 0x00010001, 0x0000000C, 0x00218006, 0xF, 128.0f / 255.0f);
+    prop.alpha_to_mask_samples = 1;  // not what the decoder gives: the mode still takes it only with the mask
+    CHECK(236, keys.size() == 1 &&
+                   DecideDrawState(prop, recipe, 1, false).alpha.mode == (4u | kAlphaTest | kAlphaFromAlbedo | (3u << 5)) &&
+                   DecideDrawState(foliage, capture::Material{}, 1, false).alpha.mode == 0);
+  }
   // 200-204: the alpha fields of the root constants (36 dwords).
   {
     static_assert(sizeof(ClayConstants) == 144);

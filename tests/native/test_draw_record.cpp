@@ -269,11 +269,13 @@ int main() {
     w.color_control = 0x8700001C; w.alpha_ref = 0x3F008081; w.blend_control = 0x07060706;
     w.color_mask = 0x5; w.depth_control = 0x00708767; w.su_sc_mode = 0x00218006;
     w.vport_z_scale = 0xBF800000; w.vte_cntl = 0x0000043F; w.bin_mask_lo = 0x15555555;
+    w.surface_info = 0x11810460;
     auto same = [&](const StateWords& a) {
       return a.read && a.color_control == w.color_control && a.alpha_ref == w.alpha_ref &&
              a.blend_control == w.blend_control && a.color_mask == w.color_mask &&
              a.depth_control == w.depth_control && a.su_sc_mode == w.su_sc_mode &&
-             a.vport_z_scale == w.vport_z_scale && a.vte_cntl == w.vte_cntl && a.bin_mask_lo == w.bin_mask_lo;
+             a.vport_z_scale == w.vport_z_scale && a.vte_cntl == w.vte_cntl && a.bin_mask_lo == w.bin_mask_lo &&
+             a.surface_info == w.surface_info;
     };
     if (DrawRecord{}.state_words.read || DrawInputs{}.state_words.read || DrawInputs{}.depth_only) return 80;
     in = Good(); in.state_words = w;                        // plain

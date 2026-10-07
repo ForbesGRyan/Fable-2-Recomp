@@ -90,9 +90,19 @@ inline constexpr uint8_t kDeviceTilingFlagMask = 0x20;
 // in pixels): DrawIndexedVertices 0x8221E200..0x8221E210 (`addi r6,r31,0x2880;
 // li r5,0x2000; bl 0x8221C908`); 0x8221C908 writes one type-0 packet per run of
 // mask bits, register r5 + n taken from r6 + 4*n (0x8221C98C..0x8221C9AC).
-// Used as evidence only (frame rows "pitch_in"/"pitch_out").
+// The pitch is evidence only (frame rows "pitch_in"/"pitch_out"). Bits 16-17
+// are the surface's sample count (SDK registers.h RB_SURFACE_INFO::msaa_samples,
+// xenos.h MsaaSamples: 0 none, 1 two samples, 2 four), which the draw records
+// carry for alpha-to-mask (render_state.h; kRegSurfaceInfo below). Runtime
+// (frame-map section 13, "Alpha and missing shaders"): 0x11810460, pitch 1120
+// and two samples, in all 7,652 and 7,186 main-scene draw and tess rows of the
+// captures native_discovery_20261007_044603 and _045335; outside the main scene
+// none, and four at pitch 280. The sample field was not compared with the GPU's
+// register file; in the depth pre-pass bins the tiling state emitter overrides
+// the register (0x82215904..0x8221592C), as it does RB_COLOR_MASK below.
 inline constexpr uint32_t kDeviceSurfaceInfoOffset = 0x2880;
 inline constexpr uint32_t kSurfacePitchMask = 0x3FFF;
+inline constexpr uint32_t kRegSurfaceInfo = 0x2000;    // RB_SURFACE_INFO
 // Shadow of VGT_HOS_CNTL (register 0x2285; bits 0-1 = tessellation mode, 2 =
 // adaptive). Registers 0x2280.. are shadowed from +0x2964 (0x82207E9C..
 // 0x82207EA4: `addi r6,r31,0x2964; li r5,0x2280` to the register-run writer),

@@ -26,53 +26,63 @@
 # Automated agents start the game ONLY through this script, WITHOUT -UserPresent; every other
 # launcher (tools\*.cmd, the launcher\ app, running fable_2.exe directly) is for a person at the keyboard.
 #  - Before launching it runs the idle gate of tools/idle_check.ps1: no keyboard or mouse input,
-#    no active, connecting or unplugged XInput pad, no sound on the default playback device (10 s),
-#    no other fullscreen or presentation program and no fable_2.exe already running, for 300 s
-#    (fixed: there is no parameter, environment variable or option that lowers it), waiting up to
-#    -IdleWaitSeconds (default 1800; the gate needs at least 10 s of observation, a pad 300 s).
-#    If the gate does not pass, or fails for any reason, the game is not launched:
-#    message "REFUSED: ..." and exit code 10.
-#  - The game is assigned to a Win32 job object (kill on close) held by this script, so the OS
-#    kills the game if this script dies for any reason. If that fails the game is killed at once
-#    (exit 12). The game also runs with SDL_AUDIO_DRIVER=fable-test-unavailable-backend (the
-#    tools\StartWithoutAudio.cmd mechanism) so its own sound does not trip the audio signal;
-#    an -Env value for SDL_AUDIO_DRIVER wins.
+#    no active, connecting or unplugged XInput pad, no sound on the default playback device,
+#    no other fullscreen or presentation program and no fable_2.exe already running, each for 300 s
+#    of observation (fixed: there is no parameter, environment variable or option that lowers it),
+#    waiting up to -IdleWaitSeconds (default 1800). Every gate therefore takes at least 300 s;
+#    an -IdleWaitSeconds below 300 always refuses. If the gate does not pass, or fails for any
+#    reason, the game is not launched: message "REFUSED: ..." and exit code 10.
+#  - The game is created suspended, assigned to a Win32 job object (kill on close) held by this
+#    script, and only then resumed, so it never runs outside the job and the OS kills it (and its
+#    children) if this script dies for any reason. If that fails the game is killed at once
+#    (exit 12). Stopping the game also terminates the job. The game runs with
+#    SDL_AUDIO_DRIVER=fable-test-unavailable-backend (the tools\StartWithoutAudio.cmd mechanism) so
+#    its own sound does not trip the audio signal; an -Env value for SDL_AUDIO_DRIVER wins.
+#  - Dead-man switch: if the main loop has not polled the watch for more than 5 s while the game
+#    runs (for example a hung screenshot call), a background thread terminates the job; the run
+#    ends "RUN ABORTED: dead-man switch ..." (exit 12).
 #  - From launch to the end it polls the same signals (about every 100 ms plus the probe time,
 #    between its timing and screenshot steps; the pad and audio latches are sampled every 10 and
 #    50 ms by a background thread; the game's own in-process autoplay and the PrintWindow
 #    screenshots are not OS input and do not trip it; the running-game check is gate-only). On a
-#    signal it kills the game at once, prints "RUN DISTURBED: <signal> at <seconds> s", moves the
-#    run's screenshots into <ShotDir>\disturbed_<timestamp>\, writes that line, a warning and the
-#    moved files to the marker file RUN_DISTURBED.txt (in -ShotDir when -Shots is given, else in
-#    <ExeDir>\logs) and exits 11. A watch error counts as a disturbance (fail closed).
+#    signal (input, controller, audio, fullscreen, unknown, forced-present; a watch error is
+#    "unknown") it kills the game at once, prints "RUN DISTURBED: <signal> at <seconds> s", moves
+#    the run's screenshots into <ShotDir>\disturbed_<timestamp>\, writes that line, a warning and
+#    the moved files to the marker file RUN_DISTURBED.txt (in -ShotDir when -Shots is given, else
+#    in <ExeDir>\logs) and exits 11. A watch error counts as a disturbance (fail closed).
 #  - A run with no disturbance ends with the last output line "RUN CLEAN: no user input for
 #    <seconds> s" (seconds from launch to close) and exit 0, printed only after the game is
 #    confirmed closed. An error during the run closes the game and ends with
 #    "RUN ABORTED: <message>" and exit 12. A game that exits before -Total prints
 #    "GAME EXITED EARLY at <seconds> s" and exits 13 (never RUN CLEAN). A stale marker from an
 #    earlier run is renamed to RUN_DISTURBED.<timestamp>.previous.txt before launch.
-#  - Every run appends one line to <ExeDir>\logs\drive_game_runs.log: time, exit code, gate
-#    result and signals ("USER PRESENT OVERRIDE" when -UserPresent was used).
-#  Exit codes: 0 clean (or unchecked with -UserPresent), 2 refused option combination,
-#  10 gate refused (nothing launched), 11 disturbed, 12 aborted, 13 game exited early;
-#  1 is a script error before launch (bad plan, unknown parameter, ambiguous abbreviation).
+#  - Every run appends lines to <ExeDir>\logs\drive_game_runs.log: "started pid <n>" at launch and
+#    at the end time, exit code, gate result and signals ("USER PRESENT OVERRIDE" when
+#    -UserPresent was used).
+#  Exit codes: 0 clean (or unchecked with -UserPresent), 2 refused option combination (also any
+#  unknown or positional argument), 10 gate refused (nothing launched), 11 disturbed, 12 aborted,
+#  13 game exited early; 1 is a script error before launch (bad plan, ambiguous abbreviation).
 #  -UserPresent (spelled in full; abbreviations are rejected): ONLY for the person at the keyboard
 #  running this script themselves. It skips the gate and the watch and prints a prominent line
 #  saying so. AGENTS MUST NEVER PASS IT. -KeyboardInput (the user driving with real key presses)
 #  requires -UserPresent.
 #  -TestHarness/-TestExe/-TestExeArgs: self-test of this script's run path (tests\test_idle_gate.py).
-#  They replace the Win32 probes by a scripted probe and the game by a stand-in process. They are
-#  refused unless all of -TestHarness and -TestExe are given, never together with -UserPresent, and
-#  refused when -TestExe is named like the game (any name containing "fable"), is the built
-#  fable_2.exe (same path or same bytes), or sits in a folder with rexruntime.dll or fable_2.toml.
-#  This is a guard against accidents, not against someone who deliberately builds a disguised
-#  copy of the game: the rule that agents start the game only through this script without
-#  test parameters is policy.
+#  They replace the Win32 probes by a scripted probe and the game by a stand-in process. Such a run
+#  is labelled everywhere: the banner "*** TEST MODE ...", every verdict line (RUN CLEAN, RUN
+#  DISTURBED, RUN ABORTED, GAME EXITED EARLY) starts with "TEST HARNESS " and so does every line
+#  of the run log. They are refused (exit 2) unless -TestHarness and -TestExe are given together
+#  with an explicit -ExeDir that contains no fable_2.exe, never together with -UserPresent,
+#  -KeyboardInput, -GameArgs or -Env, and refused when -TestExe is named like the game (any name
+#  containing "fable"), is the built fable_2.exe (same path or same bytes), or sits in a folder
+#  with rexruntime.dll or fable_2.toml. This is a guard against accidents, not against someone who
+#  deliberately builds a disguised copy of the game: the rule that agents start the game only
+#  through this script without test parameters is policy.
 #
 # Examples (from the repo root, PowerShell):
 #   .\tools\drive_game.ps1 -Total 120
 #   .\tools\drive_game.ps1 -Total 150 -Env @{FABLE2_NATIVE_DISCOVERY="300"; FABLE2_NATIVE_DISCOVERY_DELAY="50"}
 #   .\tools\drive_game.ps1 -GameArgs "--native_render_log_vertex_bindings=true" -Shots "50,80"
+[CmdletBinding(PositionalBinding = $false)]
 param(
   [int]$Total = 120,                         # seconds before the game is closed
   [string]$Plan = "23:E,27:S,30:E,35:E",     # second:key list
@@ -88,24 +98,34 @@ param(
   [switch]$UserPresentAbbreviationGuard,     # makes every abbreviation of -UserPresent ambiguous (an error); refused if given
   [string]$TestHarness = "",                 # self-test only, see the header
   [string]$TestExe = "",                     # self-test only
-  [string]$TestExeArgs = ""                  # self-test only: arguments of the stand-in, separated by |
+  [string]$TestExeArgs = "",                 # self-test only: arguments of the stand-in, separated by |
+  [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest = @()   # catches positional and unknown arguments: refused
 )
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
+$exeDirGiven = $PSBoundParameters.ContainsKey('ExeDir')
 if ($HoldMs -le 0) { $HoldMs = if ($KeyboardInput) { 50 } else { 100 } }
 if (-not $ExeDir) { $ExeDir = Join-Path $Root "out\build\win-amd64-release" }
 if (-not $ShotDir) { $ShotDir = Join-Path $ExeDir "logs\shots" }
 $RequiredAbsenceSeconds = 300   # the idle requirement; nothing lowers it
+$DeadManSeconds = 5             # the main loop must poll the watch at least this often
+$testMode = [bool]($TestHarness -or $TestExe -or $TestExeArgs)
+$Label = if ($testMode) { "TEST HARNESS " } else { "" }   # prefix of every verdict and log line of a harness run
 $script:GateText = "not evaluated"
 $script:sampledNative = $null
 
-# Ends the script: one line in the durable run log, the sampler stopped, then exit.
-function Exit-Run([int]$Code) {
+# Appends one line to the durable run log (harness runs: labelled, and never into a default folder).
+function Add-RunLog([string]$Text) {
+  if ($testMode -and -not $exeDirGiven) { return }
   try {
     $dir = Join-Path $ExeDir "logs"
     New-Item -ItemType Directory -Force $dir | Out-Null
-    Add-Content -LiteralPath (Join-Path $dir "drive_game_runs.log") -Value ("{0:yyyy-MM-dd HH:mm:ss}  exit={1}  gate={2}" -f (Get-Date), $Code, $script:GateText)
+    Add-Content -LiteralPath (Join-Path $dir "drive_game_runs.log") -Value ("{0}{1:yyyy-MM-dd HH:mm:ss}  {2}" -f $Label, (Get-Date), $Text)
   } catch { }
+}
+# Ends the script: the final line in the run log, the sampler stopped, then exit.
+function Exit-Run([int]$Code) {
+  Add-RunLog ("exit={0}  gate={1}" -f $Code, $script:GateText)
   try { if ($script:sampledNative) { $script:sampledNative.StopSampler() } } catch { }
   exit $Code
 }
@@ -113,30 +133,31 @@ if ($UserPresentAbbreviationGuard) {
   Write-Output "REFUSED: -UserPresentAbbreviationGuard is not an option. Nothing launched."
   Exit-Run 2
 }
+if ($Rest.Count) {
+  Write-Output "REFUSED: unknown arguments ($($Rest -join ' ')); positional and unknown arguments are never ignored silently. Nothing launched."
+  Exit-Run 2
+}
 if ($KeyboardInput -and -not $UserPresent) {
   Write-Output "REFUSED: -KeyboardInput means the user is driving; it requires -UserPresent. Nothing launched."
   Exit-Run 2
 }
-if ($args.Count) {
-  Write-Output "REFUSED: unknown arguments ($($args -join ' ')); nothing is ignored silently. Nothing launched."
-  Exit-Run 2
-}
-$testMode = [bool]($TestHarness -or $TestExe -or $TestExeArgs)
 if ($testMode) {
   $why = $null
   if (-not ($TestHarness -and $TestExe)) { $why = "-TestHarness and -TestExe must be given together" }
   elseif ($UserPresent -or $KeyboardInput) { $why = "test parameters cannot be combined with -UserPresent or -KeyboardInput" }
+  elseif (-not $exeDirGiven) { $why = "test parameters require an explicit -ExeDir" }
+  elseif ($GameArgs.Count -or $PSBoundParameters.ContainsKey('Env')) { $why = "test mode refuses -GameArgs and -Env" }
   elseif ([IO.Path]::GetFileName($TestExe) -match 'fable') { $why = "the stand-in must not be named like the game" }
   elseif (-not (Test-Path -LiteralPath $TestExe -PathType Leaf)) { $why = "the stand-in does not exist" }
   elseif (-not (Test-Path -LiteralPath $TestHarness -PathType Leaf)) { $why = "the harness script does not exist" }
+  elseif (Test-Path -LiteralPath (Join-Path $ExeDir "fable_2.exe")) { $why = "-ExeDir contains fable_2.exe" }
   else {
     $standIn = (Resolve-Path -LiteralPath $TestExe).Path
-    foreach ($dir in @($ExeDir, (Join-Path $Root "out\build\win-amd64-release"))) {
-      $real = Join-Path $dir "fable_2.exe"
-      if (-not (Test-Path -LiteralPath $real -PathType Leaf)) { continue }
-      if ((Resolve-Path -LiteralPath $real).Path -ieq $standIn) { $why = "the stand-in is the game"; break }
-      if ((Get-Item -LiteralPath $real).Length -eq (Get-Item -LiteralPath $standIn).Length -and
-          (Get-FileHash -LiteralPath $real).Hash -eq (Get-FileHash -LiteralPath $standIn).Hash) { $why = "the stand-in has the game's bytes"; break }
+    $real = Join-Path $Root "out\build\win-amd64-release\fable_2.exe"
+    if (Test-Path -LiteralPath $real -PathType Leaf) {
+      if ((Resolve-Path -LiteralPath $real).Path -ieq $standIn) { $why = "the stand-in is the game" }
+      elseif ((Get-Item -LiteralPath $real).Length -eq (Get-Item -LiteralPath $standIn).Length -and
+              (Get-FileHash -LiteralPath $real).Hash -eq (Get-FileHash -LiteralPath $standIn).Hash) { $why = "the stand-in has the game's bytes" }
     }
     $sd = Split-Path -Parent $standIn
     if (-not $why -and ((Test-Path (Join-Path $sd "rexruntime.dll")) -or (Test-Path (Join-Path $sd "fable_2.toml")))) { $why = "the stand-in sits in a game folder" }
@@ -150,7 +171,7 @@ if ($testMode) {
 
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
-using System; using System.Runtime.InteropServices;
+using System; using System.Diagnostics; using System.Runtime.InteropServices; using System.Text; using System.Threading;
 public static class DriveGameNative {
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
@@ -185,6 +206,50 @@ public static class DriveGameNative {
     } finally { Marshal.FreeHGlobal(mem); }
     return job;
   }
+  [DllImport("kernel32.dll")] static extern bool TerminateJobObject(IntPtr job, uint code);
+  [DllImport("kernel32.dll")] static extern uint ResumeThread(IntPtr h);
+  [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr h, uint code);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct STARTUPINFO {
+    public int cb; public string lpReserved; public string lpDesktop; public string lpTitle;
+    public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+    public short wShowWindow, cbReserved2; public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError; }
+  [StructLayout(LayoutKind.Sequential)] struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern bool CreateProcessW(string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string cwd, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+  // Creates the process SUSPENDED (CREATE_SUSPENDED | CREATE_NO_WINDOW): it executes nothing until Resume,
+  // so the caller can assign it to the job first. Returns the pid, or 0 on failure.
+  public static int StartSuspended(string exe, string args, string cwd, out IntPtr hProcess, out IntPtr hThread) {
+    STARTUPINFO si = new STARTUPINFO(); si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+    PROCESS_INFORMATION pi;
+    StringBuilder cmd = new StringBuilder("\"" + exe + "\"" + (args.Length > 0 ? " " + args : ""));
+    hProcess = IntPtr.Zero; hThread = IntPtr.Zero;
+    if (!CreateProcessW(exe, cmd, IntPtr.Zero, IntPtr.Zero, false, 0x00000004 | 0x08000000, IntPtr.Zero, cwd, ref si, out pi)) return 0;
+    hProcess = pi.hProcess; hThread = pi.hThread;
+    return pi.dwProcessId;
+  }
+  public static bool Resume(IntPtr hThread) { return ResumeThread(hThread) != 0xFFFFFFFF; }
+  // Kills a process that was created suspended and never ran.
+  public static void Abort(IntPtr hProcess, IntPtr hThread) { TerminateProcess(hProcess, 1); CloseHandle(hThread); CloseHandle(hProcess); }
+  public static bool TerminateJob(IntPtr job) { return job != IntPtr.Zero && TerminateJobObject(job, 1); }
+
+  // Dead-man switch: terminates the job when PetDeadMan has not been called for more than the given seconds.
+  static Thread dmThread; static volatile bool dmStop; static volatile bool dmTripped; static long dmLast;
+  public static void StartDeadMan(IntPtr job, double seconds) {
+    dmStop = false; dmTripped = false; dmLast = Stopwatch.GetTimestamp();
+    long limit = (long)(seconds * Stopwatch.Frequency);
+    dmThread = new Thread(delegate() {
+      while (!dmStop) {
+        if (Stopwatch.GetTimestamp() - Interlocked.Read(ref dmLast) > limit) { TerminateJobObject(job, 1); dmTripped = true; return; }
+        Thread.Sleep(100);
+      }
+    });
+    dmThread.IsBackground = true;
+    dmThread.Start();
+  }
+  public static void PetDeadMan() { Interlocked.Exchange(ref dmLast, Stopwatch.GetTimestamp()); }
+  public static bool IsDeadManTripped() { return dmTripped; }
+  public static void StopDeadMan() { dmStop = true; }
   public static bool AssignToJob(IntPtr job, IntPtr process) { return job != IntPtr.Zero && AssignProcessToJobObject(job, process); }
 }
 "@
@@ -266,8 +331,8 @@ if ($UserPresent) {
     }
     $script:sampledNative = $native
     $native.StartSampler()
-    $probe = { Get-Fable2Snapshot -CheckProcess -Native $native }.GetNewClosure()
-    $clock = { $native.Now() }.GetNewClosure()
+    $probe = { Get-Fable2Snapshot -CheckProcess -Native $native }
+    $clock = { $native.Now() }
     $sleepSb = if ($harness) { $harness.Sleep } else { $null }
     $gate = Wait-Fable2Away -MinIdleSeconds $RequiredAbsenceSeconds -MaxWaitSeconds $IdleWaitSeconds -Probe $probe -Clock $clock -Sleep $sleepSb
     if ($gate.Passed) {
@@ -277,7 +342,7 @@ if ($UserPresent) {
       $script:GateText = "passed (no user input for at least $RequiredAbsenceSeconds s)"
     } else {
       $script:GateText = "refused: $($gate.Signals -join ',')"
-      Write-Output "REFUSED: user present or state unknown ($($gate.Signals -join ', ')) after waiting up to $IdleWaitSeconds s. Nothing launched."
+      Write-Output "REFUSED: user present or state unknown ($($gate.Signals -join ', ')) after waiting up to $IdleWaitSeconds s. Every gate needs $RequiredAbsenceSeconds s of observed absence: use -IdleWaitSeconds $RequiredAbsenceSeconds or more. Nothing launched."
     }
   } catch {
     $script:GateText = "refused: gate error ($($_.Exception.Message))"
@@ -299,9 +364,10 @@ if (-not $UserPresent -and (Test-Path -LiteralPath $markerFile)) {
 
 # The OS kills the game when this process dies for any reason: the job handle is held for the
 # life of the script and is never closed explicitly.
-$script:job = [DriveGameNative]::CreateKillOnCloseJob()
+$script:job = if ($harness -and $harness.FailJobCreate) { [IntPtr]::Zero } else { [DriveGameNative]::CreateKillOnCloseJob() }
 if ($script:job -eq [IntPtr]::Zero) {
-  Write-Output "RUN ABORTED: could not create the kill-on-close job object. Nothing launched."
+  $script:GateText += "; ABORTED"
+  Write-Output "${Label}RUN ABORTED: could not create the kill-on-close job object. Nothing launched."
   Exit-Run 12
 }
 
@@ -316,10 +382,10 @@ function Stop-Game {
   if (-not $script:p) { return }
   if ($harness -and $harness.NoKill) { return }   # test mode only: simulates a game that cannot be killed
   try {
-    if (-not $script:p.HasExited) {
-      $script:p.Kill()
-      "closed game at $([int]$sw.Elapsed.TotalSeconds) s"
-    }
+    $wasAlive = -not $script:p.HasExited
+    [void][DriveGameNative]::TerminateJob($script:job)   # the game and its children
+    if (-not $script:p.HasExited) { $script:p.Kill() }
+    if ($wasAlive) { "closed game at $([int]$sw.Elapsed.TotalSeconds) s" }
   } catch {
     try { Stop-Process -Id $script:p.Id -Force } catch { }
   }
@@ -328,6 +394,10 @@ function Stop-Game {
 
 # Polls the presence signals; on one it kills the game at once and throws. No-op with -UserPresent.
 function Invoke-WatchPoll {
+  if ([DriveGameNative]::IsDeadManTripped()) {
+    throw "dead-man switch: the driver did not poll the watch for more than $DeadManSeconds s; the game was terminated"
+  }
+  [DriveGameNative]::PetDeadMan()
   if ($harness -and $harness.Tick) { & $harness.Tick $sw.Elapsed.TotalSeconds $testCtx }
   if ($UserPresent) { return }
   $sig = $null
@@ -341,7 +411,7 @@ function Invoke-WatchPoll {
   } catch { $sig = "watch-error" }
   if ($sig) {
     $script:disturbAt = $sw.Elapsed.TotalSeconds
-    try { if ($script:p -and -not $script:p.HasExited) { $script:p.Kill() } } catch { }
+    try { [void][DriveGameNative]::TerminateJob($script:job); if ($script:p -and -not $script:p.HasExited) { $script:p.Kill() } } catch { }
     throw "FABLE2-DISTURBED:$sig"
   }
 }
@@ -360,17 +430,26 @@ try {
   $exePath = Join-Path $ExeDir "fable_2.exe"
   $workDir = $ExeDir
   if ($testMode) { $exePath = $TestExe; $workDir = Split-Path -Parent $TestExe; $argList = @($TestExeArgs.Split("|") | Where-Object { $_ }) }
-  # The only place the game is started.
+  # The only place the game is started: created suspended, assigned to the job, then resumed.
   if (-not ($UserPresent -or $gatePassed)) { throw "internal error: launch without a passed idle gate" }
-  $spawn = @{ FilePath = $exePath; WorkingDirectory = $workDir; PassThru = $true }
-  if ($argList.Count) { $spawn.ArgumentList = $argList }
-  $script:p = Start-Process @spawn
+  $cmdArgs = (@($argList | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } })) -join ' '
+  $hProc = [IntPtr]::Zero; $hThr = [IntPtr]::Zero
+  $newPid = [DriveGameNative]::StartSuspended($exePath, $cmdArgs, $workDir, [ref]$hProc, [ref]$hThr)
+  if ($newPid -eq 0) { throw "could not start $exePath (Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))" }
+  if ($harness -and $harness.AssignDelayMs) { Start-Sleep -Milliseconds $harness.AssignDelayMs }   # test mode only: a game that was not suspended would run now
+  $assigned = (-not ($harness -and $harness.FailJobAssign)) -and [DriveGameNative]::AssignToJob($script:job, $hProc)
+  if (-not $assigned) {
+    [DriveGameNative]::Abort($hProc, $hThr)
+    throw "could not assign the game to the kill-on-close job object (the game was killed before it ran)"
+  }
+  if (-not [DriveGameNative]::Resume($hThr)) { [DriveGameNative]::Abort($hProc, $hThr); throw "could not resume the game" }
+  $script:p = [Diagnostics.Process]::GetProcessById($newPid)
   $p = $script:p
   foreach ($name in $Env.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name]) }
   "started pid $($p.Id): $($argList -join ' ')"
-  if (-not [DriveGameNative]::AssignToJob($script:job, $p.Handle)) {
-    throw "could not assign the game to the kill-on-close job object (the game is being closed)"
-  }
+  Add-RunLog "started pid $($p.Id)"
+  $testCtx.Pid = $p.Id
+  [DriveGameNative]::StartDeadMan($script:job, $DeadManSeconds)
 
   $sw.Restart()
   $shell = if ($KeyboardInput) { New-Object -ComObject WScript.Shell } else { $null }
@@ -410,7 +489,7 @@ try {
   while (-not $p.HasExited -and $sw.Elapsed.TotalSeconds -lt $Total) { Invoke-WatchPoll; Start-Sleep -Milliseconds 100 }
   if ($p.HasExited -and $sw.Elapsed.TotalSeconds -lt $Total) {
     $earlyExit = $true
-    "GAME EXITED EARLY at $([int]$sw.Elapsed.TotalSeconds) s"
+    "${Label}GAME EXITED EARLY at $([int]$sw.Elapsed.TotalSeconds) s"
   }
   Invoke-WatchPoll
 } catch {
@@ -418,7 +497,9 @@ try {
   else { $abortMessage = $_.Exception.Message }
 } finally {
   # Every exit path closes the game; the environment is restored.
+  [DriveGameNative]::StopDeadMan()
   Stop-Game
+  if ($harness -and $harness.HoldAfterKillMs) { Start-Sleep -Milliseconds $harness.HoldAfterKillMs }   # test mode only: lets a test look at the machine while the driver is still alive
   foreach ($name in $saved.Keys) { try { [Environment]::SetEnvironmentVariable($name, $saved[$name]) } catch { } }
 }
 
@@ -426,7 +507,7 @@ $gameClosed = $true
 if ($script:p) { try { $gameClosed = $script:p.HasExited } catch { $gameClosed = $false } }
 
 if ($disturbSignal) {
-  $line = "RUN DISTURBED: $disturbSignal at {0:N1} s" -f $script:disturbAt
+  $line = "${Label}RUN DISTURBED: $disturbSignal at {0:N1} s" -f $script:disturbAt
   $script:GateText += "; DISTURBED: $disturbSignal"
   $moved = @()
   try {
@@ -455,15 +536,15 @@ if ($disturbSignal) {
 }
 if ($abortMessage) {
   $script:GateText += "; ABORTED"
-  Write-Output "RUN ABORTED: $abortMessage"
+  Write-Output "${Label}RUN ABORTED: $abortMessage"
   Exit-Run 12
 }
 if (-not $gameClosed) {
   $script:GateText += "; ABORTED"
-  Write-Output "RUN ABORTED: the game is still running after the kill"
+  Write-Output "${Label}RUN ABORTED: the game is still running after the kill"
   Exit-Run 12
 }
 if ($earlyExit) { $script:GateText += "; EARLY EXIT"; Exit-Run 13 }
 if ($UserPresent) { Write-Output "RUN UNCHECKED: -UserPresent given, no idle gate and no watch" }
-else { Write-Output ("RUN CLEAN: no user input for {0} s" -f [int]$sw.Elapsed.TotalSeconds) }
+else { Write-Output ("${Label}RUN CLEAN: no user input for {0} s" -f [int]$sw.Elapsed.TotalSeconds) }
 Exit-Run 0

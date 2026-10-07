@@ -16,7 +16,7 @@
 #                   pad has been seen, the gate needs the full idle time without activity or
 #                   change; each activity, connect or disconnect restarts that observation
 #   audio           sound is playing on the default playback device (Core Audio peak meter above
-#                   0.005, sampled every 50 ms by the same thread). The gate needs 10 s without
+#                   0.005, sampled every 50 ms by the same thread). The gate needs the whole idle time (300 s from the driver) without
 #                   it; the watch trips on any sample after the gate passed
 #   fullscreen      SHQueryUserNotificationState says busy (2), Direct3D fullscreen (3),
 #                   presentation mode (4) or a fullscreen app (7: stricter choice)
@@ -54,7 +54,7 @@ $script:GateGiven = $PSBoundParameters.ContainsKey('MinIdleSeconds')
 
 # The type name carries the version: a stale or look-alike type from earlier in the session is
 # never reused (and a type of this name without the right ProbeVersion is an error).
-if (-not ('Fable2IdleProbeV2' -as [type])) {
+if (-not ('Fable2IdleProbeV3' -as [type])) {
   Add-Type -TypeDefinition @"
 using System;
 using System.Diagnostics;
@@ -80,8 +80,8 @@ interface IFable2AudioMeter {
   [PreserveSig] int GetPeakValue(out float peak);
 }
 
-public sealed class Fable2IdleProbeV2 {
-  public const int ProbeVersion = 2;
+public sealed class Fable2IdleProbeV3 {
+  public const int ProbeVersion = 3;
   [StructLayout(LayoutKind.Sequential)]
   struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
   [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LASTINPUTINFO info);
@@ -139,15 +139,17 @@ public sealed class Fable2IdleProbeV2 {
   static readonly object Lk = new object();
   static Thread th;
   static volatile bool stopFlag;
-  static double heartbeat = -1, padActivity = -1, padChange = -1, audioStamp = -1, padErr = -1, audioErr = -1;
-  static int padMask = 0;
+  static double heartbeat = -1;
+  static Fable2SamplerCore core;
+  static IFable2AudioMeter meterCom;
+  static double meterAcquired;
 
   public void StartSampler() {
     lock (Lk) {
       if (th != null && th.IsAlive) return;
       stopFlag = false;
-      padActivity = -1; padChange = -1; audioStamp = -1; padErr = -1; audioErr = -1; padMask = 0;
-      heartbeat = Now();
+      core = new Fable2SamplerCore(RealPad, RealMeter);
+      heartbeat = NowS();
       th = new Thread(SampleLoop);
       th.IsBackground = true;
       th.Name = "Fable2IdleSampler";
@@ -165,11 +167,23 @@ public sealed class Fable2IdleProbeV2 {
   public double[] Latch() {
     lock (Lk) {
       bool run = th != null && th.IsAlive;
-      return new double[] { padMask != 0 ? 1.0 : 0.0, padActivity, padChange, audioStamp, padErr, audioErr, heartbeat, run ? 1.0 : 0.0 };
+      double[] c = core != null ? core.Latch() : new double[] { 0, -1, -1, -1, -1, -1 };
+      return new double[] { c[0], c[1], c[2], c[3], c[4], c[5], heartbeat, run ? 1.0 : 0.0 };
     }
   }
 
   static double NowS() { return (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency; }
+
+  static int RealPad(int slot, int[] v) {
+    XINPUT_STATE st;
+    uint r = XInputGetState((uint)slot, out st);
+    if (r == 0) {
+      XINPUT_GAMEPAD g = st.Gamepad;
+      v[0] = g.wButtons; v[1] = g.bLeftTrigger; v[2] = g.bRightTrigger;
+      v[3] = g.sThumbLX; v[4] = g.sThumbLY; v[5] = g.sThumbRX; v[6] = g.sThumbRY;
+    }
+    return (int)r;
+  }
 
   static IFable2AudioMeter AcquireMeter() {
     IFable2MMDeviceEnumerator en = (IFable2MMDeviceEnumerator)new Fable2MMDeviceEnumeratorCom();
@@ -183,62 +197,89 @@ public sealed class Fable2IdleProbeV2 {
     return (IFable2AudioMeter)o;
   }
 
+  static void ReleaseMeter() {
+    if (meterCom != null) { try { Marshal.ReleaseComObject(meterCom); } catch (Exception) { } meterCom = null; }
+  }
+
+  // Peak 0..1 of the default playback device; throws when it cannot be read.
+  static double RealMeter() {
+    double t = NowS();
+    try {
+      if (meterCom == null || t - meterAcquired > 5.0) { ReleaseMeter(); meterCom = AcquireMeter(); meterAcquired = t; }
+      float pk;
+      int hr = meterCom.GetPeakValue(out pk);
+      if (hr != 0) throw new InvalidOperationException("GetPeakValue 0x" + hr.ToString("X"));
+      return pk;
+    } catch (Exception) { ReleaseMeter(); throw; }
+  }
+
   static void SampleLoop() {
-    int mask = 0;
-    double nextScan = 0, nextAudio = 0, meterAcquired = 0;
-    IFable2AudioMeter meter = null;
+    Fable2SamplerCore c = core;
     while (!stopFlag) {
       double t = NowS();
-      try {
-        int nm = mask;
-        bool rescan = t >= nextScan;
-        for (int i = 0; i < 4; i++) {
-          if ((mask & (1 << i)) == 0 && !rescan) continue;
-          XINPUT_STATE st;
-          uint r = XInputGetState((uint)i, out st);
-          if (r == 0) {
-            nm |= (1 << i);
-            XINPUT_GAMEPAD g = st.Gamepad;
-            if (PadActive(g.wButtons, g.bLeftTrigger, g.bRightTrigger, g.sThumbLX, g.sThumbLY, g.sThumbRX, g.sThumbRY)) lock (Lk) { padActivity = t; }
-          } else if (r == 1167) {
-            nm &= ~(1 << i);
-          } else {
-            lock (Lk) { padErr = t; }
-          }
-        }
-        if (rescan) nextScan = t + 1.0;
-        if (nm != mask) { mask = nm; lock (Lk) { padMask = mask; padChange = t; } }
-      } catch (Exception) { lock (Lk) { padErr = t; } }
-      if (t >= nextAudio) {
-        nextAudio = t + 0.05;
-        try {
-          if (meter == null || t - meterAcquired > 5.0) {
-            if (meter != null) { try { Marshal.ReleaseComObject(meter); } catch (Exception) { } meter = null; }
-            meter = AcquireMeter(); meterAcquired = t;
-          }
-          float pk;
-          int hr = meter.GetPeakValue(out pk);
-          if (hr != 0) throw new InvalidOperationException("GetPeakValue 0x" + hr.ToString("X"));
-          if (pk > 0.005f) lock (Lk) { audioStamp = t; }
-        } catch (Exception) {
-          lock (Lk) { audioErr = t; }
-          if (meter != null) { try { Marshal.ReleaseComObject(meter); } catch (Exception) { } meter = null; }
-        }
-      }
+      c.Step(t);
       lock (Lk) { heartbeat = t; }
       Thread.Sleep(10);
     }
-    if (meter != null) { try { Marshal.ReleaseComObject(meter); } catch (Exception) { } }
+    ReleaseMeter();
+  }
+}
+
+// One sampling step of the pads and the audio meter with injectable readers, so the stamping
+// (activity, connect or unplug, XInput error, audio level, audio error) is unit-testable.
+public sealed class Fable2SamplerCore {
+  // XInput result code (0 connected, 1167 no controller, else error); vals: buttons, lt, rt, lx, ly, rx, ry
+  public delegate int PadReader(int slot, int[] vals);
+  // Peak level 0..1 of the playback device; throws on failure
+  public delegate double MeterReader();
+  readonly PadReader pads;
+  readonly MeterReader meter;
+  readonly object lk = new object();
+  int mask;
+  double nextScan, nextAudio;
+  double padActivity = -1, padChange = -1, audioStamp = -1, padErr = -1, audioErr = -1;
+
+  public Fable2SamplerCore(PadReader p, MeterReader m) { pads = p; meter = m; }
+
+  public void Step(double t) {
+    int[] v = new int[7];
+    try {
+      int nm = mask;
+      bool rescan = t >= nextScan;
+      for (int i = 0; i < 4; i++) {
+        if ((mask & (1 << i)) == 0 && !rescan) continue;
+        int r = pads(i, v);
+        if (r == 0) {
+          nm |= (1 << i);
+          if (Fable2IdleProbeV3.PadActive(v[0], v[1], v[2], v[3], v[4], v[5], v[6])) lock (lk) { padActivity = t; }
+        } else if (r == 1167) {
+          nm &= ~(1 << i);
+        } else {
+          lock (lk) { padErr = t; }
+        }
+      }
+      if (rescan) nextScan = t + 1.0;
+      if (nm != mask) { lock (lk) { mask = nm; padChange = t; } }
+    } catch (Exception) { lock (lk) { padErr = t; } }
+    if (t >= nextAudio) {
+      nextAudio = t + 0.05;
+      try {
+        double pk = meter();
+        if (pk > 0.005) lock (lk) { audioStamp = t; }
+      } catch (Exception) { lock (lk) { audioErr = t; } }
+    }
+  }
+
+  public double[] Latch() {
+    lock (lk) { return new double[] { mask != 0 ? 1.0 : 0.0, padActivity, padChange, audioStamp, padErr, audioErr }; }
   }
 }
 "@
 }
-if ([Fable2IdleProbeV2]::ProbeVersion -ne 2) { throw "Fable2IdleProbeV2 has an unexpected version" }
-if ($null -eq $script:Fable2Native) { $script:Fable2Native = New-Object Fable2IdleProbeV2 }
+if ([Fable2IdleProbeV3]::ProbeVersion -ne 3) { throw "Fable2IdleProbeV3 has an unexpected version" }
+if ($null -eq $script:Fable2Native) { $script:Fable2Native = New-Object Fable2IdleProbeV3 }
 
 # ---- Pure decision logic (no Win32 calls; tested with synthetic values) ----
-
-$script:AudioQuietRequired = 10.0   # seconds without sound before the gate passes
 
 # One pad state is "activity": any button, a trigger above 30, a stick beyond 8000 from centre.
 function Test-Fable2PadActive {
@@ -246,7 +287,7 @@ function Test-Fable2PadActive {
         [Parameter(Mandatory)][int]$RightTrigger, [Parameter(Mandatory)][int]$ThumbLX,
         [Parameter(Mandatory)][int]$ThumbLY, [Parameter(Mandatory)][int]$ThumbRX,
         [Parameter(Mandatory)][int]$ThumbRY)
-  return [Fable2IdleProbeV2]::PadActive($Buttons, $LeftTrigger, $RightTrigger, $ThumbLX, $ThumbLY, $ThumbRX, $ThumbRY)
+  return [Fable2IdleProbeV3]::PadActive($Buttons, $LeftTrigger, $RightTrigger, $ThumbLX, $ThumbLY, $ThumbRX, $ThumbRY)
 }
 
 # Gate decision before a run. Present = any signal. A negative, non-finite or too long idle time
@@ -266,7 +307,7 @@ function Get-Fable2GateDecision {
   if ($ForcePresent) { [void]$signals.Add("forced-present") }
   if (-not $idleBad -and $IdleSeconds -lt $MinIdleSeconds) { [void]$signals.Add("input") }
   if ($PadObserved -and $PadQuietSeconds -lt $MinIdleSeconds) { [void]$signals.Add("controller") }
-  if ($AudioQuietSeconds -lt $script:AudioQuietRequired) { [void]$signals.Add("audio") }
+  if ($AudioQuietSeconds -lt $MinIdleSeconds) { [void]$signals.Add("audio") }
   switch ($NotificationState) {
     { $_ -in 2, 3, 4, 7 } { [void]$signals.Add("fullscreen") }
     { $_ -in 1, 5, 6 } { }
@@ -343,7 +384,7 @@ function Get-Fable2Snapshot {
   }
 }
 
-# Waits until the user has been away for MinIdleSeconds (and sound has been off for 10 s), at most
+# Waits until the user has been away for MinIdleSeconds (and sound has been off for as long, a failing probe restarting that), at most
 # MaxWaitSeconds; a pad observation needs MinIdleSeconds of that. Returns Passed, Signals and the
 # last snapshot. -Probe, -Clock and -Sleep are injectable for tests; the 60 s floor is always in force.
 function Wait-Fable2Away {
@@ -357,14 +398,16 @@ function Wait-Fable2Away {
   if ($null -eq $Clock) { $Clock = { $script:Fable2Native.Now() } }
   if ($null -eq $Sleep) { $Sleep = { param($ms) Start-Sleep -Milliseconds $ms } }
   $t0 = [double](& $Clock)
-  $quietSince = $t0; $lastLog = $t0
+  $quietSince = $t0; $audioSince = $t0; $lastLog = $t0
   while ($true) {
     $snap = & $Probe
     $now = [double]$snap.Now
     # A pad connecting, unplugged or active (latched between polls) restarts the observation.
     if ($snap.PadChangeStamp -gt $quietSince) { $quietSince = $snap.PadChangeStamp }
     if ($snap.PadActivityStamp -gt $quietSince) { $quietSince = $snap.PadActivityStamp }
-    $audioSince = [Math]::Max($t0, $snap.AudioStamp)
+    # Sound restarts the audio observation, and so does a failing probe.
+    $audioSince = [Math]::Max($audioSince, $snap.AudioStamp)
+    if ($snap.ProbeFailed) { $audioSince = $now }
     # Any other instantaneous signal restarts the pad observation too.
     $others = Get-Fable2GateDecision -IdleSeconds $snap.IdleSeconds -UptimeSeconds $snap.UptimeSeconds -MinIdleSeconds 0 `
       -PadObserved $false -PadQuietSeconds 0 -AudioQuietSeconds 1e9 -NotificationState $snap.NotificationState `

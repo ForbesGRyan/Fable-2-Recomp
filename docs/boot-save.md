@@ -9,8 +9,8 @@ Load a named save straight from the front end, with no menu input, to shorten te
 ```
 
 - `-BootSave HeroNNN` sets `FABLE2_BOOT_SAVE`, drops the default key plan (give `-Plan` to add steps; times are still seconds since start) and sets `FABLE2_SKIP_LOGOS=1` (`-Env @{FABLE2_SKIP_LOGOS="0"}` keeps the logos).
-- `HeroNNN` is the save folder name under `<exe>\saves\<profile>\4D5307F1\00000001\`.
-- If `<exe>\saves-pristine\HeroNNN` exists, the live save folder is first moved to `<exe>\saves-replaced\<timestamp>\HeroNNN` and the pristine copy is put in its place, so every run starts from the same save. Nothing is deleted. Without a pristine copy the live save is loaded as it is.
+- `HeroNNN` is the save folder name under `<exe>\saves\<profile>\4D5307F1\00000001\`. The driver refuses (exit 2, before the idle gate) unless exactly one such folder with a `mainsave.bin` exists.
+- If `<exe>\saves-pristine\HeroNNN` exists, the live save folder is first moved to `<exe>\saves-replaced\<timestamp>\HeroNNN` and the pristine copy is put in its place, so every run starts from the same save. Nothing is deleted, and the live save is not touched until the copy is complete. Without a pristine copy the live save is loaded as it is.
 - Start captures at 33 s or later (see Results).
 
 Environment options read by the game (all unset: nothing changes):
@@ -23,7 +23,7 @@ Environment options read by the game (all unset: nothing changes):
 
 ## How it works
 
-The retail front end's Load Game and Continue handlers (`sub_826C9280`, `sub_826C72A8`, `sub_826C81A0`) do three things, and `src/core/fable2_boot_save.h` runs the same three from the per-frame main loop hook (`MainRenderLoop_82B9CD68` in `src/diagnostics/fps_meter.h`) once per second while the front end is up:
+The retail front end's Load Game and Continue handlers (`sub_826C9280`, `sub_826C72A8`, `sub_826C81A0`) do three things, and `src/core/fable2_boot_save.h` runs the same three from the per-frame main loop hook (`MainRenderLoop_82B9CD68` in `src/diagnostics/fps_meter.h`) every 30 frames (about once per second) while the front end is up. It stops for the rest of the run when the load starts, after 60 failed attempts (one `gave up` warning), or when the front end is left another way (the player loaded by hand):
 
 1. Pick the user's storage device if none is chosen yet: `sub_824E54C0(manager, user)`, then `sub_824E5398(manager, user, 0)`.
 2. Read the save's info: `sub_824E4E30(info)`, `sub_824EA7A0(manager, info, name, user)`. The info holds the save's level name at `+12`.

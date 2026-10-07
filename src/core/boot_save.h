@@ -42,6 +42,7 @@ inline constexpr uint32_t kSignedInMask = 0x834968D8;   // u32, bit per user, tr
 inline constexpr uint32_t kActiveUser = 0x83496934;     // u32, the pad that pressed A
 
 inline constexpr uint32_t kAttemptEvery = 30;  // frames between load attempts (about one second)
+inline constexpr uint32_t kMaxAttempts = 60;   // then give up and leave the menu alone
 
 // Set once at startup, before any guest thread runs; read-only afterwards.
 struct Config {
@@ -68,16 +69,33 @@ inline std::optional<std::string> ParseHeroName(std::string_view s) {
   return "Hero" + std::string(s.substr(4));
 }
 
-// Paces the load attempts: one every kAttemptEvery frames while the front end runs,
-// none after Finish. Touched only by the guest thread that runs the main loop.
+// Paces the load attempts: one every kAttemptEvery frames while the front end runs, at
+// most kMaxAttempts, none once the front end has been left (the player loaded by hand)
+// and none after Finish. Touched only by the guest thread that runs the main loop.
 struct Trigger {
   bool done = false;
+  bool seen_front_end = false;
+  bool gave_up = false;  // kMaxAttempts attempts were made and none started the load
   uint64_t updates = 0;
+  uint32_t attempts = 0;
 
   // True when a load attempt should be made on this update.
   bool Step(bool in_front_end) {
     ++updates;
-    return !done && in_front_end && updates % kAttemptEvery == 0;
+    if (done) return false;
+    if (!in_front_end) {
+      if (seen_front_end) done = true;
+      return false;
+    }
+    seen_front_end = true;
+    if (updates % kAttemptEvery != 0) return false;
+    if (attempts >= kMaxAttempts) {
+      done = true;
+      gave_up = true;
+      return false;
+    }
+    ++attempts;
+    return true;
   }
   // The load was started, or boot save gave up: no further attempts this run.
   void Finish() { done = true; }

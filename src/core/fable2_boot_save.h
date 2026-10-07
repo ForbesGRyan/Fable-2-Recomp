@@ -60,8 +60,9 @@ inline Objects FindObjects(const uint8_t* base) {
 
 enum class LoadResult { kStarted, kNoSaveInfo, kNoDevice, kNoMemory };
 
-// The front end's own sequence: read the save's info, then start from it. Must run on
-// the guest thread that runs the game update. `valid` receives the info's valid byte.
+// The front end's own sequence: pick the storage device, read the save's info, then start
+// from it. Must run on the guest thread that runs the main loop. `valid` receives the
+// info's valid byte (logged only: the Load Game list handler starts without checking it).
 inline LoadResult TryLoad(PPCContext& ctx, uint8_t* base, const Objects& o, uint32_t user,
                           const std::string& hero, uint8_t* valid) {
   static uint32_t name = 0;  // game string with the hero name, built once
@@ -120,6 +121,8 @@ inline LoadResult TryLoad(PPCContext& ctx, uint8_t* base, const Objects& o, uint
 inline void OnFrame(PPCContext& ctx, uint8_t* base) {
   const Config& cfg = config();
   if (!cfg.trace && cfg.hero.empty()) return;
+  static Trigger trigger;
+  if (trigger.done && !cfg.trace) return;  // loaded, left by hand, or gave up: nothing more to do
   const Objects o = FindObjects(base);
   const bool ready = o.game && o.manager && o.gui && ta::rdable2(base, o.game + kGameLeftFrontEnd, 1);
   const bool in_front_end =
@@ -128,7 +131,6 @@ inline void OnFrame(PPCContext& ctx, uint8_t* base) {
   const uint32_t mask = Deref(base, kSignedInMask);
   const uint32_t active_user = Deref(base, kActiveUser);
 
-  static Trigger trigger;
   static uint32_t last[5] = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
   const uint32_t now[5] = {(o.game ? 1u : 0u) | (o.manager ? 2u : 0u) | (o.gui ? 4u : 0u),
                            in_front_end ? 1u : 0u, state, mask, active_user};
@@ -139,10 +141,21 @@ inline void OnFrame(PPCContext& ctx, uint8_t* base) {
                 mask, active_user);
     std::memcpy(last, now, sizeof now);
   }
-  if (!trigger.Step(in_front_end) || cfg.hero.empty()) return;
-
-  static uint32_t attempts = 0;
-  if (attempts == 0) {
+  if (cfg.hero.empty()) {  // trace only
+    ++trigger.updates;
+    return;
+  }
+  if (!trigger.Step(in_front_end)) {
+    static bool reported = false;
+    if (trigger.gave_up && !reported) {
+      reported = true;
+      REXSYS_WARN("[boot-save] gave up on {} after {} attempts; menu left as is", cfg.hero,
+                  trigger.attempts);
+    }
+    return;
+  }
+  const uint32_t attempts = trigger.attempts;
+  if (attempts == 1) {
     const FindResult save = FindHeroDir(cfg.saves_root, cfg.hero);
     if (save.dir.empty()) {
       REXSYS_WARN("[boot-save] not started: {}", save.error);
@@ -150,7 +163,6 @@ inline void OnFrame(PPCContext& ctx, uint8_t* base) {
       return;
     }
   }
-  ++attempts;
   // TryLoad calls guest functions that clobber the registers; restore them so the main
   // loop function sees the state it was called with.
   const uint32_t user = active_user < 4 ? active_user : 0;

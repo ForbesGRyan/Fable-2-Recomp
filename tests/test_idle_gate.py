@@ -930,6 +930,42 @@ class DriverGateTest(unittest.TestCase):
         self.assertEqual(len(replaced), 1)
         self.assertEqual(replaced[0].read_text(), "drifted")
 
+    def test_bootsave_without_that_save_is_refused_before_the_gate(self):
+        other = Path(self.tmp) / "saves" / "B13EBABEBABEBABE" / "4D5307F1" / "00000001" / "Hero003"
+        other.mkdir(parents=True)
+        (other / "mainsave.bin").write_text("x")
+        r = self.drive("-BootSave", "Hero004")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("needs exactly one save folder", r.stdout)
+        self.assertIn("found 0", r.stdout)
+        self.assertNotIn("started pid", r.stdout)
+
+    def test_bootsave_failed_pristine_copy_leaves_the_live_save_in_place(self):
+        import ctypes
+        live = Path(self.tmp) / "saves" / "B13EBABEBABEBABE" / "4D5307F1" / "00000001" / "Hero003"
+        live.mkdir(parents=True)
+        (live / "mainsave.bin").write_text("drifted")
+        pristine = Path(self.tmp) / "saves-pristine" / "Hero003"
+        pristine.mkdir(parents=True)
+        (pristine / "mainsave.bin").write_text("pristine")
+        # Hold the pristine file open with no sharing, so the driver's copy of it fails.
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = ctypes.c_void_p
+        k32.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+                                    ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        h = k32.CreateFileW(str(pristine / "mainsave.bin"), 0x80000000, 0, None, 3, 0, None)   # GENERIC_READ, OPEN_EXISTING
+        self.assertNotIn(h, (None, ctypes.c_void_p(-1).value))
+        try:
+            r = run_ps([self.drv, "-ExeDir", self.tmp, "-Total", "5", "-UserPresent", "-BootSave", "Hero003"])
+        finally:
+            k32.CloseHandle(h)
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertIn("could not restore the pristine save", r.stdout)
+        self.assertNotIn("started pid", r.stdout)
+        self.assertEqual((live / "mainsave.bin").read_text(), "drifted")   # the live save was never moved
+        self.assertEqual(list((Path(self.tmp) / "saves-replaced").glob("*/Hero003")), [])
+
     def test_bootsave_without_a_pristine_copy_leaves_the_save_alone(self):
         live = Path(self.tmp) / "saves" / "B13EBABEBABEBABE" / "4D5307F1" / "00000001" / "Hero003"
         live.mkdir(parents=True)

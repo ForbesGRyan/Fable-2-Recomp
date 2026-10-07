@@ -198,6 +198,12 @@ if ($BootSave) {
     Write-Output "REFUSED: test mode refuses -BootSave. Nothing launched."
     Exit-Run 2
   }
+  # Refused here, before the gate: with a wrong name the game would sit at the menu for the whole run.
+  $liveSaves = @(Get-ChildItem -Path (Join-Path $ExeDir "saves\*\4D5307F1\00000001\$BootSave\mainsave.bin") -File -ErrorAction SilentlyContinue)
+  if ($liveSaves.Count -ne 1) {
+    Write-Output "REFUSED: -BootSave $BootSave needs exactly one save folder saves\<profile>\4D5307F1\00000001\$BootSave with a mainsave.bin under $ExeDir; found $($liveSaves.Count). Nothing launched."
+    Exit-Run 2
+  }
   if (-not $PSBoundParameters.ContainsKey('Plan')) { $Plan = "" }
   $Env = @{} + $Env
   $Env["FABLE2_BOOT_SAVE"] = $BootSave
@@ -444,18 +450,29 @@ if ($UserPresent) {
 if ($BootSave) {
   $pristine = Join-Path $ExeDir "saves-pristine\$BootSave"
   if (Test-Path -LiteralPath $pristine -PathType Container) {
+    $aside = Join-Path $ExeDir ("saves-replaced\{0}" -f (Get-Date -Format "yyyyMMdd_HHmmss_fff"))
+    $livePath = $null; $movedLive = $false
     try {
       $live = @(Get-ChildItem -Path (Join-Path $ExeDir "saves\*\4D5307F1\00000001\$BootSave") -Directory -ErrorAction Stop)
       if ($live.Count -ne 1) { throw "expected one live save folder $BootSave, found $($live.Count)" }
-      $aside = Join-Path $ExeDir ("saves-replaced\{0}" -f (Get-Date -Format "yyyyMMdd_HHmmss_fff"))
+      $livePath = $live[0].FullName
       New-Item -ItemType Directory -Force $aside | Out-Null
-      Move-Item -LiteralPath $live[0].FullName -Destination (Join-Path $aside $BootSave)
-      Copy-Item -Recurse -LiteralPath $pristine -Destination $live[0].FullName
+      # The copy is made next to its destination first: the live save is not touched until it is complete.
+      $incoming = Join-Path $aside "incoming"
+      Copy-Item -Recurse -LiteralPath $pristine -Destination $incoming
+      Move-Item -LiteralPath $livePath -Destination (Join-Path $aside $BootSave)
+      $movedLive = $true
+      Move-Item -LiteralPath $incoming -Destination $livePath
       Write-Output "restored pristine save $BootSave (previous one moved to $aside)"
       Add-RunLog "restored pristine save $BootSave; previous moved to $aside"
     } catch {
+      $why = $_.Exception.Message
+      if ($movedLive -and -not (Test-Path -LiteralPath $livePath)) {
+        try { Move-Item -LiteralPath (Join-Path $aside $BootSave) -Destination $livePath; $why += "; the live save was put back" }
+        catch { $why += "; THE LIVE SAVE IS NOW IN $(Join-Path $aside $BootSave): move it back to $livePath by hand" }
+      }
       $script:GateText += "; ABORTED"
-      Write-Output "${Label}RUN ABORTED: could not restore the pristine save $BootSave ($($_.Exception.Message)). Nothing launched."
+      Write-Output "${Label}RUN ABORTED: could not restore the pristine save $BootSave ($why). Nothing launched."
       Exit-Run 12
     }
   }

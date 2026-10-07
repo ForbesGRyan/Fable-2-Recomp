@@ -42,6 +42,28 @@ int main() {
       if (t.Step(false)) return 17;               // in game: no attempt
   }
 
+  // Leaving the front end after it was up ends boot save: the player loaded by hand, and a
+  // later quit to the front end must not start a load.
+  {
+    Trigger t;
+    for (int i = 0; i < 5; ++i) t.Step(false);    // before the front end exists: still armed
+    if (t.done) return 20;
+    t.Step(true);
+    t.Step(false);
+    if (!t.done || t.gave_up) return 21;
+    for (uint32_t i = 0; i < 3 * kAttemptEvery; ++i)
+      if (t.Step(true)) return 22;
+  }
+  // At most kMaxAttempts attempts, then it gives up.
+  {
+    Trigger t;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < (kMaxAttempts + 5) * kAttemptEvery; ++i)
+      if (t.Step(true)) ++n;
+    if (n != kMaxAttempts || t.attempts != kMaxAttempts) return 23;
+    if (!t.done || !t.gave_up) return 24;
+  }
+
   // Save folder lookup.
   const fs::path root = fs::temp_directory_path() / "fable2_boot_save_test";
   fs::remove_all(root);

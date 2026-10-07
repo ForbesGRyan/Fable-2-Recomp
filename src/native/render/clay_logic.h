@@ -3,10 +3,12 @@
 // Pure helpers for the clay pass and its geometry cache (no SDK/GPU deps):
 // cache keys, vertex counts, index range checks, draw colors, the root
 // constant block, pipeline keys and the alpha rule of a draw's render state,
+// the terrain material (its constants, the fallback of a ground square),
 // texture counters and the F3 status text.
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -15,6 +17,7 @@
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -54,6 +57,10 @@ struct ClayStats {
   uint32_t pipelines = 0, pipeline_overflow = 0;
   // alpha_unknown and blend_unknown by pixel shader (kTallyAlphaUnknown, kTallyBlendUnknown).
   capture::ShaderTally<32> unknown_by_ps;
+  // Terrain layer records left out because their ground square is drawn as flat
+  // clay by another record (PlanTerrain), and the distinct (colour, weights)
+  // texture pairs bound for the terrain records drawn with their material.
+  uint32_t terrain_skipped = 0, terrain_tuples = 0;
 };
 
 inline constexpr uint8_t kTallyAlphaUnknown = 0, kTallyBlendUnknown = 1;
@@ -64,6 +71,8 @@ struct TextureStats {
   uint64_t resident_bytes = 0, upload_bytes = 0;
   double decode_ms = 0;
   uint32_t status[size_t(capture::MaterialStatus::kCount)] = {};  // final statuses of drawn records
+  // Drawn terrain records, and those of them drawn with their material (counted in `textured` too).
+  uint32_t terrain = 0, terrain_textured = 0;
   bool latched = false;  // an RHI failure turned the texture path off
 };
 
@@ -270,6 +279,27 @@ inline GeoKey UvKey(const capture::DrawRecord& r) {
   return k;
 }
 
+// Cache key of a far terrain draw's colour coordinates (kind 7), which
+// BuildTerrainFarUvs reads from the adaptive vertex shader's two tables: the
+// tables (fetch dwords 0 to 2 of each: pitch and tiling, address, format and
+// endian, size), the draw's patches and the constants that address the tables.
+// The content hash covers both tables' bytes. The heightmap, the height scale
+// and what changes with the eye (fade, eye) do not enter.
+inline GeoKey TerrainFarUvKey(const capture::DrawRecord& r) {
+  const capture::TerrainPatch& t = r.terrain;
+  const capture::TerrainMaterialInputs& m = t.material;
+  GeoKey k;
+  k.addr = m.far_u_fetch[1] & 0xFFFFF000u;
+  k.size = m.far_v_fetch[1] & 0xFFFFF000u;  // (the second table's address)
+  k.stride = capture::kTerrainGrid;
+  k.extra = HashCombine32({m.far_u_fetch[0], m.far_u_fetch[1], m.far_u_fetch[2], m.far_v_fetch[0], m.far_v_fetch[1],
+                           m.far_v_fetch[2], FloatBits(t.patch), t.patches, FloatBits(t.cols), FloatBits(t.inv_cols),
+                           FloatBits(m.far_table[0]), FloatBits(m.far_table[1]), FloatBits(m.far_table[2]),
+                           FloatBits(m.far_table[3]), FloatBits(m.far_patch[0]), FloatBits(m.far_patch[1])});
+  k.kind = 7;
+  return k;
+}
+
 // Mesh vertices (positions or UVs) to decode for an instanced draw, of the
 // `stream_count` its stream holds: every index maps to a vertex below
 // s.count (InstanceIndex, checked at capture by InstanceBoundsOk), so one
@@ -326,8 +356,11 @@ inline bool IndexRangeValid(uint32_t max_index, int32_t base_vertex, uint32_t ve
 // capture::Compare on the pass's own depth (not reversed), cull a capture::Cull
 // in the pass's window space, where clockwise faces are front (ClayCull). The
 // alpha test is not pipeline state: it is a discard driven by ClayAlpha.
+inline constexpr uint8_t kTexturedTerrainLayer = 2, kTexturedTerrainFar = 3;
+inline constexpr uint8_t kClayPixelShaders = 4;  // the values of PipelineKey::textured
+
 struct PipelineKey {
-  uint8_t textured = 0;      // 0 flat, 1 textured, 2 terrain layer, 3 terrain far
+  uint8_t textured = 0;      // 0 flat, 1 textured, 2 terrain layer, 3 terrain far (the pass's pixel shaders)
   uint8_t blend = 0, src = 1, dst = 0, op = 0, src_alpha = 1, dst_alpha = 0, op_alpha = 0;
   uint8_t color_mask = 0xF;
   uint8_t depth_test = 1, depth_write = 1, depth_func = 1;   // Compare values
@@ -485,8 +518,12 @@ struct DrawState {
 // `textured`: the PipelineKey value the record is drawn with this frame (0: flat
 // clay, its colour is not known). `flat_terrain`: a terrain patch drawn as flat
 // clay; its blend is the layer's own, which flat clay does not have, so it is
-// drawn opaque and not left out. Rules (DecideAlpha): a blended draw whose
-// colour is unknown, or whose blend the RHI cannot express, is left out; a test
+// drawn opaque and not left out. A terrain record drawn with its material
+// (`textured` 2 or 3) needs no recipe: the terrain pixel shaders form their own
+// alpha (weight x fade, or 1), so its test and blend always apply, and the
+// material's recipe, scale and colour division are not used. Rules
+// (DecideAlpha): a blended draw whose colour is unknown, or whose blend the RHI
+// cannot express, is left out; a test
 // or blend without an alpha the pixel shader can form (no recipe, a flat draw,
 // a recipe that needs another fetch) is drawn without the test and with alpha
 // 1; an invalid state or an inexpressible depth function draws with the default
@@ -508,11 +545,12 @@ inline DrawState DecideDrawState(const capture::RenderState& rs, const capture::
     return d;
   }
   const bool colour_known = textured != 0;
+  const bool terrain = textured == kTexturedTerrainLayer || textured == kTexturedTerrainFar;
   const capture::AlphaSpec& a = m.alpha;
-  const bool has_recipe = colour_known && (a.source == capture::AlphaSource::kAlbedo ||
-                                           a.source == capture::AlphaSource::kOne);
+  const bool has_recipe = terrain || (colour_known && (a.source == capture::AlphaSource::kAlbedo ||
+                                                       a.source == capture::AlphaSource::kOne));
   // The shader divides its colour by the alpha whatever the state is.
-  if (has_recipe && a.divide_colour) d.alpha.mode |= kAlphaDivide;
+  if (has_recipe && !terrain && a.divide_colour) d.alpha.mode |= kAlphaDivide;
   const bool test = rs.alpha_test || rs.alpha_to_mask;
   switch (capture::DecideAlpha(test, blend, colour_known, has_recipe)) {
     case capture::AlphaRule::kOpaque:
@@ -532,12 +570,12 @@ inline DrawState DecideDrawState(const capture::RenderState& rs, const capture::
         d.alpha.mode |= kAlphaToMask | (uint32_t(rs.alpha_to_mask_offsets) << kAlphaToMaskShift) |
                         (uint32_t(rs.alpha_to_mask_samples & 3) << kAlphaToMaskSamplesShift);
       }
-      if (a.source == capture::AlphaSource::kAlbedo) {
+      if (!terrain && a.source == capture::AlphaSource::kAlbedo) {
         d.alpha.mode |= kAlphaFromAlbedo | (uint32_t(a.component & 3) << 5);
       }
       if (blend) d.alpha.mode |= kAlphaBlend;
       d.alpha.ref = rs.alpha_ref;
-      d.alpha.scale = m.alpha_scale;
+      if (!terrain) d.alpha.scale = m.alpha_scale;
       break;
   }
   return d;
@@ -580,8 +618,226 @@ inline ClayConstants MakeClayConstants(const capture::DrawRecord& r, uint32_t ve
   return c;
 }
 
-// The F3 texture line: textured share of the drawn records and of the drawn
-// non-terrain records (spec success criterion 2), cache counters and the top
+// --- Terrain material (frame-map section 13, "Terrain", "Native terrain material") ---
+// A terrain record whose inputs and textures are usable is drawn by one of the
+// two terrain pixel shaders (fable2_native_shaders.h) with its captured render
+// state: a layer of the layer builder (8221C9C8) with kClayTerrainLayerPs, a
+// draw of the adaptive builder (82207C30) with kClayTerrainFarPs.
+
+// The terrain shaders' constants (cbuffer Terrain, register b1), laid out as
+// shaders::kClayTerrainFields says. They do not fit the root signature (64
+// words: 36 are the draw's constants, 6 the three buffers, 2 the two texture
+// tables, and the RHI has one constant block per layout), so every terrain
+// draw of a frame has a slot of kClayTerrainSlotBytes in one constant buffer.
+struct ClayTerrainConstants {
+  float detail_uv[4];   // layer: tf0 coordinate of the world position, scaled into the host texture
+  float weight_uv[4];   // layer: tf18 coordinate of the world position
+  float world[12];      // TerrainMaterialInputs::world
+  float eye[3];
+  float hole_ref;
+  float fade[2];
+  float weight_scale, weight_bias;
+  uint32_t colour_sampler;  // static sampler of the colour texture (SamplerIndex)
+  uint32_t weight_sampler;  // of the weights; the shader reads its clamp bit and filters linearly
+  uint32_t flags;           // kTerrainFadeIn
+  uint32_t pad;
+};
+static_assert(sizeof(ClayTerrainConstants) == 128);
+inline constexpr uint32_t kClayTerrainSlotBytes = 256;  // the RHI's constant buffer offset alignment
+// ClayTerrainConstants::flags: the far colour is multiplied by sat(d2 * fade[0] + fade[1]) (the
+// kind terrain-far-fade, shader 2F8A: the underlay the layers add to).
+inline constexpr uint32_t kTerrainFadeIn = 1u;
+
+// PipelineKey::textured of a terrain kind.
+inline uint8_t TerrainTextured(capture::MaterialKind kind) {
+  return kind == capture::MaterialKind::kTerrainLayer ? kTexturedTerrainLayer : kTexturedTerrainFar;
+}
+
+// `colour_fix`: the colour texture's (width / host width, height / host height). A far draw's
+// colour coordinate is per vertex (TerrainFarUvKey) and is scaled by the draw's uv transform.
+inline ClayTerrainConstants MakeClayTerrainConstants(const capture::TerrainMaterialInputs& m,
+                                                     capture::MaterialKind kind, const float colour_fix[2],
+                                                     uint32_t colour_sampler, uint32_t weight_sampler) {
+  ClayTerrainConstants c{};
+  for (int i = 0; i < 4; ++i) {
+    c.detail_uv[i] = m.detail_uv[i] * colour_fix[i & 1];
+    c.weight_uv[i] = m.weight_uv[i];
+  }
+  std::copy(std::begin(m.world), std::end(m.world), std::begin(c.world));
+  std::copy(std::begin(m.eye), std::end(m.eye), std::begin(c.eye));
+  c.hole_ref = m.hole_ref;
+  c.fade[0] = m.fade[0];
+  c.fade[1] = m.fade[1];
+  c.weight_scale = m.weight_scale;
+  c.weight_bias = m.weight_bias;
+  c.colour_sampler = colour_sampler;
+  c.weight_sampler = weight_sampler;
+  c.flags = kind == capture::MaterialKind::kTerrainFarFade ? kTerrainFadeIn : 0u;
+  return c;
+}
+
+// kTextured when a terrain record can be drawn with its material this frame,
+// else the reason it is flat clay. `kind` is the record's pixel shader's
+// (Material::kind), `adaptive_builder` whether the adaptive builder drew it;
+// `colour` and `weight` are the texture cache's statuses of the colour texture
+// and (layers) the weight cells, `far_uvs` whether the far colour coordinates
+// were built (far draws). Inputs that are not valid, or a pixel shader that is
+// not a terrain shader of the record's builder: terrain-inputs, and no texture
+// was asked for. A texture that is not usable: the cache's reason, the colour
+// texture's first. Far coordinates that could not be built (a table unreadable
+// or of a layout that is not handled): uv-unsupported.
+inline capture::MaterialStatus TerrainMaterialStatus(const capture::TerrainMaterialInputs& m,
+                                                     capture::MaterialKind kind, bool adaptive_builder,
+                                                     capture::MaterialStatus colour, capture::MaterialStatus weight,
+                                                     bool far_uvs) {
+  using capture::MaterialKind;
+  using capture::MaterialStatus;
+  const bool far_kind = kind == MaterialKind::kTerrainFar || kind == MaterialKind::kTerrainFarFade;
+  const bool layer_kind = kind == MaterialKind::kTerrainLayer;
+  if (!m.valid || m.adaptive != adaptive_builder || (adaptive_builder ? !far_kind : !layer_kind)) {
+    return MaterialStatus::kTerrainInputs;
+  }
+  if (colour != MaterialStatus::kTextured) return colour;
+  if (adaptive_builder) return far_uvs ? MaterialStatus::kTextured : MaterialStatus::kUvUnsupported;
+  return weight;
+}
+
+// A patch's rectangle of ground: corner and size in world units.
+struct TerrainRect {
+  float x0 = 0, y0 = 0, w = 0, h = 0;
+  bool operator==(const TerrainRect&) const = default;
+};
+
+// Patch `k` of a terrain record, as the vertex shaders place it: row = floor(p / cols),
+// col = p - row * cols, corner = origin + (col, row) * cell (the first grid point of
+// BuildTerrainPositions, computed the same way, so equal patches give equal rectangles).
+inline TerrainRect TerrainPatchRect(const capture::TerrainPatch& t, uint32_t k) {
+  const float p = t.patch + float(k);
+  const float row = std::floor(p * t.inv_cols);
+  const float col = p - row * t.cols;
+  return {col * t.cell[0] + t.origin[0], row * t.cell[1] + t.origin[1], t.cell[0], t.cell[1]};
+}
+
+enum class TerrainAction : uint8_t {
+  kMaterial,  // drawn by its terrain pixel shader with its captured state
+  kFlat,      // drawn as flat clay, opaque
+  kSkip       // not drawn
+};
+
+// One terrain record of a frame for PlanTerrain, in draw order.
+struct TerrainPlanItem {
+  const capture::TerrainPatch* patch = nullptr;  // the record's terrain
+  bool layer = false;     // a draw of the layer builder; else of the adaptive builder
+  bool usable = false;    // its material can be drawn this frame (TerrainMaterialStatus is kTextured)
+  bool drawable = true;   // its positions and indices were built
+  TerrainAction action = TerrainAction::kFlat;  // out
+};
+
+// What the pass does with each terrain record of a frame. The ground near the
+// eye is the sum of the layer draws of a square (one patch rectangle of the
+// layer builder: a tile's origin, its sub-patch and the cell size, compared as
+// TerrainPatchRect) over an underlay (a draw of the adaptive builder that
+// covers the square; found by the square's centre), each layer blended by its
+// captured state. A sum with a part missing or replaced by flat clay is wrong
+// (too dark, or additive layers over clay), so a square is all or nothing:
+//  - every draw usable and drawable: each with its material;
+//  - a layer of a square not usable (or without geometry): the square is "bad".
+//    Its first drawable layer that is not yet under a flat draw is drawn as flat
+//    clay (opaque: it covers the underlay), every other layer of the square is
+//    left out;
+//  - an underlay that is not usable is itself drawn flat (opaque, all its
+//    patches), and every layer of the squares it covers is left out; one without
+//    geometry draws nothing and its squares are bad as above;
+//  - a layer draw of several patches ties its squares together: when one is bad
+//    all are (a square can then lie under two opaque flat draws, never under a
+//    material layer over flat clay).
+// A draw of the adaptive builder never depends on another draw.
+inline void PlanTerrain(std::vector<TerrainPlanItem>& items) {
+  struct Square {
+    TerrainRect rect;
+    bool bad = false, covered = false;
+  };
+  struct RectHash {
+    size_t operator()(const TerrainRect& r) const {
+      return HashCombine32({FloatBits(r.x0), FloatBits(r.y0), FloatBits(r.w), FloatBits(r.h)});
+    }
+  };
+  std::vector<Square> squares;
+  std::unordered_map<TerrainRect, uint32_t, RectHash> index;
+  // link[first[i] .. first[i + 1]): the squares of layer item i, one per patch.
+  std::vector<uint32_t> link, first(items.size() + 1, 0);
+  for (size_t i = 0; i < items.size(); ++i) {
+    first[i] = uint32_t(link.size());
+    const TerrainPlanItem& it = items[i];
+    if (!it.layer || !it.patch) continue;
+    for (uint32_t k = 0; k < it.patch->patches; ++k) {
+      const TerrainRect rect = TerrainPatchRect(*it.patch, k);
+      const auto found = index.try_emplace(rect, uint32_t(squares.size()));
+      if (found.second) squares.push_back({rect});
+      link.push_back(found.first->second);
+    }
+  }
+  first[items.size()] = uint32_t(link.size());
+
+  for (size_t i = 0; i < items.size(); ++i) {
+    TerrainPlanItem& it = items[i];
+    const bool whole = it.usable && it.drawable;
+    if (it.layer) {
+      if (!whole) {
+        for (uint32_t l = first[i]; l < first[i + 1]; ++l) squares[link[l]].bad = true;
+      }
+      continue;
+    }
+    it.action = !it.drawable ? TerrainAction::kSkip : it.usable ? TerrainAction::kMaterial : TerrainAction::kFlat;
+    if (whole || !it.patch) continue;
+    // The squares over this draw have no underlay to add to: bad, and under its flat draw if it has one.
+    for (uint32_t k = 0; k < it.patch->patches; ++k) {
+      const TerrainRect f = TerrainPatchRect(*it.patch, k);
+      for (Square& s : squares) {
+        const float cx = s.rect.x0 + 0.5f * s.rect.w, cy = s.rect.y0 + 0.5f * s.rect.h;
+        if (cx >= f.x0 && cx < f.x0 + f.w && cy >= f.y0 && cy < f.y0 + f.h) {
+          s.bad = true;
+          s.covered = s.covered || it.drawable;
+        }
+      }
+    }
+  }
+  // A layer draw with a bad square makes all its squares bad.
+  for (bool changed = true; changed;) {
+    changed = false;
+    for (size_t i = 0; i < items.size(); ++i) {
+      bool bad = false;
+      for (uint32_t l = first[i]; l < first[i + 1]; ++l) bad = bad || squares[link[l]].bad;
+      if (!bad) continue;
+      for (uint32_t l = first[i]; l < first[i + 1]; ++l) {
+        changed = changed || !squares[link[l]].bad;
+        squares[link[l]].bad = true;
+      }
+    }
+  }
+  for (size_t i = 0; i < items.size(); ++i) {
+    TerrainPlanItem& it = items[i];
+    if (!it.layer) continue;
+    bool bad = false, open = false;
+    for (uint32_t l = first[i]; l < first[i + 1]; ++l) {
+      bad = bad || squares[link[l]].bad;
+      open = open || !squares[link[l]].covered;
+    }
+    if (!bad) {
+      // (a layer without a patch has no square: it is drawn on its own)
+      it.action = !it.drawable ? TerrainAction::kSkip : it.usable ? TerrainAction::kMaterial : TerrainAction::kFlat;
+    } else if (it.drawable && open) {
+      it.action = TerrainAction::kFlat;
+      for (uint32_t l = first[i]; l < first[i + 1]; ++l) squares[link[l]].covered = true;
+    } else {
+      it.action = TerrainAction::kSkip;
+    }
+  }
+}
+
+// The F3 texture line: textured share of the drawn records (terrain records
+// drawn with their material among them) and of the drawn non-terrain records
+// (spec success criterion 2), cache counters and the top
 // three final statuses other than textured, among which the state reasons rank:
 // `alpha-unknown` (drawn records whose alpha test or blend had no alpha to
 // apply) and `blend-unknown` (records left out, ClayStats). "Textures: off
@@ -599,9 +855,9 @@ inline std::string FormatTextureText(const TextureStats& ts, uint32_t drawn, uin
   std::stable_sort(reasons.begin(), reasons.end(),
                    [](const auto& a, const auto& b) { return a.second > b.second; });
   const uint32_t share = drawn ? uint32_t(uint64_t(ts.textured) * 100 / drawn) : 0;
-  const uint32_t terrain = ts.status[size_t(capture::MaterialStatus::kTerrain)];
-  const uint32_t non_terrain = drawn > terrain ? drawn - terrain : 0;
-  const uint32_t share_nt = non_terrain ? uint32_t(uint64_t(ts.textured) * 100 / non_terrain) : 0;
+  const uint32_t non_terrain = drawn > ts.terrain ? drawn - ts.terrain : 0;
+  const uint32_t textured_nt = ts.textured > ts.terrain_textured ? ts.textured - ts.terrain_textured : 0;
+  const uint32_t share_nt = non_terrain ? uint32_t(uint64_t(textured_nt) * 100 / non_terrain) : 0;
   char buf[256];
   std::snprintf(buf, sizeof(buf),
                 "Textures: textured %u of %u drawn (%u%%, %u%% non-terrain), resident %u (%.1f MB), "
@@ -629,6 +885,17 @@ inline std::string FormatStateText(const ClayStats& st) {
          std::to_string(st.blended) + ", invalid " + std::to_string(st.state_invalid);
 }
 
+// The log's terrain line: the drawn terrain records, those drawn with their
+// material and as flat clay, the layer records left out with their square, and
+// the distinct texture pairs bound (each takes two slots of the RHI's
+// shader-visible view heap until one of its views is destroyed).
+inline std::string FormatTerrainText(const ClayStats& st, const TextureStats& ts) {
+  const uint32_t flat = ts.terrain > ts.terrain_textured ? ts.terrain - ts.terrain_textured : 0;
+  return "Terrain: material " + std::to_string(ts.terrain_textured) + " of " + std::to_string(ts.terrain) +
+         " drawn, flat " + std::to_string(flat) + ", left out " + std::to_string(st.terrain_skipped) +
+         ", texture pairs " + std::to_string(st.terrain_tuples);
+}
+
 // The log's breakdown of alpha-unknown and blend-unknown by pixel shader (top
 // eight each); empty when there is neither.
 inline std::string FormatUnknownByPs(const ClayStats& st) {
@@ -653,7 +920,8 @@ inline std::string FormatUnknownByPs(const ClayStats& st) {
 }
 
 // Five F3 lines: capture/draw counts with the top three skip reasons (records
-// the pass left out as blend-unknown among them), the geometry cache counters
+// the pass left out as blend-unknown, and terrain layers left out with their
+// square as terrain-square, among them), the geometry cache counters
 // and GPU-thread CPU timings, the state line, the guest-thread capture time of
 // the scene's frame, then the texture line (tex nullptr: the texture path is
 // off).
@@ -667,6 +935,7 @@ inline std::string FormatStatusText(const FrameScene& scene, const ClayStats& st
   }
   if (st.skipped_other) reasons.emplace_back("render-other", st.skipped_other);
   if (st.blend_unknown) reasons.emplace_back("blend-unknown", st.blend_unknown);
+  if (st.terrain_skipped) reasons.emplace_back("terrain-square", st.terrain_skipped);
   uint64_t skipped = 0;
   for (const auto& r : reasons) skipped += r.second;
   std::stable_sort(reasons.begin(), reasons.end(),

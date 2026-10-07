@@ -288,6 +288,7 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
     if (textures) {
       REXLOG_INFO("[native] clay: {}",
                   render::FormatTextureText(tst, st.drawn, st.alpha_unknown, st.blend_unknown));
+      REXLOG_INFO("[native] clay: {}", render::FormatTerrainText(st, tst));
     }
     REXLOG_INFO("[native] clay: {} | alpha-unknown {}, blend-unknown {}", render::FormatStateText(st),
                 st.alpha_unknown, st.blend_unknown);

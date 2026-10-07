@@ -41,6 +41,16 @@ class GeometryCache {
   // instanced record gets flat UVs: the mesh vertex's UV per flat position.
   nrhi::Buffer* Uvs(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t vertex_count,
                     ClayStats& st);
+  // float2 far colour coordinates of a terrain record of the adaptive builder,
+  // one per grid point of its position buffer: read from the vertex shader's
+  // two tables where the game reads them, at the patch knots
+  // (capture::BuildTerrainFarUvs; key TerrainFarUvKey, content hash of both
+  // tables). nullptr when the record's material inputs are not valid ones of
+  // that builder, a table is not a k_16 texture the heightmap decode handles or
+  // is unreadable, a knot lies outside its table's bytes, or fewer than
+  // `vertex_count` coordinates result. Reads are bounded by the tables' sizes.
+  nrhi::Buffer* TerrainFarUvs(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t vertex_count,
+                              ClayStats& st);
   void BeginFrame(uint64_t frame, uint64_t budget_bytes);
   // DestroyDeferred all (dev may be nullptr: forget the buffers without
   // destroying them, e.g. after a device change).

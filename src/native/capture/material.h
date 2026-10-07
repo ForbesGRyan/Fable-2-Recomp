@@ -28,6 +28,12 @@ enum class MaterialStatus : uint8_t {
   kTexturePending,     // renderer
   kTextureDynamic,     // renderer
   kTextureBad,         // renderer
+  // Renderer, terrain records (clay_logic.h, "Terrain material"): the record's material inputs are
+  // not usable (TerrainMaterialInputs::valid is false, or its pixel shader is not a terrain shader
+  // of its builder); the record could be drawn with its material but another draw of its ground
+  // square could not, so the whole square is flat clay.
+  kTerrainInputs,
+  kTerrainSquare,
   kCount
 };
 
@@ -42,6 +48,8 @@ inline const char* MaterialStatusName(MaterialStatus s) {
     case MaterialStatus::kTexturePending: return "texture-pending";
     case MaterialStatus::kTextureDynamic: return "texture-dynamic";
     case MaterialStatus::kTextureBad: return "texture-bad";
+    case MaterialStatus::kTerrainInputs: return "terrain-inputs";
+    case MaterialStatus::kTerrainSquare: return "terrain-square";
     default: return "?";
   }
 }

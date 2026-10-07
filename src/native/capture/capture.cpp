@@ -1991,7 +1991,8 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders)
 // bank as FillMaterial reads an alpha recipe's scale) and at most four fetch
 // constants from the device shadow: bounded reads, and anything unreadable
 // leaves in.terrain.material invalid. Also records the pixel shader and its
-// kind in the material; nothing the renderer draws depends on any of it yet.
+// kind in the material; the clay pass draws the record with them (clay_logic.h,
+// "Terrain material") and as flat clay when they are not valid.
 void FillTerrainMaterial(uint32_t device, const DeviceSnapshot& dev, bool adaptive, DrawInputs& in) {
   in.terrain.material = TerrainMaterialInputs{};
   if (!in.terrain.active) return;
@@ -2081,7 +2082,8 @@ SkipReason FillTerrainInputs(uint32_t device, uint32_t first, uint32_t patches, 
 // Albedo texture and UVs for a recorded draw (material.h). Never changes the
 // draw's skip reason. Terrain draws need no lookups here (FillTerrainMaterial
 // has recorded their pixel shader, kind and inputs; the status stays terrain,
-// which the renderer draws as flat clay); a draw whose device was not read
+// and the renderer decides from the inputs whether the record gets the terrain
+// material or flat clay); a draw whose device was not read
 // stays ps-unknown.
 void FillMaterial(uint32_t device, const DrawShaders& shaders, DrawInputs& in) {
   Material& m = in.material;

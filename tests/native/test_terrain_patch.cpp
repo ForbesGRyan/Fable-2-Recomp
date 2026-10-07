@@ -41,8 +41,8 @@ int main() {
   fc[5] = (fc[5] & ~(3u << 9)) | (2u << 9);  // 3D
   if (DecodeHeightMap(fc, &m)) return 10;
   std::memcpy(fc, kTf16, sizeof(fc));
-  fc[0] &= ~0x80000000u;  // linear (untiled): rows of 608 texels padded to 256 bytes (1280)
-  if (!DecodeHeightMap(fc, &m) || m.tiled || m.size != 1280u * 576u + 577u * 2u) return 11;
+  fc[0] &= ~0x80000000u;  // linear (untiled): rows of the fetch pitch, 608 texels of 2 bytes (the SDK's base-level rule)
+  if (!DecodeHeightMap(fc, &m) || m.tiled || m.size != 1216u * 576u + 577u * 2u) return 11;
 
   // --- Tiled addressing (xenia GetTiledOffset2D) ---
   if (TiledOffset2D(0, 0, 608, 1) != 0) return 20;
@@ -355,6 +355,61 @@ int main() {
     if (MakeTerrainMaterialInputs(fp, true, vs, ps, fg, &bad) || bad.valid) return 138;
     // The distance of a far draw is to the patch position itself (its pixel shader reads no matrix).
     if (!Near(TerrainEyeDistance2(fm, 88.0f, 152.0f, 20.0f), 308.0f, 1e-3f)) return 139;
+
+    // --- The far colour coordinate per grid point (test_far_patch of the Python test: the same two
+    // tables, the same patch, the same numbers) ---
+    // Tables 34 x 2, linear k_16 with big-endian words, pitch 64 texels: rows of 128 bytes. Patch
+    // column 1, row 1 holds u 0.25 to 0.75 over its 17 knots and v 0.6 to 0.9; everything else is 0.
+    static const uint32_t kSmallU[6] = {0x00800002, 0x1A000058, 0x00002021, 0x00000D10, 0x00000000, 0x00000200};
+    static const uint32_t kSmallV[6] = {0x00800002, 0x1A100058, 0x00002021, 0x00000D10, 0x00000000, 0x00000200};
+    HeightMap um, vm;
+    if (!DecodeHeightMap(kSmallU, &um) || !DecodeHeightMap(kSmallV, &vm)) return 150;
+    if (um.tiled || um.width != 34 || um.height != 2 || um.pitch != 64 || um.size != 128u + 68u) return 151;
+    std::vector<uint8_t> tu(um.size, 0), tv(vm.size, 0);
+    for (uint32_t x = 17; x < 34; ++x) {
+      const uint32_t u16 = uint32_t(std::lround(65535.0 * (0.25 + 0.5 * (x - 17) / 16.0)));
+      const uint32_t v16 = uint32_t(std::lround(65535.0 * (0.6 + 0.3 * (x - 17) / 16.0)));
+      tu[128 + 2 * x] = uint8_t(u16 >> 8);
+      tu[128 + 2 * x + 1] = uint8_t(u16);
+      tv[128 + 2 * x] = uint8_t(v16 >> 8);
+      tv[128 + 2 * x + 1] = uint8_t(v16);
+    }
+    float texel = 0;
+    if (!HeightTexel(tu.data(), tu.size(), um, 21, 1, &texel) || !Near(texel, 0.375f, 1e-4f)) return 152;
+    ff.far_u = kSmallU;
+    ff.far_v = kSmallV;
+    TerrainPatch one;  // patch 4 of the draw: with c113.x = 3 it is patch 7, column 1 of row 1, corner (104, 152)
+    if (!MakeTerrainPatch(far_spec, vs, kTf16, 4, 1, &one)) return 153;
+    if (!MakeTerrainMaterialInputs(one, true, vs, ps, ff, &one.material)) return 154;
+    std::vector<Float2> uvs;
+    if (!BuildTerrainFarUvs(one, um, tu.data(), tu.size(), vm, tv.data(), tv.size(), kTerrainGrid, &uvs)) return 155;
+    if (uvs.size() != 17 * 17) return 156;
+    // Grid point (i, j) reads the u table at knot i and the v table at knot j. The replay's point
+    // (U 0.25, V 0.5) is (4, 8): u 0.375, v 0.75; (U 0.75, V 0.5) is (12, 8): u 0.625.
+    if (!Near(uvs[8 * 17 + 4].u, 0.375f, 1e-4f) || !Near(uvs[8 * 17 + 4].v, 0.75f, 1e-4f)) return 157;
+    if (!Near(uvs[8 * 17 + 12].u, 0.625f, 1e-4f) || !Near(uvs[8 * 17 + 12].v, 0.75f, 1e-4f)) return 158;
+    // The corners: knots 0 and 16 of both tables.
+    if (!Near(uvs[0].u, 0.25f, 1e-4f) || !Near(uvs[0].v, 0.6f, 1e-4f) || !Near(uvs[16 * 17 + 16].u, 0.75f, 1e-4f) ||
+        !Near(uvs[16 * 17 + 16].v, 0.9f, 1e-4f)) return 159;
+    // u changes along i only, v along j only (each table is read along its own axis).
+    if (uvs[5 * 17 + 4].u != uvs[8 * 17 + 4].u || uvs[8 * 17 + 9].v != uvs[8 * 17 + 4].v) return 160;
+    // Two patches in a run: the second (patch 8, column 2) lies past the tables' 34 texels, which
+    // wrap (clamp mode 0) to column 0, where the tables hold 0.
+    TerrainPatch two = one;
+    two.patches = 2;
+    if (!BuildTerrainFarUvs(two, um, tu.data(), tu.size(), vm, tv.data(), tv.size(), kTerrainGrid, &uvs) ||
+        uvs.size() != 2 * 17 * 17 || uvs[289 + 8 * 17 + 4].u != 0.0f || !Near(uvs[8 * 17 + 4].u, 0.375f, 1e-4f)) return 161;
+    // Nothing is made from missing data: a table cut short, a missing table, inputs that are not
+    // valid or not those of the adaptive builder, another grid than the 17 knots.
+    if (BuildTerrainFarUvs(one, um, tu.data(), 128 + 40, vm, tv.data(), tv.size(), kTerrainGrid, &uvs) || !uvs.empty()) return 162;
+    if (BuildTerrainFarUvs(one, um, tu.data(), tu.size(), vm, nullptr, tv.size(), kTerrainGrid, &uvs) || !uvs.empty()) return 163;
+    if (BuildTerrainFarUvs(one, um, tu.data(), tu.size(), vm, tv.data(), tv.size(), 8, &uvs)) return 164;
+    TerrainPatch invalid = one;
+    invalid.material.valid = false;
+    if (BuildTerrainFarUvs(invalid, um, tu.data(), tu.size(), vm, tv.data(), tv.size(), kTerrainGrid, &uvs)) return 165;
+    TerrainPatch not_far = one;
+    not_far.material.adaptive = false;
+    if (BuildTerrainFarUvs(not_far, um, tu.data(), tu.size(), vm, tv.data(), tv.size(), kTerrainGrid, &uvs)) return 166;
   }
 
   std::cout << "PASS: terrain patch\n";

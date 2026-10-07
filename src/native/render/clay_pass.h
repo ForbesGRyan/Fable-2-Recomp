@@ -4,8 +4,11 @@
 // (R8G8B8A8 color + D32 depth). Vertices are pulled from the geometry cache's
 // StructuredBuffers by SV_VertexID and transformed by each draw's captured
 // rows. With textures on, draws whose capture resolved an albedo and UVs
-// sample it (texture cache, unlit, softened facet shade); every other draw
-// keeps the flat clay colour. Each draw uses the game's own render state
+// sample it (texture cache, unlit, softened facet shade); terrain records are
+// drawn with the terrain material (the layer's detail colour weighted by its
+// weight cell and the distance fade, or the far colour; clay_logic.h, "Terrain
+// material"), a ground square as a whole or not at all (PlanTerrain); every
+// other draw keeps the flat clay colour. Each draw uses the game's own render state
 // (DrawRecord::state_words): blend, colour mask, depth and cull through a
 // pipeline of a small cache keyed by state (PipelineKey), the alpha test as a
 // discard in the textured pixel shader (DecideDrawState has the rules for a
@@ -13,6 +16,7 @@
 // only; Cmd is valid only inside the SDK's guest-output callbacks.
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include <rex/graphics/native_rhi.h>
@@ -32,8 +36,9 @@ class ClayPass {
   ClayPass(uint64_t geometry_budget_bytes, uint64_t texture_budget_bytes)
       : geometry_(geometry_budget_bytes), textures_(texture_budget_bytes) {}
 
-  // Targets, binding layout, shaders (both pixel shaders: kClayPs for flat
-  // draws, kClayTexturedPs for textured ones) and the two default pipelines.
+  // Targets, binding layout, shaders (the four pixel shaders: kClayPs for flat
+  // draws, kClayTexturedPs for textured ones, kClayTerrainLayerPs and
+  // kClayTerrainFarPs for terrain) and their four default pipelines.
   // False on any failure (logged); call again to retry.
   bool Ensure(nrhi::Device* dev);
   // Bumped each time Ensure creates new targets: their contents are
@@ -59,8 +64,26 @@ class ClayPass {
     nrhi::TextureView* albedo = nullptr;
     uint32_t vertex_count = 0, index_count = 0, sampler = 0;
     float uv_fix[2] = {1.0f, 1.0f};
-    nrhi::Pipeline* pipeline = nullptr;  // by the record's render state
+    nrhi::Pipeline* pipeline = nullptr;  // by the record's render state; nullptr: not drawn
     ClayAlpha alpha;
+    // A terrain record. With its material (`textured` 2 or 3): `albedo` is the
+    // colour texture (tf0 or tf13) with `sampler` and `uv_fix`, `weights` the
+    // layer's weight cells, `uvs` a far draw's colour coordinates, `slot` its
+    // constants in the frame's terrain constant buffer. `status`: kTextured
+    // when the material is usable, else why not (TerrainMaterialStatus).
+    bool terrain = false;
+    uint8_t textured = 0;  // PipelineKey::textured when drawn with the terrain material
+    nrhi::TextureView* weights = nullptr;
+    uint32_t weight_sampler = 0, plan = 0, slot = 0;
+    capture::MaterialStatus status = capture::MaterialStatus::kTerrain;
+  };
+  // A texture resolved for a terrain layer this frame (many layers share a few).
+  struct TerrainTexture {
+    uint32_t fetch[6] = {};
+    nrhi::TextureView* view = nullptr;
+    uint32_t sampler = 0;
+    float uv_fix[2] = {1.0f, 1.0f};
+    capture::MaterialStatus status = capture::MaterialStatus::kTextureBad;
   };
 
   void DestroyObjects();
@@ -70,16 +93,30 @@ class ClayPass {
   // is full or the pipeline could not be created.
   nrhi::Pipeline* PipelineFor(nrhi::Device* dev, const PipelineKey& key, ClayStats& st);
   bool CreateWhite(nrhi::Device* dev);
+  // Terrain records (Render). PrepareTerrain: geometry, and with textures on the
+  // textures, far coordinates and status of the record's material; adds its
+  // entry to prepared_ and terrain_items_. FinishTerrain, after every record:
+  // which records are drawn with the material, as flat clay or not at all
+  // (PlanTerrain), their pipelines, constants and counters.
+  void PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::DrawRecord& r, bool textured,
+                      ClayStats& st, TextureStats& tst);
+  void FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, TextureStats& tst);
+  // The texture behind a fetch constant, through the texture cache; with `memo`
+  // looked up once per frame (terrain_textures_).
+  nrhi::TextureView* ResolveTerrainTexture(nrhi::Cmd* cmd, nrhi::Device* dev, const uint32_t fetch[6], bool memo,
+                                           uint32_t* sampler, float* uv_fix, capture::MaterialStatus* status,
+                                           TextureStats& tst);
 
   nrhi::Device* device_ = nullptr;
   bool ready_ = false;
   uint64_t targets_generation_ = 0;
   nrhi::BindingLayout* layout_ = nullptr;  // the RHI has no layout destruction
   nrhi::Shader* vs_ = nullptr;
-  nrhi::Shader* ps_[2] = {};  // by PipelineKey::textured: kClayPs, kClayTexturedPs
+  // By PipelineKey::textured: kClayPs, kClayTexturedPs, kClayTerrainLayerPs, kClayTerrainFarPs.
+  nrhi::Shader* ps_[kClayPixelShaders] = {};
   // The pipeline cache: pipelines_[i] draws pipeline_keys_[i] (nullptr: its
-  // creation failed). Slots 0 and 1 are the default pipelines of `textured` 0
-  // and 1 (Ensure). At most kMaxClayPipelines, never evicted within a run.
+  // creation failed). Slots 0 to 3 are the default pipelines of `textured` 0
+  // to 3 (Ensure). At most kMaxClayPipelines, never evicted within a run.
   std::vector<PipelineKey> pipeline_keys_;
   std::vector<nrhi::Pipeline*> pipelines_;
   nrhi::Texture* color_ = nullptr;
@@ -92,6 +129,20 @@ class ClayPass {
   GeometryCache geometry_;
   TextureCache textures_;
   std::vector<Prepared> prepared_;
+  // Terrain of the frame being rendered: one plan item per terrain record
+  // (Prepared::plan), the layers' textures, the texture pairs bound, and the
+  // constant buffer (one kClayTerrainSlotBytes slot per terrain record,
+  // persistently mapped). The buffer is in use until the frame's submission has
+  // completed, so each frame takes one from the pool or a new one and returns it
+  // at the end of Render.
+  static constexpr uint64_t kTerrainPoolBytes = 4ull << 20;
+  std::vector<TerrainPlanItem> terrain_items_;
+  std::vector<TerrainTexture> terrain_textures_;
+  std::vector<std::pair<nrhi::TextureView*, nrhi::TextureView*>> terrain_pairs_;
+  RetirePool<nrhi::Buffer*> terrain_pool_{kTerrainPoolBytes};
+  std::vector<nrhi::Buffer*> terrain_destroy_;
+  nrhi::Buffer* terrain_cb_ = nullptr;
+  uint64_t terrain_cb_bytes_ = 0;
 };
 
 }  // namespace fable2::native::render

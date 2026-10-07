@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "position_decode.h"
+#include "uv_decode.h"
 #include "xenos_tiling.h"
 
 namespace fable2::native::capture {
@@ -65,11 +66,11 @@ inline bool DecodeHeightMap(const uint32_t fc[6], HeightMap* out) {
     m.size = uint32_t(TiledOffset2D(int32_t((m.width - 1) & ~31u), int32_t((m.height - 1) & ~31u),
                                     m.pitch, 1)) + 0xC00;
   } else {
-    // Linear rows padded to 256 bytes: unverified (every heightmap observed is
-    // tiled, so this branch has never run; the SDK's base-level rule aligns the
-    // pitch to 32 texels instead, see render::BaseLevelLinear).
-    const uint32_t row = (m.pitch * 2 + 255) & ~255u;
-    m.size = row * (m.height - 1) + m.width * 2;
+    // Linear rows by the SDK's base-level rule (texture_util::GetGuestTextureLayout,
+    // as render::BaseLevelLinear): the fetch pitch, a multiple of 32 texels, with no
+    // further row alignment. Every heightmap observed is tiled; the far colour
+    // tables of the adaptive vertex shader (TerrainFarKnot) are linear.
+    m.size = m.pitch * 2 * (m.height - 1) + m.width * 2;
   }
   *out = m;
   return true;
@@ -82,7 +83,7 @@ inline bool HeightTexel(const uint8_t* data, size_t size, const HeightMap& m, ui
   if (m.tiled) {
     o = uint64_t(uint32_t(TiledOffset2D(int32_t(x), int32_t(y), m.pitch, 1)));
   } else {
-    o = uint64_t(y) * ((m.pitch * 2 + 255) & ~255u) + uint64_t(x) * 2;
+    o = uint64_t(y) * (uint64_t(m.pitch) * 2) + uint64_t(x) * 2;
   }
   if (!data || o + 2 > size) return false;
   // 8in16 swaps the bytes of each 16-bit word: the GPU reads memory order.
@@ -148,6 +149,11 @@ inline bool SampleHeight(const uint8_t* data, size_t size, const HeightMap& m, f
 //   layers add to: 0 where the layers are whole)
 //   u and v are read from two tables at the patch's 17 knots per edge
 //   (TerrainFarKnot) and vary linearly between them.
+//
+// The clay pass draws the colour texture alone (the unlit rule of the frame
+// map: tf3 is baked light and base_tint an ambient tint, both lighting): it
+// does not read base_fetch, base_uv, base_pow or base_tint, which stay
+// captured for the lighting sub-project.
 struct TerrainMaterialInputs {
   bool valid = false;  // false: something could not be read or is not finite; nothing below is usable
   bool adaptive = false;  // a draw of the adaptive builder (the far kinds)
@@ -181,8 +187,9 @@ struct TerrainPatch {
   float tex_offset[2] = {};
   float tex_scale[2] = {};
   HeightMap map;
-  // Not part of the geometry and of no cache key; the renderer does not read it
-  // yet (terrain is drawn as flat clay).
+  // Not part of the positions and of no position or index key. The clay pass
+  // draws the record with it (clay_logic.h, "Terrain material"); the far colour
+  // coordinates built from it have their own key (TerrainFarUvKey).
   TerrainMaterialInputs material;
 };
 
@@ -386,6 +393,45 @@ inline void TerrainFarKnot(const TerrainMaterialInputs& m, float col, float row,
 // Quads per patch edge. A patch spans 16 heightmap texels in gameplay (cell 8,
 // 0.5 world units per texel) and the GPU tessellates it at most 15 times.
 inline constexpr uint32_t kTerrainGrid = 16;
+
+// Far: the far colour (tf13) coordinate of every grid point of the draw's
+// patches, in the order of BuildTerrainPositions: (n + 1)^2 per patch, v outer.
+// The adaptive vertex shader reads u from one table and v from the other at its
+// vertices, point sampled (5003700B7C9B1C16 instr 21 to 26); grid point (i, j)
+// of a 16 x 16 grid is knot i of the u table and knot j of the v table
+// (TerrainFarKnot), so the coordinate varies linearly between the 17 knots of a
+// patch edge, as in the replay tool (terrain_replay.py, far_uv). `um` / `vm` are
+// the decoded fetch constants material.far_u_fetch / far_v_fetch
+// (DecodeHeightMap: the tables are k_16 like the heightmap) with their bytes.
+// False, with nothing in `out`, unless the inputs are valid ones of the
+// adaptive builder, n is 16 and every texel read lies inside its table.
+inline bool BuildTerrainFarUvs(const TerrainPatch& t, const HeightMap& um, const uint8_t* u_data, size_t u_size,
+                               const HeightMap& vm, const uint8_t* v_data, size_t v_size, uint32_t n,
+                               std::vector<Float2>* out) {
+  out->clear();
+  const TerrainMaterialInputs& m = t.material;
+  if (!t.active || !m.valid || !m.adaptive || n != 16 || t.patches == 0 || t.patches > 4096) return false;
+  out->reserve(size_t(t.patches) * (n + 1) * (n + 1));
+  for (uint32_t k = 0; k < t.patches; ++k) {
+    const float p = t.patch + float(k);
+    const float row = std::floor(p * t.inv_cols);
+    const float col = p - row * t.cols;
+    float u[17], v[17];
+    for (uint32_t i = 0; i <= n; ++i) {
+      float at[2];
+      TerrainFarKnot(m, col, row, i, at);
+      if (!SampleHeight(u_data, u_size, um, at[0], at[1], &u[i]) ||
+          !SampleHeight(v_data, v_size, vm, at[0], at[1], &v[i])) {
+        out->clear();
+        return false;
+      }
+    }
+    for (uint32_t j = 0; j <= n; ++j) {
+      for (uint32_t i = 0; i <= n; ++i) out->push_back({u[i], v[j]});
+    }
+  }
+  return true;
+}
 
 // (n + 1)^2 grid points per patch, v outer, as (world.x, world.y, height, 1).
 inline bool BuildTerrainPositions(const TerrainPatch& t, const uint8_t* data, size_t size,

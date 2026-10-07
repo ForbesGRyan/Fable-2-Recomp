@@ -1,5 +1,6 @@
 """Tests for tools/xdk_sigmatch/gen_transform_table.py (vs-transforms.json -> .inc)."""
 import importlib.util
+import json
 import unittest
 from pathlib import Path
 
@@ -171,6 +172,51 @@ class GenTransformTableTest(unittest.TestCase):
         out = gtt.generate(data).splitlines()
         self.assertIn("FABLE2_VS_UV(0xECD66A10092E6562ull, 0, 0, 2, 1, 31, 3, -1, -1, -1, -1)", out)
         self.assertIn(f"FABLE2_VS_UV(0xECD66A10092E6562ull, 0, 1, 2, 0, 31, 3, {41}, {(1 << 11) | 43}, -1, -1)", out)
+
+
+class CommittedLeafEntriesTest(unittest.TestCase):
+    """The table as committed. The leaf vertex shaders 0xA584..., 0xD7DD... and 0x2D40... are one
+    shader with one, two and four point lights (frame-map section 13): the same position and the
+    same UV export, so the three entries carry one layout, and the .inc is a fresh generator run."""
+
+    LEAVES = ("0xA5846836C90E1192", "0xD7DD31B9BF194DE8", "0x2D40B53C926109BE")
+    LAYOUT_KEYS = ("base", "layout", "pos_fetch", "pos_swizzle", "deformed", "uv")
+
+    @staticmethod
+    def lines(vs):
+        return [f"FABLE2_VS_TRANSFORM({vs}ull, 0, 0, 0, 1)",
+                f"FABLE2_VS_POS_SWIZZLE({vs}ull, 0xAC1)",
+                f"FABLE2_VS_UV({vs}ull, 1, 3, 2, 1, 31, 3, -1, -1, -1, -1)",
+                f"FABLE2_VS_UV({vs}ull, 2, 3, 2, 0, 31, 3, -1, -1, -1, -1)"]
+
+    def setUp(self):
+        self.table = json.loads((ROOT / "docs" / "native-renderer" / "vs-transforms.json").read_text())
+
+    def test_leaf_form_lines(self):
+        entry = {"base": 0, "layout": "dot", "pos_fetch": 0, "manual": True, "deformed": True, "pos_swizzle": "yxw1",
+                 "uv": {"o1.w": {"fetch": 2, "format": 31, "offset": 3, "stages": [], "src": "y"},
+                        "o2.w": {"fetch": 2, "format": 31, "offset": 3, "stages": [], "src": "x"}}}
+        self.assertEqual(gtt.generate({"0xABC7": entry}).splitlines()[1:], self.lines("0xABC7"))
+
+    def test_d7dd_and_2d40_carry_the_layout_of_a584(self):
+        ref = self.table[self.LEAVES[0]]
+        for vs in self.LEAVES[1:]:
+            entry = self.table.get(vs)
+            self.assertIsNotNone(entry, vs)
+            self.assertNotIn("rejected", entry, vs)
+            self.assertIs(entry.get("manual"), True, vs)
+            self.assertIs(entry.get("uv_manual"), True, vs)
+            self.assertTrue(entry.get("evidence"), vs)
+            self.assertTrue(entry.get("uv_evidence"), vs)
+            self.assertEqual({k: entry.get(k) for k in self.LAYOUT_KEYS}, {k: ref[k] for k in self.LAYOUT_KEYS}, vs)
+
+    def test_committed_inc_is_a_fresh_generator_run_with_the_leaf_lines(self):
+        inc = (ROOT / "src" / "native" / "capture" / "vs_transform_table.inc").read_text()
+        self.assertEqual(inc, gtt.generate(self.table))
+        have = set(inc.splitlines())
+        for vs in self.LEAVES:
+            for line in self.lines(vs):
+                self.assertTrue(line in have, line)
 
 
 if __name__ == "__main__":

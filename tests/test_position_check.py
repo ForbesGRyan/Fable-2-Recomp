@@ -806,5 +806,20 @@ class SkinStructureTest(Base):
         self.assertIn("edge ok share 0.333 (>= 0.98) of 3 edges, edge nan 0", line)
 
 
+class CommittedLeafEntriesTest(unittest.TestCase):
+    """docs/native-renderer/vs-transforms.json as committed: the leaf vertex shaders 0xD7DD... and
+    0x2D40... are the two- and four-light variants of 0xA584... (frame-map section 13), so the
+    checker must replay all three alike. Their position_check line reads REJECT (exception path of
+    the in-clip rule); what is pinned here is the entry the checker and the runtime read."""
+
+    def test_the_three_leaf_shaders_parse_to_one_spec(self):
+        table = json.loads((Path(__file__).resolve().parent.parent / "docs" / "native-renderer" /
+                            "vs-transforms.json").read_text())
+        want = {"kind": "plain", "base": 0, "combine": False, "pos_fetch": 0, "pos_swizzle": 0xAC1}
+        for vs in ("0xA5846836C90E1192", "0xD7DD31B9BF194DE8", "0x2D40B53C926109BE"):
+            self.assertTrue(vs in table, vs)
+            self.assertEqual(pc.parse_entry(table[vs]), want, vs)
+
+
 if __name__ == "__main__":
     unittest.main()

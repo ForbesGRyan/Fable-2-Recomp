@@ -93,10 +93,49 @@ FETCH = """/*    0.0 */       exec
 VFETCH = """/*    0.0 */       exec
 /*    1   */          vfetch_full r5.yxw1, r0.x, vf0, DataFormat=FMT_16_16_16_16_FLOAT, Stride=5, Signed=true
 /*    2   */          vfetch_mini r7.xyz_, Offset=2, DataFormat=FMT_10_11_11, Signed=true
-/*    3   */          vfetch_full r3.zyxw, r0.x, vf3, DataFormat=FMT_8_8_8_8, Stride=1
-/*    4   */          vfetch_mini r4.x0__, Offset=1, DataFormat=FMT_32_FLOAT
+/*    3   */          add r0.x___, r0.xxxx, c1.xxxx
+/*    4   */          vfetch_full r3.zyxw, r0.x, vf3, DataFormat=FMT_8_8_8_8, Stride=1
+/*    5   */          vfetch_mini r4.x0__, Offset=1, DataFormat=FMT_32_FLOAT
 /*    0.1 */       exece
-/*    5   */          add o0, r5, r7
+/*    6   */          add o0, r5, r7
+"""
+
+# Operand conventions (fix round 1 of the lighting plan's Task 2). The SDK sources cited in the tests are
+# thirdparty/rexglue-sdk/include/rex/graphics/format/ucode.h ("ucode.h") and
+# thirdparty/rexglue-sdk/src/graphics/pipeline/shader/interpreter.cpp ("interpreter.cpp").
+OPERANDS = """/*    0.0 */       exec
+/*    1   */          add_sat r1, r0, c1
+/*    2   */          max r6._, r6, r6
+              +       subs r2.x___, r0.yw
+/*    3   */          max r6._, r6, r6
+              +       subsc r2._y__, c2.x, r0.y
+/*    4   */          max r6._, r6, r6
+              +       subs_prev r2.__z_, r0.w
+/*    5   */          add r3, -r_abs[0], c2.yyyy
+/*    0.1 */       exece
+/*    6   */          max oC0, r3, r3
+              +       mulsc_sat r2.___w, c2.z, r0.z
+"""
+
+SELECT = """/*    0.0 */       exec    // PredicateClean=false
+/*    1   */          cndeq r1, r0, c1, c2
+/*    2   */          dp2add r2.x___, r0.wzzz, c1.xyyy, c2.zwww
+/*    3   */          max r6._, r6, r6
+              +       exp r3.x___, r0.w
+/*    4   */          max r6._, r6, r6
+              +       log r3._y__, c1.w
+/*    5   */          max r6._, r6, r6
+              +       setp_ge r3.__z_, r0.y
+/*    0.1 */       exece
+/*    6   */          maxa o0, c3, r0
+              +       setp_eq r3.___w, r0.x
+"""
+
+ADDRESS = """/*    0.0 */       exec
+/*    1   */          max r6._, r6, r6
+              +       maxasf r6._, r0.xx
+/*    0.1 */       exece
+/*    2   */          add o0, c[10+a0], r0.yyyy
 """
 
 RELATIVE = """/*    0.0 */       exec
@@ -215,17 +254,76 @@ class HandWrittenDumps(unittest.TestCase):
         near(self, out["oC0"], [0.2, 0.05, 3.5, 0.5])
         self.assertEqual([(i, s) for i, s, _ in m.fetches], [(2, 3), (3, 4)])
 
+    def test_operand_conventions(self):
+        out, m = run(OPERANDS, consts={1: [0.25, -2.5, 0.5, 2.5], 2: [10, 1, -4, 0]}, regs={0: [-0.5, 3, 0.75, -2]})
+        # 1: saturation clamps on both sides: sat(-0.25, 0.5, 1.25, 0.5) (interpreter.cpp 831 to 834).
+        self.assertEqual(m.r[1], [0.0, 0.5, 1.0, 0.5])
+        # 2: subs is first component minus second: r0.y - r0.w = 3 - (-2) (ucode.h 1132).
+        # 3: subsc is the constant minus the register: c2.x - r0.y = 10 - 3 (interpreter.cpp 601 to 613: operand 0
+        #    is the constant, 1 the register; 756 to 759: operand 0 minus operand 1).
+        # 4: subs_prev is the operand minus the previous scalar: r0.w - 7 (ucode.h 1137; interpreter.cpp 761 to 763).
+        self.assertEqual(m.r[2][:3], [5.0, 7.0, -9.0])
+        # 5: `-r_abs[0]` takes the absolute value first, then negates: -|r0| + 1 (interpreter.cpp 289 to 298).
+        self.assertEqual(out["oC0"], [0.5, -2.0, 0.25, -1.0])
+        # 6: a saturated scalar writes the clamped value and leaves the previous scalar as computed:
+        #    sat(-4 * 0.75) = 0 is written, ps stays -3 (interpreter.cpp 836, 837).
+        self.assertEqual(m.r[2][3], 0.0)
+        self.assertEqual(m.ps, -3.0)
+
+    def test_selects_exponents_and_predicate_results(self):
+        consts = {1: [10, 20, 30, 8], 2: [-1, -2, 5, 7], 3: [0.5, -3, 2.5, 300.4]}
+        out, m = run(SELECT, consts=consts, regs={0: [0, -1, 2, 3], 3: [9, 9, 9, 9]})
+        # 1: cndeq takes the second operand where the first is 0, else the third (ucode.h 1437 to 1442).
+        self.assertEqual(m.r[1], [10.0, -2.0, 5.0, 7.0])
+        # 2: dp2add is two products plus the third operand's FIRST component: 3 * 10 + 2 * 20 + c2.z
+        #    (ucode.h 1470 to 1482; the printed swizzle `zwww` puts c2.z first).
+        self.assertEqual(m.r[2][0], 75.0)
+        # 3, 4: exp and log are base 2: 2^3 and log2(8) (ucode.h 1059, 1070).
+        self.assertEqual(m.r[3][:2], [8.0, 3.0])
+        # 5: setp_ge with -1: the predicate is false and the result is 1 (ucode.h 1175 to 1182; interpreter.cpp
+        #    the result is float(!predicate)).
+        self.assertEqual(m.r[3][2], 1.0)
+        # 6: setp_eq with 0: the predicate is true and the result is 0 (ucode.h 1142 to 1149; interpreter.cpp 764
+        #    to 767). maxa is max and sets a0 from the FIRST operand's w, floor(300.4 + 0.5) clamped to 255
+        #    (ucode.h 1670 to 1684; interpreter.cpp 549 to 551).
+        self.assertTrue(m.p0)
+        self.assertEqual(m.r[3][3], 0.0)
+        self.assertEqual(out["o0"], [0.5, -1.0, 2.5, 300.4])
+        self.assertEqual(m.a0, 255)
+        # The half is added before the floor: w = 2.6 gives 3, not 2 (ucode.h 1670; interpreter.cpp 551).
+        _, m = run(SELECT, consts={**consts, 3: [0.5, -3, 2.5, 2.6]}, regs={0: [0, -1, 2, 3]})
+        self.assertEqual(m.a0, 3)
+
+    def test_address_register_clamp_and_floor(self):
+        consts = {12: [100, 0, 0, 0], 13: [1000, 0, 0, 0]}
+        # maxasf takes floor(a) where maxas takes floor(a + 0.5): 2.7 gives 2 (ucode.h 1126; interpreter.cpp 751).
+        out, m = run(ADDRESS, consts=consts, regs={0: [2.7, 1, 0, 0]})
+        self.assertEqual(m.a0, 2)
+        self.assertEqual(out["o0"][0], 101.0)
+        # Both clamp to [-256, 255] (ucode.h 1119, 1126; interpreter.cpp 744, 751).
+        for text, low in ((ADDRESS, [-300.2, 0, 0, 0]), (RELATIVE, [0, -300.2, 0, 0])):
+            m = ue.Machine(text, {1: [3, -7, 0, 0]}, no_sampler, regs={0: low})
+            with self.assertRaises(KeyError):               # c[10 - 256] / c[28 - 256] is not supplied
+                m.run()
+            self.assertEqual(m.a0, -256)
+        m = ue.Machine(RELATIVE, {1: [3, -7, 0, 0]}, no_sampler, regs={0: [0, 254.6, 0, 0]})
+        with self.assertRaises(KeyError):
+            m.run()
+        self.assertEqual(m.a0, 255)                         # floor(254.6 + 0.5)
+
     def test_vertex_fetch(self):
         calls = []
 
-        def vfetch(slot, offset, attrs):
-            calls.append((slot, offset, attrs.get("DataFormat")))
+        def vfetch(slot, offset, attrs, index):
+            calls.append((slot, offset, attrs.get("DataFormat"), index))
             return {(0, 0): [1, 2, 3, 4], (0, 2): [0.1, 0.2, 0.3, 9], (3, 0): [5, 6, 7, 8], (3, 1): [0.5, 9, 9, 9]}[(slot, offset)]
 
-        out, m = run(VFETCH, vfetch=vfetch)
-        # A mini fetch reads the stream of the full fetch before it, at its own offset.
-        self.assertEqual(calls, [(0, 0, "FMT_16_16_16_16_FLOAT"), (0, 2, "FMT_10_11_11"), (3, 0, "FMT_8_8_8_8"),
-                                 (3, 1, "FMT_32_FLOAT")])
+        out, m = run(VFETCH, consts={1: [100, 0, 0, 0]}, regs={0: [7, 0, 0, 0]}, vfetch=vfetch)
+        # A mini fetch reads the stream and the index of the full fetch before it, at its own offset; the
+        # callback is told the index, as the shader computed it (7, then 7 + c1.x).
+        self.assertEqual(calls, [(0, 0, "FMT_16_16_16_16_FLOAT", 7.0), (0, 2, "FMT_10_11_11", 7.0),
+                                 (3, 0, "FMT_8_8_8_8", 107.0), (3, 1, "FMT_32_FLOAT", 107.0)])
+        self.assertEqual(m.vfetches, [(1, 0, 0, 7.0), (2, 0, 2, 7.0), (4, 3, 0, 107.0), (5, 3, 1, 107.0)])
         near(self, m.r[5], [2.0, 1.0, 4.0, 1.0])                # `yxw1`
         near(self, m.r[7], [0.1, 0.2, 0.3, 0.0])                # `xyz_`
         near(self, m.r[3], [7.0, 6.0, 5.0, 8.0])                # `zyxw`
@@ -234,7 +332,7 @@ class HandWrittenDumps(unittest.TestCase):
 
     def test_vertex_fetch_needs_a_callback(self):
         with self.assertRaises(ValueError):
-            run(VFETCH)
+            run(VFETCH, consts={1: [100, 0, 0, 0]})
 
     def test_relative_constant_and_conditional_moves(self):
         consts = {1: [3, -7, 0, 0], 28: [1, 1, 1, 1], 30: [10, 20, 30, 40], 31: [50, 60, 70, 80]}

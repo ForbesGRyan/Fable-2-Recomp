@@ -22,14 +22,20 @@ Semantics follow the SDK's ucode.h (xenos AluVectorOpcode / AluScalarOpcode):
   jumps when the bool is set / clear;
 - `vfetch_full` names a stream (`vfN`), its index operand and an `Offset` (0 when absent),
   `vfetch_mini` reads the stream and index of the full fetch before it at its own `Offset`; the
-  caller's callback returns the element's four components and the destination swizzle applies as for
-  a texture fetch; `vfetches` lists (instruction, stream, offset, index value);
+  caller's callback is given (stream, offset, attributes, index value) and returns the element's four
+  components, and the destination swizzle applies as for a texture fetch; `vfetches` lists
+  (instruction, stream, offset, index value);
 - `c[N+a0]` is constant N + a0, with a0 set by maxas (floor(a + 0.5)), maxasf (floor(a)) or maxa
   (floor(first operand's w + 0.5)), clamped to [-256, 255];
 - `loop iN, Lend` ... `endloop iN, Lbody` runs its body `loops[N]` times (the count field of integer
   constant N; 0 skips to Lend), and a predicated `endloop` leaves early when the predicate has the
   printed value (the SDK's own interpreter, graphics/pipeline/shader/interpreter.cpp). The loop's aL
   register is not modelled: an aL-relative operand is an error.
+
+Not modelled: the SDK's interpreter makes a product with a zero factor +0 whatever the other factor
+is ("Direct3D 9 behavior", interpreter.cpp), flushes denormals and rounds to single precision; here
+0 * infinity is NaN and the arithmetic is double precision. The checkers feed finite inputs, where the
+two agree to rounding.
 """
 import math
 import re
@@ -92,7 +98,8 @@ class Machine:
     def __init__(self, text, consts, sampler, regs=None, bools=None, vfetch=None, loops=None):
         """consts: {register: [4 floats]}; sampler(slot, coords tuple, attrs dict) -> 4 floats;
         regs: {register: [4 floats]} initial values (interpolators or the patch inputs);
-        vfetch(stream, offset, attrs dict) -> 4 floats, the vertex element as the fetch delivers it;
+        vfetch(stream, offset, attrs dict, index) -> 4 floats, the vertex element as the fetch delivers
+        it (index: the value of the full fetch's index operand);
         loops: {integer constant: iteration count}."""
         self.lines = text.splitlines()
         self.c = {int(k): [float(x) for x in v] for k, v in consts.items()}
@@ -274,7 +281,7 @@ class Machine:
             self.vstream = ins.fetch_slot
             self.vindex = self._src(ins.srcs[0], 1)[0]     # the index register, as the shader computed it
         offset = int(ins.attrs.get("Offset", 0))
-        sample = [float(x) for x in self.vfetch(self.vstream, offset, ins.attrs)]
+        sample = [float(x) for x in self.vfetch(self.vstream, offset, ins.attrs, self.vindex)]
         self.vfetches.append((ins.index, self.vstream, offset, self.vindex))
         tgt = self.r[ins.dest]
         for i, ch in enumerate(ins.dest_swz[:4]):

@@ -158,12 +158,13 @@ def run_vs(text, consts, sampler=None, regs=None, vfetch=None, bools=(), loops=N
 
 
 def _flat_or_tex(slot, coords, attrs, mask):
-    """The pixel sampler of every driver: normal maps flat, the screen mask the trial's texel, everything
-    else the fixed pseudo-random texture."""
+    """The pixel sampler of every driver: normal maps flat, the screen mask the trial's texel (in the
+    component the shaders read, x; the others differ from it), everything else the fixed pseudo-random
+    texture."""
     if slot in (2, 14):
         return [0.5, 0.5, 0.5, 0.5]
     if slot == 8:
-        return [mask] * 4
+        return [mask, 1.0 - 0.5 * mask, 2.0 + mask, -1.0 - mask]
     return tex(slot, coords)
 
 
@@ -255,7 +256,7 @@ def _terrain_layer_driver(ps, vs, dumps, multi):
         world = regs[slots["world"]][:3]
         regs[max(regs) + 1] = [rng.uniform(0, 1120), rng.uniform(0, 720), 0, 0]      # the pixel position
         c = _light_block(rng)
-        c[11] = [rng.uniform(0.3, 1.0)] * 4
+        c[11] = [rng.uniform(0.3, 1.0) for _ in range(4)]
         c[31] = [rng.uniform(0.0002, 0.001), rng.uniform(-1.5, 0.2), 0, 0]
         c[109] = [rng.uniform(-0.3, 0.3) for _ in range(3)] + [0.0]
         c.update({k: list(v) for k, v in PS_LITERALS[ps].items()})
@@ -314,7 +315,7 @@ def _terrain_far_driver(ps, vs, dumps):
         x, y = 2 * nx - 1, 2 * ny - 1
         normal = lf.normalize([x, y, math.sqrt(abs(1 - x * x - y * y))])
         c = _light_block(rng)
-        c[11] = [rng.uniform(0.3, 1.0)] * 4
+        c[11] = [rng.uniform(0.3, 1.0) for _ in range(4)]
         c[23] = [rng.uniform(-1, 1) for _ in range(3)] + [4.0]
         c[31] = [rng.uniform(0.0002, 0.001), rng.uniform(0.3, 0.6), 0, 0]
         c.update({k: list(v) for k, v in PS_LITERALS[ps].items()})
@@ -335,17 +336,20 @@ def _terrain_far_driver(ps, vs, dumps):
 
 class Vertex:
     """Random vertex data for a mesh vertex shader: the fetch callback makes each element once, by its
-    format, and keeps it under (stream, dword offset) so the driver can read what the shader was given.
-    The fourth component of a 16_16_16_16_FLOAT position (as fetched: its z) is the a0 index."""
+    format, per (stream, dword offset, index), so the four bone fetches of a skinned shader get four
+    matrices; `elements[(stream, offset)]` is the first element fetched there, for the driver to read
+    what the shader was given. The fourth component of a 16_16_16_16_FLOAT position (as fetched: its
+    z) is the a0 index."""
 
     def __init__(self, rng, a0=(0, 4, 8)):
-        self.rng, self.a0, self.elements = rng, a0, {}     # a0=None: an ordinary fourth component
+        self.rng, self.a0, self.elements, self.by_index = rng, a0, {}, {}     # a0=None: an ordinary fourth component
 
-    def __call__(self, stream, offset, attrs):
-        key = (stream, offset)
-        if key not in self.elements:
-            self.elements[key] = self._make(stream, attrs)
-        return self.elements[key]
+    def __call__(self, stream, offset, attrs, index):
+        key = (stream, offset, index)
+        if key not in self.by_index:
+            self.by_index[key] = self._make(stream, attrs)
+            self.elements.setdefault((stream, offset), self.by_index[key])
+        return self.by_index[key]
 
     def _make(self, stream, attrs):
         rng, fmt = self.rng, attrs.get("DataFormat")
@@ -697,9 +701,10 @@ def _plant_driver(ps, vs, dumps, multi, lit):
             n_dot_sun = lf.sat(lf.dot(n_lit, c[80][:3]))
             gate = lf.sun_gate_single(mask=mask)
         if lit:
+            # These shaders read neither c27 nor c49: the object formula with both at 1.
             args = dict(A=albedo, vcolour=colour, tint=vc[18][:3], tint_pow=vc[18][3], add=c[20][:3], floor=c[22][:3],
                         t=lf.ambient_t(lf.ambient_axis(normal, vc[19][:3]), n_lit), n_dot_sun=n_dot_sun,
-                        sun_col=c[87][:3], sun_gate=gate)
+                        sun_col=c[87][:3], c27w=1.0, sun_gate=gate, c49=[1.0, 1.0, 1.0])
         else:
             args = dict(A=albedo, vs_ambient=lf.instance_ambient(colour, vc[18][:3], vc[18][3], vc[54][:3]),
                         n_dot_sun=n_dot_sun, sun_col=c[87][:3], sun_gate=gate)

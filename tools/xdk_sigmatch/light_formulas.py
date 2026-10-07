@@ -25,6 +25,17 @@ Where an input comes from (pixel constants are the frame's light block unless ma
     c27w        c27.w, per draw: scale of the ambient part of objects
     c49         c49.xyz, per draw: factor on an object's whole colour before fog
 
+Not in any function: after fog, objects, trunks and leaves multiply the colour by pixel c26.xyz (per
+draw; their alpha by c26.w) together with the output scale c20.w. c26 reads (1, 1, 1, 1) in every
+captured row of those shaders; a caller that draws them must apply it with c20.w.
+
+Defaults. c11x and c27w default to 1: c11.x reads 1 at every captured layer row and c27.w at every
+captured object, trunk and leaf row. The objects' and plants' sun_gate defaults to 1, a mask of 1 (no
+shadows). An input whose value is open or in no
+capture row has NO default and must be passed by keyword: the terrain layers' sun_gate (it carries
+the facing factor of pixel c109), c49, and the leaves' m1 and m2. Leaving one out is a TypeError that
+names it.
+
 Plants and tree leaves compute their ambient (and leaves their sun) in the vertex shader from vertex
 constants; instance_ambient, plant_normal, leaf_light and tree_leaf name those registers. In the
 captured rows vs c18 = (pixel c21.xyz, 2.2 * pixel c21.w), vs c54 = pixel c20 and vs c19.xyz = pixel
@@ -160,11 +171,13 @@ def _sun(sun_col, n_dot_sun, sun_gate):
     return [_finite(c) * k for c in sun_col]
 
 
-def terrain_layer(A, baked, tint, tint_pow, add, floor, t, n_dot_sun, sun_col, c11x=1.0, sun_gate=1.0):
+def terrain_layer(A, baked, tint, tint_pow, add, floor, t, n_dot_sun, sun_col, c11x=1.0, *, sun_gate):
     """Terrain layer shaders: A * c11x * (pow(baked, tint_pow) * tint * L + add) + A * sun_col * n_dot_sun
     * sun_gate. n_dot_sun: one-light shaders sat(N . c80.xyz) with c80 as it is; multi-light shaders
     sat(N . normalize(c80.xyz - P * c80.w)). N is the unit normal the pixel shader lights with (with a
-    flat normal map: the vertex shader's tf17 normal, normalised)."""
+    flat normal map: the vertex shader's tf17 normal, normalised). sun_gate has no default: every layer
+    shader multiplies the sun by the facing factor (sun_gate_single / sun_gate_multi with facing_gate),
+    and 1 would be arithmetic none of them computes. c11x defaults to the 1 of every captured layer row."""
     amb = _ambient(baked, tint, tint_pow, add, floor, t)
     sun = _sun(sun_col, n_dot_sun, sun_gate)
     return [_finite(_finite(A[i]) * (_finite(c11x) * amb[i] + sun[i])) for i in range(3)]
@@ -235,18 +248,20 @@ def leaf_mask(mask, gain, bias):
     """The leaf pixel shader's two factors from the screen mask: m1 = mask * gain + bias on the front
     light, m2 = m1 * gain + bias on the back light. gain and bias are the pixel shader's literals c255.w
     and c255.z, whose values are in no capture (open; see the document)."""
-    m1 = sat(mask) * _finite(gain) + _finite(bias)
-    return m1, m1 * _finite(gain) + _finite(bias)
+    m1 = _finite(sat(mask) * _finite(gain) + _finite(bias))
+    return m1, _finite(m1 * _finite(gain) + _finite(bias))
 
 
-def tree_leaf(A, vs_ambient, front, back, sun_col, c27w=1.0, m1=1.0, m2=1.0, c49=(1.0, 1.0, 1.0)):
+def tree_leaf(A, vs_ambient, front, back, sun_col, c27w=1.0, *, m1, m2, c49):
     """Tree leaves (pixel shader 7CD5... with vertex shader A584...): everything but the texture and the
     mask is computed per vertex.
         (A * (vs_ambient * c27w + m1 * sun_col * front) + green * A * m2 * sun_col * back) * c49
     green = 1 where the texel's A has green >= red, else 0: the back light passes through leaf texels
     only. A = tf0.rgb^2 / tf0.a^2; vs_ambient = instance_ambient(probe_colour, vs c18.xyz, vs c18.w *
     0.4545 (literal c249.w), vs c54.xyz); front, back = leaf_light(...); sun_col vs c83.xyz; m1, m2 =
-    leaf_mask(...). The interpolators are o1 = vs_ambient, o2 = sun_col * front, o3 = sun_col * back."""
+    leaf_mask(...). The interpolators are o1 = vs_ambient, o2 = sun_col * front, o3 = sun_col * back.
+    m1, m2 and c49 have no default: the literals behind m1 and m2 are open and c49 is in no capture
+    row. c27w defaults to the 1 of every captured leaf row."""
     green = 1.0 if _finite(A[1]) >= _finite(A[0]) else 0.0
     out = []
     for i in range(3):
@@ -256,11 +271,12 @@ def tree_leaf(A, vs_ambient, front, back, sun_col, c27w=1.0, m1=1.0, m2=1.0, c49
     return out
 
 
-def lit_object(A, vcolour, tint, tint_pow, add, floor, t, n_dot_sun, sun_col, c27w=1.0, sun_gate=1.0,
-               c49=(1.0, 1.0, 1.0)):
+def lit_object(A, vcolour, tint, tint_pow, add, floor, t, n_dot_sun, sun_col, c27w=1.0, sun_gate=1.0, *, c49):
     """Lit objects: (A * c27w * (pow(vcolour, tint_pow) * tint * L + add) + A * sun_col * n_dot_sun *
     sun_gate) * c49. The terrain's ambient with the vertex shader's colour o6 in the place of the baked
-    map; c27w scales the ambient part only. Without the specular, emissive (b133) and cube (b134) terms."""
+    map; c27w scales the ambient part only. Without the specular, emissive (b133) and cube (b134) terms.
+    c49 has no default: it is in no capture row (the lit plants, whose shaders have no c49, pass ones).
+    c27w defaults to the 1 of every captured object and trunk row, sun_gate to a mask of 1."""
     amb = _ambient(vcolour, tint, tint_pow, add, floor, t)
     sun = _sun(sun_col, n_dot_sun, sun_gate)
     return [_finite(_finite(A[i]) * (_finite(c27w) * amb[i] + sun[i]) * _finite(c49[i])) for i in range(3)]

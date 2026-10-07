@@ -55,7 +55,7 @@ SYNTHETIC = """/*    0.0 */       exec
 
 def synthetic_case(rng, normal=None):
     """One random pixel of SYNTHETIC: what the microcode gets and what the formula gets."""
-    consts = {11: [rng.uniform(0.3, 1.0)] * 4,
+    consts = {11: [rng.uniform(0.3, 1.0) for _ in range(4)],
               20: [rng.uniform(0.0, 0.2) for _ in range(3)] + [rng.choice([1.0, 16.0])],
               21: [rng.uniform(0.5, 2.0) for _ in range(3)] + [rng.choice([1.3, 2.0])],
               22: [rng.uniform(0.02, 0.5) for _ in range(3)] + [0.0],
@@ -72,7 +72,8 @@ def synthetic_case(rng, normal=None):
     n = lf.normalize(regs[1][:3])
     args = dict(A=[x * x for x in albedo[:3]], baked=base[:3], tint=consts[21][:3], tint_pow=consts[21][3],
                 add=consts[20][:3], floor=consts[22][:3], t=lf.ambient_t(regs[2][:3], regs[1][:3]),
-                n_dot_sun=lf.sat(lf.dot(n, consts[80][:3])), sun_col=consts[87][:3], c11x=consts[11][0])
+                n_dot_sun=lf.sat(lf.dot(n, consts[80][:3])), sun_col=consts[87][:3], c11x=consts[11][0],
+                sun_gate=1.0)       # the synthetic shader has no mask and no facing factor
     return lc.Case(consts=consts, regs=regs, sampler=lambda slot, coords, attrs: lc.tex(slot, coords),
                    args=args, scale=[consts[20][3]] * 3)
 
@@ -121,8 +122,11 @@ class Formulas(unittest.TestCase):
     def test_lit_object_by_hand(self):
         # A * c27w * (vcolour^p * tint * L + add) + A * sun_col * n_dot_sun: c27w is on the ambient part only.
         got = lf.lit_object(A=[0.5] * 3, vcolour=[0.5] * 3, tint=[2.0] * 3, tint_pow=2.0, add=[0.1] * 3,
-                            floor=[0.25] * 3, t=0.5, n_dot_sun=0.5, sun_col=[3.0] * 3, c27w=0.5)
-        self.assertAlmostEqual(got[0], 0.5 * 0.5 * (0.21875 + 0.1) + 0.5 * 3.0 * 0.5, places=12)
+                            floor=[0.25] * 3, t=0.5, n_dot_sun=0.5, sun_col=[3.0] * 3, c27w=0.5, c49=[1.0, 2.0, 0.5])
+        base = 0.5 * 0.5 * (0.21875 + 0.1) + 0.5 * 3.0 * 0.5
+        self.assertAlmostEqual(got[0], base, places=12)
+        self.assertAlmostEqual(got[1], base * 2.0, places=12)       # c49 scales the whole colour, per channel
+        self.assertAlmostEqual(got[2], base * 0.5, places=12)
 
     def test_ambient_axis_and_t(self):
         # lerp(N, C, (1 + N . C) / 2): N = (0, 0, 1), C = (1, 0, 0): k = 0.5, axis (0.5, 0, 0.5); t = cos 45.
@@ -188,8 +192,37 @@ class Formulas(unittest.TestCase):
         self.assertEqual(got, [0.4375, 0.4375, 0.21875])
         # A texel with more red than green has no back light.
         got = lf.tree_leaf(A=[0.5, 0.25, 0.25], vs_ambient=[0.5] * 3, front=0.5, back=0.25, sun_col=[2.0] * 3, c27w=0.5,
-                           m1=0.5, m2=0.25)
+                           m1=0.5, m2=0.25, c49=[1.0] * 3)
         self.assertEqual(got, [0.375, 0.1875, 0.1875])
+
+    def test_open_inputs_have_no_default(self):
+        """Fix round 1: an input whose value is open or in no capture row must be given by the caller; a
+        default would be arithmetic no shader computes. The error names the input."""
+        layer = dict(A=[0.5] * 3, baked=[0.5] * 3, tint=[2.0] * 3, tint_pow=2.0, add=[0.1] * 3, floor=[0.25] * 3,
+                     t=0.5, n_dot_sun=0.5, sun_col=[3.0] * 3)
+        with self.assertRaisesRegex(TypeError, "sun_gate"):         # the layers' facing factor and mask
+            lf.terrain_layer(**layer)
+        self.assertEqual(len(lf.terrain_layer(**layer, sun_gate=1.0)), 3)        # c11x may default (1 at layer rows)
+        obj = dict(layer, vcolour=layer["baked"])
+        del obj["baked"]
+        with self.assertRaisesRegex(TypeError, "c49"):
+            lf.lit_object(**obj)
+        self.assertEqual(len(lf.lit_object(**obj, c49=[1.0] * 3)), 3)             # c27w and the mask may default
+        leaf = dict(A=[0.25, 0.5, 0.25], vs_ambient=[0.5] * 3, front=0.5, back=0.25, sun_col=[2.0] * 3,
+                    m1=0.5, m2=0.25, c49=[1.0] * 3)
+        for name in ("m1", "m2", "c49"):
+            with self.assertRaisesRegex(TypeError, name):
+                lf.tree_leaf(**{k: v for k, v in leaf.items() if k != name})
+        self.assertEqual(len(lf.tree_leaf(**leaf)), 3)
+        # Positional use cannot slip an open input in by its place either.
+        with self.assertRaises(TypeError):
+            lf.tree_leaf(leaf["A"], leaf["vs_ambient"], 0.5, 0.25, leaf["sun_col"], 1.0, 0.5, 0.25, [1.0] * 3)
+
+    def test_leaf_mask_is_finite_for_a_huge_gain(self):
+        # m1 = 1 * 1e200 is finite, m2 = m1 * 1e200 overflows: the guard gives a finite number.
+        for got in (lf.leaf_mask(1.0, 1e200, 0.0), lf.leaf_mask(1.0, 1e308, 1e308), lf.leaf_mask(0.5, -1e200, 1e308)):
+            self.assertTrue(all(math.isfinite(x) for x in got), got)
+        self.assertEqual(lf.leaf_mask(1.0, 1e200, 0.0)[0], 1e200)
 
     def test_zeros_and_non_finite_inputs_give_finite_numbers(self):
         """Review focus 2: a zero-length normal, a zero colour, a non-finite constant and the power of a
@@ -202,14 +235,12 @@ class Formulas(unittest.TestCase):
         self.assertEqual(lf.powc([0.0, -0.25, nan], 2.0), [0.0, 0.0625, 0.0])   # |x|^p as the microcode's log of r_abs
         self.assertEqual(lf.powc([0.5, 0.5, 0.5], nan), [0.0, 0.0, 0.0])
         self.assertEqual(lf.ambient_factor([0.1, 0.1, 0.1], nan), [0.1, 0.1, 0.1])
-        for fn in (lf.terrain_layer, lf.terrain_far):
-            name = "F" if fn is lf.terrain_far else "A"
-            got = fn(**{name: [0.0, 1.0, inf]}, baked=[0.0, -1.0, nan], tint=[1.0, nan, 1.0], tint_pow=1.3,
-                     add=[0.0, 0.0, inf], floor=[0.0, nan, 0.0], t=nan, n_dot_sun=inf, sun_col=[nan, 1.0, 1.0],
-                     c11x=nan)
+        for fn, more in ((lf.terrain_layer, dict(A=[0.0, 1.0, inf], sun_gate=nan)), (lf.terrain_far, dict(F=[0.0, 1.0, inf]))):
+            got = fn(baked=[0.0, -1.0, nan], tint=[1.0, nan, 1.0], tint_pow=1.3, add=[0.0, 0.0, inf],
+                     floor=[0.0, nan, 0.0], t=nan, n_dot_sun=inf, sun_col=[nan, 1.0, 1.0], c11x=nan, **more)
             self.assertTrue(all(math.isfinite(x) for x in got), got)
         got = lf.lit_object(A=[1.0] * 3, vcolour=[0.0] * 3, tint=[1.0] * 3, tint_pow=1.3, add=[0.0] * 3,
-                            floor=[0.0] * 3, t=0.0, n_dot_sun=0.0, sun_col=[1.0] * 3)
+                            floor=[0.0] * 3, t=0.0, n_dot_sun=0.0, sun_col=[1.0] * 3, c49=[1.0] * 3)
         self.assertEqual(got, [0.0, 0.0, 0.0])
         bad = [nan, inf, -inf]
         zero = [0.0, 0.0, 0.0]
@@ -312,7 +343,7 @@ class RealDumps(unittest.TestCase):
             return lf.terrain_far(**dict(a, t=math.sqrt(a["t"])))
 
         def far_c11x_on_the_ambient(**a):      # the layers' place for c11.x
-            return lf.terrain_layer(A=a["F"], **{k: v for k, v in a.items() if k != "F"})
+            return lf.terrain_layer(A=a["F"], sun_gate=1.0, **{k: v for k, v in a.items() if k != "F"})
 
         def far_swapped_floor(**a):
             f = a["floor"]
@@ -413,6 +444,64 @@ class RealDumps(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(lc.main(["--family", "terrain-layer", "--shader", "9C2144E42E95A76F", "--trials", "8"]), 0)
             self.assertNotEqual(lc.main(["--family", "terrain-far", "--shader", "9C2144E42E95A76F"]), 0)
+
+
+@unittest.skipUnless(DUMPS.is_dir(), NO_DUMPS)
+class TrialInputs(unittest.TestCase):
+    """Fix round 1: a trial must not draw a constant or a texel with equal components, or a formula that
+    names the wrong component of it would pass."""
+
+    def test_no_pixel_constant_has_four_equal_components(self):
+        for family, pairs in lc.FAMILIES.items():
+            for ps, vs in pairs:
+                _, make_case = lc.DRIVERS[family](ps, vs, DUMPS)
+                rng = random.Random(3)
+                for _ in range(4):
+                    case = make_case(rng)
+                    for reg, value in case.consts.items():
+                        if reg >= 240 or not any(value):
+                            continue        # literals; a register that is zero on purpose (lights 1 to 3)
+                        self.assertGreater(len(set(value)), 1, f"{family} {ps}: c{reg} = {value}")
+                        if reg == 11:       # the review's case: c11.x read as .y or .w must not pass
+                            self.assertEqual(len(set(value)), 4, f"{family} {ps}: c11 = {value}")
+
+    def test_c11_x_is_the_component_the_terrain_shaders_read(self):
+        for family in ("terrain-layer", "terrain-layer-multi", "terrain-far"):
+            ps, vs = lc.FAMILIES[family][0]
+            ps_text, make_case = lc.DRIVERS[family](ps, vs, DUMPS)
+
+            def other_components(rng):
+                case = make_case(rng)
+                case.consts[11][1:] = [9.0, -9.0, 99.0]             # y, z, w: not read
+                return case
+
+            def x_exchanged(rng):
+                case = make_case(rng)
+                c11 = case.consts[11]
+                c11[0], c11[1] = c11[1], c11[0]                     # the formula keeps the old x
+                return case
+
+            with self.subTest(family=family):
+                self.assertTrue(lc.check(ps_text, other_components, lc.FORMULAS[family], 24).ok)
+                self.assertFalse(lc.check(ps_text, x_exchanged, lc.FORMULAS[family], 24).ok)
+
+    def test_the_mask_texel_has_distinct_components(self):
+        for family, pairs in lc.FAMILIES.items():
+            if family == "terrain-far":
+                continue                    # no mask in the far shaders
+            ps, vs = pairs[0]
+            _, make_case = lc.DRIVERS[family](ps, vs, DUMPS)
+            texel = make_case(random.Random(3)).sampler(8, (0.0, 0.0), {})
+            self.assertEqual(len(set(texel)), 4, f"{family}: tf8 texel {texel}")
+
+    def test_bone_matrices_differ_by_index(self):
+        vertex = lc.Vertex(random.Random(3))
+        attrs = {"DataFormat": "FMT_16_16_16_16_FLOAT"}
+        a = vertex(3, 0, attrs, 5.0)
+        self.assertEqual(vertex(3, 0, attrs, 5.0), a)               # the same bone again: the same row
+        self.assertNotEqual(vertex(3, 0, attrs, 6.0), a)            # another bone
+        self.assertNotEqual(vertex(3, 2, attrs, 5.0), a)            # another row of the same bone
+        self.assertEqual(vertex.elements[(3, 0)], a)                # the first element fetched at an offset
 
 
 class Coverage(unittest.TestCase):

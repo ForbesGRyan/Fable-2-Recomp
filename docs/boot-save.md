@@ -9,8 +9,9 @@ Load a named save straight from the front end, with no menu input, to shorten te
 ```
 
 - `-BootSave HeroNNN` sets `FABLE2_BOOT_SAVE`, drops the default key plan (give `-Plan` to add steps; times are still seconds since start) and sets `FABLE2_SKIP_LOGOS=1` (`-Env @{FABLE2_SKIP_LOGOS="0"}` keeps the logos).
-- `HeroNNN` is the save folder name under `<exe>\saves\<profile>\4D5307F1\00000001\`. The driver refuses (exit 2, before the idle gate) unless exactly one such folder with a `mainsave.bin` exists.
-- If `<exe>\saves-pristine\HeroNNN` exists, the live save folder is first moved to `<exe>\saves-replaced\<timestamp>\HeroNNN` and the pristine copy is put in its place, so every run starts from the same save. Nothing is deleted, and the live save is not touched until the copy is complete. Without a pristine copy the live save is loaded as it is.
+- The driver prints the plan the game is given (`-BootSave Hero000: the game loads the save itself; plan for the game: none`, or the plan in the game's button names). A run with `-Plan` must show the game's `[autoplay] armed` line in the game log, or the driver ends it `RUN ABORTED: the game did not accept the plan` (exit 12); the line `[boot-save] armed: HeroNNN`, which every boot-save run logs, does not count. `-PlanShift N` then moves the plan, the `-Shots` times and `-Total` only: there are no menu steps to shift.
+- `HeroNNN` is the save folder name under `<exe>\saves\<profile>\4D5307F1\00000001\`. The driver refuses (exit 2, before the idle gate) unless exactly one such folder with a `mainsave.bin` exists; a name that is not `Hero` and three digits, `-KeyboardInput` and the driver's test mode are refused the same way.
+- If `<exe>\saves-pristine\HeroNNN` exists, the live save folder is first moved to `<exe>\saves-replaced\<timestamp>\HeroNNN` and the pristine copy is put in its place, so every run starts from the same save. Nothing is deleted, and the live save is not touched until the copy is complete. Without a pristine copy the live save is loaded as it is. The swap is made after the plan has been checked and the idle gate has passed (or been skipped with `-UserPresent`), so a refused run moves nothing; if it fails the run ends `RUN ABORTED: could not restore the pristine save ...` (exit 12) with nothing launched.
 - Start captures at 33 s or later (see Results).
 
 Environment options read by the game (all unset: nothing changes):
@@ -47,6 +48,10 @@ Seconds from process start to the first `Forced readback-resolve` log line (the 
 Timeline of the boot-save run: logo queue skipped at 2.1 s; game, save manager and GUI objects present at 5.0 s; `loading Hero000` at 5.4 s on the first attempt; front end torn down at about 18 s; world drawing at 22.6 s; screenshots at 25 s and 40 s show the world with the HUD.
 
 The load itself takes about 17 s here against about 6 s after the last key press in the baseline: with the logos gone the game has not finished its background loading when the save starts. The net gain is about 18 s per launch, not the 30 s first estimated.
+
+Runs 277 to 279 of the branch `native-renderer-materials` (2026-10-07, release build of the merge `f7b5f87`, `-UserPresent -BootSave Hero000`, no pristine copy; copies in `out\native-evidence\materials`: `final_bridge_fable_2_277.log`, `final_trees_fable_2_278.log`, `final_off_fable_2_279.log`): the world draws from 23.9 s, 22.6 s and 22.5 s, measured from the log's first line to the first `Forced readback-resolve` line; `loading Hero000` is logged at 6.9 s, 5.4 s and 5.3 s, each on the first attempt.
+
+Open question from those three runs: in the world the guest work median is about 2 to 3 ms above runs 272, 273 and 276 of the same day, which started through the menu (native view at the bridge 10.7 to 11.7 ms against 8.3 to 8.7 ms, by the trees 9.6 to 10.6 ms against 7.5 to 8.0 ms, renderer off 9.9 to 10.1 ms against 7.0 to 7.4 ms; `docs\native-renderer\frame-map.md` section 13, "Final fix wave"). The rise is the same with the renderer on and off. Whether it is the machine's load at that hour or the game's background loading still going on after a boot-save start (the paragraph above) was not separated; a menu start and a boot-save start run back to back with the renderer off, on a machine left alone, would say.
 
 ## Not verified
 

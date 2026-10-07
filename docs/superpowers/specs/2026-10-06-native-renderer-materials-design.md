@@ -480,7 +480,9 @@ The list under "Success criteria" was changed by rulings. What was validated is 
   gated runs the press comes 0.09 to 0.26 s after the end of the loading phase; where
   between 0.02 s and 1.7 s before that end a press starts to be lost is not known.
   Fixed-time plans are a limitation. The driver's `-PlanShift` (final fix wave) moves a
-  plan by whole seconds; waiting for the menu is a follow-up.
+  plan by whole seconds; waiting for the menu is a follow-up. A start with `-BootSave`
+  (the boot-save branch, merged before the final check: "Final fix wave" below) has no
+  menu steps; the limitation remains for plans that press through the menu.
 - "Ruling: the next sub-project is lighting and shadows (roadmap 6) ...; post-processing
   and 2D replay (roadmap 7, with the user's native menus/cutscenes TODO) follows." It
   takes over what this sub-project left to lighting (below).
@@ -713,10 +715,30 @@ What a user of the debug view or of the driver sees of it:
   its `[autoplay] armed` line, has `-PlanShift N` for a slow start, always prints its
   verdict as the last line, and its gate reports what it has observed (`idle gate:
   observing: N of 300 s without sound; ...`) where it used to print `user present (audio)`.
-- A plan entry at second 0 runs; a `VIEW=` entry naming the view the game is in is logged
-  as unchanged.
+- A plan entry at second 0 is dispatched (before the wave it never ran). The native
+  renderer is installed about 1.5 s after the autoplay thread starts (1.46 s between
+  lines 1 and 33 of `fable_2_277.log`), so a `VIEW=` entry that early is logged and
+  ignored, and a `DISC=` entry that early is not to be relied on. A `VIEW=` entry naming
+  the view the game is in is logged as unchanged.
 
-The game check of the final code was not made: the gated driver refused both launches of
-2026-10-07 (14:31 and 14:45; the user was at the machine: input and sound). The wave's
-changes to the capture and the clay pass rest on unit tests and reading, and two gated runs
-(bridge and trees) are pending: frame-map section 13, "Final fix wave".
+The game check of the final code was made on 2026-10-07, as `RUN UNCHECKED` runs and not
+as gated ones. The gated driver refused both launches (14:31 and 14:45; the user was at the
+machine: input and sound). Two deviations followed. The user merged the branch `boot-save`
+into this branch before the check (merge `f7b5f87`), so this branch carries work no task
+of this plan wrote: `tools/drive_game.ps1 -BootSave HeroNNN`, which makes the game load a
+named save without menu input and skips the logo videos, `src/core/boot_save.h`,
+`src/core/fable2_boot_save.h` and `docs/boot-save.md`. And the check used it: the release
+build was made from the merge, and the controlling agent, on the user's word, ran the
+bridge plan, the trees plan and a renderer-off run with `-UserPresent -BootSave Hero000`
+(game logs 277, 278 and 279), with plans that have no menu presses.
+
+Result: every ground draw had its material (564 of 564 at the bridge, 446 of 446 by the
+trees, flat 0, nothing after `texture sets N`), 13 and 15 pipelines, `invalid 0`, no
+overflow, the drawn and textured counts inside those of runs 272 and 273, and 30.0 fps in
+every window after the load and the walk that holds no capture. Guest work medians are
+about 2 to 3 ms above the earlier runs with the renderer on and with it off, so the rise
+is not the native pass; whether it is the machine's load or the game's background loading
+after a boot-save start was not separated. The capture medians read higher under the same
+caveat, so what reading `RB_SURFACE_INFO` for fewer draws saves is not measurable in these
+runs. One thing is still pending: a gated run (`RUN CLEAN`) of the final code. Details:
+frame-map section 13, "Final fix wave".

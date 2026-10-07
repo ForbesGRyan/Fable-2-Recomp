@@ -1,9 +1,10 @@
 # Native renderer sub-project 6: materials
 
 Status: implemented on branch `native-renderer-materials` (2026-10-06 and 2026-10-07);
-validated by autoplay up to commit `6a027bc`. The last commit, `4d74e0e` (steep ground),
-has not run in the game, and the user checks are pending. What differs from this design
-is in "Implementation notes (deviations)" at the end.
+validated by autoplay: in gated runs up to commit `6a027bc`, and at the last commit,
+`4d74e0e` (steep ground), in runs made with the user present under the user's
+authorisation (`RUN UNCHECKED`, 2026-10-07). The user checks are pending. What differs
+from this design is in "Implementation notes (deviations)" at the end.
 
 Design of 2026-10-06. Scope, fidelity, coverage target, capture method and approach
 were chosen by the user in brainstorming; the user approved the first two design sections
@@ -394,11 +395,12 @@ every ruling of the execution ledger
 from the ledger, shortened to the decision and its reason. Measurements, screenshots and
 the known limitations are in `docs/native-renderer/frame-map.md` section 13,
 "Validation";
-in short: at the last commit seen in the game (`6a027bc`) criteria 1 (for flat ground), 2, 3, 4 and 5 are met at
-three spots of one region, with single native-view windows below 30.0 fps at the third
-spot; the steep-ground block of `4d74e0e` is built and unit-tested but has not run in the
-game (the idle gate refused every launch, the user being at the machine), so nothing is
-decided for that commit; the user checks are pending.
+in short: criteria 1 to 5 are met at three spots of one region. Flat ground, cut-outs,
+trees, coverage and cost were measured in gated runs up to `6a027bc`. The last commit,
+`4d74e0e`, was run on 2026-10-07 from 12:32 to 12:44 with the user present ("Process",
+below): the steep-ground rock shows in four small areas where the emulated frame has rock,
+the flat ground is unchanged, 98 to 99% of the drawn draws are textured and every window
+without a capture reads 30.0 fps. The user checks are pending.
 
 ### Success criteria as ruled
 
@@ -416,7 +418,7 @@ The list under "Success criteria" was changed by rulings. What was validated is 
 5. **Cost:** 30.0 fps in live windows, with single native-view windows below 30.0 at the
    third spot accepted as a limitation of the debug view; view-off capture median under
    0.5 ms; the capture median with records on is reported, and its rises are accepted.
-6. **User checks:** unchanged; `user-checks.md` checks 17, 18 and 23 to 27.
+6. **User checks:** unchanged; `user-checks.md` checks 17, 18 and 23 to 26.
 
 ### Process
 
@@ -455,6 +457,20 @@ The list under "Success criteria" was changed by rulings. What was validated is 
 - "Ruling: Task 10b's game check is carried into Task 11 as its first step (B0), with a
   hard stop if the ground is broken — why: the user is at the machine, and both tasks need
   the same three runs."
+- **Runs with the user present.** The idle gate refused every gated launch for `4d74e0e`
+  (five, the user being at the machine). On the user's word ("run it anyways. i'm fine
+  with it", 2026-10-07) the controller started six runs in the user's session between
+  12:29 and 12:44 with `tools/drive_game.ps1 -UserPresent`, the switch the rules reserve
+  for the person at the keyboard. They are not gated runs: their verdict is `RUN
+  UNCHECKED: -UserPresent given, no idle gate and no watch`, nothing watched for input,
+  F6 presses reached the game in two of them and one froze. Each was checked window by
+  window for the freeze signature, and for the camera position, before anything of it was
+  used (frame-map section 13, "Validation").
+- **The plans were shifted by 6 s** for those runs. With the machine in use the game's
+  loading phase ended 1.8 s later than in the gated runs; the plans' first menu press at
+  23.0 s, which has 0.1 to 0.2 s of margin in the gated runs, was lost, and the first run
+  stopped in the main menu at a "New Game" dialog. Fixed-time plans are a limitation and a
+  follow-up.
 - "Ruling: the next sub-project is lighting and shadows (roadmap 6) ...; post-processing
   and 2D replay (roadmap 7, with the user's native menus/cutscenes TODO) follows." It
   takes over what this sub-project left to lighting (below).

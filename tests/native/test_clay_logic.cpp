@@ -38,6 +38,23 @@ static capture::DrawRecord BaseRecord() {
   return r;
 }
 
+// A decoded render state from real register words (frame-map section 13), under
+// the reversed depth range every sampled draw has.
+static capture::RenderState State(uint32_t depth, uint32_t blend, uint32_t alpha, uint32_t cull,
+                                  uint32_t mask = 0xF, float ref = 0.0f) {
+  capture::StateWords w;
+  w.depth_control = depth;
+  w.blend_control = blend;
+  w.color_control = alpha;
+  w.su_sc_mode = cull;
+  w.color_mask = mask;
+  w.alpha_ref = FloatBits(ref);
+  w.vport_z_scale = 0xBF800000u;
+  w.vte_cntl = 0x0000043Fu;
+  w.read = true;
+  return capture::DecodeRenderState(w);
+}
+
 int main() {
   // 1-4: clay color cvar parsing.
   {
@@ -149,9 +166,9 @@ int main() {
     CHECK(38, !IndexRangeValid(0xFFFFFFFFu, 0x7FFFFFFF, 0xFFFFFFFFu));
     CHECK(39, !IndexRangeValid(0, 0, 0));
   }
-  // 40-43, 80-82, 130-133: root constants match the HLSL cbuffer (32 dwords).
+  // 40-43, 80-82, 130-133: root constants match the HLSL cbuffer (36 dwords).
   {
-    static_assert(sizeof(ClayConstants) == 128);
+    static_assert(sizeof(ClayConstants) == 144);
     {
       const float inf = std::numeric_limits<float>::infinity();
       const float one[4] = {1.0f, 1.0f, 0.0f, 0.0f};
@@ -166,7 +183,7 @@ int main() {
       std::memcpy(dw, &c, sizeof(dw));
       float f[4];
       std::memcpy(f, &dw[28], sizeof(f));
-      // 131: the cut is the last float4 of the cbuffer.
+      // 131: the cut is the eighth float4 of the cbuffer.
       CHECK(131, f[0] == 82.0f && f[1] == 157.25f && f[2] == 50.0f && f[3] == 1062.5f);
       // 132, 133: the camera moving must not rebuild anything: no cache key
       // (and so no content hash, which follows the keyed streams) takes it.
@@ -328,6 +345,7 @@ int main() {
         "(top: unsupported-prim 324, no-transform 229, bad-index 5)\n"
         "Geometry: 12 uploads, 1818 hits, 45.5 MB resident, instanced 0, skinned 0 | hash 0.84 ms, "
         "decode 0.13 ms, record 0.50 ms\n"
+        "State: 0 pipelines, alpha test 0, blended 0, invalid 0\n"
         "Capture: 0.43 ms guest time per frame\n"
         "Textures: textured 900 of 915 drawn (98%, 100% non-terrain), resident 0 (0.0 MB), uploads 0 (0.0 MB), "
         "decode 0.00 ms | top untextured: terrain 15";
@@ -583,8 +601,329 @@ int main() {
     s.count = std::numeric_limits<float>::infinity();
     CHECK(149, InstanceMeshCount(100, s) == 100);
   }
+  // 150-169: pipeline keys from decoded render states (real words: frame-map section 13).
+  {
+    using capture::Compare;
+    using capture::Cull;
+    using capture::Factor;
+    const PipelineKey def;
+    CHECK(150, MakePipelineKey(capture::DefaultRenderState(), 0) == def && def.textured == 0 && def.blend == 0 &&
+                   def.src == 1 && def.dst == 0 && def.color_mask == 0xF && def.depth_test == 1 &&
+                   def.depth_write == 1 && def.depth_func == uint8_t(Compare::kLess) && def.cull == 0);
+    // An invalid state (unread words; garbage in a field) is the default key of its `textured`.
+    capture::RenderState bad = capture::DecodeRenderState(capture::StateWords{});
+    CHECK(151, !bad.valid && MakePipelineKey(bad, 0) == def);
+    bad = State(0x00708767, 0x07060706, 0x0000000C, 0x00218006);
+    bad.valid = false;
+    PipelineKey def1;
+    def1.textured = 1;
+    CHECK(152, MakePipelineKey(bad, 0) == def && MakePipelineKey(bad, 1) == def1 && !(def1 == def));
+    // The alpha test is a discard in the pixel shader: reference, function and
+    // alpha-to-mask are constants, not pipeline state.
+    const capture::RenderState opaque = State(0x00708767, 0x00010001, 0x00000004, 0x00218006);
+    const PipelineKey k = MakePipelineKey(opaque, 1);
+    CHECK(153, MakePipelineKey(State(0x00708767, 0x00010001, 0x8700001C, 0x00218006, 0xF, 0.0f), 1) == k &&
+                   MakePipelineKey(State(0x00708767, 0x00010001, 0x0000000E, 0x00218006, 0xF, 0.5f), 1) == k);
+    // The opaque mesh state: no blend, depth greater-equal with write under a
+    // reversed range is less-equal on the pass's own depth, back faces culled.
+    CHECK(154, k.textured == 1 && k.blend == 0 && k.color_mask == 0xF && k.depth_test == 1 && k.depth_write == 1 &&
+                   k.depth_func == uint8_t(Compare::kLessEqual) && k.cull == uint8_t(Cull::kBack));
+    // Every key field tells two states apart.
+    CHECK(155, !(MakePipelineKey(opaque, 0) == k));
+    const PipelineKey fur = MakePipelineKey(State(0x00708767, 0x07060706, 0x0000000E, 0x00218006), 1);
+    CHECK(156, fur.blend == 1 && fur.src == uint8_t(Factor::kSrcAlpha) && fur.dst == uint8_t(Factor::kInvSrcAlpha) &&
+                   fur.op == 0 && fur.src_alpha == fur.src && fur.dst_alpha == fur.dst && fur.op_alpha == 0 &&
+                   !(fur == k));
+    const PipelineKey add = MakePipelineKey(State(0x00708767, 0x01060106, 0x00000004, 0x00218006), 1);
+    const PipelineKey premul = MakePipelineKey(State(0x00708767, 0x07010701, 0x00000004, 0x00218006), 1);
+    CHECK(157, add.dst == uint8_t(Factor::kOne) && !(add == fur) && premul.src == uint8_t(Factor::kOne) &&
+                   !(premul == fur));
+    // Colour and alpha halves separately (words no capture holds), and the operation.
+    const PipelineKey a_src = MakePipelineKey(State(0x00708767, 0x07010706, 0x00000004, 0x00218006), 1);
+    const PipelineKey a_dst = MakePipelineKey(State(0x00708767, 0x01060706, 0x00000004, 0x00218006), 1);
+    const PipelineKey op = MakePipelineKey(State(0x00708767, 0x07060746, 0x00000004, 0x00218006), 1);
+    const PipelineKey a_op = MakePipelineKey(State(0x00708767, 0x07460706, 0x00000004, 0x00218006), 1);
+    CHECK(158, a_src.src_alpha == uint8_t(Factor::kOne) && a_src.src == fur.src && !(a_src == fur) &&
+                   a_dst.dst_alpha == uint8_t(Factor::kOne) && a_dst.dst == fur.dst && !(a_dst == fur));
+    CHECK(159, op.op == uint8_t(capture::BlendOp::kMin) && op.op_alpha == 0 && !(op == fur) &&
+                   a_op.op_alpha == uint8_t(capture::BlendOp::kMin) && a_op.op == 0 && !(a_op == fur));
+    const PipelineKey mask0 = MakePipelineKey(State(0x00708767, 0x00010001, 0x00000004, 0x00218006, 0x0), 1);
+    CHECK(160, mask0.color_mask == 0 && mask0.depth_write == 1 && !(mask0 == k));
+    const PipelineKey no_write = MakePipelineKey(State(0x00708763, 0x00010001, 0x00000004, 0x00218006), 1);
+    const PipelineKey greater = MakePipelineKey(State(0x00708747, 0x00010001, 0x00000004, 0x00218006), 1);
+    const PipelineKey no_test = MakePipelineKey(State(0x00708765, 0x00010001, 0x00000004, 0x00218006), 1);
+    CHECK(161, no_write.depth_write == 0 && no_write.depth_func == k.depth_func && !(no_write == k));
+    CHECK(162, greater.depth_func == uint8_t(Compare::kLess) && greater.depth_write == 1 && !(greater == k));
+    // Without the depth test nothing is written and the function does not matter.
+    CHECK(163, no_test.depth_test == 0 && no_test.depth_write == 0 && no_test.depth_func == def.depth_func &&
+                   !(no_test == k));
+    // Cull after the front-face bit: meshes cull back faces with clockwise front
+    // faces, terrain with counter-clockwise ones, foliage culls nothing.
+    const PipelineKey terrain = MakePipelineKey(State(0x00708767, 0x00010001, 0x00000004, 0x00218002), 1);
+    const PipelineKey two_sided = MakePipelineKey(State(0x00708767, 0x00010001, 0x00000004, 0x00218000), 1);
+    CHECK(164, terrain.cull == uint8_t(Cull::kFront) && two_sided.cull == uint8_t(Cull::kNone) &&
+                   !(terrain == k) && !(two_sided == k) && !(terrain == two_sided));
+    CHECK(165, ClayCull(Cull::kBack, true) == Cull::kBack && ClayCull(Cull::kFront, true) == Cull::kFront &&
+                   ClayCull(Cull::kBack, false) == Cull::kFront && ClayCull(Cull::kFront, false) == Cull::kBack &&
+                   ClayCull(Cull::kNone, true) == Cull::kNone && ClayCull(Cull::kNone, false) == Cull::kNone);
+    // The depth function is mirrored only under a reversed range.
+    CHECK(166, MirrorCompare(Compare::kGreater) == Compare::kLess &&
+                   MirrorCompare(Compare::kGreaterEqual) == Compare::kLessEqual &&
+                   MirrorCompare(Compare::kLess) == Compare::kGreater &&
+                   MirrorCompare(Compare::kLessEqual) == Compare::kGreaterEqual &&
+                   MirrorCompare(Compare::kEqual) == Compare::kEqual &&
+                   MirrorCompare(Compare::kNotEqual) == Compare::kNotEqual &&
+                   MirrorCompare(Compare::kAlways) == Compare::kAlways &&
+                   MirrorCompare(Compare::kNever) == Compare::kNever);
+    capture::RenderState forward = opaque;
+    forward.depth_reversed = false;
+    forward.depth_func = Compare::kLessEqual;
+    CHECK(167, DepthSupported(forward) && MakePipelineKey(forward, 1).depth_func == uint8_t(Compare::kLessEqual));
+    // A depth function the RHI cannot express (greater-equal on the pass's own
+    // depth, equal, never): the default depth state.
+    forward.depth_func = Compare::kGreaterEqual;
+    forward.depth_write = false;
+    CHECK(168, !DepthSupported(forward) && MakePipelineKey(forward, 1).depth_func == def.depth_func &&
+                   MakePipelineKey(forward, 1).depth_write == 1 && MakePipelineKey(forward, 1).depth_test == 1 &&
+                   MakePipelineKey(forward, 1).cull == k.cull);
+    capture::RenderState equal = opaque;
+    equal.depth_func = Compare::kEqual;
+    capture::RenderState never = opaque;
+    never.depth_func = Compare::kNever;
+    capture::RenderState always = opaque;
+    always.depth_func = Compare::kAlways;
+    CHECK(169, !DepthSupported(equal) && !DepthSupported(never) && DepthSupported(always) &&
+                   DepthSupported(opaque) && MakePipelineKey(always, 1).depth_func == uint8_t(Compare::kAlways));
+    // A blend state the RHI cannot express (the constant-colour factors of the
+    // walking capture, a subtract): never in a key.
+    const capture::RenderState constant = State(0x00708767, 0x0D0C0D0C, 0x00000004, 0x00218006);
+    const capture::RenderState subtract = State(0x00708767, 0x07260726, 0x00000004, 0x00218006);
+    CHECK(170, constant.valid && constant.blend && !BlendSupported(constant) && MakePipelineKey(constant, 1) == k);
+    CHECK(171, subtract.valid && subtract.blend && !BlendSupported(subtract) &&
+                   MakePipelineKey(subtract, 1) == k && BlendSupported(opaque) &&
+                   BlendSupported(State(0x00708767, 0x07060706, 0x0000000E, 0x00218006)));
+  }
+  // 172-177: the pipeline cache's slots are bounded (Review Focus 2).
+  {
+    std::vector<PipelineKey> keys;
+    PipelineKey a;
+    PipelineKey b;
+    b.cull = 2;
+    CHECK(172, FindOrAddPipelineSlot(keys, a) == 0 && FindOrAddPipelineSlot(keys, b) == 1 && keys.size() == 2);
+    CHECK(173, FindOrAddPipelineSlot(keys, a) == 0 && FindOrAddPipelineSlot(keys, b) == 1 && keys.size() == 2);
+    // Appends until the bound, then no slot for a new key, while the existing
+    // ones are still found and nothing is replaced.
+    std::vector<PipelineKey> small;
+    PipelineKey k;
+    for (uint8_t i = 0; i < 4; ++i) {
+      k.color_mask = i;
+      CHECK(174, FindOrAddPipelineSlot(small, k, 4) == i);
+    }
+    k.color_mask = 9;
+    CHECK(175, FindOrAddPipelineSlot(small, k, 4) == kNoPipelineSlot && small.size() == 4);
+    CHECK(176, FindOrAddPipelineSlot(small, k, 4) == kNoPipelineSlot && small.size() == 4);
+    for (uint8_t i = 0; i < 4; ++i) {
+      k.color_mask = i;
+      CHECK(177, FindOrAddPipelineSlot(small, k, 4) == i && small[i].color_mask == i);
+    }
+    std::vector<PipelineKey> full;
+    for (size_t i = 0; i < kMaxClayPipelines + 10; ++i) {
+      k.color_mask = uint8_t(i & 0xF);
+      k.src = uint8_t(i >> 4);
+      const size_t slot = FindOrAddPipelineSlot(full, k);
+      CHECK(178, slot == (i < kMaxClayPipelines ? i : kNoPipelineSlot));
+    }
+    CHECK(179, full.size() == kMaxClayPipelines && kMaxClayPipelines == 64);
+  }
+  // 180-199: what the pass does with a record's state and material (Review Focus 3).
+  {
+    using capture::AlphaSource;
+    capture::Material none;  // no recipe
+    capture::Material recipe;
+    recipe.alpha.source = AlphaSource::kAlbedo;
+    recipe.alpha.component = 3;
+    recipe.alpha_scale = 0.75f;
+    const capture::RenderState opaque = State(0x00708767, 0x00010001, 0x00000004, 0x00218006);
+    const capture::RenderState foliage = State(0x00708767, 0x00010001, 0x8700001C, 0x00218000, 0xF, 0.0f);
+    const capture::RenderState prop = State(0x00708767, 0x00010001, 0x0000000C, 0x00218006, 0xF, 128.0f / 255.0f);
+    const capture::RenderState fur = State(0x00708767, 0x07060706, 0x0000000E, 0x00218006, 0xF, 16.0f / 255.0f);
+    const capture::RenderState layer = State(0x00708767, 0x01060106, 0x00000004, 0x00218002);
+    // Opaque: mode and reference zero, scale one, nothing counted.
+    DrawState d = DecideDrawState(opaque, recipe, 1, false);
+    CHECK(180, !d.skip && d.alpha.mode == 0 && d.alpha.ref == 0.0f && d.alpha.scale == 1.0f && !d.alpha_tested &&
+                   !d.blended && !d.alpha_unknown && !d.state_invalid && d.key == MakePipelineKey(opaque, 1));
+    // A blended draw whose colour is unknown is not drawn, with or without a recipe.
+    CHECK(181, DecideDrawState(fur, none, 0, false).skip && DecideDrawState(fur, recipe, 0, false).skip);
+    // An alpha-tested draw without a recipe: drawn without the test, alpha 1, counted.
+    d = DecideDrawState(foliage, none, 1, false);
+    CHECK(182, !d.skip && d.alpha_unknown && !d.alpha_tested && !d.blended && d.alpha.mode == 0 &&
+                   d.alpha.scale == 1.0f && d.key == MakePipelineKey(foliage, 1));
+    d = DecideDrawState(prop, none, 0, false);
+    CHECK(183, !d.skip && d.alpha_unknown && d.alpha.mode == 0 && d.key.textured == 0);
+    // The flat shader has no alpha source: a recipe does not apply to a flat draw.
+    d = DecideDrawState(prop, recipe, 0, false);
+    CHECK(184, !d.skip && d.alpha_unknown && !d.alpha_tested && d.alpha.mode == 0 && d.alpha.scale == 1.0f);
+    // A blended draw with colour but no recipe: drawn with the blend and alpha 1, counted.
+    d = DecideDrawState(fur, none, 1, false);
+    CHECK(185, !d.skip && d.alpha_unknown && d.blended && !d.alpha_tested && d.alpha.mode == 0 &&
+                   d.alpha.scale == 1.0f && d.key.blend == 1);
+    // Recipe and alpha test: function, test bit, source and component, reference and scale.
+    d = DecideDrawState(prop, recipe, 1, false);
+    CHECK(186, !d.skip && d.alpha_tested && !d.alpha_unknown && !d.blended &&
+                   d.alpha.mode == (4u | kAlphaTest | kAlphaFromAlbedo | (3u << 5)) &&
+                   d.alpha.ref == 128.0f / 255.0f && d.alpha.scale == 0.75f && d.key.blend == 0);
+    // Alpha-to-mask is a second test; the fur shells blend and test with greater-equal.
+    d = DecideDrawState(foliage, recipe, 1, false);
+    CHECK(187, d.alpha_tested && d.alpha.mode == (4u | kAlphaTest | kAlphaFromAlbedo | (3u << 5) | kAlphaToMask) &&
+                   d.alpha.ref == 0.0f && d.key.cull == 0);
+    d = DecideDrawState(fur, recipe, 1, false);
+    CHECK(188, !d.skip && d.alpha_tested && d.blended && !d.alpha_unknown &&
+                   d.alpha.mode == (6u | kAlphaTest | kAlphaFromAlbedo | (3u << 5) | kAlphaBlend) &&
+                   d.alpha.ref == 16.0f / 255.0f && d.key.blend == 1);
+    // Alpha-to-mask without the test bit is still a test; a component other than w; the literal 1.
+    capture::RenderState mask_only = opaque;
+    mask_only.alpha_to_mask = true;
+    capture::Material red = recipe;
+    red.alpha.component = 0;
+    d = DecideDrawState(mask_only, red, 1, false);
+    CHECK(189, d.alpha_tested && !d.alpha_unknown && d.alpha.mode == (kAlphaFromAlbedo | kAlphaToMask));
+    capture::Material one;
+    one.alpha.source = AlphaSource::kOne;
+    one.alpha_scale = 0.25f;
+    d = DecideDrawState(prop, one, 1, false);
+    CHECK(190, d.alpha_tested && !d.alpha_unknown && d.alpha.mode == (4u | kAlphaTest) && d.alpha.scale == 0.25f);
+    // Another fetch as the alpha source is not bound by the pass: no recipe.
+    capture::Material fetch;
+    fetch.alpha.source = AlphaSource::kFetch;
+    fetch.alpha.slot = 2;
+    d = DecideDrawState(prop, fetch, 1, false);
+    CHECK(191, !d.skip && d.alpha_unknown && !d.alpha_tested && d.alpha.mode == 0);
+    // The colour division belongs to the shader, whatever the state.
+    capture::Material divide = recipe;
+    divide.alpha.divide_colour = true;
+    CHECK(192, DecideDrawState(opaque, divide, 1, false).alpha.mode == kAlphaDivide &&
+                   (DecideDrawState(foliage, divide, 1, false).alpha.mode & kAlphaDivide) != 0 &&
+                   DecideDrawState(opaque, divide, 0, false).alpha.mode == 0 &&
+                   !DecideDrawState(opaque, divide, 1, false).alpha_tested);
+    // A blend state the RHI cannot express: left out even with colour and a recipe.
+    const capture::RenderState constant = State(0x00708767, 0x0D0C0D0C, 0x00000004, 0x00218006);
+    CHECK(193, DecideDrawState(constant, recipe, 1, false).skip && DecideDrawState(constant, none, 0, false).skip);
+    // An invalid state: the default state, drawn, counted (Review Focus 1).
+    capture::RenderState bad = fur;
+    bad.valid = false;
+    d = DecideDrawState(bad, recipe, 1, false);
+    PipelineKey def1;
+    def1.textured = 1;
+    CHECK(194, !d.skip && d.state_invalid && d.key == def1 && d.alpha.mode == 0 && !d.blended && !d.alpha_tested &&
+                   !d.alpha_unknown);
+    d = DecideDrawState(capture::DecodeRenderState(capture::StateWords{}), none, 0, false);
+    CHECK(195, !d.skip && d.state_invalid && d.key == PipelineKey{});
+    // An unsupported depth function: the default depth state, counted, still drawn.
+    capture::RenderState equal = opaque;
+    equal.depth_func = capture::Compare::kEqual;
+    d = DecideDrawState(equal, none, 1, false);
+    CHECK(196, !d.skip && d.state_invalid && d.key.depth_func == uint8_t(capture::Compare::kLess) &&
+                   d.key.depth_write == 1 && d.key.cull == uint8_t(capture::Cull::kBack));
+    // Colour mask 0 with depth write: a depth-only draw is drawn, also when its
+    // state blends and its colour is unknown (it writes none).
+    d = DecideDrawState(State(0x00708767, 0x00010001, 0x00000004, 0x00218006, 0x0), none, 0, false);
+    CHECK(197, !d.skip && d.key.color_mask == 0 && d.key.depth_write == 1 && !d.blended);
+    d = DecideDrawState(State(0x00708767, 0x07060706, 0x00000004, 0x00218006, 0x0), none, 0, false);
+    CHECK(198, !d.skip && d.key.color_mask == 0 && d.key.blend == 0 && !d.blended && !d.alpha_unknown);
+    // A terrain patch drawn as flat clay is drawn opaque: its blend is the
+    // layer's own, which flat clay does not have.
+    d = DecideDrawState(layer, none, 0, true);
+    CHECK(199, !d.skip && !d.blended && !d.alpha_unknown && d.key.blend == 0 &&
+                   d.key.depth_func == uint8_t(capture::Compare::kLessEqual) &&
+                   d.key.cull == uint8_t(capture::Cull::kFront) && DecideDrawState(layer, none, 0, false).skip);
+  }
+  // 200-204: the alpha fields of the root constants (36 dwords).
+  {
+    static_assert(sizeof(ClayConstants) == 144);
+    const float uv[4] = {1.0f, 1.0f, 0.0f, 0.0f};
+    capture::DrawRecord r = BaseRecord();
+    r.cut[0] = 1.0f; r.cut[1] = 2.0f; r.cut[2] = 3.0f; r.cut[3] = 4.0f;
+    uint32_t dw[36];
+    const ClayConstants plain = MakeClayConstants(r, 10, 0, uv, true, 1);
+    std::memcpy(dw, &plain, sizeof(dw));
+    // An opaque draw: mode and reference zero, scale one.
+    CHECK(200, dw[26] == 0 && dw[27] == 0 && dw[32] == FloatBits(1.0f) && dw[33] == 0 && dw[34] == 0 &&
+                   dw[35] == 0);
+    ClayAlpha a;
+    a.mode = 4u | kAlphaTest | kAlphaFromAlbedo | (3u << 5);
+    a.ref = 128.0f / 255.0f;
+    a.scale = 0.75f;
+    const ClayConstants c = MakeClayConstants(r, 10, 0, uv, true, 1, a);
+    std::memcpy(dw, &c, sizeof(dw));
+    CHECK(201, dw[24] == 1 && dw[25] == 1 && dw[26] == a.mode && dw[27] == FloatBits(128.0f / 255.0f));
+    CHECK(202, dw[28] == FloatBits(1.0f) && dw[31] == FloatBits(4.0f));
+    CHECK(203, dw[32] == FloatBits(0.75f) && dw[33] == 0 && dw[34] == 0 && dw[35] == 0);
+    CHECK(204, kAlphaTest == 8u && kAlphaFromAlbedo == 16u && kAlphaBlend == 128u && kAlphaToMask == 256u &&
+                   kAlphaDivide == 512u);
+  }
+  // 205-213: F3 text with the state counters and the two new reasons.
+  {
+    FrameScene s;
+    s.captured = 985;
+    s.skipped[size_t(capture::SkipReason::kUnsupportedPrim)] = 30;
+    s.skipped[size_t(capture::SkipReason::kDepthOnly)] = 3;
+    ClayStats st;
+    st.drawn = 920;
+    st.blend_unknown = 27;
+    st.alpha_unknown = 140;
+    st.alpha_tested = 12;
+    st.blended = 5;
+    st.state_invalid = 2;
+    st.pipelines = 9;
+    TextureStats ts;
+    ts.textured = 325;
+    ts.status[size_t(capture::MaterialStatus::kTextured)] = 325;
+    ts.status[size_t(capture::MaterialStatus::kTerrain)] = 564;
+    ts.status[size_t(capture::MaterialStatus::kNoAlbedo)] = 31;
+    const std::string t = FormatStatusText(s, st, &ts);
+    const std::string want =
+        "Native: captured 985, drawn 920 (deformed 0), skipped 60 "
+        "(top: unsupported-prim 30, blend-unknown 27, depth-only 3)\n"
+        "Geometry: 0 uploads, 0 hits, 0.0 MB resident, instanced 0, skinned 0 | hash 0.00 ms, "
+        "decode 0.00 ms, record 0.00 ms\n"
+        "State: 9 pipelines, alpha test 12, blended 5, invalid 2\n"
+        "Capture: 0.00 ms guest time per frame\n"
+        "Textures: textured 325 of 920 drawn (35%, 91% non-terrain), resident 0 (0.0 MB), uploads 0 (0.0 MB), "
+        "decode 0.00 ms | top untextured: terrain 564, alpha-unknown 140, no-albedo 31";
+    CHECK(205, t == want);
+    if (t != want) std::cerr << "got:  " << t << "\nwant: " << want << "\n";
+    // The two reasons rank with the texture statuses, by count.
+    CHECK(206, FormatTextureText(ts, 920, 0, 600).find("top untextured: blend-unknown 600, terrain 564, no-albedo 31") !=
+                   std::string::npos);
+    CHECK(207, FormatTextureText(ts, 920, 0, 0).find("unknown") == std::string::npos &&
+                   FormatTextureText(ts, 920).find("unknown") == std::string::npos);
+    TextureStats only;
+    only.textured = 4;
+    only.status[size_t(capture::MaterialStatus::kTextured)] = 4;
+    CHECK(208, FormatTextureText(only, 4, 3, 1).find("| top untextured: alpha-unknown 3, blend-unknown 1") !=
+                   std::string::npos);
+    // Draws past the pipeline cache are named on the state line.
+    st.pipelines = 64;
+    st.pipeline_overflow = 7;
+    CHECK(209, FormatStateText(st) == "State: 64 pipelines (overflow 7), alpha test 12, blended 5, invalid 2");
+    CHECK(210, FormatStateText(ClayStats{}) == "State: 0 pipelines, alpha test 0, blended 0, invalid 0");
+    // With the texture path off the state line is still there.
+    const std::string off = FormatStatusText(s, st, nullptr);
+    CHECK(211, off.find("\nState: 64 pipelines (overflow 7), alpha test 12, blended 5, invalid 2\nCapture: ") !=
+                   std::string::npos && off.find("blend-unknown 27") != std::string::npos);
+    // The log's breakdown of the two reasons by pixel shader.
+    ClayStats by;
+    CHECK(212, FormatUnknownByPs(by).empty());
+    for (int i = 0; i < 3; ++i) by.unknown_by_ps.Add(0x00E09D1BC5295D52ull, kTallyAlphaUnknown);
+    by.unknown_by_ps.Add(0x7CD57B81550F19E3ull, kTallyAlphaUnknown);
+    for (int i = 0; i < 15; ++i) by.unknown_by_ps.Add(0x014F8A02DB7B19CAull, kTallyBlendUnknown);
+    CHECK(213, FormatUnknownByPs(by) ==
+                   "alpha-unknown by ps {0x00E09D1BC5295D52: 3, 0x7CD57B81550F19E3: 1} "
+                   "blend-unknown by ps {0x014F8A02DB7B19CA: 15}");
+    if (g_fail == 213) std::cerr << "got:  " << FormatUnknownByPs(by) << "\n";
+  }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
-               "uv keys, texture text, instanced keys\n";
+               "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants\n";
   return 0;
 }

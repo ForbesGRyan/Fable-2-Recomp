@@ -2,7 +2,8 @@
 
 // Pure helpers for the clay pass and its geometry cache (no SDK/GPU deps):
 // cache keys, vertex counts, index range checks, draw colors, the root
-// constant block, texture counters and the F3 status text.
+// constant block, pipeline keys and the alpha rule of a draw's render state,
+// texture counters and the F3 status text.
 
 #include <algorithm>
 #include <cctype>
@@ -18,6 +19,8 @@
 #include <vector>
 
 #include "../capture/draw_record.h"
+#include "../capture/render_state.h"
+#include "../capture/shader_tally.h"
 #include "frame_scene.h"
 #include "geometry_cache_index.h"
 
@@ -36,7 +39,21 @@ struct ClayStats {
   // the bone-skinned builders, cache hits included. Counted with `drawn`: a
   // record whose index list fails afterwards is in neither.
   uint32_t instanced = 0, skinned = 0;
+  // Render state (DecideDrawState). Of the drawn records: those drawn with the
+  // alpha test (or alpha-to-mask) applied, with a blend, with a test or blend
+  // the material has no alpha for (drawn without the test, with alpha 1), and
+  // with a state that was not read or not expressible (drawn with the default
+  // state). blend_unknown: records left out because their state blends and
+  // their colour is not known, or the RHI cannot express the blend.
+  uint32_t alpha_tested = 0, blended = 0, alpha_unknown = 0, blend_unknown = 0, state_invalid = 0;
+  // Pipelines in the pass's cache, and drawn records that used the default
+  // pipeline because the cache was full or their pipeline could not be created.
+  uint32_t pipelines = 0, pipeline_overflow = 0;
+  // alpha_unknown and blend_unknown by pixel shader (kTallyAlphaUnknown, kTallyBlendUnknown).
+  capture::ShaderTally<32> unknown_by_ps;
 };
+
+inline constexpr uint8_t kTallyAlphaUnknown = 0, kTallyBlendUnknown = 1;
 
 // Albedo texture counters of one clay frame (TextureCache and the clay pass).
 struct TextureStats {
@@ -300,24 +317,213 @@ inline bool IndexRangeValid(uint32_t max_index, int32_t base_vertex, uint32_t ve
   return hi >= 0 && hi < int64_t(vertex_count);
 }
 
-// Root constants, laid out as the clay HLSL cbuffer (32 dwords).
+// A draw's render state as a pipeline of the clay pass: which pixel shader, and
+// blend, colour mask, depth and cull in the values the RHI can express. Factors
+// and operations are capture::Factor / BlendOp values, depth_func a
+// capture::Compare on the pass's own depth (not reversed), cull a capture::Cull
+// in the pass's window space, where clockwise faces are front (ClayCull). The
+// alpha test is not pipeline state: it is a discard driven by ClayAlpha.
+struct PipelineKey {
+  uint8_t textured = 0;      // 0 flat, 1 textured, 2 terrain layer, 3 terrain far
+  uint8_t blend = 0, src = 1, dst = 0, op = 0, src_alpha = 1, dst_alpha = 0, op_alpha = 0;
+  uint8_t color_mask = 0xF;
+  uint8_t depth_test = 1, depth_write = 1, depth_func = 1;   // Compare values
+  uint8_t cull = 0;          // Cull values
+  bool operator==(const PipelineKey&) const = default;
+};
+
+// The game's depth function on a depth buffer of the other direction.
+inline capture::Compare MirrorCompare(capture::Compare f) {
+  switch (f) {
+    case capture::Compare::kLess: return capture::Compare::kGreater;
+    case capture::Compare::kLessEqual: return capture::Compare::kGreaterEqual;
+    case capture::Compare::kGreater: return capture::Compare::kLess;
+    case capture::Compare::kGreaterEqual: return capture::Compare::kLessEqual;
+    default: return f;
+  }
+}
+
+// The depth function the pass draws with: its depth is not reversed.
+inline capture::Compare ClayDepthFunc(const capture::RenderState& s) {
+  return s.depth_reversed ? MirrorCompare(s.depth_func) : s.depth_func;
+}
+
+// What the RHI's enums hold (native_rhi.h: BlendFactor, BlendOp, CompareFunc).
+inline bool RhiFactor(capture::Factor f) {
+  return f == capture::Factor::kZero || f == capture::Factor::kOne || f == capture::Factor::kSrcAlpha ||
+         f == capture::Factor::kInvSrcAlpha;
+}
+inline bool RhiBlendOp(capture::BlendOp op) {
+  return op == capture::BlendOp::kAdd || op == capture::BlendOp::kMin;
+}
+inline bool BlendSupported(const capture::RenderState& s) {
+  return RhiFactor(s.src) && RhiFactor(s.dst) && RhiFactor(s.src_alpha) && RhiFactor(s.dst_alpha) &&
+         RhiBlendOp(s.op) && RhiBlendOp(s.op_alpha);
+}
+// False: the depth test is on with a function the RHI cannot express on the
+// pass's depth; the draw then uses the default depth state.
+inline bool DepthSupported(const capture::RenderState& s) {
+  if (!s.depth_test) return true;
+  const capture::Compare f = ClayDepthFunc(s);
+  return f == capture::Compare::kAlways || f == capture::Compare::kLess || f == capture::Compare::kLessEqual;
+}
+
+// The captured cull mode in the pass's window space, where clockwise faces are
+// front (the RHI has no front-face control; D3D12's default). The pass draws the
+// game's own clip positions into a viewport of the same orientation, so a
+// triangle keeps the winding it has in the game: with clockwise front faces
+// (PA_SU_SC_MODE_CNTL bit 2) the mode is the captured one, with
+// counter-clockwise ones front and back trade places. Checked against the
+// emulated frame for meshes and terrain: frame-map section 13, "Render state".
+inline capture::Cull ClayCull(capture::Cull cull, bool front_cw) {
+  if (cull == capture::Cull::kNone || front_cw) return cull;
+  return cull == capture::Cull::kFront ? capture::Cull::kBack : capture::Cull::kFront;
+}
+
+// An invalid state gives the default key of `textured`. A blend the RHI cannot
+// express gives no blend (DecideDrawState leaves such a draw out), a depth
+// function it cannot express the default depth state. Without the depth test
+// nothing is written to depth, as on the console.
+inline PipelineKey MakePipelineKey(const capture::RenderState& s, uint8_t textured) {
+  PipelineKey k;
+  k.textured = textured;
+  if (!s.valid) return k;
+  if (s.blend && BlendSupported(s)) {
+    k.blend = 1;
+    k.src = uint8_t(s.src); k.dst = uint8_t(s.dst); k.op = uint8_t(s.op);
+    k.src_alpha = uint8_t(s.src_alpha); k.dst_alpha = uint8_t(s.dst_alpha); k.op_alpha = uint8_t(s.op_alpha);
+  }
+  k.color_mask = s.color_mask;
+  if (!s.depth_test) {
+    k.depth_test = 0;
+    k.depth_write = 0;
+  } else if (DepthSupported(s)) {
+    k.depth_write = s.depth_write ? 1 : 0;
+    k.depth_func = uint8_t(ClayDepthFunc(s));
+  }
+  k.cull = uint8_t(ClayCull(s.cull, s.front_cw));
+  return k;
+}
+
+inline constexpr size_t kMaxClayPipelines = 64;
+inline constexpr size_t kNoPipelineSlot = ~size_t(0);
+
+// Index of `k` in `keys`, appended if absent and there is room; kNoPipelineSlot when the
+// cache is full (the caller then draws with the default pipeline and counts the overflow).
+inline size_t FindOrAddPipelineSlot(std::vector<PipelineKey>& keys, const PipelineKey& k,
+                                    size_t max = kMaxClayPipelines) {
+  for (size_t i = 0; i < keys.size(); ++i) {
+    if (keys[i] == k) return i;
+  }
+  if (keys.size() >= max) return kNoPipelineSlot;
+  keys.push_back(k);
+  return keys.size() - 1;
+}
+
+// ClayConstants::alpha_mode: bits 0-2 the alpha test's compare function
+// (capture::Compare), then the flags below; bits 5-6 are the albedo component
+// (0-3 = x-w) that is the alpha.
+inline constexpr uint32_t kAlphaTest = 1u << 3;        // discard unless alpha <func> alpha_ref
+inline constexpr uint32_t kAlphaFromAlbedo = 1u << 4;  // alpha is an albedo component (else the literal 1)
+inline constexpr uint32_t kAlphaBlend = 1u << 7;       // write the alpha (else 1)
+inline constexpr uint32_t kAlphaToMask = 1u << 8;      // discard unless alpha >= 0.5
+inline constexpr uint32_t kAlphaDivide = 1u << 9;      // the colour is the albedo's divided by its alpha
+
+// The alpha fields of the root constants; the default is an opaque draw.
+struct ClayAlpha {
+  uint32_t mode = 0;
+  float ref = 0.0f;
+  float scale = 1.0f;  // Material::alpha_scale
+};
+
+// What the pass does with one record.
+struct DrawState {
+  bool skip = false;  // blend-unknown: the record is not drawn
+  PipelineKey key;
+  ClayAlpha alpha;
+  // The ClayStats counters the drawn record adds to.
+  bool alpha_tested = false, blended = false, alpha_unknown = false, state_invalid = false;
+};
+
+// `textured`: the PipelineKey value the record is drawn with this frame (0: flat
+// clay, its colour is not known). `flat_terrain`: a terrain patch drawn as flat
+// clay; its blend is the layer's own, which flat clay does not have, so it is
+// drawn opaque and not left out. Rules (DecideAlpha): a blended draw whose
+// colour is unknown, or whose blend the RHI cannot express, is left out; a test
+// or blend without an alpha the pixel shader can form (no recipe, a flat draw,
+// a recipe that needs another fetch) is drawn without the test and with alpha
+// 1; an invalid state or an inexpressible depth function draws with the default
+// state. A colour mask of 0 writes no colour, so its blend does not matter.
+inline DrawState DecideDrawState(const capture::RenderState& rs, const capture::Material& m,
+                                 uint8_t textured, bool flat_terrain) {
+  DrawState d;
+  d.key = MakePipelineKey(rs, textured);
+  d.state_invalid = !rs.valid || !DepthSupported(rs);
+  if (!rs.valid) return d;
+  const bool blend = rs.blend && rs.color_mask != 0 && !flat_terrain;
+  if (!blend) {
+    const PipelineKey opaque;
+    d.key.blend = 0;
+    d.key.src = opaque.src; d.key.dst = opaque.dst; d.key.op = opaque.op;
+    d.key.src_alpha = opaque.src_alpha; d.key.dst_alpha = opaque.dst_alpha; d.key.op_alpha = opaque.op_alpha;
+  } else if (!BlendSupported(rs)) {
+    d.skip = true;
+    return d;
+  }
+  const bool colour_known = textured != 0;
+  const capture::AlphaSpec& a = m.alpha;
+  const bool has_recipe = colour_known && (a.source == capture::AlphaSource::kAlbedo ||
+                                           a.source == capture::AlphaSource::kOne);
+  // The shader divides its colour by the alpha whatever the state is.
+  if (has_recipe && a.divide_colour) d.alpha.mode |= kAlphaDivide;
+  const bool test = rs.alpha_test || rs.alpha_to_mask;
+  switch (capture::DecideAlpha(test, blend, colour_known, has_recipe)) {
+    case capture::AlphaRule::kOpaque:
+      break;
+    case capture::AlphaRule::kSkipBlendUnknown:
+      d.skip = true;
+      break;
+    case capture::AlphaRule::kDrawAlphaUnknown:
+      d.alpha_unknown = true;
+      d.blended = blend;
+      break;
+    case capture::AlphaRule::kApply:
+      d.alpha_tested = test;
+      d.blended = blend;
+      if (rs.alpha_test) d.alpha.mode |= (uint32_t(rs.alpha_func) & 7u) | kAlphaTest;
+      if (rs.alpha_to_mask) d.alpha.mode |= kAlphaToMask;
+      if (a.source == capture::AlphaSource::kAlbedo) {
+        d.alpha.mode |= kAlphaFromAlbedo | (uint32_t(a.component & 3) << 5);
+      }
+      if (blend) d.alpha.mode |= kAlphaBlend;
+      d.alpha.ref = rs.alpha_ref;
+      d.alpha.scale = m.alpha_scale;
+      break;
+  }
+  return d;
+}
+
+// Root constants, laid out as the clay HLSL cbuffer (36 dwords).
 struct ClayConstants {
   float rows[16];
   uint32_t layout;
   int32_t base_vertex;
   uint32_t vertex_count;
   uint32_t color;
-  float uv[4];        // u * uv[0] + uv[2], v * uv[1] + uv[3]
-  uint32_t textured;  // 1: sample the albedo at t3
-  uint32_t sampler;   // static sampler s0-s3 (SamplerIndex)
-  uint32_t pad[2];
-  float cut[4];       // eye xyz, squared distance (DrawRecord::cut; +inf: no cut)
+  float uv[4];          // u * uv[0] + uv[2], v * uv[1] + uv[3]
+  uint32_t textured;    // 1: sample the albedo at t3
+  uint32_t sampler;     // static sampler s0-s3 (SamplerIndex)
+  uint32_t alpha_mode;  // ClayAlpha::mode
+  float alpha_ref;
+  float cut[4];         // eye xyz, squared distance (DrawRecord::cut; +inf: no cut)
+  float alpha_scale;
+  uint32_t pad2[3];
 };
-static_assert(sizeof(ClayConstants) == 128);
+static_assert(sizeof(ClayConstants) == 144);
 
 inline ClayConstants MakeClayConstants(const capture::DrawRecord& r, uint32_t vertex_count,
                                        uint32_t color, const float uv[4], bool textured,
-                                       uint32_t sampler) {
+                                       uint32_t sampler, const ClayAlpha& alpha = {}) {
   ClayConstants c{};
   std::copy(std::begin(r.rows), std::end(r.rows), std::begin(c.rows));
   c.layout = r.layout == capture::TransformLayout::kCombine ? 1u : 0u;
@@ -327,21 +533,29 @@ inline ClayConstants MakeClayConstants(const capture::DrawRecord& r, uint32_t ve
   std::copy(uv, uv + 4, std::begin(c.uv));
   c.textured = textured ? 1u : 0u;
   c.sampler = sampler;
+  c.alpha_mode = alpha.mode;
+  c.alpha_ref = alpha.ref;
   std::copy(std::begin(r.cut), std::end(r.cut), std::begin(c.cut));
+  c.alpha_scale = alpha.scale;
   return c;
 }
 
 // The F3 texture line: textured share of the drawn records and of the drawn
 // non-terrain records (spec success criterion 2), cache counters and the top
-// three final statuses other than textured. "Textures: off (latched)" once an
-// RHI failure turned the texture path off.
-inline std::string FormatTextureText(const TextureStats& ts, uint32_t drawn) {
+// three final statuses other than textured, among which the state reasons rank:
+// `alpha-unknown` (drawn records whose alpha test or blend had no alpha to
+// apply) and `blend-unknown` (records left out, ClayStats). "Textures: off
+// (latched)" once an RHI failure turned the texture path off.
+inline std::string FormatTextureText(const TextureStats& ts, uint32_t drawn, uint32_t alpha_unknown = 0,
+                                     uint32_t blend_unknown = 0) {
   if (ts.latched) return "Textures: off (latched)";
   std::vector<std::pair<const char*, uint32_t>> reasons;
   for (size_t i = 0; i < size_t(capture::MaterialStatus::kCount); ++i) {
     if (i == size_t(capture::MaterialStatus::kTextured) || ts.status[i] == 0) continue;
     reasons.emplace_back(capture::MaterialStatusName(capture::MaterialStatus(i)), ts.status[i]);
   }
+  if (alpha_unknown) reasons.emplace_back("alpha-unknown", alpha_unknown);
+  if (blend_unknown) reasons.emplace_back("blend-unknown", blend_unknown);
   std::stable_sort(reasons.begin(), reasons.end(),
                    [](const auto& a, const auto& b) { return a.second > b.second; });
   const uint32_t share = drawn ? uint32_t(uint64_t(ts.textured) * 100 / drawn) : 0;
@@ -365,10 +579,44 @@ inline std::string FormatTextureText(const TextureStats& ts, uint32_t drawn) {
   return text;
 }
 
-// Four F3 lines: capture/draw counts with the top three skip reasons, the
-// geometry cache counters and GPU-thread CPU timings, the guest-thread
-// capture time of the scene's frame, then the texture line (tex nullptr: the
-// texture path is off).
+// The F3 state line: pipelines in the pass's cache (with the draws that found
+// no pipeline there, when there are any) and the drawn records with the alpha
+// test applied, with a blend, and with an invalid state.
+inline std::string FormatStateText(const ClayStats& st) {
+  std::string text = "State: " + std::to_string(st.pipelines) + " pipelines";
+  if (st.pipeline_overflow) text += " (overflow " + std::to_string(st.pipeline_overflow) + ")";
+  return text + ", alpha test " + std::to_string(st.alpha_tested) + ", blended " +
+         std::to_string(st.blended) + ", invalid " + std::to_string(st.state_invalid);
+}
+
+// The log's breakdown of alpha-unknown and blend-unknown by pixel shader (top
+// eight each); empty when there is neither.
+inline std::string FormatUnknownByPs(const ClayStats& st) {
+  constexpr size_t kTop = 8;
+  std::string text;
+  const std::pair<uint8_t, const char*> kinds[] = {{kTallyAlphaUnknown, "alpha-unknown"},
+                                                   {kTallyBlendUnknown, "blend-unknown"}};
+  for (const auto& [kind, name] : kinds) {
+    capture::ShaderTally<32>::Entry top[kTop];
+    const size_t n = st.unknown_by_ps.Top(kind, top, kTop);
+    if (!n) continue;
+    text += std::string(text.empty() ? "" : " ") + name + " by ps {";
+    char buf[48];
+    for (size_t i = 0; i < n; ++i) {
+      std::snprintf(buf, sizeof(buf), "%s0x%016llX: %u", i ? ", " : "",
+                    static_cast<unsigned long long>(top[i].hash), top[i].count);
+      text += buf;
+    }
+    text += "}";
+  }
+  return text;
+}
+
+// Five F3 lines: capture/draw counts with the top three skip reasons (records
+// the pass left out as blend-unknown among them), the geometry cache counters
+// and GPU-thread CPU timings, the state line, the guest-thread capture time of
+// the scene's frame, then the texture line (tex nullptr: the texture path is
+// off).
 inline std::string FormatStatusText(const FrameScene& scene, const ClayStats& st,
                                     const TextureStats* tex) {
   std::vector<std::pair<std::string, uint64_t>> reasons;
@@ -378,6 +626,7 @@ inline std::string FormatStatusText(const FrameScene& scene, const ClayStats& st
     if (n) reasons.emplace_back(capture::SkipReasonName(capture::SkipReason(i)), n);
   }
   if (st.skipped_other) reasons.emplace_back("render-other", st.skipped_other);
+  if (st.blend_unknown) reasons.emplace_back("blend-unknown", st.blend_unknown);
   uint64_t skipped = 0;
   for (const auto& r : reasons) skipped += r.second;
   std::stable_sort(reasons.begin(), reasons.end(),
@@ -395,10 +644,13 @@ inline std::string FormatStatusText(const FrameScene& scene, const ClayStats& st
   char geo[256];
   std::snprintf(geo, sizeof(geo),
                 "\nGeometry: %u uploads, %u hits, %.1f MB resident, instanced %u, skinned %u | "
-                "hash %.2f ms, decode %.2f ms, record %.2f ms\nCapture: %.2f ms guest time per frame",
+                "hash %.2f ms, decode %.2f ms, record %.2f ms",
                 st.uploads, st.hits, double(st.resident_bytes) / (1024.0 * 1024.0), st.instanced,
-                st.skinned, st.hash_ms, st.decode_ms, st.record_ms, scene.capture_ms);
-  return text + geo + "\n" + (tex ? FormatTextureText(*tex, st.drawn) : std::string("Textures: off"));
+                st.skinned, st.hash_ms, st.decode_ms, st.record_ms);
+  char cap[64];
+  std::snprintf(cap, sizeof(cap), "\nCapture: %.2f ms guest time per frame\n", scene.capture_ms);
+  return text + geo + "\n" + FormatStateText(st) + cap +
+         (tex ? FormatTextureText(*tex, st.drawn, st.alpha_unknown, st.blend_unknown) : std::string("Textures: off"));
 }
 
 }  // namespace fable2::native::render

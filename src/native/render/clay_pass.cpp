@@ -11,26 +11,60 @@ namespace fable2::native::render {
 
 namespace {
 constexpr float kClearColor[4] = {0.08f, 0.08f, 0.1f, 1.0f};
-constexpr uint32_t kConstantCount = sizeof(ClayConstants) / 4;  // 32
-static_assert(kConstantCount == 32);
+constexpr uint32_t kConstantCount = sizeof(ClayConstants) / 4;  // 36
+static_assert(kConstantCount == 36);
 // Binding parameters (see Ensure).
 constexpr uint32_t kParamConstants = 0, kParamPositions = 1, kParamIndices = 2, kParamUvs = 3,
                    kParamAlbedo = 4;
+
+// PipelineKey values (capture enums) as the RHI's. A key holds only values the
+// RHI has (MakePipelineKey); the defaults below are never reached with one.
+nrhi::BlendFactor ToFactor(uint8_t f) {
+  switch (capture::Factor(f)) {
+    case capture::Factor::kZero: return nrhi::BlendFactor::kZero;
+    case capture::Factor::kSrcAlpha: return nrhi::BlendFactor::kSrcAlpha;
+    case capture::Factor::kInvSrcAlpha: return nrhi::BlendFactor::kInvSrcAlpha;
+    default: return nrhi::BlendFactor::kOne;
+  }
+}
+
+nrhi::BlendOp ToBlendOp(uint8_t op) {
+  return capture::BlendOp(op) == capture::BlendOp::kMin ? nrhi::BlendOp::kMin : nrhi::BlendOp::kAdd;
+}
+
+nrhi::CompareFunc ToCompare(uint8_t f) {
+  switch (capture::Compare(f)) {
+    case capture::Compare::kAlways: return nrhi::CompareFunc::kAlways;
+    case capture::Compare::kLessEqual: return nrhi::CompareFunc::kLessEqual;
+    default: return nrhi::CompareFunc::kLess;
+  }
+}
+
+// PipelineKey::cull is in the pass's window space with clockwise front faces
+// (ClayCull), which is the RHI's (D3D12's default front face).
+nrhi::CullMode ToCull(uint8_t c) {
+  switch (capture::Cull(c)) {
+    case capture::Cull::kFront: return nrhi::CullMode::kFront;
+    case capture::Cull::kBack: return nrhi::CullMode::kBack;
+    default: return nrhi::CullMode::kNone;
+  }
+}
 }  // namespace
 
 void ClayPass::DestroyObjects() {
   if (device_) {
-    device_->DestroyDeferred(pipeline_);
+    for (nrhi::Pipeline* p : pipelines_) device_->DestroyDeferred(p);
     device_->DestroyDeferred(vs_);
-    device_->DestroyDeferred(ps_);
+    for (nrhi::Shader* ps : ps_) device_->DestroyDeferred(ps);
     device_->DestroyDeferred(color_);
     device_->DestroyDeferred(depth_);
     device_->DestroyDeferred(white_view_);
     device_->DestroyDeferred(white_);
     device_->DestroyDeferred(white_staging_);
   }
-  pipeline_ = nullptr;
-  vs_ = ps_ = nullptr;
+  pipeline_keys_.clear();
+  pipelines_.clear();
+  vs_ = ps_[0] = ps_[1] = nullptr;
   color_ = depth_ = nullptr;
   white_ = nullptr;
   white_view_ = nullptr;
@@ -38,34 +72,43 @@ void ClayPass::DestroyObjects() {
   ready_ = false;
 }
 
-bool ClayPass::CreatePipeline(nrhi::Device* dev, bool textured) {
-  nrhi::ShaderDesc sd;
-  sd.stage = nrhi::ShaderStage::kPixel;
-  sd.name = textured ? "fable2_clay_textured_ps" : "fable2_clay_ps";
-  sd.hlsl_source = textured ? shaders::kClayTexturedPs : shaders::kClayPs;
-  sd.entry_point = "main";
-  ps_ = dev->CreateShader(sd);
-  if (!ps_) {
-    REXLOG_ERROR("[native] clay: pixel shader compile failed");
-    return false;
-  }
+// The default key (an invalid state) is the pass's pipeline before render
+// states: opaque, depth Less with write, no cull.
+nrhi::Pipeline* ClayPass::CreatePipeline(nrhi::Device* dev, const PipelineKey& key) {
   nrhi::GraphicsPipelineDesc pipe;
   pipe.layout = layout_;
   pipe.vs = vs_;
-  pipe.ps = ps_;
+  pipe.ps = ps_[key.textured ? 1 : 0];
   pipe.rtv_format = nrhi::Format::kR8G8B8A8_UNORM;
   pipe.dsv_format = nrhi::Format::kD32_FLOAT;
-  pipe.depth.test_enable = true;
-  pipe.depth.write_enable = true;
-  pipe.depth.func = nrhi::CompareFunc::kLess;
-  pipe.cull = nrhi::CullMode::kNone;
-  pipeline_ = dev->CreateGraphicsPipeline(pipe);
-  if (!pipeline_) {
-    REXLOG_ERROR("[native] clay: pipeline creation failed");
-    return false;
+  pipe.blend.enable = key.blend != 0;
+  pipe.blend.src = ToFactor(key.src);
+  pipe.blend.dst = ToFactor(key.dst);
+  pipe.blend.op = ToBlendOp(key.op);
+  pipe.blend.src_alpha = ToFactor(key.src_alpha);
+  pipe.blend.dst_alpha = ToFactor(key.dst_alpha);
+  pipe.blend.op_alpha = ToBlendOp(key.op_alpha);
+  pipe.blend.write_mask = key.color_mask;  // 0 with depth write: a depth-only draw
+  pipe.depth.test_enable = key.depth_test != 0;
+  pipe.depth.write_enable = key.depth_write != 0;
+  pipe.depth.func = ToCompare(key.depth_func);
+  pipe.cull = ToCull(key.cull);
+  return dev->CreateGraphicsPipeline(pipe);
+}
+
+nrhi::Pipeline* ClayPass::PipelineFor(nrhi::Device* dev, const PipelineKey& key, ClayStats& st) {
+  const size_t slot = FindOrAddPipelineSlot(pipeline_keys_, key);
+  if (slot != kNoPipelineSlot) {
+    if (slot == pipelines_.size()) {  // a new key
+      pipelines_.push_back(CreatePipeline(dev, key));
+      if (!pipelines_.back()) {
+        REXLOG_ERROR("[native] clay: pipeline creation failed for a render state (its draws use the default)");
+      }
+    }
+    if (pipelines_[slot]) return pipelines_[slot];
   }
-  textured_ps_ = textured;
-  return true;
+  ++st.pipeline_overflow;
+  return pipelines_[key.textured ? 1 : 0];
 }
 
 // The 1x1 white albedo for untextured draws. Its texel is staged here and
@@ -91,24 +134,15 @@ bool ClayPass::CreateWhite(nrhi::Device* dev) {
   return true;
 }
 
-bool ClayPass::Ensure(nrhi::Device* dev, bool textured) {
-  if (ready_ && dev == device_) {
-    if (textured == textured_ps_) return true;
-    // fable2_native_textures changed: swap the pixel shader only.
-    device_->DestroyDeferred(pipeline_);
-    device_->DestroyDeferred(ps_);
-    pipeline_ = nullptr;
-    ps_ = nullptr;
-    if (CreatePipeline(dev, textured)) return true;
-    DestroyObjects();
-    return false;
-  }
+bool ClayPass::Ensure(nrhi::Device* dev) {
+  if (ready_ && dev == device_) return true;
   if (dev != device_) {
     // A different device: the old objects are not ours to destroy through it.
     geometry_.Release(nullptr);
     textures_.Release(nullptr);
-    pipeline_ = nullptr;
-    vs_ = ps_ = nullptr;
+    pipeline_keys_.clear();
+    pipelines_.clear();
+    vs_ = ps_[0] = ps_[1] = nullptr;
     color_ = depth_ = nullptr;
     white_ = nullptr;
     white_view_ = nullptr;
@@ -161,7 +195,29 @@ bool ClayPass::Ensure(nrhi::Device* dev, bool textured) {
     REXLOG_ERROR("[native] clay: shader compile failed");
     return false;
   }
-  if (!CreatePipeline(dev, textured)) return false;
+  for (uint8_t textured = 0; textured < 2; ++textured) {
+    nrhi::ShaderDesc sd;
+    sd.stage = nrhi::ShaderStage::kPixel;
+    sd.name = textured ? "fable2_clay_textured_ps" : "fable2_clay_ps";
+    sd.hlsl_source = textured ? shaders::kClayTexturedPs : shaders::kClayPs;
+    sd.entry_point = "main";
+    ps_[textured] = dev->CreateShader(sd);
+    if (!ps_[textured]) {
+      REXLOG_ERROR("[native] clay: pixel shader compile failed");
+      return false;
+    }
+  }
+  // Cache slots 0 and 1: the default pipelines (PipelineFor falls back to them).
+  for (uint8_t textured = 0; textured < 2; ++textured) {
+    PipelineKey key;
+    key.textured = textured;
+    pipeline_keys_.push_back(key);
+    pipelines_.push_back(CreatePipeline(dev, key));
+    if (!pipelines_.back()) {
+      REXLOG_ERROR("[native] clay: pipeline creation failed");
+      return false;
+    }
+  }
   if (!CreateWhite(dev)) {
     REXLOG_ERROR("[native] clay: white texture creation failed");
     return false;
@@ -197,14 +253,29 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   if (!ready_ || dev != device_) return;
   // A latched texture cache (RHI failure) resolves nothing: skip the UV decode
   // too, and report the latch on F3.
-  textured = textured && textured_ps_ && !textures_.latched();
+  textured = textured && !textures_.latched();
   const auto t0 = std::chrono::steady_clock::now();
   const double hash0 = st.hash_ms, decode0 = st.decode_ms, tex0 = tst.decode_ms;
 
-  // Geometry and albedo of every drawable record. Texture uploads record
-  // copies and barriers, so this runs before the render targets are bound.
+  // Geometry, albedo and render state of every drawable record. Texture
+  // uploads record copies and barriers, so this runs before the render targets
+  // are bound; pipelines are created here too.
   prepared_.clear();
   for (const capture::DrawRecord& r : scene.draws) {
+    const capture::RenderState rs = capture::DecodeRenderState(r.state_words);
+    // A terrain patch has no colour of its own yet: flat clay, drawn opaque.
+    const bool flat_terrain = r.terrain.active;
+    const bool may_texture = textured && r.material.status == capture::MaterialStatus::kTextured;
+    auto leave_out = [&] {
+      ++st.blend_unknown;
+      st.unknown_by_ps.Add(r.material.ps_hash, kTallyBlendUnknown);
+    };
+    // A blended draw that cannot be textured is left out before any geometry
+    // is built for it.
+    if (!may_texture && DecideDrawState(rs, r.material, 0, flat_terrain).skip) {
+      leave_out();
+      continue;
+    }
     Prepared p;
     p.r = &r;
     uint32_t buffer_vertices = 0;
@@ -213,23 +284,38 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     p.vertex_count = DrawVertexCount(buffer_vertices, RecordVertexCount(r));
     p.indices = geometry_.Indices(dev, r, p.vertex_count, &p.index_count, st);
     if (!p.indices) continue;
-    if (textured) {
-      capture::MaterialStatus status = r.material.status;  // capture statuses pass through
-      if (status == capture::MaterialStatus::kTextured) {
-        // UVs first: a stream that does not decode costs no texture upload.
-        p.uvs = geometry_.Uvs(dev, r, p.vertex_count, st);
-        if (!p.uvs) {
-          status = capture::MaterialStatus::kUvUnsupported;
-        } else {
-          p.albedo = textures_.Resolve(cmd, dev, r.material, &p.sampler, p.uv_fix, &status, tst);
-          if (!p.albedo) p.uvs = nullptr;
-        }
+    capture::MaterialStatus status = r.material.status;  // capture statuses pass through
+    if (may_texture) {
+      // UVs first: a stream that does not decode costs no texture upload.
+      p.uvs = geometry_.Uvs(dev, r, p.vertex_count, st);
+      if (!p.uvs) {
+        status = capture::MaterialStatus::kUvUnsupported;
+      } else {
+        p.albedo = textures_.Resolve(cmd, dev, r.material, &p.sampler, p.uv_fix, &status, tst);
+        if (!p.albedo) p.uvs = nullptr;
       }
+    }
+    const DrawState d = DecideDrawState(rs, r.material, p.albedo ? 1 : 0, flat_terrain);
+    if (d.skip) {  // blended, and its texture is not usable this frame
+      leave_out();
+      continue;
+    }
+    if (textured) {
       if (size_t(status) < size_t(capture::MaterialStatus::kCount)) ++tst.status[size_t(status)];
       if (p.albedo) ++tst.textured;
     }
+    p.alpha = d.alpha;
+    p.pipeline = PipelineFor(dev, d.key, st);
+    if (d.alpha_tested) ++st.alpha_tested;
+    if (d.blended) ++st.blended;
+    if (d.state_invalid) ++st.state_invalid;
+    if (d.alpha_unknown) {
+      ++st.alpha_unknown;
+      st.unknown_by_ps.Add(r.material.ps_hash, kTallyAlphaUnknown);
+    }
     prepared_.push_back(p);
   }
+  st.pipelines = uint32_t(pipelines_.size());
 
   if (white_staging_) {
     cmd->CopyBufferToTexture(white_, 0, 0, white_staging_, 0, nrhi::kRowPitchAlignment, 1, 1, 1);
@@ -248,11 +334,15 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   cmd->SetViewport({0.0f, 0.0f, float(kWidth), float(kHeight), 0.0f, 1.0f});
   cmd->SetScissor({0, 0, int32_t(kWidth), int32_t(kHeight)});
   cmd->SetBindingLayout(layout_);
-  cmd->SetPipeline(pipeline_);
   cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
 
+  nrhi::Pipeline* bound = nullptr;
   for (const Prepared& p : prepared_) {
     const capture::DrawRecord& r = *p.r;
+    if (p.pipeline != bound) {
+      cmd->SetPipeline(p.pipeline);
+      bound = p.pipeline;
+    }
     const bool has_albedo = p.albedo != nullptr;
     float uv[4] = {1.0f, 1.0f, 0.0f, 0.0f};
     if (has_albedo) {
@@ -264,7 +354,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       uv[3] = x[3] * p.uv_fix[1];
     }
     const ClayConstants constants = MakeClayConstants(r, p.vertex_count, ClayColorValue(color, r),
-                                                      uv, has_albedo, p.sampler);
+                                                      uv, has_albedo, p.sampler, p.alpha);
     cmd->SetRootConstants(kParamConstants, kConstantCount, &constants, 0);
     cmd->SetBufferSrv(kParamPositions, p.positions, 0);
     cmd->SetBufferSrv(kParamIndices, p.indices, 0);

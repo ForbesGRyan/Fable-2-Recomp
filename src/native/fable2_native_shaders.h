@@ -51,6 +51,12 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 // (DrawRecord::cut); cut.w is +inf for every other draw. Textured
 // draws (kClayTexturedPs) sample the albedo at t3 with static sampler
 // s<sampler_index> (bit 0 linear, bit 1 clamp) and keep a softened facet shade.
+// Their alpha (clay_logic.h, ClayAlpha) is an albedo component or 1, times
+// alpha_scale; alpha_mode says whether it is tested against alpha_ref (bits 0-2
+// the compare function, bit 3 the test), tested as alpha-to-mask (bit 8, alpha
+// >= 0.5), written for blending (bit 7; else 1 is written), and whether the
+// colour is first divided by the albedo's alpha (bit 9). Flat draws (kClayPs)
+// have no alpha. The three shaders declare one cbuffer (ClayConstants).
 inline constexpr const char* kClayVs = R"hlsl(
 cbuffer Draw : register(b0) {
   float4 r0; float4 r1; float4 r2; float4 r3;   // captured rows
@@ -60,9 +66,9 @@ cbuffer Draw : register(b0) {
   uint color;         // 0xRRGGBB
   float4 uv_xform;    // u * x + z, v * y + w
   uint textured;      // 1: uvs holds this draw's UVs
-  uint sampler_index;
-  uint2 pad;
+  uint sampler_index; uint alpha_mode; float alpha_ref;
   float4 cut;         // eye xyz, squared distance (+inf: no cut)
+  float alpha_scale; uint3 pad2;
 };
 StructuredBuffer<float4> positions : register(t0);
 StructuredBuffer<uint> indices : register(t1);
@@ -86,7 +92,10 @@ VsOut main(uint vid : SV_VertexID) {
 )hlsl";
 
 inline constexpr const char* kClayPs = R"hlsl(
-cbuffer Draw : register(b0) { float4 r0; float4 r1; float4 r2; float4 r3; uint layout; int base_vertex; uint vertex_count; uint color; };
+cbuffer Draw : register(b0) { float4 r0; float4 r1; float4 r2; float4 r3; uint layout; int base_vertex;
+                              uint vertex_count; uint color; float4 uv_xform; uint textured;
+                              uint sampler_index; uint alpha_mode; float alpha_ref;
+                              float4 cut; float alpha_scale; uint3 pad2; };
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0) : SV_Target {
   float3 n = normalize(cross(ddx(ndc), ddy(ndc)));
   float shade = 0.35 + 0.65 * saturate(abs(dot(n, normalize(float3(0.4, 0.6, -0.7)))));
@@ -97,13 +106,25 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0) : SV_Target {
 
 inline constexpr const char* kClayTexturedPs = R"hlsl(
 cbuffer Draw : register(b0) { float4 r0; float4 r1; float4 r2; float4 r3; uint layout; int base_vertex;
-                              uint vertex_count; uint color; float4 uv_xform; uint textured; uint sampler_index; uint2 pad;
-                              float4 cut; };
+                              uint vertex_count; uint color; float4 uv_xform; uint textured;
+                              uint sampler_index; uint alpha_mode; float alpha_ref;
+                              float4 cut; float alpha_scale; uint3 pad2; };
 Texture2D albedo : register(t3);
 SamplerState s_point_wrap : register(s0);
 SamplerState s_linear_wrap : register(s1);
 SamplerState s_point_clamp : register(s2);
 SamplerState s_linear_clamp : register(s3);
+// The GPU's compare functions: never, less, equal, less-equal, greater, not-equal, greater-equal, always.
+bool alpha_passes(float a, float ref, uint func) {
+  if (func == 0) return false;
+  if (func == 1) return a < ref;
+  if (func == 2) return a == ref;
+  if (func == 3) return a <= ref;
+  if (func == 4) return a > ref;
+  if (func == 5) return a != ref;
+  if (func == 6) return a >= ref;
+  return true;
+}
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1) : SV_Target {
   float3 n = normalize(cross(ddx(ndc), ddy(ndc)));
   float facet = saturate(abs(dot(n, normalize(float3(0.4, 0.6, -0.7)))));
@@ -114,7 +135,15 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
     else if (sampler_index == 1) t = albedo.Sample(s_linear_wrap, uv);
     else if (sampler_index == 2) t = albedo.Sample(s_point_clamp, uv);
     else t = albedo.Sample(s_linear_clamp, uv);
-    return float4(t.rgb * (0.75 + 0.25 * facet), 1.0);
+    if (alpha_mode & 0x200) t.rgb = saturate(t.rgb / max(t.a, 1.0 / 255.0));
+    float a = alpha_scale;
+    if (alpha_mode & 0x10) {
+      uint comp = (alpha_mode >> 5) & 3;
+      a *= comp == 0 ? t.x : comp == 1 ? t.y : comp == 2 ? t.z : t.w;
+    }
+    if ((alpha_mode & 0x8) && !alpha_passes(a, alpha_ref, alpha_mode & 7)) discard;
+    if ((alpha_mode & 0x100) && a < 0.5) discard;
+    return float4(t.rgb * (0.75 + 0.25 * facet), (alpha_mode & 0x80) ? a : 1.0);
   }
   base = float3((color >> 16) & 255, (color >> 8) & 255, color & 255) / 255.0;
   return float4(base * (0.35 + 0.65 * facet), 1.0);

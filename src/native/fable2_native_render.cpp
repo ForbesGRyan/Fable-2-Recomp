@@ -226,9 +226,9 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   if (!g_clay) {
     g_clay = std::make_unique<render::ClayPass>(GeometryBudgetBytes(), TextureBudgetBytes());
   }
-  // Read once per frame: picks the pixel shader (Ensure) and the draw path.
+  // Read once per frame: picks the draw path.
   const bool textures = REXCVAR_GET(fable2_native_textures);
-  if (!g_clay->Ensure(ctx.device, textures)) {
+  if (!g_clay->Ensure(ctx.device)) {
     Fail("clay pass");
     return false;
   }
@@ -274,7 +274,17 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
         tst.textured, st.drawn, st.uploads, st.hits,
         double(st.resident_bytes) / (1024.0 * 1024.0), st.instanced, st.skinned, st.hash_ms,
         st.decode_ms, st.record_ms, g_clay_window_max_ms, scene->frame);
-    if (textures) REXLOG_INFO("[native] clay: {}", render::FormatTextureText(tst, st.drawn));
+    if (textures) {
+      REXLOG_INFO("[native] clay: {}",
+                  render::FormatTextureText(tst, st.drawn, st.alpha_unknown, st.blend_unknown));
+    }
+    REXLOG_INFO("[native] clay: {} | alpha-unknown {}, blend-unknown {}", render::FormatStateText(st),
+                st.alpha_unknown, st.blend_unknown);
+    const std::string by_ps = render::FormatUnknownByPs(st);
+    if (!by_ps.empty()) {
+      REXLOG_INFO("[native] clay: {}{}", by_ps,
+                  st.unknown_by_ps.Other() ? " (+ more shaders)" : "");
+    }
     g_clay_window_max_ms = 0;
   }
   return true;

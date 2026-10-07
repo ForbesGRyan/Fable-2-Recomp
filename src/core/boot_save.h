@@ -20,22 +20,28 @@
 
 namespace fable2::bootsave {
 
-inline constexpr uint32_t kStartGameFn = 0x826962D0;      // (front end, user index)
-inline constexpr uint32_t kSaveQueryCtorFn = 0x824E4E30;  // (query); strings at +12 and +16
-inline constexpr uint32_t kSaveExistsFn = 0x824EA7A0;     // (save manager, query, name, user) -> bool
+// The retail front end's Load Game / Continue handlers (sub_826C9280, sub_826C72A8,
+// sub_826C81A0) read a save's info and call kStartFromSaveFn with its name and level.
+inline constexpr uint32_t kStartFromSaveFn = 0x8237A2D8;  // (gui, save name, level name)
+// Saves are read from the user's storage device; the Continue handler picks it first.
+inline constexpr uint32_t kHasDeviceFn = 0x824E54C0;      // (save manager, user) -> bool
+inline constexpr uint32_t kSelectDeviceFn = 0x824E5398;   // (save manager, user, show size ui = 0) -> bool
+inline constexpr uint32_t kSaveInfoCtorFn = 0x824E4E30;   // (info)
+inline constexpr uint32_t kSaveInfoFn = 0x824EA7A0;       // (save manager, info, name, user) -> bool; reads the save
 inline constexpr uint32_t kStringCtorFn = 0x8222CF18;     // (dest, cstr, len = -1)
-inline constexpr uint32_t kStringAssignFn = 0x82265160;   // (dest, src)
 inline constexpr uint32_t kStringDtorFn = 0x82214F08;     // (str)
-inline constexpr uint32_t kInitialSaveName = 0x834973BC;  // game string
-inline constexpr uint32_t kLoadClearedByte = 0x8349693F;  // the Load Game handler stores 0 here
-inline constexpr uint32_t kFrontEndState = 0x83496930;    // u32
-inline constexpr uint32_t kGameRoot = 0x83496928;         // save manager = *(*(*root + 12) + 40)
+// Save info: 36 bytes; level name (game string) at +12, a second string at +16, a valid byte at +24.
+inline constexpr uint32_t kInfoLevelName = 12;
+inline constexpr uint32_t kInfoString2 = 16;
+inline constexpr uint32_t kInfoValid = 24;
+// root = *kGameRoot; game = *(root + 12); save manager = *(game + 40); gui = *(*(root + 8) + 80).
+inline constexpr uint32_t kGameRoot = 0x83496928;
+inline constexpr uint32_t kGameLeftFrontEnd = 92;       // byte in game: 0 while the front end runs
+inline constexpr uint32_t kFrontEndState = 0x83496930;  // u32, traced only
+inline constexpr uint32_t kSignedInMask = 0x834968D8;   // u32, bit per user, traced only
+inline constexpr uint32_t kActiveUser = 0x83496934;     // u32, the pad that pressed A
 
-// The front-end input dispatcher (sub_82692048) handles input only in this state range.
-inline constexpr uint32_t kFireStateMin = 3;
-inline constexpr uint32_t kFireStateMax = 8;
-inline constexpr uint32_t kStableUpdates = 2;  // consecutive front-end updates in range before firing
-inline constexpr uint32_t kUserIndex = 0;
+inline constexpr uint32_t kAttemptEvery = 30;  // frames between load attempts (about one second)
 
 // Set once at startup, before any guest thread runs; read-only afterwards.
 struct Config {
@@ -62,26 +68,19 @@ inline std::optional<std::string> ParseHeroName(std::string_view s) {
   return "Hero" + std::string(s.substr(4));
 }
 
-enum class Action { kWait, kFire, kDone };
-
-// Decides when to start the load: once, after kStableUpdates consecutive front-end
-// updates with the state in range. Touched only by the guest thread that runs the update.
+// Paces the load attempts: one every kAttemptEvery frames while the front end runs,
+// none after Finish. Touched only by the guest thread that runs the main loop.
 struct Trigger {
-  uint32_t stable = 0;
-  bool fired = false;
+  bool done = false;
   uint64_t updates = 0;
 
-  Action Step(uint32_t fe_state) {
+  // True when a load attempt should be made on this update.
+  bool Step(bool in_front_end) {
     ++updates;
-    if (fired) return Action::kDone;
-    if (fe_state < kFireStateMin || fe_state > kFireStateMax) {
-      stable = 0;
-      return Action::kWait;
-    }
-    if (++stable < kStableUpdates) return Action::kWait;
-    fired = true;
-    return Action::kFire;
+    return !done && in_front_end && updates % kAttemptEvery == 0;
   }
+  // The load was started, or boot save gave up: no further attempts this run.
+  void Finish() { done = true; }
 };
 
 struct FindResult {

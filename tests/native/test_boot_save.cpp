@@ -20,22 +20,26 @@ int main() {
                           "Hero000\\..", "Hero 00", "Hero000/x", "Zero000"})
     if (ParseHeroName(bad)) { std::cerr << "accepted '" << bad << "'\n"; return 3; }
 
-  // Trigger: fires once after kStableUpdates consecutive updates in [kFireStateMin, kFireStateMax].
+  // Trigger: one load attempt every kAttemptEvery game updates while in the front end,
+  // none after Finish (started or given up), none while the game is not in the front end.
   {
     Trigger t;
-    if (t.Step(0) != Action::kWait) return 10;
-    if (t.Step(kFireStateMin) != Action::kWait) return 11;   // one update in range: flicker
-    if (t.Step(kFireStateMin - 1) != Action::kWait) return 12;  // reset
-    if (t.Step(kFireStateMin) != Action::kWait) return 13;
-    if (t.Step(kFireStateMax) != Action::kFire) return 14;   // second consecutive update in range
-    if (t.Step(kFireStateMin) != Action::kDone) return 15;   // never again (quit to front end later)
-    if (t.Step(0) != Action::kDone) return 16;
-    if (t.updates != 7) return 17;
+    for (uint32_t i = 1; i < kAttemptEvery; ++i)
+      if (t.Step(true)) return 10;
+    if (!t.Step(true)) return 11;                 // update kAttemptEvery
+    if (t.Step(true)) return 12;
+    for (uint32_t i = 2; i < kAttemptEvery; ++i)
+      if (t.Step(true)) return 13;
+    if (!t.Step(true)) return 14;                 // update 2 * kAttemptEvery
+    t.Finish();
+    for (uint32_t i = 0; i < 3 * kAttemptEvery; ++i)
+      if (t.Step(true)) return 15;                // never again (quit to the front end later)
+    if (t.updates != 5 * kAttemptEvery) return 16;
   }
   {
     Trigger t;
-    if (t.Step(kFireStateMax + 1) != Action::kWait) return 18;  // above the range
-    if (t.Step(kFireStateMax + 1) != Action::kWait) return 19;
+    for (uint32_t i = 0; i < 3 * kAttemptEvery; ++i)
+      if (t.Step(false)) return 17;               // in game: no attempt
   }
 
   // Save folder lookup.

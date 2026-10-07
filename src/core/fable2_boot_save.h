@@ -1,10 +1,12 @@
 // fable_2 - Boot save: runtime side (see src/core/boot_save.h for the options).
 //
-// The front-end menu is UI over one global, the initial save name. Its Load Game
-// handler (sub_82695590) checks that the save exists, assigns the name, clears a
-// byte and calls sub_826962D0(front end, user index). OnFrontEndUpdate runs the
-// same sequence from the per-frame front-end update (sub_82692230, r3 = front
-// end) once the front end accepts input, so no pad input is needed.
+// The retail front end loads a save by reading its info (sub_824EA7A0: the save's
+// level name) and calling sub_8237A2D8(gui, save name, level name); see its Load
+// Game and Continue handlers (sub_826C9280, sub_826C72A8, sub_826C81A0).
+// OnFrame runs the same two calls from the per-frame main loop hook while the
+// front end is up, so no pad input is needed. (The game update sub_82355460 does
+// not run in the front end, and the 0x8269xxxx menu handlers are a second,
+// non-retail front end that the retail game never enters.)
 //
 // Recompiled guest functions are weak aliases of __imp__<name>; the strong
 // definitions below replace them for direct and indirect calls.
@@ -24,7 +26,6 @@
 static_assert(fable2::versions::kCodeGroup == "goty-identical-payload-2026-09-28",
               "boot save guest addresses were taken from this code group; re-derive them");
 
-extern "C" void __imp__sub_82692230(PPCContext& ctx, uint8_t* base);
 extern "C" void __imp__sub_822F4958(PPCContext& ctx, uint8_t* base);
 
 namespace fable2::bootsave {
@@ -38,113 +39,141 @@ inline uint32_t GuestZeroed(PPCContext& ctx, uint8_t* base, size_t size) {
   return p;
 }
 
-// *(*(*kGameRoot + 12) + 40), or 0 when any link is not readable.
-inline uint32_t SaveManager(const uint8_t* base) {
-  if (!ta::rdable2(base, kGameRoot, 4)) return 0;
-  const uint32_t root = ta::load_be(base, kGameRoot);
-  if (!root || !ta::rdable2(base, root + 12, 4)) return 0;
-  const uint32_t mid = ta::load_be(base, root + 12);
-  if (!mid || !ta::rdable2(base, mid + 40, 4)) return 0;
-  return ta::load_be(base, mid + 40);
+// *(addr) as a guest pointer, or 0 when addr is 0 or not readable.
+inline uint32_t Deref(const uint8_t* base, uint32_t addr) {
+  if (!addr || !ta::rdable2(base, addr, 4)) return 0;
+  return ta::load_be(base, addr);
 }
 
-// The Load Game handler's sequence. Returns false (and starts nothing) when the game
-// says the save does not exist. Must run on the guest thread that updates the front end.
-inline bool StartLoad(PPCContext& ctx, uint8_t* base, uint32_t front_end, const std::string& hero) {
-  const uint32_t cstr = GuestZeroed(ctx, base, hero.size() + 1);
-  const uint32_t name = GuestZeroed(ctx, base, 16);
-  const uint32_t query = GuestZeroed(ctx, base, 96);
-  const uint32_t manager = SaveManager(base);
-  if (!cstr || !name || !query || !manager) {
-    REXSYS_WARN("[boot-save] not started: cstr={:08X} name={:08X} query={:08X} manager={:08X}",
-                cstr, name, query, manager);
-    return false;
+struct Objects {
+  uint32_t game = 0, manager = 0, gui = 0;
+};
+inline Objects FindObjects(const uint8_t* base) {
+  Objects o;
+  const uint32_t root = Deref(base, kGameRoot);
+  o.game = Deref(base, root ? root + 12 : 0);
+  o.manager = Deref(base, o.game ? o.game + 40 : 0);
+  const uint32_t gui_owner = Deref(base, root ? root + 8 : 0);
+  o.gui = Deref(base, gui_owner ? gui_owner + 80 : 0);
+  return o;
+}
+
+enum class LoadResult { kStarted, kNoSaveInfo, kNoDevice, kNoMemory };
+
+// The front end's own sequence: read the save's info, then start from it. Must run on
+// the guest thread that runs the game update. `valid` receives the info's valid byte.
+inline LoadResult TryLoad(PPCContext& ctx, uint8_t* base, const Objects& o, uint32_t user,
+                          const std::string& hero, uint8_t* valid) {
+  static uint32_t name = 0;  // game string with the hero name, built once
+  if (!name) {
+    const uint32_t cstr = GuestZeroed(ctx, base, hero.size() + 1);
+    const uint32_t str = GuestZeroed(ctx, base, 16);
+    if (!cstr || !str) return LoadResult::kNoMemory;
+    std::memcpy(reinterpret_cast<void*>(ta::host_addr(base, cstr)), hero.data(), hero.size());
+    ctx.r3.u32 = str;
+    ctx.r4.u32 = cstr;
+    ctx.r5.u32 = 0xFFFFFFFF;
+    REX_CALL_INDIRECT_FUNC(kStringCtorFn);
+    name = str;
   }
-  std::memcpy(reinterpret_cast<void*>(ta::host_addr(base, cstr)), hero.data(), hero.size());
+  // Storage device for the user, as the Continue handler does before it reads saves.
+  ctx.r3.u32 = o.manager;
+  ctx.r4.u32 = user;
+  REX_CALL_INDIRECT_FUNC(kHasDeviceFn);
+  if ((ctx.r3.u32 & 0xFF) == 0) {
+    ctx.r3.u32 = o.manager;
+    ctx.r4.u32 = user;
+    ctx.r5.u32 = 0;
+    REX_CALL_INDIRECT_FUNC(kSelectDeviceFn);
+    if ((ctx.r3.u32 & 0xFF) == 0) return LoadResult::kNoDevice;
+  }
 
-  ctx.r3.u32 = name;
-  ctx.r4.u32 = cstr;
-  ctx.r5.u32 = 0xFFFFFFFF;
-  REX_CALL_INDIRECT_FUNC(kStringCtorFn);
+  const uint32_t info = GuestZeroed(ctx, base, 96);
+  if (!info) return LoadResult::kNoMemory;
 
-  ctx.r3.u32 = query;
-  REX_CALL_INDIRECT_FUNC(kSaveQueryCtorFn);
-  ctx.r3.u32 = manager;
-  ctx.r4.u32 = query;
+  ctx.r3.u32 = info;
+  REX_CALL_INDIRECT_FUNC(kSaveInfoCtorFn);
+  ctx.r3.u32 = o.manager;
+  ctx.r4.u32 = info;
   ctx.r5.u32 = name;
-  ctx.r6.u32 = kUserIndex;
-  REX_CALL_INDIRECT_FUNC(kSaveExistsFn);
-  const bool exists = (ctx.r3.u32 & 0xFF) != 0;
-  ctx.r3.u32 = query + 16;
-  REX_CALL_INDIRECT_FUNC(kStringDtorFn);
-  ctx.r3.u32 = query + 12;
-  REX_CALL_INDIRECT_FUNC(kStringDtorFn);
+  ctx.r6.u32 = user;
+  REX_CALL_INDIRECT_FUNC(kSaveInfoFn);
+  const bool found = (ctx.r3.u32 & 0xFF) != 0;
+  *valid = *reinterpret_cast<const uint8_t*>(ta::host_addr(base, info + kInfoValid));
 
-  if (exists) {
-    ctx.r3.u32 = kInitialSaveName;
+  if (found) {
+    ctx.r3.u32 = o.gui;
     ctx.r4.u32 = name;
-    REX_CALL_INDIRECT_FUNC(kStringAssignFn);
-    *reinterpret_cast<uint8_t*>(ta::host_addr(base, kLoadClearedByte)) = 0;
-    ctx.r3.u32 = front_end;
-    ctx.r4.u32 = kUserIndex;
-    REX_CALL_INDIRECT_FUNC(kStartGameFn);
+    ctx.r5.u32 = info + kInfoLevelName;
+    REX_CALL_INDIRECT_FUNC(kStartFromSaveFn);
   }
-  ctx.r3.u32 = name;
+  ctx.r3.u32 = info + kInfoString2;
   REX_CALL_INDIRECT_FUNC(kStringDtorFn);
-  // The C string and the two small blocks are left allocated (once per run).
-  return exists;
+  ctx.r3.u32 = info + kInfoLevelName;
+  REX_CALL_INDIRECT_FUNC(kStringDtorFn);
+  // The info block is left allocated (96 bytes per attempt).
+  return found ? LoadResult::kStarted : LoadResult::kNoSaveInfo;
 }
 
-// Called after every front-end update with its object.
-inline void OnFrontEndUpdate(PPCContext& ctx, uint8_t* base, uint32_t front_end) {
+// Called once per frame from the main loop hook (MainRenderLoop_82B9CD68 in
+// src/diagnostics/fps_meter.h), which also runs while the front end is up.
+inline void OnFrame(PPCContext& ctx, uint8_t* base) {
   const Config& cfg = config();
   if (!cfg.trace && cfg.hero.empty()) return;
-  if (!front_end || !ta::rdable2(base, front_end + 4, 4) || !ta::rdable2(base, kFrontEndState, 4)) return;
-  const uint32_t state = ta::load_be(base, kFrontEndState);
-  const uint32_t screen = ta::load_be(base, front_end + 4);
+  const Objects o = FindObjects(base);
+  const bool ready = o.game && o.manager && o.gui && ta::rdable2(base, o.game + kGameLeftFrontEnd, 1);
+  const bool in_front_end =
+      ready && *reinterpret_cast<const uint8_t*>(ta::host_addr(base, o.game + kGameLeftFrontEnd)) == 0;
+  const uint32_t state = Deref(base, kFrontEndState);
+  const uint32_t mask = Deref(base, kSignedInMask);
+  const uint32_t active_user = Deref(base, kActiveUser);
 
   static Trigger trigger;
-  static uint32_t last_state = 0xFFFFFFFF, last_screen = 0xFFFFFFFF;
-  if (state != last_state || screen != last_screen) {
-    REXSYS_INFO("[boot-save] front end state {} screen {} (update {})", state, screen, trigger.updates);
-    last_state = state;
-    last_screen = screen;
+  static uint32_t last[5] = {0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
+  const uint32_t now[5] = {(o.game ? 1u : 0u) | (o.manager ? 2u : 0u) | (o.gui ? 4u : 0u),
+                           in_front_end ? 1u : 0u, state, mask, active_user};
+  if (std::memcmp(last, now, sizeof now) != 0) {
+    REXSYS_INFO("[boot-save] frame {}: game {:08X} manager {:08X} gui {:08X} front end {} state {} "
+                "signed-in mask {:X} user {}",
+                trigger.updates, o.game, o.manager, o.gui, in_front_end ? "up" : "not up", state,
+                mask, active_user);
+    std::memcpy(last, now, sizeof now);
   }
-  if (cfg.hero.empty()) {
-    ++trigger.updates;
-    return;
-  }
+  if (!trigger.Step(in_front_end) || cfg.hero.empty()) return;
 
-  const Action action = trigger.Step(state);
-  if (action == Action::kWait && trigger.updates == 1800)
-    REXSYS_WARN("[boot-save] still waiting after 1800 front-end updates (state {}, needs {}..{})",
-                state, kFireStateMin, kFireStateMax);
-  if (action != Action::kFire) return;
-
-  const FindResult save = FindHeroDir(cfg.saves_root, cfg.hero);
-  if (save.dir.empty()) {
-    REXSYS_WARN("[boot-save] not started: {}", save.error);
-    return;
+  static uint32_t attempts = 0;
+  if (attempts == 0) {
+    const FindResult save = FindHeroDir(cfg.saves_root, cfg.hero);
+    if (save.dir.empty()) {
+      REXSYS_WARN("[boot-save] not started: {}", save.error);
+      trigger.Finish();
+      return;
+    }
   }
-  // StartLoad calls guest functions that clobber the registers; the update we hooked
-  // has already returned, so restore the context it left.
+  ++attempts;
+  // TryLoad calls guest functions that clobber the registers; restore them so the main
+  // loop function sees the state it was called with.
+  const uint32_t user = active_user < 4 ? active_user : 0;
+  uint8_t valid = 0;
   const PPCContext saved = ctx;
-  const bool started = StartLoad(ctx, base, front_end, cfg.hero);
+  const LoadResult result = TryLoad(ctx, base, o, user, cfg.hero, &valid);
   ctx = saved;
-  if (started)
-    REXSYS_INFO("[boot-save] loading {} (front end state {}, update {})", cfg.hero, state, trigger.updates);
-  else
-    REXSYS_WARN("[boot-save] the game reports no save named {}; menu left as is", cfg.hero);
+  if (result == LoadResult::kStarted) {
+    REXSYS_INFO("[boot-save] loading {} (attempt {}, update {}, state {}, valid {})", cfg.hero,
+                attempts, trigger.updates, state, valid);
+    trigger.Finish();
+  } else if (result == LoadResult::kNoMemory) {
+    REXSYS_WARN("[boot-save] not started: guest allocation failed");
+    trigger.Finish();
+  } else if (attempts == 1 || attempts == 10 || attempts == 60) {
+    REXSYS_WARN("[boot-save] {} (attempt {}, save {}, state {}, mask {:X})",
+                result == LoadResult::kNoDevice ? "no storage device for the user yet"
+                                                : "the game cannot read the save yet",
+                attempts, cfg.hero, state, mask);
+  }
 }
 
 }  // namespace fable2::bootsave
-
-// Front-end per-frame update: run the original, then let boot save act.
-extern "C" void sub_82692230(PPCContext& ctx, uint8_t* base) {
-  const uint32_t front_end = ctx.r3.u32;
-  __imp__sub_82692230(ctx, base);
-  fable2::bootsave::OnFrontEndUpdate(ctx, base, front_end);
-}
 
 // Queues the Microsoft and Lionhead logo videos. FABLE2_SKIP_LOGOS=1: queue nothing.
 extern "C" void sub_822F4958(PPCContext& ctx, uint8_t* base) {

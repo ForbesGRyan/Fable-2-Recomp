@@ -193,6 +193,170 @@ int main() {
     if (detail::TexelIndex(1.25f, 8, 1) != 5 || detail::TexelIndex(2.0f, 8, 2) != 7) return 80;
   }
 
+  // --- Terrain material inputs (frame-map section 13, "Terrain") ---
+  // The synthetic layer draw of tests/test_terrain_replay.py (LAYER_CONSTS, PCONST): the same
+  // constants, and the numbers pinned here are the ones pinned there (LAYER_WANT and
+  // test_layer_inputs_and_values), so the replay tool and the capture's inputs agree on every
+  // intermediate value: the three coordinate transforms, the weight of a texel value, the cull
+  // test, the fade and the distance.
+  {
+    static const uint32_t kTf0[6] = {0x88000002, 0x17360052, 0x007FE3FF, 0x00A80D10, 0x000000C3, 0x173E0A18};
+    static const uint32_t kTf3[6] = {0x86000002, 0x1A000052, 0x005FE2FF, 0x00A80D10, 0x00000000, 0x00000218};
+    // tf18 of every layer draw of the bridge captures: 1650 x 1815 k_DXT3A, tiled.
+    static const uint32_t kTf18[6] = {0x8D004802, 0x1BA0207A, 0x00E2C671, 0x01000D10, 0x00000000, 0x00000218};
+    static float vs[1024], ps[1024];
+    std::fill(std::begin(vs), std::end(vs), 0.0f);
+    std::fill(std::begin(ps), std::end(ps), 0.0f);
+    auto set = [](float* bank, int reg, float x, float y, float z, float w) {
+      bank[4 * reg] = x; bank[4 * reg + 1] = y; bank[4 * reg + 2] = z; bank[4 * reg + 3] = w;
+    };
+    set(vs, 4, 1, 0, 0, 0);
+    set(vs, 5, 0, 1, 0, 0);
+    set(vs, 6, 0, 0, 1, 0);
+    set(vs, 8, 0.0625f, 0.125f, 1, 0.125f);
+    set(vs, 11, 2, 0.5f, 0.25f, 0);
+    set(vs, 14, 1.0f / 384, 1.0f / 384, 1, 1);
+    set(vs, 46, 8, 8, 90, 1);
+    set(vs, 47, 1.0f / 384, 1.0f / 384, 16, 32);
+    set(vs, 113, 80, 144, 0, 0);
+    set(vs, 114, 1.0f / 255, 0, 0, 0);
+    set(vs, 115, 16.0f / 66, 16.0f / 33, 33.5f / 66, 0.5f / 33);
+    set(ps, 19, 100, 160, 30, 1);
+    set(ps, 21, 1.5f, 1.0f, 0.5f, 2.0f);
+    set(ps, 31, 0.0005f, -1.25f, 0, 0);
+    const TerrainSpec layer_spec{11 * 4, 46 * 4, 46 * 4 + 2, 113 * 4, 47 * 4 + 2, 47 * 4, -1, 16};
+    TerrainPatch tp;
+    if (!MakeTerrainPatch(layer_spec, vs, kTf16, 3, 1, &tp)) return 100;
+    TerrainFetches f;
+    f.detail = kTf0;
+    f.base = kTf3;
+    f.weight = kTf18;
+    TerrainMaterialInputs in;
+    if (!MakeTerrainMaterialInputs(tp, false, vs, ps, f, &in) || !in.valid || in.adaptive) return 101;
+    if (std::memcmp(in.detail_fetch, kTf0, 24) || std::memcmp(in.base_fetch, kTf3, 24) ||
+        std::memcmp(in.weight_fetch, kTf18, 24)) return 102;
+    if (!Near(in.detail_uv[0], 0.125f, 1e-6f) || !Near(in.detail_uv[1], -0.125f, 1e-6f) ||
+        in.detail_uv[2] != 0.0f || in.detail_uv[3] != 0.0f) return 103;
+    if (!Near(in.base_uv[0], 1.0f / 384, 1e-7f) || !Near(in.base_uv[1], 1.0f / 384, 1e-7f) ||
+        !Near(in.base_uv[2], -16.0f / 384, 1e-6f) || !Near(in.base_uv[3], -32.0f / 384, 1e-6f)) return 104;
+    if (!Near(in.weight_uv[0], 2.0f / 66, 1e-6f) || !Near(in.weight_uv[1], 2.0f / 33, 1e-6f) ||
+        !Near(in.weight_uv[2], -126.5f / 66, 1e-5f) || !Near(in.weight_uv[3], -287.5f / 33, 1e-5f)) return 105;
+    if (in.base_pow != 2.0f || in.base_tint[0] != 1.5f || in.base_tint[1] != 1.0f || in.base_tint[2] != 0.5f) return 106;
+    if (!Near(in.weight_scale, 15.0f / 14, 1e-6f) || !Near(in.weight_bias, 1.0f / 15, 1e-7f)) return 107;
+    if (in.fade[0] != 0.0005f || in.fade[1] != -1.25f || !Near(in.hole_ref, 1.0f / 255, 1e-8f)) return 108;
+    if (in.eye[0] != 100.0f || in.eye[1] != 160.0f || in.eye[2] != 30.0f) return 109;
+    const float identity[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+    if (std::memcmp(in.world, identity, sizeof(identity))) return 110;
+    // Sub-patch 3 is row 1, column 1: its corner (88, 152) is texel 16 of the second 33-texel
+    // cell (49.5 of 66) and row 16 (16.5 of 33).
+    float uv[2];
+    TerrainUv(in.weight_uv, 88.0f, 152.0f, uv);
+    if (!Near(uv[0], 0.75f, 1e-5f) || !Near(uv[1], 0.5f, 1e-5f)) return 111;
+    TerrainUv(in.base_uv, 88.0f, 152.0f, uv);
+    if (!Near(uv[0], 0.1875f, 1e-6f) || !Near(uv[1], 0.3125f, 1e-6f)) return 112;
+    TerrainUv(in.detail_uv, 88.0f, 152.0f, uv);
+    if (uv[0] != 11.0f || uv[1] != -19.0f) return 113;
+    // The weight of the 4-bit value n is (n - 1) / 14; n = 0 is below the reference 1/255.
+    if (!Near(TerrainLayerWeight(in, 8.0f / 15), 0.5f, 1e-6f) || !Near(TerrainLayerWeight(in, 1.0f), 1.0f, 1e-6f) ||
+        !Near(TerrainLayerWeight(in, 1.0f / 15), 0.0f, 1e-6f)) return 114;
+    if (!TerrainLayerCulled(in, 0.0f) || TerrainLayerCulled(in, 1.0f / 15)) return 115;
+    // The game compares with greater-than (sgt): a value equal to the reference is drawn.
+    if (TerrainLayerCulled(in, in.hole_ref)) return 140;
+    // Fade 1 - sat(d2 * 0.0005 - 1.25).
+    if (TerrainFade(in, 2500.0f) != 1.0f || !Near(TerrainFade(in, 3000.0f), 0.75f, 1e-5f) ||
+        TerrainFade(in, 4500.0f) != 0.0f) return 116;
+    if (!Near(TerrainEyeDistance2(in, 88.0f, 152.0f, 20.0f), 308.0f, 1e-3f)) return 117;
+    // The reference of a base layer is -1: nothing is culled, and the value 0 has the weight -1/14.
+    set(vs, 114, -1, 0, 0, 0);
+    TerrainMaterialInputs base_layer;
+    if (!MakeTerrainMaterialInputs(tp, false, vs, ps, f, &base_layer)) return 118;
+    if (TerrainLayerCulled(base_layer, 0.0f) || !Near(TerrainLayerWeight(base_layer, 0.0f), -1.0f / 14, 1e-6f)) return 119;
+    set(vs, 114, 1.0f / 255, 0, 0, 0);
+    // A world matrix other than identity reaches the distance: c4 = (0, 1, 0, 5) puts y + 5 in x.
+    set(vs, 4, 0, 1, 0, 5);
+    TerrainMaterialInputs turned;
+    if (!MakeTerrainMaterialInputs(tp, false, vs, ps, f, &turned)) return 120;
+    // p = (152 + 5, 152, 20): d2 = 57^2 + 8^2 + 10^2.
+    if (!Near(TerrainEyeDistance2(turned, 88.0f, 152.0f, 20.0f), 3249.0f + 64.0f + 100.0f, 1e-2f)) return 121;
+    set(vs, 4, 1, 0, 0, 0);
+
+    // Nothing is made from missing or garbage data: every failure leaves the inputs invalid.
+    TerrainMaterialInputs bad = in;
+    if (MakeTerrainMaterialInputs(tp, false, nullptr, ps, f, &bad) || bad.valid) return 122;
+    bad = in;
+    if (MakeTerrainMaterialInputs(tp, false, vs, nullptr, f, &bad) || bad.valid) return 123;
+    TerrainFetches g = f;
+    g.weight = nullptr;  // the weight fetch constant could not be read
+    bad = in;
+    if (MakeTerrainMaterialInputs(tp, false, vs, ps, g, &bad) || bad.valid) return 124;
+    uint32_t not_texture[6];
+    std::memcpy(not_texture, kTf0, sizeof(not_texture));
+    not_texture[0] &= ~3u;  // not a texture fetch constant
+    g = f;
+    g.detail = not_texture;
+    bad = in;
+    if (MakeTerrainMaterialInputs(tp, false, vs, ps, g, &bad) || bad.valid) return 125;
+    TerrainPatch inactive;
+    bad = in;
+    if (MakeTerrainMaterialInputs(inactive, false, vs, ps, f, &bad) || bad.valid) return 126;
+    volatile float nan = NAN;  // volatile: no constant folding
+    ps[31 * 4] = nan;
+    bad = in;
+    if (MakeTerrainMaterialInputs(tp, false, vs, ps, f, &bad) || bad.valid) return 127;
+    ps[31 * 4] = 0.0005f;
+    TerrainPatch flat = tp;
+    flat.cell[0] = 0.0f;  // the weight coordinate divides by the cell
+    bad = in;
+    if (MakeTerrainMaterialInputs(flat, false, vs, ps, f, &bad) || bad.valid) return 128;
+
+    // --- A draw of the adaptive builder (FAR_CONSTS / FAR_WANT of the Python test) ---
+    static const uint32_t kTf13[6] = {0x88000002, 0x1A800052, 0x007FE3FF, 0x00A80D10, 0x00000000, 0x00000218};
+    // tf18 / tf19 of the adaptive draws of the bridge captures: 816 x 48 k_16 tables, point sampled.
+    static const uint32_t kTableU[6] = {0x07004802, 0x1B9D6058, 0x0005E32F, 0x01001400, 0x00000000, 0x00000218};
+    static const uint32_t kTableV[6] = {0x07004802, 0x1B9EC058, 0x0005E32F, 0x01001400, 0x00000000, 0x00000218};
+    set(vs, 8, 8, 8, 90, 1);
+    set(vs, 11, 6, 1.0f / 6, 1.0f / 12, 0);
+    set(vs, 46, 1.0f / 384, 1.0f / 384, 32, 64);
+    set(vs, 47, 96, 144, 0, 0);
+    set(vs, 72, 16.0f / 17, 0.5f / 17, 0, 0);
+    set(vs, 113, 3, 0, 0, 0);
+    set(vs, 114, 0.5f, 0.5f, 0, 0);
+    set(vs, 115, 0, 0, 0, 0);
+    const TerrainSpec far_spec{11 * 4, 8 * 4, 8 * 4 + 2, 47 * 4, 46 * 4 + 2, 46 * 4, 113 * 4, 16};
+    TerrainPatch fp;
+    if (!MakeTerrainPatch(far_spec, vs, kTf16, 0, 6, &fp)) return 130;
+    TerrainFetches ff;
+    ff.detail = kTf13;
+    ff.base = kTf3;
+    ff.far_u = kTableU;
+    ff.far_v = kTableV;
+    TerrainMaterialInputs fm;
+    if (!MakeTerrainMaterialInputs(fp, true, vs, ps, ff, &fm) || !fm.valid || !fm.adaptive) return 131;
+    if (std::memcmp(fm.detail_fetch, kTf13, 24) || std::memcmp(fm.far_u_fetch, kTableU, 24) ||
+        std::memcmp(fm.far_v_fetch, kTableV, 24) || fm.weight_fetch[0] != 0) return 132;
+    if (!Near(fm.base_uv[0], 1.0f / 384, 1e-7f) || !Near(fm.base_uv[2], -32.0f / 384, 1e-6f) ||
+        !Near(fm.base_uv[3], -64.0f / 384, 1e-6f)) return 133;
+    if (!Near(fm.far_table[0], 16.0f / 17, 1e-6f) || !Near(fm.far_table[1], 0.5f / 17, 1e-7f) ||
+        fm.far_table[2] != 0.5f || fm.far_table[3] != 0.5f || fm.far_patch[0] != 0.0f || fm.far_patch[1] != 0.0f)
+      return 134;
+    if (fm.base_pow != 2.0f || fm.fade[0] != 0.0005f || fm.eye[2] != 30.0f) return 135;
+    // Knot k of patch column 1, row 1 is texel 17 + k of row 1 of a 34 x 2 table.
+    float knot[2];
+    TerrainFarKnot(fm, 1.0f, 1.0f, 0, knot);
+    if (uint32_t(knot[0] * 34) != 17 || uint32_t(knot[1] * 2) != 1) return 136;
+    // The knot is the centre of its texel: (1 + 0.5 / 17) / 2 across, (1 + 0.5) / 2 down.
+    if (!Near(knot[0], (1.0f + 0.5f / 17) / 2, 1e-6f) || !Near(knot[1], 0.75f, 1e-6f)) return 141;
+    TerrainFarKnot(fm, 1.0f, 1.0f, 16, knot);
+    if (uint32_t(knot[0] * 34) != 33 || uint32_t(knot[1] * 2) != 1) return 137;
+    // The far kind needs both tables and no weight map.
+    TerrainFetches fg = ff;
+    fg.far_v = nullptr;
+    bad = fm;
+    if (MakeTerrainMaterialInputs(fp, true, vs, ps, fg, &bad) || bad.valid) return 138;
+    // The distance of a far draw is to the patch position itself (its pixel shader reads no matrix).
+    if (!Near(TerrainEyeDistance2(fm, 88.0f, 152.0f, 20.0f), 308.0f, 1e-3f)) return 139;
+  }
+
   std::cout << "PASS: terrain patch\n";
   return 0;
 }

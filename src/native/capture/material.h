@@ -73,8 +73,11 @@ inline bool ComposeAlphaScale(const float* consts, int n, float* out) {
   return true;
 }
 
-// ps-albedo.json "kind": what the shader draws (terrain entries get texture slots later).
-enum class MaterialKind : uint8_t { kPlain, kTerrainLayer, kTerrainFar };
+// ps-albedo.json "kind": what the shader draws. The terrain kinds (FABLE2_PS_TERRAIN, with the
+// texture slots of the base map and of the detail or far colour texture) are a blended ground layer,
+// the opaque far ground, and the far ground multiplied by the fade the layers leave (the underlay
+// the layers add to); frame-map section 13, "Terrain".
+enum class MaterialKind : uint8_t { kPlain, kTerrainLayer, kTerrainFar, kTerrainFarFade };
 
 struct Material {
   MaterialStatus status = MaterialStatus::kPsUnknown;

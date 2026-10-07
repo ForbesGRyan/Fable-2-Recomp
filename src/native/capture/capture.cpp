@@ -388,12 +388,12 @@ const std::vector<AlbedoSpec> kAlbedoTable = {
   {H, int8_t(SL), UI, UC, VI, VC, {{US0, UO0}, {US1, UO1}}, {{VS0, VO0}, {VS1, VO1}}},
 #define FABLE2_PS_NO_ALBEDO(H) {H, int8_t(-1), 0, 0, 0, 0, {}, {}},
 #define FABLE2_PS_ALPHA(H, S, SL, C, SR0, SR1, DC)
-#define FABLE2_PS_KIND(H, K)
+#define FABLE2_PS_TERRAIN(H, K, B, D)
 #include "ps_albedo_table.inc"
 #undef FABLE2_PS_ALBEDO
 #undef FABLE2_PS_NO_ALBEDO
 #undef FABLE2_PS_ALPHA
-#undef FABLE2_PS_KIND
+#undef FABLE2_PS_TERRAIN
 };
 
 // Alpha recipe per pixel shader hash (ps-albedo.json "alpha"); the source is the generated
@@ -407,29 +407,32 @@ const std::vector<PsAlphaEntry> kAlphaTable = {
 #define FABLE2_PS_NO_ALBEDO(H)
 #define FABLE2_PS_ALPHA(H, S, SL, C, SR0, SR1, DC) \
   {H, {AlphaSource((S) + 1), uint8_t(SL), uint8_t(C), {int32_t(SR0), int32_t(SR1)}, (DC) != 0}},
-#define FABLE2_PS_KIND(H, K)
+#define FABLE2_PS_TERRAIN(H, K, B, D)
 #include "ps_albedo_table.inc"
 #undef FABLE2_PS_ALBEDO
 #undef FABLE2_PS_NO_ALBEDO
 #undef FABLE2_PS_ALPHA
-#undef FABLE2_PS_KIND
+#undef FABLE2_PS_TERRAIN
 };
 
-// Kind per pixel shader hash (ps-albedo.json "kind", only entries other than plain).
-struct PsKindEntry {
+// Terrain pixel shaders (ps-albedo.json entries whose "kind" is a terrain kind): the kind and the
+// texture fetch slots of the base map and of the detail texture (far kinds: the far colour).
+// These shaders have no albedo entry, so FindAlbedo does not know them.
+struct PsTerrainEntry {
   uint64_t ps_hash;
   MaterialKind kind;
+  uint8_t base_slot, detail_slot;
 };
-const std::vector<PsKindEntry> kKindTable = {
+const std::vector<PsTerrainEntry> kPsTerrainTable = {
 #define FABLE2_PS_ALBEDO(H, SL, UI, UC, US0, UO0, US1, UO1, VI, VC, VS0, VO0, VS1, VO1)
 #define FABLE2_PS_NO_ALBEDO(H)
 #define FABLE2_PS_ALPHA(H, S, SL, C, SR0, SR1, DC)
-#define FABLE2_PS_KIND(H, K) {H, MaterialKind(K)},
+#define FABLE2_PS_TERRAIN(H, K, B, D) {H, MaterialKind(K), uint8_t(B), uint8_t(D)},
 #include "ps_albedo_table.inc"
 #undef FABLE2_PS_ALBEDO
 #undef FABLE2_PS_NO_ALBEDO
 #undef FABLE2_PS_ALPHA
-#undef FABLE2_PS_KIND
+#undef FABLE2_PS_TERRAIN
 };
 const std::vector<VsUvSpec> kVsUvTable = {
 #define FABLE2_VS_TRANSFORM(H, B, L, P, D)
@@ -463,11 +466,11 @@ AlphaSpec FindAlpha(uint64_t ps_hash) {
   return {};
 }
 
-MaterialKind FindKind(uint64_t ps_hash) {
-  for (const PsKindEntry& e : kKindTable) {
-    if (e.ps_hash == ps_hash) return e.kind;
+const PsTerrainEntry* FindPsTerrain(uint64_t ps_hash) {
+  for (const PsTerrainEntry& e : kPsTerrainTable) {
+    if (e.ps_hash == ps_hash) return &e;
   }
-  return MaterialKind::kPlain;
+  return nullptr;
 }
 
 const VsUvSpec* FindVsUv(uint64_t vs_hash, uint8_t interp, uint8_t comp) {
@@ -737,6 +740,43 @@ UcodeRef ReadVsUcode(uint32_t obj, uint32_t v) { return ReadUcode(kVsLayout, obj
 // unpatched by both the shader flush and GpuLoadShaders).
 UcodeRef ReadPsUcode(uint32_t obj) { return ReadUcode(kPsLayout, obj, 0); }
 
+// Discovery evidence: the literal constants a shader object uploads itself
+// (xdk_layout.h, kShaderLiteralTableField; zero in the device banks), as
+// [{"reg":first register,"v":[floats]},...]: [] for a shader without a table,
+// null when the table or a run cannot be read. Bounded: the first
+// kMaxLiteralRuns runs, kMaxLiteralDwords dwords of each.
+constexpr uint32_t kMaxLiteralRuns = 4;
+constexpr uint32_t kMaxLiteralDwords = 64;
+
+std::string LiteralsJson(const UcodeLayout& l, uint32_t obj, uint32_t variant) {
+  uint32_t table_off = 0, base = 0, size = 0;
+  const uint32_t header = obj + l.header_offset;
+  if (!obj || !ReadVirtualBe32(header + xdk::kShaderLiteralTableField + 8 * variant, &table_off) ||
+      !ReadVirtualBe32(obj + 4 * l.base_dword, &base)) {
+    return "null";
+  }
+  if (table_off == 0) return "[]";
+  const uint32_t table = header + table_off;
+  if (!ReadVirtualBe32(table + xdk::kLiteralTableSizeOffset, &size)) return "null";
+  size = std::min(size, 8 * kMaxLiteralRuns);
+  const uint8_t* entries = size ? ReadVirtual(table + xdk::kLiteralTableEntriesOffset, size) : nullptr;
+  if (size && !entries) return "null";
+  xdk::LiteralRun runs[kMaxLiteralRuns];
+  const uint32_t n = xdk::ParseLiteralRuns(entries, size, runs, kMaxLiteralRuns);
+  std::string s = "[";
+  char buf[32];
+  for (uint32_t i = 0; i < n; ++i) {
+    const uint32_t dwords = std::min<uint32_t>(runs[i].dwords, kMaxLiteralDwords);
+    const uint8_t* v = ReadPhysical(xdk::GpuAddress(base + runs[i].offset), 4 * dwords);
+    if (!v) return "null";
+    std::snprintf(buf, sizeof(buf), "%s{\"reg\":%u,\"v\":", i ? "," : "", runs[i].first_register);
+    s += buf;
+    s += BeFloats(v, dwords);
+    s += "}";
+  }
+  return s + "]";
+}
+
 // Microcode size in bytes of variant `v` of a vertex shader object, from its
 // variant record (xdk_layout.h) without reading the microcode.
 bool ReadVsUcodeBytes(uint32_t obj, uint32_t v, uint32_t* bytes) {
@@ -900,7 +940,7 @@ struct PsInfo {
   std::vector<uint32_t> tex_slots;     // TextureFetchSlots (vfetch_decode.h)
   const AlbedoSpec* albedo = nullptr;  // FindAlbedo; slot -1 = samples no albedo
   AlphaSpec alpha;                     // FindAlpha; kNone = no recipe
-  MaterialKind kind = MaterialKind::kPlain;
+  const PsTerrainEntry* terrain = nullptr;  // FindPsTerrain: a terrain pixel shader (the entry is stable)
   uint32_t phys = 0;
   uint32_t bytes = 0;
 };
@@ -926,7 +966,7 @@ const PsInfo* LookupPs(uint32_t obj) {
   e.tex_slots = TextureFetchSlots(u.dwords.data(), u.dwords.size());
   e.albedo = FindAlbedo(u.hash);
   e.alpha = FindAlpha(u.hash);
-  e.kind = FindKind(u.hash);
+  e.terrain = FindPsTerrain(u.hash);
   e.phys = u.phys;
   e.bytes = u.bytes;
   return &e;
@@ -1274,6 +1314,29 @@ void AppendPixelConstants(std::string& row, uint32_t device) {
   row += BeFloats(p, 128);
 }
 
+// Discovery evidence for the terrain shaders (frame-map section 13, "Terrain"):
+// the pixel constants above c31 that they read, from the same bank, as
+// "pc":{"cN":[4 floats]} (a register that cannot be read is left out). c45 is
+// the slope blend of the layer shaders paired with C30A; the others are
+// lighting, sun and fog terms the unlit rule drops, recorded so that what they
+// hold is known.
+void AppendTerrainPixelConstants(std::string& row, uint32_t device) {
+  const uint32_t bank_ptr = g_ps_bank_ptr.load(std::memory_order_relaxed);
+  const uint32_t bank = bank_ptr ? bank_ptr : device + xdk::kDevicePsConstantsOffset;
+  row += ",\"pc\":{";
+  bool first = true;
+  char buf[24];
+  for (uint32_t c : {45u, 66u, 67u, 68u, 80u, 81u, 87u, 88u, 109u, 112u}) {
+    const uint8_t* p = device ? ReadVirtual(bank + 16 * c, 16) : nullptr;
+    if (!p) continue;
+    std::snprintf(buf, sizeof(buf), "%s\"c%u\":", first ? "" : ",", c);
+    row += buf;
+    row += BeFloats(p, 4);
+    first = false;
+  }
+  row += "}";
+}
+
 // The nine words of a draw's render state (render_state.h) from the device's
 // register shadows, as AppendRenderState reads them, and the low word of its bin
 // mask. `read` stays false when any of them cannot be read.
@@ -1502,7 +1565,10 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
 // patches, r7 * 4 tessellation factors from the bound index buffer at r6): the
 // vertex shader, the constants the terrain shaders read and texture fetch
 // constants 16-19 and every slot the vertex and pixel shaders sample from the device shadow (each 2D
-// texture also dumped, discovery only).
+// texture also dumped, discovery only), then what a terrain material needs besides (frame-map
+// section 13, "Terrain"): the pixel constants ("pconst" c0..c31 as draw rows have them, "pc" the
+// higher registers the terrain shaders read), the pixel bool word ("pbool") and the literal
+// constants of the two shaders ("vs_lit", "ps_lit").
 void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const DeviceSnapshot& dev,
                   bool in_scene) {
   char buf[512];
@@ -1530,8 +1596,10 @@ void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
       g_state.vs_bank_ptr ? g_state.vs_bank_ptr : device + xdk::kDeviceVsConstantsOffset;
   row += ",\"consts\":{";
   bool first = true;
-  for (uint32_t c : {0u, 1u, 2u, 3u, 8u, 11u, 46u, 47u, 72u, 113u, 114u, 115u, 252u, 253u, 254u,
-                     255u}) {
+  // c4..c6 (the world matrix of the layers), c14 (the base map scale) and c19 came with the terrain
+  // material: rows written before it have none of them.
+  for (uint32_t c : {0u, 1u, 2u, 3u, 4u, 5u, 6u, 8u, 11u, 14u, 19u, 46u, 47u, 72u, 113u, 114u, 115u, 252u,
+                     253u, 254u, 255u}) {
     const uint8_t* p = ReadVirtual(bank_ptr + 16 * c, 16);
     if (!p) continue;
     std::snprintf(buf, sizeof(buf), "%s\"c%u\":[", first ? "" : ",", c);
@@ -1580,7 +1648,19 @@ void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
     row += buf;
     row += p ? HexDwords(v, 6) : "null";
   }
-  row += "}}\n";
+  row += "}";
+  AppendPixelConstants(row, device);
+  AppendTerrainPixelConstants(row, device);
+  if (const uint8_t* bools = ReadVirtual(device + xdk::kDevicePsBoolConstantsOffset, 4)) {
+    std::snprintf(buf, sizeof(buf), ",\"pbool\":\"0x%08X\"", LoadBe32(bools));
+    row += buf;
+  }
+  // The immediate path runs a patched copy of the vertex microcode, but the table is the object's.
+  row += ",\"vs_lit\":";
+  row += vc_ok ? LiteralsJson(kVsLayout, vc.obj, vc.variant) : "null";
+  row += ",\"ps_lit\":";
+  row += ps_obj ? LiteralsJson(kPsLayout, ps_obj, 0) : "null";
+  row += "}\n";
   std::fputs(row.c_str(), g_file);
 }
 
@@ -1896,12 +1976,60 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders)
   return extra;
 }
 
+// The material inputs of a terrain draw (terrain_patch.h; frame-map section 13,
+// "Terrain"), for a patch that was built. The draw's pixel shader must have a
+// terrain entry (ps-albedo.json) of the builder's kind: a layer shader on the
+// layer builder, a far shader on the adaptive one. The registers
+// MakeTerrainMaterialInputs names are read into t_bank and t_ps_bank (the pixel
+// bank as FillMaterial reads an alpha recipe's scale) and at most four fetch
+// constants from the device shadow: bounded reads, and anything unreadable
+// leaves in.terrain.material invalid. Also records the pixel shader and its
+// kind in the material; nothing the renderer draws depends on any of it yet.
+void FillTerrainMaterial(uint32_t device, const DeviceSnapshot& dev, bool adaptive, DrawInputs& in) {
+  in.terrain.material = TerrainMaterialInputs{};
+  if (!in.terrain.active) return;
+  uint32_t ps_obj = 0;
+  const PsInfo* ps = ChoosePs(dev, &ps_obj) ? LookupPs(ps_obj) : nullptr;
+  if (!ps) return;
+  in.material.ps_hash = ps->hash;
+  const PsTerrainEntry* entry = ps->terrain;  // points into the table: stable
+  if (!entry) return;
+  in.material.kind = entry->kind;
+  if ((entry->kind != MaterialKind::kTerrainLayer) != adaptive) return;
+  bool ok = ReadBankRegisters(device, kTerrainVsBaseScaleReg, 1) && ReadBankRegisters(device, kTerrainVsCullReg, 2);
+  ok = ok && (adaptive ? ReadBankRegisters(device, kTerrainVsFarKnotReg, 1)
+                       : ReadBankRegisters(device, kTerrainVsDetailReg, 1) && ReadBankRegisters(device, kTerrainVsWorldReg, 3));
+  for (uint32_t reg : {kTerrainPsEyeReg, kTerrainPsBaseReg, kTerrainPsFadeReg}) {
+    ok = ok && ReadPsBankRegisters(device, reg, 1);
+  }
+  if (!ok) return;
+  uint32_t fc[4][6];
+  auto fetch = [&](uint32_t slot, uint32_t* out) -> const uint32_t* {
+    const uint8_t* p =
+        slot < 32 ? ReadVirtual(device + xdk::kDeviceVertexFetchOffset + xdk::kDeviceTextureFetchStride * slot, 24)
+                  : nullptr;
+    if (!p) return nullptr;
+    for (int i = 0; i < 6; ++i) out[i] = LoadBe32(p + 4 * i);
+    return out;
+  };
+  TerrainFetches f;
+  f.detail = fetch(entry->detail_slot, fc[0]);
+  f.base = fetch(entry->base_slot, fc[1]);
+  if (adaptive) {
+    f.far_u = fetch(kTerrainFarUFetch, fc[2]);
+    f.far_v = fetch(kTerrainFarVFetch, fc[3]);
+  } else {
+    f.weight = fetch(kTerrainWeightFetch, fc[2]);
+  }
+  MakeTerrainMaterialInputs(in.terrain, adaptive, t_bank, t_ps_bank, f, &in.terrain.material);
+}
+
 // Fills `in` for a tessellated terrain draw (DrawIndx:8221C9C8, the adaptive
 // DrawIndx:82207C30): patches [first, first + patches) of the bound vertex
 // shader's terrain grid (terrain_patch.h). A shader without a terrain entry
 // leaves the draw unsupported; an unhandled heightmap leaves `terrain`
-// inactive (kUnknownPosFormat).
-SkipReason FillTerrainInputs(uint32_t device, uint32_t first, uint32_t patches, DrawInputs& in) {
+// inactive (kUnknownPosFormat). `adaptive`: the draw is the adaptive builder's.
+SkipReason FillTerrainInputs(uint32_t device, uint32_t first, uint32_t patches, bool adaptive, DrawInputs& in) {
   if (const SkipReason c = CountSkip(patches); c != SkipReason::kNone) return c;
   DeviceSnapshot dev;
   if (!ReadDevice(device, &dev)) return SkipReason::kNone;
@@ -1939,12 +2067,15 @@ SkipReason FillTerrainInputs(uint32_t device, uint32_t first, uint32_t patches, 
   uint32_t fc[6];
   for (int i = 0; i < 6; ++i) fc[i] = LoadBe32(p + 4 * i);
   MakeTerrainPatch(s, t_bank, fc, first, patches, &in.terrain);
+  FillTerrainMaterial(device, dev, adaptive, in);
   return SkipReason::kNone;
 }
 
 // Albedo texture and UVs for a recorded draw (material.h). Never changes the
-// draw's skip reason. Terrain draws need no lookups; a draw whose device was
-// not read stays ps-unknown.
+// draw's skip reason. Terrain draws need no lookups here (FillTerrainMaterial
+// has recorded their pixel shader, kind and inputs; the status stays terrain,
+// which the renderer draws as flat clay); a draw whose device was not read
+// stays ps-unknown.
 void FillMaterial(uint32_t device, const DrawShaders& shaders, DrawInputs& in) {
   Material& m = in.material;
   if (in.terrain_shader) {
@@ -1962,7 +2093,7 @@ void FillMaterial(uint32_t device, const DrawShaders& shaders, DrawInputs& in) {
   if (!ps) return;
   // Copied at once: ps points into t_ps_cache (the table entry is stable).
   m.ps_hash = ps->hash;
-  m.kind = ps->kind;
+  m.kind = ps->terrain ? ps->terrain->kind : MaterialKind::kPlain;
   if (ps->alpha.source != AlphaSource::kNone) {
     // The recipe's scale constants (register * 4 + component) at this draw, multiplied; a
     // constant that cannot be read or is not finite leaves the draw without a recipe.
@@ -2049,14 +2180,14 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
     in.prim = kPrimQuadPatch;
     in.start = a.r[2];
     in.count = a.r[3];
-    extra = FillTerrainInputs(device, in.start, in.count, in);
+    extra = FillTerrainInputs(device, in.start, in.count, false, in);
   } else if (id == kHook_DrawIndx_82207C30) {
     const uint8_t* hos = device ? ReadVirtual(device + xdk::kDeviceHosCntlOffset, 4) : nullptr;
     if (hos && (LoadBe32(hos) & 3) == xdk::kHosCntlAdaptive) {
       in.prim = kPrimQuadPatch;
       in.start = 0;
       in.count = a.r[4];
-      extra = FillTerrainInputs(device, 0, in.count, in);
+      extra = FillTerrainInputs(device, 0, in.count, true, in);
     }
   }
   DrawShaders shaders;

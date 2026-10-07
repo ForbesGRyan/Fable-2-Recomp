@@ -333,6 +333,52 @@ inline constexpr uint32_t kPsUcodeAddressDword = 0;
 inline constexpr uint32_t kPsUcodeSizeDword = 1;
 inline constexpr uint32_t kPsUcodeSizeShift = 0;  // bytes
 
+// A shader's literal constants (the registers its own code sets: c252..c255 in
+// the terrain shaders) are not in the device's constant banks. GpuLoadShaders
+// uploads them from a table in the shader object with 0x82221CB0 (r3 device,
+// r4 header, r5 base, r7 variant): for the vertex shader with header = object +
+// kVsHeaderOffset and base = object dword kVsUcodeBaseDword (0x82221B60 `lwz
+// r5,32(r31)`, 0x82221B68 `addi r4,r31,872`, call at 0x82221B70), for the pixel
+// shader with header = object + kPsHeaderOffset, base = object dword
+// kPsUcodeBaseDword and variant 0 (0x82221BDC..0x82221BF4). The table is at
+// header + header[kShaderLiteralTableField + 8 * variant], 0 = none
+// (0x82221CB8..0x82221CD8); its dword at kLiteralTableSizeOffset is the byte
+// size of the entries, which start at kLiteralTableEntriesOffset
+// (0x82221CDC..0x82221CE8). An entry is {u16 first register, u16 dword count,
+// u32 offset} (0x82221CF8..0x82221D10); a zero count ends the list (another
+// list follows it). The values are `count` big-endian dwords at
+// GpuAddress(base + offset), loaded with LOAD_ALU_CONSTANT at dword index
+// first * 4 (0x82221D30..0x82221D6C). Runtime: sub-project 5 read seven vertex
+// shaders' tables this way with a temporary diagnostic (frame-map section 12,
+// "Literals": one entry each, registers 252-255); the pixel side has not run.
+inline constexpr uint32_t kShaderLiteralTableField = 0x14;
+inline constexpr uint32_t kLiteralTableSizeOffset = 0x10;
+inline constexpr uint32_t kLiteralTableEntriesOffset = 0x14;
+
+struct LiteralRun {
+  uint16_t first_register;
+  uint16_t dwords;
+  uint32_t offset;  // of the values, from the shader object's base dword
+};
+
+// The entries of a literal table (`size` big-endian bytes at `entries`) as at
+// most `max` runs; returns how many. Stops at a zero count or at an entry that
+// does not fit in `size`.
+inline uint32_t ParseLiteralRuns(const uint8_t* entries, uint32_t size, LiteralRun* out, uint32_t max) {
+  uint32_t n = 0;
+  if (!entries) return 0;
+  for (uint32_t at = 0; n < max && at + 4 <= size;) {
+    const uint16_t first = uint16_t(entries[at] << 8 | entries[at + 1]);
+    const uint16_t count = uint16_t(entries[at + 2] << 8 | entries[at + 3]);
+    if (count == 0 || at + 8 > size) break;
+    out[n++] = {first, count,
+                uint32_t(entries[at + 4]) << 24 | uint32_t(entries[at + 5]) << 16 |
+                    uint32_t(entries[at + 6]) << 8 | uint32_t(entries[at + 7])};
+    at += 8;
+  }
+  return n;
+}
+
 // XDK CPU-virtual -> GPU physical address conversion, as inlined at every
 // fetch-constant / IM_LOAD site (e.g. SetStreamSource 0x821B6DD8..0x821B6DF4):
 // the 0xE0000000 4 KB-page physical view is offset by 0x1000.

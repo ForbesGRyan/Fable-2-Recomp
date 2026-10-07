@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import struct
 import sys
@@ -205,6 +206,93 @@ class Dxt3aTest(unittest.TestCase):
     def test_format_name_in_cli_summary(self):
         self.assertEqual(tt._FORMAT_NAMES[58], "DXT3A")
 
+
+def smooth_value(x, y):
+    """A smooth 4-bit image: neighbouring texels differ by at most 1."""
+    return int(round(7.5 + 7.5 * math.sin(x / 9.0) * math.cos(y / 7.0)))
+
+
+def smooth_guest_image(w, h, nibble=lambda i: i, row=lambda r: r):
+    """The smooth image as linear 8in16 guest memory (pitch 32 blocks). `nibble` and `row` say where
+    texel i of a row and row r of a block are stored; the identity is the format's own layout."""
+    wb, hb = (w + 3) // 4, (h + 3) // 4
+    buf = bytearray(hb * 32 * 8)
+    for by in range(hb):
+        for bx in range(wb):
+            words = [0, 0, 0, 0]
+            for r in range(4):
+                for i in range(4):
+                    words[row(r)] |= smooth_value(bx * 4 + i, by * 4 + r) << (4 * nibble(i))
+            post = b"".join(bytes([v & 255, v >> 8]) for v in words)
+            o = by * 32 * 8 + bx * 8
+            buf[o:o + 8] = tt._swap(post, 1)
+    return bytes(buf)
+
+
+class BlockStepTest(unittest.TestCase):
+    """block_step_stats: the mean absolute step between neighbouring texels inside a 4x4 block and across a
+    block edge, horizontally and vertically. A decode with the right layout gives about the same value on
+    both sides; a wrong nibble order shows in the horizontal pair, a wrong row order in the vertical one."""
+    W, H = 96, 64
+
+    def _stats(self, **order):
+        w, h, r8 = tt.decode_r8(smooth_guest_image(self.W, self.H, **order), fc_for(58, self.W, self.H, 128, False))
+        return tt.block_step_stats(w, h, r8)
+
+    def test_hand_counted_steps(self):
+        # 8 x 1: 0 17 34 51 | 68 85 102 255: three in-block steps of 17 per block side (six in all), one across of 17.
+        s = tt.block_step_stats(8, 1, bytes([0, 17, 34, 51, 68, 85, 102, 255]))
+        self.assertAlmostEqual(s["h_in"], (5 * 17 + 153) / 6)
+        self.assertAlmostEqual(s["h_cross"], 17.0)
+        self.assertEqual((s["v_in"], s["v_cross"]), (0.0, 0.0))
+        # 1 x 8 with the same values: the vertical pair instead.
+        s = tt.block_step_stats(1, 8, bytes([0, 17, 34, 51, 68, 85, 102, 255]))
+        self.assertAlmostEqual(s["v_in"], (5 * 17 + 153) / 6)
+        self.assertAlmostEqual(s["v_cross"], 17.0)
+        self.assertEqual((s["h_in"], s["h_cross"]), (0.0, 0.0))
+
+    def test_correct_layout_is_even(self):
+        s = self._stats()
+        self.assertGreater(s["h_in"], 0)
+        self.assertGreater(s["v_in"], 0)
+        self.assertLess(abs(s["h_cross"] / s["h_in"] - 1), 0.25)
+        self.assertLess(abs(s["v_cross"] / s["v_in"] - 1), 0.25)
+
+    def test_wrong_nibble_order_shows_horizontally(self):
+        good = self._stats()
+        mirrored = self._stats(nibble=lambda i: 3 - i)     # texel i in nibble 3 - i
+        pairs = self._stats(nibble=lambda i: i ^ 1)        # the two nibbles of each byte exchanged
+        for s in (mirrored, pairs):
+            self.assertGreater(s["h_cross"] / s["h_in"], 1.5)
+            self.assertLess(abs(s["v_cross"] / s["v_in"] - 1), 0.25)
+        # Mirrored texels keep the steps inside a block and tear the block edges; exchanged pairs raise both.
+        self.assertAlmostEqual(mirrored["h_in"], good["h_in"])
+        self.assertGreater(pairs["h_in"], 1.3 * good["h_in"])
+        self.assertGreater(mirrored["h_cross"], 3 * good["h_cross"])
+
+    def test_wrong_row_order_shows_vertically(self):
+        good = self._stats()
+        mirrored = self._stats(row=lambda r: 3 - r)
+        pairs = self._stats(row=lambda r: r ^ 1)           # the two 16-bit rows of each dword exchanged
+        for s in (mirrored, pairs):
+            self.assertGreater(s["v_cross"] / s["v_in"], 1.5)
+            self.assertLess(abs(s["h_cross"] / s["h_in"] - 1), 0.25)
+        self.assertAlmostEqual(mirrored["v_in"], good["v_in"])
+        self.assertGreater(pairs["v_in"], 1.3 * good["v_in"])
+
+    def test_cli_block_stat_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "tex").mkdir()
+            fc = fc_for(58, self.W, self.H, 128, False)
+            (root / "tex" / "w.bin").write_bytes(smooth_guest_image(self.W, self.H))
+            row = {"kind": "texture", "file": "tex/w.bin", "bytes": 1, "fc": [f"0x{x:08X}" for x in fc]}
+            (root / "cap.jsonl").write_text(json.dumps(row) + chr(10))
+            lines = tt.main([str(root / "cap.jsonl"), "--out", str(root / "out"), "--block-stat"])
+        stat = [line for line in lines if "block steps" in line]
+        self.assertEqual(len(stat), 1)
+        self.assertRegex(stat[0], r"horizontal in-block [0-9.]+ across [0-9.]+ \(ratio [0-9.]+\), "
+                                  r"vertical in-block [0-9.]+ across [0-9.]+ \(ratio [0-9.]+\)")
 
 
 def png_pixel(path):

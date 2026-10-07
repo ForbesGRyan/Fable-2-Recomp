@@ -58,6 +58,12 @@ def _albedo(**extra):
     return e
 
 
+def _terrain(**extra):
+    e = {"kind": "terrain-layer", "base_slot": 3, "detail_slot": 0, "manual": True, "evidence": "e"}
+    e.update(extra)
+    return e
+
+
 class GenAlphaKindTest(unittest.TestCase):
     H = "0x00000000000000AA"
 
@@ -88,16 +94,26 @@ class GenAlphaKindTest(unittest.TestCase):
         out = self._gen(_albedo(alpha={"source": "fetch", "slot": 2, "component": "x", "divide_by_alpha": False}))
         self.assertEqual(out[2], a + "2, 2, 0, -1, -1, 0)")
 
-    def test_kind(self):
+    def test_plain_kind_adds_nothing(self):
         self.assertEqual(len(self._gen(_albedo(kind="plain"))), 2)
-        self.assertEqual(self._gen(_albedo(kind="terrain-layer"))[2], "FABLE2_PS_KIND(0x00000000000000AAull, 1)")
-        self.assertEqual(self._gen(_albedo(kind="terrain-far"))[2], "FABLE2_PS_KIND(0x00000000000000AAull, 2)")
 
-    def test_order_alpha_then_kind_after_albedo_lines(self):
-        data = {"0x2": _albedo(alpha={"source": "one"}, kind="terrain-far"), "0x1": _albedo()}
+    def test_terrain_kinds(self):
+        # A terrain entry is one line, kind 1 layer / 2 far / 3 far with the fade, then the texture fetch
+        # slots of the base map and of the detail (far: the far colour) texture. It has no albedo line: the
+        # runtime's albedo lookup does not know the shader.
+        t = "FABLE2_PS_TERRAIN(0x00000000000000AAull, "
+        self.assertEqual(self._gen(_terrain()), [self._gen(_terrain())[0], t + "1, 3, 0)"])
+        self.assertEqual(self._gen(_terrain(kind="terrain-far", detail_slot=13))[1], t + "2, 3, 13)")
+        self.assertEqual(self._gen(_terrain(kind="terrain-far-fade", detail_slot=13))[1], t + "3, 3, 13)")
+        self.assertEqual(self._gen(_terrain(base_slot=31, detail_slot=30))[1], t + "1, 31, 30)")
+
+    def test_order_alpha_then_terrain_after_albedo_lines(self):
+        data = {"0x3": _terrain(), "0x2": _albedo(alpha={"source": "one"}), "0x1": _albedo(), "0x4": _terrain()}
         out = gen_albedo_table.generate(data).splitlines()
         self.assertEqual([l.split("(")[0] for l in out[1:]],
-                         ["FABLE2_PS_ALBEDO", "FABLE2_PS_ALBEDO", "FABLE2_PS_ALPHA", "FABLE2_PS_KIND"])
+                         ["FABLE2_PS_ALBEDO", "FABLE2_PS_ALBEDO", "FABLE2_PS_ALPHA", "FABLE2_PS_TERRAIN",
+                          "FABLE2_PS_TERRAIN"])
+        self.assertNotIn("FABLE2_PS_KIND", "".join(out))
 
     def test_rejects_invalid(self):
         bad = [
@@ -121,6 +137,22 @@ class GenAlphaKindTest(unittest.TestCase):
             _albedo(alpha={"source": "albedo", "component": "x", "divide_by_alpha": "true"}),
             _albedo(alpha={"source": "one", "divide_by_alpha": True}),
             _albedo(kind="water"),
+            _albedo(kind="terrain-layer"),                       # a terrain kind on an albedo entry
+            _albedo(base_slot=3, detail_slot=0),                 # terrain slots on a plain entry
+            _albedo(kind="plain", detail_slot=0),
+            _terrain(slot=0),
+            _terrain(u={"input": "r0.x", "stages": []}),
+            _terrain(alpha={"source": "one"}),
+            _terrain(no_albedo="terrain"),
+            _terrain(base_slot=None),
+            _terrain(detail_slot=32),
+            _terrain(detail_slot=-1),
+            _terrain(base_slot=True),
+            _terrain(base_slot="3"),
+            _terrain(base_slot=0, detail_slot=0),                # one slot named twice
+            {"kind": "terrain-far", "base_slot": 3, "manual": True, "evidence": "e"},
+            {"kind": "terrain-layer", "detail_slot": 0, "manual": True, "evidence": "e"},
+            {"no_albedo": "fog", "manual": True, "evidence": "e", "kind": "terrain-layer"},
             {"no_albedo": "fog", "manual": True, "evidence": "e", "alpha": {"source": "one"}},
         ]
         for entry in bad:

@@ -4,10 +4,13 @@ Supported formats: DXT1 (18), DXT2_3 (19), DXT4_5 (20), 8888 (6), DXT3A (58, one
 The fetch constant is six host-order dwords (xenos::xe_gpu_texture_fetch_t).
 
 Usage: texture_thumb.py <capture.jsonl> --out <dir> [--alpha] [--base 0x<fetch dword 1> ...] [--max-edge N]
+                        [--block-stat]
 Writes <out>/<fetch dword 1>.png for each "texture" row of the capture (the dumps are read relative to the
 capture's folder, or --tex-root), with --alpha also <...>_alpha.png, the alpha channel alone as opaque grey
 (the cut-out shape of an alpha-tested texture), and prints one line per texture with the shares of texels
-whose alpha is 0, 255 and in between.
+whose alpha is 0, 255 and in between. --block-stat adds, for each DXT3A texture, the mean step between
+neighbouring texels inside a 4x4 block and across a block edge (block_step_stats): a check of the block
+layout that a thumbnail cannot give.
 """
 import argparse
 import json
@@ -100,6 +103,31 @@ def decode_r8(data, fc):
                     if x < w and y < h:
                         out[y * w + x] = ((row >> (4 * i)) & 15) * 17
     return w, h, bytes(out)
+
+
+def block_step_stats(w, h, values):
+    """Mean absolute difference between neighbouring texels of a one-channel image (row-major bytes),
+    by where the pair lies on the 4x4 block grid: "h_in" (x % 4 in 0..2, both in one block) and
+    "h_cross" (x % 4 == 3, the pair straddles a block edge) for horizontal neighbours, "v_in" and
+    "v_cross" the same for vertical ones. A block format decoded with its right layout gives about
+    the same value inside and across (the image does not know where the blocks are). A wrong nibble
+    order shows in the horizontal pair and a wrong row order in the vertical one: mirrored texels
+    or rows keep the in-block steps and tear the block edges (across far above inside); exchanged
+    pairs (the nibbles of a byte, the 16-bit rows of a dword) raise both, across more. A side with
+    no pair gives 0."""
+    acc = {"h_in": [0, 0], "h_cross": [0, 0], "v_in": [0, 0], "v_cross": [0, 0]}
+    for y in range(h):
+        row = values[y * w:(y + 1) * w]
+        for x in range(w - 1):
+            a = acc["h_cross" if x % 4 == 3 else "h_in"]
+            a[0] += abs(row[x + 1] - row[x])
+            a[1] += 1
+        if y + 1 < h:
+            below = values[(y + 1) * w:(y + 2) * w]
+            a = acc["v_cross" if y % 4 == 3 else "v_in"]
+            a[0] += sum(abs(p - q) for p, q in zip(row, below))
+            a[1] += w
+    return {k: (s / n if n else 0.0) for k, (s, n) in acc.items()}
 
 
 def decode_rgba(data, fc):
@@ -209,6 +237,8 @@ def main(argv=None):
     ap.add_argument("--base", action="append", default=[], help="only textures with this fetch dword 1 (hex)")
     ap.add_argument("--tex-root", help="folder the rows' file paths are relative to (default: the capture's)")
     ap.add_argument("--max-edge", type=int, default=256)
+    ap.add_argument("--block-stat", action="store_true",
+                    help="for DXT3A textures also print block_step_stats (steps inside and across 4x4 blocks)")
     a = ap.parse_args(argv)
     root = Path(a.tex_root) if a.tex_root else Path(a.capture).parent
     want = {int(b, 16) for b in a.base}
@@ -236,6 +266,15 @@ def main(argv=None):
             s = alpha_stats(rgba)
             lines.append(f"{name}: {_FORMAT_NAMES[fc[1] & 0x3F]} {w}x{h}, alpha 0: {100 * s['zero']:.1f}%, "
                          f"255: {100 * s['full']:.1f}%, between: {100 * s['between']:.1f}%")
+            if a.block_stat and (fc[1] & 0x3F) == 58:
+                b = block_step_stats(w, h, rgba[0::4])
+
+                def ratio(across, inside):
+                    return f"{across / inside:.2f}" if inside else "n/a"
+
+                lines.append(f"{name}: block steps horizontal in-block {b['h_in']:.3f} across {b['h_cross']:.3f} "
+                             f"(ratio {ratio(b['h_cross'], b['h_in'])}), vertical in-block {b['v_in']:.3f} "
+                             f"across {b['v_cross']:.3f} (ratio {ratio(b['v_cross'], b['v_in'])})")
     return lines
 
 

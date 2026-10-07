@@ -30,6 +30,7 @@
 
 #include "alloc_watch.h"
 #include "autoplay.h"
+#include "boot_save.h"
 #include "dir_manifest_heal.h"
 #include "fable2_config.h"
 #include "fable2_native_render.h"
@@ -315,6 +316,7 @@ class Fable2App : public rex::ReXApp {
   // cvar are seeded into it below so the console/overlay keep working.
   void OnPostInitLogging() override {
     StartAutoplay();
+    StartBootSave();
     // This describes the linked build, not a guarantee about DLLs replaced later.
     REXSYS_INFO("[native-build] configuration={} linked_sdk={}",
                 FABLE2_NATIVE_CONFIGURATION, FABLE2_NATIVE_SDK);
@@ -392,6 +394,31 @@ class Fable2App : public rex::ReXApp {
     fable2::stateprobe::stop();
     remote_server_.Stop();
 #endif  // FABLE2_REMOTE_CONTROL
+  }
+
+  // Boot save options (src/core/boot_save.h). Unset: nothing changes.
+  //   FABLE2_BOOT_SAVE=Hero003  load that save from the front end without menu input
+  //   FABLE2_SKIP_LOGOS=1       drop the boot logo videos
+  //   FABLE2_BOOT_TRACE=1       log front-end state changes
+  void StartBootSave() {
+    auto flag = [](const char* name) {
+      const char* v = std::getenv(name);
+      return v && v[0] == '1' && v[1] == '\0';
+    };
+    fable2::bootsave::Config& cfg = fable2::bootsave::config();
+    cfg.skip_logos = flag("FABLE2_SKIP_LOGOS");
+    cfg.trace = flag("FABLE2_BOOT_TRACE");
+    const char* hero_env = std::getenv("FABLE2_BOOT_SAVE");
+    if (hero_env && *hero_env) {
+      if (auto hero = fable2::bootsave::ParseHeroName(hero_env)) {
+        cfg.hero = *hero;
+        REXSYS_INFO("[boot-save] armed: {}", cfg.hero);
+      } else {
+        REXSYS_WARN("[boot-save] invalid FABLE2_BOOT_SAVE '{}' (expected HeroNNN); ignored", hero_env);
+      }
+    }
+    if (cfg.skip_logos) REXSYS_INFO("[boot-save] FABLE2_SKIP_LOGOS=1");
+    if (cfg.trace) REXSYS_INFO("[boot-save] FABLE2_BOOT_TRACE=1");
   }
 
   // Parse FABLE2_AUTOPLAY / FABLE2_AUTOPLAY_HOLD_MS and start the press thread.
@@ -610,6 +637,7 @@ class Fable2App : public rex::ReXApp {
     std::error_code ec;
     paths.user_data_root = exe_dir / "saves";
     std::filesystem::create_directories(paths.user_data_root, ec);
+    fable2::bootsave::config().saves_root = paths.user_data_root;
     paths.cache_root = exe_dir / "cache";
     std::filesystem::create_directories(paths.cache_root, ec);
 

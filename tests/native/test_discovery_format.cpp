@@ -15,6 +15,21 @@ int main() {
   std::string s = "x";
   fable2::native::capture::AppendFloat(s, 0.25f);
   if (s != "x0.25") return 7;
+  // Constant registers by their bits (discovery rows "pfull", "ptiles", "pbank_diff"): 32 hex
+  // digits per register, x first; a register that was not read is 32 dashes; no register, "".
+  const uint32_t regs[12] = {0x3F800000, 0xBF000000, 0x00000000, 0x7FC00001, 1, 2, 3, 4,
+                             0xDEADBEEF, 0x80000000, 0x0000000A, 0xFFFFFFFF};
+  const bool have[3] = {true, false, true};
+  if (fable2::native::capture::RegistersHex(regs, have, 3) !=
+      "3F800000BF000000000000007FC00001--------------------------------DEADBEEF800000000000000AFFFFFFFF") {
+    return 8;
+  }
+  if (fable2::native::capture::RegistersHex(regs + 4, nullptr, 1) != "00000001000000020000000300000004") return 9;
+  if (fable2::native::capture::RegistersHex(regs, have, 0) != "") return 10;
+  if (fable2::native::capture::RegistersHex(nullptr, have, 2) !=
+      "----------------------------------------------------------------") {
+    return 11;
+  }
   std::cout << "PASS: discovery format\n";
   return 0;
 }

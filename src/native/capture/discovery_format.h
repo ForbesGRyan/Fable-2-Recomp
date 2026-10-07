@@ -42,4 +42,23 @@ inline std::string BeFloats(const uint8_t* be, size_t n) {
   }
   return s + "]";
 }
+// Constant registers by their bits, as discovery rows write them ("pfull"): 32
+// hex digits per register, the dwords of x, y, z, w from `bits` (four per
+// register); 32 dashes for a register that was not read (`have[r]` false, or no
+// `bits`; a null `have` means all were read).
+inline std::string RegistersHex(const uint32_t* bits, const bool* have, size_t registers) {
+  std::string s;
+  s.reserve(registers * 32);
+  char buf[40];
+  for (size_t r = 0; r < registers; ++r) {
+    if (!bits || (have && !have[r])) {
+      s.append(32, '-');
+      continue;
+    }
+    std::snprintf(buf, sizeof(buf), "%08X%08X%08X%08X", bits[4 * r], bits[4 * r + 1], bits[4 * r + 2],
+                  bits[4 * r + 3]);
+    s += buf;
+  }
+  return s;
+}
 }  // namespace fable2::native::capture

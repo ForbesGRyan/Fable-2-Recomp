@@ -65,6 +65,81 @@ inline constexpr uint32_t kDeviceBoolConstantsOffset = 0x2780;
 // (b136 alone) in every draw row of two captures. Evidence only (discovery
 // draw rows "pbool").
 inline constexpr uint32_t kDevicePsBoolConstantsOffset = kDeviceBoolConstantsOffset + 4 * 4;
+// The pending flag of that shadow: bit 56 of the 64-bit word at device + 0x20,
+// i.e. 0x01000000 in the dword at + 0x20. The D3D bool setter sets it
+// (0x8226E0D0, the pixel one: r4 register, bit r4 & 31 of the dword at
+// device + 0x2790 + 4 * (r4 >> 5); 0x8226E114..0x8226E124 `li r12,1; rldicr
+// r12,r12,0x38,0x3f; or; std r11,0x20(r3)`), and a draw builder that finds it
+// set writes all forty registers 0x4900..0x4927 from the shadow, the pixel
+// word included (DrawIndexedVertices 0x8221E300..0x8221E324), and clears the
+// word (0x8221E328). Runtime (frame-map section 14, the bool word): the engine
+// does not set its pixel bools here (kEngineFlowConstantsAddress below), so
+// the shadow's pixel word is stale and such a flush puts that stale word on
+// the GPU.
+inline constexpr uint32_t kDeviceBoolPendingOffset = 0x20;
+inline constexpr uint32_t kDeviceBoolPendingMaskHi = 0x01000000u;
+
+// --- Constants loaded from guest memory (frame-map section 14, "Pixel constants") ---
+// The two banks above hold only what the game sets through the D3D constant
+// setters. LoadAluConstants 0x8227CFC8 (r3 device, r4 bank: 0 vertex, 1 pixel,
+// r5 first register, r6 register count, r7 constant buffer object, r8 the
+// buffer's first register) writes one LOAD_ALU_CONSTANT packet instead
+// (0x8227D004..0x8227D044: header 0xC0022F00 OR'ed with device + 0x31AC, then
+// GpuAddress(object dword 6 + 16 * r8), then the dword index
+// ((r4 << 8) + r5) * 4 (0x8227CFD8 `slwi r11,r4,8`, 0x8227CFEC, 0x8227D00C),
+// then 4 * r6 dwords): the GPU reads the registers from the buffer's memory
+// when it executes the packet, and the bank never sees them. Static callers
+// (all of them):
+//   0x8227D0D0 (called by the light-set setter 0x82189A40 when the set
+//     changes, global 0x83496CB8): pixel c80..c115 from the buffer at
+//     set + 0xC (0x8227D0E8..0x8227D108: `li r8,0; li r6,0x24; li r5,0x50;
+//     li r4,1; lwz r7,0xc(r31)`);
+//   0x8227CDD0 (after BeginTiling, from 0x822872D0 / 0x822AA060): pixel c0..c3
+//     once per tile under SetPredication(2 << 2 * tile) (0x8227CE30..
+//     0x8227CE58), then pixel c4..c7 and vertex c40..c43 under bin mask
+//     0x15555555 from the buffer's registers 0..3 and under 0x2AAAAAAA from its
+//     registers 4..7 (0x8227CE7C..0x8227CFB0); it first clears the pending bits
+//     of those groups (0x8227CDF0..0x8227CE10: device + 8 is the pixel bank's
+//     pending mask, device + 0 the vertex bank's; DrawIndexedVertices
+//     0x8221E110..0x8221E15C hands them to SetPending_AluConstants);
+//   0x821B320C, 0x821CB16C, 0x82210988, 0x82A549A4: vertex c76..c107
+//     (`li r6,0x20; li r5,0x4c; li r4,0`) from the buffer at
+//     [global 0x83496CC0] + 0xC.
+// Runtime: frame-map section 14 (tools/xdk_sigmatch/pconst_check.py).
+inline constexpr uint32_t kAluLoadHookAddress = 0x8227CFC8;
+// Constant buffer object: dword 6 is the CPU virtual address of its registers
+// (0x8227D020 `lwz r10,0x18(r29)`, then the inline GpuAddress conversion).
+inline constexpr uint32_t kConstantBufferDataDword = 6;
+// Device + 0x31AC: 1 while an explicit bin mask is in force, else 0
+// (SetPredication 0x822655B0: 0x822655D4 stores 0 for a zero mask, 0x822656C4
+// stores 1 with the mask at + 0x31A4). The emitters OR it into type-3 headers
+// as the predicate bit (0x8227D004 `lwz r10,0x31ac(r31)`, 0x82221D30), so such
+// a packet executes only in the passes whose bin select meets the bin mask.
+inline constexpr uint32_t kDevicePredicateOffset = 0x31AC;
+// The engine's flow constants: eight bool words (registers 0x4900..0x4907),
+// then the 32 loop constants. GpuLoadShaders copies these 0xA0 bytes
+// (0x82221B4C..0x82221B58: `addi r4,r11,0x14f0; li r5,0xa0`, memcpy to the
+// stack), lets the literal upload 0x82221CB0 put each shader's own bool and
+// loop literals into the copy (0x82221D8C..0x82221DA0) and writes it with one
+// SET_CONSTANT (0x82221C74..0x82221C98: header 0xC0282D00, type dword
+// 0x00020000, 40 dwords) when a shader uses flow constants. The engine's bool
+// setters write this block and not the device's shadow while the byte at
+// 0x833603D9 is set (0x82189AA8..0x82189ADC: bit 7 of the dword at + 0x10,
+// b135; 0x82210824..0x82210858: bit 0, b128), so for draws whose shaders come
+// from GpuLoadShaders the pixel bool word b128..b159 is the dword at + 0x10 as
+// it was at that call, not kDevicePsBoolConstantsOffset. Runtime: frame-map
+// section 14, "Pixel constants" (the bool word).
+inline constexpr uint32_t kEngineFlowConstantsAddress = 0x834914F0;
+inline constexpr uint32_t kEnginePsBoolWordOffset = 4 * 4;
+// A microcode record's dword 4 (after the microcode offset, its size and two
+// more words) is non-zero when the shader uses flow constants: GpuLoadShaders
+// ORs the two shaders' words (0x82221A1C `lwz r4,0x38(r11)` with r11 = pixel
+// shader object + object[0x40], the record being at + 0x28; 0x82221AC8 `lwz
+// r20,0x378(r11)` with r11 = vertex shader object + the variant's record
+// offset, the record being at + 0x368; 0x82221ADC `or. r26,r20,r4`) and skips
+// the upload of the block above when the result is zero (0x82221B44 `beq`,
+// 0x82221C58..0x82221C5C).
+inline constexpr uint32_t kUcodeRecordFlowDword = 4;
 
 // --- Main-scene bracket (frame-map section 8, "Main-scene bracket") ---------
 // Device flag byte +0x2ABC; bit 0x20 = inside BeginTiling/EndTiling (the

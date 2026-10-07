@@ -2481,6 +2481,242 @@ Written 2026-10-07 for commit `4d74e0e` (the steep-ground block, plan Task 10b; 
   - *Times, and why they are not compared.* The guest work median is 10.7 to 11.7 ms at the bridge (the four windows after the load), 9.6 to 10.6 ms by the trees (the six windows after the walk's first) and 9.9 and 10.1 ms with the renderer off (the two whole windows; 9.2 in the load's), against 8.3 to 8.7, 7.5 to 8.0 and 7.0 to 7.4 ms in "Numbers at `4d74e0e`" above: about 2 to 3 ms more with the renderer on and with it off, so the rise is not the native pass (native less off is 0.7 to 1.8 ms at the bridge here and 0.9 to 1.7 ms there). Whether it is the machine's load at that hour or the game's background loading still going on after a boot-save start (`docs\boot-save.md`, "Results": with the logos gone the load itself takes about 17 s against about 6 s) was not separated. The capture median with records on reads 1.47 to 1.62 ms at the bridge and 1.41 to 1.64 ms by the trees, against 1.32 to 1.35 and 1.35 to 1.42 ms, under the same caveat: what reading `RB_SURFACE_INFO` for fewer draws saves cannot be read from these runs. No window of them has the view off from end to end, so the view-off capture median was not measured.
   - *Still open.* A gated run of the final code, for whoever has the machine to itself (no `-UserPresent`; the last line must be `RUN CLEAN: ...`): `.\tools\drive_game.ps1 -BootSave Hero000 -Total 80 -Shots "36,42,48,54,74" -Plan "32:VIEW=off,38:VIEW=native,44:VIEW=split,50:VIEW=overlay,56:VIEW=native,60:DISC=8/1" -GameArgs "--fable2_native_render=true","--fable2_native_view=native"` and the trees plan above in the same form. On a machine left alone it would also say whether the work medians of a boot-save start come back to those of "Numbers at `4d74e0e`".
 
+## 14. Lighting
+
+Sub-project 7 (spec `docs/superpowers/specs/2026-10-07-native-renderer-lighting-design.md`, 2026-10-07). Evidence files of this section are in `out\native-evidence\lighting\` (git-ignored); the names below are files of that folder unless a path is given. The shaders' light formulas are in `docs/native-renderer/lighting-formulas.md`.
+
+### Pixel constants
+
+Plan Task 1 (2026-10-07): where the GPU's shader constants come from at a draw, proved register by register against the emulated GPU's register file.
+
+**Result.**
+
+- *What the device's bank misses, and why.* The pixel bank at device + 0x1780 (section 8) holds what the game sets through the D3D constant setters; the draw builders upload it in groups of four registers whose pending bit is set. Two kinds of register reach the GPU without it:
+  - `c80..c115`, the draw's light set, and `c0..c7`, the tiled scene's per-tile constants: the engine calls `LoadAluConstants` `0x8227CFC8`, which writes a `LOAD_ALU_CONSTANT` packet naming a constant buffer in guest memory, and the GPU reads the registers from that memory when it executes the packet;
+  - a shader's own literals (`c248..c255` in these scenes): `GpuLoadShaders` uploads them from a table of the shader object with the same kind of packet (section 8, "Pixel shader microcode").
+
+  The bank holds zero in all of them. In values, the bank differs from the GPU, in a draw whose pixel shader reads the register, at `c0`, `c80..c83`, `c87..c89`, `c94`, `c96`, `c105`, `c107`, `c109`, `c112` and the shaders' literals (`task1_bridge1_pconst_check_pbank.txt`, `task1_trees1_pconst_check_pbank.txt`: the same registers below `c248` in both scenes; literals `c252..c255` at the bridge, `c250..c255` by the trees); `c1..c7` and the other registers of `c80..c115` are loaded the same way and hold zero, a value no shader of the scenes reads, or what the bank holds too. That is the zero the research for this sub-project saw at `c0`, `c80`, `c81`, `c87`, `c88`, `c109`, `c112`.
+- *The vertex bank has the same hole.* `LoadAluConstants` also loads vertex `c76..c107`, a light set in the pixel set's layout four registers lower (`c76` is light 0's direction or position, `c83` its colour), and vertex `c40..c43` per bin group; the vertex shaders' literals are uploaded like the pixel shaders'. "The vertex side", below.
+- *The reader.* The capture follows both upload paths per guest thread (`ConstantLoads` in `light_block.h`; hooks on `LoadAluConstants` and on `SetPending_AluConstants`): per register, the last upload decides, the bank's or a buffer's. `ReadPixelConstant(reg, out)` in `capture.cpp` reads a register from there at a draw: the bank, or the buffer's memory (constant buffer object dword 6 is the address of its registers). It reads nothing for a register the draw's pixel shader loads itself (a literal). Discovery rows carry all 256 registers as it gives them (`"pfull"`).
+- *Proof.* In two captures of eight frames with every draw sampled, each paired draw by draw with a GPU-side log of the register file (`tools\xdk_sigmatch\pconst_check.py`, test `tests/test_pconst_check.py`; pairing by packet address as in section 13, "Render state"): every register a draw's pixel shader reads has the reader's value in every colour-pass execution of the main scene, the shaders' own literals aside (the two captures were made before the reader left those out; "Limits"). The eleven registers of the light block (`LightBlock` in `light_block.h`: `c0`, `c19`, `c20`, `c21`, `c22`, `c23`, `c80`, `c87`, `c94`, `c109`, `c112`) are equal in all 14,320 such executions at the bridge and in all 12,980 by the trees, with one exception that is the game's and not the reader's: in 24 executions by the trees (the first three main-scene draws of each frame, water, under bin select `0x2`) the GPU holds another light set in `c80..c115` than the reader gives, at a draw whose shader reads none of those registers ("Replays", below).
+
+| | Bridge | Trees |
+|---|---|---|
+| Capture (`FABLE2_NATIVE_DISCOVERY="8"`, every draw) | `task1_bridge1_capture\native_discovery_20261007_180314.jsonl` | `task1_trees1_capture\native_discovery_20261007_182113.jsonl` |
+| GPU log (60 GPU frames) | `task1_bridge1_gpu_pconst.log.gz` | `task1_trees1_gpu_pconst.log.gz` |
+| Checker output (`--dumps out\shader_dump`) | `task1_bridge1_pconst_check_pfull.txt` | `task1_trees1_pconst_check_pfull.txt` |
+| Draw and tess rows, all with `"pfull"` | 14,691 | 11,303 |
+| Paired with a GPU draw | 14,691 (100.00%) | 11,303 (100.00%) |
+| Frame offset; rows confirmed at it; at the runner-up | +1039; 7,346 of 7,346 probed; +1069: 643 | +1642; 11,303 of 11,303 probed; +1627: 1,450 |
+| Executions compared: main-scene colour / depth pre-pass / other passes | 14,320 / 3,280 / 7,095 | 12,980 / 3,369 / 4,185 |
+| Light block registers: unequal main-scene colour executions | 0 | 0 where the pixel shader reads the register; `c80`, `c87`, `c94`, `c112`: 24 where it does not |
+| Registers unequal where the pixel shader reads them, main-scene colour | `c252..c255` (its own literals) | `c250..c255` (its own literals) |
+| Registers unequal only where the pixel shader does not read them | `c248..c251` (other shaders' literals) | `c80..c82`, `c87..c89`, `c94..c97`, `c106`, `c108`, `c110..c113`, `c115` (the 24 executions), `c248`, `c249` |
+| Pixel shaders of the compared executions without a dump | 0 | 0 |
+| `LoadAluConstants` calls (`"aluload"` rows); paired with a GPU packet; packet names the row's buffer, register and size | 636; 632; 632 (the other 4: the diagnostic's first version, below) | 720; 720; 720 |
+| Executed `LOAD_ALU_CONSTANT` packets without a row, by registers | 13,763: pixel `c252..c255` 5,648, `c248..c255` 88; vertex `c252..c255` 5,308, `c248..c255` 2,711 (shader literals); 8 that are the 4 rows above | 13,898: pixel `c252..c255` 5,544, `c248..c255` 72; vertex `c252..c255` 4,892, `c248..c255` 3,390 (shader literals) |
+| Checker exit code | 0 (`RESULT: OK`) | 0 (`RESULT: OK`) |
+
+The bridge capture was made with the first version of the diagnostic (`task1_sdk_gpu_pconst_log_v1.patch`), which gave a load packet that ends its command buffer the address of the buffer's start: in each of the frames 2, 4, 6 and 8 one load of `c80..c115` is logged 0x4BF4 bytes before the row's packet, with the row's source address, index and size, at the row's place in the order of execution (`loads_probe.py`). The trees capture has the corrected address. Without `--dumps` the checker counts every difference and exits 1 on the trees capture for `c80`, `c87`, `c94` and `c112`.
+
+**Open at this commit** (the gate refused the runs: the user was at the machine). The capture gained three things after the two captures above, none of which a clean run has seen: the reader leaves a draw's own literals out; `"pbool_load"` follows the builder's flush as well; and the vertex bank's rows. One capture at the bridge and one by the trees with the present build and the diagnostic settle them (commands in `.superpowers/sdd/2026-10-07-native-renderer-lighting/task-1-report.md`); the diagnostic stays in the SDK's working tree until then.
+
+**The path (static).** All addresses are guest code (`sigmatch.py disasm out\xdk\fable2 <addr> <n>`); the device is the engine's global device, `[0x8336019C]`.
+
+| What | Instructions |
+|---|---|
+| The bank's uploads | `DrawIndexedVertices` `0x8221E110 ld r4,0(r31)` .. `0x8221E15C std r26,8(r31)`: device + 0 is the vertex bank's pending mask and device + 8 the pixel bank's, 64 bits each, one bit per group of four registers (bit 63 = registers 0..3). A non-zero mask is handed to `SetPending_AluConstants` `0x8221DF98` in r4 with r5 = `0x4000` / `0x4400` and the bank in r6, and cleared; the function writes one type-0 packet per run of set bits (`0x8221DFC8 cntlzd` .. `0x8221E0A0`). A register the game never sets through the D3D setters is never uploaded from the bank |
+| `LoadAluConstants` `0x8227CFC8` | r3 device, r4 bank (0 vertex, 1 pixel), r5 first register, r6 register count, r7 constant buffer object, r8 the buffer's first register. One packet (`0x8227D004`..`0x8227D044`): header `0xC0022F00` (`LOAD_ALU_CONSTANT`, three dwords) OR'ed with device + 0x31AC, then `GpuAddress(object dword 6 + 16 * r8)`, then the dword index `((r4 << 8) + r5) * 4` (`0x8227CFD8 slwi r11,r4,8`, `0x8227CFEC add r27,r11,r5`, `0x8227D00C slwi r9,r27,2`), then `4 * r6` dwords. The emulator's `ExecutePacketType3_LOAD_ALU_CONSTANT` copies that many dwords from the address to register `0x4000` + index (SDK `command_processor.cpp`): pixel register r is `0x4400 + 4 r` (`register_table.inc`: `SHADER_CONSTANT_256_X` = `0x4400`), bool words `0x4900..0x4907` (`SHADER_CONSTANT_BOOL_000_031`..) |
+| The light set, pixel `c80..c115` | `0x8227D0D0` (`0x8227D0E8 li r8,0`, `li r6,0x24`, `li r5,0x50`, `li r4,1`, `0x8227D104 lwz r7,0xc(r31)`, `0x8227D108 bl 0x8227cfc8`): 36 registers from the buffer at light set + 0xC, the set being the global `[0x83496CB8]`. Its only caller is the engine's light-set setter `0x82189A40` (r4 the set), which calls it when the set is another one than the global holds (`0x82189B1C`..`0x82189B40`) and the flag bit 43 of the 64-bit word at `0x83491590` is set (`0x82189A50`..`0x82189A68`); five callers (`0x821A3B38`, `0x821B4B18`, `0x822243E4`, `0x822366AC`, `0x82B1F144`) |
+| The tiled scene, pixel `c0..c7` and vertex `c40..c43` | `0x8227CDD0` (called after the engine's `BeginTiling` wrapper `0x821A17A8`, from `0x822872D0` at `0x82287464` / `0x82287478` / `0x82287498`, and from `0x822AA060`). It clears the pending bits of those groups first (`0x8227CDF0`..`0x8227CE10`: the two top bits of device + 8, bit 53 of device + 0), then per tile i calls `SetPredication(2 << 2 i)` and loads pixel `c0..c3` from the tile's buffer (`0x8227CE30 slw r4,r25,r28` .. `0x8227CE58`); then under bin mask `0x15555555` (the pre-pass bins) pixel `c4..c7` and vertex `c40..c43` from registers 0..3 of one buffer, and under `0x2AAAAAAA` (the colour bins) from its registers 4..7 (`0x8227CE7C`..`0x8227CFB0`) |
+| Vertex `c76..c107` | four sites (`0x821B320C`, `0x821CB16C`, `0x82210988`, `0x82A549A4`: `li r6,0x20`, `li r5,0x4c`, `li r4,0`), from the buffer at `[0x83496CC0]` + 0xC |
+| Predication | `SetPredication` `0x822655B0` stores 1 at device + 0x31AC with a non-zero mask (`0x822656C4`) and 0 with a zero one (`0x822655D4`); the emitters OR that word into their type-3 headers as the predicate bit, so a load issued under an explicit bin mask executes only in the passes whose bin select meets the mask |
+| Shader literals | `GpuLoadShaders` `0x82221978` calls `0x82221CB0` for each shader (section 8, "Pixel shader microcode"): `LOAD_ALU_CONSTANT` from the shader object's table, pixel register c numbered 256 + c |
+| No other emitter found | A scan of every `.pdata` function for an `ori` / `addi` with the immediate `0x2F00` finds the `LOAD_ALU_CONSTANT` header in three functions: `0x8227CFC8`, `0x82221CB0` and `0x8222BFF8` (the shader flush's literal upload); its other five hits build addresses (`0x823944E0`, `0x8276C97C`, `0x8276D5F8`, `0x82D437AC`: `lis` + `addi`). The immediate `0x4400` (the pixel bank's first register, for a type-0 header) occurs in the six draw builders only (`0x82313920` and `0x83258940` build addresses). The scan is a scratch script, not committed, and would miss a header built another way; the comparison with the GPU below is what shows that no further path writes these registers in the two scenes |
+
+**The light set: `c80` is not always the sun.** `c80..c115` is one block of 36 registers that the engine loads per light set, 65 times per frame at the bridge and 61 by the trees; a frame of each scene has four distinct sets (`task1_bridge1_lightsets_gpu_frame_1040.txt`, `task1_trees1_lightsets_gpu_frame_1643.txt`: the GPU's values at every colour-pass draw of pitch 1120 of one frame). A set lists its lanterns first and the sun last:
+
+| Set (GPU frame 1040, bridge) | Draws | `c80` / `c87` | `c81` / `c88` | `c82` / `c89` | `c112` | `c94`, `c96` |
+|---|---|---|---|---|---|---|
+| sun only | 1,496 (pixel shaders `9C21`, `8D90`, `4755`, `A7E4`, `7DDA`, `165E`, ...) | sun direction (-0.6713, 0.0940, 0.7352, 0) / sun colour (1.0052, 0.8460, 0.4085, 1) | (0, 0, 0, 1) / 0 | (0, 0, 0, 1) / 0 | (1, 0, 0, 0) | 0, 0 |
+| lantern, sun | 198 (`4524`, `648B`, `AF1E`, `F525`, `E99F`) | position (93.75, 161.32, 42.38, 1) / (1.558, 0.727, 0.092, 0.999) | sun / sun colour | (0, 0, 0, 1) / 0 | (0, 1, 0, 0) | (1, 0, 0, 0), (0.2505, 0, 0, 0) |
+| second lantern, sun | 94 (`4524`, `AF1E`, `E99F`, `F525`, `648B`) | position (115.88, 158.23, 41.46, 1) / (1.643, 0.767, 0.097, 1.053) | sun / sun colour | (0, 0, 0, 1) / 0 | (0, 1, 0, 0) | (1, 0, 0, 0), (0.2302, 0, 0, 0) |
+| both lanterns, sun | 62 (`04F2`, `7892`, `5783`) | first lantern | second lantern | sun / sun colour | (0, 0, 1, 0) | (1, 1, 0, 0), (0.2505, 0.2302, 0, 0) |
+
+- Over all 60 logged GPU frames of each scene (111,056 and 106,708 colour-pass draws at pitch 1120 with a pixel shader; `task1_bridge1_sun_relations.txt`, `task1_trees1_sun_relations.txt`): `c112` is one-hot in every draw and marks the sun's slot i (slot 0 in 89,816 and 90,268 draws, slot 1 in 17,520 and 9,840, slot 2 in 3,720 and 6,600); `c(80 + i).xyz` equals `c109.xyz` bit for bit and `c(80 + i).w` is 0 in every draw; and `c109`, the sun's colour `c(87 + i)`, `c19.xyz`, `c20`, `c21` and `c23` each have exactly one value per frame.
+- So the frame's sun is: direction `c109.xyz` (in every set), colour `c(87 + i)` with i the hot component of `c112`. For the one-light shaders, four draws in five, that is `c80` / `c87`. A light with w = 1 is a position; an unused slot holds (0, 0, 0, 1) and colour 0. `MakeLightBlock` therefore takes `c80` as the sun only when its w is 0 (or the direction is exactly zero); a block made at a draw of a two- or four-light shader is not valid, and the frame's block has to come from a draw whose light set has the sun first.
+- `c23.xyz`, the axis of the ambient factor, is the sun direction to within 0.002 per component and equal to `c109.xyz` bit for bit in 13 and 19 of the 60 frames (the same files): it follows the sun with a lag. It is not the fog axis `c66`.
+- The registers of a set the scenes do not use hold zero or padding: the three-light set's buffer has uninitialised words in `c95.w`, `c97.w`, `c106.w`, `c108.w`, `c110`, `c111`, `c113.w`, `c115.w` (values near -1e38), which no shader of these scenes reads.
+
+**`c0..c7`: per tile.** The tiled scene loads `c0..c3` once per colour tile and `c4..c7` once for the pre-pass bins and once for the colour bins, each load predicated under its bin mask, so the GPU holds another value in each pass:
+
+| Registers | Load under bin mask | Executed under bin selects | Value at the bridge and by the trees |
+|---|---|---|---|
+| `c0..c3` | `0x2` (tile 0's colour bin) | `0x2`, `0x80000003` | `c0` = (0, 0, 1/1120, 1/720), `c1..c3` = 0 |
+| `c0..c3` | `0x8` (tile 1's colour bin) | `0x8`, `0xC` | `c0` = (0, 0.8, 1/1120, 1/720), `c1..c3` = 0 |
+| `c4..c7` | `0x15555555` (pre-pass bins) | `0x80000001`, `0x80000003`, `0xC` | `c4` = (1, 1, 1, 1), `c5..c7` = 0 |
+| `c4..c7` | `0x2AAAAAAA` (colour bins) | `0x2`, `0x8`, `0x80000003`, `0xC` | 0 |
+
+`c0.xy` is the tile's offset on the screen and `c0.zw` the size of a pixel of the 1120 x 720 scene: the shaders address the screen-size sun mask with `pixel.xy * c0.zw + c0.xy`, and the second tile starts at 0.8 of the height (576 of 720 lines). A draw record is drawn once, over the whole screen, so `ReadPixelConstant` gives it the first colour tile's value (the lowest colour bin a load of the register names); discovery rows carry every tile's load in `"ptiles"` and the checker compares each execution with the load its bin select executes. `0x8227CDD0` runs twice per frame (four loads of `c0..c3` and four of `c4..c7` in the rows of each frame).
+
+**Replays: the one exception.** The GPU executes a tile's command buffers once per pass (the opaque group under bin selects `0x80000001`, `0x2`, `0x8`; the blended group under `0x80000003`, `0xC`), so a register keeps, for the first draws of a replay, the value the replay before it ended with unless the game loads it again before them. The engine loads a light set when a draw's material uses one and the set is another one than the last it loaded. By the trees the first three main-scene draws of every frame are water (pixel shader `0xF6D98C7B4D98438B`, which reads none of `c80..c115`), no load precedes them, and under bin select `0x2` the GPU still holds the three-light set the pre-pass replay ended with, where the reader gives the set loaded before the scene: 24 executions, all of them these (`task1_trees1_light_mismatches.txt`). In the pre-pass executions of the same rows and under `0x8` the two agree. No execution of either capture differs in a register its pixel shader reads. Consequence for the frame's light block: take it at a draw whose pixel shader reads `c80` and `c87` (a shader with a light family), not at the first draw of the scene whatever it is.
+
+**The vertex side.** The same call loads vertex constants, and the device's vertex bank (device + 0x780) never holds them:
+
+| Registers | Loaded | Rows in the captures (bridge / trees, eight frames) |
+|---|---|---|
+| vertex `c76..c107` | from a light set's buffer (`[0x83496CC0]` + 0xC; four call sites), in every pass | 20 / 136 |
+| vertex `c40..c43` | by `0x8227CDD0` with the pixel `c4..c7`: registers 0..3 of the buffer under bin mask `0x15555555`, 4..7 under `0x2AAAAAAA` | 16 + 16 / 16 + 16 |
+| a vertex shader's literals | by `GpuLoadShaders` from the shader's table (`c252..c255`, and from `c248` or `c249` on in the leaf shaders) | no row: 8,019 / 8,282 executed packets |
+
+- *Layout.* Vertex `c76..c107` is the pixel light set four registers lower: `c76 + i` the light's direction or position (pixel `c80 + i`), `c83 + i` its colour (`c87 + i`), `c90` the range-and-cone switch (`c94`), `c92` the range term (`c96`), `c94..c97` the cone axes (`c98..c101`), `c101` and `c103` the cone limits and slopes (`c105`, `c107`), `c105` the mask axis (`c109`). At the GPU's draws whose vertex shader names `c76` or `c83` (11,672 colour-pass draws at pitch 1120 in the bridge's 60 logged frames, 29,332 by the trees; `task1_bridge1_gpu_relations.txt`, `task1_trees1_gpu_relations.txt`, the GPU log alone) all 32 registers equal the pixel bank's `c80..c111` bit for bit in 10,524 and 23,850; in the others the two banks hold different sets (the vertex and the pixel set are loaded by different calls, each only when it changes, and a draw's two shaders need not both read their set). For the leaf shader `0xA5846836C90E1192` the GPU's `c76` is the sun direction with w = 0 and `c83` the sun colour (first frame by the trees: (-0.632628, 0.033603, 0.773727, 0) and (0.989521, 0.830305, 0.399962, 1)); for its two- and four-light forms `0xD7DD...` and `0x2D40...` `c76` is a lantern's position and `c83` its colour.
+- *Copies of pixel constants.* On the GPU's values, at every such draw whose vertex shader names the register: vertex `c18.xyz` = pixel `c21.xyz` bit for bit and `c18.w` = 2.2 x pixel `c21.w` as a float (18,840 of 18,840 draws at the bridge, 14,040 of 14,040 by the trees); vertex `c54` = pixel `c20`, all four components (20,572 of 20,572; 31,528 of 31,528); vertex `c19.xyz` = pixel `c23.xyz` (80,992 of 80,992; 81,268 of 81,268). 180 draws in each log run a vertex shader without a dump and are not in these counts.
+- *The reader and its rows.* The capture follows the vertex bank's uploads with the same model (`t_vs_loads`) and writes `"vfull"`, `"vtiles"`, `"vbank_diff"` and, in draw rows too now, `"vs_lit"`; `pconst_check.py --key vfull` and `--key vbank` compare them with the log's vertex registers, where every one of the 256 registers decides. No record reads vertex constants through it yet, so the vertex bank's uploads are followed only while a discovery capture is requested or running, and the rows carry vertex registers only when they were followed from the thread's first upload: in a capture armed by the environment (`FABLE2_NATIVE_DISCOVERY`), not in one armed at run time (`DISC=`).
+
+Which registers of the vertex bank differ from the GPU's, and whether the vertex rows equal them, needs a capture with the present build ("Open at this commit", above): the two captures above were made before the rows existed.
+
+**The shaders' literals.** The GPU's values of the registers from `c240` on that a shader's microcode names, at the colour-pass draws of pitch 1120 of the 60 logged frames of each scene (`task1_bridge1_gpu_relations.txt`, `task1_trees1_gpu_relations.txt`; script `gpu_relations.py`; draws at the bridge / by the trees). Each register has one value per shader in both logs. A dash: the microcode does not name the register. The tables of the rows' pixel shaders, read from the shader objects (`"ps_lit"`), equal these registers in every execution that ran the row's shader (36,608 registers of `c252..c255` in the tess rows of the bridge capture, 53,472 in all rows by the trees, 0 unequal; `lit_probe.py`, `task1_trees1_literals.txt`).
+
+| Shader | Draws (bridge / trees) | c252 | c253 | c254 | c255 | below c252 |
+|---|---|---|---|---|---|---|
+| `0x9C2144E42E95A76F` | 24780 / 29520 | - | - | (2, 0.9960938, 8, 0) | (0, -1, 1, 0.0001) | - |
+| `0x8D900846800943C8` | 14520 / 22920 | - | - | (2, 0, -1, 1) | (1.5, 0, 0, 0) | - |
+| `0x4755A2E4A05BA678` | 12360 / 6540 | - | - | (2, 0, -1, 1) | (8, 0, 0, 0) | - |
+| `0x45243B758F9272AB` | 10500 / 2100 | - | - | (8, 2, 0.9960938, 0) | (0, 1, -1, 0.0001) | - |
+| `0xA7E45D07F5CF6627` | 8040 / 3480 | - | - | - | (1, 0, 0, 0) | - |
+| `0x00E09D1BC5295D52` | 3600 / 4800 | - | - | (1, 0, -1, 0.5) | (2, 0, 0, 0) | - |
+| `0x7DDAD5C29B3F56EE` | 6840 / 1320 | - | - | - | (1, 0, 0, 0) | - |
+| `0x7CD57B81550F19E3` | 2640 / 4800 | - | - | (0.5, 0, 0, 0) | (1, 0, 0.4, 0.6) | - |
+| `0x165EDCD2CB963868` | 4680 / 2760 | - | - | - | (0, 1, -1, 2) | - |
+| `0x04F23292B2F44077` | 2160 / 2160 | - | - | (2, 0.9960938, 8, 0) | (0, 1, -1, 0.0001) | - |
+| `0x401A01FD4E5F8757` | 1372 / 2608 | (-1, 1.5, -2, 0) | (0.125, 0.5, 0.375, 0.1) | (0.5, 0.375, 0, 1) | (1, 2, 3, 0.5) | - |
+| `0xAF1E16EE57E4BB06` | 2700 / 1140 | - | - | (0, 1, -1, 8) | (2, 0, 0, 0) | - |
+| `0x014F8A02DB7B19CA` | 1800 / 1800 | - | - | - | (1, 0, 0, 0) | - |
+| `0xE99F4ACC7A3C78B4` | 1800 / 1440 | - | - | - | (0, 1, -1, 0) | - |
+| `0x648B965C200A5113` | 1320 / 1680 | - | - | (0, 1, -1, 1.5) | (2, 0, 0, 0) | - |
+| `0x2F8A0341E8C09698` | 1800 / 1080 | - | - | - | (1, 0, 0, 0) | - |
+| `0x4B1D3E6E8E58D3AC` | 1680 / 1200 | - | - | - | (0, 1, 0.1, 0.5) | - |
+| `0x58D3FAAAA84A48AA` | 0 / 2040 | - | - | (1, 0, -1, 0.5) | (2, 0, 0, 0) | - |
+| `0xF525E023E08AC9BB` | 1200 / 600 | - | - | - | (0, 1, -1, 2) | - |
+| `0xA17D8AEC3A817D45` | 1440 / 360 | - | - | (0, 2, 0, 0) | (0.5, -1, 1, -2) | - |
+| `0xF6D98C7B4D98438B` | 1440 / 360 | - | - | (0, 2, 0, 0) | (0.5, -1, 1, -2) | - |
+| `0xFF19CE696F916E0C` | 0 / 1428 | - | - | (2, 0.5, 0, 0) | (0, 1, 0.01, -1) | - |
+| `0x789266C3E42D7E59` | 1200 / 120 | - | - | (0, 1, -1, 1.5) | (2, 0, 0, 0) | - |
+| `0x2FBE9B4EE822609A` | 0 / 1200 | - | - | (1, 0, -1, 0.5) | (2, 0, 0, 0) | - |
+| `0x578342593A37DD35` | 360 / 600 | - | - | (0, 1, -1, 2) | (8, 0, 0, 0) | - |
+| `0x61976295517D7015` | 360 / 360 | - | - | (0, 0.001, 1000, 1) | (32, 0, 0, 0) | - |
+| `0x2FD24989AB04A475` | 240 / 240 | - | - | (2, 0, -1, 1) | (1.5, 0, 0, 0) | - |
+| `0x7F65142C12BEB353` | 240 / 240 | - | - | - | (0, 1, 2, -1) | - |
+| `0x2B091BD0C45A7454` | 120 / 240 | (-0.2121144, 0.999866, -0.085133, 3.141593) | (1.570796, 1.570729, -2, 0.2) | (1, 0, 0.5, 0.0208351) | (-0.3302995, 0.074261, 0.6366385, 0.1591596) | `c250` (-3.141593, 2, -0.0187293, 0); `c251` (1.05, -1, 0.180141, 1.442695) |
+| `0xF7601FBE485936FD` | 120 / 120 | (1.570796, 1.570729, -0.2121144, 0.999866) | (1, 0, 0.074261, -0.3302995) | (0.2, 0.0208351, 0.6366385, 0.1591596) | (1.442695, 0, 0, 0) | `c250` (-0.0187293, 0.180141, 0.5, 1.05); `c251` (-3.141593, -0.085133, 3.141593, -2) |
+| `0x14217F5C1118D00F` | 0 / 240 | - | - | - | (0, 1, -1, 2) | - |
+| `0x1B4B5AE12EF270CA` | 60 / 60 | - | - | (0.5, 1, 0, -1) | (2, 0, 0, 0) | - |
+| `0x09CB69BD265B58D1` | 0 / 120 | - | - | - | (0, 1, -1, 0) | - |
+| `0x0F99810F072BF0FC` | 60 / 60 | (-0.07358, 0.412458, -0.695914, 0.507431) | (-0.40581, -0.932615, 0.96234, 0.519456) | (-0.326212, -0.32194, 0.620716, -0.893124) | (-0.840144, 0.89642, 0.457137, 0.064425) | `c248` (10, 0.08333334, -1, 2); `c249` (0, 1, 0.5, 0.1); `c250` (-0.480026, -0.59771, -0.194983, 0.767022); `c251` (0.473434, -0.791559, -0.203345, 0.185461) |
+| `0xBB432A3FDCE052D6` | 0 / 102 | - | - | (2, 0.5, 0, 0) | (0, 1, 0.01, -1) | - |
+
+Vertex shaders:
+
+| Shader | Draws (bridge / trees) | c252 | c253 | c254 | c255 | below c252 |
+|---|---|---|---|---|---|---|
+| `0xC30A97D946FA2BE4` | 37440 / 33780 | - | (0.5, 0.06666667, -1, 1.071429) | (0, 1, 3, 2) | (NaN, NaN, NaN, NaN) | - |
+| `0xECD66A10092E6562` | 14640 / 14520 | - | - | - | (2.2, 0.5, 1, 0) | - |
+| `0xFB68A7F2301210E1` | 15420 / 8280 | - | (0.5, 0.06666667, -1, 1.071429) | (0, 1, 3, 2) | (NaN, NaN, NaN, NaN) | - |
+| `0x8123C16DBF583F92` | 9480 / 4800 | - | (-3.141593, 6.283185, 0.1591549, 0) | (0, 1, 0.5, 0.1) | (NaN, NaN, NaN, 5) | - |
+| `0x475EC9F795E5EDBB` | 3600 / 8040 | (0.035, 0.472, 6.283185, 0.25) | (0.04, 0.025, 0, 1) | (0.23, 0.11, -3.141593, 0) | (0.3849, 0.3, 0.019245, 0.1) | `c251` (0.5, 0.7, 0, 0) |
+| `0x5003700B7C9B1C16` | 8640 / 2400 | - | - | (0.5, -1, 0, 0) | (0, 1, 3, 2) | - |
+| `0x79EAC49585797037` | 480 / 6840 | - | - | - | (0, 1, 0.5, 0) | - |
+| `0xB636821F95DC9D8E` | 4560 / 2640 | - | (-3.141593, 5, 0.1591549, 0) | (0, 1, 6.283185, 0.5) | (NaN, NaN, NaN, 0.1) | - |
+| `0xD4D558DA6A82BDC8` | 3172 / 3208 | - | - | - | (0, 1, 0.5, 0) | - |
+| `0xA5846836C90E1192` | 2640 / 3360 | (0.04, 0.025, 0, 1) | (0.035, 0.472, 0.5, 1) | (0.3849, 0.3, 0.019245, 0.288675) | (0.55, 0.9, 0.15, 0.1) | `c249` (-3.141593, 0.7, 100, 0.4545454); `c250` (-0.3, 0.05, 0.25, 1); `c251` (6.283185, 0.25, 0.11, 0.23) |
+| `0xBEAD84BD72072E0E` | 2880 / 720 | - | - | - | (1, 0, 0, 0) | - |
+| `0x7C5710DEF3EE33C4` | 1800 / 1800 | - | - | - | (1, 0.3, 0.01, 0) | - |
+| `0xA1F7E9885EC466DF` | 360 / 3000 | - | - | - | (0, 1, 0.5, 0) | - |
+| `0x129F7F2793DA9084` | 1680 / 1200 | - | - | (0.5, 0.25, 2, 0) | (0, 1, -1, 4) | - |
+| `0x6AD4108C3FF07966` | 960 / 600 | - | - | (0, 1, 0.5, 0) | (NaN, NaN, NaN, 0) | - |
+| `0x563E3BE17857DB59` | 0 / 1530 | - | (-0.5, 0.1, 0, 0) | (4, 6.283185, 1, 0.1591549) | (0.25, 0.5, -2, -3.141593) | - |
+| `0x48D30ECCF684F488` | 480 / 600 | - | (-3.141593, 4, 6.283185, 0.1591549) | (0, 1, 0.5, 0.1) | (NaN, NaN, NaN, 5) | - |
+| `0xD7DD31B9BF194DE8` | 0 / 840 | (0.035, 0.472, 0.5, 1) | (0.3849, 0.3, 0.019245, 0.288675) | (0.55, 0.9, 0.15, 0.1) | (-1, 0, 0, 0) | `c248` (-3.141593, 0.7, 100, 0.4545454); `c249` (-0.3, 0.05, 0.25, 1); `c250` (6.283185, 0.25, 0.11, 0.23); `c251` (0.04, 0.025, 0, 1) |
+| `0x29B6506FBACEB93A` | 118 / 714 | - | (-0.5, 0.1, 0, 0) | (4, 6.283185, 1, 0.1591549) | (0.25, 0.5, -2, -3.141593) | - |
+| `0x33C00226C154C1F2` | 240 / 360 | - | (-3.141593, 4, 0.1591549, 6.283185) | (0, 1, 0.5, 0.1) | (NaN, NaN, NaN, 5) | - |
+| `0xFC4F2EF6930768BE` | 360 / 240 | - | (-3.141593, 4, 6.283185, 0.1591549) | (0, 1, 0.5, 0.1) | (NaN, NaN, NaN, 5) | - |
+| `0x2D40B53C926109BE` | 0 / 600 | (0.035, 0.472, 0.5, 1) | (0.3849, 0.3, 0.019245, 0.288675) | (0.55, 0.9, 0.15, 0.1) | (0.4545454, 0, 0, 0) | `c248` (-3.141593, -1, 0.7, 100); `c249` (-0.3, 0.05, 0.25, 1); `c250` (6.283185, 0.25, 0.11, 0.23); `c251` (0.04, 0.025, 0, 1) |
+| `0x5763211D63BBFA3D` | 120 / 120 | - | - | (2, 0, 2850, -1) | (1, 0, 0, 0) | - |
+| `0x8262E1111C273B50` | 120 / 120 | - | - | - | (2850, 2, -1, 0) | - |
+| `0x7D1C707013A556BB` | 120 / 120 | - | - | (0.5, 0, 0.1591549, 6.283185) | (-3.141593, 0, 0, 0) | - |
+| `0x36B543CECAE5C781` | 120 / 0 | - | - | (0, 1, 4, 0.5) | (NaN, NaN, NaN, 0) | - |
+| `0xB1D7F0D4330BBD7D` | 60 / 60 | - | - | - | (0.5, 0, 0, 0) | - |
+| `0x7A6E981FC4D0A375` | 60 / 60 | - | - | - | (0.5, 0, 0, 0) | - |
+| `0x775C6085FBB9D676` | 102 / 0 | - | (0.5, 0.1, -2, 4) | (-0.01, 0, 0.01, 5) | (1, 3, 2, -1) | - |
+
+**The bool word.** The device's shadow of the pixel bool word (device + 0x2790, discovery rows' `"pbool"`) is refuted as the GPU's value. It reads `0x00000100` (b136 alone) in every row of both captures, while the GPU's register `0x4904` differs from it in 11,870 of the bridge's 14,320 main-scene colour executions and in 12,150 of 12,980 by the trees:
+
+| Bit | GPU set (bridge / trees) | Device shadow set | Shadow differs; of those, executions whose pixel shader tests the bit | Last writer's word differs |
+|---|---|---|---|---|
+| b128 | 140 / 224 | 0 / 0 | 140, 32 / 224, 192 | 0 / 0 |
+| b129 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| b132 | 11,758 / 12,150 | 0 / 0 | 11,758, 800 / 12,150, 1,680 | 1,400, none tested / 664, none tested |
+| b133 | 112 / 272 | 0 / 0 | 112, 112 / 272, 240 | 0 / 0 |
+| b134 | 16 / 16 | 0 / 0 | 16, 16 / 16, 16 | 0 / 0 |
+| b135 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| b136 | 14,320 / 12,980 | 14,320 / 12,980 | 0 / 0 | 0 / 0 |
+
+- *Why.* The engine keeps its flow constants (eight bool words, then 32 loop constants) in a block of its own at `0x834914F0`; its pixel bool setters write the dword at + 0x10 there and not the device while the byte at `0x833603D9` is set (`0x82189AA8`..`0x82189ADC` b135, `0x82210824`..`0x82210858` b128, `0x8226E060`..`0x8226E094` b129). `GpuLoadShaders` copies the block (`0x82221B4C`..`0x82221B58`), lets each shader's literal upload put the shader's own bool and loop literals into the copy (`0x82221D8C`..`0x82221DA0`) and writes all 40 dwords with one `SET_CONSTANT` (`0x82221C74`..`0x82221C98`), but only when one of the two shaders' microcode records says it uses flow constants (`0x82221ADC or. r26,r20,r4`; `xdk_layout.h`, `kUcodeRecordFlowDword`). The D3D setter `0x8226E0D0` writes the device's shadow and sets a pending bit (bit 56 of the word at device + 0x20); a draw builder that finds it set writes all 40 registers from the shadow, the stale pixel word included (`0x8221E300`..`0x8221E324`).
+- *The last writer's word* (`"pbool_load"` in the rows; discovery evidence only, no run-time reader). In the bridge capture it is the engine's word at the thread's last `GpuLoadShaders`: equal to the GPU's word in 12,920 of 14,320 main-scene colour executions. By the trees it is that word at the last `GpuLoadShaders` that uploaded: 12,316 of 12,980. In both, every difference is in b132 alone, at draws whose pixel shader does not test b132 (five shaders at the bridge: `0x7DDA...`, `0x2F8A...`, `0x014F...`, `0xDBFD...`, `0xC300...`; by the trees these and `0xFF19...`, `0xBB43...`, `0xA753...` and one row without a pixel shader), and there the GPU holds the device's stale word `0x100` (`task1_bridge1_bool_by_shader.txt`, `task1_trees1_bool_by_shader.txt`): the second writer. The capture now follows it too (the builder's flush, from the pending bit read when the draw hook is entered); whether the word then equals the GPU's in every execution needs a clean capture with the present build ("Open at this commit", above).
+- So for a draw whose shaders come from `GpuLoadShaders` the bits a scene shader tests (b128, b133, b134, b135, b136; b129 is never set) are the engine's word, not the device's.
+
+**The GPU's values** (main-scene colour executions of the compared rows, first capture frame; `--values` of the checker, at the end of `task1_bridge1_pconst_check_pfull.txt` and `task1_trees1_pconst_check_pfull.txt`; the light changes every frame, eight values of each frame constant in eight frames):
+
+| Register | Bridge (run 280, 40 s) | Trees (run 281, 60 s) | Source; what |
+|---|---|---|---|
+| `c0` | (0, 0, 1/1120, 1/720) under `0x2`; (0, 0.8, 1/1120, 1/720) under `0x8` | the same | load per tile; screen mask transform |
+| `c1..c7` | 0 in the colour passes | 0 | load per tile; not read by a scene shader here |
+| `c12` | (20, 35, 2, 0.4637) | (20, 35, 2, 0.4833) | bank; cascade distances and the mask's far value |
+| `c13` | (1/1024, 1/1024, 0, 0) | the same | bank |
+| `c19` | (82.0721, 157.339, 50.1707, 1); w = 0 in 584 executions | (84.4621, 171.928, 49.755, 1); w = 0 in 570 | bank; eye |
+| `c20` | (0.00509, 0.06943, 0.09037, 16) | (0.00693, 0.07114, 0.09217, 16) | bank; additive light, output scale (15.99999) |
+| `c21` | (1.14805, 1.40127, 1.96414, 1.3) | (1.1228, 1.38699, 1.88422, 1.3) | bank; tint and exponent of the baked light |
+| `c22` | (0.0588235, 0.0901961, 0, 0) | the same | bank; floor of the ambient factor |
+| `c23` | (-0.671334, 0.0940108, 0.735169, 4) | (-0.630261, 0.0304265, 0.775787, 4) | bank; axis of the ambient factor (the sun direction, lagging), w the specular factor |
+| `c32..c35`, `c44`, `c48` | 0 | 0 | bank; the per-light shadow map's matrix and texel size: unset |
+| `c36..c38`, `c39` | (0.0246146, 0, 0.0224773, -2.81689), (-0.00211311, -0.0331857, 0.00231404, 5.96533), (0.00583819, -0.000817556, -0.00639333, 0.782841), (0, 0, 0, 1) | (0.0258715, 0, 0.0210184, -2.47022), (-0.000639517, -0.0333179, 0.00078718, 6.41064), (0.00548101, -0.000264601, -0.00674656, 0.819989), (0, 0, 0, 1) | bank; world to the near shadow cascade (inference from the mask shader's use; one per frame) |
+| `c40..c42`, `c43` | (0.0105491, 0, 0.00963315, -1.02979), (-0.00090562, -0.0142224, 0.000991732, 2.96143), (0.00433147, -0.00060656, -0.00474333, 0.646465), (0, 0, 0, 1) | (0.0110878, 0, 0.0090079, -0.60498), (-0.000274078, -0.0142791, 0.000337362, 3.14111), (0.00406646, -0.000196312, -0.0050054, 0.773246), (0, 0, 0, 1) | bank; world to the far cascade (inference) |
+| `c45` | (-7.6619, 10.0019, 0, 0) | the same | bank; slope blend of the terrain layers |
+| `c46`, `c47` | (1/1120, 1/720, 0, 0) and (0.5, 0.5, 1/32, 1/32) in 13,736 executions; other values in 584 | the same in 12,410; others in 570 | bank |
+| `c49` | (1, 1, 1, 1) | the same | bank |
+| `c80..c83` | the set's lights: sun (-0.671334, 0.0940108, 0.735169, 0); lanterns (93.7503, 161.322, 42.3773, 1), (115.876, 158.233, 41.4589, 1); unused (0, 0, 0, 1) | sun (-0.630261, 0.0304265, 0.775787, 0); lanterns (46.051, 161.474, 38.157, 1), (56.7935, 170.589, 39.04, 1) | light set |
+| `c84..c86` | (0, 0, 0, 1) | the same | light set; unused slots |
+| `c87..c90` | the lights' colours: sun (1.00523, 0.84597, 0.408496, 1); lanterns (1.55806, 0.727093, 0.0916504, 0.998754), (1.64307, 0.766766, 0.0966512, 1.05325); unused 0 | sun (0.988645, 0.829431, 0.399486, 1); lanterns (1.59576, 0.744688, 0.0938683, 1.02292), (1.66138, 0.775311, 0.0977283, 1.06499) | light set |
+| `c91..c93`, `c95`, `c97..c104`, `c110`, `c111`, `c113..c115` | 0 | 0 (padding in the three-light set, above) | light set |
+| `c94` | per light, 1 for a lantern: (0, 0, 0, 0), (1, 0, 0, 0), (1, 1, 0, 0) | the same | light set; switches the range and cone term on |
+| `c96` | per light, a lantern's range term: 0.2505, 0.2302 in the first frame (24 values over the eight frames: the lanterns flicker, their colours too) | 0.2755, 0.2586 | light set |
+| `c105`, `c106` | (-1, -1, -1, -1), (-1, -1, -1, 0) | the same | light set; cone limits (no cone) |
+| `c107`, `c108` | (1, 1, 1, 1), (1, 1, 1, 0) | the same | light set; cone slopes |
+| `c109` | the sun direction, w = 0 | the sun direction | light set; in every set |
+| `c112` | one-hot: the sun's slot | the same | light set |
+| `c116..c119` | per draw (the water shaders read `c116`, `c117`); at the mask draws the rows of the screen-to-world matrix | the same | bank |
+
+The constants of the two sun-mask draws (pixel shaders `0x1B4B...` and `0x0F99...`, drawn with `BeginVertices`, no discovery row) are in `task1_bridge1_mask_draws_gpu_frame_1040.txt` and `task1_trees1_mask_draws_gpu_frame_1643.txt`, from the GPU log alone: `c12`, the screen-to-cascade matrices `c36..c39` and `c40..c43` (other values than at the scene draws), `c31` = the eye, `c46`, `c47`, `c77` and `c116..c119`. They are bank registers (no load row names them); the shadow sub-project needs them at those draws.
+
+**Captures.** All through `tools\drive_game.ps1 -BootSave Hero000` without `-UserPresent` (the wrapper `task1_run_game.ps1`; every run `RUN CLEAN`, exit 0, `gate=passed` in the run log), with `-GameArgs "--fable2_native_render=true"`, the view off, and `-Env @{FABLE2_NATIVE_DISCOVERY="8"; FABLE2_NATIVE_DISCOVERY_EVERY="1"; FABLE2_NATIVE_DISCOVERY_DELAY="<s>"; FABLE2_GPU_PCONST_LOG="<file>"; FABLE2_GPU_PCONST_DELAY="<s - 1>"; FABLE2_GPU_PCONST_FRAMES="60"; FABLE2_GPU_PCONST_VERTEX="1"}`: both are armed by time since the first swap, one second apart, so the 60 logged GPU frames hold the eight captured ones (capture frame 1 is the GPU log's 19th frame at the bridge and its 22nd by the trees).
+
+- *Bridge* (run 280, `task1_bridge1_fable_2_280.log`, `task1_bridge1_driver_output.txt`): `-Total 75 -Shots "36,70"`, delays 40 and 39 s. `[native-discovery] armed after 40.0 s`, complete 6.1 s later (372 stream dumps). The windows of 300 frames around the capture read 24.2 and 26.1 fps with a frame median of 39.4 and 38.6 ms, a work median of 10.3 and 9.9 ms and a swap median of 28.6 and 28.3 ms: the guest waits on the swap and the hooked draw count moves (985, 986, 985), so the world is live and not in the frozen state of section 12, but the emulated GPU took longer than a 30 Hz interval. This task's Python test suite was running on the machine during the run; the cause was not separated. `task1_bridge1_shot_36s.png` and `_70s.png`: the bridge over the lake, the hero at the rail with the dog, the quest banner; the emulated view.
+- *Trees* (run 281, `task1_trees1_fable_2_281.log`): `-Total 95 -Shots "56,90" -Plan "33:LS=0/100/3000,37:RS=-60/0/1500,40:LS=0/100/2500,47:RS=-60/0/600,50:RS=60/0/600"`, delays 60 and 59 s. `[autoplay] armed: 5 steps`; armed after 60.0 s, complete 5.3 s later. Windows after the walk: 28.4 and 29.2 fps before the capture, 29.2 and 29.1 after it (frame median 34.0 to 35.1 ms, work 8.2 to 8.7 ms, swap 25.2 to 26.3 ms; 931 to 939 hooked draws): live. `task1_trees1_shot_56s.png` and `_90s.png`: the hero at the fence of posts under the trees, ferns in front, a string of lanterns behind the fence.
+- *Not evidence.* A third run at the bridge with the capture as it is now (run 282) ended `RUN DISTURBED: audio at 52.1 s`, six seconds after its capture was complete; its files are kept with `DISTURBED` in their names and nothing above rests on them. Two later starts were refused by the gate (the user at the machine).
+
+**The GPU side (temporary diagnostic).** A patch to the SDK's command processor (`task1_sdk_gpu_pconst_log.patch`, 135 added lines in `src/graphics/command_processor.cpp`, not committed) writes, to the file named by `FABLE2_GPU_PCONST_LOG`, one `D` line per `DRAW_INDX` packet handed to the backend (GPU frame, draw ordinal, the address just past the packet, index count, bin select and mask, shader hashes, pitch, vertex `c0`, the eight bool words `0x4900..0x4907`, and the pixel registers `0x4400 + 4 r` as `P<r>=`: all 256 on the frame's first line, then only those that changed; with `FABLE2_GPU_PCONST_VERTEX` also the vertex registers as `V<r>=`), one `S` line per draw packet skipped by the bin predicate, and one `L` line per `LOAD_ALU_CONSTANT` packet (executed or skipped, with the source address, the dword index and the size). The register indices were checked against the SDK's `register_table.inc` (`SHADER_CONSTANT_000_X` = `0x4000`, `SHADER_CONSTANT_256_X` = `0x4400`, `SHADER_CONSTANT_BOOL_000_031` = `0x4900`, `SHADER_CONSTANT_BOOL_128_159` = `0x4904`). The logs of this section therefore also hold the vertex registers of every draw of 60 frames in each scene ("The vertex side").
+
+**Discovery rows.** `"draw"` and `"tess"` rows carry `"pfull"` (the 256 registers as `ReadPixelConstant` gives them, their bits in hex, 32 digits a register, dashes for a register not read), `"ptiles"` (the loads issued under a bin mask that leaves bins out, each as the runs of registers it still decides), `"pbank_diff"` (the registers whose value in the device's bank is another one), `"pbool_load"` and, in draw rows too now, `"ps_lit"`. A new row kind `"aluload"` records every `LoadAluConstants` call: bank, first register, count, the buffer object, its data address and first register, the predicate word and bin mask in force, the command write pointer after the call (the packet's last dword) and the registers as the buffer holds them. Formatter `RegistersHex` in `discovery_format.h` (test `tests/native/test_discovery_format.cpp`).
+
+**Limits.**
+
+- Two daylight scenes of one area, eight frames each, the view off. Night, town and interiors were not captured: whether a set there has the sun first, or a sun at all, is not known (`MakeLightBlock` accepts a zero direction and refuses anything else that is not a directional unit vector).
+- The reader gives a draw the registers in the order the game issued its uploads. Where a tile's replay differs from that order (above) the GPU holds another value; in the two captures only in registers the draw's shader does not read.
+- A register the draw's pixel shader loads itself is not read (`c252..c255` of the shaders in the rows; `c248..c255` of others). A register that only another shader's literals wrote keeps the bank's value in the reader while the GPU holds that literal (`c248..c251` at most draws); no shader of the draw reads it. The literal tables of the rows' shaders equal the GPU's registers in every execution that ran the row's shader (36,608 and 53,472 registers of `c252..c255`, 0 unequal; scratch script, tess rows of the first bridge capture and all rows by the trees).
+- The pre-pass executions (bin select `0x80000001`) are compared and reported apart; the light registers are equal there too in both captures, `c248..c255` are not.
+- The bool word and the vertex bank have no run-time reader: `"pbool_load"` and `"vfull"` are discovery evidence. The shaders' own bool literals are not applied in `"pbool_load"`.
+- Cost: the hook on `LoadAluConstants` runs whatever the view (80 calls a frame at the bridge, 90 by the trees). In the two windows of run 281 after its capture had ended the guest-thread capture median reads 0.073 and 0.075 ms with the view off (0.122 ms in run 280, with the test suite beside it), against 0.05 ms in section 13; with a capture pending it reads 0.19 to 0.23 ms as it did before (the discovery state is kept under a lock then). Not measured: records on.
+
 ## Pending
 
 1. **Pitch ablation** (done 2026-10-01, results in section 4; kept for re-runs). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):

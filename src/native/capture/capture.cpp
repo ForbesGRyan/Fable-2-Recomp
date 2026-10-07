@@ -38,6 +38,7 @@
 #include "draw_nesting.h"
 #include "draw_record.h"
 #include "guest_read.h"
+#include "light_block.h"
 #include "main_scene.h"
 #include "material.h"
 #include "position_decode.h"
@@ -586,14 +587,86 @@ bool ReadDevice(uint32_t device, DeviceSnapshot* s) {
   return true;
 }
 
+// --- Pixel constants (frame-map section 14, "Pixel constants") ----------------
+// Where the GPU's pixel constants come from on this thread: the device's bank,
+// or the constant buffers LoadAluConstants named (light_block.h, ConstantLoads;
+// xdk_layout.h, kAluLoad*). Kept up to date by the two upload hooks whatever
+// the view, because a load decides the registers until the next one.
+thread_local ConstantLoads t_ps_loads;
+// The same for the vertex bank (vertex c40..c43 and c76..c107 are loaded from
+// buffers too). Discovery evidence only ("vfull"): no record reads through
+// it, so it is followed only while a discovery capture is requested or
+// running. t_vs_loads_whole is false once an upload was not followed: the
+// model then no longer says where the vertex registers come from, and rows
+// carry no vertex registers (a capture armed by the environment follows from
+// the first upload; one armed at run time does not).
+thread_local ConstantLoads t_vs_loads;
+thread_local bool t_vs_loads_whole = true;
+// The device of the draw this thread is capturing (the r3 of its draw hook).
+thread_local uint32_t t_draw_device = 0;
+
+// Discovery evidence: the pixel bool word (b128..b159) as its last writer on
+// this thread put it on the GPU; `read` false when it is not known. Two
+// writers (xdk_layout.h): GpuLoadShaders uploads the engine's flow constants
+// when one of its shaders uses them (the shaders' own bool literals, which the
+// upload also carries, are not applied here), and a draw builder that finds
+// the bool shadow pending writes the device's shadow. Rows carry the word as
+// "pbool_load" beside the device's shadow "pbool".
+struct GpuBoolLoad {
+  uint32_t word = 0;
+  bool read = false;
+};
+thread_local GpuBoolLoad t_gpu_pbool;
+// The bool shadow was pending when this thread's current draw hook was entered
+// (discovery only): the builder then flushes it.
+thread_local bool t_bool_flush_pending = false;
+
+// The four dwords of constant `reg` from `from`: the 256-register bank at
+// guest address `bank` (0: none), or register `from.index` of a constant
+// buffer. False when the source is unknown or its memory cannot be read.
+bool ReadConstantBits(uint32_t bank, const ConstantSource& from, uint32_t reg, uint32_t bits[4]) {
+  const uint8_t* p = nullptr;
+  if (from.kind == ConstantSource::Kind::kBank) {
+    p = bank && reg < ConstantLoads::kRegisters ? ReadVirtual(bank + 16 * reg, 16) : nullptr;
+  } else if (from.kind == ConstantSource::Kind::kMemory) {
+    uint32_t data = 0;
+    if (from.object && from.index < ConstantLoads::kMaxBufferRegisters &&
+        ReadVirtualBe32(from.object + 4 * xdk::kConstantBufferDataDword, &data) && data &&
+        uint64_t(data) + 16ull * from.index + 16 <= 0x100000000ull) {
+      p = ReadVirtual(data + 16 * from.index, 16);
+    }
+  }
+  if (!p) return false;
+  for (int i = 0; i < 4; ++i) bits[i] = LoadBe32(p + 4 * i);
+  return true;
+}
+
+// The device's pixel and vertex constant banks (0 without a device).
+uint32_t PixelBank(uint32_t device) {
+  const uint32_t bank_ptr = g_ps_bank_ptr.load(std::memory_order_relaxed);
+  return bank_ptr ? bank_ptr : (device ? device + xdk::kDevicePsConstantsOffset : 0);
+}
+uint32_t VertexBank(uint32_t device) {
+  const uint32_t bank_ptr = g_vs_bank_ptr.load(std::memory_order_relaxed);
+  return bank_ptr ? bank_ptr : (device ? device + xdk::kDeviceVsConstantsOffset : 0);
+}
+
 void UpdateState(uint32_t id, const PPCContext& ctx) {
   // Records read only the constant bank pointers, lock-free (r5 0x4000 vertex,
   // 0x4400 pixel; xdk_layout.h kDeviceVsConstantsOffset / kDevicePsConstantsOffset).
   if (id == kHook_D3DDevice_SetPending_AluConstants) {
     if (ctx.r5.u32 == 0x4000) {
       g_vs_bank_ptr.store(ctx.r6.u32, std::memory_order_relaxed);
+      if (g_discovery_active.load(std::memory_order_relaxed)) {
+        t_vs_loads.BankUpload(ctx.r4.u64);
+      } else {
+        t_vs_loads_whole = false;
+      }
     } else if (ctx.r5.u32 == 0x4400) {
       g_ps_bank_ptr.store(ctx.r6.u32, std::memory_order_relaxed);
+      // r4: the pending mask, one bit per group of four registers. The bank's
+      // values replace what a load put in those registers.
+      t_ps_loads.BankUpload(ctx.r4.u64);
     }
   }
   // The rest is evidence for discovery rows only.
@@ -782,6 +855,38 @@ std::string LiteralsJson(const UcodeLayout& l, uint32_t obj, uint32_t variant) {
   return s + "]";
 }
 
+// The registers a shader object loads itself (its literal table, xdk_layout.h
+// kShaderLiteral*): bit c of `regs` for register `bank_first` + c of the table
+// (a pixel shader's table numbers pixel register c as 256 + c, a vertex
+// shader's vertex register c as c). False when the table cannot be read or is
+// larger than kMaxLiteralGuardRuns runs: no register can then be told from a
+// literal.
+constexpr uint32_t kMaxLiteralGuardRuns = 32;
+
+bool ReadLiteralRegisters(const UcodeLayout& l, uint32_t obj, uint32_t variant, uint32_t bank_first,
+                          uint64_t regs[4]) {
+  regs[0] = regs[1] = regs[2] = regs[3] = 0;
+  uint32_t table_off = 0, size = 0;
+  const uint32_t header = obj + l.header_offset;
+  if (!obj || !ReadVirtualBe32(header + xdk::kShaderLiteralTableField + 8 * variant, &table_off)) return false;
+  if (table_off == 0) return true;  // no table: no literal
+  const uint32_t table = header + table_off;
+  if (!ReadVirtualBe32(table + xdk::kLiteralTableSizeOffset, &size)) return false;
+  if (size == 0) return true;
+  if (size > 8 * kMaxLiteralGuardRuns) return false;
+  const uint8_t* entries = ReadVirtual(table + xdk::kLiteralTableEntriesOffset, size);
+  if (!entries) return false;
+  xdk::LiteralRun runs[kMaxLiteralGuardRuns];
+  const uint32_t n = xdk::ParseLiteralRuns(entries, size, runs, kMaxLiteralGuardRuns);
+  for (uint32_t i = 0; i < n; ++i) {
+    const uint32_t first = runs[i].first_register, count = (uint32_t(runs[i].dwords) + 3) / 4;
+    for (uint32_t r = first; r < first + count; ++r) {
+      if (r >= bank_first && r - bank_first < 256) regs[(r - bank_first) / 64] |= 1ull << ((r - bank_first) % 64);
+    }
+  }
+  return true;
+}
+
 // Microcode size in bytes of variant `v` of a vertex shader object, from its
 // variant record (xdk_layout.h) without reading the microcode.
 bool ReadVsUcodeBytes(uint32_t obj, uint32_t v, uint32_t* bytes) {
@@ -870,16 +975,98 @@ thread_local GpuVsLoad t_gpu_vs;
 // The pixel shader of that GpuLoadShaders call (r5; 0 = none loaded).
 thread_local uint32_t t_gpu_ps = 0;
 
+// Whether a shader's microcode record says it uses flow constants (bool and
+// loop constants; xdk_layout.h, kUcodeRecordFlowDword). `ok` false when the
+// record cannot be read.
+bool UsesFlowConstants(const UcodeLayout& l, uint32_t obj, uint32_t variant, bool* ok) {
+  uint32_t rec_off = 0, flow = 0;
+  const uint32_t header = obj + l.header_offset;
+  *ok = ReadVirtualBe32(header + l.record_field + 8 * variant, &rec_off) &&
+        ReadVirtualBe32(header + rec_off + 4 * xdk::kUcodeRecordFlowDword, &flow);
+  return *ok && flow != 0;
+}
+
 void OnGpuLoadShaders(const LastArgs& a) {
   const uint32_t vs = a.r[1], ps = a.r[2];
   uint32_t flags = 0;
   t_gpu_ps = ps;
   t_gpu_vs = {};
-  if (!vs || !ReadVirtualBe32(vs + xdk::kVsHeaderOffset, &flags)) return;
+  const bool discovery = g_discovery_active.load(std::memory_order_relaxed);
+  if (!discovery) t_gpu_pbool.read = false;
+  if (!vs || !ReadVirtualBe32(vs + xdk::kVsHeaderOffset, &flags)) {
+    t_gpu_pbool.read = false;
+    return;
+  }
   t_gpu_vs.obj = vs;
   // 0x822219BC..0x822219C8: the variant flag applies only without a pixel
   // shader; 0x82221A10 forces variant 0 otherwise.
   t_gpu_vs.variant = (!ps && (flags & xdk::kVsVariantFlagMask)) ? 1 : 0;
+  if (!discovery) return;
+  // The flow constants are uploaded only when one of the two shaders uses them
+  // (0x82221ADC `or. r26,r20,r4`); otherwise the GPU keeps its bool words.
+  bool vs_ok = false, ps_ok = true;
+  const bool uploads = UsesFlowConstants(kVsLayout, vs, t_gpu_vs.variant, &vs_ok) |
+                       (ps != 0 && UsesFlowConstants(kPsLayout, ps, 0, &ps_ok));
+  if (!vs_ok || !ps_ok) {
+    t_gpu_pbool.read = false;
+  } else if (uploads) {
+    t_gpu_pbool.read = ReadVirtualBe32(xdk::kEngineFlowConstantsAddress + xdk::kEnginePsBoolWordOffset,
+                                       &t_gpu_pbool.word);
+  }
+}
+
+// LoadAluConstants (0x8227CFC8: r3 device, r4 bank, r5 first register, r6
+// count, r7 constant buffer, r8 the buffer's first register; xdk_layout.h) has
+// written its LOAD_ALU_CONSTANT packet: the loads of both banks are followed
+// (t_ps_loads, t_vs_loads). A load whose predicate word or bin mask cannot be read is
+// taken as one that cannot be followed. While discovery is armed every call
+// writes an "aluload" row with the registers as the buffer holds them and the
+// device's command write pointer (the packet's last dword), for
+// tools/xdk_sigmatch/pconst_check.py.
+void OnAluLoad(const LastArgs& a) {
+  const uint32_t device = a.r[0], bank = a.r[1], start = a.r[2], count = a.r[3], object = a.r[4],
+                 first = a.r[5];
+  uint32_t predicate = 0, mask = 0;
+  const bool state_read = device && ReadVirtualBe32(device + xdk::kDevicePredicateOffset, &predicate) &&
+                          ReadVirtualBe32(device + xdk::kDeviceBinMaskLoOffset, &mask);
+  if (bank == 1 || (bank == 0 && g_discovery_active.load(std::memory_order_relaxed))) {
+    (bank ? t_ps_loads : t_vs_loads)
+        .Load(start, count, state_read ? object : 0, first, state_read && predicate != 0,
+              state_read ? mask : ConstantLoads::kAllBins);
+  } else if (bank == 0) {
+    t_vs_loads_whole = false;
+  }
+  if (!g_armed.load(std::memory_order_relaxed)) return;
+  uint32_t data = 0, write = 0;
+  const bool have_data = object && ReadVirtualBe32(object + 4 * xdk::kConstantBufferDataDword, &data);
+  const bool have_write = device && ReadVirtualBe32(device + xdk::kDeviceCommandWriteOffset, &write);
+  char buf[256];
+  std::snprintf(buf, sizeof(buf),
+                "{\"kind\":\"aluload\",\"frame\":%d,\"bank\":%u,\"start\":%u,\"count\":%u,\"obj\":\"0x%08X\","
+                "\"first\":%u,\"data\":\"0x%08X\",\"pred\":%d,\"bin_mask\":\"0x%08X\"",
+                g_frames_written.load(std::memory_order_relaxed) + 1, bank, start, count, object, first,
+                have_data ? data : 0, state_read ? int(predicate != 0) : -1, mask);
+  std::string row = buf;
+  if (have_write) {
+    std::snprintf(buf, sizeof(buf), ",\"cmd\":\"0x%08X\"", write);
+    row += buf;
+  }
+  // The registers as the buffer holds them now (bounded: a bank has 256).
+  const uint32_t n = count <= ConstantLoads::kRegisters ? count : 0;
+  if (have_data && n && first < ConstantLoads::kMaxBufferRegisters) {
+    uint32_t bits[4 * ConstantLoads::kRegisters];
+    bool have[ConstantLoads::kRegisters];
+    for (uint32_t i = 0; i < n; ++i) {
+      have[i] = ReadConstantBits(0, ConstantSource{ConstantSource::Kind::kMemory, object, first + i}, 0,
+                                 &bits[4 * i]);
+    }
+    row += ",\"v\":\"";
+    row += RegistersHex(bits, have, n);
+    row += "\"";
+  }
+  row += "}\n";
+  std::lock_guard<std::mutex> lock(g_mutex);
+  if (g_file) std::fputs(row.c_str(), g_file);
 }
 
 bool ReadIb(uint32_t ib, IbView* v) {
@@ -948,6 +1135,10 @@ struct PsInfo {
   const PsTerrainEntry* terrain = nullptr;  // FindPsTerrain: a terrain pixel shader (the entry is stable)
   uint32_t phys = 0;
   uint32_t bytes = 0;
+  // ReadLiteralRegisters: the pixel registers the shader loads itself;
+  // `literals_known` false when its table could not be read.
+  uint64_t literal_regs[4] = {};
+  bool literals_known = false;
 };
 thread_local std::unordered_map<uint32_t, PsInfo> t_ps_cache;
 
@@ -974,7 +1165,36 @@ const PsInfo* LookupPs(uint32_t obj) {
   e.terrain = FindPsTerrain(u.hash);
   e.phys = u.phys;
   e.bytes = u.bytes;
+  e.literals_known = ReadLiteralRegisters(kPsLayout, obj, 0, 256, e.literal_regs);
   return &e;
+}
+
+// The GPU's pixel constant `reg` (0..255) at the draw this thread is capturing,
+// as host floats (their bits are the guest's): the device's bank, or the
+// constant buffer the last LoadAluConstants of the register named; a register
+// loaded per tile is the first colour tile's. Proven against the GPU's register
+// file (frame-map section 14). False, with `out` untouched, when the register
+// cannot be read, and for a register the draw's pixel shader loads itself (a
+// literal of its table, which no bank or buffer holds; also when the shader or
+// its table cannot be read): nothing may then be drawn from it. Not covered: a
+// register that only another shader's literals wrote, which no shader of this
+// draw reads; the bank's value is returned for it.
+bool ReadPixelConstant(uint32_t reg, float out[4]) {
+  if (reg >= ConstantLoads::kRegisters || !t_draw_device) return false;
+  uint32_t vs_field = 0, ps_field = 0;
+  if (!ReadVirtualBe32(t_draw_device + xdk::kVsDeviceFieldOffset, &vs_field) ||
+      !ReadVirtualBe32(t_draw_device + xdk::kPsDeviceFieldOffset, &ps_field)) {
+    return false;
+  }
+  // The pixel shader as ChoosePs picks it; none: a depth-only draw, no literal.
+  if (const uint32_t ps_obj = vs_field ? ps_field : t_gpu_ps) {
+    const PsInfo* ps = LookupPs(ps_obj);
+    if (!ps || !ps->literals_known || ((ps->literal_regs[reg / 64] >> (reg % 64)) & 1)) return false;
+  }
+  uint32_t bits[4];
+  if (!ReadConstantBits(PixelBank(t_draw_device), t_ps_loads.Find(reg), reg, bits)) return false;
+  std::memcpy(out, bits, sizeof(bits));
+  return true;
 }
 
 // The vertex buffer feeding a fetch slot (stream_resolve.h): nullptr, or the
@@ -1323,6 +1543,110 @@ void AppendPixelConstants(std::string& row, uint32_t device) {
   row += BeFloats(p, 128);
 }
 
+// Discovery evidence (frame-map section 14, "Pixel constants"), for
+// tools/xdk_sigmatch/pconst_check.py, which compares it with the GPU's register
+// file. For one constant bank, under keys that begin with `prefix` ("p" pixel,
+// "v" vertex); register values are their bits in hex (RegistersHex):
+//   "<p>full"       all 256 registers as `read` gives them (the reader);
+//   "<p>tiles"      the loads issued under a bin mask that leaves bins out,
+//                   oldest first, each as the runs of registers it still
+//                   decides: {"mask", "start", "v"};
+//   "<p>bank_diff"  the registers whose value in the device's bank at `bank`
+//                   is another one (or that the reader did not read), with the
+//                   bank's value; left out when the bank cannot be read.
+// The caller is the thread that issued the draw (the loads are per thread).
+template <typename Read>
+void AppendBankRegisters(std::string& row, const char* prefix, const ConstantLoads& loads, uint32_t bank,
+                         Read read) {
+  constexpr uint32_t kRegs = ConstantLoads::kRegisters;
+  uint32_t bits[4 * kRegs] = {};
+  bool have[kRegs];
+  for (uint32_t r = 0; r < kRegs; ++r) have[r] = read(r, &bits[4 * r]);
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), ",\"%sfull\":\"", prefix);
+  row += buf;
+  row += RegistersHex(bits, have, kRegs);
+  std::snprintf(buf, sizeof(buf), "\",\"%stiles\":[", prefix);
+  row += buf;
+  bool first = true;
+  for (uint32_t i = 0; i < loads.binned_count(); ++i) {
+    const ConstantLoads::Binned& b = loads.binned(i);
+    for (uint32_t r = b.start; r < b.start + b.count;) {
+      if (!loads.InForce(b, r)) {
+        ++r;
+        continue;
+      }
+      uint32_t run[4 * kRegs];
+      bool run_have[kRegs];
+      uint32_t n = 0;
+      for (; r < b.start + b.count && loads.InForce(b, r); ++r, ++n) {
+        run_have[n] = ReadConstantBits(
+            bank, ConstantSource{ConstantSource::Kind::kMemory, b.object, b.first + (r - b.start)}, r,
+            &run[4 * n]);
+      }
+      std::snprintf(buf, sizeof(buf), "%s{\"mask\":\"0x%08X\",\"start\":%u,\"v\":\"", first ? "" : ",", b.mask,
+                    r - n);
+      row += buf;
+      row += RegistersHex(run, run_have, n);
+      row += "\"}";
+      first = false;
+    }
+  }
+  row += "]";
+  const uint8_t* shadow = bank ? ReadVirtual(bank, 16 * kRegs) : nullptr;
+  if (shadow) {
+    std::snprintf(buf, sizeof(buf), ",\"%sbank_diff\":{", prefix);
+    row += buf;
+    first = true;
+    for (uint32_t r = 0; r < kRegs; ++r) {
+      uint32_t v[4];
+      for (int i = 0; i < 4; ++i) v[i] = LoadBe32(shadow + 16 * r + 4 * i);
+      if (have[r] && std::memcmp(v, &bits[4 * r], sizeof(v)) == 0) continue;
+      std::snprintf(buf, sizeof(buf), "%s\"%u\":\"", first ? "" : ",", r);
+      row += buf;
+      row += RegistersHex(v, nullptr, 1);
+      row += "\"";
+      first = false;
+    }
+    row += "}";
+  }
+}
+
+// The pixel bank's rows ("pfull" is what ReadPixelConstant gives), and
+// "pbool_load": the pixel bool word as its last writer on this thread left it
+// (t_gpu_pbool), when that is known.
+void AppendPixelRegisters(std::string& row, uint32_t device) {
+  AppendBankRegisters(row, "p", t_ps_loads, PixelBank(device), [](uint32_t r, uint32_t* bits) {
+    float f[4];
+    if (!ReadPixelConstant(r, f)) return false;
+    std::memcpy(bits, f, sizeof(f));
+    return true;
+  });
+  if (t_gpu_pbool.read) {
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), ",\"pbool_load\":\"0x%08X\"", t_gpu_pbool.word);
+    row += buf;
+  }
+}
+
+// The vertex bank's rows ("vfull", "vtiles", "vbank_diff"): the registers as
+// the same model gives them for the vertex bank, a register the vertex shader
+// `vs` (variant `variant`) loads itself left out, as for the pixel bank; no
+// register is read when the shader's literal table cannot be. Nothing is
+// written when the vertex bank's uploads were not followed from the start
+// (t_vs_loads_whole). Discovery evidence only: no record reads vertex
+// constants through it.
+void AppendVertexRegisters(std::string& row, uint32_t device, uint32_t vs, uint32_t variant) {
+  if (!t_vs_loads_whole) return;
+  uint64_t literal[4] = {};
+  const bool literals_known = vs && ReadLiteralRegisters(kVsLayout, vs, variant, 0, literal);
+  const uint32_t bank = VertexBank(device);
+  AppendBankRegisters(row, "v", t_vs_loads, bank, [&](uint32_t r, uint32_t* bits) {
+    if (!literals_known || ((literal[r / 64] >> (r % 64)) & 1)) return false;
+    return ReadConstantBits(bank, t_vs_loads.Find(r), r, bits);
+  });
+}
+
 // Discovery evidence for the terrain shaders (frame-map section 13, "Terrain"):
 // the pixel constants above c31 that they read, from the same bank, as
 // "pc":{"cN":[4 floats]} (a register that cannot be read is left out). c45 is
@@ -1436,10 +1760,22 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
   AppendPs(row, dev);
   AppendTextureFetches(row, device, dev);
   AppendPixelConstants(row, device);
+  AppendPixelRegisters(row, device);
+  // The pixel shader's literal constants, as tess rows carry them: registers
+  // the shader loads itself, which no constant reader covers (frame-map
+  // section 14, "Pixel constants").
+  {
+    uint32_t ps_obj = 0;
+    row += ",\"ps_lit\":";
+    row += ChoosePs(dev, &ps_obj) ? LiteralsJson(kPsLayout, ps_obj, 0) : "null";
+  }
 
   // Vertex shader and its microcode.
   VsChoice vc;
   if (!ChooseVs(dev, &vc)) return finish("no_vs");
+  AppendVertexRegisters(row, device, vc.obj, vc.variant);
+  row += ",\"vs_lit\":";
+  row += LiteralsJson(kVsLayout, vc.obj, vc.variant);
   const uint32_t vs = vc.obj, variant = vc.variant;
   const UcodeRef cand[2] = {ReadVsUcode(vs, 0), ReadVsUcode(vs, 1)};
   std::snprintf(buf, sizeof(buf), ",\"vs\":{\"obj\":\"0x%08X\",\"flags\":\"0x%08X\",\"variant\":%u,\"candidates\":[",
@@ -1663,6 +1999,8 @@ void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
   }
   row += "}";
   AppendPixelConstants(row, device);
+  AppendPixelRegisters(row, device);
+  if (vc_ok) AppendVertexRegisters(row, device, vc.obj, vc.variant);
   AppendTerrainPixelConstants(row, device);
   if (const uint8_t* bools = ReadVirtual(device + xdk::kDevicePsBoolConstantsOffset, 4)) {
     std::snprintf(buf, sizeof(buf), ",\"pbool\":\"0x%08X\"", LoadBe32(bools));
@@ -2557,7 +2895,15 @@ void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t*) {
   a.r[5] = ctx.r8.u32;
   a.r[6] = ctx.r9.u32;
   a.r[7] = ctx.r10.u32;
-  if (IsDrawId(id) && t_nesting.Enter()) g_nested_draws.fetch_add(1, std::memory_order_relaxed);
+  if (IsDrawId(id)) {
+    if (t_nesting.Enter()) g_nested_draws.fetch_add(1, std::memory_order_relaxed);
+    // Discovery evidence (t_gpu_pbool): whether this builder will flush the bool shadow.
+    if (g_discovery_active.load(std::memory_order_relaxed)) {
+      uint32_t pending = 0;
+      t_bool_flush_pending = ReadVirtualBe32(ctx.r3.u32 + xdk::kDeviceBoolPendingOffset, &pending) &&
+                             (pending & xdk::kDeviceBoolPendingMaskHi) != 0;
+    }
+  }
   switch (id) {
     case kHook_D3DDevice_SetStreamSource:
     case kHook_D3DDevice_SetIndices:
@@ -2583,6 +2929,11 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
     OnGpuLoadShaders(t_last_args[id]);
     return;
   }
+  if (id == kHook_LoadAluConstants_8227CFC8) {
+    CaptureTimer timer;
+    OnAluLoad(t_last_args[id]);
+    return;
+  }
   if (id == kHook_IndirectBuffer_82286248) {
     if (!g_armed.load(std::memory_order_relaxed)) return;
     CaptureTimer timer;
@@ -2594,6 +2945,12 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
   const bool outermost = t_nesting.Leave();
   const LastArgs& args = t_last_args[id];
   const uint32_t device = args.r[0];  // r3 of every draw hook is the device
+  t_draw_device = device;             // for ReadPixelConstant
+  if (t_bool_flush_pending) {
+    // The builder wrote the device's bool shadow to the GPU (discovery evidence).
+    t_bool_flush_pending = false;
+    t_gpu_pbool.read = ReadVirtualBe32(device + xdk::kDevicePsBoolConstantsOffset, &t_gpu_pbool.word);
+  }
   // Records: only the outermost draw of a nested call chain, so geometry is
   // never captured twice, and only for a frame a consumer wants records for;
   // otherwise the draw is only counted.

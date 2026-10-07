@@ -50,3 +50,4 @@ FABLE2_XDK_HOOK(113, "IndirectBuffer:82286248", ProcessAndProcessAndProcess816_8
 FABLE2_XDK_HOOK(114, "TileReplay?:82B9ED28", ProcessAndProcessAndProcess1079_82B9ED28)
 FABLE2_XDK_HOOK(115, "VsLoadImmediate:821DFDE0", ProcessAndProcessAndProcess778_821DFDE0)
 FABLE2_XDK_HOOK(116, "GpuLoadShaders:82221978", sub_82221978)
+FABLE2_XDK_HOOK(117, "LoadAluConstants:8227CFC8", ProcessAndProcessAndProcess860_8227CFC8)

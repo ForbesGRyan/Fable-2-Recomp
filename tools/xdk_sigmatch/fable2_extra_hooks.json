@@ -15,5 +15,6 @@
   {"name": "IndirectBuffer:82286248", "address": "0x82286248"},
   {"name": "TileReplay?:82B9ED28", "address": "0x82B9ED28"},
   {"name": "VsLoadImmediate:821DFDE0", "address": "0x821DFDE0"},
-  {"name": "GpuLoadShaders:82221978", "address": "0x82221978"}
+  {"name": "GpuLoadShaders:82221978", "address": "0x82221978"},
+  {"name": "LoadAluConstants:8227CFC8", "address": "0x8227CFC8"}
 ]

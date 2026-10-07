@@ -19,8 +19,16 @@
         }
       ]
     },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "scale": "c26.w",
+      "divide_by_alpha": false
+    },
     "manual": true,
-    "evidence": "native_discovery_20261002_194918.jsonl: 4500 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/8D900846800943C8_tf0.png: DXT1 1024x1024 atlas of painted wood planks, red/gold trimmed panels and green boards (building facades); shader squares tf0 into the diffuse term, tf1 is the scalar-squared specular colour, tf2 DXN normal"
+    "evidence": "native_discovery_20261002_194918.jsonl: 4500 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/8D900846800943C8_tf0.png: DXT1 1024x1024 atlas of painted wood planks, red/gold trimmed panels and green boards (building facades); shader squares tf0 into the diffuse term, tf1 is the scalar-squared specular colour, tf2 DXN normal",
+    "alpha_manual": true,
+    "alpha_evidence": "Dump shader_8D900846800943C8.ucode.frag: tfetch2D r8.wxyz, r8.yx, tf0 (instr 14) puts the texture's w in r8.x (the scalars of 18, 19 and 22 rewrite r8.y, r8.z, r8.w; nothing rewrites r8.x); oC0.w = c26.w * r8.x (85, scalar mulsc) in the unconditional exece after label L18; no kill. shader_trace.py --alpha: fetch slot 0, the albedo slot, component w, scale [c26.w]. Colour division only under cexec b128: r0.w = r8.x squared (30, scalar muls), r0.w = 1 / r0.w (31, scalar rcp), r11.xyz = r11.xyz * r0.w (32); the bool constant b128 is clear in every draw row of both captures (\"pbool\" 0x00000100; device shadow, not compared with the GPU), so the division does not run there and divide_by_alpha is false; a scene that sets b128 would need it. Captures (out/native-evidence/materials): native_discovery_20261006_211654.jsonl (bridge) / native_discovery_20261006_211843.jsonl (by the trees), main-scene rows, 24 frames each, every draw. State: alpha test greater with reference 128/255, no alpha-to-mask, in 48 of 2904 / 216 of 4584 rows; no test and no blend in the others. Constants in the rows with the test: c26.w 1 in all, so the alpha is the texture's. Thumbnails task7/tex_bridge and task7/tex_walk (<fetch dword 1>.png colour, _alpha.png alpha), statistics task7/texalpha_*.txt, constants task7/pconst_*.txt; a texture is named by its address in the capture it is quoted for, and the two runs place some small textures at different addresses. Textures of the rows with the test, DXT1 with alpha 0 or 255 only and black transparent texels: one cell each of the atlases 17D00052 (1.8% of its texels transparent), 17360052 (10.5%), 17620052 (2.8%), 17E60052 (2.3%), 17DB0052 (3.1%). Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders)."
   },
   "0xA7E45D07F5CF6627": {
     "slot": 0,
@@ -42,8 +50,15 @@
         }
       ]
     },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "divide_by_alpha": true
+    },
     "manual": true,
-    "evidence": "native_discovery_20261002_194918.jsonl: 2506 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/A7E45D07F5CF6627_tf0.png: DXT1 atlas of character parts (skin, faces, eyes, cloth patches)"
+    "evidence": "native_discovery_20261002_194918.jsonl: 2506 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/A7E45D07F5CF6627_tf0.png: DXT1 atlas of character parts (skin, faces, eyes, cloth patches)",
+    "alpha_manual": true,
+    "alpha_evidence": "Hand trace (shader_trace.py --alpha refuses: 'alpha is multiplied by a computed term (dissolve or fade)'). Dump shader_A7E45D07F5CF6627.ucode.frag: tfetch2D r5, r0.wx, tf0 (instr 8; r5 has no other writer), oC0.w = r4.x * r5.w (43) in the unconditional exece; no kill. The factor is the distance dissolve, left out by ruling (2026-10-06): the distance from c19 (read as the eye position), less c15.z, times c15.y, is taken from the literal that the comparison uses as 1 and saturated; the noise texture tf10, fetched at the pixel position scaled by c50.xy, is added; the factor is 1 where the sum reaches the literal and 0 elsewhere (instr 9, 10, 12 scalar: the distance; 37 scalar, 38, 40, 41, 42). Without it a plant stays solid out to the vertex shader's cut radius, where the game thins it out over the last stretch: with the captured constants the dissolve band is 0.8 to 9.6 units wide and ends 0.1 to 0.7 units inside the cut radius. Colour division: r7 = r5 squared (14), r0.w = 1 / r7.w (18, scalar rcp), r3.xyz = r7.xyz * r0.w (19). Captures (out/native-evidence/materials): native_discovery_20261006_211654.jsonl (bridge) / native_discovery_20261006_211843.jsonl (by the trees), main-scene rows, 24 frames each, every draw. State: alpha test greater with reference 128/255 and alpha-to-mask 0x87 in 1610 of 1610 / 696 of 696 rows; never blended. No constant in the recipe, so no draw is stippled. Thumbnails task7/tex_bridge and task7/tex_walk (<fetch dword 1>.png colour, _alpha.png alpha), statistics task7/texalpha_*.txt, constants task7/pconst_*.txt; a texture is named by its address in the capture it is quoted for, and the two runs place some small textures at different addresses. Textures, DXT1 with alpha 0 or 255 only and black transparent texels: 14DC0052 grass tufts (62.6% transparent), 13B60052 leaves (47.8%), 156C0052 long grass (71.2%), one cell each of the atlases 17DB0052, 17E60052, 172B0052. UV replay task7/uvcheck_walk_textured.txt: 75.0% of the cards' area on opaque texels of 14DC0052 (whole texture 37.4%; 53.5% with u and v exchanged, 35.7% with v mirrored), 85.7% on 156C0052 (28.8%; 21.4%, 21.4%). Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders)."
   },
   "0x165EDCD2CB963868": {
     "slot": 0,
@@ -65,8 +80,15 @@
         }
       ]
     },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "divide_by_alpha": true
+    },
     "manual": true,
-    "evidence": "native_discovery_20261002_194918.jsonl: 1446 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/165EDCD2CB963868_tf0.png: DXT1 green and autumn-red leaves on a cut-out background (foliage); the finder proposed slot 1 (shader-order tie at score 4.5), but tf1 is a 16x16 all-zero 8_8_8_8 or a DXT4_5 specular map (thumbnail blank), so slot 0 was chosen"
+    "evidence": "native_discovery_20261002_194918.jsonl: 1446 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/165EDCD2CB963868_tf0.png: DXT1 green and autumn-red leaves on a cut-out background (foliage); the finder proposed slot 1 (shader-order tie at score 4.5), but tf1 is a 16x16 all-zero 8_8_8_8 or a DXT4_5 specular map (thumbnail blank), so slot 0 was chosen",
+    "alpha_manual": true,
+    "alpha_evidence": "Hand trace (shader_trace.py --alpha refuses: 'alpha is multiplied by a computed term (dissolve or fade)'). Dump shader_165EDCD2CB963868.ucode.frag: tfetch2D r9, r9.yx, tf0 (instr 15; r9 has no other writer), oC0.w = r7.x * r9.w (73) in the unconditional exece; no kill. The factor is the distance dissolve, left out by ruling (2026-10-06): the distance from c19 (read as the eye position), less c15.z, times c15.y, is taken from the literal that the comparison uses as 1 and saturated; the noise texture tf10, fetched at the pixel position scaled by c50.xy, is added; the factor is 1 where the sum reaches the literal and 0 elsewhere (instr 19, 22, 30 scalar: the distance; 67 scalar, 68, 70, 71, 72). Without it a plant stays solid out to the vertex shader's cut radius, where the game thins it out over the last stretch: with the captured constants the dissolve band is 0.6 to 1.6 units wide and ends 0.8 to 3.1 units inside the cut radius. Colour division: r3 = r9 squared, one component at a time (41, 43, 44, 46, scalar muls), r1.x = 1 / r3.w (47, scalar rcp), r1.xyz = r3.xyz * r1.x (48). Captures (out/native-evidence/materials): native_discovery_20261006_211654.jsonl (bridge) / native_discovery_20261006_211843.jsonl (by the trees), main-scene rows, 24 frames each, every draw. State: alpha test greater with reference 128/255 and alpha-to-mask 0x87 in 888 of 936 / 528 of 552 rows; no test and no blend in the others. No constant in the recipe. Thumbnails task7/tex_bridge and task7/tex_walk (<fetch dword 1>.png colour, _alpha.png alpha), statistics task7/texalpha_*.txt, constants task7/pconst_*.txt; a texture is named by its address in the capture it is quoted for, and the two runs place some small textures at different addresses. Textures of the rows with alpha state, DXT1 with alpha 0 or 255 only and black transparent texels: fern and leaf cut-outs (tex_bridge 13F70052, 13DC0052, 13E60052, 13FF0052; tex_walk 13B20052, 13FF0052, 15390052; 59.7% to 69.1% transparent) and one cell each of the atlases 17BA0052, 17410052, 17360052. UV replay task7/uvcheck_walk_textured.txt: 66.1% of the cards' area on opaque texels of 15390052 (whole texture 34.5%; 33.7% with u and v exchanged). Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders)."
   },
   "0x00E09D1BC5295D52": {
     "slot": 0,
@@ -88,16 +110,56 @@
         }
       ]
     },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "scale": [
+        "c26.w",
+        "c15.w"
+      ],
+      "divide_by_alpha": true
+    },
     "manual": true,
-    "evidence": "native_discovery_20261002_194918.jsonl: 1149 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/00E09D1BC5295D52_tf0.png: DXT1 atlas of grass tufts, bark, stone, wood and roof tiles"
+    "evidence": "native_discovery_20261002_194918.jsonl: 1149 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/00E09D1BC5295D52_tf0.png: DXT1 atlas of grass tufts, bark, stone, wood and roof tiles",
+    "alpha_manual": true,
+    "alpha_evidence": "Dump shader_00E09D1BC5295D52.ucode.frag: tfetch2D r0.wxyz, r0.yx, tf0 (instr 14) puts the texture's w in r0.x (no other writer) and its rgb in r0.yzw; r8.x = c26.w * r0.x (88, scalar mulsc); oC0.w = c15.w * r8.x (89, scalar mulsc); both in the unconditional exece after label L18; no kill. shader_trace.py --alpha: fetch slot 0, the albedo slot, component w, scale [c26.w, c15.w]. Colour division: r9 = r0.yzwx squared = (rgb^2, alpha^2) (21), r1.x = 1 / r9.w (38, scalar rcp), r1.xyz = r9.xyz * r1.x (39). Captures (out/native-evidence/materials): native_discovery_20261006_211654.jsonl (bridge) / native_discovery_20261006_211843.jsonl (by the trees), main-scene rows, 24 frames each, every draw. State: alpha test greater with reference 0 and alpha-to-mask in 384 of 720 / 648 of 960 rows (offsets 0x87 in 240 / 624, 0xAA in 144 / 24); no test and no blend in the other rows. Constants in the rows with alpha state: c26.w 1 in all; c15.w 1 in 216 / 336 rows and 0.02 to 0.71 / 0.0025 to 0.88 in the other 168 / 312. An opaque texel of a draw with scale s keeps the pixels of each 2x2 block whose alpha-to-mask threshold is at most s (0x87: 0.25, 0.75, 1, 0.5; 0xAA: 0.5 everywhere): all four in 216 / 336 rows, three in 0 / 24, two in 48 / 0, one in 72 / 144, none in 48 / 144 (the stippled and missing draws are fading ones; the game fades them through its two samples per pixel). Thumbnails task7/tex_bridge and task7/tex_walk (<fetch dword 1>.png colour, _alpha.png alpha), statistics task7/texalpha_*.txt, constants task7/pconst_*.txt; a texture is named by its address in the capture it is quoted for, and the two runs place some small textures at different addresses. Textures of the rows with alpha state, all DXT1 with alpha 0 or 255 only and black transparent texels: 172B0052 1024x1024 atlas with grass tufts (5.6% of its texels transparent), 17FC0052 and 15630052 bark (0%), 13C80052 ivy (65.6%), 15300052 and 18070052 (0%), 17BA0052 (6.2%), 17360052 (10.5%). UV replay task7/uvcheck_walk_textured.txt: on 13C80052 45.4% of the cards' area lies on opaque texels (whole texture 34.4%; 27.1% with u and v exchanged, 15.4% with v mirrored). Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders)."
   },
   "0x7CD57B81550F19E3": {
-    "no_albedo": "only colour candidate tf0 (DXT1, xyzw) has an untraceable UV: shader_trace Unsupported('u: scalar co-issue mulsc writes component'); tf8 k_8 screen mask (r_abs), tf11/tf12 1x1 8_8_8_8 (predicated / cndgt). VS 0xA5846836C90E1192 has a transform entry since sub-project 5 (frame-map section 12, Wind and displacement; no uv entry), so its 22 draws per frame in the bridge scene are drawn as flat clay, counted no-albedo (corrected 2026-10-06; this text first said the shader was rejected and the draws were not drawn)",
+    "slot": 0,
+    "u": {
+      "input": "r1.w",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r2.w",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "scale": [
+        "c26.w",
+        "c15.w"
+      ],
+      "divide_by_alpha": true
+    },
     "manual": true,
-    "evidence": "native_discovery_20261002_194918.jsonl: 834 draws; disassembly out/shader_dump/shader_7CD57B81550F19E3.ucode.frag"
+    "evidence": "Hand trace (shader_trace.py refuses the coordinate: 'u: scalar co-issue mulsc writes component'); until 2026-10-06 this entry was no_albedo for that reason. Dump shader_7CD57B81550F19E3.ucode.frag: r6.x = c8.y * r2.w (instr 9, scalar mulsc), r6.y = c8.x * r1.w (10, scalar mulsc), r6.xy = r6.xy + c8.wz (11: add r6.xy__, r6.xyyy, c8.wzzz), tfetch2D r6.wxyz, r6.yx, tf0 (13): u = r1.w * c8.x + c8.z, v = r2.w * c8.y + c8.w. r1 and r2 are the interpolators as they arrive: nothing writes them before instr 10 (8 writes r6.zw from the pixel position r_abs[6], 9 writes r7.xyz). tf0 is the shader's only colour texture: its rgb is squared (14), divided by its alpha squared (18, 19), lit (20 to 25, 67) and written at 69; tf8 is the screen-sized k_8 mask, tf11 / tf12 1x1 8_8_8_8 in the blocks under cjmp b132 / b129. Captures (out/native-evidence/materials): native_discovery_20261006_211654.jsonl (bridge) / native_discovery_20261006_211843.jsonl (by the trees), main-scene rows, 24 frames each, every draw. Vertex shaders: 0xA5846836C90E1192 (\"uv\" o1.w, o2.w in vs-transforms.json) in 528 of 528 / 672 of 960 rows; 0xD7DD31B9BF194DE8 (168) and 0x2D40B53C926109BE (120) by the trees have no transform, their draws are not drawn. Thumbnails task7/tex_bridge and task7/tex_walk (<fetch dword 1>.png colour, _alpha.png alpha), statistics task7/texalpha_*.txt, constants task7/pconst_*.txt; a texture is named by its address in the capture it is quoted for, and the two runs place some small textures at different addresses. Textures: 195C0052 DXT1 2048x1024, three sprays of oak-like leaves on a cut-out background (72 / 480 rows); 17360052 DXT1 1024x1024 atlas, of which the cards use one cell of leaf sprays (432 / 480); 18120052 DXT1 1024x1024, leaf sprays on twigs (24 / 0). UV replay on the dumped vertices (task7/uvcheck.py, uvcheck_bridge.txt, uvcheck_walk.txt; overlays task7/uv_bridge and task7/uv, uv_7CD57B81550F19E3_<texture>.png): every coordinate inside 0..1 (c8 = (1, 1, 0, 0), and (0.125, 0.125, 0.8438, 0.0156) for the atlas cell u 0.844 to 0.969, v 0.016 to 0.141; 5 of the 40 replayed bridge draws on the atlas use a second cell, c8 = (0.125, 0.0625, 0.8281, 0.9219)); bridge: 77.6% of the cards' area on opaque texels of 195C0052 (whole texture 34.8%; 61.8% with u and v exchanged, 25.9% with v mirrored), 81.0% on 18120052 (38.6%; 23.8%, 43.1%); in the overlays the card outlines follow the sprays leaf by leaf, also in the atlas cell (task7/uv_cells_sheet.png). Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders).",
+    "alpha_manual": true,
+    "alpha_evidence": "Dump: tfetch2D r6.wxyz, r6.yx, tf0 (instr 13) puts the texture's w in r6.x (no later writer); r0.x = c26.w * r6.x (68, scalar mulsc); oC0.w = c15.w * r0.x (69, scalar mulsc); both in the unconditional exece after label L15; no kill. shader_trace.py --alpha: fetch slot 0, the albedo slot, component w, scale [c26.w, c15.w]. Colour division: r1 = r6.yzwx squared (14), r0.w = 1 / r1.w (18, scalar rcp), r3.xyz = r1.xyz * r0.w (19). Captures (out/native-evidence/materials): native_discovery_20261006_211654.jsonl (bridge) / native_discovery_20261006_211843.jsonl (by the trees), main-scene rows, 24 frames each, every draw. State: alpha test greater with reference 0 and alpha-to-mask in 528 of 528 / 960 of 960 rows (offsets 0xAA in 312 / 264, 0x87 in 216 / 696), cull none, never blended. Constants: c26.w 1 in all; c15.w 1 in 312 / 624 rows and 0.02 to 0.71 / 0.0013 to 0.88 in the other 216 / 336. An opaque texel of a draw with scale s keeps the pixels of each 2x2 block whose alpha-to-mask threshold is at most s (0x87: 0.25, 0.75, 1, 0.5; 0xAA: 0.5 everywhere): all four in 384 / 624 rows, three in 0 / 24, two in 48 / 0, one in 48 / 168, none in 48 / 144. Thumbnails task7/tex_bridge and task7/tex_walk (<fetch dword 1>.png colour, _alpha.png alpha), statistics task7/texalpha_*.txt, constants task7/pconst_*.txt; a texture is named by its address in the capture it is quoted for, and the two runs place some small textures at different addresses. Textures, DXT1 with alpha 0 or 255 only and black transparent texels: 195C0052 (65.2% of its texels transparent), 18120052 (61.4%), 17360052 (10.5% of the atlas; the cards' cell is a cut-out cell). Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders)."
   },
   "0x014F8A02DB7B19CA": {
-    "no_albedo": "traced fetches tf14/tf15 (8_8_8_8 128x128, one texture each) read all-zero guest memory at first use (render-target-like; thumbnails 014F8A02DB7B19CA_tf14/tf15.png blank); tf13 is 8_8 two-channel (15 animated 128x128 textures, normal-map-like); tf4/tf5 1D lookups. VS 0x7C5710DEF3EE33C4 has a transform entry and a uv entry since sub-project 5 (frame-map section 12, Wind and displacement), so its 15 draws per frame in the bridge scene (the dog's fur shells) are drawn as flat clay, counted no-albedo (corrected 2026-10-06; this text first said the shader had no entry and the draws were not drawn)",
+    "no_albedo": "traced fetches tf14/tf15 (8_8_8_8 128x128, one texture each) read all-zero guest memory at first use (render-target-like; thumbnails 014F8A02DB7B19CA_tf14/tf15.png blank); tf13 is 8_8 two-channel (15 animated 128x128 textures, normal-map-like); tf4/tf5 1D lookups. VS 0x7C5710DEF3EE33C4 has a transform entry and a uv entry since sub-project 5 (frame-map section 12, Wind and displacement), so its 15 draws per frame in the bridge scene (the dog's fur shells) are drawn as flat clay, counted no-albedo (corrected 2026-10-06; this text first said the shader had no entry and the draws were not drawn). Added 2026-10-06 (materials Task 7; native_discovery_20261006_211654.jsonl bridge / _211843.jsonl by the trees, out/native-evidence/materials): tf14 / tf15 (8_8_8_8 128x128) still read all zero in both captures; tf13 is format 10 (8_8), 15 textures with data. Alpha, by hand (shader_trace.py --alpha refuses: 'alpha chain passes through mad'): r1.w = r0.w * r2.y + r2.w (instr 8: the tf13 sample's w times one interpolator plus another), oC0 = r1 (27): not a texture component times constants. State: blend source alpha, inverse source alpha (0x07060706) with alpha test greater-equal, reference 16/255, depth write on, in 360 of 360 rows of both captures (15 draws per frame, the dog's fur shells). Rule: a blended draw whose colour is unknown is left out, counted blend-unknown (so since materials Task 6; before it these draws were flat clay)",
     "manual": true,
     "evidence": "native_discovery_20261002_194918.jsonl: 571 draws; disassembly out/shader_dump/shader_014F8A02DB7B19CA.ucode.frag"
   },
@@ -121,8 +183,15 @@
         }
       ]
     },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "divide_by_alpha": true
+    },
     "manual": true,
-    "evidence": "native_discovery_20261002_194918.jsonl: 549 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/E99F4ACC7A3C78B4_tf0.png: DXT1 character-part atlas (same texture as PS A7E45D07F5CF6627 slot 0)"
+    "evidence": "native_discovery_20261002_194918.jsonl: 549 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/E99F4ACC7A3C78B4_tf0.png: DXT1 character-part atlas (same texture as PS A7E45D07F5CF6627 slot 0)",
+    "alpha_manual": true,
+    "alpha_evidence": "Hand trace (shader_trace.py --alpha refuses: 'alpha is multiplied by a computed term (dissolve or fade)'). Dump shader_E99F4ACC7A3C78B4.ucode.frag: tfetch2D r0.xwyz, r0.yx, tf0 (instr 12) puts the texture's w in r0.y (no later writer; its rgb in r0.x, r0.z, r0.w), oC0.w = r4.x * r0.y (82) in the unconditional exece; no kill. The factor is the distance dissolve, left out by ruling (2026-10-06): the distance from c19 (read as the eye position), less c15.z, times c15.y, is taken from the literal that the comparison uses as 1 and saturated; the noise texture tf10, fetched at the pixel position scaled by c50.xy, is added; the factor is 1 where the sum reaches the literal and 0 elsewhere (instr 13, 16, 24 scalar: the distance; 76 scalar, 77, 79, 80, 81). Without it a plant stays solid out to the vertex shader's cut radius, where the game thins it out over the last stretch: with the captured constants the dissolve band is 0.8 to 9.6 units wide and ends 0.1 to 0.7 units inside the cut radius. Colour division: r7 = r0.xzwy squared = (rgb^2, alpha^2) (15), r0.x = 1 / r7.w (18, scalar rcp), r7.xyz = r7.xyz * r0.x (19). Captures (out/native-evidence/materials): native_discovery_20261006_211654.jsonl (bridge) / native_discovery_20261006_211843.jsonl (by the trees), main-scene rows, 24 frames each, every draw. State: alpha test greater with reference 128/255 and alpha-to-mask 0x87 in 360 of 360 / 288 of 288 rows; never blended. No constant in the recipe. Thumbnails task7/tex_bridge and task7/tex_walk (<fetch dword 1>.png colour, _alpha.png alpha), statistics task7/texalpha_*.txt, constants task7/pconst_*.txt; a texture is named by its address in the capture it is quoted for, and the two runs place some small textures at different addresses. Textures, DXT1 with alpha 0 or 255 only and black transparent texels: 14DC0052 grass tufts (62.6% transparent), 14D20052 (82.2%), 156C0052 long grass (71.2%), 13B60052 leaves (47.8%), one cell each of the atlases 17DB0052, 17E60052, 172B0052. UV replay task7/uvcheck_walk_textured.txt: 75.0% of the cards' area on opaque texels of 14DC0052 (whole texture 37.4%). Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders)."
   },
   "0x401A01FD4E5F8757": {
     "slot": 0,
@@ -144,16 +213,24 @@
         }
       ]
     },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "scale": "c26.w",
+      "divide_by_alpha": false
+    },
     "manual": true,
-    "evidence": "native_discovery_20261002_194918.jsonl: 454 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/401A01FD4E5F8757_tf0.png: DXT4_5 256x512 atlas of feathers, fur and small props with alpha; shader squares tf0 (instr 81) into the diffuse term like PS 8D900846800943C8, tf1 (DXT1) squared is the specular colour"
+    "evidence": "native_discovery_20261002_194918.jsonl: 454 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/401A01FD4E5F8757_tf0.png: DXT4_5 256x512 atlas of feathers, fur and small props with alpha; shader squares tf0 (instr 81) into the diffuse term like PS 8D900846800943C8, tf1 (DXT1) squared is the specular colour",
+    "alpha_manual": true,
+    "alpha_evidence": "Dump shader_401A01FD4E5F8757.ucode.frag: tfetch2D r7.wxyz, r7.yx, tf0 (instr 60) puts the texture's w in r7.x (instr 81 rewrites r7.yzw only); oC0.w = c26.w * r7.x (227, scalar mulsc) in the unconditional exece after label L40; no kill. shader_trace.py --alpha: fetch slot 0, the albedo slot, component w, scale [c26.w]. No colour division: the rgb is squared (81) and used as it is (153, 197); the shader has no cexec b128 block and no rcp of the alpha. Captures (out/native-evidence/materials): native_discovery_20261006_211654.jsonl (bridge) / native_discovery_20261006_211843.jsonl (by the trees), main-scene rows, 24 frames each, every draw. State, in 308 of 308 / 546 of 546 rows: alpha test greater with reference 254/255, depth write on, in 154 / 261; blend one, inverse source alpha (0x07010701) with depth write off and no test in 154 / 261 (the same meshes drawn a second time for their soft edges: inference from the equal counts and textures); blend constant colour (0x0D0C0D0C) in 0 / 24, which the RHI cannot express: those stay left out as blend-unknown. Constants: c26.w 1 in all. Thumbnails task7/tex_bridge and task7/tex_walk (<fetch dword 1>.png colour, _alpha.png alpha), statistics task7/texalpha_*.txt, constants task7/pconst_*.txt; a texture is named by its address in the capture it is quoted for, and the two runs place some small textures at different addresses. Textures: 15210054 DXT4_5 256x512 feathers, fur and small props (alpha 0 in 13.1% of its texels, 255 in 40.2%, between in 46.7%), 186A0054 DXT4_5 1024x1024 (15.3%, 50.8%, 33.9%), 13AD0054 DXT4_5 128x64 (38.5%, 0%, 61.5%), 16500053 DXT2_3 512x512 hair strands (8.9%, 40.5%, 50.6%). Transparent texels are black in all four (at most 0.2% are transparent and brighter than 16 of 255), so the blend with source factor one adds nothing around the shapes. Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders)."
   },
   "0xA17D8AEC3A817D45": {
-    "no_albedo": "only traced fetch tf1 writes a single component (mask .w) of a k_8 (format 2) texture (12 textures, 64x64/32x32/8x16: a mask, not colour; thumbnail tool does not decode format 2); colour-format fetches tf13/tf14 (8_8_8_8 256x256) are predicated (shader_trace Unsupported) and read all-zero guest memory at first use (thumbnails A17D8AEC3A817D45_tf13/tf14.png blank)",
+    "no_albedo": "only traced fetch tf1 writes a single component (mask .w) of a k_8 (format 2) texture (12 textures, 64x64/32x32/8x16: a mask, not colour; thumbnail tool does not decode format 2); colour-format fetches tf13/tf14 (8_8_8_8 256x256) are predicated (shader_trace Unsupported) and read all-zero guest memory at first use (thumbnails A17D8AEC3A817D45_tf13/tf14.png blank). Added 2026-10-06 (materials Task 7; native_discovery_20261006_211654.jsonl bridge / _211843.jsonl by the trees, out/native-evidence/materials): tf13 / tf14 (8_8_8_8 256x256) still read all zero in every dump of both captures and tf1 is still k_8, so no colour texture can be named. Alpha, by hand (shader_trace.py --alpha refuses: 'predicated write in the alpha chain'): r0.w = the tf1 sample (instr 10: tfetch2D r0.___x, r3.xy, tf1), r0.w = c255.z - r0.w (11, scalar), r0.w = saturate(c141.x - r0.w * c141.y) (12), r4.w = c255.z - r0.w (13, scalar), oC0 = r4 (89; r4.xyz = r2.xyz * c20.w at 88): a saturated affine function of a k_8 mask sample, not a texture component times constants. The shader also discards by that value: r2.w = (r4.w == c255.z) (14), p0 = (r2.w != 0) (15, scalar setp_ne), (p0) kill_gt (16). Neither the function nor the kill fits the alpha schema (source, component, up to two constants). State: alpha test greater with reference 15/255, blend source alpha, inverse source alpha (0x07060706), depth greater with write, in 288 of 288 / 72 of 72 rows. Rule: a blended draw whose colour is unknown is left out, counted blend-unknown (12 draws per frame on the bridge)",
     "manual": true,
     "evidence": "native_discovery_20261002_194918.jsonl: 450 draws; disassembly out/shader_dump/shader_A17D8AEC3A817D45.ucode.frag"
   },
   "0xF6D98C7B4D98438B": {
-    "no_albedo": "same shader shape as PS A17D8AEC3A817D45: only traced fetch tf1 is single-component k_8 (format 2, mask .w, 12 textures); tf13/tf14 8_8_8_8 256x256 predicated (shader_trace Unsupported) and all-zero at first use (thumbnails F6D98C7B4D98438B_tf13/tf14.png blank)",
+    "no_albedo": "same shader shape as PS A17D8AEC3A817D45: only traced fetch tf1 is single-component k_8 (format 2, mask .w, 12 textures); tf13/tf14 8_8_8_8 256x256 predicated (shader_trace Unsupported) and all-zero at first use (thumbnails F6D98C7B4D98438B_tf13/tf14.png blank). Added 2026-10-06 (materials Task 7; native_discovery_20261006_211654.jsonl bridge / _211843.jsonl by the trees, out/native-evidence/materials): the same reading as PS A17D8AEC3A817D45, from which the dump differs in one instruction: 14 is sgt r2.___w, c255.zzzz, r4.wwww, so this shader discards (16, predicated kill_gt) where the mask value r4.w is below c255.z and keeps where A17D... discards: the two draw complementary parts of the same meshes (vertex shader 0xBEAD84BD72072E0E, equal row counts). tf13 / tf14 still read all zero. State: alpha test greater with reference 15/255, no blend, depth greater-equal with write, in 288 of 288 / 72 of 72 rows. Rule: an alpha-tested draw without a recipe is drawn without the test, here as flat clay over the whole mesh (also where the game discards it), counted alpha-unknown (12 draws per frame on the bridge)",
     "manual": true,
     "evidence": "native_discovery_20261002_194918.jsonl: 447 draws; disassembly out/shader_dump/shader_F6D98C7B4D98438B.ucode.frag"
   },
@@ -177,8 +254,16 @@
         }
       ]
     },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "scale": "c26.w",
+      "divide_by_alpha": false
+    },
     "manual": true,
-    "evidence": "native_discovery_20261002_194918.jsonl: 405 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/648B965C200A5113_tf0.png: DXT1 atlas of dark wood planks, rope coils and nailed boards"
+    "evidence": "native_discovery_20261002_194918.jsonl: 405 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/648B965C200A5113_tf0.png: DXT1 atlas of dark wood planks, rope coils and nailed boards",
+    "alpha_manual": true,
+    "alpha_evidence": "Dump shader_648B965C200A5113.ucode.frag: tfetch2D r8.wxyz, r8.yx, tf0 (instr 18) puts the texture's w in r8.x (instr 22 and 36 rewrite r8.yzw only); oC0.w = c26.w * r8.x (135, scalar mulsc) in the unconditional exece after label L27; no kill. shader_trace.py --alpha: fetch slot 0, the albedo slot, component w, scale [c26.w]. Colour division only under cexec b128: r0.w = r8.x squared (34, scalar muls), r0.w = 1 / r0.w (35, scalar rcp), r8.yzw = r8.yzw * r0.w (36); the bool constant b128 is clear in every draw row of both captures (\"pbool\" 0x00000100; device shadow, not compared with the GPU), so the division does not run there and divide_by_alpha is false; a scene that sets b128 would need it. Captures (out/native-evidence/materials): native_discovery_20261006_211654.jsonl (bridge) / native_discovery_20261006_211843.jsonl (by the trees), main-scene rows, 24 frames each, every draw. State: alpha test greater with reference 128/255, no alpha-to-mask, in 0 of 264 / 72 of 336 rows; no test and no blend in the others. Constants in the rows with the test: c26.w 1 in all. Thumbnails task7/tex_bridge and task7/tex_walk (<fetch dword 1>.png colour, _alpha.png alpha), statistics task7/texalpha_*.txt, constants task7/pconst_*.txt; a texture is named by its address in the capture it is quoted for, and the two runs place some small textures at different addresses. Texture of the rows with the test: 13E80052 DXT1 128x128 (1.8% of its texels transparent, alpha 0 or 255 only). Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders)."
   },
   "0xF525E023E08AC9BB": {
     "slot": 0,
@@ -200,8 +285,15 @@
         }
       ]
     },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "divide_by_alpha": true
+    },
     "manual": true,
-    "evidence": "native_discovery_20261002_194918.jsonl: 389 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/F525E023E08AC9BB_tf0.png: DXT1 fern fronds on a cut-out background (foliage)"
+    "evidence": "native_discovery_20261002_194918.jsonl: 389 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/F525E023E08AC9BB_tf0.png: DXT1 fern fronds on a cut-out background (foliage)",
+    "alpha_manual": true,
+    "alpha_evidence": "Hand trace (shader_trace.py --alpha refuses: 'alpha is multiplied by a computed term (dissolve or fade)'). Dump shader_F525E023E08AC9BB.ucode.frag: tfetch2D r0.xywz, r0.wz, tf0 (instr 17) puts the texture's w in r0.z (no later writer) and its z in r0.w, oC0.w = r7.x * r0.z (117) in the unconditional exece; no kill. The factor is the distance dissolve, left out by ruling (2026-10-06): the distance from c19 (read as the eye position), less c15.z, times c15.y, is taken from the literal that the comparison uses as 1 and saturated; the noise texture tf10, fetched at the pixel position scaled by c50.xy, is added; the factor is 1 where the sum reaches the literal and 0 elsewhere (instr 21, 25, 46 scalar: the distance; 111 scalar, 112, 114, 115, 116). Without it a plant stays solid out to the vertex shader's cut radius, where the game thins it out over the last stretch: with the captured constants the dissolve band is 0.6 to 1.6 units wide and ends 0.8 to 3.1 units inside the cut radius. Colour division: r8 = r0.xywz squared = (rgb^2, alpha^2) (23), r1.y = 1 / r8.w (34, scalar rcp), r8.xyz = r8.xyz * r1.y (35). Captures (out/native-evidence/materials): native_discovery_20261006_211654.jsonl (bridge) / native_discovery_20261006_211843.jsonl (by the trees), main-scene rows, 24 frames each, every draw. State: alpha test greater with reference 128/255 and alpha-to-mask 0x87 in 240 of 240 / 120 of 120 rows; never blended. No constant in the recipe. Thumbnails task7/tex_bridge and task7/tex_walk (<fetch dword 1>.png colour, _alpha.png alpha), statistics task7/texalpha_*.txt, constants task7/pconst_*.txt; a texture is named by its address in the capture it is quoted for, and the two runs place some small textures at different addresses. Textures, DXT1 with alpha 0 or 255 only and black transparent texels: tex_walk 13ED0052 two large leaves (59.7% transparent) and 13B20052 fern fronds (69.1%), tex_bridge 13F70052, 13DC0052, 13FF0052 (59.7% to 69.1%), one cell each of the atlases 17BA0052, 17410052, 17360052. UV replay task7/uvcheck_walk_textured.txt: 74.6% of the cards' area on opaque texels of 13ED0052 (whole texture 40.3%; 38.9% with u and v exchanged). Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders)."
   },
   "0x789266C3E42D7E59": {
     "slot": 0,
@@ -246,8 +338,15 @@
         }
       ]
     },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "divide_by_alpha": true
+    },
     "manual": true,
-    "evidence": "native_discovery_20261002_194918.jsonl: 157 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/26052DEFBA688AF2_tf0.png: DXT1 grass/bark/stone atlas (same texture as PS 00E09D1BC5295D52 slot 0)"
+    "evidence": "native_discovery_20261002_194918.jsonl: 157 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/26052DEFBA688AF2_tf0.png: DXT1 grass/bark/stone atlas (same texture as PS 00E09D1BC5295D52 slot 0)",
+    "alpha_manual": true,
+    "alpha_evidence": "Dump shader_26052DEFBA688AF2.ucode.frag: tfetch2D r0, r0.xy, tf0 (instr 6), oC0.w = r0.w (21, scalar maxs oC0.___w, r0.ww) in the exece; r0 has no writer between; no dissolve and no kill. shader_trace.py --alpha: fetch slot 0, the albedo slot, component w, no scale. Colour division: r4 = r0 squared (8), r1.w = 1 / r4.w (9, scalar rcp), r4.xyz = r4.xyz * r1.w (10). Captures (out/native-evidence/materials): native_discovery_20261006_211654.jsonl (bridge) / native_discovery_20261006_211843.jsonl (by the trees), main-scene rows, 24 frames each, every draw. State: alpha test greater with reference 128/255 and alpha-to-mask 0x87 in 94 of 94 / 120 of 120 rows; never blended. Thumbnails task7/tex_bridge and task7/tex_walk (<fetch dword 1>.png colour, _alpha.png alpha), statistics task7/texalpha_*.txt, constants task7/pconst_*.txt; a texture is named by its address in the capture it is quoted for, and the two runs place some small textures at different addresses. Textures, DXT1 with alpha 0 or 255 only and black transparent texels: 156C0052 long grass (71.2% transparent), 14DC0052 grass tufts (62.6%), 14D20052 (82.2%), one cell each of the atlases 17DB0052, 17E60052, 172B0052. UV replay task7/uvcheck_walk_textured.txt: 85.7% of the cards' area on opaque texels of 156C0052 (whole texture 28.8%; 21.4% with u and v exchanged). Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders)."
   },
   "0x2FD24989AB04A475": {
     "slot": 0,
@@ -297,5 +396,133 @@
     },
     "manual": true,
     "evidence": "native_discovery_20261002_194918.jsonl: 40 draws, score 4.5, thumbnail out/albedo_thumbs_bowerstone/C300519EC8915346_tf0.png: DXT4_5 yellow flame sprite; shader lerps tf0 -> tf1 (flipbook, instr 6-7), slot 0 is the base frame; the finder proposed slot 1 by shader order"
+  },
+  "0x58D3FAAAA84A48AA": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "scale": [
+        "c26.w",
+        "c15.w"
+      ],
+      "divide_by_alpha": true
+    },
+    "manual": true,
+    "evidence": "native_discovery_20261006_211843.jsonl (by the trees; out/native-evidence/materials): 408 main-scene draws in 24 frames, all of vertex shader 0x475EC9F795E5EDBB (\"uv\" o0.xy). albedo_finder.py proposed slot 1 (task7/finder/albedo_proposals_walk.json; a tie at score 4.5 that shader order decides: tf1 is fetched at instr 20, tf0 at 21); slot 0 by the dump shader_58D3FAAAA84A48AA.ucode.frag: r11.x = r0.y * c8.y + c8.w, r11.z = r0.x * c8.x + c8.z (16), tfetch2D r9.wxyz, r11.zx, tf0 (21); shader_trace.py: u = r0.x * c8.x + c8.z, v = r0.y * c8.y + c8.w. tf0 squared (29) and divided by its alpha squared (30, 36) is the diffuse colour (r1, lit at 48 and 105); tf1 squared (31) only multiplies the specular term (104); tf2 is the DXN normal (22), tf8 the screen-sized mask (19), tf9 four point taps under cexec b135. Thumbnails task7/tex_bridge and task7/tex_walk (<fetch dword 1>.png colour, _alpha.png alpha), statistics task7/texalpha_*.txt, constants task7/pconst_*.txt; a texture is named by its address in the capture it is quoted for, and the two runs place some small textures at different addresses. Textures: 17FC0052 DXT1 1024x1024 and 15630052 DXT1 512x512, bark (168 and 144 rows), and one cell each of the atlases 17BA0052, 17620052, 17360052, 172B0052 (24 rows each). UV replay (task7/uvcheck_walk.txt, overlays task7/uv): every coordinate inside 0..1; on 17360052 the cards' cell (u 0.014 to 0.141, v 0.188 to 0.312) is an ivy cell and the card outlines follow the ivy (task7/uv_cells_sheet.png). Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders).",
+    "alpha_manual": true,
+    "alpha_evidence": "Dump: tfetch2D r9.wxyz, r11.zx, tf0 (instr 21) puts the texture's w in r9.x (instr 30 rewrites r9.yzw only); r8.x = c26.w * r9.x (151, scalar mulsc); oC0.w = c15.w * r8.x (152, scalar mulsc); both in the unconditional exece after label L28; the cexec b135 blocks (50 to 70) and the blocks under cjmp b132 / b129 write neither; no kill. shader_trace.py --alpha: fetch slot 0, the albedo slot, component w, scale [c26.w, c15.w]. Colour division: r12 = r9.yzwx squared (29), r0.w = 1 / r12.w (30, scalar rcp), r1.xyz = r12.xyz * r0.w (36). State (by the trees): alpha test greater with reference 0 and alpha-to-mask in 264 of 408 rows (offsets 0x87 in 240, 0xAA in 24); no test and no blend in the other 144. Constants in those 264 rows: c26.w 1; c15.w 1 in 168, 0.3264 in 48, 0.0013 in 48. An opaque texel of a draw with scale s keeps the pixels of each 2x2 block whose alpha-to-mask threshold is at most s (0x87: 0.25, 0.75, 1, 0.5; 0xAA: 0.5 everywhere): all four in 168 rows, one in 48, none in 48. Textures of the rows with alpha state: 15630052 and 17FC0052 (bark, DXT1, no transparent texel: there the recipe only applies the fade) and 17360052 (atlas, 10.5% transparent; the ivy cell). Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders)."
+  },
+  "0x2FBE9B4EE822609A": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "scale": [
+        "c26.w",
+        "c15.w"
+      ],
+      "divide_by_alpha": true
+    },
+    "manual": true,
+    "evidence": "native_discovery_20261006_211843.jsonl (by the trees; out/native-evidence/materials): 240 main-scene draws in 24 frames, all of vertex shader 0x475EC9F795E5EDBB (\"uv\" o0.xy). albedo_finder.py: slot 0, score 4.5 (task7/finder/albedo_proposals_walk.json). Dump shader_2FBE9B4EE822609A.ucode.frag: r0.xy from instr 19 (mad r0.xy__, r0.yxxx, c8.yxxx, c8.wzzz), tfetch2D r0.wxyz, r0.yx, tf0 (22); shader_trace.py: u = r0.x * c8.x + c8.z, v = r0.y * c8.y + c8.w. tf0 squared (31) and divided by its alpha squared (35, 39) is the diffuse colour; tf1 (24) is scalar-squared (47, 50, 51) as the specular colour; tf2 is the DXN normal (23), tf8 the screen-sized mask (21), tf9 four point taps under cexec b135. Thumbnails task7/tex_bridge and task7/tex_walk (<fetch dword 1>.png colour, _alpha.png alpha), statistics task7/texalpha_*.txt, constants task7/pconst_*.txt; a texture is named by its address in the capture it is quoted for, and the two runs place some small textures at different addresses. Textures: 15630052 DXT1 512x512 and 17FC0052 DXT1 1024x1024, bark (120 rows each). UV replay (task7/uvcheck_walk.txt, overlays task7/uv): every coordinate inside 0..1 (c8 = (1, 1, 0, 0)). Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders).",
+    "alpha_manual": true,
+    "alpha_evidence": "Dump: tfetch2D r0.wxyz, r0.yx, tf0 (instr 22) puts the texture's w in r0.x (no later writer); r8.x = c26.w * r0.x (176, scalar mulsc); oC0.w = c15.w * r8.x (177, scalar mulsc); both in the unconditional exece after label L32; no kill. shader_trace.py --alpha: fetch slot 0, the albedo slot, component w, scale [c26.w, c15.w]. Colour division: r14 = r0.yzwx squared (31), r8.w = 1 / r14.w (35, scalar rcp), r3.xyz = r14.xyz * r8.w (39). State (by the trees): alpha test greater with reference 0 and alpha-to-mask 0x87 in 192 of 240 rows; no test and no blend in the other 48. Constants in those 192 rows: c26.w 1; c15.w 1 in 96, 0.3549 in 48, 0.1269 in 48. An opaque texel of a draw with scale s keeps the pixels of each 2x2 block whose alpha-to-mask threshold is at most s (0x87: 0.25, 0.75, 1, 0.5; 0xAA: 0.5 everywhere): all four in 96 rows, one in 48, none in 48. Both textures are bark with no transparent texel: the recipe only applies the fade. Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders)."
+  },
+  "0x14217F5C1118D00F": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "divide_by_alpha": true
+    },
+    "manual": true,
+    "evidence": "native_discovery_20261006_211843.jsonl (by the trees; out/native-evidence/materials): 48 main-scene draws in 24 frames, vertex shaders 0xB636821F95DC9D8E and 0x6AD4108C3FF07966 (24 each; instanced, \"uv\" o0.xy). albedo_finder.py: slot 0, score 4.5 (task7/finder/albedo_proposals_walk.json). Dump shader_14217F5C1118D00F.ucode.frag: r10.xy from instr 14 (mad r10.xy__, r0.yxxx, c8.yxxx, c8.wzzz), tfetch2D r8, r10.yx, tf0 (19); shader_trace.py: u = r0.x * c8.x + c8.z, v = r0.y * c8.y + c8.w. tf0 squared (25) and divided by its alpha squared (36, 37) is the diffuse colour (r4, lit at 48 and 125); tf1 (20) is scalar-squared (43, 44, 45) as the specular colour; tf2 is the DXN normal (18), tf8 the screen-sized mask (17), tf9 four point taps under cexec b135, tf10 the dissolve noise. Thumbnails task7/tex_bridge and task7/tex_walk (<fetch dword 1>.png colour, _alpha.png alpha), statistics task7/texalpha_*.txt, constants task7/pconst_*.txt; a texture is named by its address in the capture it is quoted for, and the two runs place some small textures at different addresses. Textures: 13B20052 DXT1 256x256, two fern fronds on a cut-out background (the rows of 0xB636...), and 13FB0052 DXT1 256x256, soft round blotches with no transparent texel (the rows of 0x6AD4...; what object it is was not established). UV replay (task7/uvcheck_walk.txt, overlays task7/uv): every coordinate inside 0..1 (c8 = (1, 1, 0, 0)). Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders).",
+    "alpha_manual": true,
+    "alpha_evidence": "Hand trace (shader_trace.py --alpha refuses: 'alpha is multiplied by a computed term (dissolve or fade)'). Dump: tfetch2D r8, r10.yx, tf0 (instr 19; instr 34 rewrites r8.xyz only), oC0.w = r7.x * r8.w (142) in the unconditional exece; no kill. The factor is the distance dissolve, left out by ruling (2026-10-06): the distance from c19 (read as the eye position), less c15.z, times c15.y, is taken from the literal that the comparison uses as 1 and saturated; the noise texture tf10, fetched at the pixel position scaled by c50.xy, is added; the factor is 1 where the sum reaches the literal and 0 elsewhere (instr 23, 27, 48 scalar: the distance; 136 scalar, 137, 139, 140, 141). Without it a plant stays solid out to the vertex shader's cut radius, where the game thins it out over the last stretch: with the captured constants the dissolve band is 0.8 to 1.2 units wide and ends 0.6 to 2.1 units inside the cut radius. Colour division: r13 = r8 squared (25), r0.w = 1 / r13.w (36, scalar rcp), r4.xyz = r13.xyz * r0.w (37). State (by the trees): alpha test greater in 48 of 48 rows: reference 128/255 with alpha-to-mask 0x87 in the 24 rows of 13B20052 (69.1% of its texels transparent, alpha 0 or 255 only), reference 0 without alpha-to-mask in the 24 rows of 13FB0052 (no transparent texel, so nothing is cut there). No constant in the recipe. Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders)."
+  },
+  "0x09CB69BD265B58D1": {
+    "slot": 0,
+    "u": {
+      "input": "r0.x",
+      "stages": [
+        {
+          "scale": "c8.x",
+          "offset": "c8.z"
+        }
+      ]
+    },
+    "v": {
+      "input": "r0.y",
+      "stages": [
+        {
+          "scale": "c8.y",
+          "offset": "c8.w"
+        }
+      ]
+    },
+    "alpha": {
+      "source": "albedo",
+      "component": "w",
+      "divide_by_alpha": true
+    },
+    "manual": true,
+    "evidence": "native_discovery_20261006_211843.jsonl (by the trees; out/native-evidence/materials): 24 main-scene draws in 24 frames, vertex shader 0x8123C16DBF583F92 (instanced, \"uv\" o0.xy). albedo_finder.py: slot 0, score 4.5 (task7/finder/albedo_proposals_walk.json). Dump shader_09CB69BD265B58D1.ucode.frag: r0.xy from instr 11 (mad r0.xy__, r0.yxxx, c8.yxxx, c8.wzzz), tfetch2D r0, r0.yx, tf0 (12); shader_trace.py: u = r0.x * c8.x + c8.z, v = r0.y * c8.y + c8.w. tf0 is the only colour texture: squared (16), divided by its alpha squared (20, 21), lit (25, 80) and written at 93; tf8 is the screen-sized mask (13), tf9 four point taps under cexec b135, tf4 / tf5 1D lookups, tf10 the dissolve noise. Thumbnails task7/tex_bridge and task7/tex_walk (<fetch dword 1>.png colour, _alpha.png alpha), statistics task7/texalpha_*.txt, constants task7/pconst_*.txt; a texture is named by its address in the capture it is quoted for, and the two runs place some small textures at different addresses. Texture: 17E60052 DXT1 1024x1024 atlas, of which the cards use the cell u 0.735 to 0.797, v 0.250 to 0.311 (c8 = (0.0625, 0.0625, 0.7344, 0.25)): a yellow flower, a rosette of leaves and a stem on a cut-out background. UV replay (task7/uvcheck_walk.txt, overlay task7/uv/uv_09CB69BD265B58D1_17E60052.png, task7/uv_cells_sheet.png): 51.4% of the cards' area on opaque texels where the whole atlas is 97.7% opaque; the card outlines follow the flower, the leaves and the stem. Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders).",
+    "alpha_manual": true,
+    "alpha_evidence": "Hand trace (shader_trace.py --alpha refuses: 'alpha is multiplied by a computed term (dissolve or fade)'). Dump: tfetch2D r0, r0.yx, tf0 (instr 12; later instructions write r0.x and r0.xyz only), oC0.w = r4.x * r0.w (97) in the unconditional exece; no kill. The factor is the distance dissolve, left out by ruling (2026-10-06): the distance from c19 (read as the eye position), less c15.z, times c15.y, is taken from the literal that the comparison uses as 1 and saturated; the noise texture tf10, fetched at the pixel position scaled by c50.xy, is added; the factor is 1 where the sum reaches the literal and 0 elsewhere (instr 14, 17, 26 scalar: the distance; 91 scalar, 92, 94, 95, 96). Without it a plant stays solid out to the vertex shader's cut radius, where the game thins it out over the last stretch: with the captured constants the dissolve band is 0.8 units wide and ends 0.5 units inside the cut radius. Colour division: r8 = r0 squared (16), r0.x = 1 / r8.w (20, scalar rcp), r0.xyz = r8.xyz * r0.x (21). State (by the trees): alpha test greater with reference 128/255 and alpha-to-mask 0x87 in 24 of 24 rows. No constant in the recipe. The atlas 17E60052 is DXT1 with alpha 0 or 255 only (2.3% of its texels transparent; the cards' cell is a cut-out cell). Native-view screenshot against the emulated frame: pending (no game run allowed; frame-map section 13, Alpha and missing shaders)."
   }
 }

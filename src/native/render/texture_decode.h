@@ -131,6 +131,50 @@ inline LevelLayout BaseLevelLinear(const TextureFetch& t) {
   return l;
 }
 
+// The SDK's texture_util::GetTiledAddressUpperBound2D: bytes a tiled level of
+// right x bottom blocks spans from its base. The origin of the 32 x 32 tile
+// holding the last block, plus that tile's extent (0xA00 for 1-byte blocks,
+// 0xC00 for 2-byte ones, 0x400 << log2 above).
+inline uint32_t TiledUpperBound2D(uint32_t right, uint32_t bottom, uint32_t pitch_blocks, uint32_t bpb_log2) {
+  if (!right || !bottom) return 0;
+  const uint32_t origin = uint32_t(capture::TiledOffset2D(int32_t((right - 1) & ~31u), int32_t((bottom - 1) & ~31u),
+                                                          pitch_blocks, bpb_log2));
+  return origin + (bpb_log2 == 0 ? 0xA00u : bpb_log2 == 1 ? 0xC00u : 0x400u << bpb_log2);
+}
+
+// Block layout of the formats a discovery dump writes in full: the ones the
+// renderer decodes, and two it does not but the terrain reads in its vertex
+// shaders: k_16 (24: the heightmap and the far colour tables) and k_DXN (49:
+// the normal map; 4 x 4 blocks of 16 bytes). False for any other format.
+inline bool DumpFormatInfo(uint32_t xenos_format, TexFormatInfo* fi) {
+  if (xenos_format == 24) {
+    *fi = {1, 2, 1};
+  } else if (xenos_format == 49) {
+    *fi = {4, 16, 4};
+  } else {
+    *fi = FormatInfo(TexFormatFromXenos(xenos_format));
+  }
+  return fi->bytes_per_block != 0;
+}
+
+// Bytes the base level of a 2D texture fetch constant spans from its base
+// address: the tiled upper bound, or the linear rows (row pitch by the SDK's
+// base-level rule, as BaseLevelLinear). 0 when the constant is not a 2D
+// texture, has no base address or a pitch below its width, or its format has
+// no layout here (DumpFormatInfo).
+inline uint64_t BaseLevelDumpBytes(const uint32_t fc[6]) {
+  if ((fc[0] & 3) != 2 || ((fc[5] >> 9) & 3) != 1) return 0;
+  TexFormatInfo fi;
+  if (!DumpFormatInfo(fc[1] & 0x3F, &fi)) return 0;
+  const uint32_t width = (fc[2] & 0x1FFF) + 1, height = ((fc[2] >> 13) & 0x1FFF) + 1;
+  const uint32_t pitch_texels = ((fc[0] >> 22) & 0x1FF) << 5;
+  if ((fc[1] & 0xFFFFF000u) == 0 || pitch_texels < width) return 0;
+  const uint32_t wb = (width + fi.block - 1) / fi.block, hb = (height + fi.block - 1) / fi.block;
+  const uint32_t pitch_blocks = pitch_texels / fi.block;
+  if ((fc[0] >> 31) != 0) return TiledUpperBound2D(wb, hb, pitch_blocks, fi.bpb_log2);
+  return uint64_t(((pitch_blocks + 31) & ~31u) * fi.bytes_per_block) * (hb - 1) + uint64_t(wb) * fi.bytes_per_block;
+}
+
 // Copies n bytes applying the GPU's endian swap (xenos::Endian): the result is
 // what the GPU reads, i.e. little-endian DXT words / RGBA8 bytes.
 inline void CopySwapped(uint8_t* d, const uint8_t* s, uint32_t n, uint32_t endian) {

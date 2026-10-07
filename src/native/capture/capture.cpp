@@ -1023,10 +1023,13 @@ void AppendPs(std::string& row, const DeviceSnapshot& dev) {
 // Discovery only (caller holds g_mutex with g_file open). Dumps the raw guest
 // bytes of a 2D fetch constant's base level once per (base address, identity)
 // to logs/native_tex_<stamp>/<BASE>_<IDENTITY16>.bin and writes a "texture"
-// row. Bounded: kMaxTextures per capture, kMaxTextureBytes each, kMaxUnsupportedBytes
-// for formats the renderer does not decode (the census needs them). The extent
-// is the tiled address upper bound / linear rows of the base level (row pitch
-// by the SDK's base-level rule, render::BaseLevelLinear).
+// row. Bounded: kMaxTextures per capture, kMaxTextureBytes each. The extent is
+// the tiled address upper bound / linear rows of the base level (row pitch by
+// the SDK's base-level rule, render::BaseLevelLinear), also for k_16 and k_DXN,
+// which the renderer does not decode but the terrain replay reads (heightmap,
+// far colour tables, normal map: render::BaseLevelDumpBytes). Any other format
+// the renderer does not decode gets kMaxUnsupportedBytes (the census needs to
+// see it; such a dump is not the whole level).
 constexpr uint32_t kMaxTextures = 768;
 constexpr uint32_t kMaxTextureBytes = 8u << 20;
 constexpr uint32_t kMaxUnsupportedBytes = 64u << 10;
@@ -1049,7 +1052,8 @@ void DumpTexture(const uint32_t fc[6]) {
                           uint64_t(wb) * fi.bytes_per_block;
     bytes = std::min<uint64_t>(bytes, kMaxTextureBytes);
   } else if (err == render::FetchError::kFormat && base) {
-    bytes = kMaxUnsupportedBytes;
+    bytes = render::BaseLevelDumpBytes(fc);
+    bytes = bytes ? std::min<uint64_t>(bytes, kMaxTextureBytes) : kMaxUnsupportedBytes;
   } else {
     return;
   }
@@ -1265,7 +1269,7 @@ void AppendRenderState(std::string& row, uint32_t device) {
       xdk::kRegColorMask,    xdk::kRegAlphaRef,     xdk::kRegDepthControl, xdk::kRegBlendControl0,
       xdk::kRegColorControl, xdk::kRegSuScModeCntl, xdk::kRegBlendRed,     xdk::kRegBlendRed + 1,
       xdk::kRegBlendRed + 2, xdk::kRegBlendRed + 3, xdk::kRegVportZScale,  xdk::kRegVportZOffset,
-      xdk::kRegVteCntl};
+      xdk::kRegVteCntl,      xdk::kRegColorInfo};
   char buf[40];
   row += ",\"rs\":{";
   bool first = true;

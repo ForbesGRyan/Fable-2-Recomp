@@ -3,7 +3,10 @@
 Usage: terrain_replay.py <capture.jsonl> --frame N --list
        terrain_replay.py <capture.jsonl> --frame N --patch K --out image.png [--res 64] [--no-fade]
                          [--no-tint] [--no-base] [--encode sqrt|linear] [--exposure X]
+       terrain_replay.py <capture.jsonl> --frame N --patch K --locate
        terrain_replay.py <capture.jsonl> --frame N --weights image.png
+       terrain_replay.py <capture.jsonl> --frame N --weight-sums
+       terrain_replay.py <capture.jsonl> --frame N --check-dumps
 
 The game draws the ground near the eye in blended layers (builder 8221C9C8: one draw per 8 x 8
 square of ground and layer) over an underlay drawn first by the adaptive builder (82207C30).
@@ -11,7 +14,12 @@ square of ground and layer) over an underlay drawn first by the adaptive builder
 square K: the underlay if a colour draw of the adaptive builder covers the square, then every
 layer draw with its captured blend, on a res x res pixel grid, and writes the picture. --weights
 writes the layer weights of every square of the frame as one map (16 pixels per square, one
-colour per detail texture, magenta where no layer covers a pixel).
+colour per detail texture, magenta where no layer covers a pixel) and counts the texel pairs where
+a 0 lies beside a value of 2 or more. --weight-sums prints how the layer weights of a grid point
+add up over the frame's squares. --patch K --locate prints where the square's corners are in the
+1120 x 720 frame (the row's c0..c3). --check-dumps lists every texture the frame's tess rows name
+with the size of its dump against the size of its base level (a dump cut short by the capture
+shows as SHORT).
 
 What is evaluated (the shaders' colour with the lighting factor 1 and the additive light, sun and
 fog terms dropped):
@@ -20,16 +28,22 @@ fog terms dropped):
           not drawn where tf18 < c114.x (the vertex shader writes a NaN position there)
   far     colour = tf13(u, v)^2 * base', u and v from the tables tf18 and tf19 of the adaptive
           vertex shader; shader 2F8A times sat(d2 * c31.x + c31.y)
-Limits, by design: the weight is sampled per pixel with a bilinear filter, which is the game's
-per-vertex weight at 16 segments per patch edge (the game tessellates less far away); the three
-layer shaders paired with vertex shader C30A blend tf13 into the detail colour on steep ground,
-which is not evaluated (--list marks those draws); base levels only, no mip maps; a negative alpha
-is clamped to 0.
+Limits, by design: the weight is sampled per pixel with a bilinear filter, which approximates the
+game's per-vertex weight (it is that weight at 16 segments per patch edge; the game's tessellator
+tops out at 15 and uses fewer far away); a layer is left out per pixel where the bilinear value is
+below c114.x, where the game removes every triangle that touches such a vertex (the two differ
+where a 0 texel lies beside a texel of 2 or more: --weights counts those); the three layer shaders
+paired with vertex shader C30A blend tf13 into the detail colour on steep ground, which is not
+evaluated (--list marks those draws); base levels only, no mip maps; a negative alpha is clamped
+to 0.
 
 Needs, per tess row: "consts" with c8, c11, c14, c46, c47, c113, c114, c115 (far: c72 too),
 "pconst" (pixel constants c0..c31: c19, c21, c31), "tf" with the slots the shaders sample, and the
-"texture" rows and dump files of those textures. --list and --weights need neither "pconst" nor
-c14. A capture taken before these were recorded is refused with the list of what it lacks.
+"texture" rows and dump files of those textures (found by fetch dwords 1 and 2: base address,
+format and size; the row's own dwords give the sampler state). --list, --weights, --weight-sums
+and --locate need neither "pconst" nor c14. A capture that lacks an input, a dump shorter than
+its base level and a texture format the tool does not decode are refused by name (exit code 2);
+nothing is read as zero.
 """
 import argparse
 import json
@@ -96,11 +110,41 @@ class Tex:
         return tuple((a[k] * (1 - fx) + b[k] * fx) * (1 - fy) + (c[k] * (1 - fx) + d[k] * fx) * fy for k in range(4))
 
 
-def decode_texture(data, fc):
+_BLOCKS = {6: (1, 4, 2), 18: (4, 8, 3), 19: (4, 16, 4), 20: (4, 16, 4), 24: (1, 2, 1), 58: (4, 8, 3)}
+
+
+_SIZE_ONLY = {49: (4, 16, 4)}   # k_DXN: not decoded here, but its dumps can be checked for size
+
+
+def base_level_need(fc, size_only=False):
+    """Bytes of a dump the decode of this fetch constant's base level reads: the end of its last
+    block (tiled) or of its last row (linear, rows by the SDK's base-level rule). ValueError
+    ("format N") for a format the tool does not decode (with size_only, k_DXN is known too)."""
+    fmt = fc[1] & 0x3F
+    table = {**_BLOCKS, **_SIZE_ONLY} if size_only else _BLOCKS
+    if fmt not in table:
+        raise ValueError(f"format {fmt}")
+    block, bpb, log2 = table[fmt]
+    w = (fc[2] & 0x1FFF) + 1
+    h = ((fc[2] >> 13) & 0x1FFF) + 1
+    wb, hb = (w + block - 1) // block, (h + block - 1) // block
+    pitch_blocks = max((((fc[0] >> 22) & 0x1FF) << 5) // block, wb)
+    if (fc[0] >> 31) != 0:
+        return max(tt.tiled_offset_2d(x, y, pitch_blocks, log2) for y in range(hb) for x in range(wb)) + bpb
+    return (hb - 1) * ((pitch_blocks + 31) & ~31) * bpb + wb * bpb
+
+
+def decode_texture(data, fc, what="texture"):
     """Dump bytes and six fetch dwords -> Tex. DXT1, DXT2/3, DXT4/5, 8888 as RGBA; k_DXT3A (58) with
     the value in every channel (the SDK's view of that format); k_16 (24) with the value in x.
-    Filter and clamp modes come from the fetch constant. Others raise ValueError("format N")."""
+    Filter and clamp modes come from the fetch constant. Others raise ValueError("format N"). A
+    dump shorter than the base level raises MissingInput with both sizes: nothing is padded."""
     fmt = fc[1] & 0x3F
+    need = base_level_need(fc)
+    if len(data) < need:
+        raise MissingInput(f"the dump of the {what} (fetch dword 1 0x{fc[1]:08X}, format {fmt}, {(fc[2] & 0x1FFF) + 1} x "
+                           f"{((fc[2] >> 13) & 0x1FFF) + 1}) has {len(data)} bytes, its base level needs {need}: "
+                           "the capture cut the dump short")
     clamp = ((fc[0] >> 10) & 7, (fc[0] >> 13) & 7)
     linear = ((fc[3] >> 19) & 3) == 1
     if fmt == 24:
@@ -114,8 +158,7 @@ def decode_texture(data, fc):
         for y in range(h):
             for x in range(w):
                 o = tt.tiled_offset_2d(x, y, pitch, 1) if tiled else y * row_pitch + x * 2
-                raw = data[o:o + 2]
-                raw = tt._swap(raw + bytes(2 - len(raw)), endian)
+                raw = tt._swap(data[o:o + 2], endian)
                 texels.append((struct.unpack("<H", raw)[0] / 65535.0, 0.0, 0.0, 1.0))
         return Tex(w, h, texels, clamp, linear)
     if fmt == 58:
@@ -308,6 +351,57 @@ def far_colour(far, wx, wy, h, tint=True, base=True):
     return tuple(c[i] * c[i] * bp[i] * k for i in range(3))
 
 
+def cull_edge_pairs(tex, x0, y0, n=17):
+    """(pairs, all pairs) of horizontally or vertically neighbouring texels of the n x n block at
+    (x0, y0) of a weight map where one is 0 and the other 2 or more (of 15): the places where a
+    cull per pixel on the bilinear value and the game's cull of whole triangles at a vertex
+    differ. A 0 beside a 1 is weight 0 either way."""
+    def v(x, y):
+        return round(tex.texel(x0 + x, y0 + y)[3] * 15)
+
+    bad = total = 0
+    for y in range(n):
+        for x in range(n):
+            for dx, dy in ((1, 0), (0, 1)):
+                if x + dx < n and y + dy < n:
+                    a, b = v(x, y), v(x + dx, y + dy)
+                    total += 1
+                    bad += min(a, b) == 0 and max(a, b) >= 2
+    return bad, total
+
+
+_SUM_EDGES = (0.9, 0.98, 1.02, 1.1)
+_SUM_NAMES = ("below 0.9", "0.9 to 0.98", "0.98 to 1.02", "1.02 to 1.1", "above 1.1")
+
+
+def weight_sum_bins(sums):
+    """Counts of the sums below 0.9, from 0.9 below 0.98, from 0.98 to 1.02, above 1.02 to 1.1, above 1.1."""
+    bins = [0] * 5
+    for v in sums:
+        if v < _SUM_EDGES[0]:
+            bins[0] += 1
+        elif v < _SUM_EDGES[1]:
+            bins[1] += 1
+        elif v <= _SUM_EDGES[2]:
+            bins[2] += 1
+        elif v <= _SUM_EDGES[3]:
+            bins[3] += 1
+        else:
+            bins[4] += 1
+    return bins
+
+
+def project(c, x, y, h, width=1120, height=720):
+    """Pixel position of the world point (x, y, h) under the rows c0..c3 of a tess row (the vertex
+    shaders' oPos = c0..c3 . (x, y, h, 1)), y down, for a width x height target; None at or
+    behind the eye plane."""
+    p = (x, y, h, 1.0)
+    cx, cy, _, cw = (sum(c[r][k] * p[k] for k in range(4)) for r in range(4))
+    if cw <= 0:
+        return None
+    return ((cx / cw * 0.5 + 0.5) * width, (0.5 - cy / cw * 0.5) * height)
+
+
 def blend_of(word):
     v = int(word, 16) if isinstance(word, str) else int(word)
     if v not in _BLENDS:
@@ -318,7 +412,10 @@ def blend_of(word):
 # --- captures ---------------------------------------------------------------------------------
 
 def read_capture(path, frame):
-    """(main-scene tess rows of `frame` in capture order, {fetch dwords tuple: dump path})."""
+    """(main-scene tess rows of `frame` in capture order, {(fetch dword 1, fetch dword 2): dump
+    path}). Dwords 1 and 2 hold the base address, format, endian and size; no pair of them occurs
+    with two pitch or tiling fields in the captures, and the sampler bits of the other dwords
+    differ between draws of one texture."""
     root = Path(path).parent
     rows, textures = [], {}
     with open(path, encoding="utf-8", errors="replace") as f:
@@ -326,7 +423,8 @@ def read_capture(path, frame):
             head = line[:24]
             if '"texture"' in head:
                 r = json.loads(line)
-                textures[tuple(int(x, 16) for x in r["fc"])] = root / r["file"]
+                fc = [int(x, 16) for x in r["fc"]]
+                textures[(fc[1], fc[2])] = root / r["file"]
             elif '"tess"' in head:
                 r = json.loads(line)
                 if r.get("frame") == frame and r.get("in_scene"):
@@ -362,7 +460,7 @@ def underlay_of(rows, square):
 
 class _Textures:
     def __init__(self, index):
-        self.index, self.cache = index, {}
+        self.index, self.cache, self.decoded = index, {}, {}
 
     def get(self, row, slot, what):
         fc = (row.get("tf") or {}).get(str(slot))
@@ -371,9 +469,20 @@ class _Textures:
                                "terrain rows listed the textures their shaders sample")
         key = tuple(int(x, 16) for x in fc)
         if key not in self.cache:
-            if key not in self.index:
+            if key[1:3] not in self.index:
                 raise MissingInput(f"no texture dump for tf{slot} ({what}), fetch dword 1 0x{key[1]:08X}")
-            self.cache[key] = decode_texture(Path(self.index[key]).read_bytes(), list(key))
+            layout = (key[1], key[2], key[0] >> 22)   # the decode of the bytes; the rest is sampler state
+            if layout in self.decoded:
+                t = self.decoded[layout]
+                t = Tex(t.w, t.h, t.texels, ((key[0] >> 10) & 7, (key[0] >> 13) & 7), ((key[3] >> 19) & 3) == 1)
+            else:
+                try:
+                    t = decode_texture(Path(self.index[key[1:3]]).read_bytes(), list(key), f"tf{slot} ({what})")
+                except ValueError as e:
+                    raise MissingInput(f"tf{slot} ({what}), fetch dword 1 0x{key[1]:08X}, is {e}, which this tool "
+                                       "does not decode") from None
+                self.decoded[layout] = t
+            self.cache[key] = t
         return self.cache[key]
 
 
@@ -492,10 +601,121 @@ def _weights(a, rows, textures, lines):
                 at = ((oy + j) * cols * 16 + ox + i) * 4
                 img[at:at + 3] = bytes(UNCOVERED) if total <= 0.0 else bytes(min(255, round(v)) for v in acc)
     tt.write_png(a.weights, cols * 16, rows_n * 16, bytes(img), max_edge=max(cols, rows_n) * 16)
+    _cull_edges(squares, tex, lines)
     lines.append(f"wrote {a.weights}: {len(squares)} squares, {cols * 16} x {rows_n * 16}, x {min(xs):g}..{max(xs) + cw:g}"
                  f" y {min(ys):g}..{max(ys) + ch:g} (y grows downwards in the picture)")
     for key, colour in palette.items():
         lines.append(f"    detail {key}: colour {colour}")
+
+
+def _check_dumps(rows, textures, lines):
+    """One line per texture the frame's tess rows name: whether its dump holds the whole base level."""
+    seen = {}
+    for r in rows:
+        for slot, fc in sorted((r.get("tf") or {}).items(), key=lambda kv: int(kv[0])):
+            if fc:
+                key = tuple(int(x, 16) for x in fc)
+                seen.setdefault(key[1:3], (int(slot), key))
+    bad = 0
+    for (slot, fc) in sorted(seen.values()):
+        head = f"tf{slot} 0x{fc[1]:08X} format {fc[1] & 0x3F} {(fc[2] & 0x1FFF) + 1} x {((fc[2] >> 13) & 0x1FFF) + 1}: "
+        path = textures.get(fc[1:3])
+        if path is None or not Path(path).is_file():
+            lines.append(head + ("NO TEXTURE ROW" if path is None else "NO DUMP FILE"))
+            bad += 1
+            continue
+        have = Path(path).stat().st_size
+        try:
+            need = base_level_need(list(fc), size_only=True)
+        except ValueError:
+            lines.append(head + f"size not known to this tool, {have} bytes")
+            bad += 1
+            continue
+        if have < need:
+            lines.append(head + f"SHORT, {have} of {need} bytes")
+            bad += 1
+        else:
+            lines.append(head + f"ok, {have} bytes (needs {need})")
+    lines.append(f"{bad} of {len(seen)} textures short, missing or of unknown size")
+
+
+def _cell_texel(row, square, wt):
+    """Texel of the weight map at the square's first grid point."""
+    c = row["consts"]
+    sx, sy = c["c115"][0] / c["c46"][0], c["c115"][1] / c["c46"][1]
+    u = square[0] * sx + c["c115"][2] - c["c113"][0] * sx
+    v = square[1] * sy + c["c115"][3] - c["c113"][1] * sy
+    return math.floor(u * wt.w), math.floor(v * wt.h)
+
+
+def _cull_edges(squares, tex, lines):
+    bad = total = 0
+    seen = set()
+    for square, draws in squares:
+        for r in draws:
+            _need(r["consts"], ("c46", "c113", "c114", "c115"))
+            wt = tex.get(r, 18, "layer weights")
+            x0, y0 = _cell_texel(r, square, wt)
+            if (id(wt.texels), x0, y0) in seen:
+                continue
+            seen.add((id(wt.texels), x0, y0))
+            b, t = cull_edge_pairs(wt, x0, y0)
+            bad += b
+            total += t
+    lines.append(f"cull edges: {bad} of {total} neighbouring texel pairs in the {len(seen)} 17 x 17 weight blocks of "
+                 "the frame's layer draws have a 0 beside a value of 2 or more (where a per-pixel cull and the "
+                 "game's per-vertex cull differ)")
+
+
+def _weight_sums(a, rows, textures, lines):
+    squares = squares_of(rows)
+    tex = _Textures(textures)
+    groups = {"replaces": [], "adds": []}
+    counts = {"replaces": 0, "adds": 0}
+    for square, draws in squares:
+        kind = "replaces" if blend_of(draws[0]["rs"]["2201"]) == BLEND_REPLACE else "adds"
+        counts[kind] += 1
+        prepared = []
+        for r in draws:
+            _need(r["consts"], ("c46", "c113", "c114", "c115"))
+            wt = tex.get(r, 18, "layer weights")
+            prepared.append((wt, _cell_texel(r, square, wt)))
+        for j in range(17):
+            for i in range(17):
+                total = 0.0
+                for wt, (x0, y0) in prepared:   # a culled texel (0) has weight 0 after the clamp anyway
+                    total += _sat(WEIGHT_SCALE * (wt.texel(x0 + i, y0 + j)[3] - WEIGHT_BIAS))
+                groups[kind].append(total)
+    for kind, what in (("replaces", "no underlay"), ("adds", "over the underlay")):
+        sums = groups[kind]
+        bins = weight_sum_bins(sums)
+        lines.append(f"weight sums at the 17 x 17 grid points of {counts[kind]} squares whose first layer {kind} ({what}): "
+                     + ", ".join(f"{n}: {b}" for n, b in zip(_SUM_NAMES, bins))
+                     + (f"; min {min(sums):.3f}, max {max(sums):.3f}" if sums else ""))
+
+
+def _locate(a, rows, textures, lines):
+    squares = squares_of(rows)
+    if not 0 <= a.patch < len(squares):
+        raise MissingInput(f"frame {a.frame} has {len(squares)} squares with layer draws; --patch {a.patch} is not one")
+    square, draws = squares[a.patch]
+    row = draws[0]
+    _need(row["consts"], ("c0", "c1", "c2", "c3"))
+    c = [row["consts"][k] for k in ("c0", "c1", "c2", "c3")]
+    try:
+        height = _Textures(textures).get(row, 16, "heightmap")
+        note = ""
+    except MissingInput as e:
+        height = None
+        note = f" (at height 0: {e})"
+    parts = []
+    for dx, dy in ((0, 0), (1, 0), (1, 1), (0, 1)):
+        x, y = square[0] + dx * square[2], square[1] + dy * square[3]
+        h = _height(height, row, False, x, y) if height is not None else 0.0
+        at = project(c, x, y, h)
+        parts.append(f"({x:g}, {y:g}) -> " + (f"({at[0]:.1f}, {at[1]:.1f})" if at else "behind the eye"))
+    lines.append(f"square {a.patch} corners in a 1120 x 720 frame (x right, y down; scale to the screenshot's size)"
+                 f"{note}: " + ", ".join(parts))
 
 
 def main(argv=None):
@@ -512,7 +732,12 @@ def main(argv=None):
     ap.add_argument("--encode", choices=("sqrt", "linear"), default="sqrt",
                     help="sqrt (default) undoes the shaders' squaring of the detail colour for viewing")
     ap.add_argument("--exposure", type=float, default=1.0)
-    ap.add_argument("--weights", help="write the frame's layer weight map")
+    ap.add_argument("--weights", help="write the frame's layer weight map and count the cull edges")
+    ap.add_argument("--weight-sums", action="store_true",
+                    help="print how the layer weights add up at the grid points of the frame's squares")
+    ap.add_argument("--locate", action="store_true", help="with --patch: where the square is in the frame")
+    ap.add_argument("--check-dumps", action="store_true",
+                    help="list every texture the frame's tess rows name with its dump's size against the base level's")
     a = ap.parse_args(argv)
     rows, textures = read_capture(a.capture, a.frame)
     lines = []
@@ -520,17 +745,31 @@ def main(argv=None):
         _list(rows, lines)
     if a.weights:
         _weights(a, rows, textures, lines)
+    if a.check_dumps:
+        _check_dumps(rows, textures, lines)
+    if a.weight_sums:
+        _weight_sums(a, rows, textures, lines)
     if a.patch is not None:
-        if not a.out:
-            ap.error("--patch needs --out")
-        _replay(a, rows, textures, lines)
+        if not a.out and not a.locate:
+            ap.error("--patch needs --out or --locate")
+        if a.locate:
+            _locate(a, rows, textures, lines)
+        if a.out:
+            _replay(a, rows, textures, lines)
     return lines
 
 
-if __name__ == "__main__":
+def cli(argv=None):
+    """main() for the command line: prints the lines; 2 with one line on stderr when the capture
+    lacks something."""
     try:
-        for text in main():
+        for text in main(argv):
             print(text)
     except MissingInput as e:
         print(f"cannot replay: {e}", file=sys.stderr)
-        sys.exit(2)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(cli())

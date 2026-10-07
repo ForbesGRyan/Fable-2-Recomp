@@ -146,13 +146,21 @@ inline constexpr uint32_t kRegSuScModeCntl = 0x2205;   // PA_SU_SC_MODE_CNTL
 inline constexpr uint32_t kRegVportZScale = 0x2113;    // PA_CL_VPORT_ZSCALE (float)
 inline constexpr uint32_t kRegVportZOffset = 0x2114;   // PA_CL_VPORT_ZOFFSET (float)
 inline constexpr uint32_t kRegVteCntl = 0x2206;        // PA_CL_VTE_CNTL
+// RB_COLOR_INFO: the colour target of the draw (SDK registers.h: color_base in
+// bits 0-11, color_format in bits 16-19). It is the second word of the 0x2000
+// run the builders flush from kDeviceSurfaceInfoOffset (sixteen registers:
+// DrawIndexedVertices 0x8221E200..0x8221E210, `rldicr r4,r30,6,15`). Discovery
+// evidence only, and from the device shadow alone: unlike the registers above
+// it was not compared with the GPU's register file.
+inline constexpr uint32_t kRegColorInfo = 0x2001;
 // PA_CL_VTE_CNTL bits 4 and 5 (SDK registers.h): the viewport Z scale and
 // offset apply; window depth = z/w * scale + offset.
 inline constexpr uint32_t kVteZScaleEnable = 0x10;
 inline constexpr uint32_t kVteZOffsetEnable = 0x20;
-// Device offset of the shadow of `reg` for the two runs above; 0 for any other
-// register (not shadowed here).
+// Device offset of the shadow of `reg` for the two runs above and the 0x2000
+// run; 0 for any other register (not shadowed here).
 constexpr uint32_t DeviceRegShadowOffset(uint32_t reg) {
+  if (reg >= 0x2000 && reg <= 0x200F) return kDeviceSurfaceInfoOffset + 4 * (reg - 0x2000);
   if (reg >= 0x2100 && reg <= 0x2114) return kDeviceRegShadowBase2100 + 4 * (reg - 0x2100);
   if (reg >= 0x2200 && reg <= 0x220B) return kDeviceRegShadowBase2200 + 4 * (reg - 0x2200);
   return 0;

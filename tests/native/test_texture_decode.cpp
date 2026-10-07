@@ -239,6 +239,70 @@ int main() {
       }
     }
   }
+  // --- BaseLevelDumpBytes: how much of a base level a discovery dump has to hold ---
+  // The fetch constants are the terrain rows' own (native_discovery_20261006_211654.jsonl); the
+  // expected sizes are counted by hand from the tile layout, not by the function's own code.
+  {
+    // tf16, the near heightmap: 769 x 769 k_16, tiled, pitch 800. 25 tiles of 32 x 32 texels per
+    // row, 2048 bytes each; the last texel (768, 768) is in tile (24, 24), whose origin is
+    // (24 * 25 + 24) * 2048 = 1,277,952; a 2-byte format extends 0xC00 past that origin.
+    const uint32_t tf16[6] = {0x86404802, 0x1B770058, 0x00600300, 0x01001400, 0x00000000, 0x00000218};
+    if (BaseLevelDumpBytes(tf16) != 1277952u + 0xC00u) return 70;
+    // tf17, its normal map: 769 x 769 k_DXN (4 x 4 blocks of 16 bytes), tiled, pitch 896 texels =
+    // 224 blocks: 7 tiles of 32 x 32 blocks per row, 16384 bytes each; the last block (192, 192)
+    // is in tile (6, 6): (6 * 7 + 6) * 16384 = 786,432, plus 0x400 << 4.
+    const uint32_t tf17[6] = {0x87004802, 0x1B8AA071, 0x00600300, 0x01000D10, 0x00000000, 0x00000218};
+    if (BaseLevelDumpBytes(tf17) != 786432u + 0x4000u) return 71;
+    // The far tables (tf18 / tf19 of the adaptive draws): 816 x 48 k_16, linear, pitch 896: rows
+    // of 1792 bytes, 47 full rows and 816 texels of the last.
+    const uint32_t table[6] = {0x07004802, 0x1B9D6058, 0x0005E32F, 0x01001400, 0x00000000, 0x00000218};
+    if (BaseLevelDumpBytes(table) != 47u * 1792u + 816u * 2u || BaseLevelDumpBytes(table) != 85856u) return 72;
+    // tf18 of the layer draws, the weight atlas: 1650 x 1815 k_DXT3A, tiled, pitch 1664 texels =
+    // 416 blocks: 13 tiles per row of 8192 bytes; the last block (412, 453) is in tile (12, 14):
+    // (14 * 13 + 12) * 8192 = 1,589,248, plus 0x400 << 3. The same number the SDK's bound gives
+    // for a format the renderer decodes.
+    const uint32_t tf18[6] = {0x8D004802, 0x1BA0207A, 0x00E2C671, 0x01000D10, 0x00000000, 0x00000218};
+    if (BaseLevelDumpBytes(tf18) != 1589248u + 0x2000u) return 73;
+    // Linear k_DXN and tiled k_16 of other shapes: 70 x 45 texels of DXN, linear, pitch 96 texels
+    // = 24 blocks aligned to 32: rows of 512 bytes, 12 block rows, 18 blocks in the last.
+    FcArgs a;
+    a.format = 49; a.w = 70; a.h = 45; a.pitch = 96; a.tiled = false;
+    uint32_t fc[6];
+    MakeFc(a, fc);
+    if (BaseLevelDumpBytes(fc) != 11u * 512u + 18u * 16u) return 74;
+    // 40 x 20 k_16, tiled, pitch 64: one row of two tiles of 2048 bytes. Two-byte formats
+    // interleave a pair of tiles in one 64-texel portion (the odd tile starts 0x400 in), so the
+    // level spans exactly the two tiles: 4096 bytes.
+    a.format = 24; a.w = 40; a.h = 20; a.pitch = 64; a.tiled = true;
+    MakeFc(a, fc);
+    if (BaseLevelDumpBytes(fc) != 4096u) return 75;
+    // The same k_16 linear: rows of 128 bytes.
+    a.tiled = false;
+    MakeFc(a, fc);
+    if (BaseLevelDumpBytes(fc) != 19u * 128u + 40u * 2u) return 76;
+    // Not dumped in full: a format without a layout here (k_8, 2), a fetch constant that is not a
+    // 2D texture, no base address, a pitch below the width.
+    a.format = 2;
+    MakeFc(a, fc);
+    if (BaseLevelDumpBytes(fc) != 0) return 77;
+    a.format = 24; a.type = 3;
+    MakeFc(a, fc);
+    if (BaseLevelDumpBytes(fc) != 0) return 78;
+    a.type = 2; a.dim = 2;
+    MakeFc(a, fc);
+    if (BaseLevelDumpBytes(fc) != 0) return 79;
+    a.dim = 1; a.base = 0;
+    MakeFc(a, fc);
+    if (BaseLevelDumpBytes(fc) != 0) return 80;
+    a.base = 0x1A000000; a.pitch = 32;  // 40 texels wide
+    MakeFc(a, fc);
+    if (BaseLevelDumpBytes(fc) != 0) return 81;
+    // The decoded formats keep their layout: DXT1 256 x 128 linear, pitch 256 = 64 blocks.
+    FcArgs d;
+    d.tiled = false;
+    MakeFc(d, fc);
+    if (BaseLevelDumpBytes(fc) != 31u * 64u * 8u + 64u * 8u) return 82;
+  }
   // --- the real terrain weight map, when a discovery dump of tf18 is on disk (else SKIPPED, loudly) ---
   // FABLE2_TF18_BIN: the dumped base-level bytes (native_tex_<stamp>/<BASE>_<IDENTITY>.bin of the tess row's tf18);
   // FABLE2_TF18_FC: its six fetch dwords as hex, comma separated (the "texture" row's "fc"). The decoded R8 image is

@@ -132,9 +132,12 @@ inline bool SampleHeight(const uint8_t* data, size_t size, const HeightMap& m, f
 //   alpha  = TerrainFade(d2) * TerrainLayerWeight(tf18(weight_uv)), d2 the squared
 //            distance from `eye` to `world` * (x, y, height, 1)
 //   the draw has no geometry where tf18 < hole_ref (TerrainLayerCulled)
-// The game samples tf18 at its vertices; a bilinear sample at weight_uv is that
-// weight at 16 segments per patch edge (the cell's texel centres are the patch's
-// 17 x 17 grid points). Not covered: the pixel shaders paired with C30A blend a
+// The game samples tf18 at its vertices (component w in both vertex shaders;
+// k_DXT3A is presented with its one channel in every component, so x would
+// read the same); a bilinear sample at weight_uv approximates that weight: it
+// is the weight at 16 segments per patch edge (the cell's texel centres are the
+// patch's 17 x 17 grid points), while the game's tessellator tops out at 15 and
+// removes whole triangles at a culled vertex, not pixels. Not covered: the pixel shaders paired with C30A blend a
 // second colour texture (tf13, at two coordinates that use the height) into the
 // detail colour where the ground is steep; these inputs hold only tf0.
 //

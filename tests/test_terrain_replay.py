@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import math
 import struct
@@ -148,6 +150,31 @@ class TexTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             tr.decode_texture(b"", fc_for(49, 4, 4))
 
+    def test_short_dump_is_refused_with_the_sizes(self):
+        # Linear 34 x 2 k_16, pitch 64: one row of 128 bytes and 34 texels of the second: 196 bytes.
+        fc = fc_for(24, 34, 2, linear=False)
+        data = dump_k16(34, 2, lambda x, y: 7)
+        self.assertEqual(tr.base_level_need(fc), 196)
+        tr.decode_texture(data[:196], fc)
+        with self.assertRaisesRegex(tr.MissingInput, r"far u table.*0x1A000058.*has 195 bytes.*needs 196"):
+            tr.decode_texture(data[:195], fc, "far u table")
+        # Tiled 40 x 20 k_16, pitch 64: the last texel read is in the second tile; the first 64 KB of a
+        # larger level would not do either.
+        tiled = fc_for(24, 40, 20, tiled=True, linear=False)
+        need = tr.base_level_need(tiled)
+        self.assertEqual(need, max(tt.tiled_offset_2d(x, y, 64, 1) for x in range(40) for y in range(20)) + 2)
+        with self.assertRaisesRegex(tr.MissingInput, f"has {need - 1} bytes.*needs {need}"):
+            tr.decode_texture(bytes(need - 1), tiled, "heightmap")
+        tr.decode_texture(bytes(need), tiled, "heightmap")
+        # The block formats: DXT3A 66 x 33 linear (17 x 9 blocks, rows of 32 blocks), 8888 3 x 2.
+        w = fc_for(58, 66, 33)
+        self.assertEqual(tr.base_level_need(w), 8 * 32 * 8 + 17 * 8)
+        with self.assertRaisesRegex(tr.MissingInput, "layer weights"):
+            tr.decode_texture(dump_dxt3a(66, 33, cell_value)[:tr.base_level_need(w) - 1], w, "layer weights")
+        c = fc_for(6, 3, 2, endian=2)
+        with self.assertRaisesRegex(tr.MissingInput, "has 0 bytes"):
+            tr.decode_texture(b"", c, "detail colour")
+
 
 class InputsTest(unittest.TestCase):
     def test_layer_inputs_and_values(self):
@@ -216,6 +243,37 @@ class InputsTest(unittest.TestCase):
             tr.layer_inputs({k: v for k, v in LAYER_CONSTS.items() if k != "c14"}, PCONST)
         with self.assertRaisesRegex(tr.MissingInput, "pconst"):
             tr.layer_inputs(LAYER_CONSTS, None)
+
+
+class WeightChecksTest(unittest.TestCase):
+    def test_cull_edge_pairs(self):
+        # 3 x 3 texel values (of 15):  0 1 5 / 0 0 2 / 3 0 0. Pairs of neighbours with a 0 beside a value
+        # of 2 or more: across (0, 2) in row 1 and (3, 0) in row 2; down (0, 3) in column 0 and (2, 0) in
+        # column 2: 4 of the 12 pairs. (0, 1) and (1, 0) do not count.
+        vals = [0, 1, 5, 0, 0, 2, 3, 0, 0]
+        t = tr.Tex(3, 3, [(v / 15,) * 4 for v in vals])
+        self.assertEqual(tr.cull_edge_pairs(t, 0, 0, 3), (4, 12))
+        # A 0 beside a 1 is where the per-pixel and the per-vertex cull agree (weight 0 either way).
+        ones = tr.Tex(2, 2, [(0.0,) * 4, (1 / 15,) * 4, (1 / 15,) * 4, (1 / 15,) * 4])
+        self.assertEqual(tr.cull_edge_pairs(ones, 0, 0, 2), (0, 4))
+        # The window: only the 2 x 2 texels from (1, 1): 0 2 / 0 0: across (0, 2), down (2, 0): 2 of 4.
+        self.assertEqual(tr.cull_edge_pairs(t, 1, 1, 2), (2, 4))
+
+    def test_weight_sum_bins(self):
+        sums = [0.5, 0.9, 0.97, 0.98, 1.0, 1.02, 1.05, 1.1, 1.5]
+        self.assertEqual(tr.weight_sum_bins(sums), [1, 2, 3, 2, 1])
+        self.assertEqual(tr.weight_sum_bins([]), [0, 0, 0, 0, 0])
+
+    def test_project(self):
+        ident = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+        self.assertEqual(tr.project(ident, 0.5, 0.5, 0.0), (840.0, 180.0))       # ndc (0.5, 0.5), y up
+        self.assertEqual(tr.project(ident, -1.0, 1.0, 0.0), (0.0, 0.0))          # top left
+        self.assertEqual(tr.project(ident, 1.0, -1.0, 0.0, 200, 100), (200.0, 100.0))
+        # w from the height: (1, 1, 2) has w 2 and lands on the same pixel; behind the eye there is none.
+        persp = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 1, 0]]
+        self.assertEqual(tr.project(persp, 1.0, 1.0, 2.0), (840.0, 180.0))
+        self.assertIsNone(tr.project(persp, 1.0, 1.0, -1.0))
+        self.assertIsNone(tr.project(persp, 1.0, 1.0, 0.0))
 
 
 class ShadeTest(unittest.TestCase):
@@ -302,10 +360,12 @@ class ShadeTest(unittest.TestCase):
     def test_far_patch(self):
         inp = tr.far_inputs(FAR_CONSTS, PCONST)
         # Tables 34 x 2 (two patch columns, two rows of patches), point sampled. Column 1, row 1: u runs
-        # 0.25 to 0.75 over the 17 knots, v is 0.75 at every knot.
+        # 0.25 to 0.75 over the 17 knots and v 0.6 to 0.9, so reading the v table with the knot along u
+        # (0.675 at U = 0.25 instead of 0.75 at V = 0.5) fails the coordinate check below.
         tu = tr.decode_texture(dump_k16(34, 2, lambda x, y: round(65535 * (0.25 + 0.5 * (x - 17) / 16)) if x >= 17 and y == 1 else 0),
                                fc_for(24, 34, 2, linear=False))
-        tv = tr.decode_texture(dump_k16(34, 2, lambda x, y: round(65535 * 0.75)), fc_for(24, 34, 2, linear=False))
+        tv = tr.decode_texture(dump_k16(34, 2, lambda x, y: round(65535 * (0.6 + 0.3 * (x - 17) / 16)) if x >= 17 and y == 1 else 0),
+                               fc_for(24, 34, 2, linear=False))
         # Far colour 2 x 2, point sampled: (u < 0.5, v >= 0.5) is texel (0, 1), (u >= 0.5, v >= 0.5) texel (1, 1).
         far = tr.Tex(2, 2, [(0.1, 0.1, 0.1, 1), (0.2, 0.2, 0.2, 1), (0.6, 0.3, 0.9, 1), (0.9, 0.6, 0.3, 1)], linear=False)
         f = tr.Far(inp, far, solid(self.BASE), tu, tv, fade_in=False)
@@ -348,7 +408,7 @@ def png_size_and_pixels(path):
 class CaptureTest(unittest.TestCase):
     """The tool on a capture: tess rows, texture rows and dump files as discovery writes them."""
 
-    def _capture(self, root, pconst=True, with_tf0=True):
+    def _capture(self, root, pconst=True, with_tf0=True, height_bytes=None, detail_format=6, other_sampler=False):
         tex = root / "native_tex_x"
         tex.mkdir()
         files = {}
@@ -362,6 +422,14 @@ class CaptureTest(unittest.TestCase):
         b = add("b.bin", dump_8888(2, 2, lambda x, y: (128, 128, 255, 255)), fc_for(6, 2, 2, endian=2, base=0x1A200000))
         base = add("base.bin", dump_8888(2, 2, lambda x, y: (128, 255, 64, 255)), fc_for(6, 2, 2, endian=2, base=0x1A300000))
         wgt = add("w.bin", dump_dxt3a(66, 33, cell_value), fc_for(58, 66, 33, base=0x1A400000))
+        # Heightmap 4 x 4 k_16, point sampled: every texel 0.2, so the height is 0.2 * 90 = 18.
+        hdata = dump_k16(4, 4, lambda x, y: 13107)
+        hgt = add("h.bin", hdata if height_bytes is None else hdata[:height_bytes],
+                  fc_for(24, 4, 4, linear=False, clamp=2, base=0x1A500000))
+        if detail_format != 6:   # a texture row of a format the tool does not decode, under detail B
+            b = add("dxn.bin", bytes(64), fc_for(detail_format, 4, 4, base=0x1A600000))
+        if other_sampler:        # the tess rows name detail A with other clamp and filter bits than its dump row
+            a = [f"0x{x:08X}" for x in fc_for(6, 2, 2, endian=2, base=0x1A100000, clamp=2, linear=False)]
         rows = [{"kind": "frame", "frame": 1}]
         for name, fc in files.items():
             rows.append({"kind": "texture", "file": f"native_tex_x/{name}", "bytes": 1, "fc": [f"0x{x:08X}" for x in fc]})
@@ -371,7 +439,8 @@ class CaptureTest(unittest.TestCase):
                  "args": ["0x00000012", "0x00000003", "0x00000001", "0x00000000"], "in_scene": True,
                  "rs": {"2201": blend, "bin_mask_lo": "0x0003000A"},
                  "vs": {"hash": "0xC30A97D946FA2BE4"}, "ps_hash": "0x9C2144E42E95A76F",
-                 "consts": consts, "tf": {"3": base, "18": wgt}}
+                 "consts": dict(consts, c0=[0.01, 0, 0, -1], c1=[0, 0.01, 0, -1.5], c2=[0, 0, 1, 0], c3=[0, 0, 0, 1]),
+                 "tf": {"3": base, "16": hgt, "18": wgt}}
             if with_tf0:
                 r["tf"]["0"] = detail
             if pconst:
@@ -422,6 +491,92 @@ class CaptureTest(unittest.TestCase):
             self.assertTrue(any("1 squares" in line for line in lines), lines)
             # Every pixel has the base layer at weight 1 plus the second layer: none is marked uncovered.
             self.assertNotIn(bytes(tr.UNCOVERED), [rows[8][i * 4:i * 4 + 3] for i in range(16)])
+
+    def test_default_replay_reads_the_heightmap_and_refuses_a_cut_dump(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root)
+            out = root / "patch.png"
+            tr.main([str(cap), "--frame", "1", "--patch", "0", "--out", str(out), "--res", "16", "--encode", "linear"])
+            _, _, rows = png_size_and_pixels(out)
+            # Height 18 under the eye at (100, 160, 30): d2 is far below 2500, the fade is 1, and the pixel
+            # is the one of the replay without the fade.
+            a2 = [(c / 255) ** 2 for c in (204, 102, 51)]
+            b2 = [(c / 255) ** 2 for c in (128, 128, 255)]
+            bp = [(c / 255) ** 2 * t for c, t in zip((128, 255, 64), (1.5, 1.0, 0.5))]
+            self.assertEqual(list(rows[8][0:3]), [round(255 * min(1.0, (a2[k] + b2[k] * 8.5 / 14) * bp[k])) for k in range(3)])
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root, height_bytes=100)    # the level needs 3 * 64 + 8 = 200 bytes
+            with self.assertRaisesRegex(tr.MissingInput, r"heightmap.*has 100 bytes.*needs 200"):
+                tr.main([str(cap), "--frame", "1", "--patch", "0", "--out", str(root / "p.png")])
+            # Without the fade the heightmap is not read and the replay goes through.
+            tr.main([str(cap), "--frame", "1", "--patch", "0", "--out", str(root / "p.png"), "--no-fade"])
+
+    def test_check_dumps_lists_every_texture_the_rows_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root, pconst=False)
+            lines = tr.main([str(cap), "--frame", "1", "--check-dumps"])
+            # Detail A and B, the base map, the heightmap and the weight map: five textures, all whole.
+            self.assertEqual(sum(" ok" in line for line in lines), 5, lines)
+            self.assertIn("0 of 5 textures short, missing or of unknown size", lines[-1])
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root, height_bytes=100, detail_format=49)
+            (root / "native_tex_x" / "w.bin").unlink()
+            lines = tr.main([str(cap), "--frame", "1", "--check-dumps"])
+            text = chr(10).join(lines)
+            self.assertRegex(text, r"tf16 0x1A500058 format 24 4 x 4: SHORT, 100 of 200 bytes")
+            self.assertRegex(text, r"tf18 0x1A40007A format 58 66 x 33: NO DUMP FILE")
+            # k_DXN is not decoded here but its size is known: 4 x 4 is one 16-byte block; the file has 64.
+            self.assertRegex(text, r"tf0 0x1A600071 format 49 4 x 4: ok, 64 bytes \(needs 16\)")
+            self.assertIn("2 of 5 textures short, missing or of unknown size", lines[-1])
+
+    def test_texture_is_found_by_address_format_and_size(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root, other_sampler=True)
+            out = root / "patch.png"
+            lines = tr.main([str(cap), "--frame", "1", "--patch", "0", "--out", str(out), "--res", "16", "--no-fade"])
+            self.assertTrue(any("2 layer draws" in line for line in lines), lines)
+
+    def test_unsupported_format_is_refused_by_name_and_exit_code(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root, detail_format=49)
+            argv = [str(cap), "--frame", "1", "--patch", "0", "--out", str(root / "p.png"), "--no-fade"]
+            with self.assertRaisesRegex(tr.MissingInput, r"tf0 \(detail colour\).*format 49"):
+                tr.main(argv)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(tr.cli(argv), 2)
+            self.assertIn("cannot replay", err.getvalue())
+            self.assertNotIn("Traceback", err.getvalue())
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(tr.cli([str(self._capture(Path(tempfile.mkdtemp()))), "--frame", "1", "--list"]), 0)
+
+    def test_weight_sums_cull_edges_and_locate(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root, pconst=False)
+            lines = tr.main([str(cap), "--frame", "1", "--weight-sums"])
+            # One square whose first layer replaces: at its 17 x 17 grid points the base layer is 1 and the
+            # second layer (texels 16 to 32 of its cell: values 9 to 15) between 8/14 and 1: all above 1.1.
+            text = " ".join(lines)
+            self.assertIn("1 squares whose first layer replaces", text)
+            self.assertIn("below 0.9: 0, 0.9 to 0.98: 0, 0.98 to 1.02: 0, 1.02 to 1.1: 0, above 1.1: 289", text)
+            self.assertIn("0 squares whose first layer adds", text)
+            # Cull edges (printed with the weight map) over the two 17 x 17 blocks the frame uses: the
+            # texels of this sub-patch (16 to 32 of each cell) hold no 0: 0 of 2 * 2 * 17 * 16 pairs.
+            lines = tr.main([str(cap), "--frame", "1", "--weights", str(root / "w.png")])
+            self.assertTrue(any("cull edges: 0 of 1088 neighbouring texel pairs in the 2 17 x 17" in line for line in lines), lines)
+            lines = tr.main([str(cap), "--frame", "1", "--patch", "0", "--locate"])
+            # c0 = (0.01, 0, 0, -1), c1 = (0, 0.01, 0, -1.5), w = 1: corner (88, 152) is ndc (-0.12, 0.02):
+            # pixel (492.8, 352.8); corner (96, 160) is ndc (-0.04, 0.10): pixel (537.6, 324.0).
+            text = " ".join(lines)
+            self.assertIn("(88, 152) -> (492.8, 352.8)", text)
+            self.assertIn("(96, 160) -> (537.6, 324.0)", text)
 
     def test_underlay_is_the_adaptive_draw_with_a_colour_pass_over_the_square(self):
         def far_row(bins, origin, name):

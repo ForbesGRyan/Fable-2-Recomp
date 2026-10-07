@@ -63,6 +63,8 @@ clang++ -std=c++23 "%~dp0native\test_stream_resolve.cpp" -o "%OUT%\stream_resolv
 "%OUT%\stream_resolve.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_autoplay.cpp" -o "%OUT%\autoplay.exe" || exit /b 1
 "%OUT%\autoplay.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_boot_save.cpp" -o "%OUT%\boot_save.exe" || exit /b 1
+"%OUT%\boot_save.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_texture_decode.cpp" -o "%OUT%\texture_decode.exe" || exit /b 1
 "%OUT%\texture_decode.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_uv_decode.cpp" -o "%OUT%\uv_decode.exe" || exit /b 1

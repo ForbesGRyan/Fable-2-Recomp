@@ -612,18 +612,6 @@ void UpdateState(uint32_t id, const PPCContext& ctx) {
   }
 }
 
-void AppendFloat(std::string& s, float f) {
-  char buf[32];
-  if (std::isnan(f)) {
-    s += "NaN";
-  } else if (std::isinf(f)) {
-    s += f > 0 ? "Infinity" : "-Infinity";
-  } else {
-    std::snprintf(buf, sizeof(buf), "%.9g", double(f));
-    s += buf;
-  }
-}
-
 // Caller holds g_mutex.
 void WriteRawRow(uint32_t id, const LastArgs& args, uint32_t device, const DeviceSnapshot* dev) {
   const DrawState& s = g_state;
@@ -1261,6 +1249,20 @@ void AppendRenderState(std::string& row, uint32_t device) {
   }
 }
 
+// Discovery evidence (frame-map section 13, "Alpha and missing shaders"): pixel
+// constants c0..c31 as host floats ("pconst", 128 values; left out when the
+// bank cannot be read), from the bank ReadPsBankRegisters reads for the draw's
+// material. They hold the constants the alpha recipes of ps-albedo.json
+// multiply by (c15.w, c26.w) and the UV scale (c8).
+void AppendPixelConstants(std::string& row, uint32_t device) {
+  const uint32_t bank_ptr = g_ps_bank_ptr.load(std::memory_order_relaxed);
+  const uint8_t* p =
+      device ? ReadVirtual(bank_ptr ? bank_ptr : device + xdk::kDevicePsConstantsOffset, 32 * 16) : nullptr;
+  if (!p) return;
+  row += ",\"pconst\":";
+  row += BeFloats(p, 128);
+}
+
 // The nine words of a draw's render state (render_state.h) from the device's
 // register shadows, as AppendRenderState reads them, and the low word of its bin
 // mask. `read` stays false when any of them cannot be read.
@@ -1295,6 +1297,13 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
   // 12, "The cexec b0 block"): bit 0 of "vbool" is b0.
   if (const uint8_t* bools = ReadVirtual(device + xdk::kDeviceBoolConstantsOffset, 4)) {
     std::snprintf(buf, sizeof(buf), ",\"vbool\":\"0x%08X\"", LoadBe32(bools));
+    row += buf;
+  }
+  // Pixel bool constants b128..b159 from the same shadow (bit 0 of "pbool" is
+  // b128, which the prop shaders' colour division is under; frame-map section
+  // 13, "Alpha and missing shaders").
+  if (const uint8_t* bools = ReadVirtual(device + xdk::kDevicePsBoolConstantsOffset, 4)) {
+    std::snprintf(buf, sizeof(buf), ",\"pbool\":\"0x%08X\"", LoadBe32(bools));
     row += buf;
   }
   AppendRenderState(row, device);
@@ -1339,6 +1348,7 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
   // Pixel shader: also independent of the vertex shader.
   AppendPs(row, dev);
   AppendTextureFetches(row, device, dev);
+  AppendPixelConstants(row, device);
 
   // Vertex shader and its microcode.
   VsChoice vc;

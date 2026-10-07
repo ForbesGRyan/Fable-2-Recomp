@@ -58,6 +58,13 @@ inline constexpr uint32_t kDevicePsConstantsOffset = 0x1780;
 // part of the shadow is not established. Used as evidence only (discovery
 // draw rows "vbool").
 inline constexpr uint32_t kDeviceBoolConstantsOffset = 0x2780;
+// Register 0x4904, the fifth dword of that shadow: the pixel shaders' bool
+// constants b128..b159 as the dumps number them (`cexec b128`), b128 in bit 0.
+// Static only: the dword was not compared with the GPU's register. Runtime
+// (frame-map section 13, "Alpha and missing shaders"): it reads 0x00000100
+// (b136 alone) in every draw row of two captures. Evidence only (discovery
+// draw rows "pbool").
+inline constexpr uint32_t kDevicePsBoolConstantsOffset = kDeviceBoolConstantsOffset + 4 * 4;
 
 // --- Main-scene bracket (frame-map section 8, "Main-scene bracket") ---------
 // Device flag byte +0x2ABC; bit 0x20 = inside BeginTiling/EndTiling (the

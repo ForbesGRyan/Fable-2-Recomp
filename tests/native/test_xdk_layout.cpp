@@ -16,6 +16,9 @@ static_assert(xdk::kDevicePsConstantsOffset == xdk::kDeviceVsConstantsOffset + 2
 // The bool constants (registers 0x4900..0x4907) follow the pixel bank.
 static_assert(xdk::kDeviceBoolConstantsOffset == 0x2780);
 static_assert(xdk::kDeviceBoolConstantsOffset == xdk::kDevicePsConstantsOffset + 256 * 16);
+// Pixel bools b128..b159 are register 0x4904, the fifth dword of that shadow.
+static_assert(xdk::kDevicePsBoolConstantsOffset == 0x2790);
+static_assert(xdk::kDevicePsBoolConstantsOffset == xdk::kDeviceBoolConstantsOffset + 4 * (0x4904 - 0x4900));
 // Render-state register shadows (frame-map section 13, "Render state"): the
 // 0x2100 run (21 registers) from +0x28CC and the 0x2200 run (12) from +0x2934.
 static_assert(xdk::DeviceRegShadowOffset(xdk::kRegColorMask) == 0x28DC);

@@ -1,3 +1,4 @@
+import json
 import struct
 import sys
 import tempfile
@@ -79,6 +80,54 @@ class ThumbTest(unittest.TestCase):
         buf[512:528] = red  # block row 1 starts at 512, not 256
         w, h, rgba = tt.decode_rgba(bytes(buf), fc_for(20, 4, 8, 32, False, endian=0))
         self.assertEqual(rgba[(4 * 4) * 4:(4 * 4) * 4 + 4], bytes([255, 0, 0, 255]))
+
+    def test_alpha_only_image_and_shares(self):
+        # Four texels: alpha 0, 255, 128, 255 with colours that must not leak into the alpha image.
+        rgba = bytes([10, 20, 30, 0, 40, 50, 60, 255, 70, 80, 90, 128, 1, 2, 3, 255])
+        self.assertEqual(tt.alpha_rgba(rgba), bytes([0, 0, 0, 255, 255, 255, 255, 255,
+                                                     128, 128, 128, 255, 255, 255, 255, 255]))
+        self.assertEqual(tt.alpha_stats(rgba), {"zero": 0.25, "full": 0.5, "between": 0.25})
+        self.assertEqual(tt.alpha_stats(b""), {"zero": 0.0, "full": 0.0, "between": 0.0})
+
+    def test_cli_writes_colour_and_alpha_thumbnails(self):
+        # A capture with one DXT4_5 texture row (alpha 200, red) and one row the filter leaves out.
+        block = bytes([200, 0]) + bytes(6) + struct.pack("<HHI", 0xF800, 0xF800, 0)
+        fc = fc_for(20, 4, 4, 32, False, endian=0)
+        other = fc_for(18, 4, 4, 32, False)
+        other[1] = (other[1] & 0xFFF) | 0x1B000000
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "native_tex_x").mkdir()
+            (d / "native_tex_x" / "a.bin").write_bytes(block + bytes(256))
+            (d / "native_tex_x" / "b.bin").write_bytes(bytes(256))
+            rows = [{"kind": "texture", "file": "native_tex_x/a.bin", "bytes": 272, "fc": [f"0x{v:08X}" for v in fc]},
+                    {"kind": "texture", "file": "native_tex_x/b.bin", "bytes": 256, "fc": [f"0x{v:08X}" for v in other]},
+                    {"kind": "draw", "frame": 1}]
+            cap = d / "cap.jsonl"
+            cap.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            out = d / "out"
+            lines = tt.main([str(cap), "--out", str(out), "--alpha", "--base", f"0x{fc[1]:08X}"])
+            name = f"{fc[1]:08X}"
+            self.assertEqual(sorted(p.name for p in out.iterdir()), [name + ".png", name + "_alpha.png"])
+            self.assertEqual(len(lines), 1)
+            self.assertIn("DXT4_5 4x4", lines[0])
+            self.assertIn("alpha 0: 0.0%, 255: 0.0%, between: 100.0%", lines[0])
+            # The alpha image is opaque grey 200; the colour image keeps the texture's own alpha.
+            self.assertEqual(png_pixel(out / (name + "_alpha.png")), bytes([200, 200, 200, 255]))
+            self.assertEqual(png_pixel(out / (name + ".png")), bytes([255, 0, 0, 200]))
+            # Without --alpha only the colour thumbnail is written; without --base every texture is.
+            out2 = d / "out2"
+            self.assertEqual(len(tt.main([str(cap), "--out", str(out2)])), 2)
+            self.assertEqual(len(list(out2.iterdir())), 2)
+            self.assertFalse(any(p.name.endswith("_alpha.png") for p in out2.iterdir()))
+
+
+def png_pixel(path):
+    """First pixel of an RGBA8 PNG written by write_png."""
+    raw = Path(path).read_bytes()
+    at = raw.index(b"IDAT")
+    size = struct.unpack(">I", raw[at - 4:at])[0]
+    return zlib.decompress(raw[at + 4:at + 4 + size])[1:5]
 
 
 if __name__ == "__main__":

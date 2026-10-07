@@ -2,7 +2,15 @@
 
 Supported formats: DXT1 (18), DXT2_3 (19), DXT4_5 (20), 8888 (6). Others raise ValueError("format N").
 The fetch constant is six host-order dwords (xenos::xe_gpu_texture_fetch_t).
+
+Usage: texture_thumb.py <capture.jsonl> --out <dir> [--alpha] [--base 0x<fetch dword 1> ...] [--max-edge N]
+Writes <out>/<fetch dword 1>.png for each "texture" row of the capture (the dumps are read relative to the
+capture's folder, or --tex-root), with --alpha also <...>_alpha.png, the alpha channel alone as opaque grey
+(the cut-out shape of an alpha-tested texture), and prints one line per texture with the shares of texels
+whose alpha is 0, 255 and in between.
 """
+import argparse
+import json
 import struct
 import zlib
 from pathlib import Path
@@ -128,3 +136,70 @@ def write_png(path, w, h, rgba, max_edge=256):
     png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
            + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
     Path(path).write_bytes(png)
+
+
+def alpha_rgba(rgba):
+    """The alpha channel of RGBA bytes as an opaque grey image (for write_png): the cut-out shape."""
+    a = rgba[3::4]
+    out = bytearray(len(a) * 4)
+    out[0::4] = a
+    out[1::4] = a
+    out[2::4] = a
+    out[3::4] = bytes([255]) * len(a)
+    return bytes(out)
+
+
+def alpha_stats(rgba):
+    """Shares of the texels whose alpha is 0 ("zero"), 255 ("full") and anything else ("between")."""
+    a = rgba[3::4]
+    n = len(a)
+    if not n:
+        return {"zero": 0.0, "full": 0.0, "between": 0.0}
+    zero, full = a.count(0), a.count(255)
+    return {"zero": zero / n, "full": full / n, "between": (n - zero - full) / n}
+
+
+_FORMAT_NAMES = {6: "8888", 18: "DXT1", 19: "DXT2_3", 20: "DXT4_5"}
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("capture")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--alpha", action="store_true", help="also write the alpha channel as <name>_alpha.png")
+    ap.add_argument("--base", action="append", default=[], help="only textures with this fetch dword 1 (hex)")
+    ap.add_argument("--tex-root", help="folder the rows' file paths are relative to (default: the capture's)")
+    ap.add_argument("--max-edge", type=int, default=256)
+    a = ap.parse_args(argv)
+    root = Path(a.tex_root) if a.tex_root else Path(a.capture).parent
+    want = {int(b, 16) for b in a.base}
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    lines, seen = [], set()
+    with open(a.capture, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if not line.startswith('{"kind":"texture"') and '"kind": "texture"' not in line[:24]:
+                continue
+            row = json.loads(line)
+            fc = [int(x, 16) for x in row["fc"]]
+            if (want and fc[1] not in want) or fc[1] in seen:
+                continue
+            seen.add(fc[1])
+            name = f"{fc[1]:08X}"
+            try:
+                w, h, rgba = decode_rgba((root / row["file"]).read_bytes(), fc)
+            except (ValueError, OSError) as e:
+                lines.append(f"{name}: not decoded ({e})")
+                continue
+            write_png(out / (name + ".png"), w, h, rgba, a.max_edge)
+            if a.alpha:
+                write_png(out / (name + "_alpha.png"), w, h, alpha_rgba(rgba), a.max_edge)
+            s = alpha_stats(rgba)
+            lines.append(f"{name}: {_FORMAT_NAMES[fc[1] & 0x3F]} {w}x{h}, alpha 0: {100 * s['zero']:.1f}%, "
+                         f"255: {100 * s['full']:.1f}%, between: {100 * s['between']:.1f}%")
+    return lines
+
+
+if __name__ == "__main__":
+    for text in main():
+        print(text)

@@ -68,7 +68,7 @@ static bool DisassemblyHas(const char* name, const char* src, const char* target
 }
 
 // 0 when `src` compiles and its cbuffer `Terrain` has exactly the variables of kClayTerrainFields, each at
-// the table's byte offset with the table's size, in a buffer of 128 bytes. Otherwise a number that says
+// the table's byte offset with the table's size, in a buffer of 160 bytes. Otherwise a number that says
 // what differs: 1 no compile, 2 no reflection, 3 no such buffer, 4 another size or variable count,
 // 10 + i for the table's entry i.
 static int TerrainLayoutMismatch(const char* name, const char* src) {
@@ -90,7 +90,7 @@ static int TerrainLayoutMismatch(const char* name, const char* src) {
     const unsigned count = sizeof(kClayTerrainFields) / sizeof(kClayTerrainFields[0]);
     if (!cb || FAILED(cb->GetDesc(&bd))) {
       result = 3;
-    } else if (bd.Size != 128 || bd.Variables != count) {
+    } else if (bd.Size != 160 || bd.Variables != count) {
       result = 4;
     } else {
       for (unsigned i = 0; i < count && !result; ++i) {
@@ -205,8 +205,12 @@ int main() {
     // The weight is read from component w with a linear filter at level 0.
     if (!strstr(l, "t_weights.SampleLevel(s_linear_clamp, wuv, 0).w") ||
         !strstr(l, "t_weights.SampleLevel(s_linear_wrap, wuv, 0).w")) return 34;
-    // Dropped by the unlit rule: the base map (tf3) and its exponent and tint, and the squaring.
-    if (strstr(l, "pow(") || strstr(l, "colour * colour") || strstr(l, "t_base")) return 35;
+    // Dropped by the unlit rule: the base map (tf3) and its exponent and tint, and the squaring (the
+    // one square of the colour is inside the steep-ground block's root, below).
+    {
+      const char* square = strstr(l, "colour * colour");
+      if (strstr(l, "pow(") || strstr(l, "t_base") || !square || strstr(square + 1, "colour * colour")) return 35;
+    }
     // The far shader: the far colour at the per-vertex coordinate, times the fade-in for the underlay.
     const char* f = kClayTerrainFarPs;
     if (!strstr(f, "float3 colour = sample_colour(uv).rgb;") ||
@@ -221,9 +225,64 @@ int main() {
       if (!test || !mask || !out || !(test < mask && mask < out)) return 38;
     }
   }
+  // The steep-ground block of the layer shader (frame-map section 13, "Terrain", item 1; the reference
+  // is terrain_replay.py's steep_mix and the numbers of TerrainSteepMix in test_terrain_patch.cpp). The
+  // vertex shader hands on the game's vertex normal: (x, y) from the draw's per-vertex buffer, z formed
+  // as the game's vertex shader forms it; (0, 0, 1) for every draw without the buffer.
+  {
+    const char* v = kClayVs;
+    const char* decl = strstr(v, "float3 normal : TEXCOORD3;");
+    const char* flat = strstr(v, "o.normal = float3(0, 0, 1);");
+    const char* read = strstr(v, "float2 t = uvs[v];");
+    const char* uv = strstr(v, "o.uv = t * uv_xform.xy + uv_xform.zw;");
+    const char* z = strstr(v, "o.normal = float3(t, sqrt(abs(1.0 - dot(t, t))));");
+    if (!decl || !flat || !read || !uv || !z || !(flat < read && read < uv && read < z)) return 39;
+    if (strstr(kClayPs, "TEXCOORD3") || strstr(kClayTexturedPs, "TEXCOORD3") || strstr(kClayTerrainFarPs, "TEXCOORD3")) return 40;
+    const char* l = kClayTerrainLayerPs;
+    if (!strstr(l, "float3 world : TEXCOORD2, float3 normal : TEXCOORD3") || !strstr(l, "Texture2D t_side : register(t6);")) return 41;
+    // One statement per term, in the shader's order: the two side projections and their derivatives
+    // (outside the branch), the slope value, the branch below the threshold, the weights, the two
+    // fetches (o0 with wx, o1 with wy), and the root of the linear mix.
+    const char* colour = strstr(l, "float3 colour = sample_colour(world.xy * t_detail_uv.xy + t_detail_uv.zw).rgb;");
+    const char* o0 = strstr(l, "float2 o0 = world.yz * t_side_uv;");
+    const char* o1 = strstr(l, "float2 o1 = world.xz * t_side_uv;");
+    const char* d0 = strstr(l, "float4 d0 = float4(ddx(o0), ddy(o0));");
+    const char* d1 = strstr(l, "float4 d1 = float4(ddx(o1), ddy(o1));");
+    const char* s = strstr(l, "float s = saturate(abs(normal.z) * t_slope.y + t_slope.x);");
+    const char* branch = strstr(l, "[branch] if ((t_flags & 2) && s < t_steep_threshold) {");
+    const char* inv = strstr(l, "float inv = 1.0 / (abs(normal.x) + t_steep_eps + abs(normal.y));");
+    const char* wx = strstr(l, "float wx = abs(normal.x) * inv;");
+    const char* wy = strstr(l, "float wy = abs(normal.y) * inv;");
+    const char* side0 = strstr(l, "float3 side0 = sample_side(o0, d0).rgb;");
+    const char* side1 = strstr(l, "float3 side1 = sample_side(o1, d1).rgb;");
+    const char* mix = strstr(l, "colour = sqrt(s * colour * colour + (1.0 - s) * (wy * side1 * side1 + wx * side0 * side0));");
+    const char* cull = strstr(l, "if (value < t_hole_ref) discard;");
+    if (!colour || !o0 || !o1 || !d0 || !d1 || !s || !branch || !inv || !wx || !wy || !side0 || !side1 || !mix || !cull) return 42;
+    if (!(colour < o0 && o0 < d0 && o1 < d1 && d0 < branch && d1 < branch && s < branch && branch < inv && inv < wx &&
+          inv < wy && wx < mix && wy < mix && side0 < mix && side1 < mix && branch < side0 && branch < side1)) return 43;
+    // The fetches inside the branch take the derivatives formed outside it, with the side texture's own sampler.
+    if (!strstr(l, "t_side.SampleGrad(s_point_wrap, at, d.xy, d.zw)") || !strstr(l, "t_side.SampleGrad(s_linear_wrap, at, d.xy, d.zw)") ||
+        !strstr(l, "t_side.SampleGrad(s_point_clamp, at, d.xy, d.zw)") || !strstr(l, "t_side.SampleGrad(s_linear_clamp, at, d.xy, d.zw)") ||
+        !strstr(l, "if (t_side_sampler == 0)")) return 44;
+    if (!DisassemblyHas("clay_terrain_layer_ps", l, "ps_5_0", "sample_d") ||
+        !DisassemblyHas("clay_terrain_layer_ps", l, "ps_5_0", "sqrt")) return 45;
+    // The far shader has no block: no side texture, no derivative fetch, no root.
+    if (strstr(kClayTerrainFarPs, "t_side :") || strstr(kClayTerrainFarPs, "sample_side") || strstr(kClayTerrainFarPs, "sqrt(") ||
+        DisassemblyHas("clay_terrain_far_ps", kClayTerrainFarPs, "ps_5_0", "sample_d")) return 46;
+    // The block's constants are in the table (and so at their offsets in both compiled shaders, above).
+    bool side_uv = false, slope = false, threshold = false, eps = false, sampler = false;
+    for (const ClayTerrainField& f : kClayTerrainFields) {
+      side_uv = side_uv || (!strcmp(f.name, "t_side_uv") && f.bytes == 8);
+      slope = slope || (!strcmp(f.name, "t_slope") && f.bytes == 8);
+      threshold = threshold || (!strcmp(f.name, "t_steep_threshold") && f.bytes == 4);
+      eps = eps || (!strcmp(f.name, "t_steep_eps") && f.bytes == 4);
+      sampler = sampler || (!strcmp(f.name, "t_side_sampler") && f.bytes == 4);
+    }
+    if (!side_uv || !slope || !threshold || !eps || !sampler) return 47;
+  }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; broken shader rejected\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; broken shader rejected\n";
   return 0;
 }

@@ -5,8 +5,9 @@
 // StructuredBuffers by SV_VertexID and transformed by each draw's captured
 // rows. With textures on, draws whose capture resolved an albedo and UVs
 // sample it (texture cache, unlit, softened facet shade); terrain records are
-// drawn with the terrain material (the layer's detail colour weighted by its
-// weight cell and the distance fade, or the far colour; clay_logic.h, "Terrain
+// drawn with the terrain material (the layer's detail colour, on steep ground
+// mixed with its side texture, weighted by its weight cell and the distance
+// fade, or the far colour; clay_logic.h, "Terrain
 // material"), a ground square as a whole or not at all (PlanTerrain); every
 // other draw keeps the flat clay colour. Each draw uses the game's own render state
 // (DrawRecord::state_words): blend, colour mask, depth and cull through a
@@ -15,6 +16,7 @@
 // draw whose alpha or colour is not known). GPU (command-processor) thread
 // only; Cmd is valid only inside the SDK's guest-output callbacks.
 
+#include <array>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -70,12 +72,17 @@ class ClayPass {
     // A terrain record. With its material (`textured` 2 or 3): `albedo` is the
     // colour texture (tf0 or tf13) with `sampler` and `uv_fix`, `weights` the
     // layer's weight cells, `uvs` a far draw's colour coordinates, `slot` its
-    // constants in the frame's terrain constant buffer. `status`: kTextured
-    // when the material is usable, else why not (TerrainMaterialStatus).
+    // constants in the frame's terrain constant buffer. A layer with the
+    // steep-ground block also has `side`, its side texture with `side_sampler`
+    // and `side_fix`, and in `uvs` the vertex normals of its grid points.
+    // `status`: kTextured when the material is usable, else why not
+    // (TerrainMaterialStatus, TerrainSteepStatus).
     bool terrain = false;
     uint8_t textured = 0;  // PipelineKey::textured when drawn with the terrain material
     nrhi::TextureView* weights = nullptr;
-    uint32_t weight_sampler = 0, plan = 0, slot = 0;
+    nrhi::TextureView* side = nullptr;
+    uint32_t weight_sampler = 0, side_sampler = 0, plan = 0, slot = 0;
+    float side_fix[2] = {1.0f, 1.0f};
     capture::MaterialStatus status = capture::MaterialStatus::kTerrain;
   };
   // A texture resolved for a terrain layer this frame (many layers share a few).
@@ -98,7 +105,7 @@ class ClayPass {
                               nrhi::Pipeline* fallback = nullptr);
   bool CreateWhite(nrhi::Device* dev);
   // Terrain records (Render). PrepareTerrain: geometry, and with textures on the
-  // textures, far coordinates, pipeline and status of the record's material
+  // textures, far coordinates or vertex normals, pipeline and status of the record's material
   // (a record whose state cannot be drawn as captured, or that finds no
   // pipeline, has none); adds its entry to prepared_ and terrain_items_.
   // FinishTerrain, after every record:
@@ -137,7 +144,7 @@ class ClayPass {
   TextureCache textures_;
   std::vector<Prepared> prepared_;
   // Terrain of the frame being rendered: one plan item per terrain record
-  // (Prepared::plan), the layers' textures, the texture pairs bound, and the
+  // (Prepared::plan), the layers' textures, the texture sets bound, and the
   // constant buffer (one kClayTerrainSlotBytes slot per terrain record,
   // persistently mapped). The buffer is in use until the frame's submission has
   // completed, so each frame takes one from the pool or a new one and returns it
@@ -146,7 +153,7 @@ class ClayPass {
   std::vector<TerrainPlanItem> terrain_items_;
   TerrainPlanScratch terrain_scratch_;  // PlanTerrain's storage, kept between frames
   std::vector<TerrainTexture> terrain_textures_;
-  std::vector<std::pair<nrhi::TextureView*, nrhi::TextureView*>> terrain_pairs_;
+  std::vector<std::array<nrhi::TextureView*, 3>> terrain_sets_;  // colour, weights, side
   RetirePool<nrhi::Buffer*> terrain_pool_{kTerrainPoolBytes};
   std::vector<nrhi::Buffer*> terrain_destroy_;
   nrhi::Buffer* terrain_cb_ = nullptr;

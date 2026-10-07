@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import math
+import os
 import struct
 import sys
 import tempfile
@@ -114,6 +115,45 @@ def dump_k16(w, h, value):
     return bytes(buf)
 
 
+def bc4_block(a0, a1, index):
+    """Eight bytes of a BC4 block: the two end values and index(i) (0..7) of texel i, row-major, three
+    bits each from the low end."""
+    bits = sum((index(i) & 7) << (3 * i) for i in range(16))
+    return bytes([a0, a1]) + bits.to_bytes(6, "little")
+
+
+def dump_dxn(w, h, block):
+    """Linear k_DXN guest bytes (8in16). block(bx, by) gives the 16 bytes of a block as the GPU reads
+    them: the BC4 block of x, then that of y."""
+    wb, hb = (w + 3) // 4, (h + 3) // 4
+    pitch = (wb + 31) & ~31
+    buf = bytearray(hb * pitch * 16)
+    for by in range(hb):
+        for bx in range(wb):
+            buf[(by * pitch + bx) * 16:(by * pitch + bx) * 16 + 16] = tt._swap(block(bx, by), 1)
+    return bytes(buf)
+
+
+def flat_dxn(x, y):
+    """A block whose every texel is (x, y) (both end values equal: every palette entry is the value)."""
+    return bc4_block(x, x, lambda i: 0) + bc4_block(y, y, lambda i: 0)
+
+
+# The steep-ground block of the three layer shaders paired with C30A. tests/native/test_terrain_patch.cpp
+# feeds the same constants to MakeTerrainMaterialInputs and pins the same numbers (STEEP_WANT and the
+# values of SteepTest): c45 as captured in game session 1, the two literals as the shaders' tables hold
+# them.
+STEEP_PC = {"c45": [-7.66190386, 10.0019045, 0, 0]}
+STEEP_LIT_9C21 = [{"reg": 508, "v": [0, 0, 0, 0, 0, 0, 0, 0, 2, 0.99609375, 8, 0, 0, -1, 1, 9.99999975e-05]}]
+STEEP_LIT_4524 = [{"reg": 508, "v": [0, 0, 0, 0, 0, 0, 0, 0, 8, 2, 0.99609375, 0, 0, 1, -1, 9.99999975e-05]}]
+STEEP_WANT = {
+    "side_uv": [0.0625, -0.0625],
+    "slope": [-7.66190386, 10.0019045],
+    "steep_threshold": 0.99609375,
+    "steep_eps": 0.0001,
+}
+
+
 def cell_value(x, y):
     """The synthetic weight atlas, 66 x 33: two 33 x 33 cells. Cell 0 (x < 33) is the base layer's: 15
     everywhere. Cell 1 is the second layer's: 0 for local x < 8 (the layer is absent there), then 1,
@@ -148,7 +188,64 @@ class TexTest(unittest.TestCase):
         self.assertAlmostEqual(k.texel(33, 1)[0], 33001 / 65535)
         self.assertFalse(k.linear)
         with self.assertRaises(ValueError):
-            tr.decode_texture(b"", fc_for(49, 4, 4))
+            tr.decode_texture(b"", fc_for(2, 4, 4))
+
+    def test_decode_dxn(self):
+        # 8 x 4: two blocks. Block 0: x has end values 200 > 60 (eight values: the ends, then six steps
+        # of a seventh from 200 towards 60, not rounded), texel i with index i % 8; y has 10 <= 250 (six
+        # values: the ends, four steps of a fifth, then 0 and 255). Block 1: x 255 everywhere, y 0.
+        def block(bx, by):
+            if bx == 0:
+                return bc4_block(200, 60, lambda i: i % 8) + bc4_block(10, 250, lambda i: i % 8)
+            return flat_dxn(255, 0)
+
+        t = tr.decode_texture(dump_dxn(8, 4, block), fc_for(49, 8, 4, linear=False))
+        self.assertEqual((t.w, t.h), (8, 4))
+        self.assertFalse(t.linear)
+        x_want = [200, 60] + [((7 - i) * 200 + i * 60) / 7 for i in range(1, 7)]
+        y_want = [10, 250] + [((5 - i) * 10 + i * 250) / 5 for i in range(1, 5)] + [0, 255]
+        self.assertAlmostEqual(x_want[2], 180.0, places=9)        # (6 * 200 + 60) / 7
+        self.assertAlmostEqual(x_want[4], 140.0, places=9)        # (4 * 200 + 3 * 60) / 7
+        self.assertAlmostEqual(x_want[3], 1120 / 7, places=9)     # (5 * 200 + 2 * 60) / 7 = 160
+        self.assertAlmostEqual(y_want[2], 58.0, places=9)         # (4 * 10 + 250) / 5
+        for i in range(16):
+            got = t.texel(i % 4, i // 4)
+            self.assertAlmostEqual(got[0], x_want[i % 8] / 255, places=9, msg=i)   # x: the first eight bytes
+            self.assertAlmostEqual(got[1], y_want[i % 8] / 255, places=9, msg=i)   # y: the second
+            self.assertEqual(got[2:], (0.0, 1.0))
+        self.assertEqual(t.texel(5, 2), (1.0, 0.0, 0.0, 1.0))
+        # A value that is no whole number of 255ths is kept as it is: 200 and 61 give 1339 / 7.
+        odd = tr.decode_texture(dump_dxn(4, 4, lambda bx, by: bc4_block(200, 61, lambda i: 2) + flat_dxn(0, 0)[8:]),
+                                fc_for(49, 4, 4, linear=False))
+        self.assertAlmostEqual(odd.texel(0, 0)[0], (6 * 200 + 61) / 7 / 255, places=9)
+        # One row of 32 blocks of 16 bytes; the second block ends at byte 32.
+        self.assertEqual(tr.base_level_need(fc_for(49, 8, 4)), 32)
+        with self.assertRaisesRegex(tr.MissingInput, r"normal map.*has 31 bytes.*needs 32"):
+            tr.decode_texture(bytes(31), fc_for(49, 8, 4), "normal map")
+        # The byte order is the fetch constant's: the same guest bytes read without the 8in16 swap have
+        # the end values exchanged (60 <= 200: the six-value mode, index 0 is 60).
+        guest = dump_dxn(4, 4, lambda bx, by: bc4_block(200, 60, lambda i: 0) + flat_dxn(0, 0)[8:])
+        self.assertAlmostEqual(tr.decode_texture(guest, fc_for(49, 4, 4)).texel(0, 0)[0], 200 / 255, places=9)
+        self.assertAlmostEqual(tr.decode_texture(guest, fc_for(49, 4, 4, endian=0)).texel(0, 0)[0], 60 / 255, places=9)
+
+    def test_real_tf17_dump_matches_cpp_decoder(self):
+        """The terrain normal map, once a discovery capture has dumped it (tf17 of the layer draws,
+        k_DXN). Needs FABLE2_TF17_BIN and FABLE2_TF17_FC (see tests/native/test_texture_decode.cpp) and
+        the C++ test's output FABLE2_TF17_BIN + '.cpp.xy'; SKIPS (never passes silently) when any is
+        missing."""
+        bin_path, fcs = os.environ.get("FABLE2_TF17_BIN"), os.environ.get("FABLE2_TF17_FC")
+        if not bin_path or not fcs or not Path(bin_path).is_file():
+            self.skipTest("no tf17 dump: set FABLE2_TF17_BIN and FABLE2_TF17_FC after a discovery capture")
+        cpp = Path(bin_path + ".cpp.xy")
+        if not cpp.is_file():
+            self.skipTest("run tests/run_native_tests.cmd with the same variables first (writes " + str(cpp) + ")")
+        fc = [int(x, 16) for x in fcs.split(",")]
+        self.assertEqual(fc[1] & 0x3F, 49)
+        w, h, xy = tr.decode_dxn(Path(bin_path).read_bytes(), fc)
+        got = struct.unpack(f"<{2 * w * h}f", cpp.read_bytes())
+        self.assertEqual(len(xy), w * h)
+        worst = max(max(abs(p[0] - got[2 * i]), abs(p[1] - got[2 * i + 1])) for i, p in enumerate(xy))
+        self.assertLess(worst, 1e-6)       # the C++ decode works in single precision
 
     def test_short_dump_is_refused_with_the_sizes(self):
         # Linear 34 x 2 k_16, pitch 64: one row of 128 bytes and 34 texels of the second: 196 bytes.
@@ -395,6 +492,133 @@ class ShadeTest(unittest.TestCase):
             tr.blend_of("0x07060706")
 
 
+class SteepTest(unittest.TestCase):
+    """The steep-ground block, hand-computed. Detail colour tf0 = (0.8, 0.4, 0.2), so tf0^2 = (0.64, 0.16,
+    0.04). The side texture is 2 x 2, point sampled: row 1 holds P = (0.3, 0.6, 0.9) and Q = (0.5, 0.25,
+    1.0). At the world point (92, 148, height 20) with c8.x = 0.0625:
+      o0 = (c8.x * y, -c8.x * h) = (9.25, -1.25): texel (0, 1) = P   (the projection for faces along x)
+      o1 = (c8.x * x, -c8.x * h) = (5.75, -1.25): texel (1, 1) = Q   (for faces along y)
+    c45 = (-7.6619, 10.0019): s = sat(|n.z| * 10.0019 - 7.6619)."""
+    TF0 = (0.8, 0.4, 0.2, 1.0)
+    P = (0.3, 0.6, 0.9, 1.0)
+    Q = (0.5, 0.25, 1.0, 1.0)
+
+    def setUp(self):
+        self.inp = dict(tr.layer_inputs(LAYER_CONSTS, PCONST),
+                        **tr.steep_inputs(LAYER_CONSTS, STEEP_PC, STEEP_LIT_9C21, "0x9C2144E42E95A76F"))
+        self.side = tr.Tex(2, 2, [(0.0,) * 4, (0.0,) * 4, self.P, self.Q], linear=False)
+
+    def near(self, got, want, places=6):
+        self.assertEqual(len(got), len(want))
+        for g, w in zip(got, want):
+            self.assertAlmostEqual(g, w, places=places)
+
+    def test_steep_inputs(self):
+        for key, want in STEEP_WANT.items():
+            got = self.inp[key]
+            if isinstance(want, list):
+                self.near(got, want)
+            else:
+                self.assertAlmostEqual(got, want, places=9, msg=key)
+        # The literals are found by each shader's own register: 4524 keeps the threshold in c254.z.
+        other = tr.steep_inputs(LAYER_CONSTS, STEEP_PC, STEEP_LIT_4524, "0x45243B758F9272AB")
+        self.assertEqual(other["steep_threshold"], 0.99609375)
+        self.assertAlmostEqual(other["steep_eps"], 0.0001, places=9)
+        # Read with the other shader's register the threshold would be 2: refused, not used.
+        with self.assertRaisesRegex(tr.MissingInput, "threshold"):
+            tr.steep_inputs(LAYER_CONSTS, STEEP_PC, STEEP_LIT_9C21, "0x45243B758F9272AB")
+        with self.assertRaisesRegex(tr.MissingInput, "c45"):
+            tr.steep_inputs(LAYER_CONSTS, {}, STEEP_LIT_9C21, "0x9C2144E42E95A76F")
+        with self.assertRaisesRegex(tr.MissingInput, "ps_lit"):
+            tr.steep_inputs(LAYER_CONSTS, STEEP_PC, None, "0x9C2144E42E95A76F")
+        with self.assertRaisesRegex(tr.MissingInput, "no steep-ground block"):
+            tr.steep_inputs(LAYER_CONSTS, STEEP_PC, STEEP_LIT_9C21, "0x4755A2E4A05BA678")
+
+    def test_normal_from_the_map_texel(self):
+        self.near(tr.steep_normal(0.5, 0.5), (0.0, 0.0, 1.0))
+        self.near(tr.steep_normal(0.8, 0.2), (0.6, -0.6, math.sqrt(0.28)))
+        self.near(tr.steep_normal(1.0, 0.5), (1.0, 0.0, 0.0))
+        # x^2 + y^2 above 1 (the map's compression gives such texels): the root of the absolute value.
+        self.near(tr.steep_normal(1.0, 1.0), (1.0, 1.0, 1.0))
+
+    def test_slope(self):
+        self.assertEqual(tr.steep_slope(self.inp, 1.0), 1.0)                                    # flat
+        self.assertAlmostEqual(tr.steep_slope(self.inp, math.cos(math.radians(30))), 1.0, places=6)
+        self.assertAlmostEqual(tr.steep_slope(self.inp, math.cos(math.radians(35))), 0.5311767, places=6)
+        self.assertEqual(tr.steep_slope(self.inp, math.cos(math.radians(40))), 0.0)
+        self.assertEqual(tr.steep_slope(self.inp, 0.0), 0.0)                                    # vertical
+        self.assertAlmostEqual(tr.steep_slope(self.inp, -math.cos(math.radians(35))), 0.5311767, places=6)   # |n.z|
+
+    def test_weights_and_side_coordinates(self):
+        self.near(tr.steep_weights(self.inp, 1.0, 0.0), (1 / 1.0001, 0.0))
+        self.near(tr.steep_weights(self.inp, 0.0, -1.0), (0.0, 1 / 1.0001))
+        self.near(tr.steep_weights(self.inp, 0.6, -0.6), (0.6 / 1.2001, 0.6 / 1.2001))
+        self.near(tr.steep_weights(self.inp, 0.0, 0.0), (0.0, 0.0))                             # the small term
+        o0, o1 = tr.side_uvs(self.inp, 92.0, 148.0, 20.0)
+        self.assertEqual(o0, (9.25, -1.25))
+        self.assertEqual(o1, (5.75, -1.25))
+        self.assertEqual(self.side.sample(*o0), self.P)
+        self.assertEqual(self.side.sample(*o1), self.Q)
+
+    def test_mix_flat_35_degrees_and_vertical(self):
+        mix = lambda n: tr.steep_mix(self.inp, n, self.TF0, self.P, self.Q)
+        # Flat: s = 1, the block is skipped: tf0^2, shown as tf0.
+        self.near(mix((0.0, 0.0, 1.0)), (0.64, 0.16, 0.04))
+        # 35 degrees, facing x: s = 0.5311767, wx = 0.573576 / 0.573676 = 0.9998257, wy = 0:
+        # A = s * tf0^2 + (1 - s) * wx * P^2.
+        n35 = (math.sin(math.radians(35)), 0.0, math.cos(math.radians(35)))
+        self.near(mix(n35), (0.3821398, 0.2537352, 0.4009278))
+        self.near([math.sqrt(c) for c in mix(n35)], (0.6181746, 0.5037214, 0.6331886))
+        # Vertical, facing x: s = 0: P^2 / 1.0001. Facing y (either way): Q^2 / 1.0001.
+        self.near(mix((1.0, 0.0, 0.0)), (0.0899910, 0.3599640, 0.8099190))
+        self.near(mix((0.0, -1.0, 0.0)), (0.2499750, 0.0624938, 0.9999000))
+        self.near([math.sqrt(c) for c in mix((0.0, 1.0, 0.0))], (0.4999750, 0.2499875, 0.9999500))
+        # Between the two: equal weights 0.6 / 1.2001 of P^2 and Q^2 (s = 0 at n.z = 0.529).
+        self.near(mix((0.6, -0.6, math.sqrt(0.28))),
+                  [0.6 / 1.2001 * (p * p + q * q) for p, q in zip(self.P[:3], self.Q[:3])])
+
+    def test_the_block_is_skipped_from_the_threshold_on(self):
+        mix = lambda nz: tr.steep_mix(self.inp, (math.sqrt(1 - nz * nz), 0.0, nz), self.TF0, self.P, self.Q)
+        at = lambda s: (s + 7.66190386) / 10.0019045          # the n.z that gives the slope value s
+        self.assertEqual(mix(at(0.99609375 + 1e-9)), (0.8 * 0.8, 0.4 * 0.4, 0.2 * 0.2))
+        # Just below it the side colour enters with (1 - s): continuous, no step at the threshold.
+        below = mix(at(0.996))
+        self.assertNotEqual(below, (0.8 * 0.8, 0.4 * 0.4, 0.2 * 0.2))
+        self.near(below, (0.64, 0.16, 0.04), places=2)
+        s, nx = 0.996, math.sqrt(1 - at(0.996) ** 2)
+        self.assertAlmostEqual(below[2], s * 0.04 + (1 - s) * nx / (nx + 0.0001) * 0.81, places=7)
+        # At the threshold itself the block is skipped (the game jumps when not threshold > s): with
+        # the slope constants (0, 1), s is |n.z| exactly.
+        edge = dict(self.inp, slope=[0.0, 1.0])
+        self.assertEqual(tr.steep_mix(edge, (0.0, 0.0, 0.99609375), self.TF0, self.P, self.Q), (0.8 * 0.8, 0.4 * 0.4, 0.2 * 0.2))
+        self.assertNotEqual(tr.steep_mix(edge, (0.0, 1.0, 0.996), self.TF0, self.P, self.Q)[2], 0.2 * 0.2)
+
+    def test_layer_colour_with_and_without_the_block(self):
+        layer = tr.Layer(self.inp, solid(self.TF0), None, solid((1.0,) * 4), tr.BLEND_REPLACE, side=self.side)
+        plain = tr.Layer(self.inp, solid(self.TF0), None, solid((1.0,) * 4), tr.BLEND_REPLACE)
+        steep = ((1.0, 0.0, 0.0), 20.0)       # the normal and the height of the pixel
+        self.near(tr.layer_colour(layer, 92.0, 148.0, base=False, steep=steep), (0.0899910, 0.3599640, 0.8099190))
+        # y picks the texel of o0 only: at y = 156 its u is 9.75, texel (1, 1) = Q.
+        self.near(tr.layer_colour(layer, 92.0, 156.0, base=False, steep=steep), [q * q / 1.0001 for q in self.Q[:3]])
+        # The height moves both: at height 28 v is -1.75, row 0 of the side texture (black).
+        self.near(tr.layer_colour(layer, 92.0, 148.0, base=False, steep=((1.0, 0.0, 0.0), 28.0)), (0.0, 0.0, 0.0))
+        # A layer without a side texture (the shaders paired with FB68), or a replay without the block.
+        self.near(tr.layer_colour(plain, 92.0, 148.0, base=False, steep=steep), (0.64, 0.16, 0.04))
+        self.near(tr.layer_colour(layer, 92.0, 148.0, base=False), (0.64, 0.16, 0.04))
+        rgb, _ = tr.shade_point([layer], 92.0, 148.0, None, fade_on=False, base=False, steep=steep)
+        self.near(rgb, (0.0899910, 0.3599640, 0.8099190))
+
+    def test_grid_interpolation_follows_the_pass_triangles(self):
+        # Corner values a (0, 0), b (1, 0), c (1, 1), d (0, 1); the grid's quads are cut from a to c.
+        a, b, c, d = (0.0,), (1.0,), (5.0,), (2.0,)
+        self.assertEqual(tr.grid_interp(a, b, c, d, 0.0, 0.0), (0.0,))
+        self.assertEqual(tr.grid_interp(a, b, c, d, 1.0, 1.0), (5.0,))
+        self.assertEqual(tr.grid_interp(a, b, c, d, 0.5, 0.5), (2.5,))            # on the diagonal: (a + c) / 2
+        self.assertEqual(tr.grid_interp(a, b, c, d, 0.75, 0.25), (1.75,))         # triangle a b c: 0.75 * 1 + 0.25 * 4
+        self.assertEqual(tr.grid_interp(a, b, c, d, 0.25, 0.75), (2.25,))         # triangle a c d: 0.25 * 3 + 0.75 * 2
+        # (bilinear would give 1.6875 and 1.9375)
+
+
 def png_size_and_pixels(path):
     raw = Path(path).read_bytes()
     w, h = struct.unpack(">II", raw[16:24])
@@ -421,7 +645,13 @@ class LegendTest(unittest.TestCase):
 class CaptureTest(unittest.TestCase):
     """The tool on a capture: tess rows, texture rows and dump files as discovery writes them."""
 
-    def _capture(self, root, pconst=True, with_tf0=True, height_bytes=None, detail_format=6, other_sampler=False):
+    def _capture(self, root, pconst=True, with_tf0=True, height_bytes=None, detail_format=6, other_sampler=False,
+                 steep=None):
+        """Two layer draws of one square. Without `steep` they have the shader pair without the
+        steep-ground block (FB68 with 4755). With steep = (x, y) (byte values of every texel of a 4 x 4
+        normal map) they have C30A with 9C21 and what the block reads: tf13 (the side texture), tf17
+        (the normal map), pixel constant c45 and the shader's literals. steep = "rows": a 16 x 16
+        normal map whose texel rows 1, 5, 9 and 13 are (230, 128) and whose other rows are (128, 128)."""
         tex = root / "native_tex_x"
         tex.mkdir()
         files = {}
@@ -439,10 +669,21 @@ class CaptureTest(unittest.TestCase):
         hdata = dump_k16(4, 4, lambda x, y: 13107)
         hgt = add("h.bin", hdata if height_bytes is None else hdata[:height_bytes],
                   fc_for(24, 4, 4, linear=False, clamp=2, base=0x1A500000))
-        if detail_format != 6:   # a texture row of a format the tool does not decode, under detail B
-            b = add("dxn.bin", bytes(64), fc_for(detail_format, 4, 4, base=0x1A600000))
+        if detail_format != 6:   # a texture row of another format under detail B
+            b = add("other.bin", bytes(64), fc_for(detail_format, 4, 4, base=0x1A600000))
         if other_sampler:        # the tess rows name detail A with other clamp and filter bits than its dump row
             a = [f"0x{x:08X}" for x in fc_for(6, 2, 2, endian=2, base=0x1A100000, clamp=2, linear=False)]
+        side = nrm = None
+        if steep is not None:
+            # Side texture 4 x 2, point sampled: row 1 is black, black, P = (77, 153, 230), Q = (128, 64, 255).
+            texels = ((0, 0, 0, 255), (0, 0, 0, 255), (77, 153, 230, 255), (128, 64, 255, 255))
+            side = add("side.bin", dump_8888(4, 2, lambda x, y: texels[x] if y else (0, 0, 0, 255)),
+                       fc_for(6, 4, 2, endian=2, linear=False, base=0x1A700000))
+            if steep == "rows":   # x: end values 230 and 128, the texels of a block's row 1 with index 0
+                block = bc4_block(230, 128, lambda i: 0 if i // 4 == 1 else 1) + flat_dxn(128, 128)[8:]
+                nrm = add("n.bin", dump_dxn(16, 16, lambda bx, by: block), fc_for(49, 16, 16, linear=False, clamp=2, base=0x1A800000))
+            else:
+                nrm = add("n.bin", dump_dxn(4, 4, lambda bx, by: flat_dxn(*steep)), fc_for(49, 4, 4, linear=False, clamp=2, base=0x1A800000))
         rows = [{"kind": "frame", "frame": 1}]
         for name, fc in files.items():
             rows.append({"kind": "texture", "file": f"native_tex_x/{name}", "bytes": 1, "fc": [f"0x{x:08X}" for x in fc]})
@@ -451,13 +692,17 @@ class CaptureTest(unittest.TestCase):
             r = {"kind": "tess", "frame": 1, "func": "DrawIndx:8221C9C8",
                  "args": ["0x00000012", "0x00000003", "0x00000001", "0x00000000"], "in_scene": True,
                  "rs": {"2201": blend, "bin_mask_lo": "0x0003000A"},
-                 "vs": {"hash": "0xC30A97D946FA2BE4"}, "ps_hash": "0x9C2144E42E95A76F",
+                 "vs": {"hash": "0xFB68A7F2301210E1"}, "ps_hash": "0x4755A2E4A05BA678",
                  "consts": dict(consts, c0=[0.01, 0, 0, -1], c1=[0, 0.01, 0, -1.5], c2=[0, 0, 1, 0], c3=[0, 0, 0, 1]),
                  "tf": {"3": base, "16": hgt, "18": wgt}}
             if with_tf0:
                 r["tf"]["0"] = detail
             if pconst:
                 r["pconst"] = PCONST
+            if steep is not None:
+                r["vs"], r["ps_hash"] = {"hash": "0xC30A97D946FA2BE4"}, "0x9C2144E42E95A76F"
+                r["tf"].update({"13": side, "17": nrm})
+                r["pc"], r["ps_lit"] = STEEP_PC, STEEP_LIT_9C21
             return r
 
         base_consts = dict(LAYER_CONSTS, c114=[-1.0, 0, 0, 0],
@@ -542,7 +787,7 @@ class CaptureTest(unittest.TestCase):
             text = chr(10).join(lines)
             self.assertRegex(text, r"tf16 0x1A500058 format 24 4 x 4: SHORT, 100 of 200 bytes")
             self.assertRegex(text, r"tf18 0x1A40007A format 58 66 x 33: NO DUMP FILE")
-            # k_DXN is not decoded here but its size is known: 4 x 4 is one 16-byte block; the file has 64.
+            # k_DXN: 4 x 4 is one 16-byte block; the file has 64.
             self.assertRegex(text, r"tf0 0x1A600071 format 49 4 x 4: ok, 64 bytes \(needs 16\)")
             self.assertIn("2 of 5 textures short, missing or of unknown size", lines[-1])
 
@@ -617,9 +862,9 @@ class CaptureTest(unittest.TestCase):
     def test_unsupported_format_is_refused_by_name_and_exit_code(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
-            cap = self._capture(root, detail_format=49)
+            cap = self._capture(root, detail_format=2)
             argv = [str(cap), "--frame", "1", "--patch", "0", "--out", str(root / "p.png"), "--no-fade"]
-            with self.assertRaisesRegex(tr.MissingInput, r"tf0 \(detail colour\).*format 49"):
+            with self.assertRaisesRegex(tr.MissingInput, r"tf0 \(detail colour\).*format 2"):
                 tr.main(argv)
             err = io.StringIO()
             with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
@@ -667,6 +912,156 @@ class CaptureTest(unittest.TestCase):
         # The draw's six patches are 3..8 of the block: (120, 144) is patch 3, (96, 144) is patch 0, not drawn.
         self.assertIsNotNone(tr.underlay_of([colour], (120.0, 144.0, 8.0, 8.0)))
         self.assertIsNone(tr.underlay_of([colour], (96.0, 144.0, 8.0, 8.0)))
+
+    def _steep_pixel(self, nxy, wx, wy, h):
+        """The first layer's linear colour at a world point, by the formulas of the frame map (not by the
+        tool's functions): normal from the map's byte pair, c45 and the literals of STEEP_*."""
+        n = [2 * v / 255 - 1 for v in nxy]
+        nz = math.sqrt(abs(1 - n[0] ** 2 - n[1] ** 2))
+        s = min(max(nz * 10.0019045 - 7.66190386, 0.0), 1.0)
+        a2 = [(c / 255) ** 2 for c in (204, 102, 51)]
+        if s >= 0.99609375:
+            return a2
+        den = abs(n[0]) + abs(n[1]) + 9.99999975e-05
+        side = lambda u: [(c / 255) ** 2 for c in ((0, 0, 0), (0, 0, 0), (77, 153, 230), (128, 64, 255))[math.floor((u % 1.0) * 4)]]
+        self.assertGreaterEqual((-0.0625 * h) % 1.0, 0.5)        # row 1 of the side texture
+        p0, p1 = side(0.0625 * wy), side(0.0625 * wx)
+        return [s * a2[k] + (1 - s) * (abs(n[1]) / den * p1[k] + abs(n[0]) / den * p0[k]) for k in range(3)]
+
+    def test_replay_evaluates_the_steep_block(self):
+        # The square is (88, 152) 8 x 8, the height 18 everywhere (-c8.x * h = -1.125: row 1 of the side
+        # texture). Pixel (i, j) of a 16 x 16 picture is the world point (88.25 + i / 2, 152.25 + j / 2):
+        # o0's u = y / 16 is on texel 2 (P) for j < 8 and on texel 3 (Q) from j = 8; o1's u = x / 16 the
+        # same by i. Normal map texels (230, 128): n = (0.804, 0.004, 0.595): s = 0, nearly all weight
+        # on o0 (wx = 0.995, wy = 0.005).
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root, steep=(230, 128))
+            out = root / "patch.png"
+            argv = [str(cap), "--frame", "1", "--patch", "0", "--out", str(out), "--res", "16", "--no-fade",
+                    "--no-base", "--encode", "linear"]
+            lines = tr.main(argv)
+            self.assertTrue(any("2 of them with the tf13 blend on steep ground, evaluated" in line for line in lines), lines)
+            _, _, rows = png_size_and_pixels(out)
+            a2 = [(c / 255) ** 2 for c in (204, 102, 51)]
+            b2 = [(c / 255) ** 2 for c in (128, 128, 255)]
+            seen = set()
+            for i, j in ((0, 8), (15, 8), (6, 2), (9, 13), (3, 0), (12, 5)):
+                wx, wy = 88.25 + i / 2, 152.25 + j / 2
+                first = self._steep_pixel((230, 128), wx, wy, 18.0)
+                # The second layer (weight texels 16 + i and 17 + i: (8.5 + i) / 14, 1 from column 6 on)
+                # has the block too, with its own detail colour B: s is 0, so both are the side colour.
+                self.assertEqual(self._steep_pixel((230, 128), wx, wy, 18.0), first)
+                w2 = min(1.0, (8.5 + i) / 14)
+                want = [round(255 * min(1.0, first[k] * (1 + w2))) for k in range(3)]
+                self.assertEqual(list(rows[j][i * 4:i * 4 + 3]), want, (i, j))
+                seen.add(tuple(want))
+            self.assertGreater(len(seen), 3)
+            # o0 depends on y: rows 2 and 13 of column 0 fall on different texels of the side texture.
+            self.assertNotEqual(rows[2][0:3], rows[13][0:3])
+            # --no-steep: the old output, every pixel the detail colours alone.
+            lines = tr.main(argv + ["--no-steep"])
+            self.assertTrue(any("2 of them with the tf13 blend on steep ground, not evaluated" in line for line in lines), lines)
+            _, _, rows = png_size_and_pixels(out)
+            self.assertEqual(list(rows[8][0:3]), [round(255 * min(1.0, a2[k] + b2[k] * 8.5 / 14)) for k in range(3)])
+            self.assertEqual(rows[2][0:3], rows[13][0:3])
+
+    def test_replay_mixes_detail_and_side_colour_on_a_35_degree_slope(self):
+        # Texels (201, 128): n = (0.5765, 0.0039, 0.8171): s = sat(8.1724 - 7.6619) = 0.5105.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root, steep=(201, 128))
+            out = root / "patch.png"
+            tr.main([str(cap), "--frame", "1", "--patch", "0", "--out", str(out), "--res", "16", "--no-fade",
+                     "--no-base", "--encode", "linear"])
+            _, _, rows = png_size_and_pixels(out)
+            n = [2 * 201 / 255 - 1, 2 * 128 / 255 - 1]
+            s = math.sqrt(1 - n[0] ** 2 - n[1] ** 2) * 10.0019045 - 7.66190386
+            self.assertAlmostEqual(s, 0.5105, places=3)
+            a2 = [(c / 255) ** 2 for c in (204, 102, 51)]
+            b2 = [(c / 255) ** 2 for c in (128, 128, 255)]
+            for i, j in ((0, 8), (15, 3)):
+                wx, wy = 88.25 + i / 2, 152.25 + j / 2
+                first = self._steep_pixel((201, 128), wx, wy, 18.0)
+                second = [f + s * (b - a) for f, a, b in zip(first, a2, b2)]      # the same side part, detail B
+                w2 = min(1.0, (8.5 + i) / 14)
+                want = [round(255 * min(1.0, first[k] + w2 * second[k])) for k in range(3)]
+                self.assertEqual(list(rows[j][i * 4:i * 4 + 3]), want, (i, j))
+
+    def test_flat_ground_is_the_same_with_and_without_the_block(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root, steep=(128, 128))     # n = (0.004, 0.004, 1): s = 1, the block is skipped
+            a, b = root / "a.png", root / "b.png"
+            argv = [str(cap), "--frame", "1", "--patch", "0", "--res", "16", "--encode", "linear"]
+            tr.main(argv + ["--out", str(a)])
+            tr.main(argv + ["--out", str(b), "--no-steep"])
+            self.assertEqual(png_size_and_pixels(a), png_size_and_pixels(b))
+
+    def test_steep_replay_names_what_a_capture_lacks(self):
+        def drop(key, sub=None):
+            def edit(rows):
+                for r in rows:
+                    if r.get("kind") == "tess":
+                        (r[key].pop(sub) if sub else r.pop(key))
+            return edit
+
+        for edit, text in ((drop("tf", "13"), r"tf13 \(side colour\)"), (drop("tf", "17"), r"tf17 \(normal map\)"),
+                           (drop("pc"), "c45"), (drop("ps_lit"), "ps_lit")):
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                cap = self._capture(root, steep=(230, 128))
+                self._edit_rows(cap, edit)
+                argv = [str(cap), "--frame", "1", "--patch", "0", "--out", str(root / "p.png"), "--no-fade"]
+                with self.assertRaisesRegex(tr.MissingInput, text + r".*--no-steep"):
+                    tr.main(argv)
+                tr.main(argv + ["--no-steep"])      # the old replay does not need it
+        # The block needs the height even without the fade: a cut heightmap is refused, not read as zero.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root, steep=(230, 128), height_bytes=100)
+            argv = [str(cap), "--frame", "1", "--patch", "0", "--out", str(root / "p.png"), "--no-fade"]
+            with self.assertRaisesRegex(tr.MissingInput, r"heightmap.*has 100 bytes"):
+                tr.main(argv)
+            tr.main(argv + ["--no-steep"])
+
+    def test_check_dumps_counts_the_block_textures_of_steep_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root, pconst=False, steep=(230, 128))
+            (root / "native_tex_x" / "n.bin").write_bytes(bytes(8))
+            lines = tr.main([str(cap), "--frame", "1", "--check-dumps"])
+            text = chr(10).join(lines)
+            self.assertRegex(text, r"tf17 0x1A800071 format 49 4 x 4: SHORT, 8 of 16 bytes")
+            self.assertRegex(text, r"tf13 0x1A700086 format 6 4 x 2: ok")
+            self.assertEqual(lines[-1], "1 of 7 textures short, missing or of unknown size")
+
+    def test_steep_share(self):
+        # Every texel of the synthetic normal map is the same, so all 289 grid points of the square agree.
+        # (201, 128): n = (0.576, 0.004, 0.817): s = 0.51. (230, 128): n.z = 0.595: s = 0.
+        for texel, below, zero in (((128, 128), 0, 0), ((230, 128), 289, 289), ((201, 128), 289, 0)):
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                cap = self._capture(root, pconst=False, steep=texel)
+                lines = tr.main([str(cap), "--frame", "1", "--steep-share"])
+                text = " ".join(lines)
+                self.assertIn("1 of 1 squares have a layer with the steep-ground block", text)
+                self.assertIn(f"s below 0.99609375 at {below} of 289 grid points", text)
+                self.assertIn(f"s = 0 at {zero} ", text)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root, pconst=False)          # no shader of the frame has the block
+            with self.assertRaisesRegex(tr.MissingInput, "steep-ground block"):
+                tr.main([str(cap), "--frame", "1", "--steep-share"])
+        # The normal is read at the height coordinate, (world - c47.zw) * c47.xy: the square's grid points
+        # (x 88 to 96, y 152 to 160, offset (16, 32), scale 1 / 384) all fall on texel (3, 5) of a 16 x 16
+        # map, in a steep row; at the unshifted position they would fall on row 6, which is flat.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cap = self._capture(root, pconst=False, steep="rows")
+            text = " ".join(tr.main([str(cap), "--frame", "1", "--steep-share"]))
+            self.assertIn("s below 0.99609375 at 289 of 289 grid points", text)
+            self.assertIn("s = 0 at 289 ", text)
 
     def test_replay_names_what_an_old_capture_lacks(self):
         with tempfile.TemporaryDirectory() as d:

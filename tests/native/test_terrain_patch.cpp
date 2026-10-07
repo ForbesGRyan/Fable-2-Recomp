@@ -357,6 +357,248 @@ int main() {
     bad = in;
     if (MakeTerrainMaterialInputs(flat, false, vs, ps, f, &bad) || bad.valid) return 128;
 
+    // --- The steep-ground block of the layer shaders paired with C30A (STEEP_PC, STEEP_WANT and SteepTest of
+    // the Python test: the same constants, the same numbers) ---
+    {
+      // tf13 of a layer draw at the bridge (the layer's side texture) and tf17 of the layer vertex shaders
+      // (the normal map, 769 x 769 k_DXN, tiled, point sampled), as captured.
+      static const uint32_t kSide[6] = {0x88000002, 0x170A0052, 0x007FE3FF, 0x00A80D10, 0x00000283, 0x17120A18};
+      static const uint32_t kTf17[6] = {0x87004802, 0x1B8AA071, 0x00600300, 0x01000D10, 0x00000000, 0x00000218};
+      set(ps, 45, -7.66190386f, 10.0019045f, 0, 0);
+      const TerrainSteepSpec spec{13, 0.99609375f, 0.0001f};
+      TerrainFetches sf = f;
+      sf.side = kSide;
+      sf.normal = kTf17;
+      TerrainMaterialInputs sm;
+      if (!MakeTerrainMaterialInputs(tp, false, vs, ps, sf, &sm, &spec) || !sm.valid || !sm.steep) return 181;
+      if (std::memcmp(sm.side_fetch, kSide, 24) || std::memcmp(sm.normal_fetch, kTf17, 24)) return 182;
+      if (sm.side_uv[0] != 0.0625f || sm.side_uv[1] != -0.0625f || sm.slope[0] != -7.66190386f ||
+          sm.slope[1] != 10.0019045f || sm.steep_threshold != 0.99609375f || sm.steep_eps != 0.0001f) return 183;
+      // The rest of the inputs is what it is without the block.
+      if (std::memcmp(sm.detail_fetch, in.detail_fetch, 24) || sm.detail_uv[0] != in.detail_uv[0] ||
+          sm.weight_uv[2] != in.weight_uv[2] || sm.hole_ref != in.hole_ref || sm.fade[1] != in.fade[1]) return 184;
+      // A shader without the block: nothing of it is read or kept, whatever the fetches hold.
+      TerrainMaterialInputs plain;
+      if (!MakeTerrainMaterialInputs(tp, false, vs, ps, sf, &plain) || !plain.valid || plain.steep ||
+          plain.side_fetch[0] != 0 || plain.normal_fetch[0] != 0 || plain.side_uv[0] != 0.0f ||
+          plain.slope[1] != 0.0f || plain.steep_threshold != 0.0f) return 185;
+
+      // The vertex shader's normal from the map's two values: * 2 - 1, z = sqrt(|1 - (x^2 + y^2)|).
+      float n[3];
+      TerrainNormalFromTexel(0.5f, 0.5f, n);
+      if (n[0] != 0.0f || n[1] != 0.0f || n[2] != 1.0f) return 186;
+      TerrainNormalFromTexel(0.8f, 0.2f, n);
+      if (!Near(n[0], 0.6f, 1e-6f) || !Near(n[1], -0.6f, 1e-6f) || !Near(n[2], std::sqrt(0.28f), 1e-6f)) return 187;
+      TerrainNormalFromTexel(1.0f, 0.5f, n);
+      if (n[0] != 1.0f || n[1] != 0.0f || n[2] != 0.0f) return 188;
+      TerrainNormalFromTexel(1.0f, 1.0f, n);  // x^2 + y^2 above 1: the root of the absolute value
+      if (n[0] != 1.0f || n[1] != 1.0f || n[2] != 1.0f) return 189;
+
+      // s = sat(|n.z| * c45.y + c45.x): 1 up to 30 degrees, 0.5311767 at 35, 0 from 40.
+      const float deg = 3.14159265f / 180.0f;
+      if (TerrainSteepSlope(sm, 1.0f) != 1.0f || !Near(TerrainSteepSlope(sm, std::cos(30 * deg)), 1.0f, 1e-5f)) return 190;
+      if (!Near(TerrainSteepSlope(sm, std::cos(35 * deg)), 0.5311767f, 1e-5f)) return 191;
+      if (!Near(TerrainSteepSlope(sm, std::cos(40 * deg)), 0.0f, 1e-5f) || TerrainSteepSlope(sm, 0.0f) != 0.0f) return 192;
+      if (!Near(TerrainSteepSlope(sm, -std::cos(35 * deg)), 0.5311767f, 1e-5f)) return 193;  // |n.z|
+
+      // wx, wy = |n.x|, |n.y| / (|n.x| + |n.y| + 0.0001).
+      float w[2];
+      TerrainSteepWeights(sm, 1.0f, 0.0f, w);
+      if (!Near(w[0], 1.0f / 1.0001f, 1e-6f) || w[1] != 0.0f) return 194;
+      TerrainSteepWeights(sm, 0.0f, -1.0f, w);
+      if (w[0] != 0.0f || !Near(w[1], 1.0f / 1.0001f, 1e-6f)) return 195;
+      TerrainSteepWeights(sm, 0.6f, -0.6f, w);
+      if (!Near(w[0], 0.6f / 1.2001f, 1e-6f) || !Near(w[1], 0.6f / 1.2001f, 1e-6f)) return 196;
+      TerrainSteepWeights(sm, 0.0f, 0.0f, w);  // the small term: no division by zero on flat ground
+      if (w[0] != 0.0f || w[1] != 0.0f) return 197;
+
+      // o0 = (c8.x * y, -c8.x * height), o1 = (c8.x * x, -c8.x * height).
+      float o0[2], o1[2];
+      TerrainSideUvs(sm, 92.0f, 148.0f, 20.0f, o0, o1);
+      if (o0[0] != 9.25f || o0[1] != -1.25f || o1[0] != 5.75f || o1[1] != -1.25f) return 198;
+
+      // A = s * tf0^2 + (1 - s) * (wy * tf13(o1)^2 + wx * tf13(o0)^2); tf0 = (0.8, 0.4, 0.2),
+      // tf13(o0) = P = (0.3, 0.6, 0.9), tf13(o1) = Q = (0.5, 0.25, 1.0).
+      const float tf0[3] = {0.8f, 0.4f, 0.2f}, P[3] = {0.3f, 0.6f, 0.9f}, Q[3] = {0.5f, 0.25f, 1.0f};
+      auto mix_is = [&](float nx, float ny, float nz, float r, float g, float b, float eps) {
+        const float nn[3] = {nx, ny, nz};
+        float a[3];
+        TerrainSteepMix(sm, nn, tf0, P, Q, a);
+        return Near(a[0], r, eps) && Near(a[1], g, eps) && Near(a[2], b, eps);
+      };
+      if (!mix_is(0.0f, 0.0f, 1.0f, 0.64f, 0.16f, 0.04f, 1e-7f)) return 199;                    // flat: tf0^2
+      if (!mix_is(std::sin(35 * deg), 0.0f, std::cos(35 * deg), 0.3821398f, 0.2537352f, 0.4009278f, 2e-5f)) return 200;
+      if (!mix_is(1.0f, 0.0f, 0.0f, 0.0899910f, 0.3599640f, 0.8099190f, 1e-6f)) return 201;   // vertical, facing x: P^2
+      if (!mix_is(0.0f, -1.0f, 0.0f, 0.2499750f, 0.0624938f, 0.9999000f, 1e-6f)) return 202;  // facing y: Q^2
+      if (!mix_is(0.0f, 1.0f, 0.0f, 0.2499750f, 0.0624938f, 0.9999000f, 1e-6f)) return 203;
+      {
+        const float k = 0.6f / 1.2001f;  // between the two: equal weights (s = 0 at n.z = 0.529)
+        if (!mix_is(0.6f, -0.6f, std::sqrt(0.28f), k * (0.09f + 0.25f), k * (0.36f + 0.0625f), k * (0.81f + 1.0f), 1e-6f)) return 204;
+      }
+      // The block is skipped from the threshold on (the game jumps when not threshold > s) and enters
+      // continuously below it: at s = 0.996 the side colour has the weight 0.004.
+      {
+        TerrainMaterialInputs edge = sm;
+        edge.slope[0] = 0.0f;
+        edge.slope[1] = 1.0f;  // s = |n.z|
+        const float at[3] = {0.0f, 0.0f, 0.99609375f};
+        float a[3];
+        TerrainSteepMix(edge, at, tf0, P, Q, a);
+        if (a[0] != 0.8f * 0.8f || a[1] != 0.4f * 0.4f || a[2] != 0.2f * 0.2f) return 205;
+        const float side[3] = {0.0f, 1.0f, 0.996f};   // facing y: Q with the weight 1 / 1.0001
+        TerrainSteepMix(edge, side, tf0, P, Q, a);
+        if (!Near(a[2], 0.996f * 0.04f + 0.004f * (1.0f / 1.0001f), 1e-6f) || a[2] == 0.04f) return 206;
+      }
+
+      // A record whose shader has the block but whose inputs cannot be read is invalid as a whole.
+      TerrainMaterialInputs gone = sm;
+      TerrainFetches sg = sf;
+      sg.side = nullptr;
+      if (MakeTerrainMaterialInputs(tp, false, vs, ps, sg, &gone, &spec) || gone.valid || gone.steep) return 207;
+      sg = sf;
+      sg.normal = nullptr;
+      gone = sm;
+      if (MakeTerrainMaterialInputs(tp, false, vs, ps, sg, &gone, &spec) || gone.valid) return 208;
+      uint32_t not_texture13[6];
+      std::memcpy(not_texture13, kSide, sizeof(not_texture13));
+      not_texture13[0] &= ~3u;
+      sg = sf;
+      sg.side = not_texture13;
+      gone = sm;
+      if (MakeTerrainMaterialInputs(tp, false, vs, ps, sg, &gone, &spec) || gone.valid) return 209;
+      volatile float not_finite = NAN;  // volatile: no constant folding
+      for (int at : {45 * 4, 45 * 4 + 1}) {
+        const float keep = ps[at];
+        ps[at] = not_finite;
+        gone = sm;
+        if (MakeTerrainMaterialInputs(tp, false, vs, ps, sf, &gone, &spec) || gone.valid) return 210;
+        ps[at] = keep;
+      }
+      {
+        const float keep = vs[8 * 4];
+        vs[8 * 4] = not_finite;  // vs c8.x, the side scale (c8.y, the detail scale, is read either way)
+        gone = sm;
+        if (MakeTerrainMaterialInputs(tp, false, vs, ps, sf, &gone, &spec) || gone.valid) return 211;
+        // Without the block c8.x is not read.
+        if (!MakeTerrainMaterialInputs(tp, false, vs, ps, sf, &gone) || !gone.valid) return 212;
+        vs[8 * 4] = keep;
+      }
+      // Literals that cannot be the block's (the table is checked when it is generated; this is the
+      // last line): a threshold outside (0, 1], a small term that is not positive, either not finite.
+      for (const TerrainSteepSpec& bad_spec :
+           {TerrainSteepSpec{13, 0.0f, 0.0001f}, TerrainSteepSpec{13, 1.5f, 0.0001f}, TerrainSteepSpec{13, 0.99609375f, 0.0f},
+            TerrainSteepSpec{13, float(not_finite), 0.0001f}, TerrainSteepSpec{13, 0.99609375f, float(not_finite)}}) {
+        gone = sm;
+        if (MakeTerrainMaterialInputs(tp, false, vs, ps, sf, &gone, &bad_spec) || gone.valid) return 213;
+      }
+      if (!MakeTerrainMaterialInputs(tp, false, vs, ps, sf, &gone, &spec) || !gone.valid || !gone.steep) return 214;
+
+      // --- The normal map and the normals of the grid points ---
+      NormalMap nm;
+      if (!DecodeNormalMap(kTf17, &nm)) return 215;
+      if (nm.phys_addr != 0x1B8AA000 || nm.width != 769 || nm.height != 769 || nm.pitch_blocks != 224 || !nm.tiled ||
+          nm.endian != 1 || nm.clamp_x != 2 || nm.clamp_y != 2 || nm.size != 786432u + 0x4000u) return 216;
+      uint32_t nfc[6];
+      std::memcpy(nfc, kTf17, sizeof(nfc));
+      nfc[1] = (nfc[1] & ~0x3Fu) | 24;  // k_16: not a normal map
+      if (DecodeNormalMap(nfc, &nm)) return 217;
+      std::memcpy(nfc, kTf17, sizeof(nfc));
+      nfc[3] |= 1u << 19;  // linear mag filter: the vertex shader's fetch is a point sample
+      if (DecodeNormalMap(nfc, &nm)) return 218;
+      std::memcpy(nfc, kTf17, sizeof(nfc));
+      nfc[0] |= 1u << 4;  // signed y
+      if (DecodeNormalMap(nfc, &nm)) return 219;
+      std::memcpy(nfc, kTf17, sizeof(nfc));
+      nfc[3] = (nfc[3] & ~(7u << 4)) | (0u << 4);  // y read from channel 0
+      if (DecodeNormalMap(nfc, &nm)) return 220;
+      std::memcpy(nfc, kTf17, sizeof(nfc));
+      nfc[0] &= ~3u;
+      if (DecodeNormalMap(nfc, &nm)) return 221;
+      std::memcpy(nfc, kTf17, sizeof(nfc));
+      nfc[5] = (nfc[5] & ~(3u << 9)) | (2u << 9);  // 3D
+      if (DecodeNormalMap(nfc, &nm)) return 222;
+
+      // A small map: 96 x 96, linear (rows of 32 blocks of 16 bytes), 8in16, clamped. x of every block
+      // is the decode tests' block: end values 200 > 60, texel i of the block with index i % 8 (values
+      // 200 60 180 160 140 120 100 80), which tells the texels of a block apart; y is one value per
+      // block, 8 * bx + by, which tells the blocks apart.
+      static const uint32_t kSmallN[6] = {0x00C04802, 0x1A200071, 0x000BE05F, 0x00000D10, 0x00000000, 0x00000200};
+      if (!DecodeNormalMap(kSmallN, &nm) || nm.tiled || nm.width != 96 || nm.height != 96 || nm.pitch_blocks != 24 ||
+          nm.size != 23u * 512u + 24u * 16u) return 223;
+      std::vector<uint8_t> nd(nm.size, 0);
+      {
+        uint8_t post[16] = {200, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        uint64_t bits = 0;
+        for (uint32_t i = 0; i < 16; ++i) bits |= uint64_t(i % 8) << (3 * i);
+        for (int b = 0; b < 6; ++b) post[2 + b] = uint8_t(bits >> (8 * b));
+        for (uint32_t by = 0; by < 24; ++by) {
+          for (uint32_t bx = 0; bx < 24; ++bx) {
+            post[8] = post[9] = uint8_t(8 * bx + by);  // both end values: every index is the value
+            uint8_t* d = nd.data() + by * 512 + bx * 16;
+            for (int k = 0; k < 16; k += 2) {  // 8in16
+              d[k] = post[k + 1];
+              d[k + 1] = post[k];
+            }
+          }
+        }
+      }
+      float xy[2];
+      // The patch's corner (88, 152) has the height coordinate ((88 - 16) / 384, (152 - 32) / 384):
+      // texel (18, 30) of the map, texel 2 * 4 + 2 of block (4, 7): index 2: x 180; y 8 * 4 + 7 = 39.
+      if (!SampleNormal(nd.data(), nd.size(), nm, 72.0f / 384, 120.0f / 384, xy) || !Near(xy[0], 180.0f / 255, 1e-6f) ||
+          !Near(xy[1], 39.0f / 255, 1e-6f)) return 224;
+      // Past the edge the map clamps (its fetch constant's mode): texel (95, 95), index 7 of block (23, 23).
+      if (!SampleNormal(nd.data(), nd.size(), nm, 3.0f, 3.0f, xy) || !Near(xy[0], 80.0f / 255, 1e-6f) ||
+          !Near(xy[1], 207.0f / 255, 1e-6f)) return 225;
+      TerrainPatch sp = tp;
+      sp.material = sm;
+      std::vector<Float2> normals;
+      if (!BuildTerrainNormals(sp, nm, nd.data(), nd.size(), kTerrainGrid, &normals) || normals.size() != 17 * 17) return 226;
+      // Grid point (i, j) is 4 texels of this map per 8 grid steps: texel (18 + i / 8, 30 + j / 8). The
+      // buffer holds the vertex shader's (n.x, n.y) = value * 2 - 1.
+      auto is = [&](uint32_t i, uint32_t j, float x, float y) {
+        return Near(normals[j * 17 + i].u, 2 * x / 255 - 1, 1e-6f) && Near(normals[j * 17 + i].v, 2 * y / 255 - 1, 1e-6f);
+      };
+      if (!is(0, 0, 180, 39) || !is(7, 7, 180, 39)) return 227;      // texel (18, 30): block (4, 7), index 2
+      if (!is(8, 0, 160, 39) || !is(15, 5, 160, 39)) return 228;     // texel (19, 30): index 3
+      if (!is(0, 8, 100, 39) || !is(8, 8, 80, 39)) return 229;       // texels (18, 31) and (19, 31): indices 6, 7
+      if (!is(16, 16, 200, 48) || !is(16, 8, 140, 47)) return 230;   // texels (20, 32): block (5, 8), index 0; (20, 31): block (5, 7), index 4
+      // Two patches in a run: the second (sub-patch 4: row 2, column 0, corner (80, 160)) follows.
+      TerrainPatch two = sp;
+      two.patches = 2;
+      if (!BuildTerrainNormals(two, nm, nd.data(), nd.size(), kTerrainGrid, &normals) || normals.size() != 2 * 289) return 231;
+      // (80, 160): height coordinate texel ((80 - 16) / 4, (160 - 32) / 4) = (16, 32): block (4, 8), index 0.
+      if (!Near(normals[289].u, 2 * 200.0f / 255 - 1, 1e-6f) || !Near(normals[289].v, 2 * 40.0f / 255 - 1, 1e-6f) ||
+          !is(0, 0, 180, 39)) return 232;
+      // Nothing is made from missing data: a map cut short, no map, inputs that are not valid, a
+      // record without the block, a draw of the adaptive builder, too many patches.
+      // (cut before block row 8, which holds texel row 32: the patch's last grid row)
+      if (BuildTerrainNormals(sp, nm, nd.data(), 8 * 512, kTerrainGrid, &normals) || !normals.empty()) return 233;
+      if (BuildTerrainNormals(sp, nm, nullptr, nd.size(), kTerrainGrid, &normals) || !normals.empty()) return 234;
+      TerrainPatch off = sp;
+      off.material.valid = false;
+      if (BuildTerrainNormals(off, nm, nd.data(), nd.size(), kTerrainGrid, &normals)) return 235;
+      off = sp;
+      off.material.steep = false;
+      if (BuildTerrainNormals(off, nm, nd.data(), nd.size(), kTerrainGrid, &normals)) return 236;
+      off = sp;
+      off.material.adaptive = true;
+      if (BuildTerrainNormals(off, nm, nd.data(), nd.size(), kTerrainGrid, &normals)) return 237;
+      off = sp;
+      off.patches = kMaxTerrainPatches + 1;
+      if (BuildTerrainNormals(off, nm, nd.data(), nd.size(), kTerrainGrid, &normals) || !normals.empty()) return 238;
+      if (BuildTerrainNormals(sp, nm, nd.data(), nd.size(), 0, &normals)) return 239;
+      // The order is that of the positions: the same grid, the same points.
+      std::vector<Float4> at;
+      TerrainPatch pp = sp;
+      pp.map = t.map;  // the 64 x 64 heightmap of the position cases
+      if (!BuildTerrainPositions(pp, tex.data(), tex.size(), kTerrainGrid, &at) || at.size() != 289 ||
+          at[8 * 17 + 4].x != 90.0f || at[8 * 17 + 4].y != 156.0f) return 240;
+      set(ps, 45, 0, 0, 0, 0);
+    }
+
+    // The far kind has no steep-ground block: a spec with a draw of the adaptive builder is refused below.
+
     // --- A draw of the adaptive builder (FAR_CONSTS / FAR_WANT of the Python test) ---
     static const uint32_t kTf13[6] = {0x88000002, 0x1A800052, 0x007FE3FF, 0x00A80D10, 0x00000000, 0x00000218};
     // tf18 / tf19 of the adaptive draws of the bridge captures: 816 x 48 k_16 tables, point sampled.
@@ -403,6 +645,12 @@ int main() {
       TerrainMaterialInputs far_no_base;
       if (!MakeTerrainMaterialInputs(fp, true, vs, ps, fb, &far_no_base) || !far_no_base.valid ||
           far_no_base.base_valid || !fm.base_valid) return 180;
+    }
+    // The steep-ground block is the layers': a draw of the adaptive builder with such a spec is refused.
+    {
+      const TerrainSteepSpec spec{13, 0.99609375f, 0.0001f};
+      TerrainMaterialInputs far_steep;
+      if (MakeTerrainMaterialInputs(fp, true, vs, ps, ff, &far_steep, &spec) || far_steep.valid) return 241;
     }
     // The far kind needs both tables and no weight map.
     TerrainFetches fg = ff;

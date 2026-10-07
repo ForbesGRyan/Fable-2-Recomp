@@ -51,6 +51,17 @@ class GeometryCache {
   // `vertex_count` coordinates result. Reads are bounded by the tables' sizes.
   nrhi::Buffer* TerrainFarUvs(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t vertex_count,
                               ClayStats& st);
+  // float2 (n.x, n.y) of the game's vertex normal for a terrain layer with the
+  // steep-ground block, one per grid point of its position buffer: read from
+  // the layer vertex shader's normal map where the game reads it, at the grid
+  // points (capture::BuildTerrainNormals; key TerrainNormalKey, content hash of
+  // the map). The clay vertex shader forms z. nullptr when the record's
+  // material inputs are not valid ones with the block, the map is not a k_DXN
+  // texture DecodeNormalMap handles or is unreadable, a grid point's texel lies
+  // outside the map's bytes, or fewer than `vertex_count` normals result.
+  // Reads are bounded by the map's size.
+  nrhi::Buffer* TerrainNormals(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t vertex_count,
+                               ClayStats& st);
   void BeginFrame(uint64_t frame, uint64_t budget_bytes);
   // DestroyDeferred all (dev may be nullptr: forget the buffers without
   // destroying them, e.g. after a device change).

@@ -388,7 +388,7 @@ const std::vector<AlbedoSpec> kAlbedoTable = {
   {H, int8_t(SL), UI, UC, VI, VC, {{US0, UO0}, {US1, UO1}}, {{VS0, VO0}, {VS1, VO1}}},
 #define FABLE2_PS_NO_ALBEDO(H) {H, int8_t(-1), 0, 0, 0, 0, {}, {}},
 #define FABLE2_PS_ALPHA(H, S, SL, C, SR0, SR1, DC)
-#define FABLE2_PS_TERRAIN(H, K, B, D)
+#define FABLE2_PS_TERRAIN(H, K, B, D, SS, ST, SE)
 #include "ps_albedo_table.inc"
 #undef FABLE2_PS_ALBEDO
 #undef FABLE2_PS_NO_ALBEDO
@@ -407,7 +407,7 @@ const std::vector<PsAlphaEntry> kAlphaTable = {
 #define FABLE2_PS_NO_ALBEDO(H)
 #define FABLE2_PS_ALPHA(H, S, SL, C, SR0, SR1, DC) \
   {H, {AlphaSource((S) + 1), uint8_t(SL), uint8_t(C), {int32_t(SR0), int32_t(SR1)}, (DC) != 0}},
-#define FABLE2_PS_TERRAIN(H, K, B, D)
+#define FABLE2_PS_TERRAIN(H, K, B, D, SS, ST, SE)
 #include "ps_albedo_table.inc"
 #undef FABLE2_PS_ALBEDO
 #undef FABLE2_PS_NO_ALBEDO
@@ -416,18 +416,23 @@ const std::vector<PsAlphaEntry> kAlphaTable = {
 };
 
 // Terrain pixel shaders (ps-albedo.json entries whose "kind" is a terrain kind): the kind and the
-// texture fetch slots of the base map and of the detail texture (far kinds: the far colour).
+// texture fetch slots of the base map and of the detail texture (far kinds: the far colour), and
+// for a layer shader with the steep-ground block ("steep") the side texture's slot with the
+// block's two literals (has_steep; terrain_patch.h, TerrainSteepSpec).
 // These shaders have no albedo entry, so FindAlbedo does not know them.
 struct PsTerrainEntry {
   uint64_t ps_hash;
   MaterialKind kind;
   uint8_t base_slot, detail_slot;
+  bool has_steep;
+  TerrainSteepSpec steep;
 };
 const std::vector<PsTerrainEntry> kPsTerrainTable = {
 #define FABLE2_PS_ALBEDO(H, SL, UI, UC, US0, UO0, US1, UO1, VI, VC, VS0, VO0, VS1, VO1)
 #define FABLE2_PS_NO_ALBEDO(H)
 #define FABLE2_PS_ALPHA(H, S, SL, C, SR0, SR1, DC)
-#define FABLE2_PS_TERRAIN(H, K, B, D) {H, MaterialKind(K), uint8_t(B), uint8_t(D)},
+#define FABLE2_PS_TERRAIN(H, K, B, D, SS, ST, SE) \
+  {H, MaterialKind(K), uint8_t(B), uint8_t(D), (SS) >= 0, {uint8_t((SS) >= 0 ? (SS) : 0), ST, SE}},
 #include "ps_albedo_table.inc"
 #undef FABLE2_PS_ALBEDO
 #undef FABLE2_PS_NO_ALBEDO
@@ -1988,11 +1993,16 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders)
 // terrain entry (ps-albedo.json) of the builder's kind: a layer shader on the
 // layer builder, a far shader on the adaptive one. The registers
 // MakeTerrainMaterialInputs names are read into t_bank and t_ps_bank (the pixel
-// bank as FillMaterial reads an alpha recipe's scale) and at most four fetch
+// bank as FillMaterial reads an alpha recipe's scale) and at most five fetch
 // constants from the device shadow: bounded reads, and anything the material
 // reads that is unreadable leaves in.terrain.material invalid. The base map's
 // fetch constant and its two registers (vs c14, ps c21) are light, not material:
-// when one cannot be read only base_valid stays false. Also records the pixel shader and its
+// when one cannot be read only base_valid stays false. A layer shader with the
+// steep-ground block (the entry's "steep") adds one pixel register (c45) and
+// two fetch constants (the side texture, the vertex shader's normal map); the
+// block's side scale is in the detail scale's register. A record whose shader
+// has the block but whose inputs for it cannot be read is invalid like any
+// other, so that its square falls back as a whole. Also records the pixel shader and its
 // kind in the material; the clay pass draws the record with them (clay_logic.h,
 // "Terrain material") and as flat clay when they are not valid.
 void FillTerrainMaterial(uint32_t device, const DeviceSnapshot& dev, bool adaptive, DrawInputs& in) {
@@ -2012,6 +2022,8 @@ void FillTerrainMaterial(uint32_t device, const DeviceSnapshot& dev, bool adapti
   for (uint32_t reg : {kTerrainPsEyeReg, kTerrainPsFadeReg}) {
     ok = ok && ReadPsBankRegisters(device, reg, 1);
   }
+  const TerrainSteepSpec* steep = entry->has_steep ? &entry->steep : nullptr;
+  if (steep) ok = ok && ReadPsBankRegisters(device, kTerrainPsSlopeReg, 1);
   if (!ok) return;
   // An unread base register is handed on as not finite (never as what the bank held before).
   const float unread = std::numeric_limits<float>::quiet_NaN();
@@ -2021,7 +2033,7 @@ void FillTerrainMaterial(uint32_t device, const DeviceSnapshot& dev, bool adapti
   if (!ReadPsBankRegisters(device, kTerrainPsBaseReg, 1)) {
     std::fill_n(t_ps_bank + 4 * kTerrainPsBaseReg, 4, unread);
   }
-  uint32_t fc[4][6];
+  uint32_t fc[5][6];
   auto fetch = [&](uint32_t slot, uint32_t* out) -> const uint32_t* {
     const uint8_t* p =
         slot < 32 ? ReadVirtual(device + xdk::kDeviceVertexFetchOffset + xdk::kDeviceTextureFetchStride * slot, 24)
@@ -2039,7 +2051,11 @@ void FillTerrainMaterial(uint32_t device, const DeviceSnapshot& dev, bool adapti
   } else {
     f.weight = fetch(kTerrainWeightFetch, fc[2]);
   }
-  MakeTerrainMaterialInputs(in.terrain, adaptive, t_bank, t_ps_bank, f, &in.terrain.material);
+  if (steep) {
+    f.side = fetch(steep->side_slot, fc[3]);
+    f.normal = fetch(kTerrainNormalFetch, fc[4]);
+  }
+  MakeTerrainMaterialInputs(in.terrain, adaptive, t_bank, t_ps_bank, f, &in.terrain.material, steep);
 }
 
 // Fills `in` for a tessellated terrain draw (DrawIndx:8221C9C8, the adaptive

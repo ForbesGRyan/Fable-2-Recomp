@@ -2,11 +2,12 @@
 
 Usage: terrain_replay.py <capture.jsonl> --frame N --list
        terrain_replay.py <capture.jsonl> --frame N --patch K --out image.png [--res 64] [--no-fade]
-                         [--no-tint] [--no-base] [--encode sqrt|linear] [--exposure X]
+                         [--no-tint] [--no-base] [--no-steep] [--encode sqrt|linear] [--exposure X]
        terrain_replay.py <capture.jsonl> --frame N --patch K --locate
        terrain_replay.py <capture.jsonl> --frame N --weights image.png
        terrain_replay.py <capture.jsonl> --frame N --weight-sums
        terrain_replay.py <capture.jsonl> --frame N --check-dumps
+       terrain_replay.py <capture.jsonl> --frame N --steep-share
 
 The game draws the ground near the eye in blended layers (builder 8221C9C8: one draw per 8 x 8
 square of ground and layer) over an underlay drawn first by the adaptive builder (82207C30).
@@ -20,11 +21,18 @@ add up over the frame's squares. --patch K --locate prints where the square's co
 1120 x 720 frame (the row's c0..c3). --check-dumps lists every texture the frame's tess rows name
 with the size of its dump against the size of its base level (a dump cut short by the capture
 shows as SHORT). Only textures the replay reads count; the others are listed as
-not needed by the replay.
+not needed by the replay. --steep-share prints how much of the frame's layered ground is steep
+enough for the steep-ground block: the slope value s at the 17 x 17 grid points of every square,
+from the normal map.
 
 What is evaluated (the shaders' colour with the lighting factor 1 and the additive light, sun and
 fog terms dropped):
-  layer   colour = tf0(detail uv)^2 * base',  base' = pow(tf3(base uv), c21.w) * c21.xyz
+  layer   colour = A * base',  A = tf0(detail uv)^2,  base' = pow(tf3(base uv), c21.w) * c21.xyz
+          the three layer shaders paired with vertex shader C30A (CLIFF_SHADERS), on steep ground:
+          A = s * tf0^2 + (1 - s) * (wy * tf13(o1)^2 + wx * tf13(o0)^2) where s < threshold, with
+          s = sat(|n.z| * c45.y + c45.x), wx, wy = |n.x|, |n.y| / (|n.x| + |n.y| + small term),
+          o0 = (c8.x * y, -c8.x * height), o1 = (c8.x * x, -c8.x * height), n the vertex shader's
+          normal: tf17 at the height coordinate, * 2 - 1, z = sqrt(|1 - x^2 - y^2|)
           alpha  = (1 - sat(d2 * c31.x + c31.y)) * weight,  weight = 15/14 * (tf18 - 1/15)
           not drawn where tf18 < c114.x (the vertex shader writes a NaN position there)
   far     colour = tf13(u, v)^2 * base', u and v from the tables tf18 and tf19 of the adaptive
@@ -33,15 +41,20 @@ Limits, by design: the weight is sampled per pixel with a bilinear filter, which
 game's per-vertex weight (it is that weight at 16 segments per patch edge; the game's tessellator
 tops out at 15 and uses fewer far away); a layer is left out per pixel where the bilinear value is
 below c114.x, where the game removes every triangle that touches such a vertex (the two differ
-where a 0 texel lies beside a texel of 2 or more: --weights counts those); the three layer shaders
-paired with vertex shader C30A blend tf13 into the detail colour on steep ground, which is not
-evaluated (--list marks those draws); base levels only, no mip maps; a negative alpha is clamped
-to 0.
+where a 0 texel lies beside a texel of 2 or more: --weights counts those); the normal and the
+height of the steep-ground block are read at the square's 17 x 17 grid points, as the vertex shader
+reads them at its vertices (point sampled), and vary linearly over the two triangles of each grid
+quad that the clay pass draws (grid_interp), where the game's tessellator has at most 15 segments
+and its own triangles; --no-steep leaves the block out (A = tf0^2 everywhere, the replay before
+the block was read); base levels only, no mip maps; a negative alpha is clamped to 0.
 
 Needs, per tess row: "consts" with c8, c11, c14, c46, c47, c113, c114, c115 (far: c72 too),
 "pconst" (pixel constants c0..c31: c19, c21, c31), "tf" with the slots the shaders sample, and the
 "texture" rows and dump files of those textures (found by fetch dwords 1 and 2: base address,
-format and size; the row's own dwords give the sampler state). --list, --weights, --weight-sums
+format and size; the row's own dwords give the sampler state). A row of a shader with the
+steep-ground block also needs tf13 (the layer's side texture), tf17 (the normal map, k_DXN), tf16
+(the heightmap), "pc" with c45 and "ps_lit" (the shader's literals: the threshold and the small
+term, each in the register its shader keeps it in). --list, --weights, --weight-sums
 and --locate need neither "pconst" nor c14. A capture that lacks an input, a dump shorter than
 its base level and a texture format the tool does not decode are refused by name (exit code 2);
 nothing is read as zero.
@@ -71,7 +84,16 @@ _BLENDS = {0x00010001: BLEND_OPAQUE, 0x00060006: BLEND_REPLACE, 0x01060106: BLEN
 LAYER_BUILDER = "DrawIndx:8221C9C8"
 FAR_BUILDER = "DrawIndx:82207C30"
 FADING_FAR = "0x2F8A0341E8C09698"
-CLIFF_SHADERS = ("0x9C2144E42E95A76F", "0x45243B758F9272AB", "0x04F23292B2F44077")
+# The layer pixel shaders with the steep-ground block (the three paired with vertex shader C30A), and
+# where each keeps the block's two literals, as (pixel register, component): the slope threshold below
+# which the block runs and the small term of the weights (frame-map section 13, "Terrain", item 1;
+# 9C21 instr 13 and 22, 4524 instr 16 and 25, 04F2 instr 17 and 26).
+STEEP_LITERALS = {
+    "0x9C2144E42E95A76F": ((254, 1), (255, 3)),
+    "0x45243B758F9272AB": ((254, 2), (255, 3)),
+    "0x04F23292B2F44077": ((254, 1), (255, 3)),
+}
+CLIFF_SHADERS = tuple(STEEP_LITERALS)
 COLOUR_BINS = 0x2AAAAAAA
 UNCOVERED = (255, 0, 255)
 # Legend colours of --weights, one per detail texture in order of appearance: a fixed palette, the
@@ -83,6 +105,8 @@ _PALETTE = [(230, 25, 75), (60, 180, 75), (255, 225, 25), (0, 130, 200), (245, 1
 # The textures the replay reads, by fetch-constant slot (what _replay asks _Textures for). A layer draw
 # (builder 8221C9C8) is read through these; the heightmap only for the distance fade (draws[0]).
 LAYER_TEXTURES = {0: "detail colour", 3: "base map", 18: "layer weights", 16: "heightmap"}
+# More for a layer draw of a shader with the steep-ground block.
+STEEP_TEXTURES = {13: "side colour", 17: "normal map"}
 # An underlay draw: the adaptive builder's colour pass (underlay_of).
 FAR_TEXTURES = {13: "far colour", 3: "base map", 18: "far u table", 19: "far v table"}
 
@@ -120,21 +144,18 @@ class Tex:
         return tuple((a[k] * (1 - fx) + b[k] * fx) * (1 - fy) + (c[k] * (1 - fx) + d[k] * fx) * fy for k in range(4))
 
 
-_BLOCKS = {6: (1, 4, 2), 18: (4, 8, 3), 19: (4, 16, 4), 20: (4, 16, 4), 24: (1, 2, 1), 58: (4, 8, 3)}
+_BLOCKS = {6: (1, 4, 2), 18: (4, 8, 3), 19: (4, 16, 4), 20: (4, 16, 4), 24: (1, 2, 1), 49: (4, 16, 4),
+           58: (4, 8, 3)}
 
 
-_SIZE_ONLY = {49: (4, 16, 4)}   # k_DXN: not decoded here, but its dumps can be checked for size
-
-
-def base_level_need(fc, size_only=False):
+def base_level_need(fc):
     """Bytes of a dump the decode of this fetch constant's base level reads: the end of its last
     block (tiled) or of its last row (linear, rows by the SDK's base-level rule). ValueError
-    ("format N") for a format the tool does not decode (with size_only, k_DXN is known too)."""
+    ("format N") for a format the tool does not decode."""
     fmt = fc[1] & 0x3F
-    table = {**_BLOCKS, **_SIZE_ONLY} if size_only else _BLOCKS
-    if fmt not in table:
+    if fmt not in _BLOCKS:
         raise ValueError(f"format {fmt}")
-    block, bpb, log2 = table[fmt]
+    block, bpb, log2 = _BLOCKS[fmt]
     w = (fc[2] & 0x1FFF) + 1
     h = ((fc[2] >> 13) & 0x1FFF) + 1
     wb, hb = (w + block - 1) // block, (h + block - 1) // block
@@ -144,9 +165,56 @@ def base_level_need(fc, size_only=False):
     return (hb - 1) * ((pitch_blocks + 31) & ~31) * bpb + wb * bpb
 
 
+def bc4_values(blk):
+    """The 16 values (0..255, row-major, not rounded) of an 8-byte BC4 block: two end values a0, a1
+    and 16 three-bit indices from the low end of the following 48 bits. a0 > a1: indices 2 to 7 are
+    the six steps of a seventh from a0 to a1; else indices 2 to 5 are the four steps of a fifth, 6
+    is 0 and 7 is 255 (the BC4 / DXT5 alpha block)."""
+    a0, a1 = blk[0], blk[1]
+    bits = int.from_bytes(blk[2:8], "little")
+    if a0 > a1:
+        pal = [a0, a1] + [((7 - i) * a0 + i * a1) / 7 for i in range(1, 7)]
+    else:
+        pal = [a0, a1] + [((5 - i) * a0 + i * a1) / 5 for i in range(1, 5)] + [0, 255]
+    return [pal[(bits >> (3 * i)) & 7] for i in range(16)]
+
+
+def decode_dxn(data, fc):
+    """Base level of a k_DXN (49) fetch constant -> (width, height, [(x, y)] in 0..1, row-major).
+    A 4 x 4 block is 16 bytes: after the fetch constant's endian swap, the BC4 block of x and then
+    that of y. Source: the SDK presents k_DXN as BC5 through its plain 128-bits-per-block loader,
+    which only swaps the bytes, with the host swizzle RGGG, so the shader's x is the first block
+    and its y the second (thirdparty/rexglue-sdk/src/graphics/d3d12/texture_cache.cpp, the k_DXN
+    row of the host format table); checked on the dump of the terrain's normal map against the
+    heightmap's slopes (docs/native-renderer/frame-map.md, section 13 "Terrain"). The values are
+    the block's palette entries as fractions, not rounded to 8 bits. Blocks sit like DXT5's: tiled
+    at tiled_offset_2d(bx, by, pitch_blocks, 4), or linear in rows of the pitch aligned to 32
+    blocks. The caller has checked the dump's size (base_level_need)."""
+    endian = (fc[1] >> 6) & 3
+    w = (fc[2] & 0x1FFF) + 1
+    h = ((fc[2] >> 13) & 0x1FFF) + 1
+    pitch = ((fc[0] >> 22) & 0x1FF) << 5
+    tiled = (fc[0] >> 31) != 0
+    wb, hb = (w + 3) // 4, (h + 3) // 4
+    pitch_blocks = max(pitch // 4, wb)
+    row_pitch = ((pitch_blocks + 31) & ~31) * 16
+    out = [None] * (w * h)
+    for by in range(hb):
+        for bx in range(wb):
+            o = tt.tiled_offset_2d(bx, by, pitch_blocks, 4) if tiled else by * row_pitch + bx * 16
+            raw = tt._swap(data[o:o + 16], endian)
+            xs, ys = bc4_values(raw[0:8]), bc4_values(raw[8:16])
+            for i in range(16):
+                x, y = bx * 4 + (i & 3), by * 4 + (i >> 2)
+                if x < w and y < h:
+                    out[y * w + x] = (xs[i] / 255.0, ys[i] / 255.0)
+    return w, h, out
+
+
 def decode_texture(data, fc, what="texture"):
     """Dump bytes and six fetch dwords -> Tex. DXT1, DXT2/3, DXT4/5, 8888 as RGBA; k_DXT3A (58) with
-    the value in every channel (the SDK's view of that format); k_16 (24) with the value in x.
+    the value in every channel (the SDK's view of that format); k_16 (24) with the value in x;
+    k_DXN (49) with its two values in x and y (decode_dxn).
     Filter and clamp modes come from the fetch constant. Others raise ValueError("format N"). A
     dump shorter than the base level raises MissingInput with both sizes: nothing is padded."""
     fmt = fc[1] & 0x3F
@@ -174,6 +242,9 @@ def decode_texture(data, fc, what="texture"):
     if fmt == 58:
         w, h, r8 = tt.decode_r8(data, fc)
         return Tex(w, h, [(v / 255.0,) * 4 for v in r8], clamp, linear)
+    if fmt == 49:
+        w, h, xy = decode_dxn(data, fc)
+        return Tex(w, h, [(x, y, 0.0, 1.0) for x, y in xy], clamp, linear)
     w, h, rgba = tt.decode_rgba(data, fc)
     return Tex(w, h, [tuple(c / 255.0 for c in rgba[i:i + 4]) for i in range(0, len(rgba), 4)], clamp, linear)
 
@@ -219,6 +290,44 @@ def layer_inputs(consts, pconst):
         "hole_ref": consts["c114"][0],
         "eye": list(c19[:3]),
         "world": world,
+    }
+
+
+def _literal(ps_lit, reg, comp):
+    """Component `comp` of pixel literal register `reg` from a tess row's "ps_lit" (runs of floats
+    from a first register; pixel registers are numbered from 256 there), or None."""
+    for run in ps_lit or []:
+        first = run["reg"] - 256 if run["reg"] >= 256 else run["reg"]
+        i = (reg - first) * 4 + comp
+        if reg >= first and i < len(run["v"]):
+            return run["v"][i]
+    return None
+
+
+def steep_inputs(consts, pc, ps_lit, ps_hash):
+    """The numbers of the steep-ground block that MakeTerrainMaterialInputs (terrain_patch.h) makes
+    for a layer draw whose pixel shader has it: from the vertex constant c8, the pixel constant
+    c45 (the row's "pc") and the shader's two literals (the row's "ps_lit")."""
+    if ps_hash not in STEEP_LITERALS:
+        raise MissingInput(f"pixel shader {ps_hash} has no steep-ground block")
+    _need(consts, ("c8",))
+    c45 = (pc or {}).get("c45")
+    if not c45 or len(c45) < 2:
+        raise MissingInput('the tess row has no pixel constant c45 (in "pc"): the capture was taken before terrain '
+                           "rows recorded it")
+    (treg, tcomp), (ereg, ecomp) = STEEP_LITERALS[ps_hash]
+    threshold, eps = _literal(ps_lit, treg, tcomp), _literal(ps_lit, ereg, ecomp)
+    if threshold is None or eps is None:
+        raise MissingInput('the tess row has no "ps_lit" with the pixel shader\'s literals c254 and c255: the capture '
+                           "was taken before terrain rows recorded them")
+    if not (0.0 < threshold <= 1.0 and 0.0 < eps < 0.01):
+        raise MissingInput(f"the literals of {ps_hash} do not look like the block's: slope threshold {threshold!r}, "
+                           f"small term {eps!r}")
+    return {
+        "side_uv": [consts["c8"][0], -consts["c8"][0]],
+        "slope": list(c45[:2]),
+        "steep_threshold": threshold,
+        "steep_eps": eps,
     }
 
 
@@ -283,9 +392,58 @@ def eye_distance2(inp, wx, wy, h):
     return sum((e - q) ** 2 for e, q in zip(inp["eye"], p))
 
 
+def steep_normal(x, y):
+    """The layer vertex shader's normal from the normal map's two values (0..1): (x, y) * 2 - 1 and
+    z = sqrt(|1 - (x^2 + y^2)|) (C30A instr 25 to 31, o3)."""
+    nx, ny = 2.0 * x - 1.0, 2.0 * y - 1.0
+    return (nx, ny, math.sqrt(abs(1.0 - (nx * nx + ny * ny))))
+
+
+def steep_slope(inp, nz):
+    """s = sat(|n.z| * c45.y + c45.x): 1 on flat ground, 0 on steep (9C21 instr 12)."""
+    return _sat(abs(nz) * inp["slope"][1] + inp["slope"][0])
+
+
+def steep_weights(inp, nx, ny):
+    """(wx, wy) = (|n.x|, |n.y|) / (|n.x| + small term + |n.y|) (9C21 instr 22 to 28, 36)."""
+    inv = 1.0 / (abs(nx) + inp["steep_eps"] + abs(ny))
+    return (abs(nx) * inv, abs(ny) * inv)
+
+
+def side_uvs(inp, wx, wy, h):
+    """(o0, o1) of a world point: o0 = (c8.x * y, -c8.x * height) is the projection for faces along
+    x, o1 = (c8.x * x, -c8.x * height) for faces along y (C30A instr 52, 53, 63, 64, 74 to 76)."""
+    s = inp["side_uv"]
+    return (wy * s[0], h * s[1]), (wx * s[0], h * s[1])
+
+
+def steep_mix(inp, n, tf0, side0, side1):
+    """A of a layer shader with the steep-ground block, in the game's linear space: tf0^2 where the
+    slope value reaches the threshold, else s * tf0^2 + (1 - s) * (wy * side1^2 + wx * side0^2),
+    with side0 = tf13(o0) and side1 = tf13(o1) (9C21 instr 13 to 37). The clay pass shows its
+    square root."""
+    s = steep_slope(inp, n[2])
+    if s >= inp["steep_threshold"]:
+        return tuple(tf0[k] * tf0[k] for k in range(3))
+    wx, wy = steep_weights(inp, n[0], n[1])
+    return tuple(s * tf0[k] * tf0[k] + (1.0 - s) * (wy * side1[k] * side1[k] + wx * side0[k] * side0[k])
+                 for k in range(3))
+
+
+def grid_interp(a, b, c, d, fx, fy):
+    """The value at (fx, fy) in 0..1 of a grid quad with the corner values a at (0, 0), b at (1, 0),
+    c at (1, 1) and d at (0, 1), linear over each of the two triangles the clay pass draws the quad
+    with: (a, b, c) and (a, c, d), cut from a to c (BuildGridIndices in terrain_patch.h)."""
+    if fx >= fy:
+        return tuple(a[k] + fx * (b[k] - a[k]) + fy * (c[k] - b[k]) for k in range(len(a)))
+    return tuple(a[k] + fx * (c[k] - d[k]) + fy * (d[k] - a[k]) for k in range(len(a)))
+
+
 class Layer:
-    def __init__(self, inp, detail, base, weight, blend):
-        self.inp, self.detail, self.base, self.weight, self.blend = inp, detail, base, weight, blend
+    def __init__(self, inp, detail, base, weight, blend, side=None):
+        """`side`: the layer's side texture (tf13) when its shader has the steep-ground block and the
+        block is replayed; `inp` then holds steep_inputs too."""
+        self.inp, self.detail, self.base, self.weight, self.blend, self.side = inp, detail, base, weight, blend, side
 
 
 class Far:
@@ -300,10 +458,15 @@ def _base_term(inp, base_tex, wx, wy, tint, base):
     return tuple(abs(b[k]) ** inp["base_pow"] * (inp["base_tint"][k] if tint else 1.0) for k in range(3))
 
 
-def layer_colour(layer, wx, wy, tint=True, base=True):
+def layer_colour(layer, wx, wy, tint=True, base=True, steep=None):
+    """`steep`: (normal, height) of the point for the steep-ground block, or None to leave it out."""
     d = layer.detail.sample(*apply_uv(layer.inp["detail_uv"], wx, wy))
     bp = _base_term(layer.inp, layer.base, wx, wy, tint, base)
-    return tuple(d[k] * d[k] * bp[k] for k in range(3))
+    if layer.side is None or steep is None:
+        return tuple(d[k] * d[k] * bp[k] for k in range(3))
+    o0, o1 = side_uvs(layer.inp, wx, wy, steep[1])
+    a = steep_mix(layer.inp, steep[0], d, layer.side.sample(*o0), layer.side.sample(*o1))
+    return tuple(a[k] * bp[k] for k in range(3))
 
 
 def _blend(dst, src, alpha, blend):
@@ -312,8 +475,9 @@ def _blend(dst, src, alpha, blend):
     return tuple(src[i] * s + dst[i] * k for i in range(3))
 
 
-def shade_point(layers, wx, wy, h, fade_on=True, background=(0.0, 0.0, 0.0), tint=True, base=True):
-    """The layers of one point in draw order over `background`. Returns (rgb, layers drawn)."""
+def shade_point(layers, wx, wy, h, fade_on=True, background=(0.0, 0.0, 0.0), tint=True, base=True, steep=None):
+    """The layers of one point in draw order over `background`. Returns (rgb, layers drawn).
+    `steep`: (normal, height) of the point for the layers with the steep-ground block, or None."""
     rgb = tuple(float(c) for c in background)
     drawn = 0
     for layer in layers:
@@ -324,7 +488,7 @@ def shade_point(layers, wx, wy, h, fade_on=True, background=(0.0, 0.0, 0.0), tin
         alpha = layer_weight(layer.inp, value)
         if fade_on and h is not None:
             alpha *= fade(layer.inp, eye_distance2(layer.inp, wx, wy, h))
-        rgb = _blend(rgb, layer_colour(layer, wx, wy, tint, base), _sat(alpha), layer.blend)
+        rgb = _blend(rgb, layer_colour(layer, wx, wy, tint, base, steep), _sat(alpha), layer.blend)
     return rgb, drawn
 
 
@@ -503,6 +667,39 @@ def _height(tex, row, far, wx, wy):
     return tex.sample((wx - off[0]) * scale[0], (wy - off[1]) * scale[1], linear=False)[0] * hs
 
 
+class SquareGrid:
+    """The normal and the height of a square at its 17 x 17 grid points, read as the layer vertex
+    shader reads them at a vertex (both maps point sampled at the height coordinate), and linear
+    over the grid's triangles in between (grid_interp)."""
+    N = 16
+
+    def __init__(self, square, row, height_tex, normal_tex):
+        self.square = square
+        c = row["consts"]
+        scale, off = c["c47"], c["c47"][2:]
+        self.points = []
+        for j in range(self.N + 1):
+            for i in range(self.N + 1):
+                wx = square[0] + square[2] * i / self.N
+                wy = square[1] + square[3] * j / self.N
+                t = normal_tex.sample((wx - off[0]) * scale[0], (wy - off[1]) * scale[1], linear=False)
+                self.points.append(steep_normal(t[0], t[1]) + (_height(height_tex, row, False, wx, wy),))
+
+    def at(self, wx, wy):
+        """((n.x, n.y, n.z), height) at a world point of the square."""
+        n = self.N
+        gx = min(max((wx - self.square[0]) / self.square[2] * n, 0.0), float(n))
+        gy = min(max((wy - self.square[1]) / self.square[3] * n, 0.0), float(n))
+        i, j = min(int(gx), n - 1), min(int(gy), n - 1)
+        p = self.points
+        v = grid_interp(p[j * (n + 1) + i], p[j * (n + 1) + i + 1], p[(j + 1) * (n + 1) + i + 1],
+                        p[(j + 1) * (n + 1) + i], gx - i, gy - j)
+        return v[:3], v[3]
+
+
+_NO_STEEP_HINT = " (--no-steep replays without the steep-ground block)"
+
+
 def _encode(rgb, mode, exposure):
     out = []
     for c in rgb:
@@ -518,12 +715,20 @@ def _replay(a, rows, textures, lines):
     square, draws = squares[a.patch]
     tex = _Textures(textures)
     layers, problems = [], []
+    steep_on = not a.no_steep
     for r in draws:
         try:
             layers.append(Layer(layer_inputs(r["consts"], r.get("pconst")), tex.get(r, 0, LAYER_TEXTURES[0]),
                                 tex.get(r, 3, LAYER_TEXTURES[3]), tex.get(r, 18, LAYER_TEXTURES[18]), blend_of(r["rs"]["2201"])))
         except MissingInput as e:
             problems.append(str(e))
+            continue
+        if steep_on and r.get("ps_hash") in STEEP_LITERALS:
+            try:
+                layers[-1].inp.update(steep_inputs(r["consts"], r.get("pc"), r.get("ps_lit"), r["ps_hash"]))
+                layers[-1].side = tex.get(r, 13, STEEP_TEXTURES[13])
+            except MissingInput as e:
+                problems.append(str(e) + _NO_STEEP_HINT)
     under = underlay_of(rows, square)
     far = None
     if under is not None:
@@ -534,15 +739,24 @@ def _replay(a, rows, textures, lines):
                       under.get("ps_hash") == FADING_FAR)
         except MissingInput as e:
             problems.append(str(e))
+    cliff = [r for r in draws if r.get("ps_hash") in CLIFF_SHADERS]
+    grid = None
+    if steep_on and cliff and not problems:
+        # The vertex shader's normal and height at the square's grid points (every layer of a square
+        # has the same patch and the same two maps).
+        try:
+            grid = SquareGrid(square, cliff[0], tex.get(cliff[0], 16, LAYER_TEXTURES[16]),
+                              tex.get(cliff[0], 17, STEEP_TEXTURES[17]))
+        except MissingInput as e:
+            problems.append(str(e) + _NO_STEEP_HINT)
     if problems:
         raise MissingInput("; ".join(sorted(set(problems))))
     height = None
     if not a.no_fade:
         height = tex.get(draws[0], 16, LAYER_TEXTURES[16])
-    cliff = sum(r.get("ps_hash") in CLIFF_SHADERS for r in draws)
     lines.append(f"square ({square[0]:g}, {square[1]:g}) {square[2]:g} x {square[3]:g}: {len(draws)} layer draws"
-                 f" ({cliff} of them with the tf13 blend on steep ground, not evaluated), underlay "
-                 + (f"{under['ps_hash']}" if under is not None else "none"))
+                 f" ({len(cliff)} of them with the tf13 blend on steep ground, {'evaluated' if steep_on else 'not evaluated'}),"
+                 " underlay " + (f"{under['ps_hash']}" if under is not None else "none"))
     n = a.res
     rgba = bytearray()
     for j in range(n):
@@ -551,7 +765,8 @@ def _replay(a, rows, textures, lines):
             wy = square[1] + square[3] * (j + 0.5) / n
             h = _height(height, draws[0], False, wx, wy) if height is not None else None
             bg = far_colour(far, wx, wy, h, not a.no_tint, not a.no_base) if far is not None else (0.0, 0.0, 0.0)
-            rgb, _ = shade_point(layers, wx, wy, h, not a.no_fade, bg, not a.no_tint, not a.no_base)
+            steep = grid.at(wx, wy) if grid is not None else None
+            rgb, _ = shade_point(layers, wx, wy, h, not a.no_fade, bg, not a.no_tint, not a.no_base, steep)
             rgba += _encode(rgb, a.encode, a.exposure)
     tt.write_png(a.out, n, n, bytes(rgba), max_edge=n)
     lines.append(f"wrote {a.out} ({n} x {n})")
@@ -622,7 +837,7 @@ def _weights(a, rows, textures, lines):
 def _read_slots(row):
     """The fetch-constant slots of a tess row that the replay reads (see LAYER_TEXTURES and FAR_TEXTURES)."""
     if row.get("func") == LAYER_BUILDER:
-        return LAYER_TEXTURES
+        return {**LAYER_TEXTURES, **STEEP_TEXTURES} if row.get("ps_hash") in STEEP_LITERALS else LAYER_TEXTURES
     if row.get("func") == FAR_BUILDER and int(row.get("rs", {}).get("bin_mask_lo", "0xFFFFFFFF"), 16) & COLOUR_BINS:
         return FAR_TEXTURES
     return {}
@@ -651,7 +866,7 @@ def _check_dumps(rows, textures, lines):
         else:
             have = Path(path).stat().st_size
             try:
-                need = base_level_need(list(fc), size_only=True)
+                need = base_level_need(list(fc))
             except ValueError:
                 problem = f"size not known to this tool, {have} bytes"
             else:
@@ -722,6 +937,44 @@ def _weight_sums(a, rows, textures, lines):
                      + (f"; min {min(sums):.3f}, max {max(sums):.3f}" if sums else ""))
 
 
+def _steep_share(a, rows, textures, lines):
+    """How much of the frame's layered ground the steep-ground block changes: the slope value s at
+    the 17 x 17 grid points of every square (the vertex shader's normal there), counted over all
+    squares and over the squares that have a layer of a shader with the block."""
+    squares = squares_of(rows)
+    tex = _Textures(textures)
+    ref = next((r for _, draws in squares for r in draws if r.get("ps_hash") in STEEP_LITERALS), None)
+    if ref is None:
+        raise MissingInput(f"frame {a.frame} has no layer draw of a shader with the steep-ground block")
+    inp = steep_inputs(ref["consts"], ref.get("pc"), ref.get("ps_lit"), ref["ps_hash"])
+    thr = inp["steep_threshold"]
+    totals = {False: [0, 0, 0, 0, 0], True: [0, 0, 0, 0, 0]}   # squares, squares with a point below, points, below, zero
+    draws_all = draws_block = 0
+    for square, draws in squares:
+        has_block = any(r.get("ps_hash") in STEEP_LITERALS for r in draws)
+        draws_all += len(draws)
+        draws_block += sum(r.get("ps_hash") in STEEP_LITERALS for r in draws)
+        row = draws[0]
+        _need(row["consts"], ("c46", "c47"))
+        grid = SquareGrid(square, row, tex.get(row, 16, LAYER_TEXTURES[16]), tex.get(row, 17, STEEP_TEXTURES[17]))
+        s = [steep_slope(inp, p[2]) for p in grid.points]
+        below, zero = sum(v < thr for v in s), sum(v == 0.0 for v in s)
+        for key in ((False, True) if has_block else (False,)):
+            t = totals[key]
+            t[0] += 1
+            t[1] += below > 0
+            t[2] += len(s)
+            t[3] += below
+            t[4] += zero
+    lines.append(f"{totals[True][0]} of {totals[False][0]} squares have a layer with the steep-ground block "
+                 f"({draws_block} of {draws_all} layer draws); c45 = ({inp['slope'][0]:g}, {inp['slope'][1]:g})")
+    for key, what in ((False, "all squares"), (True, "squares with such a layer")):
+        n, some, points, below, zero = totals[key]
+        pct = lambda v: f"{100.0 * v / points:.1f}%" if points else "0.0%"
+        lines.append(f"{what}: s below {thr!r} at {below} of {points} grid points ({pct(below)}), s = 0 at {zero} "
+                     f"({pct(zero)}); {some} of {n} squares have a point below")
+
+
 def _locate(a, rows, textures, lines):
     squares = squares_of(rows)
     if not 0 <= a.patch < len(squares):
@@ -757,6 +1010,8 @@ def main(argv=None):
     ap.add_argument("--no-fade", action="store_true", help="alpha is the weight alone (no distance fade)")
     ap.add_argument("--no-tint", action="store_true", help="base' without c21.xyz")
     ap.add_argument("--no-base", action="store_true", help="the detail colour alone")
+    ap.add_argument("--no-steep", action="store_true",
+                    help="leave the steep-ground block out (the detail colour on steep ground too)")
     ap.add_argument("--encode", choices=("sqrt", "linear"), default="sqrt",
                     help="sqrt (default) undoes the shaders' squaring of the detail colour for viewing")
     ap.add_argument("--exposure", type=float, default=1.0)
@@ -766,6 +1021,8 @@ def main(argv=None):
     ap.add_argument("--locate", action="store_true", help="with --patch: where the square is in the frame")
     ap.add_argument("--check-dumps", action="store_true",
                     help="list every texture the frame's tess rows name with its dump's size against the base level's")
+    ap.add_argument("--steep-share", action="store_true",
+                    help="print how much of the frame's layered ground is steep enough for the steep-ground block")
     a = ap.parse_args(argv)
     rows, textures = read_capture(a.capture, a.frame)
     lines = []
@@ -777,6 +1034,8 @@ def main(argv=None):
         _check_dumps(rows, textures, lines)
     if a.weight_sums:
         _weight_sums(a, rows, textures, lines)
+    if a.steep_share:
+        _steep_share(a, rows, textures, lines)
     if a.patch is not None:
         if not a.out and not a.locate:
             ap.error("--patch needs --out or --locate")

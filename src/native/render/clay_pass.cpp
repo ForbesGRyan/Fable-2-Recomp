@@ -193,11 +193,12 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     desc.params[kParamAlbedo].shader_register = 3;
     desc.params[kParamAlbedo].count = 1;
     desc.params[kParamAlbedo].visibility = nrhi::Visibility::kPixel;
-    // The terrain shaders' own table (t4 the colour, t5 the weight cells) and
-    // constant buffer (b1); the other shaders declare neither.
+    // The terrain shaders' own table (t4 the colour, t5 the weight cells, t6 the
+    // side texture of the steep-ground block) and constant buffer (b1); the
+    // other shaders declare neither.
     desc.params[kParamTerrainTextures].kind = nrhi::BindingParamKind::kTextureTable;
     desc.params[kParamTerrainTextures].shader_register = 4;
-    desc.params[kParamTerrainTextures].count = 2;
+    desc.params[kParamTerrainTextures].count = 3;
     desc.params[kParamTerrainTextures].visibility = nrhi::Visibility::kPixel;
     desc.params[kParamTerrainConstants].kind = nrhi::BindingParamKind::kConstantBuffer;
     desc.params[kParamTerrainConstants].shader_register = 1;
@@ -341,7 +342,8 @@ void ClayPass::PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::
     const capture::MaterialKind kind = r.material.kind;
     const capture::RenderState rs = capture::DecodeRenderState(r.state_words);
     MaterialStatus colour = MaterialStatus::kTextured, weight = MaterialStatus::kTextured;
-    bool far_uvs = true;
+    MaterialStatus side = MaterialStatus::kTextured;
+    bool far_uvs = true, normals = true;
     // Nothing is asked of the caches for a record whose state or inputs are not usable.
     if (TerrainStateUsable(rs) &&
         TerrainMaterialStatus(m, kind, adaptive, colour, weight, far_uvs) == MaterialStatus::kTextured) {
@@ -353,10 +355,19 @@ void ClayPass::PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::
       } else {
         float fix[2];  // the weights' coordinate is in texels of the guest extent; the decode pads nothing
         p.weights = ResolveTerrainTexture(cmd, dev, m.weight_fetch, true, &p.weight_sampler, fix, &weight, tst);
+        if (m.steep) {
+          // The steep-ground block: the layer's side texture (a few are shared by all layers) and
+          // the game's vertex normals at the grid points (one buffer for all layers of a square).
+          p.side = ResolveTerrainTexture(cmd, dev, m.side_fetch, true, &p.side_sampler, p.side_fix, &side, tst);
+          p.uvs = p.side ? geometry_.TerrainNormals(dev, r, p.vertex_count, st) : nullptr;
+          normals = p.uvs != nullptr;
+        }
       }
     }
     p.status = TerrainStateUsable(rs) ? TerrainMaterialStatus(m, kind, adaptive, colour, weight, far_uvs)
                                       : MaterialStatus::kTerrainInputs;
+    // A layer whose shader has the block is drawn with it or not with its material at all.
+    if (p.status == MaterialStatus::kTextured) p.status = TerrainSteepStatus(m, side, normals);
     if (p.status == MaterialStatus::kTextured) {
       // The pipeline of its state. Without one (the cache is full, its creation
       // failed) the record cannot be drawn as captured either: the default
@@ -410,7 +421,7 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
       item.action = item.drawable ? TerrainAction::kFlat : TerrainAction::kSkip;
     }
   }
-  terrain_pairs_.clear();
+  terrain_sets_.clear();
   uint32_t slot = 0;
   for (Prepared& p : prepared_) {
     if (!p.terrain) continue;
@@ -426,7 +437,7 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
     if (material) {
       p.textured = TerrainTextured(r.material.kind);
     } else {
-      p.albedo = p.weights = nullptr;
+      p.albedo = p.weights = p.side = nullptr;
       p.uvs = nullptr;
     }
     const DrawState d = DecideDrawState(capture::DecodeRenderState(r.state_words), r.material, p.textured, !material);
@@ -446,12 +457,14 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
       p.slot = slot++;
       // The weights are read with a linear filter whatever the fetch constant says (it is the
       // vertex shader's, point sampled at the cell's texel centres).
+      // (a layer with the steep-ground block has its side texture and normals here: TerrainSteepStatus)
       const ClayTerrainConstants c = MakeClayTerrainConstants(r.terrain.material, r.material.kind, p.uv_fix,
-                                                              p.sampler, p.weight_sampler | 1u);
+                                                              p.sampler, p.weight_sampler | 1u,
+                                                              p.side ? p.side_fix : nullptr, p.side_sampler);
       std::memcpy(slots + size_t(p.slot) * kClayTerrainSlotBytes, &c, sizeof(c));
-      const std::pair<nrhi::TextureView*, nrhi::TextureView*> pair{p.albedo, p.weights};
-      if (std::find(terrain_pairs_.begin(), terrain_pairs_.end(), pair) == terrain_pairs_.end()) {
-        terrain_pairs_.push_back(pair);
+      const std::array<nrhi::TextureView*, 3> set{p.albedo, p.weights, p.side};
+      if (std::find(terrain_sets_.begin(), terrain_sets_.end(), set) == terrain_sets_.end()) {
+        terrain_sets_.push_back(set);
       }
     }
     if (textured) {
@@ -467,7 +480,7 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
       }
     }
   }
-  st.terrain_tuples = uint32_t(terrain_pairs_.size());
+  st.terrain_tuples = uint32_t(terrain_sets_.size());
 }
 
 void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
@@ -566,7 +579,10 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
   // The terrain table and constant buffer hold something from the first draw on
   // (only the terrain shaders read them, and each terrain draw binds its own).
-  cmd->SetTexturePair(kParamTerrainTextures, white_view_, white_view_);
+  {
+    nrhi::TextureView* const whites[3] = {white_view_, white_view_, white_view_};
+    cmd->SetTextures(kParamTerrainTextures, whites, 3);
+  }
   if (terrain_cb_) cmd->SetConstantBuffer(kParamTerrainConstants, terrain_cb_, 0);
 
   nrhi::Pipeline* bound = nullptr;
@@ -578,10 +594,12 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       bound = p.pipeline;
     }
     // A terrain record with its material has its textures in the terrain table;
-    // a far one reads its colour coordinates from t2 like a textured draw.
+    // a far one reads its colour coordinates from t2 like a textured draw, and a
+    // layer with the steep-ground block its vertex normals (as they are: no
+    // transform).
     const bool terrain_material = p.textured != 0;
     const bool has_albedo = p.albedo != nullptr && !terrain_material;
-    const bool has_uvs = has_albedo || p.textured == kTexturedTerrainFar;
+    const bool has_uvs = has_albedo || (terrain_material && p.uvs != nullptr);
     float uv[4] = {1.0f, 1.0f, 0.0f, 0.0f};
     if (has_albedo) {
       // BC textures are padded to whole blocks: scale into the guest extent.
@@ -590,7 +608,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       uv[1] = x[1] * p.uv_fix[1];
       uv[2] = x[2] * p.uv_fix[0];
       uv[3] = x[3] * p.uv_fix[1];
-    } else if (has_uvs) {
+    } else if (p.textured == kTexturedTerrainFar) {
       uv[0] = p.uv_fix[0];
       uv[1] = p.uv_fix[1];
     }
@@ -603,9 +621,12 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     cmd->SetBufferSrv(kParamUvs, has_uvs ? p.uvs : p.positions, 0);
     cmd->SetTexture(kParamAlbedo, has_albedo ? p.albedo : white_view_);
     if (terrain_material) {
-      // The white view stands in for the weights of a far draw: the backend
-      // skips a null entry of a table.
-      cmd->SetTexturePair(kParamTerrainTextures, p.albedo, p.weights ? p.weights : white_view_);
+      // The white view stands in for the weights of a far draw and for the side
+      // texture of a draw without the steep-ground block: the backend skips a
+      // null entry of a table.
+      nrhi::TextureView* const set[3] = {p.albedo, p.weights ? p.weights : white_view_,
+                                         p.side ? p.side : white_view_};
+      cmd->SetTextures(kParamTerrainTextures, set, 3);
       cmd->SetConstantBuffer(kParamTerrainConstants, terrain_cb_, uint64_t(p.slot) * kClayTerrainSlotBytes);
     }
     cmd->Draw(p.index_count, 0);

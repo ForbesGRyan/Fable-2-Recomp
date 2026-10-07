@@ -1,5 +1,6 @@
 // Synthetic standalone test; no game or GPU.
 #include "../../src/native/render/texture_decode.h"
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -303,6 +304,120 @@ int main() {
     MakeFc(d, fc);
     if (BaseLevelDumpBytes(fc) != 31u * 64u * 8u + 64u * 8u) return 82;
   }
+  // --- k_DXN (format 49): two BC4 blocks per 4 x 4 block, the terrain's normal map (tf17) ---
+  // The same blocks and numbers as test_decode_dxn of tests/test_terrain_replay.py.
+  {
+    auto near = [](float a, float b) { return std::fabs(a - b) <= 1e-6f; };
+    // 8 bytes of a BC4 block as the GPU reads them: two end values, then texel i's 3-bit index from the low end.
+    auto bc4 = [](uint8_t a0, uint8_t a1, uint32_t (*index)(uint32_t), uint8_t out[8]) {
+      uint64_t bits = 0;
+      for (uint32_t i = 0; i < 16; ++i) bits |= uint64_t(index(i) & 7) << (3 * i);
+      out[0] = a0;
+      out[1] = a1;
+      for (int b = 0; b < 6; ++b) out[2 + b] = uint8_t(bits >> (8 * b));
+    };
+    auto by_i = [](uint32_t i) { return i % 8; };
+    auto zero = [](uint32_t) { return 0u; };
+    // Block 0: x has end values 200 > 60 (eight values), y 10 <= 250 (six values, then 0 and 255), texel i
+    // with index i % 8. Block 1: x 255 everywhere, y 0.
+    uint8_t post[32];
+    bc4(200, 60, by_i, post);
+    bc4(10, 250, by_i, post + 8);
+    bc4(255, 255, zero, post + 16);
+    bc4(0, 0, zero, post + 24);
+    const float x_want[8] = {200, 60, 180, 160, 140, 120, 100, 80};
+    const float y_want[8] = {10, 250, 58, 106, 154, 202, 0, 255};
+    for (uint32_t i = 0; i < 16; ++i) {
+      if (!near(Bc4Value(post, i), x_want[i % 8]) || !near(Bc4Value(post + 8, i), y_want[i % 8])) return 90;
+    }
+    // A value that is no whole number: 200 and 61 give (6 * 200 + 61) / 7 at index 2. Not rounded.
+    {
+      uint8_t odd[8];
+      bc4(200, 61, [](uint32_t) { return 2u; }, odd);
+      if (!near(Bc4Value(odd, 5), 1261.0f / 7.0f) || Bc4Value(odd, 5) == 180.0f) return 91;
+    }
+    for (bool tiled : {false, true}) {
+      for (uint32_t endian : {1u, 0u, 2u, 3u}) {
+        // Linear: blocks 0 and 1 of a row of 32 blocks, at 0 and 16; tiled: block (1, 0) at 32 (16-byte
+        // blocks sit two to a 32-byte column of the tile; (0, 1) lies between them).
+        const uint32_t second = tiled ? uint32_t(capture::TiledOffset2D(1, 0, 8, 4)) : 16u;
+        if (second != (tiled ? 32u : 16u)) return 89;
+        std::vector<uint8_t> g(second + 16, 0);
+        CopySwapped(g.data(), post, 16, endian);  // the swaps are their own inverses
+        CopySwapped(g.data() + second, post + 16, 16, endian);
+        float xy[2] = {9, 9};
+        for (uint32_t i = 0; i < 16; ++i) {
+          if (!DecodeDxnTexel(g.data(), g.size(), 8, 4, 8, tiled, endian, i % 4, i / 4, xy)) return 92;
+          // x is the first eight bytes of the block, y the second.
+          if (!near(xy[0], x_want[i % 8] / 255.0f) || !near(xy[1], y_want[i % 8] / 255.0f)) return 93;
+        }
+        if (!DecodeDxnTexel(g.data(), g.size(), 8, 4, 8, tiled, endian, 5, 2, xy) || xy[0] != 1.0f || xy[1] != 0.0f) return 94;
+        // Nothing is read out of range: a block cut by one byte, a texel outside the level, no source.
+        xy[0] = xy[1] = 9;
+        if (DecodeDxnTexel(g.data(), g.size() - 1, 8, 4, 8, tiled, endian, 5, 2, xy) || xy[0] != 9 || xy[1] != 9) return 95;
+        if (!DecodeDxnTexel(g.data(), g.size() - 1, 8, 4, 8, tiled, endian, 3, 3, xy)) return 96;  // block 0 is whole
+        if (DecodeDxnTexel(g.data(), g.size(), 8, 4, 8, tiled, endian, 8, 0, xy)) return 97;
+        if (DecodeDxnTexel(g.data(), g.size(), 8, 4, 8, tiled, endian, 0, 4, xy)) return 98;
+        if (DecodeDxnTexel(nullptr, g.size(), 8, 4, 8, tiled, endian, 0, 0, xy)) return 99;
+        // The whole level: width * height pairs, row-major.
+        std::vector<float> level(3, 7.0f);
+        if (!DecodeDxnLevel(g.data(), g.size(), 8, 4, 8, tiled, endian, &level) || level.size() != 64) return 100;
+        if (!near(level[2 * (1 * 8 + 2)], x_want[6] / 255.0f) || !near(level[2 * (1 * 8 + 2) + 1], y_want[6] / 255.0f) ||
+            level[2 * (3 * 8 + 7)] != 1.0f || level[2 * (3 * 8 + 7) + 1] != 0.0f) return 101;
+        if (DecodeDxnLevel(g.data(), g.size() - 1, 8, 4, 8, tiled, endian, &level) || !level.empty()) return 102;
+      }
+    }
+    // The byte order is the fetch constant's: the 8in16 guest bytes read without the swap have the end
+    // values exchanged (60 <= 200: the six-value mode, whose index 0 is 60).
+    {
+      uint8_t one[16], guest[16];
+      bc4(200, 60, zero, one);
+      bc4(0, 0, zero, one + 8);
+      CopySwapped(guest, one, 16, 1);
+      float xy[2];
+      if (!DecodeDxnTexel(guest, 16, 4, 4, 1, false, 1, 0, 0, xy) || !near(xy[0], 200.0f / 255.0f)) return 103;
+      if (!DecodeDxnTexel(guest, 16, 4, 4, 1, false, 0, 0, 0, xy) || !near(xy[0], 60.0f / 255.0f)) return 104;
+    }
+    // A 70 x 45 level (edge blocks cropped), linear with a pitch of 24 blocks (rows of 32 blocks of 16
+    // bytes) and tiled: block (bx, by) holds x = 3 * bx + by and y = 250 - bx - 2 * by everywhere.
+    for (bool tiled : {false, true}) {
+      const uint32_t W = 70, H = 45, WB = 18, HB = 12, PITCH = 24;
+      uint32_t size = 0, last_x = 0, last_y = 0;  // the block that ends the level's bytes
+      auto at = [&](uint32_t bx, uint32_t by) {
+        return tiled ? uint32_t(capture::TiledOffset2D(int(bx), int(by), PITCH, 4)) : by * 32u * 16u + bx * 16u;
+      };
+      for (uint32_t by = 0; by < HB; ++by)
+        for (uint32_t bx = 0; bx < WB; ++bx) {
+          if (at(bx, by) + 16 > size) {
+            size = at(bx, by) + 16;
+            last_x = bx;
+            last_y = by;
+          }
+        }
+      std::vector<uint8_t> g(size, 0);
+      for (uint32_t by = 0; by < HB; ++by)
+        for (uint32_t bx = 0; bx < WB; ++bx) {
+          uint8_t blk[16];
+          bc4(uint8_t(3 * bx + by), uint8_t(3 * bx + by), zero, blk);
+          bc4(uint8_t(250 - bx - 2 * by), uint8_t(250 - bx - 2 * by), zero, blk + 8);
+          CopySwapped(g.data() + at(bx, by), blk, 16, 1);
+        }
+      float xy[2];
+      for (uint32_t y = 0; y < H; y += 7)
+        for (uint32_t x = 0; x < W; x += 3) {
+          if (!DecodeDxnTexel(g.data(), g.size(), W, H, PITCH, tiled, 1, x, y, xy)) return 105;
+          if (!near(xy[0], float(3 * (x / 4) + y / 4) / 255.0f) || !near(xy[1], float(250 - x / 4 - 2 * (y / 4)) / 255.0f)) return 106;
+        }
+      // The block that ends the bytes is needed whole for its own texels, and for no other.
+      if (DecodeDxnTexel(g.data(), g.size() - 1, W, H, PITCH, tiled, 1, last_x * 4, last_y * 4, xy)) return 107;
+      if (!DecodeDxnTexel(g.data(), g.size(), W, H, PITCH, tiled, 1, last_x * 4, last_y * 4, xy)) return 109;
+      if (!DecodeDxnTexel(g.data(), g.size() - 1, W, H, PITCH, tiled, 1, 0, 0, xy)) return 115;
+      // The size the level spans by the dump rule (pitch 96 texels) holds every block the decode reads.
+      const uint32_t dump_fc[6] = {2u | ((96u >> 5) << 22) | (uint32_t(tiled) << 31), 49u | (1u << 6) | 0x1A000000u,
+                                   (W - 1) | ((H - 1) << 13), 0, 0, 1u << 9};
+      if (BaseLevelDumpBytes(dump_fc) < size || (!tiled && BaseLevelDumpBytes(dump_fc) != size)) return 108;
+    }
+  }
   // --- the real terrain weight map, when a discovery dump of tf18 is on disk (else SKIPPED, loudly) ---
   // FABLE2_TF18_BIN: the dumped base-level bytes (native_tex_<stamp>/<BASE>_<IDENTITY>.bin of the tess row's tf18);
   // FABLE2_TF18_FC: its six fetch dwords as hex, comma separated (the "texture" row's "fc"). The decoded R8 image is
@@ -331,6 +446,36 @@ int main() {
       if (!o || std::fwrite(r8.data(), 1, r8.size(), o) != r8.size()) return 64;
       std::fclose(o);
       std::printf("tf18 dump decoded: %ux%u, wrote %s\n", rt.width, rt.height, outp.c_str());
+    }
+  }
+  // --- the real terrain normal map, when a discovery dump of tf17 is on disk (else SKIPPED, loudly) ---
+  // FABLE2_TF17_BIN / FABLE2_TF17_FC as above, for the tess rows' tf17 (k_DXN). The decoded level is written to
+  // FABLE2_TF17_BIN + ".cpp.xy" (two little-endian floats per texel) for tests/test_terrain_replay.py's real-dump
+  // test to compare with.
+  {
+    const char* bin = std::getenv("FABLE2_TF17_BIN");
+    const char* fcs = std::getenv("FABLE2_TF17_FC");
+    if (!bin || !fcs) {
+      std::printf("SKIPPED: real tf17 dump test (set FABLE2_TF17_BIN and FABLE2_TF17_FC after a discovery capture)\n");
+    } else {
+      uint32_t rfc[6] = {};
+      if (std::sscanf(fcs, "%x,%x,%x,%x,%x,%x", &rfc[0], &rfc[1], &rfc[2], &rfc[3], &rfc[4], &rfc[5]) != 6) return 110;
+      if ((rfc[1] & 0x3F) != 49) return 111;
+      std::FILE* f = std::fopen(bin, "rb");
+      if (!f) return 112;
+      std::vector<uint8_t> bytes;
+      uint8_t chunk[65536];
+      for (size_t n; (n = std::fread(chunk, 1, sizeof(chunk), f)) > 0;) bytes.insert(bytes.end(), chunk, chunk + n);
+      std::fclose(f);
+      const uint32_t w = (rfc[2] & 0x1FFF) + 1, h = ((rfc[2] >> 13) & 0x1FFF) + 1;
+      std::vector<float> xy;
+      if (!DecodeDxnLevel(bytes.data(), bytes.size(), w, h, (((rfc[0] >> 22) & 0x1FF) << 5) / 4, (rfc[0] >> 31) != 0,
+                          (rfc[1] >> 6) & 3, &xy) || xy.size() != size_t(w) * h * 2) return 113;
+      const std::string outp = std::string(bin) + ".cpp.xy";
+      std::FILE* o = std::fopen(outp.c_str(), "wb");
+      if (!o || std::fwrite(xy.data(), sizeof(float), xy.size(), o) != xy.size()) return 114;
+      std::fclose(o);
+      std::printf("tf17 dump decoded: %ux%u, wrote %s\n", w, h, outp.c_str());
     }
   }
   return 0;

@@ -1231,7 +1231,7 @@ int main() {
     m.weight_scale = 56.0f;
     m.weight_bias = 57.0f;
     const float fix[2] = {0.5f, 0.25f};
-    static_assert(sizeof(ClayTerrainConstants) == 128 && kClayTerrainSlotBytes == 256);
+    static_assert(sizeof(ClayTerrainConstants) == 160 && kClayTerrainSlotBytes == 256);
     ClayTerrainConstants c = MakeClayTerrainConstants(m, MaterialKind::kTerrainLayer, fix, 1, 3);
     auto field = [](const char* name) -> const shaders::ClayTerrainField* {
       for (const shaders::ClayTerrainField& f : shaders::kClayTerrainFields) {
@@ -1267,7 +1267,8 @@ int main() {
     CHECK(254, floats("t_eye", {50.0f, 51.0f, 52.0f}) && floats("t_hole_ref", {53.0f}) &&
                    floats("t_fade", {54.0f, 55.0f}) && floats("t_weight_scale", {56.0f}) &&
                    floats("t_weight_bias", {57.0f}));
-    CHECK(255, word("t_colour_sampler", 1) && word("t_weight_sampler", 3) && word("t_flags", 0) && word("t_pad", 0));
+    CHECK(255, word("t_colour_sampler", 1) && word("t_weight_sampler", 3) && word("t_flags", 0) &&
+                   word("t_side_sampler", 0));
     {
       // The table covers the block in order, without a gap or an overlap.
       uint32_t at = 0;
@@ -1286,6 +1287,37 @@ int main() {
                    floats("t_fade", {54.0f, 55.0f}) && floats("t_eye", {50.0f, 51.0f, 52.0f}));
     c = MakeClayTerrainConstants(fm, MaterialKind::kTerrainFar, fix, 2, 0);
     CHECK(258, word("t_flags", 0));
+
+    // 301-304: the steep-ground block's constants (a layer of a shader paired with C30A). The side
+    // coordinate's scale goes into the host texture's extent like the detail coordinate's; without the
+    // block the fields are zero and the flag is clear.
+    c = MakeClayTerrainConstants(m, MaterialKind::kTerrainLayer, fix, 1, 3);
+    CHECK(301, floats("t_side_uv", {0.0f, 0.0f}) && floats("t_slope", {0.0f, 0.0f}) &&
+                   floats("t_steep_threshold", {0.0f}) && floats("t_steep_eps", {0.0f}) && word("t_flags", 0));
+    capture::TerrainMaterialInputs sm = m;
+    sm.steep = true;
+    sm.side_uv[0] = 0.125f;
+    sm.side_uv[1] = -0.125f;
+    sm.slope[0] = -7.5f;
+    sm.slope[1] = 10.0f;
+    sm.steep_threshold = 0.99609375f;
+    sm.steep_eps = 0.0001f;
+    const float side_fix[2] = {0.5f, 0.75f};
+    c = MakeClayTerrainConstants(sm, MaterialKind::kTerrainLayer, fix, 1, 3, side_fix, 2);
+    CHECK(302, kTerrainSteep == 2u && word("t_flags", kTerrainSteep) && word("t_side_sampler", 2) &&
+                   floats("t_side_uv", {0.0625f, -0.09375f}) && floats("t_slope", {-7.5f, 10.0f}) &&
+                   floats("t_steep_threshold", {0.99609375f}) && floats("t_steep_eps", {0.0001f}));
+    // The rest of the block is what it is without it.
+    CHECK(303, floats("t_detail_uv", {5.0f, 2.75f, 6.0f, 3.25f}) && word("t_colour_sampler", 1) &&
+                   word("t_weight_sampler", 3) && floats("t_fade", {54.0f, 55.0f}));
+    // Without a side texture resolved the block is off, whatever the inputs say; and a side texture
+    // does not switch it on for inputs without the block, or for a far kind.
+    c = MakeClayTerrainConstants(sm, MaterialKind::kTerrainLayer, fix, 1, 3);
+    CHECK(304, word("t_flags", 0) && floats("t_side_uv", {0.0f, 0.0f}) && floats("t_steep_threshold", {0.0f}));
+    c = MakeClayTerrainConstants(m, MaterialKind::kTerrainLayer, fix, 1, 3, side_fix, 2);
+    CHECK(316, word("t_flags", 0) && word("t_side_sampler", 0) && floats("t_side_uv", {0.0f, 0.0f}));
+    c = MakeClayTerrainConstants(sm, MaterialKind::kTerrainFarFade, fix, 1, 3, side_fix, 2);
+    CHECK(317, word("t_flags", kTerrainFadeIn) && floats("t_slope", {0.0f, 0.0f}));
 
     // 259-265: whether a record is drawn with its material this frame, and the reason when not.
     const MaterialStatus ok = MaterialStatus::kTextured;
@@ -1317,6 +1349,15 @@ int main() {
                        MaterialStatus::kUvUnsupported &&
                    TerrainMaterialStatus(fm, MaterialKind::kTerrainFar, true, MaterialStatus::kTextureBad, ok, true) ==
                        MaterialStatus::kTextureBad);
+    // 305-306: the steep-ground block's part of a layer's status. A record without the block needs
+    // nothing more; one with it needs its side texture (the cache's reason when not usable) and the
+    // normals of its grid points (uv-unsupported: the normal map could not be read or decoded).
+    CHECK(305, TerrainSteepStatus(m, MaterialStatus::kTexturePending, false) == ok &&
+                   TerrainSteepStatus(sm, ok, true) == ok);
+    CHECK(306, TerrainSteepStatus(sm, MaterialStatus::kTexturePending, true) == MaterialStatus::kTexturePending &&
+                   TerrainSteepStatus(sm, MaterialStatus::kFormatUnsupported, false) == MaterialStatus::kFormatUnsupported &&
+                   TerrainSteepStatus(sm, MaterialStatus::kTextureBad, true) == MaterialStatus::kTextureBad &&
+                   TerrainSteepStatus(sm, ok, false) == MaterialStatus::kUvUnsupported);
     CHECK(264, TerrainTextured(MaterialKind::kTerrainLayer) == kTexturedTerrainLayer &&
                    TerrainTextured(MaterialKind::kTerrainFar) == kTexturedTerrainFar &&
                    TerrainTextured(MaterialKind::kTerrainFarFade) == kTexturedTerrainFar);
@@ -1426,6 +1467,16 @@ int main() {
     // The underlay of a square is found by the square's centre: a coarser patch covers the 8-unit
     // squares inside it and no square beside it.
     CHECK(279, plan({item(coarse, F, false), item(a, L), item(a3, L), item(out, L)}) == "FSSM");
+    // 313-315: a layer with the steep-ground block whose side texture is not usable this frame, or whose
+    // normals could not be built (TerrainSteepStatus), is a layer without its material: its square is
+    // one flat draw, its other layers are left out, and the neighbouring square keeps its material.
+    {
+      const bool pending = TerrainSteepStatus(sm, MaterialStatus::kTexturePending, true) == ok;
+      CHECK(313, !pending && plan({item(under, F), item(a, L), item(a, L, pending), item(b, L), item(a, L)}) == "MFSMS");
+      const bool no_normals = TerrainSteepStatus(sm, ok, false) == ok;
+      CHECK(314, !no_normals && plan({item(a, L, no_normals), item(a, L), item(b, L)}) == "FSM");
+      CHECK(315, plan({item(a, L, TerrainSteepStatus(sm, ok, true) == ok), item(a, L)}) == "MM");
+    }
 
     // 280-286: F3 and log text with terrain drawn with its material.
     TextureStats ts;
@@ -1458,17 +1509,17 @@ int main() {
     CHECK(284, FormatStatusText(s, st, nullptr).find("skipped 7 (top: terrain-square 7)") != std::string::npos);
     st.terrain_tuples = 78;
     CHECK(285, FormatTerrainText(st, ts) ==
-                   "Terrain: material 560 of 567 drawn, flat 7, left out 7, texture pairs 78");
+                   "Terrain: material 560 of 567 drawn, flat 7, left out 7, texture sets 78");
     // Every terrain record that could not have its material is named with its own reason, also
     // when it was left out or its square's flat draw is another record (those show as
     // terrain-square elsewhere): most first.
     st.terrain_unusable[size_t(MaterialStatus::kTexturePending)] = 2;
     st.terrain_unusable[size_t(MaterialStatus::kTerrainInputs)] = 3;
     CHECK(300, FormatTerrainText(st, ts) ==
-                   "Terrain: material 560 of 567 drawn, flat 7, left out 7, texture pairs 78 | "
+                   "Terrain: material 560 of 567 drawn, flat 7, left out 7, texture sets 78 | "
                    "without material: terrain-inputs 3, texture-pending 2");
     CHECK(286, FormatTerrainText(ClayStats{}, TextureStats{}) ==
-                   "Terrain: material 0 of 0 drawn, flat 0, left out 0, texture pairs 0");
+                   "Terrain: material 0 of 0 drawn, flat 0, left out 0, texture sets 0");
 
     // 287-292: the cache key of a far draw's colour coordinates (built from the two tables).
     static const uint32_t kTableU[6] = {0x07004802, 0x1B9D6058, 0x0005E32F, 0x01001400, 0x00000000, 0x00000218};
@@ -1515,6 +1566,61 @@ int main() {
     v.terrain.material.fade[1] = 0.0f;
     v.terrain.height_scale = 2.0f;
     CHECK(292, TerrainFarUvKey(v) == k);
+
+    // 307-312: the cache key of a steep layer's vertex normals (built from the normal map at the
+    // grid points): the map (fetch dwords 0 to 2), the draw's patches and what places a grid point on
+    // the map. What the normals do not depend on stays out: the height scale, the layer's textures
+    // and constants (every layer of a square shares one buffer), the eye.
+    static const uint32_t kTf17[6] = {0x87004802, 0x1B8AA071, 0x00600300, 0x01000D10, 0x00000000, 0x00000218};
+    capture::DrawRecord n = BaseRecord();
+    n.terrain = under;
+    n.terrain.map.phys_addr = 0x1B770000;
+    n.terrain.map.size = 0x138C00;
+    n.terrain.material = sm;
+    std::memcpy(n.terrain.material.normal_fetch, kTf17, sizeof(kTf17));
+    const GeoKey nk = TerrainNormalKey(n);
+    CHECK(307, nk.kind == 8 && nk.addr == 0x1B8AA000 && nk.stride == capture::kTerrainGrid && !(nk == PositionKey(n)) &&
+                   !(nk == IndexKey(n)) && !(nk == TerrainFarUvKey(n)) && TerrainNormalKey(n) == nk);
+    v = n;
+    v.terrain.material.normal_fetch[1] = 0x1B8AB071;  // another map
+    w = n;
+    w.terrain.material.normal_fetch[2] = 0x00600301;  // another size
+    CHECK(308, !(TerrainNormalKey(v) == nk) && !(TerrainNormalKey(w) == nk));
+    v = n;
+    v.terrain.material.normal_fetch[1] = 0x1B8AA031;  // the same address read with another byte order
+    CHECK(318, !(TerrainNormalKey(v) == nk) && TerrainNormalKey(v).addr == nk.addr);
+    v = n;
+    v.terrain.material.normal_fetch[0] = 0x86C04802;  // another pitch
+    w = n;
+    w.terrain.material.normal_fetch[0] = 0x87000002;  // other clamp modes
+    CHECK(309, !(TerrainNormalKey(v) == nk) && !(TerrainNormalKey(w) == nk));
+    v = n;
+    v.terrain.patch += 1.0f;
+    w = n;
+    w.terrain.patches += 1;
+    CHECK(310, !(TerrainNormalKey(v) == nk) && !(TerrainNormalKey(w) == nk));
+    {
+      // Each number that places a grid point on the map.
+      bool all = true;
+      for (int field = 0; field < 10; ++field) {
+        capture::DrawRecord x = n;
+        float* at[10] = {&x.terrain.cols, &x.terrain.inv_cols, &x.terrain.cell[0], &x.terrain.cell[1],
+                         &x.terrain.origin[0], &x.terrain.origin[1], &x.terrain.tex_offset[0], &x.terrain.tex_offset[1],
+                         &x.terrain.tex_scale[0], &x.terrain.tex_scale[1]};
+        *at[field] += 0.25f;
+        all = all && !(TerrainNormalKey(x) == nk);
+      }
+      CHECK(311, all);
+    }
+    v = n;
+    v.terrain.height_scale = 2.0f;
+    v.terrain.material.eye[0] += 1.0f;
+    v.terrain.material.detail_fetch[1] ^= 0x1000u;   // another layer of the same square
+    v.terrain.material.side_fetch[1] ^= 0x1000u;
+    v.terrain.material.weight_uv[2] += 0.5f;
+    v.terrain.material.slope[0] = 0.0f;
+    v.terrain.map.phys_addr = 0x1B780000;            // (the heights are the position buffer's)
+    CHECK(312, TerrainNormalKey(v) == nk);
   }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "

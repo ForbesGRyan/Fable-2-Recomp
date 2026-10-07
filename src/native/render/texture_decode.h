@@ -254,6 +254,69 @@ inline bool DecodeDxt3aLevel(const uint8_t* src, size_t src_size, uint32_t width
   return true;
 }
 
+// The value (0..255, not rounded) of texel i (row-major, 0..15) of an 8-byte BC4 block as the GPU reads it: two
+// end values a0 and a1, then sixteen 3-bit indices from the low end of the following 48 bits. Index 0 is a0 and 1
+// is a1; with a0 > a1 the indices 2 to 7 are the six steps of a seventh from a0 to a1, else 2 to 5 are the four
+// steps of a fifth, 6 is 0 and 7 is 255 (the alpha block of DXT5).
+inline float Bc4Value(const uint8_t blk[8], uint32_t i) {
+  const uint32_t a0 = blk[0], a1 = blk[1];
+  uint64_t bits = 0;
+  for (uint32_t b = 0; b < 6; ++b) bits |= uint64_t(blk[2 + b]) << (8 * b);
+  const uint32_t k = uint32_t(bits >> (3 * (i & 15))) & 7;
+  if (k == 0) return float(a0);
+  if (k == 1) return float(a1);
+  if (a0 > a1) return float((8 - k) * a0 + (k - 1) * a1) / 7.0f;
+  if (k < 6) return float((6 - k) * a0 + (k - 1) * a1) / 5.0f;
+  return k == 6 ? 0.0f : 255.0f;
+}
+
+// One texel of a k_DXN level (Xenos format 49; the terrain's normal map, tf17 of the layer vertex shaders) as its
+// two values in 0..1. A 4 x 4 block is 16 bytes: after the GPU's endian swap, the BC4 block of x and then that of y.
+// Source: the SDK presents k_DXN as BC5 through its plain 128-bits-per-block loader, which only swaps the bytes,
+// with the host swizzle RGGG, so the shader's x is the first block and its y the second
+// (thirdparty/rexglue-sdk/src/graphics/d3d12/texture_cache.cpp, the k_DXN row of the host format table); checked on
+// the dump of the normal map against the heightmap's slopes (frame-map section 13, "Terrain"). The values are the
+// palette entries as fractions (Bc4Value), not rounded to 8 bits. Blocks sit like DXT5's: tiled at
+// TiledOffset2D(bx, by, pitch_blocks, 4) or linear in rows of pitch_blocks aligned to 32 blocks times 16 bytes
+// (pitch_blocks: the fetch pitch in blocks, at least the level's width). False, with out_xy untouched, for a null
+// source, a texel outside the level or a block that does not lie inside src_size (nothing is read past it).
+inline bool DecodeDxnTexel(const uint8_t* src, size_t src_size, uint32_t width, uint32_t height, uint32_t pitch_blocks,
+                           bool tiled, uint32_t endian, uint32_t x, uint32_t y, float out_xy[2]) {
+  if (!src || x >= width || y >= height) return false;
+  const uint32_t pitch = std::max(pitch_blocks, (width + 3) / 4);
+  const uint32_t bx = x / 4, by = y / 4;
+  const uint64_t o = tiled ? uint64_t(uint32_t(capture::TiledOffset2D(int32_t(bx), int32_t(by), pitch, 4)))
+                           : uint64_t(by) * (uint64_t((pitch + 31) & ~31u) * 16) + uint64_t(bx) * 16;
+  if (o + 16 > src_size) return false;
+  uint8_t blk[16];
+  CopySwapped(blk, src + o, 16, endian);
+  const uint32_t i = (y & 3) * 4 + (x & 3);
+  out_xy[0] = Bc4Value(blk, i) / 255.0f;
+  out_xy[1] = Bc4Value(blk + 8, i) / 255.0f;
+  return true;
+}
+
+// A whole k_DXN level: width * height pairs (x, y), row-major, each as DecodeDxnTexel gives it. False, with
+// out_xy left empty, when any texel cannot be read. The clay pass reads single texels (the terrain grid's
+// points); this is for tools and tests.
+inline bool DecodeDxnLevel(const uint8_t* src, size_t src_size, uint32_t width, uint32_t height, uint32_t pitch_blocks,
+                           bool tiled, uint32_t endian, std::vector<float>* out_xy) {
+  if (!out_xy) return false;
+  out_xy->clear();
+  if (!src || width == 0 || height == 0) return false;
+  std::vector<float> out(size_t(width) * height * 2);
+  for (uint32_t y = 0; y < height; ++y) {
+    for (uint32_t x = 0; x < width; ++x) {
+      if (!DecodeDxnTexel(src, src_size, width, height, pitch_blocks, tiled, endian, x, y,
+                          &out[(size_t(y) * width + x) * 2])) {
+        return false;
+      }
+    }
+  }
+  *out_xy = std::move(out);
+  return true;
+}
+
 inline bool IsMirror(uint8_t clamp) { return clamp == 1 || clamp == 3 || clamp == 5 || clamp == 7; }
 
 // Static sampler s<i>: bit 0 linear (else point), bit 1 clamp (else wrap).

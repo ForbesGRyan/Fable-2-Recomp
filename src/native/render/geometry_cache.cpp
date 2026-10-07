@@ -447,6 +447,47 @@ nrhi::Buffer* GeometryCache::TerrainFarUvs(nrhi::Device* dev, const capture::Dra
   return buffer;
 }
 
+nrhi::Buffer* GeometryCache::TerrainNormals(nrhi::Device* dev, const capture::DrawRecord& r,
+                                            uint32_t vertex_count, ClayStats& st) {
+  // A map of garbage constants can claim hundreds of MB; the one seen is 803 KB.
+  constexpr uint32_t kMaxMapBytes = 16u << 20;
+  const capture::TerrainMaterialInputs& m = r.terrain.material;
+  capture::NormalMap nm;
+  if (!r.terrain.active || !m.valid || m.adaptive || !m.steep || !capture::DecodeNormalMap(m.normal_fetch, &nm) ||
+      nm.size == 0 || nm.size > kMaxMapBytes) {
+    return nullptr;
+  }
+  const auto t0 = Clock::now();
+  const uint8_t* src = capture::ReadPhysical(nm.phys_addr, nm.size);
+  if (!src) {
+    st.hash_ms += Ms(t0, Clock::now());
+    return nullptr;
+  }
+  const uint64_t hash = FrameHash(nm.phys_addr, nm.size, src);
+  const GeoKey key = TerrainNormalKey(r);
+  const LookupResult found = index_.Lookup(key, hash);
+  const auto t1 = Clock::now();
+  st.hash_ms += Ms(t0, t1);
+  if (found.hit) {
+    if (auto it = entries_.find(found.id); it != entries_.end() && it->second.count >= vertex_count) {
+      ++st.hits;
+      return it->second.buffer;
+    }
+  }
+  nrhi::Buffer* buffer = nullptr;
+  uint64_t alloc = 0;
+  if (capture::BuildTerrainNormals(r.terrain, nm, src, nm.size, capture::kTerrainGrid, &uvs_) &&
+      uvs_.size() >= vertex_count) {
+    buffer = Upload(dev, uvs_.data(), uint64_t(uvs_.size()) * sizeof(capture::Float2), &alloc);
+  }
+  if (buffer) {
+    Insert(dev, key, hash, {buffer, uint32_t(uvs_.size()), 0, alloc}, alloc);
+    ++st.uploads;
+  }
+  st.decode_ms += Ms(t1, Clock::now());
+  return buffer;
+}
+
 nrhi::Buffer* GeometryCache::Indices(nrhi::Device* dev, const capture::DrawRecord& r,
                                      uint32_t vertex_count, uint32_t* index_count, ClayStats& st) {
   const auto t0 = Clock::now();

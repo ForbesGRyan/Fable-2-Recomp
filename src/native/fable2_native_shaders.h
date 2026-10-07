@@ -62,7 +62,11 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 // by the albedo's alpha (bit 9). Flat draws (kClayPs) have no alpha. Every clay
 // shader declares the one cbuffer Draw (ClayConstants). The vertex shader also
 // hands on the position it read (`world`: for a terrain record the world
-// position x, y, height), which only the terrain pixel shaders below take.
+// position x, y, height), which only the terrain pixel shaders below take, and
+// `normal`: (0, 0, 1), or for a terrain layer with the steep-ground block the
+// game's vertex normal, whose (x, y) the draw's buffer at t2 holds in place of
+// UVs (GeometryCache::TerrainNormals) and whose z is formed here as the game's
+// vertex shader forms it; only kClayTerrainLayerPs takes it.
 inline constexpr const char* kClayVs = R"hlsl(
 cbuffer Draw : register(b0) {
   float4 r0; float4 r1; float4 r2; float4 r3;   // captured rows
@@ -82,6 +86,7 @@ StructuredBuffer<float2> uvs : register(t2);
 struct VsOut {
   float4 pos : SV_Position; float3 ndc : TEXCOORD0; float2 uv : TEXCOORD1;
   float3 world : TEXCOORD2;
+  float3 normal : TEXCOORD3;
 };
 VsOut main(uint vid : SV_VertexID) {
   VsOut o;
@@ -95,7 +100,12 @@ VsOut main(uint vid : SV_VertexID) {
   o.pos = c;
   o.ndc = float3(c.xy / max(abs(c.w), 1e-6), c.w * 0.01);
   o.uv = float2(0, 0);
-  if (textured != 0 && in_range) o.uv = uvs[v] * uv_xform.xy + uv_xform.zw;
+  o.normal = float3(0, 0, 1);
+  if (textured != 0 && in_range) {
+    float2 t = uvs[v];
+    o.uv = t * uv_xform.xy + uv_xform.zw;
+    o.normal = float3(t, sqrt(abs(1.0 - dot(t, t))));
+  }
   o.world = p.xyz;
   return o;
 }
@@ -186,16 +196,26 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
 //     the vertex carries (read from the game's two tables when the grid is built,
 //     TerrainFarUvs), alpha 1; with t_flags bit 0 (shader 2F8A, the layers'
 //     underlay) times sat(d2 * c31.x + c31.y).
+//   steep ground (t_flags bit 1: the three layer shaders paired with vertex
+//     shader C30A): where s = sat(|n.z| * c45.y + c45.x) is below the shader's
+//     threshold the colour is the display value of the game's linear mix,
+//     sqrt(s * tf0^2 + (1 - s) * (wy * tf13(o1)^2 + wx * tf13(o0)^2)), with
+//     wx, wy = |n.x|, |n.y| / (|n.x| + |n.y| + small term), tf13 the layer's side
+//     texture at the side projections o0 = (c8.x * y, -c8.x * height) and
+//     o1 = (c8.x * x, -c8.x * height) of the world position, and n the game's
+//     vertex normal interpolated over the grid (kClayVs). The game skips the
+//     block from the threshold on; the mix is continuous there (1 - s is at
+//     most 1/256).
 // Not read: the base map tf3 with its exponent and tint, every light, the fog
-// (they are lighting; the frame map lists them) and, until the steep-ground
-// block is built, the side projections of three layer shaders.
+// and the normal maps tf2 and tf14 (they are lighting; the frame map lists them).
 // Both shaders end in kClayTexturedPs's alpha test, alpha-to-mask and output
 // (the softened facet shade; the alpha written when the draw blends). The
 // constants are cbuffer Terrain at b1, a constant buffer with one 256-byte slot
 // per terrain draw (ClayTerrainConstants in clay_logic.h); kClayTerrainFields
 // below is its layout, which the tests hold against both the compiled shaders
 // and the C++ struct. Textures: t4 the colour (tf0 or tf13), t5 the weight
-// cells (white for a far draw); static samplers as kClayTexturedPs.
+// cells (white for a far draw), t6 the side texture of a layer with the
+// steep-ground block (white otherwise); static samplers as kClayTexturedPs.
 struct ClayTerrainField {
   const char* name;  // the variable in cbuffer Terrain
   unsigned offset;   // bytes from the start of the buffer
@@ -205,7 +225,8 @@ inline constexpr ClayTerrainField kClayTerrainFields[] = {
     {"t_detail_uv", 0, 16},      {"t_weight_uv", 16, 16},     {"t_world0", 32, 16},        {"t_world1", 48, 16},
     {"t_world2", 64, 16},        {"t_eye", 80, 12},           {"t_hole_ref", 92, 4},       {"t_fade", 96, 8},
     {"t_weight_scale", 104, 4},  {"t_weight_bias", 108, 4},   {"t_colour_sampler", 112, 4}, {"t_weight_sampler", 116, 4},
-    {"t_flags", 120, 4},         {"t_pad", 124, 4},
+    {"t_flags", 120, 4},         {"t_side_sampler", 124, 4},  {"t_side_uv", 128, 8},       {"t_slope", 136, 8},
+    {"t_steep_threshold", 144, 4}, {"t_steep_eps", 148, 4},   {"t_pad", 152, 8},
 };
 
 #define FABLE2_CLAY_TERRAIN_COMMON_HLSL R"hlsl(
@@ -219,7 +240,10 @@ cbuffer Terrain : register(b1) {
   float4 t_world0; float4 t_world1; float4 t_world2;   // rows c4..c6 (far: identity)
   float3 t_eye; float t_hole_ref;                      // c19.xyz; layer: c114.x
   float2 t_fade; float t_weight_scale; float t_weight_bias;   // c31.xy; layer: c253.w, c253.y
-  uint t_colour_sampler; uint t_weight_sampler; uint t_flags; uint t_pad;   // t_flags bit 0: the far colour fades in
+  uint t_colour_sampler; uint t_weight_sampler; uint t_flags; uint t_side_sampler;   // t_flags bit 0: the far colour
+                                                                // fades in; bit 1: the layer has the steep-ground block
+  float2 t_side_uv; float2 t_slope;                    // steep: (c8.x, -c8.x) into the side texture; c45.xy
+  float t_steep_threshold; float t_steep_eps; uint2 t_pad;   // steep: the shader's two literals
 };
 Texture2D t_colour : register(t4);
 Texture2D t_weights : register(t5);
@@ -270,9 +294,32 @@ float4 terrain_out(float3 colour, float a, float4 pos, float3 ndc) {
 )hlsl"
 
 inline constexpr const char* kClayTerrainLayerPs = FABLE2_CLAY_TERRAIN_COMMON_HLSL R"hlsl(
+Texture2D t_side : register(t6);
+// The side texture at `at` with the screen derivatives d = (ddx, ddy) of the coordinate.
+float4 sample_side(float2 at, float4 d) {
+  if (t_side_sampler == 0) return t_side.SampleGrad(s_point_wrap, at, d.xy, d.zw);
+  if (t_side_sampler == 1) return t_side.SampleGrad(s_linear_wrap, at, d.xy, d.zw);
+  if (t_side_sampler == 2) return t_side.SampleGrad(s_point_clamp, at, d.xy, d.zw);
+  return t_side.SampleGrad(s_linear_clamp, at, d.xy, d.zw);
+}
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1,
-            float3 world : TEXCOORD2) : SV_Target {
+            float3 world : TEXCOORD2, float3 normal : TEXCOORD3) : SV_Target {
   float3 colour = sample_colour(world.xy * t_detail_uv.xy + t_detail_uv.zw).rgb;
+  // The steep-ground block. The side projections and their derivatives are formed for every pixel,
+  // so that the two fetches can stay inside the branch.
+  float2 o0 = world.yz * t_side_uv;
+  float2 o1 = world.xz * t_side_uv;
+  float4 d0 = float4(ddx(o0), ddy(o0));
+  float4 d1 = float4(ddx(o1), ddy(o1));
+  float s = saturate(abs(normal.z) * t_slope.y + t_slope.x);
+  [branch] if ((t_flags & 2) && s < t_steep_threshold) {
+    float inv = 1.0 / (abs(normal.x) + t_steep_eps + abs(normal.y));
+    float wx = abs(normal.x) * inv;
+    float wy = abs(normal.y) * inv;
+    float3 side0 = sample_side(o0, d0).rgb;
+    float3 side1 = sample_side(o1, d1).rgb;
+    colour = sqrt(s * colour * colour + (1.0 - s) * (wy * side1 * side1 + wx * side0 * side0));
+  }
   float2 wuv = world.xy * t_weight_uv.xy + t_weight_uv.zw;
   float value = (t_weight_sampler & 2) ? t_weights.SampleLevel(s_linear_clamp, wuv, 0).w
                                        : t_weights.SampleLevel(s_linear_wrap, wuv, 0).w;

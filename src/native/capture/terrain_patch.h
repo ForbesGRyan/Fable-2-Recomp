@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "../render/texture_decode.h"
 #include "position_decode.h"
 #include "uv_decode.h"
 #include "xenos_tiling.h"
@@ -120,6 +121,59 @@ inline bool SampleHeight(const uint8_t* data, size_t size, const HeightMap& m, f
                      detail::TexelIndex(v, m.height, m.clamp_y), out);
 }
 
+// Mip 0 of the layer vertex shaders' normal map (tf17): a Xenos 2D texture in
+// k_DXN, two values per texel (render::DecodeDxnTexel has the block layout and
+// its source).
+struct NormalMap {
+  uint32_t phys_addr = 0;  // GPU physical
+  uint32_t size = 0;       // bytes the level spans from phys_addr
+  uint32_t width = 0, height = 0;
+  uint32_t pitch_blocks = 0;  // 4 x 4 blocks per row (fetch constant pitch field << 5, in texels, / 4)
+  uint32_t endian = 0;        // xenos::Endian of the 16-byte blocks
+  bool tiled = false;
+  uint8_t clamp_x = 0, clamp_y = 0;  // xenos::ClampMode
+};
+
+// Decodes the normal map's texture fetch constant (host-order dwords). Accepted:
+// a 2D texture in k_DXN (49), unsigned x and y read from channels 0 and 1, exp
+// adjust 0, point magnification filter (a vertex shader's fetch has no computed
+// level; C30A97D946FA2BE4 instr 25). Anything else returns false (the draw has
+// no steep-ground block to draw with, so its material is not usable).
+inline bool DecodeNormalMap(const uint32_t fc[6], NormalMap* out) {
+  if ((fc[0] & 3) != 2) return false;                // not a texture fetch constant
+  if (((fc[0] >> 2) & 0xF) != 0) return false;       // x or y signed
+  if ((fc[1] & 0x3F) != 49) return false;            // k_DXN
+  if (((fc[5] >> 9) & 3) != 1) return false;         // not 2D
+  if (((fc[3] >> 1) & 0x3F) != 0x08) return false;   // swizzle: x from channel 0, y from channel 1
+  if (((fc[3] >> 13) & 0x3F) != 0) return false;     // exp adjust
+  if (((fc[3] >> 19) & 3) != 0) return false;        // mag filter not point
+  NormalMap m;
+  m.endian = (fc[1] >> 6) & 3;
+  m.clamp_x = uint8_t((fc[0] >> 10) & 7);
+  m.clamp_y = uint8_t((fc[0] >> 13) & 7);
+  m.pitch_blocks = (((fc[0] >> 22) & 0x1FF) << 5) / 4;
+  m.tiled = (fc[0] >> 31) != 0;
+  m.phys_addr = fc[1] & 0xFFFFF000u;
+  m.width = (fc[2] & 0x1FFF) + 1;
+  m.height = ((fc[2] >> 13) & 0x1FFF) + 1;
+  // The SDK's bound of a tiled level, or the linear rows (0: no base address, or a pitch below the width).
+  const uint64_t bytes = render::BaseLevelDumpBytes(fc);
+  if (bytes == 0 || bytes > 0xFFFFFFFFull) return false;
+  m.size = uint32_t(bytes);
+  *out = m;
+  return true;
+}
+
+// Point sample of the normal map at normalized (u, v), as SampleHeight: the two
+// values (0..1) of texel floor(u * width), floor(v * height) under the map's
+// clamp modes. False when the texel's block lies outside `size`.
+inline bool SampleNormal(const uint8_t* data, size_t size, const NormalMap& m, float u, float v, float out_xy[2]) {
+  if (m.width == 0 || m.height == 0) return false;
+  return render::DecodeDxnTexel(data, size, m.width, m.height, m.pitch_blocks, m.tiled, m.endian,
+                                detail::TexelIndex(u, m.width, m.clamp_x), detail::TexelIndex(v, m.height, m.clamp_y),
+                                out_xy);
+}
+
 // What the terrain shaders' unlit colour needs from one terrain draw besides the
 // patch geometry (frame-map section 13, "Terrain": the reading of the three
 // vertex and eight pixel shaders, with instruction numbers). Coordinate
@@ -138,9 +192,22 @@ inline bool SampleHeight(const uint8_t* data, size_t size, const HeightMap& m, f
 // read the same); a bilinear sample at weight_uv approximates that weight: it
 // is the weight at 16 segments per patch edge (the cell's texel centres are the
 // patch's 17 x 17 grid points), while the game's tessellator tops out at 15 and
-// removes whole triangles at a culled vertex, not pixels. Not covered: the pixel shaders paired with C30A blend a
-// second colour texture (tf13, at two coordinates that use the height) into the
-// detail colour where the ground is steep; these inputs hold only tf0.
+// removes whole triangles at a culled vertex, not pixels.
+//
+// The steep-ground block (`steep`: the three layer pixel shaders paired with
+// C30A, 9C2144E42E95A76F, 45243B758F9272AB and 04F23292B2F44077; the table's
+// "steep" object). Where the ground is steep they blend the layer's side
+// texture tf13 into the detail colour by two side projections that use the
+// height (9C21 instr 12 to 37; frame-map section 13, "Terrain", item 1):
+//   n = the vertex shader's normal: tf17 at the height coordinate, * 2 - 1,
+//       z = sqrt(|1 - (x^2 + y^2)|) (TerrainNormalFromTexel), interpolated
+//   s = sat(|n.z| * slope[1] + slope[0])                      (TerrainSteepSlope)
+//   colour^2 = tf0^2 where s >= steep_threshold, else
+//     s * tf0^2 + (1 - s) * (wy * tf13(o1)^2 + wx * tf13(o0)^2)  (TerrainSteepMix)
+//   wx, wy = |n.x|, |n.y| / (|n.x| + |n.y| + steep_eps)       (TerrainSteepWeights)
+//   o0 = (y, height) * side_uv, o1 = (x, height) * side_uv    (TerrainSideUvs)
+// The clay pass shows the square root of that mix (the unlit rule: the display
+// value of the game's linear colour).
 //
 // Draws of the adaptive builder (82207C30, vertex shader 5003700B7C9B1C16, kinds
 // terrain-far and terrain-far-fade; `adaptive`):
@@ -179,6 +246,14 @@ struct TerrainMaterialInputs {
   float hole_ref = 0.0f;   // layer: vs c114.x (1/255, or -1 for a layer that is never culled)
   float eye[3] = {};       // ps c19.xyz
   float world[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};  // layer: vs c4..c6, three rows; far: identity
+  // The steep-ground block. false: the draw's pixel shader has none, and the six fields below are zero.
+  bool steep = false;
+  uint32_t side_fetch[6] = {};    // tf13 of the layer draw: the layer's side texture (not the far colour)
+  uint32_t normal_fetch[6] = {};  // tf17 of the vertex shader: the normal map (k_DXN, DecodeNormalMap)
+  float side_uv[2] = {};          // (vs c8.x, -vs c8.x)
+  float slope[2] = {};            // ps c45.xy
+  float steep_threshold = 0.0f;   // the block runs where s is below it (a literal of the pixel shader)
+  float steep_eps = 0.0f;         // the small term of the weights (a literal of the pixel shader)
 };
 
 struct TerrainPatch {
@@ -269,21 +344,40 @@ inline constexpr float kTerrainFarRowBias = 0.5f;
 inline constexpr uint32_t kTerrainVsWorldReg = 4, kTerrainVsDetailReg = 8, kTerrainVsBaseScaleReg = 14,
                           kTerrainVsFarKnotReg = 72, kTerrainVsCullReg = 114, kTerrainVsCellReg = 115;
 inline constexpr uint32_t kTerrainPsEyeReg = 19, kTerrainPsBaseReg = 21, kTerrainPsFadeReg = 31;
+// The steep-ground block: ps c45.xy is the slope's offset and scale (9C21 instr
+// 12, 4524 instr 15, 04F2 instr 16); the side scale is vs c8.x, in the detail
+// scale's register (C30A instr 53, 63, 64).
+inline constexpr uint32_t kTerrainPsSlopeReg = 45;
 // Texture fetch constants the vertex shaders sample besides the heightmap: the
 // layers' weight cells (C30A and FB68 instr 24), the adaptive shader's tables
-// of u and v (5003 instr 26 and 25). The pixel shaders' slots (base map,
-// detail or far colour) are in ps-albedo.json.
-inline constexpr uint32_t kTerrainWeightFetch = 18, kTerrainFarUFetch = 18, kTerrainFarVFetch = 19;
+// of u and v (5003 instr 26 and 25), the layers' normal map (C30A and FB68
+// instr 25). The pixel shaders' slots (base map, detail or far colour, the
+// side texture) are in ps-albedo.json.
+inline constexpr uint32_t kTerrainWeightFetch = 18, kTerrainFarUFetch = 18, kTerrainFarVFetch = 19,
+                          kTerrainNormalFetch = 17;
+
+// ps-albedo.json "steep" (FABLE2_PS_TERRAIN): the steep-ground block of a layer
+// pixel shader. The two numbers are literals of the shader (zero in the device
+// bank), entered from the shaders' own literal tables as captured in game
+// session 1 ("ps_lit": c254.y, in 45243B758F9272AB c254.z, and c255.w).
+struct TerrainSteepSpec {
+  uint8_t side_slot;  // the pixel shader's fetch constant of the layer's side texture
+  float threshold;    // 255/256: the block runs where the slope value is below it
+  float epsilon;      // 0.0001: the small term of the weights
+};
 
 // The fetch constants of a terrain draw (six host-order dwords each), nullptr
 // for one that could not be read. A layer needs detail and weight; a far draw
 // detail (the far colour), far_u and far_v. The base map is optional (base_valid).
+// A layer whose shader has the steep-ground block also needs side and normal.
 struct TerrainFetches {
   const uint32_t* detail = nullptr;
   const uint32_t* base = nullptr;
   const uint32_t* weight = nullptr;
   const uint32_t* far_u = nullptr;
   const uint32_t* far_v = nullptr;
+  const uint32_t* side = nullptr;
+  const uint32_t* normal = nullptr;
 };
 
 // The material inputs of a terrain draw from its patch, the two constant banks
@@ -293,11 +387,18 @@ struct TerrainFetches {
 // a value the material reads is not finite, or the patch has no cell size. The
 // base map's fetch constant, vs c14 and ps c21 decide base_valid only (a caller
 // that could not read one of the two registers passes values that are not finite).
+// `steep`: the steep-ground block of the draw's pixel shader, or nullptr when it
+// has none. With it the inputs are valid only if the block's can be read too:
+// the side texture's and the normal map's fetch constants are texture fetch
+// constants, vs c8.x and ps c45.xy are finite, and the two literals can be the
+// block's (a threshold in (0, 1], a positive small term); the block is the
+// layers', so with a draw of the adaptive builder it is refused.
 inline bool MakeTerrainMaterialInputs(const TerrainPatch& patch, bool adaptive, const float* vs_bank,
                                       const float* ps_bank, const TerrainFetches& f,
-                                      TerrainMaterialInputs* out) {
+                                      TerrainMaterialInputs* out, const TerrainSteepSpec* steep = nullptr) {
   *out = TerrainMaterialInputs{};
   if (!patch.active || !vs_bank || !ps_bank) return false;
+  if (steep && adaptive) return false;
   TerrainMaterialInputs m;
   m.adaptive = adaptive;
   auto fetch = [](const uint32_t* fc, uint32_t* dst) {
@@ -352,6 +453,22 @@ inline bool MakeTerrainMaterialInputs(const TerrainPatch& patch, bool adaptive, 
     m.hole_ref = vs(kTerrainVsCullReg, 0);
     for (uint32_t i = 0; i < 12; ++i) m.world[i] = vs_bank[4 * kTerrainVsWorldReg + i];
   }
+  if (steep) {
+    if (!fetch(f.side, m.side_fetch) || !fetch(f.normal, m.normal_fetch)) return false;
+    m.side_uv[0] = vs(kTerrainVsDetailReg, 0);
+    m.side_uv[1] = -vs(kTerrainVsDetailReg, 0);
+    m.slope[0] = ps(kTerrainPsSlopeReg, 0);
+    m.slope[1] = ps(kTerrainPsSlopeReg, 1);
+    m.steep_threshold = steep->threshold;
+    m.steep_eps = steep->epsilon;
+    // (comparisons with a value that is not finite are false)
+    if (!std::isfinite(m.side_uv[0]) || !std::isfinite(m.slope[0]) || !std::isfinite(m.slope[1]) ||
+        !(m.steep_threshold > 0.0f && m.steep_threshold <= 1.0f) || !(m.steep_eps > 0.0f) ||
+        !std::isfinite(m.steep_eps)) {
+      return false;
+    }
+    m.steep = true;
+  }
   m.fade[0] = ps(kTerrainPsFadeReg, 0);
   m.fade[1] = ps(kTerrainPsFadeReg, 1);
   for (uint32_t i = 0; i < 3; ++i) m.eye[i] = ps(kTerrainPsEyeReg, i);
@@ -398,6 +515,58 @@ inline float TerrainEyeDistance2(const TerrainMaterialInputs& m, float x, float 
     d2 += (m.eye[r] - p) * (m.eye[r] - p);
   }
   return d2;
+}
+
+// The layer vertex shader's normal from the normal map's two values (0..1):
+// (x, y) * 2 - 1 and z = sqrt(|1 - (x^2 + y^2)|) (C30A instr 26 to 31, o3).
+inline void TerrainNormalFromTexel(float x, float y, float n[3]) {
+  n[0] = 2.0f * x - 1.0f;
+  n[1] = 2.0f * y - 1.0f;
+  n[2] = std::sqrt(std::fabs(1.0f - (n[0] * n[0] + n[1] * n[1])));
+}
+
+// Steep-ground block: the slope value of a normal's z, 1 on flat ground and 0 on
+// steep (9C21 instr 12: mad_sat of |n.z| with c45.y and c45.x).
+inline float TerrainSteepSlope(const TerrainMaterialInputs& m, float nz) {
+  const float s = std::fabs(nz) * m.slope[1] + m.slope[0];
+  return std::fmin(std::fmax(s, 0.0f), 1.0f);
+}
+
+// The weights of the two side projections: out[0] = wx goes with o0 (faces along
+// x), out[1] = wy with o1 (9C21 instr 22 to 28 and 36).
+inline void TerrainSteepWeights(const TerrainMaterialInputs& m, float nx, float ny, float out[2]) {
+  const float inv = 1.0f / (std::fabs(nx) + m.steep_eps + std::fabs(ny));
+  out[0] = std::fabs(nx) * inv;
+  out[1] = std::fabs(ny) * inv;
+}
+
+// The side texture's two coordinates at the patch point (x, y, height):
+// o0 = (c8.x * y, -c8.x * height), o1 = (c8.x * x, -c8.x * height) (C30A instr
+// 52, 53, 63, 64, 74 to 76).
+inline void TerrainSideUvs(const TerrainMaterialInputs& m, float x, float y, float height, float o0[2], float o1[2]) {
+  o0[0] = y * m.side_uv[0];
+  o0[1] = height * m.side_uv[1];
+  o1[0] = x * m.side_uv[0];
+  o1[1] = height * m.side_uv[1];
+}
+
+// The layer's colour of a steep-block shader in the game's linear space, per
+// channel: tf0^2 where the slope value reaches the threshold (the game skips the
+// block when not threshold > s), else the mix with side0 = tf13(o0) and
+// side1 = tf13(o1), all three as stored. The clay pass's pixel shader
+// (kClayTerrainLayerPs) shows its square root.
+inline void TerrainSteepMix(const TerrainMaterialInputs& m, const float n[3], const float tf0[3], const float side0[3],
+                            const float side1[3], float out[3]) {
+  const float s = TerrainSteepSlope(m, n[2]);
+  if (!(s < m.steep_threshold)) {
+    for (int k = 0; k < 3; ++k) out[k] = tf0[k] * tf0[k];
+    return;
+  }
+  float w[2];
+  TerrainSteepWeights(m, n[0], n[1], w);
+  for (int k = 0; k < 3; ++k) {
+    out[k] = s * tf0[k] * tf0[k] + (1.0f - s) * (w[1] * side1[k] * side1[k] + w[0] * side0[k] * side0[k]);
+  }
 }
 
 // Far: the table coordinate of knot k (0..16) of the patch at column `col`, row
@@ -453,6 +622,48 @@ inline bool BuildTerrainFarUvs(const TerrainPatch& t, const HeightMap& um, const
     }
     for (uint32_t j = 0; j <= n; ++j) {
       for (uint32_t i = 0; i <= n; ++i) out->push_back({u[i], v[j]});
+    }
+  }
+  return true;
+}
+
+// Steep-ground block: the layer vertex shader's (n.x, n.y) at every grid point
+// of the draw's patches, in the order of BuildTerrainPositions. The shader reads
+// the normal map at the height coordinate of its vertex, point sampled (C30A
+// instr 25: the same coordinate as the heightmap fetch of instr 20), and the
+// grid's points are the points it would be evaluated at with 16 segments per
+// patch edge, each on a texel of its own in the game's maps (two texels per
+// world unit, as the heightmap). The clay vertex shader forms z from the pair
+// as the game's does, and the three are interpolated over the grid's triangles.
+// `nm` is the decoded fetch constant material.normal_fetch with its bytes.
+// False, with nothing in `out`, unless the inputs are valid ones with the
+// block and every texel read lies inside the map's bytes.
+inline bool BuildTerrainNormals(const TerrainPatch& t, const NormalMap& nm, const uint8_t* data, size_t size, uint32_t n,
+                                std::vector<Float2>* out) {
+  out->clear();
+  const TerrainMaterialInputs& m = t.material;
+  if (!t.active || !m.valid || m.adaptive || !m.steep || n == 0 || t.patches == 0 || t.patches > kMaxTerrainPatches) {
+    return false;
+  }
+  out->reserve(size_t(t.patches) * (n + 1) * (n + 1));
+  for (uint32_t k = 0; k < t.patches; ++k) {
+    const float p = t.patch + float(k);
+    const float row = std::floor(p * t.inv_cols);
+    const float col = p - row * t.cols;
+    for (uint32_t j = 0; j <= n; ++j) {
+      for (uint32_t i = 0; i <= n; ++i) {
+        const float u = float(i) / float(n), v = float(j) / float(n);
+        const float wx = (col + u) * t.cell[0] + t.origin[0];
+        const float wy = (row + v) * t.cell[1] + t.origin[1];
+        float xy[2], normal[3];
+        if (!SampleNormal(data, size, nm, (wx - t.tex_offset[0]) * t.tex_scale[0],
+                          (wy - t.tex_offset[1]) * t.tex_scale[1], xy)) {
+          out->clear();
+          return false;
+        }
+        TerrainNormalFromTexel(xy[0], xy[1], normal);
+        out->push_back({normal[0], normal[1]});
+      }
     }
   }
   return true;

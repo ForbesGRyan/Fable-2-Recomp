@@ -58,8 +58,8 @@ struct ClayStats {
   // alpha_unknown and blend_unknown by pixel shader (kTallyAlphaUnknown, kTallyBlendUnknown).
   capture::ShaderTally<32> unknown_by_ps;
   // Terrain layer records left out because their ground square is drawn as flat
-  // clay by another record (PlanTerrain), and the distinct (colour, weights)
-  // texture pairs bound for the terrain records drawn with their material.
+  // clay by another record (PlanTerrain), and the distinct (colour, weights,
+  // side) texture sets bound for the terrain records drawn with their material.
   uint32_t terrain_skipped = 0, terrain_tuples = 0;
   // Terrain records that could not have their material this frame, by their own
   // reason (TerrainMaterialStatus), whatever the plan then did with them: drawn
@@ -301,6 +301,29 @@ inline GeoKey TerrainFarUvKey(const capture::DrawRecord& r) {
                            FloatBits(m.far_table[0]), FloatBits(m.far_table[1]), FloatBits(m.far_table[2]),
                            FloatBits(m.far_table[3]), FloatBits(m.far_patch[0]), FloatBits(m.far_patch[1])});
   k.kind = 7;
+  return k;
+}
+
+// Cache key of the vertex normals of a terrain layer with the steep-ground
+// block (kind 8), which BuildTerrainNormals reads from the layer vertex
+// shader's normal map at the grid points: the map (fetch dwords 0 to 2: pitch,
+// tiling and clamp modes, address, format and endian, size), the draw's patches
+// and what places a grid point on the map (cell, origin, the height
+// coordinate's offset and scale). The content hash covers the map's bytes. The
+// heightmap, the height scale and everything of the layer itself (its textures
+// and constants) do not enter: the layers of a square share one buffer.
+inline GeoKey TerrainNormalKey(const capture::DrawRecord& r) {
+  const capture::TerrainPatch& t = r.terrain;
+  const capture::TerrainMaterialInputs& m = t.material;
+  GeoKey k;
+  k.addr = m.normal_fetch[1] & 0xFFFFF000u;
+  k.size = m.normal_fetch[2];
+  k.stride = capture::kTerrainGrid;
+  k.extra = HashCombine32({m.normal_fetch[0], m.normal_fetch[1], m.normal_fetch[2], FloatBits(t.patch), t.patches,
+                           FloatBits(t.cols), FloatBits(t.inv_cols), FloatBits(t.cell[0]), FloatBits(t.cell[1]),
+                           FloatBits(t.origin[0]), FloatBits(t.origin[1]), FloatBits(t.tex_offset[0]),
+                           FloatBits(t.tex_offset[1]), FloatBits(t.tex_scale[0]), FloatBits(t.tex_scale[1])});
+  k.kind = 8;
   return k;
 }
 
@@ -651,14 +674,22 @@ struct ClayTerrainConstants {
   float weight_scale, weight_bias;
   uint32_t colour_sampler;  // static sampler of the colour texture (SamplerIndex)
   uint32_t weight_sampler;  // of the weights; the shader reads its clamp bit and filters linearly
-  uint32_t flags;           // kTerrainFadeIn
-  uint32_t pad;
+  uint32_t flags;           // kTerrainFadeIn, kTerrainSteep
+  // The steep-ground block (kTerrainSteep; zero without it).
+  uint32_t side_sampler;    // static sampler of the side texture
+  float side_uv[2];         // TerrainMaterialInputs::side_uv, scaled into the host texture
+  float slope[2];           // TerrainMaterialInputs::slope
+  float steep_threshold, steep_eps;
+  uint32_t pad[2];
 };
-static_assert(sizeof(ClayTerrainConstants) == 128);
+static_assert(sizeof(ClayTerrainConstants) == 160);
 inline constexpr uint32_t kClayTerrainSlotBytes = 256;  // the RHI's constant buffer offset alignment
 // ClayTerrainConstants::flags: the far colour is multiplied by sat(d2 * fade[0] + fade[1]) (the
 // kind terrain-far-fade, shader 2F8A: the underlay the layers add to).
 inline constexpr uint32_t kTerrainFadeIn = 1u;
+// The layer's pixel shader has the steep-ground block and the draw has what it reads: the side
+// texture at t6 and the vertex normals in the draw's buffer at t2 (TerrainSteepStatus).
+inline constexpr uint32_t kTerrainSteep = 2u;
 
 // The pipeline of a flat terrain draw whose state could not be read: the default
 // state with depth less-equal. The pass keeps it as a default pipeline, so that
@@ -688,9 +719,12 @@ inline uint8_t TerrainTextured(capture::MaterialKind kind) {
 
 // `colour_fix`: the colour texture's (width / host width, height / host height). A far draw's
 // colour coordinate is per vertex (TerrainFarUvKey) and is scaled by the draw's uv transform.
+// `side_fix` and `side_sampler`: the same of the side texture of a layer with the steep-ground
+// block, when the pass has it (nullptr: the block stays off).
 inline ClayTerrainConstants MakeClayTerrainConstants(const capture::TerrainMaterialInputs& m,
                                                      capture::MaterialKind kind, const float colour_fix[2],
-                                                     uint32_t colour_sampler, uint32_t weight_sampler) {
+                                                     uint32_t colour_sampler, uint32_t weight_sampler,
+                                                     const float* side_fix = nullptr, uint32_t side_sampler = 0) {
   ClayTerrainConstants c{};
   for (int i = 0; i < 4; ++i) {
     c.detail_uv[i] = m.detail_uv[i] * colour_fix[i & 1];
@@ -706,6 +740,16 @@ inline ClayTerrainConstants MakeClayTerrainConstants(const capture::TerrainMater
   c.colour_sampler = colour_sampler;
   c.weight_sampler = weight_sampler;
   c.flags = kind == capture::MaterialKind::kTerrainFarFade ? kTerrainFadeIn : 0u;
+  if (m.steep && side_fix && kind == capture::MaterialKind::kTerrainLayer) {
+    c.flags |= kTerrainSteep;
+    c.side_sampler = side_sampler;
+    c.side_uv[0] = m.side_uv[0] * side_fix[0];
+    c.side_uv[1] = m.side_uv[1] * side_fix[1];
+    c.slope[0] = m.slope[0];
+    c.slope[1] = m.slope[1];
+    c.steep_threshold = m.steep_threshold;
+    c.steep_eps = m.steep_eps;
+  }
   return c;
 }
 
@@ -733,6 +777,22 @@ inline capture::MaterialStatus TerrainMaterialStatus(const capture::TerrainMater
   if (colour != MaterialStatus::kTextured) return colour;
   if (adaptive_builder) return far_uvs ? MaterialStatus::kTextured : MaterialStatus::kUvUnsupported;
   return weight;
+}
+
+// The steep-ground block's part of a layer record's status, asked when
+// TerrainMaterialStatus is kTextured: kTextured for a record without the block
+// (`side` and `normals` are not looked at); for one with it, the texture
+// cache's reason of the side texture when that is not usable, uv-unsupported
+// when the vertex normals could not be built (the normal map unreadable or of a
+// layout that is not handled), else kTextured. A record that is not kTextured
+// here cannot have its material, so its square falls back as a whole
+// (PlanTerrain): the block is not left out of a layer that has it.
+inline capture::MaterialStatus TerrainSteepStatus(const capture::TerrainMaterialInputs& m,
+                                                  capture::MaterialStatus side, bool normals) {
+  using capture::MaterialStatus;
+  if (!m.steep) return MaterialStatus::kTextured;
+  if (side != MaterialStatus::kTextured) return side;
+  return normals ? MaterialStatus::kTextured : MaterialStatus::kUvUnsupported;
 }
 
 // A patch's rectangle of ground: corner and size in world units.
@@ -940,8 +1000,9 @@ inline std::string FormatStateText(const ClayStats& st) {
 
 // The log's terrain line: the drawn terrain records, those drawn with their
 // material and as flat clay, the layer records left out with their square, and
-// the distinct texture pairs bound (each takes two slots of the RHI's
-// shader-visible view heap until one of its views is destroyed).
+// the distinct texture sets bound (colour, weights, side texture: each takes
+// three slots of the RHI's shader-visible view heap until one of its views is
+// destroyed).
 // Then, when there are any, the records that could not have their material by
 // their own reason, most first (ClayStats::terrain_unusable): the cause of a
 // square's fallback, which the other lines show only as terrain-square when the
@@ -950,7 +1011,7 @@ inline std::string FormatTerrainText(const ClayStats& st, const TextureStats& ts
   const uint32_t flat = ts.terrain > ts.terrain_textured ? ts.terrain - ts.terrain_textured : 0;
   std::string text = "Terrain: material " + std::to_string(ts.terrain_textured) + " of " +
                      std::to_string(ts.terrain) + " drawn, flat " + std::to_string(flat) + ", left out " +
-                     std::to_string(st.terrain_skipped) + ", texture pairs " + std::to_string(st.terrain_tuples);
+                     std::to_string(st.terrain_skipped) + ", texture sets " + std::to_string(st.terrain_tuples);
   std::vector<std::pair<const char*, uint32_t>> reasons;
   for (size_t i = 0; i < size_t(capture::MaterialStatus::kCount); ++i) {
     if (st.terrain_unusable[i]) {

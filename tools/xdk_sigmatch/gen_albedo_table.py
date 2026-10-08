@@ -24,8 +24,11 @@ block of the layer shaders that blend a side texture in where the ground is stee
 the line ends in -1, 0.0f, 0.0f. All ALPHA lines, then all TERRAIN lines, follow the albedo lines.
 Light: an albedo or terrain entry may have "light": {"family", "vertex", "evidence"}, the light family
 of the shader as tools/xdk_sigmatch/light_check.py names it (docs/native-renderer/lighting-formulas.md):
-1 terrain-layer, 2 terrain-far, 3 object, 4 tree-trunk, 5 plant, 6 plant-lit, each but terrain-far
-also with "-multi" (the family's two- and four-light form: multi 1). A family belongs to the pair
+1 terrain-layer, 2 terrain-far, 3 object, 4 tree-trunk, 5 plant, 6 plant-lit, 7 tree-leaf, each but
+terrain-far and tree-leaf also with "-multi" (the family's two- and four-light form: multi 1; the
+leaves' lights are their vertex shader's, their pixel shader reads no light register and is one
+program for one, two and four lights, so the entry is "tree-leaf" whatever the vertex shaders it
+lists, and light_check.py's tree-leaf-multi pairs stand under it). A family belongs to the pair
 of a pixel and a vertex shader, so "vertex" lists the vertex shaders the pair was checked with, one
 FABLE2_PS_LIGHT_VS line each; with any other vertex shader the draw has no family. What the vertex
 side reads is that shader's own "light" in vs-transforms.json. "facing_scale": the literal of the
@@ -36,7 +39,7 @@ The two tables are held against each other: this generator reads the vertex tabl
 by default the vs-transforms.json beside --json) and refuses a pair whose vertex shader has no
 "light" there (an entry without one, no entry) and a pair whose vertex shader is of a kind the family
 cannot stand on: the terrain families need a "terrain" vertex shader, object "stream" or "probe",
-tree-trunk "probe", the plants "instance" (_LIGHT_VERTEX_KINDS; capture::LightKindFits in
+tree-trunk and tree-leaf "probe", the plants "instance" (_LIGHT_VERTEX_KINDS; capture::LightKindFits in
 material.h is the same rule at the draw, which would give every draw of such a pair no light,
 "vertex-shader"). A table with any "light" is not generated without the vertex table.
 What generation cannot check is the family itself: that a pair is of the family named, and of its
@@ -83,14 +86,18 @@ ENTRY_KEYS = {
 LIGHT_KEYS = ("family", "vertex", "facing_scale", "evidence")
 # Light families (light_check.py FAMILIES without "-multi") -> the code of capture::LightFamily
 # (material.h pins the two against each other), and the entry kinds each may stand on.
-LIGHT_FAMILIES = {"terrain-layer": 1, "terrain-far": 2, "object": 3, "tree-trunk": 4, "plant": 5, "plant-lit": 6}
+LIGHT_FAMILIES = {"terrain-layer": 1, "terrain-far": 2, "object": 3, "tree-trunk": 4, "plant": 5, "plant-lit": 6,
+                  "tree-leaf": 7}
 _LIGHT_KINDS = {"terrain-layer": ("terrain-layer",), "terrain-far": ("terrain-far", "terrain-far-fade")}
-_ONE_LIGHT_ONLY = ("terrain-far",)   # no two- or four-light form of it exists
+# No "-multi" form of these exists in the table: the far shaders have one light; the leaves' lights
+# are their vertex shader's (one pixel shader for one, two and four).
+_ONE_LIGHT_ONLY = ("terrain-far", "tree-leaf")
 # The kinds of vertex shader (vs-transforms.json "light"."kind", gen_transform_table.LIGHT_KINDS) a
 # family can stand on: capture::LightKindFits of material.h, which refuses the others at the draw.
 _VERTEX_KINDS = ("terrain", "stream", "probe", "instance")
 _LIGHT_VERTEX_KINDS = {"terrain-layer": ("terrain",), "terrain-far": ("terrain",), "object": ("stream", "probe"),
-                       "tree-trunk": ("probe",), "plant": ("instance",), "plant-lit": ("instance",)}
+                       "tree-trunk": ("probe",), "plant": ("instance",), "plant-lit": ("instance",),
+                       "tree-leaf": ("probe",)}
 ALPHA_KEYS = ("source", "component", "slot", "scale", "divide_by_alpha")  # "slot" only with source "fetch"
 # The small term of the steep weights is a literal like 0.0001: this much or more is not one. One
 # bound for the table, for terrain_replay.py's reading of a capture (it imports this) and for

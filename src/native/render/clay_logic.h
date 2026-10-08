@@ -933,23 +933,31 @@ static_assert(kProbeWeightElementBytes <= kClayLightElementBytesMax && kProbeSet
 // family is plant-lit (its pixel shader has the ambient factor: the vertex
 // side exports the colour without the added light and the vector of the
 // factor), without it plant (the vertex side's colour is the whole ambient).
+// kLightModeLeaf (with the object and probe bits, without the instance bit;
+// plan Task 8c): the draw is a tree leaf: the buffers are a probe record's
+// (normals at t9, the probe set at t10, the weights at t11), and the vertex
+// shader makes of them, the draw's rows and the frame's eye and sun what the
+// game's leaf vertex shaders make: the ambient of the probe colour and the two
+// scalars of the sun's light on the side of the card that faces the viewer.
 // kLightModeLit: the pixel shader lights the draw with its family's function
 // (the frame's block in cbuffer Frame, the draw's values in its slot at b1);
 // without it the draw is the unlit linear colour of the materials picture.
 inline constexpr uint32_t kLightModeTerrainNormals = 1u, kLightModeObject = 2u, kLightModeLit = 4u, kLightModeProbe = 8u,
-                          kLightModeInstance = 16u, kLightModePlantLit = 32u;
+                          kLightModeInstance = 16u, kLightModePlantLit = 32u, kLightModeLeaf = 64u;
 // Every value the bits can make (the shader tests compile each shader once per value).
-inline constexpr uint32_t kLightModeCount = 64u;
+inline constexpr uint32_t kLightModeCount = 128u;
 
 // The light_mode of a lit mesh record by its vertex kind and family: a colour
 // stream's object (6), an object or trunk with probe colours (14), an
-// instanced plant of family plant (22) or plant-lit (54); 0 for a pair the
-// pass does not light.
+// instanced plant of family plant (22) or plant-lit (54), a tree leaf (78: a
+// probe record with the leaf bit); 0 for a pair the pass does not light.
 constexpr uint32_t LitObjectMode(capture::LightVertexKind kind, capture::LightFamily family) {
   const bool object = family == capture::LightFamily::kObject, trunk = family == capture::LightFamily::kTreeTrunk;
   switch (kind) {
     case capture::LightVertexKind::kStream: return object ? kLightModeObject | kLightModeLit : 0;
-    case capture::LightVertexKind::kProbe: return object || trunk ? kLightModeObject | kLightModeLit | kLightModeProbe : 0;
+    case capture::LightVertexKind::kProbe:
+      if (family == capture::LightFamily::kTreeLeaf) return kLightModeObject | kLightModeLit | kLightModeProbe | kLightModeLeaf;
+      return object || trunk ? kLightModeObject | kLightModeLit | kLightModeProbe : 0;
     case capture::LightVertexKind::kInstance:
       if (family == capture::LightFamily::kPlant) return kLightModeObject | kLightModeLit | kLightModeInstance;
       if (family == capture::LightFamily::kPlantLit) {
@@ -970,7 +978,10 @@ constexpr uint32_t LitObjectMode(capture::LightVertexKind kind, capture::LightFa
 // instance set's; kInstanceColours and kBend are an instanced plant's two
 // buffers (its copies' colours; the bend inputs). The instance bit decides
 // before the probe bit, as in the vertex shader (the pass makes no mode with
-// both).
+// both). A leaf is a probe record with the leaf bit: the probe buffer's two
+// regions. The three mesh blocks of the vertex shader exclude each other by
+// the mode (LightModeBlock: its own tests), and a mode none of them takes,
+// which the pass never makes, loads from none of t9 to t11: the positions.
 enum class ClayLightBuffer : uint8_t {
   kPositions, kTerrainNormals, kNormals, kColours, kProbeSets, kProbeWeights, kInstanceColours, kBend
 };
@@ -978,13 +989,25 @@ inline constexpr uint32_t kClayLightBufferParam0 = 8, kClayLightBufferCount = 4;
 struct ClayLightBuffers {
   ClayLightBuffer source[kClayLightBufferCount];  // t8, t9, t10, t11
 };
+// Which of the vertex shader's three mesh blocks a mode takes, by the shader's own tests (kClayVs):
+// an object's or trunk's with the object bit and neither the instance nor the leaf bit; an instanced
+// plant's with the object and instance bits and no leaf bit; a leaf's with the object, probe and
+// leaf bits and no instance bit; none otherwise.
+enum class LightModeBlock : uint8_t { kNone, kObject, kPlant, kLeaf };
+constexpr LightModeBlock LightModeBlockOf(uint32_t light_mode) {
+  constexpr uint32_t kinds = kLightModeObject | kLightModeInstance | kLightModeLeaf;
+  if ((light_mode & kinds) == kLightModeObject) return LightModeBlock::kObject;
+  if ((light_mode & kinds) == (kLightModeObject | kLightModeInstance)) return LightModeBlock::kPlant;
+  if ((light_mode & (kinds | kLightModeProbe)) == (kLightModeObject | kLightModeLeaf | kLightModeProbe)) return LightModeBlock::kLeaf;
+  return LightModeBlock::kNone;
+}
 constexpr ClayLightBuffers LightBufferSources(uint32_t light_mode) {
   const bool terrain = (light_mode & kLightModeTerrainNormals) != 0;
-  const bool object = (light_mode & kLightModeObject) != 0;
-  const bool instance = object && (light_mode & kLightModeInstance) != 0;
-  const bool probe = object && !instance && (light_mode & kLightModeProbe) != 0;
+  const LightModeBlock block = LightModeBlockOf(light_mode);
+  const bool object = block == LightModeBlock::kObject, instance = block == LightModeBlock::kPlant;
+  const bool probe = block == LightModeBlock::kLeaf || (object && (light_mode & kLightModeProbe) != 0);
   return {{terrain ? ClayLightBuffer::kTerrainNormals : ClayLightBuffer::kPositions,
-           object ? ClayLightBuffer::kNormals : ClayLightBuffer::kPositions,
+           block != LightModeBlock::kNone ? ClayLightBuffer::kNormals : ClayLightBuffer::kPositions,
            instance ? ClayLightBuffer::kInstanceColours
            : probe  ? ClayLightBuffer::kProbeSets
            : object ? ClayLightBuffer::kColours
@@ -1134,15 +1157,16 @@ inline std::string FormatTargetText(uint32_t width, uint32_t height) {
 
 // --- Native light (frame-map section 14, "Native light"; docs/native-renderer/lighting-formulas.md) ---
 // With fable2_native_light on, in a frame that has a light block, the draws of
-// six families are lit by the game's own ambient, baked and sun light, in
+// seven families are lit by the game's own ambient, baked and sun light, in
 // linear space and without shadows (the screen mask is 1): the terrain layers,
 // the far terrain, the objects (their baked term from the colour stream of
 // vertex shader 0xECD6..., or the probe colour of 0x79EA..., 0xD4D5...,
 // 0xA1F7...), the tree trunks (probe colours, 0x475E...) and the instanced
 // plants without and with the ambient factor (the colour of the vertex's copy
 // and the normal bent towards the copy's up axis: the seven plant vertex
-// shaders), each with its two- and four-light forms. Every other draw (leaves,
-// shaders without a family), and every draw of a frame without a block, is
+// shaders), each with its two- and four-light forms, and the tree leaves (the
+// three leaf vertex shaders: plan Task 8c). Every other draw (shaders without a
+// family), and every draw of a frame without a block, is
 // the unlit colour of the materials picture, counted by reason (ClayUnlit).
 //
 // The functions below are the pure mirrors of the HLSL light functions
@@ -1367,6 +1391,101 @@ inline Float3 LightPlantLit(const Float3& A, const Float3& vs_base, const Float3
   return {one(A.x, vs_base.x, lit.x, add.x, sun.x), one(A.y, vs_base.y, lit.y, add.y, sun.y), one(A.z, vs_base.z, lit.z, add.z, sun.z)};
 }
 
+// --- The tree leaves (plan Task 8c; lighting-formulas.md, "Tree leaves") ---
+// The game's leaf vertex shaders (0xA584..., and 0xD7DD... / 0x2D40... with two and four lights)
+// compute everything but the texture and the screen mask per vertex: the ambient
+// pow(|probe colour|, c18.w * literal) * c18.xyz + c54.xyz (export o1), and the light's two scalars
+// on the side of the card that faces the viewer, times the light's colour (o2 front, o3 back). The
+// cards are drawn without culling (register 0x2205 = 0x00218000 in every leaf row captured), and
+// the shader turns the normal to the viewer instead (0xA584... instr 108 to 110). The pixel shader
+// 0x7CD5... adds them up on the squared albedo. The mirrors below are split the same way, but for
+// one thing: the two scalars are interpolated WITHOUT the sun's colour, which the pixel side
+// multiplies in (LightLeaf): the colour is one per frame, so the product commutes with the
+// interpolation.
+//
+// The sun. The light registers are the vertex shader's own (c76.. positions or directions, c83..
+// colours, c90 the blend of cone and range). At every leaf draw compared (176 + 328 main-scene rows
+// of two captures whose rows carry the followed vertex registers:
+// out/native-evidence/lighting/task8c/leaf_rows_check.txt) the frame's sun stands there bit for bit,
+// in slot 0 of the one-light shader, slot 1 of the two-light and slot 2 of the four-light one, with
+// w = 0 (a direction) and c90 zero at its slot (no cone, no range: spot = 1); the slots before it
+// are lanterns, which the pass does not draw (ruling 5; light_check.py --multi-sun: with the
+// lanterns dark the two- and four-light shaders are the one-light function of that sun). Vertex c9
+// (the eye) is pixel c19, c18 is (pixel c21.xyz, 2.2 * c21.w) and c54 is pixel c20 in those rows,
+// bit for bit: the frame's block gives them. Observations of two daylight scenes, not rules read
+// from the game.
+
+// The literal 1 / 2.2 on the ambient exponent, as the three vertex shaders' literal tables hold it
+// (c249.w of 0xA584..., c248.w of 0xD7DD..., c255.x of 0x2D40...: "vs_lit" of every row of theirs in
+// the captures, task8c/leaf_literals.txt), and the exponent's factor over the frame's c21.w:
+// c18.w * literal = (2.2 * c21.w) * 0.4545.
+inline constexpr float kLeafGamma = 0.45454543828964233f;
+inline constexpr float kLeafColourPower = kInstanceColourPower * kLeafGamma;
+// The pixel shader's two literals on the screen mask, c255.w and c255.z (0.6 and 0.4 in every
+// "ps_lit" of 0x7CD5... in the captures and at every execution in the GPU's logs: frame-map
+// section 14, "The shaders' literals").
+inline constexpr float kLeafMaskGain = 0.6f, kLeafMaskBias = 0.4f;
+
+// The leaf vertex shaders' two scalars of one light (light_formulas.leaf_light):
+//   Nf    = the normal, negated when it faces away from the viewer (view . normal < 0)
+//   front = sat((light_dir . Nf + wrap) / (1 + wrap)) * spot
+//   back  = sat(-(light_dir . Nf)) * (1 - (1 - sat(view . Nf))^2) * spot
+// normal: M n as it is, NOT normalised (0xA584... instr 83, 87, 95, 96: the rows, times c7.w, and
+// nothing more); view: the unit vector from the vertex to the eye; light_dir: the unit vector to
+// the light; wrap: vertex c50.w; spot: 1 for the sun. A wrap of -1 gives no front light.
+struct LeafSides {
+  float front, back;
+};
+inline LeafSides LeafLight(const Float3& normal, const Float3& view, const Float3& light_dir, float wrap, float spot) {
+  Float3 n{LightFinite(normal.x), LightFinite(normal.y), LightFinite(normal.z)};
+  if (LightDot(view, n) < 0.0f) n = {-n.x, -n.y, -n.z};
+  const float nl = LightDot(light_dir, n);
+  const float w = LightFinite(wrap);
+  const float front = (1.0f + w) != 0.0f ? LightSat((nl + w) / (1.0f + w)) : 0.0f;
+  const float turn = 1.0f - LightSat(LightDot(view, n));
+  const float back = LightSat(-nl) * (1.0f - turn * turn);
+  const float s = LightFinite(spot);
+  return {LightFinite(front * s), LightFinite(back * s)};
+}
+
+// The world position of a leaf vertex from the draw's block (below): (M p) / c7.w + the translation,
+// which is the game's c4..c6 . (p, 1) (the block's rows hold M = R * c7.w and the translation in
+// their fourth components; leaf[1] is 1 / c7.w). The game's own position has the wind on it, which
+// the pass does not draw (frame-map section 12).
+struct ClayObjectConstants;
+inline Float3 LeafWorldPosition(const ClayObjectConstants& c, const Float3& p);
+
+// The unit vector from a vertex to the eye; zero in the eye itself.
+inline Float3 LeafView(const Float3& eye, const Float3& world) {
+  return LightNormalize({LightFinite(eye.x - world.x), LightFinite(eye.y - world.y), LightFinite(eye.z - world.z)});
+}
+
+// The leaf pixel shader's two factors of the screen mask (light_formulas.leaf_mask): m1 = mask *
+// gain + bias on the front light, m2 = m1 * gain + bias on the back light (0x7CD5... instr 15, 17).
+// With the mask at 1 (no shadows) and the shader's literals both are 1.
+struct LeafMasks {
+  float m1, m2;
+};
+inline LeafMasks LeafMask(float mask, float gain, float bias) {
+  const float m1 = LightFinite(LightSat(mask) * LightFinite(gain) + LightFinite(bias));
+  return {m1, LightFinite(m1 * LightFinite(gain) + LightFinite(bias))};
+}
+
+// Tree leaves (light_formulas.tree_leaf): (A * (vs_ambient * c27w + m1 * sun_col * front) + green *
+// A * m2 * sun_col * back) * c49, green = 1 where A.g >= A.r (a leaf texel; the back light does not
+// pass through a twig's). vs_ambient, front and back are the vertex side's, interpolated.
+inline Float3 LightLeaf(const Float3& A, const Float3& vs_ambient, float front, float back, const Float3& sun_col, float c27w,
+                        float m1, float m2, const Float3& c49) {
+  const float green = LightFinite(A.y) >= LightFinite(A.x) ? 1.0f : 0.0f;
+  auto one = [&](float a, float amb, float sun, float tint) {
+    a = LightFinite(a);
+    sun = LightFinite(sun);
+    const float lit = a * (LightFinite(amb) * LightFinite(c27w) + LightFinite(m1) * sun * LightFinite(front));
+    return LightFinite((lit + green * a * LightFinite(m2) * sun * LightFinite(back)) * LightFinite(tint));
+  };
+  return {one(A.x, vs_ambient.x, sun_col.x, c49.x), one(A.y, vs_ambient.y, sun_col.y, c49.y), one(A.z, vs_ambient.z, sun_col.z, c49.z)};
+}
+
 // What a lit draw writes into the float target for the value `v`: v itself, not clamped at 1 (the
 // lit values exceed it, and the output mapping clamps after the exposure), but nothing that is not
 // a number, nothing negative and nothing above kClayLitMax: a NaN (no comparison holds for it) and
@@ -1385,6 +1504,11 @@ inline float ClayLit(float v) {
 // below 2, and a product of five such bounds is still a number in single precision.
 inline constexpr float kLightValueMax = 1024.0f;
 inline bool LightValueUsable(float v) { return std::fabs(v) <= kLightValueMax; }  // (false for a NaN and for infinity)
+// A world position (the frame's eye, a leaf draw's translation) is no light value: the levels are
+// larger than 1024 units. What reaches a shader of it is a number of at most this magnitude; the
+// shader forms a difference of two of them and normalises it.
+inline constexpr float kLightPositionMax = 1048576.0f;
+inline bool LightPositionUsable(float v) { return std::fabs(v) <= kLightPositionMax; }
 // A probe buffer's weights are bounded alike where they are decoded (normal_decode.h, DecodeWeights).
 static_assert(kProbeWeightMax == kLightValueMax);
 
@@ -1403,12 +1527,15 @@ struct ClayFrameConstants {
   float pad1;
   float axis[3];        // c23.xyz (= vertex c19.xyz)
   float pad2;
+  float eye[3];         // c19.xyz, the eye (= vertex c9.xyz of the leaf shaders); zero when not usable
+  uint32_t eye_on;      // 1: `eye` is the frame's eye; 0: the frame's leaves are not lit (LightFrameLights)
 };
-static_assert(sizeof(ClayFrameConstants) == 96);
+static_assert(sizeof(ClayFrameConstants) == 112);
 
 // The frame's constants from its light block. Lit only with the switch on and a valid block whose
 // every value is a number of usable size (the block's own rules: light_block.h, MakeLightBlock; a
-// frame without one is "light-block"); else everything is zero.
+// frame without one is "light-block"); else everything is zero. The eye is not among those values:
+// a frame whose eye is not usable is lit all the same, without it (eye_on 0: LightFrameLights).
 inline ClayFrameConstants MakeClayFrameConstants(const capture::LightBlock& b, ClayLight light) {
   ClayFrameConstants c{};
   if (light != ClayLight::kOn || !b.valid) return c;
@@ -1429,7 +1556,18 @@ inline ClayFrameConstants MakeClayFrameConstants(const capture::LightBlock& b, C
   c.floor[1] = b.floor[1];
   c.tint_pow = b.tint_pow;
   c.light_on = 1;
+  // The eye: all three components or none (a position: LightPositionUsable).
+  if (LightPositionUsable(b.eye[0]) && LightPositionUsable(b.eye[1]) && LightPositionUsable(b.eye[2])) {
+    for (int i = 0; i < 3; ++i) c.eye[i] = b.eye[i];
+    c.eye_on = 1;
+  }
   return c;
+}
+
+// Whether a frame's constants light a draw of `family`: the frame is lit, and for a leaf, whose
+// vertex-side light takes the vector to the eye, the frame's eye is usable.
+inline bool LightFrameLights(const ClayFrameConstants& frame, capture::LightFamily family) {
+  return frame.light_on != 0 && (family != capture::LightFamily::kTreeLeaf || frame.eye_on != 0);
 }
 
 // The output mapping's exposure of a frame: ClayExposure of "on" only when the frame is lit. A
@@ -1447,14 +1585,16 @@ inline float ClayFrameExposure(const ClayFrameConstants& frame) {
 // microcode, with the sun in the slot the game puts it in behind dark lanterns, is that function
 // (light_check.py --multi-sun; tests/test_light_check.py, MultiSun). Since plan Task 8b also the
 // instanced plants (kInstance), with and without the ambient factor, and their two-light forms (the
-// sun in slot 1 at every such draw captured). The leaves have no family yet.
+// sun in slot 1 at every such draw captured). Since plan Task 8c the tree leaves (probe colours;
+// their one family covers the one-, two- and four-light vertex shaders: "The tree leaves" above).
 inline bool LightFamilyDrawn(const capture::LightInputs& l) {
   switch (l.family) {
     case capture::LightFamily::kTerrainLayer:
     case capture::LightFamily::kTerrainFar: return l.kind == capture::LightVertexKind::kTerrain;
     case capture::LightFamily::kObject:
       return l.kind == capture::LightVertexKind::kStream || l.kind == capture::LightVertexKind::kProbe;
-    case capture::LightFamily::kTreeTrunk: return l.kind == capture::LightVertexKind::kProbe;
+    case capture::LightFamily::kTreeTrunk:
+    case capture::LightFamily::kTreeLeaf: return l.kind == capture::LightVertexKind::kProbe;
     case capture::LightFamily::kPlant:
     case capture::LightFamily::kPlantLit: return l.kind == capture::LightVertexKind::kInstance;
     default: return false;
@@ -1475,38 +1615,53 @@ constexpr bool LightObjectReady(capture::LightVertexKind kind, bool normals, boo
 }
 
 // A lit object's, trunk's or plant's values for the shaders (cbuffer Object, register b1, in the
-// draw's slot of the frame's constant buffer; shaders::kClayObjectFields is its layout). 272 bytes:
-// more than a 256-byte slot, so an object's or trunk's slot is kClayObjectSlotBytes (below). An
+// draw's slot of the frame's constant buffer; shaders::kClayObjectFields is its layout). 288 bytes
+// (272 before the leaves' register, plan Task 8c):
+// more than a 256-byte slot, so an object's, trunk's or leaf's slot is kClayObjectSlotBytes (below). An
 // instanced plant's values all lie in the first kClayPlantConstantBytes: it has a small slot.
 struct ClayObjectConstants {
   // Rows of M = world_rot * world_scale in xyz: the game's own (R n) * c7.w. The fourth components
-  // are 0 for an object or trunk. An instanced plant has no rows (its normals are in the world
+  // are 0 for an object or trunk, and for a leaf the world position's translation (vertex c4..c6 .w). An instanced plant has no rows (its normals are in the world
   // already; xyz 0, not read) and carries its bend constants there: vertex c45.x, c45.y, c45.z (the
   // strength, and the scale and offset of the height blend) in rot[0][3], rot[1][3], rot[2][3].
   float rot[3][4];
   float c49[3];        // pixel c49.xyz: on the whole colour (kInstance: 0, not read)
   float c27w;          // pixel c27.w: on the ambient part (kInstance: 0, not read)
   float c26[3];        // pixel c26.xyz: with the output scale, after the function (kInstance: 0, not read)
-  // kStream: the vertex shader's literal on the stream colour (2.2); kProbe: 0, not read; kInstance:
+  // kStream: the vertex shader's literal on the stream colour (2.2); kProbe: 0, not read (a leaf:
+  // kLeafColourPower, the factor of the frame's exponent in its ambient's); kInstance:
   // kInstanceColourPower, the factor of the frame's exponent in the instance colour's.
   float colour_power;
   float probe[capture::kLightProbeRegisters][4];  // kProbe: vertex c28..c39 (three sets of four); else 0, not read
+  // A leaf only (zero otherwise, not read): [0] vertex c50.w, the wrap of the front light; [1] the
+  // inverse of c7.w, which takes the scale out of M p for the world position.
+  float leaf[4];
 };
-static_assert(sizeof(ClayObjectConstants) == 272 && offsetof(ClayObjectConstants, probe) == 80);
+static_assert(sizeof(ClayObjectConstants) == 288 && offsetof(ClayObjectConstants, probe) == 80 &&
+              offsetof(ClayObjectConstants, leaf) == 272);
+inline Float3 LeafWorldPosition(const ClayObjectConstants& c, const Float3& p) {
+  auto row = [&](int r) {
+    return LightFinite(LightFinite(c.rot[r][0] * p.x + c.rot[r][1] * p.y + c.rot[r][2] * p.z) * LightFinite(c.leaf[1]) +
+                       LightFinite(c.rot[r][3]));
+  };
+  return {row(0), row(1), row(2)};
+}
 // The bytes of the block an instanced plant's shader path reads: the rows' fourth components and
 // colour_power, all before the probe registers.
 inline constexpr uint32_t kClayPlantConstantBytes = offsetof(ClayObjectConstants, probe);
 static_assert(offsetof(ClayObjectConstants, colour_power) + sizeof(float) == kClayPlantConstantBytes);
 
 // False (the draw is then not lit: light-unknown), with `out` all zero, unless the inputs are an
-// object's with a colour stream, an object's or trunk's with probe colours or an instanced plant's
+// object's with a colour stream, an object's, trunk's or leaf's with probe colours or an instanced plant's
 // and EVERY value the kind's shader path reads is a number of usable size. An object or trunk: the
 // world rotation gives a direction (every RotationKind but kDegenerate: the normal is the game's
 // normalize(M n), ruling of 2026-10-08), the rows, c27.w, c49, c26, and the stream colour's power in
 // (0, 8] or each of the forty-eight components of the probe registers. An instanced plant (family
 // plant or plant-lit on the instance kind): the three bend constants c45.xyz; nothing else of the
 // inputs is read or carried (it has no world rotation, its shaders read no c27, c49 or c26, and
-// c45.w is no bend constant). All or nothing: no block is made with one value left out.
+// c45.w is no bend constant). A leaf: a trunk's values, and its world translation (a position), its
+// wrap (0 to kLightValueMax) and a scale whose inverse is usable. All or nothing: no block is made
+// with one value left out.
 inline bool MakeClayObjectConstants(const capture::LightInputs& l, ClayObjectConstants* out) {
   *out = ClayObjectConstants{};
   if (l.kind == capture::LightVertexKind::kInstance) {
@@ -1521,8 +1676,9 @@ inline bool MakeClayObjectConstants(const capture::LightInputs& l, ClayObjectCon
     return true;
   }
   const bool stream = l.kind == capture::LightVertexKind::kStream, probe = l.kind == capture::LightVertexKind::kProbe;
+  const bool leaf = l.family == capture::LightFamily::kTreeLeaf;
   if (!(l.family == capture::LightFamily::kObject && (stream || probe)) &&
-      !(l.family == capture::LightFamily::kTreeTrunk && probe)) {
+      !((l.family == capture::LightFamily::kTreeTrunk || leaf) && probe)) {
     return false;
   }
   if (ClassifyRotation(l.world_rot, l.world_scale) == RotationKind::kDegenerate) return false;
@@ -1548,6 +1704,19 @@ inline bool MakeClayObjectConstants(const capture::LightInputs& l, ClayObjectCon
   }
   c.c27w = l.c27w;
   c.colour_power = stream ? l.colour_power : 0.0f;
+  if (leaf) {
+    // The translation, the wrap (the front light divides by 1 + wrap: not negative) and the
+    // inverse of the scale (ClassifyRotation above refused a scale of zero).
+    const float inv_scale = 1.0f / l.world_scale;
+    if (!(l.wrap >= 0.0f) || !LightValueUsable(l.wrap) || !LightValueUsable(inv_scale)) return false;
+    for (int r = 0; r < 3; ++r) {
+      if (!LightPositionUsable(l.world_pos[r])) return false;
+      c.rot[r][3] = l.world_pos[r];
+    }
+    c.leaf[0] = l.wrap;
+    c.leaf[1] = inv_scale;
+    c.colour_power = kLeafColourPower;
+  }
   *out = c;
   return true;
 }

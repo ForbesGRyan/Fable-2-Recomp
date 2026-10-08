@@ -1133,7 +1133,7 @@ int main() {
       if (v.kind == capture::LightVertexKind::kProbe) CHECK(277, v.second.source == 0x4E4);
       if (v.kind == capture::LightVertexKind::kInstance) CHECK(278, v.second.source == 0x306);
     }
-    CHECK(279, entries == 12);
+    CHECK(279, entries == 15);  // (12 before the three leaf vertex shaders, plan Task 8c: probe entries)
   }
 
   // --- The probe weights (lighting-formulas.md, "Objects", probe_colour) ---
@@ -1717,7 +1717,7 @@ int main() {
                        (v.second.source & 0xFF) == (comp[0] | (comp[1] << 2) | (comp[2] << 4)) && v.a0_comp == -1);
       }
     }
-    CHECK(380, probe_entries == 4 && instance_entries == 7);
+    CHECK(380, probe_entries == 7 && instance_entries == 7);  // (four probe entries before the three leaf shaders')
   }
 
   // --- Real streams (else SKIPPED, loudly) --- FABLE2_NORMALS_BIN: one or more bundles written by

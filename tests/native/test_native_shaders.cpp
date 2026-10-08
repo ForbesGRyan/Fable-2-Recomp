@@ -396,12 +396,13 @@ static std::string WithLightMode(const char* src, unsigned mode) {
 // that is added between them, before them, or inside a function they call. A change to a shader's
 // light path has to be made here as well, on purpose. Six pieces:
 //   kPinLight        the shared light block: cbuffer Frame and every light function, light_normalize to
-//                    clay_lit, the plants' among them (in all four shaders that light);
+//                    clay_lit, the plants' and the leaves' among them (in all four shaders that light);
 //   kPinVsMain       the vertex shader's whole main (position, coordinates, the terrain normal, the
 //                    object's normal, the vector of t, the stream colour and the probe colour; an
-//                    instanced plant's normal, bend and colour);
-//   kPinTexturedMain the textured pixel shader from clay_linear to the end of main (the object's and
-//                    the plants' lit paths);
+//                    instanced plant's normal, bend and colour; a leaf's normal, ambient and two light
+//                    scalars);
+//   kPinTexturedMain the textured pixel shader from clay_linear to the end of main (the object's, the
+//                    plants' and the leaves' lit paths);
 //   kPinTerrainCommon the terrain shaders' functions: sample_colour, sample_base, terrain_fade_in,
 //                    alpha test and output (terrain_out);
 //   kPinLayerMain    the layer shader from sample_side to the end of main;
@@ -415,6 +416,7 @@ static const char kPinLight[] = R"pin(cbuffer Frame : register(b2) {
   float3 f_add; float f_pad0;            // c20.xyz (c20.w, the output scale, is not applied)
   float3 f_floor; float f_pad1;          // c22.xyz
   float3 f_axis; float f_pad2;           // c23.xyz (= vertex c19.xyz)
+  float3 f_eye; uint f_eye_on;           // c19.xyz, the eye (= vertex c9.xyz of the leaf shaders); 1: it is usable
 };
 float3 light_normalize(float3 v) {
   float n2 = dot(v, v);
@@ -477,6 +479,28 @@ float3 LightPlantLit(float3 A, float3 vs_base, float3 add, float3 amb_floor, flo
                      float sun_gate) {
   return A * (vs_base * AmbientFactor(amb_floor, t) + add + light_sun(sun_col, n_dot_sun, sun_gate));
 }
+// The tree leaves (lighting-formulas.md, "Tree leaves"; the mirrors are in clay_logic.h). The game's leaf
+// vertex shaders make the ambient and the light's two scalars on the side of the card the viewer sees
+// (the cards are drawn without culling; the normal, used as it is, is turned to the viewer); its pixel
+// shader adds them on the albedo, the back light on leaf texels only. Split the same way. The one
+// division of the light is LeafLight's by 1 + wrap (the pass refuses a draw whose wrap is negative).
+float2 LeafLight(float3 normal, float3 view, float3 light_dir, float wrap, float spot) {
+  float3 n = (dot(view, normal) < 0.0) ? -normal : normal;
+  float nl = dot(light_dir, n);
+  float d = 1.0 + wrap;
+  float front = (d != 0.0) ? saturate((nl + wrap) / d) : 0.0;
+  float turn = 1.0 - saturate(dot(view, n));
+  return float2(front, saturate(-nl) * (1.0 - turn * turn)) * spot;
+}
+float2 LeafMask(float mask, float gain, float bias) {
+  float m1 = saturate(mask) * gain + bias;
+  return float2(m1, m1 * gain + bias);
+}
+float3 LightLeaf(float3 A, float3 vs_ambient, float front, float back, float3 sun_col, float c27w, float m1, float m2,
+                 float3 c49) {
+  float green = (A.g >= A.r) ? 1.0 : 0.0;
+  return (A * (vs_ambient * c27w + m1 * sun_col * front) + green * A * m2 * sun_col * back) * c49;
+}
 // What a lit draw writes: the value itself, a number, not negative, at most 64 (ClayLit in clay_logic.h).
 float3 clay_lit(float3 v) { return (v > 0.0) ? min(v, 64.0) : float3(0.0, 0.0, 0.0); }
 )pin";
@@ -507,8 +531,8 @@ static const char kPinVsMain[] = R"pin(VsOut main(uint vid : SV_VertexID) {
     o.normal = float3(t, sqrt(abs(1.0 - dot(t, t))));
     if (light_mode & 4) o.axis = AmbientAxis(o.normal, f_axis);
   }
-  // (18: the object bit and the instance bit. An object or trunk has the first alone.)
-  [branch] if ((light_mode & 18) == 2 && has_light) {
+  // (82: the object bit, the instance bit and the leaf bit. An object or trunk has the first alone.)
+  [branch] if ((light_mode & 82) == 2 && has_light) {
     // The object's normal as the game's vertex shader exports it: (R n) * c7.w, not normalised.
     float3 n = normals[v];
     o.normal = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));
@@ -525,7 +549,7 @@ static const char kPinVsMain[] = R"pin(VsOut main(uint vid : SV_VertexID) {
       o.vcolour = light_pow(float3(word & 255, (word >> 8) & 255, (word >> 16) & 255) / 255.0, o_colour_power);
     }
   }
-  [branch] if ((light_mode & 18) == 18 && has_light) {
+  [branch] if ((light_mode & 82) == 18 && has_light) {
     // An instanced plant. Its normal is in the world already (normalize(M n) of its copy's rows): no
     // rows here. t10 holds the colour of the vertex's copy, t11 the copy's up axis (xyz) and the
     // vertex's height in the copy (w); the draw's bend constants c45.x, .y, .z are the fourth
@@ -546,6 +570,26 @@ static const char kPinVsMain[] = R"pin(VsOut main(uint vid : SV_VertexID) {
       o.axis = float3(0, 0, 0);
       o.vcolour = InstanceAmbient(colour, f_tint, o_colour_power * f_tint_pow, f_add);
     }
+  }
+  // (90: those three bits and the probe bit. A leaf is a probe record with the leaf bit.)
+  [branch] if ((light_mode & 90) == 74 && has_light) {
+    // A tree leaf, as the game's leaf vertex shaders: the normal through the rows, as it is; the probe
+    // colour (the set at t10 clamped, the weights at t11) raised to c18.w * 0.4545 (2.2 * c21.w * 0.4545)
+    // times c18.xyz (c21.xyz) plus c54.xyz (c20.xyz); the world position (M p) / c7.w + c4..c6 .w and
+    // the unit vector from it to the eye; and the sun's two scalars on the side of the card the viewer
+    // sees (the frame's sun stands in the vertex side's light set: a direction, no cone, no range), in
+    // the first two components of the bend's interpolator. A leaf has no vector of t.
+    float3 n = normals[v];
+    float3 N = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));
+    o.normal = N;
+    o.axis = float3(0, 0, 0);
+    uint a0 = min(colours[v], 8u);
+    float4 w = probe_weights[v];
+    float3 probe = o_probe[a0].xyz + float3(dot(o_probe[a0 + 1], w), dot(o_probe[a0 + 2], w), dot(o_probe[a0 + 3], w));
+    o.vcolour = InstanceAmbient(probe, f_tint, o_colour_power * f_tint_pow, f_add);
+    float3 at = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +
+                float3(o_rot0.w, o_rot1.w, o_rot2.w);
+    o.bend = float4(LeafLight(N, light_normalize(f_eye - at), light_normalize(f_sun_dir), o_leaf.x, 1.0), 0, 0);
   }
   return o;
 })pin";
@@ -591,6 +635,12 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
         } else {
           lit = LightPlant(clay_linear(t.rgb), vcolour, dot(Np, f_sun_dir), f_sun_col, SunGateSingle(1.0, 1.0));
         }
+      } else if (light_mode & 64) {
+        // A tree leaf: the vertex side's ambient and the sun's two scalars (bend.x front, bend.y back)
+        // on A, the back light on leaf texels only; the mask 1 through the shader's two literals (0.6
+        // and 0.4: both factors are then 1); c27.w, c49 and c26 as an object's.
+        float2 m = LeafMask(1.0, 0.6, 0.4);
+        lit = LightLeaf(clay_linear(t.rgb), vcolour, bend.x, bend.y, f_sun_col, o_c27w, m.x, m.y, o_c49) * o_c26;
       } else {
         float3 N = light_normalize(normal);
         lit = LightObject(clay_linear(t.rgb), vcolour, f_tint, f_tint_pow, f_add, f_floor, AmbientT(axis, normal),
@@ -1253,6 +1303,22 @@ int main() {
         "return A * (vs_ambient + light_sun(sun_col, n_dot_sun, sun_gate));",
         "float3 LightPlantLit(float3 A, float3 vs_base, float3 add, float3 amb_floor, float t, float n_dot_sun, float3 sun_col,",
         "return A * (vs_base * AmbientFactor(amb_floor, t) + add + light_sun(sun_col, n_dot_sun, sun_gate));",
+        // the tree leaves: the two scalars of the light on the side the viewer sees (the normal turned to
+        // him, the wrapped cosine guarded where 1 + wrap is zero, the back light through the card), the
+        // two factors of the mask, and the family's function with the back light on leaf texels only
+        "float2 LeafLight(float3 normal, float3 view, float3 light_dir, float wrap, float spot) {",
+        "float3 n = (dot(view, normal) < 0.0) ? -normal : normal;",
+        "float nl = dot(light_dir, n);",
+        "float d = 1.0 + wrap;",
+        "float front = (d != 0.0) ? saturate((nl + wrap) / d) : 0.0;",
+        "float turn = 1.0 - saturate(dot(view, n));",
+        "return float2(front, saturate(-nl) * (1.0 - turn * turn)) * spot;",
+        "float2 LeafMask(float mask, float gain, float bias) {",
+        "float m1 = saturate(mask) * gain + bias;",
+        "return float2(m1, m1 * gain + bias);",
+        "float3 LightLeaf(float3 A, float3 vs_ambient, float front, float back, float3 sun_col, float c27w, float m1, float m2,",
+        "float green = (A.g >= A.r) ? 1.0 : 0.0;",
+        "return (A * (vs_ambient * c27w + m1 * sun_col * front) + green * A * m2 * sun_col * back) * c49;",
         // what a lit draw writes
         "float3 clay_lit(float3 v) { return (v > 0.0) ? min(v, 64.0) : float3(0.0, 0.0, 0.0); }",
     };
@@ -1263,8 +1329,19 @@ int main() {
           return 80;
         }
       }
-      // Nothing is divided in the light, and no clamp at 1 is on a lit value.
+      // No clamp at 1 is on a lit value, and the light has one division, LeafLight's by 1 + wrap, under
+      // its test (held just above).
       if (strstr(src, "saturate(lit") || strstr(src, "clay_linear(lit")) return 80;
+      {
+        const char* light_at = strstr(src, "float3 light_normalize(float3 v) {");
+        const char* light_end = strstr(src, "float3 clay_lit(float3 v)");
+        if (!light_at || !light_end) return 80;
+        int divisions = 0;
+        for (const char* c = light_at; c < light_end; ++c) {
+          if (c[0] == '/' && c[1] != '/' && c[-1] != '/') ++divisions;
+        }
+        if (divisions != 1) return 80;
+      }
     }
     // The flat shader has no light at all: no block, no function.
     if (strstr(kClayPs, "Frame") || strstr(kClayPs, "light_mode &") || strstr(kClayPs, "clay_lit")) return 81;
@@ -1276,7 +1353,7 @@ int main() {
       const char* v = kClayVs;
       const char* range = strstr(v, "bool has_light = in_range && uint(v) < light_count;");
       const char* terrain = strstr(v, "if (light_mode & 4) o.axis = AmbientAxis(o.normal, f_axis);");
-      const char* object = strstr(v, "if ((light_mode & 18) == 2 && has_light) {");
+      const char* object = strstr(v, "if ((light_mode & 82) == 2 && has_light) {");
       const char* n = strstr(v, "float3 n = normals[v];");
       const char* rot = strstr(v, "o.normal = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));");
       const char* axis = rot ? strstr(rot, "o.axis = AmbientAxis(o.normal, f_axis);") : nullptr;  // (the object's)
@@ -1302,16 +1379,22 @@ int main() {
       if (!strstr(v, "StructuredBuffer<float3> normals : register(t9);") ||
           !strstr(v, "StructuredBuffer<uint> colours : register(t10);")) return 82;
       // The object's block is not an instanced plant's: the plant's normal must not go through the rows
-      // (the test of the block excludes the instance bit, and nothing else of the shader has the rows).
+      // (the test of the block excludes the instance bit, and nothing else of the shader has the rows
+      // but the leaf's block, which comes after the plant's and under its own test).
       const char* after_rows = rot + strlen("o.normal = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));");
-      if (strstr(v, "if ((light_mode & 2) && has_light)") || strstr(after_rows, "o_rot0.xyz") || strstr(after_rows, "o_rot1.xyz") ||
-          strstr(after_rows, "o_rot2.xyz")) return 82;
+      const char* leaf_test = strstr(v, "[branch] if ((light_mode & 90) == 74 && has_light) {");
+      for (const char* row : {"o_rot0.xyz", "o_rot1.xyz", "o_rot2.xyz"}) {
+        const char* again = strstr(after_rows, row);
+        if (!leaf_test || !again || again < leaf_test) return 82;
+      }
+      if (strstr(v, "if ((light_mode & 2) && has_light)") || strstr(v, "if ((light_mode & 18) == 2 && has_light)") ||
+          strstr(v, "if ((light_mode & 18) == 18 && has_light)")) return 82;
       // The instanced plant (plan Task 8b), after the object's block and under its own test: the
       // normal as it is, the colour of the copy and the bend inputs from the plant's own buffers, the
       // bend from the up axis, the height and the three bend constants (c45.x the strength, .y the
       // scale, .z the offset), the colour's exponent 2.2 * c21.w; then by family the vector of t with
       // the colour times the tint, or no vector and the colour times the tint plus the added light.
-      const char* plant = strstr(v, "[branch] if ((light_mode & 18) == 18 && has_light) {");
+      const char* plant = strstr(v, "[branch] if ((light_mode & 82) == 18 && has_light) {");
       const char* pn = plant ? strstr(plant, "float3 n = normals[v];") : nullptr;
       const char* as_is = strstr(v, "o.normal = n;");
       const char* tone = strstr(v, "uint tone = colours[v];");
@@ -1335,9 +1418,36 @@ int main() {
         for (const char* at = from ? strstr(from, needle) : nullptr; at; at = strstr(at + 1, needle)) ++found;
         return found;
       };
-      if (count(main_at, "PlantBend(") != 1 || count(main_at, "PlantHeight(") != 1 || count(main_at, "InstanceAmbient(") != 2 ||
-          count(main_at, "= normals[v]") != 2 || count(main_at, "colours[v]") != 2 || count(main_at, "probe_weights[v]") != 2 ||
+      // (since plan Task 8c three of each: the leaf's block has its own loads and its own ambient)
+      if (count(main_at, "PlantBend(") != 1 || count(main_at, "PlantHeight(") != 1 || count(main_at, "InstanceAmbient(") != 3 ||
+          count(main_at, "= normals[v]") != 3 || count(main_at, "colours[v]") != 3 || count(main_at, "probe_weights[v]") != 3 ||
           count(main_at, "terrain_normals[v]") != 1 || as_is < plant || tone < plant) return 99;
+      // The tree leaf (plan Task 8c), after the plant's block and under its own test (the object, probe
+      // and leaf bits without the instance bit): the normal through the rows AS IT IS (the game's leaf
+      // vertex shaders do not normalise it), no vector of t, the probe colour of the clamped set and the
+      // weights, the ambient with the exponent's factor and the frame's tint, exponent and added light,
+      // the world position (M p) / c7.w + the translation, and the two scalars of the sun from the unit
+      // vector to the eye, the unit sun direction and the wrap, with no cone or range (spot 1), in the
+      // first two components of the bend.
+      const char* leaf = strstr(v, "[branch] if ((light_mode & 90) == 74 && has_light) {");
+      const char* ln = leaf ? strstr(leaf, "float3 n = normals[v];") : nullptr;
+      const char* big_n = strstr(v, "float3 N = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));");
+      const char* keep = strstr(v, "o.normal = N;");
+      const char* no_t = keep ? strstr(keep, "o.axis = float3(0, 0, 0);") : nullptr;
+      const char* set = strstr(v, "uint a0 = min(colours[v], 8u);");
+      const char* lw = set ? strstr(set, "float4 w = probe_weights[v];") : nullptr;
+      const char* lprobe = strstr(v, "float3 probe = o_probe[a0].xyz + float3(dot(o_probe[a0 + 1], w), dot(o_probe[a0 + 2], w), dot(o_probe[a0 + 3], w));");
+      const char* lamb = strstr(v, "o.vcolour = InstanceAmbient(probe, f_tint, o_colour_power * f_tint_pow, f_add);");
+      const char* where = strstr(v, "float3 at = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +");
+      const char* shift = strstr(v, "float3(o_rot0.w, o_rot1.w, o_rot2.w);");
+      const char* sides = strstr(v, "o.bend = float4(LeafLight(N, light_normalize(f_eye - at), light_normalize(f_sun_dir), o_leaf.x, 1.0), 0, 0);");
+      if (!leaf || !ln || !big_n || !keep || !no_t || !set || !lw || !lprobe || !lamb || !where || !shift || !sides) return 166;
+      if (!(amb < leaf && leaf < ln && ln < big_n && big_n < keep && keep < no_t && no_t < set && set < lw && lw < lprobe &&
+            lprobe < lamb && lamb < where && where < shift && shift < sides && sides < strstr(leaf, "return o;"))) return 166;
+      // (one call of LeafLight in main, and the leaf's normal is never normalised: N is used as made)
+      if (count(main_at, "LeafLight(") != 1 || strstr(v, "light_normalize(N)") || strstr(v, "normalize(N)") ||
+          count(main_at, "o_leaf.") != 2 || count(main_at, "f_eye") != 1) return 166;
+      if (!strstr(v, "float4 o_leaf;") || !strstr(kClayTexturedPs, "float4 o_leaf;") || !strstr(v, "float3 f_eye; uint f_eye_on;")) return 166;
     }
     // The object (kClayTexturedPs): A is the albedo squared, clamped to [0, 1] before the square as the
     // materials picture clamps it, and the light multiplies it outside the square; the normal is
@@ -1369,10 +1479,20 @@ int main() {
       if (!declared || !plant || !np || !family || !lit_call || !plant_call) return 99;
       if (!(branch < declared && declared < plant && plant < np && np < family && family < lit_call && lit_call < plant_call &&
             plant_call < n && n < call)) return 99;
-      // (the object's constants are read by the object's path alone: once each, after the plants' paths)
+      // The tree leaf (plan Task 8c), between the plants' paths and the object's, under the leaf bit:
+      // the mask's two factors of a mask of 1 with the shader's literals, and the family's function on
+      // the vertex side's ambient and two scalars with the frame's sun colour, c27.w, c49, then c26.
+      const char* leaf = strstr(t, "} else if (light_mode & 64) {");
+      const char* mask_factors = strstr(t, "float2 m = LeafMask(1.0, 0.6, 0.4);");
+      const char* leaf_call = strstr(t, "lit = LightLeaf(clay_linear(t.rgb), vcolour, bend.x, bend.y, f_sun_col, o_c27w, m.x, m.y, o_c49) * o_c26;");
+      if (!leaf || !mask_factors || !leaf_call) return 167;
+      if (!(plant_call < leaf && leaf < mask_factors && mask_factors < leaf_call && leaf_call < n)) return 167;
+      // (the object's constants are read by the leaf's path and the object's alone: once each in each,
+      // after the plants' paths)
       for (const char* field : {"o_c27w", "o_c49", "o_c26"}) {
         const char* at = strstr(strstr(t, "float4 main("), field);
-        if (!at || at < n || strstr(at + 1, field)) return 99;
+        const char* second = at ? strstr(at + 1, field) : nullptr;
+        if (!at || at < leaf || at > n || !second || second < n || strstr(second + 1, field)) return 99;
       }
     }
     // The terrain layer: the lit colour replaces the unlit one after the alpha is formed (the alpha is
@@ -1442,7 +1562,7 @@ int main() {
       using fable2::native::render::ClayObjectConstants;
       const unsigned frame_count = sizeof(kClayFrameFields) / sizeof(kClayFrameFields[0]);
       const unsigned object_count = sizeof(kClayObjectFields) / sizeof(kClayObjectFields[0]);
-      static_assert(sizeof(ClayFrameConstants) == 96 && sizeof(ClayObjectConstants) == 272);
+      static_assert(sizeof(ClayFrameConstants) == 112 && sizeof(ClayObjectConstants) == 288);
       const struct {
         const char* name;
         size_t offset, bytes;
@@ -1459,6 +1579,8 @@ int main() {
           {"f_pad1", offsetof(ClayFrameConstants, pad1), sizeof(ClayFrameConstants::pad1)},
           {"f_axis", offsetof(ClayFrameConstants, axis), sizeof(ClayFrameConstants::axis)},
           {"f_pad2", offsetof(ClayFrameConstants, pad2), sizeof(ClayFrameConstants::pad2)},
+          {"f_eye", offsetof(ClayFrameConstants, eye), sizeof(ClayFrameConstants::eye)},
+          {"f_eye_on", offsetof(ClayFrameConstants, eye_on), sizeof(ClayFrameConstants::eye_on)},
       }, object_struct[] = {
           {"o_rot0", offsetof(ClayObjectConstants, rot), 16},
           {"o_rot1", offsetof(ClayObjectConstants, rot) + 16, 16},
@@ -1468,6 +1590,7 @@ int main() {
           {"o_c26", offsetof(ClayObjectConstants, c26), sizeof(ClayObjectConstants::c26)},
           {"o_colour_power", offsetof(ClayObjectConstants, colour_power), sizeof(ClayObjectConstants::colour_power)},
           {"o_probe", offsetof(ClayObjectConstants, probe), sizeof(ClayObjectConstants::probe)},
+          {"o_leaf", offsetof(ClayObjectConstants, leaf), sizeof(ClayObjectConstants::leaf)},
       };
       if (frame_count != sizeof(frame_struct) / sizeof(frame_struct[0]) ||
           object_count != sizeof(object_struct) / sizeof(object_struct[0])) return 89;
@@ -1488,28 +1611,32 @@ int main() {
       }
       for (int i = 0; i < 4; ++i) {
         const char* target = i == 0 ? "vs_5_0" : "ps_5_0";
-        if (int at = BufferLayoutMismatch("lit", lit_shaders[i], target, "Frame", kClayFrameFields, frame_count, 96)) {
+        if (int at = BufferLayoutMismatch("lit", lit_shaders[i], target, "Frame", kClayFrameFields, frame_count, 112)) {
           std::cerr << "cbuffer Frame of lit shader " << i << ": " << at << "\n";
           return 90 + i;
         }
       }
-      if (int at = BufferLayoutMismatch("clay_vs", kClayVs, "vs_5_0", "Object", kClayObjectFields, object_count, 272)) return 94;
-      if (int at = BufferLayoutMismatch("clay_textured_ps", kClayTexturedPs, "ps_5_0", "Object", kClayObjectFields, object_count, 272)) return 95;
+      if (int at = BufferLayoutMismatch("clay_vs", kClayVs, "vs_5_0", "Object", kClayObjectFields, object_count, 288)) return 94;
+      if (int at = BufferLayoutMismatch("clay_textured_ps", kClayTexturedPs, "ps_5_0", "Object", kClayObjectFields, object_count, 288)) return 95;
       std::string swapped = kClayTexturedPs;
       const std::string good = "float3 f_tint; float f_pad3;";
       size_t at = swapped.find(good);
       if (at == std::string::npos) return 96;
       swapped.replace(at, good.size(), "float f_pad3; float3 f_tint;");
-      if (BufferLayoutMismatch("swapped_frame_ps", swapped.c_str(), "ps_5_0", "Frame", kClayFrameFields, frame_count, 96) < 10) return 96;
+      if (BufferLayoutMismatch("swapped_frame_ps", swapped.c_str(), "ps_5_0", "Frame", kClayFrameFields, frame_count, 112) < 10) return 96;
       swapped = kClayTexturedPs;
       const std::string object_good = "float3 o_c49; float o_c27w;";
       at = swapped.find(object_good);
       if (at == std::string::npos) return 97;
       swapped.replace(at, object_good.size(), "float o_c27w; float3 o_c49;");
-      if (BufferLayoutMismatch("swapped_object_ps", swapped.c_str(), "ps_5_0", "Object", kClayObjectFields, object_count, 272) < 10) return 97;
-      // (the probe registers are the block's last 192 bytes, twelve float4: an array a register apart)
-      if (object_count != 8 || strcmp(kClayObjectFields[7].name, "o_probe") || kClayObjectFields[7].offset != 80 ||
-          kClayObjectFields[7].bytes != 192) return 97;
+      if (BufferLayoutMismatch("swapped_object_ps", swapped.c_str(), "ps_5_0", "Object", kClayObjectFields, object_count, 288) < 10) return 97;
+      // (the probe registers are 192 bytes from byte 80, twelve float4: an array a register apart; the
+      // leaf's register is the block's last, behind them; the frame's eye is its block's last register)
+      if (object_count != 9 || strcmp(kClayObjectFields[7].name, "o_probe") || kClayObjectFields[7].offset != 80 ||
+          kClayObjectFields[7].bytes != 192 || strcmp(kClayObjectFields[8].name, "o_leaf") || kClayObjectFields[8].offset != 272 ||
+          kClayObjectFields[8].bytes != 16) return 97;
+      if (frame_count != 14 || strcmp(kClayFrameFields[12].name, "f_eye") || kClayFrameFields[12].offset != 96 ||
+          kClayFrameFields[12].bytes != 12 || strcmp(kClayFrameFields[13].name, "f_eye_on") || kClayFrameFields[13].offset != 108) return 97;
     }
   }
 
@@ -1624,9 +1751,10 @@ int main() {
     // (LoadsOnlyFrom sees a load from a register it is not given)
     if (LoadsOnlyFrom(vs, buffer_registers & ~(1u << 11)) || LoadsOnlyFrom(vs, buffer_registers & ~(1u << 0))) return 156;
     if (!strstr(kClayVs, "[branch] if ((light_mode & 1) && has_light) {") ||
-        !strstr(kClayVs, "[branch] if ((light_mode & 18) == 2 && has_light) {") ||
+        !strstr(kClayVs, "[branch] if ((light_mode & 82) == 2 && has_light) {") ||
         !strstr(kClayVs, "[branch] if (light_mode & 8) {") ||
-        !strstr(kClayVs, "[branch] if ((light_mode & 18) == 18 && has_light) {") ||
+        !strstr(kClayVs, "[branch] if ((light_mode & 82) == 18 && has_light) {") ||
+        !strstr(kClayVs, "[branch] if ((light_mode & 90) == 74 && has_light) {") ||
         !strstr(kClayVs, "[branch] if (light_mode & 32) {") ||
         !strstr(kClayTexturedPs, "[branch] if (light_mode & 16) {")) return 157;
     // Controls: a load that is outside its test is reported. (Whether the compiler takes a load out of a
@@ -1637,8 +1765,8 @@ int main() {
     // read as a vertex output's default; the weights read inside the object's test but before the probe
     // bit's, where every colour-stream object would load them from a t11 that is not a weights buffer.
     {
-      const std::string early_normal = Changed(kClayVs, "  [branch] if ((light_mode & 18) == 2 && has_light) {",
-                                               "  o.axis = normals[v];\n  [branch] if ((light_mode & 18) == 2 && has_light) {");
+      const std::string early_normal = Changed(kClayVs, "  [branch] if ((light_mode & 82) == 2 && has_light) {",
+                                               "  o.axis = normals[v];\n  [branch] if ((light_mode & 82) == 2 && has_light) {");
       const std::string early_weights = Changed(kClayVs, "  o.vcolour = float3(0, 0, 0);", "  o.vcolour = probe_weights[v].xyz;");
       const std::string outer_weights = Changed(kClayVs, "    [branch] if (light_mode & 8) {",
                                                 "    o.axis += probe_weights[v].xyz;\n    [branch] if (light_mode & 8) {");
@@ -1661,25 +1789,67 @@ int main() {
           outer_depths == LoadDepths(vs, 11)) return 158;
       // The plant's bend inputs read before the plant's test (every draw would load them), and its
       // colour read in the object's block (every object would load a second word): both reported.
-      const std::string early_bend = Changed(kClayVs, "  [branch] if ((light_mode & 18) == 18 && has_light) {",
-                                             "  o.bend = probe_weights[v];\n  [branch] if ((light_mode & 18) == 18 && has_light) {");
+      const std::string early_bend = Changed(kClayVs, "  [branch] if ((light_mode & 82) == 18 && has_light) {",
+                                             "  o.bend = probe_weights[v];\n  [branch] if ((light_mode & 82) == 18 && has_light) {");
       const std::string bend_listing = Disassembly("early_bend_vs", early_bend.c_str(), "vs_5_0");
       if (early_bend.empty() || bend_listing.empty() || BufferLoadGuard(bend_listing, 11) != 0) return 158;
-      // The object's block and the plant's exclude each other in the compiled program: the mode's
-      // object and instance bits (18) are compared with 2 for the one and with 18 for the other.
-      // Control: an object's test without the instance bit (a plant would run the object's block too,
-      // and load its normals and its word twice) has no such comparison. (With the mode fixed the two
-      // programs are the same: the plant's block overwrites all the object's block gives.)
-      const std::string both = Changed(kClayVs, "  [branch] if ((light_mode & 18) == 2 && has_light) {", "  [branch] if ((light_mode & 2) && has_light) {");
-      const std::string both_listing = Disassembly("both_vs", both.c_str(), "vs_5_0");
-      if (both.empty() || both_listing.empty() || !HasLineWith(vs, "ieq", "2, 18)") || !HasLineWith(vs, "and", "1, 18)") ||
-          HasLineWith(both_listing, "ieq", "2, 18)")) return 158;
+      // The object's block, the plant's and the leaf's exclude each other in the compiled program: the
+      // mode's object, instance and leaf bits (82) are compared with 2 for the first and with 18 for
+      // the second, and those with the probe bit (90) with 74 for the third: one `and` of the mode
+      // with (1, 82, 90) and one `ieq` with (2, 18, 74).
+      // Controls, each a test that lets two blocks run for one mode, and each without that comparison:
+      // an object's test without the other two bits (a plant and a leaf would run the object's block
+      // too, and load their normals and their word twice); an object's test without the leaf bit (the
+      // parent's: a leaf would run it too); a plant's test without the leaf bit; a leaf's test without
+      // the instance bit (a mode with both would run the plant's block and the leaf's); a leaf's test
+      // without the probe bit (the block would load weights where the pass binds none). (With the mode
+      // fixed the first programs are the same: a later block overwrites all an earlier one gives.)
+      const char* const object_test = "  [branch] if ((light_mode & 82) == 2 && has_light) {";
+      const char* const plant_test = "  [branch] if ((light_mode & 82) == 18 && has_light) {";
+      const char* const leaf_test = "  [branch] if ((light_mode & 90) == 74 && has_light) {";
+      if (!HasLineWith(vs, "ieq", "l(2, 18, 74, 0)") || !HasLineWith(vs, "and", "l(1, 82, 90, 0)")) return 158;
+      const struct {
+        const char* name;
+        const char* before;
+        const char* after;
+      } pairings[] = {
+          {"both_vs", object_test, "  [branch] if ((light_mode & 2) && has_light) {"},
+          {"object_and_leaf_vs", object_test, "  [branch] if ((light_mode & 18) == 2 && has_light) {"},
+          {"plant_and_leaf_vs", plant_test, "  [branch] if ((light_mode & 18) == 18 && has_light) {"},
+          {"leaf_and_plant_vs", leaf_test, "  [branch] if ((light_mode & 74) == 74 && has_light) {"},
+          {"leaf_without_probe_vs", leaf_test, "  [branch] if ((light_mode & 82) == 66 && has_light) {"},
+      };
+      for (const auto& pairing : pairings) {
+        const std::string changed = Changed(kClayVs, pairing.before, pairing.after);
+        const std::string listing = Disassembly(pairing.name, changed.c_str(), "vs_5_0");
+        if (changed.empty() || listing.empty() ||
+            (HasLineWith(listing, "ieq", "l(2, 18, 74, 0)") && HasLineWith(listing, "and", "l(1, 82, 90, 0)"))) {
+          std::cerr << "the control '" << pairing.name << "' is not reported\n";
+          return 158;
+        }
+      }
+      // What the first two pairings do, on the program of a leaf's mode (78): the object's block's
+      // stream-colour or probe path runs before the leaf's. The leaf's block overwrites what it gave,
+      // so the compiler drops it, and the programs are the leaf's own: the comparison above, on the
+      // whole program, is what shows them. The last pairing shows on a fixed mode: an object-and-leaf
+      // mode without the probe bit (70), for which the pass binds no weights, loads them.
+      {
+        const std::string loose_leaf = Changed(kClayVs, leaf_test, "  [branch] if ((light_mode & 82) == 66 && has_light) {");
+        if (!ReadsResource(Disassembly("leaf_without_probe_vs_mode70", WithLightMode(loose_leaf.c_str(), 70).c_str(), "vs_5_0"), 11) ||
+            ReadsResource(Disassembly("clay_vs_mode70", WithLightMode(kClayVs, 70).c_str(), "vs_5_0"), 11)) return 158;
+      }
+      // The leaf's weights read before the leaf's test (every draw would load them): reported. (Into an
+      // output no block writes: one that the blocks overwrite the compiler moves into their `else`.)
+      const std::string early_leaf = Changed(kClayVs, leaf_test, (std::string("  o.world += probe_weights[v].xyz;\n") + leaf_test).c_str());
+      const std::string early_leaf_listing = Disassembly("early_leaf_vs", early_leaf.c_str(), "vs_5_0");
+      if (early_leaf.empty() || early_leaf_listing.empty() || BufferLoadGuard(early_leaf_listing, 11) != 0) return 158;
     }
     // Every light load, by the blocks around it. The terrain normals: one load, in the terrain's block.
-    // The normals and the word at t10: two loads each, one in the object's block and one in the
-    // instanced plant's. t11: the weights inside BOTH of the object's tests (its block's, which has the
-    // vertex bound, and the probe bit's), and the plant's bend inputs in the plant's block.
-    if (LoadDepths(vs, 8) != "1" || LoadDepths(vs, 9) != "1,1" || LoadDepths(vs, 10) != "1,1" || LoadDepths(vs, 11) != "2,1" ||
+    // The normals and the word at t10: three loads each, one in the object's block, one in the
+    // instanced plant's and one in the leaf's. t11: the weights inside BOTH of the object's tests (its
+    // block's, which has the vertex bound, and the probe bit's), the plant's bend inputs in the plant's
+    // block, and the leaf's weights in the leaf's block (whose one test has the probe bit).
+    if (LoadDepths(vs, 8) != "1" || LoadDepths(vs, 9) != "1,1,1" || LoadDepths(vs, 10) != "1,1,1" || LoadDepths(vs, 11) != "2,1,1" ||
         InnerLoadDepth(vs, 11) != 1 || InnerLoadDepth(vs, 10) != 1 || InnerLoadDepth(vs, 9) != 1 || InnerLoadDepth(vs, 8) != 1) {
       std::cerr << "nesting of the light loads: t8 " << LoadDepths(vs, 8) << "; t9 " << LoadDepths(vs, 9) << "; t10 "
                 << LoadDepths(vs, 10) << "; t11 " << LoadDepths(vs, 11) << "\n";
@@ -1726,13 +1896,19 @@ int main() {
       // (the unlit programs still read their own inputs: the albedo, the terrain block and colour)
       if (!ReadsResource(textured0, 3) || !ReadsBlock(layer0, "cb1") || !ReadsResource(layer0, 4) ||
           !ReadsResource(far0, 4)) return 161;
-      // Every light_mode there is (six bits), on the program a draw with that mode runs: the vertex
+      // Every light_mode there is (seven bits), on the program a draw with that mode runs: the vertex
       // shader loads from exactly the light registers at which the pass binds the draw's OWN buffer
       // (LightBufferSources, which is what clay_pass.cpp binds by), every such load is still inside a
       // test (the vertex bound is a root word), it loads from no register outside the layout, every
       // resource it declares has a parameter, and it has no loop.
-      static_assert(fable2::native::render::kLightModeCount == 64);
+      static_assert(fable2::native::render::kLightModeCount == 128);
       for (unsigned mode = 0; mode < fable2::native::render::kLightModeCount; ++mode) {
+        // Which of the three mesh blocks the mode takes, by the shader's own tests: an object's or
+        // trunk's (the object bit without the instance and leaf bits), an instanced plant's (with the
+        // instance bit, without the leaf bit), a leaf's (with the probe and leaf bits, without the
+        // instance bit), or none (a mode the pass never makes: its program loads nothing of t9 to t11).
+        const bool object = (mode & 82) == 2, plant = (mode & 82) == 18, leaf = (mode & 90) == 74, probe = object && (mode & 8) != 0;
+        const bool runs = object || plant || leaf;
         const std::string text = WithLightMode(kClayVs, mode);
         const std::string listing = Disassembly("clay_vs_mode", text.c_str(), "vs_5_0");
         if (listing.empty()) return 160;
@@ -1740,9 +1916,9 @@ int main() {
         for (unsigned i = 0; i < fable2::native::render::kClayLightBufferCount; ++i) {
           const bool named = own.source[i] != fable2::native::render::ClayLightBuffer::kPositions;
           const int reg = int(fable2::native::render::kClayBindings[fable2::native::render::kClayLightBufferParam0 + i].reg);
-          // (a mode with both the terrain and the object bit, which the pass never makes, need not load
-          // the terrain normals: the object's block overwrites what they give; it must not load more)
-          const bool expected = named && !(reg == 8 && (mode & 3) == 3);
+          // (a mode with the terrain bit and a mesh block, which the pass never makes, need not load
+          // the terrain normals: the block overwrites what they give; it must not load more)
+          const bool expected = named && !(reg == 8 && runs);
           if (ReadsResource(listing, reg) != expected || (expected && BufferLoadGuard(listing, reg) != 1)) {
             std::cerr << "light_mode " << mode << ": t" << reg << " is " << (named ? "" : "not ") << "the draw's own buffer, and the "
                       << "vertex shader " << (ReadsResource(listing, reg) ? "loads from it" : "does not load from it")
@@ -1752,16 +1928,17 @@ int main() {
         }
         if (!LoadsOnlyFrom(listing, buffer_registers) || LoopInstructions(listing) != 0 ||
             BindingsMismatch("clay_vs_mode", text.c_str(), "vs_5_0", true) != 0) return 160;
-        // The draw's slot at b1 (cb1). Not read without the object bit. An object or trunk (the object
-        // bit without the instance bit): without the probe bit only its first five registers (the rows,
-        // c49 / c27.w, c26 / the colour's power: 80 bytes), by fixed index; with the probe bit all
-        // seventeen, the probe registers by the clamped set index. An instanced plant (both bits; the
-        // probe bit beside them changes nothing): the first five by fixed index, of which it reads the
-        // rows' fourth components and the power: what a small slot holds.
+        // The draw's slot at b1 (cb1). Not read where no mesh block runs. An object or trunk: without
+        // the probe bit only its first five registers (the rows, c49 / c27.w, c26 / the colour's power:
+        // 80 bytes), by fixed index; with the probe bit seventeen, the probe registers by the clamped
+        // set index. An instanced plant (the probe bit beside its bits changes nothing): the first
+        // five by fixed index, of which it reads the rows' fourth components and the power: what a
+        // small slot holds. A leaf: all eighteen, the probe registers by the clamped set index and
+        // its own register (17: the wrap and the inverse scale) behind them.
         bool dynamic = false;
         const unsigned registers = DeclaredRegisters(listing, 1, &dynamic);
-        const bool any = (mode & 2) != 0, plant = any && (mode & 16) != 0, object = any && !plant, probe = object && (mode & 8) != 0;
-        if (registers != (probe ? 17u : any ? 5u : 0u) || dynamic != probe || ReadsBlock(listing, "cb1") != any) {
+        if (registers != (leaf ? 18u : probe ? 17u : runs ? 5u : 0u) || dynamic != (probe || leaf) || ReadsBlock(listing, "cb1") != runs ||
+            (listing.find("cb1[17]") != std::string::npos) != leaf) {
           std::cerr << "light_mode " << mode << ": the vertex shader declares " << registers << " registers of cb1"
                     << (dynamic ? ", indexed by a value" : "") << "\n";
           return 160;
@@ -1772,37 +1949,44 @@ int main() {
         // plant's colours and bend inputs, also where the probe bit stands beside the instance bit.
         {
           using B = fable2::native::render::ClayLightBuffer;
-          const B want10 = plant ? B::kInstanceColours : probe ? B::kProbeSets : object ? B::kColours : B::kPositions;
-          const B want11 = plant ? B::kBend : probe ? B::kProbeWeights : B::kPositions;
-          if (own.source[2] != want10 || own.source[3] != want11) {
+          const B want10 = plant ? B::kInstanceColours : (probe || leaf) ? B::kProbeSets : object ? B::kColours : B::kPositions;
+          const B want11 = plant ? B::kBend : (probe || leaf) ? B::kProbeWeights : B::kPositions;
+          if (own.source[2] != want10 || own.source[3] != want11 || (own.source[1] == B::kNormals) != runs) {
             std::cerr << "light_mode " << mode << ": the sources at t10 and t11 are not those of the path the vertex shader takes\n";
             return 160;
           }
         }
-        // The rows (the xyz of the first three registers) are an object's or trunk's; a plant reads the
-        // three fourth components and no row: its normal goes through no rotation.
+        // The rows (the xyz of the first three registers) are an object's, trunk's or leaf's; a plant
+        // reads the three fourth components and no row: its normal goes through no rotation. A leaf
+        // reads the fourth components too, as the world position's translation, and the frame's eye.
         const bool rows = HasLineWith(listing, "dp3", "cb1[0].xyzx") && HasLineWith(listing, "dp3", "cb1[1].xyzx") &&
                           HasLineWith(listing, "dp3", "cb1[2].xyzx");
         const bool bend_constants = HasLineWith(listing, "mad_sat", "cb1[1].w, cb1[2].w") && HasLineWith(listing, "mul", "cb1[0].wwww");
-        if (rows != object || bend_constants != plant || (plant && (listing.find("cb1[0].x") != std::string::npos ||
-                                                                    listing.find("cb1[3]") != std::string::npos))) {
+        const bool translation = listing.find("cb1[0].w") != std::string::npos && listing.find("cb1[1].w") != std::string::npos &&
+                                 listing.find("cb1[2].w") != std::string::npos;
+        if (rows != (object || leaf) || bend_constants != plant || translation != (plant || leaf) ||
+            (listing.find("cb2[6]") != std::string::npos) != leaf ||
+            (plant && (listing.find("cb1[0].x") != std::string::npos || listing.find("cb1[3]") != std::string::npos))) {
           std::cerr << "light_mode " << mode << ": rows " << rows << ", bend constants " << bend_constants << "\n";
           return 160;
         }
         // The frame's block (cb2): the axis (register 5), for a lit terrain draw, every object draw
         // and a plant of the family with the ambient factor; a plant without it reads the exponent,
-        // the tint and the added light (registers 1 to 3) and no axis.
+        // the tint and the added light (registers 1 to 3) and no axis; a leaf reads those, the sun's
+        // direction (0) and the eye (6), and no axis.
         const unsigned frame_registers = DeclaredRegisters(listing, 2);
-        const unsigned frame_want = object ? 6u : plant ? ((mode & 32) ? 6u : 4u) : (mode & 5) == 5 ? 6u : 0u;
-        if (ReadsBlock(listing, "cb2") != (any || (mode & 5) == 5) || frame_registers != frame_want) {
+        const unsigned frame_want = object ? 6u : plant ? ((mode & 32) ? 6u : 4u) : leaf ? 7u : (mode & 5) == 5 ? 6u : 0u;
+        if (ReadsBlock(listing, "cb2") != (runs || (mode & 5) == 5) || frame_registers != frame_want ||
+            (leaf && listing.find("cb2[5]") != std::string::npos)) {
           std::cerr << "light_mode " << mode << ": the vertex shader declares " << frame_registers << " registers of cb2\n";
           return 160;
         }
         // The set index is clamped where it is used (an unsigned minimum with the literal 8 survives
         // compiling), and the probe colour's program has no power in it (no log, no exp): the stream
-        // colour's and the plant's have.
+        // colour's, the plant's and the leaf's (its ambient's) have.
         const bool clamp = HasOp(listing, "umin"), power = HasOp(listing, "log");
-        if (clamp != probe || (probe && !HasLineWith(listing, "umin", "l(8)")) || power != ((object && !probe) || plant)) {
+        if (clamp != (probe || leaf) || ((probe || leaf) && !HasLineWith(listing, "umin", "l(8)")) ||
+            power != ((object && !probe) || plant || leaf)) {
           std::cerr << "light_mode " << mode << ": clamp " << clamp << ", power " << power << "\n";
           return 160;
         }
@@ -1810,20 +1994,31 @@ int main() {
         const bool loads_light = ReadsResource(listing, 8) || ReadsResource(listing, 9) || ReadsResource(listing, 10) || ReadsResource(listing, 11);
         if (loads_light && !HasLineWith(listing, "ult", "cb0[8].z")) return 160;
         // The bend: a plant's program writes it from its inputs (and zeros for a vertex past its
-        // buffers); every other program writes zeros alone (so the interpolator a pixel shader may
-        // read is never left unwritten, and never another draw's).
-        if (!HasLineWith(listing, "mov", "o7.xyzw, l(0,0,0,0)") || HasLineWith(listing, "mul", "o7.xyzw") != plant) {
-          std::cerr << "light_mode " << mode << ": the bend output is not " << (plant ? "the plant's" : "zero") << "\n";
+        // buffers); a leaf's writes its two scalars in the first two components (zeros for a vertex
+        // past its buffers) and zeros in the other two, with the one division of the light, saturated;
+        // every other program writes zeros alone (so the interpolator a pixel shader may read is never
+        // left unwritten, and never another draw's).
+        const bool zero_bend = HasLineWith(listing, "mov", "o7.xyzw, l(0,0,0,0)");
+        const bool leaf_bend = HasLineWith(listing, "mov", "o7.zw, l(0,0,0,0)") && HasLineWith(listing, "mov", "o7.xy, r") &&
+                               HasOp(listing, "div_sat");
+        if (zero_bend == leaf || leaf_bend != leaf || HasLineWith(listing, "mul", "o7.xyzw") != plant || (!leaf && HasOp(listing, "div_sat"))) {
+          std::cerr << "light_mode " << mode << ": the bend output is not " << (plant ? "the plant's" : leaf ? "the leaf's" : "zero") << "\n";
           return 160;
         }
       }
-      // The whole program (the mode a root word): all seventeen registers, the probe ones by the index.
+      // The whole program (the mode a root word): all eighteen registers, the probe ones by the index.
       {
         bool dynamic = false;
-        if (DeclaredRegisters(vs, 1, &dynamic) != 17 || !dynamic || !HasOp(vs, "umin") || !HasLineWith(vs, "umin", "l(8)")) return 160;
-        // Control: without the clamp the index is the buffer's word as it is.
+        if (DeclaredRegisters(vs, 1, &dynamic) != 18 || !dynamic || !HasOp(vs, "umin") || !HasLineWith(vs, "umin", "l(8)")) return 160;
+        // (the leaf's clamp too: without it its index is the buffer's word as it is, and one `umin` is left)
+        const std::string loose_leaf = Changed(kClayVs, "uint a0 = min(colours[v], 8u);", "uint a0 = colours[v];");
+        const std::string loose_78 = Disassembly("loose_leaf_vs_mode78", WithLightMode(loose_leaf.c_str(), 78).c_str(), "vs_5_0");
+        if (loose_leaf.empty() || loose_78.empty() || HasOp(loose_78, "umin")) return 160;
+        // Control: without the clamp the index is the buffer's word as it is (on a probe object's
+        // program: the whole program has the leaf's clamp as well).
         const std::string loose = Changed(kClayVs, "uint a0 = min(word, 8u);", "uint a0 = word;");
-        if (loose.empty() || HasOp(Disassembly("loose_vs", loose.c_str(), "vs_5_0"), "umin")) return 160;
+        if (loose.empty() || HasOp(Disassembly("loose_vs_mode14", WithLightMode(loose.c_str(), 14).c_str(), "vs_5_0"), "umin") ||
+            !HasOp(Disassembly("clay_vs_mode14", WithLightMode(kClayVs, 14).c_str(), "vs_5_0"), "umin")) return 160;
       }
       // The textured pixel shader reads the object's first five registers only, lit or not: the probe
       // registers are the vertex stage's.
@@ -1837,31 +2032,37 @@ int main() {
         if (lit14 != Disassembly("clay_textured_ps_mode6", WithLightMode(kClayTexturedPs, 6).c_str(), "ps_5_0")) return 161;
       }
       // Every light_mode, pixel stage (the textured shader): no buffer load; the draw's slot (cb1) read
-      // by a lit object or trunk alone (five registers: c27.w, c49, c26), never by a plant (its slot
+      // by a lit object, trunk or leaf alone (five registers: c27.w, c49, c26), never by a plant (its slot
       // holds vertex-stage values only) and never without light; the frame's block by every lit draw
-      // (a plant without the ambient factor: the sun's two registers; with it also the added light and
-      // the floor: five); the bend input (v7) declared by a lit plant alone. And a mode's program is
-      // the program of its lit, instance and plant-lit bits: nothing else of the mode reaches the stage.
+      // (a plant without the ambient factor and a leaf: the sun's two registers, of which a leaf reads
+      // the colour; a plant with the factor also the added light and the floor: five); the bend input
+      // (v7) declared by a lit plant and a lit leaf alone. And a mode's program is the program of its
+      // lit, instance, plant-lit and leaf bits (the leaf bit only without the instance bit): nothing
+      // else of the mode reaches the stage. No program reads the frame's eye (register 6).
       {
-        std::string by_bits[64];
+        static std::string by_bits[128];
         for (unsigned mode = 0; mode < fable2::native::render::kLightModeCount; ++mode) {
           by_bits[mode] = Disassembly("clay_textured_ps_mode", WithLightMode(kClayTexturedPs, mode).c_str(), "ps_5_0");
           const std::string& listing = by_bits[mode];
           if (listing.empty() || listing.find("ld_structured") != std::string::npos || LoopInstructions(listing) != 0) return 161;
           const bool lit = (mode & 4) != 0, plant = lit && (mode & 16) != 0, plant_lit = plant && (mode & 32) != 0;
+          const bool leaf = lit && !plant && (mode & 64) != 0;
           const unsigned slot = DeclaredRegisters(listing, 1), frame = DeclaredRegisters(listing, 2);
           if (slot != (lit && !plant ? 5u : 0u) || ReadsBlock(listing, "cb1") != (lit && !plant) ||
-              frame != (!lit ? 0u : plant && !plant_lit ? 2u : 5u) || ReadsBlock(listing, "cb2") != lit ||
-              HasLineWith(listing, "dcl_input_ps", "v7.xyzw") != plant) {
+              frame != (!lit ? 0u : (plant && !plant_lit) || leaf ? 2u : 5u) || ReadsBlock(listing, "cb2") != lit ||
+              HasLineWith(listing, "dcl_input_ps", "v7.xyzw") != plant || HasLineWith(listing, "dcl_input_ps", "v7.xy") != (plant || leaf) ||
+              (leaf && (listing.find("cb2[0]") != std::string::npos || !HasLineWith(listing, "ge", "r0.y, r0.x")))) {
             std::cerr << "light_mode " << mode << ": the textured pixel shader declares " << slot << " registers of cb1 and " << frame
                       << " of cb2\n";
             return 161;
           }
-          const unsigned canon = !lit ? 0u : plant ? (mode & 52u) : 4u;
+          const unsigned canon = !lit ? 0u : plant ? (mode & 52u) : leaf ? 68u : 4u;
           if (canon < mode && listing != by_bits[canon]) return 161;
         }
-        // (the three lit programs are three programs)
-        if (by_bits[4] == by_bits[20] || by_bits[4] == by_bits[52] || by_bits[20] == by_bits[52] || by_bits[0] == by_bits[4]) return 161;
+        // (the four lit programs are four programs)
+        if (by_bits[4] == by_bits[20] || by_bits[4] == by_bits[52] || by_bits[20] == by_bits[52] || by_bits[0] == by_bits[4] ||
+            by_bits[68] == by_bits[4] || by_bits[68] == by_bits[20] || by_bits[68] == by_bits[52] || by_bits[68] == by_bits[0] ||
+            by_bits[78] != by_bits[68]) return 161;
       }
       // The lit programs do read them (the check above is not empty): mode 6 a lit object, 5 lit ground.
       const std::string vs6 = Disassembly("clay_vs_mode6", WithLightMode(kClayVs, 6).c_str(), "vs_5_0");
@@ -1982,13 +2183,38 @@ int main() {
           {"plant sun", 1, "lit = LightPlant(clay_linear(t.rgb), vcolour, dot(Np, f_sun_dir),",
            "lit = LightPlant(clay_linear(t.rgb), vcolour, dot(normal, f_sun_dir),", 2},
           {"plant-lit t", 1, "AmbientT(axis, Np)", "AmbientT(axis, normal)", 2},
-          {"plant c26", 1, "f_sun_col, SunGateSingle(1.0, 1.0));\n        }\n      } else {",
-           "f_sun_col, SunGateSingle(1.0, 1.0));\n        }\n        lit *= o_c26;\n      } else {", 2},
+          {"plant c26", 1, "f_sun_col, SunGateSingle(1.0, 1.0));\n        }\n      } else if (light_mode & 64) {",
+           "f_sun_col, SunGateSingle(1.0, 1.0));\n        }\n        lit *= o_c26;\n      } else if (light_mode & 64) {", 2},
           {"PlantBend", 0, "  float h = saturate(height);", "  float h = height;", 6},
           {"PlantNormal", 1, "  float3 n = light_normalize(normal);\n  return light_normalize(n + (bend.xyz - n)",
            "  float3 n = normal;\n  return light_normalize(n + (bend.xyz - n)", 6},
           {"LightPlantLit", 1, "  return A * (vs_base * AmbientFactor(amb_floor, t) + add + light_sun(",
            "  return A * ((vs_base + add) * AmbientFactor(amb_floor, t) + light_sun(", 6},
+          // The tree leaves (plan Task 8c). The functions: the normal not turned to the viewer, the
+          // cosine not wrapped, the back light without the viewer's factor, the mask's second factor
+          // not applied twice, the back light through every texel, c27.w on the sun too. The vertex
+          // stage: the normal normalised (the game uses it as it is), the exponent without its factor,
+          // the world position without its translation or with the scale left in, the vector FROM the
+          // eye, the wrap dropped, the set not clamped, a vector of t made. The pixel stage: c26
+          // dropped, the two scalars exchanged, another literal in the mask.
+          {"LeafLight turn", 0, "  float3 n = (dot(view, normal) < 0.0) ? -normal : normal;", "  float3 n = normal;", 6},
+          {"LeafLight wrap", 0, "saturate((nl + wrap) / d)", "saturate(nl)", 6},
+          {"LeafLight back", 0, "saturate(-nl) * (1.0 - turn * turn)", "saturate(-nl)", 6},
+          {"LeafMask", 1, "  return float2(m1, m1 * gain + bias);", "  return float2(m1, m1);", 6},
+          {"LightLeaf green", 1, "  float green = (A.g >= A.r) ? 1.0 : 0.0;", "  float green = 1.0;", 6},
+          {"LightLeaf c27w", 1, "(vs_ambient * c27w + m1 * sun_col * front)", "((vs_ambient + m1 * sun_col * front) * c27w)", 6},
+          {"leaf normal", 0, "    o.normal = N;\n", "    N = light_normalize(N);\n    o.normal = N;\n", 1},
+          {"leaf exponent", 0, "InstanceAmbient(probe, f_tint, o_colour_power * f_tint_pow, f_add);",
+           "InstanceAmbient(probe, f_tint, f_tint_pow, f_add);", 1},
+          {"leaf translation", 0, " * o_leaf.y +\n                float3(o_rot0.w, o_rot1.w, o_rot2.w);", " * o_leaf.y;", 1},
+          {"leaf scale", 0, "dot(o_rot2.xyz, p.xyz)) * o_leaf.y +", "dot(o_rot2.xyz, p.xyz)) +", 1},
+          {"leaf view", 0, "light_normalize(f_eye - at)", "light_normalize(at - f_eye)", 1},
+          {"leaf wrap", 0, "o_leaf.x, 1.0), 0, 0);", "0.0, 1.0), 0, 0);", 1},
+          {"leaf clamp", 0, "uint a0 = min(colours[v], 8u);", "uint a0 = colours[v];", 1},
+          {"leaf axis", 0, "    o.normal = N;\n    o.axis = float3(0, 0, 0);", "    o.normal = N;\n    o.axis = AmbientAxis(N, f_axis);", 1},
+          {"leaf c26", 1, "m.x, m.y, o_c49) * o_c26;", "m.x, m.y, o_c49);", 2},
+          {"leaf sides", 1, "vcolour, bend.x, bend.y, f_sun_col,", "vcolour, bend.y, bend.x, f_sun_col,", 2},
+          {"leaf mask literal", 1, "LeafMask(1.0, 0.6, 0.4);", "LeafMask(1.0, 0.6, 0.6);", 2},
       };
       const char* sources[4] = {kClayVs, kClayTexturedPs, kClayTerrainLayerPs, kClayTerrainFarPs};
       for (const auto& m : outside) {
@@ -2010,6 +2236,6 @@ int main() {
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; broken shader rejected\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; broken shader rejected\n";
   return 0;
 }

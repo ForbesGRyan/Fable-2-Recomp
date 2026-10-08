@@ -185,6 +185,10 @@ class Formulas(unittest.TestCase):
         # A normal that faces away from the viewer is negated first: the same numbers.
         again = lf.leaf_light([0.0, 0.0, -1.0], [math.sqrt(0.75), 0.0, 0.5], [0.0, math.sqrt(0.75), -0.5], 0.5, spot=0.5)
         self.assertEqual(again, (front, back))
+        # (the spot is on the front light too)
+        front, back = lf.leaf_light([0.0, 0.0, 1.0], [math.sqrt(0.75), 0.0, 0.5], [0.0, math.sqrt(0.75), 0.5], 0.5, spot=0.5)
+        self.assertAlmostEqual(front, 1 / 3, places=12)
+        self.assertEqual(back, 0.0)
         self.assertEqual(lf.leaf_mask(0.5, 0.5, 0.5), (0.75, 0.875))
         # (A * (amb * c27w + m1 * sun * front) + green * A * m2 * sun * back) * c49, green texel:
         got = lf.tree_leaf(A=[0.25, 0.5, 0.25], vs_ambient=[0.5] * 3, front=0.5, back=0.25, sun_col=[2.0] * 3, c27w=0.5,
@@ -460,6 +464,103 @@ class PinnedForTheRenderer(unittest.TestCase):
         # direction (shortened by 1 - h before it is normalised).
         self.close(self.plant(n, 0.5, (200, 128, 64), up=[0.0, 0.0, 0.0]), PLANT_PINS["no up"])
 
+    # Plan Task 8c: the tree leaves. The clay vertex shader makes, per vertex: N = M n as it is (the game
+    # does not normalise it), the world position (M p) / c7.w + the rows' fourth components, the unit vector
+    # to the eye, the two scalars of the sun (leaf_light with the frame's sun direction, normalised, the
+    # wrap c50.w and no cone or range: the sun's slot has c90 = 0), the probe colour, and the ambient
+    # pow(|probe colour|, 2.2 * c21.w * 0.4545) * c21.xyz + c20.xyz (the vertex copies c18 and c54 of the
+    # frame's block; 0.4545 the vertex shaders' literal). The pixel shader multiplies the two scalars by
+    # the sun's colour (the game's vertex shader does: the product commutes with the interpolation) and
+    # calls tree_leaf with the mask at 1 (leaf_mask(1, 0.6, 0.4) = (1, 1)), then c26.
+    # tests/native/test_clay_logic.cpp, cases 520 to 529, has the same.
+    LEAF_GAMMA = 0.45454543828964233          # literal c249.w of A584..., c248.w of D7DD..., c255.x of 2D40...
+    LEAF_T = [1.0, 2.0, 3.0]                  # the fourth components of c4..c6
+    LEAF_P = [0.5, -1.0, 2.0]                 # a vertex position in the mesh's space
+    EYE_FRONT, EYE_BEHIND = [1.5, -10.0, 13.0], [0.0, 12.0, -5.0]
+    GREEN, RED = [0.3, 0.5, 0.2], [0.5, 0.4, 0.3]     # a leaf texel (green >= red) and a twig texel
+
+    def leaf(self, n, eye, A, a0=0, scale=1.0, wrap=0.4, c27w=1.0, c49=(1.0, 1.0, 1.0), c26=(1.0, 1.0, 1.0), vcolour=None):
+        m = [[x * scale for x in row] for row in self.M_ROT]                        # M = R * c7.w
+        normal = [lf.dot(row, n) for row in m]
+        world = [lf.dot(row, self.LEAF_P) / scale + t for row, t in zip(m, self.LEAF_T)]
+        view = lf.normalize([e - w for e, w in zip(eye, world)])
+        front, back = lf.leaf_light(normal, view, lf.normalize(self.SUN_DIR), wrap)
+        if vcolour is None:
+            vcolour = lf.probe_colour(self.PROBE[a0][:3], self.PROBE[a0 + 1:a0 + 4], self.WEIGHTS)
+        amb = lf.instance_ambient(vcolour, self.TINT, self.PLANT_POW * self.LEAF_GAMMA, self.ADD)
+        m1, m2 = lf.leaf_mask(1.0, 0.6, 0.4)
+        c = lf.tree_leaf(A, amb, front, back, self.SUN_COL, c27w, m1=m1, m2=m2, c49=list(c49))
+        return [front, back] + amb + [c[i] * c26[i] for i in range(3)]
+
+    def leaf_cases(self):
+        n = [-0.6, 0.0, 0.8]
+        return {
+            # The viewer on the normal's side, the sun in front: the wrapped front light, no back light.
+            "front": self.leaf(n, self.EYE_FRONT, self.GREEN),
+            # The viewer behind the card: the normal is turned to him, the sun is then behind it, and the
+            # back light passes through a leaf texel (green >= red) ...
+            "behind, leaf": self.leaf(n, self.EYE_BEHIND, self.GREEN),
+            # ... and not through a twig texel.
+            "behind, twig": self.leaf(n, self.EYE_BEHIND, self.RED),
+            "green equals red": self.leaf(n, self.EYE_BEHIND, [0.4, 0.4, 0.2]),
+            # c7.w = 0.5 (in the rows, and taken out of the world position), set 8, another wrap, c27.w on
+            # the ambient part only, c49 on the whole colour, c26 after the function.
+            "scaled": self.leaf(n, self.EYE_FRONT, self.GREEN, a0=8, scale=0.5, wrap=0.25, c27w=0.5,
+                                c49=(1.0, 0.5, 2.0), c26=(1.0, 1.0, 0.5)),
+            "behind, scaled": self.leaf(n, self.EYE_BEHIND, self.GREEN, a0=8, scale=0.5, wrap=0.25, c27w=0.5,
+                                        c49=(1.0, 0.5, 2.0), c26=(1.0, 1.0, 0.5)),
+            # A zero normal: front = wrap / (1 + wrap), no back light.
+            "no normal": self.leaf([0.0, 0.0, 0.0], self.EYE_FRONT, self.GREEN),
+            # A probe colour of exactly zero in red and negative in green (set 4): the power of the
+            # absolute value, as the game's `log r, r_abs` (A584... instr 124, 126, 127).
+            "probe zero and negative": self.leaf(n, self.EYE_FRONT, self.GREEN, a0=4),
+            # The eye in the vertex: no view direction, so no turn and no back light.
+            "eye in the vertex": self.leaf(n, [1.0 + 1.0, 2.0 + 0.5, 3.0 + 2.0], self.GREEN),
+            # No wrap: the plain clamped cosine.
+            "no wrap": self.leaf(n, self.EYE_FRONT, self.GREEN, wrap=0.0),
+        }
+
+    def test_leaf(self):
+        cases = self.leaf_cases()
+        self.assertEqual(sorted(cases), sorted(LEAF_PINS))
+        for name, got in cases.items():
+            with self.subTest(case=name):
+                self.close(got, LEAF_PINS[name])
+        # What the cases are meant to reach, so that a pin cannot be of the wrong branch:
+        self.assertAlmostEqual(cases["front"][0], (cases["no wrap"][0] + 0.4) / 1.4, places=15)
+        self.assertEqual(cases["front"][1], 0.0)
+        self.assertEqual(cases["behind, leaf"][0], 0.0)
+        self.assertGreater(cases["behind, leaf"][1], 0.5)
+        self.assertEqual(cases["behind, leaf"][:5], cases["behind, twig"][:5])
+        self.assertAlmostEqual(cases["no normal"][0], 0.4 / 1.4, places=15)
+        self.assertEqual(cases["no normal"][1], 0.0)
+        self.assertEqual(cases["eye in the vertex"][1], 0.0)
+        self.assertEqual(cases["eye in the vertex"][0], cases["front"][0])
+        self.assertLess(cases["no wrap"][0], cases["front"][0])
+        self.assertEqual(lf.leaf_mask(1.0, 0.6, 0.4), (1.0, 1.0))
+        # A wrap of -1 (the wrapped cosine's denominator zero) gives no front light, also where the
+        # numerator is above zero; and the viewer's cosine is clamped before the back light's factor
+        # (tests/native/test_clay_logic.cpp, case 526, has the same two).
+        self.assertEqual(lf.leaf_light([0.0, 0.0, 2.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], -1.0), (0.0, 0.0))
+        self.assertEqual(lf.leaf_light([0.0, 0.0, 4.0], [math.sqrt(0.75), 0.0, 0.5], [0.0, math.sqrt(0.984375), -0.125], 0.0),
+                         (0.0, 0.5))
+        # The scale is in the normal (the game does not normalise it) and not in the world position.
+        self.assertAlmostEqual(cases["scaled"][0], (0.5 * 0.5976971893220461 + 0.25) / 1.25, places=12)
+
+
+LEAF_PINS = {
+    "front": [0.7126408495157472, 0.0, 0.46369198767397196, 0.16310554084116385, 0.5053389422232634, 0.3507619286083685, 0.377298722969617, 0.15807905640591247],
+    "behind, leaf": [0.0, 0.5975238349664942, 0.46369198767397196, 0.16310554084116385, 0.5053389422232634, 0.31657217528724035, 0.329525161931677, 0.14886969524197222],
+    "behind, twig": [0.0, 0.5975238349664942, 0.46369198767397196, 0.16310554084116385, 0.5053389422232634, 0.23184599383698598, 0.06524221633646554, 0.15160168266697902],
+    "green equals red": [0.0, 0.5975238349664942, 0.46369198767397196, 0.16310554084116385, 0.5053389422232634, 0.42209623371632055, 0.26362012954534164, 0.14886969524197222],
+    "scaled": [0.4390788757288185, 0.0, 1.2240510043759552, 0.8173572059344705, 3.6166064948512817, 0.31401407674785237, 0.19327851745553865, 0.3967869595434337],
+    "behind, scaled": [0.0, 0.22157000987666525, 1.2240510043759552, 0.8173572059344705, 3.6166064948512817, 0.24941394358976282, 0.14814542779121684, 0.37938625027526146],
+    "no normal": [0.28571428571428575, 0.0, 0.46369198767397196, 0.16310554084116385, 0.5053389422232634, 0.22396473915933449, 0.2001241989920105, 0.12392493130179555],
+    "probe zero and negative": [0.7126408495157472, 0.0, 0.0068, 0.10840647433840495, 0.092, 0.21369433230617693, 0.3499491897182375, 0.0754112679612598],
+    "eye in the vertex": [0.7126408495157472, 0.0, 0.46369198767397196, 0.16310554084116385, 0.5053389422232634, 0.3507619286083685, 0.377298722969617, 0.15807905640591247],
+    "no wrap": [0.5976971893220461, 0.0, 0.46369198767397196, 0.16310554084116385, 0.5053389422232634, 0.31662366153083926, 0.32959710398923103, 0.14888356359041638],
+}
+
 
 PLANT_PINS = {
     "half": [0.5, 0.5257311121191336, 0.0, 0.8506508083520399, 0.5683564165336911, 0.2625218355265196, 0.12797253813103704, 0.44487503475959345, 0.2127892319794812, 0.07734856786179545],
@@ -542,14 +643,15 @@ class MultiSun(unittest.TestCase):
         checked = 0
         for family in lc.MULTI_SUN_FAMILIES:
             for ps, vs in lc.FAMILIES[family]:
-                for slot in range(1, lc.MULTI_LIGHTS[ps]):
+                for slot in range(1, lc.light_count(ps, vs)):
                     with self.subTest(family=family, ps=ps, vs=vs, slot=slot):
                         res = lc.check_multi_sun(family, ps, vs, slot, trials=self.TRIALS)
                         self.assertTrue(res.ok, f"{res.agree}/{res.trials} worst {res.worst:.3g} {res.first_bad}")
                         self.assertEqual(res.trials, self.TRIALS)
                         checked += 1
-        # nineteen pairs: thirteen of two lights (slot 1; six of them the plants', plan Task 8b), six of four (slots 1 to 3)
-        self.assertEqual(checked, 31)
+        # twenty-one pairs: fourteen of two lights (slot 1; six of them the plants', plan Task 8b; one the leaves',
+        # plan Task 8c), seven of four (slots 1 to 3; one the leaves')
+        self.assertEqual(checked, 35)
 
     def test_the_families_and_light_counts_cover_the_table(self):
         # Every -multi pair of every family is checked (the plants' since plan Task 8b), and has a light count.
@@ -557,13 +659,27 @@ class MultiSun(unittest.TestCase):
             if family.endswith("-multi"):
                 self.assertIn(family, lc.MULTI_SUN_FAMILIES)
             if family.endswith("-multi"):
-                for ps, _ in pairs:
-                    self.assertIn(lc.MULTI_LIGHTS[ps], (2, 4))
+                for ps, vs in pairs:
+                    self.assertIn(lc.light_count(ps, vs), (2, 4))
         # The light count is the registers the dump reads: c82 / c89 only in the four-light shaders.
         for ps, lights in lc.MULTI_LIGHTS.items():
             text = lc.ue.load(DUMPS, ps, "frag")
             self.assertEqual("c89" in text and "c82" in text, lights == 4, ps)
             self.assertIn("c88", text)
+        # The leaves' lights are the VERTEX shader's (plan Task 8c: their pixel shader 7CD5... reads no light
+        # register at all): c84 / c77 from two lights on, c85 / c78 only with four.
+        self.assertEqual(lc.MULTI_LIGHTS_VS, {"D7DD31B9BF194DE8": 2, "2D40B53C926109BE": 4})
+        for vs, lights in list(lc.MULTI_LIGHTS_VS.items()) + [("A5846836C90E1192", 1)]:
+            text = lc.ue.load(DUMPS, vs, "vert")
+            self.assertEqual("c84" in text and "c77" in text, lights >= 2, vs)
+            self.assertEqual("c85" in text and "c78" in text, lights == 4, vs)
+        leaf_ps = lc.ue.load(DUMPS, "7CD57B81550F19E3", "frag")
+        for register in ("c80", "c87", "c83", "c112", "c109"):
+            self.assertNotIn(register, leaf_ps)
+        self.assertNotIn("7CD57B81550F19E3", lc.MULTI_LIGHTS)
+        self.assertEqual(lc.light_count("7CD57B81550F19E3", "D7DD31B9BF194DE8"), 2)
+        self.assertEqual(lc.light_count("7CD57B81550F19E3", "2D40B53C926109BE"), 4)
+        self.assertEqual(lc.light_count("648B965C200A5113", "ECD66A10092E6562"), 2)
         self.assertEqual(lc.GAME_SUN_SLOT, {2: 1, 4: 2})
 
     def test_a_slot_the_shader_does_not_have_is_refused(self):
@@ -575,6 +691,11 @@ class MultiSun(unittest.TestCase):
             lc.check_multi_sun("plant-multi", "E99F4ACC7A3C78B4", "8123C16DBF583F92", 2, trials=1)
         with self.assertRaises(KeyError):     # a one-light family has no slot to check
             lc.check_multi_sun("plant", "A7E45D07F5CF6627", "8123C16DBF583F92", 1, trials=1)
+        with self.assertRaises(ValueError):   # the leaves: the light count is the vertex shader's
+            lc.check_multi_sun("tree-leaf-multi", "7CD57B81550F19E3", "D7DD31B9BF194DE8", 2, trials=1)
+        with self.assertRaises(KeyError):
+            lc.check_multi_sun("tree-leaf", "7CD57B81550F19E3", "A5846836C90E1192", 1, trials=1)
+        self.assertTrue(lc.check_multi_sun("tree-leaf-multi", "7CD57B81550F19E3", "2D40B53C926109BE", 3, trials=2).ok)
 
     def check_with(self, family, ps, vs, slot, spoil):
         """check_multi_sun with the light set spoiled after _sun_in_slot made it."""
@@ -616,6 +737,15 @@ class MultiSun(unittest.TestCase):
                     self.assertFalse(self.check_with(family, ps, vs, slot, spoil).ok)
             # Control: the same wrapper without a change agrees.
             self.assertTrue(self.check_with(family, ps, vs, slot, lambda c, s: None).ok)
+        # The leaves (plan Task 8c): their light set is the vertex shader's (c76.. the positions, c83.. the
+        # colours, c90 the blend of cone and range), made from the same set. The screen mask shadows the
+        # whole leaf light whatever c112 says (the pixel shader reads no c112), so spoiling that says nothing.
+        for vs, slot in (("D7DD31B9BF194DE8", 1), ("2D40B53C926109BE", 2), ("2D40B53C926109BE", 1)):
+            for spoil in (lantern_lit, sun_with_a_cone, sun_as_a_position):
+                with self.subTest(vs=vs, slot=slot, spoil=spoil.__name__):
+                    self.assertFalse(self.check_with("tree-leaf-multi", "7CD57B81550F19E3", vs, slot, spoil).ok)
+            self.assertTrue(self.check_with("tree-leaf-multi", "7CD57B81550F19E3", vs, slot, mask_on_the_lantern).ok)
+            self.assertTrue(self.check_with("tree-leaf-multi", "7CD57B81550F19E3", vs, slot, lambda c, s: None).ok)
 
     def test_the_default_check_is_untouched_by_the_sun_slot(self):
         # Without a slot the drivers are the ones `--all` runs: light 0 with every constant random.
@@ -632,7 +762,9 @@ class MultiSun(unittest.TestCase):
             code = lc.main(["--multi-sun", "--trials", "4"])
         text = out.getvalue()
         self.assertEqual(code, 0)
-        self.assertEqual(text.count("(the game)"), 19)
+        self.assertEqual(text.count("(the game)"), 21)
+        self.assertIn("tree-leaf-multi: ps 7CD57B81550F19E3 vs D7DD31B9BF194DE8 (2 lights), sun in slot 1 (the game): 4/4 agree", text)
+        self.assertIn("tree-leaf-multi: ps 7CD57B81550F19E3 vs 2D40B53C926109BE (4 lights), sun in slot 2 (the game): 4/4 agree", text)
         self.assertIn("plant-multi: ps E99F4ACC7A3C78B4 vs 8123C16DBF583F92 (2 lights), sun in slot 1 (the game): 4/4 agree", text)
         self.assertIn("plant-lit-multi: ps F525E023E08AC9BB vs 36B543CECAE5C781 (2 lights), sun in slot 1 (the game): 4/4 agree", text)
         self.assertIn("ps 789266C3E42D7E59 vs ECD66A10092E6562 (4 lights), sun in slot 2 (the game): 4/4 agree", text)
@@ -650,7 +782,7 @@ class MultiSun(unittest.TestCase):
         with mock.patch.object(lc, "_sun_in_slot", sun_as_a_position), contextlib.redirect_stdout(out):
             code = lc.main(["--multi-sun", "--trials", "8"])
         self.assertEqual(code, 1)
-        self.assertIn("19 pairs disagree at the slot the game puts the sun in", out.getvalue())
+        self.assertIn("21 pairs disagree at the slot the game puts the sun in", out.getvalue())
         self.assertIn("first disagreement, trial ", out.getvalue())
 
 
@@ -751,6 +883,14 @@ class RealDumps(unittest.TestCase):
             ("leaf_light", lambda normal, view, light_dir, wrap, spot=1.0: right["leaf_light"](
                 normal, [-x for x in view], light_dir, wrap, spot), "tree-leaf", None),
             ("leaf_mask", lambda mask, gain, bias: (mask * gain + bias,) * 2, "tree-leaf", None),
+            ("instance_ambient", lambda colour, tint, power, add: right["instance_ambient"](colour, tint, power * 2.2, add),
+             "tree-leaf-multi", None),
+            ("leaf_light", lambda normal, view, light_dir, wrap, spot=1.0: right["leaf_light"](normal, view, light_dir, 0.0, spot),
+             "tree-leaf-multi", None),
+            ("leaf_light", lambda normal, view, light_dir, wrap, spot=1.0: right["leaf_light"](normal, view, light_dir, wrap, 1.0),
+             "tree-leaf-multi", None),
+            ("leaf_mask", lambda mask, gain, bias: (mask * gain + bias,) * 2, "tree-leaf-multi", None),
+            ("probe_colour", lambda base, rows, weights: list(base), "tree-leaf-multi", None),
         ]
         for helper, form, family, only_vs in wrong:
             pairs = [(ps, vs) for ps, vs in lc.FAMILIES[family] if only_vs in (None, vs)]
@@ -772,10 +912,31 @@ class RealDumps(unittest.TestCase):
             return lf.tree_leaf(**dict(a, front=a["front"] * a["c27w"]))
 
         for family, wrong in (("plant", plant_with_the_ambient_factor), ("plant-multi", plant_with_the_ambient_factor),
-                              ("tree-leaf", leaf_without_the_green_test), ("tree-leaf", leaf_c27w_on_the_sun)):
+                              ("tree-leaf", leaf_without_the_green_test), ("tree-leaf", leaf_c27w_on_the_sun),
+                              ("tree-leaf-multi", leaf_without_the_green_test), ("tree-leaf-multi", leaf_c27w_on_the_sun)):
             for ps, vs in lc.FAMILIES[family]:
                 with self.subTest(family=family, ps=ps, wrong=wrong.__name__):
                     self.assertFalse(lc.check_pair(family, ps, vs, trials=self.TRIALS, formula=wrong).ok)
+
+    def test_the_leaf_pairs_are_checked_with_the_shaders_own_literals(self):
+        # Plan Task 8c: the leaf pixel shader's mask literals are the captured ones (c255 = (1, 0, 0.4, 0.6) in
+        # every "ps_lit" of 7CD5... in two captures: out/native-evidence/lighting/task8c/leaf_literals.txt), no
+        # longer drawn at random, and each of the three vertex shaders runs with its own table (the 1 / 2.2
+        # of the ambient exponent is c249.w, c248.w and c255.x in them).
+        self.assertEqual(lc.PS_LITERALS["7CD57B81550F19E3"][255], [1.0, 0.0, 0.4, 0.6])
+        self.assertEqual({vs: (info["lights"], info["gamma"]) for vs, info in lc._LEAF_VS.items()},
+                         {"A5846836C90E1192": (1, (249, 3)), "D7DD31B9BF194DE8": (2, (248, 3)),
+                          "2D40B53C926109BE": (4, (255, 0))})
+        for vs, info in lc._LEAF_VS.items():
+            reg, comp = info["gamma"]
+            self.assertAlmostEqual(info["literals"][reg][comp], 1 / 2.2, places=7)
+            self.assertEqual(sorted(info["literals"]), list(range(248, 256)))
+        self.assertEqual(lc.FAMILIES["tree-leaf"], [("7CD57B81550F19E3", "A5846836C90E1192")])
+        self.assertEqual(lc.FAMILIES["tree-leaf-multi"], [("7CD57B81550F19E3", "D7DD31B9BF194DE8"),
+                                                          ("7CD57B81550F19E3", "2D40B53C926109BE")])
+        _, make_case = lc._leaf_driver("7CD57B81550F19E3", "D7DD31B9BF194DE8", DUMPS)
+        case = make_case(random.Random(5))
+        self.assertEqual(case.consts[255], [1.0, 0.0, 0.4, 0.6])
 
     def test_command_line(self):
         out = io.StringIO()
@@ -856,7 +1017,8 @@ class Coverage(unittest.TestCase):
             draw("8D900846800943C8", "ECD66A10092E6562"),
             draw("8D900846800943C8", "ECD66A10092E6562", frame=2),
             draw("8D900846800943C8", "ECD66A10092E6562", in_scene=False),          # a shadow or reflection pass
-            draw("7CD57B81550F19E3", "D7DD31B9BF194DE8"),                          # its literals are in no capture
+            draw("7CD57B81550F19E3", "D7DD31B9BF194DE8"),                          # a two-light leaf (plan Task 8c)
+            draw("7CD57B81550F19E3", "0000000000000000"),                          # a leaf vertex shader that was not run
             draw("014F8A02DB7B19CA", "7C5710DEF3EE33C4"),                          # fur shells
             {"kind": "tess", "frame": 2, "in_scene": True, "ps_hash": "0x9C2144E42E95A76F",
              "vs": {"hash": "0xC30A97D946FA2BE4"}},
@@ -865,7 +1027,8 @@ class Coverage(unittest.TestCase):
         ]
         frames, by_label, by_pair = lc.coverage(rows)
         self.assertEqual(frames, 2)
-        self.assertEqual(by_label, {"object": 2, "tree-leaf, vertex shader not run": 1, "no family": 1,
+        self.assertEqual(by_label, {"object": 2, "tree-leaf-multi": 1,
+                                    "tree-leaf / tree-leaf-multi, vertex shader not run": 1, "no family": 1,
                                     "terrain-layer": 1})
         self.assertEqual(by_pair[("object", "8D900846800943C8", "ECD66A10092E6562")], 2)
         self.assertEqual(lc.classify("8D900846800943C8", "ECD66A10092E6562"), ("object", True))

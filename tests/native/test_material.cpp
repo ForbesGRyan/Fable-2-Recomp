@@ -50,6 +50,7 @@ static const PsLightSpec kLayerPs{0x9C21, LightFamily::kTerrainLayer, false, 8.0
 static const PsLightSpec kFarPs{0x7DDA, LightFamily::kTerrainFar, false, 0.0f};
 static const PsLightSpec kPlantPs{0xA7E4, LightFamily::kPlant, false, 0.0f};
 static const PsLightSpec kPlantLitPs{0x165E, LightFamily::kPlantLit, true, 0.0f};
+static const PsLightSpec kLeafPs{0x7CD5, LightFamily::kTreeLeaf, false, 0.0f};
 // The sources as the table writes them (gen_transform_table.py, source_code): the components two
 // bits each from bit 0, their number above: xyz, zyxw, xyzw, yxw, zyx.
 static constexpr uint16_t kXyz = 0x324, kZyxw = 0x4C6, kXyzw = 0x4E4, kYxw = 0x331, kZyx = 0x306;
@@ -99,6 +100,7 @@ static void Fill(LightCase& c, const PsLightSpec& ps, const VsLightSpec& vs, std
   SetReg(c.vs, 20, 224.0f, 81.0f, 82.0f, 83.0f);
   for (uint32_t r = 0; r < 12; ++r) SetReg(c.vs, 28 + r, 100.0f + r, 200.0f + r, 300.0f + r, 400.0f + r);
   SetReg(c.vs, 45, 1.0f, -200.0f, 100.0f, 0.5f);
+  SetReg(c.vs, 50, 1.0f, 100.0f, 1.0f, 0.4f);
   SetReg(c.ps, 11, 0.488f, 61.0f, 62.0f, 63.0f);
   SetReg(c.ps, 26, 0.9f, 0.8f, 0.7f, 0.6f);
   SetReg(c.ps, 27, 51.0f, 52.0f, 53.0f, 0.75f);
@@ -109,6 +111,8 @@ static void Fill(LightCase& c, const PsLightSpec& ps, const VsLightSpec& vs, std
 }
 static LightCase StreamCase() { LightCase c; Fill(c, kObjectPs, kStreamVs, StreamFetches()); return c; }
 static LightCase ProbeCase() { LightCase c; Fill(c, kObjectPs, kProbeVs, ProbeFetches()); return c; }
+// (the leaves' vertex shaders have the probe shaders' elements: normal, weights, the set in the position)
+static LightCase LeafCase() { LightCase c; Fill(c, kLeafPs, kProbeVs, ProbeFetches()); return c; }
 static LightCase InstanceCase() {
   LightCase c;
   Fill(c, kPlantPs, kInstanceVs, InstanceFetches());
@@ -147,6 +151,7 @@ static int LightTests() {
       std::strcmp(LightFamilyName(LightFamily::kTreeTrunk), "tree-trunk") != 0 ||
       std::strcmp(LightFamilyName(LightFamily::kPlant), "plant") != 0 ||
       std::strcmp(LightFamilyName(LightFamily::kPlantLit), "plant-lit") != 0 ||
+      std::strcmp(LightFamilyName(LightFamily::kTreeLeaf), "tree-leaf") != 0 || size_t(LightFamily::kCount) != 8 ||
       std::strcmp(LightFamilyName(LightFamily::kNone), "none") != 0) {
     return 200;
   }
@@ -169,7 +174,7 @@ static int LightTests() {
     const struct { F f; K k; } fits[] = {{F::kTerrainLayer, K::kTerrain}, {F::kTerrainFar, K::kTerrain},
                                          {F::kObject, K::kStream},        {F::kObject, K::kProbe},
                                          {F::kTreeTrunk, K::kProbe},      {F::kPlant, K::kInstance},
-                                         {F::kPlantLit, K::kInstance}};
+                                         {F::kPlantLit, K::kInstance},    {F::kTreeLeaf, K::kProbe}};
     for (int f = 0; f <= int(F::kCount); ++f) {
       for (int k = 0; k <= 5; ++k) {
         bool want = false;
@@ -225,6 +230,12 @@ static int LightTests() {
     if (LightRegisterRuns(kPlantLitPs, kInstanceVs, r) != 1 || !is(0, 0, 45, 1)) return 218;
     const PsLightSpec none{1, LightFamily::kNone, false, 0.0f};
     if (LightRegisterRuns(none, kStreamVs, r) != 0) return 219;
+    // A leaf (plan Task 8c): the trunk's registers and the wrap of its front light, vertex c50 (.w).
+    if (LightRegisterRuns(kLeafPs, kProbeVs, r) != 6 || !is(0, 0, 4, 3) || !is(1, 0, 7, 1) || !is(2, 0, 28, 12) ||
+        !is(3, 0, 50, 1) || !is(4, 1, 26, 2) || !is(5, 1, 49, 1)) {
+      return 380;
+    }
+    static_assert(kMaxLightRegisterRuns == 6);
   }
   // The fetch an entry names: by ordinal, held against the format and the offset it was written for.
   {
@@ -632,6 +643,73 @@ static int LightTests() {
     if (!Fails(t.d, LightReason::kNormalUnsupported, "normal-fetch")) return 316;
   }
 
+  // --- tree leaves (0x7CD5 with 0xA584, 0xD7DD, 0x2D40; plan Task 8c) ---
+  {
+    LightCase c = LeafCase();
+    LightInputs l;
+    const char* why = "x";
+    if (MakeLightInputs(c.d, &l, &why) != LightReason::kNone || why[0] != 0) return 381;
+    if (l.family != LightFamily::kTreeLeaf || l.kind != LightVertexKind::kProbe || l.multi || l.a0_comp != 2) return 382;
+    // The trunk's inputs: the rows and their scale, the probe sets, c27.w, c49, c26 ...
+    const float rot[3][3] = {{0, 1, 0}, {-1, 0, 0}, {0, 0, 1}};
+    if (std::memcmp(l.world_rot, rot, sizeof(rot)) != 0 || l.world_scale != 1.25f || l.c27w != 0.75f ||
+        l.c49[0] != 0.5f || l.c49[1] != 0.25f || l.c49[2] != 0.125f || l.c26[0] != 0.9f || l.c26[1] != 0.8f || l.c26[2] != 0.7f) {
+      return 383;
+    }
+    for (uint32_t r = 0; r < 12; ++r) {
+      if (l.vs_const[r][0] != 100.0f + r || l.vs_const[r][3] != 400.0f + r) return 384;
+    }
+    if (l.second.format != 38 || l.second.source != 0xE4 || l.normal.source != 0x24) return 385;
+    // ... and its own: the rows' fourth components (the world position's translation: the leaf's
+    // light needs the vector to the eye) and c50.w.
+    if (l.world_pos[0] != 91.0f || l.world_pos[1] != 92.0f || l.world_pos[2] != 93.0f || l.wrap != 0.4f) return 386;
+    // No other family carries them: neutral values.
+    LightCase o = ProbeCase();
+    if (MakeLightInputs(o.d, &l) != LightReason::kNone || l.world_pos[0] != 0.0f || l.world_pos[1] != 0.0f ||
+        l.world_pos[2] != 0.0f || l.wrap != 0.0f) {
+      return 387;
+    }
+    o = StreamCase();
+    if (MakeLightInputs(o.d, &l) != LightReason::kNone || l.world_pos[1] != 0.0f || l.wrap != 0.0f) return 387;
+    o = ProbeCase(); o.d.ps = &kTrunkPs;
+    if (MakeLightInputs(o.d, &l) != LightReason::kNone || l.world_pos[2] != 0.0f || l.wrap != 0.0f) return 387;
+    const LightInputs fresh;
+    if (fresh.world_pos[0] != 0.0f || fresh.world_pos[1] != 0.0f || fresh.world_pos[2] != 0.0f || fresh.wrap != 0.0f) return 388;
+    static_assert(sizeof(LightInputs) == 328);
+    // Every value it reads is a number, the translation and the wrap included; an object's
+    // translation is not read (case 264 above).
+    for (uint32_t reg = 4; reg <= 6; ++reg) {
+      LightCase t = LeafCase(); t.vs[reg * 4 + 3] = nan;
+      if (!Fails(t.d, LightReason::kLightUnknown, "register-not-finite")) return 389;
+    }
+    LightCase t = LeafCase(); t.vs[50 * 4 + 3] = inf;
+    if (!Fails(t.d, LightReason::kLightUnknown, "register-not-finite")) return 390;
+    t = LeafCase(); t.vs[50 * 4] = nan; t.vs[50 * 4 + 1] = nan; t.vs[50 * 4 + 2] = inf;  // c50.xyz: not the light's
+    if (MakeLightInputs(t.d, &l) != LightReason::kNone || l.wrap != 0.4f) return 391;
+    t = LeafCase(); t.d.vs_regs.have[0] &= ~(1ull << 50);
+    if (!Fails(t.d, LightReason::kLightUnknown, "register-unread")) return 392;
+    t = LeafCase(); t.vs[35 * 4 + 2] = nan;
+    if (!Fails(t.d, LightReason::kLightUnknown, "register-not-finite")) return 393;
+    t = LeafCase(); t.ps[49 * 4 + 1] = inf;
+    if (!Fails(t.d, LightReason::kLightUnknown, "register-not-finite")) return 393;
+    // On probe vertex shaders only, with the weights inside their stream and the set's component.
+    t = LeafCase(); t.d.vs = &kStreamVs; t.fetches = StreamFetches();
+    if (!Fails(t.d, LightReason::kLightUnknown, "vertex-shader")) return 394;
+    t = LeafCase(); t.d.vs = &kInstanceVs;
+    if (!Fails(t.d, LightReason::kLightUnknown, "vertex-shader")) return 394;
+    t = LeafCase(); t.d.max_vertex = 106;  // one weight set more than the stream holds
+    if (!Fails(t.d, LightReason::kLightUnknown, "weights-range")) return 395;
+    t = LeafCase(); t.d.pair = false;
+    if (!Fails(t.d, LightReason::kLightUnknown, "pair-not-checked")) return 396;
+    // Which families' pixel shaders read the light set's first light (c80, c87), so that the frame's
+    // light block may be read at their draws: every family but the leaves, whose light is the vertex
+    // shader's (0x7CD5... reads no light register; frame-map section 14, "Tree leaves").
+    for (int f = 0; f <= int(LightFamily::kCount); ++f) {
+      const bool want = f >= 1 && f < int(LightFamily::kCount) && LightFamily(f) != LightFamily::kTreeLeaf;
+      if (LightFamilyReadsSun(LightFamily(f)) != want) return 397;
+    }
+  }
+
   // --- instanced plants (0xA7E4 with 0x8123; 0x165E with 0xB636) ---
   {
     LightCase c = InstanceCase();
@@ -739,7 +817,7 @@ static int LightTests() {
     if (!Fails(c.d, LightReason::kLightUnknown, "vertex-shader")) return 351;
   }
   // The entry's size: one per lit draw is copied into the frame.
-  if (sizeof(LightInputs) != 312 || sizeof(LightElement) != 16) {
+  if (sizeof(LightInputs) != 328 || sizeof(LightElement) != 16) {  // (312 before the leaves' four floats, plan Task 8c)
     std::printf("FAIL: sizeof(LightInputs) = %zu, sizeof(LightElement) = %zu\n", sizeof(LightInputs), sizeof(LightElement));
     return 352;
   }

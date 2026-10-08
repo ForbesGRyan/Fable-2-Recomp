@@ -78,7 +78,7 @@ VERTEX = {VS: {"layout": "plain", "light": {"kind": "stream"}}, PROBE: {"light":
           NO_LIGHT: {"layout": "plain"}, ODD_KIND: {"light": {"kind": "leaf"}}}
 # The vertex shader kind each family is checked with here (gen_albedo_table._LIGHT_VERTEX_KINDS).
 FITS = {"terrain-layer": TERRAIN, "terrain-far": TERRAIN, "object": VS, "tree-trunk": PROBE, "plant": INSTANCE,
-        "plant-lit": INSTANCE}
+        "plant-lit": INSTANCE, "tree-leaf": PROBE}
 
 
 class GenAlphaKindTest(unittest.TestCase):
@@ -429,6 +429,10 @@ class GenAlphaKindTest(unittest.TestCase):
         for family, code, multi in (("tree-trunk", 4, 0), ("tree-trunk-multi", 4, 1), ("plant", 5, 0),
                                     ("plant-multi", 5, 1), ("plant-lit", 6, 0), ("plant-lit-multi", 6, 1)):
             self.assertEqual(self._gen(_albedo(light=self._light(family=family)))[2], p + f"{code}, {multi}, 0.0f)")
+        # 7 tree-leaf (plan Task 8c): on probe vertex shaders, and one line whatever the lights (the pixel
+        # shader reads no light register: the two- and four-light forms are the vertex shader's)
+        out = self._gen(_albedo(light=self._light(family="tree-leaf", vertex=[PROBE])))
+        self.assertEqual(out[2:], [p + "7, 0, 0.0f)", v + "0x79EAC49585797037ull)"])
         # a recipe's alpha line comes before it
         out = self._gen(_albedo(alpha={"source": "one"}, light=self._light()))
         self.assertEqual([l.split("(")[0] for l in out[1:]],
@@ -470,7 +474,13 @@ class GenAlphaKindTest(unittest.TestCase):
              "light family terrain-layer-multi belongs to"),
             (dict(fog, light=self._light()), "unknown key light in a no_albedo entry"),
             # the family
-            (_albedo(light=self._light(family="tree-leaf")), "unknown light family 'tree-leaf'"),
+            (_albedo(light=self._light(family="tree-leaves")), "unknown light family 'tree-leaves'"),
+            # the leaves' lights are the vertex shader's: the entry has no -multi form
+            (_albedo(light=self._light(family="tree-leaf-multi")), "unknown light family 'tree-leaf-multi'"),
+            (_albedo(light=self._light(family="tree-leaf", vertex=[VS])),
+             "light family tree-leaf needs a vertex shader of kind probe, and 0xECD66A10092E6562 is of kind stream"),
+            (_albedo(light=self._light(family="tree-leaf", facing_scale=8)), "light facing_scale belongs to a terrain-layer family"),
+            (_terrain(light=self._light(family="tree-leaf")), "light family tree-leaf belongs to a plain"),
             (_terrain(kind="terrain-far", detail_slot=13, light=dict(far, family="terrain-far-multi")),
              "unknown light family 'terrain-far-multi'"),   # the far shaders have one light
             (_albedo(light=self._light(family="object-multi-multi")), "unknown light family 'object-multi-multi'"),
@@ -605,7 +615,7 @@ class GenAlphaKindTest(unittest.TestCase):
         vertex = json.loads((root / "docs" / "native-renderer" / "vs-transforms.json").read_text())
         gen_albedo_table.generate(data, vertex)
         named = sorted({vs.upper() for e in data.values() if "light" in e for vs in e["light"]["vertex"]})
-        self.assertEqual(len(named), 15)
+        self.assertEqual(len(named), 18)   # (15 before the three leaf vertex shaders: plan Task 8c)
         other = {"terrain": "instance", "stream": "instance", "probe": "terrain", "instance": "probe"}
         for vs in named:
             key = next(k for k in vertex if k.upper() == vs)
@@ -639,18 +649,27 @@ class GenAlphaKindTest(unittest.TestCase):
 
     def test_the_committed_light_pairs_are_the_checked_pairs(self):
         # The table's (family, pixel shader, vertex shader) triples are exactly the pairs
-        # light_check.py runs (FAMILIES), all but the tree leaves, which stay without a family:
-        # their formula is not closed (docs/native-renderer/lighting-formulas.md, "Tree leaves").
+        # light_check.py runs (FAMILIES). The tree leaves (plan Task 8c) are one family in the table
+        # whatever their lights: the checker's tree-leaf-multi pairs (two and four lights, which are the
+        # vertex shader's) stand under "tree-leaf" here.
         import light_check
         root = Path(__file__).resolve().parent.parent
         data = gen_albedo_table.load(root / "docs" / "native-renderer" / "ps-albedo.json")
         table = {(e["light"]["family"], ps[2:].upper(), vs[2:].upper())
                  for ps, e in data.items() if "light" in e for vs in e["light"]["vertex"]}
-        checked = {(family, ps, vs) for family, pairs in light_check.FAMILIES.items() if family != "tree-leaf"
-                   for ps, vs in pairs}
+        checked = {("tree-leaf" if family == "tree-leaf-multi" else family, ps, vs)
+                   for family, pairs in light_check.FAMILIES.items() for ps, vs in pairs}
         self.assertEqual(table, checked)
-        self.assertEqual(len(table), 37)
-        self.assertNotIn("light", data["0x7CD57B81550F19E3"])
+        self.assertEqual(len(table), 40)
+        self.assertEqual(data["0x7CD57B81550F19E3"]["light"]["family"], "tree-leaf")
+        self.assertEqual(data["0x7CD57B81550F19E3"]["light"]["vertex"],
+                         ["0xA5846836C90E1192", "0xD7DD31B9BF194DE8", "0x2D40B53C926109BE"])
+        # ... and each of the multi-light leaf pairs is one --multi-sun checks
+        self.assertIn("tree-leaf-multi", light_check.MULTI_SUN_FAMILIES)
+        inc = (root / "src" / "native" / "capture" / "ps_albedo_table.inc").read_text()
+        self.assertIn("FABLE2_PS_LIGHT(0x7CD57B81550F19E3ull, 7, 0, 0.0f)", inc)
+        for vs in ("A5846836C90E1192", "D7DD31B9BF194DE8", "2D40B53C926109BE"):
+            self.assertIn(f"FABLE2_PS_LIGHT_VS(0x7CD57B81550F19E3ull, 0x{vs}ull)", inc)
         # every terrain layer's facing literal is the 8 of its own table (frame-map section 14, "The
         # shaders' literals"), and each family's evidence names the checker
         for e in data.values():

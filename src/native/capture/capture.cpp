@@ -2820,7 +2820,7 @@ LightStream ResolveLightStream(const DeviceSnapshot& dev, const VertexFetch* f) 
 // The light inputs of a draw (material.h, MakeLightInputs; frame-map section 14, "Light inputs"):
 // its family from the two shaders' table entries, then what the family reads per draw. Guest reads,
 // all bounded: the registers LightRegisterRuns names, from the device's two banks into t_bank and
-// t_ps_bank (at most 16 vertex and 3 pixel registers; a register the shader loads itself, or whose
+// t_ps_bank (at most 17 vertex and 3 pixel registers; a register the shader loads itself, or whose
 // literal table could not be read, is left unread), and the vertex buffer objects of the two
 // streams the entry's fetches name. A draw without a family costs the table lookups its shaders'
 // cache entries already hold and reads nothing. Anything unread or not usable gives a reason and
@@ -2869,11 +2869,12 @@ LightReason FillLightInputs(uint32_t device, const DeviceSnapshot& dev, const Vs
 // light inputs as FillLightInputs gives them at the row's draw, read again here (the row is
 // written whether or not the draw is recorded), under "lin":
 //   {"reason":"none","family","multi","kind","a0","normal":{element},"second":{element},"first",
-//    "power","facing","rot":[9],"scale","c11x","c27w","c49":[3],"c26":[3],"vc":[[4] x n]}
+//    "power","facing","rot":[9],"scale","c11x","c27w","c49":[3],"c26":[3],"pos":[3],"wrap","vc":[[4] x n]}
 // with an element as {"phys","size","off","stride","fmt","src","flags"} (left out for a terrain
 // draw; "src" the element's source components in the reader's order, as the table names them:
-// "xyz", "yxw", "zyxw"; the fetch's destination swizzle is the row's "fetches"[i]."swz") and "vc"
-// the probe sets (twelve registers) or the plants' c45 (one); or, without inputs,
+// "xyz", "yxw", "zyxw"; the fetch's destination swizzle is the row's "fetches"[i]."swz"), "pos" and
+// "wrap" a leaf's world translation (vertex c4..c6 .w) and vertex c50.w (zero for any other family),
+// and "vc" the probe sets (twelve registers) or the plants' c45 (one); or, without inputs,
 //   {"reason":"light-unknown"|"normal-unsupported","why": MakeLightInputs' word[,"family","multi"][,"kind"]}
 // where family and kind are what the two shaders' entries say, when they have one.
 // One difference from the records: `instanced` here is that the vertex shader's instance rows
@@ -2940,6 +2941,8 @@ void AppendLightInputs(std::string& row, uint32_t device, const DeviceSnapshot& 
   floats("c27w", &l.c27w, 1);
   floats("c49", l.c49, 3);
   floats("c26", l.c26, 3);
+  floats("pos", l.world_pos, 3);
+  floats("wrap", &l.wrap, 1);
   const uint32_t sets = l.kind == LightVertexKind::kProbe ? kLightProbeRegisters : l.kind == LightVertexKind::kInstance ? 1 : 0;
   if (sets) {
     row += ",\"vc\":[";
@@ -3021,14 +3024,16 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
     light_reason = FillLightInputs(device, shaders.dev, shaders.vs, shaders.ps, in.instances.active,
                                    shaders.max_vertex, &light, nullptr);
     // The frame's light block: once per frame, at the first such draw whose pixel shader has a
-    // one-light family (its first light is the sun; a two- or four-light shader has a lantern
-    // there and its block is invalid by design) and at which the light set was loaded in this
+    // one-light family that reads the set's first light (its first light is the sun; a two- or
+    // four-light shader has a lantern there and its block is invalid by design; a leaf's pixel
+    // shader reads no light register: LightFamilyReadsSun) and at which the light set was loaded in this
     // scene (ReadLightBlock; never the scene's first draw whatever it is: frame-map section 14,
     // "Replays"). A read that gives no block is counted, and the next read is made at the first
     // such draw under another load of the light set, not at the next draw (a set without a sun
     // gives the same answer at every draw under it): up to LightBlockTries::kMaxSets sets a frame.
     const PsLightSpec* family = shaders.ps ? shaders.ps->light : nullptr;
-    if (family && !family->multi && t_light_tries.Open(g_light_frame.load(std::memory_order_relaxed))) {
+    if (family && !family->multi && LightFamilyReadsSun(family->family) &&
+        t_light_tries.Open(g_light_frame.load(std::memory_order_relaxed))) {
       const uint64_t set = LightSetUpload();
       if (t_light_tries.ShouldTry(set)) {
         block = ReadLightBlock();

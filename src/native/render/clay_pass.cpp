@@ -476,7 +476,8 @@ void ClayPass::PrepareLight(nrhi::Device* dev, const capture::DrawRecord& r, con
   }
   ++st.light_ready;
   // The world rotation the draw's normals will go through: what it is, counted, never assumed.
-  if (light.family == capture::LightFamily::kObject || light.family == capture::LightFamily::kTreeTrunk) {
+  if (light.family == capture::LightFamily::kObject || light.family == capture::LightFamily::kTreeTrunk ||
+      light.family == capture::LightFamily::kTreeLeaf) {
     const RotationKind kind = ClassifyRotation(light.world_rot, light.world_scale);
     ++st.light_rotation[size_t(kind)];
     if (kind != RotationKind::kRotation) st.light_rotation_by_vs.Add(r.vs_hash, uint8_t(kind));
@@ -486,9 +487,10 @@ void ClayPass::PrepareLight(nrhi::Device* dev, const capture::DrawRecord& r, con
   // instance set's colours and bend inputs), when every value of the draw's is usable (a rotation
   // without a direction is not: counted above, drawn unlit; one probe register or bend constant
   // that is not a number of usable size: the whole block is refused). An instanced plant's values
-  // fit a small slot (kClayPlantConstantBytes); an object's or trunk's take a large one.
+  // fit a small slot (kClayPlantConstantBytes); an object's, trunk's or leaf's take a large one. A
+  // leaf (a probe record) also needs the frame's eye (LightFrameLights).
   ClayObjectConstants constants;
-  if (frame_.light_on && LightFamilyDrawn(light) &&
+  if (LightFrameLights(frame_, light.family) && LightFamilyDrawn(light) &&
       LightObjectReady(light.kind, p.normals != nullptr, p.colours != nullptr, p.probe != nullptr, p.bend != nullptr) &&
       MakeClayObjectConstants(light, &constants)) {
     p.lit = true;
@@ -920,7 +922,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
         light_mode |= kLightModeLit;
       } else {
         // An object or trunk: by its vertex kind, the stream colour or the probe colour. An
-        // instanced plant: by its family, without or with the ambient factor.
+        // instanced plant: by its family, without or with the ambient factor. A leaf: a probe
+        // record with the leaf bit.
         light_mode |= LitObjectMode(p.light->kind, p.light->family);
         light_count = p.light_count;  // the smallest count of its normals and its kind's other buffers
       }
@@ -985,8 +988,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       cmd->SetBufferSrv(kClayLightBufferParam0 + i, own ? own : p.positions, offset);
     }
     if (light_mode & kLightModeObject) {
-      // The draw's slot at b1: a plant's small one among the small slots, an object's or trunk's
-      // large one behind them.
+      // The draw's slot at b1: a plant's small one among the small slots, an object's, trunk's or
+      // leaf's large one behind them.
       const uint64_t at = (light_mode & kLightModeInstance) ? ClaySmallSlotOffset(uint64_t(plant_slot0_) + p.slot)
                                                             : ClayObjectSlotOffset(object_slot0_, p.slot);
       cmd->SetConstantBuffer(kParamTerrainConstants, terrain_cb_, at);

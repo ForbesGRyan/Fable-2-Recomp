@@ -120,10 +120,12 @@ inline constexpr ClayBufferField kClayFrameFields[] = {
     {"f_sun_dir", 0, 12},  {"f_light_on", 12, 4},  {"f_sun_col", 16, 12}, {"f_tint_pow", 28, 4},
     {"f_tint", 32, 12},    {"f_pad3", 44, 4},      {"f_add", 48, 12},     {"f_pad0", 60, 4},
     {"f_floor", 64, 12},   {"f_pad1", 76, 4},      {"f_axis", 80, 12},    {"f_pad2", 92, 4},
+    {"f_eye", 96, 12},     {"f_eye_on", 108, 4},
 };
 inline constexpr ClayBufferField kClayObjectFields[] = {
     {"o_rot0", 0, 16}, {"o_rot1", 16, 16}, {"o_rot2", 32, 16},        {"o_c49", 48, 12},
     {"o_c27w", 60, 4}, {"o_c26", 64, 12},  {"o_colour_power", 76, 4}, {"o_probe", 80, 192},
+    {"o_leaf", 272, 16},
 };
 
 #define FABLE2_CLAY_DRAW_HLSL R"hlsl(
@@ -137,7 +139,8 @@ cbuffer Draw : register(b0) { float4 r0; float4 r1; float4 r2; float4 r3; uint l
 // tools/xdk_sigmatch/light_formulas.py term for term (docs/native-renderer/lighting-formulas.md), with the
 // argument lists of their mirrors in clay_logic.h. Guards: a vector without a length (or with one that is
 // not a number) normalises to zero, never to a made-up direction, so a zero normal gives no sun and t = 0;
-// the power of a zero base is 0; t and n_dot_sun are saturated; nothing is divided.
+// the power of a zero base is 0; t and n_dot_sun are saturated; nothing is divided but the leaves' wrapped
+// cosine (LeafLight).
 #define FABLE2_CLAY_LIGHT_HLSL R"hlsl(
 cbuffer Frame : register(b2) {
   float3 f_sun_dir; uint f_light_on;     // c80.xyz of a one-light draw (= c109.xyz), as it is; 1: the frame is lit
@@ -146,6 +149,7 @@ cbuffer Frame : register(b2) {
   float3 f_add; float f_pad0;            // c20.xyz (c20.w, the output scale, is not applied)
   float3 f_floor; float f_pad1;          // c22.xyz
   float3 f_axis; float f_pad2;           // c23.xyz (= vertex c19.xyz)
+  float3 f_eye; uint f_eye_on;           // c19.xyz, the eye (= vertex c9.xyz of the leaf shaders); 1: it is usable
 };
 float3 light_normalize(float3 v) {
   float n2 = dot(v, v);
@@ -208,6 +212,28 @@ float3 LightPlantLit(float3 A, float3 vs_base, float3 add, float3 amb_floor, flo
                      float sun_gate) {
   return A * (vs_base * AmbientFactor(amb_floor, t) + add + light_sun(sun_col, n_dot_sun, sun_gate));
 }
+// The tree leaves (lighting-formulas.md, "Tree leaves"; the mirrors are in clay_logic.h). The game's leaf
+// vertex shaders make the ambient and the light's two scalars on the side of the card the viewer sees
+// (the cards are drawn without culling; the normal, used as it is, is turned to the viewer); its pixel
+// shader adds them on the albedo, the back light on leaf texels only. Split the same way. The one
+// division of the light is LeafLight's by 1 + wrap (the pass refuses a draw whose wrap is negative).
+float2 LeafLight(float3 normal, float3 view, float3 light_dir, float wrap, float spot) {
+  float3 n = (dot(view, normal) < 0.0) ? -normal : normal;
+  float nl = dot(light_dir, n);
+  float d = 1.0 + wrap;
+  float front = (d != 0.0) ? saturate((nl + wrap) / d) : 0.0;
+  float turn = 1.0 - saturate(dot(view, n));
+  return float2(front, saturate(-nl) * (1.0 - turn * turn)) * spot;
+}
+float2 LeafMask(float mask, float gain, float bias) {
+  float m1 = saturate(mask) * gain + bias;
+  return float2(m1, m1 * gain + bias);
+}
+float3 LightLeaf(float3 A, float3 vs_ambient, float front, float back, float3 sun_col, float c27w, float m1, float m2,
+                 float3 c49) {
+  float green = (A.g >= A.r) ? 1.0 : 0.0;
+  return (A * (vs_ambient * c27w + m1 * sun_col * front) + green * A * m2 * sun_col * back) * c49;
+}
 // What a lit draw writes: the value itself, a number, not negative, at most 64 (ClayLit in clay_logic.h).
 float3 clay_lit(float3 v) { return (v > 0.0) ? min(v, 64.0) : float3(0.0, 0.0, 0.0); }
 )hlsl"
@@ -215,11 +241,14 @@ float3 clay_lit(float3 v) { return (v > 0.0) ? min(v, 64.0) : float3(0.0, 0.0, 0
 #define FABLE2_CLAY_OBJECT_HLSL R"hlsl(
 cbuffer Object : register(b1) {
   float4 o_rot0; float4 o_rot1; float4 o_rot2;   // rows of M = c4..c6.xyz * c7.w (xyz); an instanced plant: no
-                                                 // rows, and in the three w its bend constants c45.x, .y, .z
+                                                 // rows, and in the three w its bend constants c45.x, .y, .z;
+                                                 // a leaf: in the three w the world translation c4..c6 .w
   float3 o_c49; float o_c27w;                    // pixel c49.xyz (the whole colour); c27.w (the ambient part)
   float3 o_c26; float o_colour_power;            // pixel c26.xyz (with the output scale); the stream colour's power
-                                                 // (an instanced plant: 2.2, the factor of c21.w in its colour's exponent)
+                                                 // (an instanced plant: 2.2, the factor of c21.w in its colour's
+                                                 // exponent; a leaf: 2.2 * 0.4545, that of its ambient's)
   float4 o_probe[12];                            // vertex c28..c39: three probe sets of four (base, rows of r, g, b)
+  float4 o_leaf;                                 // a leaf: x vertex c50.w (the wrap of the front light), y 1 / c7.w
 };
 )hlsl"
 
@@ -266,8 +295,8 @@ VsOut main(uint vid : SV_VertexID) {
     o.normal = float3(t, sqrt(abs(1.0 - dot(t, t))));
     if (light_mode & 4) o.axis = AmbientAxis(o.normal, f_axis);
   }
-  // (18: the object bit and the instance bit. An object or trunk has the first alone.)
-  [branch] if ((light_mode & 18) == 2 && has_light) {
+  // (82: the object bit, the instance bit and the leaf bit. An object or trunk has the first alone.)
+  [branch] if ((light_mode & 82) == 2 && has_light) {
     // The object's normal as the game's vertex shader exports it: (R n) * c7.w, not normalised.
     float3 n = normals[v];
     o.normal = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));
@@ -284,7 +313,7 @@ VsOut main(uint vid : SV_VertexID) {
       o.vcolour = light_pow(float3(word & 255, (word >> 8) & 255, (word >> 16) & 255) / 255.0, o_colour_power);
     }
   }
-  [branch] if ((light_mode & 18) == 18 && has_light) {
+  [branch] if ((light_mode & 82) == 18 && has_light) {
     // An instanced plant. Its normal is in the world already (normalize(M n) of its copy's rows): no
     // rows here. t10 holds the colour of the vertex's copy, t11 the copy's up axis (xyz) and the
     // vertex's height in the copy (w); the draw's bend constants c45.x, .y, .z are the fourth
@@ -305,6 +334,26 @@ VsOut main(uint vid : SV_VertexID) {
       o.axis = float3(0, 0, 0);
       o.vcolour = InstanceAmbient(colour, f_tint, o_colour_power * f_tint_pow, f_add);
     }
+  }
+  // (90: those three bits and the probe bit. A leaf is a probe record with the leaf bit.)
+  [branch] if ((light_mode & 90) == 74 && has_light) {
+    // A tree leaf, as the game's leaf vertex shaders: the normal through the rows, as it is; the probe
+    // colour (the set at t10 clamped, the weights at t11) raised to c18.w * 0.4545 (2.2 * c21.w * 0.4545)
+    // times c18.xyz (c21.xyz) plus c54.xyz (c20.xyz); the world position (M p) / c7.w + c4..c6 .w and
+    // the unit vector from it to the eye; and the sun's two scalars on the side of the card the viewer
+    // sees (the frame's sun stands in the vertex side's light set: a direction, no cone, no range), in
+    // the first two components of the bend's interpolator. A leaf has no vector of t.
+    float3 n = normals[v];
+    float3 N = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));
+    o.normal = N;
+    o.axis = float3(0, 0, 0);
+    uint a0 = min(colours[v], 8u);
+    float4 w = probe_weights[v];
+    float3 probe = o_probe[a0].xyz + float3(dot(o_probe[a0 + 1], w), dot(o_probe[a0 + 2], w), dot(o_probe[a0 + 3], w));
+    o.vcolour = InstanceAmbient(probe, f_tint, o_colour_power * f_tint_pow, f_add);
+    float3 at = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +
+                float3(o_rot0.w, o_rot1.w, o_rot2.w);
+    o.bend = float4(LeafLight(N, light_normalize(f_eye - at), light_normalize(f_sun_dir), o_leaf.x, 1.0), 0, 0);
   }
   return o;
 }
@@ -386,6 +435,12 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
         } else {
           lit = LightPlant(clay_linear(t.rgb), vcolour, dot(Np, f_sun_dir), f_sun_col, SunGateSingle(1.0, 1.0));
         }
+      } else if (light_mode & 64) {
+        // A tree leaf: the vertex side's ambient and the sun's two scalars (bend.x front, bend.y back)
+        // on A, the back light on leaf texels only; the mask 1 through the shader's two literals (0.6
+        // and 0.4: both factors are then 1); c27.w, c49 and c26 as an object's.
+        float2 m = LeafMask(1.0, 0.6, 0.4);
+        lit = LightLeaf(clay_linear(t.rgb), vcolour, bend.x, bend.y, f_sun_col, o_c27w, m.x, m.y, o_c49) * o_c26;
       } else {
         float3 N = light_normalize(normal);
         lit = LightObject(clay_linear(t.rgb), vcolour, f_tint, f_tint_pow, f_add, f_floor, AmbientT(axis, normal),

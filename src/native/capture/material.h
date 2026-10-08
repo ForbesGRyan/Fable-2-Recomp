@@ -215,14 +215,19 @@ inline bool ResolveUvFetch(const std::vector<VertexFetch>& fetches, const VsUvSp
 // formula the pair was checked against by tools/xdk_sigmatch/light_check.py, whose names these are.
 // kTerrainLayer / kTerrainFar: terrain_layer / terrain_far. kObject, kTreeTrunk, kPlantLit:
 // lit_object (props; trunks; instanced plants with a normal map). kPlant: plant. A family's two- and
-// four-light form ("-multi") is the same value with LightInputs::multi set.
-enum class LightFamily : uint8_t { kNone, kTerrainLayer, kTerrainFar, kObject, kTreeTrunk, kPlant, kPlantLit, kCount };
+// four-light form ("-multi") is the same value with LightInputs::multi set. kTreeLeaf (plan Task
+// 8c) has no such form: a leaf's lights are its vertex shader's, and its pixel shader is one
+// program for one, two and four of them.
+enum class LightFamily : uint8_t {
+  kNone, kTerrainLayer, kTerrainFar, kObject, kTreeTrunk, kPlant, kPlantLit, kTreeLeaf, kCount
+};
 // The generated table writes the family as 1 terrain-layer, 2 terrain-far, 3 object, 4 tree-trunk,
-// 5 plant, 6 plant-lit (gen_albedo_table.py, LIGHT_FAMILIES) and capture.cpp casts it as LightFamily(code).
+// 5 plant, 6 plant-lit, 7 tree-leaf (gen_albedo_table.py, LIGHT_FAMILIES) and capture.cpp casts it
+// as LightFamily(code).
 static_assert(LightFamily(1) == LightFamily::kTerrainLayer && LightFamily(2) == LightFamily::kTerrainFar &&
               LightFamily(3) == LightFamily::kObject && LightFamily(4) == LightFamily::kTreeTrunk &&
               LightFamily(5) == LightFamily::kPlant && LightFamily(6) == LightFamily::kPlantLit &&
-              size_t(LightFamily::kCount) == 7);
+              LightFamily(7) == LightFamily::kTreeLeaf && size_t(LightFamily::kCount) == 8);
 
 inline const char* LightFamilyName(LightFamily f) {
   switch (f) {
@@ -233,6 +238,7 @@ inline const char* LightFamilyName(LightFamily f) {
     case LightFamily::kTreeTrunk: return "tree-trunk";
     case LightFamily::kPlant: return "plant";
     case LightFamily::kPlantLit: return "plant-lit";
+    case LightFamily::kTreeLeaf: return "tree-leaf";
     default: return "?";
   }
 }
@@ -264,11 +270,22 @@ inline bool LightKindFits(LightFamily f, LightVertexKind k) {
     case LightFamily::kTerrainLayer:
     case LightFamily::kTerrainFar: return k == LightVertexKind::kTerrain;
     case LightFamily::kObject: return k == LightVertexKind::kStream || k == LightVertexKind::kProbe;
-    case LightFamily::kTreeTrunk: return k == LightVertexKind::kProbe;
+    case LightFamily::kTreeTrunk:
+    case LightFamily::kTreeLeaf: return k == LightVertexKind::kProbe;
     case LightFamily::kPlant:
     case LightFamily::kPlantLit: return k == LightVertexKind::kInstance;
     default: return false;
   }
+}
+
+// Whether a family's PIXEL shader reads the light set's first light (c80, c87): at a draw of such a
+// family, in its one-light form, those registers hold the frame's sun, and the capture may read the
+// frame's light block there (capture.cpp, RecordDraw; light_block.h). Every family but the leaves:
+// their pixel shader 0x7CD5... reads no light register at all (the leaf's light is computed by its
+// vertex shader from the vertex side's copy of the set, c76.. / c83..), so what the pixel registers
+// hold at a leaf draw was never held against the GPU and is not asked.
+inline bool LightFamilyReadsSun(LightFamily f) {
+  return f != LightFamily::kNone && f != LightFamily::kTreeLeaf && size_t(f) < size_t(LightFamily::kCount);
 }
 
 // Why a recorded draw has no light inputs. Such a draw keeps its material and is drawn without
@@ -428,11 +445,12 @@ inline constexpr uint32_t kLightVsIndexOffsetReg = 20;  // c20.x: the colour str
 inline constexpr uint32_t kLightVsProbeReg = 28;        // c28..c39: three probe sets of four registers
 inline constexpr uint32_t kLightProbeRegisters = 12;
 inline constexpr uint32_t kLightVsBendReg = 45;         // c45: the plants' bend of the normal
+inline constexpr uint32_t kLightVsWrapReg = 50;         // c50.w: the wrap of the leaves' front light
 // Pixel constants, from the device's pixel bank (bank-only registers too):
 inline constexpr uint32_t kLightPsSunScaleReg = 11;     // c11.x: terrain (layers: the ambient; far: the sun)
-inline constexpr uint32_t kLightPsFadeReg = 26;         // c26.xyz: objects and trunks, with the output scale
-inline constexpr uint32_t kLightPsAmbientReg = 27;      // c27.w: objects and trunks, on the ambient part
-inline constexpr uint32_t kLightPsTintReg = 49;         // c49.xyz: objects and trunks, on the whole colour
+inline constexpr uint32_t kLightPsFadeReg = 26;         // c26.xyz: objects, trunks and leaves, with the output scale
+inline constexpr uint32_t kLightPsAmbientReg = 27;      // c27.w: objects, trunks and leaves, on the ambient part
+inline constexpr uint32_t kLightPsTintReg = 49;         // c49.xyz: objects, trunks and leaves, on the whole colour
 
 // A run of registers of one bank (0 vertex, 1 pixel).
 struct LightRegisterRun {
@@ -451,10 +469,12 @@ inline size_t LightRegisterRuns(const PsLightSpec& ps, const VsLightSpec& vs, Li
       break;
     case LightFamily::kObject:
     case LightFamily::kTreeTrunk:
+    case LightFamily::kTreeLeaf:
       add(0, kLightVsRotationReg, 3);
       if (vs.scale_ref >= 0 && vs.scale_ref < 1024) add(0, uint32_t(vs.scale_ref) / 4, 1);
       if (vs.kind == LightVertexKind::kStream) add(0, kLightVsIndexOffsetReg, 1);
       if (vs.kind == LightVertexKind::kProbe) add(0, kLightVsProbeReg, kLightProbeRegisters);
+      if (ps.family == LightFamily::kTreeLeaf) add(0, kLightVsWrapReg, 1);
       add(1, kLightPsFadeReg, 2);  // c26, c27
       add(1, kLightPsTintReg, 1);
       break;
@@ -485,21 +505,26 @@ struct LightInputs {
   uint32_t colour_first = 0;    // kStream: vertex c20.x, a whole number; bounded by the stream at capture
   float colour_power = 0.0f;    // kStream: the literal the colour is raised to (2.2)
   float facing_scale = 0.0f;    // kTerrainLayer: the literal of sat(scale * (N . c109))
-  // kObject, kTreeTrunk: vertex c4..c6 (xyz), the rotation the shader puts its normal through, and
-  // the constant it then multiplies by (c7.w; 1 where the shader has none).
+  // kObject, kTreeTrunk, kTreeLeaf: vertex c4..c6 (xyz), the rotation the shader puts its normal
+  // through, and the constant it then multiplies by (c7.w; 1 where the shader has none).
   float world_rot[3][3] = {{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
   float world_scale = 1.0f;
   float c11x = 1.0f;                    // terrain: pixel c11.x
-  float c27w = 1.0f;                    // kObject, kTreeTrunk: pixel c27.w
-  float c49[3] = {1.0f, 1.0f, 1.0f};    // kObject, kTreeTrunk: pixel c49.xyz
-  float c26[3] = {1.0f, 1.0f, 1.0f};    // kObject, kTreeTrunk: pixel c26.xyz
+  float c27w = 1.0f;                    // kObject, kTreeTrunk, kTreeLeaf: pixel c27.w
+  float c49[3] = {1.0f, 1.0f, 1.0f};    // kObject, kTreeTrunk, kTreeLeaf: pixel c49.xyz
+  float c26[3] = {1.0f, 1.0f, 1.0f};    // kObject, kTreeTrunk, kTreeLeaf: pixel c26.xyz
   // kProbe: vertex c28..c39 (the probe sets c[28 + a0]..c[31 + a0], a0 = 0, 4 or 8).
   // kInstance: [0] = vertex c45. Zero otherwise.
   float vs_const[kLightProbeRegisters][4] = {};
+  // kTreeLeaf only (plan Task 8c; zero otherwise): the fourth components of vertex c4..c6, the
+  // translation of the world position (the leaf's light takes the vector from the vertex to the
+  // eye), and vertex c50.w, the wrap of its front light (0.4 in every row captured).
+  float world_pos[3] = {};
+  float wrap = 0.0f;
 };
 // Measured, so that a field added here is noticed: one entry per lit draw is copied into the frame
-// on the guest thread (about 900 a frame at the bridge).
-static_assert(sizeof(LightInputs) == 312, "LightInputs grew or shrank: see the comment above");
+// on the guest thread (about 900 a frame at the bridge; 312 bytes before the leaves' four floats).
+static_assert(sizeof(LightInputs) == 328, "LightInputs grew or shrank: see the comment above");
 
 // Registers of one constant bank as a draw's capture read them: `bank` is 256 x 4 host floats,
 // bit r of `have` says register r was read for this draw (anything else in `bank` is stale).
@@ -630,10 +655,14 @@ inline LightReason MakeLightInputs(const LightDraw& d, LightInputs* out, const c
     return LightReason::kNone;
   }
   if (!d.fetches) return fail(LightReason::kLightUnknown, "vertex-shader");
-  if (ps.family == LightFamily::kObject || ps.family == LightFamily::kTreeTrunk) {
+  const bool leaf = ps.family == LightFamily::kTreeLeaf;
+  if (ps.family == LightFamily::kObject || ps.family == LightFamily::kTreeTrunk || leaf) {
     for (uint32_t row = 0; row < 3; ++row) {
       for (uint32_t c = 0; c < 3; ++c) take(d.vs_regs, kLightVsRotationReg + row, c, &l.world_rot[row][c]);
+      // A leaf: the row's fourth component too, the world position's translation.
+      if (leaf) take(d.vs_regs, kLightVsRotationReg + row, 3, &l.world_pos[row]);
     }
+    if (leaf) take(d.vs_regs, kLightVsWrapReg, 3, &l.wrap);
     if (vs.scale_ref >= 0) {
       if (vs.scale_ref >= 1024) return fail(LightReason::kLightUnknown, "vertex-shader");
       take(d.vs_regs, uint32_t(vs.scale_ref) / 4, uint32_t(vs.scale_ref) % 4, &l.world_scale);

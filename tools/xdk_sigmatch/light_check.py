@@ -23,14 +23,16 @@ What a trial switches off, and why (docs/native-renderer/lighting-formulas.md ha
     constants are not supplied either;
   - the specular texture tf1 reads black (ruling 4);
   - trees: bool b129 (a fog volume) is clear and the vertex shader's fog is off (vs c111.x = 1e9).
-The screen mask tf8 is NOT switched off: it is a random texel and part of `sun_gate`.
+The screen mask tf8 is NOT switched off: it is a random texel and part of `sun_gate` (for the leaves:
+of the two factors leaf_mask makes of it with the pixel shader's literals 0.6 and 0.4).
 
 Literal constants (c252..c255) are not in the dump text. Terrain: the values of the shaders' own
 literal tables, "ps_lit" / "vs_lit" of the tess rows of the captures (frame-map section 13). Mesh
 vertex shaders: "vs_literals" of capture native_discovery_20261005_123635.jsonl (frame-map section 12,
-"Literals"). Mesh pixel shaders: no capture row holds them (draw rows carry no "ps_lit"); the values
-here are read from the idioms (2 and -1 of the normal decode, the 0 of a dp2add, the 1 of `1 - x`)
-and marked so in PS_LITERALS.
+"Literals"); the leaves' two- and four-light vertex shaders and their pixel shader: "vs_lit" / "ps_lit"
+of the draw rows of plan Task 1's captures (plan Task 8c). Other mesh pixel shaders: the values here
+are read from the idioms (2 and -1 of the normal decode, the 0 of a dp2add, the 1 of `1 - x`) and
+marked so in PS_LITERALS.
 """
 import argparse
 import json
@@ -50,9 +52,9 @@ TOLERANCE = 1e-4
 NAN = float("nan")
 
 # family -> [(pixel shader, vertex shader)]: the pairs the two captures of the materials validation draw
-# in the main scene (task11_bridge_up2_capture, task11_trees_up1_capture) with these pixel shaders, but
-# for two whose vertex shader's literal table is in no capture (7CD5... with D7DD... and 2D40...).
-# `--coverage` lists what a capture draws outside this table.
+# in the main scene (task11_bridge_up2_capture, task11_trees_up1_capture) with these pixel shaders (the
+# leaves' two- and four-light vertex shaders D7DD... and 2D40... since plan Task 8c, when their literal
+# tables were read from a capture). `--coverage` lists what a capture draws outside this table.
 FAMILIES = {
     "terrain-layer": [("9C2144E42E95A76F", "C30A97D946FA2BE4"), ("4755A2E4A05BA678", "FB68A7F2301210E1")],
     "terrain-layer-multi": [("45243B758F9272AB", "C30A97D946FA2BE4"), ("04F23292B2F44077", "C30A97D946FA2BE4"),
@@ -207,6 +209,15 @@ MULTI_LIGHTS = {
     "58D3FAAAA84A48AA": 2, "2FBE9B4EE822609A": 4,                                                 # tree trunks
     "E99F4ACC7A3C78B4": 2, "F525E023E08AC9BB": 2,                                                 # plants
 }
+# The tree leaves' lights are their VERTEX shader's: the pixel shader 7CD5... reads no light register and
+# is the same for one, two and four lights. By vertex shader: the registers c76.. / c83.. its dump reads.
+MULTI_LIGHTS_VS = {"D7DD31B9BF194DE8": 2, "2D40B53C926109BE": 4}
+
+
+def light_count(ps, vs):
+    """The lights of a two- or four-light pair: the vertex shader's where it has them (the leaves), else
+    the pixel shader's."""
+    return MULTI_LIGHTS_VS.get(vs) or MULTI_LIGHTS[ps]
 
 
 def _sun_in_slot(rng, c, slot):
@@ -562,18 +573,38 @@ FAMILIES.update({
 
 # --- tree leaves --------------------------------------------------------------------------------
 
-# Vertex shader A584...: "vs_literals" of capture native_discovery_20261005_123635.jsonl, registers 248
-# to 255. The two- and four-light variants D7DD... and 2D40... are in no capture with literals and are
-# not run.
-_LEAF_VS_LITERALS = dict(zip(range(248, 256), (
-    [0.0] * 4, [-math.pi, 0.7, 100.0, 0.45454543828964233], [-0.3, 0.05, 0.25, 1.0], [2 * math.pi, 0.25, 0.11, 0.23],
-    [0.04, 0.025, 0.0, 1.0], [0.035, 0.472, 0.5, 1.0], [0.3849, 0.3, 0.019245, 0.2886750102043152],
-    [0.55, 0.9, 0.15, 0.1])))
-_LEAF_GAMMA = (249, 3)      # the literal 1 / 2.2 on the ambient exponent
+# The three leaf vertex shaders (one, two and four lights) with their literal tables, registers 248 to 255.
+# A584...: "vs_literals" of capture native_discovery_20261005_123635.jsonl. D7DD... and 2D40... (plan Task
+# 8c): "vs_lit" of every row of theirs (56 and 40) in the capture by the trees of plan Task 1
+# (out/native-evidence/lighting/task1_trees2_capture; listed in task8c/leaf_literals.txt), where A584...'s
+# rows (312, and 288 at the bridge) carry the same table as the older capture. "gamma": where the literal
+# 1 / 2.2 on the ambient exponent stands (the three tables hold the same values in another order).
+_LEAF_WIND = ([-0.3, 0.05, 0.25, 1.0], [2 * math.pi, 0.25, 0.11, 0.23], [0.04, 0.025, 0.0, 1.0], [0.035, 0.472, 0.5, 1.0],
+              [0.3849, 0.3, 0.019245, 0.2886750102043152], [0.55, 0.9, 0.15, 0.1])
+_LEAF_GAMMA_VALUE = 0.45454543828964233
+_LEAF_VS = {
+    "A5846836C90E1192": dict(lights=1, gamma=(249, 3), literals=dict(zip(range(248, 256), (
+        [0.0] * 4, [-math.pi, 0.7, 100.0, _LEAF_GAMMA_VALUE]) + _LEAF_WIND))),
+    "D7DD31B9BF194DE8": dict(lights=2, gamma=(248, 3), literals=dict(zip(range(248, 256), (
+        [-math.pi, 0.7, 100.0, _LEAF_GAMMA_VALUE],) + _LEAF_WIND + ([-1.0, 0.0, 0.0, 0.0],)))),
+    "2D40B53C926109BE": dict(lights=4, gamma=(255, 0), literals=dict(zip(range(248, 256), (
+        [-math.pi, -1.0, 0.7, 100.0],) + _LEAF_WIND + ([_LEAF_GAMMA_VALUE, 0.0, 0.0, 0.0],)))),
+}
+# The leaf pixel shader's literals (plan Task 8c): "ps_lit" of every row of 7CD5... in the two captures of
+# plan Task 1 (288 and 408 rows; task8c/leaf_literals.txt), and c255 in every execution of the shader in
+# the GPU logs of that task (frame-map section 14, "The shaders' literals"). c255.w = 0.6 and c255.z = 0.4
+# shape the mask (leaf_mask); c255.x = 1 and c255.y = 0 and c254.x = 0.5 belong to the fog volume under
+# b129, which no trial reaches.
+PS_LITERALS.update({"7CD57B81550F19E3": {254: [0.5, 0.0, 0.0, 0.0], 255: [1.0, 0.0, 0.4, 0.6]}})
 
 
-def _leaf_driver(ps, vs, dumps):
-    vs_text = ue.load(dumps, vs, "vert")
+def _leaf_driver(ps, vs, dumps, sun_slot=None):
+    """`sun_slot` (a two- or four-light vertex shader only): the vertex shader's light set is the game's
+    with the sun in that slot (_sun_in_slot, its registers 80.., 87.. and 94 taken as the vertex side's
+    76.., 83.. and 90), and the formula is fed as a ONE-light draw is: the sun's direction as it is and no
+    cone or range (spot 1). Without it: light 0 with every constant random, the colours of lights 1 to 3
+    zero."""
+    vs_text, info = ue.load(dumps, vs, "vert"), _LEAF_VS[vs]
 
     def make_case(rng):
         vc = {i: [rng.uniform(-1, 1) for _ in range(4)] for i in (0, 1, 2, 3, 4, 5, 6)}
@@ -584,28 +615,44 @@ def _leaf_driver(ps, vs, dumps):
             vc[k] = [rng.uniform(-0.5, 0.5) for _ in range(4)]
         vc[50] = [0.0, 0.0, 0.0, rng.uniform(0.0, 1.0)]
         vc[54] = [rng.uniform(0.0, 0.2) for _ in range(3)] + [0.0]
-        vc[76] = [rng.uniform(-40, 40) for _ in range(3)] + [rng.choice([0.0, rng.uniform(0.2, 1.0)])]
-        vc[83] = [rng.uniform(0.2, 2.0) for _ in range(3)] + [0.0]
-        vc[90] = [rng.choice([0.0, 1.0, rng.random()]), 0.0, 0.0, 0.0]
-        vc[92] = [rng.uniform(0.0, 0.02), 0.0, 0.0, 0.0]
-        vc[94] = unit(rng) + [0.0]
-        vc[101] = [rng.uniform(-0.5, 0.5), 0.0, 0.0, 0.0]
-        vc[103] = [rng.uniform(0.5, 3.0), 0.0, 0.0, 0.0]
-        vc.update(_LEAF_VS_LITERALS)
+        # The light set: light j reads c(76 + j) (position or direction, w), c(83 + j) (colour),
+        # c(94 + j) (cone axis) and component j of c90 (blend of cone and range), c92 (range), c101 and
+        # c103 (cone).
+        for j in range(4):
+            vc[76 + j] = [rng.uniform(-40, 40) for _ in range(3)] + [rng.choice([0.0, rng.uniform(0.2, 1.0)])]
+            vc[83 + j] = [rng.uniform(0.2, 2.0) for _ in range(3)] + [0.0] if j == 0 else [0.0] * 4
+            vc[94 + j] = unit(rng) + [0.0]
+        vc[90] = [rng.choice([0.0, 1.0, rng.random()]) for _ in range(4)]
+        vc[92] = [rng.uniform(0.0, 0.02) for _ in range(4)]
+        vc[101] = [rng.uniform(-0.5, 0.5) for _ in range(4)]
+        vc[103] = [rng.uniform(0.5, 3.0) for _ in range(4)]
+        sun = 0
+        if sun_slot is not None:
+            game = {}
+            _sun_in_slot(rng, game, sun_slot)
+            for j in range(4):
+                vc[76 + j], vc[83 + j] = game[80 + j], game[87 + j]
+            vc[90] = game[94]
+            sun = sun_slot
+        vc.update(info["literals"])
         vertex = Vertex(rng)
         regs, _, _ = run_vs(vs_text, vc, regs={0: [float(rng.randrange(1000)), 0, 0, 0]}, vfetch=vertex)
         e = vertex.elements
         world = regs[0][:3]                                     # o0: the swayed world position
         normal = [lf.dot(vc[r][:3], e[(0, 2)][:3]) * vc[7][3] for r in (4, 5, 6)]
         view = lf.normalize([vc[9][i] - world[i] for i in range(3)])
-        to_light = [vc[76][i] - world[i] * vc[76][3] for i in range(3)]
-        light_dir = lf.normalize(to_light)
-        rng_ = lf.sat(1.0 - math.sqrt(lf.dot(to_light, to_light)) * vc[92][0])
-        cone = lf.sat((lf.dot(light_dir, vc[94][:3]) - vc[101][0]) * vc[103][0])
-        front, back = lf.leaf_light(normal, view, light_dir, vc[50][3], 1.0 + vc[90][0] * (cone * rng_ - 1.0))
+        if sun_slot is None:
+            to_light = [vc[76][i] - world[i] * vc[76][3] for i in range(3)]
+            light_dir = lf.normalize(to_light)
+            rng_ = lf.sat(1.0 - math.sqrt(lf.dot(to_light, to_light)) * vc[92][0])
+            cone = lf.sat((lf.dot(light_dir, vc[94][:3]) - vc[101][0]) * vc[103][0])
+            spot = 1.0 + vc[90][0] * (cone * rng_ - 1.0)
+        else:
+            light_dir, spot = lf.normalize(vc[76 + sun][:3]), 1.0
+        front, back = lf.leaf_light(normal, view, light_dir, vc[50][3], spot)
         a0 = int(e[(0, 0)][2])
         probe = lf.probe_colour(vc[28 + a0][:3], [vc[29 + a0], vc[30 + a0], vc[31 + a0]], e[(1, 0)])
-        gr, gc = _LEAF_GAMMA
+        gr, gc = info["gamma"]
         ambient = lf.instance_ambient(probe, vc[18][:3], vc[18][3] * vc[gr][gc], vc[54][:3])
 
         regs[max(regs) + 1] = [rng.uniform(0, 1120), rng.uniform(0, 720), 0, 0]
@@ -616,21 +663,17 @@ def _leaf_driver(ps, vs, dumps):
              26: [rng.uniform(0.5, 1.0) for _ in range(4)],
              27: [rng.uniform(0.5, 1.0) for _ in range(4)],
              49: [rng.uniform(0.5, 1.5) for _ in range(4)]}
-        # The pixel literals c255.w and c255.z shape the mask. They are 0.6 and 0.4 (frame-map section
-        # 14, "The shaders' literals": known since plan Task 1, after this check was written); a trial
-        # still draws them at random and the formula is given the two factors they make, so the form
-        # is checked for any values.
-        gain, bias = rng.uniform(0.25, 2.0), rng.uniform(-1.0, 0.75)
-        c[255] = [1.0, 0.0, bias, gain]
+        c.update({k: list(v) for k, v in PS_LITERALS[ps].items()})
         mask = rng.random()
         texel = [rng.uniform(0.05, 1.0) for _ in range(4)]
 
         def sampler(slot, coords, attrs):
             return texel if slot == 0 else _flat_or_tex(slot, coords, attrs, mask)
 
-        m1, m2 = lf.leaf_mask(mask, gain, bias)
+        # The mask's two factors with the shader's own literals: gain c255.w = 0.6, bias c255.z = 0.4.
+        m1, m2 = lf.leaf_mask(mask, c[255][3], c[255][2])
         args = dict(A=[x * x / (texel[3] * texel[3]) for x in texel[:3]], vs_ambient=ambient, front=front, back=back,
-                    sun_col=vc[83][:3], c27w=c[27][3], m1=m1, m2=m2, c49=c[49][:3])
+                    sun_col=vc[83 + sun][:3], c27w=c[27][3], m1=m1, m2=m2, c49=c[49][:3])
         # b132: the colour times o4 plus o5, the vertex fog (1 and 0 while it is off). b129 stays clear.
         return Case(c, regs, sampler, args, [c[20][3] * c[26][i] for i in range(3)], rng.choice([(), (132,)]))
 
@@ -641,6 +684,8 @@ FAMILIES.update({
     "tree-trunk": [("00E09D1BC5295D52", "475EC9F795E5EDBB")],
     "tree-trunk-multi": [("58D3FAAAA84A48AA", "475EC9F795E5EDBB"), ("2FBE9B4EE822609A", "475EC9F795E5EDBB")],
     "tree-leaf": [("7CD57B81550F19E3", "A5846836C90E1192")],
+    # (plan Task 8c; the light count is the vertex shader's: MULTI_LIGHTS_VS)
+    "tree-leaf-multi": [("7CD57B81550F19E3", "D7DD31B9BF194DE8"), ("7CD57B81550F19E3", "2D40B53C926109BE")],
 })
 
 
@@ -788,6 +833,7 @@ DRIVERS = {
     "tree-trunk": lambda ps, vs, dumps: _object_driver(ps, vs, dumps, multi=False),
     "tree-trunk-multi": lambda ps, vs, dumps: _object_driver(ps, vs, dumps, multi=True),
     "tree-leaf": _leaf_driver,
+    "tree-leaf-multi": _leaf_driver,
     "plant": lambda ps, vs, dumps: _plant_driver(ps, vs, dumps, multi=False, lit=False),
     "plant-multi": lambda ps, vs, dumps: _plant_driver(ps, vs, dumps, multi=True, lit=False),
     "plant-lit": lambda ps, vs, dumps: _plant_driver(ps, vs, dumps, multi=False, lit=True),
@@ -802,6 +848,7 @@ FORMULAS = {
     "tree-trunk": lf.lit_object,
     "tree-trunk-multi": lf.lit_object,
     "tree-leaf": lf.tree_leaf,
+    "tree-leaf-multi": lf.tree_leaf,
     "plant": lf.plant,
     "plant-multi": lf.plant,
     "plant-lit": lf.lit_object,
@@ -884,8 +931,12 @@ def check_pair(family, ps, vs, trials=200, seed=1, formula=None, dumps=DUMPS, to
 # main-scene -multi rows of the two captures of plan Task 6's final runs, read from their "pfull":
 # out/native-evidence/lighting/task7/multi_slots_bridge_trees.txt). The plants' pairs (two lights each; plan
 # Task 8b): slot 1 in all 200, 360 and 136 plant -multi rows of the three captures of plan Task 8a's runs
-# (out/native-evidence/lighting/task8b/plant_rows_check.txt).
-MULTI_SUN_FAMILIES = ("terrain-layer-multi", "object-multi", "tree-trunk-multi", "plant-multi", "plant-lit-multi")
+# (out/native-evidence/lighting/task8b/plant_rows_check.txt). The leaves' pairs (plan Task 8c; the lights are
+# the vertex shader's): slot 1 in all 56 rows of D7DD... and slot 2 in all 40 of 2D40... in the capture by the
+# trees of plan Task 1, the sun there bit for bit the frame's, w = 0 and c90 zero at its slot, a lantern (w = 1,
+# c90 = 1) in every slot before it (out/native-evidence/lighting/task8c/leaf_rows_check.txt).
+MULTI_SUN_FAMILIES = ("terrain-layer-multi", "object-multi", "tree-trunk-multi", "plant-multi", "plant-lit-multi",
+                      "tree-leaf-multi")
 GAME_SUN_SLOT = {2: 1, 4: 2}
 _SUN_DRIVERS = {
     "terrain-layer-multi": _terrain_layer_driver,
@@ -893,6 +944,7 @@ _SUN_DRIVERS = {
     "tree-trunk-multi": _object_driver,
     "plant-multi": lambda ps, vs, dumps, multi, sun_slot: _plant_driver(ps, vs, dumps, multi, lit=False, sun_slot=sun_slot),
     "plant-lit-multi": lambda ps, vs, dumps, multi, sun_slot: _plant_driver(ps, vs, dumps, multi, lit=True, sun_slot=sun_slot),
+    "tree-leaf-multi": lambda ps, vs, dumps, multi, sun_slot: _leaf_driver(ps, vs, dumps, sun_slot=sun_slot),
 }
 
 
@@ -905,8 +957,8 @@ def check_multi_sun(family, ps, vs, slot, trials=200, seed=1, dumps=DUMPS, tol=T
     through the one-light function; one that does not stays light-unknown."""
     if family not in _SUN_DRIVERS:
         raise KeyError(f"{family}: not a family --multi-sun checks")
-    if not 1 <= slot < MULTI_LIGHTS[ps]:
-        raise ValueError(f"{ps} has {MULTI_LIGHTS[ps]} lights: no sun slot {slot}")
+    if not 1 <= slot < light_count(ps, vs):
+        raise ValueError(f"{ps} with {vs} has {light_count(ps, vs)} lights: no sun slot {slot}")
     ps_text, make_case = _SUN_DRIVERS[family](ps, vs, dumps, multi=True, sun_slot=slot)
     return check(ps_text, make_case, FORMULAS[family], trials, seed, tol)
 
@@ -917,7 +969,7 @@ def print_multi_sun(trials, seed, dumps):
     bad = 0
     for family in MULTI_SUN_FAMILIES:
         for ps, vs in FAMILIES[family]:
-            lights = MULTI_LIGHTS[ps]
+            lights = light_count(ps, vs)
             for slot in range(1, lights):
                 res = check_multi_sun(family, ps, vs, slot, trials, seed, dumps)
                 game = slot == GAME_SUN_SLOT[lights]
@@ -934,7 +986,7 @@ def print_multi_sun(trials, seed, dumps):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--multi-sun", action="store_true",
-                    help="the two- and four-light pairs of the terrain, object, trunk and plant families with the sun "
+                    help="the two- and four-light pairs of the terrain, object, trunk, plant and leaf families with the sun "
                          "in slot 1 to 3 and dark lanterns, against their family's one-light function")
     ap.add_argument("--all", action="store_true", help="every pair of FAMILIES")
     ap.add_argument("--family", choices=sorted(FAMILIES))

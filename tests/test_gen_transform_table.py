@@ -506,8 +506,8 @@ class GenTransformTableTest(unittest.TestCase):
             gtt.generate({self.L: {"rejected": "no", "light": self._stream()}})
 
     def test_the_committed_light_entries(self):
-        # One entry per vertex shader of light_check.py's FAMILIES (the leaves' apart: no family yet),
-        # of the kind that shader's colour comes from; the fetches are the dumps' in DecodeVertexFetches
+        # One entry per vertex shader of light_check.py's FAMILIES (the three leaf shaders since plan
+        # Task 8c), of the kind that shader's colour comes from; the fetches are the dumps' in DecodeVertexFetches
         # order (out/native-evidence/lighting/task4_table_facts.txt).
         import sys
         sys.path.insert(0, str(ROOT / "tools" / "xdk_sigmatch"))
@@ -521,13 +521,11 @@ class GenTransformTableTest(unittest.TestCase):
                     kind = "terrain"
                 elif family.startswith("plant"):
                     kind = "instance"
-                elif family.startswith("tree-leaf"):
-                    continue
                 else:
                     kind = "stream" if vs == "ECD66A10092E6562" else "probe"
                 self.assertEqual(want.setdefault("0x" + vs, kind), kind, vs)
         self.assertEqual(kinds, want)
-        self.assertEqual(len(kinds), 15)
+        self.assertEqual(len(kinds), 18)
         light = {vs: table[vs]["light"] for vs in kinds}
         # The sources (fix round 1): the element's source components in the order the formulas read
         # them, whatever the fetch's destination swizzle. The 10_11_11 normal is source x, y, z in all
@@ -541,7 +539,10 @@ class GenTransformTableTest(unittest.TestCase):
                          {"kind": "stream", "normal": normal,
                           "colour": {"fetch": 4, "format": 6, "offset": 0, "source": "zyxw"}, "scale": "c7.w", "power": 2.2})
         probes = {"0x79EAC49585797037": (4, "c7.w"), "0xD4D558DA6A82BDC8": (6, None),
-                  "0xA1F7E9885EC466DF": (5, None), "0x475EC9F795E5EDBB": (5, "c7.w")}
+                  "0xA1F7E9885EC466DF": (5, None), "0x475EC9F795E5EDBB": (5, "c7.w"),
+                  # the leaves (plan Task 8c): the probe colour is their ambient's base
+                  "0xA5846836C90E1192": (6, "c7.w"), "0xD7DD31B9BF194DE8": (6, "c7.w"),
+                  "0x2D40B53C926109BE": (6, "c7.w")}
         for vs, (fetch, scale) in probes.items():
             want = {"kind": "probe", "normal": normal,
                     "weights": {"fetch": fetch, "format": 38, "offset": 0, "source": "xyzw"}, "a0": "z"}
@@ -555,7 +556,9 @@ class GenTransformTableTest(unittest.TestCase):
                                   "colour": {"fetch": 3, "format": 6, "offset": 6, "source": "zyx"}}, vs)
             if kind == "terrain":
                 self.assertEqual(sorted(light[vs]), ["evidence", "kind"], vs)
-        self.assertNotIn("light", table["0xA5846836C90E1192"])
+        inc = (ROOT / "src" / "native" / "capture" / "vs_transform_table.inc").read_text()
+        for vs in ("0xA5846836C90E1192", "0xD7DD31B9BF194DE8", "0x2D40B53C926109BE"):
+            self.assertIn(f"FABLE2_VS_LIGHT({vs}ull, 3, 1, 16, 2, ", inc)
 
     def test_the_committed_table_uses_the_allowed_keys(self):
         # The lists are the committed file's keys plus the three the finder writes.

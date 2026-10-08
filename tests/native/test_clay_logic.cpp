@@ -2474,7 +2474,7 @@ int main() {
     block.floor[0] = 0.0588f;
     block.floor[1] = 0.0902f;
     block.valid = true;
-    static_assert(sizeof(ClayFrameConstants) == 96);
+    static_assert(sizeof(ClayFrameConstants) == 112);  // (96 before the eye, plan Task 8c)
     ClayFrameConstants frame = MakeClayFrameConstants(block, ClayLight::kOn);
     CHECK(440, frame.light_on == 1 && frame.tint_pow == 1.3f && frame.floor[0] == 0.0588f && frame.floor[1] == 0.0902f &&
                    frame.floor[2] == 0.0f);
@@ -2528,7 +2528,7 @@ int main() {
     obj.c27w = 0.75f;
     obj.c49[0] = 1.0f; obj.c49[1] = 0.5f; obj.c49[2] = 2.0f;
     obj.c26[0] = 0.25f; obj.c26[1] = 1.0f; obj.c26[2] = 0.5f;
-    static_assert(sizeof(ClayObjectConstants) == 272 && offsetof(ClayObjectConstants, probe) == 80);
+    static_assert(sizeof(ClayObjectConstants) == 288 && offsetof(ClayObjectConstants, probe) == 80);
     ClayObjectConstants oc;
     CHECK(450, MakeClayObjectConstants(obj, &oc));
     // (a colour-stream object has no probe registers: the block's are zero, whatever the inputs hold)
@@ -2591,8 +2591,9 @@ int main() {
     CHECK(458, !MakeClayObjectConstants(other, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0);
     // The families the pass lights: the terrain layers, the far terrain, the objects with a colour
     // stream or with probe colours, the trunks (probe colours) and, since plan Task 8b, the instanced
-    // plants with and without the ambient factor, each with its two- and four-light form; nothing
-    // else (the leaves have no family yet), and no family on another vertex kind than its own.
+    // plants with and without the ambient factor, each with its two- and four-light form; since plan
+    // Task 8c the tree leaves (probe colours; their lights are the vertex shader's, so the entry has
+    // no -multi form); nothing else, and no family on another vertex kind than its own.
     auto drawn = [](LightFamily f, LightVertexKind k, bool multi) {
       capture::LightInputs l;
       l.family = f;
@@ -2609,6 +2610,9 @@ int main() {
                    drawn(LightFamily::kTreeTrunk, LightVertexKind::kProbe, false) && drawn(LightFamily::kTreeTrunk, LightVertexKind::kProbe, true));
     CHECK(459, drawn(LightFamily::kPlant, LightVertexKind::kInstance, false) && drawn(LightFamily::kPlant, LightVertexKind::kInstance, true) &&
                    drawn(LightFamily::kPlantLit, LightVertexKind::kInstance, false) && drawn(LightFamily::kPlantLit, LightVertexKind::kInstance, true));
+    CHECK(459, drawn(LightFamily::kTreeLeaf, LightVertexKind::kProbe, false) && !drawn(LightFamily::kTreeLeaf, LightVertexKind::kStream, false) &&
+                   !drawn(LightFamily::kTreeLeaf, LightVertexKind::kInstance, false) && !drawn(LightFamily::kTreeLeaf, LightVertexKind::kTerrain, false) &&
+                   !drawn(LightFamily::kTreeLeaf, LightVertexKind::kNone, false) && !drawn(LightFamily::kCount, LightVertexKind::kProbe, false));
     CHECK(459, !drawn(LightFamily::kTreeTrunk, LightVertexKind::kStream, false) &&
                    !drawn(LightFamily::kPlant, LightVertexKind::kStream, false) && !drawn(LightFamily::kPlantLit, LightVertexKind::kProbe, false) &&
                    !drawn(LightFamily::kPlantLit, LightVertexKind::kTerrain, false) && !drawn(LightFamily::kTreeTrunk, LightVertexKind::kInstance, false) &&
@@ -2695,7 +2699,7 @@ int main() {
     dc = MakeClayConstants(r, 100, 0, uv, true, 1, ClayAlpha{}, 0, 500);
     CHECK(466, dc.light_mode == 0 && dc.light_count == 0);
     CHECK(467, kLightModeTerrainNormals == 1u && kLightModeObject == 2u && kLightModeLit == 4u && kLightModeProbe == 8u &&
-                   kLightModeInstance == 16u && kLightModePlantLit == 32u && kLightModeCount == 64u);
+                   kLightModeInstance == 16u && kLightModePlantLit == 32u && kLightModeLeaf == 64u && kLightModeCount == 128u);
     // A lit mesh record's mode by its vertex kind and family: the colour stream's is what it was (6); a
     // probe object's or trunk's adds the probe bit (14); an instanced plant's adds the instance bit
     // (22) and, for the family whose pixel shader has the ambient factor, the plant-lit bit (54). No
@@ -2705,6 +2709,13 @@ int main() {
                    LitObjectMode(LightVertexKind::kProbe, LightFamily::kTreeTrunk) == 14u &&
                    LitObjectMode(LightVertexKind::kInstance, LightFamily::kPlant) == 22u &&
                    LitObjectMode(LightVertexKind::kInstance, LightFamily::kPlantLit) == 54u);
+    // A leaf (plan Task 8c) is a probe record with the leaf bit (78); on no other kind.
+    CHECK(467, LitObjectMode(LightVertexKind::kProbe, LightFamily::kTreeLeaf) == 78u &&
+                   LitObjectMode(LightVertexKind::kProbe, LightFamily::kTreeLeaf) ==
+                       (kLightModeObject | kLightModeLit | kLightModeProbe | kLightModeLeaf) &&
+                   LitObjectMode(LightVertexKind::kStream, LightFamily::kTreeLeaf) == 0u &&
+                   LitObjectMode(LightVertexKind::kInstance, LightFamily::kTreeLeaf) == 0u &&
+                   LitObjectMode(LightVertexKind::kTerrain, LightFamily::kTreeLeaf) == 0u);
     CHECK(467, LitObjectMode(LightVertexKind::kInstance, LightFamily::kObject) == 0u &&
                    LitObjectMode(LightVertexKind::kInstance, LightFamily::kTreeTrunk) == 0u &&
                    LitObjectMode(LightVertexKind::kStream, LightFamily::kTreeTrunk) == 0u &&
@@ -2809,16 +2820,16 @@ int main() {
     // 480-489: the Light line.
     ClayStats st;
     CHECK(480, FormatLightDrawnText(st) ==
-                   "Light: off, lit 0 (terrain-layer 0, terrain-far 0, object 0, tree-trunk 0, plant 0, plant-lit 0), unlit 0");
+                   "Light: off, lit 0 (terrain-layer 0, terrain-far 0, object 0, tree-trunk 0, plant 0, plant-lit 0, tree-leaf 0), unlit 0");
     st.light_unlit[size_t(ClayUnlit::kOff)] = 948;
     CHECK(481, FormatLightDrawnText(st) ==
-                   "Light: off, lit 0 (terrain-layer 0, terrain-far 0, object 0, tree-trunk 0, plant 0, plant-lit 0), "
+                   "Light: off, lit 0 (terrain-layer 0, terrain-far 0, object 0, tree-trunk 0, plant 0, plant-lit 0, tree-leaf 0), "
                    "unlit 948 {light-off: 948}");
     st = ClayStats{};
     st.light_switch = true;
     st.light_unlit[size_t(ClayUnlit::kBlock)] = 12;
     CHECK(482, FormatLightDrawnText(st) ==
-                   "Light: on, block missing, lit 0 (terrain-layer 0, terrain-far 0, object 0, tree-trunk 0, plant 0, plant-lit 0), "
+                   "Light: on, block missing, lit 0 (terrain-layer 0, terrain-far 0, object 0, tree-trunk 0, plant 0, plant-lit 0, tree-leaf 0), "
                    "unlit 12 {light-block: 12}");
     st = ClayStats{};
     st.light_switch = st.light_block = true;
@@ -2834,7 +2845,7 @@ int main() {
     st.light_sun_col[0] = 0.99f; st.light_sun_col[1] = 0.8306f; st.light_sun_col[2] = 0.4f;
     CHECK(483, FormatLightDrawnText(st) ==
                    "Light: on, block valid, lit 684 (terrain-layer 492, terrain-far 72, object 120, tree-trunk 0, plant 0, "
-                   "plant-lit 0), unlit 264 {light-unknown: 262, normal-unsupported: 2}, unknown {0x7CD57B81550F19E3: 3, "
+                   "plant-lit 0, tree-leaf 0), unlit 264 {light-unknown: 262, normal-unsupported: 2}, unknown {0x7CD57B81550F19E3: 3, "
                    "0x8D900846800943C8: 2, 0x401A000000000001: 1}, sun (-0.633, 0.035, 0.773) colour (0.990, 0.831, 0.400)");
     CHECK(484, std::string(ClayUnlitName(ClayUnlit::kOff)) == "light-off" && std::string(ClayUnlitName(ClayUnlit::kBlock)) == "light-block" &&
                    std::string(ClayUnlitName(ClayUnlit::kUnknown)) == "light-unknown" &&
@@ -2869,6 +2880,24 @@ int main() {
     CHECK(489, is(LitObjectMode(capture::LightVertexKind::kProbe, capture::LightFamily::kTreeTrunk), B::kPositions, B::kNormals,
                   B::kProbeSets, B::kProbeWeights));
     CHECK(489, is(kLightModeObject | kLightModeProbe, B::kPositions, B::kNormals, B::kProbeSets, B::kProbeWeights));
+    // A lit leaf (plan Task 8c) is a probe record: the same three buffers; the leaf bit names none.
+    CHECK(489, is(LitObjectMode(capture::LightVertexKind::kProbe, capture::LightFamily::kTreeLeaf), B::kPositions, B::kNormals,
+                  B::kProbeSets, B::kProbeWeights));
+    CHECK(489, is(kLightModeLeaf, B::kPositions, B::kPositions, B::kPositions, B::kPositions) &&
+                   is(kLightModeLeaf | kLightModeLit | kLightModeProbe, B::kPositions, B::kPositions, B::kPositions, B::kPositions));
+    // The vertex shader's three mesh blocks exclude each other (an object's or trunk's: the object bit
+    // without the instance and leaf bits; a plant's: with the instance bit, without the leaf bit; a
+    // leaf's: with the probe and leaf bits, without the instance bit), and a mode none of them takes
+    // (which the pass never makes) loads nothing: the positions at all of t9 to t11, whatever its
+    // object bit says. The leaf bit beside the probe bit of an instanced plant changes nothing.
+    CHECK(489, is(kLightModeObject | kLightModeLeaf, B::kPositions, B::kPositions, B::kPositions, B::kPositions) &&
+                   is(kLightModeObject | kLightModeLeaf | kLightModeInstance, B::kPositions, B::kPositions, B::kPositions, B::kPositions) &&
+                   is(kLightModeObject | kLightModeLeaf | kLightModeInstance | kLightModeProbe, B::kPositions, B::kPositions, B::kPositions,
+                      B::kPositions) &&
+                   is(kLightModeObject | kLightModeLeaf | kLightModeProbe | kLightModePlantLit, B::kPositions, B::kNormals, B::kProbeSets,
+                      B::kProbeWeights) &&
+                   is(kLightModeTerrainNormals | kLightModeObject | kLightModeLeaf, B::kTerrainNormals, B::kPositions, B::kPositions,
+                      B::kPositions));
     CHECK(489, is(LitObjectMode(capture::LightVertexKind::kStream, capture::LightFamily::kObject), B::kPositions, B::kNormals,
                   B::kColours, B::kPositions));
     // A lit instanced plant (plan Task 8b), with or without the ambient factor: its flat normals at
@@ -2887,21 +2916,29 @@ int main() {
     // ... and with the probe bit beside it (a mode the pass never makes) the instance bit decides, as
     // in the vertex shader, whose instance branch comes first.
     CHECK(489, is(kLightModeObject | kLightModeInstance | kLightModeProbe, B::kPositions, B::kNormals, B::kInstanceColours, B::kBend));
-    // Every mode: t9 is the normals exactly with the object bit, t8 the terrain normals exactly with
-    // the terrain bit, and t10 / t11 are a pair of one kind.
+    // Every mode (the numbers are the vertex shader's own tests of the mode: 82 the object, instance
+    // and leaf bits, 90 those and the probe bit): t9 is the normals exactly where one of the three
+    // mesh blocks runs, t8 the terrain normals exactly with the terrain bit, and t10 / t11 are a pair
+    // of one kind, the kind of the block that runs.
     for (uint32_t mode = 0; mode < kLightModeCount; ++mode) {
       const ClayLightBuffers s = LightBufferSources(mode);
-      const bool object = (mode & kLightModeObject) != 0;
-      bool ok = (s.source[0] == B::kTerrainNormals) == ((mode & kLightModeTerrainNormals) != 0) && (s.source[1] == B::kNormals) == object;
+      const bool object = (mode & 82u) == 2u, plant = (mode & 82u) == 18u, leaf = (mode & 90u) == 74u;
+      bool ok = int(object) + int(plant) + int(leaf) <= 1;
+      ok = ok && (s.source[0] == B::kTerrainNormals) == ((mode & kLightModeTerrainNormals) != 0) &&
+           (s.source[1] == B::kNormals) == (object || plant || leaf);
       ok = ok && (s.source[0] == B::kTerrainNormals || s.source[0] == B::kPositions) && (s.source[1] == B::kNormals || s.source[1] == B::kPositions);
-      if (!object) ok = ok && s.source[2] == B::kPositions && s.source[3] == B::kPositions;
-      if (object && (mode & kLightModeInstance)) ok = ok && s.source[2] == B::kInstanceColours && s.source[3] == B::kBend;
-      if (object && !(mode & kLightModeInstance)) {
+      if (!object && !plant && !leaf) ok = ok && s.source[2] == B::kPositions && s.source[3] == B::kPositions;
+      if (plant) ok = ok && s.source[2] == B::kInstanceColours && s.source[3] == B::kBend;
+      if (leaf) ok = ok && s.source[2] == B::kProbeSets && s.source[3] == B::kProbeWeights;
+      if (object) {
         ok = ok && ((mode & kLightModeProbe) ? s.source[2] == B::kProbeSets && s.source[3] == B::kProbeWeights
                                              : s.source[2] == B::kColours && s.source[3] == B::kPositions);
       }
       CHECK(489, ok);
     }
+    static_assert((kLightModeObject | kLightModeInstance | kLightModeLeaf) == 82u &&
+                  (kLightModeObject | kLightModeInstance | kLightModeLeaf | kLightModeProbe) == 90u &&
+                  (kLightModeObject | kLightModeLeaf | kLightModeProbe) == 74u);
     // The four registers are the layout's last four parameters, vertex stage, buffers; the layout has
     // twelve parameters (the backend's limit) and 56 of the root signature's 64 words.
     for (uint32_t i = 0; i < kClayLightBufferCount; ++i) {
@@ -3295,7 +3332,7 @@ int main() {
     pl.vs_const[0][0] = 1.0f; pl.vs_const[0][1] = -200.0f; pl.vs_const[0][2] = 100.0f; pl.vs_const[0][3] = 7.0f;
     ClayObjectConstants oc;
     const ClayObjectConstants empty{};
-    static_assert(sizeof(ClayObjectConstants) == 272 && kClayPlantConstantBytes == 80 && kClayPlantConstantBytes <= kClayTerrainSlotBytes &&
+    static_assert(sizeof(ClayObjectConstants) == 288 && kClayPlantConstantBytes == 80 && kClayPlantConstantBytes <= kClayTerrainSlotBytes &&
                   offsetof(ClayObjectConstants, colour_power) + 4 == kClayPlantConstantBytes &&
                   offsetof(ClayObjectConstants, probe) == kClayPlantConstantBytes);
     CHECK(509, MakeClayObjectConstants(pl, &oc) && oc.rot[0][3] == 1.0f && oc.rot[1][3] == -200.0f && oc.rot[2][3] == 100.0f &&
@@ -3458,13 +3495,335 @@ int main() {
     st.light_second[size_t(LightSecond::kValue)] = 2;
     CHECK(517, FormatLightText(st).ends_with("| probe or instance buffer refused: value 2 | bend inputs: 135 records, 4.1 MB"));
   }
+
+  // 520-539: the tree leaves (plan Task 8c; lighting-formulas.md, "Tree leaves").
+  {
+    using capture::LightFamily;
+    using capture::LightVertexKind;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    auto close_to = [](float got, double want) { return std::fabs(double(got) - want) <= 2e-6 * std::max(1.0, std::fabs(want)); };
+    auto close3 = [&](const Float3& got, double x, double y, double z) { return close_to(got.x, x) && close_to(got.y, y) && close_to(got.z, z); };
+    auto finite3 = [](const Float3& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+    // The frame values, registers, weights and pins of tests/test_light_check.py, PinnedForTheRenderer
+    // (leaf, leaf_cases, LEAF_PINS), composed as the clay shaders compose: the vertex side makes N = M n
+    // as it is, the world position, the unit vector to the eye, the sun's two scalars, the probe colour
+    // and the ambient; the pixel side multiplies the scalars by the sun's colour inside the family's
+    // function, with the mask at 1, and applies c26.
+    const Float3 tint{1.125f, 1.375f, 1.875f}, add{0.0068f, 0.071f, 0.092f};
+    const Float3 sun_col{0.99f, 0.83f, 0.40f}, sun_dir{-0.6334f, 0.0346f, 0.7731f};
+    const Float3 green{0.3f, 0.5f, 0.2f}, red{0.5f, 0.4f, 0.3f}, one{1.0f, 1.0f, 1.0f}, zero{0.0f, 0.0f, 0.0f};
+    const Float3 n{-0.6f, 0.0f, 0.8f}, position{0.5f, -1.0f, 2.0f}, eye_front{1.5f, -10.0f, 13.0f}, eye_behind{0.0f, 12.0f, -5.0f};
+    const float probe[12][4] = {{0.25f, 0.125f, 0.0625f, 9.0f}, {0.5f, 0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.125f, 1.0f},
+                                {0.125f, 0.25f, 0.0f, 9.0f},    {-0.25f, 0.0f, 0.0f, 0.0f}, {0.0f, 1.25f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f},
+                                {0.0625f, 0.5f, 0.25f, 9.0f},   {0.0f, 0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}};
+    const float weights[4] = {0.5f, -0.25f, 1.0f, 0.125f};
+    // 520: the literals. The 1 / 2.2 of the ambient exponent as the three vertex shaders' tables hold
+    // it, the two of the pixel shader's mask, the mode bit.
+    CHECK(520, kLeafGamma == 0.45454543828964233f && kLeafMaskGain == 0.6f && kLeafMaskBias == 0.4f && kLightModeLeaf == 64u &&
+                   kLeafColourPower == kInstanceColourPower * kLeafGamma);
+    // The inputs of one leaf draw: the rotation M_ROT of the reference (its rows over c7.w, as the
+    // game's c4..c6 hold them), the translation, the wrap.
+    auto inputs = [&](float scale, float wrap, float c27w, const Float3& c49, const Float3& c26) {
+      capture::LightInputs l;
+      l.family = LightFamily::kTreeLeaf;
+      l.kind = LightVertexKind::kProbe;
+      const float rot[3][3] = {{0.0f, -1.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
+      std::memcpy(l.world_rot, rot, sizeof(rot));
+      l.world_scale = scale;
+      l.world_pos[0] = 1.0f; l.world_pos[1] = 2.0f; l.world_pos[2] = 3.0f;
+      l.wrap = wrap;
+      l.c27w = c27w;
+      l.c49[0] = c49.x; l.c49[1] = c49.y; l.c49[2] = c49.z;
+      l.c26[0] = c26.x; l.c26[1] = c26.y; l.c26[2] = c26.z;
+      std::memcpy(l.vs_const, probe, sizeof(probe));
+      return l;
+    };
+    struct Leaf {
+      bool ok;
+      float front, back;
+      Float3 amb, colour;
+    };
+    auto leaf = [&](const Float3& normal, const Float3& eye, const Float3& A, uint32_t a0, float scale, float wrap, float c27w,
+                    const Float3& c49, const Float3& c26) {
+      Leaf out{};
+      ClayObjectConstants c;
+      out.ok = MakeClayObjectConstants(inputs(scale, wrap, c27w, c49, c26), &c);
+      // The vertex side.
+      const Float3 N{c.rot[0][0] * normal.x + c.rot[0][1] * normal.y + c.rot[0][2] * normal.z,
+                     c.rot[1][0] * normal.x + c.rot[1][1] * normal.y + c.rot[1][2] * normal.z,
+                     c.rot[2][0] * normal.x + c.rot[2][1] * normal.y + c.rot[2][2] * normal.z};
+      const Float3 view = LeafView(eye, LeafWorldPosition(c, position));
+      const LeafSides s = LeafLight(N, view, LightNormalize(sun_dir), c.leaf[0], 1.0f);
+      out.front = s.front;
+      out.back = s.back;
+      out.amb = InstanceAmbient(ProbeColour(c.probe, a0, weights), tint, c.colour_power * 1.3f, add);
+      // The pixel side.
+      const LeafMasks m = LeafMask(1.0f, kLeafMaskGain, kLeafMaskBias);
+      const Float3 lit = LightLeaf(A, out.amb, s.front, s.back, sun_col, c.c27w, m.m1, m.m2, {c.c49[0], c.c49[1], c.c49[2]});
+      out.colour = {lit.x * c.c26[0], lit.y * c.c26[1], lit.z * c.c26[2]};
+      return out;
+    };
+    // 521: the viewer on the normal's side, the sun in front: the wrapped front light, no back light.
+    Leaf f = leaf(n, eye_front, green, 0, 1.0f, 0.4f, 1.0f, one, one);
+    CHECK(521, f.ok && close_to(f.front, 0.7126408495157472) && f.back == 0.0f &&
+                   close3(f.amb, 0.46369198767397196, 0.16310554084116385, 0.5053389422232634) &&
+                   close3(f.colour, 0.3507619286083685, 0.377298722969617, 0.15807905640591247));
+    // 522: the viewer behind the card: the normal is turned to him, the sun is then behind it, and
+    // the back light passes through a leaf texel (green >= red, equality included), not through a twig's.
+    Leaf b = leaf(n, eye_behind, green, 0, 1.0f, 0.4f, 1.0f, one, one);
+    CHECK(522, b.ok && b.front == 0.0f && close_to(b.back, 0.5975238349664942) &&
+                   close3(b.colour, 0.31657217528724035, 0.329525161931677, 0.14886969524197222));
+    b = leaf(n, eye_behind, red, 0, 1.0f, 0.4f, 1.0f, one, one);
+    CHECK(522, b.front == 0.0f && close_to(b.back, 0.5975238349664942) &&
+                   close3(b.colour, 0.23184599383698598, 0.06524221633646554, 0.15160168266697902));
+    b = leaf(n, eye_behind, {0.4f, 0.4f, 0.2f}, 0, 1.0f, 0.4f, 1.0f, one, one);
+    CHECK(522, close3(b.colour, 0.42209623371632055, 0.26362012954534164, 0.14886969524197222));
+    // 523: c7.w = 0.5 (in the normal, which the game does not normalise, and not in the world
+    // position), set 8, another wrap, c27.w on the ambient part only, c49 on the whole colour, c26 after.
+    f = leaf(n, eye_front, green, 8, 0.5f, 0.25f, 0.5f, {1.0f, 0.5f, 2.0f}, {1.0f, 1.0f, 0.5f});
+    CHECK(523, f.ok && close_to(f.front, 0.4390788757288185) && f.back == 0.0f &&
+                   close3(f.amb, 1.2240510043759552, 0.8173572059344705, 3.6166064948512817) &&
+                   close3(f.colour, 0.31401407674785237, 0.19327851745553865, 0.3967869595434337));
+    b = leaf(n, eye_behind, green, 8, 0.5f, 0.25f, 0.5f, {1.0f, 0.5f, 2.0f}, {1.0f, 1.0f, 0.5f});
+    CHECK(523, b.front == 0.0f && close_to(b.back, 0.22157000987666525) &&
+                   close3(b.colour, 0.24941394358976282, 0.14814542779121684, 0.37938625027526146));
+    // 524: a zero normal: front = wrap / (1 + wrap), no back light. A probe colour of zero in red and
+    // negative in green (set 4): the power of the absolute value. The eye in the vertex: no view
+    // direction, so no turn and no back light. No wrap: the plain clamped cosine.
+    f = leaf(zero, eye_front, green, 0, 1.0f, 0.4f, 1.0f, one, one);
+    CHECK(524, close_to(f.front, 0.28571428571428575) && f.back == 0.0f &&
+                   close3(f.colour, 0.22396473915933449, 0.2001241989920105, 0.12392493130179555));
+    f = leaf(n, eye_front, green, 4, 1.0f, 0.4f, 1.0f, one, one);
+    CHECK(524, f.amb.x == 0.0068f && close_to(f.amb.y, 0.10840647433840495) && f.amb.z == 0.092f &&
+                   close3(f.colour, 0.21369433230617693, 0.3499491897182375, 0.0754112679612598));
+    f = leaf(n, {2.0f, 2.5f, 5.0f}, green, 0, 1.0f, 0.4f, 1.0f, one, one);
+    CHECK(524, close_to(f.front, 0.7126408495157472) && f.back == 0.0f &&
+                   close3(f.colour, 0.3507619286083685, 0.377298722969617, 0.15807905640591247));
+    f = leaf(n, eye_front, green, 0, 1.0f, 0.0f, 1.0f, one, one);
+    CHECK(524, close_to(f.front, 0.5976971893220461) && f.back == 0.0f &&
+                   close3(f.colour, 0.31662366153083926, 0.32959710398923103, 0.14888356359041638));
+
+    // 525: the pieces by hand. The light faces the leaf (L . N = 0.5), the viewer too (V . N = 0.5),
+    // wrap 0.5: front = 1 / 1.5, no back light. The light behind it: front = sat(0 / 1.5) = 0, back =
+    // 0.5 * (1 - (1 - 0.5)^2) = 0.375, times the spot. A normal that faces away from the viewer is turned.
+    {
+      const float r = std::sqrt(0.75f);
+      LeafSides s = LeafLight({0.0f, 0.0f, 1.0f}, {r, 0.0f, 0.5f}, {0.0f, r, 0.5f}, 0.5f, 1.0f);
+      CHECK(525, close_to(s.front, 2.0 / 3.0) && s.back == 0.0f);
+      s = LeafLight({0.0f, 0.0f, 1.0f}, {r, 0.0f, 0.5f}, {0.0f, r, -0.5f}, 0.5f, 0.5f);
+      CHECK(525, s.front == 0.0f && close_to(s.back, 0.1875));
+      const LeafSides turned = LeafLight({0.0f, 0.0f, -1.0f}, {r, 0.0f, 0.5f}, {0.0f, r, -0.5f}, 0.5f, 0.5f);
+      CHECK(525, turned.front == s.front && turned.back == s.back);
+      // (the spot is on the front light too: half of 1 / 1.5)
+      s = LeafLight({0.0f, 0.0f, 1.0f}, {r, 0.0f, 0.5f}, {0.0f, r, 0.5f}, 0.5f, 0.5f);
+      CHECK(525, close_to(s.front, 1.0 / 3.0) && s.back == 0.0f);
+      // The normal is used as it comes (not normalised): twice as long, twice the cosine.
+      s = LeafLight({0.0f, 0.0f, 2.0f}, {r, 0.0f, 0.5f}, {0.0f, r, 0.25f}, 0.0f, 1.0f);
+      CHECK(525, s.front == 0.5f && s.back == 0.0f);
+      // The two factors of the mask: m1 = mask * gain + bias, m2 = m1 * gain + bias; with the shader's
+      // literals a mask of 1 gives exactly (1, 1).
+      LeafMasks m = LeafMask(0.5f, 0.5f, 0.5f);
+      CHECK(525, m.m1 == 0.75f && m.m2 == 0.875f);
+      m = LeafMask(1.0f, kLeafMaskGain, kLeafMaskBias);
+      CHECK(525, m.m1 == 1.0f && m.m2 == 1.0f);
+      m = LeafMask(0.0f, kLeafMaskGain, kLeafMaskBias);
+      CHECK(525, m.m1 == 0.4f && close_to(m.m2, 0.64));
+      m = LeafMask(7.0f, 0.5f, 0.0f);  // (the mask is clamped)
+      CHECK(525, m.m1 == 0.5f && m.m2 == 0.25f);
+      // (A * (amb * c27w + m1 * sun * front) + green * A * m2 * sun * back) * c49:
+      // a * (0.5 * 0.5 + 0.75 * 2 * 0.5) = a; + a * 0.875 * 2 * 0.25 = 0.4375 a where green >= red.
+      Float3 c = LightLeaf({0.25f, 0.5f, 0.25f}, {0.5f, 0.5f, 0.5f}, 0.5f, 0.25f, {2.0f, 2.0f, 2.0f}, 0.5f, 0.75f, 0.875f, {1.0f, 0.5f, 2.0f});
+      CHECK(525, c.x == 0.359375f && c.y == 0.359375f && c.z == 0.71875f);
+      c = LightLeaf({0.5f, 0.25f, 0.25f}, {0.5f, 0.5f, 0.5f}, 0.5f, 0.25f, {2.0f, 2.0f, 2.0f}, 0.5f, 0.75f, 0.875f, {1.0f, 0.5f, 2.0f});
+      CHECK(525, c.x == 0.5f && c.y == 0.125f && c.z == 0.5f);
+      // The world position and the view: (M p) / c7.w + T; the unit vector to the eye, zero in the eye.
+      ClayObjectConstants k;
+      CHECK(525, MakeClayObjectConstants(inputs(0.5f, 0.4f, 1.0f, one, one), &k));
+      const Float3 w = LeafWorldPosition(k, position);
+      CHECK(525, w.x == 2.0f && w.y == 2.5f && w.z == 5.0f);
+      Float3 v = LeafView({2.0f, 2.5f, 9.0f}, w);
+      CHECK(525, v.x == 0.0f && v.y == 0.0f && v.z == 1.0f);
+      v = LeafView(w, w);
+      CHECK(525, v.x == 0.0f && v.y == 0.0f && v.z == 0.0f);
+    }
+    // 526: zeros and values that are not numbers give numbers, from every function (review focus 2);
+    // a wrap of -1 (the formula's denominator zero) gives no front light.
+    {
+      const Float3 bad{nan, inf, -inf};
+      for (const LeafSides& s : {LeafLight(bad, bad, bad, nan, inf), LeafLight(zero, zero, zero, -1.0f, 1.0f),
+                                 LeafLight(n, bad, n, 0.4f, nan), LeafLight(n, n, bad, inf, 1.0f),
+                                 LeafLight({1.0e30f, 1.0e30f, 1.0e30f}, {1.0e30f, 1.0e30f, 1.0e30f}, {-1.0e30f, 1.0e30f, 1.0e30f}, 0.4f, 1.0e30f)}) {
+        CHECK(526, std::isfinite(s.front) && std::isfinite(s.back));
+      }
+      LeafSides s = LeafLight({0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 1.0f}, -1.0f, 1.0f);
+      CHECK(526, s.front == 0.0f && s.back == 0.0f);
+      // (also where the numerator is above zero, a normal longer than 1: the quotient would be +infinity,
+      // which a clamp makes 1)
+      s = LeafLight({0.0f, 0.0f, 2.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 1.0f}, -1.0f, 1.0f);
+      CHECK(526, s.front == 0.0f && s.back == 0.0f);
+      // The viewer's cosine is clamped before the back light's factor (a normal longer than 1 again:
+      // V . N = 2 counts as 1, the factor is 1 and not 1 - (1 - 2)^2 = 0).
+      s = LeafLight({0.0f, 0.0f, 4.0f}, {std::sqrt(0.75f), 0.0f, 0.5f}, {0.0f, std::sqrt(0.984375f), -0.125f}, 0.0f, 1.0f);
+      CHECK(526, s.front == 0.0f && s.back == 0.5f);
+      for (const LeafMasks& m : {LeafMask(nan, inf, nan), LeafMask(1.0f, 1.0e30f, 1.0e30f), LeafMask(0.5f, -inf, inf), LeafMask(1.0f, 3.0e38f, 3.0e38f)}) {
+        CHECK(526, std::isfinite(m.m1) && std::isfinite(m.m2));
+      }
+      CHECK(526, finite3(LightLeaf(bad, bad, nan, inf, bad, inf, nan, inf, bad)) &&
+                     finite3(LightLeaf({1.0e30f, 1.0e30f, 1.0e30f}, {1.0e30f, 1.0e30f, 1.0e30f}, 1.0e30f, 1.0e30f, {1.0e30f, 1.0e30f, 1.0e30f},
+                                       1.0e30f, 1.0e30f, 1.0e30f, {1.0e30f, 1.0e30f, 1.0e30f})));
+      CHECK(526, finite3(LeafView(bad, bad)) && finite3(LeafView({3.0e38f, -3.0e38f, 0.0f}, {-3.0e38f, 3.0e38f, 0.0f})));
+      ClayObjectConstants k{};
+      k.rot[0][0] = nan; k.rot[1][3] = inf; k.leaf[1] = nan;
+      CHECK(526, finite3(LeafWorldPosition(k, bad)) && finite3(LeafWorldPosition(k, position)));
+    }
+
+    // 527: a leaf's constants: a trunk's (the rows of M, c49, c27.w, c26, the twelve probe registers),
+    // and its own: the world translation in the rows' fourth components, the exponent's factor of the
+    // ambient (2.2 * 0.4545, over the frame's c21.w) where a stream object has its colour's power, and
+    // the wrap with the inverse of c7.w in one more register behind the probe registers.
+    static_assert(sizeof(ClayObjectConstants) == 288 && offsetof(ClayObjectConstants, leaf) == 272 &&
+                  sizeof(ClayObjectConstants) <= kClayObjectSlotBytes);
+    ClayObjectConstants oc;
+    const ClayObjectConstants empty{};
+    const capture::LightInputs li = inputs(0.5f, 0.4f, 0.75f, {1.0f, 0.5f, 2.0f}, {0.25f, 1.0f, 0.5f});
+    CHECK(527, MakeClayObjectConstants(li, &oc) && oc.rot[0][0] == 0.0f && oc.rot[0][1] == -0.5f && oc.rot[1][0] == 0.5f &&
+                   oc.rot[2][2] == 0.5f && oc.rot[0][3] == 1.0f && oc.rot[1][3] == 2.0f && oc.rot[2][3] == 3.0f);
+    CHECK(527, oc.c49[0] == 1.0f && oc.c49[1] == 0.5f && oc.c49[2] == 2.0f && oc.c27w == 0.75f && oc.c26[0] == 0.25f &&
+                   oc.c26[1] == 1.0f && oc.c26[2] == 0.5f && oc.colour_power == kLeafColourPower &&
+                   std::memcmp(oc.probe, probe, sizeof(probe)) == 0);
+    CHECK(527, oc.leaf[0] == 0.4f && oc.leaf[1] == 2.0f && oc.leaf[2] == 0.0f && oc.leaf[3] == 0.0f);
+    // No other kind of record carries any of it: a trunk with the same inputs has zeros there.
+    {
+      capture::LightInputs trunk = li;
+      trunk.family = LightFamily::kTreeTrunk;
+      ClayObjectConstants t;
+      CHECK(527, MakeClayObjectConstants(trunk, &t) && t.rot[0][3] == 0.0f && t.rot[1][3] == 0.0f && t.rot[2][3] == 0.0f &&
+                     t.leaf[0] == 0.0f && t.leaf[1] == 0.0f && t.leaf[2] == 0.0f && t.leaf[3] == 0.0f && t.colour_power == 0.0f);
+      capture::LightInputs object = li;
+      object.family = LightFamily::kObject;
+      CHECK(527, MakeClayObjectConstants(object, &t) && t.rot[1][3] == 0.0f && t.leaf[0] == 0.0f && t.leaf[1] == 0.0f);
+      // (and a value of theirs that is not a number does not refuse a trunk, which does not read it)
+      trunk.world_pos[1] = nan;
+      trunk.wrap = inf;
+      CHECK(527, MakeClayObjectConstants(trunk, &t) && t.rot[1][3] == 0.0f && t.leaf[0] == 0.0f);
+    }
+    // 528: refused as a whole on one value that is not a number or not of usable size: the three of
+    // the translation (a position: up to kLightPositionMax), the wrap (0 to kLightValueMax: the
+    // formula divides by 1 + wrap), a scale without an inverse, and everything a trunk is refused for.
+    for (int k = 0; k < 3; ++k) {
+      for (float value : {nan, inf, -inf, 2.0f * kLightPositionMax, -2.0f * kLightPositionMax}) {
+        capture::LightInputs bad = li;
+        bad.world_pos[k] = value;
+        oc.c27w = 5.0f;
+        CHECK(528, !MakeClayObjectConstants(bad, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0);
+      }
+    }
+    for (float value : {nan, inf, -inf, -0.25f, -1.0f, 2.0f * kLightValueMax}) {
+      capture::LightInputs bad = li;
+      bad.wrap = value;
+      oc.c27w = 5.0f;
+      CHECK(528, !MakeClayObjectConstants(bad, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0);
+    }
+    {
+      capture::LightInputs edge = li;
+      edge.world_pos[0] = kLightPositionMax;
+      edge.world_pos[2] = -kLightPositionMax;
+      edge.wrap = 0.0f;
+      CHECK(528, MakeClayObjectConstants(edge, &oc) && oc.rot[0][3] == kLightPositionMax && oc.rot[2][3] == -kLightPositionMax &&
+                     oc.leaf[0] == 0.0f);
+      edge.wrap = kLightValueMax;
+      CHECK(528, MakeClayObjectConstants(edge, &oc) && oc.leaf[0] == kLightValueMax);
+      static_assert(kLightPositionMax == 1048576.0f);
+    }
+    // (5e-4: a rotation with a direction, whose inverse scale, 2000, is beyond what a shader gets)
+    CHECK(528, ClassifyRotation(li.world_rot, 5.0e-4f) != RotationKind::kDegenerate);
+    for (float scale : {0.0f, nan, inf, 1.0e-6f, 5.0e-4f}) {
+      capture::LightInputs bad = li;
+      bad.world_scale = scale;
+      CHECK(528, !MakeClayObjectConstants(bad, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0);
+    }
+    for (int field = 0; field < 5; ++field) {
+      for (float value : {nan, inf, 4.0f * kLightValueMax}) {
+        capture::LightInputs bad = li;
+        float* at[] = {&bad.world_rot[0][1], &bad.vs_const[11][3], &bad.c27w, &bad.c49[1], &bad.c26[2]};
+        *at[field] = value;
+        CHECK(528, !MakeClayObjectConstants(bad, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0);
+      }
+    }
+    // The leaf family stands on the probe kind only.
+    for (LightVertexKind kind : {LightVertexKind::kNone, LightVertexKind::kTerrain, LightVertexKind::kStream, LightVertexKind::kInstance}) {
+      capture::LightInputs bad = li;
+      bad.kind = kind;
+      CHECK(528, !MakeClayObjectConstants(bad, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0 && !LightFamilyDrawn(bad));
+    }
+    CHECK(528, LightFamilyDrawn(li) && LightObjectReady(li.kind, true, false, true, false) && !LightObjectReady(li.kind, true, true, false, true));
+
+    // 529: the frame's eye (pixel c19 of the light block; vertex c9 of the leaf shaders is that value
+    // bit for bit in every leaf row compared). It is a position: usable up to kLightPositionMax. A
+    // frame whose eye is not usable is still lit; only its leaves are not (LightFrameLights).
+    capture::LightBlock block{};
+    for (int i = 0; i < 3; ++i) {
+      block.sun_dir[i] = i == 2 ? 1.0f : 0.0f;
+      block.sun_col[i] = 0.5f;
+      block.tint[i] = 1.0f;
+      block.eye[i] = 50.0f + float(i);
+    }
+    block.tint_pow = 1.3f;
+    block.valid = true;
+    static_assert(sizeof(ClayFrameConstants) == 112 && offsetof(ClayFrameConstants, eye) == 96 && offsetof(ClayFrameConstants, eye_on) == 108);
+    ClayFrameConstants frame = MakeClayFrameConstants(block, ClayLight::kOn);
+    CHECK(529, frame.light_on == 1 && frame.eye_on == 1 && frame.eye[0] == 50.0f && frame.eye[1] == 51.0f && frame.eye[2] == 52.0f);
+    for (LightFamily family : {LightFamily::kTerrainLayer, LightFamily::kTerrainFar, LightFamily::kObject, LightFamily::kTreeTrunk,
+                               LightFamily::kPlant, LightFamily::kPlantLit, LightFamily::kTreeLeaf}) {
+      CHECK(529, LightFrameLights(frame, family));
+    }
+    for (int k = 0; k < 3; ++k) {
+      for (float value : {nan, inf, -inf, 2.0f * kLightPositionMax}) {
+        capture::LightBlock far_eye = block;
+        far_eye.eye[k] = value;
+        frame = MakeClayFrameConstants(far_eye, ClayLight::kOn);
+        CHECK(529, frame.light_on == 1 && frame.eye_on == 0 && frame.eye[0] == 0.0f && frame.eye[1] == 0.0f && frame.eye[2] == 0.0f);
+        CHECK(529, !LightFrameLights(frame, LightFamily::kTreeLeaf) && LightFrameLights(frame, LightFamily::kObject) &&
+                       LightFrameLights(frame, LightFamily::kPlantLit) && LightFrameLights(frame, LightFamily::kTerrainFar));
+      }
+    }
+    {
+      capture::LightBlock edge = block;
+      edge.eye[1] = -kLightPositionMax;
+      CHECK(529, MakeClayFrameConstants(edge, ClayLight::kOn).eye_on == 1);
+      // No light, no eye: the switch off, or no block.
+      const ClayFrameConstants none{};
+      frame = MakeClayFrameConstants(block, ClayLight::kOff);
+      CHECK(529, std::memcmp(&frame, &none, sizeof(frame)) == 0 && !LightFrameLights(frame, LightFamily::kTreeLeaf) &&
+                     !LightFrameLights(frame, LightFamily::kObject));
+      capture::LightBlock invalid = block;
+      invalid.valid = false;
+      frame = MakeClayFrameConstants(invalid, ClayLight::kOn);
+      CHECK(529, std::memcmp(&frame, &none, sizeof(frame)) == 0);
+      // (the eye alone lights nothing: a block the function does not make, an eye without a lit frame)
+      ClayFrameConstants eye_only{};
+      eye_only.eye_on = 1;
+      CHECK(529, !LightFrameLights(eye_only, LightFamily::kTreeLeaf) && !LightFrameLights(eye_only, LightFamily::kObject));
+    }
+
+    // 530: the Light line counts the leaves as a family of their own.
+    ClayStats st;
+    st.light_switch = st.light_block = true;
+    st.light_drawn[size_t(LightFamily::kTerrainLayer)] = 426;
+    st.light_drawn[size_t(LightFamily::kTreeLeaf)] = 41;
+    CHECK(530, FormatLightDrawnText(st).starts_with(
+                   "Light: on, block valid, lit 467 (terrain-layer 426, terrain-far 0, object 0, tree-trunk 0, plant 0, plant-lit 0, "
+                   "tree-leaf 41), unlit 0"));
+  }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
                "alpha-to-mask, terrain keys, terrain draw state, terrain constants, terrain squares, "
                "terrain text, normal and colour keys, light text, linear target and output mapping, light functions "
                "against the reference's numbers, frame and object and terrain light constants, lit squares, Light line, light buffer sources, "
-               "probe colours and constants, constant buffer slots, plant light functions and constants and bend key\n";
+               "probe colours and constants, constant buffer slots, plant light functions and constants and bend key, "
+               "leaf light functions and constants and the frame's eye\n";
 
   return 0;
 }

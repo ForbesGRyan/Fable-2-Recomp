@@ -179,14 +179,27 @@ int main() {
   }
   // 32-37: index range validation (the renderer's kBadIndex rule).
   {
-    CHECK(32, IndexRangeValid(99, 0, 100));
-    CHECK(33, !IndexRangeValid(100, 0, 100));
-    CHECK(34, IndexRangeValid(49, 50, 100));
-    CHECK(35, !IndexRangeValid(50, 50, 100));
-    CHECK(36, !IndexRangeValid(0, -1, 100));
-    CHECK(37, IndexRangeValid(10, -10, 100));
-    CHECK(38, !IndexRangeValid(0xFFFFFFFFu, 0x7FFFFFFF, 0xFFFFFFFFu));
-    CHECK(39, !IndexRangeValid(0, 0, 0));
+    CHECK(32, IndexRangeValid(0, 99, 0, 100));
+    CHECK(33, !IndexRangeValid(0, 100, 0, 100));
+    CHECK(34, IndexRangeValid(0, 49, 50, 100));
+    CHECK(35, !IndexRangeValid(0, 50, 50, 100));
+    CHECK(36, !IndexRangeValid(0, 0, -1, 100));
+    // The low end: the shader loads every vertex of the list, so the lowest must not lie before the
+    // buffer's start. A negative base vertex is fine when every index is at least its size.
+    CHECK(37, IndexRangeValid(10, 10, -10, 100) && IndexRangeValid(10, 109, -10, 100));
+    CHECK(37, !IndexRangeValid(9, 10, -10, 100) && !IndexRangeValid(0, 10, -10, 100) && !IndexRangeValid(0, 109, -1, 100));
+    CHECK(37, !IndexRangeValid(10, 110, -10, 100));
+    CHECK(38, !IndexRangeValid(0, 0xFFFFFFFFu, 0x7FFFFFFF, 0xFFFFFFFFu));
+    CHECK(38, !IndexRangeValid(0, 5, INT32_MIN, 100) && IndexRangeValid(0x80000000u, 0x80000005u, INT32_MIN, 100));
+    CHECK(39, !IndexRangeValid(0, 0, 0, 0));
+    // A list whose smallest index is above its largest is no list.
+    CHECK(39, !IndexRangeValid(5, 4, 0, 100) && IndexRangeValid(5, 5, 0, 100));
+  }
+  // The frame without its constant buffer: every drawable record is left out, none otherwise.
+  {
+    CHECK(40, ClayRecordsWithoutConstants(921, true) == 0 && ClayRecordsWithoutConstants(921, false) == 921);
+    CHECK(40, ClayRecordsWithoutConstants(0, false) == 0 && ClayRecordsWithoutConstants(0, true) == 0);
+    CHECK(40, ClayRecordsWithoutConstants(1, false) == 1);
   }
   // 40-43, 80-82, 130-133: root constants match the HLSL cbuffer (36 dwords).
   {
@@ -607,8 +620,8 @@ int main() {
     a.material.uv_vb.size = 3200;
     CHECK(126, !(MeshPositionKey(a) == MeshPositionKey(i)) && !(MeshUvKey(a) == MeshUvKey(i)));
     // The renderer's index rule runs on the flat count: index 151 is the last.
-    CHECK(121, IndexRangeValid(151, 0, RecordVertexCount(i, nullptr)) &&
-                   !IndexRangeValid(152, 0, RecordVertexCount(i, nullptr)));
+    CHECK(121, IndexRangeValid(0, 151, 0, RecordVertexCount(i, nullptr)) &&
+                   !IndexRangeValid(0, 152, 0, RecordVertexCount(i, nullptr)));
   }
   // 142-149: an instanced draw decodes no more of its mesh stream than one
   // copy has vertices (every index maps to a vertex below count), and never
@@ -2663,7 +2676,8 @@ int main() {
     CHECK(468, LightVertexNeed(27, 0, 528) == 28 && LightVertexNeed(27, 100, 528) == 128 && LightVertexNeed(527, 0, 528) == 528 &&
                    LightVertexNeed(0, 0, 1) == 1);
     CHECK(469, LightVertexNeed(528, 0, 528) == 0 && LightVertexNeed(27, 501, 528) == 0 && LightVertexNeed(3, -4, 528) == 0 &&
-                   LightVertexNeed(3, -3, 528) == 1 && LightVertexNeed(0, 0, 0) == 0);
+                   LightVertexNeed(3, -3, 528) == 1 && LightVertexNeed(0, 0, 0) == 0 && LightVertexNeed(600, -100, 528) == 501 &&
+                   LightVertexNeed(3, -10, 528) == 0);
 
     // 470-476: the light of a ground square is all or nothing (PlanTerrain).
     auto patch_of = [](float ox, float oy, float patch, float cols, uint32_t patches) {
@@ -2709,6 +2723,18 @@ int main() {
     // A layer draw of several patches ties its squares together, in whichever order they come.
     CHECK(472, lights({item(sq_ab, kLayer, true), item(sq_a, kLayer, true), item(sq_b, kLayer, false)}) == "uuu");
     CHECK(472, lights({item(sq_b, kLayer, false), item(sq_a, kLayer, true), item(sq_ab, kLayer, true)}) == "uuu");
+    {
+      // A chain that one pass over the records in their order does not finish: X over squares a and
+      // b, Y over b and c, Z on c without light. Z darkens c; in the first pass X sees a and b still
+      // lit and Y then darkens b; only a second pass takes the light from X (and with it from a).
+      const capture::TerrainPatch sq_bc = patch_of(88, 144, 0, 6, 2), sq_c = patch_of(96, 144, 0, 6, 1);
+      CHECK(477, lights({item(sq_ab, kLayer, true), item(sq_bc, kLayer, true), item(sq_c, kLayer, false)}) == "uuu");
+      // A layer on a alone, drawn first, loses its light through the same chain.
+      CHECK(477, lights({item(sq_a, kLayer, true), item(sq_ab, kLayer, true), item(sq_bc, kLayer, true), item(sq_c, kLayer, false)}) == "uuuu");
+      // The chain does not reach a square no draw ties to it.
+      const capture::TerrainPatch sq_e = patch_of(112, 144, 0, 6, 1);
+      CHECK(477, lights({item(sq_ab, kLayer, true), item(sq_bc, kLayer, true), item(sq_c, kLayer, false), item(sq_e, kLayer, true)}) == "uuuL");
+    }
     // An underlay without light does not take the light from the layers over it, nor the reverse.
     CHECK(473, lights({item(under, kFarDraw, false), item(sq_a, kLayer, true)}) == "uL" &&
                    lights({item(under, kFarDraw, true), item(sq_a, kLayer, false)}) == "Lu");

@@ -575,7 +575,8 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
   uint8_t* slots = nullptr;
   // The frame's constant buffer: for the terrain material and for the light, and taken for every
   // frame that draws anything, so that the two registers the vertex shader declares (b1, b2) are
-  // bound at every draw, whether or not the draw reads them.
+  // bound at every draw, whether or not the draw reads them. A frame whose buffer cannot be made
+  // draws nothing (Render, ClayRecordsWithoutConstants).
   const bool wanted = !prepared_.empty();
   if (wanted) {
     // Slot 0 the frame's light, one slot per terrain record (at most that many are drawn with
@@ -838,14 +839,28 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   }
   // The frame's light at b2 for the whole frame (slot 0), and b1 on something
   // from the first draw on: only a terrain draw and a lit object read b1, and
-  // each binds its own slot.
-  if (terrain_cb_) {
+  // each binds its own slot. Without the frame's constant buffer neither can be
+  // bound, and then no record is drawn: the frame is the cleared target, mapped
+  // below as always (the native view shows the clear colour, not a stale frame).
+  const uint32_t drawable = uint32_t(std::count_if(prepared_.begin(), prepared_.end(),
+                                                    [](const Prepared& p) { return p.pipeline != nullptr; }));
+  const uint32_t left_out = ClayRecordsWithoutConstants(drawable, terrain_cb_ != nullptr);
+  if (left_out) {
+    st.skipped_no_constants = left_out;
+    st.skipped_other += left_out;
+    if (!no_constants_logged_) {
+      no_constants_logged_ = true;
+      REXLOG_ERROR("[native] clay: the frame's constant buffer could not be made: {} records not drawn "
+                   "(the clay frame is empty; logged once)", left_out);
+    }
+  } else if (terrain_cb_) {
     cmd->SetConstantBuffer(kParamTerrainConstants, terrain_cb_, 0);
     cmd->SetConstantBuffer(kParamFrameConstants, terrain_cb_, 0);
   }
 
   nrhi::Pipeline* bound = nullptr;
   for (const Prepared& p : prepared_) {
+    if (left_out) break;        // (no constant buffer: nothing is drawn)
     if (!p.pipeline) continue;  // a terrain record that is not drawn (FinishTerrain)
     const capture::DrawRecord& r = *p.r;
     if (p.pipeline != bound) {

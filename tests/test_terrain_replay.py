@@ -910,7 +910,11 @@ class CaptureTest(unittest.TestCase):
         normal map whose texel rows 1, 5, 9 and 13 are (230, 128) and whose other rows are (128, 128).
         `lit`: what the lit replay reads besides, as a dict: "block" (the frame row's "light"; absent:
         none), "lin" (the two rows' "lin"; absent: a terrain-layer one with c11.x 0.5 and 1), and for the
-        pair without the block "normal" (the byte values of every texel of its normal map tf17)."""
+        pair without the block "normal" (the byte values of every texel of its normal map tf17), and
+        "base_columns": True makes the base map tf3 two point-sampled columns, the usual colour in
+        column 0 and (16, 32, 255) in column 1. The whole square's base coordinate lies in column 0
+        (u = 0.167 to 0.187), and its detail coordinate, taken for the base map by mistake, would lie
+        in column 1 for the square's right half (u = 10.03 to 10.97, wrapped)."""
         tex = root / "native_tex_x"
         tex.mkdir()
         files = {}
@@ -922,7 +926,11 @@ class CaptureTest(unittest.TestCase):
 
         a = add("a.bin", dump_8888(2, 2, lambda x, y: (204, 102, 51, 255)), fc_for(6, 2, 2, endian=2, base=0x1A100000))
         b = add("b.bin", dump_8888(2, 2, lambda x, y: (128, 128, 255, 255)), fc_for(6, 2, 2, endian=2, base=0x1A200000))
-        base = add("base.bin", dump_8888(2, 2, lambda x, y: (128, 255, 64, 255)), fc_for(6, 2, 2, endian=2, base=0x1A300000))
+        if lit is not None and lit.get("base_columns"):
+            base = add("base.bin", dump_8888(2, 2, lambda x, y: (128, 255, 64, 255) if x == 0 else (16, 32, 255, 255)),
+                       fc_for(6, 2, 2, endian=2, linear=False, base=0x1A300000))
+        else:
+            base = add("base.bin", dump_8888(2, 2, lambda x, y: (128, 255, 64, 255)), fc_for(6, 2, 2, endian=2, base=0x1A300000))
         wgt = add("w.bin", dump_dxt3a(66, 33, cell_value), fc_for(58, 66, 33, base=0x1A400000))
         # Heightmap 4 x 4 k_16, point sampled: every texel 0.2, so the height is 0.2 * 90 = 18.
         hdata = dump_k16(4, 4, lambda x, y: 13107)
@@ -1019,11 +1027,20 @@ class CaptureTest(unittest.TestCase):
         la, lb = layer_by_hand(a2, baked, n, 0.5), layer_by_hand(b2, baked, n, 1.0)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            cap = self._capture(root, lit={"block": BLOCK})
+            # The base map has two columns here: the base coordinate of every pixel of the square is in
+            # column 0 (the colour `baked` above), the detail coordinate of column 15 would be in column 1.
+            cap = self._capture(root, lit={"block": BLOCK, "base_columns": True})
             out = root / "patch.png"
             argv = [str(cap), "--frame", "1", "--patch", "0", "--out", str(out), "--res", "16", "--no-fade", "--lit"]
             lines = tr.main(argv + ["--encode", "linear"])
             _, _, rows = png_size_and_pixels(out)
+            # (the two coordinates of the pixels compared, as the inputs give them: the test's premise)
+            last = json.loads(cap.read_text().splitlines()[-1])
+            inp = tr.layer_inputs(last["consts"], last["pconst"])
+            for column, detail_column in ((0, 0), (15, 1)):
+                wx, wy = 80 + 8 * (column + 0.5) / 16, 144 + 8 * 8.5 / 16
+                self.assertEqual(int(tr.apply_uv(inp["base_uv"], wx, wy)[0] % 1.0 * 2), 0)
+                self.assertEqual(int(tr.apply_uv(inp["detail_uv"], wx, wy)[0] % 1.0 * 2), detail_column)
             # Column 0: the second layer's weight is 8.5 / 14; column 15: 1 (the unlit test's columns).
             want = [round(255 * min(1.0, la[k] + lb[k] * 8.5 / 14)) for k in range(3)]
             self.assertEqual(list(rows[8][0:3]), want)

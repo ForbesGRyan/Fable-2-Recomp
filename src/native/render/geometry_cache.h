@@ -142,6 +142,7 @@ class GeometryCache {
     uint32_t count = 0;      // vertices or indices
     uint32_t max_index = 0;  // indices only
     uint64_t bytes = 0;      // allocation size
+    uint32_t min_index = 0;  // indices only: the smallest index of the list
   };
   // Replaced buffers, reused by Upload (animated skinned streams re-decode
   // every frame; creating a buffer costs far more than filling one).

@@ -803,7 +803,7 @@ nrhi::Buffer* GeometryCache::Indices(nrhi::Device* dev, const capture::DrawRecor
   }
   if (!entry) {
     indices_.clear();
-    uint32_t max_index = 0;
+    uint32_t max_index = 0, min_index = 0;
     // data already points at the draw's first index; non-indexed draws
     // generate start + i.
     bool built;
@@ -814,7 +814,7 @@ nrhi::Buffer* GeometryCache::Indices(nrhi::Device* dev, const capture::DrawRecor
     } else {
       const capture::IndexSource src{data, bytes.size, r.index32};
       built = capture::BuildTriangleList(src, r.indexed ? 0 : r.start, r.count, r.prim, indices_,
-                                         &max_index);
+                                         &max_index, &min_index);
     }
     nrhi::Buffer* buffer = nullptr;
     uint64_t alloc = 0;
@@ -828,13 +828,14 @@ nrhi::Buffer* GeometryCache::Indices(nrhi::Device* dev, const capture::DrawRecor
       return nullptr;
     }
     const uint32_t id =
-        Insert(dev, key, hash, {buffer, uint32_t(indices_.size()), max_index, alloc}, alloc);
+        Insert(dev, key, hash, {buffer, uint32_t(indices_.size()), max_index, alloc, min_index}, alloc);
     entry = &entries_[id];
     ++st.uploads;
     st.decode_ms += Ms(t1, Clock::now());
   }
-  // The renderer is the producer of kBadIndex for index ranges.
-  if (!IndexRangeValid(entry->max_index, r.base_vertex, vertex_count)) {
+  // The renderer is the producer of kBadIndex for index ranges: the lowest and the highest
+  // vertex of the list, since the shader loads every vertex it is given.
+  if (!IndexRangeValid(entry->min_index, entry->max_index, r.base_vertex, vertex_count)) {
     ++st.skipped_bad_index;
     return nullptr;
   }

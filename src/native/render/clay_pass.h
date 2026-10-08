@@ -248,6 +248,7 @@ class ClayPass {
   ClayFrameConstants frame_{};
   std::vector<ClayObjectConstants> object_constants_;
   uint32_t object_slot0_ = 0;
+  bool no_constants_logged_ = false;
 };
 
 }  // namespace fable2::native::render

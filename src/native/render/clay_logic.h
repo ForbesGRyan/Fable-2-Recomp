@@ -39,6 +39,9 @@ struct ClayStats {
   // Renderer-side skips other than bad indices: unreadable guest memory, a
   // failed decode or upload, or an empty triangle list.
   uint32_t skipped_other = 0;
+  // Of them: the frame's drawable records when its constant buffer could not be
+  // made (ClayRecordsWithoutConstants; then nothing of the frame is drawn).
+  uint32_t skipped_no_constants = 0;
   // Drawn records whose positions came from the instanced (flat stream) and
   // the bone-skinned builders, cache hits included. Counted with `drawn`: a
   // record whose index list fails afterwards is in neither.
@@ -546,12 +549,28 @@ inline uint32_t DrawVertexCount(uint32_t buffer_count, uint32_t record_count) {
   return std::min(buffer_count, record_count);
 }
 
-// The renderer's kBadIndex rule: the highest referenced vertex
-// (max_index + base_vertex) must lie inside the position stream. Lower
-// vertices below 0 are left to the shader's per-vertex bounds check.
-inline bool IndexRangeValid(uint32_t max_index, int32_t base_vertex, uint32_t vertex_count) {
+// The renderer's kBadIndex rule: every vertex the record's triangles name,
+// from the lowest (min_index + base_vertex) to the highest
+// (max_index + base_vertex), must lie inside the position stream. Both ends
+// are checked here, on the CPU: the vertex shader's own bounds check is a
+// select AFTER the load (the compiled shader loads positions[v] and uvs[v]
+// for every vertex), and a buffer bound by address has no bounds check, so a
+// vertex below 0 would be loaded from before the start of the buffer.
+inline bool IndexRangeValid(uint32_t min_index, uint32_t max_index, int32_t base_vertex, uint32_t vertex_count) {
+  const int64_t lo = int64_t(min_index) + base_vertex;
   const int64_t hi = int64_t(max_index) + base_vertex;
-  return hi >= 0 && hi < int64_t(vertex_count);
+  return min_index <= max_index && lo >= 0 && hi < int64_t(vertex_count);
+}
+
+// Whether the frame's records are drawn at all: the number of them left out
+// (0: the frame is drawn). Every clay shader's layout declares the constant
+// buffers b1 and b2, and both are views of the frame's constant buffer; when
+// that buffer could not be made nothing may be drawn with them unset, so the
+// whole frame's records are left out (counted as render-other, logged once).
+// The targets are still cleared and mapped: the native view shows the clear
+// colour for that frame, never a stale target.
+inline uint32_t ClayRecordsWithoutConstants(uint32_t drawable_records, bool constants) {
+  return constants ? 0u : drawable_records;
 }
 
 // A draw's render state as a pipeline of the clay pass: which pixel shader, and
@@ -1302,10 +1321,11 @@ inline bool MakeClayObjectConstants(const capture::LightInputs& l, ClayObjectCon
 // streams (material.h, MakeLightInputs: the normal stream, the colour stream from its offset and the
 // probe weights hold the draw's largest vertex), not the whole position stream: meshes share
 // streams, and a colour stream ends where its last mesh's vertices end. 0 when the indices name no
-// vertex inside the positions (IndexRangeValid; such a record is not drawn).
+// vertex inside the positions (the high end of IndexRangeValid; such a record is not drawn).
 inline uint32_t LightVertexNeed(uint32_t max_index, int32_t base_vertex, uint32_t vertex_count) {
-  if (!IndexRangeValid(max_index, base_vertex, vertex_count)) return 0;
-  return uint32_t(int64_t(max_index) + base_vertex) + 1u;
+  const int64_t hi = int64_t(max_index) + base_vertex;
+  if (hi < 0 || hi >= int64_t(vertex_count)) return 0;
+  return uint32_t(hi) + 1u;
 }
 
 // --- Terrain material (frame-map section 13, "Terrain", "Native terrain material") ---

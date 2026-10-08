@@ -52,6 +52,24 @@ int main() {
   out.clear();
   if (!BuildTriangleList({nullptr, 0, false}, 0, 5, kPrimTriangleList, out, &mx)) return 14;
   if (!Eq(out, {0, 1, 2})) return 15;
+  // The smallest index of the triangles made, beside the largest: a list, a strip with a cut (the
+  // cut value itself and an index no triangle uses do not count), generated indices, and none.
+  uint32_t mn = 99;
+  out.clear();
+  auto l16b = Be16s({7, 9, 5, 12, 6, 8});   // (the smallest as a triangle's third index and as its second)
+  if (!BuildTriangleList({l16b.data(), l16b.size(), false}, 0, 6, kPrimTriangleList, out, &mx, &mn)) return 16;
+  if (mn != 5 || mx != 12) return 17;
+  out.clear();
+  auto s16b = Be16s({4, 5, 6, 0xFFFF, 1, 2, 0xFFFF, 9, 8, 7});
+  if (!BuildTriangleList({s16b.data(), s16b.size(), false}, 0, 10, kPrimTriangleStrip, out, &mx, &mn)) return 18;
+  if (!Eq(out, {4, 5, 6, 9, 8, 7}) || mn != 4 || mx != 9) return 19;   // (1 and 2 make no triangle)
+  out.clear();
+  if (!BuildTriangleList({nullptr, 0, false}, 30, 6, kPrimTriangleList, out, &mx, &mn)) return 20;
+  if (mn != 30 || mx != 35) return 21;
+  out.clear();
+  mn = 99;
+  if (!BuildTriangleList({nullptr, 0, false}, 30, 2, kPrimTriangleList, out, &mx, &mn)) return 22;
+  if (!out.empty() || mn != 0 || mx != 0) return 23;
   std::cout << "PASS: index convert\n";
   return 0;
 }

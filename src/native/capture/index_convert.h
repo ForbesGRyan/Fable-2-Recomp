@@ -34,7 +34,8 @@ inline bool IsSupportedPrim(uint32_t prim) {
 }
 
 inline bool BuildTriangleList(const IndexSource& src, uint32_t start, uint32_t count, uint32_t prim,
-                              std::vector<uint32_t>& out, uint32_t* max_index) {
+                              std::vector<uint32_t>& out, uint32_t* max_index,
+                              uint32_t* min_index = nullptr) {
   if (!IsSupportedPrim(prim)) return false;
   const uint32_t width = src.is32 ? 4 : 2;
   if (src.data && (uint64_t(start) + count) * width > src.size) return false;
@@ -45,10 +46,11 @@ inline bool BuildTriangleList(const IndexSource& src, uint32_t start, uint32_t c
     return src.is32 ? (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3]
                     : (uint32_t(p[0]) << 8) | p[1];
   };
-  uint32_t mx = 0;
+  uint32_t mx = 0, mn = 0xFFFFFFFFu;
   auto emit = [&](uint32_t a, uint32_t b, uint32_t c) {
     out.push_back(a); out.push_back(b); out.push_back(c);
     mx = std::max(mx, std::max(a, std::max(b, c)));
+    mn = std::min(mn, std::min(a, std::min(b, c)));
   };
   if (prim == kPrimTriangleList) {
     for (uint32_t i = 0; i + 2 < count; i += 3) emit(at(i), at(i + 1), at(i + 2));
@@ -75,6 +77,8 @@ inline bool BuildTriangleList(const IndexSource& src, uint32_t start, uint32_t c
     }
   }
   if (max_index) *max_index = mx;
+  // The smallest index of the triangles made (0 when none was made, as the largest is).
+  if (min_index) *min_index = mn <= mx ? mn : 0;
   return true;
 }
 

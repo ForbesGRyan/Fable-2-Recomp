@@ -307,12 +307,12 @@ inline void RotateNormal(const float rot[3][3], const float n[3], float out[3]) 
 //   kSkewed: invertible, not orthonormal after the scale (a scale that is not
 //     uniform, a shear, a c7.w that is not the rows' reciprocal): the normal
 //     RotateNormal makes is perpendicular, the game's is not.
+//   kDegenerate: no direction comes out of it (a zero or singular matrix, a
+//     zero scale, a value that is not finite).
 // The clay pass lights with the game's own value for every kind that has a
 // direction, N = normalize(M n) with M the rows times the scale
 // (clay_logic.h, MakeClayObjectConstants; ruling of 2026-10-08), and draws a
 // kDegenerate draw without light. RotateNormal is used by no object draw.
-//   kDegenerate: no direction comes out of it (a zero or singular matrix, a
-//     zero scale, a value that is not finite).
 enum class RotationKind : uint8_t { kRotation, kMirrored, kSkewed, kDegenerate, kCount };
 
 inline const char* RotationKindName(RotationKind k) {

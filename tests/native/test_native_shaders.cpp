@@ -246,6 +246,93 @@ static std::string WithLightMode(const char* src, unsigned mode) {
   return text;
 }
 
+// The lit statements of each clay shader as ONE piece of text, from the first to the last statement
+// of the block, exactly as in fable2_native_shaders.h: the tests above find statements by their text
+// and so cannot see a statement that is added between them. A change to a lit block has to be made
+// here as well, on purpose. (Vertex shader: from the outputs' defaults to the return; the textured
+// pixel shader's lit branch; the terrain shaders' common output; the layer and the far shader from
+// the light's branch to the return.)
+static const char kPinVsLight[] = R"pin(  o.normal = (light_mode & 2) ? float3(0, 0, 0) : float3(0, 0, 1);
+  o.axis = float3(0, 0, 0);
+  o.vcolour = float3(0, 0, 0);
+  bool has_light = in_range && uint(v) < light_count;
+  [branch] if ((light_mode & 1) && has_light) {
+    // The terrain normal as the game's vertex shaders form it, not normalised (the pixel shader does).
+    float2 t = terrain_normals[v];
+    o.normal = float3(t, sqrt(abs(1.0 - dot(t, t))));
+    if (light_mode & 4) o.axis = AmbientAxis(o.normal, f_axis);
+  }
+  [branch] if ((light_mode & 2) && has_light) {
+    // The object's normal as the game's vertex shader exports it: (R n) * c7.w, not normalised.
+    float3 n = normals[v];
+    o.normal = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));
+    o.axis = AmbientAxis(o.normal, f_axis);
+    uint rgba = colours[v];
+    o.vcolour = light_pow(float3(rgba & 255, (rgba >> 8) & 255, (rgba >> 16) & 255) / 255.0, o_colour_power);
+  }
+  return o;
+})pin";
+static const char kPinTexturedLit[] = R"pin(    if (light_mode & 4) {
+      float3 N = light_normalize(normal);
+      float3 lit = LightObject(clay_linear(t.rgb), vcolour, f_tint, f_tint_pow, f_add, f_floor, AmbientT(axis, normal),
+                               dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(1.0, 1.0), o_c49) * o_c26;
+      return float4(clay_lit(lit), (alpha_mode & 0x80) ? saturate(a) : 1.0);
+    }
+)pin";
+static const char kPinTerrainOut[] = R"pin(float4 terrain_out(float3 colour, float a, float4 pos, float3 ndc) {
+  float3 n = normalize(cross(ddx(ndc), ddy(ndc)));
+  float facet = saturate(abs(dot(n, normalize(float3(0.4, 0.6, -0.7)))));
+  if ((alpha_mode & 0x8) && !alpha_passes(a, alpha_ref, alpha_mode & 7)) discard;
+  if (alpha_mode & 0x100) {
+    uint2 p = uint2(pos.xy);
+    uint index = ((p.x & 1) << 1) | (p.y & 1);
+    uint offset = (alpha_mode >> (16 + 2 * index)) & 3;
+    uint samples = (alpha_mode >> 24) & 3;
+    float mask_base = (samples == 1 || samples == 2) ? 0.5 : 1.0;
+    float per_offset = samples == 1 ? 0.125 : samples == 2 ? 0.0625 : 0.25;
+    if (!(a >= mask_base - offset * per_offset)) discard;
+  }
+  if (light_mode & 4) return float4(clay_lit(colour), (alpha_mode & 0x80) ? saturate(a) : 1.0);
+  float shade = 0.75 + 0.25 * facet;
+  return float4(saturate(colour * (shade * shade)), (alpha_mode & 0x80) ? saturate(a) : 1.0);
+}
+)pin";
+static const char kPinLayerLit[] = R"pin(  [branch] if (light_mode & 4) {
+    float3 N = light_normalize(normal);
+    float facing = FacingGate(dot(N, f_sun_dir), t_facing_scale);
+    lin = LightTerrainLayer(lin, sample_base(base_at, base_d).rgb, f_tint, f_tint_pow, f_add, f_floor,
+                            AmbientT(axis, normal), dot(N, f_sun_dir), f_sun_col, t_c11x, SunGateSingle(1.0, facing));
+  }
+  return terrain_out(lin, a, pos, ndc);
+})pin";
+static const char kPinFarLit[] = R"pin(  [branch] if (light_mode & 4) {
+    float3 N = light_normalize(normal);
+    lin = LightTerrainFar(lin, sample_base(base_at, base_d).rgb, f_tint, f_tint_pow, f_add, f_floor, dot(N, f_axis),
+                          dot(N, f_sun_dir), f_sun_col, t_c11x);
+  }
+  if (t_flags & 1) lin *= terrain_fade_in(world);
+  return terrain_out(lin, 1.0, pos, ndc);
+})pin";
+
+// `src` with the first `before` replaced by `after`; empty when `before` is not in it.
+static std::string Changed(const char* src, const char* before, const char* after) {
+  std::string text = src;
+  const size_t at = text.find(before);
+  if (at == std::string::npos) return {};
+  text.replace(at, strlen(before), after);
+  return text;
+}
+
+// 0 when the five pinned blocks are in their shaders; else the number of the first that is not.
+static int PinsMissing(const char* vs, const char* textured, const char* layer, const char* far_ps) {
+  if (!strstr(vs, kPinVsLight)) return 1;
+  if (!strstr(textured, kPinTexturedLit)) return 2;
+  if (!strstr(layer, kPinTerrainOut) || !strstr(far_ps, kPinTerrainOut)) return 3;
+  if (!strstr(layer, kPinLayerLit)) return 4;
+  if (!strstr(far_ps, kPinFarLit)) return 5;
+  return 0;
+}
+
 // 0 when every resource the compiled shader binds has a parameter of the pass's layout (kClayBindings in
 // clay_logic.h) of its kind, at its register, visible to its stage: a constant buffer a kConstants or
 // kConstantBuffer entry at its b register, a structured buffer a kBuffer entry at its t register, a
@@ -1099,6 +1186,37 @@ int main() {
       const std::string leaking_vs = Disassembly("leaking_vs", WithLightMode(leak.c_str(), 0).c_str(), "vs_5_0");
       if (leaking_vs.empty() || !ReadsBlock(leaking_vs, "cb2")) return 162;
     }
+  }
+  // 163, 164: the lit blocks are the pinned text, and a statement added to one of them, or one of
+  // them changed, is seen. The five controls are changes that every test above lets through: a lit
+  // object halved, the layer's normal negated, the lit far colour squared, the stream colour not
+  // raised to its power, the object's rows transposed.
+  {
+    if (int at = PinsMissing(kClayVs, kClayTexturedPs, kClayTerrainLayerPs, kClayTerrainFarPs)) {
+      std::cerr << "a lit block is not the pinned text: block " << at << "\n";
+      return 163;
+    }
+    const std::string halved = Changed(kClayTexturedPs, "      return float4(clay_lit(lit),", "      lit *= 0.5;\n      return float4(clay_lit(lit),");
+    const std::string negated = Changed(kClayTerrainLayerPs, "    float facing = FacingGate(", "    N = -N;\n    float facing = FacingGate(");
+    const std::string squared = Changed(kClayTerrainFarPs, "  if (t_flags & 1) lin *= terrain_fade_in(world);",
+                                        "  if (light_mode & 4) lin = lin * lin;\n  if (t_flags & 1) lin *= terrain_fade_in(world);");
+    const std::string no_power = Changed(kClayVs, " / 255.0, o_colour_power);", " / 255.0, 1.0);");
+    const std::string transposed = Changed(kClayVs, "float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));",
+                                           "o_rot0.xyz * n.x + o_rot1.xyz * n.y + o_rot2.xyz * n.z;");
+    if (halved.empty() || negated.empty() || squared.empty() || no_power.empty() || transposed.empty()) return 164;
+    // (each still compiles: it is a change a compiler would not stop)
+    if (!Compile("halved_ps", halved.c_str(), "ps_5_0") || !Compile("negated_ps", negated.c_str(), "ps_5_0") ||
+        !Compile("squared_ps", squared.c_str(), "ps_5_0") || !Compile("no_power_vs", no_power.c_str(), "vs_5_0") ||
+        !Compile("transposed_vs", transposed.c_str(), "vs_5_0")) return 164;
+    if (PinsMissing(kClayVs, halved.c_str(), kClayTerrainLayerPs, kClayTerrainFarPs) != 2 ||
+        PinsMissing(kClayVs, kClayTexturedPs, negated.c_str(), kClayTerrainFarPs) != 4 ||
+        PinsMissing(kClayVs, kClayTexturedPs, kClayTerrainLayerPs, squared.c_str()) != 5 ||
+        PinsMissing(no_power.c_str(), kClayTexturedPs, kClayTerrainLayerPs, kClayTerrainFarPs) != 1 ||
+        PinsMissing(transposed.c_str(), kClayTexturedPs, kClayTerrainLayerPs, kClayTerrainFarPs) != 1) return 164;
+    // A statement added to the terrain shaders' common output (before its lit return) is seen too.
+    const std::string out_changed = Changed(kClayTerrainFarPs, "  if (light_mode & 4) return float4(clay_lit(colour),",
+                                            "  colour *= 0.5;\n  if (light_mode & 4) return float4(clay_lit(colour),");
+    if (out_changed.empty() || PinsMissing(kClayVs, kClayTexturedPs, kClayTerrainLayerPs, out_changed.c_str()) != 3) return 164;
   }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))

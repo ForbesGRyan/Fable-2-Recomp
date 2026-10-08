@@ -830,10 +830,34 @@ int main() {
     for (Float3& o : out) o = {9, 9, 9};
     CHECK(140, ExpandInstanceNormals(mesh, 2, rows.data(), rows.size(), s, 10, out));
     CHECK(141, Near3(out[0], 0, 1, 0) && Near3(out[1], 0, h, h));                       // copy 0
-    CHECK(142, Near3(out[2], 1, 0, 0) && Near3(out[3], 1 / std::sqrt(17.0f), 0, 4 / std::sqrt(17.0f)));  // copy 1
+    {
+      // A copy that stretches x four times: the game's plant shaders put the normal through the
+      // instance's rows as they are and normalise (0x8123... instr 22 to 24, 30, 35, 36; ruling of
+      // 2026-10-08), and so does this: (1, 0, 1) / sqrt 2 becomes (4, 0, 1) / sqrt 17. It is not the
+      // inverse transpose's (1, 0, 4) / sqrt 17, which is perpendicular to the stretched surface
+      // (tangent (4, 0, -1)) and is not what the game lights with.
+      const float got[3] = {out[3].x, out[3].y, out[3].z}, stretched_tangent[3] = {4, 0, -1};
+      CHECK(142, Near3(out[2], 1, 0, 0) && Near3(out[3], 4 / std::sqrt(17.0f), 0, 1 / std::sqrt(17.0f)) && Near(Dot(got, got), 1.0f));
+      CHECK(280, std::fabs(Dot(got, stretched_tangent)) > 3.0f && !Near3(out[3], 1 / std::sqrt(17.0f), 0, 4 / std::sqrt(17.0f), 0.1f));
+    }
     CHECK(143, Near3(out[4], -1, 0, 0) && Near3(out[5], -h, 0, h));                     // copy 2
     CHECK(144, IsZero(out[6]) && IsZero(out[7]));                                        // copy 3: no direction
     CHECK(145, IsZero(out[8]) && IsZero(out[9]));                                        // copy 4: past the stream
+    {
+      // Rows that are no rotation, no scale and no mirror alone (a shear with a mirror and a
+      // stretch): the product of the rows with the normal, row by row, of unit length.
+      std::vector<uint8_t> skew(24, 0);
+      PutHalf4(&skew[0], -2, 0.5f, 0, 3); PutHalf4(&skew[8], 0, 1, 0.25f, 3); PutHalf4(&skew[16], 0.5f, 0, 4, 3);
+      capture::InstanceSet one = s;
+      one.inv_count = 1.0f;
+      one.count = 1.0f;
+      const Float3 n[1] = {{0.6f, 0.0f, 0.8f}};
+      Float3 got[1];
+      // M n = (-2 * 0.6, 0.25 * 0.8, 0.5 * 0.6 + 4 * 0.8) = (-1.2, 0.2, 3.5).
+      const float len = std::sqrt(1.2f * 1.2f + 0.2f * 0.2f + 3.5f * 3.5f);
+      CHECK(281, ExpandInstanceNormals(n, 1, skew.data(), skew.size(), one, 1, got) &&
+                     Near3(got[0], -1.2f / len, 0.2f / len, 3.5f / len, 1e-5f));
+    }
     // The flat order is that of the positions: index i is the same copy and vertex in both.
     {
       const capture::Float4 pm[2] = {{1, 0, 0, 1}, {0, 0, 1, 1}};
@@ -1112,6 +1136,491 @@ int main() {
     CHECK(279, entries == 12);
   }
 
+  // --- The probe weights (lighting-formulas.md, "Objects", probe_colour) ---
+  {
+    // Four floats at the vertex index in a stream of their own, 16 bytes a vertex, source x, y, z, w
+    // (the table's "xyzw": memory order).
+    auto weights_element = [](uint32_t size) {
+      capture::LightElement e;
+      e.vb = {0x4000, size};
+      e.stride_bytes = 16;
+      e.format = uint8_t(capture::kVertexFormat_32_32_32_32_FLOAT);
+      e.flags = uint8_t(capture::kLightElementSigned | (2u << capture::kLightElementEndianShift));
+      SetSource(e, {0, 1, 2, 3});
+      return e;
+    };
+    auto put_float = [](uint8_t* p, float f) {
+      uint32_t bits;
+      std::memcpy(&bits, &f, 4);
+      PutBe32(p, bits);
+    };
+    const capture::LightElement e = weights_element(64);
+    {
+      uint8_t comp[4] = {9, 9, 9, 9};
+      WeightsSourceComponents(comp);
+      CHECK(300, comp[0] == 0 && comp[1] == 1 && comp[2] == 2 && comp[3] == 3);
+    }
+    CHECK(301, WeightsElementSupported(e) && WeightsCount(e) == 4);
+    std::vector<uint8_t> s(64);
+    for (int i = 0; i < 16; ++i) put_float(&s[size_t(4 * i)], 0.125f * float(i) - 0.5f);  // -0.5, -0.375, ... 1.375
+    capture::Float4 w[5];
+    for (capture::Float4& x : w) x = {9, 9, 9, 9};
+    CHECK(302, DecodeWeights(s.data(), s.size(), e, 0, 4, w) == LightSecond::kNone);
+    CHECK(303, w[0].x == -0.5f && w[0].y == -0.375f && w[0].z == -0.25f && w[0].w == -0.125f && w[3].x == 1.0f &&
+                   w[3].w == 1.375f && w[4].x == 9);
+    // From a first vertex on.
+    CHECK(304, DecodeWeights(s.data(), s.size(), e, 2, 2, w) == LightSecond::kNone && w[0].x == 0.5f && w[1].w == 1.375f);
+    // Bounded by the stream: one vertex too many, a cut stream, a first vertex near 2^32 (no wrap), no stream.
+    CHECK(305, DecodeWeights(s.data(), s.size(), e, 0, 5, w) == LightSecond::kStream &&
+                   DecodeWeights(s.data(), s.size(), e, 3, 2, w) == LightSecond::kStream &&
+                   DecodeWeights(s.data(), 63, e, 0, 4, w) == LightSecond::kStream &&
+                   DecodeWeights(s.data(), 63, e, 0, 3, w) == LightSecond::kNone &&
+                   DecodeWeights(s.data(), s.size(), e, 0xFFFFFFFFu, 2, w) == LightSecond::kStream &&
+                   DecodeWeights(nullptr, s.size(), e, 0, 1, w) == LightSecond::kStream);
+    // Counts: whole elements in the stream.
+    {
+      capture::LightElement a = e;
+      a.vb.size = 63;
+      CHECK(306, WeightsCount(a) == 3);
+      a.vb.size = 15;
+      CHECK(307, WeightsCount(a) == 0);
+      a = e;
+      a.stride_bytes = 24;  // inside a wider vertex
+      a.offset_bytes = 8;
+      a.vb.size = 72;
+      CHECK(308, WeightsElementSupported(a) && WeightsCount(a) == 3 && DecodeWeights(s.data(), s.size(), a, 1, 1, w) == LightSecond::kNone &&
+                     w[0].x == 0.5f);  // bytes 32 to 47: floats 8 to 11
+    }
+    // No value that is not a number of usable size reaches a buffer: the whole decode fails.
+    for (float bad : {nan, inf, -inf, 1025.0f, -1e30f}) {
+      std::vector<uint8_t> t = s;
+      put_float(&t[36], bad);  // vertex 2, the second weight
+      CHECK(309, DecodeWeights(t.data(), t.size(), e, 0, 4, w) == LightSecond::kValue &&
+                     DecodeWeights(t.data(), t.size(), e, 0, 2, w) == LightSecond::kNone &&
+                     DecodeWeights(t.data(), t.size(), e, 3, 1, w) == LightSecond::kNone);
+    }
+    {
+      std::vector<uint8_t> t = s;
+      put_float(&t[0], kProbeWeightMax);
+      put_float(&t[4], -kProbeWeightMax);
+      put_float(&t[8], -0.0f);
+      CHECK(310, DecodeWeights(t.data(), t.size(), e, 0, 1, w) == LightSecond::kNone && w[0].x == 1024.0f && w[0].y == -1024.0f);
+    }
+    // Not the weights a reader decodes: another selector (the register order of the skinned
+    // shaders' fetch wzxy, two exchanged, three components, one twice), another format, another
+    // endian, an element past its vertex.
+    for (const std::vector<int>& other : std::vector<std::vector<int>>{{3, 2, 0, 1}, {1, 0, 2, 3}, {0, 1, 3, 2}, {3, 2, 1, 0},
+                                             {0, 1, 2}, {0, 1, 2, 2}, {}}) {
+      capture::LightElement a = e;
+      SetSource(a, other);
+      w[0].x = 7;
+      CHECK(311, !WeightsElementSupported(a) && WeightsCount(a) == 0 &&
+                     DecodeWeights(s.data(), s.size(), a, 0, 1, w) == LightSecond::kElement && w[0].x == 7);
+    }
+    {
+      capture::LightElement a = ElementHalf(64);
+      SetSource(a, {0, 1, 2, 3});
+      CHECK(312, !WeightsElementSupported(a) && DecodeWeights(s.data(), s.size(), a, 0, 1, w) == LightSecond::kElement);
+      a = ElementColour(64);
+      SetSource(a, {0, 1, 2, 3});
+      CHECK(313, !WeightsElementSupported(a));
+      for (uint32_t endian : {0u, 1u, 3u}) {
+        a = e;
+        a.flags = uint8_t(endian << capture::kLightElementEndianShift);
+        CHECK(314, !WeightsElementSupported(a));
+      }
+      a = e;
+      a.offset_bytes = 4;
+      CHECK(315, !WeightsElementSupported(a));
+      a = e;
+      a.stride_bytes = 0;
+      CHECK(316, !WeightsElementSupported(a) && WeightsCount(a) == 0);
+    }
+    CHECK(317, DecodeWeights(s.data(), s.size(), e, 0, 0, w) == LightSecond::kNone);
+  }
+
+  // --- The probe set index: the position element's source component the table names ---
+  {
+    // A 16_16_16_16_FLOAT position at byte 0 of a 12-byte vertex, the stream's endian 8in32 (swap16):
+    // the halves in memory are x, y, z and the set index, which is the fetch's source z (2).
+    capture::PosLayout pos;
+    pos.format = capture::PosFormat::kHalf4;
+    pos.stride_bytes = 12;
+    pos.swizzle = 0xAC1;  // the table's override: (y, x, w, one) of the source; the set index is in no register
+    pos.swap16 = true;
+    {
+      uint8_t comp = 9;
+      CHECK(320, ProbeSetSourceComponent(pos, &comp) && comp == 2);
+      capture::PosLayout other = pos;
+      other.swap16 = false;  // 8in16: the fourth half would be source w; not a layout seen
+      comp = 9;
+      CHECK(321, !ProbeSetSourceComponent(other, &comp) && comp == 9);
+      for (capture::PosFormat f : {capture::PosFormat::kFloat3, capture::PosFormat::kFloat4, capture::PosFormat::kShort4,
+                                   capture::PosFormat::kUnknown}) {
+        other = pos;
+        other.format = f;
+        CHECK(322, !ProbeSetSourceComponent(other, &comp) && !ProbeSetSupported(other, 2));
+      }
+    }
+    // The table's component is held against the format: only source z.
+    CHECK(323, ProbeSetSupported(pos, 2));
+    for (int comp : {-1, 0, 1, 3, 4, 127}) CHECK(324, !ProbeSetSupported(pos, comp));
+    std::vector<uint8_t> vb(6 * 12, 0);
+    const float sets[6] = {0.0f, 4.0f, 8.0f, 8.0f, 0.0f, 4.0f};
+    for (int v = 0; v < 6; ++v) PutHalf4(&vb[size_t(12 * v)], 1.5f + float(v), -2.0f, 0.25f, sets[v]);
+    uint32_t a0[7];
+    for (uint32_t& x : a0) x = 77;
+    CHECK(325, DecodeProbeSets(vb.data(), vb.size(), pos, 2, 0, 6, a0) == LightSecond::kNone);
+    CHECK(326, a0[0] == 0 && a0[1] == 4 && a0[2] == 8 && a0[3] == 8 && a0[4] == 0 && a0[5] == 4 && a0[6] == 77);
+    // Whatever the fetch's destination swizzle is (the four shaders': zxwy, wxyz, yxwz; the table's override).
+    for (uint32_t swizzle : {0x2C2u, 0x443u, 0x4C1u, 0x688u, 0xFFFu}) {
+      capture::PosLayout other = pos;
+      other.swizzle = swizzle;
+      uint32_t b[6];
+      CHECK(327, DecodeProbeSets(vb.data(), vb.size(), other, 2, 0, 6, b) == LightSecond::kNone && b[1] == 4 && b[2] == 8 && b[4] == 0);
+    }
+    // From a first vertex on; inside a wider vertex.
+    CHECK(328, DecodeProbeSets(vb.data(), vb.size(), pos, 2, 2, 3, a0) == LightSecond::kNone && a0[0] == 8 && a0[1] == 8 && a0[2] == 0);
+    {
+      capture::PosLayout wide = pos;
+      wide.stride_bytes = 24;
+      wide.offset_bytes = 12;  // vertices 1, 3, 5 of the stream above
+      CHECK(329, DecodeProbeSets(vb.data(), vb.size(), wide, 2, 0, 3, a0) == LightSecond::kNone && a0[0] == 4 && a0[1] == 8 && a0[2] == 4);
+    }
+    // Any value but exactly 0, 4 or 8 in any vertex: no sets at all (a value in between is the
+    // sign of another element, not something to round as the game's address register would).
+    {
+      const uint16_t half_nan = 0x7E00, half_inf = 0x7C00, half_tiny = 0x0001, half_minus_zero = 0x8000;
+      for (uint16_t bits : {Half(2.0f), Half(4.5f), Half(-4.0f), Half(12.0f), Half(1.0f), Half(3.5f), Half(7.75f), half_nan, half_inf,
+                            half_tiny}) {
+        std::vector<uint8_t> t = vb;
+        PutBe16(&t[3 * 12 + 6], bits);  // vertex 3
+        CHECK(330, DecodeProbeSets(t.data(), t.size(), pos, 2, 0, 6, a0) == LightSecond::kProbeSet &&
+                       DecodeProbeSets(t.data(), t.size(), pos, 2, 0, 3, a0) == LightSecond::kNone &&
+                       DecodeProbeSets(t.data(), t.size(), pos, 2, 4, 2, a0) == LightSecond::kNone);
+      }
+      std::vector<uint8_t> t = vb;
+      PutBe16(&t[6], half_minus_zero);  // -0 is 0
+      CHECK(331, DecodeProbeSets(t.data(), t.size(), pos, 2, 0, 1, a0) == LightSecond::kNone && a0[0] == 0);
+    }
+    // The other components are not the set: the position's own x, y, z here are 1.5 on, -2, 0.25.
+    CHECK(332, DecodeProbeSets(vb.data(), vb.size(), pos, 0, 0, 1, a0) == LightSecond::kElement &&
+                   DecodeProbeSets(vb.data(), vb.size(), pos, 3, 0, 1, a0) == LightSecond::kElement &&
+                   DecodeProbeSets(vb.data(), vb.size(), pos, -1, 0, 1, a0) == LightSecond::kElement);
+    // Bounded by the stream.
+    CHECK(333, DecodeProbeSets(vb.data(), vb.size(), pos, 2, 0, 7, a0) == LightSecond::kStream &&
+                   DecodeProbeSets(vb.data(), vb.size() - 5, pos, 2, 0, 6, a0) == LightSecond::kStream &&
+                   DecodeProbeSets(vb.data(), vb.size() - 4, pos, 2, 0, 6, a0) == LightSecond::kNone &&
+                   DecodeProbeSets(vb.data(), vb.size(), pos, 2, 0xFFFFFFFFu, 2, a0) == LightSecond::kStream &&
+                   DecodeProbeSets(nullptr, vb.size(), pos, 2, 0, 1, a0) == LightSecond::kStream);
+    {
+      capture::PosLayout none = pos;
+      none.stride_bytes = 0;
+      CHECK(334, DecodeProbeSets(vb.data(), vb.size(), none, 2, 0, 1, a0) == LightSecond::kElement);
+    }
+
+    // The probe buffer: the weights (float4 a vertex) from byte 0, the sets (one word a vertex) from
+    // the next multiple of 256 bytes on (a bind offset's alignment).
+    CHECK(335, ProbeSetOffset(0) == 0 && ProbeSetOffset(1) == 256 && ProbeSetOffset(16) == 256 && ProbeSetOffset(17) == 512 &&
+                   ProbeSetOffset(1000) == 16128 && ProbeBufferBytes(1) == 260 && ProbeBufferBytes(16) == 320 &&
+                   ProbeBufferBytes(1000) == 20128 && ProbeSetOffset(0xFFFFFFFFu) == 0x1000000000ull);
+    capture::LightElement e;
+    e.vb = {0x4000, 96};
+    e.stride_bytes = 16;
+    e.format = uint8_t(capture::kVertexFormat_32_32_32_32_FLOAT);
+    e.flags = uint8_t(capture::kLightElementSigned | (2u << capture::kLightElementEndianShift));
+    SetSource(e, {0, 1, 2, 3});
+    std::vector<uint8_t> ws(96);
+    for (int i = 0; i < 24; ++i) {
+      const float f = 0.25f * float(i) - 1.0f;
+      uint32_t bits;
+      std::memcpy(&bits, &f, 4);
+      PutBe32(&ws[size_t(4 * i)], bits);
+    }
+    std::vector<uint8_t> built(3, 0xEE);
+    CHECK(336, BuildProbe(ws.data(), ws.size(), e, vb.data(), vb.size(), pos, 2, 6, &built) == LightSecond::kNone &&
+                   built.size() == 256 + 24);
+    if (built.size() == 280) {
+      float f[24];
+      uint32_t words[6];
+      std::memcpy(f, built.data(), sizeof(f));
+      std::memcpy(words, built.data() + 256, sizeof(words));
+      bool same = true;
+      for (int i = 0; i < 24; ++i) same = same && f[i] == 0.25f * float(i) - 1.0f;
+      CHECK(337, same && words[0] == 0 && words[1] == 4 && words[2] == 8 && words[3] == 8 && words[4] == 0 && words[5] == 4);
+      bool padded = true;
+      for (size_t i = 96; i < 256; ++i) padded = padded && built[i] == 0;
+      CHECK(338, padded);
+    }
+    // Fewer vertices than the streams hold.
+    CHECK(339, BuildProbe(ws.data(), ws.size(), e, vb.data(), vb.size(), pos, 2, 2, &built) == LightSecond::kNone && built.size() == 264);
+    // All or nothing: one bad set, one bad weight, a stream too short, an element or a component
+    // no reader decodes, no vertex.
+    {
+      std::vector<uint8_t> t = vb;
+      PutBe16(&t[5 * 12 + 6], Half(2.0f));
+      CHECK(340, BuildProbe(ws.data(), ws.size(), e, t.data(), t.size(), pos, 2, 6, &built) == LightSecond::kProbeSet && built.empty());
+      CHECK(341, BuildProbe(ws.data(), ws.size(), e, t.data(), t.size(), pos, 2, 5, &built) == LightSecond::kNone && built.size() == 276);
+      t = ws;
+      PutBe32(&t[5 * 16 + 12], 0x7FC00000u);  // a NaN
+      CHECK(342, BuildProbe(t.data(), t.size(), e, vb.data(), vb.size(), pos, 2, 6, &built) == LightSecond::kValue && built.empty());
+      CHECK(343, BuildProbe(ws.data(), ws.size() - 1, e, vb.data(), vb.size(), pos, 2, 6, &built) == LightSecond::kStream && built.empty() &&
+                     BuildProbe(ws.data(), ws.size(), e, vb.data(), vb.size() - 5, pos, 2, 6, &built) == LightSecond::kStream &&
+                     BuildProbe(ws.data(), ws.size(), e, vb.data(), vb.size(), pos, 2, 7, &built) == LightSecond::kStream);
+      capture::LightElement a = e;
+      SetSource(a, {3, 2, 0, 1});
+      CHECK(344, BuildProbe(ws.data(), ws.size(), a, vb.data(), vb.size(), pos, 2, 6, &built) == LightSecond::kElement && built.empty() &&
+                     BuildProbe(ws.data(), ws.size(), e, vb.data(), vb.size(), pos, 3, 6, &built) == LightSecond::kElement);
+      CHECK(345, BuildProbe(ws.data(), ws.size(), e, vb.data(), vb.size(), pos, 2, 0, &built) == LightSecond::kStream && built.empty() &&
+                     BuildProbe(ws.data(), ws.size(), e, vb.data(), vb.size(), pos, 2, 6, nullptr) == LightSecond::kStream);
+    }
+    CHECK(346, std::string(LightSecondName(LightSecond::kNone)) == "none" && std::string(LightSecondName(LightSecond::kElement)) == "element" &&
+                   std::string(LightSecondName(LightSecond::kStream)) == "stream" &&
+                   std::string(LightSecondName(LightSecond::kProbeSet)) == "probe-set" &&
+                   std::string(LightSecondName(LightSecond::kValue)) == "value" &&
+                   std::string(LightSecondName(LightSecond::kUpload)) == "upload" && size_t(LightSecond::kCount) == 6);
+  }
+
+  // --- The instance colours (lighting-formulas.md, "Instanced plants") ---
+  {
+    // 8_8_8_8 at byte 24 of the 28-byte instance record, unsigned, normalised; red, green, blue are
+    // the fetch's source z, y, x (the table's "zyx"): the bytes in memory are (not fetched), R, G, B.
+    auto colour_element = [](uint32_t size) {
+      capture::LightElement e;
+      e.vb = {0x5000, size};
+      e.offset_bytes = 24;
+      e.stride_bytes = 28;
+      e.format = uint8_t(capture::kVertexFormat_8_8_8_8);
+      e.flags = uint8_t(capture::kLightElementNormalized | (2u << capture::kLightElementEndianShift));
+      SetSource(e, {2, 1, 0});
+      return e;
+    };
+    {
+      uint8_t comp[3] = {9, 9, 9};
+      InstanceColourSourceComponents(comp);
+      CHECK(350, comp[0] == 2 && comp[1] == 1 && comp[2] == 0);
+    }
+    // Three copies of 28 bytes; a draw of two vertices a copy.
+    std::vector<uint8_t> rows(3 * 28, 0);
+    const uint8_t c0[4] = {0xFE, 0x10, 0x20, 0x30}, c1[4] = {0x00, 0xFF, 0x80, 0x01}, c2[4] = {0xFE, 0x87, 0x97, 0x9D};
+    std::memcpy(&rows[24], c0, 4);
+    std::memcpy(&rows[52], c1, 4);
+    std::memcpy(&rows[80], c2, 4);
+    const capture::LightElement e = colour_element(uint32_t(rows.size()));
+    CHECK(351, InstanceColourElementSupported(e));
+    capture::InstanceSet s;
+    s.active = true;
+    s.inv_count = 0.5f;
+    s.count = 2.0f;
+    s.first = 0.0f;
+    s.bias = 0.5f;
+    for (int k = 0; k < 3; ++k) s.rows[k] = HalfRow(uint32_t(8 * k), 28);
+    s.rows_size = uint32_t(rows.size());
+    uint32_t out[9];
+    for (uint32_t& o : out) o = 0xDEADBEEFu;
+    CHECK(352, ExpandInstanceColours(rows.data(), rows.size(), e, s, 6, out));
+    // Red in the low byte, then green and blue; the fourth byte, which no fetch delivers, is not carried.
+    CHECK(353, out[0] == 0x302010u && out[1] == 0x302010u && out[2] == 0x0180FFu && out[3] == 0x0180FFu && out[4] == 0x9D9787u &&
+                   out[5] == 0x9D9787u && out[6] == 0xDEADBEEFu);
+    // A draw that names a copy past the stream has no colours: none is made up for it.
+    CHECK(354, !ExpandInstanceColours(rows.data(), rows.size(), e, s, 7, out) && !ExpandInstanceColours(rows.data(), rows.size(), e, s, 8, out));
+    {
+      uint8_t bytes[4];
+      std::memcpy(bytes, &out[4], 4);  // as a buffer of R8G8B8A8 on a little-endian host, like the colour stream's
+      CHECK(355, bytes[0] == 0x87 && bytes[1] == 0x97 && bytes[2] == 0x9D && bytes[3] == 0);
+    }
+    // The flat order is that of the positions: index i is the same copy in both.
+    {
+      for (int copy = 0; copy < 3; ++copy) {
+        PutHalf4(&rows[size_t(28 * copy)], 1, 0, 0, float(10 * copy));
+        PutHalf4(&rows[size_t(28 * copy + 8)], 0, 1, 0, 0);
+        PutHalf4(&rows[size_t(28 * copy + 16)], 0, 0, 1, 0);
+      }
+      const capture::Float4 mesh[2] = {{0, 0, 0, 1}, {1, 0, 0, 1}};
+      capture::Float4 p[8];
+      CHECK(356, capture::ExpandInstances(mesh, 2, rows.data(), rows.size(), s, 8, p) && Near(p[4].x, 20) && Near(p[5].x, 21) &&
+                     std::isnan(p[6].x) && ExpandInstanceColours(rows.data(), rows.size(), e, s, 6, out) && out[4] == 0x9D9787u);
+    }
+    // The first copy of the draw.
+    {
+      capture::InstanceSet from = s;
+      from.first = 2.0f;
+      CHECK(357, ExpandInstanceColours(rows.data(), rows.size(), e, from, 2, out) && out[0] == 0x9D9787u && out[1] == 0x9D9787u &&
+                     !ExpandInstanceColours(rows.data(), rows.size(), e, from, 3, out));
+    }
+    // Bounded by the stream: a copy whose colour lies past it (its rows may still be there) has
+    // none, and the draw that names it no colours.
+    CHECK(358, !ExpandInstanceColours(rows.data(), rows.size() - 1, e, s, 6, out) &&
+                   ExpandInstanceColours(rows.data(), rows.size() - 1, e, s, 4, out) && out[2] == 0x0180FFu && out[3] == 0x0180FFu);
+    // An index the constants map to no copy (garbage constants: every index) has no position
+    // either: its colour is zero, nothing is read.
+    {
+      capture::InstanceSet bad = s;
+      bad.inv_count = nan;
+      out[0] = out[3] = 5;
+      CHECK(359, ExpandInstanceColours(rows.data(), rows.size(), e, bad, 4, out) && out[0] == 0 && out[3] == 0);
+    }
+    CHECK(360, !ExpandInstanceColours(nullptr, rows.size(), e, s, 4, out) && !ExpandInstanceColours(rows.data(), rows.size(), e, s, 0, out) &&
+                   !ExpandInstanceColours(rows.data(), rows.size(), e, s, 4, nullptr));
+    // Not an instance colour a reader decodes: another selector (the colour stream's four
+    // components, memory order, red and blue exchanged, one twice), another format, signed, integers.
+    for (const std::vector<int>& other : std::vector<std::vector<int>>{{2, 1, 0, 3}, {0, 1, 2}, {1, 2, 3}, {2, 0, 1}, {2, 1, 1},
+                                             {2, 1}, {}}) {
+      capture::LightElement a = e;
+      SetSource(a, other);
+      out[0] = 7;
+      CHECK(361, !InstanceColourElementSupported(a) && !ExpandInstanceColours(rows.data(), rows.size(), a, s, 4, out) && out[0] == 7);
+    }
+    {
+      // (elements a reader does read, with the instance colour's selector: only the format differs)
+      capture::LightElement a = Element10(20);
+      SetSource(a, {2, 1, 0});
+      CHECK(362, ElementReadable(a) && !InstanceColourElementSupported(a));
+      a = ElementHalf(24);
+      SetSource(a, {2, 1, 0});
+      CHECK(368, ElementReadable(a) && !InstanceColourElementSupported(a));
+      a = e;
+      a.flags = uint8_t(e.flags | capture::kLightElementSigned);
+      CHECK(363, !InstanceColourElementSupported(a));
+      a = e;
+      a.flags = uint8_t(e.flags & ~capture::kLightElementNormalized);
+      CHECK(364, !InstanceColourElementSupported(a));
+      a = e;
+      a.offset_bytes = 26;  // past its 28-byte record
+      CHECK(365, !InstanceColourElementSupported(a));
+      for (uint32_t endian : {0u, 1u, 3u}) {
+        a = e;
+        a.flags = uint8_t(capture::kLightElementNormalized | (endian << capture::kLightElementEndianShift));
+        CHECK(366, !InstanceColourElementSupported(a));
+      }
+      // The colour stream's reader does not take an instance colour, nor this one a stream colour.
+      CHECK(367, !ColourElementSupported(e) && !InstanceColourElementSupported(ElementColour(4)));
+    }
+  }
+
+  // --- The committed table on the weights, the set index and the instance colour of real draws ---
+  // Bytes of dumped streams of the bridge capture of plan Task 7's runs
+  // (native_discovery_20261008_055155.jsonl, frame 1; run 314, made with the user present: RUN
+  // UNCHECKED), as out/native-evidence/lighting/task5b/probe_instance_survey.py --bytes prints them
+  // (probe_instance_survey_055155.txt): per element the stream's file, the vertex or copy and the
+  // byte. Each goes through the table's entry of its vertex shader and the fetch of its row, as the
+  // capture makes the element, and through the reader that holds the selector against the format:
+  // an entry of any of these shaders that named other components would fail here.
+  {
+    struct RealProbe {
+      RealElement weights;
+      uint32_t pos_stride;   // the row's "pos": 16_16_16_16_FLOAT at byte 0, endian 8in32
+      uint8_t pos_bytes[8];  // the position element of the same vertex
+      uint32_t set;
+    };
+    const RealProbe probes[] = {
+        // 0x475E... (ps 0x00E0...), weights fetched xyzw: 1C256480_00006B60.bin, vertex 3, byte 48;
+        // position 1C247280_0000F198.bin, byte 108.
+        {{0x475EC9F795E5EDBBull, true, 5, 38, 0, 4, 0x688, true, false, 4,
+          {0x3E, 0xCE, 0x36, 0x66, 0x3F, 0x08, 0xDF, 0xAF, 0x3F, 0x2A, 0x77, 0x47, 0x3E, 0xD8, 0xD8, 0x2C},
+          {0.402758777f, 0.534663141f, 0.665882528f, 0.423524261f}},
+         36, {0xC4, 0x18, 0xC3, 0x89, 0x46, 0xDD, 0x44, 0x00}, 4},
+        // 0x79EA... (ps 0x2FD2...), xyzw: 1BE87880_00000640.bin, vertex 3, byte 48; position
+        // 1BE87040_000007D0.bin, byte 60.
+        {{0x79EAC49585797037ull, true, 4, 38, 0, 4, 0x688, true, false, 4,
+          {0xBF, 0x73, 0x86, 0xF2, 0xBE, 0xCD, 0x25, 0x32, 0xBE, 0x7F, 0x8D, 0x78, 0xB2, 0x20, 0x7C, 0x54},
+          {-0.951277852f, -0.400674403f, -0.249563098f, -9.34149469e-09f}},
+         20, {0x01, 0x6A, 0x89, 0xCC, 0x24, 0xB2, 0x00, 0x00}, 0},
+        // 0xA1F7... (ps 0x8D90...), wzxy: 1BFD9040_00000F00.bin, vertex 3, byte 48; position
+        // 1C118900_00001A40.bin, byte 84.
+        {{0xA1F7E9885EC466DFull, true, 5, 38, 0, 4, 0x213, true, false, 4,
+          {0x3D, 0xC6, 0x67, 0x21, 0x3E, 0x13, 0x3E, 0x26, 0x3F, 0x1C, 0x31, 0x4F, 0xBC, 0x68, 0xD3, 0x2D},
+          {0.0968763903f, 0.143791765f, 0.610127389f, -0.0142105045f}},
+         28, {0xA7, 0x97, 0x38, 0x9B, 0x3B, 0xD6, 0x44, 0x00}, 4},
+        // 0xD4D5... (ps 0x8D90...), wzxy: 1AAC9300_0000D130.bin, vertex 3, byte 48; position
+        // 1A951940_00016E14.bin, byte 84.
+        {{0xD4D558DA6A82BDC8ull, true, 6, 38, 0, 4, 0x213, true, false, 4,
+          {0x3F, 0x5D, 0x86, 0x5A, 0x3E, 0x44, 0x5E, 0xE7, 0xBE, 0x01, 0x7C, 0x87, 0x3F, 0x0B, 0x07, 0x3D},
+          {0.865331292f, 0.191768274f, -0.126451597f, 0.543079197f}},
+         28, {0xC0, 0x61, 0xB3, 0x02, 0x3B, 0x2D, 0x00, 0x00}, 0},
+    };
+    for (const RealProbe& p : probes) {
+      capture::LightElement e;
+      capture::Float4 w = {9, 9, 9, 9};
+      const bool made = RealElementOf(p.weights, &e);
+      CHECK(370, made && WeightsElementSupported(e));
+      CHECK(371, made && DecodeWeights(p.weights.bytes, 16, e, 0, 1, &w) == LightSecond::kNone && w.x == p.weights.want[0] &&
+                     w.y == p.weights.want[1] && w.z == p.weights.want[2] && w.w == p.weights.want[3]);
+      // The set index through the entry's a0 component and the row's position layout.
+      const capture::VsLightSpec* vs = VsLight(p.weights.vs);
+      capture::PosLayout pos;
+      pos.format = capture::PosFormatFromXenos(32);
+      pos.stride_bytes = p.pos_stride;
+      pos.swizzle = 0xAC1;
+      CHECK(372, vs && capture::ApplyFetchEndian(&pos, 2) && ProbeSetSupported(pos, vs->a0_comp));
+      uint32_t set = 77;
+      CHECK(373, vs && DecodeProbeSets(p.pos_bytes, 8, pos, vs->a0_comp, 0, 1, &set) == LightSecond::kNone && set == p.set);
+    }
+    // What the skinned shaders' fetch leaves in its register (wzxy) is not the weights' order: taken
+    // so, the element is refused.
+    {
+      capture::LightElement e;
+      CHECK(374, RealElementOf(probes[3].weights, &e));
+      SetSource(e, {3, 2, 0, 1});
+      capture::Float4 w;
+      CHECK(375, !WeightsElementSupported(e) && DecodeWeights(probes[3].weights.bytes, 16, e, 0, 1, &w) == LightSecond::kElement);
+    }
+
+    // The instance colour of every plant vertex shader (fetch 3 of each row: 8_8_8_8 at dword 6 of
+    // the 7-dword record, unsigned, normalised; fetched zyx_ or _zyx).
+    const RealElement colours[] = {
+        // 0x33C0... (ps 0x165E...), zyx_: 1BCA9C40_000000FC.bin, copy 4, byte 136.
+        {0x33C00226C154C1F2ull, true, 3, 6, 6, 7, 0xE0A, false, true, 3, {0xFE, 0x72, 0x7E, 0x7F}, {0x72, 0x7E, 0x7F}},
+        // 0x36B5... (ps 0x165E...), zyx_: 1BE06640_000000C4.bin, copy 0, byte 24.
+        {0x36B543CECAE5C781ull, true, 3, 6, 6, 7, 0xE0A, false, true, 3, {0xFE, 0x89, 0x98, 0x9F}, {0x89, 0x98, 0x9F}},
+        // 0x48D3... (ps 0x2605...), _zyx: 1BDE7E80_000002D8.bin, copy 0, byte 24.
+        {0x48D30ECCF684F488ull, true, 3, 6, 6, 7, 0x057, false, true, 3, {0xFE, 0x87, 0x97, 0x9D}, {0x87, 0x97, 0x9D}},
+        // 0x6AD4... (ps 0x165E...), _zyx: 1BE06640_000000C4.bin, copy 5, byte 164.
+        {0x6AD4108C3FF07966ull, true, 3, 6, 6, 7, 0x057, false, true, 3, {0xFE, 0x87, 0x97, 0xAA}, {0x87, 0x97, 0xAA}},
+        // 0x8123... (ps 0xA7E4...), zyx_: 1BD684C0_0000127C.bin, copy 153, byte 4308.
+        {0x8123C16DBF583F92ull, true, 3, 6, 6, 7, 0xE0A, false, true, 3, {0xFE, 0x78, 0x84, 0x96}, {0x78, 0x84, 0x96}},
+        // 0xB636... (ps 0x165E...), zyx_: 1BCA9D80_0000008C.bin, copy 4, byte 136.
+        {0xB636821F95DC9D8Eull, true, 3, 6, 6, 7, 0xE0A, false, true, 3, {0xFE, 0x86, 0x94, 0xA5}, {0x86, 0x94, 0xA5}},
+        // 0xFC4F... (ps 0xA7E4...), _zyx: 1BD211C0_000012B4.bin, copy 0, byte 24.
+        {0xFC4F2EF6930768BEull, true, 3, 6, 6, 7, 0x057, false, true, 3, {0xFE, 0x68, 0x71, 0x6C}, {0x68, 0x71, 0x6C}},
+    };
+    capture::InstanceSet one;
+    one.active = true;
+    one.inv_count = 1.0f;
+    one.count = 1.0f;
+    one.bias = 0.5f;
+    for (const RealElement& r : colours) {
+      capture::LightElement e;
+      const bool made = RealElementOf(r, &e);
+      CHECK(376, made && InstanceColourElementSupported(e) && e.offset_bytes == 24 && e.stride_bytes == 28);
+      uint8_t record[28] = {};
+      std::memcpy(record + 24, r.bytes, 4);
+      uint32_t packed = 7;
+      CHECK(377, made && ExpandInstanceColours(record, sizeof(record), e, one, 1, &packed) &&
+                     packed == (uint32_t(r.want[0]) | (uint32_t(r.want[1]) << 8) | (uint32_t(r.want[2]) << 16)));
+    }
+    // Every committed entry of a kind: the weights' selector is WeightsSourceComponents, an
+    // instance colour's InstanceColourSourceComponents, the set's component the one this file
+    // knows for the position's format.
+    int probe_entries = 0, instance_entries = 0;
+    for (const capture::VsLightSpec& v : kVsLight) {
+      if (v.kind == capture::LightVertexKind::kProbe) {
+        ++probe_entries;
+        uint8_t comp[4];
+        WeightsSourceComponents(comp);
+        CHECK(378, v.second.format == capture::kVertexFormat_32_32_32_32_FLOAT && (v.second.source >> 8) == 4 &&
+                       (v.second.source & 0xFF) == (comp[0] | (comp[1] << 2) | (comp[2] << 4) | (comp[3] << 6)) && v.a0_comp == 2);
+      } else if (v.kind == capture::LightVertexKind::kInstance) {
+        ++instance_entries;
+        uint8_t comp[3];
+        InstanceColourSourceComponents(comp);
+        CHECK(379, v.second.format == capture::kVertexFormat_8_8_8_8 && (v.second.source >> 8) == 3 &&
+                       (v.second.source & 0xFF) == (comp[0] | (comp[1] << 2) | (comp[2] << 4)) && v.a0_comp == -1);
+      }
+    }
+    CHECK(380, probe_entries == 4 && instance_entries == 7);
+  }
+
   // --- Real streams (else SKIPPED, loudly) --- FABLE2_NORMALS_BIN: one or more bundles written by
   // out/native-evidence/lighting/task5a/normal_survey.py --export from a discovery capture, separated
   // by ';'. Each is one mesh draw: its position layout, its normal element, its streams (for a
@@ -1150,6 +1659,7 @@ int main() {
   }
 
   if (g_fail) return g_fail;
-  std::cout << "PASS: normal decode, normal transform, skinned and instanced normals, colour stream\n";
+  std::cout << "PASS: normal decode, normal transform, skinned and instanced normals, colour stream, probe weights and sets, "
+               "instance colours\n";
   return 0;
 }

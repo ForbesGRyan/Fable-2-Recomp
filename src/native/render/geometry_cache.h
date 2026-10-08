@@ -4,8 +4,9 @@
 // float2 UVs and uint32 triangle-list indices in persistently mapped upload-heap buffers,
 // read by the vertex shader as StructuredBuffers (the RHI has 16-bit index
 // buffers only and no buffer-to-buffer copy). For the light also float3
-// normals and uint32 vertex colours (normal_decode.h), which no shader reads
-// yet. Keyed by GeometryCacheIndex (guest range + layout + content hash) with
+// normals and uint32 vertex colours (normal_decode.h), and, read by no shader
+// yet, the probe weights with their set indices and the instances' colours.
+// Keyed by GeometryCacheIndex (guest range + layout + content hash) with
 // an LRU byte budget that counts every buffer.
 // GPU (command-processor) thread only.
 
@@ -99,6 +100,34 @@ class GeometryCache {
   // the stream's size, and a draw whose offset leads outside it has no colours.
   nrhi::Buffer* Colours(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light,
                         uint32_t need, ClayStats& st, uint32_t* count);
+  // The probe buffer of a record whose vertex kind is probe
+  // (LightVertexKind::kProbe), one entry per vertex its weights stream and its
+  // position stream both hold: the four weights of the vertex (float4, from
+  // byte 0) and its set index a0 (one uint32: 0, 4 or 8; from
+  // ProbeSetOffset(count) on), as BuildProbe lays them out (normal_decode.h;
+  // key ProbeKey, content hash of the two streams). Mesh-intrinsic: the probe
+  // constants c28..c39 are the draw's (light.vs_const) and are not in it, and
+  // a skinned mesh's entry does not depend on its palette. All or nothing:
+  // nullptr, with the cause in `why`, when the weights' selector or the set's
+  // component is not the one its format has (element), a stream is unreadable
+  // or holds fewer than `need` vertices (stream), a vertex's set index is not
+  // 0, 4 or 8 (probe-set), a weight is not a number of usable size (value), or
+  // the upload fails. `need` and `count` as Normals'. Reads are bounded by the
+  // streams' sizes. No shader reads it yet.
+  nrhi::Buffer* Probe(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light, uint32_t need,
+                      ClayStats& st, LightSecond* why, uint32_t* count);
+  // uint32 colours of an instanced record (LightVertexKind::kInstance), one per
+  // flat position: the colour of the position's copy, the 8_8_8_8 element of
+  // the instance stream, red, green and blue in bytes 0 to 2 as stored, byte 3
+  // zero (ExpandInstanceColours; key InstanceColourKey: the element and the
+  // instance set as the flat normals have it; content hash of the element's
+  // stream). nullptr, with the cause in `why`, when the element's selector is
+  // not an instance colour's (element), the stream is unreadable, the record
+  // has fewer flat positions than `need`, or a copy the draw names has its
+  // colour past the stream (stream), or the upload fails. Reads are bounded by
+  // the stream's size. No shader reads it yet.
+  nrhi::Buffer* InstanceColours(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light,
+                                uint32_t need, ClayStats& st, LightSecond* why, uint32_t* count);
 
   void BeginFrame(uint64_t frame, uint64_t budget_bytes);
   // DestroyDeferred all (dev may be nullptr: forget the buffers without
@@ -172,7 +201,8 @@ class GeometryCache {
   std::vector<capture::Float2> mesh_uvs_;
   std::vector<Float3> normals_;       // a record's normals being built
   std::vector<Float3> mesh_normals_;  // an instanced record's mesh normals (one copy's vertices)
-  std::vector<uint32_t> colours_;
+  std::vector<uint32_t> colours_;     // a record's colours (a colour stream's, an instance set's) being built
+  std::vector<uint8_t> probe_;        // a mesh's probe buffer being built (BuildProbe)
   std::vector<uint32_t> indices_;
   std::vector<uint32_t> evicted_;
 };

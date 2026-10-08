@@ -76,18 +76,24 @@ struct ClayStats {
   // The light inputs of the prepared records (frame_scene.h, LightOf) as the
   // geometry cache built them (a terrain record is counted when it is drawn
   // with its material: after the plan, FinishTerrain). lit: prepared
-  // records with light inputs. light_ready: those whose normals, and for the
-  // family with a colour stream its colours, were built. light_missing: the
+  // records with light inputs. light_ready: those whose normals and the
+  // second buffer of their vertex kind were built (a colour stream: its
+  // colours; probe: the weights and set indices; instance: the copies'
+  // colours; terrain has none). light_missing: the
   // others by reason (index: capture::LightReason; normal-unsupported: a normal
   // element no reader decodes; light-unknown: a stream that could not be read
-  // or holds too few elements, a failed upload), and by vertex shader
-  // (light_missing_by_vs; the kind is the reason). light_rotation: the world
+  // or holds too few elements, a second buffer that was refused, a failed
+  // upload), and by vertex shader
+  // (light_missing_by_vs; the kind is the reason). light_second: of the
+  // light-unknown ones, the records whose probe or instance colour buffer was
+  // refused, by cause (index: LightSecond, normal_decode.h). light_rotation: the world
   // rotation of the object and trunk records among the ready ones, by
   // RotationKind (normal_decode.h), and those that are not a rotation by
   // vertex shader (light_rotation_by_vs; the kind is the RotationKind).
   uint32_t lit = 0, light_ready = 0;
   uint32_t light_missing[size_t(capture::LightReason::kCount)] = {};
   capture::ShaderTally<32> light_missing_by_vs;
+  uint32_t light_second[size_t(LightSecond::kCount)] = {};
   uint32_t light_rotation[size_t(RotationKind::kCount)] = {};
   capture::ShaderTally<32> light_rotation_by_vs;
   // The light as drawn ("Native light" below; the Light line). light_switch:
@@ -350,6 +356,45 @@ inline GeoKey ColourKey(const capture::LightInputs& l, uint32_t count) {
   k.stride = e.stride_bytes;
   k.extra = HashCombine32({e.offset_bytes, e.format, e.source, e.source_count, l.colour_first, count});
   k.kind = 11;
+  return k;
+}
+
+// Cache key of a mesh's probe buffer (kind 12: the four weights and the set
+// index of every vertex, BuildProbe): the weights' stream with where the
+// element lies and the source components the reader takes, and the position
+// stream with what places the set index in a vertex (the element's offset,
+// stride and format, the pair swap, the component: DecodeProbeSets reads
+// nothing else of the layout, not the fetch's destination swizzle). Nothing of
+// the draw: the probe constants c28..c39 are the draw's and in no buffer, and
+// the weights are the bind mesh's, so a skinned mesh has one entry whatever
+// its palette holds. The content hash is the two streams'.
+inline GeoKey ProbeKey(const capture::DrawRecord& r, const capture::LightInputs& l) {
+  const capture::LightElement& e = l.second;
+  GeoKey k;
+  k.addr = e.vb.phys_addr;
+  k.size = e.vb.size;
+  k.stride = e.stride_bytes;
+  k.extra = HashCombine32({e.offset_bytes, e.format, e.source, e.source_count, r.vb.phys_addr, r.vb.size,
+                           r.pos.offset_bytes, r.pos.stride_bytes, uint32_t(r.pos.format), uint32_t(r.pos.swap16),
+                           uint32_t(int32_t(l.a0_comp))});
+  k.kind = 12;
+  return k;
+}
+
+// Cache key of an instanced draw's flat colours (kind 13: the colour of each
+// flat position's copy, ExpandInstanceColours): the instance stream's colour
+// element and the source components the reader takes, and the instance set as
+// the flat normals have it (InstanceNormalHash: an entry of each per instance
+// set; the offset moves positions only). Nothing of the mesh. The content hash
+// is the element's stream's.
+inline GeoKey InstanceColourKey(const capture::DrawRecord& r, const capture::LightInputs& l) {
+  const capture::LightElement& e = l.second;
+  GeoKey k;
+  k.addr = e.vb.phys_addr;
+  k.size = e.vb.size;
+  k.stride = e.stride_bytes;
+  k.extra = HashCombine32({e.offset_bytes, e.format, e.source, e.source_count, InstanceNormalHash(r.instances)});
+  k.kind = 13;
   return k;
 }
 
@@ -818,6 +863,17 @@ static_assert(ClayRootWords() == 54 && ClayRootWords() <= 64);
 // draw lies inside it.
 inline constexpr uint32_t kClayLightElementBytesMax = 12, kClayPositionElementBytes = 16;
 static_assert(kClayLightElementBytesMax <= kClayPositionElementBytes);
+// The buffers the geometry cache holds for the vertex kinds no shader reads
+// yet keep to that: an instance's colours are one uint a flat position (like
+// the stream colours at t10), and the probe buffer is two regions, float4
+// weights and one uint set index a vertex (normal_decode.h, BuildProbe), so
+// that neither is read with an element larger than a position's. No draw binds
+// them yet (they are built and resident only): the shader that reads them and
+// the register its weights need come together, in kClayBindings and
+// LightBufferSources, with the tests that hold the compiled shaders to both.
+inline constexpr uint32_t kProbeWeightElementBytes = 16, kProbeSetElementBytes = 4, kInstanceColourElementBytes = 4;
+static_assert(kProbeWeightElementBytes <= kClayPositionElementBytes && kProbeSetElementBytes <= kClayPositionElementBytes &&
+              kInstanceColourElementBytes <= kClayPositionElementBytes);
 
 // ClayConstants::light_mode. kLightModeTerrainNormals: the vertex shader forms
 // the game's terrain normal from the draw's buffer at t8 (float2 per grid
@@ -1135,6 +1191,8 @@ inline float ClayLit(float v) {
 // below 2, and a product of five such bounds is still a number in single precision.
 inline constexpr float kLightValueMax = 1024.0f;
 inline bool LightValueUsable(float v) { return std::fabs(v) <= kLightValueMax; }  // (false for a NaN and for infinity)
+// A probe buffer's weights are bounded alike where they are decoded (normal_decode.h, DecodeWeights).
+static_assert(kProbeWeightMax == kLightValueMax);
 
 // The frame's light for the shaders (cbuffer Frame, register b2; shaders::kClayFrameFields is its
 // layout). One per Render, in slot 0 of the frame's constant buffer.
@@ -1742,10 +1800,12 @@ inline std::string FormatTerrainText(const ClayStats& st, const TextureStats& ts
 }
 
 // The log's light line: the prepared records with light inputs and those whose
-// normals (and colours) the geometry cache built, the world rotations of the
+// normals and second buffer (colours, probe weights and sets, instance
+// colours) the geometry cache built, the world rotations of the
 // objects and trunks among them by kind, and, when there are any, the rotations
-// that are not one by vertex shader and the records without their buffers by
-// reason and vertex shader (top eight each).
+// that are not one by vertex shader, the records without their buffers by
+// reason and vertex shader (top eight each), and the causes for which a probe
+// or instance colour buffer was refused.
 inline std::string FormatLightText(const ClayStats& st) {
   constexpr size_t kTop = 8;
   std::string text = "Light inputs: ready " + std::to_string(st.light_ready) + " of " + std::to_string(st.lit) +
@@ -1773,6 +1833,13 @@ inline std::string FormatLightText(const ClayStats& st) {
     if (!st.light_missing[i]) continue;
     text += std::string(" | ") + capture::LightReasonName(capture::LightReason(i)) + " " +
             std::to_string(st.light_missing[i]) + " by vs {" + by_vs(st.light_missing_by_vs, uint8_t(i)) + "}";
+  }
+  bool refused = false;
+  for (size_t i = 1; i < size_t(LightSecond::kCount); ++i) {
+    if (!st.light_second[i]) continue;
+    text += std::string(refused ? ", " : " | probe or instance buffer refused: ") + LightSecondName(LightSecond(i)) + " " +
+            std::to_string(st.light_second[i]);
+    refused = true;
   }
   return text;
 }

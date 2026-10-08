@@ -1928,6 +1928,140 @@ int main() {
     a.colour_power = 2.2f;
     a.c26[0] = 0.5f;
     CHECK(373, ColourKey(a, 80) == ck);
+
+    // The probe buffer (the four weights and the set index of every vertex of a mesh): the weights'
+    // stream and element, and the position stream and what places the set index in a vertex.
+    capture::LightInputs pl = l;
+    pl.family = capture::LightFamily::kTreeTrunk;
+    pl.kind = capture::LightVertexKind::kProbe;
+    pl.a0_comp = 2;
+    pl.second.vb = {0xB000, 1280};
+    pl.second.offset_bytes = 0;
+    pl.second.stride_bytes = 16;
+    pl.second.source = 0xE4;  // source x, y, z, w
+    pl.second.source_count = 4;
+    pl.second.format = uint8_t(capture::kVertexFormat_32_32_32_32_FLOAT);
+    pl.second.flags = 9;
+    const GeoKey pk = ProbeKey(r, pl);
+    CHECK(335, pk.kind == 12 && pk.addr == 0xB000 && pk.size == 1280 && pk.stride == 16 && !(pk == k) && !(pk == ck) &&
+                   !(pk == PositionKey(r, nullptr)));
+    for (int field = 0; field < 13; ++field) {
+      capture::LightInputs b = pl;
+      capture::DrawRecord q = r;
+      switch (field) {
+        case 0: b.second.vb.phys_addr = 0xC000; break;
+        case 1: b.second.vb.size = 1296; break;
+        case 2: b.second.stride_bytes = 20; break;
+        case 3: b.second.offset_bytes = 4; break;
+        case 4: b.second.source = 0x4B; break;  // the register order of the skinned shaders' fetch
+        case 5: b.second.source_count = 3; break;
+        case 6: b.second.format = uint8_t(capture::kVertexFormat_16_16_16_16_FLOAT); break;
+        case 7: b.a0_comp = 3; break;
+        case 8: q.vb.phys_addr = 0x2800; break;
+        case 9: q.vb.size += 20; break;
+        case 10: q.pos.stride_bytes += 4; break;
+        case 11: q.pos.offset_bytes += 4; break;
+        default: q.pos.swap16 = !q.pos.swap16; break;
+      }
+      CHECK(336, !(ProbeKey(q, b) == pk));
+    }
+    {
+      capture::DrawRecord q = r;
+      q.pos.format = q.pos.format == capture::PosFormat::kHalf4 ? capture::PosFormat::kShort4 : capture::PosFormat::kHalf4;
+      CHECK(337, !(ProbeKey(q, pl) == pk));
+    }
+    // Nothing else of the draw: not the probe constants (the draw's), the rotation, the normal, the
+    // pixel constants, where the fetch puts the position in its register; and not the bones: the
+    // weights are the bind mesh's, one entry whatever the palette holds.
+    {
+      capture::LightInputs b = pl;
+      capture::DrawRecord q = r;
+      b.vs_const[0][0] = 0.25f;
+      b.vs_const[11][3] = -3.0f;
+      b.world_rot[1][1] = 0.5f;
+      b.world_scale = 1.5f;
+      b.c27w = 0.5f;
+      b.c49[2] = 2.0f;
+      b.multi = true;
+      b.family = capture::LightFamily::kObject;
+      b.normal.vb.phys_addr = 0x7000;
+      b.normal.offset_bytes = 12;
+      b.second.flags = 8;
+      q.pos.swizzle = 0x443;
+      q.rows[5] = 3.0f;
+      q.seq = 12;
+      q.start = 9;
+      q.count = 33;
+      q.vs_hash = 0x1111;
+      q.material.ps_hash = 0x2222;
+      q.skin.active = true;
+      q.skin.palette_addr = 0x3000;
+      q.skin.palette_size = 168;
+      q.skin.bone_stride = 24;
+      CHECK(338, ProbeKey(q, b) == pk);
+    }
+
+    // An instanced draw's flat colours: the instance stream's colour element and the instance set
+    // as the flat normals have it (not the offset, which moves positions only).
+    capture::LightInputs il = l;
+    il.family = capture::LightFamily::kPlant;
+    il.kind = capture::LightVertexKind::kInstance;
+    il.second.vb = {0x5000, 280};
+    il.second.offset_bytes = 24;
+    il.second.stride_bytes = 28;
+    il.second.source = 0x06;  // source z, y, x
+    il.second.source_count = 3;
+    il.second.format = uint8_t(capture::kVertexFormat_8_8_8_8);
+    il.second.flags = 10;
+    const GeoKey ick = InstanceColourKey(i, il);
+    CHECK(339, ick.kind == 13 && ick.addr == 0x5000 && ick.size == 280 && ick.stride == 28 && !(ick == ik) && !(ick == pk) &&
+                   !(ick == PositionKey(i, nullptr)) && !(ick == UvKey(i)) && !(ick == ColourKey(il, 40)));
+    i2 = i;
+    i2.instances.offset[2] = -9.0f;
+    CHECK(342, InstanceColourKey(i2, il) == ick && !(PositionKey(i2, nullptr) == PositionKey(i, nullptr)));
+    for (int field = 0; field < 8; ++field) {
+      i2 = i;
+      switch (field) {
+        case 0: i2.instances.rows_addr = 0x6000; break;
+        case 1: i2.instances.rows_size = 308; break;
+        case 2: i2.instances.rows[1].offset_bytes = 8; break;
+        case 3: i2.instances.inv_count = 0.2f; break;
+        case 4: i2.instances.count = 5.0f; break;
+        case 5: i2.instances.first = 2.0f; break;
+        case 6: i2.instances.bias = 0.25f; break;
+        default: i2.instances.flat_count = 44; break;
+      }
+      // (the same fields as the flat normals' key: an entry of each per instance set)
+      CHECK(343, !(InstanceColourKey(i2, il) == ick) && !(NormalKey(i2, l) == ik));
+    }
+    for (int field = 0; field < 7; ++field) {
+      capture::LightInputs b = il;
+      switch (field) {
+        case 0: b.second.vb.phys_addr = 0x6000; break;
+        case 1: b.second.vb.size = 308; break;
+        case 2: b.second.stride_bytes = 32; break;
+        case 3: b.second.offset_bytes = 20; break;
+        case 4: b.second.source = 0x24; break;  // memory order: other colours of the same bytes
+        case 5: b.second.source_count = 4; break;
+        default: b.second.format = uint8_t(capture::kVertexFormat_10_11_11); break;
+      }
+      CHECK(344, !(InstanceColourKey(i, b) == ick));
+    }
+    {
+      // Nothing of the mesh or of the light's constants: the colour is the copy's.
+      capture::LightInputs b = il;
+      capture::DrawRecord q = i;
+      b.normal.vb.phys_addr = 0x7000;
+      b.normal.offset_bytes = 4;
+      b.vs_const[0][1] = -200.0f;
+      b.multi = true;
+      b.family = capture::LightFamily::kPlantLit;
+      q.vb.phys_addr = 0x2800;
+      q.pos.stride_bytes += 4;
+      q.rows[2] = 4.0f;
+      q.vs_hash = 0x1111;
+      CHECK(345, InstanceColourKey(q, b) == ick);
+    }
   }
 
   // 380-389: the light line.
@@ -1950,6 +2084,28 @@ int main() {
                    "Light inputs: ready 870 of 873 lit records | world rotation: rotation 172, mirrored 0, skewed 2, "
                    "degenerate 0 | skewed by vs {0xECD66A10092E6562: 2} | light-unknown 1 by vs {0xECD66A10092E6562: 1} | "
                    "normal-unsupported 2 by vs {0x79EAC49585797037: 2}");
+    // Why a probe or an instance colour buffer was refused (those records are among light-unknown):
+    // only the causes that occurred, in the enum's order; nothing when none did.
+    ClayStats refused;
+    refused.lit = 10;
+    refused.light_ready = 4;
+    refused.light_missing[size_t(capture::LightReason::kLightUnknown)] = 6;
+    for (int n = 0; n < 6; ++n) refused.light_missing_by_vs.Add(0x475EC9F795E5EDBBull, uint8_t(capture::LightReason::kLightUnknown));
+    refused.light_second[size_t(LightSecond::kProbeSet)] = 3;
+    refused.light_second[size_t(LightSecond::kStream)] = 2;
+    refused.light_second[size_t(LightSecond::kUpload)] = 1;
+    CHECK(382, FormatLightText(refused) ==
+                   "Light inputs: ready 4 of 10 lit records | world rotation: rotation 0, mirrored 0, skewed 0, degenerate 0 | "
+                   "light-unknown 6 by vs {0x475EC9F795E5EDBB: 6} | probe or instance buffer refused: stream 2, probe-set 3, "
+                   "upload 1");
+    refused.light_second[size_t(LightSecond::kNone)] = 9;  // (never counted; never printed)
+    refused.light_second[size_t(LightSecond::kElement)] = 1;
+    refused.light_second[size_t(LightSecond::kValue)] = 4;
+    CHECK(383, FormatLightText(refused).ends_with("| probe or instance buffer refused: element 1, stream 2, probe-set 3, value 4, "
+                                                  "upload 1"));
+    CHECK(384, FormatLightText(st).find("refused") == std::string::npos);
+    // The probe buffer's weights are bounded like the light's constants.
+    CHECK(385, kProbeWeightMax == kLightValueMax);
   }
 
   // 390-417: the linear target and the output mapping (frame-map section 14, "Linear target").

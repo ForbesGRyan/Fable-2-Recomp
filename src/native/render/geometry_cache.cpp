@@ -495,8 +495,8 @@ nrhi::Buffer* GeometryCache::TerrainNormals(nrhi::Device* dev, const capture::Te
   return buffer;
 }
 
-// Instanced draws: normals[i] = the mesh normal of vertex(i) through the normal
-// matrix of copy(i)'s rows, for every flat index i (ExpandInstanceNormals). The
+// Instanced draws: normals[i] = the mesh normal of vertex(i) through the 3 x 3
+// of copy(i)'s rows as it is, for every flat index i (ExpandInstanceNormals). The
 // content hash covers the normal's stream and the instance stream. Only the
 // normals of one copy's vertices are decoded (InstanceMeshCount): a few
 // hundred at most, so they are not kept for the frame as the positions are.
@@ -663,6 +663,111 @@ nrhi::Buffer* GeometryCache::Colours(nrhi::Device* dev, const capture::DrawRecor
     Insert(dev, key, hash, {buffer, count, 0, alloc}, alloc);
     ++st.uploads;
     *out_count = count;
+  }
+  st.decode_ms += Ms(t1, Clock::now());
+  return buffer;
+}
+
+// The probe buffer's second region is bound from an offset (normal_decode.h, ProbeSetOffset).
+static_assert(kProbeRegionAlignment == nrhi::kBufferOffsetAlignment);
+
+nrhi::Buffer* GeometryCache::Probe(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light,
+                                   uint32_t need, ClayStats& st, LightSecond* why, uint32_t* out_count) {
+  const capture::LightElement& e = light.second;
+  *out_count = 0;
+  *why = LightSecond::kElement;
+  if (light.kind != capture::LightVertexKind::kProbe || r.instances.active || !WeightsElementSupported(e) ||
+      !ProbeSetSupported(r.pos, light.a0_comp)) {
+    return nullptr;
+  }
+  *why = LightSecond::kStream;
+  // One entry for every vertex both streams hold: the mesh's, whichever part of it a draw names
+  // (and, for a skinned mesh, whatever its palette holds: the weights are the bind mesh's).
+  const uint32_t count = std::min(WeightsCount(e), PositionCount(r.vb.size, r.pos));
+  if (need == 0 || count < need) return nullptr;
+  const auto t0 = Clock::now();
+  const uint8_t* src = capture::ReadPhysical(e.vb.phys_addr, e.vb.size);
+  const uint8_t* vb = src ? capture::ReadPhysical(r.vb.phys_addr, r.vb.size) : nullptr;
+  if (!vb) {
+    st.hash_ms += Ms(t0, Clock::now());
+    return nullptr;
+  }
+  const uint64_t hash = FrameHash(e.vb.phys_addr, e.vb.size, src) ^
+                        (FrameHash(r.vb.phys_addr, r.vb.size, vb) * kSecondStreamMix);
+  const GeoKey key = ProbeKey(r, light);
+  const LookupResult found = index_.Lookup(key, hash);
+  const auto t1 = Clock::now();
+  st.hash_ms += Ms(t0, t1);
+  if (found.hit) {
+    if (auto it = entries_.find(found.id); it != entries_.end() && it->second.count >= need) {
+      ++st.hits;
+      *out_count = it->second.count;
+      *why = LightSecond::kNone;
+      return it->second.buffer;
+    }
+  }
+  nrhi::Buffer* buffer = nullptr;
+  uint64_t alloc = 0;
+  // All or nothing: one vertex whose set index is not 0, 4 or 8, or one weight that is not a
+  // number of usable size, and the mesh has no buffer.
+  *why = BuildProbe(src, e.vb.size, e, vb, r.vb.size, r.pos, light.a0_comp, count, &probe_);
+  if (*why == LightSecond::kNone) {
+    buffer = Upload(dev, probe_.data(), uint64_t(probe_.size()), &alloc);
+    if (!buffer) *why = LightSecond::kUpload;
+  }
+  if (buffer) {
+    Insert(dev, key, hash, {buffer, count, 0, alloc}, alloc);
+    ++st.uploads;
+    *out_count = count;
+  }
+  st.decode_ms += Ms(t1, Clock::now());
+  return buffer;
+}
+
+nrhi::Buffer* GeometryCache::InstanceColours(nrhi::Device* dev, const capture::DrawRecord& r,
+                                             const capture::LightInputs& light, uint32_t need, ClayStats& st,
+                                             LightSecond* why, uint32_t* out_count) {
+  const capture::LightElement& e = light.second;
+  const capture::InstanceSet& s = r.instances;
+  *out_count = 0;
+  *why = LightSecond::kElement;
+  if (light.kind != capture::LightVertexKind::kInstance || !s.active || !InstanceColourElementSupported(e)) return nullptr;
+  *why = LightSecond::kStream;
+  // The capture caps flat_count (InstanceRangeSkip); nothing larger is built.
+  if (need == 0 || s.flat_count < need || s.flat_count > capture::kMaxDrawCount) return nullptr;
+  const auto t0 = Clock::now();
+  // The element's stream as the light inputs name it (the instance set's in every draw seen):
+  // exactly its range, read within it.
+  const uint8_t* src = capture::ReadPhysical(e.vb.phys_addr, e.vb.size);
+  if (!src) {
+    st.hash_ms += Ms(t0, Clock::now());
+    return nullptr;
+  }
+  const uint64_t hash = FrameHash(e.vb.phys_addr, e.vb.size, src);
+  const GeoKey key = InstanceColourKey(r, light);
+  const LookupResult found = index_.Lookup(key, hash);
+  const auto t1 = Clock::now();
+  st.hash_ms += Ms(t0, t1);
+  if (found.hit) {
+    if (auto it = entries_.find(found.id); it != entries_.end() && it->second.count >= need) {
+      ++st.hits;
+      *out_count = it->second.count;
+      *why = LightSecond::kNone;
+      return it->second.buffer;
+    }
+  }
+  colours_.resize(s.flat_count);
+  nrhi::Buffer* buffer = nullptr;
+  uint64_t alloc = 0;
+  // (false: a copy the draw names has its colour past the stream)
+  if (ExpandInstanceColours(src, e.vb.size, e, s, s.flat_count, colours_.data())) {
+    buffer = Upload(dev, colours_.data(), uint64_t(s.flat_count) * sizeof(uint32_t), &alloc);
+    *why = buffer ? LightSecond::kNone : LightSecond::kUpload;
+  }
+  if (buffer) {
+    Insert(dev, key, hash, {buffer, s.flat_count, 0, alloc}, alloc);
+    ++st.uploads;
+    *out_count = s.flat_count;
   }
   st.decode_ms += Ms(t1, Clock::now());
   return buffer;

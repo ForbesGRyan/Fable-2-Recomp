@@ -12,8 +12,12 @@
 //   - a bone-skinned mesh: after the bones, through each vertex's blended bone
 //     matrix as it is (bone_skin.h, BlendBones: the weights of the position),
 //     which is what the game's shaders compute.
-//   - an instanced draw: after the instance's rows, one normal per flat
-//     position (instance_expand.h).
+//   - an instanced draw: after the instance's rows as they are, one normal per
+//     flat position (instance_expand.h), which is what the game's shaders
+//     compute.
+// And the second per-vertex input of the two vertex kinds without a colour
+// stream (at the end): the probe weights with the set index of each vertex,
+// and an instance's colour per flat position.
 // A vertex whose normal has no direction (a zero or not finite element, a
 // vertex that gets no position, a matrix that flattens it) holds (0, 0, 0):
 // no direction is made up, and whoever lights with the buffer treats a zero
@@ -381,21 +385,30 @@ inline bool SkinNormals(const uint8_t* vb, size_t vb_size, const uint8_t* palett
   return true;
 }
 
-// Instanced draws: out[i] = the mesh normal of flat index i's vertex through
-// the normal matrix of its copy's rows (the 3 x 3 that ExpandInstances puts
-// the position through; the fourth components and the offset move positions
-// only). Index for index the order of ExpandInstances. (0, 0, 0) where that
-// has no position (an index the constants do not map, a vertex past the mesh
+// Instanced draws: out[i] = normalize(M n), n the mesh normal of flat index
+// i's vertex and M the 3 x 3 of its copy's rows, the one ExpandInstances puts
+// the position through (the fourth components and the offset move positions
+// only). The matrix as it is, not its inverse transpose: that is the game's
+// own arithmetic in all seven plant vertex shaders (0x8123C16DBF583F92 instr
+// 22 to 24, 30, 35, 36; 0x48D30ECCF684F488 and 0xFC4F2EF6930768BE 29 to 31, 37,
+// 39, 40; 0xB636821F95DC9D8E 24, 29, 30, 34, 35, 37: three dp3 of the normal
+// with the rows' xyz, the rows of the position's dp4, then the reciprocal
+// length; machine-checked for the seven with rows that are no rotation by
+// out/native-evidence/lighting/task5b/plant_normal_check.py), so under a copy
+// that is scaled unevenly or sheared the normal tilts as the game's does
+// (ruling of 2026-10-08, controller-amendments C8: the game's arithmetic, as
+// for the bones and the world rotation). The two forms are one for the rows of
+// a rotation times one scale, which every copy the captures' draws name is.
+// Index for index the order of ExpandInstances. (0, 0, 0) where that has no
+// position (an index the constants do not map, a vertex past the mesh
 // normals, a copy past the stream) and where the normal has no direction.
-// The game's shaders normalise M n (lighting-formulas.md, "Instanced
-// plants"), which is the same for the rows of a rotation times one scale.
 inline bool ExpandInstanceNormals(const Float3* mesh, uint32_t mesh_count, const uint8_t* rows, size_t rows_size,
                                   const capture::InstanceSet& s, uint32_t flat_count, Float3* out) {
   if (!mesh || !rows || !out || flat_count == 0) return false;
   struct Matrix {
     float m[3][3];
   };
-  std::vector<Matrix> matrices;  // the normal matrix per copy, made on first use
+  std::vector<Matrix> matrices;  // the rows' 3 x 3 per copy, decoded on first use
   std::vector<uint8_t> state;    // 0 unknown, 1 made, 2 past the stream
   for (uint32_t i = 0; i < flat_count; ++i) {
     uint32_t copy = 0, vertex = 0;
@@ -410,15 +423,18 @@ inline bool ExpandInstanceNormals(const Float3* mesh, uint32_t mesh_count, const
       bool ok = true;
       for (int k = 0; k < 3 && ok; ++k) ok = capture::DecodePositions(rows, rows_size, s.rows[k], copy, 1, &r[k]);
       if (ok) {
-        const float rot[3][3] = {{r[0].x, r[0].y, r[0].z}, {r[1].x, r[1].y, r[1].z}, {r[2].x, r[2].y, r[2].z}};
-        NormalMatrix(rot, matrices[copy].m);
+        for (int k = 0; k < 3; ++k) {
+          matrices[copy].m[k][0] = r[k].x;
+          matrices[copy].m[k][1] = r[k].y;
+          matrices[copy].m[k][2] = r[k].z;
+        }
       }
       state[copy] = ok ? 1 : 2;
     }
     if (state[copy] != 1) continue;
     const float n[3] = {mesh[vertex].x, mesh[vertex].y, mesh[vertex].z};
     float v[3];
-    TransformNormal(matrices[copy].m, n, v);  // (zero without a direction)
+    TransformNormal(matrices[copy].m, n, v);  // (the matrix as it is; zero without a direction)
     out[i] = {v[0], v[1], v[2]};
   }
   return true;
@@ -485,6 +501,245 @@ inline bool DecodeColours(const uint8_t* src, size_t src_size, const capture::Li
     const uint32_t w = capture::detail::Be32(src + at);
     uint32_t packed = 0;
     for (uint32_t c = 0; c < 4; ++c) packed |= ((w >> (8 * comp[c])) & 0xFFu) << (8 * c);
+    out[i] = packed;
+  }
+  return true;
+}
+
+// --- The second buffer of the two other vertex kinds (plan Task 5b) ---
+// kProbe (0x79EA..., 0xD4D5..., 0xA1F7..., 0x475E...): the vertex colour is
+// c[28 + a0].xyz + (c[29 + a0] . w, c[30 + a0] . w, c[31 + a0] . w), w the four
+// weights of the vertex and a0 the set its position element names
+// (lighting-formulas.md, "Objects", probe_colour). The buffer holds w and a0 per
+// vertex of the mesh; the constants are the draw's (LightInputs::vs_const) and
+// are in no buffer. kInstance (the seven plant shaders): the colour of the
+// vertex's copy, one entry per flat position.
+
+// Why such a buffer was not built (counted by the pass: ClayStats::light_second;
+// the record is `light-unknown` and keeps its material). kElement: the element,
+// or the position's set component, is not one the kind's reader decodes (the
+// table's selector held against the format). kStream: a stream is not readable
+// or holds fewer elements than asked for. kProbeSet: a vertex whose set index is
+// not 0, 4 or 8. kValue: a weight that is not a number of usable size. kUpload:
+// the buffer could not be made on the GPU.
+enum class LightSecond : uint8_t { kNone, kElement, kStream, kProbeSet, kValue, kUpload, kCount };
+
+inline const char* LightSecondName(LightSecond s) {
+  switch (s) {
+    case LightSecond::kNone: return "none";
+    case LightSecond::kElement: return "element";
+    case LightSecond::kStream: return "stream";
+    case LightSecond::kProbeSet: return "probe-set";
+    case LightSecond::kValue: return "value";
+    case LightSecond::kUpload: return "upload";
+    default: return "?";
+  }
+}
+
+// What this file knows of the probe weights: the source components (0 to 3: x
+// to w of the GPU's fetch) in the order of the probe constants' components: x,
+// y, z, w, the four floats in memory order. Every probe shader dots the fetched
+// weights with c[29 + a0]..c[31 + a0] under one swizzle or its exact undoing
+// (0x79EA... instr 30 to 32 and 0x475E... 66 to 68: fetched xyzw, `dp4 r.yxzw,
+// c.yxzw`; 0xD4D5... 76 to 78 and 0xA1F7... 52 to 54: fetched wzxy, `dp4 r.wzyx,
+// c.yxzw`, and register wzyx of a wzxy fetch is source y, x, z, w), so weight
+// component k meets constant component k whatever the fetch's destination
+// swizzle; light_check.py's probe_colour takes them so. What the element's
+// selector (the table's "xyzw") is held against.
+inline void WeightsSourceComponents(uint8_t comp[4]) {
+  comp[0] = 0; comp[1] = 1; comp[2] = 2; comp[3] = 3;
+}
+
+// Whether a reader decodes this element as the probe weights: 32_32_32_32_FLOAT
+// that ElementReadable reads (inside its vertex, the guest's big-endian dwords),
+// whose selector names four components and the very four, in the order, of
+// WeightsSourceComponents (the cross-check: another order gives no weights, and
+// with them no light for the draw, `light-unknown`).
+inline bool WeightsElementSupported(const capture::LightElement& e) {
+  if (e.format != capture::kVertexFormat_32_32_32_32_FLOAT || !ElementReadable(e) || e.source_count != 4) return false;
+  uint8_t comp[4];
+  WeightsSourceComponents(comp);
+  for (uint32_t i = 0; i < 4; ++i) {
+    if (capture::LightSourceComponent(e, i) != comp[i]) return false;
+  }
+  return true;
+}
+
+// Weights in the element's stream: every vertex whose element lies fully inside
+// it; 0 for an element that is not read as weights.
+inline uint32_t WeightsCount(const capture::LightElement& e) {
+  if (!WeightsElementSupported(e)) return 0;
+  const uint32_t need = uint32_t(e.offset_bytes) + 16;
+  if (need > e.vb.size) return 0;
+  return (e.vb.size - need) / e.stride_bytes + 1;
+}
+
+// The largest magnitude a weight may have to reach a buffer (clay_logic.h holds
+// it equal to the bound of the light's constants, kLightValueMax): the captured
+// weights are at most 1 in every vertex of every stream (frame-map section 14,
+// "Probe weights and instance colours").
+inline constexpr float kProbeWeightMax = 1024.0f;
+
+// out[i] = the four weights of vertex first_vertex + i, for i < count. kNone,
+// or, with nothing usable in `out`: kElement for an element
+// WeightsElementSupported refuses, kStream for a read past src_size, kValue for
+// a weight that is not finite or larger than kProbeWeightMax (no such value
+// reaches a buffer, and no vertex is given made-up weights instead).
+inline LightSecond DecodeWeights(const uint8_t* src, size_t src_size, const capture::LightElement& e, uint32_t first_vertex,
+                                 uint32_t count, capture::Float4* out) {
+  if (!WeightsElementSupported(e)) return LightSecond::kElement;
+  if (!src) return LightSecond::kStream;
+  const uint32_t comp[4] = {capture::LightSourceComponent(e, 0), capture::LightSourceComponent(e, 1),
+                            capture::LightSourceComponent(e, 2), capture::LightSourceComponent(e, 3)};
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint64_t at = (uint64_t(first_vertex) + i) * e.stride_bytes + e.offset_bytes;
+    if (at + 16 > src_size) return LightSecond::kStream;
+    float w[4];
+    for (uint32_t k = 0; k < 4; ++k) {
+      w[k] = capture::detail::BeFloat(src + at + 4 * comp[k]);
+      if (!(std::fabs(w[k]) <= kProbeWeightMax)) return LightSecond::kValue;  // (a NaN too)
+    }
+    out[i] = {w[0], w[1], w[2], w[3]};
+  }
+  return LightSecond::kNone;
+}
+
+// What this file knows of the probe set's index: the source component (0 to 3)
+// of the position element that holds it, by the element's layout. A
+// 16_16_16_16_FLOAT position read under the stream's endian 8in32 (swap16): the
+// fourth half in memory, which under the pair swap is the fetch's source z
+// (2). The shaders take it from wherever their fetch's destination swizzle puts
+// source z (0x79EA... instr 28, 29: `truncs r2.x, r2.x`, `maxas a0, r2.x` after a
+// zxwy fetch; 0x475E... r1.w after wxyz; 0xD4D5... r7.w and 0xA1F7... r1.w after
+// yxwz). False for any other layout: none is seen, and where the index would
+// lie in one is not known.
+inline bool ProbeSetSourceComponent(const capture::PosLayout& pos, uint8_t* comp) {
+  if (pos.format != capture::PosFormat::kHalf4 || !pos.swap16) return false;
+  *comp = 2;
+  return true;
+}
+
+// Whether a reader takes the set index from this position element through the
+// table's component (LightInputs::a0_comp): the component this file knows for
+// the layout, and no other (the cross-check of the table against the format).
+inline bool ProbeSetSupported(const capture::PosLayout& pos, int a0_comp) {
+  uint8_t comp = 0;
+  return pos.stride_bytes != 0 && ProbeSetSourceComponent(pos, &comp) && a0_comp == int(comp);
+}
+
+// out[i] = the set index a0 of vertex first_vertex + i (0, 4 or 8: the offset of
+// the vertex's probe set from c28), for i < count. kNone, or, with nothing
+// usable in `out`: kElement unless ProbeSetSupported, kStream for a read past
+// src_size, kProbeSet for a vertex whose component is not exactly 0, 4 or 8.
+// The game truncates the component and loads its address register with the
+// result; every vertex of every captured stream holds one of the three exactly,
+// so anything else is taken for another element than the set index and the
+// draw has no buffer, rather than truncated into a set.
+inline LightSecond DecodeProbeSets(const uint8_t* src, size_t src_size, const capture::PosLayout& pos, int a0_comp,
+                                   uint32_t first_vertex, uint32_t count, uint32_t* out) {
+  if (!ProbeSetSupported(pos, a0_comp)) return LightSecond::kElement;
+  if (!src) return LightSecond::kStream;
+  capture::PosLayout source = pos;
+  source.swizzle = 0x688;  // the element's source components as they are, whatever the fetch's destination swizzle
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint64_t vertex = uint64_t(first_vertex) + i;
+    capture::Float4 p;
+    if (vertex > 0xFFFFFFFFull || !capture::DecodePositions(src, src_size, source, uint32_t(vertex), 1, &p)) {
+      return LightSecond::kStream;
+    }
+    const float v[4] = {p.x, p.y, p.z, p.w};
+    const float set = v[a0_comp];
+    if (set != 0.0f && set != 4.0f && set != 8.0f) return LightSecond::kProbeSet;  // (a NaN too)
+    out[i] = uint32_t(set);
+  }
+  return LightSecond::kNone;
+}
+
+// The probe buffer of a mesh of `count` vertices, as the geometry cache uploads
+// it: the weights from byte 0 (four host floats a vertex), the set indices from
+// ProbeSetOffset(count) on (one host uint32 a vertex: 0, 4 or 8), the bytes
+// between zero. Two regions of one buffer, so that each is read with an
+// element no larger than a position's (clay_logic.h, kClayPositionElementBytes:
+// the rule for whatever is bound at a light register), the second from a bind
+// offset the RHI accepts (a multiple of 256 bytes: nrhi::kBufferOffsetAlignment;
+// geometry_cache.cpp asserts the two equal).
+inline constexpr uint64_t kProbeRegionAlignment = 256;
+inline constexpr uint64_t ProbeSetOffset(uint32_t count) {
+  return (uint64_t(count) * 16 + (kProbeRegionAlignment - 1)) & ~(kProbeRegionAlignment - 1);
+}
+inline constexpr uint64_t ProbeBufferBytes(uint32_t count) { return ProbeSetOffset(count) + uint64_t(count) * 4; }
+
+// Builds that buffer for the first `count` vertices of the two streams into
+// `out`. All or nothing: on anything but kNone `out` is empty (the reasons of
+// DecodeWeights and DecodeProbeSets; kStream also for no vertex and no `out`).
+inline LightSecond BuildProbe(const uint8_t* weights, size_t weights_size, const capture::LightElement& e, const uint8_t* vb,
+                              size_t vb_size, const capture::PosLayout& pos, int a0_comp, uint32_t count,
+                              std::vector<uint8_t>* out) {
+  if (!out) return LightSecond::kStream;
+  out->clear();
+  if (count == 0) return LightSecond::kStream;
+  static_assert(sizeof(capture::Float4) == 16);
+  std::vector<capture::Float4> w(count);
+  std::vector<uint32_t> sets(count);
+  LightSecond why = DecodeWeights(weights, weights_size, e, 0, count, w.data());
+  if (why == LightSecond::kNone) why = DecodeProbeSets(vb, vb_size, pos, a0_comp, 0, count, sets.data());
+  if (why != LightSecond::kNone) return why;
+  out->assign(size_t(ProbeBufferBytes(count)), 0);
+  std::memcpy(out->data(), w.data(), size_t(count) * 16);
+  std::memcpy(out->data() + ProbeSetOffset(count), sets.data(), size_t(count) * 4);
+  return LightSecond::kNone;
+}
+
+// What this file knows of an instance's colour: the source components that are
+// its red, green and blue: z, y, x, as the colour stream's (ColourSourceComponents)
+// without the alpha: the fourth byte of the element is not the light's, and the
+// shaders' fetches leave it out (zyx_ and _zyx; it reads 254 in every captured
+// copy). The seven plant shaders raise the fetched z, y, x to c18.w as red,
+// green, blue (0x8123... instr 17, 26 to 33; light_check.py's _plant_vertex).
+// What the element's selector (the table's "zyx") is held against.
+inline void InstanceColourSourceComponents(uint8_t comp[3]) {
+  comp[0] = 2; comp[1] = 1; comp[2] = 0;
+}
+
+// Whether a reader decodes this element as an instance's colour: 8_8_8_8 that
+// ElementReadable reads (unsigned, normalised, inside its record, the guest's
+// big-endian dword), whose selector names three components and the very three,
+// in the order, of InstanceColourSourceComponents.
+inline bool InstanceColourElementSupported(const capture::LightElement& e) {
+  if (e.format != capture::kVertexFormat_8_8_8_8 || !ElementReadable(e) || e.source_count != 3) return false;
+  uint8_t comp[3];
+  InstanceColourSourceComponents(comp);
+  for (uint32_t i = 0; i < 3; ++i) {
+    if (capture::LightSourceComponent(e, i) != comp[i]) return false;
+  }
+  return true;
+}
+
+// Instanced draws: out[i] = the colour of flat index i's copy, the element of
+// that copy in the instance stream (`rows`): red, green and blue in bytes 0 to
+// 2 of an entry as stored (0 to 255; the shader's power c18.w is the frame's),
+// byte 3 zero. Index for index the order of ExpandInstances. 0 for an index the
+// constants map to no copy (ExpandInstances gives it no position either).
+// False, with nothing usable in `out`, for an element
+// InstanceColourElementSupported refuses and for a copy whose colour lies past
+// the stream: a draw that names such a copy has no colours (the copy's rows
+// can lie inside the stream where its colour, the record's last element, does
+// not, and no colour is made up for a vertex that has a position).
+inline bool ExpandInstanceColours(const uint8_t* rows, size_t rows_size, const capture::LightElement& e,
+                                  const capture::InstanceSet& s, uint32_t flat_count, uint32_t* out) {
+  if (!rows || !out || flat_count == 0 || !InstanceColourElementSupported(e)) return false;
+  const uint32_t comp[3] = {capture::LightSourceComponent(e, 0), capture::LightSourceComponent(e, 1),
+                            capture::LightSourceComponent(e, 2)};
+  for (uint32_t i = 0; i < flat_count; ++i) {
+    uint32_t copy = 0, vertex = 0;
+    out[i] = 0;
+    if (!capture::InstanceIndex(s, i, &copy, &vertex)) continue;
+    const uint64_t at = uint64_t(copy) * e.stride_bytes + e.offset_bytes;
+    if (at + 4 > rows_size) return false;
+    // Source x in bits 0 to 7, then y, z, w (as DecodeColours).
+    const uint32_t w = capture::detail::Be32(rows + at);
+    uint32_t packed = 0;
+    for (uint32_t c = 0; c < 3; ++c) packed |= ((w >> (8 * comp[c])) & 0xFFu) << (8 * c);
     out[i] = packed;
   }
   return true;

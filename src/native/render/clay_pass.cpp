@@ -428,6 +428,24 @@ void ClayPass::PrepareLight(nrhi::Device* dev, const capture::DrawRecord& r, con
       why = LightReason::kLightUnknown;
     }
     p.light_count = std::min(normal_count, colour_count);
+  } else if (p.normals && (light.kind == capture::LightVertexKind::kProbe || light.kind == capture::LightVertexKind::kInstance)) {
+    // The other two vertex kinds: the baked term is made of the probe weights (with the draw's
+    // probe constants) or is the copy's colour. Built and resident; no shader reads them yet and
+    // no draw binds them (light_mode stays 0 for these records: they are not lit).
+    LightSecond refused = LightSecond::kNone;
+    uint32_t second_count = 0;
+    if (light.kind == capture::LightVertexKind::kProbe) {
+      p.probe = geometry_.Probe(dev, r, light, need, st, &refused, &second_count);
+      p.probe_count = second_count;
+    } else {
+      p.colours = geometry_.InstanceColours(dev, r, light, need, st, &refused, &second_count);
+    }
+    if (!p.probe && !p.colours) {
+      p.normals = nullptr;
+      why = LightReason::kLightUnknown;
+      if (size_t(refused) < size_t(LightSecond::kCount)) ++st.light_second[size_t(refused)];
+    }
+    p.light_count = std::min(normal_count, second_count);
   }
   if (!p.normals) {
     p.light_why = why;

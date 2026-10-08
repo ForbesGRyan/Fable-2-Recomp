@@ -104,15 +104,23 @@ class ClayPass {
     // LightOf) and its material: `normals` (a mesh record: float3,
     // GeometryCache::Normals; a terrain record: float2 (n.x, n.y) per grid
     // point, GeometryCache::TerrainNormals, which a layer with the steep-ground
-    // block has with or without light inputs), and `colours` for the family
-    // with a colour stream. For a mesh record both or neither: nullptr when one
+    // block has with or without light inputs), and the second buffer of the
+    // record's vertex kind: `colours` for the family with a colour stream
+    // (GeometryCache::Colours) and for an instanced record (the copies'
+    // colours per flat position, GeometryCache::InstanceColours), `probe` for
+    // the probe kind (GeometryCache::Probe: the weights from byte 0, the set
+    // indices from ProbeSetOffset(probe_count) on). For a mesh record the
+    // normals and its kind's second buffer or neither: nullptr when one
     // could not be built (counted in ClayStats::light_missing; `light_why`).
+    // Only a lit record's buffers are bound (`lit`, below): the probe and the
+    // instance colours are bound by no draw yet.
     // `light_count`: the elements the buffers hold (the shader reads them for a
     // vertex below it). `max_index`: the largest index of the record's list.
     const capture::LightInputs* light = nullptr;
     nrhi::Buffer* normals = nullptr;
     nrhi::Buffer* colours = nullptr;
-    uint32_t light_count = 0, max_index = 0;
+    nrhi::Buffer* probe = nullptr;
+    uint32_t light_count = 0, max_index = 0, probe_count = 0;
     capture::LightReason light_why = capture::LightReason::kLightUnknown;
     // `lit`: the record is drawn lit by its family's function (the frame is
     // lit, the family is one the pass lights, everything it reads is there,
@@ -167,9 +175,10 @@ class ClayPass {
                       ClayStats& st, TextureStats& tst);
   void FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, TextureStats& tst);
   // The light's vertex inputs of a textured mesh record with light inputs:
-  // its normals and, for the family with a colour stream, its colours, from the
+  // its normals and the second buffer of its vertex kind (a colour stream's
+  // colours, the probe weights and sets, an instance set's colours), from the
   // geometry cache into `p`; counts the record in st (lit, light_ready or
-  // light_missing by reason and vertex shader, light_rotation). In a lit frame
+  // light_missing by reason and vertex shader, light_second, light_rotation). In a lit frame
   // a record of a family the pass lights whose constants can be made
   // (MakeClayObjectConstants) is marked lit and gets its entry of
   // object_constants_.

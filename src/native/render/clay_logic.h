@@ -1092,9 +1092,10 @@ inline float ClayLinearShaded(float linear, float shade) {
 // in the 10-bit one), so that the clear does not depend on a GPU's rounding;
 // the mapping returns the three levels. The fourth is the alpha of the clear
 // call; the target has none.
-// These are the levels under exposure 1. Once the exposure of a lit frame is not
-// 1 (ClayExposure, plan Task 9) the mapping shows sqrt(E) times these levels
-// where nothing is drawn, unless the clear value of such a frame is divided by E.
+// These are the levels under exposure 1. A lit frame's exposure is kLitExposure
+// (plan Task 9) and the clear value is not divided by it: where nothing is drawn
+// (the sky) the mapping shows sqrt(E) times these levels in a lit frame, 30, 30,
+// 37 (test case 418), and these levels with the light off.
 inline constexpr int kClayClearLevels[3] = {20, 20, 25};
 inline constexpr float kClayClearLinear[4] = {101.0f / 16384.0f, 101.0f / 16384.0f, 39.0f / 4096.0f, 1.0f};
 
@@ -1113,15 +1114,30 @@ inline ClayLight ParseClayLight(std::string_view text, bool* recognized) {
   return lower == "on" ? ClayLight::kOn : ClayLight::kOff;
 }
 
+// The exposure of a lit frame, calibrated once (spec, design 4; plan Task 9) on
+// the dirt patch at the bridge ("dirt patch" of docs/native-renderer/
+// lighting-regions.json) and fixed here. It stands in for the game's own
+// exposure, which belongs to its post chain and is not drawn.
+// Evidence: run 341 (binary of commit c4d9e57, exposure 1, a quiet machine, RUN
+// UNCHECKED), log out/native-evidence/lighting/task8cq_bridge_fable_2_341.log,
+// shots task8cq_bridge_shot_36s.png (emulated), _40s.png (native, lit),
+// _44s.png (emulated). tools/xdk_sigmatch/region_compare.py --calibrate
+// "dirt patch": mean linear luminance 0.32914 and 0.33498 emulated, 0.14926
+// native, ratio 0.4495, E = 2.2248 (red 2.30, green 2.20, blue 1.97 taken
+// alone); the two emulated shots differ by 1.8%, so two decimals are kept.
+// Output in out/native-evidence/lighting/task9/e1_regions_bridge_341.txt.
+// Frame-map section 14, "Validation", has what this one number does and does
+// not bring into line.
+inline constexpr float kLitExposure = 2.22f;
+
 // The output mapping's exposure E: one number for the frame, no draw's own.
-// 1 with light off and in a frame drawn without light. With light on it is
-// NOT CALIBRATED yet: 1 as well, until it is fitted against the emulated frame
-// (spec, design 4; plan Task 9). The lit linear values are the game's before
-// its output scale c20.w (16), which its own later passes take back.
+// 1 with light off and in a frame drawn without light; kLitExposure with light
+// on. The lit linear values are the game's before its output scale c20.w (16),
+// which its own later passes take back.
 inline float ClayExposure(ClayLight light) {
   switch (light) {
     case ClayLight::kOff: return 1.0f;
-    case ClayLight::kOn: return 1.0f;
+    case ClayLight::kOn: return kLitExposure;
   }
   return 1.0f;
 }

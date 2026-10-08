@@ -2285,9 +2285,16 @@ int main() {
     CHECK(408, ParseClayLight(" On ", &ok) == ClayLight::kOn && ok);
     CHECK(409, ParseClayLight("true", &ok) == ClayLight::kOff && !ok);
     CHECK(410, ParseClayLight("", &ok) == ClayLight::kOff && !ok && ParseClayLight("on", nullptr) == ClayLight::kOn);
-    // The exposure of the output mapping: 1 with light off (the materials picture), and with light on
-    // 1 as well while it is not calibrated (plan Task 9 fits it against the emulated frame).
-    CHECK(411, ClayExposure(ClayLight::kOff) == 1.0f && ClayExposure(ClayLight::kOn) == 1.0f);
+    // The exposure of the output mapping: 1 with light off (the materials picture); with light on the
+    // calibrated constant (plan Task 9: fitted on the dirt patch at the bridge against the emulated frame).
+    CHECK(411, ClayExposure(ClayLight::kOff) == 1.0f && ClayExposure(ClayLight::kOn) == kLitExposure &&
+                   kLitExposure == 2.22f);
+    // What the calibration means: the dirt patch's linear value under exposure 1 (0.14926, run 341) comes
+    // out at the emulated shots' mean (0.33206) within 1%; and the clear colour of a lit frame is shown
+    // sqrt(E) times its levels (30, 30, 37), the light-off frame's as before (case 406).
+    CHECK(418, std::fabs(OutputMap(0.14926f, kLitExposure) - std::sqrt(0.33206f)) < 0.01f * std::sqrt(0.33206f) &&
+                   Level8(OutputMap(kClayClearLinear[0], kLitExposure)) == 30 &&
+                   Level8(OutputMap(kClayClearLinear[2], kLitExposure)) == 37);
 
     // Target memory at the pass's size, and the line that reports it.
     CHECK(412, kClayLinearTexelBytes == 4 && kClayMappedTexelBytes == 4 && kClayDepthTexelBytes == 4 &&

@@ -1,6 +1,14 @@
 # Native renderer sub-project 7: lighting (sun, ambient and baked light, without shadows)
 
-Status: design, 2026-10-07. Written under the user's standing instruction to proceed on the
+Status: implemented 2026-10-08 (plan Tasks 1 to 9, branch `native-renderer-lighting`); measured in
+`docs/native-renderer/frame-map.md` section 14, "Validation": criteria 1, 3, 6 and 8 met; 5 met in all
+seven pairs measured, four of them on steady regions; 4 met for the six regions with one rectangle corrected (the first one straddled a shadow edge); 2 met at
+the bridge and the third spot, by the trees only in another display state; 7 met for the frame
+rate and the view-off capture, its records-on clause not measurable as written (no gated run) and
+its number, 1.35 ms, not met (1.46 to 1.50 ms). What was ruled and built differently is at the end,
+"Implementation notes (deviations)".
+
+Design of 2026-10-07. Written under the user's standing instruction to proceed on the
 recommended option at each choice and to log it as a ruling ("when these tasks are finished.
 move onto the next subproject and use the recommended option until completion"). Nothing here
 was approved section by section; the rulings are listed in "Rulings" so they can be corrected.
@@ -257,3 +265,234 @@ that names a family without its inputs, in the strict style the materials fix wa
 5. Linear target and output mapping with light off (criterion 2).
 6. Lit shaders: terrain, objects; then plants; then trees.
 7. Calibration, validation, documents, user checks.
+
+## Implementation notes (deviations)
+
+Written by plan Task 9 (2026-10-08) from the controller's ledger of this sub-project
+(`.superpowers/sdd/2026-10-07-native-renderer-lighting/progress.md` and
+`controller-amendments.md`, both untracked). Every ruling made while the plan ran is here, in
+the ledger's order, each with why and the cost if it is wrong; then what was built differently
+from the design above. The measured result is in `docs/native-renderer/frame-map.md` section 14,
+"Validation".
+
+### Rulings made during the work
+
+Process and runs:
+
+1. The plan is executed task by task with a fresh implementer and a reviewer for each, fix
+   rounds, and a final review of the whole branch — why: the user's standing choice — cost if
+   wrong: tokens.
+2. Tasks 1 and 2 ran at the same time, and Task 2 wrote its formulas into a document of its
+   own, `docs/native-renderer/lighting-formulas.md`, which the frame map links to — why: Task 2
+   is Python and documents only, Task 1 edited the frame map — cost if wrong: two documents to
+   keep in step.
+3. Game runs of this sub-project may be made by the controlling agent with `-UserPresent
+   -BootSave Hero000` while the user is at the machine (the user, 2026-10-07: "yes, lgtm");
+   task agents never pass `-UserPresent` and ask for runs instead. Such runs are labelled
+   `RUN UNCHECKED`; the freeze check per window stays the guard — why: the idle gate refuses
+   while the user works — cost if wrong: every number of this sub-project comes from runs with
+   a person at the machine, none from a gated one.
+4. Before a user-present run the controlling agent samples the graphics card's load from other
+   programs and does not launch above about 20% — why: three runs were spent measuring another
+   game's load — cost if wrong: a wait.
+5. Task 6 was finished while the machine was in a fallback display state (one 1024 x 768
+   display, the monitor off): its comparisons were made against that night's runs exactly and
+   against the earlier full-size runs by resampling; the absolute 30.0 fps and the exact
+   comparisons were repeated later at full size — why: waiting would have stalled the work for
+   hours — cost if wrong: none remaining for the bridge and the third spot (runs 328 against
+   292, 333 against 328, 342 against 333); by the trees the light-off comparison at full size
+   was never made (the view there does not repeat).
+6. Three agents worked beside the leaf task's implementer on files of their own and without game
+   runs (the region tool, the replay check, the research for shadows); the calibration stayed
+   serial after the leaves — why: the user asked for more agents; calibration needs runs with the
+   leaves lit — cost if wrong: time only. The frame times of the runs made while they worked are
+   not used (they loaded the machine); the series was repeated on a quiet machine.
+
+The light constants (Task 1):
+
+7. The temporary diagnostic was widened beyond the design's list (the registers `c109`, `c112`,
+   `c94`, `c80.w`, the further lights, the shaders' literals, vertex constants, two more bools)
+   — why: Task 2 found the shaders read them — cost if wrong: none; it was removed with the
+   diagnostic.
+8. The tracking of constant uploads runs only while draw records are on; with the view off
+   nothing is tracked, and the first frame after the view comes on has no light block and is
+   drawn unlit — why: the view-off promise (under 0.5 ms, nothing added) — cost if wrong: one
+   unlit frame at each view switch.
+9. A sun of zero is "no block" (`light-block`), not a night — why: zero is exactly the wrong
+   data that motivated the task, and a light set that was never loaded reads as zero — cost if
+   wrong: a night scene is drawn unlit until a night capture shows what night holds (user check
+   30).
+10. Registers the game sets through the device's bank (everything outside pixel `c0..c7`,
+    `c80..c115` and vertex `c40..c43`, `c76..c107`) are always read from the bank, whatever the
+    state of the upload tracking — why: a register the game sets once would otherwise stay
+    unknown for good — cost if wrong: a new upload site naming another range would be read
+    wrongly; such a site is counted and logged once.
+11. A register of the light set loaded in an earlier scene stays readable one by one; only the
+    block as a whole is invalid there — why: the block is what the renderer consumes — cost if
+    wrong: a tool reading single registers sees a stale value.
+
+Families and inputs (controller amendments C1 to C4, which replace parts of the design):
+
+12. The frame's sun is direction `c109.xyz` with the colour at the hot slot of `c112`, not `c80`
+    / `c87` as the design says: those are a draw's first light, a lantern in the two- and
+    four-light shaders. The block is read once per frame at a one-light draw, never at the first
+    scene draw — why: Task 1 proved it on the emulated GPU's registers (the review recomputed it
+    on 29,548 and 28,720 colour draws) — cost if wrong: none seen.
+13. Seven families instead of the design's five, each belonging to a pair of pixel and vertex
+    shader: `terrain-layer`, `terrain-far`, `object` (baked colour from a stream or from probe
+    weights), `tree-trunk`, `plant`, `plant-lit`, `tree-leaf`. A pair the checker did not run is
+    `light-unknown` — why: the baked term is made in the vertex shader, differently per vertex
+    shader — cost if wrong: a pair missing from the list is drawn unlit and counted.
+14. The two- and four-light variants are drawn through their family's one-light function with
+    the frame's sun, and only where `light_check.py --multi-sun` shows that the microcode equals
+    it with the sun in the slot the game uses — why: design ruling 5 (no lanterns) without
+    guessing — cost if wrong: such a draw lacks its lantern's light (it does, by design).
+15. No run-time reader of vertex-side light constants: the pass uses the copies proven against
+    the GPU (vertex `c18` = pixel `c21` with the exponent times 2.2, `c54` = pixel `c20`,
+    `c19.xyz` = pixel `c23.xyz`; for leaves vertex `c76` / `c83` = the frame's sun) — why: those
+    registers are uploaded past the bank — cost if wrong: these identities were seen in daylight
+    scenes of one area only, and a scene in which one fails is lit wrongly without a message.
+16. Shader literals are fixed per shader from the dump; bool flags are never read from the
+    device (its bool word was refuted) and the blocks under `b133`, `b134`, `b135` are not drawn
+    — why: no proven reader — cost if wrong: emissive, cube-map and per-light shadow terms are
+    missing (they are out of scope anyway).
+17. Probe colours are per-draw constants and the geometry cache stays mesh-intrinsic (normals,
+    and per vertex either the stream colour or four weights and a set index); Task 5 was split
+    into 5a and 5b and the order became 3, 4, 5a, 6, 7, 5b, 8 — why: the same mesh is drawn with
+    different probe sets — cost if wrong: none seen.
+
+Records and normals (Tasks 3 to 5):
+
+18. Scene buffers are reused between frames, not allocated per frame — why: the plan said so and
+    a benchmark showed the allocation cost as large as the gain the task existed for — cost if
+    wrong: a small spare list.
+19. Skinned normals are `normalize(B n)` with the blended bone matrix as it is, without the
+    inverse transpose and without the game's tangent correction — why: it is the game's own
+    arithmetic and the closer of the two on the captured meshes — cost if wrong: up to 12.8
+    degrees from the game's normal at single vertices (377 of 14,620 beyond 2.6 degrees by the
+    trees); the tangent step is a follow-up.
+20. Objects, trunks and instanced plants use `N = normalize(M n)` for every kind of world matrix
+    but a degenerate one (unlit, counted) — why: the same principle; for rotations and mirrors it
+    equals the inverse transpose — cost if wrong: a skewed object (none seen) is lit slightly off
+    perpendicular, as in the game.
+
+The linear target (Task 6):
+
+21. Frame rate first: the target is `R11G11B10_FLOAT`, 32 bits a pixel, with the mapping as a
+    step of its own — why: in one night's experiment it was the float form that cost no more
+    than the old 8-bit pass, the 64-bit form 2 to 3 ms a frame more; nothing reads destination
+    alpha — cost if wrong: rounding (next ruling).
+22. The choice between the 32- and the 64-bit target was deferred to Task 9 and is made there
+    without a run of the 64-bit form: the 32-bit target stays (frame map, "Validation", "The
+    target's format") — why: the code has one format constant behind the pipelines and the
+    targets, not a switch; the two formats' arithmetic is known, and at the calibrated exposure
+    the 32-bit form shows every display level below 96 in all three channels, so dark smooth
+    regions cannot band; what it costs is at the bright end (blue up to 3 levels, red and green
+    up to 2, darker; five stored blends up to 7 and 4) — cost if wrong: that rounding stays in a
+    debug view. The earlier ruling asked for alternating runs on the display; they were not
+    made.
+23. The per-view frame-time log line stays as a permanent diagnostic; the experiment's switches
+    were removed.
+
+Lit drawing (Tasks 7 and 8):
+
+24. After the first lit build hung the graphics device three times: no further lit run until
+    the cause was found offline, and at most three launches that could hang it. The cause is
+    recorded as likely, not proven: vertex-stage loads from buffers bound by another draw
+    (through root descriptors, which have no bounds check). The run that would have proven it
+    (the old bindings again) was not made — why: each hang resets the user's graphics driver —
+    cost if wrong: another cause is latent; the binding tests and every later run are the guard.
+25. From then on, every first launch of a build that changes bindings or shader text is one run
+    on the software adapter with the Direct3D debug layer (amendment C10), clean only if the
+    layer is shown to be on and reports no error after lit frames of the new family — why: that
+    run cannot hang the real device — cost if wrong: a fault the software adapter does not show.
+    Its length: 300 s at first; 150 s after the user closed one such run because it loads the
+    whole processor (that run was ruled clean on its 250 s of lit frames, without a picture); the
+    game process at below-normal priority; 240 s while other agents were working. Task 9 changes
+    one constant and no shader text or binding, so it has no such run.
+26. A frame whose constant buffer cannot be made draws nothing and shows the clear colour — why:
+    such a failure is device loss or exhaustion; keeping the previous picture would break "never
+    a picture older than its scene" — cost if wrong: a dark frame until the next scene.
+27. Task 8 was split into 8a (objects without a colour stream, and trunks), 8b (plants) and 8c
+    (leaves, needed for criterion 3) — why: one binding parameter was left and the trees spot
+    stood at 66% lit — cost if wrong: three tasks instead of one.
+28. Four departures of the plants' task were accepted: a seventh interpolator in the clay vertex
+    shader (the plants need 13 interpolated values, 12 existed), so every fixed-mode vertex
+    program gained two lines; the object block's test changed so that the plant block is its
+    exclusive sibling; the bend constants ride in the fourth components of the object block's
+    rows, which keeps a plant in a 256-byte slot; the pixel shader's plant test has no `[branch]`
+    (it holds no buffer load) — cost if wrong: one more interpolator on every clay draw; no cost
+    was visible in the runs.
+29. Leaves are drawn as probe records with one more mode bit: no new buffer and no new binding
+    parameter. Five departures were accepted with them: the leaf shader's literals (0.4545, 0.6,
+    0.4) are constants in code and not table fields (they move to the table with shadows, whose
+    mask they scale); `LightInputs` grew from 312 to 328 bytes (`DrawRecord` did not); the sun's
+    colour is multiplied in the pixel stage where the game does it per vertex; a function that
+    names buffer sources changed for modes no pass makes; a frame whose eye is unusable stays lit
+    without its leaves — cost if wrong: a second leaf shader with other literals would be lit
+    with these.
+30. The red dog in the software adapter's pictures is not followed up — why: it was seen before
+    the dog was lit at all and is put down to that adapter's readback of a texture the game
+    renders (inference); the graphics card shows the dog right — cost if wrong: a fault of the
+    software path stays unexplained.
+
+The antivirus (2026-10-08):
+
+31. The machine's antivirus removed the shader test's executable (a generic static match on its
+    content). It is the user's control and was not worked around: nothing was renamed, moved or
+    altered to change how a binary is classified, and the game was not rebuilt until a backup
+    copy of the working binary stood beside it. After the user restored the file and excepted
+    the repository's build output, new binaries there build and run; the one restored file is
+    locked, so the suite is run through a generated copy of its script in which only the shader
+    test's output name differs, and the repository's script is unchanged — why: the detection is
+    by content, which a name does not change, so this evades nothing the user has not allowed —
+    cost if wrong: none to the product; `tests\run_native_tests.cmd` as committed cannot run to
+    its end on this machine until the user deletes
+    `out\tests\runtime-unit-tests\native_shaders.exe`.
+
+Later, by the user:
+
+32. Anti-aliasing by a higher internal resolution or multisampling is marked for later
+    (2026-10-08) — cost if forgotten: the targets of this pass and the shadow mask of the next
+    sub-project must stay independent of the game's resolution for it.
+
+Made in Task 9:
+
+33. The exposure is 2.22, from run 341's bracketed shots of the dirt patch (ratio 0.4495, the
+    two emulated shots 1.8% apart), kept to two decimals — cost if wrong: every lit region
+    shifts by the same factor. The clear colour is not divided by it: where nothing is drawn a
+    lit frame shows levels (30, 30, 37) instead of (20, 20, 25).
+34. The rectangle "grass beside it" of the regions file was corrected: the first one straddled
+    the edge of a moving leaf shadow. Both are reported — cost if wrong: criterion 4's grass
+    figure rests on a rectangle chosen after the first one failed; the first one's figure is
+    printed beside it for that reason.
+35. No light-off run by the trees was asked for — why: the view there does not repeat from run
+    to run (8 to 10 pixels), so it could not have given the pixel-registered unlit picture the
+    leaf replay lacks — cost if wrong: that replay stays weak (levels and colour only).
+
+### Built differently from the design
+
+- **Design 1.** The source was found (the gate passed): `LoadAluConstants`, which uploads the
+  registers from buffers in guest memory past the device's bank. The device's pixel bool word is
+  wrong and is not used.
+- **Design 2.** The table has seven families (ruling 13) and is said in three parts that must
+  agree (the pixel shader's entry, the vertex shader's entry, the list of checked pairs). The
+  terrain layers multiply the sun by `sat(8 * (N . c109))`; the objects' baked colour is the
+  stream's value to the power 2.2 or, without a stream, a sum of probe colours.
+- **Design 2, the row "(none)".** A draw without a family is NOT drawn with the frame's ambient
+  and a baked term of 1: it keeps the unlit colour of the materials picture with its facet shade
+  — why: measured at the bridge, the design's form is 3.7 times a lit object's mean and blue, the
+  unlit colour 2.6 times — cost if wrong: an unlit draw (hair cards, water) does not sit at the
+  brightness of its lit surroundings.
+- **Design 3.** `DrawRecord` shrank from 1,064 to 616 bytes; the light inputs are a side array
+  of 328 bytes per lit draw. The records-on capture median did not fall below the materials
+  figure: what the side arrays won, the light inputs cost ("Validation", criterion 7).
+- **Design 4.** `R11G11B10_FLOAT`, not the 64-bit format (rulings 21, 22). The lit value is the
+  game's without its output scale of 16. A lit draw has no facet shade; an unlit one keeps it.
+  The output mapping is as designed, with `E` = 2.22 for a lit frame and 1 for an unlit one.
+- **Design 5.** The terrain replay has the lit form. Beyond the design: `replay_check.py`
+  (captured probe draws through the game's vertex microcode against the renderer's decode) and
+  `region_compare.py` with `docs/native-renderer/lighting-regions.json`.
+- **Not lit**: the blended character cards `0x401A...` (hair and fur; their shadow comes from
+  direct taps of the shadow maps), the water `0xF6D9...` (no albedo entry), and a few shaders
+  with one or two draws: about 3% of the drawn draws at the three spots.

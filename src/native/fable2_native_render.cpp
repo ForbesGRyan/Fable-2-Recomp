@@ -45,7 +45,7 @@ REXCVAR_DEFINE_INT32(fable2_native_texture_budget_mb, 512, "Fable2",
                      "textures are evicted above it.");
 REXCVAR_DEFINE_STRING(fable2_native_light, "on", "Fable2",
                       "Native clay pass light: on = terrain, objects, tree trunks, leaves and plants are lit by the "
-                      "game's ambient, baked and sun light (no shadows; exposure not calibrated); "
+                      "game's ambient, baked and sun light (no shadows; one fixed exposure, fitted on the bridge's dirt patch); "
                       "off = the unlit materials picture.");
 REXCVAR_DEFINE_BOOL(fable2_native_d3d_messages, false, "Fable2",
                     "Write the Direct3D debug layer's errors, corruption and warnings to the game log "

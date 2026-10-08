@@ -12,7 +12,15 @@
 namespace fable2::native::render {
 
 namespace {
-constexpr float kClearColor[4] = {0.08f, 0.08f, 0.1f, 1.0f};
+// The draws' colour target and the output mapping's (clay_logic.h, "Linear
+// target and output mapping": kClayLinearTexelBytes, kClayMappedTexelBytes).
+// Every pipeline of the cache renders into the linear format, so PipelineKey
+// does not hold it.
+constexpr nrhi::Format kLinearFormat = nrhi::Format::kR11G11B10_FLOAT;
+constexpr nrhi::Format kMappedFormat = nrhi::Format::kR8G8B8A8_UNORM;
+// The output mapping's binding parameters: its constants (word 0 the exposure)
+// and the linear target at t0.
+constexpr uint32_t kMapParamConstants = 0, kMapParamLinear = 1, kMapConstantCount = 4;
 constexpr uint32_t kConstantCount = sizeof(ClayConstants) / 4;  // 36
 static_assert(kConstantCount == 36);
 // Binding parameters (see Ensure). Root signature cost: 36 words of constants,
@@ -64,10 +72,15 @@ void ClayPass::DestroyObjects() {
     for (nrhi::Pipeline* p : pipelines_) device_->DestroyDeferred(p);
     device_->DestroyDeferred(vs_);
     for (nrhi::Shader* ps : ps_) device_->DestroyDeferred(ps);
+    device_->DestroyDeferred(map_pipeline_);
+    device_->DestroyDeferred(map_vs_);
+    device_->DestroyDeferred(map_ps_);
     terrain_destroy_.clear();
     terrain_pool_.Drain(&terrain_destroy_);
     for (nrhi::Buffer* b : terrain_destroy_) device_->DestroyDeferred(b);
     device_->DestroyDeferred(terrain_cb_);
+    device_->DestroyDeferred(linear_view_);
+    device_->DestroyDeferred(linear_);
     device_->DestroyDeferred(color_);
     device_->DestroyDeferred(depth_);
     device_->DestroyDeferred(white_view_);
@@ -78,9 +91,12 @@ void ClayPass::DestroyObjects() {
   pipelines_.clear();
   vs_ = nullptr;
   for (nrhi::Shader*& ps : ps_) ps = nullptr;
+  map_pipeline_ = nullptr;
+  map_vs_ = map_ps_ = nullptr;
   terrain_destroy_.clear();
   terrain_cb_ = nullptr;
-  color_ = depth_ = nullptr;
+  linear_view_ = nullptr;
+  linear_ = color_ = depth_ = nullptr;
   white_ = nullptr;
   white_view_ = nullptr;
   white_staging_ = nullptr;
@@ -94,7 +110,7 @@ nrhi::Pipeline* ClayPass::CreatePipeline(nrhi::Device* dev, const PipelineKey& k
   pipe.layout = layout_;
   pipe.vs = vs_;
   pipe.ps = ps_[key.textured < kClayPixelShaders ? key.textured : 0];
-  pipe.rtv_format = nrhi::Format::kR8G8B8A8_UNORM;
+  pipe.rtv_format = kLinearFormat;
   pipe.dsv_format = nrhi::Format::kD32_FLOAT;
   pipe.blend.enable = key.blend != 0;
   pipe.blend.src = ToFactor(key.src);
@@ -163,15 +179,19 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     pipelines_.clear();
     vs_ = nullptr;
     for (nrhi::Shader*& ps : ps_) ps = nullptr;
+    map_pipeline_ = nullptr;
+    map_vs_ = map_ps_ = nullptr;
     terrain_destroy_.clear();
     terrain_pool_.Drain(&terrain_destroy_);
     terrain_destroy_.clear();
     terrain_cb_ = nullptr;
-    color_ = depth_ = nullptr;
+    linear_view_ = nullptr;
+    linear_ = color_ = depth_ = nullptr;
     white_ = nullptr;
     white_view_ = nullptr;
     white_staging_ = nullptr;
     layout_ = nullptr;
+    map_layout_ = nullptr;
     device_ = dev;
   } else {
     DestroyObjects();  // retry after a partial failure
@@ -267,14 +287,70 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     return false;
   }
 
+  // The output mapping: a full-screen triangle from the linear target into the
+  // mapped one. Not in the pipeline cache (it is no draw's state).
+  if (!map_layout_) {
+    nrhi::BindingLayoutDesc desc;
+    desc.params[kMapParamConstants].kind = nrhi::BindingParamKind::kConstants;
+    desc.params[kMapParamConstants].shader_register = 0;
+    desc.params[kMapParamConstants].count = kMapConstantCount;
+    desc.params[kMapParamConstants].visibility = nrhi::Visibility::kPixel;
+    desc.params[kMapParamLinear].kind = nrhi::BindingParamKind::kTextureTable;
+    desc.params[kMapParamLinear].shader_register = 0;
+    desc.params[kMapParamLinear].count = 1;
+    desc.params[kMapParamLinear].visibility = nrhi::Visibility::kPixel;
+    desc.param_count = 2;
+    desc.allow_input_layout = false;
+    map_layout_ = dev->CreateBindingLayout(desc);
+    if (!map_layout_) {
+      REXLOG_ERROR("[native] clay: output mapping binding layout creation failed");
+      return false;
+    }
+  }
+  nrhi::ShaderDesc map_shader;
+  map_shader.entry_point = "main";
+  map_shader.stage = nrhi::ShaderStage::kVertex;
+  map_shader.name = "fable2_fullscreen_vs";
+  map_shader.hlsl_source = shaders::kFullscreenVs;
+  map_vs_ = dev->CreateShader(map_shader);
+  map_shader.stage = nrhi::ShaderStage::kPixel;
+  map_shader.name = "fable2_output_map_ps";
+  map_shader.hlsl_source = shaders::kOutputMapPs;
+  map_ps_ = dev->CreateShader(map_shader);
+  if (!map_vs_ || !map_ps_) {
+    REXLOG_ERROR("[native] clay: output mapping shader compile failed");
+    return false;
+  }
+  nrhi::GraphicsPipelineDesc map_pipe;
+  map_pipe.layout = map_layout_;
+  map_pipe.vs = map_vs_;
+  map_pipe.ps = map_ps_;
+  map_pipe.rtv_format = kMappedFormat;
+  map_pipeline_ = dev->CreateGraphicsPipeline(map_pipe);
+  if (!map_pipeline_) {
+    REXLOG_ERROR("[native] clay: output mapping pipeline creation failed");
+    return false;
+  }
+
+  // The three targets, always together: a new linear target comes with a new
+  // mapped one, and targets_generation_ makes the caller render into both
+  // before anything samples the mapped one.
+  nrhi::TextureDesc linear;
+  linear.width = kWidth;
+  linear.height = kHeight;
+  linear.format = kLinearFormat;
+  linear.usage = nrhi::kTextureUsageRenderTarget;
+  linear.initial_state = nrhi::ResourceState::kPixelShaderResource;
+  for (int i = 0; i < 4; ++i) linear.clear_color[i] = kClayClearLinear[i];
+  linear_ = dev->CreateTexture(linear);
+  linear_view_ = linear_ ? dev->CreateTextureView(linear_, nrhi::TextureViewDesc{}) : nullptr;
   nrhi::TextureDesc color;
   color.width = kWidth;
   color.height = kHeight;
-  color.format = nrhi::Format::kR8G8B8A8_UNORM;
+  color.format = kMappedFormat;
   color.usage = nrhi::kTextureUsageRenderTarget;
   color.initial_state = nrhi::ResourceState::kPixelShaderResource;
-  for (int i = 0; i < 4; ++i) color.clear_color[i] = kClearColor[i];
-  color_ = dev->CreateTexture(color);
+  color_ = dev->CreateTexture(color);  // never cleared: the mapping writes every pixel
   nrhi::TextureDesc depth;
   depth.width = kWidth;
   depth.height = kHeight;
@@ -283,12 +359,13 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
   depth.initial_state = nrhi::ResourceState::kPixelShaderResource;
   depth.clear_depth = 1.0f;
   depth_ = dev->CreateTexture(depth);
-  if (!color_ || !depth_) {
+  if (!linear_ || !linear_view_ || !color_ || !depth_) {
     REXLOG_ERROR("[native] clay: target creation failed");
     return false;
   }
   ready_ = true;
   ++targets_generation_;
+  REXLOG_INFO("[native] clay: {} (generation {})", FormatTargetText(kWidth, kHeight), targets_generation_);
   return true;
 }
 
@@ -545,7 +622,7 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
 }
 
 void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
-                      bool textured, ClayStats& st, TextureStats& tst) {
+                      bool textured, ClayLight light, ClayStats& st, TextureStats& tst) {
   if (!ready_ || dev != device_) return;
   // A latched texture cache (RHI failure) resolves nothing: skip the UV decode
   // too, and report the latch on F3.
@@ -638,13 +715,13 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     dev->DestroyDeferred(white_staging_);
     white_staging_ = nullptr;
   }
-  cmd->Barrier(color_, nrhi::ResourceState::kPixelShaderResource,
+  cmd->Barrier(linear_, nrhi::ResourceState::kPixelShaderResource,
                nrhi::ResourceState::kRenderTarget);
   cmd->Barrier(depth_, nrhi::ResourceState::kPixelShaderResource,
                nrhi::ResourceState::kDepthWrite);
   cmd->FlushBarriers();
-  cmd->SetRenderTargets(color_, depth_);
-  cmd->ClearRenderTarget(color_, kClearColor);
+  cmd->SetRenderTargets(linear_, depth_);
+  cmd->ClearRenderTarget(linear_, kClayClearLinear);
   cmd->ClearDepth(depth_, 1.0f);
   cmd->SetViewport({0.0f, 0.0f, float(kWidth), float(kHeight), 0.0f, 1.0f});
   cmd->SetScissor({0, 0, int32_t(kWidth), int32_t(kHeight)});
@@ -715,9 +792,27 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     }
   }
 
-  cmd->Barrier(color_, nrhi::ResourceState::kRenderTarget,
+  // The output mapping: every pixel of the mapped target from the linear target
+  // of this Render (cleared and drawn above), so the composite never samples a
+  // mapped target older than its linear one, or one that was never written.
+  cmd->Barrier(linear_, nrhi::ResourceState::kRenderTarget,
                nrhi::ResourceState::kPixelShaderResource);
   cmd->Barrier(depth_, nrhi::ResourceState::kDepthWrite,
+               nrhi::ResourceState::kPixelShaderResource);
+  cmd->Barrier(color_, nrhi::ResourceState::kPixelShaderResource,
+               nrhi::ResourceState::kRenderTarget);
+  cmd->FlushBarriers();
+  cmd->SetRenderTargets(color_, nullptr);
+  cmd->SetViewport({0.0f, 0.0f, float(kWidth), float(kHeight), 0.0f, 1.0f});
+  cmd->SetScissor({0, 0, int32_t(kWidth), int32_t(kHeight)});
+  cmd->SetBindingLayout(map_layout_);
+  cmd->SetPipeline(map_pipeline_);
+  const float map_constants[kMapConstantCount] = {ClayExposure(light), 0.0f, 0.0f, 0.0f};
+  cmd->SetRootConstants(kMapParamConstants, kMapConstantCount, map_constants, 0);
+  cmd->SetTexture(kMapParamLinear, linear_view_);
+  cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+  cmd->Draw(3, 0);
+  cmd->Barrier(color_, nrhi::ResourceState::kRenderTarget,
                nrhi::ResourceState::kPixelShaderResource);
   cmd->FlushBarriers();
 

@@ -42,6 +42,9 @@ REXCVAR_DEFINE_INT32(fable2_native_texture_upload_mb, 8, "Fable2",
 REXCVAR_DEFINE_INT32(fable2_native_texture_budget_mb, 512, "Fable2",
                      "GPU memory budget (MB) for native albedo textures; least recently used "
                      "textures are evicted above it.");
+REXCVAR_DEFINE_STRING(fable2_native_light, "off", "Fable2",
+                      "Native clay pass light: off = the unlit materials picture (the linear "
+                      "target mapped with exposure 1); on = the same for now (lit shaders follow).");
 
 namespace fable2::native {
 namespace nrhi = rex::graphics::nrhi;
@@ -142,6 +145,16 @@ render::ClayColor CurrentClayColor() {
                 REXCVAR_GET(fable2_native_clay_color));
   }
   return color;
+}
+
+render::ClayLight CurrentClayLight() {
+  static std::atomic<bool> warned{false};
+  bool recognized = true;
+  const render::ClayLight light = render::ParseClayLight(REXCVAR_GET(fable2_native_light), &recognized);
+  if (!recognized && !warned.exchange(true)) {
+    REXLOG_WARN("[native] unknown fable2_native_light '{}', using off", REXCVAR_GET(fable2_native_light));
+  }
+  return light;
 }
 
 bool EnsureResources(nrhi::Device* device, nrhi::Format format) {
@@ -248,7 +261,7 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   g_clay->textures().BeginFrame(g_clay_frames, TextureBudgetBytes(), TextureUploadBytes());
   render::ClayStats st;
   render::TextureStats tst;
-  g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, st, tst);
+  g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), st, tst);
   SetStatus(render::FormatStatusText(*scene, st, textures ? &tst : nullptr));
   const double cpu_ms = st.hash_ms + st.decode_ms + st.record_ms + tst.decode_ms;
   const uint32_t pending = tst.status[size_t(capture::MaterialStatus::kTexturePending)];
@@ -349,6 +362,8 @@ void Install(rex::memory::Memory* memory) {
   g_installed.store(true, std::memory_order_release);
   REXLOG_INFO("[native] native renderer installed (view={}, F6 cycles views)",
               ViewName(CurrentView()));
+  REXLOG_INFO("[native] light: {} (fable2_native_light)",
+              CurrentClayLight() == render::ClayLight::kOn ? "on" : "off");
 }
 
 // Game thread only: the string cvar is touched here only.
@@ -375,6 +390,15 @@ bool ArmDiscovery(uint32_t frames, uint32_t every) {
 
 void PollFrame() {
   if (!g_installed.load(std::memory_order_acquire)) return;
+  {
+    // Frame times per view (ViewFrameLog; game thread). Costs a timestamp a frame.
+    static ViewFrameLog frames;
+    static const std::chrono::steady_clock::time_point epoch = std::chrono::steady_clock::now();
+    const double now_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - epoch).count();
+    const std::string line = frames.Add(CurrentView(), now_ms);
+    if (!line.empty()) REXLOG_INFO("[native] frames: {}", line);
+  }
   if (const int pending = g_pending_view.exchange(-1, std::memory_order_acq_rel); pending >= 0) {
     ApplyView(View(pending), "autoplay");
   }

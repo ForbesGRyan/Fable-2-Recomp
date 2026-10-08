@@ -1,7 +1,10 @@
 #pragma once
 
-// "Clay" rendering of the captured main scene into a native 1120x720 target
-// (R8G8B8A8 color + D32 depth). Vertices are pulled from the geometry cache's
+// "Clay" rendering of the captured main scene into native 1120x720 targets:
+// linear colour (R11G11B10_FLOAT) with D32 depth, then one full-screen
+// output mapping, display = sqrt(saturate(linear * exposure)), into the 8-bit
+// target (R8G8B8A8) the composite views sample (clay_logic.h, "Linear target
+// and output mapping"). Vertices are pulled from the geometry cache's
 // StructuredBuffers by SV_VertexID and transformed by each draw's captured
 // rows. With textures on, draws whose capture resolved an albedo and UVs
 // sample it (texture cache, unlit, softened facet shade); terrain records are
@@ -41,19 +44,25 @@ class ClayPass {
   // Targets, binding layout, shaders (the four pixel shaders: kClayPs for flat
   // draws, kClayTexturedPs for textured ones, kClayTerrainLayerPs and
   // kClayTerrainFarPs for terrain), their four default pipelines and the
-  // default pipeline of a flat terrain draw. False on any failure (logged);
-  // call again to retry.
+  // default pipeline of a flat terrain draw, and the output mapping's layout,
+  // shaders and pipeline. False on any failure (logged); call again to retry.
   bool Ensure(nrhi::Device* dev);
-  // Bumped each time Ensure creates new targets: their contents are
-  // undefined until the next Render.
+  // Bumped each time Ensure creates new targets (all three together): their
+  // contents are undefined until the next Render, which writes every pixel of
+  // the linear target (clear, draws) and then every pixel of the mapped one.
   uint64_t targets_generation() const { return targets_generation_; }
   // `textured`: draws may sample their albedo (fable2_native_textures). tst
   // receives the texture counters and the final material status of every
-  // drawn record (untouched when textured is false).
+  // drawn record (untouched when textured is false). `light`:
+  // fable2_native_light; it sets the output mapping's exposure (ClayExposure)
+  // and nothing else yet.
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
-              bool textured, ClayStats& st, TextureStats& tst);
-  nrhi::Texture* color() const { return color_; }  // left in kPixelShaderResource after Render
-  nrhi::Texture* depth() const { return depth_; }  // likewise
+              bool textured, ClayLight light, ClayStats& st, TextureStats& tst);
+  // The mapped target (display values, 8 bits): what the composite views
+  // sample. Left in kPixelShaderResource after Render, and written by the same
+  // Render that drew the linear target.
+  nrhi::Texture* color() const { return color_; }
+  nrhi::Texture* depth() const { return depth_; }  // left in kPixelShaderResource after Render
   GeometryCache& geometry() { return geometry_; }
   TextureCache& textures() { return textures_; }
 
@@ -154,8 +163,20 @@ class ClayPass {
   // At most kMaxClayPipelines, never evicted within a run.
   std::vector<PipelineKey> pipeline_keys_;
   std::vector<nrhi::Pipeline*> pipelines_;
+  // The three targets, created and destroyed together (Ensure, DestroyObjects):
+  // linear_ is what the draws render into (with depth_), color_ what the output
+  // mapping writes from it at the end of each Render. linear_view_ is the
+  // mapping's view of linear_; the mapping has its own layout (the exposure in
+  // root constants, the linear target at t0), shaders and pipeline, outside the
+  // pipeline cache.
+  nrhi::Texture* linear_ = nullptr;
+  nrhi::TextureView* linear_view_ = nullptr;
   nrhi::Texture* color_ = nullptr;
   nrhi::Texture* depth_ = nullptr;
+  nrhi::BindingLayout* map_layout_ = nullptr;  // the RHI has no layout destruction
+  nrhi::Shader* map_vs_ = nullptr;
+  nrhi::Shader* map_ps_ = nullptr;
+  nrhi::Pipeline* map_pipeline_ = nullptr;
   // 1x1 white texture bound at t3 for untextured draws; its contents are
   // copied from white_staging_ by the first Render after creation.
   nrhi::Texture* white_ = nullptr;

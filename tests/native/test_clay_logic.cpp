@@ -3,6 +3,7 @@
 #include "../../src/native/fable2_native_shaders.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <cmath>
@@ -55,6 +56,25 @@ static capture::RenderState State(uint32_t depth, uint32_t blend, uint32_t alpha
   w.vte_cntl = 0x0000043Fu;
   w.read = true;
   return capture::DecodeRenderState(w);
+}
+
+// What a float colour channel with `mantissa_bits` stored bits keeps of a value in [0, 1]: 10 bits for a
+// channel of R16G16B16A16_FLOAT, 6 for red and green and 5 for blue of R11G11B10_FLOAT (every one with
+// five exponent bits, least normal 2^-14, denormals below). `nearest`: rounded to the nearest stored
+// value, else toward zero (a GPU may do either when it writes a target).
+static float StoredFloat(float v, int mantissa_bits, bool nearest) {
+  if (!(v > 0.0f)) return 0.0f;
+  int e = int(std::floor(std::log2(double(v))));
+  if (e < -14) e = -14;
+  const double step = std::ldexp(1.0, e - mantissa_bits);
+  const double q = double(v) / step;
+  return float((nearest ? std::floor(q + 0.5) : std::floor(q)) * step);
+}
+
+// The 8-bit level a UNORM target stores for `v` (rounded to nearest).
+static int Level8(float v) {
+  const float c = v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v;
+  return int(std::floor(c * 255.0f + 0.5f));
 }
 
 int main() {
@@ -1931,10 +1951,190 @@ int main() {
                    "degenerate 0 | skewed by vs {0xECD66A10092E6562: 2} | light-unknown 1 by vs {0xECD66A10092E6562: 1} | "
                    "normal-unsupported 2 by vs {0x79EAC49585797037: 2}");
   }
+
+  // 390-417: the linear target and the output mapping (frame-map section 14, "Linear target").
+  {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    // display = sqrt(saturate(linear * E)).
+    CHECK(390, OutputMap(0.0f, 1.0f) == 0.0f && OutputMap(0.25f, 1.0f) == 0.5f && OutputMap(1.0f, 1.0f) == 1.0f &&
+                   OutputMap(4.0f, 1.0f) == 1.0f);
+    CHECK(391, OutputMap(0.0625f, 4.0f) == 0.5f && OutputMap(0.25f, 0.25f) == 0.25f && OutputMap(0.5f, 8.0f) == 1.0f);
+    // Nothing but a value in [0, 1] comes out: a negative value, a NaN and 0 * infinity give 0, +infinity 1.
+    CHECK(392, OutputMap(-0.25f, 1.0f) == 0.0f && OutputMap(-inf, 1.0f) == 0.0f && OutputMap(nan, 1.0f) == 0.0f &&
+                   OutputMap(1.0f, nan) == 0.0f && OutputMap(0.25f, -1.0f) == 0.0f);
+    CHECK(393, OutputMap(inf, 1.0f) == 1.0f && OutputMap(inf, 0.0f) == 0.0f && OutputMap(0.0f, inf) == 0.0f &&
+                   OutputMap(-0.0f, 1.0f) == 0.0f && !std::signbit(OutputMap(-0.0f, 1.0f)));
+
+    // What a clay pixel shader writes for a display value: the value the 8-bit target held (clamped to
+    // [0, 1]), squared; never a NaN, a negative value or more than 1.
+    CHECK(394, ClayLinear(0.0f) == 0.0f && ClayLinear(0.5f) == 0.25f && ClayLinear(1.0f) == 1.0f);
+    CHECK(395, ClayLinear(2.0f) == 1.0f && ClayLinear(inf) == 1.0f && ClayLinear(-0.5f) == 0.0f &&
+                   ClayLinear(-inf) == 0.0f && ClayLinear(nan) == 0.0f);
+    // The terrain shaders have the linear value itself and shade it: v * shade^2, clamped the same way.
+    CHECK(396, ClayLinearShaded(0.25f, 0.5f) == 0.0625f && ClayLinearShaded(1.0f, 1.0f) == 1.0f &&
+                   ClayLinearShaded(4.0f, 1.0f) == 1.0f && ClayLinearShaded(-1.0f, 1.0f) == 0.0f &&
+                   ClayLinearShaded(nan, 1.0f) == 0.0f && ClayLinearShaded(1.0f, nan) == 0.0f &&
+                   ClayLinearShaded(inf, 0.0f) == 0.0f);
+
+    // The format (R11G11B10_FLOAT: red and green have 6 mantissa bits, blue 5; no sign, no alpha),
+    // measured: each of the 256 levels the 8-bit target could hold, squared, stored in the channel,
+    // mapped and stored in 8 bits again, for either way a GPU may round when it writes the target.
+    // Red and green come back at most one level off; blue at most one level off when rounded to
+    // nearest and at most three when rounded toward zero (two levels, 183 and 199). A half-float
+    // channel (R16G16B16A16_FLOAT, 2 to 3 ms a frame more in one set of game runs, and not taken)
+    // returns every level as itself.
+    {
+      const int bits[3] = {6, 5, 10};  // red and green; blue; a half-float channel
+      int exact[3][2] = {}, worst[3][2] = {}, three_off[2] = {};
+      for (int f = 0; f < 3; ++f) {
+        for (int mode = 0; mode < 2; ++mode) {
+          for (int k = 0; k < 256; ++k) {
+            const float stored = StoredFloat(ClayLinear(float(k) / 255.0f), bits[f], mode == 0);
+            const int off = std::abs(Level8(OutputMap(stored, 1.0f)) - k);
+            exact[f][mode] += off == 0 ? 1 : 0;
+            worst[f][mode] = std::max(worst[f][mode], off);
+            if (f == 1 && off == 3) ++three_off[mode];
+          }
+        }
+      }
+      CHECK(397, worst[0][0] == 1 && worst[0][1] == 1 && worst[1][0] == 1 && worst[1][1] == 3 &&
+                     three_off[0] == 0 && three_off[1] == 2);
+      CHECK(398, exact[0][0] == 245 && exact[0][1] == 193 && exact[1][0] == 187 && exact[1][1] == 123 &&
+                     exact[2][0] == 256 && exact[2][1] == 256 && worst[2][0] == 0 && worst[2][1] == 0);
+      std::cout << "linear target, 8-bit levels that come back as themselves of 256 (rounded to nearest / toward zero), "
+                << "largest error in levels: red and green (11-bit float) " << exact[0][0] << " / " << exact[0][1] << ", "
+                << worst[0][0] << " / " << worst[0][1] << "; blue (10-bit float) " << exact[1][0] << " / " << exact[1][1]
+                << ", " << worst[1][0] << " / " << worst[1][1] << "; a half-float channel " << exact[2][0] << " / "
+                << exact[2][1] << ", " << worst[2][0] << " / " << worst[2][1] << "\n";
+    }
+
+    // The facet shade (0.35 + 0.65 f for flat clay, 0.75 + 0.25 f for a textured draw) multiplied the
+    // display value in the 8-bit target, so the linear value is the square of that product: the mapping
+    // then gives the product back. Exactly as real numbers; through the target's channels a shaded value
+    // lands at most two levels (red, green) or three (blue) from where the 8-bit target had it, far
+    // below the eight levels the comparison with the materials picture counts.
+    {
+      float exact = 0.0f;
+      const int bits[2] = {6, 5};  // red and green; blue
+      int total = 0, off[2][2][4] = {};  // [channel][rounding][levels off, 3 = three or more]
+      int farthest = 0;
+      for (int textured = 0; textured < 2; ++textured) {
+        for (float facet : {0.0f, 0.3f, 0.77f, 1.0f}) {
+          const float shade = textured ? 0.75f + 0.25f * facet : 0.35f + 0.65f * facet;
+          for (int k = 0; k < 256; ++k) {
+            const float c = float(k) / 255.0f;
+            const float display = c * shade;  // what the shaders wrote before
+            exact = std::max(exact, std::fabs(OutputMap(ClayLinear(display), 1.0f) - display));
+            exact = std::max(exact, std::fabs(OutputMap(ClayLinearShaded(c * c, shade), 1.0f) - display));
+            ++total;
+            for (int f = 0; f < 2; ++f) {
+              for (int mode = 0; mode < 2; ++mode) {
+                const int was = Level8(display);
+                const int is = Level8(OutputMap(StoredFloat(ClayLinear(display), bits[f], mode == 0), 1.0f));
+                const int d = std::abs(was - is);
+                ++off[f][mode][d < 3 ? d : 3];
+                farthest = std::max(farthest, d);
+              }
+            }
+          }
+        }
+      }
+      CHECK(399, exact < 1e-6f);
+      CHECK(400, total == 2048 && farthest == 3 && off[0][0][2] == 0 && off[0][0][3] == 0 && off[0][1][3] == 0 &&
+                     off[1][0][3] == 0 && off[0][1][2] < 16 && off[1][0][2] < 16 && off[1][1][3] < 32);
+      std::cout << "shaded values through the target, of " << total << " (one / two / three levels off): red and green "
+                << off[0][0][1] << " / " << off[0][0][2] << " / " << off[0][0][3] << " rounded to nearest, "
+                << off[0][1][1] << " / " << off[0][1][2] << " / " << off[0][1][3] << " toward zero; blue "
+                << off[1][0][1] << " / " << off[1][0][2] << " / " << off[1][0][3] << " and " << off[1][1][1] << " / "
+                << off[1][1][2] << " / " << off[1][1][3] << "\n";
+      // Control: the shade applied to the linear value as it is would be a different picture
+      // (white flat clay facing away: the root of 0.35 instead of 0.35).
+      CHECK(401, Level8(OutputMap(ClayLinear(1.0f) * 0.35f, 1.0f)) - Level8(0.35f) > 8);
+    }
+
+    // Every blend into the target rounds again. Five additive layers of one colour and equal weight
+    // (a ground square has about five layer draws; a pixel usually has one or two with a weight),
+    // stored after each: the mapped sum is at most three levels (red, green) or six (blue, rounded
+    // toward zero) from the colour, still under eight.
+    {
+      const int bits[2] = {6, 5};
+      int worst[2][2] = {};
+      for (int f = 0; f < 2; ++f) {
+        for (int mode = 0; mode < 2; ++mode) {
+          for (int k = 1; k < 256; ++k) {
+            const float part = ClayLinear(float(k) / 255.0f) / 5.0f;
+            float sum = 0.0f;
+            for (int layer = 0; layer < 5; ++layer) sum = StoredFloat(sum + part, bits[f], mode == 0);
+            worst[f][mode] = std::max(worst[f][mode], std::abs(Level8(OutputMap(sum, 1.0f)) - k));
+          }
+        }
+      }
+      CHECK(416, worst[0][0] <= 2 && worst[0][1] <= 3 && worst[1][0] <= 3 && worst[1][1] <= 6);
+      std::cout << "five equal additive layers stored after each blend, largest error in levels (nearest / toward zero): "
+                << "red and green " << worst[0][0] << " / " << worst[0][1] << ", blue " << worst[1][0] << " / "
+                << worst[1][1] << "\n";
+    }
+
+    // Terrain layers add linear values with their captured blend (the game's own sum). Where one layer
+    // has the whole weight, or both have one colour, the mapped value is what the display-space sum was;
+    // in between it is brighter, never darker (0.3 against 0.6 at half weight: 0.474 where it was 0.45).
+    {
+      float band = 0.0f;
+      bool never_darker = true;
+      for (int i = 0; i <= 16; ++i) {
+        const float w = float(i) / 16.0f;
+        const float was = w * 0.3f + (1.0f - w) * 0.6f;
+        const float is = OutputMap(w * ClayLinear(0.3f) + (1.0f - w) * ClayLinear(0.6f), 1.0f);
+        never_darker = never_darker && is >= was - 1e-6f;
+        band = std::max(band, is - was);
+      }
+      CHECK(402, never_darker && band > 0.02f && band < 0.03f);
+      CHECK(403, std::fabs(OutputMap(1.0f * ClayLinear(0.3f) + 0.0f * ClayLinear(0.6f), 1.0f) - 0.3f) < 1e-6f &&
+                     std::fabs(OutputMap(0.5f * ClayLinear(0.4f) + 0.5f * ClayLinear(0.4f), 1.0f) - 0.4f) < 1e-6f);
+      // A sum over 1, which the float target keeps where the 8-bit one clamped, is 1 after the mapping.
+      CHECK(404, OutputMap(ClayLinear(0.9f) + ClayLinear(0.9f), 1.0f) == 1.0f);
+    }
+
+    // The clear colour: the levels the 8-bit target showed, as linear values the target's channels hold
+    // exactly (so that the clear does not depend on how a GPU rounds); they come back as those levels.
+    CHECK(405, kClayClearLevels[0] == 20 && kClayClearLevels[1] == 20 && kClayClearLevels[2] == 25 &&
+                   kClayClearLinear[3] == 1.0f);
+    for (int i = 0; i < 3; ++i) {
+      const int bits = i == 2 ? 5 : 6;
+      CHECK(406, Level8(OutputMap(kClayClearLinear[i], 1.0f)) == kClayClearLevels[i]);
+      CHECK(415, StoredFloat(kClayClearLinear[i], bits, true) == kClayClearLinear[i] &&
+                     StoredFloat(kClayClearLinear[i], bits, false) == kClayClearLinear[i]);
+      // (of the values the channel holds, the one nearest the level's square)
+      CHECK(417, StoredFloat(ClayLinear(float(kClayClearLevels[i]) / 255.0f), bits, true) == kClayClearLinear[i]);
+    }
+
+
+    // The light switch (fable2_native_light): off or on; anything else is off and not recognised.
+    bool ok = false;
+    CHECK(407, ParseClayLight("off", &ok) == ClayLight::kOff && ok);
+    CHECK(408, ParseClayLight(" On ", &ok) == ClayLight::kOn && ok);
+    CHECK(409, ParseClayLight("true", &ok) == ClayLight::kOff && !ok);
+    CHECK(410, ParseClayLight("", &ok) == ClayLight::kOff && !ok && ParseClayLight("on", nullptr) == ClayLight::kOn);
+    // The exposure of the output mapping: 1 with light off (the materials picture), and 1 with light on
+    // until the lit shaders exist and it is calibrated.
+    CHECK(411, ClayExposure(ClayLight::kOff) == 1.0f && ClayExposure(ClayLight::kOn) == 1.0f);
+
+    // Target memory at the pass's size, and the line that reports it.
+    CHECK(412, kClayLinearTexelBytes == 4 && kClayMappedTexelBytes == 4 && kClayDepthTexelBytes == 4 &&
+                   ClayTargetBytes(1120, 720, kClayLinearTexelBytes) == 3225600ull &&
+                   ClayTargetBytes(1120, 720, 8) == 6451200ull);
+    CHECK(413, FormatTargetText(1120, 720) ==
+                   "targets 1120 x 720: linear R11G11B10_FLOAT 3.1 MB, mapped R8G8B8A8_UNORM 3.1 MB, "
+                   "depth D32_FLOAT 3.1 MB");
+    // The linear format is one for every pipeline of the pass, so the key has no field for it: the
+    // same keys, and the same number of pipelines, as with the 8-bit target.
+    CHECK(414, sizeof(PipelineKey) == 13);
+  }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
                "alpha-to-mask, terrain keys, terrain draw state, terrain constants, terrain squares, "
-               "terrain text, normal and colour keys, light text\n";
+               "terrain text, normal and colour keys, light text, linear target and output mapping\n";
   return 0;
 }

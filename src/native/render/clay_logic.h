@@ -751,6 +751,104 @@ inline ClayConstants MakeClayConstants(const capture::DrawRecord& r, uint32_t ve
   return c;
 }
 
+// --- Linear target and output mapping (frame-map section 14, "Linear target") ---
+// The pass draws linear colour into a float target, as the game does, and one
+// full-screen step (shaders::kOutputMapPs) makes the display values of the 8-bit
+// target the composite views sample: display = sqrt(saturate(linear * E)). The
+// functions below are the HLSL's rules; test_native_shaders.cpp pins the
+// statements they mirror.
+
+// The output mapping for one channel. Only a value in [0, 1] comes out: a
+// negative value, a NaN (no comparison holds for it) and 0 * infinity give 0,
+// +infinity gives 1.
+inline float OutputMap(float linear, float exposure) {
+  const float v = linear * exposure;
+  if (!(v > 0.0f)) return 0.0f;
+  return std::sqrt(v < 1.0f ? v : 1.0f);
+}
+
+// What a clay pixel shader writes for the display value `display` (albedo or
+// clay colour times the facet shade: the value the 8-bit target held, which
+// clamped it to [0, 1]): its square, so that the mapping with E = 1 gives the
+// value back. The shade therefore multiplies before the square. A NaN gives 0.
+inline float ClayLinear(float display) {
+  if (!(display > 0.0f)) return 0.0f;
+  const float d = display < 1.0f ? display : 1.0f;
+  return d * d;
+}
+
+// The terrain shaders have the linear value itself (the game's A = tf0^2,
+// F = tf13^2, or the steep-ground mix) and the shade of the display value:
+// (sqrt(v) * shade)^2 = v * shade^2, clamped as ClayLinear clamps.
+inline float ClayLinearShaded(float linear, float shade) {
+  const float v = linear * shade * shade;
+  if (!(v > 0.0f)) return 0.0f;
+  return v < 1.0f ? v : 1.0f;
+}
+
+// The pass's clear colour: the 8-bit levels the old target showed where nothing
+// is drawn (it was cleared to 0.08, 0.08, 0.1; 20, 20, 25 in the shots), and
+// for the linear target the values nearest those levels' squares that its
+// channels hold exactly (101 steps of 2^-14 in the 11-bit floats, 39 of 2^-12
+// in the 10-bit one), so that the clear does not depend on a GPU's rounding;
+// the mapping returns the three levels. The fourth is the alpha of the clear
+// call; the target has none.
+inline constexpr int kClayClearLevels[3] = {20, 20, 25};
+inline constexpr float kClayClearLinear[4] = {101.0f / 16384.0f, 101.0f / 16384.0f, 39.0f / 4096.0f, 1.0f};
+
+// fable2_native_light. Off: every light term is 1 and the exposure is 1, which
+// is the materials picture. On: nothing more yet (the lit shaders follow).
+enum class ClayLight : uint8_t { kOff, kOn };
+
+inline ClayLight ParseClayLight(std::string_view text, bool* recognized) {
+  while (!text.empty() && text.front() == ' ') text.remove_prefix(1);
+  while (!text.empty() && text.back() == ' ') text.remove_suffix(1);
+  std::string lower(text);
+  for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+  if (recognized) *recognized = lower == "off" || lower == "on";
+  return lower == "on" ? ClayLight::kOn : ClayLight::kOff;
+}
+
+// The output mapping's exposure E: one number for the frame, no draw's own.
+// 1 with light off; with light on it stays 1 until the lit shaders exist and E
+// is calibrated against the emulated frame (spec, design 4).
+inline float ClayExposure(ClayLight light) {
+  switch (light) {
+    case ClayLight::kOff: return 1.0f;
+    case ClayLight::kOn: return 1.0f;
+  }
+  return 1.0f;
+}
+
+// Bytes per texel of the pass's three targets: the linear colour
+// (R11G11B10_FLOAT: 11-bit floats for red and green, a 10-bit float for blue,
+// no sign and no alpha), the mapped colour (R8G8B8A8_UNORM) and the depth
+// (D32_FLOAT). The 32-bit float format was taken for the frame rate (ruling,
+// 2026-10-08): R16G16B16A16_FLOAT, 8 bytes, returns every 8-bit level exactly
+// but cost 2 to 3 ms a frame more in one set of game runs (later runs did not
+// separate the two formats); this one is up to one level off
+// in red and green and up to three in blue (test_clay_logic.cpp, cases 397 to
+// 400 and 416; frame-map section 14, "Linear target"). The linear format is one
+// for every pipeline of the pass, so PipelineKey has no field for it.
+inline constexpr uint32_t kClayLinearTexelBytes = 4, kClayMappedTexelBytes = 4, kClayDepthTexelBytes = 4;
+
+inline uint64_t ClayTargetBytes(uint32_t width, uint32_t height, uint32_t texel_bytes) {
+  return uint64_t(width) * height * texel_bytes;
+}
+
+// The log line of the pass's targets, written when they are created.
+inline std::string FormatTargetText(uint32_t width, uint32_t height) {
+  const double mb = 1024.0 * 1024.0;
+  char buf[192];
+  std::snprintf(buf, sizeof(buf),
+                "targets %u x %u: linear R11G11B10_FLOAT %.1f MB, mapped R8G8B8A8_UNORM %.1f MB, "
+                "depth D32_FLOAT %.1f MB",
+                width, height, double(ClayTargetBytes(width, height, kClayLinearTexelBytes)) / mb,
+                double(ClayTargetBytes(width, height, kClayMappedTexelBytes)) / mb,
+                double(ClayTargetBytes(width, height, kClayDepthTexelBytes)) / mb);
+  return buf;
+}
+
 // --- Terrain material (frame-map section 13, "Terrain", "Native terrain material") ---
 // A terrain record whose inputs and textures are usable is drawn by one of the
 // two terrain pixel shaders (fable2_native_shaders.h) with its captured render

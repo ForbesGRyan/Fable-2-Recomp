@@ -1,12 +1,17 @@
 #pragma once
 
 // Pure state helpers for the native renderer plumbing (no SDK/GPU deps) so
-// they are unit-testable: view parsing, F6 edge detection, sticky failure.
+// they are unit-testable: view parsing, F6 edge detection, sticky failure,
+// frame times per view.
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstddef>
+#include <cstdio>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace fable2::native {
 
@@ -66,6 +71,60 @@ inline bool ViewChanges(View current, View next) { return current != next; }
 inline bool RecordsWanted(View v, bool latch_failed) {
   return !latch_failed && IsCompositeView(v);
 }
+
+// Guest frame times per view, for the log line "[native] frames: ..."
+// (fable2_native_render.cpp, PollFrame): the `[frame] guest` windows of the SDK
+// mix the views a plan switches through, this line does not. One Add per guest
+// frame with the view in effect and a monotonic time in milliseconds; it
+// returns the line's text when the view holds kWindow intervals, and at a view
+// switch for the stretch that ends (if it has at least kMinFrames), else an
+// empty string. An interval is the time between two consecutive frames of one
+// view: the frame at which the view changes starts the next stretch and its
+// interval is counted for neither. Cost per frame: the caller's timestamp and
+// one stored number; a sort of at most kWindow numbers per line.
+class ViewFrameLog {
+ public:
+  static constexpr size_t kWindow = 150, kMinFrames = 10;
+
+  std::string Add(View view, double now_ms) {
+    std::string line;
+    if (started_ && view != view_) {
+      if (intervals_.size() >= kMinFrames) line = Summary("until the switch");
+      intervals_.clear();
+    } else if (started_) {
+      const double interval = now_ms - last_ms_;
+      intervals_.push_back(interval > 0.0 ? interval : 0.0);
+      if (intervals_.size() >= kWindow) {
+        line = Summary("window");
+        intervals_.clear();
+      }
+    }
+    started_ = true;
+    view_ = view;
+    last_ms_ = now_ms;
+    return line;
+  }
+
+ private:
+  // "view V (why): N frames, mean, fps, median, p90, max" of intervals_ (not empty).
+  std::string Summary(const char* why) {
+    std::sort(intervals_.begin(), intervals_.end());
+    const size_t n = intervals_.size();
+    double sum = 0.0;
+    for (double v : intervals_) sum += v;
+    char buf[192];
+    std::snprintf(buf, sizeof(buf),
+                  "view %s (%s): %zu frames, mean %.2f ms (%.1f fps), median %.2f ms, p90 %.2f ms, max %.2f ms",
+                  ViewName(view_), why, n, sum / double(n), sum > 0.0 ? 1000.0 * double(n) / sum : 0.0,
+                  intervals_[n / 2], intervals_[n * 9 / 10], intervals_[n - 1]);
+    return buf;
+  }
+
+  std::vector<double> intervals_;
+  View view_ = View::kOff;
+  double last_ms_ = 0.0;
+  bool started_ = false;
+};
 
 class EdgeDetector {
  public:

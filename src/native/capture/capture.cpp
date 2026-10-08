@@ -2864,19 +2864,28 @@ void LogShaderBreakdown(const render::FrameScene& sc) {
 // Ownership of the records and their side arrays (FrameScene::terrain): while a
 // frame is captured they belong to g_builder and are written only under
 // g_scene_mutex. FrameBuilder::Finish (EndMainSceneFrame, under that mutex)
-// moves them into a new FrameScene and leaves the builder with new, empty
-// vectors; EndMainSceneFrame fills the scene's two remaining fields and keeps
-// only a pointer to const, so from then on nothing can write them. The scene
-// is published here as a shared_ptr<const FrameScene>: the render thread takes
-// its own reference (ScenePublisher::Latest, under the publisher's mutex) and
-// only reads, for as long as it keeps that reference; pointers into the scene
-// (TerrainOf) are valid for that long. A side array is therefore never read
-// while it is written: it is reachable from the render thread only after the
-// last write to it.
+// moves them into a new FrameScene and gives the builder other buffers (below);
+// EndMainSceneFrame fills the scene's two remaining fields and keeps only a
+// pointer to const, so from then on nothing writes them while a reference to
+// the scene exists. The scene is published here as a
+// shared_ptr<const FrameScene>: the render thread takes its own reference
+// (ScenePublisher::Latest, under the publisher's mutex) and only reads, for as
+// long as it keeps that reference; pointers into the scene (TerrainOf) are
+// valid for that long and no longer. A side array is therefore never read
+// while it is written: it is reachable from the render thread only between its
+// last write and the drop of the scene's last reference.
+// Reuse: when that last reference drops (on the render thread, or here when a
+// scene is replaced before it was drawn) the scene's deleter hands the two
+// buffers to the builder's spare list (render::SceneBufferPool: its own lock,
+// at most four pairs, the rest freed), and a later Finish takes a pair,
+// cleared, for the next frame. A spare is reachable from no scene. The spares
+// are freed when a frame has no records (the view went off, where the scene is
+// released too): the builder then keeps its one pair, and nothing else.
 void PublishScene(const FinishedScene& done) {
   if (!done.scene) return;
   const render::FrameScene& sc = *done.scene;
   Publisher().Publish(sc.records ? done.scene : nullptr);
+  if (!sc.records) g_builder.ReleaseSpares();  // (locks the spare list only: no scene mutex needed)
   g_capture_window.Add(sc.capture_ms);
   if (sc.frame % 300 != 0) return;
   std::string skipped, unsupported;

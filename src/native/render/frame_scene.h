@@ -4,6 +4,7 @@
 // thread (pure: no SDK/GPU deps). Pattern: skate3recomp's FrameScene.
 
 #include <algorithm>
+#include <array>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -24,7 +25,8 @@ struct FrameScene {
   std::vector<capture::DrawRecord> draws;
   // Side array of `draws`: the terrain inputs of its terrain records, each at
   // its record's terrain_index (TerrainOf). Built with the records, handed
-  // over with them (FrameBuilder::Finish) and, like them, never written again.
+  // over with them (FrameBuilder::Finish) and, like them, not written again
+  // while anything refers to the scene.
   std::vector<capture::TerrainPatch> terrain;
   uint32_t captured = 0;
   uint32_t skipped[size_t(capture::SkipReason::kCount)] = {};
@@ -52,6 +54,59 @@ inline const capture::TerrainPatch* TerrainOf(const FrameScene& scene, const cap
   return &scene.terrain[r.terrain_index];
 }
 
+// The record and side-array buffers of scenes nothing refers to any more, kept
+// for the builder to fill again: a new allocation of that size is new pages,
+// and a frame's records then cost a page fault per page on the guest thread.
+// The list has its own lock, so buffers come back from whichever thread drops
+// a scene's last reference (usually the render thread) without the capture's
+// scene mutex; nothing is freed or allocated while the list's lock is held.
+// At most kMaxSpares pairs are kept. A buffer is in exactly one place: the
+// builder, one scene, or this list.
+class SceneBufferPool {
+ public:
+  static constexpr size_t kMaxSpares = 4;
+  struct Buffers {
+    std::vector<capture::DrawRecord> draws;
+    std::vector<capture::TerrainPatch> terrain;
+  };
+
+  // The buffers of a scene whose last reference has dropped, with whatever
+  // they hold (Take's caller clears them). Kept if the list has room, else
+  // freed here, after the lock. Buffers without memory are not kept.
+  void Return(Buffers&& buffers) {
+    Buffers b = std::move(buffers);
+    if (b.draws.capacity() == 0 && b.terrain.capacity() == 0) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (count_ < kMaxSpares) std::swap(b, spares_[count_++]);  // (the slot held nothing)
+  }
+
+  // A spare pair, the one returned last, or a pair without memory.
+  Buffers Take() {
+    Buffers b;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (count_ != 0) std::swap(b, spares_[--count_]);
+    return b;
+  }
+
+  // Frees every spare (after the lock).
+  void Release() {
+    std::array<Buffers, kMaxSpares> drop;
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (size_t i = 0; i < count_; ++i) std::swap(drop[i], spares_[i]);
+    count_ = 0;
+  }
+
+  size_t size() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return count_;
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::array<Buffers, kMaxSpares> spares_;  // [0, count_) hold buffers; the rest hold nothing
+  size_t count_ = 0;
+};
+
 class FrameBuilder {
  public:
   void Open() { open_ = true; }
@@ -74,9 +129,16 @@ class FrameBuilder {
       skip = capture::SkipReason::kBadMemory;
     }
     if (skip == capture::SkipReason::kNone) {
+      // The patch first: if the record then cannot be appended, the frame holds
+      // a patch no record names. The other order would leave a record naming an
+      // entry that the next terrain record's patch then fills.
+      uint16_t index = capture::kNoSideIndex;
+      if (terrain) {
+        index = uint16_t(terrain_.size());
+        terrain_.push_back(*terrain);
+      }
       draws_.push_back(r);
-      draws_.back().terrain_index = terrain ? uint16_t(terrain_.size()) : capture::kNoSideIndex;
-      if (terrain) terrain_.push_back(*terrain);
+      draws_.back().terrain_index = index;
       const capture::MaterialStatus m = r.material.status;
       if (size_t(m) < size_t(capture::MaterialStatus::kCount)) ++material_[size_t(m)];
       if (m == capture::MaterialStatus::kPsUnknown || m == capture::MaterialStatus::kNoAlbedo ||
@@ -96,12 +158,32 @@ class FrameBuilder {
     if (open_) ++captured_;
   }
 
+  // Frees the spare buffers (any thread; scenes that die later bring theirs).
+  void ReleaseSpares() { pool_->Release(); }
+  size_t spare_count() const { return pool_->size(); }
+
   // The caller may fill the scene's remaining fields before publishing it.
-  // The records and their side array move into the scene together and the
-  // builder starts the next frame with new, empty ones: nothing of a finished
-  // scene is written by the builder again.
+  // The records and their side array move into the scene together, and the
+  // builder goes on with other buffers: a spare pair (SceneBufferPool), cleared
+  // (the capacity stays), or new ones. Nothing of a scene is written by the
+  // builder while a reference to the scene exists: its buffers come back only
+  // from its deleter, which runs when the last reference has dropped, on that
+  // thread. A frame without a record keeps the builder's buffers and gives the
+  // scene none, so nothing circulates while records are off.
+  // Capacity: a buffer grows only when a frame needs more than it holds, to
+  // the size of the frame before (reserve) or by the vector's own growth within
+  // a frame, so it stays within the largest frame recorded since it was
+  // allocated times the vector's growth factor (1.5 here); it does not shrink.
+  // At most kMaxSpares spare pairs exist besides the builder's and those of
+  // the living scenes, and ReleaseSpares frees the spares.
   std::shared_ptr<FrameScene> Finish(uint64_t frame) {
-    auto s = std::make_shared<FrameScene>();
+    // (weak: a scene may outlive the builder, and then frees its buffers itself)
+    std::shared_ptr<FrameScene> s(new FrameScene, [pool = std::weak_ptr<SceneBufferPool>(pool_)](FrameScene* scene) {
+      if (const std::shared_ptr<SceneBufferPool> p = pool.lock()) {
+        p->Return({std::move(scene->draws), std::move(scene->terrain)});
+      }
+      delete scene;
+    });
     s->frame = frame;
     s->captured = captured_;
     std::copy(std::begin(skipped_), std::end(skipped_), std::begin(s->skipped));
@@ -113,14 +195,18 @@ class FrameBuilder {
     const size_t n = untextured_ps_.Top(0, top, kUntexturedTop);
     for (size_t i = 0; i < n; ++i) s->untextured_ps.emplace_back(top[i].hash, top[i].count);
     untextured_ps_.Clear();
-    const size_t reserve = draws_.size();
-    s->draws = std::move(draws_);
-    draws_ = {};
-    draws_.reserve(reserve);
-    const size_t terrain_reserve = terrain_.size();
-    s->terrain = std::move(terrain_);
-    terrain_ = {};
-    terrain_.reserve(terrain_reserve);
+    if (!draws_.empty() || !terrain_.empty()) {
+      const size_t records = draws_.size(), patches = terrain_.size();
+      s->draws = std::move(draws_);
+      s->terrain = std::move(terrain_);
+      SceneBufferPool::Buffers next = pool_->Take();
+      draws_ = std::move(next.draws);
+      terrain_ = std::move(next.terrain);
+      draws_.clear();
+      terrain_.clear();
+      draws_.reserve(records);  // (nothing happens when the spare is large enough)
+      terrain_.reserve(patches);
+    }
     captured_ = 0;
     std::fill(std::begin(skipped_), std::end(skipped_), 0u);
     open_ = false;
@@ -136,6 +222,9 @@ class FrameBuilder {
   capture::ShaderTally<kUntexturedTallySize> untextured_ps_;
   std::vector<capture::DrawRecord> draws_;
   std::vector<capture::TerrainPatch> terrain_;  // side array of draws_ (FrameScene::terrain)
+  // Shared with the deleters of this builder's scenes. Never reassigned, and
+  // locked inside: ReleaseSpares and spare_count need no lock of the caller's.
+  std::shared_ptr<SceneBufferPool> pool_ = std::make_shared<SceneBufferPool>();
 };
 
 class ScenePublisher {

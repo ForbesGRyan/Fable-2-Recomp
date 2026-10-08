@@ -650,9 +650,68 @@ class VertexTest(Base):
         self.assertEqual(code, 0, text)
         self.assertIn("compared 3, equal 3, different 0", self.line(text, "register c76 "))
         self.assertIn("RESULT: OK (vfull)", self.result(text))
-        self.assertIn("every vertex register", self.result(text))
+        self.assertIn("no vertex register differs where it was compared, in 3 main-scene colour executions",
+                      self.result(text))
+        self.assertIn("registers compared in every one of them: 256, in some: 0, in none: 0", self.result(text))
+        self.assertNotIn("were not compared", self.result(text))
         self.assertNotIn("[light block]", text)
         self.assertNotIn("pixel bool word", text)
+
+    def test_the_result_says_what_was_compared(self):
+        # The result line must not say more than was compared (fix round 1, m5): a register no
+        # row carries (the vertex shader's own literals) was compared nowhere, and a row without
+        # "vfull" not at all.
+        rows = [self.row(1, 0xFF500000, lack=(252, 254, 255)),
+                self.row(1, 0xFF500100, count=12, lack=(100, 252, 254, 255)),
+                self.row(2, 0xFF600000, lack=(252, 254, 255)),
+                draw_row(2, 0xFF600200)]
+        over = {252: (2.0, -1.0, 0.0, 1.0), 100: (5.0, 5.0, 5.0, 5.0)}
+        lines = [self.gpu(1 + OFFSET, 0, 0xFF500000, over={252: over[252]}),
+                 self.gpu(1 + OFFSET, 1, 0xFF500100, n=12, over=over),
+                 self.gpu(2 + OFFSET, 0, 0xFF600000, over={252: over[252]})]
+        code, text = self.run_check(rows, lines, "--key", "vfull")
+        self.assertEqual(code, 0, text)
+        result = self.result(text)
+        self.assertNotIn("every vertex register", result)
+        self.assertIn("no vertex register differs where it was compared, in 3 main-scene colour executions", result)
+        self.assertIn("registers compared in every one of them: 252, in some: 1, in none: 3 (c252 c254 c255)", result)
+        self.assertIn("1 rows without \"vfull\" were not compared", result)
+
+    def test_a_register_that_differs_where_the_shader_does_not_read_it_was_compared(self):
+        d = self.dir / "dumps"
+        d.mkdir()
+        (d / f"shader_{int(VS, 16):016X}.ucode.vert").write_text("/* 1 */ mul r0, r1, c18.xyzz\n")
+        over = {200: (1.0, 0.0, 0.0, 0.0)}
+        lines = [self.gpu(1 + OFFSET, 0, 0xFF500000, over=over), self.gpu(1 + OFFSET, 1, 0xFF500100, n=12, over=over),
+                 self.gpu(2 + OFFSET, 0, 0xFF600000, over=over)]
+        code, text = self.run_check(self.rows(), lines, "--key", "vfull", "--dumps", str(d))
+        self.assertEqual(code, 0, text)
+        self.assertIn("no vertex register differs where it was compared and the vertex shader reads it, in 3 "
+                      "main-scene colour executions", self.result(text))
+        self.assertIn("registers compared in every one of them: 256, in some: 0, in none: 0", self.result(text))
+
+    def test_the_result_of_the_pixel_side_names_the_rows_not_sampled(self):
+        rows = three_rows() + [draw_row(2, 0xFF600200, with_pfull=False)]
+        code, text = self.run_check(rows, three_lines())
+        self.assertEqual(code, 0, text)
+        self.assertIn("1 rows without \"pfull\" were not compared", self.result(text))
+        code, text = self.run_check(three_rows(), three_lines())
+        self.assertNotIn("were not compared", self.result(text))
+
+    def test_a_failure_names_the_rows_not_sampled_too(self):
+        rows = self.rows() + [draw_row(2, 0xFF600200)]
+        code, text = self.run_check(rows, self.lines(over={200: (1.0, 0.0, 0.0, 0.0)}), "--key", "vfull")
+        self.assertEqual(code, 1, text)
+        self.assertIn("1 rows without \"vfull\" were not compared", self.result(text))
+
+    def test_many_registers_never_compared_are_counted_and_the_first_named(self):
+        lack = tuple(range(200, 256))
+        rows = [self.row(1, 0xFF500000, lack=lack)]
+        code, text = self.run_check(rows, [self.gpu(1 + OFFSET, 0, 0xFF500000)], "--key", "vfull")
+        self.assertEqual(code, 0, text)
+        self.assertIn("in none: 56 (c200 c201", self.result(text))
+        self.assertIn("c223 ...)", self.result(text))
+        self.assertNotIn("c224", self.result(text))
 
     def test_any_register_different_fails(self):
         code, text = self.run_check(self.rows(), self.lines(over={200: (1.0, 0.0, 0.0, 0.0)}), "--key", "vfull")
@@ -729,6 +788,88 @@ class VertexTest(Base):
                                     "--key", "vfull")
         self.assertEqual(code, 0, text)
         self.assertIn("compared 2, equal 2, different 0, not compared 1", self.line(text, "register c255 "))
+
+
+class LightFieldTest(Base):
+    """ "light": whether the capture's ReadLightBlock gave a valid block at the draw (fix round 1).
+    The checker counts it and holds it against the register rules of MakeLightBlock."""
+
+    SUN = {109: BASE[80], 112: (1.0, 0.0, 0.0, 0.0)}  # with BASE: a one-light draw, the sun first
+
+    def rows(self, lights, over=None):
+        rows = [draw_row(1, 0xFF500000, over=over), draw_row(1, 0xFF500100, count=12, over=over),
+                draw_row(2, 0xFF600000, over=over)]
+        for row, value in zip(rows, lights):
+            if value is not None:
+                row["light"] = value
+        return rows
+
+    def lines(self, over=None):
+        return [gpu_line(1 + OFFSET, 0, 0xFF500000, regs=over), gpu_line(1 + OFFSET, 1, 0xFF500100, regs=over, n=12),
+                gpu_line(2 + OFFSET, 0, 0xFF600000, regs=over)]
+
+    def test_the_register_rules(self):
+        def block(over=None, lack=()):
+            regs = registers(self.SUN)
+            regs.update(over or {})
+            return pc.sun_block(pc.parse_registers(pfull(regs, lack)))
+        self.assertTrue(block())
+        self.assertFalse(pc.sun_block(None))
+        for reg in pc.LIGHT_BLOCK:
+            self.assertFalse(block(lack=(reg,)), reg)
+            self.assertFalse(block({reg: (float("nan"),) * 4}), reg)
+        self.assertFalse(block({80: (-0.828, 0.022, 0.560, 1.0), 109: (-0.828, 0.022, 0.560, 0.0)}))  # not directional
+        self.assertFalse(block({80: (0.0, 0.0, 0.0, 0.0), 109: (0.0, 0.0, 0.0, 0.0)}))  # no night form
+        self.assertFalse(block({80: (-1.0, 0.5, 0.560, 0.0), 109: (-1.0, 0.5, 0.560, 0.0)}))  # not a unit vector
+        self.assertFalse(block({109: (-0.828, 0.022, 0.561, 0.0)}))  # the mask axis is not the sun
+        self.assertTrue(block({109: (-0.828, 0.022, 0.560, 7.0)}))   # its w is not compared
+        self.assertFalse(block({112: (0.0, 1.0, 0.0, 0.0)}))         # the mask shadows another light
+        self.assertFalse(block({94: (1.0, 0.0, 0.0, 0.0)}))          # light 0 has a range
+        self.assertTrue(block({94: (0.0, 1.0, 1.0, 0.0)}))
+        self.assertFalse(block({21: (1.0, 1.0, 1.0, 0.0)}))          # the exponent
+        self.assertFalse(block({21: (1.0, 1.0, 1.0, 8.5)}))
+        self.assertFalse(block({20: (0.0, 0.0, 0.0, 0.0)}))          # the output scale
+        self.assertFalse(block({20: (0.0, 0.0, 0.0, 2000.0)}))
+
+    def test_valid_rows_are_counted(self):
+        code, text = self.run_check(self.rows((1, 1, 0), self.SUN), self.lines(self.SUN))
+        self.assertEqual(code, 0, text)
+        ln = self.line(text, "light block (")
+        self.assertIn("rows 3, valid 2;", ln)
+        self.assertIn("valid where the registers are not a sun block 0;", ln)
+        self.assertIn("not valid where the registers are a sun block 1 ", ln)
+
+    def test_a_valid_block_where_the_registers_are_not_one_fails(self):
+        # BASE alone: c109 and c112 are zero, so the registers are no sun block.
+        code, text = self.run_check(self.rows((0, 1, 0)), self.lines())
+        self.assertEqual(code, 1, text)
+        self.assertIn("valid where the registers are not a sun block 1;", self.line(text, "light block ("))
+        self.assertIn("1 main-scene rows say \"light\": 1 where their registers are not a sun block",
+                      self.result(text))
+
+    def test_rows_without_the_field_are_not_counted_and_old_captures_print_nothing(self):
+        code, text = self.run_check(self.rows((None, 1, None), self.SUN), self.lines(self.SUN))
+        self.assertEqual(code, 0, text)
+        self.assertIn("rows 1, valid 1;", self.line(text, "light block ("))
+        code, text = self.run_check(self.rows((None, None, None), self.SUN), self.lines(self.SUN))
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("light block (", text)
+
+    def test_only_main_scene_rows_and_only_the_key_pfull(self):
+        rows = self.rows((1, 1, 1), self.SUN)
+        rows[2]["in_scene"] = False
+        code, text = self.run_check(rows, self.lines(self.SUN))
+        self.assertEqual(code, 0, text)
+        self.assertIn("rows 2, valid 2;", self.line(text, "light block ("))
+        for row in rows:
+            row["pbank_diff"] = {}
+        code, text = self.run_check(rows, self.lines(self.SUN), "--key", "pbank")
+        self.assertNotIn("light block (", text)
+
+    def test_a_field_that_is_not_a_number_is_no_field(self):
+        code, text = self.run_check(self.rows((True, "1", 1), self.SUN), self.lines(self.SUN))
+        self.assertEqual(code, 0, text)
+        self.assertIn("rows 1, valid 1;", self.line(text, "light block ("))
 
 
 class ValuesTest(Base):

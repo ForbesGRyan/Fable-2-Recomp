@@ -46,7 +46,16 @@ Bank Day() {
   return b;
 }
 
-LightBlock Make(const Bank& b) { return MakeLightBlock(b.reg, b.have); }
+// A block made where the light set was loaded from its buffer since the scene began.
+LightBlock Make(const Bank& b) { return MakeLightBlock(b.reg, b.have, true); }
+
+// The sun direction lives in c80 and, as the mask term's axis, in c109: both scaled.
+void ScaleSun(Bank& b, float scale) {
+  for (int c = 0; c < 3; ++c) {
+    b.reg[80][c] *= scale;
+    b.reg[109][c] *= scale;
+  }
+}
 
 bool AllZero(const LightBlock& l) {
   const LightBlock zero{};
@@ -58,6 +67,21 @@ constexpr uint32_t kAll = ConstantLoads::kAllBins;
 
 bool Is(const ConstantSource& s, Kind kind, uint32_t object = 0, uint32_t index = 0) {
   return s.kind == kind && (kind != Kind::kMemory || (s.object == object && s.index == index));
+}
+
+// A model in a scene whose uploads were all followed.
+ConstantLoads InScene() {
+  ConstantLoads t;
+  t.Observe(true);
+  return t;
+}
+
+AluLoadCall Call(uint32_t bank, uint32_t start, uint32_t count, uint32_t object = 0x40001000, uint32_t first = 0) {
+  AluLoadCall c;
+  c.bank = bank, c.start = start, c.count = count, c.object = object, c.first = first;
+  c.state_read = true;
+  c.predicate = 0, c.mask_lo = kAll, c.mask_hi = 0;
+  return c;
 }
 
 }  // namespace
@@ -86,20 +110,14 @@ int main() {
     CHECK(l.light_mix[0] == 0.0f && l.light_mix[1] == 0.0f && l.light_mix[2] == 0.0f && l.light_mix[3] == 0.0f);
     CHECK(sizeof(kLightBlockRegisters) / sizeof(kLightBlockRegisters[0]) == 11);
   }
-  // The three further registers are stored as they are: no bound is put on them beyond finite
-  // (the values seen are one-hot c112, c94 of zeros and ones, c109 the sun direction with w 0).
+  // --- the light set must have been loaded from its buffer since the scene began (fix round 1,
+  //     I1): registers that only look like a block (a bank that holds zeros where no load was
+  //     followed, a buffer of an earlier frame) make no block ---
   {
-    Bank b = Day();
-    b.Set(94, 1.0f, 1.0f, 0.0f, 0.0f);
-    b.Set(109, 0.3f, -7.0f, 0.25f, 2.0f);
-    b.Set(112, 0.0f, 0.0f, 1.0f, 0.0f);
-    const LightBlock l = Make(b);
-    CHECK(l.valid);
-    CHECK(l.light_mix[0] == 1.0f && l.light_mix[1] == 1.0f && l.mask_axis[1] == -7.0f && l.mask_axis[3] == 2.0f &&
-          l.shadow_mix[2] == 1.0f && l.shadow_mix[0] == 0.0f);
-    // Night: the unused slot's w is kept.
-    b.Set(80, 0.0f, 0.0f, 0.0f, 1.0f);
-    CHECK(Make(b).valid && Make(b).sun_w == 1.0f);
+    const Bank b = Day();
+    const LightBlock l = MakeLightBlock(b.reg, b.have, false);
+    CHECK(!l.valid);
+    CHECK(AllZero(l));
   }
   // --- a missing register: invalid, and nothing of the block is left to use ---
   for (uint32_t r : kLightBlockRegisters) {
@@ -150,21 +168,32 @@ int main() {
     b.reg[20][3] = w;
     CHECK(Make(b).valid);
   }
-  // --- the sun direction is a unit vector (within 0.05) or exactly zero ---
-  {
-    Bank b = Day();
-    b.Set(80, 0.0f, 0.0f, 0.0f, 0.0f);  // night
-    b.Set(87, 0.0f, 0.0f, 0.0f, 0.0f);
-    const LightBlock l = Make(b);
-    CHECK(l.valid);
-    CHECK(l.sun_dir[0] == 0.0f && l.sun_dir[1] == 0.0f && l.sun_dir[2] == 0.0f);
-    b.Set(80, -0.0f, 0.0f, -0.0f, 1.0f);  // negative zeros are zero; an unused light slot is (0, 0, 0, 1)
-    CHECK(Make(b).valid);
-  }
+  // --- the sun direction is a unit vector (within 0.05) ---
   for (float scale : {0.96f, 1.0f, 1.04f}) {
     Bank b = Day();
-    for (int c = 0; c < 3; ++c) b.reg[80][c] *= scale;
+    ScaleSun(b, scale);
     CHECK(Make(b).valid);
+  }
+  for (float scale : {1e-6f, 0.5f, 0.94f, 1.06f, 2.0f, 1e19f, 1e30f}) {  // 1e30: the squared length overflows
+    Bank b = Day();
+    ScaleSun(b, scale);
+    CHECK(!Make(b).valid);
+  }
+  // --- a zero sun direction is not a block (controller's ruling, fix round 1: there is no
+  //     "night" form until a night capture shows what a night's light set holds; the first
+  //     version of this test pinned a zero direction as valid). An unused light slot holds
+  //     (0, 0, 0, 1) and colour 0. ---
+  for (float w : {0.0f, 1.0f}) {
+    Bank b = Day();
+    b.Set(80, 0.0f, 0.0f, 0.0f, w);
+    b.Set(87, 0.0f, 0.0f, 0.0f, 0.0f);
+    b.Set(109, 0.0f, 0.0f, 0.0f, 0.0f);
+    const LightBlock l = Make(b);
+    CHECK(!l.valid);
+    CHECK(AllZero(l));
+    b.Set(80, -0.0f, 0.0f, -0.0f, w);  // negative zeros are zero
+    b.Set(109, -0.0f, 0.0f, -0.0f, 0.0f);
+    CHECK(!Make(b).valid);
   }
   // c80 is the draw's first light, and only a directional one (w = 0) is the sun: the two- and
   // four-light shaders have a lantern there (a position with w = 1) and the sun in a later
@@ -178,28 +207,68 @@ int main() {
   }
   {
     Bank b = Day();
+    b.reg[80][3] = -0.0f;  // a negative zero is zero
+    CHECK(Make(b).valid);
     b.Set(80, 93.7503f, 161.322f, 42.3773f, 1.0f);  // the lantern by the bridge
     b.Set(87, 1.55806f, 0.727093f, 0.0916504f, 0.998754f);
     CHECK(!Make(b).valid);
-    b.reg[80][3] = -0.0f;  // a negative zero is zero
-    b.Set(80, -0.828f, 0.022f, 0.560f, -0.0f);
-    CHECK(Make(b).valid);
   }
-  for (float scale : {1e-6f, 0.5f, 0.94f, 1.06f, 2.0f, 1e19f, 1e30f}) {  // 1e30: the squared length overflows
+  // --- the set's own account of its sun must agree (fix round 1, m1; so in every one-light draw
+  //     of the GPU logs): c112 marks light 0 as the one the screen mask shadows, c109 is the sun
+  //     direction bit for bit, and light 0 has no range or cone (c94.x = 0) ---
+  for (int c = 0; c < 4; ++c) {
+    for (float v : {0.0f, 1.0f, 0.5f, -1.0f}) {
+      Bank b = Day();
+      if (b.reg[112][c] == v) continue;
+      b.reg[112][c] = v;
+      CHECK(!Make(b).valid);
+    }
+  }
+  {
     Bank b = Day();
-    for (int c = 0; c < 3; ++c) b.reg[80][c] *= scale;
+    b.Set(112, 0.0f, 1.0f, 0.0f, 0.0f);  // the sun is the set's second light: a two-light draw
+    b.Set(94, 1.0f, 0.0f, 0.0f, 0.0f);
+    const LightBlock l = Make(b);
+    CHECK(!l.valid);
+    CHECK(AllZero(l));
+  }
+  for (int c = 0; c < 3; ++c) {
+    Bank b = Day();
+    b.reg[109][c] = std::nextafter(b.reg[109][c], 2.0f);  // one bit off the sun direction
     CHECK(!Make(b).valid);
+  }
+  {
+    Bank b = Day();
+    b.reg[109][3] = 7.0f;  // w is not part of the direction
+    CHECK(Make(b).valid);
+    b = Day();
+    b.Set(80, -0.828f, 0.0f, 0.560f, 0.0f);  // +0 against -0: equal directions, other bits
+    b.Set(109, -0.828f, -0.0f, 0.560f, 0.0f);
+    CHECK(!Make(b).valid);
+  }
+  for (float v : {1.0f, 0.5f, -1.0f, 1e-6f}) {
+    Bank b = Day();
+    b.reg[94][0] = v;
+    CHECK(!Make(b).valid);
+  }
+  {
+    Bank b = Day();
+    b.Set(94, 0.0f, 1.0f, 1.0f, 0.5f);  // the other lights' switches are theirs
+    const LightBlock l = Make(b);
+    CHECK(l.valid);
+    CHECK(l.light_mix[1] == 1.0f && l.light_mix[3] == 0.5f);
   }
   // Null inputs: invalid.
   {
     const Bank b = Day();
-    CHECK(!MakeLightBlock(nullptr, b.have).valid);
-    CHECK(!MakeLightBlock(b.reg, nullptr).valid);
+    CHECK(!MakeLightBlock(nullptr, b.have, true).valid);
+    CHECK(!MakeLightBlock(b.reg, nullptr, true).valid);
   }
 
   // --- constant sources: with no load every register is the bank's ---
   {
     ConstantLoads t;
+    CHECK(t.whole() && !t.ever_skipped() && !t.in_scene() && t.scene() == 0);
     for (uint32_t r : {0u, 80u, 255u}) CHECK(Is(t.Find(r), Kind::kBank));
     CHECK(Is(t.Find(256), Kind::kUnknown));  // not a register
     CHECK(t.binned_count() == 0);
@@ -207,21 +276,27 @@ int main() {
   // --- a load under every bin: the registers come from the buffer, the others stay ---
   {
     ConstantLoads t;
-    t.Load(80, 36, 0x40001000, 0, false, kAll);
+    CHECK(t.Load(80, 36, 0x40001000, 0, false, kAll));
     CHECK(Is(t.Find(80), Kind::kMemory, 0x40001000, 0));
     CHECK(Is(t.Find(87), Kind::kMemory, 0x40001000, 7));
     CHECK(Is(t.Find(115), Kind::kMemory, 0x40001000, 35));
     CHECK(Is(t.Find(79), Kind::kBank) && Is(t.Find(116), Kind::kBank));
     // The buffer's first register may be another one, and a later load replaces an earlier one.
-    t.Load(84, 8, 0x40002000, 4, false, kAll);
+    CHECK(t.Load(84, 8, 0x40002000, 4, false, kAll));
     CHECK(Is(t.Find(83), Kind::kMemory, 0x40001000, 3));
     CHECK(Is(t.Find(84), Kind::kMemory, 0x40002000, 4));
     CHECK(Is(t.Find(91), Kind::kMemory, 0x40002000, 11));
     CHECK(Is(t.Find(92), Kind::kMemory, 0x40001000, 12));
     // A predicated load whose mask has every bin is the same thing.
-    t.Load(80, 1, 0x40003000, 0, true, kAll);
+    CHECK(t.Load(80, 1, 0x40003000, 0, true, kAll));
     CHECK(Is(t.Find(80), Kind::kMemory, 0x40003000, 0));
     CHECK(t.binned_count() == 0);
+    // The last register of the bank, and a whole bank.
+    CHECK(t.Load(255, 1, 0x40004000, 9, false, kAll));
+    CHECK(Is(t.Find(255), Kind::kMemory, 0x40004000, 9));
+    CHECK(t.Load(0, 256, 0x40005000, 0, false, kAll));
+    CHECK(Is(t.Find(0), Kind::kMemory, 0x40005000, 0) && Is(t.Find(255), Kind::kMemory, 0x40005000, 255));
+    CHECK(t.whole());
   }
   // --- the device bank uploads a group of four registers: it replaces the load there ---
   {
@@ -302,48 +377,54 @@ int main() {
     t.Load(4, 4, 0x40030000, 0, true, 0x15555555);
     CHECK(Is(t.Find(4), Kind::kBank));
     CHECK(Is(t.FindForBins(4, 0x80000001), Kind::kMemory, 0x40030000, 0));
-    // A predicated load with an empty mask executes nowhere.
-    t.Load(8, 4, 0x40060000, 0, true, 0);
+    // A predicated load with an empty mask executes in no pass: followed, and nothing changes.
+    // (The mask is the low word; a call with bins in the high word is not handed to the model:
+    // MapAluLoad, below.)
+    CHECK(t.Load(8, 4, 0x40060000, 0, true, 0));
     CHECK(Is(t.Find(8), Kind::kBank));
-    CHECK(t.binned_count() == 1);
+    CHECK(t.binned_count() == 1 && t.whole());
   }
-  // --- arguments that cannot be a load: the registers they name are unknown, never guessed ---
+  // --- arguments that cannot be a load of this bank: the model stops being whole and no
+  //     register is known until it is whole again (fix round 1, m3: a run that leaves the bank
+  //     would write the other bank's registers) ---
+  {
+    struct Bad {
+      uint32_t start, count, object, first;
+    };
+    for (const Bad& bad : {Bad{80, 36, 0, 0},                    // no buffer
+                           Bad{250, 10, 0x40001000, 0},          // runs past register 255
+                           Bad{256, 4, 0x40001000, 0},           // starts in the other bank
+                           Bad{300, 4, 0x40001000, 0},
+                           Bad{0xFFFFFFFF, 2, 0x40001000, 0},
+                           Bad{10, 0xFFFFFFFF, 0x40001000, 0},
+                           Bad{0, 4, 0x40001000, 0xFFFFFFF0},    // past the buffer bound
+                           Bad{0, 4, 0x40001000, 65533}}) {
+      ConstantLoads t;
+      t.Load(80, 36, 0x40001000, 0, false, kAll);
+      CHECK(t.whole());
+      CHECK(!t.Load(bad.start, bad.count, bad.object, bad.first, false, kAll));
+      CHECK(!t.whole() && t.ever_skipped());
+      for (uint32_t r : {0u, 19u, 80u, 250u, 255u}) CHECK(Is(t.Find(r), Kind::kUnknown));
+      CHECK(Is(t.FindForBins(80, kAll), Kind::kUnknown));
+    }
+    // Nothing loaded is not a load, and is no fault.
+    ConstantLoads t;
+    CHECK(t.Load(20, 0, 0x40001000, 0, false, kAll));
+    CHECK(t.Load(300, 0, 0, 0xFFFFFFFF, true, 0x2));  // whatever else its arguments say
+    CHECK(t.whole() && Is(t.Find(20), Kind::kBank));
+    // The buffer bound itself.
+    CHECK(t.Load(0, 4, 0x40001000, 65532, false, kAll));
+    CHECK(Is(t.Find(3), Kind::kMemory, 0x40001000, 65535));
+  }
+  // --- more tile loads than the table holds: the model stops being whole ---
   {
     ConstantLoads t;
-    t.Load(80, 36, 0, 0, false, kAll);  // no buffer
-    CHECK(Is(t.Find(80), Kind::kUnknown) && Is(t.Find(115), Kind::kUnknown));
-    CHECK(Is(t.Find(79), Kind::kBank));
-    t.Load(80, 36, 0x40001000, 0, false, kAll);  // a good load repairs them
-    CHECK(Is(t.Find(80), Kind::kMemory, 0x40001000, 0));
-    t.Load(250, 10, 0x40001000, 0, false, kAll);  // runs past register 255
-    CHECK(Is(t.Find(250), Kind::kUnknown) && Is(t.Find(255), Kind::kUnknown));
-    CHECK(Is(t.Find(249), Kind::kBank));
-    t.Load(300, 4, 0x40001000, 0, false, kAll);   // not registers at all: nothing to mark
-    t.Load(0xFFFFFFFF, 2, 0x40001000, 0, false, kAll);
-    t.Load(10, 0xFFFFFFFF, 0x40001000, 0, false, kAll);
-    CHECK(Is(t.Find(10), Kind::kUnknown) && Is(t.Find(255), Kind::kUnknown) && Is(t.Find(9), Kind::kBank));
-    t.Load(20, 0, 0x40001000, 0, false, kAll);    // nothing loaded
-    CHECK(Is(t.Find(20), Kind::kUnknown));        // (still from the load above)
-    t.BankUpload(~0ull);
-    CHECK(Is(t.Find(20), Kind::kBank) && Is(t.Find(250), Kind::kBank));
-    // A buffer register past 65535 registers is not believed either.
-    t.Load(0, 4, 0x40001000, 0xFFFFFFF0, false, kAll);
-    CHECK(Is(t.Find(0), Kind::kUnknown));
-  }
-  // --- more tile loads than the table holds: every register they covered is unknown ---
-  {
-    ConstantLoads t;
-    for (uint32_t i = 0; i < ConstantLoads::kMaxBinned; ++i) t.Load(i * 4, 4, 0x40000000 + i, 0, true, 0x2);
+    for (uint32_t i = 0; i < ConstantLoads::kMaxBinned; ++i) CHECK(t.Load(i * 4, 4, 0x40000000 + i, 0, true, 0x2));
     CHECK(t.binned_count() == ConstantLoads::kMaxBinned);
     CHECK(Is(t.Find(0), Kind::kMemory, 0x40000000, 0));
-    t.Load(200, 4, 0x4FFF0000, 0, true, 0x2);
-    CHECK(t.binned_count() == 0);
-    CHECK(Is(t.Find(0), Kind::kUnknown) && Is(t.Find(63), Kind::kUnknown) && Is(t.Find(200), Kind::kUnknown));
-    CHECK(Is(t.Find(64), Kind::kBank) && Is(t.Find(204), Kind::kBank));
-    // The next frame's loads repair it.
-    t.Load(0, 4, 0x40011000, 0, true, 0x2);
-    CHECK(Is(t.Find(0), Kind::kMemory, 0x40011000, 0));
-    CHECK(Is(t.FindForBins(0, 0x8), Kind::kUnknown));  // the other tile was not issued again
+    CHECK(!t.Load(200, 4, 0x4FFF0000, 0, true, 0x2));
+    CHECK(!t.whole());
+    CHECK(Is(t.Find(0), Kind::kUnknown) && Is(t.Find(200), Kind::kUnknown) && Is(t.Find(64), Kind::kUnknown));
   }
   // --- a full table first drops the tile loads that decide nothing any more ---
   {
@@ -354,10 +435,235 @@ int main() {
     for (uint32_t i = 0; i <= ConstantLoads::kMaxBinned; ++i) t.Load(i * 4, 4, 0x40100000 + i, 0, false, kAll);
     CHECK(t.binned_count() == ConstantLoads::kMaxBinned);
     CHECK(Is(t.Find(5), Kind::kMemory, 0x40100001, 1));
-    t.Load(200, 4, 0x4FFF0000, 0, true, 0x2);
-    CHECK(t.binned_count() == 1);
+    CHECK(t.Load(200, 4, 0x4FFF0000, 0, true, 0x2));
+    CHECK(t.binned_count() == 1 && t.whole());
     CHECK(Is(t.Find(5), Kind::kMemory, 0x40100001, 1));
     CHECK(Is(t.Find(200), Kind::kMemory, 0x4FFF0000, 0));
+  }
+
+  // --- scenes (fix round 1, I1): a load carries the scene it was issued in, and the light set
+  //     counts for a block only when its buffer was loaded since the current scene began ---
+  {
+    ConstantLoads t;
+    CHECK(!t.LoadedThisScene(80));  // nothing loaded: the bank, which holds zeros there
+    t.Load(80, 36, 0x40001000, 0, false, kAll);  // before any scene (another pass of the frame)
+    CHECK(Is(t.Find(80), Kind::kMemory, 0x40001000, 0));
+    CHECK(!t.LoadedThisScene(80));  // not in a scene
+    t.Observe(true);  // the scene begins
+    CHECK(t.in_scene() && t.scene() == 1);
+    CHECK(Is(t.Find(80), Kind::kMemory, 0x40001000, 0));  // the register is still read from there
+    CHECK(!t.LoadedThisScene(80) && !t.LoadedThisScene(87));  // but that load is not this scene's
+    t.Observe(true);  // further draws of the scene
+    CHECK(t.scene() == 1);
+    t.Load(80, 36, 0x40002000, 0, false, kAll);
+    CHECK(t.LoadedThisScene(80) && t.LoadedThisScene(87) && t.LoadedThisScene(115));
+    CHECK(t.Find(80).scene == 1);
+    CHECK(!t.LoadedThisScene(79) && !t.LoadedThisScene(116) && !t.LoadedThisScene(19));  // bank registers
+    CHECK(!t.LoadedThisScene(256));
+    // The bank takes a group back: not a buffer's any more.
+    t.BankUpload(1ull << (63 - 21));
+    CHECK(t.LoadedThisScene(80) && !t.LoadedThisScene(87));
+    t.Load(80, 36, 0x40002000, 0, false, kAll);
+    CHECK(t.LoadedThisScene(87));
+    // The scene ends: no block outside it.
+    t.Observe(false);
+    CHECK(!t.in_scene() && !t.LoadedThisScene(80));
+    CHECK(Is(t.Find(80), Kind::kMemory, 0x40002000, 0));
+    // The next frame's scene: the same buffer, reloaded each frame with new contents, counts
+    // again only once it is loaded again.
+    t.Observe(true);
+    CHECK(t.scene() == 2 && !t.LoadedThisScene(80));
+    t.Load(80, 36, 0x40002000, 0, false, kAll);
+    CHECK(t.LoadedThisScene(80) && t.Find(80).scene == 2);
+    // A tile load counts the same way.
+    CHECK(!t.LoadedThisScene(0));
+    t.Load(0, 4, 0x40010000, 0, true, 0x2);
+    t.Load(0, 4, 0x40020000, 0, true, 0x8);
+    CHECK(t.LoadedThisScene(0) && t.LoadedThisScene(3) && !t.LoadedThisScene(4));
+    t.Observe(false);
+    t.Observe(true);
+    CHECK(!t.LoadedThisScene(0));  // last scene's tile loads
+  }
+  // --- uploads that were not followed (fix round 1, G1: with records off nothing is tracked):
+  //     the model is not whole, no register is known, and it is whole again at the first scene
+  //     whose uploads are all followed from its begin ---
+  {
+    ConstantLoads t = InScene();
+    t.Load(80, 36, 0x40001000, 0, false, kAll);
+    t.Load(0, 4, 0x40010000, 0, true, 0x2);
+    CHECK(t.LoadedThisScene(80));
+    t.Skip();  // records went off: an upload happened that nobody looked at
+    CHECK(!t.whole() && t.ever_skipped());
+    for (uint32_t r : {0u, 19u, 80u, 255u}) CHECK(Is(t.Find(r), Kind::kUnknown));
+    CHECK(Is(t.FindForBins(0, 0x2), Kind::kUnknown));
+    CHECK(!t.LoadedThisScene(80));
+    t.Skip();  // scenes pass, nothing is observed
+    t.Skip();
+    // Records come back in the middle of a later scene: its first uploads were not followed.
+    t.Observe(true);
+    CHECK(t.scene() == 1 && !t.whole());
+    CHECK(t.Load(80, 36, 0x40002000, 0, false, kAll));  // followed, and not believed yet
+    CHECK(!t.whole() && Is(t.Find(80), Kind::kUnknown) && !t.LoadedThisScene(80));
+    CHECK(t.Load(0, 4, 0x40012000, 0, true, 0x2) && t.Load(8, 4, 0x40013000, 0, true, 0x2));
+    CHECK(t.binned_count() == 1);  // nor kept: the one tile load of before the gap
+    t.BankUpload(~0ull);
+    CHECK(Is(t.Find(19), Kind::kUnknown));
+    t.Observe(true);  // more hooks of that scene, all followed: still not from its begin
+    t.Observe(true);
+    CHECK(!t.whole() && Is(t.Find(19), Kind::kUnknown));
+    // More tile loads than the table holds, while nothing is kept: no skip (the next scene
+    // still makes the model whole).
+    for (uint32_t i = 0; i <= ConstantLoads::kMaxBinned; ++i) CHECK(t.Load(i * 4, 4, 0x40000000 + i, 0, true, 0x2));
+    t.Observe(false);
+    CHECK(!t.whole());
+    // The next scene begins with every upload followed: whole again.
+    t.Observe(true);
+    CHECK(t.whole() && t.scene() == 2);
+    // What was loaded before that is not believed: the registers the bank has not uploaded
+    // since, and the loads of before, are unknown; a buffer register must be loaded again.
+    CHECK(Is(t.Find(80), Kind::kUnknown) && Is(t.Find(0), Kind::kUnknown) && Is(t.Find(19), Kind::kUnknown));
+    CHECK(t.binned_count() == 0);
+    t.BankUpload(1ull << (63 - 4));  // registers 16..19: the builder uploads the group
+    CHECK(Is(t.Find(19), Kind::kBank) && Is(t.Find(16), Kind::kBank));
+    CHECK(Is(t.Find(20), Kind::kUnknown));
+    t.BankUpload(1ull << (63 - 5));
+    CHECK(Is(t.Find(20), Kind::kBank) && Is(t.Find(23), Kind::kBank));
+    t.Load(0, 4, 0x40011000, 0, true, 0x2);
+    t.Load(80, 36, 0x40003000, 0, false, kAll);
+    CHECK(Is(t.Find(0), Kind::kMemory, 0x40011000, 0) && Is(t.Find(80), Kind::kMemory, 0x40003000, 0));
+    CHECK(t.LoadedThisScene(80) && t.LoadedThisScene(87));
+    CHECK(Is(t.FindForBins(0, 0x8), Kind::kUnknown));  // the other tile was not loaded since
+    CHECK(t.ever_skipped());  // stays: the vertex rows are written only by a model never interrupted
+    // The bank taking a loaded group back after that is followed as before.
+    t.BankUpload(1ull << (63 - 20));
+    CHECK(Is(t.Find(80), Kind::kBank) && Is(t.Find(84), Kind::kMemory, 0x40003000, 4));
+    // And the model stays whole over the scenes that follow.
+    t.Observe(false);
+    t.Observe(true);
+    CHECK(t.whole() && Is(t.Find(19), Kind::kBank) && Is(t.Find(84), Kind::kMemory, 0x40003000, 4));
+  }
+  // An upload skipped between the last thing seen and the scene's begin may belong to the scene:
+  // that scene is not taken as followed from its begin; the next one is.
+  {
+    ConstantLoads t;
+    t.Skip();
+    t.Observe(false);
+    t.Skip();          // not followed, and nothing was seen since
+    t.Observe(true);   // the scene's first followed hook
+    CHECK(!t.whole());
+    t.Observe(false);
+    t.Observe(true);
+    CHECK(t.whole());
+  }
+  // A skip outside a scene, with every upload of the next scene followed: whole at its begin.
+  {
+    ConstantLoads t;
+    t.Skip();
+    CHECK(!t.whole());
+    t.Observe(false);
+    CHECK(!t.whole());  // no scene has begun
+    t.Observe(true);
+    CHECK(t.whole() && t.scene() == 1 && Is(t.Find(19), Kind::kUnknown));
+  }
+  // A model never interrupted believes the bank from the start (no upload is needed first).
+  {
+    ConstantLoads t = InScene();
+    CHECK(Is(t.Find(19), Kind::kBank) && t.whole() && !t.ever_skipped());
+  }
+
+  // --- a LoadAluConstants call as the hook sees it (fix round 1, m6): which bank, which
+  //     registers, under which bins ---
+  {
+    AluLoad l;
+    CHECK(MapAluLoad(Call(1, 80, 36, 0x40CF28F0, 0), &l));  // the light set
+    CHECK(l.pixel && l.start == 80 && l.count == 36 && l.object == 0x40CF28F0 && l.first == 0 && !l.predicated);
+    CHECK(MapAluLoad(Call(0, 76, 32, 0x401CD790, 0), &l));  // the vertex light set
+    CHECK(!l.pixel && l.start == 76 && l.count == 32);
+    AluLoadCall tile = Call(1, 4, 4, 0x40981080, 4);        // c4..c7 for the colour bins
+    tile.predicate = 1, tile.mask_lo = 0x2AAAAAAA;
+    CHECK(MapAluLoad(tile, &l));
+    CHECK(l.pixel && l.start == 4 && l.count == 4 && l.first == 4 && l.predicated && l.mask == 0x2AAAAAAA);
+    tile.predicate = 0x80;  // any non-zero predicate word
+    CHECK(MapAluLoad(tile, &l) && l.predicated);
+    // An unpredicated load executes in every pass whatever the mask words hold.
+    AluLoadCall every = Call(1, 80, 36);
+    every.mask_lo = 0x80000000, every.mask_hi = 0x1234;
+    CHECK(MapAluLoad(every, &l) && !l.predicated && l.mask == kAll);
+    // Not followable: another bank number, a run that leaves the bank (the packet's index would
+    // reach the other bank's registers; the static callers pass constants inside it), no buffer,
+    // the device's predicate word or bin mask unread, and a predicated load with bins in the
+    // high word of the bin mask (the model keeps the low word only).
+    CHECK(!MapAluLoad(Call(2, 80, 36), &l));
+    CHECK(!MapAluLoad(Call(0xFFFFFFFF, 80, 36), &l));
+    CHECK(!MapAluLoad(Call(1, 250, 10), &l));
+    CHECK(!MapAluLoad(Call(0, 256, 4), &l));
+    CHECK(!MapAluLoad(Call(1, 0, 257), &l));
+    CHECK(!MapAluLoad(Call(1, 0xFFFFFFFF, 2), &l));
+    CHECK(!MapAluLoad(Call(1, 10, 0xFFFFFFFF), &l));
+    CHECK(!MapAluLoad(Call(1, 80, 36, 0), &l));
+    CHECK(!MapAluLoad(Call(1, 80, 36, 0x40001000, 65536), &l));
+    CHECK(!MapAluLoad(Call(1, 80, 36, 0x40001000, 70000), &l));
+    CHECK(!MapAluLoad(Call(1, 80, 36, 0x40001000, 0xFFFFFFF0), &l));
+    CHECK(MapAluLoad(Call(1, 80, 36, 0x40001000, 65500), &l) && l.first == 65500);
+    AluLoadCall unread = Call(1, 80, 36);
+    unread.state_read = false;
+    CHECK(!MapAluLoad(unread, &l));
+    AluLoadCall high = Call(1, 0, 4);
+    high.predicate = 1, high.mask_lo = 0x2, high.mask_hi = 1;
+    CHECK(!MapAluLoad(high, &l));
+    high.mask_hi = 0;
+    CHECK(MapAluLoad(high, &l));
+    // The edges of a bank, and a call that loads nothing.
+    CHECK(MapAluLoad(Call(1, 255, 1), &l) && MapAluLoad(Call(0, 0, 256), &l));
+    CHECK(MapAluLoad(Call(1, 80, 0), &l) && l.count == 0);
+    CHECK(MapAluLoad(Call(1, 80, 0, 0, 70000), &l) && l.count == 0);  // nothing loaded: no buffer needed
+    CHECK(!MapAluLoad(Call(1, 80, 36), nullptr));
+  }
+  // --- a register of a constant buffer in guest memory (the bounds of the read) ---
+  {
+    uint32_t a = 0;
+    CHECK(BufferRegisterAddress(0xFFA9A000, 0, &a) && a == 0xFFA9A000);
+    CHECK(BufferRegisterAddress(0xFFA9A000, 7, &a) && a == 0xFFA9A070);
+    CHECK(BufferRegisterAddress(0x40000000, 65535, &a) && a == 0x400FFFF0);
+    CHECK(!BufferRegisterAddress(0, 0, &a));            // no buffer
+    CHECK(!BufferRegisterAddress(0x40000000, 65536, &a));  // past the buffer bound
+    CHECK(BufferRegisterAddress(0xFFFFFFF0, 0, &a) && a == 0xFFFFFFF0);  // the last 16 bytes
+    CHECK(!BufferRegisterAddress(0xFFFFFFF0, 1, &a));   // would wrap
+    CHECK(!BufferRegisterAddress(0xFFFFFFF4, 0, &a));   // the register would run past the end
+    CHECK(BufferRegisterAddress(0xFFF00000, 65535, &a) && a == 0xFFFFFFF0);
+    CHECK(!BufferRegisterAddress(0xFFF00010, 65535, &a));
+    CHECK(!BufferRegisterAddress(0x40000000, 0, nullptr));
+  }
+  // --- the pixel bool word's two writers (discovery evidence) ---
+  {
+    BoolWordWriters w;
+    CHECK(!w.known);
+    // GpuLoadShaders with a shader that uses flow constants uploads the engine's word.
+    w.OnShaderLoad(true, true, true, 0x00000110);
+    CHECK(w.known && w.word == 0x110);
+    // Shaders that use none: the GPU keeps what it has.
+    w.OnShaderLoad(true, false, true, 0x00000100);
+    CHECK(w.known && w.word == 0x110);
+    // A draw builder that finds the bool shadow pending writes the device's (stale) word.
+    w.OnBuilderFlush(true, 0x00000100);
+    CHECK(w.known && w.word == 0x100);
+    w.OnShaderLoad(true, true, true, 0x00000131);
+    CHECK(w.known && w.word == 0x131);
+    // What cannot be read is not known: the shaders' records, the engine's word, the shadow.
+    w.OnShaderLoad(false, true, true, 0x00000110);
+    CHECK(!w.known);
+    w.OnShaderLoad(true, true, true, 0x00000110);
+    w.OnShaderLoad(true, true, false, 0xDEAD);
+    CHECK(!w.known);
+    w.OnShaderLoad(true, false, true, 0x00000100);
+    CHECK(!w.known);  // an upload that was not known stays unknown under a load that uploads nothing
+    w.OnBuilderFlush(true, 0x00000100);
+    CHECK(w.known && w.word == 0x100);
+    w.OnBuilderFlush(false, 0xDEAD);
+    CHECK(!w.known);
+    w.OnShaderLoad(true, true, true, 0x00000110);
+    w.Forget();  // not followed any more (discovery off)
+    CHECK(!w.known);
   }
   std::printf("PASS: light block\n");
   return 0;

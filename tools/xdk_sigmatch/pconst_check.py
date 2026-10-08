@@ -66,14 +66,20 @@ register with the values, the registers that differ, the pixel bool word against
 LOAD_ALU_CONSTANT packets (a row's packet ends at its command write pointer + 4 and must name
 the row's buffer, register and size; the executed packets no row stands for are listed by
 register range: the shaders' literals), and with --values the GPU's values of the listed
-registers.
+registers. With --key pfull, when rows carry "light" (whether the capture's ReadLightBlock gave
+a valid block at the draw): how many main-scene rows say so, and for each of them whether its
+registers are a sun block by the register rules of light_block.h (MakeLightBlock).
 
 Exit code 0, with "RESULT: OK", only when every main-scene row in a frame of the GPU log is
 paired, at least one main-scene colour execution was compared, and every register of the light
 block (light_block.h: c0, c19, c20, c21, c22, c23, c80, c87, c94, c109, c112) was read in every
 main-scene row and is equal in every main-scene colour execution (with --dumps: in every one
-whose pixel shader reads it). With a vertex key there is no light block: every one of the 256
-registers must be equal there. Otherwise 1, with "RESULT: FAIL".
+whose pixel shader reads it), and no row says "light": 1 where its registers are not a sun
+block. With a vertex key there is no light block: no register may differ where it was compared
+(the result line says how many registers were compared in every execution, in some and in none:
+a register the row does not carry, such as the vertex shader's own literals, is compared
+nowhere). Rows without the key's registers are not compared, and the result line counts them.
+Otherwise 1, with "RESULT: FAIL".
 """
 import argparse
 import gzip
@@ -94,6 +100,7 @@ LIGHT_BLOCK = (0, 19, 20, 21, 22, 23, 80, 87, 94, 109, 112)
 # b133 / b134 (emissive and cube blocks), b135 (the per-light shadow map), b136 (water).
 BOOL_BITS = (128, 129, 132, 133, 134, 135, 136)
 MAX_MISMATCHES = 3
+MAX_NAMED = 24  # registers named in the result line
 DEPTH_ONLY_MODE = 5  # RB_MODECONTROL & 7: depth only, no pixel shader (frame-map section 8)
 _HEX = set("0123456789ABCDEFabcdef")
 
@@ -124,6 +131,23 @@ def _show(reg_hex, digits=9):
     if reg_hex is None:
         return "(not read)"
     return "(" + ", ".join(f"{x:.{digits}g}" for x in floats(reg_hex)) + ")"
+
+
+def sun_block(regs):
+    """Whether a row's pixel registers are a light block by the register rules of
+    MakeLightBlock (light_block.h): all read and finite, the exponent c21.w in (0, 8], the
+    output scale c20.w in (0, 1024], c80 a unit direction (within 0.05) with w = 0,
+    c112 = (1, 0, 0, 0), c109.xyz the bits of c80.xyz, c94.x = 0. (The other rule, that the
+    light set was loaded in the scene, is the capture's.)"""
+    if regs is None or any(regs[r] is None for r in LIGHT_BLOCK):
+        return False
+    f = {r: floats(regs[r]) for r in LIGHT_BLOCK}
+    if any(x != x or x in (float("inf"), float("-inf")) for r in LIGHT_BLOCK for x in f[r]):
+        return False
+    x, y, z, w = f[80]
+    return (0.0 < f[21][3] <= 8.0 and 0.0 < f[20][3] <= 1024.0 and w == 0.0
+            and 0.95 <= (x * x + y * y + z * z) ** 0.5 <= 1.05
+            and f[112] == (1.0, 0.0, 0.0, 0.0) and regs[109][:24] == regs[80][:24] and f[94][0] == 0.0)
 
 
 def parse_register_list(text):
@@ -254,6 +278,7 @@ def load_capture(path, key, frame=None):
                 "c0": None if c0 is None or None in c0 else c0,
                 "P": regs, "tiles": tiles, "pbool": rsc._hex(r.get("pbool")),
                 "pbool_load": rsc._hex(r.get("pbool_load")),
+                "light": r.get("light") if type(r.get("light")) is int else None,
             })
     return rows, loads
 
@@ -465,7 +490,14 @@ def main(argv=None):
     differing_bits = {"device": Counter(), "load": Counter()}
     tested_bits = {"device": Counter(), "load": Counter()}  # of those, where the pixel shader tests the bit
     paired_frames = set()
+    light = Counter()
     for r in sampled:
+        if r["in_scene"] and r["light"] is not None and args.key == "pfull":
+            block = sun_block(r["P"])
+            light["rows"] += 1
+            light["valid"] += r["light"] == 1
+            light["valid without a sun block"] += r["light"] == 1 and not block
+            light["sun block and not valid"] += r["light"] != 1 and block
         if r["cmd"] is None:
             status["no command pointer"] += 1
             continue
@@ -605,6 +637,13 @@ def main(argv=None):
         print(f"  b{b}: GPU set {c['gpu']}, device set {c['device']}, device differs {c['device differs']}, "
               f"load set {c['load']} of {bools['load compared']}, load differs {c['load differs']}")
 
+    if light["rows"]:
+        print(f"light block (\"light\" of the sampled main-scene rows): rows {light['rows']}, valid "
+              f"{light['valid']}; valid where the registers are not a sun block "
+              f"{light['valid without a sun block']}; not valid where the registers are a sun block "
+              f"{light['sun block and not valid']} (the light set was not loaded in the scene, or the uploads "
+              "were not followed)")
+
     print_loads(capture_loads, gpu_loads, offset, frames)
 
     for reg in args.values:
@@ -629,17 +668,35 @@ def main(argv=None):
     if not_read:
         reasons.append("light block registers not read in a main-scene row: "
                        + " ".join(f"c{reg}" for reg in sorted(not_read)))
+    if light["valid without a sun block"]:
+        reasons.append(f"{light['valid without a sun block']} main-scene rows say \"light\": 1 where their "
+                       "registers are not a sun block")
     outside = status["frame outside the GPU log"]
     tail = f"; {outside} rows in frames outside the GPU log were not compared" if outside else ""
+    if len(rows) > len(sampled):
+        tail += (f"; {len(rows) - len(sampled)} rows without \"{args.key[0]}full\""
+                 + (f" or \"{args.key}_diff\"" if args.key.endswith("bank") else "") + " were not compared")
     if reasons:
         print(f"RESULT: FAIL ({args.key}): {paired_text}; " + "; ".join(reasons) + tail)
         return 1
-    print(f"RESULT: OK ({args.key}): {paired_text}; "
-          + ("every vertex register is" if vertex else
-             "the light block's registers (" + " ".join(f"c{reg}" for reg in LIGHT_BLOCK) + ") are")
-          + f" equal in all {n_exec[0]} main-scene colour executions"
-          + (f" whose {shader_name} shader reads them" if args.dumps else "")
-          + (f"; other registers differ there: {len(different)}" if different and not vertex else "") + tail)
+    if vertex:
+        # By what was compared: a register the rows do not carry (the shader's own literals) was
+        # compared nowhere, and "equal" says nothing of it.
+        compared = [s[0]["equal"] + s[0]["different"] + s[0]["unread"] for s in stats]
+        never = [reg for reg in range(REGISTERS) if not compared[reg]]
+        some = sum(1 for n in compared if 0 < n < n_exec[0])
+        said = ("no vertex register differs where it was compared"
+                + (" and the vertex shader reads it" if args.dumps else "")
+                + f", in {n_exec[0]} main-scene colour executions; registers compared in every one of them: "
+                f"{REGISTERS - some - len(never)}, in some: {some}, in none: {len(never)}"
+                + (" (" + " ".join(f"c{reg}" for reg in never[:MAX_NAMED])
+                   + (" ..." if len(never) > MAX_NAMED else "") + ")" if never else ""))
+    else:
+        said = ("the light block's registers (" + " ".join(f"c{reg}" for reg in LIGHT_BLOCK) + ") are"
+                + f" equal in all {n_exec[0]} main-scene colour executions"
+                + (f" whose {shader_name} shader reads them" if args.dumps else "")
+                + (f"; other registers differ there: {len(different)}" if different else ""))
+    print(f"RESULT: OK ({args.key}): {paired_text}; {said}{tail}")
     return 0
 
 

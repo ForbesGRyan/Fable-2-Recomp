@@ -590,36 +590,45 @@ bool ReadDevice(uint32_t device, DeviceSnapshot* s) {
 // --- Pixel constants (frame-map section 14, "Pixel constants") ----------------
 // Where the GPU's pixel constants come from on this thread: the device's bank,
 // or the constant buffers LoadAluConstants named (light_block.h, ConstantLoads;
-// xdk_layout.h, kAluLoad*). Kept up to date by the two upload hooks whatever
-// the view, because a load decides the registers until the next one.
+// xdk_layout.h, kAluLoad*). The two upload hooks hand it every upload only
+// while somebody reads the result (FollowPixelLoads: a frame with records, or
+// discovery); otherwise they only mark that an upload was skipped
+// (ConstantLoads::Skip), and no pixel constant is known until the first main
+// scene whose uploads are all followed from its begin (ConstantLoads::Observe).
 thread_local ConstantLoads t_ps_loads;
 // The same for the vertex bank (vertex c40..c43 and c76..c107 are loaded from
 // buffers too). Discovery evidence only ("vfull"): no record reads through
 // it, so it is followed only while a discovery capture is requested or
-// running. t_vs_loads_whole is false once an upload was not followed: the
-// model then no longer says where the vertex registers come from, and rows
-// carry no vertex registers (a capture armed by the environment follows from
-// the first upload; one armed at run time does not).
+// running. Once an upload was skipped (ConstantLoads::ever_skipped) rows carry
+// no vertex registers (a capture armed by the environment follows from the
+// first upload; one armed at run time does not).
 thread_local ConstantLoads t_vs_loads;
-thread_local bool t_vs_loads_whole = true;
 // The device of the draw this thread is capturing (the r3 of its draw hook).
 thread_local uint32_t t_draw_device = 0;
 
 // Discovery evidence: the pixel bool word (b128..b159) as its last writer on
-// this thread put it on the GPU; `read` false when it is not known. Two
-// writers (xdk_layout.h): GpuLoadShaders uploads the engine's flow constants
-// when one of its shaders uses them (the shaders' own bool literals, which the
-// upload also carries, are not applied here), and a draw builder that finds
-// the bool shadow pending writes the device's shadow. Rows carry the word as
-// "pbool_load" beside the device's shadow "pbool".
-struct GpuBoolLoad {
-  uint32_t word = 0;
-  bool read = false;
-};
-thread_local GpuBoolLoad t_gpu_pbool;
+// this thread put it on the GPU (light_block.h, BoolWordWriters). Rows carry
+// the word as "pbool_load" beside the device's shadow "pbool".
+thread_local BoolWordWriters t_gpu_pbool;
 // The bool shadow was pending when this thread's current draw hook was entered
 // (discovery only): the builder then flushes it.
 thread_local bool t_bool_flush_pending = false;
+
+// Whether this thread's pixel constant uploads are handed to t_ps_loads now.
+bool FollowPixelLoads() {
+  return g_discovery_active.load(std::memory_order_relaxed) ||
+         (g_records_frame.load(std::memory_order_relaxed) && g_render.load(std::memory_order_relaxed));
+}
+
+// Tells t_ps_loads whether the main scene's bracket is open as an upload hook
+// that is being followed finds it: the device's tiling flag, the byte the
+// draws read (main_scene.h). Called before the hook's own upload is handed
+// over, so an upload at a scene's begin belongs to the scene. A flag that
+// cannot be read is taken as no scene.
+void ObservePixelScene(uint32_t device) {
+  const uint8_t* flag = device ? ReadVirtual(device + xdk::kDeviceTilingFlagOffset, 1) : nullptr;
+  t_ps_loads.Observe(flag && TilingActive(*flag));
+}
 
 // The four dwords of constant `reg` from `from`: the 256-register bank at
 // guest address `bank` (0: none), or register `from.index` of a constant
@@ -629,11 +638,10 @@ bool ReadConstantBits(uint32_t bank, const ConstantSource& from, uint32_t reg, u
   if (from.kind == ConstantSource::Kind::kBank) {
     p = bank && reg < ConstantLoads::kRegisters ? ReadVirtual(bank + 16 * reg, 16) : nullptr;
   } else if (from.kind == ConstantSource::Kind::kMemory) {
-    uint32_t data = 0;
-    if (from.object && from.index < ConstantLoads::kMaxBufferRegisters &&
-        ReadVirtualBe32(from.object + 4 * xdk::kConstantBufferDataDword, &data) && data &&
-        uint64_t(data) + 16ull * from.index + 16 <= 0x100000000ull) {
-      p = ReadVirtual(data + 16 * from.index, 16);
+    uint32_t data = 0, address = 0;
+    if (from.object && ReadVirtualBe32(from.object + 4 * xdk::kConstantBufferDataDword, &data) &&
+        BufferRegisterAddress(data, from.index, &address)) {
+      p = ReadVirtual(address, 16);
     }
   }
   if (!p) return false;
@@ -660,13 +668,20 @@ void UpdateState(uint32_t id, const PPCContext& ctx) {
       if (g_discovery_active.load(std::memory_order_relaxed)) {
         t_vs_loads.BankUpload(ctx.r4.u64);
       } else {
-        t_vs_loads_whole = false;
+        t_vs_loads.Skip();
       }
     } else if (ctx.r5.u32 == 0x4400) {
       g_ps_bank_ptr.store(ctx.r6.u32, std::memory_order_relaxed);
       // r4: the pending mask, one bit per group of four registers. The bank's
-      // values replace what a load put in those registers.
-      t_ps_loads.BankUpload(ctx.r4.u64);
+      // values replace what a load put in those registers. Followed only while
+      // somebody reads the result; otherwise the upload is marked as skipped
+      // (three byte stores, nothing of the guest is read).
+      if (FollowPixelLoads()) {
+        ObservePixelScene(ctx.r3.u32);
+        t_ps_loads.BankUpload(ctx.r4.u64);
+      } else {
+        t_ps_loads.Skip();
+      }
     }
   }
   // The rest is evidence for discovery rows only.
@@ -992,9 +1007,9 @@ void OnGpuLoadShaders(const LastArgs& a) {
   t_gpu_ps = ps;
   t_gpu_vs = {};
   const bool discovery = g_discovery_active.load(std::memory_order_relaxed);
-  if (!discovery) t_gpu_pbool.read = false;
+  if (!discovery) t_gpu_pbool.Forget();
   if (!vs || !ReadVirtualBe32(vs + xdk::kVsHeaderOffset, &flags)) {
-    t_gpu_pbool.read = false;
+    t_gpu_pbool.Forget();
     return;
   }
   t_gpu_vs.obj = vs;
@@ -1007,45 +1022,73 @@ void OnGpuLoadShaders(const LastArgs& a) {
   bool vs_ok = false, ps_ok = true;
   const bool uploads = UsesFlowConstants(kVsLayout, vs, t_gpu_vs.variant, &vs_ok) |
                        (ps != 0 && UsesFlowConstants(kPsLayout, ps, 0, &ps_ok));
-  if (!vs_ok || !ps_ok) {
-    t_gpu_pbool.read = false;
-  } else if (uploads) {
-    t_gpu_pbool.read = ReadVirtualBe32(xdk::kEngineFlowConstantsAddress + xdk::kEnginePsBoolWordOffset,
-                                       &t_gpu_pbool.word);
-  }
+  uint32_t word = 0;
+  const bool word_read =
+      uploads && ReadVirtualBe32(xdk::kEngineFlowConstantsAddress + xdk::kEnginePsBoolWordOffset, &word);
+  t_gpu_pbool.OnShaderLoad(vs_ok && ps_ok, uploads, word_read, word);
+}
+
+// Whether a LoadAluConstants call of bank `bank` (r4) is handed to that bank's
+// model: the vertex bank's while discovery is requested or running, the pixel
+// bank's also in a frame with records. If not, the models the call may have
+// written are told that an upload was skipped (byte stores; nothing of the
+// guest is read and the hook is not timed) and false is returned.
+bool FollowAluLoad(uint32_t bank) {
+  if (g_discovery_active.load(std::memory_order_relaxed)) return true;
+  if (bank != 1) t_vs_loads.Skip();
+  if (bank == 0) return false;
+  if (g_records_frame.load(std::memory_order_relaxed) && g_render.load(std::memory_order_relaxed)) return true;
+  t_ps_loads.Skip();
+  return false;
 }
 
 // LoadAluConstants (0x8227CFC8: r3 device, r4 bank, r5 first register, r6
 // count, r7 constant buffer, r8 the buffer's first register; xdk_layout.h) has
-// written its LOAD_ALU_CONSTANT packet: the loads of both banks are followed
-// (t_ps_loads, t_vs_loads). A load whose predicate word or bin mask cannot be read is
-// taken as one that cannot be followed. While discovery is armed every call
-// writes an "aluload" row with the registers as the buffer holds them and the
-// device's command write pointer (the packet's last dword), for
-// tools/xdk_sigmatch/pconst_check.py.
+// written its LOAD_ALU_CONSTANT packet, and the call is followed
+// (FollowAluLoad): it is handed to its bank's model (t_ps_loads, t_vs_loads;
+// light_block.h, MapAluLoad). A call that cannot be followed (the predicate
+// word or the bin mask unread, arguments outside the bank, bins in the mask's
+// high word) is a skipped upload for the models it may have written. While
+// discovery is armed every call writes an "aluload" row with the registers as
+// the buffer holds them and the device's command write pointer (the packet's
+// last dword), for tools/xdk_sigmatch/pconst_check.py; "tiling" is whether
+// the device's tiling flag was set at the call (0 also when it was unread),
+// "bin_mask_hi" the bin mask's high word.
 void OnAluLoad(const LastArgs& a) {
-  const uint32_t device = a.r[0], bank = a.r[1], start = a.r[2], count = a.r[3], object = a.r[4],
-                 first = a.r[5];
-  uint32_t predicate = 0, mask = 0;
-  const bool state_read = device && ReadVirtualBe32(device + xdk::kDevicePredicateOffset, &predicate) &&
-                          ReadVirtualBe32(device + xdk::kDeviceBinMaskLoOffset, &mask);
-  if (bank == 1 || (bank == 0 && g_discovery_active.load(std::memory_order_relaxed))) {
-    (bank ? t_ps_loads : t_vs_loads)
-        .Load(start, count, state_read ? object : 0, first, state_read && predicate != 0,
-              state_read ? mask : ConstantLoads::kAllBins);
-  } else if (bank == 0) {
-    t_vs_loads_whole = false;
+  const uint32_t device = a.r[0];
+  AluLoadCall call;
+  call.bank = a.r[1], call.start = a.r[2], call.count = a.r[3], call.object = a.r[4], call.first = a.r[5];
+  call.state_read = device && ReadVirtualBe32(device + xdk::kDevicePredicateOffset, &call.predicate) &&
+                    ReadVirtualBe32(device + xdk::kDeviceBinMaskLoOffset, &call.mask_lo) &&
+                    ReadVirtualBe32(device + xdk::kDeviceBinMaskHiOffset, &call.mask_hi);
+  const uint32_t bank = call.bank, start = call.start, count = call.count, object = call.object,
+                 first = call.first;
+  // Here the pixel model is being followed whatever the bank (FollowAluLoad):
+  // the scene first, so a load at a scene's begin belongs to it.
+  ObservePixelScene(device);
+  AluLoad load;
+  if (!MapAluLoad(call, &load)) {
+    if (bank != 0) t_ps_loads.Skip();
+    if (bank != 1) t_vs_loads.Skip();
+  } else if (load.pixel) {
+    t_ps_loads.Load(load.start, load.count, load.object, load.first, load.predicated, load.mask);
+  } else if (g_discovery_active.load(std::memory_order_relaxed)) {
+    t_vs_loads.Load(load.start, load.count, load.object, load.first, load.predicated, load.mask);
+  } else {
+    t_vs_loads.Skip();
   }
   if (!g_armed.load(std::memory_order_relaxed)) return;
   uint32_t data = 0, write = 0;
   const bool have_data = object && ReadVirtualBe32(object + 4 * xdk::kConstantBufferDataDword, &data);
   const bool have_write = device && ReadVirtualBe32(device + xdk::kDeviceCommandWriteOffset, &write);
-  char buf[256];
+  char buf[320];
   std::snprintf(buf, sizeof(buf),
                 "{\"kind\":\"aluload\",\"frame\":%d,\"bank\":%u,\"start\":%u,\"count\":%u,\"obj\":\"0x%08X\","
-                "\"first\":%u,\"data\":\"0x%08X\",\"pred\":%d,\"bin_mask\":\"0x%08X\"",
+                "\"first\":%u,\"data\":\"0x%08X\",\"pred\":%d,\"bin_mask\":\"0x%08X\",\"bin_mask_hi\":\"0x%08X\","
+                "\"tiling\":%d",
                 g_frames_written.load(std::memory_order_relaxed) + 1, bank, start, count, object, first,
-                have_data ? data : 0, state_read ? int(predicate != 0) : -1, mask);
+                have_data ? data : 0, call.state_read ? int(call.predicate != 0) : -1, call.mask_lo, call.mask_hi,
+                t_ps_loads.in_scene() ? 1 : 0);
   std::string row = buf;
   if (have_write) {
     std::snprintf(buf, sizeof(buf), ",\"cmd\":\"0x%08X\"", write);
@@ -1176,9 +1219,13 @@ const PsInfo* LookupPs(uint32_t obj) {
 // file (frame-map section 14). False, with `out` untouched, when the register
 // cannot be read, and for a register the draw's pixel shader loads itself (a
 // literal of its table, which no bank or buffer holds; also when the shader or
-// its table cannot be read): nothing may then be drawn from it. Not covered: a
-// register that only another shader's literals wrote, which no shader of this
-// draw reads; the bank's value is returned for it.
+// its table cannot be read): nothing may then be drawn from it. False also
+// while the uploads are not known: after a time in which they were not
+// followed (no records and no discovery) no register is known until the first
+// main scene followed from its begin, and then each one only once its upload
+// was seen (ConstantLoads). Not covered: a register that only another shader's
+// literals wrote, which no shader of this draw reads; the bank's value is
+// returned for it.
 bool ReadPixelConstant(uint32_t reg, float out[4]) {
   if (reg >= ConstantLoads::kRegisters || !t_draw_device) return false;
   uint32_t vs_field = 0, ps_field = 0;
@@ -1195,6 +1242,21 @@ bool ReadPixelConstant(uint32_t reg, float out[4]) {
   if (!ReadConstantBits(PixelBank(t_draw_device), t_ps_loads.Find(reg), reg, bits)) return false;
   std::memcpy(out, bits, sizeof(bits));
   return true;
+}
+
+// The light block at the draw this thread is capturing (light_block.h), its
+// registers read through ReadPixelConstant. Invalid (all zero) unless the
+// light set's registers come from a constant buffer loaded since the main
+// scene of this draw began: the bank's values there, and a buffer loaded in an
+// earlier scene, are not this frame's light.
+LightBlock ReadLightBlock() {
+  bool this_scene = true;
+  for (uint32_t r : kLightSetRegisters) this_scene = this_scene && t_ps_loads.LoadedThisScene(r);
+  if (!this_scene) return LightBlock{};
+  float reg[ConstantLoads::kRegisters][4] = {};
+  bool have[ConstantLoads::kRegisters] = {};
+  for (uint32_t r : kLightBlockRegisters) have[r] = ReadPixelConstant(r, reg[r]);
+  return MakeLightBlock(reg, have, this_scene);
 }
 
 // The vertex buffer feeding a fetch slot (stream_resolve.h): nullptr, or the
@@ -1612,9 +1674,10 @@ void AppendBankRegisters(std::string& row, const char* prefix, const ConstantLoa
   }
 }
 
-// The pixel bank's rows ("pfull" is what ReadPixelConstant gives), and
-// "pbool_load": the pixel bool word as its last writer on this thread left it
-// (t_gpu_pbool), when that is known.
+// The pixel bank's rows ("pfull" is what ReadPixelConstant gives); "light":
+// whether ReadLightBlock gives a valid block at this draw; and "pbool_load":
+// the pixel bool word as its last writer on this thread left it (t_gpu_pbool),
+// when that is known.
 void AppendPixelRegisters(std::string& row, uint32_t device) {
   AppendBankRegisters(row, "p", t_ps_loads, PixelBank(device), [](uint32_t r, uint32_t* bits) {
     float f[4];
@@ -1622,7 +1685,8 @@ void AppendPixelRegisters(std::string& row, uint32_t device) {
     std::memcpy(bits, f, sizeof(f));
     return true;
   });
-  if (t_gpu_pbool.read) {
+  row += ReadLightBlock().valid ? ",\"light\":1" : ",\"light\":0";
+  if (t_gpu_pbool.known) {
     char buf[40];
     std::snprintf(buf, sizeof(buf), ",\"pbool_load\":\"0x%08X\"", t_gpu_pbool.word);
     row += buf;
@@ -1634,10 +1698,10 @@ void AppendPixelRegisters(std::string& row, uint32_t device) {
 // `vs` (variant `variant`) loads itself left out, as for the pixel bank; no
 // register is read when the shader's literal table cannot be. Nothing is
 // written when the vertex bank's uploads were not followed from the start
-// (t_vs_loads_whole). Discovery evidence only: no record reads vertex
-// constants through it.
+// (ConstantLoads::ever_skipped). Discovery evidence only: no record reads
+// vertex constants through it.
 void AppendVertexRegisters(std::string& row, uint32_t device, uint32_t vs, uint32_t variant) {
-  if (!t_vs_loads_whole) return;
+  if (t_vs_loads.ever_skipped()) return;
   uint64_t literal[4] = {};
   const bool literals_known = vs && ReadLiteralRegisters(kVsLayout, vs, variant, 0, literal);
   const uint32_t bank = VertexBank(device);
@@ -2944,6 +3008,7 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
     return;
   }
   if (id == kHook_LoadAluConstants_8227CFC8) {
+    if (!FollowAluLoad(t_last_args[id].r[1])) return;  // skipped: not timed
     CaptureTimer timer;
     OnAluLoad(t_last_args[id]);
     return;
@@ -2963,7 +3028,9 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
   if (t_bool_flush_pending) {
     // The builder wrote the device's bool shadow to the GPU (discovery evidence).
     t_bool_flush_pending = false;
-    t_gpu_pbool.read = ReadVirtualBe32(device + xdk::kDevicePsBoolConstantsOffset, &t_gpu_pbool.word);
+    uint32_t shadow = 0;
+    const bool shadow_read = ReadVirtualBe32(device + xdk::kDevicePsBoolConstantsOffset, &shadow);
+    t_gpu_pbool.OnBuilderFlush(shadow_read, shadow);
   }
   // Records: only the outermost draw of a nested call chain, so geometry is
   // never captured twice, and only for a frame a consumer wants records for;
@@ -2971,8 +3038,13 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
   const bool render = outermost && g_render.load(std::memory_order_relaxed);
   const bool records = render && g_records_frame.load(std::memory_order_relaxed);
   const bool in_scene = ObserveMainScene(device, render && !records);
+  // The pixel constants' model takes the bracket from the draws too, where
+  // its uploads are followed: with records here, with discovery below (no
+  // instruction is added to a draw that neither reads).
+  if (records) t_ps_loads.Observe(in_scene);
   if (in_scene && records) RecordDraw(id, args, device);
   if (!g_armed.load(std::memory_order_relaxed)) return;
+  if (!records) t_ps_loads.Observe(in_scene);
   const uint64_t n = g_draw_count.fetch_add(1, std::memory_order_relaxed);
   if (n % Every() != 0) return;
   DeviceSnapshot dev;

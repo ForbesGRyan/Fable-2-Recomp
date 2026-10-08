@@ -47,7 +47,8 @@ transform is the product of two constant windows, which FABLE2_VS_TRANSFORM (one
       shaders that use one element the same way) in the order the light's formula reads them, as
       "pos_swizzle" does for a position: a normal's x, y, z ("xyz" for the 10_11_11 element, "yxw" for
       the plants' halves, the first three in memory); a colour's red, green, blue and, where the reader
-      keeps it, alpha ("zyxw" for the colour stream, "zyx" for an instance's); the four weights in the
+      keeps it, alpha ("zyxw" for the colour stream, "zyx" for an instance's: four components for
+      kind "stream", three for kind "instance", anything else is refused); the four weights in the
       order of the probe constants' components ("xyzw"). Each component at most once, and only
       components the format has (x, y, z for 10_11_11). In the line: two bits a component from bit 0,
       the number of components above them (0x324 = xyz, 0x331 = yxw, 0x4C6 = zyxw, 0x4E4 = xyzw; 0x0
@@ -104,9 +105,14 @@ LIGHT_KINDS = {
 _LIGHT_FORMATS = {"normal": {16: "10_11_11", 32: "16_16_16_16_FLOAT"}, "colour": {6: "8_8_8_8"},
                   "weights": {38: "32_32_32_32_FLOAT"}}
 # How many source components an element's selector names (a normal's three, a colour with or without
-# its alpha, the four weights), and the components a format has.
+# its alpha, the four weights), and the components a format has. A colour's number is its kind's
+# (_COLOUR_SOURCE_COUNT): the readers hold a colour stream's selector to four components and an
+# instance colour's to three (normal_decode.h, ColourElementSupported and
+# InstanceColourElementSupported), so the other number would be a table that generates and a draw
+# without colours.
 _LIGHT_SOURCE_COUNTS = {"normal": (3,), "colour": (3, 4), "weights": (4,)}
 _LIGHT_SOURCE_WORDS = {(3,): "three", (3, 4): "three or four", (4,): "four"}
+_COLOUR_SOURCE_COUNT = {"stream": 4, "instance": 3}
 _FORMAT_COMPONENTS = {16: "xyz", 32: "xyzw", 6: "xyzw", 38: "xyzw"}
 
 
@@ -265,8 +271,9 @@ def _uv_line(vs, h, name, u):
             f"{_int('uv format', u.get('format'), 0, 63)}, {_int('uv offset', u.get('offset'), 0, 255)}, {refs})")
 
 
-def _light_fetch(vs, what, f):
-    """(fetch ordinal, format, offset in dwords) of a light's "normal", "colour" or "weights"."""
+def _light_fetch(vs, what, f, kind=None):
+    """(fetch ordinal, format, offset in dwords, source code) of a light's "normal", "colour" or
+    "weights". `kind`: the light's kind, which says how many components a colour's source names."""
     _only_keys(vs, f"light {what}", f, LIGHT_FETCH_KEYS)
     fetch = _fetch(f"light {what} fetch", f.get("fetch"))
     offset = _int(f"light {what} offset", f.get("offset"), 0, 255)
@@ -279,6 +286,10 @@ def _light_fetch(vs, what, f):
             or any(c not in components for c in source)):
         raise ValueError(f"light {what} source {source!r} is not {_LIGHT_SOURCE_WORDS[counts]} of "
                          f"{', '.join(components)}, each once")
+    if what == "colour" and kind in _COLOUR_SOURCE_COUNT and len(source) != _COLOUR_SOURCE_COUNT[kind]:
+        a = "an" if kind[0] in "aeiou" else "a"
+        raise ValueError(f"{vs}: {a} {kind} light's colour source {source!r} is not "
+                         f"{_LIGHT_SOURCE_WORDS[(_COLOUR_SOURCE_COUNT[kind],)]} of {', '.join(components)}")
     return fetch, fmt, offset, f"0x{source_code(source):X}"
 
 
@@ -307,7 +318,7 @@ def _light_line(vs, h, e):
             raise ValueError(f"{vs}: {a} {kind} light does not belong to an entry with {form}")
     none = (-1, 0, 0, "0x0")
     normal = _light_fetch(vs, "normal", light["normal"]) if "normal" in light else none
-    second = next((_light_fetch(vs, k, light[k]) for k in ("colour", "weights") if k in light), none)
+    second = next((_light_fetch(vs, k, light[k], kind) for k in ("colour", "weights") if k in light), none)
     a0 = _component("light a0", light["a0"]) if "a0" in light else -1
     scale = reg_comp(light["scale"]) if "scale" in light else -1
     power = "0.0f"

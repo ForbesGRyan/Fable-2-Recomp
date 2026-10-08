@@ -989,6 +989,17 @@ int main() {
     CHECK(t.Open(1) && t.failed() == 0 && t.ShouldTry(99));
     // Only the last failed set is held: a set is a new upload each time it is loaded, so an
     // earlier number cannot come again in the frame, and one that did would be read as new.
+    // A read that gave the block is marked only when the frame has taken it (capture.cpp, RecordDraw:
+    // after SetLight, under the scene's lock). Until then the frame stays open and the same set is
+    // read again at the next draw: a draw dropped between the read and the lock loses nothing.
+    {
+      LightBlockTries pending;
+      CHECK(pending.Open(3) && pending.ShouldTry(41));   // the read is made and gives a block ...
+      CHECK(pending.Open(3) && pending.ShouldTry(41) && pending.failed() == 0);  // ... not marked: read again
+      pending.Tried(41, true);                            // the frame took it
+      CHECK(!pending.Open(3) && !pending.ShouldTry(41) && !pending.ShouldTry(42));
+      CHECK(pending.Open(4) && pending.ShouldTry(41));    // the next frame reads its own
+    }
     LightBlockTries u;
     CHECK(u.Open(0));
     u.Tried(3, false);

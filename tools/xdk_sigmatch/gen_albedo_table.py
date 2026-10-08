@@ -415,7 +415,11 @@ def main(argv=None):
                                       "(default: vs-transforms.json in the folder of --json)")
     a = ap.parse_args(argv)
     data = load(a.json)
-    vertex = load(a.vs_json if a.vs_json else Path(a.json).parent / "vs-transforms.json")
+    vs_json = Path(a.vs_json) if a.vs_json else Path(a.json).parent / "vs-transforms.json"
+    if not vs_json.is_file():
+        raise FileNotFoundError(f"the vertex table {vs_json} is missing: the light pairs are held against it "
+                                "(name another file with --vs-json)")
+    vertex = load(vs_json)
     Path(a.out).write_text(generate(data, vertex))
 
 

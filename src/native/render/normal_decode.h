@@ -1,14 +1,15 @@
 #pragma once
 
 // Vertex normals and the vertex colour stream for the light of the clay pass
-// (pure: no SDK/GPU deps): the element decodes, the transform that keeps a
-// normal perpendicular, and what the geometry cache builds from them.
+// (pure: no SDK/GPU deps): the element decodes, the transform of a normal as
+// the game makes it, and what the geometry cache builds from them.
 //
 // A normal buffer holds one unit normal per vertex of the draw's position
 // buffer, in the space its positions are in (geometry_cache.h):
 //   - a plain mesh: the stream's own space. The draw's world rotation
 //     (LightInputs::world_rot) is applied when the draw is drawn, as the draw's
-//     rows are to its positions: RotateNormal is the rule.
+//     rows are to its positions: the vertex shader's normalize(M n), M the
+//     rows times the draw's scale (ClassifyRotation below says what M is).
 //   - a bone-skinned mesh: after the bones, through each vertex's blended bone
 //     matrix as it is (bone_skin.h, BlendBones: the weights of the position),
 //     which is what the game's shaders compute.
@@ -246,51 +247,17 @@ inline bool DecodeNormals(const uint8_t* src, size_t src_size, const capture::Li
   return true;
 }
 
-// The matrix that takes a normal through `rot` so that it stays perpendicular
-// to what `rot` makes of its surface: the inverse transpose, up to a positive
-// factor (the cofactor matrix times the determinant's sign, so a mirror does
-// not turn the normal into the surface). For a rotation times one scale it is
-// `rot` up to a factor. When the determinant is within 1e-12 of zero there is
-// no inverse and `rot` itself is used.
-inline void NormalMatrix(const float rot[3][3], float out[3][3]) {
-  const double a = rot[0][0], b = rot[0][1], c = rot[0][2];
-  const double d = rot[1][0], e = rot[1][1], f = rot[1][2];
-  const double g = rot[2][0], h = rot[2][1], i = rot[2][2];
-  const double cof[3][3] = {{e * i - f * h, f * g - d * i, d * h - e * g},
-                            {c * h - b * i, a * i - c * g, b * g - a * h},
-                            {b * f - c * e, c * d - a * f, a * e - b * d}};
-  const double det = a * cof[0][0] + b * cof[0][1] + c * cof[0][2];
-  if (!(std::fabs(det) > 1e-12)) {  // (a determinant that is not a number too)
-    for (int r = 0; r < 3; ++r) {
-      for (int k = 0; k < 3; ++k) out[r][k] = rot[r][k];
-    }
-    return;
-  }
-  const double sign = det < 0.0 ? -1.0 : 1.0;
-  for (int r = 0; r < 3; ++r) {
-    for (int k = 0; k < 3; ++k) out[r][k] = float(sign * cof[r][k]);
-  }
-}
-
-// out = normalize(m * n). False, with out (0, 0, 0), when the result has no
-// direction: a zero normal, a matrix that flattens it, values that are not finite.
+// out = normalize(m * n): the matrix as it is, which is the game's arithmetic
+// for a bone's, an instance's and a draw's rows alike (rulings of 2026-10-08;
+// the inverse transpose, which keeps a normal perpendicular under a scale that
+// is not uniform, is used nowhere: the functions that made it, NormalMatrix
+// and RotateNormal, were removed in the final fix wave). False, with out
+// (0, 0, 0), when the result has no direction: a zero normal, a matrix that
+// flattens it, values that are not finite.
 inline bool TransformNormal(const float m[3][3], const float n[3], float out[3]) {
   double v[3];
   for (int r = 0; r < 3; ++r) v[r] = double(m[r][0]) * n[0] + double(m[r][1]) * n[1] + double(m[r][2]) * n[2];
   return detail::Normalize(v, out);
-}
-
-// A normal through the 3 x 3 `rot` (rows, as a draw's world rotation c4..c6
-// holds them): multiplied by the inverse transpose of `rot` and normalised, so
-// that it stays perpendicular under a scale that is not uniform and under a
-// mirror (NormalMatrix); a result without a direction gives (0, 0, 1).
-inline void RotateNormal(const float rot[3][3], const float n[3], float out[3]) {
-  float m[3][3];
-  NormalMatrix(rot, m);
-  if (!TransformNormal(m, n, out)) {
-    out[0] = out[1] = 0.0f;
-    out[2] = 1.0f;
-  }
 }
 
 // What a draw's world rotation is, as the object shaders use it on the normal:
@@ -303,17 +270,16 @@ inline void RotateNormal(const float rot[3][3], const float n[3], float out[3]) 
 //     the identity's) and right-handed: the normal is M n.
 //   kMirrored: orthonormal after the scale, left-handed (a mirrored object, or
 //     a negative c7.w). For an orthonormal M the inverse transpose is M
-//     itself, sign included, so the game's M n and RotateNormal's normal are
-//     the same vector.
+//     itself, sign included, so the game's M n is the perpendicular normal.
 //   kSkewed: invertible, not orthonormal after the scale (a scale that is not
-//     uniform, a shear, a c7.w that is not the rows' reciprocal): the normal
-//     RotateNormal makes is perpendicular, the game's is not.
+//     uniform, a shear, a c7.w that is not the rows' reciprocal): the game's
+//     M n is not perpendicular to the transformed surface there (0 seen).
 //   kDegenerate: no direction comes out of it (a zero or singular matrix, a
 //     zero scale, a value that is not finite).
 // The clay pass lights with the game's own value for every kind that has a
 // direction, N = normalize(M n) with M the rows times the scale
 // (clay_logic.h, MakeClayObjectConstants; ruling of 2026-10-08), and draws a
-// kDegenerate draw without light. RotateNormal is used by no object draw.
+// kDegenerate draw without light.
 enum class RotationKind : uint8_t { kRotation, kMirrored, kSkewed, kDegenerate, kCount };
 
 inline const char* RotationKindName(RotationKind k) {
@@ -371,7 +337,7 @@ inline bool SkinNormals(const uint8_t* vb, size_t vb_size, const uint8_t* palett
   if (bones.empty()) return false;
   for (uint32_t i = 0; i < count; ++i) {
     float m[3][4];
-    const capture::BoneBlend blend = capture::BlendBones(vb, vb_size, uint64_t(first_vertex + i) * stride, s, bones, m);
+    const capture::BoneBlend blend = capture::BlendBones(vb, vb_size, (uint64_t(first_vertex) + i) * stride, s, bones, m);
     if (blend == capture::BoneBlend::kUnreadable) return false;
     if (blend == capture::BoneBlend::kNone) {
       normals[i] = {0.0f, 0.0f, 0.0f};

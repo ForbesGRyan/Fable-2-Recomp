@@ -420,6 +420,25 @@ int main() {
     if (PaletteBones(s, 0) != 0 || PaletteBones(s, 23) != 0) return 80;
     if (PaletteBones(s, 24) != 1 || PaletteBones(s, 47) != 1 || PaletteBones(s, 48) != 2) return 81;
     if (PaletteBones(s, 24 * 300) != 256) return 82;  // the index is 8 bits
+    // DecodeBones decodes every whole bone up to the 256th (index 255, the largest a vertex can
+    // name), and no more: 255 bones, 256, and a palette of 300.
+    {
+      std::vector<uint8_t> palette(24 * 300, 0);
+      for (uint32_t b = 0; b < 300; ++b) {
+        for (int k = 0; k < 3; ++k) PutHalf4(&palette[24 * b + 8 * k], float(b), float(k), 1.0f, 0.0f);
+      }
+      std::vector<Float4> bones;
+      DecodeBones(palette.data(), 24 * 255, s, &bones);
+      if (bones.size() != 3 * 255) return 87;
+      DecodeBones(palette.data(), 24 * 256, s, &bones);
+      if (bones.size() != 3 * 256) return 88;
+      DecodeBones(palette.data(), palette.size(), s, &bones);
+      if (bones.size() != 3 * 256) return 89;
+      // (the last one is bone 255's: its rows carry its number)
+      const Float4& last = bones[3 * 255 + 2];
+      if (!(Near(last.x, 255.0f) || Near(last.y, 255.0f) || Near(last.z, 255.0f) || Near(last.w, 255.0f))) return 90;
+      if (bones.size() != 3 * size_t(PaletteBones(s, palette.size()))) return 91;
+    }
     // A stride larger than the rows' end (32-byte bones, rows ending at byte
     // 24): the last bone needs its rows, not a whole stride.
     BoneSkin wide = s;

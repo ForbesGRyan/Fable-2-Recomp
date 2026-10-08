@@ -196,6 +196,17 @@ class D3dMessageLog {
   unsigned lines_ = 0, errors_ = 0, warnings_ = 0, corruption_ = 0;
 };
 
+// The line written when fable2_native_d3d_messages is first seen on. `queue`: the process's DXGI
+// information queue was found (dxgidebug.dll answered; that alone reports nothing). `layer`: the
+// SDK's --d3d12_debug is set, which is what turns the Direct3D debug layer on and makes it store
+// messages. Only both together report anything.
+inline std::string D3dMessagesStartText(bool queue, bool layer) {
+  return std::string("d3d messages: on (fable2_native_d3d_messages); the queue is ") +
+         (queue ? "available" : "NOT available (dxgidebug.dll gave no information queue: nothing will be reported)") +
+         "; the debug layer is " +
+         (layer ? "on (--d3d12_debug=true)" : "OFF (--d3d12_debug=true is not set: nothing will be reported)");
+}
+
 class FailureLatch {
  public:
   // Returns true only for the first failure since construction/Clear().

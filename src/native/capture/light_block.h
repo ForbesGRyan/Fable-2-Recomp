@@ -468,7 +468,9 @@ class ConstantLoads {
 // that follow under it: the next read is at the first draw under another
 // upload of the set. A read can also fail for a register that is not the
 // set's (one of c0, c19..c23 not read or out of range); that is not told
-// apart, and such a frame gets its block one set later, a few draws on.
+// apart, and such a frame gets its block one set later: at the next
+// one-light draw under another load of the set, which is not a few draws on
+// (the final review counted 76 draws at the bridge and 86 by the trees).
 // `set` is that upload's order number
 // (ConstantLoads::Find(c80, &set) where the set was loaded in this scene; 0
 // where it was not, and then nothing is read).

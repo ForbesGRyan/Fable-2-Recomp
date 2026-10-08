@@ -14,7 +14,8 @@
 
 namespace fable2::native::render {
 
-// Whether the layer's queue can be read (the DXGI debug interface is there).
+// Whether the layer's queue can be read (the DXGI debug interface is there: dxgidebug.dll
+// answered). It says nothing of the layer itself, which only --d3d12_debug=true turns on.
 bool D3dMessagesAvailable();
 
 // Hands every message stored since the last call to `log` and writes the lines

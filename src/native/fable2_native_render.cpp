@@ -45,7 +45,8 @@ REXCVAR_DEFINE_INT32(fable2_native_texture_budget_mb, 512, "Fable2",
                      "textures are evicted above it.");
 REXCVAR_DEFINE_STRING(fable2_native_light, "on", "Fable2",
                       "Native clay pass light: on = terrain, objects, tree trunks, leaves and plants are lit by the "
-                      "game's ambient, baked and sun light (no shadows; one fixed exposure, fitted on the bridge's dirt patch); "
+                      "game's ambient, baked and sun light (no shadows; one fixed exposure on the lit draws, fitted on the bridge's "
+                      "dirt patch; unlit draws are shown as with the light off); "
                       "off = the unlit materials picture.");
 REXCVAR_DEFINE_BOOL(fable2_native_d3d_messages, false, "Fable2",
                     "Write the Direct3D debug layer's errors, corruption and warnings to the game log "
@@ -99,10 +100,15 @@ struct UploadBurst {
   std::chrono::steady_clock::time_point start;
 };
 UploadBurst g_burst;
-// The debug layer's messages (fable2_native_d3d_messages): command-processor thread only.
+// The debug layer's messages (fable2_native_d3d_messages). Read on the command-processor thread
+// with each composite frame, and once more where a frame may not come again: when the renderer
+// latches a failure (which is how a removed device shows here: the SDK hands this module no
+// removal callback) and at shutdown (the game thread). The mutex is for those two.
+std::mutex g_d3d_messages_mutex;
 D3dMessageLog g_d3d_messages;
 bool g_d3d_messages_started = false;
 uint64_t g_d3d_messages_logged = 0;  // g_clay_frames at the last count line
+void PollD3dMessagesOnce(const char* when);
 
 // F3 status text, written on the command-processor thread, read by the UI.
 std::mutex g_status_mutex;
@@ -130,6 +136,7 @@ void Fail(const char* what) {
   if (g_latch.Fail()) {
     REXLOG_ERROR("[native] {} failed; falling back to emulated output (F6 retries)", what);
     SetStatus(std::string("Native: ") + what + " failed (F6 retries)");
+    PollD3dMessagesOnce("at the failure");  // (what the layer said of it; no composite frame may follow)
   }
 }
 
@@ -335,16 +342,26 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
 // lines, and the count with every 300th clay frame's lines. Command-processor thread.
 void LogD3dMessages() {
   if (!REXCVAR_GET(fable2_native_d3d_messages)) return;
+  std::lock_guard<std::mutex> lock(g_d3d_messages_mutex);
   if (!g_d3d_messages_started) {
     g_d3d_messages_started = true;
-    REXLOG_INFO("[native] d3d messages: on (fable2_native_d3d_messages); the debug layer's queue is {}",
-                render::D3dMessagesAvailable() ? "available" : "NOT available (is --d3d12_debug=true set?)");
+    // The queue answering says only that dxgidebug.dll is there; the layer itself is the SDK's switch.
+    REXLOG_INFO("[native] {}", D3dMessagesStartText(render::D3dMessagesAvailable(),
+                                                    rex::cvar::GetFlagByName("d3d12_debug") == "true"));
   }
   render::PollD3dMessages(g_d3d_messages, [](const std::string& line) { REXLOG_WARN("[native] {}", line); });
   if (g_clay_frames != g_d3d_messages_logged && g_clay_frames % 300 == 0) {
     g_d3d_messages_logged = g_clay_frames;
     REXLOG_INFO("[native] {}", g_d3d_messages.Summary());
   }
+}
+
+// One more read of the layer's queue, with the count: where no composite frame may follow.
+void PollD3dMessagesOnce(const char* when) {
+  if (!REXCVAR_GET(fable2_native_d3d_messages)) return;
+  std::lock_guard<std::mutex> lock(g_d3d_messages_mutex);
+  render::PollD3dMessages(g_d3d_messages, [](const std::string& line) { REXLOG_WARN("[native] {}", line); });
+  REXLOG_INFO("[native] {} ({})", g_d3d_messages.Summary(), when);
 }
 
 void OverlayCallback(const NativeGuestOutputRenderContext& ctx, void*) {
@@ -395,6 +412,11 @@ void Install(rex::memory::Memory* memory) {
               ViewName(CurrentView()));
   REXLOG_INFO("[native] light: {} (fable2_native_light)",
               CurrentClayLight() == render::ClayLight::kOn ? "on" : "off");
+}
+
+void Shutdown() {
+  if (!g_installed.load(std::memory_order_acquire)) return;
+  PollD3dMessagesOnce("at shutdown");
 }
 
 // Game thread only: the string cvar is touched here only.

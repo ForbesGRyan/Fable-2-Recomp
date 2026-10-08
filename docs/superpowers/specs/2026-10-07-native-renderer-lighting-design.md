@@ -1,12 +1,19 @@
 # Native renderer sub-project 7: lighting (sun, ambient and baked light, without shadows)
 
-Status: implemented 2026-10-08 (plan Tasks 1 to 9, branch `native-renderer-lighting`); measured in
-`docs/native-renderer/frame-map.md` section 14, "Validation": criteria 1, 3, 6 and 8 met; 5 met in all
-seven pairs measured, four of them on steady regions; 4 met for the six regions with one rectangle corrected (the first one straddled a shadow edge); 2 met at
-the bridge and the third spot, by the trees only in another display state; 7 met for the frame
-rate and the view-off capture, its records-on clause not measurable as written (no gated run) and
-its number, 1.35 ms, not met (1.46 to 1.50 ms). What was ruled and built differently is at the end,
-"Implementation notes (deviations)".
+Status: implemented 2026-10-08 (plan Tasks 1 to 9 and the final fix wave after the whole-branch
+review, branch `native-renderer-lighting`); measured in `docs/native-renderer/frame-map.md` section
+14, "Validation" and its "After the review: the fix wave": criteria 1, 3, 6 and 8 met; 4 met for
+the six regions with one rectangle corrected (the first one straddled a shadow edge), and again
+after the fix wave within 0.01 of the same ratios; 5 met as written in all seven pairs, four of
+them on steady regions, but it cannot fail as written (with the light off the bridge pairs read
+the same: 1.47, 1.50; the trees' pairs are albedo): what supports the light is the ratio's size
+(rope pole 3.60 in the game's frame, 3.03 lit, 1.47 unlit); 2 met at the bridge in the normal
+display state, at the third spot and by the trees only in a fallback display state; 7 met for the
+frame rate (30.0 fps, and 30.0 in the renderer-off control) and the view-off capture; its
+records-on clause met against the baseline of the same kind (run 277, master's code, 1.47 to 1.62
+ms; this branch 1.44 to 1.50 at the bridge), its first form not measurable (no gated run exists).
+The exposure reaches the lit draws only since the fix wave (ruling 37). What was ruled and built
+differently is at the end, "Implementation notes (deviations)".
 
 Design of 2026-10-07. Written under the user's standing instruction to proceed on the
 recommended option at each choice and to log it as a ruling ("when these tasks are finished.
@@ -299,9 +306,10 @@ Process and runs:
    display, the monitor off): its comparisons were made against that night's runs exactly and
    against the earlier full-size runs by resampling; the absolute 30.0 fps and the exact
    comparisons were repeated later at full size — why: waiting would have stalled the work for
-   hours — cost if wrong: none remaining for the bridge and the third spot (runs 328 against
-   292, 333 against 328, 342 against 333); by the trees the light-off comparison at full size
-   was never made (the view there does not repeat).
+   hours — cost if wrong: none remaining for the bridge (runs 328 against 292, 333 against 328,
+   342 against 333). The third spot's only comparison with the materials picture, 0.001%, is from
+   that fallback display state, as the trees' 0.82% is, and was not repeated at full size; by the
+   trees the light-off comparison at full size was never made (the view there does not repeat).
 6. Three agents worked beside the leaf task's implementer on files of their own and without game
    runs (the region tool, the replay check, the research for shadows); the calibration stayed
    serial after the leaves — why: the user asked for more agents; calibration needs runs with the
@@ -390,7 +398,10 @@ The linear target (Task 6):
     regions cannot band; what it costs is at the bright end (blue up to 3 levels, red and green
     up to 2, darker; five stored blends up to 7 and 4) — cost if wrong: that rounding stays in a
     debug view. The earlier ruling asked for alternating runs on the display; they were not
-    made.
+    made. (Since the fix wave the target holds the value the mapping shows, so the arithmetic's
+    rows for a factor of 1 apply: every level below 91 is shown in all three channels, blue lacks
+    91, 95 and 67 more above them, red and green 11 from level 181 up; five stored blends up to 6
+    and 3. The ruling stands.)
 23. The per-view frame-time log line stays as a permanent diagnostic; the experiment's switches
     were removed.
 
@@ -409,7 +420,8 @@ Lit drawing (Tasks 7 and 8):
     Its length: 300 s at first; 150 s after the user closed one such run because it loads the
     whole processor (that run was ruled clean on its 250 s of lit frames, without a picture); the
     game process at below-normal priority; 240 s while other agents were working. Task 9 changes
-    one constant and no shader text or binding, so it has no such run.
+    one constant and no shader text or binding, so it has no such run. The fix wave changes the
+    text of three pixel shaders (ruling 37) and has one, of 240 s.
 26. A frame whose constant buffer cannot be made draws nothing and shows the clear colour — why:
     such a failure is device loss or exhaustion; keeping the previous picture would break "never
     a picture older than its scene" — cost if wrong: a dark frame until the next scene.
@@ -460,8 +472,9 @@ Made in Task 9:
 
 33. The exposure is 2.22, from run 341's bracketed shots of the dirt patch (ratio 0.4495, the
     two emulated shots 1.8% apart), kept to two decimals — cost if wrong: every lit region
-    shifts by the same factor. The clear colour is not divided by it: where nothing is drawn a
-    lit frame shows levels (30, 30, 37) instead of (20, 20, 25).
+    shifts by the same factor. As built in Task 9 it was the output mapping's factor, so it also
+    scaled the clear colour (a lit frame showed levels (30, 30, 37) instead of (20, 20, 25)) and
+    every unlit draw of a lit frame: a defect, see ruling 37.
 34. The rectangle "grass beside it" of the regions file was corrected: the first one straddled
     the edge of a moving leaf shadow. Both are reported — cost if wrong: criterion 4's grass
     figure rests on a rectangle chosen after the first one failed; the first one's figure is
@@ -469,6 +482,39 @@ Made in Task 9:
 35. No light-off run by the trees was asked for — why: the view there does not repeat from run
     to run (8 to 10 pixels), so it could not have given the pixel-registered unlit picture the
     leaf replay lacks — cost if wrong: that replay stays weak (levels and colour only).
+
+Made after Task 9:
+
+36. Task 9 (the calibration, the measurements and the documents) got no task review of its own;
+    the whole-branch review read it as a named focus — why: it is measurements and text on top of
+    one constant, and the whole-branch review read the same files next — cost if wrong: a fault
+    of Task 9 is found one step later. It was: the two Important findings of that review are both
+    Task 9's (rulings 37 and 38).
+37. The exposure in the output mapping was a defect, not a property: it multiplied every pixel,
+    so the unlit draws and the clear of a lit frame came out `sqrt(2.22)` = 1.49 times too bright
+    on the display (clean water (216, 207, 187) for (145, 139, 125)). Fixed in the final fix wave
+    as the whole-branch review specified: the frame's block carries the exposure and the three
+    lit pixel paths multiply their own value by it; the mapping's factor is 1 — why this form:
+    the vertex shader with all its buffer loads is untouched, no binding and no buffer size
+    changes, every program without light is instruction for instruction what it was, the clear
+    is right with no change, and lit and unlit values share one unit in the target, so blends of
+    the two are consistent — cost if wrong: lit pixels differ from Task 9's by a level or two
+    where the target's rounding falls otherwise (the lit value is now stored after the exposure);
+    one more software-adapter run.
+38. Criterion 5 is recorded as met as written and as weak evidence: with the light off the two
+    bridge pairs also have the same member brighter (1.47, 1.50), and the three pairs by the
+    trees compare cut wood with bark, so a test of which side is brighter cannot fail. What
+    supports the light is the size of the ratio (rope pole 3.60 in the game's frame, 3.03 lit,
+    1.47 unlit) — cost if wrong: none; the criterion should have asked for the ratio's size.
+39. The final fix wave: one implementer, after the whole-branch review's verdict "ready to merge
+    after the MUST items": the exposure (ruling 37), the text of criteria 2, 5 and 7, and the
+    review's smaller items (no light buffers built with the light off, the block read marked
+    under the lock, tests for the smallest index and others, dead code, stale text); the items
+    it left and the review's later ones are follow-ups 7 to 15 of the frame map's "Validation".
+    Criterion 7's records-on clause was re-read against the baseline of the same kind (run 277,
+    master's code in a user-present boot-save session: 1.47 to 1.62 ms; this branch 1.46 to
+    1.50): not a regression; the 1.35 ms of the criterion's first form is a gated menu-start
+    run's figure and no gated run of this code exists.
 
 ### Built differently from the design
 
@@ -489,7 +535,10 @@ Made in Task 9:
   figure: what the side arrays won, the light inputs cost ("Validation", criterion 7).
 - **Design 4.** `R11G11B10_FLOAT`, not the 64-bit format (rulings 21, 22). The lit value is the
   game's without its output scale of 16. A lit draw has no facet shade; an unlit one keeps it.
-  The output mapping is as designed, with `E` = 2.22 for a lit frame and 1 for an unlit one.
+  The exposure is NOT where the design put it: the design's `display = sqrt(saturate(linear *
+  E))` multiplies every pixel, and built so (Task 9) it brightened the unlit draws and the clear
+  of a lit frame. Since the fix wave `E` = 2.22 multiplies the lit draws' own values before they
+  are stored, and the mapping is `display = sqrt(saturate(linear))` in every frame (ruling 37).
 - **Design 5.** The terrain replay has the lit form. Beyond the design: `replay_check.py`
   (captured probe draws through the game's vertex microcode against the renderer's decode) and
   `region_compare.py` with `docs/native-renderer/lighting-regions.json`.

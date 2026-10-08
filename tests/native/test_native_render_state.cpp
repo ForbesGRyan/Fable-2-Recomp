@@ -100,6 +100,28 @@ int main() {
         "view split (until the switch): 10 frames, mean 9.00 ms (111.1 fps), median 10.00 ms, p90 10.00 ms, max 10.00 ms") {
       return 34;
     }
+    // The median of an even count is the upper middle value (index n / 2), the largest is the one
+    // largest value (here it stands alone), and a stretch whose intervals are all zero (a clock that
+    // stands still) has no rate, not an infinite one.
+    ViewFrameLog two;
+    double u = 0.0;
+    two.Add(View::kNative, u);
+    for (int i = 0; i < 10; ++i) {
+      u += i == 2 ? 30.0 : i < 6 ? 10.0 : 20.0;   // (five of 10, four of 20, one of 30, not in order)
+      if (!two.Add(View::kNative, u).empty()) return 35;
+    }
+    if (two.Add(View::kOff, u + 1.0) !=
+        "view native (until the switch): 10 frames, mean 16.00 ms (62.5 fps), median 20.00 ms, p90 30.00 ms, max 30.00 ms") {
+      return 36;
+    }
+    ViewFrameLog still;
+    for (int i = 0; i <= 10; ++i) {
+      if (!still.Add(View::kSplit, 500.0).empty()) return 37;
+    }
+    if (still.Add(View::kOff, 500.0) !=
+        "view split (until the switch): 10 frames, mean 0.00 ms (0.0 fps), median 0.00 ms, p90 0.00 ms, max 0.00 ms") {
+      return 38;
+    }
   }
 
   // The Direct3D debug layer's messages in the game log (fable2_native_d3d_messages): errors,
@@ -128,6 +150,18 @@ int main() {
     for (int32_t id = 0; id < 1000; ++id) lines += many.Add(D3dSeverity::kError, id, "e").empty() ? 0 : 1;
     if (lines != D3dMessageLog::kTotal || many.Summary() != "d3d messages: errors 1000, warnings 0") return 51;
     if (D3dMessageLog::kPerId != 4 || D3dMessageLog::kTotal != 400) return 52;
+    // The line written when the cvar is first seen on: the queue (dxgidebug.dll answered) and the
+    // layer itself (--d3d12_debug) are two things, and only both together report anything.
+    if (D3dMessagesStartText(true, true) !=
+        "d3d messages: on (fable2_native_d3d_messages); the queue is available; the debug layer is on (--d3d12_debug=true)") return 53;
+    if (D3dMessagesStartText(true, false) !=
+        "d3d messages: on (fable2_native_d3d_messages); the queue is available; the debug layer is OFF "
+        "(--d3d12_debug=true is not set: nothing will be reported)") return 54;
+    if (D3dMessagesStartText(false, true) !=
+        "d3d messages: on (fable2_native_d3d_messages); the queue is NOT available (dxgidebug.dll gave no information queue: "
+        "nothing will be reported); the debug layer is on (--d3d12_debug=true)") return 55;
+    if (D3dMessagesStartText(false, false).find("NOT available") == std::string::npos ||
+        D3dMessagesStartText(false, false).find("is OFF") == std::string::npos) return 56;
   }
 
   std::cout << "PASS: view parsing/cycling, F6 edge detection, failure latch, frame times per view, d3d message log\n";

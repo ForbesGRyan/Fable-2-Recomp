@@ -20,6 +20,11 @@ namespace fable2::native {
 // after the GPU plugin is loaded (Fable2App::OnPostSetup).
 void Install(rex::memory::Memory* memory);
 
+// At the app's shutdown (Fable2App::OnShutdown), while the process's DXGI objects still exist: with
+// fable2_native_d3d_messages, the debug layer's messages since the last composite frame and the
+// count. Nothing otherwise.
+void Shutdown();
+
 // Per guest frame (MainRenderLoop override): F6 toggle and the overlay
 // post-process request flag.
 void PollFrame();

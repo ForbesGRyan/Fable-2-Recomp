@@ -547,132 +547,68 @@ int main() {
     CHECK(75, !DecodeNormals(m.data(), 39, h, 0, 2, out));
   }
 
-  // --- RotateNormal ---
+  // --- TransformNormal: normalize(M n), the matrix as it is (the game's arithmetic) ---
+  // (The inverse transpose, which keeps a normal perpendicular under a scale that is not uniform, is
+  // used by no draw: NormalMatrix and RotateNormal were removed in the final fix wave.)
   {
     float out[3];
     // A rotation by 90 degrees about z: x goes to y.
     const float rz[3][3] = {{0, -1, 0}, {1, 0, 0}, {0, 0, 1}};
     const float x[3] = {1, 0, 0}, z[3] = {0, 0, 1};
-    RotateNormal(rz, x, out);
-    CHECK(80, Near3(out, 0, 1, 0));
-    RotateNormal(rz, z, out);
-    CHECK(81, Near3(out, 0, 0, 1));
+    CHECK(80, TransformNormal(rz, x, out) && Near3(out, 0, 1, 0));
+    CHECK(81, TransformNormal(rz, z, out) && Near3(out, 0, 0, 1));
     // A rotation times one scale: the direction is the rotation's, the length 1.
     const float rs[3][3] = {{0, -3, 0}, {3, 0, 0}, {0, 0, 3}};
     const float d[3] = {0.6f, 0.0f, 0.8f};
-    RotateNormal(rs, d, out);
-    CHECK(82, Near3(out, 0, 0.6f, 0.8f));
-    // A scale that is not uniform: the plane x + z = 0 has the normal (1, 0, 1) and the tangents
-    // (1, 0, -1) and (0, 1, 0). Stretched four times along x, the tangents are (4, 0, -1) and
-    // (0, 1, 0); the normal has to stay perpendicular to both, which the matrix itself does not do.
+    CHECK(82, TransformNormal(rs, d, out) && Near3(out, 0, 0.6f, 0.8f));
+    // A scale that is not uniform: the matrix as it is, normalised. The plane x + z = 0 stretched four
+    // times along x has the tangent (4, 0, -1); M n = (4, 0, 1) / sqrt(17) is NOT perpendicular to it
+    // (the game's normal is not either: the same three dot products).
     const float sx[3][3] = {{4, 0, 0}, {0, 1, 0}, {0, 0, 1}};
     const float n[3] = {std::sqrt(0.5f), 0.0f, std::sqrt(0.5f)};
-    const float t1[3] = {4, 0, -1}, t2[3] = {0, 1, 0};
-    RotateNormal(sx, n, out);
-    CHECK(83, Near(Dot(out, t1), 0.0f) && Near(Dot(out, t2), 0.0f) && Near(Dot(out, out), 1.0f));
-    CHECK(84, Near3(out, 1.0f / std::sqrt(17.0f), 0.0f, 4.0f / std::sqrt(17.0f)));
-    {
-      const float plain[3] = {4 * n[0], n[1], n[2]};  // (the matrix applied as it is: not perpendicular)
-      CHECK(85, std::fabs(Dot(plain, t1)) > 1.0f);
-    }
-    // The same under a rotation after the scale: perpendicular to the transformed tangents.
-    const float rsx[3][3] = {{0, -1, 0}, {4, 0, 0}, {0, 0, 1}};  // rz * sx
-    const float rt1[3] = {0, 4, -1}, rt2[3] = {-1, 0, 0};
-    RotateNormal(rsx, n, out);
-    CHECK(86, Near(Dot(out, rt1), 0.0f) && Near(Dot(out, rt2), 0.0f) && Near(Dot(out, out), 1.0f) && out[2] > 0.0f);
-    // A mirror in x: the normal goes with the surface (x turns, the rest stays) and does not point
-    // into it. The cofactor matrix alone would give the opposite direction.
+    const float t1[3] = {4, 0, -1};
+    CHECK(83, TransformNormal(sx, n, out) && Near3(out, 4.0f / std::sqrt(17.0f), 0.0f, 1.0f / std::sqrt(17.0f)) &&
+                  Near(Dot(out, out), 1.0f) && std::fabs(Dot(out, t1)) > 1.0f);
+    // A mirror in x: x turns, the rest stays (sign included: for an orthonormal matrix this is the
+    // perpendicular normal).
     const float mx[3][3] = {{-1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
-    RotateNormal(mx, d, out);
-    CHECK(87, Near3(out, -0.6f, 0, 0.8f));
-    RotateNormal(mx, z, out);
-    CHECK(88, Near3(out, 0, 0, 1));
-    // A mirror with a scale that is not uniform.
-    const float mxs[3][3] = {{-4, 0, 0}, {0, 1, 0}, {0, 0, 1}};
-    const float mt1[3] = {-4, 0, -1};
-    RotateNormal(mxs, n, out);
-    CHECK(89, Near(Dot(out, mt1), 0.0f) && out[0] < 0.0f && out[2] > 0.0f && Near(Dot(out, out), 1.0f));
-    // A singular matrix has no inverse: the matrix itself is applied (a flattened mesh keeps the
-    // normals of what is left of it).
+    CHECK(87, TransformNormal(mx, d, out) && Near3(out, -0.6f, 0, 0.8f));
+    CHECK(88, TransformNormal(mx, z, out) && Near3(out, 0, 0, 1));
+    // Every entry counts (a matrix with nothing zero in it), rows times the vector.
+    const float g[3][3] = {{0.5f, 3.0f, 1.0f}, {2.0f, 0.25f, 5.0f}, {1.5f, 1.0f, 0.75f}};
+    const float pn[3] = {2.0f / 3.0f, -1.0f / 3.0f, 2.0f / 3.0f};
+    {
+      float mn[3];
+      for (int r = 0; r < 3; ++r) mn[r] = Dot(g[r], pn);
+      const float len = std::sqrt(Dot(mn, mn));
+      CHECK(89, TransformNormal(g, pn, out) && Near3(out, mn[0] / len, mn[1] / len, mn[2] / len, 1e-5f));
+    }
+    // A matrix that flattens the normal, the zero matrix, a zero normal, values that are not finite:
+    // no direction, false and (0, 0, 0).
     const float flat[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 0}};
-    RotateNormal(flat, d, out);
-    CHECK(90, Near3(out, 1, 0, 0));
-    // A result without a direction is (0, 0, 1): the zero matrix, a zero normal, values that are not finite.
+    CHECK(90, TransformNormal(flat, d, out) && Near3(out, 1, 0, 0));
     const float none[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
-    RotateNormal(none, d, out);
-    CHECK(91, out[0] == 0.0f && out[1] == 0.0f && out[2] == 1.0f);
-    RotateNormal(flat, z, out);
-    CHECK(92, out[0] == 0.0f && out[1] == 0.0f && out[2] == 1.0f);
+    out[0] = out[1] = out[2] = 5.0f;
+    CHECK(91, !TransformNormal(none, d, out) && out[0] == 0.0f && out[1] == 0.0f && out[2] == 0.0f);
+    out[0] = out[1] = out[2] = 5.0f;
+    CHECK(92, !TransformNormal(flat, z, out) && out[0] == 0.0f && out[1] == 0.0f && out[2] == 0.0f);
     const float zero[3] = {0, 0, 0};
-    RotateNormal(rz, zero, out);
-    CHECK(93, out[0] == 0.0f && out[1] == 0.0f && out[2] == 1.0f);
+    out[0] = 5.0f;
+    CHECK(101, !TransformNormal(rz, zero, out) && out[0] == 0.0f && out[1] == 0.0f && out[2] == 0.0f);
     for (float bad : {nan, inf, -inf}) {
       float m[3][3] = {{0, -1, 0}, {1, 0, 0}, {0, 0, 1}};
       m[1][1] = bad;
-      RotateNormal(m, d, out);
-      CHECK(94, out[0] == 0.0f && out[1] == 0.0f && out[2] == 1.0f);
+      out[0] = out[1] = out[2] = 5.0f;
+      CHECK(94, !TransformNormal(m, d, out) && out[0] == 0.0f && out[1] == 0.0f && out[2] == 0.0f);
       const float bn[3] = {bad, 0.0f, 1.0f};
-      RotateNormal(rz, bn, out);
-      CHECK(95, out[0] == 0.0f && out[1] == 0.0f && out[2] == 1.0f);
+      out[0] = out[1] = out[2] = 5.0f;
+      CHECK(95, !TransformNormal(rz, bn, out) && out[0] == 0.0f && out[1] == 0.0f && out[2] == 0.0f);
     }
-    // Small and large matrices keep their direction (the determinant of a scale of 1/1000 is 1e-9).
-    const float tiny[3][3] = {{0, -1e-3f, 0}, {1e-3f, 0, 0}, {0, 0, 1e-3f}};
-    RotateNormal(tiny, d, out);
-    CHECK(96, Near3(out, 0, 0.6f, 0.8f));
+    // Small and large matrices keep their direction.
+    const float tiny[3][3] = {{0, -1e-5f, 0}, {1e-5f, 0, 0}, {0, 0, 1e-5f}};
+    CHECK(96, TransformNormal(tiny, d, out) && Near3(out, 0, 0.6f, 0.8f));
     const float big[3][3] = {{0, -1e6f, 0}, {1e6f, 0, 0}, {0, 0, 1e6f}};
-    RotateNormal(big, d, out);
-    CHECK(97, Near3(out, 0, 0.6f, 0.8f));
-    // Below the determinant's bound the matrix itself is used: for a rotation times one scale the same direction.
-    const float tinier[3][3] = {{0, -1e-5f, 0}, {1e-5f, 0, 0}, {0, 0, 1e-5f}};
-    RotateNormal(tinier, d, out);
-    CHECK(98, Near3(out, 0, 0.6f, 0.8f));
-    // The bound is 1e-12: a small stretch above it (determinant 4e-9) is still inverted, one below
-    // it (4e-15) is applied as it is, which for a stretch is the other direction.
-    const float small_stretch[3][3] = {{4e-3f, 0, 0}, {0, 1e-3f, 0}, {0, 0, 1e-3f}};
-    RotateNormal(small_stretch, n, out);
-    CHECK(136, Near3(out, 1.0f / std::sqrt(17.0f), 0.0f, 4.0f / std::sqrt(17.0f), 1e-5f));
-    const float smaller_stretch[3][3] = {{4e-5f, 0, 0}, {0, 1e-5f, 0}, {0, 0, 1e-5f}};
-    RotateNormal(smaller_stretch, n, out);
-    CHECK(137, Near3(out, 4.0f / std::sqrt(17.0f), 0.0f, 1.0f / std::sqrt(17.0f), 1e-5f));
-    // A matrix with nothing zero in it (every cofactor counts; its determinant is 17.2): the normal
-    // of a plane stays perpendicular to both of the plane's transformed tangents and on the side
-    // the transformed normal points to.
-    {
-      const float g[3][3] = {{0.5f, 3.0f, 1.0f}, {2.0f, 0.25f, 5.0f}, {1.5f, 1.0f, 0.75f}};
-      const float pn[3] = {2.0f / 3.0f, -1.0f / 3.0f, 2.0f / 3.0f};
-      const float ta[3] = {1.0f, 2.0f, 0.0f}, tb[3] = {0.0f, 2.0f, 1.0f};  // both perpendicular to pn
-      float ma[3], mb[3], mn[3];
-      for (int r = 0; r < 3; ++r) {
-        ma[r] = Dot(g[r], ta);
-        mb[r] = Dot(g[r], tb);
-        mn[r] = Dot(g[r], pn);
-      }
-      RotateNormal(g, pn, out);
-      CHECK(138, std::fabs(Dot(out, ma)) < 1e-5f && std::fabs(Dot(out, mb)) < 1e-5f && Near(Dot(out, out), 1.0f, 1e-5f));
-      // (the determinant of g is positive: the normal keeps the side of M n)
-      CHECK(139, Dot(out, mn) > 0.0f);
-      // Its mirror image: perpendicular still, and on the mirrored side.
-      float gm[3][3];
-      for (int r = 0; r < 3; ++r) {
-        for (int k = 0; k < 3; ++k) gm[r][k] = r == 1 ? -g[r][k] : g[r][k];
-      }
-      float mma[3], mmb[3], mmn[3];
-      for (int r = 0; r < 3; ++r) {
-        mma[r] = Dot(gm[r], ta);
-        mmb[r] = Dot(gm[r], tb);
-        mmn[r] = Dot(gm[r], pn);
-      }
-      RotateNormal(gm, pn, out);
-      CHECK(155, std::fabs(Dot(out, mma)) < 1e-5f && std::fabs(Dot(out, mmb)) < 1e-5f && Dot(out, mmn) > 0.0f);
-    }
-
-    // The two steps of it: NormalMatrix, then TransformNormal, which says when there is no direction.
-    float nm[3][3];
-    NormalMatrix(sx, nm);
-    CHECK(99, Near(nm[0][0], 1.0f) && Near(nm[1][1], 4.0f) && Near(nm[2][2], 4.0f) && Near(nm[0][1], 0.0f));
-    CHECK(100, TransformNormal(nm, n, out) && Near3(out, 1.0f / std::sqrt(17.0f), 0.0f, 4.0f / std::sqrt(17.0f)));
-    out[0] = 5.0f;
-    CHECK(101, !TransformNormal(nm, zero, out) && out[0] == 0.0f && out[1] == 0.0f && out[2] == 0.0f);
+    CHECK(97, TransformNormal(big, d, out) && Near3(out, 0, 0.6f, 0.8f));
   }
 
   // --- ClassifyRotation: what a draw's c4..c6 times c7.w is ---
@@ -938,6 +874,31 @@ int main() {
     a = e;
     a.format = uint8_t(capture::kVertexFormat_10_11_11);
     CHECK(180, !ColourElementSupported(a) && !DecodeColours(s, sizeof(s), a, 0, 1, out));
+    // The format alone: elements a reader DOES read, given the colour's own selector (the case above
+    // is an unsigned 10_11_11, which no reader reads whatever the colour rule says).
+    a = ElementHalf(24);
+    SetSource(a, {2, 1, 0, 3});
+    out[0] = 7;
+    CHECK(187, ElementReadable(a) && !ColourElementSupported(a) && ColourCount(a, 0, 100) == 0 &&
+                   !DecodeColours(s, sizeof(s), a, 0, 1, out) && out[0] == 7);
+    // Each of the four places of the selector alone: any other component there is no colour.
+    for (int place = 0; place < 4; ++place) {
+      const int right[4] = {2, 1, 0, 3};
+      for (int other = 0; other < 4; ++other) {
+        if (other == right[place]) continue;
+        std::vector<int> sel(right, right + 4);
+        sel[size_t(place)] = other;
+        a = e;
+        SetSource(a, sel);
+        CHECK(188, !ColourElementSupported(a) && ColourCount(a, 0, 100) == 0);
+      }
+    }
+    // More or fewer components than four with the right ones in front.
+    for (const std::vector<int>& count : std::vector<std::vector<int>>{{2}, {2, 1}, {2, 1, 0}}) {
+      a = e;
+      SetSource(a, count);
+      CHECK(189, !ColourElementSupported(a));
+    }
     a = e;
     a.flags = uint8_t(e.flags | capture::kLightElementSigned);
     CHECK(181, !ColourElementSupported(a));

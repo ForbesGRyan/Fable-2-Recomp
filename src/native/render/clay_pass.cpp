@@ -18,8 +18,8 @@ namespace {
 // does not hold it.
 constexpr nrhi::Format kLinearFormat = nrhi::Format::kR11G11B10_FLOAT;
 constexpr nrhi::Format kMappedFormat = nrhi::Format::kR8G8B8A8_UNORM;
-// The output mapping's binding parameters: its constants (word 0 the exposure)
-// and the linear target at t0.
+// The output mapping's binding parameters: its constants (word 0 the factor of
+// the linear value, 1 in every frame: kClayMapExposure) and the linear target at t0.
 constexpr uint32_t kMapParamConstants = 0, kMapParamLinear = 1, kMapConstantCount = 4;
 constexpr uint32_t kConstantCount = sizeof(ClayConstants) / 4;  // 36
 static_assert(kConstantCount == 36);
@@ -758,9 +758,17 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   const auto t0 = std::chrono::steady_clock::now();
   const double hash0 = st.hash_ms, decode0 = st.decode_ms, tex0 = tst.decode_ms;
   // The frame's light: of this scene's own block or none (never another frame's). The light is
-  // of the material, so without the texture path there is none.
+  // of the material, so without the texture path there is none (the Light line says so).
+  st.light_textures_off = light == ClayLight::kOn && !textured;
   if (!textured) light = ClayLight::kOff;
   frame_ = MakeClayFrameConstants(scene.light, light);
+  // With the light off no light input is asked of the geometry cache: every record is prepared as
+  // one without light inputs (its light buffers null, its light_mode without an object bit, the
+  // positions at t8 to t11 at its draw; a steep layer's terrain normals are the material's and
+  // are built as before). A frame cannot be lit without them: `lit` needs the record's own
+  // buffers (PrepareLight, FinishTerrain), which the first frame with the light on builds before
+  // its draws.
+  const bool light_inputs = ClayLightInputsBuilt(light);
   object_constants_.clear();
   plant_constants_.clear();
   object_slot0_ = plant_slot0_ = 0;
@@ -777,7 +785,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       // index the scene does not hold (the builder makes none) has nothing it
       // could be drawn from.
       if (const capture::TerrainPatch* terrain = TerrainOf(scene, r)) {
-        PrepareTerrain(cmd, dev, r, *terrain, LightOf(scene, r), textured, st, tst);
+        PrepareTerrain(cmd, dev, r, *terrain, light_inputs ? LightOf(scene, r) : nullptr, textured, st, tst);
       } else {
         ++st.skipped_other;
       }
@@ -833,8 +841,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       st.unknown_by_ps.Add(r.material.ps_hash, kTallyAlphaUnknown);
     }
     // A record drawn with its texture and with light inputs: its normals and colours (the light
-    // is of the material; a record that stays flat clay has none).
-    if (p.albedo) {
+    // is of the material; a record that stays flat clay has none; none with the light off).
+    if (p.albedo && light_inputs) {
       if (const capture::LightInputs* inputs = LightOf(scene, r)) PrepareLight(dev, r, *inputs, p, st);
     }
     prepared_.push_back(p);
@@ -884,7 +892,6 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
                                                     [](const Prepared& p) { return p.pipeline != nullptr; }));
   const uint32_t left_out = ClayRecordsWithoutConstants(drawable, terrain_cb_ != nullptr);
   if (left_out) {
-    st.skipped_no_constants = left_out;
     st.skipped_other += left_out;
     if (!no_constants_logged_) {
       no_constants_logged_ = true;
@@ -1035,8 +1042,9 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   cmd->SetScissor({0, 0, int32_t(kWidth), int32_t(kHeight)});
   cmd->SetBindingLayout(map_layout_);
   cmd->SetPipeline(map_pipeline_);
-  // The exposure: the one source, applied only here (1 for a frame drawn without light).
-  const float map_constants[kMapConstantCount] = {ClayFrameExposure(frame_), 0.0f, 0.0f, 0.0f};
+  // The mapping's own word is 1 in every frame: the exposure of a lit frame is in the lit draws'
+  // values (the frame's block), so the unlit draws and the clear are mapped as they are.
+  const float map_constants[kMapConstantCount] = {kClayMapExposure, 0.0f, 0.0f, 0.0f};
   cmd->SetRootConstants(kMapParamConstants, kMapConstantCount, map_constants, 0);
   cmd->SetTexture(kMapParamLinear, linear_view_);
   cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);

@@ -70,9 +70,12 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 // would keep a NaN and blending would spread it (the albedo textures are UNORM
 // and the shade is finite, so none arises; where the compiler can prove the
 // range it drops the clamp, and it keeps it for the terrain layers' mix). A lit
-// draw (light_mode bit 2, below) writes its light function's value without the
-// facet shade and without the clamp at 1, through clay_lit: a number, not
-// negative, at most 64. Alpha is not squared;
+// draw (light_mode bit 2, below) writes its light function's value times the
+// frame's exposure (Frame's f_exposure; no other value takes it: an unlit draw
+// and the clear are written as they are and the output mapping multiplies by
+// 1, so lit and unlit values have one unit in the target and a blend of the
+// two is consistent), without the facet shade and without the clamp at 1,
+// through clay_lit: a number, not negative, at most 64. Alpha is not squared;
 // the alpha test and alpha-to-mask read it as it is, and it is clamped where it
 // is written for the blend (the 8-bit target clamped it there; the float
 // target has no alpha channel and no sign: a blend's terms are all products of
@@ -100,15 +103,27 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 // (AmbientAxis with the frame's axis) and, without bit 3, the colour-stream
 // colour raised to the vertex shader's literal, and the pixel shader calls its
 // family's function with the frame's block (cbuffer Frame, b2) and the draw's
-// values. A light buffer is read only for a vertex below light_count, and only
-// by a draw whose light_mode names it: the reads are inside [branch] blocks
-// (the weights' inside two: the object's and bit 3's), because a buffer bound
-// through a root descriptor has no bounds check and the compiler otherwise
-// turns `if` into a select and loads all four buffers for every vertex of
-// every draw (the tests hold the compiled shader to this, for each of the
-// sixteen values of light_mode). The pass also binds something that covers the
-// draw's vertices at all four registers at every draw (clay_pass.cpp). A draw
-// without bit 2 reads neither Frame nor Object and is the unlit colour.
+// values. Bit 4 (with bit 1): an instanced plant; its normal at t9 is in the
+// world already and takes no rows, the word at t10 is the colour of the
+// vertex's copy, and t11 (probe_or_bend) holds the copy's up axis and the
+// vertex's height, the inputs of the bent normal; bit 5 (with bit 4): the
+// plant's pixel shader has the ambient factor. Bit 6 (with bits 1 and 3): a
+// tree leaf, a probe record whose vertex stage also makes the sun's two
+// scalars on the side of the card the viewer sees. The three mesh blocks of
+// the vertex shader exclude each other by these bits (clay_logic.h,
+// LightModeBlockOf). A light buffer is read only for a vertex below
+// light_count, and only by a draw whose light_mode names it: the reads are
+// inside [branch] blocks (an object's weights inside two: the object's and
+// bit 3's), because a buffer bound through a root descriptor has no bounds
+// check and the compiler otherwise turns `if` into a select and loads all
+// four buffers for every vertex of every draw (the tests hold the compiled
+// shader to this, for each of the 128 values of light_mode: seven bits). The
+// positions (t0), the indices (t1) and the texture coordinates (t2) are
+// loaded outside any branch, by design: every draw binds its own three, and
+// the index range of a record is checked at both ends before it is drawn
+// (IndexRangeValid). The pass also binds something that covers the
+// draw's vertices at all four light registers at every draw (clay_pass.cpp).
+// A draw without bit 2 reads neither Frame nor Object and is the unlit colour.
 // kClayFrameFields and kClayObjectFields are the two buffers' layouts, which the
 // tests hold against the compiled shaders and the C++ structs.
 struct ClayBufferField {
@@ -118,7 +133,7 @@ struct ClayBufferField {
 };
 inline constexpr ClayBufferField kClayFrameFields[] = {
     {"f_sun_dir", 0, 12},  {"f_light_on", 12, 4},  {"f_sun_col", 16, 12}, {"f_tint_pow", 28, 4},
-    {"f_tint", 32, 12},    {"f_pad3", 44, 4},      {"f_add", 48, 12},     {"f_pad0", 60, 4},
+    {"f_tint", 32, 12},    {"f_exposure", 44, 4},  {"f_add", 48, 12},     {"f_pad0", 60, 4},
     {"f_floor", 64, 12},   {"f_pad1", 76, 4},      {"f_axis", 80, 12},    {"f_pad2", 92, 4},
     {"f_eye", 96, 12},     {"f_eye_on", 108, 4},
 };
@@ -145,7 +160,7 @@ cbuffer Draw : register(b0) { float4 r0; float4 r1; float4 r2; float4 r3; uint l
 cbuffer Frame : register(b2) {
   float3 f_sun_dir; uint f_light_on;     // c80.xyz of a one-light draw (= c109.xyz), as it is; 1: the frame is lit
   float3 f_sun_col; float f_tint_pow;    // c87.xyz; c21.w
-  float3 f_tint; float f_pad3;           // c21.xyz (the exposure is the output mapping's alone: cbuffer Map)
+  float3 f_tint; float f_exposure;       // c21.xyz; the exposure, which the lit pixel paths alone multiply by
   float3 f_add; float f_pad0;            // c20.xyz (c20.w, the output scale, is not applied)
   float3 f_floor; float f_pad1;          // c22.xyz
   float3 f_axis; float f_pad2;           // c23.xyz (= vertex c19.xyz)
@@ -259,7 +274,7 @@ StructuredBuffer<float2> uvs : register(t2);
 StructuredBuffer<float2> terrain_normals : register(t8);
 StructuredBuffer<float3> normals : register(t9);
 StructuredBuffer<uint> colours : register(t10);          // a stream colour, a probe set, or the colour of a plant's copy
-StructuredBuffer<float4> probe_weights : register(t11);  // a probe object's weights, or a plant's bend inputs (up axis, height)
+StructuredBuffer<float4> probe_or_bend : register(t11);  // a probe object's or leaf's weights, or a plant's bend inputs (up axis, height)
 struct VsOut {
   float4 pos : SV_Position; float3 ndc : TEXCOORD0; float2 uv : TEXCOORD1;
   float3 world : TEXCOORD2;
@@ -307,7 +322,7 @@ VsOut main(uint vid : SV_VertexID) {
       // The probe colour as the game's vertex shaders form it, with no power:
       // c[28 + a0].xyz + (c[29 + a0] . w, c[30 + a0] . w, c[31 + a0] . w), a0 clamped to the last set.
       uint a0 = min(word, 8u);
-      float4 w = probe_weights[v];
+      float4 w = probe_or_bend[v];
       o.vcolour = o_probe[a0].xyz + float3(dot(o_probe[a0 + 1], w), dot(o_probe[a0 + 2], w), dot(o_probe[a0 + 3], w));
     } else {
       o.vcolour = light_pow(float3(word & 255, (word >> 8) & 255, (word >> 16) & 255) / 255.0, o_colour_power);
@@ -324,7 +339,7 @@ VsOut main(uint vid : SV_VertexID) {
     float3 n = normals[v];
     o.normal = n;
     uint tone = colours[v];
-    float4 b = probe_weights[v];
+    float4 b = probe_or_bend[v];
     o.bend = PlantBend(n, b.xyz, PlantHeight(b.w, o_rot1.w, o_rot2.w), o_rot0.w);
     float3 colour = float3(tone & 255, (tone >> 8) & 255, (tone >> 16) & 255) / 255.0;
     [branch] if (light_mode & 32) {
@@ -348,7 +363,7 @@ VsOut main(uint vid : SV_VertexID) {
     o.normal = N;
     o.axis = float3(0, 0, 0);
     uint a0 = min(colours[v], 8u);
-    float4 w = probe_weights[v];
+    float4 w = probe_or_bend[v];
     float3 probe = o_probe[a0].xyz + float3(dot(o_probe[a0 + 1], w), dot(o_probe[a0 + 2], w), dot(o_probe[a0 + 3], w));
     o.vcolour = InstanceAmbient(probe, f_tint, o_colour_power * f_tint_pow, f_add);
     float3 at = float3(dot(o_rot0.xyz, p.xyz), dot(o_rot1.xyz, p.xyz), dot(o_rot2.xyz, p.xyz)) * o_leaf.y +
@@ -446,7 +461,7 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
         lit = LightObject(clay_linear(t.rgb), vcolour, f_tint, f_tint_pow, f_add, f_floor, AmbientT(axis, normal),
                           dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(1.0, 1.0), o_c49) * o_c26;
       }
-      return float4(clay_lit(lit), (alpha_mode & 0x80) ? saturate(a) : 1.0);
+      return float4(clay_lit(lit * f_exposure), (alpha_mode & 0x80) ? saturate(a) : 1.0);
     }
     return float4(clay_linear(t.rgb * (0.75 + 0.25 * facet)), (alpha_mode & 0x80) ? saturate(a) : 1.0);
   }
@@ -583,7 +598,7 @@ float4 terrain_out(float3 colour, float a, float4 pos, float3 ndc) {
     float per_offset = samples == 1 ? 0.125 : samples == 2 ? 0.0625 : 0.25;
     if (!(a >= mask_base - offset * per_offset)) discard;
   }
-  if (light_mode & 4) return float4(clay_lit(colour), (alpha_mode & 0x80) ? saturate(a) : 1.0);
+  if (light_mode & 4) return float4(clay_lit(colour * f_exposure), (alpha_mode & 0x80) ? saturate(a) : 1.0);
   float shade = 0.75 + 0.25 * facet;
   return float4(saturate(colour * (shade * shade)), (alpha_mode & 0x80) ? saturate(a) : 1.0);
 }
@@ -658,8 +673,10 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
 #undef FABLE2_CLAY_DRAW_HLSL
 
 // Output mapping of the clay pass (render/clay_pass.cpp; kFullscreenVs draws it): the linear target's
-// value times the exposure, as a display value in the 8-bit target the composite samples:
-// display = sqrt(saturate(linear * exposure)), alpha 1. The linear target is read texel for texel (the
+// value times the buffer's first word, as a display value in the 8-bit target the composite samples:
+// display = sqrt(saturate(linear * exposure)), alpha 1. The pass sets that word to 1 in every frame
+// (kClayMapExposure): the exposure of a lit frame is in the lit draws' own values (Frame's f_exposure),
+// so that it does not reach the unlit draws and the clear. The linear target is read texel for texel (the
 // two targets have one size). A negative value, a NaN (no comparison holds for it) and 0 * infinity
 // give 0, +infinity gives 1: nothing but a value in [0, 1] reaches the root (OutputMap in clay_logic.h
 // is the same rule).

@@ -197,9 +197,9 @@ int main() {
   }
   // The frame without its constant buffer: every drawable record is left out, none otherwise.
   {
-    CHECK(40, ClayRecordsWithoutConstants(921, true) == 0 && ClayRecordsWithoutConstants(921, false) == 921);
-    CHECK(40, ClayRecordsWithoutConstants(0, false) == 0 && ClayRecordsWithoutConstants(0, true) == 0);
-    CHECK(40, ClayRecordsWithoutConstants(1, false) == 1);
+    CHECK(51, ClayRecordsWithoutConstants(921, true) == 0 && ClayRecordsWithoutConstants(921, false) == 921);
+    CHECK(51, ClayRecordsWithoutConstants(0, false) == 0 && ClayRecordsWithoutConstants(0, true) == 0);
+    CHECK(51, ClayRecordsWithoutConstants(1, false) == 1);
   }
   // 40-43, 80-82, 130-133: root constants match the HLSL cbuffer (36 dwords).
   {
@@ -2080,6 +2080,15 @@ int main() {
   // 380-389: the light line.
   {
     ClayStats st;
+    // With the switch off the pass asks the geometry cache for no light input (the final fix wave:
+    // normals, colours, probe and bend buffers were built with the light off too, 20 MB at the
+    // bridge), and the line says so instead of counting nothing.
+    CHECK(531, !ClayLightInputsBuilt(ClayLight::kOff) && ClayLightInputsBuilt(ClayLight::kOn));
+    CHECK(531, FormatLightText(st) == "Light inputs: not built (light off)");
+    st.lit = 873;  // (whatever the counters hold: with the switch off nothing was asked for)
+    CHECK(531, FormatLightText(st) == "Light inputs: not built (light off)");
+    st = ClayStats{};
+    st.light_switch = true;
     CHECK(380, FormatLightText(st) == "Light inputs: ready 0 of 0 lit records | world rotation: rotation 0, mirrored 0, "
                                       "skewed 0, degenerate 0");
     st.lit = 873;
@@ -2100,6 +2109,7 @@ int main() {
     // Why a probe or an instance colour buffer was refused (those records are among light-unknown):
     // only the causes that occurred, in the enum's order; nothing when none did.
     ClayStats refused;
+    refused.light_switch = true;
     refused.lit = 10;
     refused.light_ready = 4;
     refused.light_missing[size_t(capture::LightReason::kLightUnknown)] = 6;
@@ -2289,12 +2299,26 @@ int main() {
     // calibrated constant (plan Task 9: fitted on the dirt patch at the bridge against the emulated frame).
     CHECK(411, ClayExposure(ClayLight::kOff) == 1.0f && ClayExposure(ClayLight::kOn) == kLitExposure &&
                    kLitExposure == 2.22f);
-    // What the calibration means: the dirt patch's linear value under exposure 1 (0.14926, run 341) comes
-    // out at the emulated shots' mean (0.33206) within 1%; and the clear colour of a lit frame is shown
-    // sqrt(E) times its levels (30, 30, 37), the light-off frame's as before (case 406).
-    CHECK(418, std::fabs(OutputMap(0.14926f, kLitExposure) - std::sqrt(0.33206f)) < 0.01f * std::sqrt(0.33206f) &&
-                   Level8(OutputMap(kClayClearLinear[0], kLitExposure)) == 30 &&
-                   Level8(OutputMap(kClayClearLinear[2], kLitExposure)) == 37);
+    // The exposure reaches lit output only (the final fix wave: the mapping multiplied every pixel by it,
+    // so the unlit draws and the clear of a lit frame came out sqrt(E) too bright: the clear at 30, 30,
+    // 37). A lit draw writes ClayLit(v * E); the mapping's own word is 1 in every frame. So in a lit
+    // frame the clear shows its levels (20, 20, 25), an unlit draw's level d comes back as d, and a lit
+    // value v is shown as sqrt(min(v * E, 1)): the dirt patch's linear value under exposure 1 (0.14926,
+    // run 341) at the emulated shots' mean (0.33206) within 1%.
+    {
+      const float E = ClayExposure(ClayLight::kOn);
+      CHECK(418, kClayMapExposure == 1.0f);
+      for (int i = 0; i < 3; ++i) CHECK(418, Level8(OutputMap(kClayClearLinear[i], kClayMapExposure)) == kClayClearLevels[i]);
+      for (int d = 0; d < 256; ++d) CHECK(418, Level8(OutputMap(ClayLinear(float(d) / 255.0f), kClayMapExposure)) == d);
+      for (float v : {0.0f, 0.001f, 0.14926f, 0.3f, 0.45f, 0.4505f, 0.5f, 2.5f, 100.0f}) {
+        const float want = std::sqrt(std::min(v * E, 1.0f));
+        CHECK(418, std::fabs(OutputMap(ClayLit(v * E), kClayMapExposure) - want) < 1e-6f);
+      }
+      CHECK(418, std::fabs(OutputMap(ClayLit(0.14926f * E), kClayMapExposure) - std::sqrt(0.33206f)) < 0.01f * std::sqrt(0.33206f));
+      // (a lit value is brighter than the same value unlit by sqrt(E) on the display, and only it)
+      CHECK(418, OutputMap(ClayLit(0.25f * E), kClayMapExposure) > OutputMap(0.25f, kClayMapExposure) * 1.48f &&
+                     OutputMap(ClayLit(0.25f * E), kClayMapExposure) < OutputMap(0.25f, kClayMapExposure) * 1.50f);
+    }
 
     // Target memory at the pass's size, and the line that reports it.
     CHECK(412, kClayLinearTexelBytes == 4 && kClayMappedTexelBytes == 4 && kClayDepthTexelBytes == 4 &&
@@ -2489,17 +2513,20 @@ int main() {
       CHECK(441, frame.sun_dir[i] == block_sun[i] && frame.sun_col[i] == 0.1f + float(i) && frame.tint[i] == 1.1f + float(i) &&
                      frame.add[i] == 0.01f + float(i) && frame.axis[i] == 0.2f + float(i));
     }
-    // The output scale (16) is not in the block the shaders get, and no exposure is: one source.
-    CHECK(442, frame.pad0 == 0.0f && frame.pad1 == 0.0f && frame.pad2 == 0.0f && frame.pad3 == 0.0f &&
-                   ClayFrameExposure(frame) == ClayExposure(ClayLight::kOn));
-    // The switch off, or no block: nothing lit, everything zero, exposure 1 (the materials picture).
+    // The output scale (16) is not in the block the shaders get. The exposure is: the lit pixel
+    // paths multiply their value by it (cbuffer Frame's f_exposure), and a lit frame carries the
+    // calibrated constant.
+    CHECK(442, frame.pad0 == 0.0f && frame.pad1 == 0.0f && frame.pad2 == 0.0f && frame.exposure == kLitExposure &&
+                   frame.exposure == ClayExposure(ClayLight::kOn) && offsetof(ClayFrameConstants, exposure) == 44);
+    // The switch off, or no block: nothing lit, everything zero, the exposure too (no draw reads it:
+    // the frame is the materials picture, written and mapped as it is).
     const ClayFrameConstants none{};
     frame = MakeClayFrameConstants(block, ClayLight::kOff);
-    CHECK(443, std::memcmp(&frame, &none, sizeof(frame)) == 0 && ClayFrameExposure(frame) == ClayExposure(ClayLight::kOff));
+    CHECK(443, std::memcmp(&frame, &none, sizeof(frame)) == 0 && frame.exposure == 0.0f);
     capture::LightBlock invalid = block;
     invalid.valid = false;
     frame = MakeClayFrameConstants(invalid, ClayLight::kOn);
-    CHECK(444, std::memcmp(&frame, &none, sizeof(frame)) == 0);
+    CHECK(444, std::memcmp(&frame, &none, sizeof(frame)) == 0 && frame.exposure == 0.0f);
     frame = MakeClayFrameConstants(capture::LightBlock{}, ClayLight::kOn);
     CHECK(444, std::memcmp(&frame, &none, sizeof(frame)) == 0);
     // A value that is not a number or not of usable size never reaches a shader: the frame is not lit.
@@ -2832,6 +2859,15 @@ int main() {
     CHECK(481, FormatLightDrawnText(st) ==
                    "Light: off, lit 0 (terrain-layer 0, terrain-far 0, object 0, tree-trunk 0, plant 0, plant-lit 0, tree-leaf 0), "
                    "unlit 948 {light-off: 948}");
+    // The switch on and the texture path off: the light is of the material, so the frame is drawn
+    // without it, and the line says why it reads "off".
+    st.light_textures_off = true;
+    CHECK(532, FormatLightDrawnText(st) ==
+                   "Light: off (the switch is on; textures are off), lit 0 (terrain-layer 0, terrain-far 0, object 0, tree-trunk 0, plant 0, "
+                   "plant-lit 0, tree-leaf 0), unlit 948 {light-off: 948}");
+    // (the note belongs to "off" alone: a frame drawn with the light on never carries it)
+    st.light_switch = true;
+    CHECK(532, FormatLightDrawnText(st).starts_with("Light: on, block missing, lit 0 ("));
     st = ClayStats{};
     st.light_switch = true;
     st.light_unlit[size_t(ClayUnlit::kBlock)] = 12;
@@ -2905,6 +2941,16 @@ int main() {
                       B::kProbeWeights) &&
                    is(kLightModeTerrainNormals | kLightModeObject | kLightModeLeaf, B::kTerrainNormals, B::kPositions, B::kPositions,
                       B::kPositions));
+    // The terrain bit beside a mesh block (a mode the pass never makes): the block overwrites what
+    // the terrain normals give and the compiled program loads none, so the mode names none: a mesh
+    // record's normals (three floats a vertex) are never bound where two are read.
+    CHECK(533, is(kLightModeTerrainNormals | kLightModeObject | kLightModeLit, B::kPositions, B::kNormals, B::kColours, B::kPositions) &&
+                   is(kLightModeTerrainNormals | kLightModeObject | kLightModeProbe, B::kPositions, B::kNormals, B::kProbeSets,
+                      B::kProbeWeights) &&
+                   is(kLightModeTerrainNormals | kLightModeObject | kLightModeInstance, B::kPositions, B::kNormals, B::kInstanceColours,
+                      B::kBend) &&
+                   is(kLightModeTerrainNormals | kLightModeObject | kLightModeProbe | kLightModeLeaf, B::kPositions, B::kNormals,
+                      B::kProbeSets, B::kProbeWeights));
     CHECK(489, is(LitObjectMode(capture::LightVertexKind::kStream, capture::LightFamily::kObject), B::kPositions, B::kNormals,
                   B::kColours, B::kPositions));
     // A lit instanced plant (plan Task 8b), with or without the ambient factor: its flat normals at
@@ -2931,7 +2977,7 @@ int main() {
       const ClayLightBuffers s = LightBufferSources(mode);
       const bool object = (mode & 82u) == 2u, plant = (mode & 82u) == 18u, leaf = (mode & 90u) == 74u;
       bool ok = int(object) + int(plant) + int(leaf) <= 1;
-      ok = ok && (s.source[0] == B::kTerrainNormals) == ((mode & kLightModeTerrainNormals) != 0) &&
+      ok = ok && (s.source[0] == B::kTerrainNormals) == ((mode & kLightModeTerrainNormals) != 0 && !object && !plant && !leaf) &&
            (s.source[1] == B::kNormals) == (object || plant || leaf);
       ok = ok && (s.source[0] == B::kTerrainNormals || s.source[0] == B::kPositions) && (s.source[1] == B::kNormals || s.source[1] == B::kPositions);
       if (!object && !plant && !leaf) ok = ok && s.source[2] == B::kPositions && s.source[3] == B::kPositions;
@@ -3490,6 +3536,7 @@ int main() {
 
     // 517: the light line names the bend inputs of the frame's plant records when there are any.
     ClayStats st;
+    st.light_switch = true;
     st.lit = 873;
     st.light_ready = 873;
     st.light_rotation[size_t(RotationKind::kRotation)] = 174;

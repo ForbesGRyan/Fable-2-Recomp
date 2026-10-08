@@ -585,9 +585,17 @@ class GenAlphaKindTest(unittest.TestCase):
             tmp = Path(tmp)
             (tmp / "ps.json").write_text(json.dumps({self.H: _albedo(light=self._light())}))
             out = tmp / "t.inc"
-            with self.assertRaises(FileNotFoundError):          # no vertex table there
+            # no vertex table there: the error says what is missing and how to name another
+            with self.assertRaisesRegex(FileNotFoundError, r"the vertex table .*vs-transforms\.json is missing.*--vs-json"):
                 gen_albedo_table.main(["--json", str(tmp / "ps.json"), "--out", str(out)])
             self.assertFalse(out.exists())
+            with self.assertRaisesRegex(FileNotFoundError, r"the vertex table .*nowhere\.json is missing"):
+                gen_albedo_table.main(["--json", str(tmp / "ps.json"), "--vs-json", str(tmp / "nowhere.json"), "--out", str(out)])
+            self.assertFalse(out.exists())
+            # (the albedo table itself missing is the plain error of its own file)
+            with self.assertRaises(FileNotFoundError) as plain:
+                gen_albedo_table.main(["--json", str(tmp / "absent.json"), "--out", str(out)])
+            self.assertNotIn("vertex table", str(plain.exception))
             (tmp / "vs-transforms.json").write_text(json.dumps(VERTEX))
             gen_albedo_table.main(["--json", str(tmp / "ps.json"), "--out", str(out)])
             self.assertIn("FABLE2_PS_LIGHT_VS(0x00000000000000AAull, 0xECD66A10092E6562ull)", out.read_text())

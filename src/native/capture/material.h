@@ -610,7 +610,7 @@ inline constexpr float kMaxLightColourFirst = 16777215.0f;
 // world_scale when it prepares the draw and counts per kind and per vertex shader (ClayStats::
 // light_rotation). The capture's only question is whether the nine values and the scale are
 // numbers: a draw refused here for its rotation would be counted in two places, and a mirrored or
-// skewed rotation is still a light the pass draws (RotateNormal).
+// skewed rotation is still a light the pass draws (with the game's own normalize(M n)).
 inline LightReason MakeLightInputs(const LightDraw& d, LightInputs* out, const char** why = nullptr) {
   *out = LightInputs{};
   const char* unused = nullptr;

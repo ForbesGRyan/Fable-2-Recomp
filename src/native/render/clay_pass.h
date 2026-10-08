@@ -2,7 +2,7 @@
 
 // "Clay" rendering of the captured main scene into native 1120x720 targets:
 // linear colour (R11G11B10_FLOAT) with D32 depth, then one full-screen
-// output mapping, display = sqrt(saturate(linear * exposure)), into the 8-bit
+// output mapping, display = sqrt(saturate(linear)), into the 8-bit
 // target (R8G8B8A8) the composite views sample (clay_logic.h, "Linear target
 // and output mapping"). Vertices are pulled from the geometry cache's
 // StructuredBuffers by SV_VertexID and transformed by each draw's captured
@@ -59,9 +59,9 @@ class ClayPass {
   // receives the texture counters and the final material status of every
   // drawn record (untouched when textured is false). `light`:
   // fable2_native_light. On, and the scene has a light block the pass can use
-  // (MakeClayFrameConstants): the families the pass lights are drawn lit, and
-  // the output mapping takes the lit frame's exposure. Else every draw is the
-  // unlit colour under exposure 1. st receives what was lit and what was not,
+  // (MakeClayFrameConstants): the families the pass lights are drawn lit, their
+  // values times the frame's exposure. Every other draw, and every draw of a
+  // frame without light, is the unlit colour. st receives what was lit and what was not,
   // by reason (ClayStats::light_drawn, light_unlit).
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
               bool textured, ClayLight light, ClayStats& st, TextureStats& tst);
@@ -171,7 +171,7 @@ class ClayPass {
   // FinishTerrain, after every record:
   // which records are drawn with the material, as flat clay or not at all
   // (PlanTerrain), their pipelines, constants and counters.
-  // `light`: the record's light inputs (LightOf), null without them; a record
+  // `light`: the record's light inputs (LightOf), null without them and with the light off; a record
   // with them and a usable material also gets its vertex normals (Prepared::normals).
   // In a lit frame a record with light inputs of a family the pass lights also
   // gets its base map, and its plan item says whether its light can be drawn.
@@ -216,8 +216,8 @@ class ClayPass {
   // The three targets, created and destroyed together (Ensure, DestroyObjects):
   // linear_ is what the draws render into (with depth_), color_ what the output
   // mapping writes from it at the end of each Render. linear_view_ is the
-  // mapping's view of linear_; the mapping has its own layout (the exposure in
-  // root constants, the linear target at t0), shaders and pipeline, outside the
+  // mapping's view of linear_; the mapping has its own layout (its constants,
+  // word 0 always 1, in root constants, the linear target at t0), shaders and pipeline, outside the
   // pipeline cache.
   nrhi::Texture* linear_ = nullptr;
   nrhi::TextureView* linear_view_ = nullptr;

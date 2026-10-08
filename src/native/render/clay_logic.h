@@ -39,9 +39,8 @@ struct ClayStats {
   // Renderer-side skips other than bad indices: unreadable guest memory, a
   // failed decode or upload, or an empty triangle list.
   uint32_t skipped_other = 0;
-  // Of them: the frame's drawable records when its constant buffer could not be
-  // made (ClayRecordsWithoutConstants; then nothing of the frame is drawn).
-  uint32_t skipped_no_constants = 0;
+  // (Among them: the frame's drawable records when its constant buffer could
+  // not be made, ClayRecordsWithoutConstants; then nothing of the frame is drawn.)
   // Drawn records whose positions came from the instanced (flat stream) and
   // the bone-skinned builders, cache hits included. Counted with `drawn`: a
   // record whose index list fails afterwards is in neither.
@@ -105,14 +104,16 @@ struct ClayStats {
   uint32_t light_rotation[size_t(RotationKind::kCount)] = {};
   capture::ShaderTally<32> light_rotation_by_vs;
   // The light as drawn ("Native light" below; the Light line). light_switch:
-  // fable2_native_light was on for this frame. light_block: the frame had a
+  // the frame was drawn with fable2_native_light on (the switch on and the
+  // texture path on: the light is of the material). light_textures_off: the
+  // switch was on and the texture path off. light_block: the frame had a
   // light block the pass could use (MakeClayFrameConstants). light_drawn: the
   // drawn records lit by their family's function, by family. light_unlit: the
   // drawn records drawn without light (the unlit linear colour of the
   // materials picture), by reason (ClayUnlit), and light_unlit_by_ps the pixel
   // shaders of those that are unlit for a reason of their own (light-unknown,
   // normal-unsupported; the kind is the ClayUnlit value).
-  bool light_switch = false, light_block = false;
+  bool light_switch = false, light_block = false, light_textures_off = false;
   uint32_t light_drawn[size_t(capture::LightFamily::kCount)] = {};
   uint32_t light_unlit[4] = {};
   capture::ShaderTally<32> light_unlit_by_ps;
@@ -982,6 +983,10 @@ constexpr uint32_t LitObjectMode(capture::LightVertexKind kind, capture::LightFa
 // regions. The three mesh blocks of the vertex shader exclude each other by
 // the mode (LightModeBlock: its own tests), and a mode none of them takes,
 // which the pass never makes, loads from none of t9 to t11: the positions.
+// The terrain normals are named only where no mesh block runs: a mode with
+// the terrain bit and a mesh block (never made either) has its normal from
+// the block, its compiled program loads nothing from t8, and a mesh record
+// has no buffer of two floats a vertex to bind there.
 enum class ClayLightBuffer : uint8_t {
   kPositions, kTerrainNormals, kNormals, kColours, kProbeSets, kProbeWeights, kInstanceColours, kBend
 };
@@ -1006,7 +1011,7 @@ constexpr ClayLightBuffers LightBufferSources(uint32_t light_mode) {
   const LightModeBlock block = LightModeBlockOf(light_mode);
   const bool object = block == LightModeBlock::kObject, instance = block == LightModeBlock::kPlant;
   const bool probe = block == LightModeBlock::kLeaf || (object && (light_mode & kLightModeProbe) != 0);
-  return {{terrain ? ClayLightBuffer::kTerrainNormals : ClayLightBuffer::kPositions,
+  return {{terrain && block == LightModeBlock::kNone ? ClayLightBuffer::kTerrainNormals : ClayLightBuffer::kPositions,
            block != LightModeBlock::kNone ? ClayLightBuffer::kNormals : ClayLightBuffer::kPositions,
            instance ? ClayLightBuffer::kInstanceColours
            : probe  ? ClayLightBuffer::kProbeSets
@@ -1053,9 +1058,12 @@ inline ClayConstants MakeClayConstants(const capture::DrawRecord& r, uint32_t ve
 // --- Linear target and output mapping (frame-map section 14, "Linear target") ---
 // The pass draws linear colour into a float target, as the game does, and one
 // full-screen step (shaders::kOutputMapPs) makes the display values of the 8-bit
-// target the composite views sample: display = sqrt(saturate(linear * E)). The
-// functions below are the HLSL's rules; test_native_shaders.cpp pins the
-// statements they mirror.
+// target the composite views sample: display = sqrt(saturate(linear * word)),
+// the word 1 in every frame (kClayMapExposure). The exposure E of a lit frame is
+// not the mapping's: the lit draws write their value times E ("Native light"
+// below), so the unlit draws and the clear of a lit frame are shown as in a
+// frame without light. The functions below are the HLSL's rules;
+// test_native_shaders.cpp pins the statements they mirror.
 
 // The output mapping for one channel. Only a value in [0, 1] comes out: a
 // negative value, a NaN (no comparison holds for it) and 0 * infinity give 0,
@@ -1092,15 +1100,14 @@ inline float ClayLinearShaded(float linear, float shade) {
 // in the 10-bit one), so that the clear does not depend on a GPU's rounding;
 // the mapping returns the three levels. The fourth is the alpha of the clear
 // call; the target has none.
-// These are the levels under exposure 1. A lit frame's exposure is kLitExposure
-// (plan Task 9) and the clear value is not divided by it: where nothing is drawn
-// (the sky) the mapping shows sqrt(E) times these levels in a lit frame, 30, 30,
-// 37 (test case 418), and these levels with the light off.
+// The same levels in a lit frame and in one without light (test case 418): the
+// exposure is in the lit draws' values, not in the mapping (the final fix wave;
+// before it the mapping multiplied every pixel by E and a lit frame showed the
+// clear at 30, 30, 37).
 inline constexpr int kClayClearLevels[3] = {20, 20, 25};
 inline constexpr float kClayClearLinear[4] = {101.0f / 16384.0f, 101.0f / 16384.0f, 39.0f / 4096.0f, 1.0f};
 
-// fable2_native_light. Off: no draw is lit and the exposure is 1, which is the
-// materials picture. On: the draws of the families the pass lights are lit in
+// fable2_native_light. Off: no draw is lit, which is the materials picture. On: the draws of the families the pass lights are lit in
 // a frame that has a light block ("Native light" below); every other draw,
 // and every draw of a frame without a block, is drawn as with the switch off.
 enum class ClayLight : uint8_t { kOff, kOn };
@@ -1113,6 +1120,15 @@ inline ClayLight ParseClayLight(std::string_view text, bool* recognized) {
   if (recognized) *recognized = lower == "off" || lower == "on";
   return lower == "on" ? ClayLight::kOn : ClayLight::kOff;
 }
+
+// Whether the pass asks the geometry cache for the light's vertex inputs of a frame (the normals of
+// the mesh records, their colours, probe buffers and bend inputs, the terrain normals of ground
+// without the steep block): only with the light on. With it off nothing reads them (20 MB at the
+// bridge, built for nothing until the final fix wave); a run that turns the light on builds them in
+// the first frame drawn with it, before that frame's draws, as a run started with the light on
+// does in its first frame. A frame with the switch on and no light block builds them all the same:
+// the next frame has the block.
+inline bool ClayLightInputsBuilt(ClayLight light) { return light == ClayLight::kOn; }
 
 // The exposure of a lit frame, calibrated once (spec, design 4; plan Task 9) on
 // the dirt patch at the bridge ("dirt patch" of docs/native-renderer/
@@ -1130,10 +1146,17 @@ inline ClayLight ParseClayLight(std::string_view text, bool* recognized) {
 // not bring into line.
 inline constexpr float kLitExposure = 2.22f;
 
-// The output mapping's exposure E: one number for the frame, no draw's own.
-// 1 with light off and in a frame drawn without light; kLitExposure with light
-// on. The lit linear values are the game's before its output scale c20.w (16),
-// which its own later passes take back.
+// The first word of the output mapping's constants (cbuffer Map's `exposure`): 1 in every frame,
+// lit or not. The mapping takes the target's values as they are.
+inline constexpr float kClayMapExposure = 1.0f;
+
+// The exposure E of the lit output: one number for the frame, no draw's own, and the lit draws'
+// alone. kLitExposure with light on: MakeClayFrameConstants puts it into a lit frame's block
+// (ClayFrameConstants::exposure, the one place a shader gets it from), and each lit pixel path
+// writes ClayLit(value * E). 1 with light off, where nothing is lit and nothing reads it. The lit
+// linear values are the game's before its output scale c20.w (16), which its own later passes
+// take back. Until the final fix wave E was the mapping's word, which made every unlit draw and
+// the clear of a lit frame sqrt(E) = 1.49 times brighter on the display.
 inline float ClayExposure(ClayLight light) {
   switch (light) {
     case ClayLight::kOff: return 1.0f;
@@ -1148,8 +1171,10 @@ inline float ClayExposure(ClayLight light) {
 // (D32_FLOAT). The 32-bit float format was taken for the frame rate (ruling,
 // 2026-10-08): R16G16B16A16_FLOAT, 8 bytes, returns every 8-bit level exactly
 // but cost 2 to 3 ms a frame more in one set of game runs (later runs did not
-// separate the two formats); this one is up to one level off
-// in red and green and up to three in blue (test_clay_logic.cpp, cases 397 to
+// separate the two formats); this one is up to two levels off
+// in red and green and up to three in blue, always darker where the GPU rounds
+// toward zero as this one does (one level off at most for a value that is an
+// 8-bit level's square; test_clay_logic.cpp, cases 397 to
 // 400 and 416; frame-map section 14, "Linear target"). The linear format is one
 // for every pipeline of the pass, so PipelineKey has no field for it.
 inline constexpr uint32_t kClayLinearTexelBytes = 4, kClayMappedTexelBytes = 4, kClayDepthTexelBytes = 4;
@@ -1196,7 +1221,8 @@ inline std::string FormatTargetText(uint32_t width, uint32_t height) {
 //
 // The value is the formula's WITHOUT the game's output scale c20.w (16): the
 // game multiplies by it at the end of every scene shader and its later passes
-// take it back; here the output mapping's exposure stands in its place. An
+// take it back; here the exposure of the lit output stands in its place
+// (ClayExposure: each lit pixel path multiplies its value by it). An
 // object's c49.xyz is inside its function (LightObject); its c26.xyz, which
 // the game applies together with c20.w after the fog, multiplies the function's
 // result (ClayObjectConstants::c26; (1, 1, 1) in every row captured).
@@ -1502,8 +1528,8 @@ inline Float3 LightLeaf(const Float3& A, const Float3& vs_ambient, float front, 
   return {one(A.x, vs_ambient.x, sun_col.x, c49.x), one(A.y, vs_ambient.y, sun_col.y, c49.y), one(A.z, vs_ambient.z, sun_col.z, c49.z)};
 }
 
-// What a lit draw writes into the float target for the value `v`: v itself, not clamped at 1 (the
-// lit values exceed it, and the output mapping clamps after the exposure), but nothing that is not
+// What a lit draw writes into the float target for the value `v` (the light function's value times
+// the frame's exposure): v itself, not clamped at 1 (the output mapping clamps), but nothing that is not
 // a number, nothing negative and nothing above kClayLitMax: a NaN (no comparison holds for it) and
 // a negative value give 0, +infinity gives the bound. The bound keeps a sum of every blended draw
 // of a frame over one pixel far below the target's largest value (64,512 in its 10-bit channel:
@@ -1536,7 +1562,7 @@ struct ClayFrameConstants {
   float sun_col[3];     // c87.xyz
   float tint_pow;       // c21.w
   float tint[3];        // c21.xyz
-  float pad3;           // (no exposure here: E is the output mapping's alone, ClayFrameExposure)
+  float exposure;       // E of the lit output (ClayExposure of "on"): the lit pixel paths multiply by it
   float add[3];         // c20.xyz (c20.w, the output scale, is not applied)
   float pad0;
   float floor[3];       // c22.xyz; the block carries x and y, z is 0 (0 in every row captured)
@@ -1572,6 +1598,7 @@ inline ClayFrameConstants MakeClayFrameConstants(const capture::LightBlock& b, C
   c.floor[1] = b.floor[1];
   c.tint_pow = b.tint_pow;
   c.light_on = 1;
+  c.exposure = ClayExposure(ClayLight::kOn);  // (only here: a frame without light has none, and no draw reads it)
   // The eye: all three components or none (a position: LightPositionUsable).
   if (LightPositionUsable(b.eye[0]) && LightPositionUsable(b.eye[1]) && LightPositionUsable(b.eye[2])) {
     for (int i = 0; i < 3; ++i) c.eye[i] = b.eye[i];
@@ -1584,13 +1611,6 @@ inline ClayFrameConstants MakeClayFrameConstants(const capture::LightBlock& b, C
 // vertex-side light takes the vector to the eye, the frame's eye is usable.
 inline bool LightFrameLights(const ClayFrameConstants& frame, capture::LightFamily family) {
   return frame.light_on != 0 && (family != capture::LightFamily::kTreeLeaf || frame.eye_on != 0);
-}
-
-// The output mapping's exposure of a frame: ClayExposure of "on" only when the frame is lit. A
-// frame drawn without light (the switch off, or no light block) is the materials picture, exposure
-// 1, whatever E becomes. The one place E comes from; it is applied only in the mapping.
-inline float ClayFrameExposure(const ClayFrameConstants& frame) {
-  return ClayExposure(frame.light_on ? ClayLight::kOn : ClayLight::kOff);
 }
 
 // Whether the pass lights a draw with these inputs (plan Tasks 7 and 8a): the terrain layers and
@@ -1791,7 +1811,7 @@ inline constexpr uint32_t kClayTerrainSlotBytes = 256;  // the RHI's constant bu
 // kClayTerrainSlotBytes (slot 0 the frame's light, cbuffer Frame; then one per terrain record drawn
 // with its material, cbuffer Terrain; then one per lit instanced plant, the first
 // kClayPlantConstantBytes of cbuffer Object), then one slot of kClayObjectSlotBytes per lit object
-// or trunk (cbuffer Object: 272 bytes with the probe registers, more than a small slot). Everything is bound by
+// or trunk (cbuffer Object: 288 bytes with the probe registers and the leaf's, more than a small slot). Everything is bound by
 // address and offset: no view has a size, so the buffer itself must hold, from the start of EVERY
 // slot the pass binds at b1, the largest block a shader declares there. That is cbuffer Object, which
 // the vertex shader declares for every draw, a terrain draw's and an unlit draw's included (they do
@@ -2271,7 +2291,8 @@ inline std::string FormatTerrainText(const ClayStats& st, const TextureStats& ts
   return text;
 }
 
-// The log's light line: the prepared records with light inputs and those whose
+// The log's light line. With the light off: that no light input was built
+// (ClayLightInputsBuilt). Else: the prepared records with light inputs and those whose
 // normals and second buffer (colours, probe weights and sets, instance
 // colours) the geometry cache built, the world rotations of the
 // objects and trunks among them by kind, and, when there are any, the rotations
@@ -2281,6 +2302,7 @@ inline std::string FormatTerrainText(const ClayStats& st, const TextureStats& ts
 // plant records that have their bend inputs with those buffers' bytes.
 inline std::string FormatLightText(const ClayStats& st) {
   constexpr size_t kTop = 8;
+  if (!st.light_switch) return "Light inputs: not built (light off)";
   std::string text = "Light inputs: ready " + std::to_string(st.light_ready) + " of " + std::to_string(st.lit) +
                      " lit records | world rotation:";
   for (size_t i = 0; i < size_t(RotationKind::kCount); ++i) {
@@ -2323,7 +2345,9 @@ inline std::string FormatLightText(const ClayStats& st) {
   return text;
 }
 
-// The log's and F3's Light line: the switch, whether the frame had a light
+// The log's and F3's Light line: the switch (and, where the frame was drawn
+// without light although the switch is on, why: the texture path is off),
+// whether the frame had a light
 // block the pass could use, the drawn records lit by their family's function
 // (by family), the drawn records without light by reason, the pixel shaders of
 // those unlit for a reason of their own (light-unknown and normal-unsupported
@@ -2331,6 +2355,7 @@ inline std::string FormatLightText(const ClayStats& st) {
 inline std::string FormatLightDrawnText(const ClayStats& st) {
   constexpr size_t kTop = 8;
   std::string text = std::string("Light: ") + (st.light_switch ? "on" : "off");
+  if (!st.light_switch && st.light_textures_off) text += " (the switch is on; textures are off)";
   if (st.light_switch) text += std::string(", block ") + (st.light_block ? "valid" : "missing");
   uint32_t lit = 0;
   for (uint32_t n : st.light_drawn) lit += n;

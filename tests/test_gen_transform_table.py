@@ -399,7 +399,19 @@ class GenTransformTableTest(unittest.TestCase):
         for text, code in (("xyz", "0x324"), ("wzy", "0x31B"), ("yxw", "0x331")):
             half = {"fetch": 5, "format": 32, "offset": 2, "source": text}
             self.assertIn(", 32, 2, " + code + ",", self._light(self._instanced(normal=half), instance=self.INSTANCE)[-1])
-        self.assertIn(", 6, 0, 0x306,", self._light(self._stream(colour=dict(self.COLOUR, source="zyx")))[2])
+        # A colour's number of source components is its kind's: the colour stream's reader keeps the
+        # alpha (four), an instance colour's reader does not (three). The other number would give a
+        # table that generates and a draw the readers refuse (ColourElementSupported,
+        # InstanceColourElementSupported: no colours, no light).
+        for light, entry, why in (
+                (self._stream(colour=dict(self.COLOUR, source="zyx")), {},
+                 "a stream light's colour source 'zyx' is not four of x, y, z, w"),
+                (self._instanced(colour={"fetch": 3, "format": 6, "offset": 6, "source": "zyxw"}), {"instance": self.INSTANCE},
+                 "an instance light's colour source 'zyxw' is not three of x, y, z, w")):
+            with self.assertRaises(ValueError) as cm:
+                self._light(light, **entry)
+            self.assertIn(why, str(cm.exception))
+        self.assertIn(", 6, 0, 0x4C9,", self._light(self._stream(colour=dict(self.COLOUR, source="yzxw")))[2])
         # a skinned shader may have a probe entry
         out = self._light(self._probe(), skin=self.SKIN)
         self.assertEqual([l.split("(")[0] for l in out[1:]], ["FABLE2_VS_TRANSFORM", "FABLE2_VS_SKIN", "FABLE2_VS_LIGHT"])

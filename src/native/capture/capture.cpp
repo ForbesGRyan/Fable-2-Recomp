@@ -2964,10 +2964,10 @@ void AppendLightInputs(std::string& row, uint32_t device, const DeviceSnapshot& 
 // LightBlockTries): a read is eleven ReadPixelConstant calls, far too many to make at every draw
 // of a frame whose light set is not a sun's (a night, an interior: no block, "light-block"),
 // and a set without a sun gives no block at the next draw under it either.
-// g_light_frame: frames ended (EndMainSceneFrame), which is what tells the tries of one frame
-// from the next's. The tries are the drawing thread's own, as the load model is whose upload
-// numbers they hold.
-std::atomic<uint32_t> g_light_frame{0};
+// g_light_tries_frame: frames ended (EndMainSceneFrame), which is what tells the tries of one frame
+// from the next's (not g_light_frames, the frames counted for the log's light-block line). The
+// tries are the drawing thread's own, as the load model is whose upload numbers they hold.
+std::atomic<uint32_t> g_light_tries_frame{0};
 constinit thread_local LightBlockTries t_light_tries;
 
 // One outermost guest draw inside the main scene, as a DrawRecord in the frame.
@@ -3020,6 +3020,7 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   LightReason light_reason = LightReason::kLightUnknown;
   LightBlock block{};
   bool block_tried = false;
+  uint64_t block_set = 0;
   if (extra == SkipReason::kNone && in.have_shader && !in.depth_only && shaders.have_dev) {
     light_reason = FillLightInputs(device, shaders.dev, shaders.vs, shaders.ps, in.instances.active,
                                    shaders.max_vertex, &light, nullptr);
@@ -3033,13 +3034,17 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
     // gives the same answer at every draw under it): up to LightBlockTries::kMaxSets sets a frame.
     const PsLightSpec* family = shaders.ps ? shaders.ps->light : nullptr;
     if (family && !family->multi && LightFamilyReadsSun(family->family) &&
-        t_light_tries.Open(g_light_frame.load(std::memory_order_relaxed))) {
+        t_light_tries.Open(g_light_tries_frame.load(std::memory_order_relaxed))) {
       const uint64_t set = LightSetUpload();
       if (t_light_tries.ShouldTry(set)) {
         block = ReadLightBlock();
         block_tried = true;
-        // Counted here, whatever becomes of the draw below: a read is never made twice for a set.
-        t_light_tries.Tried(set, block.valid);
+        block_set = set;
+        // A read without a block is counted here, whatever becomes of the draw below: it is never
+        // made twice for a set. A read that gave the block is marked done only when the frame has
+        // taken it (below, under the lock): were this draw dropped there, the frame would have no
+        // block and no further read.
+        if (!block.valid) t_light_tries.Tried(set, false);
       }
     }
   }
@@ -3048,6 +3053,7 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   if (block_tried) {
     if (block.valid) {
       g_builder.SetLight(block);
+      t_light_tries.Tried(block_set, true);  // (the frame has its block: nothing more is read for it)
     } else {
       g_builder.CountLightTry();
     }
@@ -3216,7 +3222,7 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
       g_records_frame.store(g_records_wanted.load(std::memory_order_relaxed),
                             std::memory_order_relaxed);
       // The next frame reads its own light block.
-      g_light_frame.fetch_add(1, std::memory_order_relaxed);
+      g_light_tries_frame.fetch_add(1, std::memory_order_relaxed);
     }
   }
   if (!write) return;

@@ -390,6 +390,7 @@ class Fable2App : public rex::ReXApp {
   void OnShutdown() override {
     autoplay_thread_.request_stop();
     if (autoplay_thread_.joinable()) autoplay_thread_.join();
+    fable2::native::Shutdown();  // (the debug layer's last messages, when they are asked for)
 #ifdef FABLE2_REMOTE_CONTROL
     fable2::stateprobe::stop();
     remote_server_.Stop();

@@ -1498,6 +1498,105 @@ int main() {
     }
   }
 
+  // --- The bend inputs of the instanced plants (lighting-formulas.md, "Instanced plants", plant_normal) ---
+  // Per flat position: the copy's up axis U, the third COLUMN of its rows' 3 x 3, normalised
+  // (0x8123... instr 40 to 42, 45, 46, 48, 49, 51), and the mesh vertex's z in the copy's space (38).
+  {
+    capture::InstanceSet s;
+    s.active = true;
+    s.inv_count = 0.5f;
+    s.count = 2.0f;
+    s.first = 0.0f;
+    s.bias = 0.5f;
+    s.offset[0] = 100.0f;  // (the offset moves positions only)
+    for (int k = 0; k < 3; ++k) s.rows[k] = HalfRow(uint32_t(8 * k), 24);
+    // Copy 0: the rotation about z. Copy 1: rows that are no rotation, third column (3, 0, 4), third
+    // row (0, 0, 4). Copy 2: a third column of zeros (the copy is flat). Three copies in the stream.
+    std::vector<uint8_t> rows(3 * 24, 0);
+    PutHalf4(&rows[0], 0, -1, 0, 5); PutHalf4(&rows[8], 1, 0, 0, 6); PutHalf4(&rows[16], 0, 0, 1, 7);
+    PutHalf4(&rows[24], 1, 0, 3, 0); PutHalf4(&rows[32], 0, 2, 0, 0); PutHalf4(&rows[40], 0, 0, 4, 9);
+    PutHalf4(&rows[48], 1, 0, 0, 0); PutHalf4(&rows[56], 0, 1, 0, 0); PutHalf4(&rows[64], 2, 3, 0, 0);
+    s.rows_size = uint32_t(rows.size());
+    const capture::Float4 mesh[2] = {{1, 2, 0.25f, 1}, {5, 6, -0.5f, 1}};
+    auto is = [](const capture::Float4& v, float x, float y, float z, float w) {
+      return Near(v.x, x) && Near(v.y, y) && Near(v.z, z) && v.w == w;
+    };
+    auto zero4 = [](const capture::Float4& v) { return v.x == 0.0f && v.y == 0.0f && v.z == 0.0f && v.w == 0.0f; };
+    capture::Float4 out[9];
+    for (capture::Float4& o : out) o = {9, 9, 9, 9};
+    CHECK(400, ExpandInstanceBend(mesh, 2, rows.data(), rows.size(), s, 8, out) == LightSecond::kNone);
+    // The height is the position's third component as it is, no other one (x, y and w differ from it).
+    CHECK(401, is(out[0], 0, 0, 1, 0.25f) && is(out[1], 0, 0, 1, -0.5f));
+    // The third column, not the third row ((0, 0, 1) here), and of unit length.
+    CHECK(402, is(out[2], 0.6f, 0, 0.8f, 0.25f) && is(out[3], 0.6f, 0, 0.8f, -0.5f));
+    // A copy without an up axis: no direction is made up; the height is the vertex's all the same.
+    CHECK(403, is(out[4], 0, 0, 0, 0.25f) && is(out[5], 0, 0, 0, -0.5f) && out[4].x == 0.0f && out[4].z == 0.0f);
+    // A copy past the stream has no position either: all four zero. Nothing is written past the count.
+    CHECK(404, zero4(out[6]) && zero4(out[7]) && out[8].x == 9 && out[8].w == 9);
+    // The flat order is that of the positions: index i is the same copy and vertex in both.
+    {
+      capture::Float4 p[8];
+      CHECK(405, capture::ExpandInstances(mesh, 2, rows.data(), rows.size(), s, 8, p));
+      // copy 1, vertex 1: (5 + 3 * -0.5 + 100, 12, -2 + 9); copy 3: no position
+      CHECK(405, Near(p[3].x, 103.5f) && Near(p[3].y, 12) && Near(p[3].z, 7) && std::isnan(p[6].x) && is(out[3], 0.6f, 0, 0.8f, -0.5f));
+    }
+    // The first copy of the draw.
+    {
+      capture::InstanceSet from = s;
+      from.first = 1.0f;
+      CHECK(406, ExpandInstanceBend(mesh, 2, rows.data(), rows.size(), from, 4, out) == LightSecond::kNone &&
+                     is(out[0], 0.6f, 0, 0.8f, 0.25f) && is(out[3], 0, 0, 0, -0.5f));
+    }
+    // A vertex past the mesh's positions (the stream holds fewer than the copy's count): zero.
+    CHECK(407, ExpandInstanceBend(mesh, 1, rows.data(), rows.size(), s, 4, out) == LightSecond::kNone && is(out[0], 0, 0, 1, 0.25f) &&
+                   zero4(out[1]) && is(out[2], 0.6f, 0, 0.8f, 0.25f) && zero4(out[3]));
+    // Bounded by the stream: a copy whose rows are cut is past it.
+    CHECK(408, ExpandInstanceBend(mesh, 2, rows.data(), rows.size() - 1, s, 6, out) == LightSecond::kNone && is(out[3], 0.6f, 0, 0.8f, -0.5f) &&
+                   zero4(out[4]) && zero4(out[5]));
+    // A height that is not a number, in a vertex the draw names: no buffer (no value is made up for
+    // it, and none that is not a number reaches a buffer). In a vertex the draw does not name: nothing.
+    for (float bad_z : {nan, inf, -inf}) {
+      const capture::Float4 bad_mesh[2] = {{1, 2, 0.25f, 1}, {5, 6, bad_z, 1}};
+      for (capture::Float4& o : out) o = {9, 9, 9, 9};
+      CHECK(409, ExpandInstanceBend(bad_mesh, 2, rows.data(), rows.size(), s, 6, out) == LightSecond::kValue);
+      CHECK(409, ExpandInstanceBend(bad_mesh, 2, rows.data(), rows.size(), s, 2, out) == LightSecond::kValue);
+      CHECK(409, ExpandInstanceBend(bad_mesh, 2, rows.data(), rows.size(), s, 1, out) == LightSecond::kNone && is(out[0], 0, 0, 1, 0.25f));
+      // (the vertex's other components are not the bend's: a position that is not a number in x is
+      // dropped by the position's own NaN)
+      const capture::Float4 bad_x[2] = {{bad_z, 2, 0.25f, 1}, {5, bad_z, -0.5f, bad_z}};
+      CHECK(409, ExpandInstanceBend(bad_x, 2, rows.data(), rows.size(), s, 4, out) == LightSecond::kNone && is(out[1], 0, 0, 1, -0.5f));
+    }
+    // A height of any finite size is kept as it is (the shader saturates the blend it makes of it).
+    {
+      const capture::Float4 big[2] = {{0, 0, 65504.0f, 1}, {0, 0, -3.0e38f, 1}};
+      CHECK(410, ExpandInstanceBend(big, 2, rows.data(), rows.size(), s, 2, out) == LightSecond::kNone && out[0].w == 65504.0f &&
+                     out[1].w == -3.0e38f);
+    }
+    // A copy whose third column is not a number has no up axis (and no position): zero direction.
+    {
+      std::vector<uint8_t> wild = rows;
+      PutBe16(&wild[4], 0x7E00);  // copy 0, row 0, z: a NaN half
+      CHECK(411, ExpandInstanceBend(mesh, 2, wild.data(), wild.size(), s, 4, out) == LightSecond::kNone && is(out[0], 0, 0, 0, 0.25f) &&
+                     is(out[2], 0.6f, 0, 0.8f, 0.25f));
+      PutBe16(&wild[4], 0x7C00);  // +infinity
+      CHECK(411, ExpandInstanceBend(mesh, 2, wild.data(), wild.size(), s, 2, out) == LightSecond::kNone && is(out[1], 0, 0, 0, -0.5f));
+    }
+    // Constants that map no index (garbage): every entry zero, nothing read.
+    {
+      capture::InstanceSet bad = s;
+      bad.inv_count = nan;
+      for (capture::Float4& o : out) o = {9, 9, 9, 9};
+      CHECK(412, ExpandInstanceBend(mesh, 2, rows.data(), rows.size(), bad, 4, out) == LightSecond::kNone && zero4(out[0]) && zero4(out[3]));
+    }
+    CHECK(413, ExpandInstanceBend(nullptr, 2, rows.data(), rows.size(), s, 4, out) == LightSecond::kStream &&
+                   ExpandInstanceBend(mesh, 2, nullptr, rows.size(), s, 4, out) == LightSecond::kStream &&
+                   ExpandInstanceBend(mesh, 2, rows.data(), rows.size(), s, 0, out) == LightSecond::kStream &&
+                   ExpandInstanceBend(mesh, 2, rows.data(), rows.size(), s, 4, nullptr) == LightSecond::kStream);
+    // The element: four host floats a flat position, as large as a position's (the rule for whatever
+    // is bound at a light register).
+    static_assert(sizeof(capture::Float4) == 16);
+  }
+
   // --- The committed table on the weights, the set index and the instance colour of real draws ---
   // Bytes of dumped streams of the bridge capture of plan Task 7's runs
   // (native_discovery_20261008_055155.jsonl, frame 1; run 314, made with the user present: RUN
@@ -1659,7 +1758,7 @@ int main() {
   }
 
   if (g_fail) return g_fail;
-  std::cout << "PASS: normal decode, normal transform, skinned and instanced normals, colour stream, probe weights and sets, "
+  std::cout << "PASS: normal decode, normal transform, skinned and instanced normals, colour stream, probe weights and sets, bend inputs, "
                "instance colours\n";
   return 0;
 }

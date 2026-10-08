@@ -110,31 +110,34 @@ class ClayPass {
     // (GeometryCache::Colours) and for an instanced record (the copies'
     // colours per flat position, GeometryCache::InstanceColours), `probe` for
     // the probe kind (GeometryCache::Probe: the weights from byte 0, the set
-    // indices from ProbeSetOffset(probe_count) on). For a mesh record the
-    // normals and its kind's second buffer or neither: nullptr when one
-    // could not be built (counted in ClayStats::light_missing; `light_why`).
+    // indices from ProbeSetOffset(probe_count) on), and for an instanced
+    // record also `bend` (the inputs of the plants' bent normal per flat
+    // position, GeometryCache::InstanceBend). For a mesh record the normals
+    // and its kind's other buffers or none of them: nullptr when one could not
+    // be built (counted in ClayStats::light_missing; `light_why`).
     // Only a lit record's buffers are bound (`lit`, below): a colour stream's
     // colours at t10; the probe buffer's set indices at t10 (from
     // ProbeSetOffset(probe_count)) and its weights at t11; an instanced
-    // record's colours are bound by no draw yet.
-    // `light_count`: the elements the buffers hold, the smaller of the normals'
-    // count and the second buffer's (the shader reads them for a vertex below
-    // it). `probe_count`: the vertices the probe buffer was built with, which
+    // plant's colours at t10 and its bend inputs at t11.
+    // `light_count`: the elements the buffers hold, the smallest of the
+    // normals' count and the other buffers' (the shader reads them for a
+    // vertex below it). `probe_count`: the vertices the probe buffer was built with, which
     // is where its second region starts. `max_index`: the largest index of the
     // record's list.
     const capture::LightInputs* light = nullptr;
     nrhi::Buffer* normals = nullptr;
     nrhi::Buffer* colours = nullptr;
     nrhi::Buffer* probe = nullptr;
+    nrhi::Buffer* bend = nullptr;
     uint32_t light_count = 0, max_index = 0, probe_count = 0;
     capture::LightReason light_why = capture::LightReason::kLightUnknown;
     // `lit`: the record is drawn lit by its family's function (the frame is
     // lit, the family is one the pass lights, everything it reads is there,
     // and a terrain layer's square is lit as a whole). A lit terrain record has
     // its base map in `base` with `base_sampler` and `base_fix`, and the
-    // light's constants in its slot; a lit object's constants are entry `slot`
-    // of object_constants_. `unlit`: why not, for a record that is not lit in
-    // a lit frame.
+    // light's constants in its slot; a lit object's or trunk's constants are
+    // entry `slot` of object_constants_, a lit plant's of plant_constants_.
+    // `unlit`: why not, for a record that is not lit in a lit frame.
     bool lit = false;
     ClayUnlit unlit = ClayUnlit::kUnknown;
     nrhi::TextureView* base = nullptr;
@@ -181,13 +184,14 @@ class ClayPass {
                       ClayStats& st, TextureStats& tst);
   void FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, TextureStats& tst);
   // The light's vertex inputs of a textured mesh record with light inputs:
-  // its normals and the second buffer of its vertex kind (a colour stream's
-  // colours, the probe weights and sets, an instance set's colours), from the
-  // geometry cache into `p`; counts the record in st (lit, light_ready or
-  // light_missing by reason and vertex shader, light_second, light_rotation). In a lit frame
-  // a record of a family the pass lights whose constants can be made
-  // (MakeClayObjectConstants) is marked lit and gets its entry of
-  // object_constants_.
+  // its normals and the other buffers of its vertex kind (a colour stream's
+  // colours, the probe weights and sets, an instance set's colours and bend
+  // inputs), from the geometry cache into `p`; counts the record in st (lit,
+  // light_ready or light_missing by reason and vertex shader, light_second,
+  // light_bend, light_rotation). In a lit frame a record of a family the pass
+  // lights whose constants can be made (MakeClayObjectConstants) is marked lit
+  // and gets its entry of object_constants_ (an object or trunk) or of
+  // plant_constants_ (an instanced plant).
   void PrepareLight(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light, Prepared& p,
                     ClayStats& st);
   // The texture behind a fetch constant, through the texture cache; with `memo`
@@ -236,8 +240,9 @@ class ClayPass {
   // frame's constant buffer, persistently mapped: slots of
   // kClayTerrainSlotBytes, slot 0 the frame's light (ClayFrameConstants,
   // cbuffer Frame), then one per terrain record drawn with its material
-  // (cbuffer Terrain); behind them one slot of kClayObjectSlotBytes per lit
-  // object (cbuffer Object; ClayObjectSlotOffset). The buffer is in use until the frame's
+  // (cbuffer Terrain), then one per lit plant (the first bytes of cbuffer
+  // Object; ClaySmallSlotOffset); behind them one slot of kClayObjectSlotBytes
+  // per lit object or trunk (cbuffer Object; ClayObjectSlotOffset). The buffer is in use until the frame's
   // submission has completed, so each frame takes one from the pool or a new
   // one and returns it at the end of Render.
   static constexpr uint64_t kTerrainPoolBytes = 4ull << 20;
@@ -250,12 +255,15 @@ class ClayPass {
   nrhi::Buffer* terrain_cb_ = nullptr;
   uint64_t terrain_cb_bytes_ = 0;
   // The light of the frame being rendered: its constants (light_on 0: no draw
-  // is lit), the lit objects' constants in prepare order (Prepared::slot), and
-  // the number of small slots in use before the first of them (the frame's and
-  // the terrain's: ClayObjectSlotOffset(object_slot0_, slot) is an object's).
+  // is lit), the lit objects' and trunks' constants and the lit plants', each
+  // in prepare order (Prepared::slot), the small slot of the first plant
+  // (ClaySmallSlotOffset(plant_slot0_ + slot) is a plant's) and the number of
+  // small slots in use before the first object (the frame's, the terrain's and
+  // the plants': ClayObjectSlotOffset(object_slot0_, slot) is an object's).
   ClayFrameConstants frame_{};
   std::vector<ClayObjectConstants> object_constants_;
-  uint32_t object_slot0_ = 0;
+  std::vector<ClayObjectConstants> plant_constants_;
+  uint32_t object_slot0_ = 0, plant_slot0_ = 0;
   bool no_constants_logged_ = false;
 };
 

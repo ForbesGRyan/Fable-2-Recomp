@@ -397,6 +397,88 @@ class PinnedForTheRenderer(unittest.TestCase):
         self.close(self.probe_obj(0, vcolour=[0.0, 1e-8, 0.06]), [0.0, 1e-8, 0.06] + want)
         self.close(lf.powc([0.0, -1e-8, -0.06], 1.3), [0.0, 3.9810717055349695e-11, 0.025798628902309793])
 
+    # Plan Task 8b: the instanced plants. The clay vertex shader makes, per vertex, the height blend
+    # h = sat(z * c45.y + c45.z), the bend (c45.x * normalize(lerp(N, U, h)), c45.x * h) and the colour
+    # pow(instance colour, 2.2 * c21.w) * c21.xyz (family plant: + c20.xyz; the vertex copies c18 and c54
+    # of the frame's block); the pixel shader makes Np = normalize(lerp(normalize(N), bend.xyz,
+    # sat(bend.w))) and calls plant, or lit_object with c27.w = 1 and c49 = 1 (family plant-lit, with L
+    # from the vertex side's axis and Np). tests/native/test_clay_logic.cpp, cases 500 to 509, has the same.
+    C45 = [1.0, -2.0, 1.5, 0.0]               # h = sat(1.5 - 2 z): 1 up to z = 0.25, 0 from z = 0.75
+    UP = [0.28, 0.0, 0.96]                    # a copy's up axis (unit), tilted
+    PLANT_POW = 2.2 * 1.3                     # vertex c18.w = 2.2 * pixel c21.w
+
+    def plant(self, n, z, rgb, c45=None, up=None):
+        c45, up = c45 or self.C45, up or self.UP
+        h = lf.sat(z * c45[1] + c45[2])
+        normal = lf.plant_normal(n, up, h, c45[0])
+        amb = lf.instance_ambient([c / 255.0 for c in rgb], self.TINT, self.PLANT_POW, self.ADD)
+        nds = lf.dot(normal, self.SUN_DIR)
+        return [h] + normal + amb + lf.plant([0.5, 0.4, 0.3], amb, nds, self.SUN_COL, lf.sun_gate_single(1.0, 1.0))
+
+    def plant_lit(self, n, z, rgb, c45=None, up=None):
+        c45, up = c45 or self.C45, up or self.UP
+        h = lf.sat(z * c45[1] + c45[2])
+        normal = lf.plant_normal(n, up, h, c45[0])
+        t = lf.ambient_t(lf.ambient_axis(n, self.AXIS), normal)
+        nds = lf.dot(normal, self.SUN_DIR)
+        return [t, nds] + lf.lit_object([0.5, 0.4, 0.3], [c / 255.0 for c in rgb], self.TINT, self.PLANT_POW, self.ADD,
+                                        self.FLOOR, t, nds, self.SUN_COL, 1.0, lf.sun_gate_single(1.0, 1.0), c49=[1.0, 1.0, 1.0])
+
+    def test_plant(self):
+        n = [0.6, 0.0, 0.8]                   # turned from the sun in x
+        # Half way up: the normal half bent towards the copy's up axis.
+        self.close(self.plant(n, 0.5, (200, 128, 64)), PLANT_PINS["half"])
+        # At the foot (h = 1): the up axis itself. At the top (h = 0): the vertex normal.
+        self.close(self.plant(n, 0.25, (200, 128, 64)), PLANT_PINS["foot"])
+        self.close(self.plant(n, 0.75, (200, 128, 64)), PLANT_PINS["top"])
+        # A strength of 0.5: the pixel side blends by sat(0.5 * h) towards HALF the bent normal.
+        self.close(self.plant(n, 0.5, (200, 128, 64), c45=[0.5, -2.0, 1.5, 0.0]), PLANT_PINS["weak"])
+
+    def test_plant_lit(self):
+        n = [0.6, 0.0, 0.8]
+        self.close(self.plant_lit(n, 0.5, (200, 128, 64)), PLANT_PINS["lit half"])
+        self.close(self.plant_lit(n, 0.25, (200, 128, 64)), PLANT_PINS["lit foot"])
+        self.close(self.plant_lit(n, 0.75, (200, 128, 64)), PLANT_PINS["lit top"])
+
+    def test_plant_zero_inputs(self):
+        n = [0.6, 0.0, 0.8]
+        # c45.x == 0: the set does not bend, whatever the height says.
+        self.close(self.plant(n, 0.25, (200, 128, 64), c45=[0.0, -2.0, 1.5, 0.0]), PLANT_PINS["unbent"])
+        self.assertEqual(self.plant(n, 0.25, (200, 128, 64), c45=[0.0, -2.0, 1.5, 0.0])[1:4], n)
+        self.close(self.plant_lit(n, 0.25, (200, 128, 64), c45=[0.0, 0.0, 0.0, 0.0]), PLANT_PINS["lit unbent"])
+        # A negative strength blends by sat(negative) = 0: the vertex normal too.
+        self.assertEqual(self.plant(n, 0.25, (200, 128, 64), c45=[-1.0, -2.0, 1.5, 0.0])[1:4], n)
+        # An instance colour of 0: the power of zero is 0, the added light and the sun remain.
+        self.close(self.plant(n, 0.5, (0, 0, 0)), PLANT_PINS["black"])
+        self.close(self.plant_lit(n, 0.5, (0, 0, 0)), PLANT_PINS["lit black"])
+        # A zero normal (a vertex whose normal has no direction): bent, it is the up axis where h > 0 ...
+        self.close(self.plant([0.0, 0.0, 0.0], 0.5, (200, 128, 64)), PLANT_PINS["no normal"])
+        # ... and no direction where nothing bends it: no sun; plant-lit: t = 0, the ambient at its floor.
+        self.close(self.plant([0.0, 0.0, 0.0], 0.75, (200, 128, 64)), PLANT_PINS["no normal, top"])
+        self.close(self.plant_lit([0.0, 0.0, 0.0], 0.75, (200, 128, 64)), PLANT_PINS["lit no normal, top"])
+        # A copy without an up axis (a third column of zeros): the bent normal is the vertex normal's
+        # direction (shortened by 1 - h before it is normalised).
+        self.close(self.plant(n, 0.5, (200, 128, 64), up=[0.0, 0.0, 0.0]), PLANT_PINS["no up"])
+
+
+PLANT_PINS = {
+    "half": [0.5, 0.5257311121191336, 0.0, 0.8506508083520399, 0.5683564165336911, 0.2625218355265196, 0.12797253813103704, 0.44487503475959345, 0.2127892319794812, 0.07734856786179545],
+    "foot": [1.0, 0.28, 0.0, 0.96, 0.5683564165336911, 0.2625218355265196, 0.12797253813103704, 0.5637660882668456, 0.29253030221060783, 0.10617064143931111],
+    "top": [0.0, 0.6, 0.0, 0.8, 0.5683564165336911, 0.2625218355265196, 0.12797253813103704, 0.40220600826684555, 0.18417081421060788, 0.06700456143931112],
+    "weak": [0.5, 0.5793187229742429, 0.0, 0.8151011085819305, 0.5683564165336911, 0.2625218355265196, 0.12797253813103704, 0.414469231283684, 0.19239584459765913, 0.06997746398884772],
+    "lit half": [0.7248367390246099, 0.32464005352070285, 0.3194501361635652, 0.17970944830063978, 0.07222667160009423],
+    "lit foot": [0.8820928926290964, 0.564824, 0.5051217140439017, 0.27706333165698416, 0.10377581868510069],
+    "lit top": [0.660085140197664, 0.23844000000000004, 0.25308259704234354, 0.14484074306862768, 0.06091490419395856],
+    "unbent": [1.0, 0.6, 0.0, 0.8, 0.5683564165336911, 0.2625218355265196, 0.12797253813103704, 0.40220600826684555, 0.18417081421060788, 0.06700456143931112],
+    "lit unbent": [0.660085140197664, 0.23844000000000004, 0.25308259704234354, 0.14484074306862768, 0.06091490419395856],
+    "black": [0.5, 0.5257311121191336, 0.0, 0.8506508083520399, 0.0068, 0.071, 0.092, 0.1640968264927479, 0.13618049776887337, 0.06655680642248434],
+    "lit black": [0.7248367390246099, 0.32464005352070285, 0.1640968264927479, 0.13618049776887337, 0.06655680642248434],
+    "no normal": [0.5, 0.28, 0.0, 0.96, 0.5683564165336911, 0.2625218355265196, 0.12797253813103704, 0.5637660882668456, 0.29253030221060783, 0.10617064143931111],
+    "no normal, top": [0.0, 0.0, 0.0, 0.0, 0.5683564165336911, 0.2625218355265196, 0.12797253813103704, 0.28417820826684553, 0.10500873421060784, 0.03839176143931111],
+    "lit no normal, top": [0.0, 0.0, 0.019909758646090518, 0.03531010782579682, 0.0276],
+    "no up": [0.5, 0.6, 0.0, 0.8, 0.5683564165336911, 0.2625218355265196, 0.12797253813103704, 0.40220600826684555, 0.18417081421060788, 0.06700456143931112],
+}
+
 
 class SyntheticDump(unittest.TestCase):
     """Always runs: the checker on a hand-written shader of the terrain layers' form."""
@@ -466,12 +548,13 @@ class MultiSun(unittest.TestCase):
                         self.assertTrue(res.ok, f"{res.agree}/{res.trials} worst {res.worst:.3g} {res.first_bad}")
                         self.assertEqual(res.trials, self.TRIALS)
                         checked += 1
-        self.assertEqual(checked, 25)       # thirteen pairs: seven of two lights (slot 1), six of four (slots 1 to 3)
+        # nineteen pairs: thirteen of two lights (slot 1; six of them the plants', plan Task 8b), six of four (slots 1 to 3)
+        self.assertEqual(checked, 31)
 
     def test_the_families_and_light_counts_cover_the_table(self):
-        # Every -multi pair of the terrain, object and trunk families is checked, and has a light count.
+        # Every -multi pair of every family is checked (the plants' since plan Task 8b), and has a light count.
         for family, pairs in lc.FAMILIES.items():
-            if family.endswith("-multi") and not family.startswith("plant"):
+            if family.endswith("-multi"):
                 self.assertIn(family, lc.MULTI_SUN_FAMILIES)
             if family.endswith("-multi"):
                 for ps, _ in pairs:
@@ -488,8 +571,10 @@ class MultiSun(unittest.TestCase):
             lc.check_multi_sun("object-multi", "648B965C200A5113", "ECD66A10092E6562", 2, trials=1)
         with self.assertRaises(ValueError):
             lc.check_multi_sun("object-multi", "789266C3E42D7E59", "ECD66A10092E6562", 0, trials=1)
-        with self.assertRaises(KeyError):
-            lc.check_multi_sun("plant-multi", "E99F4ACC7A3C78B4", "8123C16DBF583F92", 1, trials=1)
+        with self.assertRaises(ValueError):
+            lc.check_multi_sun("plant-multi", "E99F4ACC7A3C78B4", "8123C16DBF583F92", 2, trials=1)
+        with self.assertRaises(KeyError):     # a one-light family has no slot to check
+            lc.check_multi_sun("plant", "A7E45D07F5CF6627", "8123C16DBF583F92", 1, trials=1)
 
     def check_with(self, family, ps, vs, slot, spoil):
         """check_multi_sun with the light set spoiled after _sun_in_slot made it."""
@@ -521,7 +606,10 @@ class MultiSun(unittest.TestCase):
         pairs = [("terrain-layer-multi", "45243B758F9272AB", "C30A97D946FA2BE4", 1),
                  ("terrain-layer-multi", "578342593A37DD35", "FB68A7F2301210E1", 2),
                  ("object-multi", "648B965C200A5113", "ECD66A10092E6562", 1),
-                 ("object-multi", "789266C3E42D7E59", "ECD66A10092E6562", 2)]
+                 ("object-multi", "789266C3E42D7E59", "ECD66A10092E6562", 2),
+                 ("plant-multi", "E99F4ACC7A3C78B4", "8123C16DBF583F92", 1),
+                 ("plant-lit-multi", "F525E023E08AC9BB", "B636821F95DC9D8E", 1),
+                 ("plant-lit-multi", "F525E023E08AC9BB", "36B543CECAE5C781", 1)]
         for family, ps, vs, slot in pairs:
             for spoil in (lantern_lit, mask_on_the_lantern, sun_with_a_cone, sun_as_a_position):
                 with self.subTest(ps=ps, spoil=spoil.__name__):
@@ -544,7 +632,9 @@ class MultiSun(unittest.TestCase):
             code = lc.main(["--multi-sun", "--trials", "4"])
         text = out.getvalue()
         self.assertEqual(code, 0)
-        self.assertEqual(text.count("(the game)"), 13)
+        self.assertEqual(text.count("(the game)"), 19)
+        self.assertIn("plant-multi: ps E99F4ACC7A3C78B4 vs 8123C16DBF583F92 (2 lights), sun in slot 1 (the game): 4/4 agree", text)
+        self.assertIn("plant-lit-multi: ps F525E023E08AC9BB vs 36B543CECAE5C781 (2 lights), sun in slot 1 (the game): 4/4 agree", text)
         self.assertIn("ps 789266C3E42D7E59 vs ECD66A10092E6562 (4 lights), sun in slot 2 (the game): 4/4 agree", text)
         self.assertIn("0 pairs disagree at the slot the game puts the sun in", text)
         # A light set that is not the game's (the sun as a position, w = 1): pairs disagree at the game's
@@ -560,7 +650,7 @@ class MultiSun(unittest.TestCase):
         with mock.patch.object(lc, "_sun_in_slot", sun_as_a_position), contextlib.redirect_stdout(out):
             code = lc.main(["--multi-sun", "--trials", "8"])
         self.assertEqual(code, 1)
-        self.assertIn("13 pairs disagree at the slot the game puts the sun in", out.getvalue())
+        self.assertIn("19 pairs disagree at the slot the game puts the sun in", out.getvalue())
         self.assertIn("first disagreement, trial ", out.getvalue())
 
 

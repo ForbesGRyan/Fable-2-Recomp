@@ -97,6 +97,11 @@ struct ClayStats {
   uint32_t light_missing[size_t(capture::LightReason::kCount)] = {};
   capture::ShaderTally<32> light_missing_by_vs;
   uint32_t light_second[size_t(LightSecond::kCount)] = {};
+  // The bend inputs of the frame's instanced plant records (GeometryCache::
+  // InstanceBend): the records that have their buffer and the bytes of those
+  // buffers (16 a flat position; a buffer two records share is counted twice).
+  uint32_t light_bend = 0;
+  uint64_t light_bend_bytes = 0;
   uint32_t light_rotation[size_t(RotationKind::kCount)] = {};
   capture::ShaderTally<32> light_rotation_by_vs;
   // The light as drawn ("Native light" below; the Light line). light_switch:
@@ -398,6 +403,21 @@ inline GeoKey InstanceColourKey(const capture::DrawRecord& r, const capture::Lig
   k.stride = e.stride_bytes;
   k.extra = HashCombine32({e.offset_bytes, e.format, e.source, e.source_count, InstanceNormalHash(r.instances)});
   k.kind = 13;
+  return k;
+}
+
+// Cache key of an instanced draw's bend inputs (kind 14: the up axis of each
+// flat position's copy and the height of its mesh vertex, ExpandInstanceBend):
+// the mesh's position stream with every layout field that changes its decode
+// (MeshPositionKey: the height is the decoded position's third component), and
+// the instance set as the flat normals have it (InstanceNormalHash: the up
+// axis is of the rows' 3 x 3; the offset moves positions only). Nothing of the
+// light's inputs: the bend constants c45 are the draw's and in no buffer. The
+// content hash is the two streams'.
+inline GeoKey InstanceBendKey(const capture::DrawRecord& r) {
+  GeoKey k = MeshPositionKey(r);
+  k.extra = HashCombine32({k.extra, InstanceNormalHash(r.instances)});
+  k.kind = 14;
   return k;
 }
 
@@ -888,12 +908,13 @@ static_assert(kClayLightElementBytesMax <= kClayPositionElementBytes);
 // The second buffers of the two vertex kinds without a colour stream keep to
 // that: the probe buffer is two regions, float4 weights (read at t11) and one
 // uint set index a vertex (read at t10 from the region's offset:
-// normal_decode.h, BuildProbe), and an instance's colours are one uint a flat
-// position (like the stream colours at t10; built and resident, bound by no
-// draw yet: the plants are not lit).
-inline constexpr uint32_t kProbeWeightElementBytes = 16, kProbeSetElementBytes = 4, kInstanceColourElementBytes = 4;
+// normal_decode.h, BuildProbe); an instanced plant's colours are one uint a
+// flat position (read at t10 like the stream colours) and its bend inputs one
+// float4 a flat position (read at t11 like the weights: ExpandInstanceBend).
+inline constexpr uint32_t kProbeWeightElementBytes = 16, kProbeSetElementBytes = 4, kInstanceColourElementBytes = 4,
+                          kBendElementBytes = 16;
 static_assert(kProbeWeightElementBytes <= kClayLightElementBytesMax && kProbeSetElementBytes <= kClayLightElementBytesMax &&
-              kInstanceColourElementBytes <= kClayLightElementBytesMax);
+              kInstanceColourElementBytes <= kClayLightElementBytesMax && kBendElementBytes <= kClayLightElementBytesMax);
 
 // ClayConstants::light_mode. kLightModeTerrainNormals: the vertex shader forms
 // the game's terrain normal from the draw's buffer at t8 (float2 per grid
@@ -903,19 +924,38 @@ static_assert(kProbeWeightElementBytes <= kClayLightElementBytesMax && kProbeSet
 // stream colour, unless kLightModeProbe (with the object bit only): then it is
 // the vertex's probe set, the vertex shader also reads the four weights at
 // t11, and the colour is the probe colour made of them and the draw's twelve
-// probe registers. kLightModeLit: the pixel shader lights the draw with its
-// family's function (the frame's block in cbuffer Frame, the draw's values in
-// its slot at b1); without it the draw is the unlit linear colour of the
-// materials picture.
-inline constexpr uint32_t kLightModeTerrainNormals = 1u, kLightModeObject = 2u, kLightModeLit = 4u, kLightModeProbe = 8u;
+// probe registers. kLightModeInstance (with the object bit only; plan Task
+// 8b): the draw is an instanced plant: the normal at t9 is in the world
+// already and goes through no rows, the word at t10 is the colour of the
+// vertex's copy, t11 holds the bend inputs (the copy's up axis and the
+// vertex's height), and the vertex shader makes of them the game's vertex-side
+// colour and the bend of the normal; with kLightModePlantLit the plant's
+// family is plant-lit (its pixel shader has the ambient factor: the vertex
+// side exports the colour without the added light and the vector of the
+// factor), without it plant (the vertex side's colour is the whole ambient).
+// kLightModeLit: the pixel shader lights the draw with its family's function
+// (the frame's block in cbuffer Frame, the draw's values in its slot at b1);
+// without it the draw is the unlit linear colour of the materials picture.
+inline constexpr uint32_t kLightModeTerrainNormals = 1u, kLightModeObject = 2u, kLightModeLit = 4u, kLightModeProbe = 8u,
+                          kLightModeInstance = 16u, kLightModePlantLit = 32u;
+// Every value the bits can make (the shader tests compile each shader once per value).
+inline constexpr uint32_t kLightModeCount = 64u;
 
-// The light_mode of a lit mesh record by its vertex kind: a colour stream's
-// object, an object or trunk with probe colours; 0 for a kind the pass does
-// not light as an object.
-constexpr uint32_t LitObjectMode(capture::LightVertexKind kind) {
+// The light_mode of a lit mesh record by its vertex kind and family: a colour
+// stream's object (6), an object or trunk with probe colours (14), an
+// instanced plant of family plant (22) or plant-lit (54); 0 for a pair the
+// pass does not light.
+constexpr uint32_t LitObjectMode(capture::LightVertexKind kind, capture::LightFamily family) {
+  const bool object = family == capture::LightFamily::kObject, trunk = family == capture::LightFamily::kTreeTrunk;
   switch (kind) {
-    case capture::LightVertexKind::kStream: return kLightModeObject | kLightModeLit;
-    case capture::LightVertexKind::kProbe: return kLightModeObject | kLightModeLit | kLightModeProbe;
+    case capture::LightVertexKind::kStream: return object ? kLightModeObject | kLightModeLit : 0;
+    case capture::LightVertexKind::kProbe: return object || trunk ? kLightModeObject | kLightModeLit | kLightModeProbe : 0;
+    case capture::LightVertexKind::kInstance:
+      if (family == capture::LightFamily::kPlant) return kLightModeObject | kLightModeLit | kLightModeInstance;
+      if (family == capture::LightFamily::kPlantLit) {
+        return kLightModeObject | kLightModeLit | kLightModeInstance | kLightModePlantLit;
+      }
+      return 0;
     default: return 0;
   }
 }
@@ -927,8 +967,13 @@ constexpr uint32_t LitObjectMode(capture::LightVertexKind kind) {
 // draw, whose (smaller) buffer this draw's vertex indices would address.
 // kProbeSets and kProbeWeights are the two regions of the draw's probe buffer
 // (LightBufferOffset); kColours is a colour stream's buffer and never an
-// instance set's.
-enum class ClayLightBuffer : uint8_t { kPositions, kTerrainNormals, kNormals, kColours, kProbeSets, kProbeWeights };
+// instance set's; kInstanceColours and kBend are an instanced plant's two
+// buffers (its copies' colours; the bend inputs). The instance bit decides
+// before the probe bit, as in the vertex shader (the pass makes no mode with
+// both).
+enum class ClayLightBuffer : uint8_t {
+  kPositions, kTerrainNormals, kNormals, kColours, kProbeSets, kProbeWeights, kInstanceColours, kBend
+};
 inline constexpr uint32_t kClayLightBufferParam0 = 8, kClayLightBufferCount = 4;
 struct ClayLightBuffers {
   ClayLightBuffer source[kClayLightBufferCount];  // t8, t9, t10, t11
@@ -936,11 +981,15 @@ struct ClayLightBuffers {
 constexpr ClayLightBuffers LightBufferSources(uint32_t light_mode) {
   const bool terrain = (light_mode & kLightModeTerrainNormals) != 0;
   const bool object = (light_mode & kLightModeObject) != 0;
-  const bool probe = object && (light_mode & kLightModeProbe) != 0;
+  const bool instance = object && (light_mode & kLightModeInstance) != 0;
+  const bool probe = object && !instance && (light_mode & kLightModeProbe) != 0;
   return {{terrain ? ClayLightBuffer::kTerrainNormals : ClayLightBuffer::kPositions,
            object ? ClayLightBuffer::kNormals : ClayLightBuffer::kPositions,
-           probe ? ClayLightBuffer::kProbeSets : object ? ClayLightBuffer::kColours : ClayLightBuffer::kPositions,
-           probe ? ClayLightBuffer::kProbeWeights : ClayLightBuffer::kPositions}};
+           instance ? ClayLightBuffer::kInstanceColours
+           : probe  ? ClayLightBuffer::kProbeSets
+           : object ? ClayLightBuffer::kColours
+                    : ClayLightBuffer::kPositions,
+           instance ? ClayLightBuffer::kBend : probe ? ClayLightBuffer::kProbeWeights : ClayLightBuffer::kPositions}};
 }
 static_assert(kClayBindings[kClayLightBufferParam0].reg == 8 && kClayBindings[kClayLightBufferParam0 + 1].reg == 9 &&
               kClayBindings[kClayLightBufferParam0 + 2].reg == 10 && kClayBindings[kClayLightBufferParam0 + 3].reg == 11 &&
@@ -1085,14 +1134,16 @@ inline std::string FormatTargetText(uint32_t width, uint32_t height) {
 
 // --- Native light (frame-map section 14, "Native light"; docs/native-renderer/lighting-formulas.md) ---
 // With fable2_native_light on, in a frame that has a light block, the draws of
-// four families are lit by the game's own ambient, baked and sun light, in
+// six families are lit by the game's own ambient, baked and sun light, in
 // linear space and without shadows (the screen mask is 1): the terrain layers,
 // the far terrain, the objects (their baked term from the colour stream of
 // vertex shader 0xECD6..., or the probe colour of 0x79EA..., 0xD4D5...,
-// 0xA1F7...) and the tree trunks (probe colours, 0x475E...), each with its
-// two- and four-light forms. Every other draw (plants, leaves, shaders
-// without a family), and every draw of a frame without a block, is the unlit
-// colour of the materials picture, counted by reason (ClayUnlit).
+// 0xA1F7...), the tree trunks (probe colours, 0x475E...) and the instanced
+// plants without and with the ambient factor (the colour of the vertex's copy
+// and the normal bent towards the copy's up axis: the seven plant vertex
+// shaders), each with its two- and four-light forms. Every other draw (leaves,
+// shaders without a family), and every draw of a frame without a block, is
+// the unlit colour of the materials picture, counted by reason (ClayUnlit).
 //
 // The functions below are the pure mirrors of the HLSL light functions
 // (shaders::kClayLightHlsl, same names and argument lists), which are the
@@ -1246,6 +1297,76 @@ inline Float3 LightObject(const Float3& A, const Float3& vcolour, const Float3& 
           LightFinite(LightFinite(A.z) * (k * amb.z + sun.z) * LightFinite(c49.z))};
 }
 
+// --- The instanced plants (plan Task 8b; lighting-formulas.md, "Instanced plants") ---
+// The game's plant vertex shaders compute, per vertex: the colour of the vertex's copy raised to
+// vertex c18.w and times c18.xyz, plus c54.xyz in the family whose pixel shader has no ambient factor
+// (0x8123... instr 17, 26 to 33: logarithms of the absolute value, the exponent, the powers, `mad r7,
+// r7, c18, c54`; export o4), and the bend of the normal towards the copy's up axis (instr 38 to 61;
+// export o3). The pixel shaders blend the interpolated normal towards the bend and call the family's
+// function. The mirrors below are split the same way.
+
+// What the instance colour's exponent is, over the frame's c21.w: vertex c18 is (pixel c21.xyz,
+// 2.2 * pixel c21.w) and vertex c54 is pixel c20 at every draw compared (bit for bit, the product as
+// a float: 1,688 main-scene plant rows of two captures, out/native-evidence/lighting/task8b/
+// vertex_copies_8b.txt; 32,880 draws of the GPU's logs, frame-map section 14, "The vertex side"), so
+// the frame's block gives the vertex side's constants: an observation of two scenes, not a rule
+// read from the game. It is the objects' power of the stream colour and the ambient exponent in one.
+inline constexpr float kInstanceColourPower = 2.2f;
+
+// The plant vertex shaders' colour (light_formulas.instance_ambient): pow(|instance_colour|,
+// tint_pow) * tint + add. Family plant: add = c54.xyz (the whole ambient, interpolator o4 of
+// 0x8123...); family plant-lit: add = 0 (the pixel shader applies the ambient factor and adds c20).
+inline Float3 InstanceAmbient(const Float3& instance_colour, const Float3& tint, float tint_pow, const Float3& add) {
+  const Float3 p = LightPow(instance_colour, tint_pow);
+  return {LightFinite(p.x * LightFinite(tint.x) + LightFinite(add.x)), LightFinite(p.y * LightFinite(tint.y) + LightFinite(add.y)),
+          LightFinite(p.z * LightFinite(tint.z) + LightFinite(add.z))};
+}
+
+// The height blend of a plant vertex: sat(z * c45.y + c45.z), z the vertex's third position
+// component in its copy's space (0x8123... instr 38, `mad_sat`). A value that is not a number gives 0.
+inline float PlantHeight(float z, float scale, float offset) { return LightSat(z * scale + offset); }
+
+// The vertex side of the bent normal (light_formulas.plant_normal, its first line and what the
+// interpolator carries): (strength * bent, strength * h) with bent = normalize(lerp(normal, up, h)),
+// h = sat(height). normal: normalize(M n), the instanced normal; up: the copy's up axis (unit, or zero
+// for a copy that has none); strength: vertex c45.x. A strength of 0 gives (0, 0, 0, 0): no bend.
+inline capture::Float4 PlantBend(const Float3& normal, const Float3& up, float height, float strength) {
+  const float h = LightSat(height);
+  const Float3 bent = LightNormalize(
+      {normal.x + (up.x - normal.x) * h, normal.y + (up.y - normal.y) * h, normal.z + (up.z - normal.z) * h});
+  const float s = LightFinite(strength);
+  return {s * bent.x, s * bent.y, s * bent.z, s * h};
+}
+
+// The pixel side: normalize(lerp(normalize(normal), bend.xyz, sat(bend.w))) (0xA7E4... instr 11 to
+// 13, 15 to 20). Zero when the result has no direction or a component that is not a number.
+inline Float3 PlantNormal(const Float3& normal, const capture::Float4& bend) {
+  const Float3 n = LightNormalize(normal);
+  const float k = LightSat(bend.w);
+  return LightNormalize({n.x + (bend.x - n.x) * k, n.y + (bend.y - n.y) * k, n.z + (bend.z - n.z) * k});
+}
+
+// Plants without an ambient factor (light_formulas.plant): A * vs_ambient + A * sun_col * n_dot_sun * sun_gate.
+inline Float3 LightPlant(const Float3& A, const Float3& vs_ambient, float n_dot_sun, const Float3& sun_col, float sun_gate) {
+  const Float3 sun = light_detail::Sun(sun_col, n_dot_sun, sun_gate);
+  return {LightFinite(LightFinite(A.x) * (LightFinite(vs_ambient.x) + sun.x)), LightFinite(LightFinite(A.y) * (LightFinite(vs_ambient.y) + sun.y)),
+          LightFinite(LightFinite(A.z) * (LightFinite(vs_ambient.z) + sun.z))};
+}
+
+// Plants with the ambient factor: the object form with the instance colour, c27.w = 1 and c49 = 1
+// (light_formulas.lit_object with those; these shaders read neither), the power and the tint applied
+// by the vertex shader: A * (vs_base * L + add) + A * sun_col * n_dot_sun * sun_gate, vs_base =
+// InstanceAmbient(colour, tint, tint_pow, 0), L from t.
+inline Float3 LightPlantLit(const Float3& A, const Float3& vs_base, const Float3& add, const Float3& floor, float t, float n_dot_sun,
+                            const Float3& sun_col, float sun_gate) {
+  const Float3 lit = AmbientFactor(floor, t);
+  const Float3 sun = light_detail::Sun(sun_col, n_dot_sun, sun_gate);
+  auto one = [](float a, float base, float l, float plus, float s) {
+    return LightFinite(LightFinite(a) * (LightFinite(base) * l + LightFinite(plus) + s));
+  };
+  return {one(A.x, vs_base.x, lit.x, add.x, sun.x), one(A.y, vs_base.y, lit.y, add.y, sun.y), one(A.z, vs_base.z, lit.z, add.z, sun.z)};
+}
+
 // What a lit draw writes into the float target for the value `v`: v itself, not clamped at 1 (the
 // lit values exceed it, and the output mapping clamps after the exposure), but nothing that is not
 // a number, nothing negative and nothing above kClayLitMax: a NaN (no comparison holds for it) and
@@ -1324,8 +1445,9 @@ inline float ClayFrameExposure(const ClayFrameConstants& frame) {
 // Their two- and four-light forms (LightInputs::multi) are drawn with the frame's sun through the
 // family's one-light function and without their lanterns: for every such pair of the table the
 // microcode, with the sun in the slot the game puts it in behind dark lanterns, is that function
-// (light_check.py --multi-sun; tests/test_light_check.py, MultiSun). The plants (kInstance) and
-// the leaves have no light yet.
+// (light_check.py --multi-sun; tests/test_light_check.py, MultiSun). Since plan Task 8b also the
+// instanced plants (kInstance), with and without the ambient factor, and their two-light forms (the
+// sun in slot 1 at every such draw captured). The leaves have no family yet.
 inline bool LightFamilyDrawn(const capture::LightInputs& l) {
   switch (l.family) {
     case capture::LightFamily::kTerrainLayer:
@@ -1333,43 +1455,71 @@ inline bool LightFamilyDrawn(const capture::LightInputs& l) {
     case capture::LightFamily::kObject:
       return l.kind == capture::LightVertexKind::kStream || l.kind == capture::LightVertexKind::kProbe;
     case capture::LightFamily::kTreeTrunk: return l.kind == capture::LightVertexKind::kProbe;
+    case capture::LightFamily::kPlant:
+    case capture::LightFamily::kPlantLit: return l.kind == capture::LightVertexKind::kInstance;
     default: return false;
   }
 }
 
 // Whether a mesh record of this vertex kind has the buffers its light reads: the normals and the
-// kind's OWN second buffer (a colour stream's colours; the probe weights and sets). A probe record
-// has no colour buffer, and the colours an instanced record has (its copies', for the plants) are
-// no stream colours: no other kind is lit as an object.
-constexpr bool LightObjectReady(capture::LightVertexKind kind, bool normals, bool colours, bool probe) {
+// kind's OWN other buffers (a colour stream's colours; the probe weights and sets; an instanced
+// plant's copies' colours AND its bend inputs). A probe record has no colour buffer, and the colours
+// an instanced record has are its copies', no stream colours: no kind is lit with another's.
+constexpr bool LightObjectReady(capture::LightVertexKind kind, bool normals, bool colours, bool probe, bool bend) {
   switch (kind) {
     case capture::LightVertexKind::kStream: return normals && colours;
     case capture::LightVertexKind::kProbe: return normals && probe;
+    case capture::LightVertexKind::kInstance: return normals && colours && bend;
     default: return false;
   }
 }
 
-// A lit object's or trunk's values for the shaders (cbuffer Object, register b1, in the draw's slot
-// of the frame's constant buffer; shaders::kClayObjectFields is its layout). 272 bytes: more than a
-// 256-byte slot, so an object's slot is kClayObjectSlotBytes (below).
+// A lit object's, trunk's or plant's values for the shaders (cbuffer Object, register b1, in the
+// draw's slot of the frame's constant buffer; shaders::kClayObjectFields is its layout). 272 bytes:
+// more than a 256-byte slot, so an object's or trunk's slot is kClayObjectSlotBytes (below). An
+// instanced plant's values all lie in the first kClayPlantConstantBytes: it has a small slot.
 struct ClayObjectConstants {
-  float rot[3][4];     // rows of M = world_rot * world_scale (xyz; w 0): the game's own (R n) * c7.w
-  float c49[3];        // pixel c49.xyz: on the whole colour
-  float c27w;          // pixel c27.w: on the ambient part
-  float c26[3];        // pixel c26.xyz: with the output scale, after the function
-  float colour_power;  // kStream: the vertex shader's literal on the stream colour (2.2); kProbe: 0, not read
-  float probe[capture::kLightProbeRegisters][4];  // kProbe: vertex c28..c39 (three sets of four); kStream: 0, not read
+  // Rows of M = world_rot * world_scale in xyz: the game's own (R n) * c7.w. The fourth components
+  // are 0 for an object or trunk. An instanced plant has no rows (its normals are in the world
+  // already; xyz 0, not read) and carries its bend constants there: vertex c45.x, c45.y, c45.z (the
+  // strength, and the scale and offset of the height blend) in rot[0][3], rot[1][3], rot[2][3].
+  float rot[3][4];
+  float c49[3];        // pixel c49.xyz: on the whole colour (kInstance: 0, not read)
+  float c27w;          // pixel c27.w: on the ambient part (kInstance: 0, not read)
+  float c26[3];        // pixel c26.xyz: with the output scale, after the function (kInstance: 0, not read)
+  // kStream: the vertex shader's literal on the stream colour (2.2); kProbe: 0, not read; kInstance:
+  // kInstanceColourPower, the factor of the frame's exponent in the instance colour's.
+  float colour_power;
+  float probe[capture::kLightProbeRegisters][4];  // kProbe: vertex c28..c39 (three sets of four); else 0, not read
 };
 static_assert(sizeof(ClayObjectConstants) == 272 && offsetof(ClayObjectConstants, probe) == 80);
+// The bytes of the block an instanced plant's shader path reads: the rows' fourth components and
+// colour_power, all before the probe registers.
+inline constexpr uint32_t kClayPlantConstantBytes = offsetof(ClayObjectConstants, probe);
+static_assert(offsetof(ClayObjectConstants, colour_power) + sizeof(float) == kClayPlantConstantBytes);
 
 // False (the draw is then not lit: light-unknown), with `out` all zero, unless the inputs are an
-// object's with a colour stream or an object's or trunk's with probe colours, the world rotation
-// gives a direction (every RotationKind but kDegenerate: the normal is the game's normalize(M n),
-// ruling of 2026-10-08) and EVERY value the kind's shader path reads is a number of usable size:
-// the rows, c27.w, c49, c26, and the stream colour's power in (0, 8] or each of the forty-eight
-// components of the probe registers. All or nothing: no block is made with one value left out.
+// object's with a colour stream, an object's or trunk's with probe colours or an instanced plant's
+// and EVERY value the kind's shader path reads is a number of usable size. An object or trunk: the
+// world rotation gives a direction (every RotationKind but kDegenerate: the normal is the game's
+// normalize(M n), ruling of 2026-10-08), the rows, c27.w, c49, c26, and the stream colour's power in
+// (0, 8] or each of the forty-eight components of the probe registers. An instanced plant (family
+// plant or plant-lit on the instance kind): the three bend constants c45.xyz; nothing else of the
+// inputs is read or carried (it has no world rotation, its shaders read no c27, c49 or c26, and
+// c45.w is no bend constant). All or nothing: no block is made with one value left out.
 inline bool MakeClayObjectConstants(const capture::LightInputs& l, ClayObjectConstants* out) {
   *out = ClayObjectConstants{};
+  if (l.kind == capture::LightVertexKind::kInstance) {
+    if (l.family != capture::LightFamily::kPlant && l.family != capture::LightFamily::kPlantLit) return false;
+    ClayObjectConstants c{};
+    for (int k = 0; k < 3; ++k) {
+      if (!LightValueUsable(l.vs_const[0][k])) return false;
+      c.rot[k][3] = l.vs_const[0][k];
+    }
+    c.colour_power = kInstanceColourPower;
+    *out = c;
+    return true;
+  }
   const bool stream = l.kind == capture::LightVertexKind::kStream, probe = l.kind == capture::LightVertexKind::kProbe;
   if (!(l.family == capture::LightFamily::kObject && (stream || probe)) &&
       !(l.family == capture::LightFamily::kTreeTrunk && probe)) {
@@ -1454,8 +1604,9 @@ inline constexpr uint32_t kClayTerrainSlotBytes = 256;  // the RHI's constant bu
 
 // The frame's constant buffer (clay_pass.cpp, FinishTerrain): `small_slots` slots of
 // kClayTerrainSlotBytes (slot 0 the frame's light, cbuffer Frame; then one per terrain record drawn
-// with its material, cbuffer Terrain), then one slot of kClayObjectSlotBytes per lit object (cbuffer
-// Object: 272 bytes with the probe registers, more than a small slot). Everything is bound by
+// with its material, cbuffer Terrain; then one per lit instanced plant, the first
+// kClayPlantConstantBytes of cbuffer Object), then one slot of kClayObjectSlotBytes per lit object
+// or trunk (cbuffer Object: 272 bytes with the probe registers, more than a small slot). Everything is bound by
 // address and offset: no view has a size, so the buffer itself must hold, from the start of EVERY
 // slot the pass binds at b1, the largest block a shader declares there. That is cbuffer Object, which
 // the vertex shader declares for every draw, a terrain draw's and an unlit draw's included (they do
@@ -1466,6 +1617,9 @@ static_assert(sizeof(ClayObjectConstants) <= kClayObjectSlotBytes && sizeof(Clay
 // The buffer's size is a multiple of this (256 small slots), so that the pool's same-size reuse
 // holds while the number of terrain draws and lit objects moves.
 inline constexpr uint64_t kClayConstantBufferStep = 256ull * kClayTerrainSlotBytes;
+// Byte offset of small slot `slot` (the frame's is 0; a terrain record's; a lit plant's).
+constexpr uint64_t ClaySmallSlotOffset(uint64_t slot) { return slot * kClayTerrainSlotBytes; }
+static_assert(kClayPlantConstantBytes <= kClayTerrainSlotBytes);
 // Byte offset of lit object `object`'s slot behind `small_slots` small ones.
 constexpr uint64_t ClayObjectSlotOffset(uint64_t small_slots, uint64_t object) {
   return small_slots * kClayTerrainSlotBytes + object * kClayObjectSlotBytes;
@@ -1937,8 +2091,9 @@ inline std::string FormatTerrainText(const ClayStats& st, const TextureStats& ts
 // colours) the geometry cache built, the world rotations of the
 // objects and trunks among them by kind, and, when there are any, the rotations
 // that are not one by vertex shader, the records without their buffers by
-// reason and vertex shader (top eight each), and the causes for which a probe
-// or instance colour buffer was refused.
+// reason and vertex shader (top eight each), the causes for which a probe or
+// instance buffer (the copies' colours, the bend inputs) was refused, and the
+// plant records that have their bend inputs with those buffers' bytes.
 inline std::string FormatLightText(const ClayStats& st) {
   constexpr size_t kTop = 8;
   std::string text = "Light inputs: ready " + std::to_string(st.light_ready) + " of " + std::to_string(st.lit) +
@@ -1973,6 +2128,12 @@ inline std::string FormatLightText(const ClayStats& st) {
     text += std::string(refused ? ", " : " | probe or instance buffer refused: ") + LightSecondName(LightSecond(i)) + " " +
             std::to_string(st.light_second[i]);
     refused = true;
+  }
+  if (st.light_bend) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), " | bend inputs: %u records, %.1f MB", st.light_bend,
+                  double(st.light_bend_bytes) / (1024.0 * 1024.0));
+    text += buf;
   }
   return text;
 }

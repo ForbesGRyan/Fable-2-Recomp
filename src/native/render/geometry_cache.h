@@ -4,8 +4,9 @@
 // float2 UVs and uint32 triangle-list indices in persistently mapped upload-heap buffers,
 // read by the vertex shader as StructuredBuffers (the RHI has 16-bit index
 // buffers only and no buffer-to-buffer copy). For the light also float3
-// normals and uint32 vertex colours (normal_decode.h), and, read by no shader
-// yet, the probe weights with their set indices and the instances' colours.
+// normals and uint32 vertex colours (normal_decode.h), the probe weights with
+// their set indices, and for the instanced plants the copies' colours and the
+// bend inputs.
 // Keyed by GeometryCacheIndex (guest range + layout + content hash) with
 // an LRU byte budget that counts every buffer.
 // GPU (command-processor) thread only.
@@ -113,7 +114,8 @@ class GeometryCache {
   // or holds fewer than `need` vertices (stream), a vertex's set index is not
   // 0, 4 or 8 (probe-set), a weight is not a number of usable size (value), or
   // the upload fails. `need` and `count` as Normals'. Reads are bounded by the
-  // streams' sizes. No shader reads it yet.
+  // streams' sizes. The clay vertex shader reads it at t10 (the sets) and t11
+  // (the weights) for a lit probe record.
   nrhi::Buffer* Probe(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light, uint32_t need,
                       ClayStats& st, LightSecond* why, uint32_t* count);
   // uint32 colours of an instanced record (LightVertexKind::kInstance), one per
@@ -125,9 +127,26 @@ class GeometryCache {
   // not an instance colour's (element), the stream is unreadable, the record
   // has fewer flat positions than `need`, or a copy the draw names has its
   // colour past the stream (stream), or the upload fails. Reads are bounded by
-  // the stream's size. No shader reads it yet.
+  // the stream's size. The clay vertex shader reads it at t10 for a lit plant.
   nrhi::Buffer* InstanceColours(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light,
                                 uint32_t need, ClayStats& st, LightSecond* why, uint32_t* count);
+  // float4 bend inputs of an instanced record (the plants' bent normal), one
+  // per flat position: the up axis of the position's copy (xyz: the third
+  // column of the copy's rows, normalised; zero for a copy without one) and
+  // the height of its mesh vertex in the copy's space (w: the decoded
+  // position's third component), as ExpandInstanceBend makes them
+  // (normal_decode.h; key InstanceBendKey: the mesh's position stream and
+  // layout, and the instance set as the flat normals have it; content hash of
+  // the mesh stream and the instance stream). The draw's bend constants c45
+  // are not in it. nullptr, with the cause in `why`, when a stream is
+  // unreadable or the record has fewer flat positions than `need` (stream), a
+  // vertex the draw names has a height that is not a number (value: all or
+  // nothing), or the upload fails. `need` and `count` as Normals'; `bytes`
+  // receives the buffer's allocation (for the log's bend line). Reads are
+  // bounded by the streams' sizes. The clay vertex shader reads it at t11 for
+  // a lit plant.
+  nrhi::Buffer* InstanceBend(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t need, ClayStats& st,
+                             LightSecond* why, uint32_t* count, uint64_t* bytes);
 
   void BeginFrame(uint64_t frame, uint64_t budget_bytes);
   // DestroyDeferred all (dev may be nullptr: forget the buffers without
@@ -204,6 +223,7 @@ class GeometryCache {
   std::vector<Float3> mesh_normals_;  // an instanced record's mesh normals (one copy's vertices)
   std::vector<uint32_t> colours_;     // a record's colours (a colour stream's, an instance set's) being built
   std::vector<uint8_t> probe_;        // a mesh's probe buffer being built (BuildProbe)
+  std::vector<capture::Float4> bend_; // an instanced record's bend inputs being built (ExpandInstanceBend)
   std::vector<uint32_t> indices_;
   std::vector<uint32_t> evicted_;
 };

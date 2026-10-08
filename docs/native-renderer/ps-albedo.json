@@ -75,7 +75,7 @@
         "0x8123C16DBF583F92",
         "0xFC4F2EF6930768BE"
       ],
-      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals plant (docs/native-renderer/lighting-formulas.md, \"Instanced plants\") with vertex shader 8123C16DBF583F92 400 of 400 trials (largest relative difference 9.53e-16), FC4F2EF6930768BE 400 of 400 trials (largest relative difference 1.48e-15)."
+      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals plant (docs/native-renderer/lighting-formulas.md, \"Instanced plants\") with vertex shader 8123C16DBF583F92 400 of 400 trials (largest relative difference 9.53e-16), FC4F2EF6930768BE 400 of 400 trials (largest relative difference 1.48e-15). Run again for plan Task 8b before the family was lit (light_check.py --family plant --trials 400, out/native-evidence/lighting/task8b/light_check_plants.txt): the same two results."
     }
   },
   "0x165EDCD2CB963868": {
@@ -115,7 +115,7 @@
         "0x36B543CECAE5C781",
         "0x33C00226C154C1F2"
       ],
-      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals lit_object (docs/native-renderer/lighting-formulas.md, \"Instanced plants\") with vertex shader B636821F95DC9D8E 400 of 400 trials (largest relative difference 7.73e-16), 6AD4108C3FF07966 400 of 400 trials (largest relative difference 7.73e-16), 36B543CECAE5C781 400 of 400 trials (largest relative difference 1.81e-15), 33C00226C154C1F2 400 of 400 trials (largest relative difference 1.81e-15)."
+      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals lit_object (docs/native-renderer/lighting-formulas.md, \"Instanced plants\") with vertex shader B636821F95DC9D8E 400 of 400 trials (largest relative difference 7.73e-16), 6AD4108C3FF07966 400 of 400 trials (largest relative difference 7.73e-16), 36B543CECAE5C781 400 of 400 trials (largest relative difference 1.81e-15), 33C00226C154C1F2 400 of 400 trials (largest relative difference 1.81e-15). Run again for plan Task 8b before the family was lit (light_check.py --family plant-lit --trials 400, out/native-evidence/lighting/task8b/light_check_plants.txt): the same four results."
     }
   },
   "0x00E09D1BC5295D52": {
@@ -233,7 +233,7 @@
         "0x8123C16DBF583F92",
         "0xFC4F2EF6930768BE"
       ],
-      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals plant (docs/native-renderer/lighting-formulas.md, \"Instanced plants\") with vertex shader 8123C16DBF583F92 400 of 400 trials (largest relative difference 5.56e-16), FC4F2EF6930768BE 400 of 400 trials (largest relative difference 1.03e-15). The two- and four-light form: light 0 through sun_gate_multi with the other lights' colours zero; it is the one-light form only with c80.w = 0, c94.x = 0 and c112.x = 1 (\"The sun\")."
+      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals plant (docs/native-renderer/lighting-formulas.md, \"Instanced plants\") with vertex shader 8123C16DBF583F92 400 of 400 trials (largest relative difference 5.56e-16), FC4F2EF6930768BE 400 of 400 trials (largest relative difference 1.03e-15). The two- and four-light form: light 0 through sun_gate_multi with the other lights' colours zero; it is the one-light form only with c80.w = 0, c94.x = 0 and c112.x = 1 (\"The sun\"). Run again for plan Task 8b (light_check.py --family plant-multi --trials 400, out/native-evidence/lighting/task8b/light_check_plants.txt): the same two results; and with the sun in slot 1 behind a dark lantern, as the game draws these two-light shaders (the sun's slot in every plant -multi row of three captures: out/native-evidence/lighting/task8b/plant_rows_check.txt), each pair is the one-light function in 400 of 400 trials (light_check.py --multi-sun, out/native-evidence/lighting/task8b/light_check_multi_sun.txt)."
     }
   },
   "0x401A01FD4E5F8757": {
@@ -352,9 +352,10 @@
       "vertex": [
         "0xB636821F95DC9D8E",
         "0x6AD4108C3FF07966",
-        "0x33C00226C154C1F2"
+        "0x33C00226C154C1F2",
+        "0x36B543CECAE5C781"
       ],
-      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals lit_object (docs/native-renderer/lighting-formulas.md, \"Instanced plants\") with vertex shader B636821F95DC9D8E 400 of 400 trials (largest relative difference 7.02e-16), 6AD4108C3FF07966 400 of 400 trials (largest relative difference 6.96e-16), 33C00226C154C1F2 400 of 400 trials (largest relative difference 1.08e-15). The two- and four-light form: light 0 through sun_gate_multi with the other lights' colours zero; it is the one-light form only with c80.w = 0, c94.x = 0 and c112.x = 1 (\"The sun\")."
+      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals lit_object (docs/native-renderer/lighting-formulas.md, \"Instanced plants\") with vertex shader B636821F95DC9D8E 400 of 400 trials (largest relative difference 7.02e-16), 6AD4108C3FF07966 400 of 400 trials (largest relative difference 6.96e-16), 33C00226C154C1F2 400 of 400 trials (largest relative difference 1.08e-15). The two- and four-light form: light 0 through sun_gate_multi with the other lights' colours zero; it is the one-light form only with c80.w = 0, c94.x = 0 and c112.x = 1 (\"The sun\"). Run again for plan Task 8b (light_check.py --family plant-lit-multi --trials 400, out/native-evidence/lighting/task8b/light_check_plants.txt): the same three results, and with vertex shader 36B543CECAE5C781 (a pair the runs of plan Task 8a draw once a frame at the third spot; entered with this run) 400 of 400 trials (largest relative difference 1.08e-15); and with the sun in slot 1 behind a dark lantern, as the game draws these two-light shaders (the sun's slot in every plant -multi row of three captures: out/native-evidence/lighting/task8b/plant_rows_check.txt), each pair is the one-light function in 400 of 400 trials (light_check.py --multi-sun, out/native-evidence/lighting/task8b/light_check_multi_sun.txt)."
     }
   },
   "0x789266C3E42D7E59": {
@@ -423,7 +424,7 @@
       "vertex": [
         "0x48D30ECCF684F488"
       ],
-      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals plant (docs/native-renderer/lighting-formulas.md, \"Instanced plants\") with vertex shader 48D30ECCF684F488 400 of 400 trials (largest relative difference 1.48e-15)."
+      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals plant (docs/native-renderer/lighting-formulas.md, \"Instanced plants\") with vertex shader 48D30ECCF684F488 400 of 400 trials (largest relative difference 1.48e-15). Run again for plan Task 8b before the family was lit (light_check.py --family plant --trials 400, out/native-evidence/lighting/task8b/light_check_plants.txt): the same result."
     }
   },
   "0x2FD24989AB04A475": {

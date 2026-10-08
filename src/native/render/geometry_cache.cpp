@@ -773,6 +773,66 @@ nrhi::Buffer* GeometryCache::InstanceColours(nrhi::Device* dev, const capture::D
   return buffer;
 }
 
+// Instanced plants: bend[i] = (the up axis of copy(i), the height of vertex(i) in its copy) for
+// every flat index i (ExpandInstanceBend). Like the flat positions, of the mesh's position stream
+// and the instance stream (the content hash covers both; the key holds the mesh's layout and the
+// instance set without its offset). The mesh is the one the flat positions were expanded from this
+// frame, so its decoded vertices come from the frame's memo.
+nrhi::Buffer* GeometryCache::InstanceBend(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t need, ClayStats& st,
+                                          LightSecond* why, uint32_t* out_count, uint64_t* out_bytes) {
+  const capture::InstanceSet& s = r.instances;
+  *out_count = 0;
+  *out_bytes = 0;
+  *why = LightSecond::kStream;
+  const uint32_t mesh_count = s.active ? InstanceMeshCount(PositionCount(r.vb.size, r.pos), s) : 0;
+  // The capture caps flat_count (InstanceRangeSkip); nothing larger is built.
+  if (mesh_count == 0 || s.rows_size == 0 || need == 0 || s.flat_count < need || s.flat_count > capture::kMaxDrawCount) {
+    return nullptr;
+  }
+  const auto t0 = Clock::now();
+  const uint8_t* mesh = capture::ReadPhysical(r.vb.phys_addr, r.vb.size);
+  const uint8_t* rows = mesh ? capture::ReadPhysical(s.rows_addr, s.rows_size) : nullptr;
+  if (!rows) {
+    st.hash_ms += Ms(t0, Clock::now());
+    return nullptr;
+  }
+  const uint64_t mesh_hash = FrameHash(r.vb.phys_addr, r.vb.size, mesh);
+  const uint64_t hash = mesh_hash ^ (FrameHash(s.rows_addr, s.rows_size, rows) * kSecondStreamMix);
+  const GeoKey key = InstanceBendKey(r);
+  const LookupResult found = index_.Lookup(key, hash);
+  const auto t1 = Clock::now();
+  st.hash_ms += Ms(t0, t1);
+  if (found.hit) {
+    if (auto it = entries_.find(found.id); it != entries_.end() && it->second.count >= need) {
+      ++st.hits;
+      *out_count = it->second.count;
+      *out_bytes = it->second.bytes;
+      *why = LightSecond::kNone;
+      return it->second.buffer;
+    }
+  }
+  bend_.resize(s.flat_count);
+  nrhi::Buffer* buffer = nullptr;
+  uint64_t alloc = 0;
+  // All or nothing: a height that is not a number in a vertex the draw names, and it has no buffer.
+  const capture::Float4* decoded = MeshPositions(r, mesh, mesh_hash, mesh_count);
+  if (decoded) {
+    *why = ExpandInstanceBend(decoded, mesh_count, rows, s.rows_size, s, s.flat_count, bend_.data());
+    if (*why == LightSecond::kNone) {
+      buffer = Upload(dev, bend_.data(), uint64_t(s.flat_count) * sizeof(capture::Float4), &alloc);
+      if (!buffer) *why = LightSecond::kUpload;
+    }
+  }
+  if (buffer) {
+    Insert(dev, key, hash, {buffer, s.flat_count, 0, alloc}, alloc);
+    ++st.uploads;
+    *out_count = s.flat_count;
+    *out_bytes = alloc;
+  }
+  st.decode_ms += Ms(t1, Clock::now());
+  return buffer;
+}
+
 nrhi::Buffer* GeometryCache::Indices(nrhi::Device* dev, const capture::DrawRecord& r,
                                      const capture::TerrainPatch* terrain, uint32_t vertex_count,
                                      uint32_t* index_count, ClayStats& st, uint32_t* out_max_index) {

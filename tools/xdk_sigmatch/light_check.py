@@ -714,7 +714,8 @@ def _plant_vertex(vs, text, rng):
     return regs, normal, up, height, colour, c
 
 
-def _plant_driver(ps, vs, dumps, multi, lit):
+def _plant_driver(ps, vs, dumps, multi, lit, sun_slot=None):
+    """`sun_slot`: as _terrain_layer_driver's."""
     vs_text = ue.load(dumps, vs, "vert")
 
     def make_case(rng):
@@ -728,8 +729,12 @@ def _plant_driver(ps, vs, dumps, multi, lit):
         c[23] = [rng.uniform(-1, 1) for _ in range(3)] + [rng.uniform(0.0, 4.0)]
         c[50] = [rng.uniform(0.01, 0.1), rng.uniform(0.01, 0.1), 0.0, 0.0]
         c.update({k: list(v) for k, v in PS_LITERALS[ps].items()})
+        sun = 80
         if multi:
             _extra_lights(rng, c)
+            if sun_slot is not None:
+                _sun_in_slot(rng, c, sun_slot)
+                sun = 80 + sun_slot
         mask = rng.random()
         texel = [rng.uniform(0.05, 1.0) for _ in range(4)]
 
@@ -741,20 +746,20 @@ def _plant_driver(ps, vs, dumps, multi, lit):
             return _flat_or_tex(slot, coords, attrs, mask)
 
         albedo = [x * x / (texel[3] * texel[3]) for x in texel[:3]]
-        if multi:
+        if multi and sun_slot is None:
             n_dot_sun, cone = _light0(c, n_lit, regs[2][:3])
             gate = lf.sun_gate_multi(c[112][0], mask=mask, **cone)
         else:
-            n_dot_sun = lf.sat(lf.dot(n_lit, c[80][:3]))
+            n_dot_sun = lf.sat(lf.dot(n_lit, c[sun][:3]))
             gate = lf.sun_gate_single(mask=mask)
         if lit:
             # These shaders read neither c27 nor c49: the object formula with both at 1.
             args = dict(A=albedo, vcolour=colour, tint=vc[18][:3], tint_pow=vc[18][3], add=c[20][:3], floor=c[22][:3],
                         t=lf.ambient_t(lf.ambient_axis(normal, vc[19][:3]), n_lit), n_dot_sun=n_dot_sun,
-                        sun_col=c[87][:3], c27w=1.0, sun_gate=gate, c49=[1.0, 1.0, 1.0])
+                        sun_col=c[sun + 7][:3], c27w=1.0, sun_gate=gate, c49=[1.0, 1.0, 1.0])
         else:
             args = dict(A=albedo, vs_ambient=lf.instance_ambient(colour, vc[18][:3], vc[18][3], vc[54][:3]),
-                        n_dot_sun=n_dot_sun, sun_col=c[87][:3], sun_gate=gate)
+                        n_dot_sun=n_dot_sun, sun_col=c[sun + 7][:3], sun_gate=gate)
         return Case(c, regs, sampler, args, [c[20][3]] * 3)
 
     return ue.load(dumps, ps, "frag"), make_case
@@ -766,8 +771,9 @@ FAMILIES.update({
     "plant-multi": [("E99F4ACC7A3C78B4", "8123C16DBF583F92"), ("E99F4ACC7A3C78B4", "FC4F2EF6930768BE")],
     "plant-lit": [("165EDCD2CB963868", "B636821F95DC9D8E"), ("165EDCD2CB963868", "6AD4108C3FF07966"),
                   ("165EDCD2CB963868", "36B543CECAE5C781"), ("165EDCD2CB963868", "33C00226C154C1F2")],
+    # (F525... with 36B5...: drawn at the third spot of plan Task 8a's runs, one draw a frame; run for plan Task 8b)
     "plant-lit-multi": [("F525E023E08AC9BB", "B636821F95DC9D8E"), ("F525E023E08AC9BB", "6AD4108C3FF07966"),
-                        ("F525E023E08AC9BB", "33C00226C154C1F2")],
+                        ("F525E023E08AC9BB", "33C00226C154C1F2"), ("F525E023E08AC9BB", "36B543CECAE5C781")],
 })
 
 
@@ -876,13 +882,17 @@ def check_pair(family, ps, vs, trials=200, seed=1, formula=None, dumps=DUMPS, to
 # the game's draws of a shader with that many lights: slot 1 behind one lantern at every draw of a
 # two-light shader, slot 2 behind two lanterns at every draw of a four-light shader (all 1,520 and 944
 # main-scene -multi rows of the two captures of plan Task 6's final runs, read from their "pfull":
-# out/native-evidence/lighting/task7/multi_slots_bridge_trees.txt). The plants' pairs are plan Task 8's.
-MULTI_SUN_FAMILIES = ("terrain-layer-multi", "object-multi", "tree-trunk-multi")
+# out/native-evidence/lighting/task7/multi_slots_bridge_trees.txt). The plants' pairs (two lights each; plan
+# Task 8b): slot 1 in all 200, 360 and 136 plant -multi rows of the three captures of plan Task 8a's runs
+# (out/native-evidence/lighting/task8b/plant_rows_check.txt).
+MULTI_SUN_FAMILIES = ("terrain-layer-multi", "object-multi", "tree-trunk-multi", "plant-multi", "plant-lit-multi")
 GAME_SUN_SLOT = {2: 1, 4: 2}
 _SUN_DRIVERS = {
     "terrain-layer-multi": _terrain_layer_driver,
     "object-multi": _object_driver,
     "tree-trunk-multi": _object_driver,
+    "plant-multi": lambda ps, vs, dumps, multi, sun_slot: _plant_driver(ps, vs, dumps, multi, lit=False, sun_slot=sun_slot),
+    "plant-lit-multi": lambda ps, vs, dumps, multi, sun_slot: _plant_driver(ps, vs, dumps, multi, lit=True, sun_slot=sun_slot),
 }
 
 
@@ -924,8 +934,8 @@ def print_multi_sun(trials, seed, dumps):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--multi-sun", action="store_true",
-                    help="the two- and four-light pairs of the terrain, object and trunk families with the sun in "
-                         "slot 1 to 3 and dark lanterns, against their family's one-light function")
+                    help="the two- and four-light pairs of the terrain, object, trunk and plant families with the sun "
+                         "in slot 1 to 3 and dark lanterns, against their family's one-light function")
     ap.add_argument("--all", action="store_true", help="every pair of FAMILIES")
     ap.add_argument("--family", choices=sorted(FAMILIES))
     ap.add_argument("--shader", help="with --family: only this pixel shader (16 hex digits)")

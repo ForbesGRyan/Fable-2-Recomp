@@ -15,9 +15,10 @@
 //   - an instanced draw: after the instance's rows as they are, one normal per
 //     flat position (instance_expand.h), which is what the game's shaders
 //     compute.
-// And the second per-vertex input of the two vertex kinds without a colour
-// stream (at the end): the probe weights with the set index of each vertex,
-// and an instance's colour per flat position.
+// And the other per-vertex inputs of the two vertex kinds without a colour
+// stream (at the end): the probe weights with the set index of each vertex;
+// an instance's colour per flat position, and the two inputs of the plants'
+// bent normal (the copy's up axis, the vertex's height).
 // A vertex whose normal has no direction (a zero or not finite element, a
 // vertex that gets no position, a matrix that flattens it) holds (0, 0, 0):
 // no direction is made up, and whoever lights with the buffer treats a zero
@@ -743,6 +744,62 @@ inline bool ExpandInstanceColours(const uint8_t* rows, size_t rows_size, const c
     out[i] = packed;
   }
   return true;
+}
+
+// Instanced plants: the two inputs of the bent normal that a flat position has
+// beside its normal (lighting-formulas.md, "Instanced plants", plant_normal),
+// out[i] = (U.x, U.y, U.z, z):
+//   U: the up axis of flat index i's copy, the third COLUMN of the 3 x 3 of the
+//      copy's rows (the z components of the three rows, the matrix
+//      ExpandInstances puts the position through), normalised: 0x8123C16DBF583F92
+//      instr 40 to 42, 45, 46 (the three squares and their sum), 48 (the
+//      reciprocal root), 49, 51 (the three products);
+//   z: the third component of the mesh vertex's position, in the copy's space
+//      (the mesh stream's own), as it is: instr 38, `mad_sat r1.w, r0.x, c45.y,
+//      c45.z`, makes the height blend of it with the draw's constants, which is
+//      why the buffer holds z and not the blend.
+// All seven plant vertex shaders compute the bend from these two and the
+// instanced normal in one form (machine-checked with rows that are no
+// rotation: out/native-evidence/lighting/task8b/plant_bend_check.py). Index for
+// index the order of ExpandInstances. All four zero where that has no position
+// (an index the constants do not map, a vertex past the mesh positions, a copy
+// past the stream). U is (0, 0, 0) for a copy whose third column has no
+// direction (zeros, a value that is not a number): none is made up. kNone, or,
+// with nothing usable in `out`: kStream without a mesh, rows, `out` or a flat
+// position; kValue for a z that is not a number in a vertex the draw names (no
+// value is made up for it and none that is not a number reaches a buffer; a z
+// of any finite size is kept, the shader saturates the blend).
+inline LightSecond ExpandInstanceBend(const capture::Float4* mesh, uint32_t mesh_count, const uint8_t* rows, size_t rows_size,
+                                      const capture::InstanceSet& s, uint32_t flat_count, capture::Float4* out) {
+  if (!mesh || !rows || !out || flat_count == 0) return LightSecond::kStream;
+  std::vector<Float3> up;      // the up axis per copy, made on first use
+  std::vector<uint8_t> state;  // 0 unknown, 1 made, 2 past the stream
+  for (uint32_t i = 0; i < flat_count; ++i) {
+    uint32_t copy = 0, vertex = 0;
+    out[i] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (!capture::InstanceIndex(s, i, &copy, &vertex) || vertex >= mesh_count) continue;
+    if (copy >= state.size()) {
+      state.resize(size_t(copy) + 1, 0);
+      up.resize(size_t(copy) + 1);
+    }
+    if (state[copy] == 0) {
+      capture::Float4 r[3];
+      bool ok = true;
+      for (int k = 0; k < 3 && ok; ++k) ok = capture::DecodePositions(rows, rows_size, s.rows[k], copy, 1, &r[k]);
+      if (ok) {
+        const double column[3] = {r[0].z, r[1].z, r[2].z};
+        float u[3];
+        detail::Normalize(column, u);  // (zero without a direction)
+        up[copy] = {u[0], u[1], u[2]};
+      }
+      state[copy] = ok ? 1 : 2;
+    }
+    if (state[copy] != 1) continue;
+    const float z = mesh[vertex].z;
+    if (!std::isfinite(z)) return LightSecond::kValue;
+    out[i] = {up[copy].x, up[copy].y, up[copy].z, z};
+  }
+  return LightSecond::kNone;
 }
 
 }  // namespace fable2::native::render

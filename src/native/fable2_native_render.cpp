@@ -44,7 +44,7 @@ REXCVAR_DEFINE_INT32(fable2_native_texture_budget_mb, 512, "Fable2",
                      "GPU memory budget (MB) for native albedo textures; least recently used "
                      "textures are evicted above it.");
 REXCVAR_DEFINE_STRING(fable2_native_light, "on", "Fable2",
-                      "Native clay pass light: on = terrain, objects and tree trunks are lit by the "
+                      "Native clay pass light: on = terrain, objects, tree trunks and plants are lit by the "
                       "game's ambient, baked and sun light (no shadows; exposure not calibrated); "
                       "off = the unlit materials picture.");
 REXCVAR_DEFINE_BOOL(fable2_native_d3d_messages, false, "Fable2",

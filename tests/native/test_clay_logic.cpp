@@ -2590,8 +2590,9 @@ int main() {
     other.kind = LightVertexKind::kNone;
     CHECK(458, !MakeClayObjectConstants(other, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0);
     // The families the pass lights: the terrain layers, the far terrain, the objects with a colour
-    // stream or with probe colours and the trunks (probe colours), each with its two- and four-light
-    // form; nothing else (plants and leaves have no light yet).
+    // stream or with probe colours, the trunks (probe colours) and, since plan Task 8b, the instanced
+    // plants with and without the ambient factor, each with its two- and four-light form; nothing
+    // else (the leaves have no family yet), and no family on another vertex kind than its own.
     auto drawn = [](LightFamily f, LightVertexKind k, bool multi) {
       capture::LightInputs l;
       l.family = f;
@@ -2606,8 +2607,11 @@ int main() {
                    drawn(LightFamily::kObject, LightVertexKind::kStream, true));
     CHECK(459, drawn(LightFamily::kObject, LightVertexKind::kProbe, false) && drawn(LightFamily::kObject, LightVertexKind::kProbe, true) &&
                    drawn(LightFamily::kTreeTrunk, LightVertexKind::kProbe, false) && drawn(LightFamily::kTreeTrunk, LightVertexKind::kProbe, true));
+    CHECK(459, drawn(LightFamily::kPlant, LightVertexKind::kInstance, false) && drawn(LightFamily::kPlant, LightVertexKind::kInstance, true) &&
+                   drawn(LightFamily::kPlantLit, LightVertexKind::kInstance, false) && drawn(LightFamily::kPlantLit, LightVertexKind::kInstance, true));
     CHECK(459, !drawn(LightFamily::kTreeTrunk, LightVertexKind::kStream, false) &&
-                   !drawn(LightFamily::kPlant, LightVertexKind::kInstance, false) && !drawn(LightFamily::kPlantLit, LightVertexKind::kInstance, false) &&
+                   !drawn(LightFamily::kPlant, LightVertexKind::kStream, false) && !drawn(LightFamily::kPlantLit, LightVertexKind::kProbe, false) &&
+                   !drawn(LightFamily::kPlantLit, LightVertexKind::kTerrain, false) && !drawn(LightFamily::kTreeTrunk, LightVertexKind::kInstance, false) &&
                    !drawn(LightFamily::kPlant, LightVertexKind::kProbe, false) && !drawn(LightFamily::kObject, LightVertexKind::kInstance, false) &&
                    !drawn(LightFamily::kNone, LightVertexKind::kNone, false) && !drawn(LightFamily::kTerrainLayer, LightVertexKind::kStream, false) &&
                    !drawn(LightFamily::kTerrainLayer, LightVertexKind::kProbe, false) && !drawn(LightFamily::kObject, LightVertexKind::kTerrain, false));
@@ -2690,13 +2694,27 @@ int main() {
     CHECK(466, dc.light_mode == 1 && dc.light_count == 100);
     dc = MakeClayConstants(r, 100, 0, uv, true, 1, ClayAlpha{}, 0, 500);
     CHECK(466, dc.light_mode == 0 && dc.light_count == 0);
-    CHECK(467, kLightModeTerrainNormals == 1u && kLightModeObject == 2u && kLightModeLit == 4u && kLightModeProbe == 8u);
-    // A lit object's mode by its vertex kind: the colour stream's is what it was (6); a probe object's
-    // adds the probe bit; no other kind has one.
-    CHECK(467, LitObjectMode(LightVertexKind::kStream) == 6u && LitObjectMode(LightVertexKind::kProbe) == 14u &&
-                   LitObjectMode(LightVertexKind::kInstance) == 0u && LitObjectMode(LightVertexKind::kTerrain) == 0u &&
-                   LitObjectMode(LightVertexKind::kNone) == 0u);
-    dc = MakeClayConstants(r, 100, 0, uv, true, 1, ClayAlpha{}, LitObjectMode(LightVertexKind::kProbe), 60);
+    CHECK(467, kLightModeTerrainNormals == 1u && kLightModeObject == 2u && kLightModeLit == 4u && kLightModeProbe == 8u &&
+                   kLightModeInstance == 16u && kLightModePlantLit == 32u && kLightModeCount == 64u);
+    // A lit mesh record's mode by its vertex kind and family: the colour stream's is what it was (6); a
+    // probe object's or trunk's adds the probe bit (14); an instanced plant's adds the instance bit
+    // (22) and, for the family whose pixel shader has the ambient factor, the plant-lit bit (54). No
+    // other pair of a kind and a family has one.
+    CHECK(467, LitObjectMode(LightVertexKind::kStream, LightFamily::kObject) == 6u &&
+                   LitObjectMode(LightVertexKind::kProbe, LightFamily::kObject) == 14u &&
+                   LitObjectMode(LightVertexKind::kProbe, LightFamily::kTreeTrunk) == 14u &&
+                   LitObjectMode(LightVertexKind::kInstance, LightFamily::kPlant) == 22u &&
+                   LitObjectMode(LightVertexKind::kInstance, LightFamily::kPlantLit) == 54u);
+    CHECK(467, LitObjectMode(LightVertexKind::kInstance, LightFamily::kObject) == 0u &&
+                   LitObjectMode(LightVertexKind::kInstance, LightFamily::kTreeTrunk) == 0u &&
+                   LitObjectMode(LightVertexKind::kStream, LightFamily::kTreeTrunk) == 0u &&
+                   LitObjectMode(LightVertexKind::kStream, LightFamily::kPlant) == 0u &&
+                   LitObjectMode(LightVertexKind::kProbe, LightFamily::kPlantLit) == 0u &&
+                   LitObjectMode(LightVertexKind::kTerrain, LightFamily::kTerrainLayer) == 0u &&
+                   LitObjectMode(LightVertexKind::kTerrain, LightFamily::kObject) == 0u &&
+                   LitObjectMode(LightVertexKind::kNone, LightFamily::kNone) == 0u &&
+                   LitObjectMode(LightVertexKind::kInstance, LightFamily::kNone) == 0u);
+    dc = MakeClayConstants(r, 100, 0, uv, true, 1, ClayAlpha{}, LitObjectMode(LightVertexKind::kProbe, LightFamily::kObject), 60);
     CHECK(467, dc.light_mode == 14 && dc.light_count == 60);
     // The draw's largest vertex plus one (the capture's rule for the streams), not the stream's size:
     // a mesh of 28 vertices in a position stream of 528 needs 28 normals and colours.
@@ -2848,9 +2866,42 @@ int main() {
     CHECK(487, is(kLightModeObject, B::kPositions, B::kNormals, B::kColours, B::kPositions));
     // A lit object with probe colours: its normals at t9, the set indices of its probe buffer at t10
     // (never a colour buffer: an instanced record's colours are no stream colours), its weights at t11.
-    CHECK(489, is(LitObjectMode(capture::LightVertexKind::kProbe), B::kPositions, B::kNormals, B::kProbeSets, B::kProbeWeights));
+    CHECK(489, is(LitObjectMode(capture::LightVertexKind::kProbe, capture::LightFamily::kTreeTrunk), B::kPositions, B::kNormals,
+                  B::kProbeSets, B::kProbeWeights));
     CHECK(489, is(kLightModeObject | kLightModeProbe, B::kPositions, B::kNormals, B::kProbeSets, B::kProbeWeights));
-    CHECK(489, is(LitObjectMode(capture::LightVertexKind::kStream), B::kPositions, B::kNormals, B::kColours, B::kPositions));
+    CHECK(489, is(LitObjectMode(capture::LightVertexKind::kStream, capture::LightFamily::kObject), B::kPositions, B::kNormals,
+                  B::kColours, B::kPositions));
+    // A lit instanced plant (plan Task 8b), with or without the ambient factor: its flat normals at
+    // t9, its copies' colours at t10 (the instance set's buffer, never a colour stream's or a probe
+    // buffer's region) and its bend inputs at t11.
+    CHECK(489, is(LitObjectMode(capture::LightVertexKind::kInstance, capture::LightFamily::kPlant), B::kPositions, B::kNormals,
+                  B::kInstanceColours, B::kBend));
+    CHECK(489, is(LitObjectMode(capture::LightVertexKind::kInstance, capture::LightFamily::kPlantLit), B::kPositions, B::kNormals,
+                  B::kInstanceColours, B::kBend));
+    CHECK(489, is(kLightModeObject | kLightModeInstance, B::kPositions, B::kNormals, B::kInstanceColours, B::kBend));
+    // The instance bit and the plant-lit bit name no buffer without the object bit ...
+    CHECK(489, is(kLightModeInstance, B::kPositions, B::kPositions, B::kPositions, B::kPositions) &&
+                   is(kLightModeInstance | kLightModePlantLit | kLightModeLit, B::kPositions, B::kPositions, B::kPositions, B::kPositions) &&
+                   is(kLightModeObject | kLightModePlantLit | kLightModeLit, B::kPositions, B::kNormals, B::kColours, B::kPositions) &&
+                   is(kLightModeTerrainNormals | kLightModeInstance, B::kTerrainNormals, B::kPositions, B::kPositions, B::kPositions));
+    // ... and with the probe bit beside it (a mode the pass never makes) the instance bit decides, as
+    // in the vertex shader, whose instance branch comes first.
+    CHECK(489, is(kLightModeObject | kLightModeInstance | kLightModeProbe, B::kPositions, B::kNormals, B::kInstanceColours, B::kBend));
+    // Every mode: t9 is the normals exactly with the object bit, t8 the terrain normals exactly with
+    // the terrain bit, and t10 / t11 are a pair of one kind.
+    for (uint32_t mode = 0; mode < kLightModeCount; ++mode) {
+      const ClayLightBuffers s = LightBufferSources(mode);
+      const bool object = (mode & kLightModeObject) != 0;
+      bool ok = (s.source[0] == B::kTerrainNormals) == ((mode & kLightModeTerrainNormals) != 0) && (s.source[1] == B::kNormals) == object;
+      ok = ok && (s.source[0] == B::kTerrainNormals || s.source[0] == B::kPositions) && (s.source[1] == B::kNormals || s.source[1] == B::kPositions);
+      if (!object) ok = ok && s.source[2] == B::kPositions && s.source[3] == B::kPositions;
+      if (object && (mode & kLightModeInstance)) ok = ok && s.source[2] == B::kInstanceColours && s.source[3] == B::kBend;
+      if (object && !(mode & kLightModeInstance)) {
+        ok = ok && ((mode & kLightModeProbe) ? s.source[2] == B::kProbeSets && s.source[3] == B::kProbeWeights
+                                             : s.source[2] == B::kColours && s.source[3] == B::kPositions);
+      }
+      CHECK(489, ok);
+    }
     // The four registers are the layout's last four parameters, vertex stage, buffers; the layout has
     // twelve parameters (the backend's limit) and 56 of the root signature's 64 words.
     for (uint32_t i = 0; i < kClayLightBufferCount; ++i) {
@@ -2868,7 +2919,10 @@ int main() {
                    LightBufferOffset(B::kProbeSets, 16) == 256 && LightBufferOffset(B::kProbeSets, 17) == 512 &&
                    LightBufferOffset(B::kProbeWeights, 1000) == 0 && LightBufferOffset(B::kColours, 1000) == 0 &&
                    LightBufferOffset(B::kNormals, 1000) == 0 && LightBufferOffset(B::kTerrainNormals, 1000) == 0 &&
-                   LightBufferOffset(B::kPositions, 1000) == 0);
+                   LightBufferOffset(B::kPositions, 1000) == 0 && LightBufferOffset(B::kInstanceColours, 1000) == 0 &&
+                   LightBufferOffset(B::kBend, 1000) == 0);
+    // The plants' two elements keep to the stand-in's size as well: one uint and one float4 a flat position.
+    CHECK(488, kInstanceColourElementBytes == 4 && kBendElementBytes == 16 && kBendElementBytes <= kClayLightElementBytesMax);
     for (uint32_t count : {1u, 16u, 17u, 1000u, 65536u}) {
       // (a multiple of the RHI's offset alignment, behind the weights, the sets inside the buffer)
       CHECK(488, LightBufferOffset(B::kProbeSets, count) % 256 == 0 && LightBufferOffset(B::kProbeSets, count) >= uint64_t(count) * 16 &&
@@ -3021,15 +3075,21 @@ int main() {
       CHECK(497, !MakeClayObjectConstants(b, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0 && !LightFamilyDrawn(b));
     }
 
-    // 498: which records the pass lights, by vertex kind: the normals and the kind's OWN second buffer.
-    // A probe record has no colour buffer and a stream record no probe buffer; an instanced record's
-    // colours (it has them, for a later task) light nothing.
-    CHECK(498, LightObjectReady(LightVertexKind::kStream, true, true, false) && LightObjectReady(LightVertexKind::kProbe, true, false, true));
-    CHECK(498, !LightObjectReady(LightVertexKind::kStream, true, false, true) && !LightObjectReady(LightVertexKind::kProbe, true, true, false) &&
-                   !LightObjectReady(LightVertexKind::kStream, false, true, true) && !LightObjectReady(LightVertexKind::kProbe, false, true, true) &&
-                   !LightObjectReady(LightVertexKind::kStream, true, false, false) && !LightObjectReady(LightVertexKind::kProbe, true, false, false));
-    CHECK(498, !LightObjectReady(LightVertexKind::kInstance, true, true, true) && !LightObjectReady(LightVertexKind::kTerrain, true, true, true) &&
-                   !LightObjectReady(LightVertexKind::kNone, true, true, true));
+    // 498: which records the pass lights, by vertex kind: the normals and the kind's OWN other buffers
+    // (the arguments: normals, colours, probe, bend). A probe record has no colour buffer and a stream
+    // record no probe buffer; an instanced record needs its copies' colours AND its bend inputs
+    // (plan Task 8b), and neither of them lights a record of another kind.
+    CHECK(498, LightObjectReady(LightVertexKind::kStream, true, true, false, false) &&
+                   LightObjectReady(LightVertexKind::kProbe, true, false, true, false));
+    CHECK(498, !LightObjectReady(LightVertexKind::kStream, true, false, true, true) && !LightObjectReady(LightVertexKind::kProbe, true, true, false, true) &&
+                   !LightObjectReady(LightVertexKind::kStream, false, true, true, true) && !LightObjectReady(LightVertexKind::kProbe, false, true, true, true) &&
+                   !LightObjectReady(LightVertexKind::kStream, true, false, false, false) &&
+                   !LightObjectReady(LightVertexKind::kProbe, true, false, false, false));
+    CHECK(498, LightObjectReady(LightVertexKind::kInstance, true, true, false, true) && LightObjectReady(LightVertexKind::kInstance, true, true, true, true));
+    CHECK(498, !LightObjectReady(LightVertexKind::kInstance, true, true, true, false) && !LightObjectReady(LightVertexKind::kInstance, true, false, true, true) &&
+                   !LightObjectReady(LightVertexKind::kInstance, false, true, true, true) &&
+                   !LightObjectReady(LightVertexKind::kInstance, true, false, false, false));
+    CHECK(498, !LightObjectReady(LightVertexKind::kTerrain, true, true, true, true) && !LightObjectReady(LightVertexKind::kNone, true, true, true, true));
 
     // 499: the frame's constant buffer. Slot 0 (the frame's light) and one slot per terrain record are
     // 256 bytes; a lit object's slot is 512 (cbuffer Object is 272 bytes with the probe registers) and
@@ -3064,13 +3124,347 @@ int main() {
                    ClayConstantBufferBytes(1, 127) == 65536 && ClayConstantBufferBytes(1, 128) == 131072 &&
                    ClayConstantBufferBytes(565, 170) == 262144);
   }
+  // 500-519: the instanced plants (plan Task 8b; lighting-formulas.md, "Instanced plants").
+  {
+    using capture::LightFamily;
+    using capture::LightVertexKind;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    auto close_to = [](float got, double want) { return std::fabs(double(got) - want) <= 2e-6 * std::max(1.0, std::fabs(want)); };
+    auto close3 = [&](const Float3& got, double x, double y, double z) { return close_to(got.x, x) && close_to(got.y, y) && close_to(got.z, z); };
+    auto finite3 = [](const Float3& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+    // The frame values, the bend constants, the up axis and the pins of tests/test_light_check.py,
+    // PinnedForTheRenderer (plant, plant_lit, PLANT_PINS), composed as the clay shaders compose: the
+    // vertex side makes the height blend, the bend and the colour, the pixel side the bent normal and
+    // the family's function with the mask at 1.
+    const Float3 tint{1.125f, 1.375f, 1.875f}, add{0.0068f, 0.071f, 0.092f}, floor{0.0588f, 0.0902f, 0.0f};
+    const Float3 sun_col{0.99f, 0.83f, 0.40f}, sun_dir{-0.6334f, 0.0346f, 0.7731f}, axis{-0.6332f, 0.0344f, 0.7732f};
+    const Float3 A{0.5f, 0.4f, 0.3f}, up{0.28f, 0.0f, 0.96f}, n{0.6f, 0.0f, 0.8f}, zero{0.0f, 0.0f, 0.0f};
+    const float c45[4] = {1.0f, -2.0f, 1.5f, 0.0f};
+    // The exponent of the instance colour: the vertex copy c18.w = 2.2 * pixel c21.w.
+    CHECK(500, kInstanceColourPower == 2.2f);
+    const float plant_pow = kInstanceColourPower * 1.3f;
+    struct Plant {
+      float h;
+      Float3 normal, amb, colour;
+    };
+    auto plant = [&](const Float3& normal, float z, int r, int g, int b, const float c[4], const Float3& u) {
+      Plant out;
+      out.h = PlantHeight(z, c[1], c[2]);
+      out.normal = PlantNormal(normal, PlantBend(normal, u, out.h, c[0]));
+      out.amb = InstanceAmbient({float(r) / 255.0f, float(g) / 255.0f, float(b) / 255.0f}, tint, plant_pow, add);
+      out.colour = LightPlant(A, out.amb, LightDot(out.normal, sun_dir), sun_col, SunGateSingle(1.0f, 1.0f));
+      return out;
+    };
+    struct PlantLit {
+      float t, nds;
+      Float3 colour;
+    };
+    auto plant_lit = [&](const Float3& normal, float z, int r, int g, int b, const float c[4], const Float3& u) {
+      PlantLit out;
+      const Float3 bent = PlantNormal(normal, PlantBend(normal, u, PlantHeight(z, c[1], c[2]), c[0]));
+      // The vertex side exports the colour without the added light; the pixel side applies L and adds it.
+      const Float3 base = InstanceAmbient({float(r) / 255.0f, float(g) / 255.0f, float(b) / 255.0f}, tint, plant_pow, zero);
+      out.t = AmbientT(AmbientAxis(normal, axis), bent);
+      out.nds = LightDot(bent, sun_dir);
+      out.colour = LightPlantLit(A, base, add, floor, out.t, out.nds, sun_col, SunGateSingle(1.0f, 1.0f));
+      return out;
+    };
+    // 500-502: family plant. Half way up, at the foot (the up axis itself), at the top (the vertex
+    // normal), and with half the strength.
+    Plant p = plant(n, 0.5f, 200, 128, 64, c45, up);
+    CHECK(500, p.h == 0.5f && close3(p.normal, 0.5257311121191336, 0.0, 0.8506508083520399) &&
+                   close3(p.amb, 0.5683564165336911, 0.2625218355265196, 0.12797253813103704) &&
+                   close3(p.colour, 0.44487503475959345, 0.2127892319794812, 0.07734856786179545));
+    p = plant(n, 0.25f, 200, 128, 64, c45, up);
+    CHECK(501, p.h == 1.0f && close3(p.normal, 0.28, 0.0, 0.96) &&
+                   close3(p.colour, 0.5637660882668456, 0.29253030221060783, 0.10617064143931111));
+    p = plant(n, 0.75f, 200, 128, 64, c45, up);
+    CHECK(501, p.h == 0.0f && close3(p.normal, 0.6, 0.0, 0.8) &&
+                   close3(p.colour, 0.40220600826684555, 0.18417081421060788, 0.06700456143931112));
+    {
+      const float weak[4] = {0.5f, -2.0f, 1.5f, 0.0f};
+      p = plant(n, 0.5f, 200, 128, 64, weak, up);
+      CHECK(502, p.h == 0.5f && close3(p.normal, 0.5793187229742429, 0.0, 0.8151011085819305) &&
+                     close3(p.colour, 0.414469231283684, 0.19239584459765913, 0.06997746398884772));
+      // The two stages by themselves, exactly (binary fractions): the bend is (strength * bent,
+      // strength * h), and the pixel side blends by sat of its fourth component.
+      const capture::Float4 bend = PlantBend({0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, 0.5f, 0.5f);
+      CHECK(502, bend.x == 0.0f && bend.y == 0.5f && bend.z == 0.0f && bend.w == 0.25f);
+      const capture::Float4 over = PlantBend({0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, 7.0f, 4.0f);  // (h saturates before the strength)
+      CHECK(502, over.y == 4.0f && over.w == 4.0f);
+      const Float3 full = PlantNormal({1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 2.0f, 3.0f});  // sat(3) = 1: the bend's direction
+      CHECK(502, full.x == 0.0f && full.y == 0.0f && full.z == 1.0f);
+      const Float3 scaled = PlantNormal({5.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f});
+      CHECK(502, scaled.x == 1.0f && scaled.y == 0.0f && scaled.z == 0.0f);
+      // The interpolated normal is normalised BEFORE the blend, as the game's pixel shaders do it
+      // (0xA7E4... instr 12, 13, 15, then 16, 17): (2, 0, 0) is (1, 0, 0), half way to (0, 2, 0) is
+      // (0.5, 1, 0); blended as it came it would be (1, 1, 0).
+      const Float3 first = PlantNormal({2.0f, 0.0f, 0.0f}, {0.0f, 2.0f, 0.0f, 0.5f});
+      CHECK(502, close3(first, 0.4472135954999579, 0.8944271909999159, 0.0));
+      CHECK(502, PlantHeight(0.5f, -2.0f, 1.5f) == 0.5f && PlantHeight(0.25f, -2.0f, 1.5f) == 1.0f && PlantHeight(0.0f, -2.0f, 1.5f) == 1.0f &&
+                     PlantHeight(0.75f, -2.0f, 1.5f) == 0.0f && PlantHeight(9.0f, -2.0f, 1.5f) == 0.0f && PlantHeight(9.0f, 0.0f, 0.0f) == 0.0f);
+    }
+    // 503: family plant-lit: the object form with the instance colour, c27.w = 1 and c49 = 1, t from the
+    // vertex side's axis (of the UNBENT normal) and the bent normal.
+    PlantLit q = plant_lit(n, 0.5f, 200, 128, 64, c45, up);
+    CHECK(503, close_to(q.t, 0.7248367390246099) && close_to(q.nds, 0.32464005352070285) &&
+                   close3(q.colour, 0.3194501361635652, 0.17970944830063978, 0.07222667160009423));
+    q = plant_lit(n, 0.25f, 200, 128, 64, c45, up);
+    CHECK(503, close_to(q.t, 0.8820928926290964) && close_to(q.nds, 0.564824) &&
+                   close3(q.colour, 0.5051217140439017, 0.27706333165698416, 0.10377581868510069));
+    q = plant_lit(n, 0.75f, 200, 128, 64, c45, up);
+    CHECK(503, close_to(q.t, 0.660085140197664) && close_to(q.nds, 0.23844000000000004) &&
+                   close3(q.colour, 0.25308259704234354, 0.14484074306862768, 0.06091490419395856));
+    // 504: c45.x == 0: the set does not bend, whatever the height says; a negative strength neither.
+    {
+      const float unbent[4] = {0.0f, -2.0f, 1.5f, 0.0f}, none[4] = {0.0f, 0.0f, 0.0f, 0.0f}, back[4] = {-1.0f, -2.0f, 1.5f, 0.0f};
+      p = plant(n, 0.25f, 200, 128, 64, unbent, up);
+      CHECK(504, p.h == 1.0f && close3(p.normal, 0.6, 0.0, 0.8) &&
+                     close3(p.colour, 0.40220600826684555, 0.18417081421060788, 0.06700456143931112));
+      const capture::Float4 bend = PlantBend(n, up, 1.0f, 0.0f);
+      CHECK(504, bend.x == 0.0f && bend.y == 0.0f && bend.z == 0.0f && bend.w == 0.0f);
+      q = plant_lit(n, 0.25f, 200, 128, 64, none, up);
+      CHECK(504, close_to(q.t, 0.660085140197664) && close_to(q.nds, 0.23844000000000004) &&
+                     close3(q.colour, 0.25308259704234354, 0.14484074306862768, 0.06091490419395856));
+      p = plant(n, 0.25f, 200, 128, 64, back, up);
+      CHECK(504, close3(p.normal, 0.6, 0.0, 0.8));
+    }
+    // 505: an instance colour of 0: the power of a zero base is 0; the added light and the sun remain.
+    p = plant(n, 0.5f, 0, 0, 0, c45, up);
+    CHECK(505, p.amb.x == 0.0068f && p.amb.y == 0.071f && p.amb.z == 0.092f &&
+                   close3(p.colour, 0.1640968264927479, 0.13618049776887337, 0.06655680642248434));
+    q = plant_lit(n, 0.5f, 0, 0, 0, c45, up);
+    CHECK(505, close3(q.colour, 0.1640968264927479, 0.13618049776887337, 0.06655680642248434));
+    {
+      const Float3 black = InstanceAmbient(zero, tint, plant_pow, zero);
+      CHECK(505, black.x == 0.0f && black.y == 0.0f && black.z == 0.0f);
+    }
+    // 506: a zero normal (a vertex without a direction). Bent, it is the up axis where h > 0; where
+    // nothing bends it it stays no direction: no sun (plant), t = 0 and the ambient at its floor (plant-lit).
+    p = plant(zero, 0.5f, 200, 128, 64, c45, up);
+    CHECK(506, close3(p.normal, 0.28, 0.0, 0.96) && close3(p.colour, 0.5637660882668456, 0.29253030221060783, 0.10617064143931111));
+    p = plant(zero, 0.75f, 200, 128, 64, c45, up);
+    CHECK(506, p.normal.x == 0.0f && p.normal.y == 0.0f && p.normal.z == 0.0f &&
+                   close3(p.colour, 0.28417820826684553, 0.10500873421060784, 0.03839176143931111));
+    q = plant_lit(zero, 0.75f, 200, 128, 64, c45, up);
+    CHECK(506, q.t == 0.0f && q.nds == 0.0f && close3(q.colour, 0.019909758646090518, 0.03531010782579682, 0.0276));
+    // 507: a copy without an up axis (the buffer holds zero for it): the vertex normal's direction.
+    p = plant(n, 0.5f, 200, 128, 64, c45, zero);
+    CHECK(507, close3(p.normal, 0.6, 0.0, 0.8) && close3(p.colour, 0.40220600826684555, 0.18417081421060788, 0.06700456143931112));
+    // 508: zeros and values that are not numbers give numbers, from every function (review focus 2).
+    {
+      const Float3 bad{nan, inf, -inf};
+      CHECK(508, PlantHeight(nan, 1.0f, 0.5f) == 0.0f && PlantHeight(inf, 0.0f, 0.5f) == 0.0f && PlantHeight(inf, 1.0f, 0.5f) == 1.0f &&
+                     PlantHeight(-inf, 1.0f, 0.5f) == 0.0f && PlantHeight(1.0f, nan, 0.0f) == 0.0f && PlantHeight(1.0f, 1.0f, nan) == 0.0f);
+      for (const capture::Float4& b : {PlantBend(bad, bad, nan, inf), PlantBend(zero, zero, nan, nan), PlantBend(n, bad, 0.5f, 1.0f),
+                                       PlantBend(bad, up, 0.5f, 1.0f), PlantBend(n, up, inf, -inf)}) {
+        CHECK(508, std::isfinite(b.x) && std::isfinite(b.y) && std::isfinite(b.z) && std::isfinite(b.w));
+      }
+      CHECK(508, finite3(PlantNormal(bad, {nan, inf, -inf, nan})) && finite3(PlantNormal(n, {nan, 0.0f, 0.0f, 0.5f})) &&
+                     finite3(PlantNormal(zero, {0.0f, 0.0f, 0.0f, inf})) && finite3(PlantNormal(n, {inf, inf, inf, inf})));
+      CHECK(508, finite3(InstanceAmbient(bad, bad, nan, bad)) && finite3(InstanceAmbient({0.5f, 0.5f, 0.5f}, bad, inf, bad)) &&
+                     finite3(InstanceAmbient({1.0e30f, 0.5f, 0.0f}, {1.0e30f, 1.0f, 1.0f}, 8.0f, {1.0e38f, 1.0e38f, 1.0e38f})));
+      // (a product that leaves single precision, in each channel: a number, not infinity)
+      CHECK(508, finite3(InstanceAmbient({1.0e30f, 1.0e30f, 1.0e30f}, {1.0e30f, 1.0e30f, 1.0e30f}, 1.0f, zero)) &&
+                     finite3(InstanceAmbient({1.0f, 1.0f, 1.0f}, {3.0e38f, 3.0e38f, 3.0e38f}, 1.0f, {3.0e38f, 3.0e38f, 3.0e38f})));
+      CHECK(508, finite3(LightPlant(bad, bad, nan, bad, nan)) && finite3(LightPlant({1.0e30f, 1.0e30f, 1.0e30f}, {1.0e30f, 1.0e30f, 1.0e30f},
+                                                                                 1.0f, {1.0e30f, 1.0e30f, 1.0e30f}, 1.0e30f)) &&
+                     finite3(LightPlantLit(bad, bad, bad, bad, nan, inf, bad, nan)) &&
+                     finite3(LightPlantLit({1.0e30f, 1.0e30f, 1.0e30f}, {1.0e30f, 1.0e30f, 1.0e30f}, {1.0e30f, 1.0e30f, 1.0e30f}, zero, 1.0f,
+                                           1.0f, {1.0e30f, 1.0e30f, 1.0e30f}, 1.0e30f)));
+      // By hand (binary fractions): A * (amb + sun_col * sat(n_dot_sun) * gate); A * (base * L + add + sun).
+      const Float3 by_hand = LightPlant({0.5f, 0.5f, 0.5f}, {0.25f, 0.5f, 1.0f}, 0.5f, {2.0f, 2.0f, 2.0f}, 0.5f);
+      CHECK(508, by_hand.x == 0.375f && by_hand.y == 0.5f && by_hand.z == 0.75f);
+      // floor 0.25, t 0.5: L = 0.25 + 0.75 * 0.25 = 0.4375; 0.5 * (2 * 0.4375 + 0.125 + 3 * 0.5 * 0.5) = 0.875
+      const Float3 lit_by_hand = LightPlantLit({0.5f, 0.5f, 0.5f}, {2.0f, 2.0f, 2.0f}, {0.125f, 0.125f, 0.125f}, {0.25f, 0.25f, 0.25f},
+                                               0.5f, 0.5f, {3.0f, 3.0f, 3.0f}, 0.5f);
+      CHECK(508, lit_by_hand.x == 0.875f && lit_by_hand.y == 0.875f && lit_by_hand.z == 0.875f);
+      // A sun behind the leaf lights nothing; the ambient stays.
+      const Float3 behind = LightPlant({0.5f, 0.5f, 0.5f}, {0.25f, 0.5f, 1.0f}, -0.5f, {2.0f, 2.0f, 2.0f}, 1.0f);
+      CHECK(508, behind.x == 0.125f && behind.y == 0.25f && behind.z == 0.5f);
+    }
+
+    // 509-512: a lit plant's constants. The bend constants c45.xyz ride in the fourth components of
+    // the three rows of cbuffer Object, which an instanced record does not use otherwise (its normals
+    // are in the world already), with the exponent's factor in colour_power: everything the plant's
+    // shader path reads lies in the block's first 80 bytes, so a plant has a small slot.
+    capture::LightInputs pl;
+    pl.family = LightFamily::kPlant;
+    pl.kind = LightVertexKind::kInstance;
+    pl.vs_const[0][0] = 1.0f; pl.vs_const[0][1] = -200.0f; pl.vs_const[0][2] = 100.0f; pl.vs_const[0][3] = 7.0f;
+    ClayObjectConstants oc;
+    const ClayObjectConstants empty{};
+    static_assert(sizeof(ClayObjectConstants) == 272 && kClayPlantConstantBytes == 80 && kClayPlantConstantBytes <= kClayTerrainSlotBytes &&
+                  offsetof(ClayObjectConstants, colour_power) + 4 == kClayPlantConstantBytes &&
+                  offsetof(ClayObjectConstants, probe) == kClayPlantConstantBytes);
+    CHECK(509, MakeClayObjectConstants(pl, &oc) && oc.rot[0][3] == 1.0f && oc.rot[1][3] == -200.0f && oc.rot[2][3] == 100.0f &&
+                   oc.colour_power == kInstanceColourPower);
+    {
+      // Nothing else: no rotation, none of an object's pixel constants, and above all no probe
+      // register (the inputs hold c45 where a probe record holds c28).
+      ClayObjectConstants want{};
+      want.rot[0][3] = 1.0f; want.rot[1][3] = -200.0f; want.rot[2][3] = 100.0f;
+      want.colour_power = kInstanceColourPower;
+      CHECK(509, std::memcmp(&oc, &want, sizeof(oc)) == 0);
+      capture::LightInputs lit = pl;
+      lit.family = LightFamily::kPlantLit;
+      lit.multi = true;
+      ClayObjectConstants got;
+      CHECK(509, MakeClayObjectConstants(lit, &got) && std::memcmp(&got, &want, sizeof(got)) == 0);
+    }
+    // What an instanced record does not read does not refuse it and is not carried: its world rotation
+    // (none: a degenerate one here), an object's pixel constants, the stream colour's power, c45.w.
+    {
+      capture::LightInputs b = pl;
+      std::memset(b.world_rot, 0, sizeof(b.world_rot));
+      b.world_scale = nan;
+      b.c27w = inf;
+      b.c49[1] = nan;
+      b.c26[2] = -inf;
+      b.colour_power = nan;
+      b.vs_const[0][3] = inf;
+      b.vs_const[5][1] = nan;
+      ClayObjectConstants got;
+      CHECK(510, MakeClayObjectConstants(b, &got) && std::memcmp(&got, &oc, sizeof(got)) == 0);
+    }
+    // Refused as a whole on one bend constant that is not a number of usable size.
+    for (int k = 0; k < 3; ++k) {
+      for (float value : {nan, inf, -inf, 2.0f * kLightValueMax, -2.0f * kLightValueMax}) {
+        capture::LightInputs b = pl;
+        b.vs_const[0][k] = value;
+        oc.c27w = 5.0f;
+        CHECK(511, !MakeClayObjectConstants(b, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0);
+      }
+    }
+    {
+      capture::LightInputs edge = pl;
+      edge.vs_const[0][1] = -kLightValueMax;
+      edge.vs_const[0][2] = kLightValueMax;
+      CHECK(511, MakeClayObjectConstants(edge, &oc) && oc.rot[1][3] == -kLightValueMax && oc.rot[2][3] == kLightValueMax);
+    }
+    // The plant families stand on the instance kind only, and the instance kind carries them only.
+    for (LightVertexKind kind : {LightVertexKind::kNone, LightVertexKind::kTerrain, LightVertexKind::kStream, LightVertexKind::kProbe}) {
+      capture::LightInputs b = pl;
+      b.kind = kind;
+      CHECK(512, !MakeClayObjectConstants(b, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0 && !LightFamilyDrawn(b));
+      b.family = LightFamily::kPlantLit;
+      CHECK(512, !MakeClayObjectConstants(b, &oc) && !LightFamilyDrawn(b));
+    }
+    for (LightFamily family : {LightFamily::kNone, LightFamily::kTerrainLayer, LightFamily::kTerrainFar, LightFamily::kObject,
+                               LightFamily::kTreeTrunk}) {
+      capture::LightInputs b = pl;
+      b.family = family;
+      CHECK(512, !MakeClayObjectConstants(b, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0 && !LightFamilyDrawn(b));
+    }
+    // An object's block keeps the fourth components of its rows zero, as before.
+    {
+      capture::LightInputs obj;
+      obj.family = LightFamily::kObject;
+      obj.kind = LightVertexKind::kStream;
+      obj.colour_power = 2.2f;
+      obj.vs_const[0][0] = 1.0f; obj.vs_const[0][1] = -200.0f; obj.vs_const[0][2] = 100.0f;
+      CHECK(512, MakeClayObjectConstants(obj, &oc) && oc.rot[0][3] == 0.0f && oc.rot[1][3] == 0.0f && oc.rot[2][3] == 0.0f);
+    }
+
+    // 513: the plants' slots. A lit plant record takes a small slot (256 bytes) among the frame's and
+    // the terrain's, before the objects' 512-byte slots: the bridge's frame of plan Task 8a's runs
+    // (565 small slots, 174 objects) with its 135 plant records, the third spot's and the trees'.
+    CHECK(513, ClaySmallSlotOffset(0) == 0 && ClaySmallSlotOffset(1) == 256 && ClaySmallSlotOffset(700) == 179200 &&
+                   ClaySmallSlotOffset(700) == ClayObjectSlotOffset(700, 0));
+    CHECK(513, ClayConstantBufferBytes(565 + 135, 174) == 327680 && ClayConstantBufferBytes(557 + 152, 210) == 327680 &&
+                   ClayConstantBufferBytes(447 + 74, 276) == 327680 && ClayConstantBufferBytes(565, 174) == 262144);
+
+    // 514-516: the key of an instanced record's bend inputs (kind 14): the mesh's position stream with
+    // its layout, and the instance set as the flat normals have it (not the offset).
+    capture::DrawRecord i = BaseRecord();
+    i.instances.active = true;
+    i.instances.rows_addr = 0x5000;
+    i.instances.rows_size = 280;
+    i.instances.inv_count = 0.25f;
+    i.instances.count = 4.0f;
+    i.instances.bias = 0.5f;
+    i.instances.flat_count = 40;
+    capture::LightInputs il;
+    il.family = LightFamily::kPlant;
+    il.kind = LightVertexKind::kInstance;
+    il.normal.vb = {i.vb.phys_addr, i.vb.size};
+    il.normal.offset_bytes = 8;
+    il.normal.stride_bytes = 24;
+    il.normal.format = uint8_t(capture::kVertexFormat_16_16_16_16_FLOAT);
+    il.second.vb = {0x5000, 280};
+    il.second.offset_bytes = 24;
+    il.second.stride_bytes = 28;
+    il.second.format = uint8_t(capture::kVertexFormat_8_8_8_8);
+    const GeoKey bk = InstanceBendKey(i);
+    CHECK(514, bk.kind == 14 && bk.addr == i.vb.phys_addr && bk.size == i.vb.size && bk.stride == i.pos.stride_bytes &&
+                   !(bk == PositionKey(i, nullptr)) && !(bk == MeshPositionKey(i)) && !(bk == NormalKey(i, il)) &&
+                   !(bk == InstanceColourKey(i, il)) && !(bk == UvKey(i)));
+    {
+      capture::DrawRecord i2 = i;
+      i2.instances.offset[2] = -9.0f;  // (moves positions only)
+      CHECK(514, InstanceBendKey(i2) == bk && !(PositionKey(i2, nullptr) == PositionKey(i, nullptr)));
+    }
+    for (int field = 0; field < 8; ++field) {
+      capture::DrawRecord i2 = i;
+      switch (field) {
+        case 0: i2.instances.rows_addr = 0x6000; break;
+        case 1: i2.instances.rows_size = 308; break;
+        case 2: i2.instances.rows[1].offset_bytes = 8; break;
+        case 3: i2.instances.inv_count = 0.2f; break;
+        case 4: i2.instances.count = 5.0f; break;
+        case 5: i2.instances.first = 2.0f; break;
+        case 6: i2.instances.bias = 0.25f; break;
+        default: i2.instances.flat_count = 44; break;
+      }
+      // (the same fields as the flat normals' key: an entry of each per instance set)
+      CHECK(515, !(InstanceBendKey(i2) == bk) && !(NormalKey(i2, il) == NormalKey(i, il)));
+    }
+    for (int field = 0; field < 7; ++field) {
+      capture::DrawRecord i2 = i;
+      switch (field) {
+        case 0: i2.vb.phys_addr += 0x100; break;
+        case 1: i2.vb.size += 24; break;
+        case 2: i2.pos.stride_bytes += 4; break;
+        case 3: i2.pos.offset_bytes += 4; break;
+        case 4: i2.pos.swizzle ^= 0x9; break;  // (which stored component is the position's z)
+        case 5: i2.pos.swap16 = !i2.pos.swap16; break;
+        default: i2.pos.format = i2.pos.format == capture::PosFormat::kHalf4 ? capture::PosFormat::kFloat3 : capture::PosFormat::kHalf4; break;
+      }
+      CHECK(515, !(InstanceBendKey(i2) == bk));
+    }
+    {
+      // Nothing of the light's constants, of the material or of the draw's transform: the bend
+      // constants c45 are the draw's and in no buffer.
+      capture::DrawRecord q = i;
+      q.rows[2] = 4.0f;
+      q.vs_hash = 0x1111;
+      q.material.ps_hash = 0x2222;
+      q.cut[3] = 5.0f;
+      CHECK(516, InstanceBendKey(q) == bk);
+    }
+
+    // 517: the light line names the bend inputs of the frame's plant records when there are any.
+    ClayStats st;
+    st.lit = 873;
+    st.light_ready = 873;
+    st.light_rotation[size_t(RotationKind::kRotation)] = 174;
+    CHECK(517, FormatLightText(st) == "Light inputs: ready 873 of 873 lit records | world rotation: rotation 174, mirrored 0, "
+                                      "skewed 0, degenerate 0");
+    st.light_bend = 135;
+    st.light_bend_bytes = 4300800;
+    CHECK(517, FormatLightText(st) == "Light inputs: ready 873 of 873 lit records | world rotation: rotation 174, mirrored 0, "
+                                      "skewed 0, degenerate 0 | bend inputs: 135 records, 4.1 MB");
+    st.light_second[size_t(LightSecond::kValue)] = 2;
+    CHECK(517, FormatLightText(st).ends_with("| probe or instance buffer refused: value 2 | bend inputs: 135 records, 4.1 MB"));
+  }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
                "alpha-to-mask, terrain keys, terrain draw state, terrain constants, terrain squares, "
                "terrain text, normal and colour keys, light text, linear target and output mapping, light functions "
                "against the reference's numbers, frame and object and terrain light constants, lit squares, Light line, light buffer sources, "
-               "probe colours and constants, constant buffer slots\n";
+               "probe colours and constants, constant buffer slots, plant light functions and constants and bend key\n";
 
   return 0;
 }

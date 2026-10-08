@@ -27,7 +27,10 @@ static_assert(kConstantCount == 36);
 // Ensure creates the layout. Root signature cost: 56 of 64 words (the reason
 // the light's per-draw values are in a constant buffer slot and not in the
 // root constants); twelve parameters, the backend's limit. kParamTerrainConstants
-// is register b1: cbuffer Terrain of a terrain draw, cbuffer Object of a lit object.
+// is register b1: cbuffer Terrain of a terrain draw, cbuffer Object of a lit
+// object, trunk or plant. kParamColours (t10) and kParamProbeWeights (t11)
+// are by the draw's kind: a stream colour, a probe set or the colour of a
+// plant's copy; the probe weights or a plant's bend inputs.
 constexpr uint32_t kParamConstants = 0, kParamPositions = 1, kParamIndices = 2, kParamUvs = 3,
                    kParamAlbedo = 4, kParamTerrainTextures = 5, kParamTerrainConstants = 6,
                    kParamFrameConstants = 7, kParamTerrainNormals = 8, kParamNormals = 9, kParamColours = 10,
@@ -433,9 +436,9 @@ void ClayPass::PrepareLight(nrhi::Device* dev, const capture::DrawRecord& r, con
     p.light_count = std::min(normal_count, colour_count);
   } else if (p.normals && (light.kind == capture::LightVertexKind::kProbe || light.kind == capture::LightVertexKind::kInstance)) {
     // The other two vertex kinds: the baked term is made of the probe weights (with the draw's
-    // probe constants) or is the copy's colour. A probe record is lit below like one with a colour
-    // stream; an instanced record's colours are built and resident only (no shader reads them yet:
-    // the plants are not lit, and light_mode stays 0 for them).
+    // probe constants) or is the copy's colour. An instanced plant also needs the inputs of its
+    // bent normal (the copy's up axis and the vertex's height): its colours AND its bend inputs, or
+    // neither and no light.
     LightSecond refused = LightSecond::kNone;
     uint32_t second_count = 0;
     if (light.kind == capture::LightVertexKind::kProbe) {
@@ -443,6 +446,18 @@ void ClayPass::PrepareLight(nrhi::Device* dev, const capture::DrawRecord& r, con
       p.probe_count = second_count;
     } else {
       p.colours = geometry_.InstanceColours(dev, r, light, need, st, &refused, &second_count);
+      if (p.colours) {
+        uint32_t bend_count = 0;
+        uint64_t bend_bytes = 0;
+        p.bend = geometry_.InstanceBend(dev, r, need, st, &refused, &bend_count, &bend_bytes);
+        if (p.bend) {
+          ++st.light_bend;
+          st.light_bend_bytes += bend_bytes;
+          second_count = std::min(second_count, bend_count);
+        } else {
+          p.colours = nullptr;
+        }
+      }
     }
     if (!p.probe && !p.colours) {
       p.normals = nullptr;
@@ -466,18 +481,20 @@ void ClayPass::PrepareLight(nrhi::Device* dev, const capture::DrawRecord& r, con
     ++st.light_rotation[size_t(kind)];
     if (kind != RotationKind::kRotation) st.light_rotation_by_vs.Add(r.vs_hash, uint8_t(kind));
   }
-  // The light itself: in a lit frame, for a family the pass lights, with the second buffer of the
-  // record's OWN vertex kind (LightObjectReady: a colour stream's colours, the probe buffer; never
-  // an instance set's colours), when every value of the draw's is usable (a rotation without a
-  // direction is not: counted above, drawn unlit; one probe register that is not a number of
-  // usable size: the whole block is refused).
+  // The light itself: in a lit frame, for a family the pass lights, with the buffers of the
+  // record's OWN vertex kind (LightObjectReady: a colour stream's colours; the probe buffer; an
+  // instance set's colours and bend inputs), when every value of the draw's is usable (a rotation
+  // without a direction is not: counted above, drawn unlit; one probe register or bend constant
+  // that is not a number of usable size: the whole block is refused). An instanced plant's values
+  // fit a small slot (kClayPlantConstantBytes); an object's or trunk's take a large one.
   ClayObjectConstants constants;
   if (frame_.light_on && LightFamilyDrawn(light) &&
-      LightObjectReady(light.kind, p.normals != nullptr, p.colours != nullptr, p.probe != nullptr) &&
+      LightObjectReady(light.kind, p.normals != nullptr, p.colours != nullptr, p.probe != nullptr, p.bend != nullptr) &&
       MakeClayObjectConstants(light, &constants)) {
     p.lit = true;
-    p.slot = uint32_t(object_constants_.size());
-    object_constants_.push_back(constants);
+    std::vector<ClayObjectConstants>& list = light.kind == capture::LightVertexKind::kInstance ? plant_constants_ : object_constants_;
+    p.slot = uint32_t(list.size());
+    list.push_back(constants);
   }
 }
 
@@ -588,11 +605,12 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
   // draws nothing (Render, ClayRecordsWithoutConstants).
   const bool wanted = !prepared_.empty();
   if (wanted) {
-    // Slot 0 the frame's light and one slot per terrain record (at most that many are drawn with
-    // the material), 256 bytes each; then one slot of 512 bytes per lit object. Sized so that the
-    // largest block a shader declares at b1 lies inside the buffer from the start of every slot
-    // (ClayConstantBufferBytes).
-    const uint64_t bytes = ClayConstantBufferBytes(1 + uint64_t(terrain_items_.size()), object_constants_.size());
+    // Slot 0 the frame's light, one slot per terrain record (at most that many are drawn with the
+    // material) and one per lit plant, 256 bytes each; then one slot of 512 bytes per lit object or
+    // trunk. Sized so that the largest block a shader declares at b1 lies inside the buffer from
+    // the start of every slot (ClayConstantBufferBytes).
+    const uint64_t bytes = ClayConstantBufferBytes(1 + uint64_t(terrain_items_.size()) + plant_constants_.size(),
+                                                   object_constants_.size());
     if (auto reused = terrain_pool_.Take(bytes, dev->CompletedSubmission())) {
       terrain_cb_ = *reused;
     } else {
@@ -710,12 +728,19 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
     }
   }
   st.terrain_tuples = uint32_t(terrain_sets_.size());
-  // The lit objects' slots (kClayObjectSlotBytes each) follow the small slots that are in use:
-  // slot 0, the frame's light, and the terrain's. (`slot` is at most 1 + terrain_items_.size(),
-  // the count the buffer was sized with.)
+  // The lit plants' small slots follow the terrain's, and the lit objects' and trunks' slots
+  // (kClayObjectSlotBytes each) follow the small slots that are in use: slot 0, the frame's light,
+  // the terrain's and the plants'. (`slot` is then at most 1 + terrain_items_.size() +
+  // plant_constants_.size(), the count the buffer was sized with.)
+  plant_slot0_ = slot;
+  slot += uint32_t(plant_constants_.size());
   object_slot0_ = slot;
   if (slots) {
     std::memcpy(slots, &frame_, sizeof(frame_));
+    for (size_t i = 0; i < plant_constants_.size(); ++i) {
+      // (what a plant's shader path reads: the block's first bytes)
+      std::memcpy(slots + ClaySmallSlotOffset(plant_slot0_ + i), &plant_constants_[i], kClayPlantConstantBytes);
+    }
     for (size_t i = 0; i < object_constants_.size(); ++i) {
       std::memcpy(slots + ClayObjectSlotOffset(object_slot0_, i), &object_constants_[i], sizeof(ClayObjectConstants));
     }
@@ -735,7 +760,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   if (!textured) light = ClayLight::kOff;
   frame_ = MakeClayFrameConstants(scene.light, light);
   object_constants_.clear();
-  object_slot0_ = 0;
+  plant_constants_.clear();
+  object_slot0_ = plant_slot0_ = 0;
 
   // Geometry, albedo and render state of every drawable record. Texture
   // uploads record copies and barriers, so this runs before the render targets
@@ -893,9 +919,10 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       if (p.terrain) {
         light_mode |= kLightModeLit;
       } else {
-        // An object or trunk: by its vertex kind, the stream colour or the probe colour.
-        light_mode |= LitObjectMode(p.light->kind);
-        light_count = p.light_count;  // the smaller of its normals' and its second buffer's count
+        // An object or trunk: by its vertex kind, the stream colour or the probe colour. An
+        // instanced plant: by its family, without or with the ambient factor.
+        light_mode |= LitObjectMode(p.light->kind, p.light->family);
+        light_count = p.light_count;  // the smallest count of its normals and its kind's other buffers
       }
     }
     float uv[4] = {1.0f, 1.0f, 0.0f, 0.0f};
@@ -938,24 +965,31 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     // Which of the four is the draw's own: LightBufferSources (clay_logic.h). A probe object's
     // two are the two regions of its probe buffer: the weights from byte 0 at t11, the set
     // indices at t10 from LightBufferOffset, the offset the buffer was built with
-    // (p.probe_count, not the draw's light_count). A buffer the mode names is there (the mode is
-    // only set with it); were it not, the positions stand in, from byte 0.
+    // (p.probe_count, not the draw's light_count). An instanced plant's are its copies' colours
+    // at t10 and its bend inputs at t11, both from byte 0. A buffer the mode names is there (the
+    // mode is only set with it); were it not, the positions stand in, from byte 0.
     const ClayLightBuffers light_buffers = LightBufferSources(light_mode);
     for (uint32_t i = 0; i < kClayLightBufferCount; ++i) {
       nrhi::Buffer* own = nullptr;
       switch (light_buffers.source[i]) {
         case ClayLightBuffer::kTerrainNormals:
         case ClayLightBuffer::kNormals: own = p.normals; break;
-        case ClayLightBuffer::kColours: own = p.colours; break;
+        case ClayLightBuffer::kColours:
+        case ClayLightBuffer::kInstanceColours: own = p.colours; break;
         case ClayLightBuffer::kProbeSets:
         case ClayLightBuffer::kProbeWeights: own = p.probe; break;
+        case ClayLightBuffer::kBend: own = p.bend; break;
         case ClayLightBuffer::kPositions: break;
       }
       const uint64_t offset = own ? LightBufferOffset(light_buffers.source[i], p.probe_count) : 0;
       cmd->SetBufferSrv(kClayLightBufferParam0 + i, own ? own : p.positions, offset);
     }
     if (light_mode & kLightModeObject) {
-      cmd->SetConstantBuffer(kParamTerrainConstants, terrain_cb_, ClayObjectSlotOffset(object_slot0_, p.slot));
+      // The draw's slot at b1: a plant's small one among the small slots, an object's or trunk's
+      // large one behind them.
+      const uint64_t at = (light_mode & kLightModeInstance) ? ClaySmallSlotOffset(uint64_t(plant_slot0_) + p.slot)
+                                                            : ClayObjectSlotOffset(object_slot0_, p.slot);
+      cmd->SetConstantBuffer(kParamTerrainConstants, terrain_cb_, at);
     }
 
     cmd->Draw(p.index_count, 0);

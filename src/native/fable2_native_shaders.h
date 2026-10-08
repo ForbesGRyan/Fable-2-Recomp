@@ -186,15 +186,39 @@ float3 LightObject(float3 A, float3 vcolour, float3 tint, float tint_pow, float3
                    float n_dot_sun, float3 sun_col, float c27w, float sun_gate, float3 c49) {
   return A * (c27w * light_ambient(vcolour, tint, tint_pow, add, amb_floor, t) + light_sun(sun_col, n_dot_sun, sun_gate)) * c49;
 }
+// The instanced plants (lighting-formulas.md, "Instanced plants"; the mirrors are in clay_logic.h). The
+// game's vertex shaders make the colour of the vertex's copy and the bend of the normal, its pixel
+// shaders the bent normal and the colour: the functions are split the same way.
+float3 InstanceAmbient(float3 instance_colour, float3 tint, float tint_pow, float3 add) {
+  return light_pow(instance_colour, tint_pow) * tint + add;
+}
+float PlantHeight(float z, float scale, float offset) { return saturate(z * scale + offset); }
+float4 PlantBend(float3 normal, float3 up, float height, float strength) {
+  float h = saturate(height);
+  return float4(light_normalize(normal + (up - normal) * h), h) * strength;
+}
+float3 PlantNormal(float3 normal, float4 bend) {
+  float3 n = light_normalize(normal);
+  return light_normalize(n + (bend.xyz - n) * saturate(bend.w));
+}
+float3 LightPlant(float3 A, float3 vs_ambient, float n_dot_sun, float3 sun_col, float sun_gate) {
+  return A * (vs_ambient + light_sun(sun_col, n_dot_sun, sun_gate));
+}
+float3 LightPlantLit(float3 A, float3 vs_base, float3 add, float3 amb_floor, float t, float n_dot_sun, float3 sun_col,
+                     float sun_gate) {
+  return A * (vs_base * AmbientFactor(amb_floor, t) + add + light_sun(sun_col, n_dot_sun, sun_gate));
+}
 // What a lit draw writes: the value itself, a number, not negative, at most 64 (ClayLit in clay_logic.h).
 float3 clay_lit(float3 v) { return (v > 0.0) ? min(v, 64.0) : float3(0.0, 0.0, 0.0); }
 )hlsl"
 
 #define FABLE2_CLAY_OBJECT_HLSL R"hlsl(
 cbuffer Object : register(b1) {
-  float4 o_rot0; float4 o_rot1; float4 o_rot2;   // rows of M = c4..c6.xyz * c7.w (xyz)
+  float4 o_rot0; float4 o_rot1; float4 o_rot2;   // rows of M = c4..c6.xyz * c7.w (xyz); an instanced plant: no
+                                                 // rows, and in the three w its bend constants c45.x, .y, .z
   float3 o_c49; float o_c27w;                    // pixel c49.xyz (the whole colour); c27.w (the ambient part)
   float3 o_c26; float o_colour_power;            // pixel c26.xyz (with the output scale); the stream colour's power
+                                                 // (an instanced plant: 2.2, the factor of c21.w in its colour's exponent)
   float4 o_probe[12];                            // vertex c28..c39: three probe sets of four (base, rows of r, g, b)
 };
 )hlsl"
@@ -205,14 +229,15 @@ StructuredBuffer<uint> indices : register(t1);
 StructuredBuffer<float2> uvs : register(t2);
 StructuredBuffer<float2> terrain_normals : register(t8);
 StructuredBuffer<float3> normals : register(t9);
-StructuredBuffer<uint> colours : register(t10);
-StructuredBuffer<float4> probe_weights : register(t11);
+StructuredBuffer<uint> colours : register(t10);          // a stream colour, a probe set, or the colour of a plant's copy
+StructuredBuffer<float4> probe_weights : register(t11);  // a probe object's weights, or a plant's bend inputs (up axis, height)
 struct VsOut {
   float4 pos : SV_Position; float3 ndc : TEXCOORD0; float2 uv : TEXCOORD1;
   float3 world : TEXCOORD2;
   float3 normal : TEXCOORD3;
   float3 axis : TEXCOORD4;
   float3 vcolour : TEXCOORD5;
+  float4 bend : TEXCOORD6;
 };
 VsOut main(uint vid : SV_VertexID) {
   VsOut o;
@@ -233,6 +258,7 @@ VsOut main(uint vid : SV_VertexID) {
   o.normal = (light_mode & 2) ? float3(0, 0, 0) : float3(0, 0, 1);
   o.axis = float3(0, 0, 0);
   o.vcolour = float3(0, 0, 0);
+  o.bend = float4(0, 0, 0, 0);
   bool has_light = in_range && uint(v) < light_count;
   [branch] if ((light_mode & 1) && has_light) {
     // The terrain normal as the game's vertex shaders form it, not normalised (the pixel shader does).
@@ -240,7 +266,8 @@ VsOut main(uint vid : SV_VertexID) {
     o.normal = float3(t, sqrt(abs(1.0 - dot(t, t))));
     if (light_mode & 4) o.axis = AmbientAxis(o.normal, f_axis);
   }
-  [branch] if ((light_mode & 2) && has_light) {
+  // (18: the object bit and the instance bit. An object or trunk has the first alone.)
+  [branch] if ((light_mode & 18) == 2 && has_light) {
     // The object's normal as the game's vertex shader exports it: (R n) * c7.w, not normalised.
     float3 n = normals[v];
     o.normal = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));
@@ -255,6 +282,28 @@ VsOut main(uint vid : SV_VertexID) {
       o.vcolour = o_probe[a0].xyz + float3(dot(o_probe[a0 + 1], w), dot(o_probe[a0 + 2], w), dot(o_probe[a0 + 3], w));
     } else {
       o.vcolour = light_pow(float3(word & 255, (word >> 8) & 255, (word >> 16) & 255) / 255.0, o_colour_power);
+    }
+  }
+  [branch] if ((light_mode & 18) == 18 && has_light) {
+    // An instanced plant. Its normal is in the world already (normalize(M n) of its copy's rows): no
+    // rows here. t10 holds the colour of the vertex's copy, t11 the copy's up axis (xyz) and the
+    // vertex's height in the copy (w); the draw's bend constants c45.x, .y, .z are the fourth
+    // components of the three rows. As the game's plant vertex shaders: the bend of the normal, and
+    // the colour raised to c18.w (2.2 * c21.w) times c18.xyz (c21.xyz), plus c54.xyz (c20.xyz) where
+    // the pixel shader has no ambient factor; where it has one (light_mode bit 5), the factor's
+    // vector and no added light.
+    float3 n = normals[v];
+    o.normal = n;
+    uint tone = colours[v];
+    float4 b = probe_weights[v];
+    o.bend = PlantBend(n, b.xyz, PlantHeight(b.w, o_rot1.w, o_rot2.w), o_rot0.w);
+    float3 colour = float3(tone & 255, (tone >> 8) & 255, (tone >> 16) & 255) / 255.0;
+    [branch] if (light_mode & 32) {
+      o.axis = AmbientAxis(n, f_axis);
+      o.vcolour = InstanceAmbient(colour, f_tint, o_colour_power * f_tint_pow, float3(0, 0, 0));
+    } else {
+      o.axis = float3(0, 0, 0);
+      o.vcolour = InstanceAmbient(colour, f_tint, o_colour_power * f_tint_pow, f_add);
     }
   }
   return o;
@@ -297,7 +346,8 @@ bool alpha_passes(float a, float ref, uint func) {
 }
 float3 clay_linear(float3 d) { d = saturate(d); return d * d; }
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1, float3 world : TEXCOORD2,
-            float3 normal : TEXCOORD3, float3 axis : TEXCOORD4, float3 vcolour : TEXCOORD5) : SV_Target {
+            float3 normal : TEXCOORD3, float3 axis : TEXCOORD4, float3 vcolour : TEXCOORD5,
+            float4 bend : TEXCOORD6) : SV_Target {
   float3 n = normalize(cross(ddx(ndc), ddy(ndc)));
   float facet = saturate(abs(dot(n, normalize(float3(0.4, 0.6, -0.7)))));
   float3 base;
@@ -324,9 +374,23 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
       if (!(a >= mask_base - offset * per_offset)) discard;
     }
     if (light_mode & 4) {
-      float3 N = light_normalize(normal);
-      float3 lit = LightObject(clay_linear(t.rgb), vcolour, f_tint, f_tint_pow, f_add, f_floor, AmbientT(axis, normal),
-                               dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(1.0, 1.0), o_c49) * o_c26;
+      float3 lit;
+      [branch] if (light_mode & 16) {
+        // An instanced plant: the normal bent as the game's plant pixel shaders bend it, then A times
+        // the vertex side's ambient plus the sun, or (light_mode bit 5) the object form with the vertex
+        // side's colour, c27.w = 1 and c49 = 1. These shaders read no c26.
+        float3 Np = PlantNormal(normal, bend);
+        if (light_mode & 32) {
+          lit = LightPlantLit(clay_linear(t.rgb), vcolour, f_add, f_floor, AmbientT(axis, Np), dot(Np, f_sun_dir), f_sun_col,
+                              SunGateSingle(1.0, 1.0));
+        } else {
+          lit = LightPlant(clay_linear(t.rgb), vcolour, dot(Np, f_sun_dir), f_sun_col, SunGateSingle(1.0, 1.0));
+        }
+      } else {
+        float3 N = light_normalize(normal);
+        lit = LightObject(clay_linear(t.rgb), vcolour, f_tint, f_tint_pow, f_add, f_floor, AmbientT(axis, normal),
+                          dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(1.0, 1.0), o_c49) * o_c26;
+      }
       return float4(clay_lit(lit), (alpha_mode & 0x80) ? saturate(a) : 1.0);
     }
     return float4(clay_linear(t.rgb * (0.75 + 0.25 * facet)), (alpha_mode & 0x80) ? saturate(a) : 1.0);

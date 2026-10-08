@@ -28,12 +28,31 @@ transform is the product of two constant windows, which FABLE2_VS_TRANSFORM (one
   FABLE2_VS_UV(hash, interp, comp, fetch_index, src_comp, xenos_format, offset_dwords, s0, o0, s1, o1)
       "uv": {"o0.x": {"fetch": 2, "src": "y", "format": 31, "offset": 3, "stages": [...]}, ...}
       Stage refs use uv_refs notation with bank 0 (vertex constants).
+  FABLE2_VS_LIGHT(hash, kind, normal_fetch, normal_format, normal_offset, second_fetch, second_format,
+                  second_offset, a0, scale_ref, power)
+      "light": what the light of a draw reads on the vertex side (docs/native-renderer/lighting-formulas.md),
+      by kind: 1 "terrain" (nothing: the normal is the heightmap's), 2 "stream" (the vertex colour is a
+      stream of its own), 3 "probe" (the colour is built from four weights per vertex and per-draw
+      constants), 4 "instance" (the colour is the instance's).
+        stream:   {"kind", "normal", "colour", "power", "scale" (optional), "evidence"}
+        probe:    {"kind", "normal", "weights", "a0", "scale" (optional), "evidence"}
+        instance: {"kind", "normal", "colour", "evidence"}   (the entry has "instance")
+        terrain:  {"kind", "evidence"}                       (the entry has "terrain")
+      "normal", "colour", "weights": {"fetch", "format", "offset"}, a vertex fetch by its ordinal with the
+      Xenos format and the offset in dwords the dump shows (the runtime refuses the entry on a shader
+      whose fetch is another one). The normal is 16 (10_11_11) or 32 (16_16_16_16_FLOAT), a colour 6
+      (8_8_8_8), the weights 38 (32_32_32_32_FLOAT). "a0": the source component of the position fetch
+      that holds the index of the draw's probe set; "scale": the constant the shader multiplies its world
+      normal by ("c7.w"; register * 4 + component in the line); "power": the literal exponent of the
+      colour stream. Absent: fetch -1 with 0, 0; a0 -1; scale -1; power 0.0f. The pixel shaders a vertex
+      shader's kind was checked with are listed in ps-albedo.json ("light"."vertex").
 
 An entry is refused (ValueError naming the shader) rather than read loosely: it and its "skin",
 "instance", "terrain" and "uv" objects have only the keys listed below (the committed table's, plus
 what matrix_finder.py writes), "layout" is "dot" or "combine", "base" is a JSON integer 0 to 252
 (four registers), a key is "0x" and 16 hex digits (written to the table in upper case) and names
 its shader once, whatever the letters' case (load() also refuses a key written twice in the file).
+A "light" has a kind, its kind's keys and no other, a non-empty "evidence", and needs "base".
 Nothing is converted on the way: a fetch ordinal ("pos_fetch", -1 = the default; "fetch",
 "index_fetch", "weight_fetch", "mesh_fetch", "row_fetches") is a JSON integer 0 to 127, a "uv"
 "format" 0 to 63 and "offset" 0 to 255 dwords, "height_fetch" a texture fetch slot 0 to 31,
@@ -56,12 +75,24 @@ _LAYOUTS = {"dot": 0, "combine": 1}
 # The keys an entry and its objects may have: those of the committed table; "base2", "score" and
 # "samples" are what matrix_finder.py writes beside "base", "layout" and "pos_fetch".
 ENTRY_KEYS = ("base", "layout", "pos_fetch", "pos_swizzle", "deformed", "skin", "instance", "terrain", "uv",
-              "manual", "evidence", "uv_manual", "uv_evidence", "bind_pose_evidence", "finder", "rejected",
+              "light", "manual", "evidence", "uv_manual", "uv_evidence", "bind_pose_evidence", "finder", "rejected",
               "task11_rejected", "base2", "score", "samples")
 SKIN_KEYS = ("index_fetch", "weight_fetch", "index_component", "row_fetches", "row_swizzles", "pairs")
 INSTANCE_KEYS = ("mesh_fetch", "row_fetches", "row_swizzles", "inv_count", "count", "first", "bias", "offset", "cut")
 TERRAIN_KEYS = ("grid", "cell", "height_scale", "origin", "tex_offset", "tex_scale", "patch_offset", "height_fetch")
 UV_KEYS = ("fetch", "src", "format", "offset", "stages")
+LIGHT_KEYS = ("kind", "normal", "colour", "weights", "a0", "scale", "power", "evidence")
+LIGHT_FETCH_KEYS = ("fetch", "format", "offset")
+# kind -> (code of capture::LightVertexKind, the keys it needs, the keys it may have besides).
+LIGHT_KINDS = {
+    "terrain": (1, (), ()),
+    "stream": (2, ("normal", "colour", "power"), ("scale",)),
+    "probe": (3, ("normal", "weights", "a0"), ("scale",)),
+    "instance": (4, ("normal", "colour"), ()),
+}
+# The Xenos vertex formats the light's readers decode, per fetch.
+_LIGHT_FORMATS = {"normal": {16: "10_11_11", 32: "16_16_16_16_FLOAT"}, "colour": {6: "8_8_8_8"},
+                  "weights": {38: "32_32_32_32_FLOAT"}}
 
 
 def _only_keys(vs, what, obj, allowed):
@@ -214,6 +245,56 @@ def _uv_line(vs, h, name, u):
             f"{_int('uv format', u.get('format'), 0, 63)}, {_int('uv offset', u.get('offset'), 0, 255)}, {refs})")
 
 
+def _light_fetch(vs, what, f):
+    """(fetch ordinal, format, offset in dwords) of a light's "normal", "colour" or "weights"."""
+    _only_keys(vs, f"light {what}", f, LIGHT_FETCH_KEYS)
+    fetch = _fetch(f"light {what} fetch", f.get("fetch"))
+    offset = _int(f"light {what} offset", f.get("offset"), 0, 255)
+    fmt, known = f.get("format"), _LIGHT_FORMATS[what]
+    if isinstance(fmt, bool) or fmt not in known:
+        raise ValueError(f"light {what} format {fmt!r} is not "
+                         + " or ".join(f"{code} ({name})" for code, name in known.items()))
+    return fetch, fmt, offset
+
+
+def _light_line(vs, h, e):
+    light = e["light"]
+    _only_keys(vs, "light", light, LIGHT_KEYS)
+    kind = light.get("kind")
+    if not isinstance(kind, str) or kind not in LIGHT_KINDS:
+        raise ValueError(f"{vs}: unknown light kind {kind!r}")
+    code, needs, may = LIGHT_KINDS[kind]
+    a = "an" if kind[0] in "aeiou" else "a"
+    for key in LIGHT_KEYS[1:-1]:
+        if key in light and key not in needs + may:
+            raise ValueError(f"{vs}: {a} {kind} light takes no {key}")
+        if key in needs and key not in light:
+            raise ValueError(f"{vs}: {a} {kind} light needs {key}")
+    evidence = light.get("evidence")
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise ValueError(f"{vs}: light without evidence")
+    # The kind and the entry's own form: a terrain shader has no vertex streams, an instancing one
+    # takes its colour from the instance stream.
+    for form in ("terrain", "instance"):
+        if kind == form and form not in e:
+            raise ValueError(f"{vs}: {a} {kind} light belongs to an entry with {form}")
+        if kind != form and form in e:
+            raise ValueError(f"{vs}: {a} {kind} light does not belong to an entry with {form}")
+    none = (-1, 0, 0)
+    normal = _light_fetch(vs, "normal", light["normal"]) if "normal" in light else none
+    second = next((_light_fetch(vs, k, light[k]) for k in ("colour", "weights") if k in light), none)
+    a0 = _component("light a0", light["a0"]) if "a0" in light else -1
+    scale = reg_comp(light["scale"]) if "scale" in light else -1
+    power = "0.0f"
+    if "power" in light:
+        value = light["power"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 < value < float("inf"):
+            raise ValueError(f"{vs}: light power {value!r} is not a number above 0")
+        power = repr(float(value)) + "f"
+    fields = [code, *normal, *second, a0, scale, power]
+    return f"FABLE2_VS_LIGHT({h}ull, {', '.join(str(f) for f in fields)})"
+
+
 def generate(data):
     _check_hashes(data)
     lines = ["// Generated by tools/xdk_sigmatch/gen_transform_table.py - do not edit."]
@@ -234,7 +315,7 @@ def _entry_lines(vs, e, lines, extras):
     """Appends one entry's lines. Raises ValueError (generate() puts the shader in front if it is missing)."""
     h = f"0x{int(vs, 16):016X}"   # the key as the table writes it
     _check_keys(vs, e)
-    for layout_key in ("skin", "instance"):
+    for layout_key in ("skin", "instance", "light"):
         if layout_key in e and "base" not in e:
             raise ValueError(f"{vs}: {layout_key} entry without base")
     if "skin" in e and "instance" in e:
@@ -283,6 +364,8 @@ def _entry_lines(vs, e, lines, extras):
         own.append(f"FABLE2_VS_TERRAIN({h}ull, {', '.join(str(f) for f in fields)})")
     for name, u in sorted(e.get("uv", {}).items()):
         own.append(_uv_line(vs, h, name, u))
+    if "light" in e:
+        own.append(_light_line(vs, h, e))
     lines.append(f"FABLE2_VS_TRANSFORM({h}ull, {base}, {layout}, {pos_fetch}, {int(deformed)})")
     extras.extend(own)
 

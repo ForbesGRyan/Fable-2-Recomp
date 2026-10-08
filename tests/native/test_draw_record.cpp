@@ -322,6 +322,16 @@ int main() {
   // default record, not a plain one, not an assembled terrain one.
   if (kNoSideIndex != 0xFFFF || DrawRecord{}.terrain_index != kNoSideIndex) return 101;
   if (AssembleRecord(Good(), 0).terrain_index != kNoSideIndex) return 102;
+  // The second side index (the light inputs, FrameScene::lights) lies beside the first, in what
+  // was padding: the record is 616 bytes with both, and no record holds a light index either
+  // until the frame gives it one.
+  if (sizeof(DrawRecord) != 616 || offsetof(DrawRecord, light_index) != offsetof(DrawRecord, terrain_index) + 2 ||
+      sizeof(DrawRecord{}.light_index) != 2) {
+    std::printf("FAIL: sizeof(DrawRecord) = %zu, light_index at %zu, terrain_index at %zu\n", sizeof(DrawRecord),
+                offsetof(DrawRecord, light_index), offsetof(DrawRecord, terrain_index));
+    return 109;
+  }
+  if (DrawRecord{}.light_index != kNoSideIndex || AssembleRecord(Good(), 0).light_index != kNoSideIndex) return 110;
   {
     DrawInputs t = Good();
     t.prim = kPrimQuadPatch; t.terrain_shader = true; t.indexed = false;
@@ -343,6 +353,6 @@ int main() {
     t.terrain_shader = true;
     if (IsTerrainDraw(t) || TerrainInputsOf(t) || AssembleRecord(t, 0).skip != SkipReason::kNone) return 108;
   }
-  std::puts("PASS: record assembly with instance sets, instance range check and cap, distance cut, skin, render state, depth-only, side index");
+  std::puts("PASS: record assembly with instance sets, instance range check and cap, distance cut, skin, render state, depth-only, side indices");
   return 0;
 }

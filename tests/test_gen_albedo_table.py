@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -384,6 +385,145 @@ class GenAlphaKindTest(unittest.TestCase):
             path.write_text('{"0x00000000000000AA": %s}' % entry)
             self.assertEqual(gen_albedo_table.load(path), {"0x00000000000000AA": _albedo()})
 
+    # --- "light": the light family of the shader's (pixel, vertex) pairs ---
+
+    VS = "0xECD66A10092E6562"
+
+    def _light(self, **extra):
+        light = {"family": "object", "vertex": [self.VS], "evidence": "light_check.py"}
+        light.update(extra)
+        return light
+
+    def test_light_lines(self):
+        # One FABLE2_PS_LIGHT line per shader: the family's code (1 terrain-layer, 2 terrain-far, 3 object,
+        # 4 tree-trunk, 5 plant, 6 plant-lit), whether it is the family's two- or four-light form
+        # ("-multi"), and the literal of the terrain layers' facing factor (0.0f where the family has
+        # none); then one FABLE2_PS_LIGHT_VS line per vertex shader the pair was checked with. After the
+        # terrain lines.
+        p = "FABLE2_PS_LIGHT(0x00000000000000AAull, "
+        v = "FABLE2_PS_LIGHT_VS(0x00000000000000AAull, "
+        out = self._gen(_albedo(light=self._light()))
+        self.assertEqual(out[2:], [p + "3, 0, 0.0f)", v + "0xECD66A10092E6562ull)"])
+        two = ["0x79EAC49585797037", "0xecd66a10092e6562"]
+        out = self._gen(_albedo(light=self._light(family="object-multi", vertex=two)))
+        self.assertEqual(out[2:], [p + "3, 1, 0.0f)", v + "0x79EAC49585797037ull)", v + "0xECD66A10092E6562ull)"])
+        for family, code, multi in (("tree-trunk", 4, 0), ("tree-trunk-multi", 4, 1), ("plant", 5, 0),
+                                    ("plant-multi", 5, 1), ("plant-lit", 6, 0), ("plant-lit-multi", 6, 1)):
+            self.assertEqual(self._gen(_albedo(light=self._light(family=family)))[2], p + f"{code}, {multi}, 0.0f)")
+        # a recipe's alpha line comes before it
+        out = self._gen(_albedo(alpha={"source": "one"}, light=self._light()))
+        self.assertEqual([l.split("(")[0] for l in out[1:]],
+                         ["FABLE2_PS_ALBEDO", "FABLE2_PS_ALPHA", "FABLE2_PS_LIGHT", "FABLE2_PS_LIGHT_VS"])
+        # terrain entries: the layers carry the facing factor's literal
+        layer = self._light(family="terrain-layer", facing_scale=8)
+        out = self._gen(_terrain(light=layer))
+        self.assertEqual(out[2:], [p + "1, 0, 8.0f)", v + "0xECD66A10092E6562ull)"])
+        out = self._gen(_terrain(light=dict(layer, family="terrain-layer-multi", facing_scale=7.5)))
+        self.assertEqual(out[2], p + "1, 1, 7.5f)")
+        far = self._light(family="terrain-far")
+        self.assertEqual(self._gen(_terrain(kind="terrain-far", detail_slot=13, light=far))[2], p + "2, 0, 0.0f)")
+        self.assertEqual(self._gen(_terrain(kind="terrain-far-fade", detail_slot=13, light=far))[2], p + "2, 0, 0.0f)")
+
+    def test_light_lines_follow_every_other_line(self):
+        data = {"0x0000000000000003": _terrain(light=self._light(family="terrain-layer", facing_scale=8)),
+                "0x0000000000000002": _albedo(alpha={"source": "one"}, light=self._light()),
+                "0x0000000000000001": _albedo()}
+        out = gen_albedo_table.generate(data).splitlines()
+        self.assertEqual([l.split("(")[0] for l in out[1:]],
+                         ["FABLE2_PS_ALBEDO", "FABLE2_PS_ALBEDO", "FABLE2_PS_ALPHA", "FABLE2_PS_TERRAIN",
+                          "FABLE2_PS_LIGHT", "FABLE2_PS_LIGHT_VS", "FABLE2_PS_LIGHT", "FABLE2_PS_LIGHT_VS"])
+        self.assertIn("FABLE2_PS_LIGHT(0x0000000000000002ull, 3, 0, 0.0f)", out)
+        self.assertIn("FABLE2_PS_LIGHT(0x0000000000000003ull, 1, 0, 8.0f)", out)
+
+    def test_light_is_refused_rather_than_read_loosely(self):
+        fog = {"no_albedo": "fog", "manual": True, "evidence": "e"}
+        layer = self._light(family="terrain-layer", facing_scale=8)
+        far = self._light(family="terrain-far")
+        bad = [
+            # the entry's kind cannot have the family
+            (_albedo(light=layer), "light family terrain-layer belongs to a terrain-layer entry"),
+            (_albedo(light=far), "light family terrain-far belongs to a terrain-far"),
+            (_terrain(light=self._light()), "light family object belongs to a plain entry"),
+            (_terrain(light=self._light(family="plant-lit-multi")), "light family plant-lit-multi belongs to a plain"),
+            (_terrain(light=far), "light family terrain-far belongs to a terrain-far"),
+            (_terrain(kind="terrain-far", detail_slot=13, light=layer), "light family terrain-layer belongs to"),
+            (_terrain(kind="terrain-far-fade", detail_slot=13, light=dict(layer, family="terrain-layer-multi")),
+             "light family terrain-layer-multi belongs to"),
+            (dict(fog, light=self._light()), "unknown key light in a no_albedo entry"),
+            # the family
+            (_albedo(light=self._light(family="tree-leaf")), "unknown light family 'tree-leaf'"),
+            (_terrain(kind="terrain-far", detail_slot=13, light=dict(far, family="terrain-far-multi")),
+             "unknown light family 'terrain-far-multi'"),   # the far shaders have one light
+            (_albedo(light=self._light(family="object-multi-multi")), "unknown light family 'object-multi-multi'"),
+            (_albedo(light=self._light(family="-multi")), "unknown light family '-multi'"),
+            (_albedo(light=self._light(family="tree")), "unknown light family 'tree'"),
+            (_albedo(light=self._light(family="Object")), "unknown light family 'Object'"),
+            (_albedo(light=self._light(family=3)), "unknown light family 3"),
+            (_albedo(light={"vertex": [self.VS], "evidence": "e"}), "unknown light family None"),
+            # not an object; keys it does not have
+            (_albedo(light="object"), "light is not an object"),
+            (_albedo(light=["object"]), "light is not an object"),
+            (_albedo(light=None), "light is not an object"),
+            (_albedo(light=self._light(familly="object")), "unknown light key familly"),
+            (_albedo(light=self._light(multi=True)), "unknown light key multi"),
+            (_albedo(light=self._light(manual=True)), "unknown light key manual"),
+            # its evidence
+            (_albedo(light={"family": "object", "vertex": [self.VS]}), "light without evidence"),
+            (_albedo(light=self._light(evidence="")), "light without evidence"),
+            (_albedo(light=self._light(evidence="  ")), "light without evidence"),
+            (_albedo(light=self._light(evidence=["seen"])), "light without evidence"),
+            # the vertex shaders the family was checked with
+            (_albedo(light={"family": "object", "evidence": "e"}), "light vertex is not a list of vertex shaders"),
+            (_albedo(light=self._light(vertex=[])), "light vertex is not a list of vertex shaders"),
+            (_albedo(light=self._light(vertex=self.VS)), "light vertex is not a list of vertex shaders"),
+            (_albedo(light=self._light(vertex=["ECD66A10092E6562"])), "light vertex 'ECD66A10092E6562' is not 0x and"),
+            (_albedo(light=self._light(vertex=["0xECD6"])), "light vertex '0xECD6' is not 0x and"),
+            (_albedo(light=self._light(vertex=[0xECD66A10092E6562])), "is not 0x and 16 hex digits"),
+            (_albedo(light=self._light(vertex=[self.VS, self.VS])), "light vertex 0xECD66A10092E6562 twice"),
+            (_albedo(light=self._light(vertex=[self.VS, self.VS.lower()])), "twice"),
+            # the facing factor's literal: the terrain layers', a positive finite JSON number
+            (_terrain(light={k: v for k, v in layer.items() if k != "facing_scale"}), "needs facing_scale"),
+            (_terrain(light=dict(layer, facing_scale=0)), "facing_scale 0 is not a number above 0"),
+            (_terrain(light=dict(layer, facing_scale=-8)), "facing_scale -8 is not a number above 0"),
+            (_terrain(light=dict(layer, facing_scale="8")), "facing_scale '8' is not a number above 0"),
+            (_terrain(light=dict(layer, facing_scale=True)), "facing_scale True is not a number above 0"),
+            (_terrain(light=dict(layer, facing_scale=float("inf"))), "facing_scale inf is not a number above 0"),
+            (_terrain(light=dict(layer, facing_scale=float("nan"))), "facing_scale nan is not a number above 0"),
+            (_albedo(light=self._light(facing_scale=8)), "facing_scale belongs to a terrain-layer family"),
+            (_terrain(kind="terrain-far", detail_slot=13, light=dict(far, facing_scale=8)),
+             "facing_scale belongs to a terrain-layer family"),
+        ]
+        for entry, why in bad:
+            with self.assertRaises(ValueError, msg=repr(entry)) as cm:
+                self._gen(entry)
+            self.assertTrue(str(cm.exception).startswith(self.H + ": "), str(cm.exception))
+            self.assertIn(why, str(cm.exception), repr(entry))
+
+    def test_the_committed_light_pairs_are_the_checked_pairs(self):
+        # The table's (family, pixel shader, vertex shader) triples are exactly the pairs
+        # light_check.py runs (FAMILIES), all but the tree leaves, which stay without a family:
+        # their formula is not closed (docs/native-renderer/lighting-formulas.md, "Tree leaves").
+        import light_check
+        root = Path(__file__).resolve().parent.parent
+        data = gen_albedo_table.load(root / "docs" / "native-renderer" / "ps-albedo.json")
+        table = {(e["light"]["family"], ps[2:].upper(), vs[2:].upper())
+                 for ps, e in data.items() if "light" in e for vs in e["light"]["vertex"]}
+        checked = {(family, ps, vs) for family, pairs in light_check.FAMILIES.items() if family != "tree-leaf"
+                   for ps, vs in pairs}
+        self.assertEqual(table, checked)
+        self.assertEqual(len(table), 31)
+        self.assertNotIn("light", data["0x7CD57B81550F19E3"])
+        # every terrain layer's facing literal is the 8 of its own table (frame-map section 14, "The
+        # shaders' literals"), and each family's evidence names the checker
+        for e in data.values():
+            if "light" in e:
+                self.assertEqual(e["light"].get("facing_scale"), 8 if e["light"]["family"].startswith("terrain-layer") else None)
+                self.assertIn("light_check", e["light"]["evidence"])
+        # every vertex shader named has the vertex side's entry (vs-transforms.json "light")
+        vs_table = json.loads((root / "docs" / "native-renderer" / "vs-transforms.json").read_text())
+        for _, _, vs in table:
+            self.assertIn("light", vs_table["0x" + vs], vs)
+
     def test_the_committed_table_uses_the_allowed_keys_and_generates_its_inc(self):
         # The per-form lists are the committed file's: every key of every entry is in its form's list
         # and every listed key but "kind" on the forms it only selects is used by some entry (a list
@@ -398,13 +538,15 @@ class GenAlphaKindTest(unittest.TestCase):
             alpha_used |= set(e.get("alpha", {}))
         self.assertEqual({f: sorted(k) for f, k in used.items()},
                          {"albedo": sorted(["slot", "u", "v", "alpha", "alpha_manual", "alpha_evidence", "manual",
-                                            "evidence"]),
+                                            "evidence", "light"]),
                           "no_albedo": sorted(["no_albedo", "manual", "evidence"]),
-                          "terrain": sorted(["kind", "base_slot", "detail_slot", "steep", "manual", "evidence"])})
+                          "terrain": sorted(["kind", "base_slot", "detail_slot", "steep", "manual", "evidence",
+                                             "light"])})
         for form, keys in used.items():
             self.assertEqual(keys | {"kind"}, set(gen_albedo_table.ENTRY_KEYS[form]), form)
         # ("slot" is the fetch source's: no committed recipe uses that source)
         self.assertEqual(alpha_used | {"slot"}, set(gen_albedo_table.ALPHA_KEYS))
+        self.assertEqual({k for e in data.values() for k in e.get("light", {})}, set(gen_albedo_table.LIGHT_KEYS))
         # byte for byte (text mode on both sides: main() writes the platform's line ends)
         inc = root / "src" / "native" / "capture" / "ps_albedo_table.inc"
         self.assertEqual(inc.read_text(), gen_albedo_table.generate(data))

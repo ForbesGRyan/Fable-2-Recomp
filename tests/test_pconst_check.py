@@ -872,6 +872,169 @@ class LightFieldTest(Base):
         self.assertIn("rows 1, valid 1;", self.line(text, "light block ("))
 
 
+def set_load(frame, cmd, tiling, **fields):
+    row = load_row(frame, cmd, **fields)
+    if tiling is not None:
+        row["tiling"] = tiling
+    return row
+
+
+class LightSceneRuleTest(Base):
+    """The block's other rule (fix round 1, I1): the light set was loaded since the scene began.
+    The load rows carry "tiling", the device's tiling flag at the call, so the checker can hold
+    "light": 1 against it: no row may say so before its frame's first load of the pixel light set
+    (bank 1, a run holding c80) made inside the scene."""
+
+    SUN, rows, lines = LightFieldTest.SUN, LightFieldTest.rows, LightFieldTest.lines
+
+    def check(self, rows, *extra):
+        return self.run_check(rows, self.lines(self.SUN), *extra)
+
+    def test_a_valid_row_after_the_scenes_load_of_the_set_passes(self):
+        a, b, c = self.rows((1, 1, 1), self.SUN)
+        code, text = self.check([set_load(1, 0xFF4FFF00, 1), a, b, set_load(2, 0xFF5FFF00, 1), c])
+        self.assertEqual(code, 0, text)
+        ln = self.line(text, "light set loads (")
+        self.assertIn("frames with an in-scene load of pixel c80 2;", ln)
+        self.assertIn("valid rows before their frame's first such load 0", ln)
+
+    def test_a_valid_row_before_the_scenes_first_load_fails(self):
+        a, b, c = self.rows((1, 1, 1), self.SUN)
+        code, text = self.check([a, set_load(1, 0xFF4FFF00, 1), b, set_load(2, 0xFF5FFF00, 1), c])
+        self.assertEqual(code, 1, text)
+        self.assertIn("valid rows before their frame's first such load 1", self.line(text, "light set loads ("))
+        self.assertIn("1 main-scene rows say \"light\": 1 before their frame's first in-scene load of pixel c80",
+                      self.result(text))
+        # The row that is not valid there is what the rule expects.
+        a, b, c = self.rows((0, 1, 1), self.SUN)
+        code, text = self.check([a, set_load(1, 0xFF4FFF00, 1), b, set_load(2, 0xFF5FFF00, 1), c])
+        self.assertEqual(code, 0, text)
+
+    def test_a_load_made_before_the_scene_is_not_the_scenes(self):
+        a, b, c = self.rows((1, 0, 1), self.SUN)
+        code, text = self.check([set_load(1, 0xFF4FFF00, 0), a, b, set_load(2, 0xFF5FFF00, 1), c])
+        self.assertEqual(code, 1, text)
+        self.assertIn("frames with an in-scene load of pixel c80 1;", self.line(text, "light set loads ("))
+        self.assertIn("1 main-scene rows say \"light\": 1 before", self.result(text))
+
+    def test_only_a_pixel_load_that_holds_c80_counts(self):
+        for fields in ({"bank": 0, "start": 76, "count": 32},       # the vertex light set
+                       {"start": 0, "count": 4},                     # a tile load of c0..c3
+                       {"start": 81, "count": 35},                   # starts past c80
+                       {"start": 44, "count": 36}):                  # ends at c79
+            a, b, c = self.rows((1, 0, 0), self.SUN)
+            code, text = self.check([set_load(1, 0xFF4FFF00, 1, **fields), a, b, c])
+            self.assertEqual(code, 1, (fields, text))
+            self.assertIn("frames with an in-scene load of pixel c80 0;", self.line(text, "light set loads ("))
+        for fields in ({"start": 80, "count": 1}, {"start": 0, "count": 81}, {"start": 64, "count": 36}):
+            a, b, c = self.rows((1, 0, 0), self.SUN)
+            code, text = self.check([set_load(1, 0xFF4FFF00, 1, **fields), a, b, c])
+            self.assertEqual(code, 0, (fields, text))
+
+    def test_a_frames_load_serves_that_frame_only(self):
+        a, b, c = self.rows((1, 1, 1), self.SUN)      # c is of frame 2, which has no load
+        code, text = self.check([set_load(1, 0xFF4FFF00, 1), a, b, c])
+        self.assertEqual(code, 1, text)
+        self.assertIn("valid rows before their frame's first such load 1", self.line(text, "light set loads ("))
+
+    def test_the_first_load_of_the_frame_decides(self):
+        a, b, c = self.rows((0, 1, 1), self.SUN)
+        rows = [a, set_load(1, 0xFF4FFF00, 1), b, set_load(1, 0xFF4FFF80, 1), set_load(2, 0xFF5FFF00, 1), c]
+        code, text = self.check(rows)
+        self.assertEqual(code, 0, text)
+
+    def test_load_rows_without_tiling_are_an_older_capture_and_nothing_is_held(self):
+        a, b, c = self.rows((1, 1, 1), self.SUN)
+        for value in (None, "1", True, 2):
+            row = load_row(1, 0xFF4FFF00)
+            if value is not None:
+                row["tiling"] = value
+            code, text = self.check([a, row, b, c])
+            self.assertEqual(code, 0, (value, text))
+            self.assertIn("carry no \"tiling\"", self.line(text, "light set loads"))
+        # no load rows at all: the same
+        code, text = self.check([a, b, c])
+        self.assertEqual(code, 0, text)
+        self.assertIn("carry no \"tiling\"", self.line(text, "light set loads"))
+
+    def test_rows_outside_the_scene_and_rows_without_the_field_are_not_held(self):
+        a, b, c = self.rows((1, None, 1), self.SUN)
+        a["in_scene"] = False
+        code, text = self.check([a, b, set_load(1, 0xFF4FFF00, 1), set_load(2, 0xFF5FFF00, 1), c])
+        self.assertEqual(code, 0, text)
+
+    def test_frame_option_keeps_the_frames_loads(self):
+        a, b, c = self.rows((1, 1, 1), self.SUN)
+        rows = [a, set_load(1, 0xFF4FFF00, 1), b, set_load(2, 0xFF5FFF00, 1), c]
+        code, text = self.check(rows, "--frame", "2")
+        self.assertEqual(code, 0, text)
+        code, text = self.check(rows, "--frame", "1")
+        self.assertEqual(code, 1, text)
+
+
+class LightReadRuleTest(Base):
+    """With --dumps the reverse is held too: a main-scene row whose registers are a sun block and
+    whose pixel shader reads c80 says "light": 1. The rows the scene rule leaves out are draws
+    that read no light register (the water draws before a scene's first load of the set)."""
+
+    SUN, rows, lines = LightFieldTest.SUN, LightFieldTest.rows, LightFieldTest.lines
+
+    WATER = "0xF6D98C7B4D98438B"
+
+    def dumps(self, files):
+        d = self.dir / "dumps"
+        d.mkdir(exist_ok=True)
+        for ps, text in files.items():
+            (d / f"shader_{int(ps, 16):016X}.ucode.frag").write_text(text)
+        return str(d)
+
+    def case(self, lights, ps=PS):
+        rows = self.rows(lights, self.SUN)
+        lines = self.lines(self.SUN)
+        rows[0]["ps_hash"] = ps
+        lines[0] = gpu_line(1 + OFFSET, 0, 0xFF500000, regs=self.SUN, ps=ps)
+        return rows, lines
+
+    LIT = "/* 1 */ mul r0, r1.xyzz, c80.xyzz\n/* 2 */ mul r0, r0, c87\n"
+
+    def test_a_sun_block_row_that_reads_c80_and_is_not_valid_fails(self):
+        rows, lines = self.case((0, 1, 1))
+        code, text = self.run_check(rows, lines, "--dumps", self.dumps({PS: self.LIT}))
+        self.assertEqual(code, 1, text)
+        self.assertIn("not valid where the registers are a sun block 1 ",
+                      self.line(text, "light block where the pixel shader reads c80:"))
+        self.assertIn("1 main-scene rows say \"light\": 0 where their registers are a sun block and the pixel "
+                      "shader reads c80", self.result(text))
+
+    def test_a_row_whose_shader_does_not_read_c80_may_be_left_out(self):
+        rows, lines = self.case((0, 1, 1), ps=self.WATER)
+        files = {PS: self.LIT, self.WATER: "/* 1 */ mad r0, r1, c19.xyzz, c8.wwww\n"}  # c8 is not c80
+        code, text = self.run_check(rows, lines, "--dumps", self.dumps(files))
+        self.assertEqual(code, 0, text)
+        self.assertIn("not valid where the registers are a sun block 0 ",
+                      self.line(text, "light block where the pixel shader reads c80:"))
+
+    def test_a_shader_without_a_dump_counts_as_reading_it(self):
+        rows, lines = self.case((0, 1, 1), ps=self.WATER)
+        code, text = self.run_check(rows, lines, "--dumps", self.dumps({PS: self.LIT}))
+        self.assertEqual(code, 1, text)
+
+    def test_valid_rows_and_rows_that_are_no_sun_block_are_not_held(self):
+        rows, lines = self.case((1, 1, 1))
+        code, text = self.run_check(rows, lines, "--dumps", self.dumps({PS: self.LIT}))
+        self.assertEqual(code, 0, text)
+        # not a sun block (BASE alone: c109 and c112 zero) and not valid: nothing to hold
+        rows = self.rows((0, 0, 0))
+        code, text = self.run_check(rows, self.lines(), "--dumps", self.dumps({PS: self.LIT}))
+        self.assertEqual(code, 0, text)
+
+    def test_without_the_option_nothing_is_held(self):
+        rows, lines = self.case((0, 1, 1))
+        code, text = self.run_check(rows, lines)
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("light block where the pixel shader reads", text)
+
+
 class ValuesTest(Base):
     def test_values_lists_the_gpus_values_of_the_registers_asked_for(self):
         code, text = self.run_check(three_rows(), three_lines(regs={87: (1.0, 2.0, 3.0, 0.0)}), "--values", "80,87")

@@ -202,7 +202,9 @@ struct ConstantSource {
 // load, or the bank's upload of its group).
 class ConstantLoads {
  public:
-  explicit ConstantLoads(uint32_t bank = kPixelBank) {
+  // constexpr: the capture's two models are thread-local, and a constant
+  // initialiser lets them be `constinit`, so that no access tests a guard.
+  constexpr explicit ConstantLoads(uint32_t bank = kPixelBank) {
     for (uint32_t r = 0; r < kRegisters; ++r) {
       if (IsBufferLoadRegister(bank, r)) load_register_[r / 64] |= 1ull << (r % 64);
     }
@@ -242,8 +244,10 @@ class ConstantLoads {
       return false;
     }
     if (!predicated) mask = kAllBins;
-    if (mask == 0) return true;  // predicated under no bin: executes in no pass
+    // Named first: a call under no bin loads nothing this time, but its call
+    // site exists, and a register it names outside the table is counted.
     Name(start, count);
+    if (mask == 0) return true;  // predicated under no bin: executes in no pass
     if (!whole_) return true;    // followed, and not believed before the model is whole again
     const uint64_t seq = ++seq_;
     if (mask != kAllBins) {
@@ -362,7 +366,9 @@ class ConstantLoads {
 
   // The tile loads, oldest first, and whether one still decides `reg` in the
   // passes its mask names (nothing later replaced it there in every pass).
-  uint32_t binned_count() const { return binned_count_; }
+  // None while the model is not whole: what the table holds then was loaded
+  // before the gap, and no register it names is known (FindForBins).
+  uint32_t binned_count() const { return whole_ ? binned_count_ : 0; }
   const Binned& binned(uint32_t i) const { return binned_[i]; }
   bool InForce(const Binned& b, uint32_t reg) const {
     return reg < kRegisters && reg >= b.start && reg - b.start < b.count && b.seq > every_[reg].seq;

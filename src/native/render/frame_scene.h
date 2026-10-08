@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "../capture/draw_record.h"
+#include "../capture/light_block.h"
 #include "../capture/shader_tally.h"
 
 namespace fable2::native::render {
@@ -28,6 +29,28 @@ struct FrameScene {
   // over with them (FrameBuilder::Finish) and, like them, not written again
   // while anything refers to the scene.
   std::vector<capture::TerrainPatch> terrain;
+  // Side array of `draws`: the light inputs of its records that have a light
+  // family and readable inputs, each at its record's light_index (LightOf).
+  // Built, handed over and left alone like `terrain`.
+  std::vector<capture::LightInputs> lights;
+  // The frame's light block (light_block.h): the sun and the ambient constants
+  // every lit shader shares, read once in the frame, at the first main-scene
+  // draw of a one-light family at which the light set was loaded in this scene
+  // and holds the sun first. Not valid (all zero) when no such draw gave one:
+  // a frame without records, a frame the view was switched on in after its
+  // scene began, a scene without a sun. A consumer then draws the frame
+  // without light ("light-block") and never with another frame's block.
+  // light_tries: how many reads were made that gave no block.
+  capture::LightBlock light{};
+  uint32_t light_tries = 0;
+  // The drawable records with light inputs by family (index: LightFamily), how
+  // many of them are a family's two- or four-light form, the records without
+  // inputs by reason (index: LightReason), and the pixel shaders of those,
+  // by count descending.
+  uint32_t light_family[size_t(capture::LightFamily::kCount)] = {};
+  uint32_t light_multi = 0;
+  uint32_t light_reason[size_t(capture::LightReason::kCount)] = {};
+  std::vector<std::pair<uint64_t, uint32_t>> light_unknown_ps;
   uint32_t captured = 0;
   uint32_t skipped[size_t(capture::SkipReason::kCount)] = {};
   // Skipped draws per (vertex shader hash, skip reason as the kind), for the
@@ -54,20 +77,28 @@ inline const capture::TerrainPatch* TerrainOf(const FrameScene& scene, const cap
   return &scene.terrain[r.terrain_index];
 }
 
+// The light inputs of record `r` of `scene`, with TerrainOf's rules: null for a
+// record without inputs and for an index the scene's array does not hold.
+inline const capture::LightInputs* LightOf(const FrameScene& scene, const capture::DrawRecord& r) {
+  if (r.light_index == capture::kNoSideIndex || r.light_index >= scene.lights.size()) return nullptr;
+  return &scene.lights[r.light_index];
+}
+
 // The record and side-array buffers of scenes nothing refers to any more, kept
 // for the builder to fill again: a new allocation of that size is new pages,
 // and a frame's records then cost a page fault per page on the guest thread.
 // The list has its own lock, so buffers come back from whichever thread drops
 // a scene's last reference (usually the render thread) without the capture's
 // scene mutex; nothing is freed or allocated while the list's lock is held.
-// At most kMaxSpares pairs are kept. A buffer is in exactly one place: the
-// builder, one scene, or this list.
+// At most kMaxSpares sets (records, terrain inputs, light inputs) are kept. A
+// buffer is in exactly one place: the builder, one scene, or this list.
 class SceneBufferPool {
  public:
   static constexpr size_t kMaxSpares = 4;
   struct Buffers {
     std::vector<capture::DrawRecord> draws;
     std::vector<capture::TerrainPatch> terrain;
+    std::vector<capture::LightInputs> lights;
   };
 
   // The buffers of a scene whose last reference has dropped, with whatever
@@ -75,7 +106,7 @@ class SceneBufferPool {
   // freed here, after the lock. Buffers without memory are not kept.
   void Return(Buffers&& buffers) {
     Buffers b = std::move(buffers);
-    if (b.draws.capacity() == 0 && b.terrain.capacity() == 0) return;
+    if (b.draws.capacity() == 0 && b.terrain.capacity() == 0 && b.lights.capacity() == 0) return;
     std::lock_guard<std::mutex> lock(mutex_);
     if (count_ < kMaxSpares) std::swap(b, spares_[count_++]);  // (the slot held nothing)
   }
@@ -121,7 +152,17 @@ class FrameBuilder {
   // holds at most kNoSideIndex terrain records: one more is skipped as
   // bad-memory (the capture's reason for a count past a cap) and counted like
   // any skipped draw, so that no index wraps onto another record's inputs.
-  void Add(const capture::DrawRecord& r, const capture::TerrainPatch* terrain = nullptr) {
+  // `light`: the draw's light inputs (capture::MakeLightInputs), null for a
+  // draw without them, and then `light_reason` says why. A drawable record's
+  // are copied to the frame's light array and the record gets their index. A
+  // record without inputs (none given, or inputs without a family) is counted
+  // by its reason, light-unknown when none was given, and by its pixel shader.
+  // The light array holds kNoSideIndex entries too; a lit record past that is
+  // kept without inputs and counted light-unknown (the light never removes a
+  // draw; a terrain record cannot be drawn without its patch, this can).
+  void Add(const capture::DrawRecord& r, const capture::TerrainPatch* terrain = nullptr,
+           const capture::LightInputs* light = nullptr,
+           capture::LightReason light_reason = capture::LightReason::kLightUnknown) {
     if (!open_) return;
     ++captured_;
     capture::SkipReason skip = r.skip;
@@ -132,13 +173,32 @@ class FrameBuilder {
       // The patch first: if the record then cannot be appended, the frame holds
       // a patch no record names. The other order would leave a record naming an
       // entry that the next terrain record's patch then fills.
+      // The same for the light inputs.
       uint16_t index = capture::kNoSideIndex;
       if (terrain) {
         index = uint16_t(terrain_.size());
         terrain_.push_back(*terrain);
       }
+      const bool lit = light && light->family != capture::LightFamily::kNone &&
+                       size_t(light->family) < size_t(capture::LightFamily::kCount) &&
+                       lights_.size() < capture::kNoSideIndex;
+      uint16_t light_index = capture::kNoSideIndex;
+      if (lit) {
+        light_index = uint16_t(lights_.size());
+        lights_.push_back(*light);
+      }
       draws_.push_back(r);
       draws_.back().terrain_index = index;
+      draws_.back().light_index = light_index;
+      if (lit) {
+        ++light_family_[size_t(light->family)];
+        light_multi_ += light->multi ? 1 : 0;
+      } else {
+        const bool given = !light && light_reason != capture::LightReason::kNone &&
+                           size_t(light_reason) < size_t(capture::LightReason::kCount);
+        ++light_reason_[size_t(given ? light_reason : capture::LightReason::kLightUnknown)];
+        light_unknown_ps_.Add(r.material.ps_hash, 0);
+      }
       const capture::MaterialStatus m = r.material.status;
       if (size_t(m) < size_t(capture::MaterialStatus::kCount)) ++material_[size_t(m)];
       if (m == capture::MaterialStatus::kPsUnknown || m == capture::MaterialStatus::kNoAlbedo ||
@@ -158,29 +218,41 @@ class FrameBuilder {
     if (open_) ++captured_;
   }
 
+  // The frame's light block: the first valid one offered inside the scene is
+  // kept (FrameScene::light). CountLightTry: a read that gave none.
+  void SetLight(const capture::LightBlock& block) {
+    if (open_ && block.valid && !light_.valid) light_ = block;
+  }
+  void CountLightTry() {
+    if (open_) ++light_tries_;
+  }
+  bool HasLight() const { return light_.valid; }
+
   // Frees the spare buffers (any thread; scenes that die later bring theirs).
   void ReleaseSpares() { pool_->Release(); }
   size_t spare_count() const { return pool_->size(); }
 
   // The caller may fill the scene's remaining fields before publishing it.
-  // The records and their side array move into the scene together, and the
-  // builder goes on with other buffers: a spare pair (SceneBufferPool), cleared
+  // The records and their side arrays move into the scene together, and the
+  // builder goes on with other buffers: a spare set (SceneBufferPool), cleared
   // (the capacity stays), or new ones. Nothing of a scene is written by the
   // builder while a reference to the scene exists: its buffers come back only
   // from its deleter, which runs when the last reference has dropped, on that
   // thread. A frame without a record keeps the builder's buffers and gives the
   // scene none, so nothing circulates while records are off.
-  // Capacity: a buffer grows only when a frame needs more than it holds, to
-  // the size of the frame before (reserve) or by the vector's own growth within
-  // a frame, so it stays within the largest frame recorded since it was
-  // allocated times the vector's growth factor (1.5 here); it does not shrink.
-  // At most kMaxSpares spare pairs exist besides the builder's and those of
+  // Capacity: a buffer grows only when a frame needs more than it holds: to
+  // the size of the frame before and half as much again (ReserveWithSlack), or
+  // by the vector's own growth within a frame (1.5 here too). So it stays
+  // within 1.5 times the largest frame recorded since it was allocated, and a
+  // frame that creeps up by a record at a time finds room instead of a new
+  // allocation under the capture's scene mutex each time; it does not shrink.
+  // At most kMaxSpares spare sets exist besides the builder's and those of
   // the living scenes, and ReleaseSpares frees the spares.
   std::shared_ptr<FrameScene> Finish(uint64_t frame) {
     // (weak: a scene may outlive the builder, and then frees its buffers itself)
     std::shared_ptr<FrameScene> s(new FrameScene, [pool = std::weak_ptr<SceneBufferPool>(pool_)](FrameScene* scene) {
       if (const std::shared_ptr<SceneBufferPool> p = pool.lock()) {
-        p->Return({std::move(scene->draws), std::move(scene->terrain)});
+        p->Return({std::move(scene->draws), std::move(scene->terrain), std::move(scene->lights)});
       }
       delete scene;
     });
@@ -195,17 +267,34 @@ class FrameBuilder {
     const size_t n = untextured_ps_.Top(0, top, kUntexturedTop);
     for (size_t i = 0; i < n; ++i) s->untextured_ps.emplace_back(top[i].hash, top[i].count);
     untextured_ps_.Clear();
-    if (!draws_.empty() || !terrain_.empty()) {
-      const size_t records = draws_.size(), patches = terrain_.size();
+    s->light = light_;
+    light_ = capture::LightBlock{};
+    s->light_tries = light_tries_;
+    light_tries_ = 0;
+    std::copy(std::begin(light_family_), std::end(light_family_), std::begin(s->light_family));
+    std::fill(std::begin(light_family_), std::end(light_family_), 0u);
+    s->light_multi = light_multi_;
+    light_multi_ = 0;
+    std::copy(std::begin(light_reason_), std::end(light_reason_), std::begin(s->light_reason));
+    std::fill(std::begin(light_reason_), std::end(light_reason_), 0u);
+    const size_t unknown = light_unknown_ps_.Top(0, top, kUntexturedTop);
+    for (size_t i = 0; i < unknown; ++i) s->light_unknown_ps.emplace_back(top[i].hash, top[i].count);
+    light_unknown_ps_.Clear();
+    if (!draws_.empty() || !terrain_.empty() || !lights_.empty()) {
+      const size_t records = draws_.size(), patches = terrain_.size(), lit = lights_.size();
       s->draws = std::move(draws_);
       s->terrain = std::move(terrain_);
+      s->lights = std::move(lights_);
       SceneBufferPool::Buffers next = pool_->Take();
       draws_ = std::move(next.draws);
       terrain_ = std::move(next.terrain);
+      lights_ = std::move(next.lights);
       draws_.clear();
       terrain_.clear();
-      draws_.reserve(records);  // (nothing happens when the spare is large enough)
-      terrain_.reserve(patches);
+      lights_.clear();
+      ReserveWithSlack(draws_, records);
+      ReserveWithSlack(terrain_, patches);
+      ReserveWithSlack(lights_, lit);
     }
     captured_ = 0;
     std::fill(std::begin(skipped_), std::end(skipped_), 0u);
@@ -214,6 +303,14 @@ class FrameBuilder {
   }
 
  private:
+  // Room for `n` entries, the size of the frame before: nothing happens when
+  // the buffer holds them; a buffer that has to be replaced gets half as much
+  // again, so that the frames after it, a few records larger, fit as well.
+  template <typename T>
+  static void ReserveWithSlack(std::vector<T>& v, size_t n) {
+    if (v.capacity() < n) v.reserve(n + n / 2);
+  }
+
   bool open_ = false;
   uint32_t captured_ = 0;
   uint32_t skipped_[size_t(capture::SkipReason::kCount)] = {};
@@ -222,6 +319,13 @@ class FrameBuilder {
   capture::ShaderTally<kUntexturedTallySize> untextured_ps_;
   std::vector<capture::DrawRecord> draws_;
   std::vector<capture::TerrainPatch> terrain_;  // side array of draws_ (FrameScene::terrain)
+  std::vector<capture::LightInputs> lights_;    // side array of draws_ (FrameScene::lights)
+  capture::LightBlock light_{};                 // the frame's light block so far (FrameScene::light)
+  uint32_t light_tries_ = 0;
+  uint32_t light_family_[size_t(capture::LightFamily::kCount)] = {};
+  uint32_t light_multi_ = 0;
+  uint32_t light_reason_[size_t(capture::LightReason::kCount)] = {};
+  capture::ShaderTally<kUntexturedTallySize> light_unknown_ps_;
   // Shared with the deleters of this builder's scenes. Never reassigned, and
   // locked inside: ReleaseSpares and spare_count need no lock of the caller's.
   std::shared_ptr<SceneBufferPool> pool_ = std::make_shared<SceneBufferPool>();

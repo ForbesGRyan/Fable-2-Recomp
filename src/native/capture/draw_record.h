@@ -107,6 +107,12 @@ struct DrawRecord {
   // through TerrainOf (frame_scene.h); kNoSideIndex: not a terrain record. Set
   // by FrameBuilder::Add, which owns the array, never by AssembleRecord.
   uint16_t terrain_index = kNoSideIndex;
+  // The draw's light inputs (material.h, LightInputs) are entry `light_index` of
+  // the frame's FrameScene::lights, read through LightOf (frame_scene.h);
+  // kNoSideIndex: the draw has none (no light family, or an input that could
+  // not be read) and is drawn without light. Set by FrameBuilder::Add, like
+  // terrain_index. The two indices lie in what was padding.
+  uint16_t light_index = kNoSideIndex;
   // Albedo texture and UVs (material.h); status says why a draw stays clay.
   Material material;
   // The draw's GPU render-state words as the device held them (render_state.h);
@@ -118,7 +124,8 @@ struct DrawRecord {
 // 1,064 bytes with the terrain inputs (452) in every record; a frame has about
 // 950 records at the bridge and each is copied into the frame on the guest
 // thread. Measured, so that a field added here is noticed: inputs that only
-// some draws have belong in a side array.
+// some draws have belong in a side array (the terrain inputs, the light
+// inputs: an index of 16 bits each).
 static_assert(sizeof(DrawRecord) == 616, "DrawRecord grew or shrank: see the comment above");
 
 struct TransformInfo {

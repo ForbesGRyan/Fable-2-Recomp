@@ -68,14 +68,22 @@ the row's buffer, register and size; the executed packets no row stands for are 
 register range: the shaders' literals), and with --values the GPU's values of the listed
 registers. With --key pfull, when rows carry "light" (whether the capture's ReadLightBlock gave
 a valid block at the draw): how many main-scene rows say so, and for each of them whether its
-registers are a sun block by the register rules of light_block.h (MakeLightBlock).
+registers are a sun block by the register rules of light_block.h (MakeLightBlock). The block's
+other rule, that the light set was loaded since the scene began, is held against the load rows
+when they carry "tiling" (the device's tiling flag at the call): a row may say "light": 1 only
+after its frame's first load of the pixel light set (bank 1, a run that holds c80) with
+"tiling": 1. With --dumps the reverse is held too: a main-scene row whose registers are a sun
+block and whose pixel shader reads c80 must say "light": 1 (the game loads a light set before a
+draw that uses one; the rows the scene rule leaves out are draws that read none).
 
 Exit code 0, with "RESULT: OK", only when every main-scene row in a frame of the GPU log is
 paired, at least one main-scene colour execution was compared, and every register of the light
 block (light_block.h: c0, c19, c20, c21, c22, c23, c80, c87, c94, c109, c112) was read in every
 main-scene row and is equal in every main-scene colour execution (with --dumps: in every one
 whose pixel shader reads it), and no row says "light": 1 where its registers are not a sun
-block. With a vertex key there is no light block: no register may differ where it was compared
+block or (load rows with "tiling") before its frame's first in-scene load of the pixel light
+set, and (with --dumps) no row whose registers are a sun block and whose pixel shader reads c80
+says "light": 0. With a vertex key there is no light block: no register may differ where it was compared
 (the result line says how many registers were compared in every execution, in some and in none:
 a register the row does not carry, such as the vertex shader's own literals, is compared
 nowhere). Rows without the key's registers are not compared, and the result line counts them.
@@ -96,6 +104,7 @@ import render_state_check as rsc  # noqa: E402
 REGISTERS = 256
 REG_DIGITS = 32
 LIGHT_BLOCK = (0, 19, 20, 21, 22, 23, 80, 87, 94, 109, 112)
+SUN_REGISTER = 80  # the light set's first register: a load of the set holds it
 # The pixel bools the scene shaders test: b128 (colour division of the prop shaders), b129, b132,
 # b133 / b134 (emissive and cube blocks), b135 (the per-light shadow map), b136 (water).
 BOOL_BITS = (128, 129, 132, 133, 134, 135, 136)
@@ -205,29 +214,50 @@ class ShaderReads:
 
 
 def _load_row(r):
-    """An "aluload" row reduced to what the packet comparison reads; None if it lacks a field."""
+    """An "aluload" row reduced to what the packet comparison reads; None if it lacks a field.
+    "tiling": the row's field when it is the number 0 or 1, else None (a capture made before the
+    field existed)."""
     try:
         out = {"frame": int(r["frame"]), "bank": int(r["bank"]), "start": int(r["start"]),
                "count": int(r["count"]), "first": int(r["first"]), "pred": int(r.get("pred", -1)),
                "data": rsc._hex(r.get("data")), "mask": rsc._hex(r.get("bin_mask")), "cmd": rsc._hex(r.get("cmd"))}
     except (KeyError, TypeError, ValueError):
         return None
+    tiling = r.get("tiling")
+    out["tiling"] = tiling if type(tiling) is int and tiling in (0, 1) else None
     return None if out["data"] is None or out["cmd"] is None else out
+
+
+def first_set_loads(loads):
+    """Per capture frame, the place ("order") of its first load of the pixel light set issued
+    inside the main scene: bank 1, a run that holds c80, "tiling": 1. None when no load row
+    carries "tiling" (nothing can be said of the scene)."""
+    if not any(load["tiling"] is not None for load in loads):
+        return None
+    first = {}
+    for load in loads:
+        if (load["bank"] == 1 and load["tiling"] == 1
+                and load["start"] <= SUN_REGISTER < load["start"] + load["count"]):
+            first[load["frame"]] = min(first.get(load["frame"], load["order"]), load["order"])
+    return first
 
 
 def load_capture(path, key, frame=None):
     """(rows, loads). rows: the draw and tess rows, reduced as render_state_check.load_capture
     reduces them (so that its pairing applies), with the pixel registers of `key` under "P"
-    (None: not sampled). loads: the "aluload" rows."""
+    (None: not sampled). loads: the "aluload" rows. Both carry "order", their line in the file:
+    the capture writes a row when its call returns, so one guest thread's rows are in the order
+    of its calls."""
     rows, loads = [], []
     with open(path, encoding="utf-8", errors="replace") as f:
-        for line in f:
+        for order, line in enumerate(f):
             if line.startswith('{"kind":"aluload"') or line.startswith('{"kind": "aluload"'):
                 try:
                     load = _load_row(json.loads(line))
                 except ValueError:
                     continue
                 if load is not None and (frame is None or load["frame"] == frame):
+                    load["order"] = order
                     loads.append(load)
                 continue
             if not (line.startswith('{"kind":"draw"') or line.startswith('{"kind": "draw"')
@@ -279,6 +309,7 @@ def load_capture(path, key, frame=None):
                 "P": regs, "tiles": tiles, "pbool": rsc._hex(r.get("pbool")),
                 "pbool_load": rsc._hex(r.get("pbool_load")),
                 "light": r.get("light") if type(r.get("light")) is int else None,
+                "order": order,
             })
     return rows, loads
 
@@ -491,6 +522,7 @@ def main(argv=None):
     tested_bits = {"device": Counter(), "load": Counter()}  # of those, where the pixel shader tests the bit
     paired_frames = set()
     light = Counter()
+    set_loads = first_set_loads(capture_loads)
     for r in sampled:
         if r["in_scene"] and r["light"] is not None and args.key == "pfull":
             block = sun_block(r["P"])
@@ -498,6 +530,13 @@ def main(argv=None):
             light["valid"] += r["light"] == 1
             light["valid without a sun block"] += r["light"] == 1 and not block
             light["sun block and not valid"] += r["light"] != 1 and block
+            # The scene rule: no valid block before the frame's first in-scene load of the set.
+            if set_loads is not None and r["light"] == 1:
+                light["valid before the load"] += r["order"] < set_loads.get(r["frame"], float("inf"))
+            # The reverse, where the shader is known: a draw that reads the sun has its block.
+            if args.dumps and r["light"] != 1 and block:
+                reads = shader_reads.reads(r["ps"] or 0)
+                light["read and not valid"] += reads is None or SUN_REGISTER in reads[0]
         if r["cmd"] is None:
             status["no command pointer"] += 1
             continue
@@ -643,6 +682,16 @@ def main(argv=None):
               f"{light['valid without a sun block']}; not valid where the registers are a sun block "
               f"{light['sun block and not valid']} (the light set was not loaded in the scene, or the uploads "
               "were not followed)")
+        if set_loads is None:
+            print("light set loads: the load rows carry no \"tiling\": the valid rows are not held against "
+                  "their frame's first in-scene load of the pixel light set")
+        else:
+            print(f"light set loads (\"tiling\" of the load rows): frames with an in-scene load of pixel "
+                  f"c{SUN_REGISTER} {len(set_loads)}; valid rows before their frame's first such load "
+                  f"{light['valid before the load']}")
+        if args.dumps:
+            print(f"light block where the pixel shader reads c{SUN_REGISTER}: not valid where the registers are "
+                  f"a sun block {light['read and not valid']} (a shader without a dump counts as reading it)")
 
     print_loads(capture_loads, gpu_loads, offset, frames)
 
@@ -671,6 +720,12 @@ def main(argv=None):
     if light["valid without a sun block"]:
         reasons.append(f"{light['valid without a sun block']} main-scene rows say \"light\": 1 where their "
                        "registers are not a sun block")
+    if light["valid before the load"]:
+        reasons.append(f"{light['valid before the load']} main-scene rows say \"light\": 1 before their frame's "
+                       f"first in-scene load of pixel c{SUN_REGISTER}")
+    if light["read and not valid"]:
+        reasons.append(f"{light['read and not valid']} main-scene rows say \"light\": 0 where their registers "
+                       f"are a sun block and the pixel shader reads c{SUN_REGISTER}")
     outside = status["frame outside the GPU log"]
     tail = f"; {outside} rows in frames outside the GPU log were not compared" if outside else ""
     if len(rows) > len(sampled):

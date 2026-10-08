@@ -106,7 +106,21 @@
       }
     },
     "uv_manual": true,
-    "uv_evidence": "native_discovery_20261005_103213.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow before export: jmp'; both predicate branches were read): o0.xy = r4.xw (instr 153 max o0.xy__, r4.xwww); r4.x = r2.w (146, unconditional exec 13.1), r2.w = source z of the mesh position fetch vfetch_full r2.wyxz (27, ordinal 4), not written again (82-125 write r2.y and r2.z only); r4.w = source z of vfetch_mini r4.yxwz Offset=2 (28, ordinal 5), not written again (44 writes r4.xyz, 146 r4.x). u and v sit in two elements of the mesh vertex (the fourth halves of the position and of the normal; in the capture's mesh dumps both run from 0 to 1), which the runtime reads with UvLayoutFromFetches. Used by albedo PS 165EDCD2CB963868 (35 rows) and F525E023E08AC9BB (26), which read r0.xy"
+    "uv_evidence": "native_discovery_20261005_103213.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow before export: jmp'; both predicate branches were read): o0.xy = r4.xw (instr 153 max o0.xy__, r4.xwww); r4.x = r2.w (146, unconditional exec 13.1), r2.w = source z of the mesh position fetch vfetch_full r2.wyxz (27, ordinal 4), not written again (82-125 write r2.y and r2.z only); r4.w = source z of vfetch_mini r4.yxwz Offset=2 (28, ordinal 5), not written again (44 writes r4.xyz, 146 r4.x). u and v sit in two elements of the mesh vertex (the fourth halves of the position and of the normal; in the capture's mesh dumps both run from 0 to 1), which the runtime reads with UvLayoutFromFetches. Used by albedo PS 165EDCD2CB963868 (35 rows) and F525E023E08AC9BB (26), which read r0.xy",
+    "light": {
+      "kind": "instance",
+      "normal": {
+        "fetch": 5,
+        "format": 32,
+        "offset": 2
+      },
+      "colour": {
+        "fetch": 3,
+        "format": 6,
+        "offset": 6
+      },
+      "evidence": "dump shader_33C00226C154C1F2.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched zyx_: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz (the pixel shader applies the ambient factor and c20). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+    }
   },
   "0x36B543CECAE5C781": {
     "base": 0,
@@ -154,7 +168,21 @@
       }
     },
     "uv_manual": true,
-    "uv_evidence": "native_discovery_20261005_103213.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow before export: jmp'; both predicate branches were read): o0.xy = r2.xw (instr 155 max o0.xy__, r2.xwww); r2.x = r11.w (148, unconditional exec 14.0), r11.w = source z of the mesh position fetch vfetch_full r11.yxwz (28, ordinal 4), r11 never written again; r2.w = source z of vfetch_mini r2.yxwz Offset=2 (29, ordinal 5), not written again (47 writes r2.xyz, 148 r2.x). u and v sit in two elements of the mesh vertex (the fourth halves of the position and of the normal; in the capture's mesh dumps both run from 0 to 1), which the runtime reads with UvLayoutFromFetches. Used by albedo PS 165EDCD2CB963868 (35 rows), which read r0.xy"
+    "uv_evidence": "native_discovery_20261005_103213.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow before export: jmp'; both predicate branches were read): o0.xy = r2.xw (instr 155 max o0.xy__, r2.xwww); r2.x = r11.w (148, unconditional exec 14.0), r11.w = source z of the mesh position fetch vfetch_full r11.yxwz (28, ordinal 4), r11 never written again; r2.w = source z of vfetch_mini r2.yxwz Offset=2 (29, ordinal 5), not written again (47 writes r2.xyz, 148 r2.x). u and v sit in two elements of the mesh vertex (the fourth halves of the position and of the normal; in the capture's mesh dumps both run from 0 to 1), which the runtime reads with UvLayoutFromFetches. Used by albedo PS 165EDCD2CB963868 (35 rows), which read r0.xy",
+    "light": {
+      "kind": "instance",
+      "normal": {
+        "fetch": 5,
+        "format": 32,
+        "offset": 2
+      },
+      "colour": {
+        "fetch": 3,
+        "format": 6,
+        "offset": 6
+      },
+      "evidence": "dump shader_36B543CECAE5C781.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched zyx_: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz (the pixel shader applies the ambient factor and c20). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+    }
   },
   "0x3A0F9098B839DDBC": {
     "base": 0,
@@ -272,7 +300,23 @@
       }
     },
     "uv_manual": true,
-    "uv_evidence": "native_discovery_20261005_103213.jsonl: shader_trace: o0.xy = r4.xy (instr 98 max o0.xy__, r4.xyyy) <- vfetch_mini r4.yx__ Offset=3 FMT_16_16_FLOAT (instr 13, fetch ordinal 2); r4.xy is written by no other instruction (instr 24, 26, 35, 36, 87, 89 write r4.z or r4.w). Used by albedo PS 00E09D1BC5295D52 (910 draws), reads r0.xy through the c8 scale/offset stage"
+    "uv_evidence": "native_discovery_20261005_103213.jsonl: shader_trace: o0.xy = r4.xy (instr 98 max o0.xy__, r4.xyyy) <- vfetch_mini r4.yx__ Offset=3 FMT_16_16_FLOAT (instr 13, fetch ordinal 2); r4.xy is written by no other instruction (instr 24, 26, 35, 36, 87, 89 write r4.z or r4.w). Used by albedo PS 00E09D1BC5295D52 (910 draws), reads r0.xy through the c8 scale/offset stage",
+    "light": {
+      "kind": "probe",
+      "normal": {
+        "fetch": 1,
+        "format": 16,
+        "offset": 2
+      },
+      "weights": {
+        "fetch": 5,
+        "format": 38,
+        "offset": 0
+      },
+      "a0": "z",
+      "scale": "c7.w",
+      "evidence": "dump shader_475EC9F795E5EDBB.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Normal: vfetch_mini r2.xyz_ Offset=2 FMT_10_11_11 of vf0 (fetch 1); o1 = the 10_11_11 normal through the rows c4..c6, times c7.w (instr 62-64, 73-75); the axis of the ambient factor is built from it and c19.xyz. Weights: vfetch_full r6 of vf1, FMT_32_32_32_32_FLOAT, Stride=4 (fetch 5); the probe colour goes to o8 (instr 16, 31, 65-68, 77). a0 = trunc of the position fetch's r1.w (fetched wxyz) (truncs / maxas, instr 31, 65), the fetch's source z: 0, 4 or 8 in every sampled vertex (out/native-evidence/lighting/task2/fix1_recounts_bridge_trees.txt). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+    }
   },
   "0x48D30ECCF684F488": {
     "base": 0,
@@ -320,7 +364,21 @@
       }
     },
     "uv_manual": true,
-    "uv_evidence": "native_discovery_20261005_103213.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow before export: jmp'; both predicate branches were read): o0.xy = r7.xy (instr 150 max o0.xy__, r7.xyyy); r7.x = r0.z (143, unconditional exec 13.1), r0.z = source z of the mesh position fetch vfetch_full r0.ywzx (27, ordinal 4), not written again (the !p0 blocks 47-141 write r0.x and r0.w only); r7.y = source z of vfetch_mini r7.yzxw Offset=2 (28, ordinal 5), not written again (40 writes r7.x_zw, 143 r7.x). u and v sit in two elements of the mesh vertex (the fourth halves of the position and of the normal; in the capture's mesh dumps both run from 0 to 1), which the runtime reads with UvLayoutFromFetches. Used by albedo PS 26052DEFBA688AF2 (109 rows), which read r0.xy"
+    "uv_evidence": "native_discovery_20261005_103213.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow before export: jmp'; both predicate branches were read): o0.xy = r7.xy (instr 150 max o0.xy__, r7.xyyy); r7.x = r0.z (143, unconditional exec 13.1), r0.z = source z of the mesh position fetch vfetch_full r0.ywzx (27, ordinal 4), not written again (the !p0 blocks 47-141 write r0.x and r0.w only); r7.y = source z of vfetch_mini r7.yzxw Offset=2 (28, ordinal 5), not written again (40 writes r7.x_zw, 143 r7.x). u and v sit in two elements of the mesh vertex (the fourth halves of the position and of the normal; in the capture's mesh dumps both run from 0 to 1), which the runtime reads with UvLayoutFromFetches. Used by albedo PS 26052DEFBA688AF2 (109 rows), which read r0.xy",
+    "light": {
+      "kind": "instance",
+      "normal": {
+        "fetch": 5,
+        "format": 32,
+        "offset": 2
+      },
+      "colour": {
+        "fetch": 3,
+        "format": 6,
+        "offset": 6
+      },
+      "evidence": "dump shader_48D30ECCF684F488.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched _zyx: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz plus c54.xyz. Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+    }
   },
   "0x5003700B7C9B1C16": {
     "base": 0,
@@ -337,7 +395,11 @@
       "patch_offset": "c113.x",
       "height_fetch": 16
     },
-    "evidence": "dump: no vertex fetch; instr 5 p = r0.x + c113.x; instr 6-20 world.xy = (col + u, row + v) * c8.xy + c47.xy, h = tfetch2D(tf16, (world.xy - c46.zw) * c46.xy).x * c8.z; oPos = dp4(c0..c3 .zxyw, cndeq(c255.xxxy, (h, world.xy), c255.yyyy)) (instr 28-32) with GPU c255 = (0, 1, 3, 2). Drawn by DrawIndx:82207C30 in adaptive tessellation: VGT_HOS_CNTL 2 and num_indices = 4 * r7 in 290/290 rows (native_discovery_20261002_130248 + fable_2_108.log); the rebuilt grid puts 80% of main-scene points inside the clip volume"
+    "evidence": "dump: no vertex fetch; instr 5 p = r0.x + c113.x; instr 6-20 world.xy = (col + u, row + v) * c8.xy + c47.xy, h = tfetch2D(tf16, (world.xy - c46.zw) * c46.xy).x * c8.z; oPos = dp4(c0..c3 .zxyw, cndeq(c255.xxxy, (h, world.xy), c255.yyyy)) (instr 28-32) with GPU c255 = (0, 1, 3, 2). Drawn by DrawIndx:82207C30 in adaptive tessellation: VGT_HOS_CNTL 2 and num_indices = 4 * r7 in 290/290 rows (native_discovery_20261002_130248 + fable_2_108.log); the rebuilt grid puts 80% of main-scene points inside the clip volume",
+    "light": {
+      "kind": "terrain",
+      "evidence": "No vertex stream: the normal is the heightmap's tf17 texel, (2x - 1, 2y - 1, sqrt(|1 - x^2 - y^2|)) (frame-map section 13, \"Terrain\"). The far shader hands the normal on in o2; the pixel shader takes the axis from its own c23. Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+    }
   },
   "0x563E3BE17857DB59": {
     "manual": true,
@@ -483,7 +545,21 @@
       }
     },
     "uv_manual": true,
-    "uv_evidence": "native_discovery_20261005_103213.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow before export: jmp'; both predicate branches were read): o0.xy = r2.xw (instr 76 max o0.xy__, r2.xwww); r2.x = r4.w (69, unconditional exec 6.1), r4.w = source z of the mesh position fetch vfetch_full r4.yxwz (20, ordinal 4), r4 never written again; r2.w = source z of vfetch_mini r2.yxwz Offset=2 (21, ordinal 5), not written again (37 writes r2.xyz, 69 r2.x). u and v sit in two elements of the mesh vertex (the fourth halves of the position and of the normal; in the capture's mesh dumps both run from 0 to 1), which the runtime reads with UvLayoutFromFetches. Used by albedo PS 165EDCD2CB963868 (176 rows) and F525E023E08AC9BB (71), which read r0.xy"
+    "uv_evidence": "native_discovery_20261005_103213.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow before export: jmp'; both predicate branches were read): o0.xy = r2.xw (instr 76 max o0.xy__, r2.xwww); r2.x = r4.w (69, unconditional exec 6.1), r4.w = source z of the mesh position fetch vfetch_full r4.yxwz (20, ordinal 4), r4 never written again; r2.w = source z of vfetch_mini r2.yxwz Offset=2 (21, ordinal 5), not written again (37 writes r2.xyz, 69 r2.x). u and v sit in two elements of the mesh vertex (the fourth halves of the position and of the normal; in the capture's mesh dumps both run from 0 to 1), which the runtime reads with UvLayoutFromFetches. Used by albedo PS 165EDCD2CB963868 (176 rows) and F525E023E08AC9BB (71), which read r0.xy",
+    "light": {
+      "kind": "instance",
+      "normal": {
+        "fetch": 5,
+        "format": 32,
+        "offset": 2
+      },
+      "colour": {
+        "fetch": 3,
+        "format": 6,
+        "offset": 6
+      },
+      "evidence": "dump shader_6AD4108C3FF07966.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched _zyx: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz (instr 18, 26, 29-31, 33, 34, 37, 40, 42, 43; the pixel shader applies the ambient factor and c20). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+    }
   },
   "0x775C6085FBB9D676": {
     "manual": true,
@@ -532,7 +608,23 @@
       }
     },
     "uv_manual": true,
-    "uv_evidence": "native_discovery_20261002_194918.jsonl: shader_trace: o0.xy = r7.xy <- vfetch_mini r7.yx__ Offset=3 FMT_16_16_FLOAT (instr 7, fetch ordinal 2). Used by albedo PS 2FD24989AB04A475 (75 draws) and 648B965C200A5113 (73); both read r0.xy"
+    "uv_evidence": "native_discovery_20261002_194918.jsonl: shader_trace: o0.xy = r7.xy <- vfetch_mini r7.yx__ Offset=3 FMT_16_16_FLOAT (instr 7, fetch ordinal 2). Used by albedo PS 2FD24989AB04A475 (75 draws) and 648B965C200A5113 (73); both read r0.xy",
+    "light": {
+      "kind": "probe",
+      "normal": {
+        "fetch": 1,
+        "format": 16,
+        "offset": 2
+      },
+      "weights": {
+        "fetch": 4,
+        "format": 38,
+        "offset": 0
+      },
+      "a0": "z",
+      "scale": "c7.w",
+      "evidence": "dump shader_79EAC49585797037.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Normal: vfetch_mini r8.xyz_ Offset=2 FMT_10_11_11 of vf0 (instr 6, fetch 1); o1 = the 10_11_11 normal through the rows c4..c6, times c7.w (mul o1.xyz_, r4.xyzz, c7.wwww, instr 23); the axis of the ambient factor is built from it and c19.xyz. Weights: vfetch_full r3 of vf1, FMT_32_32_32_32_FLOAT, Stride=4 (instr 9, fetch 4); o6 = c[28+a0].xyz + (c[29+a0] . w, c[30+a0] . w, c[31+a0] . w) (instr 30-32, 39). a0 = trunc of the position fetch's r2.x (fetched zxwy) (truncs / maxas, instr 28, 29), the fetch's source z: 0, 4 or 8 in every sampled vertex (out/native-evidence/lighting/task2/fix1_recounts_bridge_trees.txt). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+    }
   },
   "0x7C5710DEF3EE33C4": {
     "base": 0,
@@ -606,7 +698,21 @@
       }
     },
     "uv_manual": true,
-    "uv_evidence": "native_discovery_20261005_103213.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow before export: jmp'; both predicate branches were read): o0.xy = r3.xw (instr 70 max o0.xy__, r3.xwww); r3.x = r0.y (63, unconditional exec 6.0), r0.y = source z of the mesh position fetch vfetch_full r0.wzyx (20, ordinal 4), not written again (the !p0 block 38-61 writes r0.w only); r3.w = source z of vfetch_mini r3.yxwz Offset=2 (21, ordinal 5), not written again (26-36 write r3.xyz, 63 r3.x). u and v sit in two elements of the mesh vertex (the fourth halves of the position and of the normal; in the capture's mesh dumps both run from 0 to 1), which the runtime reads with UvLayoutFromFetches. Used by albedo PS A7E45D07F5CF6627 (1966 rows) and E99F4ACC7A3C78B4 (388), which read r0.xy"
+    "uv_evidence": "native_discovery_20261005_103213.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow before export: jmp'; both predicate branches were read): o0.xy = r3.xw (instr 70 max o0.xy__, r3.xwww); r3.x = r0.y (63, unconditional exec 6.0), r0.y = source z of the mesh position fetch vfetch_full r0.wzyx (20, ordinal 4), not written again (the !p0 block 38-61 writes r0.w only); r3.w = source z of vfetch_mini r3.yxwz Offset=2 (21, ordinal 5), not written again (26-36 write r3.xyz, 63 r3.x). u and v sit in two elements of the mesh vertex (the fourth halves of the position and of the normal; in the capture's mesh dumps both run from 0 to 1), which the runtime reads with UvLayoutFromFetches. Used by albedo PS A7E45D07F5CF6627 (1966 rows) and E99F4ACC7A3C78B4 (388), which read r0.xy",
+    "light": {
+      "kind": "instance",
+      "normal": {
+        "fetch": 5,
+        "format": 32,
+        "offset": 2
+      },
+      "colour": {
+        "fetch": 3,
+        "format": 6,
+        "offset": 6
+      },
+      "evidence": "dump shader_8123C16DBF583F92.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched zyx_: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz plus c54.xyz (instr 17, 26-33). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+    }
   },
   "0x82F6433A69263C75": {
     "base": 0,
@@ -762,7 +868,22 @@
       }
     },
     "uv_manual": true,
-    "uv_evidence": "native_discovery_20261002_194918.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow: cexec'): o0.xy = max(r5.xy, r5.xy) (instr 55, unconditional exec 5.1) <- vfetch_mini r5.yx__ Offset=5 FMT_16_16_FLOAT (instr 10, fetch ordinal 3; ordinal 2 is vfetch_mini r5.__x_ at instr 9, which writes only r5.z); the only other r5.xy reader is instr 45 inside cexec b0 (3.1), which writes r4; no instruction writes r5 after instr 10. Used by albedo PS 8D900846800943C8 (100 draws), reads r0.xy"
+    "uv_evidence": "native_discovery_20261002_194918.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow: cexec'): o0.xy = max(r5.xy, r5.xy) (instr 55, unconditional exec 5.1) <- vfetch_mini r5.yx__ Offset=5 FMT_16_16_FLOAT (instr 10, fetch ordinal 3; ordinal 2 is vfetch_mini r5.__x_ at instr 9, which writes only r5.z); the only other r5.xy reader is instr 45 inside cexec b0 (3.1), which writes r4; no instruction writes r5 after instr 10. Used by albedo PS 8D900846800943C8 (100 draws), reads r0.xy",
+    "light": {
+      "kind": "probe",
+      "normal": {
+        "fetch": 1,
+        "format": 16,
+        "offset": 2
+      },
+      "weights": {
+        "fetch": 5,
+        "format": 38,
+        "offset": 0
+      },
+      "a0": "z",
+      "evidence": "dump shader_A1F7E9885EC466DF.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Normal: vfetch_mini r0._xyz Offset=2 FMT_10_11_11 of vf0 (fetch 1); skinned with the one bone, made orthogonal to the skinned tangent and normalised (instr 19-21, 26-31, 34-41; no closed formula yet); it reads c4..c6 and no c7. Weights: vfetch_full r3.wzxy of vf1, FMT_32_32_32_32_FLOAT, Stride=4 (fetch 5); probe colour as 0x79EAC49585797037. a0 = trunc of the position fetch's r1.w (fetched yxwz) (truncs / maxas, instr 44, 51), the fetch's source z: 0, 4 or 8 in every sampled vertex (out/native-evidence/lighting/task2/fix1_recounts_bridge_trees.txt). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+    }
   },
   "0xA5846836C90E1192": {
     "base": 0,
@@ -852,7 +973,21 @@
       }
     },
     "uv_manual": true,
-    "uv_evidence": "native_discovery_20261005_103213.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow before export: jmp'; both predicate branches were read): o0.xy = r2.xw (instr 90 max o0.xy__, r2.xwww); r2.x = r1.w (83, unconditional exec 7.1), r1.w = source z of the mesh position fetch vfetch_full r1.wyxz (21, ordinal 4), r1 not written before 85; r2.w = source z of vfetch_mini r2.yxwz Offset=2 (22, ordinal 5), not written again (33 writes r2.xyz, 83 r2.x). u and v sit in two elements of the mesh vertex (the fourth halves of the position and of the normal; in the capture's mesh dumps both run from 0 to 1), which the runtime reads with UvLayoutFromFetches. Used by albedo PS 165EDCD2CB963868 (909 rows) and F525E023E08AC9BB (219), which read r0.xy"
+    "uv_evidence": "native_discovery_20261005_103213.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow before export: jmp'; both predicate branches were read): o0.xy = r2.xw (instr 90 max o0.xy__, r2.xwww); r2.x = r1.w (83, unconditional exec 7.1), r1.w = source z of the mesh position fetch vfetch_full r1.wyxz (21, ordinal 4), r1 not written before 85; r2.w = source z of vfetch_mini r2.yxwz Offset=2 (22, ordinal 5), not written again (33 writes r2.xyz, 83 r2.x). u and v sit in two elements of the mesh vertex (the fourth halves of the position and of the normal; in the capture's mesh dumps both run from 0 to 1), which the runtime reads with UvLayoutFromFetches. Used by albedo PS 165EDCD2CB963868 (909 rows) and F525E023E08AC9BB (219), which read r0.xy",
+    "light": {
+      "kind": "instance",
+      "normal": {
+        "fetch": 5,
+        "format": 32,
+        "offset": 2
+      },
+      "colour": {
+        "fetch": 3,
+        "format": 6,
+        "offset": 6
+      },
+      "evidence": "dump shader_B636821F95DC9D8E.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched zyx_: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz (the pixel shader applies the ambient factor and c20). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+    }
   },
   "0xBEAD84BD72072E0E": {
     "base": 0,
@@ -890,7 +1025,11 @@
       "patch_offset": null,
       "height_fetch": 16
     },
-    "evidence": "dump (instr 8-22, r10 at 51, oPos 52-55): no vertex fetch; r0.x = patch index, r0.yz = domain (u, v) (xenia kQuadDomainPatchIndexed); row = floor(p * c11.y), col = p - row * c11.x, world.xy = (col + u, row + v) * c46.xy + c113.xy, h = tfetch2D(tf16, (world.xy - c47.zw) * c47.xy).x * c46.z; position = cndeq(c254.xxxy, (h, world.xy), c254.yyyy) with GPU c254 = (0, 1, 3, 2), oPos = dp4(c0..c3 .zxyw, position) = dp4(c0..c3, (world.x, world.y, h, 1)). Drawn by DrawIndx:8221C9C8 (quad patches, auto-indexed). [vtess] GPU register file matches the capture's constants, tf16-19 and indx_offset = r5 in 1275/1275 rows (native_discovery_20261002_130248 + fable_2_108.log); the rebuilt grid puts 83% of points inside the clip volume (axes swapped 34%, height 0 15%). Hole mask (tf18.w < c114.x: NaN position, instr 37-47) not applied"
+    "evidence": "dump (instr 8-22, r10 at 51, oPos 52-55): no vertex fetch; r0.x = patch index, r0.yz = domain (u, v) (xenia kQuadDomainPatchIndexed); row = floor(p * c11.y), col = p - row * c11.x, world.xy = (col + u, row + v) * c46.xy + c113.xy, h = tfetch2D(tf16, (world.xy - c47.zw) * c47.xy).x * c46.z; position = cndeq(c254.xxxy, (h, world.xy), c254.yyyy) with GPU c254 = (0, 1, 3, 2), oPos = dp4(c0..c3 .zxyw, position) = dp4(c0..c3, (world.x, world.y, h, 1)). Drawn by DrawIndx:8221C9C8 (quad patches, auto-indexed). [vtess] GPU register file matches the capture's constants, tf16-19 and indx_offset = r5 in 1275/1275 rows (native_discovery_20261002_130248 + fable_2_108.log); the rebuilt grid puts 83% of points inside the clip volume (axes swapped 34%, height 0 15%). Hole mask (tf18.w < c114.x: NaN position, instr 37-47) not applied",
+    "light": {
+      "kind": "terrain",
+      "evidence": "No vertex stream: the normal is the heightmap's tf17 texel, (2x - 1, 2y - 1, sqrt(|1 - x^2 - y^2|)) (frame-map section 13, \"Terrain\"). The axis of the ambient factor is built from it and c19.xyz into o8 (instr 50, 56-61, 63, 66, 83). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+    }
   },
   "0xD4D558DA6A82BDC8": {
     "base": 0,
@@ -964,7 +1103,22 @@
       }
     },
     "uv_manual": true,
-    "uv_evidence": "native_discovery_20261002_194918.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow: cexec'): o0.xy = max(r5.xy, r5.xy) (instr 79, unconditional exec 7.0) <- vfetch_mini r5.yx__ Offset=5 FMT_16_16_FLOAT (instr 13, fetch ordinal 4); the only other r5 reader is instr 69 inside cexec b0 (5.0), which writes r4 (and co-issued sgts r4.z); no instruction writes r5 after instr 13. Same dest-swizzle convention as the tool's ECD66A10092E6562 trace. Used by albedo PS 8D900846800943C8 (639 draws) and 401A01FD4E5F8757 (379); both read r0.xy"
+    "uv_evidence": "native_discovery_20261002_194918.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow: cexec'): o0.xy = max(r5.xy, r5.xy) (instr 79, unconditional exec 7.0) <- vfetch_mini r5.yx__ Offset=5 FMT_16_16_FLOAT (instr 13, fetch ordinal 4); the only other r5 reader is instr 69 inside cexec b0 (5.0), which writes r4 (and co-issued sgts r4.z); no instruction writes r5 after instr 13. Same dest-swizzle convention as the tool's ECD66A10092E6562 trace. Used by albedo PS 8D900846800943C8 (639 draws) and 401A01FD4E5F8757 (379); both read r0.xy",
+    "light": {
+      "kind": "probe",
+      "normal": {
+        "fetch": 1,
+        "format": 16,
+        "offset": 2
+      },
+      "weights": {
+        "fetch": 6,
+        "format": 38,
+        "offset": 0
+      },
+      "a0": "z",
+      "evidence": "dump shader_D4D558DA6A82BDC8.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Normal: vfetch_mini r0._xyz Offset=2 FMT_10_11_11 of vf0 (instr 10, fetch 1); the shader skins it with the position's bones, makes it orthogonal to the skinned tangent and normalises it (no closed formula yet: lighting-formulas.md, \"Objects\", last paragraph); it reads c4..c6 and no c7. Weights: vfetch_full r3.wzxy of vf1, FMT_32_32_32_32_FLOAT, Stride=4 (instr 15, fetch 6); probe colour as 0x79EAC49585797037. a0 = trunc of the position fetch's r7.w (fetched yxwz) (truncs / maxas, instr 68, 75), the fetch's source z: 0, 4 or 8 in every sampled vertex (out/native-evidence/lighting/task2/fix1_recounts_bridge_trees.txt). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+    }
   },
   "0xD7DD31B9BF194DE8": {
     "base": 0,
@@ -1020,7 +1174,23 @@
       }
     },
     "uv_manual": true,
-    "uv_evidence": "native_discovery_20261002_194918.jsonl: shader_trace: o0.xy = r6.xy (instr 23 max) <- vfetch_mini r6.yx__ Offset=3 FMT_16_16_FLOAT (instr 7, fetch ordinal 2). Used by albedo PS 8D900846800943C8 (3761 draws), 789266C3E42D7E59 (377), 648B965C200A5113 (332), 401A01FD4E5F8757 (75); all read r0.xy"
+    "uv_evidence": "native_discovery_20261002_194918.jsonl: shader_trace: o0.xy = r6.xy (instr 23 max) <- vfetch_mini r6.yx__ Offset=3 FMT_16_16_FLOAT (instr 7, fetch ordinal 2). Used by albedo PS 8D900846800943C8 (3761 draws), 789266C3E42D7E59 (377), 648B965C200A5113 (332), 401A01FD4E5F8757 (75); all read r0.xy",
+    "light": {
+      "kind": "stream",
+      "normal": {
+        "fetch": 1,
+        "format": 16,
+        "offset": 2
+      },
+      "colour": {
+        "fetch": 4,
+        "format": 6,
+        "offset": 0
+      },
+      "scale": "c7.w",
+      "power": 2.2,
+      "evidence": "dump shader_ECD66A10092E6562.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Normal: vfetch_mini r7.xyz_ Offset=2 FMT_10_11_11 of vf0 (instr 6, fetch 1); o1 = the 10_11_11 normal through the rows c4..c6, times c7.w (instr 20-22, 27); the axis of the ambient factor is built from it and c19.xyz. Colour: vfetch_full r3.zyxw of vf3, FMT_8_8_8_8, Stride=1 (instr 14, fetch 4), read at the vertex index plus c20.x (instr 9: add r0.x, r0.x, c20.x); o6 = pow(|colour|, c255.x) with the literal c255.x = 2.2 (instr 21, 22, 29-35; frame-map section 14, \"The shaders' literals\": c255 = (2.2, 0.5, 1, 0)). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+    }
   },
   "0xF160B4DA459A6D40": {
     "base": 0,
@@ -1048,7 +1218,11 @@
       "patch_offset": null,
       "height_fetch": 16
     },
-    "evidence": "dump (instr 8-22, r9 at 50, oPos 51-54): no vertex fetch; r0.x = patch index, r0.yz = domain (u, v) (xenia kQuadDomainPatchIndexed); row = floor(p * c11.y), col = p - row * c11.x, world.xy = (col + u, row + v) * c46.xy + c113.xy, h = tfetch2D(tf16, (world.xy - c47.zw) * c47.xy).x * c46.z; position = cndeq(c254.xxxy, (h, world.xy), c254.yyyy) with GPU c254 = (0, 1, 3, 2), oPos = dp4(c0..c3 .zxyw, position) = dp4(c0..c3, (world.x, world.y, h, 1)). Drawn by DrawIndx:8221C9C8 (quad patches, auto-indexed). [vtess] GPU register file matches the capture's constants, tf16-19 and indx_offset = r5 in 1275/1275 rows (native_discovery_20261002_130248 + fable_2_108.log); the rebuilt grid puts 83% of points inside the clip volume (axes swapped 34%, height 0 15%). Hole mask (tf18.w < c114.x: NaN position, instr 37-47) not applied"
+    "evidence": "dump (instr 8-22, r9 at 50, oPos 51-54): no vertex fetch; r0.x = patch index, r0.yz = domain (u, v) (xenia kQuadDomainPatchIndexed); row = floor(p * c11.y), col = p - row * c11.x, world.xy = (col + u, row + v) * c46.xy + c113.xy, h = tfetch2D(tf16, (world.xy - c47.zw) * c47.xy).x * c46.z; position = cndeq(c254.xxxy, (h, world.xy), c254.yyyy) with GPU c254 = (0, 1, 3, 2), oPos = dp4(c0..c3 .zxyw, position) = dp4(c0..c3, (world.x, world.y, h, 1)). Drawn by DrawIndx:8221C9C8 (quad patches, auto-indexed). [vtess] GPU register file matches the capture's constants, tf16-19 and indx_offset = r5 in 1275/1275 rows (native_discovery_20261002_130248 + fable_2_108.log); the rebuilt grid puts 83% of points inside the clip volume (axes swapped 34%, height 0 15%). Hole mask (tf18.w < c114.x: NaN position, instr 37-47) not applied",
+    "light": {
+      "kind": "terrain",
+      "evidence": "No vertex stream: the normal is the heightmap's tf17 texel, (2x - 1, 2y - 1, sqrt(|1 - x^2 - y^2|)) (frame-map section 13, \"Terrain\"). The axis of the ambient factor is built from it and c19.xyz into o6 (instr 49, 56-60, 62, 65, 79). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+    }
   },
   "0xFBD39C64463E180B": {
     "base": 0,
@@ -1118,6 +1292,20 @@
       }
     },
     "uv_manual": true,
-    "uv_evidence": "native_discovery_20261005_103213.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow before export: jmp'; both predicate branches were read): o0.xy = r4.xy (instr 150 max o0.xy__, r4.xyyy); r4.x = r0.z (143, unconditional exec 13.1), r0.z = source z of the mesh position fetch vfetch_full r0.ywzx (27, ordinal 4), not written again (the !p0 blocks 47-141 write r0.x and r0.w only); r4.y = source z of vfetch_mini r4.yzxw Offset=2 (28, ordinal 5), not written again (33-35 and 40 write r4.x, r4.z, r4.w; 143 r4.x). u and v sit in two elements of the mesh vertex (the fourth halves of the position and of the normal; in the capture's mesh dumps both run from 0 to 1), which the runtime reads with UvLayoutFromFetches. Used by albedo PS E99F4ACC7A3C78B4 (70 rows) and A7E45D07F5CF6627 (35), which read r0.xy"
+    "uv_evidence": "native_discovery_20261005_103213.jsonl: hand trace, verified instruction by instruction (shader_trace refused: 'control flow before export: jmp'; both predicate branches were read): o0.xy = r4.xy (instr 150 max o0.xy__, r4.xyyy); r4.x = r0.z (143, unconditional exec 13.1), r0.z = source z of the mesh position fetch vfetch_full r0.ywzx (27, ordinal 4), not written again (the !p0 blocks 47-141 write r0.x and r0.w only); r4.y = source z of vfetch_mini r4.yzxw Offset=2 (28, ordinal 5), not written again (33-35 and 40 write r4.x, r4.z, r4.w; 143 r4.x). u and v sit in two elements of the mesh vertex (the fourth halves of the position and of the normal; in the capture's mesh dumps both run from 0 to 1), which the runtime reads with UvLayoutFromFetches. Used by albedo PS E99F4ACC7A3C78B4 (70 rows) and A7E45D07F5CF6627 (35), which read r0.xy",
+    "light": {
+      "kind": "instance",
+      "normal": {
+        "fetch": 5,
+        "format": 32,
+        "offset": 2
+      },
+      "colour": {
+        "fetch": 3,
+        "format": 6,
+        "offset": 6
+      },
+      "evidence": "dump shader_FC4F2EF6930768BE.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched _zyx: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz plus c54.xyz. Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+    }
   }
 }

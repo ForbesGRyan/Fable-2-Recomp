@@ -6,6 +6,8 @@
   FABLE2_PS_ALPHA(hash, source, slot, component, scale_ref0, scale_ref1, divide_colour)  (optional "alpha")
   FABLE2_PS_TERRAIN(hash, kind, base_slot, detail_slot, side_slot, steep_threshold, steep_epsilon)
                                                               ("kind" other than "plain")
+  FABLE2_PS_LIGHT(hash, family, multi, facing_scale)          (optional "light")
+  FABLE2_PS_LIGHT_VS(hash, vertex shader hash)                (one per vertex shader of "light"."vertex")
 Stage refs use uv_refs notation with bank 1 (pixel constants). Alpha: source 0 one, 1 albedo,
 2 fetch; slot is the albedo's slot for "albedo" and the entry's own for "fetch"; component 0-3
 (x-w); scale_ref0/1 are the up to two pixel constants (register * 4 + component, no bank or negate
@@ -20,13 +22,24 @@ block of the layer shaders that blend a side texture in where the ground is stee
 {"threshold": the slope value below which the block runs, "epsilon": the small term of its weights
 (both literals of the shader), "side_slot": the texture fetch slot of the side texture}; without it
 the line ends in -1, 0.0f, 0.0f. All ALPHA lines, then all TERRAIN lines, follow the albedo lines.
+Light: an albedo or terrain entry may have "light": {"family", "vertex", "evidence"}, the light family
+of the shader as tools/xdk_sigmatch/light_check.py names it (docs/native-renderer/lighting-formulas.md):
+1 terrain-layer, 2 terrain-far, 3 object, 4 tree-trunk, 5 plant, 6 plant-lit, each but terrain-far
+also with "-multi" (the family's two- and four-light form: multi 1). A family belongs to the pair
+of a pixel and a vertex shader, so "vertex" lists the vertex shaders the pair was checked with, one
+FABLE2_PS_LIGHT_VS line each; with any other vertex shader the draw has no family. What the vertex
+side reads is that shader's own "light" in vs-transforms.json. "facing_scale": the literal of the
+terrain layers' facing factor sat(scale * (N . c109)), which the shader loads itself (no constant
+reader gives it); required for the terrain-layer families, refused for the others (0.0f in the line).
+The LIGHT lines, each followed by its LIGHT_VS lines, come last.
 
 An entry is refused (ValueError naming the shader) rather than read loosely: a key is "0x" and 16
 hex digits and names its shader once, whatever the letters' case (load() also refuses a key written
 twice in the file); every entry has "manual": true and a non-empty "evidence", an "alpha" its
-"alpha_evidence"; a slot is a JSON integer 0 to 31; and an entry has only the keys of its form
-(ENTRY_KEYS, ALPHA_KEYS: the keys the committed table uses), so a mistyped key cannot be dropped
-without a word.
+"alpha_evidence", a "light" its own "evidence"; a slot is a JSON integer 0 to 31; and an entry has
+only the keys of its form (ENTRY_KEYS, ALPHA_KEYS, LIGHT_KEYS: the keys the committed table uses),
+so a mistyped key cannot be dropped without a word. A light family the entry's kind cannot have (a
+terrain family on a plain entry and the reverse, a layer family on a far entry) is refused.
 """
 import argparse
 import json
@@ -46,10 +59,16 @@ _COMP = "xyzw"
 # kind. "kind" selects the form ("plain", the default, for the first two).
 _COMMON_KEYS = ("kind", "manual", "evidence")
 ENTRY_KEYS = {
-    "albedo": _COMMON_KEYS + ("slot", "u", "v", "alpha", "alpha_manual", "alpha_evidence"),
+    "albedo": _COMMON_KEYS + ("slot", "u", "v", "alpha", "alpha_manual", "alpha_evidence", "light"),
     "no_albedo": _COMMON_KEYS + ("no_albedo",),
-    "terrain": _COMMON_KEYS + _TERRAIN_SLOTS + ("steep",),
+    "terrain": _COMMON_KEYS + _TERRAIN_SLOTS + ("steep", "light"),
 }
+LIGHT_KEYS = ("family", "vertex", "facing_scale", "evidence")
+# Light families (light_check.py FAMILIES without "-multi") -> the code of capture::LightFamily
+# (material.h pins the two against each other), and the entry kinds each may stand on.
+LIGHT_FAMILIES = {"terrain-layer": 1, "terrain-far": 2, "object": 3, "tree-trunk": 4, "plant": 5, "plant-lit": 6}
+_LIGHT_KINDS = {"terrain-layer": ("terrain-layer",), "terrain-far": ("terrain-far", "terrain-far-fade")}
+_ONE_LIGHT_ONLY = ("terrain-far",)   # no two- or four-light form of it exists
 ALPHA_KEYS = ("source", "component", "slot", "scale", "divide_by_alpha")  # "slot" only with source "fetch"
 # The small term of the steep weights is a literal like 0.0001: this much or more is not one. One
 # bound for the table, for terrain_replay.py's reading of a capture (it imports this) and for
@@ -176,6 +195,49 @@ def _steep_fields(ps, e, kind, slots):
     return [str(side), f"{threshold!r}f", f"{epsilon!r}f"]
 
 
+def _light_lines(ps, h, e, kind):
+    """The FABLE2_PS_LIGHT line of an entry's "light" and its FABLE2_PS_LIGHT_VS lines."""
+    light = e["light"]
+    if not isinstance(light, dict):
+        raise ValueError(f"{ps}: light is not an object")
+    unknown = [k for k in light if k not in LIGHT_KEYS]
+    if unknown:
+        raise ValueError(f"{ps}: unknown light key {', '.join(sorted(map(str, unknown)))}")
+    name = light.get("family")
+    base = name[:-len("-multi")] if isinstance(name, str) and name.endswith("-multi") else name
+    if not isinstance(name, str) or base not in LIGHT_FAMILIES or (base != name and base in _ONE_LIGHT_ONLY):
+        raise ValueError(f"{ps}: unknown light family {name!r}")
+    kinds = _LIGHT_KINDS.get(base, ("plain",))
+    if kind not in kinds:
+        raise ValueError(f"{ps}: light family {name} belongs to a {' or '.join(kinds)} entry, not {kind}")
+    evidence = light.get("evidence")
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise ValueError(f"{ps}: light without evidence")
+    vertex = light.get("vertex")
+    if not isinstance(vertex, list) or not vertex:
+        raise ValueError(f"{ps}: light vertex is not a list of vertex shaders")
+    seen = {}
+    for vs in vertex:
+        if not isinstance(vs, str) or not re.fullmatch(r"0x[0-9A-Fa-f]{16}", vs):
+            raise ValueError(f"{ps}: light vertex {vs!r} is not 0x and 16 hex digits")
+        if int(vs, 16) in seen:
+            raise ValueError(f"{ps}: light vertex {seen[int(vs, 16)]} twice")
+        seen[int(vs, 16)] = vs
+    facing = "0.0f"
+    if base == "terrain-layer":
+        if "facing_scale" not in light:
+            raise ValueError(f"{ps}: light family {name} needs facing_scale")
+        scale = light["facing_scale"]
+        # (a value that is not finite fails the comparison or is infinite)
+        if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not 0.0 < scale < float("inf"):
+            raise ValueError(f"{ps}: light facing_scale {scale!r} is not a number above 0")
+        facing = f"{float(scale)!r}f"
+    elif "facing_scale" in light:
+        raise ValueError(f"{ps}: light facing_scale belongs to a terrain-layer family, not {name}")
+    lines = [f"FABLE2_PS_LIGHT({h}, {LIGHT_FAMILIES[base]}, {int(base != name)}, {facing})"]
+    return lines + [f"FABLE2_PS_LIGHT_VS({h}, 0x{value:016X}ull)" for value in sorted(seen)]
+
+
 def _axis_fields(ps, axis, a):
     """(interpolator, component, four stage refs) of an albedo entry's "u" or "v": an object with
     "input" and "stages" and nothing else; a stage has "scale" and "offset" and nothing else."""
@@ -219,7 +281,7 @@ def _check_hashes(data):
 def generate(data):
     _check_hashes(data)
     lines = ["// Generated by tools/xdk_sigmatch/gen_albedo_table.py - do not edit."]
-    alpha_lines, terrain_lines = [], []
+    alpha_lines, terrain_lines, light_lines = [], [], []
     for ps, e in sorted(data.items(), key=lambda kv: int(kv[0], 16)):
         h = f"0x{int(ps, 16):016X}ull"
         if not isinstance(e, dict):
@@ -232,6 +294,8 @@ def generate(data):
             steep = _steep_fields(ps, e, kind, (base, detail))
             _check_entry(ps, e, "terrain")
             terrain_lines.append(f"FABLE2_PS_TERRAIN({h}, {_KINDS[kind]}, {base}, {detail}, {', '.join(steep)})")
+            if "light" in e:
+                light_lines += _light_lines(ps, h, e, kind)
             continue
         if any(k in e for k in _TERRAIN_SLOTS + ("steep",)):
             raise ValueError(f"{ps}: base_slot, detail_slot and steep belong to a terrain kind")
@@ -259,7 +323,9 @@ def generate(data):
         lines.append(f"FABLE2_PS_ALBEDO({h}, {', '.join(fields)})")
         if "alpha" in e:
             alpha_lines.append(f"FABLE2_PS_ALPHA({h}, {', '.join(str(f) for f in _alpha_fields(ps, e))})")
-    return "\n".join(lines + alpha_lines + terrain_lines) + "\n"
+        if "light" in e:
+            light_lines += _light_lines(ps, h, e, kind)
+    return "\n".join(lines + alpha_lines + terrain_lines + light_lines) + "\n"
 
 
 def _no_repeats(pairs):

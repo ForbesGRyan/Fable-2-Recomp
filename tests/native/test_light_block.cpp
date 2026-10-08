@@ -69,6 +69,12 @@ bool Is(const ConstantSource& s, Kind kind, uint32_t object = 0, uint32_t index 
   return s.kind == kind && (kind != Kind::kMemory || (s.object == object && s.index == index));
 }
 
+// The capture keeps one model per bank and guest thread. Their constructor is constexpr, so
+// they are constant-initialised (`constinit`: this does not compile otherwise) and no access
+// tests a thread-local guard.
+constinit ConstantLoads g_constinit_pixel{kPixelBank};
+constinit thread_local ConstantLoads t_constinit_vertex{kVertexBank};
+
 // A model in a scene whose uploads were all followed.
 ConstantLoads InScene() {
   ConstantLoads t;
@@ -523,7 +529,7 @@ int main() {
     CHECK(t.Load(80, 36, 0x40002000, 0, false, kAll));  // followed, and not believed yet
     CHECK(!t.whole() && Is(t.Find(80), Kind::kUnknown) && !t.LoadedThisScene(80));
     CHECK(t.Load(0, 4, 0x40012000, 0, true, 0x2) && t.Load(4, 4, 0x40013000, 0, true, 0x2));
-    CHECK(t.binned_count() == 1);  // nor kept: the one tile load of before the gap
+    CHECK(t.binned_count() == 0);  // nor listed: a row carries no tile load while nothing is known
     t.BankUpload(~0ull);
     CHECK(Is(t.Find(84), Kind::kUnknown));
     t.Observe(true);  // more hooks of that scene, all followed: still not from its begin
@@ -816,6 +822,74 @@ int main() {
     w.OnShaderLoad(true, true, true, 0x00000110);
     w.Forget();  // not followed any more (discovery off)
     CHECK(!w.known);
+  }
+  // --- the models as the capture declares them (constant-initialised) ---
+  {
+    CHECK(g_constinit_pixel.whole() && Is(g_constinit_pixel.Find(19), Kind::kBank));
+    g_constinit_pixel.Skip();
+    CHECK(Is(g_constinit_pixel.Find(80), Kind::kUnknown) && Is(g_constinit_pixel.Find(40), Kind::kBank));
+    t_constinit_vertex.Skip();
+    CHECK(Is(t_constinit_vertex.Find(76), Kind::kUnknown) && Is(t_constinit_vertex.Find(40), Kind::kUnknown));
+    CHECK(Is(t_constinit_vertex.Find(4), Kind::kBank) && Is(t_constinit_vertex.Find(108), Kind::kBank));
+  }
+  // --- the tile loads a row lists ("ptiles"): none while the model is not whole. What the
+  //     table holds then was loaded before the gap; beside the dashes of "pfull" it would be a
+  //     stale value. ---
+  {
+    ConstantLoads t = InScene();
+    CHECK(t.Load(0, 4, 0x40010000, 0, true, 0x2) && t.Load(0, 4, 0x40011000, 0, true, 0x8));
+    CHECK(t.binned_count() == 2 && t.InForce(t.binned(0), 0));
+    t.Skip();
+    CHECK(t.binned_count() == 0 && Is(t.Find(0), Kind::kUnknown));
+    t.Observe(true);  // a hook of the same scene: still not whole, still nothing listed
+    CHECK(t.binned_count() == 0);
+    t.Observe(false);
+    t.Observe(true);  // the next scene, followed from its begin
+    CHECK(t.whole() && t.binned_count() == 0);
+    CHECK(t.Load(0, 4, 0x40012000, 0, true, 0x2));
+    CHECK(t.binned_count() == 1 && t.binned(0).object == 0x40012000);
+  }
+  // --- a call that names a register outside the table is counted whatever it loads: also
+  //     when it is predicated under no bin and so executes in no pass (its call site exists) ---
+  {
+    ConstantLoads t = InScene();
+    CHECK(t.Load(200, 4, 0x40073000, 0, true, 0));
+    CHECK(t.untabled_loads() == 1);
+    CHECK(Is(t.Find(200), Kind::kBank) && t.binned_count() == 0);  // nothing was loaded
+    t.Skip();
+    CHECK(Is(t.Find(200), Kind::kUnknown) && Is(t.Find(203), Kind::kUnknown) && Is(t.Find(204), Kind::kBank));
+    // The table's own registers under no bin: nothing new.
+    ConstantLoads u = InScene();
+    CHECK(u.Load(0, 4, 0x40010000, 0, true, 0) && u.untabled_loads() == 0 && u.binned_count() == 0);
+    CHECK(Is(u.Find(0), Kind::kBank));
+  }
+  // --- the bank's upload of a group ends the following of that group and of no other: each
+  //     loaded group is taken back by its own upload, in either order, and a group loaded
+  //     again after its upload is taken back again. (Bit 63 - g of the pending mask is group
+  //     g; groups 0 and 63 are each other's mirror, 20 and 43 too.) ---
+  {
+    for (int order = 0; order < 2; ++order) {
+      ConstantLoads t = InScene();
+      CHECK(t.Load(0, 4, 0x40010000, 0, false, kAll));     // group 0
+      CHECK(t.Load(252, 4, 0x40020000, 0, false, kAll));   // group 63 (outside the table: counted)
+      CHECK(t.Load(80, 4, 0x40030000, 0, false, kAll));    // group 20
+      CHECK(t.Load(172, 4, 0x40040000, 0, false, kAll));   // group 43
+      const uint32_t first = order ? 252 : 0, second = order ? 0 : 252;
+      t.BankUpload(1ull << (63 - first / 4));
+      CHECK(Is(t.Find(first), Kind::kBank) && Is(t.Find(second), Kind::kMemory, order ? 0x40010000 : 0x40020000, 0));
+      CHECK(Is(t.Find(80), Kind::kMemory, 0x40030000, 0) && Is(t.Find(172), Kind::kMemory, 0x40040000, 0));
+      t.BankUpload(1ull << (63 - second / 4));
+      CHECK(Is(t.Find(second), Kind::kBank) && Is(t.Find(first + 3), Kind::kBank));
+      t.BankUpload(1ull << (63 - 20));
+      CHECK(Is(t.Find(80), Kind::kBank) && Is(t.Find(172), Kind::kMemory, 0x40040000, 0));
+      t.BankUpload(1ull << (63 - 43));
+      CHECK(Is(t.Find(172), Kind::kBank));
+      // Loaded again after its upload: its next upload is followed again.
+      CHECK(t.Load(first, 4, 0x40050000, 0, false, kAll));
+      CHECK(Is(t.Find(first), Kind::kMemory, 0x40050000, 0));
+      t.BankUpload(~0ull);
+      CHECK(Is(t.Find(first), Kind::kBank));
+    }
   }
   std::printf("PASS: light block\n");
   return 0;

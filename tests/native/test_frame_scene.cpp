@@ -1,8 +1,11 @@
 // Synthetic standalone test; no game or GPU.
 #include "../../src/native/render/frame_scene.h"
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
+#include <memory>
 #include <new>
 #include <string>
 #include <thread>
@@ -15,6 +18,10 @@ using capture::SkipReason;
 // (the next allocation of g_fail_lo <= bytes < g_fail_hi throws once).
 static std::atomic<long long> g_live{0};
 static std::atomic<size_t> g_fail_lo{0}, g_fail_hi{0};
+// Allocations of this size or more, counted: in the creeping-frame case below they are the
+// buffers of a frame's records and light inputs (nothing else there is that large).
+static constexpr size_t kBufferBytes = 32 * 1024;
+static std::atomic<long long> g_buffers{0};
 void* operator new(std::size_t n) {
   const size_t lo = g_fail_lo.load();
   if (lo != 0 && n >= lo && n < g_fail_hi.load()) {
@@ -24,6 +31,7 @@ void* operator new(std::size_t n) {
   void* p = std::malloc(n ? n : 1);
   if (!p) throw std::bad_alloc();
   ++g_live;
+  if (n >= kBufferBytes) ++g_buffers;
   return p;
 }
 void operator delete(void* p) noexcept {
@@ -44,6 +52,420 @@ static capture::DrawInputs Good() {
   in.have_vb = true; in.vb = {0x1000, 1200}; in.have_ib = true; in.ib = {0x2000, 60};
   in.transform = &t; in.bank = bank;
   return in;
+}
+
+// The light side array and the frame's light block (FrameScene::lights, ::light), the reuse of
+// the three buffers, and the pool under threads. `r`: a drawable record. Returns 0 or the number
+// of the case that failed.
+static int LightAndPoolTests(const capture::DrawRecord& r) {
+  using capture::kNoSideIndex;
+  using capture::LightFamily;
+  using capture::LightInputs;
+  using capture::LightReason;
+  using capture::TerrainPatch;
+  using render::LightOf;
+  using render::TerrainOf;
+  auto inputs = [](LightFamily family, uint32_t mark, bool multi = false) {
+    LightInputs l;
+    l.family = family;
+    l.multi = multi;
+    l.colour_first = mark;
+    return l;
+  };
+  auto patch = [](float first) {
+    TerrainPatch p;
+    p.active = true;
+    p.patch = first;
+    return p;
+  };
+  capture::DrawRecord plain = r;
+  plain.material.ps_hash = 0xAAAA;
+  capture::DrawRecord ground = r;
+  ground.prim = capture::kPrimQuadPatch;
+  ground.material.status = capture::MaterialStatus::kTerrain;
+  ground.material.ps_hash = 0x9C21;
+
+  // --- the side array: each lit record's inputs at its light_index (LightOf) ---
+  {
+    const LightInputs obj = inputs(LightFamily::kObject, 1), plant = inputs(LightFamily::kPlant, 2, true),
+                      layer = inputs(LightFamily::kTerrainLayer, 3);
+    const TerrainPatch p0 = patch(10);
+    render::FrameBuilder lb;
+    lb.Add(plain, nullptr, &obj);                 // outside the bracket: ignored, no entry
+    lb.Open();
+    lb.Add(plain, nullptr, &obj);                 // 0: light 0
+    lb.Add(plain);                                // 1: no inputs (light-unknown unless the caller says why)
+    lb.Add(ground, &p0, &layer);                  // 2: terrain 0 and light 1
+    capture::DrawRecord np = plain;
+    np.material.ps_hash = 0xBEEF;
+    lb.Add(np, nullptr, nullptr, LightReason::kNormalUnsupported);  // 3
+    capture::DrawRecord gone = plain;
+    gone.skip = SkipReason::kBadIndex;
+    lb.Add(gone, nullptr, &plant);                // a skipped draw takes no entry and is in no light tally
+    capture::DrawRecord stale = plain;
+    stale.light_index = 0;
+    stale.material.ps_hash = 0xF00D;
+    lb.Add(stale);                                // 4: an index the frame did not give is not kept
+    lb.Add(plain, nullptr, &plant);               // 5: light 2, a "-multi" form
+    const LightInputs none{};
+    lb.Add(plain, nullptr, &none);                // 6: inputs without a family are no inputs
+    auto f1 = lb.Finish(1);
+    if (f1->captured != 8 || f1->draws.size() != 7 || f1->lights.size() != 3 || f1->terrain.size() != 1) return 130;
+    const uint16_t want[7] = {0, kNoSideIndex, 1, kNoSideIndex, kNoSideIndex, 2, kNoSideIndex};
+    for (int i = 0; i < 7; ++i) {
+      if (f1->draws[i].light_index != want[i]) return 131;
+    }
+    if (f1->draws[2].terrain_index != 0 || TerrainOf(*f1, f1->draws[2])->patch != 10.0f) return 132;
+    const LightInputs* l0 = LightOf(*f1, f1->draws[0]);
+    const LightInputs* l1 = LightOf(*f1, f1->draws[2]);
+    const LightInputs* l2 = LightOf(*f1, f1->draws[5]);
+    if (l0 != &f1->lights[0] || l1 != &f1->lights[1] || l2 != &f1->lights[2]) return 133;
+    if (l0->family != LightFamily::kObject || l0->colour_first != 1 || l1->family != LightFamily::kTerrainLayer ||
+        l1->colour_first != 3 || l2->family != LightFamily::kPlant || l2->colour_first != 2 || !l2->multi) {
+      return 134;
+    }
+    // A record without an index: null. An index past the end (a record of another scene, a
+    // damaged one): null, nothing is read.
+    if (LightOf(*f1, f1->draws[1]) || LightOf(*f1, f1->draws[3]) || LightOf(*f1, f1->draws[4]) ||
+        LightOf(*f1, f1->draws[6]) || LightOf(*f1, capture::DrawRecord{})) {
+      return 135;
+    }
+    capture::DrawRecord past = f1->draws[0];
+    past.light_index = 3;
+    if (LightOf(*f1, past)) return 136;
+    past.light_index = 0xFFFE;
+    if (LightOf(*f1, past)) return 137;
+    if (LightOf(render::FrameScene{}, f1->draws[0])) return 138;
+    {
+      render::FrameScene big;
+      big.lights.resize(size_t(kNoSideIndex) + 2);
+      past.light_index = kNoSideIndex;
+      if (LightOf(big, past)) return 139;
+      past.light_index = kNoSideIndex - 1;
+      if (LightOf(big, past) != &big.lights[kNoSideIndex - 1]) return 140;
+    }
+    // The frame's tallies: lit records by family and how many of them are "-multi" forms; the
+    // others by reason, and their pixel shaders by count.
+    using F = LightFamily;
+    const uint32_t families[size_t(F::kCount)] = {0, 1, 0, 1, 0, 1, 0};
+    for (size_t i = 0; i < size_t(F::kCount); ++i) {
+      if (f1->light_family[i] != families[i]) return 141;
+    }
+    if (f1->light_multi != 1) return 142;
+    if (f1->light_reason[size_t(LightReason::kLightUnknown)] != 3 ||
+        f1->light_reason[size_t(LightReason::kNormalUnsupported)] != 1 || f1->light_reason[0] != 0) {
+      return 143;
+    }
+    const std::vector<std::pair<uint64_t, uint32_t>> unknown = {{0xAAAA, 2}, {0xBEEF, 1}, {0xF00D, 1}};
+    if (f1->light_unknown_ps != unknown) return 144;
+    if (f1->skipped[size_t(SkipReason::kBadIndex)] != 1) return 145;
+
+    // The next frame starts with an empty array and clean tallies; the first frame's scene
+    // keeps its own entries.
+    lb.Open();
+    lb.Add(plain);
+    lb.Add(plain, nullptr, &plant);
+    // A reason that is none, or no reason at all, for a record without inputs: light-unknown.
+    lb.Add(plain, nullptr, nullptr, LightReason::kNone);
+    lb.Add(plain, nullptr, nullptr, LightReason::kCount);
+    auto f2 = lb.Finish(2);
+    if (f2->draws.size() != 4 || f2->lights.size() != 1 || f2->draws[0].light_index != kNoSideIndex ||
+        f2->draws[1].light_index != 0 || LightOf(*f2, f2->draws[1])->colour_first != 2) {
+      return 146;
+    }
+    if (f2->light_family[size_t(F::kPlant)] != 1 || f2->light_family[size_t(F::kObject)] != 0 || f2->light_multi != 1 ||
+        f2->light_reason[size_t(LightReason::kLightUnknown)] != 3 ||
+        f2->light_reason[size_t(LightReason::kNormalUnsupported)] != 0 ||
+        f2->light_unknown_ps != std::vector<std::pair<uint64_t, uint32_t>>{{0xAAAA, 3}}) {
+      return 147;
+    }
+    if (f1->lights.size() != 3 || LightOf(*f1, f1->draws[5])->colour_first != 2) return 148;
+    // A frame without lit records, and one without records, hold none.
+    lb.Open();
+    lb.Add(plain);
+    auto f3 = lb.Finish(3);
+    if (!f3->lights.empty() || f3->light_reason[size_t(LightReason::kLightUnknown)] != 1) return 149;
+    lb.Open();
+    lb.CountUnrecorded();
+    auto f4 = lb.Finish(4);
+    if (!f4->lights.empty() || f4->light_reason[size_t(LightReason::kLightUnknown)] != 0 || !f4->light_unknown_ps.empty()) return 150;
+
+    // The index is 16 bits: a frame holds 65,535 light entries. A lit record past that is kept,
+    // with its material, without inputs, and counted light-unknown: the light never removes a
+    // draw (a terrain record past the terrain array's cap is skipped: it cannot be built).
+    lb.Open();
+    for (uint32_t i = 0; i < kNoSideIndex; ++i) {
+      const LightInputs l = inputs(LightFamily::kObject, i);
+      lb.Add(plain, nullptr, &l);
+    }
+    lb.Add(plain, nullptr, &obj);
+    // (whatever reason comes with inputs that were fine: the cap is why it has none)
+    lb.Add(plain, nullptr, &plant, LightReason::kNormalUnsupported);
+    lb.Add(plain);
+    auto f5 = lb.Finish(5);
+    if (f5->captured != 65538 || f5->draws.size() != 65538 || f5->lights.size() != 65535) return 151;
+    for (uint32_t n : f5->skipped) {
+      if (n) return 152;
+    }
+    for (uint32_t i = 0; i < kNoSideIndex; ++i) {
+      const LightInputs* l = LightOf(*f5, f5->draws[i]);
+      if (f5->draws[i].light_index != i || !l || l->colour_first != i) return 153;
+    }
+    for (uint32_t i = 65535; i < 65538; ++i) {
+      if (f5->draws[i].light_index != kNoSideIndex || LightOf(*f5, f5->draws[i])) return 154;
+    }
+    if (f5->light_family[size_t(F::kObject)] != 65535 || f5->light_family[size_t(F::kPlant)] != 0 ||
+        f5->light_multi != 0 || f5->light_reason[size_t(LightReason::kLightUnknown)] != 3 ||
+        f5->light_reason[size_t(LightReason::kNormalUnsupported)] != 0) {
+      return 155;
+    }
+    lb.Open();
+    lb.Add(plain, nullptr, &plant);
+    auto f6 = lb.Finish(6);
+    if (f6->lights.size() != 1 || f6->draws[0].light_index != 0) return 156;
+  }
+
+  // --- the frame's light block: the first valid one offered inside the scene ---
+  {
+    capture::LightBlock day{};
+    day.valid = true;
+    day.sun_dir[0] = 0.5f;
+    day.sun_col[2] = 0.25f;
+    capture::LightBlock later = day;
+    later.sun_dir[0] = -0.75f;
+    const capture::LightBlock zero{};
+    if (render::FrameScene{}.light.valid || render::FrameScene{}.light_tries != 0) return 160;
+    render::FrameBuilder bb;
+    bb.SetLight(day);       // outside the bracket: not the scene's
+    bb.CountLightTry();
+    if (bb.HasLight()) return 161;
+    bb.Open();
+    if (bb.HasLight()) return 162;
+    bb.CountLightTry();
+    bb.SetLight(zero);      // a read that gave no block
+    if (bb.HasLight()) return 163;
+    bb.CountLightTry();
+    bb.SetLight(day);
+    if (!bb.HasLight()) return 164;
+    bb.SetLight(later);     // the frame keeps its first
+    bb.SetLight(zero);
+    auto f = bb.Finish(1);
+    if (!f->light.valid || f->light.sun_dir[0] != 0.5f || f->light.sun_col[2] != 0.25f || f->light_tries != 2) return 165;
+    // The next frame has none until one is offered: never the frame before's.
+    if (bb.HasLight()) return 166;
+    bb.Open();
+    bb.Add(plain);
+    capture::LightBlock junk = day;  // not valid, whatever else it holds: nothing of it is kept
+    junk.valid = false;
+    bb.SetLight(junk);
+    auto g = bb.Finish(2);
+    if (g->light.valid || std::memcmp(&g->light, &zero, sizeof(zero)) != 0 || g->light_tries != 0) return 167;
+    if (!f->light.valid) return 168;
+    bb.Open();
+    bb.SetLight(later);
+    auto h = bb.Finish(3);
+    if (!h->light.valid || h->light.sun_dir[0] != -0.75f || h->light_tries != 0) return 169;
+  }
+
+  // --- reuse: the light array circulates with the records and the terrain array ---
+  // Frame `id`: `terrain` terrain records (patch id * 1000 + i), then `lit` plain records with
+  // inputs (mark id * 1000 + i), then `dark` plain ones; each record's count is the frame's id.
+  auto build = [&](render::FrameBuilder& b, uint32_t id, uint32_t terrain, uint32_t lit, uint32_t dark) {
+    capture::DrawRecord g = ground, o = plain;
+    g.count = o.count = id;
+    b.Open();
+    for (uint32_t i = 0; i < terrain; ++i) {
+      const TerrainPatch p = patch(float(id * 1000 + i));
+      b.Add(g, &p);
+    }
+    for (uint32_t i = 0; i < lit; ++i) {
+      const LightInputs l = inputs(LightFamily::kObject, id * 1000 + i);
+      b.Add(o, nullptr, &l);
+    }
+    for (uint32_t i = 0; i < dark; ++i) b.Add(o);
+    return b.Finish(id);
+  };
+  auto whole = [&](const render::FrameScene& sc, uint32_t id, uint32_t terrain, uint32_t lit, uint32_t dark) {
+    if (sc.draws.size() != terrain + lit + dark || sc.terrain.size() != terrain || sc.lights.size() != lit) return false;
+    for (uint32_t i = 0; i < terrain + lit + dark; ++i) {
+      const TerrainPatch* t = TerrainOf(sc, sc.draws[i]);
+      const LightInputs* l = LightOf(sc, sc.draws[i]);
+      if (sc.draws[i].count != id) return false;
+      if (i < terrain ? (!t || t->patch != float(id * 1000 + i)) : t != nullptr) return false;
+      const bool is_lit = i >= terrain && i < terrain + lit;
+      if (is_lit ? (!l || sc.draws[i].light_index != i - terrain || l->colour_first != id * 1000 + (i - terrain)) : l != nullptr) {
+        return false;
+      }
+    }
+    return true;
+  };
+  const long long live_before = g_live.load();
+  {
+    render::FrameBuilder rb;
+    auto a = build(rb, 1, 3, 5, 2);
+    const LightInputs* a_lights = a->lights.data();
+    const capture::DrawRecord* a_draws = a->draws.data();
+    const size_t a_lcap = a->lights.capacity();
+    auto b = build(rb, 2, 3, 5, 2);
+    if (b->lights.data() == a_lights || rb.spare_count() != 0) return 170;
+    a.reset();
+    if (rb.spare_count() != 1) return 171;
+    auto c = build(rb, 3, 2, 2, 1);
+    if (c->lights.data() == a_lights || c->lights.data() == b->lights.data()) return 172;
+    auto d = build(rb, 4, 1, 2, 0);
+    // Frame 4 is in the three buffers of frame 1, at their capacities, and holds only itself.
+    if (d->lights.data() != a_lights || d->draws.data() != a_draws || d->lights.capacity() != a_lcap) return 173;
+    if (!whole(*d, 4, 1, 2, 0) || !whole(*b, 2, 3, 5, 2) || !whole(*c, 3, 2, 2, 1)) return 174;
+    b.reset();
+    c.reset();
+    d.reset();
+    if (rb.spare_count() != 3) return 175;
+    const long long live = g_live.load();
+    rb.ReleaseSpares();  // three buffers a pair now
+    if (rb.spare_count() != 0 || g_live.load() != live - 9) return 176;
+    // Buffers that hold only light inputs (no record survived) are kept like any other.
+    render::SceneBufferPool pool;
+    render::SceneBufferPool::Buffers only;
+    only.lights.resize(3);
+    pool.Return(std::move(only));
+    if (pool.size() != 1 || pool.Take().lights.size() != 3 || pool.size() != 0) return 177;
+    pool.Return(render::SceneBufferPool::Buffers{});  // nothing to keep
+    if (pool.size() != 0) return 178;
+  }
+  if (g_live.load() != live_before) return 179;
+
+  // --- a frame that grows a little at a time does not allocate each time ---
+  // The next frame's buffers are sized by the frame before with half as much again, so a frame
+  // creeping up by one record (as the game's does: a few draws more or fewer every frame) finds
+  // room. Three scenes alive, as in the game; the frame has 30 terrain records and 200 lit
+  // records to begin with and one more lit record every 5 frames, up to 290. After the warm-up
+  // each buffer in circulation was allocated with room for 300, except the first frame's own
+  // (grown by appending): at most that one is replaced, once for the records and once for the
+  // light inputs. (Sized by the frame before exactly, every step of the creep allocates.)
+  {
+    render::FrameBuilder cb;
+    std::shared_ptr<render::FrameScene> ring[3];
+    long long after_warm_up = 0;
+    size_t largest = 0;
+    for (uint32_t f = 0; f < 480; ++f) {
+      if (f == 30) after_warm_up = g_buffers.load();
+      const uint32_t lit = f < 30 ? 200 : 200 + (f - 30) / 5;
+      ring[f % 3] = build(cb, f + 1, 30, lit, 0);
+      if (!whole(*ring[f % 3], f + 1, 30, lit, 0)) return 180;
+      largest = std::max(largest, ring[f % 3]->draws.capacity());
+    }
+    const long long allocations = g_buffers.load() - after_warm_up;
+    if (allocations > 2) {
+      std::cout << "creeping frame: " << allocations << " buffer allocations after the warm-up\n";
+      return 181;
+    }
+    // The capacity stays within the largest frame and its half (the vector's own growth is 1.5 too).
+    if (largest > (30 + 290) * 3 / 2 + 1) return 182;
+  }
+  if (g_live.load() != live_before) return 183;
+
+  // --- the pool under threads ---
+  // A: the pool alone. Three threads take a set of buffers, check that every entry carries the
+  // set's one marker (before and after a pause: the set is theirs alone), and give it back; one
+  // of them frees the spares now and then. Without the pool's lock two threads get the same
+  // buffers, or the list's count runs past its slots.
+  {
+    render::SceneBufferPool pool;
+    std::atomic<uint32_t> next_id{1}, bad{0};
+    auto worker = [&](int who) {
+      for (int i = 0; i < 40000; ++i) {
+        render::SceneBufferPool::Buffers b = pool.Take();
+        if (b.draws.capacity() == 0) {
+          const uint32_t id = next_id.fetch_add(1);
+          b.draws.resize(4);
+          b.terrain.resize(2);
+          b.lights.resize(3);
+          for (auto& d : b.draws) d.count = id;
+          for (auto& t : b.terrain) t.patches = id;
+          for (auto& l : b.lights) l.colour_first = id;
+        }
+        const uint32_t id = b.draws.empty() ? 0 : b.draws[0].count;
+        for (int pass = 0; pass < 2; ++pass) {
+          if (b.draws.size() != 4 || b.terrain.size() != 2 || b.lights.size() != 3) {
+            ++bad;
+            break;
+          }
+          for (auto& d : b.draws) bad += d.count != id;
+          for (auto& t : b.terrain) bad += t.patches != id;
+          for (auto& l : b.lights) bad += l.colour_first != id;
+          if (who == 0 && (i & 63) == 0) std::this_thread::yield();
+        }
+        if (who == 2 && (i % 1000) == 0) pool.Release();
+        pool.Return(std::move(b));
+        if (pool.size() > render::SceneBufferPool::kMaxSpares) ++bad;
+      }
+    };
+    std::thread t0(worker, 0), t1(worker, 1), t2(worker, 2);
+    t0.join();
+    t1.join();
+    t2.join();
+    if (bad.load() != 0) return 190;
+  }
+  if (g_live.load() != live_before) return 191;
+  // B: builder and publisher with two readers that drop each scene at once (often its last
+  // reference), while the capture side frees the spares now and then (the view going off and on).
+  {
+    render::FrameBuilder rb;
+    render::ScenePublisher shared;
+    std::atomic<bool> stop{false};
+    std::atomic<uint32_t> bad{0}, seen{0};
+    auto sizes = [](uint32_t id, uint32_t* terrain, uint32_t* lit) {
+      *terrain = 20 + id % 7;
+      *lit = 5 + id % 3;
+    };
+    auto reader = [&] {
+      while (!stop.load()) {
+        std::shared_ptr<const render::FrameScene> s = shared.Latest();
+        if (!s) continue;
+        uint32_t terrain, lit;
+        sizes(uint32_t(s->frame), &terrain, &lit);
+        if (!whole(*s, uint32_t(s->frame), terrain, lit, 3)) ++bad;
+        ++seen;
+        s.reset();
+      }
+    };
+    std::thread t1(reader), t2(reader);
+    for (uint32_t id = 1; id <= 6000; ++id) {
+      uint32_t terrain, lit;
+      sizes(id, &terrain, &lit);
+      shared.Publish(build(rb, id, terrain, lit, 3));
+      if (id % 97 == 0) rb.ReleaseSpares();
+      if (rb.spare_count() > render::SceneBufferPool::kMaxSpares) ++bad;
+    }
+    while (seen.load() == 0) std::this_thread::yield();
+    stop = true;
+    t1.join();
+    t2.join();
+    shared.Publish(nullptr);
+    if (bad.load() != 0) return 192;
+  }
+  if (g_live.load() != live_before) return 193;
+  // C: the builder dies on one thread while another drops its scenes. Each scene's buffers go to
+  // the pool while it lives and are freed by the scene itself afterwards; nothing is lost or
+  // freed twice.
+  {
+    for (int round = 0; round < 400; ++round) {
+      auto rb = std::make_unique<render::FrameBuilder>();
+      std::shared_ptr<render::FrameScene> held[6];
+      for (uint32_t i = 0; i < 6; ++i) held[i] = build(*rb, 60 + i, 2, 4, 2);
+      std::atomic<bool> go{false};
+      std::thread t([&] {
+        while (!go.load()) {
+        }
+        for (auto& h : held) h.reset();
+      });
+      go = true;
+      rb.reset();
+      t.join();
+    }
+  }
+  if (g_live.load() != live_before) return 194;
+  return 0;
 }
 
 int main() {
@@ -573,11 +995,17 @@ int main() {
     if (g_live.load() != live_before) return 128;
   }
 
+  if (const int code = LightAndPoolTests(r)) {
+    std::cout << "FAIL: light side array / pool case " << code << "\n";  // (an exit code would wrap at 256)
+    return 129;
+  }
+
   render::ScenePublisher pub;
   if (pub.Latest()) return 18;
   pub.Publish(s);
   pub.Publish(s2);
   if (pub.Latest()->frame != 43) return 19;
-  std::cout << "PASS: draw record, frame builder, terrain side array, buffer reuse, publisher\n";
+  std::cout << "PASS: draw record, frame builder, terrain side array, light side array and block, buffer reuse, "
+               "pool under threads, publisher\n";
   return 0;
 }

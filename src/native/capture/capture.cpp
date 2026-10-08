@@ -130,6 +130,10 @@ DrawState g_state;
 std::atomic<uint64_t> g_capture_ticks{0};
 double g_ticks_per_ms = 1e6;  // written once in SetMemory, before any hook runs
 fable2::diagnostics::WindowStats g_capture_window(300);  // OnSwap thread only
+// Frames with records since the last periodic log line, and how many of them have no light
+// block ("light-block"). OnSwap thread only.
+uint32_t g_light_frames = 0;
+uint32_t g_light_block_missing = 0;
 
 inline uint64_t Ticks() {
 #if defined(_M_X64) || defined(__x86_64__)
@@ -289,6 +293,7 @@ static constexpr TableEntry kTransformTable[] = {
 #define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF, CE, CD)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
+#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, SF, SM, SO, A0, SC, PW)
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
@@ -296,6 +301,7 @@ static constexpr TableEntry kTransformTable[] = {
 #undef FABLE2_VS_INSTANCE
 #undef FABLE2_VS_TERRAIN
 #undef FABLE2_VS_UV
+#undef FABLE2_VS_LIGHT
 };
 
 struct PosSwizzleEntry {
@@ -309,6 +315,7 @@ static constexpr PosSwizzleEntry kPosSwizzleTable[] = {
 #define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF, CE, CD)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
+#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, SF, SM, SO, A0, SC, PW)
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
@@ -316,6 +323,7 @@ static constexpr PosSwizzleEntry kPosSwizzleTable[] = {
 #undef FABLE2_VS_INSTANCE
 #undef FABLE2_VS_TERRAIN
 #undef FABLE2_VS_UV
+#undef FABLE2_VS_LIGHT
     {0, 0}};
 
 struct SkinEntry {
@@ -330,6 +338,7 @@ static constexpr SkinEntry kSkinTable[] = {
 #define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF, CE, CD)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
+#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, SF, SM, SO, A0, SC, PW)
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
@@ -337,6 +346,7 @@ static constexpr SkinEntry kSkinTable[] = {
 #undef FABLE2_VS_INSTANCE
 #undef FABLE2_VS_TERRAIN
 #undef FABLE2_VS_UV
+#undef FABLE2_VS_LIGHT
     {0, {-1, -1, {-1, -1, -1}, {0, 0, 0}, 1, {0, 0, 0, 0}, {0, 0, 0, 0}}}};
 
 struct InstanceEntry {
@@ -351,6 +361,7 @@ static constexpr InstanceEntry kInstanceTable[] = {
   {H, {{R0, R1, R2}, {S0, S1, S2}, INV, CNT, FIRST, BIAS, OFF, CE, CD}},
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
+#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, SF, SM, SO, A0, SC, PW)
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
@@ -358,6 +369,7 @@ static constexpr InstanceEntry kInstanceTable[] = {
 #undef FABLE2_VS_INSTANCE
 #undef FABLE2_VS_TERRAIN
 #undef FABLE2_VS_UV
+#undef FABLE2_VS_LIGHT
     {0, {{-1, -1, -1}, {0, 0, 0}, 0, 0, 0, 0.0f, 0, -1, -1}}};
 
 struct TerrainEntry {
@@ -371,6 +383,7 @@ static constexpr TerrainEntry kTerrainTable[] = {
 #define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF, CE, CD)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F) {H, {G, CE, HS, O, TO, TS, PO, F}},
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
+#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, SF, SM, SO, A0, SC, PW)
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
@@ -378,6 +391,7 @@ static constexpr TerrainEntry kTerrainTable[] = {
 #undef FABLE2_VS_INSTANCE
 #undef FABLE2_VS_TERRAIN
 #undef FABLE2_VS_UV
+#undef FABLE2_VS_LIGHT
     {0, {0, 0, 0, 0, 0, 0, -1, 0}}};
 
 // Albedo texture slot and UV interpolators per pixel shader hash
@@ -390,11 +404,15 @@ const std::vector<AlbedoSpec> kAlbedoTable = {
 #define FABLE2_PS_NO_ALBEDO(H) {H, int8_t(-1), 0, 0, 0, 0, {}, {}},
 #define FABLE2_PS_ALPHA(H, S, SL, C, SR0, SR1, DC)
 #define FABLE2_PS_TERRAIN(H, K, B, D, SS, ST, SE)
+#define FABLE2_PS_LIGHT(H, F, M, FS)
+#define FABLE2_PS_LIGHT_VS(H, VS)
 #include "ps_albedo_table.inc"
 #undef FABLE2_PS_ALBEDO
 #undef FABLE2_PS_NO_ALBEDO
 #undef FABLE2_PS_ALPHA
 #undef FABLE2_PS_TERRAIN
+#undef FABLE2_PS_LIGHT
+#undef FABLE2_PS_LIGHT_VS
 };
 
 // Alpha recipe per pixel shader hash (ps-albedo.json "alpha"); the source is the generated
@@ -409,11 +427,15 @@ const std::vector<PsAlphaEntry> kAlphaTable = {
 #define FABLE2_PS_ALPHA(H, S, SL, C, SR0, SR1, DC) \
   {H, {AlphaSource((S) + 1), uint8_t(SL), uint8_t(C), {int32_t(SR0), int32_t(SR1)}, (DC) != 0}},
 #define FABLE2_PS_TERRAIN(H, K, B, D, SS, ST, SE)
+#define FABLE2_PS_LIGHT(H, F, M, FS)
+#define FABLE2_PS_LIGHT_VS(H, VS)
 #include "ps_albedo_table.inc"
 #undef FABLE2_PS_ALBEDO
 #undef FABLE2_PS_NO_ALBEDO
 #undef FABLE2_PS_ALPHA
 #undef FABLE2_PS_TERRAIN
+#undef FABLE2_PS_LIGHT
+#undef FABLE2_PS_LIGHT_VS
 };
 
 // Terrain pixel shaders (ps-albedo.json entries whose "kind" is a terrain kind): the kind and the
@@ -434,11 +456,15 @@ const std::vector<PsTerrainEntry> kPsTerrainTable = {
 #define FABLE2_PS_ALPHA(H, S, SL, C, SR0, SR1, DC)
 #define FABLE2_PS_TERRAIN(H, K, B, D, SS, ST, SE) \
   {H, MaterialKind(K), uint8_t(B), uint8_t(D), (SS) >= 0, {uint8_t((SS) >= 0 ? (SS) : 0), ST, SE}},
+#define FABLE2_PS_LIGHT(H, F, M, FS)
+#define FABLE2_PS_LIGHT_VS(H, VS)
 #include "ps_albedo_table.inc"
 #undef FABLE2_PS_ALBEDO
 #undef FABLE2_PS_NO_ALBEDO
 #undef FABLE2_PS_ALPHA
 #undef FABLE2_PS_TERRAIN
+#undef FABLE2_PS_LIGHT
+#undef FABLE2_PS_LIGHT_VS
 };
 const std::vector<VsUvSpec> kVsUvTable = {
 #define FABLE2_VS_TRANSFORM(H, B, L, P, D)
@@ -448,6 +474,7 @@ const std::vector<VsUvSpec> kVsUvTable = {
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1) \
   {H, I, C, int8_t(F), S, FM, O, {{S0, O0}, {S1, O1}}},
+#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, SF, SM, SO, A0, SC, PW)
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
@@ -455,7 +482,78 @@ const std::vector<VsUvSpec> kVsUvTable = {
 #undef FABLE2_VS_INSTANCE
 #undef FABLE2_VS_TERRAIN
 #undef FABLE2_VS_UV
+#undef FABLE2_VS_LIGHT
 };
+
+
+// Light families (ps-albedo.json "light", vs-transforms.json "light"; material.h): per pixel shader
+// its family, the "-multi" flag and the facing literal; the (pixel, vertex) pairs the family was
+// checked with (tools/xdk_sigmatch/light_check.py); per vertex shader what the light reads on the
+// vertex side. A draw has a family only when all three name it (MakeLightInputs).
+const std::vector<PsLightSpec> kPsLightTable = {
+#define FABLE2_PS_ALBEDO(H, SL, UI, UC, US0, UO0, US1, UO1, VI, VC, VS0, VO0, VS1, VO1)
+#define FABLE2_PS_NO_ALBEDO(H)
+#define FABLE2_PS_ALPHA(H, S, SL, C, SR0, SR1, DC)
+#define FABLE2_PS_TERRAIN(H, K, B, D, SS, ST, SE)
+#define FABLE2_PS_LIGHT(H, F, M, FS) {H, LightFamily(F), (M) != 0, FS},
+#define FABLE2_PS_LIGHT_VS(H, VS)
+#include "ps_albedo_table.inc"
+#undef FABLE2_PS_ALBEDO
+#undef FABLE2_PS_NO_ALBEDO
+#undef FABLE2_PS_ALPHA
+#undef FABLE2_PS_TERRAIN
+#undef FABLE2_PS_LIGHT
+#undef FABLE2_PS_LIGHT_VS
+};
+const std::vector<PsLightPair> kPsLightPairs = {
+#define FABLE2_PS_ALBEDO(H, SL, UI, UC, US0, UO0, US1, UO1, VI, VC, VS0, VO0, VS1, VO1)
+#define FABLE2_PS_NO_ALBEDO(H)
+#define FABLE2_PS_ALPHA(H, S, SL, C, SR0, SR1, DC)
+#define FABLE2_PS_TERRAIN(H, K, B, D, SS, ST, SE)
+#define FABLE2_PS_LIGHT(H, F, M, FS)
+#define FABLE2_PS_LIGHT_VS(H, VS) {H, VS},
+#include "ps_albedo_table.inc"
+#undef FABLE2_PS_ALBEDO
+#undef FABLE2_PS_NO_ALBEDO
+#undef FABLE2_PS_ALPHA
+#undef FABLE2_PS_TERRAIN
+#undef FABLE2_PS_LIGHT
+#undef FABLE2_PS_LIGHT_VS
+};
+const std::vector<VsLightSpec> kVsLightTable = {
+#define FABLE2_VS_TRANSFORM(H, B, L, P, D)
+#define FABLE2_VS_POS_SWIZZLE(H, S)
+#define FABLE2_VS_SKIN(H, I, W, R0, R1, R2, S0, S1, S2, N, IC0, WC0, IC1, WC1, IC2, WC2, IC3, WC3)
+#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF, CE, CD)
+#define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
+#define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
+#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, SF, SM, SO, A0, SC, PW) \
+  {H, LightVertexKind(K), {int8_t(NF), uint8_t(NM), uint8_t(NO)}, {int8_t(SF), uint8_t(SM), uint8_t(SO)}, int8_t(A0), SC, PW},
+#include "vs_transform_table.inc"
+#undef FABLE2_VS_TRANSFORM
+#undef FABLE2_VS_POS_SWIZZLE
+#undef FABLE2_VS_SKIN
+#undef FABLE2_VS_INSTANCE
+#undef FABLE2_VS_TERRAIN
+#undef FABLE2_VS_UV
+#undef FABLE2_VS_LIGHT
+};
+
+// The light's per-draw registers are read from the device's banks as they stand: none of them is
+// a register a buffer load can name (light_block.h, kBufferLoadRanges), for which the bank would
+// hold another value than the GPU.
+constexpr bool LightRegistersAreBankOnly() {
+  for (uint32_t r = kLightVsRotationReg; r < kLightVsRotationReg + 4; ++r) {  // c4..c6 and c7 (the scale)
+    if (IsBufferLoadRegister(kVertexBank, r)) return false;
+  }
+  for (uint32_t r = kLightVsProbeReg; r < kLightVsProbeReg + kLightProbeRegisters; ++r) {
+    if (IsBufferLoadRegister(kVertexBank, r)) return false;
+  }
+  return !IsBufferLoadRegister(kVertexBank, kLightVsIndexOffsetReg) && !IsBufferLoadRegister(kVertexBank, kLightVsBendReg) &&
+         !IsBufferLoadRegister(kPixelBank, kLightPsSunScaleReg) && !IsBufferLoadRegister(kPixelBank, kLightPsFadeReg) &&
+         !IsBufferLoadRegister(kPixelBank, kLightPsAmbientReg) && !IsBufferLoadRegister(kPixelBank, kLightPsTintReg);
+}
+static_assert(LightRegistersAreBankOnly(), "a light register is loaded from a constant buffer: the bank does not hold it");
 
 // Linear scans; callers cache the result per shader (PsInfo, VsInfo).
 const AlbedoSpec* FindAlbedo(uint64_t ps_hash) {
@@ -484,6 +582,28 @@ const VsUvSpec* FindVsUv(uint64_t vs_hash, uint8_t interp, uint8_t comp) {
     if (e.vs_hash == vs_hash && e.interp == interp && e.comp == comp) return &e;
   }
   return nullptr;
+}
+
+const PsLightSpec* FindPsLight(uint64_t ps_hash) {
+  for (const PsLightSpec& e : kPsLightTable) {
+    if (e.ps_hash == ps_hash) return &e;
+  }
+  return nullptr;
+}
+
+const VsLightSpec* FindVsLight(uint64_t vs_hash) {
+  for (const VsLightSpec& e : kVsLightTable) {
+    if (e.vs_hash == vs_hash) return &e;
+  }
+  return nullptr;
+}
+
+// Whether the family of pixel shader `ps_hash` was checked with vertex shader `vs_hash`.
+bool LightPairChecked(uint64_t ps_hash, uint64_t vs_hash) {
+  for (const PsLightPair& p : kPsLightPairs) {
+    if (p.ps_hash == ps_hash && p.vs_hash == vs_hash) return true;
+  }
+  return false;
 }
 
 const TransformInfo* FindTransform(uint64_t hash) {
@@ -597,14 +717,16 @@ bool ReadDevice(uint32_t device, DeviceSnapshot* s) {
 // c80..c115: light_block.h, kBufferLoadRanges) is known until the first main
 // scene whose uploads are all followed from its begin (ConstantLoads::Observe).
 // Every other pixel constant is the bank's whatever was followed.
-thread_local ConstantLoads t_ps_loads{kPixelBank};
+// constinit (the constructor is constexpr): the model is initialised with the
+// thread, so no access, the skipped path included, tests an initialisation guard.
+constinit thread_local ConstantLoads t_ps_loads{kPixelBank};
 // The same for the vertex bank (vertex c40..c43 and c76..c107 are loaded from
 // buffers too). Discovery evidence only ("vfull"): no record reads through
 // it, so it is followed only while a discovery capture is requested or
 // running. Once an upload was skipped (ConstantLoads::ever_skipped) rows carry
 // no vertex registers (a capture armed by the environment follows from the
 // first upload; one armed at run time does not).
-thread_local ConstantLoads t_vs_loads{kVertexBank};
+constinit thread_local ConstantLoads t_vs_loads{kVertexBank};
 // A followed LoadAluConstants call named a register that no call site of the
 // table names (xdk_layout.h, kAluLoadSites): logged once per process.
 std::atomic<bool> g_untabled_load_logged{false};
@@ -680,8 +802,11 @@ void UpdateState(uint32_t id, const PPCContext& ctx) {
       // r4: the pending mask, one bit per group of four registers. The bank's
       // values replace what a load put in those registers. Followed only while
       // somebody reads the result; otherwise the upload is marked as skipped
-      // (three byte stores, nothing of the guest is read).
+      // (three byte stores, nothing of the guest is read, and no timer). The
+      // followed path is capture work of the frame: timed here, since the
+      // timer below starts only for discovery.
       if (FollowPixelLoads()) {
+        CaptureTimer timer;
         ObservePixelScene(ctx.r3.u32);
         t_ps_loads.BankUpload(ctx.r4.u64);
       } else {
@@ -1192,6 +1317,7 @@ struct PsInfo {
   const AlbedoSpec* albedo = nullptr;  // FindAlbedo; slot -1 = samples no albedo
   AlphaSpec alpha;                     // FindAlpha; kNone = no recipe
   const PsTerrainEntry* terrain = nullptr;  // FindPsTerrain: a terrain pixel shader (the entry is stable)
+  const PsLightSpec* light = nullptr;       // FindPsLight: the shader's light family, null without one
   uint32_t phys = 0;
   uint32_t bytes = 0;
   // ReadLiteralRegisters: the pixel registers the shader loads itself;
@@ -1222,6 +1348,7 @@ const PsInfo* LookupPs(uint32_t obj) {
   e.albedo = FindAlbedo(u.hash);
   e.alpha = FindAlpha(u.hash);
   e.terrain = FindPsTerrain(u.hash);
+  e.light = FindPsLight(u.hash);
   e.phys = u.phys;
   e.bytes = u.bytes;
   e.literals_known = ReadLiteralRegisters(kPsLayout, obj, 0, 256, e.literal_regs);
@@ -1263,14 +1390,24 @@ bool ReadPixelConstant(uint32_t reg, float out[4]) {
   return true;
 }
 
+// Whether the light set's registers, as the draw this thread is capturing sees them, come from a
+// constant buffer loaded since the draw's main scene began (five lookups in the load model, no
+// guest read): the part of ReadLightBlock that costs nothing.
+bool LightSetThisScene() {
+  bool this_scene = true;
+  for (uint32_t r : kLightSetRegisters) this_scene = this_scene && t_ps_loads.LoadedThisScene(r);
+  return this_scene;
+}
+
 // The light block at the draw this thread is capturing (light_block.h), its
 // registers read through ReadPixelConstant. Invalid (all zero) unless the
 // light set's registers come from a constant buffer loaded since the main
 // scene of this draw began: the bank's values there, and a buffer loaded in an
 // earlier scene, are not this frame's light.
+// Costly (eleven ReadPixelConstant calls): the capture makes it once per frame for the frame's
+// block (RecordDraw), never per draw; discovery rows make it per row ("light").
 LightBlock ReadLightBlock() {
-  bool this_scene = true;
-  for (uint32_t r : kLightSetRegisters) this_scene = this_scene && t_ps_loads.LoadedThisScene(r);
+  const bool this_scene = LightSetThisScene();
   if (!this_scene) return LightBlock{};
   float reg[ConstantLoads::kRegisters][4] = {};
   bool have[ConstantLoads::kRegisters] = {};
@@ -1631,7 +1768,9 @@ void AppendPixelConstants(std::string& row, uint32_t device) {
 //   "<p>full"       all 256 registers as `read` gives them (the reader);
 //   "<p>tiles"      the loads issued under a bin mask that leaves bins out,
 //                   oldest first, each as the runs of registers it still
-//                   decides: {"mask", "start", "v"};
+//                   decides: {"mask", "start", "v"}; none while the model is
+//                   not whole (ConstantLoads::binned_count), where "<p>full"
+//                   has dashes for every register a load can name;
 //   "<p>bank_diff"  the registers whose value in the device's bank at `bank`
 //                   is another one (or that the reader did not read), with the
 //                   bank's value; left out when the bank cannot be read.
@@ -1773,6 +1912,11 @@ void ReadStateWords(uint32_t device, StateWords* w) {
   if (!NeedsSurfaceInfo(*w) || !reg(xdk::kRegSurfaceInfo, &w->surface_info)) w->surface_info = 0;
 }
 
+// Discovery evidence, "lin": the draw's light inputs as the records get them (FillLightInputs).
+// Defined with the records' light inputs, below.
+void AppendLightInputs(std::string& row, uint32_t device, const DeviceSnapshot& dev, const VsChoice* vc, bool indexed,
+                       int64_t max_vertex);
+
 // Caller holds g_mutex. One decoded "draw" row (frame-map section 8) for
 // DrawVertices / DrawIndexedVertices; other draw hooks have no VB objects.
 // `in_scene`: the draw is inside the main-scene bracket.
@@ -1855,7 +1999,13 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
 
   // Vertex shader and its microcode.
   VsChoice vc;
-  if (!ChooseVs(dev, &vc)) return finish("no_vs");
+  const bool have_vs = ChooseVs(dev, &vc);
+  // The light inputs (also without a vertex shader: the row then says why there are none). The
+  // largest vertex the draw reads: its largest index plus the base vertex, or its last vertex.
+  AppendLightInputs(row, device, dev, have_vs ? &vc : nullptr, indexed,
+                    indexed ? (scanned && scan.max_index >= 0 ? scan.max_index + int64_t(int32_t(args.r[2])) : -1)
+                            : (args.r[3] ? int64_t(args.r[2]) + args.r[3] - 1 : -1));
+  if (!have_vs) return finish("no_vs");
   AppendVertexRegisters(row, device, vc.obj, vc.variant);
   row += ",\"vs_lit\":";
   row += LiteralsJson(kVsLayout, vc.obj, vc.variant);
@@ -2083,6 +2233,7 @@ void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
   row += "}";
   AppendPixelConstants(row, device);
   AppendPixelRegisters(row, device);
+  AppendLightInputs(row, device, dev, vc_ok ? &vc : nullptr, false, -1);
   if (vc_ok) AppendVertexRegisters(row, device, vc.obj, vc.variant);
   AppendTerrainPixelConstants(row, device);
   if (const uint8_t* bools = ReadVirtual(device + xdk::kDevicePsBoolConstantsOffset, 4)) {
@@ -2134,6 +2285,13 @@ struct VsInfo {
   // decoded vertex fetches its fetch_index refers to (ResolveUvFetch).
   const VsUvSpec* uv[16][4] = {};
   std::vector<VertexFetch> fetches;
+  // vs-transforms.json "light" (FindVsLight): what the light reads on the vertex side.
+  const VsLightSpec* light = nullptr;
+  // ReadLiteralRegisters: the vertex registers the shader loads itself (the device's bank does not
+  // hold them); `literals_known` false when its table could not be read. Read only for a shader
+  // with a light entry: nothing else reads vertex constants that could be literals.
+  uint64_t literal_regs[4] = {};
+  bool literals_known = false;
 };
 thread_local std::unordered_map<uint32_t, VsInfo> t_vs_cache;
 
@@ -2157,6 +2315,7 @@ void FillShader(VsInfo& e, const uint32_t* ucode, size_t dwords, uint64_t hash) 
   for (uint8_t i = 0; i < 16; ++i) {
     for (uint8_t c = 0; c < 4; ++c) e.uv[i][c] = FindVsUv(hash, i, c);
   }
+  e.light = FindVsLight(hash);
 }
 
 const VsInfo* LookupVs(const VsChoice& c) {
@@ -2173,6 +2332,8 @@ const VsInfo* LookupVs(const VsChoice& c) {
     e = VsInfo{};
     e.immediate = true;
     FillShader(e, ucode->data(), ucode->size(), t_vs_load.hash);
+    // (the immediate path runs a patched copy of the microcode, but the literal table is the object's)
+    if (e.light) e.literals_known = ReadLiteralRegisters(kVsLayout, c.obj, c.variant, 0, e.literal_regs);
     return &e;
   }
   // The variant's record (xdk_layout.h), read without touching the microcode.
@@ -2203,6 +2364,7 @@ const VsInfo* LookupVs(const VsChoice& c) {
   e.bytes = bytes;
   e.patch_id = patch_id;
   FillShader(e, u.dwords.data(), u.dwords.size(), u.hash);
+  if (e.light) e.literals_known = ReadLiteralRegisters(kVsLayout, c.obj, c.variant, 0, e.literal_regs);
   return &e;
 }
 
@@ -2236,13 +2398,18 @@ bool ReadPsBankRegisters(uint32_t device, uint32_t reg, uint32_t count) {
                                count, t_ps_bank);
 }
 
-// The device snapshot and vertex shader FillDrawInputs used, for FillMaterial
-// (the device is read once per draw). `vs` points into t_vs_cache: valid
-// until the next LookupVs.
+// The device snapshot and vertex shader FillDrawInputs (FillTerrainInputs) used,
+// for FillMaterial and FillLightInputs (the device is read once per draw). `vs`
+// points into t_vs_cache: valid until the next LookupVs. `ps`: the pixel shader
+// the material was read with, into t_ps_cache: valid until the next LookupPs.
+// max_vertex: the largest vertex index the draw reads (its largest index plus
+// the base vertex; DrawVertices: its last vertex), -1 when that is not known.
 struct DrawShaders {
   bool have_dev = false;
   DeviceSnapshot dev;
   const VsInfo* vs = nullptr;
+  const PsInfo* ps = nullptr;
+  int64_t max_vertex = -1;
 };
 
 // Builds the instance set of an indexed draw of an instancing shader
@@ -2360,7 +2527,9 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders)
     // instancing shader's index names a copy and a mesh vertex instead: its
     // range check is the instance set's.
     IndexScan scan;
-    if (!ScanIndices(ib, in.start, in.count, &scan)) {
+    const bool scanned = ScanIndices(ib, in.start, in.count, &scan);
+    if (scanned && scan.max_index >= 0) shaders->max_vertex = scan.max_index + int64_t(in.base_vertex);
+    if (!scanned) {
       extra = SkipReason::kBadMemory;
     } else if (in.instance_shader) {
       extra = FillInstanceSet(device, dev, *vs, scan, vertices, in);
@@ -2372,6 +2541,8 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders)
     extra = SkipReason::kInstanceUnsupported;  // the index encodes the copy: no index, no instancing
   } else if (uint64_t(in.start) + in.count > vertices) {
     extra = SkipReason::kBadIndex;
+  } else if (in.count != 0) {
+    shaders->max_vertex = int64_t(in.start) + in.count - 1;
   }
   // Skin (vs-transforms.json "skin", one bone or weighted): the bone palette
   // is the stream feeding the rows' fetch slot; endians come from the two
@@ -2427,11 +2598,13 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders)
 // other, so that its square falls back as a whole. Also records the pixel shader and its
 // kind in the material; the clay pass draws the record with them (clay_logic.h,
 // "Terrain material") and as flat clay when they are not valid.
-void FillTerrainMaterial(uint32_t device, const DeviceSnapshot& dev, bool adaptive, DrawInputs& in) {
+void FillTerrainMaterial(uint32_t device, const DeviceSnapshot& dev, bool adaptive, DrawInputs& in,
+                         const PsInfo** ps_out) {
   in.terrain.material = TerrainMaterialInputs{};
   if (!in.terrain.active) return;
   uint32_t ps_obj = 0;
   const PsInfo* ps = ChoosePs(dev, &ps_obj) ? LookupPs(ps_obj) : nullptr;
+  *ps_out = ps;  // for the light inputs (FillLightInputs)
   if (!ps) return;
   in.material.ps_hash = ps->hash;
   const PsTerrainEntry* entry = ps->terrain;  // points into the table: stable
@@ -2485,12 +2658,17 @@ void FillTerrainMaterial(uint32_t device, const DeviceSnapshot& dev, bool adapti
 // shader's terrain grid (terrain_patch.h). A shader without a terrain entry
 // leaves the draw unsupported; an unhandled heightmap leaves `terrain`
 // inactive (kUnknownPosFormat). `adaptive`: the draw is the adaptive builder's.
-SkipReason FillTerrainInputs(uint32_t device, uint32_t first, uint32_t patches, bool adaptive, DrawInputs& in) {
+// `shaders` receives the device snapshot and the two shaders, as FillDrawInputs
+// and FillMaterial leave them for an ordinary draw.
+SkipReason FillTerrainInputs(uint32_t device, uint32_t first, uint32_t patches, bool adaptive, DrawInputs& in,
+                             DrawShaders* shaders) {
   if (const SkipReason c = CountSkip(patches); c != SkipReason::kNone) return c;
-  DeviceSnapshot dev;
-  if (!ReadDevice(device, &dev)) return SkipReason::kNone;
+  DeviceSnapshot& dev = shaders->dev;
+  shaders->have_dev = ReadDevice(device, &dev);
+  if (!shaders->have_dev) return SkipReason::kNone;
   VsChoice vc;
   const VsInfo* vs = ChooseVs(dev, &vc) ? LookupVs(vc) : nullptr;
+  shaders->vs = vs;
   if (!vs) return SkipReason::kNone;
   in.have_shader = true;
   in.vs_hash = vs->hash;
@@ -2523,7 +2701,7 @@ SkipReason FillTerrainInputs(uint32_t device, uint32_t first, uint32_t patches, 
   uint32_t fc[6];
   for (int i = 0; i < 6; ++i) fc[i] = LoadBe32(p + 4 * i);
   MakeTerrainPatch(s, t_bank, fc, first, patches, &in.terrain);
-  FillTerrainMaterial(device, dev, adaptive, in);
+  FillTerrainMaterial(device, dev, adaptive, in, &shaders->ps);
   return SkipReason::kNone;
 }
 
@@ -2533,7 +2711,7 @@ SkipReason FillTerrainInputs(uint32_t device, uint32_t first, uint32_t patches, 
 // and the renderer decides from the inputs whether the record gets the terrain
 // material or flat clay); a draw whose device was not read
 // stays ps-unknown.
-void FillMaterial(uint32_t device, const DrawShaders& shaders, DrawInputs& in) {
+void FillMaterial(uint32_t device, DrawShaders& shaders, DrawInputs& in) {
   Material& m = in.material;
   if (in.terrain_shader) {
     m.status = MaterialStatus::kTerrain;
@@ -2543,10 +2721,13 @@ void FillMaterial(uint32_t device, const DrawShaders& shaders, DrawInputs& in) {
   m.alpha = {};
   m.alpha_scale = 1.0f;
   m.kind = MaterialKind::kPlain;
-  if (!shaders.have_dev) return;
+  // (A patch draw whose vertex shader has no terrain entry is never drawn: no lookups for it,
+  // though its device snapshot is here now, read for the terrain draws' light inputs.)
+  if (!shaders.have_dev || in.prim == kPrimQuadPatch) return;
   const DeviceSnapshot& dev = shaders.dev;
   uint32_t ps_obj = 0;
   const PsInfo* ps = ChoosePs(dev, &ps_obj) ? LookupPs(ps_obj) : nullptr;
+  shaders.ps = ps;  // for the light inputs (FillLightInputs)
   if (!ps) return;
   // Copied at once: ps points into t_ps_cache (the table entry is stable).
   m.ps_hash = ps->hash;
@@ -2611,6 +2792,161 @@ void FillMaterial(uint32_t device, const DrawShaders& shaders, DrawInputs& in) {
   m.status = MaterialStatus::kTextured;
 }
 
+// The stream behind a light fetch's slot (material.h, LightStream): resolved only when the stream
+// is bound as its vertex buffer object says (fc_match), from its bound offset on.
+LightStream ResolveLightStream(const DeviceSnapshot& dev, const VertexFetch* f) {
+  LightStream out;
+  StreamView sv;
+  if (!f || ResolveStream(dev, f->fetch_slot, &sv) || !sv.fc_match) return out;
+  out.resolved = true;
+  out.vb = {sv.base + sv.offset, sv.size - sv.offset};
+  out.endian = uint8_t(sv.fc1 & 3);
+  return out;
+}
+
+// The light inputs of a draw (material.h, MakeLightInputs; frame-map section 14, "Light inputs"):
+// its family from the two shaders' table entries, then what the family reads per draw. Guest reads,
+// all bounded: the registers LightRegisterRuns names, from the device's two banks into t_bank and
+// t_ps_bank (at most 16 vertex and 3 pixel registers; a register the shader loads itself, or whose
+// literal table could not be read, is left unread), and the vertex buffer objects of the two
+// streams the entry's fetches name. A draw without a family costs the table lookups its shaders'
+// cache entries already hold and reads nothing. Anything unread or not usable gives a reason and
+// default inputs: the draw then keeps its material and is drawn without light.
+// `instanced`: the draw has its instance set; `max_vertex`: DrawShaders::max_vertex.
+LightReason FillLightInputs(uint32_t device, const DeviceSnapshot& dev, const VsInfo* vs, const PsInfo* ps,
+                            bool instanced, int64_t max_vertex, LightInputs* out, const char** why) {
+  LightDraw d;
+  d.ps = ps ? ps->light : nullptr;
+  d.vs = vs ? vs->light : nullptr;
+  d.pair = d.ps && d.vs && LightPairChecked(ps->hash, vs->hash);
+  if (!d.pair) return MakeLightInputs(d, out, why);  // no family: nothing is read
+  d.fetches = &vs->fetches;
+  d.instanced = instanced;
+  d.max_vertex = max_vertex;
+  d.vs_regs.bank = t_bank;
+  d.ps_regs.bank = t_ps_bank;
+  LightRegisterRun runs[kMaxLightRegisterRuns];
+  const size_t n = LightRegisterRuns(*d.ps, *d.vs, runs);
+  for (size_t i = 0; i < n; ++i) {
+    const LightRegisterRun& run = runs[i];
+    const bool pixel = run.bank != 0;
+    const uint64_t* literal = pixel ? ps->literal_regs : vs->literal_regs;
+    bool ok = pixel ? ps->literals_known : vs->literals_known;
+    for (uint32_t r = run.reg; ok && r < uint32_t(run.reg) + run.count; ++r) ok = !((literal[r / 64] >> (r % 64)) & 1);
+    if (!ok) continue;
+    if (pixel) {
+      // Through the load model like every pixel constant (the bank for these registers, unless
+      // a call the static list does not know named one: then what that load decides).
+      for (uint32_t r = run.reg; ok && r < uint32_t(run.reg) + run.count; ++r) {
+        uint32_t bits[4];
+        ok = ReadConstantBits(PixelBank(device), t_ps_loads.Find(r), r, bits);
+        if (ok) std::memcpy(&t_ps_bank[4 * r], bits, sizeof(bits));
+      }
+    } else {
+      ok = ReadBankRegisters(device, run.reg, run.count);
+    }
+    if (ok) (pixel ? d.ps_regs : d.vs_regs).Mark(run.reg, run.count);
+  }
+  d.normal_stream = ResolveLightStream(dev, LightFetch(vs->fetches, d.vs->normal));
+  d.second_stream = ResolveLightStream(dev, LightFetch(vs->fetches, d.vs->second));
+  return MakeLightInputs(d, out, why);
+}
+
+// Discovery evidence (frame-map section 14, "Light inputs"), in draw and tess rows: the draw's
+// light inputs as FillLightInputs gives them at the row's draw, read again here (the row is
+// written whether or not the draw is recorded), under "lin":
+//   {"reason":"none","family","multi","kind","a0","normal":{element},"second":{element},"first",
+//    "power","facing","rot":[9],"scale","c11x","c27w","c49":[3],"c26":[3],"vc":[[4] x n]}
+// with an element as {"phys","size","off","stride","fmt","swz","flags"} (left out for a terrain
+// draw) and "vc" the probe sets (twelve registers) or the plants' c45 (one); or, without inputs,
+//   {"reason":"light-unknown"|"normal-unsupported","why": MakeLightInputs' word[,"family","multi"][,"kind"]}
+// where family and kind are what the two shaders' entries say, when they have one.
+// One difference from the records: `instanced` here is that the vertex shader's instance rows
+// match its fetches (the record also needs the set built from the instance stream); a row can
+// therefore show inputs for an instanced draw whose record has none.
+void AppendLightInputs(std::string& row, uint32_t device, const DeviceSnapshot& dev, const VsChoice* vc, bool indexed,
+                       int64_t max_vertex) {
+  const VsInfo* vs = vc ? LookupVs(*vc) : nullptr;
+  uint32_t ps_obj = 0;
+  const PsInfo* ps = ChoosePs(dev, &ps_obj) ? LookupPs(ps_obj) : nullptr;
+  LightInputs l;
+  const char* why = "";
+  const LightReason reason = FillLightInputs(device, dev, vs, ps, indexed && vs && vs->have_instance, max_vertex, &l, &why);
+  char buf[192];
+  std::snprintf(buf, sizeof(buf), ",\"lin\":{\"reason\":\"%s\"", LightReasonName(reason));
+  row += buf;
+  if (reason != LightReason::kNone) {
+    std::snprintf(buf, sizeof(buf), ",\"why\":\"%s\"", why);
+    row += buf;
+    if (ps && ps->light) {
+      std::snprintf(buf, sizeof(buf), ",\"family\":\"%s\",\"multi\":%d", LightFamilyName(ps->light->family),
+                    ps->light->multi ? 1 : 0);
+      row += buf;
+    }
+    if (vs && vs->light) {
+      std::snprintf(buf, sizeof(buf), ",\"kind\":\"%s\"", LightVertexKindName(vs->light->kind));
+      row += buf;
+    }
+    row += "}";
+    return;
+  }
+  std::snprintf(buf, sizeof(buf), ",\"family\":\"%s\",\"multi\":%d,\"kind\":\"%s\",\"a0\":%d", LightFamilyName(l.family),
+                l.multi ? 1 : 0, LightVertexKindName(l.kind), int(l.a0_comp));
+  row += buf;
+  auto element = [&](const char* key, const LightElement& e) {
+    std::snprintf(buf, sizeof(buf),
+                  ",\"%s\":{\"phys\":%u,\"size\":%u,\"off\":%u,\"stride\":%u,\"fmt\":%u,\"swz\":%u,\"flags\":%u}", key,
+                  e.vb.phys_addr, e.vb.size, e.offset_bytes, e.stride_bytes, e.format, e.swizzle, e.flags);
+    row += buf;
+  };
+  auto floats = [&](const char* key, const float* v, int n) {
+    row += ",\"";
+    row += key;
+    row += n > 1 ? "\":[" : "\":";
+    for (int i = 0; i < n; ++i) {
+      if (i) row += ",";
+      AppendFloat(row, v[i]);
+    }
+    if (n > 1) row += "]";
+  };
+  if (l.kind != LightVertexKind::kTerrain) {
+    element("normal", l.normal);
+    element("second", l.second);
+  }
+  std::snprintf(buf, sizeof(buf), ",\"first\":%u", l.colour_first);
+  row += buf;
+  floats("power", &l.colour_power, 1);
+  floats("facing", &l.facing_scale, 1);
+  floats("rot", &l.world_rot[0][0], 9);
+  floats("scale", &l.world_scale, 1);
+  floats("c11x", &l.c11x, 1);
+  floats("c27w", &l.c27w, 1);
+  floats("c49", l.c49, 3);
+  floats("c26", l.c26, 3);
+  const uint32_t sets = l.kind == LightVertexKind::kProbe ? kLightProbeRegisters : l.kind == LightVertexKind::kInstance ? 1 : 0;
+  if (sets) {
+    row += ",\"vc\":[";
+    for (uint32_t r = 0; r < sets; ++r) {
+      row += r ? ",[" : "[";
+      for (int c = 0; c < 4; ++c) {
+        if (c) row += ",";
+        AppendFloat(row, l.vs_const[r][c]);
+      }
+      row += "]";
+    }
+    row += "]";
+  }
+  row += "}";
+}
+
+// The frame's light block (FrameScene::light) is read at most this many times a frame without
+// result: a read is eleven ReadPixelConstant calls, far too many to make at every draw of a
+// frame whose light set is not a sun's (a night, an interior: no block, "light-block").
+constexpr int kMaxLightBlockTries = 8;
+// Reads still allowed in the frame being captured; 0 once the frame has its block. Set at the
+// frame's end for the next one (EndMainSceneFrame).
+std::atomic<int> g_light_tries_left{kMaxLightBlockTries};
+
 // One outermost guest draw inside the main scene, as a DrawRecord in the frame.
 // Draw-argument mapping (frame-map section 8): DrawIndexedVertices r4 prim, r5
 // base vertex, r6 start index, r7 index count; DrawVertices r4 prim, r5 start
@@ -2623,6 +2959,7 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   DrawInputs in;
   in.func_id = id;
   SkipReason extra = SkipReason::kNone;
+  DrawShaders shaders;
   if (id == kHook_D3DDevice_DrawIndexedVertices) {
     in.indexed = true;
     in.prim = a.r[1];
@@ -2637,33 +2974,63 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
     in.prim = kPrimQuadPatch;
     in.start = a.r[2];
     in.count = a.r[3];
-    extra = FillTerrainInputs(device, in.start, in.count, false, in);
+    extra = FillTerrainInputs(device, in.start, in.count, false, in, &shaders);
   } else if (id == kHook_DrawIndx_82207C30) {
     const uint8_t* hos = device ? ReadVirtual(device + xdk::kDeviceHosCntlOffset, 4) : nullptr;
     if (hos && (LoadBe32(hos) & 3) == xdk::kHosCntlAdaptive) {
       in.prim = kPrimQuadPatch;
       in.start = 0;
       in.count = a.r[4];
-      extra = FillTerrainInputs(device, 0, in.count, true, in);
+      extra = FillTerrainInputs(device, 0, in.count, true, in, &shaders);
     }
   }
-  DrawShaders shaders;
   if (IsSupportedPrim(in.prim)) extra = FillDrawInputs(device, in, &shaders);
   FillMaterial(device, shaders, in);
   ReadStateWords(device, &in.state_words);
-  std::lock_guard<std::mutex> lock(g_scene_mutex);
-  if (!g_builder.InMainScene()) return;
   // HasColourPass is proved only for draws of the tiled main scene (xdk_layout.h);
   // RecordDraw is reached only for those (OnDraw: in_scene) and the bracket is
-  // checked again just above. Unreadable words leave the draw a colour draw.
+  // checked again below. Unreadable words leave the draw a colour draw.
   in.depth_only = in.state_words.read && !xdk::HasColourPass(in.state_words.bin_mask_lo);
+  // Light (frame-map section 14, "Light inputs"). Only for a colour draw that got this far: a
+  // draw that is skipped anyway has no use for its inputs.
+  LightInputs light;
+  LightReason light_reason = LightReason::kLightUnknown;
+  LightBlock block{};
+  bool block_tried = false;
+  if (extra == SkipReason::kNone && in.have_shader && !in.depth_only && shaders.have_dev) {
+    light_reason = FillLightInputs(device, shaders.dev, shaders.vs, shaders.ps, in.instances.active,
+                                   shaders.max_vertex, &light, nullptr);
+    // The frame's light block: once per frame, at the first such draw whose pixel shader has a
+    // one-light family (its first light is the sun; a two- or four-light shader has a lantern
+    // there and its block is invalid by design) and at which the light set was loaded in this
+    // scene (ReadLightBlock; never the scene's first draw whatever it is: frame-map section 14,
+    // "Replays"). A read that gives no block is counted and the next such draw tries again, up
+    // to kMaxLightBlockTries.
+    const PsLightSpec* family = shaders.ps ? shaders.ps->light : nullptr;
+    if (family && !family->multi && g_light_tries_left.load(std::memory_order_relaxed) > 0 && LightSetThisScene()) {
+      block = ReadLightBlock();
+      block_tried = true;
+    }
+  }
+  std::lock_guard<std::mutex> lock(g_scene_mutex);
+  if (!g_builder.InMainScene()) return;
+  if (block_tried) {
+    if (block.valid) {
+      g_builder.SetLight(block);
+      g_light_tries_left.store(0, std::memory_order_relaxed);
+    } else {
+      g_builder.CountLightTry();
+      g_light_tries_left.fetch_sub(1, std::memory_order_relaxed);
+    }
+  }
   DrawRecord r = AssembleRecord(in, g_builder.NextSeq());
   // A capture-side reason (garbage count, bad index memory) replaces
   // AssembleRecord's, which only sees the inputs filled before it.
   r.skip = ResolveSkip(r.skip, extra);
   if (r.skip == SkipReason::kUnsupportedPrim && id < kMaxHookIds) ++g_unsupported_by_hook[id];
-  // A terrain draw's inputs go to the frame's side array, not into the record.
-  g_builder.Add(r, TerrainInputsOf(in));
+  // A terrain draw's inputs and a lit draw's light inputs go to the frame's side arrays, not
+  // into the record.
+  g_builder.Add(r, TerrainInputsOf(in), light_reason == LightReason::kNone ? &light : nullptr, light_reason);
 }
 
 // Device tiling flag byte, or nullptr if unreadable.
@@ -2727,6 +3094,71 @@ struct FinishedScene {
   uint32_t unsupported_by_hook[kMaxHookIds] = {};
 };
 
+// "name: n" pairs of a scene's light tallies: the lit records by family, the others by reason.
+std::string LightFamilies(const render::FrameScene& sc, const char* quote) {
+  std::string out;
+  char buf[64];
+  for (size_t i = 1; i < size_t(LightFamily::kCount); ++i) {
+    if (!sc.light_family[i]) continue;
+    std::snprintf(buf, sizeof(buf), "%s%s%s%s: %u", out.empty() ? "" : ", ", quote, LightFamilyName(LightFamily(i)), quote,
+                  sc.light_family[i]);
+    out += buf;
+  }
+  return out;
+}
+std::string LightReasons(const render::FrameScene& sc, const char* quote) {
+  std::string out;
+  char buf[64];
+  for (size_t i = 1; i < size_t(LightReason::kCount); ++i) {
+    if (!sc.light_reason[i]) continue;
+    std::snprintf(buf, sizeof(buf), "%s%s%s%s: %u", out.empty() ? "" : ", ", quote, LightReasonName(LightReason(i)), quote,
+                  sc.light_reason[i]);
+    out += buf;
+  }
+  return out;
+}
+
+// Discovery evidence, in the frame row of a frame with records: the frame's light block as the
+// scene carries it ("valid" 0: none was read; "tries": reads that gave none) and the frame's light
+// tallies: {"light":{"valid","tries","sun_dir","sun_col","eye","tint","tint_pow","add","out_scale",
+// "floor","axis","mask_xform","lit","multi","families":{name: n},"reasons":{name: n}}}.
+void AppendFrameLight(std::string& row, const render::FrameScene& sc) {
+  const LightBlock& l = sc.light;
+  char buf[96];
+  auto floats = [&](const char* key, const float* v, int n) {
+    row += ",\"";
+    row += key;
+    row += n > 1 ? "\":[" : "\":";
+    for (int i = 0; i < n; ++i) {
+      if (i) row += ",";
+      AppendFloat(row, v[i]);
+    }
+    if (n > 1) row += "]";
+  };
+  std::snprintf(buf, sizeof(buf), ",\"light\":{\"valid\":%d,\"tries\":%u", l.valid ? 1 : 0, sc.light_tries);
+  row += buf;
+  if (l.valid) {
+    floats("sun_dir", l.sun_dir, 3);
+    floats("sun_col", l.sun_col, 3);
+    floats("eye", l.eye, 3);
+    floats("tint", l.tint, 3);
+    floats("tint_pow", &l.tint_pow, 1);
+    floats("add", l.add, 3);
+    floats("out_scale", &l.out_scale, 1);
+    floats("floor", l.floor, 2);
+    floats("axis", l.axis, 3);
+    floats("mask_xform", l.mask_xform, 4);
+  }
+  uint32_t lit = 0;
+  for (uint32_t n : sc.light_family) lit += n;
+  std::snprintf(buf, sizeof(buf), ",\"lit\":%u,\"multi\":%u,\"families\":{", lit, sc.light_multi);
+  row += buf;
+  row += LightFamilies(sc, "\"");
+  row += "},\"reasons\":{";
+  row += LightReasons(sc, "\"");
+  row += "}}";
+}
+
 // Ends the frame's bracket and, with the renderer on, finishes the frame's
 // scene (`swap` = guest frame number) with its capture time from `timer`,
 // then latches whether the next frame builds records. With `write`
@@ -2754,6 +3186,8 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
       // Records start or stop at a frame boundary, never mid-frame.
       g_records_frame.store(g_records_wanted.load(std::memory_order_relaxed),
                             std::memory_order_relaxed);
+      // The next frame reads its own light block.
+      g_light_tries_left.store(kMaxLightBlockTries, std::memory_order_relaxed);
     }
   }
   if (!write) return;
@@ -2774,7 +3208,10 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
   row += "}";
   AppendPitches(row, "pitch_in", e.pitch_in);
   AppendPitches(row, "pitch_out", e.pitch_out);
-  row += "}}\n";
+  row += "}";
+  // The frame's light as the records have it (a frame with records only).
+  if (done->scene && done->scene->records) AppendFrameLight(row, *done->scene);
+  row += "}\n";
   std::fputs(row.c_str(), g_file);
 }
 
@@ -2861,7 +3298,8 @@ void LogShaderBreakdown(const render::FrameScene& sc) {
 // consumer never draws a stale one); every 300 guest frames logs its coverage
 // (frame-map section 9) and the guest-thread capture time, with any view.
 //
-// Ownership of the records and their side arrays (FrameScene::terrain): while a
+// Ownership of the records and their side arrays (FrameScene::terrain,
+// FrameScene::lights) and of the frame's light block: while a
 // frame is captured they belong to g_builder and are written only under
 // g_scene_mutex. FrameBuilder::Finish (EndMainSceneFrame, under that mutex)
 // moves them into a new FrameScene and gives the builder other buffers (below);
@@ -2870,23 +3308,27 @@ void LogShaderBreakdown(const render::FrameScene& sc) {
 // the scene exists. The scene is published here as a
 // shared_ptr<const FrameScene>: the render thread takes its own reference
 // (ScenePublisher::Latest, under the publisher's mutex) and only reads, for as
-// long as it keeps that reference; pointers into the scene (TerrainOf) are
-// valid for that long and no longer. A side array is therefore never read
+// long as it keeps that reference; pointers into the scene (TerrainOf, LightOf)
+// are valid for that long and no longer. A side array is therefore never read
 // while it is written: it is reachable from the render thread only between its
 // last write and the drop of the scene's last reference.
 // Reuse: when that last reference drops (on the render thread, or here when a
-// scene is replaced before it was drawn) the scene's deleter hands the two
+// scene is replaced before it was drawn) the scene's deleter hands the three
 // buffers to the builder's spare list (render::SceneBufferPool: its own lock,
-// at most four pairs, the rest freed), and a later Finish takes a pair,
+// at most four sets, the rest freed), and a later Finish takes a set,
 // cleared, for the next frame. A spare is reachable from no scene. The spares
 // are freed when a frame has no records (the view went off, where the scene is
-// released too): the builder then keeps its one pair, and nothing else.
+// released too): the builder then keeps its one set, and nothing else.
 void PublishScene(const FinishedScene& done) {
   if (!done.scene) return;
   const render::FrameScene& sc = *done.scene;
   Publisher().Publish(sc.records ? done.scene : nullptr);
   if (!sc.records) g_builder.ReleaseSpares();  // (locks the spare list only: no scene mutex needed)
   g_capture_window.Add(sc.capture_ms);
+  if (sc.records) {
+    ++g_light_frames;
+    g_light_block_missing += sc.light.valid ? 0 : 1;
+  }
   if (sc.frame % 300 != 0) return;
   std::string skipped, unsupported;
   char buf[96];
@@ -2943,6 +3385,30 @@ void PublishScene(const FinishedScene& done) {
   }
   if (!unsupported.empty()) {
     REXSYS_INFO("[native] capture: frame {} unsupported by hook {{{}}}", sc.frame, unsupported);
+  }
+  if (sc.records) {
+    // light: the drawable records with light inputs ("lit": the capture has what their family
+    // reads; nothing is drawn with it yet) by family, those without by reason and by pixel shader,
+    // this frame's light block, and in how many of the frames with records since the last line no
+    // block was read (light-block).
+    uint32_t lit = 0;
+    for (uint32_t n : sc.light_family) lit += n;
+    std::string by_ps;
+    for (const auto& [hash, n] : sc.light_unknown_ps) {
+      std::snprintf(buf, sizeof(buf), "%s0x%016llX: %u", by_ps.empty() ? "" : ", ", static_cast<unsigned long long>(hash), n);
+      by_ps += buf;
+    }
+    char block[160] = "missing";
+    if (sc.light.valid) {
+      std::snprintf(block, sizeof(block), "valid, sun (%.4f, %.4f, %.4f) colour (%.4f, %.4f, %.4f)", sc.light.sun_dir[0],
+                    sc.light.sun_dir[1], sc.light.sun_dir[2], sc.light.sun_col[0], sc.light.sun_col[1], sc.light.sun_col[2]);
+    }
+    REXSYS_INFO("[native] capture: frame {} light: lit {} by family {{{}}} (multi {}), unknown {{{}}} by ps {{{}}} "
+                "| block {} (tries {}) | {} in {} of {} frames",
+                sc.frame, lit, LightFamilies(sc, ""), sc.light_multi, LightReasons(sc, ""), by_ps, block, sc.light_tries,
+                kLightBlockReason, g_light_block_missing, g_light_frames);
+    g_light_block_missing = 0;
+    g_light_frames = 0;
   }
   LogShaderBreakdown(sc);
 }

@@ -345,10 +345,183 @@ class GenTransformTableTest(unittest.TestCase):
             path.write_text('{"0x000000000000ABCC": {"base": 0, "layout": "dot"}}')
             self.assertEqual(gtt.load(path), {"0x000000000000ABCC": {"base": 0, "layout": "dot"}})
 
+    # --- "light": what the light of a draw reads on the vertex side ---
+
+    NORMAL = {"fetch": 1, "format": 16, "offset": 2}
+    COLOUR = {"fetch": 4, "format": 6, "offset": 0}
+    WEIGHTS = {"fetch": 4, "format": 38, "offset": 0}
+    L = "0x000000000000ABCD"
+
+    def _light(self, light, **entry):
+        e = {"base": 0, "layout": "dot"}
+        e.update(entry)
+        e["light"] = light
+        return gtt.generate({self.L: e}).splitlines()
+
+    def _stream(self, **extra):
+        return dict({"kind": "stream", "normal": self.NORMAL, "colour": self.COLOUR, "power": 2.2, "evidence": "e"},
+                    **extra)
+
+    def _probe(self, **extra):
+        return dict({"kind": "probe", "normal": self.NORMAL, "weights": self.WEIGHTS, "a0": "z", "evidence": "e"},
+                    **extra)
+
+    def _instanced(self, **extra):
+        return dict({"kind": "instance", "normal": {"fetch": 5, "format": 32, "offset": 2},
+                     "colour": {"fetch": 3, "format": 6, "offset": 6}, "evidence": "e"}, **extra)
+
+    def test_light_lines(self):
+        # FABLE2_VS_LIGHT(hash, kind, normal fetch, format, offset, second fetch, format, offset, a0,
+        # scale reference, power): kind 1 terrain, 2 stream, 3 probe, 4 instance; the second fetch is the
+        # colour stream's, the probe weights' or the instance colour's; a0 the source component of the
+        # position fetch that holds the probe set's index (-1 without); the scale is the constant the
+        # shader multiplies its world normal by (register * 4 + component, -1 without); the power is the
+        # colour stream's literal exponent (0.0f without). After every other line of the shader.
+        p = "FABLE2_VS_LIGHT(0x000000000000ABCDull, "
+        self.assertEqual(self._light(self._stream())[2:], [p + "2, 1, 16, 2, 4, 6, 0, -1, -1, 2.2f)"])
+        self.assertEqual(self._light(self._stream(scale="c7.w", power=2))[2], p + "2, 1, 16, 2, 4, 6, 0, -1, 31, 2.0f)")
+        self.assertEqual(self._light(self._probe())[2], p + "3, 1, 16, 2, 4, 38, 0, 2, -1, 0.0f)")
+        self.assertEqual(self._light(self._probe(a0="x", scale="c7.w", weights={"fetch": 6, "format": 38, "offset": 0}))[2],
+                         p + "3, 1, 16, 2, 6, 38, 0, 0, 31, 0.0f)")
+        out = self._light(self._instanced(), instance=self.INSTANCE)
+        self.assertEqual(out[-1], p + "4, 5, 32, 2, 3, 6, 6, -1, -1, 0.0f)")
+        self.assertEqual([l.split("(")[0] for l in out[1:]], ["FABLE2_VS_TRANSFORM", "FABLE2_VS_INSTANCE", "FABLE2_VS_LIGHT"])
+        out = self._light({"kind": "terrain", "evidence": "e"}, terrain=self.TERRAIN)
+        self.assertEqual(out[-1], p + "1, -1, 0, 0, -1, 0, 0, -1, -1, 0.0f)")
+        # a skinned shader may have a probe entry
+        out = self._light(self._probe(), skin=self.SKIN)
+        self.assertEqual([l.split("(")[0] for l in out[1:]], ["FABLE2_VS_TRANSFORM", "FABLE2_VS_SKIN", "FABLE2_VS_LIGHT"])
+
+    def test_light_is_refused_rather_than_read_loosely(self):
+        terrain = {"kind": "terrain", "evidence": "e"}
+        bad = [
+            # (light, the rest of the entry, the message)
+            ("stream", {}, "light is not an object"),
+            ([self.NORMAL], {}, "light is not an object"),
+            (self._stream(kind="colour"), {}, "unknown light kind 'colour'"),
+            (self._stream(kind=2), {}, "unknown light kind 2"),
+            ({"normal": self.NORMAL, "evidence": "e"}, {}, "unknown light kind None"),
+            (self._stream(normall=self.NORMAL), {}, "unknown light key normall"),
+            (self._stream(manual=True), {}, "unknown light key manual"),
+            # the evidence
+            ({k: v for k, v in self._stream().items() if k != "evidence"}, {}, "light without evidence"),
+            (self._stream(evidence=" "), {}, "light without evidence"),
+            (self._probe(evidence=["dump"]), {}, "light without evidence"),
+            # each kind has its keys and no other
+            (dict(terrain, normal=self.NORMAL), {"terrain": self.TERRAIN}, "a terrain light takes no normal"),
+            (dict(terrain, power=2.2), {"terrain": self.TERRAIN}, "a terrain light takes no power"),
+            (self._stream(weights=self.WEIGHTS), {}, "a stream light takes no weights"),
+            (self._stream(a0="z"), {}, "a stream light takes no a0"),
+            (self._probe(colour=self.COLOUR), {}, "a probe light takes no colour"),
+            (self._probe(power=2.2), {}, "a probe light takes no power"),
+            (self._instanced(weights=self.WEIGHTS), {"instance": self.INSTANCE}, "an instance light takes no weights"),
+            (self._instanced(scale="c7.w"), {"instance": self.INSTANCE}, "an instance light takes no scale"),
+            (self._instanced(power=2.2), {"instance": self.INSTANCE}, "an instance light takes no power"),
+            ({k: v for k, v in self._stream().items() if k != "normal"}, {}, "a stream light needs normal"),
+            ({k: v for k, v in self._stream().items() if k != "colour"}, {}, "a stream light needs colour"),
+            ({k: v for k, v in self._stream().items() if k != "power"}, {}, "a stream light needs power"),
+            ({k: v for k, v in self._probe().items() if k != "weights"}, {}, "a probe light needs weights"),
+            ({k: v for k, v in self._probe().items() if k != "a0"}, {}, "a probe light needs a0"),
+            ({k: v for k, v in self._instanced().items() if k != "colour"}, {"instance": self.INSTANCE},
+             "an instance light needs colour"),
+            # the kind and the entry's own form
+            (terrain, {}, "a terrain light belongs to an entry with terrain"),
+            (self._instanced(), {}, "an instance light belongs to an entry with instance"),
+            (self._stream(), {"instance": self.INSTANCE}, "a stream light does not belong to an entry with instance"),
+            (self._probe(), {"instance": self.INSTANCE}, "a probe light does not belong to an entry with instance"),
+            (self._stream(), {"terrain": self.TERRAIN}, "a stream light does not belong to an entry with terrain"),
+            (self._instanced(), {"instance": self.INSTANCE, "terrain": self.TERRAIN},
+             "an instance light does not belong to an entry with terrain"),
+            # the fetches: an object with fetch, format, offset; the format is the one the reader decodes
+            (self._stream(normal=1), {}, "light normal is not an object"),
+            (self._stream(normal=dict(self.NORMAL, slot=95)), {}, "unknown light normal key slot"),
+            (self._stream(normal={"fetch": 1, "format": 16}), {}, "light normal offset None"),
+            (self._stream(normal=dict(self.NORMAL, fetch=-1)), {}, "light normal fetch -1"),
+            (self._stream(normal=dict(self.NORMAL, fetch=128)), {}, "light normal fetch 128"),
+            (self._stream(normal=dict(self.NORMAL, fetch=1.0)), {}, "light normal fetch 1.0"),
+            (self._stream(normal=dict(self.NORMAL, fetch=True)), {}, "light normal fetch True"),
+            (self._stream(normal=dict(self.NORMAL, offset=256)), {}, "light normal offset 256"),
+            (self._stream(normal=dict(self.NORMAL, offset="2")), {}, "light normal offset '2'"),
+            (self._stream(normal=dict(self.NORMAL, format=7)), {}, "light normal format 7 is not 16 (10_11_11) or 32"),
+            (self._stream(normal=dict(self.NORMAL, format=6)), {}, "light normal format 6 is not"),
+            (self._stream(colour=dict(self.COLOUR, format=7)), {}, "light colour format 7 is not 6 (8_8_8_8)"),
+            (self._probe(weights=dict(self.WEIGHTS, format=32)), {}, "light weights format 32 is not 38 (32_32_32_32_FLOAT)"),
+            (self._instanced(colour={"fetch": 3, "format": 38, "offset": 6}), {"instance": self.INSTANCE},
+             "light colour format 38 is not 6"),
+            # a0, scale, power
+            (self._probe(a0="zw"), {}, "light a0 'zw' is not one of x, y, z, w"),
+            (self._probe(a0=2), {}, "light a0 2 is not one of x, y, z, w"),
+            (self._probe(scale="c7"), {}, "bad register 'c7'"),
+            (self._probe(scale="c7.xy"), {}, "names more than one component"),
+            (self._stream(scale="c256.w"), {}, "bad register 'c256.w'"),
+            (self._stream(scale=31), {}, "bad register 31"),
+            (self._stream(power=0), {}, "light power 0 is not a number above 0"),
+            (self._stream(power=-2.2), {}, "light power -2.2 is not a number above 0"),
+            (self._stream(power="2.2"), {}, "light power '2.2' is not a number above 0"),
+            (self._stream(power=True), {}, "light power True is not a number above 0"),
+            (self._stream(power=float("nan")), {}, "light power nan is not a number above 0"),
+            (self._stream(power=float("inf")), {}, "light power inf is not a number above 0"),
+        ]
+        for light, rest, why in bad:
+            with self.assertRaises(ValueError, msg=repr(light)) as cm:
+                self._light(light, **rest)
+            self.assertTrue(str(cm.exception).startswith(self.L + ": "), str(cm.exception))
+            self.assertIn(why, str(cm.exception), repr(light))
+        # without a transform the entry has no line, and a light with it is a mistake
+        with self.assertRaisesRegex(ValueError, f"{self.L}: light entry without base"):
+            gtt.generate({self.L: {"rejected": "no", "light": self._stream()}})
+
+    def test_the_committed_light_entries(self):
+        # One entry per vertex shader of light_check.py's FAMILIES (the leaves' apart: no family yet),
+        # of the kind that shader's colour comes from; the fetches are the dumps' in DecodeVertexFetches
+        # order (out/native-evidence/lighting/task4_table_facts.txt).
+        import sys
+        sys.path.insert(0, str(ROOT / "tools" / "xdk_sigmatch"))
+        import light_check
+        table = gtt.load(ROOT / "docs" / "native-renderer" / "vs-transforms.json")
+        kinds = {"0x" + vs: e["light"]["kind"] for vs, e in ((k[2:], v) for k, v in table.items()) if "light" in e}
+        want = {}
+        for family, pairs in light_check.FAMILIES.items():
+            for _, vs in pairs:
+                if family.startswith("terrain"):
+                    kind = "terrain"
+                elif family.startswith("plant"):
+                    kind = "instance"
+                elif family.startswith("tree-leaf"):
+                    continue
+                else:
+                    kind = "stream" if vs == "ECD66A10092E6562" else "probe"
+                self.assertEqual(want.setdefault("0x" + vs, kind), kind, vs)
+        self.assertEqual(kinds, want)
+        self.assertEqual(len(kinds), 15)
+        light = {vs: table[vs]["light"] for vs in kinds}
+        normal = {"fetch": 1, "format": 16, "offset": 2}
+        self.assertEqual({k: v for k, v in light["0xECD66A10092E6562"].items() if k != "evidence"},
+                         {"kind": "stream", "normal": normal, "colour": {"fetch": 4, "format": 6, "offset": 0},
+                          "scale": "c7.w", "power": 2.2})
+        probes = {"0x79EAC49585797037": (4, "c7.w"), "0xD4D558DA6A82BDC8": (6, None),
+                  "0xA1F7E9885EC466DF": (5, None), "0x475EC9F795E5EDBB": (5, "c7.w")}
+        for vs, (fetch, scale) in probes.items():
+            want = {"kind": "probe", "normal": normal, "weights": {"fetch": fetch, "format": 38, "offset": 0}, "a0": "z"}
+            if scale:
+                want["scale"] = scale
+            self.assertEqual({k: v for k, v in light[vs].items() if k != "evidence"}, want, vs)
+        for vs, kind in kinds.items():
+            if kind == "instance":
+                self.assertEqual({k: v for k, v in light[vs].items() if k != "evidence"},
+                                 {"kind": "instance", "normal": {"fetch": 5, "format": 32, "offset": 2},
+                                  "colour": {"fetch": 3, "format": 6, "offset": 6}}, vs)
+            if kind == "terrain":
+                self.assertEqual(sorted(light[vs]), ["evidence", "kind"], vs)
+        self.assertNotIn("light", table["0xA5846836C90E1192"])
+
     def test_the_committed_table_uses_the_allowed_keys(self):
         # The lists are the committed file's keys plus the three the finder writes.
         table = gtt.load(ROOT / "docs" / "native-renderer" / "vs-transforms.json")
         used = {"entry": set(), "skin": set(), "instance": set(), "terrain": set(), "uv": set()}
+        self.assertEqual({k for e in table.values() for k in e.get("light", {})}, set(gtt.LIGHT_KEYS))
+        self.assertEqual({k for e in table.values() for part in ("normal", "colour", "weights")
+                          for k in e.get("light", {}).get(part, {})}, set(gtt.LIGHT_FETCH_KEYS))
         for e in table.values():
             used["entry"] |= set(e)
             for part in ("skin", "instance", "terrain"):

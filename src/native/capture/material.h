@@ -3,8 +3,11 @@
 // Albedo material of a captured draw (pure: no SDK/GPU deps): the albedo
 // texture's fetch constant, the UV element and a per-draw UV scale/offset
 // folded from shader constants (ps-albedo.json, vs-transforms.json "uv").
+// And the light inputs of a draw (the two tables' "light"): LightInputs,
+// MakeLightInputs, at the end.
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -201,6 +204,428 @@ inline bool ResolveUvFetch(const std::vector<VertexFetch>& fetches, const VsUvSp
   }
   return UvLayoutFromFetches(fetches[size_t(u.fetch_index)], fetches[size_t(v.fetch_index)], u.src_comp,
                              v.src_comp, out);
+}
+
+// --- Light inputs (frame-map section 14; docs/native-renderer/lighting-formulas.md) ----------------
+// What the light of one draw needs beyond the frame's light block (light_block.h): its family, and
+// what its family reads per draw. Recorded by the capture into a side array of the frame
+// (FrameScene::lights, DrawRecord::light_index); nothing is drawn from it by the capture.
+
+// The family of a draw's pixel shader with its vertex shader (ps-albedo.json "light"): the closed
+// formula the pair was checked against by tools/xdk_sigmatch/light_check.py, whose names these are.
+// kTerrainLayer / kTerrainFar: terrain_layer / terrain_far. kObject, kTreeTrunk, kPlantLit:
+// lit_object (props; trunks; instanced plants with a normal map). kPlant: plant. A family's two- and
+// four-light form ("-multi") is the same value with LightInputs::multi set.
+enum class LightFamily : uint8_t { kNone, kTerrainLayer, kTerrainFar, kObject, kTreeTrunk, kPlant, kPlantLit, kCount };
+// The generated table writes the family as 1 terrain-layer, 2 terrain-far, 3 object, 4 tree-trunk,
+// 5 plant, 6 plant-lit (gen_albedo_table.py, LIGHT_FAMILIES) and capture.cpp casts it as LightFamily(code).
+static_assert(LightFamily(1) == LightFamily::kTerrainLayer && LightFamily(2) == LightFamily::kTerrainFar &&
+              LightFamily(3) == LightFamily::kObject && LightFamily(4) == LightFamily::kTreeTrunk &&
+              LightFamily(5) == LightFamily::kPlant && LightFamily(6) == LightFamily::kPlantLit &&
+              size_t(LightFamily::kCount) == 7);
+
+inline const char* LightFamilyName(LightFamily f) {
+  switch (f) {
+    case LightFamily::kNone: return "none";
+    case LightFamily::kTerrainLayer: return "terrain-layer";
+    case LightFamily::kTerrainFar: return "terrain-far";
+    case LightFamily::kObject: return "object";
+    case LightFamily::kTreeTrunk: return "tree-trunk";
+    case LightFamily::kPlant: return "plant";
+    case LightFamily::kPlantLit: return "plant-lit";
+    default: return "?";
+  }
+}
+
+// Where a vertex shader takes what the light reads per vertex (vs-transforms.json "light"):
+// kTerrain: nothing from a stream (the normal is the heightmap's). kStream: a colour stream of its
+// own beside the normal. kProbe: four weights per vertex, combined with per-draw constants.
+// kInstance: the instance's colour (and the mesh's normal through the instance's rows).
+enum class LightVertexKind : uint8_t { kNone, kTerrain, kStream, kProbe, kInstance };
+// The generated table writes the kind as 1 terrain, 2 stream, 3 probe, 4 instance
+// (gen_transform_table.py, LIGHT_KINDS) and capture.cpp casts it as LightVertexKind(code).
+static_assert(LightVertexKind(1) == LightVertexKind::kTerrain && LightVertexKind(2) == LightVertexKind::kStream &&
+              LightVertexKind(3) == LightVertexKind::kProbe && LightVertexKind(4) == LightVertexKind::kInstance);
+
+inline const char* LightVertexKindName(LightVertexKind k) {
+  switch (k) {
+    case LightVertexKind::kNone: return "none";
+    case LightVertexKind::kTerrain: return "terrain";
+    case LightVertexKind::kStream: return "stream";
+    case LightVertexKind::kProbe: return "probe";
+    case LightVertexKind::kInstance: return "instance";
+    default: return "?";
+  }
+}
+
+// Whether a family can stand on a vertex side of this kind (the forms the checked pairs have).
+inline bool LightKindFits(LightFamily f, LightVertexKind k) {
+  switch (f) {
+    case LightFamily::kTerrainLayer:
+    case LightFamily::kTerrainFar: return k == LightVertexKind::kTerrain;
+    case LightFamily::kObject: return k == LightVertexKind::kStream || k == LightVertexKind::kProbe;
+    case LightFamily::kTreeTrunk: return k == LightVertexKind::kProbe;
+    case LightFamily::kPlant:
+    case LightFamily::kPlantLit: return k == LightVertexKind::kInstance;
+    default: return false;
+  }
+}
+
+// Why a recorded draw has no light inputs. Such a draw keeps its material and is drawn without
+// light; it is never lit from guessed data. kLightUnknown: its shaders have no family (no entry, or
+// a pair that was not checked), or an input the family reads could not be read or is not usable.
+// kNormalUnsupported: its normal element is not the one the table names, or is in a format no
+// reader decodes. The third reason of the lighting, "light-block" (kLightBlockReason), is a
+// frame's, not a draw's: the frame's light block was not read.
+enum class LightReason : uint8_t { kNone, kLightUnknown, kNormalUnsupported, kCount };
+inline constexpr const char* kLightBlockReason = "light-block";
+
+inline const char* LightReasonName(LightReason r) {
+  switch (r) {
+    case LightReason::kNone: return "none";
+    case LightReason::kLightUnknown: return "light-unknown";
+    case LightReason::kNormalUnsupported: return "normal-unsupported";
+    default: return "?";
+  }
+}
+
+// ps-albedo.json "light": the family of a pixel shader, whether it is the "-multi" form, and the
+// literal of the terrain layers' facing factor sat(scale * (N . c109)) (0 for every other family; a
+// shader loads its literals itself, so no constant reader gives them).
+struct PsLightSpec {
+  uint64_t ps_hash;
+  LightFamily family;
+  bool multi;
+  float facing_scale;
+};
+// One vertex shader a pixel shader's family was checked with (ps-albedo.json "light"."vertex").
+struct PsLightPair {
+  uint64_t ps_hash, vs_hash;
+};
+
+// A vertex fetch a light entry names: its index in DecodeVertexFetches order with the Xenos format
+// and the offset in dwords the table's author saw; a mismatch at run time rejects the entry.
+// fetch -1: none.
+struct LightFetchSpec {
+  int8_t fetch;
+  uint8_t format;
+  uint8_t offset_dwords;
+};
+// vs-transforms.json "light". `second`: the colour stream (kStream), the probe weights (kProbe) or
+// the instance colour (kInstance). a0_comp: the source component of the position fetch that holds
+// the index of the draw's probe set (kProbe; -1 otherwise). scale_ref: the vertex constant the
+// shader multiplies its world normal by, register * 4 + component (-1: none). power: the literal
+// exponent of the colour stream (kStream; 0 otherwise).
+struct VsLightSpec {
+  uint64_t vs_hash;
+  LightVertexKind kind;
+  LightFetchSpec normal, second;
+  int8_t a0_comp;
+  int32_t scale_ref;
+  float power;
+};
+
+// The Xenos vertex formats the light's elements have, and their size in a vertex (0: not one).
+inline constexpr uint32_t kVertexFormat_8_8_8_8 = 6;
+inline constexpr uint32_t kVertexFormat_10_11_11 = 16;
+inline constexpr uint32_t kVertexFormat_16_16_16_16_FLOAT = 32;
+inline constexpr uint32_t kVertexFormat_32_32_32_32_FLOAT = 38;
+inline uint32_t LightElementBytes(uint32_t xenos_format) {
+  switch (xenos_format) {
+    case kVertexFormat_8_8_8_8:
+    case kVertexFormat_10_11_11: return 4;
+    case kVertexFormat_16_16_16_16_FLOAT: return 8;
+    case kVertexFormat_32_32_32_32_FLOAT: return 16;
+    default: return 0;
+  }
+}
+// A normal is the 10_11_11 element of the object shaders or the half4 of the instanced plants.
+inline bool IsLightNormalFormat(uint32_t xenos_format) {
+  return xenos_format == kVertexFormat_10_11_11 || xenos_format == kVertexFormat_16_16_16_16_FLOAT;
+}
+
+// One vertex element as a later reader needs it: the stream from its bound offset, where the
+// element lies in a vertex, and how the fetch reads it.
+inline constexpr uint8_t kLightElementSigned = 1;
+inline constexpr uint8_t kLightElementNormalized = 2;
+inline constexpr uint8_t kLightElementEndianShift = 2;  // bits 2-3: the stream's endian (0 none, 1 8in16, 2 8in32, 3 16in32)
+struct LightElement {
+  BufferRef vb;
+  uint16_t offset_bytes = 0;
+  uint16_t stride_bytes = 0;
+  uint16_t swizzle = 0;  // the fetch's destination swizzle
+  uint8_t format = 0;    // Xenos vertex format
+  uint8_t flags = 0;     // kLightElementSigned, kLightElementNormalized, the endian
+};
+static_assert(sizeof(LightElement) == 16);
+
+// The registers the light of a draw reads besides the frame's block (lighting-formulas.md, per
+// family). Vertex constants, from the device's vertex bank (none is a register a buffer load can
+// name: light_block.h, kBufferLoadRanges; frame-map section 14, "The vertex side"):
+inline constexpr uint32_t kLightVsRotationReg = 4;      // c4..c6: the rows of the world rotation (xyz)
+inline constexpr uint32_t kLightVsIndexOffsetReg = 20;  // c20.x: the colour stream's index offset (ECD6)
+inline constexpr uint32_t kLightVsProbeReg = 28;        // c28..c39: three probe sets of four registers
+inline constexpr uint32_t kLightProbeRegisters = 12;
+inline constexpr uint32_t kLightVsBendReg = 45;         // c45: the plants' bend of the normal
+// Pixel constants, from the device's pixel bank (bank-only registers too):
+inline constexpr uint32_t kLightPsSunScaleReg = 11;     // c11.x: terrain (layers: the ambient; far: the sun)
+inline constexpr uint32_t kLightPsFadeReg = 26;         // c26.xyz: objects and trunks, with the output scale
+inline constexpr uint32_t kLightPsAmbientReg = 27;      // c27.w: objects and trunks, on the ambient part
+inline constexpr uint32_t kLightPsTintReg = 49;         // c49.xyz: objects and trunks, on the whole colour
+
+// A run of registers of one bank (0 vertex, 1 pixel).
+struct LightRegisterRun {
+  uint8_t bank, reg, count;
+};
+inline constexpr size_t kMaxLightRegisterRuns = 6;
+// The registers a draw of this family and vertex kind reads: what the capture reads from the
+// banks, and what MakeLightInputs requires to have been read. Returns the number of runs.
+inline size_t LightRegisterRuns(const PsLightSpec& ps, const VsLightSpec& vs, LightRegisterRun out[kMaxLightRegisterRuns]) {
+  size_t n = 0;
+  auto add = [&](uint32_t bank, uint32_t reg, uint32_t count) { out[n++] = {uint8_t(bank), uint8_t(reg), uint8_t(count)}; };
+  switch (ps.family) {
+    case LightFamily::kTerrainLayer:
+    case LightFamily::kTerrainFar:
+      add(1, kLightPsSunScaleReg, 1);
+      break;
+    case LightFamily::kObject:
+    case LightFamily::kTreeTrunk:
+      add(0, kLightVsRotationReg, 3);
+      if (vs.scale_ref >= 0 && vs.scale_ref < 1024) add(0, uint32_t(vs.scale_ref) / 4, 1);
+      if (vs.kind == LightVertexKind::kStream) add(0, kLightVsIndexOffsetReg, 1);
+      if (vs.kind == LightVertexKind::kProbe) add(0, kLightVsProbeReg, kLightProbeRegisters);
+      add(1, kLightPsFadeReg, 2);  // c26, c27
+      add(1, kLightPsTintReg, 1);
+      break;
+    case LightFamily::kPlant:
+    case LightFamily::kPlantLit:
+      add(0, kLightVsBendReg, 1);
+      break;
+    default:
+      break;
+  }
+  return n;
+}
+
+// The light inputs of one recorded draw (an entry of FrameScene::lights). Sized for the largest
+// family (the probe sets); a field a family does not read holds its neutral value.
+struct LightInputs {
+  LightFamily family = LightFamily::kNone;
+  LightVertexKind kind = LightVertexKind::kNone;
+  bool multi = false;   // the family's two- or four-light form: its first light need not be the sun
+  int8_t a0_comp = -1;  // kProbe: source component (0-3) of the position element holding the probe set's index
+  // The vertex normal's element (not kTerrain: a terrain normal comes from the patch's heightmap).
+  // kInstance: in the mesh stream, to go through the instance's rows.
+  LightElement normal;
+  // kStream: the colour stream (8_8_8_8; red is the fetch's z), read at colour_first + the vertex
+  // index. kProbe: the four weights (32_32_32_32_FLOAT) at the vertex index. kInstance: the instance's
+  // colour (8_8_8_8) in the instance stream, at the copy's index.
+  LightElement second;
+  uint32_t colour_first = 0;    // kStream: vertex c20.x, a whole number; bounded by the stream at capture
+  float colour_power = 0.0f;    // kStream: the literal the colour is raised to (2.2)
+  float facing_scale = 0.0f;    // kTerrainLayer: the literal of sat(scale * (N . c109))
+  // kObject, kTreeTrunk: vertex c4..c6 (xyz), the rotation the shader puts its normal through, and
+  // the constant it then multiplies by (c7.w; 1 where the shader has none).
+  float world_rot[3][3] = {{1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
+  float world_scale = 1.0f;
+  float c11x = 1.0f;                    // terrain: pixel c11.x
+  float c27w = 1.0f;                    // kObject, kTreeTrunk: pixel c27.w
+  float c49[3] = {1.0f, 1.0f, 1.0f};    // kObject, kTreeTrunk: pixel c49.xyz
+  float c26[3] = {1.0f, 1.0f, 1.0f};    // kObject, kTreeTrunk: pixel c26.xyz
+  // kProbe: vertex c28..c39 (the probe sets c[28 + a0]..c[31 + a0], a0 = 0, 4 or 8).
+  // kInstance: [0] = vertex c45. Zero otherwise.
+  float vs_const[kLightProbeRegisters][4] = {};
+};
+// Measured, so that a field added here is noticed: one entry per lit draw is copied into the frame
+// on the guest thread (about 900 a frame at the bridge).
+static_assert(sizeof(LightInputs) == 312, "LightInputs grew or shrank: see the comment above");
+
+// Registers of one constant bank as a draw's capture read them: `bank` is 256 x 4 host floats,
+// bit r of `have` says register r was read for this draw (anything else in `bank` is stale).
+struct RegisterView {
+  const float* bank = nullptr;
+  uint64_t have[4] = {};
+  void Mark(uint32_t reg, uint32_t count) {
+    for (uint32_t r = reg; r < 256 && r - reg < count; ++r) have[r / 64] |= 1ull << (r % 64);
+  }
+  bool Has(uint32_t reg, uint32_t count = 1) const {
+    if (!bank || count == 0 || reg >= 256 || count > 256 - reg) return false;
+    for (uint32_t r = reg; r < reg + count; ++r) {
+      if (!((have[r / 64] >> (r % 64)) & 1)) return false;
+    }
+    return true;
+  }
+};
+
+// The stream behind a fetch's slot as the capture resolved it (from the stream's bound offset on).
+struct LightStream {
+  bool resolved = false;
+  BufferRef vb;
+  uint8_t endian = 0;  // the fetch constant's endian
+};
+
+// The fetch a light entry names, or null: no such fetch, or its format or offset is not the one
+// the entry was written for (another fetch order: never a wrong element).
+inline const VertexFetch* LightFetch(const std::vector<VertexFetch>& fetches, const LightFetchSpec& spec) {
+  if (spec.fetch < 0 || size_t(spec.fetch) >= fetches.size()) return nullptr;
+  const VertexFetch& f = fetches[size_t(spec.fetch)];
+  if (f.format != spec.format || f.offset_dwords != int32_t(spec.offset_dwords)) return nullptr;
+  return &f;
+}
+
+// The element of a fetch in its stream. False when the element does not lie inside one vertex of
+// the fetch's stride, or the stream is not resolved or holds no whole vertex.
+inline bool MakeLightElement(const VertexFetch& f, const LightStream& stream, LightElement* out) {
+  const uint32_t bytes = LightElementBytes(f.format);
+  if (bytes == 0 || f.offset_dwords < 0 || f.stride_dwords == 0 || f.stride_dwords > 255) return false;
+  const uint32_t offset = uint32_t(f.offset_dwords) * 4, stride = f.stride_dwords * 4;
+  if (offset + bytes > stride) return false;
+  if (!stream.resolved || stream.vb.size < stride || stream.endian > 3) return false;
+  out->vb = stream.vb;
+  out->offset_bytes = uint16_t(offset);
+  out->stride_bytes = uint16_t(stride);
+  out->swizzle = uint16_t(f.dst_swizzle & 0xFFF);
+  out->format = uint8_t(f.format);
+  out->flags = uint8_t((f.is_signed ? kLightElementSigned : 0) | (f.normalized ? kLightElementNormalized : 0) |
+                       (stream.endian << kLightElementEndianShift));
+  return true;
+}
+
+// What the capture found for one draw.
+struct LightDraw {
+  const PsLightSpec* ps = nullptr;  // the pixel shader's entry, null without one
+  const VsLightSpec* vs = nullptr;  // the vertex shader's entry
+  bool pair = false;                // the two are a pair the table lists (PsLightPair)
+  const std::vector<VertexFetch>* fetches = nullptr;  // the vertex shader's fetches
+  LightStream normal_stream;        // the stream behind LightFetch(vs->normal)
+  LightStream second_stream;        // ... behind LightFetch(vs->second)
+  RegisterView vs_regs, ps_regs;    // the registers of LightRegisterRuns, as read
+  // The largest vertex index the draw reads (index plus base vertex), -1 when it is not known.
+  // For an instanced draw the index names a copy and a mesh vertex and is not a bound here.
+  int64_t max_vertex = -1;
+  bool instanced = false;           // the draw has its instance set (DrawInputs::instances.active)
+};
+
+// The colour stream's index offset is a whole number of vertices (c20.x is 0 for most meshes and
+// up to several thousand where meshes share a stream: lighting-formulas.md, "Objects").
+inline constexpr float kMaxLightColourFirst = 16777215.0f;
+
+// The light inputs of a draw. On kNone `*out` is complete; otherwise `*out` is left default (no
+// family) and the draw has no light. `why` (optional) receives a short word for the discovery rows.
+// Fails closed: every register it copies was read and is finite, every element is the table's and
+// lies in its stream, and the two streams the position's range check does not cover (the colour
+// stream, read at an offset, and the probe weights) hold the draw's largest vertex.
+inline LightReason MakeLightInputs(const LightDraw& d, LightInputs* out, const char** why = nullptr) {
+  *out = LightInputs{};
+  const char* unused = nullptr;
+  const char*& word = why ? *why : unused;
+  auto fail = [&](LightReason r, const char* w) {
+    *out = LightInputs{};
+    word = w;
+    return r;
+  };
+  word = "";
+  if (!d.ps || d.ps->family == LightFamily::kNone || size_t(d.ps->family) >= size_t(LightFamily::kCount)) {
+    return fail(LightReason::kLightUnknown, "no-family");
+  }
+  if (!d.vs || !LightKindFits(d.ps->family, d.vs->kind)) return fail(LightReason::kLightUnknown, "vertex-shader");
+  if (!d.pair) return fail(LightReason::kLightUnknown, "pair-not-checked");
+  const PsLightSpec& ps = *d.ps;
+  const VsLightSpec& vs = *d.vs;
+  LightInputs& l = *out;  // (default so far; fail() makes it default again)
+  l.family = ps.family;
+  l.kind = vs.kind;
+  l.multi = ps.multi;
+  // Registers: all read, all finite.
+  LightRegisterRun runs[kMaxLightRegisterRuns];
+  const size_t n_runs = LightRegisterRuns(ps, vs, runs);
+  for (size_t i = 0; i < n_runs; ++i) {
+    const RegisterView& view = runs[i].bank ? d.ps_regs : d.vs_regs;
+    if (!view.Has(runs[i].reg, runs[i].count)) return fail(LightReason::kLightUnknown, "register-unread");
+  }
+  bool finite = true;
+  auto take = [&](const RegisterView& view, uint32_t reg, uint32_t comp, float* to) {
+    const float v = view.bank[reg * 4 + comp];
+    finite = finite && std::isfinite(v);
+    *to = v;
+  };
+  if (ps.family == LightFamily::kTerrainLayer || ps.family == LightFamily::kTerrainFar) {
+    take(d.ps_regs, kLightPsSunScaleReg, 0, &l.c11x);
+    if (ps.family == LightFamily::kTerrainLayer) {
+      if (!(ps.facing_scale > 0.0f) || !std::isfinite(ps.facing_scale)) return fail(LightReason::kLightUnknown, "literal");
+      l.facing_scale = ps.facing_scale;
+    }
+    if (!finite) return fail(LightReason::kLightUnknown, "register-not-finite");
+    return LightReason::kNone;
+  }
+  if (!d.fetches) return fail(LightReason::kLightUnknown, "vertex-shader");
+  if (ps.family == LightFamily::kObject || ps.family == LightFamily::kTreeTrunk) {
+    for (uint32_t row = 0; row < 3; ++row) {
+      for (uint32_t c = 0; c < 3; ++c) take(d.vs_regs, kLightVsRotationReg + row, c, &l.world_rot[row][c]);
+    }
+    if (vs.scale_ref >= 0) {
+      if (vs.scale_ref >= 1024) return fail(LightReason::kLightUnknown, "vertex-shader");
+      take(d.vs_regs, uint32_t(vs.scale_ref) / 4, uint32_t(vs.scale_ref) % 4, &l.world_scale);
+    }
+    take(d.ps_regs, kLightPsAmbientReg, 3, &l.c27w);
+    for (uint32_t c = 0; c < 3; ++c) {
+      take(d.ps_regs, kLightPsTintReg, c, &l.c49[c]);
+      take(d.ps_regs, kLightPsFadeReg, c, &l.c26[c]);
+    }
+    if (vs.kind == LightVertexKind::kProbe) {
+      for (uint32_t r = 0; r < kLightProbeRegisters; ++r) {
+        for (uint32_t c = 0; c < 4; ++c) take(d.vs_regs, kLightVsProbeReg + r, c, &l.vs_const[r][c]);
+      }
+    }
+  } else {
+    for (uint32_t c = 0; c < 4; ++c) take(d.vs_regs, kLightVsBendReg, c, &l.vs_const[0][c]);
+  }
+  if (!finite) return fail(LightReason::kLightUnknown, "register-not-finite");
+  // The normal: the table's fetch, in a format a reader decodes, inside its vertex.
+  const VertexFetch* nf = LightFetch(*d.fetches, vs.normal);
+  if (!nf || !IsLightNormalFormat(nf->format)) return fail(LightReason::kNormalUnsupported, "normal-fetch");
+  const uint32_t normal_bytes = LightElementBytes(nf->format);
+  if (nf->offset_dwords < 0 || nf->stride_dwords == 0 || nf->stride_dwords > 255 ||
+      uint32_t(nf->offset_dwords) * 4 + normal_bytes > nf->stride_dwords * 4) {
+    return fail(LightReason::kNormalUnsupported, "normal-fetch");
+  }
+  if (!MakeLightElement(*nf, d.normal_stream, &l.normal)) return fail(LightReason::kLightUnknown, "normal-stream");
+  const bool instance = vs.kind == LightVertexKind::kInstance;
+  if (instance != d.instanced) return fail(LightReason::kLightUnknown, "instance-set");
+  if (!instance) {
+    if (d.max_vertex < 0) return fail(LightReason::kLightUnknown, "vertex-range");
+    if ((uint64_t(d.max_vertex) + 1) * l.normal.stride_bytes > l.normal.vb.size) {
+      return fail(LightReason::kLightUnknown, "normal-stream");
+    }
+  }
+  // The second element: the colour stream, the probe weights or the instance colour.
+  const VertexFetch* sf = LightFetch(*d.fetches, vs.second);
+  const uint32_t want = vs.kind == LightVertexKind::kProbe ? kVertexFormat_32_32_32_32_FLOAT : kVertexFormat_8_8_8_8;
+  if (!sf || sf->format != want || !MakeLightElement(*sf, d.second_stream, &l.second)) {
+    return fail(LightReason::kLightUnknown, vs.kind == LightVertexKind::kProbe ? "weights" : "colour");
+  }
+  if (vs.kind == LightVertexKind::kStream) {
+    // The colour is read at the vertex index plus c20.x: a whole number, and the draw's largest
+    // vertex must still lie inside the stream.
+    float first = 0.0f;
+    take(d.vs_regs, kLightVsIndexOffsetReg, 0, &first);
+    if (!finite || !(first >= 0.0f) || first > kMaxLightColourFirst || first != std::floor(first)) {
+      return fail(LightReason::kLightUnknown, "colour-offset");
+    }
+    l.colour_first = uint32_t(first);
+    if ((uint64_t(l.colour_first) + uint64_t(d.max_vertex) + 1) * l.second.stride_bytes > l.second.vb.size) {
+      return fail(LightReason::kLightUnknown, "colour-range");
+    }
+    if (!(vs.power > 0.0f) || !std::isfinite(vs.power)) return fail(LightReason::kLightUnknown, "literal");
+    l.colour_power = vs.power;
+  } else if (vs.kind == LightVertexKind::kProbe) {
+    if ((uint64_t(d.max_vertex) + 1) * l.second.stride_bytes > l.second.vb.size) {
+      return fail(LightReason::kLightUnknown, "weights-range");
+    }
+    if (vs.a0_comp < 0 || vs.a0_comp > 3) return fail(LightReason::kLightUnknown, "vertex-shader");
+    l.a0_comp = vs.a0_comp;
+  }
+  return LightReason::kNone;
 }
 
 }  // namespace fable2::native::capture

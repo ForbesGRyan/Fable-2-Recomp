@@ -289,6 +289,8 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
       REXLOG_INFO("[native] clay: {}",
                   render::FormatTextureText(tst, st.drawn, st.alpha_unknown, st.blend_unknown));
       REXLOG_INFO("[native] clay: {}", render::FormatTerrainText(st, tst));
+      // The light's vertex inputs in the geometry cache (built for the lit records, read by no shader yet).
+      REXLOG_INFO("[native] clay: {}", render::FormatLightText(st));
     }
     REXLOG_INFO("[native] clay: {} | alpha-unknown {}, blend-unknown {}", render::FormatStateText(st),
                 st.alpha_unknown, st.blend_unknown);

@@ -2586,13 +2586,15 @@ SkipReason FillDrawInputs(uint32_t device, DrawInputs& in, DrawShaders* shaders)
 // terrain entry (ps-albedo.json) of the builder's kind: a layer shader on the
 // layer builder, a far shader on the adaptive one. The registers
 // MakeTerrainMaterialInputs names are read into t_bank and t_ps_bank (the pixel
-// bank as FillMaterial reads an alpha recipe's scale) and at most five fetch
+// bank as FillMaterial reads an alpha recipe's scale) and at most six fetch
 // constants from the device shadow: bounded reads, and anything the material
 // reads that is unreadable leaves in.terrain.material invalid. The base map's
 // fetch constant and its two registers (vs c14, ps c21) are light, not material:
-// when one cannot be read only base_valid stays false. A layer shader with the
+// when one cannot be read only base_valid stays false; so is the vertex
+// shader's normal map (tf17), read for every terrain draw: without it the draw
+// has no normals and keeps its material. A layer shader with the
 // steep-ground block (the entry's "steep") adds one pixel register (c45) and
-// two fetch constants (the side texture, the vertex shader's normal map); the
+// the side texture's fetch constant, and needs the normal map; the
 // block's side scale is in the detail scale's register. A record whose shader
 // has the block but whose inputs for it cannot be read is invalid like any
 // other, so that its square falls back as a whole. Also records the pixel shader and its
@@ -2628,7 +2630,7 @@ void FillTerrainMaterial(uint32_t device, const DeviceSnapshot& dev, bool adapti
   if (!ReadPsBankRegisters(device, kTerrainPsBaseReg, 1)) {
     std::fill_n(t_ps_bank + 4 * kTerrainPsBaseReg, 4, unread);
   }
-  uint32_t fc[6][6];  // 2 and 3: the far tables or (2) the weights; 4 and 5: the steep block's
+  uint32_t fc[6][6];  // 2 and 3: the far tables or (2) the weights; 4: the steep block's side texture; 5: the normal map
   auto fetch = [&](uint32_t slot, uint32_t* out) -> const uint32_t* {
     const uint8_t* p =
         slot < 32 ? ReadVirtual(device + xdk::kDeviceVertexFetchOffset + xdk::kDeviceTextureFetchStride * slot, 24)
@@ -2646,10 +2648,9 @@ void FillTerrainMaterial(uint32_t device, const DeviceSnapshot& dev, bool adapti
   } else {
     f.weight = fetch(kTerrainWeightFetch, fc[2]);
   }
-  if (steep) {
-    f.side = fetch(steep->side_slot, fc[4]);
-    f.normal = fetch(kTerrainNormalFetch, fc[5]);
-  }
+  if (steep) f.side = fetch(steep->side_slot, fc[4]);
+  // The vertex shader's normal map: the light of every terrain draw reads it (and the block).
+  f.normal = fetch(kTerrainNormalFetch, fc[5]);
   MakeTerrainMaterialInputs(in.terrain, adaptive, t_bank, t_ps_bank, f, &in.terrain.material, steep);
 }
 

@@ -318,9 +318,37 @@ nrhi::TextureView* ClayPass::ResolveTerrainTexture(nrhi::Cmd* cmd, nrhi::Device*
   return t.view;
 }
 
+void ClayPass::PrepareLight(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light,
+                            Prepared& p, ClayStats& st) {
+  using capture::LightReason;
+  ++st.lit;
+  LightReason why = LightReason::kLightUnknown;
+  p.normals = geometry_.Normals(dev, r, light, p.vertex_count, st, &why);
+  if (p.normals && light.kind == capture::LightVertexKind::kStream) {
+    // The family's baked term is the stream's colour: without it the record has no light.
+    p.colours = geometry_.Colours(dev, r, light, p.vertex_count, st);
+    if (!p.colours) {
+      p.normals = nullptr;
+      why = LightReason::kLightUnknown;
+    }
+  }
+  if (!p.normals) {
+    ++st.light_missing[size_t(why)];
+    st.light_missing_by_vs.Add(r.vs_hash, uint8_t(why));
+    return;
+  }
+  ++st.light_ready;
+  // The world rotation the draw's normals will go through: what it is, counted, never assumed.
+  if (light.family == capture::LightFamily::kObject || light.family == capture::LightFamily::kTreeTrunk) {
+    const RotationKind kind = ClassifyRotation(light.world_rot, light.world_scale);
+    ++st.light_rotation[size_t(kind)];
+    if (kind != RotationKind::kRotation) st.light_rotation_by_vs.Add(r.vs_hash, uint8_t(kind));
+  }
+}
+
 void ClayPass::PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::DrawRecord& r,
-                              const capture::TerrainPatch& terrain, bool textured, ClayStats& st,
-                              TextureStats& tst) {
+                              const capture::TerrainPatch& terrain, const capture::LightInputs* light,
+                              bool textured, ClayStats& st, TextureStats& tst) {
   using capture::MaterialStatus;
   Prepared p;
   p.r = &r;
@@ -386,6 +414,23 @@ void ClayPass::PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::
     }
     item.usable = p.status == MaterialStatus::kTextured;
     if (!item.usable) ++st.terrain_unusable[size_t(p.status)];
+    if (item.usable && light) {
+      // The light's vertex normals: the grid points' (n.x, n.y) of every terrain record, the
+      // buffer the steep-ground block has already asked for when the layer has the block.
+      ++st.lit;
+      p.normals = !adaptive && m.steep ? p.uvs : geometry_.TerrainNormals(dev, terrain, p.vertex_count, st);
+      if (p.normals) {
+        ++st.light_ready;
+      } else {
+        // No map the reader decodes (no texture in the slot, another format), or one it could not read.
+        capture::NormalMap nm;
+        const capture::LightReason why = capture::DecodeNormalMap(m.normal_fetch, &nm)
+                                             ? capture::LightReason::kLightUnknown
+                                             : capture::LightReason::kNormalUnsupported;
+        ++st.light_missing[size_t(why)];
+        st.light_missing_by_vs.Add(r.vs_hash, uint8_t(why));
+      }
+    }
   }
   p.plan = uint32_t(terrain_items_.size());
   terrain_items_.push_back(item);
@@ -448,6 +493,7 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
     } else {
       p.albedo = p.weights = p.side = nullptr;
       p.uvs = nullptr;
+      p.normals = nullptr;  // (flat clay has no light)
     }
     const DrawState d = DecideDrawState(capture::DecodeRenderState(r.state_words), r.material, p.textured, !material);
     p.alpha = d.alpha;
@@ -519,7 +565,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       // index the scene does not hold (the builder makes none) has nothing it
       // could be drawn from.
       if (const capture::TerrainPatch* terrain = TerrainOf(scene, r)) {
-        PrepareTerrain(cmd, dev, r, *terrain, textured, st, tst);
+        PrepareTerrain(cmd, dev, r, *terrain, LightOf(scene, r), textured, st, tst);
       } else {
         ++st.skipped_other;
       }
@@ -573,6 +619,11 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     if (d.alpha_unknown) {
       ++st.alpha_unknown;
       st.unknown_by_ps.Add(r.material.ps_hash, kTallyAlphaUnknown);
+    }
+    // A record drawn with its texture and with light inputs: its normals and colours (the light
+    // is of the material; a record that stays flat clay has none).
+    if (p.albedo) {
+      if (const capture::LightInputs* light = LightOf(scene, r)) PrepareLight(dev, r, *light, p, st);
     }
     prepared_.push_back(p);
   }

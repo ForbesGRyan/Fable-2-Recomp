@@ -1740,11 +1740,186 @@ int main() {
     v.material.slope[0] = 0.0f;
     v.map.phys_addr = 0x1B780000;            // (the heights are the position buffer's)
     CHECK(312, TerrainNormalKey(v) == nk);
+    // The same buffer serves a layer without the block and a draw of the adaptive builder that
+    // has the same patches (the key has nothing of the block).
+    v = n;
+    v.material.steep = false;
+    CHECK(340, TerrainNormalKey(v) == nk);
+    v.material.adaptive = true;
+    CHECK(341, TerrainNormalKey(v) == nk);
+  }
+
+  // 350-369: normal and colour keys (normal_decode.h; frame-map section 14, "Normals").
+  {
+    capture::DrawRecord r = BaseRecord();
+    capture::LightInputs l;
+    l.family = capture::LightFamily::kObject;
+    l.kind = capture::LightVertexKind::kStream;
+    l.normal.vb = r.vb;
+    l.normal.offset_bytes = 8;
+    l.normal.stride_bytes = 20;
+    l.normal.swizzle = 0xE88;
+    l.normal.format = uint8_t(capture::kVertexFormat_10_11_11);
+    l.normal.flags = 11;
+    l.second.vb = {0x9000, 400};
+    l.second.stride_bytes = 4;
+    l.second.swizzle = 0x60A;
+    l.second.format = uint8_t(capture::kVertexFormat_8_8_8_8);
+    l.second.flags = 10;
+    const GeoKey k = NormalKey(r, l);
+    CHECK(350, k.kind == 9 && k == MeshNormalKey(l) && k.addr == r.vb.phys_addr && k.size == r.vb.size && k.stride == 20);
+    // Its own kind: never the positions', the UVs' or the indices' entry of the same stream.
+    CHECK(351, !(k == PositionKey(r, nullptr)) && !(k == UvKey(r)) && !(k == IndexKey(r, nullptr)) && k.kind != PositionKey(r, nullptr).kind);
+    // What changes the decode changes the key: the stream, where the element lies, its format.
+    capture::LightInputs a = l;
+    a.normal.vb.phys_addr = 0x2400;
+    CHECK(352, !(NormalKey(r, a) == k));
+    a = l;
+    a.normal.vb.size = 1620;
+    CHECK(353, !(NormalKey(r, a) == k));
+    a = l;
+    a.normal.offset_bytes = 12;
+    CHECK(354, !(NormalKey(r, a) == k));
+    a = l;
+    a.normal.stride_bytes = 28;
+    CHECK(355, !(NormalKey(r, a) == k));
+    a = l;
+    a.normal.format = uint8_t(capture::kVertexFormat_16_16_16_16_FLOAT);
+    CHECK(356, !(NormalKey(r, a) == k));
+    // Nothing of the draw: the mesh's normals are one entry however it is placed, turned, lit or
+    // coloured, and whatever shader fetches them (the swizzle and flags only admit the element).
+    a = l;
+    a.world_rot[0][0] = 0.5f;
+    a.world_rot[1][2] = -0.5f;
+    a.world_scale = 2.0f;
+    a.c27w = 0.25f;
+    a.c49[1] = 3.0f;
+    a.colour_first = 77;
+    a.family = capture::LightFamily::kTreeTrunk;
+    a.kind = capture::LightVertexKind::kProbe;
+    a.multi = true;
+    a.vs_const[3][2] = 9.0f;
+    a.second.vb.phys_addr = 0xA000;
+    a.normal.swizzle = 0x447;
+    a.normal.flags = 9;
+    capture::DrawRecord moved = r;
+    moved.rows[3] = 12.0f;
+    moved.seq = 99;
+    moved.start = 60;
+    moved.count = 30;
+    moved.vs_hash = 0x1111;
+    moved.material.ps_hash = 0x2222;
+    CHECK(357, NormalKey(moved, a) == k);
+    // A skinned stream: the bone layout, the palette and the stream the bone words come from.
+    capture::DrawRecord s = r;
+    s.skin.active = true;
+    s.skin.palette_addr = 0x3000;
+    s.skin.palette_size = 168;
+    s.skin.bone_stride = 24;
+    const GeoKey sk = NormalKey(s, l);
+    CHECK(358, sk.kind == 9 && !(sk == k) && !(sk == PositionKey(s, nullptr)));
+    capture::DrawRecord s2 = s;
+    s2.skin.palette_addr = 0x4000;
+    CHECK(359, !(NormalKey(s2, l) == sk));
+    s2 = s;
+    s2.skin.weight_shift[1] = 8;
+    CHECK(360, !(NormalKey(s2, l) == sk));
+    s2 = s;
+    s2.vb.phys_addr = 0x2800;  // (the normal's stream as it was: the bone words are another stream's)
+    CHECK(361, !(NormalKey(s2, l) == sk));
+    s2 = s;
+    s2.pos.stride_bytes = 32;
+    CHECK(362, !(NormalKey(s2, l) == sk));
+    // The same skin fields change the position key (one list for both: SkinHash).
+    s2 = s;
+    s2.skin.index_shift[2] = 16;
+    CHECK(363, !(NormalKey(s2, l) == sk) && !(PositionKey(s2, nullptr) == PositionKey(s, nullptr)) &&
+                   SkinHash(s2.skin) != SkinHash(s.skin));
+    // An instanced draw: its instance set, but not the offset, which moves positions only.
+    capture::DrawRecord i = r;
+    i.instances.active = true;
+    i.instances.rows_addr = 0x5000;
+    i.instances.rows_size = 280;
+    i.instances.inv_count = 0.25f;
+    i.instances.count = 4.0f;
+    i.instances.bias = 0.5f;
+    i.instances.flat_count = 40;
+    const GeoKey ik = NormalKey(i, l);
+    CHECK(364, ik.kind == 10 && !(ik == k) && !(ik == PositionKey(i, nullptr)) && !(ik == UvKey(i)));
+    capture::DrawRecord i2 = i;
+    i2.instances.offset[1] = 55.0f;
+    CHECK(365, NormalKey(i2, l) == ik && !(PositionKey(i2, nullptr) == PositionKey(i, nullptr)));
+    for (int field = 0; field < 7; ++field) {
+      i2 = i;
+      switch (field) {
+        case 0: i2.instances.rows_addr = 0x6000; break;
+        case 1: i2.instances.rows_size = 308; break;
+        case 2: i2.instances.rows[1].offset_bytes = 8; break;
+        case 3: i2.instances.inv_count = 0.2f; break;
+        case 4: i2.instances.count = 5.0f; break;
+        case 5: i2.instances.first = 2.0f; break;
+        default: i2.instances.flat_count = 44; break;
+      }
+      CHECK(366, !(NormalKey(i2, l) == ik));
+    }
+    i2 = i;
+    i2.instances.bias = 0.25f;
+    CHECK(367, !(NormalKey(i2, l) == ik));
+
+    // The colour buffer: the stream, where the element lies, the draw's offset into it, the count.
+    const GeoKey ck = ColourKey(l, 80);
+    CHECK(368, ck.kind == 11 && ck.addr == 0x9000 && ck.size == 400 && ck.stride == 4 && !(ck == k));
+    a = l;
+    a.colour_first = 20;  // another mesh's colours in a shared stream
+    CHECK(369, !(ColourKey(a, 80) == ck) && !(ColourKey(l, 81) == ck));
+    a = l;
+    a.second.vb.phys_addr = 0xA000;  // a mesh drawn with two colour streams is two entries
+    CHECK(370, !(ColourKey(a, 80) == ck));
+    a = l;
+    a.second.vb.size = 404;
+    CHECK(371, !(ColourKey(a, 80) == ck));
+    a = l;
+    a.second.stride_bytes = 8;
+    CHECK(372, !(ColourKey(a, 80) == ck));
+    {
+      capture::LightInputs b = a;
+      b.second.offset_bytes = 4;  // the same stream and stride, the element elsewhere in the vertex
+      CHECK(374, !(ColourKey(b, 80) == ColourKey(a, 80)));
+    }
+    // Nothing else of the draw: the normal, the rotation, the power the shader raises it to.
+    a = l;
+    a.normal.vb.phys_addr = 0x7000;
+    a.world_rot[2][2] = -1.0f;
+    a.colour_power = 2.2f;
+    a.c26[0] = 0.5f;
+    CHECK(373, ColourKey(a, 80) == ck);
+  }
+
+  // 380-389: the light line.
+  {
+    ClayStats st;
+    CHECK(380, FormatLightText(st) == "Light inputs: ready 0 of 0 lit records | world rotation: rotation 0, mirrored 0, "
+                                      "skewed 0, degenerate 0");
+    st.lit = 873;
+    st.light_ready = 870;
+    st.light_rotation[size_t(RotationKind::kRotation)] = 172;
+    st.light_rotation[size_t(RotationKind::kSkewed)] = 2;
+    st.light_rotation_by_vs.Add(0xECD66A10092E6562ull, uint8_t(RotationKind::kSkewed));
+    st.light_rotation_by_vs.Add(0xECD66A10092E6562ull, uint8_t(RotationKind::kSkewed));
+    st.light_missing[size_t(capture::LightReason::kNormalUnsupported)] = 2;
+    st.light_missing[size_t(capture::LightReason::kLightUnknown)] = 1;
+    st.light_missing_by_vs.Add(0x79EAC49585797037ull, uint8_t(capture::LightReason::kNormalUnsupported));
+    st.light_missing_by_vs.Add(0x79EAC49585797037ull, uint8_t(capture::LightReason::kNormalUnsupported));
+    st.light_missing_by_vs.Add(0xECD66A10092E6562ull, uint8_t(capture::LightReason::kLightUnknown));
+    CHECK(381, FormatLightText(st) ==
+                   "Light inputs: ready 870 of 873 lit records | world rotation: rotation 172, mirrored 0, skewed 2, "
+                   "degenerate 0 | skewed by vs {0xECD66A10092E6562: 2} | light-unknown 1 by vs {0xECD66A10092E6562: 1} | "
+                   "normal-unsupported 2 by vs {0x79EAC49585797037: 2}");
   }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
                "alpha-to-mask, terrain keys, terrain draw state, terrain constants, terrain squares, "
-               "terrain text\n";
+               "terrain text, normal and colour keys, light text\n";
   return 0;
 }

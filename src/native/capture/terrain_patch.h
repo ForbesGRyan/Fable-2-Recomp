@@ -246,10 +246,16 @@ struct TerrainMaterialInputs {
   float hole_ref = 0.0f;   // layer: vs c114.x (1/255, or -1 for a layer that is never culled)
   float eye[3] = {};       // ps c19.xyz
   float world[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};  // layer: vs c4..c6, three rows; far: identity
-  // The steep-ground block. false: the draw's pixel shader has none, and the six fields below are zero.
+  // The steep-ground block. false: the draw's pixel shader has none, and the fields below but
+  // normal_fetch are zero.
   bool steep = false;
   uint32_t side_fetch[6] = {};    // tf13 of the layer draw: the layer's side texture (not the far colour)
-  uint32_t normal_fetch[6] = {};  // tf17 of the vertex shader: the normal map (k_DXN, DecodeNormalMap)
+  // tf17 of the vertex shader: the normal map (k_DXN, DecodeNormalMap). The three terrain vertex
+  // shaders read it at the height coordinate for the normal their pixel shaders light with (C30A
+  // and FB68 instr 25, 5003 instr 27), and the block reads the same normal: kept for every terrain
+  // draw whose slot holds a texture fetch constant, zero otherwise (then the draw has no normals;
+  // with the block it is not valid).
+  uint32_t normal_fetch[6] = {};
   float side_uv[2] = {};          // (vs c8.x, -vs c8.x)
   float slope[2] = {};            // ps c45.xy
   float steep_threshold = 0.0f;   // the block runs where s is below it (a literal of the pixel shader)
@@ -375,6 +381,8 @@ inline constexpr float kTerrainSteepEpsMax = 0.01f;
 // for one that could not be read. A layer needs detail and weight; a far draw
 // detail (the far colour), far_u and far_v. The base map is optional (base_valid).
 // A layer whose shader has the steep-ground block also needs side and normal.
+// The normal map is given for every terrain draw (the light reads it); without
+// the block it is optional, like the base map.
 struct TerrainFetches {
   const uint32_t* detail = nullptr;
   const uint32_t* base = nullptr;
@@ -392,6 +400,9 @@ struct TerrainFetches {
 // a value the material reads is not finite, or the patch has no cell size. The
 // base map's fetch constant, vs c14 and ps c21 decide base_valid only (a caller
 // that could not read one of the two registers passes values that are not finite).
+// The vertex shader's normal map (f.normal) is kept in normal_fetch for any
+// terrain draw when it is a texture fetch constant; without the block it
+// decides nothing else.
 // `steep`: the steep-ground block of the draw's pixel shader, or nullptr when it
 // has none. With it the inputs are valid only if the block's can be read too:
 // the side texture's and the normal map's fetch constants are texture fetch
@@ -459,8 +470,11 @@ inline bool MakeTerrainMaterialInputs(const TerrainPatch& patch, bool adaptive, 
     m.hole_ref = vs(kTerrainVsCullReg, 0);
     for (uint32_t i = 0; i < 12; ++i) m.world[i] = vs_bank[4 * kTerrainVsWorldReg + i];
   }
+  // The vertex shader's normal map, for the light of every terrain draw: kept when it is a
+  // texture fetch constant, else left zero (no normals; the material does not depend on it).
+  const bool has_normal = fetch(f.normal, m.normal_fetch);
   if (steep) {
-    if (!fetch(f.side, m.side_fetch) || !fetch(f.normal, m.normal_fetch)) return false;
+    if (!fetch(f.side, m.side_fetch) || !has_normal) return false;
     m.side_uv[0] = vs(kTerrainVsDetailReg, 0);
     m.side_uv[1] = -vs(kTerrainVsDetailReg, 0);
     m.slope[0] = ps(kTerrainPsSlopeReg, 0);
@@ -633,24 +647,27 @@ inline bool BuildTerrainFarUvs(const TerrainPatch& t, const HeightMap& um, const
   return true;
 }
 
-// Steep-ground block: the layer vertex shader's (n.x, n.y) at every grid point
-// of the draw's patches, in the order of BuildTerrainPositions. The shader reads
-// the normal map at the height coordinate of its vertex, point sampled (C30A
-// instr 25: the same coordinate as the heightmap fetch of instr 20), and the
-// grid's points are the points it would be evaluated at with 16 segments per
-// patch edge, each on a texel of its own in the game's maps (two texels per
-// world unit, as the heightmap). The clay vertex shader forms z from the pair
-// as the game's does, and the three are interpolated over the grid's triangles.
+// The terrain vertex shader's (n.x, n.y) at every grid point of the draw's
+// patches, in the order of BuildTerrainPositions: the normal the terrain pixel
+// shaders light with, and the one the steep-ground block reads. Every terrain
+// draw has it, a layer with or without the block and a draw of the adaptive
+// builder: the three vertex shaders read the normal map at the height
+// coordinate of their vertex, point sampled (C30A and FB68 instr 25: the
+// coordinate of the heightmap fetch of instr 20; 5003 instr 27: that of
+// instr 18), and the grid's points are the points a layer's would be evaluated
+// at with 16 segments per patch edge, each on a texel of its own in the game's
+// maps (two texels per world unit, as the heightmap); a far draw's patches are
+// larger, and its grid samples the map as it samples the heights. The clay
+// vertex shader forms z from the pair as the game's does, and the three are
+// interpolated over the grid's triangles.
 // `nm` is the decoded fetch constant material.normal_fetch with its bytes.
-// False, with nothing in `out`, unless the inputs are valid ones with the
-// block and every texel read lies inside the map's bytes.
+// False, with nothing in `out`, unless the patch is active, its inputs are
+// valid and every texel read lies inside the map's bytes.
 inline bool BuildTerrainNormals(const TerrainPatch& t, const NormalMap& nm, const uint8_t* data, size_t size, uint32_t n,
                                 std::vector<Float2>* out) {
   out->clear();
   const TerrainMaterialInputs& m = t.material;
-  if (!t.active || !m.valid || m.adaptive || !m.steep || n == 0 || t.patches == 0 || t.patches > kMaxTerrainPatches) {
-    return false;
-  }
+  if (!t.active || !m.valid || n == 0 || t.patches == 0 || t.patches > kMaxTerrainPatches) return false;
   out->reserve(size_t(t.patches) * (n + 1) * (n + 1));
   for (uint32_t k = 0; k < t.patches; ++k) {
     const float p = t.patch + float(k);

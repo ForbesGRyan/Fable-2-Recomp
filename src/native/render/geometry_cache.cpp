@@ -26,6 +26,9 @@ uint64_t RoundUp256(uint64_t v) { return (v + 255) & ~uint64_t(255); }
 // Content hash of a buffer built from two guest ranges (vertex stream and
 // bone palette, mesh stream and instance stream): first ^ (second * this).
 constexpr uint64_t kSecondStreamMix = 0x9E3779B97F4A7C15ull;
+// A third range (a skinned record's normals: the normal's stream, the stream of
+// the bone words, the palette): ... ^ (third * this).
+constexpr uint64_t kThirdStreamMix = 0xC2B2AE3D27D4EB4Full;
 
 }  // namespace
 
@@ -283,7 +286,8 @@ nrhi::Buffer* GeometryCache::Positions(nrhi::Device* dev, const capture::DrawRec
       ++st.skipped_other;
       return nullptr;
     }
-    hash ^= XXH3_64bits(palette, r.skin.palette_size) * kSecondStreamMix;
+    // (once per frame and palette: the record's normals and the other draws of the skeleton ask again)
+    hash ^= FrameHash(r.skin.palette_addr, r.skin.palette_size, palette) * kSecondStreamMix;
   }
   const GeoKey key = PositionKey(r, nullptr);
   const LookupResult found = index_.Lookup(key, hash);
@@ -455,8 +459,9 @@ nrhi::Buffer* GeometryCache::TerrainNormals(nrhi::Device* dev, const capture::Te
   constexpr uint32_t kMaxMapBytes = 16u << 20;
   const capture::TerrainMaterialInputs& m = t.material;
   capture::NormalMap nm;
-  if (!t.active || !m.valid || m.adaptive || !m.steep || !capture::DecodeNormalMap(m.normal_fetch, &nm) ||
-      nm.size == 0 || nm.size > kMaxMapBytes) {
+  // (a record without a normal map has a zero fetch constant, which is no map)
+  if (!t.active || !m.valid || !capture::DecodeNormalMap(m.normal_fetch, &nm) || nm.size == 0 ||
+      nm.size > kMaxMapBytes) {
     return nullptr;
   }
   const auto t0 = Clock::now();
@@ -484,6 +489,164 @@ nrhi::Buffer* GeometryCache::TerrainNormals(nrhi::Device* dev, const capture::Te
   }
   if (buffer) {
     Insert(dev, key, hash, {buffer, uint32_t(uvs_.size()), 0, alloc}, alloc);
+    ++st.uploads;
+  }
+  st.decode_ms += Ms(t1, Clock::now());
+  return buffer;
+}
+
+// Instanced draws: normals[i] = the mesh normal of vertex(i) through the normal
+// matrix of copy(i)'s rows, for every flat index i (ExpandInstanceNormals). The
+// content hash covers the normal's stream and the instance stream. Only the
+// normals of one copy's vertices are decoded (InstanceMeshCount): a few
+// hundred at most, so they are not kept for the frame as the positions are.
+nrhi::Buffer* GeometryCache::InstancedNormals(nrhi::Device* dev, const capture::DrawRecord& r,
+                                              const capture::LightInputs& light, uint32_t vertex_count,
+                                              ClayStats& st) {
+  const capture::LightElement& e = light.normal;
+  const capture::InstanceSet& s = r.instances;
+  const uint32_t mesh_count = InstanceMeshCount(NormalElementCount(e), s);
+  if (mesh_count == 0 || s.rows_size == 0 || s.flat_count == 0 || s.flat_count < vertex_count ||
+      s.flat_count > capture::kMaxDrawCount) {
+    return nullptr;
+  }
+  const auto t0 = Clock::now();
+  const uint8_t* mesh = capture::ReadPhysical(e.vb.phys_addr, e.vb.size);
+  const uint8_t* rows = mesh ? capture::ReadPhysical(s.rows_addr, s.rows_size) : nullptr;
+  if (!rows) {
+    st.hash_ms += Ms(t0, Clock::now());
+    return nullptr;
+  }
+  const uint64_t hash = FrameHash(e.vb.phys_addr, e.vb.size, mesh) ^
+                        (FrameHash(s.rows_addr, s.rows_size, rows) * kSecondStreamMix);
+  const GeoKey key = NormalKey(r, light);
+  const LookupResult found = index_.Lookup(key, hash);
+  const auto t1 = Clock::now();
+  st.hash_ms += Ms(t0, t1);
+  if (found.hit) {
+    if (auto it = entries_.find(found.id); it != entries_.end() && it->second.count >= vertex_count) {
+      ++st.hits;
+      return it->second.buffer;
+    }
+  }
+  mesh_normals_.resize(mesh_count);
+  normals_.resize(s.flat_count);
+  nrhi::Buffer* buffer = nullptr;
+  uint64_t alloc = 0;
+  if (DecodeNormals(mesh, e.vb.size, e, 0, mesh_count, mesh_normals_.data()) &&
+      ExpandInstanceNormals(mesh_normals_.data(), mesh_count, rows, s.rows_size, s, s.flat_count, normals_.data())) {
+    buffer = Upload(dev, normals_.data(), uint64_t(s.flat_count) * sizeof(Float3), &alloc);
+  }
+  if (buffer) {
+    Insert(dev, key, hash, {buffer, s.flat_count, 0, alloc}, alloc);
+    ++st.uploads;
+  }
+  st.decode_ms += Ms(t1, Clock::now());
+  return buffer;
+}
+
+nrhi::Buffer* GeometryCache::Normals(nrhi::Device* dev, const capture::DrawRecord& r,
+                                     const capture::LightInputs& light, uint32_t vertex_count, ClayStats& st,
+                                     capture::LightReason* why) {
+  using capture::LightReason;
+  using capture::LightVertexKind;
+  const capture::LightElement& e = light.normal;
+  *why = LightReason::kNormalUnsupported;
+  if (light.kind == LightVertexKind::kNone || light.kind == LightVertexKind::kTerrain || !NormalElementSupported(e)) {
+    return nullptr;
+  }
+  *why = LightReason::kLightUnknown;
+  // The inputs are an instance's exactly when the record has its instance set (MakeLightInputs).
+  if ((light.kind == LightVertexKind::kInstance) != r.instances.active) return nullptr;
+  if (r.instances.active) return InstancedNormals(dev, r, light, vertex_count, st);
+  // A skinned record's normals follow its positions vertex for vertex: no more than those.
+  uint32_t count = NormalElementCount(e);
+  if (r.skin.active) count = std::min(count, PositionCount(r.vb.size, r.pos));
+  if (count == 0 || count < vertex_count) return nullptr;
+  const auto t0 = Clock::now();
+  // The normal's stream is read as the light inputs name it (the position's in every draw seen,
+  // but not range checked with it at capture): exactly its range, decoded within it.
+  const uint8_t* src = capture::ReadPhysical(e.vb.phys_addr, e.vb.size);
+  const uint8_t* vb = nullptr;
+  const uint8_t* palette = nullptr;
+  uint64_t hash = 0;
+  bool readable = src != nullptr;
+  if (readable) hash = FrameHash(e.vb.phys_addr, e.vb.size, src);
+  if (readable && r.skin.active) {
+    // The bone words are the position stream's, the bones the palette's.
+    vb = capture::ReadPhysical(r.vb.phys_addr, r.vb.size);
+    palette = vb ? capture::ReadPhysical(r.skin.palette_addr, r.skin.palette_size) : nullptr;
+    readable = palette != nullptr;
+    if (readable) {
+      hash ^= (FrameHash(r.skin.palette_addr, r.skin.palette_size, palette) * kSecondStreamMix) ^
+              (FrameHash(r.vb.phys_addr, r.vb.size, vb) * kThirdStreamMix);
+    }
+  }
+  if (!readable) {
+    st.hash_ms += Ms(t0, Clock::now());
+    return nullptr;
+  }
+  const GeoKey key = NormalKey(r, light);
+  const LookupResult found = index_.Lookup(key, hash);
+  const auto t1 = Clock::now();
+  st.hash_ms += Ms(t0, t1);
+  if (found.hit) {
+    if (auto it = entries_.find(found.id); it != entries_.end() && it->second.count >= vertex_count) {
+      ++st.hits;
+      return it->second.buffer;
+    }
+  }
+  normals_.resize(count);
+  nrhi::Buffer* buffer = nullptr;
+  uint64_t alloc = 0;
+  bool decoded = DecodeNormals(src, e.vb.size, e, 0, count, normals_.data());
+  if (decoded && r.skin.active) {
+    decoded = SkinNormals(vb, r.vb.size, palette, r.skin.palette_size, r.skin, r.pos.stride_bytes, 0, count,
+                          normals_.data());
+  }
+  if (decoded) buffer = Upload(dev, normals_.data(), uint64_t(count) * sizeof(Float3), &alloc);
+  if (buffer) {
+    Insert(dev, key, hash, {buffer, count, 0, alloc}, alloc);
+    ++st.uploads;
+  }
+  st.decode_ms += Ms(t1, Clock::now());
+  return buffer;
+}
+
+nrhi::Buffer* GeometryCache::Colours(nrhi::Device* dev, const capture::DrawRecord& r,
+                                     const capture::LightInputs& light, uint32_t vertex_count, ClayStats& st) {
+  const capture::LightElement& e = light.second;
+  if (light.kind != capture::LightVertexKind::kStream || r.instances.active) return nullptr;
+  // As many colours as the record has positions, from the draw's offset on; fewer than the
+  // shader may index (the stream ends first, or the offset lies past it) is none.
+  const uint32_t count = ColourCount(e, light.colour_first, PositionCount(r.vb.size, r.pos));
+  if (count == 0 || count < vertex_count) return nullptr;
+  const auto t0 = Clock::now();
+  const uint8_t* src = capture::ReadPhysical(e.vb.phys_addr, e.vb.size);
+  if (!src) {
+    st.hash_ms += Ms(t0, Clock::now());
+    return nullptr;
+  }
+  // (the whole stream: meshes that share it share the hash of the frame)
+  const uint64_t hash = FrameHash(e.vb.phys_addr, e.vb.size, src);
+  const GeoKey key = ColourKey(light, count);
+  const LookupResult found = index_.Lookup(key, hash);
+  const auto t1 = Clock::now();
+  st.hash_ms += Ms(t0, t1);
+  if (found.hit) {
+    if (auto it = entries_.find(found.id); it != entries_.end() && it->second.count >= vertex_count) {
+      ++st.hits;
+      return it->second.buffer;
+    }
+  }
+  colours_.resize(count);
+  nrhi::Buffer* buffer = nullptr;
+  uint64_t alloc = 0;
+  if (DecodeColours(src, e.vb.size, e, light.colour_first, count, colours_.data())) {
+    buffer = Upload(dev, colours_.data(), uint64_t(count) * sizeof(uint32_t), &alloc);
+  }
+  if (buffer) {
+    Insert(dev, key, hash, {buffer, count, 0, alloc}, alloc);
     ++st.uploads;
   }
   st.decode_ms += Ms(t1, Clock::now());

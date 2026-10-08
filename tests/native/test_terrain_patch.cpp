@@ -380,11 +380,30 @@ int main() {
       // The rest of the inputs is what it is without the block.
       if (std::memcmp(sm.detail_fetch, in.detail_fetch, 24) || sm.detail_uv[0] != in.detail_uv[0] ||
           sm.weight_uv[2] != in.weight_uv[2] || sm.hole_ref != in.hole_ref || sm.fade[1] != in.fade[1]) return 184;
-      // A shader without the block: nothing of it is read or kept, whatever the fetches hold.
+      // A shader without the block: nothing of the block is read or kept, whatever the fetches hold.
+      // The normal map is not the block's alone: the vertex shader reads it for the light of every
+      // terrain draw, so its fetch constant is kept for every one.
       TerrainMaterialInputs plain;
       if (!MakeTerrainMaterialInputs(tp, false, vs, ps, sf, &plain) || !plain.valid || plain.steep ||
-          plain.side_fetch[0] != 0 || plain.normal_fetch[0] != 0 || plain.side_uv[0] != 0.0f ||
+          plain.side_fetch[0] != 0 || plain.side_uv[0] != 0.0f ||
           plain.slope[1] != 0.0f || plain.steep_threshold != 0.0f) return 185;
+      if (std::memcmp(plain.normal_fetch, kTf17, 24)) return 142;
+      // Without the block the map is light, not material: a draw whose normal map cannot be read,
+      // or whose slot holds no texture, keeps its material and has no normals (the fetch stays zero).
+      {
+        TerrainFetches none = f;  // (no normal given)
+        TerrainMaterialInputs m0;
+        if (!MakeTerrainMaterialInputs(tp, false, vs, ps, none, &m0) || !m0.valid || m0.normal_fetch[0] != 0 ||
+            m0.normal_fetch[1] != 0) return 143;
+        uint32_t not_texture17[6];
+        std::memcpy(not_texture17, kTf17, sizeof(not_texture17));
+        not_texture17[0] &= ~3u;
+        none.normal = not_texture17;
+        if (!MakeTerrainMaterialInputs(tp, false, vs, ps, none, &m0) || !m0.valid || m0.normal_fetch[0] != 0 ||
+            m0.normal_fetch[1] != 0) return 144;
+        NormalMap no_map;
+        if (DecodeNormalMap(m0.normal_fetch, &no_map)) return 145;  // a zero fetch is no map
+      }
 
       // The vertex shader's normal from the map's two values: * 2 - 1, z = sqrt(|1 - (x^2 + y^2)|).
       float n[3];
@@ -582,7 +601,7 @@ int main() {
       if (!Near(normals[289].u, 2 * 200.0f / 255 - 1, 1e-6f) || !Near(normals[289].v, 2 * 40.0f / 255 - 1, 1e-6f) ||
           !is(0, 0, 180, 39)) return 232;
       // Nothing is made from missing data: a map cut short, no map, inputs that are not valid, a
-      // record without the block, a draw of the adaptive builder, too many patches.
+      // patch that is not active, too many patches.
       // (cut before block row 8, which holds texel row 32: the patch's last grid row)
       if (BuildTerrainNormals(sp, nm, nd.data(), 8 * 512, kTerrainGrid, &normals) || !normals.empty()) return 233;
       if (BuildTerrainNormals(sp, nm, nullptr, nd.size(), kTerrainGrid, &normals) || !normals.empty()) return 234;
@@ -590,11 +609,28 @@ int main() {
       off.material.valid = false;
       if (BuildTerrainNormals(off, nm, nd.data(), nd.size(), kTerrainGrid, &normals)) return 235;
       off = sp;
-      off.material.steep = false;
-      if (BuildTerrainNormals(off, nm, nd.data(), nd.size(), kTerrainGrid, &normals)) return 236;
-      off = sp;
-      off.material.adaptive = true;
-      if (BuildTerrainNormals(off, nm, nd.data(), nd.size(), kTerrainGrid, &normals)) return 237;
+      off.active = false;
+      if (BuildTerrainNormals(off, nm, nd.data(), nd.size(), kTerrainGrid, &normals) || !normals.empty()) return 146;
+      // Every terrain record has them, not only a layer with the steep-ground block: the light of a
+      // layer without the block and of a draw of the adaptive builder reads the same map at the same
+      // coordinate (FB68 instr 25, 5003 instr 27: the heightmap's coordinate of instr 20 and 18). The
+      // normals are those of the grid points, whatever the draw is.
+      {
+        std::vector<Float2> with_block, without;
+        if (!BuildTerrainNormals(sp, nm, nd.data(), nd.size(), kTerrainGrid, &with_block)) return 147;
+        off = sp;
+        off.material.steep = false;
+        if (!BuildTerrainNormals(off, nm, nd.data(), nd.size(), kTerrainGrid, &without) || without.size() != 289) return 236;
+        off = sp;
+        off.material.steep = false;
+        off.material.adaptive = true;
+        std::vector<Float2> far_normals;
+        if (!BuildTerrainNormals(off, nm, nd.data(), nd.size(), kTerrainGrid, &far_normals) || far_normals.size() != 289) return 237;
+        for (size_t i = 0; i < 289; ++i) {
+          if (without[i].u != with_block[i].u || without[i].v != with_block[i].v || far_normals[i].u != with_block[i].u ||
+              far_normals[i].v != with_block[i].v) return 148;
+        }
+      }
       off = sp;
       off.patches = kMaxTerrainPatches + 1;
       if (BuildTerrainNormals(off, nm, nd.data(), nd.size(), kTerrainGrid, &normals) || !normals.empty()) return 238;
@@ -641,6 +677,16 @@ int main() {
         fm.far_table[2] != 0.5f || fm.far_table[3] != 0.5f || fm.far_patch[0] != 0.0f || fm.far_patch[1] != 0.0f)
       return 134;
     if (fm.base_pow != 2.0f || fm.fade[0] != 0.0005f || fm.eye[2] != 30.0f) return 135;
+    // The adaptive vertex shader's normal map (tf17, 5003 instr 27) is kept when it is given, for the light.
+    {
+      static const uint32_t kFarTf17[6] = {0x87004802, 0x1B8AA071, 0x00600300, 0x01000D10, 0x00000000, 0x00000218};
+      if (fm.normal_fetch[0] != 0) return 149;  // (none was given above)
+      TerrainFetches fn = ff;
+      fn.normal = kFarTf17;
+      TerrainMaterialInputs far_lit;
+      if (!MakeTerrainMaterialInputs(fp, true, vs, ps, fn, &far_lit) || !far_lit.valid || !far_lit.adaptive ||
+          far_lit.steep || std::memcmp(far_lit.normal_fetch, kFarTf17, 24)) return 244;
+    }
     // Knot k of patch column 1, row 1 is texel 17 + k of row 1 of a 34 x 2 table.
     float knot[2];
     TerrainFarKnot(fm, 1.0f, 1.0f, 0, knot);

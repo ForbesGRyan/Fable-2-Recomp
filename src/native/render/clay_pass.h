@@ -85,6 +85,16 @@ class ClayPass {
     uint32_t weight_sampler = 0, side_sampler = 0, plan = 0, slot = 0;
     float side_fix[2] = {1.0f, 1.0f};
     capture::MaterialStatus status = capture::MaterialStatus::kTerrain;
+    // The light's vertex inputs of a record that has light inputs (LightOf) and
+    // its material: `normals`, one per vertex of `positions` (a mesh record:
+    // float3, GeometryCache::Normals; a terrain record: float2 (n.x, n.y),
+    // GeometryCache::TerrainNormals, for a layer with the steep-ground block
+    // the buffer in `uvs`), and `colours` for the family with a colour stream.
+    // Both or neither: nullptr when one could not be built (counted in
+    // ClayStats::light_missing). Built so that they are resident and their cost
+    // is the frame's; no shader reads them yet and nothing binds them.
+    nrhi::Buffer* normals = nullptr;
+    nrhi::Buffer* colours = nullptr;
   };
   // A texture resolved for a terrain layer this frame (many layers share a few).
   struct TerrainTexture {
@@ -113,9 +123,18 @@ class ClayPass {
   // FinishTerrain, after every record:
   // which records are drawn with the material, as flat clay or not at all
   // (PlanTerrain), their pipelines, constants and counters.
+  // `light`: the record's light inputs (LightOf), null without them; a record
+  // with them and a usable material also gets its vertex normals (Prepared::normals).
   void PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::DrawRecord& r,
-                      const capture::TerrainPatch& terrain, bool textured, ClayStats& st, TextureStats& tst);
+                      const capture::TerrainPatch& terrain, const capture::LightInputs* light, bool textured,
+                      ClayStats& st, TextureStats& tst);
   void FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, TextureStats& tst);
+  // The light's vertex inputs of a textured mesh record with light inputs:
+  // its normals and, for the family with a colour stream, its colours, from the
+  // geometry cache into `p`; counts the record in st (lit, light_ready or
+  // light_missing by reason and vertex shader, light_rotation).
+  void PrepareLight(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light, Prepared& p,
+                    ClayStats& st);
   // The texture behind a fetch constant, through the texture cache; with `memo`
   // looked up once per frame (terrain_textures_).
   nrhi::TextureView* ResolveTerrainTexture(nrhi::Cmd* cmd, nrhi::Device* dev, const uint32_t fetch[6], bool memo,

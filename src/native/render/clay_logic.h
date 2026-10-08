@@ -26,6 +26,7 @@
 #include "../capture/shader_tally.h"
 #include "frame_scene.h"
 #include "geometry_cache_index.h"
+#include "normal_decode.h"
 
 namespace fable2::native::render {
 
@@ -72,6 +73,22 @@ struct ClayStats {
   // be read, the upload failed) or, with positions, the indices. Counted while the
   // texture path is on, like terrain_unusable.
   uint32_t terrain_no_positions = 0, terrain_no_indices = 0;
+  // The light inputs of the prepared records (frame_scene.h, LightOf) as the
+  // geometry cache built them. Nothing is drawn from them yet. lit: prepared
+  // records with light inputs. light_ready: those whose normals, and for the
+  // family with a colour stream its colours, were built. light_missing: the
+  // others by reason (index: capture::LightReason; normal-unsupported: a normal
+  // element no reader decodes; light-unknown: a stream that could not be read
+  // or holds too few elements, a failed upload), and by vertex shader
+  // (light_missing_by_vs; the kind is the reason). light_rotation: the world
+  // rotation of the object and trunk records among the ready ones, by
+  // RotationKind (normal_decode.h), and those that are not a rotation by
+  // vertex shader (light_rotation_by_vs; the kind is the RotationKind).
+  uint32_t lit = 0, light_ready = 0;
+  uint32_t light_missing[size_t(capture::LightReason::kCount)] = {};
+  capture::ShaderTally<32> light_missing_by_vs;
+  uint32_t light_rotation[size_t(RotationKind::kCount)] = {};
+  capture::ShaderTally<32> light_rotation_by_vs;
 };
 
 inline constexpr uint8_t kTallyAlphaUnknown = 0, kTallyBlendUnknown = 1;
@@ -174,6 +191,17 @@ inline uint32_t InstanceHash(const capture::InstanceSet& s) {
                         FloatBits(s.offset[1]), FloatBits(s.offset[2]), s.flat_count});
 }
 
+// Everything of a skin that changes what is built from a stream through its
+// bones: the bone words' layout, the palette's range and its rows' layouts (the
+// content hash covers the palette's bytes).
+inline uint32_t SkinHash(const capture::BoneSkin& s) {
+  return HashCombine32({s.bones, s.index_offset_bytes, s.index_shift[0], s.index_shift[1], s.index_shift[2],
+                        s.index_shift[3], s.index_endian, uint32_t(s.weighted), s.weight_offset_bytes,
+                        s.weight_shift[0], s.weight_shift[1], s.weight_shift[2], s.weight_shift[3],
+                        s.palette_addr, s.palette_size, s.bone_stride, LayoutHash(s.rows[0]),
+                        LayoutHash(s.rows[1]), LayoutHash(s.rows[2])});
+}
+
 // Key of the record's vertex stream decoded on its own (kind 0): the stream
 // plus every layout field that changes the decode, whatever is built from it
 // afterwards. An instanced draw's mesh is decoded under this key once per
@@ -217,15 +245,74 @@ inline GeoKey PositionKey(const capture::DrawRecord& r, const capture::TerrainPa
     k.kind = 5;
     return k;
   }
-  if (r.skin.active) {
-    const capture::BoneSkin& s = r.skin;
-    k.extra = HashCombine32({k.extra, s.bones, s.index_offset_bytes, s.index_shift[0], s.index_shift[1],
-                             s.index_shift[2], s.index_shift[3], s.index_endian, uint32_t(s.weighted),
-                             s.weight_offset_bytes, s.weight_shift[0], s.weight_shift[1], s.weight_shift[2],
-                             s.weight_shift[3], s.palette_addr, s.palette_size, s.bone_stride,
-                             LayoutHash(s.rows[0]), LayoutHash(s.rows[1]), LayoutHash(s.rows[2])});
-  }
+  if (r.skin.active) k.extra = HashCombine32({k.extra, SkinHash(r.skin)});
   k.kind = 0;
+  return k;
+}
+
+// --- Normals and colours (normal_decode.h; frame-map section 14, "Normals") ---
+
+// Key of a normal stream decoded on its own (kind 9): the stream holding the
+// element and what changes its decode (where the element lies and its format).
+// Nothing of the draw: a plain mesh's normals are in the stream's own space,
+// one buffer however many draws place and turn the mesh (the world rotation is
+// the draw's, LightInputs::world_rot). The fetch's destination swizzle, its
+// sign and scale flags and the endian decide only whether the element is read
+// at all (NormalElementSupported), so two shaders that fetch one stream's
+// normal differently share its buffer. The content hash is the stream's.
+inline GeoKey MeshNormalKey(const capture::LightInputs& l) {
+  const capture::LightElement& e = l.normal;
+  GeoKey k;
+  k.addr = e.vb.phys_addr;
+  k.size = e.vb.size;
+  k.stride = e.stride_bytes;
+  k.extra = HashCombine32({e.offset_bytes, e.format});
+  k.kind = 9;
+  return k;
+}
+
+// Everything of an instance set that changes the flat normals built from a
+// mesh's normals: InstanceHash without the offset, which moves positions only
+// (ExpandInstanceNormals reads the rows' 3 x 3; the content hash covers the
+// mesh's and the instance stream's bytes).
+inline uint32_t InstanceNormalHash(const capture::InstanceSet& s) {
+  return HashCombine32({s.rows_addr, s.rows_size, LayoutHash(s.rows[0]), LayoutHash(s.rows[1]),
+                        LayoutHash(s.rows[2]), FloatBits(s.inv_count), FloatBits(s.count),
+                        FloatBits(s.first), FloatBits(s.bias), s.flat_count});
+}
+
+// Cache key of a record's normal buffer, as PositionKey is of its positions:
+// MeshNormalKey; a skinned stream adds its bone layout and palette range and
+// the position stream its bone words are read from (kind 9; the content hash
+// adds that stream's and the palette's bytes); an instanced draw's flat
+// normals add InstanceNormalHash (kind 10; the content hash adds the instance
+// stream's bytes).
+inline GeoKey NormalKey(const capture::DrawRecord& r, const capture::LightInputs& l) {
+  GeoKey k = MeshNormalKey(l);
+  if (r.instances.active) {
+    k.extra = HashCombine32({k.extra, InstanceNormalHash(r.instances)});
+    k.kind = 10;
+    return k;
+  }
+  if (r.skin.active) {
+    k.extra = HashCombine32({k.extra, SkinHash(r.skin), r.vb.phys_addr, r.vb.size, r.pos.stride_bytes});
+  }
+  return k;
+}
+
+// Cache key of a record's colour buffer (kind 11), which holds `count` colours
+// of the stream from element LightInputs::colour_first on (DecodeColours): the
+// stream, where the element lies, the draw's offset into the stream and the
+// count. Meshes that share one colour stream at different offsets are different
+// entries; draws of one mesh share theirs. The content hash is the stream's.
+inline GeoKey ColourKey(const capture::LightInputs& l, uint32_t count) {
+  const capture::LightElement& e = l.second;
+  GeoKey k;
+  k.addr = e.vb.phys_addr;
+  k.size = e.vb.size;
+  k.stride = e.stride_bytes;
+  k.extra = HashCombine32({e.offset_bytes, e.format, l.colour_first, count});
+  k.kind = 11;
   return k;
 }
 
@@ -312,14 +399,15 @@ inline GeoKey TerrainFarUvKey(const capture::TerrainPatch& t) {
   return k;
 }
 
-// Cache key of the vertex normals of a terrain layer with the steep-ground
-// block (kind 8), which BuildTerrainNormals reads from the layer vertex
-// shader's normal map at the grid points: the map (fetch dwords 0 to 2: pitch,
-// tiling and clamp modes, address, format and endian, size), the draw's patches
-// and what places a grid point on the map (cell, origin, the height
-// coordinate's offset and scale). The content hash covers the map's bytes. The
-// heightmap, the height scale and everything of the layer itself (its textures
-// and constants) do not enter: the layers of a square share one buffer.
+// Cache key of a terrain record's vertex normals (kind 8), which
+// BuildTerrainNormals reads from the terrain vertex shader's normal map at the
+// grid points, for the light and for the steep-ground block: the map (fetch
+// dwords 0 to 2: pitch, tiling and clamp modes, address, format and endian,
+// size), the draw's patches and what places a grid point on the map (cell,
+// origin, the height coordinate's offset and scale). The content hash covers
+// the map's bytes. The heightmap, the height scale and everything of the draw
+// itself (its textures and constants) do not enter: the layers of a square
+// share one buffer.
 inline GeoKey TerrainNormalKey(const capture::TerrainPatch& t) {
   const capture::TerrainMaterialInputs& m = t.material;
   GeoKey k;
@@ -1073,6 +1161,42 @@ inline std::string FormatTerrainText(const ClayStats& st, const TextureStats& ts
   std::stable_sort(reasons.begin(), reasons.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
   for (size_t i = 0; i < reasons.size(); ++i) {
     text += std::string(i ? ", " : " | without material: ") + reasons[i].first + " " + std::to_string(reasons[i].second);
+  }
+  return text;
+}
+
+// The log's light line: the prepared records with light inputs and those whose
+// normals (and colours) the geometry cache built, the world rotations of the
+// objects and trunks among them by kind, and, when there are any, the rotations
+// that are not one by vertex shader and the records without their buffers by
+// reason and vertex shader (top eight each).
+inline std::string FormatLightText(const ClayStats& st) {
+  constexpr size_t kTop = 8;
+  std::string text = "Light inputs: ready " + std::to_string(st.light_ready) + " of " + std::to_string(st.lit) +
+                     " lit records | world rotation:";
+  for (size_t i = 0; i < size_t(RotationKind::kCount); ++i) {
+    text += std::string(i ? ", " : " ") + RotationKindName(RotationKind(i)) + " " + std::to_string(st.light_rotation[i]);
+  }
+  auto by_vs = [&](const capture::ShaderTally<32>& tally, uint8_t kind) {
+    capture::ShaderTally<32>::Entry top[kTop];
+    const size_t n = tally.Top(kind, top, kTop);
+    std::string list;
+    char buf[48];
+    for (size_t i = 0; i < n; ++i) {
+      std::snprintf(buf, sizeof(buf), "%s0x%016llX: %u", i ? ", " : "", static_cast<unsigned long long>(top[i].hash),
+                    top[i].count);
+      list += buf;
+    }
+    return list;
+  };
+  for (size_t i = 1; i < size_t(RotationKind::kCount); ++i) {
+    if (!st.light_rotation[i]) continue;
+    text += std::string(" | ") + RotationKindName(RotationKind(i)) + " by vs {" + by_vs(st.light_rotation_by_vs, uint8_t(i)) + "}";
+  }
+  for (size_t i = 1; i < size_t(capture::LightReason::kCount); ++i) {
+    if (!st.light_missing[i]) continue;
+    text += std::string(" | ") + capture::LightReasonName(capture::LightReason(i)) + " " +
+            std::to_string(st.light_missing[i]) + " by vs {" + by_vs(st.light_missing_by_vs, uint8_t(i)) + "}";
   }
   return text;
 }

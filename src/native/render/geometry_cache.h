@@ -3,8 +3,10 @@
 // Decoded guest geometry on the GPU for the clay pass: float4 positions,
 // float2 UVs and uint32 triangle-list indices in persistently mapped upload-heap buffers,
 // read by the vertex shader as StructuredBuffers (the RHI has 16-bit index
-// buffers only and no buffer-to-buffer copy). Keyed by GeometryCacheIndex
-// (guest range + layout + content hash) with an LRU byte budget.
+// buffers only and no buffer-to-buffer copy). For the light also float3
+// normals and uint32 vertex colours (normal_decode.h), which no shader reads
+// yet. Keyed by GeometryCacheIndex (guest range + layout + content hash) with
+// an LRU byte budget that counts every buffer.
 // GPU (command-processor) thread only.
 
 #include <cstdint>
@@ -54,17 +56,43 @@ class GeometryCache {
   // `vertex_count` coordinates result. Reads are bounded by the tables' sizes.
   nrhi::Buffer* TerrainFarUvs(nrhi::Device* dev, const capture::TerrainPatch& t, uint32_t vertex_count,
                               ClayStats& st);
-  // float2 (n.x, n.y) of the game's vertex normal for a terrain layer with the
-  // steep-ground block, one per grid point of its position buffer: read from
-  // the layer vertex shader's normal map where the game reads it, at the grid
-  // points (capture::BuildTerrainNormals; key TerrainNormalKey, content hash of
-  // the map). The clay vertex shader forms z. nullptr when the record's
-  // material inputs are not valid ones with the block, the map is not a k_DXN
-  // texture DecodeNormalMap handles or is unreadable, a grid point's texel lies
-  // outside the map's bytes, or fewer than `vertex_count` normals result.
-  // Reads are bounded by the map's size.
+  // float2 (n.x, n.y) of the game's vertex normal for a terrain record (a layer
+  // with or without the steep-ground block, a draw of the adaptive builder),
+  // one per grid point of its position buffer: read from the terrain vertex
+  // shader's normal map where the game reads it, at the grid points
+  // (capture::BuildTerrainNormals; key TerrainNormalKey, content hash of the
+  // map). The clay vertex shader forms z. nullptr when the record's material
+  // inputs are not valid, they hold no normal map (the slot held no texture),
+  // the map is not a k_DXN texture DecodeNormalMap handles or is unreadable, a
+  // grid point's texel lies outside the map's bytes, or fewer than
+  // `vertex_count` normals result. Reads are bounded by the map's size.
   nrhi::Buffer* TerrainNormals(nrhi::Device* dev, const capture::TerrainPatch& t, uint32_t vertex_count,
                                ClayStats& st);
+  // float3 unit normals of a mesh record with light inputs (`light`: LightOf),
+  // one per vertex of its position buffer and in the space of its positions
+  // (normal_decode.h): a plain mesh's as the stream stores them (the draw's
+  // world rotation, light.world_rot, is not applied: one buffer for every draw
+  // of the mesh; key MeshNormalKey), a skinned mesh's after the bones, an
+  // instanced draw's after the instance's rows, one per flat position (keys
+  // NormalKey). A vertex without a direction holds (0, 0, 0). nullptr, with
+  // the reason in `why`: normal-unsupported for a normal element no reader
+  // decodes (NormalElementSupported); light-unknown when a stream is
+  // unreadable, the buffer would hold fewer than `vertex_count` normals (the
+  // shader reads normals[v] for every v < vertex_count), a bone word lies
+  // outside its stream, or the upload fails. Reads are bounded by the streams'
+  // sizes. A terrain record has TerrainNormals instead.
+  nrhi::Buffer* Normals(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light,
+                        uint32_t vertex_count, ClayStats& st, capture::LightReason* why);
+  // uint32 colours of a record whose family has a colour stream
+  // (LightVertexKind::kStream), one per vertex of its position buffer: element
+  // light.colour_first + v of the stream for vertex v, red, green, blue and
+  // alpha in bytes 0 to 3 (DecodeColours; key ColourKey, content hash of the
+  // stream). nullptr when the element is not a colour a reader decodes, the
+  // stream is unreadable, or it holds fewer than `vertex_count` colours from
+  // colour_first on: nothing is read past the stream's size, and a draw
+  // whose offset leads outside it has no colours.
+  nrhi::Buffer* Colours(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light,
+                        uint32_t vertex_count, ClayStats& st);
   void BeginFrame(uint64_t frame, uint64_t budget_bytes);
   // DestroyDeferred all (dev may be nullptr: forget the buffers without
   // destroying them, e.g. after a device change).
@@ -96,6 +124,11 @@ class GeometryCache {
                                    uint32_t* vertex_count, ClayStats& st);
   nrhi::Buffer* InstancedUvs(nrhi::Device* dev, const capture::DrawRecord& r,
                              uint32_t vertex_count, ClayStats& st);
+  // The flat normal stream of an instanced record, built from the mesh's
+  // normals and the instance stream's rows; rebuilt when either's bytes or the
+  // instance set but for its offset (NormalKey) change.
+  nrhi::Buffer* InstancedNormals(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light,
+                                 uint32_t vertex_count, ClayStats& st);
   // The first `count` positions / UVs of the record's mesh stream, decoded
   // (`mesh` and `mesh_hash` are the stream's bytes and frame hash), or
   // nullptr if they do not decode. Kept for the frame per stream and layout,
@@ -130,6 +163,9 @@ class GeometryCache {
   FrameMemo<capture::Float2> mesh_uv_memo_{kMeshUvMemoBytes};
   std::vector<capture::Float4> mesh_positions_;
   std::vector<capture::Float2> mesh_uvs_;
+  std::vector<Float3> normals_;       // a record's normals being built
+  std::vector<Float3> mesh_normals_;  // an instanced record's mesh normals (one copy's vertices)
+  std::vector<uint32_t> colours_;
   std::vector<uint32_t> indices_;
   std::vector<uint32_t> evicted_;
 };

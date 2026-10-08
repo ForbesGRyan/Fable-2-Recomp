@@ -151,6 +151,54 @@ inline uint32_t PaletteBones(const BoneSkin& s, size_t palette_size) {
   return bones < 256 ? uint32_t(bones) : 256;
 }
 
+// Every whole bone of the palette, three rows each, decoded once (the index is
+// 8 bits: at most 256 bones). Empty when the palette holds no whole bone.
+inline void DecodeBones(const uint8_t* palette, size_t palette_size, const BoneSkin& s, std::vector<Float4>* bones) {
+  bones->clear();
+  for (uint32_t b = 0; b < 256; ++b) {
+    Float4 r[3];
+    bool ok = true;
+    for (int k = 0; k < 3 && ok; ++k) ok = DecodePositions(palette, palette_size, s.rows[k], b, 1, &r[k]);
+    if (!ok) break;
+    bones->insert(bones->end(), {r[0], r[1], r[2]});
+  }
+}
+
+// What BlendBones made of one vertex.
+enum class BoneBlend : uint8_t {
+  kBlended,     // m holds the blended matrix
+  kNone,        // a nonzero-weight bone past the palette, or every weight zero: the vertex has no place
+  kUnreadable   // an index or weight word lies outside the stream, or the endian is not handled
+};
+
+// The blended bone matrix of the vertex at byte `vertex_at` of the position
+// stream: m = sum_j(w_j * rows(bone_j)) over `bones` (DecodeBones). An
+// influence of weight zero may name any bone. The positions and the normals of
+// a skinned draw are both made with it (SkinPositions; render/normal_decode.h).
+inline BoneBlend BlendBones(const uint8_t* vb, size_t vb_size, uint64_t vertex_at, const BoneSkin& s,
+                            const std::vector<Float4>& bones, float m[3][4]) {
+  uint32_t iw = 0, ww = 0;
+  if (!detail::SkinWord(vb, vb_size, vertex_at + s.index_offset_bytes, s.index_endian, &iw)) return BoneBlend::kUnreadable;
+  if (s.weighted && !detail::SkinWord(vb, vb_size, vertex_at + s.weight_offset_bytes, s.index_endian, &ww)) {
+    return BoneBlend::kUnreadable;
+  }
+  const uint32_t n = uint32_t(bones.size() / 3);
+  for (int row = 0; row < 3; ++row) m[row][0] = m[row][1] = m[row][2] = m[row][3] = 0.0f;
+  bool any = false;
+  for (uint32_t k = 0; k < s.bones; ++k) {
+    const float w = s.weighted ? float((ww >> s.weight_shift[k]) & 0xFF) / 255.0f : 1.0f;
+    if (w == 0.0f) continue;  // an unused influence may name any bone
+    const uint32_t bone = (iw >> s.index_shift[k]) & 0xFF;
+    if (bone >= n) return BoneBlend::kNone;
+    const Float4* r = &bones[size_t(bone) * 3];
+    for (int row = 0; row < 3; ++row) {
+      m[row][0] += w * r[row].x; m[row][1] += w * r[row].y; m[row][2] += w * r[row].z; m[row][3] += w * r[row].w;
+    }
+    any = true;
+  }
+  return any ? BoneBlend::kBlended : BoneBlend::kNone;
+}
+
 // Replaces positions[0, count) of vertices first_vertex.. (already decoded
 // with w = 1) by their skinned positions. A vertex with a nonzero-weight bone
 // past the palette (another mesh's vertex in a shared stream), or with every
@@ -161,37 +209,15 @@ inline bool SkinPositions(const uint8_t* vb, size_t vb_size, const uint8_t* pale
                           const BoneSkin& s, uint32_t stride, uint32_t first_vertex, uint32_t count,
                           Float4* positions) {
   if (!s.active || stride == 0 || s.bone_stride == 0 || s.bones < 1 || s.bones > 4) return false;
-  // Every bone's rows, decoded once (the index is 8 bits: at most 256 bones).
   std::vector<Float4> bones;
-  for (uint32_t b = 0; b < 256; ++b) {
-    Float4 r[3];
-    bool ok = true;
-    for (int k = 0; k < 3 && ok; ++k) ok = DecodePositions(palette, palette_size, s.rows[k], b, 1, &r[k]);
-    if (!ok) break;
-    bones.insert(bones.end(), {r[0], r[1], r[2]});
-  }
+  DecodeBones(palette, palette_size, s, &bones);
   if (bones.empty()) return false;
-  const uint32_t n = uint32_t(bones.size() / 3);
   const float nan = std::numeric_limits<float>::quiet_NaN();
   for (uint32_t i = 0; i < count; ++i) {
-    const uint64_t at = uint64_t(first_vertex + i) * stride;
-    uint32_t iw = 0, ww = 0;
-    if (!detail::SkinWord(vb, vb_size, at + s.index_offset_bytes, s.index_endian, &iw)) return false;
-    if (s.weighted && !detail::SkinWord(vb, vb_size, at + s.weight_offset_bytes, s.index_endian, &ww)) return false;
-    float m[3][4] = {};
-    bool any = false, bad = false;
-    for (uint32_t k = 0; k < s.bones; ++k) {
-      const float w = s.weighted ? float((ww >> s.weight_shift[k]) & 0xFF) / 255.0f : 1.0f;
-      if (w == 0.0f) continue;  // an unused influence may name any bone
-      const uint32_t bone = (iw >> s.index_shift[k]) & 0xFF;
-      if (bone >= n) { bad = true; break; }
-      const Float4* r = &bones[size_t(bone) * 3];
-      for (int row = 0; row < 3; ++row) {
-        m[row][0] += w * r[row].x; m[row][1] += w * r[row].y; m[row][2] += w * r[row].z; m[row][3] += w * r[row].w;
-      }
-      any = true;
-    }
-    if (bad || !any) {
+    float m[3][4];
+    const BoneBlend blend = BlendBones(vb, vb_size, uint64_t(first_vertex + i) * stride, s, bones, m);
+    if (blend == BoneBlend::kUnreadable) return false;
+    if (blend == BoneBlend::kNone) {
       positions[i] = {nan, nan, nan, 1.0f};
       continue;
     }

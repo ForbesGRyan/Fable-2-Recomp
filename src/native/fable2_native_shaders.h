@@ -86,19 +86,28 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 // vertex normal, whose (x, y) the draw's buffer at t8 holds per grid point
 // (GeometryCache::TerrainNormals) and whose z is formed here as the game's
 // vertex shader forms it, for the steep-ground block and for the light; bit 1,
-// an object's stream normal at t9 and colour at t10, the normal put through the
-// draw's rows of cbuffer Object (b1) as the game puts it through c4..c6 times
-// c7.w; bit 2, the draw is lit: the vertex shader also makes the vector of the
-// ambient factor (AmbientAxis with the frame's axis) and the colour-stream
+// an object's stream normal at t9 and its word at t10, the normal put through
+// the draw's rows of cbuffer Object (b1) as the game puts it through c4..c6
+// times c7.w (a bone-skinned mesh's normals are in the buffer after the bones
+// and take the rows like any other); bit 3 (with bit 1), the word is not the
+// stream colour but the vertex's probe set, and the colour is the probe colour
+// of the draw's twelve probe registers (Object's o_probe, vertex c28..c39) and
+// the vertex's four weights at t11, as the game's probe vertex shaders form
+// it, with no power (the pixel function's pow(|x|, c21.w) is the only one it
+// takes; the game takes that absolute value too, so a colour that the signed
+// weights make zero or negative is lit as the game lights it); bit 2, the
+// draw is lit: the vertex shader also makes the vector of the ambient factor
+// (AmbientAxis with the frame's axis) and, without bit 3, the colour-stream
 // colour raised to the vertex shader's literal, and the pixel shader calls its
 // family's function with the frame's block (cbuffer Frame, b2) and the draw's
 // values. A light buffer is read only for a vertex below light_count, and only
-// by a draw whose light_mode names it: the two reads are inside [branch]
-// blocks, because a buffer bound through a root descriptor has no bounds check
-// and the compiler otherwise turns `if` into a select and loads all three
-// buffers for every vertex of every draw (the tests hold the compiled shader to
-// this). The pass also binds something that covers the draw's vertices at all
-// three registers at every draw (clay_pass.cpp). A draw
+// by a draw whose light_mode names it: the reads are inside [branch] blocks
+// (the weights' inside two: the object's and bit 3's), because a buffer bound
+// through a root descriptor has no bounds check and the compiler otherwise
+// turns `if` into a select and loads all four buffers for every vertex of
+// every draw (the tests hold the compiled shader to this, for each of the
+// sixteen values of light_mode). The pass also binds something that covers the
+// draw's vertices at all four registers at every draw (clay_pass.cpp). A draw
 // without bit 2 reads neither Frame nor Object and is the unlit colour.
 // kClayFrameFields and kClayObjectFields are the two buffers' layouts, which the
 // tests hold against the compiled shaders and the C++ structs.
@@ -114,7 +123,7 @@ inline constexpr ClayBufferField kClayFrameFields[] = {
 };
 inline constexpr ClayBufferField kClayObjectFields[] = {
     {"o_rot0", 0, 16}, {"o_rot1", 16, 16}, {"o_rot2", 32, 16},        {"o_c49", 48, 12},
-    {"o_c27w", 60, 4}, {"o_c26", 64, 12},  {"o_colour_power", 76, 4},
+    {"o_c27w", 60, 4}, {"o_c26", 64, 12},  {"o_colour_power", 76, 4}, {"o_probe", 80, 192},
 };
 
 #define FABLE2_CLAY_DRAW_HLSL R"hlsl(
@@ -186,6 +195,7 @@ cbuffer Object : register(b1) {
   float4 o_rot0; float4 o_rot1; float4 o_rot2;   // rows of M = c4..c6.xyz * c7.w (xyz)
   float3 o_c49; float o_c27w;                    // pixel c49.xyz (the whole colour); c27.w (the ambient part)
   float3 o_c26; float o_colour_power;            // pixel c26.xyz (with the output scale); the stream colour's power
+  float4 o_probe[12];                            // vertex c28..c39: three probe sets of four (base, rows of r, g, b)
 };
 )hlsl"
 
@@ -196,6 +206,7 @@ StructuredBuffer<float2> uvs : register(t2);
 StructuredBuffer<float2> terrain_normals : register(t8);
 StructuredBuffer<float3> normals : register(t9);
 StructuredBuffer<uint> colours : register(t10);
+StructuredBuffer<float4> probe_weights : register(t11);
 struct VsOut {
   float4 pos : SV_Position; float3 ndc : TEXCOORD0; float2 uv : TEXCOORD1;
   float3 world : TEXCOORD2;
@@ -234,8 +245,17 @@ VsOut main(uint vid : SV_VertexID) {
     float3 n = normals[v];
     o.normal = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));
     o.axis = AmbientAxis(o.normal, f_axis);
-    uint rgba = colours[v];
-    o.vcolour = light_pow(float3(rgba & 255, (rgba >> 8) & 255, (rgba >> 16) & 255) / 255.0, o_colour_power);
+    // t10 holds one word a vertex: the stream colour, or (light_mode bit 3) the vertex's probe set.
+    uint word = colours[v];
+    [branch] if (light_mode & 8) {
+      // The probe colour as the game's vertex shaders form it, with no power:
+      // c[28 + a0].xyz + (c[29 + a0] . w, c[30 + a0] . w, c[31 + a0] . w), a0 clamped to the last set.
+      uint a0 = min(word, 8u);
+      float4 w = probe_weights[v];
+      o.vcolour = o_probe[a0].xyz + float3(dot(o_probe[a0 + 1], w), dot(o_probe[a0 + 2], w), dot(o_probe[a0 + 3], w));
+    } else {
+      o.vcolour = light_pow(float3(word & 255, (word >> 8) & 255, (word >> 16) & 255) / 255.0, o_colour_power);
+    }
   }
   return o;
 }
@@ -251,11 +271,13 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0) : SV_Target {
 }
 )hlsl";
 
-// A lit textured draw (light_mode bit 2: an object with the colour stream; lighting-formulas.md,
-// "Objects"): colour = (A * c27.w * (pow(vcolour, c21.w) * c21.xyz * L + c20.xyz) + A * c87.xyz *
+// A lit textured draw (light_mode bit 2: an object or a tree trunk; lighting-formulas.md, "Objects",
+// "Tree trunks"): colour = (A * c27.w * (pow(vcolour, c21.w) * c21.xyz * L + c20.xyz) + A * c87.xyz *
 // sat(N . c80.xyz) * mask) * c49.xyz, times c26.xyz, with A = albedo^2 (after the division by the
-// alpha where the shader has it), vcolour the vertex shader's colour, N the interpolated M n
-// normalised, L from t = sat(normalize(axis) . N), and the mask 1 (no shadows).
+// alpha where the shader has it), vcolour the vertex shader's colour (the stream colour raised to its
+// literal, or the probe colour as it is), N the interpolated M n normalised, L from
+// t = sat(normalize(axis) . N), and the mask 1 (no shadows). The pixel shader is the same program for
+// both kinds of colour and reads none of the probe registers.
 inline constexpr const char* kClayTexturedPs = FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL FABLE2_CLAY_OBJECT_HLSL R"hlsl(
 Texture2D albedo : register(t3);
 SamplerState s_point_wrap : register(s0);

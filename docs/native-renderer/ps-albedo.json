@@ -311,9 +311,11 @@
       "family": "object-multi",
       "vertex": [
         "0xECD66A10092E6562",
-        "0x79EAC49585797037"
+        "0x79EAC49585797037",
+        "0xD4D558DA6A82BDC8",
+        "0xA1F7E9885EC466DF"
       ],
-      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals lit_object (docs/native-renderer/lighting-formulas.md, \"Objects\") with vertex shader ECD66A10092E6562 400 of 400 trials (largest relative difference 1.10e-15), 79EAC49585797037 400 of 400 trials (largest relative difference 1.13e-15). The two- and four-light form: light 0 through sun_gate_multi with the other lights' colours zero; it is the one-light form only with c80.w = 0, c94.x = 0 and c112.x = 1 (\"The sun\")."
+      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals lit_object (docs/native-renderer/lighting-formulas.md, \"Objects\") with vertex shader ECD66A10092E6562 400 of 400 trials (largest relative difference 1.10e-15), 79EAC49585797037 400 of 400 trials (largest relative difference 1.13e-15). The two- and four-light form: light 0 through sun_gate_multi with the other lights' colours zero; it is the one-light form only with c80.w = 0, c94.x = 0 and c112.x = 1 (\"The sun\"). With the bone-skinned vertex shaders (plan Task 8a; light_check.py --family object-multi --trials 400, out/native-evidence/lighting/task8a/light_check_object_multi.txt): D4D558DA6A82BDC8 400 of 400 trials (largest relative difference 8.88e-16), A1F7E9885EC466DF 400 of 400 trials (largest relative difference 7.81e-16); and with the sun in slot 1 behind a dark lantern, as the game draws a two-light shader, each is the one-light function in 400 of 400 trials (light_check.py --multi-sun, out/native-evidence/lighting/task8a/light_check_multi_sun.txt)."
     }
   },
   "0xF525E023E08AC9BB": {
@@ -380,9 +382,11 @@
     "light": {
       "family": "object-multi",
       "vertex": [
-        "0xECD66A10092E6562"
+        "0xECD66A10092E6562",
+        "0xD4D558DA6A82BDC8",
+        "0xA1F7E9885EC466DF"
       ],
-      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals lit_object (docs/native-renderer/lighting-formulas.md, \"Objects\") with vertex shader ECD66A10092E6562 400 of 400 trials (largest relative difference 1.10e-15). The two- and four-light form: light 0 through sun_gate_multi with the other lights' colours zero; it is the one-light form only with c80.w = 0, c94.x = 0 and c112.x = 1 (\"The sun\")."
+      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals lit_object (docs/native-renderer/lighting-formulas.md, \"Objects\") with vertex shader ECD66A10092E6562 400 of 400 trials (largest relative difference 1.10e-15). The two- and four-light form: light 0 through sun_gate_multi with the other lights' colours zero; it is the one-light form only with c80.w = 0, c94.x = 0 and c112.x = 1 (\"The sun\"). With the bone-skinned vertex shaders (plan Task 8a; light_check.py --family object-multi --trials 400, out/native-evidence/lighting/task8a/light_check_object_multi.txt): D4D558DA6A82BDC8 400 of 400 trials (largest relative difference 8.88e-16), A1F7E9885EC466DF 400 of 400 trials (largest relative difference 7.81e-16); and with the sun in slot 2 behind two dark lanterns, as the game draws a four-light shader (and in slots 1 and 3), each is the one-light function in 400 of 400 trials (light_check.py --multi-sun, out/native-evidence/lighting/task8a/light_check_multi_sun.txt). Neither pair is in a capture so far: entered on the microcode's evidence."
     }
   },
   "0x26052DEFBA688AF2": {
@@ -447,9 +451,10 @@
     "light": {
       "family": "object",
       "vertex": [
-        "0x79EAC49585797037"
+        "0x79EAC49585797037",
+        "0xECD66A10092E6562"
       ],
-      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals lit_object (docs/native-renderer/lighting-formulas.md, \"Objects\") with vertex shader 79EAC49585797037 400 of 400 trials (largest relative difference 8.10e-16)."
+      "evidence": "light_check.py --all --trials 400 (out/native-evidence/lighting/task4_light_check_all.txt): the microcode's colour equals lit_object (docs/native-renderer/lighting-formulas.md, \"Objects\") with vertex shader 79EAC49585797037 400 of 400 trials (largest relative difference 8.10e-16). With the colour-stream vertex shader (plan Task 8a; light_check.py --family object --trials 400, out/native-evidence/lighting/task8a/light_check_object.txt): ECD66A10092E6562 400 of 400 trials (largest relative difference 8.46e-16); the pair is in no capture so far: entered on the microcode's evidence."
     }
   },
   "0xDBFD88A80EDBCE36": {

@@ -102,6 +102,34 @@ int main() {
     }
   }
 
-  std::cout << "PASS: view parsing/cycling, F6 edge detection, failure latch, frame times per view\n";
+  // The Direct3D debug layer's messages in the game log (fable2_native_d3d_messages): errors,
+  // corruption and warnings as lines, at most kPerId of one severity and id and kTotal in all; every
+  // message is counted, written or not, and the summary says so.
+  {
+    D3dMessageLog log;
+    if (log.Summary() != "d3d messages: errors 0, warnings 0") return 40;
+    if (log.Add(D3dSeverity::kError, 1328, "CreateCommittedResource: bad") != "d3d ERROR id 1328 (seen 1): CreateCommittedResource: bad") return 41;
+    if (log.Add(D3dSeverity::kWarning, 1328, "w") != "d3d warning id 1328 (seen 1): w") return 42;      // (its own count)
+    if (log.Add(D3dSeverity::kCorruption, 7, "c") != "d3d CORRUPTION id 7 (seen 1): c") return 43;
+    if (!log.Add(D3dSeverity::kOther, 9, "info").empty()) return 44;                                      // not written, not counted
+    for (uint32_t i = 2; i <= D3dMessageLog::kPerId; ++i) {
+      if (log.Add(D3dSeverity::kError, 1328, "x") != "d3d ERROR id 1328 (seen " + std::to_string(i) + "): x") return 45;
+    }
+    if (!log.Add(D3dSeverity::kError, 1328, "x").empty() || !log.Add(D3dSeverity::kError, 1328, "x").empty()) return 46;
+    if (log.Add(D3dSeverity::kError, 1329, "y") != "d3d ERROR id 1329 (seen 1): y") return 47;          // another id still writes
+    if (log.Summary() != "d3d messages: errors 8, warnings 1 (CORRUPTION 1)") return 48;
+    // A text with line breaks or control characters is one line; a long one is cut.
+    if (log.Add(D3dSeverity::kWarning, 5, "a\r\nb\tc") != "d3d warning id 5 (seen 1): a  b c") return 49;
+    const std::string cut = log.Add(D3dSeverity::kWarning, 6, std::string(5000, 'z'));
+    if (cut.size() != std::string("d3d warning id 6 (seen 1): ").size() + D3dMessageLog::kTextMax || cut.back() != 'z') return 50;
+    // No more than kTotal lines in a run, whatever comes; the counts go on.
+    D3dMessageLog many;
+    uint32_t lines = 0;
+    for (int32_t id = 0; id < 1000; ++id) lines += many.Add(D3dSeverity::kError, id, "e").empty() ? 0 : 1;
+    if (lines != D3dMessageLog::kTotal || many.Summary() != "d3d messages: errors 1000, warnings 0") return 51;
+    if (D3dMessageLog::kPerId != 4 || D3dMessageLog::kTotal != 400) return 52;
+  }
+
+  std::cout << "PASS: view parsing/cycling, F6 edge detection, failure latch, frame times per view, d3d message log\n";
   return 0;
 }

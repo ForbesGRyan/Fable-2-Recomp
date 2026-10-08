@@ -649,7 +649,7 @@ class GenAlphaKindTest(unittest.TestCase):
         checked = {(family, ps, vs) for family, pairs in light_check.FAMILIES.items() if family != "tree-leaf"
                    for ps, vs in pairs}
         self.assertEqual(table, checked)
-        self.assertEqual(len(table), 31)
+        self.assertEqual(len(table), 36)
         self.assertNotIn("light", data["0x7CD57B81550F19E3"])
         # every terrain layer's facing literal is the 8 of its own table (frame-map section 14, "The
         # shaders' literals"), and each family's evidence names the checker

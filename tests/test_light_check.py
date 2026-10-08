@@ -354,6 +354,49 @@ class PinnedForTheRenderer(unittest.TestCase):
         self.close(self.obj([-0.6, 0.0, 0.8], self.M_ROT, (0, 0, 0)),
                    [0.727362161936653, 0.59772, 0.0, 0.0, 0.0, 0.2992714, 0.22684304, 0.09932640000000001])
 
+    # Plan Task 8a: the probe colour (objects without a colour stream, trunks). The twelve registers
+    # c28..c39 as three sets of four (base, then the rows of red, green, blue), the vertex's four weights,
+    # and the set its position names: tests/native/test_clay_logic.cpp, cases 490 to 495, has the same.
+    PROBE = [[0.25, 0.125, 0.0625, 9.0], [0.5, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.125, 1.0],
+             [0.125, 0.25, 0.0, 9.0], [-0.25, 0.0, 0.0, 0.0], [0.0, 1.25, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0],
+             [0.0625, 0.5, 0.25, 9.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]]
+    WEIGHTS = [0.5, -0.25, 1.0, 0.125]
+
+    def probe_obj(self, a0, c27w=1.0, c49=(1.0, 1.0, 1.0), c26=(1.0, 1.0, 1.0), vcolour=None):
+        """A probe object as the clay shaders compose it: the vertex side makes the colour with no power,
+        the pixel side hands it to the object function, which raises its absolute value to c21.w."""
+        n, m = [-0.6, 0.0, 0.8], self.M_ROT
+        o1 = [lf.dot(row, n) for row in m]
+        t = lf.ambient_t(lf.ambient_axis(o1, self.AXIS), o1)
+        nds = lf.dot(lf.normalize(o1), self.SUN_DIR)
+        if vcolour is None:
+            vcolour = lf.probe_colour(self.PROBE[a0][:3], self.PROBE[a0 + 1:a0 + 4], self.WEIGHTS)
+        c = lf.lit_object([0.5, 0.4, 0.3], vcolour, self.TINT, self.TINT_POW, self.ADD, self.FLOOR, t, nds, self.SUN_COL,
+                          c27w, lf.sun_gate_single(1.0, 1.0), c49=list(c49))
+        return list(vcolour) + [c[i] * c26[i] for i in range(3)]
+
+    def test_probe_object(self):
+        # Set 0: base + (rows . weights), four-component dot products; the base's w is not read.
+        self.close(self.probe_obj(0), [0.5, -0.125, 0.3125, 0.426458072138784, 0.24789964999454064, 0.16493019528946776])
+        # Set 8, a colour above 1 (no clamp anywhere before the output), with c27.w, c49 and c26.
+        self.close(self.probe_obj(8), [1.0625, 0.625, 1.625, 0.6381219686383413, 0.3974707094581953, 0.6587403749904683])
+        self.close(self.probe_obj(8, c27w=0.5, c49=(1.0, 0.5, 2.0), c26=(1.0, 1.0, 0.5)),
+                   [1.0625, 0.625, 1.625, 0.46699668431917063, 0.14897843736454883, 0.3652333874952342])
+
+    def test_probe_colour_zero_and_negative(self):
+        # Set 4: the weights cancel the base exactly in red (0: no baked term, the added light and the sun
+        # remain, as for a black stream colour) and overshoot in green (-0.0625: the largest negative of
+        # the captured meshes is -0.062). The game takes the logarithm of the ABSOLUTE value (`log r6.x,
+        # r_abs[6].x` in 8D90..., instr 37 to 39; `r_abs[8]` in the trunks' 00E0...), so a negative colour
+        # lights like its mirror image: no clamp at zero, no NaN.
+        self.close(self.probe_obj(4), [0.0, -0.0625, 0.0, 0.2992714, 0.23539468096360217, 0.09932640000000001])
+        # The three values of the review of plan Task 5b: exactly 0, a rounding residue of either sign,
+        # the genuinely negative one.
+        want = [0.2992714, 0.2268430400125143, 0.10700391302815564]
+        self.close(self.probe_obj(0, vcolour=[0.0, -1e-8, -0.06]), [0.0, -1e-8, -0.06] + want)
+        self.close(self.probe_obj(0, vcolour=[0.0, 1e-8, 0.06]), [0.0, 1e-8, 0.06] + want)
+        self.close(lf.powc([0.0, -1e-8, -0.06], 1.3), [0.0, 3.9810717055349695e-11, 0.025798628902309793])
+
 
 class SyntheticDump(unittest.TestCase):
     """Always runs: the checker on a hand-written shader of the terrain layers' form."""
@@ -423,7 +466,7 @@ class MultiSun(unittest.TestCase):
                         self.assertTrue(res.ok, f"{res.agree}/{res.trials} worst {res.worst:.3g} {res.first_bad}")
                         self.assertEqual(res.trials, self.TRIALS)
                         checked += 1
-        self.assertEqual(checked, 17)       # nine pairs: five of two lights (slot 1), four of four (slots 1 to 3)
+        self.assertEqual(checked, 25)       # thirteen pairs: seven of two lights (slot 1), six of four (slots 1 to 3)
 
     def test_the_families_and_light_counts_cover_the_table(self):
         # Every -multi pair of the terrain, object and trunk families is checked, and has a light count.
@@ -501,7 +544,7 @@ class MultiSun(unittest.TestCase):
             code = lc.main(["--multi-sun", "--trials", "4"])
         text = out.getvalue()
         self.assertEqual(code, 0)
-        self.assertEqual(text.count("(the game)"), 9)
+        self.assertEqual(text.count("(the game)"), 13)
         self.assertIn("ps 789266C3E42D7E59 vs ECD66A10092E6562 (4 lights), sun in slot 2 (the game): 4/4 agree", text)
         self.assertIn("0 pairs disagree at the slot the game puts the sun in", text)
         # A light set that is not the game's (the sun as a position, w = 1): pairs disagree at the game's
@@ -517,7 +560,7 @@ class MultiSun(unittest.TestCase):
         with mock.patch.object(lc, "_sun_in_slot", sun_as_a_position), contextlib.redirect_stdout(out):
             code = lc.main(["--multi-sun", "--trials", "8"])
         self.assertEqual(code, 1)
-        self.assertIn("9 pairs disagree at the slot the game puts the sun in", out.getvalue())
+        self.assertIn("13 pairs disagree at the slot the game puts the sun in", out.getvalue())
         self.assertIn("first disagreement, trial ", out.getvalue())
 
 

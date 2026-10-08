@@ -858,8 +858,11 @@ inline constexpr ClayBinding kClayBindings[] = {
     {ClayBindingKind::kConstantBuffer, 2, 1, ClayBindingStage::kAll},    // 7: b2 Frame
     {ClayBindingKind::kBuffer, 8, 1, ClayBindingStage::kVertex},         // 8: t8 terrain normals (float2)
     {ClayBindingKind::kBuffer, 9, 1, ClayBindingStage::kVertex},         // 9: t9 object normals (float3)
-    {ClayBindingKind::kBuffer, 10, 1, ClayBindingStage::kVertex},        // 10: t10 object colours (uint)
+    {ClayBindingKind::kBuffer, 10, 1, ClayBindingStage::kVertex},        // 10: t10 an object's word per vertex (uint): the
+                                                                         //     stream colour, or the probe set's index
+    {ClayBindingKind::kBuffer, 11, 1, ClayBindingStage::kVertex},        // 11: t11 probe weights (float4)
 };
+// (twelve parameters: the backend's limit, nrhi::kMaxBindingParams; clay_pass.cpp asserts it)
 inline constexpr uint32_t kClayStaticSamplers = 4;  // s0..s3, pixel stage (SamplerIndex)
 static_assert(kClayBindings[0].count * 4 == sizeof(ClayConstants));
 
@@ -872,57 +875,85 @@ constexpr uint32_t ClayRootWords() {
   }
   return words;
 }
-static_assert(ClayRootWords() == 54 && ClayRootWords() <= 64);
+static_assert(ClayRootWords() == 56 && ClayRootWords() <= 64);
 
 // The largest element (bytes) the vertex shader loads per vertex from the
-// light's three buffers (t8 float2, t9 float3, t10 uint), and the element of
-// the position buffer (float4). A draw that does not use one of the three has
-// its own position buffer bound there: it holds an element of 16 bytes for
-// every vertex the draw can name, so any load the shader could make for the
-// draw lies inside it.
-inline constexpr uint32_t kClayLightElementBytesMax = 12, kClayPositionElementBytes = 16;
+// light's four buffers (t8 float2, t9 float3, t10 uint, t11 float4), and the
+// element of the position buffer (float4). A draw that does not use one of
+// the four has its own position buffer bound there: it holds an element of 16
+// bytes for every vertex the draw can name, so any load the shader could make
+// for the draw lies inside it.
+inline constexpr uint32_t kClayLightElementBytesMax = 16, kClayPositionElementBytes = 16;
 static_assert(kClayLightElementBytesMax <= kClayPositionElementBytes);
-// The buffers the geometry cache holds for the vertex kinds no shader reads
-// yet keep to that: an instance's colours are one uint a flat position (like
-// the stream colours at t10), and the probe buffer is two regions, float4
-// weights and one uint set index a vertex (normal_decode.h, BuildProbe), so
-// that neither is read with an element larger than a position's. No draw binds
-// them yet (they are built and resident only): the shader that reads them and
-// the register its weights need come together, in kClayBindings and
-// LightBufferSources, with the tests that hold the compiled shaders to both.
+// The second buffers of the two vertex kinds without a colour stream keep to
+// that: the probe buffer is two regions, float4 weights (read at t11) and one
+// uint set index a vertex (read at t10 from the region's offset:
+// normal_decode.h, BuildProbe), and an instance's colours are one uint a flat
+// position (like the stream colours at t10; built and resident, bound by no
+// draw yet: the plants are not lit).
 inline constexpr uint32_t kProbeWeightElementBytes = 16, kProbeSetElementBytes = 4, kInstanceColourElementBytes = 4;
-static_assert(kProbeWeightElementBytes <= kClayPositionElementBytes && kProbeSetElementBytes <= kClayPositionElementBytes &&
-              kInstanceColourElementBytes <= kClayPositionElementBytes);
+static_assert(kProbeWeightElementBytes <= kClayLightElementBytesMax && kProbeSetElementBytes <= kClayLightElementBytesMax &&
+              kInstanceColourElementBytes <= kClayLightElementBytesMax);
 
 // ClayConstants::light_mode. kLightModeTerrainNormals: the vertex shader forms
 // the game's terrain normal from the draw's buffer at t8 (float2 per grid
 // point): for the steep-ground block and for the light. kLightModeObject: the
-// vertex shader reads the stream normal at t9 and the colour at t10 and puts
-// the normal through the draw's rows of cbuffer Object. kLightModeLit: the
-// pixel shader lights the draw with its family's function (the frame's block
-// in cbuffer Frame, the draw's values in its slot at b1); without it the draw
-// is the unlit linear colour of the materials picture.
-inline constexpr uint32_t kLightModeTerrainNormals = 1u, kLightModeObject = 2u, kLightModeLit = 4u;
+// vertex shader reads the stream normal at t9 and the draw's word at t10 and
+// puts the normal through the draw's rows of cbuffer Object; the word is the
+// stream colour, unless kLightModeProbe (with the object bit only): then it is
+// the vertex's probe set, the vertex shader also reads the four weights at
+// t11, and the colour is the probe colour made of them and the draw's twelve
+// probe registers. kLightModeLit: the pixel shader lights the draw with its
+// family's function (the frame's block in cbuffer Frame, the draw's values in
+// its slot at b1); without it the draw is the unlit linear colour of the
+// materials picture.
+inline constexpr uint32_t kLightModeTerrainNormals = 1u, kLightModeObject = 2u, kLightModeLit = 4u, kLightModeProbe = 8u;
 
-// What the pass binds at the light's three buffer registers (t8, t9, t10:
+// The light_mode of a lit mesh record by its vertex kind: a colour stream's
+// object, an object or trunk with probe colours; 0 for a kind the pass does
+// not light as an object.
+constexpr uint32_t LitObjectMode(capture::LightVertexKind kind) {
+  switch (kind) {
+    case capture::LightVertexKind::kStream: return kLightModeObject | kLightModeLit;
+    case capture::LightVertexKind::kProbe: return kLightModeObject | kLightModeLit | kLightModeProbe;
+    default: return 0;
+  }
+}
+
+// What the pass binds at the light's four buffer registers (t8 to t11:
 // kClayBindings[kClayLightBufferParam0 + i]) for a draw with `light_mode`: the
 // draw's own buffer of that register where the mode names it, else the draw's
-// positions. EVERY draw gets all three: nothing may stay bound from another
+// positions. EVERY draw gets all four: nothing may stay bound from another
 // draw, whose (smaller) buffer this draw's vertex indices would address.
-enum class ClayLightBuffer : uint8_t { kPositions, kTerrainNormals, kNormals, kColours };
+// kProbeSets and kProbeWeights are the two regions of the draw's probe buffer
+// (LightBufferOffset); kColours is a colour stream's buffer and never an
+// instance set's.
+enum class ClayLightBuffer : uint8_t { kPositions, kTerrainNormals, kNormals, kColours, kProbeSets, kProbeWeights };
+inline constexpr uint32_t kClayLightBufferParam0 = 8, kClayLightBufferCount = 4;
 struct ClayLightBuffers {
-  ClayLightBuffer source[3];  // t8, t9, t10
+  ClayLightBuffer source[kClayLightBufferCount];  // t8, t9, t10, t11
 };
-inline constexpr uint32_t kClayLightBufferParam0 = 8;
 constexpr ClayLightBuffers LightBufferSources(uint32_t light_mode) {
   const bool terrain = (light_mode & kLightModeTerrainNormals) != 0;
   const bool object = (light_mode & kLightModeObject) != 0;
+  const bool probe = object && (light_mode & kLightModeProbe) != 0;
   return {{terrain ? ClayLightBuffer::kTerrainNormals : ClayLightBuffer::kPositions,
            object ? ClayLightBuffer::kNormals : ClayLightBuffer::kPositions,
-           object ? ClayLightBuffer::kColours : ClayLightBuffer::kPositions}};
+           probe ? ClayLightBuffer::kProbeSets : object ? ClayLightBuffer::kColours : ClayLightBuffer::kPositions,
+           probe ? ClayLightBuffer::kProbeWeights : ClayLightBuffer::kPositions}};
 }
 static_assert(kClayBindings[kClayLightBufferParam0].reg == 8 && kClayBindings[kClayLightBufferParam0 + 1].reg == 9 &&
-              kClayBindings[kClayLightBufferParam0 + 2].reg == 10 && std::size(kClayBindings) == kClayLightBufferParam0 + 3);
+              kClayBindings[kClayLightBufferParam0 + 2].reg == 10 && kClayBindings[kClayLightBufferParam0 + 3].reg == 11 &&
+              std::size(kClayBindings) == kClayLightBufferParam0 + kClayLightBufferCount);
+// The byte offset a source is bound from in its buffer: the set indices are
+// the probe buffer's second region, behind the weights of its `probe_count`
+// vertices (ProbeSetOffset: a multiple of 256 bytes, which the RHI's bind
+// offsets must be); everything else is bound from the buffer's start.
+// `probe_count` is the count the probe buffer was built with, never the
+// draw's light_count (the smaller of that and the normals' count).
+constexpr uint64_t LightBufferOffset(ClayLightBuffer source, uint32_t probe_count) {
+  return source == ClayLightBuffer::kProbeSets ? ProbeSetOffset(probe_count) : 0;
+}
 
 inline ClayConstants MakeClayConstants(const capture::DrawRecord& r, uint32_t vertex_count,
                                        uint32_t color, const float uv[4], bool textured,
@@ -1054,12 +1085,14 @@ inline std::string FormatTargetText(uint32_t width, uint32_t height) {
 
 // --- Native light (frame-map section 14, "Native light"; docs/native-renderer/lighting-formulas.md) ---
 // With fable2_native_light on, in a frame that has a light block, the draws of
-// three families are lit by the game's own ambient, baked and sun light, in
+// four families are lit by the game's own ambient, baked and sun light, in
 // linear space and without shadows (the screen mask is 1): the terrain layers,
-// the far terrain, and the objects whose vertex shader reads the colour stream
-// (0xECD6...), each with its two- and four-light forms. Every other draw, and
-// every draw of a frame without a block, is the unlit colour of the materials
-// picture, counted by reason (ClayUnlit).
+// the far terrain, the objects (their baked term from the colour stream of
+// vertex shader 0xECD6..., or the probe colour of 0x79EA..., 0xD4D5...,
+// 0xA1F7...) and the tree trunks (probe colours, 0x475E...), each with its
+// two- and four-light forms. Every other draw (plants, leaves, shaders
+// without a family), and every draw of a frame without a block, is the unlit
+// colour of the materials picture, counted by reason (ClayUnlit).
 //
 // The functions below are the pure mirrors of the HLSL light functions
 // (shaders::kClayLightHlsl, same names and argument lists), which are the
@@ -1135,6 +1168,27 @@ inline float AmbientT(const Float3& axis_vector, const Float3& normal) {
 
 // The colour-stream vertex shader's o6: pow(|colour|, power) per channel (power: its literal 2.2).
 inline Float3 VertexColour(const Float3& stream_colour, float power) { return LightPow(stream_colour, power); }
+
+// The probe vertex shaders' o6 (lighting-formulas.md, "Objects", probe_colour): of the draw's twelve
+// probe registers c28..c39 (`probe`), the set at `set` (the vertex's a0: 0, 4 or 8), the base
+// c[28 + a0].xyz plus the four-component dot products of the vertex's weights with c[29 + a0],
+// c[30 + a0], c[31 + a0] for red, green and blue. No power here: the pixel shader's pow(|x|, c21.w) is
+// the only one the colour takes, and its absolute value is what the game computes for a colour that is
+// zero or negative (the weights are signed; LightPow). The set is clamped to the last one, as the clay
+// vertex shader clamps it: the buffer holds 0, 4 or 8 only (normal_decode.h, DecodeProbeSets), and the
+// clamp keeps any other word inside the twelve registers.
+inline constexpr uint32_t kProbeSetMax = 8;
+static_assert(kProbeSetMax + 4 == capture::kLightProbeRegisters);
+constexpr uint32_t ProbeSetClamp(uint32_t set) { return set < kProbeSetMax ? set : kProbeSetMax; }
+inline Float3 ProbeColour(const float probe[capture::kLightProbeRegisters][4], uint32_t set, const float weights[4]) {
+  const uint32_t a0 = ProbeSetClamp(set);
+  auto one = [&](int channel) {
+    const float* row = probe[a0 + 1 + channel];
+    const float sum = row[0] * weights[0] + row[1] * weights[1] + row[2] * weights[2] + row[3] * weights[3];
+    return LightFinite(LightFinite(probe[a0][channel]) + sum);
+  };
+  return {one(0), one(1), one(2)};
+}
 
 // Terrain layers only: sat(k * (N . c109.xyz)), k the pixel shader's literal 8.
 inline float FacingGate(float n_dot_c109, float k) { return LightSat(LightFinite(k) * LightFinite(n_dot_c109)); }
@@ -1264,43 +1318,75 @@ inline float ClayFrameExposure(const ClayFrameConstants& frame) {
   return ClayExposure(frame.light_on ? ClayLight::kOn : ClayLight::kOff);
 }
 
-// Whether the pass lights a draw with these inputs (plan Task 7): the terrain layers and the far
-// terrain, and the objects whose vertex shader has the colour stream (LightVertexKind::kStream).
+// Whether the pass lights a draw with these inputs (plan Tasks 7 and 8a): the terrain layers and
+// the far terrain; the objects whose vertex shader has the colour stream (LightVertexKind::kStream)
+// or probe colours (kProbe: the plain and the bone-skinned ones); the tree trunks (probe colours).
 // Their two- and four-light forms (LightInputs::multi) are drawn with the frame's sun through the
 // family's one-light function and without their lanterns: for every such pair of the table the
 // microcode, with the sun in the slot the game puts it in behind dark lanterns, is that function
-// (light_check.py --multi-sun; tests/test_light_check.py, MultiSun). The objects, trunks and
-// plants of the other vertex kinds have no light yet.
+// (light_check.py --multi-sun; tests/test_light_check.py, MultiSun). The plants (kInstance) and
+// the leaves have no light yet.
 inline bool LightFamilyDrawn(const capture::LightInputs& l) {
   switch (l.family) {
     case capture::LightFamily::kTerrainLayer:
     case capture::LightFamily::kTerrainFar: return l.kind == capture::LightVertexKind::kTerrain;
-    case capture::LightFamily::kObject: return l.kind == capture::LightVertexKind::kStream;
+    case capture::LightFamily::kObject:
+      return l.kind == capture::LightVertexKind::kStream || l.kind == capture::LightVertexKind::kProbe;
+    case capture::LightFamily::kTreeTrunk: return l.kind == capture::LightVertexKind::kProbe;
     default: return false;
   }
 }
 
-// A lit object's values for the shaders (cbuffer Object, register b1, in the draw's slot of the
-// frame's constant buffer; shaders::kClayObjectFields is its layout).
+// Whether a mesh record of this vertex kind has the buffers its light reads: the normals and the
+// kind's OWN second buffer (a colour stream's colours; the probe weights and sets). A probe record
+// has no colour buffer, and the colours an instanced record has (its copies', for the plants) are
+// no stream colours: no other kind is lit as an object.
+constexpr bool LightObjectReady(capture::LightVertexKind kind, bool normals, bool colours, bool probe) {
+  switch (kind) {
+    case capture::LightVertexKind::kStream: return normals && colours;
+    case capture::LightVertexKind::kProbe: return normals && probe;
+    default: return false;
+  }
+}
+
+// A lit object's or trunk's values for the shaders (cbuffer Object, register b1, in the draw's slot
+// of the frame's constant buffer; shaders::kClayObjectFields is its layout). 272 bytes: more than a
+// 256-byte slot, so an object's slot is kClayObjectSlotBytes (below).
 struct ClayObjectConstants {
   float rot[3][4];     // rows of M = world_rot * world_scale (xyz; w 0): the game's own (R n) * c7.w
   float c49[3];        // pixel c49.xyz: on the whole colour
   float c27w;          // pixel c27.w: on the ambient part
   float c26[3];        // pixel c26.xyz: with the output scale, after the function
-  float colour_power;  // the vertex shader's literal on the stream colour (2.2)
+  float colour_power;  // kStream: the vertex shader's literal on the stream colour (2.2); kProbe: 0, not read
+  float probe[capture::kLightProbeRegisters][4];  // kProbe: vertex c28..c39 (three sets of four); kStream: 0, not read
 };
-static_assert(sizeof(ClayObjectConstants) == 80);
+static_assert(sizeof(ClayObjectConstants) == 272 && offsetof(ClayObjectConstants, probe) == 80);
 
-// False (the draw is then not lit: light-unknown) unless the inputs are a colour-stream object's,
-// its world rotation gives a direction (every RotationKind but kDegenerate: the normal is the
-// game's normalize(M n), ruling of 2026-10-08) and every value is a number of usable size, the
-// power in (0, 8].
+// False (the draw is then not lit: light-unknown), with `out` all zero, unless the inputs are an
+// object's with a colour stream or an object's or trunk's with probe colours, the world rotation
+// gives a direction (every RotationKind but kDegenerate: the normal is the game's normalize(M n),
+// ruling of 2026-10-08) and EVERY value the kind's shader path reads is a number of usable size:
+// the rows, c27.w, c49, c26, and the stream colour's power in (0, 8] or each of the forty-eight
+// components of the probe registers. All or nothing: no block is made with one value left out.
 inline bool MakeClayObjectConstants(const capture::LightInputs& l, ClayObjectConstants* out) {
   *out = ClayObjectConstants{};
-  if (l.family != capture::LightFamily::kObject || l.kind != capture::LightVertexKind::kStream) return false;
+  const bool stream = l.kind == capture::LightVertexKind::kStream, probe = l.kind == capture::LightVertexKind::kProbe;
+  if (!(l.family == capture::LightFamily::kObject && (stream || probe)) &&
+      !(l.family == capture::LightFamily::kTreeTrunk && probe)) {
+    return false;
+  }
   if (ClassifyRotation(l.world_rot, l.world_scale) == RotationKind::kDegenerate) return false;
-  if (!(l.colour_power > 0.0f && l.colour_power <= 8.0f) || !LightValueUsable(l.c27w)) return false;
+  if (stream && !(l.colour_power > 0.0f && l.colour_power <= 8.0f)) return false;
+  if (!LightValueUsable(l.c27w)) return false;
   ClayObjectConstants c{};
+  if (probe) {
+    for (uint32_t r = 0; r < capture::kLightProbeRegisters; ++r) {
+      for (int k = 0; k < 4; ++k) {
+        if (!LightValueUsable(l.vs_const[r][k])) return false;
+        c.probe[r][k] = l.vs_const[r][k];
+      }
+    }
+  }
   for (int r = 0; r < 3; ++r) {
     for (int k = 0; k < 3; ++k) {
       c.rot[r][k] = l.world_rot[r][k] * l.world_scale;
@@ -1311,7 +1397,7 @@ inline bool MakeClayObjectConstants(const capture::LightInputs& l, ClayObjectCon
     c.c26[r] = l.c26[r];
   }
   c.c27w = l.c27w;
-  c.colour_power = l.colour_power;
+  c.colour_power = stream ? l.colour_power : 0.0f;
   *out = c;
   return true;
 }
@@ -1365,6 +1451,33 @@ struct ClayTerrainConstants {
 };
 static_assert(sizeof(ClayTerrainConstants) == 192);
 inline constexpr uint32_t kClayTerrainSlotBytes = 256;  // the RHI's constant buffer offset alignment
+
+// The frame's constant buffer (clay_pass.cpp, FinishTerrain): `small_slots` slots of
+// kClayTerrainSlotBytes (slot 0 the frame's light, cbuffer Frame; then one per terrain record drawn
+// with its material, cbuffer Terrain), then one slot of kClayObjectSlotBytes per lit object (cbuffer
+// Object: 272 bytes with the probe registers, more than a small slot). Everything is bound by
+// address and offset: no view has a size, so the buffer itself must hold, from the start of EVERY
+// slot the pass binds at b1, the largest block a shader declares there. That is cbuffer Object, which
+// the vertex shader declares for every draw, a terrain draw's and an unlit draw's included (they do
+// not read it; a validation layer holds the declaration against the buffer all the same).
+inline constexpr uint32_t kClayObjectSlotBytes = 512;
+static_assert(sizeof(ClayObjectConstants) <= kClayObjectSlotBytes && sizeof(ClayTerrainConstants) <= kClayTerrainSlotBytes &&
+              sizeof(ClayFrameConstants) <= kClayTerrainSlotBytes && kClayObjectSlotBytes % kClayTerrainSlotBytes == 0);
+// The buffer's size is a multiple of this (256 small slots), so that the pool's same-size reuse
+// holds while the number of terrain draws and lit objects moves.
+inline constexpr uint64_t kClayConstantBufferStep = 256ull * kClayTerrainSlotBytes;
+// Byte offset of lit object `object`'s slot behind `small_slots` small ones.
+constexpr uint64_t ClayObjectSlotOffset(uint64_t small_slots, uint64_t object) {
+  return small_slots * kClayTerrainSlotBytes + object * kClayObjectSlotBytes;
+}
+// Bytes of the frame's buffer: every slot, in whole steps. Without objects the last small slot is
+// the buffer's last, and it is padded so that a view of kClayObjectSlotBytes from its start lies
+// inside the buffer (with objects, their slots lie behind it and the last of them is that large).
+constexpr uint64_t ClayConstantBufferBytes(uint64_t small_slots, uint64_t objects) {
+  const uint64_t pad = objects == 0 ? kClayObjectSlotBytes - kClayTerrainSlotBytes : 0;
+  const uint64_t bytes = ClayObjectSlotOffset(small_slots, objects) + pad;
+  return (bytes + kClayConstantBufferStep - 1) / kClayConstantBufferStep * kClayConstantBufferStep;
+}
 // ClayTerrainConstants::flags: the far colour is multiplied by sat(d2 * fade[0] + fade[1]) (the
 // kind terrain-far-fade, shader 2F8A: the underlay the layers add to).
 inline constexpr uint32_t kTerrainFadeIn = 1u;

@@ -17,9 +17,10 @@
 // pipeline of a small cache keyed by state (PipelineKey), the alpha test as a
 // discard in the textured pixel shader (DecideDrawState has the rules for a
 // draw whose alpha or colour is not known). With the light on, in a frame
-// that has a light block, the terrain and the objects with a colour stream are
-// lit by the game's ambient, baked and sun light (clay_logic.h, "Native
-// light"); every other draw is the unlit colour. GPU (command-processor) thread
+// that has a light block, the terrain, the objects (with a colour stream or
+// with probe colours) and the tree trunks are lit by the game's ambient, baked
+// and sun light (clay_logic.h, "Native light"); every other draw is the unlit
+// colour. GPU (command-processor) thread
 // only; Cmd is valid only inside the SDK's guest-output callbacks.
 
 #include <array>
@@ -112,10 +113,15 @@ class ClayPass {
     // indices from ProbeSetOffset(probe_count) on). For a mesh record the
     // normals and its kind's second buffer or neither: nullptr when one
     // could not be built (counted in ClayStats::light_missing; `light_why`).
-    // Only a lit record's buffers are bound (`lit`, below): the probe and the
-    // instance colours are bound by no draw yet.
-    // `light_count`: the elements the buffers hold (the shader reads them for a
-    // vertex below it). `max_index`: the largest index of the record's list.
+    // Only a lit record's buffers are bound (`lit`, below): a colour stream's
+    // colours at t10; the probe buffer's set indices at t10 (from
+    // ProbeSetOffset(probe_count)) and its weights at t11; an instanced
+    // record's colours are bound by no draw yet.
+    // `light_count`: the elements the buffers hold, the smaller of the normals'
+    // count and the second buffer's (the shader reads them for a vertex below
+    // it). `probe_count`: the vertices the probe buffer was built with, which
+    // is where its second region starts. `max_index`: the largest index of the
+    // record's list.
     const capture::LightInputs* light = nullptr;
     nrhi::Buffer* normals = nullptr;
     nrhi::Buffer* colours = nullptr;
@@ -227,10 +233,11 @@ class ClayPass {
   std::vector<Prepared> prepared_;
   // Terrain of the frame being rendered: one plan item per terrain record
   // (Prepared::plan), the layers' textures, the texture sets bound, and the
-  // frame's constant buffer of kClayTerrainSlotBytes slots, persistently
-  // mapped: slot 0 the frame's light (ClayFrameConstants, cbuffer Frame), then
-  // one slot per terrain record drawn with its material (cbuffer Terrain) and
-  // one per lit object (cbuffer Object). The buffer is in use until the frame's
+  // frame's constant buffer, persistently mapped: slots of
+  // kClayTerrainSlotBytes, slot 0 the frame's light (ClayFrameConstants,
+  // cbuffer Frame), then one per terrain record drawn with its material
+  // (cbuffer Terrain); behind them one slot of kClayObjectSlotBytes per lit
+  // object (cbuffer Object; ClayObjectSlotOffset). The buffer is in use until the frame's
   // submission has completed, so each frame takes one from the pool or a new
   // one and returns it at the end of Render.
   static constexpr uint64_t kTerrainPoolBytes = 4ull << 20;
@@ -244,7 +251,8 @@ class ClayPass {
   uint64_t terrain_cb_bytes_ = 0;
   // The light of the frame being rendered: its constants (light_on 0: no draw
   // is lit), the lit objects' constants in prepare order (Prepared::slot), and
-  // the buffer slot of the first of them (after the terrain slots).
+  // the number of small slots in use before the first of them (the frame's and
+  // the terrain's: ClayObjectSlotOffset(object_slot0_, slot) is an object's).
   ClayFrameConstants frame_{};
   std::vector<ClayObjectConstants> object_constants_;
   uint32_t object_slot0_ = 0;

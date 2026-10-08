@@ -24,13 +24,14 @@ constexpr uint32_t kMapParamConstants = 0, kMapParamLinear = 1, kMapConstantCoun
 constexpr uint32_t kConstantCount = sizeof(ClayConstants) / 4;  // 36
 static_assert(kConstantCount == 36);
 // Binding parameters: indices into kClayBindings (clay_logic.h), from which
-// Ensure creates the layout. Root signature cost: 54 of 64 words (the reason
+// Ensure creates the layout. Root signature cost: 56 of 64 words (the reason
 // the light's per-draw values are in a constant buffer slot and not in the
-// root constants). kParamTerrainConstants is register b1: cbuffer Terrain of a
-// terrain draw, cbuffer Object of a lit object.
+// root constants); twelve parameters, the backend's limit. kParamTerrainConstants
+// is register b1: cbuffer Terrain of a terrain draw, cbuffer Object of a lit object.
 constexpr uint32_t kParamConstants = 0, kParamPositions = 1, kParamIndices = 2, kParamUvs = 3,
                    kParamAlbedo = 4, kParamTerrainTextures = 5, kParamTerrainConstants = 6,
-                   kParamFrameConstants = 7, kParamTerrainNormals = 8, kParamNormals = 9, kParamColours = 10;
+                   kParamFrameConstants = 7, kParamTerrainNormals = 8, kParamNormals = 9, kParamColours = 10,
+                   kParamProbeWeights = 11;
 constexpr uint32_t kParamCount = uint32_t(std::size(kClayBindings));
 // The terrain shaders' table: colour, weights, side texture, base map (t4 to t7).
 constexpr uint32_t kTerrainTableSize = 4;
@@ -38,7 +39,7 @@ constexpr bool ParamIs(uint32_t param, ClayBindingKind kind, uint32_t reg, uint3
   return param < kParamCount && kClayBindings[param].kind == kind && kClayBindings[param].reg == reg &&
          kClayBindings[param].count == count;
 }
-static_assert(kParamCount == 11 && kParamCount <= nrhi::kMaxBindingParams);
+static_assert(kParamCount == 12 && kParamCount <= nrhi::kMaxBindingParams);
 static_assert(ParamIs(kParamConstants, ClayBindingKind::kConstants, 0, kConstantCount));
 static_assert(ParamIs(kParamPositions, ClayBindingKind::kBuffer, 0, 1) && ParamIs(kParamIndices, ClayBindingKind::kBuffer, 1, 1) &&
               ParamIs(kParamUvs, ClayBindingKind::kBuffer, 2, 1));
@@ -47,10 +48,12 @@ static_assert(ParamIs(kParamAlbedo, ClayBindingKind::kTextures, 3, 1) &&
 static_assert(ParamIs(kParamTerrainConstants, ClayBindingKind::kConstantBuffer, 1, 1) &&
               ParamIs(kParamFrameConstants, ClayBindingKind::kConstantBuffer, 2, 1));
 static_assert(ParamIs(kParamTerrainNormals, ClayBindingKind::kBuffer, 8, 1) && ParamIs(kParamNormals, ClayBindingKind::kBuffer, 9, 1) &&
-              ParamIs(kParamColours, ClayBindingKind::kBuffer, 10, 1) && kParamTerrainNormals == kClayLightBufferParam0);
-// The terrain constant buffer's size is a multiple of this (256 slots), so the
-// pool's same-size reuse holds while the number of terrain draws moves.
-constexpr uint64_t kTerrainBufferStep = 256ull * kClayTerrainSlotBytes;
+              ParamIs(kParamColours, ClayBindingKind::kBuffer, 10, 1) && ParamIs(kParamProbeWeights, ClayBindingKind::kBuffer, 11, 1) &&
+              kParamTerrainNormals == kClayLightBufferParam0 && kParamProbeWeights + 1 == kClayLightBufferParam0 + kClayLightBufferCount);
+// The offsets the pass binds from are ones the RHI accepts: the constant buffer's slots and the
+// probe buffer's second region (LightBufferOffset) are multiples of its alignment.
+static_assert(kClayTerrainSlotBytes % nrhi::kBufferOffsetAlignment == 0 && kClayObjectSlotBytes % nrhi::kBufferOffsetAlignment == 0 &&
+              kProbeRegionAlignment % nrhi::kBufferOffsetAlignment == 0);
 // Cache slot of the flat terrain default pipeline, after the four of `textured`.
 constexpr size_t kTerrainFlatSlot = kClayPixelShaders;
 
@@ -430,8 +433,9 @@ void ClayPass::PrepareLight(nrhi::Device* dev, const capture::DrawRecord& r, con
     p.light_count = std::min(normal_count, colour_count);
   } else if (p.normals && (light.kind == capture::LightVertexKind::kProbe || light.kind == capture::LightVertexKind::kInstance)) {
     // The other two vertex kinds: the baked term is made of the probe weights (with the draw's
-    // probe constants) or is the copy's colour. Built and resident; no shader reads them yet and
-    // no draw binds them (light_mode stays 0 for these records: they are not lit).
+    // probe constants) or is the copy's colour. A probe record is lit below like one with a colour
+    // stream; an instanced record's colours are built and resident only (no shader reads them yet:
+    // the plants are not lit, and light_mode stays 0 for them).
     LightSecond refused = LightSecond::kNone;
     uint32_t second_count = 0;
     if (light.kind == capture::LightVertexKind::kProbe) {
@@ -462,10 +466,15 @@ void ClayPass::PrepareLight(nrhi::Device* dev, const capture::DrawRecord& r, con
     ++st.light_rotation[size_t(kind)];
     if (kind != RotationKind::kRotation) st.light_rotation_by_vs.Add(r.vs_hash, uint8_t(kind));
   }
-  // The light itself: in a lit frame, for a family the pass lights, when every value of the
-  // draw's is usable (a rotation without a direction is not: counted above, drawn unlit).
+  // The light itself: in a lit frame, for a family the pass lights, with the second buffer of the
+  // record's OWN vertex kind (LightObjectReady: a colour stream's colours, the probe buffer; never
+  // an instance set's colours), when every value of the draw's is usable (a rotation without a
+  // direction is not: counted above, drawn unlit; one probe register that is not a number of
+  // usable size: the whole block is refused).
   ClayObjectConstants constants;
-  if (frame_.light_on && LightFamilyDrawn(light) && p.colours && MakeClayObjectConstants(light, &constants)) {
+  if (frame_.light_on && LightFamilyDrawn(light) &&
+      LightObjectReady(light.kind, p.normals != nullptr, p.colours != nullptr, p.probe != nullptr) &&
+      MakeClayObjectConstants(light, &constants)) {
     p.lit = true;
     p.slot = uint32_t(object_constants_.size());
     object_constants_.push_back(constants);
@@ -579,11 +588,11 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
   // draws nothing (Render, ClayRecordsWithoutConstants).
   const bool wanted = !prepared_.empty();
   if (wanted) {
-    // Slot 0 the frame's light, one slot per terrain record (at most that many are drawn with
-    // the material), one per lit object.
-    const uint64_t count = 1 + uint64_t(terrain_items_.size()) + object_constants_.size();
-    const uint64_t bytes = (count * kClayTerrainSlotBytes + kTerrainBufferStep - 1) /
-                           kTerrainBufferStep * kTerrainBufferStep;
+    // Slot 0 the frame's light and one slot per terrain record (at most that many are drawn with
+    // the material), 256 bytes each; then one slot of 512 bytes per lit object. Sized so that the
+    // largest block a shader declares at b1 lies inside the buffer from the start of every slot
+    // (ClayConstantBufferBytes).
+    const uint64_t bytes = ClayConstantBufferBytes(1 + uint64_t(terrain_items_.size()), object_constants_.size());
     if (auto reused = terrain_pool_.Take(bytes, dev->CompletedSubmission())) {
       terrain_cb_ = *reused;
     } else {
@@ -701,13 +710,14 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
     }
   }
   st.terrain_tuples = uint32_t(terrain_sets_.size());
-  // The lit objects' slots follow the terrain's; slot 0 is the frame's light.
+  // The lit objects' slots (kClayObjectSlotBytes each) follow the small slots that are in use:
+  // slot 0, the frame's light, and the terrain's. (`slot` is at most 1 + terrain_items_.size(),
+  // the count the buffer was sized with.)
   object_slot0_ = slot;
   if (slots) {
     std::memcpy(slots, &frame_, sizeof(frame_));
     for (size_t i = 0; i < object_constants_.size(); ++i) {
-      std::memcpy(slots + (size_t(object_slot0_) + i) * kClayTerrainSlotBytes, &object_constants_[i],
-                  sizeof(ClayObjectConstants));
+      std::memcpy(slots + ClayObjectSlotOffset(object_slot0_, i), &object_constants_[i], sizeof(ClayObjectConstants));
     }
   }
 }
@@ -880,10 +890,12 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       light_count = p.vertex_count;  // (TerrainNormals gives one per grid point or nothing)
     }
     if (p.lit) {
-      light_mode |= kLightModeLit;
-      if (!p.terrain) {
-        light_mode |= kLightModeObject;
-        light_count = p.light_count;
+      if (p.terrain) {
+        light_mode |= kLightModeLit;
+      } else {
+        // An object or trunk: by its vertex kind, the stream colour or the probe colour.
+        light_mode |= LitObjectMode(p.light->kind);
+        light_count = p.light_count;  // the smaller of its normals' and its second buffer's count
       }
     }
     float uv[4] = {1.0f, 1.0f, 0.0f, 0.0f};
@@ -916,25 +928,34 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       cmd->SetTextures(kParamTerrainTextures, set, kTerrainTableSize);
       cmd->SetConstantBuffer(kParamTerrainConstants, terrain_cb_, uint64_t(p.slot) * kClayTerrainSlotBytes);
     }
-    // The light's three vertex buffers, at EVERY draw: the draw's own where its light_mode names
+    // The light's four vertex buffers, at EVERY draw: the draw's own where its light_mode names
     // them, else the draw's positions, as for t2. A buffer bound by address has no bounds check
     // on the GPU, so nothing may stay bound from another draw: this draw's vertex indices would
     // address that draw's (smaller) buffer. The positions hold an element of 16 bytes for every
-    // vertex the draw can name, more than any element of the three (kClayLightElementBytesMax),
-    // so a load the shader made for this draw would lie inside them (it makes none: the loads are
-    // inside branches on light_mode).
-    // Which of the three is the draw's own: LightBufferSources (clay_logic.h). A buffer the
-    // mode names is there (the mode is only set with it); were it not, the positions stand in.
+    // vertex the draw can name, as much as the largest element of the four
+    // (kClayLightElementBytesMax), so a load the shader made for this draw would lie inside them
+    // (it makes none: the loads are inside branches on light_mode).
+    // Which of the four is the draw's own: LightBufferSources (clay_logic.h). A probe object's
+    // two are the two regions of its probe buffer: the weights from byte 0 at t11, the set
+    // indices at t10 from LightBufferOffset, the offset the buffer was built with
+    // (p.probe_count, not the draw's light_count). A buffer the mode names is there (the mode is
+    // only set with it); were it not, the positions stand in, from byte 0.
     const ClayLightBuffers light_buffers = LightBufferSources(light_mode);
-    for (uint32_t i = 0; i < 3; ++i) {
-      nrhi::Buffer* own = light_buffers.source[i] == ClayLightBuffer::kColours     ? p.colours
-                          : light_buffers.source[i] == ClayLightBuffer::kPositions ? p.positions
-                                                                                   : p.normals;
-      cmd->SetBufferSrv(kClayLightBufferParam0 + i, own ? own : p.positions, 0);
+    for (uint32_t i = 0; i < kClayLightBufferCount; ++i) {
+      nrhi::Buffer* own = nullptr;
+      switch (light_buffers.source[i]) {
+        case ClayLightBuffer::kTerrainNormals:
+        case ClayLightBuffer::kNormals: own = p.normals; break;
+        case ClayLightBuffer::kColours: own = p.colours; break;
+        case ClayLightBuffer::kProbeSets:
+        case ClayLightBuffer::kProbeWeights: own = p.probe; break;
+        case ClayLightBuffer::kPositions: break;
+      }
+      const uint64_t offset = own ? LightBufferOffset(light_buffers.source[i], p.probe_count) : 0;
+      cmd->SetBufferSrv(kClayLightBufferParam0 + i, own ? own : p.positions, offset);
     }
     if (light_mode & kLightModeObject) {
-      cmd->SetConstantBuffer(kParamTerrainConstants, terrain_cb_,
-                             (uint64_t(object_slot0_) + p.slot) * kClayTerrainSlotBytes);
+      cmd->SetConstantBuffer(kParamTerrainConstants, terrain_cb_, ClayObjectSlotOffset(object_slot0_, p.slot));
     }
 
     cmd->Draw(p.index_count, 0);

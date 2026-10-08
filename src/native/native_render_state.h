@@ -138,6 +138,64 @@ class EdgeDetector {
   bool prev_down_ = false;
 };
 
+// The Direct3D debug layer's messages as lines of the game log (cvar
+// fable2_native_d3d_messages; render/d3d_messages.cpp reads the layer's queue
+// and hands each message here). The layer itself writes to the debugger output
+// only, so a run without a debugger would not show what it rejects. Add
+// returns the line for one message, "d3d ERROR id N (seen k): text" (CORRUPTION
+// and warning alike; k counts the messages of that severity and id so far), or
+// an empty string when the message is not written: another severity (the
+// layer's information), the fifth and later message of one severity and id,
+// and everything after kTotal lines (a layer that complains per draw would
+// fill the log). Every error, corruption and warning is counted, written or
+// not; Summary is the count, logged with the pass's other lines, so that a
+// clean run says "errors 0" in so many words.
+enum class D3dSeverity { kCorruption, kError, kWarning, kOther };
+
+class D3dMessageLog {
+ public:
+  static constexpr unsigned kPerId = 4, kTotal = 400;
+  static constexpr size_t kTextMax = 600;  // characters of a message's text that are written
+
+  std::string Add(D3dSeverity severity, int id, std::string_view text) {
+    if (severity == D3dSeverity::kOther) return {};
+    ++(severity == D3dSeverity::kWarning ? warnings_ : errors_);
+    if (severity == D3dSeverity::kCorruption) ++corruption_;
+    unsigned seen = 0;
+    for (Seen& s : seen_) {
+      if (s.severity == severity && s.id == id) seen = ++s.count;
+    }
+    if (seen == 0) {
+      seen_.push_back({severity, id, 1});
+      seen = 1;
+    }
+    if (seen > kPerId || lines_ >= kTotal) return {};
+    ++lines_;
+    std::string line = std::string("d3d ") + (severity == D3dSeverity::kCorruption ? "CORRUPTION"
+                                             : severity == D3dSeverity::kError    ? "ERROR"
+                                                                                  : "warning") +
+                       " id " + std::to_string(id) + " (seen " + std::to_string(seen) + "): ";
+    // One line: a control character (a line break, a tab) is written as a space.
+    for (const char c : text.substr(0, kTextMax)) line += static_cast<unsigned char>(c) < 0x20 ? ' ' : c;
+    return line;
+  }
+
+  std::string Summary() const {
+    std::string text = "d3d messages: errors " + std::to_string(errors_) + ", warnings " + std::to_string(warnings_);
+    if (corruption_) text += " (CORRUPTION " + std::to_string(corruption_) + ")";
+    return text;
+  }
+
+ private:
+  struct Seen {
+    D3dSeverity severity;
+    int id;
+    unsigned count;
+  };
+  std::vector<Seen> seen_;  // one entry per severity and id (the layer has a few hundred ids)
+  unsigned lines_ = 0, errors_ = 0, warnings_ = 0, corruption_ = 0;
+};
+
 class FailureLatch {
  public:
   // Returns true only for the first failure since construction/Clear().

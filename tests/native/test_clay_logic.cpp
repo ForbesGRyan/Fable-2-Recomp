@@ -2528,9 +2528,20 @@ int main() {
     obj.c27w = 0.75f;
     obj.c49[0] = 1.0f; obj.c49[1] = 0.5f; obj.c49[2] = 2.0f;
     obj.c26[0] = 0.25f; obj.c26[1] = 1.0f; obj.c26[2] = 0.5f;
-    static_assert(sizeof(ClayObjectConstants) == 80);
+    static_assert(sizeof(ClayObjectConstants) == 272 && offsetof(ClayObjectConstants, probe) == 80);
     ClayObjectConstants oc;
     CHECK(450, MakeClayObjectConstants(obj, &oc));
+    // (a colour-stream object has no probe registers: the block's are zero, whatever the inputs hold)
+    {
+      capture::LightInputs stray = obj;
+      stray.vs_const[3][2] = 0.5f;
+      ClayObjectConstants got;
+      bool zero = MakeClayObjectConstants(stray, &got);
+      for (int r = 0; r < 12; ++r) {
+        for (int k = 0; k < 4; ++k) zero = zero && got.probe[r][k] == 0.0f;
+      }
+      CHECK(450, zero);
+    }
     // M = world_rot * world_scale, rows, the fourth component 0.
     CHECK(451, oc.rot[0][0] == 0.0f && oc.rot[0][1] == -1.0f && oc.rot[0][2] == 0.0f && oc.rot[0][3] == 0.0f &&
                    oc.rot[1][0] == 1.0f && oc.rot[1][1] == 0.0f && oc.rot[1][3] == 0.0f && oc.rot[2][2] == 1.0f && oc.rot[2][3] == 0.0f);
@@ -2567,14 +2578,20 @@ int main() {
       b.colour_power = power;
       CHECK(457, !MakeClayObjectConstants(b, &oc));
     }
+    // A trunk has no colour stream, and an instanced or terrain kind is no object: not lit.
     capture::LightInputs other = obj;
-    other.kind = LightVertexKind::kProbe;
-    CHECK(458, !MakeClayObjectConstants(other, &oc) && !LightFamilyDrawn(other));
-    other = obj;
     other.family = LightFamily::kTreeTrunk;
     CHECK(458, !MakeClayObjectConstants(other, &oc) && !LightFamilyDrawn(other));
-    // The families the pass lights: the terrain layers, the far terrain and the colour-stream objects,
-    // with their two- and four-light forms; nothing else.
+    other = obj;
+    other.kind = LightVertexKind::kInstance;
+    CHECK(458, !MakeClayObjectConstants(other, &oc) && !LightFamilyDrawn(other));
+    other.kind = LightVertexKind::kTerrain;
+    CHECK(458, !MakeClayObjectConstants(other, &oc) && !LightFamilyDrawn(other));
+    other.kind = LightVertexKind::kNone;
+    CHECK(458, !MakeClayObjectConstants(other, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0);
+    // The families the pass lights: the terrain layers, the far terrain, the objects with a colour
+    // stream or with probe colours and the trunks (probe colours), each with its two- and four-light
+    // form; nothing else (plants and leaves have no light yet).
     auto drawn = [](LightFamily f, LightVertexKind k, bool multi) {
       capture::LightInputs l;
       l.family = f;
@@ -2587,10 +2604,13 @@ int main() {
                    drawn(LightFamily::kTerrainFar, LightVertexKind::kTerrain, false) &&
                    drawn(LightFamily::kObject, LightVertexKind::kStream, false) &&
                    drawn(LightFamily::kObject, LightVertexKind::kStream, true));
-    CHECK(459, !drawn(LightFamily::kObject, LightVertexKind::kProbe, false) && !drawn(LightFamily::kTreeTrunk, LightVertexKind::kProbe, false) &&
+    CHECK(459, drawn(LightFamily::kObject, LightVertexKind::kProbe, false) && drawn(LightFamily::kObject, LightVertexKind::kProbe, true) &&
+                   drawn(LightFamily::kTreeTrunk, LightVertexKind::kProbe, false) && drawn(LightFamily::kTreeTrunk, LightVertexKind::kProbe, true));
+    CHECK(459, !drawn(LightFamily::kTreeTrunk, LightVertexKind::kStream, false) &&
                    !drawn(LightFamily::kPlant, LightVertexKind::kInstance, false) && !drawn(LightFamily::kPlantLit, LightVertexKind::kInstance, false) &&
+                   !drawn(LightFamily::kPlant, LightVertexKind::kProbe, false) && !drawn(LightFamily::kObject, LightVertexKind::kInstance, false) &&
                    !drawn(LightFamily::kNone, LightVertexKind::kNone, false) && !drawn(LightFamily::kTerrainLayer, LightVertexKind::kStream, false) &&
-                   !drawn(LightFamily::kObject, LightVertexKind::kTerrain, false));
+                   !drawn(LightFamily::kTerrainLayer, LightVertexKind::kProbe, false) && !drawn(LightFamily::kObject, LightVertexKind::kTerrain, false));
 
     // 460-464: the light's part of the terrain constants, at the offsets the HLSL declares.
     capture::TerrainMaterialInputs tm;
@@ -2670,7 +2690,14 @@ int main() {
     CHECK(466, dc.light_mode == 1 && dc.light_count == 100);
     dc = MakeClayConstants(r, 100, 0, uv, true, 1, ClayAlpha{}, 0, 500);
     CHECK(466, dc.light_mode == 0 && dc.light_count == 0);
-    CHECK(467, kLightModeTerrainNormals == 1u && kLightModeObject == 2u && kLightModeLit == 4u);
+    CHECK(467, kLightModeTerrainNormals == 1u && kLightModeObject == 2u && kLightModeLit == 4u && kLightModeProbe == 8u);
+    // A lit object's mode by its vertex kind: the colour stream's is what it was (6); a probe object's
+    // adds the probe bit; no other kind has one.
+    CHECK(467, LitObjectMode(LightVertexKind::kStream) == 6u && LitObjectMode(LightVertexKind::kProbe) == 14u &&
+                   LitObjectMode(LightVertexKind::kInstance) == 0u && LitObjectMode(LightVertexKind::kTerrain) == 0u &&
+                   LitObjectMode(LightVertexKind::kNone) == 0u);
+    dc = MakeClayConstants(r, 100, 0, uv, true, 1, ClayAlpha{}, LitObjectMode(LightVertexKind::kProbe), 60);
+    CHECK(467, dc.light_mode == 14 && dc.light_count == 60);
     // The draw's largest vertex plus one (the capture's rule for the streams), not the stream's size:
     // a mesh of 28 vertices in a position stream of 528 needs 28 normals and colours.
     CHECK(468, LightVertexNeed(27, 0, 528) == 28 && LightVertexNeed(27, 100, 528) == 128 && LightVertexNeed(527, 0, 528) == 528 &&
@@ -2795,39 +2822,255 @@ int main() {
                    std::string(ClayUnlitName(ClayUnlit::kUnknown)) == "light-unknown" &&
                    std::string(ClayUnlitName(ClayUnlit::kNormal)) == "normal-unsupported");
   }
-  // The light's three buffer registers (t8, t9, t10): every draw binds all three, its own buffer where
-  // its light_mode names it and its positions where not. (A buffer bound by address has no bounds check:
-  // one left bound by another draw is read past its end; the first build's three lit runs ended so.)
+  // The light's four buffer registers (t8 to t11): every draw binds all four, its own buffer where its
+  // light_mode names it and its positions where not. (A buffer bound by address has no bounds check: one
+  // left bound by another draw is read past its end; the first lit build's three runs ended so.)
   {
     using B = ClayLightBuffer;
-    auto is = [](uint32_t mode, B t8, B t9, B t10) {
+    auto is = [](uint32_t mode, B t8, B t9, B t10, B t11) {
       const ClayLightBuffers s = LightBufferSources(mode);
-      return s.source[0] == t8 && s.source[1] == t9 && s.source[2] == t10;
+      return s.source[0] == t8 && s.source[1] == t9 && s.source[2] == t10 && s.source[3] == t11;
     };
-    // No light input: the positions at all three (an unlit textured draw, a flat draw, light off).
-    CHECK(485, is(0, B::kPositions, B::kPositions, B::kPositions));
-    // The lit bit alone names no buffer.
-    CHECK(485, is(kLightModeLit, B::kPositions, B::kPositions, B::kPositions));
+    static_assert(kClayLightBufferCount == 4 && sizeof(ClayLightBuffers::source) == 4);
+    // No light input: the positions at all four (an unlit textured draw, a flat draw, light off).
+    CHECK(485, is(0, B::kPositions, B::kPositions, B::kPositions, B::kPositions));
+    // The lit bit alone names no buffer, and neither does the probe bit without the object bit.
+    CHECK(485, is(kLightModeLit, B::kPositions, B::kPositions, B::kPositions, B::kPositions));
+    CHECK(485, is(kLightModeProbe, B::kPositions, B::kPositions, B::kPositions, B::kPositions));
+    CHECK(485, is(kLightModeProbe | kLightModeLit, B::kPositions, B::kPositions, B::kPositions, B::kPositions));
     // Terrain (steep ground without light, and lit): its normals at t8 only.
-    CHECK(486, is(kLightModeTerrainNormals, B::kTerrainNormals, B::kPositions, B::kPositions));
-    CHECK(486, is(kLightModeTerrainNormals | kLightModeLit, B::kTerrainNormals, B::kPositions, B::kPositions));
-    // A lit object: its normals at t9 and its colours at t10, the positions at t8.
-    CHECK(487, is(kLightModeObject | kLightModeLit, B::kPositions, B::kNormals, B::kColours));
-    CHECK(487, is(kLightModeObject, B::kPositions, B::kNormals, B::kColours));
-    // The three registers are the layout's last three parameters, vertex stage, buffers.
-    for (uint32_t i = 0; i < 3; ++i) {
+    CHECK(486, is(kLightModeTerrainNormals, B::kTerrainNormals, B::kPositions, B::kPositions, B::kPositions));
+    CHECK(486, is(kLightModeTerrainNormals | kLightModeLit, B::kTerrainNormals, B::kPositions, B::kPositions, B::kPositions));
+    CHECK(486, is(kLightModeTerrainNormals | kLightModeProbe, B::kTerrainNormals, B::kPositions, B::kPositions, B::kPositions));
+    // A lit object with a colour stream: its normals at t9 and its colours at t10; the positions at t8
+    // and at t11 (it has no weights).
+    CHECK(487, is(kLightModeObject | kLightModeLit, B::kPositions, B::kNormals, B::kColours, B::kPositions));
+    CHECK(487, is(kLightModeObject, B::kPositions, B::kNormals, B::kColours, B::kPositions));
+    // A lit object with probe colours: its normals at t9, the set indices of its probe buffer at t10
+    // (never a colour buffer: an instanced record's colours are no stream colours), its weights at t11.
+    CHECK(489, is(LitObjectMode(capture::LightVertexKind::kProbe), B::kPositions, B::kNormals, B::kProbeSets, B::kProbeWeights));
+    CHECK(489, is(kLightModeObject | kLightModeProbe, B::kPositions, B::kNormals, B::kProbeSets, B::kProbeWeights));
+    CHECK(489, is(LitObjectMode(capture::LightVertexKind::kStream), B::kPositions, B::kNormals, B::kColours, B::kPositions));
+    // The four registers are the layout's last four parameters, vertex stage, buffers; the layout has
+    // twelve parameters (the backend's limit) and 56 of the root signature's 64 words.
+    for (uint32_t i = 0; i < kClayLightBufferCount; ++i) {
       const ClayBinding& b = kClayBindings[kClayLightBufferParam0 + i];
-      CHECK(488, b.kind == ClayBindingKind::kBuffer && b.reg == 8 + i && b.stage == ClayBindingStage::kVertex);
+      CHECK(488, b.kind == ClayBindingKind::kBuffer && b.reg == 8 + i && b.stage == ClayBindingStage::kVertex && b.count == 1);
     }
-    // The stand-in holds more per vertex than any of the three elements.
-    CHECK(488, kClayPositionElementBytes == 16 && kClayLightElementBytesMax == 12);
+    CHECK(488, std::size(kClayBindings) == 12 && kClayLightBufferParam0 + kClayLightBufferCount == std::size(kClayBindings) &&
+                   ClayRootWords() == 56);
+    // The stand-in holds as much per vertex as the largest of the four elements (the float4 weights).
+    CHECK(488, kClayPositionElementBytes == 16 && kClayLightElementBytesMax == 16 && kProbeWeightElementBytes == 16 &&
+                   kProbeSetElementBytes == 4);
+    // Where each source lies in its buffer: the probe buffer's two regions, the weights from byte 0
+    // and the set indices from the aligned offset behind them; every other source from byte 0.
+    CHECK(488, LightBufferOffset(B::kProbeSets, 1000) == ProbeSetOffset(1000) && LightBufferOffset(B::kProbeSets, 1000) == 16128 &&
+                   LightBufferOffset(B::kProbeSets, 16) == 256 && LightBufferOffset(B::kProbeSets, 17) == 512 &&
+                   LightBufferOffset(B::kProbeWeights, 1000) == 0 && LightBufferOffset(B::kColours, 1000) == 0 &&
+                   LightBufferOffset(B::kNormals, 1000) == 0 && LightBufferOffset(B::kTerrainNormals, 1000) == 0 &&
+                   LightBufferOffset(B::kPositions, 1000) == 0);
+    for (uint32_t count : {1u, 16u, 17u, 1000u, 65536u}) {
+      // (a multiple of the RHI's offset alignment, behind the weights, the sets inside the buffer)
+      CHECK(488, LightBufferOffset(B::kProbeSets, count) % 256 == 0 && LightBufferOffset(B::kProbeSets, count) >= uint64_t(count) * 16 &&
+                     LightBufferOffset(B::kProbeSets, count) + uint64_t(count) * 4 == ProbeBufferBytes(count));
+    }
+  }
+  // 490-499: probe colours (plan Task 8a; lighting-formulas.md, "Objects", probe_colour).
+  {
+    using capture::LightFamily;
+    using capture::LightVertexKind;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    auto close_to = [](float got, double want) { return std::fabs(double(got) - want) <= 2e-6 * std::max(1.0, std::fabs(want)); };
+    auto close3 = [&](const Float3& got, double x, double y, double z) { return close_to(got.x, x) && close_to(got.y, y) && close_to(got.z, z); };
+    // The registers, weights and frame values of tests/test_light_check.py, PinnedForTheRenderer (PROBE,
+    // WEIGHTS, probe_obj): three sets of four registers (base, then the rows of red, green, blue).
+    const float probe[12][4] = {{0.25f, 0.125f, 0.0625f, 9.0f}, {0.5f, 0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.125f, 1.0f},
+                                {0.125f, 0.25f, 0.0f, 9.0f},    {-0.25f, 0.0f, 0.0f, 0.0f}, {0.0f, 1.25f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 0.0f},
+                                {0.0625f, 0.5f, 0.25f, 9.0f},   {0.0f, 0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}};
+    const float weights[4] = {0.5f, -0.25f, 1.0f, 0.125f};
+    // 490: the colour itself, exactly (the inputs are binary fractions): base + (rows . weights), the
+    // base's fourth component not read, no power, no clamp (a colour above 1, a zero, a negative).
+    Float3 v = ProbeColour(probe, 0, weights);
+    CHECK(490, v.x == 0.5f && v.y == -0.125f && v.z == 0.3125f);
+    v = ProbeColour(probe, 4, weights);
+    CHECK(490, v.x == 0.0f && v.y == -0.0625f && v.z == 0.0f);
+    v = ProbeColour(probe, 8, weights);
+    CHECK(490, v.x == 1.0625f && v.y == 0.625f && v.z == 1.625f);
+    // The fourth weight and the fourth component of a row count (a four-component dot product).
+    {
+      const float w3[4] = {0.5f, -0.25f, 1.0f, 0.0f};
+      v = ProbeColour(probe, 0, w3);
+      CHECK(490, v.x == 0.5f && v.y == -0.125f && v.z == 0.1875f);
+    }
+    // 491: the set index is clamped to the last set (the buffer holds 0, 4 or 8 only; the clamp keeps
+    // any other word inside the twelve registers), as the shader clamps it.
+    CHECK(491, ProbeSetClamp(0) == 0 && ProbeSetClamp(4) == 4 && ProbeSetClamp(8) == 8 && ProbeSetClamp(9) == 8 &&
+                   ProbeSetClamp(12) == 8 && ProbeSetClamp(0xFFFFFFFFu) == 8 && ProbeSetClamp(5) == 5 &&
+                   kProbeSetMax + 3 == capture::kLightProbeRegisters - 1);
+    v = ProbeColour(probe, 0xFFFFFFFFu, weights);
+    CHECK(491, v.x == 1.0625f && v.y == 0.625f && v.z == 1.625f);
+    // Values that are not numbers give numbers (review focus 2).
+    {
+      const float bad[12][4] = {{nan, inf, -inf, 0.0f}, {nan, 0.0f, 0.0f, 0.0f}, {inf, 0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f, -inf}};
+      const float bad_w[4] = {1.0f, nan, 0.0f, inf};
+      v = ProbeColour(bad, 0, bad_w);
+      CHECK(491, std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z));
+      // A base that is not a number counts as 0 by itself, as in the reference (`_finite(base[i])` before
+      // the sum): the rows' part stays.
+      const float no_base[12][4] = {{nan, inf, -inf, 0.0f}, {0.5f, 0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.125f, 1.0f}};
+      v = ProbeColour(no_base, 0, weights);
+      CHECK(491, v.x == 0.25f && v.y == -0.25f && v.z == 0.25f);
+    }
+    // 492-494: the object function on a probe colour, against the reference's numbers. The vertex side
+    // applies no power; the pixel side raises the ABSOLUTE value to c21.w, as the game does (its
+    // `log r, r_abs`): a negative colour lights like its mirror image, a zero has no baked term.
+    const Float3 tint{1.125f, 1.375f, 1.875f}, add{0.0068f, 0.071f, 0.092f}, floor{0.0588f, 0.0902f, 0.0f};
+    const Float3 sun_col{0.99f, 0.83f, 0.40f}, sun_dir{-0.6334f, 0.0346f, 0.7731f}, axis{-0.6332f, 0.0344f, 0.7732f};
+    const Float3 one{1.0f, 1.0f, 1.0f};
+    auto lit = [&](const Float3& vcolour, float c27w, const Float3& c49, const Float3& c26) {
+      const Float3 o1{0.0f, -0.6f, 0.8f};  // M_ROT times (-0.6, 0, 0.8)
+      const float t = AmbientT(AmbientAxis(o1, axis), o1);
+      const float nds = LightDot(LightNormalize(o1), sun_dir);
+      const Float3 c = LightObject({0.5f, 0.4f, 0.3f}, vcolour, tint, 1.3f, add, floor, t, nds, sun_col, c27w, SunGateSingle(1.0f, 1.0f), c49);
+      return Float3{c.x * c26.x, c.y * c26.y, c.z * c26.z};
+    };
+    CHECK(492, close3(lit(ProbeColour(probe, 0, weights), 1.0f, one, one), 0.426458072138784, 0.24789964999454064, 0.16493019528946776));
+    CHECK(492, close3(lit(ProbeColour(probe, 8, weights), 1.0f, one, one), 0.6381219686383413, 0.3974707094581953, 0.6587403749904683));
+    CHECK(492, close3(lit(ProbeColour(probe, 8, weights), 0.5f, {1.0f, 0.5f, 2.0f}, {1.0f, 1.0f, 0.5f}), 0.46699668431917063,
+                      0.14897843736454883, 0.3652333874952342));
+    // Set 4: red exactly zero, green -0.0625 (the captured meshes go to -0.062).
+    CHECK(493, close3(lit(ProbeColour(probe, 4, weights), 1.0f, one, one), 0.2992714, 0.23539468096360217, 0.09932640000000001));
+    // Zero, a rounding residue of either sign, the genuinely negative value: numbers, the same for
+    // either sign, and never less than the colour without a baked term.
+    const Float3 neg = lit({0.0f, -1e-8f, -0.06f}, 1.0f, one, one), pos = lit({0.0f, 1e-8f, 0.06f}, 1.0f, one, one);
+    const Float3 none = lit({0.0f, 0.0f, 0.0f}, 1.0f, one, one);
+    CHECK(494, close3(neg, 0.2992714, 0.2268430400125143, 0.10700391302815564) && neg.x == pos.x && neg.y == pos.y && neg.z == pos.z);
+    CHECK(494, neg.x == none.x && neg.y >= none.y && neg.z > none.z && close3(none, 0.2992714, 0.22684304, 0.09932640000000001));
+    v = LightPow({0.0f, -1e-8f, -0.06f}, 1.3f);
+    CHECK(494, v.x == 0.0f && std::fabs(double(v.y) - 3.9810717055349695e-11) < 1e-16 && close_to(v.z, 0.025798628902309793) && v.y > 0.0f);
+
+    // 495-497: a probe object's constants: the object's values and the twelve registers, or nothing.
+    capture::LightInputs obj;
+    obj.family = LightFamily::kObject;
+    obj.kind = LightVertexKind::kProbe;
+    const float rot[3][3] = {{0.0f, -2.0f, 0.0f}, {2.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 2.0f}};
+    std::memcpy(obj.world_rot, rot, sizeof(rot));
+    obj.world_scale = 0.5f;
+    obj.c27w = 0.75f;
+    obj.c49[0] = 1.0f; obj.c49[1] = 0.5f; obj.c49[2] = 2.0f;
+    obj.c26[0] = 0.25f; obj.c26[1] = 1.0f; obj.c26[2] = 0.5f;
+    std::memcpy(obj.vs_const, probe, sizeof(probe));
+    static_assert(sizeof(obj.vs_const) == sizeof(ClayObjectConstants::probe) && sizeof(ClayObjectConstants::probe) == 192);
+    ClayObjectConstants oc;
+    const ClayObjectConstants empty{};
+    CHECK(495, MakeClayObjectConstants(obj, &oc) && std::memcmp(oc.probe, probe, sizeof(probe)) == 0);
+    CHECK(495, oc.rot[0][1] == -1.0f && oc.rot[1][0] == 1.0f && oc.rot[2][2] == 1.0f && oc.rot[0][3] == 0.0f && oc.c49[1] == 0.5f &&
+                   oc.c27w == 0.75f && oc.c26[0] == 0.25f);
+    // (the colour stream's power is not a probe object's: whatever the inputs hold, the block's is 0)
+    CHECK(495, oc.colour_power == 0.0f);
+    obj.colour_power = 2.2f;
+    CHECK(495, MakeClayObjectConstants(obj, &oc) && oc.colour_power == 0.0f);
+    obj.colour_power = nan;
+    CHECK(495, MakeClayObjectConstants(obj, &oc) && oc.colour_power == 0.0f);
+    obj.colour_power = 0.0f;
+    // A trunk is the same block; its scale (c7.w, 0.67 to 1.53 in the captures) is inside the rows.
+    capture::LightInputs trunk = obj;
+    trunk.family = LightFamily::kTreeTrunk;
+    trunk.world_scale = 1.5f;
+    CHECK(495, MakeClayObjectConstants(trunk, &oc) && oc.rot[0][1] == -3.0f && oc.rot[2][2] == 3.0f &&
+                   std::memcmp(oc.probe, probe, sizeof(probe)) == 0);
+    // A skinned object's rows are its world rotation as it is (the shader has no c7).
+    capture::LightInputs skinned = obj;
+    skinned.world_scale = 1.0f;
+    CHECK(495, MakeClayObjectConstants(skinned, &oc) && oc.rot[0][1] == -2.0f && oc.rot[1][0] == 2.0f);
+    // 496: refused as a whole on one value that is not a number or not of usable size, in any of the
+    // forty-eight probe components and in every value a stream object's block is refused for.
+    for (int reg = 0; reg < 12; ++reg) {
+      for (int k = 0; k < 4; ++k) {
+        for (float value : {nan, inf, -inf, 2.0f * kLightValueMax, -2.0f * kLightValueMax}) {
+          capture::LightInputs b = obj;
+          b.vs_const[reg][k] = value;
+          oc.c27w = 5.0f;
+          CHECK(496, !MakeClayObjectConstants(b, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0);
+        }
+      }
+    }
+    {
+      capture::LightInputs edge = obj;
+      edge.vs_const[11][3] = kLightValueMax;
+      edge.vs_const[0][0] = -kLightValueMax;
+      CHECK(496, MakeClayObjectConstants(edge, &oc) && oc.probe[11][3] == kLightValueMax && oc.probe[0][0] == -kLightValueMax);
+    }
+    for (int field = 0; field < 5; ++field) {
+      for (float value : {nan, inf, 4.0f * kLightValueMax}) {
+        capture::LightInputs b = obj;
+        float* at[] = {&b.world_rot[0][1], &b.world_scale, &b.c27w, &b.c49[1], &b.c26[2]};
+        *at[field] = value;
+        CHECK(497, !MakeClayObjectConstants(b, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0);
+      }
+    }
+    capture::LightInputs flat = obj;
+    flat.world_scale = 0.0f;  // (a rotation without a direction)
+    CHECK(497, !MakeClayObjectConstants(flat, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0);
+    // Probe colours belong to the object and trunk families only.
+    for (LightFamily family : {LightFamily::kNone, LightFamily::kTerrainLayer, LightFamily::kTerrainFar, LightFamily::kPlant,
+                               LightFamily::kPlantLit}) {
+      capture::LightInputs b = obj;
+      b.family = family;
+      CHECK(497, !MakeClayObjectConstants(b, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0 && !LightFamilyDrawn(b));
+    }
+
+    // 498: which records the pass lights, by vertex kind: the normals and the kind's OWN second buffer.
+    // A probe record has no colour buffer and a stream record no probe buffer; an instanced record's
+    // colours (it has them, for a later task) light nothing.
+    CHECK(498, LightObjectReady(LightVertexKind::kStream, true, true, false) && LightObjectReady(LightVertexKind::kProbe, true, false, true));
+    CHECK(498, !LightObjectReady(LightVertexKind::kStream, true, false, true) && !LightObjectReady(LightVertexKind::kProbe, true, true, false) &&
+                   !LightObjectReady(LightVertexKind::kStream, false, true, true) && !LightObjectReady(LightVertexKind::kProbe, false, true, true) &&
+                   !LightObjectReady(LightVertexKind::kStream, true, false, false) && !LightObjectReady(LightVertexKind::kProbe, true, false, false));
+    CHECK(498, !LightObjectReady(LightVertexKind::kInstance, true, true, true) && !LightObjectReady(LightVertexKind::kTerrain, true, true, true) &&
+                   !LightObjectReady(LightVertexKind::kNone, true, true, true));
+
+    // 499: the frame's constant buffer. Slot 0 (the frame's light) and one slot per terrain record are
+    // 256 bytes; a lit object's slot is 512 (cbuffer Object is 272 bytes with the probe registers) and
+    // the objects' slots follow the small ones. The buffer holds every slot and, from the start of
+    // EVERY slot, the largest block a shader declares at b1 (the vertex shader declares Object for
+    // every draw, whatever is bound there), in whole steps.
+    static_assert(kClayTerrainSlotBytes == 256 && kClayObjectSlotBytes == 512 && sizeof(ClayObjectConstants) <= kClayObjectSlotBytes &&
+                  sizeof(ClayTerrainConstants) <= kClayTerrainSlotBytes && sizeof(ClayFrameConstants) <= kClayTerrainSlotBytes);
+    CHECK(499, ClayObjectSlotOffset(1, 0) == 256 && ClayObjectSlotOffset(565, 0) == 144640 && ClayObjectSlotOffset(565, 1) == 145152 &&
+                   ClayObjectSlotOffset(565, 170) == 231680 && ClayObjectSlotOffset(0x100000, 0x100000) == 0x30000000ull);
+    CHECK(499, kClayConstantBufferStep == 65536);
+    for (uint32_t small : {1u, 2u, 255u, 256u, 257u, 565u, 4096u}) {
+      for (uint32_t objects : {0u, 1u, 2u, 127u, 128u, 129u, 170u, 4096u}) {
+        const uint64_t bytes = ClayConstantBufferBytes(small, objects);
+        bool ok = bytes % kClayConstantBufferStep == 0 && bytes % 256 == 0;
+        // Every slot the pass can bind at b1 or b2, with the largest block from its start inside.
+        ok = ok && uint64_t(small - 1) * kClayTerrainSlotBytes + kClayObjectSlotBytes <= bytes;
+        if (objects) ok = ok && ClayObjectSlotOffset(small, objects - 1) + kClayObjectSlotBytes <= bytes;
+        // ... and less than one step beyond that.
+        const uint64_t need = std::max(uint64_t(small - 1) * kClayTerrainSlotBytes + kClayObjectSlotBytes,
+                                       objects ? ClayObjectSlotOffset(small, objects - 1) + kClayObjectSlotBytes : uint64_t(0));
+        ok = ok && bytes - need < kClayConstantBufferStep;
+        // The offsets are multiples of the RHI's alignment and the object slots do not overlap the small ones.
+        ok = ok && ClayObjectSlotOffset(small, 0) == uint64_t(small) * kClayTerrainSlotBytes && ClayObjectSlotOffset(small, objects) % 256 == 0 &&
+             ClayObjectSlotOffset(small, 1) - ClayObjectSlotOffset(small, 0) == kClayObjectSlotBytes;
+        CHECK(499, ok);
+      }
+    }
+    // The case the padding is for: 256 small slots end exactly on a step; a view of the object block
+    // from the last of them would end 256 bytes past it.
+    CHECK(499, ClayConstantBufferBytes(256, 0) == 131072 && ClayConstantBufferBytes(255, 0) == 65536 && ClayConstantBufferBytes(1, 0) == 65536 &&
+                   ClayConstantBufferBytes(1, 127) == 65536 && ClayConstantBufferBytes(1, 128) == 131072 &&
+                   ClayConstantBufferBytes(565, 170) == 262144);
   }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
                "alpha-to-mask, terrain keys, terrain draw state, terrain constants, terrain squares, "
                "terrain text, normal and colour keys, light text, linear target and output mapping, light functions "
-               "against the reference's numbers, frame and object and terrain light constants, lit squares, Light line, light buffer sources\n";
+               "against the reference's numbers, frame and object and terrain light constants, lit squares, Light line, light buffer sources, "
+               "probe colours and constants, constant buffer slots\n";
 
   return 0;
 }

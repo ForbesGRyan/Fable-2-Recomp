@@ -19,6 +19,7 @@
 #include "capture.h"
 #include "clay_pass.h"
 #include "composite.h"
+#include "d3d_messages.h"
 #include "fable2_native_shaders.h"
 #include "native_render_state.h"
 
@@ -43,9 +44,13 @@ REXCVAR_DEFINE_INT32(fable2_native_texture_budget_mb, 512, "Fable2",
                      "GPU memory budget (MB) for native albedo textures; least recently used "
                      "textures are evicted above it.");
 REXCVAR_DEFINE_STRING(fable2_native_light, "on", "Fable2",
-                      "Native clay pass light: on = terrain and objects with a colour stream are lit "
-                      "by the game's ambient, baked and sun light (no shadows; exposure not calibrated); "
+                      "Native clay pass light: on = terrain, objects and tree trunks are lit by the "
+                      "game's ambient, baked and sun light (no shadows; exposure not calibrated); "
                       "off = the unlit materials picture.");
+REXCVAR_DEFINE_BOOL(fable2_native_d3d_messages, false, "Fable2",
+                    "Write the Direct3D debug layer's errors, corruption and warnings to the game log "
+                    "(the layer is the SDK's --d3d12_debug=true; without it there is nothing to write). "
+                    "For diagnosing a rejected call or a lost device; off by default.");
 
 namespace fable2::native {
 namespace nrhi = rex::graphics::nrhi;
@@ -94,6 +99,10 @@ struct UploadBurst {
   std::chrono::steady_clock::time_point start;
 };
 UploadBurst g_burst;
+// The debug layer's messages (fable2_native_d3d_messages): command-processor thread only.
+D3dMessageLog g_d3d_messages;
+bool g_d3d_messages_started = false;
+uint64_t g_d3d_messages_logged = 0;  // g_clay_frames at the last count line
 
 // F3 status text, written on the command-processor thread, read by the UI.
 std::mutex g_status_mutex;
@@ -322,9 +331,26 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   return true;
 }
 
+// fable2_native_d3d_messages: what the Direct3D debug layer stored since the last frame, as log
+// lines, and the count with every 300th clay frame's lines. Command-processor thread.
+void LogD3dMessages() {
+  if (!REXCVAR_GET(fable2_native_d3d_messages)) return;
+  if (!g_d3d_messages_started) {
+    g_d3d_messages_started = true;
+    REXLOG_INFO("[native] d3d messages: on (fable2_native_d3d_messages); the debug layer's queue is {}",
+                render::D3dMessagesAvailable() ? "available" : "NOT available (is --d3d12_debug=true set?)");
+  }
+  render::PollD3dMessages(g_d3d_messages, [](const std::string& line) { REXLOG_WARN("[native] {}", line); });
+  if (g_clay_frames != g_d3d_messages_logged && g_clay_frames % 300 == 0) {
+    g_d3d_messages_logged = g_clay_frames;
+    REXLOG_INFO("[native] {}", g_d3d_messages.Summary());
+  }
+}
+
 void OverlayCallback(const NativeGuestOutputRenderContext& ctx, void*) {
   const View view = CurrentView();
   if (!Usable(ctx) || !IsCompositeView(view)) return;  // off/pattern: record nothing
+  LogD3dMessages();  // (of the frames before this one: the layer reports a call when it is executed)
   if (!RenderClay(ctx)) return;
   if (!g_clay_scene) return;  // no scene captured yet: leave the emulated frame
   if (!g_composite.Ensure(ctx.device, ctx.guest_output->format())) {

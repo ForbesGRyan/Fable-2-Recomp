@@ -115,6 +115,53 @@ inline LightBlock MakeLightBlock(const float (*reg)[4], const bool* have, bool l
   return l;
 }
 
+// The two constant banks as LoadAluConstants numbers them (r4).
+inline constexpr uint32_t kVertexBank = 0;
+inline constexpr uint32_t kPixelBank = 1;
+
+// The registers a LoadAluConstants call can name: the ranges of the game's ten
+// call sites (xdk_layout.h, kAluLoadSites, where the instructions are named).
+// Every other register is bank-only: no buffer is ever its source, so the
+// device's bank holds its latest value at any draw, whatever uploads were or
+// were not followed (controller's ruling, fix round 2). The pixel registers
+// outside these ranges were read that way before the load model existed, and
+// the first two captures of frame-map section 14 prove them so.
+struct BufferLoadRange {
+  uint32_t bank;
+  uint32_t start;
+  uint32_t count;
+};
+inline constexpr BufferLoadRange kBufferLoadRanges[] = {
+    {kPixelBank, 0, 8},     // c0..c3 per colour tile, c4..c7 per bin group
+    {kPixelBank, 80, 36},   // the light set
+    {kVertexBank, 40, 4},   // per bin group
+    {kVertexBank, 76, 32},  // the vertex light set
+};
+constexpr bool IsBufferLoadRegister(uint32_t bank, uint32_t reg) {
+  for (const BufferLoadRange& r : kBufferLoadRanges) {
+    if (r.bank == bank && reg >= r.start && reg - r.start < r.count) return true;
+  }
+  return false;
+}
+// The table is the call sites' registers, no fewer and no more.
+constexpr bool BufferLoadRangesAreTheCallSites() {
+  for (uint32_t bank = 0; bank < 2; ++bank) {
+    for (uint32_t reg = 0; reg < 256; ++reg) {
+      bool named = false;
+      for (const xdk::AluLoadSite& s : xdk::kAluLoadSites) {
+        named = named || (s.bank == bank && reg >= s.start && reg - s.start < s.count);
+      }
+      if (named != IsBufferLoadRegister(bank, reg)) return false;
+    }
+  }
+  for (const xdk::AluLoadSite& s : xdk::kAluLoadSites) {
+    if (s.bank > 1 || s.count == 0 || s.start >= 256 || s.count > 256 - s.start) return false;
+  }
+  return true;
+}
+static_assert(BufferLoadRangesAreTheCallSites(),
+              "kBufferLoadRanges must be exactly the registers the LoadAluConstants call sites name");
+
 // Where the GPU's value of one constant register comes from.
 struct ConstantSource {
   enum class Kind : uint8_t {
@@ -140,16 +187,27 @@ struct ConstantSource {
 // A draw record is drawn once, so Find gives it what the first colour tile
 // sees; FindForBins gives what a pass with a given bin select sees.
 //
-// The model says something only while it is whole: every upload since it was
-// last made whole was handed to it. The capture follows uploads only while
-// somebody reads the result (records or discovery); for an upload it does not
-// follow it calls Skip, and from then on no register is known. Observe tells
-// the model whether the main scene's bracket is open; at the first begin of a
-// scene with every upload since the last observation followed, the model is
-// whole again, knowing nothing: each register is unknown until an upload of
-// it is followed (the bank's group, or a load).
+// Only the registers a load can name need the model (kBufferLoadRanges for
+// the bank given at construction; a register that a followed call names
+// outside them is added and counted, untabled_loads). Every other register is
+// the bank's, always.
+// For the load registers the model says something only while it is whole:
+// every upload since it was last made whole was handed to it. The capture
+// follows uploads only while somebody reads the result (records or
+// discovery); for an upload it does not follow it calls Skip, and from then on
+// no load register is known. Observe tells the model whether the main scene's
+// bracket is open; at the first begin of a scene with every upload since the
+// last observation followed, the model is whole again, knowing nothing of
+// them: each load register is unknown until an upload of it is followed (a
+// load, or the bank's upload of its group).
 class ConstantLoads {
  public:
+  explicit ConstantLoads(uint32_t bank = kPixelBank) {
+    for (uint32_t r = 0; r < kRegisters; ++r) {
+      if (IsBufferLoadRegister(bank, r)) load_register_[r / 64] |= 1ull << (r % 64);
+    }
+  }
+
   static constexpr uint32_t kRegisters = 256;
   static constexpr uint32_t kMaxBinned = 16;
   static constexpr uint32_t kAllBins = 0xFFFFFFFFu;
@@ -174,17 +232,18 @@ class ConstantLoads {
   // cannot be a load of this bank (no buffer, a start or a run outside
   // registers 0..255, which the packet would write to the other bank's
   // registers, a run past the buffer bound) and a tile load the table has no
-  // room for are not followed: the model stops being whole (Skip). The game's
-  // callers pass constants inside the bank (frame-map section 14, "The path").
+  // room for are not followed: the model stops being whole (Unfollowable). The
+  // game's callers pass constants inside the bank (xdk_layout.h, kAluLoadSites).
   bool Load(uint32_t start, uint32_t count, uint32_t object, uint32_t first, bool predicated, uint32_t mask) {
     if (count == 0) return true;  // loads nothing
     if (start >= kRegisters || count > kRegisters - start || object == 0 || first >= kMaxBufferRegisters ||
         count > kMaxBufferRegisters - first) {
-      Skip();
+      Unfollowable(start, count);
       return false;
     }
     if (!predicated) mask = kAllBins;
     if (mask == 0) return true;  // predicated under no bin: executes in no pass
+    Name(start, count);
     if (!whole_) return true;    // followed, and not believed before the model is whole again
     const uint64_t seq = ++seq_;
     if (mask != kAllBins) {
@@ -222,6 +281,18 @@ class ConstantLoads {
     }
   }
 
+  // A LoadAluConstants call that was seen and cannot be followed: the registers
+  // of this bank that it names are load registers from now on, and its upload
+  // counts as skipped.
+  void Unfollowable(uint32_t start, uint32_t count) {
+    Name(start, count);
+    Skip();
+  }
+
+  // Calls seen that named a register outside the table for the first time: a
+  // call site the static reading does not know. The capture logs the first.
+  uint32_t untabled_loads() const { return untabled_loads_; }
+
   // An upload happened that was not handed to the model.
   void Skip() {
     whole_ = false;
@@ -257,10 +328,13 @@ class ConstantLoads {
     return from.kind == ConstantSource::Kind::kMemory && from.scene == scene_;
   }
 
-  // The source of `reg` as a pass with this bin select sees it: the last
-  // upload it executed. Unknown while the model is not whole.
+  // The source of `reg` as a pass with this bin select sees it: the bank for a
+  // register no load names, in any state of the model; for a load register the
+  // last upload the pass executed, unknown while the model is not whole.
   ConstantSource FindForBins(uint32_t reg, uint32_t bin_select) const {
-    if (reg >= kRegisters || !whole_) return Unknown();
+    if (reg >= kRegisters) return Unknown();
+    if (!IsLoadRegister(reg)) return ConstantSource{};
+    if (!whole_) return Unknown();
     const Entry* best = &every_[reg];
     ConstantSource from = best->source;
     uint64_t seq = best->seq;
@@ -301,11 +375,24 @@ class ConstantLoads {
   };
   static ConstantSource Unknown() { return ConstantSource{ConstantSource::Kind::kUnknown, 0, 0, 0}; }
 
-  // Whole again, knowing nothing of what the GPU holds.
+  bool IsLoadRegister(uint32_t reg) const { return (load_register_[reg / 64] >> (reg % 64)) & 1; }
+  // The registers of this bank in [start, start + count) become load registers.
+  void Name(uint32_t start, uint32_t count) {
+    bool added = false;
+    for (uint32_t r = start; r < kRegisters && r - start < count; ++r) {
+      if (IsLoadRegister(r)) continue;
+      load_register_[r / 64] |= 1ull << (r % 64);
+      added = true;
+    }
+    if (added) ++untabled_loads_;
+  }
+  // Whole again, knowing nothing of what the GPU holds in the load registers.
   void Resume() {
     whole_ = true;
     binned_count_ = 0;
-    SetEvery(0, kRegisters, Unknown(), ++seq_);  // marks every group: its next bank upload is followed
+    const uint64_t seq = ++seq_;
+    for (uint32_t r = 0; r < kRegisters; ++r) every_[r] = Entry{IsLoadRegister(r) ? Unknown() : ConstantSource{}, seq};
+    loaded_ = ~0ull;  // every group's next bank upload is followed
   }
   void SetEvery(uint32_t start, uint32_t n, ConstantSource source, uint64_t seq) {
     for (uint32_t i = 0; i < n; ++i) every_[start + i] = Entry{source, seq};
@@ -350,6 +437,8 @@ class ConstantLoads {
   bool whole_ = true;
   bool ever_skipped_ = false;
   bool skip_pending_ = false;  // an upload was skipped since the last observation
+  uint64_t load_register_[kRegisters / 64] = {};  // bit r: a load can name register r
+  uint32_t untabled_loads_ = 0;
 };
 
 // --- the hooks' pure parts ---------------------------------------------------

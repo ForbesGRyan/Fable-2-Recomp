@@ -593,16 +593,21 @@ bool ReadDevice(uint32_t device, DeviceSnapshot* s) {
 // xdk_layout.h, kAluLoad*). The two upload hooks hand it every upload only
 // while somebody reads the result (FollowPixelLoads: a frame with records, or
 // discovery); otherwise they only mark that an upload was skipped
-// (ConstantLoads::Skip), and no pixel constant is known until the first main
+// (ConstantLoads::Skip), and no pixel constant that a load can name (c0..c7,
+// c80..c115: light_block.h, kBufferLoadRanges) is known until the first main
 // scene whose uploads are all followed from its begin (ConstantLoads::Observe).
-thread_local ConstantLoads t_ps_loads;
+// Every other pixel constant is the bank's whatever was followed.
+thread_local ConstantLoads t_ps_loads{kPixelBank};
 // The same for the vertex bank (vertex c40..c43 and c76..c107 are loaded from
 // buffers too). Discovery evidence only ("vfull"): no record reads through
 // it, so it is followed only while a discovery capture is requested or
 // running. Once an upload was skipped (ConstantLoads::ever_skipped) rows carry
 // no vertex registers (a capture armed by the environment follows from the
 // first upload; one armed at run time does not).
-thread_local ConstantLoads t_vs_loads;
+thread_local ConstantLoads t_vs_loads{kVertexBank};
+// A followed LoadAluConstants call named a register that no call site of the
+// table names (xdk_layout.h, kAluLoadSites): logged once per process.
+std::atomic<bool> g_untabled_load_logged{false};
 // The device of the draw this thread is capturing (the r3 of its draw hook).
 thread_local uint32_t t_draw_device = 0;
 
@@ -1053,7 +1058,9 @@ bool FollowAluLoad(uint32_t bank) {
 // the buffer holds them and the device's command write pointer (the packet's
 // last dword), for tools/xdk_sigmatch/pconst_check.py; "tiling" is whether
 // the device's tiling flag was set at the call (0 also when it was unread),
-// "bin_mask_hi" the bin mask's high word.
+// "bin_mask_hi" the bin mask's high word, "untabled" how many calls so far
+// named a register outside the call sites' ranges for the first time (0 unless
+// the static list of call sites is incomplete).
 void OnAluLoad(const LastArgs& a) {
   const uint32_t device = a.r[0];
   AluLoadCall call;
@@ -1066,16 +1073,25 @@ void OnAluLoad(const LastArgs& a) {
   // Here the pixel model is being followed whatever the bank (FollowAluLoad):
   // the scene first, so a load at a scene's begin belongs to it.
   ObservePixelScene(device);
+  const uint32_t untabled = t_ps_loads.untabled_loads() + t_vs_loads.untabled_loads();
   AluLoad load;
   if (!MapAluLoad(call, &load)) {
-    if (bank != 0) t_ps_loads.Skip();
-    if (bank != 1) t_vs_loads.Skip();
+    if (bank != 0) t_ps_loads.Unfollowable(start, count);
+    if (bank != 1) t_vs_loads.Unfollowable(start, count);
   } else if (load.pixel) {
     t_ps_loads.Load(load.start, load.count, load.object, load.first, load.predicated, load.mask);
   } else if (g_discovery_active.load(std::memory_order_relaxed)) {
     t_vs_loads.Load(load.start, load.count, load.object, load.first, load.predicated, load.mask);
   } else {
     t_vs_loads.Skip();
+  }
+  // A register outside the call sites' ranges: it is followed like a load
+  // register from now on (the model added it); say so once.
+  if (t_ps_loads.untabled_loads() + t_vs_loads.untabled_loads() != untabled &&
+      !g_untabled_load_logged.exchange(true)) {
+    REXSYS_WARN("[native] LoadAluConstants named registers outside its call-site table: bank {} c{} count {} "
+                "(followed from now on; xdk_layout.h kAluLoadSites is incomplete)",
+                bank, start, count);
   }
   if (!g_armed.load(std::memory_order_relaxed)) return;
   uint32_t data = 0, write = 0;
@@ -1085,10 +1101,10 @@ void OnAluLoad(const LastArgs& a) {
   std::snprintf(buf, sizeof(buf),
                 "{\"kind\":\"aluload\",\"frame\":%d,\"bank\":%u,\"start\":%u,\"count\":%u,\"obj\":\"0x%08X\","
                 "\"first\":%u,\"data\":\"0x%08X\",\"pred\":%d,\"bin_mask\":\"0x%08X\",\"bin_mask_hi\":\"0x%08X\","
-                "\"tiling\":%d",
+                "\"tiling\":%d,\"untabled\":%u",
                 g_frames_written.load(std::memory_order_relaxed) + 1, bank, start, count, object, first,
                 have_data ? data : 0, call.state_read ? int(call.predicate != 0) : -1, call.mask_lo, call.mask_hi,
-                t_ps_loads.in_scene() ? 1 : 0);
+                t_ps_loads.in_scene() ? 1 : 0, t_ps_loads.untabled_loads() + t_vs_loads.untabled_loads());
   std::string row = buf;
   if (have_write) {
     std::snprintf(buf, sizeof(buf), ",\"cmd\":\"0x%08X\"", write);
@@ -1219,13 +1235,16 @@ const PsInfo* LookupPs(uint32_t obj) {
 // file (frame-map section 14). False, with `out` untouched, when the register
 // cannot be read, and for a register the draw's pixel shader loads itself (a
 // literal of its table, which no bank or buffer holds; also when the shader or
-// its table cannot be read): nothing may then be drawn from it. False also
-// while the uploads are not known: after a time in which they were not
-// followed (no records and no discovery) no register is known until the first
-// main scene followed from its begin, and then each one only once its upload
-// was seen (ConstantLoads). Not covered: a register that only another shader's
-// literals wrote, which no shader of this draw reads; the bank's value is
-// returned for it.
+// its table cannot be read): nothing may then be drawn from it.
+// Which source is decided by the table of the registers a load can name first
+// (light_block.h, kBufferLoadRanges: pixel c0..c7 and c80..c115). Any other
+// register is read from the bank, whatever uploads were followed: no buffer
+// is ever its source. A load register is false while the uploads are not
+// known: after a time in which they were not followed (no records and no
+// discovery) until the first main scene followed from its begin, and then
+// until an upload of it was seen (ConstantLoads). Not covered: a register that
+// only another shader's literals wrote, which no shader of this draw reads;
+// the bank's value is returned for it.
 bool ReadPixelConstant(uint32_t reg, float out[4]) {
   if (reg >= ConstantLoads::kRegisters || !t_draw_device) return false;
   uint32_t vs_field = 0, ps_field = 0;

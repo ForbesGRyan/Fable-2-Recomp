@@ -271,6 +271,7 @@ int main() {
     CHECK(t.whole() && !t.ever_skipped() && !t.in_scene() && t.scene() == 0);
     for (uint32_t r : {0u, 80u, 255u}) CHECK(Is(t.Find(r), Kind::kBank));
     CHECK(Is(t.Find(256), Kind::kUnknown));  // not a register
+    CHECK(Is(t.FindForBins(256, kAll), Kind::kUnknown) && Is(t.FindForBins(0xFFFFFFFF, 0x2), Kind::kUnknown));
     CHECK(t.binned_count() == 0);
   }
   // --- a load under every bin: the registers come from the buffer, the others stay ---
@@ -306,6 +307,10 @@ int main() {
     CHECK(Is(t.Find(83), Kind::kMemory, 0x40001000, 3));
     for (uint32_t r = 84; r < 88; ++r) CHECK(Is(t.Find(r), Kind::kBank));
     CHECK(Is(t.Find(88), Kind::kMemory, 0x40001000, 8));
+    // Another loaded group, in a later upload: followed too.
+    t.BankUpload(1ull << (63 - 23));  // registers 92..95
+    CHECK(Is(t.Find(92), Kind::kBank) && Is(t.Find(95), Kind::kBank));
+    CHECK(Is(t.Find(91), Kind::kMemory, 0x40001000, 11) && Is(t.Find(96), Kind::kMemory, 0x40001000, 16));
     // Groups without a load: nothing changes.
     t.BankUpload(~0ull & ~(0xFFull << 36));
     t.BankUpload(0);
@@ -385,8 +390,9 @@ int main() {
     CHECK(t.binned_count() == 1 && t.whole());
   }
   // --- arguments that cannot be a load of this bank: the model stops being whole and no
-  //     register is known until it is whole again (fix round 1, m3: a run that leaves the bank
-  //     would write the other bank's registers) ---
+  //     register a load can name is known until it is whole again (fix round 1, m3: a run that
+  //     leaves the bank would write the other bank's registers). The registers of this bank
+  //     that the call names count as load registers from then on (fix round 2). ---
   {
     struct Bad {
       uint32_t start, count, object, first;
@@ -404,8 +410,18 @@ int main() {
       CHECK(t.whole());
       CHECK(!t.Load(bad.start, bad.count, bad.object, bad.first, false, kAll));
       CHECK(!t.whole() && t.ever_skipped());
-      for (uint32_t r : {0u, 19u, 80u, 250u, 255u}) CHECK(Is(t.Find(r), Kind::kUnknown));
+      for (uint32_t r : {0u, 7u, 80u, 115u}) CHECK(Is(t.Find(r), Kind::kUnknown));
       CHECK(Is(t.FindForBins(80, kAll), Kind::kUnknown));
+      // What the call named inside the bank is no bank-only register any more; the others
+      // that no load names stay the bank's.
+      for (uint32_t r = 0; r < ConstantLoads::kRegisters; ++r) {
+        const bool named = r >= bad.start && uint64_t(r) < uint64_t(bad.start) + bad.count;
+        if (named || IsBufferLoadRegister(kPixelBank, r)) {
+          CHECK(Is(t.Find(r), Kind::kUnknown));
+        } else {
+          CHECK(Is(t.Find(r), Kind::kBank));
+        }
+      }
     }
     // Nothing loaded is not a load, and is no fault.
     ConstantLoads t;
@@ -424,7 +440,8 @@ int main() {
     CHECK(Is(t.Find(0), Kind::kMemory, 0x40000000, 0));
     CHECK(!t.Load(200, 4, 0x4FFF0000, 0, true, 0x2));
     CHECK(!t.whole());
-    CHECK(Is(t.Find(0), Kind::kUnknown) && Is(t.Find(200), Kind::kUnknown) && Is(t.Find(64), Kind::kUnknown));
+    CHECK(Is(t.Find(0), Kind::kUnknown) && Is(t.Find(200), Kind::kUnknown) && Is(t.Find(60), Kind::kUnknown));
+    CHECK(Is(t.Find(64), Kind::kBank));  // no load named it
   }
   // --- a full table first drops the tile loads that decide nothing any more ---
   {
@@ -494,7 +511,8 @@ int main() {
     CHECK(t.LoadedThisScene(80));
     t.Skip();  // records went off: an upload happened that nobody looked at
     CHECK(!t.whole() && t.ever_skipped());
-    for (uint32_t r : {0u, 19u, 80u, 255u}) CHECK(Is(t.Find(r), Kind::kUnknown));
+    for (uint32_t r : {0u, 4u, 80u, 115u}) CHECK(Is(t.Find(r), Kind::kUnknown));
+    for (uint32_t r : {19u, 20u, 21u, 22u, 23u, 255u}) CHECK(Is(t.Find(r), Kind::kBank));  // bank-only
     CHECK(Is(t.FindForBins(0, 0x2), Kind::kUnknown));
     CHECK(!t.LoadedThisScene(80));
     t.Skip();  // scenes pass, nothing is observed
@@ -504,30 +522,30 @@ int main() {
     CHECK(t.scene() == 1 && !t.whole());
     CHECK(t.Load(80, 36, 0x40002000, 0, false, kAll));  // followed, and not believed yet
     CHECK(!t.whole() && Is(t.Find(80), Kind::kUnknown) && !t.LoadedThisScene(80));
-    CHECK(t.Load(0, 4, 0x40012000, 0, true, 0x2) && t.Load(8, 4, 0x40013000, 0, true, 0x2));
+    CHECK(t.Load(0, 4, 0x40012000, 0, true, 0x2) && t.Load(4, 4, 0x40013000, 0, true, 0x2));
     CHECK(t.binned_count() == 1);  // nor kept: the one tile load of before the gap
     t.BankUpload(~0ull);
-    CHECK(Is(t.Find(19), Kind::kUnknown));
+    CHECK(Is(t.Find(84), Kind::kUnknown));
     t.Observe(true);  // more hooks of that scene, all followed: still not from its begin
     t.Observe(true);
-    CHECK(!t.whole() && Is(t.Find(19), Kind::kUnknown));
+    CHECK(!t.whole() && Is(t.Find(84), Kind::kUnknown));
     // More tile loads than the table holds, while nothing is kept: no skip (the next scene
     // still makes the model whole).
-    for (uint32_t i = 0; i <= ConstantLoads::kMaxBinned; ++i) CHECK(t.Load(i * 4, 4, 0x40000000 + i, 0, true, 0x2));
+    for (uint32_t i = 0; i <= ConstantLoads::kMaxBinned; ++i) CHECK(t.Load(0, 4, 0x40000000 + i, 0, true, 1u << i));
     t.Observe(false);
     CHECK(!t.whole());
     // The next scene begins with every upload followed: whole again.
     t.Observe(true);
     CHECK(t.whole() && t.scene() == 2);
-    // What was loaded before that is not believed: the registers the bank has not uploaded
-    // since, and the loads of before, are unknown; a buffer register must be loaded again.
-    CHECK(Is(t.Find(80), Kind::kUnknown) && Is(t.Find(0), Kind::kUnknown) && Is(t.Find(19), Kind::kUnknown));
+    // What was loaded before that is not believed: a register a load can name is unknown
+    // until an upload of it is followed, a load or the bank's upload of its group.
+    CHECK(Is(t.Find(80), Kind::kUnknown) && Is(t.Find(0), Kind::kUnknown) && Is(t.Find(115), Kind::kUnknown));
     CHECK(t.binned_count() == 0);
-    t.BankUpload(1ull << (63 - 4));  // registers 16..19: the builder uploads the group
-    CHECK(Is(t.Find(19), Kind::kBank) && Is(t.Find(16), Kind::kBank));
-    CHECK(Is(t.Find(20), Kind::kUnknown));
-    t.BankUpload(1ull << (63 - 5));
-    CHECK(Is(t.Find(20), Kind::kBank) && Is(t.Find(23), Kind::kBank));
+    t.BankUpload(1ull << (63 - 22));  // registers 88..91: the builder uploads the group
+    CHECK(Is(t.Find(88), Kind::kBank) && Is(t.Find(91), Kind::kBank));
+    CHECK(Is(t.Find(87), Kind::kUnknown) && Is(t.Find(92), Kind::kUnknown));
+    // The bank-only registers were never in doubt.
+    for (uint32_t r : {8u, 19u, 20u, 21u, 22u, 23u, 79u, 116u, 255u}) CHECK(Is(t.Find(r), Kind::kBank));
     t.Load(0, 4, 0x40011000, 0, true, 0x2);
     t.Load(80, 36, 0x40003000, 0, false, kAll);
     CHECK(Is(t.Find(0), Kind::kMemory, 0x40011000, 0) && Is(t.Find(80), Kind::kMemory, 0x40003000, 0));
@@ -541,6 +559,7 @@ int main() {
     t.Observe(false);
     t.Observe(true);
     CHECK(t.whole() && Is(t.Find(19), Kind::kBank) && Is(t.Find(84), Kind::kMemory, 0x40003000, 4));
+    CHECK(t.untabled_loads() == 0);
   }
   // An upload skipped between the last thing seen and the scene's begin may belong to the scene:
   // that scene is not taken as followed from its begin; the next one is.
@@ -563,7 +582,140 @@ int main() {
     t.Observe(false);
     CHECK(!t.whole());  // no scene has begun
     t.Observe(true);
-    CHECK(t.whole() && t.scene() == 1 && Is(t.Find(19), Kind::kUnknown));
+    CHECK(t.whole() && t.scene() == 1 && Is(t.Find(80), Kind::kUnknown) && Is(t.Find(19), Kind::kBank));
+  }
+  // --- bank-only registers (fix round 2, controller's ruling): a register that no call site
+  //     of LoadAluConstants names is the bank's whatever the model's state. The game is
+  //     usually started with the view off, so the model is not whole when the view comes on,
+  //     and a register the game sets once (c22 reads the same in every row of every capture)
+  //     would otherwise never be known. ---
+  {
+    // The table: the registers the ten call sites name (xdk_layout.h, kAluLoadSites).
+    for (uint32_t r = 0; r < ConstantLoads::kRegisters; ++r) {
+      CHECK(IsBufferLoadRegister(kPixelBank, r) == (r < 8 || (r >= 80 && r < 116)));
+      CHECK(IsBufferLoadRegister(kVertexBank, r) == ((r >= 40 && r < 44) || (r >= 76 && r < 108)));
+      CHECK(!IsBufferLoadRegister(2, r));
+    }
+    CHECK(!IsBufferLoadRegister(kPixelBank, 256) && !IsBufferLoadRegister(kVertexBank, 0xFFFFFFFF));
+    CHECK(sizeof(xdk::kAluLoadSites) / sizeof(xdk::kAluLoadSites[0]) == 10);
+    for (const xdk::AluLoadSite& s : xdk::kAluLoadSites) {
+      CHECK(s.count != 0);
+      for (uint32_t r = s.start; r < s.start + s.count; ++r) CHECK(IsBufferLoadRegister(s.bank, r));
+    }
+    // Every register of the table is named by a site: the table holds nothing else.
+    for (uint32_t bank : {kVertexBank, kPixelBank}) {
+      for (uint32_t r = 0; r < ConstantLoads::kRegisters; ++r) {
+        bool named = false;
+        for (const xdk::AluLoadSite& s : xdk::kAluLoadSites) named |= s.bank == bank && r >= s.start && r - s.start < s.count;
+        CHECK(named == IsBufferLoadRegister(bank, r));
+      }
+    }
+    // The light block's bank registers are bank-only; its other registers are loaded.
+    for (uint32_t r : {19u, 20u, 21u, 22u, 23u}) CHECK(!IsBufferLoadRegister(kPixelBank, r));
+    for (uint32_t r : {0u, 80u, 87u, 94u, 109u, 112u}) CHECK(IsBufferLoadRegister(kPixelBank, r));
+    for (uint32_t r : kLightSetRegisters) CHECK(IsBufferLoadRegister(kPixelBank, r));
+  }
+  // The game as it is usually run: started with the view off, the view switched on later.
+  {
+    ConstantLoads t;
+    // Nothing is followed from the first upload on (among them the bank's one upload of the
+    // group of c22, which the game sets once).
+    for (int i = 0; i < 5; ++i) t.Skip();
+    CHECK(!t.whole());
+    // After the gap c19..c23 are readable at once, in no scene and before any upload.
+    for (uint32_t r : {19u, 20u, 21u, 22u, 23u}) CHECK(Is(t.Find(r), Kind::kBank));
+    CHECK(Is(t.Find(80), Kind::kUnknown) && Is(t.Find(0), Kind::kUnknown));
+    CHECK(!t.LoadedThisScene(80));
+    // The view comes on at a frame boundary: the next scene is followed from its begin.
+    t.Observe(false);
+    t.Observe(true);
+    CHECK(t.whole());
+    for (uint32_t r : {19u, 20u, 21u, 22u, 23u}) CHECK(Is(t.Find(r), Kind::kBank));  // no upload was needed
+    // c80 is unknown until its range is loaded in the scene; so is c0 until its tile load.
+    CHECK(Is(t.Find(80), Kind::kUnknown) && Is(t.Find(109), Kind::kUnknown) && Is(t.Find(0), Kind::kUnknown));
+    CHECK(!t.LoadedThisScene(80));
+    // The bank's upload of a load register's group is an upload of it: known, and the bank's.
+    t.BankUpload(1ull << (63 - 28));  // registers 112..115
+    CHECK(Is(t.Find(112), Kind::kBank) && Is(t.Find(115), Kind::kBank) && Is(t.Find(111), Kind::kUnknown));
+    CHECK(!t.LoadedThisScene(112));
+    t.Load(0, 4, 0x40010000, 0, true, 0x2);
+    t.Load(0, 4, 0x40020000, 0, true, 0x8);
+    CHECK(Is(t.Find(0), Kind::kMemory, 0x40010000, 0) && Is(t.Find(80), Kind::kUnknown));
+    // The first scene whose light-set load was followed has everything a block reads.
+    t.Load(80, 36, 0x40001000, 0, false, kAll);
+    for (uint32_t r : kLightSetRegisters) CHECK(t.LoadedThisScene(r));
+    for (uint32_t r : kLightBlockRegisters) CHECK(!Is(t.Find(r), Kind::kUnknown));
+    // The bank's uploads of the bank-only groups change nothing, before or after.
+    t.BankUpload(1ull << (63 - 5));
+    CHECK(Is(t.Find(22), Kind::kBank));
+    // The view goes off and on again: the bank-only registers are read all the way through.
+    t.Observe(false);
+    t.Skip();
+    CHECK(Is(t.Find(22), Kind::kBank) && Is(t.Find(19), Kind::kBank) && Is(t.Find(80), Kind::kUnknown));
+    t.Observe(true);  // a scene with a skipped upload before its first hook
+    CHECK(!t.whole() && Is(t.Find(22), Kind::kBank) && !t.LoadedThisScene(80));
+    t.Load(80, 36, 0x40001000, 0, false, kAll);  // followed, not believed: the scene was not followed from its begin
+    CHECK(Is(t.Find(80), Kind::kUnknown) && !t.LoadedThisScene(80));
+    t.Observe(false);
+    t.Observe(true);
+    t.Load(80, 36, 0x40001000, 0, false, kAll);
+    CHECK(t.whole() && t.LoadedThisScene(80) && Is(t.Find(22), Kind::kBank));
+    CHECK(t.untabled_loads() == 0);
+  }
+  // The vertex bank's model has the vertex ranges.
+  {
+    ConstantLoads v(kVertexBank);
+    v.Skip();
+    for (uint32_t r : {40u, 43u, 76u, 107u}) CHECK(Is(v.Find(r), Kind::kUnknown));
+    for (uint32_t r : {0u, 4u, 18u, 39u, 44u, 75u, 108u, 115u, 255u}) CHECK(Is(v.Find(r), Kind::kBank));
+    ConstantLoads p(kPixelBank);
+    p.Skip();
+    CHECK(Is(p.Find(40), Kind::kBank) && Is(p.Find(4), Kind::kUnknown));
+  }
+  // The unexpected: a followed load names a register outside the table (a call site the static
+  // reading missed). The register is a load register from then on, and the model counts it.
+  {
+    ConstantLoads t = InScene();
+    CHECK(t.untabled_loads() == 0);
+    CHECK(t.Load(80, 36, 0x40001000, 0, false, kAll) && t.Load(0, 4, 0x40010000, 0, true, 0x2));
+    CHECK(t.untabled_loads() == 0);  // the table's own ranges
+    CHECK(t.Load(20, 4, 0x40070000, 0, false, kAll));  // c20..c23 from a buffer
+    CHECK(t.untabled_loads() == 1);
+    CHECK(Is(t.Find(20), Kind::kMemory, 0x40070000, 0) && Is(t.Find(23), Kind::kMemory, 0x40070000, 3));
+    CHECK(t.Load(20, 4, 0x40071000, 0, false, kAll));  // the same registers again: nothing new
+    CHECK(t.untabled_loads() == 1);
+    CHECK(t.Load(114, 4, 0x40072000, 0, false, kAll));  // c114..c117: two of the table, two not
+    CHECK(t.untabled_loads() == 2);
+    t.Skip();
+    for (uint32_t r : {20u, 21u, 22u, 23u, 116u, 117u}) CHECK(Is(t.Find(r), Kind::kUnknown));  // no longer bank-only
+    CHECK(Is(t.Find(19), Kind::kBank) && Is(t.Find(24), Kind::kBank) && Is(t.Find(118), Kind::kBank));
+    t.Observe(false);
+    t.Observe(true);
+    CHECK(t.whole() && Is(t.Find(20), Kind::kUnknown) && Is(t.Find(19), Kind::kBank));
+    t.BankUpload(1ull << (63 - 5));  // the bank's upload of the group is followed now
+    CHECK(Is(t.Find(20), Kind::kBank) && Is(t.Find(23), Kind::kBank));
+    // A tile load outside the table counts the same way.
+    CHECK(t.Load(200, 4, 0x40073000, 0, true, 0x2));
+    CHECK(t.untabled_loads() == 3 && Is(t.Find(200), Kind::kMemory, 0x40073000, 0));
+    CHECK(Is(t.FindForBins(200, 0x8), Kind::kBank));  // the other tile still has the bank's value
+    // A load that is followed and not believed (the model is not whole) still names its registers.
+    t.Skip();
+    CHECK(t.Load(210, 2, 0x40074000, 0, false, kAll));
+    CHECK(t.untabled_loads() == 4 && Is(t.Find(210), Kind::kUnknown) && Is(t.Find(212), Kind::kBank));
+    // A call that cannot be followed (the hook could not read the device's state): the registers
+    // it names inside the bank are load registers too, and the upload is skipped.
+    ConstantLoads u = InScene();
+    u.Unfollowable(30, 2);
+    CHECK(!u.whole() && u.untabled_loads() == 1);
+    CHECK(Is(u.Find(30), Kind::kUnknown) && Is(u.Find(31), Kind::kUnknown) && Is(u.Find(32), Kind::kBank));
+    u.Unfollowable(254, 100);     // runs out of the bank: its registers up to 255
+    CHECK(u.untabled_loads() == 2 && Is(u.Find(254), Kind::kUnknown) && Is(u.Find(255), Kind::kUnknown));
+    u.Unfollowable(300, 4);       // another bank's registers
+    u.Unfollowable(8, 0);         // names nothing
+    u.Unfollowable(0xFFFFFFFF, 0xFFFFFFFF);
+    CHECK(u.untabled_loads() == 2 && Is(u.Find(8), Kind::kBank) && Is(u.Find(253), Kind::kBank));
+    u.Unfollowable(80, 36);       // the table's: a skip, nothing new
+    CHECK(u.untabled_loads() == 2);
   }
   // A model never interrupted believes the bank from the start (no upload is needed first).
   {

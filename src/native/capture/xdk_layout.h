@@ -107,6 +107,30 @@ inline constexpr uint32_t kDeviceBoolPendingMaskHi = 0x01000000u;
 //     [global 0x83496CC0] + 0xC.
 // Runtime: frame-map section 14 (tools/xdk_sigmatch/pconst_check.py).
 inline constexpr uint32_t kAluLoadHookAddress = 0x8227CFC8;
+// The ten call sites above: the address of each `bl 0x8227CFC8` and the bank,
+// first register and count it passes, all immediates (`li r4`, `li r5`,
+// `li r6`; generated/default/fable_2_recomp.{77,107,163,185,240,243}.cpp).
+// A register no site names is never loaded from a buffer: the device's bank
+// holds its latest value at every draw (light_block.h, kBufferLoadRanges,
+// which a static_assert holds against this table).
+struct AluLoadSite {
+  uint32_t call;
+  uint32_t bank;  // 0 vertex, 1 pixel
+  uint32_t start;
+  uint32_t count;
+};
+inline constexpr AluLoadSite kAluLoadSites[] = {
+    {0x8227D108, 1, 80, 36},  // the light set
+    {0x8227CE58, 1, 0, 4},    // per tile
+    {0x8227CEF4, 1, 4, 4},    // pre-pass bins (the buffer's registers 0..3)
+    {0x8227CF14, 0, 40, 4},
+    {0x8227CF90, 1, 4, 4},    // colour bins (the buffer's registers 4..7)
+    {0x8227CFB0, 0, 40, 4},
+    {0x821B320C, 0, 76, 32},  // the vertex light set
+    {0x821CB16C, 0, 76, 32},
+    {0x82210988, 0, 76, 32},
+    {0x82A549A4, 0, 76, 32},
+};
 // Constant buffer object: dword 6 is the CPU virtual address of its registers
 // (0x8227D020 `lwz r10,0x18(r29)`, then the inline GpuAddress conversion).
 inline constexpr uint32_t kConstantBufferDataDword = 6;

@@ -36,8 +36,9 @@ class GeometryCache {
   // record; a terrain record's buffers are the grid built from them.
   nrhi::Buffer* Positions(nrhi::Device* dev, const capture::DrawRecord& r, const capture::TerrainPatch* terrain,
                           uint32_t* vertex_count, ClayStats& st);
+  // `max_index` (optional): receives the largest index of the list, before the base vertex.
   nrhi::Buffer* Indices(nrhi::Device* dev, const capture::DrawRecord& r, const capture::TerrainPatch* terrain,
-                        uint32_t vertex_count, uint32_t* index_count, ClayStats& st);
+                        uint32_t vertex_count, uint32_t* index_count, ClayStats& st, uint32_t* max_index = nullptr);
   // float2 UVs of the record's material (material.uv_vb / material.uv), one
   // per vertex of the UV stream; nullptr when the stream is unreadable, does
   // not decode or holds fewer than `vertex_count` UVs (the shader reads
@@ -69,7 +70,8 @@ class GeometryCache {
   nrhi::Buffer* TerrainNormals(nrhi::Device* dev, const capture::TerrainPatch& t, uint32_t vertex_count,
                                ClayStats& st);
   // float3 unit normals of a mesh record with light inputs (`light`: LightOf),
-  // one per vertex of its position buffer and in the space of its positions
+  // one per vertex of its normal stream (at least `need`; an instanced draw:
+  // one per flat position) and in the space of its positions
   // (normal_decode.h): a plain mesh's as the stream stores them (the draw's
   // world rotation, light.world_rot, is not applied: one buffer for every draw
   // of the mesh; key MeshNormalKey), a skinned mesh's after the bones, an
@@ -77,22 +79,27 @@ class GeometryCache {
   // NormalKey). A vertex without a direction holds (0, 0, 0). nullptr, with
   // the reason in `why`: normal-unsupported for a normal element no reader
   // decodes (NormalElementSupported); light-unknown when a stream is
-  // unreadable, the buffer would hold fewer than `vertex_count` normals (the
-  // shader reads normals[v] for every v < vertex_count), a bone word lies
-  // outside its stream, or the upload fails. Reads are bounded by the streams'
-  // sizes. A terrain record has TerrainNormals instead.
+  // unreadable, the buffer would hold fewer than `need` normals, a bone word
+  // lies outside its stream, or the upload fails. `need`: the vertices the
+  // draw's indices name (LightVertexNeed: its largest vertex plus one, the
+  // capture's rule for the stream; for an instanced draw its flat positions).
+  // `count` receives the normals the buffer holds: the shader reads
+  // normals[v] only for v below it (ClayConstants::light_count). Reads are
+  // bounded by the streams' sizes. A terrain record has TerrainNormals instead.
   nrhi::Buffer* Normals(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light,
-                        uint32_t vertex_count, ClayStats& st, capture::LightReason* why);
+                        uint32_t need, ClayStats& st, capture::LightReason* why, uint32_t* count);
   // uint32 colours of a record whose family has a colour stream
-  // (LightVertexKind::kStream), one per vertex of its position buffer: element
-  // light.colour_first + v of the stream for vertex v, red, green, blue and
+  // (LightVertexKind::kStream): element light.colour_first + v of the stream
+  // for vertex v, for as many vertices as the stream holds from that offset
+  // on and the record has positions, red, green, blue and
   // alpha in bytes 0 to 3 (DecodeColours; key ColourKey, content hash of the
   // stream). nullptr when the element is not a colour a reader decodes, the
-  // stream is unreadable, or it holds fewer than `vertex_count` colours from
-  // colour_first on: nothing is read past the stream's size, and a draw
-  // whose offset leads outside it has no colours.
+  // stream is unreadable, or it holds fewer than `need` colours from
+  // colour_first on (`need` and `count` as Normals'): nothing is read past
+  // the stream's size, and a draw whose offset leads outside it has no colours.
   nrhi::Buffer* Colours(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light,
-                        uint32_t vertex_count, ClayStats& st);
+                        uint32_t need, ClayStats& st, uint32_t* count);
+
   void BeginFrame(uint64_t frame, uint64_t budget_bytes);
   // DestroyDeferred all (dev may be nullptr: forget the buffers without
   // destroying them, e.g. after a device change).

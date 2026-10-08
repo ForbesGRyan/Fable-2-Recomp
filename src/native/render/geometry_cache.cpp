@@ -546,11 +546,12 @@ nrhi::Buffer* GeometryCache::InstancedNormals(nrhi::Device* dev, const capture::
 }
 
 nrhi::Buffer* GeometryCache::Normals(nrhi::Device* dev, const capture::DrawRecord& r,
-                                     const capture::LightInputs& light, uint32_t vertex_count, ClayStats& st,
-                                     capture::LightReason* why) {
+                                     const capture::LightInputs& light, uint32_t need, ClayStats& st,
+                                     capture::LightReason* why, uint32_t* out_count) {
   using capture::LightReason;
   using capture::LightVertexKind;
   const capture::LightElement& e = light.normal;
+  *out_count = 0;
   *why = LightReason::kNormalUnsupported;
   if (light.kind == LightVertexKind::kNone || light.kind == LightVertexKind::kTerrain || !NormalElementSupported(e)) {
     return nullptr;
@@ -558,11 +559,17 @@ nrhi::Buffer* GeometryCache::Normals(nrhi::Device* dev, const capture::DrawRecor
   *why = LightReason::kLightUnknown;
   // The inputs are an instance's exactly when the record has its instance set (MakeLightInputs).
   if ((light.kind == LightVertexKind::kInstance) != r.instances.active) return nullptr;
-  if (r.instances.active) return InstancedNormals(dev, r, light, vertex_count, st);
+  if (r.instances.active) {
+    nrhi::Buffer* flat = InstancedNormals(dev, r, light, need, st);
+    if (flat) *out_count = r.instances.flat_count;
+    return flat;
+  }
   // A skinned record's normals follow its positions vertex for vertex: no more than those.
+  // Every vertex the draw names has to be there (`need`), not every vertex of the position
+  // stream: the capture's own rule for the normal's stream.
   uint32_t count = NormalElementCount(e);
   if (r.skin.active) count = std::min(count, PositionCount(r.vb.size, r.pos));
-  if (count == 0 || count < vertex_count) return nullptr;
+  if (need == 0 || count < need) return nullptr;
   const auto t0 = Clock::now();
   // The normal's stream is read as the light inputs name it (the position's in every draw seen,
   // but not range checked with it at capture): exactly its range, decoded within it.
@@ -591,8 +598,9 @@ nrhi::Buffer* GeometryCache::Normals(nrhi::Device* dev, const capture::DrawRecor
   const auto t1 = Clock::now();
   st.hash_ms += Ms(t0, t1);
   if (found.hit) {
-    if (auto it = entries_.find(found.id); it != entries_.end() && it->second.count >= vertex_count) {
+    if (auto it = entries_.find(found.id); it != entries_.end() && it->second.count >= need) {
       ++st.hits;
+      *out_count = it->second.count;
       return it->second.buffer;
     }
   }
@@ -608,19 +616,24 @@ nrhi::Buffer* GeometryCache::Normals(nrhi::Device* dev, const capture::DrawRecor
   if (buffer) {
     Insert(dev, key, hash, {buffer, count, 0, alloc}, alloc);
     ++st.uploads;
+    *out_count = count;
   }
   st.decode_ms += Ms(t1, Clock::now());
   return buffer;
 }
 
 nrhi::Buffer* GeometryCache::Colours(nrhi::Device* dev, const capture::DrawRecord& r,
-                                     const capture::LightInputs& light, uint32_t vertex_count, ClayStats& st) {
+                                     const capture::LightInputs& light, uint32_t need, ClayStats& st,
+                                     uint32_t* out_count) {
   const capture::LightElement& e = light.second;
+  *out_count = 0;
   if (light.kind != capture::LightVertexKind::kStream || r.instances.active) return nullptr;
-  // As many colours as the record has positions, from the draw's offset on; fewer than the
-  // shader may index (the stream ends first, or the offset lies past it) is none.
+  // As many colours as the stream holds from the draw's offset on, at most the record's
+  // positions; fewer than the draw's indices name (`need`: the stream ends first, or the offset
+  // lies past it) is none. Meshes share a colour stream, so one that ends before the position
+  // stream's last vertex is the rule, not a fault.
   const uint32_t count = ColourCount(e, light.colour_first, PositionCount(r.vb.size, r.pos));
-  if (count == 0 || count < vertex_count) return nullptr;
+  if (need == 0 || count < need) return nullptr;
   const auto t0 = Clock::now();
   const uint8_t* src = capture::ReadPhysical(e.vb.phys_addr, e.vb.size);
   if (!src) {
@@ -634,8 +647,9 @@ nrhi::Buffer* GeometryCache::Colours(nrhi::Device* dev, const capture::DrawRecor
   const auto t1 = Clock::now();
   st.hash_ms += Ms(t0, t1);
   if (found.hit) {
-    if (auto it = entries_.find(found.id); it != entries_.end() && it->second.count >= vertex_count) {
+    if (auto it = entries_.find(found.id); it != entries_.end() && it->second.count >= need) {
       ++st.hits;
+      *out_count = it->second.count;
       return it->second.buffer;
     }
   }
@@ -648,6 +662,7 @@ nrhi::Buffer* GeometryCache::Colours(nrhi::Device* dev, const capture::DrawRecor
   if (buffer) {
     Insert(dev, key, hash, {buffer, count, 0, alloc}, alloc);
     ++st.uploads;
+    *out_count = count;
   }
   st.decode_ms += Ms(t1, Clock::now());
   return buffer;
@@ -655,7 +670,7 @@ nrhi::Buffer* GeometryCache::Colours(nrhi::Device* dev, const capture::DrawRecor
 
 nrhi::Buffer* GeometryCache::Indices(nrhi::Device* dev, const capture::DrawRecord& r,
                                      const capture::TerrainPatch* terrain, uint32_t vertex_count,
-                                     uint32_t* index_count, ClayStats& st) {
+                                     uint32_t* index_count, ClayStats& st, uint32_t* out_max_index) {
   const auto t0 = Clock::now();
   const uint8_t* data = nullptr;
   IndexBytes bytes;
@@ -719,7 +734,9 @@ nrhi::Buffer* GeometryCache::Indices(nrhi::Device* dev, const capture::DrawRecor
     return nullptr;
   }
   *index_count = entry->count;
+  if (out_max_index) *out_max_index = entry->max_index;
   return entry->buffer;
 }
+
 
 }  // namespace fable2::native::render

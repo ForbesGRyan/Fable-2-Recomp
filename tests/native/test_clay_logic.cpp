@@ -1294,7 +1294,7 @@ int main() {
     m.weight_scale = 56.0f;
     m.weight_bias = 57.0f;
     const float fix[2] = {0.5f, 0.25f};
-    static_assert(sizeof(ClayTerrainConstants) == 160 && kClayTerrainSlotBytes == 256);
+    static_assert(sizeof(ClayTerrainConstants) == 192 && kClayTerrainSlotBytes == 256);
     ClayTerrainConstants c = MakeClayTerrainConstants(m, MaterialKind::kTerrainLayer, fix, 1, 3);
     auto field = [](const char* name) -> const shaders::ClayTerrainField* {
       for (const shaders::ClayTerrainField& f : shaders::kClayTerrainFields) {
@@ -2116,8 +2116,8 @@ int main() {
     CHECK(408, ParseClayLight(" On ", &ok) == ClayLight::kOn && ok);
     CHECK(409, ParseClayLight("true", &ok) == ClayLight::kOff && !ok);
     CHECK(410, ParseClayLight("", &ok) == ClayLight::kOff && !ok && ParseClayLight("on", nullptr) == ClayLight::kOn);
-    // The exposure of the output mapping: 1 with light off (the materials picture), and 1 with light on
-    // until the lit shaders exist and it is calibrated.
+    // The exposure of the output mapping: 1 with light off (the materials picture), and with light on
+    // 1 as well while it is not calibrated (plan Task 9 fits it against the emulated frame).
     CHECK(411, ClayExposure(ClayLight::kOff) == 1.0f && ClayExposure(ClayLight::kOn) == 1.0f);
 
     // Target memory at the pass's size, and the line that reports it.
@@ -2131,10 +2131,521 @@ int main() {
     // same keys, and the same number of pipelines, as with the 8-bit target.
     CHECK(414, sizeof(PipelineKey) == 13);
   }
+
+  // 420-489: the light (frame-map section 14, "Native light").
+  {
+    using capture::LightFamily;
+    using capture::LightVertexKind;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    // Within single precision of the reference's double (relative, with a floor for values at 0).
+    auto close_to = [](float got, double want) { return std::fabs(double(got) - want) <= 2e-6 * std::max(1.0, std::fabs(want)); };
+    auto close3 = [&](const Float3& got, double x, double y, double z) { return close_to(got.x, x) && close_to(got.y, y) && close_to(got.z, z); };
+    auto finite3 = [](const Float3& v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+
+    // 420-429: the mirrors against the numbers of tools/xdk_sigmatch/light_formulas.py: the inputs and
+    // the literals of tests/test_light_check.py, PinnedForTheRenderer, composed as the shaders compose.
+    const Float3 tint{1.125f, 1.375f, 1.875f}, add{0.0068f, 0.071f, 0.092f}, floor{0.0588f, 0.0902f, 0.0f};
+    const Float3 sun_col{0.99f, 0.83f, 0.40f}, sun_dir{-0.6334f, 0.0346f, 0.7731f}, axis{-0.6332f, 0.0344f, 0.7732f};
+    const float tint_pow = 1.3f;
+    const Float3 A{0.36f, 0.25f, 0.16f}, baked{0.5f, 0.6f, 0.7f};
+    CHECK(420, close3(AmbientFactor(floor, 0.5f), 0.29410000000000003, 0.31765, 0.25));
+    CHECK(420, close3(AmbientAxis({-0.25f, 0.5f, 0.75f}, axis), -0.5863346399999999, 0.09134288000000004, 0.77036264));
+    CHECK(420, close3(LightPow({0.5f, -0.25f, 0.0f}, 1.3f), 0.40612619817811774, 0.16493848884661177, 0.0));
+    struct Layer {
+      float t, nds, gate;
+      Float3 colour;
+    };
+    auto layer = [&](float x, float y, float c11x) {
+      const Float3 n{x, y, std::sqrt(std::fabs(1.0f - x * x - y * y))};  // the vertex shader's normal
+      Layer out;
+      out.t = AmbientT(AmbientAxis(n, axis), n);
+      out.nds = LightDot(LightNormalize(n), sun_dir);
+      out.gate = SunGateSingle(1.0f, FacingGate(out.nds, 8.0f));
+      out.colour = LightTerrainLayer(A, baked, tint, tint_pow, add, floor, out.t, out.nds, sun_col, c11x, out.gate);
+      return out;
+    };
+    Layer got = layer(-0.25f, 0.5f, 1.0f);
+    CHECK(421, close_to(got.t, 0.8464635611181413) && close_to(got.nds, 0.8166706563559398) && got.gate == 1.0f &&
+                   close3(got.colour, 0.41410209137988163, 0.31851544194361503, 0.20218335739892443));
+    got = layer(0.75f, -0.5f, 1.0f);
+    CHECK(422, close_to(got.t, 0.7762633015448206) && close_to(got.nds, -0.15758788016712524) && got.gate == 0.0f &&
+                   close3(got.colour, 0.10540540036087104, 0.13071754433579474, 0.12842166302336305));
+    got = layer(0.6f, 0.55f, 0.75f);
+    CHECK(423, close_to(got.t, 0.6809123554006105) && close_to(got.nds, 0.08812051374294312) && close_to(got.gate, 0.704964109943545) &&
+                   close3(got.colour, 0.08506196574192819, 0.09415262382898765, 0.08062917350272386));
+    got = layer(0.9f, 0.8f, 1.0f);
+    CHECK(424, close_to(got.t, 0.8191864712988252) && close_to(got.nds, -0.017243666506090518) && got.gate == 0.0f &&
+                   close3(got.colour, 0.11600703589238615, 0.14174207696615995, 0.14134348129986526));
+    auto far_colour = [&](float x, float y, float c11x, float* t, float* nds) {
+      const Float3 N = LightNormalize({x, y, std::sqrt(std::fabs(1.0f - x * x - y * y))});
+      *t = LightDot(N, axis);
+      *nds = LightDot(N, sun_dir);
+      return LightTerrainFar({0.3f, 0.3f, 0.2f}, baked, tint, tint_pow, add, floor, *t, *nds, sun_col, c11x);
+    };
+    float t = 0, nds = 0;
+    Float3 c = far_colour(-0.25f, 0.5f, 0.48f, &t, &nds);
+    CHECK(425, close_to(t, 0.8166035719756988) && close_to(nds, 0.8166706563559398) &&
+                   close3(c, 0.21255202935748654, 0.26688275988662435, 0.20704296707043351));
+    c = far_colour(0.75f, -0.5f, 0.48f, &t, &nds);
+    CHECK(426, close_to(t, -0.15729457889693604) && close_to(nds, -0.15758788016712524) &&
+                   close3(c, 0.010099574402844745, 0.040452572541314194, 0.0184));
+    struct Object {
+      float t, nds;
+      Float3 vcolour, colour;
+    };
+    auto object = [&](const Float3& n, const float m[3][3], int r, int g, int b, float c27w, const Float3& c49,
+                      const Float3& c26) {
+      const Float3 o1{m[0][0] * n.x + m[0][1] * n.y + m[0][2] * n.z, m[1][0] * n.x + m[1][1] * n.y + m[1][2] * n.z,
+                      m[2][0] * n.x + m[2][1] * n.y + m[2][2] * n.z};  // the game's (R n) * c7.w
+      Object out;
+      out.t = AmbientT(AmbientAxis(o1, axis), o1);
+      out.nds = LightDot(LightNormalize(o1), sun_dir);
+      out.vcolour = VertexColour({float(r) / 255.0f, float(g) / 255.0f, float(b) / 255.0f}, 2.2f);
+      const Float3 lit = LightObject({0.5f, 0.4f, 0.3f}, out.vcolour, tint, tint_pow, add, floor, out.t, out.nds, sun_col,
+                                     c27w, SunGateSingle(1.0f, 1.0f), c49);
+      out.colour = {lit.x * c26.x, lit.y * c26.y, lit.z * c26.z};
+      return out;
+    };
+    const float m_rot[3][3] = {{0, -1, 0}, {1, 0, 0}, {0, 0, 1}};
+    const float m_skew[3][3] = {{1, 0, 0}, {0, 2, 0}, {0, 0, 0.5f}};
+    const float m_mirror[3][3] = {{-1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    const Float3 n{-0.6f, 0.0f, 0.8f}, one{1.0f, 1.0f, 1.0f};
+    Object o = object(n, m_rot, 200, 128, 64, 1.0f, one, one);
+    CHECK(427, close_to(o.t, 0.727362161936653) && close_to(o.nds, 0.59772) &&
+                   close3(o.vcolour, 0.5859729839496614, 0.2195197180748679, 0.04777575355617064) &&
+                   close3(o.colour, 0.4555938921109685, 0.2706276044156476, 0.10503584306025268));
+    o = object(n, m_rot, 200, 128, 64, 0.5f, {1.0f, 0.5f, 2.0f}, {1.0f, 1.0f, 0.5f});
+    CHECK(428, close3(o.colour, 0.3757326460554843, 0.1172676611039119, 0.08838112153012634));
+    o = object(n, m_skew, 200, 128, 64, 1.0f, one, one);
+    CHECK(429, close_to(o.t, 0.9653736259006114) && close_to(o.nds, 0.9558593781353147) &&
+                   close3(o.colour, 0.7393441381594212, 0.41761079399085327, 0.1523604668465132));
+    o = object(n, m_mirror, 200, 128, 64, 1.0f, one, one);
+    CHECK(429, close_to(o.t, 0.660085140197664) && close_to(o.nds, 0.23844000000000004) &&
+                   close3(o.colour, 0.2530825970423436, 0.14484074306862768, 0.06091490419395856));
+    // A zero normal is no direction: no sun, t = 0 (the ambient at its floor). A black colour: the
+    // added light and the sun remain.
+    o = object({0.0f, 0.0f, 0.0f}, m_rot, 200, 128, 64, 1.0f, one, one);
+    CHECK(430, o.t == 0.0f && o.nds == 0.0f && close3(o.colour, 0.01990975864609052, 0.03531010782579682, 0.0276));
+    o = object(n, m_rot, 0, 0, 0, 1.0f, one, one);
+    CHECK(431, o.vcolour.x == 0.0f && o.vcolour.y == 0.0f && o.vcolour.z == 0.0f &&
+                   close3(o.colour, 0.2992714, 0.22684304, 0.09932640000000001));
+
+    // 432-439: zeros and values that are not numbers give numbers, from every function (review
+    // focus 2); the same cases as test_light_check.py, test_zeros_and_non_finite_inputs_give_finite_numbers.
+    CHECK(432, LightSat(nan) == 0.0f && LightSat(inf) == 1.0f && LightSat(-inf) == 0.0f && LightSat(0.25f) == 0.25f);
+    const Float3 zero{0.0f, 0.0f, 0.0f}, bad{nan, inf, -inf};
+    Float3 v = LightNormalize(zero);
+    CHECK(433, v.x == 0.0f && v.y == 0.0f && v.z == 0.0f);
+    v = LightNormalize({nan, 1.0f, 0.0f});
+    CHECK(433, v.x == 0.0f && v.y == 0.0f && v.z == 0.0f);
+    v = LightNormalize({3.0e30f, 3.0e30f, 0.0f});  // (the squared length is not a number of the type)
+    CHECK(433, v.x == 0.0f && v.y == 0.0f && v.z == 0.0f);
+    v = LightNormalize({inf, 0.0f, 0.0f});
+    CHECK(433, v.x == 0.0f && v.y == 0.0f && v.z == 0.0f);
+    v = LightNormalize({0.0f, -inf, 1.0f});
+    CHECK(433, v.x == 0.0f && v.y == 0.0f && v.z == 0.0f);
+    v = LightNormalize({0.0f, 3.0f, 4.0f});
+    CHECK(433, v.x == 0.0f && close_to(v.y, 0.6) && close_to(v.z, 0.8));
+    CHECK(434, AmbientT(zero, {0.0f, 0.0f, 1.0f}) == 0.0f && AmbientT({0.0f, 0.0f, 1.0f}, {inf, 0.0f, 0.0f}) == 0.0f &&
+                   AmbientT({0.0f, 0.0f, 2.0f}, {0.0f, 0.0f, 0.5f}) == 1.0f);
+    // t is clamped: a vector that points away from the normal gives 0, not a negative factor.
+    CHECK(434, AmbientT({0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.0f}) == 0.0f && AmbientT({0.6f, 0.0f, -0.8f}, {0.0f, 0.0f, 1.0f}) == 0.0f);
+    v = LightPow({0.0f, -0.25f, nan}, 2.0f);
+    CHECK(435, v.x == 0.0f && v.y == 0.0625f && v.z == 0.0f);
+    v = LightPow({0.5f, 0.5f, 0.5f}, nan);
+    CHECK(435, v.x == 0.0f && v.y == 0.0f && v.z == 0.0f);
+    v = LightPow({inf, 1.0e30f, 0.5f}, 8.0f);  // (an overflow is 0, not infinity)
+    CHECK(435, v.x == 0.0f && v.y == 0.0f && v.z == 0.00390625f);
+    // A zero base is 0 whatever the exponent (0^0 would be 1), and an exponent that is not a number
+    // gives 0 whatever the base (1^infinity would be 1): the reference's rules.
+    v = LightPow({0.0f, 0.5f, 1.0f}, 0.0f);
+    CHECK(435, v.x == 0.0f && v.y == 1.0f && v.z == 1.0f);
+    v = LightPow({1.0f, 1.0f, 0.5f}, inf);
+    CHECK(435, v.x == 0.0f && v.y == 0.0f && v.z == 0.0f);
+    v = AmbientFactor({0.1f, nan, inf}, nan);
+    CHECK(436, v.x == 0.1f && v.y == 0.0f && v.z == 0.0f);
+    v = AmbientFactor({0.2f, 0.2f, 0.2f}, 7.0f);
+    CHECK(436, v.x == 1.0f && v.y == 1.0f && v.z == 1.0f);
+    CHECK(437, FacingGate(nan, 8.0f) == 0.0f && FacingGate(inf, nan) == 0.0f && FacingGate(0.0625f, 8.0f) == 0.5f &&
+                   SunGateSingle(nan, inf) == 0.0f && SunGateSingle(0.5f, 0.5f) == 0.25f && finite3(AmbientAxis(bad, bad)));
+    CHECK(438, finite3(LightTerrainLayer({0.0f, 1.0f, inf}, {0.0f, -1.0f, nan}, {1.0f, nan, 1.0f}, 1.3f, {0.0f, 0.0f, inf},
+                                         {0.0f, nan, 0.0f}, nan, inf, {nan, 1.0f, 1.0f}, nan, nan)) &&
+                   finite3(LightTerrainFar({0.0f, 1.0f, inf}, {0.0f, -1.0f, nan}, {1.0f, nan, 1.0f}, 1.3f, {0.0f, 0.0f, inf},
+                                           {0.0f, nan, 0.0f}, nan, inf, {nan, 1.0f, 1.0f}, nan)) &&
+                   finite3(LightObject(bad, bad, bad, inf, bad, bad, inf, nan, bad, nan, inf, bad)) &&
+                   finite3(LightObject({1.0e30f, 1.0e30f, 1.0e30f}, one, {1.0e30f, 1.0e30f, 1.0e30f}, 1.0f, zero, zero, 1.0f, 1.0f,
+                                       one, 1.0e30f, 1.0f, {1.0e30f, 1.0e30f, 1.0e30f})) &&
+                   finite3(VertexColour(bad, nan)));
+    v = LightObject(one, zero, one, 1.3f, zero, zero, 0.0f, 0.0f, one, 1.0f, 1.0f, one);
+    CHECK(438, v.x == 0.0f && v.y == 0.0f && v.z == 0.0f);
+    // What a lit draw writes: the value, not clamped at 1; nothing that is not a number, nothing
+    // negative, nothing above the bound. The bound keeps a pixel's sum of blended draws finite in the
+    // target (64,512 is the largest value of its 10-bit channel).
+    CHECK(439, ClayLit(0.25f) == 0.25f && ClayLit(2.5f) == 2.5f && ClayLit(1000.0f) == kClayLitMax && ClayLit(inf) == kClayLitMax &&
+                   ClayLit(nan) == 0.0f && ClayLit(-1.0f) == 0.0f && ClayLit(-inf) == 0.0f && ClayLit(0.0f) == 0.0f &&
+                   kClayLitMax == 64.0f && 1008.0f * kClayLitMax <= 64512.0f);
+    // ... and the mapping still gives a display value for anything it holds.
+    CHECK(439, OutputMap(ClayLit(2.5f), 1.0f) == 1.0f && OutputMap(ClayLit(0.25f), 1.0f) == 0.5f &&
+                   OutputMap(ClayLit(2.5f), 0.1f) == 0.5f);
+
+    // 440-449: the frame's constants from the light block.
+    capture::LightBlock block{};
+    const float block_sun[3] = {-0.6334f, 0.0346f, 0.7731f};
+    for (int i = 0; i < 3; ++i) {
+      block.sun_dir[i] = block_sun[i];
+      block.sun_col[i] = 0.1f + float(i);
+      block.tint[i] = 1.1f + float(i);
+      block.add[i] = 0.01f + float(i);
+      block.axis[i] = 0.2f + float(i);
+      block.eye[i] = 50.0f + float(i);
+    }
+    block.tint_pow = 1.3f;
+    block.out_scale = 16.0f;
+    block.floor[0] = 0.0588f;
+    block.floor[1] = 0.0902f;
+    block.valid = true;
+    static_assert(sizeof(ClayFrameConstants) == 96);
+    ClayFrameConstants frame = MakeClayFrameConstants(block, ClayLight::kOn);
+    CHECK(440, frame.light_on == 1 && frame.tint_pow == 1.3f && frame.floor[0] == 0.0588f && frame.floor[1] == 0.0902f &&
+                   frame.floor[2] == 0.0f);
+    for (int i = 0; i < 3; ++i) {
+      CHECK(441, frame.sun_dir[i] == block_sun[i] && frame.sun_col[i] == 0.1f + float(i) && frame.tint[i] == 1.1f + float(i) &&
+                     frame.add[i] == 0.01f + float(i) && frame.axis[i] == 0.2f + float(i));
+    }
+    // The output scale (16) is not in the block the shaders get, and no exposure is: one source.
+    CHECK(442, frame.pad0 == 0.0f && frame.pad1 == 0.0f && frame.pad2 == 0.0f && frame.pad3 == 0.0f &&
+                   ClayFrameExposure(frame) == ClayExposure(ClayLight::kOn));
+    // The switch off, or no block: nothing lit, everything zero, exposure 1 (the materials picture).
+    const ClayFrameConstants none{};
+    frame = MakeClayFrameConstants(block, ClayLight::kOff);
+    CHECK(443, std::memcmp(&frame, &none, sizeof(frame)) == 0 && ClayFrameExposure(frame) == ClayExposure(ClayLight::kOff));
+    capture::LightBlock invalid = block;
+    invalid.valid = false;
+    frame = MakeClayFrameConstants(invalid, ClayLight::kOn);
+    CHECK(444, std::memcmp(&frame, &none, sizeof(frame)) == 0);
+    frame = MakeClayFrameConstants(capture::LightBlock{}, ClayLight::kOn);
+    CHECK(444, std::memcmp(&frame, &none, sizeof(frame)) == 0);
+    // A value that is not a number or not of usable size never reaches a shader: the frame is not lit.
+    for (int field = 0; field < 8; ++field) {
+      for (float value : {nan, inf, -inf, 2.0f * kLightValueMax}) {
+        capture::LightBlock b = block;
+        float* at[] = {&b.sun_dir[1], &b.sun_col[2], &b.tint[0], &b.add[1], &b.axis[2], &b.floor[0], &b.floor[1], &b.tint_pow};
+        *at[field] = value;
+        frame = MakeClayFrameConstants(b, ClayLight::kOn);
+        CHECK(445, std::memcmp(&frame, &none, sizeof(frame)) == 0);
+      }
+    }
+    capture::LightBlock edge = block;
+    edge.tint_pow = 0.0f;
+    CHECK(446, MakeClayFrameConstants(edge, ClayLight::kOn).light_on == 0);
+    edge.tint_pow = 8.0f;
+    edge.tint[0] = kLightValueMax;
+    edge.add[0] = -kLightValueMax;
+    CHECK(446, MakeClayFrameConstants(edge, ClayLight::kOn).light_on == 1);
+    edge.tint_pow = 8.5f;
+    CHECK(446, MakeClayFrameConstants(edge, ClayLight::kOn).light_on == 0);
+    CHECK(447, LightValueUsable(0.0f) && LightValueUsable(-1024.0f) && !LightValueUsable(1024.5f) && !LightValueUsable(nan) &&
+                   !LightValueUsable(inf));
+
+    // 450-459: a lit object's constants.
+    capture::LightInputs obj;
+    obj.family = LightFamily::kObject;
+    obj.kind = LightVertexKind::kStream;
+    obj.colour_power = 2.2f;
+    const float rot[3][3] = {{0.0f, -2.0f, 0.0f}, {2.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 2.0f}};
+    std::memcpy(obj.world_rot, rot, sizeof(rot));
+    obj.world_scale = 0.5f;
+    obj.c27w = 0.75f;
+    obj.c49[0] = 1.0f; obj.c49[1] = 0.5f; obj.c49[2] = 2.0f;
+    obj.c26[0] = 0.25f; obj.c26[1] = 1.0f; obj.c26[2] = 0.5f;
+    static_assert(sizeof(ClayObjectConstants) == 80);
+    ClayObjectConstants oc;
+    CHECK(450, MakeClayObjectConstants(obj, &oc));
+    // M = world_rot * world_scale, rows, the fourth component 0.
+    CHECK(451, oc.rot[0][0] == 0.0f && oc.rot[0][1] == -1.0f && oc.rot[0][2] == 0.0f && oc.rot[0][3] == 0.0f &&
+                   oc.rot[1][0] == 1.0f && oc.rot[1][1] == 0.0f && oc.rot[1][3] == 0.0f && oc.rot[2][2] == 1.0f && oc.rot[2][3] == 0.0f);
+    CHECK(452, oc.c49[0] == 1.0f && oc.c49[1] == 0.5f && oc.c49[2] == 2.0f && oc.c27w == 0.75f && oc.c26[0] == 0.25f &&
+                   oc.c26[1] == 1.0f && oc.c26[2] == 0.5f && oc.colour_power == 2.2f);
+    // The scale is inside the matrix, so its sign counts: a negative c7.w turns the normal, as in the game.
+    capture::LightInputs neg = obj;
+    neg.world_scale = -0.5f;
+    CHECK(453, ClassifyRotation(neg.world_rot, neg.world_scale) == RotationKind::kMirrored && MakeClayObjectConstants(neg, &oc) &&
+                   oc.rot[0][1] == 1.0f && oc.rot[1][0] == -1.0f && oc.rot[2][2] == -1.0f);
+    // A skewed rotation is lit with the game's own M n; one without a direction is not lit.
+    capture::LightInputs skew = obj;
+    skew.world_rot[1][0] = 4.0f;
+    CHECK(454, ClassifyRotation(skew.world_rot, skew.world_scale) == RotationKind::kSkewed && MakeClayObjectConstants(skew, &oc) &&
+                   oc.rot[1][0] == 2.0f);
+    capture::LightInputs flat = obj;
+    flat.world_scale = 0.0f;
+    const ClayObjectConstants empty{};
+    CHECK(455, !MakeClayObjectConstants(flat, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0);
+    flat = obj;
+    flat.world_rot[2][0] = flat.world_rot[2][1] = flat.world_rot[2][2] = 0.0f;
+    CHECK(455, !MakeClayObjectConstants(flat, &oc));
+    // Values that are not numbers, a power outside (0, 8], another family or vertex kind: not lit.
+    for (int field = 0; field < 5; ++field) {
+      for (float value : {nan, inf, 4.0f * kLightValueMax}) {
+        capture::LightInputs b = obj;
+        float* at[] = {&b.world_rot[0][1], &b.world_scale, &b.c27w, &b.c49[1], &b.c26[2]};
+        *at[field] = value;
+        CHECK(456, !MakeClayObjectConstants(b, &oc) && std::memcmp(&oc, &empty, sizeof(oc)) == 0);
+      }
+    }
+    for (float power : {0.0f, -2.2f, 8.5f, nan}) {
+      capture::LightInputs b = obj;
+      b.colour_power = power;
+      CHECK(457, !MakeClayObjectConstants(b, &oc));
+    }
+    capture::LightInputs other = obj;
+    other.kind = LightVertexKind::kProbe;
+    CHECK(458, !MakeClayObjectConstants(other, &oc) && !LightFamilyDrawn(other));
+    other = obj;
+    other.family = LightFamily::kTreeTrunk;
+    CHECK(458, !MakeClayObjectConstants(other, &oc) && !LightFamilyDrawn(other));
+    // The families the pass lights: the terrain layers, the far terrain and the colour-stream objects,
+    // with their two- and four-light forms; nothing else.
+    auto drawn = [](LightFamily f, LightVertexKind k, bool multi) {
+      capture::LightInputs l;
+      l.family = f;
+      l.kind = k;
+      l.multi = multi;
+      return LightFamilyDrawn(l);
+    };
+    CHECK(459, drawn(LightFamily::kTerrainLayer, LightVertexKind::kTerrain, false) &&
+                   drawn(LightFamily::kTerrainLayer, LightVertexKind::kTerrain, true) &&
+                   drawn(LightFamily::kTerrainFar, LightVertexKind::kTerrain, false) &&
+                   drawn(LightFamily::kObject, LightVertexKind::kStream, false) &&
+                   drawn(LightFamily::kObject, LightVertexKind::kStream, true));
+    CHECK(459, !drawn(LightFamily::kObject, LightVertexKind::kProbe, false) && !drawn(LightFamily::kTreeTrunk, LightVertexKind::kProbe, false) &&
+                   !drawn(LightFamily::kPlant, LightVertexKind::kInstance, false) && !drawn(LightFamily::kPlantLit, LightVertexKind::kInstance, false) &&
+                   !drawn(LightFamily::kNone, LightVertexKind::kNone, false) && !drawn(LightFamily::kTerrainLayer, LightVertexKind::kStream, false) &&
+                   !drawn(LightFamily::kObject, LightVertexKind::kTerrain, false));
+
+    // 460-464: the light's part of the terrain constants, at the offsets the HLSL declares.
+    capture::TerrainMaterialInputs tm;
+    tm.valid = true;
+    tm.base_valid = true;
+    for (int i = 0; i < 4; ++i) tm.base_uv[i] = 8.0f + float(i);
+    capture::LightInputs tl;
+    tl.family = LightFamily::kTerrainLayer;
+    tl.kind = LightVertexKind::kTerrain;
+    tl.c11x = 0.75f;
+    tl.facing_scale = 8.0f;
+    const float colour_fix[2] = {1.0f, 1.0f}, base_fix[2] = {0.5f, 0.25f};
+    ClayTerrainConstants tc = MakeClayTerrainConstants(tm, capture::MaterialKind::kTerrainLayer, colour_fix, 1, 3);
+    auto at = [&](const char* name) -> const unsigned char* {
+      for (const shaders::ClayTerrainField& f : shaders::kClayTerrainFields) {
+        if (std::strcmp(f.name, name) == 0) return reinterpret_cast<const unsigned char*>(&tc) + f.offset;
+      }
+      return nullptr;
+    };
+    auto f32 = [&](const char* name, int i) {
+      float got = nan;
+      if (const unsigned char* p = at(name)) std::memcpy(&got, p + 4 * i, 4);
+      return got;
+    };
+    auto u32 = [&](const char* name) {
+      uint32_t got = ~0u;
+      if (const unsigned char* p = at(name)) std::memcpy(&got, p, 4);
+      return got;
+    };
+    // (without the light the block's light fields are zero)
+    CHECK(460, f32("t_base_uv", 0) == 0.0f && f32("t_c11x", 0) == 0.0f && f32("t_facing_scale", 0) == 0.0f && u32("t_base_sampler") == 0);
+    CHECK(461, SetClayTerrainLight(tc, tm, tl, base_fix, 3));
+    // The base coordinate is scaled into the host texture's extent like the detail coordinate.
+    CHECK(461, f32("t_base_uv", 0) == 4.0f && f32("t_base_uv", 1) == 2.25f && f32("t_base_uv", 2) == 5.0f && f32("t_base_uv", 3) == 2.75f &&
+                   u32("t_base_sampler") == 3 && f32("t_c11x", 0) == 0.75f && f32("t_facing_scale", 0) == 8.0f && u32("t_light_pad") == 0);
+    capture::LightInputs tf = tl;
+    tf.family = LightFamily::kTerrainFar;
+    tf.facing_scale = 0.0f;
+    tf.c11x = 0.48f;
+    tc = MakeClayTerrainConstants(tm, capture::MaterialKind::kTerrainFar, colour_fix, 1, 3);
+    CHECK(462, SetClayTerrainLight(tc, tm, tf, base_fix, 1) && f32("t_c11x", 0) == 0.48f && f32("t_facing_scale", 0) == 0.0f &&
+                   u32("t_base_sampler") == 1);
+    // Without the base map's inputs, a layer's facing literal, a usable c11.x or a terrain family: no
+    // light, and the block is left as it was.
+    const ClayTerrainConstants before = MakeClayTerrainConstants(tm, capture::MaterialKind::kTerrainLayer, colour_fix, 1, 3);
+    auto refused = [&](const capture::TerrainMaterialInputs& m, const capture::LightInputs& l) {
+      ClayTerrainConstants k = before;
+      return !SetClayTerrainLight(k, m, l, base_fix, 3) && std::memcmp(&k, &before, sizeof(k)) == 0;
+    };
+    capture::TerrainMaterialInputs no_base = tm;
+    no_base.base_valid = false;
+    capture::TerrainMaterialInputs not_valid = tm;
+    not_valid.valid = false;
+    capture::TerrainMaterialInputs wild = tm;
+    wild.base_uv[2] = inf;
+    CHECK(463, refused(no_base, tl) && refused(not_valid, tl) && refused(wild, tl));
+    capture::LightInputs no_facing = tl;
+    no_facing.facing_scale = 0.0f;
+    capture::LightInputs bad_c11 = tl;
+    bad_c11.c11x = nan;
+    capture::LightInputs not_terrain = tl;
+    not_terrain.family = LightFamily::kObject;
+    capture::LightInputs wrong_kind = tl;
+    wrong_kind.kind = LightVertexKind::kStream;
+    CHECK(464, refused(tm, no_facing) && refused(tm, bad_c11) && refused(tm, not_terrain) && refused(tm, wrong_kind) &&
+                   refused(tm, capture::LightInputs{}));
+
+    // 465-469: the draw's light words, and how many elements the light's buffers must hold.
+    const capture::DrawRecord r = BaseRecord();
+    const float uv[4] = {1.0f, 1.0f, 0.0f, 0.0f};
+    ClayConstants dc = MakeClayConstants(r, 100, 0, uv, true, 1);
+    CHECK(465, dc.light_mode == 0 && dc.light_count == 0 && dc.pad2 == 0);
+    dc = MakeClayConstants(r, 100, 0, uv, true, 1, ClayAlpha{}, kLightModeObject | kLightModeLit, 60);
+    CHECK(466, dc.light_mode == 6 && dc.light_count == 60);
+    // Never more than the positions, and nothing without a mode.
+    dc = MakeClayConstants(r, 100, 0, uv, true, 1, ClayAlpha{}, kLightModeTerrainNormals, 500);
+    CHECK(466, dc.light_mode == 1 && dc.light_count == 100);
+    dc = MakeClayConstants(r, 100, 0, uv, true, 1, ClayAlpha{}, 0, 500);
+    CHECK(466, dc.light_mode == 0 && dc.light_count == 0);
+    CHECK(467, kLightModeTerrainNormals == 1u && kLightModeObject == 2u && kLightModeLit == 4u);
+    // The draw's largest vertex plus one (the capture's rule for the streams), not the stream's size:
+    // a mesh of 28 vertices in a position stream of 528 needs 28 normals and colours.
+    CHECK(468, LightVertexNeed(27, 0, 528) == 28 && LightVertexNeed(27, 100, 528) == 128 && LightVertexNeed(527, 0, 528) == 528 &&
+                   LightVertexNeed(0, 0, 1) == 1);
+    CHECK(469, LightVertexNeed(528, 0, 528) == 0 && LightVertexNeed(27, 501, 528) == 0 && LightVertexNeed(3, -4, 528) == 0 &&
+                   LightVertexNeed(3, -3, 528) == 1 && LightVertexNeed(0, 0, 0) == 0);
+
+    // 470-476: the light of a ground square is all or nothing (PlanTerrain).
+    auto patch_of = [](float ox, float oy, float patch, float cols, uint32_t patches) {
+      capture::TerrainPatch p;
+      p.active = true;
+      p.patch = patch;
+      p.patches = patches;
+      p.cols = cols;
+      p.inv_cols = 1.0f / cols;
+      p.cell[0] = p.cell[1] = 8.0f;
+      p.origin[0] = ox;
+      p.origin[1] = oy;
+      return p;
+    };
+    const capture::TerrainPatch sq_a = patch_of(80, 144, 0, 6, 1), sq_b = patch_of(88, 144, 0, 6, 1);
+    const capture::TerrainPatch sq_ab = patch_of(80, 144, 0, 6, 2);   // one draw over both squares
+    const capture::TerrainPatch under = patch_of(48, 96, 72, 12, 12);   // twelve squares at y 144, x 48 to 144
+    auto item = [](const capture::TerrainPatch& p, bool layer, bool light, bool usable = true) {
+      TerrainPlanItem i;
+      i.patch = &p;
+      i.layer = layer;
+      i.usable = usable;
+      i.light = light;
+      return i;
+    };
+    // L lit, u drawn with its material without light, - not drawn with its material (and not lit:
+    // X would be a record lit without its material).
+    auto lights = [](std::vector<TerrainPlanItem> items) {
+      PlanTerrain(items);
+      std::string s;
+      for (const TerrainPlanItem& i : items) {
+        s += i.action != TerrainAction::kMaterial ? (i.light ? 'X' : '-') : i.light ? 'L' : 'u';
+      }
+      return s;
+    };
+
+    const bool kLayer = true, kFarDraw = false;
+    CHECK(470, lights({item(under, kFarDraw, true), item(sq_a, kLayer, true), item(sq_a, kLayer, true), item(sq_b, kLayer, true)}) == "LLLL");
+    // One layer of a square cannot be lit: every layer of that square is unlit; the other square and
+    // the underlay keep their light.
+    CHECK(471, lights({item(under, kFarDraw, true), item(sq_a, kLayer, true), item(sq_a, kLayer, false), item(sq_b, kLayer, true)}) == "LuuL");
+    CHECK(471, lights({item(sq_a, kLayer, false), item(sq_a, kLayer, true), item(sq_a, kLayer, true)}) == "uuu");
+    // A layer draw of several patches ties its squares together, in whichever order they come.
+    CHECK(472, lights({item(sq_ab, kLayer, true), item(sq_a, kLayer, true), item(sq_b, kLayer, false)}) == "uuu");
+    CHECK(472, lights({item(sq_b, kLayer, false), item(sq_a, kLayer, true), item(sq_ab, kLayer, true)}) == "uuu");
+    // An underlay without light does not take the light from the layers over it, nor the reverse.
+    CHECK(473, lights({item(under, kFarDraw, false), item(sq_a, kLayer, true)}) == "uL" &&
+                   lights({item(under, kFarDraw, true), item(sq_a, kLayer, false)}) == "Lu");
+    // A record that is not drawn with its material has no light, and a square that fell back has none.
+    CHECK(474, lights({item(under, kFarDraw, true), item(sq_a, kLayer, true), item(sq_a, kLayer, true, false), item(sq_b, kLayer, true)}) == "L--L");
+    CHECK(474, lights({item(under, kFarDraw, true, false), item(sq_a, kLayer, true)}) == "--");
+    {
+      // Over the plan's budget every layer is flat: none is lit; a far draw keeps its own.
+      capture::TerrainPatch row = patch_of(0, 0, 0, 4096, 4096);
+      std::vector<TerrainPlanItem> many(5, item(row, kLayer, true));
+      many.push_back(item(under, kFarDraw, true));
+      PlanTerrain(many);
+      bool none_lit = true;
+      for (size_t i = 0; i < 5; ++i) none_lit = none_lit && !many[i].light && many[i].action == TerrainAction::kFlat;
+      CHECK(475, none_lit && many[5].light && many[5].action == TerrainAction::kMaterial);
+    }
+    {
+      // The scratch storage keeps no light state between frames.
+      TerrainPlanScratch scratch;
+      std::vector<TerrainPlanItem> first = {item(sq_a, kLayer, false), item(sq_a, kLayer, true)};
+      PlanTerrain(first, &scratch);
+      std::vector<TerrainPlanItem> second = {item(sq_a, kLayer, true), item(sq_a, kLayer, true)};
+      PlanTerrain(second, &scratch);
+      CHECK(476, !first[0].light && !first[1].light && second[0].light && second[1].light);
+    }
+
+    // 480-489: the Light line.
+    ClayStats st;
+    CHECK(480, FormatLightDrawnText(st) ==
+                   "Light: off, lit 0 (terrain-layer 0, terrain-far 0, object 0, tree-trunk 0, plant 0, plant-lit 0), unlit 0");
+    st.light_unlit[size_t(ClayUnlit::kOff)] = 948;
+    CHECK(481, FormatLightDrawnText(st) ==
+                   "Light: off, lit 0 (terrain-layer 0, terrain-far 0, object 0, tree-trunk 0, plant 0, plant-lit 0), "
+                   "unlit 948 {light-off: 948}");
+    st = ClayStats{};
+    st.light_switch = true;
+    st.light_unlit[size_t(ClayUnlit::kBlock)] = 12;
+    CHECK(482, FormatLightDrawnText(st) ==
+                   "Light: on, block missing, lit 0 (terrain-layer 0, terrain-far 0, object 0, tree-trunk 0, plant 0, plant-lit 0), "
+                   "unlit 12 {light-block: 12}");
+    st = ClayStats{};
+    st.light_switch = st.light_block = true;
+    st.light_drawn[size_t(LightFamily::kTerrainLayer)] = 492;
+    st.light_drawn[size_t(LightFamily::kTerrainFar)] = 72;
+    st.light_drawn[size_t(LightFamily::kObject)] = 120;
+    st.light_unlit[size_t(ClayUnlit::kUnknown)] = 262;
+    st.light_unlit[size_t(ClayUnlit::kNormal)] = 2;
+    for (int i = 0; i < 3; ++i) st.light_unlit_by_ps.Add(0x7CD57B81550F19E3ull, uint8_t(ClayUnlit::kUnknown));
+    st.light_unlit_by_ps.Add(0x401A000000000001ull, uint8_t(ClayUnlit::kUnknown));
+    for (int i = 0; i < 2; ++i) st.light_unlit_by_ps.Add(0x8D900846800943C8ull, uint8_t(ClayUnlit::kNormal));
+    st.light_sun_dir[0] = -0.6334f; st.light_sun_dir[1] = 0.0346f; st.light_sun_dir[2] = 0.7731f;
+    st.light_sun_col[0] = 0.99f; st.light_sun_col[1] = 0.8306f; st.light_sun_col[2] = 0.4f;
+    CHECK(483, FormatLightDrawnText(st) ==
+                   "Light: on, block valid, lit 684 (terrain-layer 492, terrain-far 72, object 120, tree-trunk 0, plant 0, "
+                   "plant-lit 0), unlit 264 {light-unknown: 262, normal-unsupported: 2}, unknown {0x7CD57B81550F19E3: 3, "
+                   "0x8D900846800943C8: 2, 0x401A000000000001: 1}, sun (-0.633, 0.035, 0.773) colour (0.990, 0.831, 0.400)");
+    CHECK(484, std::string(ClayUnlitName(ClayUnlit::kOff)) == "light-off" && std::string(ClayUnlitName(ClayUnlit::kBlock)) == "light-block" &&
+                   std::string(ClayUnlitName(ClayUnlit::kUnknown)) == "light-unknown" &&
+                   std::string(ClayUnlitName(ClayUnlit::kNormal)) == "normal-unsupported");
+  }
+  // The light's three buffer registers (t8, t9, t10): every draw binds all three, its own buffer where
+  // its light_mode names it and its positions where not. (A buffer bound by address has no bounds check:
+  // one left bound by another draw is read past its end; the first build's three lit runs ended so.)
+  {
+    using B = ClayLightBuffer;
+    auto is = [](uint32_t mode, B t8, B t9, B t10) {
+      const ClayLightBuffers s = LightBufferSources(mode);
+      return s.source[0] == t8 && s.source[1] == t9 && s.source[2] == t10;
+    };
+    // No light input: the positions at all three (an unlit textured draw, a flat draw, light off).
+    CHECK(485, is(0, B::kPositions, B::kPositions, B::kPositions));
+    // The lit bit alone names no buffer.
+    CHECK(485, is(kLightModeLit, B::kPositions, B::kPositions, B::kPositions));
+    // Terrain (steep ground without light, and lit): its normals at t8 only.
+    CHECK(486, is(kLightModeTerrainNormals, B::kTerrainNormals, B::kPositions, B::kPositions));
+    CHECK(486, is(kLightModeTerrainNormals | kLightModeLit, B::kTerrainNormals, B::kPositions, B::kPositions));
+    // A lit object: its normals at t9 and its colours at t10, the positions at t8.
+    CHECK(487, is(kLightModeObject | kLightModeLit, B::kPositions, B::kNormals, B::kColours));
+    CHECK(487, is(kLightModeObject, B::kPositions, B::kNormals, B::kColours));
+    // The three registers are the layout's last three parameters, vertex stage, buffers.
+    for (uint32_t i = 0; i < 3; ++i) {
+      const ClayBinding& b = kClayBindings[kClayLightBufferParam0 + i];
+      CHECK(488, b.kind == ClayBindingKind::kBuffer && b.reg == 8 + i && b.stage == ClayBindingStage::kVertex);
+    }
+    // The stand-in holds more per vertex than any of the three elements.
+    CHECK(488, kClayPositionElementBytes == 16 && kClayLightElementBytesMax == 12);
+  }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
                "alpha-to-mask, terrain keys, terrain draw state, terrain constants, terrain squares, "
-               "terrain text, normal and colour keys, light text, linear target and output mapping\n";
+               "terrain text, normal and colour keys, light text, linear target and output mapping, light functions "
+               "against the reference's numbers, frame and object and terrain light constants, lit squares, Light line, light buffer sources\n";
+
   return 0;
 }

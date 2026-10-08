@@ -262,6 +262,99 @@ class Formulas(unittest.TestCase):
             self.assertTrue(all(math.isfinite(x) for x in got), got)
 
 
+class PinnedForTheRenderer(unittest.TestCase):
+    """Plan Task 7: numbers of the reference that the native renderer's pure mirrors are held against
+    (tests/native/test_clay_logic.cpp, cases 420 to 449, has the same inputs and the same literals). Each
+    case composes the functions as the clay shaders do: the vertex side makes the normal and the vector
+    of t, the pixel side normalises, takes the two dot products and calls the family's function with the
+    mask at 1. The frame values are rounded ones of a captured light block (the bridge, 2026-10-08)."""
+    TINT, TINT_POW, ADD = [1.125, 1.375, 1.875], 1.3, [0.0068, 0.071, 0.092]
+    FLOOR, SUN_COL = [0.0588, 0.0902, 0.0], [0.99, 0.83, 0.40]
+    SUN_DIR, AXIS = [-0.6334, 0.0346, 0.7731], [-0.6332, 0.0344, 0.7732]
+    A, BAKED = [0.36, 0.25, 0.16], [0.5, 0.6, 0.7]
+    M_ROT = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+    M_SKEW = [[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 0.5]]
+    M_MIRROR = [[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+
+    def close(self, got, want):
+        self.assertEqual(len(got), len(want))
+        for g, w in zip(got, want):
+            self.assertAlmostEqual(g, w, places=12)
+
+    def layer(self, xy, c11x, scale=8.0):
+        n = [xy[0], xy[1], math.sqrt(abs(1.0 - xy[0] * xy[0] - xy[1] * xy[1]))]     # the vertex shader's normal
+        big_n = lf.normalize(n)
+        t = lf.ambient_t(lf.ambient_axis(n, self.AXIS), n)
+        nds = lf.dot(big_n, self.SUN_DIR)
+        gate = lf.sun_gate_single(1.0, lf.facing_gate(nds, scale))
+        return [t, nds, gate] + lf.terrain_layer(self.A, self.BAKED, self.TINT, self.TINT_POW, self.ADD, self.FLOOR, t,
+                                                 nds, self.SUN_COL, c11x, sun_gate=gate)
+
+    def far(self, xy, c11x):
+        big_n = lf.normalize([xy[0], xy[1], math.sqrt(abs(1.0 - xy[0] * xy[0] - xy[1] * xy[1]))])
+        t, nds = lf.dot(big_n, self.AXIS), lf.dot(big_n, self.SUN_DIR)
+        return [t, nds] + lf.terrain_far([0.3, 0.3, 0.2], self.BAKED, self.TINT, self.TINT_POW, self.ADD, self.FLOOR, t,
+                                         nds, self.SUN_COL, c11x)
+
+    def obj(self, n, m, rgb, c27w=1.0, c49=(1.0, 1.0, 1.0), c26=(1.0, 1.0, 1.0)):
+        o1 = [lf.dot(row, n) for row in m]                                          # the game's (R n) * c7.w
+        t = lf.ambient_t(lf.ambient_axis(o1, self.AXIS), o1)
+        nds = lf.dot(lf.normalize(o1), self.SUN_DIR)
+        vcolour = lf.vertex_colour([c / 255.0 for c in rgb], 2.2)
+        c = lf.lit_object([0.5, 0.4, 0.3], vcolour, self.TINT, self.TINT_POW, self.ADD, self.FLOOR, t, nds, self.SUN_COL,
+                          c27w, lf.sun_gate_single(1.0, 1.0), c49=list(c49))
+        return [t, nds] + vcolour + [c[i] * c26[i] for i in range(3)]
+
+    def test_shared_pieces(self):
+        self.close(lf.ambient_factor(self.FLOOR, 0.5), [0.29410000000000003, 0.31765, 0.25])
+        self.close(lf.ambient_axis([-0.25, 0.5, 0.75], self.AXIS), [-0.5863346399999999, 0.09134288000000004, 0.77036264])
+        self.close(lf.powc([0.5, -0.25, 0.0], 1.3), [0.40612619817811774, 0.16493848884661177, 0.0])
+
+    def test_terrain_layer(self):
+        # Facing the sun: the facing factor is 1.
+        self.close(self.layer((-0.25, 0.5), 1.0), [0.8464635611181413, 0.8166706563559398, 1.0,
+                                                   0.41410209137988163, 0.31851544194361503, 0.20218335739892443])
+        # Facing away: no sun, the ambient alone.
+        self.close(self.layer((0.75, -0.5), 1.0), [0.7762633015448206, -0.15758788016712524, 0.0,
+                                                   0.10540540036087104, 0.13071754433579474, 0.12842166302336305])
+        # Grazing: sat(8 * (N . c109)) is between 0 and 1; c11.x 0.75 scales the ambient part only.
+        self.close(self.layer((0.6, 0.55), 0.75), [0.6809123554006105, 0.08812051374294312, 0.704964109943545,
+                                                   0.08506196574192819, 0.09415262382898765, 0.08062917350272386])
+        # A map normal outside the unit disk (x^2 + y^2 > 1): z is the root of the absolute value.
+        self.close(self.layer((0.9, 0.8), 1.0), [0.8191864712988252, -0.017243666506090518, 0.0,
+                                                 0.11600703589238615, 0.14174207696615995, 0.14134348129986526])
+
+    def test_terrain_far(self):
+        self.close(self.far((-0.25, 0.5), 0.48), [0.8166035719756988, 0.8166706563559398,
+                                                  0.21255202935748654, 0.26688275988662435, 0.20704296707043351])
+        self.close(self.far((0.75, -0.5), 0.48), [-0.15729457889693604, -0.15758788016712524,
+                                                  0.010099574402844745, 0.040452572541314194, 0.0184])
+
+    def test_object(self):
+        n = [-0.6, 0.0, 0.8]
+        colour = [0.5859729839496614, 0.2195197180748679, 0.04777575355617064]      # pow((200, 128, 64) / 255, 2.2)
+        self.close(self.obj(n, self.M_ROT, (200, 128, 64)),
+                   [0.727362161936653, 0.59772] + colour + [0.4555938921109685, 0.2706276044156476, 0.10503584306025268])
+        # c27.w on the ambient part, c49 on the whole colour, c26 after the function.
+        self.close(self.obj(n, self.M_ROT, (200, 128, 64), c27w=0.5, c49=(1.0, 0.5, 2.0), c26=(1.0, 1.0, 0.5)),
+                   [0.727362161936653, 0.59772] + colour + [0.3757326460554843, 0.1172676611039119, 0.08838112153012634])
+        # A scale that is not uniform: the game's own normalize(M n), not the inverse transpose.
+        self.close(self.obj(n, self.M_SKEW, (200, 128, 64)),
+                   [0.9653736259006114, 0.9558593781353147] + colour + [0.7393441381594212, 0.41761079399085327, 0.1523604668465132])
+        # A mirror: M n as it is, sign included.
+        self.close(self.obj(n, self.M_MIRROR, (200, 128, 64)),
+                   [0.660085140197664, 0.23844000000000004] + colour + [0.2530825970423436, 0.14484074306862768, 0.06091490419395856])
+
+    def test_no_direction_and_no_colour(self):
+        # A zero normal is no direction: no sun and t = 0, the ambient at its floor (blue has none).
+        colour = [0.5859729839496614, 0.2195197180748679, 0.04777575355617064]
+        self.close(self.obj([0.0, 0.0, 0.0], self.M_ROT, (200, 128, 64)),
+                   [0.0, 0.0] + colour + [0.01990975864609052, 0.03531010782579682, 0.0276])
+        # A black stream colour: the added light and the sun remain.
+        self.close(self.obj([-0.6, 0.0, 0.8], self.M_ROT, (0, 0, 0)),
+                   [0.727362161936653, 0.59772, 0.0, 0.0, 0.0, 0.2992714, 0.22684304, 0.09932640000000001])
+
+
 class SyntheticDump(unittest.TestCase):
     """Always runs: the checker on a hand-written shader of the terrain layers' form."""
 
@@ -313,8 +406,125 @@ class SyntheticDump(unittest.TestCase):
 
 
 @unittest.skipUnless(DUMPS.is_dir(), NO_DUMPS)
+class MultiSun(unittest.TestCase):
+    """Controller amendment C2 (plan Task 7): a two- or four-light pair is drawn by the native pass with
+    the frame's sun through its family's ONE-light function. That is right only if the shader's own
+    arithmetic, with the light set as the game loads it (the sun behind dark lanterns, c112 one-hot at
+    its slot, c94 zero there, w = 0), is that function."""
+    TRIALS = 24
+
+    def test_every_pair_is_its_one_light_function_at_every_slot_behind_light_0(self):
+        checked = 0
+        for family in lc.MULTI_SUN_FAMILIES:
+            for ps, vs in lc.FAMILIES[family]:
+                for slot in range(1, lc.MULTI_LIGHTS[ps]):
+                    with self.subTest(family=family, ps=ps, vs=vs, slot=slot):
+                        res = lc.check_multi_sun(family, ps, vs, slot, trials=self.TRIALS)
+                        self.assertTrue(res.ok, f"{res.agree}/{res.trials} worst {res.worst:.3g} {res.first_bad}")
+                        self.assertEqual(res.trials, self.TRIALS)
+                        checked += 1
+        self.assertEqual(checked, 17)       # nine pairs: five of two lights (slot 1), four of four (slots 1 to 3)
+
+    def test_the_families_and_light_counts_cover_the_table(self):
+        # Every -multi pair of the terrain, object and trunk families is checked, and has a light count.
+        for family, pairs in lc.FAMILIES.items():
+            if family.endswith("-multi") and not family.startswith("plant"):
+                self.assertIn(family, lc.MULTI_SUN_FAMILIES)
+            if family.endswith("-multi"):
+                for ps, _ in pairs:
+                    self.assertIn(lc.MULTI_LIGHTS[ps], (2, 4))
+        # The light count is the registers the dump reads: c82 / c89 only in the four-light shaders.
+        for ps, lights in lc.MULTI_LIGHTS.items():
+            text = lc.ue.load(DUMPS, ps, "frag")
+            self.assertEqual("c89" in text and "c82" in text, lights == 4, ps)
+            self.assertIn("c88", text)
+        self.assertEqual(lc.GAME_SUN_SLOT, {2: 1, 4: 2})
+
+    def test_a_slot_the_shader_does_not_have_is_refused(self):
+        with self.assertRaises(ValueError):
+            lc.check_multi_sun("object-multi", "648B965C200A5113", "ECD66A10092E6562", 2, trials=1)
+        with self.assertRaises(ValueError):
+            lc.check_multi_sun("object-multi", "789266C3E42D7E59", "ECD66A10092E6562", 0, trials=1)
+        with self.assertRaises(KeyError):
+            lc.check_multi_sun("plant-multi", "E99F4ACC7A3C78B4", "8123C16DBF583F92", 1, trials=1)
+
+    def check_with(self, family, ps, vs, slot, spoil):
+        """check_multi_sun with the light set spoiled after _sun_in_slot made it."""
+        real = lc._sun_in_slot
+
+        def spoiled(rng, c, s):
+            out = real(rng, c, s)
+            spoil(c, s)
+            return out
+
+        with mock.patch.object(lc, "_sun_in_slot", spoiled):
+            return lc.check_multi_sun(family, ps, vs, slot, trials=self.TRIALS)
+
+    def test_the_check_fails_when_the_light_set_is_not_the_games(self):
+        """What makes the equality hold is the game's light set; with any one of its properties gone the
+        microcode is no longer the one-light function, and the check says so."""
+        def lantern_lit(c, s):
+            c[87] = [0.5, 0.25, 0.125, 0.0]         # a lantern with its light
+
+        def mask_on_the_lantern(c, s):
+            c[112] = [1.0, 0.0, 0.0, 0.0]           # the screen mask shadows light 0, not the sun
+
+        def sun_with_a_cone(c, s):
+            c[94][s] = 1.0                          # range and cone apply to the sun
+
+        def sun_as_a_position(c, s):
+            c[80 + s][3] = 1.0                      # w = 1: the direction becomes position minus point
+
+        pairs = [("terrain-layer-multi", "45243B758F9272AB", "C30A97D946FA2BE4", 1),
+                 ("terrain-layer-multi", "578342593A37DD35", "FB68A7F2301210E1", 2),
+                 ("object-multi", "648B965C200A5113", "ECD66A10092E6562", 1),
+                 ("object-multi", "789266C3E42D7E59", "ECD66A10092E6562", 2)]
+        for family, ps, vs, slot in pairs:
+            for spoil in (lantern_lit, mask_on_the_lantern, sun_with_a_cone, sun_as_a_position):
+                with self.subTest(ps=ps, spoil=spoil.__name__):
+                    self.assertFalse(self.check_with(family, ps, vs, slot, spoil).ok)
+            # Control: the same wrapper without a change agrees.
+            self.assertTrue(self.check_with(family, ps, vs, slot, lambda c, s: None).ok)
+
+    def test_the_default_check_is_untouched_by_the_sun_slot(self):
+        # Without a slot the drivers are the ones `--all` runs: light 0 with every constant random.
+        res = lc.check_pair("object-multi", "789266C3E42D7E59", "ECD66A10092E6562", trials=8)
+        self.assertTrue(res.ok)
+        # ... and that general form is not the one-light function (the reason the check exists).
+        _, make_case = lc._object_driver("789266C3E42D7E59", "ECD66A10092E6562", DUMPS, multi=True)
+        case = make_case(random.Random(3))
+        self.assertNotEqual(case.consts[112], [1.0, 0.0, 0.0, 0.0])
+
+    def test_command_line(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = lc.main(["--multi-sun", "--trials", "4"])
+        text = out.getvalue()
+        self.assertEqual(code, 0)
+        self.assertEqual(text.count("(the game)"), 9)
+        self.assertIn("ps 789266C3E42D7E59 vs ECD66A10092E6562 (4 lights), sun in slot 2 (the game): 4/4 agree", text)
+        self.assertIn("0 pairs disagree at the slot the game puts the sun in", text)
+        # A light set that is not the game's (the sun as a position, w = 1): pairs disagree at the game's
+        # slot, the line counts them and the exit code says so.
+        real = lc._sun_in_slot
+
+        def sun_as_a_position(rng, c, slot):
+            out_ = real(rng, c, slot)
+            c[80 + slot][3] = 1.0
+            return out_
+
+        out = io.StringIO()
+        with mock.patch.object(lc, "_sun_in_slot", sun_as_a_position), contextlib.redirect_stdout(out):
+            code = lc.main(["--multi-sun", "--trials", "8"])
+        self.assertEqual(code, 1)
+        self.assertIn("9 pairs disagree at the slot the game puts the sun in", out.getvalue())
+        self.assertIn("first disagreement, trial ", out.getvalue())
+
+
+@unittest.skipUnless(DUMPS.is_dir(), NO_DUMPS)
 class RealDumps(unittest.TestCase):
     TRIALS = 24
+
 
     def test_every_listed_pair_agrees(self):
         for family, pairs in lc.FAMILIES.items():

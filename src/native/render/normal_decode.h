@@ -297,11 +297,16 @@ inline void RotateNormal(const float rot[3][3], const float n[3], float out[3]) 
 //   kRotation: orthonormal after the scale (each entry of M M^T within 1e-3 of
 //     the identity's) and right-handed: the normal is M n.
 //   kMirrored: orthonormal after the scale, left-handed (a mirrored object, or
-//     a negative c7.w): RotateNormal keeps the normal on the surface's side,
-//     which the game's own M n * c7.w does only up to its sign.
+//     a negative c7.w). For an orthonormal M the inverse transpose is M
+//     itself, sign included, so the game's M n and RotateNormal's normal are
+//     the same vector.
 //   kSkewed: invertible, not orthonormal after the scale (a scale that is not
 //     uniform, a shear, a c7.w that is not the rows' reciprocal): the normal
 //     RotateNormal makes is perpendicular, the game's is not.
+// The clay pass lights with the game's own value for every kind that has a
+// direction, N = normalize(M n) with M the rows times the scale
+// (clay_logic.h, MakeClayObjectConstants; ruling of 2026-10-08), and draws a
+// kDegenerate draw without light. RotateNormal is used by no object draw.
 //   kDegenerate: no direction comes out of it (a zero or singular matrix, a
 //     zero scale, a value that is not finite).
 enum class RotationKind : uint8_t { kRotation, kMirrored, kSkewed, kDegenerate, kCount };

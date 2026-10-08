@@ -73,6 +73,54 @@ def solid(rgba, linear=True):
     return tr.Tex(1, 1, [tuple(rgba)], linear=linear)
 
 
+# A frame row's light block for the lit replay (--lit), and the formulas written out by hand: no
+# function of the tool or of light_formulas.py is called by them.
+BLOCK = {"valid": 1, "tries": 0, "sun_dir": [0.6, 0.0, 0.8], "sun_col": [1.0, 0.5, 0.25], "eye": [100.0, 160.0, 30.0],
+         "tint": [1.25, 0.75, 0.5], "tint_pow": 2.0, "add": [0.1, 0.05, 0.0], "out_scale": 16.0, "floor": [0.25, 0.5],
+         "axis": [0.0, 0.0, 1.0]}
+
+
+def lin_row(family, c11x, facing):
+    return {"reason": "none", "family": family, "multi": 0, "kind": "terrain", "c11x": c11x, "facing": facing}
+
+
+def _unit(v):
+    length = math.sqrt(sum(x * x for x in v))
+    return [x / length for x in v]
+
+
+def _clamp01(x):
+    return min(max(x, 0.0), 1.0)
+
+
+def _ambient_by_hand(baked, t, block):
+    floor = block["floor"] + [0.0]
+    return [baked[c] ** block["tint_pow"] * block["tint"][c] * (floor[c] + (1.0 - floor[c]) * t * t) + block["add"][c]
+            for c in range(3)]
+
+
+def layer_by_hand(albedo, baked, n, c11x, block=BLOCK, facing=8.0):
+    """A * c11.x * (pow(tf3, c21.w) * c21.xyz * L + c20.xyz) + A * c87.xyz * sat(N . sun) * sat(8 * (N . sun)), with
+    L = floor + (1 - floor) * t^2, t = sat(normalize(lerp(n, C, (1 + n . C) / 2)) . N)."""
+    big_n, axis = _unit(n), block["axis"]
+    k = 0.5 + 0.5 * sum(a * b for a, b in zip(n, axis))
+    vector = _unit([a * (1.0 - k) + c * k for a, c in zip(n, axis)])
+    t = _clamp01(sum(a * b for a, b in zip(vector, big_n)))
+    nds = sum(a * b for a, b in zip(big_n, block["sun_dir"]))
+    sun = _clamp01(nds) * _clamp01(facing * nds)
+    amb = _ambient_by_hand(baked, t, block)
+    return [albedo[c] * (c11x * amb[c] + block["sun_col"][c] * sun) for c in range(3)]
+
+
+def far_by_hand(albedo, baked, n, c11x, block=BLOCK):
+    """F * (pow(tf3, c21.w) * c21.xyz * L + c20.xyz) + F * c11.x * c87.xyz * sat(N . sun), L from t = sat(N . c23)."""
+    big_n = _unit(n)
+    t = _clamp01(sum(a * b for a, b in zip(big_n, block["axis"])))
+    nds = _clamp01(sum(a * b for a, b in zip(big_n, block["sun_dir"])))
+    amb = _ambient_by_hand(baked, t, block)
+    return [albedo[c] * (amb[c] + c11x * block["sun_col"][c] * nds) for c in range(3)]
+
+
 def fc_for(fmt, w, h, tiled=False, endian=1, clamp=0, linear=True, base=0x1A000000):
     pitch = (w + 31) & ~31
     return [2 | (clamp << 10) | (clamp << 13) | ((pitch >> 5) << 22) | (int(tiled) << 31), fmt | (endian << 6) | base,
@@ -556,6 +604,142 @@ class ShadeTest(unittest.TestCase):
         for got, w in zip(rgb, (0.135 * 0.25, 0.09 * 0.25, 0.0253125 * 0.25)):
             self.assertAlmostEqual(got, w, places=5)
 
+    def test_light_block_of_a_frame_row(self):
+        block = tr.light_block_of({"kind": "frame", "frame": 1, "light": BLOCK})
+        self.assertEqual(block["sun_dir"], [0.6, 0.0, 0.8])
+        self.assertEqual(block["floor"], [0.25, 0.5, 0.0])        # the block carries c22.xy; blue has no floor
+        self.assertEqual((block["tint"], block["tint_pow"], block["add"], block["axis"]),
+                         ([1.25, 0.75, 0.5], 2.0, [0.1, 0.05, 0.0], [0.0, 0.0, 1.0]))
+        self.assertNotIn("out_scale", block)                       # the output scale is not applied
+        # No block, a block that is not valid, a value that is not a finite number: nothing is replayed lit.
+        for row, word in ((None, 'no "light"'), ({"kind": "frame"}, 'no "light"'),
+                          ({"light": dict(BLOCK, valid=0)}, "light-block"),
+                          ({"light": dict(BLOCK, sun_col=[1.0, float("nan"), 0.0])}, '"sun_col"'),
+                          ({"light": dict(BLOCK, floor=[0.25])}, '"floor"'),
+                          ({"light": dict(BLOCK, tint_pow=0.0)}, '"tint_pow"'),
+                          ({"light": dict(BLOCK, tint_pow=float("inf"))}, '"tint_pow"'),
+                          ({"light": {k: v for k, v in BLOCK.items() if k != "axis"}}, '"axis"')):
+            with self.assertRaises(tr.MissingInput) as e:
+                tr.light_block_of(row)
+            self.assertIn(word, str(e.exception))
+
+    def test_light_inputs_of_a_tess_row(self):
+        row = {"ps_hash": "0x9C2144E42E95A76F", "lin": lin_row("terrain-layer", 0.75, 8)}
+        self.assertEqual(tr.light_inputs_of(row, "terrain-layer"), {"c11x": 0.75, "facing": 8.0})
+        far = {"ps_hash": "0x7DDAD5C29B3F56EE", "lin": lin_row("terrain-far", 0.48, 0)}
+        self.assertEqual(tr.light_inputs_of(far, "terrain-far"), {"c11x": 0.48, "facing": 0.0})
+        for bad, family in ((dict(row, lin=None), "terrain-layer"), ({"ps_hash": "0x1"}, "terrain-layer"),
+                            (row, "terrain-far"), (far, "terrain-layer"),
+                            (dict(row, lin={"reason": "light-unknown", "why": "no-family"}), "terrain-layer"),
+                            (dict(row, lin=lin_row("terrain-layer", 1.0, 0)), "terrain-layer"),          # no facing literal
+                            (dict(row, lin=lin_row("terrain-layer", float("nan"), 8)), "terrain-layer")):
+            with self.assertRaises(tr.MissingInput):
+                tr.light_inputs_of(bad, family)
+
+    def test_lit_layer_colour_by_hand(self):
+        block = tr.light_block_of({"light": BLOCK})
+        albedo, baked = (0.64, 0.16, 0.04), (0.5, 1.0, 0.25, 1.0)
+        # Flat ground under a sun at 53 degrees: N . sun = 0.8, the facing factor 1, t = 1 (the axis is up).
+        got = tr.lit_layer_colour(block, {"c11x": 1.0, "facing": 8.0}, albedo, baked, (0.0, 0.0, 1.0), (0.0, 0.0, 1.0))
+        want = [0.64 * (0.25 * 1.25 + 0.1 + 1.0 * 0.8), 0.16 * (1.0 * 0.75 + 0.05 + 0.5 * 0.8), 0.04 * (0.0625 * 0.5 + 0.25 * 0.8)]
+        for g, w in zip(got, want):
+            self.assertAlmostEqual(g, w, places=12)
+        # A vertex normal that is not unit, with its vector of t; c11.x scales the ambient part only.
+        n = (0.3, -0.2, 0.7)
+        k = 0.5 + 0.5 * 0.7
+        vector = [0.3 * (1 - k), -0.2 * (1 - k), 0.7 * (1 - k) + k]
+        got = tr.lit_layer_colour(block, {"c11x": 0.5, "facing": 8.0}, albedo, baked, n, vector)
+        for g, w in zip(got, layer_by_hand(albedo, baked, n, 0.5)):
+            self.assertAlmostEqual(g, w, places=12)
+        self.assertNotAlmostEqual(got[0], layer_by_hand(albedo, baked, n, 1.0)[0], places=3)
+        # Grazing (N . sun = 0.05): the facing factor sat(8 * 0.05) = 0.4 is on the sun.
+        n = _unit((0.6 * 0.05 - 0.8 * math.sqrt(1 - 0.05 ** 2), 0.0, 0.8 * 0.05 + 0.6 * math.sqrt(1 - 0.05 ** 2)))
+        self.assertAlmostEqual(sum(a * b for a, b in zip(n, BLOCK["sun_dir"])), 0.05, places=12)
+        got = tr.lit_layer_colour(block, {"c11x": 1.0, "facing": 8.0}, albedo, baked, n, n)
+        t = 1.0                                             # (the vector given is the normal itself)
+        amb = _ambient_by_hand(baked, t, BLOCK)
+        self.assertAlmostEqual(got[0], 0.64 * (amb[0] + 1.0 * 0.05 * 0.4), places=12)
+        # Facing away: no sun at all; a zero normal: no sun and t = 0 (the ambient at its floor).
+        away = tr.lit_layer_colour(block, {"c11x": 1.0, "facing": 8.0}, albedo, baked, (-0.9, 0.0, 0.4), (-0.9, 0.0, 0.4))
+        self.assertAlmostEqual(away[0], 0.64 * amb[0], places=12)
+        zero = tr.lit_layer_colour(block, {"c11x": 1.0, "facing": 8.0}, albedo, baked, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+        self.assertAlmostEqual(zero[0], 0.64 * (0.25 * 1.25 * 0.25 + 0.1), places=12)
+        self.assertAlmostEqual(zero[2], 0.04 * (0.0625 * 0.5 * 0.0 + 0.0), places=12)
+
+    def test_lit_far_colour_by_hand(self):
+        block = tr.light_block_of({"light": dict(BLOCK, axis=[0.6, 0.0, 0.8])})
+        albedo, baked, n = (0.36, 0.09, 0.81), (0.5, 1.0, 0.25, 1.0), (0.3, -0.2, 0.7)
+        got = tr.lit_far_colour(block, {"c11x": 0.5, "facing": 0.0}, albedo, baked, n)
+        for g, w in zip(got, far_by_hand(albedo, baked, n, 0.5, dict(BLOCK, axis=[0.6, 0.0, 0.8]))):
+            self.assertAlmostEqual(g, w, places=12)
+        # c11.x is on the sun here, not on the ambient part, and there is no facing factor.
+        full = far_by_hand(albedo, baked, n, 1.0, dict(BLOCK, axis=[0.6, 0.0, 0.8]))
+        self.assertGreater(full[0], got[0])
+        up = tr.lit_far_colour(block, {"c11x": 1.0, "facing": 0.0}, albedo, baked, (0.6, 0.0, 0.8))
+        self.assertAlmostEqual(up[0], 0.36 * (0.25 * 1.25 * 1.0 + 0.1 + 1.0), places=12)
+
+    def test_lit_layers_blend_like_unlit_ones(self):
+        block = tr.light_block_of({"light": BLOCK})
+        self.layers[0].lin = {"c11x": 0.5, "facing": 8.0}
+        self.layers[1].lin = {"c11x": 1.0, "facing": 8.0}
+        n = (0.3, -0.2, 0.7)
+        vector = tuple(tr.lf.ambient_axis(list(n), BLOCK["axis"]))
+        # lx = 15: the second layer's weight is 0.5 (test_two_layers_blend_in_draw_order).
+        rgb, drawn = tr.shade_point(self.layers, 88.0 + (15 - 16) * 0.5, 152.0, None, fade_on=False, lit=(block, n, vector))
+        a = layer_by_hand((0.64, 0.16, 0.04), self.BASE, n, 0.5)
+        b = layer_by_hand((0.25, 0.25, 1.0), self.BASE, n, 1.0)
+        self.assertEqual(drawn, 2)
+        for g, x, y in zip(rgb, a, b):
+            self.assertAlmostEqual(g, x + 0.5 * y, places=9)
+        # The base map's tint and exponent of the unlit replay (the row's c21) are not used twice.
+        self.assertNotAlmostEqual(rgb[0], (0.24 + 0.046875), places=2)
+
+    def test_far_colour_lit_uses_the_far_draws_own_normals(self):
+        inp = tr.far_inputs(FAR_CONSTS, PCONST)
+        table = tr.decode_texture(dump_k16(34, 2, lambda x, y: 32768), fc_for(24, 34, 2, linear=False))
+        far = tr.Far(inp, solid((0.6, 0.3, 0.9, 1.0)), solid(self.BASE), table, table, fade_in=False,
+                     lin={"c11x": 0.5, "facing": 0.0})
+        x0, y0, cw, ch = tr.patch_square(FAR_CONSTS, 4, far=True)
+        normals = tr.decode_texture(dump_dxn(4, 4, lambda bx, by: flat_dxn(204, 102)), fc_for(49, 4, 4, linear=False, clamp=2))
+        grid = tr.SquareGrid((x0, y0, cw, ch), {"consts": FAR_CONSTS}, None, normals, far=True)
+        far.grids = lambda wx, wy: grid
+        block = tr.light_block_of({"light": BLOCK})
+        n = (2 * 204 / 255 - 1, 2 * 102 / 255 - 1)
+        n = n + (math.sqrt(abs(1 - n[0] ** 2 - n[1] ** 2)),)
+        got = tr.far_colour(far, x0 + 0.25 * cw, y0 + 0.5 * ch, None, lit=block)
+        for g, w in zip(got, far_by_hand((0.36, 0.09, 0.81), self.BASE, n, 0.5)):
+            self.assertAlmostEqual(g, w, places=9)
+        # The fade of the underlay multiplies the lit colour.
+        wx, wy = x0 + 0.25 * cw, y0 + 0.5 * ch
+        fading = tr.Far(dict(inp, eye=[wx + math.sqrt(3000.0), wy, 30.0]), far.colour, far.base, table, table, fade_in=True,
+                        lin=far.lin, grids=far.grids)
+        faded = tr.far_colour(fading, wx, wy, 30.0, lit=block)
+        for g, w in zip(faded, got):
+            self.assertAlmostEqual(g, w * 0.25, places=6)
+
+    def test_grid_carries_the_vector_of_t_per_grid_point(self):
+        # Normal map rows 0 to 3 and 8 to 11 are flat, the others steep: the vector of t is made at each grid point from
+        # that point's normal and interpolated, which is not the vector of the interpolated normal.
+        normals = tr.decode_texture(dump_dxn(16, 16, lambda bx, by: flat_dxn(230, 128) if by % 2 else flat_dxn(128, 128)),
+                                    fc_for(49, 16, 16, linear=False, clamp=2))
+        row = {"consts": dict(LAYER_CONSTS, c47=[1 / 16, 1 / 16, 0, 0])}       # one texel per world unit
+        grid = tr.SquareGrid((0.0, 0.0, 16.0, 16.0), row, None, normals, axis=[0.6, 0.0, 0.8])
+        flat = tr.steep_normal(128 / 255, 128 / 255)
+        steep = tr.steep_normal(230 / 255, 128 / 255)
+        n, vector = grid.light_at(8.0, 3.5)                    # half way between grid rows 3 (flat) and 4 (steep)
+        for g, a, b in zip(n, flat, steep):
+            self.assertAlmostEqual(g, 0.5 * (a + b), places=12)
+        want = [0.5 * (a + b) for a, b in zip(tr.lf.ambient_axis(list(flat), [0.6, 0.0, 0.8]),
+                                              tr.lf.ambient_axis(list(steep), [0.6, 0.0, 0.8]))]
+        for g, w in zip(vector, want):
+            self.assertAlmostEqual(g, w, places=12)
+        of_mean = tr.lf.ambient_axis(list(n), [0.6, 0.0, 0.8])
+        self.assertGreater(max(abs(g - w) for g, w in zip(vector, of_mean)), 0.01)
+        # Without an axis the grid is the steep-ground block's: normal and height only.
+        plain = tr.SquareGrid((0.0, 0.0, 16.0, 16.0), row, None, normals)
+        self.assertEqual(len(plain.points[0]), 4)
+        self.assertEqual(plain.at(8.0, 3.5)[0], n)
+
     def test_blend_words(self):
         self.assertEqual(tr.blend_of("0x00060006"), tr.BLEND_REPLACE)
         self.assertEqual(tr.blend_of("0x01060106"), tr.BLEND_ADD)
@@ -718,12 +902,15 @@ class CaptureTest(unittest.TestCase):
     """The tool on a capture: tess rows, texture rows and dump files as discovery writes them."""
 
     def _capture(self, root, pconst=True, with_tf0=True, height_bytes=None, detail_format=6, other_sampler=False,
-                 steep=None):
+                 steep=None, lit=None):
         """Two layer draws of one square. Without `steep` they have the shader pair without the
         steep-ground block (FB68 with 4755). With steep = (x, y) (byte values of every texel of a 4 x 4
         normal map) they have C30A with 9C21 and what the block reads: tf13 (the side texture), tf17
         (the normal map), pixel constant c45 and the shader's literals. steep = "rows": a 16 x 16
-        normal map whose texel rows 1, 5, 9 and 13 are (230, 128) and whose other rows are (128, 128)."""
+        normal map whose texel rows 1, 5, 9 and 13 are (230, 128) and whose other rows are (128, 128).
+        `lit`: what the lit replay reads besides, as a dict: "block" (the frame row's "light"; absent:
+        none), "lin" (the two rows' "lin"; absent: a terrain-layer one with c11.x 0.5 and 1), and for the
+        pair without the block "normal" (the byte values of every texel of its normal map tf17)."""
         tex = root / "native_tex_x"
         tex.mkdir()
         files = {}
@@ -756,7 +943,12 @@ class CaptureTest(unittest.TestCase):
                 nrm = add("n.bin", dump_dxn(16, 16, lambda bx, by: block), fc_for(49, 16, 16, linear=False, clamp=2, base=0x1A800000))
             else:
                 nrm = add("n.bin", dump_dxn(4, 4, lambda bx, by: flat_dxn(*steep)), fc_for(49, 4, 4, linear=False, clamp=2, base=0x1A800000))
+        if lit is not None and steep is None:
+            nrm = add("n.bin", dump_dxn(4, 4, lambda bx, by: flat_dxn(*lit.get("normal", (128, 128)))),
+                      fc_for(49, 4, 4, linear=False, clamp=2, base=0x1A800000))
         rows = [{"kind": "frame", "frame": 1}]
+        if lit is not None and "block" in lit:
+            rows[0]["light"] = lit["block"]
         for name, fc in files.items():
             rows.append({"kind": "texture", "file": f"native_tex_x/{name}", "bytes": 1, "fc": [f"0x{x:08X}" for x in fc]})
 
@@ -775,12 +967,19 @@ class CaptureTest(unittest.TestCase):
                 r["vs"], r["ps_hash"] = {"hash": "0xC30A97D946FA2BE4"}, "0x9C2144E42E95A76F"
                 r["tf"].update({"13": side, "17": nrm})
                 r["pc"], r["ps_lit"] = STEEP_PC, STEEP_LIT_9C21
+            elif lit is not None:
+                r["tf"]["17"] = nrm
             return r
 
         base_consts = dict(LAYER_CONSTS, c114=[-1.0, 0, 0, 0],
                            c115=[16 / 66, 16 / 33, 0.5 / 66, 0.5 / 33])
         rows.append(tess(base_consts, "0x00060006", a))
         rows.append(tess(LAYER_CONSTS, "0x01060106", b))
+        if lit is not None:
+            lins = lit.get("lin", (lin_row("terrain-layer", 0.5, 8), lin_row("terrain-layer", 1.0, 8)))
+            for r, lin in zip(rows[-2:], lins):
+                if lin is not None:
+                    r["lin"] = lin
         path = root / "cap.jsonl"
         path.write_text("".join(json.dumps(r) + chr(10) for r in rows))
         return path
@@ -808,7 +1007,119 @@ class CaptureTest(unittest.TestCase):
             want = [round(255 * min(1.0, (a2[k] + b2[k]) * bp[k])) for k in range(3)]
             self.assertEqual(list(rows[8][15 * 4:15 * 4 + 3]), want)
 
+    def test_lit_replay_by_hand(self):
+        # The square of test_replay_writes_the_patch under the light block BLOCK: a flat normal map
+        # (texels (128, 128): n = (d, d, sqrt(1 - 2 d^2)), d = 1 / 255), the first layer with c11.x 0.5 and
+        # the second with 1. The tint and the exponent are the block's, not the rows' c21.
+        d = 2 * 128 / 255 - 1
+        n = (d, d, math.sqrt(1 - 2 * d * d))
+        a2 = [(c / 255) ** 2 for c in (204, 102, 51)]
+        b2 = [(c / 255) ** 2 for c in (128, 128, 255)]
+        baked = [c / 255 for c in (128, 255, 64)]
+        la, lb = layer_by_hand(a2, baked, n, 0.5), layer_by_hand(b2, baked, n, 1.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cap = self._capture(root, lit={"block": BLOCK})
+            out = root / "patch.png"
+            argv = [str(cap), "--frame", "1", "--patch", "0", "--out", str(out), "--res", "16", "--no-fade", "--lit"]
+            lines = tr.main(argv + ["--encode", "linear"])
+            _, _, rows = png_size_and_pixels(out)
+            # Column 0: the second layer's weight is 8.5 / 14; column 15: 1 (the unlit test's columns).
+            want = [round(255 * min(1.0, la[k] + lb[k] * 8.5 / 14)) for k in range(3)]
+            self.assertEqual(list(rows[8][0:3]), want)
+            want15 = [round(255 * min(1.0, la[k] + lb[k])) for k in range(3)]
+            self.assertEqual(list(rows[8][15 * 4:15 * 4 + 3]), want15)
+            self.assertNotEqual(want, want15)
+            self.assertTrue(any(line.startswith("lit with the frame's light block: sun direction (0.6000, 0.0000, 0.8000) "
+                                                "colour (1.0000, 0.5000, 0.2500), mask 1, without the output scale")
+                                for line in lines), lines)
+            mean = [line for line in lines if line.startswith("mean linear colour (")]
+            self.assertEqual(len(mean), 1, lines)
+            # The mean is of the linear values, not clamped: column i has the weight min(1, (8.5 + i) / 14).
+            weights = [min(1.0, (8.5 + i) / 14) for i in range(16)]
+            first = sum(la[0] + lb[0] * w for w in weights) / 16
+            self.assertIn(f"mean linear colour ({first:.4f}, ", mean[0])
+            # The default picture is the pass's output mapping: the square root, and the exposure before it.
+            tr.main(argv)
+            _, _, rows = png_size_and_pixels(out)
+            self.assertEqual(list(rows[8][0:3]), [round(255 * math.sqrt(min(1.0, la[k] + lb[k] * 8.5 / 14))) for k in range(3)])
+            tr.main(argv + ["--exposure", "0.25"])
+            _, _, rows = png_size_and_pixels(out)
+            self.assertEqual(list(rows[8][0:3]),
+                             [round(255 * math.sqrt(min(1.0, 0.25 * (la[k] + lb[k] * 8.5 / 14)))) for k in range(3)])
+            # The unlit replay of the same capture is what it was: the light is not in it.
+            tr.main(argv[:-1] + ["--encode", "linear"])
+            _, _, rows = png_size_and_pixels(out)
+            bp = [(c / 255) ** 2 * t for c, t in zip((128, 255, 64), (1.5, 1.0, 0.5))]
+            self.assertEqual(list(rows[8][0:3]), [round(255 * min(1.0, (a2[k] + b2[k] * 8.5 / 14) * bp[k])) for k in range(3)])
+
+    def test_lit_replay_reads_the_normal_map(self):
+        # Texels (13, 128): n = (-0.898, 0.004, 0.440) faces away from the sun (0.6, 0, 0.8): no sun term,
+        # and t is the ambient vector's, not 1.
+        x, y = 2 * 13 / 255 - 1, 2 * 128 / 255 - 1
+        n = (x, y, math.sqrt(abs(1 - x * x - y * y)))
+        self.assertLess(sum(a * b for a, b in zip(n, BLOCK["sun_dir"])), 0.0)
+        a2 = [(c / 255) ** 2 for c in (204, 102, 51)]
+        b2 = [(c / 255) ** 2 for c in (128, 128, 255)]
+        baked = [c / 255 for c in (128, 255, 64)]
+        la, lb = layer_by_hand(a2, baked, n, 0.5), layer_by_hand(b2, baked, n, 1.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cap = self._capture(root, lit={"block": BLOCK, "normal": (13, 128)})
+            out = root / "patch.png"
+            tr.main([str(cap), "--frame", "1", "--patch", "0", "--out", str(out), "--res", "16", "--no-fade", "--lit",
+                     "--encode", "linear"])
+            _, _, rows = png_size_and_pixels(out)
+            self.assertEqual(list(rows[8][15 * 4:15 * 4 + 3]), [round(255 * min(1.0, la[k] + lb[k])) for k in range(3)])
+        # With the steep-ground block the same grid serves both: the block's A, then the light.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cap = self._capture(root, steep=(128, 128), lit={"block": BLOCK})
+            out = root / "patch.png"
+            lines = tr.main([str(cap), "--frame", "1", "--patch", "0", "--out", str(out), "--res", "16", "--no-fade", "--lit",
+                             "--encode", "linear"])
+            self.assertTrue(any("2 of them with the tf13 blend on steep ground, evaluated" in line for line in lines), lines)
+            _, _, rows = png_size_and_pixels(out)
+            d = 2 * 128 / 255 - 1
+            flat = (d, d, math.sqrt(1 - 2 * d * d))
+            la, lb = layer_by_hand(a2, baked, flat, 0.5), layer_by_hand(b2, baked, flat, 1.0)
+            self.assertEqual(list(rows[8][15 * 4:15 * 4 + 3]), [round(255 * min(1.0, la[k] + lb[k])) for k in range(3)])
+
+    def test_lit_replay_refuses_what_the_pass_would_not_light(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "patch.png"
+
+            def refuse(lit, word, name):
+                folder = root / name
+                folder.mkdir()
+                cap = self._capture(folder, lit=lit)
+                argv = [str(cap), "--frame", "1", "--patch", "0", "--out", str(out), "--res", "8", "--no-fade", "--lit"]
+                with self.assertRaises(tr.MissingInput) as e:
+                    tr.main(argv)
+                self.assertIn(word, str(e.exception))
+                self.assertFalse(out.exists())
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(tr.cli(argv), 2)
+                self.assertIn("cannot replay", err.getvalue())
+                return cap
+
+            refuse({}, 'no "light"', "a")                                                  # a capture without the block
+            refuse({"block": dict(BLOCK, valid=0)}, "light-block", "b")                    # a frame without a block
+            refuse({"block": BLOCK, "lin": (lin_row("terrain-layer", 0.5, 8), None)}, 'no "lin"', "c")
+            refuse({"block": BLOCK, "lin": (lin_row("terrain-layer", 0.5, 8), {"reason": "light-unknown", "why": "no-family"})},
+                   'no "lin"', "d")
+            # --lit is the pass's lit picture: the unlit variants do not combine with it.
+            folder = root / "e"
+            folder.mkdir()
+            cap = self._capture(folder, lit={"block": BLOCK})
+            for flag in ("--no-base", "--no-tint"):
+                with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                    tr.main([str(cap), "--frame", "1", "--patch", "0", "--out", str(out), "--lit", flag])
+
     def test_list_and_weights_need_no_pixel_constants(self):
+
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             cap = self._capture(root, pconst=False)

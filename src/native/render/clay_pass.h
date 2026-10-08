@@ -16,7 +16,10 @@
 // (DrawRecord::state_words): blend, colour mask, depth and cull through a
 // pipeline of a small cache keyed by state (PipelineKey), the alpha test as a
 // discard in the textured pixel shader (DecideDrawState has the rules for a
-// draw whose alpha or colour is not known). GPU (command-processor) thread
+// draw whose alpha or colour is not known). With the light on, in a frame
+// that has a light block, the terrain and the objects with a colour stream are
+// lit by the game's ambient, baked and sun light (clay_logic.h, "Native
+// light"); every other draw is the unlit colour. GPU (command-processor) thread
 // only; Cmd is valid only inside the SDK's guest-output callbacks.
 
 #include <array>
@@ -54,8 +57,11 @@ class ClayPass {
   // `textured`: draws may sample their albedo (fable2_native_textures). tst
   // receives the texture counters and the final material status of every
   // drawn record (untouched when textured is false). `light`:
-  // fable2_native_light; it sets the output mapping's exposure (ClayExposure)
-  // and nothing else yet.
+  // fable2_native_light. On, and the scene has a light block the pass can use
+  // (MakeClayFrameConstants): the families the pass lights are drawn lit, and
+  // the output mapping takes the lit frame's exposure. Else every draw is the
+  // unlit colour under exposure 1. st receives what was lit and what was not,
+  // by reason (ClayStats::light_drawn, light_unlit).
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
               bool textured, ClayLight light, ClayStats& st, TextureStats& tst);
   // The mapped target (display values, 8 bits): what the composite views
@@ -94,16 +100,32 @@ class ClayPass {
     uint32_t weight_sampler = 0, side_sampler = 0, plan = 0, slot = 0;
     float side_fix[2] = {1.0f, 1.0f};
     capture::MaterialStatus status = capture::MaterialStatus::kTerrain;
-    // The light's vertex inputs of a record that has light inputs (LightOf) and
-    // its material: `normals`, one per vertex of `positions` (a mesh record:
-    // float3, GeometryCache::Normals; a terrain record: float2 (n.x, n.y),
-    // GeometryCache::TerrainNormals, for a layer with the steep-ground block
-    // the buffer in `uvs`), and `colours` for the family with a colour stream.
-    // Both or neither: nullptr when one could not be built (counted in
-    // ClayStats::light_missing). Built so that they are resident and their cost
-    // is the frame's; no shader reads them yet and nothing binds them.
+    // The light's vertex inputs of a record that has light inputs (`light`:
+    // LightOf) and its material: `normals` (a mesh record: float3,
+    // GeometryCache::Normals; a terrain record: float2 (n.x, n.y) per grid
+    // point, GeometryCache::TerrainNormals, which a layer with the steep-ground
+    // block has with or without light inputs), and `colours` for the family
+    // with a colour stream. For a mesh record both or neither: nullptr when one
+    // could not be built (counted in ClayStats::light_missing; `light_why`).
+    // `light_count`: the elements the buffers hold (the shader reads them for a
+    // vertex below it). `max_index`: the largest index of the record's list.
+    const capture::LightInputs* light = nullptr;
     nrhi::Buffer* normals = nullptr;
     nrhi::Buffer* colours = nullptr;
+    uint32_t light_count = 0, max_index = 0;
+    capture::LightReason light_why = capture::LightReason::kLightUnknown;
+    // `lit`: the record is drawn lit by its family's function (the frame is
+    // lit, the family is one the pass lights, everything it reads is there,
+    // and a terrain layer's square is lit as a whole). A lit terrain record has
+    // its base map in `base` with `base_sampler` and `base_fix`, and the
+    // light's constants in its slot; a lit object's constants are entry `slot`
+    // of object_constants_. `unlit`: why not, for a record that is not lit in
+    // a lit frame.
+    bool lit = false;
+    ClayUnlit unlit = ClayUnlit::kUnknown;
+    nrhi::TextureView* base = nullptr;
+    uint32_t base_sampler = 0;
+    float base_fix[2] = {1.0f, 1.0f};
   };
   // A texture resolved for a terrain layer this frame (many layers share a few).
   struct TerrainTexture {
@@ -134,6 +156,12 @@ class ClayPass {
   // (PlanTerrain), their pipelines, constants and counters.
   // `light`: the record's light inputs (LightOf), null without them; a record
   // with them and a usable material also gets its vertex normals (Prepared::normals).
+  // In a lit frame a record with light inputs of a family the pass lights also
+  // gets its base map, and its plan item says whether its light can be drawn.
+  // FinishTerrain also takes the frame's constant buffer (frame_cb_), marks
+  // the lit records (a square as a whole: PlanTerrain), writes every slot and
+  // counts the terrain records' light inputs (after the plan: a record whose
+  // square fell back is not counted).
   void PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::DrawRecord& r,
                       const capture::TerrainPatch& terrain, const capture::LightInputs* light, bool textured,
                       ClayStats& st, TextureStats& tst);
@@ -141,7 +169,10 @@ class ClayPass {
   // The light's vertex inputs of a textured mesh record with light inputs:
   // its normals and, for the family with a colour stream, its colours, from the
   // geometry cache into `p`; counts the record in st (lit, light_ready or
-  // light_missing by reason and vertex shader, light_rotation).
+  // light_missing by reason and vertex shader, light_rotation). In a lit frame
+  // a record of a family the pass lights whose constants can be made
+  // (MakeClayObjectConstants) is marked lit and gets its entry of
+  // object_constants_.
   void PrepareLight(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light, Prepared& p,
                     ClayStats& st);
   // The texture behind a fetch constant, through the texture cache; with `memo`
@@ -187,19 +218,27 @@ class ClayPass {
   std::vector<Prepared> prepared_;
   // Terrain of the frame being rendered: one plan item per terrain record
   // (Prepared::plan), the layers' textures, the texture sets bound, and the
-  // constant buffer (one kClayTerrainSlotBytes slot per terrain record,
-  // persistently mapped). The buffer is in use until the frame's submission has
-  // completed, so each frame takes one from the pool or a new one and returns it
-  // at the end of Render.
+  // frame's constant buffer of kClayTerrainSlotBytes slots, persistently
+  // mapped: slot 0 the frame's light (ClayFrameConstants, cbuffer Frame), then
+  // one slot per terrain record drawn with its material (cbuffer Terrain) and
+  // one per lit object (cbuffer Object). The buffer is in use until the frame's
+  // submission has completed, so each frame takes one from the pool or a new
+  // one and returns it at the end of Render.
   static constexpr uint64_t kTerrainPoolBytes = 4ull << 20;
   std::vector<TerrainPlanItem> terrain_items_;
   TerrainPlanScratch terrain_scratch_;  // PlanTerrain's storage, kept between frames
   std::vector<TerrainTexture> terrain_textures_;
-  std::vector<std::array<nrhi::TextureView*, 3>> terrain_sets_;  // colour, weights, side
+  std::vector<std::array<nrhi::TextureView*, 4>> terrain_sets_;  // colour, weights, side, base
   RetirePool<nrhi::Buffer*> terrain_pool_{kTerrainPoolBytes};
   std::vector<nrhi::Buffer*> terrain_destroy_;
   nrhi::Buffer* terrain_cb_ = nullptr;
   uint64_t terrain_cb_bytes_ = 0;
+  // The light of the frame being rendered: its constants (light_on 0: no draw
+  // is lit), the lit objects' constants in prepare order (Prepared::slot), and
+  // the buffer slot of the first of them (after the terrain slots).
+  ClayFrameConstants frame_{};
+  std::vector<ClayObjectConstants> object_constants_;
+  uint32_t object_slot0_ = 0;
 };
 
 }  // namespace fable2::native::render

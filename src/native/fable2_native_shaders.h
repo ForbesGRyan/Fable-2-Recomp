@@ -61,46 +61,147 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 // blending (bit 7; else 1 is written), and whether the colour is first divided
 // by the albedo's alpha (bit 9). Flat draws (kClayPs) have no alpha. Every clay
 // pixel shader writes linear colour into the pass's float target (frame-map
-// section 14, "Linear target"): the square of the display value it wrote into
-// the 8-bit target before, which is the game's own A = albedo^2. The facet
-// shade multiplied the display value, so it multiplies before the square
-// (clay_linear; ClayLinear in clay_logic.h); kOutputMapPs takes the root. The
-// value is clamped to [0, 1] as the 8-bit target clamped it, so that no NaN,
-// negative value or value over 1 is written: a float target would keep a NaN
-// and blending would spread it (the albedo textures are UNORM and the shade is
-// finite, so none arises; where the compiler can prove the range it drops the
-// clamp, and it keeps it for the terrain layers' mix). Alpha is not squared;
+// section 14, "Linear target"). An unlit draw writes the square of the display
+// value it wrote into the 8-bit target before, which is the game's own
+// A = albedo^2. The facet shade multiplied the display value, so it multiplies
+// before the square (clay_linear; ClayLinear in clay_logic.h); kOutputMapPs
+// takes the root. That value is clamped to [0, 1] as the 8-bit target clamped
+// it, so that no NaN, negative value or value over 1 is written: a float target
+// would keep a NaN and blending would spread it (the albedo textures are UNORM
+// and the shade is finite, so none arises; where the compiler can prove the
+// range it drops the clamp, and it keeps it for the terrain layers' mix). A lit
+// draw (light_mode bit 2, below) writes its light function's value without the
+// facet shade and without the clamp at 1, through clay_lit: a number, not
+// negative, at most 64. Alpha is not squared;
 // the alpha test and alpha-to-mask read it as it is, and it is clamped where it
 // is written for the blend (the 8-bit target clamped it there; the float
 // target has no alpha channel and no sign: a blend's terms are all products of
 // values and factors that are not negative). Every clay
 // shader declares the one cbuffer Draw (ClayConstants). The vertex shader also
 // hands on the position it read (`world`: for a terrain record the world
-// position x, y, height), which only the terrain pixel shaders below take, and
-// `normal`: (0, 0, 1), or for a terrain layer with the steep-ground block the
-// game's vertex normal, whose (x, y) the draw's buffer at t2 holds in place of
-// UVs (GeometryCache::TerrainNormals) and whose z is formed here as the game's
-// vertex shader forms it; only kClayTerrainLayerPs takes it.
-inline constexpr const char* kClayVs = R"hlsl(
-cbuffer Draw : register(b0) {
-  float4 r0; float4 r1; float4 r2; float4 r3;   // captured rows
-  uint layout;        // 0 dot, 1 combine
-  int base_vertex;
-  uint vertex_count;  // positions (and UVs) in the buffers
-  uint color;         // 0xRRGGBB
-  float4 uv_xform;    // u * x + z, v * y + w
-  uint textured;      // 1: uvs holds this draw's UVs
-  uint sampler_index; uint alpha_mode; float alpha_ref;
-  float4 cut;         // eye xyz, squared distance (+inf: no cut)
-  float alpha_scale; uint3 pad2;
+// position x, y, height), which only the terrain pixel shaders below use.
+//
+// The light (frame-map section 14, "Native light"; clay_logic.h, "Native
+// light"). Draw's light_mode says what the draw has: bit 0, the game's terrain
+// vertex normal, whose (x, y) the draw's buffer at t8 holds per grid point
+// (GeometryCache::TerrainNormals) and whose z is formed here as the game's
+// vertex shader forms it, for the steep-ground block and for the light; bit 1,
+// an object's stream normal at t9 and colour at t10, the normal put through the
+// draw's rows of cbuffer Object (b1) as the game puts it through c4..c6 times
+// c7.w; bit 2, the draw is lit: the vertex shader also makes the vector of the
+// ambient factor (AmbientAxis with the frame's axis) and the colour-stream
+// colour raised to the vertex shader's literal, and the pixel shader calls its
+// family's function with the frame's block (cbuffer Frame, b2) and the draw's
+// values. A light buffer is read only for a vertex below light_count, and only
+// by a draw whose light_mode names it: the two reads are inside [branch]
+// blocks, because a buffer bound through a root descriptor has no bounds check
+// and the compiler otherwise turns `if` into a select and loads all three
+// buffers for every vertex of every draw (the tests hold the compiled shader to
+// this). The pass also binds something that covers the draw's vertices at all
+// three registers at every draw (clay_pass.cpp). A draw
+// without bit 2 reads neither Frame nor Object and is the unlit colour.
+// kClayFrameFields and kClayObjectFields are the two buffers' layouts, which the
+// tests hold against the compiled shaders and the C++ structs.
+struct ClayBufferField {
+  const char* name;  // the variable in the cbuffer
+  unsigned offset;   // bytes from the start of the buffer
+  unsigned bytes;
 };
+inline constexpr ClayBufferField kClayFrameFields[] = {
+    {"f_sun_dir", 0, 12},  {"f_light_on", 12, 4},  {"f_sun_col", 16, 12}, {"f_tint_pow", 28, 4},
+    {"f_tint", 32, 12},    {"f_pad3", 44, 4},      {"f_add", 48, 12},     {"f_pad0", 60, 4},
+    {"f_floor", 64, 12},   {"f_pad1", 76, 4},      {"f_axis", 80, 12},    {"f_pad2", 92, 4},
+};
+inline constexpr ClayBufferField kClayObjectFields[] = {
+    {"o_rot0", 0, 16}, {"o_rot1", 16, 16}, {"o_rot2", 32, 16},        {"o_c49", 48, 12},
+    {"o_c27w", 60, 4}, {"o_c26", 64, 12},  {"o_colour_power", 76, 4},
+};
+
+#define FABLE2_CLAY_DRAW_HLSL R"hlsl(
+cbuffer Draw : register(b0) { float4 r0; float4 r1; float4 r2; float4 r3; uint layout; int base_vertex;
+                              uint vertex_count; uint color; float4 uv_xform; uint textured;
+                              uint sampler_index; uint alpha_mode; float alpha_ref;
+                              float4 cut; float alpha_scale; uint light_mode; uint light_count; uint pad2; };
+)hlsl"
+
+// The frame's light block (ClayFrameConstants) and the light functions: the functions of
+// tools/xdk_sigmatch/light_formulas.py term for term (docs/native-renderer/lighting-formulas.md), with the
+// argument lists of their mirrors in clay_logic.h. Guards: a vector without a length (or with one that is
+// not a number) normalises to zero, never to a made-up direction, so a zero normal gives no sun and t = 0;
+// the power of a zero base is 0; t and n_dot_sun are saturated; nothing is divided.
+#define FABLE2_CLAY_LIGHT_HLSL R"hlsl(
+cbuffer Frame : register(b2) {
+  float3 f_sun_dir; uint f_light_on;     // c80.xyz of a one-light draw (= c109.xyz), as it is; 1: the frame is lit
+  float3 f_sun_col; float f_tint_pow;    // c87.xyz; c21.w
+  float3 f_tint; float f_pad3;           // c21.xyz (the exposure is the output mapping's alone: cbuffer Map)
+  float3 f_add; float f_pad0;            // c20.xyz (c20.w, the output scale, is not applied)
+  float3 f_floor; float f_pad1;          // c22.xyz
+  float3 f_axis; float f_pad2;           // c23.xyz (= vertex c19.xyz)
+};
+float3 light_normalize(float3 v) {
+  float n2 = dot(v, v);
+  return (n2 > 0.0 && n2 < 3.0e38) ? v * rsqrt(n2) : float3(0.0, 0.0, 0.0);
+}
+float3 light_pow(float3 base, float exponent) {
+  float3 b = abs(base);
+  return (b > 0.0) ? exp2(exponent * log2(b)) : float3(0.0, 0.0, 0.0);
+}
+float3 AmbientFactor(float3 amb_floor, float t) {
+  t = saturate(t);
+  return amb_floor + (1.0 - amb_floor) * (t * t);
+}
+float3 AmbientAxis(float3 normal, float3 axis) {
+  float k = 0.5 + 0.5 * dot(normal, axis);
+  return normal * (1.0 - k) + axis * k;
+}
+float AmbientT(float3 axis_vector, float3 normal) {
+  return saturate(dot(light_normalize(axis_vector), light_normalize(normal)));
+}
+float FacingGate(float n_dot_c109, float k) { return saturate(k * n_dot_c109); }
+float SunGateSingle(float mask, float facing) { return saturate(facing) * saturate(mask); }
+float3 light_ambient(float3 base, float3 tint, float tint_pow, float3 add, float3 amb_floor, float t) {
+  return light_pow(base, tint_pow) * tint * AmbientFactor(amb_floor, t) + add;
+}
+float3 light_sun(float3 sun_col, float n_dot_sun, float sun_gate) {
+  return sun_col * (saturate(n_dot_sun) * sun_gate);
+}
+float3 LightTerrainLayer(float3 A, float3 baked, float3 tint, float tint_pow, float3 add, float3 amb_floor, float t,
+                         float n_dot_sun, float3 sun_col, float c11x, float sun_gate) {
+  return A * (c11x * light_ambient(baked, tint, tint_pow, add, amb_floor, t) + light_sun(sun_col, n_dot_sun, sun_gate));
+}
+float3 LightTerrainFar(float3 F, float3 baked, float3 tint, float tint_pow, float3 add, float3 amb_floor, float t,
+                       float n_dot_sun, float3 sun_col, float c11x) {
+  return F * (light_ambient(baked, tint, tint_pow, add, amb_floor, t) + c11x * light_sun(sun_col, n_dot_sun, 1.0));
+}
+float3 LightObject(float3 A, float3 vcolour, float3 tint, float tint_pow, float3 add, float3 amb_floor, float t,
+                   float n_dot_sun, float3 sun_col, float c27w, float sun_gate, float3 c49) {
+  return A * (c27w * light_ambient(vcolour, tint, tint_pow, add, amb_floor, t) + light_sun(sun_col, n_dot_sun, sun_gate)) * c49;
+}
+// What a lit draw writes: the value itself, a number, not negative, at most 64 (ClayLit in clay_logic.h).
+float3 clay_lit(float3 v) { return (v > 0.0) ? min(v, 64.0) : float3(0.0, 0.0, 0.0); }
+)hlsl"
+
+#define FABLE2_CLAY_OBJECT_HLSL R"hlsl(
+cbuffer Object : register(b1) {
+  float4 o_rot0; float4 o_rot1; float4 o_rot2;   // rows of M = c4..c6.xyz * c7.w (xyz)
+  float3 o_c49; float o_c27w;                    // pixel c49.xyz (the whole colour); c27.w (the ambient part)
+  float3 o_c26; float o_colour_power;            // pixel c26.xyz (with the output scale); the stream colour's power
+};
+)hlsl"
+
+inline constexpr const char* kClayVs = FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL FABLE2_CLAY_OBJECT_HLSL R"hlsl(
 StructuredBuffer<float4> positions : register(t0);
 StructuredBuffer<uint> indices : register(t1);
 StructuredBuffer<float2> uvs : register(t2);
+StructuredBuffer<float2> terrain_normals : register(t8);
+StructuredBuffer<float3> normals : register(t9);
+StructuredBuffer<uint> colours : register(t10);
 struct VsOut {
   float4 pos : SV_Position; float3 ndc : TEXCOORD0; float2 uv : TEXCOORD1;
   float3 world : TEXCOORD2;
   float3 normal : TEXCOORD3;
+  float3 axis : TEXCOORD4;
+  float3 vcolour : TEXCOORD5;
 };
 VsOut main(uint vid : SV_VertexID) {
   VsOut o;
@@ -114,22 +215,33 @@ VsOut main(uint vid : SV_VertexID) {
   o.pos = c;
   o.ndc = float3(c.xy / max(abs(c.w), 1e-6), c.w * 0.01);
   o.uv = float2(0, 0);
-  o.normal = float3(0, 0, 1);
-  if (textured != 0 && in_range) {
-    float2 t = uvs[v];
-    o.uv = t * uv_xform.xy + uv_xform.zw;
-    o.normal = float3(t, sqrt(abs(1.0 - dot(t, t))));
-  }
+  if (textured != 0 && in_range) o.uv = uvs[v] * uv_xform.xy + uv_xform.zw;
   o.world = p.xyz;
+  // An object's normal without its buffer is no direction (no sun, the ambient at its floor); any
+  // other draw's is the flat (0, 0, 1) of a draw without the steep-ground block.
+  o.normal = (light_mode & 2) ? float3(0, 0, 0) : float3(0, 0, 1);
+  o.axis = float3(0, 0, 0);
+  o.vcolour = float3(0, 0, 0);
+  bool has_light = in_range && uint(v) < light_count;
+  [branch] if ((light_mode & 1) && has_light) {
+    // The terrain normal as the game's vertex shaders form it, not normalised (the pixel shader does).
+    float2 t = terrain_normals[v];
+    o.normal = float3(t, sqrt(abs(1.0 - dot(t, t))));
+    if (light_mode & 4) o.axis = AmbientAxis(o.normal, f_axis);
+  }
+  [branch] if ((light_mode & 2) && has_light) {
+    // The object's normal as the game's vertex shader exports it: (R n) * c7.w, not normalised.
+    float3 n = normals[v];
+    o.normal = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));
+    o.axis = AmbientAxis(o.normal, f_axis);
+    uint rgba = colours[v];
+    o.vcolour = light_pow(float3(rgba & 255, (rgba >> 8) & 255, (rgba >> 16) & 255) / 255.0, o_colour_power);
+  }
   return o;
 }
 )hlsl";
 
-inline constexpr const char* kClayPs = R"hlsl(
-cbuffer Draw : register(b0) { float4 r0; float4 r1; float4 r2; float4 r3; uint layout; int base_vertex;
-                              uint vertex_count; uint color; float4 uv_xform; uint textured;
-                              uint sampler_index; uint alpha_mode; float alpha_ref;
-                              float4 cut; float alpha_scale; uint3 pad2; };
+inline constexpr const char* kClayPs = FABLE2_CLAY_DRAW_HLSL R"hlsl(
 float3 clay_linear(float3 d) { d = saturate(d); return d * d; }
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0) : SV_Target {
   float3 n = normalize(cross(ddx(ndc), ddy(ndc)));
@@ -139,11 +251,12 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0) : SV_Target {
 }
 )hlsl";
 
-inline constexpr const char* kClayTexturedPs = R"hlsl(
-cbuffer Draw : register(b0) { float4 r0; float4 r1; float4 r2; float4 r3; uint layout; int base_vertex;
-                              uint vertex_count; uint color; float4 uv_xform; uint textured;
-                              uint sampler_index; uint alpha_mode; float alpha_ref;
-                              float4 cut; float alpha_scale; uint3 pad2; };
+// A lit textured draw (light_mode bit 2: an object with the colour stream; lighting-formulas.md,
+// "Objects"): colour = (A * c27.w * (pow(vcolour, c21.w) * c21.xyz * L + c20.xyz) + A * c87.xyz *
+// sat(N . c80.xyz) * mask) * c49.xyz, times c26.xyz, with A = albedo^2 (after the division by the
+// alpha where the shader has it), vcolour the vertex shader's colour, N the interpolated M n
+// normalised, L from t = sat(normalize(axis) . N), and the mask 1 (no shadows).
+inline constexpr const char* kClayTexturedPs = FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL FABLE2_CLAY_OBJECT_HLSL R"hlsl(
 Texture2D albedo : register(t3);
 SamplerState s_point_wrap : register(s0);
 SamplerState s_linear_wrap : register(s1);
@@ -161,7 +274,8 @@ bool alpha_passes(float a, float ref, uint func) {
   return true;
 }
 float3 clay_linear(float3 d) { d = saturate(d); return d * d; }
-float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1) : SV_Target {
+float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1, float3 world : TEXCOORD2,
+            float3 normal : TEXCOORD3, float3 axis : TEXCOORD4, float3 vcolour : TEXCOORD5) : SV_Target {
   float3 n = normalize(cross(ddx(ndc), ddy(ndc)));
   float facet = saturate(abs(dot(n, normalize(float3(0.4, 0.6, -0.7)))));
   float3 base;
@@ -187,6 +301,12 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
       float per_offset = samples == 1 ? 0.125 : samples == 2 ? 0.0625 : 0.25;
       if (!(a >= mask_base - offset * per_offset)) discard;
     }
+    if (light_mode & 4) {
+      float3 N = light_normalize(normal);
+      float3 lit = LightObject(clay_linear(t.rgb), vcolour, f_tint, f_tint_pow, f_add, f_floor, AmbientT(axis, normal),
+                               dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(1.0, 1.0), o_c49) * o_c26;
+      return float4(clay_lit(lit), (alpha_mode & 0x80) ? saturate(a) : 1.0);
+    }
     return float4(clay_linear(t.rgb * (0.75 + 0.25 * facet)), (alpha_mode & 0x80) ? saturate(a) : 1.0);
   }
   base = float3((color >> 16) & 255, (color >> 8) & 255, color & 255) / 255.0;
@@ -196,7 +316,7 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
 
 // Terrain material of the clay pass (frame-map section 13, "Terrain", "Native
 // terrain material"; the reference is tools/xdk_sigmatch/terrain_replay.py,
-// variant --no-base). The game's terrain shaders keep, of everything that is
+// variant --no-base, and with the light --lit). The game's terrain shaders keep, of everything that is
 // not light, sun or fog, one colour texture per draw; this is that colour
 // squared, as the game squares it (A = tf0^2, F = tf13^2): the clay target is
 // linear like the game's, so the draws' captured blend adds the layers of a
@@ -224,36 +344,38 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
 //     vertex normal interpolated over the grid (kClayVs). The game skips the
 //     block from the threshold on; the mix is continuous there (1 - s is at
 //     most 1/256).
-// Not read: the base map tf3 with its exponent and tint, every light, the fog
-// and the normal maps tf2 and tf14 (they are lighting; the frame map lists them).
+// The light (light_mode bit 2; lighting-formulas.md, "Terrain layers", "Far terrain"), with the
+// colour above as A or F, the base map tf3 at (world - heightmap offset) * c14.xy as the baked term,
+// N the vertex normal interpolated and normalised, and the mask 1:
+//   layer  A * c11.x * (pow(tf3, c21.w) * c21.xyz * L + c20.xyz) + A * c87.xyz * sat(N . c80.xyz) *
+//          sat(8 * (N . c109.xyz)), L from t = sat(normalize(axis) . N), axis the vertex shader's
+//          lerp(n, c19, (1 + n . c19) / 2) interpolated;
+//   far    F * (pow(tf3, c21.w) * c21.xyz * L + c20.xyz) + F * c11.x * c87.xyz * sat(N . c80.xyz),
+//          L from t = sat(N . c23.xyz); the underlay's fade multiplies the lit colour.
+// Not read: the fog, the normal maps tf2 and tf14, the screen mask tf8, the
+// lanterns of the two- and four-light shaders.
 // Both shaders end in kClayTexturedPs's alpha test, alpha-to-mask and output
-// (the softened facet shade, squared here because it multiplies the display
-// value and the colour is linear: ClayLinearShaded in clay_logic.h; the alpha
-// written when the draw blends). The
+// (unlit: the softened facet shade, squared here because it multiplies the display
+// value and the colour is linear: ClayLinearShaded in clay_logic.h; lit: the value
+// through clay_lit; the alpha written when the draw blends). The
 // constants are cbuffer Terrain at b1, a constant buffer with one 256-byte slot
 // per terrain draw (ClayTerrainConstants in clay_logic.h); kClayTerrainFields
 // below is its layout, which the tests hold against both the compiled shaders
 // and the C++ struct. Textures: t4 the colour (tf0 or tf13), t5 the weight
 // cells (white for a far draw), t6 the side texture of a layer with the
-// steep-ground block (white otherwise); static samplers as kClayTexturedPs.
-struct ClayTerrainField {
-  const char* name;  // the variable in cbuffer Terrain
-  unsigned offset;   // bytes from the start of the buffer
-  unsigned bytes;
-};
+// steep-ground block (white otherwise), t7 the base map of a lit draw (white
+// otherwise); static samplers as kClayTexturedPs.
+using ClayTerrainField = ClayBufferField;
 inline constexpr ClayTerrainField kClayTerrainFields[] = {
     {"t_detail_uv", 0, 16},      {"t_weight_uv", 16, 16},     {"t_world0", 32, 16},        {"t_world1", 48, 16},
     {"t_world2", 64, 16},        {"t_eye", 80, 12},           {"t_hole_ref", 92, 4},       {"t_fade", 96, 8},
     {"t_weight_scale", 104, 4},  {"t_weight_bias", 108, 4},   {"t_colour_sampler", 112, 4}, {"t_weight_sampler", 116, 4},
     {"t_flags", 120, 4},         {"t_side_sampler", 124, 4},  {"t_side_uv", 128, 8},       {"t_slope", 136, 8},
-    {"t_steep_threshold", 144, 4}, {"t_steep_eps", 148, 4},   {"t_pad", 152, 8},
+    {"t_steep_threshold", 144, 4}, {"t_steep_eps", 148, 4},   {"t_pad", 152, 8},           {"t_base_uv", 160, 16},
+    {"t_base_sampler", 176, 4},  {"t_c11x", 180, 4},          {"t_facing_scale", 184, 4},  {"t_light_pad", 188, 4},
 };
 
-#define FABLE2_CLAY_TERRAIN_COMMON_HLSL R"hlsl(
-cbuffer Draw : register(b0) { float4 r0; float4 r1; float4 r2; float4 r3; uint layout; int base_vertex;
-                              uint vertex_count; uint color; float4 uv_xform; uint textured;
-                              uint sampler_index; uint alpha_mode; float alpha_ref;
-                              float4 cut; float alpha_scale; uint3 pad2; };
+#define FABLE2_CLAY_TERRAIN_COMMON_HLSL FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL R"hlsl(
 cbuffer Terrain : register(b1) {
   float4 t_detail_uv;   // layer: tf0 coordinate of the world position, x * [0] + [2], y * [1] + [3]
   float4 t_weight_uv;   // layer: tf18 coordinate of the world position (the layer's weight cell)
@@ -264,9 +386,12 @@ cbuffer Terrain : register(b1) {
                                                                 // fades in; bit 1: the layer has the steep-ground block
   float2 t_side_uv; float2 t_slope;                    // steep: (c8.x, -c8.x) into the side texture; c45.xy
   float t_steep_threshold; float t_steep_eps; uint2 t_pad;   // steep: the shader's two literals
+  float4 t_base_uv;     // lit: tf3 coordinate of the world position
+  uint t_base_sampler; float t_c11x; float t_facing_scale; uint t_light_pad;   // lit: c11.x; layer: the literal 8
 };
 Texture2D t_colour : register(t4);
 Texture2D t_weights : register(t5);
+Texture2D t_base : register(t7);
 SamplerState s_point_wrap : register(s0);
 SamplerState s_linear_wrap : register(s1);
 SamplerState s_point_clamp : register(s2);
@@ -287,6 +412,14 @@ float4 sample_colour(float2 at) {
   if (t_colour_sampler == 1) return t_colour.Sample(s_linear_wrap, at);
   if (t_colour_sampler == 2) return t_colour.Sample(s_point_clamp, at);
   return t_colour.Sample(s_linear_clamp, at);
+}
+// The base map at `at` with the screen derivatives d = (ddx, ddy) of the coordinate (the fetch is
+// inside the light's branch, the derivatives are formed outside it).
+float4 sample_base(float2 at, float4 d) {
+  if (t_base_sampler == 0) return t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw);
+  if (t_base_sampler == 1) return t_base.SampleGrad(s_linear_wrap, at, d.xy, d.zw);
+  if (t_base_sampler == 2) return t_base.SampleGrad(s_point_clamp, at, d.xy, d.zw);
+  return t_base.SampleGrad(s_linear_clamp, at, d.xy, d.zw);
 }
 // sat(d2 * c31.x + c31.y): 0 where the layers are whole, 1 where they are gone.
 float terrain_fade_in(float3 world) {
@@ -309,6 +442,7 @@ float4 terrain_out(float3 colour, float a, float4 pos, float3 ndc) {
     float per_offset = samples == 1 ? 0.125 : samples == 2 ? 0.0625 : 0.25;
     if (!(a >= mask_base - offset * per_offset)) discard;
   }
+  if (light_mode & 4) return float4(clay_lit(colour), (alpha_mode & 0x80) ? saturate(a) : 1.0);
   float shade = 0.75 + 0.25 * facet;
   return float4(saturate(colour * (shade * shade)), (alpha_mode & 0x80) ? saturate(a) : 1.0);
 }
@@ -324,15 +458,17 @@ float4 sample_side(float2 at, float4 d) {
   return t_side.SampleGrad(s_linear_clamp, at, d.xy, d.zw);
 }
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1,
-            float3 world : TEXCOORD2, float3 normal : TEXCOORD3) : SV_Target {
+            float3 world : TEXCOORD2, float3 normal : TEXCOORD3, float3 axis : TEXCOORD4) : SV_Target {
   float3 colour = sample_colour(world.xy * t_detail_uv.xy + t_detail_uv.zw).rgb;
   float3 lin = colour * colour;
   // The steep-ground block. The side projections and their derivatives are formed for every pixel,
-  // so that the two fetches can stay inside the branch.
+  // so that the two fetches can stay inside the branch; the base map's coordinate likewise.
   float2 o0 = world.yz * t_side_uv;
   float2 o1 = world.xz * t_side_uv;
   float4 d0 = float4(ddx(o0), ddy(o0));
   float4 d1 = float4(ddx(o1), ddy(o1));
+  float2 base_at = world.xy * t_base_uv.xy + t_base_uv.zw;
+  float4 base_d = float4(ddx(base_at), ddy(base_at));
   float s = saturate(abs(normal.z) * t_slope.y + t_slope.x);
   [branch] if ((t_flags & 2) && s < t_steep_threshold) {
     float inv = 1.0 / (abs(normal.x) + t_steep_eps + abs(normal.y));
@@ -348,21 +484,37 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
   if (value < t_hole_ref) discard;
   float weight = t_weight_scale * (value - t_weight_bias);
   float a = saturate(weight) * (1.0 - terrain_fade_in(world));
+  [branch] if (light_mode & 4) {
+    float3 N = light_normalize(normal);
+    float facing = FacingGate(dot(N, f_sun_dir), t_facing_scale);
+    lin = LightTerrainLayer(lin, sample_base(base_at, base_d).rgb, f_tint, f_tint_pow, f_add, f_floor,
+                            AmbientT(axis, normal), dot(N, f_sun_dir), f_sun_col, t_c11x, SunGateSingle(1.0, facing));
+  }
   return terrain_out(lin, a, pos, ndc);
 }
 )hlsl";
 
 inline constexpr const char* kClayTerrainFarPs = FABLE2_CLAY_TERRAIN_COMMON_HLSL R"hlsl(
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1,
-            float3 world : TEXCOORD2) : SV_Target {
+            float3 world : TEXCOORD2, float3 normal : TEXCOORD3) : SV_Target {
   float3 colour = sample_colour(uv).rgb;
   float3 lin = colour * colour;
+  float2 base_at = world.xy * t_base_uv.xy + t_base_uv.zw;
+  float4 base_d = float4(ddx(base_at), ddy(base_at));
+  [branch] if (light_mode & 4) {
+    float3 N = light_normalize(normal);
+    lin = LightTerrainFar(lin, sample_base(base_at, base_d).rgb, f_tint, f_tint_pow, f_add, f_floor, dot(N, f_axis),
+                          dot(N, f_sun_dir), f_sun_col, t_c11x);
+  }
   if (t_flags & 1) lin *= terrain_fade_in(world);
   return terrain_out(lin, 1.0, pos, ndc);
 }
 )hlsl";
 
 #undef FABLE2_CLAY_TERRAIN_COMMON_HLSL
+#undef FABLE2_CLAY_OBJECT_HLSL
+#undef FABLE2_CLAY_LIGHT_HLSL
+#undef FABLE2_CLAY_DRAW_HLSL
 
 // Output mapping of the clay pass (render/clay_pass.cpp; kFullscreenVs draws it): the linear target's
 // value times the exposure, as a display value in the 8-bit target the composite samples:

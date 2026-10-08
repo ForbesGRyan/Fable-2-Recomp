@@ -74,7 +74,8 @@ struct ClayStats {
   // texture path is on, like terrain_unusable.
   uint32_t terrain_no_positions = 0, terrain_no_indices = 0;
   // The light inputs of the prepared records (frame_scene.h, LightOf) as the
-  // geometry cache built them. Nothing is drawn from them yet. lit: prepared
+  // geometry cache built them (a terrain record is counted when it is drawn
+  // with its material: after the plan, FinishTerrain). lit: prepared
   // records with light inputs. light_ready: those whose normals, and for the
   // family with a colour stream its colours, were built. light_missing: the
   // others by reason (index: capture::LightReason; normal-unsupported: a normal
@@ -89,9 +90,42 @@ struct ClayStats {
   capture::ShaderTally<32> light_missing_by_vs;
   uint32_t light_rotation[size_t(RotationKind::kCount)] = {};
   capture::ShaderTally<32> light_rotation_by_vs;
+  // The light as drawn ("Native light" below; the Light line). light_switch:
+  // fable2_native_light was on for this frame. light_block: the frame had a
+  // light block the pass could use (MakeClayFrameConstants). light_drawn: the
+  // drawn records lit by their family's function, by family. light_unlit: the
+  // drawn records drawn without light (the unlit linear colour of the
+  // materials picture), by reason (ClayUnlit), and light_unlit_by_ps the pixel
+  // shaders of those that are unlit for a reason of their own (light-unknown,
+  // normal-unsupported; the kind is the ClayUnlit value).
+  bool light_switch = false, light_block = false;
+  uint32_t light_drawn[size_t(capture::LightFamily::kCount)] = {};
+  uint32_t light_unlit[4] = {};
+  capture::ShaderTally<32> light_unlit_by_ps;
+  float light_sun_dir[3] = {}, light_sun_col[3] = {};
 };
 
 inline constexpr uint8_t kTallyAlphaUnknown = 0, kTallyBlendUnknown = 1;
+
+// Why a drawn record has no light (ClayStats::light_unlit). kOff: the switch is
+// off. kBlock: the frame has no light block ("light-block": every draw of the
+// frame). kUnknown ("light-unknown"): the record has no light inputs, its
+// family is not one the pass lights, an input or buffer is missing or not
+// usable, its world rotation has no direction, or its ground square is unlit
+// as a whole. kNormal ("normal-unsupported"): its normal element is one no
+// reader decodes.
+enum class ClayUnlit : uint8_t { kOff, kBlock, kUnknown, kNormal, kCount };
+static_assert(size_t(ClayUnlit::kCount) == 4);
+
+inline const char* ClayUnlitName(ClayUnlit u) {
+  switch (u) {
+    case ClayUnlit::kOff: return "light-off";
+    case ClayUnlit::kBlock: return capture::kLightBlockReason;
+    case ClayUnlit::kUnknown: return capture::LightReasonName(capture::LightReason::kLightUnknown);
+    case ClayUnlit::kNormal: return capture::LightReasonName(capture::LightReason::kNormalUnsupported);
+    default: return "?";
+  }
+}
 
 // Albedo texture counters of one clay frame (TextureCache and the clay pass).
 struct TextureStats {
@@ -728,13 +762,97 @@ struct ClayConstants {
   float alpha_ref;
   float cut[4];         // eye xyz, squared distance (DrawRecord::cut; +inf: no cut)
   float alpha_scale;
-  uint32_t pad2[3];
+  uint32_t light_mode;   // kLightMode* ("Native light" below); 0: the draw has no light and no vertex normal
+  uint32_t light_count;  // elements the draw's normal (and colour) buffer holds: read for a vertex below it
+  uint32_t pad2;
 };
 static_assert(sizeof(ClayConstants) == 144);
 
+// The pass's binding layout: what each binding parameter of the clay shaders
+// is (clay_pass.cpp creates the layout from this table, and binds by the
+// parameter's index in it; test_native_shaders.cpp holds every resource each
+// compiled shader declares against it, so that no shader can declare a
+// register the layout does not bind for its stage). kBuffer: a structured
+// buffer bound by address, which has NO bounds check on the GPU: whatever is
+// bound there must hold every element the shader can load for the draw.
+enum class ClayBindingKind : uint8_t { kConstants, kConstantBuffer, kBuffer, kTextures };
+enum class ClayBindingStage : uint8_t { kAll, kVertex, kPixel };
+struct ClayBinding {
+  ClayBindingKind kind;
+  uint8_t reg;    // b register (constants, constant buffer) or t register (buffer, first texture)
+  uint8_t count;  // kConstants: 32-bit words; kTextures: textures at consecutive registers; else 1
+  ClayBindingStage stage;
+};
+inline constexpr ClayBinding kClayBindings[] = {
+    {ClayBindingKind::kConstants, 0, 36, ClayBindingStage::kAll},        // 0: b0 Draw (ClayConstants)
+    {ClayBindingKind::kBuffer, 0, 1, ClayBindingStage::kAll},            // 1: t0 positions (float4)
+    {ClayBindingKind::kBuffer, 1, 1, ClayBindingStage::kAll},            // 2: t1 indices (uint)
+    {ClayBindingKind::kBuffer, 2, 1, ClayBindingStage::kAll},            // 3: t2 UVs (float2)
+    {ClayBindingKind::kTextures, 3, 1, ClayBindingStage::kPixel},        // 4: t3 albedo
+    {ClayBindingKind::kTextures, 4, 4, ClayBindingStage::kPixel},        // 5: t4..t7 terrain colour, weights, side, base map
+    {ClayBindingKind::kConstantBuffer, 1, 1, ClayBindingStage::kAll},    // 6: b1 the draw's slot (Terrain or Object)
+    {ClayBindingKind::kConstantBuffer, 2, 1, ClayBindingStage::kAll},    // 7: b2 Frame
+    {ClayBindingKind::kBuffer, 8, 1, ClayBindingStage::kVertex},         // 8: t8 terrain normals (float2)
+    {ClayBindingKind::kBuffer, 9, 1, ClayBindingStage::kVertex},         // 9: t9 object normals (float3)
+    {ClayBindingKind::kBuffer, 10, 1, ClayBindingStage::kVertex},        // 10: t10 object colours (uint)
+};
+inline constexpr uint32_t kClayStaticSamplers = 4;  // s0..s3, pixel stage (SamplerIndex)
+static_assert(kClayBindings[0].count * 4 == sizeof(ClayConstants));
+
+// Words of the root signature the layout takes (64 at most): a constant block
+// its words, a buffer or constant buffer address 2, a texture table 1.
+constexpr uint32_t ClayRootWords() {
+  uint32_t words = 0;
+  for (const ClayBinding& b : kClayBindings) {
+    words += b.kind == ClayBindingKind::kConstants ? b.count : b.kind == ClayBindingKind::kTextures ? 1u : 2u;
+  }
+  return words;
+}
+static_assert(ClayRootWords() == 54 && ClayRootWords() <= 64);
+
+// The largest element (bytes) the vertex shader loads per vertex from the
+// light's three buffers (t8 float2, t9 float3, t10 uint), and the element of
+// the position buffer (float4). A draw that does not use one of the three has
+// its own position buffer bound there: it holds an element of 16 bytes for
+// every vertex the draw can name, so any load the shader could make for the
+// draw lies inside it.
+inline constexpr uint32_t kClayLightElementBytesMax = 12, kClayPositionElementBytes = 16;
+static_assert(kClayLightElementBytesMax <= kClayPositionElementBytes);
+
+// ClayConstants::light_mode. kLightModeTerrainNormals: the vertex shader forms
+// the game's terrain normal from the draw's buffer at t8 (float2 per grid
+// point): for the steep-ground block and for the light. kLightModeObject: the
+// vertex shader reads the stream normal at t9 and the colour at t10 and puts
+// the normal through the draw's rows of cbuffer Object. kLightModeLit: the
+// pixel shader lights the draw with its family's function (the frame's block
+// in cbuffer Frame, the draw's values in its slot at b1); without it the draw
+// is the unlit linear colour of the materials picture.
+inline constexpr uint32_t kLightModeTerrainNormals = 1u, kLightModeObject = 2u, kLightModeLit = 4u;
+
+// What the pass binds at the light's three buffer registers (t8, t9, t10:
+// kClayBindings[kClayLightBufferParam0 + i]) for a draw with `light_mode`: the
+// draw's own buffer of that register where the mode names it, else the draw's
+// positions. EVERY draw gets all three: nothing may stay bound from another
+// draw, whose (smaller) buffer this draw's vertex indices would address.
+enum class ClayLightBuffer : uint8_t { kPositions, kTerrainNormals, kNormals, kColours };
+struct ClayLightBuffers {
+  ClayLightBuffer source[3];  // t8, t9, t10
+};
+inline constexpr uint32_t kClayLightBufferParam0 = 8;
+constexpr ClayLightBuffers LightBufferSources(uint32_t light_mode) {
+  const bool terrain = (light_mode & kLightModeTerrainNormals) != 0;
+  const bool object = (light_mode & kLightModeObject) != 0;
+  return {{terrain ? ClayLightBuffer::kTerrainNormals : ClayLightBuffer::kPositions,
+           object ? ClayLightBuffer::kNormals : ClayLightBuffer::kPositions,
+           object ? ClayLightBuffer::kColours : ClayLightBuffer::kPositions}};
+}
+static_assert(kClayBindings[kClayLightBufferParam0].reg == 8 && kClayBindings[kClayLightBufferParam0 + 1].reg == 9 &&
+              kClayBindings[kClayLightBufferParam0 + 2].reg == 10 && std::size(kClayBindings) == kClayLightBufferParam0 + 3);
+
 inline ClayConstants MakeClayConstants(const capture::DrawRecord& r, uint32_t vertex_count,
                                        uint32_t color, const float uv[4], bool textured,
-                                       uint32_t sampler, const ClayAlpha& alpha = {}) {
+                                       uint32_t sampler, const ClayAlpha& alpha = {}, uint32_t light_mode = 0,
+                                       uint32_t light_count = 0) {
   ClayConstants c{};
   std::copy(std::begin(r.rows), std::end(r.rows), std::begin(c.rows));
   c.layout = r.layout == capture::TransformLayout::kCombine ? 1u : 0u;
@@ -748,6 +866,9 @@ inline ClayConstants MakeClayConstants(const capture::DrawRecord& r, uint32_t ve
   c.alpha_ref = alpha.ref;
   std::copy(std::begin(r.cut), std::end(r.cut), std::begin(c.cut));
   c.alpha_scale = alpha.scale;
+  c.light_mode = light_mode;
+  // Never more than the positions: the shader reads a light buffer only for a vertex it draws.
+  c.light_count = light_mode ? std::min(light_count, vertex_count) : 0u;
   return c;
 }
 
@@ -793,11 +914,16 @@ inline float ClayLinearShaded(float linear, float shade) {
 // in the 10-bit one), so that the clear does not depend on a GPU's rounding;
 // the mapping returns the three levels. The fourth is the alpha of the clear
 // call; the target has none.
+// These are the levels under exposure 1. Once the exposure of a lit frame is not
+// 1 (ClayExposure, plan Task 9) the mapping shows sqrt(E) times these levels
+// where nothing is drawn, unless the clear value of such a frame is divided by E.
 inline constexpr int kClayClearLevels[3] = {20, 20, 25};
 inline constexpr float kClayClearLinear[4] = {101.0f / 16384.0f, 101.0f / 16384.0f, 39.0f / 4096.0f, 1.0f};
 
-// fable2_native_light. Off: every light term is 1 and the exposure is 1, which
-// is the materials picture. On: nothing more yet (the lit shaders follow).
+// fable2_native_light. Off: no draw is lit and the exposure is 1, which is the
+// materials picture. On: the draws of the families the pass lights are lit in
+// a frame that has a light block ("Native light" below); every other draw,
+// and every draw of a frame without a block, is drawn as with the switch off.
 enum class ClayLight : uint8_t { kOff, kOn };
 
 inline ClayLight ParseClayLight(std::string_view text, bool* recognized) {
@@ -810,8 +936,10 @@ inline ClayLight ParseClayLight(std::string_view text, bool* recognized) {
 }
 
 // The output mapping's exposure E: one number for the frame, no draw's own.
-// 1 with light off; with light on it stays 1 until the lit shaders exist and E
-// is calibrated against the emulated frame (spec, design 4).
+// 1 with light off and in a frame drawn without light. With light on it is
+// NOT CALIBRATED yet: 1 as well, until it is fitted against the emulated frame
+// (spec, design 4; plan Task 9). The lit linear values are the game's before
+// its output scale c20.w (16), which its own later passes take back.
 inline float ClayExposure(ClayLight light) {
   switch (light) {
     case ClayLight::kOff: return 1.0f;
@@ -849,6 +977,279 @@ inline std::string FormatTargetText(uint32_t width, uint32_t height) {
   return buf;
 }
 
+// --- Native light (frame-map section 14, "Native light"; docs/native-renderer/lighting-formulas.md) ---
+// With fable2_native_light on, in a frame that has a light block, the draws of
+// three families are lit by the game's own ambient, baked and sun light, in
+// linear space and without shadows (the screen mask is 1): the terrain layers,
+// the far terrain, and the objects whose vertex shader reads the colour stream
+// (0xECD6...), each with its two- and four-light forms. Every other draw, and
+// every draw of a frame without a block, is the unlit colour of the materials
+// picture, counted by reason (ClayUnlit).
+//
+// The functions below are the pure mirrors of the HLSL light functions
+// (shaders::kClayLightHlsl, same names and argument lists), which are the
+// functions of tools/xdk_sigmatch/light_formulas.py term for term, with its
+// guards: a vector without a direction or with a component that is not a
+// number normalises to zero, the power of a zero base is 0, a scalar that is
+// not a number counts as 0, and every result is a number. The tests pin both
+// against the same literals (tests/test_light_check.py, PinnedForTheRenderer;
+// tests/native/test_clay_logic.cpp).
+//
+// The value is the formula's WITHOUT the game's output scale c20.w (16): the
+// game multiplies by it at the end of every scene shader and its later passes
+// take it back; here the output mapping's exposure stands in its place. An
+// object's c49.xyz is inside its function (LightObject); its c26.xyz, which
+// the game applies together with c20.w after the fog, multiplies the function's
+// result (ClayObjectConstants::c26; (1, 1, 1) in every row captured).
+
+inline float LightFinite(float x) { return std::isfinite(x) ? x : 0.0f; }
+
+// Clamp to [0, 1]; a NaN gives 0.
+inline float LightSat(float x) {
+  if (x != x) return 0.0f;
+  return x < 0.0f ? 0.0f : x > 1.0f ? 1.0f : x;
+}
+
+inline float LightDot(const Float3& a, const Float3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+
+// v / |v|; (0, 0, 0) for a vector without a length or with a component that is not a number.
+// The zero normal is never made a direction (ruling: N = 0 gives no sun and t = 0, the ambient at
+// its floor, which is what the game's saturating dot products give).
+inline Float3 LightNormalize(const Float3& v) {
+  // (a component that is not a number makes the squared length one too: NaN or infinity)
+  const float n2 = LightDot(v, v);
+  if (!(n2 > 0.0f) || !std::isfinite(n2)) return {0.0f, 0.0f, 0.0f};
+  const float k = 1.0f / std::sqrt(n2);
+  return {v.x * k, v.y * k, v.z * k};
+}
+
+// |base|^exponent per channel, as the game computes it (exp2(exponent * log2(|base|))); 0 for a
+// zero base, a base or an exponent that is not a number, and a result that is none.
+inline Float3 LightPow(const Float3& base, float exponent) {
+  if (!std::isfinite(exponent)) return {0.0f, 0.0f, 0.0f};
+  auto one = [&](float b) {
+    b = std::fabs(b);
+    return b > 0.0f && std::isfinite(b) ? LightFinite(std::pow(b, exponent)) : 0.0f;
+  };
+  return {one(base.x), one(base.y), one(base.z)};
+}
+
+// The ambient factor L = floor + (1 - floor) * t^2 per channel, t clamped to [0, 1].
+inline Float3 AmbientFactor(const Float3& floor, float t) {
+  t = LightSat(t);
+  auto one = [&](float f) {
+    f = LightFinite(f);
+    return f + (1.0f - f) * t * t;
+  };
+  return {one(floor.x), one(floor.y), one(floor.z)};
+}
+
+// The vertex shaders' vector for t: lerp(normal, axis, (1 + normal . axis) / 2), not normalised.
+// normal: the vertex normal as the vertex shader has it (terrain: the decoded map normal; objects:
+// M n); axis: vertex c19.xyz (= pixel c23.xyz, the block's axis).
+inline Float3 AmbientAxis(const Float3& normal, const Float3& axis) {
+  const float k = 0.5f + 0.5f * LightDot(normal, axis);
+  return {LightFinite(normal.x * (1.0f - k) + axis.x * k), LightFinite(normal.y * (1.0f - k) + axis.y * k),
+          LightFinite(normal.z * (1.0f - k) + axis.z * k)};
+}
+
+// t = sat(normalize(axis_vector) . normalize(normal)); 0 when either has no direction.
+inline float AmbientT(const Float3& axis_vector, const Float3& normal) {
+  return LightSat(LightDot(LightNormalize(axis_vector), LightNormalize(normal)));
+}
+
+// The colour-stream vertex shader's o6: pow(|colour|, power) per channel (power: its literal 2.2).
+inline Float3 VertexColour(const Float3& stream_colour, float power) { return LightPow(stream_colour, power); }
+
+// Terrain layers only: sat(k * (N . c109.xyz)), k the pixel shader's literal 8.
+inline float FacingGate(float n_dot_c109, float k) { return LightSat(LightFinite(k) * LightFinite(n_dot_c109)); }
+
+// The one-light gate on the sun: facing * mask (the mask is 1 while the pass draws no shadows).
+inline float SunGateSingle(float mask, float facing) { return LightSat(facing) * LightSat(mask); }
+
+namespace light_detail {
+// pow(base, tint_pow) * tint * L + add, per channel.
+inline Float3 Ambient(const Float3& base, const Float3& tint, float tint_pow, const Float3& add, const Float3& floor,
+                      float t) {
+  const Float3 lit = AmbientFactor(floor, t);
+  const Float3 p = LightPow(base, tint_pow);
+  return {p.x * LightFinite(tint.x) * lit.x + LightFinite(add.x), p.y * LightFinite(tint.y) * lit.y + LightFinite(add.y),
+          p.z * LightFinite(tint.z) * lit.z + LightFinite(add.z)};
+}
+// sun_col * sat(n_dot_sun) * sun_gate.
+inline Float3 Sun(const Float3& sun_col, float n_dot_sun, float sun_gate) {
+  const float k = LightSat(n_dot_sun) * LightFinite(sun_gate);
+  return {LightFinite(sun_col.x) * k, LightFinite(sun_col.y) * k, LightFinite(sun_col.z) * k};
+}
+}  // namespace light_detail
+
+// Terrain layers: A * c11x * (pow(baked, tint_pow) * tint * L + add) + A * sun_col * n_dot_sun * sun_gate.
+inline Float3 LightTerrainLayer(const Float3& A, const Float3& baked, const Float3& tint, float tint_pow,
+                                const Float3& add, const Float3& floor, float t, float n_dot_sun,
+                                const Float3& sun_col, float c11x, float sun_gate) {
+  const Float3 amb = light_detail::Ambient(baked, tint, tint_pow, add, floor, t);
+  const Float3 sun = light_detail::Sun(sun_col, n_dot_sun, sun_gate);
+  const float k = LightFinite(c11x);
+  return {LightFinite(LightFinite(A.x) * (k * amb.x + sun.x)), LightFinite(LightFinite(A.y) * (k * amb.y + sun.y)),
+          LightFinite(LightFinite(A.z) * (k * amb.z + sun.z))};
+}
+
+// Far terrain: F * (pow(baked, tint_pow) * tint * L + add) + F * c11x * sun_col * n_dot_sun.
+inline Float3 LightTerrainFar(const Float3& F, const Float3& baked, const Float3& tint, float tint_pow,
+                              const Float3& add, const Float3& floor, float t, float n_dot_sun, const Float3& sun_col,
+                              float c11x) {
+  const Float3 amb = light_detail::Ambient(baked, tint, tint_pow, add, floor, t);
+  const Float3 sun = light_detail::Sun(sun_col, n_dot_sun, 1.0f);
+  const float k = LightFinite(c11x);
+  return {LightFinite(LightFinite(F.x) * (amb.x + k * sun.x)), LightFinite(LightFinite(F.y) * (amb.y + k * sun.y)),
+          LightFinite(LightFinite(F.z) * (amb.z + k * sun.z))};
+}
+
+// Lit objects: (A * c27w * (pow(vcolour, tint_pow) * tint * L + add) + A * sun_col * n_dot_sun * sun_gate) * c49.
+inline Float3 LightObject(const Float3& A, const Float3& vcolour, const Float3& tint, float tint_pow,
+                          const Float3& add, const Float3& floor, float t, float n_dot_sun, const Float3& sun_col,
+                          float c27w, float sun_gate, const Float3& c49) {
+  const Float3 amb = light_detail::Ambient(vcolour, tint, tint_pow, add, floor, t);
+  const Float3 sun = light_detail::Sun(sun_col, n_dot_sun, sun_gate);
+  const float k = LightFinite(c27w);
+  return {LightFinite(LightFinite(A.x) * (k * amb.x + sun.x) * LightFinite(c49.x)),
+          LightFinite(LightFinite(A.y) * (k * amb.y + sun.y) * LightFinite(c49.y)),
+          LightFinite(LightFinite(A.z) * (k * amb.z + sun.z) * LightFinite(c49.z))};
+}
+
+// What a lit draw writes into the float target for the value `v`: v itself, not clamped at 1 (the
+// lit values exceed it, and the output mapping clamps after the exposure), but nothing that is not
+// a number, nothing negative and nothing above kClayLitMax: a NaN (no comparison holds for it) and
+// a negative value give 0, +infinity gives the bound. The bound keeps a sum of every blended draw
+// of a frame over one pixel far below the target's largest value (64,512 in its 10-bit channel:
+// 1,008 draws of 64), so no infinity arises in the target, from which a blend factor of 0 would
+// make a NaN. A lit value is at most a few times its albedo (the captured block: tint up to 1.9,
+// sun colour up to 1.0).
+inline constexpr float kClayLitMax = 64.0f;
+inline float ClayLit(float v) {
+  if (!(v > 0.0f)) return 0.0f;
+  return v < kClayLitMax ? v : kClayLitMax;
+}
+
+// The largest magnitude a light constant may have to reach a shader: the captured values are
+// below 2, and a product of five such bounds is still a number in single precision.
+inline constexpr float kLightValueMax = 1024.0f;
+inline bool LightValueUsable(float v) { return std::fabs(v) <= kLightValueMax; }  // (false for a NaN and for infinity)
+
+// The frame's light for the shaders (cbuffer Frame, register b2; shaders::kClayFrameFields is its
+// layout). One per Render, in slot 0 of the frame's constant buffer.
+struct ClayFrameConstants {
+  float sun_dir[3];     // c80.xyz of a one-light draw (bit-equal to c109.xyz: MakeLightBlock), as it is
+  uint32_t light_on;    // 1: the frame is lit; 0: no draw of it is (the other fields are zero)
+  float sun_col[3];     // c87.xyz
+  float tint_pow;       // c21.w
+  float tint[3];        // c21.xyz
+  float pad3;           // (no exposure here: E is the output mapping's alone, ClayFrameExposure)
+  float add[3];         // c20.xyz (c20.w, the output scale, is not applied)
+  float pad0;
+  float floor[3];       // c22.xyz; the block carries x and y, z is 0 (0 in every row captured)
+  float pad1;
+  float axis[3];        // c23.xyz (= vertex c19.xyz)
+  float pad2;
+};
+static_assert(sizeof(ClayFrameConstants) == 96);
+
+// The frame's constants from its light block. Lit only with the switch on and a valid block whose
+// every value is a number of usable size (the block's own rules: light_block.h, MakeLightBlock; a
+// frame without one is "light-block"); else everything is zero.
+inline ClayFrameConstants MakeClayFrameConstants(const capture::LightBlock& b, ClayLight light) {
+  ClayFrameConstants c{};
+  if (light != ClayLight::kOn || !b.valid) return c;
+  bool ok = b.tint_pow > 0.0f && b.tint_pow <= 8.0f && LightValueUsable(b.floor[0]) && LightValueUsable(b.floor[1]);
+  for (int i = 0; i < 3; ++i) {
+    ok = ok && LightValueUsable(b.sun_dir[i]) && LightValueUsable(b.sun_col[i]) && LightValueUsable(b.tint[i]) &&
+         LightValueUsable(b.add[i]) && LightValueUsable(b.axis[i]);
+  }
+  if (!ok) return c;
+  for (int i = 0; i < 3; ++i) {
+    c.sun_dir[i] = b.sun_dir[i];
+    c.sun_col[i] = b.sun_col[i];
+    c.tint[i] = b.tint[i];
+    c.add[i] = b.add[i];
+    c.axis[i] = b.axis[i];
+  }
+  c.floor[0] = b.floor[0];
+  c.floor[1] = b.floor[1];
+  c.tint_pow = b.tint_pow;
+  c.light_on = 1;
+  return c;
+}
+
+// The output mapping's exposure of a frame: ClayExposure of "on" only when the frame is lit. A
+// frame drawn without light (the switch off, or no light block) is the materials picture, exposure
+// 1, whatever E becomes. The one place E comes from; it is applied only in the mapping.
+inline float ClayFrameExposure(const ClayFrameConstants& frame) {
+  return ClayExposure(frame.light_on ? ClayLight::kOn : ClayLight::kOff);
+}
+
+// Whether the pass lights a draw with these inputs (plan Task 7): the terrain layers and the far
+// terrain, and the objects whose vertex shader has the colour stream (LightVertexKind::kStream).
+// Their two- and four-light forms (LightInputs::multi) are drawn with the frame's sun through the
+// family's one-light function and without their lanterns: for every such pair of the table the
+// microcode, with the sun in the slot the game puts it in behind dark lanterns, is that function
+// (light_check.py --multi-sun; tests/test_light_check.py, MultiSun). The objects, trunks and
+// plants of the other vertex kinds have no light yet.
+inline bool LightFamilyDrawn(const capture::LightInputs& l) {
+  switch (l.family) {
+    case capture::LightFamily::kTerrainLayer:
+    case capture::LightFamily::kTerrainFar: return l.kind == capture::LightVertexKind::kTerrain;
+    case capture::LightFamily::kObject: return l.kind == capture::LightVertexKind::kStream;
+    default: return false;
+  }
+}
+
+// A lit object's values for the shaders (cbuffer Object, register b1, in the draw's slot of the
+// frame's constant buffer; shaders::kClayObjectFields is its layout).
+struct ClayObjectConstants {
+  float rot[3][4];     // rows of M = world_rot * world_scale (xyz; w 0): the game's own (R n) * c7.w
+  float c49[3];        // pixel c49.xyz: on the whole colour
+  float c27w;          // pixel c27.w: on the ambient part
+  float c26[3];        // pixel c26.xyz: with the output scale, after the function
+  float colour_power;  // the vertex shader's literal on the stream colour (2.2)
+};
+static_assert(sizeof(ClayObjectConstants) == 80);
+
+// False (the draw is then not lit: light-unknown) unless the inputs are a colour-stream object's,
+// its world rotation gives a direction (every RotationKind but kDegenerate: the normal is the
+// game's normalize(M n), ruling of 2026-10-08) and every value is a number of usable size, the
+// power in (0, 8].
+inline bool MakeClayObjectConstants(const capture::LightInputs& l, ClayObjectConstants* out) {
+  *out = ClayObjectConstants{};
+  if (l.family != capture::LightFamily::kObject || l.kind != capture::LightVertexKind::kStream) return false;
+  if (ClassifyRotation(l.world_rot, l.world_scale) == RotationKind::kDegenerate) return false;
+  if (!(l.colour_power > 0.0f && l.colour_power <= 8.0f) || !LightValueUsable(l.c27w)) return false;
+  ClayObjectConstants c{};
+  for (int r = 0; r < 3; ++r) {
+    for (int k = 0; k < 3; ++k) {
+      c.rot[r][k] = l.world_rot[r][k] * l.world_scale;
+      if (!LightValueUsable(c.rot[r][k])) return false;
+    }
+    if (!LightValueUsable(l.c49[r]) || !LightValueUsable(l.c26[r])) return false;
+    c.c49[r] = l.c49[r];
+    c.c26[r] = l.c26[r];
+  }
+  c.c27w = l.c27w;
+  c.colour_power = l.colour_power;
+  *out = c;
+  return true;
+}
+
+// Elements a record's normal and colour buffers must hold: one for every vertex its indices name,
+// the draw's largest vertex (max_index + base_vertex) plus one. That is the capture's rule for the
+// streams (material.h, MakeLightInputs: the normal stream, the colour stream from its offset and the
+// probe weights hold the draw's largest vertex), not the whole position stream: meshes share
+// streams, and a colour stream ends where its last mesh's vertices end. 0 when the indices name no
+// vertex inside the positions (IndexRangeValid; such a record is not drawn).
+inline uint32_t LightVertexNeed(uint32_t max_index, int32_t base_vertex, uint32_t vertex_count) {
+  if (!IndexRangeValid(max_index, base_vertex, vertex_count)) return 0;
+  return uint32_t(int64_t(max_index) + base_vertex) + 1u;
+}
+
 // --- Terrain material (frame-map section 13, "Terrain", "Native terrain material") ---
 // A terrain record whose inputs and textures are usable is drawn by one of the
 // two terrain pixel shaders (fable2_native_shaders.h) with its captured render
@@ -877,8 +1278,14 @@ struct ClayTerrainConstants {
   float slope[2];           // TerrainMaterialInputs::slope
   float steep_threshold, steep_eps;
   uint32_t pad[2];
+  // The light (SetClayTerrainLight; zero for a record drawn without it).
+  float base_uv[4];         // tf3 coordinate of the world position, scaled into the host texture
+  uint32_t base_sampler;    // static sampler of the base map
+  float c11x;               // pixel c11.x: layers on the ambient part, far terrain on the sun
+  float facing_scale;       // layers: the literal of sat(scale * (N . c109)); far terrain: 0
+  uint32_t light_pad;
 };
-static_assert(sizeof(ClayTerrainConstants) == 160);
+static_assert(sizeof(ClayTerrainConstants) == 192);
 inline constexpr uint32_t kClayTerrainSlotBytes = 256;  // the RHI's constant buffer offset alignment
 // ClayTerrainConstants::flags: the far colour is multiplied by sat(d2 * fade[0] + fade[1]) (the
 // kind terrain-far-fade, shader 2F8A: the underlay the layers add to).
@@ -947,6 +1354,32 @@ inline ClayTerrainConstants MakeClayTerrainConstants(const capture::TerrainMater
     c.steep_eps = m.steep_eps;
   }
   return c;
+}
+
+// The light's part of a terrain record's constants. `base_fix`, `base_sampler`: the base map's
+// (width / host width, height / host height) and static sampler, as the texture cache resolved
+// it. False, with `c` untouched (the record is then not lit, and with it its ground square:
+// PlanTerrain), unless the inputs are a terrain family's, the record has its base map inputs
+// (TerrainMaterialInputs::base_valid), every value is a number of usable size, and a layer has its
+// facing literal (above 0).
+inline bool SetClayTerrainLight(ClayTerrainConstants& c, const capture::TerrainMaterialInputs& m,
+                                const capture::LightInputs& l, const float base_fix[2], uint32_t base_sampler) {
+  const bool layer = l.family == capture::LightFamily::kTerrainLayer;
+  if ((!layer && l.family != capture::LightFamily::kTerrainFar) || l.kind != capture::LightVertexKind::kTerrain) {
+    return false;
+  }
+  if (!m.valid || !m.base_valid || !LightValueUsable(l.c11x)) return false;
+  if (layer && !(l.facing_scale > 0.0f && LightValueUsable(l.facing_scale))) return false;
+  float uv[4];
+  for (int i = 0; i < 4; ++i) {
+    uv[i] = m.base_uv[i] * base_fix[i & 1];
+    if (!std::isfinite(uv[i])) return false;
+  }
+  std::copy(std::begin(uv), std::end(uv), std::begin(c.base_uv));
+  c.base_sampler = base_sampler;
+  c.c11x = l.c11x;
+  c.facing_scale = layer ? l.facing_scale : 0.0f;
+  return true;
 }
 
 // kTextured when a terrain record can be drawn with its material this frame,
@@ -1020,6 +1453,10 @@ struct TerrainPlanItem {
   bool usable = false;    // its material can be drawn this frame (TerrainMaterialStatus is kTextured)
   bool drawable = true;   // its positions and indices were built
   TerrainAction action = TerrainAction::kFlat;  // out
+  // In: the record's light can be drawn (its inputs, normals and base map are there, the frame is
+  // lit). Out: the record is drawn lit: it is drawn with its material and, for a layer, every layer
+  // drawn with its material in each of its squares can be lit too (below).
+  bool light = false;
 };
 
 // What the pass does with each terrain record of a frame. The ground near the
@@ -1040,6 +1477,15 @@ struct TerrainPlanItem {
 //  - a layer draw of several patches ties its squares together: when one is bad
 //    all are (a square can then lie under two opaque flat draws, never under a
 //    material layer over flat clay).
+// The light follows the same rule one step on (TerrainPlanItem::light): the
+// lit layers of a square add up like its unlit ones, and a sum of lit and unlit
+// layers is neither, so a square is lit as a whole or not at all. A layer drawn
+// with its material that cannot be lit makes its squares unlit, a layer draw of
+// several patches ties its squares together, and a layer in an unlit square is
+// drawn without light. A record that is not drawn with its material has no
+// light; a draw of the adaptive builder is lit or not by itself (it covers
+// many squares, and where it fades into unlit layers the two differ in the
+// ring of the cross-fade: counted, not hidden).
 // A draw of the adaptive builder never depends on another draw. A record with
 // more than capture::kMaxTerrainPatches patches has no grid (no positions are
 // built for it) and is not walked: as a layer it has no squares; as an underlay
@@ -1066,6 +1512,7 @@ struct TerrainPlanScratch {
   struct Square {
     TerrainRect rect;
     bool bad = false, covered = false;
+    bool dark = false;  // a layer drawn with its material in it cannot be lit
   };
   struct RectHash {
     size_t operator()(const TerrainRect& r) const {
@@ -1100,6 +1547,7 @@ inline void PlanTerrain(std::vector<TerrainPlanItem>& items, TerrainPlanScratch*
   auto unplanned = [&] {
     for (TerrainPlanItem& it : items) {
       it.action = !it.layer ? own_action(it) : it.drawable ? TerrainAction::kFlat : TerrainAction::kSkip;
+      it.light = it.light && it.action == TerrainAction::kMaterial;
     }
   };
   uint64_t steps = 0;
@@ -1183,6 +1631,33 @@ inline void PlanTerrain(std::vector<TerrainPlanItem>& items, TerrainPlanScratch*
     } else {
       it.action = TerrainAction::kSkip;
     }
+  }
+  // The light: only of a record drawn with its material, and a square as a whole.
+  for (size_t i = 0; i < items.size(); ++i) {
+    TerrainPlanItem& it = items[i];
+    const bool material = it.action == TerrainAction::kMaterial;
+    it.light = it.light && material;
+    if (material && !it.light) {  // (only a layer has squares linked)
+      for (uint32_t l = first[i]; l < first[i + 1]; ++l) squares[link[l]].dark = true;
+    }
+
+  }
+  for (bool changed = true; changed;) {
+    changed = false;
+    for (size_t i = 0; i < items.size(); ++i) {
+      if (!items[i].layer || items[i].action != TerrainAction::kMaterial) continue;
+      bool dark = false;
+      for (uint32_t l = first[i]; l < first[i + 1]; ++l) dark = dark || squares[link[l]].dark;
+      if (!dark) continue;
+      for (uint32_t l = first[i]; l < first[i + 1]; ++l) {
+        changed = changed || !squares[link[l]].dark;
+        squares[link[l]].dark = true;
+      }
+    }
+  }
+  for (size_t i = 0; i < items.size(); ++i) {
+    if (!items[i].layer) continue;
+    for (uint32_t l = first[i]; l < first[i + 1]; ++l) items[i].light = items[i].light && !squares[link[l]].dark;
   }
 }
 
@@ -1298,6 +1773,60 @@ inline std::string FormatLightText(const ClayStats& st) {
     if (!st.light_missing[i]) continue;
     text += std::string(" | ") + capture::LightReasonName(capture::LightReason(i)) + " " +
             std::to_string(st.light_missing[i]) + " by vs {" + by_vs(st.light_missing_by_vs, uint8_t(i)) + "}";
+  }
+  return text;
+}
+
+// The log's and F3's Light line: the switch, whether the frame had a light
+// block the pass could use, the drawn records lit by their family's function
+// (by family), the drawn records without light by reason, the pixel shaders of
+// those unlit for a reason of their own (light-unknown and normal-unsupported
+// together, top eight), and the frame's sun.
+inline std::string FormatLightDrawnText(const ClayStats& st) {
+  constexpr size_t kTop = 8;
+  std::string text = std::string("Light: ") + (st.light_switch ? "on" : "off");
+  if (st.light_switch) text += std::string(", block ") + (st.light_block ? "valid" : "missing");
+  uint32_t lit = 0;
+  for (uint32_t n : st.light_drawn) lit += n;
+  text += ", lit " + std::to_string(lit) + " (";
+  for (size_t i = 1; i < size_t(capture::LightFamily::kCount); ++i) {
+    text += std::string(i > 1 ? ", " : "") + capture::LightFamilyName(capture::LightFamily(i)) + " " +
+            std::to_string(st.light_drawn[i]);
+  }
+  text += ")";
+  uint32_t unlit = 0;
+  for (uint32_t n : st.light_unlit) unlit += n;
+  text += ", unlit " + std::to_string(unlit);
+  if (unlit) {
+    text += " {";
+    bool first = true;
+    for (size_t i = 0; i < size_t(ClayUnlit::kCount); ++i) {
+      if (!st.light_unlit[i]) continue;
+      text += std::string(first ? "" : ", ") + ClayUnlitName(ClayUnlit(i)) + ": " + std::to_string(st.light_unlit[i]);
+      first = false;
+    }
+    text += "}";
+  }
+  // Both reasons of a record's own in one list, most first.
+  capture::ShaderTally<32>::Entry top[2 * kTop];
+  size_t n = st.light_unlit_by_ps.Top(uint8_t(ClayUnlit::kUnknown), top, kTop);
+  n += st.light_unlit_by_ps.Top(uint8_t(ClayUnlit::kNormal), top + n, kTop);
+  std::stable_sort(top, top + n, [](const auto& a, const auto& b) { return a.count > b.count; });
+  if (n) {
+    text += ", unknown {";
+    char buf[48];
+    for (size_t i = 0; i < n && i < kTop; ++i) {
+      std::snprintf(buf, sizeof(buf), "%s0x%016llX: %u", i ? ", " : "", static_cast<unsigned long long>(top[i].hash),
+                    top[i].count);
+      text += buf;
+    }
+    text += "}";
+  }
+  if (st.light_block) {
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), ", sun (%.3f, %.3f, %.3f) colour (%.3f, %.3f, %.3f)", st.light_sun_dir[0],
+                  st.light_sun_dir[1], st.light_sun_dir[2], st.light_sun_col[0], st.light_sun_col[1], st.light_sun_col[2]);
+    text += buf;
   }
   return text;
 }

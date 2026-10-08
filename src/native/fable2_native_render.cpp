@@ -42,9 +42,10 @@ REXCVAR_DEFINE_INT32(fable2_native_texture_upload_mb, 8, "Fable2",
 REXCVAR_DEFINE_INT32(fable2_native_texture_budget_mb, 512, "Fable2",
                      "GPU memory budget (MB) for native albedo textures; least recently used "
                      "textures are evicted above it.");
-REXCVAR_DEFINE_STRING(fable2_native_light, "off", "Fable2",
-                      "Native clay pass light: off = the unlit materials picture (the linear "
-                      "target mapped with exposure 1); on = the same for now (lit shaders follow).");
+REXCVAR_DEFINE_STRING(fable2_native_light, "on", "Fable2",
+                      "Native clay pass light: on = terrain and objects with a colour stream are lit "
+                      "by the game's ambient, baked and sun light (no shadows; exposure not calibrated); "
+                      "off = the unlit materials picture.");
 
 namespace fable2::native {
 namespace nrhi = rex::graphics::nrhi;
@@ -262,7 +263,8 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   render::ClayStats st;
   render::TextureStats tst;
   g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), st, tst);
-  SetStatus(render::FormatStatusText(*scene, st, textures ? &tst : nullptr));
+  SetStatus(render::FormatStatusText(*scene, st, textures ? &tst : nullptr) + "\n" +
+            render::FormatLightDrawnText(st));
   const double cpu_ms = st.hash_ms + st.decode_ms + st.record_ms + tst.decode_ms;
   const uint32_t pending = tst.status[size_t(capture::MaterialStatus::kTexturePending)];
   if (textures && (tst.uploads || pending)) {
@@ -302,9 +304,12 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
       REXLOG_INFO("[native] clay: {}",
                   render::FormatTextureText(tst, st.drawn, st.alpha_unknown, st.blend_unknown));
       REXLOG_INFO("[native] clay: {}", render::FormatTerrainText(st, tst));
-      // The light's vertex inputs in the geometry cache (built for the lit records, read by no shader yet).
+      // The light's vertex inputs in the geometry cache.
       REXLOG_INFO("[native] clay: {}", render::FormatLightText(st));
     }
+    // What was drawn lit and what was not, by reason.
+    REXLOG_INFO("[native] clay: {}", render::FormatLightDrawnText(st));
+
     REXLOG_INFO("[native] clay: {} | alpha-unknown {}, blend-unknown {}", render::FormatStateText(st),
                 st.alpha_unknown, st.blend_unknown);
     const std::string by_ps = render::FormatUnknownByPs(st);

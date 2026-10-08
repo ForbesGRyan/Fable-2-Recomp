@@ -3,6 +3,7 @@
 Usage: terrain_replay.py <capture.jsonl> --frame N --list
        terrain_replay.py <capture.jsonl> --frame N --patch K --out image.png [--res 64] [--no-fade]
                          [--no-tint] [--no-base] [--no-steep] [--encode sqrt|linear] [--exposure X]
+       terrain_replay.py <capture.jsonl> --frame N --patch K --out image.png --lit [--res 64] [--exposure X]
        terrain_replay.py <capture.jsonl> --frame N --patch K --locate
        terrain_replay.py <capture.jsonl> --frame N --weights image.png
        terrain_replay.py <capture.jsonl> --frame N --weight-sums
@@ -48,6 +49,21 @@ quad that the clay pass draws (grid_interp), where the game's tessellator has at
 and its own triangles; --no-steep leaves the block out (A = tf0^2 everywhere, the replay before
 the block was read); base levels only, no mip maps; a negative alpha is clamped to 0.
 
+--lit replays the square with the game's light as the native pass draws it (frame-map section 14,
+"Native light"; the formulas are tools/xdk_sigmatch/light_formulas.py's): every layer's colour is
+  terrain_layer(A, tf3(base uv), c21.xyz, c21.w, c20.xyz, c22, t, sat(N . sun), c87.xyz, c11.x,
+                sun_gate = sat(8 * (N . sun)) * 1)
+and the underlay's terrain_far(F, tf3, ..., t = sat(N . c23.xyz), sat(N . sun), c87.xyz, c11.x), times
+its fade for shader 2F8A; without the output scale c20.w, the mask 1 (no shadows), no fog. N is the
+vertex shader's normal (tf17 at the grid points of the draw's own patch, interpolated as the pass's
+triangles interpolate it, then normalised), t for a layer from the vertex shader's vector
+lerp(n, c19, (1 + n . c19) / 2), interpolated the same way. The frame's values come from the frame
+row's "light" (the capture's light block: sun_dir, sun_col, tint, tint_pow, add, floor, axis) and each
+draw's c11.x and facing literal from its row's "lin"; a frame without a valid block, or a row whose
+"lin" has no terrain family, is refused. The picture is sqrt(min(1, linear * exposure)) (the pass's
+output mapping; --encode linear writes min(1, linear * exposure)), and two lines give the square's
+mean linear colour and the mean value in the picture.
+
 Needs, per tess row: "consts" with c8, c11, c14, c46, c47, c113, c114, c115 (far: c72 too),
 "pconst" (pixel constants c0..c31: c19, c21, c31), "tf" with the slots the shaders sample, and the
 "texture" rows and dump files of those textures (found by fetch dwords 1 and 2: base address,
@@ -67,6 +83,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import light_formulas as lf  # noqa: E402
 import texture_thumb as tt  # noqa: E402
 from gen_albedo_table import STEEP_EPSILON_MAX  # noqa: E402  (the table's bound on the small term)
 
@@ -441,15 +458,88 @@ def grid_interp(a, b, c, d, fx, fy):
 
 
 class Layer:
-    def __init__(self, inp, detail, base, weight, blend, side=None):
+    def __init__(self, inp, detail, base, weight, blend, side=None, lin=None):
         """`side`: the layer's side texture (tf13) when its shader has the steep-ground block and the
-        block is replayed; `inp` then holds steep_inputs too."""
+        block is replayed; `inp` then holds steep_inputs too. `lin`: the draw's light inputs
+        (light_inputs_of) for --lit."""
         self.inp, self.detail, self.base, self.weight, self.blend, self.side = inp, detail, base, weight, blend, side
+        self.lin = lin
 
 
 class Far:
-    def __init__(self, inp, colour, base, table_u, table_v, fade_in):
+    def __init__(self, inp, colour, base, table_u, table_v, fade_in, lin=None, grids=None):
+        """`lin`, `grids`: for --lit, the draw's light inputs and a function giving the SquareGrid of the
+        draw's own patch at a world point (its normal map at its own grid points)."""
         self.inp, self.colour, self.base, self.table_u, self.table_v, self.fade_in = inp, colour, base, table_u, table_v, fade_in
+        self.lin, self.grids = lin, grids
+
+
+# --- the light (--lit) --------------------------------------------------------------------------
+
+_BLOCK_FIELDS = (("sun_dir", 3), ("sun_col", 3), ("tint", 3), ("add", 3), ("floor", 2), ("axis", 3))
+
+
+def light_block_of(frame_row):
+    """The frame's light block from a frame row's "light" (the capture's FrameScene::light), as the
+    native pass takes it: floor gets the third channel 0 (the block carries c22.xy). MissingInput when
+    the row has none, it is not valid, or a value is not a finite number: the pass draws such a frame
+    without light, and so nothing is replayed lit from it."""
+    light = (frame_row or {}).get("light")
+    if not light:
+        raise MissingInput('the frame row has no "light" (the frame\'s light block): the capture was taken before '
+                           "the capture recorded it")
+    if not light.get("valid"):
+        raise MissingInput("the frame's light block is not valid (light-block): the native pass draws this frame "
+                           "without light")
+    block = {}
+    for name, n in _BLOCK_FIELDS:
+        v = light.get(name)
+        if not isinstance(v, list) or len(v) != n or not all(isinstance(x, (int, float)) and math.isfinite(x) for x in v):
+            raise MissingInput(f'the light block\'s "{name}" is not {n} finite numbers')
+        block[name] = [float(x) for x in v]
+    p = light.get("tint_pow")
+    if not isinstance(p, (int, float)) or not math.isfinite(p) or not 0.0 < p <= 8.0:
+        raise MissingInput('the light block\'s "tint_pow" is not in (0, 8]')
+    block["tint_pow"] = float(p)
+    block["floor"] = block["floor"] + [0.0]
+    return block
+
+
+def light_inputs_of(row, family):
+    """c11.x and the facing literal of a tess row's "lin" (the draw's LightInputs), for a row of
+    `family` ("terrain-layer" or "terrain-far"). MissingInput when the row has no inputs of that
+    family (the pass then draws its square without light)."""
+    lin = row.get("lin")
+    if not lin or lin.get("reason") != "none" or lin.get("family") != family:
+        raise MissingInput(f'a tess row of {row.get("ps_hash")} has no "lin" of the family {family} '
+                           f'(it has {(lin or {}).get("family") or (lin or {}).get("why") or "none"}): no light for it')
+    c11x, facing = lin.get("c11x"), lin.get("facing")
+    if not all(isinstance(x, (int, float)) and math.isfinite(x) for x in (c11x, facing)):
+        raise MissingInput('a tess row\'s "lin" has no finite c11x and facing')
+    if family == "terrain-layer" and not facing > 0.0:
+        raise MissingInput('a layer row\'s "lin" has no facing literal')
+    return {"c11x": float(c11x), "facing": float(facing)}
+
+
+def lit_layer_colour(block, lin, albedo, baked, normal, axis_vector):
+    """A layer's lit linear colour at a point: terrain_layer of light_formulas.py as the native layer
+    shader calls it. `albedo`: A (tf0^2 or the steep-ground mix); `baked`: the base map's texel;
+    `normal`, `axis_vector`: the vertex shader's normal and its vector of t, interpolated, neither
+    normalised."""
+    big_n = lf.normalize(list(normal))
+    n_dot_sun = lf.dot(big_n, block["sun_dir"])
+    gate = lf.sun_gate_single(1.0, lf.facing_gate(n_dot_sun, lin["facing"]))
+    return tuple(lf.terrain_layer(list(albedo), list(baked)[:3], block["tint"], block["tint_pow"], block["add"],
+                                  block["floor"], lf.ambient_t(list(axis_vector), list(normal)), n_dot_sun,
+                                  block["sun_col"], lin["c11x"], sun_gate=gate))
+
+
+def lit_far_colour(block, lin, albedo, baked, normal):
+    """The far terrain's lit linear colour: terrain_far with t = N . c23.xyz (both as they are)."""
+    big_n = lf.normalize(list(normal))
+    return tuple(lf.terrain_far(list(albedo), list(baked)[:3], block["tint"], block["tint_pow"], block["add"],
+                                block["floor"], lf.dot(big_n, block["axis"]), lf.dot(big_n, block["sun_dir"]),
+                                block["sun_col"], lin["c11x"]))
 
 
 def _base_term(inp, base_tex, wx, wy, tint, base):
@@ -476,9 +566,13 @@ def _blend(dst, src, alpha, blend):
     return tuple(src[i] * s + dst[i] * k for i in range(3))
 
 
-def shade_point(layers, wx, wy, h, fade_on=True, background=(0.0, 0.0, 0.0), tint=True, base=True, steep=None):
+def shade_point(layers, wx, wy, h, fade_on=True, background=(0.0, 0.0, 0.0), tint=True, base=True, steep=None,
+                lit=None):
     """The layers of one point in draw order over `background`. Returns (rgb, layers drawn).
-    `steep`: (normal, height) of the point for the layers with the steep-ground block, or None."""
+    `steep`: (normal, height) of the point for the layers with the steep-ground block, or None.
+    `lit`: (light block, normal, vector of t) of the point: every layer's colour is then its lit one
+    (lit_layer_colour with its A, its base map's texel and its own c11.x and facing literal), and
+    `tint` and `base` are not looked at."""
     rgb = tuple(float(c) for c in background)
     drawn = 0
     for layer in layers:
@@ -489,7 +583,13 @@ def shade_point(layers, wx, wy, h, fade_on=True, background=(0.0, 0.0, 0.0), tin
         alpha = layer_weight(layer.inp, value)
         if fade_on and h is not None:
             alpha *= fade(layer.inp, eye_distance2(layer.inp, wx, wy, h))
-        rgb = _blend(rgb, layer_colour(layer, wx, wy, tint, base, steep), _sat(alpha), layer.blend)
+        if lit is None:
+            colour = layer_colour(layer, wx, wy, tint, base, steep)
+        else:
+            block, normal, axis_vector = lit
+            colour = lit_layer_colour(block, layer.lin, layer_colour(layer, wx, wy, False, False, steep),
+                                      layer.base.sample(*apply_uv(layer.inp["base_uv"], wx, wy)), normal, axis_vector)
+        rgb = _blend(rgb, colour, _sat(alpha), layer.blend)
     return rgb, drawn
 
 
@@ -517,12 +617,19 @@ def far_uv(far, wx, wy):
     return tuple(out)
 
 
-def far_colour(far, wx, wy, h, tint=True, base=True):
+def far_colour(far, wx, wy, h, tint=True, base=True, lit=None):
+    """`lit`: the frame's light block: the colour is then the lit one (lit_far_colour with the normal
+    of the draw's own patch at the point), times the fade as before."""
     c = far.colour.sample(*far_uv(far, wx, wy))
-    bp = _base_term(far.inp, far.base, wx, wy, tint, base)
     k = 1.0
     if far.fade_in and h is not None:
         k = _sat(eye_distance2(far.inp, wx, wy, h) * far.inp["fade"][0] + far.inp["fade"][1])
+    if lit is not None:
+        normal, _ = far.grids(wx, wy).at(wx, wy)
+        colour = lit_far_colour(lit, far.lin, [c[i] * c[i] for i in range(3)],
+                                far.base.sample(*apply_uv(far.inp["base_uv"], wx, wy)), normal)
+        return tuple(colour[i] * k for i in range(3))
+    bp = _base_term(far.inp, far.base, wx, wy, tint, base)
     return tuple(c[i] * c[i] * bp[i] * k for i in range(3))
 
 
@@ -585,6 +692,17 @@ def blend_of(word):
 
 
 # --- captures ---------------------------------------------------------------------------------
+
+def read_frame_row(path, frame):
+    """The "frame" row of `frame` (it follows the frame's draw rows), or None."""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if line.startswith('{"kind":"frame"') or line.startswith('{"kind": "frame"'):
+                r = json.loads(line)
+                if r.get("frame") == frame:
+                    return r
+    return None
+
 
 def read_capture(path, frame):
     """(main-scene tess rows of `frame` in capture order, {(fetch dword 1, fetch dword 2): dump
@@ -671,31 +789,47 @@ def _height(tex, row, far, wx, wy):
 class SquareGrid:
     """The normal and the height of a square at its 17 x 17 grid points, read as the layer vertex
     shader reads them at a vertex (both maps point sampled at the height coordinate), and linear
-    over the grid's triangles in between (grid_interp)."""
+    over the grid's triangles in between (grid_interp). `far`: the square is a patch of the adaptive
+    builder, whose vertex shader keeps the height coordinate's scale and offset in c46. `axis`: the
+    frame's axis (vertex c19.xyz) for --lit: every grid point then also has the vertex shader's
+    vector of t, lerp(n, axis, (1 + n . axis) / 2), which light_at interpolates like the normal."""
     N = 16
 
-    def __init__(self, square, row, height_tex, normal_tex):
+    def __init__(self, square, row, height_tex, normal_tex, far=False, axis=None):
         self.square = square
         c = row["consts"]
-        scale, off = c["c47"], c["c47"][2:]
+        scale, off = (c["c46"], c["c46"][2:]) if far else (c["c47"], c["c47"][2:])
         self.points = []
         for j in range(self.N + 1):
             for i in range(self.N + 1):
                 wx = square[0] + square[2] * i / self.N
                 wy = square[1] + square[3] * j / self.N
                 t = normal_tex.sample((wx - off[0]) * scale[0], (wy - off[1]) * scale[1], linear=False)
-                self.points.append(steep_normal(t[0], t[1]) + (_height(height_tex, row, False, wx, wy),))
+                n = steep_normal(t[0], t[1])
+                height = _height(height_tex, row, far, wx, wy) if height_tex is not None else 0.0
+                point = n + (height,)
+                if axis is not None:
+                    point += tuple(lf.ambient_axis(list(n), list(axis)))
+                self.points.append(point)
 
-    def at(self, wx, wy):
-        """((n.x, n.y, n.z), height) at a world point of the square."""
+    def _interp(self, wx, wy):
         n = self.N
         gx = min(max((wx - self.square[0]) / self.square[2] * n, 0.0), float(n))
         gy = min(max((wy - self.square[1]) / self.square[3] * n, 0.0), float(n))
         i, j = min(int(gx), n - 1), min(int(gy), n - 1)
         p = self.points
-        v = grid_interp(p[j * (n + 1) + i], p[j * (n + 1) + i + 1], p[(j + 1) * (n + 1) + i + 1],
-                        p[(j + 1) * (n + 1) + i], gx - i, gy - j)
+        return grid_interp(p[j * (n + 1) + i], p[j * (n + 1) + i + 1], p[(j + 1) * (n + 1) + i + 1],
+                           p[(j + 1) * (n + 1) + i], gx - i, gy - j)
+
+    def at(self, wx, wy):
+        """((n.x, n.y, n.z), height) at a world point of the square."""
+        v = self._interp(wx, wy)
         return v[:3], v[3]
+
+    def light_at(self, wx, wy):
+        """(normal, vector of t) at a world point of a grid built with `axis`."""
+        v = self._interp(wx, wy)
+        return v[:3], v[4:7]
 
 
 _NO_STEEP_HINT = " (--no-steep replays without the steep-ground block)"
@@ -717,10 +851,16 @@ def _replay(a, rows, textures, lines):
     tex = _Textures(textures)
     layers, problems = [], []
     steep_on = not a.no_steep
+    block = None
+    if a.lit:
+        # (refused before anything is replayed: a frame without a block has no lit picture)
+        block = light_block_of(read_frame_row(a.capture, a.frame))
     for r in draws:
         try:
             layers.append(Layer(layer_inputs(r["consts"], r.get("pconst")), tex.get(r, 0, LAYER_TEXTURES[0]),
                                 tex.get(r, 3, LAYER_TEXTURES[3]), tex.get(r, 18, LAYER_TEXTURES[18]), blend_of(r["rs"]["2201"])))
+            if block is not None:
+                layers[-1].lin = light_inputs_of(r, "terrain-layer")
         except MissingInput as e:
             problems.append(str(e))
             continue
@@ -738,18 +878,35 @@ def _replay(a, rows, textures, lines):
                       tex.get(under, 3, FAR_TEXTURES[3]), tex.get(under, 18, FAR_TEXTURES[18]),
                       tex.get(under, 19, FAR_TEXTURES[19]),
                       under.get("ps_hash") == FADING_FAR)
+            if block is not None:
+                far.lin = light_inputs_of(under, "terrain-far")
+                far_normals = tex.get(under, 17, STEEP_TEXTURES[17])
+                far_grids = {}
+
+                def grids(wx, wy, under=under, far_normals=far_normals, far_grids=far_grids):
+                    # The underlay's patch that holds the point, with the underlay's own normals.
+                    for p in range(int(under["args"][3], 16)):
+                        sq = patch_square(under["consts"], p, far=True)
+                        if sq[0] <= wx < sq[0] + sq[2] and sq[1] <= wy < sq[1] + sq[3]:
+                            if p not in far_grids:
+                                far_grids[p] = SquareGrid(sq, under, None, far_normals, far=True)
+                            return far_grids[p]
+                    raise MissingInput("the underlay has no patch at a point of the square")
+
+                far.grids = grids
         except MissingInput as e:
             problems.append(str(e))
     cliff = [r for r in draws if r.get("ps_hash") in CLIFF_SHADERS]
     grid = None
-    if steep_on and cliff and not problems:
+    if (block is not None or (steep_on and cliff)) and not problems:
         # The vertex shader's normal and height at the square's grid points (every layer of a square
-        # has the same patch and the same two maps).
+        # has the same patch and the same two maps). The light reads the normal for every layer.
+        source = cliff[0] if cliff else draws[0]
         try:
-            grid = SquareGrid(square, cliff[0], tex.get(cliff[0], 16, LAYER_TEXTURES[16]),
-                              tex.get(cliff[0], 17, STEEP_TEXTURES[17]))
+            grid = SquareGrid(square, source, tex.get(source, 16, LAYER_TEXTURES[16]),
+                              tex.get(source, 17, STEEP_TEXTURES[17]), axis=block["axis"] if block is not None else None)
         except MissingInput as e:
-            problems.append(str(e) + _NO_STEEP_HINT)
+            problems.append(str(e) + ("" if block is not None else _NO_STEEP_HINT))
     if problems:
         raise MissingInput("; ".join(sorted(set(problems))))
     height = None
@@ -760,17 +917,31 @@ def _replay(a, rows, textures, lines):
                  " underlay " + (f"{under['ps_hash']}" if under is not None else "none"))
     n = a.res
     rgba = bytearray()
+    total, shown = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
     for j in range(n):
         for i in range(n):
             wx = square[0] + square[2] * (i + 0.5) / n
             wy = square[1] + square[3] * (j + 0.5) / n
             h = _height(height, draws[0], False, wx, wy) if height is not None else None
-            bg = far_colour(far, wx, wy, h, not a.no_tint, not a.no_base) if far is not None else (0.0, 0.0, 0.0)
-            steep = grid.at(wx, wy) if grid is not None else None
-            rgb, _ = shade_point(layers, wx, wy, h, not a.no_fade, bg, not a.no_tint, not a.no_base, steep)
-            rgba += _encode(rgb, a.encode, a.exposure)
+            bg = (0.0, 0.0, 0.0)
+            if far is not None:
+                bg = far_colour(far, wx, wy, h, not a.no_tint, not a.no_base, block)
+            steep = grid.at(wx, wy) if grid is not None and steep_on and cliff else None
+            lit = (block,) + grid.light_at(wx, wy) if block is not None else None
+            rgb, _ = shade_point(layers, wx, wy, h, not a.no_fade, bg, not a.no_tint, not a.no_base, steep, lit)
+            pixel = _encode(rgb, a.encode, a.exposure)
+            rgba += pixel
+            for k in range(3):
+                total[k] += rgb[k]
+                shown[k] += pixel[k]
     tt.write_png(a.out, n, n, bytes(rgba), max_edge=n)
     lines.append(f"wrote {a.out} ({n} x {n})")
+    if block is not None:
+        count = float(n * n)
+        lines.append("lit with the frame's light block: sun direction (" + ", ".join(f"{v:.4f}" for v in block["sun_dir"])
+                     + ") colour (" + ", ".join(f"{v:.4f}" for v in block["sun_col"]) + "), mask 1, without the output scale")
+        lines.append("mean linear colour (" + ", ".join(f"{v / count:.4f}" for v in total) + "), mean value in the picture ("
+                     + ", ".join(f"{v / count:.1f}" for v in shown) + f") of 255 at exposure {a.exposure:g}")
 
 
 def _list(rows, lines):
@@ -1014,6 +1185,9 @@ def main(argv=None):
     ap.add_argument("--encode", choices=("sqrt", "linear"), default="sqrt",
                     help="sqrt (default) undoes the shaders' squaring of the detail colour for viewing")
     ap.add_argument("--exposure", type=float, default=1.0)
+    ap.add_argument("--lit", action="store_true",
+                    help="replay the square with the frame's light block as the native pass lights it (sun and "
+                         "ambient, no shadows, no fog)")
     ap.add_argument("--weights", help="write the frame's layer weight map and count the cull edges")
     ap.add_argument("--weight-sums", action="store_true",
                     help="print how the layer weights add up at the grid points of the frame's squares")
@@ -1038,6 +1212,9 @@ def main(argv=None):
     if a.patch is not None:
         if not a.out and not a.locate:
             ap.error("--patch needs --out or --locate")
+        if a.lit and (a.no_base or a.no_tint):
+            ap.error("--lit replays the pass's lit picture: not with --no-base or --no-tint")
+
         if a.locate:
             _locate(a, rows, textures, lines)
         if a.out:

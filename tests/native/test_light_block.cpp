@@ -891,6 +891,158 @@ int main() {
       CHECK(Is(t.Find(first), Kind::kBank));
     }
   }
+  // --- the upload that decides a register (Task 4 fix round 1, I2): what tells one light set
+  //     from the next. A number per followed upload, never 0; 0 where no upload decides ---
+  {
+    ConstantLoads t = InScene();
+    uint64_t a = 77, b = 77, c = 77;
+    CHECK(Is(t.Find(80, &a), Kind::kBank) && a == 0);      // nothing loaded yet: the bank's, no upload
+    CHECK(t.Load(80, 36, 0x40010000, 0, false, kAll));
+    CHECK(Is(t.Find(80, &a), Kind::kMemory, 0x40010000, 0) && a != 0);
+    CHECK(Is(t.Find(80, &b), Kind::kMemory, 0x40010000, 0) && b == a);  // asked again: the same upload
+    CHECK(Is(t.Find(115, &b), Kind::kMemory, 0x40010000, 35) && b == a);  // one load, one number for its run
+    CHECK(Is(t.Find(80), Kind::kMemory, 0x40010000, 0));                 // (the number is optional)
+    // Uploads of other registers do not change it: a tile's c0..c3, the bank's upload of another
+    // group, a load of the vertex-side range's numbers in this bank.
+    CHECK(t.Load(0, 4, 0x40020000, 0, true, 0x100));
+    t.BankUpload(1ull << (63 - 5));
+    CHECK(t.Load(4, 4, 0x40020000, 4, false, kAll));
+    CHECK(Is(t.Find(80, &b), Kind::kMemory, 0x40010000, 0) && b == a);
+    // The same buffer loaded again is a new upload: its contents may be another light.
+    CHECK(t.Load(80, 36, 0x40010000, 0, false, kAll));
+    CHECK(Is(t.Find(80, &b), Kind::kMemory, 0x40010000, 0) && b != a && b != 0);
+    // So is another buffer, and a load of a part of the set that covers c80.
+    CHECK(t.Load(80, 36, 0x40030000, 0, false, kAll));
+    CHECK(Is(t.Find(80, &c), Kind::kMemory, 0x40030000, 0) && c != b && c != a && c != 0);
+    CHECK(t.Load(80, 4, 0x40040000, 8, false, kAll));
+    CHECK(Is(t.Find(80, &a), Kind::kMemory, 0x40040000, 8) && a != c && a != 0);
+    CHECK(Is(t.Find(87, &b), Kind::kMemory, 0x40030000, 7) && b == c);  // the rest of the set: the older load
+    // A part that does not cover c80 leaves its number.
+    CHECK(t.Load(100, 4, 0x40050000, 0, false, kAll));
+    CHECK(Is(t.Find(80, &b), Kind::kMemory, 0x40040000, 8) && b == a);
+    // A tile load of the set: a record sees the first colour tile's (Find), each pass its own.
+    CHECK(t.Load(80, 36, 0x40060000, 0, true, 0x300));
+    CHECK(Is(t.Find(80, &b), Kind::kMemory, 0x40060000, 0) && b != a && b != 0);
+    CHECK(Is(t.FindForBins(80, 0x100, &c), Kind::kMemory, 0x40060000, 0) && c == b);
+    CHECK(Is(t.FindForBins(80, 0x400, &c), Kind::kMemory, 0x40040000, 8) && c == a);
+    // The bank's upload of the group: the bank's value, by that upload; no load decides it, and
+    // LoadedThisScene is false, so the capture reads no block there.
+    t.BankUpload(1ull << (63 - 20));
+    CHECK(Is(t.Find(80, &c), Kind::kBank) && c != 0 && c != b && !t.LoadedThisScene(80));
+    // A register no load names is the bank's, by no upload; a register past the bank and one of a
+    // model that is not whole are unknown, by no upload.
+    c = 77;
+    CHECK(Is(t.Find(19, &c), Kind::kBank) && c == 0);
+    c = 77;
+    CHECK(Is(t.Find(256, &c), Kind::kUnknown) && c == 0);
+    c = 77;
+    CHECK(Is(t.FindForBins(256, 0x100, &c), Kind::kUnknown) && c == 0);
+    t.Skip();
+    c = 77;
+    CHECK(Is(t.Find(80, &c), Kind::kUnknown) && c == 0);
+    c = 77;
+    CHECK(Is(t.Find(19, &c), Kind::kBank) && c == 0);
+    // Whole again at the next scene, knowing nothing of the set: unknown, by no upload, until a
+    // load of it is followed.
+    t.Observe(false);
+    t.Observe(true);
+    c = 77;
+    CHECK(t.whole() && Is(t.Find(80, &c), Kind::kUnknown) && c == 0);
+    c = 77;
+    CHECK(Is(t.FindForBins(80, 0x200, &c), Kind::kUnknown) && c == 0);
+    CHECK(t.Load(80, 36, 0x40070000, 0, false, kAll));
+    CHECK(Is(t.Find(80, &c), Kind::kMemory, 0x40070000, 0) && c != 0 && t.LoadedThisScene(80));
+  }
+
+  // --- the frame's block is tried once per light set, not once per draw (Task 4 fix round 1, I2) ---
+  {
+    LightBlockTries t;
+    // No set (the light set is not a buffer's of this scene): nothing to read.
+    CHECK(t.Open(0) && !t.ShouldTry(0) && t.failed() == 0);
+    // A set: read. Without a block, the draws that follow under the same set do not read again,
+    // however many they are.
+    CHECK(t.ShouldTry(5));
+    t.Tried(5, false);
+    CHECK(t.failed() == 1);
+    for (int draw = 0; draw < 1000; ++draw) CHECK(t.Open(0) && !t.ShouldTry(5));
+    // A new load of the set: one more read. Any other number is another load.
+    CHECK(t.ShouldTry(6) && t.ShouldTry(4) && !t.ShouldTry(0));
+    t.Tried(6, true);
+    // The frame has its block: nothing more is read, whatever is loaded.
+    CHECK(!t.Open(0) && !t.ShouldTry(7) && !t.ShouldTry(5) && t.failed() == 1);
+    // The next frame begins anew: also for a number seen in the frame before.
+    CHECK(t.Open(1) && t.failed() == 0 && t.ShouldTry(5) && t.ShouldTry(6));
+    CHECK(t.Open(1) && t.ShouldTry(5));  // asking again in the frame forgets nothing
+    // At most kMaxSets sets are read in a frame without a block.
+    CHECK(LightBlockTries::kMaxSets == 8);
+    for (uint64_t set = 10; set < 10 + LightBlockTries::kMaxSets; ++set) {
+      CHECK(t.Open(1) && t.ShouldTry(set));
+      t.Tried(set, false);
+      CHECK(!t.ShouldTry(set) && t.failed() == set - 9);
+    }
+    CHECK(!t.Open(1) && !t.ShouldTry(99) && t.failed() == 8);
+    t.Tried(99, false);  // (not asked for: the count stays at the cap's)
+    CHECK(t.failed() == 8 && !t.Open(1));
+    CHECK(t.Open(2) && t.ShouldTry(99) && t.failed() == 0);
+    // A frame number that goes back is another frame too.
+    t.Tried(99, false);
+    CHECK(t.Open(1) && t.failed() == 0 && t.ShouldTry(99));
+    // Only the last failed set is held: a set is a new upload each time it is loaded, so an
+    // earlier number cannot come again in the frame, and one that did would be read as new.
+    LightBlockTries u;
+    CHECK(u.Open(0));
+    u.Tried(3, false);
+    u.Tried(4, false);
+    CHECK(u.ShouldTry(3) && !u.ShouldTry(4) && u.failed() == 2);
+  }
+  // The frame the review describes: a lantern's set first, twenty one-light draws under it, then
+  // the sun's set. One read without a block, then the block; per draw it took all eight reads at
+  // the lantern's draws and the frame had none.
+  {
+    ConstantLoads loads = InScene();
+    LightBlockTries tries;
+    uint32_t reads = 0, blocks = 0;
+    auto draw = [&](bool sun) {
+      if (!tries.Open(7)) return;
+      uint64_t set = 0;
+      if (!loads.LoadedThisScene(80) || loads.Find(80, &set).kind != Kind::kMemory) set = 0;
+      if (!tries.ShouldTry(set)) return;
+      ++reads;
+      blocks += sun ? 1 : 0;
+      tries.Tried(set, sun);
+    };
+    draw(false);  // before any load of the set: no read
+    CHECK(reads == 0);
+    CHECK(loads.Load(80, 36, 0x40010000, 0, false, kAll));
+    for (int i = 0; i < 20; ++i) draw(false);
+    CHECK(reads == 1 && blocks == 0 && tries.failed() == 1);
+    CHECK(loads.Load(80, 36, 0x40020000, 0, false, kAll));
+    for (int i = 0; i < 20; ++i) draw(true);
+    CHECK(reads == 2 && blocks == 1 && tries.failed() == 1);
+    CHECK(loads.Load(80, 36, 0x40030000, 0, false, kAll));
+    for (int i = 0; i < 20; ++i) draw(true);
+    CHECK(reads == 2 && blocks == 1);
+    // A frame of lantern sets only: one read per set, eight at most.
+    LightBlockTries night;
+    reads = 0;
+    for (int group = 0; group < 59; ++group) {  // (59 loads of the set in a frame at the bridge)
+      CHECK(loads.Load(80, 36, 0x40040000, 0, false, kAll));
+      for (int i = 0; i < 15; ++i) {
+        if (!night.Open(8)) continue;
+        uint64_t set = 0;
+        loads.Find(80, &set);
+        if (!night.ShouldTry(set)) continue;
+        ++reads;
+        night.Tried(set, false);
+      }
+    }
+    CHECK(reads == 8 && night.failed() == 8);
+  }
+  // constant-initialised, as the capture declares it (thread-local)
+  {
+    static constinit LightBlockTries tries;
+    CHECK(tries.Open(0) && tries.failed() == 0);
+  }
   std::printf("PASS: light block\n");
   return 0;
 }

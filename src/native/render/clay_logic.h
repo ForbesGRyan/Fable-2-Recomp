@@ -253,20 +253,22 @@ inline GeoKey PositionKey(const capture::DrawRecord& r, const capture::TerrainPa
 // --- Normals and colours (normal_decode.h; frame-map section 14, "Normals") ---
 
 // Key of a normal stream decoded on its own (kind 9): the stream holding the
-// element and what changes its decode (where the element lies and its format).
-// Nothing of the draw: a plain mesh's normals are in the stream's own space,
-// one buffer however many draws place and turn the mesh (the world rotation is
-// the draw's, LightInputs::world_rot). The fetch's destination swizzle, its
-// sign and scale flags and the endian decide only whether the element is read
-// at all (NormalElementSupported), so two shaders that fetch one stream's
-// normal differently share its buffer. The content hash is the stream's.
+// element and what changes its decode (where the element lies, its format and
+// the source components the reader takes, LightElement::source). Nothing of
+// the draw: a plain mesh's normals are in the stream's own space, one buffer
+// however many draws place and turn the mesh (the world rotation is the
+// draw's, LightInputs::world_rot). The sign and scale flags and the endian
+// decide only whether the element is read at all (NormalElementSupported),
+// and where a shader's fetch puts the components in its register is not in
+// the element, so two shaders that fetch one stream's normal differently
+// share its buffer. The content hash is the stream's.
 inline GeoKey MeshNormalKey(const capture::LightInputs& l) {
   const capture::LightElement& e = l.normal;
   GeoKey k;
   k.addr = e.vb.phys_addr;
   k.size = e.vb.size;
   k.stride = e.stride_bytes;
-  k.extra = HashCombine32({e.offset_bytes, e.format});
+  k.extra = HashCombine32({e.offset_bytes, e.format, e.source, e.source_count});
   k.kind = 9;
   return k;
 }
@@ -302,7 +304,8 @@ inline GeoKey NormalKey(const capture::DrawRecord& r, const capture::LightInputs
 
 // Cache key of a record's colour buffer (kind 11), which holds `count` colours
 // of the stream from element LightInputs::colour_first on (DecodeColours): the
-// stream, where the element lies, the draw's offset into the stream and the
+// stream, where the element lies, the source components the reader takes, the
+// draw's offset into the stream and the
 // count. Meshes that share one colour stream at different offsets are different
 // entries; draws of one mesh share theirs. The content hash is the stream's.
 inline GeoKey ColourKey(const capture::LightInputs& l, uint32_t count) {
@@ -311,7 +314,7 @@ inline GeoKey ColourKey(const capture::LightInputs& l, uint32_t count) {
   k.addr = e.vb.phys_addr;
   k.size = e.vb.size;
   k.stride = e.stride_bytes;
-  k.extra = HashCombine32({e.offset_bytes, e.format, l.colour_first, count});
+  k.extra = HashCombine32({e.offset_bytes, e.format, e.source, e.source_count, l.colour_first, count});
   k.kind = 11;
   return k;
 }

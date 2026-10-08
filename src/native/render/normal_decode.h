@@ -20,16 +20,22 @@
 // normal as unlit by the sun, which is what the game's saturating dot
 // products make of it (lighting-formulas.md, "Method", "Limits").
 //
-// Which components are the normal's x, y, z is NormalSourceComponents: source
-// components by the element's format, never the fetch's destination swizzle
-// (LightElement::swizzle says where the fetch puts a component in the shader's
-// register, and the shaders differ in that: xyz_ and _xyz for the 10_11_11
-// element, yxwz and yzxw for the halves).
+// Which components of an element a reader takes is the element's own selector
+// (LightElement::source: source components, named per element by the table,
+// vs-transforms.json "light"), never the fetch's destination swizzle, which
+// says where the fetch puts a component in the shader's register and differs
+// between shaders that use one element in one way (xyz_ and _xyz for the
+// 10_11_11 normal, yxwz and yzxw for the halves, xyzw and wzxy for the probe
+// weights). What this file knows of the formats (NormalSourceComponents,
+// ColourSourceComponents) is held against the selector: an element whose
+// selector is another one than its format's is not decoded
+// (`normal-unsupported`, or no colours: `light-unknown`), never read either way.
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "../capture/bone_skin.h"
@@ -58,20 +64,92 @@ inline bool Normalize(const double v[3], float out[3]) {
 }
 // The fetch's endian of an element (xenos::Endian): 2 is 8in32, the guest's big-endian dword.
 inline uint32_t ElementEndian(const capture::LightElement& e) { return (e.flags >> capture::kLightElementEndianShift) & 3u; }
-// Bit c: the fetch writes source component c into its register (destination swizzle, 3 bits a component).
-inline uint32_t FetchedComponents(uint32_t swizzle) {
-  uint32_t mask = 0;
-  for (int c = 0; c < 4; ++c) {
-    const uint32_t sel = (swizzle >> (3 * c)) & 7u;
-    if (sel < 4) mask |= 1u << sel;
+
+// The source components (x to w of the GPU's fetch) of one element at `p`, which holds the
+// format's bytes (LightElementBytes) as the guest stores them: big-endian dwords, the fetch's
+// endian 8in32. A component the format does not have is 0.
+//   FMT_10_11_11 (16), signed and normalised: x = bits 0 to 10, y = bits 11 to 21, z = bits 22 to
+//     31 of the dword, each divided by its positive maximum (1023, 1023, 511), at least -1: the
+//     SDK's k_10_11_11 (thirdparty/rexglue-sdk/src/graphics/pipeline/shader/interpreter.cpp,
+//     ExecuteVertexFetchInstruction: widths 11, 11, 10 at offsets 0, 11, 22, max(-1, v / (2^(w - 1)
+//     - 1)); dxbc_translator_fetch.cpp has the same).
+//   FMT_16_16_16_16_FLOAT (32): x and y the low and the high half of the first dword, z and w of
+//     the second (the same two files): the halves in memory are source y, x, w, z.
+//   FMT_8_8_8_8 (6), unsigned and normalised: x = bits 0 to 7, then y, z, w (widths 8 at offsets
+//     0, 8, 16, 24), each divided by 255: the bytes in memory are source w, z, y, x.
+//   FMT_32_32_32_32_FLOAT (38): x to w the four dwords in memory order.
+inline void ElementSource(uint32_t format, const uint8_t* p, double source[4]) {
+  source[0] = source[1] = source[2] = source[3] = 0.0;
+  if (format == capture::kVertexFormat_10_11_11) {
+    const uint32_t w = capture::detail::Be32(p);
+    auto field = [w](uint32_t shift, uint32_t bits) {
+      const int32_t raw = int32_t(w << (32 - shift - bits)) >> (32 - bits);  // sign-extended
+      return std::max(double(raw) / double((1u << (bits - 1)) - 1u), -1.0);
+    };
+    source[0] = field(0, 11);
+    source[1] = field(11, 11);
+    source[2] = field(22, 10);
+  } else if (format == capture::kVertexFormat_16_16_16_16_FLOAT) {
+    for (int k = 0; k < 4; ++k) source[k ^ 1] = capture::HalfToFloat(capture::detail::Be16(p + 2 * k));
+  } else if (format == capture::kVertexFormat_8_8_8_8) {
+    const uint32_t w = capture::detail::Be32(p);
+    for (int k = 0; k < 4; ++k) source[k] = double((w >> (8 * k)) & 0xFFu) / 255.0;
+  } else if (format == capture::kVertexFormat_32_32_32_32_FLOAT) {
+    for (int k = 0; k < 4; ++k) {
+      const uint32_t w = capture::detail::Be32(p + 4 * k);
+      float f;
+      std::memcpy(&f, &w, sizeof(f));
+      source[k] = f;
+    }
   }
-  return mask;
 }
 }  // namespace detail
 
-// The source components of a normal element (0 to 3: x to w of the GPU's
-// fetch, before any destination swizzle) that are the normal's x, y, z; false
-// for a format that holds no normal a reader decodes.
+// Whether a reader decodes this element at all: one of the light's formats, inside its vertex,
+// read as the guest's big-endian dwords (endian 8in32), the 10_11_11 signed and normalised and
+// the 8_8_8_8 unsigned and normalised (the meanings ElementSource has for them; sign and scale
+// mean nothing for the float formats), and with a selector that names three or four source
+// components, each one its format has, none twice. The capture makes no other element
+// (material.h, LightSource: it also requires that the shader's fetch delivers every component
+// named); a reader does not rely on that.
+inline bool ElementReadable(const capture::LightElement& e) {
+  const uint32_t bytes = capture::LightElementBytes(e.format), components = capture::LightFormatComponents(e.format);
+  if (bytes == 0 || components == 0) return false;
+  if (e.stride_bytes == 0 || uint32_t(e.offset_bytes) + bytes > e.stride_bytes) return false;
+  if (detail::ElementEndian(e) != 2) return false;
+  const bool is_signed = (e.flags & capture::kLightElementSigned) != 0;
+  const bool normalized = (e.flags & capture::kLightElementNormalized) != 0;
+  if (e.format == capture::kVertexFormat_10_11_11 && !(is_signed && normalized)) return false;
+  if (e.format == capture::kVertexFormat_8_8_8_8 && !(!is_signed && normalized)) return false;
+  if (e.source_count < 3 || e.source_count > 4) return false;
+  if (e.source_count == 3 && (e.source >> 6) != 0) return false;
+  uint32_t seen = 0;
+  for (uint32_t i = 0; i < e.source_count; ++i) {
+    const uint32_t c = capture::LightSourceComponent(e, i);
+    if (c >= components || ((seen >> c) & 1u)) return false;
+    seen |= 1u << c;
+  }
+  return true;
+}
+
+// One element through its selector: out[i] = the source component the selector names i-th, for
+// i < e.source_count, which is returned (the normal's x, y, z as stored; a colour's red, green,
+// blue and, of the colour stream, alpha, each 0 to 1; the four probe weights). 0, with `out`
+// untouched, for an element ElementReadable refuses or fewer than its bytes at `p`.
+inline uint32_t DecodeElement(const capture::LightElement& e, const uint8_t* p, size_t avail, float out[4]) {
+  if (!p || !ElementReadable(e) || avail < capture::LightElementBytes(e.format)) return 0;
+  double source[4];
+  detail::ElementSource(e.format, p, source);
+  for (uint32_t i = 0; i < e.source_count; ++i) out[i] = float(source[capture::LightSourceComponent(e, i)]);
+  return e.source_count;
+}
+
+// What this file knows of a normal element by its format: the source
+// components (0 to 3: x to w of the GPU's fetch, before any destination
+// swizzle) that are the normal's x, y, z; false for a format that holds no
+// normal a reader decodes. Not what a reader selects with (that is the
+// element's selector, the table's): what the selector is held against
+// (NormalElementSupported).
 //   FMT_10_11_11 (16), the object, trunk and skinned meshes: source x, y, z.
 //   FMT_16_16_16_16_FLOAT (32), the instanced plants' meshes: source y, x, w,
 //     which under the stream's 8in32 pair swap are the first three halves in
@@ -84,8 +162,9 @@ inline uint32_t FetchedComponents(uint32_t swizzle) {
 // taken this way has unit length in every sampled vertex of all twelve shaders
 // and agrees with its triangles' face normals, which no other order does
 // (frame-map section 14, "Normals"; tests/native/test_normal_decode.cpp,
-// FABLE2_NORMALS_BIN). The one place that says which components a normal is:
-// a table entry that names them replaces the format here.
+// FABLE2_NORMALS_BIN). The table names the same components per element
+// (vs-transforms.json "light": "source": "xyz" and "yxw"); the two agree for
+// every committed entry (tests/native/test_normal_decode.cpp, the table's rows).
 inline bool NormalSourceComponents(uint32_t format, uint8_t comp[3]) {
   if (format == capture::kVertexFormat_10_11_11) {
     comp[0] = 0; comp[1] = 1; comp[2] = 2;
@@ -98,60 +177,36 @@ inline bool NormalSourceComponents(uint32_t format, uint8_t comp[3]) {
   return false;
 }
 
-// One normal element as the guest stores it (big-endian words: the fetch's
-// endian 8in32), normalised. The element's source components:
-//   FMT_10_11_11 (16): x = bits 0 to 10, y = bits 11 to 21, z = bits 22 to 31 of
-//     the dword, each signed and divided by its positive maximum (1023, 1023,
-//     511), at least -1: the SDK's k_10_11_11 with a signed, normalised fetch
-//     (thirdparty/rexglue-sdk/src/graphics/pipeline/shader/interpreter.cpp,
-//     ExecuteVertexFetchInstruction: widths 11, 11, 10 at offsets 0, 11, 22,
-//     max(-1, v / (2^(w - 1) - 1)); dxbc_translator_fetch.cpp has the same).
-//   FMT_16_16_16_16_FLOAT (32): x and y the low and the high half of the first
-//     dword, z and w of the second (the same two files).
-// of which the normal is the three NormalSourceComponents names. False, with
-// nothing usable in `out`, for another format, fewer bytes than the element
-// has, or a vector without a direction.
-inline bool DecodeNormal(uint32_t format, const uint8_t* p, size_t avail, float out[3]) {
-  uint8_t comp[3];
-  if (!p || !NormalSourceComponents(format, comp)) return false;
-  double source[4] = {0.0, 0.0, 0.0, 0.0};
-  if (format == capture::kVertexFormat_10_11_11) {
-    if (avail < 4) return false;
-    const uint32_t w = capture::detail::Be32(p);
-    auto field = [w](uint32_t shift, uint32_t bits) {
-      const int32_t raw = int32_t(w << (32 - shift - bits)) >> (32 - bits);  // sign-extended
-      return std::max(double(raw) / double((1u << (bits - 1)) - 1u), -1.0);
-    };
-    source[0] = field(0, 11);
-    source[1] = field(11, 11);
-    source[2] = field(22, 10);
-  } else {
-    if (avail < 8) return false;
-    for (int k = 0; k < 4; ++k) source[k ^ 1] = capture::HalfToFloat(capture::detail::Be16(p + 2 * k));
-  }
-  const double v[3] = {source[comp[0]], source[comp[1]], source[comp[2]]};
-  return detail::Normalize(v, out);
-}
-
-// Whether a reader decodes this element as a normal: a format
-// NormalSourceComponents knows, inside its vertex, read as the guest's
-// big-endian dwords (endian 8in32), the 10_11_11 signed and normalised, and
-// fetched whole: the fetch delivers each of the three source components
-// somewhere in its register (a shader that fetches two and derives the third
-// has another normal than the stored one). Anything else is
-// `normal-unsupported`: never the bytes read another way.
+// Whether a reader decodes this element as a normal: one ElementReadable
+// reads, in a format NormalSourceComponents knows, whose selector names three
+// components and the very three, in the order, this file knows for the format.
+// That last is the cross-check of the table against the format: an entry that
+// named another order (or a format whose order nobody has measured) gives no
+// normals rather than plausible wrong ones. Anything else is
+// `normal-unsupported` (GeometryCache::Normals, counted by the pass per reason
+// and vertex shader): never the bytes read another way. That the shader's
+// fetch delivers the three components is the capture's check (material.h,
+// LightSource; `normal-unsupported` there too).
 inline bool NormalElementSupported(const capture::LightElement& e) {
   uint8_t comp[3];
-  const uint32_t bytes = capture::LightElementBytes(e.format);
-  if (!NormalSourceComponents(e.format, comp) || bytes == 0) return false;
-  if (e.stride_bytes == 0 || uint32_t(e.offset_bytes) + bytes > e.stride_bytes) return false;
-  if (detail::ElementEndian(e) != 2) return false;
-  if (e.format == capture::kVertexFormat_10_11_11 &&
-      !((e.flags & capture::kLightElementSigned) && (e.flags & capture::kLightElementNormalized))) {
-    return false;
+  if (!NormalSourceComponents(e.format, comp) || !ElementReadable(e) || e.source_count != 3) return false;
+  for (uint32_t i = 0; i < 3; ++i) {
+    if (capture::LightSourceComponent(e, i) != comp[i]) return false;
   }
-  const uint32_t need = (1u << comp[0]) | (1u << comp[1]) | (1u << comp[2]);
-  return (detail::FetchedComponents(e.swizzle) & need) == need;
+  return true;
+}
+
+// One normal element as the guest stores it, through the element's selector,
+// normalised. False, with nothing usable in `out`, for an element
+// NormalElementSupported refuses, fewer bytes than the element has, or a
+// vector without a direction.
+inline bool DecodeNormal(const capture::LightElement& e, const uint8_t* p, size_t avail, float out[3]) {
+  if (!p || !NormalElementSupported(e) || avail < capture::LightElementBytes(e.format)) return false;
+  double source[4];
+  detail::ElementSource(e.format, p, source);
+  const double v[3] = {source[capture::LightSourceComponent(e, 0)], source[capture::LightSourceComponent(e, 1)],
+                       source[capture::LightSourceComponent(e, 2)]};
+  return detail::Normalize(v, out);
 }
 
 // Normals in the element's stream: every vertex whose element lies fully
@@ -171,11 +226,16 @@ inline bool DecodeNormals(const uint8_t* src, size_t src_size, const capture::Li
                           uint32_t count, Float3* out) {
   if (!src || !NormalElementSupported(e)) return false;
   const uint32_t bytes = capture::LightElementBytes(e.format);
+  const uint32_t comp[3] = {capture::LightSourceComponent(e, 0), capture::LightSourceComponent(e, 1),
+                            capture::LightSourceComponent(e, 2)};
   for (uint32_t i = 0; i < count; ++i) {
     const uint64_t at = (uint64_t(first_vertex) + i) * e.stride_bytes + e.offset_bytes;
     if (at + bytes > src_size) return false;
+    double source[4];
+    detail::ElementSource(e.format, src + at, source);
+    const double v[3] = {source[comp[0]], source[comp[1]], source[comp[2]]};
     float n[3];
-    DecodeNormal(e.format, src + at, bytes, n);  // (zero without a direction)
+    detail::Normalize(v, n);  // (zero without a direction)
     out[i] = {n[0], n[1], n[2]};
   }
   return true;
@@ -366,27 +426,31 @@ inline bool ExpandInstanceNormals(const Float3* mesh, uint32_t mesh_count, const
 // (the fetch is unsigned and normalised). The shader raises the first three to
 // its literal (LightInputs::colour_power); the buffer holds them as stored.
 
-// The source components (0 to 3: x to w of the GPU's fetch) that are the
-// colour's red, green, blue and alpha: z, y, x, w. A D3DCOLOR in guest memory
-// is the bytes A, R, G, B, of which the fetch's source x is the last; the
-// shader raises the fetched z, y, x to its literal as red, green, blue
-// (0xECD6... instr 14, 21 to 35; checked by light_check.py's vertex_colour).
-// Like NormalSourceComponents, by what the element is and not by the fetch's
-// destination swizzle, and the one place that says so.
+// What this file knows of that colour: the source components (0 to 3: x to w
+// of the GPU's fetch) that are its red, green, blue and alpha: z, y, x, w. A
+// D3DCOLOR in guest memory is the bytes A, R, G, B, of which the fetch's
+// source x is the last; the shader raises the fetched z, y, x to its literal
+// as red, green, blue (0xECD6... instr 14, 21 to 35; checked by
+// light_check.py's vertex_colour). Like NormalSourceComponents, by what the
+// element is and not by the fetch's destination swizzle, and what the
+// element's selector (the table's "zyxw") is held against.
 inline void ColourSourceComponents(uint8_t comp[4]) {
   comp[0] = 2; comp[1] = 1; comp[2] = 0; comp[3] = 3;
 }
 
-// Whether a reader decodes this element as that colour: 8_8_8_8, unsigned,
-// normalised, inside its vertex, read as the guest's big-endian dword, and
-// fetched whole (the fetch delivers all four source components).
+// Whether a reader decodes this element as that colour: 8_8_8_8 that
+// ElementReadable reads (unsigned, normalised, inside its vertex, the guest's
+// big-endian dword), whose selector names four components and the very four,
+// in the order, of ColourSourceComponents (the cross-check: another order
+// gives no colours, and with them no light for the draw, `light-unknown`).
 inline bool ColourElementSupported(const capture::LightElement& e) {
-  if (e.format != capture::kVertexFormat_8_8_8_8 || e.stride_bytes == 0 || uint32_t(e.offset_bytes) + 4 > e.stride_bytes) {
-    return false;
+  if (e.format != capture::kVertexFormat_8_8_8_8 || !ElementReadable(e) || e.source_count != 4) return false;
+  uint8_t comp[4];
+  ColourSourceComponents(comp);
+  for (uint32_t i = 0; i < 4; ++i) {
+    if (capture::LightSourceComponent(e, i) != comp[i]) return false;
   }
-  if ((e.flags & capture::kLightElementSigned) || !(e.flags & capture::kLightElementNormalized)) return false;
-  if (detail::ElementEndian(e) != 2) return false;
-  return detail::FetchedComponents(e.swizzle) == 0xFu;
+  return true;
 }
 
 // Colours the stream holds from element `first` on, at most `limit` (the
@@ -407,8 +471,8 @@ inline uint32_t ColourCount(const capture::LightElement& e, uint32_t first, uint
 inline bool DecodeColours(const uint8_t* src, size_t src_size, const capture::LightElement& e, uint32_t first,
                           uint32_t count, uint32_t* out) {
   if (!src || !ColourElementSupported(e)) return false;
-  uint8_t comp[4];
-  ColourSourceComponents(comp);
+  const uint32_t comp[4] = {capture::LightSourceComponent(e, 0), capture::LightSourceComponent(e, 1),
+                            capture::LightSourceComponent(e, 2), capture::LightSourceComponent(e, 3)};
   for (uint32_t i = 0; i < count; ++i) {
     const uint64_t at = (uint64_t(first) + i) * e.stride_bytes + e.offset_bytes;
     if (at + 4 > src_size) return false;

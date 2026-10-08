@@ -112,14 +112,16 @@
       "normal": {
         "fetch": 5,
         "format": 32,
-        "offset": 2
+        "offset": 2,
+        "source": "yxw"
       },
       "colour": {
         "fetch": 3,
         "format": 6,
-        "offset": 6
+        "offset": 6,
+        "source": "zyx"
       },
-      "evidence": "dump shader_33C00226C154C1F2.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched zyx_: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz (the pixel shader applies the ambient factor and c20). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+      "evidence": "dump shader_33C00226C154C1F2.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched zyx_: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz (the pixel shader applies the ambient factor and c20). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source y, x, w, the first three halves of the element in memory, whatever the fetch's destination swizzle (yxwz or yzxw); the instance colour's red, green, blue are source z, y, x. Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
     }
   },
   "0x36B543CECAE5C781": {
@@ -174,14 +176,16 @@
       "normal": {
         "fetch": 5,
         "format": 32,
-        "offset": 2
+        "offset": 2,
+        "source": "yxw"
       },
       "colour": {
         "fetch": 3,
         "format": 6,
-        "offset": 6
+        "offset": 6,
+        "source": "zyx"
       },
-      "evidence": "dump shader_36B543CECAE5C781.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched zyx_: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz (the pixel shader applies the ambient factor and c20). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+      "evidence": "dump shader_36B543CECAE5C781.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched zyx_: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz (the pixel shader applies the ambient factor and c20). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source y, x, w, the first three halves of the element in memory, whatever the fetch's destination swizzle (yxwz or yzxw); the instance colour's red, green, blue are source z, y, x. Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
     }
   },
   "0x3A0F9098B839DDBC": {
@@ -306,16 +310,18 @@
       "normal": {
         "fetch": 1,
         "format": 16,
-        "offset": 2
+        "offset": 2,
+        "source": "xyz"
       },
       "weights": {
         "fetch": 5,
         "format": 38,
-        "offset": 0
+        "offset": 0,
+        "source": "xyzw"
       },
       "a0": "z",
       "scale": "c7.w",
-      "evidence": "dump shader_475EC9F795E5EDBB.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Normal: vfetch_mini r2.xyz_ Offset=2 FMT_10_11_11 of vf0 (fetch 1); o1 = the 10_11_11 normal through the rows c4..c6, times c7.w (instr 62-64, 73-75); the axis of the ambient factor is built from it and c19.xyz. Weights: vfetch_full r6 of vf1, FMT_32_32_32_32_FLOAT, Stride=4 (fetch 5); the probe colour goes to o8 (instr 16, 31, 65-68, 77). a0 = trunc of the position fetch's r1.w (fetched wxyz) (truncs / maxas, instr 31, 65), the fetch's source z: 0, 4 or 8 in every sampled vertex (out/native-evidence/lighting/task2/fix1_recounts_bridge_trees.txt). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+      "evidence": "dump shader_475EC9F795E5EDBB.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Normal: vfetch_mini r2.xyz_ Offset=2 FMT_10_11_11 of vf0 (fetch 1); o1 = the 10_11_11 normal through the rows c4..c6, times c7.w (instr 62-64, 73-75); the axis of the ambient factor is built from it and c19.xyz. Weights: vfetch_full r6 of vf1, FMT_32_32_32_32_FLOAT, Stride=4 (fetch 5); the probe colour goes to o8 (instr 16, 31, 65-68, 77). a0 = trunc of the position fetch's r1.w (fetched wxyz) (truncs / maxas, instr 31, 65), the fetch's source z: 0, 4 or 8 in every sampled vertex (out/native-evidence/lighting/task2/fix1_recounts_bridge_trees.txt). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source x, y, z whatever the fetch's destination swizzle (xyz_ here and in the trunks' shader, _xyz in the two skinned ones); the weights are source x, y, z, w: every dp4 of the probe colour pairs the fetched register and the constant with one swizzle or its exact undoing (dp4 r3.yxzw, c[30+a0].yxzw where the fetch is xyzw; dp4 r3.wzyx, c[30+a0].yxzw where it is wzxy). Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
     }
   },
   "0x48D30ECCF684F488": {
@@ -370,14 +376,16 @@
       "normal": {
         "fetch": 5,
         "format": 32,
-        "offset": 2
+        "offset": 2,
+        "source": "yxw"
       },
       "colour": {
         "fetch": 3,
         "format": 6,
-        "offset": 6
+        "offset": 6,
+        "source": "zyx"
       },
-      "evidence": "dump shader_48D30ECCF684F488.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched _zyx: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz plus c54.xyz. Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+      "evidence": "dump shader_48D30ECCF684F488.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched _zyx: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz plus c54.xyz. Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source y, x, w, the first three halves of the element in memory, whatever the fetch's destination swizzle (yxwz or yzxw); the instance colour's red, green, blue are source z, y, x. Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
     }
   },
   "0x5003700B7C9B1C16": {
@@ -551,14 +559,16 @@
       "normal": {
         "fetch": 5,
         "format": 32,
-        "offset": 2
+        "offset": 2,
+        "source": "yxw"
       },
       "colour": {
         "fetch": 3,
         "format": 6,
-        "offset": 6
+        "offset": 6,
+        "source": "zyx"
       },
-      "evidence": "dump shader_6AD4108C3FF07966.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched _zyx: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz (instr 18, 26, 29-31, 33, 34, 37, 40, 42, 43; the pixel shader applies the ambient factor and c20). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+      "evidence": "dump shader_6AD4108C3FF07966.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched _zyx: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz (instr 18, 26, 29-31, 33, 34, 37, 40, 42, 43; the pixel shader applies the ambient factor and c20). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source y, x, w, the first three halves of the element in memory, whatever the fetch's destination swizzle (yxwz or yzxw); the instance colour's red, green, blue are source z, y, x. Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
     }
   },
   "0x775C6085FBB9D676": {
@@ -614,16 +624,18 @@
       "normal": {
         "fetch": 1,
         "format": 16,
-        "offset": 2
+        "offset": 2,
+        "source": "xyz"
       },
       "weights": {
         "fetch": 4,
         "format": 38,
-        "offset": 0
+        "offset": 0,
+        "source": "xyzw"
       },
       "a0": "z",
       "scale": "c7.w",
-      "evidence": "dump shader_79EAC49585797037.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Normal: vfetch_mini r8.xyz_ Offset=2 FMT_10_11_11 of vf0 (instr 6, fetch 1); o1 = the 10_11_11 normal through the rows c4..c6, times c7.w (mul o1.xyz_, r4.xyzz, c7.wwww, instr 23); the axis of the ambient factor is built from it and c19.xyz. Weights: vfetch_full r3 of vf1, FMT_32_32_32_32_FLOAT, Stride=4 (instr 9, fetch 4); o6 = c[28+a0].xyz + (c[29+a0] . w, c[30+a0] . w, c[31+a0] . w) (instr 30-32, 39). a0 = trunc of the position fetch's r2.x (fetched zxwy) (truncs / maxas, instr 28, 29), the fetch's source z: 0, 4 or 8 in every sampled vertex (out/native-evidence/lighting/task2/fix1_recounts_bridge_trees.txt). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+      "evidence": "dump shader_79EAC49585797037.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Normal: vfetch_mini r8.xyz_ Offset=2 FMT_10_11_11 of vf0 (instr 6, fetch 1); o1 = the 10_11_11 normal through the rows c4..c6, times c7.w (mul o1.xyz_, r4.xyzz, c7.wwww, instr 23); the axis of the ambient factor is built from it and c19.xyz. Weights: vfetch_full r3 of vf1, FMT_32_32_32_32_FLOAT, Stride=4 (instr 9, fetch 4); o6 = c[28+a0].xyz + (c[29+a0] . w, c[30+a0] . w, c[31+a0] . w) (instr 30-32, 39). a0 = trunc of the position fetch's r2.x (fetched zxwy) (truncs / maxas, instr 28, 29), the fetch's source z: 0, 4 or 8 in every sampled vertex (out/native-evidence/lighting/task2/fix1_recounts_bridge_trees.txt). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source x, y, z whatever the fetch's destination swizzle (xyz_ here and in the trunks' shader, _xyz in the two skinned ones); the weights are source x, y, z, w: every dp4 of the probe colour pairs the fetched register and the constant with one swizzle or its exact undoing (dp4 r3.yxzw, c[30+a0].yxzw where the fetch is xyzw; dp4 r3.wzyx, c[30+a0].yxzw where it is wzxy). Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
     }
   },
   "0x7C5710DEF3EE33C4": {
@@ -704,14 +716,16 @@
       "normal": {
         "fetch": 5,
         "format": 32,
-        "offset": 2
+        "offset": 2,
+        "source": "yxw"
       },
       "colour": {
         "fetch": 3,
         "format": 6,
-        "offset": 6
+        "offset": 6,
+        "source": "zyx"
       },
-      "evidence": "dump shader_8123C16DBF583F92.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched zyx_: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz plus c54.xyz (instr 17, 26-33). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+      "evidence": "dump shader_8123C16DBF583F92.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched zyx_: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz plus c54.xyz (instr 17, 26-33). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source y, x, w, the first three halves of the element in memory, whatever the fetch's destination swizzle (yxwz or yzxw); the instance colour's red, green, blue are source z, y, x. Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
     }
   },
   "0x82F6433A69263C75": {
@@ -874,15 +888,17 @@
       "normal": {
         "fetch": 1,
         "format": 16,
-        "offset": 2
+        "offset": 2,
+        "source": "xyz"
       },
       "weights": {
         "fetch": 5,
         "format": 38,
-        "offset": 0
+        "offset": 0,
+        "source": "xyzw"
       },
       "a0": "z",
-      "evidence": "dump shader_A1F7E9885EC466DF.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Normal: vfetch_mini r0._xyz Offset=2 FMT_10_11_11 of vf0 (fetch 1); skinned with the one bone, made orthogonal to the skinned tangent and normalised (instr 19-21, 26-31, 34-41; no closed formula yet); it reads c4..c6 and no c7. Weights: vfetch_full r3.wzxy of vf1, FMT_32_32_32_32_FLOAT, Stride=4 (fetch 5); probe colour as 0x79EAC49585797037. a0 = trunc of the position fetch's r1.w (fetched yxwz) (truncs / maxas, instr 44, 51), the fetch's source z: 0, 4 or 8 in every sampled vertex (out/native-evidence/lighting/task2/fix1_recounts_bridge_trees.txt). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+      "evidence": "dump shader_A1F7E9885EC466DF.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Normal: vfetch_mini r0._xyz Offset=2 FMT_10_11_11 of vf0 (fetch 1); skinned with the one bone, made orthogonal to the skinned tangent and normalised (instr 19-21, 26-31, 34-41; no closed formula yet); it reads c4..c6 and no c7. Weights: vfetch_full r3.wzxy of vf1, FMT_32_32_32_32_FLOAT, Stride=4 (fetch 5); probe colour as 0x79EAC49585797037. a0 = trunc of the position fetch's r1.w (fetched yxwz) (truncs / maxas, instr 44, 51), the fetch's source z: 0, 4 or 8 in every sampled vertex (out/native-evidence/lighting/task2/fix1_recounts_bridge_trees.txt). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source x, y, z whatever the fetch's destination swizzle (xyz_ here and in the trunks' shader, _xyz in the two skinned ones); the weights are source x, y, z, w: every dp4 of the probe colour pairs the fetched register and the constant with one swizzle or its exact undoing (dp4 r3.yxzw, c[30+a0].yxzw where the fetch is xyzw; dp4 r3.wzyx, c[30+a0].yxzw where it is wzxy). Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
     }
   },
   "0xA5846836C90E1192": {
@@ -979,14 +995,16 @@
       "normal": {
         "fetch": 5,
         "format": 32,
-        "offset": 2
+        "offset": 2,
+        "source": "yxw"
       },
       "colour": {
         "fetch": 3,
         "format": 6,
-        "offset": 6
+        "offset": 6,
+        "source": "zyx"
       },
-      "evidence": "dump shader_B636821F95DC9D8E.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched zyx_: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz (the pixel shader applies the ambient factor and c20). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+      "evidence": "dump shader_B636821F95DC9D8E.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched zyx_: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz (the pixel shader applies the ambient factor and c20). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source y, x, w, the first three halves of the element in memory, whatever the fetch's destination swizzle (yxwz or yzxw); the instance colour's red, green, blue are source z, y, x. Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
     }
   },
   "0xBEAD84BD72072E0E": {
@@ -1109,15 +1127,17 @@
       "normal": {
         "fetch": 1,
         "format": 16,
-        "offset": 2
+        "offset": 2,
+        "source": "xyz"
       },
       "weights": {
         "fetch": 6,
         "format": 38,
-        "offset": 0
+        "offset": 0,
+        "source": "xyzw"
       },
       "a0": "z",
-      "evidence": "dump shader_D4D558DA6A82BDC8.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Normal: vfetch_mini r0._xyz Offset=2 FMT_10_11_11 of vf0 (instr 10, fetch 1); the shader skins it with the position's bones, makes it orthogonal to the skinned tangent and normalises it (no closed formula yet: lighting-formulas.md, \"Objects\", last paragraph); it reads c4..c6 and no c7. Weights: vfetch_full r3.wzxy of vf1, FMT_32_32_32_32_FLOAT, Stride=4 (instr 15, fetch 6); probe colour as 0x79EAC49585797037. a0 = trunc of the position fetch's r7.w (fetched yxwz) (truncs / maxas, instr 68, 75), the fetch's source z: 0, 4 or 8 in every sampled vertex (out/native-evidence/lighting/task2/fix1_recounts_bridge_trees.txt). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+      "evidence": "dump shader_D4D558DA6A82BDC8.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Normal: vfetch_mini r0._xyz Offset=2 FMT_10_11_11 of vf0 (instr 10, fetch 1); the shader skins it with the position's bones, makes it orthogonal to the skinned tangent and normalises it (no closed formula yet: lighting-formulas.md, \"Objects\", last paragraph); it reads c4..c6 and no c7. Weights: vfetch_full r3.wzxy of vf1, FMT_32_32_32_32_FLOAT, Stride=4 (instr 15, fetch 6); probe colour as 0x79EAC49585797037. a0 = trunc of the position fetch's r7.w (fetched yxwz) (truncs / maxas, instr 68, 75), the fetch's source z: 0, 4 or 8 in every sampled vertex (out/native-evidence/lighting/task2/fix1_recounts_bridge_trees.txt). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source x, y, z whatever the fetch's destination swizzle (xyz_ here and in the trunks' shader, _xyz in the two skinned ones); the weights are source x, y, z, w: every dp4 of the probe colour pairs the fetched register and the constant with one swizzle or its exact undoing (dp4 r3.yxzw, c[30+a0].yxzw where the fetch is xyzw; dp4 r3.wzyx, c[30+a0].yxzw where it is wzxy). Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
     }
   },
   "0xD7DD31B9BF194DE8": {
@@ -1180,16 +1200,18 @@
       "normal": {
         "fetch": 1,
         "format": 16,
-        "offset": 2
+        "offset": 2,
+        "source": "xyz"
       },
       "colour": {
         "fetch": 4,
         "format": 6,
-        "offset": 0
+        "offset": 0,
+        "source": "zyxw"
       },
       "scale": "c7.w",
       "power": 2.2,
-      "evidence": "dump shader_ECD66A10092E6562.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Normal: vfetch_mini r7.xyz_ Offset=2 FMT_10_11_11 of vf0 (instr 6, fetch 1); o1 = the 10_11_11 normal through the rows c4..c6, times c7.w (instr 20-22, 27); the axis of the ambient factor is built from it and c19.xyz. Colour: vfetch_full r3.zyxw of vf3, FMT_8_8_8_8, Stride=1 (instr 14, fetch 4), read at the vertex index plus c20.x (instr 9: add r0.x, r0.x, c20.x); o6 = pow(|colour|, c255.x) with the literal c255.x = 2.2 (instr 21, 22, 29-35; frame-map section 14, \"The shaders' literals\": c255 = (2.2, 0.5, 1, 0)). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+      "evidence": "dump shader_ECD66A10092E6562.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Normal: vfetch_mini r7.xyz_ Offset=2 FMT_10_11_11 of vf0 (instr 6, fetch 1); o1 = the 10_11_11 normal through the rows c4..c6, times c7.w (instr 20-22, 27); the axis of the ambient factor is built from it and c19.xyz. Colour: vfetch_full r3.zyxw of vf3, FMT_8_8_8_8, Stride=1 (instr 14, fetch 4), read at the vertex index plus c20.x (instr 9: add r0.x, r0.x, c20.x); o6 = pow(|colour|, c255.x) with the literal c255.x = 2.2 (instr 21, 22, 29-35; frame-map section 14, \"The shaders' literals\": c255 = (2.2, 0.5, 1, 0)). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source x, y, z; the colour's red, green, blue and alpha are source z, y, x, w (a D3DCOLOR's bytes A, R, G, B in memory, source x the last). Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
     }
   },
   "0xF160B4DA459A6D40": {
@@ -1298,14 +1320,16 @@
       "normal": {
         "fetch": 5,
         "format": 32,
-        "offset": 2
+        "offset": 2,
+        "source": "yxw"
       },
       "colour": {
         "fetch": 3,
         "format": 6,
-        "offset": 6
+        "offset": 6,
+        "source": "zyx"
       },
-      "evidence": "dump shader_FC4F2EF6930768BE.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched _zyx: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz plus c54.xyz. Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt)."
+      "evidence": "dump shader_FC4F2EF6930768BE.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched _zyx: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz plus c54.xyz. Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source y, x, w, the first three halves of the element in memory, whatever the fetch's destination swizzle (yxwz or yzxw); the instance colour's red, green, blue are source z, y, x. Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
     }
   }
 }

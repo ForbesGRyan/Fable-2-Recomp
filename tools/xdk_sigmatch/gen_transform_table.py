@@ -28,8 +28,8 @@ transform is the product of two constant windows, which FABLE2_VS_TRANSFORM (one
   FABLE2_VS_UV(hash, interp, comp, fetch_index, src_comp, xenos_format, offset_dwords, s0, o0, s1, o1)
       "uv": {"o0.x": {"fetch": 2, "src": "y", "format": 31, "offset": 3, "stages": [...]}, ...}
       Stage refs use uv_refs notation with bank 0 (vertex constants).
-  FABLE2_VS_LIGHT(hash, kind, normal_fetch, normal_format, normal_offset, second_fetch, second_format,
-                  second_offset, a0, scale_ref, power)
+  FABLE2_VS_LIGHT(hash, kind, normal_fetch, normal_format, normal_offset, normal_source, second_fetch,
+                  second_format, second_offset, second_source, a0, scale_ref, power)
       "light": what the light of a draw reads on the vertex side (docs/native-renderer/lighting-formulas.md),
       by kind: 1 "terrain" (nothing: the normal is the heightmap's), 2 "stream" (the vertex colour is a
       stream of its own), 3 "probe" (the colour is built from four weights per vertex and per-draw
@@ -38,10 +38,20 @@ transform is the product of two constant windows, which FABLE2_VS_TRANSFORM (one
         probe:    {"kind", "normal", "weights", "a0", "scale" (optional), "evidence"}
         instance: {"kind", "normal", "colour", "evidence"}   (the entry has "instance")
         terrain:  {"kind", "evidence"}                       (the entry has "terrain")
-      "normal", "colour", "weights": {"fetch", "format", "offset"}, a vertex fetch by its ordinal with the
-      Xenos format and the offset in dwords the dump shows (the runtime refuses the entry on a shader
-      whose fetch is another one). The normal is 16 (10_11_11) or 32 (16_16_16_16_FLOAT), a colour 6
-      (8_8_8_8), the weights 38 (32_32_32_32_FLOAT). "a0": the source component of the position fetch
+      "normal", "colour", "weights": {"fetch", "format", "offset", "source"}, a vertex fetch by its
+      ordinal with the Xenos format and the offset in dwords the dump shows (the runtime refuses the
+      entry on a shader whose fetch is another one). The normal is 16 (10_11_11) or 32
+      (16_16_16_16_FLOAT), a colour 6 (8_8_8_8), the weights 38 (32_32_32_32_FLOAT).
+      "source": the element's SOURCE components (x to w of the GPU's fetch, before the fetch's
+      destination swizzle, which only says where the shader's register gets them and differs between
+      shaders that use one element the same way) in the order the light's formula reads them, as
+      "pos_swizzle" does for a position: a normal's x, y, z ("xyz" for the 10_11_11 element, "yxw" for
+      the plants' halves, the first three in memory); a colour's red, green, blue and, where the reader
+      keeps it, alpha ("zyxw" for the colour stream, "zyx" for an instance's); the four weights in the
+      order of the probe constants' components ("xyzw"). Each component at most once, and only
+      components the format has (x, y, z for 10_11_11). In the line: two bits a component from bit 0,
+      the number of components above them (0x324 = xyz, 0x331 = yxw, 0x4C6 = zyxw, 0x4E4 = xyzw; 0x0
+      without an element). "a0": the source component of the position fetch
       that holds the index of the draw's probe set; "scale": the constant the shader multiplies its world
       normal by ("c7.w"; register * 4 + component in the line); "power": the literal exponent of the
       colour stream. Absent: fetch -1 with 0, 0; a0 -1; scale -1; power 0.0f. The pixel shaders a vertex
@@ -82,7 +92,7 @@ INSTANCE_KEYS = ("mesh_fetch", "row_fetches", "row_swizzles", "inv_count", "coun
 TERRAIN_KEYS = ("grid", "cell", "height_scale", "origin", "tex_offset", "tex_scale", "patch_offset", "height_fetch")
 UV_KEYS = ("fetch", "src", "format", "offset", "stages")
 LIGHT_KEYS = ("kind", "normal", "colour", "weights", "a0", "scale", "power", "evidence")
-LIGHT_FETCH_KEYS = ("fetch", "format", "offset")
+LIGHT_FETCH_KEYS = ("fetch", "format", "offset", "source")
 # kind -> (code of capture::LightVertexKind, the keys it needs, the keys it may have besides).
 LIGHT_KINDS = {
     "terrain": (1, (), ()),
@@ -93,6 +103,16 @@ LIGHT_KINDS = {
 # The Xenos vertex formats the light's readers decode, per fetch.
 _LIGHT_FORMATS = {"normal": {16: "10_11_11", 32: "16_16_16_16_FLOAT"}, "colour": {6: "8_8_8_8"},
                   "weights": {38: "32_32_32_32_FLOAT"}}
+# How many source components an element's selector names (a normal's three, a colour with or without
+# its alpha, the four weights), and the components a format has.
+_LIGHT_SOURCE_COUNTS = {"normal": (3,), "colour": (3, 4), "weights": (4,)}
+_LIGHT_SOURCE_WORDS = {(3,): "three", (3, 4): "three or four", (4,): "four"}
+_FORMAT_COMPONENTS = {16: "xyz", 32: "xyzw", 6: "xyzw", 38: "xyzw"}
+
+
+def source_code(text):
+    """'yxw' -> 0x331: the source components two bits each from bit 0, their number above them."""
+    return (len(text) << 8) | sum(_COMP.index(c) << (2 * i) for i, c in enumerate(text))
 
 
 def _only_keys(vs, what, obj, allowed):
@@ -254,7 +274,12 @@ def _light_fetch(vs, what, f):
     if isinstance(fmt, bool) or fmt not in known:
         raise ValueError(f"light {what} format {fmt!r} is not "
                          + " or ".join(f"{code} ({name})" for code, name in known.items()))
-    return fetch, fmt, offset
+    source, counts, components = f.get("source"), _LIGHT_SOURCE_COUNTS[what], _FORMAT_COMPONENTS[fmt]
+    if (not isinstance(source, str) or len(source) not in counts or len(set(source)) != len(source)
+            or any(c not in components for c in source)):
+        raise ValueError(f"light {what} source {source!r} is not {_LIGHT_SOURCE_WORDS[counts]} of "
+                         f"{', '.join(components)}, each once")
+    return fetch, fmt, offset, f"0x{source_code(source):X}"
 
 
 def _light_line(vs, h, e):
@@ -280,7 +305,7 @@ def _light_line(vs, h, e):
             raise ValueError(f"{vs}: {a} {kind} light belongs to an entry with {form}")
         if kind != form and form in e:
             raise ValueError(f"{vs}: {a} {kind} light does not belong to an entry with {form}")
-    none = (-1, 0, 0)
+    none = (-1, 0, 0, "0x0")
     normal = _light_fetch(vs, "normal", light["normal"]) if "normal" in light else none
     second = next((_light_fetch(vs, k, light[k]) for k in ("colour", "weights") if k in light), none)
     a0 = _component("light a0", light["a0"]) if "a0" in light else -1

@@ -50,10 +50,13 @@ static const PsLightSpec kLayerPs{0x9C21, LightFamily::kTerrainLayer, false, 8.0
 static const PsLightSpec kFarPs{0x7DDA, LightFamily::kTerrainFar, false, 0.0f};
 static const PsLightSpec kPlantPs{0xA7E4, LightFamily::kPlant, false, 0.0f};
 static const PsLightSpec kPlantLitPs{0x165E, LightFamily::kPlantLit, true, 0.0f};
-static const VsLightSpec kStreamVs{0xECD6, LightVertexKind::kStream, {1, 16, 2}, {4, 6, 0}, -1, 7 * 4 + 3, 2.2f};
-static const VsLightSpec kProbeVs{0x79EA, LightVertexKind::kProbe, {1, 16, 2}, {4, 38, 0}, 2, 7 * 4 + 3, 0.0f};
-static const VsLightSpec kInstanceVs{0x8123, LightVertexKind::kInstance, {5, 32, 2}, {3, 6, 6}, -1, -1, 0.0f};
-static const VsLightSpec kTerrainVs{0xC30A, LightVertexKind::kTerrain, {-1, 0, 0}, {-1, 0, 0}, -1, -1, 0.0f};
+// The sources as the table writes them (gen_transform_table.py, source_code): the components two
+// bits each from bit 0, their number above: xyz, zyxw, xyzw, yxw, zyx.
+static constexpr uint16_t kXyz = 0x324, kZyxw = 0x4C6, kXyzw = 0x4E4, kYxw = 0x331, kZyx = 0x306;
+static const VsLightSpec kStreamVs{0xECD6, LightVertexKind::kStream, {1, 16, 2, kXyz}, {4, 6, 0, kZyxw}, -1, 7 * 4 + 3, 2.2f};
+static const VsLightSpec kProbeVs{0x79EA, LightVertexKind::kProbe, {1, 16, 2, kXyz}, {4, 38, 0, kXyzw}, 2, 7 * 4 + 3, 0.0f};
+static const VsLightSpec kInstanceVs{0x8123, LightVertexKind::kInstance, {5, 32, 2, kYxw}, {3, 6, 6, kZyx}, -1, -1, 0.0f};
+static const VsLightSpec kTerrainVs{0xC30A, LightVertexKind::kTerrain, {-1, 0, 0, 0}, {-1, 0, 0, 0}, -1, -1, 0.0f};
 
 // One draw of each kind with everything read, and the two banks it was read into.
 struct LightCase {
@@ -235,26 +238,108 @@ static int LightTests() {
   {
     const std::vector<VertexFetch> f = StreamFetches();
     LightElement e;
-    if (!MakeLightElement(f[1], {true, {0x100000, 4000}, 2}, &e)) return 224;
+    if (!MakeLightElement(f[1], 0x24, 3, {true, {0x100000, 4000}, 2}, &e)) return 224;
     if (e.vb.phys_addr != 0x100000 || e.vb.size != 4000 || e.offset_bytes != 8 || e.stride_bytes != 20 ||
-        e.swizzle != 0xE88 || e.format != 16 || e.flags != (kLightElementSigned | kLightElementNormalized | (2 << 2))) {
+        e.source != 0x24 || e.source_count != 3 || e.format != 16 ||
+        e.flags != (kLightElementSigned | kLightElementNormalized | (2 << 2))) {
       return 225;
     }
-    if (!MakeLightElement(f[4], {true, {0x200000, 4}, 0}, &e) || e.flags != kLightElementNormalized || e.stride_bytes != 4) return 226;
-    if (MakeLightElement(f[4], {true, {0x200000, 3}, 0}, &e)) return 227;     // no whole element
-    if (MakeLightElement(f[1], {false, {0x100000, 4000}, 2}, &e)) return 228;  // not resolved
-    if (MakeLightElement(f[1], {true, {0x100000, 4000}, 4}, &e)) return 229;   // not an endian
+    if (LightSourceComponent(e, 0) != 0 || LightSourceComponent(e, 1) != 1 || LightSourceComponent(e, 2) != 2) return 225;
+    if (!MakeLightElement(f[4], 0xC6, 4, {true, {0x200000, 4}, 0}, &e) || e.flags != kLightElementNormalized ||
+        e.stride_bytes != 4 || e.source != 0xC6 || e.source_count != 4) {
+      return 226;
+    }
+    if (LightSourceComponent(e, 0) != 2 || LightSourceComponent(e, 1) != 1 || LightSourceComponent(e, 2) != 0 ||
+        LightSourceComponent(e, 3) != 3) {
+      return 226;
+    }
+    if (MakeLightElement(f[4], 0xC6, 4, {true, {0x200000, 3}, 0}, &e)) return 227;     // no whole element
+    if (MakeLightElement(f[1], 0x24, 3, {false, {0x100000, 4000}, 2}, &e)) return 228;  // not resolved
+    if (MakeLightElement(f[1], 0x24, 3, {true, {0x100000, 4000}, 4}, &e)) return 229;   // not an endian
     VertexFetch bad = f[1];
     bad.offset_dwords = 5;  // past the vertex (stride 5 dwords)
-    if (MakeLightElement(bad, {true, {0x100000, 4000}, 2}, &e)) return 230;
+    if (MakeLightElement(bad, 0x24, 3, {true, {0x100000, 4000}, 2}, &e)) return 230;
     bad = f[1]; bad.offset_dwords = -1;
-    if (MakeLightElement(bad, {true, {0x100000, 4000}, 2}, &e)) return 231;
+    if (MakeLightElement(bad, 0x24, 3, {true, {0x100000, 4000}, 2}, &e)) return 231;
     bad = f[1]; bad.stride_dwords = 0;
-    if (MakeLightElement(bad, {true, {0x100000, 4000}, 2}, &e)) return 232;
+    if (MakeLightElement(bad, 0x24, 3, {true, {0x100000, 4000}, 2}, &e)) return 232;
     bad = f[3];             // a format the light has no element of (2_10_10_10)
-    if (MakeLightElement(bad, {true, {0x100000, 4000}, 2}, &e)) return 233;
+    if (MakeLightElement(bad, 0x24, 3, {true, {0x100000, 4000}, 2}, &e)) return 233;
     bad = f[0]; bad.offset_dwords = 4;  // a half4 (8 bytes) at the last dword of a 5-dword vertex
-    if (MakeLightElement(bad, {true, {0x100000, 4000}, 2}, &e)) return 234;
+    if (MakeLightElement(bad, 0x24, 3, {true, {0x100000, 4000}, 2}, &e)) return 234;
+  }
+  // The source components of an element: the table's selector, admitted for the shader's fetch.
+  {
+    // What a fetch delivers: xyzw, xyz_, _xyz, yzxw all of x, y, z; a constant or a component left
+    // as it was delivers nothing.
+    if (FetchedComponents(0x688) != 0xF || FetchedComponents(0xE88) != 7 || FetchedComponents(0x447) != 7 ||
+        FetchedComponents(0x611) != 0xF || FetchedComponents(0x213) != 0xF) {
+      return 235;
+    }
+    if (FetchedComponents(0xE80) != 5 || FetchedComponents(0xFC8) != 3 || FetchedComponents(0xE8C) != 6 ||
+        FetchedComponents(0xE45) != 3 || FetchedComponents(0xFFF) != 0 || FetchedComponents(0xB6D) != 0 ||
+        FetchedComponents(0x057) != 7 || FetchedComponents(0xE41) != 3) {
+      return 236;
+    }
+    if (LightFormatComponents(16) != 3 || LightFormatComponents(32) != 4 || LightFormatComponents(6) != 4 ||
+        LightFormatComponents(38) != 4 || LightFormatComponents(7) != 0 || LightFormatComponents(0) != 0) {
+      return 237;
+    }
+    const VertexFetch n10 = Fetch(95, 2, 16, 5, 0xE88, true, true, true);
+    uint8_t src = 0x77;
+    auto with = [](VertexFetch f, uint32_t swizzle) { f.dst_swizzle = swizzle; return f; };
+    auto refused = [&](uint32_t spec, uint32_t count, const VertexFetch& f) {
+      src = 0x77;
+      return !LightSource(spec, count, f, &src) && src == 0x77;  // and the output untouched
+    };
+    // The 10_11_11 normal: source x, y, z, fetched xyz_ or (the skinned shaders) _xyz.
+    if (!LightSource(kXyz, 3, n10, &src) || src != 0x24) return 238;
+    src = 0x77;
+    if (!LightSource(kXyz, 3, with(n10, 0x447), &src) || src != 0x24) return 239;
+    // Any order of its three components is a selector; the capture does not judge the order.
+    if (!LightSource(0x312, 3, n10, &src) || src != 0x12 || !LightSource(0x309, 3, n10, &src) || src != 0x09) return 353;
+    // A component the fetch does not deliver: xxz_ (no y), xy__ (no z), 0yz_ (a constant where x
+    // would be), 1xy_ (no z).
+    for (uint32_t swizzle : {0xE80u, 0xFC8u, 0xE8Cu, 0xE45u, 0xFFFu}) {
+      if (!refused(kXyz, 3, with(n10, swizzle))) return 354;
+    }
+    // Not three components, or not the number asked: a count of two, four, five; a selector of four
+    // where three are asked and the reverse; no selector.
+    if (!refused(0x224, 3, n10) || !refused(0x524, 3, n10) || !refused(kXyzw, 3, n10) || !refused(0, 3, n10) ||
+        !refused(0x24, 3, n10) || !refused(kXyz, 4, n10) || !refused(kXyz, 2, n10) || !refused(0x224, 2, n10) ||
+        !refused(0x5E4, 5, with(n10, 0x688))) {
+      return 355;
+    }
+    // A component the format does not have (w of 10_11_11), one named twice, bits past the three.
+    if (!refused(0x334, 3, n10) || !refused(0x304, 3, n10) || !refused(0x300, 3, n10) || !refused(0x364, 3, n10) ||
+        !refused(0x3E4, 3, n10)) {
+      return 356;
+    }
+    // The format has no w whatever the fetch's swizzle says of one (xyzw on a 10_11_11 element).
+    if (!refused(0x334, 3, with(n10, 0x688)) || !refused(0x4E4, 4, with(n10, 0x688))) return 356;
+    if (!LightSource(kXyz, 3, with(n10, 0x688), &src) || src != 0x24) return 356;
+    // A format the light has no element of.
+    if (!refused(kXyz, 3, Fetch(95, 4, 7, 5, 0x688, true, true, true))) return 357;
+    // The plants' halves: source y, x, w, fetched yxwz or yzxw; yxy_ does not deliver w.
+    const VertexFetch half = Fetch(95, 2, 32, 6, 0x4C1, true, false, true);
+    if (!LightSource(kYxw, 3, half, &src) || src != 0x31) return 358;
+    if (!LightSource(kYxw, 3, with(half, 0x611), &src) || src != 0x31) return 359;
+    if (!refused(kYxw, 3, with(half, 0xE41)) || !refused(0x311, 3, half)) return 360;
+    // Colours: the stream's four (fetched zyxw), an instance's three (zyx_ and _zyx: its fourth
+    // byte is not delivered, so four cannot be asked of it).
+    const VertexFetch colour = Fetch(92, 0, 6, 1, 0x60A, false, true, false);
+    if (!LightSource(kZyxw, 4, colour, &src) || src != 0xC6) return 361;
+    if (!LightSource(kZyx, 3, with(colour, 0xE0A), &src) || src != 0x06) return 362;
+    if (!LightSource(kZyx, 3, with(colour, 0x057), &src) || src != 0x06) return 363;
+    if (!refused(kZyxw, 4, with(colour, 0xE0A)) || !refused(kZyxw, 4, with(colour, 0xA0A)) ||
+        !refused(kZyx, 3, with(colour, 0xFCA)) || !refused(kZyxw, 3, colour) || !refused(kZyx, 4, colour)) {
+      return 364;
+    }
+    // The four weights, fetched xyzw or (the skinned shaders) wzxy.
+    const VertexFetch weights = Fetch(94, 0, 38, 4, 0x688, true, false, false);
+    if (!LightSource(kXyzw, 4, weights, &src) || src != 0xE4) return 365;
+    if (!LightSource(kXyzw, 4, with(weights, 0x213), &src) || src != 0xE4) return 366;
+    if (!refused(kXyzw, 4, with(weights, 0xE88)) || !refused(0x4E0, 4, weights)) return 367;
   }
 
   // --- a draw of the object family with the colour stream (0x8D90 with 0xECD6) ---
@@ -264,9 +349,12 @@ static int LightTests() {
     const char* why = "?";
     if (MakeLightInputs(c.d, &l, &why) != LightReason::kNone || why[0] != 0) return 240;
     if (l.family != LightFamily::kObject || l.kind != LightVertexKind::kStream || l.multi || l.a0_comp != -1) return 241;
-    if (l.normal.vb.phys_addr != 0x100000 || l.normal.offset_bytes != 8 || l.normal.stride_bytes != 20 || l.normal.format != 16) return 242;
+    if (l.normal.vb.phys_addr != 0x100000 || l.normal.offset_bytes != 8 || l.normal.stride_bytes != 20 || l.normal.format != 16 ||
+        l.normal.source != 0x24 || l.normal.source_count != 3) {
+      return 242;
+    }
     if (l.second.vb.phys_addr != 0x200000 || l.second.vb.size != 1696 || l.second.stride_bytes != 4 ||
-        l.second.format != 6 || l.second.swizzle != 0x60A) {
+        l.second.format != 6 || l.second.source != 0xC6 || l.second.source_count != 4) {
       return 243;
     }
     if (l.colour_first != 224 || l.colour_power != 2.2f || l.facing_scale != 0.0f) return 244;
@@ -362,6 +450,24 @@ static int LightTests() {
     t.fetches = StreamFetches();
     t.fetches[1].stride_dwords = 2;  // the element does not fit its vertex
     if (!Fails(t.d, LightReason::kNormalUnsupported, "normal-fetch")) return 271;
+    // Its source components: the entry's three, each delivered by the shader's fetch. Otherwise the
+    // normal is not one a reader may decode, whatever else is wrong with the draw.
+    t = StreamCase(); t.fetches[1].dst_swizzle = 0x447;  // _xyz: the same three, elsewhere in the register
+    if (MakeLightInputs(t.d, &l) != LightReason::kNone || l.normal.source != 0x24 || l.normal.source_count != 3) return 295;
+    for (uint32_t swizzle : {0xE80u, 0xFC8u, 0xE8Cu, 0xE45u}) {  // xxz_, xy__, 0yz_, 1xy_
+      t = StreamCase(); t.fetches[1].dst_swizzle = swizzle;
+      if (!Fails(t.d, LightReason::kNormalUnsupported, "normal-source")) return 296;
+      t.d.normal_stream.resolved = false;
+      if (!Fails(t.d, LightReason::kNormalUnsupported, "normal-source")) return 296;
+    }
+    for (uint16_t spec : {uint16_t(0), uint16_t(0x24), kXyzw, uint16_t(0x334), uint16_t(0x304), uint16_t(0x224), uint16_t(0x3E4)}) {
+      vs = kStreamVs; vs.normal.source = spec;  // no selector, no count, four, w, x twice, two, stray bits
+      t = StreamCase(); t.d.vs = &vs;
+      if (!Fails(t.d, LightReason::kNormalUnsupported, "normal-source")) return 297;
+    }
+    vs = kStreamVs; vs.normal.source = 0x312;  // z, x, y: a selector the capture records as the table names it
+    t = StreamCase(); t.d.vs = &vs;
+    if (MakeLightInputs(t.d, &l) != LightReason::kNone || l.normal.source != 0x12) return 298;
     // Its stream: not resolved, too short for the draw's largest vertex, the range unknown.
     t = StreamCase(); t.d.normal_stream.resolved = false;
     if (!Fails(t.d, LightReason::kLightUnknown, "normal-stream")) return 272;
@@ -389,6 +495,20 @@ static int LightTests() {
     if (!Fails(t.d, LightReason::kLightUnknown, "colour")) return 293;
     vs.second = {0, 32, 0}; // or the position
     if (!Fails(t.d, LightReason::kLightUnknown, "colour")) return 294;
+    // Its source components: red, green, blue and alpha, all four delivered.
+    for (uint32_t swizzle : {0xE0Au, 0xA0Au, 0xFCAu}) {  // zyx_, zyx1, zy__
+      t = StreamCase(); t.fetches[4].dst_swizzle = swizzle;
+      if (!Fails(t.d, LightReason::kLightUnknown, "colour-source")) return 299;
+      t.d.second_stream.vb.size = 0;
+      if (!Fails(t.d, LightReason::kLightUnknown, "colour-source")) return 299;
+    }
+    for (uint16_t spec : {uint16_t(0), kZyx, uint16_t(0x4C2), uint16_t(0xC6)}) {  // none, three, z twice, no count
+      vs = kStreamVs; vs.second.source = spec;
+      t = StreamCase(); t.d.vs = &vs;
+      if (!Fails(t.d, LightReason::kLightUnknown, "colour-source")) return 319;
+    }
+    t = StreamCase(); t.fetches[4].dst_swizzle = 0x688;  // fetched in another order: the same element
+    if (MakeLightInputs(t.d, &l) != LightReason::kNone || l.second.source != 0xC6) return 337;
     // Its index offset c20.x: a whole number from 0, and offset plus the largest vertex inside the
     // stream (424 colours: 224 + 199 is the last one).
     for (float bad : {-1.0f, 0.5f, 224.25f, 16777216.0f, 1e30f, inf, nan}) {
@@ -436,7 +556,8 @@ static int LightTests() {
     if (MakeLightInputs(c.d, &l) != LightReason::kNone) return 300;
     if (l.family != LightFamily::kObject || l.kind != LightVertexKind::kProbe || l.a0_comp != 2) return 301;
     if (l.second.format != 38 || l.second.stride_bytes != 16 || l.second.vb.phys_addr != 0x200000 ||
-        l.second.flags != (kLightElementSigned | (2 << 2))) {
+        l.second.flags != (kLightElementSigned | (2 << 2)) || l.second.source != 0xE4 || l.second.source_count != 4 ||
+        l.normal.source != 0x24 || l.normal.source_count != 3) {
       return 302;
     }
     for (uint32_t r = 0; r < 12; ++r) {
@@ -478,6 +599,22 @@ static int LightTests() {
       other.second = {0, 32, 0};  // or the position (a half4: an element the light has, not the weights')
       if (!Fails(t.d, LightReason::kLightUnknown, "weights")) return 318;
     }
+    // Their source components: the four, as the two skinned shaders fetch them too (wzxy; their
+    // normal _xyz).
+    t = ProbeCase(); t.fetches[4].dst_swizzle = 0x213; t.fetches[1].dst_swizzle = 0x447;
+    if (MakeLightInputs(t.d, &l) != LightReason::kNone || l.second.source != 0xE4 || l.normal.source != 0x24) return 338;
+    t = ProbeCase(); t.fetches[4].dst_swizzle = 0xE88;  // xyz_: the fourth weight is not delivered
+    if (!Fails(t.d, LightReason::kLightUnknown, "weights-source")) return 339;
+    t.d.second_stream.vb.size = 0;
+    if (!Fails(t.d, LightReason::kLightUnknown, "weights-source")) return 339;
+    {
+      VsLightSpec other = kProbeVs;
+      for (uint16_t spec : {uint16_t(0), kXyz, uint16_t(0x4E0), uint16_t(0xE4)}) {  // none, three, x twice, no count
+        other.second.source = spec;
+        t = ProbeCase(); t.d.vs = &other;
+        if (!Fails(t.d, LightReason::kLightUnknown, "weights-source")) return 368;
+      }
+    }
     t = ProbeCase(); t.d.max_vertex = -1;
     if (!Fails(t.d, LightReason::kLightUnknown, "vertex-range")) return 313;
     VsLightSpec vs = kProbeVs;
@@ -501,9 +638,12 @@ static int LightTests() {
     LightInputs l;
     if (MakeLightInputs(c.d, &l) != LightReason::kNone) return 320;
     if (l.family != LightFamily::kPlant || l.kind != LightVertexKind::kInstance || l.a0_comp != -1) return 321;
-    if (l.normal.format != 32 || l.normal.offset_bytes != 8 || l.normal.stride_bytes != 24 || l.normal.vb.phys_addr != 0x100000) return 322;
+    if (l.normal.format != 32 || l.normal.offset_bytes != 8 || l.normal.stride_bytes != 24 || l.normal.vb.phys_addr != 0x100000 ||
+        l.normal.source != 0x31 || l.normal.source_count != 3) {
+      return 322;
+    }
     if (l.second.format != 6 || l.second.offset_bytes != 24 || l.second.stride_bytes != 28 ||
-        l.second.vb.phys_addr != 0x200000 || l.second.swizzle != 0xE0A) {
+        l.second.vb.phys_addr != 0x200000 || l.second.source != 0x06 || l.second.source_count != 3) {
       return 323;
     }
     if (l.vs_const[0][0] != 1.0f || l.vs_const[0][1] != -200.0f || l.vs_const[0][2] != 100.0f || l.vs_const[0][3] != 0.5f) return 324;
@@ -540,6 +680,29 @@ static int LightTests() {
     if (!Fails(t.d, LightReason::kNormalUnsupported, "normal-fetch")) return 335;
     t = InstanceCase(); t.d.normal_stream.vb.size = 23;
     if (!Fails(t.d, LightReason::kLightUnknown, "normal-stream")) return 336;
+    // The source components: the halves y, x, w as 0x48D3... and 0xFC4F... fetch them too (yzxw),
+    // the colour's three as both fetches of it deliver them (zyx_ and _zyx).
+    t = InstanceCase(); t.fetches[5].dst_swizzle = 0x611; t.fetches[3].dst_swizzle = 0x057;
+    if (MakeLightInputs(t.d, &l) != LightReason::kNone || l.normal.source != 0x31 || l.second.source != 0x06 ||
+        l.second.source_count != 3) {
+      return 369;
+    }
+    t = InstanceCase(); t.fetches[5].dst_swizzle = 0xE41;  // yxy_: w, the third half in memory, is not delivered
+    if (!Fails(t.d, LightReason::kNormalUnsupported, "normal-source")) return 370;
+    t = InstanceCase(); t.fetches[3].dst_swizzle = 0xFCA;  // zy__: no red
+    if (!Fails(t.d, LightReason::kLightUnknown, "colour-source")) return 371;
+    {
+      VsLightSpec other = kInstanceVs;
+      other.second.source = kZyxw;  // four of an instance colour: its alpha is not the light's
+      t = InstanceCase(); t.d.vs = &other;
+      if (!Fails(t.d, LightReason::kLightUnknown, "colour-source")) return 372;
+      t.fetches[3].dst_swizzle = 0x60A;  // (nor when a fetch would deliver it)
+      if (!Fails(t.d, LightReason::kLightUnknown, "colour-source")) return 372;
+      other = kInstanceVs;
+      other.normal.source = kXyz;  // the 10_11_11 order on the halves: a selector, recorded as named
+      t = InstanceCase(); t.d.vs = &other;
+      if (MakeLightInputs(t.d, &l) != LightReason::kNone || l.normal.source != 0x24) return 373;
+    }
   }
 
   // --- terrain (layers 0x9C21 with 0xC30A; far 0x7DDA with 0x5003) ---

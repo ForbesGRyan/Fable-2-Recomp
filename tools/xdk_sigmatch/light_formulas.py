@@ -247,7 +247,8 @@ def leaf_light(normal, view, light_dir, wrap, spot=1.0):
 def leaf_mask(mask, gain, bias):
     """The leaf pixel shader's two factors from the screen mask: m1 = mask * gain + bias on the front
     light, m2 = m1 * gain + bias on the back light. gain and bias are the pixel shader's literals c255.w
-    and c255.z, whose values are in no capture (open; see the document)."""
+    and c255.z: 0.6 and 0.4 in every execution of 0x7CD5... in the GPU logs of plan Task 1 (frame-map
+    section 14, "The shaders' literals"; in no capture row when this was written)."""
     m1 = _finite(sat(mask) * _finite(gain) + _finite(bias))
     return m1, _finite(m1 * _finite(gain) + _finite(bias))
 
@@ -260,8 +261,8 @@ def tree_leaf(A, vs_ambient, front, back, sun_col, c27w=1.0, *, m1, m2, c49):
     only. A = tf0.rgb^2 / tf0.a^2; vs_ambient = instance_ambient(probe_colour, vs c18.xyz, vs c18.w *
     0.4545 (literal c249.w), vs c54.xyz); front, back = leaf_light(...); sun_col vs c83.xyz; m1, m2 =
     leaf_mask(...). The interpolators are o1 = vs_ambient, o2 = sun_col * front, o3 = sun_col * back.
-    m1, m2 and c49 have no default: the literals behind m1 and m2 are open and c49 is in no capture
-    row. c27w defaults to the 1 of every captured leaf row."""
+    m1, m2 and c49 have no default: the caller makes m1 and m2 (leaf_mask with the literals 0.6 and
+    0.4) and c49 is in no capture row of the time. c27w defaults to the 1 of every captured leaf row."""
     green = 1.0 if _finite(A[1]) >= _finite(A[0]) else 0.0
     out = []
     for i in range(3):

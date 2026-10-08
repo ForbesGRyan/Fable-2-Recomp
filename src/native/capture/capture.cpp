@@ -293,7 +293,7 @@ static constexpr TableEntry kTransformTable[] = {
 #define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF, CE, CD)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
-#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, SF, SM, SO, A0, SC, PW)
+#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, NS, SF, SM, SO, SS, A0, SC, PW)
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
@@ -315,7 +315,7 @@ static constexpr PosSwizzleEntry kPosSwizzleTable[] = {
 #define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF, CE, CD)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
-#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, SF, SM, SO, A0, SC, PW)
+#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, NS, SF, SM, SO, SS, A0, SC, PW)
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
@@ -338,7 +338,7 @@ static constexpr SkinEntry kSkinTable[] = {
 #define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF, CE, CD)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
-#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, SF, SM, SO, A0, SC, PW)
+#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, NS, SF, SM, SO, SS, A0, SC, PW)
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
@@ -361,7 +361,7 @@ static constexpr InstanceEntry kInstanceTable[] = {
   {H, {{R0, R1, R2}, {S0, S1, S2}, INV, CNT, FIRST, BIAS, OFF, CE, CD}},
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
-#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, SF, SM, SO, A0, SC, PW)
+#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, NS, SF, SM, SO, SS, A0, SC, PW)
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
@@ -383,7 +383,7 @@ static constexpr TerrainEntry kTerrainTable[] = {
 #define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF, CE, CD)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F) {H, {G, CE, HS, O, TO, TS, PO, F}},
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
-#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, SF, SM, SO, A0, SC, PW)
+#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, NS, SF, SM, SO, SS, A0, SC, PW)
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
@@ -474,7 +474,7 @@ const std::vector<VsUvSpec> kVsUvTable = {
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1) \
   {H, I, C, int8_t(F), S, FM, O, {{S0, O0}, {S1, O1}}},
-#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, SF, SM, SO, A0, SC, PW)
+#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, NS, SF, SM, SO, SS, A0, SC, PW)
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
@@ -527,8 +527,9 @@ const std::vector<VsLightSpec> kVsLightTable = {
 #define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF, CE, CD)
 #define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
 #define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
-#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, SF, SM, SO, A0, SC, PW) \
-  {H, LightVertexKind(K), {int8_t(NF), uint8_t(NM), uint8_t(NO)}, {int8_t(SF), uint8_t(SM), uint8_t(SO)}, int8_t(A0), SC, PW},
+#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, NS, SF, SM, SO, SS, A0, SC, PW)                                    \
+  {H, LightVertexKind(K), {int8_t(NF), uint8_t(NM), uint8_t(NO), uint16_t(NS)},                                \
+   {int8_t(SF), uint8_t(SM), uint8_t(SO), uint16_t(SS)}, int8_t(A0), SC, PW},
 #include "vs_transform_table.inc"
 #undef FABLE2_VS_TRANSFORM
 #undef FABLE2_VS_POS_SWIZZLE
@@ -1397,6 +1398,17 @@ bool LightSetThisScene() {
   bool this_scene = true;
   for (uint32_t r : kLightSetRegisters) this_scene = this_scene && t_ps_loads.LoadedThisScene(r);
   return this_scene;
+}
+
+// The light set in force at the draw this thread is capturing, as the upload that decides its
+// first register (c80: the sun's slot, which MakeLightBlock judges the set by): that upload's
+// order number in this thread's load model, another for every load of the set. 0 unless the
+// whole set comes from a buffer loaded in this scene (LightSetThisScene), where no block is read.
+uint64_t LightSetUpload() {
+  if (!LightSetThisScene()) return 0;
+  uint64_t upload = 0;
+  t_ps_loads.Find(kLightSetRegisters[0], &upload);
+  return upload;
 }
 
 // The light block at the draw this thread is capturing (light_block.h), its
@@ -2858,8 +2870,10 @@ LightReason FillLightInputs(uint32_t device, const DeviceSnapshot& dev, const Vs
 // written whether or not the draw is recorded), under "lin":
 //   {"reason":"none","family","multi","kind","a0","normal":{element},"second":{element},"first",
 //    "power","facing","rot":[9],"scale","c11x","c27w","c49":[3],"c26":[3],"vc":[[4] x n]}
-// with an element as {"phys","size","off","stride","fmt","swz","flags"} (left out for a terrain
-// draw) and "vc" the probe sets (twelve registers) or the plants' c45 (one); or, without inputs,
+// with an element as {"phys","size","off","stride","fmt","src","flags"} (left out for a terrain
+// draw; "src" the element's source components in the reader's order, as the table names them:
+// "xyz", "yxw", "zyxw"; the fetch's destination swizzle is the row's "fetches"[i]."swz") and "vc"
+// the probe sets (twelve registers) or the plants' c45 (one); or, without inputs,
 //   {"reason":"light-unknown"|"normal-unsupported","why": MakeLightInputs' word[,"family","multi"][,"kind"]}
 // where family and kind are what the two shaders' entries say, when they have one.
 // One difference from the records: `instanced` here is that the vertex shader's instance rows
@@ -2895,9 +2909,11 @@ void AppendLightInputs(std::string& row, uint32_t device, const DeviceSnapshot& 
                 l.multi ? 1 : 0, LightVertexKindName(l.kind), int(l.a0_comp));
   row += buf;
   auto element = [&](const char* key, const LightElement& e) {
+    char src[5] = {};
+    for (uint32_t i = 0; i < e.source_count && i < 4; ++i) src[i] = "xyzw"[LightSourceComponent(e, i)];
     std::snprintf(buf, sizeof(buf),
-                  ",\"%s\":{\"phys\":%u,\"size\":%u,\"off\":%u,\"stride\":%u,\"fmt\":%u,\"swz\":%u,\"flags\":%u}", key,
-                  e.vb.phys_addr, e.vb.size, e.offset_bytes, e.stride_bytes, e.format, e.swizzle, e.flags);
+                  ",\"%s\":{\"phys\":%u,\"size\":%u,\"off\":%u,\"stride\":%u,\"fmt\":%u,\"src\":\"%s\",\"flags\":%u}", key,
+                  e.vb.phys_addr, e.vb.size, e.offset_bytes, e.stride_bytes, e.format, src, e.flags);
     row += buf;
   };
   auto floats = [&](const char* key, const float* v, int n) {
@@ -2940,13 +2956,16 @@ void AppendLightInputs(std::string& row, uint32_t device, const DeviceSnapshot& 
   row += "}";
 }
 
-// The frame's light block (FrameScene::light) is read at most this many times a frame without
-// result: a read is eleven ReadPixelConstant calls, far too many to make at every draw of a
-// frame whose light set is not a sun's (a night, an interior: no block, "light-block").
-constexpr int kMaxLightBlockTries = 8;
-// Reads still allowed in the frame being captured; 0 once the frame has its block. Set at the
-// frame's end for the next one (EndMainSceneFrame).
-std::atomic<int> g_light_tries_left{kMaxLightBlockTries};
+// The frame's light block (FrameScene::light) is read once per light set until one read gives
+// it, and at most LightBlockTries::kMaxSets (8) times a frame without result (light_block.h,
+// LightBlockTries): a read is eleven ReadPixelConstant calls, far too many to make at every draw
+// of a frame whose light set is not a sun's (a night, an interior: no block, "light-block"),
+// and a set without a sun gives no block at the next draw under it either.
+// g_light_frame: frames ended (EndMainSceneFrame), which is what tells the tries of one frame
+// from the next's. The tries are the drawing thread's own, as the load model is whose upload
+// numbers they hold.
+std::atomic<uint32_t> g_light_frame{0};
+constinit thread_local LightBlockTries t_light_tries;
 
 // One outermost guest draw inside the main scene, as a DrawRecord in the frame.
 // Draw-argument mapping (frame-map section 8): DrawIndexedVertices r4 prim, r5
@@ -3005,12 +3024,18 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
     // one-light family (its first light is the sun; a two- or four-light shader has a lantern
     // there and its block is invalid by design) and at which the light set was loaded in this
     // scene (ReadLightBlock; never the scene's first draw whatever it is: frame-map section 14,
-    // "Replays"). A read that gives no block is counted and the next such draw tries again, up
-    // to kMaxLightBlockTries.
+    // "Replays"). A read that gives no block is counted, and the next read is made at the first
+    // such draw under another load of the light set, not at the next draw (a set without a sun
+    // gives the same answer at every draw under it): up to LightBlockTries::kMaxSets sets a frame.
     const PsLightSpec* family = shaders.ps ? shaders.ps->light : nullptr;
-    if (family && !family->multi && g_light_tries_left.load(std::memory_order_relaxed) > 0 && LightSetThisScene()) {
-      block = ReadLightBlock();
-      block_tried = true;
+    if (family && !family->multi && t_light_tries.Open(g_light_frame.load(std::memory_order_relaxed))) {
+      const uint64_t set = LightSetUpload();
+      if (t_light_tries.ShouldTry(set)) {
+        block = ReadLightBlock();
+        block_tried = true;
+        // Counted here, whatever becomes of the draw below: a read is never made twice for a set.
+        t_light_tries.Tried(set, block.valid);
+      }
     }
   }
   std::lock_guard<std::mutex> lock(g_scene_mutex);
@@ -3018,10 +3043,8 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   if (block_tried) {
     if (block.valid) {
       g_builder.SetLight(block);
-      g_light_tries_left.store(0, std::memory_order_relaxed);
     } else {
       g_builder.CountLightTry();
-      g_light_tries_left.fetch_sub(1, std::memory_order_relaxed);
     }
   }
   DrawRecord r = AssembleRecord(in, g_builder.NextSeq());
@@ -3188,7 +3211,7 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
       g_records_frame.store(g_records_wanted.load(std::memory_order_relaxed),
                             std::memory_order_relaxed);
       // The next frame reads its own light block.
-      g_light_tries_left.store(kMaxLightBlockTries, std::memory_order_relaxed);
+      g_light_frame.fetch_add(1, std::memory_order_relaxed);
     }
   }
   if (!write) return;

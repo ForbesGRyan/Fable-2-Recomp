@@ -571,8 +571,10 @@ def _leaf_driver(ps, vs, dumps):
              26: [rng.uniform(0.5, 1.0) for _ in range(4)],
              27: [rng.uniform(0.5, 1.0) for _ in range(4)],
              49: [rng.uniform(0.5, 1.5) for _ in range(4)]}
-        # The pixel literals c255.w and c255.z shape the mask; their values are not known, so a trial
-        # draws them at random and the formula is given the two factors they make.
+        # The pixel literals c255.w and c255.z shape the mask. They are 0.6 and 0.4 (frame-map section
+        # 14, "The shaders' literals": known since plan Task 1, after this check was written); a trial
+        # still draws them at random and the formula is given the two factors they make, so the form
+        # is checked for any values.
         gain, bias = rng.uniform(0.25, 2.0), rng.uniform(-1.0, 0.75)
         c[255] = [1.0, 0.0, bias, gain]
         mask = rng.random()

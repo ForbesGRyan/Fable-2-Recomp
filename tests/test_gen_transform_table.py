@@ -347,9 +347,9 @@ class GenTransformTableTest(unittest.TestCase):
 
     # --- "light": what the light of a draw reads on the vertex side ---
 
-    NORMAL = {"fetch": 1, "format": 16, "offset": 2}
-    COLOUR = {"fetch": 4, "format": 6, "offset": 0}
-    WEIGHTS = {"fetch": 4, "format": 38, "offset": 0}
+    NORMAL = {"fetch": 1, "format": 16, "offset": 2, "source": "xyz"}
+    COLOUR = {"fetch": 4, "format": 6, "offset": 0, "source": "zyxw"}
+    WEIGHTS = {"fetch": 4, "format": 38, "offset": 0, "source": "xyzw"}
     L = "0x000000000000ABCD"
 
     def _light(self, light, **entry):
@@ -367,27 +367,39 @@ class GenTransformTableTest(unittest.TestCase):
                     **extra)
 
     def _instanced(self, **extra):
-        return dict({"kind": "instance", "normal": {"fetch": 5, "format": 32, "offset": 2},
-                     "colour": {"fetch": 3, "format": 6, "offset": 6}, "evidence": "e"}, **extra)
+        return dict({"kind": "instance", "normal": {"fetch": 5, "format": 32, "offset": 2, "source": "yxw"},
+                     "colour": {"fetch": 3, "format": 6, "offset": 6, "source": "zyx"}, "evidence": "e"}, **extra)
 
     def test_light_lines(self):
-        # FABLE2_VS_LIGHT(hash, kind, normal fetch, format, offset, second fetch, format, offset, a0,
-        # scale reference, power): kind 1 terrain, 2 stream, 3 probe, 4 instance; the second fetch is the
-        # colour stream's, the probe weights' or the instance colour's; a0 the source component of the
-        # position fetch that holds the probe set's index (-1 without); the scale is the constant the
-        # shader multiplies its world normal by (register * 4 + component, -1 without); the power is the
-        # colour stream's literal exponent (0.0f without). After every other line of the shader.
+        # FABLE2_VS_LIGHT(hash, kind, normal fetch, format, offset, source, second fetch, format, offset,
+        # source, a0, scale reference, power): kind 1 terrain, 2 stream, 3 probe, 4 instance; the second
+        # fetch is the colour stream's, the probe weights' or the instance colour's; a source is the
+        # element's source components in the order the formula reads them, two bits a component from bit
+        # 0 with their number above (xyz = 0x324, yxw = 0x331, zyx = 0x306, zyxw = 0x4C6, xyzw = 0x4E4;
+        # 0x0 without an element); a0 the source component of the position fetch that holds the probe
+        # set's index (-1 without); the scale is the constant the shader multiplies its world normal by
+        # (register * 4 + component, -1 without); the power is the colour stream's literal exponent
+        # (0.0f without). After every other line of the shader.
         p = "FABLE2_VS_LIGHT(0x000000000000ABCDull, "
-        self.assertEqual(self._light(self._stream())[2:], [p + "2, 1, 16, 2, 4, 6, 0, -1, -1, 2.2f)"])
-        self.assertEqual(self._light(self._stream(scale="c7.w", power=2))[2], p + "2, 1, 16, 2, 4, 6, 0, -1, 31, 2.0f)")
-        self.assertEqual(self._light(self._probe())[2], p + "3, 1, 16, 2, 4, 38, 0, 2, -1, 0.0f)")
-        self.assertEqual(self._light(self._probe(a0="x", scale="c7.w", weights={"fetch": 6, "format": 38, "offset": 0}))[2],
-                         p + "3, 1, 16, 2, 6, 38, 0, 0, 31, 0.0f)")
+        self.assertEqual(self._light(self._stream())[2:], [p + "2, 1, 16, 2, 0x324, 4, 6, 0, 0x4C6, -1, -1, 2.2f)"])
+        self.assertEqual(self._light(self._stream(scale="c7.w", power=2))[2],
+                         p + "2, 1, 16, 2, 0x324, 4, 6, 0, 0x4C6, -1, 31, 2.0f)")
+        self.assertEqual(self._light(self._probe())[2], p + "3, 1, 16, 2, 0x324, 4, 38, 0, 0x4E4, 2, -1, 0.0f)")
+        weights = {"fetch": 6, "format": 38, "offset": 0, "source": "wzyx"}
+        self.assertEqual(self._light(self._probe(a0="x", scale="c7.w", weights=weights))[2],
+                         p + "3, 1, 16, 2, 0x324, 6, 38, 0, 0x41B, 0, 31, 0.0f)")
         out = self._light(self._instanced(), instance=self.INSTANCE)
-        self.assertEqual(out[-1], p + "4, 5, 32, 2, 3, 6, 6, -1, -1, 0.0f)")
+        self.assertEqual(out[-1], p + "4, 5, 32, 2, 0x331, 3, 6, 6, 0x306, -1, -1, 0.0f)")
         self.assertEqual([l.split("(")[0] for l in out[1:]], ["FABLE2_VS_TRANSFORM", "FABLE2_VS_INSTANCE", "FABLE2_VS_LIGHT"])
         out = self._light({"kind": "terrain", "evidence": "e"}, terrain=self.TERRAIN)
-        self.assertEqual(out[-1], p + "1, -1, 0, 0, -1, 0, 0, -1, -1, 0.0f)")
+        self.assertEqual(out[-1], p + "1, -1, 0, 0, 0x0, -1, 0, 0, 0x0, -1, -1, 0.0f)")
+        # every selector that is a permutation of its element's components is written as it stands
+        for text, code in (("zxy", "0x312"), ("yzx", "0x309"), ("xzy", "0x318")):
+            self.assertIn(", 16, 2, " + code + ",", self._light(self._stream(normal=dict(self.NORMAL, source=text)))[2])
+        for text, code in (("xyz", "0x324"), ("wzy", "0x31B"), ("yxw", "0x331")):
+            half = {"fetch": 5, "format": 32, "offset": 2, "source": text}
+            self.assertIn(", 32, 2, " + code + ",", self._light(self._instanced(normal=half), instance=self.INSTANCE)[-1])
+        self.assertIn(", 6, 0, 0x306,", self._light(self._stream(colour=dict(self.COLOUR, source="zyx")))[2])
         # a skinned shader may have a probe entry
         out = self._light(self._probe(), skin=self.SKIN)
         self.assertEqual([l.split("(")[0] for l in out[1:]], ["FABLE2_VS_TRANSFORM", "FABLE2_VS_SKIN", "FABLE2_VS_LIGHT"])
@@ -448,6 +460,28 @@ class GenTransformTableTest(unittest.TestCase):
             (self._probe(weights=dict(self.WEIGHTS, format=32)), {}, "light weights format 32 is not 38 (32_32_32_32_FLOAT)"),
             (self._instanced(colour={"fetch": 3, "format": 38, "offset": 6}), {"instance": self.INSTANCE},
              "light colour format 38 is not 6"),
+            # the source selector: the element's source components in the formula's order, each once
+            ({**self._stream(), "normal": {"fetch": 1, "format": 16, "offset": 2}}, {}, "light normal source None is not"),
+            (self._stream(normal=dict(self.NORMAL, source="xy")), {}, "light normal source 'xy' is not three of x, y, z, each once"),
+            (self._stream(normal=dict(self.NORMAL, source="xyzw")), {}, "light normal source 'xyzw' is not three of x, y, z"),
+            (self._stream(normal=dict(self.NORMAL, source="xyw")), {}, "light normal source 'xyw' is not three of x, y, z"),
+            (self._stream(normal=dict(self.NORMAL, source="xxz")), {}, "light normal source 'xxz' is not three of x, y, z, each once"),
+            (self._stream(normal=dict(self.NORMAL, source="XYZ")), {}, "light normal source 'XYZ' is not"),
+            (self._stream(normal=dict(self.NORMAL, source="xy_")), {}, "light normal source 'xy_' is not"),
+            (self._stream(normal=dict(self.NORMAL, source="xy1")), {}, "light normal source 'xy1' is not"),
+            (self._stream(normal=dict(self.NORMAL, source=["x", "y", "z"])), {}, "light normal source ['x', 'y', 'z'] is not"),
+            (self._stream(normal=dict(self.NORMAL, source=0x324)), {}, "light normal source 804 is not"),
+            (self._instanced(normal={"fetch": 5, "format": 32, "offset": 2, "source": "yxwz"}), {"instance": self.INSTANCE},
+             "light normal source 'yxwz' is not three of x, y, z, w, each once"),
+            (self._instanced(normal={"fetch": 5, "format": 32, "offset": 2, "source": "yyw"}), {"instance": self.INSTANCE},
+             "light normal source 'yyw' is not three of x, y, z, w, each once"),
+            (self._stream(colour=dict(self.COLOUR, source="zy")), {}, "light colour source 'zy' is not three or four of x, y, z, w"),
+            (self._stream(colour=dict(self.COLOUR, source="zyxwx")), {}, "light colour source 'zyxwx' is not three or four"),
+            (self._stream(colour=dict(self.COLOUR, source="zzxw")), {}, "light colour source 'zzxw' is not three or four"),
+            (self._stream(colour=dict(self.COLOUR, source="rgba")), {}, "light colour source 'rgba' is not"),
+            (self._probe(weights=dict(self.WEIGHTS, source="xyz")), {}, "light weights source 'xyz' is not four of x, y, z, w, each once"),
+            (self._probe(weights=dict(self.WEIGHTS, source="xyzz")), {}, "light weights source 'xyzz' is not four of x, y, z, w"),
+            (self._probe(weights=dict(self.WEIGHTS, source=None)), {}, "light weights source None is not"),
             # a0, scale, power
             (self._probe(a0="zw"), {}, "light a0 'zw' is not one of x, y, z, w"),
             (self._probe(a0=2), {}, "light a0 2 is not one of x, y, z, w"),
@@ -495,22 +529,30 @@ class GenTransformTableTest(unittest.TestCase):
         self.assertEqual(kinds, want)
         self.assertEqual(len(kinds), 15)
         light = {vs: table[vs]["light"] for vs in kinds}
-        normal = {"fetch": 1, "format": 16, "offset": 2}
+        # The sources (fix round 1): the element's source components in the order the formulas read
+        # them, whatever the fetch's destination swizzle. The 10_11_11 normal is source x, y, z in all
+        # five shaders (the two skinned ones fetch it _xyz); the plants' half4 normal is source y, x, w,
+        # the first three halves in memory, in all seven (two of them fetch it yzxw); the weights are
+        # source x, y, z, w in all four (the skinned two fetch wzxy); a colour is source z, y, x = red,
+        # green, blue (the stream's with its alpha, source w). Measured on dumped streams
+        # (out/native-evidence/lighting/task4_fix1_elements_*.txt).
+        normal = {"fetch": 1, "format": 16, "offset": 2, "source": "xyz"}
         self.assertEqual({k: v for k, v in light["0xECD66A10092E6562"].items() if k != "evidence"},
-                         {"kind": "stream", "normal": normal, "colour": {"fetch": 4, "format": 6, "offset": 0},
-                          "scale": "c7.w", "power": 2.2})
+                         {"kind": "stream", "normal": normal,
+                          "colour": {"fetch": 4, "format": 6, "offset": 0, "source": "zyxw"}, "scale": "c7.w", "power": 2.2})
         probes = {"0x79EAC49585797037": (4, "c7.w"), "0xD4D558DA6A82BDC8": (6, None),
                   "0xA1F7E9885EC466DF": (5, None), "0x475EC9F795E5EDBB": (5, "c7.w")}
         for vs, (fetch, scale) in probes.items():
-            want = {"kind": "probe", "normal": normal, "weights": {"fetch": fetch, "format": 38, "offset": 0}, "a0": "z"}
+            want = {"kind": "probe", "normal": normal,
+                    "weights": {"fetch": fetch, "format": 38, "offset": 0, "source": "xyzw"}, "a0": "z"}
             if scale:
                 want["scale"] = scale
             self.assertEqual({k: v for k, v in light[vs].items() if k != "evidence"}, want, vs)
         for vs, kind in kinds.items():
             if kind == "instance":
                 self.assertEqual({k: v for k, v in light[vs].items() if k != "evidence"},
-                                 {"kind": "instance", "normal": {"fetch": 5, "format": 32, "offset": 2},
-                                  "colour": {"fetch": 3, "format": 6, "offset": 6}}, vs)
+                                 {"kind": "instance", "normal": {"fetch": 5, "format": 32, "offset": 2, "source": "yxw"},
+                                  "colour": {"fetch": 3, "format": 6, "offset": 6, "source": "zyx"}}, vs)
             if kind == "terrain":
                 self.assertEqual(sorted(light[vs]), ["evidence", "kind"], vs)
         self.assertNotIn("light", table["0xA5846836C90E1192"])

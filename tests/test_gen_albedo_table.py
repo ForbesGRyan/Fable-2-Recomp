@@ -1,5 +1,6 @@
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -67,11 +68,24 @@ def _terrain(**extra):
     return e
 
 
+# A vertex table (vs-transforms.json) as far as the albedo generator reads it: a vertex shader of
+# each light kind, one without a "light", one whose "light" names no kind the generator knows.
+VS, PROBE, INSTANCE, TERRAIN = ("0xECD66A10092E6562", "0x79EAC49585797037", "0x8123C16DBF583F92",
+                                "0xC30A97D946FA2BE4")
+NO_LIGHT, ODD_KIND = "0x5F4416192E87005F", "0x00000000000000DD"
+VERTEX = {VS: {"layout": "plain", "light": {"kind": "stream"}}, PROBE: {"light": {"kind": "probe"}},
+          INSTANCE: {"light": {"kind": "instance"}}, TERRAIN: {"light": {"kind": "terrain"}},
+          NO_LIGHT: {"layout": "plain"}, ODD_KIND: {"light": {"kind": "leaf"}}}
+# The vertex shader kind each family is checked with here (gen_albedo_table._LIGHT_VERTEX_KINDS).
+FITS = {"terrain-layer": TERRAIN, "terrain-far": TERRAIN, "object": VS, "tree-trunk": PROBE, "plant": INSTANCE,
+        "plant-lit": INSTANCE}
+
+
 class GenAlphaKindTest(unittest.TestCase):
     H = "0x00000000000000AA"
 
-    def _gen(self, entry):
-        return gen_albedo_table.generate({self.H: entry}).splitlines()
+    def _gen(self, entry, vertex=VERTEX):
+        return gen_albedo_table.generate({self.H: entry}, vertex).splitlines()
 
     def test_no_alpha_or_kind_adds_nothing(self):
         self.assertEqual(len(self._gen(_albedo())), 2)
@@ -164,7 +178,8 @@ class GenAlphaKindTest(unittest.TestCase):
         self.assertEqual(sorted(steep), ["0x04F23292B2F44077", "0x45243B758F9272AB", "0x9C2144E42E95A76F"])
         for v in steep.values():
             self.assertEqual(v, {"threshold": 0.99609375, "epsilon": 0.0001, "side_slot": 13})
-        lines = gen_albedo_table.generate(data).splitlines()
+        vertex = json.loads((root / "docs" / "native-renderer" / "vs-transforms.json").read_text())
+        lines = gen_albedo_table.generate(data, vertex).splitlines()
         self.assertEqual(sum(", 13, 0.99609375f, 0.0001f)" in line for line in lines), 3)
         self.assertEqual(sum(", -1, 0.0f, 0.0f)" in line for line in lines), 5)
         # The generated table in the tree is this table's.
@@ -387,11 +402,15 @@ class GenAlphaKindTest(unittest.TestCase):
 
     # --- "light": the light family of the shader's (pixel, vertex) pairs ---
 
-    VS = "0xECD66A10092E6562"
+    VS = VS
 
     def _light(self, **extra):
-        light = {"family": "object", "vertex": [self.VS], "evidence": "light_check.py"}
+        """A light object; its vertex shader, unless given, is one of the kind the family stands on."""
+        light = {"family": "object", "evidence": "light_check.py"}
         light.update(extra)
+        family = light["family"]
+        base = family[:-len("-multi")] if isinstance(family, str) and family.endswith("-multi") else family
+        light.setdefault("vertex", [FITS.get(base, VS) if isinstance(base, str) else VS])
         return light
 
     def test_light_lines(self):
@@ -417,7 +436,7 @@ class GenAlphaKindTest(unittest.TestCase):
         # terrain entries: the layers carry the facing factor's literal
         layer = self._light(family="terrain-layer", facing_scale=8)
         out = self._gen(_terrain(light=layer))
-        self.assertEqual(out[2:], [p + "1, 0, 8.0f)", v + "0xECD66A10092E6562ull)"])
+        self.assertEqual(out[2:], [p + "1, 0, 8.0f)", v + "0xC30A97D946FA2BE4ull)"])
         out = self._gen(_terrain(light=dict(layer, family="terrain-layer-multi", facing_scale=7.5)))
         self.assertEqual(out[2], p + "1, 1, 7.5f)")
         far = self._light(family="terrain-far")
@@ -428,7 +447,7 @@ class GenAlphaKindTest(unittest.TestCase):
         data = {"0x0000000000000003": _terrain(light=self._light(family="terrain-layer", facing_scale=8)),
                 "0x0000000000000002": _albedo(alpha={"source": "one"}, light=self._light()),
                 "0x0000000000000001": _albedo()}
-        out = gen_albedo_table.generate(data).splitlines()
+        out = gen_albedo_table.generate(data, VERTEX).splitlines()
         self.assertEqual([l.split("(")[0] for l in out[1:]],
                          ["FABLE2_PS_ALBEDO", "FABLE2_PS_ALBEDO", "FABLE2_PS_ALPHA", "FABLE2_PS_TERRAIN",
                           "FABLE2_PS_LIGHT", "FABLE2_PS_LIGHT_VS", "FABLE2_PS_LIGHT", "FABLE2_PS_LIGHT_VS"])
@@ -460,6 +479,31 @@ class GenAlphaKindTest(unittest.TestCase):
             (_albedo(light=self._light(family="Object")), "unknown light family 'Object'"),
             (_albedo(light=self._light(family=3)), "unknown light family 3"),
             (_albedo(light={"vertex": [self.VS], "evidence": "e"}), "unknown light family None"),
+            # a family whose vertex shader cannot serve it (the vertex table's "light" kind): the layers
+            # and the far shader stand on a terrain vertex shader, objects on the colour stream's or a
+            # probe one, trunks on a probe one, plants on an instancing one
+            (_terrain(light=dict(layer, vertex=[VS])),
+             "light family terrain-layer needs a vertex shader of kind terrain, and 0xECD66A10092E6562 is of kind stream"),
+            (_terrain(kind="terrain-far", detail_slot=13, light=dict(far, vertex=[INSTANCE])),
+             "light family terrain-far needs a vertex shader of kind terrain, and 0x8123C16DBF583F92 is of kind instance"),
+            (_albedo(light=self._light(vertex=[INSTANCE])),
+             "light family object needs a vertex shader of kind stream or probe, and 0x8123C16DBF583F92 is of kind instance"),
+            (_albedo(light=self._light(vertex=[TERRAIN])), "needs a vertex shader of kind stream or probe, and 0xC30A97D946FA2BE4 is of kind terrain"),
+            (_albedo(light=self._light(family="object-multi", vertex=[VS, PROBE, TERRAIN])), "light family object-multi needs"),
+            (_albedo(light=self._light(family="tree-trunk", vertex=[VS])),
+             "light family tree-trunk needs a vertex shader of kind probe, and 0xECD66A10092E6562 is of kind stream"),
+            (_albedo(light=self._light(family="tree-trunk-multi", vertex=[INSTANCE])), "needs a vertex shader of kind probe"),
+            (_albedo(light=self._light(family="plant", vertex=[PROBE])),
+             "light family plant needs a vertex shader of kind instance, and 0x79EAC49585797037 is of kind probe"),
+            (_albedo(light=self._light(family="plant-lit", vertex=[VS])), "light family plant-lit needs a vertex shader of kind instance"),
+            (_albedo(light=self._light(family="plant-lit-multi", vertex=[INSTANCE, TERRAIN])),
+             "light family plant-lit-multi needs a vertex shader of kind instance, and 0xC30A97D946FA2BE4 is of kind terrain"),
+            # a vertex shader the vertex table has no light for: an entry without "light", no entry
+            (_albedo(light=self._light(vertex=[NO_LIGHT])), "light vertex 0x5F4416192E87005F has no light in the vertex table"),
+            (_albedo(light=self._light(vertex=[VS, NO_LIGHT])), "light vertex 0x5F4416192E87005F has no light in the vertex table"),
+            (_albedo(light=self._light(vertex=["0x0000000000000001"])), "light vertex 0x0000000000000001 has no light in the vertex table"),
+            # or a light of a kind this generator does not know (the two generators disagree)
+            (_albedo(light=self._light(vertex=[ODD_KIND])), "needs a vertex shader of kind stream or probe, and 0x00000000000000DD is of kind 'leaf'"),
             # not an object; keys it does not have
             (_albedo(light="object"), "light is not an object"),
             (_albedo(light=["object"]), "light is not an object"),
@@ -498,6 +542,100 @@ class GenAlphaKindTest(unittest.TestCase):
                 self._gen(entry)
             self.assertTrue(str(cm.exception).startswith(self.H + ": "), str(cm.exception))
             self.assertIn(why, str(cm.exception), repr(entry))
+
+    def test_light_needs_the_vertex_table(self):
+        # A table with a "light" is not generated without the vertex table: the pair's check cannot
+        # be left out by leaving the table out. A table without any generates as before.
+        with self.assertRaisesRegex(ValueError, "0x00000000000000AA: light needs the vertex table"):
+            gen_albedo_table.generate({self.H: _albedo(light=self._light())})
+        with self.assertRaisesRegex(ValueError, "0x00000000000000AA: light needs the vertex table"):
+            gen_albedo_table.generate({self.H: _terrain(light=self._light(family="terrain-layer", facing_scale=8))}, None)
+        self.assertEqual(gen_albedo_table.generate({self.H: _albedo()}), gen_albedo_table.generate({self.H: _albedo()}, VERTEX))
+        # The vertex table's keys are shaders by value, whatever the letters' case, as the entry's are.
+        p = "FABLE2_PS_LIGHT_VS(0x00000000000000AAull, 0xECD66A10092E6562ull)"
+        lower = {VS.lower(): VERTEX[VS]}
+        self.assertIn(p, self._gen(_albedo(light=self._light()), lower))
+        self.assertIn(p, self._gen(_albedo(light=self._light(vertex=[VS.lower()]))))
+        # A vertex table that is not one: refused, never read as "no light anywhere".
+        for vertex, why in (([], "the vertex table is not an object"), ("x", "the vertex table is not an object"),
+                            ({"ECD6": {}}, "the vertex table's key 'ECD6' is not 0x and 16 hex digits"),
+                            ({VS: {"light": {"kind": "stream"}}, VS.lower(): {}}, "the vertex table names 0x"),
+                            ({VS: {"light": "stream"}}, "light vertex 0xECD66A10092E6562 has no light in the vertex table"),
+                            ({VS: ["light"]}, "light vertex 0xECD66A10092E6562 has no light in the vertex table"),
+                            ({VS: {"light": {"kind": ["stream"]}}}, "is of kind ['stream']"),
+                            ({VS: {"light": {}}}, "is of kind None")):
+            with self.assertRaises(ValueError, msg=repr(vertex)) as cm:
+                self._gen(_albedo(light=self._light()), vertex)
+            self.assertIn(why, str(cm.exception), repr(vertex))
+
+    def test_main_reads_the_vertex_table_beside_the_albedo_table(self):
+        # main() checks against vs-transforms.json in the folder of --json, or the file --vs-json
+        # names; a pair that fails writes nothing.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "ps.json").write_text(json.dumps({self.H: _albedo(light=self._light())}))
+            out = tmp / "t.inc"
+            with self.assertRaises(FileNotFoundError):          # no vertex table there
+                gen_albedo_table.main(["--json", str(tmp / "ps.json"), "--out", str(out)])
+            self.assertFalse(out.exists())
+            (tmp / "vs-transforms.json").write_text(json.dumps(VERTEX))
+            gen_albedo_table.main(["--json", str(tmp / "ps.json"), "--out", str(out)])
+            self.assertIn("FABLE2_PS_LIGHT_VS(0x00000000000000AAull, 0xECD66A10092E6562ull)", out.read_text())
+            out.unlink()
+            (tmp / "other.json").write_text(json.dumps({VS: {"light": {"kind": "instance"}}}))
+            with self.assertRaisesRegex(ValueError, "0x00000000000000AA: light family object needs a vertex shader"):
+                gen_albedo_table.main(["--json", str(tmp / "ps.json"), "--vs-json", str(tmp / "other.json"), "--out", str(out)])
+            self.assertFalse(out.exists())
+            (tmp / "other.json").write_text(json.dumps({VS: {"layout": "plain"}}))
+            with self.assertRaisesRegex(ValueError, "has no light in the vertex table"):
+                gen_albedo_table.main(["--json", str(tmp / "ps.json"), "--vs-json", str(tmp / "other.json"), "--out", str(out)])
+            self.assertFalse(out.exists())
+            # a vertex table with a key twice is refused as the albedo table is
+            (tmp / "other.json").write_text('{"%s": {"light": {"kind": "stream"}}, "%s": {}}' % (VS, VS))
+            with self.assertRaisesRegex(ValueError, "twice"):
+                gen_albedo_table.main(["--json", str(tmp / "ps.json"), "--vs-json", str(tmp / "other.json"), "--out", str(out)])
+            self.assertFalse(out.exists())
+
+    def test_the_committed_tables_fail_together_when_one_loses_its_side(self):
+        # The two committed files as generation holds them against each other: every pair's vertex
+        # shader has its "light" and is of a kind the family stands on; take one vertex shader's
+        # "light" away, or make it another kind, and the albedo table is not generated.
+        root = Path(__file__).resolve().parent.parent
+        data = gen_albedo_table.load(root / "docs" / "native-renderer" / "ps-albedo.json")
+        vertex = json.loads((root / "docs" / "native-renderer" / "vs-transforms.json").read_text())
+        gen_albedo_table.generate(data, vertex)
+        named = sorted({vs.upper() for e in data.values() if "light" in e for vs in e["light"]["vertex"]})
+        self.assertEqual(len(named), 15)
+        other = {"terrain": "instance", "stream": "instance", "probe": "terrain", "instance": "probe"}
+        for vs in named:
+            key = next(k for k in vertex if k.upper() == vs)
+            without = {k: ({f: v for f, v in e.items() if f != "light"} if k == key else e) for k, e in vertex.items()}
+            with self.assertRaisesRegex(ValueError, "has no light in the vertex table", msg=vs):
+                gen_albedo_table.generate(data, without)
+            gone = {k: e for k, e in vertex.items() if k != key}
+            with self.assertRaisesRegex(ValueError, "has no light in the vertex table", msg=vs):
+                gen_albedo_table.generate(data, gone)
+            kind = vertex[key]["light"]["kind"]
+            wrong = {k: (dict(e, light=dict(e["light"], kind=other[kind])) if k == key else e) for k, e in vertex.items()}
+            with self.assertRaisesRegex(ValueError, "needs a vertex shader of kind", msg=vs):
+                gen_albedo_table.generate(data, wrong)
+
+    def test_generation_does_not_tell_a_family_from_its_multi_form(self):
+        # What generation cannot check (the tool's docstring says so): whether a pair's family is the
+        # one-light form or the "-multi" one. 0x648B... written "object" for "object-multi" generates,
+        # with the same vertex shaders, and would light a lantern's draws as the sun's; it is the test
+        # below, against light_check.FAMILIES, that holds the committed table to the checked label.
+        root = Path(__file__).resolve().parent.parent
+        data = gen_albedo_table.load(root / "docs" / "native-renderer" / "ps-albedo.json")
+        vertex = json.loads((root / "docs" / "native-renderer" / "vs-transforms.json").read_text())
+        ps = "0x648B965C200A5113"
+        self.assertEqual(data[ps]["light"]["family"], "object-multi")
+        data[ps] = dict(data[ps], light=dict(data[ps]["light"], family="object"))
+        out = gen_albedo_table.generate(data, vertex)
+        self.assertIn("FABLE2_PS_LIGHT(0x648B965C200A5113ull, 3, 0, 0.0f)", out)
+        import light_check
+        self.assertNotIn((ps[2:], "ECD66A10092E6562"), light_check.FAMILIES["object"])
+        self.assertIn((ps[2:], "ECD66A10092E6562"), light_check.FAMILIES["object-multi"])
 
     def test_the_committed_light_pairs_are_the_checked_pairs(self):
         # The table's (family, pixel shader, vertex shader) triples are exactly the pairs
@@ -547,9 +685,11 @@ class GenAlphaKindTest(unittest.TestCase):
         # ("slot" is the fetch source's: no committed recipe uses that source)
         self.assertEqual(alpha_used | {"slot"}, set(gen_albedo_table.ALPHA_KEYS))
         self.assertEqual({k for e in data.values() for k in e.get("light", {})}, set(gen_albedo_table.LIGHT_KEYS))
-        # byte for byte (text mode on both sides: main() writes the platform's line ends)
+        # byte for byte (text mode on both sides: main() writes the platform's line ends), held
+        # against the committed vertex table as main() holds it
         inc = root / "src" / "native" / "capture" / "ps_albedo_table.inc"
-        self.assertEqual(inc.read_text(), gen_albedo_table.generate(data))
+        vertex = gen_albedo_table.load(root / "docs" / "native-renderer" / "vs-transforms.json")
+        self.assertEqual(inc.read_text(), gen_albedo_table.generate(data, vertex))
 
 
 if __name__ == "__main__":

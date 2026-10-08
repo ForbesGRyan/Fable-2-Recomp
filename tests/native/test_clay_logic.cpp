@@ -1758,12 +1758,14 @@ int main() {
     l.normal.vb = r.vb;
     l.normal.offset_bytes = 8;
     l.normal.stride_bytes = 20;
-    l.normal.swizzle = 0xE88;
+    l.normal.source = 0x24;  // source x, y, z
+    l.normal.source_count = 3;
     l.normal.format = uint8_t(capture::kVertexFormat_10_11_11);
     l.normal.flags = 11;
     l.second.vb = {0x9000, 400};
     l.second.stride_bytes = 4;
-    l.second.swizzle = 0x60A;
+    l.second.source = 0xC6;  // source z, y, x, w
+    l.second.source_count = 4;
     l.second.format = uint8_t(capture::kVertexFormat_8_8_8_8);
     l.second.flags = 10;
     const GeoKey k = NormalKey(r, l);
@@ -1786,8 +1788,16 @@ int main() {
     a = l;
     a.normal.format = uint8_t(capture::kVertexFormat_16_16_16_16_FLOAT);
     CHECK(356, !(NormalKey(r, a) == k));
+    // The source components the reader takes: another selector is another decode of the same bytes.
+    a = l;
+    a.normal.source = 0x21;  // source y, x, z
+    CHECK(376, !(NormalKey(r, a) == k));
+    a = l;
+    a.normal.source_count = 4;
+    CHECK(377, !(NormalKey(r, a) == k));
     // Nothing of the draw: the mesh's normals are one entry however it is placed, turned, lit or
-    // coloured, and whatever shader fetches them (the swizzle and flags only admit the element).
+    // coloured, and whatever shader fetches them (the flags only admit the element, and where a
+    // shader's fetch puts the components in its register is not in the element).
     a = l;
     a.world_rot[0][0] = 0.5f;
     a.world_rot[1][2] = -0.5f;
@@ -1800,7 +1810,6 @@ int main() {
     a.multi = true;
     a.vs_const[3][2] = 9.0f;
     a.second.vb.phys_addr = 0xA000;
-    a.normal.swizzle = 0x447;
     a.normal.flags = 9;
     capture::DrawRecord moved = r;
     moved.rows[3] = 12.0f;
@@ -1885,6 +1894,12 @@ int main() {
       capture::LightInputs b = a;
       b.second.offset_bytes = 4;  // the same stream and stride, the element elsewhere in the vertex
       CHECK(374, !(ColourKey(b, 80) == ColourKey(a, 80)));
+      b = a;
+      b.second.source = 0xE4;  // the same element taken in memory order: other colours
+      CHECK(378, !(ColourKey(b, 80) == ColourKey(a, 80)));
+      b = a;
+      b.second.source_count = 3;
+      CHECK(379, !(ColourKey(b, 80) == ColourKey(a, 80)));
     }
     // Nothing else of the draw: the normal, the rotation, the power the shader raises it to.
     a = l;

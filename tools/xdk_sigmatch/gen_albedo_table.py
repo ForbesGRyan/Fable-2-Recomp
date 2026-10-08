@@ -1,4 +1,4 @@
-"""ps-albedo.json -> src/native/capture/ps_albedo_table.inc.
+"""ps-albedo.json -> src/native/capture/ps_albedo_table.inc (held against vs-transforms.json).
 
   FABLE2_PS_ALBEDO(hash, slot, u_interp, u_comp, u_s0, u_o0, u_s1, u_o1,
                    v_interp, v_comp, v_s0, v_o0, v_s1, v_o1)
@@ -32,6 +32,20 @@ side reads is that shader's own "light" in vs-transforms.json. "facing_scale": t
 terrain layers' facing factor sat(scale * (N . c109)), which the shader loads itself (no constant
 reader gives it); required for the terrain-layer families, refused for the others (0.0f in the line).
 The LIGHT lines, each followed by its LIGHT_VS lines, come last.
+The two tables are held against each other: this generator reads the vertex table too (--vs-json;
+by default the vs-transforms.json beside --json) and refuses a pair whose vertex shader has no
+"light" there (an entry without one, no entry) and a pair whose vertex shader is of a kind the family
+cannot stand on: the terrain families need a "terrain" vertex shader, object "stream" or "probe",
+tree-trunk "probe", the plants "instance" (_LIGHT_VERTEX_KINDS; capture::LightKindFits in
+material.h is the same rule at the draw, which would give every draw of such a pair no light,
+"vertex-shader"). A table with any "light" is not generated without the vertex table.
+What generation cannot check is the family itself: that a pair is of the family named, and of its
+one-light form or the "-multi" one, is light_check.py's verdict on the two shaders' microcode
+(FAMILIES), which no field of either table repeats. 0x648B965C200A5113 written "object" for
+"object-multi" generates, and its draws under a lantern would be lit as the sun's. What holds the
+committed table to the checked label is tests/test_gen_albedo_table.py,
+test_the_committed_light_pairs_are_the_checked_pairs (the table's triples are FAMILIES', exactly):
+run the Python suite after editing a "light".
 
 An entry is refused (ValueError naming the shader) rather than read loosely: a key is "0x" and 16
 hex digits and names its shader once, whatever the letters' case (load() also refuses a key written
@@ -40,6 +54,9 @@ twice in the file); every entry has "manual": true and a non-empty "evidence", a
 only the keys of its form (ENTRY_KEYS, ALPHA_KEYS, LIGHT_KEYS: the keys the committed table uses),
 so a mistyped key cannot be dropped without a word. A light family the entry's kind cannot have (a
 terrain family on a plain entry and the reverse, a layer family on a far entry) is refused.
+
+usage: gen_albedo_table.py --json docs/native-renderer/ps-albedo.json
+                           --out src/native/capture/ps_albedo_table.inc [--vs-json vs-transforms.json]
 """
 import argparse
 import json
@@ -69,6 +86,11 @@ LIGHT_KEYS = ("family", "vertex", "facing_scale", "evidence")
 LIGHT_FAMILIES = {"terrain-layer": 1, "terrain-far": 2, "object": 3, "tree-trunk": 4, "plant": 5, "plant-lit": 6}
 _LIGHT_KINDS = {"terrain-layer": ("terrain-layer",), "terrain-far": ("terrain-far", "terrain-far-fade")}
 _ONE_LIGHT_ONLY = ("terrain-far",)   # no two- or four-light form of it exists
+# The kinds of vertex shader (vs-transforms.json "light"."kind", gen_transform_table.LIGHT_KINDS) a
+# family can stand on: capture::LightKindFits of material.h, which refuses the others at the draw.
+_VERTEX_KINDS = ("terrain", "stream", "probe", "instance")
+_LIGHT_VERTEX_KINDS = {"terrain-layer": ("terrain",), "terrain-far": ("terrain",), "object": ("stream", "probe"),
+                       "tree-trunk": ("probe",), "plant": ("instance",), "plant-lit": ("instance",)}
 ALPHA_KEYS = ("source", "component", "slot", "scale", "divide_by_alpha")  # "slot" only with source "fetch"
 # The small term of the steep weights is a literal like 0.0001: this much or more is not one. One
 # bound for the table, for terrain_replay.py's reading of a capture (it imports this) and for
@@ -195,8 +217,26 @@ def _steep_fields(ps, e, kind, slots):
     return [str(side), f"{threshold!r}f", f"{epsilon!r}f"]
 
 
-def _light_lines(ps, h, e, kind):
-    """The FABLE2_PS_LIGHT line of an entry's "light" and its FABLE2_PS_LIGHT_VS lines."""
+def _vertex_lights(vertex):
+    """vs-transforms.json as the light pairs are held against it: {shader hash: its "light" object, or
+    None for an entry without one}. Refuses a table that is not an object of shader keys, each once."""
+    if not isinstance(vertex, dict):
+        raise ValueError("the vertex table is not an object")
+    out, spelled = {}, {}
+    for vs, e in vertex.items():
+        if not isinstance(vs, str) or not re.fullmatch(r"0x[0-9A-Fa-f]{16}", vs):
+            raise ValueError(f"the vertex table's key {vs!r} is not 0x and 16 hex digits")
+        if int(vs, 16) in out:
+            raise ValueError(f"the vertex table names {spelled[int(vs, 16)]} and {vs}: the same shader twice")
+        spelled[int(vs, 16)] = vs
+        light = e.get("light") if isinstance(e, dict) else None
+        out[int(vs, 16)] = light if isinstance(light, dict) else None
+    return out
+
+
+def _light_lines(ps, h, e, kind, vertex_lights):
+    """The FABLE2_PS_LIGHT line of an entry's "light" and its FABLE2_PS_LIGHT_VS lines.
+    `vertex_lights`: _vertex_lights of the vertex table, None when no table was given."""
     light = e["light"]
     if not isinstance(light, dict):
         raise ValueError(f"{ps}: light is not an object")
@@ -223,6 +263,20 @@ def _light_lines(ps, h, e, kind):
         if int(vs, 16) in seen:
             raise ValueError(f"{ps}: light vertex {seen[int(vs, 16)]} twice")
         seen[int(vs, 16)] = vs
+    # The pair against the vertex table: the vertex shader has its "light", of a kind the family
+    # stands on.
+    if vertex_lights is None:
+        raise ValueError(f"{ps}: light needs the vertex table (vs-transforms.json) to hold its vertex shaders against")
+    fits = _LIGHT_VERTEX_KINDS[base]
+    for value in sorted(seen):
+        vs_light = vertex_lights.get(value)
+        if vs_light is None:
+            raise ValueError(f"{ps}: light vertex 0x{value:016X} has no light in the vertex table")
+        vs_kind = vs_light.get("kind")
+        if not isinstance(vs_kind, str) or vs_kind not in fits:
+            shown = vs_kind if isinstance(vs_kind, str) and vs_kind in _VERTEX_KINDS else repr(vs_kind)
+            raise ValueError(f"{ps}: light family {name} needs a vertex shader of kind {' or '.join(fits)}, "
+                             f"and 0x{value:016X} is of kind {shown}")
     facing = "0.0f"
     if base == "terrain-layer":
         if "facing_scale" not in light:
@@ -278,8 +332,11 @@ def _check_hashes(data):
         seen[int(ps, 16)] = ps
 
 
-def generate(data):
+def generate(data, vertex=None):
+    """The table's text. `vertex`: vs-transforms.json as loaded, which every "light" is held against
+    (a table with a "light" is refused without it)."""
     _check_hashes(data)
+    vertex_lights = None if vertex is None else _vertex_lights(vertex)
     lines = ["// Generated by tools/xdk_sigmatch/gen_albedo_table.py - do not edit."]
     alpha_lines, terrain_lines, light_lines = [], [], []
     for ps, e in sorted(data.items(), key=lambda kv: int(kv[0], 16)):
@@ -295,7 +352,7 @@ def generate(data):
             _check_entry(ps, e, "terrain")
             terrain_lines.append(f"FABLE2_PS_TERRAIN({h}, {_KINDS[kind]}, {base}, {detail}, {', '.join(steep)})")
             if "light" in e:
-                light_lines += _light_lines(ps, h, e, kind)
+                light_lines += _light_lines(ps, h, e, kind, vertex_lights)
             continue
         if any(k in e for k in _TERRAIN_SLOTS + ("steep",)):
             raise ValueError(f"{ps}: base_slot, detail_slot and steep belong to a terrain kind")
@@ -324,7 +381,7 @@ def generate(data):
         if "alpha" in e:
             alpha_lines.append(f"FABLE2_PS_ALPHA({h}, {', '.join(str(f) for f in _alpha_fields(ps, e))})")
         if "light" in e:
-            light_lines += _light_lines(ps, h, e, kind)
+            light_lines += _light_lines(ps, h, e, kind, vertex_lights)
     return "\n".join(lines + alpha_lines + terrain_lines + light_lines) + "\n"
 
 
@@ -347,8 +404,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--json", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--vs-json", help="the vertex table the light pairs are held against "
+                                      "(default: vs-transforms.json in the folder of --json)")
     a = ap.parse_args(argv)
-    Path(a.out).write_text(generate(load(a.json)))
+    data = load(a.json)
+    vertex = load(a.vs_json if a.vs_json else Path(a.json).parent / "vs-transforms.json")
+    Path(a.out).write_text(generate(data, vertex))
 
 
 if __name__ == "__main__":

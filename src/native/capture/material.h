@@ -305,11 +305,15 @@ struct PsLightPair {
 
 // A vertex fetch a light entry names: its index in DecodeVertexFetches order with the Xenos format
 // and the offset in dwords the table's author saw; a mismatch at run time rejects the entry.
-// fetch -1: none.
+// fetch -1: none. `source`: the element's source components in the order the light's formula reads
+// them (vs-transforms.json "light": "source"), as gen_transform_table.py's source_code writes them:
+// two bits a component (0 to 3: x to w of the GPU's fetch) from bit 0, their number in the bits
+// above (0x324 = x, y, z; 0x331 = y, x, w; 0x4C6 = z, y, x, w). LightSource reads it.
 struct LightFetchSpec {
   int8_t fetch;
   uint8_t format;
   uint8_t offset_dwords;
+  uint16_t source;
 };
 // vs-transforms.json "light". `second`: the colour stream (kStream), the probe weights (kProbe) or
 // the instance colour (kInstance). a0_comp: the source component of the position fetch that holds
@@ -344,8 +348,56 @@ inline bool IsLightNormalFormat(uint32_t xenos_format) {
   return xenos_format == kVertexFormat_10_11_11 || xenos_format == kVertexFormat_16_16_16_16_FLOAT;
 }
 
+// The source components a format's element has (x on, of the GPU's fetch): 0 for no element of the light.
+inline uint32_t LightFormatComponents(uint32_t xenos_format) {
+  switch (xenos_format) {
+    case kVertexFormat_10_11_11: return 3;
+    case kVertexFormat_8_8_8_8:
+    case kVertexFormat_16_16_16_16_FLOAT:
+    case kVertexFormat_32_32_32_32_FLOAT: return 4;
+    default: return 0;
+  }
+}
+
+// Bit c: a fetch with this destination swizzle writes source component c somewhere into its
+// register (3 bits a register component: 0 to 3 source x to w, 4 zero, 5 one, 7 not written).
+inline uint32_t FetchedComponents(uint32_t dst_swizzle) {
+  uint32_t mask = 0;
+  for (int c = 0; c < 4; ++c) {
+    const uint32_t sel = (dst_swizzle >> (3 * c)) & 7u;
+    if (sel < 4) mask |= 1u << sel;
+  }
+  return mask;
+}
+
+// The selector of an element as LightElement holds it, from a table entry's `spec`
+// (LightFetchSpec::source) and the fetch it names. False, with `*source` untouched, unless the entry
+// names exactly `count` components (a normal's three, a colour's three or four, the four weights),
+// each a component the fetch's format has, none twice, and the fetch delivers each of them to the
+// shader: a component the shader never receives is one it cannot be using, so the entry is not
+// this shader's element (a shader that fetches two components of a normal and derives the third
+// has another normal than the stored one).
+// Where the fetch puts a component in its register is not asked: that is the destination swizzle,
+// which differs between shaders that use one element in one way (the 10_11_11 normal is fetched
+// xyz_ and _xyz, the plants' halves yxwz and yzxw, the weights xyzw and wzxy) and says nothing a
+// reader of the stream needs.
+inline bool LightSource(uint32_t spec, uint32_t count, const VertexFetch& f, uint8_t* source) {
+  const uint32_t components = LightFormatComponents(f.format);
+  if (components == 0 || count < 3 || count > 4 || (spec >> 8) != count) return false;
+  if (count == 3 && ((spec >> 6) & 3u) != 0) return false;  // (no bits past the components named)
+  const uint32_t fetched = FetchedComponents(f.dst_swizzle);
+  uint32_t seen = 0;
+  for (uint32_t i = 0; i < count; ++i) {
+    const uint32_t c = (spec >> (2 * i)) & 3u;
+    if (c >= components || ((seen >> c) & 1u) || !((fetched >> c) & 1u)) return false;
+    seen |= 1u << c;
+  }
+  *source = uint8_t(spec & 0xFFu);
+  return true;
+}
+
 // One vertex element as a later reader needs it: the stream from its bound offset, where the
-// element lies in a vertex, and how the fetch reads it.
+// element lies in a vertex, how the fetch reads it, and which of its components the reader takes.
 inline constexpr uint8_t kLightElementSigned = 1;
 inline constexpr uint8_t kLightElementNormalized = 2;
 inline constexpr uint8_t kLightElementEndianShift = 2;  // bits 2-3: the stream's endian (0 none, 1 8in16, 2 8in32, 3 16in32)
@@ -353,11 +405,20 @@ struct LightElement {
   BufferRef vb;
   uint16_t offset_bytes = 0;
   uint16_t stride_bytes = 0;
-  uint16_t swizzle = 0;  // the fetch's destination swizzle
+  // The element's SOURCE components (0 to 3: x to w of the GPU's fetch, before the fetch's
+  // destination swizzle) in the order a reader takes them, two bits each from bit 0, and how many
+  // there are (3 or 4): the table's (LightSource). A normal: its x, y, z. The colour stream: red,
+  // green, blue, alpha. An instance's colour: red, green, blue. The probe weights: the four, in the
+  // order of the probe constants' components. The fetch's destination swizzle is not kept: it is
+  // not what a reader needs (the discovery row's "fetches" has it).
+  uint8_t source = 0;
+  uint8_t source_count = 0;
   uint8_t format = 0;    // Xenos vertex format
   uint8_t flags = 0;     // kLightElementSigned, kLightElementNormalized, the endian
 };
 static_assert(sizeof(LightElement) == 16);
+// Source component i of the element's selector (i < source_count).
+inline uint32_t LightSourceComponent(const LightElement& e, uint32_t i) { return (uint32_t(e.source) >> (2 * i)) & 3u; }
 
 // The registers the light of a draw reads besides the frame's block (lighting-formulas.md, per
 // family). Vertex constants, from the device's vertex bank (none is a register a buffer load can
@@ -473,9 +534,11 @@ inline const VertexFetch* LightFetch(const std::vector<VertexFetch>& fetches, co
   return &f;
 }
 
-// The element of a fetch in its stream. False when the element does not lie inside one vertex of
-// the fetch's stride, or the stream is not resolved or holds no whole vertex.
-inline bool MakeLightElement(const VertexFetch& f, const LightStream& stream, LightElement* out) {
+// The element of a fetch in its stream, read through `source` (`count` components: LightSource).
+// False when the element does not lie inside one vertex of the fetch's stride, or the stream is
+// not resolved or holds no whole vertex.
+inline bool MakeLightElement(const VertexFetch& f, uint8_t source, uint32_t count, const LightStream& stream,
+                             LightElement* out) {
   const uint32_t bytes = LightElementBytes(f.format);
   if (bytes == 0 || f.offset_dwords < 0 || f.stride_dwords == 0 || f.stride_dwords > 255) return false;
   const uint32_t offset = uint32_t(f.offset_dwords) * 4, stride = f.stride_dwords * 4;
@@ -484,7 +547,8 @@ inline bool MakeLightElement(const VertexFetch& f, const LightStream& stream, Li
   out->vb = stream.vb;
   out->offset_bytes = uint16_t(offset);
   out->stride_bytes = uint16_t(stride);
-  out->swizzle = uint16_t(f.dst_swizzle & 0xFFF);
+  out->source = source;
+  out->source_count = uint8_t(count);
   out->format = uint8_t(f.format);
   out->flags = uint8_t((f.is_signed ? kLightElementSigned : 0) | (f.normalized ? kLightElementNormalized : 0) |
                        (stream.endian << kLightElementEndianShift));
@@ -512,9 +576,16 @@ inline constexpr float kMaxLightColourFirst = 16777215.0f;
 
 // The light inputs of a draw. On kNone `*out` is complete; otherwise `*out` is left default (no
 // family) and the draw has no light. `why` (optional) receives a short word for the discovery rows.
-// Fails closed: every register it copies was read and is finite, every element is the table's and
-// lies in its stream, and the two streams the position's range check does not cover (the colour
-// stream, read at an offset, and the probe weights) hold the draw's largest vertex.
+// Fails closed: every register it copies was read and is finite, every element is the table's, is
+// read through the table's source components and lies in its stream, and the two streams the
+// position's range check does not cover (the colour stream, read at an offset, and the probe
+// weights) hold the draw's largest vertex.
+// What the world rotation is (a rotation, mirrored, skewed, without a direction) is not asked here:
+// that is ClassifyRotation of render/normal_decode.h, which the clay pass runs on world_rot and
+// world_scale when it prepares the draw and counts per kind and per vertex shader (ClayStats::
+// light_rotation). The capture's only question is whether the nine values and the scale are
+// numbers: a draw refused here for its rotation would be counted in two places, and a mirrored or
+// skewed rotation is still a light the pass draws (RotateNormal).
 inline LightReason MakeLightInputs(const LightDraw& d, LightInputs* out, const char** why = nullptr) {
   *out = LightInputs{};
   const char* unused = nullptr;
@@ -589,7 +660,10 @@ inline LightReason MakeLightInputs(const LightDraw& d, LightInputs* out, const c
       uint32_t(nf->offset_dwords) * 4 + normal_bytes > nf->stride_dwords * 4) {
     return fail(LightReason::kNormalUnsupported, "normal-fetch");
   }
-  if (!MakeLightElement(*nf, d.normal_stream, &l.normal)) return fail(LightReason::kLightUnknown, "normal-stream");
+  // Its x, y, z are the three source components the entry names, and the shader gets all three.
+  uint8_t source = 0;
+  if (!LightSource(vs.normal.source, 3, *nf, &source)) return fail(LightReason::kNormalUnsupported, "normal-source");
+  if (!MakeLightElement(*nf, source, 3, d.normal_stream, &l.normal)) return fail(LightReason::kLightUnknown, "normal-stream");
   const bool instance = vs.kind == LightVertexKind::kInstance;
   if (instance != d.instanced) return fail(LightReason::kLightUnknown, "instance-set");
   if (!instance) {
@@ -599,10 +673,18 @@ inline LightReason MakeLightInputs(const LightDraw& d, LightInputs* out, const c
     }
   }
   // The second element: the colour stream, the probe weights or the instance colour.
+  // The colour stream's red, green, blue and alpha; the four weights; an instance colour's red,
+  // green and blue (its fourth byte is not the light's: the fetches leave it out).
   const VertexFetch* sf = LightFetch(*d.fetches, vs.second);
-  const uint32_t want = vs.kind == LightVertexKind::kProbe ? kVertexFormat_32_32_32_32_FLOAT : kVertexFormat_8_8_8_8;
-  if (!sf || sf->format != want || !MakeLightElement(*sf, d.second_stream, &l.second)) {
-    return fail(LightReason::kLightUnknown, vs.kind == LightVertexKind::kProbe ? "weights" : "colour");
+  const bool probe = vs.kind == LightVertexKind::kProbe;
+  const uint32_t want = probe ? kVertexFormat_32_32_32_32_FLOAT : kVertexFormat_8_8_8_8;
+  const uint32_t second_count = instance ? 3 : 4;
+  if (!sf || sf->format != want) return fail(LightReason::kLightUnknown, probe ? "weights" : "colour");
+  if (!LightSource(vs.second.source, second_count, *sf, &source)) {
+    return fail(LightReason::kLightUnknown, probe ? "weights-source" : "colour-source");
+  }
+  if (!MakeLightElement(*sf, source, second_count, d.second_stream, &l.second)) {
+    return fail(LightReason::kLightUnknown, probe ? "weights" : "colour");
   }
   if (vs.kind == LightVertexKind::kStream) {
     // The colour is read at the vertex index plus c20.x: a whole number, and the draw's largest

@@ -48,6 +48,8 @@ struct LightBlock {
   float light_mix[4];   // c94
   bool valid;
 };
+// 39 floats and the flag: one is copied into each frame's scene (FrameScene::light).
+static_assert(sizeof(LightBlock) == 160, "LightBlock grew or shrank: the documents state its size");
 
 // The registers MakeLightBlock reads, and those of them that belong to the
 // light set (c80..c115, loaded from a constant buffer per group of draws).
@@ -335,7 +337,14 @@ class ConstantLoads {
   // The source of `reg` as a pass with this bin select sees it: the bank for a
   // register no load names, in any state of the model; for a load register the
   // last upload the pass executed, unknown while the model is not whole.
-  ConstantSource FindForBins(uint32_t reg, uint32_t bin_select) const {
+  // `upload` (optional) receives the order number of that upload: one number
+  // per followed upload of this model (a load, the bank's upload of a group),
+  // never 0, so that two answers with one number are one upload and a register
+  // loaded again, from the same buffer too, has another. 0 where no followed
+  // upload decides the register: one no load names, one out of range, a model
+  // that is not whole, a load register nothing was uploaded to yet.
+  ConstantSource FindForBins(uint32_t reg, uint32_t bin_select, uint64_t* upload = nullptr) const {
+    if (upload) *upload = 0;
     if (reg >= kRegisters) return Unknown();
     if (!IsLoadRegister(reg)) return ConstantSource{};
     if (!whole_) return Unknown();
@@ -348,20 +357,23 @@ class ConstantLoads {
       seq = b.seq;
       from = ConstantSource{ConstantSource::Kind::kMemory, b.object, b.first + (reg - b.start), b.scene};
     }
+    if (upload && from.kind != ConstantSource::Kind::kUnknown) *upload = seq;
     return from;
   }
 
   // The source of `reg` for a draw record: what the first colour tile sees
   // (the lowest colour bin any tile load of the register names; xdk_layout.h
-  // kColourBins). A load for pre-pass bins alone never decides it.
-  ConstantSource Find(uint32_t reg) const {
+  // kColourBins). A load for pre-pass bins alone never decides it. `upload`:
+  // as FindForBins.
+  ConstantSource Find(uint32_t reg, uint64_t* upload = nullptr) const {
+    if (upload) *upload = 0;
     if (reg >= kRegisters) return Unknown();
     uint32_t bins = 0;
     for (uint32_t i = 0; i < binned_count_; ++i) {
       const Binned& b = binned_[i];
       if (reg >= b.start && reg - b.start < b.count) bins |= b.mask & xdk::kColourBins;
     }
-    return FindForBins(reg, bins & (0u - bins));
+    return FindForBins(reg, bins & (0u - bins), upload);
   }
 
   // The tile loads, oldest first, and whether one still decides `reg` in the
@@ -445,6 +457,64 @@ class ConstantLoads {
   bool skip_pending_ = false;  // an upload was skipped since the last observation
   uint64_t load_register_[kRegisters / 64] = {};  // bit r: a load can name register r
   uint32_t untabled_loads_ = 0;
+};
+
+// Which reads of the frame's light block the capture makes (capture.cpp,
+// RecordDraw). A read is costly (eleven ReadPixelConstant calls) and its
+// result depends on the light set in force, which the game loads once per
+// group of draws (57 to 59 loads of pixel c80..c115 in a main scene of the two
+// places captured: frame-map section 14, "Light inputs"). So a set that gave
+// no block (a lantern's, a set without a sun) is not read again at the draws
+// that follow under it: the next read is at the first draw under another
+// upload of the set. A read can also fail for a register that is not the
+// set's (one of c0, c19..c23 not read or out of range); that is not told
+// apart, and such a frame gets its block one set later, a few draws on.
+// `set` is that upload's order number
+// (ConstantLoads::Find(c80, &set) where the set was loaded in this scene; 0
+// where it was not, and then nothing is read).
+// At most kMaxSets sets are read in a frame without a block: what a frame with
+// no sun at all costs, eight reads of eleven registers, as much as the reads
+// cost before this rule (when they were counted per draw and one set without a
+// sun could take all eight). Once a read gives a block the frame has it and
+// nothing more is read. One per guest thread, as the load model is whose
+// numbers it holds; `frame` is any number that changes with the frame.
+class LightBlockTries {
+ public:
+  static constexpr uint32_t kMaxSets = 8;
+
+  // Whether the frame still wants a block: none yet and fewer than kMaxSets
+  // sets read for it. A `frame` other than the last one's begins anew.
+  constexpr bool Open(uint32_t frame) {
+    if (frame != frame_) {
+      frame_ = frame;
+      last_failed_ = 0;
+      failed_ = 0;
+      done_ = false;
+    }
+    return !done_ && failed_ < kMaxSets;
+  }
+  // Whether to read the block at a draw under `set` (call after Open said
+  // yes): there is a set, and it is not the one the last read without a block
+  // was made under. Only that one is held: a set is another upload each time
+  // it is loaded, so an earlier number does not come again.
+  constexpr bool ShouldTry(uint64_t set) const { return !done_ && failed_ < kMaxSets && set != 0 && set != last_failed_; }
+  // A read was made under `set`; `valid`: it gave the frame's block.
+  constexpr void Tried(uint64_t set, bool valid) {
+    if (valid) {
+      done_ = true;
+    } else if (failed_ < kMaxSets) {
+      last_failed_ = set;
+      ++failed_;
+    }
+  }
+  // Sets read without a block in the frame (at most kMaxSets).
+  constexpr uint32_t failed() const { return failed_; }
+
+ private:
+  uint64_t last_failed_ = 0;
+  uint32_t frame_ = 0;
+  uint32_t failed_ = 0;
+  bool done_ = false;
 };
 
 // --- the hooks' pure parts ---------------------------------------------------

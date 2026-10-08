@@ -40,7 +40,8 @@ struct FrameScene {
   // a frame without records, a frame the view was switched on in after its
   // scene began, a scene without a sun. A consumer then draws the frame
   // without light ("light-block") and never with another frame's block.
-  // light_tries: how many reads were made that gave no block.
+  // light_tries: how many reads were made that gave no block, one per light
+  // set at most and eight a frame at most (light_block.h, LightBlockTries).
   capture::LightBlock light{};
   uint32_t light_tries = 0;
   // The drawable records with light inputs by family (index: LightFamily), how
@@ -219,7 +220,8 @@ class FrameBuilder {
   }
 
   // The frame's light block: the first valid one offered inside the scene is
-  // kept (FrameScene::light). CountLightTry: a read that gave none.
+  // kept (FrameScene::light). CountLightTry: a read that gave none (the
+  // capture makes one per light set: light_block.h, LightBlockTries).
   void SetLight(const capture::LightBlock& block) {
     if (open_ && block.valid && !light_.valid) light_ = block;
   }

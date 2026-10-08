@@ -58,39 +58,115 @@ static void PutHalf4(uint8_t* p, float a, float b, float c, float d) {
   PutBe16(p, Half(a)); PutBe16(p + 2, Half(b)); PutBe16(p + 4, Half(c)); PutBe16(p + 6, Half(d));
 }
 
+// A selector as LightElement holds it: the source components (0 to 3) in the reader's order.
+static void SetSource(capture::LightElement& e, const std::vector<int>& comps) {
+  e.source = 0;
+  e.source_count = uint8_t(comps.size());
+  int i = 0;
+  for (int c : comps) e.source = uint8_t(e.source | (c << (2 * i++)));
+}
+
 // The normal elements of the captured draws (frame-map section 14, "Light inputs"): 10_11_11 at
-// byte 8 of a 20-byte vertex, signed, normalised, endian 8in32, fetched xyz_ (0xECD6...).
+// byte 8 of a 20-byte vertex, signed, normalised, endian 8in32, source x, y, z (the table's "xyz").
 static capture::LightElement Element10(uint32_t size, uint16_t stride = 20, uint16_t offset = 8) {
   capture::LightElement e;
   e.vb = {0x1000, size};
   e.offset_bytes = offset;
   e.stride_bytes = stride;
-  e.swizzle = 0xE88;
+  SetSource(e, {0, 1, 2});
   e.format = uint8_t(capture::kVertexFormat_10_11_11);
   e.flags = uint8_t(capture::kLightElementSigned | capture::kLightElementNormalized | (2u << capture::kLightElementEndianShift));
   return e;
 }
-// 16_16_16_16_FLOAT at byte 8 of the 24-byte mesh vertex of an instanced plant, fetched yxwz.
+// 16_16_16_16_FLOAT at byte 8 of the 24-byte mesh vertex of an instanced plant, source y, x, w
+// (the table's "yxw": the first three halves in memory).
 static capture::LightElement ElementHalf(uint32_t size) {
   capture::LightElement e;
   e.vb = {0x2000, size};
   e.offset_bytes = 8;
   e.stride_bytes = 24;
-  e.swizzle = 0x4C1;
+  SetSource(e, {1, 0, 3});
   e.format = uint8_t(capture::kVertexFormat_16_16_16_16_FLOAT);
   e.flags = uint8_t(capture::kLightElementSigned | (2u << capture::kLightElementEndianShift));
   return e;
 }
-// The colour stream of 0xECD6...: 8_8_8_8 in a stream of its own, 4 bytes an element, fetched zyxw.
+// The colour stream of 0xECD6...: 8_8_8_8 in a stream of its own, 4 bytes an element, source z, y,
+// x, w (the table's "zyxw").
 static capture::LightElement ElementColour(uint32_t size) {
   capture::LightElement e;
   e.vb = {0x3000, size};
   e.offset_bytes = 0;
   e.stride_bytes = 4;
-  e.swizzle = 0x60A;
+  SetSource(e, {2, 1, 0, 3});
   e.format = uint8_t(capture::kVertexFormat_8_8_8_8);
   e.flags = uint8_t(capture::kLightElementNormalized | (2u << capture::kLightElementEndianShift));
   return e;
+}
+
+// One normal of an element of `format` as the table's entries of that format select it.
+static bool NormalOfFormat(uint32_t format, const uint8_t* p, size_t avail, float n[3]) {
+  capture::LightElement e = format == capture::kVertexFormat_16_16_16_16_FLOAT ? ElementHalf(24) : Element10(20);
+  e.format = uint8_t(format);
+  return DecodeNormal(e, p, avail, n);
+}
+
+// The light entries of the committed table (vs-transforms.json "light", as the capture reads them).
+static const capture::VsLightSpec kVsLight[] = {
+#define FABLE2_VS_TRANSFORM(H, B, L, P, D)
+#define FABLE2_VS_POS_SWIZZLE(H, S)
+#define FABLE2_VS_SKIN(H, I, W, R0, R1, R2, S0, S1, S2, N, IC0, WC0, IC1, WC1, IC2, WC2, IC3, WC3)
+#define FABLE2_VS_INSTANCE(H, R0, R1, R2, S0, S1, S2, INV, CNT, FIRST, BIAS, OFF, CE, CD)
+#define FABLE2_VS_TERRAIN(H, G, CE, HS, O, TO, TS, PO, F)
+#define FABLE2_VS_UV(H, I, C, F, S, FM, O, S0, O0, S1, O1)
+#define FABLE2_VS_LIGHT(H, K, NF, NM, NO, NS, SF, SM, SO, SS, A0, SC, PW)                                    \
+  {H, capture::LightVertexKind(K), {int8_t(NF), uint8_t(NM), uint8_t(NO), uint16_t(NS)},                       \
+   {int8_t(SF), uint8_t(SM), uint8_t(SO), uint16_t(SS)}, int8_t(A0), SC, PW},
+#include "../../src/native/capture/vs_transform_table.inc"
+#undef FABLE2_VS_TRANSFORM
+#undef FABLE2_VS_POS_SWIZZLE
+#undef FABLE2_VS_SKIN
+#undef FABLE2_VS_INSTANCE
+#undef FABLE2_VS_TERRAIN
+#undef FABLE2_VS_UV
+#undef FABLE2_VS_LIGHT
+};
+static const capture::VsLightSpec* VsLight(uint64_t hash) {
+  for (const capture::VsLightSpec& v : kVsLight) {
+    if (v.vs_hash == hash) return &v;
+  }
+  return nullptr;
+}
+
+// One element of a real draw: the shader's fetch as the capture row lists it ("fetches": fmt, off
+// and stride in dwords, swz, signed, norm; the stream's endian is 2 in all), the element's bytes
+// in the dumped stream, and what the formulas take from it (lighting-formulas.md).
+struct RealElement {
+  uint64_t vs;
+  bool second;      // the entry's second element (colour or weights); else its normal
+  int fetch;        // the fetch's ordinal in the row
+  uint32_t format, offset, stride, swizzle;
+  bool is_signed, normalized;
+  uint32_t count;   // components the reader takes
+  uint8_t bytes[16];
+  float want[4];
+};
+// Through the table's entry and the capture's own functions: the element as the capture would
+// record it, or false when the entry does not fit the fetch.
+static bool RealElementOf(const RealElement& r, capture::LightElement* e) {
+  const capture::VsLightSpec* vs = VsLight(r.vs);
+  if (!vs) return false;
+  const capture::LightFetchSpec& spec = r.second ? vs->second : vs->normal;
+  if (spec.fetch != r.fetch || spec.format != r.format || spec.offset_dwords != r.offset) return false;
+  capture::VertexFetch f;
+  f.format = r.format;
+  f.offset_dwords = int32_t(r.offset);
+  f.stride_dwords = r.stride;
+  f.dst_swizzle = r.swizzle;
+  f.is_signed = r.is_signed;
+  f.normalized = r.normalized;
+  uint8_t source = 0;
+  if (!capture::LightSource(spec.source, r.count, f, &source)) return false;
+  return capture::MakeLightElement(f, source, r.count, {true, {0x1000, r.stride * 4}, 2}, e);
 }
 
 static capture::PosLayout HalfRow(uint32_t offset, uint32_t stride) {
@@ -151,7 +227,16 @@ static double RealBundle(const std::string& path) {
   e.format = uint8_t(u32());
   e.offset_bytes = uint16_t(u32());
   e.stride_bytes = uint16_t(u32());
-  e.swizzle = uint16_t(u32());
+  // The bundle holds the fetch's destination swizzle (the capture row's, of the time the element
+  // carried it). The selector is the table's for the element's format, "xyz" or "yxw" (every
+  // committed entry of a format names the same: the table's rows below), admitted as the capture
+  // admits it: the fetch delivers the three components.
+  capture::VertexFetch fetch;
+  fetch.format = e.format;
+  fetch.dst_swizzle = u32();
+  const uint32_t spec = e.format == capture::kVertexFormat_16_16_16_16_FLOAT ? 0x331u : 0x324u;
+  if (!capture::LightSource(spec, 3, fetch, &e.source)) return -11.0;
+  e.source_count = 3;
   e.flags = uint8_t(u32());
   const uint32_t vb_size = u32(), nb_size = u32(), aux_size = u32();
   capture::BoneSkin skin;
@@ -263,47 +348,47 @@ int main() {
     uint8_t w[4];
     float n[3];
     PutBe32(w, Pack(1023, 0, 0));  // +x: the positive maximum of an 11-bit field
-    CHECK(1, DecodeNormal(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, 1, 0, 0));
+    CHECK(1, NormalOfFormat(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, 1, 0, 0));
     PutBe32(w, Pack(0, -1023, 0));  // -y
-    CHECK(2, DecodeNormal(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, 0, -1, 0));
+    CHECK(2, NormalOfFormat(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, 0, -1, 0));
     PutBe32(w, Pack(0, 0, 511));  // +z: the positive maximum of the 10-bit field
-    CHECK(3, DecodeNormal(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, 0, 0, 1));
+    CHECK(3, NormalOfFormat(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, 0, 0, 1));
     // The fields are told apart by their place: x in the low bits, z in the high ones.
     PutBe32(w, 0x000003FFu);
-    CHECK(4, DecodeNormal(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, 1, 0, 0));
+    CHECK(4, NormalOfFormat(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, 1, 0, 0));
     PutBe32(w, 0x7FC00000u);
-    CHECK(5, DecodeNormal(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, 0, 0, 1));
+    CHECK(5, NormalOfFormat(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, 0, 0, 1));
     PutBe32(w, 0x001FF800u);
-    CHECK(6, DecodeNormal(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, 0, 1, 0));
+    CHECK(6, NormalOfFormat(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, 0, 1, 0));
     // A diagonal: (600 / 1023, -400 / 1023, 300 / 511), normalised. The fields have different
     // maxima, so each is divided by its own.
     {
       PutBe32(w, Pack(600, -400, 300));
       const float x = 600.0f / 1023.0f, y = -400.0f / 1023.0f, z = 300.0f / 511.0f;
       const float len = std::sqrt(x * x + y * y + z * z);
-      CHECK(7, DecodeNormal(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, x / len, y / len, z / len));
+      CHECK(7, NormalOfFormat(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, x / len, y / len, z / len));
       CHECK(8, Near(n[0] * n[0] + n[1] * n[1] + n[2] * n[2], 1.0f));
     }
     // The most negative code is -1, as the code one above it (the SDK's max(-1, v / maximum)).
     PutBe32(w, Pack(-1024, 0, 0));
-    CHECK(9, DecodeNormal(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, -1, 0, 0));
+    CHECK(9, NormalOfFormat(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, -1, 0, 0));
     PutBe32(w, Pack(-1024, 0, -512));
-    CHECK(10, DecodeNormal(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, -std::sqrt(0.5f), 0, -std::sqrt(0.5f)));
+    CHECK(10, NormalOfFormat(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, -std::sqrt(0.5f), 0, -std::sqrt(0.5f)));
     PutBe32(w, Pack(-1024, 0, -511));  // z = -1 exactly here too: both -1
-    CHECK(11, DecodeNormal(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, -std::sqrt(0.5f), 0, -std::sqrt(0.5f)));
+    CHECK(11, NormalOfFormat(capture::kVertexFormat_10_11_11, w, 4, n) && Near3(n, -std::sqrt(0.5f), 0, -std::sqrt(0.5f)));
     // Nothing from a zero vector, short data, no data, another format.
     PutBe32(w, 0);
     n[0] = n[1] = n[2] = 7.0f;
-    CHECK(12, !DecodeNormal(capture::kVertexFormat_10_11_11, w, 4, n));
+    CHECK(12, !NormalOfFormat(capture::kVertexFormat_10_11_11, w, 4, n));
     PutBe32(w, Pack(1023, 0, 0));
-    CHECK(13, !DecodeNormal(capture::kVertexFormat_10_11_11, w, 3, n));
-    CHECK(14, !DecodeNormal(capture::kVertexFormat_10_11_11, nullptr, 4, n));
-    CHECK(15, !DecodeNormal(0, w, 4, n));
-    CHECK(16, !DecodeNormal(17, w, 4, n));  // k_11_11_10: another split of the bits
-    CHECK(17, !DecodeNormal(capture::kVertexFormat_8_8_8_8, w, 4, n) && !DecodeNormal(capture::kVertexFormat_32_32_32_32_FLOAT, w, 4, n));
+    CHECK(13, !NormalOfFormat(capture::kVertexFormat_10_11_11, w, 3, n));
+    CHECK(14, !NormalOfFormat(capture::kVertexFormat_10_11_11, nullptr, 4, n));
+    CHECK(15, !NormalOfFormat(0, w, 4, n));
+    CHECK(16, !NormalOfFormat(17, w, 4, n));  // k_11_11_10: another split of the bits
+    CHECK(17, !NormalOfFormat(capture::kVertexFormat_8_8_8_8, w, 4, n) && !NormalOfFormat(capture::kVertexFormat_32_32_32_32_FLOAT, w, 4, n));
     // The bytes are the guest's: big-endian. The same bytes read the other way round are another normal.
     const uint8_t be[4] = {0x00, 0x00, 0x03, 0xFF};
-    CHECK(18, DecodeNormal(capture::kVertexFormat_10_11_11, be, 4, n) && Near3(n, 1, 0, 0));
+    CHECK(18, NormalOfFormat(capture::kVertexFormat_10_11_11, be, 4, n) && Near3(n, 1, 0, 0));
   }
 
   // --- DecodeNormal: the half-float element of the instanced meshes (memory order x, y, z, unused) ---
@@ -311,20 +396,20 @@ int main() {
     uint8_t h[8];
     float n[3];
     PutHalf4(h, 0.0f, 0.0f, 2.0f, 9.0f);  // not unit length: normalised; the fourth half is not the normal's
-    CHECK(20, DecodeNormal(capture::kVertexFormat_16_16_16_16_FLOAT, h, 8, n) && Near3(n, 0, 0, 1));
+    CHECK(20, NormalOfFormat(capture::kVertexFormat_16_16_16_16_FLOAT, h, 8, n) && Near3(n, 0, 0, 1));
     PutHalf4(h, 3.0f, -4.0f, 0.0f, 0.0f);
-    CHECK(21, DecodeNormal(capture::kVertexFormat_16_16_16_16_FLOAT, h, 8, n) && Near3(n, 0.6f, -0.8f, 0));
-    CHECK(22, !DecodeNormal(capture::kVertexFormat_16_16_16_16_FLOAT, h, 7, n));
+    CHECK(21, NormalOfFormat(capture::kVertexFormat_16_16_16_16_FLOAT, h, 8, n) && Near3(n, 0.6f, -0.8f, 0));
+    CHECK(22, !NormalOfFormat(capture::kVertexFormat_16_16_16_16_FLOAT, h, 7, n));
     PutHalf4(h, 0.0f, 0.0f, 0.0f, 1.0f);
-    CHECK(23, !DecodeNormal(capture::kVertexFormat_16_16_16_16_FLOAT, h, 8, n));
+    CHECK(23, !NormalOfFormat(capture::kVertexFormat_16_16_16_16_FLOAT, h, 8, n));
     PutBe16(h, 0x7C00);  // infinity: no direction
-    CHECK(24, !DecodeNormal(capture::kVertexFormat_16_16_16_16_FLOAT, h, 8, n));
+    CHECK(24, !NormalOfFormat(capture::kVertexFormat_16_16_16_16_FLOAT, h, 8, n));
     PutHalf4(h, 1.0f, 0.0f, 0.0f, 0.0f);
     PutBe16(h + 2, 0x7E00);  // a NaN
-    CHECK(25, !DecodeNormal(capture::kVertexFormat_16_16_16_16_FLOAT, h, 8, n));
+    CHECK(25, !NormalOfFormat(capture::kVertexFormat_16_16_16_16_FLOAT, h, 8, n));
   }
 
-  // --- Which source components are a normal: one place, by the element's format ---
+  // --- Which source components are a normal, by the element's format: what a selector is held against ---
   {
     uint8_t c[3] = {9, 9, 9};
     CHECK(26, NormalSourceComponents(capture::kVertexFormat_10_11_11, c) && c[0] == 0 && c[1] == 1 && c[2] == 2);
@@ -339,7 +424,7 @@ int main() {
     float n[3];
     PutHalf4(h, 1.0f, 2.0f, 4.0f, 8.0f);
     const float len = std::sqrt(21.0f);
-    CHECK(29, DecodeNormal(capture::kVertexFormat_16_16_16_16_FLOAT, h, 8, n) && Near3(n, 1 / len, 2 / len, 4 / len));
+    CHECK(29, NormalOfFormat(capture::kVertexFormat_16_16_16_16_FLOAT, h, 8, n) && Near3(n, 1 / len, 2 / len, 4 / len));
   }
 
   // --- Which elements are read as a normal ---
@@ -347,20 +432,20 @@ int main() {
     const capture::LightElement e = Element10(200);
     CHECK(30, NormalElementSupported(e) && NormalElementCount(e) == 10);
     capture::LightElement a = e;
-    a.swizzle = 0x447;  // _xyz: the two skinned shaders
-    CHECK(31, NormalElementSupported(a));
+    // The selector is held against the format: only source x, y, z is a 10_11_11 normal. Another
+    // order, a fourth component, a component twice, none: no normals, never the bytes another way.
+    for (const std::vector<int>& other : std::vector<std::vector<int>>{{1, 0, 2}, {2, 1, 0}, {0, 2, 1}, {1, 2, 0}, {2, 0, 1},
+                                             {0, 1, 3}, {0, 0, 2}, {0, 1, 2, 3}, {0, 1}, {}}) {
+      a = e;
+      SetSource(a, other);
+      CHECK(31, !NormalElementSupported(a) && NormalElementCount(a) == 0);
+    }
     a = e;
-    a.swizzle = 0xE80;  // xxz_: y is not fetched
+    a.source_count = 4;  // (three components and a count of four)
     CHECK(32, !NormalElementSupported(a));
     a = e;
-    a.swizzle = 0xFC8;  // xy__: z is not fetched
+    a.source = uint8_t(e.source | 0x40);  // bits past the three components
     CHECK(33, !NormalElementSupported(a));
-    a = e;
-    a.swizzle = 0xE8C;  // 0yz_: a constant where x would be is not x
-    CHECK(51, !NormalElementSupported(a));
-    a = e;
-    a.swizzle = 0xE45;  // 1xy_: z is not fetched, whatever constant the register gets
-    CHECK(52, !NormalElementSupported(a));
     a = e;
     a.flags = uint8_t(e.flags & ~capture::kLightElementSigned);  // unsigned: 0..1, another meaning
     CHECK(34, !NormalElementSupported(a));
@@ -397,15 +482,14 @@ int main() {
 
     const capture::LightElement h = ElementHalf(240);
     CHECK(45, NormalElementSupported(h) && NormalElementCount(h) == 10);
-    a = h;
-    a.swizzle = 0x611;  // yzxw: 0x48D3... and 0xFC4F... fetch the same element this way
-    CHECK(46, NormalElementSupported(a));
-    a = h;
-    a.swizzle = 0x688;  // xyzw: every component fetched
-    CHECK(47, NormalElementSupported(a));
-    a = h;
-    a.swizzle = 0xE41;  // yxy_: w, the third half in memory, is not fetched
-    CHECK(48, !NormalElementSupported(a));
+    // The halves: only source y, x, w. What the registers of 0x48D3... and 0xFC4F... hold in x, y, z
+    // (their fetch is yzxw: source y, z, x) is not the normal, nor is the 10_11_11 order.
+    for (const std::vector<int>& other : std::vector<std::vector<int>>{{1, 2, 0}, {0, 1, 2}, {0, 1, 3}, {1, 0, 2}, {3, 0, 1},
+                                             {1, 0, 3, 2}, {1, 1, 3}}) {
+      a = h;
+      SetSource(a, other);
+      CHECK(46, !NormalElementSupported(a) && NormalElementCount(a) == 0);
+    }
     a = h;
     a.flags = uint8_t(1u << capture::kLightElementEndianShift);  // 8in16
     CHECK(49, !NormalElementSupported(a));
@@ -442,21 +526,24 @@ int main() {
     a.format = uint8_t(capture::kVertexFormat_8_8_8_8);
     CHECK(70, !DecodeNormals(s.data(), s.size(), a, 0, 5, out));
     a = e;
-    a.swizzle = 0xFC8;
-    CHECK(71, !DecodeNormals(s.data(), s.size(), a, 0, 5, out));
-    // The destination swizzle does not change the components: _xyz is the same normal.
-    a = e;
-    a.swizzle = 0x447;
-    CHECK(72, DecodeNormals(s.data(), s.size(), a, 0, 3, out) && Near3(out[0], 1, 0, 0) && Near3(out[2], 0, 0, -1));
+    SetSource(a, {1, 0, 2});  // a selector that is not the format's
+    out[0] = {9, 9, 9};
+    CHECK(71, !DecodeNormals(s.data(), s.size(), a, 0, 5, out) && out[0].x == 9);
+    {
+      float n[3] = {9, 9, 9};
+      CHECK(72, !DecodeNormal(a, &s[8], 4, n) && n[0] == 9 && DecodeNormal(e, &s[8], 4, n) && Near3(n, 1, 0, 0));
+      CHECK(76, !DecodeNormal(e, nullptr, 4, n) && !DecodeNormal(e, &s[8], 3, n));
+    }
 
-    // Half floats: memory order, whatever the fetch's swizzle (0x4C1 and 0x611 are the two seen).
+    // Half floats: the first three halves in memory (source y, x, w).
     capture::LightElement h = ElementHalf(48);
     std::vector<uint8_t> m(48, 0);
     PutHalf4(&m[8], 0.0f, 3.0f, 4.0f, 0.5f);
     PutHalf4(&m[32], -1.0f, 0.0f, 0.0f, 0.25f);
     CHECK(73, DecodeNormals(m.data(), m.size(), h, 0, 2, out) && Near3(out[0], 0, 0.6f, 0.8f) && Near3(out[1], -1, 0, 0));
-    h.swizzle = 0x611;
-    CHECK(74, DecodeNormals(m.data(), m.size(), h, 0, 2, out) && Near3(out[0], 0, 0.6f, 0.8f) && Near3(out[1], -1, 0, 0));
+    SetSource(h, {1, 2, 0});  // what a yzxw fetch leaves in its register's x, y, z
+    CHECK(74, !DecodeNormals(m.data(), m.size(), h, 0, 2, out));
+    h = ElementHalf(48);
     CHECK(75, !DecodeNormals(m.data(), 39, h, 0, 2, out));
   }
 
@@ -806,25 +893,24 @@ int main() {
     CHECK(174, ColourCount(a, 0, 100) == 5);
     a.vb.size = 3;
     CHECK(175, ColourCount(a, 0, 100) == 0);
-    // Which source components are red, green, blue, alpha is said in one place, by what the element
-    // is: z, y, x, w. The fetch's destination swizzle does not order the bytes: fetched xyzw, the
-    // same colour.
+    // Which source components are red, green, blue, alpha, by what the element is: z, y, x, w. The
+    // element's selector is held against it.
     {
       uint8_t comp[4] = {9, 9, 9, 9};
       ColourSourceComponents(comp);
       CHECK(176, comp[0] == 2 && comp[1] == 1 && comp[2] == 0 && comp[3] == 3);
     }
-    a = e;
-    a.swizzle = 0x688;
-    CHECK(177, ColourElementSupported(a) && DecodeColours(s, sizeof(s), a, 0, 1, out) && out[0] == 0xFF302010u);
-    // Not a colour a reader decodes: a component the fetch does not deliver (a constant in its
-    // place, or left as it was), another format, signed, integers.
-    a = e;
-    a.swizzle = 0xA0A;  // zyx1
-    CHECK(178, !ColourElementSupported(a) && !DecodeColours(s, sizeof(s), a, 4, 1, out));
-    a = e;
-    a.swizzle = 0xE0A;  // zyx_
-    CHECK(179, !ColourElementSupported(a) && !DecodeColours(s, sizeof(s), a, 0, 1, out) && ColourCount(a, 0, 100) == 0);
+    CHECK(177, ColourElementSupported(e) && DecodeColours(s, sizeof(s), e, 0, 1, out) && out[0] == 0xFF302010u);
+    // Not a colour a reader decodes: another selector (memory order, red and blue exchanged; three
+    // components, an instance colour's; a component twice), another format, signed, integers.
+    for (const std::vector<int>& other : std::vector<std::vector<int>>{{0, 1, 2, 3}, {3, 2, 1, 0}, {2, 1, 0}, {2, 1, 0, 0},
+                                             {2, 1, 3, 0}, {}}) {
+      a = e;
+      SetSource(a, other);
+      out[0] = 7;
+      CHECK(178, !ColourElementSupported(a) && !DecodeColours(s, sizeof(s), a, 0, 1, out) && out[0] == 7 &&
+                     ColourCount(a, 0, 100) == 0);
+    }
     a = e;
     a.format = uint8_t(capture::kVertexFormat_10_11_11);
     CHECK(180, !ColourElementSupported(a) && !DecodeColours(s, sizeof(s), a, 0, 1, out));
@@ -851,6 +937,179 @@ int main() {
     a.offset_bytes = 8;
     CHECK(186, ColourElementSupported(a) && ColourCount(a, 0, 100) == 2 && DecodeColours(s, sizeof(s), a, 1, 1, out) &&
                    out[0] == 0x40706050u);
+  }
+
+  // --- An element through its selector (DecodeElement): the generic read ---
+  {
+    // 10_11_11: three components, in any order the selector names.
+    capture::LightElement e = Element10(20);
+    uint8_t w[16];
+    float v[4] = {9, 9, 9, 9};
+    PutBe32(w, Pack(1023, -1023, 511));
+    CHECK(210, ElementReadable(e) && DecodeElement(e, w, 4, v) == 3 && v[0] == 1.0f && v[1] == -1.0f && v[2] == 1.0f && v[3] == 9);
+    PutBe32(w, Pack(600, -400, 300));
+    SetSource(e, {2, 0, 1});
+    CHECK(211, DecodeElement(e, w, 4, v) == 3 && Near(v[0], 300.0f / 511.0f) && Near(v[1], 600.0f / 1023.0f) && Near(v[2], -400.0f / 1023.0f));
+    // Bounded: the element's bytes, a pointer.
+    v[0] = 9;
+    CHECK(212, DecodeElement(e, w, 3, v) == 0 && DecodeElement(e, nullptr, 4, v) == 0 && v[0] == 9);
+    // The format has three components: a selector naming w, four components, one twice, too few.
+    for (const std::vector<int>& bad : std::vector<std::vector<int>>{{0, 1, 3}, {0, 1, 2, 3}, {0, 0, 1}, {0, 1}, {}}) {
+      SetSource(e, bad);
+      CHECK(213, !ElementReadable(e) && DecodeElement(e, w, 4, v) == 0);
+    }
+    e = Element10(20);
+    e.source_count = 5;
+    CHECK(214, !ElementReadable(e));
+    e = Element10(20);
+    e.source = uint8_t(e.source | 0x80);  // a fourth component's bits with a count of three
+    CHECK(215, !ElementReadable(e));
+    // Halves: source x, y = the low and the high half of the first dword, z, w of the second, so
+    // the halves in memory (1, 2, 4, 8) are source (2, 1, 8, 4).
+    capture::LightElement h = ElementHalf(24);
+    PutHalf4(w, 1.0f, 2.0f, 4.0f, 8.0f);
+    SetSource(h, {0, 1, 2, 3});
+    CHECK(216, DecodeElement(h, w, 8, v) == 4 && v[0] == 2.0f && v[1] == 1.0f && v[2] == 8.0f && v[3] == 4.0f);
+    SetSource(h, {1, 0, 3});
+    v[3] = 9;
+    CHECK(217, DecodeElement(h, w, 8, v) == 3 && v[0] == 1.0f && v[1] == 2.0f && v[2] == 4.0f && v[3] == 9 && DecodeElement(h, w, 7, v) == 0);
+    // 8_8_8_8, unsigned, normalised: source x is the last byte in memory.
+    capture::LightElement c = ElementColour(4);
+    const uint8_t argb[4] = {0xFF, 0x33, 0x66, 0x99};
+    CHECK(218, DecodeElement(c, argb, 4, v) == 4 && Near(v[0], 0.2f) && Near(v[1], 0.4f) && Near(v[2], 0.6f) && v[3] == 1.0f);
+    SetSource(c, {2, 1, 0});  // an instance's colour: red, green, blue
+    v[3] = 9;
+    CHECK(219, DecodeElement(c, argb, 4, v) == 3 && Near(v[0], 0.2f) && Near(v[2], 0.6f) && v[3] == 9);
+    capture::LightElement a = c;
+    a.flags = uint8_t(c.flags | capture::kLightElementSigned);
+    CHECK(220, !ElementReadable(a) && DecodeElement(a, argb, 4, v) == 0);
+    a = c;
+    a.flags = uint8_t(c.flags & ~capture::kLightElementNormalized);
+    CHECK(221, !ElementReadable(a));
+    // Four floats in memory order; sign and scale flags mean nothing for them.
+    capture::LightElement f;
+    f.vb = {0x4000, 16};
+    f.stride_bytes = 16;
+    f.format = uint8_t(capture::kVertexFormat_32_32_32_32_FLOAT);
+    f.flags = uint8_t(capture::kLightElementSigned | (2u << capture::kLightElementEndianShift));
+    SetSource(f, {0, 1, 2, 3});
+    const float values[4] = {0.25f, -0.5f, 3.0f, -8.0f};
+    for (int k = 0; k < 4; ++k) {
+      uint32_t bits;
+      std::memcpy(&bits, &values[k], 4);
+      PutBe32(w + 4 * k, bits);
+    }
+    CHECK(222, DecodeElement(f, w, 16, v) == 4 && v[0] == 0.25f && v[1] == -0.5f && v[2] == 3.0f && v[3] == -8.0f);
+    SetSource(f, {3, 2, 0, 1});
+    CHECK(223, DecodeElement(f, w, 16, v) == 4 && v[0] == -8.0f && v[1] == 3.0f && v[2] == 0.25f && v[3] == -0.5f &&
+                   DecodeElement(f, w, 15, v) == 0);
+    // Only the guest's big-endian dwords, inside the vertex, of a format the light has.
+    for (uint32_t endian : {0u, 1u, 3u}) {
+      a = f;
+      a.flags = uint8_t(endian << capture::kLightElementEndianShift);
+      CHECK(224, !ElementReadable(a) && DecodeElement(a, w, 16, v) == 0);
+    }
+    a = f;
+    a.offset_bytes = 4;
+    CHECK(225, !ElementReadable(a));
+    a = f;
+    a.stride_bytes = 0;
+    CHECK(226, !ElementReadable(a));
+    a = f;
+    a.format = 7;  // 2_10_10_10
+    CHECK(227, !ElementReadable(a));
+  }
+
+  // --- The committed table's selectors on elements of real draws ---
+  // Bytes of dumped streams of capture bridge C (native_discovery_20261007_225337.jsonl, frame 1;
+  // run 290, made with the user present: RUN UNCHECKED), as
+  // out/native-evidence/lighting/task4_fix1_elements.py prints them
+  // (task4_fix1_elements_bridge_C.txt): per element the stream's file, the vertex and the byte. Each
+  // goes through the table's entry of its vertex shader and the fetch of its row, as the capture
+  // makes the element, and through the reader.
+  {
+    const float h0 = 0.69140625f, h1 = 0.72216796875f, h2 = -0.00239372253f;  // halves 0x3988, 0x39C7, 0x98E7
+    const RealElement real[] = {
+        // Object normal, 0xECD6... (ps 0x648B...), fetched xyz_: 1A6470C0_0004932C.bin, vertex 9, byte 188.
+        {0xECD66A10092E6562ull, false, 1, 16, 2, 5, 0xE88, true, true, 3, {0xFF, 0xA0, 0x17, 0xEA},
+         {-22.0f / 1023.0f, -1022.0f / 1023.0f, -2.0f / 511.0f}},
+        // Skinned object normal, 0xD4D5... (ps 0x8D90...), fetched _xyz: 1A951940_00016E14.bin, vertex 0, byte 8.
+        {0xD4D558DA6A82BDC8ull, false, 1, 16, 2, 7, 0x447, true, true, 3, {0x0A, 0x76, 0x94, 0x33},
+         {-973.0f / 1023.0f, -302.0f / 1023.0f, 41.0f / 511.0f}},
+        // Plant normal, 0x48D3... (ps 0x2605...), fetched yzxw: 1C44BB00_000011D0.bin, vertex 0, byte 8.
+        {0x48D30ECCF684F488ull, false, 5, 32, 2, 6, 0x611, true, false, 3, {0x39, 0x88, 0x39, 0xC7, 0x98, 0xE7, 0x3C, 0x00},
+         {h0, h1, h2}},
+        // Probe weights of a skinned shader, 0xD4D5..., fetched wzxy: 1AAC9300_0000D130.bin, vertex 0, byte 0.
+        {0xD4D558DA6A82BDC8ull, true, 6, 38, 0, 4, 0x213, true, false, 4,
+         {0x3D, 0x94, 0xA4, 0xA6, 0x3B, 0x2C, 0xED, 0x3C, 0x3C, 0x86, 0x42, 0x7F, 0xBC, 0x49, 0xFF, 0xA1},
+         {0.07258f, 0.002639f, 0.016389f, -0.012329f}},
+        // Stream colour, 0xECD6... (ps 0x7892...), fetched zyxw: 1B215E40_00000840.bin, vertex 0, byte 0.
+        {0xECD66A10092E6562ull, true, 4, 6, 0, 1, 0x60A, false, true, 4, {0xFF, 0x67, 0x6D, 0x7B},
+         {0x67 / 255.0f, 0x6D / 255.0f, 0x7B / 255.0f, 1.0f}},
+        // Instance colour, 0x48D3..., fetched _zyx: 1BDE7E80_000002D8.bin, vertex 0, byte 24.
+        {0x48D30ECCF684F488ull, true, 3, 6, 6, 7, 0x057, false, true, 3, {0xFE, 0x87, 0x97, 0x9D},
+         {0x87 / 255.0f, 0x97 / 255.0f, 0x9D / 255.0f}},
+    };
+    int index = 0;
+    for (const RealElement& r : real) {
+      capture::LightElement e;
+      float v[4] = {9, 9, 9, 9};
+      const bool made = RealElementOf(r, &e);
+      CHECK(230 + index, made);
+      const uint32_t bytes = capture::LightElementBytes(r.format);
+      CHECK(240 + index, made && DecodeElement(e, r.bytes, bytes, v) == r.count);
+      for (uint32_t k = 0; k < r.count; ++k) CHECK(250 + index, Near(v[k], r.want[k], 2e-6f));
+      if (!r.second) {
+        // A normal: unit length as stored (to the element's precision), and the reader's own.
+        const float len = std::sqrt(r.want[0] * r.want[0] + r.want[1] * r.want[1] + r.want[2] * r.want[2]);
+        float n[3];
+        CHECK(260 + index, std::fabs(len - 1.0f) < 2e-3f && NormalElementSupported(e) && DecodeNormal(e, r.bytes, bytes, n) &&
+                               Near3(n, r.want[0] / len, r.want[1] / len, r.want[2] / len, 2e-6f));
+      }
+      ++index;
+    }
+    // The stream colour through its own reader: red in the low byte.
+    {
+      capture::LightElement e;
+      uint32_t packed = 0;
+      CHECK(270, RealElementOf(real[4], &e) && ColourElementSupported(e) && DecodeColours(real[4].bytes, 4, e, 0, 1, &packed) &&
+                     packed == 0xFF7B6D67u);
+    }
+    // What the fetch leaves in its register's x, y, z is not the element's vector: for 0x48D3...
+    // (yzxw) that is source y, z, x = (0.691, 1.0, 0.722), no unit vector (the second and third
+    // differ from the normal's), and the skinned shaders' _xyz register has no x from the fetch.
+    {
+      capture::LightElement e;
+      float v[4];
+      CHECK(271, RealElementOf(real[2], &e));
+      e.source = 1 | (2 << 2) | (0 << 4);
+      CHECK(272, !NormalElementSupported(e) && DecodeElement(e, real[2].bytes, 8, v) == 3 && v[0] == h0 && v[1] == 1.0f && v[2] == h1);
+    }
+    // An entry that does not fit its fetch gives no element: another count, a component the fetch
+    // does not deliver (the instance colour's fourth byte: its fetches are zyx_ and _zyx).
+    {
+      capture::LightElement e;
+      RealElement r = real[5];
+      r.count = 4;
+      CHECK(273, !RealElementOf(r, &e));
+      r = real[5];
+      r.swizzle = 0xFCA;  // zy__: red is not fetched
+      CHECK(274, !RealElementOf(r, &e));
+    }
+    // Every committed entry: a normal's selector is the one this file knows for the format, a stream
+    // colour's is ColourSourceComponents, and they are the same for every entry of a format.
+    int entries = 0;
+    for (const capture::VsLightSpec& v : kVsLight) {
+      if (v.kind == capture::LightVertexKind::kTerrain) continue;
+      ++entries;
+      uint8_t comp[3] = {9, 9, 9};
+      CHECK(275, NormalSourceComponents(v.normal.format, comp) && (v.normal.source >> 8) == 3 &&
+                     (v.normal.source & 0xFF) == (comp[0] | (comp[1] << 2) | (comp[2] << 4)));
+      if (v.kind == capture::LightVertexKind::kStream) CHECK(276, v.second.source == 0x4C6);
+      if (v.kind == capture::LightVertexKind::kProbe) CHECK(277, v.second.source == 0x4E4);
+      if (v.kind == capture::LightVertexKind::kInstance) CHECK(278, v.second.source == 0x306);
+    }
+    CHECK(279, entries == 12);
   }
 
   // --- Real streams (else SKIPPED, loudly) --- FABLE2_NORMALS_BIN: one or more bundles written by

@@ -29,11 +29,13 @@ class GeometryCache {
   // nullptr (draw skipped). *vertex_count receives the number of positions
   // the returned buffer actually holds. An instanced record's buffer is its
   // flat stream (instance_expand.h): instances.flat_count positions, indexed
-  // like any other draw.
-  nrhi::Buffer* Positions(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t* vertex_count,
-                          ClayStats& st);
-  nrhi::Buffer* Indices(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t vertex_count,
-                        uint32_t* index_count, ClayStats& st);
+  // like any other draw. `terrain`: the record's terrain inputs from its
+  // scene's side array (TerrainOf), null for a record that is not a terrain
+  // record; a terrain record's buffers are the grid built from them.
+  nrhi::Buffer* Positions(nrhi::Device* dev, const capture::DrawRecord& r, const capture::TerrainPatch* terrain,
+                          uint32_t* vertex_count, ClayStats& st);
+  nrhi::Buffer* Indices(nrhi::Device* dev, const capture::DrawRecord& r, const capture::TerrainPatch* terrain,
+                        uint32_t vertex_count, uint32_t* index_count, ClayStats& st);
   // float2 UVs of the record's material (material.uv_vb / material.uv), one
   // per vertex of the UV stream; nullptr when the stream is unreadable, does
   // not decode or holds fewer than `vertex_count` UVs (the shader reads
@@ -41,7 +43,8 @@ class GeometryCache {
   // instanced record gets flat UVs: the mesh vertex's UV per flat position.
   nrhi::Buffer* Uvs(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t vertex_count,
                     ClayStats& st);
-  // float2 far colour coordinates of a terrain record of the adaptive builder,
+  // float2 far colour coordinates of a terrain record of the adaptive builder
+  // (`t`: its terrain inputs, here and in TerrainNormals),
   // one per grid point of its position buffer: read from the vertex shader's
   // two tables where the game reads them, at the patch knots
   // (capture::BuildTerrainFarUvs; key TerrainFarUvKey, content hash of both
@@ -49,7 +52,7 @@ class GeometryCache {
   // that builder, a table is not a k_16 texture the heightmap decode handles or
   // is unreadable, a knot lies outside its table's bytes, or fewer than
   // `vertex_count` coordinates result. Reads are bounded by the tables' sizes.
-  nrhi::Buffer* TerrainFarUvs(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t vertex_count,
+  nrhi::Buffer* TerrainFarUvs(nrhi::Device* dev, const capture::TerrainPatch& t, uint32_t vertex_count,
                               ClayStats& st);
   // float2 (n.x, n.y) of the game's vertex normal for a terrain layer with the
   // steep-ground block, one per grid point of its position buffer: read from
@@ -60,7 +63,7 @@ class GeometryCache {
   // texture DecodeNormalMap handles or is unreadable, a grid point's texel lies
   // outside the map's bytes, or fewer than `vertex_count` normals result.
   // Reads are bounded by the map's size.
-  nrhi::Buffer* TerrainNormals(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t vertex_count,
+  nrhi::Buffer* TerrainNormals(nrhi::Device* dev, const capture::TerrainPatch& t, uint32_t vertex_count,
                                ClayStats& st);
   void BeginFrame(uint64_t frame, uint64_t budget_bytes);
   // DestroyDeferred all (dev may be nullptr: forget the buffers without
@@ -83,7 +86,7 @@ class GeometryCache {
   nrhi::Buffer* Upload(nrhi::Device* dev, const void* data, uint64_t bytes, uint64_t* alloc_bytes);
   // Content hash of a guest range, computed once per frame.
   uint64_t FrameHash(uint32_t phys_addr, uint32_t size, const uint8_t* data);
-  nrhi::Buffer* TerrainPositions(nrhi::Device* dev, const capture::DrawRecord& r,
+  nrhi::Buffer* TerrainPositions(nrhi::Device* dev, const capture::DrawRecord& r, const capture::TerrainPatch& t,
                                  uint32_t* vertex_count, ClayStats& st);
   // Instanced records: the flat position stream built from the mesh stream
   // and the instance stream, rebuilt when either's bytes or the instance set

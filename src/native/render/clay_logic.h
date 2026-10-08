@@ -140,11 +140,13 @@ inline uint32_t PositionCount(uint32_t vb_size, const capture::PosLayout& l) {
 }
 
 // Vertices the record's position buffer holds: the terrain grid points, an
-// instanced draw's flat stream, or every position in the stream.
-inline uint32_t RecordVertexCount(const capture::DrawRecord& r) {
-  if (r.terrain.active) {
+// instanced draw's flat stream, or every position in the stream. `terrain`,
+// here and in the keys below: the record's terrain inputs from its scene's
+// side array (TerrainOf), null for a record that is not a terrain record.
+inline uint32_t RecordVertexCount(const capture::DrawRecord& r, const capture::TerrainPatch* terrain) {
+  if (terrain) {
     constexpr uint32_t kPoints = (capture::kTerrainGrid + 1) * (capture::kTerrainGrid + 1);
-    return r.terrain.patches * kPoints;
+    return terrain->patches * kPoints;
   }
   if (r.instances.active) return r.instances.flat_count;
   return PositionCount(r.vb.size, r.pos);
@@ -192,10 +194,10 @@ inline GeoKey MeshPositionKey(const capture::DrawRecord& r) {
 // patch run is keyed by its heightmap and every patch parameter (kind 2); an
 // instanced draw's flat stream is keyed by its mesh stream and its instance
 // set (kind 5).
-inline GeoKey PositionKey(const capture::DrawRecord& r) {
+inline GeoKey PositionKey(const capture::DrawRecord& r, const capture::TerrainPatch* terrain) {
   GeoKey k;
-  if (r.terrain.active) {
-    const capture::TerrainPatch& t = r.terrain;
+  if (terrain) {
+    const capture::TerrainPatch& t = *terrain;
     const capture::HeightMap& m = t.map;
     k.addr = m.phys_addr;
     k.size = m.size;
@@ -227,12 +229,12 @@ inline GeoKey PositionKey(const capture::DrawRecord& r) {
   return k;
 }
 
-inline GeoKey IndexKey(const capture::DrawRecord& r) {
+inline GeoKey IndexKey(const capture::DrawRecord& r, const capture::TerrainPatch* terrain) {
   GeoKey k;
-  if (r.terrain.active) {
+  if (terrain) {
     // The grid's triangle list depends only on its shape.
     k.stride = capture::kTerrainGrid;
-    k.extra = r.terrain.patches;
+    k.extra = terrain->patches;
     k.kind = 3;
     return k;
   }
@@ -296,8 +298,7 @@ inline GeoKey UvKey(const capture::DrawRecord& r) {
 // endian, size), the draw's patches and the constants that address the tables.
 // The content hash covers both tables' bytes. The heightmap, the height scale
 // and what changes with the eye (fade, eye) do not enter.
-inline GeoKey TerrainFarUvKey(const capture::DrawRecord& r) {
-  const capture::TerrainPatch& t = r.terrain;
+inline GeoKey TerrainFarUvKey(const capture::TerrainPatch& t) {
   const capture::TerrainMaterialInputs& m = t.material;
   GeoKey k;
   k.addr = m.far_u_fetch[1] & 0xFFFFF000u;
@@ -319,8 +320,7 @@ inline GeoKey TerrainFarUvKey(const capture::DrawRecord& r) {
 // coordinate's offset and scale). The content hash covers the map's bytes. The
 // heightmap, the height scale and everything of the layer itself (its textures
 // and constants) do not enter: the layers of a square share one buffer.
-inline GeoKey TerrainNormalKey(const capture::DrawRecord& r) {
-  const capture::TerrainPatch& t = r.terrain;
+inline GeoKey TerrainNormalKey(const capture::TerrainPatch& t) {
   const capture::TerrainMaterialInputs& m = t.material;
   GeoKey k;
   k.addr = m.normal_fetch[1] & 0xFFFFF000u;
@@ -826,7 +826,7 @@ enum class TerrainAction : uint8_t {
 
 // One terrain record of a frame for PlanTerrain, in draw order.
 struct TerrainPlanItem {
-  const capture::TerrainPatch* patch = nullptr;  // the record's terrain
+  const capture::TerrainPatch* patch = nullptr;  // the record's terrain inputs (TerrainOf)
   bool layer = false;     // a draw of the layer builder; else of the adaptive builder
   bool usable = false;    // its material can be drawn this frame (TerrainMaterialStatus is kTextured)
   bool drawable = true;   // its positions and indices were built

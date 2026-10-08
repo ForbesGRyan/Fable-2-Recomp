@@ -312,6 +312,37 @@ int main() {
     // Capture-side reasons replace it like any other assembled reason.
     if (ResolveSkip(SkipReason::kDepthOnly, SkipReason::kBadIndex) != SkipReason::kBadIndex) return 92;
   }
-  std::puts("PASS: record assembly with instance sets, instance range check and cap, distance cut, skin, render state, depth-only");
+  // --- the record's size and its side index ---
+  // A terrain draw's inputs (452 bytes) are in the frame's side array, not in every record.
+  if (sizeof(DrawRecord) > 640) {
+    std::printf("FAIL: sizeof(DrawRecord) = %zu, above 640\n", sizeof(DrawRecord));
+    return 100;
+  }
+  // No record holds an index until the frame gives it one (FrameBuilder::Add): not a
+  // default record, not a plain one, not an assembled terrain one.
+  if (kNoSideIndex != 0xFFFF || DrawRecord{}.terrain_index != kNoSideIndex) return 101;
+  if (AssembleRecord(Good(), 0).terrain_index != kNoSideIndex) return 102;
+  {
+    DrawInputs t = Good();
+    t.prim = kPrimQuadPatch; t.terrain_shader = true; t.indexed = false;
+    t.terrain.active = true; t.terrain.patch = 3; t.terrain.patches = 2;
+    r = AssembleRecord(t, 0);
+    if (r.skip != SkipReason::kNone || r.terrain_index != kNoSideIndex) return 103;
+    // The inputs the frame keeps for the record: the draw's own patch.
+    if (!IsTerrainDraw(t) || TerrainInputsOf(t) != &t.terrain) return 104;
+    // A patch that was not built (unhandled heightmap): none, and the draw is skipped.
+    t.terrain.active = false;
+    if (TerrainInputsOf(t) || AssembleRecord(t, 0).skip != SkipReason::kUnknownPosFormat) return 105;
+    // A patch draw whose shader has no terrain entry: none.
+    t.terrain.active = true; t.terrain_shader = false;
+    if (IsTerrainDraw(t) || TerrainInputsOf(t)) return 106;
+    // Terrain fields on an ordinary draw are ignored, also with a terrain shader bound
+    // (the primitive decides).
+    t = Good(); t.terrain.active = true;
+    if (IsTerrainDraw(t) || TerrainInputsOf(t)) return 107;
+    t.terrain_shader = true;
+    if (IsTerrainDraw(t) || TerrainInputsOf(t) || AssembleRecord(t, 0).skip != SkipReason::kNone) return 108;
+  }
+  std::puts("PASS: record assembly with instance sets, instance range check and cap, distance cut, skin, render state, depth-only, side index");
   return 0;
 }

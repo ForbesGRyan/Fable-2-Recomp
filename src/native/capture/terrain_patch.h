@@ -256,6 +256,8 @@ struct TerrainMaterialInputs {
   float steep_eps = 0.0f;         // the small term of the weights (a literal of the pixel shader)
 };
 
+// The inputs of one terrain draw: an entry of its frame's side array
+// (FrameScene::terrain), which the record names by DrawRecord::terrain_index.
 struct TerrainPatch {
   bool active = false;
   float patch = 0;       // first patch index as the shader sees it

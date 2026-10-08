@@ -79,7 +79,8 @@ int main() {
     t.terrain_shader = true;
     t.terrain.active = true; t.terrain.patch = 1; t.terrain.patches = 1; t.terrain.map.size = 4096;
     const auto rt = capture::AssembleRecord(t, 5);
-    if (rt.skip != SkipReason::kNone || !rt.terrain.active || rt.terrain.patch != 1.0f) return 50;
+    // The record does not hold the patch: the frame keeps it in its side array (below).
+    if (rt.skip != SkipReason::kNone || capture::TerrainInputsOf(t) != &t.terrain) return 50;
     if (rt.rows[0] != 1.0f) return 51;
     // The shader is a terrain shader but the patch could not be built
     // (unsupported heightmap): unknown position format.
@@ -93,7 +94,7 @@ int main() {
     if (capture::AssembleRecord(t2, 0).skip != SkipReason::kNoTransform) return 54;
     // Terrain fields on an ordinary draw are ignored.
     auto o = Good(); o.terrain.active = true;
-    if (capture::AssembleRecord(o, 0).terrain.active) return 55;
+    if (capture::AssembleRecord(o, 0).skip != SkipReason::kNone || capture::TerrainInputsOf(o)) return 55;
   }
   // A rigid skin layout travels with the record.
   {
@@ -162,11 +163,133 @@ int main() {
     if (!m2->untextured_ps.empty()) return 65;
   }
 
+  // The terrain inputs of a frame's terrain records are in the scene's side
+  // array, each at its record's terrain_index (TerrainOf); the records do not
+  // hold them.
+  {
+    using capture::kNoSideIndex;
+    using capture::TerrainPatch;
+    using render::TerrainOf;
+    auto patch = [](float first) {
+      TerrainPatch p;
+      p.active = true;
+      p.patch = first;
+      return p;
+    };
+    const capture::DrawRecord plain = r;
+    capture::DrawRecord ground = r;
+    ground.prim = capture::kPrimQuadPatch;
+    ground.vs_hash = 0xC30A;
+    ground.material.status = capture::MaterialStatus::kTerrain;
+    const TerrainPatch p0 = patch(10), p1 = patch(11), p2 = patch(12);
+    render::FrameBuilder tb;
+    tb.Add(ground, &p0);                 // outside the bracket: ignored, no entry
+    tb.Open();
+    tb.Add(ground, &p0);
+    tb.Add(plain);
+    tb.Add(ground, &p1);
+    auto gone = ground; gone.skip = SkipReason::kBadIndex;
+    tb.Add(gone, &p2);                   // a skipped terrain draw takes no entry
+    auto stale = plain; stale.terrain_index = 0;
+    tb.Add(stale);                       // an index the frame did not give is not kept
+    auto f1 = tb.Finish(1);
+    if (f1->captured != 5 || f1->draws.size() != 4 || f1->terrain.size() != 2) return 70;
+    if (f1->skipped[size_t(SkipReason::kBadIndex)] != 1) return 71;
+    if (f1->draws[0].terrain_index != 0 || f1->draws[1].terrain_index != kNoSideIndex ||
+        f1->draws[2].terrain_index != 1 || f1->draws[3].terrain_index != kNoSideIndex) {
+      return 72;
+    }
+    const TerrainPatch* t0 = TerrainOf(*f1, f1->draws[0]);
+    const TerrainPatch* t1 = TerrainOf(*f1, f1->draws[2]);
+    if (t0 != &f1->terrain[0] || t1 != &f1->terrain[1] || !t0->active || t0->patch != 10.0f || t1->patch != 11.0f) {
+      return 73;
+    }
+    // A record without an index: null.
+    if (TerrainOf(*f1, f1->draws[1]) || TerrainOf(*f1, f1->draws[3]) || TerrainOf(*f1, capture::DrawRecord{})) return 74;
+    // An index past the end of the scene's array (a record of another scene,
+    // a damaged one): null, nothing is read.
+    capture::DrawRecord past = f1->draws[0];
+    past.terrain_index = 2;
+    if (TerrainOf(*f1, past)) return 75;
+    past.terrain_index = 0xFFFE;
+    if (TerrainOf(*f1, past)) return 76;
+    if (TerrainOf(render::FrameScene{}, f1->draws[0])) return 77;
+    // kNoSideIndex is "none" also in a scene with that many entries and more.
+    {
+      render::FrameScene big;
+      big.terrain.resize(size_t(kNoSideIndex) + 2);
+      past.terrain_index = kNoSideIndex;
+      if (TerrainOf(big, past)) return 78;
+      past.terrain_index = kNoSideIndex - 1;
+      if (TerrainOf(big, past) != &big.terrain[kNoSideIndex - 1]) return 79;
+    }
+
+    // The next frame starts with an empty array (its first terrain record is
+    // index 0 again) and the first frame's scene keeps its own entries.
+    tb.Open();
+    tb.Add(plain);
+    tb.Add(ground, &p2);
+    auto f2 = tb.Finish(2);
+    if (f2->draws.size() != 2 || f2->terrain.size() != 1 || f2->draws[0].terrain_index != kNoSideIndex ||
+        f2->draws[1].terrain_index != 0) {
+      return 80;
+    }
+    if (TerrainOf(*f2, f2->draws[1]) != &f2->terrain[0] || f2->terrain[0].patch != 12.0f) return 81;
+    if (f1->terrain.size() != 2 || TerrainOf(*f1, f1->draws[0])->patch != 10.0f ||
+        TerrainOf(*f1, f1->draws[2])->patch != 11.0f) {
+      return 82;
+    }
+    // A frame without terrain, and one without records, hold none.
+    tb.Open();
+    tb.Add(plain);
+    if (!tb.Finish(3)->terrain.empty()) return 83;
+    tb.Open();
+    tb.CountUnrecorded();
+    auto f4 = tb.Finish(4);
+    if (f4->captured != 1 || !f4->draws.empty() || !f4->terrain.empty()) return 84;
+
+    // The index is 16 bits and kNoSideIndex means none: a frame holds 65,535
+    // terrain records, indices 0 to 65,534. One more is skipped as bad-memory
+    // (the capture's reason for a count past a cap), counted by reason and by
+    // shader like any skipped draw and in no material tally; its index never
+    // wraps onto another record's inputs. Other draws are still recorded.
+    tb.Open();
+    for (uint32_t i = 0; i < kNoSideIndex; ++i) {
+      const TerrainPatch p = patch(float(i));
+      tb.Add(ground, &p);
+    }
+    tb.Add(ground, &p0);
+    tb.Add(ground, &p1);
+    tb.Add(plain);
+    auto f5 = tb.Finish(5);
+    if (f5->captured != 65538 || f5->draws.size() != 65536 || f5->terrain.size() != 65535) return 85;
+    if (f5->skipped[size_t(SkipReason::kBadMemory)] != 2) return 86;
+    for (uint32_t i = 0; i < kNoSideIndex; ++i) {
+      const TerrainPatch* t = TerrainOf(*f5, f5->draws[i]);
+      if (f5->draws[i].terrain_index != i || !t || t->patch != float(i)) return 87;
+    }
+    if (f5->draws.back().terrain_index != kNoSideIndex || TerrainOf(*f5, f5->draws.back())) return 88;
+    capture::ShaderTally<render::kSkippedTallySize>::Entry top[2];
+    if (f5->skipped_by_vs.Top(uint8_t(SkipReason::kBadMemory), top, 2) != 1 || top[0].hash != 0xC30A ||
+        top[0].count != 2) {
+      return 89;
+    }
+    if (f5->material[size_t(capture::MaterialStatus::kTerrain)] != 65535) return 90;
+    // The frame after it is not affected.
+    tb.Open();
+    tb.Add(ground, &p2);
+    auto f6 = tb.Finish(6);
+    if (f6->draws.size() != 1 || f6->terrain.size() != 1 || f6->draws[0].terrain_index != 0) return 91;
+    for (uint32_t n : f6->skipped) {
+      if (n) return 92;
+    }
+  }
+
   render::ScenePublisher pub;
   if (pub.Latest()) return 18;
   pub.Publish(s);
   pub.Publish(s2);
   if (pub.Latest()->frame != 43) return 19;
-  std::cout << "PASS: draw record, frame builder, publisher\n";
+  std::cout << "PASS: draw record, frame builder, terrain side array, publisher\n";
   return 0;
 }

@@ -102,51 +102,51 @@ int main() {
   // 16-20: position keys: anything that changes decoding changes the key.
   {
     capture::DrawRecord r = BaseRecord();
-    const GeoKey k = PositionKey(r);
+    const GeoKey k = PositionKey(r, nullptr);
     CHECK(16, k.addr == 0x2000 && k.size == 1600 && k.stride == 16 && k.kind == 0);
     capture::DrawRecord a = r;
     a.pos.offset_bytes = 4;
-    CHECK(17, !(PositionKey(a) == k));
+    CHECK(17, !(PositionKey(a, nullptr) == k));
     a = r;
     a.pos.swizzle = 0x11;
-    CHECK(18, !(PositionKey(a) == k));
+    CHECK(18, !(PositionKey(a, nullptr) == k));
     a = r;
     a.pos.swap16 = true;
-    CHECK(19, !(PositionKey(a) == k));
+    CHECK(19, !(PositionKey(a, nullptr) == k));
     a = r;
     a.pos.exp_adjust = -3;
-    CHECK(20, !(PositionKey(a) == k));
+    CHECK(20, !(PositionKey(a, nullptr) == k));
     a = r;
     a.pos.format = capture::PosFormat::kFloat4;
-    CHECK(21, !(PositionKey(a) == k));
+    CHECK(21, !(PositionKey(a, nullptr) == k));
     a = r;
     a.pos.is_signed = false;
     a.pos.format = capture::PosFormat::kShort4;
     capture::DrawRecord b = a;
     b.pos.is_signed = true;
-    CHECK(22, !(PositionKey(a) == PositionKey(b)));
+    CHECK(22, !(PositionKey(a, nullptr) == PositionKey(b, nullptr)));
     a = r;
     a.seq = 99;
     a.base_vertex = 5;  // irrelevant to the decoded stream
-    CHECK(23, PositionKey(a) == k);
+    CHECK(23, PositionKey(a, nullptr) == k);
   }
   // 24-29: index keys and the referenced index byte range.
   {
     capture::DrawRecord r = BaseRecord();
-    const GeoKey k = IndexKey(r);
+    const GeoKey k = IndexKey(r, nullptr);
     CHECK(24, k.addr == 0x1000 && k.size == 64 && k.stride == 0 && k.kind == 1);
     capture::DrawRecord a = r;
     a.start = 0;
-    CHECK(25, !(IndexKey(a) == k));
+    CHECK(25, !(IndexKey(a, nullptr) == k));
     a = r;
     a.index32 = true;
-    CHECK(26, !(IndexKey(a) == k) && IndexKey(a).stride == 1);
+    CHECK(26, !(IndexKey(a, nullptr) == k) && IndexKey(a, nullptr).stride == 1);
     a = r;
     a.prim = capture::kPrimTriangleStrip;
-    CHECK(27, !(IndexKey(a) == k));
+    CHECK(27, !(IndexKey(a, nullptr) == k));
     a = r;
     a.indexed = false;
-    const GeoKey n = IndexKey(a);
+    const GeoKey n = IndexKey(a, nullptr);
     CHECK(28, n.addr == 0 && n.size == 0 && n.kind == 1);
     IndexBytes ib;
     CHECK(29, ReferencedIndexBytes(r, &ib) && ib.offset == 12 && ib.size == 24);
@@ -199,7 +199,7 @@ int main() {
       a.instances.flat_count = 64;
       capture::DrawRecord b = a;
       b.cut[0] = 82.0f; b.cut[1] = 157.25f; b.cut[2] = 50.0f; b.cut[3] = 1062.5f;
-      CHECK(132, PositionKey(a) == PositionKey(b) && UvKey(a) == UvKey(b) && IndexKey(a) == IndexKey(b));
+      CHECK(132, PositionKey(a, nullptr) == PositionKey(b, nullptr) && UvKey(a) == UvKey(b) && IndexKey(a, nullptr) == IndexKey(b, nullptr));
       CHECK(133, MeshPositionKey(a) == MeshPositionKey(b) && MeshUvKey(a) == MeshUvKey(b));
     }
     capture::DrawRecord r = BaseRecord();
@@ -256,11 +256,12 @@ int main() {
     capture::DrawRecord s = r;
     s.material.uv_vb = s.vb;
     s.material.uv.stride_bytes = s.pos.stride_bytes;
-    capture::DrawRecord t = BaseRecord();
-    t.terrain.active = true;
-    t.terrain.patches = 1;
-    CHECK(87, !(UvKey(s) == PositionKey(s)) && !(UvKey(s) == IndexKey(s)) &&
-                  UvKey(s).kind != IndexKey(t).kind && UvKey(s).kind != PositionKey(t).kind);
+    const capture::DrawRecord t = BaseRecord();
+    capture::TerrainPatch tp;  // a terrain record's inputs (the scene's side array: TerrainOf)
+    tp.active = true;
+    tp.patches = 1;
+    CHECK(87, !(UvKey(s) == PositionKey(s, nullptr)) && !(UvKey(s) == IndexKey(s, nullptr)) &&
+                  UvKey(s).kind != IndexKey(t, &tp).kind && UvKey(s).kind != PositionKey(t, &tp).kind);
   }
   // 88-90: F3 texture line.
   {
@@ -397,38 +398,44 @@ int main() {
     t.prim = capture::kPrimQuadPatch;
     t.indexed = false;
     t.vb = {};
-    t.terrain.active = true;
-    t.terrain.patch = 2;
-    t.terrain.patches = 3;
-    t.terrain.cols = 2;
-    t.terrain.inv_cols = 0.5f;
-    t.terrain.cell[0] = t.terrain.cell[1] = 8;
-    t.terrain.map.phys_addr = 0x1BD0C000;
-    t.terrain.map.size = 0x5000;
+    // The record's terrain inputs, which the scene holds in its side array (TerrainOf).
+    capture::TerrainPatch tp;
+    tp.active = true;
+    tp.patch = 2;
+    tp.patches = 3;
+    tp.cols = 2;
+    tp.inv_cols = 0.5f;
+    tp.cell[0] = tp.cell[1] = 8;
+    tp.map.phys_addr = 0x1BD0C000;
+    tp.map.size = 0x5000;
     constexpr uint32_t kPts = (capture::kTerrainGrid + 1) * (capture::kTerrainGrid + 1);
-    CHECK(60, RecordVertexCount(t) == 3 * kPts);
-    CHECK(61, RecordVertexCount(BaseRecord()) == 100);
-    const GeoKey k = PositionKey(t);
+    CHECK(60, RecordVertexCount(t, &tp) == 3 * kPts);
+    CHECK(61, RecordVertexCount(BaseRecord(), nullptr) == 100);
+    const GeoKey k = PositionKey(t, &tp);
     CHECK(62, k.addr == 0x1BD0C000 && k.size == 0x5000 && k.kind == 2 && k.stride == capture::kTerrainGrid);
-    capture::DrawRecord a = t;
-    a.terrain.patch = 3;
-    CHECK(63, !(PositionKey(a) == k));
-    a = t;
-    a.terrain.origin[1] = 16;
-    CHECK(64, !(PositionKey(a) == k));
-    a = t;
-    a.terrain.height_scale = 2;
-    CHECK(65, !(PositionKey(a) == k));
-    a = t;
-    a.terrain.map.endian = 1;
-    CHECK(66, !(PositionKey(a) == k));
-    const GeoKey ik = IndexKey(t);
+    capture::TerrainPatch a = tp;
+    a.patch = 3;
+    CHECK(63, !(PositionKey(t, &a) == k));
+    a = tp;
+    a.origin[1] = 16;
+    CHECK(64, !(PositionKey(t, &a) == k));
+    a = tp;
+    a.height_scale = 2;
+    CHECK(65, !(PositionKey(t, &a) == k));
+    a = tp;
+    a.map.endian = 1;
+    CHECK(66, !(PositionKey(t, &a) == k));
+    const GeoKey ik = IndexKey(t, &tp);
     CHECK(67, ik.kind == 3 && ik.stride == capture::kTerrainGrid && ik.addr == 0);
-    a = t;
-    a.terrain.patch = 9;  // same grid shape: same indices
-    CHECK(68, IndexKey(a) == ik);
-    a.terrain.patches = 1;
-    CHECK(69, !(IndexKey(a) == ik));
+    a = tp;
+    a.patch = 9;  // same grid shape: same indices
+    CHECK(68, IndexKey(t, &a) == ik);
+    a.patches = 1;
+    CHECK(69, !(IndexKey(t, &a) == ik));
+    // A terrain record whose inputs the scene does not hold has no vertices (it has no
+    // vertex stream) and no terrain key: nothing is built for it from other data.
+    CHECK(334, RecordVertexCount(t, nullptr) == 0 && PositionKey(t, nullptr).kind == 0 &&
+                   PositionKey(t, nullptr).size == 0 && IndexKey(t, nullptr).kind == 1);
   }
   // 70-72: rigid skin layouts are part of the position key.
   {
@@ -438,16 +445,16 @@ int main() {
     s.skin.palette_addr = 0x3000;
     s.skin.palette_size = 168;
     s.skin.bone_stride = 24;
-    CHECK(70, !(PositionKey(s) == PositionKey(r)) && PositionKey(s).kind == 0);
+    CHECK(70, !(PositionKey(s, nullptr) == PositionKey(r, nullptr)) && PositionKey(s, nullptr).kind == 0);
     capture::DrawRecord s2 = s;
     s2.skin.palette_addr = 0x4000;
-    CHECK(71, !(PositionKey(s2) == PositionKey(s)));
+    CHECK(71, !(PositionKey(s2, nullptr) == PositionKey(s, nullptr)));
     s2 = s;
     s2.skin.index_offset_bytes = 12;
-    CHECK(72, !(PositionKey(s2) == PositionKey(s)));
+    CHECK(72, !(PositionKey(s2, nullptr) == PositionKey(s, nullptr)));
     s2 = s;
     s2.skin.weight_shift[1] = 8;
-    CHECK(73, !(PositionKey(s2) == PositionKey(s)));
+    CHECK(73, !(PositionKey(s2, nullptr) == PositionKey(s, nullptr)));
   }
   // 100-101: the skip reasons of sub-project 5.
   {
@@ -479,44 +486,44 @@ int main() {
     i.instances.first = 2.0f;
     i.instances.bias = 0.5f;
     i.instances.flat_count = 152;
-    const GeoKey k = PositionKey(i);
+    const GeoKey k = PositionKey(i, nullptr);
     CHECK(102, k.kind == 5 && k.addr == 0x2000 && k.size == 1600 && k.stride == 16);
-    CHECK(103, PositionKey(r).kind == 0 && !(PositionKey(r) == k));
+    CHECK(103, PositionKey(r, nullptr).kind == 0 && !(PositionKey(r, nullptr) == k));
     capture::DrawRecord a = i;
     a.instances.first = 3.0f;  // identical except the first copy
-    CHECK(104, PositionKey(a).kind == 5 && !(PositionKey(a) == k));
+    CHECK(104, PositionKey(a, nullptr).kind == 5 && !(PositionKey(a, nullptr) == k));
     a = i;
     a.instances.rows_addr = 0x8000;
-    CHECK(105, !(PositionKey(a) == k));
+    CHECK(105, !(PositionKey(a, nullptr) == k));
     a = i;
     a.instances.rows_size = 28 * 41;
-    CHECK(106, !(PositionKey(a) == k));
+    CHECK(106, !(PositionKey(a, nullptr) == k));
     a = i;
     a.instances.rows[2].swizzle = 0x11;
-    CHECK(107, !(PositionKey(a) == k));
+    CHECK(107, !(PositionKey(a, nullptr) == k));
     a = i;
     a.instances.inv_count = 0.2f;
-    CHECK(108, !(PositionKey(a) == k));
+    CHECK(108, !(PositionKey(a, nullptr) == k));
     a = i;
     a.instances.count = 5.0f;
-    CHECK(109, !(PositionKey(a) == k));
+    CHECK(109, !(PositionKey(a, nullptr) == k));
     a = i;
     a.instances.bias = 0.25f;
-    CHECK(110, !(PositionKey(a) == k));
+    CHECK(110, !(PositionKey(a, nullptr) == k));
     a = i;
     a.instances.offset[1] = 8.0f;
-    CHECK(111, !(PositionKey(a) == k));
+    CHECK(111, !(PositionKey(a, nullptr) == k));
     a = i;
     a.instances.flat_count = 153;
-    CHECK(112, !(PositionKey(a) == k));
+    CHECK(112, !(PositionKey(a, nullptr) == k));
     a = i;
     a.pos.swizzle = 0x11;  // the mesh layout still counts
-    CHECK(113, !(PositionKey(a) == k));
+    CHECK(113, !(PositionKey(a, nullptr) == k));
     a = i;
     a.seq = 99;  // irrelevant to the flat stream
-    CHECK(114, PositionKey(a) == k);
+    CHECK(114, PositionKey(a, nullptr) == k);
     // The flat stream holds flat_count positions, not the mesh's.
-    CHECK(115, RecordVertexCount(i) == 152 && RecordVertexCount(r) == 100);
+    CHECK(115, RecordVertexCount(i, nullptr) == 152 && RecordVertexCount(r, nullptr) == 100);
     // Flat UVs: their own kind, never the mesh's UV buffer or the flat positions.
     const GeoKey uk = UvKey(i);
     CHECK(116, uk.kind == 6 && uk.addr == 0x2000 && uk.size == 1600 && uk.stride == 16);
@@ -528,20 +535,20 @@ int main() {
     // while their flat positions differ.
     a = i;
     a.instances.first = 3.0f;
-    CHECK(118, UvKey(a) == uk && !(PositionKey(a) == k));
+    CHECK(118, UvKey(a) == uk && !(PositionKey(a, nullptr) == k));
     a = i;
     a.instances.rows_addr = 0x8000;
-    CHECK(134, UvKey(a) == uk && !(PositionKey(a) == k));
+    CHECK(134, UvKey(a) == uk && !(PositionKey(a, nullptr) == k));
     a = i;
     a.instances.rows_size = 28 * 41;
-    CHECK(135, UvKey(a) == uk && !(PositionKey(a) == k));
+    CHECK(135, UvKey(a) == uk && !(PositionKey(a, nullptr) == k));
     a = i;
     a.instances.rows[2].swizzle = 0x11;
     a.instances.rows[1].offset_bytes = 12;
-    CHECK(136, UvKey(a) == uk && !(PositionKey(a) == k));
+    CHECK(136, UvKey(a) == uk && !(PositionKey(a, nullptr) == k));
     a = i;
     a.instances.offset[1] = 8.0f;
-    CHECK(137, UvKey(a) == uk && !(PositionKey(a) == k));
+    CHECK(137, UvKey(a) == uk && !(PositionKey(a, nullptr) == k));
     // What changes the vertex an index maps to, or how many UVs are built, changes the key.
     a = i;
     a.instances.inv_count = 0.2f;
@@ -564,7 +571,7 @@ int main() {
     CHECK(141, !(UvKey(a) == uk));
     // The mesh stream on its own (decoded once per frame for all the draws
     // that expand it): the plain keys, whatever the instance set.
-    CHECK(122, MeshPositionKey(i) == PositionKey(r) && MeshPositionKey(i).kind == 0);
+    CHECK(122, MeshPositionKey(i) == PositionKey(r, nullptr) && MeshPositionKey(i).kind == 0);
     CHECK(123, MeshUvKey(i) == UvKey(r) && MeshUvKey(i).kind == 4);
     a = i;
     a.instances.first = 3.0f;
@@ -580,8 +587,8 @@ int main() {
     a.material.uv_vb.size = 3200;
     CHECK(126, !(MeshPositionKey(a) == MeshPositionKey(i)) && !(MeshUvKey(a) == MeshUvKey(i)));
     // The renderer's index rule runs on the flat count: index 151 is the last.
-    CHECK(121, IndexRangeValid(151, 0, RecordVertexCount(i)) &&
-                   !IndexRangeValid(152, 0, RecordVertexCount(i)));
+    CHECK(121, IndexRangeValid(151, 0, RecordVertexCount(i, nullptr)) &&
+                   !IndexRangeValid(152, 0, RecordVertexCount(i, nullptr)));
   }
   // 142-149: an instanced draw decodes no more of its mesh stream than one
   // copy has vertices (every index maps to a vertex below count), and never
@@ -1637,47 +1644,47 @@ int main() {
     // 287-292: the cache key of a far draw's colour coordinates (built from the two tables).
     static const uint32_t kTableU[6] = {0x07004802, 0x1B9D6058, 0x0005E32F, 0x01001400, 0x00000000, 0x00000218};
     static const uint32_t kTableV[6] = {0x07004802, 0x1B9EC058, 0x0005E32F, 0x01001400, 0x00000000, 0x00000218};
-    capture::DrawRecord r = BaseRecord();
-    r.terrain = under;
-    r.terrain.map.phys_addr = 0x1B770000;
-    r.terrain.map.size = 0x138C00;
-    r.terrain.material = fm;
-    std::memcpy(r.terrain.material.far_u_fetch, kTableU, sizeof(kTableU));
-    std::memcpy(r.terrain.material.far_v_fetch, kTableV, sizeof(kTableV));
-    r.terrain.material.far_table[0] = 16.0f / 17;
-    r.terrain.material.far_table[1] = 0.5f / 17;
-    r.terrain.material.far_table[2] = r.terrain.material.far_table[3] = 1.0f / 48;
-    r.terrain.material.far_patch[0] = 12;
-    r.terrain.material.far_patch[1] = 18;
+    const capture::DrawRecord rec = BaseRecord();  // (the position and index keys take the record too)
+    capture::TerrainPatch r = under;
+    r.map.phys_addr = 0x1B770000;
+    r.map.size = 0x138C00;
+    r.material = fm;
+    std::memcpy(r.material.far_u_fetch, kTableU, sizeof(kTableU));
+    std::memcpy(r.material.far_v_fetch, kTableV, sizeof(kTableV));
+    r.material.far_table[0] = 16.0f / 17;
+    r.material.far_table[1] = 0.5f / 17;
+    r.material.far_table[2] = r.material.far_table[3] = 1.0f / 48;
+    r.material.far_patch[0] = 12;
+    r.material.far_patch[1] = 18;
     const GeoKey k = TerrainFarUvKey(r);
-    CHECK(287, k.kind == 7 && k.addr == 0x1B9D6000 && k.stride == capture::kTerrainGrid && !(k == PositionKey(r)) &&
-                   !(k == IndexKey(r)) && TerrainFarUvKey(r) == k);
-    capture::DrawRecord v = r;
-    v.terrain.patch = 37;
+    CHECK(287, k.kind == 7 && k.addr == 0x1B9D6000 && k.stride == capture::kTerrainGrid && !(k == PositionKey(rec, &r)) &&
+                   !(k == IndexKey(rec, &r)) && TerrainFarUvKey(r) == k);
+    capture::TerrainPatch v = r;
+    v.patch = 37;
     CHECK(288, !(TerrainFarUvKey(v) == k));
     v = r;
-    v.terrain.patches = 6;
+    v.patches = 6;
     CHECK(289, !(TerrainFarUvKey(v) == k));
     v = r;
-    v.terrain.material.far_patch[1] = 12;
-    capture::DrawRecord w = r;
-    w.terrain.material.far_table[0] = 0.5f;
+    v.material.far_patch[1] = 12;
+    capture::TerrainPatch w = r;
+    w.material.far_table[0] = 0.5f;
     CHECK(290, !(TerrainFarUvKey(v) == k) && !(TerrainFarUvKey(w) == k));
     v = r;
-    v.terrain.material.far_v_fetch[1] = 0x1B9ED058;  // another v table
+    v.material.far_v_fetch[1] = 0x1B9ED058;  // another v table
     w = r;
-    w.terrain.material.far_u_fetch[2] = 0x0005E32E;  // another size
+    w.material.far_u_fetch[2] = 0x0005E32E;  // another size
     CHECK(291, !(TerrainFarUvKey(v) == k) && !(TerrainFarUvKey(w) == k));
     v = r;
-    v.terrain.material.far_v_fetch[2] = 0x0005E32E;  // the v table's size
+    v.material.far_v_fetch[2] = 0x0005E32E;  // the v table's size
     w = r;
-    w.terrain.material.far_u_fetch[0] = 0x06C04802;  // the u table's pitch
+    w.material.far_u_fetch[0] = 0x06C04802;  // the u table's pitch
     CHECK(293, !(TerrainFarUvKey(v) == k) && !(TerrainFarUvKey(w) == k));
     // What changes every frame without changing the coordinates is not in the key.
     v = r;
-    v.terrain.material.eye[0] += 1.0f;
-    v.terrain.material.fade[1] = 0.0f;
-    v.terrain.height_scale = 2.0f;
+    v.material.eye[0] += 1.0f;
+    v.material.fade[1] = 0.0f;
+    v.height_scale = 2.0f;
     CHECK(292, TerrainFarUvKey(v) == k);
 
     // 307-312: the cache key of a steep layer's vertex normals (built from the normal map at the
@@ -1685,54 +1692,53 @@ int main() {
     // the map. What the normals do not depend on stays out: the height scale, the layer's textures
     // and constants (every layer of a square shares one buffer), the eye.
     static const uint32_t kTf17[6] = {0x87004802, 0x1B8AA071, 0x00600300, 0x01000D10, 0x00000000, 0x00000218};
-    capture::DrawRecord n = BaseRecord();
-    n.terrain = under;
-    n.terrain.map.phys_addr = 0x1B770000;
-    n.terrain.map.size = 0x138C00;
-    n.terrain.material = sm;
-    std::memcpy(n.terrain.material.normal_fetch, kTf17, sizeof(kTf17));
+    capture::TerrainPatch n = under;
+    n.map.phys_addr = 0x1B770000;
+    n.map.size = 0x138C00;
+    n.material = sm;
+    std::memcpy(n.material.normal_fetch, kTf17, sizeof(kTf17));
     const GeoKey nk = TerrainNormalKey(n);
-    CHECK(307, nk.kind == 8 && nk.addr == 0x1B8AA000 && nk.stride == capture::kTerrainGrid && !(nk == PositionKey(n)) &&
-                   !(nk == IndexKey(n)) && !(nk == TerrainFarUvKey(n)) && TerrainNormalKey(n) == nk);
+    CHECK(307, nk.kind == 8 && nk.addr == 0x1B8AA000 && nk.stride == capture::kTerrainGrid && !(nk == PositionKey(rec, &n)) &&
+                   !(nk == IndexKey(rec, &n)) && !(nk == TerrainFarUvKey(n)) && TerrainNormalKey(n) == nk);
     v = n;
-    v.terrain.material.normal_fetch[1] = 0x1B8AB071;  // another map
+    v.material.normal_fetch[1] = 0x1B8AB071;  // another map
     w = n;
-    w.terrain.material.normal_fetch[2] = 0x00600301;  // another size
+    w.material.normal_fetch[2] = 0x00600301;  // another size
     CHECK(308, !(TerrainNormalKey(v) == nk) && !(TerrainNormalKey(w) == nk));
     v = n;
-    v.terrain.material.normal_fetch[1] = 0x1B8AA031;  // the same address read with another byte order
+    v.material.normal_fetch[1] = 0x1B8AA031;  // the same address read with another byte order
     CHECK(318, !(TerrainNormalKey(v) == nk) && TerrainNormalKey(v).addr == nk.addr);
     v = n;
-    v.terrain.material.normal_fetch[0] = 0x86C04802;  // another pitch
+    v.material.normal_fetch[0] = 0x86C04802;  // another pitch
     w = n;
-    w.terrain.material.normal_fetch[0] = 0x87000002;  // other clamp modes
+    w.material.normal_fetch[0] = 0x87000002;  // other clamp modes
     CHECK(309, !(TerrainNormalKey(v) == nk) && !(TerrainNormalKey(w) == nk));
     v = n;
-    v.terrain.patch += 1.0f;
+    v.patch += 1.0f;
     w = n;
-    w.terrain.patches += 1;
+    w.patches += 1;
     CHECK(310, !(TerrainNormalKey(v) == nk) && !(TerrainNormalKey(w) == nk));
     {
       // Each number that places a grid point on the map.
       bool all = true;
       for (int field = 0; field < 10; ++field) {
-        capture::DrawRecord x = n;
-        float* at[10] = {&x.terrain.cols, &x.terrain.inv_cols, &x.terrain.cell[0], &x.terrain.cell[1],
-                         &x.terrain.origin[0], &x.terrain.origin[1], &x.terrain.tex_offset[0], &x.terrain.tex_offset[1],
-                         &x.terrain.tex_scale[0], &x.terrain.tex_scale[1]};
+        capture::TerrainPatch x = n;
+        float* at[10] = {&x.cols, &x.inv_cols, &x.cell[0], &x.cell[1],
+                         &x.origin[0], &x.origin[1], &x.tex_offset[0], &x.tex_offset[1],
+                         &x.tex_scale[0], &x.tex_scale[1]};
         *at[field] += 0.25f;
         all = all && !(TerrainNormalKey(x) == nk);
       }
       CHECK(311, all);
     }
     v = n;
-    v.terrain.height_scale = 2.0f;
-    v.terrain.material.eye[0] += 1.0f;
-    v.terrain.material.detail_fetch[1] ^= 0x1000u;   // another layer of the same square
-    v.terrain.material.side_fetch[1] ^= 0x1000u;
-    v.terrain.material.weight_uv[2] += 0.5f;
-    v.terrain.material.slope[0] = 0.0f;
-    v.terrain.map.phys_addr = 0x1B780000;            // (the heights are the position buffer's)
+    v.height_scale = 2.0f;
+    v.material.eye[0] += 1.0f;
+    v.material.detail_fetch[1] ^= 0x1000u;   // another layer of the same square
+    v.material.side_fetch[1] ^= 0x1000u;
+    v.material.weight_uv[2] += 0.5f;
+    v.material.slope[0] = 0.0f;
+    v.map.phys_addr = 0x1B780000;            // (the heights are the position buffer's)
     CHECK(312, TerrainNormalKey(v) == nk);
   }
   if (g_fail) return g_fail;

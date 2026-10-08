@@ -2579,7 +2579,8 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   // AssembleRecord's, which only sees the inputs filled before it.
   r.skip = ResolveSkip(r.skip, extra);
   if (r.skip == SkipReason::kUnsupportedPrim && id < kMaxHookIds) ++g_unsupported_by_hook[id];
-  g_builder.Add(r);
+  // A terrain draw's inputs go to the frame's side array, not into the record.
+  g_builder.Add(r, TerrainInputsOf(in));
 }
 
 // Device tiling flag byte, or nullptr if unreadable.
@@ -2776,6 +2777,19 @@ void LogShaderBreakdown(const render::FrameScene& sc) {
 // Publishes the frame's scene (none for a frame without records, so a
 // consumer never draws a stale one); every 300 guest frames logs its coverage
 // (frame-map section 9) and the guest-thread capture time, with any view.
+//
+// Ownership of the records and their side arrays (FrameScene::terrain): while a
+// frame is captured they belong to g_builder and are written only under
+// g_scene_mutex. FrameBuilder::Finish (EndMainSceneFrame, under that mutex)
+// moves them into a new FrameScene and leaves the builder with new, empty
+// vectors; EndMainSceneFrame fills the scene's two remaining fields and keeps
+// only a pointer to const, so from then on nothing can write them. The scene
+// is published here as a shared_ptr<const FrameScene>: the render thread takes
+// its own reference (ScenePublisher::Latest, under the publisher's mutex) and
+// only reads, for as long as it keeps that reference; pointers into the scene
+// (TerrainOf) are valid for that long. A side array is therefore never read
+// while it is written: it is reachable from the render thread only after the
+// last write to it.
 void PublishScene(const FinishedScene& done) {
   if (!done.scene) return;
   const render::FrameScene& sc = *done.scene;

@@ -66,6 +66,12 @@ inline void SanitizeCut(const float in[4], float out[4]) {
 // kDot: clip[i] = dot(row[i], p).  kCombine: clip = p.x*row0 + p.y*row1 + p.z*row2 + p.w*row3.
 enum class TransformLayout : uint8_t { kDot = 0, kCombine = 1 };
 
+// A record's index into one of its frame's side arrays (frame_scene.h) when the
+// frame holds nothing there for it. Inputs only some draws have are kept in a
+// side array of the frame and indexed from the record, so that the other
+// records do not carry them.
+inline constexpr uint16_t kNoSideIndex = 0xFFFF;
+
 struct DrawRecord {
   uint32_t seq = 0;
   uint32_t func_id = 0;
@@ -96,8 +102,11 @@ struct DrawRecord {
   // constants). Not part of any geometry cache key: the eye moves every frame.
   float cut[4] = {0.0f, 0.0f, 0.0f, kNoCut};
   // A heightmap terrain patch run (terrain_patch.h): no vertex or index buffer;
-  // the renderer builds the grid from the heightmap.
-  TerrainPatch terrain;
+  // the renderer builds the grid from the heightmap. The patch and its material
+  // inputs are entry `terrain_index` of the frame's FrameScene::terrain, read
+  // through TerrainOf (frame_scene.h); kNoSideIndex: not a terrain record. Set
+  // by FrameBuilder::Add, which owns the array, never by AssembleRecord.
+  uint16_t terrain_index = kNoSideIndex;
   // Albedo texture and UVs (material.h); status says why a draw stays clay.
   Material material;
   // The draw's GPU render-state words as the device held them (render_state.h);
@@ -105,6 +114,12 @@ struct DrawRecord {
   StateWords state_words;
   SkipReason skip = SkipReason::kNone;
 };
+
+// 1,064 bytes with the terrain inputs (452) in every record; a frame has about
+// 950 records at the bridge and each is copied into the frame on the guest
+// thread. Measured, so that a field added here is noticed: inputs that only
+// some draws have belong in a side array.
+static_assert(sizeof(DrawRecord) == 616, "DrawRecord grew or shrank: see the comment above");
 
 struct TransformInfo {
   uint32_t base_reg;
@@ -159,6 +174,18 @@ struct DrawInputs {
   bool depth_only = false;
 };
 
+// Terrain: a tessellated patch draw whose shader has a terrain entry.
+inline bool IsTerrainDraw(const DrawInputs& in) { return in.prim == kPrimQuadPatch && in.terrain_shader; }
+
+// The terrain inputs the frame keeps for the record AssembleRecord makes of
+// `in` (FrameBuilder::Add): the patch of a terrain draw that was built. Null
+// for every other draw: terrain fields on an ordinary draw are ignored, and a
+// terrain draw without its patch is skipped (kUnknownPosFormat).
+inline const TerrainPatch* TerrainInputsOf(const DrawInputs& in) {
+  return IsTerrainDraw(in) && in.terrain.active ? &in.terrain : nullptr;
+}
+
+// The record of a draw. A terrain draw's patch is not in it (TerrainInputsOf).
 inline DrawRecord AssembleRecord(const DrawInputs& in, uint32_t seq) {
   DrawRecord r;
   r.seq = seq;
@@ -176,8 +203,7 @@ inline DrawRecord AssembleRecord(const DrawInputs& in, uint32_t seq) {
   r.material = in.material;
   r.state_words = in.state_words;
   auto skip = [&](SkipReason why) { r.skip = why; return r; };
-  // Terrain: a tessellated patch draw whose shader has a terrain entry.
-  const bool terrain = in.prim == kPrimQuadPatch && in.terrain_shader;
+  const bool terrain = IsTerrainDraw(in);
   if (!terrain && !IsSupportedPrim(in.prim)) return skip(SkipReason::kUnsupportedPrim);
   if (!in.have_shader) return skip(SkipReason::kUnknownShader);
   if (in.depth_only) return skip(SkipReason::kDepthOnly);
@@ -203,7 +229,6 @@ inline DrawRecord AssembleRecord(const DrawInputs& in, uint32_t seq) {
       return skip(SkipReason::kBadMemory);
   }
   if (!in.transform || !in.bank || in.transform->base_reg > 252) return skip(SkipReason::kNoTransform);
-  if (terrain) r.terrain = in.terrain;
   r.skin = in.skin;
   if (!terrain) r.instances = in.instances;
   if (r.instances.active) SanitizeCut(in.cut, r.cut);

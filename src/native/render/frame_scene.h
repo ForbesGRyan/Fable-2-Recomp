@@ -22,6 +22,10 @@ inline constexpr size_t kUntexturedTop = 8;
 struct FrameScene {
   uint64_t frame = 0;
   std::vector<capture::DrawRecord> draws;
+  // Side array of `draws`: the terrain inputs of its terrain records, each at
+  // its record's terrain_index (TerrainOf). Built with the records, handed
+  // over with them (FrameBuilder::Finish) and, like them, never written again.
+  std::vector<capture::TerrainPatch> terrain;
   uint32_t captured = 0;
   uint32_t skipped[size_t(capture::SkipReason::kCount)] = {};
   // Skipped draws per (vertex shader hash, skip reason as the kind), for the
@@ -39,6 +43,15 @@ struct FrameScene {
   double capture_ms = 0;
 };
 
+// The terrain inputs of record `r` of `scene`. Null for a record that is not a
+// terrain record and for an index the scene's array does not hold (a record of
+// another scene): the array is never read past its end. The pointer is into
+// the scene and lives as long as it.
+inline const capture::TerrainPatch* TerrainOf(const FrameScene& scene, const capture::DrawRecord& r) {
+  if (r.terrain_index == capture::kNoSideIndex || r.terrain_index >= scene.terrain.size()) return nullptr;
+  return &scene.terrain[r.terrain_index];
+}
+
 class FrameBuilder {
  public:
   void Open() { open_ = true; }
@@ -46,11 +59,24 @@ class FrameBuilder {
   bool InMainScene() const { return open_; }
   uint32_t NextSeq() const { return captured_; }
 
-  void Add(const capture::DrawRecord& r) {
+  // `terrain`: the terrain inputs of the draw (capture::TerrainInputsOf), null
+  // for a draw that has none. A drawable record's are copied to the frame's
+  // side array and the record gets their index; whatever index `r` came with
+  // is not kept. An index is 16 bits and kNoSideIndex means none, so a frame
+  // holds at most kNoSideIndex terrain records: one more is skipped as
+  // bad-memory (the capture's reason for a count past a cap) and counted like
+  // any skipped draw, so that no index wraps onto another record's inputs.
+  void Add(const capture::DrawRecord& r, const capture::TerrainPatch* terrain = nullptr) {
     if (!open_) return;
     ++captured_;
-    if (r.skip == capture::SkipReason::kNone) {
+    capture::SkipReason skip = r.skip;
+    if (skip == capture::SkipReason::kNone && terrain && terrain_.size() >= capture::kNoSideIndex) {
+      skip = capture::SkipReason::kBadMemory;
+    }
+    if (skip == capture::SkipReason::kNone) {
       draws_.push_back(r);
+      draws_.back().terrain_index = terrain ? uint16_t(terrain_.size()) : capture::kNoSideIndex;
+      if (terrain) terrain_.push_back(*terrain);
       const capture::MaterialStatus m = r.material.status;
       if (size_t(m) < size_t(capture::MaterialStatus::kCount)) ++material_[size_t(m)];
       if (m == capture::MaterialStatus::kPsUnknown || m == capture::MaterialStatus::kNoAlbedo ||
@@ -58,9 +84,9 @@ class FrameBuilder {
         untextured_ps_.Add(r.material.ps_hash, 0);
       }
     } else {
-      ++skipped_[size_t(r.skip)];
-      if (r.skip != capture::SkipReason::kUnsupportedPrim) {
-        skipped_by_vs_.Add(r.vs_hash, uint8_t(r.skip));
+      ++skipped_[size_t(skip)];
+      if (skip != capture::SkipReason::kUnsupportedPrim) {
+        skipped_by_vs_.Add(r.vs_hash, uint8_t(skip));
       }
     }
   }
@@ -71,6 +97,9 @@ class FrameBuilder {
   }
 
   // The caller may fill the scene's remaining fields before publishing it.
+  // The records and their side array move into the scene together and the
+  // builder starts the next frame with new, empty ones: nothing of a finished
+  // scene is written by the builder again.
   std::shared_ptr<FrameScene> Finish(uint64_t frame) {
     auto s = std::make_shared<FrameScene>();
     s->frame = frame;
@@ -88,6 +117,10 @@ class FrameBuilder {
     s->draws = std::move(draws_);
     draws_ = {};
     draws_.reserve(reserve);
+    const size_t terrain_reserve = terrain_.size();
+    s->terrain = std::move(terrain_);
+    terrain_ = {};
+    terrain_.reserve(terrain_reserve);
     captured_ = 0;
     std::fill(std::begin(skipped_), std::end(skipped_), 0u);
     open_ = false;
@@ -102,6 +135,7 @@ class FrameBuilder {
   uint32_t material_[size_t(capture::MaterialStatus::kCount)] = {};
   capture::ShaderTally<kUntexturedTallySize> untextured_ps_;
   std::vector<capture::DrawRecord> draws_;
+  std::vector<capture::TerrainPatch> terrain_;  // side array of draws_ (FrameScene::terrain)
 };
 
 class ScenePublisher {

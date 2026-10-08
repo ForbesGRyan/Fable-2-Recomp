@@ -105,15 +105,16 @@ class ClayPass {
   nrhi::Pipeline* PipelineFor(nrhi::Device* dev, const PipelineKey& key, ClayStats& st,
                               nrhi::Pipeline* fallback = nullptr);
   bool CreateWhite(nrhi::Device* dev);
-  // Terrain records (Render). PrepareTerrain: geometry, and with textures on the
+  // Terrain records (Render; `terrain`: the record's inputs in the scene's side
+  // array, TerrainOf). PrepareTerrain: geometry, and with textures on the
   // textures, far coordinates or vertex normals, pipeline and status of the record's material
   // (a record whose state cannot be drawn as captured, or that finds no
   // pipeline, has none); adds its entry to prepared_ and terrain_items_.
   // FinishTerrain, after every record:
   // which records are drawn with the material, as flat clay or not at all
   // (PlanTerrain), their pipelines, constants and counters.
-  void PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::DrawRecord& r, bool textured,
-                      ClayStats& st, TextureStats& tst);
+  void PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::DrawRecord& r,
+                      const capture::TerrainPatch& terrain, bool textured, ClayStats& st, TextureStats& tst);
   void FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, TextureStats& tst);
   // The texture behind a fetch constant, through the texture cache; with `memo`
   // looked up once per frame (terrain_textures_).

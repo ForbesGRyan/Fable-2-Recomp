@@ -318,30 +318,31 @@ nrhi::TextureView* ClayPass::ResolveTerrainTexture(nrhi::Cmd* cmd, nrhi::Device*
   return t.view;
 }
 
-void ClayPass::PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::DrawRecord& r, bool textured,
-                              ClayStats& st, TextureStats& tst) {
+void ClayPass::PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::DrawRecord& r,
+                              const capture::TerrainPatch& terrain, bool textured, ClayStats& st,
+                              TextureStats& tst) {
   using capture::MaterialStatus;
   Prepared p;
   p.r = &r;
   p.terrain = true;
   uint32_t buffer_vertices = 0;
-  p.positions = geometry_.Positions(dev, r, &buffer_vertices, st);
+  p.positions = geometry_.Positions(dev, r, &terrain, &buffer_vertices, st);
   if (p.positions) {
-    p.vertex_count = DrawVertexCount(buffer_vertices, RecordVertexCount(r));
-    p.indices = geometry_.Indices(dev, r, p.vertex_count, &p.index_count, st);
+    p.vertex_count = DrawVertexCount(buffer_vertices, RecordVertexCount(r, &terrain));
+    p.indices = geometry_.Indices(dev, r, &terrain, p.vertex_count, &p.index_count, st);
   }
   // The adaptive builder draws the far ground and the layers' underlay; every
   // other terrain record is a layer of the layer builder.
   const bool adaptive = r.func_id == capture::kHook_DrawIndx_82207C30;
   TerrainPlanItem item;
-  item.patch = &r.terrain;
+  item.patch = &terrain;  // into the scene, which outlives this Render
   item.layer = !adaptive;
   item.drawable = p.positions && p.indices;
   // A record without geometry makes its square fall back like one without its
   // material: the Terrain line names it by what was missing.
   if (textured && !item.drawable) ++(p.positions ? st.terrain_no_indices : st.terrain_no_positions);
   if (textured && item.drawable) {
-    const capture::TerrainMaterialInputs& m = r.terrain.material;
+    const capture::TerrainMaterialInputs& m = terrain.material;
     const capture::MaterialKind kind = r.material.kind;
     const capture::RenderState rs = capture::DecodeRenderState(r.state_words);
     MaterialStatus colour = MaterialStatus::kTextured, weight = MaterialStatus::kTextured;
@@ -353,7 +354,7 @@ void ClayPass::PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::
       // The layers share a few detail textures and one weight atlas; most far draws have their own colour.
       p.albedo = ResolveTerrainTexture(cmd, dev, m.detail_fetch, !adaptive, &p.sampler, p.uv_fix, &colour, tst);
       if (adaptive) {
-        p.uvs = p.albedo ? geometry_.TerrainFarUvs(dev, r, p.vertex_count, st) : nullptr;
+        p.uvs = p.albedo ? geometry_.TerrainFarUvs(dev, terrain, p.vertex_count, st) : nullptr;
         far_uvs = p.uvs != nullptr;
       } else {
         float fix[2];  // the weights' coordinate is in texels of the guest extent; the decode pads nothing
@@ -362,7 +363,7 @@ void ClayPass::PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::
           // The steep-ground block: the layer's side texture (a few are shared by all layers) and
           // the game's vertex normals at the grid points (one buffer for all layers of a square).
           p.side = ResolveTerrainTexture(cmd, dev, m.side_fetch, true, &p.side_sampler, p.side_fix, &side, tst);
-          p.uvs = p.side ? geometry_.TerrainNormals(dev, r, p.vertex_count, st) : nullptr;
+          p.uvs = p.side ? geometry_.TerrainNormals(dev, terrain, p.vertex_count, st) : nullptr;
           normals = p.uvs != nullptr;
         }
       }
@@ -472,7 +473,7 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
       // The weights are read with a linear filter whatever the fetch constant says (it is the
       // vertex shader's, point sampled at the cell's texel centres).
       // (a layer with the steep-ground block has its side texture and normals here: TerrainSteepStatus)
-      const ClayTerrainConstants c = MakeClayTerrainConstants(r.terrain.material, r.material.kind, p.uv_fix,
+      const ClayTerrainConstants c = MakeClayTerrainConstants(item.patch->material, r.material.kind, p.uv_fix,
                                                               p.sampler, p.weight_sampler | 1u,
                                                               p.side ? p.side_fix : nullptr, p.side_sampler);
       std::memcpy(slots + size_t(p.slot) * kClayTerrainSlotBytes, &c, sizeof(c));
@@ -513,8 +514,15 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   terrain_items_.clear();
   terrain_textures_.clear();
   for (const capture::DrawRecord& r : scene.draws) {
-    if (r.terrain.active) {
-      PrepareTerrain(cmd, dev, r, textured, st, tst);
+    if (r.terrain_index != capture::kNoSideIndex) {
+      // A terrain record: its inputs are in the scene's side array. One whose
+      // index the scene does not hold (the builder makes none) has nothing it
+      // could be drawn from.
+      if (const capture::TerrainPatch* terrain = TerrainOf(scene, r)) {
+        PrepareTerrain(cmd, dev, r, *terrain, textured, st, tst);
+      } else {
+        ++st.skipped_other;
+      }
       continue;
     }
     const capture::RenderState rs = capture::DecodeRenderState(r.state_words);
@@ -532,10 +540,10 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     Prepared p;
     p.r = &r;
     uint32_t buffer_vertices = 0;
-    p.positions = geometry_.Positions(dev, r, &buffer_vertices, st);
+    p.positions = geometry_.Positions(dev, r, nullptr, &buffer_vertices, st);
     if (!p.positions) continue;
-    p.vertex_count = DrawVertexCount(buffer_vertices, RecordVertexCount(r));
-    p.indices = geometry_.Indices(dev, r, p.vertex_count, &p.index_count, st);
+    p.vertex_count = DrawVertexCount(buffer_vertices, RecordVertexCount(r, nullptr));
+    p.indices = geometry_.Indices(dev, r, nullptr, p.vertex_count, &p.index_count, st);
     if (!p.indices) continue;
     capture::MaterialStatus status = r.material.status;  // capture statuses pass through
     if (may_texture) {
@@ -647,7 +655,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     ++st.drawn;
     if (r.deformed) ++st.deformed;
     // Which builder made the positions (the order of GeometryCache::Positions).
-    if (!r.terrain.active) {
+    if (!p.terrain) {
       if (r.instances.active) {
         ++st.instanced;
       } else if (r.skin.active) {

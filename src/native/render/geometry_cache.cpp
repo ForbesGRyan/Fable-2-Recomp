@@ -113,8 +113,9 @@ uint64_t GeometryCache::FrameHash(uint32_t phys_addr, uint32_t size, const uint8
 // Terrain patch runs: the grid is rebuilt from the heightmap when the map's
 // bytes or any patch parameter (the key) change.
 nrhi::Buffer* GeometryCache::TerrainPositions(nrhi::Device* dev, const capture::DrawRecord& r,
-                                              uint32_t* vertex_count, ClayStats& st) {
-  const capture::HeightMap& m = r.terrain.map;
+                                              const capture::TerrainPatch& t, uint32_t* vertex_count,
+                                              ClayStats& st) {
+  const capture::HeightMap& m = t.map;
   const auto t0 = Clock::now();
   const uint8_t* src = m.size ? capture::ReadPhysical(m.phys_addr, m.size) : nullptr;
   if (!src) {
@@ -123,7 +124,7 @@ nrhi::Buffer* GeometryCache::TerrainPositions(nrhi::Device* dev, const capture::
     return nullptr;
   }
   const uint64_t hash = FrameHash(m.phys_addr, m.size, src);
-  const GeoKey key = PositionKey(r);
+  const GeoKey key = PositionKey(r, &t);
   const LookupResult found = index_.Lookup(key, hash);
   const auto t1 = Clock::now();
   st.hash_ms += Ms(t0, t1);
@@ -136,7 +137,7 @@ nrhi::Buffer* GeometryCache::TerrainPositions(nrhi::Device* dev, const capture::
   }
   nrhi::Buffer* buffer = nullptr;
   uint64_t alloc = 0;
-  if (capture::BuildTerrainPositions(r.terrain, src, m.size, capture::kTerrainGrid, &positions_)) {
+  if (capture::BuildTerrainPositions(t, src, m.size, capture::kTerrainGrid, &positions_)) {
     buffer = Upload(dev, positions_.data(), uint64_t(positions_.size()) * sizeof(capture::Float4),
                     &alloc);
   }
@@ -225,7 +226,7 @@ nrhi::Buffer* GeometryCache::InstancedPositions(nrhi::Device* dev, const capture
   }
   const uint64_t mesh_hash = FrameHash(r.vb.phys_addr, r.vb.size, mesh);
   const uint64_t hash = mesh_hash ^ (FrameHash(s.rows_addr, s.rows_size, rows) * kSecondStreamMix);
-  const GeoKey key = PositionKey(r);
+  const GeoKey key = PositionKey(r, nullptr);  // (never a terrain record)
   const LookupResult found = index_.Lookup(key, hash);
   const auto t1 = Clock::now();
   st.hash_ms += Ms(t0, t1);
@@ -256,8 +257,9 @@ nrhi::Buffer* GeometryCache::InstancedPositions(nrhi::Device* dev, const capture
 }
 
 nrhi::Buffer* GeometryCache::Positions(nrhi::Device* dev, const capture::DrawRecord& r,
-                                       uint32_t* vertex_count, ClayStats& st) {
-  if (r.terrain.active) return TerrainPositions(dev, r, vertex_count, st);
+                                       const capture::TerrainPatch* terrain, uint32_t* vertex_count,
+                                       ClayStats& st) {
+  if (terrain) return TerrainPositions(dev, r, *terrain, vertex_count, st);
   if (r.instances.active) return InstancedPositions(dev, r, vertex_count, st);
   const uint32_t count = PositionCount(r.vb.size, r.pos);
   if (count == 0) {
@@ -283,7 +285,7 @@ nrhi::Buffer* GeometryCache::Positions(nrhi::Device* dev, const capture::DrawRec
     }
     hash ^= XXH3_64bits(palette, r.skin.palette_size) * kSecondStreamMix;
   }
-  const GeoKey key = PositionKey(r);
+  const GeoKey key = PositionKey(r, nullptr);
   const LookupResult found = index_.Lookup(key, hash);
   const auto t1 = Clock::now();
   st.hash_ms += Ms(t0, t1);
@@ -403,13 +405,13 @@ nrhi::Buffer* GeometryCache::Uvs(nrhi::Device* dev, const capture::DrawRecord& r
   return buffer;
 }
 
-nrhi::Buffer* GeometryCache::TerrainFarUvs(nrhi::Device* dev, const capture::DrawRecord& r,
+nrhi::Buffer* GeometryCache::TerrainFarUvs(nrhi::Device* dev, const capture::TerrainPatch& t,
                                            uint32_t vertex_count, ClayStats& st) {
   // A table of garbage constants can claim hundreds of MB; the largest seen is 86 KB.
   constexpr uint32_t kMaxTableBytes = 16u << 20;
-  const capture::TerrainMaterialInputs& m = r.terrain.material;
+  const capture::TerrainMaterialInputs& m = t.material;
   capture::HeightMap um, vm;
-  if (!r.terrain.active || !m.valid || !m.adaptive || !capture::DecodeHeightMap(m.far_u_fetch, &um) ||
+  if (!t.active || !m.valid || !m.adaptive || !capture::DecodeHeightMap(m.far_u_fetch, &um) ||
       !capture::DecodeHeightMap(m.far_v_fetch, &vm) || um.size == 0 || vm.size == 0 ||
       um.size > kMaxTableBytes || vm.size > kMaxTableBytes) {
     return nullptr;
@@ -423,7 +425,7 @@ nrhi::Buffer* GeometryCache::TerrainFarUvs(nrhi::Device* dev, const capture::Dra
   }
   const uint64_t hash = FrameHash(um.phys_addr, um.size, u) ^
                         (FrameHash(vm.phys_addr, vm.size, v) * kSecondStreamMix);
-  const GeoKey key = TerrainFarUvKey(r);
+  const GeoKey key = TerrainFarUvKey(t);
   const LookupResult found = index_.Lookup(key, hash);
   const auto t1 = Clock::now();
   st.hash_ms += Ms(t0, t1);
@@ -435,7 +437,7 @@ nrhi::Buffer* GeometryCache::TerrainFarUvs(nrhi::Device* dev, const capture::Dra
   }
   nrhi::Buffer* buffer = nullptr;
   uint64_t alloc = 0;
-  if (capture::BuildTerrainFarUvs(r.terrain, um, u, um.size, vm, v, vm.size, capture::kTerrainGrid, &uvs_) &&
+  if (capture::BuildTerrainFarUvs(t, um, u, um.size, vm, v, vm.size, capture::kTerrainGrid, &uvs_) &&
       uvs_.size() >= vertex_count) {
     buffer = Upload(dev, uvs_.data(), uint64_t(uvs_.size()) * sizeof(capture::Float2), &alloc);
   }
@@ -447,13 +449,13 @@ nrhi::Buffer* GeometryCache::TerrainFarUvs(nrhi::Device* dev, const capture::Dra
   return buffer;
 }
 
-nrhi::Buffer* GeometryCache::TerrainNormals(nrhi::Device* dev, const capture::DrawRecord& r,
+nrhi::Buffer* GeometryCache::TerrainNormals(nrhi::Device* dev, const capture::TerrainPatch& t,
                                             uint32_t vertex_count, ClayStats& st) {
   // A map of garbage constants can claim hundreds of MB; the one seen is 803 KB.
   constexpr uint32_t kMaxMapBytes = 16u << 20;
-  const capture::TerrainMaterialInputs& m = r.terrain.material;
+  const capture::TerrainMaterialInputs& m = t.material;
   capture::NormalMap nm;
-  if (!r.terrain.active || !m.valid || m.adaptive || !m.steep || !capture::DecodeNormalMap(m.normal_fetch, &nm) ||
+  if (!t.active || !m.valid || m.adaptive || !m.steep || !capture::DecodeNormalMap(m.normal_fetch, &nm) ||
       nm.size == 0 || nm.size > kMaxMapBytes) {
     return nullptr;
   }
@@ -464,7 +466,7 @@ nrhi::Buffer* GeometryCache::TerrainNormals(nrhi::Device* dev, const capture::Dr
     return nullptr;
   }
   const uint64_t hash = FrameHash(nm.phys_addr, nm.size, src);
-  const GeoKey key = TerrainNormalKey(r);
+  const GeoKey key = TerrainNormalKey(t);
   const LookupResult found = index_.Lookup(key, hash);
   const auto t1 = Clock::now();
   st.hash_ms += Ms(t0, t1);
@@ -476,7 +478,7 @@ nrhi::Buffer* GeometryCache::TerrainNormals(nrhi::Device* dev, const capture::Dr
   }
   nrhi::Buffer* buffer = nullptr;
   uint64_t alloc = 0;
-  if (capture::BuildTerrainNormals(r.terrain, nm, src, nm.size, capture::kTerrainGrid, &uvs_) &&
+  if (capture::BuildTerrainNormals(t, nm, src, nm.size, capture::kTerrainGrid, &uvs_) &&
       uvs_.size() >= vertex_count) {
     buffer = Upload(dev, uvs_.data(), uint64_t(uvs_.size()) * sizeof(capture::Float2), &alloc);
   }
@@ -489,12 +491,13 @@ nrhi::Buffer* GeometryCache::TerrainNormals(nrhi::Device* dev, const capture::Dr
 }
 
 nrhi::Buffer* GeometryCache::Indices(nrhi::Device* dev, const capture::DrawRecord& r,
-                                     uint32_t vertex_count, uint32_t* index_count, ClayStats& st) {
+                                     const capture::TerrainPatch* terrain, uint32_t vertex_count,
+                                     uint32_t* index_count, ClayStats& st) {
   const auto t0 = Clock::now();
   const uint8_t* data = nullptr;
   IndexBytes bytes;
   uint64_t hash = 0;
-  if (r.indexed && !r.terrain.active) {
+  if (r.indexed && !terrain) {
     if (r.count == 0 || !ReferencedIndexBytes(r, &bytes) ||
         !(data = capture::ReadPhysical(r.ib.phys_addr + bytes.offset, bytes.size))) {
       st.hash_ms += Ms(t0, Clock::now());
@@ -503,7 +506,7 @@ nrhi::Buffer* GeometryCache::Indices(nrhi::Device* dev, const capture::DrawRecor
     }
     hash = XXH3_64bits(data, bytes.size);
   }
-  const GeoKey key = IndexKey(r);
+  const GeoKey key = IndexKey(r, terrain);
   const LookupResult found = index_.Lookup(key, hash);
   const auto t1 = Clock::now();
   st.hash_ms += Ms(t0, t1);
@@ -521,10 +524,10 @@ nrhi::Buffer* GeometryCache::Indices(nrhi::Device* dev, const capture::DrawRecor
     // data already points at the draw's first index; non-indexed draws
     // generate start + i.
     bool built;
-    if (r.terrain.active) {
-      capture::BuildGridIndices(capture::kTerrainGrid, r.terrain.patches, &indices_);
-      max_index = r.terrain.patches * (capture::kTerrainGrid + 1) * (capture::kTerrainGrid + 1) - 1;
-      built = r.terrain.patches != 0;
+    if (terrain) {
+      capture::BuildGridIndices(capture::kTerrainGrid, terrain->patches, &indices_);
+      max_index = terrain->patches * (capture::kTerrainGrid + 1) * (capture::kTerrainGrid + 1) - 1;
+      built = terrain->patches != 0;
     } else {
       const capture::IndexSource src{data, bytes.size, r.index32};
       built = capture::BuildTriangleList(src, r.indexed ? 0 : r.start, r.count, r.prim, indices_,

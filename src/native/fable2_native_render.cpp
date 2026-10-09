@@ -48,6 +48,10 @@ REXCVAR_DEFINE_STRING(fable2_native_light, "on", "Fable2",
                       "game's ambient, baked and sun light (no shadows; one fixed exposure on the lit draws, fitted on the bridge's "
                       "dirt patch; unlit draws are shown as with the light off); "
                       "off = the unlit materials picture.");
+REXCVAR_DEFINE_STRING(fable2_native_shadows, "off", "Fable2",
+                      "Native sun shadows: on = with a composite view and the light on, the capture also records the "
+                      "game's two shadow passes and the frame's shadow block (nothing is drawn with them yet: the "
+                      "picture is the same); off = none of it is read.");
 REXCVAR_DEFINE_BOOL(fable2_native_d3d_messages, false, "Fable2",
                     "Write the Direct3D debug layer's errors, corruption and warnings to the game log "
                     "(the layer is the SDK's --d3d12_debug=true; without it there is nothing to write). "
@@ -172,6 +176,25 @@ render::ClayLight CurrentClayLight() {
     REXLOG_WARN("[native] unknown fable2_native_light '{}', using off", REXCVAR_GET(fable2_native_light));
   }
   return light;
+}
+
+// fable2_native_shadows: "on" or "off", read like the light's switch (the same two words, so
+// its parser is used); anything else is off, with one warning.
+bool CurrentShadows() {
+  static std::atomic<bool> warned{false};
+  bool recognized = true;
+  const bool on = render::ParseClayLight(REXCVAR_GET(fable2_native_shadows), &recognized) == render::ClayLight::kOn;
+  if (!recognized && !warned.exchange(true)) {
+    REXLOG_WARN("[native] unknown fable2_native_shadows '{}', using off", REXCVAR_GET(fable2_native_shadows));
+  }
+  return on;
+}
+
+// Whether the capture takes the game's shadow passes: only for a frame that could be drawn with
+// them, which is a lit one (the light on, and textures, without which nothing is lit).
+bool ShadowsWanted(bool records_wanted) {
+  return records_wanted && CurrentShadows() && REXCVAR_GET(fable2_native_textures) &&
+         CurrentClayLight() == render::ClayLight::kOn;
 }
 
 bool EnsureResources(nrhi::Device* device, nrhi::Format format) {
@@ -412,6 +435,8 @@ void Install(rex::memory::Memory* memory) {
               ViewName(CurrentView()));
   REXLOG_INFO("[native] light: {} (fable2_native_light)",
               CurrentClayLight() == render::ClayLight::kOn ? "on" : "off");
+  REXLOG_INFO("[native] shadows: {} (fable2_native_shadows; capture only, nothing is drawn with them yet)",
+              CurrentShadows() ? "on" : "off");
 }
 
 void Shutdown() {
@@ -469,6 +494,7 @@ void PollFrame() {
 #endif
   const bool wanted = RecordsWanted(CurrentView(), g_latch.IsFailed());
   capture::SetRecordsWanted(wanted);
+  capture::SetShadowsWanted(ShadowsWanted(wanted));
   rex::graphics::RequestNativeGuestOutputPostProcess(wanted);
 }
 

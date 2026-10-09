@@ -353,6 +353,49 @@ int main() {
     t.terrain_shader = true;
     if (IsTerrainDraw(t) || TerrainInputsOf(t) || AssembleRecord(t, 0).skip != SkipReason::kNone) return 108;
   }
-  std::puts("PASS: record assembly with instance sets, instance range check and cap, distance cut, skin, render state, depth-only, side indices");
+  // Shadow-pass records (frame_scene.h, FrameScene::shadow_draws) are DrawRecords: the record does
+  // not grow for them. What a caster needs beyond the record is its twin entry, ShadowCaster.
+  {
+    static_assert(sizeof(DrawRecord) == 616);
+    if (sizeof(ShadowCaster) != 12) return 120;
+    const ShadowCaster c;
+    if (c.kind != CasterKind::kOpaque || c.biased || c.bias_scale != 0.0f || c.bias_offset != 0.0f) return 121;
+    // The kinds as tools/xdk_sigmatch/gen_caster_table.py writes them (KINDS: 0 opaque, 1 alpha-test).
+    if (uint8_t(CasterKind::kOpaque) != 0 || uint8_t(CasterKind::kAlphaTest) != 1) return 122;
+    // A shadow draw's skip reason is a record's (SkipReason) or one of the pass's own, numbered
+    // after them, so that one tally holds both; every code has a name.
+    if (uint8_t(ShadowSkip::kNoCaster) != uint8_t(SkipReason::kCount) || kShadowSkipCount != size_t(SkipReason::kCount) + 4) return 123;
+    if (std::strcmp(ShadowSkipName(uint8_t(SkipReason::kBadIndex)), "bad-index") != 0 ||
+        std::strcmp(ShadowSkipName(uint8_t(SkipReason::kSkinUnsupported)), "skin-unsupported") != 0 ||
+        std::strcmp(ShadowSkipName(uint8_t(ShadowSkip::kNoCaster)), "no-caster") != 0 ||
+        std::strcmp(ShadowSkipName(uint8_t(ShadowSkip::kAlphaInputs)), "alpha-inputs") != 0 ||
+        std::strcmp(ShadowSkipName(uint8_t(ShadowSkip::kStateUnread)), "state-unread") != 0 ||
+        std::strcmp(ShadowSkipName(uint8_t(ShadowSkip::kOverLimit)), "over-limit") != 0 ||
+        std::strcmp(ShadowSkipName(uint8_t(ShadowSkip::kCount)), "?") != 0 || std::strcmp(ShadowSkipName(255), "?") != 0) {
+      return 124;
+    }
+    // What a caster's record holds in fields it already has: the 0x2202 word (alpha test, its
+    // function, alpha-to-mask and its offsets), the reference, the cull and the offset enables.
+    DrawInputs s = Good();
+    s.state_words.read = true;
+    s.state_words.color_control = 0xAA00001C;  // the leaf cards: test greater, alpha-to-mask, offsets 0xAA
+    s.state_words.alpha_ref = 0;
+    s.state_words.depth_control = 0x00708766;
+    s.state_words.su_sc_mode = 0x00219800;     // no cull, the offset on for both faces
+    s.state_words.color_mask = 0;
+    s.state_words.vport_z_scale = 0xBF800000;  // -1: the reversed range
+    s.state_words.vte_cntl = 0x0000043F;
+    const DrawRecord leaf = AssembleRecord(s, 3);
+    const RenderState st = DecodeRenderState(leaf.state_words);
+    if (leaf.skip != SkipReason::kNone || leaf.state_words.color_control != 0xAA00001C) return 125;
+    if (!st.valid || !st.alpha_test || st.alpha_func != Compare::kGreater || st.alpha_ref != 0.0f || !st.alpha_to_mask ||
+        st.alpha_to_mask_offsets != 0xAA || st.cull != Cull::kNone || st.depth_func != Compare::kGreaterEqual ||
+        !st.depth_write || !st.depth_reversed || st.color_mask != 0) {
+      return 126;
+    }
+    // A shadow draw is never "depth-only" (that reason is the main scene's: a pre-pass draw).
+    if (s.depth_only) return 127;
+  }
+  std::puts("PASS: record assembly with instance sets, instance range check and cap, distance cut, skin, render state, depth-only, side indices, shadow casters");
   return 0;
 }

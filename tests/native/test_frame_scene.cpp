@@ -2,6 +2,7 @@
 #include "../../src/native/render/frame_scene.h"
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -465,6 +466,306 @@ static int LightAndPoolTests(const capture::DrawRecord& r) {
     }
   }
   if (g_live.load() != live_before) return 194;
+  return 0;
+}
+
+// The two shadow passes' record lists, their casters, the frame's shadow block and its tallies
+// (FrameScene::shadow_draws, ::shadow_casters, ::shadow, ...). `r`: a drawable record. Returns 0
+// or the number of the case that failed.
+static int ShadowTests(const capture::DrawRecord& r) {
+  using capture::CasterKind;
+  using capture::ShadowBlock;
+  using capture::ShadowBlockReason;
+  using capture::ShadowCaster;
+  using capture::ShadowSkip;
+  using render::kMaxShadowRecords;
+  // An orthographic light and the registers that hold it (tests/test_shadow_matrices.py's numbers).
+  auto light = [](float m[4][4], float tx, float ty, float scale) {
+    const float v[4][4] = {{0.052114f * scale, 0.0f, 0.041577f * scale, tx},
+                           {0.000898f * scale, 0.066651f * scale, -0.001126f * scale, ty},
+                           {0.005422f, -0.000188f, -0.006796f, 0.737847f},
+                           {0.0f, 0.0f, 0.0f, 1.0f}};
+    std::memcpy(m, v, sizeof(v));
+  };
+  float near[4][4], far[4][4];
+  light(near, -6.732423f, -10.841799f, 1.0f);
+  light(far, -3.123047f, -4.865234f, 30.0f / 70.0f);
+  auto registers = [&] {
+    float reg[256][4] = {};
+    bool have[256] = {};
+    const float c12[4] = {20.0f, 35.0f, 2.0f, 0.486f};
+    std::memcpy(reg[12], c12, sizeof(c12));
+    reg[13][0] = reg[14][0] = 1.0f / 1024.0f;
+    const float half = 0.5f / 1024.0f;
+    for (int c = 0; c < 2; ++c) {
+      const float (*l)[4] = c ? far : near;
+      for (int j = 0; j < 4; ++j) {
+        reg[36 + 4 * c][j] = 0.5f * l[0][j] + (0.5f + half) * l[3][j];
+        reg[37 + 4 * c][j] = -0.5f * l[1][j] + (0.5f + half) * l[3][j];
+        reg[38 + 4 * c][j] = l[2][j];
+        reg[39 + 4 * c][j] = l[3][j];
+      }
+    }
+    for (uint32_t i : capture::kShadowBlockRegisters) have[i] = true;
+    return capture::MakeShadowBlock(reg, have);
+  };
+  const ShadowBlock reg = registers();
+  if (!reg.valid) return 1;
+  auto caster = [](CasterKind kind, bool biased, float scale, float offset) {
+    ShadowCaster c;
+    c.kind = kind;
+    c.biased = biased;
+    c.bias_scale = scale;
+    c.bias_offset = offset;
+    return c;
+  };
+  const ShadowCaster near_caster = caster(CasterKind::kOpaque, true, -32.0f, -0.001f);
+  const ShadowCaster far_caster = caster(CasterKind::kAlphaTest, true, -80.0f, -0.005f);
+  auto record = [&](uint32_t mark, uint64_t vs = 0xF160) {
+    capture::DrawRecord d = r;
+    d.count = mark;
+    d.vs_hash = vs;
+    return d;
+  };
+  // A frame as the capture makes it: `n` near and `m` far records, the first of each with its
+  // pass's matrix, and the registers at the first scene draw.
+  auto frame = [&](render::FrameBuilder& b, uint32_t id, uint32_t n, uint32_t m) {
+    for (uint32_t i = 0; i < n; ++i) b.AddShadow(0, record(1000 * id + i), near_caster, 0, i == 0 ? near : nullptr);
+    for (uint32_t i = 0; i < m; ++i) b.AddShadow(1, record(2000 * id + i), far_caster, 0, i == 0 ? far : nullptr);
+    b.CountShadowPass();
+    b.CountShadowPass();
+    b.SetShadowRegisters(reg);
+    return b.Finish(id);
+  };
+  const long long live_before = g_live.load();
+  {
+    // Shadows off (the builder's state at first): nothing is taken, the block says "off".
+    render::FrameBuilder b;
+    if (b.AddShadow(0, record(1), near_caster, 0, near)) return 2;
+    b.CountShadowExtra();
+    b.CountShadowPass();
+    b.SetShadowRegisters(reg);
+    auto s = b.Finish(1);
+    if (s->shadow.valid || s->shadow_reason != ShadowBlockReason::kOff || s->shadow_records) return 3;
+    if (!s->shadow_draws[0].empty() || !s->shadow_draws[1].empty() || s->shadow_extra != 0 || s->shadow_passes != 0) return 4;
+    if (render::ShadowLine(*s) != "off") return 5;
+
+    // On: two passes, each list with its casters, record i with caster i; a valid block.
+    b.ShadowsOn(true);
+    s = frame(b, 2, 3, 4);
+    if (!s->shadow_records || s->shadow_draws[0].size() != 3 || s->shadow_draws[1].size() != 4) return 6;
+    if (s->shadow_casters[0].size() != 3 || s->shadow_casters[1].size() != 4) return 7;
+    for (uint32_t i = 0; i < 3; ++i) {
+      const capture::DrawRecord& d = s->shadow_draws[0][i];
+      if (d.count != 2000 + i || d.seq != i || d.terrain_index != capture::kNoSideIndex || d.light_index != capture::kNoSideIndex) return 8;
+      const ShadowCaster& c = s->shadow_casters[0][i];
+      if (c.kind != CasterKind::kOpaque || !c.biased || c.bias_scale != -32.0f || c.bias_offset != -0.001f) return 9;
+    }
+    for (uint32_t i = 0; i < 4; ++i) {
+      if (s->shadow_draws[1][i].count != 4000 + i || s->shadow_draws[1][i].seq != i) return 10;
+      if (s->shadow_casters[1][i].kind != CasterKind::kAlphaTest || s->shadow_casters[1][i].bias_scale != -80.0f) return 11;
+    }
+    if (!s->shadow.valid || s->shadow_reason != ShadowBlockReason::kNone) return 12;
+    if (std::memcmp(s->shadow.world_to_clip[0], near, 64) != 0 || std::memcmp(s->shadow.world_to_clip[1], far, 64) != 0) return 13;
+    if (std::memcmp(s->shadow.world_to_map, reg.world_to_map, sizeof(reg.world_to_map)) != 0) return 14;
+    if (s->shadow.bias[0][0] != -32.0f || s->shadow.bias[0][1] != -0.001f || s->shadow.bias[1][0] != -80.0f ||
+        s->shadow.bias[1][1] != -0.005f || s->shadow.split[0] != 20.0f || s->shadow.texel[0] != 1.0f / 1024.0f) {
+      return 15;
+    }
+    if (s->shadow_passes != 2 || s->shadow_extra != 0) return 16;
+    // The shadow records are no scene records: the scene's own counts do not move.
+    if (s->captured != 0 || !s->draws.empty() || s->lights.size() != 0) return 17;
+    if (render::ShadowLine(*s) != "block valid, near 3 (skipped {}), far 4 (skipped {}), extra 0") {
+      std::cout << "shadow line: " << render::ShadowLine(*s) << "\n";
+      return 18;
+    }
+
+    // The next frame holds nothing of this one: no record, no caster, no block, no count.
+    auto empty = b.Finish(3);
+    if (!empty->shadow_records || !empty->shadow_draws[0].empty() || !empty->shadow_draws[1].empty() ||
+        !empty->shadow_casters[0].empty() || !empty->shadow_casters[1].empty()) {
+      return 20;
+    }
+    static const unsigned char zero[offsetof(ShadowBlock, valid)] = {};
+    if (empty->shadow.valid || std::memcmp(&empty->shadow, zero, sizeof(zero)) != 0 ||
+        empty->shadow_reason != ShadowBlockReason::kRegisters) {
+      return 21;
+    }
+    if (empty->shadow_passes != 0 || empty->shadow_extra != 0 || empty->shadow_skipped_by_vs.size() != 0) return 22;
+    for (int c = 0; c < 2; ++c) {
+      for (uint32_t n : empty->shadow_skipped[c]) {
+        if (n != 0) return 23;
+      }
+    }
+    if (render::ShadowLine(*empty) != "block invalid(registers), near 0 (skipped {}), far 0 (skipped {}), extra 0") return 24;
+    // ... and frame 2 is still whole while frame 4 is built in other buffers.
+    auto next = frame(b, 4, 2, 1);
+    if (s->shadow_draws[0].size() != 3 || s->shadow_draws[0][2].count != 2002 || s->shadow_casters[1][3].bias_scale != -80.0f) return 25;
+    if (next->shadow_draws[0].data() == s->shadow_draws[0].data() || next->shadow_draws[0][1].count != 4001) return 26;
+    // Reuse: when frame 2 is dropped its four shadow buffers come back for a later frame.
+    const capture::DrawRecord* near_buffer = s->shadow_draws[0].data();
+    const ShadowCaster* far_casters = s->shadow_casters[1].data();
+    s.reset();
+    if (b.spare_count() != 1) return 27;
+    auto again = frame(b, 5, 2, 2);  // (at this frame's end the builder takes the spare set for the next one)
+    auto later = frame(b, 6, 3, 4);
+    if (again->shadow_draws[0].data() != near_buffer && later->shadow_draws[0].data() != near_buffer) return 28;
+    if (again->shadow_casters[1].data() != far_casters && later->shadow_casters[1].data() != far_casters) return 29;
+    if (later->shadow_draws[0].size() != 3 || later->shadow_draws[0][0].count != 6000 || later->shadow_draws[1][3].count != 12003) return 30;
+
+    // The same by capacity, which no fresh allocation can imitate: a frame of 40 and 40 records is
+    // dropped, and the frame after the next, with one record a pass, sits in its four buffers.
+    {
+      auto big = frame(b, 20, 40, 40);
+      const size_t cap = big->shadow_draws[0].capacity(), caster_cap = big->shadow_casters[1].capacity();
+      if (cap < 40 || caster_cap < 40) return 90;
+      big.reset();
+      auto one = frame(b, 21, 1, 1);
+      auto two = frame(b, 22, 1, 1);
+      if (two->shadow_draws[0].capacity() != cap || two->shadow_draws[1].capacity() < 40 ||
+          two->shadow_casters[0].capacity() < 40 || two->shadow_casters[1].capacity() != caster_cap) {
+        return 91;
+      }
+      if (two->shadow_draws[0].size() != 1 || two->shadow_draws[0][0].count != 22000 || !two->shadow.valid) return 92;
+    }
+
+    // The proof and the tallies.
+    // The registers without the passes: no block. One pass only: none either.
+    b.SetShadowRegisters(reg);
+    auto f = b.Finish(7);
+    if (f->shadow.valid || f->shadow_reason != ShadowBlockReason::kNoPass) return 31;
+    b.AddShadow(0, record(1), near_caster, 0, near);
+    b.SetShadowRegisters(reg);
+    f = b.Finish(8);
+    if (f->shadow.valid || f->shadow_reason != ShadowBlockReason::kNoPass || f->shadow_draws[0].size() != 1) return 32;
+    // The passes without the registers.
+    b.AddShadow(0, record(1), near_caster, 0, near);
+    b.AddShadow(1, record(2), far_caster, 0, far);
+    f = b.Finish(9);
+    if (f->shadow.valid || f->shadow_reason != ShadowBlockReason::kRegisters) return 33;
+    // Registers that are not valid are not kept, and do not replace valid ones; the first valid ones stay.
+    b.AddShadow(0, record(1), near_caster, 0, near);
+    b.AddShadow(1, record(2), far_caster, 0, far);
+    b.SetShadowRegisters(ShadowBlock{});
+    if (b.HasShadowRegisters()) return 34;
+    b.SetShadowRegisters(reg);
+    ShadowBlock other = reg;
+    other.split[3] = 0.9f;
+    b.SetShadowRegisters(other);
+    b.SetShadowRegisters(ShadowBlock{});
+    if (!b.HasShadowRegisters()) return 35;
+    f = b.Finish(10);
+    if (!f->shadow.valid || f->shadow.split[3] != 0.486f) return 36;
+    if (b.HasShadowRegisters()) return 37;
+    // A pass whose first matrix is another light's: the frame has no block ("proof"). The matrix
+    // kept is the first one given, whatever comes later.
+    b.AddShadow(0, record(1), near_caster, 0, far);
+    b.AddShadow(0, record(2), near_caster, 0, near);
+    b.AddShadow(1, record(3), far_caster, 0, far);
+    b.SetShadowRegisters(reg);
+    f = b.Finish(11);
+    if (f->shadow.valid || f->shadow_reason != ShadowBlockReason::kProof || f->shadow_draws[0].size() != 2) return 38;
+    if (render::ShadowLine(*f) != "block invalid(proof), near 2 (skipped {}), far 1 (skipped {}), extra 0") return 39;
+    // A record given without a matrix first: the next one's is the pass's.
+    b.AddShadow(0, record(1), near_caster, 0, nullptr);
+    b.AddShadow(0, record(2), near_caster, 0, near);
+    b.AddShadow(1, record(3), far_caster, 0, far);
+    b.SetShadowRegisters(reg);
+    if (!b.Finish(12)->shadow.valid) return 40;
+    // Records of a pass with two biases: no block ("bias"). A record without the offset is no disagreement.
+    b.AddShadow(0, record(1), near_caster, 0, near);
+    b.AddShadow(0, record(2), far_caster, 0, nullptr);
+    b.AddShadow(1, record(3), far_caster, 0, far);
+    b.SetShadowRegisters(reg);
+    f = b.Finish(13);
+    if (f->shadow.valid || f->shadow_reason != ShadowBlockReason::kBias) return 41;
+    b.AddShadow(0, record(1), near_caster, 0, near);
+    b.AddShadow(0, record(2), caster(CasterKind::kAlphaTest, false, 0.0f, 0.0f), 0, nullptr);
+    b.AddShadow(1, record(3), caster(CasterKind::kOpaque, false, 0.0f, 0.0f), 0, far);
+    b.SetShadowRegisters(reg);
+    f = b.Finish(14);
+    if (!f->shadow.valid || f->shadow.bias[0][0] != -32.0f || f->shadow.bias[1][0] != 0.0f || f->shadow.bias[1][1] != 0.0f) return 42;
+    if (f->shadow_casters[0][1].biased || f->shadow_casters[0][1].kind != CasterKind::kAlphaTest) return 43;
+
+    // Skipped draws: by reason per pass and by vertex shader; a skipped draw leaves no record, no
+    // caster, no matrix and no say in the bias. The reason given with the draw comes before the
+    // record's own (the capture gives one only where it knows better: no caster entry).
+    capture::DrawRecord bad = record(1, 0xBAD1);
+    bad.skip = SkipReason::kBadIndex;
+    if (b.AddShadow(0, bad, far_caster, 0, far)) return 44;
+    if (b.AddShadow(0, bad, far_caster, uint8_t(ShadowSkip::kNoCaster), far)) return 45;
+    if (b.AddShadow(1, record(2, 0xBAD2), near_caster, uint8_t(ShadowSkip::kNoCaster), near)) return 46;
+    if (b.AddShadow(1, record(3, 0xBAD2), near_caster, uint8_t(ShadowSkip::kNoCaster), near)) return 47;
+    if (b.AddShadow(1, record(4, 0xBAD3), near_caster, uint8_t(ShadowSkip::kAlphaInputs), near)) return 48;
+    if (b.AddShadow(1, record(5, 0xBAD3), near_caster, uint8_t(ShadowSkip::kStateUnread), near)) return 49;
+    if (b.AddShadow(1, record(6), near_caster, 200, near)) return 50;   // no reason of that number: skipped as bad-memory
+    if (b.AddShadow(2, record(7), near_caster, 0, near)) return 51;     // no third cascade
+    if (!b.AddShadow(0, record(8), near_caster, 0, near) || !b.AddShadow(1, record(9), far_caster, 0, far)) return 52;
+    b.CountShadowExtra();
+    b.CountShadowExtra();
+    b.CountShadowPass();
+    b.CountShadowPass();
+    b.CountShadowPass();
+    b.SetShadowRegisters(reg);
+    f = b.Finish(15);
+    if (!f->shadow.valid || f->shadow_draws[0].size() != 1 || f->shadow_draws[1].size() != 1) return 53;
+    if (f->shadow_draws[0][0].count != 8 || f->shadow_draws[0][0].seq != 0 || f->shadow_casters[0].size() != 1) return 54;
+    if (f->shadow_skipped[0][size_t(SkipReason::kBadIndex)] != 1 || f->shadow_skipped[0][size_t(ShadowSkip::kNoCaster)] != 1 ||
+        f->shadow_skipped[1][size_t(ShadowSkip::kNoCaster)] != 2 || f->shadow_skipped[1][size_t(ShadowSkip::kAlphaInputs)] != 1 ||
+        f->shadow_skipped[1][size_t(ShadowSkip::kStateUnread)] != 1 || f->shadow_skipped[1][size_t(SkipReason::kBadMemory)] != 1) {
+      return 55;
+    }
+    if (f->shadow_skipped_by_vs.Total(uint8_t(SkipReason::kBadIndex)) != 1 ||
+        f->shadow_skipped_by_vs.Total(uint8_t(ShadowSkip::kNoCaster)) != 3 || f->shadow_skipped_by_vs.size() != 6) {
+      return 56;
+    }
+    if (f->shadow_extra != 2 || f->shadow_passes != 3) return 57;
+    if (render::ShadowLine(*f) !=
+        "block valid, near 1 (skipped {bad-index: 1, no-caster: 1}), far 1 (skipped {bad-memory: 1, no-caster: 2, "
+        "alpha-inputs: 1, state-unread: 1}), extra 2 (shadow-pass-extra)") {
+      std::cout << "shadow line: " << render::ShadowLine(*f) << "\n";
+      return 58;
+    }
+    if (render::ShadowSkippedByVs(*f) != "0x000000000000F160(bad-memory): 1, 0x000000000000BAD1(bad-index): 1, "
+                                          "0x000000000000BAD2(no-caster): 2, 0x000000000000BAD1(no-caster): 1, "
+                                          "0x000000000000BAD3(alpha-inputs): 1, 0x000000000000BAD3(state-unread): 1") {
+      std::cout << "skipped by vs: " << render::ShadowSkippedByVs(*f) << "\n";
+      return 59;
+    }
+
+    // The limit: a pass with more records than a list holds. The rest is counted (over-limit),
+    // the list does not grow past the limit, and the block is still the frame's.
+    for (uint32_t i = 0; i < kMaxShadowRecords + 7; ++i) {
+      const bool added = b.AddShadow(0, record(i), near_caster, 0, i == 0 ? near : nullptr);
+      if (added != (i < kMaxShadowRecords)) return 60;
+    }
+    b.AddShadow(1, record(1), far_caster, 0, far);
+    b.SetShadowRegisters(reg);
+    f = b.Finish(16);
+    if (f->shadow_draws[0].size() != kMaxShadowRecords || f->shadow_casters[0].size() != kMaxShadowRecords) return 61;
+    if (f->shadow_draws[0].capacity() > kMaxShadowRecords || f->shadow_casters[0].capacity() > kMaxShadowRecords) {
+      std::cout << "shadow list capacity " << f->shadow_draws[0].capacity() << "\n";
+      return 62;
+    }
+    if (f->shadow_skipped[0][size_t(ShadowSkip::kOverLimit)] != 7 || f->shadow_draws[0].back().count != kMaxShadowRecords - 1) return 63;
+    if (!f->shadow.valid || f->shadow_draws[1].size() != 1) return 64;
+    // (and nothing of frame 15's tallies is in it)
+    if (f->shadow_skipped[1][size_t(ShadowSkip::kNoCaster)] != 0 || f->shadow_skipped[0][size_t(SkipReason::kBadIndex)] != 0 ||
+        f->shadow_skipped_by_vs.size() != 1 || f->shadow_extra != 0 || f->shadow_passes != 0) {
+      return 69;
+    }
+    // The frame after it starts with room for the limit and no more.
+    for (uint32_t i = 0; i < kMaxShadowRecords + 1; ++i) b.AddShadow(0, record(i), near_caster, 0, nullptr);
+    auto g = b.Finish(17);
+    if (g->shadow_draws[0].size() != kMaxShadowRecords || g->shadow_draws[0].capacity() > kMaxShadowRecords) return 65;
+
+    // Shadows switched off again: nothing is taken from the next frame on.
+    b.ShadowsOn(false);
+    if (b.AddShadow(0, record(1), near_caster, 0, near)) return 66;
+    f = b.Finish(18);
+    if (f->shadow_records || f->shadow_reason != ShadowBlockReason::kOff || !f->shadow_draws[0].empty()) return 67;
+  }
+  if (g_live.load() != live_before) return 68;
   return 0;
 }
 
@@ -999,6 +1300,10 @@ int main() {
     std::cout << "FAIL: light side array / pool case " << code << "\n";  // (an exit code would wrap at 256)
     return 129;
   }
+  if (const int code = ShadowTests(r)) {
+    std::cout << "FAIL: shadow lists / block case " << code << "\n";
+    return 130;
+  }
 
   render::ScenePublisher pub;
   if (pub.Latest()) return 18;
@@ -1006,6 +1311,6 @@ int main() {
   pub.Publish(s2);
   if (pub.Latest()->frame != 43) return 19;
   std::cout << "PASS: draw record, frame builder, terrain side array, light side array and block, buffer reuse, "
-               "pool under threads, publisher\n";
+               "pool under threads, shadow lists and block, publisher\n";
   return 0;
 }

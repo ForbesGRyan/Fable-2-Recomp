@@ -111,6 +111,12 @@ std::atomic<bool> g_discovery_active{false};
 // clear, main-scene draws are only counted.
 std::atomic<bool> g_records_wanted{false};
 std::atomic<bool> g_records_frame{false};
+// The consumer also wants the two shadow passes (SetShadowsWanted: the native
+// view, the light and the shadows on), and the value latched for the current
+// guest frame with g_records_frame: set only in a frame with records. With it
+// clear nothing of the shadows is read, observed or recorded.
+std::atomic<bool> g_shadows_wanted{false};
+std::atomic<bool> g_shadows_frame{false};
 std::atomic<bool> g_failed{false};
 std::atomic<uint64_t> g_swaps{0};      // guest frames since start (while enabled)
 std::atomic<int> g_frames_written{0};  // discovery frames completed
@@ -134,6 +140,10 @@ fable2::diagnostics::WindowStats g_capture_window(300);  // OnSwap thread only
 // block ("light-block"). OnSwap thread only.
 uint32_t g_light_frames = 0;
 uint32_t g_light_block_missing = 0;
+// The same for the shadows: frames with shadow records since the last line, and how many of
+// them have no shadow block ("shadow-block"). OnSwap thread only.
+uint32_t g_shadow_frames = 0;
+uint32_t g_shadow_block_missing = 0;
 
 inline uint64_t Ticks() {
 #if defined(_M_X64) || defined(__x86_64__)
@@ -606,6 +616,66 @@ bool LightPairChecked(uint64_t ps_hash, uint64_t vs_hash) {
   }
   return false;
 }
+
+// The shader pairs the game draws into its two sun shadow maps
+// (docs/native-renderer/shadow-casters.json; lighting-formulas.md, "Casters"):
+// `ps_hash` 0 for a draw without a pixel shader. An alpha-test caster's alpha is
+// the w of the texture in fetch slot `slot`, read at interpolator 0 (xy) times
+// pixel c8.xy plus c8.zw, times the pixel constant `scale_ref` (register * 4 +
+// component; -1: none).
+struct CasterEntry {
+  uint64_t vs_hash;
+  uint64_t ps_hash;
+  CasterKind kind;
+  int8_t slot;
+  int16_t scale_ref;
+};
+constexpr CasterEntry kCasterTable[] = {
+#define FABLE2_SHADOW_CASTER(VS, PS, K, SL, SR) {VS, PS, CasterKind(K), int8_t(SL), int16_t(SR)},
+#include "shadow_caster_table.inc"
+#undef FABLE2_SHADOW_CASTER
+};
+// What the table may hold: the two kinds; an opaque caster without a texture,
+// an alpha-test caster with a pixel shader, a texture slot and a scale that is
+// a pixel constant component or none.
+constexpr bool CasterTableIsWellFormed() {
+  for (const CasterEntry& e : kCasterTable) {
+    if (e.vs_hash == 0) return false;
+    if (e.kind == CasterKind::kOpaque) {
+      if (e.slot != -1 || e.scale_ref != -1) return false;
+    } else if (e.kind == CasterKind::kAlphaTest) {
+      if (e.ps_hash == 0 || e.slot < 0 || e.slot >= 32 || e.scale_ref < -1 || e.scale_ref >= 1024) return false;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+static_assert(CasterTableIsWellFormed(), "shadow_caster_table.inc holds an entry the capture cannot read");
+// The pixel registers a caster's material reads (c8: the UV scale and offset; the scale of the
+// table) are the bank's at any draw: no buffer load names them.
+constexpr bool CasterRegistersAreBankOnly() {
+  if (IsBufferLoadRegister(kPixelBank, 8)) return false;
+  for (const CasterEntry& e : kCasterTable) {
+    if (e.scale_ref >= 0 && IsBufferLoadRegister(kPixelBank, uint32_t(e.scale_ref) / 4)) return false;
+  }
+  return true;
+}
+static_assert(CasterRegistersAreBankOnly(), "a caster's pixel register is loaded from a constant buffer");
+
+// The caster entry of a shadow-pass draw's shaders (`ps_hash` 0: no pixel shader), or null.
+const CasterEntry* FindCaster(uint64_t vs_hash, uint64_t ps_hash) {
+  for (const CasterEntry& e : kCasterTable) {
+    if (e.vs_hash == vs_hash && e.ps_hash == ps_hash) return &e;
+  }
+  return nullptr;
+}
+
+// The vertex shader of the shadow passes that builds the world position itself and multiplies
+// it by c0..c3, so that c0..c3 is the light matrix and c4..c6 are not world rows: the instanced
+// bushes (frame-map section 15, "Passes"; tools/xdk_sigmatch/shadow_matrices.py, DIRECT_VS).
+// Every other caster shader has oPos = c0..c3 . p with the world rows in c4..c6.
+constexpr uint64_t kShadowDirectMatrixVs = 0xA8A5B2A89F70336Aull;
 
 const TransformInfo* FindTransform(uint64_t hash) {
   static const std::unordered_map<uint64_t, TransformInfo> table = [] {
@@ -2781,6 +2851,7 @@ SkipReason FillTerrainInputs(uint32_t device, uint32_t first, uint32_t patches, 
 // and the renderer decides from the inputs whether the record gets the terrain
 // material or flat clay); a draw whose device was not read
 // stays ps-unknown.
+void ResolveAlbedo(uint32_t device, const DeviceSnapshot& dev, const VsInfo* vs, const AlbedoSpec& a, DrawInputs& in);
 void FillMaterial(uint32_t device, DrawShaders& shaders, DrawInputs& in) {
   Material& m = in.material;
   if (in.terrain_shader) {
@@ -2821,14 +2892,23 @@ void FillMaterial(uint32_t device, DrawShaders& shaders, DrawInputs& in) {
   }
   const AlbedoSpec* albedo = ps->albedo;
   if (!albedo) return;
-  const AlbedoSpec& a = *albedo;
-  if (a.slot < 0) {
+  if (albedo->slot < 0) {
     m.status = MaterialStatus::kNoAlbedo;
     return;
   }
+  ResolveAlbedo(device, shaders.dev, shaders.vs, *albedo, in);
+}
+
+// The texture and its coordinates for in.material from a pixel shader's albedo entry `a` (slot
+// 0 to 31) and the vertex shader's "uv" entries: the fetch constant, the UV element and its
+// stream, and the scale and offset folded from the constants the two entries name. The status
+// becomes textured, or uv-unsupported when any of it does not resolve or cannot be read. Used
+// by FillMaterial for a scene draw, and by FillCasterMaterial for an alpha-tested shadow caster
+// (whose "albedo" is the texture its alpha comes from).
+void ResolveAlbedo(uint32_t device, const DeviceSnapshot& dev, const VsInfo* vs, const AlbedoSpec& a, DrawInputs& in) {
+  Material& m = in.material;
   m.status = MaterialStatus::kUvUnsupported;
-  const VsInfo* vs = shaders.vs;
-  if (!vs || a.slot >= 32 || a.u_interp >= 16 || a.v_interp >= 16 || a.u_comp >= 4 || a.v_comp >= 4) return;
+  if (!vs || a.slot < 0 || a.slot >= 32 || a.u_interp >= 16 || a.v_interp >= 16 || a.u_comp >= 4 || a.v_comp >= 4) return;
   const VsUvSpec* u = vs->uv[a.u_interp][a.u_comp];
   const VsUvSpec* v = vs->uv[a.v_interp][a.v_comp];
   UvLayout uv;
@@ -3027,6 +3107,229 @@ void AppendLightInputs(std::string& row, uint32_t device, const DeviceSnapshot& 
 std::atomic<uint32_t> g_light_tries_frame{0};
 constinit thread_local LightBlockTries t_light_tries;
 
+// --- The two sun shadow passes (frame-map section 15; shadow_block.h, main_scene.h) ---------
+// Taken only in a frame with records and with the shadows wanted (g_shadows_frame): the draws
+// of the two passes as record lists of their own (FrameScene::shadow_draws), and the frame's
+// shadow block, proven against the passes when the frame ends (FrameBuilder::Finish).
+
+// This thread's shadow state of the current frame (the drawing thread's own, like the light's
+// tries; g_light_tries_frame tells one frame from the next): the pass tracker, which pass has
+// given its light matrix, and the reads of the block's registers.
+struct ShadowFrame {
+  ShadowPassTracker tracker;
+  bool have_matrix[2] = {};
+  bool registers_done = false;
+  uint32_t register_tries = 0;
+  uint32_t frame = 0;
+};
+constinit thread_local ShadowFrame t_shadow;
+// At most this many reads of the block's registers (eleven ReadPixelConstant calls each) in a
+// frame that gives none: what a frame without valid registers costs, as for the light.
+constexpr uint32_t kMaxShadowRegisterTries = 8;
+
+ShadowFrame& CurrentShadowFrame() {
+  const uint32_t frame = g_light_tries_frame.load(std::memory_order_relaxed);
+  if (t_shadow.frame != frame) {
+    t_shadow = ShadowFrame{};
+    t_shadow.frame = frame;
+  }
+  return t_shadow;
+}
+
+// The registers' part of the frame's shadow block at the main-scene draw this thread is
+// capturing (shadow_block.h, MakeShadowBlock): pixel c12, c13, c14 and c36..c43 through
+// ReadPixelConstant, the reader the captures of frame-map section 15 were checked with ("pfull":
+// one value in every decoded scene row of a frame). Read once a frame, at the frame's first
+// scene draw of a kind those rows are (DrawIndexedVertices, DrawVertices, the two terrain
+// builders; never at a BeginVertices draw: the two mask rectangles are drawn with other values
+// in c36..c43), and again at the next such draw while a read gives no valid registers (one of
+// them a literal of that draw's pixel shader, or not read), up to kMaxShadowRegisterTries.
+void ReadShadowRegisters(uint32_t id, ShadowFrame& f) {
+  if (f.registers_done || f.register_tries >= kMaxShadowRegisterTries) return;
+  if (id != kHook_D3DDevice_DrawIndexedVertices && id != kHook_D3DDevice_DrawVertices && id != kHook_DrawIndx_8221C9C8 &&
+      id != kHook_DrawIndx_82207C30) {
+    return;
+  }
+  float reg[ConstantLoads::kRegisters][4] = {};
+  bool have[ConstantLoads::kRegisters] = {};
+  for (uint32_t r : kShadowBlockRegisters) have[r] = ReadPixelConstant(r, reg[r]);
+  const ShadowBlock registers = MakeShadowBlock(reg, have);
+  if (!registers.valid) {
+    ++f.register_tries;
+    return;
+  }
+  std::lock_guard<std::mutex> lock(g_scene_mutex);
+  if (!g_builder.InMainScene()) return;  // (as RecordDraw: the bracket is checked again under the lock)
+  g_builder.SetShadowRegisters(registers);
+  f.registers_done = true;
+}
+
+// The material of an alpha-tested shadow caster (draw_record.h, "Shadow-pass records"): the
+// texture its alpha comes from as the record's albedo (the fetch constant of the entry's slot;
+// the coordinates of interpolator 0, x and y, times pixel c8.xy plus c8.zw, through the vertex
+// shader's "uv" entries: ResolveAlbedo), and the alpha recipe (the texture's w times the entry's
+// scale constant at this draw). False when any of it cannot be read or is not finite: the draw
+// is then skipped (alpha-inputs), never drawn as an opaque caster.
+bool FillCasterMaterial(uint32_t device, const DrawShaders& shaders, const CasterEntry& entry, DrawInputs& in) {
+  Material& m = in.material;
+  m = Material{};
+  m.ps_hash = entry.ps_hash;
+  constexpr int32_t kPixelC8 = (1 << 10) | (8 * 4);  // a UV stage's constant reference: bank 1, register 8
+  AlbedoSpec a{};
+  a.ps_hash = entry.ps_hash;
+  a.slot = entry.slot;
+  a.u_interp = 0;
+  a.u_comp = 0;
+  a.v_interp = 0;
+  a.v_comp = 1;
+  a.u_stages[0] = UvStage{kPixelC8 + 0, kPixelC8 + 2};
+  a.v_stages[0] = UvStage{kPixelC8 + 1, kPixelC8 + 3};
+  ResolveAlbedo(device, shaders.dev, shaders.vs, a, in);
+  if (m.status != MaterialStatus::kTextured) return false;
+  for (float v : m.uv_xform) {
+    if (!std::isfinite(v)) return false;
+  }
+  float scale = 1.0f;
+  if (entry.scale_ref >= 0) {
+    if (!ReadPsBankRegisters(device, uint32_t(entry.scale_ref) / 4, 1)) return false;
+    if (!ComposeAlphaScale(&t_ps_bank[entry.scale_ref], 1, &scale)) return false;
+  }
+  m.alpha.source = AlphaSource::kAlbedo;
+  m.alpha.slot = uint8_t(entry.slot);
+  m.alpha.component = 3;
+  m.alpha.scale_ref[0] = entry.scale_ref;
+  m.alpha.scale_ref[1] = -1;
+  m.alpha_scale = scale;
+  return true;
+}
+
+// One draw of a shadow pass (`pass`: kNear or kFar), as a DrawRecord in that pass's list. The
+// geometry is read as a scene draw's (FillDrawInputs: streams, indices, the bone palette, the
+// instance set; only DrawIndexedVertices and DrawVertices, any other hook is an unsupported
+// primitive). Then, fail closed (a draw that cannot be read is skipped and counted, never drawn
+// from guessed data):
+//  - the draw's shader pair must be in the caster table (no-caster, counted by vertex shader);
+//  - the state words must be read, and with the polygon offset on (PA_SU_SC_MODE_CNTL bits 11,
+//    12) its four registers (state-unread);
+//  - an alpha-test caster needs its texture, coordinates and scale (alpha-inputs);
+//  - the transform rows must be finite (no-transform).
+// The first recorded draw of a pass also gives the pass's light matrix for the frame's proof:
+// c0..c3 times the inverse of the world rows c4..c6 (PassMatrix), or c0..c3 itself for the
+// instanced bushes' shader (kShadowDirectMatrixVs).
+void RecordShadowDraw(uint32_t id, const LastArgs& a, uint32_t device, ShadowPass pass, ShadowFrame& f) {
+  const size_t cascade = pass == ShadowPass::kNear ? 0 : 1;
+  DrawInputs in;
+  in.func_id = id;
+  SkipReason extra = SkipReason::kNone;
+  DrawShaders shaders;
+  if (id == kHook_D3DDevice_DrawIndexedVertices) {
+    in.indexed = true;
+    in.prim = a.r[1];
+    in.base_vertex = int32_t(a.r[2]);
+    in.start = a.r[3];
+    in.count = a.r[4];
+  } else if (id == kHook_D3DDevice_DrawVertices) {
+    in.prim = a.r[1];
+    in.start = a.r[2];
+    in.count = a.r[3];
+  }
+  if (IsSupportedPrim(in.prim)) extra = FillDrawInputs(device, in, &shaders);
+  ReadStateWords(device, &in.state_words);
+  uint8_t skip = 0;
+  ShadowCaster caster;
+  const CasterEntry* entry = nullptr;
+  if (shaders.vs) {
+    // The pixel shader as the draw runs it: none (a depth-only draw), or one whose hash is known.
+    uint32_t ps_obj = 0;
+    uint64_t ps_hash = 0;
+    bool ps_known = true;
+    if (ChoosePs(shaders.dev, &ps_obj)) {
+      shaders.ps = LookupPs(ps_obj);
+      ps_known = shaders.ps != nullptr;
+      if (ps_known) ps_hash = shaders.ps->hash;
+    }
+    entry = ps_known ? FindCaster(shaders.vs->hash, ps_hash) : nullptr;
+    if (!entry) {
+      skip = uint8_t(ShadowSkip::kNoCaster);
+    } else if (!in.state_words.read) {
+      skip = uint8_t(ShadowSkip::kStateUnread);
+    } else {
+      caster.kind = entry->kind;
+      uint32_t words[4];
+      const uint8_t* p = ReadVirtual(device + xdk::DeviceRegShadowOffset(xdk::kRegPolyOffsetFrontScale), sizeof(words));
+      for (int i = 0; p && i < 4; ++i) words[i] = LoadBe32(p + 4 * i);
+      const DrawBias bias = ShadowDrawBias(in.state_words.su_sc_mode, p ? words : nullptr);
+      caster.biased = bias.biased;
+      caster.bias_scale = bias.scale;
+      caster.bias_offset = bias.offset;
+      if (bias.biased && !p) {
+        skip = uint8_t(ShadowSkip::kStateUnread);
+      } else if (entry->kind == CasterKind::kAlphaTest && !FillCasterMaterial(device, shaders, *entry, in)) {
+        skip = uint8_t(ShadowSkip::kAlphaInputs);
+      }
+    }
+  }
+  DrawRecord r = AssembleRecord(in, 0);
+  r.skip = ResolveSkip(r.skip, extra);
+  if (skip == 0 && r.skip == SkipReason::kNone) {
+    for (float v : r.rows) {
+      if (!std::isfinite(v)) r.skip = SkipReason::kNoTransform;
+    }
+  }
+  // The pass's light matrix, from the first draw of the pass that is recorded and gives one.
+  float matrix[4][4];
+  bool have_matrix = false;
+  if (skip == 0 && r.skip == SkipReason::kNone && !f.have_matrix[cascade] && ReadBankRegisters(device, 0, 7)) {
+    float c[7][4];
+    std::memcpy(c, t_bank, sizeof(c));
+    if (r.vs_hash == kShadowDirectMatrixVs) {
+      have_matrix = true;
+      for (int i = 0; i < 16; ++i) have_matrix = have_matrix && std::isfinite(c[i / 4][i % 4]);
+      if (have_matrix) std::memcpy(matrix, c, sizeof(matrix));
+    } else {
+      have_matrix = PassMatrix(c, c + 4, matrix);
+    }
+  }
+  std::lock_guard<std::mutex> lock(g_scene_mutex);
+  if (g_builder.AddShadow(cascade, r, caster, skip, have_matrix ? matrix : nullptr) && have_matrix) {
+    f.have_matrix[cascade] = true;
+  }
+}
+
+// One outermost guest draw call outside the main scene, in a frame with shadow records: tells
+// the pass tracker and records the draw if it is one of a shadow pass.
+// The game's clear (DrawIndx2:821EF988) opens a pass when it clears the shadow map: r8 the
+// map's surface word, r7 its height (frame-map section 15: r7 = 0x400, r8 = 0x10000410). The
+// routine is entered a second time for each clear, with a packet header in r7 and no surface
+// word; that call, and a clear of another surface, is no draw and tells the tracker nothing.
+// Any other hook is a draw: on the map (the device's RB_SURFACE_INFO shadow) with the colour
+// mask 0 it is a shadow draw; a word that cannot be read is not the map, and an unread mask is
+// a mask.
+void ObserveShadowDraw(uint32_t id, const LastArgs& a, uint32_t device) {
+  ShadowFrame& f = CurrentShadowFrame();
+  if (id == kHook_DrawIndx2_821EF988) {
+    if (a.r[5] != kShadowMapSurfaceWord || a.r[4] >= 0x10000) return;
+    f.tracker.Observe(a.r[5], 0, true, false);
+    std::lock_guard<std::mutex> lock(g_scene_mutex);
+    g_builder.CountShadowPass();
+    return;
+  }
+  uint32_t surface = 0, mask = 0xF;
+  if (!device || !ReadVirtualBe32(device + xdk::kDeviceSurfaceInfoOffset, &surface)) surface = 0;
+  if (surface == kShadowMapSurfaceWord &&
+      !ReadVirtualBe32(device + xdk::DeviceRegShadowOffset(xdk::kRegColorMask), &mask)) {
+    mask = 0xF;
+  }
+  const ShadowPass pass = f.tracker.Observe(surface, mask, false, false);
+  if (pass == ShadowPass::kNone) return;
+  if (pass == ShadowPass::kExtra) {
+    std::lock_guard<std::mutex> lock(g_scene_mutex);
+    g_builder.CountShadowExtra();
+    return;
+  }
+  RecordShadowDraw(id, a, device, pass, f);
+}
+
 // One outermost guest draw inside the main scene, as a DrawRecord in the frame.
 // Draw-argument mapping (frame-map section 8): DrawIndexedVertices r4 prim, r5
 // base vertex, r6 start index, r7 index count; DrawVertices r4 prim, r5 start
@@ -3071,6 +3374,13 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   // RecordDraw is reached only for those (OnDraw: in_scene) and the bracket is
   // checked again below. Unreadable words leave the draw a colour draw.
   in.depth_only = in.state_words.read && !xdk::HasColourPass(in.state_words.bin_mask_lo);
+  // The registers of the frame's shadow block, once a frame (ReadShadowRegisters), and the end
+  // of a shadow pass's run for the tracker: only in a frame with shadow records.
+  if (g_shadows_frame.load(std::memory_order_relaxed)) {
+    ShadowFrame& shadow = CurrentShadowFrame();
+    shadow.tracker.Observe(0, 0xF, false, true);
+    ReadShadowRegisters(id, shadow);
+  }
   // Light (frame-map section 14, "Light inputs"). Only for a colour draw that got this far: a
   // draw that is skipped anyway has no use for its inputs.
   LightInputs light;
@@ -3251,6 +3561,67 @@ void AppendFrameLight(std::string& row, const render::FrameScene& sc) {
   row += "}}";
 }
 
+// Discovery evidence, in the frame row of a frame with records: the frame's shadow capture as the
+// scene carries it, {"shadow":{"on","valid","reason","passes","near","far","extra",
+// "skipped":[{name: n} near, {name: n} far],"by_vs":"0xHASH(reason): n, ...","kinds":[[opaque,
+// alpha-test] near, [..] far],"unbiased":[near, far],"split","texel","bias":[scale, offset near,
+// scale, offset far],"map":[32: the registers' rows],"clip":[32: the passes' matrices]}}; the
+// numbers after "extra" only for a valid block. "kinds": the records by caster kind; "unbiased":
+// the records without the polygon offset. tools/xdk_sigmatch/shadow_matrices.py reads the same
+// capture's shadow rows, which is what the counts and the matrices are held against.
+void AppendFrameShadow(std::string& row, const render::FrameScene& sc) {
+  char buf[160];
+  std::snprintf(buf, sizeof(buf), ",\"shadow\":{\"on\":%d,\"valid\":%d,\"reason\":\"%s\",\"passes\":%u,\"near\":%zu,\"far\":%zu,"
+                                  "\"extra\":%u,\"skipped\":[",
+                sc.shadow_records ? 1 : 0, sc.shadow.valid ? 1 : 0, ShadowBlockReasonName(sc.shadow_reason), sc.shadow_passes,
+                sc.shadow_draws[0].size(), sc.shadow_draws[1].size(), sc.shadow_extra);
+  row += buf;
+  for (size_t c = 0; c < 2; ++c) {
+    row += c ? ",{" : "{";
+    bool first = true;
+    for (size_t i = 1; i < kShadowSkipCount; ++i) {
+      if (!sc.shadow_skipped[c][i]) continue;
+      std::snprintf(buf, sizeof(buf), "%s\"%s\":%u", first ? "" : ",", ShadowSkipName(uint8_t(i)), sc.shadow_skipped[c][i]);
+      row += buf;
+      first = false;
+    }
+    row += "}";
+  }
+  row += "],\"by_vs\":\"";
+  row += render::ShadowSkippedByVs(sc);
+  row += "\",\"kinds\":[";
+  uint32_t unbiased[2] = {};
+  for (size_t c = 0; c < 2; ++c) {
+    uint32_t kinds[2] = {};
+    for (const ShadowCaster& caster : sc.shadow_casters[c]) {
+      ++kinds[caster.kind == CasterKind::kAlphaTest ? 1 : 0];
+      unbiased[c] += caster.biased ? 0 : 1;
+    }
+    std::snprintf(buf, sizeof(buf), "%s[%u,%u]", c ? "," : "", kinds[0], kinds[1]);
+    row += buf;
+  }
+  std::snprintf(buf, sizeof(buf), "],\"unbiased\":[%u,%u]", unbiased[0], unbiased[1]);
+  row += buf;
+  if (sc.shadow.valid) {
+    auto floats = [&](const char* key, const float* v, int n) {
+      row += ",\"";
+      row += key;
+      row += "\":[";
+      for (int i = 0; i < n; ++i) {
+        if (i) row += ",";
+        AppendFloat(row, v[i]);
+      }
+      row += "]";
+    };
+    floats("split", sc.shadow.split, 4);
+    floats("texel", sc.shadow.texel, 2);
+    floats("bias", &sc.shadow.bias[0][0], 4);
+    floats("map", &sc.shadow.world_to_map[0][0][0], 32);
+    floats("clip", &sc.shadow.world_to_clip[0][0][0], 32);
+  }
+  row += "}";
+}
+
 // Ends the frame's bracket and, with the renderer on, finishes the frame's
 // scene (`swap` = guest frame number) with its capture time from `timer`,
 // then latches whether the next frame builds records. With `write`
@@ -3276,9 +3647,13 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
                 std::begin(done->unsupported_by_hook));
       std::fill(std::begin(g_unsupported_by_hook), std::end(g_unsupported_by_hook), 0u);
       // Records start or stop at a frame boundary, never mid-frame.
-      g_records_frame.store(g_records_wanted.load(std::memory_order_relaxed),
-                            std::memory_order_relaxed);
-      // The next frame reads its own light block.
+      const bool records = g_records_wanted.load(std::memory_order_relaxed);
+      g_records_frame.store(records, std::memory_order_relaxed);
+      // The shadow passes with them, and only in a frame with records.
+      const bool shadows = records && g_shadows_wanted.load(std::memory_order_relaxed);
+      g_shadows_frame.store(shadows, std::memory_order_relaxed);
+      g_builder.ShadowsOn(shadows);
+      // The next frame reads its own light block (and its own shadow state: CurrentShadowFrame).
       g_light_tries_frame.fetch_add(1, std::memory_order_relaxed);
     }
   }
@@ -3302,7 +3677,10 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
   AppendPitches(row, "pitch_out", e.pitch_out);
   row += "}";
   // The frame's light as the records have it (a frame with records only).
-  if (done->scene && done->scene->records) AppendFrameLight(row, *done->scene);
+  if (done->scene && done->scene->records) {
+    AppendFrameLight(row, *done->scene);
+    AppendFrameShadow(row, *done->scene);
+  }
   row += "}\n";
   std::fputs(row.c_str(), g_file);
 }
@@ -3420,6 +3798,10 @@ void PublishScene(const FinishedScene& done) {
   if (sc.records) {
     ++g_light_frames;
     g_light_block_missing += sc.light.valid ? 0 : 1;
+    if (sc.shadow_records) {
+      ++g_shadow_frames;
+      g_shadow_block_missing += sc.shadow.valid ? 0 : 1;
+    }
   }
   if (sc.frame % 300 != 0) return;
   std::string skipped, unsupported;
@@ -3501,6 +3883,25 @@ void PublishScene(const FinishedScene& done) {
                 kLightBlockReason, g_light_block_missing, g_light_frames);
     g_light_block_missing = 0;
     g_light_frames = 0;
+    // shadow: this frame's shadow capture (render::ShadowLine: the block, the two passes' records
+    // and their skipped draws by reason, the draws on the map outside the passes), the skipped
+    // draws by vertex shader, the block's split and bias, and in how many of the frames with
+    // shadow records since the last line there was no block (shadow-block). "off" without them.
+    if (sc.shadow_records) {
+      char numbers[192] = "";
+      if (sc.shadow.valid) {
+        std::snprintf(numbers, sizeof(numbers), " | split (%g, %g, %g, %.4f) bias near (%g, %g) far (%g, %g)", sc.shadow.split[0],
+                      sc.shadow.split[1], sc.shadow.split[2], sc.shadow.split[3], sc.shadow.bias[0][0], sc.shadow.bias[0][1],
+                      sc.shadow.bias[1][0], sc.shadow.bias[1][1]);
+      }
+      REXSYS_INFO("[native] capture: frame {} shadow: {} | passes {} | skipped by vs {{{}}}{} | {} in {} of {} frames", sc.frame,
+                  render::ShadowLine(sc), sc.shadow_passes, render::ShadowSkippedByVs(sc), numbers, kShadowBlockReason,
+                  g_shadow_block_missing, g_shadow_frames);
+    } else {
+      REXSYS_INFO("[native] capture: frame {} shadow: {}", sc.frame, render::ShadowLine(sc));
+    }
+    g_shadow_block_missing = 0;
+    g_shadow_frames = 0;
   }
   LogShaderBreakdown(sc);
 }
@@ -3545,6 +3946,10 @@ bool ArmDiscoveryNow(uint32_t frames, uint32_t every) {
 
 void SetRecordsWanted(bool wanted) {
   g_records_wanted.store(wanted, std::memory_order_relaxed);
+}
+
+void SetShadowsWanted(bool wanted) {
+  g_shadows_wanted.store(wanted, std::memory_order_relaxed);
 }
 
 void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t*) {
@@ -3628,7 +4033,12 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
   // its uploads are followed: with records here, with discovery below (no
   // instruction is added to a draw that neither reads).
   if (records) t_ps_loads.Observe(in_scene);
-  if (in_scene && records) RecordDraw(id, args, device);
+  if (in_scene && records) {
+    RecordDraw(id, args, device);
+  } else if (records && g_shadows_frame.load(std::memory_order_relaxed)) {
+    // Outside the scene, in a frame with shadow records: the two shadow passes.
+    ObserveShadowDraw(id, args, device);
+  }
   if (!g_armed.load(std::memory_order_relaxed)) return;
   if (!records) t_ps_loads.Observe(in_scene);
   const uint64_t n = g_draw_count.fetch_add(1, std::memory_order_relaxed);

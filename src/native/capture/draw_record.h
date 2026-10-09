@@ -128,6 +128,61 @@ struct DrawRecord {
 // inputs: an index of 16 bits each).
 static_assert(sizeof(DrawRecord) == 616, "DrawRecord grew or shrank: see the comment above");
 
+// --- Shadow-pass records (frame-map section 15; frame_scene.h, FrameScene::shadow_draws) ---
+// A draw of one of the game's two sun shadow passes is a DrawRecord like a
+// scene draw's: geometry (streams, indices, bone palette, instance set), the
+// transform rows (vertex c0..c3 at the shadow draw: object, or for the
+// instanced bushes world, to the light's clip space) and the state words. Of
+// those the native shadow pass reads: color_control (register 0x2202: the
+// alpha test, its function, alpha-to-mask and its offsets), alpha_ref, and
+// su_sc_mode (the cull; bits 11 and 12, the polygon offset's enables), through
+// DecodeRenderState. An alpha-tested caster's texture is the record's material:
+// status textured, `fetch` the texture's fetch constant, `uv` / `uv_vb` /
+// `uv_xform` its coordinates, `alpha` the texture's w with `alpha_scale`.
+// terrain_index and light_index are not used (kNoSideIndex).
+// What the record has no field for is in its twin entry of
+// FrameScene::shadow_casters, the same index as the record.
+
+// docs/native-renderer/shadow-casters.json "kind", as shadow_caster_table.inc
+// writes it (tools/xdk_sigmatch/gen_caster_table.py, KINDS): 0 opaque (depth
+// only), 1 alpha-test (the draw's alpha test on the texture's alpha decides).
+enum class CasterKind : uint8_t { kOpaque = 0, kAlphaTest = 1 };
+
+struct ShadowCaster {
+  CasterKind kind = CasterKind::kOpaque;
+  // The polygon offset applies to this draw (PA_SU_SC_MODE_CNTL bits 11, 12);
+  // false: drawn without bias. Its pair as the device held it at the draw
+  // (shadow_block.h, ShadowDrawBias): in a frame with a valid shadow block the
+  // pass's pair (ShadowBlock::bias), zero when not biased.
+  bool biased = false;
+  float bias_scale = 0.0f;
+  float bias_offset = 0.0f;
+};
+
+// Why a shadow-pass draw was not recorded: a record's reason (SkipReason, by
+// its number) or one of these, numbered after them so that one tally and one
+// counter array hold both.
+enum class ShadowSkip : uint8_t {
+  kNoCaster = uint8_t(SkipReason::kCount),  // the draw's shader pair has no entry in the caster table
+  kAlphaInputs,   // an alpha-test caster whose texture, coordinates or alpha scale could not be read
+  kStateUnread,   // the draw's state words or polygon offset registers could not be read
+  kOverLimit,     // the pass has more records than a list holds (frame_scene.h, kMaxShadowRecords)
+  kCount
+};
+inline constexpr size_t kShadowSkipCount = size_t(ShadowSkip::kCount);
+
+// The name of a shadow skip code (a SkipReason's or a ShadowSkip's number).
+inline const char* ShadowSkipName(uint8_t code) {
+  if (code < uint8_t(SkipReason::kCount)) return SkipReasonName(SkipReason(code));
+  switch (ShadowSkip(code)) {
+    case ShadowSkip::kNoCaster: return "no-caster";
+    case ShadowSkip::kAlphaInputs: return "alpha-inputs";
+    case ShadowSkip::kStateUnread: return "state-unread";
+    case ShadowSkip::kOverLimit: return "over-limit";
+    default: return "?";
+  }
+}
+
 struct TransformInfo {
   uint32_t base_reg;
   TransformLayout layout;

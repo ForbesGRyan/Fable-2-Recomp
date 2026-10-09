@@ -24,6 +24,12 @@ bool Enabled();
 // per guest frame by fable2::native::PollFrame; takes effect from the next
 // guest frame. Without it main-scene draws are only counted.
 void SetRecordsWanted(bool wanted);
+// Whether the consumer also wants the game's two sun shadow passes (the native
+// view, the light and the shadows on: fable2_native_shadows). Set with
+// SetRecordsWanted and latched with it at the frame boundary; it has an effect
+// only in a frame with records. Without it no shadow draw is read or recorded
+// and a frame's scene says so (FrameScene::shadow_records false).
+void SetShadowsWanted(bool wanted);
 // Starts a discovery capture of `frames` guest frames (1..100000) sampling every `every`th
 // draw (1..64) at the next guest frame, into a new file, like FABLE2_NATIVE_DISCOVERY
 // after its delay. Callable from any thread. Returns false, with a log line, when the

@@ -223,6 +223,14 @@ class ClayPass {
   bool EnsureShadowObjects(nrhi::Device* dev);
   void DestroyShadowObjects();
   void ForgetShadowObjects();
+  // What the sky step alone needs (clay_logic.h, "Native sky"): its vertex and pixel shader, its
+  // layout and its pipeline. EnsureSkyObjects makes them on the first frame that draws a sky; false
+  // when they could not be made, now or before: then they are not tried again until the pass is
+  // rebuilt (one log line) and the frames have no sky (ClaySky::kObjects). Destroyed with the
+  // pass's other objects; the sky's two textures are the texture cache's.
+  bool EnsureSkyObjects(nrhi::Device* dev);
+  void DestroySkyObjects();
+  void ForgetSkyObjects();
   // The pre-pass pipeline of a colour pipeline (PrepassKey), from the pre-pass's own cache; nullptr
   // when the colour pipeline is not one of the cache or does not write depth, or on a failure.
   nrhi::Pipeline* PrepassPipeline(nrhi::Device* dev, nrhi::Pipeline* colour, const ClayAlpha& alpha, bool* flat);
@@ -368,6 +376,22 @@ class ClayPass {
   // This Render's mask: what is bound as the screen mask at the colour draws (the mask target's
   // view or the white texture), and the frame's slot of the mask's constants.
   uint32_t mask_slot_ = 0;
+  // The sky step (EnsureSkyObjects): its own layout (the frame's block at b2, its constants in a
+  // slot of the frame's constant buffer at b0, the two sky textures at t0 and t1, the four static
+  // samplers), shaders and pipeline, outside the pipeline cache. sky_slot_: this Render's slot of
+  // the sky's constants. sky_order_: the records' kinds for SkyPlace (kept for its storage).
+  bool sky_objects_ = false, sky_objects_failed_ = false;
+  nrhi::BindingLayout* sky_layout_ = nullptr;  // the RHI has no layout destruction
+  nrhi::Shader* sky_vs_ = nullptr;
+  nrhi::Shader* sky_ps_ = nullptr;
+  nrhi::Pipeline* sky_pipeline_ = nullptr;
+  uint32_t sky_slot_ = 0;
+  std::vector<SkyOrderItem> sky_order_;
+  // The pass's frame counts for the Sky line, and what it last logged about the sky (a line when
+  // the verdict changes, at most kSkyLogLines of them).
+  ClaySkyFrames sky_counts_;
+  ClaySky sky_logged_ = ClaySky::kOff;
+  uint32_t sky_log_lines_ = 0;
   nrhi::BindingLayout* map_layout_ = nullptr;  // the RHI has no layout destruction
   nrhi::Shader* map_vs_ = nullptr;
   nrhi::Shader* map_ps_ = nullptr;

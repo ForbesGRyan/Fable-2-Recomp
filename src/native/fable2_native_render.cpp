@@ -60,9 +60,9 @@ REXCVAR_DEFINE_STRING(fable2_native_shadows, "on", "Fable2",
 REXCVAR_DEFINE_STRING(fable2_native_fog, "off", "Fable2",
                       "Native fog and sky: on (or true, 1) = with a composite view and the light on, the capture also reads the "
                       "frame's fog block (the game's six fog registers and its two fog tables) and its sky block at the game's "
-                      "own draws, and the clay pass fogs its lit draws with the game's arithmetic and tables (the sky is not "
-                      "drawn yet); off (or false, 0) = none of it is read or drawn: the shadows' picture. Off by default until "
-                      "the fog is validated (sub-project 9).");
+                      "own draws, and the clay pass fogs its lit draws with the game's arithmetic and tables and draws the "
+                      "game's sky where no record is drawn; off (or false, 0) = none of it is read or drawn: the shadows' "
+                      "picture. Off by default until the fog is validated (sub-project 9).");
 REXCVAR_DEFINE_BOOL(fable2_native_d3d_messages, false, "Fable2",
                     "Write the Direct3D debug layer's errors, corruption and warnings to the game log "
                     "(the layer is the SDK's --d3d12_debug=true; without it there is nothing to write). "
@@ -345,7 +345,8 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
                  tst);
   g_shadows_usable.store(g_clay->shadows_usable(), std::memory_order_relaxed);
   SetStatus(render::FormatStatusText(*scene, st, textures ? &tst : nullptr) + "\n" +
-            render::FormatLightDrawnText(st) + "\n" + render::FormatShadowText(st) + "\n" + render::FormatFogText(st));
+            render::FormatLightDrawnText(st) + "\n" + render::FormatShadowText(st) + "\n" + render::FormatFogText(st) + "\n" +
+            render::FormatSkyText(st));
   const double cpu_ms = st.hash_ms + st.decode_ms + st.record_ms + tst.decode_ms;
   const uint32_t pending = tst.status[size_t(capture::MaterialStatus::kTexturePending)];
   if (textures && (tst.uploads || pending)) {
@@ -394,6 +395,8 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
     REXLOG_INFO("[native] clay: {}", render::FormatShadowText(st));
     // The fog: the frame's block, what the pass did about it, and the frames without fog by reason.
     REXLOG_INFO("[native] clay: {}", render::FormatFogText(st));
+    // The sky: the frame's sky block, what the pass did about it, its place, and the frames without a sky by reason.
+    REXLOG_INFO("[native] clay: {}", render::FormatSkyText(st));
     if (const std::string by_vs = render::FormatShadowSkippedByVs(st); !by_vs.empty()) {
       REXLOG_INFO("[native] clay: shadow draws skipped by vs {{{}}}", by_vs);
     }
@@ -500,7 +503,7 @@ void Install(rex::memory::Memory* memory) {
               "are drawn and the lit draws' sun is shadowed)",
               CurrentShadows() ? "on" : "off");
   REXLOG_INFO("[native] fog: {} (fable2_native_fog; on: the frame's fog and sky blocks are read with the light on and "
-              "the lit draws are fogged; the sky is not drawn yet)",
+              "the lit draws are fogged and the sky is drawn behind them)",
               CurrentFog() ? "on" : "off");
 }
 

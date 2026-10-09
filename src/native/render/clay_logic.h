@@ -163,6 +163,115 @@ constexpr ClayFogDecision DecideClayFog(const ClayFogInputs& in) {
   return {ClayFog::kDrawn, FrameViewReason::kNone};
 }
 
+// The rules of the sky that are not the fog's ("Native sky" below; review of plan Task 3, I1: they
+// were taken out of the fog block so that a night or an interior keeps its fog, and are judged
+// where the sky is decided). kHeight: c67.y, the sky's path height, is below 0. kExtinction: a
+// component of c64 or c65 is below 0 (the sky's exp(-(l1 * c64 + l2 * c65)) would grow with the
+// path). kPath: a zenith path c31.x or c46.x below 0 or beyond capture::kFogRegisterLimit (the sky
+// block bounds neither from above, and a product downstream could overflow). kBlend: c47.x outside
+// 0..1. kValue: a value that is no number, or beyond the limit. A frame one of them fails in has no
+// sky and is counted "sky-block" with the rule.
+enum class SkyRule : uint8_t { kNone, kValue, kHeight, kExtinction, kPath, kBlend, kCount };
+// The plan's reason string of a sky drawn without its texture term.
+inline constexpr const char* kSkyTextureReason = "sky-texture";
+inline const char* SkyRuleName(SkyRule r) {
+  switch (r) {
+    case SkyRule::kNone: return "none";
+    case SkyRule::kValue: return "value";
+    case SkyRule::kHeight: return "height";
+    case SkyRule::kExtinction: return "extinction";
+    case SkyRule::kPath: return "path";
+    case SkyRule::kBlend: return "blend";
+    default: return "?";
+  }
+}
+
+// What the pass did about the frame's sky ("Native sky" below; ClayStats::sky; the Sky line). The
+// sky goes with the fog (one switch, fable2_native_fog) and reads the fog's tail of the frame's
+// constants (the in-scatter table, the axis) and the lit draws' exposure, so a frame without fog
+// has no sky. kOff: the switch is off. kNoLight: the frame is drawn without light. kNoFog: the
+// frame is not fogged for want of a fog block or of usable values ("fog-block"). kView: the frame
+// has no single view, or its view-projection gives no ray (`view` says which). kBlock: the frame
+// has no valid sky block, whatever the capture's reason. kRules: the blocks hold a value the sky's
+// own rules refuse (SkyRule). kObjects: the sky's GPU objects could not be made (off until the
+// pass is rebuilt). kDrawn: the sky step is drawn. In every case but the last the pixels nothing
+// is drawn at keep the clear colour, as before the sky.
+enum class ClaySky : uint8_t { kOff, kNoLight, kNoFog, kView, kBlock, kRules, kObjects, kDrawn, kCount };
+
+// The pass's decision about the frame's sky (ClayPass::Render), one chain in which the first thing
+// missing decides. `fog`, `fog_view`: the frame's verdict about its fog (DecideClayFog: the switch
+// as the pass reads it now, the light, the fog block, its values, the eye, the one view, the
+// filled tail). `block`: FrameScene::sky is valid. `rule`: SkyRules of the two blocks. `ray`: the
+// frame's view-projection gives the view rays (SkyRayBasis). `constants`: the frame's constant
+// buffer was made and the sky's constants could be made of the blocks (MakeClaySkyConstants).
+// `objects`: the sky's GPU objects exist or may still be made; false once making them has failed.
+struct ClaySkyInputs {
+  ClayFog fog = ClayFog::kOff;
+  FrameViewReason fog_view = FrameViewReason::kNone;
+  bool block = false;
+  SkyRule rule = SkyRule::kNone;
+  bool ray = false, constants = false, objects = false;
+};
+struct ClaySkyDecision {
+  ClaySky sky = ClaySky::kOff;
+  FrameViewReason view = FrameViewReason::kNone;  // with kView: why
+  SkyRule rule = SkyRule::kNone;                  // with kRules: which
+};
+constexpr ClaySkyDecision DecideClaySky(const ClaySkyInputs& in) {
+  switch (in.fog) {
+    case ClayFog::kDrawn: break;
+    case ClayFog::kNoLight: return {ClaySky::kNoLight, FrameViewReason::kNone, SkyRule::kNone};
+    case ClayFog::kBlock:
+    case ClayFog::kValues: return {ClaySky::kNoFog, FrameViewReason::kNone, SkyRule::kNone};
+    case ClayFog::kView: return {ClaySky::kView, in.fog_view, SkyRule::kNone};
+    default: return {ClaySky::kOff, FrameViewReason::kNone, SkyRule::kNone};  // (kOff, and anything that is no verdict)
+  }
+  if (!in.block) return {ClaySky::kBlock, FrameViewReason::kNone, SkyRule::kNone};
+  if (in.rule != SkyRule::kNone) return {ClaySky::kRules, FrameViewReason::kNone, in.rule};
+  if (!in.ray) return {ClaySky::kView, FrameViewReason::kSingular, SkyRule::kNone};
+  if (!in.constants) return {ClaySky::kRules, FrameViewReason::kNone, SkyRule::kValue};
+  if (!in.objects) return {ClaySky::kObjects, FrameViewReason::kNone, SkyRule::kNone};
+  return {ClaySky::kDrawn, FrameViewReason::kNone, SkyRule::kNone};
+}
+
+// Where the sky step goes among the colour pass's records ("Native sky" below). The pass draws its
+// records in the scene's order, which is the game's: the opaque group, the terrain layers (blended
+// onto their own ground, with depth write), then the game's sky draw, then the blended group. The
+// sky is drawn BEFORE the first drawn record that blends and is no terrain record, or after the
+// last record when there is none. It is depth-tested against the clear value without depth write,
+// so by its place alone:
+//   - no record at or after its place can be covered: those are drawn later, over it;
+//   - every blended record that is no terrain record is at or after its place;
+//   - a record before its place is covered only at pixels where the depth is still the clear value
+//     when the sky is drawn, which a record that writes depth never leaves behind (a fragment drawn
+//     exactly at the far plane apart: it is the clear value). `before_no_depth` counts the drawn
+//     records before the place that write no depth: where nothing else wrote depth under them the
+//     sky is drawn over them, as the game's sky is over the same draws.
+// `drawn`: the record is drawn this frame (it has a pipeline). `terrain`: a terrain record.
+// `blend`, `depth_write`: of its pipeline's key (depth_write: depth test and write, InPrepass).
+struct SkyOrderItem {
+  bool drawn = false, terrain = false, blend = false, depth_write = false;
+};
+struct SkyOrder {
+  size_t place = 0;              // the sky is drawn before the record of this index; the count: after all
+  uint32_t before = 0;           // drawn records before the place
+  uint32_t before_no_depth = 0;  // those of them that write no depth
+};
+constexpr SkyOrder SkyPlace(const SkyOrderItem* items, size_t count) {
+  SkyOrder o;
+  o.place = count;
+  for (size_t i = 0; i < count; ++i) {
+    if (!items[i].drawn) continue;
+    if (items[i].blend && !items[i].terrain) {
+      o.place = i;
+      break;
+    }
+    ++o.before;
+    if (!items[i].depth_write) ++o.before_no_depth;
+  }
+  return o;
+}
+
 struct ClayStats {
   uint32_t drawn = 0, skipped_bad_index = 0, uploads = 0, hits = 0;
   uint64_t resident_bytes = 0;
@@ -310,7 +419,47 @@ struct ClayStats {
   FrameViewReason fog_view = FrameViewReason::kNone;
   uint32_t fog_trees = 0, fog_trees_none = 0;
   uint64_t fog_frames = 0, fog_block_frames = 0, fog_values_frames = 0, fog_view_frames = 0, fog_nolight_frames = 0;
+  // The sky ("Native sky" below; the Sky line). sky_block, sky_reason: the scene's sky block and,
+  // without one, the capture's reason. sky, sky_view, sky_rule: what the pass did about it
+  // (ClaySky), and with kView or kRules why. sky_textured: the drawn sky has the texture term (the
+  // game's two sky textures, resolved by the texture cache); sky_texture_missing: it is the
+  // clear-sky term alone because a texture the shader would read could not be had ("sky-texture").
+  // sky_before, sky_before_no_depth: the drawn records before the sky's place and those of them
+  // that write no depth (SkyPlace). sky_ray, sky_axis_cos: of a drawn sky, the view ray of the
+  // picture's centre and its cosine to the fog's axis c66 (1: the view looks along the axis, where
+  // the in-scatter table is read at its far end). The frame counts are the pass's totals since it was made, this
+  // frame included: frames with the fog's and the light's switch on, and those of them without a
+  // sky by reason: no fog ("fog-block" frames and frames without light), no view, no valid sky
+  // block or a refused value ("sky-block" is the two together), no objects; and the frames whose
+  // sky was drawn without its textures ("sky-texture").
+  bool sky_block = false, sky_textured = false, sky_texture_missing = false;
+  capture::SkyBlockReason sky_reason = capture::SkyBlockReason::kOff;
+  ClaySky sky = ClaySky::kOff;
+  FrameViewReason sky_view = FrameViewReason::kNone;
+  SkyRule sky_rule = SkyRule::kNone;
+  uint32_t sky_before = 0, sky_before_no_depth = 0;
+  float sky_ray[3] = {}, sky_axis_cos = 0.0f;
+  uint64_t sky_frames = 0, sky_nofog_frames = 0, sky_view_frames = 0, sky_block_frames = 0, sky_rules_frames = 0;
+  uint64_t sky_objects_frames = 0, sky_texture_frames = 0;
 };
+// The pass's frame counts of the sky, which follow from the frame's verdict: one frame added.
+// `on`: the fog's switch and the light's switch together (the frames that are counted; the sky has
+// no switch of its own). `texture_missing`: a drawn sky without its texture term.
+struct ClaySkyFrames {
+  uint64_t frames = 0, nofog = 0, view = 0, block = 0, rules = 0, objects = 0, texture = 0;
+};
+inline void CountClaySkyFrame(bool on, ClaySky sky, bool texture_missing, ClaySkyFrames& n) {
+  if (!on) return;
+  ++n.frames;
+  if (sky == ClaySky::kNoFog || sky == ClaySky::kNoLight) ++n.nofog;
+  if (sky == ClaySky::kView) ++n.view;
+  if (sky == ClaySky::kBlock) ++n.block;
+  if (sky == ClaySky::kRules) ++n.rules;
+  if (sky == ClaySky::kObjects) ++n.objects;
+  if (sky == ClaySky::kDrawn && texture_missing) ++n.texture;
+}
+// The frames counted "sky-block": frames that could have had a sky and had none for their sky block.
+inline uint64_t ClaySkyBlockFrames(const ClaySkyFrames& n) { return n.block + n.rules; }
 // The pass's frame counts of the fog, which follow from the frame's verdict: one frame added.
 // `on`: the fog's switch and the light's switch together (the frames that are counted).
 struct ClayFogFrames {
@@ -2390,6 +2539,324 @@ inline std::string FormatFogText(const ClayStats& st) {
                 static_cast<unsigned long long>(st.fog_block_frames + st.fog_values_frames + st.fog_view_frames),
                 static_cast<unsigned long long>(st.fog_block_frames), static_cast<unsigned long long>(st.fog_values_frames),
                 static_cast<unsigned long long>(st.fog_view_frames), static_cast<unsigned long long>(st.fog_nolight_frames));
+  return text + buf;
+}
+
+// --- Native sky (frame-map section 16, "Native sky"; docs/native-renderer/lighting-formulas.md, "The sky") ---
+//
+// The game draws its sky as one cube around the eye with pixel shader 0xF7601FBE485936FD, after the
+// terrain layers and before its blended draws, depth-tested (greater-or-equal on its reversed
+// depth) without depth write and without blend. The native pass draws one full-screen triangle in
+// that place (SkyPlace) instead of the cube, which only supplies a direction: at the far depth of
+// the pass's own convention (clip z / w = 1, which is also the value the depth is cleared to; the
+// pass keeps the game's clip z and mirrors its compare), tested less-or-equal, so that it lands
+// exactly where the depth is still the clear value; no depth write, no blend.
+//
+// The arithmetic is the game's shader (light_formulas.sky, machine-checked against the microcode),
+// with its own polynomials for the lat-long coordinate and its literals as the exact singles
+// (light_formulas.SKY_LITERALS):
+//   n      = the view ray of the pixel, normalised
+//   a      = sat(n . c66);  S = scatter(a)                    the fog's in-scatter table
+//   k      = |n.z|^0.2;  h = c67.y * (1.05 - k)
+//   l1     = h + (c31.x - h) * k;  l2 = h + (c46.x - h) * k   the two path lengths
+//   E      = exp2(-1.4426950 * (l1 * c64 + l2 * c65))
+//   base   = (1 - E) * S                                      the clear-sky term
+//   (u, v) = SkyLatLong(n);  s13 = tf13(u, v);  s14 = tf14(u, v)
+//   col    = s13.rgb^2 + c47.x * (s14.rgb^2 - s13.rgb^2);  alpha = s13.a + c47.x * (s14.a - s13.a)
+//   sky    = base + alpha * (col - base)
+// and the result goes through the lit draws' exposure, which stands in for the game's c20.w. In
+// every captured frame the two textures are one 16 x 16 texture of zeros and c47.x is 0: the sky is
+// the clear-sky term alone there, and the texture term has never been seen with content.
+//
+// The mirrors below compute in double on the single-precision values a shader gets and are pinned to
+// the reference by the numbers of tools/xdk_sigmatch/sky_pins.py. Guards: a ray without a length or
+// that is no number counts as (0, 0, 0) (the table's first texel, the horizon's paths); a value or
+// a texel that is no number counts as 0; the result is a number for any input (there is no other
+// colour to fall back to: the pass does not draw a sky whose constants it will not hand a shader).
+
+// The shader's literals c250..c255 (light_formulas.SKY_LITERALS), each the exact single.
+inline constexpr double kSkyAtan[5] = {0.9998660087585449, -0.3302994966506958, 0.18014100193977356, -0.08513300120830536,
+                                       0.02083509974181652};  // q, q^3, q^5, q^7, q^9
+inline constexpr double kSkyAcos[4] = {1.5707287788391113, -0.2121143937110901, 0.07426100224256516, -0.018729299306869507};
+inline constexpr double kSkyPi = 3.1415927410125732, kSkyHalfPi = 1.5707963705062866;
+inline constexpr double kSkyInvTwoPi = 0.15915963053703308, kSkyTwoOverPi = 0.6366385221481323;
+inline constexpr double kSkyPathPower = 0.20000000298023224, kSkyPathHorizon = 1.0499999523162842;
+inline constexpr double kSkyInvLn2 = 1.4426950216293335;
+
+// The sky textures' coordinate of a unit direction (or of (0, 0, 0)): light_formulas.sky_latlong,
+// the shader's arithmetic and not atan2 / asin (which differ from it by 1.6e-5 and 4.3e-5).
+//   u = 0.5 + atan2(y, x) / (2 pi) by its polynomial in min / max of |x|, |y|; on the half plane
+//   y = 0, x < 0 and just north of it u is 1.0000147, just south -0.0000147 (the seam; y = 0 counts
+//   as positive); at the poles (x = y = 0) the ratio is 0 by the console's product rule: u = 0.5.
+//   v = asin(z) * 2 / pi by its polynomial: 0 at the horizon, 1.00003 at the zenith, negative below.
+inline void SkyLatLong(const double n[3], double uv[2]) {
+  const double x = n[0], y = n[1], z = n[2];
+  const double ax = std::fabs(x), ay = std::fabs(y), az = std::fabs(z);
+  const double hi = ax > ay ? ax : ay, lo = ax > ay ? ay : ax;
+  const double q = hi > 0.0 ? lo * (1.0 / hi) : 0.0;
+  const double q2 = q * q;
+  double at = q * (q2 * (q2 * (q2 * (q2 * kSkyAtan[4] + kSkyAtan[3]) + kSkyAtan[2]) + kSkyAtan[1]) + kSkyAtan[0]);
+  if (ay > ax) at = at + (-2.0 * at + kSkyHalfPi);
+  if (x < 0.0) at = at + -kSkyPi;
+  if ((x < y ? x : y) < 0.0 && (x < y ? y : x) >= 0.0) at = at - (at + at);
+  const double root = std::sqrt(std::fabs(1.0 - az));
+  const double poly = az * (az * (az * kSkyAcos[3] + kSkyAcos[2]) + kSkyAcos[1]) + kSkyAcos[0];
+  double ac = poly * root;
+  if (z < 0.0) ac = ac + (-2.0 * root * poly + kSkyPi);
+  uv[0] = 0.5 + at * kSkyInvTwoPi;
+  uv[1] = (kSkyHalfPi - ac) * kSkyTwoOverPi;
+}
+
+// The sky step's constants (cbuffer Sky of shaders::kClaySkyPs, register b0 of the sky's own layout;
+// shaders::kClaySkyFields is its layout): one small slot of the frame's constant buffer. The rest of
+// what the shader reads is the frame's block at b2: the in-scatter table, the axis c66, the
+// exposure, and 1 / the target's size.
+struct ClaySkyConstants {
+  float ray0[3];        // the view ray of a pixel: ray0 + X * rayx + Y * rayy, (X, Y) its centre in -1..1, Y up (SkyRayBasis)
+  float c31x;           // pixel c31.x at the sky draw: the first path's length at the zenith
+  float rayx[3];
+  float c46x;           // c46.x: the second path's
+  float rayy[3];
+  float c47x;           // c47.x: the blend from the first sky texture to the second
+  float ext1[3];        // c64.rgb
+  float c67y;           // c67.y: the paths' height
+  float ext2[3];        // c65.rgb
+  uint32_t textures;    // 1: the two sky textures are bound at t0, t1 and read; 0: the clear-sky term alone
+  float fix13[2];       // host texture scale of tf13 (TextureCache::Resolve's uv_fix)
+  float fix14[2];       // ... of tf14
+  uint32_t sampler13;   // static sampler of tf13 (SamplerIndex)
+  uint32_t sampler14;   // ... of tf14
+  uint32_t pad[2];
+};
+static_assert(sizeof(ClaySkyConstants) == 112);
+
+// The sky's own rules on the two blocks (SkyRule): judged here and not in the fog block, so that a
+// frame whose sky numbers are odd keeps its fog. Both blocks must be valid for a sky; this judges
+// only the values (the first rule that fails): every value the sky reads a number within
+// capture::kFogRegisterLimit; c67.y >= 0; no component of c64, c65 below 0; c31.x, c46.x >= 0;
+// c47.x in 0..1. With them the two paths are not negative and E lies in 0..1, so the clear-sky term
+// is between 0 and the table's texel and no product can overflow.
+inline SkyRule SkyRules(const capture::FogBlock& fog, const capture::SkyBlock& sky) {
+  auto bounded = [](float v) { return std::fabs(v) <= capture::kFogRegisterLimit; };  // (false for a NaN and for infinity)
+  bool ok = bounded(fog.range[1]) && bounded(sky.c31x) && bounded(sky.c46x) && bounded(sky.c47x);
+  for (int i = 0; i < 3; ++i) ok = ok && bounded(fog.ext[0][i]) && bounded(fog.ext[1][i]) && bounded(fog.axis[i]);
+  if (!ok) return SkyRule::kValue;
+  if (!(fog.range[1] >= 0.0f)) return SkyRule::kHeight;
+  for (int i = 0; i < 3; ++i) {
+    if (!(fog.ext[0][i] >= 0.0f && fog.ext[1][i] >= 0.0f)) return SkyRule::kExtinction;
+  }
+  if (!(sky.c31x >= 0.0f && sky.c46x >= 0.0f)) return SkyRule::kPath;
+  if (!(sky.c47x >= 0.0f && sky.c47x <= 1.0f)) return SkyRule::kBlend;
+  return SkyRule::kNone;
+}
+
+// The view rays of the frame from its view-projection V (clip = V . (p, 1); FrameInverseViewProj's
+// `view_proj`, the matrix whose inverse the mask and the fog use). A direction d is seen at the
+// screen point (X, Y) (-1..1, Y up) when r0 . d = X * (r3 . d) and r1 . d = Y * (r3 . d), with
+// r0, r1, r3 the first three entries of V's x, y and w rows; so
+//   d(X, Y) = r0 x r1 + X * (r1 x r3) + Y * (r3 x r0),   towards the scene when r3 . (r0 x r1) > 0
+// (negated otherwise). It is the direction from the eye through the pixel, the same line the
+// inverse view-projection gives for the pixel at any two depths, and it reads neither the depth row
+// nor the translation column: it does not depend on a depth value, on the depth convention or on
+// the eye. Formed from V itself and not from its inverse because the inverse's rows cancel (its
+// entries are of the size of the eye's coordinates over the near plane): the same ray through the
+// single-precision inverse is off by about 1e-4 radian, this one by the rounding of V's entries
+// (test case 593 measures both at the picture's edges and corners).
+// `basis`: ray0, rayx, rayy, scaled so that ray0 has length 1 (computed in double, stored as
+// singles). False, with `basis` untouched, when an entry is no number, the three rows are not
+// independent (no forward direction) or a result does not fit.
+inline bool SkyRayBasis(const float view_proj[4][4], float basis[3][3]) {
+  if (!view_proj || !basis) return false;
+  double r[3][3];
+  static constexpr int kRows[3] = {0, 1, 3};
+  for (int i = 0; i < 3; ++i) {
+    for (int j = 0; j < 3; ++j) {
+      if (!std::isfinite(view_proj[kRows[i]][j])) return false;
+      r[i][j] = double(view_proj[kRows[i]][j]);
+    }
+  }
+  auto cross = [](const double a[3], const double b[3], double out[3]) {
+    out[0] = a[1] * b[2] - a[2] * b[1];
+    out[1] = a[2] * b[0] - a[0] * b[2];
+    out[2] = a[0] * b[1] - a[1] * b[0];
+  };
+  double d[3][3];
+  cross(r[0], r[1], d[0]);
+  cross(r[1], r[2], d[1]);
+  cross(r[2], r[0], d[2]);
+  const double det = r[2][0] * d[0][0] + r[2][1] * d[0][1] + r[2][2] * d[0][2];
+  const double len = std::sqrt(d[0][0] * d[0][0] + d[0][1] * d[0][1] + d[0][2] * d[0][2]);
+  if (!std::isfinite(det) || !std::isfinite(len) || !(len > 0.0)) return false;
+  // (independent rows: the forward ray is not at a right angle to the view axis within rounding)
+  const double w_len = std::sqrt(r[2][0] * r[2][0] + r[2][1] * r[2][1] + r[2][2] * r[2][2]);
+  if (!(std::fabs(det) > 1e-9 * len * w_len)) return false;
+  const double scale = (det > 0.0 ? 1.0 : -1.0) / len;
+  float out[3][3];
+  for (int i = 0; i < 3; ++i) {
+    for (int j = 0; j < 3; ++j) {
+      out[i][j] = float(d[i][j] * scale);
+      if (!std::isfinite(out[i][j])) return false;
+    }
+  }
+  std::memcpy(basis, out, sizeof(out));
+  return true;
+}
+
+// The frame's sky constants. False, with `out` untouched, unless both blocks are valid, the sky's
+// rules hold (SkyRules: checked again here, so that no value reaches a shader on the strength of a
+// flag alone) and the basis is of numbers. Without textures; SetClaySkyTextures turns them on.
+inline bool MakeClaySkyConstants(const capture::FogBlock& fog, const capture::SkyBlock& sky, const float basis[3][3],
+                                 ClaySkyConstants* out) {
+  if (!fog.valid || !sky.valid || !basis || !out || SkyRules(fog, sky) != SkyRule::kNone) return false;
+  ClaySkyConstants c{};
+  for (int i = 0; i < 3; ++i) {
+    if (!std::isfinite(basis[0][i]) || !std::isfinite(basis[1][i]) || !std::isfinite(basis[2][i])) return false;
+    c.ray0[i] = basis[0][i];
+    c.rayx[i] = basis[1][i];
+    c.rayy[i] = basis[2][i];
+    c.ext1[i] = fog.ext[0][i];
+    c.ext2[i] = fog.ext[1][i];
+  }
+  c.c31x = sky.c31x;
+  c.c46x = sky.c46x;
+  c.c47x = sky.c47x;
+  c.c67y = fog.range[1];
+  c.fix13[0] = c.fix13[1] = c.fix14[0] = c.fix14[1] = 1.0f;
+  *out = c;
+  return true;
+}
+
+// The sky's two textures. The second is read only where the blend is above 0 (with c47.x = 0 the
+// shader's blend returns the first, whatever the second holds): the pass then binds the first in
+// its place. The texture term is drawn only when every texture that is read could be had; else the
+// sky is the clear-sky term alone and the frame is counted "sky-texture".
+constexpr bool SkySecondTextureRead(float c47x) { return c47x > 0.0f; }
+constexpr bool SkyTexturesUsable(bool first, bool second, float c47x) { return first && (second || !SkySecondTextureRead(c47x)); }
+inline void SetClaySkyTextures(ClaySkyConstants& c, uint32_t sampler13, const float fix13[2], uint32_t sampler14, const float fix14[2]) {
+  const bool ok = fix13 && fix14 && std::isfinite(fix13[0]) && std::isfinite(fix13[1]) && std::isfinite(fix14[0]) && std::isfinite(fix14[1]);
+  c.textures = ok ? 1u : 0u;
+  c.sampler13 = ok ? (sampler13 & 3u) : 0u;
+  c.sampler14 = ok ? (sampler14 & 3u) : 0u;
+  for (int i = 0; i < 2; ++i) {
+    c.fix13[i] = ok ? fix13[i] : 1.0f;
+    c.fix14[i] = ok ? fix14[i] : 1.0f;
+  }
+}
+
+// The sky's two path lengths from |n.z| of the unit ray, and E (light_formulas.sky_paths,
+// sky_extinction). At the zenith the paths are c31.x and c46.x, at the horizon both 1.05 * c67.y.
+inline void SkyPaths(double az, const ClaySkyConstants& c, double l[2]) {
+  auto finite = [](float v) { return std::isfinite(v) ? double(v) : 0.0; };
+  const double k = az > 0.0 ? std::pow(az, kSkyPathPower) : 0.0;
+  const double h = finite(c.c67y) * (kSkyPathHorizon - k);
+  l[0] = h + (finite(c.c31x) - h) * k;
+  l[1] = h + (finite(c.c46x) - h) * k;
+  for (int i = 0; i < 2; ++i) {
+    if (!std::isfinite(l[i])) l[i] = 0.0;
+  }
+}
+inline void SkyExtinction(const double l[2], const ClaySkyConstants& c, double E[3]) {
+  auto finite = [](float v) { return std::isfinite(v) ? double(v) : 0.0; };
+  for (int i = 0; i < 3; ++i) {
+    const double x = -(l[0] * finite(c.ext1[i]) + l[1] * finite(c.ext2[i])) * kSkyInvLn2;
+    const double e = std::exp2(x);
+    E[i] = std::isfinite(e) ? e : 0.0;  // (the reference: an overflow counts as 0; unreachable inside the rules)
+  }
+}
+
+// The sky of a view ray `n` (any length), linear, before the exposure: light_formulas.sky.
+// `axis`: c66.xyz (the frame's fog constants'); `scatter`: the frame's in-scatter table. `s13`,
+// `s14`: what the two textures return at SkyLatLong(n), four floats each; s13 null: the clear-sky
+// term alone; s14 null: the first texture alone.
+template <size_t K>
+inline void SkyMirror(const float n[3], const ClaySkyConstants& c, const float axis[3], const float (*scatter)[K], const float* s13,
+                      const float* s14, double out[3]) {
+  auto finite = [](float v) { return std::isfinite(v) ? double(v) : 0.0; };
+  double u[3] = {0.0, 0.0, 0.0};
+  if (std::isfinite(n[0]) && std::isfinite(n[1]) && std::isfinite(n[2])) {
+    const double n2 = double(n[0]) * n[0] + double(n[1]) * n[1] + double(n[2]) * n[2];
+    if (n2 > 0.0 && std::isfinite(n2)) {
+      const double inv = 1.0 / std::sqrt(n2);
+      for (int i = 0; i < 3; ++i) u[i] = double(n[i]) * inv;
+    }
+  }
+  double a = u[0] * finite(axis[0]) + u[1] * finite(axis[1]) + u[2] * finite(axis[2]);
+  a = a != a ? 0.0 : (a < 0.0 ? 0.0 : (a > 1.0 ? 1.0 : a));
+  double S[3], l[2], E[3], base[3];
+  FogTableRead(scatter, kFogScatterTexels, a, S);
+  SkyPaths(std::fabs(u[2]), c, l);
+  SkyExtinction(l, c, E);
+  for (int i = 0; i < 3; ++i) {
+    base[i] = (1.0 - E[i]) * (std::isfinite(S[i]) ? S[i] : 0.0);
+    out[i] = std::isfinite(base[i]) ? base[i] : 0.0;
+  }
+  if (!s13) return;
+  double col[3], alpha = finite(s13[3]);
+  for (int i = 0; i < 3; ++i) col[i] = finite(s13[i]) * finite(s13[i]);
+  if (s14) {
+    const double k = finite(c.c47x);
+    for (int i = 0; i < 3; ++i) col[i] = col[i] + k * (finite(s14[i]) * finite(s14[i]) - col[i]);
+    alpha = alpha + k * (finite(s14[3]) - alpha);
+  }
+  for (int i = 0; i < 3; ++i) {
+    const double v = base[i] + alpha * (col[i] - base[i]);
+    out[i] = std::isfinite(v) ? v : 0.0;
+  }
+}
+
+// The view ray of the pixel whose centre is (pos_x, pos_y), in single precision as the shader forms
+// it: X = pos_x * (2 / width) - 1, Y = 1 - pos_y * (2 / height), n = ray0 + X * rayx + Y * rayy.
+inline void SkyPixelRay(const ClaySkyConstants& c, float pos_x, float pos_y, float inv_width, float inv_height, float n[3]) {
+  const float X = pos_x * (2.0f * inv_width) - 1.0f, Y = 1.0f - pos_y * (2.0f * inv_height);
+  for (int i = 0; i < 3; ++i) n[i] = c.ray0[i] + X * c.rayx[i] + Y * c.rayy[i];
+}
+
+// The sky of a pixel as the sky step's shader computes it, with the frame's block (its fog's axis,
+// its in-scatter table, 1 / the target's size), before the exposure.
+inline void SkyPixelMirror(float pos_x, float pos_y, const ClayFrameConstants& frame, const ClaySkyConstants& c, const float* s13,
+                           const float* s14, double out[3]) {
+  float n[3];
+  SkyPixelRay(c, pos_x, pos_y, frame.mask_du, frame.mask_dv, n);
+  SkyMirror(n, c, frame.fog.axis, frame.scatter, s13, s14, out);
+}
+
+// The Sky line of the status text and the log: the frame's sky block, what the pass did, the
+// sky's place among the records, and the pass's totals since it was made.
+inline std::string FormatSkyText(const ClayStats& st) {
+  if (!st.fog_switch) return "Sky: off";
+  std::string text = "Sky: on, block ";
+  if (st.sky_block) {
+    text += "valid";
+  } else {
+    text += std::string("invalid (") + capture::kSkyBlockReason + ": " + capture::SkyBlockReasonName(st.sky_reason) + ")";
+  }
+  switch (st.sky) {
+    case ClaySky::kDrawn:
+      text += st.sky_textured ? ", drawn with its textures"
+                              : st.sky_texture_missing ? std::string(", drawn without its textures (") + kSkyTextureReason + ")"
+                                                       : std::string(", drawn");
+      break;
+    case ClaySky::kNoLight: text += ", not drawn (no light)"; break;
+    case ClaySky::kNoFog: text += std::string(", not drawn (no fog: ") + capture::kFogBlockReason + ")"; break;
+    case ClaySky::kView: text += std::string(", not drawn (view: ") + FrameViewReasonName(st.sky_view) + ")"; break;
+    case ClaySky::kBlock: text += std::string(", not drawn (") + capture::kSkyBlockReason + ": block)"; break;
+    case ClaySky::kRules:
+      text += std::string(", not drawn (") + capture::kSkyBlockReason + ": " + SkyRuleName(st.sky_rule) + ")";
+      break;
+    case ClaySky::kObjects: text += ", not drawn (no objects)"; break;
+    default: text += ", not drawn (off)"; break;
+  }
+  char buf[400];
+  std::snprintf(buf, sizeof(buf),
+                " | view (%.3f, %.3f, %.3f), to the fog's axis %.3f | before it %u records, %u without depth write | "
+                "frames since start %llu: %s %llu {block: %llu, rules: %llu}, %s %llu, no-fog %llu, view %llu, no-objects %llu",
+                double(st.sky_ray[0]), double(st.sky_ray[1]), double(st.sky_ray[2]), double(st.sky_axis_cos), st.sky_before,
+                st.sky_before_no_depth, static_cast<unsigned long long>(st.sky_frames), capture::kSkyBlockReason,
+                static_cast<unsigned long long>(st.sky_block_frames + st.sky_rules_frames),
+                static_cast<unsigned long long>(st.sky_block_frames), static_cast<unsigned long long>(st.sky_rules_frames),
+                kSkyTextureReason, static_cast<unsigned long long>(st.sky_texture_frames),
+                static_cast<unsigned long long>(st.sky_nofog_frames), static_cast<unsigned long long>(st.sky_view_frames),
+                static_cast<unsigned long long>(st.sky_objects_frames));
   return text + buf;
 }
 

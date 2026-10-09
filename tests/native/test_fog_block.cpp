@@ -204,20 +204,41 @@ static int RegisterTests() {
       if (!b.valid || b.ext[r - 1][c] != -1e-6f) return 38;
     }
   }
-  // Magnitudes (review M2): every component of the six registers within kFogRegisterLimit, so that
-  // no product of the fog's or the sky's arithmetic can overflow (0 * inf downstream). The limit
-  // itself is inside; the used and the unused components alike.
+  // Magnitudes (review of plan Task 3, M2; of plan Task 4, M2): the components the fog reads, c67.x,
+  // .z, .w and c68.rgb, within kFogRegisterLimit, so that no product of the fog's arithmetic can
+  // overflow (0 * inf downstream); c28.xy and the axis have tighter rules, tried first. The limit
+  // itself is inside.
   static_assert(kFogRegisterLimit == 1e6f);
-  for (int r = 0; r < 6; ++r) {
+  for (int r = 4; r < 6; ++r) {
     for (int c = 0; c < 4; ++c) {
-      if ((r == 0 && c < 2) || (r == 3 && c < 3)) continue;  // (c28.xy and the axis have tighter rules, tried first)
+      if ((r == 4 && c == 1) || (r == 5 && c == 3)) continue;  // (c67.y is the sky's; c68.w is not read)
       for (float bad : {1.0001e6f, -1.0001e6f, 3e38f, -3e38f}) {
         Inputs in;
         in.regs[r][c] = bad;
-        if (r == 4 && (c == 0 || c == 2 || c == 3) && bad < 0.0f) continue;  // (the range rule's)
         if (!Refused(in, FogBlockReason::kMagnitude)) return 43;
       }
     }
+  }
+  // What the fog does not read has no say about the fog, whatever its size: the sky's c64, c65 and
+  // c67.y (their magnitudes are judged with their signs where the sky is decided: clay_logic.h,
+  // SkyRules) and the components no shader reads (c28.zw, c66.w, c68.w, c64.w, c65.w). The sky's
+  // are carried as they are.
+  {
+    const int unread[][2] = {{1, 0}, {1, 1}, {1, 2}, {1, 3}, {2, 0}, {2, 1}, {2, 2}, {2, 3}, {4, 1}, {0, 2}, {0, 3}, {3, 3}, {5, 3}};
+    for (const auto& u : unread) {
+      for (float big : {1e7f, -1.0001e6f, 3e38f, -3e38f}) {
+        Inputs in;
+        in.regs[u[0]][u[1]] = big;
+        FogBlockReason why = FogBlockReason::kUnread;
+        const FogBlock b = in.Make(&why);
+        if (!b.valid || why != FogBlockReason::kNone) return 47;
+        if ((u[0] == 1 || u[0] == 2) && u[1] < 3 && b.ext[u[0] - 1][u[1]] != big) return 47;
+        if (u[0] == 4 && b.range[1] != big) return 47;
+      }
+    }
+    Inputs in;
+    in.regs[2][0] = 1e7f;  // c65.x
+    if (!in.Make().valid) return 47;
   }
   {
     Inputs in;

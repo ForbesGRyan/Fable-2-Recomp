@@ -6028,6 +6028,659 @@ int main() {
       FogPixelMirror(C, 560.5f, 360.5f, 1.0f, c, kTreeFogFormGround, 0.0f, out);
       CHECK(587, finite3(out));
     }
+
+    // 588-594: the native sky (fog sub-project, plan Task 5; frame-map section 16, "Native sky"): the
+    // mirror of the sky step's shader against the reference's numbers, its guards, the sky's own rules
+    // and constants, the decision, the step's place among the records, and the view rays. Every line
+    // of numbers of case 588 was written by tools/xdk_sigmatch/sky_pins.py (light_formulas.sky,
+    // sky_latlong, sky_paths, sky_extinction), and tests/test_sky_literals.py holds the lines against
+    // that tool's output.
+    {
+      // The sky block of every captured row, and a made-up set with other paths, extinctions and a
+      // texture blend that is not 0 (the captured frames' textures are zeros and their blend is 0).
+      const float c31[4] = {150.0f, 0.0f, 0.0f, 0.0f}, c46[4] = {100.0f, 0.0f, 0.0f, 0.0f}, c47[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+      const uint32_t fc13[6] = {0x00002002, 0x1A544086, 0x0001E00F, 0x00280C14, 0x00000003, 0x00000200};
+      const capture::SkyBlock real_sky = capture::MakeSkyBlock(c31, c46, c47, fc13, fc13);
+      CHECK(588, real_sky.valid && real.valid);
+      capture::FogBlock made_fog = real;
+      const float made_ext[2][3] = {{0.0007999999797903001f, 0.0010999999940395355f, 0.0019000000320374966f},
+                                    {0.004000000189989805f, 0.007000000216066837f, 0.012000000104308128f}};
+      std::memcpy(made_fog.ext, made_ext, sizeof(made_ext));
+      made_fog.range[1] = 1500.0f;
+      capture::SkyBlock made_sky = real_sky;
+      made_sky.c31x = 120.5f;
+      made_sky.c46x = 80.25f;
+      made_sky.c47x = 0.25f;
+      float basis[3][3];
+      CHECK(588, SkyRayBasis(fog_vp, basis));
+      ClaySkyConstants real_k, made_k;
+      CHECK(588, MakeClaySkyConstants(real, real_sky, basis, &real_k) && MakeClaySkyConstants(made_fog, made_sky, basis, &made_k));
+      // sky texture samples: tf13 {0.6000000238418579f, 0.5f, 0.8999999761581421f, 0.3499999940395355f} tf14 {0.20000000298023224f, 0.800000011920929f, 0.4000000059604645f, 0.75f}
+      const float s13[4] = {0.6000000238418579f, 0.5f, 0.8999999761581421f, 0.3499999940395355f}, s14[4] = {0.20000000298023224f, 0.800000011920929f, 0.4000000059604645f, 0.75f};
+      struct SkyPin {
+        float n[3];
+        double uv[2], a, l[2], E[3], clear[3], first[3], both[3];
+      };
+      static const SkyPin real_sky_pins[] = {
+        // real sky registers: c31.x 150.0f c46.x 100.0f c47.x 0.0f c64 {0.0003054436529055238f, 0.0003937904257327318f, 0.0010710508795455098f} c65 {0.0052510276436805725f, 0.005962266121059656f, 0.009832949377596378f} c66 {-0.8295828104019165f, 0.04456644505262375f, 0.5566023588180542f} c67.y 1900.0f
+        // real sky pins: n, (u, v), a, (l1, l2), E, the clear sky, with tf13 alone, with both textures
+        {{0.0f, 0.0f, 1.0f}, {0.5, 1.0000294799147724}, 0.5566023588180542, {150.0, 100.0}, {0.5650057874113371, 0.5192887629442311, 0.31855741465598497}, {0.2538611605969858, 0.22348437954236802, 0.29243710770514025}, {0.29100976376898435, 0.2327648465444938, 0.4735841019030559}, {0.29100976376898435, 0.2327648465444938, 0.4735841019030559}},
+        {{0.0f, 0.0f, -2.5f}, {0.5, -1.0000294799147724}, 0.0, {150.0, 100.0}, {0.5650057874113371, 0.5192887629442311, 0.31855741465598497}, {0.13402409577316712, 0.18460907614470812, 0.317097062418382}, {0.21311567091921763, 0.2074958991043, 0.48961307261364784}, {0.21311567091921763, 0.2074958991043, 0.48961307261364784}},
+        {{9.999999974752427e-07f, 0.0f, 1.0f}, {0.5, 1.0000288432783284}, 0.5566015292349675, {149.9999999999945, 99.9999999999995}, {0.5650057874113396, 0.5192887629442338, 0.3185574146559884}, {0.2538609576110735, 0.22348436708018202, 0.2924371960353331}, {0.29100963182814016, 0.23276483844407284, 0.4735841593176817}, {0.29100963182814016, 0.23276483844407284, 0.4735841593176817}},
+        {{1.0f, 0.0f, 0.0f}, {0.5, 4.303145910000694e-05}, 0.0, {1994.99990940094, 1994.99990940094}, {1.533826938868475e-05, 3.1117289128203197e-06, 3.5693078421318173e-10}, {0.3081007429453202, 0.3840320081177783, 0.46533203108390864}, {0.3262654926186948, 0.3371208060754489, 0.5859658031297894}, {0.3262654926186948, 0.3371208060754489, 0.5859658031297894}},
+        {{0.0f, 3.0f, 0.0f}, {0.7500073699786931, 4.303145910000694e-05}, 0.04456644505262375, {1994.99990940094, 1994.99990940094}, {1.533826938868475e-05, 3.1117289128203197e-06, 3.5693078421318173e-10}, {0.3210648524735525, 0.38944465542306, 0.4641834703014241}, {0.3346921638893179, 0.3406390268561439, 0.5852192386143285}, {0.3346921638893179, 0.3406390268561439, 0.5852192386143285}},
+        {{0.0f, -1.0f, 0.0f}, {0.2499926300213069, 4.303145910000694e-05}, 0.0, {1994.99990940094, 1994.99990940094}, {1.533826938868475e-05, 3.1117289128203197e-06, 3.5693078421318173e-10}, {0.3081007429453202, 0.3840320081177783, 0.46533203108390864}, {0.3262654926186948, 0.3371208060754489, 0.5859658031297894}, {0.3262654926186948, 0.3371208060754489, 0.5859658031297894}},
+        {{-1.0f, 0.0f, 0.0f}, {1.0000147399573862, 4.303145910000694e-05}, 0.8295828104019165, {1994.99990940094, 1994.99990940094}, {1.533826938868475e-05, 3.1117289128203197e-06, 3.5693078421318173e-10}, {0.7698184637375876, 0.47021338056887546, 0.36966162161745747}, {0.6263820138857207, 0.3931386986823431, 0.5237800364063561}, {0.6263820138857207, 0.3931386986823431, 0.5237800364063561}},
+        {{-1.0f, 9.999999974752427e-07f, 0.0f}, {1.000014580819082, 4.303145910000694e-05}, 0.8295828549679467, {1994.99990940094, 1994.99990940094}, {1.533826938868475e-05, 3.1117289128203197e-06, 3.5693078421318173e-10}, {0.7698185027322658, 0.47021338056887546, 0.36966160769057305}, {0.6263820392322618, 0.3931386986823431, 0.5237800273538811}, {0.6263820392322618, 0.3931386986823431, 0.5237800273538811}},
+        {{-1.0f, -9.999999974752427e-07f, 0.0f}, {-1.4580819082010699e-05, 4.303145910000694e-05}, 0.8295827658350567, {1994.99990940094, 1994.99990940094}, {1.533826938868475e-05, 3.1117289128203197e-06, 3.5693078421318173e-10}, {0.7698184247421833, 0.47021338056887546, 0.36966163554460113}, {0.6263819885387076, 0.3931386986823431, 0.5237800454589996}, {0.6263819885387076, 0.3931386986823431, 0.5237800454589996}},
+        {{-2.0f, 0.0f, 1.0f}, {1.0000147399573862, 0.29520738196904805}, 0.9909215649603816, {183.81333871991245, 141.2463426959595}, {0.4503036900564933, 0.4007040298037657, 0.20479586950784565}, {0.5121200219182144, 0.279638736240336, 0.24413535900492508}, {0.45887802516712567, 0.26926517873287903, 0.44218796496001517}, {0.45887802516712567, 0.26926517873287903, 0.44218796496001517}},
+        {{-1.0f, -0.0010000000474974513f, -0.4000000059604645f}, {0.00014439830214268978, -0.24226883488723971}, 0.5634897500861816, {201.4792224305203, 160.46484099369525}, {0.4048875707461826, 0.3548448383849493, 0.16635401635179214}, {0.34961117307280654, 0.3000738076906502, 0.35685717542995454}, {0.35324727244898235, 0.2825479752973858, 0.5154571463081588}, {0.35324727244898235, 0.2825479752973858, 0.5154571463081588}},
+        {{1.0f, 1.0f, 0.0f}, {0.6250055037586475, 4.303145910000694e-05}, 0.0, {1994.99990940094, 1994.99990940094}, {1.533826938868475e-05, 3.1117289128203197e-06, 3.5693078421318173e-10}, {0.3081007429453202, 0.3840320081177783, 0.46533203108390864}, {0.3262654926186948, 0.3371208060754489, 0.5859658031297894}, {0.3262654926186948, 0.3371208060754489, 0.5859658031297894}},
+        {{-1.0f, 1.0f, 0.20000000298023224f}, {0.8750092361987387, 0.0894015812521043}, 0.6899668171778474, {332.92397226021956, 299.1786961904603}, {0.1877422821962996, 0.14735874078857344, 0.036942691562578914}, {0.5393166773906158, 0.3996043722907808, 0.39040678815084817}, {0.4765558513862913, 0.34724284288071905, 0.5372643947767108}, {0.4765558513862913, 0.34724284288071905, 0.5372643947767108}},
+        {{1.0f, -1.0f, -0.30000001192092896f}, {0.3749944962413525, -0.13305374263823294}, 0.0, {273.5183915578653, 237.01109884864053}, {0.2649812339363854, 0.21852996188075402, 0.07255065904121051}, {0.22646330145807658, 0.3001104418851499, 0.43157188570982735}, {0.2732011551653894, 0.28257178752402895, 0.5640217084354104}, {0.2732011551653894, 0.28257178752402895, 0.5640217084354104}},
+        {{-1.0f, -1.0f, 0.0f}, {0.12499076380126134, 4.303145910000694e-05}, 0.5550903952809012, {1994.99990940094, 1994.99990940094}, {1.533826938868475e-05, 3.1117289128203197e-06, 3.5693078421318173e-10}, {0.582737221527922, 0.4648548939706132, 0.42938040683410006}, {0.504779205334347, 0.38965568236153353, 0.5625972471531254}, {0.504779205334347, 0.38965568236153353, 0.5625972471531254}},
+        {{0.30000001192092896f, -0.4000000059604645f, -0.800000011920929f}, {0.35241236724137226, -0.6443869497228895}, 0.0, {150.21510305125338, 101.8369815804109}, {0.5595451555736591, 0.5135887425105261, 0.3127829162486742}, {0.13570654630518608, 0.1867980732497418, 0.3197841214917058}, {0.21420926377505814, 0.20891874723561932, 0.4913596610273244}, {0.21420926377505814, 0.20891874723561932, 0.4913596610273244}},
+        {{0.6000000238418579f, 0.20000000298023224f, 0.05000000074505806f}, {0.5512110117509568, 0.05019502850077647}, 0.0, {429.6414681698631, 399.5608046629108}, {0.10759984623130171, 0.07796646259024827, 0.01241277643328472}, {0.27495336768947687, 0.35409149276014146, 0.45955596877884747}, {0.3047196985048229, 0.3176594709145256, 0.5822113625970716}, {0.3047196985048229, 0.3176594709145256, 0.5822113625970716}},
+        {{0.10000000149011612f, -0.20000000298023224f, 0.9700000286102295f}, {0.32378708273902457, 0.8557921521422289}, 0.4500852879987637, {149.7666362134995, 100.02485094234035}, {0.5649723324333389, 0.519259542605633, 0.3185591942598743}, {0.22503646201192062, 0.21764304080225, 0.3009864228895406}, {0.2722737095168834, 0.2289679763286, 0.47914115682387404}, {0.2722737095168834, 0.2289679763286, 0.47914115682387404}},
+        {{-0.5f, 0.699999988079071f, 0.3499999940395355f}, {0.8487253694971866, 0.24602960975560556}, 0.6899888956580524, {199.97998959139392, 158.84534956139584}, {0.4085324510937295, 0.3584993479679675, 0.1692959349368103}, {0.39272667668683825, 0.30065006977038217, 0.33674934532014694}, {0.3812723500550914, 0.28292254565264635, 0.5023870566169317}, {0.3812723500550914, 0.28292254565264635, 0.5023870566169317}},
+        {{-0.8295828104019165f, 0.04456644505262375f, 0.5566023588180542f}, {0.9914737269217622, 0.3758235687626616}, 0.9999999965903963, {167.14958579923868, 122.67836901924377}, {0.498953547977844, 0.45056047135474336, 0.25024473882487724}, {0.4675291844796583, 0.25634251446315565, 0.22972237616571756}, {0.42989398056628214, 0.2541226344388555, 0.4328195260286222}, {0.42989398056628214, 0.2541226344388555, 0.4328195260286222}},
+        {{0.8295828104019165f, -0.04456644505262375f, -0.5566023588180542f}, {0.49145898696437595, -0.37582356876266154}, 0.0, {167.14958579923868, 122.67836901924377}, {0.498953547977844, 0.45056047135474336, 0.25024473882487724}, {0.15437515196581078, 0.2110030221091281, 0.34888513862299414}, {0.22634385756573777, 0.22465196413849317, 0.5102753223361174}, {0.22634385756573777, 0.22465196413849317, 0.5102753223361174}},
+        {{-0.8999999761581421f, 0.30000001192092896f, 0.44999998807907104f}, {0.9488037238579108, 0.28200501792848803}, 0.9623481140649474, {187.59340609581147, 145.38736225581818}, {0.44010926097019865, 0.39035034636351773, 0.19582994301753295}, {0.5033685810174762, 0.2852864428195614, 0.2576607000838273}, {0.4531895885294832, 0.2729361880430385, 0.4509794367419189}, {0.4531895885294832, 0.2729361880430385, 0.4509794367419189}},
+      };
+      static const SkyPin made_sky_pins[] = {
+        // made sky registers: c31.x 120.5f c46.x 80.25f c47.x 0.25f c64 {0.0007999999797903001f, 0.0010999999940395355f, 0.0019000000320374966f} c65 {0.004000000189989805f, 0.007000000216066837f, 0.012000000104308128f} c66 {-0.8295828104019165f, 0.04456644505262375f, 0.5566023588180542f} c67.y 1500.0f
+        // made sky pins: n, (u, v), a, (l1, l2), E, the clear sky, with tf13 alone, with both textures
+        {{0.0f, 0.0f, 1.0f}, {0.5, 1.0000294799147724}, 0.5566023588180542, {120.5, 80.25}, {0.6587573595218957, 0.49942391872854114, 0.3036286117443316}, {0.19914805818087636, 0.23271961691988374, 0.29884371633054635}, {0.2554462468723977, 0.23876775089492533, 0.4777483975477562}, {0.23553144142810867, 0.28437079093859496, 0.4557390284756989}},
+        {{0.0f, 0.0f, -2.5f}, {0.5, -1.0000294799147724}, 0.0, {120.5, 80.25}, {0.6587573595218957, 0.49942391872854114, 0.3036286117443316}, {0.10513872370199404, 0.19223783589843865, 0.32404391260139254}, {0.19434017890078487, 0.2124545929896958, 0.49412852527401113}, {0.1838263070444689, 0.26210581119583254, 0.469599136537318}},
+        {{9.999999974752427e-07f, 0.0f, 1.0f}, {0.5, 1.0000288432783284}, 0.5566015292349675, {120.49999999999545, 80.24999999999947}, {0.6587573595218996, 0.4994239187285454, 0.3036286117443361}, {0.1991478989432424, 0.23271960394271143, 0.2988438065958453}, {0.2554461433679347, 0.23876774245976323, 0.4777484562202011}, {0.23553135384740925, 0.28437078380115016, 0.45573907812161374}},
+        {{1.0f, 0.0f, 0.0f}, {0.5, 4.303145910000694e-05}, 0.0, {1574.9999284744263, 1574.9999284744263}, {0.0005208753359983021, 2.880635635923183e-06, 3.1060505565704907e-10}, {0.3079449842104419, 0.3840320968652697, 0.4653320311054655}, {0.32616424944009553, 0.33712086376131883, 0.5859658031438013}, {0.2953697512307299, 0.3675926555849767, 0.5473076023461652}},
+        {{0.0f, 3.0f, 0.0f}, {0.7500073699786931, 4.303145910000694e-05}, 0.04456644505262375, {1574.9999284744263, 1574.9999284744263}, {0.0005208753359983021, 2.880635635923183e-06, 3.1060505565704907e-10}, {0.3209025398002461, 0.3894447454213817, 0.4641834703229278}, {0.3345866606507013, 0.34063908535505355, 0.5852192386283059}, {0.30249640686304696, 0.37056961231503477, 0.546675893910635}},
+        {{0.0f, -1.0f, 0.0f}, {0.2499926300213069, 4.303145910000694e-05}, 0.0, {1574.9999284744263, 1574.9999284744263}, {0.0005208753359983021, 2.880635635923183e-06, 3.1060505565704907e-10}, {0.3079449842104419, 0.3840320968652697, 0.4653320311054655}, {0.32616424944009553, 0.33712086376131883, 0.5859658031438013}, {0.2953697512307299, 0.3675926555849767, 0.5473076023461652}},
+        {{-1.0f, 0.0f, 0.0f}, {1.0000147399573862, 4.303145910000694e-05}, 0.8295828104019165, {1574.9999284744263, 1574.9999284744263}, {0.0005208753359983021, 2.880635635923183e-06, 3.1060505565704907e-10}, {0.7694292860002947, 0.47021348923236456, 0.3696616216345823}, {0.6261290483541606, 0.39313876931361164, 0.5237800364174872}, {0.5491861192781444, 0.41499242177213974, 0.4946888767094994}},
+        {{-1.0f, 9.999999974752427e-07f, 0.0f}, {1.000014580819082, 4.303145910000694e-05}, 0.8295828549679467, {1574.9999284744263, 1574.9999284744263}, {0.0005208753359983021, 2.880635635923183e-06, 3.1060505565704907e-10}, {0.7694293249752595, 0.47021348923236456, 0.3696616077076979}, {0.626129073687888, 0.39313876931361164, 0.5237800273650123}, {0.5491861407143753, 0.41499242177213974, 0.4946888690497129}},
+        {{-1.0f, -9.999999974752427e-07f, 0.0f}, {-1.4580819082010699e-05, 4.303145910000694e-05}, 0.8295827658350567, {1574.9999284744263, 1574.9999284744263}, {0.0005208753359983021, 2.880635635923183e-06, 3.1060505565704907e-10}, {0.7694292470246045, 0.47021348923236456, 0.369661635561726}, {0.6261290230199618, 0.39313876931361164, 0.5237800454701307}, {0.5491860978415146, 0.41499242177213974, 0.4946888843694285}},
+        {{-2.0f, 0.0f, 1.0f}, {1.0000147399573862, 0.29520738196904805}, 0.9909215649603816, {146.8856846135584, 112.61925281427628}, {0.5666657984277277, 0.38677620551203584, 0.1958289256463402}, {0.4037122258104862, 0.28613762723444947, 0.2468882974956379}, {0.3884129570509416, 0.27348945791778917, 0.4439773749953873}, {0.34804173453886716, 0.31375069685040324, 0.42716354788424044}},
+        {{-1.0f, -0.0010000000474974513f, -0.4000000059604645f}, {0.00014439830214268978, -0.24226883488723971}, 0.5634897500861816, {160.76787883120508, 127.75130177456091}, {0.5274930850399643, 0.34263011641530117, 0.15905987345926595}, {0.27758401388342585, 0.30575510476365103, 0.35997956464655967}, {0.3064296185465696, 0.2862408184286995, 0.517486699317563}, {0.27867121741514694, 0.324540309579161, 0.4893637453228048}},
+        {{1.0f, 1.0f, 0.0f}, {0.6250055037586475, 4.303145910000694e-05}, 0.0, {1574.9999284744263, 1574.9999284744263}, {0.0005208753359983021, 2.880635635923183e-06, 3.1060505565704907e-10}, {0.3079449842104419, 0.3840320968652697, 0.4653320311054655}, {0.32616424944009553, 0.33712086376131883, 0.5859658031438013}, {0.2953697512307299, 0.3675926555849767, 0.5473076023461652}},
+        {{-1.0f, 1.0f, 0.20000000298023224f}, {0.8750092361987387, 0.0894015812521043}, 0.6899668171778474, {264.23780799991596, 237.07286076375976}, {0.313585975127861, 0.1422496540790311, 0.03519236395956155}, {0.4557599430502759, 0.40199882994279973, 0.3911163407098901}, {0.4222439735670334, 0.34879924036880344, 0.5377256039443173}, {0.37666797925342294, 0.3774743588579358, 0.5064889722968288}},
+        {{1.0f, -1.0f, -0.30000001192092896f}, {0.3749944962413525, -0.13305374263823294}, 0.0, {217.4535070846456, 188.06513645371967}, {0.39604661086348786, 0.21105113444187545, 0.06925615258657403}, {0.1860813420630562, 0.30298255994212153, 0.43310492509032955}, {0.24695288131793092, 0.28443866427817965, 0.5650181840418744}, {0.2283447475048948, 0.3230154099149256, 0.529582693893774}},
+        {{-1.0f, -1.0f, 0.0f}, {0.12499076380126134, 4.303145910000694e-05}, 0.5550903952809012, {1574.9999284744263, 1574.9999284744263}, {0.0005208753359983021, 2.880635635923183e-06, 3.1060505565704907e-10}, {0.5824426217436957, 0.4648550013957882, 0.4293804068539914}, {0.5045877154728439, 0.38965575218789794, 0.5625972471660549}, {0.44634345310111945, 0.41204525343806847, 0.5275342088471382}},
+        {{0.30000001192092896f, -0.4000000059604645f, -0.800000011920929f}, {0.35241236724137226, -0.6443869497228895}, 0.0, {120.60238219635612, 81.65799441232794}, {0.6550040299078279, 0.49447010298587146, 0.29848355035332913}, {0.10629514508210966, 0.19414026562578715, 0.3264380744693737}, {0.19509185280475283, 0.21369117232381168, 0.4956847305024692}, {0.1844623388087021, 0.2631521475543787, 0.4709159255754103}},
+        {{0.6000000238418579f, 0.20000000298023224f, 0.05000000074505806f}, {0.5512110117509568, 0.05019502850077647}, 0.0, {340.4413550904442, 316.22642096734756}, {0.21496956895436894, 0.07516493331249, 0.011777602894718167}, {0.24187216894032873, 0.3551673730223275, 0.4598515353717449}, {0.2832169191206973, 0.3183587930913593, 0.5824034808842167}, {0.25902970253679913, 0.35171705734232317, 0.5442933296681192}},
+        {{0.10000000149011612f, -0.20000000298023224f, 0.9700000286102295f}, {0.32378708273902457, 0.8557921521422289}, 0.4500852879987637, {120.30502913508991, 80.2628919918068}, {0.6588261431233047, 0.49948596302060855, 0.30369412387339223}, {0.17648660856893222, 0.22659502710220822, 0.3075521940085286}, {0.24071630448956124, 0.23478676747693084, 0.4834089080903513}, {0.2230676440402348, 0.2810022665114944, 0.46052869123751905}},
+        {{-0.5f, 0.699999988079071f, 0.3499999940395355f}, {0.8487253694971866, 0.24602960975560556}, 0.6899888956580524, {159.5892741839267, 126.47588895977827}, {0.5306911913108374, 0.34615125836962074, 0.1618750913080816}, {0.31161487915469976, 0.30643720963924154, 0.3397575937912887}, {0.3285496811757374, 0.286684186601899, 0.5043424181411045}, {0.2973881934664774, 0.32491546726378506, 0.4782416612620065}},
+        {{-0.8295828104019165f, 0.04456644505262375f, 0.5566023588180542f}, {0.9914737269217622, 0.3758235687626616}, 0.9999999965903963, {133.80926569709348, 98.00993618919759}, {0.6070845739533555, 0.4346301867620815, 0.23922354379562275}, {0.3666315328003602, 0.263774832299234, 0.23309923157629237}, {0.3643105063733415, 0.2589536410766065, 0.4350144820656235}, {0.32764735321753424, 0.3014511595360652, 0.41957956156695847}},
+        {{0.8295828104019165f, -0.04456644505262375f, -0.5566023588180542f}, {0.49145898696437595, -0.37582356876266154}, 0.0, {133.80926569709348, 98.00993618919759}, {0.6070845739533555, 0.4346301867620815, 0.23922354379562275}, {0.12105939152120737, 0.2171207803279409, 0.35401365369275956}, {0.20468861307816813, 0.22862850701718618, 0.5136088571620332}, {0.19258267441620716, 0.27579143074329415, 0.48608249427154504}},
+        {{-0.8999999761581421f, 0.30000001192092896f, 0.44999998807907104f}, {0.9488037238579108, 0.28200501792848803}, 0.9623481140649474, {149.85494031951404, 115.87907502831945}, {0.5579977975966879, 0.37681762169580774, 0.18725699862093623}, {0.39738114228482, 0.29161910102592453, 0.26040752065470935}, {0.38429775272152233, 0.27705241591492014, 0.4527648701293646}, {0.3445596385714486, 0.3167655074602186, 0.43459912068216533}},
+      };
+      CHECK(588, std::size(real_sky_pins) == 22 && std::size(made_sky_pins) == 22);
+      // 588: the lat-long coordinate by the game's polynomials, the two paths, E, and the sky without
+      // a texture, with the first alone and with both, on both register sets.
+      {
+        int textures_show = 0, second_shows = 0;
+        for (int set = 0; set < 2; ++set) {
+          const ClaySkyConstants& k = set ? made_k : real_k;
+          for (const SkyPin& p : set ? made_sky_pins : real_sky_pins) {
+            const double len = std::sqrt(double(p.n[0]) * p.n[0] + double(p.n[1]) * p.n[1] + double(p.n[2]) * p.n[2]);
+            const double u[3] = {p.n[0] / len, p.n[1] / len, p.n[2] / len};
+            double uv[2], l[2], E[3], clear[3], first[3], both[3];
+            SkyLatLong(u, uv);
+            CHECK(588, std::fabs(uv[0] - p.uv[0]) <= 1e-12 && std::fabs(uv[1] - p.uv[1]) <= 1e-12);
+            SkyPaths(std::fabs(u[2]), k, l);
+            CHECK(588, std::fabs(l[0] - p.l[0]) <= 1e-9 && std::fabs(l[1] - p.l[1]) <= 1e-9);
+            SkyExtinction(l, k, E);
+            CHECK(588, close3(E, p.E, 1e-12));
+            SkyMirror(p.n, k, real.axis, real.scatter, nullptr, nullptr, clear);
+            SkyMirror(p.n, k, real.axis, real.scatter, s13, nullptr, first);
+            SkyMirror(p.n, k, real.axis, real.scatter, s13, s14, both);
+            CHECK(588, close3(clear, p.clear, 1e-12) && close3(first, p.first, 1e-12) && close3(both, p.both, 1e-12));
+            // The clear-sky term is (1 - E) * the table at the pin's coordinate.
+            double S[3];
+            FogTableRead(real.scatter, kFogScatterTexels, p.a, S);
+            for (int i = 0; i < 3; ++i) CHECK(588, std::fabs(clear[i] - (1.0 - p.E[i]) * S[i]) <= 1e-12);
+            if (!close3(first, clear, 1e-6)) ++textures_show;
+            if (!close3(both, first, 1e-6)) ++second_shows;
+            // Textures of zeros (alpha 0) give the clear-sky term exactly: the captured frames' case.
+            const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            double zeroed[3];
+            SkyMirror(p.n, k, real.axis, real.scatter, zero, zero, zeroed);
+            CHECK(588, zeroed[0] == clear[0] && zeroed[1] == clear[1] && zeroed[2] == clear[2]);
+          }
+        }
+        // What the pins can tell apart: the texture term shows in all 44; the second texture only
+        // with the made-up blend (with c47.x = 0 it is not read).
+        CHECK(588, textures_show == 44 && second_shows == 22);
+        for (const SkyPin& p : real_sky_pins) CHECK(588, close3(p.first, p.both, 0.0));
+        // The named places. The poles: u = 0.5 (the console's zero product), v just beyond 1 and -1.
+        CHECK(588, real_sky_pins[0].uv[0] == 0.5 && real_sky_pins[0].uv[1] > 1.00002 && real_sky_pins[0].uv[1] < 1.00004 &&
+                       real_sky_pins[1].uv[0] == 0.5 && real_sky_pins[1].uv[1] == -real_sky_pins[0].uv[1]);
+        // The zenith's paths are c31.x and c46.x themselves; the horizon's both 1.05 * c67.y.
+        CHECK(588, real_sky_pins[0].l[0] == 150.0 && real_sky_pins[0].l[1] == 100.0 && made_sky_pins[0].l[0] == 120.5 &&
+                       made_sky_pins[0].l[1] == 80.25);
+        CHECK(588, std::fabs(real_sky_pins[3].l[0] - 1.05 * 1900.0) < 1e-3 && real_sky_pins[3].l[0] == real_sky_pins[3].l[1] &&
+                       std::fabs(made_sky_pins[3].l[0] - 1.05 * 1500.0) < 1e-3);
+        // The seam on -x: on the half plane y = 0 and just north of it u is one whole turn (1.0000147),
+        // just south it is -0.0000147; v does not jump.
+        CHECK(588, real_sky_pins[6].uv[0] > 1.0000147 && real_sky_pins[6].uv[0] < 1.0000148 && real_sky_pins[7].uv[0] > 1.0000145 &&
+                       real_sky_pins[7].uv[0] < real_sky_pins[6].uv[0] && real_sky_pins[8].uv[0] < -0.0000145 &&
+                       real_sky_pins[8].uv[0] > -0.0000148 && real_sky_pins[7].uv[1] == real_sky_pins[8].uv[1]);
+        // ... and the sky itself does not jump there (the coordinate only matters to a texture).
+        CHECK(588, close3(real_sky_pins[7].clear, real_sky_pins[8].clear, 1e-6));
+        // The coordinate is not atan2 / asin: within 5e-5 of them and not equal (lighting-formulas.md).
+        {
+          const double n[3] = {0.6, 0.64, 0.48};
+          double uv[2];
+          SkyLatLong(n, uv);
+          const double pi = 3.14159265358979323846;
+          const double exact_u = 0.5 + std::atan2(n[1], n[0]) / (2.0 * pi), exact_v = std::asin(n[2]) * 2.0 / pi;
+          CHECK(588, std::fabs(uv[0] - exact_u) < 5e-5 && std::fabs(uv[1] - exact_v) < 5e-5 && std::fabs(uv[0] - exact_u) > 1e-9 &&
+                         std::fabs(uv[1] - exact_v) > 1e-9);
+        }
+        // The literals are the reference's singles.
+        CHECK(588, kSkyAtan[0] == double(0.9998660087585449f) && kSkyAtan[4] == double(0.02083509974181652f) &&
+                       kSkyAcos[0] == double(1.5707287788391113f) && kSkyAcos[3] == double(-0.018729299306869507f) &&
+                       kSkyPi == double(3.1415927410125732f) && kSkyHalfPi == double(1.5707963705062866f) &&
+                       kSkyInvTwoPi == double(0.15915963053703308f) && kSkyTwoOverPi == double(0.6366385221481323f) &&
+                       kSkyPathPower == double(0.2f) && kSkyPathHorizon == double(1.05f) && kSkyInvLn2 == double(1.4426950216293335f));
+      }
+
+      // 589: guards. Whatever goes in, a number comes out; a ray without a length or that is no
+      // number counts as (0, 0, 0): the table's first texel and the horizon's paths.
+      {
+        double out[3], want[3];
+        const float none[3] = {0.0f, 0.0f, 0.0f};
+        SkyMirror(none, real_k, real.axis, real.scatter, nullptr, nullptr, want);
+        CHECK(589, finite3(want) && std::fabs(want[0] - (1.0 - real_sky_pins[3].E[0]) * double(real.scatter[0][0])) < 1e-12);
+        for (float bad : {qnan, pinf, -pinf}) {
+          for (int at = 0; at < 3; ++at) {
+            float n[3] = {0.3f, -0.4f, 0.8f};
+            n[at] = bad;
+            SkyMirror(n, real_k, real.axis, real.scatter, s13, s14, out);
+            CHECK(589, finite3(out));
+            SkyMirror(n, real_k, real.axis, real.scatter, nullptr, nullptr, out);
+            CHECK(589, close3(out, want, 0.0));
+          }
+        }
+        const float huge[3] = {3e30f, 3e30f, 3e30f};  // (its squared length overflows a single, not a double: a direction all the same)
+        SkyMirror(huge, real_k, real.axis, real.scatter, nullptr, nullptr, out);
+        CHECK(589, finite3(out));
+        const float n[3] = {-0.5f, 0.7f, 0.35f};
+        // Every constant, the axis and every sample that is no number: a number comes out.
+        for (float bad : {qnan, pinf, -pinf, 3e38f, -3e38f}) {
+          for (size_t word = 0; word < sizeof(ClaySkyConstants) / 4; ++word) {
+            ClaySkyConstants k = made_k;
+            if (word * 4 >= offsetof(ClaySkyConstants, textures)) break;  // (the words behind are no floats of the arithmetic)
+            std::memcpy(reinterpret_cast<unsigned char*>(&k) + word * 4, &bad, 4);
+            SkyMirror(n, k, real.axis, real.scatter, s13, s14, out);
+            CHECK(589, finite3(out));
+            float ray[3];
+            SkyPixelRay(k, 100.5f, 200.5f, 1.0f / 1120.0f, 1.0f / 720.0f, ray);
+            SkyMirror(ray, k, real.axis, real.scatter, s13, s14, out);
+            CHECK(589, finite3(out));
+          }
+          for (int at = 0; at < 3; ++at) {
+            float axis[3] = {real.axis[0], real.axis[1], real.axis[2]};
+            axis[at] = bad;
+            SkyMirror(n, made_k, axis, real.scatter, s13, s14, out);
+            CHECK(589, finite3(out));
+          }
+          for (int at = 0; at < 4; ++at) {
+            float a[4] = {s13[0], s13[1], s13[2], s13[3]}, b[4] = {s14[0], s14[1], s14[2], s14[3]};
+            a[at] = bad;
+            SkyMirror(n, made_k, real.axis, real.scatter, a, s14, out);
+            CHECK(589, finite3(out));
+            b[at] = bad;
+            SkyMirror(n, made_k, real.axis, real.scatter, s13, b, out);
+            CHECK(589, finite3(out));
+          }
+          float table[64][3];
+          std::memcpy(table, real.scatter, sizeof(table));
+          table[0][1] = table[40][0] = table[63][2] = bad;
+          for (const float* dir : {none, n, real.axis}) {
+            SkyMirror(dir, made_k, real.axis, table, s13, s14, out);
+            CHECK(589, finite3(out));
+          }
+        }
+        // No table: the clear-sky term is 0, the texture term stays.
+        SkyMirror(n, made_k, real.axis, static_cast<const float (*)[3]>(nullptr), nullptr, nullptr, out);
+        CHECK(589, out[0] == 0.0 && out[1] == 0.0 && out[2] == 0.0);
+        // Inside the rules the clear-sky term lies between 0 and the table's texel, for every pin.
+        for (const SkyPin& p : made_sky_pins) {
+          double S[3];
+          FogTableRead(real.scatter, kFogScatterTexels, p.a, S);
+          for (int i = 0; i < 3; ++i) CHECK(589, p.E[i] >= 0.0 && p.E[i] <= 1.0 && p.clear[i] >= 0.0 && p.clear[i] <= S[i]);
+        }
+        // The lat-long coordinate of (0, 0, 0) and of a pole is a number.
+        const double zero[3] = {0.0, 0.0, 0.0};
+        double uv[2];
+        SkyLatLong(zero, uv);
+        CHECK(589, uv[0] == 0.5 && std::isfinite(uv[1]) && std::fabs(uv[1]) < 1e-4);
+      }
+
+      // 590: the sky's own rules (review of plan Task 3, I1; of plan Task 4, M2: their signs and their
+      // magnitudes are judged here, not in the fog block) and the sky's constants.
+      {
+        CHECK(590, SkyRules(real, real_sky) == SkyRule::kNone && SkyRules(made_fog, made_sky) == SkyRule::kNone);
+        auto rule = [&](void (*change)(capture::FogBlock&, capture::SkyBlock&)) {
+          capture::FogBlock f = real;
+          capture::SkyBlock s = real_sky;
+          change(f, s);
+          ClaySkyConstants k;
+          std::memset(&k, 0x5A, sizeof(k));
+          ClaySkyConstants before = k;
+          const SkyRule r = SkyRules(f, s);
+          // (a refused value gives no constants, and nothing is written)
+          if (r != SkyRule::kNone && (MakeClaySkyConstants(f, s, basis, &k) || std::memcmp(&k, &before, sizeof(k)) != 0)) return SkyRule::kCount;
+          if (r == SkyRule::kNone && !MakeClaySkyConstants(f, s, basis, &k)) return SkyRule::kCount;
+          return r;
+        };
+        CHECK(590, rule([](capture::FogBlock& f, capture::SkyBlock&) { f.range[1] = -0.001f; }) == SkyRule::kHeight);
+        CHECK(590, rule([](capture::FogBlock& f, capture::SkyBlock&) { f.range[1] = 0.0f; }) == SkyRule::kNone);
+        CHECK(590, rule([](capture::FogBlock& f, capture::SkyBlock&) { f.range[1] = 1e6f; }) == SkyRule::kNone);
+        CHECK(590, rule([](capture::FogBlock& f, capture::SkyBlock&) { f.range[1] = 1.0001e6f; }) == SkyRule::kValue);
+        CHECK(590, rule([](capture::FogBlock& f, capture::SkyBlock&) { f.range[1] = -3e38f; }) == SkyRule::kValue);
+        CHECK(590, rule([](capture::FogBlock& f, capture::SkyBlock&) { f.ext[0][0] = -1e-6f; }) == SkyRule::kExtinction);
+        CHECK(590, rule([](capture::FogBlock& f, capture::SkyBlock&) { f.ext[0][2] = -1e-6f; }) == SkyRule::kExtinction);
+        CHECK(590, rule([](capture::FogBlock& f, capture::SkyBlock&) { f.ext[1][1] = -1e-6f; }) == SkyRule::kExtinction);
+        CHECK(590, rule([](capture::FogBlock& f, capture::SkyBlock&) { f.ext[1][0] = 0.0f; }) == SkyRule::kNone);
+        CHECK(590, rule([](capture::FogBlock& f, capture::SkyBlock&) { f.ext[1][0] = 1e7f; }) == SkyRule::kValue);  // (M2: the fog block lets it through)
+        CHECK(590, rule([](capture::FogBlock& f, capture::SkyBlock&) { f.ext[0][1] = std::numeric_limits<float>::quiet_NaN(); }) == SkyRule::kValue);
+        CHECK(590, rule([](capture::FogBlock& f, capture::SkyBlock&) { f.ext[0][1] = std::numeric_limits<float>::infinity(); }) == SkyRule::kValue);
+        CHECK(590, rule([](capture::FogBlock& f, capture::SkyBlock&) { f.axis[2] = std::numeric_limits<float>::quiet_NaN(); }) == SkyRule::kValue);
+        CHECK(590, rule([](capture::FogBlock&, capture::SkyBlock& s) { s.c31x = -1.0f; }) == SkyRule::kPath);
+        CHECK(590, rule([](capture::FogBlock&, capture::SkyBlock& s) { s.c46x = -1.0f; }) == SkyRule::kPath);
+        CHECK(590, rule([](capture::FogBlock&, capture::SkyBlock& s) { s.c31x = 3e38f; }) == SkyRule::kValue);  // (the sky block has no upper bound)
+        CHECK(590, rule([](capture::FogBlock&, capture::SkyBlock& s) { s.c46x = std::numeric_limits<float>::infinity(); }) == SkyRule::kValue);
+        CHECK(590, rule([](capture::FogBlock&, capture::SkyBlock& s) { s.c47x = 1.001f; }) == SkyRule::kBlend);
+        CHECK(590, rule([](capture::FogBlock&, capture::SkyBlock& s) { s.c47x = -0.001f; }) == SkyRule::kBlend);
+        CHECK(590, rule([](capture::FogBlock&, capture::SkyBlock& s) { s.c47x = 1.0f; }) == SkyRule::kNone);
+        CHECK(590, rule([](capture::FogBlock&, capture::SkyBlock& s) { s.c47x = std::numeric_limits<float>::quiet_NaN(); }) == SkyRule::kValue);
+        // The order: a value, the height, the extinctions, the paths, the blend.
+        CHECK(590, rule([](capture::FogBlock& f, capture::SkyBlock& s) { f.range[1] = -1.0f; f.ext[0][0] = -1.0f; s.c31x = -1.0f; s.c47x = 2.0f; }) == SkyRule::kHeight);
+        CHECK(590, rule([](capture::FogBlock& f, capture::SkyBlock& s) { f.ext[0][0] = -1.0f; s.c31x = -1.0f; s.c47x = 2.0f; }) == SkyRule::kExtinction);
+        CHECK(590, rule([](capture::FogBlock&, capture::SkyBlock& s) { s.c31x = -1.0f; s.c47x = 2.0f; }) == SkyRule::kPath);
+        CHECK(590, rule([](capture::FogBlock& f, capture::SkyBlock& s) { f.range[1] = -1.0f; s.c47x = 3e38f; }) == SkyRule::kValue);
+        CHECK(590, std::string(SkyRuleName(SkyRule::kHeight)) == "height" && std::string(SkyRuleName(SkyRule::kExtinction)) == "extinction" &&
+                       std::string(SkyRuleName(SkyRule::kPath)) == "path" && std::string(SkyRuleName(SkyRule::kBlend)) == "blend" &&
+                       std::string(SkyRuleName(SkyRule::kValue)) == "value" && std::string(SkyRuleName(SkyRule::kNone)) == "none");
+        // The constants: the blocks' values in their places, no textures; nothing from an invalid block.
+        static_assert(sizeof(ClaySkyConstants) == 112 && sizeof(ClaySkyConstants) <= kClayTerrainSlotBytes);
+        CHECK(590, made_k.c31x == 120.5f && made_k.c46x == 80.25f && made_k.c47x == 0.25f && made_k.c67y == 1500.0f &&
+                       std::memcmp(made_k.ext1, made_ext[0], 12) == 0 && std::memcmp(made_k.ext2, made_ext[1], 12) == 0 &&
+                       std::memcmp(made_k.ray0, basis[0], 12) == 0 && std::memcmp(made_k.rayx, basis[1], 12) == 0 &&
+                       std::memcmp(made_k.rayy, basis[2], 12) == 0 && made_k.textures == 0 && made_k.fix13[0] == 1.0f && made_k.fix14[1] == 1.0f);
+        ClaySkyConstants k = made_k;
+        CHECK(590, !MakeClaySkyConstants(capture::FogBlock{}, real_sky, basis, &k) && !MakeClaySkyConstants(real, capture::SkyBlock{}, basis, &k) &&
+                       !MakeClaySkyConstants(real, real_sky, nullptr, &k) && !MakeClaySkyConstants(real, real_sky, basis, nullptr) &&
+                       std::memcmp(&k, &made_k, sizeof(k)) == 0);
+        float bad_basis[3][3];
+        std::memcpy(bad_basis, basis, sizeof(basis));
+        bad_basis[2][1] = qnan;
+        CHECK(590, !MakeClaySkyConstants(real, real_sky, bad_basis, &k) && std::memcmp(&k, &made_k, sizeof(k)) == 0);
+        // The textures: the second is read only with a blend above 0; the term is on only with every
+        // texture that is read.
+        CHECK(590, !SkySecondTextureRead(0.0f) && SkySecondTextureRead(0.25f) && SkySecondTextureRead(1.0f) && !SkySecondTextureRead(-1.0f));
+        CHECK(590, SkyTexturesUsable(true, false, 0.0f) && SkyTexturesUsable(true, true, 0.5f) && !SkyTexturesUsable(true, false, 0.5f) &&
+                       !SkyTexturesUsable(false, true, 0.0f) && !SkyTexturesUsable(false, true, 0.5f) && !SkyTexturesUsable(false, false, 0.0f));
+        const float fix_a[2] = {0.5f, 0.75f}, fix_b[2] = {1.0f, 0.25f}, fix_bad[2] = {qnan, 1.0f};
+        SetClaySkyTextures(k, 1, fix_a, 7, fix_b);
+        CHECK(590, k.textures == 1 && k.sampler13 == 1 && k.sampler14 == 3 && k.fix13[1] == 0.75f && k.fix14[1] == 0.25f);
+        SetClaySkyTextures(k, 1, fix_a, 2, fix_bad);
+        CHECK(590, k.textures == 0 && k.sampler13 == 0 && k.sampler14 == 0 && k.fix13[0] == 1.0f && k.fix14[0] == 1.0f);
+        SetClaySkyTextures(k, 1, nullptr, 2, fix_b);
+        CHECK(590, k.textures == 0);
+      }
+
+      // 591: the decision about the frame's sky, one chain in which the first thing missing decides;
+      // the counts and the line that follow from it.
+      {
+        ClaySkyInputs all;
+        all.fog = ClayFog::kDrawn;
+        all.block = all.ray = all.constants = all.objects = true;
+        auto is = [](const ClaySkyInputs& in, ClaySky sky, FrameViewReason view = FrameViewReason::kNone, SkyRule rule = SkyRule::kNone) {
+          const ClaySkyDecision d = DecideClaySky(in);
+          return d.sky == sky && d.view == view && d.rule == rule;
+        };
+        CHECK(591, is(all, ClaySky::kDrawn) && is(ClaySkyInputs{}, ClaySky::kOff));
+        // The fog's verdict first: its switch off, no light, no fog block or values, no single view;
+        // each whatever else the frame has or lacks.
+        const struct {
+          ClayFog fog;
+          ClaySky sky;
+        } fogs[] = {{ClayFog::kOff, ClaySky::kOff}, {ClayFog::kNoLight, ClaySky::kNoLight}, {ClayFog::kBlock, ClaySky::kNoFog},
+                    {ClayFog::kValues, ClaySky::kNoFog}, {ClayFog::kCount, ClaySky::kOff}};
+        for (const auto& f : fogs) {
+          ClaySkyInputs in = all;
+          in.fog = f.fog;
+          CHECK(591, is(in, f.sky));
+          in.block = in.ray = in.constants = in.objects = false;
+          in.rule = SkyRule::kHeight;
+          CHECK(591, is(in, f.sky));
+        }
+        for (FrameViewReason why : {FrameViewReason::kNoRecord, FrameViewReason::kDisagree, FrameViewReason::kSingular, FrameViewReason::kEye}) {
+          ClaySkyInputs in = all;
+          in.fog = ClayFog::kView;
+          in.fog_view = why;
+          CHECK(591, is(in, ClaySky::kView, why));
+          in.block = false;
+          CHECK(591, is(in, ClaySky::kView, why));
+        }
+        // Then the sky's own: no valid sky block; a rule; no ray; no constants; no objects.
+        {
+          ClaySkyInputs in = all;
+          in.block = false;
+          CHECK(591, is(in, ClaySky::kBlock));
+          in.rule = SkyRule::kExtinction;
+          in.ray = in.constants = in.objects = false;
+          CHECK(591, is(in, ClaySky::kBlock));
+          in.block = true;
+          CHECK(591, is(in, ClaySky::kRules, FrameViewReason::kNone, SkyRule::kExtinction));
+          for (SkyRule r : {SkyRule::kValue, SkyRule::kHeight, SkyRule::kPath, SkyRule::kBlend}) {
+            ClaySkyInputs one = all;
+            one.rule = r;
+            CHECK(591, is(one, ClaySky::kRules, FrameViewReason::kNone, r));
+          }
+          in.rule = SkyRule::kNone;
+          CHECK(591, is(in, ClaySky::kView, FrameViewReason::kSingular));
+          in.ray = true;
+          CHECK(591, is(in, ClaySky::kRules, FrameViewReason::kNone, SkyRule::kValue));
+          in.constants = true;
+          CHECK(591, is(in, ClaySky::kObjects));
+          in.objects = true;
+          CHECK(591, is(in, ClaySky::kDrawn));
+        }
+        // The counts: frames with the fog's and the light's switch on, and those without a sky by
+        // reason; "sky-block" is the block and the rules; "sky-texture" a drawn sky without its textures.
+        auto counts = [](bool on, ClaySky sky, bool missing) {
+          ClaySkyFrames n;
+          CountClaySkyFrame(on, sky, missing, n);
+          return n;
+        };
+        auto same = [](const ClaySkyFrames& n, uint64_t frames, uint64_t nofog, uint64_t view, uint64_t block, uint64_t rules, uint64_t objects,
+                       uint64_t texture) {
+          return n.frames == frames && n.nofog == nofog && n.view == view && n.block == block && n.rules == rules && n.objects == objects &&
+                 n.texture == texture;
+        };
+        CHECK(591, same(counts(true, ClaySky::kDrawn, false), 1, 0, 0, 0, 0, 0, 0) && same(counts(true, ClaySky::kDrawn, true), 1, 0, 0, 0, 0, 0, 1) &&
+                       same(counts(true, ClaySky::kNoFog, false), 1, 1, 0, 0, 0, 0, 0) && same(counts(true, ClaySky::kNoLight, false), 1, 1, 0, 0, 0, 0, 0) &&
+                       same(counts(true, ClaySky::kView, false), 1, 0, 1, 0, 0, 0, 0) && same(counts(true, ClaySky::kBlock, false), 1, 0, 0, 1, 0, 0, 0) &&
+                       same(counts(true, ClaySky::kRules, false), 1, 0, 0, 0, 1, 0, 0) && same(counts(true, ClaySky::kObjects, false), 1, 0, 0, 0, 0, 1, 0));
+        // (a sky that is not drawn has no texture count, whatever the flag says; nothing is counted with the switches off)
+        CHECK(591, same(counts(true, ClaySky::kBlock, true), 1, 0, 0, 1, 0, 0, 0));
+        for (int s = 0; s < int(ClaySky::kCount); ++s) CHECK(591, same(counts(false, ClaySky(s), true), 0, 0, 0, 0, 0, 0, 0));
+        ClaySkyFrames sum;
+        CountClaySkyFrame(true, ClaySky::kBlock, false, sum);
+        CountClaySkyFrame(true, ClaySky::kRules, false, sum);
+        CountClaySkyFrame(true, ClaySky::kDrawn, false, sum);
+        CHECK(591, same(sum, 3, 0, 0, 1, 1, 0, 0) && ClaySkyBlockFrames(sum) == 2);
+        // The line.
+        ClayStats st;
+        CHECK(591, FormatSkyText(st) == "Sky: off");
+        st.fog_switch = true;
+        st.sky_block = true;
+        st.sky = ClaySky::kDrawn;
+        st.sky_before = 612;
+        st.sky_ray[0] = 0.851f;
+        st.sky_ray[1] = 0.495f;
+        st.sky_ray[2] = -0.177f;
+        st.sky_axis_cos = -0.783f;
+        st.sky_before_no_depth = 2;
+        st.sky_frames = 900;
+        st.sky_block_frames = 4;
+        st.sky_rules_frames = 5;
+        st.sky_texture_frames = 3;
+        st.sky_nofog_frames = 6;
+        st.sky_view_frames = 2;
+        st.sky_objects_frames = 1;
+        CHECK(591, FormatSkyText(st) == "Sky: on, block valid, drawn | view (0.851, 0.495, -0.177), to the fog's axis -0.783 | before it 612 records, 2 without depth write | "
+                                        "frames since start 900: sky-block 9 {block: 4, rules: 5}, sky-texture 3, no-fog 6, view 2, no-objects 1");
+        st.sky_textured = true;
+        CHECK(591, FormatSkyText(st).starts_with("Sky: on, block valid, drawn with its textures | "));
+        st.sky_textured = false;
+        st.sky_texture_missing = true;
+        CHECK(591, FormatSkyText(st).starts_with("Sky: on, block valid, drawn without its textures (sky-texture) | "));
+        st.sky = ClaySky::kRules;
+        st.sky_rule = SkyRule::kExtinction;
+        CHECK(591, FormatSkyText(st).starts_with("Sky: on, block valid, not drawn (sky-block: extinction) | "));
+        st.sky = ClaySky::kView;
+        st.sky_view = FrameViewReason::kNoRecord;
+        CHECK(591, FormatSkyText(st).starts_with("Sky: on, block valid, not drawn (view: no-record) | "));
+        st.sky = ClaySky::kNoFog;
+        CHECK(591, FormatSkyText(st).starts_with("Sky: on, block valid, not drawn (no fog: fog-block) | "));
+        st.sky = ClaySky::kNoLight;
+        CHECK(591, FormatSkyText(st).starts_with("Sky: on, block valid, not drawn (no light) | "));
+        st.sky = ClaySky::kObjects;
+        CHECK(591, FormatSkyText(st).starts_with("Sky: on, block valid, not drawn (no objects) | "));
+        st.sky = ClaySky::kBlock;
+        st.sky_block = false;
+        st.sky_reason = capture::SkyBlockReason::kNoDraw;
+        CHECK(591, FormatSkyText(st).starts_with("Sky: on, block invalid (sky-block: no-draw), not drawn (sky-block: block) | "));
+        CHECK(591, std::string(capture::kSkyBlockReason) == "sky-block" && std::string(kSkyTextureReason) == "sky-texture");
+      }
+
+      // 592: the sky's place among the colour pass's records: before the first drawn record that
+      // blends and is no terrain record, after the last record when there is none. Shown on record
+      // lists by playing the pass: a pixel's depth and the last thing drawn at it.
+      {
+        const SkyOrderItem opaque{true, false, false, true}, layer{true, true, true, true}, blended{true, false, true, false},
+            blended_depth{true, false, true, true}, opaque_no_depth{true, false, false, false}, not_drawn{false, false, true, false},
+            flat_terrain{true, true, false, true};
+        auto place = [](std::initializer_list<SkyOrderItem> list) { return SkyPlace(list.begin(), list.size()); };
+        // The scene's order at the bridge: opaque, terrain layers, [sky], the blended group with opaque draws in it.
+        SkyOrder o = place({opaque, opaque, layer, layer, blended, opaque, blended});
+        CHECK(592, o.place == 4 && o.before == 4 && o.before_no_depth == 0);
+        // No blended record: after everything. No terrain. No records at all. Only blended ones.
+        o = place({opaque, layer, opaque});
+        CHECK(592, o.place == 3 && o.before == 3 && o.before_no_depth == 0);
+        o = place({opaque, opaque, blended});
+        CHECK(592, o.place == 2 && o.before == 2);
+        o = SkyPlace(nullptr, 0);
+        CHECK(592, o.place == 0 && o.before == 0 && o.before_no_depth == 0);
+        o = place({blended, blended_depth});
+        CHECK(592, o.place == 0 && o.before == 0);
+        // A record that is not drawn has no say; a terrain record never is the place, blended or flat.
+        o = place({not_drawn, opaque, not_drawn, layer, flat_terrain, not_drawn});
+        CHECK(592, o.place == 6 && o.before == 3);
+        o = place({not_drawn, opaque, not_drawn, blended_depth, layer});
+        CHECK(592, o.place == 3 && o.before == 1);
+        // Records before the place that write no depth are counted.
+        o = place({opaque_no_depth, opaque, opaque_no_depth, blended});
+        CHECK(592, o.place == 3 && o.before == 3 && o.before_no_depth == 2);
+        // ... a terrain layer that writes none among them (the captured layers all write depth).
+        const SkyOrderItem layer_no_depth{true, true, true, false};
+        o = place({opaque, layer_no_depth, layer, blended});
+        CHECK(592, o.place == 3 && o.before == 3 && o.before_no_depth == 1);
+        // The property, on every list of up to six records of the seven kinds: play the pass on one
+        // pixel that every drawn record covers. The sky lands only if the depth is still clear at its
+        // place. After the pass: the pixel never shows the sky when a record that writes depth was
+        // drawn before the place or any record was drawn at or after it; no blended record that is
+        // no terrain record lies before the place.
+        const SkyOrderItem kinds[7] = {opaque, layer, blended, blended_depth, opaque_no_depth, not_drawn, flat_terrain};
+        long lists = 0, sky_shown = 0;
+        for (int len = 0; len <= 6; ++len) {
+          int total = 1;
+          for (int i = 0; i < len; ++i) total *= 7;
+          for (int code = 0; code < total; ++code) {
+            SkyOrderItem list[6];
+            for (int i = 0, c = code; i < len; ++i, c /= 7) list[i] = kinds[c % 7];
+            const SkyOrder at = SkyPlace(list, size_t(len));
+            CHECK(592, at.place <= size_t(len));
+            bool depth_clear = true, sky_on_top = false, covered_record = false;
+            uint32_t before = 0, no_depth = 0;
+            for (int i = 0; i <= len; ++i) {
+              if (size_t(i) == at.place && depth_clear) {
+                // (the sky: tested against the clear value, no depth write; what was drawn here before is covered)
+                covered_record = before != 0;
+                sky_on_top = true;
+              }
+              if (i == len || !list[i].drawn) continue;
+              if (size_t(i) < at.place) {
+                CHECK(592, !(list[i].blend && !list[i].terrain));  // no blended draw before the sky
+                ++before;
+                if (!list[i].depth_write) ++no_depth;
+              }
+              if (size_t(i) >= at.place) sky_on_top = false;  // drawn after the sky: over it
+              if (list[i].depth_write) depth_clear = false;
+            }
+            CHECK(592, at.before == before && at.before_no_depth == no_depth);
+            // The sky covered a record only if no record before it wrote depth: all of them are counted.
+            if (covered_record) CHECK(592, at.before_no_depth == at.before && at.before != 0);
+            if (at.before_no_depth == 0) CHECK(592, !covered_record);
+            // Whatever is drawn at or after the place is never under the sky.
+            bool any_after = false;
+            for (int i = int(at.place); i < len; ++i) any_after = any_after || list[i].drawn;
+            if (any_after) CHECK(592, !sky_on_top);
+            ++lists;
+            if (sky_on_top) ++sky_shown;
+          }
+        }
+        CHECK(592, lists == 137257 && sky_shown > 0);
+      }
+
+      // 593: the view rays from the frame's view-projection (the bridge frame's matrices). A ray is
+      // the direction seen at its screen point: put through the matrix as a direction, it comes out
+      // at that point, at the picture's centre, edges and corners alike; it points forward; it does
+      // not read the depth row or the translation.
+      {
+        auto screen_error = [&](const double n[3], double X, double Y) {
+          // (the direction's clip position: rows 0, 1, 3 on (n, 0); the error in pixels of a 1120 x 720 picture)
+          double c[4];
+          for (int r = 0; r < 4; ++r) c[r] = double(fog_vp[r][0]) * n[0] + double(fog_vp[r][1]) * n[1] + double(fog_vp[r][2]) * n[2];
+          if (!(c[3] > 0.0)) return 1e9;
+          return std::fmax(std::fabs(c[0] / c[3] - X) * 560.0, std::fabs(c[1] / c[3] - Y) * 360.0);
+        };
+        CHECK(593, std::fabs(std::sqrt(double(basis[0][0]) * basis[0][0] + double(basis[0][1]) * basis[0][1] + double(basis[0][2]) * basis[0][2]) - 1.0) < 1e-6);
+        double worst = 0.0, worst_inverse = 0.0, worst_angle = 0.0;
+        int points = 0;
+        const ClayFrameConstants frame = lit_frame();
+        for (float py : {0.5f, 1.5f, 180.5f, 360.5f, 540.5f, 718.5f, 719.5f}) {
+          for (float px : {0.5f, 1.5f, 280.5f, 560.5f, 840.5f, 1118.5f, 1119.5f}) {
+            float ray[3];
+            SkyPixelRay(real_k, px, py, frame.mask_du, frame.mask_dv, ray);
+            const double X = double(px) * 2.0 / 1120.0 - 1.0, Y = 1.0 - double(py) * 2.0 / 720.0;
+            const double n[3] = {ray[0], ray[1], ray[2]};
+            const double err = screen_error(n, X, Y);
+            if (err > worst) worst = err;
+            // The same ray through the single-precision inverse, as a shader would form it from two
+            // depths of the pixel (0.25 and 0.75): the same line, with the inverse's cancellation.
+            float P[2][3];
+            for (int k = 0; k < 2; ++k) {
+              const float S[4] = {px * (2.0f * frame.mask_du) - 1.0f, 1.0f - py * (2.0f * frame.mask_dv), k ? 0.75f : 0.25f, 1.0f};
+              float h[4];
+              for (int r = 0; r < 4; ++r) h[r] = fog_inv[r][0] * S[0] + fog_inv[r][1] * S[1] + fog_inv[r][2] * S[2] + fog_inv[r][3] * S[3];
+              for (int i = 0; i < 3; ++i) P[k][i] = h[i] / h[3];
+            }
+            const double m[3] = {double(P[1][0]) - P[0][0], double(P[1][1]) - P[0][1], double(P[1][2]) - P[0][2]};
+            const double inverse_err = screen_error(m, X, Y);
+            if (inverse_err > worst_inverse) worst_inverse = inverse_err;
+            const double dot = (n[0] * m[0] + n[1] * m[1] + n[2] * m[2]) /
+                               std::sqrt((n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) * (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]));
+            const double angle = std::acos(std::fmin(1.0, dot));
+            if (angle > worst_angle) worst_angle = angle;
+            ++points;
+          }
+        }
+        std::printf("sky: the view ray's error over %d pixels (centre, edges, corners; the bridge frame's matrices): worst %.6f pixel "
+                    "from the view-projection's rows; %.4f pixel for the same ray through the single-precision inverse at two depths "
+                    "(the two rays differ by at most %.2e radian)\n",
+                    points, worst, worst_inverse, worst_angle);
+        // Measured: under a thousandth of a pixel anywhere on the picture; the inverse's route is
+        // the same line within its own error (a few hundredths of a pixel).
+        CHECK(593, points == 49 && worst < 1e-3 && worst_inverse < 0.5 && worst_angle < 1e-3);
+        // The basis does not read the depth row or the translation column: change both, the same rays.
+        {
+          float other[4][4];
+          std::memcpy(other, fog_vp, sizeof(other));
+          for (int j = 0; j < 4; ++j) other[2][j] = 17.0f * float(j + 1);
+          for (int i = 0; i < 4; ++i) other[i][3] = -1000.0f + 600.0f * float(i);
+          float b2[3][3];
+          CHECK(593, SkyRayBasis(other, b2) && std::memcmp(b2, basis, sizeof(basis)) == 0);
+        }
+        // A matrix with the other handedness of its rows still gives the forward ray; a matrix
+        // without one, or with an entry that is no number, gives none and writes nothing.
+        {
+          float flipped[4][4];
+          std::memcpy(flipped, fog_vp, sizeof(flipped));
+          for (int j = 0; j < 4; ++j) flipped[0][j] = -flipped[0][j];
+          float b2[3][3];
+          CHECK(593, SkyRayBasis(flipped, b2));
+          const double fwd = double(b2[0][0]) * fog_vp[3][0] + double(b2[0][1]) * fog_vp[3][1] + double(b2[0][2]) * fog_vp[3][2];
+          CHECK(593, fwd > 0.0 && std::fabs(double(b2[0][0]) - basis[0][0]) < 1e-6 && std::fabs(double(b2[0][2]) - basis[0][2]) < 1e-6);
+          float untouched[3][3];
+          std::memset(untouched, 0x5A, sizeof(untouched));
+          float before[3][3];
+          std::memcpy(before, untouched, sizeof(before));
+          float flat[4][4];
+          std::memcpy(flat, fog_vp, sizeof(flat));
+          for (int j = 0; j < 4; ++j) flat[3][j] = flat[0][j];  // (the w row is the x row: no forward direction)
+          CHECK(593, !SkyRayBasis(flat, untouched) && std::memcmp(untouched, before, sizeof(before)) == 0);
+          const float zero[4][4] = {};
+          CHECK(593, !SkyRayBasis(zero, untouched) && !SkyRayBasis(nullptr, untouched) && !SkyRayBasis(fog_vp, nullptr));
+          for (float bad : {qnan, pinf, -pinf}) {
+            for (int r : {0, 1, 3}) {
+              float m[4][4];
+              std::memcpy(m, fog_vp, sizeof(m));
+              m[r][1] = bad;
+              CHECK(593, !SkyRayBasis(m, untouched));
+            }
+          }
+          CHECK(593, std::memcmp(untouched, before, sizeof(before)) == 0);
+        }
+      }
+
+      // 594: the sky of a pixel as the step computes it: the pixel's ray in single precision, then
+      // the mirror with the frame's block (the fog's axis and in-scatter table in its tail).
+      {
+        ClayFrameConstants frame = lit_frame();
+        CHECK(594, SetClayFrameFog(frame, real, true, fog_inv));
+        double worst = 0.0;
+        for (float py : {0.5f, 200.5f, 360.5f, 719.5f}) {
+          for (float px : {0.5f, 560.5f, 1119.5f}) {
+            // The true direction of the pixel, from the view-projection's rows in double.
+            const double X = double(px) * 2.0 / 1120.0 - 1.0, Y = 1.0 - double(py) * 2.0 / 720.0;
+            double a[3], b[3];
+            for (int i = 0; i < 3; ++i) {
+              a[i] = double(fog_vp[0][i]) - X * double(fog_vp[3][i]);
+              b[i] = double(fog_vp[1][i]) - Y * double(fog_vp[3][i]);
+            }
+            double t[3] = {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+            const double forward = t[0] * fog_vp[3][0] + t[1] * fog_vp[3][1] + t[2] * fog_vp[3][2];
+            const float true_ray[3] = {float(forward > 0.0 ? t[0] : -t[0]), float(forward > 0.0 ? t[1] : -t[1]), float(forward > 0.0 ? t[2] : -t[2])};
+            double want[3], got[3], got_tex[3], want_tex[3];
+            SkyMirror(true_ray, real_k, real.axis, real.scatter, nullptr, nullptr, want);
+            SkyPixelMirror(px, py, frame, real_k, nullptr, nullptr, got);
+            SkyMirror(true_ray, made_k, real.axis, real.scatter, s13, s14, want_tex);
+            SkyPixelMirror(px, py, frame, made_k, s13, s14, got_tex);
+            for (int i = 0; i < 3; ++i) {
+              worst = std::fmax(worst, std::fmax(std::fabs(got[i] - want[i]), std::fabs(got_tex[i] - want_tex[i])));
+            }
+            CHECK(594, finite3(got) && got[0] > 0.0 && got[2] > 0.0);
+          }
+        }
+        std::printf("sky: a pixel's sky from its single-precision ray against the true ray's, 12 pixels: worst difference %.2e\n", worst);
+        CHECK(594, worst < 1e-5);
+        // The bridge's view looks away from the fog's axis and slightly down: the picture's top row is
+        // above the horizon, its bottom row below, and the centre's ray is the matrix's forward axis.
+        float top[3], bottom[3], centre[3];
+        SkyPixelRay(real_k, 560.0f, 0.5f, frame.mask_du, frame.mask_dv, top);
+        SkyPixelRay(real_k, 560.0f, 719.5f, frame.mask_du, frame.mask_dv, bottom);
+        SkyPixelRay(real_k, 560.0f, 360.0f, frame.mask_du, frame.mask_dv, centre);
+        CHECK(594, top[2] > 0.0f && bottom[2] < 0.0f && top[2] > centre[2] && centre[2] > bottom[2]);
+        const double fwd_len = std::sqrt(double(fog_vp[3][0]) * fog_vp[3][0] + double(fog_vp[3][1]) * fog_vp[3][1] + double(fog_vp[3][2]) * fog_vp[3][2]);
+        for (int i = 0; i < 3; ++i) CHECK(594, std::fabs(double(centre[i]) - fog_vp[3][i] / fwd_len) < 1e-5);
+        // A frame without the fog's tail (no sky is drawn of it): the mirror still gives numbers.
+        const ClayFrameConstants off = lit_frame();
+        double out[3];
+        SkyPixelMirror(560.5f, 100.5f, off, real_k, s13, s14, out);
+        CHECK(594, finite3(out));
+        for (float bad : {qnan, pinf, -pinf}) {
+          SkyPixelMirror(bad, 100.5f, frame, real_k, s13, s14, out);
+          CHECK(594, finite3(out));
+          SkyPixelMirror(560.5f, bad, frame, real_k, nullptr, nullptr, out);
+          CHECK(594, finite3(out));
+        }
+      }
+    }
   }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
@@ -6041,7 +6694,9 @@ int main() {
                "pre-pass keys, compare directions, mask mirrors against the reference's numbers, guards, the frame's inverse "
                "view-projection, mask constants; native fog: the tables' read, the ground form and the trees' form "
                "against the reference's numbers, guards, the frame's fog constants, the frame's block with the "
-               "fog's tail, the decision and the Fog line, the form of a draw's fog, a pixel's position from its depth\n";
+               "fog's tail, the decision and the Fog line, the form of a draw's fog, a pixel's position from its depth; "
+               "native sky: the lat-long coordinate, the paths and the sky against the reference's numbers, guards, the sky's "
+               "rules and constants, the decision and the Sky line, the step's place among the records, the view rays\n";
 
   return 0;
 }

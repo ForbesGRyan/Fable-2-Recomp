@@ -3904,7 +3904,7 @@ Plan Task 3 (commit 5cd4f47 and the commit of this subsection): the capture buil
 | `register` | every component of the six registers is finite |
 | `amount` | `c28.x`, `c28.y` in [0, 4] |
 | `axis` | the length of `c66.xyz` is 1 within 1e-3 |
-| `magnitude` | beyond the spec (review of plan Task 3, M2): no component of the six registers beyond 1e6 in magnitude (`kFogRegisterLimit`), so that no product downstream can overflow |
+| `magnitude` | beyond the spec (review of plan Task 3, M2): none of the components the fog reads (`c67.x`, `.z`, `.w`, `c68.rgb`; `c28.xy` and the axis have their own bounds) beyond 1e6 in magnitude (`kFogRegisterLimit`), so that no product downstream can overflow. Narrowed by the review of plan Task 4 (M2): as first built every component of the six registers was bound, the sky's `c64`, `c65`, `c67.y` and the unread ones among them; the sky's magnitudes are judged where the sky is decided (`SkyRules`) |
 | `range` | `c67.x` >= 0, `c67.z` >= 0, `c67.w` > 0 |
 | `tf4-<property>`, `tf5-<property>` | the table's fetch constant: `dimension` (a texture constant, 1D), `base` (an address; beyond the spec), `width` (64 / 256), `format` (29 / 6, and the number format bit of dword 3: 1 / 0), `endian` (8-in-16 / 8-in-32), `swizzle` (`0x688` / `0x60A`), `sign` (1 1 1 1 / 0), `exp-adjust` (0), `clamp` (clamp to edge along the table), `filter` (magnification and minification linear), `mip` (highest mip level 0); `bytes`: exactly 512 / 1,024 |
 | `tf4-texel` | every half float of tf4 is finite, the alpha too (tf5's are bytes) |

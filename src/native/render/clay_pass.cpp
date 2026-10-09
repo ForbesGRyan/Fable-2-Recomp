@@ -25,6 +25,11 @@ constexpr uint32_t kMapParamConstants = 0, kMapParamLinear = 1, kMapConstantCoun
 // constant buffer) at b0 and its table at t0 to t3: the scene's depth, the near map, the far map,
 // the rotation tile.
 constexpr uint32_t kMaskParamConstants = 0, kMaskParamTextures = 1, kMaskTableSize = 4;
+// The sky step's binding parameters: the frame's block (ClayFrameConstants with the fog's tail, the
+// head of the frame's constant buffer) at b2, its own constants (ClaySkyConstants, a slot of that
+// buffer) at b0, and its table at t0, t1: the game's two sky textures.
+constexpr uint32_t kSkyParamFrame = 0, kSkyParamConstants = 1, kSkyParamTextures = 2, kSkyTableSize = 2;
+static_assert(kSkyTableSize <= nrhi::kMaxTextureTableSize && sizeof(ClaySkyConstants) <= kClayTerrainSlotBytes);
 constexpr uint32_t kConstantCount = sizeof(ClayConstants) / 4;  // 36
 static_assert(kConstantCount == 36);
 // Binding parameters: indices into kClayBindings (clay_logic.h), from which
@@ -103,6 +108,7 @@ nrhi::CullMode ToCull(uint8_t c) {
 
 void ClayPass::DestroyObjects() {
   DestroyShadowObjects();  // (first: its view of depth_ and its pipelines of vs_ and layout_)
+  DestroySkyObjects();
   if (device_) {
     for (nrhi::Pipeline* p : pipelines_) device_->DestroyDeferred(p);
     device_->DestroyDeferred(vs_);
@@ -227,6 +233,9 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     linear_ = color_ = depth_ = nullptr;
     ForgetShadowObjects();
     shadow_objects_failed_ = false;  // (another device: its shadows are tried anew)
+    ForgetSkyObjects();
+    sky_objects_failed_ = false;
+    sky_layout_ = nullptr;
     white_ = nullptr;
     white_view_ = nullptr;
     white_staging_ = nullptr;
@@ -240,6 +249,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     // tried anew with the rest. A failure of the shadows' objects alone does not latch the renderer
     // and F6 does not come here for it: those stay off until this path, another device or a restart.)
     shadow_objects_failed_ = false;
+    sky_objects_failed_ = false;  // (the sky's objects likewise)
   }
   ready_ = false;
 
@@ -637,8 +647,8 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
     // lit object or trunk. Sized so that the largest block a shader declares at b1 lies inside the
     // buffer from the start of every slot (ClayConstantBufferBytes), and the frame's whole block
     // from offset 0.
-    // (and one small slot for the mask step's constants, used or not)
-    const uint64_t bytes = ClayConstantBufferBytes(kClayFrameSlots + 1 + uint64_t(terrain_items_.size()) + plant_constants_.size(),
+    // (and one small slot each for the mask step's and the sky step's constants, used or not)
+    const uint64_t bytes = ClayConstantBufferBytes(kClayFrameSlots + 2 + uint64_t(terrain_items_.size()) + plant_constants_.size(),
                                                    object_constants_.size());
     if (auto reused = terrain_pool_.Take(bytes, dev->CompletedSubmission())) {
       terrain_cb_ = *reused;
@@ -760,11 +770,12 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
   st.terrain_tuples = uint32_t(terrain_sets_.size());
   // The lit plants' small slots follow the terrain's, and the lit objects' and trunks' slots
   // (kClayObjectSlotBytes each) follow the small slots that are in use: the frame's block's,
-  // the terrain's, the plants' and the mask's. (`slot` is then at most kClayFrameSlots + 1 +
+  // the terrain's, the plants', the mask's and the sky's. (`slot` is then at most kClayFrameSlots + 2 +
   // terrain_items_.size() + plant_constants_.size(), the count the buffer was sized with.)
   plant_slot0_ = slot;
   slot += uint32_t(plant_constants_.size());
   mask_slot_ = slot++;  // the mask step's constants (Render writes them when the frame has a mask)
+  sky_slot_ = slot++;   // the sky step's (Render writes them when the frame has a sky)
   object_slot0_ = slot;
   if (slots) {
     std::memcpy(slots, &frame_, sizeof(frame_));
@@ -1278,6 +1289,93 @@ bool ClayPass::EnsureShadowObjects(nrhi::Device* dev) {
   return true;
 }
 
+void ClayPass::ForgetSkyObjects() {
+  sky_vs_ = sky_ps_ = nullptr;
+  sky_pipeline_ = nullptr;
+  sky_objects_ = false;
+}
+
+void ClayPass::DestroySkyObjects() {
+  if (device_) {
+    device_->DestroyDeferred(sky_pipeline_);
+    device_->DestroyDeferred(sky_vs_);
+    device_->DestroyDeferred(sky_ps_);
+  }
+  ForgetSkyObjects();
+}
+
+bool ClayPass::EnsureSkyObjects(nrhi::Device* dev) {
+  if (sky_objects_) return true;
+  if (sky_objects_failed_ || !ready_ || dev != device_) return false;
+  auto fail = [&](const char* what) {
+    REXLOG_ERROR("[native] clay: {} failed: the native sky is off until the pass is rebuilt (another device, or an F6 retry after a "
+                 "failure of the renderer) or the game is restarted; the fogged picture is drawn with the clear colour behind it",
+                 what);
+    DestroySkyObjects();
+    sky_objects_failed_ = true;
+    return false;
+  };
+  // The sky step's layout: the frame's block at b2 and the step's constants at b0 (both slots of
+  // the frame's constant buffer), the two sky textures at t0 and t1, and the clay layout's four
+  // static samplers (s<i>: bit 0 linear, bit 1 clamp), all for the pixel stage.
+  if (!sky_layout_) {
+    nrhi::BindingLayoutDesc desc;
+    desc.params[kSkyParamFrame].kind = nrhi::BindingParamKind::kConstantBuffer;
+    desc.params[kSkyParamFrame].shader_register = 2;
+    desc.params[kSkyParamFrame].count = 1;
+    desc.params[kSkyParamFrame].visibility = nrhi::Visibility::kPixel;
+    desc.params[kSkyParamConstants].kind = nrhi::BindingParamKind::kConstantBuffer;
+    desc.params[kSkyParamConstants].shader_register = 0;
+    desc.params[kSkyParamConstants].count = 1;
+    desc.params[kSkyParamConstants].visibility = nrhi::Visibility::kPixel;
+    desc.params[kSkyParamTextures].kind = nrhi::BindingParamKind::kTextureTable;
+    desc.params[kSkyParamTextures].shader_register = 0;
+    desc.params[kSkyParamTextures].count = kSkyTableSize;
+    desc.params[kSkyParamTextures].visibility = nrhi::Visibility::kPixel;
+    desc.param_count = 3;
+    static_assert(kClayStaticSamplers == 4);
+    for (uint32_t i = 0; i < 4; ++i) {
+      desc.static_samplers[i].shader_register = i;
+      desc.static_samplers[i].filter = (i & 1) ? nrhi::Filter::kLinear : nrhi::Filter::kPoint;
+      desc.static_samplers[i].address = (i & 2) ? nrhi::AddressMode::kClamp : nrhi::AddressMode::kWrap;
+    }
+    desc.static_sampler_count = 4;
+    desc.allow_input_layout = false;
+    sky_layout_ = dev->CreateBindingLayout(desc);
+    if (!sky_layout_) return fail("sky binding layout creation");
+  }
+  nrhi::ShaderDesc sd;
+  sd.entry_point = "main";
+  sd.stage = nrhi::ShaderStage::kVertex;
+  sd.name = "fable2_sky_vs";
+  sd.hlsl_source = shaders::kSkyVs;
+  sky_vs_ = dev->CreateShader(sd);
+  sd.stage = nrhi::ShaderStage::kPixel;
+  sd.name = "fable2_clay_sky_ps";
+  sd.hlsl_source = shaders::kClaySkyPs;
+  sky_ps_ = dev->CreateShader(sd);
+  if (!sky_vs_ || !sky_ps_) return fail("sky shader compile");
+  // One triangle at the far depth into the colour pass's targets: tested less-or-equal against the
+  // depth the pass has written so far (it passes where the depth is still the clear value, 1), no
+  // depth write, no blend, no cull. Not in the pipeline cache (it is no draw's state).
+  nrhi::GraphicsPipelineDesc pipe;
+  pipe.layout = sky_layout_;
+  pipe.vs = sky_vs_;
+  pipe.ps = sky_ps_;
+  pipe.rtv_format = kLinearFormat;
+  pipe.dsv_format = nrhi::Format::kD32_FLOAT;
+  pipe.depth.test_enable = true;
+  pipe.depth.write_enable = false;
+  pipe.depth.func = nrhi::CompareFunc::kLessEqual;
+  pipe.cull = nrhi::CullMode::kNone;
+  sky_pipeline_ = dev->CreateGraphicsPipeline(pipe);
+  if (!sky_pipeline_) return fail("sky pipeline creation");
+  sky_objects_ = true;
+  REXLOG_INFO("[native] clay: sky step ready (one triangle at depth 1, less-or-equal, no depth write, no blend; its own layout: "
+              "b2 the frame's block, b0 {} bytes of constants, t0 and t1 the sky textures)", sizeof(ClaySkyConstants));
+  return true;
+}
+
 void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
                       bool textured, ClayLight light, bool shadows, bool fog, ClayStats& st, TextureStats& tst) {
   if (!ready_ || dev != device_) return;
@@ -1471,6 +1569,103 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
                 scene.frame, FormatFogText(st), frame_.fog.start, frame_.fog.scale, frame_.fog.slope, frame_.fog.amount, frame_.fog.scatter,
                 sizeof(ClayFrameConstants), kClayFrameSlots, fog_log_lines_ == kFogLogLines ? " (last such line)" : "");
   }
+  // The frame's sky, decided the same way (DecideClaySky: the first thing missing decides). It goes
+  // with the fog: a frame that is not fogged (the switch, the light, the fog block, its values, the
+  // view) has no sky, because the step reads the fog's tail of the frame's constants and the lit
+  // draws' exposure. Then the frame's own sky block, the sky's own rules on the two blocks, the view
+  // rays of the frame's view-projection, the step's constants, and, asked last so that nothing is
+  // made for a frame that cannot use it, the step's objects. In every other case nothing is drawn
+  // for the sky and the pixels no record covers keep the clear colour.
+  ClaySkyInputs sky_in;
+  sky_in.fog = fog_decision.fog;
+  sky_in.fog_view = fog_decision.view;
+  sky_in.block = scene.sky.valid;
+  sky_in.rule = scene.fog.valid && scene.sky.valid ? SkyRules(scene.fog, scene.sky) : SkyRule::kNone;
+  float sky_basis[3][3] = {};
+  ClaySkyConstants sky_constants{};
+  sky_in.ray = view_found && SkyRayBasis(mask_view_proj, sky_basis);
+  sky_in.constants = terrain_cb_mapped_ != nullptr && sky_in.ray && MakeClaySkyConstants(scene.fog, scene.sky, sky_basis, &sky_constants);
+  sky_in.objects = !sky_objects_failed_;
+  if (DecideClaySky(sky_in).sky == ClaySky::kDrawn) sky_in.objects = EnsureSkyObjects(dev);
+  const ClaySkyDecision sky_decision = DecideClaySky(sky_in);
+  nrhi::TextureView* sky_views[kSkyTableSize] = {white_view_, white_view_};
+  bool sky_textured = false;
+  SkyOrder sky_order;
+  if (sky_decision.sky == ClaySky::kDrawn) {
+    // The game's two sky textures, by the fetch constants the sky block carries, through the
+    // texture cache (which judges a constant before it follows its address, and bounds the read).
+    // The second is asked only when the blend reads it. A texture that cannot be had (not a 2D
+    // texture, a format the cache does not decode, pending, changing every frame): the clear-sky
+    // term alone, counted "sky-texture". Before any target is bound: an upload records a copy.
+    uint32_t sampler[2] = {0, 0};
+    float fix[2][2] = {{1.0f, 1.0f}, {1.0f, 1.0f}};
+    capture::MaterialStatus status = capture::MaterialStatus::kTextureBad;
+    nrhi::TextureView* const first = ResolveTerrainTexture(cmd, dev, scene.sky.fetch[0], false, &sampler[0], fix[0], &status, tst);
+    nrhi::TextureView* second = nullptr;
+    if (first && SkySecondTextureRead(scene.sky.c47x)) {
+      second = ResolveTerrainTexture(cmd, dev, scene.sky.fetch[1], false, &sampler[1], fix[1], &status, tst);
+    }
+    if (SkyTexturesUsable(first != nullptr, second != nullptr, scene.sky.c47x)) {
+      if (!second) {  // (not read: the first stands in, so that the register holds a texture)
+        second = first;
+        sampler[1] = sampler[0];
+        fix[1][0] = fix[0][0];
+        fix[1][1] = fix[0][1];
+      }
+      SetClaySkyTextures(sky_constants, sampler[0], fix[0], sampler[1], fix[1]);
+      if (sky_constants.textures) {
+        sky_views[0] = first;
+        sky_views[1] = second;
+        sky_textured = true;
+      }
+    }
+    std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(sky_slot_), &sky_constants, sizeof(sky_constants));
+    // The step's place among the records (SkyPlace): before the first drawn record that blends and
+    // is no terrain record.
+    sky_order_.clear();
+    for (const Prepared& p : prepared_) {
+      SkyOrderItem item;
+      const PipelineKey* key = p.pipeline ? KeyOf(p.pipeline) : nullptr;
+      item.drawn = p.pipeline != nullptr;
+      item.terrain = p.terrain;
+      item.blend = key && key->blend != 0;
+      item.depth_write = key && InPrepass(*key);
+      sky_order_.push_back(item);
+    }
+    sky_order = SkyPlace(sky_order_.data(), sky_order_.size());
+    // (for the line: where the picture's centre looks, and how far towards the fog's axis)
+    for (int i = 0; i < 3; ++i) {
+      st.sky_ray[i] = sky_constants.ray0[i];
+      st.sky_axis_cos += sky_constants.ray0[i] * scene.fog.axis[i];
+    }
+  }
+  const bool sky_texture_missing = sky_decision.sky == ClaySky::kDrawn && !sky_textured;
+  st.sky_block = scene.sky.valid;
+  st.sky_reason = scene.sky_reason;
+  st.sky = sky_decision.sky;
+  st.sky_view = sky_decision.view;
+  st.sky_rule = sky_decision.rule;
+  st.sky_textured = sky_textured;
+  st.sky_texture_missing = sky_texture_missing;
+  st.sky_before = sky_order.before;
+  st.sky_before_no_depth = sky_order.before_no_depth;
+  CountClaySkyFrame(fog && light == ClayLight::kOn, sky_decision.sky, sky_texture_missing, sky_counts_);
+  st.sky_frames = sky_counts_.frames;
+  st.sky_nofog_frames = sky_counts_.nofog;
+  st.sky_view_frames = sky_counts_.view;
+  st.sky_block_frames = sky_counts_.block;
+  st.sky_rules_frames = sky_counts_.rules;
+  st.sky_objects_frames = sky_counts_.objects;
+  st.sky_texture_frames = sky_counts_.texture;
+  constexpr uint32_t kSkyLogLines = 16;
+  if (sky_decision.sky != sky_logged_ && sky_log_lines_ < kSkyLogLines) {
+    sky_logged_ = sky_decision.sky;
+    ++sky_log_lines_;
+    REXLOG_INFO("[native] clay: sky changed at scene frame {}: {} | place {} of {} records, c31.x {:.3f}, c46.x {:.3f}, c47.x {:.3f}, "
+                "c67.y {:.3f}{}",
+                scene.frame, FormatSkyText(st), sky_order.place, prepared_.size(), sky_constants.c31x, sky_constants.c46x,
+                sky_constants.c47x, sky_constants.c67y, sky_log_lines_ == kSkyLogLines ? " (last such line)" : "");
+  }
   st.shadow_light_off = scene.shadow.valid && (light != ClayLight::kOn || !frame_.light_on);
   st.light_switch = light == ClayLight::kOn;
   st.light_block = frame_.light_on != 0;
@@ -1557,11 +1752,9 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   }
   // The scene's targets and the bindings every clay draw of the frame has. (SetBindingLayout
   // resets them, so this is done again after the mask step, which has a layout of its own.)
-  auto begin_scene = [&] {
-    cmd->SetRenderTargets(linear_, depth_);
-    cmd->ClearDepth(depth_, 1.0f);
-    cmd->SetViewport({0.0f, 0.0f, float(kWidth), float(kHeight), 0.0f, 1.0f});
-    cmd->SetScissor({0, 0, int32_t(kWidth), int32_t(kHeight)});
+  // (bind_scene alone: after the sky step, which has a layout of its own too and draws into the
+  // colour pass's targets, with the depth as the pass has written it so far.)
+  auto bind_scene = [&] {
     cmd->SetBindingLayout(layout_);
     cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
     // The terrain table and constant buffer hold something from the first draw on
@@ -1576,6 +1769,13 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       cmd->SetConstantBuffer(kParamTerrainConstants, terrain_cb_, 0);
       cmd->SetConstantBuffer(kParamFrameConstants, terrain_cb_, 0);
     }
+  };
+  auto begin_scene = [&] {
+    cmd->SetRenderTargets(linear_, depth_);
+    cmd->ClearDepth(depth_, 1.0f);
+    cmd->SetViewport({0.0f, 0.0f, float(kWidth), float(kHeight), 0.0f, 1.0f});
+    cmd->SetScissor({0, 0, int32_t(kWidth), int32_t(kHeight)});
+    bind_scene();
   };
   cmd->SetRenderTargets(linear_, depth_);
   cmd->ClearRenderTarget(linear_, kClayClearLinear);
@@ -1641,8 +1841,28 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   begin_scene();
 
   nrhi::Pipeline* bound = nullptr;
-  for (const Prepared& p : prepared_) {
+  // The sky step: one triangle at the far depth, in its place among the records (sky_order: after
+  // the opaque records and the terrain layers, before the first blended record). It tests the depth
+  // the colour pass has written up to here, through the depth target that stays bound for writing
+  // (no shader reads the depth here: the mask step's read of it ended before this pass's clear),
+  // and passes only where that depth is still the clear value. Then the clay layout again, with
+  // the frame's bindings; every draw binds its own.
+  const bool sky_drawn = sky_decision.sky == ClaySky::kDrawn && !left_out && terrain_cb_ != nullptr;
+  auto draw_sky = [&] {
+    cmd->SetBindingLayout(sky_layout_);
+    cmd->SetPipeline(sky_pipeline_);
+    cmd->SetConstantBuffer(kSkyParamFrame, terrain_cb_, 0);
+    cmd->SetConstantBuffer(kSkyParamConstants, terrain_cb_, ClaySmallSlotOffset(sky_slot_));
+    cmd->SetTextures(kSkyParamTextures, sky_views, kSkyTableSize);
+    cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+    cmd->Draw(3, 0);
+    bind_scene();
+    bound = nullptr;
+  };
+  for (size_t index = 0; index < prepared_.size(); ++index) {
+    const Prepared& p = prepared_[index];
     if (left_out) break;        // (no constant buffer: nothing is drawn)
+    if (sky_drawn && index == sky_order.place) draw_sky();
     if (!p.pipeline) continue;  // a terrain record that is not drawn (FinishTerrain)
     const capture::DrawRecord& r = *p.r;
     if (p.pipeline != bound) {
@@ -1674,6 +1894,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       }
     }
   }
+  // (no blended record: the sky after the last record; no record at all: the sky alone)
+  if (sky_drawn && sky_order.place >= prepared_.size()) draw_sky();
 
   // The output mapping: every pixel of the mapped target from the linear target
   // of this Render (cleared and drawn above), so the composite never samples a

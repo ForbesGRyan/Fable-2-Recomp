@@ -9,6 +9,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <vector>
 
 static bool Compile(const char* name, const char* src, const char* target) {
   ID3DBlob* code = nullptr;
@@ -3000,6 +3001,22 @@ int main() {
       const size_t test = listing.find("\nif_");
       if (table == std::string::npos || far_table == std::string::npos || test == std::string::npos || test > table || test > far_table) return 202;
       if (HasOp(listing, "sqrt") || LoopInstructions(listing) != 0 || listing.find("ld_structured") != std::string::npos) return 202;
+      // The guards as the compiler left them (review of plan Task 4, M1). The first index of a table
+      // read is bounded by the float clamp of the texel coordinate (max with 0, min with N - 1, on a
+      // saturated product) before it is made an integer: the integer minimum on it is removed as
+      // implied; the second index keeps its integer minimum. The distance's bound and the frame's
+      // flag are compared in the code.
+      if (!HasLineWith(listing, "min", "l(63.000000)") || !HasLineWith(listing, "min", "l(255.000000)") ||
+          !HasLineWith(listing, "umin", "l(63)") || !HasLineWith(listing, "umin", "l(255)") ||
+          !HasLineWith(listing, "lt", "l(1000000015047466219876688855040.000000)") || !HasLineWith(listing, "ine", "cb2[7].w")) {
+        std::cerr << s.name << ": a guard of the fog is not in the compiled program\n";
+        return 202;
+      }
+      // Control: a table read without its float clamp has no such minimum.
+      if (s.src == kClayTerrainFarPs) {
+        const std::string unclamped = Changed(s.src, "float x = clamp(saturate(u) * 64.0 - 0.5, 0.0, 63.0);", "float x = u * 64.0 - 0.5;");
+        if (unclamped.empty() || HasLineWith(Disassembly("unclamped_fog", WithLightMode(unclamped.c_str(), mode).c_str(), "ps_5_0"), "min", "l(63.000000)")) return 202;
+      }
       for (int reg = 0; reg < 16; ++reg) {
         if (ReadsResource(listing, reg) != ReadsResource(before, reg)) return 202;
       }
@@ -3046,9 +3063,186 @@ int main() {
           !strstr(t, "bool placed = abs(w) > 0.0 && abs(w) < 3.0e38;")) return 204;
     }
   }
+  // 205 to 209: the sky step (fog sub-project, plan Task 5; clay_logic.h, "Native sky").
+  {
+    using fable2::native::render::ClaySkyConstants;
+    const char* s = kClaySkyPs;
+    // 205: both shaders compile; the vertex shader puts the triangle at the far depth (z = w = 1: the
+    // value the depth is cleared to) and reads nothing but the vertex's number.
+    if (!Compile("sky_vs", kSkyVs, "vs_5_0") || !Compile("clay_sky_ps", s, "ps_5_0")) return 205;
+    {
+      const std::string vs = Disassembly("sky_vs", kSkyVs, "vs_5_0");
+      if (vs.empty() || !HasLineWith(vs, "mov", "o0.zw, l(0,0,1.000000,1.000000)") || vs.find("dcl_constantbuffer") != std::string::npos ||
+          vs.find("dcl_resource") != std::string::npos || !strstr(kSkyVs, "float2(-1.0, 1.0), 1.0, 1.0);")) return 205;
+      // Control: the output mapping's triangle is at depth 0, and the check sees the difference.
+      if (HasLineWith(Disassembly("fullscreen_vs", kFullscreenVs, "vs_5_0"), "mov", "o0.zw, l(0,0,1.000000,1.000000)")) return 205;
+    }
+    // 206: the bindings of the sky's own layout: cbuffer Sky at b0, the frame's block at b2, the two
+    // textures at t0 and t1, the four static samplers; the constants at ClaySkyConstants' offsets.
+    if (BindPoint("clay_sky_ps", s, "ps_5_0", "Sky") != 0 || BindPoint("clay_sky_ps", s, "ps_5_0", "Frame") != 2 ||
+        BindPoint("clay_sky_ps", s, "ps_5_0", "sky13") != 0 || BindPoint("clay_sky_ps", s, "ps_5_0", "sky14") != 1 ||
+        BindPoint("clay_sky_ps", s, "ps_5_0", "s_point_wrap") != 0 || BindPoint("clay_sky_ps", s, "ps_5_0", "s_linear_wrap") != 1 ||
+        BindPoint("clay_sky_ps", s, "ps_5_0", "s_point_clamp") != 2 || BindPoint("clay_sky_ps", s, "ps_5_0", "s_linear_clamp") != 3) return 206;
+    {
+      const unsigned count = sizeof(kClaySkyFields) / sizeof(kClaySkyFields[0]);
+      const struct {
+        const char* name;
+        size_t offset, bytes;
+      } sky_struct[] = {
+          {"s_ray0", offsetof(ClaySkyConstants, ray0), sizeof(ClaySkyConstants::ray0)},
+          {"s_c31x", offsetof(ClaySkyConstants, c31x), sizeof(ClaySkyConstants::c31x)},
+          {"s_rayx", offsetof(ClaySkyConstants, rayx), sizeof(ClaySkyConstants::rayx)},
+          {"s_c46x", offsetof(ClaySkyConstants, c46x), sizeof(ClaySkyConstants::c46x)},
+          {"s_rayy", offsetof(ClaySkyConstants, rayy), sizeof(ClaySkyConstants::rayy)},
+          {"s_c47x", offsetof(ClaySkyConstants, c47x), sizeof(ClaySkyConstants::c47x)},
+          {"s_ext1", offsetof(ClaySkyConstants, ext1), sizeof(ClaySkyConstants::ext1)},
+          {"s_c67y", offsetof(ClaySkyConstants, c67y), sizeof(ClaySkyConstants::c67y)},
+          {"s_ext2", offsetof(ClaySkyConstants, ext2), sizeof(ClaySkyConstants::ext2)},
+          {"s_textures", offsetof(ClaySkyConstants, textures), sizeof(ClaySkyConstants::textures)},
+          {"s_fix13", offsetof(ClaySkyConstants, fix13), sizeof(ClaySkyConstants::fix13)},
+          {"s_fix14", offsetof(ClaySkyConstants, fix14), sizeof(ClaySkyConstants::fix14)},
+          {"s_sampler13", offsetof(ClaySkyConstants, sampler13), sizeof(ClaySkyConstants::sampler13)},
+          {"s_sampler14", offsetof(ClaySkyConstants, sampler14), sizeof(ClaySkyConstants::sampler14)},
+          {"s_pad", offsetof(ClaySkyConstants, pad), sizeof(ClaySkyConstants::pad)},
+      };
+      if (count != sizeof(sky_struct) / sizeof(sky_struct[0]) || sizeof(ClaySkyConstants) != 112) return 206;
+      for (unsigned i = 0; i < count; ++i) {
+        if (strcmp(kClaySkyFields[i].name, sky_struct[i].name) || kClaySkyFields[i].offset != sky_struct[i].offset ||
+            kClaySkyFields[i].bytes != sky_struct[i].bytes) return 206;
+      }
+      if (int at = BufferLayoutMismatch("clay_sky_ps", s, "ps_5_0", "Sky", kClaySkyFields, count, 112)) {
+        std::cerr << "cbuffer Sky: " << at << "\n";
+        return 206;
+      }
+      const std::string swapped = Changed(s, "float3 s_ext1; float s_c67y;", "float s_c67y; float3 s_ext1;");
+      if (swapped.empty() || BufferLayoutMismatch("swapped_sky_ps", swapped.c_str(), "ps_5_0", "Sky", kClaySkyFields, count, 112) < 7) return 206;
+      // The frame's block is the lit shaders' block with the fog's tail, field for field (the sky reads
+      // the in-scatter table at byte 224, the axis, the exposure and 1 / the target's size from it).
+      const unsigned light = sizeof(kClayFrameFields) / sizeof(kClayFrameFields[0]), tail = sizeof(kClayFrameFogFields) / sizeof(kClayFrameFogFields[0]);
+      std::vector<ClayBufferField> frame(kClayFrameFields, kClayFrameFields + light);
+      frame.insert(frame.end(), kClayFrameFogFields, kClayFrameFogFields + tail);
+      if (int at = BufferLayoutMismatch("clay_sky_ps", s, "ps_5_0", "Frame", frame.data(), unsigned(frame.size()), kClayFrameSize)) {
+        std::cerr << "cbuffer Frame of the sky shader: " << at << "\n";
+        return 206;
+      }
+      if (Count(s, "#define CLAY_FOG 1\n") != 1) return 206;
+    }
+    // 207: the compiled program. It reads the frame's block by a computed index (the in-scatter
+    // table at register 14) and not beyond the table (78 registers: the transmittance table is not
+    // read); no depth (the position's x and y alone), no buffer, no loop; the two textures only by
+    // sample at an explicit level, each with each of the four samplers, all behind the branch on the
+    // block's flag. The guards are in the code: the ray's length (two compares, one against 3e38),
+    // the power's base, the arctangent's ratio, the table index's float and integer clamps (review of
+    // plan Task 4, M1), the output's sign and ceiling.
+    {
+      const std::string listing = Disassembly("clay_sky_ps", s, "ps_5_0");
+      bool dynamic = false;
+      if (listing.empty() || DeclaredRegisters(listing, 2, &dynamic) != 78 || !dynamic || DeclaredRegisters(listing, 0) != 7) return 207;
+      if (LoopInstructions(listing) != 0 || listing.find("ld_structured") != std::string::npos || listing.find("ld_indexable") != std::string::npos ||
+          !HasLineWith(listing, "dcl_input_ps_siv", "v0.xy, position") || HasLineWith(listing, "dcl_input_ps_siv", "v0.xyz")) return 207;
+      const size_t branch = listing.find("\nif_nz cb0[4].w");
+      if (branch == std::string::npos || listing.find("\nif_") != branch) return 207;
+      int samples[2] = {0, 0};
+      for (size_t at = listing.find("sample", branch); at != std::string::npos; at = listing.find("sample", at + 1)) {
+        const size_t end = listing.find('\n', at);
+        const std::string line = listing.substr(at, end - at);
+        if (line.rfind("sample_l_indexable", 0) != 0 || line.find("l(0.000000)") == std::string::npos) return 207;
+        if (line.find(", t0.") != std::string::npos) ++samples[0];
+        if (line.find(", t1.") != std::string::npos) ++samples[1];
+      }
+      if (samples[0] != 4 || samples[1] != 4 || listing.find("sample_") < branch) return 207;
+      const size_t table = listing.find(" + 14]");
+      if (table == std::string::npos || table > branch || listing.find(" + 78]") != std::string::npos) return 207;
+      if (!HasLineWith(listing, "lt", "l(300000000549775575777803994281145270272.000000)") || !HasLineWith(listing, "rsq", "r0.w") ||
+          !HasLineWith(listing, "lt", "l(0.000000), |r0.z|") || !HasLineWith(listing, "max", "l(0.000000)") ||
+          !HasLineWith(listing, "min", "l(63.000000)") || !HasLineWith(listing, "umin", "l(63)") ||
+          !HasLineWith(listing, "min", "l(64.000000, 64.000000, 64.000000, 0.000000)") ||
+          !HasLineWith(listing, "lt", "l(0.000000, 0.000000, 0.000000, 0.000000), r0.xyzx") || !HasLineWith(listing, "dp3_sat", "cb2[7].xyzx")) return 207;
+      // Controls: a sky that reads its textures outside the flag's branch, one whose ray is normalised
+      // without a test, and one whose power has no test of its base are reported by the checks above.
+      const std::string unbranched = Changed(s, "[branch] if (s_textures != 0) {", "{");
+      if (unbranched.empty() || Disassembly("unbranched_sky", unbranched.c_str(), "ps_5_0").find("\nif_nz cb0[4].w") != std::string::npos) return 207;
+      const std::string unguarded = Changed(s, "float3 n = light_normalize(s_ray0 + X * s_rayx + Y * s_rayy);", "float3 n = normalize(s_ray0 + X * s_rayx + Y * s_rayy);");
+      if (unguarded.empty() || HasLineWith(Disassembly("unguarded_sky", unguarded.c_str(), "ps_5_0"), "lt", "l(300000000549775575777803994281145270272.000000)")) return 207;
+      const std::string unpowered = Changed(s, "float k = (az > 0.0) ? exp2(0.20000000298023224 * log2(az)) : 0.0;", "float k = exp2(0.20000000298023224 * log2(az));");
+      if (unpowered.empty() || HasLineWith(Disassembly("unpowered_sky", unpowered.c_str(), "ps_5_0"), "lt", "l(0.000000), |r0.z|")) return 207;
+    }
+    // 208: the arithmetic, statement for statement (light_formulas.py: sky, sky_latlong, sky_paths,
+    // sky_extinction), in the text's order.
+    {
+      const char* statements[] = {
+          "float3 a = abs(n);",
+          "float hi = max(a.x, a.y);",
+          "float lo = min(a.x, a.y);",
+          "float q = (hi > 0.0) ? lo * (1.0 / hi) : 0.0;",
+          "float q2 = q * q;",
+          "float at = q * (q2 * (q2 * (q2 * (q2 * 0.02083509974181652 + -0.08513300120830536) + 0.18014100193977356) + -0.3302994966506958) + 0.9998660087585449);",
+          "if (a.y > a.x) at = at + (-2.0 * at + 1.5707963705062866);",
+          "if (n.x < 0.0) at = at + -3.1415927410125732;",
+          "if (min(n.x, n.y) < 0.0 && max(n.x, n.y) >= 0.0) at = at - (at + at);",
+          "float root = sqrt(abs(1.0 - a.z));",
+          "float poly = a.z * (a.z * (a.z * -0.018729299306869507 + 0.07426100224256516) + -0.2121143937110901) + 1.5707287788391113;",
+          "float ac = poly * root;",
+          "if (n.z < 0.0) ac = ac + (-2.0 * root * poly + 3.1415927410125732);",
+          "return float2(0.5 + at * 0.15915963053703308, (1.5707963705062866 - ac) * 0.6366385221481323);",
+          "float k = (az > 0.0) ? exp2(0.20000000298023224 * log2(az)) : 0.0;",
+          "float h = s_c67y * (1.0499999523162842 - k);",
+          "return float2(h + (s_c31x - h) * k, h + (s_c46x - h) * k);",
+          "return exp2(-1.4426950216293335 * (l.x * s_ext1 + l.y * s_ext2));",
+          "float X = pos.x * (2.0 * f_mask_du) - 1.0;",
+          "float Y = 1.0 - pos.y * (2.0 * f_mask_dv);",
+          "float3 n = light_normalize(s_ray0 + X * s_rayx + Y * s_rayy);",
+          "float3 S = fog_scatter(saturate(dot(n, f_fog_axis)));",
+          "float3 E = SkyExtinction(SkyPaths(abs(n.z)));",
+          "float3 sky = (1.0 - E) * S;",
+          "[branch] if (s_textures != 0) {",
+          "float2 uv = SkyLatLong(n);",
+          "float4 s13 = sky_sample(sky13, s_sampler13, uv * s_fix13);",
+          "float4 s14 = sky_sample(sky14, s_sampler14, uv * s_fix14);",
+          "float3 col = s13.rgb * s13.rgb;",
+          "col = col + s_c47x * (s14.rgb * s14.rgb - col);",
+          "float alpha = s13.a + s_c47x * (s14.a - s13.a);",
+          "sky = sky + alpha * (col - sky);",
+          "return float4(clay_lit(sky * f_exposure), 1.0);",
+      };
+      const char* own = strstr(s, "cbuffer Sky : register(b0) {");
+      if (!own) return 208;
+      const char* at = own;
+      for (const char* statement : statements) {
+        const char* found = strstr(at, statement);
+        if (!found) {
+          std::cerr << "the sky shader lacks (or has out of order): " << statement << "\n";
+          return 208;
+        }
+        at = found + 1;
+      }
+      // No exact arctangent or arcsine, no depth, no implicit level, no discard.
+      if (strstr(own, "atan") || strstr(own, "asin") || strstr(own, "acos") || strstr(own, "pos.z") || strstr(own, ".Sample(") ||
+          strstr(own, "discard") || Count(own, "SampleLevel(") != 4) return 208;
+    }
+    // 209: the literals are the mirror's (clay_logic.h: the reference's singles).
+    {
+      using namespace fable2::native::render;
+      const struct {
+        const char* text;
+        double value;
+      } literals[] = {{"0.9998660087585449", kSkyAtan[0]}, {"-0.3302994966506958", kSkyAtan[1]}, {"0.18014100193977356", kSkyAtan[2]},
+                      {"-0.08513300120830536", kSkyAtan[3]}, {"0.02083509974181652", kSkyAtan[4]}, {"1.5707287788391113", kSkyAcos[0]},
+                      {"-0.2121143937110901", kSkyAcos[1]}, {"0.07426100224256516", kSkyAcos[2]}, {"-0.018729299306869507", kSkyAcos[3]},
+                      {"3.1415927410125732", kSkyPi}, {"1.5707963705062866", kSkyHalfPi}, {"0.15915963053703308", kSkyInvTwoPi},
+                      {"0.6366385221481323", kSkyTwoOverPi}, {"0.20000000298023224", kSkyPathPower}, {"1.0499999523162842", kSkyPathHorizon},
+                      {"1.4426950216293335", kSkyInvLn2}};
+      for (const auto& l : literals) {
+        if (!strstr(s, l.text) || std::strtod(l.text, nullptr) != l.value || double(float(l.value)) != l.value) {
+          std::cerr << "sky literal " << l.text << "\n";
+          return 209;
+        }
+      }
+    }
+  }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the lit colour programs alone, fog off the program without fog at every light_mode, the tables read behind a test; broken shader rejected\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the lit colour programs alone, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; broken shader rejected\n";
   return 0;
 }

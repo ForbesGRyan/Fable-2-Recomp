@@ -152,7 +152,7 @@ enum class FogBlockReason : uint8_t {
   kRegister,   // a register is not finite
   kAmount,     // c28.xy outside [0, 4]
   kAxis,       // c66.xyz is not a unit vector within 1e-3
-  kMagnitude,  // a register component beyond kFogRegisterLimit
+  kMagnitude,  // a component the fog reads beyond kFogRegisterLimit
   kRange,      // c67: a start or a near slope below 0, or a distance scale not above 0
   // tf4's faults (FogTableFault, in its order), then tf5's.
   kScatterDimension, kScatterBase, kScatterWidth, kScatterFormat, kScatterEndian, kScatterSwizzle, kScatterSign,
@@ -186,10 +186,12 @@ inline const char* FogBlockReasonName(FogBlockReason r) {
 }
 
 // The largest magnitude a component of the six registers may have (review of
-// plan Task 3, M2). Generous for anything the game holds there (a start of
-// 19.9, a path height of 1,900, colours that may be HDR), and small enough that
-// no product of the fog's arithmetic overflows single precision: with every
-// register within it, a table texel within a half float's 65,504 and c28 within
+// plan Task 3, M2): of the fog's c67.x, .z, .w and c68.rgb here, and of the
+// sky's numbers where the sky is decided (clay_logic.h, SkyRules). Generous for
+// anything the game holds there (a start of 19.9, a path height of 1,900,
+// colours that may be HDR), and small enough that no product of the fog's
+// arithmetic overflows single precision: with every component the fog reads
+// within it, a table texel within a half float's 65,504 and c28 within
 // 4, the largest term is (1 - T) * c28.y * F <= 4 * 1e6, and a table coordinate
 // c67.w * dD stays finite for any distance below 3e32. So nothing downstream can
 // meet 0 * infinity from the block alone; the pixel's own position is the
@@ -205,8 +207,10 @@ inline constexpr float kFogRegisterLimit = 1e6f;
 //   - every component of the six registers is finite (kRegister);
 //   - c28.x and c28.y are in [0, 4] (kAmount);
 //   - |c66.xyz| is 1 within 1e-3 (kAxis);
-//   - no component of the six registers is beyond kFogRegisterLimit in
-//     magnitude (kMagnitude);
+//   - no component the fog reads is beyond kFogRegisterLimit in magnitude: c67.x,
+//     .z, .w and c68.rgb (kMagnitude; c28.xy and the axis are bounded by their own
+//     rules; review of plan Task 4, M2: the sky's c64, c65, c67.y and the unread
+//     components are not judged, the sky's magnitudes are the sky's decision's);
 //   - c67.x >= 0, c67.z >= 0 and c67.w > 0 (kRange);
 //   - each fetch constant is its table's pin (FogTableFetchFault: 1D, an address,
 //     width, format with its number format bit, endian, swizzle, sign fields,
@@ -221,10 +225,11 @@ inline constexpr float kFogRegisterLimit = 1e6f;
 // below 1: half floats can carry more). An invalid block is all zero.
 // Not judged here, because the fog reads none of them (review of plan Task 3,
 // I1): the sign of c67.y (the sky's path height) and of c64, c65 (the sky's
-// extinctions). They are finite and bounded like every component; whether they
-// make a sky is the sky's decision (plan Task 5: a negative range[1] or ext
-// component gives no sky, counted "sky-block"), and must not cost a night or an
-// interior its fog.
+// extinctions), nor their magnitudes (review of plan Task 4, M2). They are
+// finite like every component; whether they make a sky is the sky's decision
+// (clay_logic.h, SkyRules: a negative or oversized range[1] or ext component
+// gives no sky, counted "sky-block"), and must not cost a night or an interior
+// its fog.
 inline FogBlock MakeFogBlock(const float regs[6][4], const uint32_t fetch4[6], const uint32_t fetch5[6],
                              const uint8_t* tf4_bytes, size_t n4, const uint8_t* tf5_bytes, size_t n5,
                              FogBlockReason* why) {
@@ -249,10 +254,11 @@ inline FogBlock MakeFogBlock(const float regs[6][4], const uint32_t fetch4[6], c
   }
   const double length = std::sqrt(double(c66[0]) * c66[0] + double(c66[1]) * c66[1] + double(c66[2]) * c66[2]);
   if (!(std::fabs(length - 1.0) <= 1e-3)) return fail(FogBlockReason::kAxis);
-  for (int r = 0; r < 6; ++r) {
-    for (int c = 0; c < 4; ++c) {
-      if (!(std::fabs(regs[r][c]) <= kFogRegisterLimit)) return fail(FogBlockReason::kMagnitude);
-    }
+  // (only what the fog reads: c28.xy and the axis are bounded above; the sky's c64, c65 and c67.y
+  // and the components no shader reads have no say here)
+  const float read[6] = {c67[0], c67[2], c67[3], c68[0], c68[1], c68[2]};
+  for (float v : read) {
+    if (!(std::fabs(v) <= kFogRegisterLimit)) return fail(FogBlockReason::kMagnitude);
   }
   if (!(c67[0] >= 0.0f && c67[2] >= 0.0f && c67[3] > 0.0f)) return fail(FogBlockReason::kRange);
   if (const FogTableFault f = FogTableFetchFault(fetch4, kFogScatterPin); f != FogTableFault::kNone) {

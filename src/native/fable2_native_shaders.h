@@ -176,7 +176,11 @@ cbuffer Draw : register(b0) { float4 r0; float4 r1; float4 r2; float4 r3; uint l
 // view-projection (the mask step's arithmetic; FogPixelWorld is the mirror) and gives the fog's three
 // coordinates; FogForm applies the form the draw has: the ground form (0), the trees' (1, with the draw's
 // scale), or none (2). fog_scatter and fog_transmit read the two tables as the game's fetch does: texel
-// centres at (i + 0.5) / N, linear, clamped (FogTableRead). Guards, each a comparison that is false for a
+// centres at (i + 0.5) / N, linear, clamped (FogTableRead). The bound of the first index i is the float
+// clamp of the texel coordinate to 0..N - 1 before it is made an integer (saturate, then max and min,
+// which give a number for one that is none): the compiler removes the integer minimum on i as implied by
+// it and keeps the one on i + 1 (review of plan Task 4, M1; the shader test holds the compiled clamps).
+// Guards, each a comparison that is false for a
 // value that is no number (no test a compiler could fold away): a w that is zero or not below 3e38, a
 // squared distance that is not above 0 and below 1e30 (kFogDistance2Max), a distance not past the start,
 // and the frame's flag leave the pixel as it is, and its tables unread ([branch]). The distance is
@@ -851,6 +855,112 @@ float main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOOR
   }
   float slope = max(abs(ddx(pos.z)), abs(ddy(pos.z)));
   return saturate(pos.z + asfloat(pad2) * slope + asfloat(color));
+}
+)hlsl";
+
+// The sky step (render/clay_pass.cpp; clay_logic.h, "Native sky"): one full-screen triangle in the colour
+// pass, after the opaque records and the terrain layers and before the first blended record (SkyPlace).
+// kSkyVs puts it at the far depth of the pass's convention: clip z / w = 1, the value the depth is
+// cleared to. The pipeline tests less-or-equal without depth write and without blend, so the triangle
+// lands exactly where the depth is still the clear value: where nothing was drawn.
+inline constexpr const char* kSkyVs = R"hlsl(
+float4 main(uint id : SV_VertexID) : SV_Position {
+  float2 uv = float2((id << 1) & 2, id & 2);
+  return float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 1.0, 1.0);
+}
+)hlsl";
+
+// The sky's pixel shader: the game's 0xF7601FBE485936FD (light_formulas.py: sky, sky_latlong, sky_paths,
+// sky_extinction; docs/native-renderer/lighting-formulas.md, "The sky") term for term; SkyMirror,
+// SkyLatLong, SkyPaths, SkyExtinction and SkyPixelRay in clay_logic.h are the mirrors, held to the
+// reference's numbers. Its own layout: cbuffer Sky at b0 (ClaySkyConstants, a small slot of the frame's
+// constant buffer; kClaySkyFields is its layout), the frame's block at b2 with the fog's tail (the
+// in-scatter table read by fog_scatter as the lit shaders read it, the axis c66, the exposure, 1 / the
+// target's size), the two sky textures at t0 and t1, the four static samplers.
+//   n     = the pixel's view ray: s_ray0 + X * s_rayx + Y * s_rayy, (X, Y) the pixel's centre in -1..1, Y
+//           up; it reads no depth (SkyRayBasis); normalised
+//   S     = fog_scatter(sat(n . c66));  k = |n.z|^0.2;  h = c67.y * (1.05 - k)
+//   E     = exp2(-1.4426950 * ((h + (c31.x - h) * k) * c64 + (h + (c46.x - h) * k) * c65))
+//   sky   = (1 - E) * S, and with the textures: lerp(sky, lerp(tf13^2, tf14^2, c47.x), their alpha)
+// The lat-long coordinate is the game's own arithmetic with its literals (the exact singles), not atan2 /
+// asin. The textures are sampled at an explicit level 0 (the game's fetch computes its level, and its
+// derivative of u is a whole turn on the seam at -x); wrap or clamp as their fetch constants say, one
+// mode for both axes (the static samplers'). Out through the exposure of the lit draws (the game's
+// c20.w). Guards, each a comparison that is false for a value that is no number: a ray without a length
+// or beyond 3e38 squared is (0, 0, 0) (light_normalize); the power of a zero |n.z| is 0; the ratio of the
+// arctangent is 0 where both of |x|, |y| are 0 (the console's zero product); the textures are read inside
+// a branch on the block's flag; clay_lit gives 0 for a result that is no number and at most 64.
+inline constexpr ClayBufferField kClaySkyFields[] = {
+    {"s_ray0", 0, 12},    {"s_c31x", 12, 4},    {"s_rayx", 16, 12},     {"s_c46x", 28, 4},
+    {"s_rayy", 32, 12},   {"s_c47x", 44, 4},    {"s_ext1", 48, 12},     {"s_c67y", 60, 4},
+    {"s_ext2", 64, 12},   {"s_textures", 76, 4}, {"s_fix13", 80, 8},    {"s_fix14", 88, 8},
+    {"s_sampler13", 96, 4}, {"s_sampler14", 100, 4}, {"s_pad", 104, 8},
+};
+inline constexpr const char* kClaySkyPs = "#define CLAY_FOG 1\n" FABLE2_CLAY_LIGHT_HLSL R"hlsl(
+cbuffer Sky : register(b0) {
+  float3 s_ray0; float s_c31x;          // the view ray of a pixel: s_ray0 + X * s_rayx + Y * s_rayy; c31.x
+  float3 s_rayx; float s_c46x;          // c46.x
+  float3 s_rayy; float s_c47x;          // c47.x: the blend from the first texture to the second
+  float3 s_ext1; float s_c67y;          // c64.rgb; c67.y
+  float3 s_ext2; uint s_textures;       // c65.rgb; 1: the two textures are bound and read
+  float2 s_fix13; float2 s_fix14;       // host texture scales
+  uint s_sampler13; uint s_sampler14; float2 s_pad;   // static samplers of the two textures
+};
+Texture2D sky13 : register(t0);
+Texture2D sky14 : register(t1);
+SamplerState s_point_wrap : register(s0);
+SamplerState s_linear_wrap : register(s1);
+SamplerState s_point_clamp : register(s2);
+SamplerState s_linear_clamp : register(s3);
+float2 SkyLatLong(float3 n) {
+  float3 a = abs(n);
+  float hi = max(a.x, a.y);
+  float lo = min(a.x, a.y);
+  float q = (hi > 0.0) ? lo * (1.0 / hi) : 0.0;
+  float q2 = q * q;
+  float at = q * (q2 * (q2 * (q2 * (q2 * 0.02083509974181652 + -0.08513300120830536) + 0.18014100193977356) + -0.3302994966506958) + 0.9998660087585449);
+  if (a.y > a.x) at = at + (-2.0 * at + 1.5707963705062866);
+  if (n.x < 0.0) at = at + -3.1415927410125732;
+  if (min(n.x, n.y) < 0.0 && max(n.x, n.y) >= 0.0) at = at - (at + at);
+  float root = sqrt(abs(1.0 - a.z));
+  float poly = a.z * (a.z * (a.z * -0.018729299306869507 + 0.07426100224256516) + -0.2121143937110901) + 1.5707287788391113;
+  float ac = poly * root;
+  if (n.z < 0.0) ac = ac + (-2.0 * root * poly + 3.1415927410125732);
+  return float2(0.5 + at * 0.15915963053703308, (1.5707963705062866 - ac) * 0.6366385221481323);
+}
+float2 SkyPaths(float az) {
+  float k = (az > 0.0) ? exp2(0.20000000298023224 * log2(az)) : 0.0;
+  float h = s_c67y * (1.0499999523162842 - k);
+  return float2(h + (s_c31x - h) * k, h + (s_c46x - h) * k);
+}
+float3 SkyExtinction(float2 l) {
+  return exp2(-1.4426950216293335 * (l.x * s_ext1 + l.y * s_ext2));
+}
+float4 sky_sample(Texture2D t, uint index, float2 uv) {
+  float4 c;
+  if (index == 0) c = t.SampleLevel(s_point_wrap, uv, 0);
+  else if (index == 1) c = t.SampleLevel(s_linear_wrap, uv, 0);
+  else if (index == 2) c = t.SampleLevel(s_point_clamp, uv, 0);
+  else c = t.SampleLevel(s_linear_clamp, uv, 0);
+  return c;
+}
+float4 main(float4 pos : SV_Position) : SV_Target {
+  float X = pos.x * (2.0 * f_mask_du) - 1.0;
+  float Y = 1.0 - pos.y * (2.0 * f_mask_dv);
+  float3 n = light_normalize(s_ray0 + X * s_rayx + Y * s_rayy);
+  float3 S = fog_scatter(saturate(dot(n, f_fog_axis)));
+  float3 E = SkyExtinction(SkyPaths(abs(n.z)));
+  float3 sky = (1.0 - E) * S;
+  [branch] if (s_textures != 0) {
+    float2 uv = SkyLatLong(n);
+    float4 s13 = sky_sample(sky13, s_sampler13, uv * s_fix13);
+    float4 s14 = sky_sample(sky14, s_sampler14, uv * s_fix14);
+    float3 col = s13.rgb * s13.rgb;
+    col = col + s_c47x * (s14.rgb * s14.rgb - col);
+    float alpha = s13.a + s_c47x * (s14.a - s13.a);
+    sky = sky + alpha * (col - sky);
+  }
+  return float4(clay_lit(sky * f_exposure), 1.0);
 }
 )hlsl";
 

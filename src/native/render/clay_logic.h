@@ -203,15 +203,24 @@ struct ClayStats {
   // records left out of it for want of a pipeline. mask: what the pass did about the frame's mask;
   // mask_view: with kView, why (FrameViewReason); mask_rotated: the mask was written with the
   // game's rotation tile (false with a drawn mask: unrotated taps, the tile could not be read or
-  // failed its check). The four frame counts are the pass's totals since it was made, this frame
-  // included: frames drawn with light and the shadows' switch on, those of them without a valid
-  // shadow block (shadow-block), without a view (shadow-view), and with unrotated taps.
+  // failed its check). mask_view_outliers: records whose matrix was not the frame's view-projection
+  // (FrameView::outliers) in a frame that has one. The frame counts are the pass's totals since it
+  // was made, this frame included: frames drawn with light and the shadows' switch on, those of
+  // them without a valid shadow block (shadow-block), without a view (shadow-view), with unrotated
+  // taps, without the frame's light block (no-light: the white mask) and without the shadows'
+  // objects (no-objects: their creation failed; the white mask).
   uint32_t prepass_drawn = 0, prepass_skipped = 0;
   ClayMask mask = ClayMask::kOff;
   FrameViewReason mask_view = FrameViewReason::kNone;
+  uint32_t mask_view_outliers = 0;
   bool mask_rotated = false;
   uint64_t shadow_frames = 0, shadow_block_frames = 0, shadow_view_frames = 0, shadow_unrotated_frames = 0;
+  uint64_t shadow_nolight_frames = 0, shadow_objects_frames = 0;
 };
+// Which frames the last two counts take: `shadows_on` is the switch and the light's switch
+// together (the frames shadow_frames counts).
+inline bool CountsNoLightFrame(bool shadows_on, ClayMask mask) { return shadows_on && mask == ClayMask::kNoLight; }
+inline bool CountsNoObjectsFrame(bool shadows_on, ClayMask mask) { return shadows_on && mask == ClayMask::kObjects; }
 
 inline constexpr uint8_t kTallyAlphaUnknown = 0, kTallyBlendUnknown = 1;
 
@@ -1069,7 +1078,7 @@ constexpr uint32_t LitObjectMode(capture::LightVertexKind kind, capture::LightFa
   }
 }
 
-// What the pass binds at the light's four buffer registers (t10 to t12:
+// What the pass binds at the light's four buffer registers (t9 to t12:
 // kClayBindings[kClayLightBufferParam0 + i]) for a draw with `light_mode`: the
 // draw's own buffer of that register where the mode names it, else the draw's
 // positions. EVERY draw gets all four: nothing may stay bound from another
@@ -1082,7 +1091,7 @@ constexpr uint32_t LitObjectMode(capture::LightVertexKind kind, capture::LightFa
 // both). A leaf is a probe record with the leaf bit: the probe buffer's two
 // regions. The three mesh blocks of the vertex shader exclude each other by
 // the mode (LightModeBlock: its own tests), and a mode none of them takes,
-// which the pass never makes, loads from none of t10 to t12: the positions.
+// which the pass never makes, loads from none of t9 to t12: the positions.
 // The terrain normals are named only where no mesh block runs: a mode with
 // the terrain bit and a mesh block (never made either) has its normal from
 // the block, its compiled program loads nothing from t9, and a mesh record
@@ -1666,7 +1675,7 @@ struct ClayFrameConstants {
   float add[3];         // c20.xyz (c20.w, the output scale, is not applied)
   float pad0;
   float floor[3];       // c22.xyz; the block carries x and y, z is 0 (0 in every row captured)
-  float mask_du;        // 1 / the clay target's width: a lit pixel reads the screen mask at pos.xy * (mask_du, mask_dv)
+  float mask_du;        // 1 / the clay target's width: a lit pixel reads the screen mask at (pos.xy - 0.5) * (mask_du, mask_dv)
   float axis[3];        // c23.xyz (= vertex c19.xyz)
   float mask_dv;        // 1 / the clay target's height (SetClayFrameMask; both 0 in a frame without light)
   float eye[3];         // c19.xyz, the eye (= vertex c9.xyz of the leaf shaders); zero when not usable
@@ -1707,14 +1716,48 @@ inline ClayFrameConstants MakeClayFrameConstants(const capture::LightBlock& b, C
   return c;
 }
 
-// Where a lit pixel reads the screen mask (cbuffer Frame's f_mask_du, f_mask_dv): the pixel's
-// centre over the clay target's size, normalised coordinates whatever the target's size is and
-// whatever texture is bound as the mask (the mask target of that size, or the 1 x 1 white one).
+// Where a lit pixel reads the screen mask (cbuffer Frame's f_mask_du, f_mask_dv): the factors of
+// its coordinate, 1 / the clay target's size, normalised coordinates whatever the target's size is
+// and whatever texture is bound as the mask (the mask target of that size, or the 1 x 1 white one).
 // Only in a lit frame: a frame without light keeps its constants all zero (no draw reads them).
 inline void SetClayFrameMask(ClayFrameConstants& c, uint32_t width, uint32_t height) {
   if (!c.light_on || width == 0 || height == 0) return;
   c.mask_du = 1.0f / float(width);
   c.mask_dv = 1.0f / float(height);
+}
+
+// The read itself, as the game's lit pixel shaders fetch the mask (tf8: 1120 x 720, k_8, filter
+// linear for magnification and minification, clamped; e.g. 0x26052DEFBA688AF2 instr 4 and 5:
+// r0.zw = |r4.xy| * c0.zw + c0.xy, tfetch2D tf8, with r4 the pixel position register, which holds
+// the pixel's whole coordinates, and c0 = (0, 0, 1 / 1120, 1 / 720)): the coordinate is the pixel's
+// CORNER over the target's size, so the linear filter returns the mean of the four texels around
+// that corner, (px - 1, px) x (py - 1, py), clamped at the target's edge. The native lit shaders
+// read the same: SampleLevel with the linear clamped sampler at (pos.xy - 0.5) * (mask_du, mask_dv),
+// pos the pixel's centre. A shadow edge one texel wide in the mask is two pixels wide in the light.
+// MaskReadCoordinate: one axis of that coordinate from the pixel centre's position.
+inline float MaskReadCoordinate(float centre, float inv_size) { return (centre - 0.5f) * inv_size; }
+// The texels of pixel (px, py) on a mask of `width` x `height` (columns x0, x1 and rows y0, y1,
+// each with weight 1/2; equal at an edge and on the 1 x 1 white texture).
+struct MaskReadTexels {
+  uint32_t x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+};
+inline MaskReadTexels MaskRead(uint32_t px, uint32_t py, uint32_t width, uint32_t height) {
+  MaskReadTexels t;
+  if (width == 0 || height == 0) return t;
+  t.x1 = px < width ? px : width - 1;
+  t.y1 = py < height ? py : height - 1;
+  t.x0 = px == 0 ? 0 : (px - 1 < width ? px - 1 : width - 1);
+  t.y0 = py == 0 ? 0 : (py - 1 < height ? py - 1 : height - 1);
+  return t;
+}
+// The value a lit pixel reads from an 8-bit mask (rows of `width` bytes): the mean of its four
+// texels over 255. Without a mask: 1 (lit).
+inline float MaskReadValue(const uint8_t* mask, uint32_t width, uint32_t height, uint32_t px, uint32_t py) {
+  if (!mask || width == 0 || height == 0) return 1.0f;
+  const MaskReadTexels t = MaskRead(px, py, width, height);
+  const uint32_t sum = uint32_t(mask[size_t(t.y0) * width + t.x0]) + mask[size_t(t.y0) * width + t.x1] +
+                       mask[size_t(t.y1) * width + t.x0] + mask[size_t(t.y1) * width + t.x1];
+  return float(sum) / (4.0f * 255.0f);
 }
 
 // Whether a frame's constants light a draw of `family`: the frame is lit, and for a leaf, whose
@@ -2614,6 +2657,16 @@ inline PipelineKey PrepassKey(const PipelineKey& colour) {
   k.cull = colour.cull;
   return k;
 }
+// Whether a textured record's alpha can discard a pixel (the alpha test, alpha-to-mask). One whose
+// alpha cannot has the depth of flat clay: its pre-pass draw is the flat kind's (PrepassKey with the
+// alpha): no texture is read and no coordinates are bound (the review of plan Task 5). A terrain
+// record keeps its kind: a layer discards by its hole and weight whatever its alpha says.
+inline bool PrepassDiscards(const ClayAlpha& alpha) { return (alpha.mode & (kAlphaTest | kAlphaToMask)) != 0; }
+inline PipelineKey PrepassKey(const PipelineKey& colour, const ClayAlpha& alpha) {
+  PipelineKey k = PrepassKey(colour);
+  if (k.textured == 1 && !PrepassDiscards(alpha)) k.textured = 0;
+  return k;
+}
 
 // The literals of 0x0F99... (frame-map section 15, "Literals": the GPU's register file at every
 // execution in 212 logged frames, and the shader object's table): the twelve tap offsets c250..c255
@@ -2846,10 +2899,13 @@ double MaskPixel(uint32_t px, uint32_t py, float depth, const ClayMaskConstants&
 // a frame at the bridge), the leaves' and the other meshes' products agree with them to 2.5e-7 of the
 // largest entry, and the inverse is the mask shader's own c116..c119 to 4e-8 (frame-map section 15,
 // "Native shadows").
-// FrameInverseViewProj: the inverse of that one matrix. False (the frame has no mask: "shadow-view")
-// when no record gives a matrix, when one of them is not finite or differs from the first by more
-// than kFrameViewTolerance (of the row's largest entry of its kind: the three direction entries, or
-// the translation), or when the matrix has no finite inverse.
+// FrameInverseViewProj: the inverse of that one matrix: the matrix of the MAJORITY of the records
+// that give one (more than half of them agree with it within kFrameViewTolerance, of the row's
+// largest entry of its kind: the three direction entries, or the translation). The others, a matrix
+// that is not finite among them, are outliers: counted (FrameView::outliers, on the Shadow line) and
+// without a say, so that one odd record does not take the frame's shadows away. False (the frame
+// has no mask: "shadow-view") when no record gives a matrix, when no matrix has a majority (fail
+// closed: one against one, two against two, all different), or when the matrix has no finite inverse.
 // A record's rows as the matrix M of clip = M . p (rows x, y, z, w), by its layout.
 inline void RecordMatrix(const capture::DrawRecord& r, float m[4][4]) {
   for (int i = 0; i < 4; ++i) {
@@ -2915,54 +2971,68 @@ inline bool InvertMatrix4(const float m[4][4], float out[4][4]) {
   return true;
 }
 
-// What FrameInverseViewProj found: the records that gave a matrix, and why there is no inverse.
+// What FrameInverseViewProj found: the records that gave a matrix, those of them that do not agree
+// with the matrix it chose (or tried), and why there is no inverse.
 struct FrameView {
   uint32_t candidates = 0;
+  uint32_t outliers = 0;
   FrameViewReason why = FrameViewReason::kNoRecord;
 };
 
 inline bool FrameInverseViewProj(const FrameScene& scene, float inverse[4][4], FrameView* info = nullptr,
                                  float view_proj[4][4] = nullptr) {
   FrameView v;
-  float ref[4][4] = {};
   auto done = [&](FrameViewReason why) {
     v.why = why;
     if (info) *info = v;
     return why == FrameViewReason::kNone;
   };
-  for (const capture::DrawRecord& r : scene.draws) {
-    if (r.skip != capture::SkipReason::kNone) continue;
-    float m[4][4];
-    bool have = false;
+  // The matrix of one record, when it gives one.
+  auto matrix_of = [&](const capture::DrawRecord& r, float m[4][4]) {
+    if (r.skip != capture::SkipReason::kNone) return false;
     if (TerrainOf(scene, r) || r.instances.active) {
       RecordMatrix(r, m);
-      have = true;
-    } else if (const capture::LightInputs* l = LightOf(scene, r);
-               l && l->family == capture::LightFamily::kTreeLeaf && l->kind == capture::LightVertexKind::kProbe) {
+      return true;
+    }
+    if (const capture::LightInputs* l = LightOf(scene, r);
+        l && l->family == capture::LightFamily::kTreeLeaf && l->kind == capture::LightVertexKind::kProbe) {
       float rows[4][4], world[3][4];
       RecordMatrix(r, rows);
       for (int i = 0; i < 3; ++i) {
         for (int j = 0; j < 3; ++j) world[i][j] = l->world_rot[i][j];
         world[i][3] = l->world_pos[i];
       }
-      // (a leaf whose world rows cannot be inverted gives no matrix; it is no disagreement)
-      have = capture::PassMatrix(rows, world, m);
+      // (a leaf whose world rows cannot be inverted gives no matrix; it is no outlier)
+      return capture::PassMatrix(rows, world, m);
     }
-    if (!have) continue;
-    if (v.candidates == 0) {
-      for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-          if (!std::isfinite(m[i][j])) return done(FrameViewReason::kDisagree);
-        }
-      }
-      std::memcpy(ref, m, sizeof(ref));
-    } else if (!ViewMatricesAgree(ref, m, kFrameViewTolerance)) {
-      ++v.candidates;
-      return done(FrameViewReason::kDisagree);
-    }
+    return false;
+  };
+  // First pass: the majority's candidate (a vote: a matrix that more than half of the records agree
+  // with survives it). Second pass: how many agree with it. (ViewMatricesAgree is false for anything
+  // that is not finite, so a matrix that is not finite agrees with nothing, itself included.)
+  float ref[4][4] = {};
+  uint32_t votes = 0;
+  for (const capture::DrawRecord& r : scene.draws) {
+    float m[4][4];
+    if (!matrix_of(r, m)) continue;
     ++v.candidates;
+    if (votes == 0) {
+      std::memcpy(ref, m, sizeof(ref));
+      votes = 1;
+    } else if (ViewMatricesAgree(ref, m, kFrameViewTolerance)) {
+      ++votes;
+    } else {
+      --votes;
+    }
   }
   if (v.candidates == 0) return done(FrameViewReason::kNoRecord);
+  uint32_t agree = 0;
+  for (const capture::DrawRecord& r : scene.draws) {
+    float m[4][4];
+    if (matrix_of(r, m) && ViewMatricesAgree(ref, m, kFrameViewTolerance)) ++agree;
+  }
+  v.outliers = v.candidates - agree;
+  if (!(uint64_t(agree) * 2 > v.candidates)) return done(FrameViewReason::kDisagree);
   float inv[4][4];
   if (!InvertMatrix4(ref, inv)) return done(FrameViewReason::kSingular);
   std::memcpy(inverse, inv, sizeof(inv));
@@ -3049,7 +3119,13 @@ inline std::string FormatShadowText(const ClayStats& st) {
     text += buf;
   }
   switch (st.mask) {
-    case ClayMask::kDrawn: text += st.mask_rotated ? " | mask drawn" : " | mask drawn, taps unrotated"; break;
+    case ClayMask::kDrawn:
+      text += st.mask_rotated ? " | mask drawn" : " | mask drawn, taps unrotated";
+      if (st.mask_view_outliers) {
+        std::snprintf(buf, sizeof(buf), " (%u records with another view)", st.mask_view_outliers);
+        text += buf;
+      }
+      break;
     case ClayMask::kNoLight: text += " | mask white (no light)"; break;
     case ClayMask::kBlock: text += std::string(" | mask white (") + capture::kShadowBlockReason + ")"; break;
     case ClayMask::kMaps: text += " | mask white (maps not drawn)"; break;
@@ -3062,6 +3138,9 @@ inline std::string FormatShadowText(const ClayStats& st) {
   std::snprintf(buf, sizeof(buf), " | frames %llu: %s %llu, %s %llu, unrotated %llu", static_cast<unsigned long long>(st.shadow_frames),
                 capture::kShadowBlockReason, static_cast<unsigned long long>(st.shadow_block_frames), kShadowViewReason,
                 static_cast<unsigned long long>(st.shadow_view_frames), static_cast<unsigned long long>(st.shadow_unrotated_frames));
+  text += buf;
+  std::snprintf(buf, sizeof(buf), ", no-light %llu, no-objects %llu", static_cast<unsigned long long>(st.shadow_nolight_frames),
+                static_cast<unsigned long long>(st.shadow_objects_frames));
   text += buf;
   return text;
 }

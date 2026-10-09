@@ -4233,7 +4233,7 @@ int main() {
     {
       ClayStats st;
       // (the line's second half, which case 570 holds: here the pass drew no pre-pass and no mask)
-      const std::string tail = " | pre-pass 0 draws | mask white (off) | frames 0: shadow-block 0, shadow-view 0, unrotated 0";
+      const std::string tail = " | pre-pass 0 draws | mask white (off) | frames 0: shadow-block 0, shadow-view 0, unrotated 0, no-light 0, no-objects 0";
       CHECK(555, FormatShadowText(st) == "Shadow: off");
       st.shadow_switch = st.shadow_block = st.shadow_maps = true;
       st.shadow_reason = capture::ShadowBlockReason::kNone;
@@ -4781,32 +4781,63 @@ int main() {
         scene.draws.push_back(record(leaf_rows));
         scene.draws.back().light_index = 2;
         CHECK(568, FrameInverseViewProj(scene, inverse, &info) && info.candidates == 3);
-        // One outlier: no view for the frame. The tolerance from both sides (1e-4 of the entry).
+        // One outlier among four: the majority's matrix stands and the outlier is counted (the review of
+        // plan Task 5: one odd record must not turn the frame's shadows off). The tolerance from both
+        // sides (1e-4 of the entry).
         FrameScene outlier = scene;
         capture::DrawRecord moved = record(view_proj);
         moved.terrain_index = 0;
         moved.rows[3] *= 1.0f + 5e-5f;  // the x row's translation
         outlier.draws.push_back(moved);
-        CHECK(568, FrameInverseViewProj(outlier, inverse, &info) && info.candidates == 4);
+        CHECK(568, FrameInverseViewProj(outlier, inverse, &info) && info.candidates == 4 && info.outliers == 0);
         outlier.draws.back().rows[3] = view_proj[0][3] * (1.0f + 3e-4f);
         float kept[4][4];
         std::memcpy(kept, inverse, sizeof(kept));
-        CHECK(568, !FrameInverseViewProj(outlier, inverse, &info) && info.why == FrameViewReason::kDisagree &&
-                       std::memcmp(kept, inverse, sizeof(kept)) == 0);
+        CHECK(568, FrameInverseViewProj(outlier, inverse, &info, back) && info.why == FrameViewReason::kNone && info.candidates == 4 &&
+                       info.outliers == 1 && std::memcmp(kept, inverse, sizeof(kept)) == 0 && std::memcmp(back, view_proj, sizeof(back)) == 0);
         // (a direction entry that is nearly zero in the reference is held to the row's largest: 2e-8 against 0.84)
         outlier.draws.back().rows[3] = view_proj[0][3];
         outlier.draws.back().rows[2] = 1e-5f;
-        CHECK(568, FrameInverseViewProj(outlier, inverse, &info));
+        CHECK(568, FrameInverseViewProj(outlier, inverse, &info) && info.outliers == 0);
         outlier.draws.back().rows[2] = 1e-3f;
-        CHECK(568, !FrameInverseViewProj(outlier, inverse, &info) && info.why == FrameViewReason::kDisagree);
-        // An outlier that comes first is one too (the others disagree with it).
+        CHECK(568, FrameInverseViewProj(outlier, inverse, &info) && info.outliers == 1);
+        // An outlier that comes first: one against one is no majority (fail closed), one against two is.
         FrameScene first;
         first.terrain.push_back(capture::TerrainPatch{});
         first.draws.push_back(record(odd));
         first.draws.back().terrain_index = 0;
         first.draws.push_back(record(view_proj));
         first.draws.back().terrain_index = 0;
-        CHECK(568, !FrameInverseViewProj(first, inverse, &info) && info.why == FrameViewReason::kDisagree);
+        std::memcpy(kept, inverse, sizeof(kept));
+        CHECK(568, !FrameInverseViewProj(first, inverse, &info) && info.why == FrameViewReason::kDisagree && info.candidates == 2 &&
+                       std::memcmp(kept, inverse, sizeof(kept)) == 0);
+        first.draws.push_back(record(view_proj));
+        first.draws.back().terrain_index = 0;
+        CHECK(568, FrameInverseViewProj(first, inverse, &info, back) && info.candidates == 3 && info.outliers == 1 &&
+                       std::memcmp(back, view_proj, sizeof(back)) == 0);
+        // Two against two, and three matrices that all differ: no majority, no view.
+        first.draws.push_back(record(odd));
+        first.draws.back().terrain_index = 0;
+        CHECK(568, !FrameInverseViewProj(first, inverse, &info) && info.why == FrameViewReason::kDisagree && info.candidates == 4);
+        {
+          FrameScene three;
+          three.terrain.push_back(capture::TerrainPatch{});
+          for (float shift : {0.0f, 50.0f, 120.0f}) {
+            float m[4][4];
+            std::memcpy(m, view_proj, sizeof(m));
+            m[0][3] += shift;
+            three.draws.push_back(record(m));
+            three.draws.back().terrain_index = 0;
+          }
+          CHECK(568, !FrameInverseViewProj(three, inverse, &info) && info.why == FrameViewReason::kDisagree && info.candidates == 3);
+          // (the same three and two more of the first: three of five)
+          for (int n = 0; n < 2; ++n) {
+            three.draws.push_back(record(view_proj));
+            three.draws.back().terrain_index = 0;
+          }
+          CHECK(568, FrameInverseViewProj(three, inverse, &info, back) && info.candidates == 5 && info.outliers == 2 &&
+                         std::memcmp(back, view_proj, sizeof(back)) == 0);
+        }
         // A matrix that is not finite, in the first record or a later one: no view.
         for (int which = 0; which < 2; ++which) {
           for (float bad : {nan, inf}) {
@@ -4827,7 +4858,14 @@ int main() {
           lone.draws.push_back(record(view_proj));
           lone.draws.back().terrain_index = 0;
           lone.draws.back().rows[10] = inf;
-          CHECK(568, !FrameInverseViewProj(lone, inverse, &info) && info.why == FrameViewReason::kDisagree && info.candidates == 0);
+          CHECK(568, !FrameInverseViewProj(lone, inverse, &info) && info.why == FrameViewReason::kDisagree && info.candidates == 1 &&
+                         info.outliers == 1);
+          // (and among two good ones it is an outlier, counted)
+          for (int n = 0; n < 2; ++n) {
+            lone.draws.push_back(record(view_proj));
+            lone.draws.back().terrain_index = 0;
+          }
+          CHECK(568, FrameInverseViewProj(lone, inverse, &info) && info.candidates == 3 && info.outliers == 1);
         }
         // A singular matrix (two equal rows; all zero): no inverse.
         float singular[4][4];
@@ -4881,12 +4919,22 @@ int main() {
         st.mask_rotated = true;
         st.shadow_frames = 300;
         st.shadow_block_frames = 2;
-        CHECK(570, FormatShadowText(st).ends_with(" | pre-pass 912 draws | mask drawn | frames 300: shadow-block 2, shadow-view 0, unrotated 0"));
+        CHECK(570, FormatShadowText(st).ends_with(
+                       " | pre-pass 912 draws | mask drawn | frames 300: shadow-block 2, shadow-view 0, unrotated 0, no-light 0, no-objects 0"));
+        // (records whose matrix was not the frame's: on the line when there are any)
+        st.mask_view_outliers = 3;
+        CHECK(570, FormatShadowText(st).find(" | mask drawn (3 records with another view) | frames 300:") != std::string::npos);
+        st.mask_view_outliers = 0;
+        // Frames with the switch and the light on that had no light block, or no shadow objects: counted.
+        st.shadow_nolight_frames = 7;
+        st.shadow_objects_frames = 5;
+        CHECK(570, FormatShadowText(st).ends_with(", unrotated 0, no-light 7, no-objects 5"));
+        st.shadow_nolight_frames = st.shadow_objects_frames = 0;
         st.mask_rotated = false;
         st.prepass_skipped = 3;
         st.shadow_unrotated_frames = 300;
         CHECK(570, FormatShadowText(st).ends_with(
-                       " | pre-pass 912 draws (3 without a pipeline) | mask drawn, taps unrotated | frames 300: shadow-block 2, shadow-view 0, unrotated 300"));
+                       " | pre-pass 912 draws (3 without a pipeline) | mask drawn, taps unrotated | frames 300: shadow-block 2, shadow-view 0, unrotated 300, no-light 0, no-objects 0"));
         st.mask = ClayMask::kView;
         st.mask_view = FrameViewReason::kDisagree;
         st.shadow_view_frames = 1;
@@ -4908,6 +4956,71 @@ int main() {
         CHECK(570, std::strcmp(ShadowDrawSkipName(ShadowDrawSkip::kTwin), "no-caster-entry") == 0 &&
                        std::strcmp(ShadowDrawSkipName(ShadowDrawSkip::kUnread), "state-unread") == 0 &&
                        std::strcmp(ShadowDrawSkipName(ShadowDrawSkip::kState), "state") == 0 && size_t(ShadowDrawSkip::kCount) == 11);
+        // Which frames the two new counters take (CountsNoLightFrame, CountsNoObjectsFrame): only frames
+        // with the switch and the light on.
+        CHECK(570, CountsNoLightFrame(true, ClayMask::kNoLight) && !CountsNoLightFrame(false, ClayMask::kNoLight) &&
+                       !CountsNoLightFrame(true, ClayMask::kDrawn) && !CountsNoLightFrame(true, ClayMask::kBlock));
+        CHECK(570, CountsNoObjectsFrame(true, ClayMask::kObjects) && !CountsNoObjectsFrame(false, ClayMask::kObjects) &&
+                       !CountsNoObjectsFrame(true, ClayMask::kMaps));
+      }
+      // 571: where a lit pixel reads the screen mask (the review of plan Task 5). The game's lit shaders
+      // fetch tf8 with a linear filter at floor(pixel) * c0.zw + c0.xy, c0 = (0, 0, 1 / 1120, 1 / 720): the
+      // pixel's corner, the mean of the four mask texels (px - 1, px) x (py - 1, py), clamped at the edge.
+      {
+        // The coordinate: the pixel's corner over the target's size, whatever the size is.
+        ClayFrameConstants frame{};
+        frame.light_on = 1;
+        SetClayFrameMask(frame, 1120, 720);
+        CHECK(571, MaskReadCoordinate(0.5f, frame.mask_du) == 0.0f && MaskReadCoordinate(559.5f, frame.mask_du) == 559.0f * frame.mask_du);
+        CHECK(571, std::fabs(MaskReadCoordinate(559.5f, frame.mask_du) * 1120.0f - 559.0f) < 1e-3f);
+        CHECK(571, std::fabs(MaskReadCoordinate(719.5f, frame.mask_dv) * 720.0f - 719.0f) < 1e-3f);
+        // The four texels of a pixel and their mean.
+        MaskReadTexels t = MaskRead(5, 7, 1120, 720);
+        CHECK(571, t.x0 == 4 && t.x1 == 5 && t.y0 == 6 && t.y1 == 7);
+        t = MaskRead(0, 0, 1120, 720);
+        CHECK(571, t.x0 == 0 && t.x1 == 0 && t.y0 == 0 && t.y1 == 0);
+        t = MaskRead(1119, 719, 1120, 720);
+        CHECK(571, t.x0 == 1118 && t.x1 == 1119 && t.y0 == 718 && t.y1 == 719);
+        t = MaskRead(3, 2, 1, 1);  // (the 1 x 1 white texture: its one texel, whatever the pixel is)
+        CHECK(571, t.x0 == 0 && t.x1 == 0 && t.y0 == 0 && t.y1 == 0);
+        const uint8_t mask[3 * 4] = {255, 0, 0, 0, /**/ 255, 255, 51, 0, /**/ 0, 0, 0, 102};
+        CHECK(571, MaskReadValue(mask, 4, 3, 0, 0) == 1.0f);                              // the corner: one texel
+        CHECK(571, std::fabs(MaskReadValue(mask, 4, 3, 1, 0) - 0.5f) < 1e-7f);             // top row: two texels
+        CHECK(571, std::fabs(MaskReadValue(mask, 4, 3, 1, 1) - 0.75f) < 1e-7f);            // 255, 0, 255, 255
+        CHECK(571, std::fabs(MaskReadValue(mask, 4, 3, 2, 1) - (255 + 51) / (4.0f * 255.0f)) < 1e-7f);
+        CHECK(571, std::fabs(MaskReadValue(mask, 4, 3, 3, 2) - (51 + 102) / (4.0f * 255.0f)) < 1e-7f);
+        CHECK(571, MaskReadValue(nullptr, 4, 3, 1, 1) == 1.0f && MaskReadValue(mask, 0, 3, 1, 1) == 1.0f);  // no mask: lit
+        const uint8_t white[1] = {255};
+        CHECK(571, MaskReadValue(white, 1, 1, 640, 360) == 1.0f);  // (a mask of 1 stays 1 exactly: the light's pinned numbers stand)
+        // An edge one texel wide in the mask is a ramp of two pixels in the read (the game's softening).
+        const uint8_t edge[1 * 4] = {0, 0, 255, 255};
+        CHECK(571, MaskReadValue(edge, 4, 1, 1, 0) == 0.0f && std::fabs(MaskReadValue(edge, 4, 1, 2, 0) - 0.5f) < 1e-7f &&
+                       MaskReadValue(edge, 4, 1, 3, 0) == 1.0f);
+        // 572: the pre-pass's lighter draw (the review of plan Task 5, problem B): a textured record whose
+        // alpha discards nothing is drawn as flat clay in the pre-pass (no texture read).
+        PipelineKey colour;
+        colour.textured = 1;
+        colour.depth_func = 3;
+        colour.cull = 2;
+        ClayAlpha solid;
+        CHECK(572, PrepassKey(colour, solid).textured == 0 && PrepassKey(colour, solid).depth_func == 3 && PrepassKey(colour, solid).cull == 2 &&
+                       PrepassKey(colour, solid).color_mask == 0);
+        ClayAlpha tested;
+        tested.mode = kAlphaFromAlbedo | kAlphaTest | 4;
+        CHECK(572, PrepassKey(colour, tested).textured == 1 && PrepassDiscards(tested) && !PrepassDiscards(solid));
+        ClayAlpha to_mask;
+        to_mask.mode = kAlphaFromAlbedo | kAlphaToMask;
+        CHECK(572, PrepassKey(colour, to_mask).textured == 1 && PrepassDiscards(to_mask));
+        ClayAlpha blended;  // (an alpha that is only written for the blend discards nothing)
+        blended.mode = kAlphaFromAlbedo | kAlphaBlend;
+        CHECK(572, PrepassKey(colour, blended).textured == 0);
+        // A terrain record keeps its kind whatever the alpha says (a layer's hole and weight discard).
+        colour.textured = 2;
+        CHECK(572, PrepassKey(colour, solid).textured == 2);
+        colour.textured = 3;
+        CHECK(572, PrepassKey(colour, solid).textured == 3);
+        colour.textured = 0;
+        CHECK(572, PrepassKey(colour, tested).textured == 0);
       }
     }
   }

@@ -120,6 +120,7 @@ class ClayPass {
     // The record's pipeline of the depth pre-pass (PrepassKey of its colour pipeline's key); nullptr:
     // the record writes no depth, the frame has no pre-pass, or no such pipeline could be made.
     nrhi::Pipeline* prepass = nullptr;
+    bool prepass_flat = false;  // its pre-pass draw is the flat kind's (PrepassKey with the record's alpha)
     ClayAlpha alpha;
     // A terrain record. With its material (`textured` 2 or 3): `albedo` is the
     // colour texture (tf0 or tf13) with `sampler` and `uv_fix`, `weights` the
@@ -213,7 +214,7 @@ class ClayPass {
   void ForgetShadowObjects();
   // The pre-pass pipeline of a colour pipeline (PrepassKey), from the pre-pass's own cache; nullptr
   // when the colour pipeline is not one of the cache or does not write depth, or on a failure.
-  nrhi::Pipeline* PrepassPipeline(nrhi::Device* dev, nrhi::Pipeline* colour);
+  nrhi::Pipeline* PrepassPipeline(nrhi::Device* dev, nrhi::Pipeline* colour, const ClayAlpha& alpha, bool* flat);
   // The key of a pipeline of the colour pass's cache; nullptr for any other pointer.
   const PipelineKey* KeyOf(nrhi::Pipeline* pipeline) const;
   // The game's rotation tile as a 32 x 32 R8G8 texture: read from guest memory and checked every
@@ -267,7 +268,7 @@ class ClayPass {
   // pipeline: the same buffers, constants and textures but for the light (none: light_mode 0) and
   // the mask (white). `mask`: what the colour draw binds as the screen mask.
   void DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, bool depth_only, nrhi::TextureView* mask,
-                    uint32_t* light_mode_out);
+                    uint32_t* light_mode_out, bool* light_bound);
   // The light's vertex inputs of a textured mesh record with light inputs:
   // its normals and the other buffers of its vertex kind (a colour stream's
   // colours, the probe weights and sets, an instance set's colours and bend
@@ -345,6 +346,7 @@ class ClayPass {
   bool rotation_valid_ = false;
   // The pass's frame counts for the Shadow line (ClayStats::shadow_frames and the three beside it).
   uint64_t shadow_frames_ = 0, shadow_block_frames_ = 0, shadow_view_frames_ = 0, shadow_unrotated_frames_ = 0;
+  uint64_t shadow_nolight_frames_ = 0, shadow_objects_frames_ = 0;
   // This Render's mask: what is bound as the screen mask at the colour draws (the mask target's
   // view or the white texture), and the frame's slot of the mask's constants.
   uint32_t mask_slot_ = 0;

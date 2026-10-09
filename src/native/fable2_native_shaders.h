@@ -390,9 +390,11 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0) : SV_Target {
 // alpha where the shader has it), vcolour the vertex shader's colour (the stream colour raised to its
 // literal, or the probe colour as it is), N the interpolated M n normalised, L from
 // t = sat(normalize(axis) . N), and the mask the frame's screen mask at the pixel (t4: the sun's shadow,
-// 1 = lit; the 1 x 1 white texture in a frame without one; clay_logic.h, "Native shadows"), read at the
-// pixel's centre over the target's size, by a lit pixel only. The pixel shader is the same program for
-// both kinds of colour and reads none of the probe registers.
+// 1 = lit; the 1 x 1 white texture in a frame without one; clay_logic.h, "Native shadows"), read as the
+// game's lit shaders fetch tf8: with the linear clamped sampler at the pixel's CORNER over the target's
+// size ((pos.xy - 0.5): the game's floor(pixel) * c0.zw + c0.xy), which is the mean of the four mask
+// texels (px - 1, px) x (py - 1, py) (MaskReadValue in clay_logic.h), by a lit pixel only. The pixel
+// shader is the same program for both kinds of colour and reads none of the probe registers.
 // kClayTexturedDepthPs is the same text compiled with CLAY_DEPTH_ONLY: the shader of the depth pre-pass
 // for a record of this kind. It makes the same alpha and discards the same pixels (the alpha test,
 // alpha-to-mask) and then returns: no light, no mask, no colour (the draw writes none).
@@ -449,7 +451,7 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
     if (light_mode & 4) {
       float3 lit;
       // The sun's shadow at the pixel: every family multiplies its sun term by it, and nothing else.
-      float mask = shadow_mask.SampleLevel(s_linear_clamp, pos.xy * float2(f_mask_du, f_mask_dv), 0).r;
+      float mask = shadow_mask.SampleLevel(s_linear_clamp, (pos.xy - 0.5) * float2(f_mask_du, f_mask_dv), 0).r;
       [branch] if (light_mode & 16) {
         // An instanced plant: the normal bent as the game's plant pixel shaders bend it, then A times
         // the vertex side's ambient plus the sun, or (light_mode bit 5) the object form with the vertex
@@ -668,7 +670,7 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
     float3 N = light_normalize(normal);
     float facing = FacingGate(dot(N, f_sun_dir), t_facing_scale);
     // The sun's shadow at the pixel, on the sun term with the facing factor.
-    float mask = shadow_mask.SampleLevel(s_linear_clamp, pos.xy * float2(f_mask_du, f_mask_dv), 0).r;
+    float mask = shadow_mask.SampleLevel(s_linear_clamp, (pos.xy - 0.5) * float2(f_mask_du, f_mask_dv), 0).r;
     lin = LightTerrainLayer(lin, sample_base(base_at, base_d).rgb, f_tint, f_tint_pow, f_add, f_floor,
                             AmbientT(axis, normal), dot(N, f_sun_dir), f_sun_col, t_c11x, SunGateSingle(mask, facing));
   }

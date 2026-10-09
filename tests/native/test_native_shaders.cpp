@@ -696,7 +696,7 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
     if (light_mode & 4) {
       float3 lit;
       // The sun's shadow at the pixel: every family multiplies its sun term by it, and nothing else.
-      float mask = shadow_mask.SampleLevel(s_linear_clamp, pos.xy * float2(f_mask_du, f_mask_dv), 0).r;
+      float mask = shadow_mask.SampleLevel(s_linear_clamp, (pos.xy - 0.5) * float2(f_mask_du, f_mask_dv), 0).r;
       [branch] if (light_mode & 16) {
         // An instanced plant: the normal bent as the game's plant pixel shaders bend it, then A times
         // the vertex side's ambient plus the sun, or (light_mode bit 5) the object form with the vertex
@@ -809,7 +809,7 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
     float3 N = light_normalize(normal);
     float facing = FacingGate(dot(N, f_sun_dir), t_facing_scale);
     // The sun's shadow at the pixel, on the sun term with the facing factor.
-    float mask = shadow_mask.SampleLevel(s_linear_clamp, pos.xy * float2(f_mask_du, f_mask_dv), 0).r;
+    float mask = shadow_mask.SampleLevel(s_linear_clamp, (pos.xy - 0.5) * float2(f_mask_du, f_mask_dv), 0).r;
     lin = LightTerrainLayer(lin, sample_base(base_at, base_d).rgb, f_tint, f_tint_pow, f_add, f_floor,
                             AmbientT(axis, normal), dot(N, f_sun_dir), f_sun_col, t_c11x, SunGateSingle(mask, facing));
   }
@@ -2369,7 +2369,8 @@ int main() {
           {"leaf without the mask", 1, "LeafMask(mask, 0.6, 0.4);", "LeafMask(1.0, 0.6, 0.4);", 2},
           {"layer without the mask", 2, "SunGateSingle(mask, facing));", "SunGateSingle(1.0, facing));", 4},
           {"mask on the whole colour", 1, "      return float4(clay_lit(lit * f_exposure),", "      lit *= mask;\n      return float4(clay_lit(lit * f_exposure),", 2},
-          {"mask at another place", 2, "pos.xy * float2(f_mask_du, f_mask_dv), 0).r;", "pos.xy * float2(f_mask_dv, f_mask_du), 0).r;", 4},
+          {"mask at another place", 2, "(pos.xy - 0.5) * float2(f_mask_du, f_mask_dv), 0).r;", "(pos.xy - 0.5) * float2(f_mask_dv, f_mask_du), 0).r;", 4},
+          {"mask at the pixel's centre", 2, "(pos.xy - 0.5) * float2(f_mask_du, f_mask_dv), 0).r;", "pos.xy * float2(f_mask_du, f_mask_dv), 0).r;", 4},
           {"mask on the far ground", 3, "dot(N, f_sun_dir), f_sun_col, t_c11x);", "dot(N, f_sun_dir), f_sun_col, t_c11x * f_mask_du);", 5},
           // The exposure (the final fix wave): dropped from a lit return, put outside the bound, put on
           // an unlit return (the textured colour, the flat colour of the textured shader, the ground).
@@ -2475,11 +2476,11 @@ int main() {
   // 190, 191: the screen mask in the lit shaders. It is the second texture of the albedo's parameter (t4),
   // read once in each of the two shaders whose families have it (the textured shader: objects, trunks,
   // plants, leaves; the layer shader), by a lit pixel alone (per light_mode, above), with the linear
-  // clamped sampler at the pixel's centre over the target's size; the far terrain has no mask and the
+  // clamped sampler at the pixel's corner over the target's size (the mean of four mask texels, as the game's fetch); the far terrain has no mask and the
   // flat shader and the shadow maps' shader none either.
   {
     using namespace fable2::native::render;
-    const char* read = "float mask = shadow_mask.SampleLevel(s_linear_clamp, pos.xy * float2(f_mask_du, f_mask_dv), 0).r;";
+    const char* read = "float mask = shadow_mask.SampleLevel(s_linear_clamp, (pos.xy - 0.5) * float2(f_mask_du, f_mask_dv), 0).r;";
     for (const char* src : {kClayTexturedPs, kClayTerrainLayerPs}) {
       if (!strstr(src, "Texture2D shadow_mask : register(t4);") || Count(src, read) != 1 || Count(src, "shadow_mask.") != 1 ||
           Count(src, "f_mask_du") != 2 || Count(src, "f_mask_dv") != 3) return 190;  // (the block names f_mask_dv twice)

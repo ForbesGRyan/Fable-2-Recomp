@@ -873,6 +873,7 @@ void ClayPass::DrawShadows(nrhi::Cmd* cmd, ClayStats& st) {
   }
   cmd->SetConstantBuffer(kParamTerrainConstants, terrain_cb_, 0);
   cmd->SetConstantBuffer(kParamFrameConstants, terrain_cb_, 0);
+  bool light_bound = false;  // (the light's four registers: once for both maps, below)
   for (size_t c = 0; c < 2; ++c) {
     // The map is a depth target for its own draws only; a shadow draw samples the caster's
     // texture or the white one, never a map.
@@ -896,9 +897,13 @@ void ClayPass::DrawShadows(nrhi::Cmd* cmd, ClayStats& st) {
       cmd->SetBufferSrv(kParamUvs, p.uvs ? p.uvs : p.positions, 0);
       // (the pair's second entry, the screen mask, is not read by the maps' shader: white)
       cmd->SetTexturePair(kParamAlbedo, p.albedo ? p.albedo : white_view_, white_view_);
-      // The light's four registers: the draw has no light (light_mode 0) and loads from none, and
-      // gets its own positions at each, as every draw of the pass does (Render).
-      for (uint32_t i = 0; i < kClayLightBufferCount; ++i) cmd->SetBufferSrv(kClayLightBufferParam0 + i, p.positions, 0);
+      // The light's four registers: a shadow draw has no light (light_mode 0) and loads from none
+      // of them, so they are bound once (to the first draw's positions: a live buffer), not at
+      // every draw.
+      if (!light_bound) {
+        for (uint32_t i = 0; i < kClayLightBufferCount; ++i) cmd->SetBufferSrv(kClayLightBufferParam0 + i, p.positions, 0);
+        light_bound = true;
+      }
       cmd->Draw(p.index_count, 0);
       ++st.shadow_drawn[c];
     }
@@ -910,8 +915,28 @@ void ClayPass::DrawShadows(nrhi::Cmd* cmd, ClayStats& st) {
 }
 
 void ClayPass::DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, bool depth_only, nrhi::TextureView* mask,
-                            uint32_t* light_mode_out) {
+                            uint32_t* light_mode_out, bool* light_bound) {
   const capture::DrawRecord& r = *p.r;
+  if (depth_only && p.prepass_flat) {
+    // A pre-pass draw whose pixels are all kept (flat clay, or a textured record whose alpha
+    // discards nothing; never a terrain record): the flat kind's pipeline, the positions and the
+    // indices. No coordinates (t2 gets the positions, as for every draw without them), no albedo
+    // (the white pair, which the flat shader does not read), no light.
+    const float uv[4] = {1.0f, 1.0f, 0.0f, 0.0f};
+    const ClayConstants constants = MakeClayConstants(r, p.vertex_count, ClayColorValue(color, r), uv, false, 0, ClayAlpha{}, 0, 0);
+    cmd->SetRootConstants(kParamConstants, kConstantCount, &constants, 0);
+    cmd->SetBufferSrv(kParamPositions, p.positions, 0);
+    cmd->SetBufferSrv(kParamIndices, p.indices, 0);
+    cmd->SetBufferSrv(kParamUvs, p.positions, 0);
+    cmd->SetTexturePair(kParamAlbedo, white_view_, white_view_);
+    if (!light_bound || !*light_bound) {
+      for (uint32_t i = 0; i < kClayLightBufferCount; ++i) cmd->SetBufferSrv(kClayLightBufferParam0 + i, p.positions, 0);
+      if (light_bound) *light_bound = true;
+    }
+    if (light_mode_out) *light_mode_out = 0;
+    cmd->Draw(p.index_count, 0);
+    return;
+  }
   // A terrain record with its material has its textures in the terrain table;
   // a far one reads its colour coordinates from t2 like a textured draw. Its
   // vertex normals (as they are: no transform) are at t9 when the steep-ground
@@ -997,9 +1022,13 @@ void ClayPass::DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, 
       case ClayLightBuffer::kBend: own = p.bend; break;
       case ClayLightBuffer::kPositions: break;
     }
+    // (a depth-only draw has light_mode 0 and loads from none of the four: once a pass is enough,
+    // so that the registers hold a live buffer)
+    if (depth_only && light_bound && *light_bound) break;
     const uint64_t offset = own ? LightBufferOffset(light_buffers.source[i], p.probe_count) : 0;
     cmd->SetBufferSrv(kClayLightBufferParam0 + i, own ? own : p.positions, offset);
   }
+  if (depth_only && light_bound) *light_bound = true;
   if (light_mode & kLightModeObject) {
     // The draw's slot at b1: a plant's small one among the small slots, an object's, trunk's or
     // leaf's large one behind them.
@@ -1017,10 +1046,13 @@ const PipelineKey* ClayPass::KeyOf(nrhi::Pipeline* pipeline) const {
   return nullptr;
 }
 
-nrhi::Pipeline* ClayPass::PrepassPipeline(nrhi::Device* dev, nrhi::Pipeline* colour) {
+nrhi::Pipeline* ClayPass::PrepassPipeline(nrhi::Device* dev, nrhi::Pipeline* colour, const ClayAlpha& alpha, bool* flat) {
   const PipelineKey* key = KeyOf(colour);
   if (!key || !InPrepass(*key)) return nullptr;
-  const size_t slot = FindOrAddPipelineSlot(prepass_keys_, PrepassKey(*key), kMaxPrepassPipelines);
+  // (a textured record whose alpha discards nothing is drawn as flat clay: no texture read)
+  const PipelineKey prepass = PrepassKey(*key, alpha);
+  *flat = prepass.textured == 0;
+  const size_t slot = FindOrAddPipelineSlot(prepass_keys_, prepass, kMaxPrepassPipelines);
   if (slot == kNoPipelineSlot) return nullptr;
   if (slot == prepass_pipelines_.size()) {  // a new key
     prepass_pipelines_.push_back(CreatePipeline(dev, prepass_keys_[slot], true));
@@ -1250,7 +1282,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   SetClayFrameMask(frame_, kWidth, kHeight);  // (where a lit pixel reads the screen mask)
   // With the light off no light input is asked of the geometry cache: every record is prepared as
   // one without light inputs (its light buffers null, its light_mode without an object bit, the
-  // positions at t8 to t11 at its draw; a steep layer's terrain normals are the material's and
+  // positions at t9 to t12 at its draw; a steep layer's terrain normals are the material's and
   // are built as before). A frame cannot be lit without them: `lit` needs the record's own
   // buffers (PrepareLight, FinishTerrain), which the first frame with the light on builds before
   // its draws.
@@ -1395,6 +1427,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       mask = ClayMask::kView;
       mask_view = view.why;
     } else {
+      st.mask_view_outliers = view.outliers;
       nrhi::TextureView* const tile = UpdateRotation(cmd, dev);
       if (MakeClayMaskConstants(scene.shadow, inverse, frame_.eye, kWidth, kHeight, tile != nullptr, &constants)) {
         std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(mask_slot_), &constants, sizeof(constants));
@@ -1410,7 +1443,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     // The pre-pass's pipelines, one a depth-writing record (a few keys for all of them).
     for (Prepared& p : prepared_) {
       if (!p.pipeline) continue;
-      p.prepass = PrepassPipeline(dev, p.pipeline);
+      p.prepass = PrepassPipeline(dev, p.pipeline, p.alpha, &p.prepass_flat);
     }
   }
   st.mask = mask;
@@ -1424,6 +1457,11 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     if (mask == ClayMask::kView) ++shadow_view_frames_;
     if (mask == ClayMask::kDrawn && !mask_rotated) ++shadow_unrotated_frames_;
   }
+  // (frames with the white mask for want of the light block or of the shadows' objects: counted too)
+  if (CountsNoLightFrame(shadows_on, mask)) ++shadow_nolight_frames_;
+  if (CountsNoObjectsFrame(shadows_on, mask)) ++shadow_objects_frames_;
+  st.shadow_nolight_frames = shadow_nolight_frames_;
+  st.shadow_objects_frames = shadow_objects_frames_;
   st.shadow_frames = shadow_frames_;
   st.shadow_block_frames = shadow_block_frames_;
   st.shadow_view_frames = shadow_view_frames_;
@@ -1479,6 +1517,10 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     // 1. The depth pre-pass: every record that writes depth, depth only, in the scene's order.
     begin_scene();
     nrhi::Pipeline* bound = nullptr;
+    // The light's four registers are bound once in the pre-pass (to the first draw's positions):
+    // every pre-pass draw has light_mode 0, whose compiled vertex shader loads from none of them
+    // (test_native_shaders.cpp holds that for every mode), so no draw can read another's buffer.
+    bool light_bound = false;
     for (const Prepared& p : prepared_) {
       if (!p.pipeline) continue;
       if (!p.prepass) {
@@ -1490,7 +1532,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
         cmd->SetPipeline(p.prepass);
         bound = p.prepass;
       }
-      DrawPrepared(cmd, p, color, true, white_view_, nullptr);
+      DrawPrepared(cmd, p, color, true, white_view_, nullptr, &light_bound);
       ++st.prepass_drawn;
     }
     // 2. The mask: one full-screen step from the pre-pass depth and the two maps. The depth is a
@@ -1542,7 +1584,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       bound = p.pipeline;
     }
     uint32_t light_mode = 0;
-    DrawPrepared(cmd, p, color, false, mask_bound, &light_mode);
+    DrawPrepared(cmd, p, color, false, mask_bound, &light_mode, nullptr);
     ++st.drawn;
     // The light of the drawn record: its family's, or why it has none.
     if (p.lit) {

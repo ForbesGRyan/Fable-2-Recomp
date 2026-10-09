@@ -450,6 +450,67 @@ int main() {
   }
   // --- the real terrain normal map, when a discovery dump of tf17 is on disk (else SKIPPED, loudly) ---
   // FABLE2_TF17_BIN / FABLE2_TF17_FC as above, for the tess rows' tf17 (k_DXN). The decoded level is written to
+  // The shadow mask's rotation tile (plan Task 5 of the shadows): 32 rows of 256 guest bytes, two bytes a
+  // texel, exchanged by the fetch's 8-in-16 swap: the shader's x is the SECOND stored byte, y the first.
+  {
+    std::vector<uint8_t> guest(kRotationTileGuestBytes, 0);
+    static_assert(kRotationTileGuestBytes == 31 * 256 + 64 && kRotationTileBytes == 2048 && kRotationTilePhys == 0x1A53B000u);
+    // Every texel the vector (1, 0): x byte 255 (a = 1), y byte 128 (b = 0.004): stored as (128, 255).
+    for (uint32_t y = 0; y < 32; ++y) {
+      for (uint32_t x = 0; x < 32; ++x) {
+        guest[y * 256 + x * 2] = 128;
+        guest[y * 256 + x * 2 + 1] = 255;
+      }
+    }
+    // One hand-made texel, (5, 3): the vector (0.6, -0.8): x byte 204 (0.6), y byte 26 (-0.796), stored
+    // y first: bytes (26, 204).
+    guest[3 * 256 + 5 * 2] = 26;
+    guest[3 * 256 + 5 * 2 + 1] = 204;
+    // (bytes between a row's 64 and the next row are not the tile's: garbage there changes nothing)
+    guest[3 * 256 + 64] = 7;
+    guest[3 * 256 + 255] = 9;
+    uint8_t tile[kRotationTileBytes];
+    std::memset(tile, 0xEE, sizeof(tile));
+    if (!DecodeRotationTile(guest.data(), guest.size(), tile)) return 120;
+    if (tile[2 * (3 * 32 + 5)] != 204 || tile[2 * (3 * 32 + 5) + 1] != 26) return 121;  // x = second stored byte, y = first
+    if (tile[0] != 255 || tile[1] != 128 || tile[2 * (31 * 32 + 31)] != 255 || tile[2 * (31 * 32 + 31) + 1] != 128) return 122;
+    // The rotation it gives: (a, b) = (0.6, -0.796); the other order would be (-0.796, 0.6), a mirror.
+    const float a = 2.0f * tile[2 * (3 * 32 + 5)] / 255.0f - 1.0f, b = 2.0f * tile[2 * (3 * 32 + 5) + 1] / 255.0f - 1.0f;
+    if (std::fabs(a - 0.6f) > 1e-6f || std::fabs(b + 0.7960784f) > 1e-6f) return 123;
+    // Fail closed: too few bytes, no source, a texel that is no unit vector (zeros, or a vector too
+    // long): false, and the output is not touched.
+    uint8_t untouched[kRotationTileBytes];
+    std::memset(untouched, 0xEE, sizeof(untouched));
+    uint8_t before[kRotationTileBytes];
+    std::memcpy(before, untouched, sizeof(before));
+    if (DecodeRotationTile(guest.data(), guest.size() - 1, untouched) || DecodeRotationTile(nullptr, guest.size(), untouched)) return 124;
+    std::vector<uint8_t> bad = guest;
+    bad[31 * 256 + 62] = 128;  // the last texel: (0, 0)
+    bad[31 * 256 + 63] = 128;
+    if (DecodeRotationTile(bad.data(), bad.size(), untouched)) return 125;
+    bad = guest;
+    bad[10 * 256 + 4] = 255;   // (1, 1): length 1.41
+    if (DecodeRotationTile(bad.data(), bad.size(), untouched)) return 125;
+    if (std::memcmp(untouched, before, sizeof(before)) != 0) return 126;
+    std::vector<uint8_t> zeros(kRotationTileGuestBytes, 0);  // unmapped or cleared memory: (-1, -1), length 1.41
+    if (DecodeRotationTile(zeros.data(), zeros.size(), untouched)) return 127;
+    // The edge of the tolerance: a length of 0.96 passes, 0.94 does not.
+    bad = guest;
+    bad[0] = 128;
+    bad[1] = uint8_t(127.5f + 127.5f * 0.96f);
+    if (!DecodeRotationTile(bad.data(), bad.size(), tile)) return 128;
+    bad[1] = uint8_t(127.5f + 127.5f * 0.94f);
+    if (DecodeRotationTile(bad.data(), bad.size(), tile)) return 128;
+    // The game's own tile, when its dump is there (out/native-evidence/shadows; git-ignored): it passes.
+    if (std::FILE* f = std::fopen("out/native-evidence/shadows/task1_bridge_0F99_tf14_1A53B000_FB036F07EB514FF4.bin", "rb")) {
+      std::vector<uint8_t> dump(65536);
+      const size_t n = std::fread(dump.data(), 1, dump.size(), f);
+      std::fclose(f);
+      if (n < kRotationTileGuestBytes || !DecodeRotationTile(dump.data(), n, tile)) return 129;
+      if (tile[0] != dump[1] || tile[1] != dump[0]) return 129;
+      std::printf("rotation tile: the game's dump passes the check\n");
+    }
+  }
   // FABLE2_TF17_BIN + ".cpp.xy" (two little-endian floats per texel) for tests/test_terrain_replay.py's real-dump
   // test to compare with.
   {

@@ -43,6 +43,11 @@ class TextureCache {
   nrhi::TextureView* Resolve(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::Material& m,
                              uint32_t* sampler, float* uv_fix, capture::MaterialStatus* status,
                              TextureStats& st);
+  // The rotation tile of the game's shadow mask (texture_decode.h, kRotationTilePhys), read from
+  // guest memory as the mask's shader samples it: 32 x 32 texels of two bytes (x, y). False, with
+  // `out` untouched, when the memory cannot be read or its bytes are not the tile (a texel that is
+  // no unit vector): the caller then draws unrotated taps. No cache and no GPU object: 8 KB a call.
+  bool ReadRotationTile(uint8_t out[kRotationTileBytes]) const;
   // DestroyDeferred all (dev may be nullptr: forget the objects without
   // destroying them, e.g. after a device change). The latch stays set.
   void Release(nrhi::Device* dev);

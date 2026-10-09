@@ -3127,10 +3127,18 @@ constinit thread_local ShadowFrame t_shadow;
 // frame that gives none: what a frame without valid registers costs, as for the light.
 constexpr uint32_t kMaxShadowRegisterTries = 8;
 
+// Shadow draws, passes and extra draws that were read in one frame and found, under the lock, to
+// belong to a frame that is over (the frame's recheck below): dropped, and counted here for the
+// shadow: log line since its last print (atomic: the line is written at the frame end).
+std::atomic<uint32_t> g_shadow_dropped{0};
+
 // Whether `f` is still the frame being built. Call with g_scene_mutex held: the frame's number
-// moves under that mutex (EndMainSceneFrame), together with the builder's Finish.
+// moves under that mutex (EndMainSceneFrame), together with the builder's Finish. A caller that
+// gets false drops what it holds; the drop is counted (g_shadow_dropped).
 bool ShadowFrameCurrent(const ShadowFrame& f) {
-  return f.frame == g_light_tries_frame.load(std::memory_order_relaxed);
+  const bool current = f.frame == g_light_tries_frame.load(std::memory_order_relaxed);
+  if (!current) g_shadow_dropped.fetch_add(1, std::memory_order_relaxed);
+  return current;
 }
 
 ShadowFrame& CurrentShadowFrame() {
@@ -3906,9 +3914,12 @@ void PublishScene(const FinishedScene& done) {
                       sc.shadow.split[1], sc.shadow.split[2], sc.shadow.split[3], sc.shadow.bias[0][0], sc.shadow.bias[0][1],
                       sc.shadow.bias[1][0], sc.shadow.bias[1][1]);
       }
-      REXSYS_INFO("[native] capture: frame {} shadow: {} | passes {} | skipped by vs {{{}}}{} | {} in {} of {} frames", sc.frame,
+      // (dropped: shadow draws, passes and extra draws of a frame that was over when they were to be
+      // added, since the last line; they are in no pass and in no count of ShadowLine)
+      REXSYS_INFO("[native] capture: frame {} shadow: {} | passes {} | skipped by vs {{{}}}{} | {} in {} of {} frames | "
+                  "dropped at a frame's end {}", sc.frame,
                   render::ShadowLine(sc), sc.shadow_passes, render::ShadowSkippedByVs(sc), numbers, kShadowBlockReason,
-                  g_shadow_block_missing, g_shadow_frames);
+                  g_shadow_block_missing, g_shadow_frames, g_shadow_dropped.exchange(0, std::memory_order_relaxed));
     } else {
       REXSYS_INFO("[native] capture: frame {} shadow: {}", sc.frame, render::ShadowLine(sc));
     }

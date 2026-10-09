@@ -9,7 +9,7 @@
 namespace fable2::native::render {
 
 bool Composite::Ensure(nrhi::Device* dev, nrhi::Format out_format) {
-  if (pipeline_ && shadow_pipeline_ && dev == device_ && out_format == format_) return true;
+  if (pipeline_ && dev == device_ && out_format == format_) return true;
   if (device_) {  // device or format changed: drop the old objects
     device_->DestroyDeferred(pipeline_);
     device_->DestroyDeferred(shadow_pipeline_);
@@ -22,6 +22,8 @@ bool Composite::Ensure(nrhi::Device* dev, nrhi::Format out_format) {
   vs_ = ps_ = shadow_ps_ = nullptr;
   view_ = nullptr;
   view_texture_ = nullptr;
+  shadow_failed_ = false;
+  shadow_layout_ = nullptr;  // (the RHI has no layout destruction; the next shadow view makes its own)
   device_ = dev;
   format_ = out_format;
 
@@ -75,53 +77,68 @@ bool Composite::Ensure(nrhi::Device* dev, nrhi::Format out_format) {
     return false;
   }
 
-  // The shadow view: its four constants and the two maps at t0 and t1, read without a sampler.
-  nrhi::BindingLayoutDesc sl;
-  sl.params[0].kind = nrhi::BindingParamKind::kConstants;
-  sl.params[0].shader_register = 0;
-  sl.params[0].count = 4;
-  sl.params[0].visibility = nrhi::Visibility::kPixel;
-  sl.params[1].kind = nrhi::BindingParamKind::kTextureTable;
-  sl.params[1].shader_register = 0;
-  sl.params[1].count = 2;
-  sl.params[1].visibility = nrhi::Visibility::kPixel;
-  sl.param_count = 2;
-  sl.allow_input_layout = false;
-  shadow_layout_ = dev->CreateBindingLayout(sl);
+  return true;
+}
+
+// The shadow view's layout, shader and pipeline: its eight constants and the two maps and the mask
+// at t0 to t2, read without a sampler. Made on the first frame that shows the view (the shadows'
+// objects are no part of the composite's own: a failure here leaves the other views working).
+bool Composite::EnsureShadowView() {
+  if (shadow_pipeline_) return true;
+  if (shadow_failed_ || !device_ || !vs_) return false;
+  auto fail = [&](const char* what) {
+    REXLOG_ERROR("[native] composite: shadow view {} failed (the view shows the native picture)", what);
+    shadow_failed_ = true;
+    return false;
+  };
+  if (!shadow_layout_) {
+    nrhi::BindingLayoutDesc sl;
+    sl.params[0].kind = nrhi::BindingParamKind::kConstants;
+    sl.params[0].shader_register = 0;
+    sl.params[0].count = kShadowViewConstants;
+    sl.params[0].visibility = nrhi::Visibility::kPixel;
+    sl.params[1].kind = nrhi::BindingParamKind::kTextureTable;
+    sl.params[1].shader_register = 0;
+    sl.params[1].count = 3;
+    sl.params[1].visibility = nrhi::Visibility::kPixel;
+    sl.param_count = 2;
+    sl.allow_input_layout = false;
+    shadow_layout_ = device_->CreateBindingLayout(sl);
+    if (!shadow_layout_) return fail("layout");
+  }
+  nrhi::ShaderDesc sd;
+  sd.entry_point = "main";
   sd.stage = nrhi::ShaderStage::kPixel;
   sd.name = "fable2_shadow_view_ps";
   sd.hlsl_source = shaders::kShadowViewPs;
-  shadow_ps_ = shadow_layout_ ? dev->CreateShader(sd) : nullptr;
-  if (!shadow_layout_ || !shadow_ps_) {
-    REXLOG_ERROR("[native] composite: shadow view layout or shader failed");
-    return false;
-  }
+  if (!shadow_ps_) shadow_ps_ = device_->CreateShader(sd);
+  if (!shadow_ps_) return fail("shader");
   nrhi::GraphicsPipelineDesc shadow_pipe;
   shadow_pipe.layout = shadow_layout_;
   shadow_pipe.vs = vs_;
   shadow_pipe.ps = shadow_ps_;
-  shadow_pipe.rtv_format = out_format;
-  shadow_pipeline_ = dev->CreateGraphicsPipeline(shadow_pipe);
-  if (!shadow_pipeline_) {
-    REXLOG_ERROR("[native] composite: shadow view pipeline creation failed");
-    return false;
-  }
+  shadow_pipe.rtv_format = format_;
+  shadow_pipeline_ = device_->CreateGraphicsPipeline(shadow_pipe);
+  if (!shadow_pipeline_) return fail("pipeline");
   return true;
 }
 
-void Composite::DrawShadowMaps(nrhi::Cmd* cmd, const rex::graphics::NativeGuestOutputRenderContext& ctx,
-                               nrhi::TextureView* near_map, nrhi::TextureView* far_map, bool valid, uint32_t map_size) {
-  // (without both views nothing can be bound at the table the shader declares: nothing is drawn)
-  if (!shadow_pipeline_ || !near_map || !far_map || ctx.device != device_) return;
+bool Composite::DrawShadowMaps(nrhi::Cmd* cmd, const rex::graphics::NativeGuestOutputRenderContext& ctx,
+                               nrhi::TextureView* near_map, nrhi::TextureView* far_map, nrhi::TextureView* mask, bool maps_valid,
+                               bool mask_valid, uint32_t map_size, uint32_t mask_width, uint32_t mask_height) {
+  // (without all three views nothing can be bound at the table the shader declares: nothing is drawn)
+  if (!near_map || !far_map || !mask || ctx.device != device_ || !EnsureShadowView()) return false;
   nrhi::Texture* out = ctx.guest_output;
   const float w = float(ctx.guest_output_width);
   const float h = float(ctx.guest_output_height);
-  const float size = float(map_size);
-  uint32_t params[4];
+  const float values[4] = {float(map_size), float(mask_width), float(mask_height), 0.0f};
+  uint32_t params[kShadowViewConstants] = {};
   std::memcpy(&params[0], &w, 4);
   std::memcpy(&params[1], &h, 4);
-  params[2] = valid ? 1u : 0u;
-  std::memcpy(&params[3], &size, 4);
+  params[2] = (maps_valid ? 1u : 0u) | (mask_valid ? 2u : 0u);
+  std::memcpy(&params[3], &values[0], 4);
+  std::memcpy(&params[4], &values[1], 4);
+  std::memcpy(&params[5], &values[2], 4);
 
   cmd->Barrier(out, nrhi::ResourceState::kGuestOutput, nrhi::ResourceState::kRenderTarget);
   cmd->FlushBarriers();
@@ -130,12 +147,14 @@ void Composite::DrawShadowMaps(nrhi::Cmd* cmd, const rex::graphics::NativeGuestO
   cmd->SetScissor({0, 0, int32_t(w), int32_t(h)});
   cmd->SetBindingLayout(shadow_layout_);
   cmd->SetPipeline(shadow_pipeline_);
-  cmd->SetRootConstants(0, 4, params, 0);
-  cmd->SetTexturePair(1, near_map, far_map);
+  cmd->SetRootConstants(0, kShadowViewConstants, params, 0);
+  nrhi::TextureView* const views[3] = {near_map, far_map, mask};
+  cmd->SetTextures(1, views, 3);
   cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
   cmd->Draw(3, 0);
   cmd->Barrier(out, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kGuestOutput);
   cmd->FlushBarriers();
+  return true;
 }
 
 void Composite::Draw(nrhi::Cmd* cmd, const rex::graphics::NativeGuestOutputRenderContext& ctx,

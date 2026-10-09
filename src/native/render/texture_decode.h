@@ -7,6 +7,7 @@
 // (texture_cache.cpp); this header handles one level at a time.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <utility>
@@ -334,6 +335,56 @@ inline uint64_t TextureIdentity(const uint32_t fc[6]) {
   uint64_t h = 1469598103934665603ull;
   for (uint32_t v : masked) h = (h ^ v) * 1099511628211ull;
   return h;
+}
+
+// The rotation tile of the game's shadow mask (frame-map section 15, "Mask draws": tf14 of pixel shader
+// 0x0F99810F072BF0FC). A k_8_8 texture of 32 x 32 texels, linear, pitch 128 texels (256 bytes a row), point
+// filtered and repeated; (a, b) = 2 * texel.xy - 1 is a unit vector, the rotation of the pixel's twelve
+// near taps. The mask draws are not captured by the product, so no record carries its fetch constant: the
+// address is the one of every mask row of five captures in four runs (fetch constant 01000002 1A53B04A
+// 0003E01F 01001690 00000000 00000218; the first 8,192 bytes equal in all five), and the contents are
+// checked each time they are read (below): another address in another session shows as a failed check,
+// and the taps are then drawn unrotated and the frame counted.
+// Channel order, from the SDK's load path of the format (not from the lengths: both orders give unit
+// vectors, and the wrong one is a mirrored rotation):
+//   - the fetch constant's endian field (dword 1 bits 6-7) is 1, the 8-in-16 swap; the 16-bit load shader
+//     exchanges the two bytes of every texel (thirdparty/rexglue-sdk/src/graphics/shaders/bytecode/
+//     d3d12_5_1/texture_load_16bpb_cs.h lines 121 to 126: `ieq ..., l(1)`, then << 8 & 0xff00ff00 and
+//     >> 8 & 0x00ff00ff), into DXGI_FORMAT_R8G8_UNORM (src/graphics/d3d12/texture_cache.cpp lines 127 to
+//     130: k_8_8, kLoadShaderIndex16bpb, host swizzle RGGG), whose R is the first byte in memory: so the
+//     host's R is the SECOND byte of the texel as it lies in guest memory and G the first;
+//   - the fetch constant's swizzle (dword 3 bits 1-12 = 0xB48: x <- 0, y <- 1, z <- 5, w <- 5) through the
+//     host format's swizzle RGGG (src/graphics/pipeline/texture/cache.cpp lines 352 to 366,
+//     GuestToHostSwizzle) gives the shader x = R, y = G.
+// So tf14.x is the texel's second stored byte and tf14.y its first, each / 255.
+inline constexpr uint32_t kRotationTilePhys = 0x1A53B000u;
+inline constexpr uint32_t kRotationTileSize = 32;
+inline constexpr uint32_t kRotationTileRowBytes = 256;
+// Guest bytes the tile's 32 rows span, and the bytes of the decoded tile (two a texel: x, y).
+inline constexpr uint32_t kRotationTileGuestBytes = (kRotationTileSize - 1) * kRotationTileRowBytes + kRotationTileSize * 2;
+inline constexpr uint32_t kRotationTileBytes = kRotationTileSize * kRotationTileSize * 2;
+// How far the length of a texel's vector may be from 1 (the game's tile: 0.989 to 1.010).
+inline constexpr float kRotationUnitTolerance = 0.05f;
+
+// The tile as the shader samples it: out[2 * (y * 32 + x)] = tf14.x and the byte after it tf14.y of texel
+// (x, y), as bytes (value / 255). False, with `out` untouched, when the source is missing or too small, or
+// when a texel is not a unit vector within kRotationUnitTolerance: then the bytes are not the tile.
+inline bool DecodeRotationTile(const uint8_t* src, size_t src_size, uint8_t out[kRotationTileBytes]) {
+  if (!src || !out || src_size < kRotationTileGuestBytes) return false;
+  uint8_t tile[kRotationTileBytes];
+  for (uint32_t y = 0; y < kRotationTileSize; ++y) {
+    for (uint32_t x = 0; x < kRotationTileSize; ++x) {
+      const uint8_t* texel = src + size_t(y) * kRotationTileRowBytes + size_t(x) * 2;
+      const uint8_t tx = texel[1], ty = texel[0];  // the 8-in-16 swap: the second stored byte is the host's R
+      const float a = 2.0f * float(tx) / 255.0f - 1.0f, b = 2.0f * float(ty) / 255.0f - 1.0f;
+      const float length = std::sqrt(a * a + b * b);
+      if (!(std::fabs(length - 1.0f) <= kRotationUnitTolerance)) return false;
+      tile[2 * (y * kRotationTileSize + x)] = tx;
+      tile[2 * (y * kRotationTileSize + x) + 1] = ty;
+    }
+  }
+  std::memcpy(out, tile, sizeof(tile));
+  return true;
 }
 
 }  // namespace fable2::native::render

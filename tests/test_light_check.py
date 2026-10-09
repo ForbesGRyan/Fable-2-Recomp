@@ -1638,5 +1638,120 @@ class LitFamiliesWithTheMask(unittest.TestCase):
         self.assertAlmostEqual(m2, 0.82, places=12)
 
 
+class MaskPinnedForTheRenderer(unittest.TestCase):
+    """Shadows plan Task 5: numbers of the mask functions that the native renderer's pure mirrors are
+    held against (tests/native/test_clay_logic.cpp, cases 564 to 566, has the same inputs and the same
+    literals). The inputs are frame 1 of the bridge capture of 2026-10-09 (the inverse of the
+    view-projection, the scene's pixel c12, c19 and c36..c43), every number single precision as the
+    renderer holds it. The maps and the rotation tile are a value per texel that a float holds
+    exactly; they hold the NATIVE maps' value n (the caster's depth, 1 = none), which the game's
+    functions get as 1 - n: the native pass compares z < n and z <= n where the game compares
+    1 - z > 1 - n and 1 - z >= 1 - n."""
+    W, H = 1120, 720
+    INV_VIEW_PROJ = [[0.5143311619758606, 0.08813292533159256, -820.677490234375, 821.5447387695312],
+                     [-0.8844040036201477, 0.05125229433178902, -1573.3095703125, 1573.8358154296875],
+                     [8.367820555577055e-06, 0.5663930773735046, -501.68060302734375, 501.51348876953125],
+                     [1.6652556666940654e-07, 7.833264703549503e-09, -9.999471664428711, 9.999671936035156]]
+    NEAR = [[0.02583850733935833, 0.0, 0.021059028804302216, -2.8588876724243164],
+            [-0.0006741421530023217, -0.03331625089049339, 0.0008271429105661809, 5.92822265625],
+            [0.005491321906447411, -0.0002783896343316883, -0.006737612187862396, 0.743424117565155],
+            [0.0, 0.0, 0.0, 1.0]]
+    FAR = [[0.011073646135628223, 0.0, 0.009025298990309238, -1.05615234375],
+           [-0.0002889182942453772, -0.014278394170105457, 0.0003544900973793119, 2.937011480331421],
+           [0.004074114840477705, -0.00020654266700148582, -0.004998760763555765, 0.6168575882911682],
+           [0.0, 0.0, 0.0, 1.0]]
+    SPLIT = [20.0, 35.0, 2.0, 0.48273685574531555]
+    EYE = [82.07209777832031, 157.33926391601562, 50.17070388793945]
+    RADIUS, TAP_WEIGHT, SLOPE = 0.00244140625, 0.0833333358168602, 0.10000000149011612     # floats: 2.5 / 1024, 1 / 12, 0.1
+    INV_W, INV_H = 0.0008928571478463709, 0.0013888889225199819                             # floats: 1 / 1120, 1 / 720
+
+    @staticmethod
+    def near_texel(ix, iy):
+        return ((ix * 37 + iy * 101) % 129) / 128.0
+
+    @staticmethod
+    def far_texel(ix, iy):
+        return ((ix * 53 + iy * 17 + 5) % 129) / 128.0
+
+    @staticmethod
+    def clamp(v):
+        return min(max(v, 0), 1023)
+
+    def sample_near(self, u, v):
+        return 1.0 - self.near_texel(self.clamp(math.floor(u * 1024)), self.clamp(math.floor(v * 1024)))
+
+    def sample_far(self, ix, iy):
+        return 1.0 - self.far_texel(self.clamp(ix), self.clamp(iy))
+
+    @staticmethod
+    def mul(a, b):
+        return [[sum(a[i][k] * b[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+
+    def mask(self, px, py, depth, rotate):
+        def tile(u, v):
+            tx, ty = math.floor(u * 32) % 32, math.floor(v * 32) % 32
+            return (((tx * 73 + ty * 29) % 256) / 255.0, ((tx * 31 + ty * 57) % 256) / 255.0)
+        return lf.mask_0f99(
+            pixel=(float(px), float(py)), sample_depth=lambda u, v: 1.0 - depth, depth_scale=(self.INV_W, self.INV_H),
+            depth_offset=(0.0, 0.0), screen_to_world=self.INV_VIEW_PROJ, eye=self.EYE, split=self.SPLIT,
+            near_rows=self.mul(self.NEAR, self.INV_VIEW_PROJ), far_rows=self.mul(self.FAR, self.INV_VIEW_PROJ),
+            sample_rot=tile if rotate else (lambda u, v: (1.0, 0.5)), rot_offset=(0.5, 0.5), rot_scale=(1 / 32, 1 / 32),
+            offsets=lf.MASK_NEAR_TAPS, radius=self.RADIUS, sample_near=self.sample_near, sample_far_texel=self.sample_far,
+            far_size=(1024, 1024), tap_weight=self.TAP_WEIGHT, far_reach=10.0, slope=self.SLOPE)
+
+    def test_combine(self):
+        for d, near, far, want in ((10.0, 0.25, 0.75, 0.25), (21.0, 0.25, 0.75, 0.5), (30.0, 0.25, 0.75, 0.75),
+                                   (40.0, 0.25, 0.75, 0.6163684258813922), (50.0, 0.25, 0.75, 0.48273685574531555),
+                                   (20.5, 1.0, 0.0, 0.75), (36.5, 0.0, 1.0, 0.9224105272056241)):
+            self.assertAlmostEqual(lf.mask_combine(d, near, far, self.SPLIT, self.SLOPE), want, places=12)
+
+    def test_the_two_terms_of_a_world_point(self):
+        rot = (0.6000000238418579, 0.800000011920929)                                        # floats 0.6, 0.8
+        for P, near, far in (([84.5, 150.25, 44.0, 1.0], 0.0833333358168602, 0.3243241310119629),
+                             ([90.0, 140.0, 43.5, 1.0], 0.0833333358168602, 0.6628598777695416),
+                             ([70.125, 165.5, 46.0, 1.0], 0.0833333358168602, 0.0),
+                             ([100.0, 120.0, 40.0, 1.0], 0.0, 0.8823890686035156)):
+            self.assertAlmostEqual(lf.mask_near(P, self.NEAR, self.sample_near, rot, lf.MASK_NEAR_TAPS, self.RADIUS, self.TAP_WEIGHT),
+                                   near, places=12)
+            self.assertAlmostEqual(lf.mask_far(P, self.FAR, self.sample_far, (1024, 1024)), far, places=10)
+
+    def test_the_mask_of_a_pixel_in_every_regime(self):
+        # px, py, the native depth (a float), the distance from the eye, the mask with the tile, without.
+        pins = ((560, 600, 0.9821628332138062, 5.999995277693097, 0.1666666716337204, 0.1666666716337204),
+                (300, 500, 0.9909855127334595, 12.500029722610465, 0.0833333358168602, 0.1666666716337204),
+                (700, 420, 0.994562029838562, 18.9999053127623, 0.0, 0.0),
+                (640, 400, 0.9950790405273438, 20.499951274353368, 0.168626222122592, 0.10612419002461002),
+                (200, 380, 0.9944530129432678, 21.500103049226347, 0.30675134735710674, 0.30675134735710674),
+                (900, 350, 0.9956575036048889, 27.000158411112753, 0.0, 0.0),
+                (500, 340, 0.9970599412918091, 34.00031121842236, 0.9111211026206659, 0.9111211026206659),
+                (333, 333, 0.9971696734428406, 37.99976545013204, 0.183352533656075, 0.183352533656075),
+                (800, 300, 0.9975280165672302, 44.00000617981933, 0.4344634749674494, 0.4344634749674494),
+                (100, 250, 0.9978243708610535, 60.000769539675034, 0.48273685574531555, 0.48273685574531555),
+                (17, 5, 1.0, 7584.099111323902, 0.48273685574531555, 0.48273685574531555),
+                (1119, 719, 1.0, 7689.370675434363, 0.48273685574531555, 0.48273685574531555))
+        regimes = set()
+        for px, py, depth, d, rotated, unrotated in pins:
+            self.assertAlmostEqual(self.mask(px, py, depth, True), rotated, places=10)
+            self.assertAlmostEqual(self.mask(px, py, depth, False), unrotated, places=10)
+            S = lf.mask_screen_point((float(px), float(py)), 1.0 - depth, (self.INV_W, self.INV_H), (0.0, 0.0))
+            Ph = [lf.dot(row, S) for row in self.INV_VIEW_PROJ]
+            got = math.sqrt(sum((Ph[i] / Ph[3] - self.EYE[i]) ** 2 for i in range(3)))
+            self.assertAlmostEqual(got / d, 1.0, places=9)
+            regimes.add("near" if d < 20 else "blend" if d < 22 else "far" if d < 35 else "fade" if d < 45 else "beyond")
+        self.assertEqual(regimes, {"near", "blend", "far", "fade", "beyond"})
+        # A pixel at the clear depth (the native 1, the game's 0) is one beyond the shadow distance: split[3], not 1.
+        self.assertEqual(self.mask(17, 5, 1.0, True), self.SPLIT[3])
+
+    def test_the_native_compare_is_the_games(self):
+        # The game's verdicts on 1 - z and 1 - n are z < n (near) and z <= n (far) on the native values.
+        P = [0.3, 0.6, 0.25, 1.0]
+        identity = [[1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0], [0, 0, 0, 1.0]]
+        for n, near_lit, far_lit in ((1.0, True, True), (0.5, True, True), (0.25, False, True), (0.125, False, False)):
+            near = lf.mask_near(P, identity, lambda u, v, n=n: 1.0 - n, (1.0, 0.0), lf.MASK_NEAR_TAPS, self.RADIUS, self.TAP_WEIGHT)
+            far = lf.mask_far(P, identity, lambda ix, iy, n=n: 1.0 - n, (1024, 1024))
+            self.assertEqual((near > 0.5, far > 0.5), (near_lit, far_lit), n)
+            self.assertEqual((0.25 < n, 0.25 <= n), (near_lit, far_lit), n)
+
+
 if __name__ == "__main__":
     unittest.main()

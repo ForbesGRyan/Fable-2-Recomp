@@ -23,9 +23,18 @@
 // colour. With the light on, in a frame that has a valid shadow block
 // (FrameScene::shadow), the game's two sun shadow maps are drawn first, from
 // the frame's shadow records into two depth targets of the pass's own
-// (clay_logic.h, "Native shadow maps"); nothing samples them yet but the
-// shadow view (composite.h). GPU (command-processor) thread
-// only; Cmd is valid only inside the SDK's guest-output callbacks.
+// (clay_logic.h, "Native shadow maps"). With the shadows' switch on, such a
+// frame's sun is shadowed as the game shadows it (clay_logic.h, "Native
+// shadows"): the scene's depth-writing records are drawn once depth-only, one
+// full-screen step writes the screen mask from that depth and the two maps
+// with the game's mask arithmetic, and the colour pass, drawn as always from
+// a cleared depth, reads the mask at each lit pixel. In every other frame the
+// mask is the 1 x 1 white texture: the lighting picture. Everything the
+// shadows alone need (the maps, the mask target, their shaders and
+// pipelines) is made on the first frame that wants it; if that fails the
+// shadows are off for the session and the pass draws on without them. GPU
+// (command-processor) thread only; Cmd is valid only inside the SDK's
+// guest-output callbacks.
 
 #include <array>
 #include <cstdint>
@@ -66,9 +75,12 @@ class ClayPass {
   // (MakeClayFrameConstants): the families the pass lights are drawn lit, their
   // values times the frame's exposure. Every other draw, and every draw of a
   // frame without light, is the unlit colour. st receives what was lit and what was not,
-  // by reason (ClayStats::light_drawn, light_unlit).
+  // by reason (ClayStats::light_drawn, light_unlit). `shadows`: fable2_native_shadows.
+  // On, in a frame drawn with light whose shadow block is valid: the maps, the
+  // pre-pass and the mask are drawn and the lit draws' sun is shadowed. Otherwise
+  // none of it is drawn and the mask is white; st says which (ClayStats::mask).
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
-              bool textured, ClayLight light, ClayStats& st, TextureStats& tst);
+              bool textured, ClayLight light, bool shadows, ClayStats& st, TextureStats& tst);
   // The mapped target (display values, 8 bits): what the composite views
   // sample. Left in kPixelShaderResource after Render, and written by the same
   // Render that drew the linear target.
@@ -76,7 +88,8 @@ class ClayPass {
   nrhi::Texture* depth() const { return depth_; }  // left in kPixelShaderResource after Render
   // The two shadow maps (0 near, 1 far): kShadowMapSize squared, D32_FLOAT, viewed as R32_FLOAT;
   // depth in the pass's direction (clay_logic.h, "Native shadow maps": 0 at the light, 1 where no
-  // caster is). Created and destroyed with the pass's other targets, whatever the window's size.
+  // caster is). Made on the first frame that draws them (null before, and when making them
+  // failed) and destroyed with the pass's other targets; their size is not the window's.
   // In kPixelShaderResource whenever Render is not running: Render binds one as a depth target
   // only while it draws that map, before anything of the scene is drawn, and no draw of the pass
   // samples a map while one is bound for writing.
@@ -85,6 +98,11 @@ class ClayPass {
   // shadows off) and must not be shown or sampled.
   nrhi::TextureView* shadow_view(size_t cascade) const { return cascade < 2 ? shadow_view_[cascade] : nullptr; }
   bool shadow_maps_drawn() const { return shadow_drawn_; }
+  // The screen mask (R8, the clay target's size; 1 = lit by the sun), made with the maps. In
+  // kPixelShaderResource whenever Render is not running. mask_drawn: the last Render wrote it for
+  // its scene; false: its contents are another frame's or undefined and must not be shown.
+  nrhi::TextureView* mask_view() const { return mask_view_; }
+  bool mask_drawn() const { return mask_drawn_; }
   GeometryCache& geometry() { return geometry_; }
   TextureCache& textures() { return textures_; }
 
@@ -99,6 +117,9 @@ class ClayPass {
     uint32_t vertex_count = 0, index_count = 0, sampler = 0;
     float uv_fix[2] = {1.0f, 1.0f};
     nrhi::Pipeline* pipeline = nullptr;  // by the record's render state; nullptr: not drawn
+    // The record's pipeline of the depth pre-pass (PrepassKey of its colour pipeline's key); nullptr:
+    // the record writes no depth, the frame has no pre-pass, or no such pipeline could be made.
+    nrhi::Pipeline* prepass = nullptr;
     ClayAlpha alpha;
     // A terrain record. With its material (`textured` 2 or 3): `albedo` is the
     // colour texture (tf0 or tf13) with `sampler` and `uv_fix`, `weights` the
@@ -181,7 +202,28 @@ class ClayPass {
   };
 
   void DestroyObjects();
-  nrhi::Pipeline* CreatePipeline(nrhi::Device* dev, const PipelineKey& key);
+  // What the shadows alone need: the two maps, their pixel shader and pipelines, the view of the
+  // scene's depth, the mask target, the mask step's layout, shader and pipeline, and the pre-pass's
+  // depth-only pixel shaders. EnsureShadowObjects makes them on the first frame that wants them;
+  // false when they could not be made, now or before: then they are not tried again (the shadows
+  // are off for the session, one log line) and nothing of them is left. Destroyed with the pass's
+  // other objects.
+  bool EnsureShadowObjects(nrhi::Device* dev);
+  void DestroyShadowObjects();
+  void ForgetShadowObjects();
+  // The pre-pass pipeline of a colour pipeline (PrepassKey), from the pre-pass's own cache; nullptr
+  // when the colour pipeline is not one of the cache or does not write depth, or on a failure.
+  nrhi::Pipeline* PrepassPipeline(nrhi::Device* dev, nrhi::Pipeline* colour);
+  // The key of a pipeline of the colour pass's cache; nullptr for any other pointer.
+  const PipelineKey* KeyOf(nrhi::Pipeline* pipeline) const;
+  // The game's rotation tile as a 32 x 32 R8G8 texture: read from guest memory and checked every
+  // frame (TextureCache::ReadRotationTile), uploaded when its bytes change. nullptr: it could not
+  // be read or is not the tile, or the upload failed: the mask's taps are then unrotated. Records
+  // a copy and barriers on `cmd`: call before render targets are bound.
+  nrhi::TextureView* UpdateRotation(nrhi::Cmd* cmd, nrhi::Device* dev);
+  // `depth_only`: a pipeline of the pre-pass (ps_ by the key's kind are the colour shaders,
+  // depth_ps_ their depth-only forms).
+  nrhi::Pipeline* CreatePipeline(nrhi::Device* dev, const PipelineKey& key, bool depth_only = false);
   // The cached pipeline of `key`, created on first use; nullptr when the cache
   // is full or the pipeline could not be created.
   nrhi::Pipeline* TryPipeline(nrhi::Device* dev, const PipelineKey& key);
@@ -221,6 +263,11 @@ class ClayPass {
   // kPixelShaderResource. Without `draw` neither map is touched and shadow_drawn_ is false.
   void PrepareShadows(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, bool draw, ClayStats& st, TextureStats& tst);
   void DrawShadows(nrhi::Cmd* cmd, ClayStats& st);
+  // One prepared record, drawn with its colour pipeline, or (`depth_only`) with its pre-pass
+  // pipeline: the same buffers, constants and textures but for the light (none: light_mode 0) and
+  // the mask (white). `mask`: what the colour draw binds as the screen mask.
+  void DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, bool depth_only, nrhi::TextureView* mask,
+                    uint32_t* light_mode_out);
   // The light's vertex inputs of a textured mesh record with light inputs:
   // its normals and the other buffers of its vertex kind (a colour stream's
   // colours, the probe weights and sets, an instance set's colours and bend
@@ -263,20 +310,51 @@ class ClayPass {
   nrhi::Texture* depth_ = nullptr;
   // The two shadow maps with their views, the shadow pixel shader (kClayShadowPs, drawn with vs_
   // under layout_) and the three depth-only pipelines, one a cull mode (ShadowPipelineSlot): made
-  // and destroyed with the targets above. shadow_wanted_: this Render draws the maps;
-  // shadow_drawn_: the last one did. shadow_prepared_: the records it draws, per map.
+  // by EnsureShadowObjects and destroyed with the targets above. shadow_wanted_: this Render draws
+  // the maps; shadow_drawn_: the last one did. shadow_prepared_: the records it draws, per map.
   nrhi::Texture* shadow_map_[2] = {};
   nrhi::TextureView* shadow_view_[2] = {};
   nrhi::Shader* shadow_ps_ = nullptr;
   nrhi::Pipeline* shadow_pipelines_[kShadowPipelines] = {};
   bool shadow_wanted_ = false, shadow_drawn_ = false;
   std::vector<ShadowPrepared> shadow_prepared_[2];
+  // The rest of the shadows' objects (EnsureShadowObjects). shadow_objects_: they exist;
+  // shadow_objects_failed_: making them failed once (not tried again). depth_view_: depth_ as the
+  // mask step reads it. mask_ / mask_view_: the screen mask; mask_drawn_: the last Render wrote it.
+  // The mask step has its own layout (its constants in a slot of the frame's constant buffer at b0;
+  // the depth, the two maps and the rotation tile at t0 to t3), shader and pipeline, outside the
+  // pipeline cache, and is drawn with map_vs_. depth_ps_: the depth-only forms of ps_[1..3]
+  // ([0] is unused: flat clay has no discard, its pre-pass pipeline takes ps_[0]). The pre-pass's
+  // pipeline cache: prepass_pipelines_[i] draws prepass_keys_[i], at most kMaxPrepassPipelines.
+  bool shadow_objects_ = false, shadow_objects_failed_ = false;
+  nrhi::TextureView* depth_view_ = nullptr;
+  nrhi::Texture* mask_ = nullptr;
+  nrhi::TextureView* mask_view_ = nullptr;
+  bool mask_drawn_ = false;
+  bool mask_logged_ = false;  // the first drawn mask was logged
+  nrhi::BindingLayout* mask_layout_ = nullptr;  // the RHI has no layout destruction
+  nrhi::Shader* mask_ps_ = nullptr;
+  nrhi::Pipeline* mask_pipeline_ = nullptr;
+  nrhi::Shader* depth_ps_[kClayPixelShaders] = {};
+  std::vector<PipelineKey> prepass_keys_;
+  std::vector<nrhi::Pipeline*> prepass_pipelines_;
+  // The rotation tile on the GPU and the bytes it was uploaded with (rotation_valid_: it holds them).
+  nrhi::Texture* rotation_ = nullptr;
+  nrhi::TextureView* rotation_view_ = nullptr;
+  uint8_t rotation_bytes_[kRotationTileBytes] = {};
+  bool rotation_valid_ = false;
+  // The pass's frame counts for the Shadow line (ClayStats::shadow_frames and the three beside it).
+  uint64_t shadow_frames_ = 0, shadow_block_frames_ = 0, shadow_view_frames_ = 0, shadow_unrotated_frames_ = 0;
+  // This Render's mask: what is bound as the screen mask at the colour draws (the mask target's
+  // view or the white texture), and the frame's slot of the mask's constants.
+  uint32_t mask_slot_ = 0;
   nrhi::BindingLayout* map_layout_ = nullptr;  // the RHI has no layout destruction
   nrhi::Shader* map_vs_ = nullptr;
   nrhi::Shader* map_ps_ = nullptr;
   nrhi::Pipeline* map_pipeline_ = nullptr;
-  // 1x1 white texture bound at t3 for untextured draws; its contents are
-  // copied from white_staging_ by the first Render after creation.
+  // 1x1 white texture bound at t3 for untextured draws and at t4 as the screen
+  // mask of a frame without one; its contents are copied from white_staging_ by
+  // the first Render after creation.
   nrhi::Texture* white_ = nullptr;
   nrhi::TextureView* white_view_ = nullptr;
   nrhi::Buffer* white_staging_ = nullptr;
@@ -302,6 +380,7 @@ class ClayPass {
   std::vector<nrhi::Buffer*> terrain_destroy_;
   nrhi::Buffer* terrain_cb_ = nullptr;
   uint64_t terrain_cb_bytes_ = 0;
+  uint8_t* terrain_cb_mapped_ = nullptr;  // the buffer's memory while this Render has it (write only)
   // The light of the frame being rendered: its constants (light_on 0: no draw
   // is lit), the lit objects' and trunks' constants and the lit plants', each
   // in prepare order (Prepared::slot), the small slot of the first plant

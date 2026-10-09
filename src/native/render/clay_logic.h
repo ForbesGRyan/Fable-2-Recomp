@@ -31,16 +31,20 @@
 namespace fable2::native::render {
 
 // Why the pass did not draw a shadow record into its map ("Native shadow maps"
-// below; ClayStats::shadow_skipped). kState: the record has no caster entry, its
-// state was not read, or its depth state is not the shadow passes' (reversed
-// range, greater-equal, written). kMatrix: a row of its transform is not finite.
+// below; ClayStats::shadow_skipped). kState: its depth state is not the shadow
+// passes' (reversed range, greater-equal, written). kMatrix: a row of its transform is not finite.
 // kBias: its polygon offset is not a pair of numbers of usable size. kAlpha: an
 // alpha-tested caster whose material has no alpha the shader can form. kGeometry:
 // its positions or indices could not be built (a bad index among them).
 // kTexture: an alpha-tested caster whose coordinates or texture are not there
 // this frame (never drawn as a solid caster). kPipeline: no pipeline of its cull.
-// kConstants: the frame's constant buffer could not be made.
-enum class ShadowDrawSkip : uint8_t { kNone, kState, kMatrix, kBias, kAlpha, kGeometry, kTexture, kPipeline, kConstants, kCount };
+// kConstants: the frame's constant buffer could not be made. kState is the
+// record's depth state alone since the review of plan Task 4: kTwin, the
+// record has no caster entry beside it or one of no known kind; kUnread, its
+// state words were not read.
+enum class ShadowDrawSkip : uint8_t {
+  kNone, kState, kMatrix, kBias, kAlpha, kGeometry, kTexture, kPipeline, kConstants, kTwin, kUnread, kCount
+};
 
 inline const char* ShadowDrawSkipName(ShadowDrawSkip s) {
   switch (s) {
@@ -53,9 +57,36 @@ inline const char* ShadowDrawSkipName(ShadowDrawSkip s) {
     case ShadowDrawSkip::kTexture: return "texture";
     case ShadowDrawSkip::kPipeline: return "pipeline";
     case ShadowDrawSkip::kConstants: return "constants";
+    case ShadowDrawSkip::kTwin: return "no-caster-entry";
+    case ShadowDrawSkip::kUnread: return "state-unread";
     default: return "?";
   }
 }
+
+// The frame's mask ("Native shadows" below): why a frame has no single inverse view-projection, and
+// what the pass did about the mask.
+inline constexpr const char* kShadowViewReason = "shadow-view";
+inline constexpr float kFrameViewTolerance = 1e-4f;
+enum class FrameViewReason : uint8_t { kNone, kNoRecord, kDisagree, kSingular, kEye, kCount };
+inline const char* FrameViewReasonName(FrameViewReason r) {
+  switch (r) {
+    case FrameViewReason::kNone: return "none";
+    case FrameViewReason::kNoRecord: return "no-record";
+    case FrameViewReason::kDisagree: return "disagree";
+    case FrameViewReason::kSingular: return "singular";
+    case FrameViewReason::kEye: return "eye";
+    default: return "?";
+  }
+}
+
+// What the pass did about the frame's mask (ClayStats::mask; the Shadow line). kOff: the shadows'
+// switch is off. kNoLight: the frame is drawn without light (the switch, the textures, or no light
+// block). kBlock: the frame has no valid shadow block, whatever the reason, a frame without shadow
+// records included ("shadow-block"). kMaps: the block is valid and the maps were not drawn (the
+// frame's constant buffer could not be made). kView: no single inverse view-projection, or no usable
+// eye ("shadow-view"; ClayStats::mask_view says which). kObjects: the shadows' GPU objects could not
+// be made (the shadows are off for the session). kDrawn: the mask was written and is bound.
+enum class ClayMask : uint8_t { kOff, kNoLight, kBlock, kMaps, kView, kObjects, kDrawn, kCount };
 
 struct ClayStats {
   uint32_t drawn = 0, skipped_bad_index = 0, uploads = 0, hits = 0;
@@ -167,6 +198,19 @@ struct ClayStats {
   capture::ShaderTally<32> shadow_skipped_by_vs;
   uint32_t shadow_extra = 0, shadow_passes = 0;
   float shadow_split[4] = {};
+  // The pre-pass and the mask ("Native shadows" below; the Shadow line's second half).
+  // prepass_drawn: scene records drawn depth-only before the mask; prepass_skipped: depth-writing
+  // records left out of it for want of a pipeline. mask: what the pass did about the frame's mask;
+  // mask_view: with kView, why (FrameViewReason); mask_rotated: the mask was written with the
+  // game's rotation tile (false with a drawn mask: unrotated taps, the tile could not be read or
+  // failed its check). The four frame counts are the pass's totals since it was made, this frame
+  // included: frames drawn with light and the shadows' switch on, those of them without a valid
+  // shadow block (shadow-block), without a view (shadow-view), and with unrotated taps.
+  uint32_t prepass_drawn = 0, prepass_skipped = 0;
+  ClayMask mask = ClayMask::kOff;
+  FrameViewReason mask_view = FrameViewReason::kNone;
+  bool mask_rotated = false;
+  uint64_t shadow_frames = 0, shadow_block_frames = 0, shadow_view_frames = 0, shadow_unrotated_frames = 0;
 };
 
 inline constexpr uint8_t kTallyAlphaUnknown = 0, kTallyBlendUnknown = 1;
@@ -922,16 +966,23 @@ inline constexpr ClayBinding kClayBindings[] = {
     {ClayBindingKind::kBuffer, 0, 1, ClayBindingStage::kAll},            // 1: t0 positions (float4)
     {ClayBindingKind::kBuffer, 1, 1, ClayBindingStage::kAll},            // 2: t1 indices (uint)
     {ClayBindingKind::kBuffer, 2, 1, ClayBindingStage::kAll},            // 3: t2 UVs (float2)
-    {ClayBindingKind::kTextures, 3, 1, ClayBindingStage::kPixel},        // 4: t3 albedo
-    {ClayBindingKind::kTextures, 4, 4, ClayBindingStage::kPixel},        // 5: t4..t7 terrain colour, weights, side, base map
+    {ClayBindingKind::kTextures, 3, 2, ClayBindingStage::kPixel},        // 4: t3 albedo, t4 the screen mask of the sun's
+                                                                         //     shadow ("Native shadows" below; 1 x 1 white
+                                                                         //     for a frame without one)
+    {ClayBindingKind::kTextures, 5, 4, ClayBindingStage::kPixel},        // 5: t5..t8 terrain colour, weights, side, base map
     {ClayBindingKind::kConstantBuffer, 1, 1, ClayBindingStage::kAll},    // 6: b1 the draw's slot (Terrain or Object)
     {ClayBindingKind::kConstantBuffer, 2, 1, ClayBindingStage::kAll},    // 7: b2 Frame
-    {ClayBindingKind::kBuffer, 8, 1, ClayBindingStage::kVertex},         // 8: t8 terrain normals (float2)
-    {ClayBindingKind::kBuffer, 9, 1, ClayBindingStage::kVertex},         // 9: t9 object normals (float3)
-    {ClayBindingKind::kBuffer, 10, 1, ClayBindingStage::kVertex},        // 10: t10 an object's word per vertex (uint): the
+    {ClayBindingKind::kBuffer, 9, 1, ClayBindingStage::kVertex},         // 8: t9 terrain normals (float2)
+    {ClayBindingKind::kBuffer, 10, 1, ClayBindingStage::kVertex},        // 9: t10 object normals (float3)
+    {ClayBindingKind::kBuffer, 11, 1, ClayBindingStage::kVertex},        // 10: t11 an object's word per vertex (uint): the
                                                                          //     stream colour, or the probe set's index
-    {ClayBindingKind::kBuffer, 11, 1, ClayBindingStage::kVertex},        // 11: t11 probe weights (float4)
+    {ClayBindingKind::kBuffer, 12, 1, ClayBindingStage::kVertex},        // 11: t12 probe weights (float4)
 };
+// (plan Task 5 of the shadows: the albedo's parameter became the pair and every register behind it
+// moved up by one; the parameters' indices and the root words did not change)
+inline constexpr uint32_t kClayAlbedoParam = 4, kClayMaskRegister = 4;
+static_assert(kClayBindings[kClayAlbedoParam].kind == ClayBindingKind::kTextures && kClayBindings[kClayAlbedoParam].reg == 3 &&
+              kClayBindings[kClayAlbedoParam].count == 2 && kClayBindings[kClayAlbedoParam].reg + 1 == kClayMaskRegister);
 // (twelve parameters: the backend's limit, nrhi::kMaxBindingParams; clay_pass.cpp asserts it)
 inline constexpr uint32_t kClayStaticSamplers = 4;  // s0..s3, pixel stage (SamplerIndex)
 static_assert(kClayBindings[0].count * 4 == sizeof(ClayConstants));
@@ -948,7 +999,7 @@ constexpr uint32_t ClayRootWords() {
 static_assert(ClayRootWords() == 56 && ClayRootWords() <= 64);
 
 // The largest element (bytes) the vertex shader loads per vertex from the
-// light's four buffers (t8 float2, t9 float3, t10 uint, t11 float4), and the
+// light's four buffers (t9 float2, t10 float3, t11 uint, t12 float4), and the
 // element of the position buffer (float4). A draw that does not use one of
 // the four has its own position buffer bound there: it holds an element of 16
 // bytes for every vertex the draw can name, so any load the shader could make
@@ -956,28 +1007,28 @@ static_assert(ClayRootWords() == 56 && ClayRootWords() <= 64);
 inline constexpr uint32_t kClayLightElementBytesMax = 16, kClayPositionElementBytes = 16;
 static_assert(kClayLightElementBytesMax <= kClayPositionElementBytes);
 // The second buffers of the two vertex kinds without a colour stream keep to
-// that: the probe buffer is two regions, float4 weights (read at t11) and one
-// uint set index a vertex (read at t10 from the region's offset:
+// that: the probe buffer is two regions, float4 weights (read at t12) and one
+// uint set index a vertex (read at t11 from the region's offset:
 // normal_decode.h, BuildProbe); an instanced plant's colours are one uint a
-// flat position (read at t10 like the stream colours) and its bend inputs one
-// float4 a flat position (read at t11 like the weights: ExpandInstanceBend).
+// flat position (read at t11 like the stream colours) and its bend inputs one
+// float4 a flat position (read at t12 like the weights: ExpandInstanceBend).
 inline constexpr uint32_t kProbeWeightElementBytes = 16, kProbeSetElementBytes = 4, kInstanceColourElementBytes = 4,
                           kBendElementBytes = 16;
 static_assert(kProbeWeightElementBytes <= kClayLightElementBytesMax && kProbeSetElementBytes <= kClayLightElementBytesMax &&
               kInstanceColourElementBytes <= kClayLightElementBytesMax && kBendElementBytes <= kClayLightElementBytesMax);
 
 // ClayConstants::light_mode. kLightModeTerrainNormals: the vertex shader forms
-// the game's terrain normal from the draw's buffer at t8 (float2 per grid
+// the game's terrain normal from the draw's buffer at t9 (float2 per grid
 // point): for the steep-ground block and for the light. kLightModeObject: the
-// vertex shader reads the stream normal at t9 and the draw's word at t10 and
+// vertex shader reads the stream normal at t10 and the draw's word at t11 and
 // puts the normal through the draw's rows of cbuffer Object; the word is the
 // stream colour, unless kLightModeProbe (with the object bit only): then it is
 // the vertex's probe set, the vertex shader also reads the four weights at
-// t11, and the colour is the probe colour made of them and the draw's twelve
+// t12, and the colour is the probe colour made of them and the draw's twelve
 // probe registers. kLightModeInstance (with the object bit only; plan Task
-// 8b): the draw is an instanced plant: the normal at t9 is in the world
-// already and goes through no rows, the word at t10 is the colour of the
-// vertex's copy, t11 holds the bend inputs (the copy's up axis and the
+// 8b): the draw is an instanced plant: the normal at t10 is in the world
+// already and goes through no rows, the word at t11 is the colour of the
+// vertex's copy, t12 holds the bend inputs (the copy's up axis and the
 // vertex's height), and the vertex shader makes of them the game's vertex-side
 // colour and the bend of the normal; with kLightModePlantLit the plant's
 // family is plant-lit (its pixel shader has the ambient factor: the vertex
@@ -985,7 +1036,7 @@ static_assert(kProbeWeightElementBytes <= kClayLightElementBytesMax && kProbeSet
 // factor), without it plant (the vertex side's colour is the whole ambient).
 // kLightModeLeaf (with the object and probe bits, without the instance bit;
 // plan Task 8c): the draw is a tree leaf: the buffers are a probe record's
-// (normals at t9, the probe set at t10, the weights at t11), and the vertex
+// (normals at t10, the probe set at t11, the weights at t12), and the vertex
 // shader makes of them, the draw's rows and the frame's eye and sun what the
 // game's leaf vertex shaders make: the ambient of the probe colour and the two
 // scalars of the sun's light on the side of the card that faces the viewer.
@@ -1018,7 +1069,7 @@ constexpr uint32_t LitObjectMode(capture::LightVertexKind kind, capture::LightFa
   }
 }
 
-// What the pass binds at the light's four buffer registers (t8 to t11:
+// What the pass binds at the light's four buffer registers (t10 to t12:
 // kClayBindings[kClayLightBufferParam0 + i]) for a draw with `light_mode`: the
 // draw's own buffer of that register where the mode names it, else the draw's
 // positions. EVERY draw gets all four: nothing may stay bound from another
@@ -1031,17 +1082,17 @@ constexpr uint32_t LitObjectMode(capture::LightVertexKind kind, capture::LightFa
 // both). A leaf is a probe record with the leaf bit: the probe buffer's two
 // regions. The three mesh blocks of the vertex shader exclude each other by
 // the mode (LightModeBlock: its own tests), and a mode none of them takes,
-// which the pass never makes, loads from none of t9 to t11: the positions.
+// which the pass never makes, loads from none of t10 to t12: the positions.
 // The terrain normals are named only where no mesh block runs: a mode with
 // the terrain bit and a mesh block (never made either) has its normal from
-// the block, its compiled program loads nothing from t8, and a mesh record
+// the block, its compiled program loads nothing from t9, and a mesh record
 // has no buffer of two floats a vertex to bind there.
 enum class ClayLightBuffer : uint8_t {
   kPositions, kTerrainNormals, kNormals, kColours, kProbeSets, kProbeWeights, kInstanceColours, kBend
 };
 inline constexpr uint32_t kClayLightBufferParam0 = 8, kClayLightBufferCount = 4;
 struct ClayLightBuffers {
-  ClayLightBuffer source[kClayLightBufferCount];  // t8, t9, t10, t11
+  ClayLightBuffer source[kClayLightBufferCount];  // t9, t10, t11, t12
 };
 // Which of the vertex shader's three mesh blocks a mode takes, by the shader's own tests (kClayVs):
 // an object's or trunk's with the object bit and neither the instance nor the leaf bit; an instanced
@@ -1068,8 +1119,8 @@ constexpr ClayLightBuffers LightBufferSources(uint32_t light_mode) {
                     : ClayLightBuffer::kPositions,
            instance ? ClayLightBuffer::kBend : probe ? ClayLightBuffer::kProbeWeights : ClayLightBuffer::kPositions}};
 }
-static_assert(kClayBindings[kClayLightBufferParam0].reg == 8 && kClayBindings[kClayLightBufferParam0 + 1].reg == 9 &&
-              kClayBindings[kClayLightBufferParam0 + 2].reg == 10 && kClayBindings[kClayLightBufferParam0 + 3].reg == 11 &&
+static_assert(kClayBindings[kClayLightBufferParam0].reg == 9 && kClayBindings[kClayLightBufferParam0 + 1].reg == 10 &&
+              kClayBindings[kClayLightBufferParam0 + 2].reg == 11 && kClayBindings[kClayLightBufferParam0 + 3].reg == 12 &&
               std::size(kClayBindings) == kClayLightBufferParam0 + kClayLightBufferCount);
 // The byte offset a source is bound from in its buffer: the set indices are
 // the probe buffer's second region, behind the weights of its `probe_count`
@@ -1615,9 +1666,9 @@ struct ClayFrameConstants {
   float add[3];         // c20.xyz (c20.w, the output scale, is not applied)
   float pad0;
   float floor[3];       // c22.xyz; the block carries x and y, z is 0 (0 in every row captured)
-  float pad1;
+  float mask_du;        // 1 / the clay target's width: a lit pixel reads the screen mask at pos.xy * (mask_du, mask_dv)
   float axis[3];        // c23.xyz (= vertex c19.xyz)
-  float pad2;
+  float mask_dv;        // 1 / the clay target's height (SetClayFrameMask; both 0 in a frame without light)
   float eye[3];         // c19.xyz, the eye (= vertex c9.xyz of the leaf shaders); zero when not usable
   uint32_t eye_on;      // 1: `eye` is the frame's eye; 0: the frame's leaves are not lit (LightFrameLights)
 };
@@ -1654,6 +1705,16 @@ inline ClayFrameConstants MakeClayFrameConstants(const capture::LightBlock& b, C
     c.eye_on = 1;
   }
   return c;
+}
+
+// Where a lit pixel reads the screen mask (cbuffer Frame's f_mask_du, f_mask_dv): the pixel's
+// centre over the clay target's size, normalised coordinates whatever the target's size is and
+// whatever texture is bound as the mask (the mask target of that size, or the 1 x 1 white one).
+// Only in a lit frame: a frame without light keeps its constants all zero (no draw reads them).
+inline void SetClayFrameMask(ClayFrameConstants& c, uint32_t width, uint32_t height) {
+  if (!c.light_on || width == 0 || height == 0) return;
+  c.mask_du = 1.0f / float(width);
+  c.mask_dv = 1.0f / float(height);
 }
 
 // Whether a frame's constants light a draw of `family`: the frame is lit, and for a leaf, whose
@@ -2414,7 +2475,8 @@ struct ShadowDrawState {
 };
 
 // Rules (fail closed: nothing is drawn from a value that was not read or is
-// not a number). The depth state must be the shadow passes' (kState); the rows
+// not a number). The state words must have been read (kUnread) and the depth
+// state be the shadow passes' (kState); the caster entry of a known kind (kTwin); the rows
 // finite (kMatrix); the bias usable (kBias). An opaque caster (no pixel shader
 // in the game) is drawn solid. An alpha-test caster whose state has the alpha
 // test or alpha-to-mask on is drawn with them from its texture's alpha times
@@ -2430,9 +2492,10 @@ inline ShadowDrawState DecideShadowDraw(const capture::DrawRecord& r, const capt
     return d;
   };
   const capture::RenderState rs = capture::DecodeRenderState(r.state_words);
+  if (!rs.valid) return skip(ShadowDrawSkip::kUnread);
   if (!ShadowDepthStateUsable(rs)) return skip(ShadowDrawSkip::kState);
   if (caster.kind != capture::CasterKind::kOpaque && caster.kind != capture::CasterKind::kAlphaTest) {
-    return skip(ShadowDrawSkip::kState);
+    return skip(ShadowDrawSkip::kTwin);
   }
   for (float v : r.rows) {
     if (!std::isfinite(v)) return skip(ShadowDrawSkip::kMatrix);
@@ -2497,6 +2560,416 @@ inline bool ShadowMapLookup(const float map_rows[4][4], const float world[3], do
   return true;
 }
 
+// --- Native shadows: the depth pre-pass and the screen mask (frame-map section 15, "Native shadows"; spec 2026-10-08, Design 5) ---
+// The game's order: depth pre-pass, mask, colour. With the shadows on, in a lit
+// frame whose shadow block is valid and whose two maps were drawn, the pass
+//   1. draws every scene record that writes depth once more before the colour
+//      draws, depth only (PrepassKey), with the record's own vertex path and
+//      the discards of its colour form (the alpha test, alpha-to-mask, a
+//      terrain layer's hole and weight), into the clay depth target;
+//   2. writes the screen mask (1 = lit by the sun) in one full-screen step
+//      from that depth and the two maps: the arithmetic of the game's mask
+//      shader 0x0F99810F072BF0FC (light_formulas.py: mask_0f99 = mask_near,
+//      mask_far, mask_combine; lighting-formulas.md, "Shadows"), evaluated for
+//      every pixel, a pixel at the clear depth included (it is a far pixel:
+//      its mask is split.w, as the game's is). The game's second mask shader
+//      (0x1B4B...) is not ported: in the emulated frame 0F99 writes every pixel;
+//   3. clears the depth again and draws the colour pass as it always did, each
+//      lit pixel reading the mask at its place (kClayBindings: t4).
+// The depth of step 1 is the mask's alone: the colour pass does not test
+// against it (it starts from a cleared depth, with each record's captured
+// function), so no record can lose a pixel to its own pre-pass depth.
+// In every other frame nothing of this is drawn and the 1 x 1 white texture
+// is bound as the mask: the lighting picture.
+//
+// Compare directions. The game's maps hold g = 1 - z of the nearest caster and
+// its shader tests 1 - z > g (near map, strictly) and 1 - z >= g (far map). The
+// native maps hold n = z of the nearest caster, 1 where none is ("Native shadow
+// maps"), so with n = 1 - g:
+//   near: lit iff z < n      (MaskNearLit: the receiver is nearer the light than the stored caster)
+//   far:  lit iff z <= n     (MaskFarLit: not farther)
+// z the receiver's depth row of ShadowBlock::world_to_map. A receiver that IS
+// the stored caster is lit through the caster's bias (n = z + bias); without a
+// bias the near map shadows it and the far map does not, as in the game.
+//
+// The mirrors below are in double (the inputs are the floats the shader gets),
+// so that they can be held to the reference's numbers to many places; the HLSL
+// (shaders::kClayMaskPs) is the same arithmetic in single precision.
+
+// A scene record is in the pre-pass when its colour pipeline tests and writes
+// depth. Its pre-pass pipeline: the same pixel shader kind, depth function and
+// cull, no colour written, no blend. At most 4 kinds x 3 functions (always,
+// less, less-equal) x 3 cull modes = 36 keys, the size of the pre-pass's own
+// pipeline cache: it cannot overflow, and the State line's count is the colour
+// pass's alone.
+inline constexpr size_t kMaxPrepassPipelines = 36;
+inline bool InPrepass(const PipelineKey& colour) { return colour.depth_test != 0 && colour.depth_write != 0; }
+inline PipelineKey PrepassKey(const PipelineKey& colour) {
+  PipelineKey k;
+  k.textured = colour.textured;
+  k.color_mask = 0;
+  k.depth_test = 1;
+  k.depth_write = 1;
+  k.depth_func = colour.depth_func;
+  k.cull = colour.cull;
+  return k;
+}
+
+// The literals of 0x0F99... (frame-map section 15, "Literals": the GPU's register file at every
+// execution in 212 logged frames, and the shader object's table): the twelve tap offsets c250..c255
+// paired as the microcode pairs them (light_formulas.MASK_NEAR_TAPS), the weight of a tap c248.y, how
+// far beyond split.y the far map is still read c248.x, the slope of the fade c249.w; and the kernel
+// radius, the shader's c77.x = 2.5 / 1024 in all of them: 2.5 texels of the near map.
+inline constexpr float kMaskNearTaps[12][2] = {
+    {-0.20334500074386597f, 0.6207159757614136f},  {0.18546099960803986f, -0.893123984336853f},
+    {0.9623399972915649f, -0.19498300552368164f},  {0.5194560289382935f, 0.7670220136642456f},
+    {-0.6959139704704285f, 0.45713698863983154f},  {0.5074309706687927f, 0.06442499905824661f},
+    {-0.8401439785957336f, -0.07357999682426453f}, {0.8964200019836426f, 0.41245800256729126f},
+    {0.4734340012073517f, -0.4800260066986084f},   {-0.7915589809417725f, -0.5977100133895874f},
+    {-0.32621198892593384f, -0.40580999851226807f}, {-0.32194000482559204f, -0.9326149821281433f},
+};
+inline constexpr uint32_t kMaskNearTapCount = 12;
+inline constexpr float kMaskTapWeight = 0.0833333358168602f;
+inline constexpr float kMaskFarReach = 10.0f;
+inline constexpr float kMaskFadeSlope = 0.1f;
+inline constexpr float kMaskNearRadiusTexels = 2.5f;
+inline constexpr float kMaskNearRadius = kMaskNearRadiusTexels / float(kShadowMapSize);
+// The rotation tile repeats every 32 pixels of the GAME's target, 1120 x 720 (its c47 = (0.5, 0.5,
+// 1/32, 1/32): the texel of pixel p is p mod 32). On a native target of another size the pixel's
+// centre is scaled into those units first, so the pattern keeps the game's scale on the screen.
+inline constexpr uint32_t kMaskTileSize = 32;
+inline constexpr float kMaskGameWidth = 1120.0f, kMaskGameHeight = 720.0f;
+
+inline bool MaskNearLit(double z, double stored) { return z < stored; }
+inline bool MaskFarLit(double z, double stored) { return z <= stored; }
+
+// (u, v, depth) of the homogeneous point P under four rows: rows[0..2] . P / rows[3] . P. False when w
+// is zero or a result is not finite (light_formulas._mask_project).
+inline bool MaskProject(const float rows[4][4], const double P[4], double out[3]) {
+  double v[4];
+  for (int i = 0; i < 4; ++i) {
+    v[i] = double(rows[i][0]) * P[0] + double(rows[i][1]) * P[1] + double(rows[i][2]) * P[2] + double(rows[i][3]) * P[3];
+  }
+  if (!std::isfinite(v[3]) || v[3] == 0.0) return false;
+  double r[3];
+  for (int i = 0; i < 3; ++i) {
+    r[i] = v[i] / v[3];
+    if (!std::isfinite(r[i])) return false;
+  }
+  out[0] = r[0];
+  out[1] = r[1];
+  out[2] = r[2];
+  return true;
+}
+
+// A tap offset turned by the pixel's rotation terms (a, b): (a x + b y, a y - b x) (mask_rotate).
+inline void MaskRotate(const float offset[2], const double rot[2], double out[2]) {
+  out[0] = rot[0] * double(offset[0]) + rot[1] * double(offset[1]);
+  out[1] = rot[0] * double(offset[1]) - rot[1] * double(offset[0]);
+}
+
+// The texel a point fetch at `coordinate` (in texels, finite) reads under clamp addressing.
+inline int MaskTexelIndex(double coordinate, uint32_t size) {
+  const double t = std::floor(coordinate);
+  if (!(t > 0.0)) return 0;
+  if (t > double(size - 1)) return int(size - 1);
+  return int(t);
+}
+
+// The near map's term (mask_near): the share of the twelve taps that are lit. `texel(ix, iy)`: the
+// native near map's value at a texel inside the map; `rot`: the rotation terms (a, b); `radius`: in
+// units of the map (kMaskNearRadius); `size`: the map's size in texels. A point the rows cannot
+// project gives 1 without a fetch; a tap whose coordinate is not finite counts as lit.
+template <class Texel>
+double MaskNear(const double P[4], const float rows[4][4], Texel&& texel, const double rot[2], double radius, uint32_t size) {
+  double p[3];
+  if (!MaskProject(rows, P, p) || size == 0) return 1.0;
+  int lit = 0;
+  for (uint32_t i = 0; i < kMaskNearTapCount; ++i) {
+    double o[2];
+    MaskRotate(kMaskNearTaps[i], rot, o);
+    const double tu = p[0] + radius * o[0], tv = p[1] + radius * o[1];
+    if (!std::isfinite(tu) || !std::isfinite(tv) ||
+        MaskNearLit(p[2], double(texel(MaskTexelIndex(tu * double(size), size), MaskTexelIndex(tv * double(size), size))))) {
+      ++lit;
+    }
+  }
+  return double(lit) * double(kMaskTapWeight);
+}
+
+// The far map's term (mask_far): the linear filter of four lit / shadowed texels, floor(x) - 1 and
+// floor(x) by floor(y) - 1 and floor(y), weights frac(x) and frac(y) towards the higher texel, with
+// (x, y) = (u, v) * size. `texel(ix, iy)`: the native far map's value at a texel inside the map (the
+// indices are clamped here). A point the rows cannot project, or one whose texel is no number an
+// integer holds, gives 1 without a fetch.
+template <class Texel>
+double MaskFar(const double P[4], const float rows[4][4], Texel&& texel, uint32_t size) {
+  double p[3];
+  if (!MaskProject(rows, P, p) || size == 0) return 1.0;
+  const double x = p[0] * double(size), y = p[1] * double(size);
+  if (!(std::fabs(x) < 2147483648.0 && std::fabs(y) < 2147483648.0)) return 1.0;
+  const double ix = std::floor(x), iy = std::floor(y);
+  const double fx = x - ix, fy = y - iy;
+  auto lit = [&](double dx, double dy) {
+    return MaskFarLit(p[2], double(texel(MaskTexelIndex(ix + dx, size), MaskTexelIndex(iy + dy, size)))) ? 1.0 : 0.0;
+  };
+  const double v = fx * fy * lit(0, 0) + (1.0 - fx) * fy * lit(-1, 0) + (1.0 - fx) * (1.0 - fy) * lit(-1, -1) + fx * (1.0 - fy) * lit(0, -1);
+  return std::isfinite(v) ? v : 0.0;
+}
+
+// The two maps' terms and the fade (mask_combine):
+//   m = lerp(near, far, sat((d - split[0]) / split[2]));  result = lerp(m, split[3], sat(slope * (d - split[1])))
+// The value beyond the shadow distance is split[3] (c12.w, 0.46 to 0.53 in the captures), NOT 1. A
+// blend width that is not positive is a step at split[0]; a value that is not finite counts as 0.
+inline double MaskCombine(double d, double near_term, double far_term, const float split[4], float slope) {
+  auto finite = [](double x) { return std::isfinite(x) ? x : 0.0; };
+  auto sat = [](double x) { return x != x ? 0.0 : x < 0.0 ? 0.0 : x > 1.0 ? 1.0 : x; };
+  const double s[4] = {finite(split[0]), finite(split[1]), finite(split[2]), finite(split[3])};
+  const double k = finite(slope);
+  near_term = finite(near_term);
+  far_term = finite(far_term);
+  if (d != d) d = 0.0;
+  const double w = s[2] > 0.0 ? sat((d - s[0]) / s[2]) : (d > s[0] ? 1.0 : 0.0);
+  const double m = near_term + w * (far_term - near_term);
+  const double fade = sat(k * (d - s[1]));
+  return finite(m + fade * (s[3] - m));
+}
+
+// The mask step's constants (cbuffer Mask of shaders::kClayMaskPs, register b0 of the mask's own
+// layout; shaders::kClayMaskFields is its layout): one small slot of the frame's constant buffer.
+struct ClayMaskConstants {
+  float inv_view_proj[4][4];  // rows: world (x, y, z, w) = rows . (X, Y, depth, 1), (X, Y) the pixel's centre in -1..1, Y up
+  float near_rows[4][4];      // ShadowBlock::world_to_map[0] (pixel c36..c39 at a scene draw)
+  float far_rows[4][4];       // ShadowBlock::world_to_map[1] (c40..c43)
+  float eye[3];               // the frame's eye (LightBlock::eye, pixel c19 = the mask shader's c31)
+  float radius;               // kMaskNearRadius
+  float split[4];             // ShadowBlock::split (c12)
+  float inv_target[2];        // 1 / the mask target's width and height
+  float tile_scale[2];        // game pixels a native pixel: kMaskGameWidth / width, kMaskGameHeight / height
+  uint32_t rotate;            // 1: the rotation tile is bound at t3; 0: unrotated taps, (a, b) = (1, 0)
+  float map_size;             // kShadowMapSize
+  float pad[2];
+};
+static_assert(sizeof(ClayMaskConstants) == 256 && sizeof(ClayMaskConstants) <= kClayTerrainSlotBytes);
+
+// The frame's mask constants. False, with `out` untouched, when the block is not valid, the target
+// has no size, or a value is not a number of usable size (a position's bound for the eye and the
+// matrices' entries: no value read from the guest reaches the shader unchecked).
+inline bool MakeClayMaskConstants(const capture::ShadowBlock& block, const float inv_view_proj[4][4], const float eye[3],
+                                  uint32_t width, uint32_t height, bool rotate, ClayMaskConstants* out) {
+  if (!block.valid || !inv_view_proj || !eye || !out || width == 0 || height == 0) return false;
+  ClayMaskConstants c{};
+  for (int i = 0; i < 4; ++i) {
+    for (int j = 0; j < 4; ++j) {
+      if (!std::isfinite(inv_view_proj[i][j]) || !std::isfinite(block.world_to_map[0][i][j]) ||
+          !std::isfinite(block.world_to_map[1][i][j])) {
+        return false;
+      }
+      c.inv_view_proj[i][j] = inv_view_proj[i][j];
+      c.near_rows[i][j] = block.world_to_map[0][i][j];
+      c.far_rows[i][j] = block.world_to_map[1][i][j];
+    }
+    if (!std::isfinite(block.split[i])) return false;
+    c.split[i] = block.split[i];
+  }
+  for (int i = 0; i < 3; ++i) {
+    if (!LightPositionUsable(eye[i])) return false;
+    c.eye[i] = eye[i];
+  }
+  c.radius = kMaskNearRadius;
+  c.inv_target[0] = 1.0f / float(width);
+  c.inv_target[1] = 1.0f / float(height);
+  c.tile_scale[0] = kMaskGameWidth / float(width);
+  c.tile_scale[1] = kMaskGameHeight / float(height);
+  c.rotate = rotate ? 1u : 0u;
+  c.map_size = float(kShadowMapSize);
+  *out = c;
+  return true;
+}
+
+// The texel of the rotation tile a native pixel reads: the pixel's centre in the game's pixel units,
+// floored, modulo the tile (point fetch, repeat).
+inline uint32_t MaskTileTexel(uint32_t pixel, float tile_scale) {
+  const double g = std::floor((double(pixel) + 0.5) * double(tile_scale));
+  if (!(g >= 0.0) || !(g < 4294967296.0)) return 0;
+  return uint32_t(g) % kMaskTileSize;
+}
+
+// The mask of native pixel (px, py) whose pre-pass depth is `depth` (0 at the near plane, 1 the clear
+// value): mask_0f99 in the native form, as shaders::kClayMaskPs computes it.
+//   S = (X, Y, depth, 1), X = (2 px + 1) / width - 1, Y = 1 - (2 py + 1) / height
+//   P = inv_view_proj . S / w;  d = |P - eye|
+//   near = MaskNear(P) where d < split[0] + split[2], else 0
+//   far  = MaskFar(P)  where split[0] < d < split[1] + kMaskFarReach, else 0
+//   MaskCombine(d, near, far, split, kMaskFadeSlope)
+// `near_texel(ix, iy)`, `far_texel(ix, iy)`: the native maps; `rot_texel(tx, ty, out[2])`: the
+// rotation tile's texel as the shader's (.x, .y) in 0..1, read only when the constants say it is
+// bound. A pixel without a finite world position gives split[3], as one beyond the shadow distance.
+template <class Near, class Far, class Rot>
+double MaskPixel(uint32_t px, uint32_t py, float depth, const ClayMaskConstants& c, Near&& near_texel, Far&& far_texel, Rot&& rot_texel) {
+  const double S[4] = {(2.0 * double(px) + 1.0) * double(c.inv_target[0]) - 1.0, 1.0 - (2.0 * double(py) + 1.0) * double(c.inv_target[1]),
+                       double(depth), 1.0};
+  const double beyond = std::isfinite(c.split[3]) ? double(c.split[3]) : 0.0;
+  double world[3];
+  if (!MaskProject(c.inv_view_proj, S, world)) return beyond;
+  double d2 = 0.0;
+  for (int i = 0; i < 3; ++i) d2 += (world[i] - double(c.eye[i])) * (world[i] - double(c.eye[i]));
+  const double d = std::sqrt(d2);
+  if (!std::isfinite(d)) return beyond;
+  const double P[4] = {world[0], world[1], world[2], 1.0};
+  auto finite = [](float x) { return std::isfinite(x) ? double(x) : 0.0; };
+  const double s0 = finite(c.split[0]), s1 = finite(c.split[1]), s2 = finite(c.split[2]);
+  const uint32_t size = c.map_size >= 1.0f && c.map_size <= 16384.0f ? uint32_t(c.map_size) : 0u;
+  double near_term = 0.0, far_term = 0.0;
+  if (s0 + s2 > d) {
+    double rot[2] = {1.0, 0.0};
+    if (c.rotate) {
+      float t[2] = {1.0f, 0.5f};
+      rot_texel(MaskTileTexel(px, c.tile_scale[0]), MaskTileTexel(py, c.tile_scale[1]), t);
+      rot[0] = 2.0 * double(t[0]) - 1.0;
+      rot[1] = 2.0 * double(t[1]) - 1.0;
+    }
+    near_term = MaskNear(P, c.near_rows, near_texel, rot, double(c.radius), size);
+  }
+  if (d > s0 && s1 + double(kMaskFarReach) > d) far_term = MaskFar(P, c.far_rows, far_texel, size);
+  return MaskCombine(d, near_term, far_term, c.split, kMaskFadeSlope);
+}
+
+// The frame's view-projection. The clay vertex shader makes a clip position of each record's own
+// rows (the game's c0..c3 of that draw) and the positions the pass builds for it. For two kinds of
+// record those positions are world positions, so their rows ARE the frame's world-to-clip matrix: a
+// terrain record (x, y, height from the heightmap) and an instanced record (the copies laid out in the
+// world). A tree leaf's record has its whole world matrix beside it (LightInputs::world_rot and
+// world_pos: vertex c4..c6), so it gives rows * inverse(world rows), as PassMatrix gives a shadow
+// pass's. No other record carries its world translation. In the captures every one of these
+// agrees: the terrain's and the instanced records' rows are bit-equal within a frame (567 and 157 rows
+// a frame at the bridge), the leaves' and the other meshes' products agree with them to 2.5e-7 of the
+// largest entry, and the inverse is the mask shader's own c116..c119 to 4e-8 (frame-map section 15,
+// "Native shadows").
+// FrameInverseViewProj: the inverse of that one matrix. False (the frame has no mask: "shadow-view")
+// when no record gives a matrix, when one of them is not finite or differs from the first by more
+// than kFrameViewTolerance (of the row's largest entry of its kind: the three direction entries, or
+// the translation), or when the matrix has no finite inverse.
+// A record's rows as the matrix M of clip = M . p (rows x, y, z, w), by its layout.
+inline void RecordMatrix(const capture::DrawRecord& r, float m[4][4]) {
+  for (int i = 0; i < 4; ++i) {
+    for (int j = 0; j < 4; ++j) m[i][j] = r.layout == capture::TransformLayout::kCombine ? r.rows[j * 4 + i] : r.rows[i * 4 + j];
+  }
+}
+
+// Whether `m` is `ref` within `tol`: each entry within tol times the larger of its own magnitude in
+// `ref` and the largest direction entry of its row. Nothing that is not finite agrees.
+inline bool ViewMatricesAgree(const float ref[4][4], const float m[4][4], float tol) {
+  for (int i = 0; i < 4; ++i) {
+    const double row = std::fmax(std::fabs(double(ref[i][0])), std::fmax(std::fabs(double(ref[i][1])), std::fabs(double(ref[i][2]))));
+    for (int j = 0; j < 4; ++j) {
+      if (!std::isfinite(ref[i][j]) || !std::isfinite(m[i][j])) return false;
+      const double bound = double(tol) * std::fmax(row, std::fabs(double(ref[i][j])));
+      if (!(std::fabs(double(m[i][j]) - double(ref[i][j])) <= bound)) return false;
+    }
+  }
+  return true;
+}
+
+// The inverse of a 4 x 4 matrix (Gauss-Jordan with row pivots, in double). False, with `out`
+// untouched, when an entry is not finite, a pivot is no larger than 1e-12 of the largest entry, or
+// the result does not fit a float.
+inline bool InvertMatrix4(const float m[4][4], float out[4][4]) {
+  double a[4][8];
+  double scale = 0.0;
+  for (int i = 0; i < 4; ++i) {
+    for (int j = 0; j < 4; ++j) {
+      if (!std::isfinite(m[i][j])) return false;
+      a[i][j] = double(m[i][j]);
+      a[i][4 + j] = i == j ? 1.0 : 0.0;
+      scale = std::fmax(scale, std::fabs(a[i][j]));
+    }
+  }
+  if (scale == 0.0) return false;
+  for (int c = 0; c < 4; ++c) {
+    int pivot = c;
+    for (int r = c + 1; r < 4; ++r) {
+      if (std::fabs(a[r][c]) > std::fabs(a[pivot][c])) pivot = r;
+    }
+    if (!(std::fabs(a[pivot][c]) > 1e-12 * scale)) return false;
+    if (pivot != c) {
+      for (int j = 0; j < 8; ++j) std::swap(a[c][j], a[pivot][j]);
+    }
+    const double d = a[c][c];
+    for (int j = 0; j < 8; ++j) a[c][j] /= d;
+    for (int r = 0; r < 4; ++r) {
+      if (r == c) continue;
+      const double f = a[r][c];
+      if (f == 0.0) continue;
+      for (int j = 0; j < 8; ++j) a[r][j] -= f * a[c][j];
+    }
+  }
+  float inv[4][4];
+  for (int i = 0; i < 4; ++i) {
+    for (int j = 0; j < 4; ++j) {
+      inv[i][j] = float(a[i][4 + j]);
+      if (!std::isfinite(inv[i][j])) return false;
+    }
+  }
+  std::memcpy(out, inv, sizeof(inv));
+  return true;
+}
+
+// What FrameInverseViewProj found: the records that gave a matrix, and why there is no inverse.
+struct FrameView {
+  uint32_t candidates = 0;
+  FrameViewReason why = FrameViewReason::kNoRecord;
+};
+
+inline bool FrameInverseViewProj(const FrameScene& scene, float inverse[4][4], FrameView* info = nullptr,
+                                 float view_proj[4][4] = nullptr) {
+  FrameView v;
+  float ref[4][4] = {};
+  auto done = [&](FrameViewReason why) {
+    v.why = why;
+    if (info) *info = v;
+    return why == FrameViewReason::kNone;
+  };
+  for (const capture::DrawRecord& r : scene.draws) {
+    if (r.skip != capture::SkipReason::kNone) continue;
+    float m[4][4];
+    bool have = false;
+    if (TerrainOf(scene, r) || r.instances.active) {
+      RecordMatrix(r, m);
+      have = true;
+    } else if (const capture::LightInputs* l = LightOf(scene, r);
+               l && l->family == capture::LightFamily::kTreeLeaf && l->kind == capture::LightVertexKind::kProbe) {
+      float rows[4][4], world[3][4];
+      RecordMatrix(r, rows);
+      for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) world[i][j] = l->world_rot[i][j];
+        world[i][3] = l->world_pos[i];
+      }
+      // (a leaf whose world rows cannot be inverted gives no matrix; it is no disagreement)
+      have = capture::PassMatrix(rows, world, m);
+    }
+    if (!have) continue;
+    if (v.candidates == 0) {
+      for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+          if (!std::isfinite(m[i][j])) return done(FrameViewReason::kDisagree);
+        }
+      }
+      std::memcpy(ref, m, sizeof(ref));
+    } else if (!ViewMatricesAgree(ref, m, kFrameViewTolerance)) {
+      ++v.candidates;
+      return done(FrameViewReason::kDisagree);
+    }
+    ++v.candidates;
+  }
+  if (v.candidates == 0) return done(FrameViewReason::kNoRecord);
+  float inv[4][4];
+  if (!InvertMatrix4(ref, inv)) return done(FrameViewReason::kSingular);
+  std::memcpy(inverse, inv, sizeof(inv));
+  if (view_proj) std::memcpy(view_proj, ref, sizeof(ref));
+  return done(FrameViewReason::kNone);
+}
+
 // The log line of the maps, written when the pass's targets are created.
 inline std::string FormatShadowTargetText() {
   char buf[128];
@@ -2504,9 +2977,18 @@ inline std::string FormatShadowTargetText() {
                 double(2 * ClayTargetBytes(kShadowMapSize, kShadowMapSize, kShadowMapTexelBytes)) / (1024.0 * 1024.0));
   return buf;
 }
+// ... and of the mask target, one byte a pixel of the clay target's size.
+inline constexpr uint32_t kClayMaskTexelBytes = 1;  // R8_UNORM
+inline std::string FormatMaskTargetText(uint32_t width, uint32_t height) {
+  char buf[128];
+  std::snprintf(buf, sizeof(buf), "shadow mask %u x %u: R8_UNORM %.1f MB", width, height,
+                double(ClayTargetBytes(width, height, kClayMaskTexelBytes)) / (1024.0 * 1024.0));
+  return buf;
+}
 
-// The log's and F3's Shadow line (spec Design 5). "Shadow: off" for a frame
-// without shadow records. Else the block (valid, or invalid with the capture's
+// The log's and F3's Shadow line (spec Design 5). "Shadow: off" with the
+// shadows' switch off (ClayStats::shadow_switch: the switch, or a scene that
+// holds shadow records). Else the block (valid, or invalid with the capture's
 // reason: the frame is then drawn without shadows, "shadow-block"), and per
 // map the records drawn into it of the scene's records, with what was not
 // drawn by reason: the pass's own reasons (ShadowDrawSkipName) first, then,
@@ -2558,6 +3040,29 @@ inline std::string FormatShadowText(const ClayStats& st) {
     text += buf;
     if (!st.shadow_maps) text += st.shadow_light_off ? " | maps not drawn: the frame has no light" : " | maps not drawn";
   }
+  // The pre-pass and the mask: what was drawn before the mask, what is bound as the mask and, when
+  // it is the white texture, why; then the pass's frame counts by reason.
+  std::snprintf(buf, sizeof(buf), " | pre-pass %u draws", st.prepass_drawn);
+  text += buf;
+  if (st.prepass_skipped) {
+    std::snprintf(buf, sizeof(buf), " (%u without a pipeline)", st.prepass_skipped);
+    text += buf;
+  }
+  switch (st.mask) {
+    case ClayMask::kDrawn: text += st.mask_rotated ? " | mask drawn" : " | mask drawn, taps unrotated"; break;
+    case ClayMask::kNoLight: text += " | mask white (no light)"; break;
+    case ClayMask::kBlock: text += std::string(" | mask white (") + capture::kShadowBlockReason + ")"; break;
+    case ClayMask::kMaps: text += " | mask white (maps not drawn)"; break;
+    case ClayMask::kView:
+      text += std::string(" | mask white (") + kShadowViewReason + ": " + FrameViewReasonName(st.mask_view) + ")";
+      break;
+    case ClayMask::kObjects: text += " | mask white (the shadows' objects could not be made: off for the session)"; break;
+    default: text += " | mask white (off)"; break;
+  }
+  std::snprintf(buf, sizeof(buf), " | frames %llu: %s %llu, %s %llu, unrotated %llu", static_cast<unsigned long long>(st.shadow_frames),
+                capture::kShadowBlockReason, static_cast<unsigned long long>(st.shadow_block_frames), kShadowViewReason,
+                static_cast<unsigned long long>(st.shadow_view_frames), static_cast<unsigned long long>(st.shadow_unrotated_frames));
+  text += buf;
   return text;
 }
 

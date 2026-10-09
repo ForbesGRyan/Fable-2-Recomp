@@ -28,7 +28,8 @@ REXCVAR_DEFINE_BOOL(fable2_native_render, false, "Fable2",
                     "required). Seeded from fable2_config.toml [native] enabled.");
 REXCVAR_DEFINE_STRING(fable2_native_view, "off", "Fable2",
                       "Native debug view: off, overlay, split, native, pattern (F6 cycles those), or shadow "
-                      "(the clay pass's two shadow maps as grey depth; by name only).");
+                      "(the clay pass's two shadow maps as grey depth and its screen mask; by name only; with the "
+                      "shadows off it shows the native picture).");
 REXCVAR_DEFINE_STRING(fable2_native_clay_color, "clay", "Fable2",
                       "Native clay pass color: clay = one clay color; draw = a color per "
                       "draw; shader = a color per vertex shader.");
@@ -49,11 +50,12 @@ REXCVAR_DEFINE_STRING(fable2_native_light, "on", "Fable2",
                       "game's ambient, baked and sun light (no shadows; one fixed exposure on the lit draws, fitted on the bridge's "
                       "dirt patch; unlit draws are shown as with the light off); "
                       "off = the unlit materials picture.");
-REXCVAR_DEFINE_STRING(fable2_native_shadows, "off", "Fable2",
+REXCVAR_DEFINE_STRING(fable2_native_shadows, "on", "Fable2",
                       "Native sun shadows: on = with a composite view and the light on, the capture also records the "
                       "game's two shadow passes and the frame's shadow block, and the clay pass draws its two shadow "
-                      "maps from them (fable2_native_view=shadow shows the maps; the scene's picture does not use them "
-                      "yet and is the same); off = none of it is read or drawn.");
+                      "maps from them, a depth pre-pass and the game's screen mask, and shadows the sun of its lit draws "
+                      "(fable2_native_view=shadow shows the maps and the mask); off = none of it is read, made or "
+                      "drawn: the lighting picture.");
 REXCVAR_DEFINE_BOOL(fable2_native_d3d_messages, false, "Fable2",
                     "Write the Direct3D debug layer's errors, corruption and warnings to the game log "
                     "(the layer is the SDK's --d3d12_debug=true; without it there is nothing to write). "
@@ -303,7 +305,7 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   g_clay->textures().BeginFrame(g_clay_frames, TextureBudgetBytes(), TextureUploadBytes());
   render::ClayStats st;
   render::TextureStats tst;
-  g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), st, tst);
+  g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), st, tst);
   SetStatus(render::FormatStatusText(*scene, st, textures ? &tst : nullptr) + "\n" +
             render::FormatLightDrawnText(st) + "\n" + render::FormatShadowText(st));
   const double cpu_ms = st.hash_ms + st.decode_ms + st.record_ms + tst.decode_ms;
@@ -350,7 +352,7 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
     }
     // What was drawn lit and what was not, by reason.
     REXLOG_INFO("[native] clay: {}", render::FormatLightDrawnText(st));
-    // The shadow maps: what was drawn into each, what was not and why.
+    // The shadows: what was drawn into each map, what was not and why; the pre-pass and the mask.
     REXLOG_INFO("[native] clay: {}", render::FormatShadowText(st));
     if (const std::string by_vs = render::FormatShadowSkippedByVs(st); !by_vs.empty()) {
       REXLOG_INFO("[native] clay: shadow draws skipped by vs {{{}}}", by_vs);
@@ -405,9 +407,14 @@ void OverlayCallback(const NativeGuestOutputRenderContext& ctx, void*) {
     return;
   }
   if (view == View::kShadow) {
-    // The pass's two maps (in kPixelShaderResource since its Render), or a flat colour for a frame without them.
-    g_composite.DrawShadowMaps(ctx.cmd, ctx, g_clay->shadow_view(0), g_clay->shadow_view(1), g_clay->shadow_maps_drawn(),
-                               render::kShadowMapSize);
+    // The pass's two maps and its mask (in kPixelShaderResource since its Render), each a flat colour
+    // for a frame without it. Without the shadows' objects (the shadows off, or they could not be
+    // made) there is nothing to show: the native picture stands in.
+    if (!g_composite.DrawShadowMaps(ctx.cmd, ctx, g_clay->shadow_view(0), g_clay->shadow_view(1), g_clay->mask_view(),
+                                    g_clay->shadow_maps_drawn(), g_clay->mask_drawn(), render::kShadowMapSize,
+                                    render::ClayPass::kWidth, render::ClayPass::kHeight)) {
+      g_composite.Draw(ctx.cmd, ctx, g_clay->color(), View::kNative);
+    }
   } else {
     g_composite.Draw(ctx.cmd, ctx, g_clay->color(), view);
   }
@@ -448,7 +455,8 @@ void Install(rex::memory::Memory* memory) {
               ViewName(CurrentView()));
   REXLOG_INFO("[native] light: {} (fable2_native_light)",
               CurrentClayLight() == render::ClayLight::kOn ? "on" : "off");
-  REXLOG_INFO("[native] shadows: {} (fable2_native_shadows; the two shadow maps are drawn, the scene does not use them yet)",
+  REXLOG_INFO("[native] shadows: {} (fable2_native_shadows; on: the two shadow maps, a depth pre-pass and the screen mask "
+              "are drawn and the lit draws' sun is shadowed)",
               CurrentShadows() ? "on" : "off");
 }
 

@@ -2516,7 +2516,7 @@ int main() {
     // The output scale (16) is not in the block the shaders get. The exposure is: the lit pixel
     // paths multiply their value by it (cbuffer Frame's f_exposure), and a lit frame carries the
     // calibrated constant.
-    CHECK(442, frame.pad0 == 0.0f && frame.pad1 == 0.0f && frame.pad2 == 0.0f && frame.exposure == kLitExposure &&
+    CHECK(442, frame.pad0 == 0.0f && frame.mask_du == 0.0f && frame.mask_dv == 0.0f && frame.exposure == kLitExposure &&
                    frame.exposure == ClayExposure(ClayLight::kOn) && offsetof(ClayFrameConstants, exposure) == 44);
     // The switch off, or no block: nothing lit, everything zero, the exposure too (no draw reads it:
     // the frame is the materials picture, written and mapped as it is).
@@ -2996,7 +2996,7 @@ int main() {
     // twelve parameters (the backend's limit) and 56 of the root signature's 64 words.
     for (uint32_t i = 0; i < kClayLightBufferCount; ++i) {
       const ClayBinding& b = kClayBindings[kClayLightBufferParam0 + i];
-      CHECK(488, b.kind == ClayBindingKind::kBuffer && b.reg == 8 + i && b.stage == ClayBindingStage::kVertex && b.count == 1);
+      CHECK(488, b.kind == ClayBindingKind::kBuffer && b.reg == 9 + i && b.stage == ClayBindingStage::kVertex && b.count == 1);
     }
     CHECK(488, std::size(kClayBindings) == 12 && kClayLightBufferParam0 + kClayLightBufferCount == std::size(kClayBindings) &&
                    ClayRootWords() == 56);
@@ -4109,7 +4109,7 @@ int main() {
       // A state that was not read, another depth state, a caster kind that is none.
       bad = good;
       bad.state_words.read = false;
-      CHECK(552, DecideShadowDraw(bad, alpha_caster).skip == ShadowDrawSkip::kState);
+      CHECK(552, DecideShadowDraw(bad, alpha_caster).skip == ShadowDrawSkip::kUnread);
       bad = good;
       bad.state_words.depth_control = 0x00708736u;  // less-equal
       CHECK(552, DecideShadowDraw(bad, alpha_caster).skip == ShadowDrawSkip::kState);
@@ -4118,7 +4118,7 @@ int main() {
       CHECK(552, DecideShadowDraw(bad, alpha_caster).skip == ShadowDrawSkip::kState);
       ShadowCaster odd = alpha_caster;
       odd.kind = CasterKind(7);
-      CHECK(552, DecideShadowDraw(good, odd).skip == ShadowDrawSkip::kState);
+      CHECK(552, DecideShadowDraw(good, odd).skip == ShadowDrawSkip::kTwin);
       // A skipped draw carries nothing a caller could draw with.
       const ShadowDrawState s = DecideShadowDraw(bad, alpha_caster);
       CHECK(552, !s.textured && s.alpha.mode == 0 && s.bias.slope == 0.0f && s.bias.constant == 0.0f);
@@ -4232,6 +4232,8 @@ int main() {
     // 555: the Shadow line.
     {
       ClayStats st;
+      // (the line's second half, which case 570 holds: here the pass drew no pre-pass and no mask)
+      const std::string tail = " | pre-pass 0 draws | mask white (off) | frames 0: shadow-block 0, shadow-view 0, unrotated 0";
       CHECK(555, FormatShadowText(st) == "Shadow: off");
       st.shadow_switch = st.shadow_block = st.shadow_maps = true;
       st.shadow_reason = capture::ShadowBlockReason::kNone;
@@ -4244,7 +4246,7 @@ int main() {
       std::copy(split, split + 4, st.shadow_split);
       CHECK(555, FormatShadowText(st) ==
                      "Shadow: on, block valid, near 110 of 110 draws (skipped {}), far 123 of 123 draws (skipped {}), extra 0, "
-                     "split (20, 35, 2, 0.4770)");
+                     "split (20, 35, 2, 0.4770)" + tail);
       CHECK(555, FormatShadowSkippedByVs(st).empty());
       // A partial pass under a valid block shows: the pass's reasons, the capture's, the extra draws, the passes.
       st.shadow_drawn[1] = 119;
@@ -4260,7 +4262,7 @@ int main() {
       st.shadow_skipped_by_vs.Add(0xF160B4DA459A6D40ull, uint8_t(ShadowDrawSkip::kGeometry));
       CHECK(555, FormatShadowText(st) ==
                      "Shadow: on, block valid, near 110 of 110 draws (skipped {capture bad-index: 1}), far 119 of 123 draws (skipped "
-                     "{geometry: 1, texture: 3, capture no-caster: 2}), extra 14 (shadow-pass-extra), passes 3, split (20, 35, 2, 0.4770)");
+                     "{geometry: 1, texture: 3, capture no-caster: 2}), extra 14 (shadow-pass-extra), passes 3, split (20, 35, 2, 0.4770)" + tail);
       CHECK(555, FormatShadowSkippedByVs(st) ==
                      "0xF160B4DA459A6D40(geometry): 1, 0x432563420047C96C(texture): 2, 0x3A0F9098B839DDBC(texture): 1");
       // No block: the reason, the records the scene holds, nothing drawn.
@@ -4270,15 +4272,643 @@ int main() {
       none.shadow_records[0] = 5;
       none.shadow_passes = 2;
       CHECK(555, FormatShadowText(none) ==
-                     "Shadow: on, block invalid (shadow-block: proof), near 0 of 5 draws (skipped {}), far 0 of 0 draws (skipped {}), extra 0");
+                     "Shadow: on, block invalid (shadow-block: proof), near 0 of 5 draws (skipped {}), far 0 of 0 draws (skipped {}), extra 0" + tail);
       // A valid block whose maps were not drawn says so.
       ClayStats dark = st;
       dark.shadow_maps = false;
       dark.shadow_light_off = true;
-      CHECK(555, FormatShadowText(dark).ends_with("split (20, 35, 2, 0.4770) | maps not drawn: the frame has no light"));
+      CHECK(555, FormatShadowText(dark).ends_with("split (20, 35, 2, 0.4770) | maps not drawn: the frame has no light" + tail));
       // Every reason has a name.
       for (size_t i = 0; i < size_t(ShadowDrawSkip::kCount); ++i) CHECK(555, std::strcmp(ShadowDrawSkipName(ShadowDrawSkip(i)), "?") != 0);
       CHECK(555, std::strcmp(ShadowDrawSkipName(ShadowDrawSkip::kCount), "?") == 0);
+    }
+
+    // 560-572: the shadowed sun (plan Task 5 of the shadows): the binding table with the mask, the
+    // pre-pass keys, the compare directions on the native maps, the mask's mirrors against the
+    // reference's numbers (tests/test_light_check.py, MaskPinnedForTheRenderer, has the same inputs
+    // and the same literals; out/tests/task5/mask_pins.py made them with light_formulas.py), the
+    // frame's inverse view-projection, the mask constants, the Shadow line.
+    {
+      const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+      // 560: the albedo's parameter is the pair (albedo t3, mask t4); the terrain table and the
+      // light's four buffers moved up by one register; still twelve parameters and 56 root words.
+      {
+        const ClayBinding& pair = kClayBindings[kClayAlbedoParam];
+        CHECK(560, kClayAlbedoParam == 4 && pair.kind == ClayBindingKind::kTextures && pair.reg == 3 && pair.count == 2 &&
+                       pair.stage == ClayBindingStage::kPixel && kClayMaskRegister == 4);
+        const ClayBinding& terrain = kClayBindings[5];
+        CHECK(560, terrain.kind == ClayBindingKind::kTextures && terrain.reg == 5 && terrain.count == 4 &&
+                       terrain.stage == ClayBindingStage::kPixel);
+        CHECK(560, kClayBindings[6].kind == ClayBindingKind::kConstantBuffer && kClayBindings[6].reg == 1 &&
+                       kClayBindings[7].kind == ClayBindingKind::kConstantBuffer && kClayBindings[7].reg == 2);
+        for (uint32_t i = 0; i < kClayLightBufferCount; ++i) CHECK(560, kClayBindings[kClayLightBufferParam0 + i].reg == 9 + i);
+        CHECK(560, std::size(kClayBindings) == 12 && ClayRootWords() == 56);
+        // No two parameters a stage sees share a texture register.
+        for (size_t a = 0; a < std::size(kClayBindings); ++a) {
+          for (size_t b = a + 1; b < std::size(kClayBindings); ++b) {
+            const ClayBinding& x = kClayBindings[a];
+            const ClayBinding& y = kClayBindings[b];
+            const bool tx = x.kind == ClayBindingKind::kBuffer || x.kind == ClayBindingKind::kTextures;
+            const bool ty = y.kind == ClayBindingKind::kBuffer || y.kind == ClayBindingKind::kTextures;
+            if (!tx || !ty) continue;
+            const uint32_t x1 = x.reg + (x.kind == ClayBindingKind::kTextures ? x.count : 1u);
+            const uint32_t y1 = y.reg + (y.kind == ClayBindingKind::kTextures ? y.count : 1u);
+            CHECK(560, x1 <= y.reg || y1 <= x.reg);
+          }
+        }
+      }
+      // 561: where a lit pixel reads the mask: 1 / the target's size, in a lit frame only.
+      {
+        ClayFrameConstants frame{};
+        SetClayFrameMask(frame, 1120, 720);
+        CHECK(561, frame.mask_du == 0.0f && frame.mask_dv == 0.0f);  // (no light: the block stays zero)
+        frame.light_on = 1;
+        SetClayFrameMask(frame, 0, 720);
+        CHECK(561, frame.mask_du == 0.0f && frame.mask_dv == 0.0f);
+        SetClayFrameMask(frame, 1120, 720);
+        CHECK(561, frame.mask_du == 1.0f / 1120.0f && frame.mask_dv == 1.0f / 720.0f);
+        SetClayFrameMask(frame, 2240, 1440);  // (nothing assumes the game's size)
+        CHECK(561, frame.mask_du == 1.0f / 2240.0f && frame.mask_dv == 1.0f / 1440.0f);
+        CHECK(561, offsetof(ClayFrameConstants, mask_du) == 76 && offsetof(ClayFrameConstants, mask_dv) == 92 &&
+                       sizeof(ClayFrameConstants) == 112);
+        // The pixel's centre times the two is the centre of the mask's texel: (i + 0.5) / width.
+        CHECK(561, std::fabs((559.0f + 0.5f) * frame.mask_du * 2240.0f - 559.5f) < 1e-3f);
+      }
+      // 562: the pre-pass: records whose colour pipeline tests and writes depth; the key keeps the
+      // shader kind, the function and the cull, writes no colour and has no blend. 36 keys at most.
+      {
+        PipelineKey colour;
+        colour.textured = kTexturedTerrainLayer;
+        colour.blend = 1;
+        colour.src = uint8_t(capture::Factor::kSrcAlpha);
+        colour.dst = uint8_t(capture::Factor::kInvSrcAlpha);
+        colour.depth_func = uint8_t(capture::Compare::kLessEqual);
+        colour.cull = uint8_t(capture::Cull::kBack);
+        CHECK(562, InPrepass(colour));
+        const PipelineKey k = PrepassKey(colour);
+        const PipelineKey plain;
+        CHECK(562, k.textured == kTexturedTerrainLayer && k.color_mask == 0 && k.blend == 0 && k.src == plain.src && k.dst == plain.dst &&
+                       k.depth_test == 1 && k.depth_write == 1 && k.depth_func == uint8_t(capture::Compare::kLessEqual) &&
+                       k.cull == uint8_t(capture::Cull::kBack));
+        PipelineKey no_write = colour;
+        no_write.depth_write = 0;
+        PipelineKey no_test = colour;
+        no_test.depth_test = 0;
+        CHECK(562, !InPrepass(no_write) && !InPrepass(no_test) && InPrepass(PipelineKey{}));
+        // Two colour keys that differ in blend or colour mask alone share a pre-pass key.
+        PipelineKey other = colour;
+        other.blend = 0;
+        other.color_mask = 0x7;
+        CHECK(562, PrepassKey(other) == k);
+        std::vector<PipelineKey> keys;
+        for (uint8_t textured = 0; textured < kClayPixelShaders; ++textured) {
+          for (capture::Compare f : {capture::Compare::kAlways, capture::Compare::kLess, capture::Compare::kLessEqual}) {
+            for (capture::Cull c : {capture::Cull::kNone, capture::Cull::kFront, capture::Cull::kBack}) {
+              PipelineKey key;
+              key.textured = textured;
+              key.depth_func = uint8_t(f);
+              key.cull = uint8_t(c);
+              for (uint8_t blend = 0; blend < 2; ++blend) {
+                key.blend = blend;
+                CHECK(562, FindOrAddPipelineSlot(keys, PrepassKey(key), kMaxPrepassPipelines) != kNoPipelineSlot);
+              }
+            }
+          }
+        }
+        CHECK(562, keys.size() == 36 && kMaxPrepassPipelines == 36);
+      }
+      // 563: the compare directions. The game: lit iff 1 - z > g (near), 1 - z >= g (far), g the map's
+      // value 1 - z_caster. Native map: n = z_caster: lit iff z < n (near), z <= n (far).
+      {
+        CHECK(563, MaskNearLit(0.25, 0.75) && !MaskNearLit(0.75, 0.25) && !MaskNearLit(0.5, 0.5));
+        CHECK(563, MaskFarLit(0.25, 0.75) && !MaskFarLit(0.75, 0.25) && MaskFarLit(0.5, 0.5));
+        // The clear value (no caster) lights every receiver inside the range; a NaN lights none.
+        CHECK(563, MaskNearLit(0.999, double(kShadowMapClear)) && MaskFarLit(1.0, double(kShadowMapClear)) && !MaskNearLit(0.5, double(nan)) &&
+                       !MaskFarLit(0.5, double(nan)));
+        // The same verdicts as the game's on the game's values, for depths a float holds exactly.
+        for (float z : {0.125f, 0.25f, 0.5f, 0.75f}) {
+          for (float caster : {0.125f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+            const float g = ShadowGameDepth(caster);  // what the game's map holds
+            CHECK(563, MaskNearLit(z, caster) == (1.0f - z > g) && MaskFarLit(z, caster) == (1.0f - z >= g));
+          }
+        }
+      }
+      // The reference's inputs: frame 1 of the bridge capture of 2026-10-09 (the view-projection's
+      // inverse, the scene's c36..c43, c12, c19), every number single precision.
+      const float inv_view_proj[4][4] = {{0.5143311619758606f, 0.08813292533159256f, -820.677490234375f, 821.5447387695312f},
+                                         {-0.8844040036201477f, 0.05125229433178902f, -1573.3095703125f, 1573.8358154296875f},
+                                         {8.367820555577055e-06f, 0.5663930773735046f, -501.68060302734375f, 501.51348876953125f},
+                                         {1.6652556666940654e-07f, 7.833264703549503e-09f, -9.999471664428711f, 9.999671936035156f}};
+      const float view_proj[4][4] = {{0.49135205149650574f, -0.8449383974075317f, 2.1847014863851655e-08f, 92.6156997680664f},
+                                     {0.26610419154167175f, 0.15474604070186615f, 1.7101504802703857f, -131.98681640625f},
+                                     {0.8508029580116272f, 0.49476245045661926f, -0.17715677618980408f, -138.88465881347656f},
+                                     {0.8507859110832214f, 0.49475255608558655f, -0.17715322971343994f, -138.78187561035156f}};
+      capture::ShadowBlock block{};
+      {
+        const float near_rows[4][4] = {{0.02583850733935833f, 0.0f, 0.021059028804302216f, -2.8588876724243164f},
+                                       {-0.0006741421530023217f, -0.03331625089049339f, 0.0008271429105661809f, 5.92822265625f},
+                                       {0.005491321906447411f, -0.0002783896343316883f, -0.006737612187862396f, 0.743424117565155f},
+                                       {0.0f, 0.0f, 0.0f, 1.0f}};
+        const float far_rows[4][4] = {{0.011073646135628223f, 0.0f, 0.009025298990309238f, -1.05615234375f},
+                                      {-0.0002889182942453772f, -0.014278394170105457f, 0.0003544900973793119f, 2.937011480331421f},
+                                      {0.004074114840477705f, -0.00020654266700148582f, -0.004998760763555765f, 0.6168575882911682f},
+                                      {0.0f, 0.0f, 0.0f, 1.0f}};
+        std::memcpy(block.world_to_map[0], near_rows, sizeof(near_rows));
+        std::memcpy(block.world_to_map[1], far_rows, sizeof(far_rows));
+        block.split[0] = 20.0f;
+        block.split[1] = 35.0f;
+        block.split[2] = 2.0f;
+        block.split[3] = 0.48273685574531555f;
+        block.texel[0] = block.texel[1] = 1.0f / 1024.0f;
+        block.valid = true;
+      }
+      const float eye[3] = {82.07209777832031f, 157.33926391601562f, 50.17070388793945f};
+      // 563 (continued): one world point as a caster and as a receiver, under the capture's near map.
+      // Drawn (plan Task 4): the pass's light matrix (the registers' rows without their texture-space
+      // mapping) puts it in a texel and the shader stores its depth with the game's bias. Looked up:
+      // the registers' rows put it in the same texel with the same depth. With the bias it is lit by
+      // both rules; without one the near rule shadows it and the far rule does not; a receiver behind
+      // it is shadowed, one in front of it lit.
+      {
+        float rows[4][4], light[4][4];
+        std::memcpy(rows, block.world_to_map[0], sizeof(rows));
+        const float half = 0.5f / 1024.0f;
+        for (int j = 0; j < 4; ++j) {
+          light[0][j] = 2.0f * (rows[0][j] - (0.5f + half) * rows[3][j]);
+          light[1][j] = -2.0f * (rows[1][j] - (0.5f + half) * rows[3][j]);
+          light[2][j] = rows[2][j];
+          light[3][j] = rows[3][j];
+        }
+        const float world[3] = {84.5f, 150.25f, 44.0f};
+        float clip[4];
+        for (int i = 0; i < 4; ++i) clip[i] = light[i][0] * world[0] + light[i][1] * world[1] + light[i][2] * world[2] + light[i][3];
+        double window[2], lookup[2];
+        CHECK(563, ShadowMapWindow(clip, window) && ShadowMapLookup(rows, world, lookup));
+        CHECK(563, std::floor(window[0]) == std::floor(lookup[0]) && std::floor(window[1]) == std::floor(lookup[1]) &&
+                       window[0] > 0.0 && window[0] < 1024.0 && window[1] > 0.0 && window[1] < 1024.0);
+        const double P[4] = {world[0], world[1], world[2], 1.0};
+        double uvz[3];
+        CHECK(563, MaskProject(rows, P, uvz) && std::fabs(uvz[0] * 1024.0 - lookup[0]) < 1e-6 && std::fabs(uvz[1] * 1024.0 - lookup[1]) < 1e-6 &&
+                       std::fabs(window[0] - lookup[0]) < 0.01 && std::fabs(window[1] - lookup[1]) < 0.01);
+        const float z = clip[2] / clip[3];
+        CHECK(563, std::fabs(uvz[2] - double(z)) < 1e-6 && z > 0.1f && z < 0.9f);
+        ShadowCaster near_caster;
+        near_caster.biased = true;
+        near_caster.bias_scale = -32.0f;
+        near_caster.bias_offset = -0.001f;
+        ShadowBiasTerms terms, none;
+        CHECK(563, MakeShadowBiasTerms(near_caster, &terms));
+        const float slope = 0.0005f;
+        const float stored = ShadowMapDepth(z, slope, terms);
+        // (the same value by the game's own offset on the game's window depth)
+        CHECK(563, std::fabs(stored - ShadowNativeDepth(ShadowBias(ShadowGameDepth(z), slope, -32.0f, -0.001f))) < 1e-6f && stored > z);
+        CHECK(563, MaskNearLit(uvz[2], stored) && MaskFarLit(uvz[2], stored));
+        const float unbiased = ShadowMapDepth(z, slope, none);
+        CHECK(563, unbiased == z && !MaskNearLit(double(z), unbiased) && MaskFarLit(double(z), unbiased));
+        CHECK(563, !MaskNearLit(uvz[2] + 0.01, stored) && !MaskFarLit(uvz[2] + 0.01, stored) && MaskNearLit(uvz[2] - 0.01, stored));
+        // A whole map of that caster: the near term of the point is 1 (all twelve taps lit), of a point
+        // 0.01 behind it 0; the far term likewise.
+        const double rot[2] = {0.6, 0.8};
+        auto flat = [&](int, int) { return stored; };
+        CHECK(563, std::fabs(MaskNear(P, rows, flat, rot, double(kMaskNearRadius), kShadowMapSize) - 12.0 * double(kMaskTapWeight)) < 1e-12);
+        float behind[4][4];
+        std::memcpy(behind, rows, sizeof(rows));
+        behind[2][3] += 0.01f;
+        CHECK(563, MaskNear(P, behind, flat, rot, double(kMaskNearRadius), kShadowMapSize) == 0.0 &&
+                       MaskFar(P, behind, flat, kShadowMapSize) == 0.0 && MaskFar(P, rows, flat, kShadowMapSize) == 1.0);
+      }
+      // The synthetic maps and tile of the reference (a value per texel that a float holds exactly).
+      auto near_texel = [](int ix, int iy) { return float((ix * 37 + iy * 101) % 129) / 128.0f; };
+      auto far_texel = [](int ix, int iy) { return float((ix * 53 + iy * 17 + 5) % 129) / 128.0f; };
+      auto rot_texel = [](uint32_t tx, uint32_t ty, float out[2]) {
+        out[0] = float((tx * 73 + ty * 29) % 256) / 255.0f;
+        out[1] = float((tx * 31 + ty * 57) % 256) / 255.0f;
+      };
+      // 564: the two terms and the fade (mask_combine).
+      {
+        const struct {
+          float d, near_term, far_term;
+          double want;
+        } pins[] = {{10.0f, 0.25f, 0.75f, 0.25},  {21.0f, 0.25f, 0.75f, 0.5},   {30.0f, 0.25f, 0.75f, 0.75},
+                    {40.0f, 0.25f, 0.75f, 0.6163684258813922}, {50.0f, 0.25f, 0.75f, 0.48273685574531555},
+                    {20.5f, 1.0f, 0.0f, 0.75},    {36.5f, 0.0f, 1.0f, 0.9224105272056241}};
+        for (const auto& p : pins) CHECK(564, std::fabs(MaskCombine(p.d, p.near_term, p.far_term, block.split, kMaskFadeSlope) - p.want) < 1e-12);
+        // Beyond the shadow distance the value is split.w, not 1.
+        CHECK(564, MaskCombine(1000.0, 1.0, 1.0, block.split, kMaskFadeSlope) == double(block.split[3]) && block.split[3] < 0.5f);
+        // A blend width that is not positive is a step at split.x; values that are no numbers give a number.
+        const float step[4] = {20.0f, 35.0f, 0.0f, 0.5f};
+        CHECK(564, MaskCombine(19.0, 0.25, 0.75, step, 0.1f) == 0.25 && MaskCombine(21.0, 0.25, 0.75, step, 0.1f) == 0.75);
+        for (float bad : {0.0f, nan, inf, -inf}) {
+          for (int at = 0; at < 4; ++at) {
+            float s[4] = {20.0f, 35.0f, 2.0f, 0.5f};
+            s[at] = bad;
+            for (double d : {0.0, 21.0, double(nan), double(inf), double(-inf)}) {
+              CHECK(564, std::isfinite(MaskCombine(d, 0.25, 0.75, s, 0.1f)) && std::isfinite(MaskCombine(d, double(bad), double(bad), s, bad)));
+            }
+          }
+        }
+        CHECK(564, kMaskTapWeight == 0.0833333358f && kMaskFarReach == 10.0f && kMaskFadeSlope == 0.1f && kMaskNearTapCount == 12 &&
+                       kMaskNearRadius == 2.5f / 1024.0f && kMaskNearTaps[0][0] == -0.203345001f && kMaskNearTaps[11][1] == -0.932614982f &&
+                       kMaskNearTaps[2][0] == 0.962339997f && kMaskNearTaps[2][1] == -0.194983006f);
+      }
+      // 565: the near and the far term of a world point under the world rows.
+      {
+        const struct {
+          double P[4];
+          double near_want, far_want;
+        } pins[] = {{{84.5, 150.25, 44.0, 1.0}, 0.0833333358168602, 0.3243241310119629},
+                    {{90.0, 140.0, 43.5, 1.0}, 0.0833333358168602, 0.6628598777695416},
+                    {{70.125, 165.5, 46.0, 1.0}, 0.0833333358168602, 0.0},
+                    {{100.0, 120.0, 40.0, 1.0}, 0.0, 0.8823890686035156}};
+        const double rot[2] = {double(0.6f), double(0.8f)};
+        for (const auto& p : pins) {
+          CHECK(565, std::fabs(MaskNear(p.P, block.world_to_map[0], near_texel, rot, double(kMaskNearRadius), kShadowMapSize) - p.near_want) < 1e-12);
+          CHECK(565, std::fabs(MaskFar(p.P, block.world_to_map[1], far_texel, kShadowMapSize) - p.far_want) < 1e-9);
+        }
+        // Constant maps (tests/test_light_check.py, MaskFormulas, in the native direction): a map of the
+        // clear value lights all twelve taps, a map of 0 (a caster at the light) none.
+        const float identity[4][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1}};
+        const double point[4] = {0.3, 0.6, 0.25, 1.0};
+        const double unrotated[2] = {1.0, 0.0};
+        auto constant = [](float v) { return [v](int, int) { return v; }; };
+        CHECK(565, std::fabs(MaskNear(point, identity, constant(1.0f), unrotated, double(kMaskNearRadius), 1024) - 12.0 * double(kMaskTapWeight)) < 1e-12 &&
+                       MaskNear(point, identity, constant(0.0f), unrotated, double(kMaskNearRadius), 1024) == 0.0);
+        // A map that holds the point's own depth: shadow for the near map (strict), light for the far one.
+        CHECK(565, MaskNear(point, identity, constant(0.25f), unrotated, double(kMaskNearRadius), 1024) == 0.0 &&
+                       MaskFar(point, identity, constant(0.25f), 1024) == 1.0);
+        // The far term's four texels and weights on an 8 x 8 map: x = 2.5, y = 3.25: texels 1, 2 by 2, 3.
+        const double far_point[4] = {0.3125, 0.40625, 0.25, 1.0};
+        const struct {
+          int ix, iy;
+          double weight;
+        } texels[] = {{1, 2, 0.5 * 0.75}, {2, 2, 0.5 * 0.75}, {1, 3, 0.5 * 0.25}, {2, 3, 0.5 * 0.25}};
+        for (const auto& t : texels) {
+          int fetched = 0;
+          auto one = [&](int ix, int iy) {
+            ++fetched;
+            return ix == t.ix && iy == t.iy ? 0.9f : 0.1f;
+          };
+          CHECK(565, std::fabs(MaskFar(far_point, identity, one, 8) - t.weight) < 1e-12 && fetched == 4);
+        }
+        // The rotation: (x, y) -> (a x + b y, a y - b x).
+        const float offset[2] = {0.5f, -2.0f};
+        const double turn[2] = {0.6, 0.8};
+        double turned[2];
+        MaskRotate(offset, turn, turned);
+        CHECK(565, std::fabs(turned[0] + 1.3) < 1e-12 && std::fabs(turned[1] + 1.6) < 1e-12);
+        // A far point whose texel is no number an integer holds: 1, and no fetch (the reference returns 1 there).
+        {
+          int fetched = 0;
+          auto counted = [&](int, int) {
+            ++fetched;
+            return 0.0f;
+          };
+          const double huge[4] = {3.0e6, 0.5, 0.25, 1.0}, huge_v[4] = {0.5, -3.0e6, 0.25, 1.0};
+          CHECK(565, MaskFar(huge, identity, counted, 1024) == 1.0 && MaskFar(huge_v, identity, counted, 1024) == 1.0 && fetched == 0);
+          const double inside[4] = {0.5, 0.5, 0.25, 1.0};
+          CHECK(565, MaskFar(inside, identity, counted, 1024) == 0.0 && fetched == 4);
+        }
+        // Clamp addressing: a tap outside the map reads the edge texel; the index of no number is 0.
+        CHECK(565, MaskTexelIndex(-3.5, 1024) == 0 && MaskTexelIndex(1023.9, 1024) == 1023 && MaskTexelIndex(5000.0, 1024) == 1023 &&
+                       MaskTexelIndex(17.99, 1024) == 17 && MaskTexelIndex(double(nan), 1024) == 0 && MaskTexelIndex(1e300, 1024) == 1023);
+      }
+      // 566: the mask of a pixel (mask_0f99), with and without the rotation tile, in every regime:
+      // near only, the blend, far only, the fade, beyond, and the clear depth.
+      ClayMaskConstants constants{};
+      CHECK(566, MakeClayMaskConstants(block, inv_view_proj, eye, 1120, 720, true, &constants));
+      {
+        ClayMaskConstants plain = constants;
+        plain.rotate = 0;
+        const struct {
+          uint32_t px, py;
+          float depth;
+          double d, rotated, unrotated;
+        } pins[] = {{560, 600, 0.9821628332138062f, 5.999995277693097, 0.1666666716337204, 0.1666666716337204},
+                    {300, 500, 0.9909855127334595f, 12.500029722610465, 0.0833333358168602, 0.1666666716337204},
+                    {700, 420, 0.994562029838562f, 18.9999053127623, 0.0, 0.0},
+                    {640, 400, 0.9950790405273438f, 20.499951274353368, 0.168626222122592, 0.10612419002461002},
+                    {200, 380, 0.9944530129432678f, 21.500103049226347, 0.30675134735710674, 0.30675134735710674},
+                    {900, 350, 0.9956575036048889f, 27.000158411112753, 0.0, 0.0},
+                    {500, 340, 0.9970599412918091f, 34.00031121842236, 0.9111211026206659, 0.9111211026206659},
+                    {333, 333, 0.9971696734428406f, 37.99976545013204, 0.183352533656075, 0.183352533656075},
+                    {800, 300, 0.9975280165672302f, 44.00000617981933, 0.4344634749674494, 0.4344634749674494},
+                    {100, 250, 0.9978243708610535f, 60.000769539675034, 0.48273685574531555, 0.48273685574531555},
+                    {17, 5, 1.0f, 7584.099111323902, 0.48273685574531555, 0.48273685574531555},
+                    {1119, 719, 1.0f, 7689.370675434363, 0.48273685574531555, 0.48273685574531555}};
+        int differ = 0;
+        for (const auto& p : pins) {
+          int tile_reads = 0;
+          auto counted = [&](uint32_t tx, uint32_t ty, float out[2]) {
+            ++tile_reads;
+            rot_texel(tx, ty, out);
+          };
+          const double with = MaskPixel(p.px, p.py, p.depth, constants, near_texel, far_texel, counted);
+          CHECK(566, std::fabs(with - p.rotated) < 1e-9);
+          // The tile is read once where the near map is read (d < 22) and nowhere else.
+          CHECK(566, tile_reads == (p.d < 22.0 ? 1 : 0));
+          tile_reads = 0;
+          const double without = MaskPixel(p.px, p.py, p.depth, plain, near_texel, far_texel, counted);
+          CHECK(566, std::fabs(without - p.unrotated) < 1e-9 && tile_reads == 0);
+          if (std::fabs(with - without) > 1e-6) ++differ;
+          // The world position the mirror forms is at the reference's distance.
+          const double S[4] = {(2.0 * p.px + 1.0) * double(1.0f / 1120.0f) - 1.0, 1.0 - (2.0 * p.py + 1.0) * double(1.0f / 720.0f),
+                               double(p.depth), 1.0};
+          double world[3];
+          CHECK(566, MaskProject(constants.inv_view_proj, S, world));
+          const double d = std::sqrt((world[0] - eye[0]) * (world[0] - eye[0]) + (world[1] - eye[1]) * (world[1] - eye[1]) +
+                                     (world[2] - eye[2]) * (world[2] - eye[2]));
+          CHECK(566, std::fabs(d - p.d) < 1e-9 * p.d);
+        }
+        CHECK(566, differ == 2);  // (the rotation shows where the taps straddle texels)
+        // The clear depth is a far pixel: split.w, the game's value there (not 1).
+        CHECK(566, MaskPixel(0, 0, 1.0f, constants, near_texel, far_texel, rot_texel) == double(block.split[3]));
+        // The tile is addressed in the game's pixel units: on a target of twice the size two native
+        // pixels share a texel, and the tile repeats every 32 game pixels.
+        CHECK(566, MaskTileTexel(0, 1.0f) == 0 && MaskTileTexel(31, 1.0f) == 31 && MaskTileTexel(32, 1.0f) == 0 && MaskTileTexel(1119, 1.0f) == 31 &&
+                       MaskTileTexel(0, 0.5f) == 0 && MaskTileTexel(1, 0.5f) == 0 && MaskTileTexel(2, 0.5f) == 1 && MaskTileTexel(64, 0.5f) == 0 &&
+                       MaskTileTexel(5, nan) == 0 && MaskTileTexel(5, inf) == 0 && MaskTileTexel(5, -1.0f) == 0);
+        // On a target of another size the same screen point gives the same mask (normalised
+        // addressing): pixel (2 px, 2 py) and its three neighbours of a 2240 x 1440 target surround
+        // the centre of pixel (px, py); the world positions differ by a quarter pixel only.
+        ClayMaskConstants twice{};
+        CHECK(566, MakeClayMaskConstants(block, inv_view_proj, eye, 2240, 1440, false, &twice));
+        CHECK(566, twice.inv_target[0] == 1.0f / 2240.0f && twice.tile_scale[0] == 0.5f && twice.tile_scale[1] == 0.5f &&
+                       constants.tile_scale[0] == 1.0f && constants.tile_scale[1] == 1.0f && constants.radius == kMaskNearRadius &&
+                       constants.map_size == 1024.0f && constants.rotate == 1 && twice.rotate == 0);
+        CHECK(566, std::fabs(MaskPixel(1000, 500, 0.9978243708610535f, twice, near_texel, far_texel, rot_texel) - double(block.split[3])) < 1e-12);
+      }
+      // 567: guards (review focus 2). Zeros and values that are no numbers: the mask is a number in
+      // [0, 1] for any depth; a pixel without a world position gets split.w.
+      {
+        for (float depth : {0.0f, 0.5f, 1.0f, 2.0f, -1.0f, nan, inf, -inf}) {
+          const double m = MaskPixel(560, 360, depth, constants, near_texel, far_texel, rot_texel);
+          CHECK(567, std::isfinite(m) && m >= 0.0 && m <= 1.0000001);
+        }
+        ClayMaskConstants zero{};
+        CHECK(567, MaskPixel(3, 4, 0.5f, zero, near_texel, far_texel, rot_texel) == 0.0);  // (no position: split.w, which is 0 there)
+        for (float bad : {0.0f, nan, inf, -inf}) {
+          for (int what = 0; what < 6; ++what) {
+            ClayMaskConstants c = constants;
+            float* fields[] = {&c.inv_view_proj[3][2], &c.near_rows[3][3], &c.far_rows[2][1], &c.eye[1], &c.split[2], &c.radius};
+            *fields[what] = bad;
+            for (float depth : {0.9821628332138062f, 0.9956575036048889f, 1.0f}) {
+              auto bad_texel = [&](int, int) { return bad; };
+              const double m = MaskPixel(560, 600, depth, c, bad_texel, bad_texel, rot_texel);
+              CHECK(567, std::isfinite(m) && m >= 0.0 && m <= 1.0000001);
+            }
+          }
+          ClayMaskConstants c = constants;
+          for (auto& row : c.inv_view_proj) {
+            for (float& v : row) v = bad;
+          }
+          CHECK(567, MaskPixel(560, 600, 0.99f, c, near_texel, far_texel, rot_texel) == double(block.split[3]));
+          // Rows that cannot project give 1 for their map (no shadow from a map that cannot be addressed), without a fetch.
+          float rows[4][4] = {};
+          rows[3][3] = bad;
+          const double P[4] = {1.0, 2.0, 3.0, 1.0};
+          const double rot[2] = {1.0, 0.0};
+          int fetched = 0;
+          auto never = [&](int, int) {
+            ++fetched;
+            return 0.0f;
+          };
+          if (bad == 0.0f || !std::isfinite(bad)) {
+            CHECK(567, MaskNear(P, rows, never, rot, 0.01, 1024) == 1.0 && MaskFar(P, rows, never, 1024) == 1.0 && fetched == 0);
+          }
+          // A rotation or radius that is no number: the taps count as lit; a number comes out.
+          const double bad_rot[2] = {double(bad), double(bad)};
+          const double v = MaskNear(P, block.world_to_map[0], near_texel, bad_rot, double(bad), 1024);
+          CHECK(567, std::isfinite(v) && v >= 0.0 && v <= 1.0001);
+        }
+        // The constants are refused, untouched, for a block that is not valid, a target without a
+        // size, a matrix entry or split that is no number, an eye that is no position.
+        ClayMaskConstants out{};
+        const ClayMaskConstants before = out;
+        capture::ShadowBlock invalid = block;
+        invalid.valid = false;
+        CHECK(567, !MakeClayMaskConstants(invalid, inv_view_proj, eye, 1120, 720, true, &out) &&
+                       !MakeClayMaskConstants(block, inv_view_proj, eye, 0, 720, true, &out) &&
+                       !MakeClayMaskConstants(block, inv_view_proj, eye, 1120, 0, true, &out) &&
+                       !MakeClayMaskConstants(block, nullptr, eye, 1120, 720, true, &out));
+        for (float bad : {nan, inf, -inf}) {
+          float m[4][4];
+          std::memcpy(m, inv_view_proj, sizeof(m));
+          m[2][1] = bad;
+          CHECK(567, !MakeClayMaskConstants(block, m, eye, 1120, 720, true, &out));
+          capture::ShadowBlock b = block;
+          b.world_to_map[1][0][3] = bad;
+          CHECK(567, !MakeClayMaskConstants(b, inv_view_proj, eye, 1120, 720, true, &out));
+          b = block;
+          b.split[3] = bad;
+          CHECK(567, !MakeClayMaskConstants(b, inv_view_proj, eye, 1120, 720, true, &out));
+          const float bad_eye[3] = {eye[0], bad, eye[2]};
+          CHECK(567, !MakeClayMaskConstants(block, inv_view_proj, bad_eye, 1120, 720, true, &out));
+        }
+        const float far_eye[3] = {eye[0], 2.0f * kLightPositionMax, eye[2]};
+        CHECK(567, !MakeClayMaskConstants(block, inv_view_proj, far_eye, 1120, 720, true, &out) && std::memcmp(&out, &before, sizeof(out)) == 0);
+      }
+      // 568: the frame's inverse view-projection, from the records whose rows are world to clip (a
+      // terrain record, an instanced record) and from a leaf's rows and world rows.
+      {
+        auto record = [&](const float m[4][4]) {
+          capture::DrawRecord r = BaseRecord();
+          for (int i = 0; i < 16; ++i) r.rows[i] = m[i / 4][i % 4];
+          return r;
+        };
+        FrameScene scene;
+        float inverse[4][4], back[4][4];
+        FrameView info;
+        // No record that gives a matrix: no view (an ordinary mesh has no world translation beside it).
+        scene.draws.push_back(record(view_proj));
+        CHECK(568, !FrameInverseViewProj(scene, inverse, &info) && info.why == FrameViewReason::kNoRecord && info.candidates == 0);
+        // A terrain record: its rows.
+        scene.draws.push_back(record(view_proj));
+        scene.draws.back().terrain_index = 0;
+        scene.terrain.push_back(capture::TerrainPatch{});
+        CHECK(568, FrameInverseViewProj(scene, inverse, &info, back) && info.why == FrameViewReason::kNone && info.candidates == 1);
+        CHECK(568, std::memcmp(back, view_proj, sizeof(back)) == 0);
+        for (int i = 0; i < 4; ++i) {
+          for (int j = 0; j < 4; ++j) {
+            // (the reference's inverse, made in double by other code: equal to a float's precision)
+            CHECK(568, std::fabs(inverse[i][j] - inv_view_proj[i][j]) <= 2e-6f * std::fabs(inv_view_proj[i][j]) + 1e-12f);
+            double sum = 0.0;
+            for (int k = 0; k < 4; ++k) sum += double(view_proj[i][k]) * double(inverse[k][j]);
+            CHECK(568, std::fabs(sum - (i == j ? 1.0 : 0.0)) < 2e-3);
+          }
+        }
+        // An instanced record with the same rows, in the other layout (its rows are the transpose).
+        capture::DrawRecord instanced = record(view_proj);
+        for (int i = 0; i < 16; ++i) instanced.rows[i] = view_proj[i % 4][i / 4];
+        instanced.layout = capture::TransformLayout::kCombine;
+        instanced.instances.active = true;
+        scene.draws.push_back(instanced);
+        CHECK(568, FrameInverseViewProj(scene, inverse, &info) && info.candidates == 2);
+        // A leaf: rows = view-projection * world; its world rows are beside it.
+        const float world[3][4] = {{0.0f, -1.5f, 0.0f, 90.0f}, {1.5f, 0.0f, 0.0f, 150.0f}, {0.0f, 0.0f, 1.5f, 44.0f}};
+        float leaf_rows[4][4];
+        for (int i = 0; i < 4; ++i) {
+          for (int j = 0; j < 4; ++j) {
+            double sum = j == 3 ? double(view_proj[i][3]) : 0.0;
+            for (int k = 0; k < 3; ++k) sum += double(view_proj[i][k]) * double(world[k][j]);
+            leaf_rows[i][j] = float(sum);
+          }
+        }
+        capture::LightInputs leaf;
+        leaf.family = capture::LightFamily::kTreeLeaf;
+        leaf.kind = capture::LightVertexKind::kProbe;
+        for (int i = 0; i < 3; ++i) {
+          for (int j = 0; j < 3; ++j) leaf.world_rot[i][j] = world[i][j];
+          leaf.world_pos[i] = world[i][3];
+        }
+        scene.lights.push_back(leaf);
+        scene.draws.push_back(record(leaf_rows));
+        scene.draws.back().light_index = 0;
+        CHECK(568, FrameInverseViewProj(scene, inverse, &info) && info.candidates == 3);
+        // A trunk (another family) with odd rows gives no matrix and changes nothing.
+        capture::LightInputs trunk = leaf;
+        trunk.family = capture::LightFamily::kTreeTrunk;
+        scene.lights.push_back(trunk);
+        float odd[4][4];
+        std::memcpy(odd, view_proj, sizeof(odd));
+        odd[0][3] += 50.0f;
+        scene.draws.push_back(record(odd));
+        scene.draws.back().light_index = 1;
+        CHECK(568, FrameInverseViewProj(scene, inverse, &info) && info.candidates == 3);
+        // A leaf whose world rows are singular gives no matrix either (it is no disagreement).
+        capture::LightInputs flat_leaf = leaf;
+        for (int j = 0; j < 3; ++j) flat_leaf.world_rot[2][j] = 0.0f;
+        scene.lights.push_back(flat_leaf);
+        scene.draws.push_back(record(leaf_rows));
+        scene.draws.back().light_index = 2;
+        CHECK(568, FrameInverseViewProj(scene, inverse, &info) && info.candidates == 3);
+        // One outlier: no view for the frame. The tolerance from both sides (1e-4 of the entry).
+        FrameScene outlier = scene;
+        capture::DrawRecord moved = record(view_proj);
+        moved.terrain_index = 0;
+        moved.rows[3] *= 1.0f + 5e-5f;  // the x row's translation
+        outlier.draws.push_back(moved);
+        CHECK(568, FrameInverseViewProj(outlier, inverse, &info) && info.candidates == 4);
+        outlier.draws.back().rows[3] = view_proj[0][3] * (1.0f + 3e-4f);
+        float kept[4][4];
+        std::memcpy(kept, inverse, sizeof(kept));
+        CHECK(568, !FrameInverseViewProj(outlier, inverse, &info) && info.why == FrameViewReason::kDisagree &&
+                       std::memcmp(kept, inverse, sizeof(kept)) == 0);
+        // (a direction entry that is nearly zero in the reference is held to the row's largest: 2e-8 against 0.84)
+        outlier.draws.back().rows[3] = view_proj[0][3];
+        outlier.draws.back().rows[2] = 1e-5f;
+        CHECK(568, FrameInverseViewProj(outlier, inverse, &info));
+        outlier.draws.back().rows[2] = 1e-3f;
+        CHECK(568, !FrameInverseViewProj(outlier, inverse, &info) && info.why == FrameViewReason::kDisagree);
+        // An outlier that comes first is one too (the others disagree with it).
+        FrameScene first;
+        first.terrain.push_back(capture::TerrainPatch{});
+        first.draws.push_back(record(odd));
+        first.draws.back().terrain_index = 0;
+        first.draws.push_back(record(view_proj));
+        first.draws.back().terrain_index = 0;
+        CHECK(568, !FrameInverseViewProj(first, inverse, &info) && info.why == FrameViewReason::kDisagree);
+        // A matrix that is not finite, in the first record or a later one: no view.
+        for (int which = 0; which < 2; ++which) {
+          for (float bad : {nan, inf}) {
+            FrameScene broken;
+            broken.terrain.push_back(capture::TerrainPatch{});
+            for (int n = 0; n < 2; ++n) {
+              broken.draws.push_back(record(view_proj));
+              broken.draws.back().terrain_index = 0;
+            }
+            broken.draws[which].rows[5] = bad;
+            CHECK(568, !FrameInverseViewProj(broken, inverse, &info) && info.why == FrameViewReason::kDisagree);
+          }
+        }
+        // (a single record whose matrix is not finite: the same reason, not a singular one)
+        {
+          FrameScene lone;
+          lone.terrain.push_back(capture::TerrainPatch{});
+          lone.draws.push_back(record(view_proj));
+          lone.draws.back().terrain_index = 0;
+          lone.draws.back().rows[10] = inf;
+          CHECK(568, !FrameInverseViewProj(lone, inverse, &info) && info.why == FrameViewReason::kDisagree && info.candidates == 0);
+        }
+        // A singular matrix (two equal rows; all zero): no inverse.
+        float singular[4][4];
+        std::memcpy(singular, view_proj, sizeof(singular));
+        std::memcpy(singular[3], singular[2], sizeof(singular[3]));
+        FrameScene degenerate;
+        degenerate.terrain.push_back(capture::TerrainPatch{});
+        degenerate.draws.push_back(record(singular));
+        degenerate.draws.back().terrain_index = 0;
+        CHECK(568, !FrameInverseViewProj(degenerate, inverse, &info) && info.why == FrameViewReason::kSingular && info.candidates == 1);
+        const float zeros[4][4] = {};
+        degenerate.draws[0] = record(zeros);
+        degenerate.draws[0].terrain_index = 0;
+        CHECK(568, !FrameInverseViewProj(degenerate, inverse, &info) && info.why == FrameViewReason::kSingular);
+        float out[4][4];
+        CHECK(568, !InvertMatrix4(zeros, out) && !InvertMatrix4(singular, out) && InvertMatrix4(view_proj, out));
+        // A skipped record gives nothing. An empty scene has no view.
+        FrameScene skipped;
+        skipped.terrain.push_back(capture::TerrainPatch{});
+        skipped.draws.push_back(record(view_proj));
+        skipped.draws.back().terrain_index = 0;
+        skipped.draws.back().skip = capture::SkipReason::kBadMemory;
+        CHECK(568, !FrameInverseViewProj(skipped, inverse, &info) && info.why == FrameViewReason::kNoRecord);
+        CHECK(568, !FrameInverseViewProj(FrameScene{}, inverse, &info) && info.why == FrameViewReason::kNoRecord);
+        CHECK(568, std::strcmp(kShadowViewReason, "shadow-view") == 0 && std::strcmp(FrameViewReasonName(FrameViewReason::kDisagree), "disagree") == 0 &&
+                       std::strcmp(FrameViewReasonName(FrameViewReason::kCount), "?") == 0);
+      }
+      // 569: the mask's and the leaves' sun factors at a mask of 1 are what the lighting picture had
+      // (every pinned number of the light stands), and in full shadow the game's 0.4 and 0.64.
+      {
+        const LeafMasks lit = LeafMask(1.0f, kLeafMaskGain, kLeafMaskBias);
+        const LeafMasks dark = LeafMask(0.0f, kLeafMaskGain, kLeafMaskBias);
+        CHECK(569, lit.m1 == 1.0f && lit.m2 == 1.0f && std::fabs(dark.m1 - 0.4f) < 1e-7f && std::fabs(dark.m2 - 0.64f) < 1e-6f);
+        CHECK(569, SunGateSingle(1.0f, 1.0f) == 1.0f && SunGateSingle(0.0f, 1.0f) == 0.0f && SunGateSingle(0.5f, 0.75f) == 0.375f);
+        // A sun term under the mask: the object's colour with the mask at 0 is its ambient part alone.
+        const Float3 A{0.5f, 0.4f, 0.3f}, v{0.2f, 0.3f, 0.4f}, tint{1.1f, 1.2f, 1.3f}, add{0.01f, 0.02f, 0.03f}, floor{0.05f, 0.09f, 0.0f};
+        const Float3 sun{0.99f, 0.83f, 0.4f}, one{1.0f, 1.0f, 1.0f}, none{0.0f, 0.0f, 0.0f};
+        const Float3 shadowed = LightObject(A, v, tint, 1.3f, add, floor, 0.7f, 0.6f, sun, 1.0f, SunGateSingle(0.0f, 1.0f), one);
+        const Float3 no_sun = LightObject(A, v, tint, 1.3f, add, floor, 0.7f, 0.6f, none, 1.0f, 1.0f, one);
+        const Float3 full = LightObject(A, v, tint, 1.3f, add, floor, 0.7f, 0.6f, sun, 1.0f, SunGateSingle(1.0f, 1.0f), one);
+        CHECK(569, shadowed.x == no_sun.x && shadowed.y == no_sun.y && shadowed.z == no_sun.z && full.x > shadowed.x);
+      }
+      // 570: the Shadow line's second half: the pre-pass, the mask and the frame counts.
+      {
+        ClayStats st;
+        st.shadow_switch = st.shadow_block = st.shadow_maps = true;
+        st.shadow_reason = capture::ShadowBlockReason::kNone;
+        st.shadow_passes = 2;
+        st.prepass_drawn = 912;
+        st.mask = ClayMask::kDrawn;
+        st.mask_rotated = true;
+        st.shadow_frames = 300;
+        st.shadow_block_frames = 2;
+        CHECK(570, FormatShadowText(st).ends_with(" | pre-pass 912 draws | mask drawn | frames 300: shadow-block 2, shadow-view 0, unrotated 0"));
+        st.mask_rotated = false;
+        st.prepass_skipped = 3;
+        st.shadow_unrotated_frames = 300;
+        CHECK(570, FormatShadowText(st).ends_with(
+                       " | pre-pass 912 draws (3 without a pipeline) | mask drawn, taps unrotated | frames 300: shadow-block 2, shadow-view 0, unrotated 300"));
+        st.mask = ClayMask::kView;
+        st.mask_view = FrameViewReason::kDisagree;
+        st.shadow_view_frames = 1;
+        CHECK(570, FormatShadowText(st).find(" | mask white (shadow-view: disagree) | frames 300: shadow-block 2, shadow-view 1,") != std::string::npos);
+        st.mask = ClayMask::kBlock;
+        CHECK(570, FormatShadowText(st).find(" | mask white (shadow-block) | ") != std::string::npos);
+        st.mask = ClayMask::kNoLight;
+        CHECK(570, FormatShadowText(st).find(" | mask white (no light) | ") != std::string::npos);
+        st.mask = ClayMask::kMaps;
+        CHECK(570, FormatShadowText(st).find(" | mask white (maps not drawn) | ") != std::string::npos);
+        st.mask = ClayMask::kObjects;
+        CHECK(570, FormatShadowText(st).find(" | mask white (the shadows' objects could not be made: off for the session) | ") != std::string::npos);
+        st.mask = ClayMask::kOff;
+        CHECK(570, FormatShadowText(st).find(" | mask white (off) | ") != std::string::npos);
+        ClayStats off;
+        CHECK(570, FormatShadowText(off) == "Shadow: off" && off.mask == ClayMask::kOff);
+        CHECK(570, FormatMaskTargetText(1120, 720) == "shadow mask 1120 x 720: R8_UNORM 0.8 MB");
+        // The split reasons of a record that is not drawn (the review of plan Task 4).
+        CHECK(570, std::strcmp(ShadowDrawSkipName(ShadowDrawSkip::kTwin), "no-caster-entry") == 0 &&
+                       std::strcmp(ShadowDrawSkipName(ShadowDrawSkip::kUnread), "state-unread") == 0 &&
+                       std::strcmp(ShadowDrawSkipName(ShadowDrawSkip::kState), "state") == 0 && size_t(ShadowDrawSkip::kCount) == 11);
+      }
     }
   }
   if (g_fail) return g_fail;
@@ -4289,7 +4919,9 @@ int main() {
                "against the reference's numbers, frame and object and terrain light constants, lit squares, Light line, light buffer sources, "
                "probe colours and constants, constant buffer slots, plant light functions and constants and bend key, "
                "leaf light functions and constants and the frame's eye, shadow maps: depth convention, bias, alpha-to-mask "
-               "threshold, draw rules, constants, texel mapping, Shadow line\n";
+               "threshold, draw rules, constants, texel mapping, Shadow line; shadowed sun: the mask in the binding table, "
+               "pre-pass keys, compare directions, mask mirrors against the reference's numbers, guards, the frame's inverse "
+               "view-projection, mask constants\n";
 
   return 0;
 }

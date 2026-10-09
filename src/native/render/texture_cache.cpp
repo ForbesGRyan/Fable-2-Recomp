@@ -207,6 +207,13 @@ bool TextureCache::BuildPlan(const TextureFetch& t, Plan* plan) {
   return true;
 }
 
+// Bounded and fail closed: the tile's 32 rows inside the physical heap or nothing, and bytes that
+// are not unit vectors are not the tile (DecodeRotationTile).
+bool TextureCache::ReadRotationTile(uint8_t out[kRotationTileBytes]) const {
+  const uint8_t* bytes = capture::ReadPhysical(kRotationTilePhys, kRotationTileGuestBytes);
+  return bytes && DecodeRotationTile(bytes, kRotationTileGuestBytes, out);
+}
+
 nrhi::TextureView* TextureCache::Resolve(nrhi::Cmd* cmd, nrhi::Device* dev,
                                          const capture::Material& m, uint32_t* sampler,
                                          float* uv_fix, MaterialStatus* status, TextureStats& st) {

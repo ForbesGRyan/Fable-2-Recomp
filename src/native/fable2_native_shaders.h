@@ -86,16 +86,16 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 //
 // The light (frame-map section 14, "Native light"; clay_logic.h, "Native
 // light"). Draw's light_mode says what the draw has: bit 0, the game's terrain
-// vertex normal, whose (x, y) the draw's buffer at t8 holds per grid point
+// vertex normal, whose (x, y) the draw's buffer at t9 holds per grid point
 // (GeometryCache::TerrainNormals) and whose z is formed here as the game's
 // vertex shader forms it, for the steep-ground block and for the light; bit 1,
-// an object's stream normal at t9 and its word at t10, the normal put through
+// an object's stream normal at t10 and its word at t11, the normal put through
 // the draw's rows of cbuffer Object (b1) as the game puts it through c4..c6
 // times c7.w (a bone-skinned mesh's normals are in the buffer after the bones
 // and take the rows like any other); bit 3 (with bit 1), the word is not the
 // stream colour but the vertex's probe set, and the colour is the probe colour
 // of the draw's twelve probe registers (Object's o_probe, vertex c28..c39) and
-// the vertex's four weights at t11, as the game's probe vertex shaders form
+// the vertex's four weights at t12, as the game's probe vertex shaders form
 // it, with no power (the pixel function's pow(|x|, c21.w) is the only one it
 // takes; the game takes that absolute value too, so a colour that the signed
 // weights make zero or negative is lit as the game lights it); bit 2, the
@@ -103,9 +103,9 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 // (AmbientAxis with the frame's axis) and, without bit 3, the colour-stream
 // colour raised to the vertex shader's literal, and the pixel shader calls its
 // family's function with the frame's block (cbuffer Frame, b2) and the draw's
-// values. Bit 4 (with bit 1): an instanced plant; its normal at t9 is in the
-// world already and takes no rows, the word at t10 is the colour of the
-// vertex's copy, and t11 (probe_or_bend) holds the copy's up axis and the
+// values. Bit 4 (with bit 1): an instanced plant; its normal at t10 is in the
+// world already and takes no rows, the word at t11 is the colour of the
+// vertex's copy, and t12 (probe_or_bend) holds the copy's up axis and the
 // vertex's height, the inputs of the bent normal; bit 5 (with bit 4): the
 // plant's pixel shader has the ambient factor. Bit 6 (with bits 1 and 3): a
 // tree leaf, a probe record whose vertex stage also makes the sun's two
@@ -134,7 +134,7 @@ struct ClayBufferField {
 inline constexpr ClayBufferField kClayFrameFields[] = {
     {"f_sun_dir", 0, 12},  {"f_light_on", 12, 4},  {"f_sun_col", 16, 12}, {"f_tint_pow", 28, 4},
     {"f_tint", 32, 12},    {"f_exposure", 44, 4},  {"f_add", 48, 12},     {"f_pad0", 60, 4},
-    {"f_floor", 64, 12},   {"f_pad1", 76, 4},      {"f_axis", 80, 12},    {"f_pad2", 92, 4},
+    {"f_floor", 64, 12},   {"f_mask_du", 76, 4},   {"f_axis", 80, 12},    {"f_mask_dv", 92, 4},
     {"f_eye", 96, 12},     {"f_eye_on", 108, 4},
 };
 inline constexpr ClayBufferField kClayObjectFields[] = {
@@ -162,8 +162,8 @@ cbuffer Frame : register(b2) {
   float3 f_sun_col; float f_tint_pow;    // c87.xyz; c21.w
   float3 f_tint; float f_exposure;       // c21.xyz; the exposure, which the lit pixel paths alone multiply by
   float3 f_add; float f_pad0;            // c20.xyz (c20.w, the output scale, is not applied)
-  float3 f_floor; float f_pad1;          // c22.xyz
-  float3 f_axis; float f_pad2;           // c23.xyz (= vertex c19.xyz)
+  float3 f_floor; float f_mask_du;       // c22.xyz; 1 / the target's width: with f_mask_dv the screen mask's coordinate
+  float3 f_axis; float f_mask_dv;        // c23.xyz (= vertex c19.xyz); 1 / the target's height
   float3 f_eye; uint f_eye_on;           // c19.xyz, the eye (= vertex c9.xyz of the leaf shaders); 1: it is usable
 };
 float3 light_normalize(float3 v) {
@@ -271,10 +271,10 @@ inline constexpr const char* kClayVs = FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_H
 StructuredBuffer<float4> positions : register(t0);
 StructuredBuffer<uint> indices : register(t1);
 StructuredBuffer<float2> uvs : register(t2);
-StructuredBuffer<float2> terrain_normals : register(t8);
-StructuredBuffer<float3> normals : register(t9);
-StructuredBuffer<uint> colours : register(t10);          // a stream colour, a probe set, or the colour of a plant's copy
-StructuredBuffer<float4> probe_or_bend : register(t11);  // a probe object's or leaf's weights, or a plant's bend inputs (up axis, height)
+StructuredBuffer<float2> terrain_normals : register(t9);
+StructuredBuffer<float3> normals : register(t10);
+StructuredBuffer<uint> colours : register(t11);          // a stream colour, a probe set, or the colour of a plant's copy
+StructuredBuffer<float4> probe_or_bend : register(t12);  // a probe object's or leaf's weights, or a plant's bend inputs (up axis, height)
 struct VsOut {
   float4 pos : SV_Position; float3 ndc : TEXCOORD0; float2 uv : TEXCOORD1;
   float3 world : TEXCOORD2;
@@ -316,7 +316,7 @@ VsOut main(uint vid : SV_VertexID) {
     float3 n = normals[v];
     o.normal = float3(dot(o_rot0.xyz, n), dot(o_rot1.xyz, n), dot(o_rot2.xyz, n));
     o.axis = AmbientAxis(o.normal, f_axis);
-    // t10 holds one word a vertex: the stream colour, or (light_mode bit 3) the vertex's probe set.
+    // t11 holds one word a vertex: the stream colour, or (light_mode bit 3) the vertex's probe set.
     uint word = colours[v];
     [branch] if (light_mode & 8) {
       // The probe colour as the game's vertex shaders form it, with no power:
@@ -330,7 +330,7 @@ VsOut main(uint vid : SV_VertexID) {
   }
   [branch] if ((light_mode & 82) == 18 && has_light) {
     // An instanced plant. Its normal is in the world already (normalize(M n) of its copy's rows): no
-    // rows here. t10 holds the colour of the vertex's copy, t11 the copy's up axis (xyz) and the
+    // rows here. t11 holds the colour of the vertex's copy, t12 the copy's up axis (xyz) and the
     // vertex's height in the copy (w); the draw's bend constants c45.x, .y, .z are the fourth
     // components of the three rows. As the game's plant vertex shaders: the bend of the normal, and
     // the colour raised to c18.w (2.2 * c21.w) times c18.xyz (c21.xyz), plus c54.xyz (c20.xyz) where
@@ -353,7 +353,7 @@ VsOut main(uint vid : SV_VertexID) {
   // (90: those three bits and the probe bit. A leaf is a probe record with the leaf bit.)
   [branch] if ((light_mode & 90) == 74 && has_light) {
     // A tree leaf, as the game's leaf vertex shaders: the normal through the rows, as it is; the probe
-    // colour (the set at t10 clamped, the weights at t11) raised to c18.w * 0.4545 (2.2 * c21.w * 0.4545)
+    // colour (the set at t11 clamped, the weights at t12) raised to c18.w * 0.4545 (2.2 * c21.w * 0.4545)
     // times c18.xyz (c21.xyz) plus c54.xyz (c20.xyz); the world position (M p) / c7.w + c4..c6 .w and
     // the unit vector from it to the eye; and the sun's two scalars on the side of the card the viewer
     // sees (the frame's sun stands in the vertex side's light set: a direction, no cone, no range), in
@@ -389,10 +389,16 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0) : SV_Target {
 // sat(N . c80.xyz) * mask) * c49.xyz, times c26.xyz, with A = albedo^2 (after the division by the
 // alpha where the shader has it), vcolour the vertex shader's colour (the stream colour raised to its
 // literal, or the probe colour as it is), N the interpolated M n normalised, L from
-// t = sat(normalize(axis) . N), and the mask 1 (no shadows). The pixel shader is the same program for
+// t = sat(normalize(axis) . N), and the mask the frame's screen mask at the pixel (t4: the sun's shadow,
+// 1 = lit; the 1 x 1 white texture in a frame without one; clay_logic.h, "Native shadows"), read at the
+// pixel's centre over the target's size, by a lit pixel only. The pixel shader is the same program for
 // both kinds of colour and reads none of the probe registers.
-inline constexpr const char* kClayTexturedPs = FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL FABLE2_CLAY_OBJECT_HLSL R"hlsl(
+// kClayTexturedDepthPs is the same text compiled with CLAY_DEPTH_ONLY: the shader of the depth pre-pass
+// for a record of this kind. It makes the same alpha and discards the same pixels (the alpha test,
+// alpha-to-mask) and then returns: no light, no mask, no colour (the draw writes none).
+#define FABLE2_CLAY_TEXTURED_HLSL FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL FABLE2_CLAY_OBJECT_HLSL R"hlsl(
 Texture2D albedo : register(t3);
+Texture2D shadow_mask : register(t4);
 SamplerState s_point_wrap : register(s0);
 SamplerState s_linear_wrap : register(s1);
 SamplerState s_point_clamp : register(s2);
@@ -437,8 +443,13 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
       float per_offset = samples == 1 ? 0.125 : samples == 2 ? 0.0625 : 0.25;
       if (!(a >= mask_base - offset * per_offset)) discard;
     }
+#ifdef CLAY_DEPTH_ONLY
+    return float4(0.0, 0.0, 0.0, 0.0);
+#else
     if (light_mode & 4) {
       float3 lit;
+      // The sun's shadow at the pixel: every family multiplies its sun term by it, and nothing else.
+      float mask = shadow_mask.SampleLevel(s_linear_clamp, pos.xy * float2(f_mask_du, f_mask_dv), 0).r;
       [branch] if (light_mode & 16) {
         // An instanced plant: the normal bent as the game's plant pixel shaders bend it, then A times
         // the vertex side's ambient plus the sun, or (light_mode bit 5) the object form with the vertex
@@ -446,29 +457,33 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
         float3 Np = PlantNormal(normal, bend);
         if (light_mode & 32) {
           lit = LightPlantLit(clay_linear(t.rgb), vcolour, f_add, f_floor, AmbientT(axis, Np), dot(Np, f_sun_dir), f_sun_col,
-                              SunGateSingle(1.0, 1.0));
+                              SunGateSingle(mask, 1.0));
         } else {
-          lit = LightPlant(clay_linear(t.rgb), vcolour, dot(Np, f_sun_dir), f_sun_col, SunGateSingle(1.0, 1.0));
+          lit = LightPlant(clay_linear(t.rgb), vcolour, dot(Np, f_sun_dir), f_sun_col, SunGateSingle(mask, 1.0));
         }
       } else if (light_mode & 64) {
         // A tree leaf: the vertex side's ambient and the sun's two scalars (bend.x front, bend.y back)
-        // on A, the back light on leaf texels only; the mask 1 through the shader's two literals (0.6
-        // and 0.4: both factors are then 1); c27.w, c49 and c26 as an object's.
-        float2 m = LeafMask(1.0, 0.6, 0.4);
+        // on A, the back light on leaf texels only; the mask through the shader's two literals (0.6
+        // and 0.4: once on the front light, twice on the back light; both factors are 1 at a mask
+        // of 1); c27.w, c49 and c26 as an object's.
+        float2 m = LeafMask(mask, 0.6, 0.4);
         lit = LightLeaf(clay_linear(t.rgb), vcolour, bend.x, bend.y, f_sun_col, o_c27w, m.x, m.y, o_c49) * o_c26;
       } else {
         float3 N = light_normalize(normal);
         lit = LightObject(clay_linear(t.rgb), vcolour, f_tint, f_tint_pow, f_add, f_floor, AmbientT(axis, normal),
-                          dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(1.0, 1.0), o_c49) * o_c26;
+                          dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(mask, 1.0), o_c49) * o_c26;
       }
       return float4(clay_lit(lit * f_exposure), (alpha_mode & 0x80) ? saturate(a) : 1.0);
     }
     return float4(clay_linear(t.rgb * (0.75 + 0.25 * facet)), (alpha_mode & 0x80) ? saturate(a) : 1.0);
+#endif
   }
   base = float3((color >> 16) & 255, (color >> 8) & 255, color & 255) / 255.0;
   return float4(clay_linear(base * (0.35 + 0.65 * facet)), 1.0);
 }
-)hlsl";
+)hlsl"
+inline constexpr const char* kClayTexturedPs = FABLE2_CLAY_TEXTURED_HLSL;
+inline constexpr const char* kClayTexturedDepthPs = "#define CLAY_DEPTH_ONLY 1\n" FABLE2_CLAY_TEXTURED_HLSL;
 
 // Terrain material of the clay pass (frame-map section 13, "Terrain", "Native
 // terrain material"; the reference is tools/xdk_sigmatch/terrain_replay.py,
@@ -502,14 +517,18 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
 //     most 1/256).
 // The light (light_mode bit 2; lighting-formulas.md, "Terrain layers", "Far terrain"), with the
 // colour above as A or F, the base map tf3 at (world - heightmap offset) * c14.xy as the baked term,
-// N the vertex normal interpolated and normalised, and the mask 1:
+// N the vertex normal interpolated and normalised, and for the layers the screen mask at the pixel
+// (t4, as kClayTexturedPs reads it; the far terrain has none: its sun is scaled by c11.x):
 //   layer  A * c11.x * (pow(tf3, c21.w) * c21.xyz * L + c20.xyz) + A * c87.xyz * sat(N . c80.xyz) *
-//          sat(8 * (N . c109.xyz)), L from t = sat(normalize(axis) . N), axis the vertex shader's
+//          sat(8 * (N . c109.xyz)) * mask, L from t = sat(normalize(axis) . N), axis the vertex shader's
 //          lerp(n, c19, (1 + n . c19) / 2) interpolated;
 //   far    F * (pow(tf3, c21.w) * c21.xyz * L + c20.xyz) + F * c11.x * c87.xyz * sat(N . c80.xyz),
 //          L from t = sat(N . c23.xyz); the underlay's fade multiplies the lit colour.
-// Not read: the fog, the normal maps tf2 and tf14, the screen mask tf8, the
-// lanterns of the two- and four-light shaders.
+// Not read: the fog, the normal maps tf2 and tf14, the lanterns of the two- and
+// four-light shaders.
+// kClayTerrainLayerDepthPs and kClayTerrainFarDepthPs are the two texts compiled with CLAY_DEPTH_ONLY,
+// the depth pre-pass's shaders for terrain records: the same alpha (the layer's weight times its fade, the
+// hole's discard) and the same alpha test and alpha-to-mask, then a return without light or colour.
 // Both shaders end in kClayTexturedPs's alpha test, alpha-to-mask and output
 // (unlit: the softened facet shade, squared here because it multiplies the display
 // value and the colour is linear: ClayLinearShaded in clay_logic.h; lit: the value
@@ -517,10 +536,10 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
 // constants are cbuffer Terrain at b1, a constant buffer with one 256-byte slot
 // per terrain draw (ClayTerrainConstants in clay_logic.h); kClayTerrainFields
 // below is its layout, which the tests hold against both the compiled shaders
-// and the C++ struct. Textures: t4 the colour (tf0 or tf13), t5 the weight
-// cells (white for a far draw), t6 the side texture of a layer with the
-// steep-ground block (white otherwise), t7 the base map of a lit draw (white
-// otherwise); static samplers as kClayTexturedPs.
+// and the C++ struct. Textures: t5 the colour (tf0 or tf13), t6 the weight
+// cells (white for a far draw), t7 the side texture of a layer with the
+// steep-ground block (white otherwise), t8 the base map of a lit draw (white
+// otherwise); t4 the screen mask (the layers); static samplers as kClayTexturedPs.
 using ClayTerrainField = ClayBufferField;
 inline constexpr ClayTerrainField kClayTerrainFields[] = {
     {"t_detail_uv", 0, 16},      {"t_weight_uv", 16, 16},     {"t_world0", 32, 16},        {"t_world1", 48, 16},
@@ -545,9 +564,9 @@ cbuffer Terrain : register(b1) {
   float4 t_base_uv;     // lit: tf3 coordinate of the world position
   uint t_base_sampler; float t_c11x; float t_facing_scale; uint t_light_pad;   // lit: c11.x; layer: the literal 8
 };
-Texture2D t_colour : register(t4);
-Texture2D t_weights : register(t5);
-Texture2D t_base : register(t7);
+Texture2D t_colour : register(t5);
+Texture2D t_weights : register(t6);
+Texture2D t_base : register(t8);
 SamplerState s_point_wrap : register(s0);
 SamplerState s_linear_wrap : register(s1);
 SamplerState s_point_clamp : register(s2);
@@ -598,14 +617,19 @@ float4 terrain_out(float3 colour, float a, float4 pos, float3 ndc) {
     float per_offset = samples == 1 ? 0.125 : samples == 2 ? 0.0625 : 0.25;
     if (!(a >= mask_base - offset * per_offset)) discard;
   }
+#ifdef CLAY_DEPTH_ONLY
+  return float4(0.0, 0.0, 0.0, 0.0);
+#else
   if (light_mode & 4) return float4(clay_lit(colour * f_exposure), (alpha_mode & 0x80) ? saturate(a) : 1.0);
   float shade = 0.75 + 0.25 * facet;
   return float4(saturate(colour * (shade * shade)), (alpha_mode & 0x80) ? saturate(a) : 1.0);
+#endif
 }
 )hlsl"
 
-inline constexpr const char* kClayTerrainLayerPs = FABLE2_CLAY_TERRAIN_COMMON_HLSL R"hlsl(
-Texture2D t_side : register(t6);
+#define FABLE2_CLAY_TERRAIN_LAYER_HLSL FABLE2_CLAY_TERRAIN_COMMON_HLSL R"hlsl(
+Texture2D t_side : register(t7);
+Texture2D shadow_mask : register(t4);
 // The side texture at `at` with the screen derivatives d = (ddx, ddy) of the coordinate.
 float4 sample_side(float2 at, float4 d) {
   if (t_side_sampler == 0) return t_side.SampleGrad(s_point_wrap, at, d.xy, d.zw);
@@ -643,14 +667,18 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
   [branch] if (light_mode & 4) {
     float3 N = light_normalize(normal);
     float facing = FacingGate(dot(N, f_sun_dir), t_facing_scale);
+    // The sun's shadow at the pixel, on the sun term with the facing factor.
+    float mask = shadow_mask.SampleLevel(s_linear_clamp, pos.xy * float2(f_mask_du, f_mask_dv), 0).r;
     lin = LightTerrainLayer(lin, sample_base(base_at, base_d).rgb, f_tint, f_tint_pow, f_add, f_floor,
-                            AmbientT(axis, normal), dot(N, f_sun_dir), f_sun_col, t_c11x, SunGateSingle(1.0, facing));
+                            AmbientT(axis, normal), dot(N, f_sun_dir), f_sun_col, t_c11x, SunGateSingle(mask, facing));
   }
   return terrain_out(lin, a, pos, ndc);
 }
-)hlsl";
+)hlsl"
+inline constexpr const char* kClayTerrainLayerPs = FABLE2_CLAY_TERRAIN_LAYER_HLSL;
+inline constexpr const char* kClayTerrainLayerDepthPs = "#define CLAY_DEPTH_ONLY 1\n" FABLE2_CLAY_TERRAIN_LAYER_HLSL;
 
-inline constexpr const char* kClayTerrainFarPs = FABLE2_CLAY_TERRAIN_COMMON_HLSL R"hlsl(
+#define FABLE2_CLAY_TERRAIN_FAR_HLSL FABLE2_CLAY_TERRAIN_COMMON_HLSL R"hlsl(
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1,
             float3 world : TEXCOORD2, float3 normal : TEXCOORD3) : SV_Target {
   float3 colour = sample_colour(uv).rgb;
@@ -665,7 +693,9 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
   if (t_flags & 1) lin *= terrain_fade_in(world);
   return terrain_out(lin, 1.0, pos, ndc);
 }
-)hlsl";
+)hlsl"
+inline constexpr const char* kClayTerrainFarPs = FABLE2_CLAY_TERRAIN_FAR_HLSL;
+inline constexpr const char* kClayTerrainFarDepthPs = "#define CLAY_DEPTH_ONLY 1\n" FABLE2_CLAY_TERRAIN_FAR_HLSL;
 
 // The shadow maps' pixel shader (render/clay_pass.cpp; clay_logic.h, "Native shadow maps"): depth only, no
 // colour output. It is drawn with kClayVs, whose first three outputs it takes (the registers are assigned
@@ -722,10 +752,138 @@ float main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOOR
 }
 )hlsl";
 
+#undef FABLE2_CLAY_TERRAIN_FAR_HLSL
+#undef FABLE2_CLAY_TERRAIN_LAYER_HLSL
 #undef FABLE2_CLAY_TERRAIN_COMMON_HLSL
+#undef FABLE2_CLAY_TEXTURED_HLSL
 #undef FABLE2_CLAY_OBJECT_HLSL
 #undef FABLE2_CLAY_LIGHT_HLSL
 #undef FABLE2_CLAY_DRAW_HLSL
+
+// The screen mask of the sun's shadow (render/clay_pass.cpp; clay_logic.h, "Native shadows"; kFullscreenVs
+// draws it): one full-screen step into a single-channel target of the clay target's size, 1 = lit. It is
+// the arithmetic of the game's mask shader 0x0F99810F072BF0FC, light_formulas.py's mask_0f99 (mask_near,
+// mask_far, mask_combine; docs/native-renderer/lighting-formulas.md, "Shadows") term for term, in the
+// native form (MaskPixel, MaskNear, MaskFar, MaskCombine in clay_logic.h are the mirrors, held to the
+// reference's numbers):
+//   depth = the pre-pass depth at the pixel (0 at the near plane, 1 the clear value)
+//   S     = (X, Y, depth, 1), (X, Y) the pixel's centre in -1..1, Y up
+//   P     = m_inv . S / w, the world position;  d = |P - m_eye|
+//   near  = 0;  where d < split.x + split.z:  (a, b) = 2 * tile - 1, the tile's texel of the pixel (in the
+//           game's pixel units, modulo 32), or (1, 0) without the tile;  (u, v, z) = m_near . P / w;
+//           the share of the twelve taps at (u, v) + m_radius * (a x + b y, a y - b x) with z < the near
+//           map's texel there (a point fetch, clamped: the texel of floor(coordinate * size))
+//   far   = 0;  where split.x < d < split.y + 10:  (u, v, z) = m_far . P / w;  (x, y) = (u, v) * size;
+//           the texels floor(x) - 1, floor(x) by floor(y) - 1, floor(y), each 1 where z <= the far map's
+//           texel, weighted by frac(x) and frac(y) towards the higher texel
+//   mask  = lerp(lerp(near, far, sat((d - split.x) / split.z)), split.w, sat(0.1 * (d - split.y)))
+// The maps hold the caster's depth z, 1 where none is, so the game's 1 - z > map and 1 - z >= map are
+// z < map and z <= map here. Every pixel is computed, one at the clear depth too: it is a far pixel and
+// gets split.w, as in the game (NOT 1). The four textures are read with Load: no sampler, no filter of
+// the hardware. Guards: a w that is zero or no number gives split.w for the pixel and 1 for a map; a tap
+// whose coordinate is no number counts as lit; the texel indices are clamped as floats before they are
+// integers. The twelve taps are unrolled: the compiled shader has no loop.
+// kClayMaskFields is cbuffer Mask's layout (ClayMaskConstants in clay_logic.h), which the tests hold
+// against the compiled shader and the C++ struct.
+inline constexpr ClayBufferField kClayMaskFields[] = {
+    {"m_inv0", 0, 16},     {"m_inv1", 16, 16},    {"m_inv2", 32, 16},       {"m_inv3", 48, 16},
+    {"m_near0", 64, 16},   {"m_near1", 80, 16},   {"m_near2", 96, 16},      {"m_near3", 112, 16},
+    {"m_far0", 128, 16},   {"m_far1", 144, 16},   {"m_far2", 160, 16},      {"m_far3", 176, 16},
+    {"m_eye", 192, 12},    {"m_radius", 204, 4},  {"m_split", 208, 16},     {"m_inv_target", 224, 8},
+    {"m_tile_scale", 232, 8}, {"m_rotate", 240, 4}, {"m_map_size", 244, 4}, {"m_pad", 248, 8},
+};
+inline constexpr const char* kClayMaskPs = R"hlsl(
+cbuffer Mask : register(b0) {
+  float4 m_inv0; float4 m_inv1; float4 m_inv2; float4 m_inv3;      // the inverse view-projection, rows
+  float4 m_near0; float4 m_near1; float4 m_near2; float4 m_near3;  // world to the near map (u, v, depth, w): c36..c39
+  float4 m_far0; float4 m_far1; float4 m_far2; float4 m_far3;      // world to the far map: c40..c43
+  float3 m_eye; float m_radius;                                    // c19.xyz; the taps' radius in the map's units (2.5 texels)
+  float4 m_split;                                                  // c12
+  float2 m_inv_target; float2 m_tile_scale;                        // 1 / the target's size; game pixels a native pixel
+  uint m_rotate; float m_map_size; float2 m_pad;                   // 1: the tile is bound; the maps' size in texels
+};
+Texture2D<float> scene_depth : register(t0);
+Texture2D<float> near_map : register(t1);
+Texture2D<float> far_map : register(t2);
+Texture2D<float4> rotation : register(t3);
+static const float2 kMaskTaps[12] = {
+  float2(-0.20334500074386597, 0.6207159757614136), float2(0.18546099960803986, -0.893123984336853),
+  float2(0.9623399972915649, -0.19498300552368164), float2(0.5194560289382935, 0.7670220136642456),
+  float2(-0.6959139704704285, 0.45713698863983154), float2(0.5074309706687927, 0.06442499905824661),
+  float2(-0.8401439785957336, -0.07357999682426453), float2(0.8964200019836426, 0.41245800256729126),
+  float2(0.4734340012073517, -0.4800260066986084), float2(-0.7915589809417725, -0.5977100133895874),
+  float2(-0.32621198892593384, -0.40580999851226807), float2(-0.32194000482559204, -0.9326149821281433),
+};
+// A number of usable size: false for a NaN (no comparison holds for it) and for infinity.
+bool mask_number(float x) { return abs(x) < 3.0e38; }
+float MaskNear(float4 P, float2 rot) {
+  float w = dot(m_near3, P);
+  if (!(abs(w) > 0.0 && mask_number(w))) return 1.0;
+  float3 p = float3(dot(m_near0, P), dot(m_near1, P), dot(m_near2, P)) / w;
+  if (!(mask_number(p.x) && mask_number(p.y) && mask_number(p.z))) return 1.0;
+  float last = m_map_size - 1.0;
+  float lit = 0.0;
+  [unroll] for (int i = 0; i < 12; ++i) {
+    float2 o = float2(rot.x * kMaskTaps[i].x + rot.y * kMaskTaps[i].y, rot.x * kMaskTaps[i].y - rot.y * kMaskTaps[i].x);
+    float2 at = p.xy + m_radius * o;
+    bool number = mask_number(at.x) && mask_number(at.y);
+    float2 texel = number ? clamp(floor(at * m_map_size), 0.0, last) : float2(0.0, 0.0);
+    float stored = near_map.Load(int3(int2(texel), 0));
+    lit += (!number || p.z < stored) ? 1.0 : 0.0;
+  }
+  return lit * 0.0833333358168602;
+}
+float MaskFar(float4 P) {
+  float w = dot(m_far3, P);
+  if (!(abs(w) > 0.0 && mask_number(w))) return 1.0;
+  float3 p = float3(dot(m_far0, P), dot(m_far1, P), dot(m_far2, P)) / w;
+  if (!(mask_number(p.x) && mask_number(p.y) && mask_number(p.z))) return 1.0;
+  float2 xy = p.xy * m_map_size;
+  if (!(abs(xy.x) < 2147483648.0 && abs(xy.y) < 2147483648.0)) return 1.0;
+  float2 cell = floor(xy);
+  float2 f = xy - cell;
+  float last = m_map_size - 1.0;
+  int2 lo = int2(clamp(cell - 1.0, 0.0, last));
+  int2 hi = int2(clamp(cell, 0.0, last));
+  float lit00 = (p.z <= far_map.Load(int3(hi.x, hi.y, 0))) ? 1.0 : 0.0;
+  float lit10 = (p.z <= far_map.Load(int3(lo.x, hi.y, 0))) ? 1.0 : 0.0;
+  float lit11 = (p.z <= far_map.Load(int3(lo.x, lo.y, 0))) ? 1.0 : 0.0;
+  float lit01 = (p.z <= far_map.Load(int3(hi.x, lo.y, 0))) ? 1.0 : 0.0;
+  return f.x * f.y * lit00 + (1.0 - f.x) * f.y * lit10 + (1.0 - f.x) * (1.0 - f.y) * lit11 + f.x * (1.0 - f.y) * lit01;
+}
+float MaskCombine(float d, float near_term, float far_term) {
+  float w = (m_split.z > 0.0) ? saturate((d - m_split.x) / m_split.z) : ((d > m_split.x) ? 1.0 : 0.0);
+  float m = near_term + w * (far_term - near_term);
+  float fade = saturate(0.1 * (d - m_split.y));
+  return m + fade * (m_split.w - m);
+}
+float4 main(float4 pos : SV_Position) : SV_Target {
+  uint2 pixel = uint2(pos.xy);
+  float depth = scene_depth.Load(int3(pixel, 0));
+  float4 S = float4((2.0 * pixel.x + 1.0) * m_inv_target.x - 1.0, 1.0 - (2.0 * pixel.y + 1.0) * m_inv_target.y, depth, 1.0);
+  float beyond = m_split.w;
+  float w = dot(m_inv3, S);
+  if (!(abs(w) > 0.0 && mask_number(w))) return float4(beyond, beyond, beyond, 1.0);
+  float3 world = float3(dot(m_inv0, S), dot(m_inv1, S), dot(m_inv2, S)) / w;
+  float3 to_eye = world - m_eye;
+  float d = sqrt(dot(to_eye, to_eye));
+  if (!mask_number(d)) return float4(beyond, beyond, beyond, 1.0);
+  float4 P = float4(world, 1.0);
+  float near_term = 0.0;
+  float far_term = 0.0;
+  [branch] if (m_split.x + m_split.z > d) {
+    float2 rot = float2(1.0, 0.0);
+    [branch] if (m_rotate != 0) {
+      uint2 tile = uint2(floor((float2(pixel) + 0.5) * m_tile_scale)) % 32;
+      rot = 2.0 * rotation.Load(int3(tile, 0)).xy - 1.0;
+    }
+    near_term = MaskNear(P, rot);
+  }
+  [branch] if (d > m_split.x && m_split.y + 10.0 > d) far_term = MaskFar(P);
+  float m = MaskCombine(d, near_term, far_term);
+  return float4(m, m, m, 1.0);
+}
+)hlsl";
 
 // Output mapping of the clay pass (render/clay_pass.cpp; kFullscreenVs draws it): the linear target's
 // value times the buffer's first word, as a display value in the 8-bit target the composite samples:
@@ -759,38 +917,55 @@ float4 main(float4 pos : SV_Position) : SV_Target {
 )hlsl";
 
 // The shadow view (render/composite.cpp, fable2_native_view=shadow; evidence shots, no key): the pass's two
-// shadow maps side by side over the whole output, the near map left and the far map right, each a square
-// of side min(out_w / 2, out_h), the pair centred. Grey = the stored depth as it is: 0 (black) at the
-// light's near plane, growing with the distance from the light, 1 (white) where no caster is (the clear
-// value); so casters are grey shapes on white, darker the nearer they are to the light. A screen pixel
-// shows the smallest depth (the nearest caster) of the 2 x 2 texels at its place, read without a sampler,
-// so that a caster a texel wide stays visible when 1024 texels are shown on fewer pixels; casters look up
-// to a texel fatter for it. Outside the two squares: dark blue-grey. maps_valid 0 (the maps were not drawn
-// for the frame shown: no shadow block, the shadows or the light off): both squares flat dark blue, never
-// a map of another frame.
+// shadow maps and its screen mask over the whole output. Left, a column of two squares of side out_h / 2:
+// the near map above the far map. Right of it, in what is left of the width, the mask, as large as fits
+// with the clay target's shape, centred.
+// The maps: grey = the stored depth as it is: 0 (black) at the light's near plane, growing with the
+// distance from the light, 1 (white) where no caster is (the clear value); so casters are grey shapes on
+// white, darker the nearer they are to the light. A screen pixel shows the smallest depth (the nearest
+// caster) of the 2 x 2 texels at its place, so that a caster a texel wide stays visible when 1024 texels
+// are shown on fewer pixels; casters look up to a texel fatter for it.
+// The mask: grey = its value, white lit, black in full shadow, the mid grey of split.w beyond the shadow
+// distance and on the sky; the texel at the pixel's place (a point read: the tap pattern is not smoothed).
+// All three are read without a sampler. Outside the panels: dark blue-grey. flags bit 0 clear (the maps
+// were not drawn for the frame shown: no shadow block, the shadows or the light off): both squares flat
+// dark blue; bit 1 clear (no mask was written for the frame): the mask's panel flat dark blue; never a
+// map or a mask of another frame.
 inline constexpr const char* kShadowViewPs = R"hlsl(
-cbuffer C : register(b0) { float out_w; float out_h; uint maps_valid; float map_size; };
+cbuffer C : register(b0) { float out_w; float out_h; uint flags; float map_size; float mask_w; float mask_h; float2 view_pad; };
 Texture2D<float> near_map : register(t0);
 Texture2D<float> far_map : register(t1);
+Texture2D<float4> mask : register(t2);
 float4 main(float4 pos : SV_Position) : SV_Target {
-  float side = min(out_w * 0.5, out_h);
-  float2 at = (pos.xy - float2(out_w * 0.5 - side, (out_h - side) * 0.5)) / side;
-  if (at.x < 0.0 || at.x >= 2.0 || at.y < 0.0 || at.y >= 1.0) return float4(0.02, 0.02, 0.05, 1.0);
-  if (maps_valid == 0) return float4(0.0, 0.0, 0.25, 1.0);
-  bool far_side = at.x >= 1.0;
-  float last = map_size - 1.0;
-  int2 t0 = int2(min(float2(far_side ? at.x - 1.0 : at.x, at.y) * map_size, last));
-  int2 t1 = min(t0 + 1, int2(last, last));
-  float d;
-  if (far_side) {
-    d = min(min(far_map.Load(int3(t0, 0)), far_map.Load(int3(t1.x, t0.y, 0))),
-            min(far_map.Load(int3(t0.x, t1.y, 0)), far_map.Load(int3(t1, 0))));
-  } else {
-    d = min(min(near_map.Load(int3(t0, 0)), near_map.Load(int3(t1.x, t0.y, 0))),
-            min(near_map.Load(int3(t0.x, t1.y, 0)), near_map.Load(int3(t1, 0))));
+  float side = out_h * 0.5;
+  if (pos.x < side) {
+    if (pos.y >= 2.0 * side) return float4(0.02, 0.02, 0.05, 1.0);
+    if ((flags & 1) == 0) return float4(0.0, 0.0, 0.25, 1.0);
+    bool far_side = pos.y >= side;
+    float2 at = float2(pos.x, far_side ? pos.y - side : pos.y) / side;
+    float last = map_size - 1.0;
+    int2 t0 = int2(min(at * map_size, last));
+    int2 t1 = min(t0 + 1, int2(last, last));
+    float d;
+    if (far_side) {
+      d = min(min(far_map.Load(int3(t0, 0)), far_map.Load(int3(t1.x, t0.y, 0))),
+              min(far_map.Load(int3(t0.x, t1.y, 0)), far_map.Load(int3(t1, 0))));
+    } else {
+      d = min(min(near_map.Load(int3(t0, 0)), near_map.Load(int3(t1.x, t0.y, 0))),
+              min(near_map.Load(int3(t0.x, t1.y, 0)), near_map.Load(int3(t1, 0))));
+    }
+    d = saturate(d);
+    return float4(d, d, d, 1.0);
   }
-  d = saturate(d);
-  return float4(d, d, d, 1.0);
+  float room_w = out_w - side;
+  float scale = min(room_w / mask_w, out_h / mask_h);
+  float2 size = float2(mask_w, mask_h) * scale;
+  float2 at = (pos.xy - float2(side + (room_w - size.x) * 0.5, (out_h - size.y) * 0.5)) / size;
+  if (at.x < 0.0 || at.x >= 1.0 || at.y < 0.0 || at.y >= 1.0) return float4(0.02, 0.02, 0.05, 1.0);
+  if ((flags & 2) == 0) return float4(0.0, 0.0, 0.25, 1.0);
+  int2 t = int2(min(at * float2(mask_w, mask_h), float2(mask_w - 1.0, mask_h - 1.0)));
+  float m = saturate(mask.Load(int3(t, 0)).r);
+  return float4(m, m, m, 1.0);
 }
 )hlsl";
 

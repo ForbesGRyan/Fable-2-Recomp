@@ -97,6 +97,7 @@ static void Fill(LightCase& c, const PsLightSpec& ps, const VsLightSpec& vs, std
   SetReg(c.vs, 5, -1.0f, 0.0f, 0.0f, 92.0f);
   SetReg(c.vs, 6, 0.0f, 0.0f, 1.0f, 93.0f);
   SetReg(c.vs, 7, 71.0f, 72.0f, 73.0f, 1.25f);
+  SetReg(c.vs, 8, 0.625f, 74.0f, 75.0f, 76.0f);
   SetReg(c.vs, 20, 224.0f, 81.0f, 82.0f, 83.0f);
   for (uint32_t r = 0; r < 12; ++r) SetReg(c.vs, 28 + r, 100.0f + r, 200.0f + r, 300.0f + r, 400.0f + r);
   SetReg(c.vs, 45, 1.0f, -200.0f, 100.0f, 0.5f);
@@ -219,10 +220,18 @@ static int LightTests() {
         !is(3, 1, 26, 2) || !is(4, 1, 49, 1)) {
       return 214;
     }
-    if (LightRegisterRuns(kTrunkPs, kProbeVs, r) != 5 || !is(0, 0, 4, 3) || !is(1, 0, 7, 1) || !is(2, 0, 28, 12) ||
-        !is(3, 1, 26, 2) || !is(4, 1, 49, 1)) {
+    // A trunk: an object's registers and, last, vertex c8 (.x: the scale of the trees' in-scatter; fog
+    // sub-project, ruling B), which the light does not need (LightRunOptional).
+    if (LightRegisterRuns(kTrunkPs, kProbeVs, r) != 6 || !is(0, 0, 4, 3) || !is(1, 0, 7, 1) || !is(2, 0, 28, 12) ||
+        !is(3, 1, 26, 2) || !is(4, 1, 49, 1) || !is(5, 0, 8, 1)) {
       return 215;
     }
+    if (!LightRunOptional(r[5]) || LightRunOptional(r[0]) || LightRunOptional(r[2]) || LightRunOptional(r[4]) ||
+        LightRunOptional(LightRegisterRun{1, 8, 1})) {
+      return 215;
+    }
+    // An object has no such register: its fog is the pixel block's.
+    if (LightRegisterRuns(kObjectPs, kProbeVs, r) != 5 || is(4, 0, 8, 1)) return 215;
     VsLightSpec skinned = kProbeVs;
     skinned.scale_ref = -1;  // the skinned shaders multiply by no constant
     if (LightRegisterRuns(kObjectPs, skinned, r) != 4 || !is(0, 0, 4, 3) || !is(1, 0, 28, 12)) return 216;
@@ -231,11 +240,11 @@ static int LightTests() {
     const PsLightSpec none{1, LightFamily::kNone, false, 0.0f};
     if (LightRegisterRuns(none, kStreamVs, r) != 0) return 219;
     // A leaf (plan Task 8c): the trunk's registers and the wrap of its front light, vertex c50 (.w).
-    if (LightRegisterRuns(kLeafPs, kProbeVs, r) != 6 || !is(0, 0, 4, 3) || !is(1, 0, 7, 1) || !is(2, 0, 28, 12) ||
-        !is(3, 0, 50, 1) || !is(4, 1, 26, 2) || !is(5, 1, 49, 1)) {
+    if (LightRegisterRuns(kLeafPs, kProbeVs, r) != 7 || !is(0, 0, 4, 3) || !is(1, 0, 7, 1) || !is(2, 0, 28, 12) ||
+        !is(3, 0, 50, 1) || !is(4, 1, 26, 2) || !is(5, 1, 49, 1) || !is(6, 0, 8, 1)) {
       return 380;
     }
-    static_assert(kMaxLightRegisterRuns == 6);
+    static_assert(kMaxLightRegisterRuns == 7 && kLightVsFogScaleReg == 8);
   }
   // The fetch an entry names: by ordinal, held against the format and the offset it was written for.
   {
@@ -675,7 +684,7 @@ static int LightTests() {
     if (MakeLightInputs(o.d, &l) != LightReason::kNone || l.world_pos[2] != 0.0f || l.wrap != 0.0f) return 387;
     const LightInputs fresh;
     if (fresh.world_pos[0] != 0.0f || fresh.world_pos[1] != 0.0f || fresh.world_pos[2] != 0.0f || fresh.wrap != 0.0f) return 388;
-    static_assert(sizeof(LightInputs) == 328);
+    static_assert(sizeof(LightInputs) == 332);
     // Every value it reads is a number, the translation and the wrap included; an object's
     // translation is not read (case 264 above).
     for (uint32_t reg = 4; reg <= 6; ++reg) {
@@ -701,6 +710,51 @@ static int LightTests() {
     if (!Fails(t.d, LightReason::kLightUnknown, "weights-range")) return 395;
     t = LeafCase(); t.d.pair = false;
     if (!Fails(t.d, LightReason::kLightUnknown, "pair-not-checked")) return 396;
+    // The trees' in-scatter scale, vertex c8.x (fog sub-project, ruling B): carried by a trunk and a
+    // leaf when it was read, is a number and lies in [0, kTreeFogScaleMax]; otherwise the draw keeps
+    // its light and carries kTreeFogNone: it is drawn without fog. No other family carries one.
+    {
+      static_assert(kTreeFogNone < 0.0f && kTreeFogScaleMax == 4.0f);
+      LightCase f = LeafCase();
+      if (MakeLightInputs(f.d, &l) != LightReason::kNone || l.tree_fog != 0.625f) return 398;
+      f = ProbeCase(); f.d.ps = &kTrunkPs;
+      Fill(f, kTrunkPs, kProbeVs, ProbeFetches());
+      if (MakeLightInputs(f.d, &l) != LightReason::kNone || l.family != LightFamily::kTreeTrunk || l.tree_fog != 0.625f) return 398;
+      for (float edge : {0.0f, 1.0f, 4.0f}) {
+        f = LeafCase(); f.vs[8 * 4] = edge;
+        if (MakeLightInputs(f.d, &l) != LightReason::kNone || l.tree_fog != edge) return 399;
+      }
+      for (float bad : {nan, inf, -inf, -0.001f, 4.001f, 1e30f}) {
+        for (bool leaf : {true, false}) {
+          f = LeafCase();
+          if (!leaf) Fill(f, kTrunkPs, kProbeVs, ProbeFetches());
+          f.vs[8 * 4] = bad;
+          if (MakeLightInputs(f.d, &l) != LightReason::kNone || l.tree_fog != kTreeFogNone) return 400;
+          if (l.c27w != 0.75f || l.c49[0] != 0.5f) return 400;  // (the light is whole)
+        }
+      }
+      // Not read (the shader loads c8 itself, or the bank could not be read): the same.
+      f = LeafCase(); f.d.vs_regs.have[0] &= ~(1ull << 8);
+      if (MakeLightInputs(f.d, &l) != LightReason::kNone || l.tree_fog != kTreeFogNone || l.wrap != 0.4f) return 401;
+      // The other components of c8 are not the fog's.
+      f = LeafCase(); f.vs[8 * 4 + 1] = nan; f.vs[8 * 4 + 2] = inf; f.vs[8 * 4 + 3] = -inf;
+      if (MakeLightInputs(f.d, &l) != LightReason::kNone || l.tree_fog != 0.625f) return 402;
+      // An object, a plant and the terrain carry none, whatever c8 holds.
+      LightCase o = ProbeCase();
+      if (MakeLightInputs(o.d, &l) != LightReason::kNone || l.tree_fog != kTreeFogNone) return 403;
+      o.d.vs_regs.Mark(8, 1);  // (also when the register happens to have been read)
+      if (MakeLightInputs(o.d, &l) != LightReason::kNone || l.family != LightFamily::kObject || l.tree_fog != kTreeFogNone) return 403;
+      o = StreamCase();
+      if (MakeLightInputs(o.d, &l) != LightReason::kNone || l.tree_fog != kTreeFogNone) return 403;
+      o = InstanceCase();
+      if (MakeLightInputs(o.d, &l) != LightReason::kNone || l.tree_fog != kTreeFogNone) return 403;
+      o = TerrainCase(kLayerPs);
+      if (MakeLightInputs(o.d, &l) != LightReason::kNone || l.tree_fog != kTreeFogNone) return 403;
+      if (LightInputs{}.tree_fog != kTreeFogNone) return 404;
+      // A draw that fails for another reason has default inputs, the marker among them.
+      f = LeafCase(); f.vs[50 * 4 + 3] = inf;
+      if (MakeLightInputs(f.d, &l) == LightReason::kNone || l.tree_fog != kTreeFogNone) return 404;
+    }
     // Which families' pixel shaders read the light set's first light (c80, c87), so that the frame's
     // light block may be read at their draws: every family but the leaves, whose light is the vertex
     // shader's (0x7CD5... reads no light register; frame-map section 14, "Tree leaves").
@@ -817,7 +871,7 @@ static int LightTests() {
     if (!Fails(c.d, LightReason::kLightUnknown, "vertex-shader")) return 351;
   }
   // The entry's size: one per lit draw is copied into the frame.
-  if (sizeof(LightInputs) != 328 || sizeof(LightElement) != 16) {  // (312 before the leaves' four floats, plan Task 8c)
+  if (sizeof(LightInputs) != 332 || sizeof(LightElement) != 16) {  // (312 before the leaves' four floats, plan Task 8c; 328 before the trees' fog scale)
     std::printf("FAIL: sizeof(LightInputs) = %zu, sizeof(LightElement) = %zu\n", sizeof(LightInputs), sizeof(LightElement));
     return 352;
   }

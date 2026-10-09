@@ -1986,6 +1986,213 @@ inline uint32_t LightVertexNeed(uint32_t max_index, int32_t base_vertex, uint32_
   return uint32_t(hi) + 1u;
 }
 
+// --- Native fog (frame-map section 16, "Native fog"; docs/native-renderer/lighting-formulas.md, "Fog and sky") ---
+//
+// The game fogs in its scene pixel shaders, after the lit colour and before the output scale: one
+// block of arithmetic on six registers that hold one value a frame and two 1D tables it rewrites
+// every frame (capture/fog_block.h has the frame's block). The functions here are the CPU mirrors
+// of what the native lit shaders do with it, pinned to the reference
+// (tools/xdk_sigmatch/light_formulas.py: fog, vertex_fog, fog_apply, fog_coords, table_1d) by the
+// numbers of tools/xdk_sigmatch/fog_pins.py; they compute in double on the single-precision values
+// a shader gets.
+//
+// Two forms. The ground form (FogMirror: terrain layers, far terrain, objects, plants; light_formulas.fog):
+//   V = eye - P;  d = |V|;  dD = d - start;  unfogged unless dD > 0
+//   a = sat((-V / d) . axis);  S = scatter(a)          the in-scatter colour by the angle to the axis
+//   s = scale * dD;            T = transmit(s)         the transmittance by distance, per channel
+//   t = sat(slope * dD);       F = near + t * (S - near)
+//   G = C * T + (1 - T) * k * F;  C' = C + amount * (G - C)
+// The trees' form (TreeFogMirror: trunks and leaves; the controller's ruling B): the game computes
+// the trees' fog in their vertex shaders from the same two tables and the same axis, start and scale
+// (frame-map section 16, "The trees' tables": 28 of 28 frames), with no blend from the near colour
+// and no amount, and its pixel shaders apply it to the whole colour. Here it is evaluated per pixel:
+//   C' = C * T + (1 - T) * S * c8x                     c8x: the draw's vertex c8.x (LightInputs::tree_fog)
+// Both come after the family's lit colour (an object's or a tree's c49 included) and before its
+// c26 and the frame's exposure, which stands in for the game's output scale c20.w.
+//
+// Guards (plan, Review Focus 2; review of plan Task 3, M2). A pixel is left UNFOGGED, its colour as
+// it went in, when the fog is off for the frame, when a value the form reads is not a number, when
+// the pixel is at the eye (d = 0: no direction; it is inside any start), when its squared distance
+// is not below kFogDistance2Max (a position that is no number among them: no comparison holds for a
+// NaN), or when the result is not a number. A colour channel that is no number counts as 0, as in
+// the light functions. A zero axis reads the in-scatter table at 0; a distance coordinate beyond
+// the table's end reads its last texel. What the product hands a shader is narrower still: the
+// constants come from MakeClayFogConstants (every value a number inside the block's bounds) and the
+// tables from a valid block (finite texels), so that with a finite colour no product can overflow
+// (fog_block.h, kFogRegisterLimit).
+
+// The tables' sizes (capture::FogBlock: tf4 and tf5 decoded).
+inline constexpr uint32_t kFogScatterTexels = 64, kFogTransmitTexels = 256;
+static_assert(sizeof(capture::FogBlock::scatter) == kFogScatterTexels * 3 * sizeof(float) &&
+              sizeof(capture::FogBlock::transmit) == kFogTransmitTexels * 3 * sizeof(float));
+
+// The largest squared distance from the eye a pixel is fogged at: beyond it (10^15 units; the
+// levels are a few thousand across) the pixel keeps its colour. Far below the largest single, so
+// that the shader's comparison against it also refuses a squared distance that overflowed and one
+// that is no number, without a test for either that a compiler could remove.
+inline constexpr float kFogDistance2Max = 1e30f;
+
+// A 1D table of `n` texels as the game's fetch reads it with its linear filter and clamped
+// addressing (light_formulas.table_1d): texel i has its centre at u = (i + 0.5) / n; between two
+// centres the result is their linear blend; below the first centre and above the last, and outside
+// 0..1, the edge texel alone. A coordinate that is no number reads texel 0. No table: zeros.
+// The native tables are textures of the same sizes read with a linear, clamped sampler at
+// (u, 0.5): the same centres (the host's are at (i + 0.5) / n); the GPU's filter weight has 8
+// fractional bits, so its blend can differ from this one by 1 / 512 of the difference of two
+// neighbouring texels.
+inline void FogTableRead(const float (*table)[3], uint32_t n, double u, double out[3]) {
+  out[0] = out[1] = out[2] = 0.0;
+  if (!table || n == 0) return;
+  double x = 0.0;
+  if (u == u) {
+    const double c = u < 0.0 ? 0.0 : (u > 1.0 ? 1.0 : u);
+    x = c * double(n) - 0.5;
+    if (x < 0.0) x = 0.0;
+    if (x > double(n) - 1.0) x = double(n) - 1.0;
+  }
+  uint32_t i = uint32_t(x);  // (0 <= x <= n - 1: a number an integer holds)
+  if (i > n - 1) i = n - 1;
+  const uint32_t j = i + 1 < n ? i + 1 : n - 1;
+  const double f = x - double(i);
+  for (int k = 0; k < 3; ++k) {
+    const double p = double(table[i][k]), q = double(table[j][k]);
+    out[k] = f == 0.0 ? p : p + (q - p) * f;
+  }
+}
+
+// The frame's fog for the shaders: what the two forms read of the frame's block besides the tables
+// and the eye (which is the frame's light constants': ClayFrameConstants::eye). 48 bytes, laid out
+// as three rows of a constant buffer.
+struct ClayFogConstants {
+  float axis[3];         // c66.xyz
+  uint32_t on;           // 1: the frame is fogged; 0: no pixel of it is (the other fields are zero)
+  float near_colour[3];  // c68.rgb
+  float start;           // c67.x
+  float slope;           // c67.z: the blend from near_colour to the in-scatter table over distance
+  float scale;           // c67.w: the transmittance table's distance scale
+  float amount;          // c28.x: how much of the fog is applied (the ground form)
+  float scatter;         // c28.y: the in-scatter's scale (the ground form; a tree's is its vertex c8.x)
+};
+static_assert(sizeof(ClayFogConstants) == 48);
+
+// The frame's fog constants from its block. On only when the fog is `wanted` (the fog's switch as
+// the pass reads it now, in a frame that is lit) and the block is valid and every value the forms
+// read is a number inside the block's own bounds (fog_block.h, MakeFogBlock: checked again here, so
+// that no value reaches a shader on the strength of a flag alone); else all zero: the frame is
+// drawn without fog. The sky's numbers in the block (c67.y, c64, c65) are not read.
+inline ClayFogConstants MakeClayFogConstants(const capture::FogBlock& b, bool wanted) {
+  ClayFogConstants c{};
+  if (!wanted || !b.valid) return c;
+  auto bounded = [](float v) { return std::fabs(v) <= capture::kFogRegisterLimit; };  // (false for a NaN and for infinity)
+  bool ok = b.range[0] >= 0.0f && bounded(b.range[0]) && b.range[2] >= 0.0f && bounded(b.range[2]) && b.range[3] > 0.0f &&
+            bounded(b.range[3]) && b.amount[0] >= 0.0f && b.amount[0] <= 4.0f && b.amount[1] >= 0.0f && b.amount[1] <= 4.0f;
+  for (int i = 0; i < 3; ++i) ok = ok && bounded(b.axis[i]) && bounded(b.near_colour[i]);
+  if (!ok) return c;
+  for (int i = 0; i < 3; ++i) {
+    c.axis[i] = b.axis[i];
+    c.near_colour[i] = b.near_colour[i];
+  }
+  c.on = 1;
+  c.start = b.range[0];
+  c.slope = b.range[2];
+  c.scale = b.range[3];
+  c.amount = b.amount[0];
+  c.scatter = b.amount[1];
+  return c;
+}
+
+// Whether a tree draw's in-scatter scale may reach its shader: a number in [0, kTreeFogScaleMax]
+// (capture::kTreeFogNone, the marker of a draw without one, is not). A trunk or a leaf without a
+// usable scale is drawn without fog and counted.
+inline bool TreeFogScaleUsable(float c8x) { return c8x >= 0.0f && c8x <= capture::kTreeFogScaleMax; }
+
+// The fog's coordinates of a pixel (light_formulas.fog_coords): the in-scatter table's (a), the
+// transmittance table's (s, not clamped: the table's read clamps it) and the near blend (t).
+// `fogged` false: the pixel is left as it is (the guards above), and the coordinates are zero.
+struct FogPoint {
+  bool fogged = false;
+  double a = 0.0, s = 0.0, t = 0.0;
+};
+inline FogPoint FogCoords(const float P[3], const float eye[3], const ClayFogConstants& f) {
+  FogPoint out;
+  if (!f.on) return out;
+  if (!std::isfinite(f.axis[0]) || !std::isfinite(f.axis[1]) || !std::isfinite(f.axis[2]) || !std::isfinite(f.start) ||
+      !std::isfinite(f.slope) || !std::isfinite(f.scale)) {
+    return out;
+  }
+  double V[3], d2 = 0.0;
+  for (int k = 0; k < 3; ++k) {
+    V[k] = double(eye[k]) - double(P[k]);
+    d2 += V[k] * V[k];
+  }
+  if (!(d2 > 0.0 && d2 < double(kFogDistance2Max))) return out;  // (false for a NaN: a position that is no number)
+  const double d = std::sqrt(d2), dD = d - double(f.start);
+  if (!(dD > 0.0)) return out;
+  const double inv = 1.0 / d;
+  double a = 0.0;
+  for (int k = 0; k < 3; ++k) a += (-V[k] * inv) * double(f.axis[k]);
+  a = a != a ? 0.0 : (a < 0.0 ? 0.0 : (a > 1.0 ? 1.0 : a));
+  const double s = double(f.scale) * dD;
+  double t = double(f.slope) * dD;
+  t = t != t ? 0.0 : (t < 0.0 ? 0.0 : (t > 1.0 ? 1.0 : t));
+  if (!std::isfinite(a) || !std::isfinite(s) || !std::isfinite(t)) return out;
+  out.fogged = true;
+  out.a = a;
+  out.s = s;
+  out.t = t;
+  return out;
+}
+
+// The ground form: the colour `C` (linear, the family's lit colour before c26 and the exposure) of
+// a pixel at world position `P`, fogged. `scatter`, `transmit`: the frame's two tables
+// (capture::FogBlock::scatter, ::transmit).
+inline void FogMirror(const float C[3], const float P[3], const float eye[3], const ClayFogConstants& f,
+                      const float (*scatter)[3], const float (*transmit)[3], double out[3]) {
+  double base[3];
+  for (int k = 0; k < 3; ++k) out[k] = base[k] = std::isfinite(C[k]) ? double(C[k]) : 0.0;
+  if (!scatter || !transmit) return;
+  const FogPoint at = FogCoords(P, eye, f);
+  if (!at.fogged) return;
+  if (!std::isfinite(f.amount) || !std::isfinite(f.scatter) || !std::isfinite(f.near_colour[0]) ||
+      !std::isfinite(f.near_colour[1]) || !std::isfinite(f.near_colour[2])) {
+    return;
+  }
+  double S[3], T[3], fogged[3];
+  FogTableRead(scatter, kFogScatterTexels, at.a, S);
+  FogTableRead(transmit, kFogTransmitTexels, at.s, T);
+  const double scale = double(f.scatter);
+  for (int k = 0; k < 3; ++k) {
+    if (!std::isfinite(S[k]) || !std::isfinite(T[k])) return;
+    const double near_colour = double(f.near_colour[k]);
+    const double F = near_colour + at.t * (S[k] - near_colour);
+    const double G = base[k] * T[k] + (1.0 - T[k]) * scale * F;
+    fogged[k] = base[k] + double(f.amount) * (G - base[k]);
+    if (!std::isfinite(fogged[k])) return;
+  }
+  for (int k = 0; k < 3; ++k) out[k] = fogged[k];
+}
+
+// The trees' form (ruling B): `C` is the trunk's or the leaf's lit colour with its c49, `c8x` the
+// draw's in-scatter scale. Reads neither the near colour, the slope nor the two amounts.
+inline void TreeFogMirror(const float C[3], const float P[3], const float eye[3], const ClayFogConstants& f, float c8x,
+                          const float (*scatter)[3], const float (*transmit)[3], double out[3]) {
+  double base[3];
+  for (int k = 0; k < 3; ++k) out[k] = base[k] = std::isfinite(C[k]) ? double(C[k]) : 0.0;
+  if (!scatter || !transmit || !std::isfinite(c8x)) return;
+  const FogPoint at = FogCoords(P, eye, f);
+  if (!at.fogged) return;
+  double S[3], T[3], fogged[3];
+  FogTableRead(scatter, kFogScatterTexels, at.a, S);
+  FogTableRead(transmit, kFogTransmitTexels, at.s, T);
+  for (int k = 0; k < 3; ++k) {
+    if (!std::isfinite(S[k]) || !std::isfinite(T[k])) return;
+    const double add = (1.0 - T[k]) * S[k] * double(c8x);
+    fogged[k] = base[k] * T[k] + add;
+    if (!std::isfinite(add) || !std::isfinite(fogged[k])) return;
+  }
+  for (int k = 0; k < 3; ++k) out[k] = fogged[k];
+}
+
 // --- Terrain material (frame-map section 13, "Terrain", "Native terrain material") ---
 // A terrain record whose inputs and textures are usable is drawn by one of the
 // two terrain pixel shaders (fable2_native_shaders.h) with its captured render

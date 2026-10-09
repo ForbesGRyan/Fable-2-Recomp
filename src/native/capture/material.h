@@ -441,6 +441,7 @@ inline uint32_t LightSourceComponent(const LightElement& e, uint32_t i) { return
 // family). Vertex constants, from the device's vertex bank (none is a register a buffer load can
 // name: light_block.h, kBufferLoadRanges; frame-map section 14, "The vertex side"):
 inline constexpr uint32_t kLightVsRotationReg = 4;      // c4..c6: the rows of the world rotation (xyz)
+inline constexpr uint32_t kLightVsFogScaleReg = 8;      // c8.x: the scale of the trees' in-scatter (trunks and leaves; not the light's)
 inline constexpr uint32_t kLightVsIndexOffsetReg = 20;  // c20.x: the colour stream's index offset (ECD6)
 inline constexpr uint32_t kLightVsProbeReg = 28;        // c28..c39: three probe sets of four registers
 inline constexpr uint32_t kLightProbeRegisters = 12;
@@ -456,9 +457,15 @@ inline constexpr uint32_t kLightPsTintReg = 49;         // c49.xyz: objects, tru
 struct LightRegisterRun {
   uint8_t bank, reg, count;
 };
-inline constexpr size_t kMaxLightRegisterRuns = 6;
+inline constexpr size_t kMaxLightRegisterRuns = 7;
+// A run the light does not need: vertex c8, whose x is the scale of the trees' in-scatter (fog
+// sub-project, ruling B: the game's trunks and leaves fog in their vertex shaders, add = (1 - T) *
+// tf4(angle) * c8.x; it was 1 in 1,968 of 1,968 captured rows). A tree draw whose c8 was not read,
+// or is no number, keeps its light and is drawn without fog (LightInputs::tree_fog).
+constexpr bool LightRunOptional(const LightRegisterRun& run) { return run.bank == 0 && run.reg == kLightVsFogScaleReg; }
 // The registers a draw of this family and vertex kind reads: what the capture reads from the
-// banks, and what MakeLightInputs requires to have been read. Returns the number of runs.
+// banks, and what MakeLightInputs requires to have been read (but for a run that is
+// LightRunOptional). Returns the number of runs.
 inline size_t LightRegisterRuns(const PsLightSpec& ps, const VsLightSpec& vs, LightRegisterRun out[kMaxLightRegisterRuns]) {
   size_t n = 0;
   auto add = [&](uint32_t bank, uint32_t reg, uint32_t count) { out[n++] = {uint8_t(bank), uint8_t(reg), uint8_t(count)}; };
@@ -477,6 +484,7 @@ inline size_t LightRegisterRuns(const PsLightSpec& ps, const VsLightSpec& vs, Li
       if (ps.family == LightFamily::kTreeLeaf) add(0, kLightVsWrapReg, 1);
       add(1, kLightPsFadeReg, 2);  // c26, c27
       add(1, kLightPsTintReg, 1);
+      if (ps.family != LightFamily::kObject) add(0, kLightVsFogScaleReg, 1);  // (optional: LightRunOptional)
       break;
     case LightFamily::kPlant:
     case LightFamily::kPlantLit:
@@ -487,6 +495,12 @@ inline size_t LightRegisterRuns(const PsLightSpec& ps, const VsLightSpec& vs, Li
   }
   return n;
 }
+
+// The trees' in-scatter scale (vertex c8.x) is carried only inside [0, kTreeFogScaleMax], the range
+// of its pixel twin c28.y (fog_block.h: the amounts are in [0, 4]); kTreeFogNone marks a draw
+// without a usable one.
+inline constexpr float kTreeFogScaleMax = 4.0f;
+inline constexpr float kTreeFogNone = -1.0f;
 
 // The light inputs of one recorded draw (an entry of FrameScene::lights). Sized for the largest
 // family (the probe sets); a field a family does not read holds its neutral value.
@@ -521,10 +535,15 @@ struct LightInputs {
   // eye), and vertex c50.w, the wrap of its front light (0.4 in every row captured).
   float world_pos[3] = {};
   float wrap = 0.0f;
+  // kTreeTrunk, kTreeLeaf (fog sub-project; kTreeFogNone otherwise): vertex c8.x, the scale of the
+  // trees' in-scatter, when it was read, is a number and lies in [0, kTreeFogScaleMax]. kTreeFogNone:
+  // the draw has no usable scale and is drawn without fog (counted by the pass); its light is whole.
+  float tree_fog = kTreeFogNone;
 };
 // Measured, so that a field added here is noticed: one entry per lit draw is copied into the frame
-// on the guest thread (about 900 a frame at the bridge; 312 bytes before the leaves' four floats).
-static_assert(sizeof(LightInputs) == 328, "LightInputs grew or shrank: see the comment above");
+// on the guest thread (about 900 a frame at the bridge; 312 bytes before the leaves' four floats,
+// 328 before the trees' fog scale). The draw record itself does not hold it and stays as it is.
+static_assert(sizeof(LightInputs) == 332, "LightInputs grew or shrank: see the comment above");
 
 // Registers of one constant bank as a draw's capture read them: `bank` is 256 x 4 host floats,
 // bit r of `have` says register r was read for this draw (anything else in `bank` is stale).
@@ -636,6 +655,7 @@ inline LightReason MakeLightInputs(const LightDraw& d, LightInputs* out, const c
   LightRegisterRun runs[kMaxLightRegisterRuns];
   const size_t n_runs = LightRegisterRuns(ps, vs, runs);
   for (size_t i = 0; i < n_runs; ++i) {
+    if (LightRunOptional(runs[i])) continue;  // (the trees' fog scale: below)
     const RegisterView& view = runs[i].bank ? d.ps_regs : d.vs_regs;
     if (!view.Has(runs[i].reg, runs[i].count)) return fail(LightReason::kLightUnknown, "register-unread");
   }
@@ -676,6 +696,11 @@ inline LightReason MakeLightInputs(const LightDraw& d, LightInputs* out, const c
       for (uint32_t r = 0; r < kLightProbeRegisters; ++r) {
         for (uint32_t c = 0; c < 4; ++c) take(d.vs_regs, kLightVsProbeReg + r, c, &l.vs_const[r][c]);
       }
+    }
+    // A tree's fog scale, outside `finite`: without it the draw is unfogged, not unlit.
+    if (ps.family != LightFamily::kObject && d.vs_regs.Has(kLightVsFogScaleReg)) {
+      const float c8x = d.vs_regs.bank[kLightVsFogScaleReg * 4];
+      if (c8x >= 0.0f && c8x <= kTreeFogScaleMax) l.tree_fog = c8x;  // (false for a NaN)
     }
   } else {
     for (uint32_t c = 0; c < 4; ++c) take(d.vs_regs, kLightVsBendReg, c, &l.vs_const[0][c]);

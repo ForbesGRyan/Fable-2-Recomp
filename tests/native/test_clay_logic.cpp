@@ -13,6 +13,9 @@
 using namespace fable2::native;
 using namespace fable2::native::render;
 
+// The two fog tables of a captured frame (kFixtureTf4, kFixtureTf5): cases 580 on.
+#include "fog_table_fixture.inc"
+
 static int g_fail = 0;
 #define CHECK(id, cond)                                         \
   do {                                                          \
@@ -5274,6 +5277,383 @@ int main() {
       }
     }
   }
+  // 580-583: native fog (fog sub-project, plan Task 4; frame-map section 16, "Native fog"): the mirrors
+  // of the shaders' fog against the reference's numbers, the tables' read, the guards, the frame's
+  // constants. Every line of numbers below was written by tools/xdk_sigmatch/fog_pins.py
+  // (light_formulas.fog, vertex_fog with fog_apply, fog_coords, table_1d), and tests/test_fog_literals.py
+  // holds the lines against that tool's output.
+  {
+    const float qnan = std::numeric_limits<float>::quiet_NaN(), pinf = std::numeric_limits<float>::infinity();
+    // The block of frame 1 of capture 092459 (tests/native/test_fog_block.cpp has the same inputs): its
+    // registers, its fetch constants and its tables' bytes through MakeFogBlock; and its eye, pixel c19.
+    const float regs[6][4] = {{1.0f, 1.0f, 0.0f, 0.0f},
+                              {0.000305443653f, 0.000393790426f, 0.00107105088f, 0.0f},
+                              {0.00525102764f, 0.00596226612f, 0.00983294938f, 0.0f},
+                              {-0.8295828104019165f, 0.04456644505262375f, 0.5566023588180542f, 0.0f},
+                              {19.881736755371094f, 1900.0f, 1.0f, 0.0005000000237487257f},
+                              {0.2666446566581726f, 0.39993393421173096f, 0.46666669845581055f, 0.0f}};
+    const uint32_t fc4[6] = {0x00804956, 0x1FAB505D, 0x0000003F, 0x00280D11, 0x00000003, 0x00000018};
+    const uint32_t fc5[6] = {0x02004802, 0x1FAB4086, 0x000000FF, 0x00280C14, 0x00000003, 0x00000018};
+    const capture::FogBlock real = capture::MakeFogBlock(regs, fc4, fc5, kFixtureTf4, sizeof(kFixtureTf4), kFixtureTf5, sizeof(kFixtureTf5));
+    const float eye[3] = {82.07209777832031f, 157.33926391601562f, 50.17070388793945f};
+    CHECK(580, real.valid);
+    // The made-up set: an amount below 1, a scale that is not 1, a slope that leaves pixels inside
+    // the near blend, a nearer start and a table that ends sooner.
+    capture::FogBlock made = real;
+    made.amount[0] = 0.75f;
+    made.amount[1] = 1.5f;
+    made.range[0] = 12.5f;
+    made.range[2] = 0.019999999552965164f;
+    made.range[3] = 0.001500000013038516f;
+    made.near_colour[0] = 0.6000000238418579f;
+    made.near_colour[1] = 0.20000000298023224f;
+    made.near_colour[2] = 0.8999999761581421f;
+    static_assert(kFogScatterTexels == 64 && kFogTransmitTexels == 256);
+    static_assert(sizeof(real.scatter) == kFogScatterTexels * 3 * sizeof(float) && sizeof(real.transmit) == kFogTransmitTexels * 3 * sizeof(float));
+    auto close3 = [](const double got[3], const double want[3], double tol) {
+      return std::fabs(got[0] - want[0]) <= tol && std::fabs(got[1] - want[1]) <= tol && std::fabs(got[2] - want[2]) <= tol;
+    };
+    auto same3 = [](const double got[3], const float want[3]) {
+      return got[0] == double(want[0]) && got[1] == double(want[1]) && got[2] == double(want[2]);
+    };
+    auto finite3 = [](const double v[3]) { return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]); };
+
+    // 580: a table as the game's fetch reads it (light_formulas.table_1d): texel i of N has its centre
+    // at (i + 0.5) / N, linear between two centres, the edge texel alone beyond the first and the last
+    // centre and outside 0..1.
+    {
+      const struct {
+        double u;
+        double tf4[3], tf5[3];
+      } pins[] = {
+        // table pins: u, tf4(u), tf5(u)
+            {-1.0, {0.30810546875, 0.384033203125, 0.46533203125}, {1.0, 1.0, 1.0}},
+            {0.0, {0.30810546875, 0.384033203125, 0.46533203125}, {1.0, 1.0, 1.0}},
+            {0.0078125, {0.30810546875, 0.384033203125, 0.46533203125}, {0.9803921580314636, 0.97843137383461, 0.9627451002597809}},
+            {0.001953125, {0.30810546875, 0.384033203125, 0.46533203125}, {1.0, 1.0, 1.0}},
+            {0.005859375, {0.30810546875, 0.384033203125, 0.46533203125}, {0.9843137264251709, 0.9843137264251709, 0.9725490212440491}},
+            {0.127, {0.352375, 0.401923828125, 0.4612099609375}, {0.7450509955883026, 0.7136784484386444, 0.564564731836319}},
+            {0.3, {0.431005859375, 0.4287109375, 0.4529296875}, {0.5282353222370147, 0.4811764717102051, 0.28509805202484134}},
+            {0.5, {0.550537109375, 0.460693359375, 0.4366455078125}, {0.36274510622024536, 0.3117647171020508, 0.1352941244840622}},
+            {0.9921875, {0.93310546875, 0.466552734375, 0.306396484375}, {0.14901961386203766, 0.11372549086809158, 0.0235294122248888}},
+            {0.998, {0.93310546875, 0.466552734375, 0.306396484375}, {0.14901961386203766, 0.11372549086809158, 0.0235294122248888}},
+            {1.0, {0.93310546875, 0.466552734375, 0.306396484375}, {0.14901961386203766, 0.11372549086809158, 0.0235294122248888}},
+            {2.5, {0.93310546875, 0.466552734375, 0.306396484375}, {0.14901961386203766, 0.11372549086809158, 0.0235294122248888}},
+      };
+      CHECK(580, std::size(pins) == 12);
+      for (const auto& p : pins) {
+        double s[3], t[3];
+        FogTableRead(real.scatter, kFogScatterTexels, p.u, s);
+        FogTableRead(real.transmit, kFogTransmitTexels, p.u, t);
+        CHECK(580, close3(s, p.tf4, 1e-12) && close3(t, p.tf5, 1e-12));
+      }
+      // Hand cases on a table of four texels, red = the texel's index: centres at 0.125, 0.375, 0.625, 0.875.
+      const float four[4][3] = {{0.0f, 10.0f, -1.0f}, {1.0f, 20.0f, -2.0f}, {2.0f, 40.0f, -4.0f}, {3.0f, 80.0f, -8.0f}};
+      const struct {
+        double u, r, g;
+      } hand[] = {{0.125, 0.0, 10.0}, {0.375, 1.0, 20.0}, {0.875, 3.0, 80.0}, {0.25, 0.5, 15.0}, {0.5, 1.5, 30.0}, {0.6875, 2.25, 50.0},
+                  {0.0, 0.0, 10.0}, {0.1, 0.0, 10.0}, {-5.0, 0.0, 10.0}, {0.9, 3.0, 80.0}, {1.0, 3.0, 80.0}, {7.0, 3.0, 80.0},
+                  {double(pinf), 3.0, 80.0}, {double(-pinf), 0.0, 10.0}, {double(qnan), 0.0, 10.0}, {1e300, 3.0, 80.0}};
+      for (const auto& h : hand) {
+        double v[3];
+        FogTableRead(four, 4, h.u, v);
+        CHECK(580, std::fabs(v[0] - h.r) < 1e-12 && std::fabs(v[1] - h.g) < 1e-12 && std::fabs(v[2] + h.g / 10.0) < 1e-12);
+      }
+      // A table of one texel, and no table: the texel, and zeros.
+      double v[3] = {9.0, 9.0, 9.0};
+      FogTableRead(four + 2, 1, 0.3, v);
+      CHECK(580, v[0] == 2.0 && v[1] == 40.0 && v[2] == -4.0);
+      FogTableRead(four, 0, 0.3, v);
+      CHECK(580, v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0);
+      FogTableRead(nullptr, 4, 0.3, v);
+      CHECK(580, v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0);
+    }
+
+    // 581: the two forms on the frame's registers and on the made-up set. The ground form
+    // (light_formulas.fog): the blend from c68, the amount c28.x and the scale c28.y. The trees' form
+    // (ruling B: vertex_fog at the pixel, then fog_apply): T = tf5, add = (1 - T) * tf4(angle) * c8.x,
+    // no blend from c68 and no amount.
+    struct FogPin {
+      float P[3], C[3];
+      int fogged;
+      double coords[3], ground[3], tree[3], tree_half[3];
+    };
+    static const FogPin real_pins[] = {
+      // real registers: c28 {1.0f, 1.0f} c66 {-0.8295828104019165f, 0.04456644505262375f, 0.5566023588180542f} c67 {19.881736755371094f, 1900.0f, 1.0f, 0.0005000000237487257f} c68 {0.2666446566581726f, 0.39993393421173096f, 0.46666669845581055f} eye {82.07209777832031f, 157.33926391601562f, 50.17070388793945f}
+      // real pins: P, C, fogged, (a, s, t), the ground form, the trees' form with c8.x = 1.0 and 0.5
+          {{82.07209777832031f, 167.33926391601562f, 50.17070388793945f}, {0.3499999940395355f, 0.30000001192092896f, 0.11999999731779099f}, 0, {0.0, 0.0, 0.0}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}},
+          {{85.76200103759766f, 145.0395965576172f, 51.40066909790039f}, {0.3499999940395355f, 0.30000001192092896f, 0.11999999731779099f}, 0, {0.0, 0.0, 0.0}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}},
+          {{101.40543365478516f, 162.17259216308594f, 46.304039001464844f}, {0.3499999940395355f, 0.30000001192092896f, 0.11999999731779099f}, 1, {0.0, 0.00020913206821352202, 0.4182641165605645}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}},
+          {{131.84706115722656f, 154.665283203125f, 16.77456283569336f}, {0.05000000074505806f, 0.05999999865889549f, 0.019999999552965164f}, 1, {0.0, 0.02005913003092971, 1.0}, {0.06343188398347593, 0.07894057937347554, 0.06285761508737381}, {0.06343188398347593, 0.07894057937347554, 0.06285761508737381}, {0.05541493511107008, 0.06771671129357842, 0.04046643292250607}},
+          {{-128.64193725585938f, 168.6591339111328f, 191.54769897460938f}, {0.05000000074505806f, 0.05999999865889549f, 0.019999999552965164f}, 1, {0.9999999965903957, 0.11705913595873045, 1.0}, {0.26102506168498507, 0.16830927224863582, 0.1383787970338749}, {0.26102506168498507, 0.16830927224863582, 0.1383787970338749}, {0.14953858269669848, 0.10616236815456304, 0.07505600975310686}},
+          {{-265.9530334472656f, 350.6865539550781f, 88.84016418457031f}, {2.5f, 0.009999999776482582f, 0.0f}, 1, {0.797139967333287, 0.19005913670568128, 1.0}, {1.8925561844319032, 0.18710146578345407, 0.21317825728481826}, {1.8925561844319032, 0.18710146578345407, 0.21317825728481826}, {1.7641450836757622, 0.0966261223691406, 0.10658912864240913}},
+          {{-396.5661315917969f, 348.7945556640625f, 911.719482421875f}, {0.0f, 0.0f, 0.0f}, 1, {0.8816161552519696, 0.4920591502991993, 1.0}, {0.5171694492099624, 0.32053205151109904, 0.30334836396928283}, {0.5171694492099624, 0.32053205151109904, 0.30334836396928283}, {0.2585847246049812, 0.16026602575554952, 0.15167418198464142}},
+          {{-2556.724853515625f, -634.2998046875f, 1237.62939453125f}, {0.20000000298023224f, 0.20000000298023224f, 0.20000000298023224f}, 1, {0.9382541248743983, 1.4900591946531574, 1.0}, {0.7730160268230054, 0.438067643711012, 0.32767189312044176}, {0.7730160268230054, 0.438067643711012, 0.32767189312044176}, {0.401409975019763, 0.23040637111177933, 0.16618888781777133}},
+          {{85.07149505615234f, 307.30926513671875f, 50.17070388793945f}, {0.10000000149011612f, 0.4000000059604645f, 0.05000000074505806f}, 1, {0.027969210765100838, 0.06505913079607037, 1.0}, {0.13147306663654246, 0.39783281450447827, 0.15997013659267717}, {0.13147306663654246, 0.39783281450447827, 0.15997013659267717}, {0.10842079420064522, 0.3657318823295919, 0.09835560328530862}},
+          {{36.796142578125f, 232.7991943359375f, 69.03568267822266f}, {0.8999999761581421f, 0.800000011920929f, 0.699999988079071f}, 1, {0.5713713850435036, 0.03505913507372106, 1.0}, {0.8734792431753198, 0.7672579226373761, 0.6561861162372317}, {0.8734792431753198, 0.7672579226373761, 0.6561861162372317}, {0.8480038297821609, 0.7444912793695355, 0.6219550407331189}},
+    };
+    static const FogPin made_pins[] = {
+      // made registers: c28 {0.75f, 1.5f} c66 {-0.8295828104019165f, 0.04456644505262375f, 0.5566023588180542f} c67 {12.5f, 1900.0f, 0.019999999552965164f, 0.001500000013038516f} c68 {0.6000000238418579f, 0.20000000298023224f, 0.8999999761581421f} eye {82.07209777832031f, 157.33926391601562f, 50.17070388793945f}
+      // made pins: P, C, fogged, (a, s, t), the ground form, the trees' form with c8.x = 1.0 and 0.5
+          {{82.07209777832031f, 167.33926391601562f, 50.17070388793945f}, {0.3499999940395355f, 0.30000001192092896f, 0.11999999731779099f}, 0, {0.0, 0.0, 0.0}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}},
+          {{85.76200103759766f, 145.0395965576172f, 51.40066909790039f}, {0.3499999940395355f, 0.30000001192092896f, 0.11999999731779099f}, 1, {0.0, 0.0006000010289242136, 0.008000013470636403}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}},
+          {{101.40543365478516f, 162.17259216308594f, 46.304039001464844f}, {0.3499999940395355f, 0.30000001192092896f, 0.11999999731779099f}, 1, {0.0, 0.011700001409597923, 0.15600001395176105}, {0.36060525638321894, 0.30107478224773515, 0.168038506758301}, {0.3487701678231873, 0.30279637308073587, 0.13960402417392803}, {0.3442479041115174, 0.2964066625514339, 0.12639589295341608}},
+          {{131.84706115722656f, 154.665283203125f, 16.77456283569336f}, {0.05000000074505806f, 0.05999999865889549f, 0.019999999552965164f}, 1, {0.0, 0.0712499929869027, 0.9499998770001576}, {0.1016775168503703, 0.12718294931575358, 0.1730293965758769}, {0.09097297249134609, 0.11779226570679799, 0.14787139962642126}, {0.06651785969666313, 0.08354554480850344, 0.0810643274872189}},
+          {{-128.64193725585938f, 168.6591339111328f, 191.54769897460938f}, {0.05000000074505806f, 0.05999999865889549f, 0.019999999552965164f}, 1, {0.9999999965903957, 0.36224999947801856, 1.0}, {0.586830517963803, 0.33895795754629465, 0.27501148590845426}, {0.5183437283760702, 0.2963362762071396, 0.2415203797094519}, {0.27091343304875587, 0.16072860857218482, 0.12302544472528652}},
+          {{-265.9530334472656f, 350.6865539550781f, 88.84016418457031f}, {2.5f, 0.009999999776482582f, 0.0f}, 1, {0.797139967333287, 0.5812499932205529, 1.0}, {1.785568271985852, 0.39437449141459446, 0.3837268116562954}, {1.292073773087556, 0.3492086983281142, 0.34109049925004037}, {1.0367231835273092, 0.1759180746955966, 0.17054524962502018}},
+          {{-396.5661315917969f, 348.7945556640625f, 911.719482421875f}, {0.0f, 0.0f, 0.0f}, 1, {0.8816161552519696, 1.4872499988436798, 1.0}, {0.781917550171365, 0.46836365133923985, 0.38718990054338165}, {0.6950378223745467, 0.4163232456348799, 0.34416880048300585}, {0.34751891118727335, 0.20816162281743994, 0.17208440024150293}},
+          {{-2556.724853515625f, -634.2998046875f, 1237.62939453125f}, {0.20000000298023224f, 0.20000000298023224f, 0.20000000298023224f}, 1, {0.9382541248743983, 4.481250015723063, 1.0}, {0.9084665597147439, 0.5342966879777415, 0.4168661745623923}, {0.7730160268230054, 0.438067643711012, 0.32767189312044176}, {0.401409975019763, 0.23040637111177933, 0.16618888781777133}},
+          {{85.07149505615234f, 307.30926513671875f, 50.17070388793945f}, {0.10000000149011612f, 0.4000000059604645f, 0.05000000074505806f}, 1, {0.027969210765100838, 0.20624999004363537, 1.0}, {0.20226165451748615, 0.454812140997435, 0.33660649420902666}, {0.17870317107257108, 0.3947088356229738, 0.29491819129018115}, {0.12105746995186602, 0.3163348185695224, 0.15769439055001283}},
+          {{36.796142578125f, 232.7991943359375f, 69.03568267822266f}, {0.8999999761581421f, 0.800000011920929f, 0.699999988079071f}, 1, {0.5713713850435036, 0.11625000636904642, 1.0}, {0.8978384062430834, 0.7797534788888927, 0.6815879127916171}, {0.8268785829716828, 0.7113939430897623, 0.5877565776233448}, {0.7566392830053019, 0.6497832516346439, 0.5000626008842236}},
+    };
+    const ClayFogConstants real_c = MakeClayFogConstants(real, true), made_c = MakeClayFogConstants(made, true);
+    CHECK(581, real_c.on == 1 && made_c.on == 1 && std::size(real_pins) == 10 && std::size(made_pins) == 10);
+    {
+      int fogged = 0, forms_differ = 0, scale_shows = 0, blend_shows = 0;
+      for (int set = 0; set < 2; ++set) {
+        const capture::FogBlock& b = set ? made : real;
+        const ClayFogConstants& c = set ? made_c : real_c;
+        for (const FogPin& p : set ? made_pins : real_pins) {
+          const FogPoint at = FogCoords(p.P, eye, c);
+          CHECK(581, at.fogged == (p.fogged != 0));
+          const double coords[3] = {at.a, at.s, at.t};
+          CHECK(581, close3(coords, p.coords, 1e-9));
+          double ground[3], tree[3], tree_half[3];
+          FogMirror(p.C, p.P, eye, c, b.scatter, b.transmit, ground);
+          TreeFogMirror(p.C, p.P, eye, c, 1.0f, b.scatter, b.transmit, tree);
+          TreeFogMirror(p.C, p.P, eye, c, 0.5f, b.scatter, b.transmit, tree_half);
+          CHECK(581, close3(ground, p.ground, 1e-9) && close3(tree, p.tree, 1e-9) && close3(tree_half, p.tree_half, 1e-9));
+          if (!p.fogged) {
+            // Inside the start the colour is the one that went in, bit for bit, in both forms.
+            CHECK(581, same3(ground, p.C) && same3(tree, p.C) && same3(tree_half, p.C));
+            continue;
+          }
+          ++fogged;
+          if (!close3(ground, tree, 1e-6)) ++forms_differ;
+          if (!close3(tree, tree_half, 1e-6)) ++scale_shows;
+          if (at.t > 0.0 && at.t < 1.0 && !close3(ground, tree, 1e-6)) ++blend_shows;
+        }
+      }
+      // What the pins can tell apart: 17 of the 20 are past a start; with the frame's own registers
+      // (amount 1, scale 1, the blend complete) the two forms agree, with the made-up ones they do not;
+      // c8.x shows wherever the transmittance is below 1; two pins lie inside the near blend.
+      CHECK(581, fogged == 17 && forms_differ == 8 && scale_shows == 15 && blend_shows == 2);
+      for (const FogPin& p : real_pins) CHECK(581, close3(p.ground, p.tree, 1e-12));
+    }
+
+    // 582: guards (review focus 2; review of plan Task 3, M2). Whatever goes in, a number comes out,
+    // and a pixel the fog cannot be computed for keeps its colour.
+    {
+      const float C[3] = {0.35f, 0.3f, 0.12f};
+      const float far_point[3] = {eye[0] - 500.0f, eye[1] + 100.0f, eye[2] + 50.0f};
+      double out[3], tree[3];
+      auto both = [&](const float colour[3], const float P[3], const float e[3], const ClayFogConstants& c, const capture::FogBlock& b,
+                      float c8x = 1.0f) {
+        FogMirror(colour, P, e, c, b.scatter, b.transmit, out);
+        TreeFogMirror(colour, P, e, c, c8x, b.scatter, b.transmit, tree);
+        return finite3(out) && finite3(tree);
+      };
+      auto unfogged = [&] { return same3(out, C) && same3(tree, C); };
+      // The far point is fogged (so that the cases below show something when they leave it alone).
+      CHECK(582, both(C, far_point, eye, real_c, real) && !unfogged() && FogCoords(far_point, eye, real_c).fogged);
+      // d = 0, the pixel at the eye: inside any start, a start of 0 included (dD > 0 is false); no
+      // direction is formed.
+      CHECK(582, both(C, eye, eye, real_c, real) && unfogged() && !FogCoords(eye, eye, real_c).fogged);
+      ClayFogConstants at_eye = real_c;
+      at_eye.start = 0.0f;
+      CHECK(582, both(C, eye, eye, at_eye, real) && unfogged() && !FogCoords(eye, eye, at_eye).fogged);
+      {
+        const float beside[3] = {eye[0] + 0.001f, eye[1], eye[2]};  // (with a start of 0 the nearest pixel is fogged, and is a number)
+        CHECK(582, both(C, beside, eye, at_eye, real) && FogCoords(beside, eye, at_eye).fogged);
+      }
+      // A start below 0 (the block refuses one; fed by hand): the pixel at the eye would be past it,
+      // but it has no direction: unfogged. (The reference reads the angle as 0 there and fogs; the
+      // product never has such a start.)
+      {
+        ClayFogConstants below = real_c;
+        below.start = -1.0f;
+        CHECK(582, both(C, eye, eye, below, real) && unfogged() && !FogCoords(eye, eye, below).fogged);
+      }
+      // Exactly at the start (dD = 0) a pixel is not fogged: the game's test is dD > 0. A pixel 5 units
+      // from an eye at the origin, with a start of 5 and tables whose first texels are not neutral.
+      {
+        capture::FogBlock b = real;
+        for (auto& texel : b.transmit) texel[0] = texel[1] = texel[2] = 0.5f;
+        ClayFogConstants c = real_c;
+        c.start = 5.0f;
+        const float origin[3] = {0.0f, 0.0f, 0.0f}, at_start[3] = {3.0f, 4.0f, 0.0f}, past[3] = {3.0f, 4.0f, 0.125f};
+        CHECK(582, both(C, at_start, origin, c, b) && unfogged() && !FogCoords(at_start, origin, c).fogged);
+        CHECK(582, both(C, past, origin, c, b) && !unfogged() && FogCoords(past, origin, c).fogged);
+      }
+      // A position or an eye that is no number, in any component: unfogged.
+      for (float bad : {qnan, pinf, -pinf}) {
+        for (int k = 0; k < 3; ++k) {
+          float P[3] = {far_point[0], far_point[1], far_point[2]}, e[3] = {eye[0], eye[1], eye[2]};
+          P[k] = bad;
+          CHECK(582, both(C, P, eye, real_c, real) && unfogged() && !FogCoords(P, eye, real_c).fogged);
+          e[k] = bad;
+          CHECK(582, both(C, far_point, e, real_c, real) && unfogged());
+        }
+      }
+      // A position beyond the distance the fog is computed for (kFogDistance2Max: its square would not
+      // be a number in single precision): unfogged. Just inside it: fogged with the table's last texel,
+      // as any pixel beyond the table's end in that direction.
+      {
+        static_assert(kFogDistance2Max == 1e30f);
+        const float beyond[3] = {eye[0] - 2e15f, eye[1], eye[2]}, huge[3] = {3e38f, -3e38f, 3e38f};
+        CHECK(582, both(C, beyond, eye, real_c, real) && unfogged());
+        CHECK(582, both(C, huge, eye, real_c, real) && unfogged());
+        const float inside[3] = {eye[0] - 5e14f, eye[1], eye[2]}, end[3] = {eye[0] - 5000.0f, eye[1], eye[2]};
+        double ref[3], ref_tree[3];
+        FogMirror(C, end, eye, real_c, real.scatter, real.transmit, ref);
+        TreeFogMirror(C, end, eye, real_c, 1.0f, real.scatter, real.transmit, ref_tree);
+        CHECK(582, both(C, inside, eye, real_c, real) && !unfogged() && close3(out, ref, 1e-9) && close3(tree, ref_tree, 1e-9));
+        const FogPoint at = FogCoords(inside, eye, real_c);
+        CHECK(582, at.fogged && at.s > 1e9 && at.t == 1.0 && std::isfinite(at.s));
+      }
+      // A zero axis (the block refuses one; the function is finite all the same): the angle reads 0,
+      // the table's first texel.
+      {
+        ClayFogConstants c = real_c;
+        c.axis[0] = c.axis[1] = c.axis[2] = 0.0f;
+        const FogPoint at = FogCoords(far_point, eye, c);
+        CHECK(582, both(C, far_point, eye, c, real) && at.fogged && at.a == 0.0);
+      }
+      // A constant that is no number (never made by MakeClayFogConstants; fed here by hand): unfogged.
+      for (float bad : {qnan, pinf, -pinf}) {
+        for (int what = 0; what < 11; ++what) {
+          ClayFogConstants c = made_c;
+          float* fields[] = {&c.axis[0], &c.axis[1], &c.axis[2], &c.near_colour[0], &c.near_colour[1], &c.near_colour[2],
+                             &c.start, &c.slope, &c.scale, &c.amount, &c.scatter};
+          *fields[what] = bad;
+          CHECK(582, both(C, far_point, eye, c, made));
+          // (the trees' form reads neither c68, the slope nor the two amounts: it may fog; the ground form may not)
+          CHECK(582, same3(out, C));
+          if (what < 3 || what == 6 || what == 8) CHECK(582, same3(tree, C));
+        }
+      }
+      // A table texel that is no number (the block refuses one): unfogged where it is read.
+      for (float bad : {qnan, pinf, -pinf}) {
+        capture::FogBlock b = real;
+        for (auto& texel : b.scatter) texel[1] = bad;
+        CHECK(582, both(C, far_point, eye, real_c, b) && unfogged());
+        b = real;
+        for (auto& texel : b.transmit) texel[2] = bad;
+        CHECK(582, both(C, far_point, eye, real_c, b) && unfogged());
+      }
+      // The largest values the block lets through (kFogRegisterLimit, a half float's 65,504, amounts of
+      // 4) give numbers: no product overflows.
+      {
+        capture::FogBlock b = real;
+        for (auto& texel : b.scatter) texel[0] = texel[1] = texel[2] = 65504.0f;
+        for (auto& texel : b.transmit) texel[0] = texel[1] = texel[2] = 0.0f;
+        b.amount[0] = b.amount[1] = 4.0f;
+        b.range[0] = 0.0f;
+        b.range[2] = b.range[3] = capture::kFogRegisterLimit;
+        for (float& v : b.near_colour) v = -capture::kFogRegisterLimit;
+        const ClayFogConstants c = MakeClayFogConstants(b, true);
+        const float bright[3] = {64.0f, 64.0f, 64.0f};
+        CHECK(582, c.on == 1);
+        FogMirror(bright, far_point, eye, c, b.scatter, b.transmit, out);
+        TreeFogMirror(bright, far_point, eye, c, capture::kTreeFogScaleMax, b.scatter, b.transmit, tree);
+        CHECK(582, finite3(out) && finite3(tree) && std::fabs(tree[0] - 4.0 * 65504.0) < 1e-6);
+      }
+      // A colour channel that is no number counts as 0, fogged or not (as the light functions' LightFinite).
+      for (float bad : {qnan, pinf, -pinf}) {
+        const float colour[3] = {bad, 0.3f, bad};
+        const float zeroed[3] = {0.0f, 0.3f, 0.0f};
+        double want[3], want_tree[3];
+        FogMirror(zeroed, far_point, eye, real_c, real.scatter, real.transmit, want);
+        TreeFogMirror(zeroed, far_point, eye, real_c, 1.0f, real.scatter, real.transmit, want_tree);
+        CHECK(582, both(colour, far_point, eye, real_c, real) && close3(out, want, 0.0) && close3(tree, want_tree, 0.0));
+        CHECK(582, both(colour, eye, eye, real_c, real) && same3(out, zeroed) && same3(tree, zeroed));
+      }
+      // A tree's scale that is no number: unfogged (the pass never passes one: LightInputs::tree_fog).
+      for (float bad : {qnan, pinf, -pinf}) {
+        TreeFogMirror(C, far_point, eye, real_c, bad, real.scatter, real.transmit, tree);
+        CHECK(582, same3(tree, C));
+      }
+      // Without the fog (constants that are off, whatever else they hold): the colour, in both forms.
+      {
+        ClayFogConstants off = made_c;
+        off.on = 0;
+        CHECK(582, both(C, far_point, eye, off, made) && unfogged() && !FogCoords(far_point, eye, off).fogged);
+        CHECK(582, both(C, far_point, eye, ClayFogConstants{}, real) && unfogged());
+      }
+      // No table: unfogged.
+      FogMirror(C, far_point, eye, real_c, nullptr, real.transmit, out);
+      TreeFogMirror(C, far_point, eye, real_c, 1.0f, real.scatter, nullptr, tree);
+      CHECK(582, unfogged());
+    }
+
+    // 583: the frame's fog constants from its block. On only for a wanted, valid block whose every value
+    // is a number inside the block's own bounds; else all zero (a frame drawn without fog).
+    {
+      static_assert(sizeof(ClayFogConstants) == 48 && offsetof(ClayFogConstants, on) == 12 && offsetof(ClayFogConstants, near_colour) == 16 &&
+                    offsetof(ClayFogConstants, start) == 28 && offsetof(ClayFogConstants, slope) == 32 && offsetof(ClayFogConstants, scale) == 36 &&
+                    offsetof(ClayFogConstants, amount) == 40 && offsetof(ClayFogConstants, scatter) == 44);
+      const ClayFogConstants zero{};
+      auto is_zero = [&](const ClayFogConstants& c) { return std::memcmp(&c, &zero, sizeof(c)) == 0; };
+      CHECK(583, real_c.axis[0] == real.axis[0] && real_c.axis[1] == real.axis[1] && real_c.axis[2] == real.axis[2] && real_c.on == 1 &&
+                     real_c.near_colour[0] == real.near_colour[0] && real_c.near_colour[1] == real.near_colour[1] &&
+                     real_c.near_colour[2] == real.near_colour[2] && real_c.start == real.range[0] && real_c.slope == real.range[2] &&
+                     real_c.scale == real.range[3] && real_c.amount == real.amount[0] && real_c.scatter == real.amount[1]);
+      CHECK(583, made_c.start == 12.5f && made_c.slope == 0.019999999552965164f && made_c.scale == 0.001500000013038516f &&
+                     made_c.amount == 0.75f && made_c.scatter == 1.5f && made_c.near_colour[2] == 0.8999999761581421f);
+      CHECK(583, is_zero(MakeClayFogConstants(real, false)) && is_zero(MakeClayFogConstants(capture::FogBlock{}, true)));
+      {
+        capture::FogBlock b = real;
+        b.valid = false;  // (a block that says it is not valid is not read, whatever it holds)
+        CHECK(583, is_zero(MakeClayFogConstants(b, true)));
+      }
+      // The sky's numbers in the block (c67.y, c64, c65) are not the fog's: nothing of them is judged.
+      {
+        capture::FogBlock b = real;
+        b.range[1] = -5.0f;
+        b.ext[0][0] = qnan;
+        b.ext[1][2] = -pinf;
+        const ClayFogConstants c = MakeClayFogConstants(b, true);
+        CHECK(583, c.on == 1 && std::memcmp(&c, &real_c, sizeof(c)) == 0);
+      }
+      // A block marked valid that holds what MakeFogBlock would have refused: no fog.
+      for (float bad : {qnan, pinf, -pinf, 2e6f, -2e6f}) {
+        for (int what = 0; what < 11; ++what) {
+          capture::FogBlock b = real;
+          float* fields[] = {&b.axis[0], &b.axis[1], &b.axis[2], &b.near_colour[0], &b.near_colour[1], &b.near_colour[2],
+                             &b.range[0], &b.range[2], &b.range[3], &b.amount[0], &b.amount[1]};
+          *fields[what] = bad;
+          CHECK(583, is_zero(MakeClayFogConstants(b, true)));
+        }
+      }
+      {
+        capture::FogBlock b = real;
+        b.range[0] = -0.5f;  // a start below 0
+        CHECK(583, is_zero(MakeClayFogConstants(b, true)));
+        b = real;
+        b.range[2] = -0.5f;  // a slope below 0
+        CHECK(583, is_zero(MakeClayFogConstants(b, true)));
+        b = real;
+        b.range[3] = 0.0f;   // a distance scale that is not above 0
+        CHECK(583, is_zero(MakeClayFogConstants(b, true)));
+        for (int k = 0; k < 2; ++k) {
+          b = real;
+          b.amount[k] = 4.5f;
+          CHECK(583, is_zero(MakeClayFogConstants(b, true)));
+          b.amount[k] = -0.5f;
+          CHECK(583, is_zero(MakeClayFogConstants(b, true)));
+          b.amount[k] = 4.0f;
+          CHECK(583, MakeClayFogConstants(b, true).on == 1);
+          b.amount[k] = 0.0f;
+          CHECK(583, MakeClayFogConstants(b, true).on == 1);
+        }
+      }
+      // A tree draw's scale: usable inside [0, kTreeFogScaleMax]; the marker of a draw without one is not.
+      CHECK(583, TreeFogScaleUsable(0.0f) && TreeFogScaleUsable(1.0f) && TreeFogScaleUsable(capture::kTreeFogScaleMax) &&
+                     !TreeFogScaleUsable(capture::kTreeFogNone) && !TreeFogScaleUsable(-0.001f) && !TreeFogScaleUsable(4.001f) &&
+                     !TreeFogScaleUsable(qnan) && !TreeFogScaleUsable(pinf) && !TreeFogScaleUsable(-pinf) &&
+                     !TreeFogScaleUsable(capture::LightInputs{}.tree_fog));
+    }
+  }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
@@ -5284,7 +5664,8 @@ int main() {
                "leaf light functions and constants and the frame's eye, shadow maps: depth convention, bias, alpha-to-mask "
                "threshold, draw rules, constants, texel mapping, Shadow line; shadowed sun: the mask in the binding table, "
                "pre-pass keys, compare directions, mask mirrors against the reference's numbers, guards, the frame's inverse "
-               "view-projection, mask constants\n";
+               "view-projection, mask constants; native fog: the tables' read, the ground form and the trees' form "
+               "against the reference's numbers, guards, the frame's fog constants\n";
 
   return 0;
 }

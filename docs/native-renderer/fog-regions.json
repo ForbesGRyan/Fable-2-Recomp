@@ -27,7 +27,7 @@
     },
     "third": {
       "plan": "-BootSave Hero000; the walk 33:LS=0/-100/3500; emulated and native shots 3 s apart from 44 s",
-      "exclude_notes": "the quest banner (gone by 44 s in the runs of 2026-10-09, kept for earlier shots); the expression icons",
+      "exclude_notes": "the quest banner (absent at 44 s and back at 50 s in the runs of 2026-10-09: the three regions that start at 0.14 are under its lower edge there; kept for earlier shots); the expression icons",
       "exclude": [[0.0, 0.0, 1.0, 0.135], [0.045, 0.775, 0.15, 0.96]],
       "regions": [
         {"name": "far mountains left", "rect": [0.151, 0.245, 0.307, 0.329], "kind": "haze", "note": "the range across the lake at the left, below its ridge"},

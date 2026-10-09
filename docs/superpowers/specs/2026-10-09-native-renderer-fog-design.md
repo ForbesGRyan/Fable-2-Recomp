@@ -25,7 +25,10 @@ final binary, one at 29.2; the records-on capture median there is 2.48 to 2.73 m
 to 2.92 on the final binary, and 2.43 to 2.64 with the fog off on Task 6's afternoon; view off 0.07
 to 0.13 ms is met). What was ruled during the work and what was built differently is at the end,
 "Implementation notes (deviations)". Research: `.superpowers/sdd/fog-research.md`
-(untracked; its scripts in `out/tests/fog-research/`).
+(untracked; its scripts in `out/tests/fog-research/`). The fix wave's own report file
+(`.superpowers/sdd/2026-10-09-native-renderer-fog/final-fix-wave-report.md`, untracked) lacks its
+completion section (it ends with the runs it asks for); the substance is in the frame map's
+section 16, "After the reviews: the fix wave".
 
 ## Goal
 
@@ -227,7 +230,9 @@ Numbered on from the nine above.
     code review, its I1, fix a): a lit record that is no terrain record and no tree and whose pixel
     shader is not in the fog table is left unfogged and counted — why: the game does not fog
     `26052DEFBA688AF2`, a plant form without a fog block — cost if wrong: a later shader with fog
-    that the fog table misses is drawn unhazed, visible in the count `lit N not fogged`.
+    that the fog table misses is drawn unhazed, visible in the count `lit N not fogged` (which also
+    moves by itself, with the fog's start: a missed shader shows by name only once the line names
+    the shaders).
 22. *No retry across frames and no fallback to an earlier frame's tables* for a fog block that was
     read and refused (after run 416's `tf4-texel` frame) — why: a stale table must never reach a
     shader; one unfogged frame at the world's start is invisible — cost if wrong: a rare single

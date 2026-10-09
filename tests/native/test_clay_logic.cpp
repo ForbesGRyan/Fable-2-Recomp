@@ -6766,7 +6766,7 @@ int main() {
           in.objects = true;
           CHECK(591, is(in, ClaySky::kDrawn));
         }
-        // The counts: frames with the fog's and the light's switch on, and those without a sky by
+        // The counts: frames with the fog's switch on, and those without a sky by
         // reason; "sky-block" is the block and the rules; "sky-texture" a drawn sky without its textures.
         auto counts = [](ClaySky sky, bool missing) {
           ClaySkyFrames n;

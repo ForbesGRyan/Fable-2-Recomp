@@ -2524,8 +2524,9 @@ inline void TreeFogMirror(const float C[3], const float P[3], const float eye[3]
 //     exposure, when the record's light inputs carry a usable scale; unfogged and counted
 //     "trees without a scale" otherwise (no inputs at all among the reasons).
 //   - any other shader: NOT fogged, lit or not. Lit, that is the one plant form without a fog
-//     block, 26052DEFBA688AF2 (22 instructions, no fog register: 4 draws a frame at the bridge),
-//     and whatever a later table adds (test case 597 holds the two tables against each other);
+//     block, 26052DEFBA688AF2 (22 instructions, no fog register; the game draws more plant
+//     batches with it as the fog's start moves out: 3 to 14 a frame at the bridge), and whatever
+//     a later table adds (test case 597 holds the two tables against each other);
 //     the lit path is told by a bit. Unlit: counted "not in the fog table" (the lake's surface
 //     2B09..., which is not of the form, is drawn through the indexed builder and is no record of
 //     the pass at all).

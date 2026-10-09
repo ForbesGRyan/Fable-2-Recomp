@@ -3127,6 +3127,12 @@ constinit thread_local ShadowFrame t_shadow;
 // frame that gives none: what a frame without valid registers costs, as for the light.
 constexpr uint32_t kMaxShadowRegisterTries = 8;
 
+// Whether `f` is still the frame being built. Call with g_scene_mutex held: the frame's number
+// moves under that mutex (EndMainSceneFrame), together with the builder's Finish.
+bool ShadowFrameCurrent(const ShadowFrame& f) {
+  return f.frame == g_light_tries_frame.load(std::memory_order_relaxed);
+}
+
 ShadowFrame& CurrentShadowFrame() {
   const uint32_t frame = g_light_tries_frame.load(std::memory_order_relaxed);
   if (t_shadow.frame != frame) {
@@ -3291,6 +3297,10 @@ void RecordShadowDraw(uint32_t id, const LastArgs& a, uint32_t device, ShadowPas
     }
   }
   std::lock_guard<std::mutex> lock(g_scene_mutex);
+  // The frame is checked again under the lock, as RecordDraw checks its bracket: the swap may
+  // run on another thread than the draws (nothing here shows that it does not), and a draw read
+  // in one frame must not land in the next frame's pass, whose cascade it was not classified in.
+  if (!ShadowFrameCurrent(f)) return;
   if (g_builder.AddShadow(cascade, r, caster, skip, have_matrix ? matrix : nullptr) && have_matrix) {
     f.have_matrix[cascade] = true;
   }
@@ -3301,17 +3311,19 @@ void RecordShadowDraw(uint32_t id, const LastArgs& a, uint32_t device, ShadowPas
 // The game's clear (DrawIndx2:821EF988) opens a pass when it clears the shadow map: r8 the
 // map's surface word, r7 its height (frame-map section 15: r7 = 0x400, r8 = 0x10000410). The
 // routine is entered a second time for each clear, with a packet header in r7 and no surface
-// word; that call, and a clear of another surface, is no draw and tells the tracker nothing.
+// word; that call is no draw and tells the tracker nothing. A clear of another surface (a
+// first entry: r7 below 0x10000) opens nothing and ends the run of an open pass.
 // Any other hook is a draw: on the map (the device's RB_SURFACE_INFO shadow) with the colour
 // mask 0 it is a shadow draw; a word that cannot be read is not the map, and an unread mask is
 // a mask.
 void ObserveShadowDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   ShadowFrame& f = CurrentShadowFrame();
   if (id == kHook_DrawIndx2_821EF988) {
-    if (a.r[5] != kShadowMapSurfaceWord || a.r[4] >= 0x10000) return;
+    if (a.r[4] >= 0x10000) return;
     f.tracker.Observe(a.r[5], 0, true, false);
+    if (a.r[5] != kShadowMapSurfaceWord) return;
     std::lock_guard<std::mutex> lock(g_scene_mutex);
-    g_builder.CountShadowPass();
+    if (ShadowFrameCurrent(f)) g_builder.CountShadowPass();
     return;
   }
   uint32_t surface = 0, mask = 0xF;
@@ -3324,7 +3336,7 @@ void ObserveShadowDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   if (pass == ShadowPass::kNone) return;
   if (pass == ShadowPass::kExtra) {
     std::lock_guard<std::mutex> lock(g_scene_mutex);
-    g_builder.CountShadowExtra();
+    if (ShadowFrameCurrent(f)) g_builder.CountShadowExtra();
     return;
   }
   RecordShadowDraw(id, a, device, pass, f);

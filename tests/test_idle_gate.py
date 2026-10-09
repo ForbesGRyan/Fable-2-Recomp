@@ -1603,6 +1603,7 @@ class PlanTableTest(unittest.TestCase):
          "4|1:LS=-100/100/60000,2:RS=000100/-0/000001,3:DISC=100000/64,4:DISC=1/1"),
         ("plan", "23:E,27:S,54.25:VIEW=native,55:LS=0/100/3000", 6, False, "4|29:A,33:Down,60.25:VIEW=native,61:LS=0/100/3000"),
         ("plan", "0:E,86400:S", 30, False, "2|30:A,86430:Down"),
+        ("plan", "40:VIEW=shadow,46:view=SHADOW", 0, False, "2|40:VIEW=shadow,46:view=SHADOW"),   # the shadow maps' view
         ("plan", "", 0, False, "0|"),
         ("plan", " , ,", 6, False, "0|"),
         ("plan", "1:e,2.5:F6", 2, True, "3=E;4.5=F6"),
@@ -1632,7 +1633,7 @@ class PlanTableTest(unittest.TestCase):
         ("plan", "5:LS=0 /0/100", "none of"),
         # view and capture
         ("plan", "5:VIEW=", "none of"), ("plan", "5:VIEW=sideways", "none of"), ("plan", "5:VIEW=native/1", "none of"),
-        ("plan", "5:VIEWS=off", "none of"), ("plan", "5:DISC=120", "none of"), ("plan", "5:DISC=0/4", "bad capture entry"),
+        ("plan", "5:VIEWS=off", "none of"), ("plan", "5:VIEW=shadows", "none of"), ("plan", "5:DISC=120", "none of"), ("plan", "5:DISC=0/4", "bad capture entry"),
         ("plan", "5:DISC=120/0", "bad capture entry"), ("plan", "5:DISC=120/65", "bad capture entry"),
         ("plan", "5:DISC=100001/4", "bad capture entry"), ("plan", "5:DISC=a/4", "none of"), ("plan", "5:DISC=120/4/1", "none of"),
         ("plan", "5:DISC=", "none of"), ("plan", "5:DISC=/4", "none of"), ("plan", "5:DISC=120/", "none of"),

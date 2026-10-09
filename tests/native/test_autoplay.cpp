@@ -145,6 +145,13 @@ int main() {
     if (ActionsBetween(z, kBeforePlan, 0.25).size() != 3) return 99;  // a late first poll runs them all
     if (ActionsBetween(z, 0.0, 0.25).size() != 1) return 100;         // (what a start at 0 did)
   }
+  {
+    // The shadow view's token (plan code 5).
+    auto v = Parse("3:view=Shadow,4:VIEW=shadows", &err);
+    if (v || err != "4:VIEW=shadows") return 110;
+    v = Parse("3:view=Shadow", &err);
+    if (!v || v->size() != 1 || (*v)[0].action != 1 || (*v)[0].view != 5 || (*v)[0].name != "VIEW=shadow" || (*v)[0].buttons != 0) return 111;
+  }
   for (const char* bad : {"5:VIEW=", "5:VIEW=sideways", "5:VIEW=native/1", "5:DISC=120", "5:DISC=0/4",
                           "5:DISC=120/0", "5:DISC=120/65", "5:DISC=100001/4", "5:DISC=a/4",
                           "5:DISC=120/4/1", "5:DISC=", "5:DISC=/4", "5:DISC=120/", "5:VIEWS=off",

@@ -237,7 +237,8 @@ static int AgreeTests() {
   float near[4][4], far[4][4], rows[4][4];
   Light(near);
   Light(far, -3.123047f, -4.865234f, 30.0f / 70.0f);
-  // The half texel in either sign, per axis, and none: all accepted, and the fit says which.
+  // The half texel in either sign, per axis, and none: the fit says which, and only plus on both
+  // axes, what every captured pass holds, is the registers' (ruling after the review of Task 3).
   const int signs[] = {1, -1, 0};
   for (int su : signs) {
     for (int sv : signs) {
@@ -249,7 +250,12 @@ static int AgreeTests() {
         return 61;
       }
       if (fit.residual > 1e-6) return 62;
-      if (!PassAgrees(near, rows, texel, 1e-3f)) return 63;
+      // (at the frame's tolerance; 1e-3 is more than a whole texel, 0.00098, and tells none of them)
+      if (PassAgrees(near, rows, texel, kShadowProofTolerance) != (su == 1 && sv == 1)) return 63;
+      if (!PassAgrees(near, rows, texel, 1e-3f)) return 64;
+      // (the residual of the plus fit is what is compared: half a texel for each other sign's step)
+      const double expect = std::fmax(1 - su, 1 - sv) * double(kHalf);
+      if (std::fabs(fit.plus_residual - expect) > 1e-6) return 88;
     }
   }
   // What the captures hold: plus in u and v (frame-map section 15), for both maps.
@@ -318,13 +324,28 @@ static int AgreeTests() {
   // A pass matrix of zeros is not the registers'.
   float zero[4][4] = {};
   if (PassAgrees(zero, rows, texel, 1e-3f)) return 83;
-  // What the tolerance of 1e-3 cannot tell: a map moved by one texel (1 / 1024 = 0.00098 in
-  // texture space), since the half texel is fitted in either sign. Three texels are told.
+  // A map moved by one texel (2 / 1024 in clip, 0.00098 in texture space) is another map, in
+  // either direction: the best fit takes the other sign of the half texel and has no residual,
+  // and the plus fit, the one compared, is a texel off. Half a texel on (the fit without a half
+  // texel) likewise.
   float moved[4][4];
+  for (float texels : {1.0f, -1.0f, 0.5f, 3.0f}) {
+    Light(moved, -6.732423f + texels * 2.0f / 1024.0f);
+    if (PassAgrees(moved, rows, texel, kShadowProofTolerance)) return 84;
+    if (!MapResidual(moved, rows, texel, &fit) || std::fabs(fit.plus_residual - std::fabs(texels) / 1024.0) > 2e-6) return 85;
+  }
   Light(moved, -6.732423f + 2.0f / 1024.0f);
-  if (!PassAgrees(moved, rows, texel, 1e-3f)) return 84;
-  Light(moved, -6.732423f + 6.0f / 1024.0f);
-  if (PassAgrees(moved, rows, texel, 1e-3f)) return 85;
+  if (!MapResidual(moved, rows, texel, &fit) || fit.sign_u != -1 || fit.residual > 2e-6) return 89;
+  // A depth row 5e-4 off is not the registers' at the frame's tolerance; the real numbers are.
+  Light(wrong);
+  wrong[2][3] += 5e-4f;
+  if (PassAgrees(wrong, rows, texel, kShadowProofTolerance)) return 90;
+  Light(wrong);
+  wrong[2][1] -= 5e-4f;
+  if (PassAgrees(wrong, rows, texel, kShadowProofTolerance)) return 91;
+  if (!PassAgrees(near, rows, texel, kShadowProofTolerance)) return 92;
+  MapRows(far, 1, 1, rows);
+  if (!PassAgrees(far, rows, texel, kShadowProofTolerance)) return 93;
   return 0;
 }
 
@@ -457,6 +478,69 @@ static int FinishTests() {
     return 148;
   }
   if (std::strcmp(kShadowBlockReason, "shadow-block") != 0 || std::strcmp(kShadowPassExtraReason, "shadow-pass-extra") != 0) return 149;
+
+  // The frame's tolerance (ruling after the review of Task 3): 1e-4 of texture space, a tenth of a
+  // texel of a 1024-map (0.00098), with the half texel plus on both axes; the captures' largest
+  // residual is 9.95e-7 over 6,612 shadow rows. Pinned from both sides: a pass a fifth of a clip
+  // texel off (0.2 / 1024 in clip x, 0.000098 in u) is the registers', one half a clip texel off
+  // (0.00024 in u) is not. Nor is a pass one or two texels on or one texel back.
+  if (kShadowProofTolerance != 1e-4f) return 150;
+  {
+    const struct {
+      float shift;  // of the near pass's x translation, in clip units
+      bool agrees;
+    } cases[] = {{1e-6f, true},           {0.2f / 1024.0f, true},  {-0.2f / 1024.0f, true}, {0.5f / 1024.0f, false},
+                 {-0.5f / 1024.0f, false}, {4.0f / 1024.0f, false}, {-2.0f / 1024.0f, false}, {2.0f / 1024.0f, false},
+                 {1.0f / 1024.0f, false}};
+    for (const auto& k : cases) {
+      ShadowPassProof m[2] = {pass[0], pass[1]};
+      Light(m[0].matrix, -6.732423f + k.shift);
+      b = FinishShadowBlock(reg, m, kShadowProofTolerance, &why);
+      if (b.valid != k.agrees || why != (k.agrees ? ShadowBlockReason::kNone : ShadowBlockReason::kProof)) {
+        std::printf("FAIL: a pass %.7f off in clip x %s at the frame's tolerance\n", double(k.shift), b.valid ? "agrees" : "does not agree");
+        return 151;
+      }
+    }
+    // (the spec's first tolerance, 1e-3, let a pass 1.9 texels off through; the frame's does not)
+    ShadowPassProof m[2] = {pass[0], pass[1]};
+    Light(m[0].matrix, -6.732423f + 1.9f * 2.0f / 1024.0f);
+    if (FinishShadowBlock(reg, m, kShadowProofTolerance, &why).valid) return 152;
+  }
+  // Each map is held against its own texel (c13.x near, c14.x far). Two different texels: the far
+  // rows carry half of the far texel and agree; far rows carrying half of the NEAR texel do not,
+  // and near rows carrying half of the far texel neither.
+  {
+    const float far_texel = 1.0f / 512.0f;
+    auto rows_with = [](const float l[4][4], float half, float out[4][4]) {
+      for (int j = 0; j < 4; ++j) {
+        out[0][j] = 0.5f * l[0][j] + (0.5f + half) * l[3][j];
+        out[1][j] = -0.5f * l[1][j] + (0.5f + half) * l[3][j];
+        out[2][j] = l[2][j];
+        out[3][j] = l[3][j];
+      }
+    };
+    Registers two = Good();
+    two.reg[14][0] = far_texel;
+    float rows[4][4];
+    rows_with(pass[1].matrix, 0.5f * far_texel, rows);
+    std::memcpy(two.reg[40], rows, sizeof(rows));
+    ShadowBlock r2 = MakeShadowBlock(two.reg, two.have);
+    if (!r2.valid || r2.texel[0] != 1.0f / 1024.0f || r2.texel[1] != far_texel) return 153;
+    b = FinishShadowBlock(r2, pass, kShadowProofTolerance, &why);
+    if (!b.valid || why != ShadowBlockReason::kNone || b.texel[1] != far_texel) return 154;
+    rows_with(pass[1].matrix, kHalf, rows);  // the near texel's half in the far rows
+    std::memcpy(two.reg[40], rows, sizeof(rows));
+    r2 = MakeShadowBlock(two.reg, two.have);
+    if (FinishShadowBlock(r2, pass, kShadowProofTolerance, &why).valid || why != ShadowBlockReason::kProof) return 155;
+    two = Good();
+    two.reg[14][0] = far_texel;
+    rows_with(pass[1].matrix, 0.5f * far_texel, rows);
+    std::memcpy(two.reg[40], rows, sizeof(rows));
+    rows_with(pass[0].matrix, 0.5f * far_texel, rows);  // the far texel's half in the near rows
+    std::memcpy(two.reg[36], rows, sizeof(rows));
+    r2 = MakeShadowBlock(two.reg, two.have);
+    if (FinishShadowBlock(r2, pass, kShadowProofTolerance, &why).valid || why != ShadowBlockReason::kProof) return 156;
+  }
   return 0;
 }
 

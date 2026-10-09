@@ -467,12 +467,12 @@ class Fable2App : public rex::ReXApp {
         for (const Step* a : ActionsBetween(autoplay_plan_, last_t, t)) {
           REXSYS_INFO("[autoplay] {} (planned {:.1f} s) at {:.1f} s", a->name, a->t_seconds, t);
           if (a->action == 1) {
-            // Plan codes: 0 off, 1 split, 2 overlay, 3 native, 4 pattern.
+            // Plan codes: 0 off, 1 split, 2 overlay, 3 native, 4 pattern, 5 shadow.
             static constexpr fable2::native::View kViews[] = {
                 fable2::native::View::kOff, fable2::native::View::kSplit,
                 fable2::native::View::kOverlay, fable2::native::View::kNative,
-                fable2::native::View::kPattern};
-            fable2::native::SetView(kViews[a->view < 5 ? a->view : 0]);
+                fable2::native::View::kPattern, fable2::native::View::kShadow};
+            fable2::native::SetView(kViews[a->view < 6 ? a->view : 0]);
           } else if (a->action == 2) {
             fable2::native::ArmDiscovery(a->disc_frames, a->disc_every);
           }

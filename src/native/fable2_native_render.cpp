@@ -27,7 +27,8 @@ REXCVAR_DEFINE_BOOL(fable2_native_render, false, "Fable2",
                     "Register the native guest-output renderer at startup (restart "
                     "required). Seeded from fable2_config.toml [native] enabled.");
 REXCVAR_DEFINE_STRING(fable2_native_view, "off", "Fable2",
-                      "Native debug view: off, overlay, split, native, pattern (F6 cycles).");
+                      "Native debug view: off, overlay, split, native, pattern (F6 cycles those), or shadow "
+                      "(the clay pass's two shadow maps as grey depth; by name only).");
 REXCVAR_DEFINE_STRING(fable2_native_clay_color, "clay", "Fable2",
                       "Native clay pass color: clay = one clay color; draw = a color per "
                       "draw; shader = a color per vertex shader.");
@@ -50,8 +51,9 @@ REXCVAR_DEFINE_STRING(fable2_native_light, "on", "Fable2",
                       "off = the unlit materials picture.");
 REXCVAR_DEFINE_STRING(fable2_native_shadows, "off", "Fable2",
                       "Native sun shadows: on = with a composite view and the light on, the capture also records the "
-                      "game's two shadow passes and the frame's shadow block (nothing is drawn with them yet: the "
-                      "picture is the same); off = none of it is read.");
+                      "game's two shadow passes and the frame's shadow block, and the clay pass draws its two shadow "
+                      "maps from them (fable2_native_view=shadow shows the maps; the scene's picture does not use them "
+                      "yet and is the same); off = none of it is read or drawn.");
 REXCVAR_DEFINE_BOOL(fable2_native_d3d_messages, false, "Fable2",
                     "Write the Direct3D debug layer's errors, corruption and warnings to the game log "
                     "(the layer is the SDK's --d3d12_debug=true; without it there is nothing to write). "
@@ -303,7 +305,7 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   render::TextureStats tst;
   g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), st, tst);
   SetStatus(render::FormatStatusText(*scene, st, textures ? &tst : nullptr) + "\n" +
-            render::FormatLightDrawnText(st));
+            render::FormatLightDrawnText(st) + "\n" + render::FormatShadowText(st));
   const double cpu_ms = st.hash_ms + st.decode_ms + st.record_ms + tst.decode_ms;
   const uint32_t pending = tst.status[size_t(capture::MaterialStatus::kTexturePending)];
   if (textures && (tst.uploads || pending)) {
@@ -348,6 +350,11 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
     }
     // What was drawn lit and what was not, by reason.
     REXLOG_INFO("[native] clay: {}", render::FormatLightDrawnText(st));
+    // The shadow maps: what was drawn into each, what was not and why.
+    REXLOG_INFO("[native] clay: {}", render::FormatShadowText(st));
+    if (const std::string by_vs = render::FormatShadowSkippedByVs(st); !by_vs.empty()) {
+      REXLOG_INFO("[native] clay: shadow draws skipped by vs {{{}}}", by_vs);
+    }
 
     REXLOG_INFO("[native] clay: {} | alpha-unknown {}, blend-unknown {}", render::FormatStateText(st),
                 st.alpha_unknown, st.blend_unknown);
@@ -397,7 +404,13 @@ void OverlayCallback(const NativeGuestOutputRenderContext& ctx, void*) {
     Fail("composite");
     return;
   }
-  g_composite.Draw(ctx.cmd, ctx, g_clay->color(), view);
+  if (view == View::kShadow) {
+    // The pass's two maps (in kPixelShaderResource since its Render), or a flat colour for a frame without them.
+    g_composite.DrawShadowMaps(ctx.cmd, ctx, g_clay->shadow_view(0), g_clay->shadow_view(1), g_clay->shadow_maps_drawn(),
+                               render::kShadowMapSize);
+  } else {
+    g_composite.Draw(ctx.cmd, ctx, g_clay->color(), view);
+  }
   g_frame.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -435,7 +448,7 @@ void Install(rex::memory::Memory* memory) {
               ViewName(CurrentView()));
   REXLOG_INFO("[native] light: {} (fable2_native_light)",
               CurrentClayLight() == render::ClayLight::kOn ? "on" : "off");
-  REXLOG_INFO("[native] shadows: {} (fable2_native_shadows; capture only, nothing is drawn with them yet)",
+  REXLOG_INFO("[native] shadows: {} (fable2_native_shadows; the two shadow maps are drawn, the scene does not use them yet)",
               CurrentShadows() ? "on" : "off");
 }
 

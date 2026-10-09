@@ -24,7 +24,7 @@ namespace fable2::native::capture {
 //   drawn with: clip x, y in [-1, 1], depth = z under the reversed range.
 // split: c12 = (begin of the blend to the far map, begin of the fade, width of
 //   the blend, the value faded to); (20, 35, 2, w) in every capture, w moving
-//   with the time of day (0.46 to 0.51).
+//   with the time of day (seen from 0.46 to 0.53).
 // texel: (c13.x, c14.x), the near and the far map's texel size.
 // bias: per map the polygon offset of the pass's draws as the device held it
 //   (registers 0x2380 / 0x2381): scale (the slope scale times 16), offset (in
@@ -131,12 +131,17 @@ inline bool PassMatrix(const float c0_3[4][4], const float world[3][4], float ou
 // map_residual): the largest difference of the texture-space form of the matrix
 // from the rows, per row (u, v, depth, w) and overall, with the half texel that
 // fits best per axis: +1 plus, -1 minus, 0 none (tried in that order; the first
-// of equals is kept, as there).
+// of equals is kept, as there). plus_residual: the same largest difference with
+// the half texel plus on both axes, which is what every captured pass holds
+// (6,612 shadow rows, residual at most 9.95e-7) and what the frame's proof
+// compares (PassAgrees): the best fit alone would take a map half a texel or
+// one texel on for the registers' by choosing another sign.
 struct MapFit {
   double residual = 0.0;
   double part[4] = {};
   int sign_u = 0;
   int sign_v = 0;
+  double plus_residual = 0.0;
 };
 
 // The fit of `pass` (rows x, y, z, w) to `map_rows` (rows u, v, depth, w) for a
@@ -153,6 +158,7 @@ inline bool MapResidual(const float pass[4][4], const float map_rows[4][4], floa
   const double half = 0.5 * double(texel);
   MapFit f;
   const double k[2] = {0.5, -0.5};
+  double plus = 0.0;
   for (int axis = 0; axis < 2; ++axis) {
     bool have = false;
     double best = 0.0;
@@ -163,6 +169,7 @@ inline bool MapResidual(const float pass[4][4], const float map_rows[4][4], floa
         r = std::fmax(r, std::fabs(k[axis] * double(pass[axis][j]) + (0.5 + sign * half) * double(pass[3][j]) -
                                    double(map_rows[axis][j])));
       }
+      if (sign == 1) plus = std::fmax(plus, r);
       if (!have || r < best) {
         have = true;
         best = r;
@@ -178,21 +185,23 @@ inline bool MapResidual(const float pass[4][4], const float map_rows[4][4], floa
     }
   }
   f.residual = std::fmax(std::fmax(f.part[0], f.part[1]), std::fmax(f.part[2], f.part[3]));
-  if (!std::isfinite(f.residual)) return false;
+  f.plus_residual = std::fmax(plus, std::fmax(f.part[2], f.part[3]));
+  if (!std::isfinite(f.residual) || !std::isfinite(f.plus_residual)) return false;
   *fit = f;
   return true;
 }
 
-// Whether a pass's light matrix is the map's register rows within `tol`, the
-// half texel in either sign or none (MapResidual). Nothing that is not finite
-// agrees with anything. Note what `tol` = 1e-3 leaves open: a texel of a
-// 1024-map is 0.00098 in texture space, so with the half texel fitted in
-// either sign a matrix moved by one texel still agrees; the proof tells
-// another frame's or the other map's matrix, not a texel.
+// Whether a pass's light matrix is the map's register rows within `tol`, with
+// the half texel plus on both axes (MapFit::plus_residual; ruling after the
+// review of Task 3: the minus sign and no half texel do not agree any more,
+// whatever MapResidual's best fit says). Nothing that is not finite agrees
+// with anything. The frame's proof uses kShadowProofTolerance (1e-4): a texel
+// of a 1024-map is 0.00098 in texture space, so a map a tenth of a texel off,
+// a depth row 5e-4 off or another frame's matrix is told.
 inline bool PassAgrees(const float pass[4][4], const float map_rows[4][4], float texel, float tol) {
   MapFit fit;
   if (!(tol >= 0.0f) || !std::isfinite(tol) || !MapResidual(pass, map_rows, texel, &fit)) return false;
-  return fit.residual <= double(tol);
+  return fit.plus_residual <= double(tol);
 }
 
 // PA_SU_SC_MODE_CNTL bits 11 and 12: the polygon offset applies to front and
@@ -288,12 +297,17 @@ struct ShadowPassProof {
   PassBias bias;
 };
 
-// The tolerance of the frame's proof (the spec's: within 1e-3).
-inline constexpr float kShadowProofTolerance = 1e-3f;
+// The tolerance of the frame's proof: 1e-4 of texture space, a tenth of a texel
+// of a 1024-map (ruling after Task 3; the spec said 1e-3, which is more than a
+// texel, 0.00098). The largest residual of the captures is 9.95e-7 over
+// 6,612 shadow rows (2.8e-7 in frame-map section 15, "Passes"), all with the
+// half texel plus on both axes, which is the only fit that agrees (PassAgrees).
+inline constexpr float kShadowProofTolerance = 1e-4f;
 
 // The frame's block: `registers` (MakeShadowBlock) with the two passes' proof.
 // Valid only when the registers are, both passes gave a matrix, each agrees
-// with its map's rows under the map's own texel (PassAgrees, `tol`), and each
+// with its map's rows under the map's own texel (texel[0] the near map's,
+// texel[1] the far map's; PassAgrees, `tol`), and each
 // pass's bias is one finite pair or none. Otherwise all zero, and `why`
 // (optional) says which of these failed first.
 inline ShadowBlock FinishShadowBlock(const ShadowBlock& registers, const ShadowPassProof pass[2], float tol,

@@ -72,7 +72,9 @@ enum class ShadowPass : uint8_t { kNone, kNear, kFar, kExtra };
 //    second the far map, later ones are extra;
 //  - a draw on the map (the surface word, colour mask 0, not in the scene) is
 //    of the pass the last clear opened, while that pass's run lasts;
-//  - any other draw ends the run. A draw on the map after that, and one before
+//  - any other draw ends the run, and so does a clear that is not a clear of
+//    the map outside the scene (the game has left the map; ruling after the
+//    review of Task 3). A draw on the map after that, and one before
 //    the frame's first clear, has no pass that could be told: kExtra. (A pass
 //    is recorded whole or its tail is counted; a map is never put together
 //    from two runs.)
@@ -85,15 +87,18 @@ class ShadowPassTracker {
   // 0 when it could not be read. `colour_mask`: RB_COLOR_MASK (anything but 0
   // when unread). `is_clear`: the call is the game's clear. `in_scene`: the
   // draw is inside the main scene's bracket. Returns the draw's pass; kNone for
-  // a clear and for whatever is not a shadow draw.
+  // a clear and for whatever is not a shadow draw. (The capture tells it of the
+  // game's clears by their first entry only: capture.cpp, ObserveShadowDraw.)
   constexpr ShadowPass Observe(uint32_t surface_word, uint32_t colour_mask, bool is_clear, bool in_scene) {
     const bool on_map = !in_scene && surface_word == kShadowMapSurfaceWord;
     if (is_clear) {
       // A clear of another surface, or one seen inside the scene, opens nothing
-      // (and is no draw: it does not end a run either).
+      // and ends the run of a pass that is open.
       if (on_map) {
         ++passes_;
         open_ = true;
+      } else {
+        open_ = false;
       }
       return ShadowPass::kNone;
     }

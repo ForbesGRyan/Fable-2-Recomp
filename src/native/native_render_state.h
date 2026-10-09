@@ -15,7 +15,9 @@
 
 namespace fable2::native {
 
-enum class View { kOff, kOverlay, kSplit, kNative, kPattern };
+// kShadow: the clay pass's two shadow maps as grey depth over the whole output (evidence shots).
+// Set by name only (the cvar, a plan's VIEW=shadow): F6 never cycles to it.
+enum class View { kOff, kOverlay, kSplit, kNative, kPattern, kShadow };
 
 struct ParsedView {
   View view;
@@ -32,6 +34,7 @@ inline ParsedView ParseView(std::string_view text) {
   if (lower == "split") return {View::kSplit, true};
   if (lower == "native") return {View::kNative, true};
   if (lower == "pattern") return {View::kPattern, true};
+  if (lower == "shadow") return {View::kShadow, true};
   return {View::kOff, false};
 }
 
@@ -42,6 +45,7 @@ inline View NextView(View v) {
     case View::kSplit: return View::kNative;
     case View::kNative: return View::kPattern;
     case View::kPattern: return View::kOff;
+    case View::kShadow: return View::kOff;  // (no key leads to it; the key leaves it)
   }
   return View::kOff;
 }
@@ -53,13 +57,15 @@ inline const char* ViewName(View v) {
     case View::kSplit: return "split";
     case View::kNative: return "native";
     case View::kPattern: return "pattern";
+    case View::kShadow: return "shadow";
   }
   return "off";
 }
 
-// Views that draw the clay pass over the guest output.
+// Views that draw the clay pass over the guest output (the shadow view: the
+// pass's shadow maps; the pass renders for it as for the others).
 inline bool IsCompositeView(View v) {
-  return v == View::kOverlay || v == View::kSplit || v == View::kNative;
+  return v == View::kOverlay || v == View::kSplit || v == View::kNative || v == View::kShadow;
 }
 
 // Whether setting the view to `next` changes it. Only a change is counted for

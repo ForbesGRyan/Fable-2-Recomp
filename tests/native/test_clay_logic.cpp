@@ -3870,6 +3870,417 @@ int main() {
                    "Light: on, block valid, lit 467 (terrain-layer 426, terrain-far 0, object 0, tree-trunk 0, plant 0, plant-lit 0, "
                    "tree-leaf 41), unlit 0"));
   }
+
+  // --- Native shadow maps (plan Task 4, sub-project 8; frame-map section 15) ---
+  {
+    using capture::CasterKind;
+    using capture::Compare;
+    using capture::Cull;
+    using capture::ShadowCaster;
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    // 540: the maps' size is the game's, a constant.
+    static_assert(kShadowMapSize == 1024 && kShadowMapTexelBytes == 4 && kShadowMapClear == 1.0f && kShadowViewportOrigin == 0.5f);
+    CHECK(540, FormatShadowTargetText() == "shadow maps 2 x 1024 x 1024: depth D32_FLOAT 8.0 MB together");
+
+    // 541: the depth convention at the range ends. The game: window depth 1 - z, cleared to 0,
+    // greater-equal. Native: depth z, cleared to 1, less-equal. The two orders are one order.
+    CHECK(541, ShadowGameDepth(0.0f) == 1.0f && ShadowGameDepth(1.0f) == 0.0f && ShadowNativeDepth(1.0f) == 0.0f &&
+                   ShadowNativeDepth(0.0f) == 1.0f && ShadowNativeDepth(ShadowGameDepth(0.25f)) == 0.25f);
+    CHECK(541, kShadowMapCompare == Compare::kLessEqual && MirrorCompare(Compare::kGreaterEqual) == kShadowMapCompare);
+    CHECK(541, ShadowNativeDepth(0.0f) == kShadowMapClear);  // the game's clear, 0, is the native clear
+    for (float a : {0.0f, 0.1f, 0.5f, 1.0f}) {
+      for (float b : {0.0f, 0.1f, 0.7f, 1.0f}) {
+        CHECK(541, (ShadowGameDepth(a) >= ShadowGameDepth(b)) == (a <= b));
+      }
+    }
+    // The state of every shadow row (frame-map section 15: 0x2200 = 0x00708766 under 2113 = -1) is
+    // the usable one; the scene's less-equal under the reversed range, an unreversed range, no
+    // write, no test and an unread state are not.
+    {
+      capture::RenderState rs = State(0x00708766u, 0x00010001u, 0x00000004u, 0x00219806u, 0);
+      CHECK(542, rs.valid && rs.depth_reversed && rs.depth_func == Compare::kGreaterEqual && ShadowDepthStateUsable(rs));
+      capture::RenderState bad = rs;
+      bad.depth_reversed = false;
+      CHECK(542, !ShadowDepthStateUsable(bad));
+      bad = rs;
+      bad.depth_write = false;
+      CHECK(542, !ShadowDepthStateUsable(bad));
+      bad = rs;
+      bad.depth_test = false;
+      CHECK(542, !ShadowDepthStateUsable(bad));
+      bad = rs;
+      bad.valid = false;
+      CHECK(542, !ShadowDepthStateUsable(bad));
+      for (Compare f : {Compare::kNever, Compare::kLess, Compare::kEqual, Compare::kLessEqual, Compare::kGreater, Compare::kNotEqual,
+                        Compare::kAlways}) {
+        bad = rs;
+        bad.depth_func = f;
+        CHECK(542, !ShadowDepthStateUsable(bad));
+      }
+    }
+
+    // 543: ShadowBias, the game's polygon offset on its window depth: (scale / 16) * slope + offset.
+    // The near pass's pair (-32, -0.001) is D3D's slope scale -2 and bias -0.001.
+    CHECK(543, ShadowBias(0.5f, 0.0f, -32.0f, -0.001f) == 0.5f - 0.001f);
+    CHECK(543, std::fabs(ShadowBias(0.5f, 0.01f, -32.0f, -0.001f) - (0.5f - 0.02f - 0.001f)) < 1e-7f);
+    CHECK(543, std::fabs(ShadowBias(0.5f, 0.01f, -80.0f, -0.005f) - (0.5f - 0.05f - 0.005f)) < 1e-7f);
+    CHECK(543, ShadowBias(0.25f, 3.0f, 0.0f, 0.0f) == 0.25f && ShadowBias(1.0f, 0.0f, -32.0f, 0.0f) == 1.0f);
+    // The terms the shader adds are the same step in the native direction: 1 - ShadowBias(1 - z).
+    ShadowCaster near_caster;
+    near_caster.biased = true;
+    near_caster.bias_scale = -32.0f;
+    near_caster.bias_offset = -0.001f;
+    ShadowCaster far_caster = near_caster;
+    far_caster.bias_scale = -80.0f;
+    far_caster.bias_offset = -0.005f;
+    ShadowBiasTerms terms;
+    CHECK(544, MakeShadowBiasTerms(near_caster, &terms) && terms.slope == 2.0f && terms.constant == 0.001f);
+    CHECK(544, MakeShadowBiasTerms(far_caster, &terms) && terms.slope == 5.0f && terms.constant == 0.005f);
+    for (const ShadowCaster& c : {near_caster, far_caster}) {
+      ShadowBiasTerms t;
+      CHECK(544, MakeShadowBiasTerms(c, &t));
+      for (float z : {0.0f, 0.1f, 0.33f, 0.5f, 0.9f}) {
+        for (float slope : {0.0f, 0.001f, 0.01f}) {
+          const float game = ShadowBias(ShadowGameDepth(z), slope, c.bias_scale, c.bias_offset);
+          CHECK(544, std::fabs(ShadowMapDepth(z, slope, t) - ShadowNativeDepth(game)) < 1e-6f);
+          // A caster moves away from the light: a larger native depth, a smaller game depth.
+          CHECK(544, ShadowMapDepth(z, slope, t) > z && game < ShadowGameDepth(z));
+        }
+      }
+    }
+    // The range ends: the nearest depth gets the bias and nothing less, the farthest stays the clear
+    // value (the result is saturated: never past 1, never below 0), a NaN gives 0.
+    CHECK(545, MakeShadowBiasTerms(near_caster, &terms));
+    CHECK(545, ShadowMapDepth(0.0f, 0.0f, terms) == 0.001f && ShadowMapDepth(1.0f, 0.0f, terms) == 1.0f &&
+                   ShadowMapDepth(1.0f, 0.5f, terms) == 1.0f && ShadowMapDepth(0.9995f, 0.0f, terms) == 1.0f);
+    {
+      const ShadowBiasTerms towards{-2.0f, -0.001f};  // (a pair of the other sign: clamped at the light's end)
+      CHECK(545, ShadowMapDepth(0.0f, 0.0f, towards) == 0.0f && ShadowMapDepth(0.0005f, 0.1f, towards) == 0.0f);
+      CHECK(545, ShadowMapDepth(nan, 0.0f, terms) == 0.0f && ShadowMapDepth(0.5f, nan, terms) == 0.0f);
+    }
+    // A caster without the offset has none, whatever its registers hold (they keep stale values).
+    {
+      ShadowCaster plain = near_caster;
+      plain.biased = false;
+      plain.bias_scale = nan;
+      CHECK(546, MakeShadowBiasTerms(plain, &terms) && terms.slope == 0.0f && terms.constant == 0.0f);
+      CHECK(546, ShadowMapDepth(0.0f, 1.0f, terms) == 0.0f && ShadowMapDepth(0.5f, 1.0f, terms) == 0.5f);
+      // A biased caster whose pair is not usable has no terms at all (and `out` is left alone).
+      terms = ShadowBiasTerms{7.0f, 7.0f};
+      for (float bad : {nan, inf, -inf, 2.0f * kShadowBiasScaleMax}) {
+        ShadowCaster c = near_caster;
+        c.bias_scale = bad;
+        CHECK(546, !MakeShadowBiasTerms(c, &terms) && terms.slope == 7.0f && terms.constant == 7.0f);
+      }
+      for (float bad : {nan, inf, -inf, 1.5f}) {
+        ShadowCaster c = near_caster;
+        c.bias_offset = bad;
+        CHECK(546, !MakeShadowBiasTerms(c, &terms) && terms.constant == 7.0f);
+      }
+      ShadowCaster edge = near_caster;
+      edge.bias_scale = -kShadowBiasScaleMax;
+      edge.bias_offset = kShadowBiasOffsetMax;
+      CHECK(546, MakeShadowBiasTerms(edge, &terms) && terms.slope == kShadowBiasScaleMax / 16.0f && terms.constant == -1.0f);
+    }
+
+    // 547: alpha-to-mask on one sample from the 0x2202 word: alpha >= 1 - offset / 4, the offset of
+    // the pixel's parity from the word's top byte. The leaf cards' word: 0.5 at every pixel.
+    CHECK(547, ShadowAlphaToMaskOn(0xAA00001Cu) && !ShadowAlphaToMaskOn(0xAA000004u) && !ShadowAlphaToMaskOn(0x0000000Cu));
+    for (uint32_t x = 0; x < 4; ++x) {
+      for (uint32_t y = 0; y < 4; ++y) {
+        CHECK(547, ShadowAlphaToMaskThreshold(0xAA00001Cu, x, y) == 0.5f);
+        // The same rule as the scene's with one sample (AlphaToMaskCovers, samples 0), at the threshold.
+        for (uint32_t word : {0xAA00001Cu, 0x8700001Cu, 0x0000001Cu, 0xFF00001Cu, 0x1B00001Cu}) {
+          const float t = ShadowAlphaToMaskThreshold(word, x, y);
+          CHECK(547, AlphaToMaskCovers(uint8_t(word >> 24), x, y, t, 0) &&
+                         !AlphaToMaskCovers(uint8_t(word >> 24), x, y, t - 1.0f / 512.0f, 0));
+        }
+      }
+    }
+    // The dither pattern 0x87: 0.25, 0.75, 1.0, 0.5 for the parities 0 to 3 (index (x & 1) * 2 + (y & 1)).
+    CHECK(547, ShadowAlphaToMaskThreshold(0x8700001Cu, 0, 0) == 0.25f && ShadowAlphaToMaskThreshold(0x8700001Cu, 0, 1) == 0.75f &&
+                   ShadowAlphaToMaskThreshold(0x8700001Cu, 1, 0) == 1.0f && ShadowAlphaToMaskThreshold(0x8700001Cu, 1, 1) == 0.5f);
+    CHECK(547, ShadowAlphaToMaskThreshold(0x0000001Cu, 3, 5) == 1.0f && ShadowAlphaToMaskThreshold(0xFF00001Cu, 2, 2) == 0.25f);
+
+    // 548: the three pipelines, one a cull mode.
+    static_assert(kShadowPipelines == 3 && ShadowPipelineSlot(Cull::kNone) == 0 && ShadowPipelineSlot(Cull::kFront) == 1 &&
+                  ShadowPipelineSlot(Cull::kBack) == 2);
+
+    // 549-553: what the pass does with a shadow record. The records' words are the rows' of
+    // frame-map section 15 and docs/native-renderer/shadow-casters.json.
+    auto shadow_record = [&](uint32_t color_control, uint32_t su_sc, float ref) {
+      capture::DrawRecord r = BaseRecord();
+      r.state_words.depth_control = 0x00708766u;
+      r.state_words.color_control = color_control;
+      r.state_words.su_sc_mode = su_sc;
+      r.state_words.color_mask = 0;
+      r.state_words.alpha_ref = FloatBits(ref);
+      r.state_words.vport_z_scale = 0xBF800000u;
+      r.state_words.vte_cntl = 0x0000043Fu;
+      r.state_words.read = true;
+      return r;
+    };
+    auto textured = [](capture::DrawRecord r, float scale) {
+      r.material.status = capture::MaterialStatus::kTextured;
+      r.material.alpha.source = capture::AlphaSource::kAlbedo;
+      r.material.alpha.component = 3;
+      r.material.alpha_scale = scale;
+      return r;
+    };
+    ShadowCaster alpha_caster = near_caster;
+    alpha_caster.kind = CasterKind::kAlphaTest;
+    {
+      // An opaque caster (static props, 0xF160...): solid, cull back under clockwise front faces, the near bias.
+      const capture::DrawRecord r = shadow_record(0x00000004u, 0x00219806u, 0.0f);
+      const ShadowDrawState d = DecideShadowDraw(r, near_caster);
+      CHECK(549, d.skip == ShadowDrawSkip::kNone && d.cull == Cull::kBack && !d.textured && d.alpha.mode == 0 &&
+                     d.bias.slope == 2.0f && d.bias.constant == 0.001f);
+      // (counter-clockwise front faces: front and back trade places, as for the scene)
+      CHECK(549, DecideShadowDraw(shadow_record(0x00000004u, 0x00219802u, 0.0f), near_caster).cull == Cull::kFront);
+      // An opaque caster is solid whatever its state says of alpha: the game runs no pixel shader there.
+      const ShadowDrawState t = DecideShadowDraw(shadow_record(0xAA00001Cu, 0x00219806u, 0.0f), near_caster);
+      CHECK(549, t.skip == ShadowDrawSkip::kNone && !t.textured && t.alpha.mode == 0);
+    }
+    {
+      // The leaf cards (0x4325... / 0xF1EB...): 0x2202 = 0xAA00001C, reference 0, no cull, scale c15.w.
+      const capture::DrawRecord r = textured(shadow_record(0xAA00001Cu, 0x00219800u, 0.0f), 0.5f);
+      const ShadowDrawState d = DecideShadowDraw(r, alpha_caster);
+      CHECK(550, d.skip == ShadowDrawSkip::kNone && d.cull == Cull::kNone && d.textured);
+      // Alpha test greater than the reference, then alpha-to-mask with the word's offsets as on ONE sample.
+      CHECK(550, d.alpha.mode == (kAlphaTest | uint32_t(Compare::kGreater) | kAlphaFromAlbedo | (3u << 5) | kAlphaToMask |
+                                  (0xAAu << kAlphaToMaskShift)));
+      CHECK(550, d.alpha.ref == 0.0f && d.alpha.scale == 0.5f);
+      CHECK(550, ((d.alpha.mode >> kAlphaToMaskSamplesShift) & 3u) == 0);
+      // ... also when the record's surface word names two samples (the scene's): the map has one.
+      capture::DrawRecord two = r;
+      two.state_words.surface_info = 0x11810460u;
+      CHECK(550, capture::DecodeRenderState(two.state_words).alpha_to_mask_samples == 1);
+      CHECK(550, DecideShadowDraw(two, alpha_caster).alpha.mode == d.alpha.mode);
+      // The threshold the mode stands for is the word's: 0.5 at every pixel.
+      const uint8_t offsets = uint8_t(d.alpha.mode >> kAlphaToMaskShift);
+      for (uint32_t x = 0; x < 2; ++x) {
+        for (uint32_t y = 0; y < 2; ++y) {
+          CHECK(550, AlphaToMaskCovers(offsets, x, y, 0.5f, 0) && !AlphaToMaskCovers(offsets, x, y, 0.499f, 0) &&
+                         ShadowAlphaToMaskThreshold(r.state_words.color_control, x, y) == 0.5f);
+        }
+      }
+    }
+    {
+      // A cut-out mesh (0x3A0F... / 0x3347...): alpha test greater 254/255, no alpha-to-mask.
+      const float ref = 254.0f / 255.0f;
+      const ShadowDrawState d = DecideShadowDraw(textured(shadow_record(0x0000000Cu, 0x00219806u, ref), 1.0f), alpha_caster);
+      CHECK(551, d.skip == ShadowDrawSkip::kNone && d.textured && d.cull == Cull::kBack &&
+                     d.alpha.mode == (kAlphaTest | uint32_t(Compare::kGreater) | kAlphaFromAlbedo | (3u << 5)) && d.alpha.ref == ref &&
+                     d.alpha.scale == 1.0f);
+      // An alpha-test caster whose state has neither test: solid, and it needs no texture.
+      const ShadowDrawState s = DecideShadowDraw(shadow_record(0x00000004u, 0x00219806u, 0.0f), alpha_caster);
+      CHECK(551, s.skip == ShadowDrawSkip::kNone && !s.textured && s.alpha.mode == 0);
+    }
+    {
+      // Fail closed. An alpha-test caster without a usable material: not drawn (never solid).
+      const capture::DrawRecord good = textured(shadow_record(0xAA00001Cu, 0x00219800u, 0.0f), 1.0f);
+      capture::DrawRecord bad = good;
+      bad.material.status = capture::MaterialStatus::kPsUnknown;
+      CHECK(552, DecideShadowDraw(bad, alpha_caster).skip == ShadowDrawSkip::kAlpha);
+      bad = good;
+      bad.material.alpha.source = capture::AlphaSource::kNone;
+      CHECK(552, DecideShadowDraw(bad, alpha_caster).skip == ShadowDrawSkip::kAlpha);
+      for (float v : {nan, inf, -inf, 4096.0f}) {
+        bad = good;
+        bad.material.alpha_scale = v;
+        CHECK(552, DecideShadowDraw(bad, alpha_caster).skip == ShadowDrawSkip::kAlpha);
+      }
+      for (int i = 0; i < 4; ++i) {
+        bad = good;
+        bad.material.uv_xform[i] = i % 2 ? nan : inf;
+        CHECK(552, DecideShadowDraw(bad, alpha_caster).skip == ShadowDrawSkip::kAlpha);
+      }
+      // A row that is not finite: not drawn. A cut of +infinity is the record's "no cut" and is fine.
+      for (int i : {0, 7, 15}) {
+        bad = good;
+        bad.rows[i] = i == 7 ? inf : nan;
+        CHECK(552, DecideShadowDraw(bad, alpha_caster).skip == ShadowDrawSkip::kMatrix);
+      }
+      CHECK(552, good.cut[3] == capture::kNoCut && DecideShadowDraw(good, alpha_caster).skip == ShadowDrawSkip::kNone);
+      // A bias that is not a number: not drawn (never unbiased instead).
+      ShadowCaster no_bias = alpha_caster;
+      no_bias.bias_scale = nan;
+      CHECK(552, DecideShadowDraw(good, no_bias).skip == ShadowDrawSkip::kBias);
+      // A state that was not read, another depth state, a caster kind that is none.
+      bad = good;
+      bad.state_words.read = false;
+      CHECK(552, DecideShadowDraw(bad, alpha_caster).skip == ShadowDrawSkip::kState);
+      bad = good;
+      bad.state_words.depth_control = 0x00708736u;  // less-equal
+      CHECK(552, DecideShadowDraw(bad, alpha_caster).skip == ShadowDrawSkip::kState);
+      bad = good;
+      bad.state_words.vport_z_scale = 0x3F800000u;  // not reversed
+      CHECK(552, DecideShadowDraw(bad, alpha_caster).skip == ShadowDrawSkip::kState);
+      ShadowCaster odd = alpha_caster;
+      odd.kind = CasterKind(7);
+      CHECK(552, DecideShadowDraw(good, odd).skip == ShadowDrawSkip::kState);
+      // A skipped draw carries nothing a caller could draw with.
+      const ShadowDrawState s = DecideShadowDraw(bad, alpha_caster);
+      CHECK(552, !s.textured && s.alpha.mode == 0 && s.bias.slope == 0.0f && s.bias.constant == 0.0f);
+      // (also one that is refused late, after its bias and cull were worked out)
+      bad = textured(shadow_record(0xAA00001Cu, 0x00219806u, 0.0f), nan);
+      const ShadowDrawState late = DecideShadowDraw(bad, alpha_caster);
+      CHECK(552, late.skip == ShadowDrawSkip::kAlpha && late.bias.slope == 0.0f && late.bias.constant == 0.0f && late.cull == Cull::kNone &&
+                     !late.textured && late.alpha.mode == 0);
+    }
+    {
+      // 553: the root constants of a shadow draw: a clay draw's without light, the bias in `color`
+      // (the constant term's bits) and `pad2` (the slope term's).
+      capture::DrawRecord r = textured(shadow_record(0xAA00001Cu, 0x00219800u, 0.0f), 0.5f);
+      r.base_vertex = 3;
+      const ShadowDrawState d = DecideShadowDraw(r, alpha_caster);
+      const float uv[4] = {2.0f, 3.0f, 0.25f, 0.5f};
+      const ClayConstants c = MakeShadowConstants(r, 40, uv, true, 2, d.alpha, d.bias);
+      CHECK(553, std::memcmp(c.rows, r.rows, sizeof(c.rows)) == 0 && c.base_vertex == 3 && c.vertex_count == 40 && c.textured == 1 &&
+                     c.sampler == 2 && c.alpha_mode == d.alpha.mode && c.alpha_ref == 0.0f && c.alpha_scale == 0.5f &&
+                     c.uv[0] == 2.0f && c.uv[3] == 0.5f && c.light_mode == 0 && c.light_count == 0);
+      CHECK(553, c.color == FloatBits(0.001f) && c.pad2 == FloatBits(2.0f) && c.cut[3] == r.cut[3]);
+      const ClayConstants solid = MakeShadowConstants(r, 40, uv, false, 0, ClayAlpha{}, ShadowBiasTerms{});
+      CHECK(553, solid.textured == 0 && solid.alpha_mode == 0 && solid.color == 0 && solid.pad2 == 0);
+    }
+
+    // 554: the texel a point is drawn into is the texel the registers address. The numbers of
+    // tests/test_shadow_matrices.py (light(), map_rows(), HALF), as test_shadow_block.cpp has them:
+    // an orthographic light whose origin lies on a whole texel of clip space.
+    {
+      const float light[4][4] = {{0.052114f, 0.0f, 0.041577f, -6.732423f},
+                                 {0.000898f, 0.066651f, -0.001126f, -10.841799f},
+                                 {0.005422f, -0.000188f, -0.006796f, 0.737847f},
+                                 {0.0f, 0.0f, 0.0f, 1.0f}};
+      const float half = 0.5f / 1024.0f;
+      float rows[4][4];
+      for (int j = 0; j < 4; ++j) {
+        rows[0][j] = 0.5f * light[0][j] + (0.5f + half) * light[3][j];
+        rows[1][j] = -0.5f * light[1][j] + (0.5f + half) * light[3][j];
+        rows[2][j] = light[2][j];
+        rows[3][j] = light[3][j];
+      }
+      auto clip_of = [&](const float p[3], float clip[4]) {
+        for (int i = 0; i < 4; ++i) {
+          clip[i] = float(double(light[i][0]) * p[0] + double(light[i][1]) * p[1] + double(light[i][2]) * p[2] + double(light[i][3]));
+        }
+      };
+      // The origin: the centre of a texel in the drawing and in the lookup, the same texel.
+      const float origin[3] = {0.0f, 0.0f, 0.0f};
+      float clip[4];
+      double window[2], lookup[2];
+      clip_of(origin, clip);
+      CHECK(554, ShadowMapWindow(clip, window) && ShadowMapLookup(rows, origin, lookup));
+      for (int a = 0; a < 2; ++a) {
+        CHECK(554, std::fabs(window[a] - std::floor(window[a]) - 0.5) < 0.004 && std::fabs(lookup[a] - std::floor(lookup[a]) - 0.5) < 0.004);
+        CHECK(554, std::floor(window[a]) == std::floor(lookup[a]));
+      }
+      // (the near map's numbers put it out of the map; a world point inside it, on the same lattice)
+      // Points all over the map: the two positions are one (float rows: within 0.002 texel), and
+      // the texel is the same wherever the point is not within that of a texel's edge.
+      uint32_t seed = 12345u, compared = 0;
+      for (int n = 0; n < 2000; ++n) {
+        float p[3];
+        for (float& v : p) {
+          seed = seed * 1664525u + 1013904223u;
+          v = float(seed >> 8) / 16777216.0f;
+        }
+        const float world[3] = {110.0f + 30.0f * p[0], 150.0f + 25.0f * p[1], 20.0f * p[2]};
+        clip_of(world, clip);
+        CHECK(554, ShadowMapWindow(clip, window) && ShadowMapLookup(rows, world, lookup));
+        CHECK(554, std::fabs(window[0] - lookup[0]) < 0.002 && std::fabs(window[1] - lookup[1]) < 0.002);
+        const bool inside = window[0] >= 0.0 && window[0] < 1024.0 && window[1] >= 0.0 && window[1] < 1024.0;
+        const bool edge = std::fabs(window[0] - std::round(window[0])) < 0.002 || std::fabs(window[1] - std::round(window[1])) < 0.002;
+        if (inside && !edge) {
+          ++compared;
+          CHECK(554, std::floor(window[0]) == std::floor(lookup[0]) && std::floor(window[1]) == std::floor(lookup[1]));
+        }
+      }
+      CHECK(554, compared > 500);  // (the points do fall into the map)
+      // Control: a viewport at the target's corner (no origin) would put the origin on a texel's
+      // corner, half a texel from where the registers look.
+      clip_of(origin, clip);
+      CHECK(554, ShadowMapWindow(clip, window) && ShadowMapLookup(rows, origin, lookup));
+      CHECK(554, std::fabs((window[0] - double(kShadowViewportOrigin)) - lookup[0] + 0.5) < 0.004);
+      // The depth a lookup compares with is the registers' depth row, which is the clip z the map holds.
+      CHECK(554, rows[2][3] == light[2][3] && rows[2][0] == light[2][0]);
+      // The rows are homogeneous: all four times a factor address the same texel (u and v are divided by w).
+      {
+        float twice[4][4];
+        for (int i = 0; i < 4; ++i) {
+          for (int j = 0; j < 4; ++j) twice[i][j] = 2.0f * rows[i][j];
+        }
+        const float world[3] = {120.0f, 160.0f, 5.0f};
+        double a[2], b[2];
+        CHECK(554, ShadowMapLookup(rows, world, a) && ShadowMapLookup(twice, world, b) && std::fabs(a[0] - b[0]) < 1e-6 &&
+                       std::fabs(a[1] - b[1]) < 1e-6);
+      }
+      // Nothing that is not finite, and no w of zero, has a place in the map.
+      float bad_clip[4] = {0.0f, 0.0f, 0.5f, 0.0f};
+      CHECK(554, !ShadowMapWindow(bad_clip, window));
+      bad_clip[3] = 1.0f;
+      bad_clip[1] = nan;
+      CHECK(554, !ShadowMapWindow(bad_clip, window));
+      float bad_rows[4][4];
+      std::memcpy(bad_rows, rows, sizeof(rows));
+      bad_rows[0][2] = inf;
+      CHECK(554, !ShadowMapLookup(bad_rows, origin, lookup));
+      std::memset(bad_rows, 0, sizeof(bad_rows));
+      CHECK(554, !ShadowMapLookup(bad_rows, origin, lookup));
+    }
+
+    // 555: the Shadow line.
+    {
+      ClayStats st;
+      CHECK(555, FormatShadowText(st) == "Shadow: off");
+      st.shadow_switch = st.shadow_block = st.shadow_maps = true;
+      st.shadow_reason = capture::ShadowBlockReason::kNone;
+      st.shadow_records[0] = 110;
+      st.shadow_drawn[0] = 110;
+      st.shadow_records[1] = 123;
+      st.shadow_drawn[1] = 123;
+      st.shadow_passes = 2;
+      const float split[4] = {20.0f, 35.0f, 2.0f, 0.477f};
+      std::copy(split, split + 4, st.shadow_split);
+      CHECK(555, FormatShadowText(st) ==
+                     "Shadow: on, block valid, near 110 of 110 draws (skipped {}), far 123 of 123 draws (skipped {}), extra 0, "
+                     "split (20, 35, 2, 0.4770)");
+      CHECK(555, FormatShadowSkippedByVs(st).empty());
+      // A partial pass under a valid block shows: the pass's reasons, the capture's, the extra draws, the passes.
+      st.shadow_drawn[1] = 119;
+      st.shadow_skipped[1][size_t(ShadowDrawSkip::kTexture)] = 3;
+      st.shadow_skipped[1][size_t(ShadowDrawSkip::kGeometry)] = 1;
+      st.shadow_capture_skipped[1][size_t(capture::ShadowSkip::kNoCaster)] = 2;
+      st.shadow_capture_skipped[0][size_t(capture::SkipReason::kBadIndex)] = 1;
+      st.shadow_extra = 14;
+      st.shadow_passes = 3;
+      st.shadow_skipped_by_vs.Add(0x432563420047C96Cull, uint8_t(ShadowDrawSkip::kTexture));
+      st.shadow_skipped_by_vs.Add(0x432563420047C96Cull, uint8_t(ShadowDrawSkip::kTexture));
+      st.shadow_skipped_by_vs.Add(0x3A0F9098B839DDBCull, uint8_t(ShadowDrawSkip::kTexture));
+      st.shadow_skipped_by_vs.Add(0xF160B4DA459A6D40ull, uint8_t(ShadowDrawSkip::kGeometry));
+      CHECK(555, FormatShadowText(st) ==
+                     "Shadow: on, block valid, near 110 of 110 draws (skipped {capture bad-index: 1}), far 119 of 123 draws (skipped "
+                     "{geometry: 1, texture: 3, capture no-caster: 2}), extra 14 (shadow-pass-extra), passes 3, split (20, 35, 2, 0.4770)");
+      CHECK(555, FormatShadowSkippedByVs(st) ==
+                     "0xF160B4DA459A6D40(geometry): 1, 0x432563420047C96C(texture): 2, 0x3A0F9098B839DDBC(texture): 1");
+      // No block: the reason, the records the scene holds, nothing drawn.
+      ClayStats none;
+      none.shadow_switch = true;
+      none.shadow_reason = capture::ShadowBlockReason::kProof;
+      none.shadow_records[0] = 5;
+      none.shadow_passes = 2;
+      CHECK(555, FormatShadowText(none) ==
+                     "Shadow: on, block invalid (shadow-block: proof), near 0 of 5 draws (skipped {}), far 0 of 0 draws (skipped {}), extra 0");
+      // A valid block whose maps were not drawn says so.
+      ClayStats dark = st;
+      dark.shadow_maps = false;
+      dark.shadow_light_off = true;
+      CHECK(555, FormatShadowText(dark).ends_with("split (20, 35, 2, 0.4770) | maps not drawn: the frame has no light"));
+      // Every reason has a name.
+      for (size_t i = 0; i < size_t(ShadowDrawSkip::kCount); ++i) CHECK(555, std::strcmp(ShadowDrawSkipName(ShadowDrawSkip(i)), "?") != 0);
+      CHECK(555, std::strcmp(ShadowDrawSkipName(ShadowDrawSkip::kCount), "?") == 0);
+    }
+  }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
@@ -3877,7 +4288,8 @@ int main() {
                "terrain text, normal and colour keys, light text, linear target and output mapping, light functions "
                "against the reference's numbers, frame and object and terrain light constants, lit squares, Light line, light buffer sources, "
                "probe colours and constants, constant buffer slots, plant light functions and constants and bend key, "
-               "leaf light functions and constants and the frame's eye\n";
+               "leaf light functions and constants and the frame's eye, shadow maps: depth convention, bias, alpha-to-mask "
+               "threshold, draw rules, constants, texel mapping, Shadow line\n";
 
   return 0;
 }

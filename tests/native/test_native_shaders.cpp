@@ -2364,9 +2364,69 @@ int main() {
       }
     }
   }
+  // The shadow maps' pixel shader (plan Task 4 of sub-project 8; clay_logic.h, "Native shadow maps").
+  {
+    if (!Compile("clay_shadow_ps", kClayShadowPs, "ps_5_0")) return 170;
+    // Bound by the pass's layout like every clay shader, with the one cbuffer Draw at ClayConstants' offsets.
+    if (int at = BindingsMismatch("clay_shadow_ps", kClayShadowPs, "ps_5_0", false)) return 171;
+    if (int at = DrawLayoutMismatch("clay_shadow_ps", kClayShadowPs, "ps_5_0")) return 172;
+    if (BindPoint("clay_shadow_ps", kClayShadowPs, "ps_5_0", "albedo") != 3) return 173;
+    // It reads neither the frame's nor the draw's light block (it declares none), and no light field.
+    if (strstr(kClayShadowPs, "register(b1)") || strstr(kClayShadowPs, "register(b2)") || strstr(kClayShadowPs, "light_mode &")) return 173;
+    // Depth only: it writes the depth and no colour, and its discards survive compiling.
+    const std::string listing = Disassembly("clay_shadow_ps", kClayShadowPs, "ps_5_0");
+    if (listing.empty() || !HasLineWith(listing, "dcl_output", "oDepth") || HasLineWith(listing, "dcl_output", "o0")) return 174;
+    if (listing.find("discard") == std::string::npos || LoopInstructions(listing) != 0) return 175;
+    if (!strstr(kClayShadowPs, ": SV_Depth {") || strstr(kClayShadowPs, "SV_Target")) return 176;
+    // Its inputs are the vertex shader's first three outputs, at the vertex shader's registers.
+    if (!strstr(kClayShadowPs, "float main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1) : SV_Depth {")) return 177;
+    unsigned vs_mask = 0, ps_mask = 0, none = 0;
+    const int vs_uv = TexcoordRegister("clay_vs", kClayVs, "vs_5_0", true, 1, &vs_mask);
+    const int ps_uv = TexcoordRegister("clay_shadow_ps", kClayShadowPs, "ps_5_0", false, 1, &ps_mask);
+    if (vs_uv < 0 || vs_uv != ps_uv || (ps_mask & ~vs_mask) != 0) return 178;
+    if (TexcoordRegister("clay_shadow_ps", kClayShadowPs, "ps_5_0", false, 2, &none) != -1) return 178;
+    // The bias (ShadowMapDepth in clay_logic.h): the depth's larger derivative times the slope term (the
+    // bits of pad2) plus the constant term (the bits of color), saturated, after the discards.
+    const char* test = strstr(kClayShadowPs, "if ((alpha_mode & 0x8) && !alpha_passes(a, alpha_ref, alpha_mode & 7)) discard;");
+    const char* mask = strstr(kClayShadowPs, "if (!(a >= 1.0 - offset * 0.25)) discard;");
+    const char* slope = strstr(kClayShadowPs, "float slope = max(abs(ddx(pos.z)), abs(ddy(pos.z)));");
+    const char* out = strstr(kClayShadowPs, "return saturate(pos.z + asfloat(pad2) * slope + asfloat(color));");
+    if (!test || !mask || !slope || !out || !(test < mask && mask < slope && slope < out)) return 179;
+    // Alpha-to-mask as on one sample (the map has one): the offset of the pixel's parity from bits 16-23,
+    // no form by sample count, no flat threshold.
+    if (!strstr(kClayShadowPs, "uint index = ((p.x & 1) << 1) | (p.y & 1);") ||
+        !strstr(kClayShadowPs, "uint offset = (alpha_mode >> (16 + 2 * index)) & 3;") || strstr(kClayShadowPs, "samples") ||
+        strstr(kClayShadowPs, "a < 0.5") || strstr(kClayShadowPs, "a >= 0.5")) {
+      return 180;
+    }
+    // The alpha is the texture's component times the scale, as the textured shader forms it.
+    if (!strstr(kClayShadowPs, "float a = alpha_scale;") ||
+        !strstr(kClayShadowPs, "a *= comp == 0 ? t.x : comp == 1 ? t.y : comp == 2 ? t.z : t.w;")) return 181;
+    // The compiled program reads both bias words and both derivatives.
+    if (!HasOp(listing, "deriv_rtx") && !HasOp(listing, "deriv_rtx_coarse")) return 182;
+    if (!HasOp(listing, "deriv_rty") && !HasOp(listing, "deriv_rty_coarse")) return 182;
+    // The textured shader keeps the form by sample count; the shadow shader's one-sample form is its own.
+    if (strstr(kClayTexturedPs, "1.0 - offset * 0.25")) return 183;
+  }
+  // The shadow view's pixel shader: the two maps at t0 and t1 read without a sampler, four constants.
+  {
+    if (!Compile("shadow_view_ps", kShadowViewPs, "ps_5_0")) return 184;
+    if (BindPoint("shadow_view_ps", kShadowViewPs, "ps_5_0", "near_map") != 0 ||
+        BindPoint("shadow_view_ps", kShadowViewPs, "ps_5_0", "far_map") != 1 ||
+        BindPoint("shadow_view_ps", kShadowViewPs, "ps_5_0", "C") != 0) {
+      return 185;
+    }
+    const std::string listing = Disassembly("shadow_view_ps", kShadowViewPs, "ps_5_0");
+    if (listing.empty() || HasLineWith(listing, "dcl_sampler", "s") || listing.find("ld_indexable") == std::string::npos || LoopInstructions(listing) != 0) return 186;
+    const ClayBufferField fields[] = {{"out_w", 0, 4}, {"out_h", 4, 4}, {"maps_valid", 8, 4}, {"map_size", 12, 4}};
+    if (BufferLayoutMismatch("shadow_view_ps", kShadowViewPs, "ps_5_0", "C", fields, 4, 16)) return 187;
+    // Grey is the stored depth; a frame without maps shows none.
+    if (!strstr(kShadowViewPs, "if (maps_valid == 0) return float4(0.0, 0.0, 0.25, 1.0);") ||
+        !strstr(kShadowViewPs, "return float4(d, d, d, 1.0);")) return 188;
+  }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; broken shader rejected\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; broken shader rejected\n";
   return 0;
 }

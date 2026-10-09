@@ -129,6 +129,20 @@ int main() {
     if (draw() != ShadowPass::kExtra) return 77;
     t.Reset();
     if (t.Observe(map, 0, true, true) != ShadowPass::kNone || t.passes() != 0) return 78;
+    // A clear of another surface while a pass is open ends the pass's run (ruling after the review
+    // of Task 3): the game has left the map, and what comes on the map after it without a clear of
+    // the map is in no pass. It opens nothing and is no pass itself.
+    t.Reset();
+    clear();
+    if (draw() != ShadowPass::kNear) return 79;
+    if (t.Observe(0x09000230u, 0, true, false) != ShadowPass::kNone || t.passes() != 1) return 80;
+    if (draw() != ShadowPass::kExtra) return 81;
+    if (clear() != ShadowPass::kNone || draw() != ShadowPass::kFar) return 82;
+    // The same for a clear seen inside the scene, and for one before the pass's first draw.
+    if (t.Observe(map, 0, true, true) != ShadowPass::kNone || draw() != ShadowPass::kExtra || t.passes() != 2) return 83;
+    t.Reset();
+    clear();
+    if (t.Observe(0x04000140u, 0, true, false) != ShadowPass::kNone || draw() != ShadowPass::kExtra) return 84;
   }
 
   std::cout << "PASS: main-scene bracket, shadow pass tracker\n";

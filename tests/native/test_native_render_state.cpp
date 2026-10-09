@@ -11,6 +11,16 @@ int main() {
   pv = ParseView("bogus");
   if (pv.view != View::kOff || pv.recognized) return 2;
   if (ParseView("pattern").view != View::kPattern) return 3;
+  // The shadow view: set by name (the cvar, a plan's VIEW=shadow), a composite view (the clay pass
+  // renders and records are wanted), and no key leads to it: F6 cycles the other five and leaves it.
+  pv = ParseView(" Shadow");
+  if (pv.view != View::kShadow || !pv.recognized || std::string(ViewName(View::kShadow)) != "shadow") return 40;
+  for (View from : {View::kOff, View::kOverlay, View::kSplit, View::kNative, View::kPattern}) {
+    if (NextView(from) == View::kShadow) return 41;
+  }
+  if (NextView(View::kShadow) != View::kOff) return 42;
+  if (!IsCompositeView(View::kShadow) || !RecordsWanted(View::kShadow, false) || RecordsWanted(View::kShadow, true)) return 43;
+  if (!ViewChanges(View::kNative, View::kShadow) || ViewChanges(View::kShadow, View::kShadow)) return 44;
   View v = View::kOff;
   const View expect[] = {View::kOverlay, View::kSplit, View::kNative, View::kPattern, View::kOff};
   for (View e : expect) { v = NextView(v); if (v != e) return 4; }

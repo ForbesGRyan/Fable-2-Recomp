@@ -110,6 +110,12 @@ void ClayPass::DestroyObjects() {
     device_->DestroyDeferred(linear_);
     device_->DestroyDeferred(color_);
     device_->DestroyDeferred(depth_);
+    for (nrhi::Pipeline* p : shadow_pipelines_) device_->DestroyDeferred(p);
+    device_->DestroyDeferred(shadow_ps_);
+    for (size_t c = 0; c < 2; ++c) {
+      device_->DestroyDeferred(shadow_view_[c]);
+      device_->DestroyDeferred(shadow_map_[c]);
+    }
     device_->DestroyDeferred(white_view_);
     device_->DestroyDeferred(white_);
     device_->DestroyDeferred(white_staging_);
@@ -124,6 +130,14 @@ void ClayPass::DestroyObjects() {
   terrain_cb_ = nullptr;
   linear_view_ = nullptr;
   linear_ = color_ = depth_ = nullptr;
+  for (nrhi::Pipeline*& p : shadow_pipelines_) p = nullptr;
+  shadow_ps_ = nullptr;
+  for (size_t c = 0; c < 2; ++c) {
+    shadow_view_[c] = nullptr;
+    shadow_map_[c] = nullptr;
+    shadow_prepared_[c].clear();
+  }
+  shadow_wanted_ = shadow_drawn_ = false;
   white_ = nullptr;
   white_view_ = nullptr;
   white_staging_ = nullptr;
@@ -214,6 +228,14 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     terrain_cb_ = nullptr;
     linear_view_ = nullptr;
     linear_ = color_ = depth_ = nullptr;
+    for (nrhi::Pipeline*& p : shadow_pipelines_) p = nullptr;
+    shadow_ps_ = nullptr;
+    for (size_t c = 0; c < 2; ++c) {
+      shadow_view_[c] = nullptr;
+      shadow_map_[c] = nullptr;
+      shadow_prepared_[c].clear();
+    }
+    shadow_wanted_ = shadow_drawn_ = false;
     white_ = nullptr;
     white_view_ = nullptr;
     white_staging_ = nullptr;
@@ -305,6 +327,40 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     REXLOG_ERROR("[native] clay: white texture creation failed");
     return false;
   }
+  // The shadow maps' pixel shader and their three depth-only pipelines, one a cull mode: the clay
+  // vertex shader under the pass's layout, no colour target, the maps' depth function with write.
+  // Not in the pipeline cache (no scene draw's state; never an overflow).
+  {
+    nrhi::ShaderDesc sd;
+    sd.stage = nrhi::ShaderStage::kPixel;
+    sd.name = "fable2_clay_shadow_ps";
+    sd.hlsl_source = shaders::kClayShadowPs;
+    sd.entry_point = "main";
+    shadow_ps_ = dev->CreateShader(sd);
+    if (!shadow_ps_) {
+      REXLOG_ERROR("[native] clay: shadow pixel shader compile failed");
+      return false;
+    }
+    static constexpr capture::Cull kCulls[kShadowPipelines] = {capture::Cull::kNone, capture::Cull::kFront, capture::Cull::kBack};
+    for (capture::Cull cull : kCulls) {
+      nrhi::GraphicsPipelineDesc pipe;
+      pipe.layout = layout_;
+      pipe.vs = vs_;
+      pipe.ps = shadow_ps_;
+      pipe.rtv_format = nrhi::Format::kUnknown;
+      pipe.dsv_format = nrhi::Format::kD32_FLOAT;
+      pipe.depth.test_enable = true;
+      pipe.depth.write_enable = true;
+      pipe.depth.func = ToCompare(uint8_t(kShadowMapCompare));
+      pipe.cull = ToCull(uint8_t(cull));
+      nrhi::Pipeline* pipeline = dev->CreateGraphicsPipeline(pipe);
+      if (!pipeline) {
+        REXLOG_ERROR("[native] clay: shadow pipeline creation failed");
+        return false;
+      }
+      shadow_pipelines_[ShadowPipelineSlot(cull)] = pipeline;
+    }
+  }
 
   // The output mapping: a full-screen triangle from the linear target into the
   // mapped one. Not in the pipeline cache (it is no draw's state).
@@ -382,9 +438,27 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     REXLOG_ERROR("[native] clay: target creation failed");
     return false;
   }
+  // The two shadow maps, with the targets above and of a size of their own (the game's 1024,
+  // whatever the window is). Their contents are undefined until a Render draws them (shadow_drawn_).
+  for (size_t c = 0; c < 2; ++c) {
+    nrhi::TextureDesc map;
+    map.width = map.height = kShadowMapSize;
+    map.format = nrhi::Format::kD32_FLOAT;
+    map.usage = nrhi::kTextureUsageDepthStencil;
+    map.initial_state = nrhi::ResourceState::kPixelShaderResource;
+    map.clear_depth = kShadowMapClear;
+    shadow_map_[c] = dev->CreateTexture(map);
+    shadow_view_[c] = shadow_map_[c] ? dev->CreateTextureView(shadow_map_[c], nrhi::TextureViewDesc{}) : nullptr;
+    if (!shadow_map_[c] || !shadow_view_[c]) {
+      REXLOG_ERROR("[native] clay: shadow map creation failed");
+      return false;
+    }
+  }
+  shadow_wanted_ = shadow_drawn_ = false;
   ready_ = true;
   ++targets_generation_;
   REXLOG_INFO("[native] clay: {} (generation {})", FormatTargetText(kWidth, kHeight), targets_generation_);
+  REXLOG_INFO("[native] clay: {}", FormatShadowTargetText());
   return true;
 }
 
@@ -605,7 +679,8 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
   // frame that draws anything, so that the two registers the vertex shader declares (b1, b2) are
   // bound at every draw, whether or not the draw reads them. A frame whose buffer cannot be made
   // draws nothing (Render, ClayRecordsWithoutConstants).
-  const bool wanted = !prepared_.empty();
+  // (the shadow draws bind it too: the clay vertex shader declares b1 and b2 in every draw)
+  const bool wanted = !prepared_.empty() || !shadow_prepared_[0].empty() || !shadow_prepared_[1].empty();
   if (wanted) {
     // Slot 0 the frame's light, one slot per terrain record (at most that many are drawn with the
     // material) and one per lit plant, 256 bytes each; then one slot of 512 bytes per lit object or
@@ -749,6 +824,145 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
   }
 }
 
+void ClayPass::PrepareShadows(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, bool draw, ClayStats& st,
+                              TextureStats& tst) {
+  for (std::vector<ShadowPrepared>& list : shadow_prepared_) list.clear();
+  shadow_wanted_ = draw;
+  // What the frame holds, whether or not it is drawn: the Shadow line.
+  st.shadow_switch = scene.shadow_records;
+  st.shadow_block = scene.shadow.valid;
+  st.shadow_reason = scene.shadow_reason;
+  st.shadow_extra = scene.shadow_extra;
+  st.shadow_passes = scene.shadow_passes;
+  std::copy(std::begin(scene.shadow.split), std::end(scene.shadow.split), std::begin(st.shadow_split));
+  for (size_t c = 0; c < 2; ++c) {
+    st.shadow_records[c] = uint32_t(scene.shadow_draws[c].size());
+    std::copy(std::begin(scene.shadow_skipped[c]), std::end(scene.shadow_skipped[c]), std::begin(st.shadow_capture_skipped[c]));
+  }
+  if (!draw) return;
+  // The geometry cache's counters of the casters: its time and its uploads and hits are the
+  // frame's; a caster whose index list is bad is a shadow skip (geometry), not a scene record's.
+  ClayStats gst;
+  for (size_t c = 0; c < 2; ++c) {
+    const std::vector<capture::DrawRecord>& draws = scene.shadow_draws[c];
+    const std::vector<capture::ShadowCaster>& casters = scene.shadow_casters[c];
+    for (size_t i = 0; i < draws.size(); ++i) {
+      const capture::DrawRecord& r = draws[i];
+      auto skip = [&](ShadowDrawSkip why) {
+        ++st.shadow_skipped[c][size_t(why)];
+        st.shadow_skipped_by_vs.Add(r.vs_hash, uint8_t(why));
+      };
+      if (i >= casters.size()) {  // a record without its twin entry (the builder makes none)
+        skip(ShadowDrawSkip::kState);
+        continue;
+      }
+      const ShadowDrawState d = DecideShadowDraw(r, casters[i]);
+      if (d.skip != ShadowDrawSkip::kNone) {
+        skip(d.skip);
+        continue;
+      }
+      ShadowPrepared p;
+      p.vs_hash = r.vs_hash;
+      uint32_t buffer_vertices = 0, vertex_count = 0;
+      p.positions = geometry_.Positions(dev, r, nullptr, &buffer_vertices, gst);
+      if (p.positions) {
+        vertex_count = DrawVertexCount(buffer_vertices, RecordVertexCount(r, nullptr));
+        p.indices = geometry_.Indices(dev, r, nullptr, vertex_count, &p.index_count, gst);
+      }
+      if (!p.positions || !p.indices) {
+        skip(ShadowDrawSkip::kGeometry);
+        continue;
+      }
+      float uv[4] = {1.0f, 1.0f, 0.0f, 0.0f};
+      uint32_t sampler = 0;
+      if (d.textured) {
+        // The coordinates first, as for a scene record: a stream that does not decode costs no upload.
+        float uv_fix[2] = {1.0f, 1.0f};
+        capture::MaterialStatus status = r.material.status;
+        p.uvs = geometry_.Uvs(dev, r, vertex_count, gst);
+        if (p.uvs) p.albedo = textures_.Resolve(cmd, dev, r.material, &sampler, uv_fix, &status, tst);
+        if (!p.uvs || !p.albedo) {
+          skip(ShadowDrawSkip::kTexture);
+          continue;
+        }
+        const float* x = r.material.uv_xform;  // (finite: DecideShadowDraw)
+        uv[0] = x[0] * uv_fix[0];
+        uv[1] = x[1] * uv_fix[1];
+        uv[2] = x[2] * uv_fix[0];
+        uv[3] = x[3] * uv_fix[1];
+      }
+      p.pipeline = shadow_pipelines_[ShadowPipelineSlot(d.cull)];
+      if (!p.pipeline) {
+        skip(ShadowDrawSkip::kPipeline);
+        continue;
+      }
+      p.constants = MakeShadowConstants(r, vertex_count, uv, d.textured, sampler, d.alpha, d.bias);
+      shadow_prepared_[c].push_back(p);
+    }
+  }
+  st.hash_ms += gst.hash_ms;
+  st.decode_ms += gst.decode_ms;
+  st.uploads += gst.uploads;
+  st.hits += gst.hits;
+}
+
+void ClayPass::DrawShadows(nrhi::Cmd* cmd, ClayStats& st) {
+  shadow_drawn_ = false;
+  if (!shadow_wanted_) return;
+  // Without the frame's constant buffer no clay draw can be made (b1 and b2 would be unset): the
+  // maps are cleared, which is the frame's truth then (nothing of it is drawn), and every
+  // prepared record is counted.
+  const bool constants = terrain_cb_ != nullptr;
+  cmd->SetBindingLayout(layout_);
+  cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+  {
+    nrhi::TextureView* const whites[kTerrainTableSize] = {white_view_, white_view_, white_view_, white_view_};
+    cmd->SetTextures(kParamTerrainTextures, whites, kTerrainTableSize);
+  }
+  if (constants) {
+    cmd->SetConstantBuffer(kParamTerrainConstants, terrain_cb_, 0);
+    cmd->SetConstantBuffer(kParamFrameConstants, terrain_cb_, 0);
+  }
+  for (size_t c = 0; c < 2; ++c) {
+    // The map is a depth target for its own draws only; a shadow draw samples the caster's
+    // texture or the white one, never a map.
+    cmd->Barrier(shadow_map_[c], nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kDepthWrite);
+    cmd->FlushBarriers();
+    cmd->SetRenderTargets(nullptr, shadow_map_[c]);
+    cmd->ClearDepth(shadow_map_[c], kShadowMapClear);
+    // The origin of half a pixel puts the game's texel centres on the native ones (clay_logic.h,
+    // "Native shadow maps", Texels); the scissor is the map.
+    cmd->SetViewport({kShadowViewportOrigin, kShadowViewportOrigin, float(kShadowMapSize), float(kShadowMapSize), 0.0f, 1.0f});
+    cmd->SetScissor({0, 0, int32_t(kShadowMapSize), int32_t(kShadowMapSize)});
+    nrhi::Pipeline* bound = nullptr;
+    for (const ShadowPrepared& p : shadow_prepared_[c]) {
+      if (!constants) {
+        ++st.shadow_skipped[c][size_t(ShadowDrawSkip::kConstants)];
+        st.shadow_skipped_by_vs.Add(p.vs_hash, uint8_t(ShadowDrawSkip::kConstants));
+        continue;
+      }
+      if (p.pipeline != bound) {
+        cmd->SetPipeline(p.pipeline);
+        bound = p.pipeline;
+      }
+      cmd->SetRootConstants(kParamConstants, kConstantCount, &p.constants, 0);
+      cmd->SetBufferSrv(kParamPositions, p.positions, 0);
+      cmd->SetBufferSrv(kParamIndices, p.indices, 0);
+      cmd->SetBufferSrv(kParamUvs, p.uvs ? p.uvs : p.positions, 0);
+      cmd->SetTexture(kParamAlbedo, p.albedo ? p.albedo : white_view_);
+      // The light's four registers: the draw has no light (light_mode 0) and loads from none, and
+      // gets its own positions at each, as every draw of the pass does (Render).
+      for (uint32_t i = 0; i < kClayLightBufferCount; ++i) cmd->SetBufferSrv(kClayLightBufferParam0 + i, p.positions, 0);
+      cmd->Draw(p.index_count, 0);
+      ++st.shadow_drawn[c];
+    }
+    cmd->Barrier(shadow_map_[c], nrhi::ResourceState::kDepthWrite, nrhi::ResourceState::kPixelShaderResource);
+    cmd->FlushBarriers();
+  }
+  shadow_drawn_ = true;
+  st.shadow_maps = true;
+}
+
 void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
                       bool textured, ClayLight light, ClayStats& st, TextureStats& tst) {
   if (!ready_ || dev != device_) return;
@@ -847,6 +1061,12 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     }
     prepared_.push_back(p);
   }
+  // The frame's shadow records: drawn into the two maps in a frame that is drawn with light and
+  // has a valid shadow block (its own: never another frame's maps or matrices). Before
+  // FinishTerrain, which takes the frame's constant buffer for these draws too.
+  const bool shadow_draw = light == ClayLight::kOn && scene.shadow.valid;
+  st.shadow_light_off = scene.shadow.valid && !shadow_draw;
+  PrepareShadows(cmd, dev, scene, shadow_draw, st, tst);
   FinishTerrain(dev, textured, st, tst);
   // (after FinishTerrain: without the frame's constant buffer the frame has no light)
   st.light_switch = light == ClayLight::kOn;
@@ -865,6 +1085,9 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     dev->DestroyDeferred(white_staging_);
     white_staging_ = nullptr;
   }
+  // The shadow maps first (the game's order), each bound only for its own draws and back in
+  // kPixelShaderResource before anything of the scene is bound.
+  DrawShadows(cmd, st);
   cmd->Barrier(linear_, nrhi::ResourceState::kPixelShaderResource,
                nrhi::ResourceState::kRenderTarget);
   cmd->Barrier(depth_, nrhi::ResourceState::kPixelShaderResource,

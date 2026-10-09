@@ -70,7 +70,7 @@ struct FrameScene {
   // split distances, the texel sizes and the two passes' bias. Valid only when
   // the scene's registers were read and passed their rules, both passes have a
   // record that gives its light matrix, each such matrix is the registers' one
-  // (the frame's proof, within 1e-3) and each pass's records hold one polygon
+  // (the frame's proof, within 1e-4: kShadowProofTolerance) and each pass's records hold one polygon
   // offset. Otherwise all zero, with the reason in shadow_reason (kOff: no
   // shadow records were taken this frame): a consumer then draws the frame
   // without shadows ("shadow-block"), never with another frame's block or maps.

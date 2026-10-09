@@ -49,7 +49,7 @@ function ConvertTo-Fable2ShotTimes {
 # view and capture entries as given), Count (its entries) and Events (-KeyboardInput: time and key name from $Keys).
 # An entry is exactly seconds:key: a second ':' is refused, not dropped.
 #   stick   LS=x/y/ms or RS=x/y/ms: x and y -100..100, ms 1..60000, each at most 6 digits (the game's ParseInt)
-#   view    VIEW=off|split|overlay|native|pattern
+#   view    VIEW=off|split|overlay|native|pattern|shadow
 #   capture DISC=frames/every: frames 1..100000, every 1..64, each at most 6 digits
 function ConvertTo-Fable2Plan {
   param([Parameter(Mandatory)][AllowEmptyString()][string]$Plan, [bool]$KeyboardInput = $false, [double]$Shift = 0,
@@ -75,14 +75,14 @@ function ConvertTo-Fable2Plan {
         if ($sx -lt -100 -or $sx -gt 100 -or $sy -lt -100 -or $sy -gt 100 -or $sms -lt 1 -or $sms -gt 60000) {
           throw "bad stick entry '$e': x and y must be -100..100 and ms 1..60000"
         }
-      } elseif ($k -match '^VIEW=(?:off|split|overlay|native|pattern)$') {
+      } elseif ($k -match '^VIEW=(?:off|split|overlay|native|pattern|shadow)$') {
       } elseif ($k -match '^DISC=([0-9]{1,6})/([0-9]{1,6})$') {
         $df = [int]$Matches[1]; $de = [int]$Matches[2]
         if ($df -lt 1 -or $df -gt 100000 -or $de -lt 1 -or $de -gt 64) {
           throw "bad capture entry '$e': frames must be 1..100000 and every 1..64"
         }
       } else {
-        throw "plan entry '$e' is none of LS=x/y/ms, RS=x/y/ms, VIEW=off|split|overlay|native|pattern, DISC=frames/every"
+        throw "plan entry '$e' is none of LS=x/y/ms, RS=x/y/ms, VIEW=off|split|overlay|native|pattern|shadow, DISC=frames/every"
       }
       [void]$steps.Add("${ts}:$k")
       continue

@@ -9,15 +9,17 @@
 namespace fable2::native::render {
 
 bool Composite::Ensure(nrhi::Device* dev, nrhi::Format out_format) {
-  if (pipeline_ && dev == device_ && out_format == format_) return true;
+  if (pipeline_ && shadow_pipeline_ && dev == device_ && out_format == format_) return true;
   if (device_) {  // device or format changed: drop the old objects
     device_->DestroyDeferred(pipeline_);
+    device_->DestroyDeferred(shadow_pipeline_);
     device_->DestroyDeferred(vs_);
     device_->DestroyDeferred(ps_);
+    device_->DestroyDeferred(shadow_ps_);
     if (view_) device_->DestroyDeferred(view_);
   }
-  pipeline_ = nullptr;
-  vs_ = ps_ = nullptr;
+  pipeline_ = shadow_pipeline_ = nullptr;
+  vs_ = ps_ = shadow_ps_ = nullptr;
   view_ = nullptr;
   view_texture_ = nullptr;
   device_ = dev;
@@ -72,7 +74,68 @@ bool Composite::Ensure(nrhi::Device* dev, nrhi::Format out_format) {
     REXLOG_ERROR("[native] composite: pipeline creation failed");
     return false;
   }
+
+  // The shadow view: its four constants and the two maps at t0 and t1, read without a sampler.
+  nrhi::BindingLayoutDesc sl;
+  sl.params[0].kind = nrhi::BindingParamKind::kConstants;
+  sl.params[0].shader_register = 0;
+  sl.params[0].count = 4;
+  sl.params[0].visibility = nrhi::Visibility::kPixel;
+  sl.params[1].kind = nrhi::BindingParamKind::kTextureTable;
+  sl.params[1].shader_register = 0;
+  sl.params[1].count = 2;
+  sl.params[1].visibility = nrhi::Visibility::kPixel;
+  sl.param_count = 2;
+  sl.allow_input_layout = false;
+  shadow_layout_ = dev->CreateBindingLayout(sl);
+  sd.stage = nrhi::ShaderStage::kPixel;
+  sd.name = "fable2_shadow_view_ps";
+  sd.hlsl_source = shaders::kShadowViewPs;
+  shadow_ps_ = shadow_layout_ ? dev->CreateShader(sd) : nullptr;
+  if (!shadow_layout_ || !shadow_ps_) {
+    REXLOG_ERROR("[native] composite: shadow view layout or shader failed");
+    return false;
+  }
+  nrhi::GraphicsPipelineDesc shadow_pipe;
+  shadow_pipe.layout = shadow_layout_;
+  shadow_pipe.vs = vs_;
+  shadow_pipe.ps = shadow_ps_;
+  shadow_pipe.rtv_format = out_format;
+  shadow_pipeline_ = dev->CreateGraphicsPipeline(shadow_pipe);
+  if (!shadow_pipeline_) {
+    REXLOG_ERROR("[native] composite: shadow view pipeline creation failed");
+    return false;
+  }
   return true;
+}
+
+void Composite::DrawShadowMaps(nrhi::Cmd* cmd, const rex::graphics::NativeGuestOutputRenderContext& ctx,
+                               nrhi::TextureView* near_map, nrhi::TextureView* far_map, bool valid, uint32_t map_size) {
+  // (without both views nothing can be bound at the table the shader declares: nothing is drawn)
+  if (!shadow_pipeline_ || !near_map || !far_map || ctx.device != device_) return;
+  nrhi::Texture* out = ctx.guest_output;
+  const float w = float(ctx.guest_output_width);
+  const float h = float(ctx.guest_output_height);
+  const float size = float(map_size);
+  uint32_t params[4];
+  std::memcpy(&params[0], &w, 4);
+  std::memcpy(&params[1], &h, 4);
+  params[2] = valid ? 1u : 0u;
+  std::memcpy(&params[3], &size, 4);
+
+  cmd->Barrier(out, nrhi::ResourceState::kGuestOutput, nrhi::ResourceState::kRenderTarget);
+  cmd->FlushBarriers();
+  cmd->SetRenderTargets(out, nullptr);
+  cmd->SetViewport({0.0f, 0.0f, w, h, 0.0f, 1.0f});
+  cmd->SetScissor({0, 0, int32_t(w), int32_t(h)});
+  cmd->SetBindingLayout(shadow_layout_);
+  cmd->SetPipeline(shadow_pipeline_);
+  cmd->SetRootConstants(0, 4, params, 0);
+  cmd->SetTexturePair(1, near_map, far_map);
+  cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+  cmd->Draw(3, 0);
+  cmd->Barrier(out, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kGuestOutput);
+  cmd->FlushBarriers();
 }
 
 void Composite::Draw(nrhi::Cmd* cmd, const rex::graphics::NativeGuestOutputRenderContext& ctx,

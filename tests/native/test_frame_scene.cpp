@@ -521,10 +521,14 @@ static int ShadowTests(const capture::DrawRecord& r) {
   };
   const ShadowCaster near_caster = caster(CasterKind::kOpaque, true, -32.0f, -0.001f);
   const ShadowCaster far_caster = caster(CasterKind::kAlphaTest, true, -80.0f, -0.005f);
+  // (the record comes with side indices and a seq of its own: AddShadow keeps none of them)
   auto record = [&](uint32_t mark, uint64_t vs = 0xF160) {
     capture::DrawRecord d = r;
     d.count = mark;
     d.vs_hash = vs;
+    d.terrain_index = 3;
+    d.light_index = 5;
+    d.seq = 777;
     return d;
   };
   // A frame as the capture makes it: `n` near and `m` far records, the first of each with its
@@ -563,6 +567,7 @@ static int ShadowTests(const capture::DrawRecord& r) {
     }
     for (uint32_t i = 0; i < 4; ++i) {
       if (s->shadow_draws[1][i].count != 4000 + i || s->shadow_draws[1][i].seq != i) return 10;
+      if (s->shadow_draws[1][i].terrain_index != capture::kNoSideIndex || s->shadow_draws[1][i].light_index != capture::kNoSideIndex) return 19;
       if (s->shadow_casters[1][i].kind != CasterKind::kAlphaTest || s->shadow_casters[1][i].bias_scale != -80.0f) return 11;
     }
     if (!s->shadow.valid || s->shadow_reason != ShadowBlockReason::kNone) return 12;

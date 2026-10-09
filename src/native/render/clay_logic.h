@@ -30,6 +30,33 @@
 
 namespace fable2::native::render {
 
+// Why the pass did not draw a shadow record into its map ("Native shadow maps"
+// below; ClayStats::shadow_skipped). kState: the record has no caster entry, its
+// state was not read, or its depth state is not the shadow passes' (reversed
+// range, greater-equal, written). kMatrix: a row of its transform is not finite.
+// kBias: its polygon offset is not a pair of numbers of usable size. kAlpha: an
+// alpha-tested caster whose material has no alpha the shader can form. kGeometry:
+// its positions or indices could not be built (a bad index among them).
+// kTexture: an alpha-tested caster whose coordinates or texture are not there
+// this frame (never drawn as a solid caster). kPipeline: no pipeline of its cull.
+// kConstants: the frame's constant buffer could not be made.
+enum class ShadowDrawSkip : uint8_t { kNone, kState, kMatrix, kBias, kAlpha, kGeometry, kTexture, kPipeline, kConstants, kCount };
+
+inline const char* ShadowDrawSkipName(ShadowDrawSkip s) {
+  switch (s) {
+    case ShadowDrawSkip::kNone: return "none";
+    case ShadowDrawSkip::kState: return "state";
+    case ShadowDrawSkip::kMatrix: return "matrix";
+    case ShadowDrawSkip::kBias: return "bias";
+    case ShadowDrawSkip::kAlpha: return "alpha";
+    case ShadowDrawSkip::kGeometry: return "geometry";
+    case ShadowDrawSkip::kTexture: return "texture";
+    case ShadowDrawSkip::kPipeline: return "pipeline";
+    case ShadowDrawSkip::kConstants: return "constants";
+    default: return "?";
+  }
+}
+
 struct ClayStats {
   uint32_t drawn = 0, skipped_bad_index = 0, uploads = 0, hits = 0;
   uint64_t resident_bytes = 0;
@@ -118,6 +145,28 @@ struct ClayStats {
   uint32_t light_unlit[4] = {};
   capture::ShaderTally<32> light_unlit_by_ps;
   float light_sun_dir[3] = {}, light_sun_col[3] = {};
+  // The shadow maps ("Native shadow maps" below; the Shadow line). shadow_switch:
+  // the scene took shadow records (fable2_native_shadows on with a composite view
+  // and the light). shadow_block: the scene has a valid shadow block
+  // (shadow_reason: why not). shadow_maps: the two maps were cleared and drawn
+  // this frame; shadow_light_off: they were not although the block is valid,
+  // because the frame is drawn without light. Per map (0 near, 1 far):
+  // shadow_records, the scene's records; shadow_drawn, those drawn into the map;
+  // shadow_skipped, the others by the pass's reason; shadow_capture_skipped, the
+  // game's shadow draws the capture did not record, by its reason (a
+  // SkipReason's or a ShadowSkip's number). shadow_skipped_by_vs: the pass's
+  // skips by vertex shader (the kind is the ShadowDrawSkip). shadow_extra: draws
+  // on the game's map that are in neither pass (shadow-pass-extra), and
+  // shadow_passes the passes the game opened: a frame with a valid block may
+  // still hold a partial pass, and these say so.
+  bool shadow_switch = false, shadow_block = false, shadow_maps = false, shadow_light_off = false;
+  capture::ShadowBlockReason shadow_reason = capture::ShadowBlockReason::kOff;
+  uint32_t shadow_records[2] = {}, shadow_drawn[2] = {};
+  uint32_t shadow_skipped[2][size_t(ShadowDrawSkip::kCount)] = {};
+  uint32_t shadow_capture_skipped[2][capture::kShadowSkipCount] = {};
+  capture::ShaderTally<32> shadow_skipped_by_vs;
+  uint32_t shadow_extra = 0, shadow_passes = 0;
+  float shadow_split[4] = {};
 };
 
 inline constexpr uint8_t kTallyAlphaUnknown = 0, kTallyBlendUnknown = 1;
@@ -2209,6 +2258,325 @@ inline void PlanTerrain(std::vector<TerrainPlanItem>& items, TerrainPlanScratch*
     if (!items[i].layer) continue;
     for (uint32_t l = first[i]; l < first[i + 1]; ++l) items[i].light = items[i].light && !squares[link[l]].dark;
   }
+}
+
+// --- Native shadow maps (frame-map section 15; spec 2026-10-08, Design 4) ---
+// The game's two sun shadow maps, drawn by the pass from the frame's shadow
+// records (FrameScene::shadow_draws) into two depth targets of its own, each
+// record with its own rows (the game's matrix of that draw: object to the
+// light's clip space) through the clay vertex shader, depth-only, with the
+// pixel shader kClayShadowPs.
+//
+// Size: kShadowMapSize, the game's 1024, a constant of the pass: nothing of it
+// follows the window or the clay target.
+//
+// Depth convention. The game draws its maps under the reversed range: window
+// depth = 1 - z of the clip position (viewport Z scale -1, offset 1), cleared
+// to 0, tested greater-equal: the largest window depth, the caster nearest the
+// light, stays. The RHI has less and less-equal only, so the native map holds
+// the pass's usual direction: depth = z (ShadowNativeDepth of the game's window
+// depth, 1 - window), cleared to kShadowMapClear = 1, tested less-equal
+// (MirrorCompare of the game's function): the smallest z stays, which is the
+// same caster. A native texel is therefore the depth row of the light matrix
+// (ShadowBlock::world_to_map row 2, world_to_clip row 2) at the nearest caster,
+// plus the bias; 1 where no caster is.
+//
+// Bias. The game's polygon offset (ShadowCaster: scale in the register's
+// units, sixteenths of a pixel of slope; offset in window-depth units) moves
+// the game's window depth: ShadowBias(depth, slope, scale, offset) =
+// depth + (scale / 16) * slope + offset, slope the larger of the depth's two
+// screen derivatives (the D3D rule). The game's pairs are negative (near -32,
+// -0.001; far -80, -0.005): the window depth falls, the caster moves away from
+// the light. In the native direction the same step is added:
+// ShadowMapDepth = z - (scale / 16) * slope - offset (ShadowBiasTerms holds the
+// two factors with their signs turned), saturated; the RHI's pipeline has no
+// bias, so kClayShadowPs writes it as the pixel's depth. The offset is exact
+// here. The emulated frame's is not: the SDK makes an integer bias of it that a
+// float depth target scales with the exponent of the primitive's depth, right
+// for window depths in [0.5, 1) and half or less below 0.5 (frame-map section
+// 15, "Bias"), so casters whose game window depth is under 0.5 (native depth
+// over 0.5: the far half of the map's range) are pushed back further here than
+// in the emulated picture.
+//
+// Texels. The pass draws with a viewport whose origin is (0.5, 0.5)
+// (kShadowViewportOrigin): a clip position (x, y, w) lands at window
+// ((x / w / 2 + 1 / 2) * 1024 + 0.5, (-y / w / 2 + 1 / 2) * 1024 + 0.5), and the
+// centre of native texel (i, j) is window (i + 0.5, j + 0.5), texture coordinate
+// ((i + 0.5) / 1024, (j + 0.5) / 1024). That is where the scene's c36..c43
+// (ShadowBlock::world_to_map: u = x / 2 + (1 / 2 + h) w, v = -y / 2 + (1 / 2 + h) w,
+// h half a texel) put the same point: (u, v) * 1024 is the window position
+// above. So world_to_map addresses the native maps as it stands, with its half
+// texel and nothing added or taken away (the mask's microcode adds none), and a
+// lookup must use world_to_map, never world_to_clip; drawing uses the records'
+// rows (world_to_clip times the draw's own world matrix). The game snaps the
+// light's origin to whole texels of clip space, so the origin lies on a texel
+// centre in both. (Inference: the half texel in the registers is the console's
+// pixel centre at whole window coordinates; the viewport origin stands in for
+// it. Without it a native texel would be the game's shifted by half a texel.)
+inline constexpr uint32_t kShadowMapSize = 1024;
+inline constexpr uint32_t kShadowMapTexelBytes = 4;  // D32_FLOAT
+inline constexpr float kShadowMapClear = 1.0f;
+inline constexpr float kShadowViewportOrigin = 0.5f;
+// The maps' depth function, a capture::Compare on the native map.
+inline constexpr capture::Compare kShadowMapCompare = capture::Compare::kLessEqual;
+
+// The game's window depth of a clip-space z (z / w; the light is orthographic),
+// and the native map's depth of a game window depth.
+inline float ShadowGameDepth(float z) { return 1.0f - z; }
+inline float ShadowNativeDepth(float game_depth) { return 1.0f - game_depth; }
+
+// The game's polygon offset on a game window depth: `slope` the larger absolute
+// screen derivative of the depth, `scale` and `offset` the registers' values
+// (ShadowCaster::bias_scale, ::bias_offset).
+inline float ShadowBias(float depth, float slope, float scale, float offset) {
+  return depth + (scale / 16.0f) * slope + offset;
+}
+
+// Whether a shadow record's depth state is the one the maps are drawn with: the
+// test on, depth written, the reversed range, greater-equal, which on the
+// native map is kShadowMapCompare. Any other state is not drawn (kState): the
+// convention above holds for this one alone.
+inline bool ShadowDepthStateUsable(const capture::RenderState& rs) {
+  return rs.valid && rs.depth_test && rs.depth_write && rs.depth_reversed &&
+         rs.depth_func == capture::Compare::kGreaterEqual && ClayDepthFunc(rs) == kShadowMapCompare;
+}
+
+// The bias of one draw as kClayShadowPs adds it to the native depth:
+// depth + slope * (the depth's larger derivative) + constant. Both zero for a
+// draw without the offset.
+struct ShadowBiasTerms {
+  float slope = 0.0f;
+  float constant = 0.0f;
+};
+// The largest scale and offset a draw's bias may hold (the game's: 80 and
+// 0.005). A pair past them, or one that is not a number, is not a bias.
+inline constexpr float kShadowBiasScaleMax = 4096.0f, kShadowBiasOffsetMax = 1.0f;
+
+// False, with `out` untouched, for a biased caster whose pair is not usable.
+inline bool MakeShadowBiasTerms(const capture::ShadowCaster& c, ShadowBiasTerms* out) {
+  ShadowBiasTerms t;
+  if (c.biased) {
+    if (!(std::fabs(c.bias_scale) <= kShadowBiasScaleMax) || !(std::fabs(c.bias_offset) <= kShadowBiasOffsetMax)) return false;
+    t.slope = -(c.bias_scale / 16.0f);
+    t.constant = -c.bias_offset;
+  }
+  *out = t;
+  return true;
+}
+
+// What kClayShadowPs writes for a pixel whose rasterised depth is `z` (the clip
+// z: the native direction) and whose depth changes by `slope` a pixel at most:
+// saturate(z + b.slope * slope + b.constant). A NaN gives 0, as the HLSL's
+// saturate does (none arises: z is the rasteriser's and the terms are checked).
+inline float ShadowMapDepth(float z, float slope, const ShadowBiasTerms& b) {
+  const float v = z + b.slope * slope + b.constant;
+  if (!(v > 0.0f)) return 0.0f;
+  return v < 1.0f ? v : 1.0f;
+}
+
+// Alpha-to-mask on the maps (ruling after the review of Task 2). A map has one
+// sample a pixel, as the game's (surface word 0x10000410: no multisampling),
+// and there the GPU covers the pixel iff alpha >= 1 - offset / 4 (the emulator's
+// rule: SDK src/graphics/pipeline/shader/dxbc_translator_om.cpp, lines 1681 to
+// 1685, threshold = offset * -scale + base and alpha >= threshold; line 1790,
+// the form without multisampling, base 1 and scale 1/4; lines 1740 to 1746, the
+// offset of the pixel's parity, x the high bit). The offsets are the top byte
+// of RB_COLORCONTROL (register 0x2202), two bits a parity from bit 24, and bit
+// 4 turns it on. The leaf cards' word 0xAA00001C: every offset 2, alpha >= 0.5
+// at every pixel, after the alpha test (greater than the reference 0).
+inline bool ShadowAlphaToMaskOn(uint32_t color_control) { return (color_control & 0x10u) != 0; }
+inline float ShadowAlphaToMaskThreshold(uint32_t color_control, uint32_t x, uint32_t y) {
+  const uint32_t index = ((x & 1u) << 1) | (y & 1u);
+  const uint32_t offset = (color_control >> (24 + 2 * index)) & 3u;
+  return 1.0f - 0.25f * float(offset);
+}
+
+// The three depth-only pipelines of the maps, one a cull mode (capture::Cull in
+// the pass's window space, ClayCull): none (the leaf cards), front, back. No
+// other state differs between shadow draws: no colour target, the depth test
+// kShadowMapCompare with write; the alpha test and the bias are the shader's.
+inline constexpr size_t kShadowPipelines = 3;
+constexpr size_t ShadowPipelineSlot(capture::Cull cull) {
+  return cull == capture::Cull::kFront ? 1 : cull == capture::Cull::kBack ? 2 : 0;
+}
+
+// What the pass does with one shadow record.
+struct ShadowDrawState {
+  ShadowDrawSkip skip = ShadowDrawSkip::kNone;
+  capture::Cull cull = capture::Cull::kNone;  // in the pass's window space
+  // The draw's alpha decides: it needs its coordinates and its texture, and is
+  // not drawn without them. `alpha`: the test's fields of the root constants
+  // (kAlphaTest with the function, kAlphaToMask with the offsets, always as on
+  // one sample; kAlphaFromAlbedo with the component; the reference, the scale).
+  bool textured = false;
+  ClayAlpha alpha;
+  ShadowBiasTerms bias;
+};
+
+// Rules (fail closed: nothing is drawn from a value that was not read or is
+// not a number). The depth state must be the shadow passes' (kState); the rows
+// finite (kMatrix); the bias usable (kBias). An opaque caster (no pixel shader
+// in the game) is drawn solid. An alpha-test caster whose state has the alpha
+// test or alpha-to-mask on is drawn with them from its texture's alpha times
+// its scale, and needs a textured material with that recipe, a finite scale of
+// usable size and a finite coordinate transform (kAlpha); with neither on it is
+// solid, as in the game. The bushes' distance dissolve is not drawn (ruling):
+// their caster is the texture alpha test alone.
+inline ShadowDrawState DecideShadowDraw(const capture::DrawRecord& r, const capture::ShadowCaster& caster) {
+  ShadowDrawState d;
+  auto skip = [&](ShadowDrawSkip why) {
+    d = ShadowDrawState{};
+    d.skip = why;
+    return d;
+  };
+  const capture::RenderState rs = capture::DecodeRenderState(r.state_words);
+  if (!ShadowDepthStateUsable(rs)) return skip(ShadowDrawSkip::kState);
+  if (caster.kind != capture::CasterKind::kOpaque && caster.kind != capture::CasterKind::kAlphaTest) {
+    return skip(ShadowDrawSkip::kState);
+  }
+  for (float v : r.rows) {
+    if (!std::isfinite(v)) return skip(ShadowDrawSkip::kMatrix);
+  }
+  if (!MakeShadowBiasTerms(caster, &d.bias)) return skip(ShadowDrawSkip::kBias);
+  d.cull = ClayCull(rs.cull, rs.front_cw);
+  if (caster.kind == capture::CasterKind::kAlphaTest && (rs.alpha_test || rs.alpha_to_mask)) {
+    const capture::Material& m = r.material;
+    bool usable = m.status == capture::MaterialStatus::kTextured && m.alpha.source == capture::AlphaSource::kAlbedo &&
+                  std::fabs(m.alpha_scale) <= 1024.0f;  // (false for a NaN)
+    for (float v : m.uv_xform) usable = usable && std::isfinite(v);
+    if (!usable) return skip(ShadowDrawSkip::kAlpha);
+    d.textured = true;
+    d.alpha.mode = kAlphaFromAlbedo | (uint32_t(m.alpha.component & 3) << 5);
+    if (rs.alpha_test) d.alpha.mode |= (uint32_t(rs.alpha_func) & 7u) | kAlphaTest;
+    // (the sample count's two bits stay 0: the map has one sample whatever the record's surface word says)
+    if (rs.alpha_to_mask) d.alpha.mode |= kAlphaToMask | (uint32_t(rs.alpha_to_mask_offsets) << kAlphaToMaskShift);
+    d.alpha.ref = rs.alpha_ref;
+    d.alpha.scale = m.alpha_scale;
+  }
+  return d;
+}
+
+// The root constants of a shadow draw: a clay draw's (the record's rows, layout,
+// base vertex and cut; the coordinates' transform, the sampler and the alpha
+// fields of a draw whose alpha decides) without light, and with the bias in the
+// two words a depth-only draw has no other use for: `color` holds the bits of
+// the constant term and `pad2` those of the slope term (kClayShadowPs reads
+// them with asfloat; the vertex shader reads neither).
+inline ClayConstants MakeShadowConstants(const capture::DrawRecord& r, uint32_t vertex_count, const float uv[4],
+                                         bool textured, uint32_t sampler, const ClayAlpha& alpha,
+                                         const ShadowBiasTerms& bias) {
+  ClayConstants c = MakeClayConstants(r, vertex_count, 0, uv, textured, sampler, alpha, 0, 0);
+  c.color = FloatBits(bias.constant);
+  c.pad2 = FloatBits(bias.slope);
+  return c;
+}
+
+// Where the pass's viewport puts a clip position in a map, in texels from the
+// map's corner (the window position: "Texels" above), and where a map's
+// register rows (ShadowBlock::world_to_map[c]) put a world position, in the
+// same units ((u, v) / w * kShadowMapSize). False for a w of zero or a value
+// that is not finite. The texel is the floor of each.
+inline bool ShadowMapWindow(const float clip[4], double out[2]) {
+  const double w = clip[3];
+  if (!std::isfinite(clip[0]) || !std::isfinite(clip[1]) || !std::isfinite(w) || w == 0.0) return false;
+  const double size = double(kShadowMapSize);
+  out[0] = (0.5 * (double(clip[0]) / w) + 0.5) * size + double(kShadowViewportOrigin);
+  out[1] = (-0.5 * (double(clip[1]) / w) + 0.5) * size + double(kShadowViewportOrigin);
+  return true;
+}
+inline bool ShadowMapLookup(const float map_rows[4][4], const float world[3], double out[2]) {
+  double v[4];
+  for (int i = 0; i < 4; ++i) {
+    v[i] = double(map_rows[i][0]) * world[0] + double(map_rows[i][1]) * world[1] + double(map_rows[i][2]) * world[2] +
+           double(map_rows[i][3]);
+    if (!std::isfinite(v[i])) return false;
+  }
+  if (v[3] == 0.0) return false;
+  out[0] = v[0] / v[3] * double(kShadowMapSize);
+  out[1] = v[1] / v[3] * double(kShadowMapSize);
+  return true;
+}
+
+// The log line of the maps, written when the pass's targets are created.
+inline std::string FormatShadowTargetText() {
+  char buf[128];
+  std::snprintf(buf, sizeof(buf), "shadow maps 2 x %u x %u: depth D32_FLOAT %.1f MB together", kShadowMapSize, kShadowMapSize,
+                double(2 * ClayTargetBytes(kShadowMapSize, kShadowMapSize, kShadowMapTexelBytes)) / (1024.0 * 1024.0));
+  return buf;
+}
+
+// The log's and F3's Shadow line (spec Design 5). "Shadow: off" for a frame
+// without shadow records. Else the block (valid, or invalid with the capture's
+// reason: the frame is then drawn without shadows, "shadow-block"), and per
+// map the records drawn into it of the scene's records, with what was not
+// drawn by reason: the pass's own reasons (ShadowDrawSkipName) first, then,
+// marked "capture", the game's shadow draws the capture did not record
+// (ShadowSkipName). Then the draws on the game's map in neither pass
+// (shadow-pass-extra) and the passes the game opened when they are not two: a
+// frame with a valid block may hold a partial pass, and this is where it
+// shows. Then the split distances of a valid block, and why the maps were not
+// drawn when the block is valid and they were not.
+inline std::string FormatShadowText(const ClayStats& st) {
+  if (!st.shadow_switch) return "Shadow: off";
+  std::string text = "Shadow: on, block ";
+  if (st.shadow_block) {
+    text += "valid";
+  } else {
+    text += std::string("invalid (") + capture::kShadowBlockReason + ": " + capture::ShadowBlockReasonName(st.shadow_reason) + ")";
+  }
+  const char* names[2] = {"near", "far"};
+  char buf[96];
+  for (size_t c = 0; c < 2; ++c) {
+    std::snprintf(buf, sizeof(buf), ", %s %u of %u draws (skipped {", names[c], st.shadow_drawn[c], st.shadow_records[c]);
+    text += buf;
+    bool first = true;
+    for (size_t i = 1; i < size_t(ShadowDrawSkip::kCount); ++i) {
+      if (!st.shadow_skipped[c][i]) continue;
+      std::snprintf(buf, sizeof(buf), "%s%s: %u", first ? "" : ", ", ShadowDrawSkipName(ShadowDrawSkip(i)), st.shadow_skipped[c][i]);
+      text += buf;
+      first = false;
+    }
+    for (size_t i = 1; i < capture::kShadowSkipCount; ++i) {
+      if (!st.shadow_capture_skipped[c][i]) continue;
+      std::snprintf(buf, sizeof(buf), "%scapture %s: %u", first ? "" : ", ", capture::ShadowSkipName(uint8_t(i)),
+                    st.shadow_capture_skipped[c][i]);
+      text += buf;
+      first = false;
+    }
+    text += "})";
+  }
+  std::snprintf(buf, sizeof(buf), ", extra %u", st.shadow_extra);
+  text += buf;
+  if (st.shadow_extra) text += std::string(" (") + capture::kShadowPassExtraReason + ")";
+  if (st.shadow_passes != 2) {
+    std::snprintf(buf, sizeof(buf), ", passes %u", st.shadow_passes);
+    text += buf;
+  }
+  if (st.shadow_block) {
+    std::snprintf(buf, sizeof(buf), ", split (%g, %g, %g, %.4f)", st.shadow_split[0], st.shadow_split[1], st.shadow_split[2],
+                  st.shadow_split[3]);
+    text += buf;
+    if (!st.shadow_maps) text += st.shadow_light_off ? " | maps not drawn: the frame has no light" : " | maps not drawn";
+  }
+  return text;
+}
+
+// The pass's shadow skips by vertex shader, "0xHASH(reason): n" by reason and
+// within one the most frequent shader first; empty when there is none.
+inline std::string FormatShadowSkippedByVs(const ClayStats& st) {
+  constexpr size_t kTop = 8;
+  std::string text;
+  char buf[96];
+  for (size_t kind = 1; kind < size_t(ShadowDrawSkip::kCount); ++kind) {
+    capture::ShaderTally<32>::Entry top[kTop];
+    const size_t n = st.shadow_skipped_by_vs.Top(uint8_t(kind), top, kTop);
+    for (size_t i = 0; i < n; ++i) {
+      std::snprintf(buf, sizeof(buf), "%s0x%016llX(%s): %u", text.empty() ? "" : ", ",
+                    static_cast<unsigned long long>(top[i].hash), ShadowDrawSkipName(ShadowDrawSkip(kind)), top[i].count);
+      text += buf;
+    }
+  }
+  return text;
 }
 
 // The F3 texture line: textured share of the drawn records (terrain records

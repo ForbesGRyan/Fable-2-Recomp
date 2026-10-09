@@ -4,7 +4,7 @@
 // (seconds since process start). The runtime side lives in fable_2_app.h.
 // Stick entries "55:LS=0/100/3000" / "60:RS=60/0/1500" hold a stick at x/y percent
 // (positive y forward, positive x right) for the given milliseconds.
-// Action entries "56:VIEW=native" (off|split|overlay|native|pattern) and "66:DISC=60/4"
+// Action entries "56:VIEW=native" (off|split|overlay|native|pattern|shadow) and "66:DISC=60/4"
 // (discovery capture of 60 frames, every 4th draw) press nothing; the app's autoplay
 // thread runs them (ActionsBetween) against the renderer and the capture.
 
@@ -28,7 +28,7 @@ struct Step {
   int8_t x = 0, y = 0;  // percent of full deflection, [-100, 100]
   uint32_t stick_ms = 0;  // how long the stick is held, [1, 60000]
   uint8_t action = 0;  // 0 none, 1 set the native view, 2 arm a discovery capture
-  uint8_t view = 0;  // action 1: 0 off, 1 split, 2 overlay, 3 native, 4 pattern
+  uint8_t view = 0;  // action 1: 0 off, 1 split, 2 overlay, 3 native, 4 pattern, 5 shadow
   uint32_t disc_frames = 0;  // action 2: frames, [1, 100000]
   uint32_t disc_every = 0;  // action 2: sample every Nth draw, [1, 64]
 };
@@ -120,8 +120,8 @@ inline bool ParseAction(std::string_view name, Step* step) {
   if (eq == std::string_view::npos) return false;
   const std::string_view key = name.substr(0, eq), val = name.substr(eq + 1);
   if (IEquals(key, "VIEW")) {
-    static constexpr const char* kViews[] = {"off", "split", "overlay", "native", "pattern"};
-    for (uint8_t i = 0; i < 5; ++i) {
+    static constexpr const char* kViews[] = {"off", "split", "overlay", "native", "pattern", "shadow"};
+    for (uint8_t i = 0; i < 6; ++i) {
       if (!IEquals(val, kViews[i])) continue;
       step->buttons = 0;
       step->action = 1;

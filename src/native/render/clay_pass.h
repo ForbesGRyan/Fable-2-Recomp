@@ -20,7 +20,11 @@
 // that has a light block, the terrain, the objects (with a colour stream or
 // with probe colours) and the tree trunks are lit by the game's ambient, baked
 // and sun light (clay_logic.h, "Native light"); every other draw is the unlit
-// colour. GPU (command-processor) thread
+// colour. With the light on, in a frame that has a valid shadow block
+// (FrameScene::shadow), the game's two sun shadow maps are drawn first, from
+// the frame's shadow records into two depth targets of the pass's own
+// (clay_logic.h, "Native shadow maps"); nothing samples them yet but the
+// shadow view (composite.h). GPU (command-processor) thread
 // only; Cmd is valid only inside the SDK's guest-output callbacks.
 
 #include <array>
@@ -70,6 +74,17 @@ class ClayPass {
   // Render that drew the linear target.
   nrhi::Texture* color() const { return color_; }
   nrhi::Texture* depth() const { return depth_; }  // left in kPixelShaderResource after Render
+  // The two shadow maps (0 near, 1 far): kShadowMapSize squared, D32_FLOAT, viewed as R32_FLOAT;
+  // depth in the pass's direction (clay_logic.h, "Native shadow maps": 0 at the light, 1 where no
+  // caster is). Created and destroyed with the pass's other targets, whatever the window's size.
+  // In kPixelShaderResource whenever Render is not running: Render binds one as a depth target
+  // only while it draws that map, before anything of the scene is drawn, and no draw of the pass
+  // samples a map while one is bound for writing.
+  // shadow_maps_drawn: the last Render cleared and drew both for its scene. False: their contents
+  // are another frame's or undefined (new targets, no valid shadow block, the light or the
+  // shadows off) and must not be shown or sampled.
+  nrhi::TextureView* shadow_view(size_t cascade) const { return cascade < 2 ? shadow_view_[cascade] : nullptr; }
+  bool shadow_maps_drawn() const { return shadow_drawn_; }
   GeometryCache& geometry() { return geometry_; }
   TextureCache& textures() { return textures_; }
 
@@ -144,6 +159,18 @@ class ClayPass {
     uint32_t base_sampler = 0;
     float base_fix[2] = {1.0f, 1.0f};
   };
+  // One shadow record of the frame that is drawn into its map, with its buffers, its texture (a
+  // caster whose alpha decides; else null) and its root constants (MakeShadowConstants).
+  struct ShadowPrepared {
+    nrhi::Buffer* positions = nullptr;
+    nrhi::Buffer* indices = nullptr;
+    nrhi::Buffer* uvs = nullptr;
+    nrhi::TextureView* albedo = nullptr;
+    nrhi::Pipeline* pipeline = nullptr;
+    uint32_t index_count = 0;
+    uint64_t vs_hash = 0;
+    ClayConstants constants;
+  };
   // A texture resolved for a terrain layer this frame (many layers share a few).
   struct TerrainTexture {
     uint32_t fetch[6] = {};
@@ -183,6 +210,17 @@ class ClayPass {
                       const capture::TerrainPatch& terrain, const capture::LightInputs* light, bool textured,
                       ClayStats& st, TextureStats& tst);
   void FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, TextureStats& tst);
+  // The shadow maps (Render). PrepareShadows, with the scene's other records and before any target
+  // is bound (a caster's texture may be uploaded here): the frame's shadow counters, and, when
+  // `draw` (the frame is drawn with light and its shadow block is valid), for every shadow record
+  // what DecideShadowDraw says, its geometry and, for a caster whose alpha decides, its
+  // coordinates and texture; a record that lacks any of it is counted by reason and vertex shader
+  // and not drawn (never as a solid caster). DrawShadows, after FinishTerrain (the frame's constant
+  // buffer) and before the scene's targets are bound: clears both maps and draws the prepared
+  // records, each map bound as the depth target for its own draws only, and leaves both in
+  // kPixelShaderResource. Without `draw` neither map is touched and shadow_drawn_ is false.
+  void PrepareShadows(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, bool draw, ClayStats& st, TextureStats& tst);
+  void DrawShadows(nrhi::Cmd* cmd, ClayStats& st);
   // The light's vertex inputs of a textured mesh record with light inputs:
   // its normals and the other buffers of its vertex kind (a colour stream's
   // colours, the probe weights and sets, an instance set's colours and bend
@@ -223,6 +261,16 @@ class ClayPass {
   nrhi::TextureView* linear_view_ = nullptr;
   nrhi::Texture* color_ = nullptr;
   nrhi::Texture* depth_ = nullptr;
+  // The two shadow maps with their views, the shadow pixel shader (kClayShadowPs, drawn with vs_
+  // under layout_) and the three depth-only pipelines, one a cull mode (ShadowPipelineSlot): made
+  // and destroyed with the targets above. shadow_wanted_: this Render draws the maps;
+  // shadow_drawn_: the last one did. shadow_prepared_: the records it draws, per map.
+  nrhi::Texture* shadow_map_[2] = {};
+  nrhi::TextureView* shadow_view_[2] = {};
+  nrhi::Shader* shadow_ps_ = nullptr;
+  nrhi::Pipeline* shadow_pipelines_[kShadowPipelines] = {};
+  bool shadow_wanted_ = false, shadow_drawn_ = false;
+  std::vector<ShadowPrepared> shadow_prepared_[2];
   nrhi::BindingLayout* map_layout_ = nullptr;  // the RHI has no layout destruction
   nrhi::Shader* map_vs_ = nullptr;
   nrhi::Shader* map_ps_ = nullptr;

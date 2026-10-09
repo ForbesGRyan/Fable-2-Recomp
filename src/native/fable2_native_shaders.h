@@ -667,6 +667,61 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
 }
 )hlsl";
 
+// The shadow maps' pixel shader (render/clay_pass.cpp; clay_logic.h, "Native shadow maps"): depth only, no
+// colour output. It is drawn with kClayVs, whose first three outputs it takes (the registers are assigned
+// by position), in a draw without light (light_mode 0). It writes the pixel's depth with the game's
+// polygon offset: the rasterised depth (clip z, the native map's direction: 0 at the light's near plane, 1
+// the clear value) plus the slope term times the depth's larger screen derivative plus the constant term,
+// saturated (ShadowMapDepth in clay_logic.h). The two terms are the bits of Draw's `pad2` (slope) and
+// `color` (constant), which a depth-only draw has no other use for (MakeShadowConstants); both are 0 for a
+// draw without the offset. A caster whose alpha decides (textured != 0: the leaf cards, the cut-out meshes,
+// the bushes) samples its texture at t3 as kClayTexturedPs does and discards by the alpha test (alpha_mode
+// bits 0-3, alpha_ref) and then by alpha-to-mask (bit 8) as on ONE sample a pixel, which is what a map has:
+// kept iff alpha >= 1 - offset / 4, the offset of the pixel's parity from bits 16-23 (the leaf cards' 0xAA:
+// 0.5 everywhere; ShadowAlphaToMaskThreshold). The sample count's bits (24-25) are not read. Writing the
+// depth turns early depth tests off for these draws; the maps are small.
+inline constexpr const char* kClayShadowPs = FABLE2_CLAY_DRAW_HLSL R"hlsl(
+Texture2D albedo : register(t3);
+SamplerState s_point_wrap : register(s0);
+SamplerState s_linear_wrap : register(s1);
+SamplerState s_point_clamp : register(s2);
+SamplerState s_linear_clamp : register(s3);
+// The GPU's compare functions: never, less, equal, less-equal, greater, not-equal, greater-equal, always.
+bool alpha_passes(float a, float ref, uint func) {
+  if (func == 0) return false;
+  if (func == 1) return a < ref;
+  if (func == 2) return a == ref;
+  if (func == 3) return a <= ref;
+  if (func == 4) return a > ref;
+  if (func == 5) return a != ref;
+  if (func == 6) return a >= ref;
+  return true;
+}
+float main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1) : SV_Depth {
+  if (textured != 0) {
+    float4 t;
+    if (sampler_index == 0) t = albedo.Sample(s_point_wrap, uv);
+    else if (sampler_index == 1) t = albedo.Sample(s_linear_wrap, uv);
+    else if (sampler_index == 2) t = albedo.Sample(s_point_clamp, uv);
+    else t = albedo.Sample(s_linear_clamp, uv);
+    float a = alpha_scale;
+    if (alpha_mode & 0x10) {
+      uint comp = (alpha_mode >> 5) & 3;
+      a *= comp == 0 ? t.x : comp == 1 ? t.y : comp == 2 ? t.z : t.w;
+    }
+    if ((alpha_mode & 0x8) && !alpha_passes(a, alpha_ref, alpha_mode & 7)) discard;
+    if (alpha_mode & 0x100) {
+      uint2 p = uint2(pos.xy);
+      uint index = ((p.x & 1) << 1) | (p.y & 1);
+      uint offset = (alpha_mode >> (16 + 2 * index)) & 3;
+      if (!(a >= 1.0 - offset * 0.25)) discard;
+    }
+  }
+  float slope = max(abs(ddx(pos.z)), abs(ddy(pos.z)));
+  return saturate(pos.z + asfloat(pad2) * slope + asfloat(color));
+}
+)hlsl";
+
 #undef FABLE2_CLAY_TERRAIN_COMMON_HLSL
 #undef FABLE2_CLAY_OBJECT_HLSL
 #undef FABLE2_CLAY_LIGHT_HLSL
@@ -700,6 +755,42 @@ float4 main(float4 pos : SV_Position) : SV_Target {
   float2 uv = pos.xy / float2(out_w, out_h);
   if (mode == 2 && uv.x < 0.5) discard;   // split: left half stays emulated
   return float4(clay.Sample(s, uv).rgb, alpha);
+}
+)hlsl";
+
+// The shadow view (render/composite.cpp, fable2_native_view=shadow; evidence shots, no key): the pass's two
+// shadow maps side by side over the whole output, the near map left and the far map right, each a square
+// of side min(out_w / 2, out_h), the pair centred. Grey = the stored depth as it is: 0 (black) at the
+// light's near plane, growing with the distance from the light, 1 (white) where no caster is (the clear
+// value); so casters are grey shapes on white, darker the nearer they are to the light. A screen pixel
+// shows the smallest depth (the nearest caster) of the 2 x 2 texels at its place, read without a sampler,
+// so that a caster a texel wide stays visible when 1024 texels are shown on fewer pixels; casters look up
+// to a texel fatter for it. Outside the two squares: dark blue-grey. maps_valid 0 (the maps were not drawn
+// for the frame shown: no shadow block, the shadows or the light off): both squares flat dark blue, never
+// a map of another frame.
+inline constexpr const char* kShadowViewPs = R"hlsl(
+cbuffer C : register(b0) { float out_w; float out_h; uint maps_valid; float map_size; };
+Texture2D<float> near_map : register(t0);
+Texture2D<float> far_map : register(t1);
+float4 main(float4 pos : SV_Position) : SV_Target {
+  float side = min(out_w * 0.5, out_h);
+  float2 at = (pos.xy - float2(out_w * 0.5 - side, (out_h - side) * 0.5)) / side;
+  if (at.x < 0.0 || at.x >= 2.0 || at.y < 0.0 || at.y >= 1.0) return float4(0.02, 0.02, 0.05, 1.0);
+  if (maps_valid == 0) return float4(0.0, 0.0, 0.25, 1.0);
+  bool far_side = at.x >= 1.0;
+  float last = map_size - 1.0;
+  int2 t0 = int2(min(float2(far_side ? at.x - 1.0 : at.x, at.y) * map_size, last));
+  int2 t1 = min(t0 + 1, int2(last, last));
+  float d;
+  if (far_side) {
+    d = min(min(far_map.Load(int3(t0, 0)), far_map.Load(int3(t1.x, t0.y, 0))),
+            min(far_map.Load(int3(t0.x, t1.y, 0)), far_map.Load(int3(t1, 0))));
+  } else {
+    d = min(min(near_map.Load(int3(t0, 0)), near_map.Load(int3(t1.x, t0.y, 0))),
+            min(near_map.Load(int3(t0.x, t1.y, 0)), near_map.Load(int3(t1, 0))));
+  }
+  d = saturate(d);
+  return float4(d, d, d, 1.0);
 }
 )hlsl";
 

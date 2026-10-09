@@ -1,0 +1,44 @@
+{
+  "about": "Regions for tools/xdk_sigmatch/region_compare.py: the fog of the native renderer (spec docs/superpowers/specs/2026-10-09-native-renderer-fog-design.md, success criteria 4 to 6) at the daylight spots of the -BootSave Hero000 plans. The regions of the lighting validation (lighting-regions.json: 'far rock', 'far slope' and the near regions) are used beside these; this file adds far ground that lies clear of the ridge line and of the lake. Plan Task 4 defined the first of them; plan Task 6 extends the file.",
+  "coordinates": "rect = [x0, y0, x1, y1] as fractions of the client area (0, 0 top left). Chosen on 1942 x 1136 window shots (client area 1920 x 1080 at 11, 45).",
+  "kinds": {
+    "haze": "far ground behind the game's haze, drawn and lit by the native pass: counts for criterion 5 (native mean luminance 0.75 to 1.25 of the emulated one, hue within 20 degrees). The emulated far hills carry the distant-tree billboards, which the native pass does not draw (spec ruling 6): a ratio compares bare hazed ground with wooded hazed ground",
+    "sky": "above the ridge: the emulated sky against the native clear colour until the sky is drawn (plan Task 5); listed, not counted",
+    "not-drawn": "the lake's surface, which the native pass draws flat and unlit (spec ruling 6) and therefore unfogged; listed, not counted"
+  },
+  "chosen_on": "out/native-evidence/fog/task4_<spot>_on_shot_<t>s.png of 2026-10-09 (binary of commit 2487da6, fog on): bridge 42 s emulated, 45 s native, 48 s emulated; third 44, 47, 50. A run with another camera position needs the rectangles checked again (the third spot's walk ends slightly elsewhere from run to run). The trees spot has no far ground in view.",
+  "spots": {
+    "bridge": {
+      "plan": "-BootSave Hero000; emulated and native shots 3 s apart from 36 s",
+      "exclude_notes": "the quest banner across the top of the emulated picture; the expression icons at the lower left",
+      "exclude": [[0.0, 0.0, 1.0, 0.165], [0.045, 0.775, 0.15, 0.96]],
+      "regions": [
+        {"name": "far mountains left", "rect": [0.359, 0.335, 0.442, 0.394], "kind": "haze", "note": "the range behind the rope, right of the tall pole, below its ridge and above the lake's far shore"},
+        {"name": "far mountains centre", "rect": [0.515, 0.338, 0.619, 0.394], "kind": "haze", "note": "the range above the hero's head"},
+        {"name": "far mountains right", "rect": [0.776, 0.31, 0.88, 0.375], "kind": "haze", "note": "the range left of the rock spire, below the two towers"},
+        {"name": "far peak", "rect": [0.401, 0.245, 0.432, 0.278], "kind": "haze", "note": "the highest peak, left of the tall pole's top, below its apex: bare in the game's picture too (no distant trees on it), so the two pictures show the same ground through the same haze"},
+        {"name": "island in the lake", "rect": [0.541, 0.505, 0.593, 0.532], "kind": "haze", "note": "the island with the hut: middle distance"},
+        {"name": "sky above the ridge", "rect": [0.5, 0.2, 0.7, 0.26], "kind": "sky", "note": "the native picture has its clear colour here until plan Task 5"},
+        {"name": "lake", "rect": [0.645, 0.477, 0.749, 0.505], "kind": "not-drawn", "note": "the water right of the island"}
+      ]
+    },
+    "third": {
+      "plan": "-BootSave Hero000; the walk 33:LS=0/-100/3500; emulated and native shots 3 s apart from 44 s",
+      "exclude_notes": "the quest banner (gone by 44 s in the runs of 2026-10-09, kept for earlier shots); the expression icons",
+      "exclude": [[0.0, 0.0, 1.0, 0.135], [0.045, 0.775, 0.15, 0.96]],
+      "regions": [
+        {"name": "far mountains left", "rect": [0.151, 0.245, 0.307, 0.329], "kind": "haze", "note": "the range across the lake at the left, below its ridge"},
+        {"name": "far mountains centre", "rect": [0.328, 0.273, 0.411, 0.347], "kind": "haze", "note": "the range left of the towers, above the lake's far shore"},
+        {"name": "sky above the ridge", "rect": [0.2, 0.14, 0.45, 0.19], "kind": "sky", "note": "the native picture has its clear colour here until plan Task 5"}
+      ]
+    },
+    "trees": {
+      "plan": "-BootSave Hero000; the walk of frame-map section 14; emulated and native shots 3 s apart from 58 s",
+      "exclude_notes": "the quest banner; the expression icons",
+      "exclude": [[0.0, 0.0, 1.0, 0.165], [0.045, 0.775, 0.15, 0.96]],
+      "regions": [
+        {"name": "path behind the trunks", "rect": [0.03, 0.5, 0.075, 0.53], "kind": "haze", "note": "the ground beyond the big trunks at the left: the farthest ground in view, a few tens of units away, barely past the fog's start"}
+      ]
+    }
+  }
+}

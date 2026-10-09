@@ -673,5 +673,41 @@ class RegionsFileTest(unittest.TestCase):
             self.assertEqual(len(rc.compare_pairs(rows, pairs)), len(pairs))
 
 
+class FogRegionsFileTest(unittest.TestCase):
+    """docs/native-renderer/fog-regions.json, the far regions of the fog's validation (used beside the lighting file)."""
+
+    PATH = Path(__file__).resolve().parent.parent / "docs" / "native-renderer" / "fog-regions.json"
+
+    def test_every_spot_loads_and_every_rectangle_is_whole_in_the_picture(self):
+        doc = json.loads(self.PATH.read_text(encoding="utf-8"))
+        self.assertEqual(sorted(doc["spots"]), ["bridge", "third", "trees"])
+        kinds = set(doc["kinds"])
+        self.assertEqual(kinds, {"haze", "sky", "not-drawn"})
+        img = rc.Image(1942, 1136, bytes([90, 120, 60]) * (1942 * 1136))
+        haze = 0
+        for spot in sorted(doc["spots"]):
+            regions, pairs, excludes = rc.load_regions(self.PATH, spot)
+            self.assertEqual(len({r["name"] for r in regions}), len(regions), spot)
+            for r in regions:
+                self.assertIn(r["kind"], kinds, "%s: '%s'" % (spot, r["name"]))
+                self.assertTrue(r.get("note"), "%s: '%s' does not say what it shows" % (spot, r["name"]))
+                haze += r["kind"] == "haze"
+            rows = rc.compare(img, img, img, regions, excludes)
+            self.assertEqual(len(rows), len(regions))
+            for row in rows:
+                # No region lies under the banner or the icons, and each holds pixels.
+                self.assertEqual(row.native.excluded, 0, "%s: '%s'" % (spot, row.name))
+                self.assertAlmostEqual(row.ratio, 1.0, places=12, msg=row.name)
+        self.assertGreaterEqual(haze, 8)
+
+    def test_no_name_is_one_of_the_lighting_files(self):
+        # The two files are read together for one spot: a name stands for one rectangle.
+        lighting = Path(self.PATH).with_name("lighting-regions.json")
+        for spot in ("bridge", "third", "trees"):
+            ours = {r["name"] for r in rc.load_regions(self.PATH, spot)[0]}
+            theirs = {r["name"] for r in rc.load_regions(lighting, spot)[0]}
+            self.assertFalse(ours & theirs, spot)
+
+
 if __name__ == "__main__":
     unittest.main()

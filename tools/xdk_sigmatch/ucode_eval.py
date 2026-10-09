@@ -3,8 +3,9 @@
 formula (ps_check.py, vs_check.py, light_check.py). Written as evidence of the materials sub-project
 (its Task 9, enough for the terrain shaders); the lighting sub-project tracked it and added what the
 mesh shaders need: vertex fetches, a0-relative constants, cndge / cndgt, trunc, sin, cos, maxa /
-maxas / maxasf, the jump on a bool constant and loops with a count the caller gives. Kills, the cube
-ops and getWeights2D are not interpreted: a shader that reaches one raises NotImplementedError.
+maxas / maxasf, the jump on a bool constant and loops with a count the caller gives; the shadows sub-project
+added getWeights (the two screen mask shaders) and the helpers for fetches with texel offsets. Kills and
+the cube ops are not interpreted: a shader that reaches one raises NotImplementedError.
 
 Semantics follow the SDK's ucode.h (xenos AluVectorOpcode / AluScalarOpcode):
 - an ALU instruction is a vector op and/or a scalar op; both read the registers as they were before
@@ -30,12 +31,26 @@ Semantics follow the SDK's ucode.h (xenos AluVectorOpcode / AluScalarOpcode):
 - `loop iN, Lend` ... `endloop iN, Lbody` runs its body `loops[N]` times (the count field of integer
   constant N; 0 skips to Lend), and a predicated `endloop` leaves early when the predicate has the
   printed value (the SDK's own interpreter, graphics/pipeline/shader/interpreter.cpp). The loop's aL
-  register is not modelled: an aL-relative operand is an error.
+  register is not modelled: an aL-relative operand is an error;
+- a texture fetch hands its attributes to the sampler callback, the texel offsets among them
+  (`OffsetX=-1`): fetch_offsets(attrs) reads them and point_texel(coords, size, attrs) is the texel a
+  point-filtered fetch reads, floor(coordinate * size + offset), as the SDK's translator samples it (it
+  adds the offset in texels to the coordinate: dxbc_translator_fetch.cpp, "Get offsets applied to the
+  coordinates before sampling");
+- `getWeights2D rD.<swz>, rC.ab, tfN, OffsetX=.., OffsetY=..` gives the linear filter's two lerp
+  factors, frac(coordinate * size + offset - 0.5) per axis (the same file: the 0.5 is subtracted "for
+  coordinate lerp factors", then `frc`), in the source's x and y; z and w read 0 (the mip factor is not
+  computed there either). The size is `tex_size[N]` (width, height), given by the caller, and is not
+  applied when the fetch says UnnormalizedTextureCoords=true. With offsets of -0.5 the factors are
+  frac(coordinate * size): the weights of the texels floor(x) - 1 and floor(x), the fetches the mask
+  shaders make with offsets -1 and 0. `weights` lists (instruction, slot, coordinates, factors).
 
 Not modelled: the SDK's interpreter makes a product with a zero factor +0 whatever the other factor
 is ("Direct3D 9 behavior", interpreter.cpp), flushes denormals and rounds to single precision; here
 0 * infinity is NaN and the arithmetic is double precision. The checkers feed finite inputs, where the
-two agree to rounding.
+two agree to rounding. The translator's rounding offset on fetch coordinates (1.5 / 1024 of a texel,
+added to every offset "to resolve ambiguity when fetching point-sampled textures between texels") is
+the emulator's own and is not modelled.
 """
 import math
 import re
@@ -94,18 +109,33 @@ def _address(a):
     return int(min(max(math.floor(a), -256.0), 255.0))
 
 
+def fetch_offsets(attrs):
+    """The texel offsets of a fetch's attributes as (x, y, z) floats; an absent one is 0."""
+    return tuple(float(attrs.get(name, 0.0)) for name in ("OffsetX", "OffsetY", "OffsetZ"))
+
+
+def point_texel(coords, size, attrs):
+    """The integer texel a point-filtered fetch reads, per axis floor(coordinate * size + offset). Not
+    wrapped or clamped: that is the caller's (the sampler state's)."""
+    off = fetch_offsets(attrs)
+    return tuple(int(math.floor(c * s + o)) for c, s, o in zip(coords, size, off))
+
+
 class Machine:
-    def __init__(self, text, consts, sampler, regs=None, bools=None, vfetch=None, loops=None):
+    def __init__(self, text, consts, sampler, regs=None, bools=None, vfetch=None, loops=None, tex_size=None):
         """consts: {register: [4 floats]}; sampler(slot, coords tuple, attrs dict) -> 4 floats;
         regs: {register: [4 floats]} initial values (interpolators or the patch inputs);
         vfetch(stream, offset, attrs dict, index) -> 4 floats, the vertex element as the fetch delivers
         it (index: the value of the full fetch's index operand);
-        loops: {integer constant: iteration count}."""
+        loops: {integer constant: iteration count};
+        tex_size: {slot: (width, height)} for getWeights."""
         self.lines = text.splitlines()
         self.c = {int(k): [float(x) for x in v] for k, v in consts.items()}
         self.sampler = sampler
         self.vfetch = vfetch
         self.loops = dict(loops or {})
+        self.tex_size = dict(tex_size or {})
+        self.weights = []
         self.vstream = None
         self.vindex = None
         self.a0 = 0
@@ -274,6 +304,25 @@ class Machine:
                 continue
             tgt[i] = 0.0 if ch == "0" else 1.0 if ch == "1" else sample[_COMPS.index(ch)]
 
+    def _weights(self, ins):
+        slot = int(re.search(r"(?<![A-Za-z])tf(\d+)", ins.raw.split("//")[0]).group(1))
+        coords = tuple(self._src(ins.srcs[0], 2)[:2])
+        off = fetch_offsets(ins.attrs)
+        if ins.attrs.get("UnnormalizedTextureCoords", "false") != "false":
+            size = (1.0, 1.0)
+        elif slot in self.tex_size:
+            size = self.tex_size[slot]
+        else:
+            raise KeyError(f"getWeights on tf{slot}: no texture size supplied")
+        t = [c * s + o - 0.5 for c, s, o in zip(coords, size, off)]
+        sample = [t[0] - math.floor(t[0]), t[1] - math.floor(t[1]), 0.0, 0.0]
+        self.weights.append((ins.index, slot, coords, (sample[0], sample[1])))
+        tgt = self.r[ins.dest]
+        for i, ch in enumerate(ins.dest_swz[:4]):
+            if ch == "_":
+                continue
+            tgt[i] = 0.0 if ch == "0" else 1.0 if ch == "1" else sample[_COMPS.index(ch)]
+
     def _vfetch(self, ins):
         if self.vfetch is None:
             raise ValueError("a vertex fetch needs the vfetch callback")
@@ -384,6 +433,9 @@ class Machine:
                 continue
             if name.startswith("vfetch"):
                 self._vfetch(first)
+                continue
+            if name == "getWeights2D":
+                self._weights(first)
                 continue
             # The a0-relative constants of the instruction, in the order its operands are read (the
             # parser keeps no register number for them).

@@ -2,6 +2,9 @@
 
 Usage: light_check.py --all [--trials N] [--seed S] [--dumps DIR]
        light_check.py --family <name> [--shader PS_HASH] [--trials N]
+       light_check.py --family mask|mask-near|mask-far [--shader PS_HASH]     (the two screen mask shaders
+                      against mask_0f99 / mask_1b4b, or one cascade's block alone against mask_near / mask_far;
+                      --all runs these after the pairs)
        light_check.py --list
        light_check.py --multi-sun [--trials N]     (the two- and four-light pairs as the game draws them,
                       the sun in slot 1 or 2 behind dark lanterns, against the ONE-light function)
@@ -983,13 +986,312 @@ def print_multi_sun(trials, seed, dumps):
     return bad
 
 
+# --- the screen mask (shadows sub-project, plan Task 2) -------------------------------------------
+
+def _f32(bits):
+    """Four single-precision values from 32 hex digits, as the GPU logs print a register."""
+    return [struct.unpack(">f", bytes.fromhex(bits[i:i + 8]))[0] for i in range(0, 32, 8)]
+
+
+# The literal registers of the two mask shaders. Not in the dumps (the binary dump is the microcode alone)
+# and in no capture row: the emulated GPU's registers at every execution of the shaders in the four GPU
+# constant logs of the lighting sub-project's Task 1 (60 + 60 + 16 + 16 frames at the bridge and by the
+# trees; one value per register in all of them), mined into
+# out/native-evidence/shadows/task2_gpu_log_mask_registers.txt by task2_mine_gpu_log.py there.
+MASK_LITERALS = {
+    "0F99810F072BF0FC": {
+        248: _f32("412000003DAAAAABBF80000040000000"),      # 10, 1/12, -1, 2
+        249: _f32("000000003F8000003F0000003DCCCCCD"),      # 0, 1, 0.5, 0.1
+        250: _f32("BEF5C5F8BF190386BE47A9A03F445B8E"),
+        251: _f32("3EF265F1BF4AA39CBE5039AC3E3DE97D"),
+        252: _f32("BD96B11C3ED32DB2BF32276B3F01E6FF"),
+        253: _f32("BECFC654BF6EBFDB3F765BEA3F04FB12"),
+        254: _f32("BEA70542BEA4D5523F1EE73EBF64A3C6"),
+        255: _f32("BF5713AD3F657BC83EEA0DDC3D83F141"),
+    },
+    "1B4B5AE12EF270CA": {
+        254: _f32("3F0000003F80000000000000BF800000"),      # 0.5, 1, 0, -1
+        255: _f32("40000000000000000000000000000000"),      # 2, 0, 0, 0
+    },
+}
+MASK_FAMILIES = {
+    "mask-near": ["0F99810F072BF0FC"],                          # the near block alone, against mask_near
+    "mask-far": ["0F99810F072BF0FC", "1B4B5AE12EF270CA"],       # the far block alone, against mask_far
+    "mask": ["0F99810F072BF0FC", "1B4B5AE12EF270CA"],           # the whole shaders: mask_0f99, mask_1b4b
+}
+MASK_REGIMES = {"0F99810F072BF0FC": ("near only", "blend", "far only", "fade", "beyond"),
+                "1B4B5AE12EF270CA": ("not far", "far", "fade", "beyond")}
+_MASK_ALONE = {"mask-near": "near only", "mask-far": {"0F99810F072BF0FC": "far only", "1B4B5AE12EF270CA": "far"}}
+
+
+def mask_taps(lit):
+    """The twelve near taps (x, y) of 0F99... from its literal registers: the x of a tap and its y stand
+    in different registers (instr 33 to 50: one register's pair is multiplied by the rotation's first
+    term and negated second term, the other's is added times the second and first)."""
+    return [(lit[251][2], lit[254][2]), (lit[251][3], lit[254][3]), (lit[253][2], lit[250][2]), (lit[253][3], lit[250][3]),
+            (lit[252][2], lit[255][2]), (lit[252][3], lit[255][3]), (lit[255][0], lit[252][0]), (lit[255][1], lit[252][1]),
+            (lit[251][0], lit[250][0]), (lit[251][1], lit[250][1]), (lit[254][0], lit[253][0]), (lit[254][1], lit[253][1])]
+
+
+def _map_value(salt, slot, ix, iy):
+    """A fixed pseudo-random value in [0, 1) per (trial, texture, texel)."""
+    return random.Random(zlib.crc32(struct.pack("<qqqq", salt, slot, ix, iy))).random()
+
+
+class MaskCase:
+    """One trial of a mask shader: what the microcode gets (constants, registers, sampler, texture sizes),
+    the whole formula's arguments, the two cascades' terms alone (thunks), and which part of the shader
+    the trial reaches."""
+
+    def __init__(self, consts, regs, sampler, tex_size, args, near_alone, far_alone, regime, flags):
+        self.consts, self.regs, self.sampler, self.tex_size, self.args = consts, regs, sampler, tex_size, args
+        self.near_alone, self.far_alone, self.regime, self.flags = near_alone, far_alone, regime, flags
+
+
+def _mask_screen(rng):
+    """A random pixel of a 1120 x 720 target with its depth fetch: (pixel, scale and offset register,
+    depth, the screen point the shaders build, the depth sampler). The sampler answers only at the
+    coordinates the shaders must compute (the pixel's centre plus the offset); anywhere else it is NaN."""
+    px, py = (float(rng.randrange(1120)), float(rng.randrange(720))) if rng.random() < 0.5 else \
+        (rng.uniform(0, 1120), rng.uniform(0, 720))
+    ox, oy = (0.0, 0.0) if rng.random() < 0.5 else (rng.uniform(-0.5, 0.5), rng.uniform(-0.5, 0.5))
+    reg = [1 / 1120, 1 / 720, ox, oy]
+    depth = rng.uniform(0.05, 0.95)
+    eu, ev = (px + 0.5 + ox) / 1120, (py + 0.5 + oy) / 720
+
+    def depth_at(u, v):
+        return depth if abs(u - eu) <= 1e-9 and abs(v - ev) <= 1e-9 else NAN
+
+    screen = [(2 * px + 1 + 2 * ox) / 1120 - 1, 1 - (2 * py + 1 + 2 * oy) / 720, 1 - depth, 1.0]
+    return (px, py), reg, depth, screen, depth_at
+
+
+def _mask_cascade(rng, equal):
+    """Random rows of a cascade for the screen point: u and v anywhere, 1 - depth within (0, 1). `equal`:
+    the depth rows are constants, so the compared value 1 - depth is one exact number in the microcode
+    and in the formula, and the trial's map can hold that very number (the comparisons' equal case)."""
+    rows = [[rng.uniform(-0.2, 0.2) for _ in range(3)] + [rng.uniform(0.3, 0.7)] for _ in range(2)]
+    if equal:
+        rows += [[0.0, 0.0, 0.0, rng.choice([0.25, 0.5, 0.625])], [0.0, 0.0, 0.0, 1.0]]
+    else:
+        rows += [[rng.uniform(-0.1, 0.1) for _ in range(3)] + [rng.uniform(0.3, 0.7)],
+                 [rng.uniform(-0.1, 0.1) for _ in range(3)] + [rng.uniform(0.8, 1.3)]]
+    return rows
+
+
+def _mask_map(salt, slot, rows, equal):
+    """A depth map as a function of the texel: uniform in [0, 1), or in an `equal` trial the compared
+    value itself in half of the texels and an eighth to either side in the others."""
+    compared = 1.0 - rows[2][3]
+
+    def texel(ix, iy):
+        r = _map_value(salt, slot, ix, iy)
+        return (compared, compared, compared - 0.125, compared + 0.125)[int(r * 4)] if equal else r
+    return texel
+
+
+def _mask_0f99_case(rng, regime, literals, taps):
+    lit = {k: list(v) for k, v in literals.items()}
+    flags = set()
+    if rng.random() < 0.5:
+        # The form holds for any literal table: other offsets, reach, tap weight and slope. The 0, 1, 0.5,
+        # -1 and 2 of the arithmetic stay.
+        flags.add("random literals")
+        for reg in lit:
+            if reg >= 250:
+                lit[reg] = [rng.uniform(-1, 1) for _ in range(4)]
+        lit[248][0], lit[248][1], lit[249][3] = rng.uniform(5.0, 15.0), rng.uniform(0.05, 0.5), rng.uniform(0.05, 0.3)
+    reach = lit[248][0]
+    regime = regime or rng.choice(MASK_REGIMES["0F99810F072BF0FC"])
+    s0, s2 = rng.uniform(10, 30), rng.uniform(1, 4)
+    split = [s0, s0 + s2 + rng.uniform(5, 20), s2, rng.uniform(0.2, 0.8)]
+    lo, hi = {"near only": (0.5, s0), "blend": (s0, s0 + s2), "far only": (s0 + s2, split[1]),
+              "fade": (split[1], split[1] + reach), "beyond": (split[1] + reach, split[1] + reach + 20)}[regime]
+    d = rng.uniform(lo + 1e-3, hi - 1e-3)
+    pixel, c46, depth, screen, depth_at = _mask_screen(rng)
+    # Screen-to-world rows that put this pixel at distance d from the eye: random rows, then each of the
+    # first three shifted by a multiple of the fourth (which moves the divided point by that multiple).
+    eye = [rng.uniform(-100, 100) for _ in range(3)]
+    target = [e + d * x for e, x in zip(eye, unit(rng))]
+    row3 = [rng.uniform(-0.2, 0.2) for _ in range(3)] + [rng.uniform(0.8, 1.5)]
+    w = lf.dot(row3, screen)
+    to_world = []
+    for i in range(3):
+        row = [rng.uniform(-1, 1) for _ in range(4)]
+        shift = target[i] - lf.dot(row, screen) / w
+        to_world.append([a + shift * b for a, b in zip(row, row3)])
+    to_world.append(row3)
+    equal = rng.random() < 0.25
+    if equal:
+        flags.add("equal depth")
+    near_rows, far_rows = _mask_cascade(rng, equal), _mask_cascade(rng, equal)
+    c47 = [0.5, 0.5, 1 / 32, 1 / 32] if rng.random() < 0.5 else \
+        [rng.random(), rng.random(), rng.uniform(0.02, 0.05), rng.uniform(0.02, 0.05)]
+    radius = 2.5 / 1024 if rng.random() < 0.5 else rng.uniform(1.0, 4.0) / 1024
+    far_size = rng.choice([(1024, 1024), (1024, 1024), (512, 2048)])
+    salt = rng.getrandbits(31)
+    near_texel, far_texel = _mask_map(salt, 6, near_rows, equal), _mask_map(salt, 7, far_rows, equal)
+
+    def near_at(u, v):
+        return near_texel(math.floor(u * 1024), math.floor(v * 1024))
+
+    def rot_at(u, v):
+        ix, iy = math.floor(u * 64), math.floor(v * 64)
+        return (0.05 + 0.95 * _map_value(salt, 14, ix, iy), 0.05 + 0.95 * _map_value(salt, 15, ix, iy))
+
+    def sampler(slot, coords, attrs):
+        if slot == 13:
+            return [depth_at(*coords), 7.0, 7.0, 7.0]
+        if slot == 14:
+            return list(rot_at(*coords)) + [5.0, 5.0]
+        if slot == 6:
+            return [near_at(*coords), 3.0, 3.0, 3.0]
+        if slot == 7:
+            return [far_texel(*ue.point_texel(coords, far_size, attrs)), 3.0, 3.0, 3.0]
+        raise KeyError(f"mask shader fetch tf{slot}")
+
+    consts = {12: split, 31: eye + [rng.uniform(0.5, 2.0)], 46: c46, 47: c47,
+              77: [radius, rng.random(), rng.random(), rng.random()]}
+    for i in range(4):
+        consts[36 + i], consts[40 + i], consts[116 + i] = near_rows[i], far_rows[i], to_world[i]
+    consts.update(lit)
+    # The position register is read through its absolute value: either sign, and unread components.
+    regs = {0: [rng.choice([-1, 1]) * pixel[0], rng.choice([-1, 1]) * pixel[1], rng.random(), rng.random()]}
+    offsets = taps(lit)
+    args = dict(pixel=pixel, sample_depth=depth_at, depth_scale=c46[:2], depth_offset=c46[2:], screen_to_world=to_world,
+                eye=eye, split=split, near_rows=near_rows, far_rows=far_rows, sample_rot=rot_at, rot_offset=c47[:2],
+                rot_scale=c47[2:], offsets=offsets, radius=radius, sample_near=near_at, sample_far_texel=far_texel,
+                far_size=far_size, tap_weight=lit[248][1], far_reach=reach, slope=lit[249][3])
+
+    def near_alone():
+        t = rot_at((pixel[0] + c47[0]) * c47[2], (pixel[1] + c47[1]) * c47[3])
+        point = lf.mask_screen_point(pixel, depth, c46[:2], c46[2:])
+        return lf.mask_near(point, near_rows, near_at, (2 * t[0] - 1, 2 * t[1] - 1), offsets, radius, lit[248][1]), 1.0
+
+    def far_alone():
+        return lf.mask_far(lf.mask_screen_point(pixel, depth, c46[:2], c46[2:]), far_rows, far_texel, far_size), 1.0
+
+    return MaskCase(consts, regs, sampler, {7: far_size}, args, near_alone, far_alone, regime, flags)
+
+
+def _mask_1b4b_case(rng, regime, literals, taps):
+    regime = regime or rng.choice(MASK_REGIMES["1B4B5AE12EF270CA"])
+    start = rng.uniform(0.3, 0.6)
+    fade_start = start + rng.uniform(0.05, 0.2)
+    width = rng.uniform(0.02, 0.1)
+    lo, hi = {"not far": (0.02, start), "far": (start, fade_start), "fade": (fade_start, fade_start + width),
+              "beyond": (fade_start + width, 0.98)}[regime]
+    pixel, c31, _, _, _ = _mask_screen(rng)
+    depth = 1.0 - rng.uniform(lo + 1e-4, hi - 1e-4)
+    eu, ev = (pixel[0] + 0.5 + c31[2]) / 1120, (pixel[1] + 0.5 + c31[3]) / 720
+
+    def depth_at(u, v):
+        return depth if abs(u - eu) <= 1e-9 and abs(v - ev) <= 1e-9 else NAN
+
+    equal = rng.random() < 0.25
+    flags = {"equal depth"} if equal else set()
+    far_rows = _mask_cascade(rng, equal)
+    far_size = rng.choice([(1024, 1024), (1024, 1024), (512, 2048)])
+    far_texel = _mask_map(rng.getrandbits(31), 7, far_rows, equal)
+    fade_to = rng.uniform(0.2, 0.8)
+
+    def sampler(slot, coords, attrs):
+        if slot == 13:
+            return [depth_at(*coords), 7.0, 7.0, 7.0]
+        if slot == 7:
+            return [far_texel(*ue.point_texel(coords, far_size, attrs)), 3.0, 3.0, 3.0]
+        raise KeyError(f"mask shader fetch tf{slot}")
+
+    consts = {12: [rng.uniform(10, 30), rng.uniform(30, 50), rng.uniform(1, 4), fade_to], 31: c31,
+              46: [start, rng.random(), rng.random(), rng.random()], 47: [fade_start, rng.random(), rng.random(), rng.random()],
+              77: [width, rng.random(), rng.random(), rng.random()]}
+    for i in range(4):
+        consts[40 + i] = far_rows[i]
+    consts.update({k: list(v) for k, v in literals.items()})
+    # Its vertex shader has one interpolator (r0, which the shader overwrites before reading); the
+    # position is r1.
+    regs = {0: [rng.random() for _ in range(4)],
+            1: [rng.choice([-1, 1]) * pixel[0], rng.choice([-1, 1]) * pixel[1], rng.random(), rng.random()]}
+    args = dict(pixel=pixel, sample_depth=depth_at, depth_scale=c31[:2], depth_offset=c31[2:], far_rows=far_rows,
+                sample_far_texel=far_texel, far_size=far_size, start=start, fade_start=fade_start, fade_width=width,
+                fade_to=fade_to)
+
+    def far_alone():
+        return lf.mask_far(lf.mask_screen_point(pixel, depth, c31[:2], c31[2:]), far_rows, far_texel, far_size), 1.0
+
+    return MaskCase(consts, regs, sampler, {7: far_size}, args, None, far_alone, regime, flags)
+
+
+_MASK_CASES = {"0F99810F072BF0FC": _mask_0f99_case, "1B4B5AE12EF270CA": _mask_1b4b_case}
+
+
+def _mask_cases(family, shader, trials, seed, literals, taps):
+    if shader not in MASK_FAMILIES.get(family, ()):
+        raise KeyError(f"{shader} is not a shader of family {family}")
+    regime = _MASK_ALONE.get(family)
+    if isinstance(regime, dict):
+        regime = regime[shader]
+    rng = random.Random(seed)
+    for _ in range(trials):
+        yield _MASK_CASES[shader](rng, regime, literals or MASK_LITERALS[shader], taps or mask_taps)
+
+
+def mask_regimes(shader, trials=200, seed=1, family="mask", literals=None, taps=None):
+    """Which parts of a mask shader the trials of check_mask reach: {name: trials}, the regimes of
+    MASK_REGIMES and the flags "equal depth" and "random literals"."""
+    seen = {}
+    for case in _mask_cases(family, shader, trials, seed, literals, taps):
+        for name in [case.regime] + sorted(case.flags):
+            seen[name] = seen.get(name, 0) + 1
+    return seen
+
+
+def check_mask(family, shader, trials=200, seed=1, dumps=DUMPS, tol=TOLERANCE, text=None, literals=None, taps=None,
+               formula=None):
+    """Runs `trials` random pixels of a mask shader: the microcode's oC0 (the mask in x, y and z; the
+    alpha) against the formulas of light_formulas.py.
+        mask       the whole shader over every regime, against mask_0f99 / mask_1b4b (or `formula`)
+        mask-near  0F99... where only its near block runs (d < split[0]), against mask_near alone
+        mask-far   where only the far block decides (0F99...: split[0] + split[2] < d < split[1]; 1B4B...:
+                   beyond its start depth and before its fade), against mask_far alone
+    A trial: a random pixel and depth; screen-to-world rows that put it at a chosen distance; random
+    cascade rows; procedural depth maps and rotation texture (a value per texel); for 0F99... in half of
+    the trials a random literal table (`literals`, with `taps` the function that pairs its offsets) and
+    in a quarter maps that hold the compared depth itself. `text`: the shader text in the place of the
+    dump (the tests' hand-written shader). Agreement as in check(), over all four components."""
+    text = text if text is not None else ue.load(dumps, shader, "frag")
+    res = Result()
+    for k, case in enumerate(_mask_cases(family, shader, trials, seed, literals, taps)):
+        m = ue.Machine(text, case.consts, case.sampler, regs={r: list(v) for r, v in case.regs.items()},
+                       tex_size=case.tex_size)
+        got = list(m.run()["oC0"])
+        if family == "mask-near":
+            value, alpha = case.near_alone()
+        elif family == "mask-far":
+            value, alpha = case.far_alone()
+        else:
+            out = (formula or (lf.mask_0f99 if case.near_alone else lf.mask_1b4b))(**case.args)
+            value, alpha = out if isinstance(out, tuple) else (out, 1.0)
+        want = [value, value, value, alpha]
+        res.trials += 1
+        finite = all(math.isfinite(x) for x in got) and all(math.isfinite(x) for x in want)
+        err = max(abs(g - w) / max(1e-6, abs(g), abs(w)) for g, w in zip(got, want)) if finite else math.inf
+        if finite:
+            res.worst = max(res.worst, err)
+        if err <= tol:
+            res.agree += 1
+        elif res.first_bad is None:
+            res.first_bad = (k, got, want)
+    return res
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--multi-sun", action="store_true",
                     help="the two- and four-light pairs of the terrain, object, trunk, plant and leaf families with the sun "
                          "in slot 1 to 3 and dark lanterns, against their family's one-light function")
-    ap.add_argument("--all", action="store_true", help="every pair of FAMILIES")
-    ap.add_argument("--family", choices=sorted(FAMILIES))
+    ap.add_argument("--all", action="store_true", help="every pair of FAMILIES, then the mask shaders (MASK_FAMILIES)")
+    ap.add_argument("--family", choices=sorted(FAMILIES) + sorted(MASK_FAMILIES))
     ap.add_argument("--shader", help="with --family: only this pixel shader (16 hex digits)")
     ap.add_argument("--trials", type=int, default=200)
     ap.add_argument("--seed", type=int, default=1)
@@ -1004,6 +1306,9 @@ def main(argv=None):
         for family, pairs in FAMILIES.items():
             for ps, vs in pairs:
                 print(f"{family}: ps {ps} vs {vs}")
+        for family, shaders in MASK_FAMILIES.items():
+            for ps in shaders:
+                print(f"{family}: ps {ps}")
         return 0
     if not args.all and not args.family and not args.multi_sun:
         ap.print_usage(sys.stderr)
@@ -1019,7 +1324,9 @@ def main(argv=None):
     want = args.shader.upper().replace("0X", "") if args.shader else None
     todo = [(f, ps, vs) for f, pairs in FAMILIES.items() for ps, vs in pairs
             if (args.all or f == args.family) and (want is None or ps == want)]
-    if not todo:
+    masks = [(f, ps) for f, shaders in MASK_FAMILIES.items() for ps in shaders
+             if (args.all or f == args.family) and (want is None or ps == want)]
+    if not todo and not masks:
         print("no pair matches", file=sys.stderr)
         return 2
     bad = 0
@@ -1031,8 +1338,21 @@ def main(argv=None):
             if res.first_bad:
                 k, got, want_ = res.first_bad
                 print(f"    first disagreement, trial {k}: microcode {got} formula {want_}")
-    print(f"{len(todo) - bad} of {len(todo)} pairs agree in every trial ({args.trials} trials each, tolerance {TOLERANCE:g} relative)")
-    return 0 if bad == 0 else 1
+    if todo:
+        print(f"{len(todo) - bad} of {len(todo)} pairs agree in every trial ({args.trials} trials each, tolerance {TOLERANCE:g} relative)")
+    bad_masks = 0
+    for family, ps in masks:
+        res = check_mask(family, ps, args.trials, args.seed, dumps=args.dumps)
+        print(f"{family}: ps {ps}: {res.line()}")
+        if not res.ok:
+            bad_masks += 1
+            if res.first_bad:
+                k, got, want_ = res.first_bad
+                print(f"    first disagreement, trial {k}: microcode {got} formula {want_}")
+    if masks:
+        print(f"{len(masks) - bad_masks} of {len(masks)} mask checks agree in every trial ({args.trials} trials each, "
+              f"tolerance {TOLERANCE:g} relative)")
+    return 0 if bad + bad_masks == 0 else 1
 
 
 if __name__ == "__main__":

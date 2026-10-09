@@ -46,6 +46,10 @@ Guards (review focus 2): a zero-length or non-finite vector normalises to (0, 0,
 zero or non-finite base is 0, a non-finite scalar counts as 0, and every function returns finite
 numbers for any input. The microcode has no such guards (rsq(0) is infinity there); light_check.py
 never feeds it those inputs and counts a non-finite microcode result as a failed trial.
+
+The screen mask the families read is written by two pixel shaders of its own; their arithmetic is the
+last part of this file (mask_near, mask_far, mask_combine, mask_0f99, mask_1b4b; the shadows
+sub-project).
 """
 import math
 
@@ -281,3 +285,203 @@ def lit_object(A, vcolour, tint, tint_pow, add, floor, t, n_dot_sun, sun_col, c2
     amb = _ambient(vcolour, tint, tint_pow, add, floor, t)
     sun = _sun(sun_col, n_dot_sun, sun_gate)
     return [_finite(_finite(A[i]) * (_finite(c27w) * amb[i] + sun[i]) * _finite(c49[i])) for i in range(3)]
+
+
+# --- the screen mask (shadows sub-project) --------------------------------------------------------
+#
+# The game writes one screen-size mask (1 = lit) with two pixel shaders before the colour draws; the lit
+# families above read it as `mask`. The functions below are those two shaders, read from the dumps and
+# checked against them by light_check.py --family mask / mask-near / mask-far
+# (docs/native-renderer/lighting-formulas.md, "Shadows", has the instruction numbers and the inputs).
+#
+# A cascade's rows are four four-component rows applied to a homogeneous point P: (u, v, depth) =
+# (rows[0] . P, rows[1] . P, rows[2] . P) / (rows[3] . P). The game hands the mask shaders rows for the
+# SCREEN point (mask_screen_point): its pixel registers c36..c39 (near) and c40..c43 (far) at the mask
+# draws. With the world-to-map rows and the world position (x, y, z, 1) the functions give the same value
+# (the screen rows are the world rows times the screen-to-world rows; tests/test_light_check.py).
+#
+# The maps hold 1 - depth of the surface nearest the light (reversed range): a point is lit where its own
+# 1 - depth is beyond the map's value. The near cascade compares with `>`, the far one with `>=`.
+#
+# Guards (review focus 2): a projection whose w is zero or whose u, v or depth is not finite gives 1 for
+# that cascade (no shadow from a map that cannot be addressed) without a sample being taken; a tap whose
+# coordinates are not finite counts as lit; every function returns a finite number for any input. The
+# microcode has no such guards; light_check.py never feeds it those inputs.
+
+# The twelve near taps of shader 0F99810F072BF0FC, in units of the kernel radius: its literal registers
+# c250..c255 as the emulated GPU held them at every execution of the shader in four logs (single precision,
+# shown exactly; out/native-evidence/shadows/task2_gpu_log_mask_registers.txt), paired as the microcode
+# pairs them (light_check.mask_taps). They are the 12-tap Poisson disc of the published samples.
+MASK_NEAR_TAPS = (
+    (-0.20334500074386597, 0.6207159757614136),
+    (0.18546099960803986, -0.893123984336853),
+    (0.9623399972915649, -0.19498300552368164),
+    (0.5194560289382935, 0.7670220136642456),
+    (-0.6959139704704285, 0.45713698863983154),
+    (0.5074309706687927, 0.06442499905824661),
+    (-0.8401439785957336, -0.07357999682426453),
+    (0.8964200019836426, 0.41245800256729126),
+    (0.4734340012073517, -0.4800260066986084),
+    (-0.7915589809417725, -0.5977100133895874),
+    (-0.32621198892593384, -0.40580999851226807),
+    (-0.32194000482559204, -0.9326149821281433),
+)
+
+
+def mask_rotate(offset, rot):
+    """A tap offset (x, y) turned by the pixel's rotation terms (a, b): (a x + b y, a y - b x). (a, b) =
+    2 * texel.xy - 1 of the rotation texture (mask_0f99); nothing normalises it."""
+    return (rot[0] * offset[0] + rot[1] * offset[1], rot[0] * offset[1] - rot[1] * offset[0])
+
+
+def _mask_project(rows, P):
+    """(u, v, depth) of P in a cascade, or None when w is zero or a result is not finite."""
+    w = dot(rows[3], P)
+    if not math.isfinite(w) or w == 0.0:
+        return None
+    out = [dot(rows[i], P) / w for i in range(3)]
+    return out if all(math.isfinite(x) for x in out) else None
+
+
+def mask_near(P, near_rows, sample_near, rot, offsets, radius, tap_weight=None):
+    """The near cascade's term: the share of taps that are lit.
+        (u, v, depth) = near_rows . P / w
+        tap i at (u, v) + radius * mask_rotate(offsets[i], rot); lit where 1 - depth > sample_near(tap)
+        result = lit taps * tap_weight
+    sample_near(u, v): the near map's value at normalised coordinates; offsets: MASK_NEAR_TAPS; radius:
+    pixel c77.x at the draw, in normalised map units (2.5 texels of 1024); tap_weight: the shader's literal
+    1 / 12 (c248.y), by default 1 / len(offsets). Not clamped."""
+    weight = (1.0 / len(offsets) if offsets else 0.0) if tap_weight is None else _finite(tap_weight)
+    p = _mask_project(near_rows, P)
+    if p is None or not offsets:
+        return 1.0
+    u, v, depth = p
+    lit = 0
+    for offset in offsets:
+        ox, oy = mask_rotate(offset, rot)
+        tu, tv = u + radius * ox, v + radius * oy
+        if not (math.isfinite(tu) and math.isfinite(tv)) or 1.0 - depth > sample_near(tu, tv):
+            lit += 1
+    return _finite(lit * weight)
+
+
+def mask_far(P, far_rows, sample_far_texel, size):
+    """The far cascade's term: the linear filter of four lit / shadowed texels.
+        (u, v, depth) = far_rows . P / w;  x = u * width, y = v * height
+        texels (floor(x) - 1 .. floor(x)) x (floor(y) - 1 .. floor(y)), each lit where
+        1 - depth >= sample_far_texel(ix, iy); weights frac(x) and frac(y) towards the higher texel.
+    sample_far_texel(ix, iy): the far map's texel (integers; the caller clamps); size: (width, height) of
+    the map in texels, 1024 x 1024 in the game. In the microcode these are four point fetches at texel
+    offsets (-1, -1), (0, -1), (-1, 0), (0, 0) and getWeights2D with offsets of -0.5."""
+    try:
+        width, height = float(size[0]), float(size[1])
+    except (TypeError, ValueError, IndexError):
+        return 1.0
+    if not (math.isfinite(width) and math.isfinite(height) and width > 0.0 and height > 0.0):
+        return 1.0
+    p = _mask_project(far_rows, P)
+    if p is None:
+        return 1.0
+    x, y, depth = p[0] * width, p[1] * height, p[2]
+    if not (abs(x) < 2.0 ** 31 and abs(y) < 2.0 ** 31):
+        return 1.0
+    ix, iy = math.floor(x), math.floor(y)
+    fx, fy = x - ix, y - iy
+
+    def lit(dx, dy):
+        return 1.0 if 1.0 - depth >= sample_far_texel(ix + dx, iy + dy) else 0.0
+
+    return _finite(fx * fy * lit(0, 0) + (1.0 - fx) * fy * lit(-1, 0) + (1.0 - fx) * (1.0 - fy) * lit(-1, -1)
+                   + fx * (1.0 - fy) * lit(0, -1))
+
+
+def mask_combine(d, near, far, split, slope):
+    """The two cascades and the fade:
+        m = lerp(near, far, sat((d - split[0]) / split[2]));  result = lerp(m, split[3], sat(slope * (d - split[1])))
+    d: the distance of the surface from the eye; split: pixel c12 (20, 35, 2, 0.46 to 0.49 in the logs): the
+    near cascade's reach, the far cascade's, the width of the blend, and the value beyond the shadow
+    distance, which is NOT 1; slope: the shader's literal 0.1 (c249.w). A blend width that is not positive is
+    a step at split[0]."""
+    s = [_finite(x) for x in split]
+    slope, near, far = _finite(slope), _finite(near), _finite(far)
+    if d != d:
+        d = 0.0
+    if s[2] > 0.0:
+        w = sat((d - s[0]) / s[2])
+    else:
+        w = 1.0 if d > s[0] else 0.0
+    m = near + w * (far - near)
+    fade = sat(slope * (d - s[1]))
+    return _finite(m + fade * (s[3] - m))
+
+
+def mask_depth_uv(pixel, scale, offset):
+    """Where the mask shaders read the scene depth: ((|px| + 0.5 + offset.x) * scale.x, the same in y).
+    pixel: the position register's xy (the pixel's corner); scale: 1 / the target's size; offset: (0, 0)
+    in the logs."""
+    return ((abs(pixel[0]) + (0.5 + offset[0])) * scale[0], (abs(pixel[1]) + (0.5 + offset[1])) * scale[1])
+
+
+def mask_screen_point(pixel, depth, scale, offset):
+    """The homogeneous screen point the mask shaders apply their rows to: (X, -Y, 1 - depth, 1) with
+    X = (2 |px| + 1 + 2 offset.x) * scale.x - 1 and Y likewise: the pixel's centre in -1..1, y up, and the
+    depth turned to 0 at the near plane (the depth target holds the reversed value)."""
+    x = (2.0 * abs(pixel[0]) + (1.0 + 2.0 * offset[0])) * scale[0] - 1.0
+    y = (2.0 * abs(pixel[1]) + (1.0 + 2.0 * offset[1])) * scale[1] - 1.0
+    return [x, -y, 1.0 - depth, 1.0]
+
+
+def mask_0f99(*, pixel, sample_depth, depth_scale, depth_offset, screen_to_world, eye, split, near_rows, far_rows,
+              sample_rot, rot_offset, rot_scale, offsets, radius, sample_near, sample_far_texel, far_size,
+              tap_weight=None, far_reach=10.0, slope=0.1):
+    """Pixel shader 0F99810F072BF0FC, the whole mask of a pixel, branches as the microcode takes them:
+        depth = sample_depth(mask_depth_uv(pixel));  S = mask_screen_point(pixel, depth)
+        P = screen_to_world . S / w;  d = |P - eye|
+        near = mask_near(S, ...) where d < split[0] + split[2], else 0
+        far  = mask_far(S, ...)  where split[0] < d < split[1] + far_reach, else 0
+        result = mask_combine(d, near, far, split, slope)
+    Registers at the draw: depth_scale, depth_offset c46.xy, c46.zw; screen_to_world c116..c119; eye
+    c31.xyz; split c12; near_rows c36..c39 and far_rows c40..c43 (for the screen point); the rotation texel
+    is sample_rot((|px| + rot_offset.x) * rot_scale.x, ...) with c47.xy, c47.zw, and (a, b) = 2 * texel.xy
+    - 1; radius c77.x; tap_weight, far_reach and slope the literals c248.y, c248.x, c249.w (1 / 12, 10,
+    0.1). A pixel without a finite world position gives split[3], as one beyond the shadow distance."""
+    s = [_finite(x) for x in split]
+    u, v = mask_depth_uv(pixel, depth_scale, depth_offset)
+    S = mask_screen_point(pixel, sample_depth(u, v), depth_scale, depth_offset)
+    world = _mask_project(screen_to_world, S)
+    if world is None:
+        return s[3]
+    d = math.sqrt(sum((world[i] - eye[i]) * (world[i] - eye[i]) for i in range(3)))
+    if not math.isfinite(d):
+        return s[3]
+    near = far = 0.0
+    if s[0] + s[2] > d:
+        texel = sample_rot((abs(pixel[0]) + rot_offset[0]) * rot_scale[0], (abs(pixel[1]) + rot_offset[1]) * rot_scale[1])
+        rot = (2.0 * texel[0] - 1.0, 2.0 * texel[1] - 1.0)
+        near = mask_near(S, near_rows, sample_near, rot, offsets, radius, tap_weight)
+    if d > s[0] and s[1] + _finite(far_reach) > d:
+        far = mask_far(S, far_rows, sample_far_texel, far_size)
+    return mask_combine(d, near, far, s, slope)
+
+
+def mask_1b4b(*, pixel, sample_depth, depth_scale, depth_offset, far_rows, sample_far_texel, far_size, start,
+              fade_start, fade_width, fade_to):
+    """Pixel shader 1B4B5AE12EF270CA, the far cascade alone for distant pixels: (value, alpha).
+        depth = sample_depth(mask_depth_uv(pixel));  z = 1 - depth
+        z <= start:  (fade_to, 0)
+        else:        (lerp(mask_far(S, ...), fade_to, sat((z - fade_start) / fade_width)), 1)
+    It measures by the depth value where 0F99... measures by distance. Registers at the draw: depth_scale,
+    depth_offset c31.xy, c31.zw; far_rows c40..c43; start c46.x; fade_start c47.x; fade_width c77.x; fade_to
+    c12.w. A fade width of zero is a step at fade_start."""
+    fade_to = _finite(fade_to)
+    u, v = mask_depth_uv(pixel, depth_scale, depth_offset)
+    depth = sample_depth(u, v)
+    if not ((1.0 - depth) - start > 0.0):
+        return fade_to, 0.0
+    far = mask_far(mask_screen_point(pixel, depth, depth_scale, depth_offset), far_rows, sample_far_texel, far_size)
+    t = (1.0 - fade_start) - depth
+    if math.isfinite(fade_width) and fade_width != 0.0:
+        fade = sat(t * (1.0 / fade_width))
+    else:
+        fade = 1.0 if t > 0.0 else 0.0
+    return _finite(far + fade * (fade_to - far)), 1.0

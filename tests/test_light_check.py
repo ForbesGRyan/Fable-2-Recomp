@@ -1060,5 +1060,583 @@ class CommandLineWithoutDumps(unittest.TestCase):
         self.assertEqual(lc.tex_seed(3, (0.25, 0.5)), 3875375324)
 
 
+# --- the screen mask (shadows sub-project, plan Task 2) -------------------------------------------
+
+# A pixel shader in the dump's syntax with the form of the mask shader 0F99810F072BF0FC and two near taps
+# in the place of twelve (the offsets (c254.x, c253.x) and (c254.y, c253.y), the tap weight c248.y): the
+# depth fetch and the world position, the distance, the near block under its predicate, the far block of
+# four offset fetches with getWeights2D, the blend and the fade. The far block and the output are the real
+# shader's lines.
+MASK_SYNTHETIC = """/*    0.0 */       exec
+/*   11   */          add r1, c46.zwzw, c249.zzyy
+              +       maxs r3.___w, c249.yy
+/*   12   */          add r1.__zw, r1.zzzw, c46.zzzw
+/*   13   */          add r1.xy__, r1.xyyy, r_abs[0].xyyy
+/*   14   */          mad r1.__zw, r_abs[0].xxxy, c248.wwww, r1.zzzw
+/*   15   */          mul r1, r1.xywz, c46.xyyx
+/*   16   */          tfetch2D r0.__x_, r1.xy, tf13, FetchValidOnly=false
+/*    0.1 */       alloc colors
+/*    1.0 */       exec
+/*   17   */          add r2.x_z_, r1.wzzz, c248.zzzz
+              +       subsc r2._y__, c249.y, r0.z
+/*   18   */          cndeq r3.xyz_, c249.xyyy, -r2.zzzz, r2.yyxx
+/*   19   */          dp4 r1.x___, c116.zxyw, r3.yzxw
+/*   20   */          dp4 r1._y__, c117.zxyw, r3.yzxw
+/*   21   */          dp4 r0.___w, c119.zxyw, r3.yzxw
+/*   22   */          dp4 r1.__z_, c118.zxyw, r3.yzxw
+              +       rcp r0.___w, r0.w
+/*    1.1 */       exec    // PredicateClean=false
+/*   23   */          mad r1.xyz_, r1.zyxx, r0.wwww, -c31.zyxx
+/*   24   */          dp3 r0.___w, r1.xzyy, r1.xzyy
+/*   25   */          add r1.x___, c12.xxxx, c12.zzzz
+              +       sqrt r0.___w, r_abs[0].w
+/*   26   */          sgt r1.x___, r1.xxxx, r0.wwww
+/*   27   */          sgt r3.xy__, -r_abs[0].xxxx, c249.xxxx
+              +       setp_ne r0._, r1.x
+/*    2.0 */ (!p0) jmp L15
+/*    2.1 */  (p0) exec
+/*   28   */     (p0) add r0.xy__, r_abs[0].xyyy, c47.xyyy
+/*   29   */     (p0) mul r0.xy__, r0.yxxx, c47.wzzz
+/*   30   */     (p0) tfetch2D r0.xy__, r0.yx, tf14, FetchValidOnly=false
+/*   31   */          serialize
+                 (p0) cndeq r9.xyz_, c249.xxyy, r2.yxxx, -r2.zzzz
+/*   32   */     (p0) mad r0.xy__, r0.xyyy, c248.wwww, c248.zzzz
+/*   33   */     (p0) mul r1.x_z_, r0.xxxx, c254.xyyy
+              +  (p0) maxs r9.___w, c249.yy
+/*   34   */     (p0) mul r1._y_w, -r0.yyyy, c254.xxyy
+/*   35   */     (p0) dp4 r3._y__, c36.zxyw, r9
+/*   36   */     (p0) dp4 r3.__z_, c37.zxyw, r9
+/*   37   */     (p0) dp4 r3.___w, c38.zxyw, r9
+/*   38   */     (p0) mad r1, r0.yxyx, c253.xxyy, r1
+/*   39   */     (p0) dp4 r0.x___, c39.zxyw, r9
+/*    3.0 */  (p0) exec
+/*   40   */     (p0) mul r1, r1, c77.xxxx
+              +  (p0) rcp r0.x___, r0.x
+/*   41   */     (p0) mad r1, r3.yzyz, r0.xxxx, r1
+/*   42   */     (p0) tfetch2D r4.x___, r1.xy, tf6
+/*   43   */     (p0) tfetch2D r4._x__, r1.zw, tf6
+/*   44   */          serialize
+                 (p0) mad r0.x___, -r3.wwww, r0.xxxx, c249.yyyy
+/*   45   */     (p0) sgt r4.xy__, r0.xxxx, r4.xyyy
+/*   46   */     (p0) add r0.x___, r4.xxxx, r4.yyyy
+/*   47   */     (p0) mulsc r3._y__, c248.y, r0.x
+                label L15
+/*    7.1 */       exec    // PredicateClean=false
+/*   87   */          add r0.x___, c12.yyyy, c248.xxxx
+/*   88   */          sgt r0._y__, r0.wwww, c12.xxxx
+/*   89   */          sgt r0.x___, r0.xxxx, r0.wwww
+/*   90   */          mul r0.x___, r0.yyyy, r0.xxxx
+/*   91   */          setp_ne r0._, r0.x
+/*    8.0 */ (!p0) jmp L20
+/*    8.1 */  (p0) exec
+/*   92   */     (p0) maxs r4.___w, c249.yy
+/*   93   */     (p0) cndeq r4.xyz_, c249.xxyy, r2.yxxx, -r2.zzzz
+/*   94   */     (p0) dp4 r1.x___, c40.zxyw, r4
+/*   95   */     (p0) dp4 r1._y__, c41.zxyw, r4
+/*   96   */     (p0) dp4 r0.x___, c43.zxyw, r4
+/*   97   */     (p0) dp4 r1.__z_, c42.zxyw, r4
+              +  (p0) rcp r0.x___, r0.x
+/*    9.0 */  (p0) exec
+/*   98   */     (p0) mul r0.xyz_, r1.zxyy, r0.xxxx
+/*   99   */     (p0) tfetch2D r1.x___, r0.yz, tf7, OffsetX=-1, OffsetY=-1
+/*  100   */     (p0) tfetch2D r1._x__, r0.yz, tf7, OffsetY=-1
+/*  101   */     (p0) tfetch2D r1.__x_, r0.yz, tf7, OffsetX=-1
+/*  102   */     (p0) tfetch2D r1.___x, r0.yz, tf7
+/*  103   */     (p0) getWeights2D r2.__xy, r0.yz, tf7, MagFilter=linear, MinFilter=linear, OffsetX=-0.5, OffsetY=-0.5
+/*    9.1 */  (p0) exec
+/*  104   */          serialize
+                 (p0) add r2.xy__, -r2.zwww, c249.yyyy
+/*  105   */     (p0) mul r2, r2.xyxz, r2.yzww
+              +  (p0) subsc r0.x___, c249.y, r0.x
+/*  106   */     (p0) sge r1, r0.xxxx, r1
+/*  107   */     (p0) dp4 r3.x___, r2.wzxy, r1.wzxy
+                label L20
+/*   10.0 */       exece
+/*  108   */          add r0.__z_, r3.xxxx, -r3.yyyy
+/*  109   */          add r0.xy__, r0.wwww, -c12.yxxx
+              +       rcp r0.___w, c12.z
+/*  110   */          mul_sat r0.___w, r0.yyyy, r0.wwww
+/*  111   */          mad r0.__z_, r0.wwww, r0.zzzz, r3.yyyy
+/*  112   */          add r0.___w, -r0.zzzz, c12.wwww
+              +       mulsc_sat r0.x___, c249.w, r0.x
+/*  113   */          mad oC0.xyz1, r0.xxxx, r0.wwww, r0.zzzz
+/*   10.1 */       cnop
+"""
+MASK_SYNTHETIC_LITERALS = {248: [10.0, 0.5, -1.0, 2.0], 249: [0.0, 1.0, 0.5, 0.1],
+                           253: [-0.40581, -0.932615, 0.0, 0.0], 254: [-0.326212, -0.32194, 0.0, 0.0]}
+
+
+def synthetic_taps(lit):
+    return [(lit[254][0], lit[253][0]), (lit[254][1], lit[253][1])]
+
+
+IDENTITY_ROWS = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+
+
+def near_with(compare):
+    """mask_near with another comparison (the reference's is `>`: lit where 1 - depth is beyond the map)."""
+    def near(P, near_rows, sample_near, rot, offsets, radius, tap_weight=None):
+        w = lf.dot(near_rows[3], P)
+        u, v, z = (lf.dot(near_rows[i], P) / w for i in range(3))
+        lit = 0
+        for offset in offsets:
+            ox, oy = lf.mask_rotate(offset, rot)
+            lit += compare(1.0 - z, sample_near(u + radius * ox, v + radius * oy))
+        return lit * (1.0 / len(offsets) if tap_weight is None else tap_weight)
+    return near
+
+
+def far_with(compare, taps=((0, 0, "11"), (-1, 0, "01"), (-1, -1, "00"), (0, -1, "10")), shift=0.0):
+    """mask_far with another comparison (the reference's is `>=`), other texels, or the weights of another
+    fraction (the reference's is frac(u * size); `shift` is added before the fraction is taken)."""
+    def far(P, far_rows, sample_far_texel, size):
+        w = lf.dot(far_rows[3], P)
+        u, v, z = (lf.dot(far_rows[i], P) / w for i in range(3))
+        x, y = u * size[0], v * size[1]
+        ix, iy = math.floor(x), math.floor(y)
+        fx, fy = (x + shift) - math.floor(x + shift), (y + shift) - math.floor(y + shift)
+        weight = {"11": fx * fy, "01": (1 - fx) * fy, "00": (1 - fx) * (1 - fy), "10": fx * (1 - fy)}
+        return sum(weight[k] * compare(1.0 - z, sample_far_texel(ix + dx, iy + dy)) for dx, dy, k in taps)
+    return far
+
+
+def fade_to_one(d, near, far, split, slope):
+    return REAL_MASK_COMBINE(d, near, far, list(split[:3]) + [1.0], slope)
+
+
+REAL_MASK_COMBINE = lf.mask_combine
+GT, GE, LT = (lambda a, b: float(a > b)), (lambda a, b: float(a >= b)), (lambda a, b: float(a < b))
+# Wrong forms of the mask arithmetic, each a (function of light_formulas, replacement): the two the plan
+# names first (a compare direction flipped; the fade to 1 instead of split[3]), then the others a port could
+# plausibly make. "tap offset wrong" is WRONG_TAPS below, since the offsets are the checker's input.
+WRONG_MASK = {
+    "near compare reversed": ("mask_near", near_with(LT)),
+    "near compare inclusive": ("mask_near", near_with(GE)),
+    "far compare reversed": ("mask_far", far_with(LT)),
+    "far compare strict": ("mask_far", far_with(GT)),
+    "far taps at +1 in the place of -1": ("mask_far", far_with(GE, taps=((1, 1, "11"), (0, 1, "01"), (0, 0, "00"), (1, 0, "10")))),
+    "far weights of frac(x - 0.5)": ("mask_far", far_with(GE, shift=-0.5)),
+    "far weights exchanged": ("mask_far", far_with(GE, taps=((0, 0, "00"), (-1, 0, "10"), (-1, -1, "11"), (0, -1, "01")))),
+    "fade to 1": ("mask_combine", fade_to_one),
+    "blend over split[1]": ("mask_combine", lambda d, near, far, split, slope: REAL_MASK_COMBINE(
+        d, near, far, [split[0], split[1], split[1], split[3]], slope)),
+    "rotation reversed": ("mask_rotate", lambda offset, rot: (rot[0] * offset[0] - rot[1] * offset[1],
+                                                               rot[0] * offset[1] + rot[1] * offset[0])),
+    "rotation dropped": ("mask_rotate", lambda offset, rot: tuple(offset)),
+}
+NEAR_ONLY = ("near compare reversed", "near compare inclusive", "rotation reversed", "rotation dropped")
+
+
+class MaskFormulas(unittest.TestCase):
+    """The mask functions on hand-computed numbers and on synthetic depth maps; no microcode."""
+
+    def test_combine_by_hand(self):
+        split = [20.0, 35.0, 2.0, 0.5]
+        # d = 10: before the blend, the near term. d = 21: half way through the 2 units: (0.25 + 0.75) / 2.
+        # d = 30: the far term. d = 40: half of the fade (0.1 * 5): 0.75 + 0.5 * (0.5 - 0.75). d = 50: split[3].
+        for d, want in ((10.0, 0.25), (21.0, 0.5), (30.0, 0.75), (40.0, 0.625), (50.0, 0.5)):
+            self.assertAlmostEqual(lf.mask_combine(d, 0.25, 0.75, split, 0.1), want, places=12)
+        self.assertAlmostEqual(fade_to_one(50.0, 0.25, 0.75, split, 0.1), 1.0, places=12)
+
+    def test_rotate_by_hand(self):
+        # (x, y) -> (a x + b y, a y - b x) with (a, b) = (0.6, 0.8).
+        for offset, want in (((1.0, 0.0), (0.6, -0.8)), ((0.0, 1.0), (0.8, 0.6)), ((0.5, -2.0), (-1.3, -1.6))):
+            got = lf.mask_rotate(offset, (0.6, 0.8))
+            self.assertAlmostEqual(got[0], want[0], places=12)
+            self.assertAlmostEqual(got[1], want[1], places=12)
+
+    def test_near_by_hand(self):
+        rows = [IDENTITY_ROWS[0], IDENTITY_ROWS[1], IDENTITY_ROWS[2], [0.0, 0.0, 0.0, 2.0]]
+        P = [0.5, 0.25, 0.6, 1.0]              # u = 0.25, v = 0.125, depth 0.3: compared value 0.7
+        taps = []
+
+        def sample(u, v):
+            taps.append((round(u, 12), round(v, 12)))
+            return 0.9 if u > 0.3 else 0.5
+
+        offsets = [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)]
+        # Unrotated, radius 0.1: taps at u 0.35 (0.7 > 0.9 is false: shadowed), 0.25, 0.15, 0.25 (lit): 3 of 4.
+        self.assertAlmostEqual(lf.mask_near(P, rows, sample, (1.0, 0.0), offsets, 0.1), 0.75, places=12)
+        self.assertEqual(taps, [(0.35, 0.125), (0.25, 0.225), (0.15, 0.125), (0.25, 0.025)])
+        # With the shader's weight of a tap (the literal 1 / 12) the sum is 3 / 12.
+        self.assertAlmostEqual(lf.mask_near(P, rows, sample, (1.0, 0.0), offsets, 0.1, tap_weight=1 / 12), 0.25, places=12)
+        # Rotated by (a, b) = (0, 1): (1, 0) goes to (0, -1), so the one tap is at v - radius.
+        del taps[:]
+        self.assertEqual(lf.mask_near(P, rows, sample, (0.0, 1.0), [(1.0, 0.0)], 0.1), 1.0)
+        self.assertEqual(taps, [(0.25, 0.025)])
+
+    def test_near_constant_maps_and_the_equal_depth(self):
+        P = [0.3, 0.6, 0.25, 1.0]              # compared value 1 - 0.25 = 0.75
+        args = ((1.0, 0.0), lf.MASK_NEAR_TAPS, 2.5 / 1024)
+        self.assertEqual(lf.mask_near(P, IDENTITY_ROWS, lambda u, v: 0.0, *args), 1.0)      # nothing nearer the light
+        self.assertEqual(lf.mask_near(P, IDENTITY_ROWS, lambda u, v: 1.0, *args), 0.0)      # all shadowed
+        # A map equal to the compared value is shadow for the near cascade (`>`) ...
+        self.assertEqual(lf.mask_near(P, IDENTITY_ROWS, lambda u, v: 0.75, *args), 0.0)
+        # ... and light for the far one (`>=`).
+        self.assertEqual(lf.mask_far(P, IDENTITY_ROWS, lambda ix, iy: 0.75, (1024, 1024)), 1.0)
+        self.assertEqual(lf.mask_far(P, IDENTITY_ROWS, lambda ix, iy: 0.0, (1024, 1024)), 1.0)
+        self.assertEqual(lf.mask_far(P, IDENTITY_ROWS, lambda ix, iy: 1.0, (1024, 1024)), 0.0)
+
+    def test_near_half_plane_the_penumbra_is_the_kernel(self):
+        # The map is lit left of u = 0.5 and shadowed from there on. A tap at u + radius * x is lit while
+        # it is left of the edge, so the mask leaves 1 where the kernel's rightmost tap crosses the edge
+        # (u = 0.5 - radius * max x) and reaches 0 where its leftmost does (u = 0.5 - radius * min x).
+        radius = 0.01
+        xs = [x for x, _ in lf.MASK_NEAR_TAPS]
+        self.assertAlmostEqual(max(xs), 0.96234, places=5)
+        self.assertAlmostEqual(min(xs), -0.840144, places=5)
+
+        def sweep(rot):
+            step = radius / 400
+            values = []
+            for k in range(-1600, 1601):
+                u = 0.5 + k * step
+                values.append((u, lf.mask_near([u, 0.2, 0.5, 1.0], IDENTITY_ROWS,
+                                               lambda tu, tv: 0.0 if tu < 0.5 else 1.0, rot, lf.MASK_NEAR_TAPS, radius)))
+            return step, values
+
+        step, values = sweep((1.0, 0.0))
+        self.assertEqual((values[0][1], values[-1][1]), (1.0, 0.0))
+        self.assertTrue(all(a[1] >= b[1] for a, b in zip(values, values[1:])))             # never brighter to the right
+        self.assertEqual({round(v * 12) for _, v in values}, set(range(13)))               # one tap at a time
+        first = next(u for u, v in values if v < 1.0)
+        last = next(u for u, v in values if v == 0.0)
+        self.assertAlmostEqual(first, 0.5 - radius * max(xs), delta=1.5 * step)
+        self.assertAlmostEqual(last, 0.5 - radius * min(xs), delta=1.5 * step)
+        self.assertAlmostEqual(last - first, radius * (max(xs) - min(xs)), delta=3 * step)   # 1.80 radii
+        # Under any rotation the penumbra stays inside one radius on either side (the taps lie in the unit disk).
+        for angle in (0.3, 1.1, 2.0, 3.7, 5.5):
+            _, values = sweep((math.cos(angle), math.sin(angle)))
+            first = next(u for u, v in values if v < 1.0)
+            last = next(u for u, v in values if v == 0.0)
+            self.assertGreater(first, 0.5 - radius)
+            self.assertLess(last, 0.5 + radius)
+            self.assertGreater(last - first, 1.5 * radius)
+        self.assertTrue(all(x * x + y * y < 1.0 for x, y in lf.MASK_NEAR_TAPS))
+        self.assertEqual(len(set(lf.MASK_NEAR_TAPS)), 12)
+
+    def test_far_by_hand(self):
+        P = [0.3125, 0.40625, 0.25, 1.0]       # on an 8 x 4 map: x = 2.5, y = 1.625; compared value 0.75
+        # The four texels are (1, 0), (2, 0), (1, 1), (2, 1) with the weights of fx = 0.5, fy = 0.625:
+        # (1 - fx)(1 - fy) = 0.1875, fx (1 - fy) = 0.1875, (1 - fx) fy = 0.3125, fx fy = 0.3125.
+        weights = {(1, 0): 0.1875, (2, 0): 0.1875, (1, 1): 0.3125, (2, 1): 0.3125}
+        for lit, want in weights.items():
+            seen = []
+
+            def texel(ix, iy):
+                seen.append((ix, iy))
+                return 0.1 if (ix, iy) == lit else 0.9
+            self.assertAlmostEqual(lf.mask_far(P, IDENTITY_ROWS, texel, (8, 4)), want, places=12)
+            self.assertEqual(sorted(seen), sorted(weights))
+        self.assertAlmostEqual(lf.mask_far(P, IDENTITY_ROWS, lambda ix, iy: 0.1 if ix == 1 else 0.9, (8, 4)), 0.5, places=12)
+        # A division by rows[3] . P: the same point given with w = 2.
+        self.assertAlmostEqual(lf.mask_far([2 * p for p in P], IDENTITY_ROWS, lambda ix, iy: 0.1 if iy == 1 else 0.9, (8, 4)),
+                               0.625, places=12)
+
+    def test_far_half_plane_is_a_ramp_of_one_texel(self):
+        # Texels left of column 4 are lit. The mask is the linear filter of the lit / shadowed texels
+        # floor(x) - 1 and floor(x): 1 up to x = 4, then down to 0 at x = 5.
+        def at(x):
+            return lf.mask_far([x / 8, 0.3, 0.5, 1.0], IDENTITY_ROWS, lambda ix, iy: 0.0 if ix < 4 else 1.0, (8, 8))
+        for x, want in ((2.5, 1.0), (3.999, 1.0), (4.0, 1.0), (4.25, 0.75), (4.5, 0.5), (4.75, 0.25), (5.0, 0.0), (6.3, 0.0)):
+            self.assertAlmostEqual(at(x), want, places=9, msg=f"x = {x}")
+
+    def test_world_rows_and_screen_rows_give_the_same_mask(self):
+        """The game hands the mask shaders screen-to-cascade rows (the world-to-cascade rows times the
+        screen-to-world rows c116..c119); a native pass has the world position and the world rows. Both
+        are the same function: the rows are applied to a homogeneous point and divided by their own w."""
+        rng = random.Random(11)
+        for k in range(50):
+            world_rows = [[rng.uniform(-0.05, 0.05) for _ in range(3)] + [rng.uniform(0.3, 0.7)] for _ in range(3)]
+            world_rows.append([0.0, 0.0, 0.0, 1.0])                                        # orthographic
+            to_world = [[rng.uniform(-1, 1) for _ in range(4)] for _ in range(3)]
+            to_world.append([rng.uniform(-0.1, 0.1) for _ in range(3)] + [rng.uniform(0.8, 1.3)])
+            screen_rows = [[sum(world_rows[i][k] * to_world[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+            S = [rng.uniform(-1, 1), rng.uniform(-1, 1), rng.random(), 1.0]
+            Ph = [lf.dot(row, S) for row in to_world]
+            Pw = [x / Ph[3] for x in Ph]
+
+            def smooth(u, v):
+                return 0.5 + 0.4 * math.sin(40 * u) * math.cos(31 * v)
+
+            def texel(ix, iy):
+                return 0.5 + 0.4 * math.sin(0.7 * ix + 1.3 * iy)
+
+            rot = (math.cos(k * 0.4), math.sin(k * 0.4))
+            a = lf.mask_near(S, screen_rows, smooth, rot, lf.MASK_NEAR_TAPS, 2.5 / 1024)
+            self.assertEqual(lf.mask_near(Ph, world_rows, smooth, rot, lf.MASK_NEAR_TAPS, 2.5 / 1024), a)
+            self.assertEqual(lf.mask_near(Pw, world_rows, smooth, rot, lf.MASK_NEAR_TAPS, 2.5 / 1024), a)
+            b = lf.mask_far(S, screen_rows, texel, (1024, 1024))
+            self.assertAlmostEqual(lf.mask_far(Pw, world_rows, texel, (1024, 1024)), b, places=6)
+
+    def test_screen_point(self):
+        # Pixel (10, 20) of 1120 x 720 with depth 0.25: X = (2 * 10 + 1) / 1120 - 1, -Y = 1 - (2 * 20 + 1) / 720.
+        S = lf.mask_screen_point((10.0, 20.0), 0.25, (1 / 1120, 1 / 720), (0.0, 0.0))
+        self.assertAlmostEqual(S[0], 21 / 1120 - 1, places=12)
+        self.assertAlmostEqual(S[1], 1 - 41 / 720, places=12)
+        self.assertEqual(S[2:], [0.75, 1.0])
+        u, v = lf.mask_depth_uv((10.0, 20.0), (1 / 1120, 1 / 720), (0.25, -0.5))      # the pixel's centre plus the offset
+        self.assertAlmostEqual(u, 10.75 / 1120, places=12)
+        self.assertAlmostEqual(v, 20.0 / 720, places=12)
+        # The position register is read through its absolute value.
+        self.assertEqual(lf.mask_screen_point((-10.0, -20.0), 0.25, (1 / 1120, 1 / 720), (0.0, 0.0)), S)
+
+    def test_the_twelve_taps_are_the_literal_table(self):
+        # c250..c255 of 0F99... as the emulated GPU held them at every execution of the shader in four logs
+        # (out/native-evidence/shadows/task2_gpu_log_mask_registers.txt); the x of a tap and its y stand in
+        # different registers (lighting-formulas.md, "Shadows").
+        lit = lc.MASK_LITERALS["0F99810F072BF0FC"]
+        self.assertEqual(lc.mask_taps(lit), [tuple(p) for p in lf.MASK_NEAR_TAPS])
+        self.assertEqual(sorted(lit), list(range(248, 256)))
+        self.assertEqual(lit[248][0], 10.0)
+        self.assertAlmostEqual(lit[248][1], 1 / 12, places=8)
+        self.assertEqual(lit[248][2:], [-1.0, 2.0])
+        self.assertEqual(lit[249][:3], [0.0, 1.0, 0.5])
+        self.assertAlmostEqual(lit[249][3], 0.1, places=8)
+        self.assertEqual(lc.MASK_LITERALS["1B4B5AE12EF270CA"], {254: [0.5, 1.0, 0.0, -1.0], 255: [2.0, 0.0, 0.0, 0.0]})
+        # The first of the published 12-tap Poisson disc, to five places.
+        self.assertIn((-0.32621, -0.40581), [(round(x, 5), round(y, 5)) for x, y in lf.MASK_NEAR_TAPS])
+
+    def test_zeros_and_non_finite_inputs_give_finite_numbers(self):
+        bad = (0.0, math.inf, -math.inf, math.nan)
+        zero_rows = [[0.0] * 4 for _ in range(4)]
+        P = [0.3, 0.6, 0.25, 1.0]
+        # A projection without a finite w, u, v or depth: the cascade's term is 1 (no shadow from a map
+        # that cannot be addressed), and the sampler is not called.
+        def never(*a):
+            raise AssertionError("sampled")
+        self.assertEqual(lf.mask_near(P, zero_rows, never, (1.0, 0.0), lf.MASK_NEAR_TAPS, 0.01), 1.0)
+        self.assertEqual(lf.mask_far(P, zero_rows, never, (1024, 1024)), 1.0)
+        for b in bad[1:]:
+            rows = [list(r) for r in IDENTITY_ROWS]
+            rows[1][1] = b
+            self.assertEqual(lf.mask_near(P, rows, never, (1.0, 0.0), lf.MASK_NEAR_TAPS, 0.01), 1.0)
+            self.assertEqual(lf.mask_far(P, rows, never, (1024, 1024)), 1.0)
+            self.assertEqual(lf.mask_far([b, 0.6, 0.25, 1.0], IDENTITY_ROWS, never, (1024, 1024)), 1.0)
+            self.assertEqual(lf.mask_far(P, IDENTITY_ROWS, never, (b, 1024)), 1.0)
+        self.assertEqual(lf.mask_far(P, IDENTITY_ROWS, never, (0, 1024)), 1.0)
+        # Non-finite rotation, radius or map values: finite, in [0, 1].
+        for b in bad:
+            for value in (lf.mask_near(P, IDENTITY_ROWS, lambda u, v: 0.5, (b, b), lf.MASK_NEAR_TAPS, 0.01),
+                          lf.mask_near(P, IDENTITY_ROWS, lambda u, v: 0.5, (1.0, 0.0), lf.MASK_NEAR_TAPS, b),
+                          lf.mask_near(P, IDENTITY_ROWS, lambda u, v: b, (1.0, 0.0), lf.MASK_NEAR_TAPS, 0.01),
+                          lf.mask_far(P, IDENTITY_ROWS, lambda ix, iy: b, (1024, 1024))):
+                self.assertTrue(math.isfinite(value) and 0.0 <= value <= 1.0, (b, value))
+        # The combination: a zero blend width is a step at split[0]; any d, slope and split give a finite value.
+        self.assertEqual(lf.mask_combine(19.0, 0.25, 0.75, [20.0, 35.0, 0.0, 0.5], 0.1), 0.25)
+        self.assertEqual(lf.mask_combine(21.0, 0.25, 0.75, [20.0, 35.0, 0.0, 0.5], 0.1), 0.75)
+        self.assertEqual(lf.mask_combine(math.inf, 0.25, 0.75, [20.0, 35.0, 2.0, 0.5], 0.1), 0.5)
+        for d in bad:
+            for s in bad:
+                for slope in bad:
+                    for split in ([s, 35.0, 2.0, 0.5], [20.0, s, 2.0, 0.5], [20.0, 35.0, s, 0.5], [20.0, 35.0, 2.0, s]):
+                        value = lf.mask_combine(d, 0.25, 0.75, split, slope)
+                        self.assertTrue(math.isfinite(value), (d, split, slope, value))
+        # The whole shaders with every input zero, and with a world position that has no finite w.
+        zero = dict(pixel=(0.0, 0.0), sample_depth=lambda u, v: 0.0, depth_scale=(0.0, 0.0), depth_offset=(0.0, 0.0),
+                    screen_to_world=zero_rows, eye=[0.0] * 3, split=[0.0] * 4, near_rows=zero_rows, far_rows=zero_rows,
+                    sample_rot=lambda u, v: (0.0, 0.0), rot_offset=(0.0, 0.0), rot_scale=(0.0, 0.0),
+                    offsets=lf.MASK_NEAR_TAPS, radius=0.0, sample_near=lambda u, v: 0.0,
+                    sample_far_texel=lambda ix, iy: 0.0, far_size=(1024, 1024))
+        self.assertTrue(math.isfinite(lf.mask_0f99(**zero)))
+        for b in bad:
+            args = dict(zero, sample_depth=lambda u, v, b=b: b, split=[20.0, 35.0, 2.0, 0.5],
+                        screen_to_world=[[b] * 4 for _ in range(4)], eye=[b] * 3)
+            self.assertEqual(lf.mask_0f99(**args), 0.5, b)          # no position: beyond the shadow distance
+            value, alpha = lf.mask_1b4b(pixel=(0.0, 0.0), sample_depth=lambda u, v, b=b: b, depth_scale=(b, b),
+                                        depth_offset=(b, b), far_rows=zero_rows, sample_far_texel=lambda ix, iy: b,
+                                        far_size=(1024, 1024), start=b, fade_start=b, fade_width=b, fade_to=0.5)
+            self.assertTrue(math.isfinite(value) and alpha in (0.0, 1.0), (b, value, alpha))
+
+
+class MaskSynthetic(unittest.TestCase):
+    """Always runs: the mask checker on the hand-written shader of the mask's form."""
+
+    def check(self, family="mask", taps=synthetic_taps, **kw):
+        return lc.check_mask(family, "0F99810F072BF0FC", trials=80, seed=7, text=MASK_SYNTHETIC,
+                             literals=MASK_SYNTHETIC_LITERALS, taps=taps, **kw)
+
+    def test_the_right_formulas_agree_in_every_trial(self):
+        for family in ("mask", "mask-near", "mask-far"):
+            res = self.check(family)
+            self.assertEqual((res.agree, res.trials), (80, 80), (family, res.first_bad))
+            self.assertLess(res.worst, 1e-9)
+
+    def test_the_trials_reach_every_part_of_the_shader(self):
+        seen = lc.mask_regimes("0F99810F072BF0FC", trials=80, seed=7, literals=MASK_SYNTHETIC_LITERALS, taps=synthetic_taps)
+        for name in ("near only", "blend", "far only", "fade", "beyond"):
+            self.assertGreaterEqual(seen.get(name, 0), 5, seen)
+        self.assertGreaterEqual(seen["equal depth"], 10, seen)       # trials whose maps hold the compared value itself
+
+    def test_wrong_formulas_fail(self):
+        for name, (helper, form) in WRONG_MASK.items():
+            with self.subTest(wrong=name):
+                with mock.patch.object(lf, helper, form):
+                    res = self.check()
+                self.assertFalse(res.ok, f"{res.agree}/{res.trials} agree with: {name}")
+                self.assertIsNotNone(res.first_bad)
+
+    def test_a_wrong_tap_offset_fails(self):
+        for name, wrong in (("x and y of the second tap exchanged", lambda lit: [synthetic_taps(lit)[0], synthetic_taps(lit)[1][::-1]]),
+                            ("the taps paired within a register", lambda lit: [(lit[254][0], lit[254][1]), (lit[253][0], lit[253][1])]),
+                            ("one tap moved by a tenth", lambda lit: [synthetic_taps(lit)[0], (lit[254][1] + 0.1, lit[253][1])])):
+            with self.subTest(wrong=name):
+                self.assertFalse(self.check(taps=wrong).ok)
+
+    def test_the_parts_alone_catch_their_own_errors(self):
+        with mock.patch.object(lf, "mask_near", near_with(LT)):
+            self.assertFalse(self.check("mask-near").ok)
+            self.assertTrue(self.check("mask-far").ok)
+        with mock.patch.object(lf, "mask_far", far_with(GT)):
+            self.assertFalse(self.check("mask-far").ok)
+            self.assertTrue(self.check("mask-near").ok)
+
+    def test_no_trials_is_not_agreement(self):
+        self.assertFalse(lc.check_mask("mask", "0F99810F072BF0FC", trials=0, text=MASK_SYNTHETIC,
+                                       literals=MASK_SYNTHETIC_LITERALS, taps=synthetic_taps).ok)
+
+
+@unittest.skipUnless(DUMPS.is_dir(), NO_DUMPS)
+class MaskRealDumps(unittest.TestCase):
+    TRIALS = 80
+
+    def test_both_shaders_agree_in_every_family(self):
+        self.assertEqual(lc.MASK_FAMILIES, {"mask-near": ["0F99810F072BF0FC"],
+                                            "mask-far": ["0F99810F072BF0FC", "1B4B5AE12EF270CA"],
+                                            "mask": ["0F99810F072BF0FC", "1B4B5AE12EF270CA"]})
+        for family, shaders in lc.MASK_FAMILIES.items():
+            for shader in shaders:
+                with self.subTest(family=family, shader=shader):
+                    res = lc.check_mask(family, shader, trials=self.TRIALS)
+                    self.assertTrue(res.ok, f"{res.agree}/{res.trials} worst {res.worst:.3g} {res.first_bad}")
+                    self.assertEqual(res.trials, self.TRIALS)
+                    self.assertLess(res.worst, 1e-9)
+
+    def test_the_trials_reach_every_part_of_both_shaders(self):
+        seen = lc.mask_regimes("0F99810F072BF0FC", trials=self.TRIALS)
+        for name in ("near only", "blend", "far only", "fade", "beyond", "equal depth", "random literals"):
+            self.assertGreaterEqual(seen.get(name, 0), 5, seen)
+        seen = lc.mask_regimes("1B4B5AE12EF270CA", trials=self.TRIALS)
+        for name in ("not far", "far", "fade", "beyond", "equal depth"):
+            self.assertGreaterEqual(seen.get(name, 0), 5, seen)
+
+    def test_wrong_formulas_fail_on_the_real_dumps(self):
+        for name, (helper, form) in WRONG_MASK.items():
+            for shader in lc.MASK_FAMILIES["mask"]:
+                if shader.startswith("1B4B") and (name in NEAR_ONLY or helper == "mask_combine"):
+                    continue                    # the far shader has no near taps and fades by depth (below)
+                with self.subTest(wrong=name, shader=shader):
+                    with mock.patch.object(lf, helper, form):
+                        res = lc.check_mask("mask", shader, trials=self.TRIALS)
+                    self.assertFalse(res.ok, f"{res.agree}/{res.trials} agree with: {name}")
+
+    def test_wrong_forms_of_the_far_shader_fail(self):
+        right = lf.mask_1b4b
+        wrong = {
+            "fade to 1": lambda **a: right(**dict(a, fade_to=1.0)),
+            "fade from the start depth": lambda **a: right(**dict(a, fade_start=a["start"])),
+            "alpha 1 everywhere": lambda **a: (right(**a)[0], 1.0),
+            "the near side lit": lambda **a: right(**a) if right(**a)[1] else (1.0, 0.0),
+            "another start depth": lambda **a: right(**dict(a, start=a["start"] + 0.05)),
+        }
+        for name, form in wrong.items():
+            with self.subTest(wrong=name):
+                self.assertFalse(lc.check_mask("mask", "1B4B5AE12EF270CA", trials=self.TRIALS, formula=form).ok)
+
+    def test_a_wrong_tap_offset_fails(self):
+        right = lc.mask_taps
+        wrong = {
+            "x and y of one tap exchanged": lambda lit: right(lit)[:11] + [right(lit)[11][::-1]],
+            "pairs read within a register": lambda lit: [(lit[r][i], lit[r][i + 1]) for r in range(250, 256) for i in (0, 2)],
+            "one tap moved by a tenth of the radius": lambda lit: [(right(lit)[0][0] + 0.1, right(lit)[0][1])] + right(lit)[1:],
+            "eleven taps": lambda lit: right(lit)[:11],
+        }
+        for name, taps in wrong.items():
+            with self.subTest(wrong=name):
+                self.assertFalse(lc.check_mask("mask", "0F99810F072BF0FC", trials=self.TRIALS, taps=taps).ok)
+
+    def test_command_line(self):
+        for family, lines in (("mask-near", 1), ("mask-far", 2), ("mask", 2)):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = lc.main(["--family", family, "--trials", "16"])
+            self.assertEqual(code, 0, out.getvalue())
+            self.assertEqual(out.getvalue().count("16/16 agree"), lines, out.getvalue())
+            self.assertIn("0F99810F072BF0FC", out.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(lc.main(["--family", "mask", "--shader", "1B4B5AE12EF270CA", "--trials", "8"]), 0)
+        self.assertNotIn("0F99810F072BF0FC", out.getvalue())
+        with mock.patch.object(lf, "mask_combine", fade_to_one), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(lc.main(["--family", "mask", "--trials", "40"]), 1)
+        self.assertIn("first disagreement, trial ", out.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            lc.main(["--list"])
+        self.assertIn("mask-near: ps 0F99810F072BF0FC", out.getvalue())
+
+
+@unittest.skipUnless(DUMPS.is_dir(), NO_DUMPS)
+class LitFamiliesWithTheMask(unittest.TestCase):
+    """Plan Task 2, step 3: every lit family is checked with the screen mask as an input. A formula that
+    takes the mask as 1 (the native pass before shadows) must disagree with the microcode in every pair
+    that has the mask, and at a mask of 1 every function is what it was."""
+    TRIALS = 24
+    MASKED = ("terrain-layer", "terrain-layer-multi", "object", "object-multi", "tree-trunk", "tree-trunk-multi",
+              "tree-leaf", "tree-leaf-multi", "plant", "plant-multi", "plant-lit", "plant-lit-multi")
+
+    def test_every_family_but_the_far_terrain_has_the_mask(self):
+        self.assertEqual(sorted(self.MASKED + ("terrain-far",)), sorted(lc.FAMILIES))
+
+    def test_the_trials_draw_the_mask_at_random(self):
+        for family in self.MASKED:
+            ps, vs = lc.FAMILIES[family][0]
+            _, make_case = lc.DRIVERS[family](ps, vs, DUMPS)
+            rng = random.Random(3)
+            masks = [make_case(rng).sampler(8, (0.0, 0.0), {})[0] for _ in range(12)]
+            self.assertEqual(len(set(masks)), 12, family)
+            self.assertTrue(all(0.0 <= m < 1.0 for m in masks), family)
+            self.assertLess(min(masks), 0.4, family)
+            self.assertGreater(max(masks), 0.6, family)
+
+    def test_a_formula_without_the_mask_fails_in_every_pair(self):
+        single, multi, leaf = lf.sun_gate_single, lf.sun_gate_multi, lf.leaf_mask
+        for family in self.MASKED:
+            for ps, vs in lc.FAMILIES[family]:
+                with self.subTest(family=family, ps=ps, vs=vs):
+                    with mock.patch.object(lf, "sun_gate_single", lambda mask=1.0, facing=1.0: single(1.0, facing)), \
+                            mock.patch.object(lf, "sun_gate_multi",
+                                              lambda strength, mask=1.0, facing=1.0, **cone: multi(strength, 1.0, facing, **cone)), \
+                            mock.patch.object(lf, "leaf_mask", lambda mask, gain, bias: leaf(1.0, gain, bias)):
+                        res = lc.check_pair(family, ps, vs, trials=self.TRIALS)
+                    self.assertFalse(res.ok, f"{res.agree}/{res.trials} agree without the mask")
+
+    def test_a_multi_light_pair_with_the_sun_in_its_slot_has_the_mask_too(self):
+        single, leaf = lf.sun_gate_single, lf.leaf_mask
+        for family in lc.MULTI_SUN_FAMILIES:
+            ps, vs = lc.FAMILIES[family][0]
+            slot = lc.GAME_SUN_SLOT[lc.light_count(ps, vs)]
+            with self.subTest(family=family):
+                self.assertTrue(lc.check_multi_sun(family, ps, vs, slot, trials=self.TRIALS).ok)
+                with mock.patch.object(lf, "sun_gate_single", lambda mask=1.0, facing=1.0: single(1.0, facing)), \
+                        mock.patch.object(lf, "leaf_mask", lambda mask, gain, bias: leaf(1.0, gain, bias)):
+                    self.assertFalse(lc.check_multi_sun(family, ps, vs, slot, trials=self.TRIALS).ok)
+
+    def test_at_a_mask_of_1_nothing_changes(self):
+        self.assertEqual(lf.sun_gate_single(), 1.0)
+        self.assertEqual(lf.sun_gate_single(mask=1.0, facing=0.25), 0.25)
+        self.assertEqual(lf.sun_gate_multi(1.0), 1.0)
+        self.assertEqual(lf.sun_gate_multi(1.0, mask=0.25), 0.25)
+        m1, m2 = lf.leaf_mask(1.0, 0.6, 0.4)
+        self.assertAlmostEqual(m1, 1.0, places=12)
+        self.assertAlmostEqual(m2, 1.0, places=12)
+        m1, m2 = lf.leaf_mask(0.0, 0.6, 0.4)                    # full shadow: 0.4 on the front light, 0.64 on the back
+        self.assertAlmostEqual(m1, 0.4, places=12)
+        self.assertAlmostEqual(m2, 0.64, places=12)
+        m1, m2 = lf.leaf_mask(0.5, 0.6, 0.4)
+        self.assertAlmostEqual(m1, 0.7, places=12)
+        self.assertAlmostEqual(m2, 0.82, places=12)
+
+
 if __name__ == "__main__":
     unittest.main()

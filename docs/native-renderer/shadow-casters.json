@@ -1,0 +1,79 @@
+[
+  {
+    "vs": "0xF160B4DA459A6D40",
+    "ps": null,
+    "kind": "opaque",
+    "evidence": "464, 815 and 464 rows of the decoded rows with surface word 0x10000410 (the two shadow passes; all outside the main scene) of native_discovery_20261008_105316.jsonl (bridge), _105659.jsonl (third spot) and _105833.jsonl (bridge), 8 frames each: out/native-evidence/shadows/task2_caster_rows.txt; no pixel shader in any of them. Static props (by vertex buffer the scene's 0xECD6... / 0x79EA... draws: shadows-research.md). State: depth word 0x2200 = 0x00708766 (test greater-equal, write) in every row; no alpha test (0x2202 = 0x00000004), cull as the scene with the polygon offset bits (0x2205 = 0x00219806). Vertex shader's table entry: vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt)"
+  },
+  {
+    "vs": "0xFBD39C64463E180B",
+    "ps": null,
+    "kind": "opaque",
+    "limitation": "the vertex shader's sway is not drawn (the table entry is \"deformed\"): the trunk's shadow stands still",
+    "evidence": "400, 376 and 400 rows of the decoded rows with surface word 0x10000410 (the two shadow passes; all outside the main scene) of native_discovery_20261008_105316.jsonl (bridge), _105659.jsonl (third spot) and _105833.jsonl (bridge), 8 frames each: out/native-evidence/shadows/task2_caster_rows.txt; no pixel shader in any of them. Tree trunks, from vertex buffers no main-scene draw uses. State: depth word 0x2200 = 0x00708766 (test greater-equal, write) in every row; no alpha test (0x2202 = 0xAA000004: the test bit 3 and the alpha-to-mask bit 4 are clear), 0x2205 = 0x00219806. Vertex shader's table entry: vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt)"
+  },
+  {
+    "vs": "0x82F6433A69263C75",
+    "ps": null,
+    "kind": "opaque",
+    "evidence": "101, 184 and 104 rows of the decoded rows with surface word 0x10000410 (the two shadow passes; all outside the main scene) of native_discovery_20261008_105316.jsonl (bridge), _105659.jsonl (third spot) and _105833.jsonl (bridge), 8 frames each: out/native-evidence/shadows/task2_caster_rows.txt; no pixel shader in any of them. Skinned characters, four weighted bones. State: depth word 0x2200 = 0x00708766 (test greater-equal, write) in every row; no alpha test (0x2202 = 0x00000004), 0x2205 = 0x00219806. Vertex shader's table entry: vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt)"
+  },
+  {
+    "vs": "0x5F4416192E87005F",
+    "ps": null,
+    "kind": "opaque",
+    "evidence": "8, 120 and 8 rows of the decoded rows with surface word 0x10000410 (the two shadow passes; all outside the main scene) of native_discovery_20261008_105316.jsonl (bridge), _105659.jsonl (third spot) and _105833.jsonl (bridge), 8 frames each: out/native-evidence/shadows/task2_caster_rows.txt; no pixel shader in any of them. Skinned, one bone per vertex. State: depth word 0x2200 = 0x00708766 (test greater-equal, write) in every row; no alpha test (0x2202 = 0x00000004), 0x2205 = 0x00219806. Vertex shader's table entry: vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt)"
+  },
+  {
+    "vs": "0x432563420047C96C",
+    "ps": "0xF1EB2497108F159D",
+    "kind": "alpha-test",
+    "alpha": {
+      "texture_slot": 0,
+      "scale_register": "c15.w"
+    },
+    "limitation": "the vertex shader's sway is not drawn (\"deformed\"): the canopy's shadow stands still. The alpha-to-mask of these draws (0x2202 bit 4, offsets 0xAA) is not read: the caster is the alpha test alone, alpha above the reference 0",
+    "evidence": "368, 336 and 368 rows of the decoded rows with surface word 0x10000410 (the two shadow passes; all outside the main scene) of native_discovery_20261008_105316.jsonl (bridge), _105659.jsonl (third spot) and _105833.jsonl (bridge), 8 frames each: out/native-evidence/shadows/task2_caster_rows.txt, every one with this pixel shader. Tree leaf cards, from vertex buffers no main-scene draw uses. Alpha (dump shader_F1EB2497108F159D.ucode.frag): oC0.w = r0.w * c15.w (instr 4) with r0 = tf0 (instr 3 tfetch2D r0, r0.xy, tf0); the texture is read at interpolator 0 (xy) times c8.xy plus c8.zw (instr 2, 3); no kill. shader_trace.py --alpha: fetch slot 0, component w, scale [c15.w]. c15 is (0, 0, 0, 1) in all 1072 rows, so the alpha is the texture's there. State: depth word 0x2200 = 0x00708766 (test greater-equal, write) in every row; alpha test greater with reference 0 and alpha-to-mask (0x2202 = 0xAA00001C, 0x210E = 0), no cull (0x2205 = 0x00219800). Vertex shader's table entry and its uv: vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt)"
+  },
+  {
+    "vs": "0x3A0F9098B839DDBC",
+    "ps": "0x33477588A5C01C7C",
+    "kind": "alpha-test",
+    "alpha": {
+      "texture_slot": 0,
+      "scale_register": null
+    },
+    "evidence": "296, 212 and 294 rows of the decoded rows with surface word 0x10000410 (the two shadow passes; all outside the main scene) of native_discovery_20261008_105316.jsonl (bridge), _105659.jsonl (third spot) and _105833.jsonl (bridge), 8 frames each: out/native-evidence/shadows/task2_caster_rows.txt, every one with this pixel shader. Skinned meshes with cut-out textures, four weighted bones. Alpha (dump shader_33477588A5C01C7C.ucode.frag): oC0 = tf0 (instr 4 max oC0, r0, r0 after tfetch2D r0, r0.xy, tf0, instr 3): the alpha is the texture's w and nothing else; the texture is read at interpolator 0 (xy) times c8.xy plus c8.zw (instr 2, 3); no kill. shader_trace.py --alpha: fetch slot 0, component w, no scale. State: depth word 0x2200 = 0x00708766 (test greater-equal, write) in every row; alpha test greater (0x2202 = 0x0000000C) with reference 254/255 (0x210E = 0x3F7EFF00) or 128/255 (0x3F008081: 32, 0 and 32 rows), 0x2205 = 0x00219806. Vertex shader's table entry and its uv: vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt)"
+  },
+  {
+    "vs": "0x57818A7FD1C4F026",
+    "ps": "0x33477588A5C01C7C",
+    "kind": "alpha-test",
+    "alpha": {
+      "texture_slot": 0,
+      "scale_register": null
+    },
+    "evidence": "0, 112 and 0 rows of the decoded rows with surface word 0x10000410 (the two shadow passes; all outside the main scene) of native_discovery_20261008_105316.jsonl (bridge), _105659.jsonl (third spot) and _105833.jsonl (bridge), 8 frames each: out/native-evidence/shadows/task2_caster_rows.txt, every one with this pixel shader. Static props with cut-out textures; at the third spot only. Alpha (dump shader_33477588A5C01C7C.ucode.frag): oC0 = tf0 (instr 4 max oC0, r0, r0 after tfetch2D r0, r0.xy, tf0, instr 3): the alpha is the texture's w and nothing else; the texture is read at interpolator 0 (xy) times c8.xy plus c8.zw (instr 2, 3); no kill. shader_trace.py --alpha: fetch slot 0, component w, no scale. State: depth word 0x2200 = 0x00708766 (test greater-equal, write) in every row; alpha test greater (0x2202 = 0x0000000C) with reference 128/255 (0x210E = 0x3F008081), 0x2205 = 0x00219806. Vertex shader's table entry and its uv: vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt)"
+  },
+  {
+    "vs": "0x87E0DB8B7C32F6A5",
+    "ps": "0x33477588A5C01C7C",
+    "kind": "alpha-test",
+    "alpha": {
+      "texture_slot": 0,
+      "scale_register": null
+    },
+    "evidence": "0, 80 and 0 rows of the decoded rows with surface word 0x10000410 (the two shadow passes; all outside the main scene) of native_discovery_20261008_105316.jsonl (bridge), _105659.jsonl (third spot) and _105833.jsonl (bridge), 8 frames each: out/native-evidence/shadows/task2_caster_rows.txt, every one with this pixel shader. A skinned mesh with a cut-out texture, one bone per vertex; at the third spot only. Alpha (dump shader_33477588A5C01C7C.ucode.frag): oC0 = tf0 (instr 4 max oC0, r0, r0 after tfetch2D r0, r0.xy, tf0, instr 3): the alpha is the texture's w and nothing else; the texture is read at interpolator 0 (xy) times c8.xy plus c8.zw (instr 2, 3); no kill. shader_trace.py --alpha: fetch slot 0, component w, no scale. State: depth word 0x2200 = 0x00708766 (test greater-equal, write) in every row; alpha test greater (0x2202 = 0x0000000C) with reference 254/255 (0x210E = 0x3F7EFF00), 0x2205 = 0x00219806. Vertex shader's table entry and its uv: vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt)"
+  },
+  {
+    "vs": "0xA8A5B2A89F70336A",
+    "ps": "0x85A9A5EC510A9700",
+    "kind": "alpha-test",
+    "alpha": {
+      "texture_slot": 0,
+      "scale_register": null
+    },
+    "limitation": "the distance dissolve is not drawn: the caster is the texture's alpha test alone, which is the shader's own result within c15.z of the eye (46.8 or 62.4 units in the captures) and keeps the full cut-out where the game thins it over the last 1.2 to 1.6 units before the copy is cut. The vertex shader's sway is not drawn (\"deformed\")",
+    "evidence": "218, 80 and 226 rows of the decoded rows with surface word 0x10000410 (the two shadow passes; all outside the main scene) of native_discovery_20261008_105316.jsonl (bridge), _105659.jsonl (third spot) and _105833.jsonl (bridge), 8 frames each: out/native-evidence/shadows/task2_caster_rows.txt, every one with this pixel shader. Instanced bushes (by vertex buffer the scene's 0xB636... / 0x6AD4... draws: shadows-research.md). Alpha (dump shader_85A9A5EC510A9700.ucode.frag): oC0.w = pass * tf0.w (instr 14; r0.y = the w of tf0, instr 5 tfetch2D r0._w__, r0.yw, tf0, read at interpolator 0 times c8.xy plus c8.zw, instr 2). pass = 1 where fade + dither >= c255.x, else 0 (instr 12, 13 sge), c255.x = 1 (\"ps_lit\" of all 524 rows); fade = sat(c255.x - (|c19.xyz - P| - c15.z) * c15.y) (instr 7 to 11; P the world position in interpolator 1, c19 the eye); dither = the w of tf10 (a 32 x 32 texture) at (|pixel.xy| * c0.zw + c0.xy) * c50.xy (instr 3, 4, 6; c50 = (35, 22.5)). That is not one comparison of constants: it holds a distance per pixel and a texel. shader_trace.py --alpha refuses it (computed term); no kill. c15 is (62.4, 0.625, 62.4, 0) in 450 rows and (46.8, 0.8333, 46.8, 0) in 74: fade is exactly 1, and with it pass (the dither is not negative), for every pixel within c15.z of the eye, and falls to 0 over the next 1 / c15.y (1.6 and 1.2 units); the vertex shader drops the copy just beyond (its cut, c13.z: 65.1, 66.3 and 51.1 units). State: depth word 0x2200 = 0x00708766 (test greater-equal, write) in every row; alpha test greater (0x2202 = 0x0000000C) with reference 254/255 (0x210E = 0x3F7EFF00), 0x2205 = 0x00219806. Vertex shader's table entry and its uv: vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt)"
+  }
+]

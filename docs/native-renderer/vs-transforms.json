@@ -258,7 +258,25 @@
         "score": 1.0,
         "samples": 34
       }
-    }
+    },
+    "uv": {
+      "o0.x": {
+        "fetch": 3,
+        "src": "y",
+        "format": 31,
+        "offset": 5,
+        "stages": []
+      },
+      "o0.y": {
+        "fetch": 3,
+        "src": "x",
+        "format": 31,
+        "offset": 5,
+        "stages": []
+      }
+    },
+    "uv_manual": true,
+    "uv_evidence": "dump shader_3A0F9098B839DDBC.ucode.vert: o0.xy = r0.xy (instr 43 max o0.xy__, r0.xyyy) <- vfetch_mini r0.yx__ Offset=5 FMT_16_16_FLOAT (instr 9, fetch ordinal 3); nothing writes r0.xy after it (the cexec b0 block reads them). shader_trace refuses the export ('control flow before export: cexec'), so the trace is by hand; vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt): the entry replayed by position_check.py's functions on random streams against the shader's microcode: 1200 of 1200 random vertices, position (four weighted bones) and uv. In the shadow passes with the caster pixel shader 0x33477588A5C01C7C (296, 212 and 294 rows of the three captures of 2026-10-08), which reads r0.xy * c8.xy + c8.zw"
   },
   "0x432563420047C96C": {
     "base": 0,
@@ -280,7 +298,25 @@
         "score": 1.0,
         "samples": 8
       }
-    }
+    },
+    "uv": {
+      "o0.x": {
+        "fetch": 1,
+        "src": "y",
+        "format": 31,
+        "offset": 3,
+        "stages": []
+      },
+      "o0.y": {
+        "fetch": 1,
+        "src": "x",
+        "format": 31,
+        "offset": 3,
+        "stages": []
+      }
+    },
+    "uv_manual": true,
+    "uv_evidence": "dump shader_432563420047C96C.ucode.vert: o0.xy = r3.xy (instr 92 max o0.xy__, r3.xyyy) <- vfetch_mini r3.yx__ Offset=3 FMT_16_16_FLOAT (instr 10, fetch ordinal 1); the wind code writes r3.z and r3.w only (15, 25, 29 to 32, 64); shader_trace gives the same. vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt): the entry replayed by position_check.py's functions on random streams against the shader's microcode: 1200 of 1200 random vertices, uv only (the position is deformed and has no switch for the sway). In the shadow passes with the caster pixel shader 0xF1EB2497108F159D (368, 336 and 368 rows of the three captures of 2026-10-08), which reads r0.xy * c8.xy + c8.zw"
   },
   "0x475EC9F795E5EDBB": {
     "base": 0,
@@ -459,7 +495,25 @@
         "score": 1.0,
         "samples": 19
       }
-    }
+    },
+    "uv": {
+      "o0.x": {
+        "fetch": 1,
+        "src": "y",
+        "format": 31,
+        "offset": 3,
+        "stages": []
+      },
+      "o0.y": {
+        "fetch": 1,
+        "src": "x",
+        "format": 31,
+        "offset": 3,
+        "stages": []
+      }
+    },
+    "uv_manual": true,
+    "uv_evidence": "dump shader_57818A7FD1C4F026.ucode.vert: o0.xy = r0.xy (instr 9 max o0.xy__, r0.xyyy) <- vfetch_mini r0.yx__ Offset=3 FMT_16_16_FLOAT (instr 4, fetch ordinal 1): o0.x is the source's y, o0.y its x (shader_trace gives the same). vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt): the entry replayed by position_check.py's functions on random streams against the shader's microcode: 1200 of 1200 random vertices, position and uv. In the shadow passes with the caster pixel shader 0x33477588A5C01C7C (112 rows of native_discovery_20261008_105659.jsonl), which reads r0.xy * c8.xy + c8.zw; of the rows' 6912 sampled positions 6200 lie inside the light's clip volume under the row's c0..c3 (out/native-evidence/shadows/task2_caster_rows.txt, task2_caster_vertex_rows.txt)"
   },
   "0x5F4416192E87005F": {
     "base": 0,
@@ -808,6 +862,45 @@
       "20261002_115507": "no window"
     }
   },
+  "0x87E0DB8B7C32F6A5": {
+    "base": 0,
+    "layout": "dot",
+    "pos_fetch": -1,
+    "manual": true,
+    "skin": {
+      "index_fetch": 1,
+      "index_component": "z",
+      "row_fetches": [
+        3,
+        4,
+        5
+      ],
+      "row_swizzles": [
+        "yxwz",
+        "yxwz",
+        "yxwz"
+      ]
+    },
+    "evidence": "dump shader_87E0DB8B7C32F6A5.ucode.vert: position vfetch_full r2.yxw1 of vf0, stride 7 (instr 4, fetch 0); bone index r0.z = source x of the integer 8_8_8_8 at dword 3 (instr 5, fetch 1, destination `__x_`: the register's z, so index_component z); the bone's rows r1 / r4 / r3 from vf3 (slot 92), stride 6, fetched yxwz at dwords 0, 2, 4 (instr 7-9, fetches 3-5); r1.x/y/z = dp4(r1/r4/r3 .zxyw, r2.zxyw) (10-12): one bone, weight 1; oPos = dp4(c0..c3 .zxyw, cndeq(c255.xxxy, r1.zxyy, c255.yyyy)) (14-18), c255 = (0, 1, 0, 0) (\"vs_lit\"). cexec b0 (instr 13) puts the uv in the place of the position; vertex bool 0 is clear in all 80 rows (\"vbool\" 0x00000000). The form of 0x5F4416192E87005F with a uv element between the index and the rows. Drawn only in the shadow passes (surface word 0x10000410): 80 rows of native_discovery_20261008_105659.jsonl (the third spot), with pixel shader 0x33477588A5C01C7C, none in the other two captures of that day (out/native-evidence/shadows/task2_caster_rows.txt, task2_caster_vertex_rows.txt); rows outside the main scene carry no stream dumps, so there is no position_check.py line. Checked instead by vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt): the entry replayed by position_check.py's functions on random streams against the shader's microcode: 1200 of 1200 random vertices, position and uv. Not checked on game data: the bone palette of a row is in no capture",
+    "uv": {
+      "o0.x": {
+        "fetch": 2,
+        "src": "y",
+        "format": 31,
+        "offset": 5,
+        "stages": []
+      },
+      "o0.y": {
+        "fetch": 2,
+        "src": "x",
+        "format": 31,
+        "offset": 5,
+        "stages": []
+      }
+    },
+    "uv_manual": true,
+    "uv_evidence": "dump: o0.xy = r0.xy (instr 19 max o0.xy__, r0.xyyy); r0.yx = the 16_16_FLOAT element at dword 5 (instr 6 vfetch_mini r0.yx__, fetch ordinal 2), so o0.x is the source's y and o0.y its x; nothing writes r0.xy after it (5 writes r0.z; the cexec b0 block reads them). shader_trace refuses the export ('control flow before export: cexec'), so the trace is by hand; vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt): the entry replayed by position_check.py's functions on random streams against the shader's microcode. Used by the caster pixel shader 0x33477588A5C01C7C, which reads r0.xy * c8.xy + c8.zw"
+  },
   "0x9ED0BA440DBD51D4": {
     "base": 0,
     "layout": "dot",
@@ -978,6 +1071,54 @@
       "scale": "c7.w",
       "evidence": "Entered 2026-10-08 (lighting plan Task 8c). dump shader_A5846836C90E1192.ucode.vert, fetches in order: 0 the position (vfetch_full r6.yxwz of vf0, FMT_16_16_16_16_FLOAT, Stride=9), 1 the normal (vfetch_mini r3.xyz_ Offset=2 FMT_10_11_11), 2 the UV, 3 the pivot (Offset=5), 4 and 5 the two 8_8_8_8 wind elements (Offset=7, Offset=8), 6 the weights (vfetch_full r9 of vf1, FMT_32_32_32_32_FLOAT, Stride=4). Normal: the 10_11_11 element through the rows c4..c6, times c7.w, NOT normalised (instr 83, 87, 95, 96); then negated where it faces away from the eye c9 (the predicate of instr 108 to 110): the leaf cards are drawn with no culling (register 0x2205 = 0x00218000 in every leaf row of four captures, out/native-evidence/lighting/task8c/leaf_cull.txt), and the shader lights the side the viewer sees. Probe colour: c[28+a0].xyz + (c[29+a0] . w, c[30+a0] . w, c[31+a0] . w) (instr 115 to 117, 122; every dp4 pairs the fetched register and the constant with one swizzle, yxzw: the weights are source x, y, z, w), a0 = trunc of the position fetch's w as fetched yxwz, the fetch's source z (truncs r5.w, r6.w, instr 31; maxas, 113). The colour goes through pow(|x|, c18.w * c249.w) * c18.xyz + c54.xyz to o1; the two scalars of the light, times the light's colour, to o2 and o3 (lighting-formulas.md, \"Tree leaves\"). Checked by light_check.py with pixel shader 7CD57B81550F19E3 (out/native-evidence/lighting/task8c/light_check_leaves.txt)."
     }
+  },
+  "0xA8A5B2A89F70336A": {
+    "base": 0,
+    "layout": "dot",
+    "manual": true,
+    "deformed": true,
+    "pos_swizzle": "yxw1",
+    "instance": {
+      "mesh_fetch": 3,
+      "row_fetches": [
+        0,
+        1,
+        2
+      ],
+      "row_swizzles": [
+        "yxwz",
+        "yxwz",
+        "yxwz"
+      ],
+      "inv_count": "c12.x",
+      "count": "c12.y",
+      "first": "c12.z",
+      "bias": 0.5,
+      "offset": "c7.xyz",
+      "cut": {
+        "eye": "c9.xyz",
+        "dist2": "c13.z"
+      }
+    },
+    "evidence": "dump shader_A8A5B2A89F70336A.ucode.vert: instancing, the scheme of 0x8123C16DBF583F92 (frame-map section 12) without the instance colour. Index: t = trunc((r0.x + c254.z) * c12.x) (instr 8-10), copy = trunc(c12.z) + t (10, 11), vertex = r0.x + trunc(-(c12.y * t)) (11, 15, 16); c254.z = 0.5 (\"vs_lit\" of every row: c254 = (0, 1, 0.5, 0.1)). The copy's rows: three 16_16_16_16_FLOAT elements at dwords 0, 2, 4 of the instance stream vf1 (slot 94), stride 7, fetched yxwz (instr 12-14, fetches 0-2); the mesh position: vf0 (slot 95), stride 6, fetched yxwz (instr 17, fetch 3; pos_swizzle yxw1 as for 0x8123...: instr 19 builds (z, x, y, 1) of the register); world = rows . (p, 1) + c7.xyz (20-23). Cut: a vertex whose squared distance from c9.xyz is above c13.z gets the position c255.xyz = NaN (24-28; \"vs_lit\" c255 = (NaN, NaN, NaN, 5)). Sway (deformed; not drawn): a cosine of a phase from the copy's position times c21, c22 and the amplitudes c26.x, c26.y, scaled by sat(height * c255.w) (29-44). oPos = dp4(c0..c3 .zxyw, (world, 1)) (46-50); o1 = the world position (53), which the pixel shader's dissolve reads. Drawn only in the shadow passes (surface word 0x10000410), with pixel shader 0x85A9A5EC510A9700: 218, 80 and 226 rows of native_discovery_20261008_105316 / _105659 / _105833.jsonl; the rows carry no stream dumps (and no sampled positions: the first full fetch is the instance row), so there is no position_check.py line. From the rows (out/native-evidence/shadows/task2_caster_rows.txt, task2_caster_vertex_rows.txt): in 524 of 524 the vertex bank's c12 is (1 / count, count, first) with count a whole number (256, 190 or 692) and the copies the row's largest index reaches are in the row's instance stream (its size over 28 bytes); c9.xyz is the frame's eye (pixel c19); c13.z is 4238.4, 4397.5 or 2609.1 (65.1, 66.3 and 51.1 units). Checked by vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt): the entry replayed by position_check.py's functions on random streams against the shader's microcode, the sway's amplitudes c26 zero: 1200 of 1200 random vertices, position, cut (the vertices the entry drops are the ones the microcode gives NaN) and uv",
+    "uv": {
+      "o0.x": {
+        "fetch": 3,
+        "src": "z",
+        "format": 32,
+        "offset": 0,
+        "stages": []
+      },
+      "o0.y": {
+        "fetch": 4,
+        "src": "z",
+        "format": 32,
+        "offset": 2,
+        "stages": []
+      }
+    },
+    "uv_manual": true,
+    "uv_evidence": "dump: o0.xy = r2.xy (instr 52 max o0.xy__, r2.xyyy); r2.x = r0.w (45, after both branches; r0.w = source z of the mesh position fetch vfetch_full r0.yxwz, instr 17, ordinal 3, which neither branch writes: 28 and 41 to 44 write r0.xyz, 29 to 39 r0.x and r0.y); r2.y = source z of vfetch_mini r2._z__ Offset=2 (18, ordinal 4), not written again (24, 25, 26, 40 write r2.x, r2.z, r2.w). u and v are the fourth halves of the mesh vertex's two elements, as in 0x8123... (the runtime reads them with UvLayoutFromFetches). shader_trace refuses the export (jumps); vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt): the entry replayed by position_check.py's functions on random streams against the shader's microcode. Used by the caster pixel shader 0x85A9A5EC510A9700, which reads r0.xy * c8.xy + c8.zw"
   },
   "0xB636821F95DC9D8E": {
     "base": 0,

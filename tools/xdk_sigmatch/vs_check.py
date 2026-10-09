@@ -1,9 +1,14 @@
 """The three terrain vertex shaders run through ucode_eval.py on random patch points, against the
 closed formulas of the reading (frame-map section 13, "Terrain"). Evidence of the materials
 sub-project's Task 9, tracked by the lighting sub-project with the dump folder's path and the trial
-count as the only changes; `python vs_check.py` prints what `vs_check.txt` of Task 9 holds."""
+count as the only changes; `python vs_check.py` prints what `vs_check.txt` of Task 9 holds.
+
+`python vs_check.py --casters` (the shadows sub-project): the vertex shaders of the two shadow passes
+against their entries of vs-transforms.json, below ("the shadow casters' vertex shaders")."""
+import json
 import math
 import random
+import struct
 import sys
 from pathlib import Path
 
@@ -150,9 +155,216 @@ def run(trials=400):
     return lines
 
 
-def main():
+# --- the shadow casters' vertex shaders (shadows sub-project, plan Task 2) ------------------------
+#
+# The vertex shaders of the two shadow passes are drawn nowhere else, and a capture's rows outside the
+# main scene carry no stream dumps, so position_check.py cannot replay them. This check stands in its
+# place: a table entry of vs-transforms.json is replayed by position_check's own functions (the ones
+# that mirror the native renderer: the position fetch and its swizzle, instance_expand.h, bone_skin.h)
+# on random streams and constants laid out as the shader's dump fetches them, and the result is held
+# against the shader's microcode run on the same bytes: the clip position, the vertices an instance
+# entry's distance cut drops (the microcode gives them a NaN position), and the entry's "uv". A shader
+# marked "deformed" in the table moves its vertices in the wind; the check then runs with the sway's
+# amplitude constants zero (CASTER_SWAY_OFF) or, where there is no such switch, compares the uv alone.
+
+TABLE = Path(__file__).resolve().parents[2] / "docs" / "native-renderer" / "vs-transforms.json"
+_PI = math.pi
+# Literal tables: "vs_lit" of every shadow-pass row of the shader in the three captures of 2026-10-08
+# (out/native-evidence/shadows/task2_caster_rows.txt; one table per shader in every row).
+CASTER_LITERALS = {
+    "F160B4DA459A6D40": {},
+    "57818A7FD1C4F026": {},
+    "5F4416192E87005F": {255: [0.0, 1.0, 0.0, 0.0]},
+    "82F6433A69263C75": {255: [0.0, 1.0, 0.0, 0.0]},
+    "3A0F9098B839DDBC": {255: [0.0, 1.0, 0.0, 0.0]},
+    "87E0DB8B7C32F6A5": {255: [0.0, 1.0, 0.0, 0.0]},
+    "A8A5B2A89F70336A": {252: [0.0] * 4, 253: [2 * _PI, -_PI, 1 / (2 * _PI), 0.0], 254: [0.0, 1.0, 0.5, 0.1],
+                         255: [NAN, NAN, NAN, 5.0]},
+    "432563420047C96C": dict(zip(range(248, 256), (
+        [0.0] * 4, [-_PI, 0.5, 0.0, 0.0], [0.25, 1.0, 0.1, 0.7], [0.11, 0.23, -0.3, 0.05], [0.15, 100.0, 2 * _PI, 0.25],
+        [0.035, 0.472, 0.55, 0.9], [0.04, 0.025, 0.0, 1.0], [0.3849, 0.3, 0.019245, 0.28867501]))),
+}
+# Deformed shaders whose sway has an amplitude in constants: the registers set to zero for the position
+# check (A8A5...: instr 42, 43 multiply the displacement by c26.y and c26.x).
+CASTER_SWAY_OFF = {"A8A5B2A89F70336A": (26,)}
+# Deformed shaders without such a switch: the uv alone is compared.
+CASTER_UV_ONLY = ("432563420047C96C",)
+_VERTEX_FORMATS = {"FMT_16_16_16_16_FLOAT": 32, "FMT_16_16_FLOAT": 31, "FMT_8_8_8_8": 6}
+
+
+def dump_fetches(text):
+    """The vertex fetches of a dump in order, in the form a capture row lists them ("fetches": the
+    stream vfN is fetch slot 95 - N; offsets and strides in dwords; the destination swizzle as bits), each
+    with the dump's own attributes under "attrs"."""
+    import gen_transform_table as gt
+    out, stream, stride = [], None, None
+    for ins in ue.st.parse(text):
+        if not ins.op.startswith("vfetch"):
+            continue
+        if ins.op == "vfetch_full":
+            stream, stride = ins.fetch_slot, int(ins.attrs["Stride"])
+        out.append({"i": len(out), "instr": ins.index, "slot": 95 - stream, "reg": ins.dest,
+                    "fmt": _VERTEX_FORMATS[ins.attrs["DataFormat"]], "off": int(ins.attrs.get("Offset", 0)),
+                    "stride": stride, "mini": ins.op == "vfetch_mini", "signed": ins.attrs.get("Signed") == "true",
+                    "norm": ins.attrs.get("NumFormat") != "integer", "exp": 0, "swz": gt.swizzle_bits(ins.dest_swz),
+                    "attrs": dict(ins.attrs)})
+    return out
+
+
+def element(data, at, attrs):
+    """A vertex element's source components (x, y, z, w) as the GPU delivers them from a stream whose
+    dwords are stored byte-reversed (fetch-constant endian 2, as every stream of the captures): a dword's
+    low half or byte is the first component."""
+    fmt = attrs["DataFormat"]
+    if fmt == "FMT_16_16_16_16_FLOAT":
+        m = struct.unpack_from(">4e", data, at)
+        return [m[1], m[0], m[3], m[2]]
+    if fmt == "FMT_16_16_FLOAT":
+        m = struct.unpack_from(">2e", data, at)
+        return [m[1], m[0], 0.0, 1.0]
+    if fmt == "FMT_8_8_8_8":
+        word = struct.unpack_from(">I", data, at)[0]
+        parts = [(word >> (8 * k)) & 0xFF for k in range(4)]
+        return [float(p) for p in parts] if attrs.get("NumFormat") == "integer" else [p / 255.0 for p in parts]
+    raise NotImplementedError(f"vertex format {fmt}")
+
+
+def _random_stream(rng, fetches, slot, count, bones=0):
+    """`count` vertices of the stream on `slot`: random halves in every dword, a random bone index below
+    `bones` in each byte of an integer 8_8_8_8 element, random bytes (the first never zero) in a
+    normalised one."""
+    stride = next(f["stride"] for f in fetches if f["slot"] == slot)
+    words = {f["off"]: f for f in fetches if f["slot"] == slot and f["fmt"] == 6}
+    out = bytearray()
+    for _ in range(count):
+        for dword in range(stride):
+            if dword in words and not words[dword]["norm"]:
+                out += bytes(rng.randrange(bones) for _ in range(4))
+            elif dword in words:
+                out += bytes([rng.randrange(1, 256)] + [rng.randrange(256) for _ in range(3)])
+            else:
+                out += struct.pack(">2e", rng.uniform(-2, 2), rng.uniform(-2, 2))
+    return bytes(out)
+
+
+def caster_trial(hash_, entry, text, rng, sway=False):
+    """One random draw of a caster vertex shader, a dozen vertices: (vertices that agree, vertices,
+    vertices the entry's cut drops). `sway`: leave the sway's amplitude constants random (the microcode
+    then moves the vertices and a "deformed" entry is expected to disagree)."""
+    import position_check as pc
+    spec = pc.parse_entry(entry)
+    fetches = dump_fetches(text)
+    bank = [rng.uniform(-1, 1) for _ in range(64 * 4)]
+    bank[15] = rng.uniform(2.0, 4.0)                                # c3.w: a w that is not near zero
+    streams, vertices, bones, copies = {}, 12, 6, 5
+    if spec["kind"] == "instance":
+        per_copy, first = rng.randrange(4, 9), rng.randrange(3)
+        bank[48:52] = [1.0 / per_copy, float(per_copy), float(first), rng.random()]        # c12
+        bank[28:31] = [rng.uniform(-50, 50) for _ in range(3)]                             # c7.xyz: the offset
+        bank[36:39] = [bank[28 + k] + rng.uniform(-1, 1) for k in range(3)]                # c9.xyz: the eye
+        bank[54] = rng.uniform(4.0, 30.0)                                                  # c13.z: the cut
+        rows_slot = fetches[spec["rows"][0]]["slot"]
+        streams[rows_slot] = _random_stream(rng, fetches, rows_slot, first + copies)
+        mesh_slot = fetches[spec["pos_fetch"]]["slot"]
+        streams[mesh_slot] = _random_stream(rng, fetches, mesh_slot, per_copy)
+        idx = sorted(rng.sample(range(per_copy * copies), vertices))
+    else:
+        for slot in sorted({f["slot"] for f in fetches}):
+            streams[slot] = _random_stream(rng, fetches, slot, bones if slot != 95 else vertices, bones)
+        idx = list(range(vertices))
+    if not sway:
+        for reg in CASTER_SWAY_OFF.get(hash_, ()):
+            bank[4 * reg:4 * reg + 4] = [0.0] * 4
+    bank = [pc.f32(x) for x in bank]                                # single precision, as the game's constants
+    row = {"fetches": fetches, "idx": idx, "base_vertex": 0, "bank": bank, "ib": {"max_index": max(idx)}}
+
+    def get(slot):
+        if slot not in streams:
+            raise pc.Unreadable(f"no stream on slot {slot}")
+        return pc.Stream(streams[slot], len(streams[slot]), 2)
+
+    positions, info = pc.replay(row, spec, get)
+    dropped = info.get("cut") or [False] * len(positions)
+    consts = {i: bank[4 * i:4 * i + 4] for i in range(64)}
+    consts.update(CASTER_LITERALS[hash_])
+    stride = {}
+
+    def vfetch(stream, offset, attrs, index):
+        if "Stride" in attrs:
+            stride[stream] = int(attrs["Stride"])
+        data = streams[95 - stream]
+        at = (int(round(index)) * stride[stream] + offset) * 4
+        if index != round(index) or at < 0 or at + 4 > len(data):
+            raise IndexError(f"vf{stream} index {index}")
+        return element(data, at, attrs)
+
+    def no_texture(slot, coords, attrs):
+        raise KeyError(f"vertex texture tf{slot}")
+
+    agree = 0
+    for k, index in enumerate(idx):
+        m = ue.Machine(text, consts, no_texture, regs={0: [float(index), 0.0, 0.0, 0.0]}, vfetch=vfetch)
+        out = m.run()
+        ok = True
+        if hash_ not in CASTER_UV_ONLY:
+            if dropped[k]:
+                ok = any(x != x for x in out["oPos"])
+            else:
+                ok = close(out["oPos"], pc.project(row, spec, positions[k]), 1e-3)
+        vertex = info["pairs"][k][1] if spec["kind"] == "instance" else index
+        for name, uv in (entry.get("uv") or {}).items():
+            f = fetches[uv["fetch"]]
+            if f["fmt"] != uv["format"] or f["off"] != uv["offset"] or uv.get("stages"):
+                ok = False
+                continue
+            source = element(streams[f["slot"]], (vertex * f["stride"] + f["off"]) * 4, f["attrs"])
+            ok = ok and close([out[name[:2]]["xyzw".index(name[3])]], [source["xyzw".index(uv["src"])]], 1e-6)
+        agree += ok
+    return agree, len(idx), sum(dropped)
+
+
+def caster_check(hash_, entry=None, trials=100, seed=9, dumps=DUMPS, sway=False):
+    """`trials` random draws of one caster vertex shader against its table entry (or `entry`): (vertices
+    that agree, vertices, vertices cut)."""
+    if entry is None:
+        entry = json.loads(TABLE.read_text())["0x" + hash_]
+    text = ue.load(dumps, hash_, "vert")
+    rng = random.Random(seed)
+    total = [0, 0, 0]
+    for _ in range(trials):
+        for i, n in enumerate(caster_trial(hash_, entry, text, rng, sway)):
+            total[i] += n
+    return tuple(total)
+
+
+def run_casters(trials=100, dumps=DUMPS):
+    """Every shader of CASTER_LITERALS against the committed table: (report lines, shaders that do not
+    agree in every vertex)."""
+    table = json.loads(TABLE.read_text())
+    lines, bad = [], 0
+    for hash_ in CASTER_LITERALS:
+        entry = table["0x" + hash_]
+        form = "instance" if "instance" in entry else "skin" if "skin" in entry else "plain"
+        agree, n, cut = caster_check(hash_, entry, trials, dumps=dumps)
+        what = "uv only (deformed, no switch for the sway)" if hash_ in CASTER_UV_ONLY else \
+            "position" + (" with the sway's amplitude zero" if hash_ in CASTER_SWAY_OFF else "") + \
+            (" and uv" if entry.get("uv") else ", no uv in the entry") + (f", {cut} vertices cut" if form == "instance" else "")
+        lines.append(f"{hash_} ({form}): {agree} of {n} random vertices agree with the table entry; compared: {what}")
+        bad += agree != n or n == 0
+    return lines, bad
+
+
+def main(argv=None):
+    """Without arguments: the three terrain shaders (as Task 9 printed them). --casters: the shadow
+    casters' vertex shaders against their table entries; exit code 1 if one disagrees."""
+    argv = sys.argv[1:] if argv is None else argv
+    if "--casters" in argv:
+        lines, bad = run_casters()
+        print("\n".join(lines))
+        return 1 if bad else 0
     print("\n".join(run()))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

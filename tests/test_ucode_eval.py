@@ -183,6 +183,49 @@ LOOP = """/*    0.0 */       exec    // PredicateClean=false
 /*    5   */          add o0, r1, r2
 """
 
+# The additions of the shadows sub-project (plan Task 2): getWeights2D, fetches with texel offsets, and the
+# predicated branch as the mask shader 0F99810F072BF0FC has it (a jump on the cleared predicate over a block
+# whose instructions all carry (p0), with a `serialize` line whose instruction is printed without a number).
+WEIGHTS = """/*    0.0 */       exec
+/*    1   */          getWeights2D r2.__xy, r0.yz, tf7, MagFilter=linear, MinFilter=linear, OffsetX=-0.5, OffsetY=-0.5
+/*    2   */          getWeights2D r3.xy__, r0.yz, tf7, MagFilter=linear, MinFilter=linear
+/*    3   */          getWeights2D r4.yx__, r0.yz, tf5, UnnormalizedTextureCoords=true, OffsetX=0.5
+/*    0.1 */       exece
+/*    4   */          max oC0, r2, r2
+"""
+
+TEXEL_FETCH = """/*    0.0 */       exec
+/*    1   */          tfetch2D r1.x___, r0.yz, tf7, OffsetX=-1, OffsetY=-1
+/*    2   */          tfetch2D r1._x__, r0.yz, tf7, OffsetY=-1
+/*    3   */          tfetch2D r1.__x_, r0.yz, tf7, OffsetX=-1
+/*    4   */          tfetch2D r1.___x, r0.yz, tf7
+/*    0.1 */       exece
+/*    5   */          max oC0, r1, r1
+"""
+
+BRANCH = """/*    0.0 */       exec    // PredicateClean=false
+/*    1   */          sgt r1.x___, c1.xxxx, r0.wwww
+/*    2   */          sgt r3.xy__, -r_abs[0].xxxx, c2.xxxx
+              +       setp_ne r0._, r1.x
+/*    0.1 */ (!p0) jmp L15
+/*    1.0 */  (p0) exec
+/*    3   */     (p0) add r4.xy__, r_abs[0].xyyy, c1.yyyy
+/*    4   */          serialize
+                 (p0) mul r4.xy__, r4.xyyy, c1.zzzz
+              +  (p0) maxs r5.___w, c2.yy
+/*    5   */     (p0) mulsc r3._y__, c2.z, r4.x
+                label L15
+/*    1.1 */       exec    // PredicateClean=false
+/*    6   */          sgt r0.x___, r0.wwww, c1.wwww
+/*    7   */          setp_ne r0._, r0.x
+/*    2.0 */ (!p0) jmp L20
+/*    2.1 */  (p0) exec
+/*    8   */     (p0) add r3.x___, r0.wwww, c2.wwww
+                label L20
+/*    3.0 */       exece
+/*    9   */          mad oC0.xyz1, r3.xxxx, c2.yyyy, r3.yyyy
+"""
+
 
 class HandWrittenDumps(unittest.TestCase):
     def test_vector_alu(self):
@@ -390,6 +433,107 @@ class HandWrittenDumps(unittest.TestCase):
         text = "/*    0.0 */       exece\n/*    1   */          cube r1, r0.zzxy, r0.yxzz\n"
         with self.assertRaises(NotImplementedError):
             run(text, regs={0: [1, 2, 3, 4]})
+
+
+class MaskShaderInstructions(unittest.TestCase):
+    """Plan Task 2 of the shadows sub-project: what the two mask shaders need beyond the lit families."""
+
+    def test_get_weights_by_hand(self):
+        # The emulator's rule (thirdparty/rexglue-sdk/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp 724
+        # to 730, 949 to 970): weight = frac(coordinate * size + Offset - 0.5), the 0.5 being the translator's
+        # own ("for coordinate lerp factors"); the size is not applied to unnormalised coordinates. Its
+        # rounding epsilon of 1.5 / 1024 texel is not modelled.
+        sizes = {7: (8, 4), 5: (64, 64)}
+        out, m = run(WEIGHTS, regs={0: [9, 0.3125, 0.40625, 9], 2: [5, 6, 7, 8]}, tex_size=sizes)
+        # 1: u * 8 = 2.5, v * 4 = 1.625; with Offset -0.5: frac(2.5 - 1) = 0.5, frac(1.625 - 1) = 0.625.
+        #    Destination `__xy`: z takes the first weight, w the second; x and y are kept.
+        self.assertEqual(m.r[2], [5.0, 6.0, 0.5, 0.625])
+        # 2: without offsets: frac(2.5 - 0.5) = 0, frac(1.625 - 0.5) = 0.125.
+        self.assertEqual(m.r[3][:2], [0.0, 0.125])
+        # 3: unnormalised: frac(0.3125 + 0.5 - 0.5) = 0.3125 and frac(0.40625 - 0.5) = 0.90625; `yx__` swaps.
+        self.assertEqual(m.r[4][:2], [0.90625, 0.3125])
+        self.assertEqual(out["oC0"], [5.0, 6.0, 0.5, 0.625])
+        self.assertEqual(m.weights, [(1, 7, (0.3125, 0.40625), (0.5, 0.625)), (2, 7, (0.3125, 0.40625), (0.0, 0.125)),
+                                     (3, 5, (0.3125, 0.40625), (0.3125, 0.90625))])
+        # A negative coordinate: frac is x - floor(x): u * 8 = -0.75, frac(-0.75 - 1) = 0.25.
+        _, m = run(WEIGHTS, regs={0: [9, -0.09375, 0.40625, 9]}, tex_size=sizes)
+        self.assertEqual(m.r[2][2], 0.25)
+
+    def test_get_weights_needs_the_texture_size(self):
+        with self.assertRaises(KeyError):
+            run(WEIGHTS, regs={0: [9, 0.3125, 0.40625, 9]}, tex_size={5: (64, 64)})
+        with self.assertRaises(KeyError):
+            run(WEIGHTS, regs={0: [9, 0.3125, 0.40625, 9]})
+
+    def test_fetch_with_texel_offsets(self):
+        # A point-sampled 8 x 4 map whose texel (ix, iy) reads 10 * iy + ix. ue.point_texel is the texel a
+        # point fetch reads: floor(coordinate * size + Offset) (the emulator adds the offset in texels before
+        # it samples, dxbc_translator_fetch.cpp 724 to 726).
+        seen = []
+
+        def sampler(slot, coords, attrs):
+            ix, iy = ue.point_texel(coords, (8, 4), attrs)
+            seen.append((ix, iy))
+            return [10.0 * iy + ix, -1.0, -1.0, -1.0]
+
+        # u * 8 = 2.5, v * 4 = 1.625: the fetch without an offset reads texel (2, 1), the others its left,
+        # upper and upper-left neighbours.
+        out, m = run(TEXEL_FETCH, regs={0: [9, 0.3125, 0.40625, 9]}, sampler=sampler)
+        self.assertEqual(seen, [(1, 0), (2, 0), (1, 1), (2, 1)])
+        self.assertEqual(out["oC0"], [1.0, 2.0, 11.0, 12.0])
+        self.assertEqual(ue.fetch_offsets({"OffsetX": "-1", "OffsetY": "-0.5"}), (-1.0, -0.5, 0.0))
+        self.assertEqual(ue.fetch_offsets({}), (0.0, 0.0, 0.0))
+        # Just left of a texel edge the offset fetch reads one texel further: u * 8 = 1.999 -> texels 0 and 1.
+        self.assertEqual(ue.point_texel((1.999 / 8, 0.5), (8, 4), {"OffsetX": "-1"}), (0, 2))
+        self.assertEqual(ue.point_texel((-0.01, 0.5), (8, 4), {}), (-1, 2))        # floor, not truncation
+
+    def test_predicated_branch_pair(self):
+        consts = {1: [20, 0.5, 2, 30], 2: [0, 1, 0.25, 100]}
+        # r0.w = 10: 20 > 10, the first block runs: r4.xy = (|r0.x| + 0.5) * 2, (|r0.y| + 0.5) * 2 = (4, 7);
+        # the `serialize` line's instruction and its scalar half run under (p0): r5.w = 1; r3.y = 0.25 * 4.
+        # 10 > 30 is false: the second block is jumped over and r3.x stays the 0 of instruction 2.
+        out, m = run(BRANCH, consts=consts, regs={0: [-1.5, 3, 0, 10], 3: [9, 9, 9, 9]})
+        self.assertEqual(m.r[4][:2], [4.0, 7.0])
+        self.assertEqual(m.r[5][3], 1.0)
+        self.assertEqual(out["oC0"], [1.0, 1.0, 1.0, 1.0])              # 0 * 1 + 1; alpha the constant 1
+        # r0.w = 25: neither block runs; instruction 2 has zeroed r3.xy (-|x| > 0 is never true).
+        out, m = run(BRANCH, consts=consts, regs={0: [-1.5, 3, 0, 25], 3: [9, 9, 9, 9], 4: [7, 7, 7, 7]})
+        self.assertEqual(m.r[4], [7.0] * 4)
+        self.assertEqual(m.r[5][3], 0.0)
+        self.assertEqual(out["oC0"], [0.0, 0.0, 0.0, 1.0])
+        # r0.w = 40: only the second block: r3.x = 40 + 100.
+        out, m = run(BRANCH, consts=consts, regs={0: [-1.5, 3, 0, 40], 3: [9, 9, 9, 9]})
+        self.assertEqual(out["oC0"], [140.0, 140.0, 140.0, 1.0])
+        self.assertEqual(m.r[5][3], 0.0)
+
+
+@unittest.skipUnless(DUMPS.is_dir(), NO_DUMPS)
+class RealMaskDumps(unittest.TestCase):
+    def test_both_mask_shaders_run_and_take_their_branches(self):
+        """The interpreter runs both dumps to the end. With every constant 0 and the literals where the
+        shaders read them, 1B4B's depth 1 - 0 is not beyond c46.x = 2 (the near side: c12.w and alpha 0) and
+        0F99's distance 0 is inside neither cascade's range (both blocks jumped over, then the fade is 0)."""
+        zero = {k: [0.0] * 4 for k in (12, 31, 36, 37, 38, 39, 40, 41, 42, 43, 46, 47, 77, 116, 117, 118, 119)}
+        fetched = []
+
+        def sampler(slot, coords, attrs):
+            fetched.append(slot)
+            return [0.0] * 4
+
+        text = ue.load(DUMPS, "1B4B5AE12EF270CA", "frag")
+        consts = {**zero, 12: [0, 0, 0, 0.5], 46: [2.0, 0, 0, 0], 254: [0.5, 1.0, 0.0, -1.0], 255: [2.0, 0, 0, 0]}
+        out, m = run(text, consts=consts, regs={1: [10, 20, 0, 0]}, sampler=sampler, tex_size={7: (1024, 1024)})
+        self.assertEqual(out["oC0"], [0.5, 0.5, 0.5, 0.0])
+        self.assertEqual(fetched, [13])
+        self.assertEqual(m.weights, [])
+        del fetched[:]
+        text = ue.load(DUMPS, "0F99810F072BF0FC", "frag")
+        consts = {**zero, 12: [0, 0, 0, 0.5], 119: [0, 0, 0, 1.0], 248: [10.0, 1 / 12, -1.0, 2.0],
+                  249: [0.0, 1.0, 0.5, 0.1]}
+        out, m = run(text, consts=consts, regs={0: [10, 20, 0, 0]}, sampler=sampler, tex_size={7: (1024, 1024)})
+        self.assertEqual(fetched, [13])
+        self.assertEqual(out["oC0"], [0.0, 0.0, 0.0, 1.0])
+
 
 
 @unittest.skipUnless(DUMPS.is_dir(), NO_DUMPS)

@@ -293,10 +293,233 @@ Of the mesh draws alone (389.5 and 446.8 per frame) the checked pairs are 331.0 
 2. **The value of `c109`**, without which the facing factor of the terrain layers (36% to 41% of the draws) cannot be computed. If it were the sun's direction, `facing = sat(8 * (N . c80))`; that is a guess. **Closed** by plan Task 1: `c109.xyz` is the sun's direction, bit-equal to `c80.xyz` of a one-light draw in every colour draw of the two GPU logs, and it is the direction the frame's block carries (frame-map section 14, "Pixel constants"; "The sun" above); the facing factor is `sat(8 * (N . c109))` with the literal 8 from each shader's table entry (`facing_scale`).
 3. **Bool states**: `b128` (objects: divide by alpha), `b129`, `b132` (trees), `b133..b135`. Only the device's word is known (`0x100`). **Closed for the capture, not used by the pass**: the device's bool word was held against the GPU and refuted, and the word the capture follows through the game's two bool writers (`"pbool_load"` in the discovery rows) equals the GPU's in every main-scene colour execution checked, 5,387 of 5,387 and 3,314 of 3,314 (frame-map section 14, "Pixel constants", "The bool word"). The pass itself reads no bool: by spec ruling 16 the blocks under `b133`, `b134` and `b135` are not drawn. What stays open is in frame-map section 14, "Validation", "Limitations".
 4. **Mesh pixel shader literals** are read from idioms. **`7CD5...`'s `c255.w`, `c255.z`**: closed since (plan Task 1: 0.6 and 0.4; "Tree leaves", item 1).
-5. **Not run**: `7CD5...` with `D7DD...` / `2D40...` (literal tables; run since plan Task 8c: "Tree leaves", item 3). **Not read**: `401A...` (it has no tf8 and takes its shadow from the two cascades tf6 / tf7 directly; `getWeights2D` is not interpreted), the 2- and 4-light shaders' lights 1 to 3, every `b135` block.
+5. **Not run**: `7CD5...` with `D7DD...` / `2D40...` (literal tables; run since plan Task 8c: "Tree leaves", item 3). **Not read**: `401A...` (it has no tf8 and takes its shadow from the two cascades tf6 / tf7 directly; `getWeights2D` was not interpreted then and is since the shadows sub-project, "Shadows" below), the 2- and 4-light shaders' lights 1 to 3, every `b135` block.
 6. **Skinned normals** (`D4D5...`, `A1F7...`): closed since (plan Task 5a; "Objects" above and frame-map section 14, "Normals"): the bone transform and the step that makes the normal orthogonal to the tangent, checked against the microcode by a script of that task's evidence. Open: the formula is not in `light_formulas.py`, and the tangent element it reads is not among the light inputs the capture records, so the native skinned normal is built without the tangent step ("Objects").
 7. **Inputs the spec's capture list (design 3) does not have**: the probe weights stream vf1 and the constants `c28..c39` with the position's fourth component (objects with `79EA...`, `D4D5...`, `A1F7...`, trunks, leaves: 76.0 draws per frame of the checked ones at the bridge and 182.5 by the trees, where `8D90...` with `79EA...` alone is 41.5); the colour stream's index offset `c20.x`; for plants the instance colour and the bend constants `c45`. **Closed**: the light inputs carry all of them since plan Task 4 (`c28..c39`, `c20.x`, `c45`; frame-map section 14, "Light inputs"), and the geometry cache builds the probe weights and set indices (plan Task 5b), the instance colours (5b) and the bend inputs (8b) ("Normals", "Probe colours", "Plants").
 
 ## Evidence
 
 In `out/native-evidence/lighting/task2/` (git-ignored): `light_check_all.txt` (`light_check.py --all --trials 400`), `light_check_list.txt` (the 32 pairs), `coverage_bridge_trees.txt`, `vertex_constants_bridge_trees.txt`, `vertex_copies_bridge_trees.txt` and `fetch_layouts_bridge_trees.txt` with their scripts `vertex_constants.py`, `vertex_copies.py`, `fetch_layouts.py` (one pass each over the two captures: the vertex bank's registers the formulas read, their comparison with the pixel bank, and the fetch layouts and the position's fourth component of the shaders named here), `tess_c19_bridge_trees.txt` (`tess_c19.py`: the tess rows' vertex `c19` against pixel `c23`, and their zero sun constants), `mutations.txt` (the light tests run against five deliberately wrong functions), `fix1_recounts_bridge_trees.txt` (`fix1_recounts.py`: the colour stream's offset against the stream's size, the a0 index per shader, `c26`, `c27.w`, `c11.x`), `fix1_interpreter_mutations.txt` (the interpreter's hand tests against 18 broken conventions), `fix1_light_check_all.txt` (the 32 pairs after fix round 1), `vs_check.txt`, `ps_check.txt` (the tracked copies of the Task 9 checkers). To rerun: `python tools/xdk_sigmatch/light_check.py --all`, `python -m unittest discover -s tests -p "test_light_check.py"`.
+
+## Shadows
+
+Native renderer sub-project 8 (shadows), plan Task 2, 2026-10-08. The two pixel shaders that write the game's screen mask as closed formulas, the lit families with the mask as an input, and the shaders the game draws into its two shadow maps. Nothing here was run in the game. Every statement rests on the shader dumps, on the four GPU constant logs of the lighting sub-project's Task 1 (`out/native-evidence/lighting/task1_bridge1_gpu_pconst.log.gz`, `task1_trees1_...`, `task1_bridge3_...`, `task1_trees2_...`: 60, 60, 16 and 16 frames at the bridge and by the trees) and on the three captures of 2026-10-08 whose rows hold the shadow passes (`out/build/win-amd64-release/logs/native_discovery_20261008_105316.jsonl` and `_105833.jsonl` at the bridge, `_105659.jsonl` at the third spot; 8 frames each). Evidence files are in `out/native-evidence/shadows/`, all named `task2_*` (list at the end). What only a run can settle is listed under "Inputs that stand on inference"; the discovery task of the same plan (frame-map section 15) is where those are settled.
+
+### Result
+
+| What | Shader | Function of `light_formulas.py` | State |
+|---|---|---|---|
+| The mask of a pixel | `0x0F99810F072BF0FC` | `mask_0f99` = `mask_near`, `mask_far`, `mask_combine` | closed: 2000 of 2000 random pixels, largest relative difference 1.6e-11 |
+| The mask of a distant pixel | `0x1B4B5AE12EF270CA` | `mask_1b4b` = `mask_far` and a fade by depth | closed: 2000 of 2000, 6.9e-12 |
+| The near cascade's term alone | `0F99...`, `d < c12.x` | `mask_near` | 2000 of 2000 (exact: a count of taps) |
+| The far cascade's term alone | both | `mask_far` | 2000 of 2000 each, 2.5e-11 and 9.1e-12 |
+| The mask in the lit families | the 40 pairs of `light_check.py`'s `FAMILIES` | unchanged: `sun_gate_single`, `sun_gate_multi`, `leaf_mask` | the mask was already a random input of every family's check; with the formula taking it as 1 every masked pair fails ("The lit families") |
+| Casters | 9 shader pairs | `shadow-casters.json`, `vs-transforms.json` | all nine in the table; two limitations ("Casters") |
+
+(`task2_light_check_mask.txt`: `light_check.py --family mask`, `--family mask-near`, `--family mask-far`, 2000 trials each; tolerance 1e-4 relative, over all four output components.)
+
+What differs from the research note (`.superpowers/sdd/shadows-research.md`) and the spec, found by this reading:
+
+1. *The literal tables are not in the binary dumps.* `shader_<hash>.ucode.bin.frag` is the microcode alone (`0F99...`: 345 words: the dump numbers its 103 instructions from 11, three words each with the control flow before them, and three zero words end the file; `1B4B...`: 123 words, 35 instructions numbered from 5). The literals of both shaders are in the GPU constant logs, which hold all of `c248..c255` at every execution ("The literals").
+2. *`c77.x`, `c46`, `c47` are known at 152 frames, not one.* The four logs hold them at both mask draws of every frame, and they are one value each for `0F99...` in all of them ("Inputs").
+3. *The three depth constants of `1B4B...` are `c12` over again.* Its start, fade start and fade end are the depth values of the view distances `c12.x + c12.z` (22), `c12.y` (35) and `c12.y + 10` (45) in every one of the 152 frames ("The far shader").
+4. *`0x57818A7FD1C4F026` had a table entry* (a plain one, from the materials sub-project). Without one were `0xA8A5...` and `0x87E0...`; and none of the five alpha-tested casters' vertex shaders had the `"uv"` their pixel shaders need.
+5. *A pixel where no cascade applies gets `c12.w`, the sky included.* Beyond `c12.y + 10` units both terms are zero and the fade is complete; a depth of the clear value is such a pixel (with the logged `c119` its distance is `1 / (c119.z + c119.w)`, about 5,000 units). The spec's design 5 gives the mask 1 there; no lit surface is drawn at the clear depth, so the difference shows only where a draw that writes no depth (a blended one) lies over the sky.
+6. *The rows of a pass outside the main scene carry no stream dumps*, so `position_check.py` cannot replay a caster's vertex shader on the existing captures. `vs_check.py --casters` checks the table entries against the microcode instead ("Casters").
+
+What the note states about the two shaders' arithmetic (its section 1, "The mask pass", instruction numbers included) was found as stated; the compare directions, the tap pairing and the fade's target are now machine-checked.
+
+### The interpreter
+
+`ucode_eval.py` gained what the two shaders need (`tests/test_ucode_eval.py`, `MaskShaderInstructions`: hand-computed):
+
+- **`getWeights2D`**: the linear filter's two lerp factors, `frac(coordinate * size + Offset - 0.5)` per axis, in the source's x and y. That is the rule of the SDK's translator (`thirdparty/rexglue-sdk/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp`, lines 724 to 730 and 949 to 970: the offsets are added in texels, 0.5 is subtracted "for coordinate lerp factors", then `frc`). The texture's size is the caller's (`tex_size`). With the shaders' offsets of -0.5 the factors are `frac(coordinate * size)`.
+- **Fetches with texel offsets** (`OffsetX=-1`): the sampler callback gets the attributes; `point_texel` is the texel a point fetch reads, `floor(coordinate * size + offset)`.
+- The predicated branch as `0F99...` has it (a jump on the cleared predicate over a block whose instructions carry `(p0)`, a `serialize` line whose instruction has no number) ran already; a test now pins it.
+
+Not modelled: the translator's own rounding offset of 1.5 / 1024 texel on every fetch coordinate (an emulator measure against fetches that land between texels), and single precision.
+
+### The literals
+
+The emulated GPU's registers at every execution of the two shaders in the four logs, one value per register in all 152 frames (`task2_gpu_log_mask_registers.txt`, made by `task2_mine_gpu_log.py`; the bits are in the file):
+
+| Register | `0F99...` | `1B4B...` |
+|---|---|---|
+| `c248` | (10, 1/12, -1, 2) | not read |
+| `c249` | (0, 1, 0.5, 0.1) | not read |
+| `c250` | (-0.480026, -0.597710, -0.194983, 0.767022) | |
+| `c251` | (0.473434, -0.791559, -0.203345, 0.185461) | |
+| `c252` | (-0.073580, 0.412458, -0.695914, 0.507431) | |
+| `c253` | (-0.405810, -0.932615, 0.962340, 0.519456) | |
+| `c254` | (-0.326212, -0.321940, 0.620716, -0.893124) | (0.5, 1, 0, -1) |
+| `c255` | (-0.840144, 0.896420, 0.457137, 0.064425) | (2, 0, 0, 0) |
+
+In `0F99...`: `c248.x` = 10 is how far beyond `c12.y` the far cascade is still read, `c248.y` the weight of a near tap, `c249.w` = 0.1 the slope of the fade (1 / 10); the others are the 0, 1, 0.5, -1 and 2 of the arithmetic. `c250..c255` are the twelve tap offsets, with **the x of a tap in one register and its y in another** (instr 33 to 50: one register's pair is multiplied by the rotation's two terms, the other's is added times the same terms exchanged):
+
+```
+(c251.z, c254.z) (c251.w, c254.w)   (c253.z, c250.z) (c253.w, c250.w)   (c252.z, c255.z) (c252.w, c255.w)
+(c255.x, c252.x) (c255.y, c252.y)   (c251.x, c250.x) (c251.y, c250.y)   (c254.x, c253.x) (c254.y, c253.y)
+```
+
+That is `light_formulas.MASK_NEAR_TAPS`: (-0.203345, 0.620716), (0.185461, -0.893124), (0.962340, -0.194983), (0.519456, 0.767022), (-0.695914, 0.457137), (0.507431, 0.064425), (-0.840144, -0.073580), (0.896420, 0.412458), (0.473434, -0.480026), (-0.791559, -0.597710), (-0.326212, -0.405810), (-0.321940, -0.932615): twelve points inside the unit disc, the 12-tap Poisson disc of the published shader samples (a recognition, not evidence; the pairing is what the check holds: with the pairs read within a register, or one tap's x and y exchanged, the check fails).
+
+### The mask of a pixel: `0x0F99810F072BF0FC`
+
+```
+depth = tf13((|pixel| + 0.5 + c46.zw) * c46.xy)                      the scene depth at the pixel's centre
+S     = (X, -Y, 1 - depth, 1),  X = (2 |px| + 1 + 2 c46.z) * c46.x - 1,  Y likewise     (mask_screen_point)
+P     = (c116 . S, c117 . S, c118 . S) / (c119 . S)                  the world position
+d     = |P - c31.xyz|                                                 its distance from the eye
+
+near  = 0;  where d < c12.x + c12.z:                                  (mask_near)
+          (a, b)  = 2 * tf14((|pixel| + c47.xy) * c47.zw).xy - 1
+          (u, v)  = (c36 . S, c37 . S) / (c39 . S),   z = (c38 . S) / (c39 . S)
+          tap i   = (u, v) + c77.x * (a x_i + b y_i,  a y_i - b x_i)          (x_i, y_i) the twelve offsets
+          near    = c248.y * (number of taps with  1 - z > tf6(tap i))        strictly greater
+far   = 0;  where c12.x < d < c12.y + c248.x:                         (mask_far)
+          (u, v, z) = (c40 . S, c41 . S, c42 . S) / (c43 . S);   x = u * width, y = v * height
+          lit(i, j) = 1 where 1 - z >= tf7 texel (i, j), else 0               greater or equal
+          far = (1 - fx)(1 - fy) lit(ix - 1, iy - 1) + fx (1 - fy) lit(ix, iy - 1)
+              + (1 - fx) fy lit(ix - 1, iy) + fx fy lit(ix, iy),   ix = floor(x), fx = frac(x), the same in y
+
+m     = lerp(near, far, sat((d - c12.x) / c12.z))                     (mask_combine)
+mask  = lerp(m, c12.w, sat(c249.w * (d - c12.y)))                     oC0.xyz; oC0.w = 1
+```
+
+`mask_0f99(pixel, sample_depth, depth_scale, depth_offset, screen_to_world, eye, split, near_rows, far_rows, sample_rot, rot_offset, rot_scale, offsets, radius, sample_near, sample_far_texel, far_size, tap_weight, far_reach, slope)`, keyword arguments; the three parts:
+
+```python
+mask_near(P, near_rows, sample_near, rot, offsets, radius, tap_weight=None)   # lit taps * tap_weight (1 / len(offsets))
+mask_far(P, far_rows, sample_far_texel, size)                                  # the weighted sum of four texels
+mask_combine(d, near, far, split, slope)                                       # split = c12, slope = c249.w
+```
+
+`P` is any homogeneous point the rows apply to, and each cascade divides by its own fourth row. The game's rows at the mask draws are for the screen point `S`; with the world-to-map rows and the world position `(x, y, z, 1)` the functions return the same number (the screen rows are the world rows times `c116..c119`; a test compares the two forms on 50 random matrices). So a native pass that has the world position needs no screen-space rows.
+
+With `c12` = (20, 35, 2, `w`): the near map alone to 20 units from the eye, a blend to the far map over the next 2, the far map to 35, a fade to `c12.w` over the next 10, and `c12.w` beyond, where neither cascade is read. `c12.w` is **not 1**: 0.4637 and 0.4833 in the two GPU logs' frames, and one value per frame between 0.4828 and 0.5119 in the captures (the far terrain's `c11.x` is the same number, context brief A3).
+
+The far term is the linear filter of four lit / shadowed texels, not of four depths: it is what a bilinear fetch of the comparison's result at `(u, v)` minus half a texel would return. The half texel is the one the scene's `c36..c43` carry in their translation (research note, "The light matrices").
+
+Instruction numbers. Depth coordinate (11, 13, 15), fetch (16); X and Y (11, 12, 14, 15, 17), `1 - depth` (17, scalar half); S (18); world position (19 to 22, with `1 / w` in 22), minus the eye (23), `d` (24, 25); the near predicate `c12.x + c12.z > d` (25 to 27); both terms zeroed (27: `-|x| > 0` is never true). Near block: rotation coordinate (28, 29), fetch (30), `* 2 - 1` (32); S again (31, 34); offsets times the rotation (33 to 41, 45 to 50); the three row products (42 to 44) and `c39 . S` (51); `* c77.x` (52 to 56), `1 / w` (56), plus `(u, v)` (57 to 62); twelve fetches of tf6 (63 to 74); `1 - z` (75); `sgt` (76 to 78); the sum (79 to 85); `* c248.y` (86). Far predicate `d > c12.x` and `c12.y + c248.x > d` (87 to 91). Far block: S (92, 93); rows (94 to 97), division (97, 98); four fetches of tf7 at texel offsets (-1, -1), (0, -1), (-1, 0), (0, 0) (99 to 102); `getWeights2D` with offsets -0.5 (103); `1 - f` (104); the four products (105); `1 - z` (105, scalar half); `sge` (106); the weighted sum (107). Output: `far - near` (108); `d - c12.y`, `d - c12.x`, `1 / c12.z` (109); the blend weight, saturated (110); `m` (111); `c12.w - m` and the fade weight, saturated (112); the result with alpha 1 (113).
+
+### The far shader: `0x1B4B5AE12EF270CA`
+
+```
+depth = tf13((|pixel| + 0.5 + c31.zw) * c31.xy);   z = 1 - depth
+z <= c46.x:   oC0 = (c12.w, c12.w, c12.w, 0)
+else:         oC0.xyz = lerp(mask_far(S, c40..c43, tf7), c12.w, sat((z - c47.x) / c77.x));   oC0.w = 1
+```
+
+`mask_1b4b(pixel, sample_depth, depth_scale, depth_offset, far_rows, sample_far_texel, far_size, start, fade_start, fade_width, fade_to)` returns `(value, alpha)`. The far term is `0F99...`'s, the same four texels and weights, compared with `>=` (instr 27 to 36). The shader has no world position: it works by the depth value, the fade as `((1 - c47.x) - depth) * (1 / c77.x)` (9, 32, 36, 37).
+
+In view distance its three constants are `c12` again. With `c119` of the same frame's `0F99...` draw, the distance along the view axis of a pixel of depth `z` at the screen's centre is `1 / (c119.z * z + c119.w)`; over all 152 frames of the four logs that gives 21.999 to 22.003 units at `c46.x` (`c12.x + c12.z`), 34.997 to 35.004 at `c47.x` (`c12.y`) and 44.996 to 45.014 at `c47.x + c77.x` (`c12.y + c248.x`) (`task2_far_shader_depths.txt`). So where this shader writes alpha 1 the near block of `0F99...` cannot run (the distance is at least the view depth, beyond 22), and the two shaders agree there but for the fade's shape: `1B4B...`'s is linear in the depth value, `0F99...`'s in the distance. Along the view axis the two fade weights differ by at most 0.063 (at 39.7 units; arithmetic on the two expressions, not a measurement), which times `c12.w - far` is at most 0.034 of mask. **Inference**: that the game writes `1B4B...`'s result exactly at the pixels where its alpha is 1 (through the alpha test, with the stencil keeping `0F99...` off them) is read from the two rectangles' depth words and from this alpha, not from a row; the discovery task settles it. A native pass that evaluates `mask_0f99` at every pixel reproduces both rectangles up to that fade shape.
+
+Instruction numbers. Depth coordinate (5 to 7), fetch (8); `1 - depth` (10, scalar half); X and Y (5, 10, 11, 15); `z - c46.x` (12), the predicate and the alpha (13); the value of the near side `c12.w` (12, scalar half). Far side: the four rows as scalar products (14 to 25), `1 / w` (25), division (26); fetches (27 to 30); weights (31, 33, 34); `1 - z` (34, scalar half); `sge` (35); the weighted sum (36). Fade: `1 - c47.x` (9), `- depth` (32), `1 / c77.x` (32), the product, saturated (36, 37); `c12.w - far` (37); the lerp (38); output (39).
+
+### Inputs
+
+| Input | Register at the mask draw | Value and where it is from |
+|---|---|---|
+| depth scale, offset | `0F99...` `c46`; `1B4B...` `c31` | (1/1120, 1/720, 0, 0) in all 152 frames of the four logs |
+| screen to world | `c116..c119` | per frame (`0F99...` draw); one value over the 60 and 16 frames at the bridge, where the camera stands |
+| eye | `c31.xyz` of `0F99...` | (82.0721, 157.339, 50.1707) in the logs at the bridge, the pixel `c19` of the captures' rows at the same spot (`task2_caster_rows.txt`) |
+| `split` | `c12` | (20, 35, 2, 0.4637) and (20, 35, 2, 0.4833) at the mask draws of the two frames the lighting task printed in full (`task1_bridge1_mask_draws_gpu_frame_1040.txt`, `task1_trees1_mask_draws_gpu_frame_1643.txt`); in the three captures (the followed registers of the rows, `task2_c12_rows.txt`): `c12.xyz` = (20, 35, 2) in all 28,439 rows of the shadow passes and the main scene, `c12.w` one value per frame, 0.4828 to 0.5119 over the 24 frames |
+| near rows, far rows | `c36..c39`, `c40..c43` | at the mask draws: for the screen point (research note; row 0 held against the world rows times `c116..c119` there). At scene draws the same registers hold the world-to-map rows |
+| rotation coordinate | `c47` of `0F99...` | (0.5, 0.5, 1/32, 1/32) in all 152 frames: the pixel's centre over 32 |
+| kernel radius | `c77.x` of `0F99...` | 2.5 / 1024 (0.00244141) in all 152 frames: 2.5 texels of the near map |
+| far map size | the fetch constant of tf7 | 1024 x 1024 by inference: `c13.x` = `c14.x` = 1/1024 in the same two frames and in every row of the three captures; the shaders do not read `c13` or `c14`, the size enters through the fetches |
+| start, fade start, fade width | `c46.x`, `c47.x`, `c77.x` of `1B4B...` | 0.995474, 0.997163, 0.000636 at the bridge; by the trees they move in the sixth place with `c119` (above: 22, 35 and 45 units) |
+
+### Inputs that stand on inference
+
+These are inputs of the functions, so the formulas do not depend on them; the check drew each at random. What they are in the game is settled by the discovery task's rows (frame-map section 15).
+
+1. **tf13 is the scene depth of the pre-pass**, holding the reversed value (the shaders use `1 - depth` as the depth that is 0 at the near plane). The mask draws have no decoded row; inference from the arithmetic and from `c119`.
+2. **tf6 and tf7 are the near and the far map**, 1024 x 1024, holding `1 - depth` of the surface nearest the light. Inference from the blended characters' shader `0x401A...`, which binds two such textures in slots 6 and 7 (research note). **The filter of tf6 is not known**: the near taps are compared after the fetch, so a linear filter would compare interpolated depths. The check and the tests' depth maps use point fetches.
+3. **tf14, the rotation texture**: its size, contents, filter and addressing are unknown. `c47.zw` = 1/32 makes it repeat every 32 pixels if it wraps. The shader does not normalise `(a, b)`: whether the texels are unit vectors is the texture's matter.
+4. **`c36..c43` at the mask draws are the scene's world rows times `c116..c119`**: held for one row of one frame by the research note.
+5. **How the two rectangles share the screen** ("The far shader").
+6. **Which sample position a map's texel has.** The half texel in the scene's rows suggests the game's rasteriser takes the texel's corner as its sample position (inference; the register that decides it is in no row). A native map drawn with the pass's own matrix has its samples at the texel centres, and then the half texel of `c36..c38` / `c40..c42` shifts every lookup by half a texel (0.015 units in the near map, 0.034 in the far one). Left to the tasks that draw the maps; named here because the formulas take the rows as given.
+7. **Anything at night, in town or indoors**: every value here is from two daylight places.
+
+### The check
+
+`light_check.py --family mask` runs each shader's microcode on random pixels against `mask_0f99` / `mask_1b4b`; `--family mask-near` and `--family mask-far` run it where only one cascade's block decides the output (`0F99...`: `d < c12.x`, or `c12.x + c12.z < d < c12.y`; `1B4B...`: beyond its start and before its fade) against `mask_near` or `mask_far` alone. `--all` runs the three after the 40 pairs.
+
+One trial: a random pixel (whole or fractional, either sign of the position register, which the shaders read through its absolute value) and depth; screen-to-world rows built so that the pixel lies at a chosen distance from the eye, the distance drawn from one of five regimes (near only, blend, far only, fade, beyond; `1B4B...`: not far, far, fade, beyond); random cascade rows with a fourth row that is not (0, 0, 0, 1); a random `c12`; random depth and rotation offsets and scales in half of the trials; a far map of 1024 x 1024 or 512 x 2048. The textures are functions of the texel: the two maps and the rotation texture give a fixed pseudo-random value per texel and trial, and the depth texture answers only at the coordinate the shader must compute (anything else is NaN and fails the trial). For `0F99...` half of the trials replace the literal table by random offsets, reach, tap weight and slope (the form holds for any table), and in a quarter of all trials the cascades' depth rows are constants and the maps hold the compared value itself in half of their texels, so the equal case of both comparisons is reached with exact numbers. Of 400 trials of `0F99...`: 85 near only, 67 blend, 83 far only, 87 fade, 78 beyond; 100 with equal depths; 204 with a random table (`task2_mask_mutations.txt`).
+
+**Switched off: nothing.** The two shaders have no bool blocks and no fog; every instruction is reached by some trial and every constant the dumps name is read (`0F99...`: 12, 31, 36 to 43, 46, 47, 77, 116 to 119, 248 to 255; `1B4B...`: 12, 31, 40 to 43, 46, 47, 77, 254, 255). What a trial replaces are the textures (above) and, in the trials with a random table, the literals.
+
+That the check can fail (`tests/test_light_check.py`: `MaskSynthetic`, which always runs, on a hand-written shader of `0F99...`'s form with two near taps; `MaskRealDumps` on the two dumps; counts of 400 trials in `task2_mask_mutations.txt`): a near comparison reversed or made inclusive, a far comparison reversed or made strict, the far texels at offsets 0 and +1, the far weights taken as `frac(x - 0.5)` or exchanged, the fade to 1 in the place of `c12.w`, the blend over `c12.y`, the rotation reversed or dropped, a tap's x and y exchanged, the offsets paired within a register, one tap moved by a tenth of the radius, eleven taps; for `1B4B...` the fade to 1, the fade from the start depth, alpha 1 everywhere. Each disagrees (the least sensitive, one tap moved by a tenth of the radius, still in 14 of 400 trials). `MaskFormulas` pins the functions without microcode: hand-computed values; constant maps (all lit, all shadowed, and a map equal to the compared depth: shadow for the near cascade, light for the far one); a half-plane edge, where the near term's penumbra runs from one kernel extent to the other (1.80 radii unrotated, within one radius on either side under any rotation) and the far term is a ramp of exactly one texel; zeros and non-finite values.
+
+**Guards** (`light_formulas.py`; the microcode has none and the check never feeds such inputs): a projection whose `w` is zero or whose results are not finite gives 1 for that cascade without a fetch; a tap with a coordinate that is not finite counts as lit; a blend width that is not positive is a step at `c12.x`; a pixel without a finite world position gives `c12.w`; every function returns a finite number for any input.
+
+### The lit families
+
+The research note's table (its section 4) says the mask is fixed to 1 in the families' checks. It was not: since the lighting sub-project's Task 2 every trial draws the tf8 texel at random and the family's `sun_gate` is made of it ("Method" above). Nothing in the families' functions changed in this task, so every value pinned for the renderer stands, and at a mask of 1 each function is what it was. What this task adds is the proof that the mask is an input everywhere (`tests/test_light_check.py`, `LitFamiliesWithTheMask`; `task2_family_mask.txt`): with `sun_gate_single`, `sun_gate_multi` and `leaf_mask` made to ignore the mask, every one of the 38 pairs of the twelve masked families disagrees with the microcode (200 trials a pair; between 53 and 164 of them still agree, the ones whose sun term is zero), and so does each two- and four-light family with the sun in the game's slot. The far terrain has no mask (two pairs).
+
+| Family | The sun term with the mask |
+|---|---|
+| `terrain-layer` | `sun_gate = sat(8 * (N . c109)) * mask` |
+| `object`, `tree-trunk`, `plant`, `plant-lit` | `sun_gate = mask` |
+| the `-multi` forms | light 0: `shadow = (1 - facing * mask) * c112.x`, `sun_gate = (1 - shadow) * (1 + c94.x * (cone * range - 1))`; with the game's light set (the sun behind dark lanterns, `c112` one-hot at its slot) the one-light form of the sun: `--multi-sun`, `task2_light_check_multi_sun.txt` |
+| `tree-leaf`, `tree-leaf-multi` | `m1 = 0.6 * mask + 0.4` on the front light, `m2 = 0.6 * m1 + 0.4` on the back light: 0.4 and 0.64 in full shadow |
+| `terrain-far` | none: its sun is scaled by `c11.x`, the number the mask fades to (`c12.w`) |
+
+`task2_light_check_all.txt` is `light_check.py --all --trials 400` after this task: 40 of 40 pairs and 5 of 5 mask checks agree in every trial.
+
+### Casters
+
+The pairs of shaders the game draws into the two maps: every decoded row with surface word `0x10000410` of the three captures (1,855, 2,315 and 1,864 rows in 8 frames each; `task2_caster_rows.txt`, made by `task2_caster_rows.py`). All have depth word `0x00708766` (greater-equal, write).
+
+| Vertex / pixel shader | Rows (bridge, third spot, bridge) | Kind | Alpha | State |
+|---|---|---|---|---|
+| `0xF160...` / none | 464, 815, 464 | opaque | | `0x2202` = `0x00000004` |
+| `0xFBD3...` / none | 400, 376, 400 | opaque | | `0xAA000004` (no test) |
+| `0x82F6...` / none | 101, 184, 104 | opaque | | `0x00000004` |
+| `0x5F44...` / none | 8, 120, 8 | opaque | | `0x00000004` |
+| `0x4325...` / `0xF1EB...` | 368, 336, 368 | alpha-test | `tf0.w * c15.w` | test greater, reference 0, and alpha-to-mask (`0xAA00001C`); no cull (`0x2205` = `0x00219800`) |
+| `0x3A0F...` / `0x3347...` | 296, 212, 294 | alpha-test | `tf0.w` | test greater (`0x0000000C`), reference 254/255, in 32 + 32 rows 128/255 |
+| `0x5781...` / `0x3347...` | 0, 112, 0 | alpha-test | `tf0.w` | reference 128/255 |
+| `0x87E0...` / `0x3347...` | 0, 80, 0 | alpha-test | `tf0.w` | reference 254/255 |
+| `0xA8A5...` / `0x85A9...` | 218, 80, 226 | alpha-test | `tf0.w` times the dissolve | reference 254/255 |
+
+`docs/native-renderer/shadow-casters.json` holds the nine as `{vs, ps, kind, alpha: {texture_slot, scale_register}, limitation, evidence}`; `tools/xdk_sigmatch/gen_caster_table.py` writes `src/native/capture/shadow_caster_table.inc`, one `FABLE2_SHADOW_CASTER(vs, ps, kind, slot, scale_reg)` a pair (kind 0 opaque, 1 alpha-test; `ps` 0 without a pixel shader; `scale_reg` register * 4 + component, -1 none). The generator is strict (an unknown key, missing evidence, an alpha entry without a pixel shader, a pair listed twice are refused with the hash) and holds the table against `vs-transforms.json`: a caster's vertex shader needs a transform there, an alpha-tested one's also the `"uv"` of interpolator 0. Nothing includes the table yet.
+
+**The pixel shaders.** All three read tf0 at interpolator 0 (xy) times `c8.xy` plus `c8.zw` (instr 2, 3) and have no kill; the draw's alpha test decides.
+
+- `0xF1EB...`: `oC0.w = tf0.w * c15.w` (instr 4). `c15` is (0, 0, 0, 1) in all 1,072 rows.
+- `0x3347...`: `oC0 = tf0` (instr 4).
+- `0x85A9...`: `oC0.w = pass * tf0.w` (instr 14), with
+
+```
+fade   = sat(c255.x - (|c19.xyz - P| - c15.z) * c15.y)         P: the world position (interpolator 1), c19 the eye   (7 to 11)
+dither = tf10.w at (|pixel.xy| * c0.zw + c0.xy) * c50.xy       a 32 x 32 texture; c50 = (35, 22.5)                    (3, 4, 6)
+pass   = 1 where fade + dither >= c255.x, else 0               c255.x = 1 ("ps_lit" of all 524 rows)                 (12, 13)
+```
+
+  **The dissolve is not one comparison of constants**: it compares a per-pixel distance term plus a texel of a dither texture with 1. By the plan's rule it is left out and is a limitation of the table: the caster is drawn as the texture's alpha test alone. How far that is from the shader: `c15` is (62.4, 0.625, 62.4, 0) in 450 rows and (46.8, 0.8333, 46.8, 0) in 74. Within `c15.z` of the eye `fade` is exactly 1 and so is `pass` whatever the dither (it is not negative), so the alpha test alone is the shader's own result there; over the next `1 / c15.y` (1.6 or 1.2 units) the game thins the cut-out, and just beyond the vertex shader drops the copy (its cut `c13.z`: 65.1, 66.3 and 51.1 units). The mask shows a cascade's shadow only within `c12.y + 10` = 45 units of the eye, so what the limitation changes is the shadow of bushes 46.8 units and more away falling on ground nearer than 45.
+
+**Other limitations in the table.** The three deformed vertex shaders (`0xFBD3...` trunks, `0x4325...` leaves, `0xA8A5...` bushes) are drawn without their sway, as the scene's trees are. The leaves' alpha-to-mask (`0x2202` bit 4 with the offsets `0xAA`) is not read: the caster is the alpha test alone, alpha above the reference 0.
+
+**The vertex shaders.** `vs-transforms.json` gained entries for `0xA8A5B2A89F70336A` (instanced: the scheme of `0x8123...` without the instance colour: rows at fetches 0 to 2, the mesh position at fetch 3, `c12` = (1 / count, count, first), bias 0.5, offset `c7.xyz`, cut `c9.xyz` / `c13.z`; deformed) and `0x87E0DB8B7C32F6A5` (one bone per vertex, the index in the register's z; rows at fetches 3 to 5), and `"uv"` for the five alpha-tested casters' vertex shaders (`0x4325...`, `0x3A0F...`, `0x5781...`, `0x87E0...`, `0xA8A5...`); `vs_transform_table.inc` is the generator's output for it (15 lines more).
+
+`position_check.py` replays stream dumps, and rows outside the main scene have none; these vertex shaders are drawn nowhere else. So the entries are checked against the microcode: `vs_check.py --casters` builds random streams and constants laid out as the dump fetches them, replays the entry with `position_check.py`'s own functions (the position fetch and its swizzle, the instance expansion, the bone skin) and compares the projected position, the vertices an instanced entry's cut drops and the entry's uv with the shader's microcode on the same bytes (`task2_vs_check_casters.txt`, 100 draws of 12 vertices each):
+
+| Vertex shader | Form | Agree | Compared |
+|---|---|---|---|
+| `0xF160...` | plain | 1200 of 1200 | position |
+| `0x5781...` | plain | 1200 of 1200 | position, uv |
+| `0x5F44...` | one bone | 1200 of 1200 | position |
+| `0x82F6...` | four bones | 1200 of 1200 | position |
+| `0x3A0F...` | four bones | 1200 of 1200 | position, uv |
+| `0x87E0...` | one bone | 1200 of 1200 | position, uv |
+| `0xA8A5...` | instanced | 1200 of 1200 | position with the sway's amplitudes `c26` zero, the cut (626 vertices dropped by both), uv |
+| `0x4325...` | deformed | 1200 of 1200 | uv only: the sway has no switch |
+| `0xFBD3...` | deformed, no uv | not run | nothing to compare: its entry says only that the position is deformed |
+
+The five entries that existed agree as well, which is the check of the check; 21 wrong entries (rows reversed, the index's other component, another fetch, swizzles as stored, a bias of a vertex and a half, no cut, u and v exchanged, ...) each fail (`tests/test_gen_caster_table.py`). What this does not show is anything about the game's data. From the rows (`task2_caster_vertex_rows.txt`): in 524 of 524 rows of `0xA8A5...` the vertex bank's `c12` is (1 / count, count, first) with count a whole number (256, 190, 692) and the copies the largest index reaches lie inside the row's instance stream; of the 6,912 sampled positions of `0x5781...`'s 112 rows, 6,200 lie inside the light's clip volume under the row's `c0..c3`. `0x87E0...`'s bone rows are in no row. **Open**: a replay of real streams (`position_check.py`) needs shadow-pass rows with stream dumps, which the capture task of this plan can write.
+
+### Evidence
+
+In `out/native-evidence/shadows/` (git-ignored): `task2_gpu_log_mask_registers.txt` (`task2_mine_gpu_log.py`: the registers of the two mask shaders in the four GPU logs); `task2_far_shader_depths.txt` (`task2_far_shader_depths.py`); `task2_light_check_mask.txt` (`--family mask`, `mask-near`, `mask-far`, 2000 trials); `task2_light_check_all.txt` (`--all --trials 400`); `task2_light_check_multi_sun.txt` (`--multi-sun --trials 400`); `task2_mask_mutations.txt` (`task2_mask_mutations.py`: the wrong forms and the regimes); `task2_family_mask.txt` (`task2_family_mask.py`: every lit pair with the mask taken as 1); `task2_caster_rows.txt` (`task2_caster_rows.py`: the shadow-pass rows per pair, their state words and constants); `task2_c12_rows.txt` (`task2_c12_rows.py`: pixel `c12`, `c13`, `c14` over the rows); `task2_caster_vertex_rows.txt` (`task2_caster_vertex_rows.py`); `task2_vs_check_casters.txt` (`vs_check.py --casters`); `task2_add_table_entries.py`, `task2_write_caster_table.py` (how the two tables' entries were written); `task2_python_suite.txt`, `task2_native_suite.txt`. To rerun: `python tools/xdk_sigmatch/light_check.py --family mask`, `python tools/xdk_sigmatch/vs_check.py --casters`, `python -m unittest discover -s tests -p "test_light_check.py"`, `-p "test_gen_caster_table.py"`, `-p "test_ucode_eval.py"`.

@@ -1,20 +1,30 @@
 # Native renderer sub-project 9: fog, in-scatter and sky
 
-Status: implemented 2026-10-09 (plan Tasks 1 to 6, branch `native-renderer-fog`); measured in
-`docs/native-renderer/frame-map.md` section 16, "Validation", with its "Limits" and "Follow-ups".
-`--fable2_native_fog` is on by default. Of the nine success criteria four are met (2, 3, 8, 9; 3 as
-it is written, on the pictures' medians, with one texel band of the sunward view outside it). One
-is shown by a substituted measure and not as written (6: the compiled programs and region means
-against Task 4's fog-off run, no run of sub-project 8's binary), as is the third part of 4 (near
-regions within 0.002 only where no leaf shadow moves). Four are not met as written: 1 (the sky shader's `b129` path is
-read by no machine check; everything the pass uses is), 4 (far ground within 25% fails on two
-ranges that are wooded in the game and bare natively, 1.28 and 1.45; the sky within 20% fails in
-the band nearest the sun, 0.75 to 0.80, where the game has its sun and clouds), 5 (the ratios are
-all inside 0.75 to 1.25; the hue is 33 and 21 to 24 degrees off on two grass regions), 7 (30.0 fps
-but for one window at 29.2 by the trees and one at 29.6 at the third spot; the records-on capture
-median is 2.48 to 2.73 ms against 2.3, and 2.43 to 2.64 with the fog off on the same afternoon;
-view off 0.07 to 0.13 ms is met). What was ruled during the work and what was built differently is
-at the end, "Implementation notes (deviations)". Research: `.superpowers/sdd/fog-research.md`
+Status: implemented 2026-10-09 (plan Tasks 1 to 6 and a fix wave after the two whole-branch
+reviews, branch `native-renderer-fog`); measured in `docs/native-renderer/frame-map.md` section 16,
+"Validation" (binary `7242edb`) and "After the reviews: the fix wave" (the final binary, `71f7f4e`:
+runs 432 to 435), with its "Limits" and "Follow-ups". `--fable2_native_fog` is on by default. Every
+run was made with the user at the machine (`RUN UNCHECKED`), on one daylight save. Of the nine
+success criteria four are met (2, 3, 8, 9), with these said beside them: 2, one fog block was read
+and refused in a software-adapter run (`tf4-texel`, run 416: counted, not explained beyond
+inference; none in 25,409 real-GPU frames); 3 as it is written, on the pictures' medians, with one
+texel band of the sunward view outside it (green 1.11), the cause given being an inference; 8 for
+the builds that changed shader text or bindings (the pairing of run and build is by the logs'
+times), with one warning, id 1008, in two of those runs, cause not established. One is shown by a
+substituted measure and not as written (6: the compiled programs and region means against Task 4's
+fog-off run; no run of sub-project 8's binary, the bridge only, three leaf-shadowed regions over
+0.002, and not repeated by region on the final binary), as is the third part of 4 (near regions
+within 0.002 only where no leaf shadow moves). Four are not met as written: 1 (the sky shader's
+`b129` path is read by no machine check; everything the pass uses is), 4 (far ground within 25%
+fails in luminance on two ranges that are wooded in the game and bare natively, 1.28 and 1.45, and
+in red on four regions, up to 1.66; the sky within 20% fails in the band nearest the sun, 0.75 to
+0.80, where the game has its sun and clouds, measured on Task 5's binary), 5 (the ratios are all
+inside 0.75 to 1.25; the hue is 33 and 21 to 24 degrees off on two grass regions), 7 (30.0 fps but
+for one window at 29.2 by the trees, and at the third spot one at 29.6, one at 29.7 and, on the
+final binary, one at 29.2; the records-on capture median there is 2.48 to 2.73 ms against 2.3, 2.64
+to 2.92 on the final binary, and 2.43 to 2.64 with the fog off on Task 6's afternoon; view off 0.07
+to 0.13 ms is met). What was ruled during the work and what was built differently is at the end,
+"Implementation notes (deviations)". Research: `.superpowers/sdd/fog-research.md`
 (untracked; its scripts in `out/tests/fog-research/`).
 
 ## Goal
@@ -206,10 +216,22 @@ Numbered on from the nine above.
     the sky are the game's within the limits measured, the frame rate held with it on and off
     alike, and no D3D error occurred in four software-adapter runs — cost if wrong: a scene
     never seen (night, town, interior) may be drawn worse than without it;
-    `--fable2_native_fog=off` gives sub-project 8's picture back.
+    `--fable2_native_fog=off` gives sub-project 8's picture back. When this was ruled the binary
+    with the default had not been run; it has been since (run 431, and the final binary's runs 432
+    to 434 with default arguments).
 20. *User-present runs* were allowed for this sub-project by the user on 2026-10-09 ("user
     present, but you can run it anyway"; the controller's reading, ruling 9's question): made by
     the controller only, every one `RUN UNCHECKED`.
+
+21. *A lit draw is fogged only if its own pixel shader in the game has fog* (after the whole-branch
+    code review, its I1, fix a): a lit record that is no terrain record and no tree and whose pixel
+    shader is not in the fog table is left unfogged and counted — why: the game does not fog
+    `26052DEFBA688AF2`, a plant form without a fog block — cost if wrong: a later shader with fog
+    that the fog table misses is drawn unhazed, visible in the count `lit N not fogged`.
+22. *No retry across frames and no fallback to an earlier frame's tables* for a fog block that was
+    read and refused (after run 416's `tf4-texel` frame) — why: a stale table must never reach a
+    shader; one unfogged frame at the world's start is invisible — cost if wrong: a rare single
+    unfogged frame.
 
 ### Built differently
 
@@ -218,7 +240,10 @@ Numbered on from the nine above.
 - **The position from depth, not an interpolator** (ruling 14).
 - **Trees in the game's own form** (ruling 11), not the shared `Fog` of Design 4.
 - **Unlit draws fogged** (ruling 17): Design 4 says "every lit native pixel shader"; the flat
-  shader and the unlit returns now fog under a per-draw bit.
+  shader and the unlit returns now fog under a per-draw bit. An unlit trunk or leaf takes the
+  trees' form with its own scale (the fix wave).
+- **Not every lit draw is fogged** (ruling 21): Design 4 and the Goal say "every lit native draw";
+  the one lit shader without a fog block in the game is left unfogged.
 - **The sky's ray from the matrix's rows; the sky at the far plane** where the game has a cube of
   half-size 2,850 units (ruling 5's cost, the other way round: far ground is drawn natively where
   the game covers it; none lies that far in the views measured). **A frame without fog has no
@@ -234,11 +259,11 @@ Numbered on from the nine above.
 | | Verdict | Evidence (frame map section 16; files in `out\native-evidence\fog\`) |
 |---|---|---|
 | 1 | not met as written | `fog_check.py` with its test: 40 pixel shaders, the trees' form, and `F760` 218 of 218 agree (`task2_fog_check.txt`); the gap that the criterion names: `F760`'s `b129` path is unchecked |
-| 2 | met | `task6_<stamp>_block.txt`: 8 of 8 frames at each of the three spots, 4 of 4 twice; no invalid frame in any fog-on run |
-| 3 | met | `task6_145136_replay_frame1.txt`: 1.007, 0.998, 0.982; towards the sun `task6_134312_replay_frame1.txt`: 1.031, 1.071, 1.022 (one texel band's green at 1.11: `task6_sunward.txt`) |
-| 4 | not met as written; its third part by a substituted measure | `task6_oracle_regions_45s.txt`: far ground 0.99 to 1.22 on six regions, 1.28 and 1.45 on two wooded ranges; sky 0.85 to 1.05, and 0.75 to 0.80 nearest the sun (`task6_sunward.txt`); near regions within 0.002 where no leaf shadow moves (`task6_regions_summary.txt`) |
+| 2 | met | `task6_<stamp>_block.txt`: 8 of 8 frames at each of the three spots, 4 of 4 twice; `fix_165011_block.txt`: 8 of 8 on the final binary; no invalid frame in any real-GPU fog-on run (0 of 25,409 frames); one refused block (`tf4-texel`) in the software-adapter run 416, counted, not explained beyond inference |
+| 3 | met | `task6_145136_replay_frame1.txt`: 1.007, 0.998, 0.982; towards the sun `task6_134312_replay_frame1.txt`: 1.031, 1.071, 1.022 (one texel band's green at 1.11: `task6_sunward.txt`; that the excess is the game's clouds and sun is an inference) |
+| 4 | not met as written; its third part by a substituted measure | `task6_oracle_regions_45s.txt`: far ground in luminance 0.99 to 1.22 on six regions, 1.28 and 1.45 on two wooded ranges; in red over 1.25 on four regions (1.27, 1.32, 1.44, 1.66); sky 0.85 to 1.05, and 0.75 to 0.80 nearest the sun (`task6_sunward.txt`; the native shot there is of Task 5's binary, run 413); near regions within 0.002 where no leaf shadow moves (`task6_regions_summary.txt`) |
 | 5 | not met as written | `task6_regions_summary.txt`: 0.84, 1.01, 0.99 on the three named regions, all far regions 0.76 to 1.23; hue -33 and -21 to -24 degrees on two; sky 0.80 to 1.0 reported |
-| 6 | met by a substituted measure | shader test cases 166, 201, 210; `task6_old_new_programs.txt`; `task6_fogoff_against_task4.txt` (within 0.0003 on fifteen regions at the bridge) |
-| 7 | not met as written | `task6_logs_summary.txt`: runs 426 to 429 and 417, 422, 430 |
-| 8 | met | runs 397, 405, 415, 416: no error; one new warning (id 1008, once, cause not established) |
-| 9 | met | the frame map's "Validation" |
+| 6 | met by a substituted measure | shader test cases 166, 201, 210; `task6_old_new_programs.txt`; `task6_fogoff_against_task4.txt` (within 0.0003 on seventeen of 22 regions at the bridge at 45 s; three leaf-shadowed regions over 0.002); the final binary's fog-off run 435 has another camera and is not compared by region; shader test cases 210 and 213 on the final text |
+| 7 | not met as written | the logs' 150-frame windows and capture lines of runs 426 to 429 and 417, 422, 430 (`task6_logs_summary.txt` has the capture and 300-frame lines), and of the final binary's runs 433 to 435 (`fix_logs_summary.txt`): one window at 29.2 by the trees, 29.6, 29.7 and 29.2 at the third spot; capture median 2.48 to 2.92 ms against 2.3 |
+| 8 | met | runs 397, 405, 415 / 416 and, for the fix wave's shader text, 432: no error (the run-to-commit pairing is by the logs' times); warning id 1008 once in runs 416 and 432, cause not established; the default-on binary `792caf9` was first run as run 431 (real GPU, no error), not on the software adapter |
+| 9 | met | the frame map's "Validation" and "After the reviews: the fix wave", after the documents review's corrections (a refused block that three places had denied, run 413's binary, the far ground by channel, an inference that stood as fact) |

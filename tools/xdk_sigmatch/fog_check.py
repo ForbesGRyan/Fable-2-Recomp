@@ -16,7 +16,9 @@ pixel   The fog block of every pixel shader of light_formulas.FOG_SHADERS agains
         without a table fetch. The trials are those of the research script this file came from
         (out/tests/fog-research/fog_check.py: seed 1234 per shader, the same draws in the same order), so
         its counts are reproduced; what differs: the two tables are real tables (random texels, read with
-        lf.table_1d, so the addressing is part of what is compared), every other texture is light_check's
+        lf.table_1d on both sides: the check compares the coordinates the microcode fetches at, not where
+        a table's texel centres lie, which any convention would pass; that convention rests on the SDK's
+        translator source cited at lf.table_1d), every other texture is light_check's
         fixed pseudo-random one, and the literal registers are all 1 (the research drew 1 or 0.875 to
         show that the 1 of `1 - T` is a literal; the formula's 1 is 1).
         The two water shaders run with their own literal table (WATER_LITERALS, from the GPU log), because
@@ -48,7 +50,7 @@ import light_formulas as lf  # noqa: E402
 import ucode_eval as ue  # noqa: E402
 
 DUMPS = lc.DUMPS
-TOLERANCE = lc.TOLERANCE      # pixel, vertex, apply: relative, per channel
+TOLERANCE = 1e-9              # pixel, vertex, apply: relative, per channel (the worst difference is 7.2e-14)
 SKY_TOLERANCE = 1e-9          # the sky: formula and microcode are the same arithmetic in double precision
 COORD_TOLERANCE = 1e-9        # table coordinates
 

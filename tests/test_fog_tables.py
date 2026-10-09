@@ -18,6 +18,10 @@ TF5_FC = [0x02004802, 0x1FAB0086, 0x000000FF, 0x00280C14, 0x00000003, 0x00000018
 SCENE_FC = [0x88C24956, 0x199E005D, 0x0059E45F, 0x01000D11, 0x00000000, 0x00000218]
 
 
+# A made-up 2D tf17: 64 x 2 half floats, linear, pitch 64.
+TF17_2D = [0x00804802, 0x1FAD0000 | 29 | (1 << 6), 63 | (1 << 13), 0x688 << 1, 0, 0x200]
+
+
 def half_be(*values):
     return struct.pack(">%de" % len(values), *values)
 
@@ -82,6 +86,22 @@ class DecodeTablesTest(unittest.TestCase):
         dxt[1] = 0x1FAA0000 | 18
         with self.assertRaises(ValueError):
             ft.decode_1d(bytes(64), dxt)          # a format without a texel decode
+        # An integer format whose constant asks for signed components, or any exponent adjust, is refused; a
+        # float format's sign fields change nothing (tf4's and the scene's are all 1).
+        signed5 = list(TF5_FC)
+        signed5[0] |= 1 << 2
+        with self.assertRaises(ValueError):
+            ft.decode_1d(bytes(1024), signed5)
+        exp5 = list(TF5_FC)
+        exp5[3] |= 1 << 13
+        with self.assertRaises(ValueError):
+            ft.decode_1d(bytes(1024), exp5)
+        self.assertEqual(ft.sign_fields(TF4_FC), [1, 1, 1, 1])
+        self.assertEqual(ft.sign_fields(TF5_FC), [0, 0, 0, 0])
+        self.assertEqual(ft.exp_adjust(TF4_FC), 0)
+        self.assertEqual(ft.exp_adjust(exp5), 1)
+        self.assertEqual(ft.exp_adjust([0, 0, 0, 0x3F << 13, 0, 0]), -1)
+        self.assertIn("signs 1111 exp 0", ft.describe_fc(TF4_FC))
         # Swizzle constants: 4 is zero, 5 is one.
         fc5 = list(TF5_FC)
         fc5[3] = (4 | 5 << 3 | 3 << 6 | 0 << 9) << 1
@@ -128,6 +148,34 @@ class UntileSceneTest(unittest.TestCase):
         self.assertEqual(ft.scene_pixel(px, 32, 2, 0), (4.0, 0.0, 0.0, 1.0))
         self.assertEqual(ft.scene_pixel(px, 32, 3, 0), (0.0, 0.0, 0.0, 0.0))
 
+    def test_layout_by_hand_beyond_the_first_tile(self):
+        # A tile of 32 x 32 eight-byte texels is 8192 bytes: at width 64 (two tiles a row) texel (32, 0)
+        # starts the second tile at 8192 and (0, 32) the third at 16384.
+        data = bytearray(4 * 8192)
+        data[8192:8200] = half_be(5.0, 0.0, 0.0, 1.0)
+        data[16384:16392] = half_be(6.0, 0.0, 0.0, 1.0)
+        px = ft.untile_scene(bytes(data), 64, 64)
+        self.assertEqual(ft.scene_pixel(px, 64, 32, 0), (5.0, 0.0, 0.0, 1.0))
+        self.assertEqual(ft.scene_pixel(px, 64, 0, 32), (6.0, 0.0, 0.0, 1.0))
+        self.assertEqual(ft.scene_pixel(px, 64, 31, 0), (0.0, 0.0, 0.0, 0.0))
+
+    def test_a_constant_with_another_pitch_is_read_by_its_own_fields(self):
+        # 40 texels wide with a pitch of 64 texels, tiled: the second tile row starts 2 tiles on, not 2.
+        fc = [0x80000002 | (2 << 22), 0x199E0000 | 29 | (1 << 6), 39 | (33 << 13), 0x688 << 1, 0, 0x200]
+        data = bytearray(4 * 8192)
+        o = tt.tiled_offset_2d(0, 32, 64, 3)
+        self.assertEqual(o, 16384)
+        data[o:o + 8] = half_be(7.0, 0.0, 0.0, 1.0)
+        px = ft.scene_texels(bytes(data), fc)
+        self.assertEqual(ft.scene_pixel(px, 40, 0, 32), (7.0, 0.0, 0.0, 1.0))
+        # The same bytes with the pitch the width gives (64 here too) go through untile_scene: equal.
+        self.assertEqual(ft.untile_scene(bytes(data), 40, 34), px)
+        # A pitch of 96: the third tile of the first row is skipped by the second row's start.
+        fc[0] = 0x80000002 | (3 << 22)
+        data = bytearray(6 * 8192)
+        data[3 * 8192:3 * 8192 + 8] = half_be(8.0, 0.0, 0.0, 1.0)
+        self.assertEqual(ft.scene_pixel(ft.scene_texels(bytes(data), fc), 40, 0, 32), (8.0, 0.0, 0.0, 1.0))
+
     def test_every_texel_of_a_picture_wider_than_a_tile_and_not_a_multiple_of_it(self):
         w, h = 70, 37
         data = self.tiled(w, h, lambda x, y: (x, y, x * 0.25 + y, 1.0))
@@ -157,6 +205,53 @@ class UntileSceneTest(unittest.TestCase):
         out = ft.scene_rgba8(px, scale=16.0)
         self.assertEqual(out[0:4], bytes([255, 0, round(255 * 0.25 ** (1 / 2.2)), 255]))
         self.assertEqual(out[4:8], bytes([255, 0, 255, 255]))
+
+
+class ReplayPiecesTest(unittest.TestCase):
+    def test_depth_float(self):
+        self.assertEqual(ft.float20e4(0), 0.0)
+        self.assertEqual(ft.float20e4(15 << 20), 1.0)
+        self.assertEqual(ft.float20e4(14 << 20), 0.5)
+        self.assertEqual(ft.float20e4((15 << 20) | 0x80000), 1.5)
+        self.assertEqual(ft.float20e4(1), 2.0 ** -34)
+        self.assertEqual(ft.float20e4(1 << 20), 2.0 ** -14)
+        self.assertLess(ft.float20e4(0xFFFFFF), 2.0)
+
+    def test_decode_depth_reads_the_upper_24_bits_big_endian(self):
+        # Linear 2 x 1, pitch 32, 8-in-32: the dword is stored high byte first; its low byte is the stencil.
+        fc = [0x00000002 | (1 << 22), 0x1A02A000 | 23 | (2 << 6), 1, 0, 0, 0x200]
+        data = bytes([0xF0, 0x00, 0x00, 0x7F, 0xE0, 0x00, 0x00, 0x00])
+        self.assertEqual(ft.decode_depth(data, fc), (2, 1, [1.0, 0.5]))
+        with self.assertRaises(ValueError):
+            ft.decode_depth(data[:7], fc)
+        with self.assertRaises(ValueError):
+            ft.decode_depth(data, SCENE_FC)
+
+    def test_sample_2d(self):
+        # 2 x 2: rows (0, 10) and (100, 110).
+        tex = [(0.0,), (10.0,), (100.0,), (110.0,)]
+        self.assertEqual(ft.sample_2d(2, 2, tex, 0.25, 0.25), (0.0,))
+        self.assertEqual(ft.sample_2d(2, 2, tex, 0.75, 0.75), (110.0,))
+        self.assertEqual(ft.sample_2d(2, 2, tex, 0.5, 0.5), (55.0,))
+        self.assertEqual(ft.sample_2d(2, 2, tex, 0.5, 0.0), (5.0,))
+        self.assertEqual(ft.sample_2d(2, 2, tex, 9.0, -9.0), (10.0,))
+        # One row: the second coordinate changes nothing.
+        self.assertEqual(ft.sample_2d(2, 1, tex[:2], 0.5, 0.9), (5.0,))
+
+    def test_invert4_and_the_screen_point(self):
+        m = [[2, 0, 0, 1], [0, 4, 0, -2], [0, 0, 1, 3], [0, 0, 0.5, 1]]
+        inv = ft.invert4(m)
+        for i in range(4):
+            for j in range(4):
+                got = sum(m[i][k] * inv[k][j] for k in range(4))
+                self.assertAlmostEqual(got, 1.0 if i == j else 0.0, places=12)
+        with self.assertRaises(ValueError):
+            ft.invert4([[1, 0, 0, 0]] * 4)
+        # Pixel (0, 0) of 4 x 2 is the upper left: x = -0.75, y up = 0.5; a stored depth of 0 is the far end.
+        self.assertEqual(ft.screen_point(0, 0, 4, 2, 0.0), [-0.75, 0.5, 1.0, 1.0])
+        self.assertEqual(ft.screen_point(3, 1, 4, 2, 1.0), [0.75, -0.5, 0.0, 1.0])
+        self.assertEqual(ft.unproject([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 2]], [1, 2, 3, 1]),
+                         [1, 2, 3, 2])
 
 
 class FitTest(unittest.TestCase):
@@ -276,7 +371,7 @@ class CaptureTest(unittest.TestCase):
         extra.append({"kind": "texture", "file": "native_tex_x/tf16.bin", "bytes": 1024, "frame": 1,
                       "content": "0x%016X" % 0x51, "dim": 1, "fc": hx(tf16)})
         # tf17: 64 x 2 half floats, linear, pitch 64: row 0 the near colour, row 1 the frame's tf4.
-        tf17 = [0x00804802 | 0, 0x1FAD0000 | 29 | (1 << 6), 63 | (1 << 13), 0x688 << 1, 0, 0x200]
+        tf17 = TF17_2D
         row0 = half_be(*c68) * 64
         row1 = b"".join(half_be(1, i, 0.0, 1.0) for i in range(64))
         (d / "native_tex_x" / "tf17.bin").write_bytes(row0 + row1)
@@ -307,16 +402,57 @@ class CaptureTest(unittest.TestCase):
         p.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows))
         return p
 
-    def test_the_tree_report_compares_tf16_with_tf5_and_tf17_with_c68_and_tf4(self):
+    def test_the_tree_report_reads_a_two_row_tf17_bilinearly_against_the_pixel_form(self):
+        # make_full's tf17 has two rows, c68 and tf4. Read linearly its second row weighs sat(2 t - 0.5), not
+        # t: the rows equal c68 and tf4, and still the table is not the pixel form's blend. The report must
+        # show that difference, not the rows' agreement.
         with tempfile.TemporaryDirectory() as d:
-            text = "\n".join(ft.report_trees(ft.load_capture(self.make_full(d))))
+            cap = ft.load_capture(self.make_full(d))
+            text = "\n".join(ft.report_trees(cap))
             self.assertIn("tf16 in 1 draw rows", text)
             self.assertIn("against tf5 texel by texel: largest difference 0, mean 0", text)
             self.assertIn("same content hash as the frame's tf5: False", text)   # another address, equal bytes
             self.assertIn("64 x 2 texels", text)
-            self.assertIn("row 0 against c68 (0.25, 0.5, 0.75): largest difference 0, mean 0", text)
-            self.assertIn("row 1 against tf4 at the same coordinate: largest difference 0, mean 0", text)
+            self.assertIn("tf17(a, t) read bilinearly against c68 + t * (tf4(a) - c68) over 33 x 33 points", text)
+            fr = cap.frames[1]
+            w, h, texels = ft.decode_2d((Path(d) / "native_tex_x" / "tf17.bin").read_bytes(), TF17_2D)
+            mx, med = ft.tf17_grid_difference(w, h, texels, fr.tf4, fr.regs[68])
+            # At t = 0.25 the table still reads row 0 (c68) where the blend is a quarter of the way to tf4:
+            # tf4's green runs to 63 here, so the difference is large.
+            self.assertGreater(mx, 10.0)
             self.assertIn("frame 2: no draw row", text)
+
+    def test_a_tf17_that_is_the_pixel_form_has_no_difference(self):
+        # 64 x 33 rows, row j = c68 + t_j * (tf4 - c68) at t_j = j / 32 ... a table built so that linear
+        # reading between rows IS the blend needs rows at the texel centres: v = (j + 0.5) / h, clamped ends.
+        tf4 = [(1.0, float(i), 0.0, 1.0) for i in range(64)]
+        c68 = (0.25, 0.5, 0.75, 0.0)
+        h = 64
+        texels = []
+        for j in range(h):
+            t = (j + 0.5) / h
+            texels += [tuple(c68[k] + t * (tf4[i][k] - c68[k]) for k in range(3)) + (1.0,) for i in range(64)]
+        mx, med = ft.tf17_grid_difference(64, h, texels, tf4, c68)
+        # Only the clamped half texel at each end of t departs: at most half a row step of the largest span.
+        self.assertLess(mx, 63.0 / h)
+        self.assertLess(med, 1e-9)
+
+    def test_the_tree_report_compares_a_1d_tf17_with_tf4(self):
+        # What the game has (native_discovery_20261009_092459.jsonl): slot 17 holds a 1D texture, tf4 itself.
+        with tempfile.TemporaryDirectory() as d:
+            p = self.make_full(d)
+            rows = [json.loads(line) for line in p.read_text().splitlines()]
+            tf4_fc = next(r for r in rows if r.get("kind") == "draw" and r["frame"] == 1 and "4" in r["tf"])["tf"]["4"]
+            for r in rows:
+                if r.get("kind") == "draw" and r.get("vs_tex_slots"):
+                    r["tf"]["17"] = tf4_fc
+                    r["tfc"]["17"] = "0x%016X" % 1
+            p.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows))
+            text = "\n".join(ft.report_trees(ft.load_capture(p)))
+            self.assertIn("tf17 in 1 draw rows: base 0x1FAB1000 1D 64", text)
+            self.assertIn("same content hash as the frame's tf4: True", text)
+            self.assertIn("against tf4 texel by texel: largest difference 0, mean 0", text)
+            self.assertIn("the fetch's second coordinate addresses nothing", text)
 
     def test_the_sky_report_shows_the_row_and_its_cube(self):
         with tempfile.TemporaryDirectory() as d:

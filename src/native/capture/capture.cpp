@@ -1571,8 +1571,8 @@ void AppendPs(std::string& row, const DeviceSnapshot& dev) {
 // row that carries the frame and the content hash ("frame", "content"; "dim":1 for a 1D
 // texture), written before the row of the draw that sampled it. Such a texture is read and hashed
 // at every row that names it. Bounded apart from the others, so that a long capture's tables
-// cannot use up the ordinary textures' files: kMaxContentTextures files, kMaxContentTextureBytes
-// in all. Returns the content hash of such a texture as it is at this moment (also when that
+// cannot use up the ordinary textures' files: kMaxContentTextures files, and kMaxContentTextureBytes
+// for the 2D targets (a 1D table does not count against the bytes). Returns the content hash of such a texture as it is at this moment (also when that
 // content was dumped before or its file could not be written), for the row's "tfc"; 0 for any
 // other texture and when the bytes were not read.
 constexpr uint32_t kMaxTextures = 768;
@@ -1621,12 +1621,16 @@ uint64_t DumpTexture(const uint32_t fc[6]) {
   uint64_t content = 0;
   char name[64];
   if (by_content) {
-    if (bytes == 0 || g_tex_content_bytes + bytes > kMaxContentTextureBytes) return 0;
+    // The byte budget is the targets': a 1D table (at most kMaxTextureBytes, in practice 1.5 KB) is
+    // bounded by the file count alone, so a long capture's targets cannot starve the tables.
+    if (bytes == 0 || (!is_1d && g_tex_content_bytes + bytes > kMaxContentTextureBytes)) return 0;
     src = ReadPhysical(base, uint32_t(bytes));
     if (!src) return 0;
     content = XXH3_64bits(src, size_t(bytes));
-    if (!g_tex_content_seen.insert({base, identity, content}).second) return content;
-    if (g_tex_seen.insert({base, identity}).second) {
+    // Marked as dumped only once its file is written (below): a failed write is tried again at
+    // the next row that names the content.
+    if (g_tex_content_seen.count({base, identity, content})) return content;
+    if (!g_tex_seen.count({base, identity})) {
       std::snprintf(name, sizeof(name), "%08X_%016llX.bin", base, static_cast<unsigned long long>(identity));
     } else {
       std::snprintf(name, sizeof(name), "%08X_%016llX_%016llX.bin", base, static_cast<unsigned long long>(identity),
@@ -1650,8 +1654,10 @@ uint64_t DumpTexture(const uint32_t fc[6]) {
                 g_tex_dir.filename().string().c_str(), name, static_cast<unsigned long long>(bytes));
   std::string row = buf;
   if (by_content) {
+    g_tex_content_seen.insert({base, identity, content});
+    g_tex_seen.insert({base, identity});
     ++g_tex_content_count;
-    g_tex_content_bytes += bytes;
+    if (!is_1d) g_tex_content_bytes += bytes;
     std::snprintf(buf, sizeof(buf), ",\"frame\":%d,\"content\":\"0x%016llX\"%s",
                   g_frames_written.load(std::memory_order_relaxed) + 1, static_cast<unsigned long long>(content),
                   is_1d ? ",\"dim\":1" : "");

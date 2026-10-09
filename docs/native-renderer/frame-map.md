@@ -3791,6 +3791,101 @@ What it shows, and its limits:
 - What the maps' position follows (it is not the eye) was not established.
 - The vertex bytes of a `"verts"` row are not in the row (the caller writes them after the builder returns); they are known from the GPU log only.
 
+## 16. Fog and sky
+
+Sub-project 9 (spec `docs/superpowers/specs/2026-10-09-native-renderer-fog-design.md`, plan `docs/superpowers/plans/2026-10-09-native-renderer-fog.md`). Evidence files of this section are in `out\native-evidence\fog\` (git-ignored); captures and their dump folders are in `out\build\win-amd64-release\logs\` and are named by their stamp (`092459` is `native_discovery_20261009_092459.jsonl` with `native_tex_20261009_092459\`). The formulas are in `lighting-formulas.md`, part "Fog and sky".
+
+### Discovery
+
+Plan Task 1: a capture-only change (commit d7af364 and the commit of this section) and three runs. Nothing the pass draws changed.
+
+**What the capture writes now** (`capture.cpp`; all of it only while a discovery capture is armed):
+
+- *1D textures are dumped*, their texels in one row (`render::Fetch1DDumpBytes`). Textures the game rewrites in place are kept once per **content**, not once per address (`render::DumpKeyedByContent`: every 1D texture, and 2D textures of formats 29, 22 and 23, which are dumped in full now): the first content at an address as `<BASE>_<IDENTITY>.bin`, every other as `<BASE>_<IDENTITY>_<XXH3>.bin`, each with a `"texture"` row carrying `"frame"`, `"content"` and, for a 1D texture, `"dim":1`. Bounds: 512 files; 512 MB for the 2D targets (the tables do not count against the bytes).
+- *`"tf"` of draw, verts and indx rows holds the vertex shader's slots too* (listed in `"vs_tex_slots"`), and every decoded row has `"tfc"`: slot -> content hash of the texture as it was when the row was written. A row is paired with a dump by that hash, never by address or order.
+- *`DrawIndx:82217EE8` has a decoded `"indx"` row.* The builder is `BeginVertices` with an index list (read from the recompiled function, `xdk_layout.h`: r4 primitive, r5 base vertex, r6 vertices, r7 indices, r8 index format, r9 vertex bytes; the two storages at device +0x3488 and +0x348C). The game fills the storage after the builder returns, so its bytes come in an `"indxdata"` row written when the thread enters its next hooked draw. In the four captures every sky row's data row holds the eight corners of the unit cube ((0, 0, 0, 1) to (1, 1, 1, 1), 16 bytes a vertex) and 36 indices below 8 (`task1_<stamp>_sky.txt`): the storage is filled by then.
+- A `"texture"` row's `"frame"` is the frame of the draw that sampled the texture, not the frame that rendered it; see "The oracle" for what that means for targets.
+
+`tools/xdk_sigmatch/fog_tables.py` decodes and reports (`tables`, `trees`, `sky`, `scene`, `replay`); its outputs for the four captures are `task1_<stamp>_tables.txt`, `_trees.txt`, `_sky.txt`, and for the oracle `task1_092959_scene.txt` and `task1_092959_replay_frame<N>.txt`.
+
+**Runs** (made by the controller with the user present: all three `RUN UNCHECKED`, exit 0, no `d3d ERROR` line in a log; through `tools\drive_game.ps1 -BootSave Hero000`). No window has the freeze signature: in the world the work medians are 6.9 to 12.6 ms (runs 1 and 2 at 30.0 fps but for the windows that hold a capture or the end; run 3, with read-back, at 23 to 28 fps, 18.7 in its last window, with swap medians of 26 to 37 ms); the two windows of 27 to 28 fps with work medians of 34 ms at each start are the loading.
+
+| Run | Driver arguments | Captures | Game log, shots |
+|---|---|---|---|
+| 1, bridge | `-Total 80 -Shots "36,42,48,54,74" -Plan "32:VIEW=off,38:VIEW=native,44:VIEW=split,50:VIEW=overlay,56:VIEW=native,60:DISC=8/1" -GameArgs "--fable2_native_render=true"` | `092459` (8 frames) | `task1_run1_fable_2_393.log`, `task1_run1_shot_*.png` |
+| 2, third spot | `-Total 204 -Shots "44,50,56,62,80,200" -Plan "33:LS=0/-100/3500,40:VIEW=off,46:VIEW=native,52:VIEW=split,58:VIEW=overlay,62:VIEW=native,68:DISC=8/1,188:DISC=8/1" -GameArgs "--fable2_native_render=true"` | `092633`, and `092833` armed 120.0 s later (8 frames each): two `DISC=` entries in one plan work | `task1_run2_fable_2_394.log`, `task1_run2_shot_*.png` (`_80s`: the native view, the hero on the planks facing the camera, the lake and unhazed hills behind, the clear colour where the sky is) |
+| 3, oracle | `-Total 110 -Shots "36,42,48,54,60,104" -Plan "32:VIEW=off,38:VIEW=native,44:VIEW=off,56:VIEW=native,64:DISC=4/1" -GameArgs --fable2_native_render=true,--readback_resolve=full,--native_render_collect_stats=true` | `092959` (4 frames) | `task1_run3_fable_2_395.log`, `task1_run3_shot_*.png` |
+
+**The two tables** (28 frames of the four captures; `task1_<stamp>_tables.txt`).
+
+| | tf4, in-scatter by angle | tf5, transmittance by distance |
+|---|---|---|
+| Fetch constant (frame 1 of `092459`) | `00804956 1FAB505D 0000003F 00280D11 00000003 00000018` | `02004802 1FAB4086 000000FF 00280C14 00000003 00000018` |
+| Reading | 1D, 64 texels, format 29, endian 8-in-16, swizzle `0x688` (identity), sign fields 1 1 1 1, exponent adjust 0, clamp to edge, linear, no mip | 1D, 256 texels, format 6, endian 8-in-32, swizzle `0x60A`, sign fields 0, exponent adjust 0, clamp to edge, linear, no mip |
+| Bytes | 512: a texel is four half floats, each stored high byte first, in the order r, g, b, a | 1,024: a texel is four bytes stored a, r, g, b |
+| Values | all finite; r 0.308 to 0.952, g 0.384 to 0.517, b 0.306 to 0.555 over the four captures, a = 0 everywhere. Not above 1: not an HDR table in these scenes. Texel 0 (looking away from the axis) is blue-grey ((0.308, 0.384, 0.465) in `092459`), the last texel (towards the axis) orange ((0.933, 0.467, 0.306)) | texel 0 is (1, 1, 1), a = 1 everywhere; falling with distance, blue fastest: (0.745, 0.714, 0.565) at 254 units, (0.361, 0.310, 0.133) at 1,004, (0.149, 0.114, 0.024) at the last texel (1,996 units) in frame 1 of `092459` |
+
+- *The decode is proven on real texels as far as these scenes can:* the tables are smooth and in range only in this reading (tf5 monotone from exactly 1, alpha exactly 255; tf4's alpha exactly 0), and the sky function with tf4's texel 0 in the order r, g, b reproduces the oracle's sky to 0.7%, 0.2% and 1.6% in red, green and blue (below); with red and blue exchanged it would be off by a factor 1.5.
+- *One table per frame, complete at the first fogged draw.* In every frame of every capture all main-scene rows that sample slot 4 name one (address, content) pair, and likewise slot 5: 56 of 56 table-frames (896 rows a frame at the bridge), from the frame's first fogged row (the water `F6D9...`, in the opaque group) to its last. The content hash is taken at each row, so the bytes did not change between the first and the last sampling draw of a frame. The sky rows of the same frame name the same tf4.
+- *The ring of three addresses* is as the research has it (tf4 at `0x1FAB1000`, `0x1FAB5000`, `0x1FAB3000`; tf5 at `0x1FAB0000`, `0x1FAB4000`, `0x1FAB2000`). The content does not change every frame: of the 24 steps between consecutive frames 4 have both tables byte-identical at another address; the others change tf4 by at most 0.002 and tf5 by one step (1 / 255) in a few texels.
+- *With the clock* (run 2, the same place 120 s apart, frame 1 of each): `c66` (-0.8272, 0.0134, 0.5618) to (-0.6848, -0.4149, 0.5991); `c67.x` 20.44 to 28.49; `c68` (0.2671, 0.4012, 0.4667) to (0.2734, 0.4201, 0.4667); tf4's texel 0 (0.311, 0.388, 0.471) to (0.352, 0.448, 0.552), its last (0.934, 0.471, 0.313) to (0.952, 0.517, 0.386); tf5's best single exponent in red 0.001011 to 0.000897.
+- *tf5 is not `exp(-k d)` of `c64` or `c65`.* The best single exponential per channel (`fit_exponential`) is off by 0.028 to 0.038 of full scale (7 to 10 steps of the table), with k = (0.00102, 0.00117, 0.00209) in `092459` against `c64` = (0.000305, 0.000394, 0.001071) and `c65` = (0.00525, 0.00596, 0.00983). The optical depth per unit of distance falls with distance (red: 0.00135 at 12 units, 0.00116 at 254, 0.00095 at 1,996), and no single second path length makes it `c64 d + c65 l` in all three channels (the implied l differs by channel: 41, 40, 31 units at 254). Spec ruling 3 (read the tables, never compute them) stands.
+
+**The trees' tables** (`task1_<stamp>_trees.txt`, all 28 frames: 52 tree rows a frame at the bridge, 84 at the third spot). Slot 16 holds **tf5 itself** and slot 17 holds **tf4 itself**: the same fetch constants, the same address, the same content hash as the frame's tf5 and tf4, texel difference 0, in 28 of 28 frames each. tf17 is therefore a **1D** texture fetched with a 2D fetch: the second coordinate (the near blend `t`) addresses nothing, `tf17(a, t)` = `tf4(a)` for every `t`. The trees have no blend from `c68`. Against the pixel form `c68 + t * (tf4(a) - c68)` the difference is `(1 - t) * (tf4(a) - c68)`, which exists only within one unit past the fog start (`c67.z` = 1) and is multiplied by `1 - T`, where T is tf5's first texel, (1, 1, 1): nothing in the picture.
+
+*Ruling B (controller, 2026-10-09; the evidence above supports it: 28 of 28 frames).* Trees are fogged with the game's own form: `T = tf5(c67.w * dD)`, `add = (1 - T) * tf4(angle) * c8.x`, `colour * T * c49 + add`: no blend from `c68` and no amount `c28.x`, evaluated per pixel. Spec ruling 4 is amended accordingly in plan Task 6.
+
+**The sky draw** (`task1_<stamp>_sky.txt`). Five `"indx"` rows a frame have pixel shader `F7601FBE485936FD` with vertex shader `8262E1111C273B50`: four outside the main scene (the reflection passes; vertex `c9`.z = -9.97, 30.8, -9.97, 29.8 at the bridge) and **one inside it**, 28 of 28 frames. So the product recognises the sky draw as: a call of `0x82217EE8` inside the main-scene bracket whose pixel shader hashes to `F760...`. At that row:
+
+- triangle list, 8 vertices, 36 indices, 16 bytes a vertex (one float4 fetch, slot 95); depth word `0x00708762`, blend `0x00010001`, cull `0x00218000`, colour mask `0xF` (as the GPU log has them);
+- vertex `c0..c3` equal the terrain rows' view-projection of the same frame, vertex `c9` is the eye ((82.072, 157.339, 50.171) at the bridge, equal to pixel `c19`); the vertex shader's `c255` is its literal, not in the bank;
+- pixel `c31.x` = 150, `c46.x` = 100, `c47.x` = 0 in all 140 sky rows; `c64..c67` the frame's; `c28` = (1, 1);
+- tf4 is the frame's table (the same content hash);
+- **tf13 and tf14 are one texture**: 2D, 16 x 16, format 6 (`k_8_8_8_8`, which the texture cache decodes), linear (not tiled), endian 8-in-32, swizzle `0x60A`, wrap in both axes, linear filter, no mip address, at `0x1A544000`; fetch constant identical in all 140 rows. Its 256 texels are all (0, 0, 0, 0) in all four captures. With alpha 0 the shader's blend leaves the clear-sky term alone: **the sky of these scenes is `(1 - E) * tf4(angle)`**, no cloud texture. tf11 and tf12 (the `b129` volume's) are a 1 x 1 black texture.
+
+**The oracle** (run 3; `task1_092959_scene.txt`, `task1_run3_oracle_scene_frame1.png`). With `--readback_resolve=full` the texture the post chain samples at `0x199E0000` (1120 x 720, format 29, tiled, 6,594,560 bytes dumped, 6,592,512 needed) is the scene before post. Untiled (`untile_scene`: half floats high byte first, r, g, b, a) and viewed: the whole bridge picture, planks and railing, the hero and the dog, the tree at the left, hazy blue hills, the lake, a blue-grey sky; no tearing. All 806,400 texels finite; medians (0.570, 0.652, 0.282), maxima about 4.
+
+- *Whose frame.* Each of the four frames' downsample (`87E8...`) and composite (`37B1...`) rows name one content of the scene, another in every frame. But a target's bytes at a row are not that frame's render: the depth content first seen at frame 1's last sampling row is the one frame 2's mask rectangles name, and so on (the emulator's GPU thread runs behind the guest thread that writes the rows). So a dump is some earlier frame's resolve, by about one frame (inference from the contents' order). With the camera standing still and the registers drifting by 1e-4 a frame, this changes no number below; a moving camera would need the pairing settled first. A half-written target could also be hashed and kept as a content; none of the four pictures viewed or replayed shows one.
+- *The scale is not 16.* `c20.w` is 8.44137 in every main-scene row of run 3 and 16.0 (15.9999914) in every one of runs 1 and 2. The scene's values are the shader output with that run's `c20.w` in it: the sky replay below fits with 8.44 and would be off by 1.9 with 16. `c20.w` is thus the game's exposure and it moves when the read-back gives the game its luminance (inference for the cause; the two values are measured). The picture file was written with the tool's default divisor 16.
+- *The clear colour* was not found (the clear rectangle is another builder, `DrawIndx2:821EF988`, without a decoded row). It does not show: the pixels whose depth is clear follow the sky function (below).
+
+**Replay against the oracle** (`fog_tables.py replay`, every 4th pixel in x and y, 50,400 pixels a frame; `light_formulas.sky` and `light_formulas.fog` with the frame's tables through `table_1d`; the world position from the read-back depth `0x1A02A000` through the inverse of the sky row's `c0..c3`; `task1_092959_replay_frame1.txt` to `_frame4.txt`).
+
+- *Sky* (10,135 pixels whose stored depth is 0, frame 1): observed / (`sky()` * `c20.w`), median per channel **1.007, 0.998, 0.984**; frames 2 to 4: 1.006 to 1.007, 0.998, 0.983 to 0.984. Median absolute difference in linear values 0.0019, 0.0013, 0.0070. The red ratio's 10th and 90th percentiles are 0.997 and 1.141: the upper tail is what is drawn over the sky without depth (the glare and the sun's quad; inference, not separated). Spec criterion 3 (median within 10% per channel) holds on this picture.
+- *Ground*: the colour before fog is unknown, so the test is a bound. With T and the in-scatter floor `(1 - T) * F` of each pixel, the colour the pixel implies is (observed / `c20.w` - floor) / T:
+
+| Distance | Pixels | Median T | Median observed / `c20.w` | Median floor | Median implied colour | Below the floor by more than 2% in a channel |
+|---|---|---|---|---|---|---|
+| 0 to 20 | 25,563 | (1, 1, 1) | (0.020, 0.025, 0.014) | 0 | the same | 0 |
+| 20 to 100 | 3,680 | (0.989, 0.989, 0.980) | (0.057, 0.082, 0.035) | (0.004, 0.004, 0.009) | (0.053, 0.076, 0.019) | 0.2% |
+| 100 to 300 | 8,336 | (0.805, 0.781, 0.656) | (0.097, 0.129, 0.180) | (0.061, 0.085, 0.161) | (0.051, 0.057, 0.023) | 0.9% |
+| 300 to 600 | 2,133 | (0.664, 0.625, 0.448) | (0.145, 0.188, 0.283) | (0.104, 0.145, 0.258) | (0.060, 0.063, 0.036) | 1.3% |
+| 600 to 1,000 | 130 | (0.418, 0.367, 0.179) | (0.191, 0.255, 0.389) | (0.180, 0.244, 0.385) | (0.027, 0.034, 0.027) | 5.4% |
+| beyond 1,000 | 423 | (0.337, 0.286, 0.118) | (0.214, 0.285, 0.416) | (0.205, 0.275, 0.413) | (0.026, 0.032, 0.027) | 1.9% |
+
+  The far picture is the in-scatter: beyond 600 units the floor alone is 94 to 99% of what is observed, and the implied ground colour stays a plausible dark green-brown (0.02 to 0.08) at every distance instead of going negative or growing with distance, as a wrong table, a wrong distance scale or a wrong channel order would make it. The pixels below the floor (water, the lake `2B09...` with its own form, edges where the depth and the colour are of different surfaces: inference) are 0 to 5%.
+- *What the replay does not test.* tf4 beyond its first texel and the texel addressing: at the bridge every sampled sky pixel and every fogged ground pixel looks away from the axis `c66` (tf4's coordinate is 0 in 10,135 of 10,135 and 14,633 of 14,633), where the clamp reads texel 0 under any convention; reading tf4 half a texel to either side changes no median. For tf5 half a texel is 3.9 units of distance, far inside the bound above. A view towards the sun is needed for both (no such capture exists).
+
+**The research's open questions.**
+
+1. *Texels of tf4 and tf5:* above. In range 0 to 1, per frame, slowly changing with the clock, tf5 not an exponential of `c64` / `c65`.
+2. *tf16, tf17:* tf5 and tf4 themselves; no `c68` blend in the trees (ruling B).
+3. *The sky draw:* one in-scene row a frame; tf13 = tf14 = a 16 x 16 `k_8_8_8_8` texture of zeros; `c47.x` = 0 in all 28 frames (two clocks 120 s apart included); vertex `c0..c3` the scene's view-projection, `c9` the eye. Whether the cube is clipped: its half-size is 2,850 around the eye and the depth-clear pixels all follow the sky function, so nothing of it is missing at these two views (inference from the replay, not from the cube's clip positions).
+4. *The scene at `0x199E0000`:* the pre-post scene, r, g, b, a in that order, with the run's `c20.w` (8.44, not 16) in it; an earlier frame's by about one (above).
+5. *The clear colour:* not found; not visible.
+
+**What plan Task 3 can rely on.**
+
+- Read 512 bytes at `fetch[4].base` and 1,024 at `fetch[5].base` (dword 1 & `0xFFFFF000`), at the first fogged main-scene draw; decode as in the table above (`decode_tf4`, `decode_tf5`; `tests/test_fog_tables.py` pins both on literal bytes, and the bytes of frame 1 of `092459` are `native_tex_20261009_092459\1FAB5000_*.bin` and `1FAB4000_*.bin`, a fixture for `MakeFogBlock`).
+- Pin in `MakeFogBlock`, besides width, format and endian: 1D, the swizzles `0x688` and `0x60A`, sign fields (1 1 1 1 and 0), exponent adjust 0, clamp to edge, linear filter. All are constant over the 28 frames.
+- The tables are whole at that draw (one content per frame over all sampling rows). The capture reads on the guest thread at the draw, as the discovery dump did.
+- The sky block: at the in-scene `0x82217EE8` call with pixel shader `F760...`. Its textures decode in the texture cache (format 6, 16 x 16, linear layout, wrap); here they are all zero and `c47.x` is 0, so the clear-sky term is the whole sky of the captured scenes.
+- `c20.w` is not a constant of the game (16.0 and 8.44 in these runs): what the native exposure stands in for moves with the game's own adaptation when that works.
+
+**Older tools on the new rows.** `albedo_finder.py` on `092459` against the same place before the change (`native_discovery_20261009_065904.jsonl`): the same 16 pixel-shader and 5 vertex-shader proposals, equal but for the evidence text and three draw counts. `terrain_replay.py --frame 1 --check-dumps`: the same 125 lines but for addresses of streamed textures and the two fog tables, which now have rows.
+
+**Limits.** Daylight, two places less than 1 unit apart looking two ways, both away from the fog axis. The three runs are `RUN UNCHECKED`. The capture's last small changes (the tables outside the byte budget; a content marked as dumped only after its file is written) were built and not run in the game.
+
 ## Pending
 
 1. **Pitch ablation** (done 2026-10-01, results in section 4; kept for re-runs). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):

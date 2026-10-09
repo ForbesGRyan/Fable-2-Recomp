@@ -26,6 +26,9 @@ Reports (every number is of the capture named on the command line):
   fog_tables.py scene  <capture.jsonl> --png <out.png> [--frame N] [--scale 16]
                                              the scene colour of a capture made with --readback_resolve=full:
                                              which rows sampled which content, statistics, a picture
+  fog_tables.py replay <capture.jsonl> [--frame N] [--step 4]
+                                             the same capture: light_formulas.sky on the pixels whose depth is
+                                             clear and light_formulas.fog on the others, against the scene colour
 The texture dumps are read relative to the capture's folder (or --tex-root).
 
 A capture made by a build with fog discovery has, in every decoded row, "tfc": the content hash of each sampled
@@ -138,15 +141,40 @@ def describe_fc(fc):
         size = "1D %d" % ((fc[2] & 0xFFFFFF) + 1)
     else:
         size = "%dD %d x %d" % (((fc[5] >> 9) & 3) + 1, (fc[2] & 0x1FFF) + 1, ((fc[2] >> 13) & 0x1FFF) + 1)
-    return ("base 0x%08X %s format %d endian %d %s pitch %d swizzle 0x%03X clamp %d/%d filter %d mip 0x%08X"
+    return ("base 0x%08X %s format %d endian %d %s pitch %d swizzle 0x%03X clamp %d/%d filter %d mip 0x%08X "
+            "signs %d%d%d%d exp %d"
             % (fc[1] & 0xFFFFF000, size, fmt, endian, "tiled" if fc[0] >> 31 else "linear",
                ((fc[0] >> 22) & 0x1FF) << 5, (fc[3] >> 1) & 0xFFF, (fc[0] >> 10) & 7, (fc[0] >> 13) & 7,
-               (fc[3] >> 19) & 3, fc[5] & 0xFFFFF000))
+               (fc[3] >> 19) & 3, fc[5] & 0xFFFFF000, *sign_fields(fc), exp_adjust(fc)))
+
+
+def sign_fields(fc):
+    """The four sign fields of a fetch constant (dword 0 bits 2 to 9, two bits a component: 0 unsigned, 1
+    signed, 2 unsigned biased, 3 gamma)."""
+    return [(fc[0] >> (2 + 2 * i)) & 3 for i in range(4)]
+
+
+def exp_adjust(fc):
+    """The exponent adjust of a fetch constant (dword 3 bits 13 to 18, signed six bits)."""
+    v = (fc[3] >> 13) & 0x3F
+    return v - 64 if v & 0x20 else v
+
+
+def _check_reading(fc):
+    """The decoders here read an integer format as unsigned fractions and apply no exponent adjust: a
+    constant that asks for anything else is refused. A float format's values are its own whatever the sign
+    fields say (the scene colour and tf4 have all four set to 1)."""
+    fmt = fc[1] & 0x3F
+    if fmt in _FORMATS and _FORMATS[fmt][3] is not None and any(sign_fields(fc)):
+        raise ValueError("integer format %d with sign fields %s" % (fmt, sign_fields(fc)))
+    if exp_adjust(fc):
+        raise ValueError("exponent adjust %d" % exp_adjust(fc))
 
 
 def decode_1d(data, fc):
     if not is_1d(fc):
         raise ValueError("not a 1D texture fetch constant")
+    _check_reading(fc)
     return _texels(data, fc[1] & 0x3F, (fc[1] >> 6) & 3, _swizzle(fc), (fc[2] & 0xFFFFFF) + 1)
 
 
@@ -157,6 +185,7 @@ def decode_2d(data, fc):
     fmt, endian = fc[1] & 0x3F, (fc[1] >> 6) & 3
     if fmt not in _FORMATS:
         raise ValueError("format %d" % fmt)
+    _check_reading(fc)
     size = _FORMATS[fmt][0]
     w, h = (fc[2] & 0x1FFF) + 1, ((fc[2] >> 13) & 0x1FFF) + 1
     pitch = max(((fc[0] >> 22) & 0x1FF) << 5, w)
@@ -184,6 +213,84 @@ def sample_1d(table, u):
     if f == 0.0:
         return tuple(table[i])
     return tuple(a + (b - a) * f for a, b in zip(table[i], table[i + 1]))
+
+
+def sample_2d(w, h, texels, u, v):
+    """Bilinear between texel centres in both axes, clamped to the edge texels (as sample_1d in each axis)."""
+    if not texels or not (math.isfinite(u) and math.isfinite(v)):
+        raise ValueError("no texels or a non-finite coordinate")
+    x = min(max(u * w - 0.5, 0.0), w - 1.0)
+    y = min(max(v * h - 0.5, 0.0), h - 1.0)
+    x0, y0 = min(int(x), max(w - 2, 0)), min(int(y), max(h - 2, 0))
+    x1, y1 = min(x0 + 1, w - 1), min(y0 + 1, h - 1)
+    fx, fy = x - x0, y - y0
+    out = []
+    for c in range(len(texels[0])):
+        top = texels[y0 * w + x0][c] + (texels[y0 * w + x1][c] - texels[y0 * w + x0][c]) * fx
+        bottom = texels[y1 * w + x0][c] + (texels[y1 * w + x1][c] - texels[y1 * w + x0][c]) * fx
+        out.append(top + (bottom - top) * fy)
+    return tuple(out)
+
+
+def float20e4(bits):
+    """The Xenos 24-bit depth float (20 bits of mantissa under 4 of exponent) as a number in 0..2: exponent
+    15 and mantissa 0 is 1.0; exponent 0 is the denormal range."""
+    e, m = (bits >> 20) & 0xF, bits & 0xFFFFF
+    if e == 0:
+        return m * 2.0 ** -34
+    return (1.0 + m / 1048576.0) * 2.0 ** (e - 15)
+
+
+def decode_depth(data, fc):
+    """(width, height, values row-major) of a 2D k_24_8_FLOAT level (format 23) as a read-back resolve leaves
+    it in guest memory: after the constant's endian swap a little-endian dword with the depth float in its
+    upper 24 bits. The game's depth is reversed: the value is 1 at the near plane and 0 where nothing was
+    drawn (frame-map section 15)."""
+    if (fc[0] & 3) != 2 or ((fc[5] >> 9) & 3) != 1 or (fc[1] & 0x3F) != 23:
+        raise ValueError("not a 2D k_24_8_FLOAT fetch constant")
+    w, h = (fc[2] & 0x1FFF) + 1, ((fc[2] >> 13) & 0x1FFF) + 1
+    pitch = max(((fc[0] >> 22) & 0x1FF) << 5, w)
+    tiled = (fc[0] >> 31) != 0
+    row_bytes = ((pitch + 31) & ~31) * 4
+    raw = bytearray(w * h * 4)
+    at = 0
+    for y in range(h):
+        for x in range(w):
+            o = tiled_offset_2d(x, y, pitch, 2) if tiled else y * row_bytes + x * 4
+            if o + 4 > len(data):
+                raise ValueError("texel (%d, %d) at %d lies outside the %d bytes" % (x, y, o, len(data)))
+            raw[at:at + 4] = data[o:o + 4]
+            at += 4
+    words = struct.unpack("<%dI" % (w * h), _swap(bytes(raw), (fc[1] >> 6) & 3))
+    return w, h, [float20e4(v >> 8) for v in words]
+
+
+def invert4(m):
+    """The inverse of a 4 x 4 matrix (rows of four), by elimination with pivoting; ValueError if singular."""
+    a = [list(map(float, m[i])) + [1.0 if i == j else 0.0 for j in range(4)] for i in range(4)]
+    for c in range(4):
+        pivot = max(range(c, 4), key=lambda r: abs(a[r][c]))
+        if abs(a[pivot][c]) < 1e-30:
+            raise ValueError("singular matrix")
+        a[c], a[pivot] = a[pivot], a[c]
+        d = a[c][c]
+        a[c] = [x / d for x in a[c]]
+        for r in range(4):
+            if r != c and a[r][c] != 0.0:
+                f = a[r][c]
+                a[r] = [x - f * y for x, y in zip(a[r], a[c])]
+    return [row[4:] for row in a]
+
+
+def screen_point(x, y, w, h, stored_depth):
+    """The homogeneous screen point of pixel (x, y)'s centre as the shadow mask builds it (light_formulas
+    mask_screen_point): x and y in -1..1 with y up, z = 1 - the stored (reversed) depth, w = 1."""
+    return [(2.0 * x + 1.0) / w - 1.0, 1.0 - (2.0 * y + 1.0) / h, 1.0 - stored_depth, 1.0]
+
+
+def unproject(vp_inv, S):
+    """screen -> homogeneous world: vp_inv . S (not divided)."""
+    return [sum(vp_inv[i][k] * S[k] for k in range(4)) for i in range(4)]
 
 
 # --- the scene picture --------------------------------------------------------------------------------------
@@ -491,6 +598,50 @@ def tables_json(cap):
     return out
 
 
+def tf17_grid_difference(w, h, texels, tf4, c68, steps=33):
+    """How far a 2D tf17, read bilinearly at (a, t), is from the pixel form's c68 + t * (tf4(a) - c68), over
+    a grid of `steps` values of a and of t in 0..1: (largest, median) absolute difference over rgb."""
+    d = []
+    for j in range(steps):
+        t = j / (steps - 1.0)
+        for i in range(steps):
+            a = i / (steps - 1.0)
+            got = sample_2d(w, h, texels, a, t)
+            s4 = sample_1d(tf4, a)
+            d += [abs(got[k] - (c68[k] + t * (s4[k] - c68[k]))) for k in range(3)]
+    d.sort()
+    return d[-1], d[len(d) // 2]
+
+
+def _tree_table_lines(fr, slot, fc, content, data):
+    """The lines of report_trees for one dumped texture of slot 16 or 17."""
+    lines = []
+    if is_1d(fc):
+        table = decode_1d(data, fc)
+        lines.append("    %d texels, range %s" % (len(table), _table_range(table)))
+        ref, name, ref_content = (fr.tf5, "tf5", fr.tf5_content) if slot == 16 else (fr.tf4, "tf4", fr.tf4_content)
+        if ref is not None:
+            lines.append("    same content hash as the frame's %s: %s" % (name, content == ref_content))
+            if len(table) == len(ref):
+                lines.append("    against %s texel by texel: largest difference %.6g, mean %.6g"
+                             % ((name,) + _table_diff(table, ref)))
+            else:
+                d = [abs(x - y) for i, row in enumerate(table)
+                     for x, y in zip(row[:3], sample_1d(ref, (i + 0.5) / len(table))[:3])]
+                lines.append("    against %s resampled: largest difference %.6g" % (name, max(d)))
+        if slot == 17:
+            lines.append("    a 1D texture: the fetch's second coordinate addresses nothing, tf17(a, t) = "
+                         "its texel row at a for every t (no blend from c68)")
+    else:
+        w, h, texels = decode_2d(data, fc)
+        lines.append("    %d x %d texels, range %s" % (w, h, _table_range(texels)))
+        if slot == 17 and fr.tf4 is not None and 68 in fr.regs:
+            mx, med = tf17_grid_difference(w, h, texels, fr.tf4, fr.regs[68])
+            lines.append("    tf17(a, t) read bilinearly against c68 + t * (tf4(a) - c68) over 33 x 33 points: "
+                         "largest difference %.6g, median %.6g" % (mx, med))
+    return lines
+
+
 def report_trees(cap):
     lines = []
     for n in sorted(cap.frames):
@@ -513,37 +664,7 @@ def report_trees(cap):
                     continue
                 data = t.read()
                 try:
-                    if is_1d(fc):
-                        table = decode_1d(data, list(fc))
-                        lines.append("    %d texels, range %s" % (len(table), _table_range(table)))
-                        if slot == 16 and fr.tf5 is not None:
-                            same = content == fr.tf5_content
-                            lines.append("    same content hash as the frame's tf5: %s" % same)
-                            if len(table) == len(fr.tf5):
-                                lines.append("    against tf5 texel by texel: largest difference %.6g, mean %.6g"
-                                             % _table_diff(table, fr.tf5))
-                            else:
-                                d = [abs(a - b) for i, row in enumerate(table)
-                                     for a, b in zip(row[:3], sample_1d(fr.tf5, (i + 0.5) / len(table))[:3])]
-                                lines.append("    against tf5 resampled: largest difference %.6g" % max(d))
-                    else:
-                        w, h, texels = decode_2d(data, list(fc))
-                        lines.append("    %d x %d texels, range %s" % (w, h, _table_range(texels)))
-                        if slot == 17:
-                            # Inference to test: the rows are {c68, tf4}: v = 0 the near colour, v = 1 the table.
-                            for y in sorted({0, h - 1}):
-                                row = texels[y * w:(y + 1) * w]
-                                lines.append("    row %d: first %s  middle %s  last %s" % (
-                                    y, _fmt(row[0], 5), _fmt(row[w // 2], 5), _fmt(row[-1], 5)))
-                                if fr.tf4 is not None:
-                                    d = [abs(a - b) for i, t17 in enumerate(row)
-                                         for a, b in zip(t17[:3], sample_1d(fr.tf4, (i + 0.5) / w)[:3])]
-                                    lines.append("    row %d against tf4 at the same coordinate: largest difference "
-                                                 "%.6g, mean %.6g" % (y, max(d), sum(d) / len(d)))
-                                if 68 in fr.regs:
-                                    d = [abs(a - b) for t17 in row for a, b in zip(t17[:3], fr.regs[68][:3])]
-                                    lines.append("    row %d against c68 %s: largest difference %.6g, mean %.6g"
-                                                 % (y, _fmt(fr.regs[68][:3], 5), max(d), sum(d) / len(d)))
+                    lines += _tree_table_lines(fr, slot, list(fc), content, data)
                 except ValueError as e:
                     lines.append("    not decoded: %s" % e)
     return lines
@@ -607,6 +728,159 @@ def scene_uses(cap, frame=None):
     return out
 
 
+def scene_texels(data, fc):
+    """The scene colour as untile_scene gives it; a constant whose pitch field is not the width rounded up
+    to 32, or that is not tiled, is read by its own fields (decode_2d)."""
+    w, h = (fc[2] & 0x1FFF) + 1, ((fc[2] >> 13) & 0x1FFF) + 1
+    if (fc[0] >> 31) and ((fc[0] >> 22) & 0x1FF) << 5 == (w + 31) & ~31 and (fc[1] >> 6) & 3 == 1 \
+            and _swizzle(fc) == [0, 1, 2, 3]:
+        return untile_scene(data, w, h)
+    return [c for t in decode_2d(data, list(fc))[2] for c in t]
+
+
+def _median(values):
+    v = sorted(values)
+    return v[len(v) // 2] if v else float("nan")
+
+
+def frame_targets(cap, n, scene_base=0x199E0000, depth_base=0x1A02A000):
+    """(scene fc, scene content, depth fc, depth content) of frame n: the scene colour the downsample 87E8
+    sampled (any row's, failing that) and the depth the in-scene mask rectangles sampled; None where absent."""
+    scene = depth = None
+    for (kind, ps, in_scene, slot, fc, content), count in sorted(cap.frames[n].uses.items(), key=str):
+        if content is None or is_1d(fc):
+            continue
+        base = fc[1] & 0xFFFFF000
+        if base == scene_base and (scene is None or ps.startswith("87E8")):
+            scene = (fc, content)
+        if base == depth_base and in_scene and kind == "verts":
+            depth = (fc, content)
+    return (scene or (None, None)) + (depth or (None, None))
+
+
+BANDS = ((0, 20), (20, 100), (100, 300), (300, 600), (600, 1000), (1000, 1e9))
+
+
+def report_replay(cap, frame=None, step=4):
+    """light_formulas.sky and light_formulas.fog on the pixels of the read-back scene colour.
+    Sky: pixels whose stored depth is 0 (nothing drawn); the prediction is sky(direction) * c20.w with the
+    frame's tf4 and the sky row's registers (the sky's textures are left out: see report_sky for what they
+    hold); reported: median of observed / predicted per channel, also with tf4 read half a texel to either
+    side. Ground: every other pixel, its world position from the depth through the inverse of the sky row's
+    vertex c0..c3; with T and the in-scatter term from fog() of black and of white, the colour before fog
+    that the pixel implies is (observed / c20.w - floor) / T: reported by distance band with the share of
+    pixels below the floor (observed darker than the in-scatter alone, which no colour explains)."""
+    import light_formulas as lf
+    n = frame if frame is not None else min(cap.frames)
+    fr = cap.frames[n]
+    lines = ["frame %d of %s, every %d. pixel" % (n, cap.path.name, step)]
+    sky_row = next((r for r in fr.indx if r.get("in_scene") and r.get("ps_hash", "")[2:].upper() == SKY_PS), None)
+    scene_fc, scene_content, depth_fc, depth_content = frame_targets(cap, n)
+    if sky_row is None or not sky_row.get("bank") or not sky_row.get("pfull") or fr.tf4 is None or fr.tf5 is None:
+        return lines + ["no in-scene sky row with its registers, or no table dump: nothing replayed"]
+    if scene_content is None or depth_content is None:
+        return lines + ["no scene colour or depth content in this frame's rows: nothing replayed"]
+    ts, td = cap.by_content.get((scene_fc[1] & 0xFFFFF000, scene_content)), \
+        cap.by_content.get((depth_fc[1] & 0xFFFFF000, depth_content))
+    if ts is None or td is None:
+        return lines + ["no dump of the scene colour or the depth: nothing replayed"]
+    lines.append("scene %s (rows of frame %d), depth %s" % (ts.file, n, td.file))
+    w, h = (scene_fc[2] & 0x1FFF) + 1, ((scene_fc[2] >> 13) & 0x1FFF) + 1
+    px = scene_texels(ts.read(), scene_fc)
+    dw, dh, depth = decode_depth(td.read(), list(depth_fc))
+    if (dw, dh) != (w, h):
+        return lines + ["depth %d x %d is not the scene's %d x %d" % (dw, dh, w, h)]
+    bank = sky_row["bank"]
+    vp = [bank[4 * i:4 * i + 4] for i in range(4)]
+    eye = bank[36:39]
+    vp_inv = invert4(vp)
+    reg = lambda r: pfull_reg(sky_row["pfull"], r)
+    scale = fr.regs[20][3]
+    block = {"c31x": reg(31)[0], "c46x": reg(46)[0], "c47x": reg(47)[0], "c64": reg(64)[:3], "c65": reg(65)[:3],
+             "c66": reg(66)[:3], "c67y": reg(67)[1]}
+    c28, c66, c67, c68 = fr.regs[28], fr.regs[66], fr.regs[67], fr.regs[68]
+    lines.append("eye %s, c20.w %.7g, c67 %s, c28 %s" % (_fmt(eye), scale, _fmt(c67), _fmt(c28[:2])))
+    tf4, tf5 = lf.table_1d(fr.tf4), lf.table_1d(fr.tf5)
+    half = 0.5 / len(fr.tf4)
+    shifted = {"half a texel lower": lambda a: tf4(a - half), "half a texel higher": lambda a: tf4(a + half)}
+    sky_ratio = [[] for _ in range(3)]
+    sky_shift = {k: [[] for _ in range(3)] for k in shifted}
+    sky_abs = [[] for _ in range(3)]
+    bands = {b: {"n": 0, "below": 0, "T": [[], [], []], "obs": [[], [], []], "floor": [[], [], []],
+                 "C": [[], [], []]} for b in BANDS}
+    n_sky = n_ground = sky_inside = ground_inside = ground_fogged = 0
+    for y in range(step // 2, h, step):
+        for x in range(step // 2, w, step):
+            i = y * w + x
+            obs = [px[4 * i + k] for k in range(3)]
+            Ph = unproject(vp_inv, screen_point(x, y, w, h, depth[i]))
+            if depth[i] == 0.0:
+                n_sky += 1
+                direction = [Ph[k] - eye[k] * Ph[3] for k in range(3)]
+                if Ph[3] < 0:
+                    direction = [-c for c in direction]
+                pred = lf.sky(direction, block, tf4, None, None)
+                a = lf.sat(lf.dot(lf.normalize(direction), block["c66"]))
+                sky_inside += half < a < 1.0 - half
+                for k in range(3):
+                    if pred[k] > 0:
+                        sky_ratio[k].append(obs[k] / (pred[k] * scale))
+                        sky_abs[k].append(abs(obs[k] / scale - pred[k]))
+                for name, table in shifted.items():
+                    alt = lf.sky(direction, block, table, None, None)
+                    for k in range(3):
+                        if alt[k] > 0:
+                            sky_shift[name][k].append(obs[k] / (alt[k] * scale))
+                continue
+            if Ph[3] == 0:
+                continue
+            n_ground += 1
+            P = [Ph[k] / Ph[3] for k in range(3)]
+            d = math.sqrt(sum((P[k] - eye[k]) ** 2 for k in range(3)))
+            floor = lf.fog([0.0, 0.0, 0.0], P, eye, c28, c66, c67, c68, tf4, tf5)
+            coords = lf.fog_coords(P, eye, c66, c67)
+            if coords is not None:
+                ground_fogged += 1
+                ground_inside += half < coords[0] < 1.0 - half
+            white = lf.fog([1.0, 1.0, 1.0], P, eye, c28, c66, c67, c68, tf4, tf5)
+            band = bands[next(b for b in BANDS if b[0] <= d < b[1])]
+            band["n"] += 1
+            below = False
+            for k in range(3):
+                T = white[k] - floor[k]
+                o = obs[k] / scale
+                band["T"][k].append(T)
+                band["obs"][k].append(o)
+                band["floor"][k].append(floor[k])
+                if T > 1e-3:
+                    band["C"][k].append((o - floor[k]) / T)
+                below = below or o < floor[k] * 0.98
+            band["below"] += below
+    lines.append("sky pixels (stored depth 0): %d; other pixels: %d" % (n_sky, n_ground))
+    if n_sky:
+        lines.append("  sky, observed / (sky() * c20.w), median per channel: %s; 10th and 90th percentile of red: "
+                     "%.4f, %.4f" % (_fmt([_median(c) for c in sky_ratio], 5),
+                                     sorted(sky_ratio[0])[len(sky_ratio[0]) // 10],
+                                     sorted(sky_ratio[0])[len(sky_ratio[0]) * 9 // 10]))
+        lines.append("  sky, median of |observed / c20.w - sky()| per channel: %s" % _fmt([_median(c) for c in sky_abs], 4))
+        for name in shifted:
+            lines.append("  sky with tf4 read %s: median ratio %s" % (
+                name, _fmt([_median(c) for c in sky_shift[name]], 5)))
+        lines.append("  tf4's coordinate lies between the first and the last texel centre (where half a texel "
+                     "changes what is read) in %d of %d sky pixels and %d of %d fogged ground pixels"
+                     % (sky_inside, n_sky, ground_inside, ground_fogged))
+    for b in BANDS:
+        band = bands[b]
+        if not band["n"]:
+            continue
+        lines.append("  ground %g..%s units: %d pixels; medians: T %s, observed / c20.w %s, in-scatter floor %s, "
+                     "implied colour before fog %s; below the floor in a channel (by more than 2%%): %.4f" % (
+                         b[0], "%g" % b[1] if b[1] < 1e9 else "", band["n"], _fmt([_median(c) for c in band["T"]], 3),
+                         _fmt([_median(c) for c in band["obs"]], 3), _fmt([_median(c) for c in band["floor"]], 3),
+                         _fmt([_median(c) for c in band["C"]], 3), band["below"] / band["n"]))
+    return lines
+
+
 def report_scene(cap, png=None, frame=None, scale=16.0, base=0x199E0000, max_edge=1120):
     lines = []
     uses = scene_uses(cap)
@@ -630,7 +904,7 @@ def report_scene(cap, png=None, frame=None, scale=16.0, base=0x199E0000, max_edg
     data = t.read()
     w, h = (fc[2] & 0x1FFF) + 1, ((fc[2] >> 13) & 0x1FFF) + 1
     lines.append("dump %s: %d bytes, needs %d" % (t.file, len(data), scene_bytes_needed(w, h)))
-    px = untile_scene(data, w, h)
+    px = scene_texels(data, fc)
     for ch, name in enumerate("rgba"):
         count_fin, lo, med, mean, hi = channel_stats(px[ch::4])
         lines.append("  %s: finite %d of %d, min %.5g, median %.5g, mean %.5g, max %.5g" % (
@@ -645,13 +919,14 @@ def report_scene(cap, png=None, frame=None, scale=16.0, base=0x199E0000, max_edg
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("report", choices=("tables", "trees", "sky", "scene"))
+    ap.add_argument("report", choices=("tables", "trees", "sky", "scene", "replay"))
     ap.add_argument("capture")
     ap.add_argument("--tex-root")
     ap.add_argument("--dump", help="tables: also write the decoded tables and registers per frame as JSON")
     ap.add_argument("--png")
     ap.add_argument("--frame", type=int)
     ap.add_argument("--scale", type=float, default=16.0)
+    ap.add_argument("--step", type=int, default=4, help="replay: every n-th pixel in x and y")
     ap.add_argument("--base", type=lambda s: int(s, 16), default=0x199E0000)
     a = ap.parse_args(argv)
     cap = load_capture(a.capture, a.tex_root)
@@ -664,6 +939,8 @@ def main(argv=None):
         lines = report_trees(cap)
     elif a.report == "sky":
         lines = report_sky(cap)
+    elif a.report == "replay":
+        lines = report_replay(cap, a.frame, a.step)
     else:
         lines = report_scene(cap, a.png, a.frame, a.scale, a.base)
     print("\n".join(lines))

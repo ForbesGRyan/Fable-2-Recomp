@@ -4,8 +4,10 @@ formula (ps_check.py, vs_check.py, light_check.py). Written as evidence of the m
 (its Task 9, enough for the terrain shaders); the lighting sub-project tracked it and added what the
 mesh shaders need: vertex fetches, a0-relative constants, cndge / cndgt, trunc, sin, cos, maxa /
 maxas / maxasf, the jump on a bool constant and loops with a count the caller gives; the shadows sub-project
-added getWeights (the two screen mask shaders) and the helpers for fetches with texel offsets. Kills and
-the cube ops are not interpreted: a shader that reaches one raises NotImplementedError.
+added getWeights (the two screen mask shaders) and the helpers for fetches with texel offsets; the fog
+sub-project added kill_gt, setp_ne_push and setp_gt_push (the two water shaders) and the zero-product switch
+(the sky shader at the poles). The other kills, the other two pushes and the cube ops are not interpreted: a
+shader that reaches one raises NotImplementedError.
 
 Semantics follow the SDK's ucode.h (xenos AluVectorOpcode / AluScalarOpcode):
 - an ALU instruction is a vector op and/or a scalar op; both read the registers as they were before
@@ -21,6 +23,12 @@ Semantics follow the SDK's ucode.h (xenos AluVectorOpcode / AluScalarOpcode):
 - `(p0)` / `(!p0)` run the instruction when the predicate has that value; `jmp` with a predicate
   jumps on it; `cexec bN` runs its block when bool constant N is set; `cjmp bN, L` / `cjmp !bN, L`
   jumps when the bool is set / clear;
+- `setp_ne_push rD, a, b` / `setp_gt_push rD, a, b` (vector opcodes; ucode.h, kSetpNePush / kSetpGtPush):
+  p0 = (a.w == 0 and b.w != 0) / (a.w == 0 and b.w > 0), and the result, in every component, is 0 where
+  (a.x == 0 and b.x != 0) / (a.x == 0 and b.x > 0), else a.x + 1: a counter of nested conditions, 0 while
+  every one of them holds;
+- `kill_gt rD, a, b` discards the pixel where any component of a is greater than b's and gives 1 there,
+  else 0. The interpreter sets `killed` and goes on (the outputs of a killed pixel mean nothing);
 - `vfetch_full` names a stream (`vfN`), its index operand and an `Offset` (0 when absent),
   `vfetch_mini` reads the stream and index of the full fetch before it at its own `Offset`; the
   caller's callback is given (stream, offset, attributes, index value) and returns the element's four
@@ -45,10 +53,14 @@ Semantics follow the SDK's ucode.h (xenos AluVectorOpcode / AluScalarOpcode):
   frac(coordinate * size): the weights of the texels floor(x) - 1 and floor(x), the fetches the mask
   shaders make with offsets -1 and 0. `weights` lists (instruction, slot, coordinates, factors).
 
-Not modelled: the SDK's interpreter makes a product with a zero factor +0 whatever the other factor
-is ("Direct3D 9 behavior", interpreter.cpp), flushes denormals and rounds to single precision; here
-0 * infinity is NaN and the arithmetic is double precision. The checkers feed finite inputs, where the
-two agree to rounding. The translator's rounding offset on fetch coordinates (1.5 / 1024 of a texel,
+Not modelled: the SDK's interpreter flushes denormals and rounds to single precision; here the arithmetic
+is double precision. The SDK's interpreter and its translators also make a product with a zero factor +0
+whatever the other factor is ("Direct3D 9 behavior", interpreter.cpp; "Shader Model 3: +-0 or denormal *
+anything = +0", dxbc_translator_alu.cpp); here 0 * infinity is NaN unless the caller asks for that rule
+with `zero_product=True` (it then holds for mul, mad, the dot products, muls, mulsc and muls_prev). The
+checkers feed finite inputs, where the two agree to rounding; the sky shader at the two poles is the one
+place that needs the rule (0 * (1 / 0)). The translator's rounding offset on fetch coordinates (1.5 / 1024 of
+a texel,
 added to every offset "to resolve ambiguity when fetching point-sampled textures between texels") is
 the emulator's own and is not modelled.
 """
@@ -105,6 +117,15 @@ def _trunc(a):
     return float(math.floor(a)) if a >= 0 else -float(math.floor(-a))
 
 
+def _mul(x, y):
+    return x * y
+
+
+def _mul_zero(x, y):
+    """The product with the console's rule: a zero factor gives +0 whatever the other is."""
+    return x * y if x and y else 0.0
+
+
 def _address(a):
     return int(min(max(math.floor(a), -256.0), 255.0))
 
@@ -122,19 +143,23 @@ def point_texel(coords, size, attrs):
 
 
 class Machine:
-    def __init__(self, text, consts, sampler, regs=None, bools=None, vfetch=None, loops=None, tex_size=None):
+    def __init__(self, text, consts, sampler, regs=None, bools=None, vfetch=None, loops=None, tex_size=None,
+                 zero_product=False):
         """consts: {register: [4 floats]}; sampler(slot, coords tuple, attrs dict) -> 4 floats;
         regs: {register: [4 floats]} initial values (interpolators or the patch inputs);
         vfetch(stream, offset, attrs dict, index) -> 4 floats, the vertex element as the fetch delivers
         it (index: the value of the full fetch's index operand);
         loops: {integer constant: iteration count};
-        tex_size: {slot: (width, height)} for getWeights."""
+        tex_size: {slot: (width, height)} for getWeights;
+        zero_product: a product with a zero factor is +0 (the module's "Not modelled")."""
         self.lines = text.splitlines()
         self.c = {int(k): [float(x) for x in v] for k, v in consts.items()}
         self.sampler = sampler
         self.vfetch = vfetch
         self.loops = dict(loops or {})
         self.tex_size = dict(tex_size or {})
+        self._mul = _mul_zero if zero_product else _mul
+        self.killed = False
         self.weights = []
         self.vstream = None
         self.vindex = None
@@ -204,13 +229,13 @@ class Machine:
             if op == "maxa":
                 self.a0 = _address(a[3] + 0.5)
                 op = "max"
-            f = {"add": lambda x, y: x + y, "mul": lambda x, y: x * y, "max": max, "min": min,
+            f = {"add": lambda x, y: x + y, "mul": self._mul, "max": max, "min": min,
                  "seq": lambda x, y: float(x == y), "sgt": lambda x, y: float(x > y),
                  "sge": lambda x, y: float(x >= y), "sne": lambda x, y: float(x != y)}[op]
             return [f(x, y) for x, y in zip(a, b)]
         if op == "mad":
             a, b, c = (self._src(x, 4) for x in s)
-            return [x * y + z for x, y, z in zip(a, b, c)]
+            return [self._mul(x, y) + z for x, y, z in zip(a, b, c)]
         if op == "cndeq":
             a, b, c = (self._src(x, 4) for x in s)
             return [y if x == 0 else z for x, y, z in zip(a, b, c)]
@@ -222,11 +247,11 @@ class Machine:
         if op in ("dp4", "dp3"):
             n = 4 if op == "dp4" else 3
             a, b = self._src(s[0], 4), self._src(s[1], 4)
-            d = sum(a[i] * b[i] for i in range(n))
+            d = sum(self._mul(a[i], b[i]) for i in range(n))
             return [d] * 4
         if op == "dp2add":
             a, b, c = (self._src(x, 4) for x in s)
-            return [a[0] * b[0] + a[1] * b[1] + c[0]] * 4
+            return [self._mul(a[0], b[0]) + self._mul(a[1], b[1]) + c[0]] * 4
         if op == "frc":
             a = self._src(s[0], 4)
             return [x - math.floor(x) for x in a]
@@ -234,6 +259,16 @@ class Machine:
             return [math.floor(x) for x in self._src(s[0], 4)]
         if op == "trunc":
             return [_trunc(x) for x in self._src(s[0], 4)]
+        if op in ("setp_ne_push", "setp_gt_push"):
+            a, b = self._src(s[0], 4), self._src(s[1], 4)
+            holds = (lambda x: x != 0) if op == "setp_ne_push" else (lambda x: x > 0)
+            self.p0 = a[3] == 0 and holds(b[3])
+            return [0.0 if a[0] == 0 and holds(b[0]) else a[0] + 1.0] * 4
+        if op == "kill_gt":
+            a, b = self._src(s[0], 4), self._src(s[1], 4)
+            kill = any(x > y for x, y in zip(a, b))
+            self.killed = self.killed or kill
+            return [float(kill)] * 4
         raise NotImplementedError(f"vector op {op}")
 
     def _scalar(self, op, s):
@@ -241,18 +276,18 @@ class Machine:
             return self.ps
         if op in ("mulsc", "addsc", "subsc"):
             a, b = self._src(s[0], 1)[0], self._src(s[1], 1)[0]
-            return a * b if op == "mulsc" else a + b if op == "addsc" else a - b
+            return self._mul(a, b) if op == "mulsc" else a + b if op == "addsc" else a - b
         if op in ("adds", "muls", "maxs", "mins", "subs", "maxas", "maxasf"):
             a, b = self._src(s[0], 2)[:2]
             if op in ("maxas", "maxasf"):
                 self.a0 = _address(a + 0.5 if op == "maxas" else a)
                 return max(a, b)
-            return {"adds": a + b, "muls": a * b, "maxs": max(a, b), "mins": min(a, b), "subs": a - b}[op]
+            return {"adds": a + b, "muls": self._mul(a, b), "maxs": max(a, b), "mins": min(a, b), "subs": a - b}[op]
         a = self._src(s[0], 1)[0]
         if op == "adds_prev":
             return a + self.ps
         if op == "muls_prev":
-            return a * self.ps
+            return self._mul(a, self.ps)
         if op == "subs_prev":
             return a - self.ps
         if op == "seqs":

@@ -534,3 +534,216 @@ The five entries that existed agree as well, which is the check of the check; 21
 ### Evidence
 
 In `out/native-evidence/shadows/` (git-ignored): `task2_gpu_log_mask_registers.txt` (`task2_mine_gpu_log.py`: the registers of the two mask shaders in the four GPU logs); `task2_far_shader_depths.txt` (`task2_far_shader_depths.py`); `task2_light_check_mask.txt` (`--family mask`, `mask-near`, `mask-far`, 2000 trials); `task2_light_check_all.txt` (`--all --trials 400`); `task2_light_check_multi_sun.txt` (`--multi-sun --trials 400`); `task2_mask_mutations.txt` (`task2_mask_mutations.py`: the wrong forms and the regimes); `task2_family_mask.txt` (`task2_family_mask.py`: every lit pair with the mask taken as 1); `task2_caster_rows.txt` (`task2_caster_rows.py`: the shadow-pass rows per pair, their state words and constants); `task2_c12_rows.txt` (`task2_c12_rows.py`: pixel `c12`, `c13`, `c14` over the rows); `task2_caster_vertex_rows.txt` (`task2_caster_vertex_rows.py`); `task2_vs_check_casters.txt` (`vs_check.py --casters`); `task2_add_table_entries.py`, `task2_write_caster_table.py` (how the two tables' entries were written); `task2_python_suite.txt`, `task2_native_suite.txt`. To rerun: `python tools/xdk_sigmatch/light_check.py --family mask`, `python tools/xdk_sigmatch/vs_check.py --casters`, `python -m unittest discover -s tests -p "test_light_check.py"`, `-p "test_gen_caster_table.py"`, `-p "test_ucode_eval.py"`.
+
+## Fog and sky
+
+Native renderer sub-project 9 (fog, in-scatter and sky), plan Task 2, 2026-10-09. The fog block of the pixel shaders, the trees' vertex form of it and the sky's pixel shader as closed formulas, each checked against the microcode, and the list of fogged pixel shaders as data for the capture. Nothing here was run in the game. Every statement rests on the shader dumps, on one GPU-side log of the shadows sub-project for the literal registers (`out/build/win-amd64-release/logs/gpu_shadow_bridge2.log`, 40 frames at the bridge; frame 1116 is the one quoted) and three more of the same kind for one count ("Which literal is the 1"), and on the research note `.superpowers/sdd/fog-research.md`, whose reading this part checks. **No texel of any fog table was known when this was written** (the discovery of the same plan, Task 1, captures them): every check here runs on random tables, and what the tables hold, their decode included, is not this part's subject.
+
+### Result
+
+| What | Shaders | Function of `light_formulas.py` | State |
+|---|---|---|---|
+| The fog block, plain form | 30 pixel shaders | `fog` (with `fog_coords`, `table_1d`) | closed: 4,319 of 4,319 fog trials, 1,458 of 1,458 near trials bit for bit; largest relative difference 7.2e-14 |
+| The fog block, blended form | 10 pixel shaders | `fog(..., scatter_scale=alpha)` | closed: 1,540 of 1,540, 460 of 460 near |
+| of these: the two water shaders | `A17D...`, `F6D9...` | `fog` | closed, for the first time: 131 of 131 fog trials (of 400; 200 killed, 23 kept out of the block by the shaders' outer predicate, 46 near) |
+| The trees' vertex form | 4 vertex shaders: `475E...`, `A584...`, `D7DD...`, `2D40...` | `vertex_fog` | closed: 576 of 576 fog trials, 224 of 224 near |
+| The tree pixel shaders' use of it (`b132`) | `00E0...`, `58D3...`, `2FBE...`, `7CD5...` (6 pairs) | `fog_apply` on the family's formula | closed: 1,200 of 1,200 |
+| The sky | `F760...` | `sky` (with `sky_latlong`, `sky_paths`, `sky_extinction`) | closed: 218 of 218 (18 named directions, 200 random), largest relative difference 8.2e-14 |
+| The lake | `2B09...` | none | not of the form, not checked |
+| Two more vertex shaders of the trees' form | `D57E...`, `129F...` | none (`vertex_fog` by the reading) | read only |
+
+(`out/native-evidence/fog/task2_fog_check.txt`: `fog_check.py --trials 200`, exit code 0. Tolerance 1e-4 relative per channel for the fog checks, 1e-9 for the sky; table coordinates to 1e-9. The 38 shaders the research ran give its counts again, 5,728 of 5,728 fog trials: the trials are the same draws.)
+
+What differs from the research note and the spec, found by this reading:
+
+1. *The water shaders are of the plain form*, world position in interpolator 0, output scale `c20.w` alone. The research could not run them.
+2. *`F760...` needs nothing new from the interpreter except at the two poles*, where its arctangent multiplies 0 by 1 / 0 (instructions 17 and 19). Everywhere else the existing interpreter runs it.
+3. *The research's trials hardly exercised the blend from `c68` to the in-scatter table*: with its `c67.z` between 0.02 and 1 the blend is complete within 50 units of the start, and a formula without the blend passed the check at 40 trials on `8D90...`, `401A...` and `A17D...` (seen when the tests were first run). Half the trials here get a slope that leaves the pixel inside the blend (2,124 of the 5,859 fog trials are inside it); the same wrong formula now fails on every shader tried (`tests/test_fog_formulas.py`).
+4. *The vertex form has no amount.* `vertex_fog` has vertex `c8.x` in the place of pixel `c28.y` and nothing in the place of `c28.x`. It is the pixel block only where `c28.x` = 1 (every fogged row of the 91 captures of the research).
+5. *A two-row tf17 would not be the pixel form.* tf17 is fetched as a 2D texture at (angle, near blend). By the addressing below, a texture of two rows read linearly gives the second row the weight `sat(2 t - 0.5)`, not `t`. So "tf17 = {`c68`, tf4}" (spec, ruling 4) can hold only as a table with enough rows to carry the ramp, or with other texel positions; the capture has to compare `tf17(a, t)` with `c68 + t * (tf4(a) - c68)` over `t`, not only its first and last row.
+6. *The sky's coordinate is not exactly the lat-long of the direction*: the shader's literals for 1 / (2 pi) and 2 / pi are 0.15915963 and 0.63663852 (the exact values are 0.15915494 and 0.63661977), so `u` runs from -0.0000147 to 1.0000147 and `v` from -1.0000295 to 1.0000295 ("The sky").
+
+### The addressing of a 1D table
+
+`table_1d(texels)` is the fetch every formula here reads its 1D tables with: texel `i` of `N` has its centre at `u = (i + 0.5) / N`; between two centres the result is their linear blend; `u <= 0.5 / N` reads texel 0 alone and `u >= 1 - 0.5 / N` the last one alone (clamp to edge); a coordinate that is not a number reads texel 0.
+
+This is the emulated game's addressing, read from the SDK's translator (`thirdparty/rexglue-sdk/src/graphics/pipeline/shader/dxbc_translator_fetch.cpp`; read only):
+
+- A 1D texture is bound as a 2D array (lines 455 to 459: "1D and 2D textures (including stacked ones) are treated as 2D arrays for binding and coordinate simplicity"), and the fetch's coordinate is padded with zeros for the second axis and the layer (line 1150: "Pad to 2D array coordinates").
+- With normalised coordinates (the fog fetches have no `UnnormalizedTextureCoords`) the shader's coordinate goes to the host's `sample` unchanged but for the translator's own offset (from line 1087): `rounding_offset = 1.5f / 1024.0f` of a texel is added to every fetch (lines 698 to 716), divided by the texture's width. For tf5 that is 0.0015 of a texel, 0.011 units of distance; for tf4 a cosine step of 0.00002. It is an emulator measure and is **not modelled** in `table_1d`.
+- The filter and the address mode are the sampler's, made from the fetch constant: linear and clamp to edge for tf4 and tf5 in every captured row (research section 1). The host sampler is Direct3D 12's, whose texel centres lie at `(i + 0.5) / N`.
+
+So the convention is the host's, not something the translator computes; that the console's own filter has its centres in the same place is taken from the translator passing the coordinate through (inference). In distance: with `c67.w` = 0.0005 the 256 texels of tf5 span 2,000 units, texel `i` is centred `(i + 0.5) * 7.8125` units past the fog start, the first 3.9 units past the start read texel 0 alone, and everything beyond 1,996 units reads texel 255. tf4's 64 texels are steps of 1 / 64 in the cosine of the angle to `c66`; every view direction more than 90 degrees from the axis reads texel 0 (within half a texel: a cosine below 0.0078).
+
+`tests/test_fog_formulas.py`, `Table1D`, holds each of these; `SyntheticDump.test_a_wrong_formula_fails` and `RealDumps.test_a_wrong_formula_fails_on_the_real_shaders` show that a transmittance table read half a texel off fails the check on the real shaders, so the addressing is part of what the microcode check compares (the interpreter hands the fetch's coordinate to the same `table_1d`; it does not model a filter of its own).
+
+### The fog block
+
+`fog(C, P, eye, c28, c66, c67, c68, tf4, tf5, scatter_scale=1)`, with `fog_coords(P, eye, c66, c67)` for the three coordinates:
+
+```
+V = eye - P;  d = |V|;  dD = d - c67.x
+dD > 0 false:  C unchanged, no table read
+a = sat((-V / d) . c66.xyz);  S = tf4(a).rgb
+s = c67.w * dD;               T = tf5(s).rgb
+t = sat(c67.z * dD);          F = c68.rgb + t * (S - c68.rgb)
+G = C * T + (1 - T) * c28.y * scatter_scale * F
+C' = C + c28.x * (G - C)
+```
+
+`C` is the family's colour (the functions above: linear, before the output scale), `P` the pixel's world position, `eye` pixel `c19.xyz`. `c67.y` is not read. Alpha is not touched. After the block the shader multiplies by `c20.w`, and by `c26.xyz` where it reads `c26`.
+
+Instruction numbers in the far terrain shader `7DDA...` (every shader of the list has the same steps; the check, not this table, is what holds them): V (8), `d^2` (11), `1 / d` and d (14 and 13, scalar), the view direction (15), `dD` (15, scalar), the predicate (23, scalar; the jump at 2.1), a and s (25), the two fetches (26, 27), `1 - T` (28), `S - c68` and t (29), F (30), `(1 - T) * c28.y` (31), `G - C` (32, 33), `C'` (34), `* c20.w` (35).
+
+**The blended form** (10 shaders, `"alpha"` in `FOG_SHADERS`): the in-scatter term is multiplied by the pixel's alpha, `scatter_scale` = the output alpha divided by `c26.w`. In `401A...`: the two fetches (217, 218), `S - c68` (219), `1 - T` and `c28.y * alpha` (220), their product and t (221), F (222), `G - C` (223, 224), `C'` (225), `* c20.w * c26.xyz` and `alpha * c26.w` (226, 227). These shaders are drawn blended one / inverse source alpha (research section 1); the native pass does not light them.
+
+**The cross-fade of `2F8A...`** multiplies after the block: `out = C' * sat(d^2 * c31.x + c31.y) * c20.w` (the fade at 12, the products at 36 and 37). The check gives it a `c31` that puts the fade strictly between 0 and 1 in 103 of its 149 fog trials (the research's trials had it at 1 throughout); `RealDumps.test_the_cross_fade_of_2f8a_is_exercised` holds that such trials exist.
+
+**Guards** (review focus 2; `Fog` in the tests). `fog` never raises on numbers. A fog input that is not finite (the position, the eye, `c28.xy`, `c66`, `c67.x`, `.z`, `.w`, `c68`, the alpha of the blended form, a texel either fetch returns) or a result that is not finite leaves the pixel **unfogged**: the colour comes back as it went in, which is how the product draws a frame without a valid fog block. A colour channel that is not finite counts as 0, as in the families. A zero `c66` reads tf4 at 0. A pixel at the eye is inside the start for any `c67.x >= 0`; with a negative start it has no view direction and the angle reads 0. `c67.w * dD` far beyond 1 reads the last texel of tf5. The microcode has none of these guards.
+
+### The fogged pixel shaders
+
+`FOG_SHADERS` in `light_formulas.py`: 40 entries of (hash, family, world, form), for the capture's fog flag (plan Task 3). They are the dumps' pixel shaders that fetch tf4 and tf5 with `tfetch1D` and read `c67` (`fog_check.scan`: 41 of 114), less the lake `2B09...` (`FOG_NOT_OF_THE_FORM`); a test and the command line compare the list with the dumps.
+
+| World position | Form | Shaders | Family (`light_check.FAMILIES`) |
+|---|---|---|---|
+| interpolator 1 | plain | `7DDA...`, `2F8A...` | `terrain-far` |
+| interpolator 1 | plain | `014F...` (the fur) | none |
+| interpolator 4 | plain | `9C21...`; `4524...`, `04F2...` | `terrain-layer`; `terrain-layer-multi` (the `C30A...` layers) |
+| interpolator 4 | plain | `E099...` | none |
+| interpolator 2 | plain | `4755...`; `AF1E...`, `5783...` | `terrain-layer`; `terrain-layer-multi` (the `FB68...` layers) |
+| interpolator 2 | plain | `8D90...`, `2FD2...`; `648B...`, `7892...` | `object`; `object-multi` |
+| interpolator 2 | plain | `A7E4...`; `E99F...`; `165E...`; `F525...` | `plant`; `plant-multi`; `plant-lit`; `plant-lit-multi` |
+| interpolator 2 | plain | `0981...`, `09CB...`, `1421...`, `31AE...`, `8C51...`, `A229...`, `C071...`, `F96A...`, `F984...`, `FC09...` | none |
+| interpolator 0 | plain | `A17D...`, `F6D9...` (water) | none |
+| interpolator 2 | alpha | `2005...`, `3275...`, `401A...`, `44B5...`, `827B...`, `90B3...`, `95ED...`, `A7A8...`, `C010...`, `F2F1...` | none |
+
+Interpolator N is register rN of the pixel shader. The family is the pixel shader's in `light_check.FAMILIES`; a test holds the two together. The tree pixel shaders (`00E0...`, `58D3...`, `2FBE...`, `7CD5...`, and the billboards' `4B1D...`) are not in the list: they read no fog register and no fog table, so a draw of theirs is no place to read the frame's fog block from. `FOG_VERTEX_SHADERS` has the six vertex shaders of the trees' form with the interpolators of the world position, the factor and the add.
+
+### The check of the pixel form
+
+`fog_check.py --only pixel` (`check_pixel`): a differential per trial. Run A has the predicate off (`c67.x = 1e9`) and gives the colour before fog times whatever follows the block; run B has fog on and must be `fog` of run A's colour (divided by `c20.w`, by `c26.xyz` where the dump reads `c26`, by the cross-fade for `2F8A...`) times the same scale. Also per fog trial: alpha bit for bit as in run A; the angle and the distance of the interpolator `FOG_SHADERS` names are the two table coordinates the microcode fetched (so the wrong interpolator fails). Per near trial (a quarter of the trials: every interpolator within a few units of the eye and the start beyond): no table fetch and run B bit for bit run A.
+
+The trials are those of the research script (`out/tests/fog-research/fog_check.py`: seed 1234 per shader, the same draws in the same order), which is why its counts come out again. What differs:
+
+- **The tables are tables**: 64 and 256 random texels (tf4 up to 3, tf5 in 0..1), read with `table_1d` by the interpreter's sampler and by the formula. The research drew a random colour per coordinate.
+- Every other texture is `light_check.tex` (the same in every process; the research's was salted per process).
+- **The literal registers are all 1.** The research drew 1 or 0.875 for all of them, to show that the 1 of `1 - T` is a literal; the formula's 1 is 1. The 38 shaders' own literal tables are not used, which the differential does not need: whatever the rest of the shader computes with wrong literals is the same in both runs.
+- Half the trials get `c67.z` between 0.001 and 0.02 (finding 3).
+- `2F8A...` gets a `c31` that puts its cross-fade between 0.2 and 1.
+
+**The water shaders** `A17D...` and `F6D9...` (80 instructions each; they differ in instruction 14 alone) compare literals in their kill (16) and in their outer predicate (18: `setp_ne_push` with `c254.x` as the counter), so a common literal value keeps every trial out of the block. They run with their own table: `c254` = (0, 2, 0, 0), `c255` = (0.5, -1, 1, -2), the registers at every one of their 24 executions each in frame 1116 of the GPU log (`00000000 40000000 00000000 00000000`, `3F000000 BF800000 3F800000 C0000000`). `c141` is drawn so that some pixels are killed, some pass the kill and fail the outer predicate, and the rest reach the block. Their fog block is 76 to 87 (`dD` 76, the predicate 77 `setp_gt_push`, a and s 78, the fetches 79 and 80, `1 - T` 81, `S - c68` and t 82, F 83, `(1 - T) * c28.y` 84, `G - C` 85 and 86, `C'` 87, `* c20.w` 88, the output with the alpha of 13 at 89); the world position is interpolator 0 (37). Of 200 trials each (`task2_fog_check.txt`): `A17D...` 69 fog trials agree, 26 near, 94 killed, 11 outside the block; `F6D9...` 62, 20, 106 and 12. A killed trial and a trial kept out of the block are no evidence of anything but themselves (run B equals run A in all 23 of the latter).
+
+**Which literal is the 1.** The register and component each shader subtracts T from, and its value in the game (`out/native-evidence/fog/task2_fog_one_literal.txt`, made by `task2_fog_one_literal.py` from the dumps and four GPU logs: `gpu_shadow_bridge2.log`, `gpu_shadow_trees.log`, `gpu_shadow_third.log`, `gpu_shadow_bridge.log`, 136 frames): located in all 40 dumps (`c254` or `c255`, any component); **24 of the 40 are drawn in those logs and the component reads 1.0 at every one of their executions**. The other 16 are not drawn there (`0981...`, `2005...`, `31AE...`, `3275...`, `827B...`, `8C51...`, `90B3...`, `95ED...`, `A229...`, `A7A8...`, `C010...`, `C071...`, `E099...`, `F2F1...`, `F96A...`, `F984...`): for them the 1 is the reading's.
+
+Mutations (`tests/test_fog_formulas.py`): the two amounts exchanged, the axis reversed, the start not subtracted, no near blend, the two tables exchanged, the transmittance table half a texel off, the alpha ignored, the wrong interpolator, `c26` left out of the scale, a block that fogs near pixels, and the plain form taken for the blended one and the reverse: each fails.
+
+### The trees' vertex form
+
+`vertex_fog(P, eye, c8x, c110, c111, tf16, tf17)` gives the two interpolators, `fog_apply(C, factor, add)` is what the pixel shader does with them:
+
+```
+(a, s, t) = fog_coords(P, eye, c110, c111)        (vertex registers; eye = vertex c9.xyz)
+dD > 0 false:  factor = (1, 1, 1), add = (0, 0, 0), no table read
+T = tf16(s).rgb;  S2 = tf17(a, t).rgb             (tf17: a 2D texture)
+factor = T;  add = (1 - T) * S2 * c8.x
+pixel, under bool b132:  colour = colour * factor + add          (then * c20.w * c26)
+```
+
+`P` is the world position the vertex shader exports, after the wind. Instruction numbers: `475E...` the vector to the eye and `d^2` (81, 82), d (83), `dD` (85), the predicate (86), t and `1 / d` (87), the view direction (88), a and s (89), the fetches (90, 91), `S2 * c8.x` (92), `1 - T` (93), add (94), the near values (95, 96), exported as `o6`, `o7` with the world position in `o2` (101, 105, 106). `A584...`: `dD` and the predicate (136, 137), s, a and t (138, 139), the fetches (140, 141), `S2 * c8.x` (142), `1 - T` (143), add (144), the near values (145, 146), exported as `o4`, `o5` with the world position in `o0` (149, 151, 152). `D7DD...` (143, 144, 147 to 155) and `2D40...` (161, 168 to 176) have the block with the predicate inverted.
+
+The check (`--only vertex`, `check_vertex`): every vertex register random, the literal tables those of `light_check.py` (captures), tf16 a random 256-texel table, tf17 a random smooth function of its two coordinates; the two exported interpolators and the coordinates of both fetches against the formula evaluated at the exported world position. 147 + 143 + 143 + 143 fog trials and 53 + 57 + 57 + 57 near trials agree (200 each). A formula without `c8.x` and one with tf17's coordinates exchanged fail.
+
+The pixel side (`--only apply`, `check_apply`): `light_check`'s case of each tree pair with `b132` set and a random factor and add in the two interpolators against `fog_apply` of the family's formula: 200 of 200 for each of the six pairs (`00E0...` 16 and 44, `7CD5...` 10 and 25 are the bool and the product; `c49` is on the colour, not on the add). The earlier check of these families ran `b132` only with factor 1 and add 0.
+
+**What ruling 4 rests on.** `vertex_fog` followed by `fog_apply` equals `fog` at the vertex if, and only as far as, tf16 is tf5, `tf17(a, t)` is `c68 + t * (tf4(a) - c68)`, vertex `c8.x` is pixel `c28.y`, vertex `c110`, `c111`, `c9` are pixel `c66`, `c67`, `c19`, and `c28.x` is 1 (`VertexFog.test_it_is_the_pixel_form_if_the_tables_are_what_ruling_4_takes_them_for`: 300 random cases to 1e-12). The registers agree in the research's rows; the two tables are for the capture (findings 4 and 5). What stays a difference in any case is the interpolation of factor and add across a triangle against the per-pixel evaluation.
+
+Read only, by `FOG_VERTEX_SHADERS`: `D57E...` (a leaf shader whose literal table is in no file here; its block, 209 to 217, is the leaves' line for line) and the distant-tree billboards `129F...` (75 to 85), whose block has **no `c8.x`** and takes the eye from vertex `c47`, not `c9`; their pixel shader `4B1D...` applies the pair without a bool (58).
+
+### The sky
+
+`sky(n, block, tf4, tf13, tf14)` is pixel shader `F760...` (instructions 10 to 58 and 100; 91 in all), linear and before the output scale `c20.w`; alpha is 1:
+
+```
+n      = the interpolator, normalised                                          (10 to 12)
+a      = sat(n . c66.xyz);  S = tf4(a).rgb                                     (14, 15, 40)
+(u, v) = sky_latlong(n)                                                        (13, 14 to 39)
+s13    = tf13(u, v);  s14 = tf14(u, v)                                         (41, 42)
+col    = s13.rgb^2 + c47.x * (s14.rgb^2 - s13.rgb^2)                           (44, 45, 47)
+alpha  = s13.a + c47.x * (s14.a - s13.a)                                       (43, 46)
+k      = |n.z|^0.2;  h = c67.y * (1.05 - k)                                    (20 to 22, 24, 28)
+l1     = h + (c31.x - h) * k;  l2 = h + (c46.x - h) * k                        (31, 33, 48)
+E      = exp2(-1.4426950 * (l1 * c64.rgb + l2 * c65.rgb))                      (49 to 54)
+base   = (1 - E) * S                                                           (55, 56)
+result = base + alpha * (col - base)                                           (57, 58)
+oC0    = (result * c20.w, 1)                                                   (100)
+```
+
+`sky_latlong`, the shader's own arithmetic:
+
+```
+q  = min(|x|, |y|) * (1 / max(|x|, |y|))                                       (14, 16, 17, 19)
+at = q * (0.9998660 - 0.3302995 q^2 + 0.1801410 q^4 - 0.0851330 q^6 + 0.0208351 q^8)     (20 to 25, 27 to 29)
+|y| > |x|:  at = pi/2 - at                                                     (17, 30, 31, 34)
+x < 0:      at = at - pi                                                       (26, 35)
+min(x, y) < 0 <= max(x, y):  at = -at                                          (15, 18, 19, 26, 29, 36, 37)
+ac = sqrt(1 - |z|) * (1.5707288 - 0.2121144 |z| + 0.0742610 |z|^2 - 0.0187293 |z|^3)     (13, 16, 18, 25 to 31)
+z < 0:      ac = pi - ac                                                       (21, 26, 32 to 34)
+u  = 0.5 + at * 0.15915963;   v = (pi/2 - ac) * 0.63663852                     (36, 38, 39)
+```
+
+So `u = 0.5 + atan2(n.y, n.x) / (2 pi)` and `v = asin(n.z) * 2 / pi` to within 1.6e-5 and 4.3e-5 (20,000 random directions; the difference is the two polynomials' error and the two rounded literals). The upper hemisphere is `v` in 0..1 with the zenith at 1.
+
+**The literals** `c250..c255`, the emulated GPU's registers at each of the shader's six executions in frame 1116 of the log (two in the main scene, four in the reflection passes); `SKY_LITERALS` has them as the exact singles:
+
+| Register | Hex | Value |
+|---|---|---|
+| `c250` | `BC996E30 3E3876E2 3F000000 3F866666` | (-0.0187293, 0.1801410, 0.5, 1.05) |
+| `c251` | `C0490FDB BDAE5A36 40490FDB C0000000` | (-pi, -0.0851330, pi, -2) |
+| `c252` | `3FC90FDB 3FC90DA4 BE593484 3F7FF738` | (pi / 2, 1.5707288, -0.2121144, 0.9998660) |
+| `c253` | `3F800000 00000000 3D981627 BEA91D04` | (1, 0, 0.0742610, -0.3302995) |
+| `c254` | `3E4CCCCD 3CAAAE5F 3F22FABE 3E22FABE` | (0.2, 0.0208351, 0.63663852, 0.15915963) |
+| `c255` | `3FB8AA3B 00000000 00000000 00000000` | (1.4426950, 0, 0, 0) |
+
+**The seam.** `u` jumps by one whole turn across the half plane `y = 0`, `x < 0`. On the half plane itself and just north of it (`y >= 0`) `u` is 1.0000147; just south it is -0.0000147: the test "of different sign" counts `y = 0` as positive (18: `sge` of `max(x, y)`; 26: `sgt` on `min(x, y)`). What a sampler makes of the two ends is the fetch constant's (wrap or clamp), which no capture row holds yet. The two fetches (41, 42) carry no attribute, so the level of detail is the computed one: where the textures have mips, the pixels on the seam see a gradient of a whole texture width, and a renderer that samples with screen-space derivatives of `u` gets its smallest mip along that line. This is the game's own behaviour on the console as far as the microcode says; whether the game's textures have mips is for the capture.
+
+**The poles.** At `x = y = 0` the ratio `q` is 0 times `1 / 0` (17: `rcp` of `max(|x|, |y|)`; 19: the product). In plain arithmetic that is not a number; by the console's rule as the SDK has it, a product with a zero factor is +0 (`interpreter.cpp`: "Direct3D 9 behavior (0 or denormal * anything = +0)"; `dxbc_translator_alu.cpp`: "Shader Model 3: +-0 or denormal * anything = +0"), so `q` = 0 and `u` = 0.5 there; `v` = 1.0000295 at the zenith and -1.0000295 at the nadir. `sky_latlong` takes the rule; the check runs the microcode with the interpreter's `zero_product` switch, and `RealDumps.test_at_the_poles_the_microcode_needs_the_zero_product` holds that without it exactly the two pole trials fail. A direction beside the pole (1e-6 off) needs no rule and agrees. At the pole itself one texel row is read whatever `u` is.
+
+**The octant boundaries.** Where `|x| = |y|` the shader changes from `atan(q)` to `pi / 2 - atan(q)`; its polynomial exceeds `pi / 4` by 1.14e-5 at `q = 1`, so `u` jumps by 3.6e-6 there (0.004 texel of a 1,024-texel texture).
+
+**Below the horizon** the paths are the mirror image (`|n.z|`), `v` is negative, and at the horizon `k` = 0: both paths are `1.05 * c67.y` (1,995 with the captured 1,900) whatever `c31.x` and `c46.x` are; at the zenith they are `c31.x` and `c46.x` themselves. The log of 0 at the horizon (20) is minus infinity, times 0.2 (21), and `exp2` of it is 0 (22): no rule is needed there.
+
+**Guards.** `sky` never raises on numbers and is finite for any input: a register, a direction or a texel that is not finite counts as 0 (there is no unfogged colour to fall back to). `tf13 = None` gives the clear-sky term `(1 - E) * S` alone, `tf14 = None` the first texture alone (as with `c47.x` = 0): the two fallbacks of spec design 5.
+
+**The check** (`--only sky`, `check_sky`): every register random within what the one logged frame shows (`c31.x`, `c46.x` 50 to 300; `c47.x` 0, 1 or between; `c64` up to 0.002, `c65` up to 0.01; `c67.y` 500 to 3,000; `c20.w` 16, 1 or 2.5), the literals as above, tf4 a random 64-texel table read with `table_1d`, tf13 and tf14 random smooth functions with four channels, bool `b129` clear, the interpolator the direction times a random length. Compared: the colour to 1e-9 relative, alpha = 1, and the three fetch coordinates to 1e-9. 18 named directions (zenith, nadir, beside each, the horizon, five on and beside the seam, three axes, the four octant boundaries, one below the horizon) and 200 random ones: 218 of 218, largest relative difference 8.2e-14. Six wrong forms fail: exact `atan2` / `asin` in the place of the polynomials, the two path constants exchanged, the textures not squared, the second texture ignored, the clear-sky term alone, the axis reversed.
+
+For the port (plan Task 5): a shader that computes `u` and `v` with its own `atan2` and `asin` is within 1.6e-5 and 4.3e-5 of the game's coordinate, not equal to it; the mirror on the CPU can be held to `sky_latlong` only if it uses the polynomials.
+
+### The interpreter
+
+`ucode_eval.py` gained what the water shaders and the sky's poles need (`tests/test_fog_formulas.py`, `InterpreterForTheWaterAndTheSky`: hand-computed):
+
+- **`setp_ne_push`**, **`setp_gt_push`** (vector opcodes; `ucode.h`, `kSetpNePush`, `kSetpGtPush`; the SDK's `interpreter.cpp` 484 to 499): p0 = (`a.w == 0` and `b.w != 0` / `b.w > 0`); the result, in every component, is 0 where (`a.x == 0` and `b.x != 0` / `b.x > 0`), else `a.x + 1`: a counter of nested conditions.
+- **`kill_gt`**: the pixel is discarded where any component of the first operand is greater than the second's; the result is 1 there, else 0. The interpreter sets `killed` and goes on.
+- **`zero_product=True`**: a product with a zero factor is +0 in `mul`, `mad`, the dot products, `muls`, `mulsc` and `muls_prev`. Off by default, so every earlier check runs as before (`light_check.py --all` and the other suites unchanged).
+
+`setp_eq_push`, `setp_ge_push` and the other three kills are still not interpreted: none of the shaders here has them.
+
+### Not checked
+
+Named by shader and instruction, so that nothing above is read as wider than it is:
+
+1. **The ground-fog volume under bool `b129`**: `F760...` 59 to 99 (and the same block in the tree pixel shaders, "Tree trunks" above). The bool is clear in every trial, as it is in every draw of the GPU log (research section 1).
+2. **The lake `2B09...`**, all 149 instructions. It fetches tf4 with the predicate off, so the differential does not apply (`RealDumps.test_the_lake_is_not_of_the_form`).
+3. **The sky's vertex shader `8262...`** (3 to 11): that the interpolator is the cube's offset before the eye is added is the research's reading. `sky` takes a direction; nothing here says where the pass gets it.
+4. **`D57E...`** 209 to 217, **`129F...`** 75 to 85 and **`4B1D...`** 58: the trees' form by the reading only.
+5. **The water shaders outside their fog block** (10 to 75): the check takes whatever they compute as the colour before fog. Their kill (16) and outer predicate (18) are run, not described by a formula.
+6. **The literals of the 38 other pixel shaders**: not theirs in the trials. For the 16 named under "Which literal is the 1" nothing but the reading says the block's literal is 1.
+7. **The cube map under `b134`** of the object and blended shaders is never set (the interpreter has no cube fetch); those instructions lie before the fog block.
+8. **Single precision, denormals** and the translator's 1.5 / 1024 texel offset: not modelled; the arithmetic is double precision.
+9. **The zero product at the poles** is the emulator's rule from its source, not something measured on a console.
+10. **The tables' content and decode** (endianness, the half floats of format 29, tf5's swizzle), tf16 and tf17 against tf5 and {`c68`, tf4}, the sky textures' format, address mode and mips, and every register's value in a scene other than the bridge by day: the discovery and the later tasks.
+
+### Evidence
+
+In `out/native-evidence/fog/` (git-ignored): `task2_fog_check.txt` (`fog_check.py --trials 200`: the 40 pixel shaders, the four vertex shaders, the six tree pairs, the sky; exit code 0), `task2_fog_one_literal.txt` with its script `task2_fog_one_literal.py`. To rerun: `python tools/xdk_sigmatch/fog_check.py`, `python -m unittest discover -s tests -p "test_fog_formulas.py"`.

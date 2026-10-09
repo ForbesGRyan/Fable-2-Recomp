@@ -48,9 +48,14 @@ numbers for any input. The microcode has no such guards (rsq(0) is infinity ther
 never feeds it those inputs and counts a non-finite microcode result as a failed trial.
 
 The screen mask the families read is written by two pixel shaders of its own; their arithmetic is the
-last part of this file (mask_near, mask_far, mask_combine, mask_0f99, mask_1b4b; the shadows
+part after the families (mask_near, mask_far, mask_combine, mask_0f99, mask_1b4b; the shadows
 sub-project).
+
+The fog block every family's shader runs on its colour, the trees' vertex form of it, the sky's pixel
+shader and the list of fogged pixel shaders are the last part (table_1d, fog, vertex_fog, fog_apply, sky,
+FOG_SHADERS; the fog sub-project).
 """
+import collections
 import math
 
 
@@ -485,3 +490,324 @@ def mask_1b4b(*, pixel, sample_depth, depth_scale, depth_offset, far_rows, sampl
     else:
         fade = 1.0 if t > 0.0 else 0.0
     return _finite(far + fade * (fade_to - far)), 1.0
+
+
+# --- fog, in-scatter and sky (fog sub-project) ------------------------------------------------------
+#
+# After its lit colour and before the output scale c20.w, every fogged pixel shader runs one block: distance
+# fog and in-scatter from two 1D tables the game rewrites every frame (fog, below). The trees compute the
+# same two quantities per vertex from two other tables and their pixel shaders apply them (vertex_fog,
+# fog_apply). The sky is one pixel shader of its own whose clear term is the same in-scatter table (sky).
+# All of it is read from the dumps and checked against them by fog_check.py
+# (docs/native-renderer/lighting-formulas.md, "Fog and sky", has the instruction numbers and what is not
+# checked).
+#
+# A table is a callable: tf4(u), tf5(u), tf16(u) return the texel at a 1D coordinate (three components or
+# more, red first, as the shader's register receives them: the swizzle of the texture's fetch constant
+# is the table decode's business, not this file's); tf17(a, t), tf13(u, v), tf14(u, v) take two
+# coordinates. table_1d makes such a callable from a list of texels with the addressing of the game's
+# fetch.
+#
+# Guards (review focus 2). Nothing here raises on numbers.
+#   - fog, vertex_fog: a fog input that is not finite (the position, the eye, a register the block reads,
+#     the alpha of the blended form, a texel the two fetches return) or a result that is not finite leaves
+#     the pixel UNFOGGED: the colour comes back as it went in (factor 1 and add 0 for the vertex form),
+#     which is how the product draws a frame without a valid fog block. A colour channel that is not
+#     finite counts as 0, as in the families above.
+#   - sky: there is no unfogged colour to fall back to, so a register, a direction or a texel that is not
+#     finite counts as 0 and the result is finite.
+#   - a zero axis c66 reads the in-scatter table at 0; a pixel at the eye (d = 0) is inside the start for
+#     any c67.x >= 0 and has no view direction otherwise (the angle then reads 0); a coordinate beyond a
+#     table's end reads its last texel.
+# The microcode has no such guards; fog_check.py feeds it finite inputs.
+
+def table_1d(texels):
+    """A 1D table as tfetch1D reads it with a linear filter and clamped addressing: a callable u -> texel.
+
+    Texel i of N has its centre at u = (i + 0.5) / N. Between two centres the result is their linear
+    blend; u <= 0.5 / N reads texel 0 alone and u >= 1 - 0.5 / N the last texel alone. That is the
+    emulated game's addressing: the SDK's translator hands the normalised coordinate of a 1D fetch to
+    the host sampler unchanged but for its own rounding offset of 1.5 / 1024 of a texel, with the texture
+    bound as a 2D array one texel high (thirdparty/rexglue-sdk, dxbc_translator_fetch.cpp: "1D and 2D
+    textures ... are treated as 2D arrays", the offsets block with `rounding_offset`, "Pad to 2D array
+    coordinates"); the filter and the clamp are the fetch constant's (linear and clamp to edge for tf4 and
+    tf5 in every captured row). The rounding offset is the emulator's own and is not modelled here.
+    A coordinate that is not a number reads texel 0. An empty table is the caller's error (ValueError)."""
+    rows = [list(t) for t in texels]
+    if not rows:
+        raise ValueError("a table needs at least one texel")
+    n = len(rows)
+
+    def fetch(u):
+        if u != u:
+            return list(rows[0])
+        x = min(max(min(max(u, 0.0), 1.0) * n - 0.5, 0.0), n - 1.0)
+        i = min(int(math.floor(x)), n - 1)
+        f = x - i
+        if f == 0.0:
+            return list(rows[i])
+        return [p + (q - p) * f for p, q in zip(rows[i], rows[min(i + 1, n - 1)])]
+
+    return fetch
+
+
+def _all_finite(*values):
+    return all(math.isfinite(x) for x in values)
+
+
+def fog_coords(P, eye, c66, c67):
+    """The fog block's three coordinates (a, s, t), or None where the block is skipped.
+        V = eye - P;  d = |V|;  dD = d - c67.x;  skipped unless dD > 0
+        a = sat((-V / d) . c66.xyz)        the in-scatter table's coordinate: the angle to the axis
+        s = c67.w * dD                     the transmittance table's coordinate (not clamped here)
+        t = sat(c67.z * dD)                the blend from c68 to the in-scatter table
+    P: the pixel's world position; eye: pixel c19.xyz. c67.y is not read. Also None when an input or
+    the distance is not finite (the guards above)."""
+    if not _all_finite(*P[:3], *eye[:3], *c66[:3], c67[0], c67[2], c67[3]):
+        return None
+    V = [eye[i] - P[i] for i in range(3)]
+    d2 = dot(V, V)
+    if not math.isfinite(d2):
+        return None
+    dD = math.sqrt(d2) - c67[0]
+    if not dD > 0.0:
+        return None
+    a = sat(dot(normalize([-x for x in V]), c66[:3]))
+    s, t = c67[3] * dD, sat(c67[2] * dD)
+    return (a, s, t) if _all_finite(a, s, t) else None
+
+
+def fog(C, P, eye, c28, c66, c67, c68, tf4, tf5, scatter_scale=1.0):
+    """The fog block of the pixel shaders of FOG_SHADERS: the colour C (linear, before the output scale)
+    fogged.
+        (a, s, t) = fog_coords(P, eye, c66, c67);  inside the start: C unchanged, no table read
+        S = tf4(a).rgb                     in-scatter colour by angle
+        T = tf5(s).rgb                     transmittance by distance, per channel
+        F = c68.rgb + t * (S - c68.rgb)
+        G = C * T + (1 - T) * c28.y * scatter_scale * F
+        C' = C + c28.x * (G - C)
+    scatter_scale: 1 in the plain form; in the blended form ("alpha" in FOG_SHADERS) the pixel's alpha,
+    the shader's output alpha divided by c26.w. Alpha itself is not touched by the block. The shader then
+    multiplies C' by c20.w (and by c26.xyz where it reads c26; 2F8A... also by its cross-fade)."""
+    base = [_finite(x) for x in C[:3]]
+    coords = fog_coords(P, eye, c66, c67)
+    if coords is None or not _all_finite(c28[0], c28[1], scatter_scale, *c68[:3]):
+        return base
+    a, s, t = coords
+    S, T = list(tf4(a)[:3]), list(tf5(s)[:3])
+    if not _all_finite(*S, *T):
+        return base
+    scale = c28[1] * scatter_scale
+    out = []
+    for i in range(3):
+        F = c68[i] + t * (S[i] - c68[i])
+        G = base[i] * T[i] + (1.0 - T[i]) * scale * F
+        out.append(base[i] + c28[0] * (G - base[i]))
+    return out if _all_finite(*out) else base
+
+
+def vertex_fog(P, eye, c8x, c110, c111, tf16, tf17):
+    """The trees' fog, computed per vertex: (factor, add), each three floats.
+        (a, s, t) = fog_coords(P, eye, c110, c111)        vertex c110, c111: equal to pixel c66, c67 in the rows
+        inside the start: ((1, 1, 1), (0, 0, 0)), no table read
+        T = tf16(s).rgb;  S2 = tf17(a, t).rgb             tf17 is a 2D texture: the angle and the near blend
+        factor = T;  add = (1 - T) * S2 * c8x
+    P: the vertex's world position after the wind; eye: vertex c9.xyz; c8x: vertex c8.x (the place of pixel
+    c28.y; there is no amount c28.x in this form). The pixel shader applies the pair with fog_apply. If
+    tf16 is tf5 and tf17(a, t) is c68 + t * (tf4(a) - c68), this is fog() with c28.x = 1 evaluated at the
+    vertex (tests/test_fog_formulas.py); whether the two tables are that is for a capture to say."""
+    one, zero = [1.0, 1.0, 1.0], [0.0, 0.0, 0.0]
+    coords = fog_coords(P, eye, c110, c111)
+    if coords is None or not math.isfinite(c8x):
+        return one, zero
+    a, s, t = coords
+    T, S2 = list(tf16(s)[:3]), list(tf17(a, t)[:3])
+    add = [(1.0 - T[i]) * S2[i] * c8x for i in range(3)]
+    if not _all_finite(*T, *S2, *add):
+        return one, zero
+    return T, add
+
+
+def fog_apply(C, factor, add):
+    """What the tree pixel shaders do with the vertex shader's pair under bool b132: C * factor + add (trunks:
+    interpolators o6 and o7; leaves: o4 and o5). C is the family's result (lit_object, tree_leaf: c49
+    included); the output scale c20.w and c26 follow."""
+    return [_finite(_finite(C[i]) * _finite(factor[i]) + _finite(add[i])) for i in range(3)]
+
+
+# The sky's pixel shader and its literal registers c250..c255: the emulated GPU's registers at every
+# execution of the shader in frame 1116 of the GPU log of the fog research (gpu_shadow_bridge2.log: six
+# draws, two in the main scene and four in the small reflection passes; single precision, shown exactly;
+# the hex is in the document). They are the coefficients of an arctangent and an arccosine polynomial,
+# 1 / (2 pi), 2 / pi, pi, pi / 2 (each as the game rounded it: 0.63663852 is not the single nearest to
+# 2 / pi) and 1 / ln 2.
+SKY_SHADER = "F7601FBE485936FD"
+SKY_LITERALS = {
+    250: (-0.018729299306869507, 0.18014100193977356, 0.5, 1.0499999523162842),
+    251: (-3.1415927410125732, -0.08513300120830536, 3.1415927410125732, -2.0),
+    252: (1.5707963705062866, 1.5707287788391113, -0.2121143937110901, 0.9998660087585449),
+    253: (1.0, 0.0, 0.07426100224256516, -0.3302994966506958),
+    254: (0.20000000298023224, 0.02083509974181652, 0.6366385221481323, 0.15915963053703308),
+    255: (1.4426950216293335, 0.0, 0.0, 0.0),
+}
+
+
+def sky_latlong(n):
+    """The sky textures' coordinate of a direction: (u, v) = (0.5 + atan2(n.y, n.x) / (2 pi),
+    asin(n.z) * 2 / pi), computed as the shader computes it, with its polynomials and its literals
+    (within 5e-5 of the exact functions).
+        q  = min(|x|, |y|) / max(|x|, |y|);  at = q * (0.99987 - 0.33030 q^2 + 0.18014 q^4 - 0.08513 q^6 + 0.02084 q^8)
+        |y| > |x|: at = pi / 2 - at;  x < 0: at = at - pi;  x and y of different sign: at = -at
+        ac = sqrt(1 - |z|) * (1.57073 - 0.21211 |z| + 0.07426 |z|^2 - 0.01873 |z|^3);  z < 0: ac = pi - ac
+        u  = 0.5 + at * 0.15916;  v = (pi / 2 - ac) * 0.63664
+    n need not be a unit vector. The seam: u is 1 (1.0000148 with these literals) on the half plane y = 0,
+    x < 0 and just north of it (y > 0), and 0 (-0.0000148) just south: "different sign" is
+    min(x, y) < 0 <= max(x, y), so y = 0 counts as positive. v runs from -1.00003 at the nadir to 1.00003
+    at the zenith; the upper hemisphere is v in 0..1. The poles: x = y = 0 makes q the product 0 * (1 / 0),
+    which is 0 by the console's product rule (ucode_eval.py, zero_product), so u = 0.5 there; a direction of
+    no length or not finite counts as (0, 0, 0)."""
+    L = SKY_LITERALS
+    x, y, z = normalize([n[0], n[1], n[2]])
+    ax, ay, az = abs(x), abs(y), abs(z)
+    hi, lo = max(ax, ay), min(ax, ay)
+    q = lo * (1.0 / hi) if hi > 0.0 else 0.0
+    q2 = q * q
+    at = q * (q2 * (q2 * (q2 * (q2 * L[254][1] + L[251][1]) + L[250][1]) + L[253][3]) + L[252][3])
+    if ay > ax:
+        at = at + (L[251][3] * at + L[252][0])
+    if x < 0.0:
+        at = at + L[251][0]
+    if min(x, y) < 0.0 and max(x, y) >= 0.0:
+        at = at - (at + at)
+    root = math.sqrt(abs(1.0 - az))
+    poly = az * (az * (az * L[250][0] + L[253][2]) + L[252][2]) + L[252][1]
+    ac = poly * root
+    if z < 0.0:
+        ac = ac + (L[251][3] * root * poly + L[251][2])
+    return L[250][2] + at * L[254][3], (L[252][0] - ac) * L[254][2]
+
+
+def sky_paths(n, c67y, c31x, c46x):
+    """The two path lengths of the sky's extinction, from the direction's elevation:
+        k = |n.z|^0.2;  h = c67y * (1.05 - k);  l1 = h + (c31x - h) * k;  l2 = h + (c46x - h) * k
+    At the zenith (c31x, c46x); at the horizon both 1.05 * c67y; mirrored below the horizon. c67y: pixel
+    c67.y (1900 in every capture); c31x, c46x: pixel c31.x, c46.x at the sky draw (150 and 100 in the one
+    frame read)."""
+    L = SKY_LITERALS
+    z = abs(normalize([n[0], n[1], n[2]])[2])
+    k = z ** L[254][0] if z > 0.0 else 0.0
+    h = _finite(c67y) * (L[250][3] - k)
+    return _finite(h + (_finite(c31x) - h) * k), _finite(h + (_finite(c46x) - h) * k)
+
+
+def sky_extinction(l1, l2, c64, c65):
+    """E = exp(-(l1 * c64.rgb + l2 * c65.rgb)) per channel (the shader: exp2 of the sum times its literal
+    1.4426950, 1 / ln 2). c64, c65: pixel registers, one value a frame."""
+    out = []
+    for i in range(3):
+        x = -(_finite(l1) * _finite(c64[i]) + _finite(l2) * _finite(c65[i])) * SKY_LITERALS[255][0]
+        try:
+            out.append(_finite(2.0 ** x))
+        except OverflowError:
+            out.append(0.0)
+    return out
+
+
+def sky(n, block, tf4, tf13, tf14):
+    """Pixel shader F7601FBE485936FD, the sky, as linear RGB before the output scale c20.w (alpha is 1).
+        a      = sat(normalize(n) . c66.xyz);  S = tf4(a).rgb          the fog's in-scatter table
+        (l1, l2) = sky_paths(n, c67y, c31x, c46x);  E = sky_extinction(l1, l2, c64, c65)
+        (u, v) = sky_latlong(n);  s13 = tf13(u, v);  s14 = tf14(u, v)
+        col    = s13.rgb^2 + c47x * (s14.rgb^2 - s13.rgb^2);  alpha = s13.a + c47x * (s14.a - s13.a)
+        result = (1 - E) * S + alpha * (col - (1 - E) * S)
+    n: the view direction (the cube's interpolator: the vertex position before the eye is added; any
+    length). block: a mapping with c31x, c46x, c47x (pixel c31.x, c46.x, c47.x at the sky draw), c64, c65,
+    c66 (three floats each) and c67y. tf13 None: the clear-sky term (1 - E) * S alone; tf14 None: the first
+    texture alone, as with c47x = 0. Without the ground-fog volume of bool b129 (clear in every draw of the
+    GPU log)."""
+    a = sat(dot(normalize([n[0], n[1], n[2]]), [_finite(x) for x in block["c66"][:3]]))
+    S = [_finite(x) for x in tf4(a)[:3]]
+    E = sky_extinction(*sky_paths(n, block["c67y"], block["c31x"], block["c46x"]), block["c64"], block["c65"])
+    base = [(1.0 - E[i]) * S[i] for i in range(3)]
+    if tf13 is None:
+        return [_finite(x) for x in base]
+    u, v = sky_latlong(n)
+    s13 = [_finite(x) for x in tf13(u, v)[:4]]
+    col, alpha = [x * x for x in s13[:3]], s13[3]
+    if tf14 is not None:
+        s14 = [_finite(x) for x in tf14(u, v)[:4]]
+        k = _finite(block["c47x"])
+        col = [col[i] + k * (s14[i] * s14[i] - col[i]) for i in range(3)]
+        alpha = alpha + k * (s14[3] - alpha)
+    return [_finite(base[i] + alpha * (col[i] - base[i])) for i in range(3)]
+
+
+# The pixel shaders with the fog block, for the capture's fog flag: (hash, light family, the interpolator
+# that is the world position, form). 40 of the 41 dumps that fetch tf4 and tf5 with tfetch1D and read c67
+# (fog_check.scan); every one is checked by fog_check.py. family: the pixel shader's family in
+# light_check.FAMILIES, None where it has none (the native pass does not light those: the blended
+# characters of the alpha form, the fur 014F..., the water A17D... and F6D9..., and eleven more).
+# world: interpolator N is register rN of the pixel shader. form: "plain", or "alpha" where the in-scatter
+# term is multiplied by the pixel's alpha (fog's scatter_scale).
+FogShader = collections.namedtuple("FogShader", "hash family world form")
+FOG_SHADERS = (
+    FogShader("014F8A02DB7B19CA", None, 1, "plain"),
+    FogShader("04F23292B2F44077", "terrain-layer-multi", 4, "plain"),
+    FogShader("0981301D645E2517", None, 2, "plain"),
+    FogShader("09CB69BD265B58D1", None, 2, "plain"),
+    FogShader("14217F5C1118D00F", None, 2, "plain"),
+    FogShader("165EDCD2CB963868", "plant-lit", 2, "plain"),
+    FogShader("20055F971BB9E749", None, 2, "alpha"),
+    FogShader("2F8A0341E8C09698", "terrain-far", 1, "plain"),
+    FogShader("2FD24989AB04A475", "object", 2, "plain"),
+    FogShader("31AE85A9275B4A29", None, 2, "plain"),
+    FogShader("3275A966F62EA3B1", None, 2, "alpha"),
+    FogShader("401A01FD4E5F8757", None, 2, "alpha"),
+    FogShader("44B567635EB10620", None, 2, "alpha"),
+    FogShader("45243B758F9272AB", "terrain-layer-multi", 4, "plain"),
+    FogShader("4755A2E4A05BA678", "terrain-layer", 2, "plain"),
+    FogShader("578342593A37DD35", "terrain-layer-multi", 2, "plain"),
+    FogShader("648B965C200A5113", "object-multi", 2, "plain"),
+    FogShader("789266C3E42D7E59", "object-multi", 2, "plain"),
+    FogShader("7DDAD5C29B3F56EE", "terrain-far", 1, "plain"),
+    FogShader("827B878F3D404635", None, 2, "alpha"),
+    FogShader("8C512607225EC5C7", None, 2, "plain"),
+    FogShader("8D900846800943C8", "object", 2, "plain"),
+    FogShader("90B310AE5D5890F3", None, 2, "alpha"),
+    FogShader("95ED70BD54B49D5E", None, 2, "alpha"),
+    FogShader("9C2144E42E95A76F", "terrain-layer", 4, "plain"),
+    FogShader("A17D8AEC3A817D45", None, 0, "plain"),
+    FogShader("A22982E86122DA41", None, 2, "plain"),
+    FogShader("A7A88924C272F438", None, 2, "alpha"),
+    FogShader("A7E45D07F5CF6627", "plant", 2, "plain"),
+    FogShader("AF1E16EE57E4BB06", "terrain-layer-multi", 2, "plain"),
+    FogShader("C0108405DECA669F", None, 2, "alpha"),
+    FogShader("C0715ED52CE7ECF2", None, 2, "plain"),
+    FogShader("E0996BF4D9539D38", None, 4, "plain"),
+    FogShader("E99F4ACC7A3C78B4", "plant-multi", 2, "plain"),
+    FogShader("F2F103F16764043B", None, 2, "alpha"),
+    FogShader("F525E023E08AC9BB", "plant-lit-multi", 2, "plain"),
+    FogShader("F6D98C7B4D98438B", None, 0, "plain"),
+    FogShader("F96A4494958BFA12", None, 2, "plain"),
+    FogShader("F98433EC8C4A4740", None, 2, "plain"),
+    FogShader("FC0922A3A8D8DA7A", None, 2, "plain"),
+)
+# The 41st: the lake's surface, which fetches both tables but with the sky's arithmetic inside it, also
+# with the fog predicate off. Not of the form and not checked; a draw of it must not count as fogged by
+# fog().
+FOG_NOT_OF_THE_FORM = ("2B091BD0C45A7454",)
+
+# The vertex shaders with the trees' form: (hash, the interpolator that is the world position, the
+# interpolators of factor and add). The first four are checked by fog_check.py (trunks 475E...; leaves
+# with one, two and four lights A584..., D7DD..., 2D40...). The last two are read only: D57E... (the same
+# block as the leaves': dump instructions 209 to 217) and the distant-tree billboards 129F... (75 to 85),
+# whose block has no c8.x and takes the eye from vertex c47, not c9.
+FogVertexShader = collections.namedtuple("FogVertexShader", "hash world factor add")
+FOG_VERTEX_SHADERS = (
+    FogVertexShader("475EC9F795E5EDBB", 2, 6, 7),
+    FogVertexShader("A5846836C90E1192", 0, 4, 5),
+    FogVertexShader("D7DD31B9BF194DE8", 0, 4, 5),
+    FogVertexShader("2D40B53C926109BE", 0, 4, 5),
+    FogVertexShader("D57E7E65F94CBB2C", 0, 4, 5),
+    FogVertexShader("129F7F2793DA9084", 0, 2, 3),
+)

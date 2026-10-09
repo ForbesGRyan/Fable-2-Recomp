@@ -89,6 +89,8 @@ class Committed(unittest.TestCase):
             out = Path(d) / "t.inc"
             gft.main(["--out", str(out)])
             self.assertEqual(out.read_text(), INC.read_text())
+            # Line feeds on every platform (review of plan Task 3, M4): the tracked file's.
+            self.assertNotIn(b"\r", out.read_bytes())
 
 
 if __name__ == "__main__":

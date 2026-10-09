@@ -95,13 +95,17 @@ struct FogTablePin {
   uint32_t endian;   // xenos::Endian (dword 1 bits 6, 7)
   uint32_t swizzle;  // dword 3 bits 1 to 12, three bits a component
   uint32_t signs;    // dword 0 bits 2 to 9, two bits a component
+  uint32_t num_format;  // dword 3 bit 0 (fraction or integer), judged with the format
 };
 // tf4: 64 texels of k_16_16_16_16_EXPAND (29; half floats as the SDK presents the
 // format), endian 8-in-16, swizzle 0x688 (r g b a as stored), all four sign
 // fields 1. tf5: 256 texels of k_8_8_8_8 (6), endian 8-in-32, swizzle 0x60A (a
-// texel is stored a r g b), sign fields 0.
-inline constexpr FogTablePin kFogScatterPin = {64, 29, 1, 0x688, 0x55};
-inline constexpr FogTablePin kFogTransmitPin = {256, 6, 2, 0x60A, 0x00};
+// texel is stored a r g b), sign fields 0. The number format bit is 1 in tf4's
+// constant and 0 in tf5's (dword 3 = 0x00280D11 and 0x00280C14 in every captured
+// row); whether the emulator reads the bit was not established: it is pinned
+// because the decode was only ever seen with these values.
+inline constexpr FogTablePin kFogScatterPin = {64, 29, 1, 0x688, 0x55, 1};
+inline constexpr FogTablePin kFogTransmitPin = {256, 6, 2, 0x60A, 0x00, 0};
 
 // What is wrong with one table, in the order the rules are tried.
 enum class FogTableFault : uint8_t {
@@ -116,6 +120,7 @@ enum class FogTableFault : uint8_t {
   kExpAdjust,  // an exponent adjust other than 0 (dword 3 bits 13 to 18)
   kClamp,      // not clamped to the edge along the table (dword 0 bits 10 to 12; 2 = clamp to edge)
   kFilter,     // magnification or minification not linear (dword 3 bits 19, 20 and 21, 22; 1 = linear)
+  kMip,        // a highest mip level other than 0 (dword 4 bits 6 to 9): a table has one level
   kBytes,      // the bytes are missing or not the table's size (MakeFogBlock)
   kCount
 };
@@ -127,13 +132,14 @@ inline FogTableFault FogTableFetchFault(const uint32_t fc[6], const FogTablePin&
   if (!fc || (fc[0] & 3) != 2 || ((fc[5] >> 9) & 3) != 0) return FogTableFault::kDimension;
   if ((fc[1] & 0xFFFFF000u) == 0) return FogTableFault::kBase;
   if ((fc[2] & 0xFFFFFFu) + 1 != pin.width) return FogTableFault::kWidth;
-  if ((fc[1] & 0x3F) != pin.format) return FogTableFault::kFormat;
+  if ((fc[1] & 0x3F) != pin.format || (fc[3] & 1) != pin.num_format) return FogTableFault::kFormat;
   if (((fc[1] >> 6) & 3) != pin.endian) return FogTableFault::kEndian;
   if (((fc[3] >> 1) & 0xFFF) != pin.swizzle) return FogTableFault::kSwizzle;
   if (((fc[0] >> 2) & 0xFF) != pin.signs) return FogTableFault::kSign;
   if (((fc[3] >> 13) & 0x3F) != 0) return FogTableFault::kExpAdjust;
   if (((fc[0] >> 10) & 7) != 2) return FogTableFault::kClamp;
   if (((fc[3] >> 19) & 3) != 1 || ((fc[3] >> 21) & 3) != 1) return FogTableFault::kFilter;
+  if (((fc[4] >> 6) & 0xF) != 0) return FogTableFault::kMip;
   return FogTableFault::kNone;
 }
 
@@ -146,13 +152,13 @@ enum class FogBlockReason : uint8_t {
   kRegister,   // a register is not finite
   kAmount,     // c28.xy outside [0, 4]
   kAxis,       // c66.xyz is not a unit vector within 1e-3
-  kRange,      // c67: a start, a path height or a near slope below 0, or a distance scale not above 0
-  kExtinction, // c64 or c65 has a negative component
+  kMagnitude,  // a register component beyond kFogRegisterLimit
+  kRange,      // c67: a start or a near slope below 0, or a distance scale not above 0
   // tf4's faults (FogTableFault, in its order), then tf5's.
   kScatterDimension, kScatterBase, kScatterWidth, kScatterFormat, kScatterEndian, kScatterSwizzle, kScatterSign,
-  kScatterExpAdjust, kScatterClamp, kScatterFilter, kScatterBytes,
+  kScatterExpAdjust, kScatterClamp, kScatterFilter, kScatterMip, kScatterBytes,
   kTransmitDimension, kTransmitBase, kTransmitWidth, kTransmitFormat, kTransmitEndian, kTransmitSwizzle, kTransmitSign,
-  kTransmitExpAdjust, kTransmitClamp, kTransmitFilter, kTransmitBytes,
+  kTransmitExpAdjust, kTransmitClamp, kTransmitFilter, kTransmitMip, kTransmitBytes,
   kScatterTexel,  // a texel of tf4 is not finite (tf5's are bytes: always numbers)
   kCount
 };
@@ -169,15 +175,26 @@ static_assert(FogTableReason(0, FogTableFault::kBytes) == FogBlockReason::kScatt
 
 inline const char* FogBlockReasonName(FogBlockReason r) {
   static constexpr const char* kNames[] = {
-      "none", "off", "no-draw", "unread", "register", "amount", "axis", "range", "extinction",
+      "none", "off", "no-draw", "unread", "register", "amount", "axis", "magnitude", "range",
       "tf4-dimension", "tf4-base", "tf4-width", "tf4-format", "tf4-endian", "tf4-swizzle", "tf4-sign",
-      "tf4-exp-adjust", "tf4-clamp", "tf4-filter", "tf4-bytes",
+      "tf4-exp-adjust", "tf4-clamp", "tf4-filter", "tf4-mip", "tf4-bytes",
       "tf5-dimension", "tf5-base", "tf5-width", "tf5-format", "tf5-endian", "tf5-swizzle", "tf5-sign",
-      "tf5-exp-adjust", "tf5-clamp", "tf5-filter", "tf5-bytes",
+      "tf5-exp-adjust", "tf5-clamp", "tf5-filter", "tf5-mip", "tf5-bytes",
       "tf4-texel"};
   static_assert(sizeof(kNames) / sizeof(kNames[0]) == size_t(FogBlockReason::kCount));
   return r < FogBlockReason::kCount ? kNames[size_t(r)] : "?";
 }
+
+// The largest magnitude a component of the six registers may have (review of
+// plan Task 3, M2). Generous for anything the game holds there (a start of
+// 19.9, a path height of 1,900, colours that may be HDR), and small enough that
+// no product of the fog's arithmetic overflows single precision: with every
+// register within it, a table texel within a half float's 65,504 and c28 within
+// 4, the largest term is (1 - T) * c28.y * F <= 4 * 1e6, and a table coordinate
+// c67.w * dD stays finite for any distance below 3e32. So nothing downstream can
+// meet 0 * infinity from the block alone; the pixel's own position is the
+// shader's guard (clay_logic.h, FogMirror).
+inline constexpr float kFogRegisterLimit = 1e6f;
 
 // The frame's fog block from what was read at a fogged main-scene draw.
 // regs: pixel c28, c64, c65, c66, c67, c68 (kFogBlockRegisters), as host floats.
@@ -188,11 +205,13 @@ inline const char* FogBlockReasonName(FogBlockReason r) {
 //   - every component of the six registers is finite (kRegister);
 //   - c28.x and c28.y are in [0, 4] (kAmount);
 //   - |c66.xyz| is 1 within 1e-3 (kAxis);
-//   - c67.x >= 0, c67.y >= 0, c67.z >= 0 and c67.w > 0 (kRange);
-//   - no component of c64.rgb, c65.rgb is negative (kExtinction);
+//   - no component of the six registers is beyond kFogRegisterLimit in
+//     magnitude (kMagnitude);
+//   - c67.x >= 0, c67.z >= 0 and c67.w > 0 (kRange);
 //   - each fetch constant is its table's pin (FogTableFetchFault: 1D, an address,
-//     width, format, endian, swizzle, sign fields, exponent adjust 0, clamp to
-//     edge, linear filter), tf4's first;
+//     width, format with its number format bit, endian, swizzle, sign fields,
+//     exponent adjust 0, clamp to edge, linear filter, highest mip level 0),
+//     tf4's first;
 //   - n4 is 512 and n5 is 1,024, with the bytes there (kScatterBytes, kTransmitBytes);
 //   - every component of every texel of tf4 is finite, its alpha too (kScatterTexel).
 // The decode (frame-map section 16, "The two tables"; tools/xdk_sigmatch/
@@ -200,6 +219,12 @@ inline const char* FogBlockReasonName(FogBlockReason r) {
 // each stored high byte first, r g b a; a texel of tf5 is four bytes a r g b,
 // each over 255. A table's values are not judged beyond that (tf4 is not held
 // below 1: half floats can carry more). An invalid block is all zero.
+// Not judged here, because the fog reads none of them (review of plan Task 3,
+// I1): the sign of c67.y (the sky's path height) and of c64, c65 (the sky's
+// extinctions). They are finite and bounded like every component; whether they
+// make a sky is the sky's decision (plan Task 5: a negative range[1] or ext
+// component gives no sky, counted "sky-block"), and must not cost a night or an
+// interior its fog.
 inline FogBlock MakeFogBlock(const float regs[6][4], const uint32_t fetch4[6], const uint32_t fetch5[6],
                              const uint8_t* tf4_bytes, size_t n4, const uint8_t* tf5_bytes, size_t n5,
                              FogBlockReason* why) {
@@ -224,10 +249,12 @@ inline FogBlock MakeFogBlock(const float regs[6][4], const uint32_t fetch4[6], c
   }
   const double length = std::sqrt(double(c66[0]) * c66[0] + double(c66[1]) * c66[1] + double(c66[2]) * c66[2]);
   if (!(std::fabs(length - 1.0) <= 1e-3)) return fail(FogBlockReason::kAxis);
-  if (!(c67[0] >= 0.0f && c67[1] >= 0.0f && c67[2] >= 0.0f && c67[3] > 0.0f)) return fail(FogBlockReason::kRange);
-  for (int c = 0; c < 3; ++c) {
-    if (!(c64[c] >= 0.0f && c65[c] >= 0.0f)) return fail(FogBlockReason::kExtinction);
+  for (int r = 0; r < 6; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      if (!(std::fabs(regs[r][c]) <= kFogRegisterLimit)) return fail(FogBlockReason::kMagnitude);
+    }
   }
+  if (!(c67[0] >= 0.0f && c67[2] >= 0.0f && c67[3] > 0.0f)) return fail(FogBlockReason::kRange);
   if (const FogTableFault f = FogTableFetchFault(fetch4, kFogScatterPin); f != FogTableFault::kNone) {
     return fail(FogTableReason(0, f));
   }

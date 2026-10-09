@@ -131,6 +131,7 @@ static int ValidTests() {
     o.regs[4][2] = 0.0f;
     o.regs[1][0] = 0.0f;
     if (!o.Make().valid) return 23;
+    static_assert(kFogScatterPin.num_format == 1 && kFogTransmitPin.num_format == 0);
     Inputs u;  // a unit axis within 1e-3
     for (int c = 0; c < 3; ++c) u.regs[3][c] *= 1.0009f;
     if (!u.Make().valid) return 24;
@@ -170,14 +171,20 @@ static int RegisterTests() {
       if (!Refused(o, FogBlockReason::kAxis)) return 33;
     }
   }
-  // c67: start >= 0, the sky's height >= 0, the near slope >= 0, the distance scale > 0.
+  // c67: start >= 0, the near slope >= 0, the distance scale > 0. The sky's path height c67.y is
+  // not the fog's: a negative one is carried as it is (review of plan Task 3, I1; the sky's
+  // decision judges it).
   {
     Inputs in;
     in.regs[4][0] = -0.001f;
     if (!Refused(in, FogBlockReason::kRange)) return 34;
     in = Inputs();
     in.regs[4][1] = -1.0f;
-    if (!Refused(in, FogBlockReason::kRange)) return 35;
+    {
+      FogBlockReason why = FogBlockReason::kUnread;
+      const FogBlock b = in.Make(&why);
+      if (!b.valid || why != FogBlockReason::kNone || b.range[1] != -1.0f) return 35;
+    }
     in = Inputs();
     in.regs[4][2] = -0.5f;
     if (!Refused(in, FogBlockReason::kRange)) return 36;
@@ -187,13 +194,50 @@ static int RegisterTests() {
       if (!Refused(in, FogBlockReason::kRange)) return 37;
     }
   }
-  // c64, c65: an extinction is not negative (the sky's exp(-(l1 c64 + l2 c65)) would grow).
+  // c64, c65: the sky's extinctions, which the fog does not read: a negative one is carried as it
+  // is (I1; the sky's decision judges it).
   for (int r = 1; r <= 2; ++r) {
     for (int c = 0; c < 3; ++c) {
       Inputs in;
       in.regs[r][c] = -1e-6f;
-      if (!Refused(in, FogBlockReason::kExtinction)) return 38;
+      const FogBlock b = in.Make();
+      if (!b.valid || b.ext[r - 1][c] != -1e-6f) return 38;
     }
+  }
+  // Magnitudes (review M2): every component of the six registers within kFogRegisterLimit, so that
+  // no product of the fog's or the sky's arithmetic can overflow (0 * inf downstream). The limit
+  // itself is inside; the used and the unused components alike.
+  static_assert(kFogRegisterLimit == 1e6f);
+  for (int r = 0; r < 6; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      if ((r == 0 && c < 2) || (r == 3 && c < 3)) continue;  // (c28.xy and the axis have tighter rules, tried first)
+      for (float bad : {1.0001e6f, -1.0001e6f, 3e38f, -3e38f}) {
+        Inputs in;
+        in.regs[r][c] = bad;
+        if (r == 4 && (c == 0 || c == 2 || c == 3) && bad < 0.0f) continue;  // (the range rule's)
+        if (!Refused(in, FogBlockReason::kMagnitude)) return 43;
+      }
+    }
+  }
+  {
+    Inputs in;
+    in.regs[5][0] = 1e6f;    // c68.r
+    in.regs[5][1] = -1e6f;
+    in.regs[4][0] = 1e6f;    // c67.x: a start as far as the limit
+    in.regs[4][1] = -1e6f;   // c67.y
+    in.regs[4][3] = 1e6f;
+    in.regs[1][2] = 1e6f;
+    in.regs[0][3] = -1e6f;   // (an unused component)
+    if (!in.Make().valid) return 44;
+  }
+  // The order of the rules: finite, the amounts, the axis, the magnitudes, the range.
+  {
+    Inputs in;
+    in.regs[5][0] = 2e6f;
+    in.regs[4][3] = 0.0f;
+    if (!Refused(in, FogBlockReason::kMagnitude)) return 45;
+    in.regs[3][0] = 5.0f;
+    if (!Refused(in, FogBlockReason::kAxis)) return 46;
   }
   // Null inputs: nothing was read.
   {
@@ -226,8 +270,10 @@ static int FetchTests() {
   if (FogTableFetchFault(good.fc5, kFogScatterPin) != FogTableFault::kWidth) return 53;
   if (FogTableFetchFault(nullptr, kFogScatterPin) != FogTableFault::kDimension) return 54;
   for (bool scatter : {true, false}) {
-    // Not a texture constant; a 2D, a 3D and a cube texture.
+    // Not a texture constant (type 0, and type 3: both bits set); a 2D, a 3D and a cube texture.
     if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[0] &= ~3u; }, FogTableFault::kDimension)) return 55;
+    if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[0] |= 3u; }, FogTableFault::kDimension)) return 82;
+    if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[0] = (fc[0] & ~3u) | 1u; }, FogTableFault::kDimension)) return 83;
     if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[5] |= 1u << 9; }, FogTableFault::kDimension)) return 56;
     if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[5] |= 2u << 9; }, FogTableFault::kDimension)) return 57;
     if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[5] |= 3u << 9; }, FogTableFault::kDimension)) return 58;
@@ -241,6 +287,8 @@ static int FetchTests() {
     // Another format (k_16_16_16_16_FLOAT, k_8).
     if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[1] = (fc[1] & ~0x3Fu) | 32; }, FogTableFault::kFormat)) return 63;
     if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[1] = (fc[1] & ~0x3Fu) | 2; }, FogTableFault::kFormat)) return 64;
+    // The other number format (dword 3 bit 0: 1 for tf4, 0 for tf5; review M1).
+    if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[3] ^= 1u; }, FogTableFault::kFormat)) return 84;
     // Another endian (none; 16-in-32).
     if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[1] &= ~(3u << 6); }, FogTableFault::kEndian)) return 65;
     if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[1] |= 3u << 6; }, FogTableFault::kEndian)) return 66;
@@ -263,6 +311,14 @@ static int FetchTests() {
     // Not linear: the magnification filter, the minification filter (point each).
     if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[3] &= ~(3u << 19); }, FogTableFault::kFilter)) return 76;
     if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[3] &= ~(3u << 21); }, FogTableFault::kFilter)) return 77;
+    // (the field's values 2 and 3, of either filter: a test of "not point" would let them pass)
+    if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[3] = (fc[3] & ~(3u << 19)) | (2u << 19); }, FogTableFault::kFilter)) return 85;
+    if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[3] |= 3u << 19; }, FogTableFault::kFilter)) return 86;
+    if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[3] = (fc[3] & ~(3u << 21)) | (2u << 21); }, FogTableFault::kFilter)) return 87;
+    if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[3] |= 3u << 21; }, FogTableFault::kFilter)) return 88;
+    // A highest mip level other than 0 (dword 4 bits 6 to 9; review M1): a table has one level.
+    if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[4] |= 1u << 6; }, FogTableFault::kMip)) return 89;
+    if (!TableRefused(scatter, [](uint32_t fc[6]) { fc[4] |= 8u << 6; }, FogTableFault::kMip)) return 98;
   }
   // The two tables exchanged: each constant fails the other's pin.
   {
@@ -383,6 +439,12 @@ static int NameAndTableTests() {
   if (std::string(FogBlockReasonName(FogBlockReason::kCount)) != "?") return 141;
   if (std::string(FogBlockReasonName(FogBlockReason::kScatterSwizzle)) != "tf4-swizzle") return 142;
   if (std::string(FogBlockReasonName(FogBlockReason::kTransmitFilter)) != "tf5-filter") return 143;
+  if (std::string(FogBlockReasonName(FogBlockReason::kScatterMip)) != "tf4-mip") return 156;
+  if (std::string(FogBlockReasonName(FogBlockReason::kTransmitMip)) != "tf5-mip") return 157;
+  if (std::string(FogBlockReasonName(FogBlockReason::kMagnitude)) != "magnitude") return 158;
+  for (size_t i = 0; i < size_t(FogBlockReason::kCount); ++i) {
+    if (std::string(FogBlockReasonName(FogBlockReason(i))) == "extinction") return 159;  // (I1: no such rule)
+  }
   if (std::string(FogBlockReasonName(FogBlockReason::kScatterTexel)) != "tf4-texel") return 144;
   if (FogTableReason(0, FogTableFault::kNone) != FogBlockReason::kNone || FogTableReason(1, FogTableFault::kNone) != FogBlockReason::kNone) return 145;
   if (FogTableReason(0, FogTableFault::kDimension) != FogBlockReason::kScatterDimension) return 146;

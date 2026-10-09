@@ -66,7 +66,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
-    Path(a.out).write_text(generate(lf.FOG_SHADERS, not_of_the_form=lf.FOG_NOT_OF_THE_FORM))
+    # Line feeds, whatever the platform: the tracked file's (git stores it so; a checkout may convert).
+    Path(a.out).write_text(generate(lf.FOG_SHADERS, not_of_the_form=lf.FOG_NOT_OF_THE_FORM), newline="\n")
 
 
 if __name__ == "__main__":

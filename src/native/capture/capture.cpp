@@ -3644,6 +3644,7 @@ struct FogFrame {
   uint32_t fog_tries = 0;
   bool sky_done = false;
   uint32_t sky_tries = 0;
+  uint32_t sky_untold = 0;  // builder calls whose pixel shader could not be told (ReadSkyBlock)
   uint32_t frame = 0;
 };
 constinit thread_local FogFrame t_fog;
@@ -3702,8 +3703,11 @@ bool ReadTextureFetch(uint32_t device, uint32_t slot, uint32_t fc[6]) {
 // shader with the game's fog block (PsInfo::fog): pixel c28 and c64..c68 through
 // ReadPixelConstant, the fetch constants of slots 4 and 5 from the device, and the two tables'
 // bytes from guest memory at the constants' base addresses (512 and 1,024 bytes, each read whole
-// or not at all: ReadPhysical). The constants are judged before any table byte is read
-// (FogTableFetchFault), so an address is followed only for a constant that is the table's pin.
+// or not at all: ReadPhysical). The registers and the constants are judged before any table
+// byte is read, by MakeFogBlock itself without bytes: its rules come in one order (registers,
+// then tf4's constant, then tf5's, then the bytes), so a first call that fails for tf4's bytes
+// has passed every rule before them, and any other reason is the frame's, in that same order
+// (review of plan Task 3, M6). An address is followed only for a constant that is the table's pin.
 // The bytes are copied first; the copy is what is hashed (FogSource: the content a discovery
 // capture names the table by) and decoded (MakeFogBlock), so the two cannot differ.
 // The tables are whole at this draw: in the captures of frame-map section 16 every main-scene
@@ -3721,11 +3725,8 @@ void ReadFogBlock(uint32_t device, FogFrame& f) {
   bool read = true;
   for (int i = 0; read && i < 6; ++i) read = ReadPixelConstant(kFogBlockRegisters[i], regs[i]);
   for (int t = 0; read && t < 2; ++t) read = ReadTextureFetch(device, kFogTableSlots[t], fc[t]);
-  if (read) {
-    why = FogTableReason(0, FogTableFetchFault(fc[0], kFogScatterPin));
-    if (why == FogBlockReason::kNone) why = FogTableReason(1, FogTableFetchFault(fc[1], kFogTransmitPin));
-  }
-  if (read && why == FogBlockReason::kNone) {
+  if (read) MakeFogBlock(regs, fc[0], fc[1], nullptr, 0, nullptr, 0, &why);
+  if (read && why == FogBlockReason::kScatterBytes) {
     uint8_t tf4[kFogScatterBytes], tf5[kFogTransmitBytes];
     const uint8_t* p4 = ReadPhysical(fc[0][1] & 0xFFFFF000u, uint32_t(kFogScatterBytes));
     const uint8_t* p5 = ReadPhysical(fc[1][1] & 0xFFFFF000u, uint32_t(kFogTransmitBytes));
@@ -3766,13 +3767,25 @@ void ReadFogBlock(uint32_t device, FogFrame& f) {
 // are outside the main scene and never get here). At that call: pixel c31, c46, c47 through
 // ReadPixelConstant and the fetch constants of slots 13 and 14. Once a frame; a read that gives
 // no block is counted in the frame with its reason (at most kMaxFogTries).
+// A call whose shader cannot be told (the device or the shader's record unreadable) may have
+// been the sky's: it is counted in the frame as a try with "unread", so that a frame which then
+// has no sky block does not read "no-draw" (review of plan Task 3, M3). Those counts have a
+// bound of their own (kMaxFogTries a frame) and do not use up the reads above: the builder's
+// other calls come before the sky's, and a few untold ones must not stop the search for it.
 void ReadSkyBlock(uint32_t device, FogFrame& f) {
   if (f.sky_done || f.sky_tries >= kMaxFogTries) return;
   DeviceSnapshot dev;
-  if (!ReadDevice(device, &dev)) return;
   uint32_t ps_obj = 0;
-  const PsInfo* ps = ChoosePs(dev, &ps_obj) ? LookupPs(ps_obj) : nullptr;
-  if (!ps || ps->hash != kSkyPixelShader) return;
+  const PsInfo* ps = ReadDevice(device, &dev) && ChoosePs(dev, &ps_obj) ? LookupPs(ps_obj) : nullptr;
+  if (!ps) {
+    if (f.sky_untold >= kMaxFogTries) return;
+    std::lock_guard<std::mutex> lock(g_scene_mutex);
+    if (!g_builder.InMainScene() || !FogFrameCurrent(f)) return;
+    g_builder.CountSkyTry(SkyBlockReason::kUnread);
+    ++f.sky_untold;
+    return;
+  }
+  if (ps->hash != kSkyPixelShader) return;
   float regs[3][4] = {};
   uint32_t fc[2][6] = {};
   bool read = true;

@@ -57,6 +57,12 @@ REXCVAR_DEFINE_STRING(fable2_native_shadows, "on", "Fable2",
                       "maps from them, a depth pre-pass and the game's screen mask, and shadows the sun of its lit draws "
                       "(fable2_native_view=shadow shows the maps and the mask); off (or false, 0) = none of it is read, made or "
                       "drawn: the lighting picture.");
+REXCVAR_DEFINE_STRING(fable2_native_fog, "off", "Fable2",
+                      "Native fog and sky: on (or true, 1) = with a composite view and the light on, the capture also reads the "
+                      "frame's fog block (the game's six fog registers and its two fog tables) and its sky block at the game's "
+                      "own draws; off (or false, 0) = none of it is read. Off by default: the clay pass does not draw with the "
+                      "blocks yet (sub-project 9, plan Task 4), so on changes the log's fog: line and a discovery capture's "
+                      "frame rows, not the picture.");
 REXCVAR_DEFINE_BOOL(fable2_native_d3d_messages, false, "Fable2",
                     "Write the Direct3D debug layer's errors, corruption and warnings to the game log "
                     "(the layer is the SDK's --d3d12_debug=true; without it there is nothing to write). "
@@ -206,6 +212,26 @@ bool CurrentShadows() {
 bool ShadowsWanted(bool records_wanted) {
   return ShadowRecordsWanted(records_wanted, CurrentShadows(), REXCVAR_GET(fable2_native_textures),
                              CurrentClayLight() == render::ClayLight::kOn, g_shadows_usable.load(std::memory_order_relaxed));
+}
+
+// fable2_native_fog: read like the shadows' switch (the same parser and words); anything else is
+// off, with one warning that names the words.
+bool CurrentFog() {
+  static std::atomic<bool> warned{false};
+  bool recognized = true;
+  const bool on = render::ParseClayLight(REXCVAR_GET(fable2_native_fog), &recognized) == render::ClayLight::kOn;
+  if (!recognized && !warned.exchange(true)) {
+    REXLOG_WARN("[native] unknown fable2_native_fog '{}', using off (accepted: {})", REXCVAR_GET(fable2_native_fog),
+                render::kClaySwitchWords);
+  }
+  return on;
+}
+
+// Whether the capture reads the frame's fog and sky blocks: only for a frame that could be drawn
+// with them, which is a lit one (FogRecordsWanted).
+bool FogWanted(bool records_wanted) {
+  return FogRecordsWanted(records_wanted, CurrentFog(), REXCVAR_GET(fable2_native_textures),
+                          CurrentClayLight() == render::ClayLight::kOn);
 }
 
 bool EnsureResources(nrhi::Device* device, nrhi::Format format) {
@@ -470,6 +496,9 @@ void Install(rex::memory::Memory* memory) {
   REXLOG_INFO("[native] shadows: {} (fable2_native_shadows; on: the two shadow maps, a depth pre-pass and the screen mask "
               "are drawn and the lit draws' sun is shadowed)",
               CurrentShadows() ? "on" : "off");
+  REXLOG_INFO("[native] fog: {} (fable2_native_fog; on: the frame's fog and sky blocks are read with the light on; "
+              "nothing is drawn with them yet)",
+              CurrentFog() ? "on" : "off");
 }
 
 void Shutdown() {
@@ -528,6 +557,7 @@ void PollFrame() {
   const bool wanted = RecordsWanted(CurrentView(), g_latch.IsFailed());
   capture::SetRecordsWanted(wanted);
   capture::SetShadowsWanted(ShadowsWanted(wanted));
+  capture::SetFogWanted(FogWanted(wanted));
   rex::graphics::RequestNativeGuestOutputPostProcess(wanted);
 }
 

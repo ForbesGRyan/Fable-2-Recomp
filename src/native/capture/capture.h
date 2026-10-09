@@ -30,6 +30,11 @@ void SetRecordsWanted(bool wanted);
 // only in a frame with records. Without it no shadow draw is read or recorded
 // and a frame's scene says so (FrameScene::shadow_records false).
 void SetShadowsWanted(bool wanted);
+// Whether the consumer also wants the frame's fog and sky blocks (the native
+// view, the light and the fog on: fable2_native_fog). Set and latched like
+// SetShadowsWanted. Without it no fog register, fetch constant or table is read
+// and a frame's scene says so (FrameScene::fog_records false).
+void SetFogWanted(bool wanted);
 // Starts a discovery capture of `frames` guest frames (1..100000) sampling every `every`th
 // draw (1..64) at the next guest frame, into a new file, like FABLE2_NATIVE_DISCOVERY
 // after its delay. Callable from any thread. Returns false, with a log line, when the

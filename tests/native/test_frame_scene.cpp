@@ -774,6 +774,155 @@ static int ShadowTests(const capture::DrawRecord& r) {
   return 0;
 }
 
+// The frame's fog block, its source and the sky block (FrameScene::fog, ::fog_source, ::sky) with
+// their reasons and the log's line. Returns 0 or the number of the case that failed.
+static int FogTests(const capture::DrawRecord& r) {
+  using capture::FogBlock;
+  using capture::FogBlockReason;
+  using capture::FogSource;
+  using capture::SkyBlock;
+  using capture::SkyBlockReason;
+  // A block as MakeFogBlock gives it: registers of the bridge's shape, flat tables (the builder
+  // does not judge a block, it carries it).
+  auto fog = [](float start) {
+    const float regs[6][4] = {{1.0f, 1.0f, 0.0f, 0.0f}, {0.0003f, 0.0004f, 0.001f, 0.0f}, {0.005f, 0.006f, 0.01f, 0.0f},
+                              {0.0f, 0.6f, 0.8f, 0.0f}, {start, 1900.0f, 1.0f, 0.0005f}, {0.25f, 0.5f, 0.75f, 0.0f}};
+    const uint32_t fc4[6] = {0x00804956, 0x1FAB505D, 0x0000003F, 0x00280D11, 0x00000003, 0x00000018};
+    const uint32_t fc5[6] = {0x02004802, 0x1FAB4086, 0x000000FF, 0x00280C14, 0x00000003, 0x00000018};
+    static uint8_t tf4[512], tf5[1024];
+    for (int i = 0; i < 256; ++i) {
+      tf4[2 * i] = 0x38;  // every half float 0.5
+      tf4[2 * i + 1] = 0x00;
+    }
+    std::memset(tf5, 0xFF, sizeof(tf5));
+    return capture::MakeFogBlock(regs, fc4, fc5, tf4, sizeof(tf4), tf5, sizeof(tf5));
+  };
+  auto sky = [](float c31x) {
+    const float c31[4] = {c31x, 0, 0, 0}, c46[4] = {100.0f, 0, 0, 0}, c47[4] = {0.25f, 0, 0, 0};
+    const uint32_t fc[6] = {0x00800002, 0x1A544086, 0x0001E00F, 0x00A80C14, 0x00000003, 0x00000218};
+    return capture::MakeSkyBlock(c31, c46, c47, fc, fc);
+  };
+  const FogBlock first = fog(20.0f), second = fog(30.0f);
+  const SkyBlock sky1 = sky(150.0f), sky2 = sky(160.0f);
+  if (!first.valid || !second.valid || !sky1.valid || !sky2.valid) return 1;
+  FogSource from1, from2;
+  from1.base[0] = 0x1FAB5000;
+  from1.base[1] = 0x1FAB4000;
+  from1.content[0] = 0xE1CDB1ADBFB1321Cull;
+  from1.content[1] = 0x591ADB7C80BECA41ull;
+  from2.base[0] = 0x1FAB1000;
+  from2.base[1] = 0x1FAB0000;
+  from2.content[0] = 2;
+  from2.content[1] = 3;
+  // Nothing of a fog or sky block in a scene: every float zero, no source.
+  auto none = [](const render::FrameScene& s) {
+    static const unsigned char zero[sizeof(FogBlock)] = {};
+    return !s.fog.valid && std::memcmp(&s.fog, zero, offsetof(FogBlock, valid)) == 0 && !s.sky.valid &&
+           std::memcmp(&s.sky, zero, offsetof(SkyBlock, valid)) == 0 && s.fog_source.base[0] == 0 && s.fog_source.base[1] == 0 &&
+           s.fog_source.content[0] == 0 && s.fog_source.content[1] == 0;
+  };
+  render::FrameBuilder b;
+  {
+    // Fog off (the builder's state at first): nothing is taken, the frame says "off".
+    b.Open();
+    b.Add(r);
+    b.SetFog(first, from1);
+    b.CountFogTry(FogBlockReason::kAxis);
+    b.SetSky(sky1);
+    b.CountSkyTry(SkyBlockReason::kRange);
+    if (b.HasFog() || b.HasSky()) return 2;
+    auto s = b.Finish(1);
+    if (s->fog_records || !none(*s) || s->fog_reason != FogBlockReason::kOff || s->sky_reason != SkyBlockReason::kOff) return 2;
+    if (s->fog_tries != 0 || s->sky_tries != 0 || render::FogLine(*s) != "off") return 3;
+  }
+  b.FogOn(true);
+  {
+    // On, a frame without a fogged draw and without a sky draw (a menu): no blocks, "no-draw".
+    b.Open();
+    b.Add(r);
+    auto s = b.Finish(2);
+    if (!s->fog_records || !none(*s) || s->fog_reason != FogBlockReason::kNoDraw || s->sky_reason != SkyBlockReason::kNoDraw) return 4;
+    if (render::FogLine(*s) != "block invalid(no-draw), tries 0 | sky invalid(no-draw), tries 0") return 5;
+  }
+  {
+    // The first valid block of a frame is the frame's, with its source; a later one is not taken,
+    // and neither is anything offered outside the scene.
+    b.SetFog(second, from2);  // before the scene opens
+    b.SetSky(sky2);
+    b.CountFogTry(FogBlockReason::kUnread);
+    b.CountSkyTry(SkyBlockReason::kUnread);
+    b.Open();
+    if (b.HasFog() || b.HasSky()) return 6;
+    b.Add(r);
+    b.SetFog(FogBlock{}, from2);  // an invalid block is no block
+    b.SetSky(SkyBlock{});
+    if (b.HasFog() || b.HasSky()) return 7;
+    b.SetFog(first, from1);
+    b.SetSky(sky1);
+    if (!b.HasFog() || !b.HasSky()) return 8;
+    b.SetFog(second, from2);
+    b.SetSky(sky2);
+    b.CountFogTry(FogBlockReason::kAxis);  // (a read after the block: not counted, the frame has its block)
+    b.CountSkyTry(SkyBlockReason::kRange);
+    auto s = b.Finish(3);
+    if (!s->fog.valid || s->fog_reason != FogBlockReason::kNone || std::memcmp(&s->fog, &first, offsetof(FogBlock, valid)) != 0) return 9;
+    if (s->fog.range[0] != 20.0f || s->fog_tries != 0) return 10;
+    if (s->fog_source.base[0] != 0x1FAB5000 || s->fog_source.base[1] != 0x1FAB4000 ||
+        s->fog_source.content[0] != 0xE1CDB1ADBFB1321Cull || s->fog_source.content[1] != 0x591ADB7C80BECA41ull) {
+      return 11;
+    }
+    if (!s->sky.valid || s->sky_reason != SkyBlockReason::kNone || s->sky.c31x != 150.0f || s->sky_tries != 0) return 12;
+    const std::string line = render::FogLine(*s);
+    if (line != "block valid, tries 0, c28 (1, 1) c66 (0, 0.6, 0.8) c67 (20, 1900, 1, 0.0005) c68 (0.25, 0.5, 0.75) "
+                "tf4 0x1FAB5000 E1CDB1ADBFB1321C tf5 0x1FAB4000 591ADB7C80BECA41 | sky valid, tries 0, c31.x 150 c46.x 100 "
+                "c47.x 0.25 tf13 0x1A544086 tf14 0x1A544086") {
+      std::cout << line << "\n";
+      return 13;
+    }
+  }
+  {
+    // Review Focus 1: the next frame starts with nothing of the last one. Reads that gave no block
+    // are counted and the last one's reason is the frame's.
+    b.Open();
+    b.Add(r);
+    b.CountFogTry(FogBlockReason::kUnread);
+    b.CountFogTry(FogBlockReason::kScatterTexel);
+    b.CountSkyTry(SkyBlockReason::kRegister);
+    auto s = b.Finish(4);
+    if (!s->fog_records || !none(*s)) return 14;
+    if (s->fog_reason != FogBlockReason::kScatterTexel || s->fog_tries != 2) return 15;
+    if (s->sky_reason != SkyBlockReason::kRegister || s->sky_tries != 1) return 16;
+    if (render::FogLine(*s) != "block invalid(tf4-texel), tries 2 | sky invalid(register), tries 1") return 17;
+    // A read that fails and one that then gives the block: the frame has the block and the count.
+    b.Open();
+    b.Add(r);
+    b.CountFogTry(FogBlockReason::kUnread);
+    b.SetFog(second, from2);
+    auto t = b.Finish(5);
+    if (!t->fog.valid || t->fog_reason != FogBlockReason::kNone || t->fog_tries != 1 || t->fog.range[0] != 30.0f) return 18;
+    if (t->fog_source.content[0] != 2 || t->sky.valid || t->sky_reason != SkyBlockReason::kNoDraw) return 19;
+    // And the frame after it has none of it.
+    b.Open();
+    auto u = b.Finish(6);
+    if (!none(*u) || u->fog_reason != FogBlockReason::kNoDraw || u->fog_tries != 0) return 20;
+  }
+  {
+    // Switched off at a frame boundary with a block held: that frame has none, and neither has
+    // the next one with the switch on again.
+    b.Open();
+    b.SetFog(first, from1);
+    b.SetSky(sky1);
+    b.FogOn(false);
+    auto s = b.Finish(7);
+    if (s->fog_records || !none(*s) || s->fog_reason != FogBlockReason::kOff || s->sky_reason != SkyBlockReason::kOff) return 21;
+    b.FogOn(true);
+    b.Open();
+    auto t = b.Finish(8);
+    if (!t->fog_records || !none(*t) || t->fog_reason != FogBlockReason::kNoDraw) return 22;
+  }
+  return 0;
+}
+
 int main() {
   auto r = capture::AssembleRecord(Good(), 7);
   if (r.skip != SkipReason::kNone || r.seq != 7 || r.rows[0] != 1.0f || r.rows[15] != 16.0f) return 1;
@@ -1309,6 +1458,10 @@ int main() {
     std::cout << "FAIL: shadow lists / block case " << code << "\n";
     return 130;
   }
+  if (const int code = FogTests(r)) {
+    std::cout << "FAIL: fog and sky block case " << code << "\n";
+    return 131;
+  }
 
   render::ScenePublisher pub;
   if (pub.Latest()) return 18;
@@ -1316,6 +1469,6 @@ int main() {
   pub.Publish(s2);
   if (pub.Latest()->frame != 43) return 19;
   std::cout << "PASS: draw record, frame builder, terrain side array, light side array and block, buffer reuse, "
-               "pool under threads, shadow lists and block, publisher\n";
+               "pool under threads, shadow lists and block, fog and sky blocks, publisher\n";
   return 0;
 }

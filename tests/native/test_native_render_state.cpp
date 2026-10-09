@@ -59,6 +59,13 @@ int main() {
     if (ShadowRecordsWanted(off != 0, off != 1, off != 2, off != 3, off != 4)) return 58;
   }
   if (ShadowRecordsWanted(false, false, false, false, false)) return 59;
+  // The capture reads the frame's fog and sky blocks only for a frame the pass could draw with
+  // them: records wanted, the fog's and the light's switches and the textures on.
+  if (!FogRecordsWanted(true, true, true, true)) return 60;
+  for (int off = 0; off < 4; ++off) {
+    if (FogRecordsWanted(off != 0, off != 1, off != 2, off != 3)) return 61;
+  }
+  if (FogRecordsWanted(false, false, false, false)) return 62;
 
   // Setting the view to what it already is (a plan's VIEW= token) is no change: it is not counted
   // for the clay log's "(changed)" mark. Every F6 step is one.

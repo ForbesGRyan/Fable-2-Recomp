@@ -29,6 +29,10 @@ Reports (every number is of the capture named on the command line):
   fog_tables.py replay <capture.jsonl> [--frame N] [--step 4]
                                              the same capture: light_formulas.sky on the pixels whose depth is
                                              clear and light_formulas.fog on the others, against the scene colour
+  fog_tables.py block  <capture.jsonl>       a capture of a build with the fog block (plan Task 3), made with
+                                             --fable2_native_fog=on: the fog and sky blocks of each frame row
+                                             against the same frame's rows and dumps (spec criterion 2); exit
+                                             code 1 unless every frame has both blocks and nothing differs
 The texture dumps are read relative to the capture's folder (or --tex-root).
 
 A capture made by a build with fog discovery has, in every decoded row, "tfc": the content hash of each sampled
@@ -420,6 +424,8 @@ class Frame:
         self.tree_row = None      # the first main-scene row whose vertex shader samples slot 16 (parsed)
         self.indx = []            # "indx" rows (parsed)
         self.indxdata = {}        # n -> "indxdata" row
+        self.has_frame_row = False
+        self.block = None         # "fog" of the frame row: the fog and sky blocks the capture built (plan Task 3)
 
 
 class Capture:
@@ -472,6 +478,12 @@ def load_capture(path, tex_root=None):
             if head.startswith('{"kind":"indxdata"'):
                 r = json.loads(line)
                 cap.frame(r["frame"]).indxdata[r["n"]] = r
+                continue
+            if head.startswith('{"kind":"frame"'):
+                r = json.loads(line)
+                fr = cap.frame(r["frame"])
+                fr.has_frame_row = True
+                fr.block = r.get("fog")
                 continue
             kind = head[9:head.find('"', 9)] if head.startswith('{"kind":"') else ""
             if kind not in ("draw", "tess", "verts", "indx"):
@@ -715,6 +727,109 @@ def report_sky(cap):
     return lines
 
 
+def _f32(x):
+    return struct.unpack("<f", struct.pack("<f", x))[0]
+
+
+def _same_floats(block_values, row_values):
+    """Whether the numbers a frame row wrote (nine significant digits: a single-precision float exactly)
+    are the other side's values in single precision (a register of "pfull" is one already; a byte of tf5
+    over 255 is a double here and a float in the block)."""
+    return len(block_values) == len(row_values) and all(
+        math.isfinite(a) and _f32(a) == _f32(b) for a, b in zip(block_values, row_values))
+
+
+def report_block(cap):
+    """(lines, ok): the fog and sky blocks the capture built for each frame (the frame row's "fog", written by
+    a build with plan Task 3) against the same frame's rows and dumps. Per frame:
+      registers   c28.xy, c64.rgb, c65.rgb, c66.xyz, c67, c68.rgb of the block against "pfull" of the frame's
+                  first fogged main-scene row (the registers hold one value a frame: frame-map section 16);
+      tables      the (address, content) pair the block read against the pair of every main-scene row that
+                  samples slot 4 / 5 (the row's "tf" and "tfc"), and the block's decoded texels against
+                  decode_tf4 / decode_tf5 of the dump with that content;
+      sky         c31.x, c46.x, c47.x and the fetch constants of slots 13 and 14 against the in-scene "indx"
+                  row whose pixel shader is the sky's.
+    ok: every frame has a valid fog block and a valid sky block and nothing differs or is missing."""
+    lines = ["capture %s: %d frames" % (cap.path.name, len(cap.frames))]
+    fog_ok = sky_ok = 0
+    for n in sorted(cap.frames):
+        fr = cap.frames[n]
+        b = fr.block
+        if b is None:
+            lines.append("frame %d: no fog block in the frame row (%s)" % (
+                n, "a build from before the fog block, or a frame without records" if fr.has_frame_row
+                else "the capture has no row of this frame's end"))
+            continue
+        faults = []
+        if not b.get("valid"):
+            faults.append("fog block invalid(%s), on %s, tries %s" % (b.get("reason"), b.get("on"), b.get("tries")))
+        elif fr.tf4_fc is None:
+            faults.append("no fogged main-scene row to hold the block against")
+        else:
+            for name, reg, count in (("c28", 28, 2), ("c64", 64, 3), ("c65", 65, 3), ("c66", 66, 3), ("c67", 67, 4),
+                                     ("c68", 68, 3)):
+                row = fr.regs.get(reg)
+                if row is None:
+                    faults.append("%s: the row has no value" % name)
+                elif not _same_floats(b.get(name, []), list(row[:count])):
+                    faults.append("%s: block %s, row %s" % (name, _fmt(b.get(name, []), 9), _fmt(row[:count], 9)))
+            for slot, name, texels, key in ((4, "tf4", fr.tf4, "scatter"), (5, "tf5", fr.tf5, "transmit")):
+                src = b.get(name) or {}
+                pair = (int(src.get("base", "0"), 16), int(src.get("content", "0"), 16))
+                rows = Counter()
+                for (kind, ps, in_scene, s, fc, content), count in fr.uses.items():
+                    if s == slot and in_scene and is_1d(fc):
+                        rows[(fc[1] & 0xFFFFF000, content)] += count
+                same, total = rows.get(pair, 0), sum(rows.values())
+                if total == 0 or same != total:
+                    faults.append("%s: the block read 0x%08X / %016X, which %d of %d sampling rows name" % (
+                        name, pair[0], pair[1], same, total))
+                if texels is None:
+                    faults.append("%s: no dump of the rows' content to decode" % name)
+                elif not _same_floats(b.get(key, []), [c for t in texels for c in t[:3]]):
+                    got = b.get(key, [])
+                    want = [c for t in texels for c in t[:3]]
+                    bad = [i for i in range(min(len(got), len(want))) if _f32(got[i]) != _f32(want[i])]
+                    faults.append("%s: %s has %d values, the dump %d; %d differ%s" % (
+                        name, key, len(got), len(want), len(bad),
+                        " (the first: texel %d channel %d, block %.9g, dump %.9g)" % (
+                            bad[0] // 3, bad[0] % 3, got[bad[0]], want[bad[0]]) if bad else ""))
+        if not faults:
+            fog_ok += 1
+            lines.append("frame %d: fog block equal to the rows: registers of the first fogged row (%s), tf4 0x%08X / %s "
+                         "and tf5 0x%08X / %s in every sampling row, %d + %d texels equal to the dumps'" % (
+                             n, fr.fog_row_ps, fr.tf4_base, b["tf4"]["content"][2:], fr.tf5_base, b["tf5"]["content"][2:],
+                             len(fr.tf4), len(fr.tf5)))
+        for text in faults:
+            lines.append("frame %d: FOG %s" % (n, text))
+        sky = b.get("sky") or {}
+        rows = [r for r in fr.indx if r.get("in_scene") and r.get("ps_hash", "")[2:].upper() == SKY_PS]
+        faults = []
+        if not sky.get("valid"):
+            faults.append("sky block invalid(%s), tries %s; %d in-scene sky rows" % (sky.get("reason"), sky.get("tries"), len(rows)))
+        elif len(rows) != 1:
+            faults.append("%d in-scene sky rows to hold the block against" % len(rows))
+        else:
+            r = rows[0]
+            for name, reg in (("c31x", 31), ("c46x", 46), ("c47x", 47)):
+                row = pfull_reg(r.get("pfull", ""), reg)
+                if row is None or not _same_floats([sky.get(name, math.nan)], [row[0]]):
+                    faults.append("%s: block %r, row %s" % (name, sky.get(name), "none" if row is None else "%.9g" % row[0]))
+            for name, slot in (("tf13", 13), ("tf14", 14)):
+                if sky.get(name) != r.get("tf", {}).get(str(slot)):
+                    faults.append("%s: block %s, row %s" % (name, sky.get(name), r.get("tf", {}).get(str(slot))))
+        if not faults:
+            sky_ok += 1
+            lines.append("frame %d: sky block equal to the in-scene sky row: c31.x %g c46.x %g c47.x %g, tf13 and tf14" % (
+                n, sky["c31x"], sky["c46x"], sky["c47x"]))
+        for text in faults:
+            lines.append("frame %d: SKY %s" % (n, text))
+    total = len(cap.frames)
+    lines.append("fog block equal to the rows in %d of %d frames; sky block equal to the sky row in %d of %d frames" % (
+        fog_ok, total, sky_ok, total))
+    return lines, total > 0 and fog_ok == total and sky_ok == total
+
+
 def scene_uses(cap, frame=None):
     """[(frame, kind, ps, slot, fc, content, rows)] of the rows that sampled a 2D texture of the scene colour's
     format, in no particular order within a frame."""
@@ -919,7 +1034,7 @@ def report_scene(cap, png=None, frame=None, scale=16.0, base=0x199E0000, max_edg
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("report", choices=("tables", "trees", "sky", "scene", "replay"))
+    ap.add_argument("report", choices=("tables", "trees", "sky", "scene", "replay", "block"))
     ap.add_argument("capture")
     ap.add_argument("--tex-root")
     ap.add_argument("--dump", help="tables: also write the decoded tables and registers per frame as JSON")
@@ -941,6 +1056,10 @@ def main(argv=None):
         lines = report_sky(cap)
     elif a.report == "replay":
         lines = report_replay(cap, a.frame, a.step)
+    elif a.report == "block":
+        lines, ok = report_block(cap)
+        print("\n".join(lines))
+        return 0 if ok else 1
     else:
         lines = report_scene(cap, a.png, a.frame, a.scale, a.base)
     print("\n".join(lines))

@@ -38,6 +38,7 @@
 #include "discovery_format.h"
 #include "draw_nesting.h"
 #include "draw_record.h"
+#include "fog_block.h"
 #include "guest_read.h"
 #include "light_block.h"
 #include "main_scene.h"
@@ -118,6 +119,12 @@ std::atomic<bool> g_records_frame{false};
 // clear nothing of the shadows is read, observed or recorded.
 std::atomic<bool> g_shadows_wanted{false};
 std::atomic<bool> g_shadows_frame{false};
+// The consumer also wants the frame's fog and sky blocks (SetFogWanted: the
+// native view, the light and the fog on), latched like the shadows' and set
+// only in a frame with records. With it clear nothing of the fog or the sky is
+// read: no register, no fetch constant, no table.
+std::atomic<bool> g_fog_wanted{false};
+std::atomic<bool> g_fog_frame{false};
 std::atomic<bool> g_failed{false};
 std::atomic<uint64_t> g_swaps{0};      // guest frames since start (while enabled)
 std::atomic<int> g_frames_written{0};  // discovery frames completed
@@ -145,6 +152,12 @@ uint32_t g_light_block_missing = 0;
 // them have no shadow block ("shadow-block"). OnSwap thread only.
 uint32_t g_shadow_frames = 0;
 uint32_t g_shadow_block_missing = 0;
+// The same for the fog and the sky: frames with the fog wanted since the last line, and those
+// of them without a fog block ("fog-block") and without a sky block ("sky-block"), by reason.
+// OnSwap thread only.
+uint32_t g_fog_frames = 0;
+uint32_t g_fog_block_missing[size_t(FogBlockReason::kCount)] = {};
+uint32_t g_sky_block_missing[size_t(SkyBlockReason::kCount)] = {};
 
 inline uint64_t Ticks() {
 #if defined(_M_X64) || defined(__x86_64__)
@@ -1396,6 +1409,7 @@ struct PsInfo {
   AlphaSpec alpha;                     // FindAlpha; kNone = no recipe
   const PsTerrainEntry* terrain = nullptr;  // FindPsTerrain: a terrain pixel shader (the entry is stable)
   const PsLightSpec* light = nullptr;       // FindPsLight: the shader's light family, null without one
+  const FogShaderEntry* fog = nullptr;      // FindFogShader: the shader has the game's fog block, null without it
   uint32_t phys = 0;
   uint32_t bytes = 0;
   // ReadLiteralRegisters: the pixel registers the shader loads itself;
@@ -1427,6 +1441,7 @@ const PsInfo* LookupPs(uint32_t obj) {
   e.alpha = FindAlpha(u.hash);
   e.terrain = FindPsTerrain(u.hash);
   e.light = FindPsLight(u.hash);
+  e.fog = FindFogShader(u.hash);
   e.phys = u.phys;
   e.bytes = u.bytes;
   e.literals_known = ReadLiteralRegisters(kPsLayout, obj, 0, 256, e.literal_regs);
@@ -3617,6 +3632,166 @@ void ObserveShadowDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   RecordShadowDraw(id, a, device, pass, f);
 }
 
+// --- The fog and sky blocks (frame-map section 16; fog_block.h) ------------------------------
+// Read only in a frame with records and with the fog wanted (g_fog_frame), once a frame each,
+// at a main-scene draw this thread is capturing.
+
+// This thread's fog state of the current frame (the drawing thread's own, like the shadows';
+// g_light_tries_frame tells one frame from the next): whether each block was taken, and the
+// reads that gave none.
+struct FogFrame {
+  bool fog_done = false;
+  uint32_t fog_tries = 0;
+  bool sky_done = false;
+  uint32_t sky_tries = 0;
+  uint32_t frame = 0;
+};
+constinit thread_local FogFrame t_fog;
+// At most this many reads of each block in a frame that gives none (a fog read is six
+// ReadPixelConstant calls, two fetch constants and 1.5 KB of tables; a sky read three and two):
+// what a frame whose tables cannot be read costs.
+constexpr uint32_t kMaxFogTries = 8;
+static_assert(kFogScatterBytes + kFogTransmitBytes == 1536);
+
+// Fog and sky reads made in one frame and found, under the lock, to belong to a frame that is
+// over (the frame's recheck below): dropped, and counted here for the fog: log line since its
+// last print.
+std::atomic<uint32_t> g_fog_dropped{0};
+
+// The registers of the two blocks are the bank's at any scene draw: no buffer load names them
+// (fog_block.h, kFogBlockRegisters; ReadPixelConstant would otherwise need the load model's answer).
+constexpr bool FogRegistersAreBankOnly() {
+  for (uint32_t r : kFogBlockRegisters) {
+    if (IsBufferLoadRegister(kPixelBank, r)) return false;
+  }
+  for (uint32_t r : kSkyBlockRegisters) {
+    if (IsBufferLoadRegister(kPixelBank, r)) return false;
+  }
+  return true;
+}
+static_assert(FogRegistersAreBankOnly(), "a fog or sky register is loaded from a constant buffer");
+
+FogFrame& CurrentFogFrame() {
+  const uint32_t frame = g_light_tries_frame.load(std::memory_order_relaxed);
+  if (t_fog.frame != frame) {
+    t_fog = FogFrame{};
+    t_fog.frame = frame;
+  }
+  return t_fog;
+}
+
+// Whether `f` is still the frame being built (as ShadowFrameCurrent: call with g_scene_mutex
+// held; a caller that gets false drops what it holds, and the drop is counted).
+bool FogFrameCurrent(const FogFrame& f) {
+  const bool current = f.frame == g_light_tries_frame.load(std::memory_order_relaxed);
+  if (!current) g_fog_dropped.fetch_add(1, std::memory_order_relaxed);
+  return current;
+}
+
+// The fetch constant of texture slot `slot` as the device holds it (host-order dwords).
+bool ReadTextureFetch(uint32_t device, uint32_t slot, uint32_t fc[6]) {
+  const uint8_t* p = device && slot < 32
+                         ? ReadVirtual(device + xdk::kDeviceVertexFetchOffset + xdk::kDeviceTextureFetchStride * slot, 24)
+                         : nullptr;
+  if (!p) return false;
+  for (int i = 0; i < 6; ++i) fc[i] = LoadBe32(p + 4 * i);
+  return true;
+}
+
+// The frame's fog block at the main-scene draw this thread is capturing, which runs a pixel
+// shader with the game's fog block (PsInfo::fog): pixel c28 and c64..c68 through
+// ReadPixelConstant, the fetch constants of slots 4 and 5 from the device, and the two tables'
+// bytes from guest memory at the constants' base addresses (512 and 1,024 bytes, each read whole
+// or not at all: ReadPhysical). The constants are judged before any table byte is read
+// (FogTableFetchFault), so an address is followed only for a constant that is the table's pin.
+// The bytes are copied first; the copy is what is hashed (FogSource: the content a discovery
+// capture names the table by) and decoded (MakeFogBlock), so the two cannot differ.
+// The tables are whole at this draw: in the captures of frame-map section 16 every main-scene
+// row of a frame that samples a table names one (address, content) pair, from the frame's first
+// fogged draw to its last (56 of 56 table-frames). Read once a frame, at the frame's first such
+// draw, and again at the next while a read gives no block, up to kMaxFogTries; each read that
+// gives none is counted in the frame with its reason.
+void ReadFogBlock(uint32_t device, FogFrame& f) {
+  if (f.fog_done || f.fog_tries >= kMaxFogTries) return;
+  FogBlockReason why = FogBlockReason::kUnread;
+  FogBlock block{};
+  FogSource source;
+  float regs[6][4] = {};
+  uint32_t fc[2][6] = {};
+  bool read = true;
+  for (int i = 0; read && i < 6; ++i) read = ReadPixelConstant(kFogBlockRegisters[i], regs[i]);
+  for (int t = 0; read && t < 2; ++t) read = ReadTextureFetch(device, kFogTableSlots[t], fc[t]);
+  if (read) {
+    why = FogTableReason(0, FogTableFetchFault(fc[0], kFogScatterPin));
+    if (why == FogBlockReason::kNone) why = FogTableReason(1, FogTableFetchFault(fc[1], kFogTransmitPin));
+  }
+  if (read && why == FogBlockReason::kNone) {
+    uint8_t tf4[kFogScatterBytes], tf5[kFogTransmitBytes];
+    const uint8_t* p4 = ReadPhysical(fc[0][1] & 0xFFFFF000u, uint32_t(kFogScatterBytes));
+    const uint8_t* p5 = ReadPhysical(fc[1][1] & 0xFFFFF000u, uint32_t(kFogTransmitBytes));
+    if (p4 && p5) {
+      std::memcpy(tf4, p4, sizeof(tf4));
+      std::memcpy(tf5, p5, sizeof(tf5));
+      block = MakeFogBlock(regs, fc[0], fc[1], tf4, sizeof(tf4), tf5, sizeof(tf5), &why);
+      if (block.valid) {
+        for (int t = 0; t < 2; ++t) source.base[t] = fc[t][1] & 0xFFFFF000u;
+        source.content[0] = XXH3_64bits(tf4, sizeof(tf4));
+        source.content[1] = XXH3_64bits(tf5, sizeof(tf5));
+      }
+    } else {
+      why = FogBlockReason::kUnread;
+    }
+  }
+  std::lock_guard<std::mutex> lock(g_scene_mutex);
+  if (!g_builder.InMainScene()) return;  // (as RecordDraw: the bracket is checked again under the lock)
+  // The frame is checked again under the lock, as for the shadow registers: a block read in one
+  // frame must not become the next frame's.
+  if (!FogFrameCurrent(f)) return;
+  if (block.valid) {
+    g_builder.SetFog(block, source);
+    f.fog_done = true;
+  } else {
+    g_builder.CountFogTry(why);
+    ++f.fog_tries;
+  }
+}
+
+// The frame's sky block at a main-scene call of the indexed builder 0x82217EE8 (sparkles,
+// particles and other quads come through it too: 93 calls in a frame at the bridge, in the scene
+// and outside it; capture native_discovery_20261009_065904, frame 2). The sky draw
+// is told from the others without decoding anything of its geometry: by the pixel shader the
+// draw runs, whose object the device holds at any hooked call (ChoosePs; its microcode hash
+// through LookupPs, cached per object) and which is the sky's (kSkyPixelShader) for exactly one
+// in-scene call a frame in the captures (28 of 28 frames; the reflection passes' four sky draws
+// are outside the main scene and never get here). At that call: pixel c31, c46, c47 through
+// ReadPixelConstant and the fetch constants of slots 13 and 14. Once a frame; a read that gives
+// no block is counted in the frame with its reason (at most kMaxFogTries).
+void ReadSkyBlock(uint32_t device, FogFrame& f) {
+  if (f.sky_done || f.sky_tries >= kMaxFogTries) return;
+  DeviceSnapshot dev;
+  if (!ReadDevice(device, &dev)) return;
+  uint32_t ps_obj = 0;
+  const PsInfo* ps = ChoosePs(dev, &ps_obj) ? LookupPs(ps_obj) : nullptr;
+  if (!ps || ps->hash != kSkyPixelShader) return;
+  float regs[3][4] = {};
+  uint32_t fc[2][6] = {};
+  bool read = true;
+  for (int i = 0; read && i < 3; ++i) read = ReadPixelConstant(kSkyBlockRegisters[i], regs[i]);
+  for (int t = 0; read && t < 2; ++t) read = ReadTextureFetch(device, kSkyTextureSlots[t], fc[t]);
+  SkyBlockReason why = SkyBlockReason::kUnread;
+  const SkyBlock block = read ? MakeSkyBlock(regs[0], regs[1], regs[2], fc[0], fc[1], &why) : SkyBlock{};
+  std::lock_guard<std::mutex> lock(g_scene_mutex);
+  if (!g_builder.InMainScene()) return;
+  if (!FogFrameCurrent(f)) return;
+  if (block.valid) {
+    g_builder.SetSky(block);
+    f.sky_done = true;
+  } else {
+    g_builder.CountSkyTry(why);
+    ++f.sky_tries;
+  }
+}
+
 // One outermost guest draw inside the main scene, as a DrawRecord in the frame.
 // Draw-argument mapping (frame-map section 8): DrawIndexedVertices r4 prim, r5
 // base vertex, r6 start index, r7 index count; DrawVertices r4 prim, r5 start
@@ -3667,6 +3842,18 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
     ShadowFrame& shadow = CurrentShadowFrame();
     shadow.tracker.Observe(0, 0xF, false, true);
     ReadShadowRegisters(id, shadow);
+  }
+  // The frame's fog block, at the frame's first colour draw whose pixel shader has the game's
+  // fog block (shaders.ps: set for a draw whose shaders were read, never for the indexed
+  // builder's), and its sky block, at the indexed builder's call that draws the sky: only in a
+  // frame with the fog wanted.
+  if (g_fog_frame.load(std::memory_order_relaxed)) {
+    FogFrame& fog = CurrentFogFrame();
+    if (id == kHook_DrawIndx_82217EE8) {
+      ReadSkyBlock(device, fog);
+    } else if (!in.depth_only && shaders.ps && shaders.ps->fog) {
+      ReadFogBlock(device, fog);
+    }
   }
   // Light (frame-map section 14, "Light inputs"). Only for a colour draw that got this far: a
   // draw that is skipped anyway has no use for its inputs.
@@ -3909,6 +4096,60 @@ void AppendFrameShadow(std::string& row, const render::FrameScene& sc) {
   row += "}";
 }
 
+// Discovery evidence, in the frame row of a frame with records: the frame's fog and sky blocks
+// as the scene carries them, {"fog":{"on","valid","reason","tries","c28":[2],"c64":[3],"c65":[3],
+// "c66":[3],"c67":[4],"c68":[3],"tf4":{"base","content"},"tf5":{"base","content"},"scatter":[192],
+// "transmit":[768],"sky":{"valid","reason","tries","c31x","c46x","c47x","tf13":[6],"tf14":[6]}}};
+// the registers, the tables' sources and the decoded tables (texel by texel, r g b) only for a
+// valid fog block, the sky's numbers only for a valid sky block. "base", "content": where each
+// table was read and the hash of the bytes that were decoded (FogSource), the same hash the
+// capture's rows name the table by in "tfc". tools/xdk_sigmatch/fog_tables.py (block) holds all
+// of it against the same frame's rows and dumps (spec criterion 2).
+void AppendFrameFog(std::string& row, const render::FrameScene& sc) {
+  char buf[192];
+  auto floats = [&](const char* key, const float* v, int n) {
+    row += ",\"";
+    row += key;
+    row += n > 1 ? "\":[" : "\":";
+    for (int i = 0; i < n; ++i) {
+      if (i) row += ",";
+      AppendFloat(row, v[i]);
+    }
+    if (n > 1) row += "]";
+  };
+  std::snprintf(buf, sizeof(buf), ",\"fog\":{\"on\":%d,\"valid\":%d,\"reason\":\"%s\",\"tries\":%u", sc.fog_records ? 1 : 0,
+                sc.fog.valid ? 1 : 0, FogBlockReasonName(sc.fog_reason), sc.fog_tries);
+  row += buf;
+  if (sc.fog.valid) {
+    floats("c28", sc.fog.amount, 2);
+    floats("c64", sc.fog.ext[0], 3);
+    floats("c65", sc.fog.ext[1], 3);
+    floats("c66", sc.fog.axis, 3);
+    floats("c67", sc.fog.range, 4);
+    floats("c68", sc.fog.near_colour, 3);
+    for (int t = 0; t < 2; ++t) {
+      std::snprintf(buf, sizeof(buf), ",\"tf%d\":{\"base\":\"0x%08X\",\"content\":\"0x%016llX\"}", t == 0 ? 4 : 5,
+                    sc.fog_source.base[t], static_cast<unsigned long long>(sc.fog_source.content[t]));
+      row += buf;
+    }
+    floats("scatter", &sc.fog.scatter[0][0], 64 * 3);
+    floats("transmit", &sc.fog.transmit[0][0], 256 * 3);
+  }
+  std::snprintf(buf, sizeof(buf), ",\"sky\":{\"valid\":%d,\"reason\":\"%s\",\"tries\":%u", sc.sky.valid ? 1 : 0,
+                SkyBlockReasonName(sc.sky_reason), sc.sky_tries);
+  row += buf;
+  if (sc.sky.valid) {
+    floats("c31x", &sc.sky.c31x, 1);
+    floats("c46x", &sc.sky.c46x, 1);
+    floats("c47x", &sc.sky.c47x, 1);
+    row += ",\"tf13\":";
+    row += HexDwords(sc.sky.fetch[0], 6);
+    row += ",\"tf14\":";
+    row += HexDwords(sc.sky.fetch[1], 6);
+  }
+  row += "}}";
+}
+
 // Ends the frame's bracket and, with the renderer on, finishes the frame's
 // scene (`swap` = guest frame number) with its capture time from `timer`,
 // then latches whether the next frame builds records. With `write`
@@ -3940,6 +4181,10 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
       const bool shadows = records && g_shadows_wanted.load(std::memory_order_relaxed);
       g_shadows_frame.store(shadows, std::memory_order_relaxed);
       g_builder.ShadowsOn(shadows);
+      // The fog and sky blocks likewise.
+      const bool fog = records && g_fog_wanted.load(std::memory_order_relaxed);
+      g_fog_frame.store(fog, std::memory_order_relaxed);
+      g_builder.FogOn(fog);
       // The next frame reads its own light block (and its own shadow state: CurrentShadowFrame).
       g_light_tries_frame.fetch_add(1, std::memory_order_relaxed);
     }
@@ -3967,6 +4212,7 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
   if (done->scene && done->scene->records) {
     AppendFrameLight(row, *done->scene);
     AppendFrameShadow(row, *done->scene);
+    AppendFrameFog(row, *done->scene);
   }
   row += "}\n";
   std::fputs(row.c_str(), g_file);
@@ -4093,6 +4339,11 @@ void PublishScene(const FinishedScene& done) {
       ++g_shadow_frames;
       g_shadow_block_missing += sc.shadow.valid ? 0 : 1;
     }
+    if (sc.fog_records) {
+      ++g_fog_frames;
+      if (!sc.fog.valid && sc.fog_reason < FogBlockReason::kCount) ++g_fog_block_missing[size_t(sc.fog_reason)];
+      if (!sc.sky.valid && sc.sky_reason < SkyBlockReason::kCount) ++g_sky_block_missing[size_t(sc.sky_reason)];
+    }
   }
   if (sc.frame % 300 != 0) return;
   std::string skipped, unsupported;
@@ -4196,6 +4447,38 @@ void PublishScene(const FinishedScene& done) {
     }
     g_shadow_block_missing = 0;
     g_shadow_frames = 0;
+    // fog: this frame's fog and sky blocks (render::FogLine: the registers, where each table was
+    // read and its content hash, the sky's registers and textures), and in how many of the frames
+    // with the fog wanted since the last line there was no fog block (fog-block) and no sky block
+    // (sky-block), by reason. "off" without the fog.
+    if (sc.fog_records || g_fog_frames) {
+      std::string fog_missing, sky_missing;
+      uint32_t fog_total = 0, sky_total = 0;
+      for (size_t i = 0; i < size_t(FogBlockReason::kCount); ++i) {
+        if (!g_fog_block_missing[i]) continue;
+        fog_total += g_fog_block_missing[i];
+        std::snprintf(buf, sizeof(buf), "%s%s: %u", fog_missing.empty() ? "" : ", ", FogBlockReasonName(FogBlockReason(i)),
+                      g_fog_block_missing[i]);
+        fog_missing += buf;
+      }
+      for (size_t i = 0; i < size_t(SkyBlockReason::kCount); ++i) {
+        if (!g_sky_block_missing[i]) continue;
+        sky_total += g_sky_block_missing[i];
+        std::snprintf(buf, sizeof(buf), "%s%s: %u", sky_missing.empty() ? "" : ", ", SkyBlockReasonName(SkyBlockReason(i)),
+                      g_sky_block_missing[i]);
+        sky_missing += buf;
+      }
+      // (dropped: fog and sky reads of a frame that was over when they were to be taken, since the last line)
+      REXSYS_INFO("[native] capture: frame {} fog: {} | {} in {} of {} frames {{{}}} | {} in {} of {} frames {{{}}} | "
+                  "dropped at a frame's end {}",
+                  sc.frame, render::FogLine(sc), kFogBlockReason, fog_total, g_fog_frames, fog_missing, kSkyBlockReason,
+                  sky_total, g_fog_frames, sky_missing, g_fog_dropped.exchange(0, std::memory_order_relaxed));
+    } else {
+      REXSYS_INFO("[native] capture: frame {} fog: {}", sc.frame, render::FogLine(sc));
+    }
+    g_fog_frames = 0;
+    std::fill(std::begin(g_fog_block_missing), std::end(g_fog_block_missing), 0u);
+    std::fill(std::begin(g_sky_block_missing), std::end(g_sky_block_missing), 0u);
   }
   LogShaderBreakdown(sc);
 }
@@ -4244,6 +4527,10 @@ void SetRecordsWanted(bool wanted) {
 
 void SetShadowsWanted(bool wanted) {
   g_shadows_wanted.store(wanted, std::memory_order_relaxed);
+}
+
+void SetFogWanted(bool wanted) {
+  g_fog_wanted.store(wanted, std::memory_order_relaxed);
 }
 
 void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t*) {

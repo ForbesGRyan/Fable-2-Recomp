@@ -488,5 +488,171 @@ class CaptureTest(unittest.TestCase):
             self.assertIn("tf5", text)
 
 
+SKY_FC = [0x00800002, 0x1A544086, 0x0001E00F, 0x00A80C14, 0x00000003, 0x00000218]
+
+
+class BlockReportTest(unittest.TestCase):
+    """report_block: the fog and sky blocks of a capture's frame rows against the same frame's rows and dumps
+    (plan Task 3; spec criterion 2). The capture is CaptureTest's, with a sky row and the blocks added."""
+
+    def make(self, d, change=None):
+        p = CaptureTest("test_tables_per_frame").make(d)
+        rows = [json.loads(line) for line in p.read_text().splitlines()]
+        hx = lambda fc: ["0x%08X" % v for v in fc]
+        out = []
+        for r in rows:
+            if r["kind"] != "frame":
+                out.append(r)
+                continue
+            frame = r["frame"]
+            pfull = ["00000000" * 4] * 256
+            pfull[31] = struct.pack(">4f", 150.0, 9.0, 9.0, 9.0).hex().upper()
+            pfull[46] = struct.pack(">4f", 100.0, 9.0, 9.0, 9.0).hex().upper()
+            pfull[47] = struct.pack(">4f", 0.1, 9.0, 9.0, 9.0).hex().upper()
+            tf4 = [TF4_FC[0], (TF4_FC[1] & 0xFFF) | (0x1FAB1000 if frame == 1 else 0x1FAB5000)] + TF4_FC[2:]
+            out.append({"kind": "indx", "frame": frame, "in_scene": True, "ps_hash": "0x" + ft.SKY_PS,
+                        "tf": {"13": hx(SKY_FC), "14": hx(SKY_FC), "4": hx(tf4)}, "tfc": {"4": "0x%016X" % frame},
+                        "pfull": "".join(pfull)})
+            # The same sky outside the scene (a reflection pass) with other constants: not the block's row.
+            out.append({"kind": "indx", "frame": frame, "in_scene": False, "ps_hash": "0x" + ft.SKY_PS,
+                        "tf": {"13": hx(TF5_FC), "14": hx(TF5_FC)}, "pfull": "".join(["00000000" * 4] * 256)})
+            f32 = lambda x: struct.unpack("<f", struct.pack("<f", x))[0]
+            r["fog"] = {
+                "on": 1, "valid": 1, "reason": "none", "tries": 0,
+                "c28": [0.0, 0.0], "c64": [0.0] * 3, "c65": [0.0] * 3, "c66": [0.0] * 3,
+                # (as the capture writes a float: nine significant digits)
+                "c67": [20.0, 1900.0, 1.0, float("%.9g" % f32(0.0005))], "c68": [0.0] * 3,
+                "tf4": {"base": "0x%08X" % (tf4[1] & 0xFFFFF000), "content": "0x%016X" % frame},
+                "tf5": {"base": "0x1FAB0000", "content": "0x%016X" % (16 + frame)},
+                "scatter": [c for i in range(64) for c in (float(frame), float(i), 0.0)],
+                "transmit": [float("%.9g" % f32(c / 255.0)) for _ in range(256) for c in (10 * frame, 20, 30)],
+                "sky": {"valid": 1, "reason": "none", "tries": 0, "c31x": 150.0, "c46x": 100.0,
+                        "c47x": float("%.9g" % f32(0.1)), "tf13": hx(SKY_FC), "tf14": hx(SKY_FC)},
+            }
+            if change:
+                change(frame, r["fog"])
+            out.append(r)
+        p.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in out))
+        return p
+
+    def report(self, change=None):
+        with tempfile.TemporaryDirectory() as d:
+            lines, ok = ft.report_block(ft.load_capture(self.make(d, change)))
+            return "\n".join(lines), ok
+
+    def test_blocks_that_are_the_rows(self):
+        text, ok = self.report()
+        self.assertTrue(ok, text)
+        self.assertIn("frame 1: fog block equal to the rows", text)
+        self.assertIn("tf4 0x1FAB1000 / 0000000000000001 and tf5 0x1FAB0000 / 0000000000000011 in every sampling row", text)
+        self.assertIn("64 + 256 texels equal to the dumps'", text)
+        self.assertIn("frame 2: sky block equal to the in-scene sky row: c31.x 150 c46.x 100 c47.x 0.1", text)
+        self.assertIn("fog block equal to the rows in 2 of 2 frames; sky block equal to the sky row in 2 of 2 frames", text)
+
+    def test_every_difference_is_found_and_named(self):
+        def reg(name, index, value):
+            def change(frame, fog):
+                if frame == 2:
+                    fog[name][index] = value
+            return change
+
+        def table(name, key, value):
+            def change(frame, fog):
+                if frame == 2:
+                    fog[name][key] = value
+            return change
+
+        def texel(key, index):
+            def change(frame, fog):
+                if frame == 2:
+                    fog[key][index] += 1.0 / 1024.0
+            return change
+
+        def sky(key, value):
+            def change(frame, fog):
+                if frame == 2:
+                    fog["sky"][key] = value
+            return change
+
+        cases = [
+            (reg("c67", 0, 20.000002), "frame 2: FOG c67: block"),
+            (reg("c28", 1, 1.0), "frame 2: FOG c28: block"),
+            (reg("c64", 2, 1e-9), "frame 2: FOG c64: block"),
+            (reg("c65", 0, 1e-9), "frame 2: FOG c65: block"),
+            (reg("c66", 1, 1e-9), "frame 2: FOG c66: block"),
+            (reg("c68", 2, 1e-9), "frame 2: FOG c68: block"),
+            (reg("c67", 1, float("nan")), "frame 2: FOG c67: block"),
+            (table("tf4", "content", "0x0000000000000001"), "frame 2: FOG tf4: the block read 0x1FAB5000 / 0000000000000001, which 0 of 2"),
+            (table("tf4", "base", "0x1FAB1000"), "frame 2: FOG tf4: the block read 0x1FAB1000 / 0000000000000002, which 0 of 2"),
+            (table("tf5", "content", "0x0000000000000011"), "frame 2: FOG tf5: the block read"),
+            (texel("scatter", 3 * 63 + 1), "frame 2: FOG tf4: scatter has 192 values, the dump 192; 1 differ (the first: texel 63 channel 1"),
+            (texel("transmit", 3 * 255 + 2), "frame 2: FOG tf5: transmit has 768 values, the dump 768; 1 differ (the first: texel 255 channel 2"),
+            (sky("c31x", 151.0), "frame 2: SKY c31x: block 151.0, row 150"),
+            (sky("c46x", 99.0), "frame 2: SKY c46x"),
+            (sky("c47x", 0.1000001), "frame 2: SKY c47x"),
+            (sky("tf14", ["0x00000000"] * 6), "frame 2: SKY tf14"),
+            (sky("valid", 0), "frame 2: SKY sky block invalid(none), tries 0; 1 in-scene sky rows"),
+        ]
+        for change, want in cases:
+            with self.subTest(want=want):
+                text, ok = self.report(change)
+                self.assertFalse(ok, text)
+                self.assertIn(want, text)
+                self.assertIn("frame 1: fog block equal to the rows", text)
+                self.assertIn("in 1 of 2 frames", text)
+
+    def test_a_shorter_table_is_a_difference(self):
+        def change(frame, fog):
+            fog["scatter"] = fog["scatter"][:-3]
+        text, ok = self.report(change)
+        self.assertFalse(ok)
+        self.assertIn("scatter has 189 values, the dump 192", text)
+
+    def test_an_invalid_or_missing_block_is_not_ok(self):
+        def invalid(frame, fog):
+            if frame == 1:
+                fog.clear()
+                fog.update({"on": 1, "valid": 0, "reason": "tf4-texel", "tries": 8,
+                            "sky": {"valid": 0, "reason": "no-draw", "tries": 0}})
+        text, ok = self.report(invalid)
+        self.assertFalse(ok)
+        self.assertIn("frame 1: FOG fog block invalid(tf4-texel), on 1, tries 8", text)
+        self.assertIn("frame 1: SKY sky block invalid(no-draw), tries 0; 1 in-scene sky rows", text)
+        self.assertIn("fog block equal to the rows in 1 of 2 frames; sky block equal to the sky row in 1 of 2 frames", text)
+        # A capture of a build without the block (CaptureTest's own): said, and not ok.
+        with tempfile.TemporaryDirectory() as d:
+            lines, ok = ft.report_block(ft.load_capture(CaptureTest("test_tables_per_frame").make(d)))
+            self.assertFalse(ok)
+            self.assertIn("frame 1: no fog block in the frame row (a build from before the fog block", "\n".join(lines))
+            self.assertIn("in 0 of 2 frames", "\n".join(lines))
+
+    def test_a_row_that_names_another_table_is_a_difference(self):
+        # One more sampling row in frame 2 with another content of tf4: the block's pair is not every row's.
+        with tempfile.TemporaryDirectory() as d:
+            p = self.make(d)
+            rows = [json.loads(line) for line in p.read_text().splitlines()]
+            extra = dict(next(r for r in rows if r["kind"] == "draw" and r["frame"] == 2))
+            extra["tfc"] = dict(extra["tfc"], **{"4": "0x00000000000000EE"})
+            rows.insert(len(rows) - 1, extra)
+            p.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows))
+            lines, ok = ft.report_block(ft.load_capture(p))
+            self.assertFalse(ok)
+            self.assertIn("frame 2: FOG tf4: the block read 0x1FAB5000 / 0000000000000002, which 2 of 3 sampling rows name",
+                          "\n".join(lines))
+
+    def test_the_command_line_exits_by_the_result(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            good = self.make(d)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(ft.main(["block", str(good)]), 0)
+            self.assertIn("in 2 of 2 frames", out.getvalue())
+        with tempfile.TemporaryDirectory() as d:
+            bad = self.make(d, lambda frame, fog: fog["c67"].__setitem__(0, 21.0))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(ft.main(["block", str(bad)]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

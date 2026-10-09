@@ -610,12 +610,16 @@ def vertex_fog(P, eye, c8x, c110, c111, tf16, tf17):
     """The trees' fog, computed per vertex: (factor, add), each three floats.
         (a, s, t) = fog_coords(P, eye, c110, c111)        vertex c110, c111: equal to pixel c66, c67 in the rows
         inside the start: ((1, 1, 1), (0, 0, 0)), no table read
-        T = tf16(s).rgb;  S2 = tf17(a, t).rgb             tf17 is a 2D texture: the angle and the near blend
+        T = tf16(s).rgb;  S2 = tf17(a, t).rgb             a 2D fetch: the angle and the near blend
         factor = T;  add = (1 - T) * S2 * c8x
     P: the vertex's world position after the wind; eye: vertex c9.xyz; c8x: vertex c8.x (the place of pixel
-    c28.y; there is no amount c28.x in this form). The pixel shader applies the pair with fog_apply. If
-    tf16 is tf5 and tf17(a, t) is c68 + t * (tf4(a) - c68), this is fog() with c28.x = 1 evaluated at the
-    vertex (tests/test_fog_formulas.py); whether the two tables are that is for a capture to say."""
+    c28.y; there is no amount c28.x in this form). The pixel shader applies the pair with fog_apply.
+    What the two tables are is settled by the captures (frame-map section 16, "The trees' tables": 28 of
+    28 frames): tf16 is tf5 itself and tf17 is tf4 itself, a 1D texture fetched with a 2D fetch, so the
+    second coordinate addresses nothing and tf17(a, t) = tf4(a) for every t. The trees therefore have no
+    blend from c68: this is not fog() at the vertex but T = tf5(s), add = (1 - T) * tf4(a) * c8x (ruling B);
+    it would be fog() with c28.x = 1 only if tf17(a, t) were c68 + t * (tf4(a) - c68), which a test holds
+    as arithmetic (tests/test_fog_formulas.py) and the game's table is not."""
     one, zero = [1.0, 1.0, 1.0], [0.0, 0.0, 0.0]
     coords = fog_coords(P, eye, c110, c111)
     if coords is None or not math.isfinite(c8x):

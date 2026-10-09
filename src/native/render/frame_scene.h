@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "../capture/draw_record.h"
+#include "../capture/fog_block.h"
 #include "../capture/light_block.h"
 #include "../capture/shader_tally.h"
 #include "../capture/shadow_block.h"
@@ -89,6 +90,32 @@ struct FrameScene {
   // the frame's first clear), and the passes the frame opened (clears of the map).
   uint32_t shadow_extra = 0;
   uint32_t shadow_passes = 0;
+  // The frame's fog block (fog_block.h): the game's six fog registers and its two
+  // tables, decoded, read once in the frame at the first main-scene colour draw
+  // whose pixel shader has the game's fog block (capture::FindFogShader). Valid
+  // only when that read passed capture::MakeFogBlock's rules; otherwise all
+  // zero, with the reason in fog_reason (kOff: the fog was not wanted this
+  // frame and nothing was read; kNoDraw: no such draw in the frame; else what
+  // the last read failed on): a consumer then draws the frame without fog
+  // ("fog-block"), never with another frame's registers or tables.
+  // fog_tries: reads that gave no block (at most eight a frame).
+  // fog_source: where the block's tables were read (address and content hash of
+  // each), for the log and the discovery frame row only; zero without a block.
+  capture::FogBlock fog{};
+  capture::FogBlockReason fog_reason = capture::FogBlockReason::kOff;
+  capture::FogSource fog_source{};
+  uint32_t fog_tries = 0;
+  // The frame's sky block (fog_block.h): three registers and two fetch constants
+  // of the game's sky draw, read at the main scene's call of the indexed builder
+  // 0x82217EE8 whose pixel shader is the sky's. Invalid (all zero) with the
+  // reason in sky_reason, as the fog block ("sky-block"); sky_tries: reads at a
+  // sky draw that gave none.
+  capture::SkyBlock sky{};
+  capture::SkyBlockReason sky_reason = capture::SkyBlockReason::kOff;
+  uint32_t sky_tries = 0;
+  // The fog and the sky were wanted this frame (the native view, the light and
+  // the fog's switch on at the frame's begin).
+  bool fog_records = false;
   // The drawable records with light inputs by family (index: LightFamily), how
   // many of them are a family's two- or four-light form, the records without
   // inputs by reason (index: LightReason), and the pixel shaders of those,
@@ -190,6 +217,43 @@ inline std::string ShadowSkippedByVs(const FrameScene& scene) {
       out += buf;
     }
   }
+  return out;
+}
+
+// The frame's fog and sky capture as the log writes it after "fog: ":
+//   block valid, tries T, c28 (x, y) c66 (x, y, z) c67 (x, y, z, w) c68 (r, g, b) tf4 0x<address> <content> tf5 0x<address>
+//   <content> | sky valid, tries T, c31.x a c46.x b c47.x c tf13 0x<dword 1> tf14 0x<dword 1>
+// with "invalid(<reason>), tries T" in the place of a block that is missing
+// (capture::FogBlockReasonName, SkyBlockReasonName). <address>, <content>: where
+// each table was read and the hash of its bytes (FrameScene::fog_source), which
+// a discovery capture of the same frame names the table by. The sky's two
+// textures are named by their fetch constants' second dword (address, endian
+// and format). "off" for a frame in which the fog was not wanted.
+inline std::string FogLine(const FrameScene& scene) {
+  if (!scene.fog_records) return "off";
+  char buf[320];
+  std::string out = "block ";
+  if (scene.fog.valid) {
+    const capture::FogBlock& f = scene.fog;
+    std::snprintf(buf, sizeof(buf),
+                  "valid, tries %u, c28 (%g, %g) c66 (%g, %g, %g) c67 (%g, %g, %g, %g) c68 (%g, %g, %g) tf4 0x%08X %016llX "
+                  "tf5 0x%08X %016llX",
+                  scene.fog_tries, f.amount[0], f.amount[1], f.axis[0], f.axis[1], f.axis[2], f.range[0], f.range[1], f.range[2],
+                  f.range[3], f.near_colour[0], f.near_colour[1], f.near_colour[2], scene.fog_source.base[0],
+                  static_cast<unsigned long long>(scene.fog_source.content[0]), scene.fog_source.base[1],
+                  static_cast<unsigned long long>(scene.fog_source.content[1]));
+  } else {
+    std::snprintf(buf, sizeof(buf), "invalid(%s), tries %u", capture::FogBlockReasonName(scene.fog_reason), scene.fog_tries);
+  }
+  out += buf;
+  out += " | sky ";
+  if (scene.sky.valid) {
+    std::snprintf(buf, sizeof(buf), "valid, tries %u, c31.x %g c46.x %g c47.x %g tf13 0x%08X tf14 0x%08X", scene.sky_tries,
+                  scene.sky.c31x, scene.sky.c46x, scene.sky.c47x, scene.sky.fetch[0][1], scene.sky.fetch[1][1]);
+  } else {
+    std::snprintf(buf, sizeof(buf), "invalid(%s), tries %u", capture::SkyBlockReasonName(scene.sky_reason), scene.sky_tries);
+  }
+  out += buf;
   return out;
 }
 
@@ -410,6 +474,40 @@ class FrameBuilder {
   }
   bool HasShadowRegisters() const { return shadow_registers_.valid; }
 
+  // --- The fog and sky blocks (FrameScene::fog, ::sky) ---
+  // Whether the fog and the sky are read from now on (the capture sets it at a
+  // frame boundary). Off: every call below does nothing, and the frame's scene
+  // says kOff.
+  void FogOn(bool on) { fog_on_ = on; }
+  // The frame's fog block with where its tables were read: the first valid one
+  // offered inside the scene is kept. CountFogTry: a read that gave none, with
+  // why (capture::MakeFogBlock's reason, or kUnread); the last one's reason is
+  // the frame's when it ends without a block. A read after the block is not counted.
+  void SetFog(const capture::FogBlock& block, const capture::FogSource& source) {
+    if (open_ && fog_on_ && block.valid && !fog_.valid) {
+      fog_ = block;
+      fog_source_ = source;
+    }
+  }
+  void CountFogTry(capture::FogBlockReason why) {
+    if (open_ && fog_on_ && !fog_.valid) {
+      ++fog_tries_;
+      fog_reason_ = why;
+    }
+  }
+  bool HasFog() const { return fog_.valid; }
+  // The same for the sky block.
+  void SetSky(const capture::SkyBlock& block) {
+    if (open_ && fog_on_ && block.valid && !sky_.valid) sky_ = block;
+  }
+  void CountSkyTry(capture::SkyBlockReason why) {
+    if (open_ && fog_on_ && !sky_.valid) {
+      ++sky_tries_;
+      sky_reason_ = why;
+    }
+  }
+  bool HasSky() const { return sky_.valid; }
+
   // Frees the spare buffers (any thread; scenes that die later bring theirs).
   void ReleaseSpares() { pool_->Release(); }
   size_t spare_count() const { return pool_->size(); }
@@ -491,6 +589,33 @@ class FrameBuilder {
     shadow_skipped_by_vs_.Clear();
     shadow_extra_ = 0;
     shadow_passes_ = 0;
+    // The fog and sky blocks: the frame's, or the reason it has none; the next
+    // frame starts with neither.
+    s->fog_records = fog_on_;
+    if (fog_on_) {
+      s->fog_tries = fog_tries_;
+      s->sky_tries = sky_tries_;
+      if (fog_.valid) {
+        s->fog = fog_;
+        s->fog_source = fog_source_;
+        s->fog_reason = capture::FogBlockReason::kNone;
+      } else {
+        s->fog_reason = fog_tries_ ? fog_reason_ : capture::FogBlockReason::kNoDraw;
+      }
+      if (sky_.valid) {
+        s->sky = sky_;
+        s->sky_reason = capture::SkyBlockReason::kNone;
+      } else {
+        s->sky_reason = sky_tries_ ? sky_reason_ : capture::SkyBlockReason::kNoDraw;
+      }
+    }
+    if (fog_.valid) fog_ = capture::FogBlock{};  // (4 KB: cleared only when a frame set it; never set with the fog off)
+    fog_source_ = capture::FogSource{};
+    fog_reason_ = capture::FogBlockReason::kNoDraw;
+    fog_tries_ = 0;
+    sky_ = capture::SkyBlock{};
+    sky_reason_ = capture::SkyBlockReason::kNoDraw;
+    sky_tries_ = 0;
     if (!draws_.empty() || !terrain_.empty() || !lights_.empty() || !shadow_draws_[0].empty() || !shadow_draws_[1].empty()) {
       const size_t shadows[2] = {shadow_draws_[0].size(), shadow_draws_[1].size()};
       const size_t records = draws_.size(), patches = terrain_.size(), lit = lights_.size();
@@ -561,6 +686,15 @@ class FrameBuilder {
   capture::ShaderTally<kSkippedTallySize> shadow_skipped_by_vs_;
   uint32_t shadow_extra_ = 0;
   uint32_t shadow_passes_ = 0;
+  // The fog and sky blocks of the frame so far (FrameScene::fog, ::sky).
+  bool fog_on_ = false;
+  capture::FogBlock fog_{};
+  capture::FogSource fog_source_{};
+  capture::FogBlockReason fog_reason_ = capture::FogBlockReason::kNoDraw;
+  uint32_t fog_tries_ = 0;
+  capture::SkyBlock sky_{};
+  capture::SkyBlockReason sky_reason_ = capture::SkyBlockReason::kNoDraw;
+  uint32_t sky_tries_ = 0;
   // Shared with the deleters of this builder's scenes. Never reassigned, and
   // locked inside: ReleaseSpares and spare_count need no lock of the caller's.
   std::shared_ptr<SceneBufferPool> pool_ = std::make_shared<SceneBufferPool>();

@@ -61,4 +61,32 @@ inline std::string RegistersHex(const uint32_t* bits, const bool* have, size_t r
   }
   return s;
 }
+// The members of a row's "rs" object for `n` registers: "<REG>":"0x<word>" (four and eight hex
+// digits), comma-separated, in the order of `regs`; `read(reg, &word)` gives a register's word
+// or false, and a register it does not give is left out.
+template <typename Read>
+inline std::string RegisterWords(const uint32_t* regs, size_t n, Read read) {
+  std::string s;
+  char buf[32];
+  for (size_t i = 0; i < n; ++i) {
+    uint32_t word = 0;
+    if (!read(regs[i], &word)) continue;
+    std::snprintf(buf, sizeof(buf), "%s\"%04X\":\"0x%08X\"", s.empty() ? "" : ",", regs[i], word);
+    s += buf;
+  }
+  return s;
+}
+// The head of a "verts" row, the decoded row of a BeginVertices draw (0x822060A0: r4 the
+// primitive type in its low six bits, r5 the vertex count, r6 the vertex size in bytes; `args`
+// are r4..r7): open, to be continued with the members the other decoded rows have.
+inline std::string VertsRowHead(int frame, const char* func, const uint32_t args[4], uint32_t device,
+                                bool in_scene) {
+  char buf[320];
+  std::snprintf(buf, sizeof(buf),
+                "{\"kind\":\"verts\",\"frame\":%d,\"func\":\"%s\",\"prim\":%u,\"count\":%u,"
+                "\"args\":[\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"],\"device\":\"0x%08X\",\"in_scene\":%s",
+                frame, func, args[0] & 0x3F, args[1], args[0], args[1], args[2], args[3], device,
+                in_scene ? "true" : "false");
+  return buf;
+}
 }  // namespace fable2::native::capture

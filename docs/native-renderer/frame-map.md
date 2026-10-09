@@ -1656,10 +1656,10 @@ The offset found is the one the two delays predict: capture frame 1 is GPU frame
 
 **Limits.**
 
-- Rows exist for four builders (`DrawVertices`, `DrawIndexedVertices`, `8221C9C8`, `82207C30`). The other draw hooks (`BeginVertices` `0x822060A0`, `0x82217EE8`, the `DrawIndx2` emitters) flush the same shadows with the same code but were not sampled.
+- Rows exist for four builders (`DrawVertices`, `DrawIndexedVertices`, `8221C9C8`, `82207C30`). The other draw hooks (`BeginVertices` `0x822060A0`, `0x82217EE8`, the `DrawIndx2` emitters) flush the same shadows with the same code but were not sampled. (Since sub-project 8 `BeginVertices` has a row and is in the proof: section 15, "Bias".)
 - One draw in four was sampled, in two scenes of one region (Bower Lake by the bridge), 120 frames each.
 - The proof is about the register words. What the emulator's backend derives from them (its normalized depth control and colour mask) is not part of it.
-- Stencil: `RB_DEPTHCONTROL` bit 0 is set in most main-scene words (`0x00708767`: stencil function always, pass operation replace). The stencil reference (`RB_STENCILREFMASK`) is not captured and the native pass has no stencil.
+- Stencil: `RB_DEPTHCONTROL` bit 0 is set in most main-scene words (`0x00708767`: stencil function always, pass operation replace). The stencil reference (`RB_STENCILREFMASK`) is not captured and the native pass has no stencil. (Since sub-project 8 it is in the rows' `"rs"`: section 15.)
 
 **Census** (main-scene rows, sampled one draw in four over 120 frames: 28,536 bridge, 28,458 walking; from the checker outputs named above, which also list every value's shader pairs and the rows of the other passes). Shader pairs are vertex / pixel shader hashes, the largest first.
 
@@ -3275,6 +3275,150 @@ From the whole-branch review (2026-10-08), recorded and not done:
 13. *A device-backed test of the pass* (the pure parts are tested; `Render`, `PrepareLight` and `FinishTerrain` run only in the game), and whether the debug layer reports a root descriptor that was never set.
 14. *The tools.* `pconst_check.py` does not excuse the first rows of a capture begun with the view off; the normal's source is counted by pixel shader only.
 15. *Left by the fix wave itself* (its report, `final-fix-wave-report.md` in the sub-project's working folder, has the reasons): a poll of the debug layer's messages at the moment a device is removed (the SDK hands the renderer no such moment: the poll is at a latched failure and at shutdown instead); a pure test of the pass's decision not to build light inputs with the light off beyond `ClayLightInputsBuilt` and the pictures.
+
+## 15. Shadows
+
+Sub-project 8 (spec `docs/superpowers/specs/2026-10-08-native-renderer-shadows-design.md`, 2026-10-08). Evidence files of this section are in `out\native-evidence\shadows\` (git-ignored); the names below are files of that folder unless a path is given. This section is the discovery (plan Task 1): how the game makes its sun shadow, as far as captures and the emulated GPU's register file show it. Inference is marked.
+
+**Runs.** Four gated runs of 2026-10-08 / 09 through `tools\drive_game.ps1 -BootSave Hero000` (script `task1_run_game.ps1`; all `RUN CLEAN`, `gate=passed`, exit 0; no window of the game logs has the freeze signature: 30.0 fps with work medians of 5.3 to 6.9 ms in the world, 20 to 22 fps in the windows that hold a capture), each with a discovery capture of 8 frames of every draw and a GPU-side log from a temporary SDK diagnostic (`task1_sdk_gpu_shadow_log.patch`, 165 added lines in `src/graphics/command_processor.cpp`: the constant log of section 14 plus, per executed `DRAW_INDX` packet, 26 register words, at pitch 1040 and at the two mask shaders the 192 fetch-constant dwords, and at the mask shaders the bytes of vertex fetch constant 95; removed again, the SDK is at `0c6d1de` and the runtime and the game were rebuilt without it).
+
+| Run | Driver arguments | Capture | GPU log | Game log, shots |
+|---|---|---|---|---|
+| bridge | `-Total 75 -Shots "36,70"`, capture at 40 s | `task1_bridge_capture1_native_discovery_20261008_233705.jsonl` | `task1_bridge_gpu_shadow.log.gz` (16 frames; the capture's frame 8 lies after it) | `task1_bridge_fable_2_355.log`; `task1_bridge_shot_36s.png`, `_70s.png`: the bridge over the lake, the hero and the dog on the planks, rail shadows on the planks |
+| bridge2 | the same, 40 logged frames | `task1_bridge2_capture1_native_discovery_20261009_000025.jsonl` | `task1_bridge2_gpu_shadow.log.gz` | `task1_bridge2_fable_2_358.log` |
+| trees | `-Total 100 -Shots "56,96" -Plan "33:LS=0/100/3000,37:RS=-60/0/1500,40:LS=0/100/2500,47:RS=-60/0/600,50:RS=60/0/600,74:LS=0/-100/14000,76:DISC=8/1"`, capture at 60 s, a second while walking back (requested at 76 s) | `task1_trees_capture1_native_discovery_20261008_234350.jsonl`, `task1_trees_capture2_native_discovery_20261008_234404.jsonl` | `task1_trees_gpu_shadow.log.gz` (40 frames around the first capture) | `task1_trees_fable_2_356.log`; `task1_trees_shot_56s.png`: the hero at the fence of posts under the trees; `task1_trees_shot_96s.png`: after the walk back, the hero close to the camera at the end of the bridge, a pale flat-shaded box at the left edge |
+| third | `-Total 70 -Shots "40,66" -Plan "33:LS=0/-100/3500"`, capture at 44 s | `task1_third_capture1_native_discovery_20261008_235353.jsonl` | `task1_third_gpu_shadow.log.gz` (40 frames) | `task1_third_fable_2_357.log`; `task1_third_shot_66s.png`: the hero on the planks facing the camera, the lake behind |
+
+Older captures used below: `native_discovery_20261008_105316.jsonl` (bridge), `_105659.jsonl` (third spot), `_105833.jsonl` (bridge) in `out\build\win-amd64-release\logs\`, and the GPU constant logs of section 14 (`out\native-evidence\lighting\task1_*_gpu_pconst.log.gz`: 60 + 60 + 16 frames at the bridge, 60 + 16 by the trees).
+
+### Passes
+
+The order in every captured frame (rows) and every logged GPU frame:
+
+1. A clear (`DrawIndx2:821EF988`, r7 = `0x400`, r8 = the surface word `0x10000410`: pitch 1040, no multisampling), then **the near map**: 110 to 137 decoded draws a frame in the eight captures used here.
+2. The same clear, then **the far map**: 121 to 228 draws.
+3. Later, in the tiled scene (pitch 1120): the depth pre-pass, then a depth-only rectangle at pitch 560 (surface word `0x08C20230`, depth word `0x00008701`), **the two mask rectangles** at pitch 1120 under bin select `0x2`, a resolve (`RB_MODECONTROL` 6), then the colour draws.
+
+A shadow-pass draw is a draw outside the main scene with surface pitch 1040 and colour mask 0. Its words: depth `0x00708766` (test greater-equal, write) under the reversed range (`2113` = -1, `2114` = 1), `2205` = `0x00219806` (cull back, clockwise front, polygon offset on for both faces) or `0x00219800` (no cull: the leaf cards), `RB_MODECONTROL` 4 or 5 on the GPU. Vertex shaders in frame 1 of the bridge capture, near pass: `0x3A0F9098B839DDBC` 29, `0xF160B4DA459A6D40` 28, `0xFBD39C64463E180B` 21, `0x432563420047C96C` 18, `0x82F6433A69263C75` 12, `0xA8A5B2A89F70336A` 8, `0x5F4416192E87005F` 1 (`task1_bridge_shadow_matrices.txt` lists every pass of every frame).
+
+**Light matrices** (`tools\xdk_sigmatch\shadow_matrices.py <capture>`, test `tests/test_shadow_matrices.py`; outputs `task1_*_shadow_matrices.txt` and, for the three older captures, `task1_shadow_matrices_105316.txt`, `_105659.txt`, `_105833.txt`). In every caster shader but one `oPos = c0..c3 . p` with the world rows in vertex `c4..c6`, so `M = [c0..c3] * inverse([c4..c6; 0 0 0 1])` is the pass's world-to-map matrix. `0xA8A5...` (instanced bushes) builds the world position itself and holds `M` in `c0..c3` (read as world rows its rows are off by 3 to 12; read directly, by under 1e-6). `0x5781...` and `0x87E0...` of the third spot fit the world-row form.
+
+| | Result |
+|---|---|
+| Passes compared (8 captures, 8 frames each, two passes a frame) | 128; all agree (the tool exits 0 on each capture) |
+| Largest deviation of a row's `M` from its pass's median | 2.3e-6 |
+| The median against the scene's pixel registers (`c36..c39` near, `c40..c43` far: one value in every scene row of a frame, 886 to 1,059 rows) after `u = 0.5 x + (0.5 + h) w`, `v = -0.5 y + (0.5 + h) w`, depth = z | largest residual 2.8e-7 |
+| The half texel `h` | + 0.5 / 1024 in u and in v, in all 128 passes |
+| Shape (bridge) | orthographic (`w` row 0 0 0 1); near 30.0 x 30.0 world units (0.0293 a texel), depth span 115; far 70.0 x 70.0 (0.0684 a texel), depth span 155; the depth axis is `-c80.xyz`, the sun |
+
+So the scene's `c36..c43` are world to shadow-map (u, v, depth) with a half texel added, and the pass's own draws give the same matrix: either source can check the other in the capture.
+
+**The origin snaps to whole texels.** The map position of the world origin, `(M.x.w, M.y.w) * 512` texels, is a whole number in every one of the 128 passes (largest distance from one: 0.0016 texel), although the sun, and with it the axes, turns from frame to frame. Standing still it moves by 0 or 1 texel a frame (the sun's turning); in the capture taken while walking (`task1_trees_capture2_shadow_matrices.txt`) by whole numbers of up to 72 texels a frame (near, frame 2 to 3: (-72.000, 67.001); far: (-28.000, 40.000)). The map is not centred on the eye: the eye (pixel `c31` at the second mask draw) sits at clip (-0.34, -0.37) of the near map at the bridge and at (0.52, -0.34) by the trees (`task1_map_centre.txt`). What the maps are fitted to was not established; the native pass takes the game's matrix and need not know.
+
+`c12` = (20, 35, 2, w) and `c13` = `c14` = (1/1024, 1/1024, 0, 0) in every frame of every capture and log; `c12.w` moves with the time of day (0.462 to 0.512 over all of them).
+
+### Mask draws
+
+Two rectangle lists of three vertices, clip positions (-1, -1), (-1, 1), (1, -1) (the GPU's bytes of vertex fetch constant 95: the whole target), drawn with `BeginVertices` (`0x822060A0`, r4 = 8, r5 = 3, r6 = 8 bytes a vertex), which now has a decoded discovery row, `"kind":"verts"` (`WriteVertsRow` in `capture.cpp`; discovery only). The surface is `0x11800460` (pitch 1120, one sample; the scene's `0x11810460` has two), `RB_COLOR_INFO` 0; the result is resolved to the `k_8` texture at `0x12B17000` that the lit shaders sample at slot 8.
+
+| | First: `0x1B4B5AE12EF270CA` (vertex shader `0x7A6E981FC4D0A375`) | Second: `0x0F99810F072BF0FC` (vertex shader `0xB1D7F0D4330BBD7D`) |
+|---|---|---|
+| `RB_DEPTHCONTROL` | `0x00708765`: stencil on, function always, pass replace; depth test off | `0x00700564`: stencil **off** (bit 0 clear; the function field says not-equal), depth test off |
+| `RB_STENCILREFMASK` | `0x00FFFFFF`: reference 255, masks `0xFF` | the same word |
+| Alpha test (`RB_COLORCONTROL`, `RB_ALPHA_REF`) | `0x0000000C`: on, greater than 0.502 | `0x00000004`: off |
+| Blend, colour mask, cull | off, RGBA, none | off, RGBA, none |
+| Bin mask | `0x00000002` | `0x00000002` |
+| Textures | tf7, tf13 | tf6, tf7, tf13, tf14 |
+| Pixel constants read | `c12`, `c31` = (1/1120, 1/720), `c40..c43`, `c46.x`, `c47.x`, `c77.x` | `c12`, `c31` = the eye, `c36..c43`, `c46` = (1/1120, 1/720), `c47` = (0.5, 0.5, 1/32, 1/32), `c77.x` = 2.5/1024, `c116..c119` |
+
+The words are the same in all 40 rows of each shader (5 captures of 8 frames), and equal the GPU's register file in every paired frame (below).
+
+**Which pixels each covers.** The first writes only where its own alpha passes the test: its shader outputs alpha 1 where the pixel is farther than its depth threshold and 0 elsewhere (instr 12, 13, 39), and there it also sets stencil to 255. The second has no test at all in these words: no stencil, no alpha test, no depth test. In the emulated frame it therefore writes every pixel of the target and the first rectangle's output survives nowhere. That costs nothing in the picture, because the second shader holds the far form and the fade itself (instr 87 to 113). Inference: on the console the second is kept off the stencilled pixels by hierarchical stencil (its stencil function field is set although the test is off; `RB_HIZCONTROL`, register `0x2203`, is in no row and was not logged), which makes the first rectangle a cheaper path for distant pixels and nothing more. For the native mask the second shader alone is the game's arithmetic.
+
+**Textures** (the rows' fetch constants, equal to the GPU's fetch constants in every paired row; `task1_*_mask_rows.txt`):
+
+| Slot | Address | Format, size | Filter, addressing | Pixels in guest memory |
+|---|---|---|---|---|
+| tf6 (near map) | `0x12BE1000` | `k_24_8_FLOAT`, 1024 x 1024, tiled | point (mag and min), clamp | no: the dump's 65,536 bytes are all zero |
+| tf7 (far map) | `0x12FE1000` | `k_24_8_FLOAT`, 1024 x 1024, tiled | point, clamp | no (all zero) |
+| tf13 (scene depth) | `0x1A02A000` | `k_24_8_FLOAT`, 1120 x 720, tiled | point, clamp | no (all zero) |
+| tf14 (rotation) | `0x1A53B000` | `k_8_8`, 32 x 32, linear, pitch 128 (256 bytes a row) | point, repeat | **yes**: 32 rows of 32 two-byte texels; `(2a - 1, 2b - 1)` of every texel has length 0.989 to 1.010 (`task1_bridge_tf14_rotation.txt`), so each texel is a unit vector, the rotation of the tap pattern; 602 distinct texels |
+
+The dumps are `task1_bridge_0F99_tf6_...bin`, `_tf7_`, `_tf13_`, `_tf14_1A53B000_FB036F07EB514FF4.bin`. The same two fetch words are bound at slots 6 and 7 in 94 scene rows of the bridge capture (the research note names their shader: the blended characters' `0x401A...`). The first 8,192 bytes of the tf14 dump are the same in all five captures of the four runs (SHA-256 `9ffab61500cd24a1...`). The rotation texture can be read by the native pass from guest memory; the fallback of the spec (unrotated taps) is not needed.
+
+**Constants over frames.**
+
+| Register | At `0x1B4B` | At `0x0F99` | Frames |
+|---|---|---|---|
+| `c12` | (20, 35, 2, w) | the same | every frame of 5 mined logs (212 frames) and 5 captures (40 frames); w between 0.462 and 0.512 |
+| `c13`, `c14` | (1/1024, 1/1024, 0, 0) | the same | all |
+| `c46` | x = 0.995474 (0.99547422 to 0.99547476) | (1/1120, 1/720, 0, 0) | all |
+| `c47` | x = 0.997163 (0.99716276 to 0.99716300) | (0.5, 0.5, 1/32, 1/32) | all |
+| `c77` | x = 0.000635 (0.00063467 to 0.00063562) | x = 0.00244140625 = 2.5 / 1024 | all |
+| `c31` | (1/1120, 1/720, 0, 0) | the eye | all |
+| `c36..c43` | screen to map (the world-to-map rows times `c116..c119` of the second draw); `c39` = `c43` = `c119` | the same | change every frame |
+
+Inference from the mined values (`task1_offline.txt`, B): with the view depth `1 / (c39.z z' + c39.w)` of a window depth `z' = 1 - depth`, the first shader's `c46.x`, `c47.x` and `c47.x + c77.x` are the depths of the distances `c12.x + c12.z` = 22, `c12.y` = 35 and `c12.y + 10` = 45 (within 0.003, 0.004 and 0.014 units in all 212 logged draws): it runs beyond 22 units and fades from 35 to 45, the second shader's own numbers.
+
+**Literals** (the GPU's register file at the draws, one value in all 212 logged frames; the rows' `"ps_lit"`, read from the shader object, hold the same values: a table of eight registers from `c248` for `0x0F99...`, and of four from `c252` for `0x1B4B...`, whose `c252` and `c253` are zero and not named by its microcode):
+
+| Shader | Register | Value |
+|---|---|---|
+| `0x0F99...` | `c248` | (10, 0.0833333358, -1, 2): the far branch ends at `c12.y` + 10; 1/12; texel * 2 - 1 |
+| | `c249` | (0, 1, 0.5, 0.1): 0.1 is the slope of the fade |
+| | `c250` | (-0.480026007, -0.597710013, -0.194983006, 0.767022014) |
+| | `c251` | (0.473434001, -0.791558981, -0.203345001, 0.185461) |
+| | `c252` | (-0.0735799968, 0.412458003, -0.69591397, 0.507430971) |
+| | `c253` | (-0.405809999, -0.932614982, 0.962339997, 0.519456029) |
+| | `c254` | (-0.326211989, -0.321940005, 0.620715976, -0.893123984) |
+| | `c255` | (-0.840143979, 0.896420002, 0.457136989, 0.0644249991) |
+| `0x1B4B...` | `c254` | (0.5, 1, 0, -1) |
+| | `c255` | (2, 0, 0, 0) |
+
+`c250..c255` are the twelve offset pairs of the near taps. The files `out\shader_dump\shader_<hash>.ucode.bin.frag` hold no literal table: they are the microcode as the SDK has it (control flow, then three dwords an instruction, three zero dwords at the end; 345 and 123 dwords), so the literals cannot be decoded from them as the plan assumed; they come from the register file and from the shader object.
+
+**Against the GPU** (`task1_mask_rows.py <capture> <GPU log> <frame offset>`; outputs `task1_bridge_mask_rows.txt`, `task1_bridge2_`, `task1_trees_`, `task1_third_`). Each mask row is set against the one `RB_MODECONTROL` 4 draw of its pixel shader in the paired GPU frame: 31 rows of each shader have one (7 + 8 + 8 + 8; frame 8 of the first bridge capture lies outside its log). In all of them the pixel registers the shaders read (`c0`, `c12..c14`, `c31`, `c36..c43`, `c46`, `c47`, `c77`, `c116..c119`) equal the row's `"pfull"`, all twenty state words of `"rs"` equal the register file, and the fetch constants of every sampled slot equal the row's `"tf"`.
+
+### Bias
+
+**Where the registers are.** The polygon offset registers `PA_SU_POLY_OFFSET_FRONT_SCALE`, `_FRONT_OFFSET`, `_BACK_SCALE`, `_BACK_OFFSET` (`0x2380..0x2383`, floats) are the first four of the run of eight the builders flush from device + `0x2A50` (section 13, the table of the eight runs), so their shadows are at + `0x2A50`, + `0x2A54`, + `0x2A58`, + `0x2A5C`. Static: `0x821A8A78` (r3 device, r4 a float's bits) stores its value times 16.0 (the float at `0x820994F8`, read from the image dump `out\xdk\fable2.img`) at + `0x2A50` and + `0x2A58`, the slope scale of both faces; `0x82289648` stores its value at + `0x2A54` and + `0x2A5C`, the offset; both set bits 11 and 12 of the `PA_SU_SC_MODE_CNTL` shadow (+ `0x2948`) to "scale or offset is not zero". `RB_STENCILREFMASK` (`0x210D`) and its back-face twin (`0x210C`) are in the `0x2100` run, at + `0x2900` and + `0x28FC`; the setters store single bytes (reference `0x822398E8` at + `0x2903`, mask `0x822C08E0` at + `0x2902`, write mask `0x821B1568` at + `0x2901`). Constants and `DeviceRegShadowOffset` in `xdk_layout.h`; the registers of a row's `"rs"` are `kRowStateRegisters` in `render_state.h` (twenty: the fourteen of section 13 and 14, then `210C`, `210D`, `2380..2383`).
+
+`BeginVertices` does not store the device's command write pointer; it keeps the address of the last dword it wrote at device + `0x3484` (`0x82206524`), which is where a `"verts"` row's `"cmd"` is read, so that the row pairs with its packet by the rule of section 13.
+
+**Proof** (`render_state_check.py`, which now compares nineteen registers and takes `"verts"` rows; outputs `task1_*_render_state_check.txt`):
+
+| | bridge | bridge2 | trees | third |
+|---|---|---|---|---|
+| Sampled rows (draw, tess, verts), all with `"rs"` | 14,922 | 14,918 | 11,537 | 16,285 |
+| Paired with a GPU draw | 13,069 (the 1,853 of frame 8: outside the GPU log) | 14,918 (100%) | 11,537 (100%) | 16,285 (100%) |
+| Frame offset; probed rows confirmed; runner-up | +1137; 6,535 of 7,461; 4 | +1132; 7,459 of 7,459; 7 | +1732; 11,537 of 11,537; 703 | +1250; 8,143 of 8,143; 52 |
+| Executions compared, colour / pre-pass | 19,051 / 2,968 | 21,752 / 3,391 | 17,503 / 3,465 | 22,403 / 3,948 |
+| `210C`, `210D`, `2380..2383`: unequal executions | 0 | 0 | 0 | 0 |
+| The other thirteen registers | 0 unequal but `RB_COLOR_MASK` in the pre-pass (GPU 0), as in section 13 | the same | the same | the same |
+| Shadow-pass executions among them (pitch 1040) | 1,721 | 1,951 | 2,272 | 2,727 |
+| Checker exit | 1: rows of frame 8 not paired | 0 | 0 | 0 |
+
+The `"verts"` rows are among the paired rows (203 of the first bridge capture's 232, then 232, 200 and 224; none unpaired where the frame is logged), so the pointer at + `0x3484` is the packet's.
+
+**Values** (`task1_bias_by_pass.py`; outputs `task1_*_bias_by_pass.txt`): the bias belongs to the pass, not to the shader. Every row of a near pass holds one set and every row of a far pass another, in all 40 captured frames (4,757 near rows, 6,423 far rows):
+
+| Pass | `2380` / `2382` (scale) | `2381` / `2383` (offset) | As D3D set it (scale / 16) |
+|---|---|---|---|
+| near | `0xC2000000` = -32 | `0xBA83126F` = -0.001 | slope scale -2, depth bias -0.001 |
+| far | `0xC2A00000` = -80 | `0xBBA3D70A` = -0.005 | slope scale -5, depth bias -0.005 |
+
+Front and back hold the same values and both enables are on. The window depth of the maps is `1 - z` with the test greater-equal, so the negative bias moves a caster away from the light, as a shadow bias must. How the emulator applies the registers (SDK `src/graphics/d3d12/pipeline_cache.cpp`, `include/rex/graphics/util/draw.h`): slope-scaled bias = scale / 16, constant bias = the offset in depth units (as an integer: `ceil(|offset| * 2^21)` steps of 8 for the float depth format). Elsewhere in the frames the offset is on only for one depth-only shader of another pass (`0x87D4404FB36AF71D`: scale 0, offset 0.0001; 3,301 rows of the bridge capture).
+
+**What a later task can rely on.** The two bias sets can be read per pass from the first shadow draw's `"rs"` words (the proof above covers every shadow-pass draw of four captures); as constants they are the table above.
+
+### Limits
+
+- Daylight at three spots of one region. Nothing here is about night, town or interiors.
+- The first bridge capture's last frame is not compared (its GPU log ended a frame early); bridge2 repeats the place completely.
+- Hierarchical stencil (`RB_HIZCONTROL`) is not in the rows or the GPU log; how the two rectangles share the screen on the console is inferred. In the emulated frame the second covers everything.
+- The mask's own pixels, the two maps and the scene depth are not in guest memory (dumps all zero); an oracle picture of the emulated mask would need its own SDK diagnostic.
+- What the maps' position follows (it is not the eye) was not established.
+- The vertex bytes of a `"verts"` row are not in the row (the caller writes them after the builder returns); they are known from the GPU log only.
 
 ## Pending
 

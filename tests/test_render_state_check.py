@@ -19,13 +19,19 @@ PS = "0xF6D98C7B4D98438B"
 STATE = {"2104": 0x0000000F, "210E": 0x3F008081, "2200": 0x00708767, "2201": 0x00010001,
          "2202": 0x8700001C, "2205": 0x00218006, "2105": 0x3F800000, "2106": 0x3F800000,
          "2107": 0x3F800000, "2108": 0x3F800000, "2113": 0xBF800000, "2114": 0x3F800000,
-         "2206": 0x0000043F}
+         "2206": 0x0000043F,
+         # Stencil reference words (reference 0x2A, mask and write mask 0xFF) and the polygon
+         # offset registers (scale 2 and offset 0.0005 for front faces, 1.5 and 0.00025 for back).
+         "210C": 0x00FFFF00, "210D": 0x00FFFF2A, "2380": 0x40000000, "2381": 0x3A03126F,
+         "2382": 0x3FC00000, "2383": 0x3983126F}
 # A GPU value for each register that differs from STATE in a high bit only (and, for the
 # floats, in one bit), so a comparison of the low half or of some registers cannot pass.
 HIGH_BIT_DIFFERENCE = {"2104": 0x8000000F, "210E": 0x3F018081, "2200": 0x80708767, "2201": 0x01010001,
                        "2202": 0xAA00001C, "2205": 0x00018006, "2105": 0x3F810000, "2106": 0x3F800100,
                        "2107": 0x7F800000, "2108": 0xBF800000, "2113": 0x3F800000, "2114": 0x3F000000,
-                       "2206": 0x0001043F}
+                       "2206": 0x0001043F,
+                       "210C": 0x00FEFF00, "210D": 0x01FFFF2A, "2380": 0xC0000000, "2381": 0x3A83126F,
+                       "2382": 0x3FC00001, "2383": 0x7983126F}
 C0 = [0.5, -0.25, 0.0, 92.5]
 OFFSET = 100  # GPU frame = capture frame + OFFSET in these logs
 ALL_BINS, PRE_PASS_BINS, COLOUR_BINS = 0xFFFFFFFF, 0x15555555, 0x2AAAAAAA
@@ -118,9 +124,13 @@ class AddressTest(unittest.TestCase):
         self.assertEqual(rsc.gpu_address(0xA0001000), 0x00001000)
         self.assertEqual(rsc.gpu_address(0xFF4FE848), 0x1F4FF848)
 
-    def test_the_registers_are_the_thirteen_of_the_capture(self):
+    def test_the_registers_are_the_nineteen_of_the_capture(self):
+        # The thirteen of the materials proof, then the stencil reference words and the four
+        # polygon offset registers (render_state.h kRowStateRegisters without RB_COLOR_INFO).
         self.assertEqual(set(rsc.REGISTERS), set(STATE))
-        self.assertEqual(len(rsc.REGISTERS), 13)
+        self.assertEqual(len(rsc.REGISTERS), 19)
+        self.assertEqual(rsc.REGISTERS[13:], ("210C", "210D", "2380", "2381", "2382", "2383"))
+        self.assertEqual(set(rsc.REGISTER_NAMES), set(rsc.REGISTERS))
 
 
 class EqualityTest(Base):
@@ -318,6 +328,44 @@ class PairingTest(Base):
         self.assertIn("paired 0 of 2 sampled rows", text)
 
 
+class VertsRowTest(Base):
+    """A "verts" row is the decoded row of a BeginVertices draw (the shadow-mask rectangles): it
+    is paired and compared like the others; its "cmd" is the builder's own write pointer."""
+
+    def verts(self, cmd=0xFF500000, count=3, **over):
+        return {"kind": "verts", "frame": 1, "func": "D3DDevice_BeginVertices?", "prim": 8, "count": count,
+                "args": ["0x00000008", f"0x{count:08X}", "0x00000010", "0x00000008"], "in_scene": True,
+                "rs": rs(**over), "cmd": f"0x{cmd:08X}", "vs": {"hash": VS}, "ps_hash": PS,
+                "consts": {"c0": C0}}
+
+    def test_the_index_count_is_the_vertex_count(self):
+        self.assertEqual(rsc.expected_count("D3DDevice_BeginVertices?", [8, 3, 16, 8]), 3)
+        self.assertEqual(rsc.expected_count("D3DDevice_BeginVertices?", [13, 224, 4, 0x110]), 224)
+
+    def test_a_verts_row_is_paired_and_compared(self):
+        code, text = self.run_check([self.verts()], [gpu_line(OFFSET + 1, 0, 0xFF500000, n=3, bs=0x2, bm=0x2)])
+        self.assertEqual(code, 0, text)
+        self.assertIn("rows 1, sampled 1, not sampled 0", text)
+        self.assertIn("paired 1 of 1 sampled rows", text)
+        self.assertIn("sampled 1, paired 1, equal 1, unequal 0", self.register_line(text, "210D"))
+        # With per-draw bin masks seven more dwords follow the packet, as for the other builders.
+        code, text = self.run_check([self.verts()],
+                                    [gpu_line(OFFSET + 1, 0, 0xFF500000, n=3, bs=0x2, bm=0x2, delta=-24)])
+        self.assertEqual(code, 0, text)
+
+    def test_a_verts_row_with_another_stencil_reference_fails(self):
+        code, text = self.run_check([self.verts()],
+                                    [gpu_line(OFFSET + 1, 0, 0xFF500000, n=3, bs=0x2, bm=0x2, r210D=0x00FFFF2B)])
+        self.assertEqual(code, 1, text)
+        self.assertRegex(text, r"mismatch 210D: frame 1 .*D3DDevice_BeginVertices\?.*device 0x00FFFF2A, "
+                               r"GPU 0x00FFFF2B")
+
+    def test_a_verts_row_with_another_vertex_count_is_not_paired(self):
+        code, text = self.run_check([self.verts(count=4)], [gpu_line(OFFSET + 1, 0, 0xFF500000, n=3)])
+        self.assertEqual(code, 1, text)
+        self.assertIn("paired 0 of 1 sampled rows", text)
+
+
 class PrePassTest(Base):
     """A bin select without a colour bin (0x2AAAAAAA) is a depth pre-pass: there the D3D library
     forces RB_COLOR_MASK to 0, which is the one accepted difference."""
@@ -496,6 +544,43 @@ class CensusTest(Base):
         self.assertRegex(text, r"alpha test on, function 4 \(greater\) +1\b")
         self.assertRegex(text, r"alpha test off +2\b")
         self.assertRegex(text, r"alpha reference 0\.5 +1\b")
+
+    def test_polygon_offset_by_shader(self):
+        # Bits 11 and 12 of PA_SU_SC_MODE_CNTL enable the offset for front and back faces.
+        both = rs(r2205=0x00219806, r2104=0)
+        front = rs(r2205=0x00218806, r2380=f32(4.0), r2381=f32(-0.001))
+        back = rs(r2205=0x00219006)
+        rows = [draw_row(1, 0xFF500000, state=both, vs="0xAAAAAAAAAAAAAAAA", ps="0xBBBBBBBBBBBBBBBB",
+                         in_scene=False),
+                draw_row(1, 0xFF500100, state=front, in_scene=False),
+                draw_row(1, 0xFF500200, state=back, in_scene=False),
+                draw_row(1, 0xFF500300)]
+        text = self.census(rows)
+        self.assertRegex(text, r"polygon offset front scale 2 offset 0\.0005, back scale 1\.5 offset 0\.00025 +1\n"
+                               r" +vs 0xAAAAAAAAAAAAAAAA ps 0xBBBBBBBBBBBBBBBB +1\b")
+        self.assertRegex(text, r"polygon offset front scale 4 offset -0\.001 +1\b")
+        self.assertRegex(text, r"polygon offset back scale 1\.5 offset 0\.00025 +1\b")
+        # Off: the registers are shown all the same (they are flushed whatever the enables say).
+        self.assertRegex(text, r"polygon offset off \(registers: front 2 0\.0005, back 1\.5 0\.00025\) +1\b")
+        self.assertEqual(rsc.decode_polygon_offset(0x00218006, 0, 0, 0, 0), "polygon offset off (registers: "
+                                                                            "front 0 0, back 0 0)")
+
+    def test_stencil_state_and_reference(self):
+        # 0x00708765: stencil on, always, pass replace, depth test off; 0x00700565: not-equal, keep.
+        rows = [draw_row(1, 0xFF500000, state=rs(r2200=0x00708765)),
+                draw_row(1, 0xFF500100, state=rs(r2200=0x00700565, r210D=0x00FF0101)),
+                draw_row(1, 0xFF500200, state=rs(r2200=0x00708766))]
+        text = self.census(rows)
+        self.assertRegex(text, r"stencil on: function 7 \(always\), fail keep, pass replace, depth fail keep; "
+                               r"reference 42, mask 0xFF, write mask 0xFF +1\b")
+        self.assertRegex(text, r"stencil on: function 5 \(notequal\), fail keep, pass keep, depth fail keep; "
+                               r"reference 1, mask 0x01, write mask 0xFF +1\b")
+        self.assertRegex(text, r"stencil off \(reference word 0x00FFFF2A\) +1\b")
+        # Two-sided stencil (bit 7): the back faces' functions and their own reference word.
+        self.assertEqual(rsc.decode_stencil(0x287087E5, 0x00FFFF2A, 0x000F0703),
+                         "stencil on: function 7 (always), fail keep, pass replace, depth fail keep; reference 42, "
+                         "mask 0xFF, write mask 0xFF; back faces: function 7 (always), fail keep, pass replace, "
+                         "depth fail zero; reference 3, mask 0x07, write mask 0x0F")
 
     def test_alpha_to_mask_is_its_own_state(self):
         text = self.census([draw_row(1, 0xFF500000, state=rs(r2202=0x00000014))])

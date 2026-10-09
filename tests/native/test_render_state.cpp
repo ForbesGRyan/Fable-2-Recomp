@@ -1,6 +1,7 @@
 // Synthetic standalone test for the render-state decoder; no game or GPU.
 // Real words are from the main-scene census of frame-map section 13, "Render state".
 #include "../../src/native/capture/render_state.h"
+#include "../../src/native/capture/xdk_layout.h"
 #include <cmath>
 #include <initializer_list>
 #include <cstdio>
@@ -291,6 +292,36 @@ int main() {
     w.vport_z_scale = Bits(0.0f);
     s = DecodeRenderState(w);
     if (!s.valid || s.depth_reversed) return 106;
+  }
+  // The registers of a discovery row's "rs" (frame-map section 15, "Bias"): the fourteen of the
+  // materials and lighting captures in their order, then the stencil reference words and the four
+  // polygon offset registers, each with a place in the device's register shadows.
+  {
+    namespace xdk = fable2::native::capture::xdk;
+    static constexpr uint32_t kExpected[] = {0x2104, 0x210E, 0x2200, 0x2201, 0x2202, 0x2205, 0x2105,
+                                             0x2106, 0x2107, 0x2108, 0x2113, 0x2114, 0x2206, 0x2001,
+                                             0x210C, 0x210D, 0x2380, 0x2381, 0x2382, 0x2383};
+    static_assert(sizeof(kRowStateRegisters) == sizeof(kExpected));
+    for (size_t i = 0; i < sizeof(kExpected) / sizeof(kExpected[0]); ++i) {
+      if (kRowStateRegisters[i] != kExpected[i]) return 110;
+      if (xdk::DeviceRegShadowOffset(kRowStateRegisters[i]) == 0) return 111;
+    }
+    // The 0x2380 run: eight registers from device + 0x2A50 (BeginVertices 0x822062BC `addi
+    // r6,r31,10832`, `li r5,9088`, `rldicr r4,r27,18,7`); the depth bias setters store there
+    // (0x821A8A78 the scale at +0x2A50 and +0x2A58, 0x82289648 the offset at +0x2A54 and +0x2A5C).
+    static_assert(xdk::kRegPolyOffsetFrontScale == 0x2380 && xdk::kRegPolyOffsetFrontOffset == 0x2381);
+    static_assert(xdk::kRegPolyOffsetBackScale == 0x2382 && xdk::kRegPolyOffsetBackOffset == 0x2383);
+    static_assert(xdk::DeviceRegShadowOffset(0x2380) == 0x2A50 && xdk::DeviceRegShadowOffset(0x2381) == 0x2A54);
+    static_assert(xdk::DeviceRegShadowOffset(0x2382) == 0x2A58 && xdk::DeviceRegShadowOffset(0x2383) == 0x2A5C);
+    static_assert(xdk::DeviceRegShadowOffset(0x2387) == 0x2A6C);
+    static_assert(xdk::DeviceRegShadowOffset(0x2388) == 0 && xdk::DeviceRegShadowOffset(0x237F) == 0);
+    // RB_STENCILREFMASK is in the 0x2100 run: +0x2900, its reference the low byte (the setter
+    // 0x822398E8 stores a byte at +0x2903); the back-face word is the register before it.
+    static_assert(xdk::kRegStencilRefMask == 0x210D && xdk::DeviceRegShadowOffset(0x210D) == 0x2900);
+    static_assert(xdk::kRegStencilRefMaskBf == 0x210C && xdk::DeviceRegShadowOffset(0x210C) == 0x28FC);
+    // BeginVertices leaves the device's write pointer alone and keeps its own (0x82206524 `stw
+    // r11,13444(r31)`); a "verts" row's "cmd" is read there.
+    static_assert(xdk::kDeviceBeginVerticesWriteOffset == 0x3484);
   }
   std::puts("PASS: render-state decoder");
   return 0;

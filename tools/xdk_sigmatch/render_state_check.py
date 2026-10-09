@@ -3,10 +3,11 @@
 Usage: python tools\\xdk_sigmatch\\render_state_check.py <native_discovery_*.jsonl> --gpu <gpu_state.log[.gz]>
            [--top N]
 
-The capture's "draw" and "tess" rows carry "rs" (the render-state registers read from the
-device's register shadows after the draw builder returned, xdk_layout.h DeviceRegShadowOffset,
-and the device's explicit bin mask as "bin_mask_lo" / "bin_mask_hi") and "cmd" (the device's
-command write pointer at that moment). The GPU log comes from the temporary SDK diagnostic of
+The capture's "draw", "tess" and "verts" rows carry "rs" (the render-state registers read from
+the device's register shadows after the draw builder returned, xdk_layout.h
+DeviceRegShadowOffset, and the device's explicit bin mask as "bin_mask_lo" / "bin_mask_hi") and
+"cmd" (the device's command write pointer at that moment; for a "verts" row, a BeginVertices
+draw, the builder's own pointer: xdk_layout.h kDeviceBeginVerticesWriteOffset). The GPU log comes from the temporary SDK diagnostic of
 frame-map section 13 (one line per DRAW_INDX packet the command processor hands to the backend,
 with the same registers from the GPU register file):
 
@@ -14,6 +15,7 @@ with the same registers from the GPU register file):
     n=<index count> bs=<bin select> bm=<bin mask> vs=<hash> ps=<hash> pitch=<surface pitch>
     mode=<RB_MODECONTROL & 7> c0=<vertex constant 0, four dwords> r2104=.. r210E=.. r2200=..
     r2201=.. r2202=.. r2205=.. r2105=.. r2106=.. r2107=.. r2108=.. r2113=.. r2114=.. r2206=..
+    r210C=.. r210D=.. r2380=.. r2381=.. r2382=.. r2383=..
     (hex without 0x; a register the log lacks is not compared and is named in the result)
   S f=<gpu frame> a=<address>     a draw packet skipped by the bin predicate
 
@@ -59,14 +61,19 @@ import sys
 from collections import Counter, defaultdict
 
 # The registers of "rs", in the order the capture writes them: the six state registers, the
-# blend constant (2105..2108), the viewport Z scale and offset and PA_CL_VTE_CNTL.
+# blend constant (2105..2108), the viewport Z scale and offset and PA_CL_VTE_CNTL; then (frame-map
+# section 15) the stencil reference words (back faces, front) and the polygon offset registers
+# (front scale and offset, back scale and offset; floats).
 REGISTERS = ("2104", "210E", "2200", "2201", "2202", "2205", "2105", "2106", "2107", "2108",
-             "2113", "2114", "2206")
+             "2113", "2114", "2206", "210C", "210D", "2380", "2381", "2382", "2383")
 REGISTER_NAMES = {
     "2104": "RB_COLOR_MASK", "210E": "RB_ALPHA_REF", "2200": "RB_DEPTHCONTROL",
     "2201": "RB_BLENDCONTROL0", "2202": "RB_COLORCONTROL", "2205": "PA_SU_SC_MODE_CNTL",
     "2105": "RB_BLEND_RED", "2106": "RB_BLEND_GREEN", "2107": "RB_BLEND_BLUE", "2108": "RB_BLEND_ALPHA",
     "2113": "PA_CL_VPORT_ZSCALE", "2114": "PA_CL_VPORT_ZOFFSET", "2206": "PA_CL_VTE_CNTL",
+    "210C": "RB_STENCILREFMASK_BF", "210D": "RB_STENCILREFMASK",
+    "2380": "PA_SU_POLY_OFFSET_FRONT_SCALE", "2381": "PA_SU_POLY_OFFSET_FRONT_OFFSET",
+    "2382": "PA_SU_POLY_OFFSET_BACK_SCALE", "2383": "PA_SU_POLY_OFFSET_BACK_OFFSET",
 }
 COLOUR_MASK = "2104"
 # Bin bits: odd bits are colour bins, even bits depth pre-pass bins (xdk_layout.h kColourBins).
@@ -83,6 +90,9 @@ FACTOR = {0: "zero", 1: "one", 4: "src_colour", 5: "inv_src_colour", 6: "src_alp
 BLEND_OP = {0: "add", 1: "subtract", 2: "min", 3: "max", 4: "rev_subtract"}
 CONSTANT_FACTORS = (12, 13, 14, 15)
 VTE_Z_SCALE_ENABLE, VTE_Z_OFFSET_ENABLE = 0x10, 0x20
+STENCIL_OP = ("keep", "zero", "replace", "incr_clamp", "decr_clamp", "invert", "incr_wrap", "decr_wrap")
+# PA_SU_SC_MODE_CNTL bits 11 and 12 (SDK registers.h poly_offset_front_enable, _back_enable).
+POLY_OFFSET_FRONT_ENABLE, POLY_OFFSET_BACK_ENABLE = 0x800, 0x1000
 
 
 def gpu_address(cpu_virtual):
@@ -133,16 +143,19 @@ def expected_count(func, args):
         return args[2]          # r6 patches
     if "82207C30" in func:
         return 4 * args[3]      # r7 patches, four tessellation factors each
+    if "BeginVertices" in func:
+        return args[1]          # r5 vertex count
     return None
 
 
 def load_capture(path):
-    """The capture's draw and tess rows, reduced to what the proof and the census read."""
+    """The capture's draw, tess and verts rows, reduced to what the proof and the census read."""
     rows = []
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             if not (line.startswith('{"kind":"draw"') or line.startswith('{"kind": "draw"')
-                    or line.startswith('{"kind":"tess"') or line.startswith('{"kind": "tess"')):
+                    or line.startswith('{"kind":"tess"') or line.startswith('{"kind": "tess"')
+                    or line.startswith('{"kind":"verts"') or line.startswith('{"kind": "verts"')):
                 continue
             try:
                 r = json.loads(line)
@@ -326,6 +339,39 @@ def decode_depth_range(vte, scale_word, offset_word):
     return f"depth range {'reversed' if scale < 0 else 'not reversed'}: z scale {scale:g}, offset {offset:g}"
 
 
+def decode_polygon_offset(mode, front_scale, front_offset, back_scale, back_offset):
+    """PA_SU_SC_MODE_CNTL bits 11 and 12 with the four float registers 0x2380..0x2383."""
+    fs, fo, bs, bo = (_float(w) for w in (front_scale, front_offset, back_scale, back_offset))
+    parts = []
+    if mode & POLY_OFFSET_FRONT_ENABLE:
+        parts.append(f"front scale {fs:g} offset {fo:g}")
+    if mode & POLY_OFFSET_BACK_ENABLE:
+        parts.append(f"back scale {bs:g} offset {bo:g}")
+    if not parts:
+        return f"polygon offset off (registers: front {fs:g} {fo:g}, back {bs:g} {bo:g})"
+    return "polygon offset " + ", ".join(parts)
+
+
+def _stencil_side(func, fail, zpass, zfail, refmask):
+    return (f"function {func} ({COMPARE[func]}), fail {STENCIL_OP[fail]}, pass {STENCIL_OP[zpass]}, "
+            f"depth fail {STENCIL_OP[zfail]}; reference {refmask & 0xFF}, mask 0x{(refmask >> 8) & 0xFF:02X}, "
+            f"write mask 0x{(refmask >> 16) & 0xFF:02X}")
+
+
+def decode_stencil(depth, refmask, refmask_bf=None):
+    """RB_DEPTHCONTROL bit 0 the enable, bits 8-19 the function and the three operations, bit 7
+    and bits 20-31 the same for back faces; RB_STENCILREFMASK bits 0-7 the reference, 8-15 the
+    mask, 16-23 the write mask (SDK registers.h)."""
+    if not depth & 1:
+        return f"stencil off (reference word 0x{refmask:08X})"
+    text = "stencil on: " + _stencil_side((depth >> 8) & 7, (depth >> 11) & 7, (depth >> 14) & 7,
+                                          (depth >> 17) & 7, refmask)
+    if depth & 0x80:
+        text += "; back faces: " + _stencil_side((depth >> 20) & 7, (depth >> 23) & 7, (depth >> 26) & 7,
+                                                 (depth >> 29) & 7, refmask if refmask_bf is None else refmask_bf)
+    return text
+
+
 def _shader(row):
     vs = f"0x{row['vs']:016X}" if row["vs"] is not None else "?"
     ps = f"0x{row['ps']:016X}" if row["ps"] is not None else "?"
@@ -357,6 +403,9 @@ def print_census(title, rows, top, combinations):
          ("2206", "2113", "2114"), decode_depth_range),
         ("cull (PA_SU_SC_MODE_CNTL 0x2205)", ("2205",), decode_cull),
         ("colour mask (RB_COLOR_MASK 0x2104, target 0)", ("2104",), lambda w: decode_mask(w & 0xF)),
+        ("polygon offset (PA_SU_SC_MODE_CNTL 0x2205 bits 11 and 12, PA_SU_POLY_OFFSET_* 0x2380..0x2383)",
+         ("2205", "2380", "2381", "2382", "2383"), decode_polygon_offset),
+        ("stencil (RB_DEPTHCONTROL 0x2200, RB_STENCILREFMASK 0x210D)", ("2200", "210D"), decode_stencil),
     )
     for name, regs, decode in tables:
         counts, by_shader = Counter(), defaultdict(Counter)
@@ -426,7 +475,8 @@ def print_controls(paired_rows):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("capture", help="native_discovery_*.jsonl with \"rs\" and \"cmd\" in its draw and tess rows")
+    ap.add_argument("capture", help="native_discovery_*.jsonl with \"rs\" and \"cmd\" in its draw, tess and "
+                                    "verts rows")
     ap.add_argument("--gpu", required=True, help="the GPU state log (plain or .gz)")
     ap.add_argument("--top", type=int, default=4, help="shader pairs listed per census value (default 4)")
     args = ap.parse_args(argv)
@@ -434,7 +484,7 @@ def main(argv=None):
     rows = load_capture(args.capture)
     sampled = [r for r in rows if r["rs"] is not None]
     print(f"capture: rows {len(rows)}, sampled {len(sampled)}, not sampled {len(rows) - len(sampled)} "
-          "(draw and tess rows; not sampled = no \"rs\")")
+          "(draw, tess and verts rows; not sampled = no \"rs\")")
     wanted = {a for r in sampled for a in packet_ends(r)}
     draws, skipped, passes, frames = load_gpu(args.gpu, wanted)
     print(f"GPU log: {sum(passes.values())} draws in {len(frames)} frames"

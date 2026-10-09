@@ -1713,28 +1713,24 @@ void AppendGeometry(std::string& row, bool indexed, const LastArgs& args, uint32
 
 // Discovery evidence (frame-map section 13, "Render state"): the render-state
 // registers from the device's register shadows as the draw builder left them
-// ("rs": register -> dword, a float register as its bits; a register whose
-// shadow cannot be read is left out; "bin_mask_lo" / "bin_mask_hi" are the
-// device's explicit bin mask), and the device's command write pointer
-// after the draw ("cmd": the last dword the builder wrote), which
+// ("rs": register -> dword for the registers of kRowStateRegisters, a float
+// register as its bits; a register whose shadow cannot be read is left out;
+// "bin_mask_lo" / "bin_mask_hi" are the device's explicit bin mask), and the
+// device's command write pointer after the draw ("cmd": the last dword the
+// builder wrote, read at `cmd_offset`: BeginVertices keeps its own), which
 // tools/xdk_sigmatch/render_state_check.py pairs with the address of the
 // DRAW_INDX packet the GPU executes.
-void AppendRenderState(std::string& row, uint32_t device) {
-  static constexpr uint32_t kRegs[] = {
-      xdk::kRegColorMask,    xdk::kRegAlphaRef,     xdk::kRegDepthControl, xdk::kRegBlendControl0,
-      xdk::kRegColorControl, xdk::kRegSuScModeCntl, xdk::kRegBlendRed,     xdk::kRegBlendRed + 1,
-      xdk::kRegBlendRed + 2, xdk::kRegBlendRed + 3, xdk::kRegVportZScale,  xdk::kRegVportZOffset,
-      xdk::kRegVteCntl,      xdk::kRegColorInfo};
+void AppendRenderState(std::string& row, uint32_t device,
+                       uint32_t cmd_offset = xdk::kDeviceCommandWriteOffset) {
   char buf[40];
   row += ",\"rs\":{";
-  bool first = true;
-  for (uint32_t reg : kRegs) {
-    const uint8_t* p = device ? ReadVirtual(device + xdk::DeviceRegShadowOffset(reg), 4) : nullptr;
-    if (!p) continue;
-    std::snprintf(buf, sizeof(buf), "%s\"%04X\":\"0x%08X\"", first ? "" : ",", reg, LoadBe32(p));
-    row += buf;
-    first = false;
-  }
+  const std::string words =
+      RegisterWords(kRowStateRegisters, std::size(kRowStateRegisters), [device](uint32_t reg, uint32_t* word) {
+        const uint32_t at = xdk::DeviceRegShadowOffset(reg);
+        return device && at && ReadVirtualBe32(device + at, word);
+      });
+  row += words;
+  const bool first = words.empty();
   // The explicit bin mask (SetPredication): which passes the draw executes in.
   uint32_t lo = 0, hi = 0;
   if (device && ReadVirtualBe32(device + xdk::kDeviceBinMaskLoOffset, &lo) &&
@@ -1746,7 +1742,7 @@ void AppendRenderState(std::string& row, uint32_t device) {
   }
   row += "}";
   uint32_t write = 0;
-  if (device && ReadVirtualBe32(device + xdk::kDeviceCommandWriteOffset, &write)) {
+  if (device && ReadVirtualBe32(device + cmd_offset, &write)) {
     std::snprintf(buf, sizeof(buf), ",\"cmd\":\"0x%08X\"", write);
     row += buf;
   }
@@ -2151,6 +2147,67 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
     row += "]";
   }
   finish(nullptr);
+}
+
+// Caller holds g_mutex. One decoded "verts" row (frame-map section 15, "Mask
+// draws") for a BeginVertices draw: what the two shadow-mask rectangles and the
+// other full-screen passes are drawn with. Discovery only; nothing is recorded
+// from these draws. It carries the render state ("rs", with "cmd" from the
+// builder's own write pointer and "surface_info"), the two bool words, the pixel
+// shader with its texture fetch constants ("tf", each 2D texture dumped), the
+// pixel constants ("pconst", "pfull" and the rows around it), the pixel shader's
+// literals ("ps_lit"), the vertex shader ("vs": object, source, hash) with c0 of
+// the vertex bank ("consts", which render_state_check.py confirms a pair by) and
+// where the builder put the vertices ("storage", "storage_dwords": the caller
+// fills them after the builder returns, so their values are not in the row).
+void WriteVertsRow(uint32_t id, const LastArgs& args, uint32_t device, const DeviceSnapshot& dev,
+                   bool in_scene) {
+  char buf[256];
+  std::string row = VertsRowHead(g_frames_written.load(std::memory_order_relaxed) + 1, HookName(id), &args.r[1],
+                                 device, in_scene);
+  if (const uint8_t* bools = ReadVirtual(device + xdk::kDeviceBoolConstantsOffset, 4)) {
+    std::snprintf(buf, sizeof(buf), ",\"vbool\":\"0x%08X\"", LoadBe32(bools));
+    row += buf;
+  }
+  if (const uint8_t* bools = ReadVirtual(device + xdk::kDevicePsBoolConstantsOffset, 4)) {
+    std::snprintf(buf, sizeof(buf), ",\"pbool\":\"0x%08X\"", LoadBe32(bools));
+    row += buf;
+  }
+  AppendRenderState(row, device, xdk::kDeviceBeginVerticesWriteOffset);
+  uint32_t storage = 0, dwords = 0;
+  if (ReadVirtualBe32(device + xdk::kDeviceBeginVerticesStorageOffset, &storage) &&
+      ReadVirtualBe32(device + xdk::kDeviceBeginVerticesDwordsOffset, &dwords)) {
+    std::snprintf(buf, sizeof(buf), ",\"storage\":\"0x%08X\",\"storage_dwords\":%u", storage, dwords);
+    row += buf;
+  }
+  AppendPs(row, dev);
+  AppendTextureFetches(row, device, dev);
+  AppendPixelConstants(row, device);
+  AppendPixelRegisters(row, device);
+  {
+    uint32_t ps_obj = 0;
+    row += ",\"ps_lit\":";
+    row += ChoosePs(dev, &ps_obj) ? LiteralsJson(kPsLayout, ps_obj, 0) : "null";
+  }
+  VsChoice vc;
+  if (ChooseVs(dev, &vc)) {
+    const UcodeRef u = vc.immediate ? UcodeRef{} : ReadVsUcode(vc.obj, vc.variant);
+    const uint64_t hash = vc.immediate ? (t_vs_load.usable ? t_vs_load.hash : 0) : u.hash;
+    std::snprintf(buf, sizeof(buf),
+                  ",\"vs\":{\"obj\":\"0x%08X\",\"source\":\"%s\",\"variant\":%u,\"hash\":\"0x%016llX\"}", vc.obj,
+                  vc.immediate ? "immediate" : (vc.gpu_owned ? "gpu_load" : "object"), vc.variant,
+                  static_cast<unsigned long long>(hash));
+    row += buf;
+  }
+  const uint32_t bank_ptr =
+      g_state.vs_bank_ptr ? g_state.vs_bank_ptr : device + xdk::kDeviceVsConstantsOffset;
+  if (const uint8_t* p = ReadVirtual(bank_ptr, 16)) {
+    row += ",\"consts\":{\"c0\":";
+    row += BeFloats(p, 4);
+    row += "}";
+  }
+  row += "}\n";
+  std::fputs(row.c_str(), g_file);
 }
 
 // Caller holds g_mutex. One "tess" row (frame-map section 9) for the
@@ -3586,6 +3643,8 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
     WriteDrawRow(id, args, device, dev, in_scene);
   } else if (have_dev && (id == kHook_DrawIndx_8221C9C8 || id == kHook_DrawIndx_82207C30)) {
     WriteTessRow(id, args, device, dev, in_scene);
+  } else if (have_dev && id == kHook_D3DDevice_BeginVertices) {
+    WriteVertsRow(id, args, device, dev, in_scene);
   }
 }
 

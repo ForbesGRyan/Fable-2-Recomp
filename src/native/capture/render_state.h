@@ -27,6 +27,19 @@ struct StateWords {
   bool read = false;            // false: the words could not be read
 };
 
+// The registers of a discovery row's "rs", in the order they are written (discovery evidence
+// only; the words above are what a draw record reads). The first fourteen are the rows of the
+// materials and lighting captures: RB_COLOR_MASK, RB_ALPHA_REF, RB_DEPTHCONTROL,
+// RB_BLENDCONTROL0, RB_COLORCONTROL, PA_SU_SC_MODE_CNTL, RB_BLEND_RED..ALPHA,
+// PA_CL_VPORT_ZSCALE, PA_CL_VPORT_ZOFFSET, PA_CL_VTE_CNTL, RB_COLOR_INFO. Then (frame-map
+// section 15, "Bias"): RB_STENCILREFMASK_BF and RB_STENCILREFMASK (bits 0-7 the stencil
+// reference, 8-15 the mask, 16-23 the write mask) and PA_SU_POLY_OFFSET_FRONT_SCALE,
+// _FRONT_OFFSET, _BACK_SCALE, _BACK_OFFSET (floats; PA_SU_SC_MODE_CNTL bits 11 and 12 enable
+// the offset for front and back faces).
+inline constexpr uint32_t kRowStateRegisters[] = {0x2104, 0x210E, 0x2200, 0x2201, 0x2202, 0x2205, 0x2105,
+                                                  0x2106, 0x2107, 0x2108, 0x2113, 0x2114, 0x2206, 0x2001,
+                                                  0x210C, 0x210D, 0x2380, 0x2381, 0x2382, 0x2383};
+
 // Only alpha-to-mask (RB_COLORCONTROL bit 4) works under the surface's sample count, so the
 // capture reads RB_SURFACE_INFO for such draws alone (about 18% of the rows of the session-1
 // captures) and DecodeRenderState looks at it for no other.

@@ -266,14 +266,74 @@ inline constexpr uint32_t kRegColorInfo = 0x2001;
 // offset apply; window depth = z/w * scale + offset.
 inline constexpr uint32_t kVteZScaleEnable = 0x10;
 inline constexpr uint32_t kVteZOffsetEnable = 0x20;
-// Device offset of the shadow of `reg` for the two runs above and the 0x2000
-// run; 0 for any other register (not shadowed here).
+// --- Polygon offset and stencil reference (frame-map section 15, "Bias") ------
+// PA_SU_POLY_OFFSET_FRONT_SCALE, _FRONT_OFFSET, _BACK_SCALE, _BACK_OFFSET (floats;
+// SDK register_table.inc) are the first four of the eight registers 0x2380..0x2387
+// the builders flush from device + 0x2A50: DrawIndexedVertices 0x8221E2CC `addi
+// r6,r31,0x2A50`, 0x8221E2D0 `li r5,0x2380`, `rldicr r4,r27,18,7`; the same triple
+// in BeginVertices (0x822062BC..0x822062C4). The D3D setters store there:
+//   0x821A8A78 (r3 device, r4 a float's bits): the value times the float at
+//     0x820994F8, which is 16.0 in the image (the register counts the slope in
+//     sixteenths of a pixel; the SDK divides by 16 again,
+//     xenos::kPolygonOffsetScaleSubpixelUnit), to +0x2A50 and +0x2A58 (0x821A8ADC
+//     `stfs f13,10832(r3)`, 0x821A8AE4 `stfs f13,10840(r3)`): the slope scale,
+//     front and back;
+//   0x82289648 (r3 device, r4 a float's bits): the value as it is, to +0x2A54 and
+//     +0x2A5C (`stfs f13,10836(r3)`, `stfs f13,10844(r3)`): the offset.
+// Both also set bits 11 and 12 of the PA_SU_SC_MODE_CNTL shadow (+0x2948; `lwz
+// r11,10568(r3)`, `rlwimi r11,r10,11,20,20`, `rlwimi r11,r10,12,19,19`) to
+// "scale or offset is not zero": the enables for front and back faces.
+// Runtime (frame-map section 15, "Bias"; render_state_check.py on four captures
+// of 2026-10-08 / 09 at the bridge, by the trees and at the third spot): the four
+// registers and the two stencil reference words below equal the GPU register
+// file in all 80,709 colour-pass and 13,772 pre-pass executions of 55,809 paired
+// rows, 8,671 of them shadow-map draws (pitch 1040). The near map's draws hold
+// scale -32 and offset -0.001, the far map's -80 and -0.005, front and back.
+inline constexpr uint32_t kDeviceRegShadowBase2380 = 0x2A50;  // register 0x2380
+inline constexpr uint32_t kRegPolyOffsetFrontScale = 0x2380;   // PA_SU_POLY_OFFSET_FRONT_SCALE (float)
+inline constexpr uint32_t kRegPolyOffsetFrontOffset = 0x2381;  // PA_SU_POLY_OFFSET_FRONT_OFFSET (float)
+inline constexpr uint32_t kRegPolyOffsetBackScale = 0x2382;    // PA_SU_POLY_OFFSET_BACK_SCALE (float)
+inline constexpr uint32_t kRegPolyOffsetBackOffset = 0x2383;   // PA_SU_POLY_OFFSET_BACK_OFFSET (float)
+inline constexpr uint32_t kSuScPolyOffsetFrontEnable = 1u << 11;  // PA_SU_SC_MODE_CNTL (SDK registers.h)
+inline constexpr uint32_t kSuScPolyOffsetBackEnable = 1u << 12;
+// RB_STENCILREFMASK (SDK registers.h: bits 0-7 the reference, 8-15 the mask, 16-23
+// the write mask) and its back-face twin are registers 0x210D and 0x210C of the
+// 0x2100 run above: +0x2900 and +0x28FC. The setters store single bytes: the
+// reference 0x822398E8 `stb r4,10499(r3)` (+0x2903, the word's low byte), the mask
+// 0x822C08E0 (+0x2902), the write mask 0x821B1568 (+0x2901); back faces
+// 0x82B90C78, 0x82B90C98, 0x82B90CB8 (+0x28FF, +0x28FE, +0x28FD).
+inline constexpr uint32_t kRegStencilRefMaskBf = 0x210C;  // RB_STENCILREFMASK_BF
+inline constexpr uint32_t kRegStencilRefMask = 0x210D;    // RB_STENCILREFMASK
+// Device offset of the shadow of `reg` for the runs above (0x2000, 0x2100, 0x2200,
+// 0x2380); 0 for any other register (not shadowed here).
 constexpr uint32_t DeviceRegShadowOffset(uint32_t reg) {
   if (reg >= 0x2000 && reg <= 0x200F) return kDeviceSurfaceInfoOffset + 4 * (reg - 0x2000);
   if (reg >= 0x2100 && reg <= 0x2114) return kDeviceRegShadowBase2100 + 4 * (reg - 0x2100);
   if (reg >= 0x2200 && reg <= 0x220B) return kDeviceRegShadowBase2200 + 4 * (reg - 0x2200);
+  if (reg >= 0x2380 && reg <= 0x2387) return kDeviceRegShadowBase2380 + 4 * (reg - 0x2380);
   return 0;
 }
+
+// --- BeginVertices (0x822060A0; frame-map section 15, "Mask draws") -----------
+// r3 device, r4 the primitive type (low six bits, 0x8220641C `clrlwi r10,r22,26`),
+// r5 the vertex count, r6 the vertex size in bytes (0x822060B8 `mullw r9,r24,r6`,
+// then / 4: the dwords of vertex storage it reserves with 0x82206820). It flushes
+// the same eight register runs as the other builders, writes vertex fetch
+// constant 95 for the storage (a type-0 packet for registers 0x48BA..0x48BF,
+// header 0x000548BA) and the DRAW_INDX packet (0xC0012201, then the initiator
+// r4 | r5 << 16 | 0x80), and returns the storage pointer for the caller to fill.
+// Unlike the other builders it does not store the device's command write pointer
+// (+kDeviceCommandWriteOffset): it keeps the address of the last dword it wrote
+// at +0x3484 (0x82206524 `stw r11,13444(r31)`), the storage at +0x3488 and its
+// dwords at +0x3490 (`stw r28,13448(r31)`, `stw r23,13456(r31)`), for the call
+// that ends the vertices. That last dword is the draw packet's initiator, or with
+// per-draw bin masks (device byte +0x2ABC bit 0) seven dwords after it, as for the
+// other builders (render_state_check.py PACKET_END_DELTAS). Runtime (the same
+// four captures): every "verts" row whose frame is logged pairs with its packet
+// by the pointer at +0x3484 (859 rows).
+inline constexpr uint32_t kDeviceBeginVerticesWriteOffset = 0x3484;
+inline constexpr uint32_t kDeviceBeginVerticesStorageOffset = 0x3488;
+inline constexpr uint32_t kDeviceBeginVerticesDwordsOffset = 0x3490;
 
 // --- Bin mask (frame-map section 13, "Pre-pass draws and the depth range") ---
 // The device's explicit bin mask, low and high word. SetPredication 0x822655B0

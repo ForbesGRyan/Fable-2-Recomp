@@ -83,7 +83,7 @@ inline const char* FrameViewReasonName(FrameViewReason r) {
 // switch is off. kNoLight: the frame is drawn without light (the switch, the textures, or no light
 // block). kBlock: the frame has no valid shadow block, whatever the reason, a frame without shadow
 // records included ("shadow-block"). kMaps: the block is valid and the frame has no constant buffer
-// (none could be made, or the frame has nothing to draw). kView: no single inverse view-projection, or
+// because it has nothing to draw (a buffer that could not be made zeroes the frame's light: kNoLight). kView: no single inverse view-projection, or
 // no usable eye ("shadow-view"; ClayStats::mask_view says which). kObjects: the shadows' GPU objects
 // could not be made (the shadows are off until the pass is rebuilt or the game restarted:
 // ClayPass::shadows_usable). kDrawn: the mask was written and is bound.

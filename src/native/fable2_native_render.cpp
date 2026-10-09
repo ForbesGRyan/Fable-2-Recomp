@@ -57,13 +57,13 @@ REXCVAR_DEFINE_STRING(fable2_native_shadows, "on", "Fable2",
                       "maps from them, a depth pre-pass and the game's screen mask, and shadows the sun of its lit draws "
                       "(fable2_native_view=shadow shows the maps and the mask); off (or false, 0) = none of it is read, made or "
                       "drawn: the lighting picture.");
-REXCVAR_DEFINE_STRING(fable2_native_fog, "off", "Fable2",
+REXCVAR_DEFINE_STRING(fable2_native_fog, "on", "Fable2",
                       "Native fog and sky: on (or true, 1) = with a composite view and the light on, the capture also reads the "
                       "frame's fog block (the game's six fog registers and its two fog tables) and its sky block at the game's "
                       "own draws, and the clay pass fogs its lit draws with the game's arithmetic and tables, its unlit draws "
                       "whose pixel shader has the game's fog block with the same form on their unlit colour, and draws the "
                       "game's sky where no record is drawn; off (or false, 0) = none of it is read or drawn: the shadows' "
-                      "picture. Off by default until the fog is validated (sub-project 9).");
+                      "picture. On by default since the fog's validation (sub-project 9; frame map section 16).");
 REXCVAR_DEFINE_BOOL(fable2_native_d3d_messages, false, "Fable2",
                     "Write the Direct3D debug layer's errors, corruption and warnings to the game log "
                     "(the layer is the SDK's --d3d12_debug=true; without it there is nothing to write). "

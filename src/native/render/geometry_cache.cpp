@@ -117,7 +117,7 @@ uint64_t GeometryCache::FrameHash(uint32_t phys_addr, uint32_t size, const uint8
 // bytes or any patch parameter (the key) change.
 nrhi::Buffer* GeometryCache::TerrainPositions(nrhi::Device* dev, const capture::DrawRecord& r,
                                               const capture::TerrainPatch& t, uint32_t* vertex_count,
-                                              ClayStats& st) {
+                                              ClayStats& st, PositionBounds* bounds) {
   const capture::HeightMap& m = t.map;
   const auto t0 = Clock::now();
   const uint8_t* src = m.size ? capture::ReadPhysical(m.phys_addr, m.size) : nullptr;
@@ -135,6 +135,7 @@ nrhi::Buffer* GeometryCache::TerrainPositions(nrhi::Device* dev, const capture::
     if (auto it = entries_.find(found.id); it != entries_.end()) {
       ++st.hits;
       *vertex_count = it->second.count;
+      if (bounds) *bounds = it->second.bounds;
       return it->second.buffer;
     }
   }
@@ -146,7 +147,10 @@ nrhi::Buffer* GeometryCache::TerrainPositions(nrhi::Device* dev, const capture::
   }
   if (buffer) {
     const uint32_t count = uint32_t(positions_.size());
-    Insert(dev, key, hash, {buffer, count, 0, alloc}, alloc);
+    Entry e{buffer, count, 0, alloc};
+    e.bounds = MakePositionBounds(positions_.data(), count);
+    if (bounds) *bounds = e.bounds;
+    Insert(dev, key, hash, e, alloc);
     *vertex_count = count;
     ++st.uploads;
   } else {
@@ -210,7 +214,7 @@ const capture::Float2* GeometryCache::MeshUvs(const capture::DrawRecord& r, cons
 // stream and the instance stream; the key holds the constants. Only the
 // vertices of one copy are decoded from the mesh stream (InstanceMeshCount).
 nrhi::Buffer* GeometryCache::InstancedPositions(nrhi::Device* dev, const capture::DrawRecord& r,
-                                                uint32_t* vertex_count, ClayStats& st) {
+                                                uint32_t* vertex_count, ClayStats& st, PositionBounds* bounds) {
   const capture::InstanceSet& s = r.instances;
   const uint32_t mesh_count = InstanceMeshCount(PositionCount(r.vb.size, r.pos), s);
   // The capture caps flat_count (InstanceRangeSkip); nothing larger is built.
@@ -237,6 +241,7 @@ nrhi::Buffer* GeometryCache::InstancedPositions(nrhi::Device* dev, const capture
     if (auto it = entries_.find(found.id); it != entries_.end()) {
       ++st.hits;
       *vertex_count = it->second.count;
+      if (bounds) *bounds = it->second.bounds;
       return it->second.buffer;
     }
   }
@@ -249,7 +254,10 @@ nrhi::Buffer* GeometryCache::InstancedPositions(nrhi::Device* dev, const capture
     buffer = Upload(dev, positions_.data(), uint64_t(s.flat_count) * sizeof(capture::Float4), &alloc);
   }
   if (buffer) {
-    Insert(dev, key, hash, {buffer, s.flat_count, 0, alloc}, alloc);
+    Entry e{buffer, s.flat_count, 0, alloc};
+    e.bounds = MakePositionBounds(positions_.data(), s.flat_count);
+    if (bounds) *bounds = e.bounds;
+    Insert(dev, key, hash, e, alloc);
     *vertex_count = s.flat_count;
     ++st.uploads;
   } else {
@@ -261,9 +269,10 @@ nrhi::Buffer* GeometryCache::InstancedPositions(nrhi::Device* dev, const capture
 
 nrhi::Buffer* GeometryCache::Positions(nrhi::Device* dev, const capture::DrawRecord& r,
                                        const capture::TerrainPatch* terrain, uint32_t* vertex_count,
-                                       ClayStats& st) {
-  if (terrain) return TerrainPositions(dev, r, *terrain, vertex_count, st);
-  if (r.instances.active) return InstancedPositions(dev, r, vertex_count, st);
+                                       ClayStats& st, PositionBounds* bounds) {
+  if (bounds) *bounds = PositionBounds{};
+  if (terrain) return TerrainPositions(dev, r, *terrain, vertex_count, st, bounds);
+  if (r.instances.active) return InstancedPositions(dev, r, vertex_count, st, bounds);
   const uint32_t count = PositionCount(r.vb.size, r.pos);
   if (count == 0) {
     ++st.skipped_other;
@@ -297,6 +306,7 @@ nrhi::Buffer* GeometryCache::Positions(nrhi::Device* dev, const capture::DrawRec
     if (auto it = entries_.find(found.id); it != entries_.end()) {
       ++st.hits;
       *vertex_count = it->second.count;
+      if (bounds) *bounds = it->second.bounds;
       return it->second.buffer;
     }
   }
@@ -313,7 +323,10 @@ nrhi::Buffer* GeometryCache::Positions(nrhi::Device* dev, const capture::DrawRec
     buffer = Upload(dev, positions_.data(), uint64_t(count) * sizeof(capture::Float4), &alloc);
   }
   if (buffer) {
-    Insert(dev, key, hash, {buffer, count, 0, alloc}, alloc);
+    Entry e{buffer, count, 0, alloc};
+    e.bounds = MakePositionBounds(positions_.data(), count);
+    if (bounds) *bounds = e.bounds;
+    Insert(dev, key, hash, e, alloc);
     *vertex_count = count;
     ++st.uploads;
   } else {

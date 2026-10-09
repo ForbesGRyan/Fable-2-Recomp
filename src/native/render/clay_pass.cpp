@@ -522,7 +522,7 @@ void ClayPass::PrepareTerrain(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::
   p.r = &r;
   p.terrain = true;
   uint32_t buffer_vertices = 0;
-  p.positions = geometry_.Positions(dev, r, &terrain, &buffer_vertices, st);
+  p.positions = geometry_.Positions(dev, r, &terrain, &buffer_vertices, st, &p.bounds);
   if (p.positions) {
     p.vertex_count = DrawVertexCount(buffer_vertices, RecordVertexCount(r, &terrain));
     p.indices = geometry_.Indices(dev, r, &terrain, p.vertex_count, &p.index_count, st);
@@ -1324,7 +1324,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     Prepared p;
     p.r = &r;
     uint32_t buffer_vertices = 0;
-    p.positions = geometry_.Positions(dev, r, nullptr, &buffer_vertices, st);
+    p.positions = geometry_.Positions(dev, r, nullptr, &buffer_vertices, st, &p.bounds);
     if (!p.positions) continue;
     p.vertex_count = DrawVertexCount(buffer_vertices, RecordVertexCount(r, nullptr));
     p.indices = geometry_.Indices(dev, r, nullptr, p.vertex_count, &p.index_count, st, &p.max_index);
@@ -1419,11 +1419,12 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   } else {
     float inverse[4][4];
     FrameView view;
+    float view_proj[4][4];
     ClayMaskConstants constants;
     if (!frame_.eye_on) {
       mask = ClayMask::kView;
       mask_view = FrameViewReason::kEye;
-    } else if (!FrameInverseViewProj(scene, inverse, &view)) {
+    } else if (!FrameInverseViewProj(scene, inverse, &view, view_proj)) {
       mask = ClayMask::kView;
       mask_view = view.why;
     } else {
@@ -1433,17 +1434,26 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
         std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(mask_slot_), &constants, sizeof(constants));
         mask = ClayMask::kDrawn;
         mask_rotated = tile != nullptr;
+        // The pre-pass's pipelines, one a depth-writing record (a few keys for all of them). A
+        // record wholly beyond the mask's reach gets none: it is left out of the pre-pass and
+        // counted (PrepassBeyondReach: the mask is the same without it).
+        for (Prepared& p : prepared_) {
+          if (!p.pipeline) continue;
+          const PipelineKey* key = KeyOf(p.pipeline);
+          if (!key || !InPrepass(*key)) continue;
+          float m[4][4];
+          RecordMatrix(*p.r, m);
+          if (PrepassBeyondReach(m, p.bounds, view_proj, frame_.eye, scene.shadow.split, key->depth_func)) {
+            p.prepass_culled = true;
+            ++st.prepass_culled;
+            continue;
+          }
+          p.prepass = PrepassPipeline(dev, p.pipeline, p.alpha, &p.prepass_flat);
+        }
       } else {
         mask = ClayMask::kView;
         mask_view = FrameViewReason::kSingular;
       }
-    }
-  }
-  if (mask == ClayMask::kDrawn) {
-    // The pre-pass's pipelines, one a depth-writing record (a few keys for all of them).
-    for (Prepared& p : prepared_) {
-      if (!p.pipeline) continue;
-      p.prepass = PrepassPipeline(dev, p.pipeline, p.alpha, &p.prepass_flat);
     }
   }
   st.mask = mask;
@@ -1525,6 +1535,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       if (!p.pipeline) continue;
       if (!p.prepass) {
         // (a record that writes no depth has no pre-pass pipeline and is no skip)
+        if (p.prepass_culled) continue;
         if (const PipelineKey* key = KeyOf(p.pipeline); key && InPrepass(*key)) ++st.prepass_skipped;
         continue;
       }

@@ -36,8 +36,10 @@ class GeometryCache {
   // like any other draw. `terrain`: the record's terrain inputs from its
   // scene's side array (TerrainOf), null for a record that is not a terrain
   // record; a terrain record's buffers are the grid built from them.
+  // `bounds` (optional): receives the box of the buffer's positions (PositionBounds, clay_logic.h),
+  // computed once when the buffer is built; not valid when no buffer is returned.
   nrhi::Buffer* Positions(nrhi::Device* dev, const capture::DrawRecord& r, const capture::TerrainPatch* terrain,
-                          uint32_t* vertex_count, ClayStats& st);
+                          uint32_t* vertex_count, ClayStats& st, PositionBounds* bounds = nullptr);
   // `max_index` (optional): receives the largest index of the list, before the base vertex.
   nrhi::Buffer* Indices(nrhi::Device* dev, const capture::DrawRecord& r, const capture::TerrainPatch* terrain,
                         uint32_t vertex_count, uint32_t* index_count, ClayStats& st, uint32_t* max_index = nullptr);
@@ -162,6 +164,7 @@ class GeometryCache {
     uint32_t max_index = 0;  // indices only
     uint64_t bytes = 0;      // allocation size
     uint32_t min_index = 0;  // indices only: the smallest index of the list
+    PositionBounds bounds;   // positions only: the box of the buffer's vertices
   };
   // Replaced buffers, reused by Upload (animated skinned streams re-decode
   // every frame; creating a buffer costs far more than filling one).
@@ -171,13 +174,13 @@ class GeometryCache {
   // Content hash of a guest range, computed once per frame.
   uint64_t FrameHash(uint32_t phys_addr, uint32_t size, const uint8_t* data);
   nrhi::Buffer* TerrainPositions(nrhi::Device* dev, const capture::DrawRecord& r, const capture::TerrainPatch& t,
-                                 uint32_t* vertex_count, ClayStats& st);
+                                 uint32_t* vertex_count, ClayStats& st, PositionBounds* bounds);
   // Instanced records: the flat position stream built from the mesh stream
   // and the instance stream, rebuilt when either's bytes or the instance set
   // (the key) change; the flat UV stream built from the mesh's UVs alone,
   // rebuilt when their bytes or the index mapping (UvKey) change.
   nrhi::Buffer* InstancedPositions(nrhi::Device* dev, const capture::DrawRecord& r,
-                                   uint32_t* vertex_count, ClayStats& st);
+                                   uint32_t* vertex_count, ClayStats& st, PositionBounds* bounds);
   nrhi::Buffer* InstancedUvs(nrhi::Device* dev, const capture::DrawRecord& r,
                              uint32_t vertex_count, ClayStats& st);
   // The flat normal stream of an instanced record, built from the mesh's

@@ -209,7 +209,9 @@ struct ClayStats {
   // them without a valid shadow block (shadow-block), without a view (shadow-view), with unrotated
   // taps, without the frame's light block (no-light: the white mask) and without the shadows'
   // objects (no-objects: their creation failed; the white mask).
-  uint32_t prepass_drawn = 0, prepass_skipped = 0;
+  // prepass_culled: depth-writing records left out of the pre-pass because they lie wholly beyond
+  // the mask's reach (PrepassBeyondReach): the mask is the same without them.
+  uint32_t prepass_drawn = 0, prepass_skipped = 0, prepass_culled = 0;
   ClayMask mask = ClayMask::kOff;
   FrameViewReason mask_view = FrameViewReason::kNone;
   uint32_t mask_view_outliers = 0;
@@ -3010,26 +3012,35 @@ inline bool FrameInverseViewProj(const FrameScene& scene, float inverse[4][4], F
   // First pass: the majority's candidate (a vote: a matrix that more than half of the records agree
   // with survives it). Second pass: how many agree with it. (ViewMatricesAgree is false for anything
   // that is not finite, so a matrix that is not finite agrees with nothing, itself included.)
+  // (When no record disagreed in the first pass, which is every frame of the captures, the candidate
+  // never changed and every record was held against it: the second pass is not needed.)
   float ref[4][4] = {};
   uint32_t votes = 0;
+  bool disagreed = false;
   for (const capture::DrawRecord& r : scene.draws) {
     float m[4][4];
     if (!matrix_of(r, m)) continue;
     ++v.candidates;
     if (votes == 0) {
+      disagreed = disagreed || v.candidates > 1;
       std::memcpy(ref, m, sizeof(ref));
       votes = 1;
     } else if (ViewMatricesAgree(ref, m, kFrameViewTolerance)) {
       ++votes;
     } else {
       --votes;
+      disagreed = true;
     }
   }
   if (v.candidates == 0) return done(FrameViewReason::kNoRecord);
   uint32_t agree = 0;
-  for (const capture::DrawRecord& r : scene.draws) {
-    float m[4][4];
-    if (matrix_of(r, m) && ViewMatricesAgree(ref, m, kFrameViewTolerance)) ++agree;
+  if (!disagreed) {
+    agree = ViewMatricesAgree(ref, ref, kFrameViewTolerance) ? v.candidates : 0;  // (a lone matrix that is not finite agrees with nothing)
+  } else {
+    for (const capture::DrawRecord& r : scene.draws) {
+      float m[4][4];
+      if (matrix_of(r, m) && ViewMatricesAgree(ref, m, kFrameViewTolerance)) ++agree;
+    }
   }
   v.outliers = v.candidates - agree;
   if (!(uint64_t(agree) * 2 > v.candidates)) return done(FrameViewReason::kDisagree);
@@ -3038,6 +3049,79 @@ inline bool FrameInverseViewProj(const FrameScene& scene, float inverse[4][4], F
   std::memcpy(inverse, inv, sizeof(inv));
   if (view_proj) std::memcpy(view_proj, ref, sizeof(ref));
   return done(FrameViewReason::kNone);
+}
+
+// The pre-pass's reach (plan Task 5b: the third spot's frame rate). Beyond split.y + kMaskFarReach
+// units from the eye the mask is split.w whatever the depth: MaskCombine's fade is saturated there
+// (0.1 * (d - split.y) >= 1) and neither map is read (the far term stops at the same distance, the
+// near one at split.x + split.z), and a pixel at the clear depth is such a pixel too. So a
+// depth-writing record that lies WHOLLY beyond that distance changes no pixel of the mask and is
+// left out of the pre-pass: where it was the nearest surface the depth is now the clear value or
+// that of a surface still farther away, and the mask is split.w either way; a nearer surface is
+// in the pre-pass as before. This needs the record's depth function to keep the nearer surface
+// (less, less-equal): a far record drawn with another function could overwrite a near one's depth,
+// and is kept.
+// The bound is the distance along the view axis, which is never more than the distance from the
+// eye: with the frame's view-projection V (world to clip) and w(P) = V[3] . (P, 1), w(P) - w(eye) =
+// V[3].xyz . (P - eye) <= |V[3].xyz| * |P - eye|. A record's own matrix M (RecordMatrix: V times its
+// world matrix) gives the same w from the positions in its buffer, and w is linear, so its smallest
+// value over the buffer is not below its smallest value over the positions' box (each of the four
+// terms at its smaller end). Beyond: (w_min - w(eye)) / |V[3].xyz| >= reach, the reach with a
+// margin for the mask's own rounding of the distance (it rebuilds the position from the depth).
+// The box is of the buffer the pass draws (after the bones, after the copies were laid out; the
+// rest pose of a deformed mesh, as drawn), computed when the buffer is built: sound for skinned and
+// instanced records as well. Anything not known or not finite: kept.
+inline constexpr float kPrepassReachMargin = 0.05f;
+inline float PrepassReach(const float split[4]) { return split[1] + kMaskFarReach + kPrepassReachMargin; }
+
+// The box of a position buffer's vertices, all four components. Not valid: no vertex, or a value
+// that is not finite.
+struct PositionBounds {
+  float lo[4] = {}, hi[4] = {};
+  bool valid = false;
+};
+inline PositionBounds MakePositionBounds(const capture::Float4* p, size_t count) {
+  PositionBounds b;
+  if (!p || count == 0) return b;
+  float lo[4] = {p[0].x, p[0].y, p[0].z, p[0].w}, hi[4] = {p[0].x, p[0].y, p[0].z, p[0].w};
+  bool finite = true;  // (every value is looked at: min and max would pass over a NaN)
+  for (size_t i = 0; i < count; ++i) {
+    const float v[4] = {p[i].x, p[i].y, p[i].z, p[i].w};
+    for (int k = 0; k < 4; ++k) {
+      finite = finite && std::isfinite(v[k]);
+      lo[k] = v[k] < lo[k] ? v[k] : lo[k];
+      hi[k] = v[k] > hi[k] ? v[k] : hi[k];
+    }
+  }
+  if (!finite) return b;
+  std::memcpy(b.lo, lo, sizeof(lo));
+  std::memcpy(b.hi, hi, sizeof(hi));
+  b.valid = true;
+  return b;
+}
+
+// Whether a record with matrix `m` (RecordMatrix) and position box `box`, whose pre-pass depth
+// function is `depth_func` (a capture::Compare on the pass's depth), lies wholly beyond the mask's
+// reach in the frame of view-projection `view_proj`, eye and split (above).
+inline bool PrepassBeyondReach(const float m[4][4], const PositionBounds& box, const float view_proj[4][4], const float eye[3],
+                               const float split[4], uint8_t depth_func) {
+  if (!box.valid || !m || !view_proj || !eye || !split) return false;
+  if (depth_func != uint8_t(capture::Compare::kLess) && depth_func != uint8_t(capture::Compare::kLessEqual)) return false;
+  double w_min = 0.0;
+  for (int k = 0; k < 4; ++k) {
+    if (!std::isfinite(m[3][k]) || !std::isfinite(box.lo[k]) || !std::isfinite(box.hi[k]) || !(box.lo[k] <= box.hi[k])) return false;
+    const double a = double(m[3][k]) * double(box.lo[k]), b = double(m[3][k]) * double(box.hi[k]);
+    w_min += a < b ? a : b;
+  }
+  double length2 = 0.0, w_eye = double(view_proj[3][3]);
+  for (int k = 0; k < 3; ++k) {
+    if (!std::isfinite(view_proj[3][k]) || !std::isfinite(eye[k])) return false;
+    length2 += double(view_proj[3][k]) * double(view_proj[3][k]);
+    w_eye += double(view_proj[3][k]) * double(eye[k]);
+  }
+  const double reach = double(PrepassReach(split));
+  if (!std::isfinite(view_proj[3][3]) || !std::isfinite(w_min) || !std::isfinite(w_eye) || !std::isfinite(reach) || !(length2 > 0.0)) return false;
+  return (w_min - w_eye) / std::sqrt(length2) >= reach;
 }
 
 // The log line of the maps, written when the pass's targets are created.
@@ -3112,7 +3196,7 @@ inline std::string FormatShadowText(const ClayStats& st) {
   }
   // The pre-pass and the mask: what was drawn before the mask, what is bound as the mask and, when
   // it is the white texture, why; then the pass's frame counts by reason.
-  std::snprintf(buf, sizeof(buf), " | pre-pass %u draws", st.prepass_drawn);
+  std::snprintf(buf, sizeof(buf), " | pre-pass %u draws, %u beyond reach", st.prepass_drawn, st.prepass_culled);
   text += buf;
   if (st.prepass_skipped) {
     std::snprintf(buf, sizeof(buf), " (%u without a pipeline)", st.prepass_skipped);

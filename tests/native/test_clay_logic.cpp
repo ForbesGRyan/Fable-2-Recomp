@@ -4233,7 +4233,7 @@ int main() {
     {
       ClayStats st;
       // (the line's second half, which case 570 holds: here the pass drew no pre-pass and no mask)
-      const std::string tail = " | pre-pass 0 draws | mask white (off) | frames 0: shadow-block 0, shadow-view 0, unrotated 0, no-light 0, no-objects 0";
+      const std::string tail = " | pre-pass 0 draws, 0 beyond reach | mask white (off) | frames 0: shadow-block 0, shadow-view 0, unrotated 0, no-light 0, no-objects 0";
       CHECK(555, FormatShadowText(st) == "Shadow: off");
       st.shadow_switch = st.shadow_block = st.shadow_maps = true;
       st.shadow_reason = capture::ShadowBlockReason::kNone;
@@ -4920,7 +4920,10 @@ int main() {
         st.shadow_frames = 300;
         st.shadow_block_frames = 2;
         CHECK(570, FormatShadowText(st).ends_with(
-                       " | pre-pass 912 draws | mask drawn | frames 300: shadow-block 2, shadow-view 0, unrotated 0, no-light 0, no-objects 0"));
+                       " | pre-pass 912 draws, 0 beyond reach | mask drawn | frames 300: shadow-block 2, shadow-view 0, unrotated 0, no-light 0, no-objects 0"));
+        st.prepass_culled = 61;
+        CHECK(570, FormatShadowText(st).find(" | pre-pass 912 draws, 61 beyond reach | mask drawn | ") != std::string::npos);
+        st.prepass_culled = 0;
         // (records whose matrix was not the frame's: on the line when there are any)
         st.mask_view_outliers = 3;
         CHECK(570, FormatShadowText(st).find(" | mask drawn (3 records with another view) | frames 300:") != std::string::npos);
@@ -4934,7 +4937,7 @@ int main() {
         st.prepass_skipped = 3;
         st.shadow_unrotated_frames = 300;
         CHECK(570, FormatShadowText(st).ends_with(
-                       " | pre-pass 912 draws (3 without a pipeline) | mask drawn, taps unrotated | frames 300: shadow-block 2, shadow-view 0, unrotated 300, no-light 0, no-objects 0"));
+                       " | pre-pass 912 draws, 0 beyond reach (3 without a pipeline) | mask drawn, taps unrotated | frames 300: shadow-block 2, shadow-view 0, unrotated 300, no-light 0, no-objects 0"));
         st.mask = ClayMask::kView;
         st.mask_view = FrameViewReason::kDisagree;
         st.shadow_view_frames = 1;
@@ -5021,6 +5024,114 @@ int main() {
         CHECK(572, PrepassKey(colour, solid).textured == 3);
         colour.textured = 0;
         CHECK(572, PrepassKey(colour, tested).textured == 0);
+      }
+      // 573: a record wholly beyond the mask's reach is left out of the pre-pass (plan Task 5b, the
+      // third spot's frame rate). Beyond split.y + 10 units from the eye the game's mask is split.w
+      // whatever the depth (the fade is saturated there and neither map is read), which is also what
+      // a pixel at the clear depth gets: such a record changes no pixel of the mask.
+      {
+        // The mask beyond the reach is split.w exactly, for any term values and any distance there.
+        const float split[4] = {20.0f, 35.0f, 2.0f, 0.4771f};
+        for (float d : {45.0f, 45.001f, 60.0f, 5000.0f}) {
+          CHECK(573, float(MaskCombine(d, 0.0, 0.0, split, kMaskFadeSlope)) == split[3]);
+        }
+        CHECK(573, float(MaskCombine(44.9f, 0.0, 0.0, split, kMaskFadeSlope)) != split[3]);
+        CHECK(573, PrepassReach(split) == 45.0f + kPrepassReachMargin && kPrepassReachMargin > 0.0f && kPrepassReachMargin <= 0.1f);
+        // Bounds of a buffer's positions: the box of all four components; none for no vertex or a
+        // value that is not finite.
+        const capture::Float4 pts[3] = {{1.0f, -2.0f, 3.0f, 1.0f}, {-4.0f, 5.0f, 0.5f, 1.0f}, {2.0f, 2.0f, 9.0f, 1.0f}};
+        const PositionBounds box = MakePositionBounds(pts, 3);
+        CHECK(573, box.valid && box.lo[0] == -4.0f && box.hi[0] == 2.0f && box.lo[1] == -2.0f && box.hi[1] == 5.0f && box.lo[2] == 0.5f &&
+                       box.hi[2] == 9.0f && box.lo[3] == 1.0f && box.hi[3] == 1.0f);
+        CHECK(573, !MakePositionBounds(pts, 0).valid && !MakePositionBounds(nullptr, 3).valid && !PositionBounds{}.valid);
+        for (float bad : {nan, inf, -inf}) {
+          capture::Float4 broken[3] = {pts[0], pts[1], pts[2]};
+          broken[1].y = bad;
+          CHECK(573, !MakePositionBounds(broken, 3).valid);
+        }
+        // A view along +x from the eye at (10, 20, 30): clip w = 2 * (x - 10) (a w row that is not of
+        // unit length: the distance is w over the row's length). A record's rows are that matrix
+        // (world positions in its buffer).
+        const float vp[4][4] = {{0.0f, 1.0f, 0.0f, -20.0f}, {0.0f, 0.0f, 1.0f, -30.0f}, {0.5f, 0.0f, 0.0f, 1.0f}, {2.0f, 0.0f, 0.0f, -20.0f}};
+        const float eye573[3] = {10.0f, 20.0f, 30.0f};
+        auto slab = [&](float x0, float x1) {
+          PositionBounds b;
+          b.valid = true;
+          const float lo[4] = {x0, -500.0f, -500.0f, 1.0f}, hi[4] = {x1, 500.0f, 500.0f, 1.0f};
+          std::memcpy(b.lo, lo, sizeof(lo));
+          std::memcpy(b.hi, hi, sizeof(hi));
+          return b;
+        };
+        const uint8_t less = uint8_t(capture::Compare::kLess), less_equal = uint8_t(capture::Compare::kLessEqual);
+        // Nearest point 45.1 units along the view: beyond. 44.9: kept. A box that straddles: kept.
+        CHECK(573, PrepassBeyondReach(vp, slab(10.0f + 45.1f, 900.0f), vp, eye573, split, less));
+        CHECK(573, PrepassBeyondReach(vp, slab(10.0f + 45.1f, 900.0f), vp, eye573, split, less_equal));
+        CHECK(573, !PrepassBeyondReach(vp, slab(10.0f + 44.9f, 900.0f), vp, eye573, split, less));
+        CHECK(573, !PrepassBeyondReach(vp, slab(10.0f + 45.0f, 900.0f), vp, eye573, split, less));  // (inside the margin)
+        CHECK(573, !PrepassBeyondReach(vp, slab(-100.0f, 900.0f), vp, eye573, split, less));
+        CHECK(573, !PrepassBeyondReach(vp, slab(-900.0f, -100.0f), vp, eye573, split, less));  // behind the eye: kept
+        // The bound is the distance along the view axis, which is never more than the distance from
+        // the eye: a point at view depth 45.2 is at least 45.2 units away, wherever it is sideways.
+        {
+          const float wx = 10.0f + 45.2f, wy = 400.0f, wz = -300.0f;
+          const double dist = std::sqrt(double(wx - 10.0f) * (wx - 10.0f) + double(wy - 20.0f) * (wy - 20.0f) + double(wz - 30.0f) * (wz - 30.0f));
+          CHECK(573, dist >= 45.2 && PrepassBeyondReach(vp, slab(wx, wx), vp, eye573, split, less));
+        }
+        // A mesh record: its rows are view-projection * world (a move of +100 in x), its box in object space.
+        float mesh_rows[4][4];
+        std::memcpy(mesh_rows, vp, sizeof(mesh_rows));
+        for (int i = 0; i < 4; ++i) mesh_rows[i][3] += vp[i][0] * 100.0f;
+        CHECK(573, PrepassBeyondReach(mesh_rows, slab(-44.0f, 5.0f), vp, eye573, split, less));    // world x from 56: 46 units
+        CHECK(573, !PrepassBeyondReach(mesh_rows, slab(-46.0f, 5.0f), vp, eye573, split, less));   // world x from 54: 44 units
+        // A w component that is not 1 is taken with the box (a 4D box, each term at its smaller end).
+        {
+          PositionBounds b = slab(10.0f + 50.0f, 900.0f);
+          b.lo[3] = 0.5f;  // w down to 0.5: clip w falls by up to 10 (the row's -20 * 0.5 against -20 * 1 rises; the lower end counts)
+          b.hi[3] = 3.0f;  // w up to 3: clip w = 2 x - 60 at its smallest
+          CHECK(573, !PrepassBeyondReach(vp, b, vp, eye573, split, less));
+        }
+        // Kept, always: no bounds; a depth function that does not keep the nearer surface (a far record
+        // drawn with "always" hides a near one in the pre-pass's depth); values that are not finite; a
+        // view whose w row has no direction.
+        CHECK(573, !PrepassBeyondReach(vp, PositionBounds{}, vp, eye573, split, less));
+        for (capture::Compare f : {capture::Compare::kAlways, capture::Compare::kGreater, capture::Compare::kGreaterEqual,
+                                   capture::Compare::kEqual, capture::Compare::kNotEqual, capture::Compare::kNever}) {
+          CHECK(573, !PrepassBeyondReach(vp, slab(500.0f, 900.0f), vp, eye573, split, uint8_t(f)));
+        }
+        for (float bad : {nan, inf}) {
+          float m[4][4];
+          std::memcpy(m, vp, sizeof(m));
+          m[3][1] = bad;
+          CHECK(573, !PrepassBeyondReach(m, slab(500.0f, 900.0f), vp, eye573, split, less));
+          CHECK(573, !PrepassBeyondReach(vp, slab(500.0f, 900.0f), m, eye573, split, less));
+          const float bad_eye[3] = {10.0f, bad, 30.0f};
+          CHECK(573, !PrepassBeyondReach(vp, slab(500.0f, 900.0f), vp, bad_eye, split, less));
+          const float bad_split[4] = {20.0f, bad, 2.0f, 0.4771f};
+          CHECK(573, !PrepassBeyondReach(vp, slab(500.0f, 900.0f), vp, eye573, bad_split, less));
+          PositionBounds b = slab(500.0f, 900.0f);
+          b.hi[2] = bad;
+          CHECK(573, !PrepassBeyondReach(vp, b, vp, eye573, split, less));
+        }
+        float flat_view[4][4];
+        std::memcpy(flat_view, vp, sizeof(flat_view));
+        flat_view[3][0] = 0.0f;
+        CHECK(573, !PrepassBeyondReach(vp, slab(500.0f, 900.0f), flat_view, eye573, split, less));
+        // (a box with lo above hi is no box)
+        PositionBounds turned = slab(900.0f, 500.0f);
+        CHECK(573, !PrepassBeyondReach(vp, turned, vp, eye573, split, less));
+        // 568 again: a frame whose records all agree is settled in one walk, and the count is the same.
+        FrameScene agree;
+        agree.terrain.push_back(capture::TerrainPatch{});
+        for (int n = 0; n < 5; ++n) {
+          capture::DrawRecord r = BaseRecord();
+          for (int i = 0; i < 16; ++i) r.rows[i] = vp[i / 4][i % 4];
+          r.terrain_index = 0;
+          agree.draws.push_back(r);
+        }
+        float inv573[4][4], back573[4][4];
+        FrameView info573;
+        CHECK(573, FrameInverseViewProj(agree, inv573, &info573, back573) && info573.candidates == 5 && info573.outliers == 0 &&
+                       std::memcmp(back573, vp, sizeof(vp)) == 0);
       }
     }
   }

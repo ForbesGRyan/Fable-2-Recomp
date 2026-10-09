@@ -120,6 +120,8 @@ class ClayPass {
     // The record's pipeline of the depth pre-pass (PrepassKey of its colour pipeline's key); nullptr:
     // the record writes no depth, the frame has no pre-pass, or no such pipeline could be made.
     nrhi::Pipeline* prepass = nullptr;
+    PositionBounds bounds;      // the box of its position buffer (GeometryCache::Positions)
+    bool prepass_culled = false;  // left out of the pre-pass: wholly beyond the mask's reach
     bool prepass_flat = false;  // its pre-pass draw is the flat kind's (PrepassKey with the record's alpha)
     ClayAlpha alpha;
     // A terrain record. With its material (`textured` 2 or 3): `albedo` is the

@@ -186,6 +186,13 @@ cbuffer Draw : register(b0) { float4 r0; float4 r1; float4 r2; float4 r3; uint l
 // and the frame's flag leave the pixel as it is, and its tables unread ([branch]). The distance is
 // d2 * rsqrt(d2): the pixel shaders call no square root (the tests hold that of their colour paths).
 // Without CLAY_FOG the same names do nothing: the programs are those without fog.
+// FogUnlit (clay_logic.h, "Unlit draws"; UnlitFogMirror; light_formulas.fog with its scatter_scale): the
+// ground form for a draw the pass does not light, on its unlit colour: the in-scatter times the frame's
+// exposure, which every lit value is multiplied by after its fog and an unlit value is not, and times
+// `scale` (1, or the alpha the draw writes for a shader of the game's blended form). Called only under
+// light_mode's bit 7 (128), which the pass sets for an unlit draw of a fogged frame whose pixel shader
+// has the game's fog block; with the bit clear, and with the frame's flag clear, the unlit programs are
+// what they were (the shader test compares them line for line).
 #define FABLE2_CLAY_LIGHT_HLSL R"hlsl(
 cbuffer Frame : register(b2) {
   float3 f_sun_dir; uint f_light_on;     // c80.xyz of a one-light draw (= c109.xyz), as it is; 1: the frame is lit
@@ -334,10 +341,21 @@ float3 FogForm(float3 c, FogPoint p, float scale, float form) {
   }
   return c;
 }
+float3 FogUnlit(float3 c, FogPoint p, float scale) {
+  [branch] if (p.fogged) {
+    float3 S = fog_scatter(p.a);
+    float3 T = fog_transmit(p.s);
+    float3 F = f_fog_near + p.t * (S - f_fog_near);
+    float3 G = c * T + (1.0 - T) * (f_fog_scatter * f_exposure * scale) * F;
+    c = c + f_fog_amount * (G - c);
+  }
+  return c;
+}
 #else
 struct FogPoint { bool fogged; };
 FogPoint FogCoords(float4 pos) { FogPoint o; o.fogged = false; return o; }
 float3 FogForm(float3 c, FogPoint p, float scale, float form) { return c; }
+float3 FogUnlit(float3 c, FogPoint p, float scale) { return c; }
 #endif
 )hlsl"
 
@@ -464,12 +482,21 @@ VsOut main(uint vid : SV_VertexID) {
 }
 )hlsl";
 
-inline constexpr const char* kClayPs = FABLE2_CLAY_DRAW_HLSL R"hlsl(
+// The colour programs of the pixel shaders that draw the scene define CLAY_FOG: the fog's tail of
+// cbuffer Frame and the fog's functions (the depth-only programs do not, and are the programs without fog).
+#define FABLE2_CLAY_FOG_HLSL "#ifndef CLAY_DEPTH_ONLY\n#define CLAY_FOG 1\n#endif\n"
+
+// Flat clay: the record's debug colour, shaded by the facet. It has no light. Since the unlit draws'
+// fog (clay_logic.h, "Unlit draws") it declares the frame's block for one thing: under light_mode's
+// bit 7 the colour is fogged (FogUnlit, scale 1: a flat draw writes no alpha of its own). With the bit
+// clear it reads nothing of the frame.
+inline constexpr const char* kClayPs = FABLE2_CLAY_FOG_HLSL FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL R"hlsl(
 float3 clay_linear(float3 d) { d = saturate(d); return d * d; }
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0) : SV_Target {
   float3 n = normalize(cross(ddx(ndc), ddy(ndc)));
   float shade = 0.35 + 0.65 * saturate(abs(dot(n, normalize(float3(0.4, 0.6, -0.7)))));
   float3 base = float3((color >> 16) & 255, (color >> 8) & 255, color & 255) / 255.0;
+  if (light_mode & 128) return float4(FogUnlit(clay_linear(base * shade), FogCoords(pos), 1.0), 1.0);
   return float4(clay_linear(base * shade), 1.0);
 }
 )hlsl";
@@ -492,7 +519,8 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0) : SV_Target {
 // included, and before c26 and the exposure, which stands in for the game's output scale: the game's
 // place. A plant and an object take the ground form; a trunk and a leaf the trees' own, from the object
 // block's last register (an instanced plant's block ends before it and is not read there).
-#define FABLE2_CLAY_FOG_HLSL "#ifndef CLAY_DEPTH_ONLY\n#define CLAY_FOG 1\n#endif\n"
+// A draw without light (light_mode bit 2 clear) under bit 7: its unlit colour through FogUnlit, with the
+// alpha it writes as the in-scatter's scale under bit 8 (the game's blended form).
 #define FABLE2_CLAY_TEXTURED_HLSL FABLE2_CLAY_FOG_HLSL FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL FABLE2_CLAY_OBJECT_HLSL R"hlsl(
 Texture2D albedo : register(t3);
 Texture2D shadow_mask : register(t4);
@@ -577,10 +605,15 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
       }
       return float4(clay_lit(lit * f_exposure), (alpha_mode & 0x80) ? saturate(a) : 1.0);
     }
+    if (light_mode & 128) {
+      float3 hazed = FogUnlit(clay_linear(t.rgb * (0.75 + 0.25 * facet)), FogCoords(pos), (light_mode & 256) ? saturate(a) : 1.0);
+      return float4(hazed, (alpha_mode & 0x80) ? saturate(a) : 1.0);
+    }
     return float4(clay_linear(t.rgb * (0.75 + 0.25 * facet)), (alpha_mode & 0x80) ? saturate(a) : 1.0);
 #endif
   }
   base = float3((color >> 16) & 255, (color >> 8) & 255, color & 255) / 255.0;
+  if (light_mode & 128) return float4(FogUnlit(clay_linear(base * (0.35 + 0.65 * facet)), FogCoords(pos), 1.0), 1.0);
   return float4(clay_linear(base * (0.35 + 0.65 * facet)), 1.0);
 }
 )hlsl"
@@ -724,6 +757,9 @@ float4 terrain_out(float3 colour, float a, float4 pos, float3 ndc) {
 #else
   if (light_mode & 4) return float4(clay_lit(colour * f_exposure), (alpha_mode & 0x80) ? saturate(a) : 1.0);
   float shade = 0.75 + 0.25 * facet;
+  // (a terrain draw without light under bit 7: FogUnlit on what it writes; for a far draw that fades
+  // in, after its fade and not before it as the lit path: such a draw has not occurred in a run)
+  if (light_mode & 128) return float4(FogUnlit(saturate(colour * (shade * shade)), FogCoords(pos), 1.0), (alpha_mode & 0x80) ? saturate(a) : 1.0);
   return float4(saturate(colour * (shade * shade)), (alpha_mode & 0x80) ? saturate(a) : 1.0);
 #endif
 }

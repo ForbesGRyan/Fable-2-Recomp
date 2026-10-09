@@ -983,6 +983,10 @@ void ClayPass::DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, 
         light_count = p.light_count;  // the smallest count of its normals and its kind's other buffers
       }
     }
+    // A draw without light in a fogged frame, whose pixel shader has the game's fog block: the
+    // unlit fog's bits (UnlitFogOf; the frame's flag is the one its shaders read). The frame's block
+    // is bound at b2 for the whole frame; the bits name no buffer and no slot.
+    light_mode |= UnlitFogMode(UnlitFogOf(frame_.fog.on != 0, light_mode, r.material.ps_hash));
   }
   if (light_mode_out) *light_mode_out = light_mode;
   float uv[4] = {1.0f, 1.0f, 0.0f, 0.0f};
@@ -1553,6 +1557,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   st.fog_reason = scene.fog_reason;
   st.fog = fog_decision.fog;
   st.fog_view = fog_decision.view;
+  // (records of another view than the frame's: fogged with a wrong position; review of plan Task 4, M3)
+  if (fog_decision.fog == ClayFog::kDrawn) st.fog_view_outliers = mask_frame_view.outliers;
   CountClayFogFrame(fog && light == ClayLight::kOn, fog_decision.fog, fog_counts_);
   st.fog_frames = fog_counts_.frames;
   st.fog_block_frames = fog_counts_.block;
@@ -1649,7 +1655,13 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   st.sky_texture_missing = sky_texture_missing;
   st.sky_before = sky_order.before;
   st.sky_before_no_depth = sky_order.before_no_depth;
-  CountClaySkyFrame(fog && light == ClayLight::kOn, sky_decision.sky, sky_texture_missing, sky_counts_);
+  // (the record the sky is drawn before, by its pixel shader: review of plan Task 5, M1)
+  if (sky_decision.sky == ClaySky::kDrawn && sky_order.place < prepared_.size()) {
+    st.sky_place_record = true;
+    st.sky_place_ps = prepared_[sky_order.place].r->material.ps_hash;
+  }
+  CountClaySkyFrame(fog && light == ClayLight::kOn, sky_decision.sky, sky_texture_missing, sky_counts_, sky_order.early);
+  st.sky_early_frames = sky_counts_.early;
   st.sky_frames = sky_counts_.frames;
   st.sky_nofog_frames = sky_counts_.nofog;
   st.sky_view_frames = sky_counts_.view;
@@ -1658,8 +1670,12 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   st.sky_objects_frames = sky_counts_.objects;
   st.sky_texture_frames = sky_counts_.texture;
   constexpr uint32_t kSkyLogLines = 16;
-  if (sky_decision.sky != sky_logged_ && sky_log_lines_ < kSkyLogLines) {
+  // (also when a drawn sky gains or loses its textures: the first frame's upload budget may be used
+  // up before the sky's texture is asked; review of plan Task 5, M4)
+  const bool sky_textures_changed = sky_decision.sky == ClaySky::kDrawn && sky_textured != sky_textured_logged_;
+  if ((sky_decision.sky != sky_logged_ || sky_textures_changed) && sky_log_lines_ < kSkyLogLines) {
     sky_logged_ = sky_decision.sky;
+    sky_textured_logged_ = sky_textured;
     ++sky_log_lines_;
     REXLOG_INFO("[native] clay: sky changed at scene frame {}: {} | place {} of {} records, c31.x {:.3f}, c46.x {:.3f}, c47.x {:.3f}, "
                 "c67.y {:.3f}{}",
@@ -1883,6 +1899,15 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       if (why == ClayUnlit::kUnknown || why == ClayUnlit::kNormal) {
         st.light_unlit_by_ps.Add(r.material.ps_hash, uint8_t(why));
       }
+      // Its fog in a fogged frame: the unlit form, or none (its pixel shader has no fog block).
+      if (frame_.fog.on) {
+        if (light_mode & kLightModeUnlitFog) {
+          ++st.fog_unlit;
+          if (light_mode & kLightModeUnlitFogAlpha) ++st.fog_unlit_alpha;
+        } else {
+          ++st.fog_unlit_none;
+        }
+      }
     }
     if (r.deformed) ++st.deformed;
     // Which builder made the positions (the order of GeometryCache::Positions).
@@ -1893,6 +1918,13 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
         ++st.skinned;
       }
     }
+  }
+  // Once: the first frame whose unlit draws were fogged (the Fog line comes only every 300 frames,
+  // which a slow adapter may not reach; the line of the fog's verdict is written before the draws).
+  if (st.fog_unlit && !unlit_fog_logged_) {
+    unlit_fog_logged_ = true;
+    REXLOG_INFO("[native] clay: first unlit draws fogged at scene frame {}: {} ({} by their alpha), {} without a fog block",
+                scene.frame, st.fog_unlit, st.fog_unlit_alpha, st.fog_unlit_none);
   }
   // (no blended record: the sky after the last record; no record at all: the sky alone)
   if (sky_drawn && sky_order.place >= prepared_.size()) draw_sky();

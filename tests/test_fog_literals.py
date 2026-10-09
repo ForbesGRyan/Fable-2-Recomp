@@ -62,11 +62,12 @@ class FogLiterals(unittest.TestCase):
             self.assertEqual(f32(g), f32(w), f"{what}[{i}]: {g!r} against {w!r}")
 
     def test_every_generated_line_is_in_the_cpp_test(self):
-        # The pins of cases 580 and 581 are the generator's output, line for line: 12 table pins and 10
-        # pixels for each of the two register sets, with the comment lines that name the registers.
+        # The pins of cases 580, 581 and 595 are the generator's output, line for line: 12 table pins, 10
+        # pixels for each of the two register sets with the comment lines that name the registers, and
+        # the 20 pixels again as an unlit draw's.
         have = {line.strip() for line in self.logic_test.splitlines()}
-        self.assertEqual(len(self.lines), 13 + 12 + 12)
-        self.assertEqual(sum(1 for line in self.lines if line.startswith("//")), 5)
+        self.assertEqual(len(self.lines), 13 + 12 + 12 + 21)
+        self.assertEqual(sum(1 for line in self.lines if line.startswith("//")), 6)
         for line in self.lines:
             self.assertIn(line.strip(), have, "not in tests/native/test_clay_logic.cpp: run tools/xdk_sigmatch/fog_pins.py")
 
@@ -176,18 +177,58 @@ class FogLiterals(unittest.TestCase):
         self.assertEqual(tuple(float(v) for v in forms), (0.0, 1.0, 2.0))
         self.assertEqual(float(_one(r"\[branch\] if \(p\.fogged && form != (" + NUMBER + r")\) \{", self.shaders, "no fog")), float(forms[2]))
         self.assertEqual(float(_one(r"    if \(form == (" + NUMBER + r")\) \{", self.shaders, "the trees' form")), float(forms[1]))
+        # An unlit draw's fog (plan Task 6) is a function of its own, FogUnlit: the lit forms' text is
+        # untouched. Four calls: the flat shader, the textured shader's two unlit returns, the terrain's.
+        self.assertEqual(len(re.findall(r"FogUnlit\(clay_linear\(base \* shade\), FogCoords\(pos\), 1\.0\)", self.shaders)), 1)
+        self.assertEqual(len(re.findall(r"FogUnlit\(clay_linear\(t\.rgb \* \(0\.75 \+ 0\.25 \* facet\)\), FogCoords\(pos\), "
+                                        r"\(light_mode & 256\) \? saturate\(a\) : 1\.0\)", self.shaders)), 1)
+        self.assertEqual(len(re.findall(r"FogUnlit\(clay_linear\(base \* \(0\.35 \+ 0\.65 \* facet\)\), FogCoords\(pos\), 1\.0\)", self.shaders)), 1)
+        self.assertEqual(len(re.findall(r"FogUnlit\(saturate\(colour \* \(shade \* shade\)\), FogCoords\(pos\), 1\.0\)", self.shaders)), 1)
+        self.assertEqual(self.shaders.count("FogUnlit("), 6)  # (the function, its stub without the fog, four calls)
         # The ground form is passed as two literal zeros where a draw has no object block's register to read.
         self.assertEqual(len(re.findall(r"FogForm\(lit, fog, 0\.0, 0\.0\)", self.shaders)), 1)
         self.assertEqual(len(re.findall(r"FogForm\(lin, FogCoords\(pos\), 0\.0, 0\.0\)", self.shaders)), 2)
         self.assertEqual(len(re.findall(r"FogForm\(lit, fog, o_leaf\.z, o_leaf\.w\) \* o_c26;", self.shaders)), 2)
         # The two forms' arithmetic, term for term as the mirrors'.
-        for line in ("c = c * T + (1.0 - T) * S * scale;", "float3 F = f_fog_near + p.t * (S - f_fog_near);",
-                     "float3 G = c * T + (1.0 - T) * f_fog_scatter * F;", "c = c + f_fog_amount * (G - c);",
+        for line in ("float3 F = f_fog_near + p.t * (S - f_fog_near);", "c = c + f_fog_amount * (G - c);"):
+            self.assertEqual(self.shaders.count(line), 2, line)  # (the ground form, and the same form of an unlit draw)
+        for line in ("c = c * T + (1.0 - T) * S * scale;",
+                     "float3 G = c * T + (1.0 - T) * f_fog_scatter * F;",
+                     "float3 G = c * T + (1.0 - T) * (f_fog_scatter * f_exposure * scale) * F;",
                      "o.fogged = f_fog_on != 0 && reach && dD > 0.0;", "o.s = f_fog_scale * dD;", "o.t = saturate(f_fog_slope * dD);"):
             self.assertEqual(self.shaders.count(line), 1, line)
         for line in ("const double F = near_colour + at.t * (S[k] - near_colour);", "const double G = base[k] * T[k] + (1.0 - T[k]) * scale * F;",
+                     "const double scale = double(f.scatter) * gain;",
                      "fogged[k] = base[k] + double(f.amount) * (G - base[k]);", "const double add = (1.0 - T[k]) * S[k] * double(c8x);"):
             self.assertEqual(self.logic.count(line), 1, line)
+
+    def test_the_unlit_pins_show_the_exposure_and_the_alpha(self):
+        # The unlit pins' two factors are made up and neither is 1, nor their product; a pin past the start
+        # differs from the lit ground form's and its two forms differ from each other; one inside it is
+        # the colour that went in. The draw's bits are the shaders' literals.
+        e, a = fog_pins.UNLIT_EXPOSURE, fog_pins.UNLIT_ALPHA
+        self.assertEqual((f32(e), f32(a)), (e, a))
+        self.assertTrue(e != 1.0 and a != 1.0 and e * a != 1.0)
+        self.assertIn("UnlitFogMirror(p.C, p.P, eye, c, %rf, 1.0f," % e, self.logic_test)
+        self.assertIn("UnlitFogMirror(p.C, p.P, eye, c, %rf, %rf," % (e, a), self.logic_test)
+        tf4_texels, tf5_texels = fog_pins.load_tables()
+        tf4, tf5 = lf.table_1d(tf4_texels), lf.table_1d(tf5_texels)
+        shown = 0
+        for name, regs in fog_pins.SETS:
+            for direction, distance, colour in fog_pins.POINTS:
+                P, C, coords, ground, trees = fog_pins.one(regs, direction, distance, colour, tf4, tf5)
+                plain, alpha = fog_pins.unlit(regs, direction, distance, colour, tf4, tf5)
+                if coords is None:
+                    self.assertEqual((plain, alpha), (C, C))
+                elif min(tf5(coords[1])) < 1.0:
+                    shown += 1
+                    self.assertNotEqual(plain, ground)
+                    self.assertNotEqual(plain, alpha)
+        self.assertGreaterEqual(shown, 15)
+        bits = _one(r"inline constexpr uint32_t kLightModeUnlitFog = (\d+)u, kLightModeUnlitFogAlpha = (\d+)u;", self.logic, "the draw's bits")
+        self.assertEqual(tuple(int(v) for v in bits), (128, 256))
+        self.assertEqual(self.shaders.count("light_mode & 128"), 4)
+        self.assertEqual(self.shaders.count("(light_mode & 256) ? "), 1)
 
     def test_the_made_up_set_exercises_what_the_frame_does_not(self):
         real, made = fog_pins.REAL, fog_pins.MADE

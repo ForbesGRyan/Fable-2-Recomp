@@ -5444,6 +5444,124 @@ int main() {
       for (const FogPin& p : real_pins) CHECK(581, close3(p.ground, p.tree, 1e-12));
     }
 
+    // 595: an unlit draw's fog (plan Task 6; the controller's ruling after the review of plan Task 4):
+    // the ground form on the unlit colour, with the in-scatter under the lit draws' exposure and, for a
+    // shader of the blended form, times the pixel's alpha: light_formulas.fog with
+    // scatter_scale = exposure * alpha. The same 20 pixels as case 581, with a made-up exposure and alpha.
+    {
+      static const struct {
+        double plain[3], alpha[3];
+      } unlit_pins[] = {
+      // unlit pins, the pixels of the real set and then of the made one: the ground form with the in-scatter times the exposure 1.25, and times the alpha 0.4000000059604645 as well
+          {{0.3499999940395355, 0.30000001192092896, 0.11999999731779099}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}},
+          {{0.3499999940395355, 0.30000001192092896, 0.11999999731779099}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}},
+          {{0.3499999940395355, 0.30000001192092896, 0.11999999731779099}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}},
+          {{0.06744035841967885, 0.0845525134134241, 0.07405320616980769}, {0.055414935230531925, 0.06771671146082708, 0.04046643325616068}},
+          {{0.31676830117912835, 0.1993827242956722, 0.1700401906742589}, {0.14953858435797648, 0.10616236908062408, 0.07505601069668992}},
+          {{1.956761734809974, 0.23233913749061083, 0.2664728216060228}, {1.7641450855892367, 0.09662612371732829, 0.10658913023071093}},
+          {{0.6464618115124531, 0.4006650643888738, 0.37918545496160355}, {0.2585847284581939, 0.1602660281436994, 0.15167418424476287}},
+          {{0.9588190527246266, 0.5418982800106283, 0.40841339577177704}, {0.4014099805571247, 0.23040637420617344, 0.16618889022405564}},
+          {{0.14299920285449108, 0.4138832805919214, 0.19077740324636147}, {0.10842079454415085, 0.36573188280793306, 0.0983556042034367}},
+          {{0.8862169498718991, 0.7786412442712966, 0.6733016539892881}, {0.8480038301617743, 0.7444912797087849, 0.6219550412432017}},
+          {{0.3499999940395355, 0.30000001192092896, 0.11999999731779099}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}},
+          {{0.3499999940395355, 0.30000001192092896, 0.11999999731779099}, {0.3499999940395355, 0.30000001192092896, 0.11999999731779099}},
+          {{0.3651830132765813, 0.30321529856046114, 0.18132542829059478}, {0.351449742732922, 0.2967937496860755, 0.14146466408969455}},
+          {{0.11608513097227546, 0.14598515724534683, 0.2123635103700327}, {0.07286228903594033, 0.08957853401691653, 0.09436117015981324}},
+          {{0.7260100590854174, 0.4152372705909567, 0.34166488683704727}, {0.3084714398684478, 0.1863993337302712, 0.14170468603769434}},
+          {{1.9292029786134908, 0.4918504672078857, 0.47965851457036934}, {1.4982988630112222, 0.19942254273302262, 0.19186340868713525}},
+          {{0.9773969377142062, 0.5854545641740497, 0.48398737567922706}, {0.3909587809114222, 0.23418182915920105, 0.1935949531564804}},
+          {{1.1174949638540679, 0.6511061538148099, 0.5077003650451445}, {0.4904097576656281, 0.30067775978479816, 0.23519779630395787}},
+          {{0.23468736139788277, 0.4988975255900014, 0.41379488212537135}, {0.13741024172305433, 0.36664137312614903, 0.1822297206767305}},
+          {{0.9373480124741727, 0.8144094928323968, 0.7309157747073727}, {0.8188191949583827, 0.7104414520347143, 0.5829321904301907}},
+      };
+      CHECK(595, std::size(unlit_pins) == 20);
+      int shown = 0, at_pin = 0;
+      for (int set = 0; set < 2; ++set) {
+        const capture::FogBlock& b = set ? made : real;
+        const ClayFogConstants& c = set ? made_c : real_c;
+        for (const FogPin& p : set ? made_pins : real_pins) {
+          const auto& u = unlit_pins[at_pin++];
+          double plain[3], alpha[3], lit[3], one[3];
+          UnlitFogMirror(p.C, p.P, eye, c, 1.25f, 1.0f, b.scatter, b.transmit, plain);
+          UnlitFogMirror(p.C, p.P, eye, c, 1.25f, 0.4000000059604645f, b.scatter, b.transmit, alpha);
+          CHECK(595, close3(plain, u.plain, 1e-9) && close3(alpha, u.alpha, 1e-9));
+          // With an exposure and an alpha of 1 it is the ground form itself, bit for bit.
+          FogMirror(p.C, p.P, eye, c, b.scatter, b.transmit, lit);
+          UnlitFogMirror(p.C, p.P, eye, c, 1.0f, 1.0f, b.scatter, b.transmit, one);
+          CHECK(595, one[0] == lit[0] && one[1] == lit[1] && one[2] == lit[2]);
+          if (!p.fogged) {
+            CHECK(595, same3(plain, p.C) && same3(alpha, p.C));  // (inside the start: the colour that went in)
+          } else if (!close3(plain, lit, 1e-6) && !close3(plain, alpha, 1e-6)) {
+            ++shown;
+          }
+        }
+      }
+      CHECK(595, shown == 15);  // (wherever the transmittance is below 1)
+      // Guards: a frame without fog, an exposure or an alpha that is no number, and no table leave the
+      // colour as it went in; an alpha of 0 leaves the transmittance alone on the colour (no in-scatter).
+      const float C[3] = {0.35f, 0.3f, 0.12f};
+      const float far_point[3] = {eye[0] - 500.0f, eye[1] + 100.0f, eye[2] + 50.0f};
+      double out[3];
+      UnlitFogMirror(C, far_point, eye, ClayFogConstants{}, 1.25f, 1.0f, real.scatter, real.transmit, out);
+      CHECK(595, same3(out, C));
+      for (float bad : {qnan, pinf, -pinf}) {
+        UnlitFogMirror(C, far_point, eye, real_c, bad, 1.0f, real.scatter, real.transmit, out);
+        CHECK(595, same3(out, C));
+        UnlitFogMirror(C, far_point, eye, real_c, 1.25f, bad, real.scatter, real.transmit, out);
+        CHECK(595, same3(out, C));
+      }
+      UnlitFogMirror(C, far_point, eye, real_c, 1.25f, 1.0f, static_cast<const float (*)[3]>(nullptr), real.transmit, out);
+      CHECK(595, same3(out, C));
+      UnlitFogMirror(C, far_point, eye, real_c, 1.25f, 0.0f, real.scatter, real.transmit, out);
+      {
+        const FogPoint at = FogCoords(far_point, eye, real_c);
+        double T[3];
+        FogTableRead(real.transmit, kFogTransmitTexels, at.s, T);
+        const double want[3] = {double(C[0]) * T[0], double(C[1]) * T[1], double(C[2]) * T[2]};
+        CHECK(595, at.fogged && T[0] < 0.9 && close3(out, want, 1e-12));
+      }
+      // 3e38 for both: a number comes out (their product overflows a single, not the mirror's double).
+      UnlitFogMirror(C, far_point, eye, real_c, 3e38f, 3e38f, real.scatter, real.transmit, out);
+      CHECK(595, finite3(out));
+    }
+
+    // 596: which draws take that form (UnlitFogOf): a draw without light, in a frame that is fogged,
+    // whose pixel shader has the game's fog block (capture::FindFogShader: the 40 of the form); the
+    // blended form where the table says so. Never a lit draw (it has its family's fog), never in a
+    // frame without fog, never a shader outside the table: the lake's (2B09..., not of the form), the
+    // sky's, a draw without a pixel shader.
+    {
+      static_assert(kLightModeUnlitFog == 128u && kLightModeUnlitFogAlpha == 256u);
+      static_assert((kLightModeCount & (kLightModeCount - 1)) == 0 && kLightModeUnlitFog == kLightModeCount);  // (above the light's seven bits)
+      const uint64_t water = 0xF6D98C7B4D98438Bull, blended = 0x401A01FD4E5F8757ull, lake = 0x2B091BD0C45A7454ull,
+                     sky = 0xF7601FBE485936FDull, far_ground = 0x2F8A0341E8C09698ull;
+      CHECK(596, UnlitFogOf(true, 0, water) == UnlitFog::kPlain && UnlitFogOf(true, 0, blended) == UnlitFog::kAlpha &&
+                     UnlitFogOf(true, kLightModeTerrainNormals, far_ground) == UnlitFog::kPlain);
+      CHECK(596, UnlitFogOf(true, 0, lake) == UnlitFog::kNone && UnlitFogOf(true, 0, sky) == UnlitFog::kNone &&
+                     UnlitFogOf(true, 0, 0) == UnlitFog::kNone && UnlitFogOf(true, 0, water + 1) == UnlitFog::kNone);
+      CHECK(596, UnlitFogOf(false, 0, water) == UnlitFog::kNone && UnlitFogOf(false, 0, blended) == UnlitFog::kNone);
+      int plain = 0, alpha = 0;
+      for (const capture::FogShaderEntry& e : capture::kFogShaderTable) {
+        const UnlitFog f = UnlitFogOf(true, 0, e.ps_hash);
+        CHECK(596, f == (e.alpha ? UnlitFog::kAlpha : UnlitFog::kPlain) && UnlitFogOf(false, 0, e.ps_hash) == UnlitFog::kNone);
+        ++(e.alpha ? alpha : plain);
+        // A lit draw of any family has its own fog: every mode with the lit bit.
+        for (uint32_t mode = 0; mode < kLightModeCount; ++mode) {
+          if (mode & kLightModeLit) CHECK(596, UnlitFogOf(true, mode, e.ps_hash) == UnlitFog::kNone);
+        }
+      }
+      CHECK(596, plain == 30 && alpha == 10);
+      // The draw's bits: none, the one, the two. They never touch the light's seven bits.
+      CHECK(596, UnlitFogMode(UnlitFog::kNone) == 0 && UnlitFogMode(UnlitFog::kPlain) == 128u && UnlitFogMode(UnlitFog::kAlpha) == 384u);
+      CHECK(596, (UnlitFogMode(UnlitFog::kAlpha) & (kLightModeCount - 1)) == 0);
+      // A mode with the unlit fog's bits names the light buffers of the mode without them (the vertex
+      // stage reads neither bit).
+      for (uint32_t mode : {0u, 1u}) {
+        const ClayLightBuffers with = LightBufferSources(mode | 384u), without = LightBufferSources(mode);
+        for (uint32_t i = 0; i < kClayLightBufferCount; ++i) CHECK(596, with.source[i] == without.source[i]);
+      }
+    }
+
     // 582: guards (review focus 2; review of plan Task 3, M2). Whatever goes in, a number comes out,
     // and a pixel the fog cannot be computed for keeps its colour.
     {
@@ -5845,6 +5963,16 @@ int main() {
       st.fog_view_frames = 2;
       st.fog_nolight_frames = 1;
       CHECK(585, FormatFogText(st) == "Fog: on, block valid, drawn | trees 52 with a scale, 3 without | "
+                                      "unlit 0 fogged (0 by their alpha), 0 without a fog block | 0 records with another view | "
+                                      "frames since start 900: fog-block 11 {block: 4, values: 5, view: 2}, no-light 1");
+      // (plan Task 6: the unlit draws of a fogged frame, and the records fogged with another view's
+      // position: review of plan Task 4, M3)
+      st.fog_unlit = 24;
+      st.fog_unlit_alpha = 10;
+      st.fog_unlit_none = 2;
+      st.fog_view_outliers = 7;
+      CHECK(585, FormatFogText(st) == "Fog: on, block valid, drawn | trees 52 with a scale, 3 without | "
+                                      "unlit 24 fogged (10 by their alpha), 2 without a fog block | 7 records with another view | "
                                       "frames since start 900: fog-block 11 {block: 4, values: 5, view: 2}, no-light 1");
       st.fog = ClayFog::kView;
       st.fog_view = FrameViewReason::kNoRecord;
@@ -6383,7 +6511,8 @@ int main() {
           in.rule = SkyRule::kNone;
           CHECK(591, is(in, ClaySky::kView, FrameViewReason::kSingular));
           in.ray = true;
-          CHECK(591, is(in, ClaySky::kRules, FrameViewReason::kNone, SkyRule::kValue));
+          // (review of plan Task 5, M3: a frame without its constant buffer is "no objects", not a refused value)
+          CHECK(591, is(in, ClaySky::kObjects));
           in.constants = true;
           CHECK(591, is(in, ClaySky::kObjects));
           in.objects = true;
@@ -6432,8 +6561,25 @@ int main() {
         st.sky_nofog_frames = 6;
         st.sky_view_frames = 2;
         st.sky_objects_frames = 1;
-        CHECK(591, FormatSkyText(st) == "Sky: on, block valid, drawn | view (0.851, 0.495, -0.177), to the fog's axis -0.783 | before it 612 records, 2 without depth write | "
-                                        "frames since start 900: sky-block 9 {block: 4, rules: 5}, sky-texture 3, no-fog 6, view 2, no-objects 1");
+        CHECK(591, FormatSkyText(st) == "Sky: on, block valid, drawn | view (0.851, 0.495, -0.177), to the fog's axis -0.783 | before it 612 records, 2 without depth write, "
+                                        "then the last record | "
+                                        "frames since start 900: sky-block 9 {block: 4, rules: 5}, sky-texture 3, no-fog 6, view 2, no-objects 1, early 0");
+        // (review of plan Task 5, M1: the pixel shader of the record at the sky's place, and the frames
+        // whose sky was drawn before a terrain record)
+        st.sky_place_record = true;
+        st.sky_place_ps = 0x401A01FD4E5F8757ull;
+        st.sky_early_frames = 7;
+        CHECK(591, FormatSkyText(st) == "Sky: on, block valid, drawn | view (0.851, 0.495, -0.177), to the fog's axis -0.783 | before it 612 records, 2 without depth write, "
+                                        "then pixel shader 0x401A01FD4E5F8757 | "
+                                        "frames since start 900: sky-block 9 {block: 4, rules: 5}, sky-texture 3, no-fog 6, view 2, no-objects 1, early 7");
+        {
+          ClaySkyFrames n;
+          CountClaySkyFrame(true, ClaySky::kDrawn, false, n, true);
+          CountClaySkyFrame(true, ClaySky::kDrawn, false, n, false);
+          CountClaySkyFrame(true, ClaySky::kBlock, false, n, true);   // (no sky: nothing was drawn early)
+          CountClaySkyFrame(false, ClaySky::kDrawn, false, n, true);  // (not counted at all)
+          CHECK(591, n.frames == 3 && n.early == 1);
+        }
         st.sky_textured = true;
         CHECK(591, FormatSkyText(st).starts_with("Sky: on, block valid, drawn with its textures | "));
         st.sky_textured = false;
@@ -6468,7 +6614,17 @@ int main() {
         auto place = [](std::initializer_list<SkyOrderItem> list) { return SkyPlace(list.begin(), list.size()); };
         // The scene's order at the bridge: opaque, terrain layers, [sky], the blended group with opaque draws in it.
         SkyOrder o = place({opaque, opaque, layer, layer, blended, opaque, blended});
-        CHECK(592, o.place == 4 && o.before == 4 && o.before_no_depth == 0);
+        CHECK(592, o.place == 4 && o.before == 4 && o.before_no_depth == 0 && !o.early);
+        // Early (review of plan Task 5, M1): a drawn terrain record at or after the place. The sky is
+        // then drawn before ground the game draws before its sky; everything after is drawn over it.
+        o = place({opaque, layer, blended, layer, opaque});
+        CHECK(592, o.place == 2 && o.before == 2 && o.early);
+        o = place({opaque, layer, blended, flat_terrain});
+        CHECK(592, o.place == 2 && o.early);
+        o = place({opaque, layer, blended, SkyOrderItem{false, true, true, true}, opaque});
+        CHECK(592, o.place == 2 && !o.early);  // (a terrain record that is not drawn has no say)
+        o = place({opaque, layer, opaque});
+        CHECK(592, o.place == 3 && !o.early);
         // No blended record: after everything. No terrain. No records at all. Only blended ones.
         o = place({opaque, layer, opaque});
         CHECK(592, o.place == 3 && o.before == 3 && o.before_no_depth == 0);
@@ -6694,7 +6850,8 @@ int main() {
                "pre-pass keys, compare directions, mask mirrors against the reference's numbers, guards, the frame's inverse "
                "view-projection, mask constants; native fog: the tables' read, the ground form and the trees' form "
                "against the reference's numbers, guards, the frame's fog constants, the frame's block with the "
-               "fog's tail, the decision and the Fog line, the form of a draw's fog, a pixel's position from its depth; "
+               "fog's tail, the decision and the Fog line, the form of a draw's fog, a pixel's position from its depth, "
+               "an unlit draw's fog against the reference's numbers and which draws take it; "
                "native sky: the lat-long coordinate, the paths and the sky against the reference's numbers, guards, the sky's "
                "rules and constants, the decision and the Sky line, the step's place among the records, the view rays\n";
 

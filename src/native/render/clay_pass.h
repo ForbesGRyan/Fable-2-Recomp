@@ -373,6 +373,7 @@ class ClayPass {
   // first fogged frame; a frame that lost its fog and why), at most kFogLogLines of them.
   ClayFog fog_logged_ = ClayFog::kOff;
   uint32_t fog_log_lines_ = 0;
+  bool unlit_fog_logged_ = false;  // (the one line of the first frame whose unlit draws were fogged)
   // This Render's mask: what is bound as the screen mask at the colour draws (the mask target's
   // view or the white texture), and the frame's slot of the mask's constants.
   uint32_t mask_slot_ = 0;
@@ -391,6 +392,7 @@ class ClayPass {
   // the verdict changes, at most kSkyLogLines of them).
   ClaySkyFrames sky_counts_;
   ClaySky sky_logged_ = ClaySky::kOff;
+  bool sky_textured_logged_ = false;  // (of the last logged drawn sky: with its textures or without)
   uint32_t sky_log_lines_ = 0;
   nrhi::BindingLayout* map_layout_ = nullptr;  // the RHI has no layout destruction
   nrhi::Shader* map_vs_ = nullptr;

@@ -60,7 +60,8 @@ REXCVAR_DEFINE_STRING(fable2_native_shadows, "on", "Fable2",
 REXCVAR_DEFINE_STRING(fable2_native_fog, "off", "Fable2",
                       "Native fog and sky: on (or true, 1) = with a composite view and the light on, the capture also reads the "
                       "frame's fog block (the game's six fog registers and its two fog tables) and its sky block at the game's "
-                      "own draws, and the clay pass fogs its lit draws with the game's arithmetic and tables and draws the "
+                      "own draws, and the clay pass fogs its lit draws with the game's arithmetic and tables, its unlit draws "
+                      "whose pixel shader has the game's fog block with the same form on their unlit colour, and draws the "
                       "game's sky where no record is drawn; off (or false, 0) = none of it is read or drawn: the shadows' "
                       "picture. Off by default until the fog is validated (sub-project 9).");
 REXCVAR_DEFINE_BOOL(fable2_native_d3d_messages, false, "Fable2",
@@ -503,7 +504,7 @@ void Install(rex::memory::Memory* memory) {
               "are drawn and the lit draws' sun is shadowed)",
               CurrentShadows() ? "on" : "off");
   REXLOG_INFO("[native] fog: {} (fable2_native_fog; on: the frame's fog and sky blocks are read with the light on and "
-              "the lit draws are fogged and the sky is drawn behind them)",
+              "the lit draws, and the unlit ones whose shader has the game's fog block, are fogged and the sky is drawn behind them)",
               CurrentFog() ? "on" : "off");
 }
 

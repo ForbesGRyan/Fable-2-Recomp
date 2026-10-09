@@ -1,6 +1,6 @@
 """The numbers the C++ mirrors of the fog are pinned to (tests/native/test_clay_logic.cpp, cases 580 on),
-made by light_formulas.py: fog (the ground form), vertex_fog with fog_apply (the trees' form, evaluated at
-the pixel: ruling B), fog_coords and table_1d. tests/test_fog_literals.py holds this file's inputs against
+made by light_formulas.py: fog (the ground form, and with its scatter_scale an unlit draw's), vertex_fog with
+fog_apply (the trees' form, evaluated at the pixel: ruling B), fog_coords and table_1d. tests/test_fog_literals.py holds this file's inputs against
 the C++ texts and this file's output against the lines of the C++ test.
 
 Inputs, all tracked (nothing is read from a capture):
@@ -59,6 +59,12 @@ SETS = (('real', REAL), ('made', MADE))
 
 # The trees' in-scatter scale, vertex c8.x: 1 in every captured row; 0.5 so that a mirror without it fails.
 C8X = (1.0, 0.5)
+
+# An unlit draw's fog (clay_logic.h, UnlitFogMirror; plan Task 6): the ground form on the unlit colour, with
+# the in-scatter under the lit draws' exposure and, for a shader of the blended form ("alpha" in
+# light_formulas.FOG_SHADERS), times the pixel's alpha: fog(..., scatter_scale = exposure * alpha). Both
+# made up, so that a mirror without either fails; no pin depends on the product's exposure.
+UNLIT_EXPOSURE, UNLIT_ALPHA = 1.25, 0.4000000059604645
 
 # A pixel: the direction from the eye (any length; AXIS is the frame's c66, AWAY its opposite), the
 # distance, the colour before fog.
@@ -123,6 +129,17 @@ def one(regs, direction, distance, colour, tf4, tf5):
     return P, C, coords, ground, trees
 
 
+def unlit(regs, direction, distance, colour, tf4, tf5):
+    """An unlit pin of the pixel one() takes: the ground form with the in-scatter times the exposure (a
+    shader of the plain form), and times the exposure and the pixel's alpha (the blended form)."""
+    P = position(regs, direction, distance)
+    C = [f32(c) for c in colour]
+    c28, c66, c67, c68, eye = regs['c28'], regs['c66'], regs['c67'], regs['c68'], regs['eye']
+    plain = lf.fog(C, P, eye, c28, c66, c67, c68, tf4, tf5, scatter_scale=UNLIT_EXPOSURE)
+    alpha = lf.fog(C, P, eye, c28, c66, c67, c68, tf4, tf5, scatter_scale=UNLIT_EXPOSURE * UNLIT_ALPHA)
+    return plain, alpha
+
+
 def lines():
     """The pins as the lines of the C++ test."""
     tf4_texels, tf5_texels = load_tables()
@@ -151,6 +168,12 @@ def lines():
             fogged, a, s, t = (1, *coords) if coords else (0, 0.0, 0.0, 0.0)
             out.append('    {%s, %s, %d, %s, %s, %s, %s},' % (
                 floats(P), floats(C), fogged, doubles((a, s, t)), doubles(ground), doubles(trees[0]), doubles(trees[1])))
+    out.append('// unlit pins, the pixels of the real set and then of the made one: the ground form with the in-scatter '
+               'times the exposure %r, and times the alpha %r as well' % (UNLIT_EXPOSURE, UNLIT_ALPHA))
+    for name, regs in SETS:
+        for direction, distance, colour in POINTS:
+            plain, alpha = unlit(regs, direction, distance, colour, tf4, tf5)
+            out.append('    {%s, %s},' % (doubles(plain), doubles(alpha)))
     return out
 
 

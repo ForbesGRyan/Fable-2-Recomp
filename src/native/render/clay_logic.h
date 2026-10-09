@@ -194,7 +194,7 @@ inline const char* SkyRuleName(SkyRule r) {
 // has no single view, or its view-projection gives no ray (`view` says which). kBlock: the frame
 // has no valid sky block, whatever the capture's reason. kRules: the blocks hold a value the sky's
 // own rules refuse (SkyRule). kObjects: the sky's GPU objects could not be made (off until the
-// pass is rebuilt). kDrawn: the sky step is drawn. In every case but the last the pixels nothing
+// pass is rebuilt), or the frame has no constant buffer for the step's constants. kDrawn: the sky step is drawn. In every case but the last the pixels nothing
 // is drawn at keep the clear colour, as before the sky.
 enum class ClaySky : uint8_t { kOff, kNoLight, kNoFog, kView, kBlock, kRules, kObjects, kDrawn, kCount };
 
@@ -229,7 +229,9 @@ constexpr ClaySkyDecision DecideClaySky(const ClaySkyInputs& in) {
   if (!in.block) return {ClaySky::kBlock, FrameViewReason::kNone, SkyRule::kNone};
   if (in.rule != SkyRule::kNone) return {ClaySky::kRules, FrameViewReason::kNone, in.rule};
   if (!in.ray) return {ClaySky::kView, FrameViewReason::kSingular, SkyRule::kNone};
-  if (!in.constants) return {ClaySky::kRules, FrameViewReason::kNone, SkyRule::kValue};
+  // (the rules passed and the ray was found, so what is missing is the frame's constant buffer:
+  // "no objects", not a refused value; review of plan Task 5, M3)
+  if (!in.constants) return {ClaySky::kObjects, FrameViewReason::kNone, SkyRule::kNone};
   if (!in.objects) return {ClaySky::kObjects, FrameViewReason::kNone, SkyRule::kNone};
   return {ClaySky::kDrawn, FrameViewReason::kNone, SkyRule::kNone};
 }
@@ -256,6 +258,11 @@ struct SkyOrder {
   size_t place = 0;              // the sky is drawn before the record of this index; the count: after all
   uint32_t before = 0;           // drawn records before the place
   uint32_t before_no_depth = 0;  // those of them that write no depth
+  // A drawn terrain record lies at or after the place: the sky is drawn earlier than the game
+  // draws its own (a blended record that is no terrain record came before ground). Harmless by the
+  // first point above, and counted, with the pixel shader of the record at the place, so that the
+  // cause can be read (review of plan Task 5, M1).
+  bool early = false;
 };
 constexpr SkyOrder SkyPlace(const SkyOrderItem* items, size_t count) {
   SkyOrder o;
@@ -268,6 +275,9 @@ constexpr SkyOrder SkyPlace(const SkyOrderItem* items, size_t count) {
     }
     ++o.before;
     if (!items[i].depth_write) ++o.before_no_depth;
+  }
+  for (size_t i = o.place; i < count; ++i) {
+    if (items[i].drawn && items[i].terrain) o.early = true;
   }
   return o;
 }
@@ -409,7 +419,12 @@ struct ClayStats {
   // fog_reason: the scene's fog block and, without one, the capture's reason. fog, fog_view: what
   // the pass did about it (ClayFog), and with kView why. fog_trees: lit trunk and leaf draws with a
   // usable in-scatter scale (the trees' form in a fogged frame); fog_trees_none: those without one,
-  // drawn without fog in any frame.
+  // drawn without fog in any frame. fog_unlit: drawn records without light that were fogged (the
+  // unlit form: "Unlit draws" below), fog_unlit_alpha: those of them with the blended form's alpha
+  // scale; fog_unlit_none: drawn records without light in a fogged frame whose pixel shader has no
+  // fog block (left unfogged). fog_view_outliers: records whose matrix was not the frame's
+  // view-projection (FrameView::outliers) in a fogged frame: their pixels are fogged with the
+  // majority's inverse, a wrong position (review of plan Task 4, M3).
   // The frame counts are the pass's totals since it was made, this frame included: frames drawn
   // with the fog's and the light's switch on, and those of them not fogged for want of a block,
   // for a value, for a view ("fog-block" is the three together) or for want of light.
@@ -418,6 +433,7 @@ struct ClayStats {
   ClayFog fog = ClayFog::kOff;
   FrameViewReason fog_view = FrameViewReason::kNone;
   uint32_t fog_trees = 0, fog_trees_none = 0;
+  uint32_t fog_unlit = 0, fog_unlit_alpha = 0, fog_unlit_none = 0, fog_view_outliers = 0;
   uint64_t fog_frames = 0, fog_block_frames = 0, fog_values_frames = 0, fog_view_frames = 0, fog_nolight_frames = 0;
   // The sky ("Native sky" below; the Sky line). sky_block, sky_reason: the scene's sky block and,
   // without one, the capture's reason. sky, sky_view, sky_rule: what the pass did about it
@@ -425,7 +441,9 @@ struct ClayStats {
   // game's two sky textures, resolved by the texture cache); sky_texture_missing: it is the
   // clear-sky term alone because a texture the shader would read could not be had ("sky-texture").
   // sky_before, sky_before_no_depth: the drawn records before the sky's place and those of them
-  // that write no depth (SkyPlace). sky_ray, sky_axis_cos: of a drawn sky, the view ray of the
+  // that write no depth (SkyPlace). sky_place_record, sky_place_ps: the place is a record (not the
+  // end of the list), and that record's pixel shader. sky_early_frames: frames whose sky was drawn
+  // before a drawn terrain record (SkyOrder::early). sky_ray, sky_axis_cos: of a drawn sky, the view ray of the
   // picture's centre and its cosine to the fog's axis c66 (1: the view looks along the axis, where
   // the in-scatter table is read at its far end). The frame counts are the pass's totals since it was made, this
   // frame included: frames with the fog's and the light's switch on, and those of them without a
@@ -438,6 +456,9 @@ struct ClayStats {
   FrameViewReason sky_view = FrameViewReason::kNone;
   SkyRule sky_rule = SkyRule::kNone;
   uint32_t sky_before = 0, sky_before_no_depth = 0;
+  bool sky_place_record = false;
+  uint64_t sky_place_ps = 0;
+  uint64_t sky_early_frames = 0;
   float sky_ray[3] = {}, sky_axis_cos = 0.0f;
   uint64_t sky_frames = 0, sky_nofog_frames = 0, sky_view_frames = 0, sky_block_frames = 0, sky_rules_frames = 0;
   uint64_t sky_objects_frames = 0, sky_texture_frames = 0;
@@ -445,10 +466,11 @@ struct ClayStats {
 // The pass's frame counts of the sky, which follow from the frame's verdict: one frame added.
 // `on`: the fog's switch and the light's switch together (the frames that are counted; the sky has
 // no switch of its own). `texture_missing`: a drawn sky without its texture term.
+// `early`: a drawn sky whose place lies before a drawn terrain record (SkyOrder::early).
 struct ClaySkyFrames {
-  uint64_t frames = 0, nofog = 0, view = 0, block = 0, rules = 0, objects = 0, texture = 0;
+  uint64_t frames = 0, nofog = 0, view = 0, block = 0, rules = 0, objects = 0, texture = 0, early = 0;
 };
-inline void CountClaySkyFrame(bool on, ClaySky sky, bool texture_missing, ClaySkyFrames& n) {
+inline void CountClaySkyFrame(bool on, ClaySky sky, bool texture_missing, ClaySkyFrames& n, bool early = false) {
   if (!on) return;
   ++n.frames;
   if (sky == ClaySky::kNoFog || sky == ClaySky::kNoLight) ++n.nofog;
@@ -457,6 +479,7 @@ inline void CountClaySkyFrame(bool on, ClaySky sky, bool texture_missing, ClaySk
   if (sky == ClaySky::kRules) ++n.rules;
   if (sky == ClaySky::kObjects) ++n.objects;
   if (sky == ClaySky::kDrawn && texture_missing) ++n.texture;
+  if (sky == ClaySky::kDrawn && early) ++n.early;
 }
 // The frames counted "sky-block": frames that could have had a sky and had none for their sky block.
 inline uint64_t ClaySkyBlockFrames(const ClaySkyFrames& n) { return n.block + n.rules; }
@@ -1330,6 +1353,13 @@ inline constexpr uint32_t kLightModeTerrainNormals = 1u, kLightModeObject = 2u, 
                           kLightModeInstance = 16u, kLightModePlantLit = 32u, kLightModeLeaf = 64u;
 // Every value the bits can make (the shader tests compile each shader once per value).
 inline constexpr uint32_t kLightModeCount = 128u;
+// Two more bits of the same word, above the light's seven, which only the pixel stage reads and
+// only for a draw without kLightModeLit ("Native fog" below, "Unlit draws"; plan Task 6 of the fog
+// sub-project). kLightModeUnlitFog: the draw's unlit colour is fogged with the ground form, its
+// in-scatter under the lit draws' exposure. kLightModeUnlitFogAlpha (with the first only): the
+// in-scatter is also multiplied by the alpha the draw writes (the game's blended form). With both
+// clear every program is the one the light's bits name.
+inline constexpr uint32_t kLightModeUnlitFog = 128u, kLightModeUnlitFogAlpha = 256u;
 
 // The light_mode of a lit mesh record by its vertex kind and family: a colour
 // stream's object (6), an object or trunk with probe colours (14), an
@@ -2388,13 +2418,14 @@ inline FogPoint FogCoords(const float P[3], const float eye[3], const ClayFogCon
 
 // The ground form: the colour `C` (linear, the family's lit colour before c26 and the exposure) of
 // a pixel at world position `P`, fogged. `scatter`, `transmit`: the frame's two tables
-// (capture::FogBlock::scatter, ::transmit).
+// (capture::FogBlock::scatter, ::transmit). `gain`: a factor on the in-scatter term beside c28.y
+// (light_formulas.fog's scatter_scale): 1 for every lit draw; an unlit draw's is UnlitFogMirror's.
 template <size_t K>
 inline void FogMirror(const float C[3], const float P[3], const float eye[3], const ClayFogConstants& f,
-                      const float (*scatter)[K], const float (*transmit)[K], double out[3]) {
+                      const float (*scatter)[K], const float (*transmit)[K], double out[3], double gain = 1.0) {
   double base[3];
   for (int k = 0; k < 3; ++k) out[k] = base[k] = std::isfinite(C[k]) ? double(C[k]) : 0.0;
-  if (!scatter || !transmit) return;
+  if (!scatter || !transmit || !std::isfinite(gain)) return;
   const FogPoint at = FogCoords(P, eye, f);
   if (!at.fogged) return;
   if (!std::isfinite(f.amount) || !std::isfinite(f.scatter) || !std::isfinite(f.near_colour[0]) ||
@@ -2404,7 +2435,7 @@ inline void FogMirror(const float C[3], const float P[3], const float eye[3], co
   double S[3], T[3], fogged[3];
   FogTableRead(scatter, kFogScatterTexels, at.a, S);
   FogTableRead(transmit, kFogTransmitTexels, at.s, T);
-  const double scale = double(f.scatter);
+  const double scale = double(f.scatter) * gain;
   for (int k = 0; k < 3; ++k) {
     if (!std::isfinite(S[k]) || !std::isfinite(T[k])) return;
     const double near_colour = double(f.near_colour[k]);
@@ -2436,6 +2467,45 @@ inline void TreeFogMirror(const float C[3], const float P[3], const float eye[3]
     if (!std::isfinite(add) || !std::isfinite(fogged[k])) return;
   }
   for (int k = 0; k < 3; ++k) out[k] = fogged[k];
+}
+
+// --- Unlit draws (plan Task 6; the controller's ruling after the review of plan Task 4) ---
+// The game fogs every draw whose pixel shader has the fog block, lit by the native pass or not. A
+// draw the pass does not light (a family it has no function for: the water, the fur, the blended
+// characters; or a draw whose light inputs could not be read) is drawn as flat clay or with its
+// texture alone, and in a fogged frame it is fogged all the same, so that it does not stand
+// unhazed against hazed ground:
+//   C' = fog(U, ..., scatter_scale = exposure * alpha)        light_formulas.fog, the ground form
+// U: the draw's unlit colour as the pass writes it (a display-linear value that carries no
+// exposure: the colour under the haze stays the placeholder it was). exposure: the frame's, which
+// every lit value is multiplied by after its fog, so that the in-scatter an unlit pixel gains is
+// the in-scatter a lit pixel at the same place gains. alpha: 1, or for a shader of the game's
+// blended form (FogShaderEntry::alpha: its in-scatter is multiplied by the pixel's alpha) the
+// textured draw's own alpha, saturated (a flat draw has none: 1); the game's is its output alpha
+// before c26.w, the native one is the material's (texture alpha times the draw's scale): an
+// approximation.
+// Which draws: UnlitFogOf. A draw whose pixel shader is not in the table stays unfogged and is
+// counted (the lake's surface 2B09..., which is not of the form, is drawn through the indexed
+// builder and is no record of the pass at all).
+enum class UnlitFog : uint8_t { kNone, kPlain, kAlpha };
+// The unlit fog of a draw with `light_mode` (the light's bits as the pass made them) and pixel
+// shader `ps_hash`, in a frame that is fogged or not (the frame's flag, ClayFogConstants::on).
+inline UnlitFog UnlitFogOf(bool frame_fogged, uint32_t light_mode, uint64_t ps_hash) {
+  if (!frame_fogged || (light_mode & kLightModeLit) != 0) return UnlitFog::kNone;
+  const capture::FogShaderEntry* entry = capture::FindFogShader(ps_hash);
+  if (!entry) return UnlitFog::kNone;
+  return entry->alpha ? UnlitFog::kAlpha : UnlitFog::kPlain;
+}
+// Its bits of ClayConstants::light_mode.
+constexpr uint32_t UnlitFogMode(UnlitFog fog) {
+  return fog == UnlitFog::kPlain ? kLightModeUnlitFog : fog == UnlitFog::kAlpha ? kLightModeUnlitFog | kLightModeUnlitFogAlpha : 0u;
+}
+// The mirror: FogMirror with the in-scatter times `exposure` and `alpha`. Either not a number: the
+// pixel is left as it is.
+template <size_t K>
+inline void UnlitFogMirror(const float C[3], const float P[3], const float eye[3], const ClayFogConstants& f, float exposure,
+                           float alpha, const float (*scatter)[K], const float (*transmit)[K], double out[3]) {
+  FogMirror(C, P, eye, f, scatter, transmit, out, double(exposure) * double(alpha));
 }
 
 // The fog's tail of the frame's constants (ClayFrameConstants::fog and what follows) from the frame's
@@ -2531,11 +2601,13 @@ inline std::string FormatFogText(const ClayStats& st) {
       break;
     default: text += ", not drawn (off)"; break;
   }
-  char buf[256];
+  char buf[384];
   std::snprintf(buf, sizeof(buf),
-                " | trees %u with a scale, %u without | frames since start %llu: %s %llu {block: %llu, values: %llu, view: %llu}, "
+                " | trees %u with a scale, %u without | unlit %u fogged (%u by their alpha), %u without a fog block | "
+                "%u records with another view | frames since start %llu: %s %llu {block: %llu, values: %llu, view: %llu}, "
                 "no-light %llu",
-                st.fog_trees, st.fog_trees_none, static_cast<unsigned long long>(st.fog_frames), capture::kFogBlockReason,
+                st.fog_trees, st.fog_trees_none, st.fog_unlit, st.fog_unlit_alpha, st.fog_unlit_none, st.fog_view_outliers,
+                static_cast<unsigned long long>(st.fog_frames), capture::kFogBlockReason,
                 static_cast<unsigned long long>(st.fog_block_frames + st.fog_values_frames + st.fog_view_frames),
                 static_cast<unsigned long long>(st.fog_block_frames), static_cast<unsigned long long>(st.fog_values_frames),
                 static_cast<unsigned long long>(st.fog_view_frames), static_cast<unsigned long long>(st.fog_nolight_frames));
@@ -2846,17 +2918,24 @@ inline std::string FormatSkyText(const ClayStats& st) {
     case ClaySky::kObjects: text += ", not drawn (no objects)"; break;
     default: text += ", not drawn (off)"; break;
   }
-  char buf[400];
+  char place[48];
+  if (st.sky_place_record) {
+    std::snprintf(place, sizeof(place), "then pixel shader 0x%016llX", static_cast<unsigned long long>(st.sky_place_ps));
+  } else {
+    std::snprintf(place, sizeof(place), "then the last record");
+  }
+  char buf[480];
   std::snprintf(buf, sizeof(buf),
-                " | view (%.3f, %.3f, %.3f), to the fog's axis %.3f | before it %u records, %u without depth write | "
-                "frames since start %llu: %s %llu {block: %llu, rules: %llu}, %s %llu, no-fog %llu, view %llu, no-objects %llu",
+                " | view (%.3f, %.3f, %.3f), to the fog's axis %.3f | before it %u records, %u without depth write, %s | "
+                "frames since start %llu: %s %llu {block: %llu, rules: %llu}, %s %llu, no-fog %llu, view %llu, no-objects %llu, "
+                "early %llu",
                 double(st.sky_ray[0]), double(st.sky_ray[1]), double(st.sky_ray[2]), double(st.sky_axis_cos), st.sky_before,
-                st.sky_before_no_depth, static_cast<unsigned long long>(st.sky_frames), capture::kSkyBlockReason,
+                st.sky_before_no_depth, place, static_cast<unsigned long long>(st.sky_frames), capture::kSkyBlockReason,
                 static_cast<unsigned long long>(st.sky_block_frames + st.sky_rules_frames),
                 static_cast<unsigned long long>(st.sky_block_frames), static_cast<unsigned long long>(st.sky_rules_frames),
                 kSkyTextureReason, static_cast<unsigned long long>(st.sky_texture_frames),
                 static_cast<unsigned long long>(st.sky_nofog_frames), static_cast<unsigned long long>(st.sky_view_frames),
-                static_cast<unsigned long long>(st.sky_objects_frames));
+                static_cast<unsigned long long>(st.sky_objects_frames), static_cast<unsigned long long>(st.sky_early_frames));
   return text + buf;
 }
 

@@ -116,7 +116,7 @@ class GeometryCache {
   // or holds fewer than `need` vertices (stream), a vertex's set index is not
   // 0, 4 or 8 (probe-set), a weight is not a number of usable size (value), or
   // the upload fails. `need` and `count` as Normals'. Reads are bounded by the
-  // streams' sizes. The clay vertex shader reads it at t10 (the sets) and t11
+  // streams' sizes. The clay vertex shader reads it at t11 (the sets) and t12
   // (the weights) for a lit probe record.
   nrhi::Buffer* Probe(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light, uint32_t need,
                       ClayStats& st, LightSecond* why, uint32_t* count);
@@ -129,7 +129,7 @@ class GeometryCache {
   // not an instance colour's (element), the stream is unreadable, the record
   // has fewer flat positions than `need`, or a copy the draw names has its
   // colour past the stream (stream), or the upload fails. Reads are bounded by
-  // the stream's size. The clay vertex shader reads it at t10 for a lit plant.
+  // the stream's size. The clay vertex shader reads it at t11 for a lit plant.
   nrhi::Buffer* InstanceColours(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light,
                                 uint32_t need, ClayStats& st, LightSecond* why, uint32_t* count);
   // float4 bend inputs of an instanced record (the plants' bent normal), one
@@ -145,7 +145,7 @@ class GeometryCache {
   // vertex the draw names has a height that is not a number (value: all or
   // nothing), or the upload fails. `need` and `count` as Normals'; `bytes`
   // receives the buffer's allocation (for the log's bend line). Reads are
-  // bounded by the streams' sizes. The clay vertex shader reads it at t11 for
+  // bounded by the streams' sizes. The clay vertex shader reads it at t12 for
   // a lit plant.
   nrhi::Buffer* InstanceBend(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t need, ClayStats& st,
                              LightSecond* why, uint32_t* count, uint64_t* bytes);

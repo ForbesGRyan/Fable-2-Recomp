@@ -78,6 +78,16 @@ inline bool RecordsWanted(View v, bool latch_failed) {
   return !latch_failed && IsCompositeView(v);
 }
 
+// Whether the capture also takes the game's two shadow passes: only for a
+// frame the clay pass could draw with shadows. `records_wanted`: RecordsWanted.
+// `shadows`: fable2_native_shadows. `textures`, `light`: the frame is a lit
+// one (the light is of the material: no textures, no light). `usable`: the
+// pass's shadow objects have not failed (ClayPass::shadows_usable): once they
+// have, nothing is recorded for shadows that cannot be drawn.
+inline bool ShadowRecordsWanted(bool records_wanted, bool shadows, bool textures, bool light, bool usable) {
+  return records_wanted && shadows && textures && light && usable;
+}
+
 // Guest frame times per view, for the log line "[native] frames: ..."
 // (fable2_native_render.cpp, PollFrame): the `[frame] guest` windows of the SDK
 // mix the views a plan switches through, this line does not. One Add per guest

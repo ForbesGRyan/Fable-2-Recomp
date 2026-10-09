@@ -82,11 +82,48 @@ inline const char* FrameViewReasonName(FrameViewReason r) {
 // What the pass did about the frame's mask (ClayStats::mask; the Shadow line). kOff: the shadows'
 // switch is off. kNoLight: the frame is drawn without light (the switch, the textures, or no light
 // block). kBlock: the frame has no valid shadow block, whatever the reason, a frame without shadow
-// records included ("shadow-block"). kMaps: the block is valid and the maps were not drawn (the
-// frame's constant buffer could not be made). kView: no single inverse view-projection, or no usable
-// eye ("shadow-view"; ClayStats::mask_view says which). kObjects: the shadows' GPU objects could not
-// be made (the shadows are off for the session). kDrawn: the mask was written and is bound.
+// records included ("shadow-block"). kMaps: the block is valid and the frame has no constant buffer
+// (none could be made, or the frame has nothing to draw). kView: no single inverse view-projection, or
+// no usable eye ("shadow-view"; ClayStats::mask_view says which). kObjects: the shadows' GPU objects
+// could not be made (the shadows are off until the pass is rebuilt or the game restarted:
+// ClayPass::shadows_usable). kDrawn: the mask was written and is bound.
 enum class ClayMask : uint8_t { kOff, kNoLight, kBlock, kMaps, kView, kObjects, kDrawn, kCount };
+
+// The pass's decision about the frame's mask (ClayPass::Render), one chain in which the first thing
+// missing decides. `shadows`: fable2_native_shadows. `light`: the frame is drawn with the light's
+// switch on (and the textures, without which there is no light). `objects`: the shadows' GPU objects
+// exist or may still be made; false once making them has failed. `block`: FrameScene::shadow is
+// valid. `light_block`: the frame has a light block the pass can use. `constants`: the frame's
+// constant buffer was made. `eye`: the frame's eye is usable. `view`: why the frame has no single
+// inverse view-projection (FrameInverseViewProj), kNone when it has one. `finite`: the mask's
+// constants could be made of it (MakeClayMaskConstants).
+// The failed objects come before the block: once they have failed the capture records no shadow
+// passes (native_render_state.h, ShadowRecordsWanted), so every later frame has no block, and it is
+// the objects that the line must name.
+struct ClayMaskInputs {
+  bool shadows = false, light = false, objects = false, block = false, light_block = false, constants = false, eye = false;
+  FrameViewReason view = FrameViewReason::kNone;
+  bool finite = false;
+};
+struct ClayMaskDecision {
+  ClayMask mask = ClayMask::kOff;
+  FrameViewReason view = FrameViewReason::kNone;  // with kView: why
+};
+constexpr ClayMaskDecision DecideClayMask(const ClayMaskInputs& in) {
+  if (!in.shadows) return {ClayMask::kOff, FrameViewReason::kNone};
+  if (!in.light) return {ClayMask::kNoLight, FrameViewReason::kNone};
+  if (!in.objects) return {ClayMask::kObjects, FrameViewReason::kNone};
+  if (!in.block) return {ClayMask::kBlock, FrameViewReason::kNone};
+  if (!in.light_block) return {ClayMask::kNoLight, FrameViewReason::kNone};
+  if (!in.constants) return {ClayMask::kMaps, FrameViewReason::kNone};
+  if (!in.eye) return {ClayMask::kView, FrameViewReason::kEye};
+  if (in.view != FrameViewReason::kNone) return {ClayMask::kView, in.view};
+  if (!in.finite) return {ClayMask::kView, FrameViewReason::kSingular};
+  return {ClayMask::kDrawn, FrameViewReason::kNone};
+}
+// The two shadow maps are prepared and drawn only for a frame whose mask is drawn: nothing else reads
+// them (the shadow view shows a flat colour for a frame without them).
+constexpr bool ClayMapsDrawn(ClayMask mask) { return mask == ClayMask::kDrawn; }
 
 struct ClayStats {
   uint32_t drawn = 0, skipped_bad_index = 0, uploads = 0, hits = 0;
@@ -177,11 +214,14 @@ struct ClayStats {
   capture::ShaderTally<32> light_unlit_by_ps;
   float light_sun_dir[3] = {}, light_sun_col[3] = {};
   // The shadow maps ("Native shadow maps" below; the Shadow line). shadow_switch:
-  // the scene took shadow records (fable2_native_shadows on with a composite view
-  // and the light). shadow_block: the scene has a valid shadow block
+  // fable2_native_shadows is on, or the scene holds shadow records all the same
+  // (taken before the switch went off): what "Shadow: on" means, set once a
+  // frame (ClayPass::Render). shadow_block: the scene has a valid shadow block
   // (shadow_reason: why not). shadow_maps: the two maps were cleared and drawn
-  // this frame; shadow_light_off: they were not although the block is valid,
-  // because the frame is drawn without light. Per map (0 near, 1 far):
+  // this frame, which is only in a frame whose mask is drawn (ClayMapsDrawn);
+  // shadow_light_off: they were not although the block is valid, because the
+  // frame is drawn without light (the switch, the textures, or no light block).
+  // Per map (0 near, 1 far):
   // shadow_records, the scene's records; shadow_drawn, those drawn into the map;
   // shadow_skipped, the others by the pass's reason; shadow_capture_skipped, the
   // game's shadow draws the capture did not record, by its reason (a
@@ -223,6 +263,22 @@ struct ClayStats {
 // together (the frames shadow_frames counts).
 inline bool CountsNoLightFrame(bool shadows_on, ClayMask mask) { return shadows_on && mask == ClayMask::kNoLight; }
 inline bool CountsNoObjectsFrame(bool shadows_on, ClayMask mask) { return shadows_on && mask == ClayMask::kObjects; }
+// The pass's frame counts (ClayStats::shadow_frames and the five beside it), which follow from the
+// frame's verdict: one frame added. A valid block whose frame has no constant buffer (kMaps) is counted
+// with the frames without a block: the frame has no shadows of its block either way. `rotated`: a
+// drawn mask was written with the game's rotation tile.
+struct ClayMaskFrames {
+  uint64_t frames = 0, block = 0, view = 0, unrotated = 0, nolight = 0, objects = 0;
+};
+inline void CountClayMaskFrame(bool shadows_on, ClayMask mask, bool rotated, ClayMaskFrames& n) {
+  if (!shadows_on) return;
+  ++n.frames;
+  if (mask == ClayMask::kBlock || mask == ClayMask::kMaps) ++n.block;
+  if (mask == ClayMask::kView) ++n.view;
+  if (mask == ClayMask::kDrawn && !rotated) ++n.unrotated;
+  if (CountsNoLightFrame(shadows_on, mask)) ++n.nolight;
+  if (CountsNoObjectsFrame(shadows_on, mask)) ++n.objects;
+}
 
 inline constexpr uint8_t kTallyAlphaUnknown = 0, kTallyBlendUnknown = 1;
 
@@ -1223,13 +1279,18 @@ inline constexpr float kClayClearLinear[4] = {101.0f / 16384.0f, 101.0f / 16384.
 // and every draw of a frame without a block, is drawn as with the switch off.
 enum class ClayLight : uint8_t { kOff, kOn };
 
+// The words of an on / off switch (fable2_native_light, and fable2_native_shadows, which is read with
+// this parser): on, true, 1 and off, false, 0, in any case, blanks around them ignored. Anything else
+// is off and not recognised (the caller warns once, with kClaySwitchWords).
+inline constexpr const char* kClaySwitchWords = "on, true, 1, off, false, 0";
 inline ClayLight ParseClayLight(std::string_view text, bool* recognized) {
   while (!text.empty() && text.front() == ' ') text.remove_prefix(1);
   while (!text.empty() && text.back() == ' ') text.remove_suffix(1);
   std::string lower(text);
   for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
-  if (recognized) *recognized = lower == "off" || lower == "on";
-  return lower == "on" ? ClayLight::kOn : ClayLight::kOff;
+  const bool on = lower == "on" || lower == "true" || lower == "1";
+  if (recognized) *recognized = on || lower == "off" || lower == "false" || lower == "0";
+  return on ? ClayLight::kOn : ClayLight::kOff;
 }
 
 // Whether the pass asks the geometry cache for the light's vertex inputs of a frame (the normals of
@@ -1310,7 +1371,8 @@ inline std::string FormatTargetText(uint32_t width, uint32_t height) {
 // --- Native light (frame-map section 14, "Native light"; docs/native-renderer/lighting-formulas.md) ---
 // With fable2_native_light on, in a frame that has a light block, the draws of
 // seven families are lit by the game's own ambient, baked and sun light, in
-// linear space and without shadows (the screen mask is 1): the terrain layers,
+// linear space, their sun shadowed by the screen mask ("Native shadows" below; the mask is 1 in a
+// frame without one, which is the picture without shadows): the terrain layers,
 // the far terrain, the objects (their baked term from the colour stream of
 // vertex shader 0xECD6..., or the probe colour of 0x79EA..., 0xD4D5...,
 // 0xA1F7...), the tree trunks (probe colours, 0x475E...) and the instanced
@@ -1421,7 +1483,7 @@ inline Float3 ProbeColour(const float probe[capture::kLightProbeRegisters][4], u
 // Terrain layers only: sat(k * (N . c109.xyz)), k the pixel shader's literal 8.
 inline float FacingGate(float n_dot_c109, float k) { return LightSat(LightFinite(k) * LightFinite(n_dot_c109)); }
 
-// The one-light gate on the sun: facing * mask (the mask is 1 while the pass draws no shadows).
+// The one-light gate on the sun: facing * mask (the screen mask at the pixel; 1 in a frame without one).
 inline float SunGateSingle(float mask, float facing) { return LightSat(facing) * LightSat(mask); }
 
 namespace light_detail {
@@ -1615,7 +1677,7 @@ inline Float3 LeafView(const Float3& eye, const Float3& world) {
 
 // The leaf pixel shader's two factors of the screen mask (light_formulas.leaf_mask): m1 = mask *
 // gain + bias on the front light, m2 = m1 * gain + bias on the back light (0x7CD5... instr 15, 17).
-// With the mask at 1 (no shadows) and the shader's literals both are 1.
+// With the mask at 1 (a frame without a mask) and the shader's literals both are 1.
 struct LeafMasks {
   float m1, m2;
 };
@@ -3141,8 +3203,8 @@ inline std::string FormatMaskTargetText(uint32_t width, uint32_t height) {
 }
 
 // The log's and F3's Shadow line (spec Design 5). "Shadow: off" with the
-// shadows' switch off (ClayStats::shadow_switch: the switch, or a scene that
-// holds shadow records). Else the block (valid, or invalid with the capture's
+// shadows' switch off and no shadow records in the scene (ClayStats::shadow_switch).
+// Else the block (valid, or invalid with the capture's
 // reason: the frame is then drawn without shadows, "shadow-block"), and per
 // map the records drawn into it of the scene's records, with what was not
 // drawn by reason: the pass's own reasons (ShadowDrawSkipName) first, then,
@@ -3150,8 +3212,12 @@ inline std::string FormatMaskTargetText(uint32_t width, uint32_t height) {
 // (ShadowSkipName). Then the draws on the game's map in neither pass
 // (shadow-pass-extra) and the passes the game opened when they are not two: a
 // frame with a valid block may hold a partial pass, and this is where it
-// shows. Then the split distances of a valid block, and why the maps were not
-// drawn when the block is valid and they were not.
+// shows. Then the split distances of a valid block, and that the maps were not
+// drawn when the block is valid and they were not (the mask's part says why).
+// The frame counts at the end are the pass's totals since it was made ("since
+// start"), over the frames drawn with the shadows' and the light's switches on;
+// the capture's own line counts "shadow-block in N of M frames" over one log
+// window of the frames with shadow records, which is another count.
 inline std::string FormatShadowText(const ClayStats& st) {
   if (!st.shadow_switch) return "Shadow: off";
   std::string text = "Shadow: on, block ";
@@ -3161,7 +3227,7 @@ inline std::string FormatShadowText(const ClayStats& st) {
     text += std::string("invalid (") + capture::kShadowBlockReason + ": " + capture::ShadowBlockReasonName(st.shadow_reason) + ")";
   }
   const char* names[2] = {"near", "far"};
-  char buf[96];
+  char buf[160];
   for (size_t c = 0; c < 2; ++c) {
     std::snprintf(buf, sizeof(buf), ", %s %u of %u draws (skipped {", names[c], st.shadow_drawn[c], st.shadow_records[c]);
     text += buf;
@@ -3216,10 +3282,13 @@ inline std::string FormatShadowText(const ClayStats& st) {
     case ClayMask::kView:
       text += std::string(" | mask white (") + kShadowViewReason + ": " + FrameViewReasonName(st.mask_view) + ")";
       break;
-    case ClayMask::kObjects: text += " | mask white (the shadows' objects could not be made: off for the session)"; break;
+    case ClayMask::kObjects:
+      text += " | mask white (the shadows' objects could not be made: off until the pass is rebuilt or the game restarted)";
+      break;
     default: text += " | mask white (off)"; break;
   }
-  std::snprintf(buf, sizeof(buf), " | frames %llu: %s %llu, %s %llu, unrotated %llu", static_cast<unsigned long long>(st.shadow_frames),
+  std::snprintf(buf, sizeof(buf), " | frames since start %llu: %s %llu, %s %llu, unrotated %llu",
+                static_cast<unsigned long long>(st.shadow_frames),
                 capture::kShadowBlockReason, static_cast<unsigned long long>(st.shadow_block_frames), kShadowViewReason,
                 static_cast<unsigned long long>(st.shadow_view_frames), static_cast<unsigned long long>(st.shadow_unrotated_frames));
   text += buf;

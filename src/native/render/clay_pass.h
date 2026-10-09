@@ -20,19 +20,21 @@
 // that has a light block, the terrain, the objects (with a colour stream or
 // with probe colours) and the tree trunks are lit by the game's ambient, baked
 // and sun light (clay_logic.h, "Native light"); every other draw is the unlit
-// colour. With the light on, in a frame that has a valid shadow block
-// (FrameScene::shadow), the game's two sun shadow maps are drawn first, from
-// the frame's shadow records into two depth targets of the pass's own
-// (clay_logic.h, "Native shadow maps"). With the shadows' switch on, such a
-// frame's sun is shadowed as the game shadows it (clay_logic.h, "Native
-// shadows"): the scene's depth-writing records are drawn once depth-only, one
-// full-screen step writes the screen mask from that depth and the two maps
-// with the game's mask arithmetic, and the colour pass, drawn as always from
-// a cleared depth, reads the mask at each lit pixel. In every other frame the
-// mask is the 1 x 1 white texture: the lighting picture. Everything the
+// colour. With the light and the shadows' switch on, a frame that has a valid
+// shadow block (FrameScene::shadow) and everything else its mask needs
+// (clay_logic.h, DecideClayMask) has its sun shadowed as the game shadows it
+// (clay_logic.h, "Native shadow maps", "Native shadows"): the game's two sun
+// shadow maps are drawn first, from the frame's shadow records into two depth
+// targets of the pass's own; the scene's depth-writing records are drawn once
+// depth-only; one full-screen step writes the screen mask from that depth and
+// the two maps with the game's mask arithmetic; and the colour pass, drawn as
+// always from a cleared depth, reads the mask at each lit pixel. In every
+// other frame neither the maps nor the mask are drawn and the mask is the
+// 1 x 1 white texture: the lighting picture. Everything the
 // shadows alone need (the maps, the mask target, their shaders and
 // pipelines) is made on the first frame that wants it; if that fails the
-// shadows are off for the session and the pass draws on without them. GPU
+// shadows are off until the pass is rebuilt (another device, an F6 retry after
+// a failure of the renderer) and the pass draws on without them. GPU
 // (command-processor) thread only; Cmd is valid only inside the SDK's
 // guest-output callbacks.
 
@@ -76,9 +78,10 @@ class ClayPass {
   // values times the frame's exposure. Every other draw, and every draw of a
   // frame without light, is the unlit colour. st receives what was lit and what was not,
   // by reason (ClayStats::light_drawn, light_unlit). `shadows`: fable2_native_shadows.
-  // On, in a frame drawn with light whose shadow block is valid: the maps, the
-  // pre-pass and the mask are drawn and the lit draws' sun is shadowed. Otherwise
-  // none of it is drawn and the mask is white; st says which (ClayStats::mask).
+  // On, in a frame drawn with light whose shadow block is valid and whose mask can
+  // be drawn (DecideClayMask): the maps, the pre-pass and the mask are drawn and
+  // the lit draws' sun is shadowed. Otherwise none of it is drawn and the mask is
+  // white; st says which (ClayStats::mask).
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
               bool textured, ClayLight light, bool shadows, ClayStats& st, TextureStats& tst);
   // The mapped target (display values, 8 bits): what the composite views
@@ -94,8 +97,8 @@ class ClayPass {
   // only while it draws that map, before anything of the scene is drawn, and no draw of the pass
   // samples a map while one is bound for writing.
   // shadow_maps_drawn: the last Render cleared and drew both for its scene. False: their contents
-  // are another frame's or undefined (new targets, no valid shadow block, the light or the
-  // shadows off) and must not be shown or sampled.
+  // are another frame's or undefined (new targets, or a frame whose mask is not drawn: the light or
+  // the shadows off, no valid shadow block, no light block, no view) and must not be shown or sampled.
   nrhi::TextureView* shadow_view(size_t cascade) const { return cascade < 2 ? shadow_view_[cascade] : nullptr; }
   bool shadow_maps_drawn() const { return shadow_drawn_; }
   // The screen mask (R8, the clay target's size; 1 = lit by the sun), made with the maps. In
@@ -103,6 +106,9 @@ class ClayPass {
   // its scene; false: its contents are another frame's or undefined and must not be shown.
   nrhi::TextureView* mask_view() const { return mask_view_; }
   bool mask_drawn() const { return mask_drawn_; }
+  // False once making the shadows' objects has failed, until the pass is rebuilt (Ensure on another
+  // device or after a failure): the pass then draws no shadows, and the capture need record none.
+  bool shadows_usable() const { return !shadow_objects_failed_; }
   GeometryCache& geometry() { return geometry_; }
   TextureCache& textures() { return textures_; }
 
@@ -154,10 +160,10 @@ class ClayPass {
     // position, GeometryCache::InstanceBend). For a mesh record the normals
     // and its kind's other buffers or none of them: nullptr when one could not
     // be built (counted in ClayStats::light_missing; `light_why`).
-    // Only a lit record's buffers are bound (`lit`, below): a colour stream's
-    // colours at t10; the probe buffer's set indices at t10 (from
-    // ProbeSetOffset(probe_count)) and its weights at t11; an instanced
-    // plant's colours at t10 and its bend inputs at t11.
+    // Only a lit record's buffers are bound (`lit`, below; the normals at t10):
+    // a colour stream's colours at t11; the probe buffer's set indices at t11
+    // (from ProbeSetOffset(probe_count)) and its weights at t12; an instanced
+    // plant's colours at t11 and its bend inputs at t12.
     // `light_count`: the elements the buffers hold, the smallest of the
     // normals' count and the other buffers' (the shader reads them for a
     // vertex below it). `probe_count`: the vertices the probe buffer was built with, which
@@ -208,9 +214,9 @@ class ClayPass {
   // What the shadows alone need: the two maps, their pixel shader and pipelines, the view of the
   // scene's depth, the mask target, the mask step's layout, shader and pipeline, and the pre-pass's
   // depth-only pixel shaders. EnsureShadowObjects makes them on the first frame that wants them;
-  // false when they could not be made, now or before: then they are not tried again (the shadows
-  // are off for the session, one log line) and nothing of them is left. Destroyed with the pass's
-  // other objects.
+  // false when they could not be made, now or before: then they are not tried again until the pass
+  // is rebuilt (Ensure: another device, or the retry after a failure of the pass; one log line) and
+  // nothing of them is left. Destroyed with the pass's other objects.
   bool EnsureShadowObjects(nrhi::Device* dev);
   void DestroyShadowObjects();
   void ForgetShadowObjects();
@@ -257,7 +263,8 @@ class ClayPass {
   void FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, TextureStats& tst);
   // The shadow maps (Render). PrepareShadows, with the scene's other records and before any target
   // is bound (a caster's texture may be uploaded here): the frame's shadow counters, and, when
-  // `draw` (the frame is drawn with light and its shadow block is valid), for every shadow record
+  // `draw` (the frame's mask is to be drawn, ClayMapsDrawn: the shadows' and the light's switches,
+  // a valid shadow block, a light block, an eye, one view and the shadows' objects), for every shadow record
   // what DecideShadowDraw says, its geometry and, for a caster whose alpha decides, its
   // coordinates and texture; a record that lacks any of it is counted by reason and vertex shader
   // and not drawn (never as a solid caster). DrawShadows, after FinishTerrain (the frame's constant
@@ -322,7 +329,7 @@ class ClayPass {
   bool shadow_wanted_ = false, shadow_drawn_ = false;
   std::vector<ShadowPrepared> shadow_prepared_[2];
   // The rest of the shadows' objects (EnsureShadowObjects). shadow_objects_: they exist;
-  // shadow_objects_failed_: making them failed once (not tried again). depth_view_: depth_ as the
+  // shadow_objects_failed_: making them failed once (not tried again until Ensure rebuilds the pass). depth_view_: depth_ as the
   // mask step reads it. mask_ / mask_view_: the screen mask; mask_drawn_: the last Render wrote it.
   // The mask step has its own layout (its constants in a slot of the frame's constant buffer at b0;
   // the depth, the two maps and the rotation tile at t0 to t3), shader and pipeline, outside the
@@ -346,9 +353,9 @@ class ClayPass {
   nrhi::TextureView* rotation_view_ = nullptr;
   uint8_t rotation_bytes_[kRotationTileBytes] = {};
   bool rotation_valid_ = false;
-  // The pass's frame counts for the Shadow line (ClayStats::shadow_frames and the three beside it).
-  uint64_t shadow_frames_ = 0, shadow_block_frames_ = 0, shadow_view_frames_ = 0, shadow_unrotated_frames_ = 0;
-  uint64_t shadow_nolight_frames_ = 0, shadow_objects_frames_ = 0;
+  // The pass's frame counts for the Shadow line (ClayStats::shadow_frames and the five beside it),
+  // since the pass was made.
+  ClayMaskFrames shadow_counts_;
   // This Render's mask: what is bound as the screen mask at the colour draws (the mask target's
   // view or the white texture), and the frame's slot of the mask's constants.
   uint32_t mask_slot_ = 0;

@@ -299,9 +299,13 @@ struct ShadowPassProof {
 
 // The tolerance of the frame's proof: 1e-4 of texture space, a tenth of a texel
 // of a 1024-map (ruling after Task 3; the spec said 1e-3, which is more than a
-// texel, 0.00098). The largest residual of the captures is 9.95e-7 over
-// 6,612 shadow rows (2.8e-7 in frame-map section 15, "Passes"), all with the
-// half texel plus on both axes, which is the only fit that agrees (PassAgrees).
+// texel, 0.00098). Two figures of the captures, both far below it: 9.95e-7 is
+// the largest residual of a single shadow row's own matrix, over the 6,612
+// shadow rows of plan Task 3's captures (what this proof compares: one
+// record's matrix); 2.8e-7 is the largest residual of a pass's median matrix,
+// over the 128 passes of plan Task 1's captures (shadow_matrices.py; frame-map
+// section 15, "Passes"). All with the half texel plus on both axes, which is
+// the only fit that agrees (PassAgrees).
 inline constexpr float kShadowProofTolerance = 1e-4f;
 
 // The frame's block: `registers` (MakeShadowBlock) with the two passes' proof.

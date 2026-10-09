@@ -236,6 +236,10 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     device_ = dev;
   } else {
     DestroyObjects();  // retry after a partial failure
+    // (the F6 retry after a failure of the pass rebuilds everything, so the shadows' objects are
+    // tried anew with the rest. A failure of the shadows' objects alone does not latch the renderer
+    // and F6 does not come here for it: those stay off until this path, another device or a restart.)
+    shadow_objects_failed_ = false;
   }
   ready_ = false;
 
@@ -772,7 +776,6 @@ void ClayPass::PrepareShadows(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScen
   for (std::vector<ShadowPrepared>& list : shadow_prepared_) list.clear();
   shadow_wanted_ = draw;
   // What the frame holds, whether or not it is drawn: the Shadow line.
-  st.shadow_switch = scene.shadow_records;
   st.shadow_block = scene.shadow.valid;
   st.shadow_reason = scene.shadow_reason;
   st.shadow_extra = scene.shadow_extra;
@@ -1161,7 +1164,9 @@ bool ClayPass::EnsureShadowObjects(nrhi::Device* dev) {
   if (shadow_objects_) return true;
   if (shadow_objects_failed_ || !ready_ || dev != device_) return false;
   auto fail = [&](const char* what) {
-    REXLOG_ERROR("[native] clay: {} failed: the native shadows are off for this session (the lighting picture is drawn)", what);
+    REXLOG_ERROR("[native] clay: {} failed: the native shadows are off until the pass is rebuilt (another device, or an F6 retry "
+                 "after a failure of the renderer) or the game is restarted; the lighting picture is drawn and the capture "
+                 "records no shadow passes", what);
     DestroyShadowObjects();
     shadow_objects_failed_ = true;
     return false;
@@ -1365,18 +1370,45 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     }
     prepared_.push_back(p);
   }
-  // The frame's shadow records: drawn into the two maps in a frame that is drawn with light and
-  // the shadows' switch and has a valid shadow block (its own: never another frame's maps or
-  // matrices), when the shadows' objects exist. Before FinishTerrain, which takes the frame's
-  // constant buffer for these draws too.
+  // The frame's mask is decided first (DecideClayMask: one chain, the first thing missing decides),
+  // and the two maps are prepared and drawn only for a frame whose mask will be drawn: nothing else
+  // reads them. Everything but the frame's constant buffer is known here: the switches, the frame's
+  // own shadow block (never another frame's maps or matrices), its light block and eye, its one
+  // inverse view-projection, the mask's constants made of them (the tile's flag is set below), and,
+  // asked last so that nothing is made for a frame that cannot use it, the shadows' objects. The
+  // shadow records are prepared before FinishTerrain, which takes the frame's constant buffer for
+  // their draws too; with that buffer known the verdict is final.
   const bool shadows_on = shadows && light == ClayLight::kOn;
-  const bool shadow_objects = shadows_on && scene.shadow.valid && EnsureShadowObjects(dev);
-  const bool shadow_draw = shadow_objects;
-  st.shadow_light_off = scene.shadow.valid && light != ClayLight::kOn;
-  PrepareShadows(cmd, dev, scene, shadow_draw, st, tst);
+  ClayMaskInputs mask_in;
+  mask_in.shadows = shadows;
+  mask_in.light = light == ClayLight::kOn;
+  mask_in.objects = !shadow_objects_failed_;
+  mask_in.block = scene.shadow.valid;
+  mask_in.light_block = frame_.light_on != 0;
+  mask_in.constants = true;  // (FinishTerrain, below)
+  mask_in.eye = frame_.eye_on != 0;
+  mask_in.finite = true;
+  float mask_inverse[4][4] = {};
+  float mask_view_proj[4][4] = {};
+  FrameView mask_frame_view;
+  ClayMaskConstants mask_constants{};
+  if (DecideClayMask(mask_in).mask == ClayMask::kDrawn) {
+    if (!FrameInverseViewProj(scene, mask_inverse, &mask_frame_view, mask_view_proj)) {
+      mask_in.view = mask_frame_view.why;
+    } else {
+      mask_in.finite = MakeClayMaskConstants(scene.shadow, mask_inverse, frame_.eye, kWidth, kHeight, false, &mask_constants);
+    }
+  }
+  if (DecideClayMask(mask_in).mask == ClayMask::kDrawn) mask_in.objects = EnsureShadowObjects(dev);
+  PrepareShadows(cmd, dev, scene, ClayMapsDrawn(DecideClayMask(mask_in).mask), st, tst);
+  // "Shadow: on": the switch, or a scene that holds shadow records all the same.
   st.shadow_switch = shadows || scene.shadow_records;
   FinishTerrain(dev, textured, st, tst);
   // (after FinishTerrain: without the frame's constant buffer the frame has no light)
+  mask_in.light_block = frame_.light_on != 0;
+  mask_in.constants = terrain_cb_ != nullptr;
+  const ClayMaskDecision mask_decision = DecideClayMask(mask_in);
+  st.shadow_light_off = scene.shadow.valid && (light != ClayLight::kOn || !frame_.light_on);
   st.light_switch = light == ClayLight::kOn;
   st.light_block = frame_.light_on != 0;
   if (st.light_block) {
@@ -1394,91 +1426,52 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     white_staging_ = nullptr;
   }
 
-  // The frame's mask: drawn only for a lit frame of its own valid block whose maps are drawn (they
-  // are when the frame's constant buffer was made: DrawShadows) and which has one inverse
-  // view-projection and an eye. Everything else is the white mask, by reason (ClayMask). Decided
-  // here, before any target is bound: the rotation tile may be uploaded and the pre-pass's
-  // pipelines made.
+  // The frame's mask: drawn only for a lit frame of its own valid block which has one inverse
+  // view-projection, an eye and the frame's constant buffer (mask_decision, above; the maps are
+  // drawn for exactly these frames). Everything else is the white mask, by reason (ClayMask). What
+  // a drawn mask needs is made here, before any target is bound: the rotation tile may be uploaded
+  // and the pre-pass's pipelines made.
   mask_drawn_ = false;
-  ClayMask mask = ClayMask::kOff;
-  FrameViewReason mask_view = FrameViewReason::kNone;
+  const ClayMask mask = mask_decision.mask;
   bool mask_rotated = false;
-  const bool maps_will_be_drawn = shadow_draw && terrain_cb_ != nullptr;
-  if (!shadows) {
-    mask = ClayMask::kOff;
-  } else if (light != ClayLight::kOn) {
-    mask = ClayMask::kNoLight;
-  } else if (!scene.shadow.valid) {
-    mask = ClayMask::kBlock;
-  } else if (!frame_.light_on) {
-    mask = ClayMask::kNoLight;
-  } else if (!shadow_objects) {
-    mask = ClayMask::kObjects;
-  } else if (!maps_will_be_drawn) {
-    mask = ClayMask::kMaps;
-  } else {
-    float inverse[4][4];
-    FrameView view;
-    float view_proj[4][4];
-    ClayMaskConstants constants;
-    if (!frame_.eye_on) {
-      mask = ClayMask::kView;
-      mask_view = FrameViewReason::kEye;
-    } else if (!FrameInverseViewProj(scene, inverse, &view, view_proj)) {
-      mask = ClayMask::kView;
-      mask_view = view.why;
-    } else {
-      st.mask_view_outliers = view.outliers;
-      nrhi::TextureView* const tile = UpdateRotation(cmd, dev);
-      if (MakeClayMaskConstants(scene.shadow, inverse, frame_.eye, kWidth, kHeight, tile != nullptr, &constants)) {
-        std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(mask_slot_), &constants, sizeof(constants));
-        mask = ClayMask::kDrawn;
-        mask_rotated = tile != nullptr;
-        // The pre-pass's pipelines, one a depth-writing record (a few keys for all of them). A
-        // record wholly beyond the mask's reach gets none: it is left out of the pre-pass and
-        // counted (PrepassBeyondReach: the mask is the same without it).
-        for (Prepared& p : prepared_) {
-          if (!p.pipeline) continue;
-          const PipelineKey* key = KeyOf(p.pipeline);
-          if (!key || !InPrepass(*key)) continue;
-          float m[4][4];
-          RecordMatrix(*p.r, m);
-          if (PrepassBeyondReach(m, p.bounds, view_proj, frame_.eye, scene.shadow.split, key->depth_func)) {
-            p.prepass_culled = true;
-            ++st.prepass_culled;
-            continue;
-          }
-          p.prepass = PrepassPipeline(dev, p.pipeline, p.alpha, &p.prepass_flat);
-        }
-      } else {
-        mask = ClayMask::kView;
-        mask_view = FrameViewReason::kSingular;
+  if (mask == ClayMask::kDrawn) {
+    st.mask_view_outliers = mask_frame_view.outliers;
+    nrhi::TextureView* const tile = UpdateRotation(cmd, dev);
+    mask_rotated = tile != nullptr;
+    mask_constants.rotate = mask_rotated ? 1u : 0u;  // (MakeClayMaskConstants' flag: the tile is bound)
+    std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(mask_slot_), &mask_constants, sizeof(mask_constants));
+    // The pre-pass's pipelines, one a depth-writing record (a few keys for all of them). A
+    // record wholly beyond the mask's reach gets none: it is left out of the pre-pass and
+    // counted (PrepassBeyondReach: the mask is the same without it).
+    for (Prepared& p : prepared_) {
+      if (!p.pipeline) continue;
+      const PipelineKey* key = KeyOf(p.pipeline);
+      if (!key || !InPrepass(*key)) continue;
+      float m[4][4];
+      RecordMatrix(*p.r, m);
+      if (PrepassBeyondReach(m, p.bounds, mask_view_proj, frame_.eye, scene.shadow.split, key->depth_func)) {
+        p.prepass_culled = true;
+        ++st.prepass_culled;
+        continue;
       }
+      p.prepass = PrepassPipeline(dev, p.pipeline, p.alpha, &p.prepass_flat);
     }
   }
   st.mask = mask;
-  st.mask_view = mask_view;
+  st.mask_view = mask_decision.view;
   st.mask_rotated = mask_rotated;
-  if (shadows_on) {
-    ++shadow_frames_;
-    // (a valid block whose maps cannot be drawn is counted with the frames without a block: the
-    // frame has no shadows of its block either way)
-    if (!scene.shadow.valid || mask == ClayMask::kMaps) ++shadow_block_frames_;
-    if (mask == ClayMask::kView) ++shadow_view_frames_;
-    if (mask == ClayMask::kDrawn && !mask_rotated) ++shadow_unrotated_frames_;
-  }
-  // (frames with the white mask for want of the light block or of the shadows' objects: counted too)
-  if (CountsNoLightFrame(shadows_on, mask)) ++shadow_nolight_frames_;
-  if (CountsNoObjectsFrame(shadows_on, mask)) ++shadow_objects_frames_;
-  st.shadow_nolight_frames = shadow_nolight_frames_;
-  st.shadow_objects_frames = shadow_objects_frames_;
-  st.shadow_frames = shadow_frames_;
-  st.shadow_block_frames = shadow_block_frames_;
-  st.shadow_view_frames = shadow_view_frames_;
-  st.shadow_unrotated_frames = shadow_unrotated_frames_;
+  // The pass's frame counts follow from the verdict (CountClayMaskFrame).
+  CountClayMaskFrame(shadows_on, mask, mask_rotated, shadow_counts_);
+  st.shadow_nolight_frames = shadow_counts_.nolight;
+  st.shadow_objects_frames = shadow_counts_.objects;
+  st.shadow_frames = shadow_counts_.frames;
+  st.shadow_block_frames = shadow_counts_.block;
+  st.shadow_view_frames = shadow_counts_.view;
+  st.shadow_unrotated_frames = shadow_counts_.unrotated;
 
   // The shadow maps first (the game's order), each bound only for its own draws and back in
-  // kPixelShaderResource before anything of the scene is bound.
+  // kPixelShaderResource before anything of the scene is bound. (Prepared only for a frame whose
+  // mask was to be drawn; a frame that then got no constant buffer draws none: DrawShadows.)
   DrawShadows(cmd, st);
   cmd->Barrier(linear_, nrhi::ResourceState::kPixelShaderResource,
                nrhi::ResourceState::kRenderTarget);
@@ -1523,7 +1516,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   cmd->SetRenderTargets(linear_, depth_);
   cmd->ClearRenderTarget(linear_, kClayClearLinear);
   nrhi::TextureView* mask_bound = white_view_;
-  if (mask == ClayMask::kDrawn && !left_out) {
+  // (a drawn mask has the frame's constant buffer, DecideClayMask: no record is left out in its frame)
+  if (mask == ClayMask::kDrawn) {
     // 1. The depth pre-pass: every record that writes depth, depth only, in the scene's order.
     begin_scene();
     nrhi::Pipeline* bound = nullptr;
@@ -1577,9 +1571,6 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       REXLOG_INFO("[native] clay: first shadow mask drawn: pre-pass {} draws ({} without a pipeline), taps {}, scene frame {}",
                   st.prepass_drawn, st.prepass_skipped, mask_rotated ? "rotated" : "unrotated", scene.frame);
     }
-  } else if (mask == ClayMask::kDrawn) {
-    // (no constant buffer after all: nothing is drawn, and no mask either)
-    st.mask = ClayMask::kMaps;
   }
   // 3. The colour pass, as always: from a cleared depth, each record with its captured state. The
   // pre-pass's depth was the mask's alone.

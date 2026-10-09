@@ -3127,7 +3127,7 @@ constinit thread_local ShadowFrame t_shadow;
 // frame that gives none: what a frame without valid registers costs, as for the light.
 constexpr uint32_t kMaxShadowRegisterTries = 8;
 
-// Shadow draws, passes and extra draws that were read in one frame and found, under the lock, to
+// Shadow draws, passes, extra draws and register reads that were read in one frame and found, under the lock, to
 // belong to a frame that is over (the frame's recheck below): dropped, and counted here for the
 // shadow: log line since its last print (atomic: the line is written at the frame end).
 std::atomic<uint32_t> g_shadow_dropped{0};
@@ -3174,6 +3174,9 @@ void ReadShadowRegisters(uint32_t id, ShadowFrame& f) {
   }
   std::lock_guard<std::mutex> lock(g_scene_mutex);
   if (!g_builder.InMainScene()) return;  // (as RecordDraw: the bracket is checked again under the lock)
+  // The frame is checked again under the lock, as for the shadow draws: registers read in one frame
+  // must not become the next frame's block.
+  if (!ShadowFrameCurrent(f)) return;
   g_builder.SetShadowRegisters(registers);
   f.registers_done = true;
 }

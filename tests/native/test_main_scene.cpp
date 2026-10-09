@@ -74,14 +74,13 @@ int main() {
     t.Reset();
     if (t.passes() != 0) return 59;
     if (clear() != ShadowPass::kNone || draw() != ShadowPass::kNear) return 60;
-    // Frame(n): a reset when the number changes, nothing when it does not.
-    t.Frame(7);
-    if (t.passes() != 0) return 61;
+    // A tracker made anew is the frame boundary too (what the capture does: capture.cpp, CurrentShadowFrame).
     clear();
-    t.Frame(7);
-    if (t.passes() != 1 || draw() != ShadowPass::kNear) return 62;
-    t.Frame(8);
-    if (t.passes() != 0) return 63;
+    if (t.passes() != 2) return 61;
+    t = ShadowPassTracker{};
+    if (t.passes() != 0 || draw() != ShadowPass::kExtra) return 62;
+    if (clear() != ShadowPass::kNone || draw() != ShadowPass::kNear) return 63;
+    t.Reset();
 
     // A pass with no draws is a pass: what follows the second clear is the far map.
     if (clear() != ShadowPass::kNone || clear() != ShadowPass::kNone) return 64;

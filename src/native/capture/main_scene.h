@@ -79,7 +79,8 @@ enum class ShadowPass : uint8_t { kNone, kNear, kFar, kExtra };
 //    is recorded whole or its tail is counted; a map is never put together
 //    from two runs.)
 // A pass with no draws is a pass: after two clears the next run is the far map.
-// Reset at the frame boundary (Reset, or Frame with the frame's number).
+// A tracker is one frame's: the capture makes a new one at the frame boundary
+// (capture.cpp, CurrentShadowFrame); Reset does the same to one that is kept.
 class ShadowPassTracker {
  public:
   // One outermost guest draw call, or a clear. `surface_word`: RB_SURFACE_INFO
@@ -115,19 +116,10 @@ class ShadowPassTracker {
     passes_ = 0;
     open_ = false;
   }
-  // The same for a tracker that is not told of the boundary itself: `frame` is
-  // any number that changes with the frame; another one than the last resets.
-  constexpr void Frame(uint32_t frame) {
-    if (frame != frame_) {
-      frame_ = frame;
-      Reset();
-    }
-  }
   // Passes opened in the frame so far (clears of the map).
   constexpr uint32_t passes() const { return passes_; }
 
  private:
-  uint32_t frame_ = 0;
   uint32_t passes_ = 0;
   bool open_ = false;  // the last clear's run has not ended
 };

@@ -28,8 +28,9 @@ REXCVAR_DEFINE_BOOL(fable2_native_render, false, "Fable2",
                     "required). Seeded from fable2_config.toml [native] enabled.");
 REXCVAR_DEFINE_STRING(fable2_native_view, "off", "Fable2",
                       "Native debug view: off, overlay, split, native, pattern (F6 cycles those), or shadow "
-                      "(the clay pass's two shadow maps as grey depth and its screen mask; by name only; with the "
-                      "shadows off it shows the native picture).");
+                      "(the clay pass's two shadow maps as grey depth and its screen mask; by name only; a frame "
+                      "without maps or mask, as every frame with the shadows off, shows flat panels; until the first "
+                      "frame drawn with shadows, and when their objects could not be made, it shows the native picture).");
 REXCVAR_DEFINE_STRING(fable2_native_clay_color, "clay", "Fable2",
                       "Native clay pass color: clay = one clay color; draw = a color per "
                       "draw; shader = a color per vertex shader.");
@@ -46,15 +47,15 @@ REXCVAR_DEFINE_INT32(fable2_native_texture_budget_mb, 512, "Fable2",
                      "GPU memory budget (MB) for native albedo textures; least recently used "
                      "textures are evicted above it.");
 REXCVAR_DEFINE_STRING(fable2_native_light, "on", "Fable2",
-                      "Native clay pass light: on = terrain, objects, tree trunks, leaves and plants are lit by the "
-                      "game's ambient, baked and sun light (no shadows; one fixed exposure on the lit draws, fitted on the bridge's "
-                      "dirt patch; unlit draws are shown as with the light off); "
-                      "off = the unlit materials picture.");
+                      "Native clay pass light: on (or true, 1) = terrain, objects, tree trunks, leaves and plants are lit by the "
+                      "game's ambient, baked and sun light (the sun shadowed when fable2_native_shadows is on; one fixed exposure "
+                      "on the lit draws, fitted on the bridge's dirt patch; unlit draws are shown as with the light off); "
+                      "off (or false, 0) = the unlit materials picture, without shadows.");
 REXCVAR_DEFINE_STRING(fable2_native_shadows, "on", "Fable2",
-                      "Native sun shadows: on = with a composite view and the light on, the capture also records the "
+                      "Native sun shadows: on (or true, 1) = with a composite view and the light on, the capture also records the "
                       "game's two shadow passes and the frame's shadow block, and the clay pass draws its two shadow "
                       "maps from them, a depth pre-pass and the game's screen mask, and shadows the sun of its lit draws "
-                      "(fable2_native_view=shadow shows the maps and the mask); off = none of it is read, made or "
+                      "(fable2_native_view=shadow shows the maps and the mask); off (or false, 0) = none of it is read, made or "
                       "drawn: the lighting picture.");
 REXCVAR_DEFINE_BOOL(fable2_native_d3d_messages, false, "Fable2",
                     "Write the Direct3D debug layer's errors, corruption and warnings to the game log "
@@ -93,6 +94,9 @@ Resources g_res;  // command-processor thread only
 FailureLatch g_latch;
 EdgeDetector g_toggle;
 std::atomic<uint32_t> g_frame{0};
+// ClayPass::shadows_usable as of the last clay frame (written on the command-processor thread, read
+// by the game thread for the capture's switch): false once the pass's shadow objects have failed.
+std::atomic<bool> g_shadows_usable{true};
 
 // Clay pass state: command-processor thread only.
 render::Composite g_composite;
@@ -177,28 +181,31 @@ render::ClayLight CurrentClayLight() {
   bool recognized = true;
   const render::ClayLight light = render::ParseClayLight(REXCVAR_GET(fable2_native_light), &recognized);
   if (!recognized && !warned.exchange(true)) {
-    REXLOG_WARN("[native] unknown fable2_native_light '{}', using off", REXCVAR_GET(fable2_native_light));
+    REXLOG_WARN("[native] unknown fable2_native_light '{}', using off (accepted: {})", REXCVAR_GET(fable2_native_light),
+                render::kClaySwitchWords);
   }
   return light;
 }
 
-// fable2_native_shadows: "on" or "off", read like the light's switch (the same two words, so
-// its parser is used); anything else is off, with one warning.
+// fable2_native_shadows: read like the light's switch (the same words, kClaySwitchWords, so its
+// parser is used); anything else is off, with one warning that names the words.
 bool CurrentShadows() {
   static std::atomic<bool> warned{false};
   bool recognized = true;
   const bool on = render::ParseClayLight(REXCVAR_GET(fable2_native_shadows), &recognized) == render::ClayLight::kOn;
   if (!recognized && !warned.exchange(true)) {
-    REXLOG_WARN("[native] unknown fable2_native_shadows '{}', using off", REXCVAR_GET(fable2_native_shadows));
+    REXLOG_WARN("[native] unknown fable2_native_shadows '{}', using off (accepted: {})", REXCVAR_GET(fable2_native_shadows),
+                render::kClaySwitchWords);
   }
   return on;
 }
 
 // Whether the capture takes the game's shadow passes: only for a frame that could be drawn with
-// them, which is a lit one (the light on, and textures, without which nothing is lit).
+// them, which is a lit one (the light on, and textures, without which nothing is lit) of a pass
+// whose shadow objects have not failed (ShadowRecordsWanted).
 bool ShadowsWanted(bool records_wanted) {
-  return records_wanted && CurrentShadows() && REXCVAR_GET(fable2_native_textures) &&
-         CurrentClayLight() == render::ClayLight::kOn;
+  return ShadowRecordsWanted(records_wanted, CurrentShadows(), REXCVAR_GET(fable2_native_textures),
+                             CurrentClayLight() == render::ClayLight::kOn, g_shadows_usable.load(std::memory_order_relaxed));
 }
 
 bool EnsureResources(nrhi::Device* device, nrhi::Format format) {
@@ -295,6 +302,9 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
     Fail("clay pass");
     return false;
   }
+  // (before the unchanged-scene return below: a rebuilt pass tries its shadows anew, and the capture
+  // must record their passes again for that)
+  g_shadows_usable.store(g_clay->shadows_usable(), std::memory_order_relaxed);
   // New targets (F6 retry, device change) start undefined: redraw even if
   // the scene has not changed.
   if (scene == g_clay_scene && g_clay->targets_generation() == g_clay_targets) return true;
@@ -306,6 +316,7 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   render::ClayStats st;
   render::TextureStats tst;
   g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), st, tst);
+  g_shadows_usable.store(g_clay->shadows_usable(), std::memory_order_relaxed);
   SetStatus(render::FormatStatusText(*scene, st, textures ? &tst : nullptr) + "\n" +
             render::FormatLightDrawnText(st) + "\n" + render::FormatShadowText(st));
   const double cpu_ms = st.hash_ms + st.decode_ms + st.record_ms + tst.decode_ms;
@@ -408,8 +419,9 @@ void OverlayCallback(const NativeGuestOutputRenderContext& ctx, void*) {
   }
   if (view == View::kShadow) {
     // The pass's two maps and its mask (in kPixelShaderResource since its Render), each a flat colour
-    // for a frame without it. Without the shadows' objects (the shadows off, or they could not be
-    // made) there is nothing to show: the native picture stands in.
+    // for a frame without it (every frame with the shadows off, once the objects exist). Without the
+    // shadows' objects (no frame was drawn with shadows yet, or they could not be made) there is
+    // nothing to show: the native picture stands in.
     if (!g_composite.DrawShadowMaps(ctx.cmd, ctx, g_clay->shadow_view(0), g_clay->shadow_view(1), g_clay->mask_view(),
                                     g_clay->shadow_maps_drawn(), g_clay->mask_drawn(), render::kShadowMapSize,
                                     render::ClayPass::kWidth, render::ClayPass::kHeight)) {

@@ -1,12 +1,21 @@
 # Native renderer sub-project 8: sun shadows (two cascades and the screen mask)
 
-Status: implemented 2026-10-09 (plan Tasks 1 to 6 and the debug round 5b, branch
-`native-renderer-shadows`); measured in `docs/native-renderer/frame-map.md` section 15,
-"Validation". Of the nine success criteria six are met, two are met with a stated limit (4: on
-regions shadowed by things that stand still; leaf shadow is reported, not counted. 7: 30.0 fps at
-two spots, 29.8 to 30.0 at the third) and one is not met as written (5: one of the three named
-edges could be measured). What was ruled during the work and what was built differently is at
-the end, "Implementation notes (deviations)".
+Status: implemented 2026-10-09 (plan Tasks 1 to 6, the debug round 5b and the fix wave after
+the two whole-branch reviews, branch `native-renderer-shadows`); measured in
+`docs/native-renderer/frame-map.md` section 15, "Validation" and "After the reviews: the fix
+wave". Of the nine success criteria five are met (1, 2, 3, 8, 9). One is shown by a substituted
+measure and not as written (6: a comparison of the compiled programs and regions within 0.002;
+no pixel comparison). One is met in part (7: 30.0 fps by the trees and at the bridge but for one
+window at 29.9, 29.8 to 30.0 at the third spot; the capture's two limits are met, the records-on
+one in quiet runs at 1.84 to 1.87 ms). Two are not met as written. 4: none of the regions it
+names was counted as named; it is shown, at the bridge only, on two small regions shadowed by
+props, 126 and 195 pixels: 1.07 to 1.13 with emulated shots 6 s from the native one and an
+emulated drift of 11 to 25%, and 1.13 to 1.36 with shots 3 s away (one run), where one of the
+two is outside 25% in two of three triples; two large leaf-shadowed regions read 0.93 to 1.15
+with shots 3 s away and are not counted (rulings 29, 36); one sunlit region, the rock face, is
+0.10 off, in the mask's far fade by inference, and another is 0.05 to 0.06 off in two triples of
+that run. 5: one of the three named edges could be measured. What was ruled during the work and
+what was built differently is at the end, "Implementation notes (deviations)".
 
 Design of 2026-10-08.
 
@@ -339,12 +348,16 @@ Numbered on from the ten above.
     within 1e-6 — cost if wrong: frames without shadows if the game ever uses another sign.
     Carried: every drawn frame with the shadows on and no valid block is counted; "an empty
     cascade removes both" is a limitation; one scratch run with a caster entry removed, and a
-    quiet A/B of the records-on capture (both: frame-map, "Validation").
+    quiet A/B of the records-on capture. The quiet A/B was made (runs 385 and 386: 1.427 to
+    1.455 ms without the shadow records, 1.865 to 1.874 ms with them); the scratch run was not
+    (ruling 35; frame-map, "Validation", "Not done").
 26. *After plan Task 4:* the native bias stays the registers' exact values (near 0.001, far
     0.005 and the slopes), not the emulator's exponent-reduced one — why: the registers are the
     game's intent; the reduction is a property of the emulator's depth mapping — cost if wrong:
-    native casters lie further from the light than the emulated ones (measured by plan Task
-    5b: 0.05 to 0.08 units in the near map, 0.40 to 0.45 in the far one).
+    native shadows sit up to 0.09 (near) / 0.58 (far) world units further back than the
+    emulated picture at contacts (the bound; measured by plan Task 5b as a median of 0.03 to
+    0.08 units in the near map and 0.40 to 0.45 in the far one). A ruling after the edges were
+    measured might have scaled the bias: none was made.
 27. The capture's rule that a clear of another surface ends an open shadow pass is accepted as
     behaviour (a replay of 24 frames and three runs were unchanged).
 28. *After plan Task 5:* the depth is cleared again before the colour pass (kept; early
@@ -352,8 +365,10 @@ Numbered on from the ten above.
     emulated maps is allowed in plan Task 5b as the oracle (ruling 6 extended) and removed at
     its end; as built it needed no SDK change (the emulator's `--readback_resolve=full` and a
     temporary dump in the clay pass).
-29. *After plan Task 5b:* sway stays out (ruling 8) — why: the native near map equals the
-    emulated one in coverage (63.46% against 63.29%) and in shape; what differs is one tree's
+29. *After plan Task 5b:* sway stays out (ruling 8) — why: the native near map has the
+    emulated one's coverage in the rows compared (63.46% against 63.29%; about 3.5% of the area
+    differs each way, intersection over union 0.88 to 0.90; bridge only) and its shapes; what
+    differs is one tree's
     crown, displaced as a whole by 8 to 18 texels (0.2 to 0.5 units) in the six frames compared,
     moving from frame to frame as an animation does (first written here, and in the ledger, as
     "leaves 0.3 to 0.7 units at the ends of branches": corrected by the review of plan Task 5b
@@ -362,7 +377,10 @@ Numbered on from the ten above.
     frame. Open: in those six frames the offset never passes through zero, so a steady lean of
     that tree in the game is not excluded. Criterion 4 is therefore measured on regions
     shadowed by casters that stand still; regions in leaf shadow are reported with the emulated
-    shots' own spread and not counted.
+    shots' own spread and not counted. *Corrected by the final fix wave:* the mismatch of the
+    leaf-shadowed regions was put down to sway alone; the time between a native shot and its
+    emulated neighbours was a second cause of the same size, since the sun turns and every
+    shadow, native and emulated, moves with it (ruling 36). "Stand still" means no sway.
 30. Validation runs keep the emulator's default anisotropic setting, so that they compare with
     the lighting runs (the game asks for none on the leaf texture; no effect on the maps was
     found).
@@ -386,6 +404,20 @@ Numbered on from the ten above.
     the compiled programs and on the regions of a shadows-off run; the scratch build with a
     caster entry removed may be left as a described procedure (it was: frame-map,
     "Validation", "Not done").
+36. *Final fix wave (controller):* validation of moving shadows uses emulated shots 3 s or
+    less from the native one — why: the sun turns about 5 degrees in 20 s (4.45 degrees
+    between two captures 20 s apart), and shots 6 s apart see the shadows in different places
+    — cost if wrong: none; the earlier figures with 6 s between the shots stay in the record
+    as they were measured.
+37. *Final fix wave (the implementer's choices, reported for the controller's ruling):* the
+    two maps are prepared and drawn only in a frame whose mask is drawn (one decision,
+    `DecideClayMask`) — why: nothing else reads them — cost if wrong: the shadow view shows a
+    flat panel in a frame without a mask where it showed the maps. Once the shadows' objects
+    have failed the capture records no shadow passes, and in the mask's decision the failed
+    objects come before the missing block, so that the `Shadow:` line names them — why:
+    without that order every later frame would read `shadow-block` and the cause would be
+    hidden — cost if wrong: none seen (the failure was never observed in a run). The switches
+    take `on`, `true`, `1`, `off`, `false`, `0`.
 
 ### Built differently from the design
 
@@ -402,15 +434,20 @@ Numbered on from the ten above.
   greater-equal), which keeps the same caster as the game's reversed range. The bias is added
   in the pixel shader through the output depth. The leaf cards are also cut by alpha-to-mask as
   on one sample. Everything the shadows need is made on the first frame that draws them, not
-  with the pass's other targets at start-up.
+  with the pass's other targets at start-up. The maps are drawn only in a frame whose mask is
+  drawn (ruling 37), not in every lit frame with a valid block.
 - **Design 5.** Pixels at the clear depth get `split.w`, not 1 (ruling 15). The pre-pass leaves
   out records beyond the mask's reach (ruling 33), draws records without a discard with a
   flat pipeline, and its depth is cleared before the colour pass (ruling 28). The frame's
   view-projection is the matrix of the majority of the records that give one (ground,
   instanced plants, leaves), not required of every static draw. A lit pixel reads the mask at
   its corner (the mean of four texels), as the game's fetch does, not at its centre. The
-  `Shadow:` line has more fields than designed (README).
-- **Design 6.** Criterion 4 is measured on static casters (ruling 29). The edge measure found
+  `Shadow:` line has more fields than designed (README); its frame counts are the pass's
+  totals and read `frames since start N:`.
+- **Design 6.** Criterion 4 is measured on static casters (ruling 29) and, in the final fix
+  wave, with emulated shots 3 s either side of the native one (ruling 36): it is not met as
+  written. Criterion 6 is shown by the programs and by regions, not pixel for pixel (ruling
+  35). The edge measure found
   one static caster whose shadow edge crosses open wood (a railing post); a trunk's shadow on
   the ground and the bridge's own edge are in none of the three views. The walking run is a
   series of shots a second apart, not a film.

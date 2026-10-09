@@ -51,6 +51,14 @@ int main() {
       !IsCompositeView(View::kNative)) return 18;
   if (!RecordsWanted(View::kSplit, false) || RecordsWanted(View::kSplit, true)) return 19;
   if (RecordsWanted(View::kOff, false) || RecordsWanted(View::kPattern, false)) return 20;
+  // The capture takes the game's shadow passes only for a frame the pass could draw with shadows:
+  // records wanted, the shadows' and the light's switches and the textures on, and the pass's
+  // shadow objects not failed (after "the native shadows are off" nothing more is recorded for them).
+  if (!ShadowRecordsWanted(true, true, true, true, true)) return 57;
+  for (int off = 0; off < 5; ++off) {
+    if (ShadowRecordsWanted(off != 0, off != 1, off != 2, off != 3, off != 4)) return 58;
+  }
+  if (ShadowRecordsWanted(false, false, false, false, false)) return 59;
 
   // Setting the view to what it already is (a plan's VIEW= token) is no change: it is not counted
   // for the clay log's "(changed)" mark. Every F6 step is one.

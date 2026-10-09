@@ -2289,11 +2289,11 @@ int main() {
     }
 
 
-    // The light switch (fable2_native_light): off or on; anything else is off and not recognised.
+    // The light switch (fable2_native_light): off or on (and their other words: case 575); anything else is off and not recognised.
     bool ok = false;
     CHECK(407, ParseClayLight("off", &ok) == ClayLight::kOff && ok);
     CHECK(408, ParseClayLight(" On ", &ok) == ClayLight::kOn && ok);
-    CHECK(409, ParseClayLight("true", &ok) == ClayLight::kOff && !ok);
+    CHECK(409, ParseClayLight("yes", &ok) == ClayLight::kOff && !ok);  // (the accepted words: case 575)
     CHECK(410, ParseClayLight("", &ok) == ClayLight::kOff && !ok && ParseClayLight("on", nullptr) == ClayLight::kOn);
     // The exposure of the output mapping: 1 with light off (the materials picture); with light on the
     // calibrated constant (plan Task 9: fitted on the dirt patch at the bridge against the emulated frame).
@@ -4233,7 +4233,7 @@ int main() {
     {
       ClayStats st;
       // (the line's second half, which case 570 holds: here the pass drew no pre-pass and no mask)
-      const std::string tail = " | pre-pass 0 draws, 0 beyond reach | mask white (off) | frames 0: shadow-block 0, shadow-view 0, unrotated 0, no-light 0, no-objects 0";
+      const std::string tail = " | pre-pass 0 draws, 0 beyond reach | mask white (off) | frames since start 0: shadow-block 0, shadow-view 0, unrotated 0, no-light 0, no-objects 0";
       CHECK(555, FormatShadowText(st) == "Shadow: off");
       st.shadow_switch = st.shadow_block = st.shadow_maps = true;
       st.shadow_reason = capture::ShadowBlockReason::kNone;
@@ -4920,13 +4920,13 @@ int main() {
         st.shadow_frames = 300;
         st.shadow_block_frames = 2;
         CHECK(570, FormatShadowText(st).ends_with(
-                       " | pre-pass 912 draws, 0 beyond reach | mask drawn | frames 300: shadow-block 2, shadow-view 0, unrotated 0, no-light 0, no-objects 0"));
+                       " | pre-pass 912 draws, 0 beyond reach | mask drawn | frames since start 300: shadow-block 2, shadow-view 0, unrotated 0, no-light 0, no-objects 0"));
         st.prepass_culled = 61;
         CHECK(570, FormatShadowText(st).find(" | pre-pass 912 draws, 61 beyond reach | mask drawn | ") != std::string::npos);
         st.prepass_culled = 0;
         // (records whose matrix was not the frame's: on the line when there are any)
         st.mask_view_outliers = 3;
-        CHECK(570, FormatShadowText(st).find(" | mask drawn (3 records with another view) | frames 300:") != std::string::npos);
+        CHECK(570, FormatShadowText(st).find(" | mask drawn (3 records with another view) | frames since start 300:") != std::string::npos);
         st.mask_view_outliers = 0;
         // Frames with the switch and the light on that had no light block, or no shadow objects: counted.
         st.shadow_nolight_frames = 7;
@@ -4937,11 +4937,11 @@ int main() {
         st.prepass_skipped = 3;
         st.shadow_unrotated_frames = 300;
         CHECK(570, FormatShadowText(st).ends_with(
-                       " | pre-pass 912 draws, 0 beyond reach (3 without a pipeline) | mask drawn, taps unrotated | frames 300: shadow-block 2, shadow-view 0, unrotated 300, no-light 0, no-objects 0"));
+                       " | pre-pass 912 draws, 0 beyond reach (3 without a pipeline) | mask drawn, taps unrotated | frames since start 300: shadow-block 2, shadow-view 0, unrotated 300, no-light 0, no-objects 0"));
         st.mask = ClayMask::kView;
         st.mask_view = FrameViewReason::kDisagree;
         st.shadow_view_frames = 1;
-        CHECK(570, FormatShadowText(st).find(" | mask white (shadow-view: disagree) | frames 300: shadow-block 2, shadow-view 1,") != std::string::npos);
+        CHECK(570, FormatShadowText(st).find(" | mask white (shadow-view: disagree) | frames since start 300: shadow-block 2, shadow-view 1,") != std::string::npos);
         st.mask = ClayMask::kBlock;
         CHECK(570, FormatShadowText(st).find(" | mask white (shadow-block) | ") != std::string::npos);
         st.mask = ClayMask::kNoLight;
@@ -4949,7 +4949,7 @@ int main() {
         st.mask = ClayMask::kMaps;
         CHECK(570, FormatShadowText(st).find(" | mask white (maps not drawn) | ") != std::string::npos);
         st.mask = ClayMask::kObjects;
-        CHECK(570, FormatShadowText(st).find(" | mask white (the shadows' objects could not be made: off for the session) | ") != std::string::npos);
+        CHECK(570, FormatShadowText(st).find(" | mask white (the shadows' objects could not be made: off until the pass is rebuilt or the game restarted) | ") != std::string::npos);
         st.mask = ClayMask::kOff;
         CHECK(570, FormatShadowText(st).find(" | mask white (off) | ") != std::string::npos);
         ClayStats off;
@@ -5149,6 +5149,128 @@ int main() {
         FrameView info573;
         CHECK(573, FrameInverseViewProj(agree, inv573, &info573, back573) && info573.candidates == 5 && info573.outliers == 0 &&
                        std::memcmp(back573, vp, sizeof(vp)) == 0);
+      }
+      // 574: what the pass does about the frame's mask (DecideClayMask; the final review's fix wave):
+      // one chain, first failure wins, and the maps are drawn only for a frame whose mask is.
+      {
+        ClayMaskInputs all;
+        all.shadows = all.light = all.objects = all.block = all.light_block = all.constants = all.eye = all.finite = true;
+        all.view = FrameViewReason::kNone;
+        auto is = [](const ClayMaskInputs& in, ClayMask mask, FrameViewReason view) {
+          const ClayMaskDecision d = DecideClayMask(in);
+          return d.mask == mask && d.view == view;
+        };
+        CHECK(574, is(all, ClayMask::kDrawn, FrameViewReason::kNone));
+        // (a default input is the switch off)
+        CHECK(574, is(ClayMaskInputs{}, ClayMask::kOff, FrameViewReason::kNone));
+        struct Row {
+          bool ClayMaskInputs::*field;
+          ClayMask mask;
+          FrameViewReason view;
+        };
+        // In the chain's order: each row's field is false and every earlier row's field true.
+        const Row rows[] = {
+            {&ClayMaskInputs::shadows, ClayMask::kOff, FrameViewReason::kNone},
+            {&ClayMaskInputs::light, ClayMask::kNoLight, FrameViewReason::kNone},
+            {&ClayMaskInputs::objects, ClayMask::kObjects, FrameViewReason::kNone},
+            {&ClayMaskInputs::block, ClayMask::kBlock, FrameViewReason::kNone},
+            {&ClayMaskInputs::light_block, ClayMask::kNoLight, FrameViewReason::kNone},
+            {&ClayMaskInputs::constants, ClayMask::kMaps, FrameViewReason::kNone},
+            {&ClayMaskInputs::eye, ClayMask::kView, FrameViewReason::kEye},
+            {&ClayMaskInputs::finite, ClayMask::kView, FrameViewReason::kSingular},
+        };
+        const size_t count = sizeof(rows) / sizeof(rows[0]);
+        for (size_t i = 0; i < count; ++i) {
+          // The row's failure alone, and with every later failure too: the first one decides.
+          ClayMaskInputs one = all;
+          one.*rows[i].field = false;
+          CHECK(574, is(one, rows[i].mask, rows[i].view));
+          ClayMaskInputs rest = all;
+          for (size_t j = i; j < count; ++j) rest.*rows[j].field = false;
+          CHECK(574, is(rest, rows[i].mask, rows[i].view));
+        }
+        // The frame's view: its reason is the mask's, after the eye and before the constants' check.
+        for (FrameViewReason why : {FrameViewReason::kNoRecord, FrameViewReason::kDisagree, FrameViewReason::kSingular}) {
+          ClayMaskInputs v = all;
+          v.view = why;
+          CHECK(574, is(v, ClayMask::kView, why));
+          v.finite = false;
+          CHECK(574, is(v, ClayMask::kView, why));
+          v.eye = false;
+          CHECK(574, is(v, ClayMask::kView, FrameViewReason::kEye));
+          v.constants = false;
+          CHECK(574, is(v, ClayMask::kMaps, FrameViewReason::kNone));
+        }
+        // Only a drawn mask has maps: every other verdict draws none (ClayMapsDrawn).
+        for (size_t m = 0; m < size_t(ClayMask::kCount); ++m) {
+          CHECK(574, ClayMapsDrawn(ClayMask(m)) == (ClayMask(m) == ClayMask::kDrawn));
+        }
+        // The frame counts follow from the verdict (CountClayMaskFrame). `shadows_on`: the switch and
+        // the light's switch; without both nothing is counted.
+        auto counts = [](bool shadows_on, ClayMask mask, bool rotated) {
+          ClayMaskFrames n;
+          CountClayMaskFrame(shadows_on, mask, rotated, n);
+          return n;
+        };
+        auto same = [](const ClayMaskFrames& n, uint64_t frames, uint64_t block, uint64_t view, uint64_t unrotated, uint64_t nolight,
+                       uint64_t objects) {
+          return n.frames == frames && n.block == block && n.view == view && n.unrotated == unrotated && n.nolight == nolight &&
+                 n.objects == objects;
+        };
+        CHECK(574, same(counts(true, ClayMask::kDrawn, true), 1, 0, 0, 0, 0, 0));
+        CHECK(574, same(counts(true, ClayMask::kDrawn, false), 1, 0, 0, 1, 0, 0));
+        CHECK(574, same(counts(true, ClayMask::kBlock, false), 1, 1, 0, 0, 0, 0));
+        // (a valid block without the frame's constant buffer: counted with the frames without a block)
+        CHECK(574, same(counts(true, ClayMask::kMaps, false), 1, 1, 0, 0, 0, 0));
+        CHECK(574, same(counts(true, ClayMask::kView, false), 1, 0, 1, 0, 0, 0));
+        CHECK(574, same(counts(true, ClayMask::kNoLight, false), 1, 0, 0, 0, 1, 0));
+        CHECK(574, same(counts(true, ClayMask::kObjects, false), 1, 0, 0, 0, 0, 1));
+        for (size_t m = 0; m < size_t(ClayMask::kCount); ++m) {
+          CHECK(574, same(counts(false, ClayMask(m), false), 0, 0, 0, 0, 0, 0));
+        }
+        ClayMaskFrames sum;
+        CountClayMaskFrame(true, ClayMask::kDrawn, true, sum);
+        CountClayMaskFrame(true, ClayMask::kView, false, sum);
+        CountClayMaskFrame(true, ClayMask::kView, false, sum);
+        CHECK(574, same(sum, 3, 0, 2, 0, 0, 0));
+      }
+      // 575: the words of an on / off switch (fable2_native_light, fable2_native_shadows): on, true, 1
+      // and off, false, 0, in any case and with blanks around; anything else is off and not recognised.
+      {
+        bool ok = false;
+        for (const char* word : {"on", "true", "1", " TRUE ", "On"}) {
+          ok = false;
+          CHECK(575, ParseClayLight(word, &ok) == ClayLight::kOn && ok);
+        }
+        for (const char* word : {"off", "false", "0", " False ", "OFF"}) {
+          ok = false;
+          CHECK(575, ParseClayLight(word, &ok) == ClayLight::kOff && ok);
+        }
+        for (const char* word : {"", "yes", "no", "2", "onn", "tru", "-1", "o n"}) {
+          ok = true;
+          CHECK(575, ParseClayLight(word, &ok) == ClayLight::kOff && !ok);
+        }
+        CHECK(575, ParseClayLight("true", nullptr) == ClayLight::kOn && ParseClayLight("yes", nullptr) == ClayLight::kOff);
+        // The warning names every accepted word.
+        const std::string words = kClaySwitchWords;
+        for (const char* word : {"on", "off", "true", "false", "1", "0"}) CHECK(575, words.find(word) != std::string::npos);
+      }
+      // 576: the Shadow line's frame counts are the pass's totals since it was made, and say so (the
+      // capture's "shadow-block in N of M frames" is of one log window); a frame without the shadows'
+      // objects says until when.
+      {
+        ClayStats st;
+        st.shadow_switch = st.shadow_block = st.shadow_maps = true;
+        st.shadow_passes = 2;
+        st.mask = ClayMask::kDrawn;
+        st.mask_rotated = true;
+        st.shadow_frames = 900;
+        st.shadow_block_frames = 4;
+        CHECK(576, FormatShadowText(st).ends_with(
+                       " | mask drawn | frames since start 900: shadow-block 4, shadow-view 0, unrotated 0, no-light 0, no-objects 0"));
+        st.mask = ClayMask::kObjects;
+        CHECK(576, FormatShadowText(st).find(" | mask white (the shadows' objects could not be made: off until the pass is rebuilt or "
+                                             "the game restarted) | frames since start 900:") != std::string::npos);
       }
     }
   }

@@ -3932,7 +3932,7 @@ A frame's reason when it has no block: `off` (not wanted), `no-draw` (no fogged 
 
 ### Native fog
 
-Plan Task 4 (2026-10-09; commits `bc7d404`, `2487da6` and the commit of this subsection). With `--fable2_native_fog=on` (default still `off`: plan Task 6 turns it on) every lit pixel of the clay pass is fogged with the game's arithmetic and the frame's own tables. The rules are in `src/native/render/clay_logic.h`, "Native fog"; `test_clay_logic.cpp` cases 580 to 587, `test_native_shaders.cpp` 200 to 204, `test_material.cpp` 398 to 404 and `tests/test_fog_literals.py` hold them; `tools/xdk_sigmatch/fog_pins.py` made the pinned numbers from `light_formulas.py`. The sky was not drawn when this was measured (plan Task 5, "Native sky" below): above the ridge the native picture of these runs shows its clear colour.
+Plan Task 4 (2026-10-09; commits `bc7d404`, `2487da6` and the commit of this subsection). With `--fable2_native_fog=on` (the default since plan Task 6; `off` when this was measured) every lit pixel of the clay pass is fogged with the game's arithmetic and the frame's own tables. The rules are in `src/native/render/clay_logic.h`, "Native fog"; `test_clay_logic.cpp` cases 580 to 587, `test_native_shaders.cpp` 200 to 204, `test_material.cpp` 398 to 404 and `tests/test_fog_literals.py` hold them; `tools/xdk_sigmatch/fog_pins.py` made the pinned numbers from `light_formulas.py`. The sky was not drawn when this was measured (plan Task 5, "Native sky" below): above the ridge the native picture of these runs shows its clear colour.
 
 | | Native |
 |---|---|
@@ -4019,7 +4019,7 @@ On the one far region that shows the same bare ground in both pictures the nativ
 
 ### Native sky
 
-Plan Task 5 (2026-10-09; commit `6b4a0ea` and the commit of this subsection). With `--fable2_native_fog=on` (default still `off`: plan Task 6 turns it on) a fogged frame also gets the game's sky, drawn by one step of the clay pass in the place of the game's sky draw. The rules are in `src/native/render/clay_logic.h`, "Native sky"; `test_clay_logic.cpp` cases 588 to 594, `test_native_shaders.cpp` 205 to 209 and `tests/test_sky_literals.py` hold them; `tools/xdk_sigmatch/sky_pins.py` made the pinned numbers from `light_formulas.py`. Evidence files: `task5_*` and `task5b_*`.
+Plan Task 5 (2026-10-09; commit `6b4a0ea` and the commit of this subsection). With `--fable2_native_fog=on` (the default since plan Task 6; `off` when this was measured) a fogged frame also gets the game's sky, drawn by one step of the clay pass in the place of the game's sky draw. The rules are in `src/native/render/clay_logic.h`, "Native sky"; `test_clay_logic.cpp` cases 588 to 594, `test_native_shaders.cpp` 205 to 209 and `tests/test_sky_literals.py` hold them; `tools/xdk_sigmatch/sky_pins.py` made the pinned numbers from `light_formulas.py`. Evidence files: `task5_*` and `task5b_*`.
 
 | | Native |
 |---|---|
@@ -4152,6 +4152,147 @@ Plan Task 6, Part A (2026-10-09; the commit "Native fog: unlit draws ..."), buil
 | 455, 456 (the scene's end) | `04985A0F7296E130` / `81BADE63A169E3DC` | 2 quads; `0x01010101` (one, one: additive) | tf13 at `0x14E60000`, 256 x 256: a soft white disc | the sun's disc and glow (inference) |
 
 So the clouds are three blended quads of one shader pair drawn right after the sky, each with a 512 x 512 colour-and-alpha texture; they are in the picture before the post chain (the oracle shows them) and are not made in the sky shader, whose two textures are zeros. How they are placed and scrolled (the vertex shader's constants) was not read. **Ruling (controller): clouds are not drawn in this sub-project** — why: they are separate draws, not part of the sky shader — cost if wrong: the sky is plain where the game's has clouds; sky regions against the oracle hold only between clouds.
+
+### Validation
+
+Plan Task 6 (2026-10-09). Binary of commit `7242edb` (109,877,760 bytes) for every run below; the commit after it turns the switch on by default and changes no shader text, binding or target (two lines of `fable2_native_render.cpp`), so the runs with `--fable2_native_fog=on` are runs of what the default now draws. Made by the controller with the user at the machine: every driver output ends `RUN UNCHECKED: -UserPresent given, no idle gate and no watch`, exit 0, 0 `d3d ERROR` / `CORRUPTION` lines; `-BootSave Hero000`, `--fable2_native_render=true`; every shot 1942 x 1136 (one window size throughout). The user's own GPU job was paused for the real-GPU runs. Files `task6_*` and `task6b_*` in `out\native-evidence\fog\`; `task6_logs_summary.txt` has the lines quoted here.
+
+| Run | What | Log, capture |
+|---|---|---|
+| 413 | bridge, turned and pitched towards the fog's axis, read-back (the plan of "Native sky", follow-up 1) | `task6_sunrb_fable_2_413.log`, `134312` (4 frames) |
+| 414 | software adapter, fog on: **not used**: the world never loaded in 240 s (a black shot, no clay line; the save's load began 12 s late while another job shared the CPU) | `task6_warp_on_fable_2_414.log` |
+| 415, 416 | software adapter with the debug layer, 240 s, shot at 225 s: fog off, fog on | `task6_warp_off_fable_2_415.log`, `task6b_warp_on_fable_2_416.log` |
+| 417 / 418 | bridge, fog on / off (pairs 3 s apart from 36 s, `60:DISC=8/1`) | `task6_v_bridge_on_fable_2_417.log`, `144831`; `task6_v_bridge_off_fable_2_418.log`, `145008` |
+| 419 | oracle: bridge, fog on, read-back; native shots at 45 s and 56 s, `50:DISC=4/1` | `task6_v_oracle_fable_2_419.log`, `145136` (4 frames) |
+| 420, 421 | bridge, fog on with `--fable2_native_shadows=off`; fog on with `--fable2_native_light=off` | `task6_noshadow_fable_2_420.log`, `task6_nolight_fable_2_421.log` |
+| 422 / 423 | trees, fog on / off | `task6_v_trees_on_fable_2_422.log`, `145620`; `task6_v_trees_off_fable_2_423.log`, `145815` |
+| 424 | third spot, fog on: **discarded** (below) | `task6_v_third_on_fable_2_424.log`, `145956` |
+| 430 / 425 | third spot, fog on (the repeat) / off | `task6b_v_third_on_fable_2_430.log`, `151205`; `task6_v_third_off_fable_2_425.log`, `150139` |
+| 426 to 429 | third spot, the A/B: off, on, off, on; 115 s each, 55 s of native view, no capture | `task6_ab_off1_fable_2_426.log`, `task6_ab_on1_fable_2_427.log`, `task6_ab_off2_fable_2_428.log`, `task6_ab_on2_fable_2_429.log` |
+
+*Freeze check, and run 424.* In every log but two the world's windows have guest work medians of 6.2 to 13.5 ms with swap medians of 19.5 to 27 ms (the two loading windows of each run: 26.5 to 28.5 fps, work 34 ms, swap 0; run 419 under read-back: 15.8 to 16.9 fps with swap 44.7 to 47 ms). Run 414 never reached the world. **Run 424 was discarded:** from its fourth window on (frames 900 to 1,200, still with the view off) the guest's frame took 42.5 to 44.8 ms of work with a swap median of 0.01 ms, at 22 to 23.6 fps with the view off and with the native view alike (`frames: view off (until the switch): 69 frames, ... 23.6 fps`). Its draw counts were constant (977 records drawn in both clay lines, 0 uploads, 136 resident textures: the frame of run 430), its Fog and Sky lines normal, its capture's blocks equal the rows in 8 of 8 frames. This is not the loading windows' signature (34 ms, 27 fps) nor a stalled picture: the game ran, each frame a third slower on the CPU and never waiting at the swap. It began before the native view came on (the window's median is already 42.5 ms and the window ends 4 s after the switch: inference from the times), so the view did not cause it; what did is not established (the run before it and the run after it, minutes apart, read 9 to 13 ms). Nothing of run 424 is used.
+
+*The afternoon's machine.* At the third spot the guest work medians of these runs are 12.1 to 13.5 ms, fog off and on alike, against 9.4 to 9.6 ms in run 412 at midday (bridge: 10 to 12 against 9.1 to 9.4). The fog-off runs have it too, so it is the machine's state and not the build (inference: the same binary was not run at midday). No number of this subsection is compared with one of "Native fog" or "Native sky" for cost.
+
+**Software adapter (runs 415, 416).** No `d3d ERROR` or `CORRUPTION` line in either. Run 416, fog on: `fog changed at scene frame 253: Fog: on, block valid, drawn`, `sky changed at scene frame 253: Sky: on, block valid, drawn with its textures | ... then pixel shader 0x401A01FD4E5F8757`, `first unlit draws fogged at scene frame 253: 176 (11 by their alpha), 2 without a fog block`: the flat shader's fogged program, the textured unlit one and the sky step **with its two texture views bound** ran under the layer (run 405 had the sky without them), and the layer said nothing of them. Warnings: the four of id 1328 at start-up as in every such run, and in run 416 **one new warning, id 1008**, once: `ResourceBarrier: Called on the same subresource(s) of Resource(...) in separate Barrier Descs which is inefficient and likely unintentional. Desc[0] and Desc[1]`. Whose barrier it is was **not established**. What is known: it is not in runs 397, 405 or 415; the layer reports a call when it is executed and the message was polled before the lines of frame 253, so it belongs to the frames before the first lit, fogged frame (in run 416 the native view came on three frames before the light block was valid, which no earlier such run had: its first frames read `not drawn (no light)`); the pass's own barrier calls (`clay_pass.cpp`, `texture_cache.cpp`, `composite.cpp`: read for this) each flush with distinct resources, except the rotation tile's path with a failed staging buffer, which had not run; the native RHI pushes its barriers into the emulator's own queue (`NrCmdD3D12::Barrier` calls the command processor's `PushTransitionBarrier`), so a barrier the emulator had left pending for a resource the composite then transitions (the guest output) would give exactly this message (inference, not shown). Nothing was changed. The shots (viewed): 415 the bridge as sub-project 8 draws it, unhazed, the clear colour above; 416 hazed ranges, hazed water and a sky. **The dog is red in both**: 10,713 and 11,134 pixels with red above 120 and green and blue below 40, 91% and 92% of them with green and blue exactly 0, 69% and 72% exactly (255, 0, 0). So the red dog is there with the fog off: it is upstream of this sub-project (follow-ups).
+
+**Counts** (the Fog and Sky lines of the fog-on runs 417, 419, 420, 422, 427, 429, 430). Every line `Fog: on, block valid, drawn`, `fog-block 0 {block: 0, values: 0, view: 0}, no-light 0`, `0 records with another view`; every line `Sky: on, block valid, drawn with its textures`, `0 without depth write`, `then pixel shader 0x401A01FD4E5F8757` (the blended characters' shader: the place is the game's), `sky-block 0`, `no-fog 0`, `view 0`, `no-objects 0`, `early 0`; `sky-texture 0` but for run 430's 1 (one frame, the first). Unlit draws fogged: 26 to 28 at the bridge (14 to 16 by their alpha), 26 to 32 by the trees (20 to 26), 24 to 26 at the third spot (10 to 12); without a fog block: 0, and 1 by the trees (a draw without a pixel shader hash: inference from the trees' Light lines, which list a hash of 0). No frame without fog or sky occurred in a fog-on run with the light on.
+
+**Criterion 2** (`task6_<stamp>_block.txt`): the fog block and the sky block equal the rows in 8 of 8 frames at the bridge (`144831`), by the trees (`145620`) and at the third spot (`151205`), and in 4 of 4 of the oracle's (`145136`) and of run 413's (`134312`); `fog-block in 0`, `sky-block in 0` in every capture line. **Met.**
+
+**Criterion 3, the CPU sky against the oracle.** Bridge, run 419 (`task6_145136_replay_frame1.txt`, 10,203 sky pixels): observed / (`sky()` * `c20.w`) median **1.007, 0.998, 0.982** (the third read-back run with these medians; `c20.w` 8.587). All its sky pixels read tf4 at the first texel. Towards the axis, run 413 (`task6_134312_replay_frame1.txt`; the view is 27.4 degrees up, cosine 0.963 to the axis; `c20.w` 7.406): median over 11,879 sky pixels **1.031, 1.071, 1.022**, with 98% of the pixels between the table's first and last texel centre. By the band of tf4 the pixel reads (`task6_sunward.txt`: 160,979 sky pixels whose neighbours are sky too):
+
+| tf4 texels | Pixels (every 2nd) | Game / `sky()` (r, g, b) | Native shot / game (r, g, b) |
+|---|---|---|---|
+| 24 to 31 | 76 | 1.064, 1.047, 0.994 | 0.938, 0.943, 0.987 |
+| 32 to 39 | 1,569 | 1.082, 1.063, 0.993 | 0.929, 0.931, 0.989 |
+| 40 to 47 | 2,198 | 1.013, 1.018, 0.997 | 0.992, 0.969, 0.978 |
+| 48 to 55 | 8,829 | 1.052, **1.110**, 1.047 | 0.947, 0.888, 0.924 |
+| 56 to 63 | 27,541 | 1.020, 1.080, 1.034 | **0.800, 0.752, 0.785** |
+
+Median within 10% per channel over the sky pixels of the read-back picture: **met** on both pictures as the criterion is written (whole-picture medians). Said beside it: one band's green is 11% over; the excess everywhere in this view is what the game draws over its sky there, the clouds, the sun's disc and glow (viewed in `task6_sunward_pair.png`: streaks and a pale glow in the oracle, a smooth gradient natively; "Unlit draws and the reviews' fixes" has the draws). **This is the first comparison of tf4 beyond its first texel with the game:** the table's upper 40 texels are the game's sky within 1 to 11%. **The texel addressing is not settled to half a texel:** read half a texel lower or higher the medians move by 1% (red 1.040 / 1.031 / 1.021), less than the residual; what the view bounds is an error of a few texels (red rises about 2% a texel there and the red-to-blue ratio of the bands stays within 9%: about four texels; inference).
+
+**Criterion 4, the native target against the oracle** (`task6_oracle_regions_45s.txt`, `task6_oracle_pair.png`: frame 1 of capture `145136` divided by `c20.w` beside the native shot at 45 s, 5 s before the capture, taken back to the value before the exposure; native over oracle; the 56 s shot, 6 s after, in `task6_oracle_regions_56s.txt`):
+
+| Region | r | g | b | Luminance |
+|---|---|---|---|---|
+| sky: high left of centre, above the right ridge, top centre, upper centre, top right, right lower, left of the peak | 0.849 to 0.990 | 0.960 to 0.993 | 0.986 to 1.048 | 0.949 to 0.989 |
+| sky above the ridge, sky above the towers (the regions file's) | 0.990, 0.990 | 0.990, 0.989 | 0.986, 0.986 | 0.990, 0.989 |
+| far peak (bare in both pictures) | 0.992 | 0.986 | 0.990 | 0.987 |
+| far rock; far rock, below the ridge | 1.180, 1.274 | 1.131, 1.180 | 1.038, 1.069 | 1.129, 1.183 |
+| far slope; island in the lake | 1.190, 1.199 | 1.200, 1.183 | 1.039, 1.064 | 1.186, 1.176 |
+| far mountains right, centre, left (wooded in the game) | 1.323, 1.435, 1.659 | 1.208, 1.258, 1.431 | 1.120, 1.158, 1.318 | 1.217, **1.275**, **1.454** |
+| lake (the water, unlit, fogged since this task; 0.825 with blue at 0.516 before it) | 1.343 | 1.033 | 0.897 | 1.068 |
+| near: grass beside the dirt, planks, trunk, pole's averted side, hero's shirt | 0.976, 0.957, 1.034, 0.964, 1.056 | 0.978, 0.963, 1.024, 0.983, 1.050 | 0.997, 0.956, 1.018, 1.000, 1.034 | 0.978, 0.961, 1.025, 0.980, 1.050 |
+| near: dirt patch, rock face | 1.158, 1.203 | 1.225, 1.234 | 1.316, 1.372 | 1.208, 1.234 |
+
+- *Far ground within 25%:* held on the peak, both far rock rectangles, the slope, the island and the right range; **not on the centre and left ranges (1.275, 1.454)**, where the game's hills are wooded and the native ones bare. **Not met as written.**
+- *Sky within 20%:* held in every sky rectangle of the bridge's view (0.85 to 1.05 by channel); **not in the band of the pitched view nearest the sun** (texels 56 to 63 above: 0.75 to 0.80, where the game has the sun's disc, its glow and clouds and 10% of the native pixels clip red on the display). **Not met as written** for that band; met elsewhere. Rectangles not counted: "sky high, right of leaves" (0.77: leaves), "sky just above the ridge" (1.15: takes in the ridge).
+- *Regions nearer than the start unchanged within 0.002 against fog off* (`task6_regions_summary.txt`, the native mean of run 417 against 418 and of 422 against 423): bridge, second and third triple: planks -0.00008 and -0.00005, dirt patch -0.0003 and -0.0002, trunk +0.0001, shirt +0.0003, the pole's averted side -0.0002, grass beside the dirt -0.0006 and -0.0002; trees: stump sides +0.00001, ground between the stumps -0.00001 and -0.0001, stone slab within 0.0001, right stump top -0.0001 and -0.0003, ferns +0.0005 and -0.0003. Over 0.002: every region under moving leaf shadows (bridge: grass in leaf shadow +0.0024 and -0.0041, planks in leaf shadow, the railing post; trees: left stump top +0.005, post top +0.0025) and regions that are past the start and fogged (rock face +0.0125, the tall pole's rectangle, the trunk and the path under the trees). **Met by a substituted measure**: region means within 0.002 where no leaf shadow moves, and for every pixel the mirror's and the programs' argument ("Native fog"); not as written for the leaf-shadowed regions, which two runs cannot hold still. The third spot's pair is not usable for this (runs 430 and 425 ended their walk at different places: the emulated near regions differ by factors of 0.2 to 12 between them).
+- The bridge's first triple (36 / 39 / 42 s) is not used: its native shot at 39 s is of the first native frames (planks 3.7 times the later shots'), as in "Native fog".
+
+**Criterion 5, the final shots** (`task6_regions_summary.txt`: native over the mean of the emulated shots 3 s before and after; `lighting-regions.json` and the extended `fog-regions.json`; second triple of the bridge, first of the third spot, the others within 0.01 but where said):
+
+| Spot | Region | Ratio, fog off | Ratio, fog on | Hue difference on (degrees) |
+|---|---|---|---|---|
+| bridge | far rock (lighting file; takes in the ridge) | 0.413 | **0.843** | +0.7 |
+| | far rock, below the ridge (the fixed rectangle) | 0.395 | 0.892 | +1.0 |
+| | far slope | 0.700 | **1.014** | **-32.7** |
+| | far peak | 0.080 | 0.761 | +5.6 |
+| | far mountains left, centre, right | 0.606, 0.527, 0.454 | 1.217, 1.027, 0.928 | +2.6 to +3.5 |
+| | island in the lake | 0.661 | 0.966 | **-22.5** (-20.7, -23.9 in the other triples) |
+| | sky above the ridge, above the towers (reported) | | 0.804, 0.795 | +10.3, +10.0 |
+| | lake: the water (unlit, reported) | 0.579 | 0.802 | +13.2 (-167.9 with the fog off) |
+| third | far rock | 0.472 | **0.990** | +2.2 |
+| | far mountains left, centre | 0.554, 0.464 | 1.091, 0.922 | +1.6, +0.5 |
+| | sky above the ridge, sky centre (reported) | | 0.904, 0.983 (1.008, 1.271 in the second triple: the emulated regions drift by 18 to 36% in the first, clouds passing) | +10.4 to +12.1 |
+| | lake: the water; the unlit hill at the left (reported) | 0.571; 0.432 | 0.761; 0.929 | +17.5; +4.8 |
+| trees | path behind the trunks | 0.739 | 1.202 | +8.8 |
+
+The three regions that read 0.4 to 0.7 read 0.84, 1.01 and 0.99, and every far region is inside 0.75 to 1.25. **Hue is outside 20 degrees on the far slope (33) and the island (21 to 24)**, the two middle-distance grass regions, as in "Native fog" (the ground's own colour, not the in-scatter). **Not met as written** (the ratio part is met, the hue part is not on two regions). The sky reads 0.80 of the game's final sky at the bridge and 0.90 to 1.0 at the third spot, 10 to 12 degrees bluer. The water and the unlit hill, which stood at 0.43 to 0.58 with a hue 168 to 175 degrees off, now read 0.76 to 0.93 within 18 degrees: placeholders under the game's haze.
+
+**Criterion 6, fog off is sub-project 8's picture.** No run of a sub-project 8 binary exists at these plans, so the regions are held against Task 4's fog-off runs, whose binary ran sub-project 8's shader text with the fog's flag 0. *Programs:* with the unlit fog's bits clear every program is the program it was, and with the frame's flag 0 the lit and the fogged unlit programs are the programs without fog, line for line (cases 166, 201, 210; `task4_old_new_programs.txt`, `task6_old_new_programs.txt`). *Regions* (`task6_fogoff_against_task4.txt`: the native means of run 418 against run 398, bridge, 45 s and 51 s): the fifteen regions without a moving leaf shadow agree within 0.0003 (planks +0.00006, dirt +0.0002, far rock +0.00005, far peak 0.00000, the water +0.00001); the leaf-shadowed ones differ by 0.001 to 0.006. By the trees and at the third spot the two builds' runs ended their walks at different places and cannot be compared so. **Met by a substituted measure** (the program comparison, and region means against Task 4's fog-off run at the bridge where nothing moves; not a run of sub-project 8's binary, not every region).
+
+**Shadows off, light off** (plan, Review Focus 4). Run 420, shadows off with the fog on: `Shadow: off`, the Fog and Sky lines as in every fog-on run, 30.0 fps in four native windows; the shot (viewed) has the haze and the sky, and the deck without its shadows: the lighting picture, fogged (the lit shaders read the white mask). Run 421, light off with the fog on: `Light: off, lit 0 ... unlit 917 {light-off: 917}`, `Fog: on, block invalid (fog-block: off), not drawn (no light)`, `Sky: ... not drawn (no light)`, `capture ... fog: off` (nothing is read), `unlit 0 fogged`; the shot (viewed) is the unlit materials picture: no haze, the clear colour above the ridge, the water flat. The frame counts `fog-block` and `no-light` stay 0 in it: they count frames with the light's switch on.
+
+**Criterion 7, cost.** *The A/B at the third spot* (runs 426 to 429, alternating, no capture, the machine otherwise idle by the controller's account; steady native windows of 150 frames after the window with the switch):
+
+| | fog off (426, 428) | fog on (427, 429) |
+|---|---|---|
+| Frame rate, nine steady windows a run | 29.9 to 30.1; 30.0 to 30.1 | 30.0 but one window at **29.6**; 30.0 but one at 29.8 |
+| Guest work median | 12.3 to 13.2 ms | 12.1 to 13.3 ms |
+| Capture, records on, window medians | 2.46 to 2.62; 2.43 to 2.64 ms | 2.53 to 2.68; 2.48 to 2.73 ms |
+| Capture, view off | 0.069 to 0.125 ms | 0.068 to 0.095 ms |
+| Clay CPU of the logged frames | 3.6 to 7.1 ms | 3.6 to 6.2 ms |
+
+Bridge (417): 30.0 to 30.3 fps in the four native windows after the first; trees (422): 30.0 in four of five such windows and **29.2** in one (423, fog off: 30.0 in all five); third spot (430): 30.0 in four and 29.7 in one (425, off: 29.8 to 30.1). Records-on capture medians: bridge 2.13 to 2.25 ms (off 2.20), trees 2.20 to 2.46 (off 2.18 to 2.36), third spot 2.65 to 2.71 (off 2.52 to 2.63).
+
+- *Frame rate* (30.0 at the bridge and by the trees, not below 29.8 at the third spot): held at the bridge; one window of five at 29.2 by the trees and one of eighteen at 29.6 at the third spot. **Not met as written**, by those two windows. The A/B shows no step between fog off and on: the same 30.0 fps, the same guest work, and nothing times the pass on the GPU.
+- *Records-on capture median at most 2.3 ms at the third spot*: 2.48 to 2.73 ms with the fog on. **Not met as written.** With the fog off, the same afternoon, it is 2.43 to 2.64 ms: over the limit without the fog too (run 412 at midday: 2.14 to 2.23). The fog's own part does not show: the alternating runs' medians of their window medians are 2.58 and 2.60 ms with the fog off against 2.62 and 2.57 ms with it on, inside the runs' own spread; the excess over the limit is the afternoon's machine (inference: fog off has it too).
+- *View off under 0.5 ms*: 0.065 to 0.125 ms. **Met.**
+
+**Criterion 8**: no D3D error in a 240 s software-adapter run with the debug layer for each build that changed bindings, targets or shader text: runs 397 (Task 4), 405 (Task 5), 415 and 416 (this task's shader text, fog off and on). **Met.** The commit that turns the default on changes none of the three and was not run on the software adapter. One new warning, id 1008, once in run 416, cause not established (above).
+
+**Criterion 1** (the formulas; plan Task 2's files): `fog_check.py` in the tracked tools with its test: the pixel fog equals the microcode in every trial of the 40 shaders of the form, the trees' vertex form likewise, and `sky` equals `F760` in 218 of 218 directions (`task2_fog_check.txt`, "all agree"). The criterion's second half says "or the gap is stated and the criterion is not met as written", and there is a gap: `F760`'s path under bool `b129` (instructions 59 to 99, the ground-fog volume) is read by no machine check (the bool is clear in every draw of every capture), and the shader's literal registers are those of one logged frame. **Not met as written, by that gap alone**; the function the pass uses (the clear-sky and the texture terms) is machine-checked whole.
+
+**Criterion 9**: every number above names its file; inference is marked; what is not met is said to be not met. The runs are `RUN UNCHECKED`.
+
+**Shots viewed** (417: 45 s native; 430: 44 s emulated, 47 s native; 413: 44 s, 47 s and the pair; 420 and 421: 45 s; 415 and 416: 225 s; 422: 61 s; 419: 45 s and the oracle pair; the other shots measured only).
+- Bridge, native: blue sky, the ranges fading into blue-grey haze, the far peak pale against the sky; **the water of the lake is now a pale grey-lilac hazed surface** and no longer flat brown; the island hazed; the deck, the hero, the dog and the trees as before. Against the game's picture what differs most now: the game's hills are wooded, its water is blue and reflects, its sky has clouds, and everything of its post chain.
+- Third spot, native: the same. **The two hills at the top left and top right are now pale hazed-blue shapes** (untextured, without shading: silhouettes in the haze's colour); they no longer stand out. The emulated shot has clouds along the top, wooded slopes and blue water.
+- Towards the sun (413): the emulated picture has the sun's glow and shafts over the left tree and a pink-white sky; the native one a smooth pink-to-lilac sky of the same colours, no sun, no glow, no clouds.
+
+### Limits
+
+- **No test executes the HLSL.** The shaders' fog and sky are held by reading (three reviews, with the compiled listings), by text pins, by a CPU mirror that is a second writing of the same sentences, by the compiled-program checks of the shader test (which find an instruction in a listing, and in one case where it stands) and by the pictures: the oracle's far peak within 1.4%, the sky within 2% away from the sun.
+- **One daylight save**, one region, standing still; every run `RUN UNCHECKED`. Night, a town, an interior, weather, dawn and dusk: never seen (user checks 40 to 47).
+- **No frame without fog or without a sky has occurred in a run with the light on**: every `fog-block`, `sky-block`, `view`, `values`, `rules`, `no-objects` path and the rules beyond the spec (the magnitude bound, the sky's ranges) are held by tests alone. An interior has no single view and so no fog and no sky (counted `view`); whether the game fogs interiors is not known.
+- **The sky's texture term has never been seen with content**: both textures are zeros and `c47.x` is 0 in every capture. `sky-texture` counts a missing texture also when its content would not have mattered.
+- **Clouds, the sun's disc and glow, the moon** are draws of their own after the sky and are not drawn; sky regions hold against the oracle only between and away from them.
+- **The sky is at the far plane, the game's is a cube of half-size 2,850 units** around the eye: ground beyond the cube's face is under the sky in the game and drawn natively. The farthest ground measured is 1,183 units (bridge; `task6_far_ground.txt`); the third spot has no read-back capture.
+- **The rebuilt position** is off by up to 6 units at 2,000 by CPU arithmetic at exact points (case 587); the rasteriser's interpolated depth adds an error nobody measured.
+- **Records of another view** than the frame's majority are fogged with the majority's inverse, a wrong position; object, trunk and skinned records do not vote. Counted on the Fog line; 0 in every run.
+- **The texel addressing of the two tables** is the reference's by construction and bounded against the game to a few texels (tf4, run 413) and to several texels (tf5, the far peak), not to half a texel.
+- **Unlit draws** are fogged over a placeholder colour; the blended form's alpha factor is the material's alpha, not the game's; an unlit far-terrain draw would be fogged after its cross-fade. The lake's far surface `2B09...` is not drawn.
+- **`c20.w`**, the game's own exposure, is 7.4 to 8.6 under read-back and 16 in normal runs; the native exposure is one fixed number. The display clips the sky's red towards the axis and its blue near the horizon under it.
+- **The dirt patch and the rock face are 21 to 24% brighter than the oracle** (not fog: both are at or inside the start).
+- **The sky's place** assumes the game's order (opaque, terrain layers, sky, blended): two captures show it, run 411 has one line with the sky early; case 592's exhaustive part tests the rule against a model that shares its premises. The finiteness rule of the fog block judges the sky's registers too: a register that is no number is a bad read of the block, and costs the frame its fog.
+- **Costs** are from a machine in use; nothing times the fog or the sky on the GPU.
+
+### Follow-ups
+
+1. **The post chain** (sub-project 10): the exposure table at `0x1FAA0000` and `c20.w`, bloom, the half-resolution quads, grading. It is what remains between the native picture and the game's final one where both draw the same things (the sky at 0.80, the hue of the far grass).
+2. **Tree billboards** on the far hills: the largest remaining difference of the far picture (the two ranges at 1.28 and 1.45 of the oracle).
+3. **Water and the lake**: the water `F6D9...` / `A17D...` is a fogged placeholder; the far surface `2B09...` (not of the fog's form; through the indexed builder) is not drawn.
+4. **Clouds**: three blended quads of `61976295517D7015` / `C304C6A1AF18B46F` through `DrawIndx:82217EE8` right after the sky, 512 x 512 colour-and-alpha textures; placement and scrolling not read ("Unlit draws and the reviews' fixes"). **The moon** (`18D39DCEBEE4C2FC` / `81BADE63A169E3DC`, a strip of eight phases) and **the sun's disc and glow** (`04985A0F7296E130` / `81BADE63A169E3DC`, additive, at the scene's end), by inference from their textures; the depth-reading mesh `7F65142C12BEB353` is not identified. All need records of the indexed builder first.
+5. **The `b129` volume** (ground fog; never set in a capture; unchecked in the formulas).
+6. **Night, town, interior, weather**: user checks 40 to 47; the counters say what happened.
+7. **The red dog on the software adapter**: red with the fog off too (run 415), in four of four software-adapter runs of this sub-project and in none of sub-project 8's three; never on the real GPU. An albedo with no green or blue, lit and clamped; the dog's texture is one the emulator reads back from its own GPU (`0x12704000`, forced every frame). Upstream of the fog; not followed.
+8. **The freeze-like state of run 424**: guest work 42 to 45 ms without a wait at the swap, 22 fps, from before the native view; once in this task's eighteen runs; cause not established.
+9. **Warning 1008 on the software adapter** (run 416, once): whose barrier is not established; the shared barrier queue of the native RHI and the emulator is the first place to look.
+10. **The window's size**: the game opens 1280 x 720 logical pixels on whichever monitor Windows gives it; runs 405 to 408 were 1296 x 759 (another monitor or scaling, inference) and one of them read 25 fps at the third spot. Not repeated: every run of this task was 1942 x 1136.
+11. **The sky early** in one line of run 411: the Sky line now names the record and counts such frames.
+12. **Anti-aliasing** (the horizon's silhouettes are stair-stepped), later, as its own sub-project.
 
 ## Pending
 

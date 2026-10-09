@@ -1,7 +1,21 @@
 # Native renderer sub-project 9: fog, in-scatter and sky
 
-Status: design, 2026-10-09. Not built. Research: `.superpowers/sdd/fog-research.md` (untracked;
-its scripts in `out/tests/fog-research/`). Branch `native-renderer-fog`.
+Status: implemented 2026-10-09 (plan Tasks 1 to 6, branch `native-renderer-fog`); measured in
+`docs/native-renderer/frame-map.md` section 16, "Validation", with its "Limits" and "Follow-ups".
+`--fable2_native_fog` is on by default. Of the nine success criteria four are met (2, 3, 8, 9; 3 as
+it is written, on the pictures' medians, with one texel band of the sunward view outside it). One
+is shown by a substituted measure and not as written (6: the compiled programs and region means
+against Task 4's fog-off run, no run of sub-project 8's binary), as is the third part of 4 (near
+regions within 0.002 only where no leaf shadow moves). Four are not met as written: 1 (the sky shader's `b129` path is
+read by no machine check; everything the pass uses is), 4 (far ground within 25% fails on two
+ranges that are wooded in the game and bare natively, 1.28 and 1.45; the sky within 20% fails in
+the band nearest the sun, 0.75 to 0.80, where the game has its sun and clouds), 5 (the ratios are
+all inside 0.75 to 1.25; the hue is 33 and 21 to 24 degrees off on two grass regions), 7 (30.0 fps
+but for one window at 29.2 by the trees and one at 29.6 at the third spot; the records-on capture
+median is 2.48 to 2.73 ms against 2.3, and 2.43 to 2.64 with the fog off on the same afternoon;
+view off 0.07 to 0.13 ms is met). What was ruled during the work and what was built differently is
+at the end, "Implementation notes (deviations)". Research: `.superpowers/sdd/fog-research.md`
+(untracked; its scripts in `out/tests/fog-research/`).
 
 ## Goal
 
@@ -137,3 +151,94 @@ distant-tree billboards, the ground-fog volume under bool `b129`, anti-aliasing.
 Tables never seen (endian, half floats, swizzle); the moment of the table read within the ring
 of three; HDR in-scatter clipping under the fixed exposure; the sky's 91 instructions with a
 lat-long seam; binding slots (the RHI has 12 parameters); all evidence is one daylight save.
+
+## Implementation notes (deviations)
+
+Written 2026-10-09 with plan Task 6. The measurements and their files are in
+`docs/native-renderer/frame-map.md` section 16; this part records what was ruled while the work
+went on (each ruling by the controller under the user's standing instruction, with why and what
+it costs if it is wrong) and where the built thing differs from the design above.
+
+### Rulings made during the work
+
+Numbered on from the nine above.
+
+10. *Non-finite input means unfogged* (`fog`, `vertex_fog`; `sky` counts the value as 0) — why:
+    fail closed like the rest of the pass — cost if wrong: a pixel with a bad input shows
+    unfogged instead of black.
+11. *Ruling B: trees take the game's own vertex-form arithmetic per pixel* (`T = tf5`,
+    `add = (1 - T) * tf4(angle) * c8.x`; no blend from `c68`, no `c28.x`), not the shared function
+    of ruling 4 — why: tf16 is tf5 and tf17 is tf4 itself in 28 of 28 frames, so ruling 4's
+    premise is false — cost if wrong: within one unit past the fog's start a tree's haze colour
+    differs slightly from the ground's.
+12. *The capture's added rules stay* (a base address that is not 0; the sky's `c31.x`, `c46.x`
+    not negative, `c47.x` in 0 to 1; the magnitude bound, narrowed after review to the
+    components the fog reads) and *the sky's own rules do not veto the fog* — why: misses are
+    counted; a night or interior that leaves a sky register negative keeps its fog — cost if
+    wrong: a scene without sky or fog, visible in the counters.
+13. *The two tables are arrays in the frame's constant block*, read by a shader function equal to
+    `table_1d`, not textures (Design 4) — why: the clay layout uses 12 of 12 binding parameters
+    and no SDK change is allowed — cost if wrong: 5.3 KB of constants a frame and dynamically
+    indexed loads.
+14. *The pixel's world position comes from its own depth* through the frame's inverse
+    view-projection — why: the stored position is model space for objects, trunks and skins; one
+    path for all families — cost if wrong: an error that grows with distance (6 units at 2,000
+    by CPU arithmetic); a frame without a single view (an interior) is unfogged, counted.
+15. *The clear-sky term is built fully, the texture term only without a new binding parameter*
+    (it got a layout of its own) — why: tf13 / tf14 are a texture of zeros with `c47.x` = 0 in
+    every capture — cost if wrong: a scene with a painted sky shows clear sky, counted
+    `sky-texture`; the term has never been seen with content.
+16. *The sky's view ray is formed from the view-projection's rows*, not from its inverse
+    (Design 5) — why: 0.00006 pixel against 0.14 through the single-precision inverse — cost if
+    wrong: none found; it is the same line.
+17. *Unlit draws whose pixel shader has the fog block are fogged too*, the ground form on the
+    unlit colour with the in-scatter under the lit draws' exposure (after the review of plan
+    Task 4) — why: the game fogs them; the water and two unlit hills stood unhazed against hazed
+    ground — cost if wrong: the unlit programs gained a branch; the colour under the haze is a
+    placeholder. Built with the blended form's alpha factor for the ten shaders the table marks
+    (the implementer's addition, an approximation, stated). The lake's far surface `2B09...` is
+    not a record of the pass and is not drawn: nothing was decided for it.
+18. *Clouds are not drawn in this sub-project* (after the review of plan Task 5) — why: they
+    are separate draws after the sky, not part of the sky shader, whose textures are zeros —
+    cost if wrong: the sky is plain where the game's has clouds; sky regions against the oracle
+    hold only between clouds.
+19. *The switch is on by default* (plan Task 6, its last code change) — why: the far ground and
+    the sky are the game's within the limits measured, the frame rate held with it on and off
+    alike, and no D3D error occurred in four software-adapter runs — cost if wrong: a scene
+    never seen (night, town, interior) may be drawn worse than without it;
+    `--fable2_native_fog=off` gives sub-project 8's picture back.
+20. *User-present runs* were allowed for this sub-project by the user on 2026-10-09 ("user
+    present, but you can run it anyway"; the controller's reading, ruling 9's question): made by
+    the controller only, every one `RUN UNCHECKED`.
+
+### Built differently
+
+- **Tables as constants, not textures** (ruling 13): no upload, barrier or fallback object; the
+  frame's block grew from 112 to 5,344 bytes.
+- **The position from depth, not an interpolator** (ruling 14).
+- **Trees in the game's own form** (ruling 11), not the shared `Fog` of Design 4.
+- **Unlit draws fogged** (ruling 17): Design 4 says "every lit native pixel shader"; the flat
+  shader and the unlit returns now fog under a per-draw bit.
+- **The sky's ray from the matrix's rows; the sky at the far plane** where the game has a cube of
+  half-size 2,850 units (ruling 5's cost, the other way round: far ground is drawn natively where
+  the game covers it; none lies that far in the views measured). **A frame without fog has no
+  sky** (the step reads the fog's part of the frame's block), which is narrower than Design 5.
+  A sky texture that cannot be had is counted also when its content would not have mattered.
+- **Validation order** (Design 7): the oracle comparison used window shots of the mapped target
+  taken back to linear values, 5 s from the capture, not the linear target itself.
+- **Not built, as ruled**: everything in ruling 6, and clouds, the sun's disc and glow, the moon
+  (ruling 18; frame map, "Follow-ups").
+
+### Criteria
+
+| | Verdict | Evidence (frame map section 16; files in `out\native-evidence\fog\`) |
+|---|---|---|
+| 1 | not met as written | `fog_check.py` with its test: 40 pixel shaders, the trees' form, and `F760` 218 of 218 agree (`task2_fog_check.txt`); the gap that the criterion names: `F760`'s `b129` path is unchecked |
+| 2 | met | `task6_<stamp>_block.txt`: 8 of 8 frames at each of the three spots, 4 of 4 twice; no invalid frame in any fog-on run |
+| 3 | met | `task6_145136_replay_frame1.txt`: 1.007, 0.998, 0.982; towards the sun `task6_134312_replay_frame1.txt`: 1.031, 1.071, 1.022 (one texel band's green at 1.11: `task6_sunward.txt`) |
+| 4 | not met as written; its third part by a substituted measure | `task6_oracle_regions_45s.txt`: far ground 0.99 to 1.22 on six regions, 1.28 and 1.45 on two wooded ranges; sky 0.85 to 1.05, and 0.75 to 0.80 nearest the sun (`task6_sunward.txt`); near regions within 0.002 where no leaf shadow moves (`task6_regions_summary.txt`) |
+| 5 | not met as written | `task6_regions_summary.txt`: 0.84, 1.01, 0.99 on the three named regions, all far regions 0.76 to 1.23; hue -33 and -21 to -24 degrees on two; sky 0.80 to 1.0 reported |
+| 6 | met by a substituted measure | shader test cases 166, 201, 210; `task6_old_new_programs.txt`; `task6_fogoff_against_task4.txt` (within 0.0003 on fifteen regions at the bridge) |
+| 7 | not met as written | `task6_logs_summary.txt`: runs 426 to 429 and 417, 422, 430 |
+| 8 | met | runs 397, 405, 415, 416: no error; one new warning (id 1008, once, cause not established) |
+| 9 | met | the frame map's "Validation" |

@@ -682,7 +682,7 @@ class FogRegionsFileTest(unittest.TestCase):
         doc = json.loads(self.PATH.read_text(encoding="utf-8"))
         self.assertEqual(sorted(doc["spots"]), ["bridge", "third", "trees"])
         kinds = set(doc["kinds"])
-        self.assertEqual(kinds, {"haze", "sky", "not-drawn"})
+        self.assertEqual(kinds, {"haze", "sky", "unlit", "not-drawn"})
         img = rc.Image(1942, 1136, bytes([90, 120, 60]) * (1942 * 1136))
         haze = 0
         for spot in sorted(doc["spots"]):
@@ -698,7 +698,14 @@ class FogRegionsFileTest(unittest.TestCase):
                 # No region lies under the banner or the icons, and each holds pixels.
                 self.assertEqual(row.native.excluded, 0, "%s: '%s'" % (spot, row.name))
                 self.assertAlmostEqual(row.ratio, 1.0, places=12, msg=row.name)
-        self.assertGreaterEqual(haze, 8)
+        self.assertGreaterEqual(haze, 9)
+        # Plan Task 6: the fixed far rock, sky regions at two spots, and the unlit draws that are fogged.
+        by_spot = {spot: {r["name"]: r["kind"] for r in rc.load_regions(self.PATH, spot)[0]} for spot in doc["spots"]}
+        self.assertEqual(by_spot["bridge"].get("far rock, below the ridge"), "haze")
+        self.assertEqual(by_spot["bridge"].get("lake"), "unlit")
+        self.assertEqual(by_spot["third"].get("unlit hill, left"), "unlit")
+        for spot in ("bridge", "third"):
+            self.assertGreaterEqual(sum(1 for kind in by_spot[spot].values() if kind == "sky"), 2, spot)
 
     def test_no_name_is_one_of_the_lighting_files(self):
         # The two files are read together for one spot: a name stands for one rectangle.

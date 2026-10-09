@@ -2508,7 +2508,7 @@ int main() {
     block.floor[0] = 0.0588f;
     block.floor[1] = 0.0902f;
     block.valid = true;
-    static_assert(sizeof(ClayFrameConstants) == 112);  // (96 before the eye, plan Task 8c)
+    static_assert(kClayFrameLightBytes == 112);  // (96 before the eye, plan Task 8c; the fog's tail follows: case 584)
     ClayFrameConstants frame = MakeClayFrameConstants(block, ClayLight::kOn);
     CHECK(440, frame.light_on == 1 && frame.tint_pow == 1.3f && frame.floor[0] == 0.0588f && frame.floor[1] == 0.0902f &&
                    frame.floor[2] == 0.0f);
@@ -3190,7 +3190,8 @@ int main() {
     // EVERY slot, the largest block a shader declares at b1 (the vertex shader declares Object for
     // every draw, whatever is bound there), in whole steps.
     static_assert(kClayTerrainSlotBytes == 256 && kClayObjectSlotBytes == 512 && sizeof(ClayObjectConstants) <= kClayObjectSlotBytes &&
-                  sizeof(ClayTerrainConstants) <= kClayTerrainSlotBytes && sizeof(ClayFrameConstants) <= kClayTerrainSlotBytes);
+                  sizeof(ClayTerrainConstants) <= kClayTerrainSlotBytes && kClayFrameLightBytes <= kClayTerrainSlotBytes &&
+                  sizeof(ClayFrameConstants) <= kClayFrameSlots * kClayTerrainSlotBytes);
     CHECK(499, ClayObjectSlotOffset(1, 0) == 256 && ClayObjectSlotOffset(565, 0) == 144640 && ClayObjectSlotOffset(565, 1) == 145152 &&
                    ClayObjectSlotOffset(565, 170) == 231680 && ClayObjectSlotOffset(0x100000, 0x100000) == 0x30000000ull);
     CHECK(499, kClayConstantBufferStep == 65536);
@@ -3749,17 +3750,19 @@ int main() {
     CHECK(527, oc.c49[0] == 1.0f && oc.c49[1] == 0.5f && oc.c49[2] == 2.0f && oc.c27w == 0.75f && oc.c26[0] == 0.25f &&
                    oc.c26[1] == 1.0f && oc.c26[2] == 0.5f && oc.colour_power == kLeafColourPower &&
                    std::memcmp(oc.probe, probe, sizeof(probe)) == 0);
-    CHECK(527, oc.leaf[0] == 0.4f && oc.leaf[1] == 2.0f && oc.leaf[2] == 0.0f && oc.leaf[3] == 0.0f);
-    // No other kind of record carries any of it: a trunk with the same inputs has zeros there.
+    // (leaf[2], leaf[3]: the trees' fog; these inputs have no scale: case 586)
+    CHECK(527, oc.leaf[0] == 0.4f && oc.leaf[1] == 2.0f && oc.leaf[2] == 0.0f && oc.leaf[3] == kTreeFogFormNone);
+    // No other kind of record carries the wrap or the inverse scale: a trunk with the same inputs has zeros there.
     {
       capture::LightInputs trunk = li;
       trunk.family = LightFamily::kTreeTrunk;
       ClayObjectConstants t;
       CHECK(527, MakeClayObjectConstants(trunk, &t) && t.rot[0][3] == 0.0f && t.rot[1][3] == 0.0f && t.rot[2][3] == 0.0f &&
-                     t.leaf[0] == 0.0f && t.leaf[1] == 0.0f && t.leaf[2] == 0.0f && t.leaf[3] == 0.0f && t.colour_power == 0.0f);
+                     t.leaf[0] == 0.0f && t.leaf[1] == 0.0f && t.leaf[2] == 0.0f && t.leaf[3] == kTreeFogFormNone && t.colour_power == 0.0f);
       capture::LightInputs object = li;
       object.family = LightFamily::kObject;
-      CHECK(527, MakeClayObjectConstants(object, &t) && t.rot[1][3] == 0.0f && t.leaf[0] == 0.0f && t.leaf[1] == 0.0f);
+      CHECK(527, MakeClayObjectConstants(object, &t) && t.rot[1][3] == 0.0f && t.leaf[0] == 0.0f && t.leaf[1] == 0.0f &&
+                     t.leaf[2] == 0.0f && t.leaf[3] == kTreeFogFormGround);
       // (and a value of theirs that is not a number does not refuse a trunk, which does not read it)
       trunk.world_pos[1] = nan;
       trunk.wrap = inf;
@@ -3828,7 +3831,7 @@ int main() {
     }
     block.tint_pow = 1.3f;
     block.valid = true;
-    static_assert(sizeof(ClayFrameConstants) == 112 && offsetof(ClayFrameConstants, eye) == 96 && offsetof(ClayFrameConstants, eye_on) == 108);
+    static_assert(kClayFrameLightBytes == 112 && offsetof(ClayFrameConstants, eye) == 96 && offsetof(ClayFrameConstants, eye_on) == 108);
     ClayFrameConstants frame = MakeClayFrameConstants(block, ClayLight::kOn);
     CHECK(529, frame.light_on == 1 && frame.eye_on == 1 && frame.eye[0] == 50.0f && frame.eye[1] == 51.0f && frame.eye[2] == 52.0f);
     for (LightFamily family : {LightFamily::kTerrainLayer, LightFamily::kTerrainFar, LightFamily::kObject, LightFamily::kTreeTrunk,
@@ -4333,7 +4336,7 @@ int main() {
         SetClayFrameMask(frame, 2240, 1440);  // (nothing assumes the game's size)
         CHECK(561, frame.mask_du == 1.0f / 2240.0f && frame.mask_dv == 1.0f / 1440.0f);
         CHECK(561, offsetof(ClayFrameConstants, mask_du) == 76 && offsetof(ClayFrameConstants, mask_dv) == 92 &&
-                       sizeof(ClayFrameConstants) == 112);
+                       kClayFrameLightBytes == 112);
         // The pixel's centre times the two is the centre of the mask's texel: (i + 0.5) / width.
         CHECK(561, std::fabs((559.0f + 0.5f) * frame.mask_du * 2240.0f - 559.5f) < 1e-3f);
       }
@@ -5365,7 +5368,7 @@ int main() {
       CHECK(580, v[0] == 2.0 && v[1] == 40.0 && v[2] == -4.0);
       FogTableRead(four, 0, 0.3, v);
       CHECK(580, v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0);
-      FogTableRead(nullptr, 4, 0.3, v);
+      FogTableRead(static_cast<const float (*)[3]>(nullptr), 4, 0.3, v);
       CHECK(580, v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0);
     }
 
@@ -5581,8 +5584,8 @@ int main() {
         CHECK(582, both(C, far_point, eye, ClayFogConstants{}, real) && unfogged());
       }
       // No table: unfogged.
-      FogMirror(C, far_point, eye, real_c, nullptr, real.transmit, out);
-      TreeFogMirror(C, far_point, eye, real_c, 1.0f, real.scatter, nullptr, tree);
+      FogMirror(C, far_point, eye, real_c, static_cast<const float (*)[3]>(nullptr), real.transmit, out);
+      TreeFogMirror(C, far_point, eye, real_c, 1.0f, real.scatter, static_cast<const float (*)[3]>(nullptr), tree);
       CHECK(582, unfogged());
     }
 
@@ -5653,6 +5656,378 @@ int main() {
                      !TreeFogScaleUsable(qnan) && !TreeFogScaleUsable(pinf) && !TreeFogScaleUsable(-pinf) &&
                      !TreeFogScaleUsable(capture::LightInputs{}.tree_fog));
     }
+
+    // 584: the frame's block with the fog (cbuffer Frame: the light's 112 bytes, which every clay shader
+    // declares, then the fog's tail, which only the lit pixel shaders declare: the fog's constants, the
+    // frame's inverse view-projection and the two tables as arrays; the controller's ruling: no binding
+    // parameter is free, so no textures). SetClayFrameFog fills the tail from a valid block or leaves
+    // every byte of it zero: nothing of an earlier frame can stay (plan, Review Focus 1).
+    // The matrices: frame 1 of the bridge capture of 2026-10-09 (case 563's), the same eye.
+    const float fog_inv[4][4] = {{0.5143311619758606f, 0.08813292533159256f, -820.677490234375f, 821.5447387695312f},
+                                 {-0.8844040036201477f, 0.05125229433178902f, -1573.3095703125f, 1573.8358154296875f},
+                                 {8.367820555577055e-06f, 0.5663930773735046f, -501.68060302734375f, 501.51348876953125f},
+                                 {1.6652556666940654e-07f, 7.833264703549503e-09f, -9.999471664428711f, 9.999671936035156f}};
+    const float fog_vp[4][4] = {{0.49135205149650574f, -0.8449383974075317f, 2.1847014863851655e-08f, 92.6156997680664f},
+                                {0.26610419154167175f, 0.15474604070186615f, 1.7101504802703857f, -131.98681640625f},
+                                {0.8508029580116272f, 0.49476245045661926f, -0.17715677618980408f, -138.88465881347656f},
+                                {0.8507859110832214f, 0.49475255608558655f, -0.17715322971343994f, -138.78187561035156f}};
+    capture::LightBlock light_block{};
+    for (int i = 0; i < 3; ++i) {
+      light_block.sun_dir[i] = i == 2 ? 1.0f : 0.0f;
+      light_block.sun_col[i] = 1.0f;
+      light_block.tint[i] = 1.0f;
+      light_block.eye[i] = eye[i];
+    }
+    light_block.tint_pow = 1.3f;
+    light_block.valid = true;
+    auto lit_frame = [&] {
+      ClayFrameConstants c = MakeClayFrameConstants(light_block, ClayLight::kOn);
+      SetClayFrameMask(c, 1120, 720);
+      return c;
+    };
+    auto tail_is_zero = [](const ClayFrameConstants& c) {
+      static const unsigned char zero[sizeof(ClayFrameConstants) - kClayFrameLightBytes] = {};
+      return std::memcmp(reinterpret_cast<const unsigned char*>(&c) + kClayFrameLightBytes, zero, sizeof(zero)) == 0;
+    };
+    {
+      static_assert(sizeof(ClayFrameConstants) == 5344 && kClayFrameLightBytes == 112 && offsetof(ClayFrameConstants, fog) == 112 &&
+                    offsetof(ClayFrameConstants, inv_view_proj) == 160 && offsetof(ClayFrameConstants, scatter) == 224 &&
+                    offsetof(ClayFrameConstants, transmit) == 1248 && sizeof(ClayFrameConstants::scatter) == 64 * 16 &&
+                    sizeof(ClayFrameConstants::transmit) == 256 * 16);
+      // The frame's block is the head of the frame's constant buffer: 21 small slots, bound at b2 at
+      // offset 0; the other small slots follow it.
+      static_assert(kClayFrameSlots == 21 && kClayFrameSlots * kClayTerrainSlotBytes >= sizeof(ClayFrameConstants) &&
+                    (kClayFrameSlots - 1) * kClayTerrainSlotBytes < sizeof(ClayFrameConstants));
+      CHECK(584, ClaySmallSlotOffset(kClayFrameSlots) == 5376 && ClayConstantBufferBytes(kClayFrameSlots + 1, 0) == 65536);
+      // A frame as MakeClayFrameConstants makes it has no fog: the tail is zero.
+      ClayFrameConstants c = lit_frame();
+      CHECK(584, c.light_on == 1 && c.eye_on == 1 && tail_is_zero(c) && c.fog.on == 0);
+      // Filled from a valid block: the constants, the matrix, and every texel (rgb; the fourth float 0).
+      CHECK(584, SetClayFrameFog(c, real, true, fog_inv));
+      CHECK(584, std::memcmp(&c.fog, &real_c, sizeof(real_c)) == 0 && std::memcmp(c.inv_view_proj, fog_inv, sizeof(fog_inv)) == 0);
+      bool tables = true;
+      for (uint32_t i = 0; i < kFogScatterTexels; ++i) {
+        tables = tables && c.scatter[i][0] == real.scatter[i][0] && c.scatter[i][1] == real.scatter[i][1] &&
+                 c.scatter[i][2] == real.scatter[i][2] && c.scatter[i][3] == 0.0f;
+      }
+      for (uint32_t i = 0; i < kFogTransmitTexels; ++i) {
+        tables = tables && c.transmit[i][0] == real.transmit[i][0] && c.transmit[i][1] == real.transmit[i][1] &&
+                 c.transmit[i][2] == real.transmit[i][2] && c.transmit[i][3] == 0.0f;
+      }
+      CHECK(584, tables && c.scatter[63][0] == 0.93310546875f && c.transmit[255][2] == 6.0f / 255.0f);
+      // The light's part is not touched.
+      const ClayFrameConstants plain = lit_frame();
+      CHECK(584, std::memcmp(&c, &plain, kClayFrameLightBytes) == 0);
+      // The same constants given a frame that has no fog: every byte of the tail is zero again,
+      // whatever the reason. (The pass makes its constants anew each frame; this holds also for one
+      // that would not.)
+      const ClayFrameConstants filled = c;
+      auto refused = [&](const capture::FogBlock& b, bool wanted, const float inverse[4][4], const ClayFrameConstants& from) {
+        ClayFrameConstants f = from;
+        return !SetClayFrameFog(f, b, wanted, inverse) && tail_is_zero(f) && std::memcmp(&f, &from, kClayFrameLightBytes) == 0;
+      };
+      CHECK(584, !tail_is_zero(filled));
+      CHECK(584, refused(real, false, fog_inv, filled));                 // the switch off
+      CHECK(584, refused(capture::FogBlock{}, true, fog_inv, filled));   // no block
+      CHECK(584, refused(real, true, nullptr, filled));                  // no view
+      {
+        capture::FogBlock b = real;
+        b.valid = false;
+        CHECK(584, refused(b, true, fog_inv, filled));
+        b = real;
+        b.range[3] = 0.0f;  // (a value MakeClayFogConstants refuses)
+        CHECK(584, refused(b, true, fog_inv, filled));
+        for (float bad : {qnan, pinf, -pinf}) {
+          b = real;
+          b.scatter[17][1] = bad;
+          CHECK(584, refused(b, true, fog_inv, filled));
+          b = real;
+          b.transmit[200][0] = bad;
+          CHECK(584, refused(b, true, fog_inv, filled));
+          float m[4][4];
+          std::memcpy(m, fog_inv, sizeof(m));
+          m[3][2] = bad;
+          CHECK(584, refused(real, true, m, filled));
+        }
+      }
+      {
+        // A frame without light, without an eye or without the target's size has no fog.
+        ClayFrameConstants f = filled;
+        f.light_on = 0;
+        CHECK(584, refused(real, true, fog_inv, f));
+        f = filled;
+        f.eye_on = 0;
+        CHECK(584, refused(real, true, fog_inv, f));
+        f = filled;
+        f.mask_du = 0.0f;
+        CHECK(584, refused(real, true, fog_inv, f));
+        f = filled;
+        f.mask_dv = qnan;
+        CHECK(584, refused(real, true, fog_inv, f));
+        CHECK(584, refused(real, true, fog_inv, ClayFrameConstants{}));
+      }
+      // Another frame's block replaces the first one's wholly.
+      ClayFrameConstants again = filled;
+      CHECK(584, SetClayFrameFog(again, made, true, fog_inv) && again.fog.start == 12.5f && again.fog.amount == 0.75f);
+    }
+
+    // 585: the decision about the frame's fog, one chain in which the first thing missing decides, and
+    // the pass's frame counts and line that follow from it.
+    {
+      ClayFogInputs all;
+      all.fog = all.light = all.light_block = all.block = all.values = all.eye = all.filled = true;
+      auto is = [](const ClayFogInputs& in, ClayFog fog, FrameViewReason view) {
+        const ClayFogDecision d = DecideClayFog(in);
+        return d.fog == fog && d.view == view;
+      };
+      CHECK(585, is(all, ClayFog::kDrawn, FrameViewReason::kNone) && is(ClayFogInputs{}, ClayFog::kOff, FrameViewReason::kNone));
+      const struct {
+        bool ClayFogInputs::*field;
+        ClayFog fog;
+        FrameViewReason view;
+      } rows[] = {{&ClayFogInputs::fog, ClayFog::kOff, FrameViewReason::kNone},
+                  {&ClayFogInputs::light, ClayFog::kNoLight, FrameViewReason::kNone},
+                  {&ClayFogInputs::light_block, ClayFog::kNoLight, FrameViewReason::kNone},
+                  {&ClayFogInputs::block, ClayFog::kBlock, FrameViewReason::kNone},
+                  {&ClayFogInputs::values, ClayFog::kValues, FrameViewReason::kNone},
+                  {&ClayFogInputs::eye, ClayFog::kView, FrameViewReason::kEye},
+                  {&ClayFogInputs::filled, ClayFog::kValues, FrameViewReason::kNone}};
+      for (size_t i = 0; i < std::size(rows); ++i) {
+        // That one thing missing alone; and that one with everything behind it in the chain missing too.
+        ClayFogInputs one = all;
+        one.*rows[i].field = false;
+        CHECK(585, is(one, rows[i].fog, rows[i].view));
+        ClayFogInputs rest = all;
+        for (size_t j = i; j < std::size(rows); ++j) rest.*rows[j].field = false;
+        if (i < 6) rest.view = FrameViewReason::kDisagree;  // (the view is asked after the eye and before the fill)
+        CHECK(585, is(rest, rows[i].fog, rows[i].view));
+      }
+      for (FrameViewReason why : {FrameViewReason::kNoRecord, FrameViewReason::kDisagree, FrameViewReason::kSingular}) {
+        ClayFogInputs v = all;
+        v.view = why;
+        CHECK(585, is(v, ClayFog::kView, why));
+        v.filled = false;  // (the view decides before the fill)
+        CHECK(585, is(v, ClayFog::kView, why));
+        v.eye = false;
+        CHECK(585, is(v, ClayFog::kView, FrameViewReason::kEye));
+      }
+      // The counts: frames with the fog's and the light's switch on, and those of them without fog,
+      // by what was missing. "fog-block" is the three reasons together.
+      auto counts = [](bool on, ClayFog fog) {
+        ClayFogFrames n;
+        CountClayFogFrame(on, fog, n);
+        return n;
+      };
+      auto same = [](const ClayFogFrames& n, uint64_t frames, uint64_t block, uint64_t values, uint64_t view, uint64_t nolight) {
+        return n.frames == frames && n.block == block && n.values == values && n.view == view && n.nolight == nolight;
+      };
+      CHECK(585, same(counts(true, ClayFog::kDrawn), 1, 0, 0, 0, 0) && same(counts(true, ClayFog::kBlock), 1, 1, 0, 0, 0) &&
+                     same(counts(true, ClayFog::kValues), 1, 0, 1, 0, 0) && same(counts(true, ClayFog::kView), 1, 0, 0, 1, 0) &&
+                     same(counts(true, ClayFog::kNoLight), 1, 0, 0, 0, 1));
+      for (int f = 0; f < int(ClayFog::kCount); ++f) CHECK(585, same(counts(false, ClayFog(f)), 0, 0, 0, 0, 0));
+      ClayFogFrames sum;
+      CountClayFogFrame(true, ClayFog::kDrawn, sum);
+      CountClayFogFrame(true, ClayFog::kView, sum);
+      CountClayFogFrame(true, ClayFog::kBlock, sum);
+      CountClayFogFrame(false, ClayFog::kOff, sum);
+      CHECK(585, same(sum, 3, 1, 0, 1, 0) && ClayFogBlockFrames(sum) == 2);
+      // The line.
+      ClayStats st;
+      CHECK(585, FormatFogText(st) == "Fog: off");
+      st.fog_switch = true;
+      st.fog_block = true;
+      st.fog = ClayFog::kDrawn;
+      st.fog_trees = 52;
+      st.fog_trees_none = 3;
+      st.fog_frames = 900;
+      st.fog_block_frames = 4;
+      st.fog_values_frames = 5;
+      st.fog_view_frames = 2;
+      st.fog_nolight_frames = 1;
+      CHECK(585, FormatFogText(st) == "Fog: on, block valid, drawn | trees 52 with a scale, 3 without | "
+                                      "frames since start 900: fog-block 11 {block: 4, values: 5, view: 2}, no-light 1");
+      st.fog = ClayFog::kView;
+      st.fog_view = FrameViewReason::kNoRecord;
+      CHECK(585, FormatFogText(st).starts_with("Fog: on, block valid, not drawn (fog-block: view: no-record) | trees 52 with a scale"));
+      st.fog = ClayFog::kValues;
+      CHECK(585, FormatFogText(st).starts_with("Fog: on, block valid, not drawn (fog-block: values) | "));
+      st.fog = ClayFog::kBlock;
+      st.fog_block = false;
+      st.fog_reason = capture::FogBlockReason::kNoDraw;
+      CHECK(585, FormatFogText(st).starts_with("Fog: on, block invalid (fog-block: no-draw), not drawn (fog-block: block) | "));
+      st.fog = ClayFog::kNoLight;
+      CHECK(585, FormatFogText(st).starts_with("Fog: on, block invalid (fog-block: no-draw), not drawn (no light) | "));
+      CHECK(585, std::string(capture::kFogBlockReason) == "fog-block");
+    }
+
+    // 586: the form of a draw's fog in its object block. An object: the ground form. A trunk or a leaf
+    // with a usable scale: the trees' form with that scale. A trunk or a leaf without one: no fog for
+    // the draw (never the ground form, never a scale of 1).
+    {
+      static_assert(kTreeFogFormGround == 0.0f && kTreeFogFormTree == 1.0f && kTreeFogFormNone == 2.0f);
+      capture::LightInputs l;
+      l.family = capture::LightFamily::kTreeTrunk;
+      l.kind = capture::LightVertexKind::kProbe;
+      ClayObjectConstants oc;
+      CHECK(586, MakeClayObjectConstants(l, &oc) && oc.leaf[2] == 0.0f && oc.leaf[3] == kTreeFogFormNone);
+      for (float scale : {0.0f, 0.625f, 1.0f, 4.0f}) {
+        l.tree_fog = scale;
+        CHECK(586, MakeClayObjectConstants(l, &oc) && oc.leaf[2] == scale && oc.leaf[3] == kTreeFogFormTree && oc.leaf[0] == 0.0f);
+      }
+      for (float bad : {qnan, pinf, -pinf, -0.5f, 4.5f, capture::kTreeFogNone}) {
+        l.tree_fog = bad;
+        CHECK(586, MakeClayObjectConstants(l, &oc) && oc.leaf[2] == 0.0f && oc.leaf[3] == kTreeFogFormNone);
+      }
+      l.family = capture::LightFamily::kTreeLeaf;
+      l.tree_fog = 0.5f;
+      CHECK(586, MakeClayObjectConstants(l, &oc) && oc.leaf[2] == 0.5f && oc.leaf[3] == kTreeFogFormTree && oc.leaf[1] == 1.0f);
+      l.family = capture::LightFamily::kObject;  // (an object carries no scale; one set by hand is not read)
+      CHECK(586, MakeClayObjectConstants(l, &oc) && oc.leaf[2] == 0.0f && oc.leaf[3] == kTreeFogFormGround);
+      l.kind = capture::LightVertexKind::kStream;
+      l.colour_power = 2.2f;
+      CHECK(586, MakeClayObjectConstants(l, &oc) && oc.leaf[2] == 0.0f && oc.leaf[3] == kTreeFogFormGround);
+      // An instanced plant's block ends before the leaf's register (kClayPlantConstantBytes): its
+      // shader path takes the ground form without reading it.
+      static_assert(offsetof(ClayObjectConstants, leaf) >= kClayPlantConstantBytes);
+    }
+
+    // 587: a pixel's world position from its own SV_Position through the frame's inverse
+    // view-projection (the controller's ruling: one path for every family; the mask step's
+    // arithmetic), in single precision as the shader computes it, and the fog of a pixel from it.
+    {
+      ClayFrameConstants c = lit_frame();
+      CHECK(587, SetClayFrameFog(c, real, true, fog_inv));
+      // A world point drawn through the frame's view-projection, as the vertex shader and the
+      // rasteriser do it (clip = rows . p, single precision; window = the pixel's centre; depth z / w).
+      auto window = [&](const double world[3], float pos[3]) {
+        float clip[4];
+        for (int r = 0; r < 4; ++r) {
+          clip[r] = fog_vp[r][0] * float(world[0]) + fog_vp[r][1] * float(world[1]) + fog_vp[r][2] * float(world[2]) + fog_vp[r][3];
+        }
+        if (!(clip[3] > 0.0f)) return false;
+        pos[0] = (clip[0] / clip[3] * 0.5f + 0.5f) * 1120.0f;
+        pos[1] = (0.5f - clip[1] / clip[3] * 0.5f) * 720.0f;
+        pos[2] = clip[2] / clip[3];
+        return pos[0] >= 0.0f && pos[0] <= 1120.0f && pos[1] >= 0.0f && pos[1] <= 720.0f && pos[2] >= 0.0f && pos[2] <= 1.0f;
+      };
+      // The view's forward and two sideways directions, from the matrix itself: rows 3 (w) and 0, 1.
+      const double fwd_len = std::sqrt(double(fog_vp[3][0]) * fog_vp[3][0] + double(fog_vp[3][1]) * fog_vp[3][1] + double(fog_vp[3][2]) * fog_vp[3][2]);
+      const double fwd[3] = {fog_vp[3][0] / fwd_len, fog_vp[3][1] / fwd_len, fog_vp[3][2] / fwd_len};
+      const double side_len = std::sqrt(double(fog_vp[0][0]) * fog_vp[0][0] + double(fog_vp[0][1]) * fog_vp[0][1] + double(fog_vp[0][2]) * fog_vp[0][2]);
+      const double side[3] = {fog_vp[0][0] / side_len, fog_vp[0][1] / side_len, fog_vp[0][2] / side_len};
+      // Points at distances over the range the tables span (the start, 19.9, to 2,000 units past it)
+      // and beyond, straight ahead and towards the picture's edges: the rebuilt position's error in
+      // its distance from the eye, absolute and as a share of the transmittance table's texel (7.8 units).
+      double worst = 0.0, worst_at = 0.0, worst_near = 0.0, worst_share = 0.0, worst_1000 = 0.0, worst_place = 0.0;
+      int seen = 0;
+      for (double d = 1.0; d <= 2600.0; d *= 1.02) {
+        for (double off : {-0.6, -0.3, 0.0, 0.3, 0.6}) {
+          const double dir[3] = {fwd[0] + off * side[0], fwd[1] + off * side[1], fwd[2] + off * side[2] + 0.2 * off};
+          const double len = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+          const double world[3] = {eye[0] + dir[0] / len * d, eye[1] + dir[1] / len * d, eye[2] + dir[2] / len * d};
+          float pos[3], P[3];
+          if (!window(world, pos)) continue;
+          ++seen;
+          CHECK(587, FogPixelWorld(c, pos[0], pos[1], pos[2], P));
+          // (the distance the vertex shader's own single-precision point has, so that the error is the rebuild's)
+          const double true_d = std::sqrt((double(float(world[0])) - eye[0]) * (double(float(world[0])) - eye[0]) +
+                                          (double(float(world[1])) - eye[1]) * (double(float(world[1])) - eye[1]) +
+                                          (double(float(world[2])) - eye[2]) * (double(float(world[2])) - eye[2]));
+          const double got = std::sqrt((double(P[0]) - eye[0]) * (double(P[0]) - eye[0]) + (double(P[1]) - eye[1]) * (double(P[1]) - eye[1]) +
+                                       (double(P[2]) - eye[2]) * (double(P[2]) - eye[2]));
+          const double err = std::fabs(got - true_d);
+          // The position itself, as a share of its distance (a point rebuilt on the wrong side of the
+          // picture has the right distance and the wrong place).
+          const double place = std::sqrt((double(P[0]) - double(float(world[0]))) * (double(P[0]) - double(float(world[0]))) +
+                                         (double(P[1]) - double(float(world[1]))) * (double(P[1]) - double(float(world[1]))) +
+                                         (double(P[2]) - double(float(world[2]))) * (double(P[2]) - double(float(world[2])))) / true_d;
+          if (d <= 2020.0 && place > worst_place) worst_place = place;
+          if (d <= 2020.0 && err > worst) {
+            worst = err;
+            worst_at = d;
+          }
+          if (d <= 40.0 && err > worst_near) worst_near = err;
+          if (d <= 1000.0 && err > worst_1000) worst_1000 = err;
+        }
+      }
+      worst_share = worst / (1.0 / (double(real.range[3]) * kFogTransmitTexels));
+      std::printf("fog: the rebuilt position's distance error over %d points to 2,020 units (the bridge frame's matrices, single "
+                  "precision): worst %.3f units at %.0f units (%.3f of a transmittance texel of %.1f units); worst within 1,000 units %.3f, "
+                  "within 40 units %.5f\n",
+                  seen, worst, worst_at, worst_share, 1.0 / (double(real.range[3]) * kFogTransmitTexels), worst_1000, worst_near);
+      CHECK(587, seen > 900);
+      // Measured: 2.2 units within 1,000 and 6.1 units at 2,007 units, 0.79 of a texel of the transmittance table (the depth is
+      // z / w in single precision with the near plane at about 0.1 units, and the inverse's rows cancel);
+      // near the start, where a pixel changes from unfogged to fogged, under 0.01 units. What the fog
+      // bears: less than one texel of the table over the tables' span (a step of 1 / 255 in T at most).
+      CHECK(587, worst < 7.8 && worst_1000 < 3.0 && worst_near < 0.01 && worst_place < 0.005);
+      // The pixel's fog from that position is the mirror's at the true point, within what the position's
+      // error moves the tables' coordinates by; inside the start it is the colour, bit for bit.
+      const float C[3] = {0.35f, 0.3f, 0.12f};
+      int fogged = 0;
+      for (double d : {5.0, 15.0, 25.0, 60.0, 254.0, 600.0, 1500.0}) {
+        const double world[3] = {eye[0] + fwd[0] * d, eye[1] + fwd[1] * d, eye[2] + fwd[2] * d};
+        float pos[3];
+        CHECK(587, window(world, pos));
+        const float Pw[3] = {float(world[0]), float(world[1]), float(world[2])};
+        double want[3], want_tree[3], got[3], got_tree[3], got_none[3];
+        FogMirror(C, Pw, eye, c.fog, c.scatter, c.transmit, want);
+        TreeFogMirror(C, Pw, eye, c.fog, 0.5f, c.scatter, c.transmit, want_tree);
+        FogPixelMirror(C, pos[0], pos[1], pos[2], c, kTreeFogFormGround, 0.0f, got);
+        FogPixelMirror(C, pos[0], pos[1], pos[2], c, kTreeFogFormTree, 0.5f, got_tree);
+        FogPixelMirror(C, pos[0], pos[1], pos[2], c, kTreeFogFormNone, 0.5f, got_none);
+        CHECK(587, close3(got, want, 2e-3) && close3(got_tree, want_tree, 2e-3) && same3(got_none, C));
+        if (d < 19.0) {
+          CHECK(587, same3(got, C) && same3(got_tree, C));
+        } else if (d > 21.0) {
+          ++fogged;
+          if (d > 100.0) CHECK(587, !close3(got, got_tree, 1e-4) && !same3(got, C));
+        }
+      }
+      CHECK(587, fogged == 5);
+      // The frame's tables read as tables of four floats a texel: the block's read, texel for texel.
+      for (double u : {0.0, 0.127, 0.5, 0.998, 2.5}) {
+        double a[3], b[3];
+        FogTableRead(c.scatter, kFogScatterTexels, u, a);
+        FogTableRead(real.scatter, kFogScatterTexels, u, b);
+        CHECK(587, close3(a, b, 0.0));
+        FogTableRead(c.transmit, kFogTransmitTexels, u, a);
+        FogTableRead(real.transmit, kFogTransmitTexels, u, b);
+        CHECK(587, close3(a, b, 0.0));
+      }
+      // Guards: a frame without fog gives the colour for any pixel; a pixel whose position cannot be
+      // rebuilt (w = 0 or no number) is unfogged; a depth or a position that is no number: a number comes out.
+      double out[3];
+      const ClayFrameConstants off = lit_frame();
+      FogPixelMirror(C, 560.5f, 360.5f, 0.999f, off, kTreeFogFormGround, 0.0f, out);
+      CHECK(587, same3(out, C));
+      FogPixelMirror(C, 560.5f, 360.5f, 0.999f, off, kTreeFogFormTree, 1.0f, out);
+      CHECK(587, same3(out, C));
+      {
+        ClayFrameConstants flat = c;
+        for (float& v : flat.inv_view_proj[3]) v = 0.0f;
+        float P[3];
+        CHECK(587, !FogPixelWorld(flat, 560.5f, 360.5f, 0.999f, P));
+        FogPixelMirror(C, 560.5f, 360.5f, 0.999f, flat, kTreeFogFormGround, 0.0f, out);
+        CHECK(587, same3(out, C));
+      }
+      for (float bad : {qnan, pinf, -pinf}) {
+        for (int what = 0; what < 3; ++what) {
+          float pos[3] = {560.5f, 360.5f, 0.999f};
+          pos[what] = bad;
+          for (float form : {kTreeFogFormGround, kTreeFogFormTree}) {
+            FogPixelMirror(C, pos[0], pos[1], pos[2], c, form, 1.0f, out);
+            CHECK(587, same3(out, C));
+          }
+        }
+        FogPixelMirror(C, 560.5f, 360.5f, 0.999f, c, bad, 1.0f, out);  // (a form that is no number is not the trees': the ground form)
+        CHECK(587, finite3(out));
+      }
+      // The clear depth (a pixel nothing was drawn at is not shaded at all; a far-plane fragment is):
+      // a number, the table's far end.
+      FogPixelMirror(C, 560.5f, 360.5f, 1.0f, c, kTreeFogFormGround, 0.0f, out);
+      CHECK(587, finite3(out));
+    }
   }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
@@ -5665,7 +6040,8 @@ int main() {
                "threshold, draw rules, constants, texel mapping, Shadow line; shadowed sun: the mask in the binding table, "
                "pre-pass keys, compare directions, mask mirrors against the reference's numbers, guards, the frame's inverse "
                "view-projection, mask constants; native fog: the tables' read, the ground form and the trees' form "
-               "against the reference's numbers, guards, the frame's fog constants\n";
+               "against the reference's numbers, guards, the frame's fog constants, the frame's block with the "
+               "fog's tail, the decision and the Fog line, the form of a draw's fog, a pixel's position from its depth\n";
 
   return 0;
 }

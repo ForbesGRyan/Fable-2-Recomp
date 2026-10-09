@@ -512,6 +512,10 @@ void ClayPass::PrepareLight(nrhi::Device* dev, const capture::DrawRecord& r, con
       LightObjectReady(light.kind, p.normals != nullptr, p.colours != nullptr, p.probe != nullptr, p.bend != nullptr) &&
       MakeClayObjectConstants(light, &constants)) {
     p.lit = true;
+    // A lit trunk or leaf: whether its block carries the trees' fog (a usable scale) or none.
+    if (light.family == capture::LightFamily::kTreeTrunk || light.family == capture::LightFamily::kTreeLeaf) {
+      ++(constants.leaf[3] == kTreeFogFormTree ? st.fog_trees : st.fog_trees_none);
+    }
     std::vector<ClayObjectConstants>& list = light.kind == capture::LightVertexKind::kInstance ? plant_constants_ : object_constants_;
     p.slot = uint32_t(list.size());
     list.push_back(constants);
@@ -626,12 +630,15 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
   // (the shadow draws bind it too: the clay vertex shader declares b1 and b2 in every draw)
   const bool wanted = !prepared_.empty() || !shadow_prepared_[0].empty() || !shadow_prepared_[1].empty();
   if (wanted) {
-    // Slot 0 the frame's light, one slot per terrain record (at most that many are drawn with the
-    // material) and one per lit plant, 256 bytes each; then one slot of 512 bytes per lit object or
-    // trunk. Sized so that the largest block a shader declares at b1 lies inside the buffer from
-    // the start of every slot (ClayConstantBufferBytes).
+    // The frame's block at the head (kClayFrameSlots small slots: its light's part and, since the
+    // fog, the tail with the fog's constants, the inverse view-projection and the two tables; bound
+    // at b2 at offset 0 for the whole frame), one slot per terrain record (at most that many are
+    // drawn with the material) and one per lit plant, 256 bytes each; then one slot of 512 bytes per
+    // lit object or trunk. Sized so that the largest block a shader declares at b1 lies inside the
+    // buffer from the start of every slot (ClayConstantBufferBytes), and the frame's whole block
+    // from offset 0.
     // (and one small slot for the mask step's constants, used or not)
-    const uint64_t bytes = ClayConstantBufferBytes(2 + uint64_t(terrain_items_.size()) + plant_constants_.size(),
+    const uint64_t bytes = ClayConstantBufferBytes(kClayFrameSlots + 1 + uint64_t(terrain_items_.size()) + plant_constants_.size(),
                                                    object_constants_.size());
     if (auto reused = terrain_pool_.Take(bytes, dev->CompletedSubmission())) {
       terrain_cb_ = *reused;
@@ -670,7 +677,7 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
     }
   }
   terrain_sets_.clear();
-  uint32_t slot = 1;  // (slot 0: the frame's light)
+  uint32_t slot = kClayFrameSlots;  // (the slots before it: the frame's block)
   for (Prepared& p : prepared_) {
     if (!p.terrain) continue;
     const TerrainPlanItem& item = terrain_items_[p.plan];
@@ -752,9 +759,9 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
   }
   st.terrain_tuples = uint32_t(terrain_sets_.size());
   // The lit plants' small slots follow the terrain's, and the lit objects' and trunks' slots
-  // (kClayObjectSlotBytes each) follow the small slots that are in use: slot 0, the frame's light,
-  // the terrain's, the plants' and the mask's. (`slot` is then at most 2 + terrain_items_.size() +
-  // plant_constants_.size(), the count the buffer was sized with.)
+  // (kClayObjectSlotBytes each) follow the small slots that are in use: the frame's block's,
+  // the terrain's, the plants' and the mask's. (`slot` is then at most kClayFrameSlots + 1 +
+  // terrain_items_.size() + plant_constants_.size(), the count the buffer was sized with.)
   plant_slot0_ = slot;
   slot += uint32_t(plant_constants_.size());
   mask_slot_ = slot++;  // the mask step's constants (Render writes them when the frame has a mask)
@@ -1272,7 +1279,7 @@ bool ClayPass::EnsureShadowObjects(nrhi::Device* dev) {
 }
 
 void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
-                      bool textured, ClayLight light, bool shadows, ClayStats& st, TextureStats& tst) {
+                      bool textured, ClayLight light, bool shadows, bool fog, ClayStats& st, TextureStats& tst) {
   if (!ready_ || dev != device_) return;
   // A latched texture cache (RHI failure) resolves nothing: skip the UV decode
   // too, and report the latch on F3.
@@ -1392,11 +1399,42 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   float mask_view_proj[4][4] = {};
   FrameView mask_frame_view;
   ClayMaskConstants mask_constants{};
+  // (the frame's one view, asked once: by the mask, by the fog, or by both)
+  bool view_asked = false, view_found = false;
+  auto frame_view = [&] {
+    if (!view_asked) {
+      view_asked = true;
+      view_found = FrameInverseViewProj(scene, mask_inverse, &mask_frame_view, mask_view_proj);
+    }
+    return view_found;
+  };
   if (DecideClayMask(mask_in).mask == ClayMask::kDrawn) {
-    if (!FrameInverseViewProj(scene, mask_inverse, &mask_frame_view, mask_view_proj)) {
+    if (!frame_view()) {
       mask_in.view = mask_frame_view.why;
     } else {
       mask_in.finite = MakeClayMaskConstants(scene.shadow, mask_inverse, frame_.eye, kWidth, kHeight, false, &mask_constants);
+    }
+  }
+  // The frame's fog, decided the same way (DecideClayFog: the first thing missing decides): the
+  // switch as it is now (a scene captured with it on may arrive after it went off), the frame's
+  // light, its own fog block (never another frame's registers or tables), values the pass will hand
+  // a shader, its eye and its one inverse view-projection, from which a lit pixel rebuilds its
+  // world position. Only then is the fog's tail of the frame's constants written (SetClayFrameFog);
+  // in every other frame it stays zero, as MakeClayFrameConstants left it, and the lit programs
+  // give the picture without fog. Before FinishTerrain, which copies the constants into the buffer.
+  ClayFogInputs fog_in;
+  fog_in.fog = fog;
+  fog_in.light = light == ClayLight::kOn;
+  fog_in.light_block = frame_.light_on != 0;
+  fog_in.block = scene.fog.valid;
+  fog_in.values = MakeClayFogConstants(scene.fog, fog).on != 0;
+  fog_in.eye = frame_.eye_on != 0;
+  fog_in.filled = true;
+  if (DecideClayFog(fog_in).fog == ClayFog::kDrawn) {
+    if (!frame_view()) {
+      fog_in.view = mask_frame_view.why;
+    } else {
+      fog_in.filled = SetClayFrameFog(frame_, scene.fog, fog, mask_inverse);
     }
   }
   if (DecideClayMask(mask_in).mask == ClayMask::kDrawn) mask_in.objects = EnsureShadowObjects(dev);
@@ -1408,6 +1446,31 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   mask_in.light_block = frame_.light_on != 0;
   mask_in.constants = terrain_cb_ != nullptr;
   const ClayMaskDecision mask_decision = DecideClayMask(mask_in);
+  // (the fog likewise: a frame whose constant buffer could not be made has no light and no fog; its
+  // constants were made zero, the fog's tail with them)
+  fog_in.light_block = frame_.light_on != 0;
+  const ClayFogDecision fog_decision = DecideClayFog(fog_in);
+  st.fog_switch = fog;
+  st.fog_block = scene.fog.valid;
+  st.fog_reason = scene.fog_reason;
+  st.fog = fog_decision.fog;
+  st.fog_view = fog_decision.view;
+  CountClayFogFrame(fog && light == ClayLight::kOn, fog_decision.fog, fog_counts_);
+  st.fog_frames = fog_counts_.frames;
+  st.fog_block_frames = fog_counts_.block;
+  st.fog_values_frames = fog_counts_.values;
+  st.fog_view_frames = fog_counts_.view;
+  st.fog_nolight_frames = fog_counts_.nolight;
+  // A line when the verdict changes (a slow adapter draws too few frames for the 300-frame line).
+  constexpr uint32_t kFogLogLines = 16;
+  if (fog_decision.fog != fog_logged_ && fog_log_lines_ < kFogLogLines) {
+    fog_logged_ = fog_decision.fog;
+    ++fog_log_lines_;
+    REXLOG_INFO("[native] clay: fog changed at scene frame {}: {} | start {:.3f}, scale {:.6f}, slope {:.3f}, amounts ({:.3f}, {:.3f}), "
+                "frame block {} bytes in {} slots{}",
+                scene.frame, FormatFogText(st), frame_.fog.start, frame_.fog.scale, frame_.fog.slope, frame_.fog.amount, frame_.fog.scatter,
+                sizeof(ClayFrameConstants), kClayFrameSlots, fog_log_lines_ == kFogLogLines ? " (last such line)" : "");
+  }
   st.shadow_light_off = scene.shadow.valid && (light != ClayLight::kOn || !frame_.light_on);
   st.light_switch = light == ClayLight::kOn;
   st.light_block = frame_.light_on != 0;
@@ -1505,7 +1568,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     // (only the terrain shaders read them, and each terrain draw binds its own).
     nrhi::TextureView* const whites[kTerrainTableSize] = {white_view_, white_view_, white_view_, white_view_};
     cmd->SetTextures(kParamTerrainTextures, whites, kTerrainTableSize);
-    // The frame's light at b2 for the whole frame (slot 0), and b1 on something
+    // The frame's block (its light, and the fog's tail) at b2 for the whole frame (the buffer's
+    // head, kClayFrameSlots small slots from offset 0), and b1 on something
     // from the first draw on: only a terrain draw and a lit object read b1, and
     // each binds its own slot.
     if (terrain_cb_) {

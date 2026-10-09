@@ -137,6 +137,20 @@ inline constexpr ClayBufferField kClayFrameFields[] = {
     {"f_floor", 64, 12},   {"f_mask_du", 76, 4},   {"f_axis", 80, 12},    {"f_mask_dv", 92, 4},
     {"f_eye", 96, 12},     {"f_eye_on", 108, 4},
 };
+// The fog's tail of cbuffer Frame (ClayFrameConstants from `fog` on; clay_logic.h, "Native fog"), which
+// only the three lit pixel shaders declare (CLAY_FOG): the vertex shader, the flat shader and the
+// depth-only programs declare the light's 112 bytes and are the programs they were. The fog's
+// constants, the rows of the frame's inverse view-projection, and the game's two fog tables as arrays
+// (64 and 256 texels, rgb): no binding parameter was left for two textures, and an array read by hand
+// is the game's table read exactly (the controller's ruling of 2026-10-09). All zero in a frame
+// without fog: f_fog_on = 0 and no pixel reads the rest.
+inline constexpr ClayBufferField kClayFrameFogFields[] = {
+    {"f_fog_axis", 112, 12},  {"f_fog_on", 124, 4},     {"f_fog_near", 128, 12},   {"f_fog_start", 140, 4},
+    {"f_fog_slope", 144, 4},  {"f_fog_scale", 148, 4},  {"f_fog_amount", 152, 4},  {"f_fog_scatter", 156, 4},
+    {"f_inv0", 160, 16},      {"f_inv1", 176, 16},      {"f_inv2", 192, 16},       {"f_inv3", 208, 16},
+    {"f_scatter", 224, 1024}, {"f_transmit", 1248, 4096},
+};
+inline constexpr unsigned kClayFrameLightSize = 112, kClayFrameSize = 5344;
 inline constexpr ClayBufferField kClayObjectFields[] = {
     {"o_rot0", 0, 16}, {"o_rot1", 16, 16}, {"o_rot2", 32, 16},        {"o_c49", 48, 12},
     {"o_c27w", 60, 4}, {"o_c26", 64, 12},  {"o_colour_power", 76, 4}, {"o_probe", 80, 192},
@@ -156,6 +170,18 @@ cbuffer Draw : register(b0) { float4 r0; float4 r1; float4 r2; float4 r3; uint l
 // not a number) normalises to zero, never to a made-up direction, so a zero normal gives no sun and t = 0;
 // the power of a zero base is 0; t and n_dot_sun are saturated; nothing is divided but the leaves' wrapped
 // cosine (LeafLight).
+// The fog (clay_logic.h, "Native fog"; light_formulas.py: fog, vertex_fog with fog_apply, table_1d): under
+// CLAY_FOG, which the lit pixel shaders define for their colour programs (FABLE2_CLAY_FOG_HLSL). FogCoords
+// rebuilds the pixel's world position from its own SV_Position through the frame's inverse
+// view-projection (the mask step's arithmetic; FogPixelWorld is the mirror) and gives the fog's three
+// coordinates; FogForm applies the form the draw has: the ground form (0), the trees' (1, with the draw's
+// scale), or none (2). fog_scatter and fog_transmit read the two tables as the game's fetch does: texel
+// centres at (i + 0.5) / N, linear, clamped (FogTableRead). Guards, each a comparison that is false for a
+// value that is no number (no test a compiler could fold away): a w that is zero or not below 3e38, a
+// squared distance that is not above 0 and below 1e30 (kFogDistance2Max), a distance not past the start,
+// and the frame's flag leave the pixel as it is, and its tables unread ([branch]). The distance is
+// d2 * rsqrt(d2): the pixel shaders call no square root (the tests hold that of their colour paths).
+// Without CLAY_FOG the same names do nothing: the programs are those without fog.
 #define FABLE2_CLAY_LIGHT_HLSL R"hlsl(
 cbuffer Frame : register(b2) {
   float3 f_sun_dir; uint f_light_on;     // c80.xyz of a one-light draw (= c109.xyz), as it is; 1: the frame is lit
@@ -165,6 +191,14 @@ cbuffer Frame : register(b2) {
   float3 f_floor; float f_mask_du;       // c22.xyz; 1 / the target's width: with f_mask_dv the screen mask's coordinate
   float3 f_axis; float f_mask_dv;        // c23.xyz (= vertex c19.xyz); 1 / the target's height
   float3 f_eye; uint f_eye_on;           // c19.xyz, the eye (= vertex c9.xyz of the leaf shaders); 1: it is usable
+#ifdef CLAY_FOG
+  float3 f_fog_axis; uint f_fog_on;      // c66.xyz; 1: the frame is fogged (0: everything from here on is zero)
+  float3 f_fog_near; float f_fog_start;  // c68.rgb; c67.x
+  float f_fog_slope; float f_fog_scale; float f_fog_amount; float f_fog_scatter;  // c67.z; c67.w; c28.x; c28.y
+  float4 f_inv0; float4 f_inv1; float4 f_inv2; float4 f_inv3;   // the frame's inverse view-projection, rows
+  float4 f_scatter[64];                  // tf4: the in-scatter colour by the angle to the axis (rgb)
+  float4 f_transmit[256];                // tf5: the transmittance by distance (rgb)
+#endif
 };
 float3 light_normalize(float3 v) {
   float n2 = dot(v, v);
@@ -251,6 +285,56 @@ float3 LightLeaf(float3 A, float3 vs_ambient, float front, float back, float3 su
 }
 // What a lit draw writes: the value itself, a number, not negative, at most 64 (ClayLit in clay_logic.h).
 float3 clay_lit(float3 v) { return (v > 0.0) ? min(v, 64.0) : float3(0.0, 0.0, 0.0); }
+#ifdef CLAY_FOG
+float3 fog_scatter(float u) {
+  float x = clamp(saturate(u) * 64.0 - 0.5, 0.0, 63.0);
+  uint i = min(uint(x), 63u);
+  uint j = min(i + 1u, 63u);
+  return lerp(f_scatter[i].rgb, f_scatter[j].rgb, x - float(i));
+}
+float3 fog_transmit(float u) {
+  float x = clamp(saturate(u) * 256.0 - 0.5, 0.0, 255.0);
+  uint i = min(uint(x), 255u);
+  uint j = min(i + 1u, 255u);
+  return lerp(f_transmit[i].rgb, f_transmit[j].rgb, x - float(i));
+}
+struct FogPoint { bool fogged; float a; float s; float t; };
+FogPoint FogCoords(float4 pos) {
+  FogPoint o;
+  float4 S = float4(pos.x * (2.0 * f_mask_du) - 1.0, 1.0 - pos.y * (2.0 * f_mask_dv), pos.z, 1.0);
+  float w = dot(f_inv3, S);
+  bool placed = abs(w) > 0.0 && abs(w) < 3.0e38;
+  float3 V = f_eye - float3(dot(f_inv0, S), dot(f_inv1, S), dot(f_inv2, S)) / (placed ? w : 1.0);
+  float d2 = dot(V, V);
+  bool reach = placed && d2 > 0.0 && d2 < 1.0e30;
+  float q = reach ? d2 : 1.0;
+  float inv = rsqrt(q);
+  float dD = q * inv - f_fog_start;
+  o.fogged = f_fog_on != 0 && reach && dD > 0.0;
+  o.a = saturate(dot(V, f_fog_axis) * -inv);
+  o.s = f_fog_scale * dD;
+  o.t = saturate(f_fog_slope * dD);
+  return o;
+}
+float3 FogForm(float3 c, FogPoint p, float scale, float form) {
+  [branch] if (p.fogged && form != 2.0) {
+    float3 S = fog_scatter(p.a);
+    float3 T = fog_transmit(p.s);
+    if (form == 1.0) {
+      c = c * T + (1.0 - T) * S * scale;
+    } else {
+      float3 F = f_fog_near + p.t * (S - f_fog_near);
+      float3 G = c * T + (1.0 - T) * f_fog_scatter * F;
+      c = c + f_fog_amount * (G - c);
+    }
+  }
+  return c;
+}
+#else
+struct FogPoint { bool fogged; };
+FogPoint FogCoords(float4 pos) { FogPoint o; o.fogged = false; return o; }
+float3 FogForm(float3 c, FogPoint p, float scale, float form) { return c; }
+#endif
 )hlsl"
 
 #define FABLE2_CLAY_OBJECT_HLSL R"hlsl(
@@ -263,7 +347,9 @@ cbuffer Object : register(b1) {
                                                  // (an instanced plant: 2.2, the factor of c21.w in its colour's
                                                  // exponent; a leaf: 2.2 * 0.4545, that of its ambient's)
   float4 o_probe[12];                            // vertex c28..c39: three probe sets of four (base, rows of r, g, b)
-  float4 o_leaf;                                 // a leaf: x vertex c50.w (the wrap of the front light), y 1 / c7.w
+  float4 o_leaf;                                 // a leaf: x vertex c50.w (the wrap of the front light), y 1 / c7.w;
+                                                 // the draw's fog: w the form (0 the ground form, 1 the trees', 2
+                                                 // none), z the trees' scale (vertex c8.x)
 };
 )hlsl"
 
@@ -398,7 +484,12 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0) : SV_Target {
 // kClayTexturedDepthPs is the same text compiled with CLAY_DEPTH_ONLY: the shader of the depth pre-pass
 // for a record of this kind. It makes the same alpha and discards the same pixels (the alpha test,
 // alpha-to-mask) and then returns: no light, no mask, no colour (the draw writes none).
-#define FABLE2_CLAY_TEXTURED_HLSL FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL FABLE2_CLAY_OBJECT_HLSL R"hlsl(
+// The fog (clay_logic.h, "Native fog"): after the family's lit colour, an object's and a tree's c49
+// included, and before c26 and the exposure, which stands in for the game's output scale: the game's
+// place. A plant and an object take the ground form; a trunk and a leaf the trees' own, from the object
+// block's last register (an instanced plant's block ends before it and is not read there).
+#define FABLE2_CLAY_FOG_HLSL "#ifndef CLAY_DEPTH_ONLY\n#define CLAY_FOG 1\n#endif\n"
+#define FABLE2_CLAY_TEXTURED_HLSL FABLE2_CLAY_FOG_HLSL FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL FABLE2_CLAY_OBJECT_HLSL R"hlsl(
 Texture2D albedo : register(t3);
 Texture2D shadow_mask : register(t4);
 SamplerState s_point_wrap : register(s0);
@@ -452,6 +543,8 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
       float3 lit;
       // The sun's shadow at the pixel: every family multiplies its sun term by it, and nothing else.
       float mask = shadow_mask.SampleLevel(s_linear_clamp, (pos.xy - 0.5) * float2(f_mask_du, f_mask_dv), 0).r;
+      // The fog's coordinates of the pixel, from its own depth.
+      FogPoint fog = FogCoords(pos);
       [branch] if (light_mode & 16) {
         // An instanced plant: the normal bent as the game's plant pixel shaders bend it, then A times
         // the vertex side's ambient plus the sun, or (light_mode bit 5) the object form with the vertex
@@ -463,17 +556,20 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
         } else {
           lit = LightPlant(clay_linear(t.rgb), vcolour, dot(Np, f_sun_dir), f_sun_col, SunGateSingle(mask, 1.0));
         }
+        lit = FogForm(lit, fog, 0.0, 0.0);
       } else if (light_mode & 64) {
         // A tree leaf: the vertex side's ambient and the sun's two scalars (bend.x front, bend.y back)
         // on A, the back light on leaf texels only; the mask through the shader's two literals (0.6
         // and 0.4: once on the front light, twice on the back light; both factors are 1 at a mask
         // of 1); c27.w, c49 and c26 as an object's.
         float2 m = LeafMask(mask, 0.6, 0.4);
-        lit = LightLeaf(clay_linear(t.rgb), vcolour, bend.x, bend.y, f_sun_col, o_c27w, m.x, m.y, o_c49) * o_c26;
+        lit = LightLeaf(clay_linear(t.rgb), vcolour, bend.x, bend.y, f_sun_col, o_c27w, m.x, m.y, o_c49);
+        lit = FogForm(lit, fog, o_leaf.z, o_leaf.w) * o_c26;
       } else {
         float3 N = light_normalize(normal);
         lit = LightObject(clay_linear(t.rgb), vcolour, f_tint, f_tint_pow, f_add, f_floor, AmbientT(axis, normal),
-                          dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(mask, 1.0), o_c49) * o_c26;
+                          dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(mask, 1.0), o_c49);
+        lit = FogForm(lit, fog, o_leaf.z, o_leaf.w) * o_c26;
       }
       return float4(clay_lit(lit * f_exposure), (alpha_mode & 0x80) ? saturate(a) : 1.0);
     }
@@ -552,7 +648,7 @@ inline constexpr ClayTerrainField kClayTerrainFields[] = {
     {"t_base_sampler", 176, 4},  {"t_c11x", 180, 4},          {"t_facing_scale", 184, 4},  {"t_light_pad", 188, 4},
 };
 
-#define FABLE2_CLAY_TERRAIN_COMMON_HLSL FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL R"hlsl(
+#define FABLE2_CLAY_TERRAIN_COMMON_HLSL FABLE2_CLAY_FOG_HLSL FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL R"hlsl(
 cbuffer Terrain : register(b1) {
   float4 t_detail_uv;   // layer: tf0 coordinate of the world position, x * [0] + [2], y * [1] + [3]
   float4 t_weight_uv;   // layer: tf18 coordinate of the world position (the layer's weight cell)
@@ -673,6 +769,8 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
     float mask = shadow_mask.SampleLevel(s_linear_clamp, (pos.xy - 0.5) * float2(f_mask_du, f_mask_dv), 0).r;
     lin = LightTerrainLayer(lin, sample_base(base_at, base_d).rgb, f_tint, f_tint_pow, f_add, f_floor,
                             AmbientT(axis, normal), dot(N, f_sun_dir), f_sun_col, t_c11x, SunGateSingle(mask, facing));
+    // The fog (the ground form), on the layer's own colour before its blend, as the game fogs each layer.
+    lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);
   }
   return terrain_out(lin, a, pos, ndc);
 }
@@ -691,6 +789,8 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
     float3 N = light_normalize(normal);
     lin = LightTerrainFar(lin, sample_base(base_at, base_d).rgb, f_tint, f_tint_pow, f_add, f_floor, dot(N, f_axis),
                           dot(N, f_sun_dir), f_sun_col, t_c11x);
+    // The fog (the ground form) before the cross-fade: 2F8A multiplies by its fade after its fog block.
+    lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);
   }
   if (t_flags & 1) lin *= terrain_fade_in(world);
   return terrain_out(lin, 1.0, pos, ndc);
@@ -758,6 +858,7 @@ float main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOOR
 #undef FABLE2_CLAY_TERRAIN_LAYER_HLSL
 #undef FABLE2_CLAY_TERRAIN_COMMON_HLSL
 #undef FABLE2_CLAY_TEXTURED_HLSL
+#undef FABLE2_CLAY_FOG_HLSL
 #undef FABLE2_CLAY_OBJECT_HLSL
 #undef FABLE2_CLAY_LIGHT_HLSL
 #undef FABLE2_CLAY_DRAW_HLSL

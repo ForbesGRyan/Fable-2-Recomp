@@ -3,9 +3,10 @@ fog, vertex_fog, fog_apply, table_1d), the generator of the numbers the C++ mirr
 (tools/xdk_sigmatch/fog_pins.py), the pinned lines themselves (tests/native/test_clay_logic.cpp, cases 580 on),
 the renderer's pure mirror (src/native/render/clay_logic.h: FogTableRead, FogCoords, FogMirror, TreeFogMirror
 and their constants), the capture's block (src/native/capture/fog_block.h) with its test's fixture frame
-(tests/native/test_fog_block.cpp, fog_table_fixture.inc) and the trees' scale (src/native/capture/material.h).
-This test reads the C++ texts and holds them to one set of numbers, as tests/test_mask_literals.py does for
-the mask."""
+(tests/native/test_fog_block.cpp, fog_table_fixture.inc), the trees' scale (src/native/capture/material.h)
+and the lit pixel shaders' fog (src/native/fable2_native_shaders.h: the shared light text's fog_scatter,
+fog_transmit, FogCoords, FogForm and the tail of cbuffer Frame). This test reads the C++ texts and holds them
+to one set of numbers, as tests/test_mask_literals.py does for the mask."""
 import re
 import struct
 import sys
@@ -52,6 +53,7 @@ class FogLiterals(unittest.TestCase):
         cls.material = _text("src/native/capture/material.h")
         cls.logic_test = _text("tests/native/test_clay_logic.cpp")
         cls.block_test = _text("tests/native/test_fog_block.cpp")
+        cls.shaders = _text("src/native/fable2_native_shaders.h")
         cls.lines = fog_pins.lines()
 
     def assertSameFloats(self, got, want, what):
@@ -140,6 +142,52 @@ class FogLiterals(unittest.TestCase):
         # The generator pins the scale the captures hold (1) and one that is not 1.
         self.assertEqual(fog_pins.C8X[0], 1.0)
         self.assertNotEqual(fog_pins.C8X[1], 1.0)
+
+    def test_the_shader_reads_the_tables_as_the_reference(self):
+        # table_1d in the shader: saturate(u) * N - 0.5 clamped to 0..N - 1, the two texels i and
+        # min(i + 1, N - 1), a linear blend; for both tables, with the arrays' sizes.
+        for name, n in (("scatter", fog_pins.SCATTER_TEXELS), ("transmit", fog_pins.TRANSMIT_TEXELS)):
+            body = _one(r"float3 fog_" + name + r"\(float u\) \{(.*?)\n\}", self.shaders, "fog_" + name)
+            scale, half, low, high = _one(r"float x = clamp\(saturate\(u\) \* (" + NUMBER + r") - (" + NUMBER + r"), (" + NUMBER + r"), (" +
+                                          NUMBER + r")\);", body, "the texel coordinate of fog_" + name)
+            self.assertEqual((float(scale), float(half), float(low), float(high)), (float(n), 0.5, 0.0, float(n - 1)))
+            self.assertEqual(int(_one(r"uint i = min\(uint\(x\), (\d+)u\);", body, "i")), n - 1)
+            self.assertEqual(int(_one(r"uint j = min\(i \+ 1u, (\d+)u\);", body, "j")), n - 1)
+            _one(r"return lerp\(f_" + name + r"\[i\]\.rgb, f_" + name + r"\[j\]\.rgb, x - float\(i\)\);", body, "the blend")
+            self.assertEqual(int(_one(r"float4 f_" + name + r"\[(\d+)\];", self.shaders, "the array")), n)
+        # The arrays lie where the C++ struct has them (the shader test holds the compiled layout).
+        self.assertEqual(_one(r'\{"f_scatter", (\d+), (\d+)\}', self.shaders, "f_scatter's field"), ("224", str(64 * 16)))
+        self.assertEqual(_one(r'\{"f_transmit", (\d+), (\d+)\}', self.shaders, "f_transmit's field"), ("1248", str(256 * 16)))
+        _one(r"float scatter\[kFogScatterTexels\]\[4\];", self.logic, "ClayFrameConstants::scatter")
+        _one(r"float transmit\[kFogTransmitTexels\]\[4\];", self.logic, "ClayFrameConstants::transmit")
+
+    def test_the_shader_has_the_mirrors_bounds_and_forms(self):
+        d2 = float(_one(r"inline constexpr float kFogDistance2Max = (" + NUMBER + r")f;", self.logic, "kFogDistance2Max"))
+        in_shader = float(_one(r"bool reach = placed && d2 > 0\.0 && d2 < (" + NUMBER + r");", self.shaders, "the distance bound"))
+        self.assertEqual(f32(in_shader), f32(d2))
+        # The position's w: the same bound in the shader and in FogPixelWorld.
+        w_shader = float(_one(r"bool placed = abs\(w\) > 0\.0 && abs\(w\) < (" + NUMBER + r");", self.shaders, "the bound of w"))
+        w_mirror = float(_one(r"if \(!\(std::fabs\(w\) > 0\.0f && std::fabs\(w\) < (" + NUMBER + r")f\)\) return false;", self.logic,
+                              "FogPixelWorld's bound of w"))
+        self.assertEqual(f32(w_shader), f32(w_mirror))
+        # The forms of a draw's fog: the object block's numbers.
+        forms = _one(r"inline constexpr float kTreeFogFormGround = (" + NUMBER + r")f, kTreeFogFormTree = (" + NUMBER +
+                     r")f, kTreeFogFormNone = (" + NUMBER + r")f;", self.logic, "the forms")
+        self.assertEqual(tuple(float(v) for v in forms), (0.0, 1.0, 2.0))
+        self.assertEqual(float(_one(r"\[branch\] if \(p\.fogged && form != (" + NUMBER + r")\) \{", self.shaders, "no fog")), float(forms[2]))
+        self.assertEqual(float(_one(r"    if \(form == (" + NUMBER + r")\) \{", self.shaders, "the trees' form")), float(forms[1]))
+        # The ground form is passed as two literal zeros where a draw has no object block's register to read.
+        self.assertEqual(len(re.findall(r"FogForm\(lit, fog, 0\.0, 0\.0\)", self.shaders)), 1)
+        self.assertEqual(len(re.findall(r"FogForm\(lin, FogCoords\(pos\), 0\.0, 0\.0\)", self.shaders)), 2)
+        self.assertEqual(len(re.findall(r"FogForm\(lit, fog, o_leaf\.z, o_leaf\.w\) \* o_c26;", self.shaders)), 2)
+        # The two forms' arithmetic, term for term as the mirrors'.
+        for line in ("c = c * T + (1.0 - T) * S * scale;", "float3 F = f_fog_near + p.t * (S - f_fog_near);",
+                     "float3 G = c * T + (1.0 - T) * f_fog_scatter * F;", "c = c + f_fog_amount * (G - c);",
+                     "o.fogged = f_fog_on != 0 && reach && dD > 0.0;", "o.s = f_fog_scale * dD;", "o.t = saturate(f_fog_slope * dD);"):
+            self.assertEqual(self.shaders.count(line), 1, line)
+        for line in ("const double F = near_colour + at.t * (S[k] - near_colour);", "const double G = base[k] * T[k] + (1.0 - T[k]) * scale * F;",
+                     "fogged[k] = base[k] + double(f.amount) * (G - base[k]);", "const double add = (1.0 - T[k]) * S[k] * double(c8x);"):
+            self.assertEqual(self.logic.count(line), 1, line)
 
     def test_the_made_up_set_exercises_what_the_frame_does_not(self):
         real, made = fog_pins.REAL, fog_pins.MADE

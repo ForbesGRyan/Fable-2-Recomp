@@ -485,6 +485,14 @@ static const char kPinLight[] = R"pin(cbuffer Frame : register(b2) {
   float3 f_floor; float f_mask_du;       // c22.xyz; 1 / the target's width: with f_mask_dv the screen mask's coordinate
   float3 f_axis; float f_mask_dv;        // c23.xyz (= vertex c19.xyz); 1 / the target's height
   float3 f_eye; uint f_eye_on;           // c19.xyz, the eye (= vertex c9.xyz of the leaf shaders); 1: it is usable
+#ifdef CLAY_FOG
+  float3 f_fog_axis; uint f_fog_on;      // c66.xyz; 1: the frame is fogged (0: everything from here on is zero)
+  float3 f_fog_near; float f_fog_start;  // c68.rgb; c67.x
+  float f_fog_slope; float f_fog_scale; float f_fog_amount; float f_fog_scatter;  // c67.z; c67.w; c28.x; c28.y
+  float4 f_inv0; float4 f_inv1; float4 f_inv2; float4 f_inv3;   // the frame's inverse view-projection, rows
+  float4 f_scatter[64];                  // tf4: the in-scatter colour by the angle to the axis (rgb)
+  float4 f_transmit[256];                // tf5: the transmittance by distance (rgb)
+#endif
 };
 float3 light_normalize(float3 v) {
   float n2 = dot(v, v);
@@ -571,6 +579,56 @@ float3 LightLeaf(float3 A, float3 vs_ambient, float front, float back, float3 su
 }
 // What a lit draw writes: the value itself, a number, not negative, at most 64 (ClayLit in clay_logic.h).
 float3 clay_lit(float3 v) { return (v > 0.0) ? min(v, 64.0) : float3(0.0, 0.0, 0.0); }
+#ifdef CLAY_FOG
+float3 fog_scatter(float u) {
+  float x = clamp(saturate(u) * 64.0 - 0.5, 0.0, 63.0);
+  uint i = min(uint(x), 63u);
+  uint j = min(i + 1u, 63u);
+  return lerp(f_scatter[i].rgb, f_scatter[j].rgb, x - float(i));
+}
+float3 fog_transmit(float u) {
+  float x = clamp(saturate(u) * 256.0 - 0.5, 0.0, 255.0);
+  uint i = min(uint(x), 255u);
+  uint j = min(i + 1u, 255u);
+  return lerp(f_transmit[i].rgb, f_transmit[j].rgb, x - float(i));
+}
+struct FogPoint { bool fogged; float a; float s; float t; };
+FogPoint FogCoords(float4 pos) {
+  FogPoint o;
+  float4 S = float4(pos.x * (2.0 * f_mask_du) - 1.0, 1.0 - pos.y * (2.0 * f_mask_dv), pos.z, 1.0);
+  float w = dot(f_inv3, S);
+  bool placed = abs(w) > 0.0 && abs(w) < 3.0e38;
+  float3 V = f_eye - float3(dot(f_inv0, S), dot(f_inv1, S), dot(f_inv2, S)) / (placed ? w : 1.0);
+  float d2 = dot(V, V);
+  bool reach = placed && d2 > 0.0 && d2 < 1.0e30;
+  float q = reach ? d2 : 1.0;
+  float inv = rsqrt(q);
+  float dD = q * inv - f_fog_start;
+  o.fogged = f_fog_on != 0 && reach && dD > 0.0;
+  o.a = saturate(dot(V, f_fog_axis) * -inv);
+  o.s = f_fog_scale * dD;
+  o.t = saturate(f_fog_slope * dD);
+  return o;
+}
+float3 FogForm(float3 c, FogPoint p, float scale, float form) {
+  [branch] if (p.fogged && form != 2.0) {
+    float3 S = fog_scatter(p.a);
+    float3 T = fog_transmit(p.s);
+    if (form == 1.0) {
+      c = c * T + (1.0 - T) * S * scale;
+    } else {
+      float3 F = f_fog_near + p.t * (S - f_fog_near);
+      float3 G = c * T + (1.0 - T) * f_fog_scatter * F;
+      c = c + f_fog_amount * (G - c);
+    }
+  }
+  return c;
+}
+#else
+struct FogPoint { bool fogged; };
+FogPoint FogCoords(float4 pos) { FogPoint o; o.fogged = false; return o; }
+float3 FogForm(float3 c, FogPoint p, float scale, float form) { return c; }
+#endif
 )pin";
 static const char kPinVsMain[] = R"pin(VsOut main(uint vid : SV_VertexID) {
   VsOut o;
@@ -697,6 +755,8 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
       float3 lit;
       // The sun's shadow at the pixel: every family multiplies its sun term by it, and nothing else.
       float mask = shadow_mask.SampleLevel(s_linear_clamp, (pos.xy - 0.5) * float2(f_mask_du, f_mask_dv), 0).r;
+      // The fog's coordinates of the pixel, from its own depth.
+      FogPoint fog = FogCoords(pos);
       [branch] if (light_mode & 16) {
         // An instanced plant: the normal bent as the game's plant pixel shaders bend it, then A times
         // the vertex side's ambient plus the sun, or (light_mode bit 5) the object form with the vertex
@@ -708,17 +768,20 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
         } else {
           lit = LightPlant(clay_linear(t.rgb), vcolour, dot(Np, f_sun_dir), f_sun_col, SunGateSingle(mask, 1.0));
         }
+        lit = FogForm(lit, fog, 0.0, 0.0);
       } else if (light_mode & 64) {
         // A tree leaf: the vertex side's ambient and the sun's two scalars (bend.x front, bend.y back)
         // on A, the back light on leaf texels only; the mask through the shader's two literals (0.6
         // and 0.4: once on the front light, twice on the back light; both factors are 1 at a mask
         // of 1); c27.w, c49 and c26 as an object's.
         float2 m = LeafMask(mask, 0.6, 0.4);
-        lit = LightLeaf(clay_linear(t.rgb), vcolour, bend.x, bend.y, f_sun_col, o_c27w, m.x, m.y, o_c49) * o_c26;
+        lit = LightLeaf(clay_linear(t.rgb), vcolour, bend.x, bend.y, f_sun_col, o_c27w, m.x, m.y, o_c49);
+        lit = FogForm(lit, fog, o_leaf.z, o_leaf.w) * o_c26;
       } else {
         float3 N = light_normalize(normal);
         lit = LightObject(clay_linear(t.rgb), vcolour, f_tint, f_tint_pow, f_add, f_floor, AmbientT(axis, normal),
-                          dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(mask, 1.0), o_c49) * o_c26;
+                          dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(mask, 1.0), o_c49);
+        lit = FogForm(lit, fog, o_leaf.z, o_leaf.w) * o_c26;
       }
       return float4(clay_lit(lit * f_exposure), (alpha_mode & 0x80) ? saturate(a) : 1.0);
     }
@@ -812,6 +875,8 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
     float mask = shadow_mask.SampleLevel(s_linear_clamp, (pos.xy - 0.5) * float2(f_mask_du, f_mask_dv), 0).r;
     lin = LightTerrainLayer(lin, sample_base(base_at, base_d).rgb, f_tint, f_tint_pow, f_add, f_floor,
                             AmbientT(axis, normal), dot(N, f_sun_dir), f_sun_col, t_c11x, SunGateSingle(mask, facing));
+    // The fog (the ground form), on the layer's own colour before its blend, as the game fogs each layer.
+    lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);
   }
   return terrain_out(lin, a, pos, ndc);
 })pin";
@@ -825,6 +890,8 @@ static const char kPinFarMain[] = R"pin(float4 main(float4 pos : SV_Position, fl
     float3 N = light_normalize(normal);
     lin = LightTerrainFar(lin, sample_base(base_at, base_d).rgb, f_tint, f_tint_pow, f_add, f_floor, dot(N, f_axis),
                           dot(N, f_sun_dir), f_sun_col, t_c11x);
+    // The fog (the ground form) before the cross-fade: 2F8A multiplies by its fade after its fog block.
+    lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);
   }
   if (t_flags & 1) lin *= terrain_fade_in(world);
   return terrain_out(lin, 1.0, pos, ndc);
@@ -1544,7 +1611,9 @@ int main() {
       const char* branch = strstr(t, "if (light_mode & 4) {");
       const char* n = strstr(t, "float3 N = light_normalize(normal);");
       const char* call = strstr(t, "lit = LightObject(clay_linear(t.rgb), vcolour, f_tint, f_tint_pow, f_add, f_floor, AmbientT(axis, normal),");
-      const char* rest = strstr(t, "dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(mask, 1.0), o_c49) * o_c26;");
+      // (c26 comes after the fog, which comes after the lit colour with its c49: the game's order)
+      const char* rest = strstr(t, "dot(N, f_sun_dir), f_sun_col, o_c27w, SunGateSingle(mask, 1.0), o_c49);\n"
+                                   "        lit = FogForm(lit, fog, o_leaf.z, o_leaf.w) * o_c26;");
       const char* out = strstr(t, "return float4(clay_lit(lit * f_exposure), (alpha_mode & 0x80) ? saturate(a) : 1.0);");
       const char* unlit = strstr(t, "return float4(clay_linear(t.rgb * (0.75 + 0.25 * facet)), (alpha_mode & 0x80) ? saturate(a) : 1.0);");
       if (!mask || !branch || !n || !call || !rest || !out || !unlit) return 83;
@@ -1569,7 +1638,8 @@ int main() {
       // the vertex side's ambient and two scalars with the frame's sun colour, c27.w, c49, then c26.
       const char* leaf = strstr(t, "} else if (light_mode & 64) {");
       const char* mask_factors = strstr(t, "float2 m = LeafMask(mask, 0.6, 0.4);");
-      const char* leaf_call = strstr(t, "lit = LightLeaf(clay_linear(t.rgb), vcolour, bend.x, bend.y, f_sun_col, o_c27w, m.x, m.y, o_c49) * o_c26;");
+      const char* leaf_call = strstr(t, "lit = LightLeaf(clay_linear(t.rgb), vcolour, bend.x, bend.y, f_sun_col, o_c27w, m.x, m.y, o_c49);\n"
+                                        "        lit = FogForm(lit, fog, o_leaf.z, o_leaf.w) * o_c26;");
       if (!leaf || !mask_factors || !leaf_call) return 167;
       if (!(plant_call < leaf && leaf < mask_factors && mask_factors < leaf_call && leaf_call < n)) return 167;
       // (the object's constants are read by the leaf's path and the object's alone: once each in each,
@@ -1651,7 +1721,45 @@ int main() {
       using fable2::native::render::ClayObjectConstants;
       const unsigned frame_count = sizeof(kClayFrameFields) / sizeof(kClayFrameFields[0]);
       const unsigned object_count = sizeof(kClayObjectFields) / sizeof(kClayObjectFields[0]);
-      static_assert(sizeof(ClayFrameConstants) == 112 && sizeof(ClayObjectConstants) == 288);
+      using fable2::native::render::ClayFogConstants;
+      static_assert(fable2::native::render::kClayFrameLightBytes == kClayFrameLightSize && sizeof(ClayFrameConstants) == kClayFrameSize &&
+                    kClayFrameLightSize == 112 && kClayFrameSize == 5344 && sizeof(ClayObjectConstants) == 288);
+      // The fog's tail of the frame's block (kClayFrameFogFields) against the C++ struct, and the whole
+      // block as the lit pixel shaders declare it: the light's fields, then the tail's.
+      const unsigned fog_count = sizeof(kClayFrameFogFields) / sizeof(kClayFrameFogFields[0]);
+      {
+        const size_t fog_at = offsetof(ClayFrameConstants, fog);
+        const struct {
+          const char* name;
+          size_t offset, bytes;
+        } fog_struct[] = {
+            {"f_fog_axis", fog_at + offsetof(ClayFogConstants, axis), sizeof(ClayFogConstants::axis)},
+            {"f_fog_on", fog_at + offsetof(ClayFogConstants, on), sizeof(ClayFogConstants::on)},
+            {"f_fog_near", fog_at + offsetof(ClayFogConstants, near_colour), sizeof(ClayFogConstants::near_colour)},
+            {"f_fog_start", fog_at + offsetof(ClayFogConstants, start), sizeof(ClayFogConstants::start)},
+            {"f_fog_slope", fog_at + offsetof(ClayFogConstants, slope), sizeof(ClayFogConstants::slope)},
+            {"f_fog_scale", fog_at + offsetof(ClayFogConstants, scale), sizeof(ClayFogConstants::scale)},
+            {"f_fog_amount", fog_at + offsetof(ClayFogConstants, amount), sizeof(ClayFogConstants::amount)},
+            {"f_fog_scatter", fog_at + offsetof(ClayFogConstants, scatter), sizeof(ClayFogConstants::scatter)},
+            {"f_inv0", offsetof(ClayFrameConstants, inv_view_proj), 16},
+            {"f_inv1", offsetof(ClayFrameConstants, inv_view_proj) + 16, 16},
+            {"f_inv2", offsetof(ClayFrameConstants, inv_view_proj) + 32, 16},
+            {"f_inv3", offsetof(ClayFrameConstants, inv_view_proj) + 48, 16},
+            {"f_scatter", offsetof(ClayFrameConstants, scatter), sizeof(ClayFrameConstants::scatter)},
+            {"f_transmit", offsetof(ClayFrameConstants, transmit), sizeof(ClayFrameConstants::transmit)},
+        };
+        if (fog_count != sizeof(fog_struct) / sizeof(fog_struct[0]) || fog_count != 14) return 89;
+        for (unsigned i = 0; i < fog_count; ++i) {
+          if (strcmp(kClayFrameFogFields[i].name, fog_struct[i].name) || kClayFrameFogFields[i].offset != fog_struct[i].offset ||
+              kClayFrameFogFields[i].bytes != fog_struct[i].bytes) return 89;
+        }
+        // (the tables are arrays of float4 a register apart: 64 and 256 registers; the sky step will read
+        // f_scatter at the same offset)
+        if (kClayFrameFogFields[12].offset != 224 || kClayFrameFogFields[12].bytes != 64 * 16 || kClayFrameFogFields[13].offset != 1248 ||
+            kClayFrameFogFields[13].bytes != 256 * 16 || kClayFrameFogFields[13].offset + kClayFrameFogFields[13].bytes != kClayFrameSize) return 89;
+      }
+      std::vector<fable2::native::shaders::ClayBufferField> frame_with_fog(kClayFrameFields, kClayFrameFields + 14);
+      frame_with_fog.insert(frame_with_fog.end(), kClayFrameFogFields, kClayFrameFogFields + fog_count);
       const struct {
         const char* name;
         size_t offset, bytes;
@@ -1704,11 +1812,42 @@ int main() {
         if (strstr(src, "float exposure") || strstr(src, "f_pad3")) return 89;
       }
       for (int i = 0; i < 4; ++i) {
+        // The vertex shader declares the light's part; the three lit pixel shaders the whole block.
         const char* target = i == 0 ? "vs_5_0" : "ps_5_0";
-        if (int at = BufferLayoutMismatch("lit", lit_shaders[i], target, "Frame", kClayFrameFields, frame_count, 112)) {
+        const int at = i == 0 ? BufferLayoutMismatch("lit", lit_shaders[i], target, "Frame", kClayFrameFields, frame_count, kClayFrameLightSize)
+                              : BufferLayoutMismatch("lit", lit_shaders[i], target, "Frame", frame_with_fog.data(),
+                                                     unsigned(frame_with_fog.size()), kClayFrameSize);
+        if (at) {
           std::cerr << "cbuffer Frame of lit shader " << i << ": " << at << "\n";
           return 90 + i;
         }
+      }
+      // The depth-only programs of the three do not define CLAY_FOG: they have the light's part alone, or
+      // (a program that reads nothing of the block keeps none of it: 3) no such buffer, as before the fog;
+      // never the block with the tail.
+      for (const char* src : {kClayTexturedDepthPs, kClayTerrainLayerDepthPs, kClayTerrainFarDepthPs}) {
+        const int light_only = BufferLayoutMismatch("depth_only", src, "ps_5_0", "Frame", kClayFrameFields, frame_count, kClayFrameLightSize);
+        if (light_only != 0 && light_only != 3) return 93;
+        if (BufferLayoutMismatch("depth_only", src, "ps_5_0", "Frame", frame_with_fog.data(), unsigned(frame_with_fog.size()),
+                                 kClayFrameSize) == 0) return 93;
+        if (strstr(src, "#define CLAY_DEPTH_ONLY 1\n#ifndef CLAY_DEPTH_ONLY\n#define CLAY_FOG 1\n#endif\n") != src) return 93;
+      }
+      // Controls: two fields of the tail exchanged, and a table one texel short, are reported.
+      {
+        std::string swapped_fog = kClayTexturedPs;
+        const std::string good_fog = "float f_fog_slope; float f_fog_scale;";
+        size_t fog_at = swapped_fog.find(good_fog);
+        if (fog_at == std::string::npos) return 96;
+        swapped_fog.replace(fog_at, good_fog.size(), "float f_fog_scale; float f_fog_slope;");
+        if (BufferLayoutMismatch("swapped_fog_ps", swapped_fog.c_str(), "ps_5_0", "Frame", frame_with_fog.data(),
+                                 unsigned(frame_with_fog.size()), kClayFrameSize) < 10) return 96;
+        std::string short_table = kClayTexturedPs;
+        const std::string good_table = "float4 f_scatter[64];";
+        fog_at = short_table.find(good_table);
+        if (fog_at == std::string::npos) return 96;
+        short_table.replace(fog_at, good_table.size(), "float4 f_scatter[63];");
+        if (BufferLayoutMismatch("short_table_ps", short_table.c_str(), "ps_5_0", "Frame", frame_with_fog.data(),
+                                 unsigned(frame_with_fog.size()), kClayFrameSize) == 0) return 96;
       }
       if (int at = BufferLayoutMismatch("clay_vs", kClayVs, "vs_5_0", "Object", kClayObjectFields, object_count, 288)) return 94;
       if (int at = BufferLayoutMismatch("clay_textured_ps", kClayTexturedPs, "ps_5_0", "Object", kClayObjectFields, object_count, 288)) return 95;
@@ -1717,7 +1856,8 @@ int main() {
       size_t at = swapped.find(good);
       if (at == std::string::npos) return 96;
       swapped.replace(at, good.size(), "float f_exposure; float3 f_tint;");
-      if (BufferLayoutMismatch("swapped_frame_ps", swapped.c_str(), "ps_5_0", "Frame", kClayFrameFields, frame_count, 112) < 10) return 96;
+      if (BufferLayoutMismatch("swapped_frame_ps", swapped.c_str(), "ps_5_0", "Frame", frame_with_fog.data(),
+                               unsigned(frame_with_fog.size()), kClayFrameSize) < 10) return 96;
       swapped = kClayTexturedPs;
       const std::string object_good = "float3 o_c49; float o_c27w;";
       at = swapped.find(object_good);
@@ -2117,14 +2257,19 @@ int main() {
         if (loose.empty() || HasOp(Disassembly("loose_vs_mode14", WithLightMode(loose.c_str(), 14).c_str(), "vs_5_0"), "umin") ||
             !HasOp(Disassembly("clay_vs_mode14", WithLightMode(kClayVs, 14).c_str(), "vs_5_0"), "umin")) return 160;
       }
-      // The textured pixel shader reads the object's first five registers only, lit or not: the probe
-      // registers are the vertex stage's.
+      // The textured pixel shader reads the object's first five registers and, since the fog, its last
+      // (17: the form of the draw's fog and the trees' scale), by fixed index, lit or not: the probe
+      // registers between them are the vertex stage's and no pixel program names one.
       {
         const std::string lit14 = Disassembly("clay_textured_ps_mode14", WithLightMode(kClayTexturedPs, 14).c_str(), "ps_5_0");
         const std::string whole = Disassembly("clay_textured_ps", kClayTexturedPs, "ps_5_0");
         bool dynamic = true;
-        if (lit14.empty() || whole.empty() || DeclaredRegisters(whole, 1, &dynamic) != 5 || dynamic ||
-            DeclaredRegisters(lit14, 1) != 5) return 161;
+        if (lit14.empty() || whole.empty() || DeclaredRegisters(whole, 1, &dynamic) != 18 || dynamic ||
+            DeclaredRegisters(lit14, 1) != 18) return 161;
+        for (int reg = 5; reg < 17; ++reg) {
+          if (whole.find("cb1[" + std::to_string(reg) + "]") != std::string::npos) return 161;
+        }
+        if (!ReadsComponent(lit14, "cb1[17]", 'w') || !ReadsComponent(lit14, "cb1[17]", 'z')) return 161;
         // A lit object is the same pixel program whichever way its colour was made.
         if (lit14 != Disassembly("clay_textured_ps_mode6", WithLightMode(kClayTexturedPs, 6).c_str(), "ps_5_0")) return 161;
       }
@@ -2137,7 +2282,11 @@ int main() {
       // by every lit program and by no other; the bend input
       // (v7) declared by a lit plant and a lit leaf alone. And a mode's program is the program of its
       // lit, instance, plant-lit and leaf bits (the leaf bit only without the instance bit): nothing
-      // else of the mode reaches the stage. No program reads the frame's eye (register 6).
+      // else of the mode reaches the stage. Since the fog every lit program declares the whole block
+      // (334 registers, indexed by a computed value: the two tables) and reads the fog's flag
+      // (register 7, w), the eye (6) and the inverse view-projection's rows (10 to 13); a lit object,
+      // trunk or leaf also the draw's last register (17: its fog's form and scale); a plant still reads
+      // nothing of the draw's slot. No unlit program has any of it.
       {
         static std::string by_bits[128];
         for (unsigned mode = 0; mode < fable2::native::render::kLightModeCount; ++mode) {
@@ -2146,12 +2295,15 @@ int main() {
           if (listing.empty() || listing.find("ld_structured") != std::string::npos || LoopInstructions(listing) != 0) return 161;
           const bool lit = (mode & 4) != 0, plant = lit && (mode & 16) != 0, plant_lit = plant && (mode & 32) != 0;
           const bool leaf = lit && !plant && (mode & 64) != 0;
-          const unsigned slot = DeclaredRegisters(listing, 1), frame = DeclaredRegisters(listing, 2);
+          bool frame_dynamic = false;
+          const unsigned slot = DeclaredRegisters(listing, 1), frame = DeclaredRegisters(listing, 2, &frame_dynamic);
           // (since the shadows: every lit program also reads the mask's coordinate, the fourth components
           // of the frame's registers 4 and 5, so it declares six registers of the block, and samples the
           // mask at t4; no unlit program does either)
-          if (slot != (lit && !plant ? 5u : 0u) || ReadsBlock(listing, "cb1") != (lit && !plant) ||
-              frame != (!lit ? 0u : 6u) || ReadsBlock(listing, "cb2") != lit ||
+          if (slot != (lit && !plant ? 18u : 0u) || ReadsBlock(listing, "cb1") != (lit && !plant) ||
+              frame != (!lit ? 0u : kClayFrameSize / 16) || frame_dynamic != lit || ReadsBlock(listing, "cb2") != lit ||
+              ReadsComponent(listing, "cb2[7]", 'w') != lit || (listing.find("cb2[6]") != std::string::npos) != lit ||
+              (listing.find("cb2[13]") != std::string::npos) != lit || (listing.find("cb1[17]") != std::string::npos) != (lit && !plant) ||
               ReadsComponent(listing, "cb2[2]", 'w') != lit ||
               ReadsComponent(listing, "cb2[4]", 'w') != lit || ReadsComponent(listing, "cb2[5]", 'w') != lit || ReadsResource(listing, 4) != lit ||
               (listing.find("sample_l") != std::string::npos) != lit ||
@@ -2329,8 +2481,8 @@ int main() {
           {"plant sun", 1, "lit = LightPlant(clay_linear(t.rgb), vcolour, dot(Np, f_sun_dir),",
            "lit = LightPlant(clay_linear(t.rgb), vcolour, dot(normal, f_sun_dir),", 2},
           {"plant-lit t", 1, "AmbientT(axis, Np)", "AmbientT(axis, normal)", 2},
-          {"plant c26", 1, "f_sun_col, SunGateSingle(mask, 1.0));\n        }\n      } else if (light_mode & 64) {",
-           "f_sun_col, SunGateSingle(mask, 1.0));\n        }\n        lit *= o_c26;\n      } else if (light_mode & 64) {", 2},
+          {"plant c26", 1, "f_sun_col, SunGateSingle(mask, 1.0));\n        }\n        lit = FogForm(lit, fog, 0.0, 0.0);\n      } else if (light_mode & 64) {",
+           "f_sun_col, SunGateSingle(mask, 1.0));\n        }\n        lit = FogForm(lit, fog, 0.0, 0.0);\n        lit *= o_c26;\n      } else if (light_mode & 64) {", 2},
           {"PlantBend", 0, "  float h = saturate(height);", "  float h = height;", 6},
           {"PlantNormal", 1, "  float3 n = light_normalize(normal);\n  return light_normalize(n + (bend.xyz - n)",
            "  float3 n = normal;\n  return light_normalize(n + (bend.xyz - n)", 6},
@@ -2358,7 +2510,29 @@ int main() {
           {"leaf wrap", 0, "o_leaf.x, 1.0), 0, 0);", "0.0, 1.0), 0, 0);", 1},
           {"leaf clamp", 0, "uint a0 = min(colours[v], 8u);", "uint a0 = colours[v];", 1},
           {"leaf axis", 0, "    o.normal = N;\n    o.axis = float3(0, 0, 0);", "    o.normal = N;\n    o.axis = AmbientAxis(N, f_axis);", 1},
-          {"leaf c26", 1, "m.x, m.y, o_c49) * o_c26;", "m.x, m.y, o_c49);", 2},
+          {"leaf c26", 1, "lit = FogForm(lit, fog, o_leaf.z, o_leaf.w) * o_c26;", "lit = FogForm(lit, fog, o_leaf.z, o_leaf.w);", 2},
+          // The fog (fog sub-project, plan Task 4). The functions: the two tables' coordinates exchanged,
+          // the start not subtracted, a table read half a texel off, the axis reversed, no blend from the
+          // near colour, the amount dropped, the trees' form with the ground's scale, a pixel at the eye
+          // let through. The pixel stage: a plant in the trees' form, c26 before the fog on a leaf (the
+          // first of the two such lines), a layer without fog, the far ground fogged after its cross-fade,
+          // the fog's coordinates from another depth.
+          {"fog tables exchanged", 1, "    float3 S = fog_scatter(p.a);\n    float3 T = fog_transmit(p.s);",
+           "    float3 S = fog_scatter(p.s);\n    float3 T = fog_transmit(p.a);", 6},
+          {"fog start", 2, "  float dD = q * inv - f_fog_start;", "  float dD = q * inv;", 6},
+          {"fog half a texel", 3, "saturate(u) * 256.0 - 0.5, 0.0, 255.0);", "saturate(u) * 256.0, 0.0, 255.0);", 6},
+          {"fog axis", 1, "dot(V, f_fog_axis) * -inv);", "dot(V, f_fog_axis) * inv);", 6},
+          {"fog near blend", 1, "float3 F = f_fog_near + p.t * (S - f_fog_near);", "float3 F = S;", 6},
+          {"fog amount", 2, "c = c + f_fog_amount * (G - c);", "c = G;", 6},
+          {"fog tree scale", 1, "c = c * T + (1.0 - T) * S * scale;", "c = c * T + (1.0 - T) * S * f_fog_scatter;", 6},
+          {"fog at the eye", 1, "bool reach = placed && d2 > 0.0 && d2 < 1.0e30;", "bool reach = placed && d2 < 1.0e30;", 6},
+          {"fog off ignored", 1, "o.fogged = f_fog_on != 0 && reach && dD > 0.0;", "o.fogged = reach && dD > 0.0;", 6},
+          {"plant in the trees' form", 1, "lit = FogForm(lit, fog, 0.0, 0.0);", "lit = FogForm(lit, fog, o_leaf.z, o_leaf.w);", 2},
+          {"leaf c26 before the fog", 1, "lit = FogForm(lit, fog, o_leaf.z, o_leaf.w) * o_c26;", "lit = FogForm(lit * o_c26, fog, o_leaf.z, o_leaf.w);", 2},
+          {"layer without fog", 2, "    lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);\n", "", 4},
+          {"far fog after the fade", 3, "    lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);\n  }\n  if (t_flags & 1) lin *= terrain_fade_in(world);",
+           "  }\n  if (t_flags & 1) lin *= terrain_fade_in(world);\n  if (light_mode & 4) lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);", 5},
+          {"fog at another depth", 2, "lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);", "lin = FogForm(lin, FogCoords(float4(pos.xy, 1.0, 1.0)), 0.0, 0.0);", 4},
           {"leaf sides", 1, "vcolour, bend.x, bend.y, f_sun_col,", "vcolour, bend.y, bend.x, f_sun_col,", 2},
           {"leaf mask literal", 1, "LeafMask(mask, 0.6, 0.4);", "LeafMask(mask, 0.6, 0.6);", 2},
           // The shadows (plan Task 5 of sub-project 8): the mask dropped from a family's sun term, put on
@@ -2483,14 +2657,17 @@ int main() {
     const char* read = "float mask = shadow_mask.SampleLevel(s_linear_clamp, (pos.xy - 0.5) * float2(f_mask_du, f_mask_dv), 0).r;";
     for (const char* src : {kClayTexturedPs, kClayTerrainLayerPs}) {
       if (!strstr(src, "Texture2D shadow_mask : register(t4);") || Count(src, read) != 1 || Count(src, "shadow_mask.") != 1 ||
-          Count(src, "f_mask_du") != 2 || Count(src, "f_mask_dv") != 3) return 190;  // (the block names f_mask_dv twice)
+          Count(src, "f_mask_du") != 3 || Count(src, "f_mask_dv") != 4) return 190;  // (the block names f_mask_dv twice; and
+                                                                                    // once each in the fog's FogCoords, which
+                                                                                    // takes the pixel's screen position by them)
     }
     if (BindPoint("clay_textured_ps", kClayTexturedPs, "ps_5_0", "shadow_mask") != int(kClayMaskRegister) ||
         BindPoint("clay_terrain_layer_ps", kClayTerrainLayerPs, "ps_5_0", "shadow_mask") != int(kClayMaskRegister) || kClayMaskRegister != 4) return 190;
     for (const char* src : {kClayTerrainFarPs, kClayPs, kClayShadowPs, kClayVs}) {
       if (strstr(src, "shadow_mask")) return 190;
     }
-    if (Count(kClayTerrainFarPs, "f_mask_du") != 1 || Count(kClayVs, "f_mask_du") != 1) return 190;  // (the block's declaration)
+    // (the block's declaration, and the fog's FogCoords in the shared text, which the vertex shader does not compile)
+    if (Count(kClayTerrainFarPs, "f_mask_du") != 2 || Count(kClayVs, "f_mask_du") != 2) return 190;
     if (BindPoint("clay_terrain_far_ps", kClayTerrainFarPs, "ps_5_0", "shadow_mask") != -1) return 190;
     // The mask multiplies each family's sun term and nothing else: the four gates and the leaf's factors
     // take it, no gate is left at a mask of 1, and the far terrain's function has none.
@@ -2534,8 +2711,12 @@ int main() {
     for (int i = 0; i < 3; ++i) {
       const auto& p = pairs[i];
       if (strncmp(p.depth, define, strlen(define)) != 0 || strcmp(p.depth + strlen(define), p.colour) != 0) return 192;
-      if (strstr(p.colour, "#define CLAY_DEPTH_ONLY") || Count(p.colour, "#ifdef CLAY_DEPTH_ONLY") != 1 || Count(p.colour, "#else") != 1 ||
-          Count(p.colour, "#endif") != 1) return 192;
+      // (since the fog: the colour form defines CLAY_FOG unless it is the depth form, and the shared
+      // light text has the fog's tail of the frame's block and the fog's functions under it, with
+      // names that do nothing in its place otherwise)
+      if (strstr(p.colour, "#define CLAY_DEPTH_ONLY") || Count(p.colour, "#ifdef CLAY_DEPTH_ONLY") != 1 || Count(p.colour, "#else") != 2 ||
+          Count(p.colour, "#endif") != 4 || Count(p.colour, "#ifdef CLAY_FOG") != 2 || Count(p.colour, "#ifndef CLAY_DEPTH_ONLY") != 1 ||
+          Count(p.colour, "#define CLAY_FOG 1") != 1 || strstr(p.colour, "#ifndef CLAY_DEPTH_ONLY") != p.colour) return 192;
       if (!Compile(p.name, p.depth, "ps_5_0")) return 192;
       if (BindingsMismatch(p.name, p.depth, "ps_5_0", false) != 0 || DrawLayoutMismatch(p.name, p.depth, "ps_5_0") != 0) return 193;
       const std::string listing = Disassembly(p.name, p.depth, "ps_5_0");
@@ -2732,9 +2913,142 @@ int main() {
     const std::string looped = Changed(m, "[unroll] for (int i = 0; i < 12; ++i) {", "[loop] for (int i = 0; i < int(m_map_size) && i < 12; ++i) {");
     if (looped.empty() || LoopInstructions(Disassembly("looped_mask_ps", looped.c_str(), "ps_5_0")) == 0) return 199;
   }
+  // 200 to 204: the fog (fog sub-project, plan Task 4; clay_logic.h, "Native fog").
+  {
+    // The clay shader `src` without the fog: the text that does not define CLAY_FOG, which is the text
+    // the shader had before the fog but for the fog's names, which then do nothing.
+    auto without_fog = [](const char* src) { return Changed(src, "#define CLAY_FOG 1\n", ""); };
+    // ... and with the frame's flag a constant 0 in the place of the block's word: the program of a
+    // frame that has no fog (the switch off, no valid block, no view), with everything it cannot reach
+    // folded away by the compiler.
+    auto fog_off = [](const std::string& src) {
+      std::string text = Changed(src.c_str(), "float3 f_fog_axis; uint f_fog_on;", "float3 f_fog_axis; uint f_fog_on_word;");
+      if (text.empty()) return text;
+      return Changed(text.c_str(), "float3 light_normalize(float3 v) {", "static const uint f_fog_on = 0;\nfloat3 light_normalize(float3 v) {");
+    };
+    const struct {
+      const char* name;
+      const char* src;
+    } lit_ps[] = {{"clay_textured_ps", kClayTexturedPs}, {"clay_terrain_layer_ps", kClayTerrainLayerPs}, {"clay_terrain_far_ps", kClayTerrainFarPs}};
+    // 200: the fog is in the three lit pixel shaders' colour programs and nowhere else. The vertex
+    // shader, the flat shader, the shadow maps' shader and the three depth-only programs do not define
+    // CLAY_FOG, so they are compiled from the text without it: the programs they were.
+    for (const char* src : {kClayVs, kClayPs, kClayShadowPs}) {
+      if (strstr(src, "#define CLAY_FOG")) return 200;
+    }
+    for (const auto& s : lit_ps) {
+      if (Count(s.src, "#define CLAY_FOG 1\n") != 1 || without_fog(s.src).empty() || strstr(without_fog(s.src).c_str(), "#define CLAY_FOG")) return 200;
+    }
+    // 201: fog off is the program without fog. For each of the three shaders and every light_mode: the
+    // program with the frame's flag 0 is, line for line, the program compiled from the text without
+    // the fog. So a frame without fog runs the instructions of the shader before the fog on its lit
+    // pixels too, and what differs in the shipped program is the fog alone, behind the flag.
+    // And without the flag folded: no program of a draw without light (bit 2 clear) differs at all.
+    int lit_programs = 0;
+    for (const auto& s : lit_ps) {
+      const std::string plain = without_fog(s.src);
+      const std::string off = fog_off(s.src);
+      if (plain.empty() || off.empty()) return 201;
+      for (unsigned mode = 0; mode < fable2::native::render::kLightModeCount; ++mode) {
+        const std::string before = Code(Disassembly("without_fog", WithLightMode(plain.c_str(), mode).c_str(), "ps_5_0"));
+        const std::string folded = Code(Disassembly("fog_off", WithLightMode(off.c_str(), mode).c_str(), "ps_5_0"));
+        if (before.empty() || folded != before) {
+          std::cerr << s.name << " light_mode " << mode << ": the program with the fog's flag 0 is not the program without the fog\n";
+          return 201;
+        }
+        const std::string now = Code(Disassembly(s.name, WithLightMode(s.src, mode).c_str(), "ps_5_0"));
+        if (now.empty()) return 201;
+        if (!(mode & 4)) {
+          if (now != before) {
+            std::cerr << s.name << " light_mode " << mode << ": a program without light changed with the fog\n";
+            return 201;
+          }
+        } else {
+          // (the lit programs do differ: the comparison above is not empty)
+          if (now == before) return 201;
+          ++lit_programs;
+        }
+      }
+    }
+    if (lit_programs != 3 * 64) return 201;
+    // Controls: a fog that does not ask the frame's flag, and one whose position is formed outside the
+    // fog's names (so that it stays when they do nothing), are not the program without fog.
+    {
+      const std::string unflagged = Changed(kClayTerrainFarPs, "o.fogged = f_fog_on != 0 && reach && dD > 0.0;", "o.fogged = reach && dD > 0.0;");
+      const std::string plain = without_fog(kClayTerrainFarPs);
+      if (unflagged.empty() || fog_off(unflagged).empty()) return 201;
+      if (Code(Disassembly("unflagged_fog", WithLightMode(fog_off(unflagged).c_str(), 5).c_str(), "ps_5_0")) ==
+          Code(Disassembly("without_fog", WithLightMode(plain.c_str(), 5).c_str(), "ps_5_0"))) return 201;
+      const std::string tinted = Changed(kClayTerrainFarPs, "    lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);",
+                                         "    lin = FogForm(lin, FogCoords(pos), 0.0, 0.0) * (1.0 + 0.001 * pos.z);");
+      if (tinted.empty() || fog_off(tinted).empty()) return 201;
+      if (Code(Disassembly("tinted_fog", WithLightMode(fog_off(tinted).c_str(), 5).c_str(), "ps_5_0")) ==
+          Code(Disassembly("without_fog", WithLightMode(plain.c_str(), 5).c_str(), "ps_5_0"))) return 201;
+    }
+    // 202: what the lit programs gained, on the compiled code. They index the frame's block by a
+    // computed value (the two tables), test before they do (the fog's reads are inside a branch: a
+    // pixel that is not fogged reads no table), call no square root, have no loop, and read no
+    // texture or buffer more than before.
+    for (const auto& s : lit_ps) {
+      const unsigned mode = s.src == kClayTexturedPs ? 6u : 5u;
+      const std::string listing = Disassembly(s.name, WithLightMode(s.src, mode).c_str(), "ps_5_0");
+      const std::string before = Disassembly("without_fog", WithLightMode(without_fog(s.src).c_str(), mode).c_str(), "ps_5_0");
+      bool dynamic = false;
+      if (DeclaredRegisters(listing, 2, &dynamic) != kClayFrameSize / 16 || !dynamic) return 202;
+      const size_t table = listing.find(" + 14]");  // f_scatter starts at register 14 (byte 224)
+      const size_t far_table = listing.find(" + 78]");  // f_transmit at register 78 (byte 1248)
+      const size_t test = listing.find("\nif_");
+      if (table == std::string::npos || far_table == std::string::npos || test == std::string::npos || test > table || test > far_table) return 202;
+      if (HasOp(listing, "sqrt") || LoopInstructions(listing) != 0 || listing.find("ld_structured") != std::string::npos) return 202;
+      for (int reg = 0; reg < 16; ++reg) {
+        if (ReadsResource(listing, reg) != ReadsResource(before, reg)) return 202;
+      }
+      // The pixel's own depth: the program declares the position's z.
+      if (!HasLineWith(listing, "dcl_input_ps_siv", "v0.xyz") && !HasLineWith(listing, "dcl_input_ps_siv", "v0.xyzw")) return 202;
+    }
+    // 203: the statements, in the text. Each family's fog comes after its lit colour and before c26 and
+    // the exposure; a plant and the ground take the ground form, an object, a trunk and a leaf the
+    // form their object block names; the far ground is fogged before its cross-fade.
+    {
+      const char* t = kClayTexturedPs;
+      const char* coords = strstr(t, "FogPoint fog = FogCoords(pos);");
+      const char* plant = strstr(t, "lit = FogForm(lit, fog, 0.0, 0.0);");
+      const char* leaf_light = strstr(t, "lit = LightLeaf(");
+      const char* leaf = strstr(t, "lit = FogForm(lit, fog, o_leaf.z, o_leaf.w) * o_c26;");
+      const char* object_light = strstr(t, "lit = LightObject(");
+      const char* object = leaf ? strstr(leaf + 1, "lit = FogForm(lit, fog, o_leaf.z, o_leaf.w) * o_c26;") : nullptr;
+      const char* out = strstr(t, "return float4(clay_lit(lit * f_exposure),");
+      const char* mask = strstr(t, "float mask = shadow_mask.SampleLevel(");
+      if (!coords || !plant || !leaf_light || !leaf || !object_light || !object || !out || !mask) return 203;
+      if (!(mask < coords && coords < plant && plant < leaf_light && leaf_light < leaf && leaf < object_light && object_light < object &&
+            object < out)) return 203;
+      if (Count(t, "FogForm(") != 5 || Count(t, "FogCoords(") != 3 || Count(t, "o_c26") != 3) return 203;  // (two definitions each; c26's declaration)
+      const char* l = kClayTerrainLayerPs;
+      const char* layer_light = strstr(l, "lin = LightTerrainLayer(");
+      const char* layer_fog = strstr(l, "lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);");
+      const char* layer_out = strstr(l, "return terrain_out(lin, a, pos, ndc);");
+      if (!layer_light || !layer_fog || !layer_out || !(layer_light < layer_fog && layer_fog < layer_out) || Count(l, "FogForm(") != 3) return 203;
+      const char* f = kClayTerrainFarPs;
+      const char* far_light = strstr(f, "lin = LightTerrainFar(");
+      const char* far_fog = strstr(f, "lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);");
+      const char* fade = strstr(f, "if (t_flags & 1) lin *= terrain_fade_in(world);");
+      if (!far_light || !far_fog || !fade || !(far_light < far_fog && far_fog < fade) || Count(f, "FogForm(") != 3) return 203;
+    }
+    // 204: the forms' numbers are the object block's (kTreeFogForm*), and the tables' sizes the frame's.
+    {
+      using namespace fable2::native::render;
+      if (kTreeFogFormGround != 0.0f || kTreeFogFormTree != 1.0f || kTreeFogFormNone != 2.0f || kFogScatterTexels != 64 ||
+          kFogTransmitTexels != 256 || kFogDistance2Max != 1.0e30f) return 204;
+      const char* t = kClayTexturedPs;
+      if (!strstr(t, "[branch] if (p.fogged && form != 2.0) {") || !strstr(t, "if (form == 1.0) {") ||
+          !strstr(t, "float4 f_scatter[64];") || !strstr(t, "float4 f_transmit[256];") ||
+          !strstr(t, "bool reach = placed && d2 > 0.0 && d2 < 1.0e30;") ||
+          !strstr(t, "bool placed = abs(w) > 0.0 && abs(w) < 3.0e38;")) return 204;
+    }
+  }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); broken shader rejected\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the lit colour programs alone, fog off the program without fog at every light_mode, the tables read behind a test; broken shader rejected\n";
   return 0;
 }

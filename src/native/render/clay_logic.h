@@ -125,6 +125,44 @@ constexpr ClayMaskDecision DecideClayMask(const ClayMaskInputs& in) {
 // them (the shadow view shows a flat colour for a frame without them).
 constexpr bool ClayMapsDrawn(ClayMask mask) { return mask == ClayMask::kDrawn; }
 
+// What the pass did about the frame's fog ("Native fog" below; ClayStats::fog; the Fog line). kOff:
+// the fog's switch is off. kNoLight: the frame is drawn without light (the light's switch, the
+// textures, no light block, no constant buffer): the fog is of the lit colour. kBlock: the frame has
+// no valid fog block, whatever the capture's reason. kValues: the block is marked valid and holds a
+// value or a texel the pass will not hand a shader (MakeClayFogConstants, SetClayFrameFog). kView:
+// the frame has no usable eye or no single inverse view-projection, from which a pixel's world
+// position is rebuilt (`view` says which, as for the mask). kDrawn: the lit pixels are fogged. The
+// three in the middle are the frames counted "fog-block".
+enum class ClayFog : uint8_t { kOff, kNoLight, kBlock, kValues, kView, kDrawn, kCount };
+
+// The pass's decision about the frame's fog (ClayPass::Render), one chain in which the first thing
+// missing decides. `fog`: fable2_native_fog as the pass reads it NOW (a scene captured with the
+// switch on can arrive after it went off: it is then drawn without fog). `light`: the light's
+// switch (and the textures). `light_block`: the frame's constants are lit. `block`:
+// FrameScene::fog is valid. `values`: MakeClayFogConstants gives constants that are on. `eye`: the
+// frame's eye is usable. `view`: why the frame has no single inverse view-projection
+// (FrameInverseViewProj), kNone when it has one. `filled`: SetClayFrameFog wrote the frame's tail
+// (false: a texel or an entry of the matrix that is no number).
+struct ClayFogInputs {
+  bool fog = false, light = false, light_block = false, block = false, values = false, eye = false;
+  FrameViewReason view = FrameViewReason::kNone;
+  bool filled = false;
+};
+struct ClayFogDecision {
+  ClayFog fog = ClayFog::kOff;
+  FrameViewReason view = FrameViewReason::kNone;  // with kView: why
+};
+constexpr ClayFogDecision DecideClayFog(const ClayFogInputs& in) {
+  if (!in.fog) return {ClayFog::kOff, FrameViewReason::kNone};
+  if (!in.light || !in.light_block) return {ClayFog::kNoLight, FrameViewReason::kNone};
+  if (!in.block) return {ClayFog::kBlock, FrameViewReason::kNone};
+  if (!in.values) return {ClayFog::kValues, FrameViewReason::kNone};
+  if (!in.eye) return {ClayFog::kView, FrameViewReason::kEye};
+  if (in.view != FrameViewReason::kNone) return {ClayFog::kView, in.view};
+  if (!in.filled) return {ClayFog::kValues, FrameViewReason::kNone};
+  return {ClayFog::kDrawn, FrameViewReason::kNone};
+}
+
 struct ClayStats {
   uint32_t drawn = 0, skipped_bad_index = 0, uploads = 0, hits = 0;
   uint64_t resident_bytes = 0;
@@ -258,7 +296,36 @@ struct ClayStats {
   bool mask_rotated = false;
   uint64_t shadow_frames = 0, shadow_block_frames = 0, shadow_view_frames = 0, shadow_unrotated_frames = 0;
   uint64_t shadow_nolight_frames = 0, shadow_objects_frames = 0;
+  // The fog ("Native fog" below; the Fog line). fog_switch: fable2_native_fog. fog_block,
+  // fog_reason: the scene's fog block and, without one, the capture's reason. fog, fog_view: what
+  // the pass did about it (ClayFog), and with kView why. fog_trees: lit trunk and leaf draws with a
+  // usable in-scatter scale (the trees' form in a fogged frame); fog_trees_none: those without one,
+  // drawn without fog in any frame.
+  // The frame counts are the pass's totals since it was made, this frame included: frames drawn
+  // with the fog's and the light's switch on, and those of them not fogged for want of a block,
+  // for a value, for a view ("fog-block" is the three together) or for want of light.
+  bool fog_switch = false, fog_block = false;
+  capture::FogBlockReason fog_reason = capture::FogBlockReason::kOff;
+  ClayFog fog = ClayFog::kOff;
+  FrameViewReason fog_view = FrameViewReason::kNone;
+  uint32_t fog_trees = 0, fog_trees_none = 0;
+  uint64_t fog_frames = 0, fog_block_frames = 0, fog_values_frames = 0, fog_view_frames = 0, fog_nolight_frames = 0;
 };
+// The pass's frame counts of the fog, which follow from the frame's verdict: one frame added.
+// `on`: the fog's switch and the light's switch together (the frames that are counted).
+struct ClayFogFrames {
+  uint64_t frames = 0, block = 0, values = 0, view = 0, nolight = 0;
+};
+inline void CountClayFogFrame(bool on, ClayFog fog, ClayFogFrames& n) {
+  if (!on) return;
+  ++n.frames;
+  if (fog == ClayFog::kBlock) ++n.block;
+  if (fog == ClayFog::kValues) ++n.values;
+  if (fog == ClayFog::kView) ++n.view;
+  if (fog == ClayFog::kNoLight) ++n.nolight;
+}
+// The frames counted "fog-block": lit frames with the switch on that were drawn without fog.
+inline uint64_t ClayFogBlockFrames(const ClayFogFrames& n) { return n.block + n.values + n.view; }
 // Which frames the last two counts take: `shadows_on` is the switch and the light's switch
 // together (the frames shadow_frames counts).
 inline bool CountsNoLightFrame(bool shadows_on, ClayMask mask) { return shadows_on && mask == ClayMask::kNoLight; }
@@ -1727,8 +1794,35 @@ inline bool LightPositionUsable(float v) { return std::fabs(v) <= kLightPosition
 // A probe buffer's weights are bounded alike where they are decoded (normal_decode.h, DecodeWeights).
 static_assert(kProbeWeightMax == kLightValueMax);
 
-// The frame's light for the shaders (cbuffer Frame, register b2; shaders::kClayFrameFields is its
-// layout). One per Render, in slot 0 of the frame's constant buffer.
+// The tables' sizes (capture::FogBlock: tf4 and tf5 decoded).
+inline constexpr uint32_t kFogScatterTexels = 64, kFogTransmitTexels = 256;
+static_assert(sizeof(capture::FogBlock::scatter) == kFogScatterTexels * 3 * sizeof(float) &&
+              sizeof(capture::FogBlock::transmit) == kFogTransmitTexels * 3 * sizeof(float));
+
+// The frame's fog for the shaders ("Native fog" below): what the two forms read of the frame's block besides the tables
+// and the eye (which is the frame's light constants': ClayFrameConstants::eye). 48 bytes, laid out
+// as three rows of a constant buffer.
+struct ClayFogConstants {
+  float axis[3];         // c66.xyz
+  uint32_t on;           // 1: the frame is fogged; 0: no pixel of it is (the other fields are zero)
+  float near_colour[3];  // c68.rgb
+  float start;           // c67.x
+  float slope;           // c67.z: the blend from near_colour to the in-scatter table over distance
+  float scale;           // c67.w: the transmittance table's distance scale
+  float amount;          // c28.x: how much of the fog is applied (the ground form)
+  float scatter;         // c28.y: the in-scatter's scale (the ground form; a tree's is its vertex c8.x)
+};
+static_assert(sizeof(ClayFogConstants) == 48);
+
+// The frame's light and fog for the shaders (cbuffer Frame, register b2). One per Render, at the head
+// of the frame's constant buffer (kClayFrameSlots small slots). Two parts. The light's
+// (kClayFrameLightBytes; shaders::kClayFrameFields is its layout) is what every clay shader declares.
+// The fog's tail (shaders::kClayFrameFogFields) is declared by the three lit pixel shaders alone
+// (CLAY_FOG): the fog's constants, the frame's inverse view-projection, from which a lit pixel
+// rebuilds its world position, and the two tables as arrays, which the shader reads as FogTableRead
+// does (the controller's ruling of 2026-10-09: the layout has no binding parameter left for two
+// textures; arrays need no texture, no upload and no neutral object, and the read is table_1d
+// exactly). The sky step (plan Task 5) reads the in-scatter table from the same place.
 struct ClayFrameConstants {
   float sun_dir[3];     // c80.xyz of a one-light draw (bit-equal to c109.xyz: MakeLightBlock), as it is
   uint32_t light_on;    // 1: the frame is lit; 0: no draw of it is (the other fields are zero)
@@ -1744,8 +1838,15 @@ struct ClayFrameConstants {
   float mask_dv;        // 1 / the clay target's height (SetClayFrameMask; both 0 in a frame without light)
   float eye[3];         // c19.xyz, the eye (= vertex c9.xyz of the leaf shaders); zero when not usable
   uint32_t eye_on;      // 1: `eye` is the frame's eye; 0: the frame's leaves are not lit (LightFrameLights)
+  // The fog's tail: all zero unless SetClayFrameFog filled it for this frame.
+  ClayFogConstants fog;
+  float inv_view_proj[4][4];                // rows: world (x, y, z, w) = rows . (X, Y, depth, 1), as the mask step's
+  float scatter[kFogScatterTexels][4];      // tf4 decoded, rgb (the fourth float 0)
+  float transmit[kFogTransmitTexels][4];    // tf5 decoded, rgb
 };
-static_assert(sizeof(ClayFrameConstants) == 112);
+inline constexpr uint32_t kClayFrameLightBytes = offsetof(ClayFrameConstants, fog);
+static_assert(kClayFrameLightBytes == 112 && sizeof(ClayFrameConstants) == 5344 && offsetof(ClayFrameConstants, inv_view_proj) == 160 &&
+              offsetof(ClayFrameConstants, scatter) == 224 && offsetof(ClayFrameConstants, transmit) == 1248);
 
 // The frame's constants from its light block. Lit only with the switch on and a valid block whose
 // every value is a number of usable size (the block's own rules: light_block.h, MakeLightBlock; a
@@ -1886,10 +1987,14 @@ struct ClayObjectConstants {
   // kInstanceColourPower, the factor of the frame's exponent in the instance colour's.
   float colour_power;
   float probe[capture::kLightProbeRegisters][4];  // kProbe: vertex c28..c39 (three sets of four); else 0, not read
-  // A leaf only (zero otherwise, not read): [0] vertex c50.w, the wrap of the front light; [1] the
+  // [0], [1]: a leaf only (zero otherwise, not read): vertex c50.w, the wrap of the front light; the
   // inverse of c7.w, which takes the scale out of M p for the world position.
+  // [2], [3]: the draw's fog ("Native fog" below). [3] the form (kTreeFogForm*): the ground form for
+  // an object; for a trunk or a leaf the trees' form with the scale [2] (vertex c8.x), or no fog
+  // when the draw has no usable scale ([2] is then 0).
   float leaf[4];
 };
+inline constexpr float kTreeFogFormGround = 0.0f, kTreeFogFormTree = 1.0f, kTreeFogFormNone = 2.0f;
 static_assert(sizeof(ClayObjectConstants) == 288 && offsetof(ClayObjectConstants, probe) == 80 &&
               offsetof(ClayObjectConstants, leaf) == 272);
 inline Float3 LeafWorldPosition(const ClayObjectConstants& c, const Float3& p) {
@@ -1957,6 +2062,12 @@ inline bool MakeClayObjectConstants(const capture::LightInputs& l, ClayObjectCon
   }
   c.c27w = l.c27w;
   c.colour_power = stream ? l.colour_power : 0.0f;
+  // The form of the draw's fog: a tree's own (ruling B) with its scale, or none without a usable one.
+  if (l.family != capture::LightFamily::kObject) {
+    const bool usable = l.tree_fog >= 0.0f && l.tree_fog <= capture::kTreeFogScaleMax;  // (TreeFogScaleUsable, below)
+    c.leaf[2] = usable ? l.tree_fog : 0.0f;
+    c.leaf[3] = usable ? kTreeFogFormTree : kTreeFogFormNone;
+  }
   if (leaf) {
     // The translation, the wrap (the front light divides by 1 + wrap: not negative) and the
     // inverse of the scale (ClassifyRotation above refused a scale of zero).
@@ -2021,11 +2132,6 @@ inline uint32_t LightVertexNeed(uint32_t max_index, int32_t base_vertex, uint32_
 // tables from a valid block (finite texels), so that with a finite colour no product can overflow
 // (fog_block.h, kFogRegisterLimit).
 
-// The tables' sizes (capture::FogBlock: tf4 and tf5 decoded).
-inline constexpr uint32_t kFogScatterTexels = 64, kFogTransmitTexels = 256;
-static_assert(sizeof(capture::FogBlock::scatter) == kFogScatterTexels * 3 * sizeof(float) &&
-              sizeof(capture::FogBlock::transmit) == kFogTransmitTexels * 3 * sizeof(float));
-
 // The largest squared distance from the eye a pixel is fogged at: beyond it (10^15 units; the
 // levels are a few thousand across) the pixel keeps its colour. Far below the largest single, so
 // that the shader's comparison against it also refuses a squared distance that overflowed and one
@@ -2040,7 +2146,10 @@ inline constexpr float kFogDistance2Max = 1e30f;
 // (u, 0.5): the same centres (the host's are at (i + 0.5) / n); the GPU's filter weight has 8
 // fractional bits, so its blend can differ from this one by 1 / 512 of the difference of two
 // neighbouring texels.
-inline void FogTableRead(const float (*table)[3], uint32_t n, double u, double out[3]) {
+// (K floats a texel, the first three read: the block's tables have three, the frame's arrays four)
+template <size_t K>
+inline void FogTableRead(const float (*table)[K], uint32_t n, double u, double out[3]) {
+  static_assert(K >= 3);
   out[0] = out[1] = out[2] = 0.0;
   if (!table || n == 0) return;
   double x = 0.0;
@@ -2059,21 +2168,6 @@ inline void FogTableRead(const float (*table)[3], uint32_t n, double u, double o
     out[k] = f == 0.0 ? p : p + (q - p) * f;
   }
 }
-
-// The frame's fog for the shaders: what the two forms read of the frame's block besides the tables
-// and the eye (which is the frame's light constants': ClayFrameConstants::eye). 48 bytes, laid out
-// as three rows of a constant buffer.
-struct ClayFogConstants {
-  float axis[3];         // c66.xyz
-  uint32_t on;           // 1: the frame is fogged; 0: no pixel of it is (the other fields are zero)
-  float near_colour[3];  // c68.rgb
-  float start;           // c67.x
-  float slope;           // c67.z: the blend from near_colour to the in-scatter table over distance
-  float scale;           // c67.w: the transmittance table's distance scale
-  float amount;          // c28.x: how much of the fog is applied (the ground form)
-  float scatter;         // c28.y: the in-scatter's scale (the ground form; a tree's is its vertex c8.x)
-};
-static_assert(sizeof(ClayFogConstants) == 48);
 
 // The frame's fog constants from its block. On only when the fog is `wanted` (the fog's switch as
 // the pass reads it now, in a frame that is lit) and the block is valid and every value the forms
@@ -2146,8 +2240,9 @@ inline FogPoint FogCoords(const float P[3], const float eye[3], const ClayFogCon
 // The ground form: the colour `C` (linear, the family's lit colour before c26 and the exposure) of
 // a pixel at world position `P`, fogged. `scatter`, `transmit`: the frame's two tables
 // (capture::FogBlock::scatter, ::transmit).
+template <size_t K>
 inline void FogMirror(const float C[3], const float P[3], const float eye[3], const ClayFogConstants& f,
-                      const float (*scatter)[3], const float (*transmit)[3], double out[3]) {
+                      const float (*scatter)[K], const float (*transmit)[K], double out[3]) {
   double base[3];
   for (int k = 0; k < 3; ++k) out[k] = base[k] = std::isfinite(C[k]) ? double(C[k]) : 0.0;
   if (!scatter || !transmit) return;
@@ -2174,8 +2269,9 @@ inline void FogMirror(const float C[3], const float P[3], const float eye[3], co
 
 // The trees' form (ruling B): `C` is the trunk's or the leaf's lit colour with its c49, `c8x` the
 // draw's in-scatter scale. Reads neither the near colour, the slope nor the two amounts.
+template <size_t K>
 inline void TreeFogMirror(const float C[3], const float P[3], const float eye[3], const ClayFogConstants& f, float c8x,
-                          const float (*scatter)[3], const float (*transmit)[3], double out[3]) {
+                          const float (*scatter)[K], const float (*transmit)[K], double out[3]) {
   double base[3];
   for (int k = 0; k < 3; ++k) out[k] = base[k] = std::isfinite(C[k]) ? double(C[k]) : 0.0;
   if (!scatter || !transmit || !std::isfinite(c8x)) return;
@@ -2191,6 +2287,110 @@ inline void TreeFogMirror(const float C[3], const float P[3], const float eye[3]
     if (!std::isfinite(add) || !std::isfinite(fogged[k])) return;
   }
   for (int k = 0; k < 3; ++k) out[k] = fogged[k];
+}
+
+// The fog's tail of the frame's constants (ClayFrameConstants::fog and what follows) from the frame's
+// block and its inverse view-projection (FrameInverseViewProj; null: the frame has none). First
+// every byte of the tail is made zero; it is then written only when the frame is lit, has its eye
+// and its target's size (SetClayFrameMask), the fog is wanted, the block gives constants that are on
+// (MakeClayFogConstants), and every entry of the matrix and every texel of both tables is a number.
+// So a frame without fog holds nothing of an earlier frame's tables or registers, whatever the
+// constants held before the call (plan, Review Focus 1), and the neutral state is one flag
+// (fog.on = 0: no shader reads the rest). True when the tail was written.
+inline bool SetClayFrameFog(ClayFrameConstants& c, const capture::FogBlock& b, bool wanted, const float inverse[4][4]) {
+  c.fog = ClayFogConstants{};
+  std::memset(c.inv_view_proj, 0, sizeof(c.inv_view_proj));
+  std::memset(c.scatter, 0, sizeof(c.scatter));
+  std::memset(c.transmit, 0, sizeof(c.transmit));
+  if (!c.light_on || !c.eye_on || !inverse) return false;
+  if (!(c.mask_du > 0.0f && c.mask_dv > 0.0f) || !std::isfinite(c.mask_du) || !std::isfinite(c.mask_dv)) return false;
+  const ClayFogConstants fog = MakeClayFogConstants(b, wanted);
+  if (!fog.on) return false;
+  for (int i = 0; i < 4; ++i) {
+    for (int j = 0; j < 4; ++j) {
+      if (!std::isfinite(inverse[i][j])) return false;
+    }
+  }
+  for (const auto& texel : b.scatter) {
+    if (!std::isfinite(texel[0]) || !std::isfinite(texel[1]) || !std::isfinite(texel[2])) return false;
+  }
+  for (const auto& texel : b.transmit) {
+    if (!std::isfinite(texel[0]) || !std::isfinite(texel[1]) || !std::isfinite(texel[2])) return false;
+  }
+  c.fog = fog;
+  std::memcpy(c.inv_view_proj, inverse, sizeof(c.inv_view_proj));
+  for (uint32_t i = 0; i < kFogScatterTexels; ++i) std::memcpy(c.scatter[i], b.scatter[i], sizeof(b.scatter[i]));
+  for (uint32_t i = 0; i < kFogTransmitTexels; ++i) std::memcpy(c.transmit[i], b.transmit[i], sizeof(b.transmit[i]));
+  return true;
+}
+
+// A lit pixel's world position (the controller's ruling of 2026-10-09: one source for every
+// family, because the vertex shader hands on a mesh's position as stored, in model space): the
+// pixel's own SV_Position through the frame's inverse view-projection, the mask step's arithmetic.
+//   S = (2 x / W - 1, 1 - 2 y / H, z, 1);  P = (rows . S).xyz / (rows . S).w
+// (x, y): SV_Position.xy, the pixel's centre; z: SV_Position.z, which in the clay pass is the clip
+// z / w of the draw's own vertex shader for every family (one vertex shader, `o.pos = c`; viewport
+// depth 0..1; no depth bias; the same value the pre-pass writes and the mask reads), blended draws
+// included: each pixel uses its own depth. In single precision, as the shader computes it. False
+// (the pixel is left unfogged) when w is zero or no number.
+// The error of the rebuilt position is the depth's: test case 587 measures it on a captured frame's
+// matrices over the distance the tables span.
+inline bool FogPixelWorld(const ClayFrameConstants& c, float pos_x, float pos_y, float depth, float P[3]) {
+  const float S[4] = {pos_x * (2.0f * c.mask_du) - 1.0f, 1.0f - pos_y * (2.0f * c.mask_dv), depth, 1.0f};
+  auto row = [&](int r) {
+    return c.inv_view_proj[r][0] * S[0] + c.inv_view_proj[r][1] * S[1] + c.inv_view_proj[r][2] * S[2] + c.inv_view_proj[r][3] * S[3];
+  };
+  const float w = row(3);
+  if (!(std::fabs(w) > 0.0f && std::fabs(w) < 3.0e38f)) return false;
+  for (int k = 0; k < 3; ++k) P[k] = row(k) / w;
+  return true;
+}
+
+// The fog of a lit pixel as the lit pixel shaders compute it: the position from the pixel's own
+// depth, then the form the draw's object block names (`form`, `scale`: ClayObjectConstants::leaf[3]
+// and [2]; a terrain draw and an instanced plant have the ground form): the trees' form with the
+// scale for kTreeFogFormTree, no fog for kTreeFogFormNone, the ground form for anything else.
+inline void FogPixelMirror(const float C[3], float pos_x, float pos_y, float depth, const ClayFrameConstants& c, float form,
+                           float scale, double out[3]) {
+  for (int k = 0; k < 3; ++k) out[k] = std::isfinite(C[k]) ? double(C[k]) : 0.0;
+  float P[3];
+  if (form == kTreeFogFormNone || !FogPixelWorld(c, pos_x, pos_y, depth, P)) return;  // (a frame without fog: the forms' own test)
+  if (form == kTreeFogFormTree) {
+    TreeFogMirror(C, P, c.eye, c.fog, scale, c.scatter, c.transmit, out);
+  } else {
+    FogMirror(C, P, c.eye, c.fog, c.scatter, c.transmit, out);
+  }
+}
+
+// The Fog line of the status text and the log: the switch, the frame's block, what the pass did,
+// the frame's tree draws, and the pass's totals since it was made.
+inline std::string FormatFogText(const ClayStats& st) {
+  if (!st.fog_switch) return "Fog: off";
+  std::string text = "Fog: on, block ";
+  if (st.fog_block) {
+    text += "valid";
+  } else {
+    text += std::string("invalid (") + capture::kFogBlockReason + ": " + capture::FogBlockReasonName(st.fog_reason) + ")";
+  }
+  switch (st.fog) {
+    case ClayFog::kDrawn: text += ", drawn"; break;
+    case ClayFog::kNoLight: text += ", not drawn (no light)"; break;
+    case ClayFog::kBlock: text += std::string(", not drawn (") + capture::kFogBlockReason + ": block)"; break;
+    case ClayFog::kValues: text += std::string(", not drawn (") + capture::kFogBlockReason + ": values)"; break;
+    case ClayFog::kView:
+      text += std::string(", not drawn (") + capture::kFogBlockReason + ": view: " + FrameViewReasonName(st.fog_view) + ")";
+      break;
+    default: text += ", not drawn (off)"; break;
+  }
+  char buf[256];
+  std::snprintf(buf, sizeof(buf),
+                " | trees %u with a scale, %u without | frames since start %llu: %s %llu {block: %llu, values: %llu, view: %llu}, "
+                "no-light %llu",
+                st.fog_trees, st.fog_trees_none, static_cast<unsigned long long>(st.fog_frames), capture::kFogBlockReason,
+                static_cast<unsigned long long>(st.fog_block_frames + st.fog_values_frames + st.fog_view_frames),
+                static_cast<unsigned long long>(st.fog_block_frames), static_cast<unsigned long long>(st.fog_values_frames),
+                static_cast<unsigned long long>(st.fog_view_frames), static_cast<unsigned long long>(st.fog_nolight_frames));
+  return text + buf;
 }
 
 // --- Terrain material (frame-map section 13, "Terrain", "Native terrain material") ---
@@ -2232,7 +2432,8 @@ static_assert(sizeof(ClayTerrainConstants) == 192);
 inline constexpr uint32_t kClayTerrainSlotBytes = 256;  // the RHI's constant buffer offset alignment
 
 // The frame's constant buffer (clay_pass.cpp, FinishTerrain): `small_slots` slots of
-// kClayTerrainSlotBytes (slot 0 the frame's light, cbuffer Frame; then one per terrain record drawn
+// kClayTerrainSlotBytes (the first kClayFrameSlots the frame's block, cbuffer Frame, bound at b2 at
+// offset 0: its light's part fits the first slot, its fog's tail takes the rest; then one per terrain record drawn
 // with its material, cbuffer Terrain; then one per lit instanced plant, the first
 // kClayPlantConstantBytes of cbuffer Object), then one slot of kClayObjectSlotBytes per lit object
 // or trunk (cbuffer Object: 288 bytes with the probe registers and the leaf's, more than a small slot). Everything is bound by
@@ -2241,12 +2442,16 @@ inline constexpr uint32_t kClayTerrainSlotBytes = 256;  // the RHI's constant bu
 // the vertex shader declares for every draw, a terrain draw's and an unlit draw's included (they do
 // not read it; a validation layer holds the declaration against the buffer all the same).
 inline constexpr uint32_t kClayObjectSlotBytes = 512;
+// The small slots the frame's block takes at the buffer's head (21: 5,344 bytes). Slot 0 is also what
+// b1 is bound to before a draw binds its own: the buffer holds kClayObjectSlotBytes from there.
+inline constexpr uint32_t kClayFrameSlots = (sizeof(ClayFrameConstants) + kClayTerrainSlotBytes - 1) / kClayTerrainSlotBytes;
 static_assert(sizeof(ClayObjectConstants) <= kClayObjectSlotBytes && sizeof(ClayTerrainConstants) <= kClayTerrainSlotBytes &&
-              sizeof(ClayFrameConstants) <= kClayTerrainSlotBytes && kClayObjectSlotBytes % kClayTerrainSlotBytes == 0);
+              kClayFrameLightBytes <= kClayTerrainSlotBytes && sizeof(ClayFrameConstants) <= kClayFrameSlots * kClayTerrainSlotBytes &&
+              kClayFrameSlots == 21 && kClayObjectSlotBytes % kClayTerrainSlotBytes == 0);
 // The buffer's size is a multiple of this (256 small slots), so that the pool's same-size reuse
 // holds while the number of terrain draws and lit objects moves.
 inline constexpr uint64_t kClayConstantBufferStep = 256ull * kClayTerrainSlotBytes;
-// Byte offset of small slot `slot` (the frame's is 0; a terrain record's; a lit plant's).
+// Byte offset of small slot `slot` (the frame's block starts at 0; a terrain record's; a lit plant's).
 constexpr uint64_t ClaySmallSlotOffset(uint64_t slot) { return slot * kClayTerrainSlotBytes; }
 static_assert(kClayPlantConstantBytes <= kClayTerrainSlotBytes);
 // Byte offset of lit object `object`'s slot behind `small_slots` small ones.

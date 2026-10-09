@@ -81,9 +81,12 @@ class ClayPass {
   // On, in a frame drawn with light whose shadow block is valid and whose mask can
   // be drawn (DecideClayMask): the maps, the pre-pass and the mask are drawn and
   // the lit draws' sun is shadowed. Otherwise none of it is drawn and the mask is
-  // white; st says which (ClayStats::mask).
+  // white; st says which (ClayStats::mask). `fog`: fable2_native_fog as it is read now. On, in a
+  // frame drawn with light that has a valid fog block, an eye and one inverse view-projection
+  // (DecideClayFog): the frame's constants carry the fog's tail and the lit pixels are fogged.
+  // Otherwise the tail is zero and no pixel is; st says which (ClayStats::fog).
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
-              bool textured, ClayLight light, bool shadows, ClayStats& st, TextureStats& tst);
+              bool textured, ClayLight light, bool shadows, bool fog, ClayStats& st, TextureStats& tst);
   // The mapped target (display values, 8 bits): what the composite views
   // sample. Left in kPixelShaderResource after Render, and written by the same
   // Render that drew the linear target.
@@ -356,6 +359,12 @@ class ClayPass {
   // The pass's frame counts for the Shadow line (ClayStats::shadow_frames and the five beside it),
   // since the pass was made.
   ClayMaskFrames shadow_counts_;
+  // The same for the Fog line (ClayStats::fog_frames and the four beside it).
+  ClayFogFrames fog_counts_;
+  // What the pass last logged about the fog, and how often: a line when its verdict changes (the
+  // first fogged frame; a frame that lost its fog and why), at most kFogLogLines of them.
+  ClayFog fog_logged_ = ClayFog::kOff;
+  uint32_t fog_log_lines_ = 0;
   // This Render's mask: what is bound as the screen mask at the colour draws (the mask target's
   // view or the white texture), and the frame's slot of the mask's constants.
   uint32_t mask_slot_ = 0;
@@ -375,8 +384,8 @@ class ClayPass {
   // Terrain of the frame being rendered: one plan item per terrain record
   // (Prepared::plan), the layers' textures, the texture sets bound, and the
   // frame's constant buffer, persistently mapped: slots of
-  // kClayTerrainSlotBytes, slot 0 the frame's light (ClayFrameConstants,
-  // cbuffer Frame), then one per terrain record drawn with its material
+  // kClayTerrainSlotBytes, the first kClayFrameSlots the frame's block (ClayFrameConstants,
+  // cbuffer Frame: its light and the fog's tail), then one per terrain record drawn with its material
   // (cbuffer Terrain), then one per lit plant (the first bytes of cbuffer
   // Object; ClaySmallSlotOffset); behind them one slot of kClayObjectSlotBytes
   // per lit object or trunk (cbuffer Object; ClayObjectSlotOffset). The buffer is in use until the frame's

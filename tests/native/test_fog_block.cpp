@@ -487,14 +487,18 @@ static int NameAndTableTests() {
   // sky and the tree pixel shaders (which read no fog register) are not in it.
   static_assert(sizeof(kFogShaderTable) / sizeof(kFogShaderTable[0]) == 40);
   static_assert(FogShaderTableIsWellFormed());
+  // (the entry carries the form alone: the interpolator of the world position, which the generated
+  // line also names, is read by nothing since the pass rebuilds the position from the pixel's depth;
+  // final review, M7. tests/test_gen_fog_table.py holds the generated numbers.)
+  static_assert(sizeof(FogShaderEntry) == 16);
   const FogShaderEntry* water = FindFogShader(0xF6D98C7B4D98438Bull);
-  if (!water || water->world != 0 || water->alpha) return 150;
+  if (!water || water->alpha) return 150;
   const FogShaderEntry* far_ground = FindFogShader(0x7DDAD5C29B3F56EEull);
-  if (!far_ground || far_ground->world != 1 || far_ground->alpha) return 151;
+  if (!far_ground || far_ground->alpha) return 151;
   const FogShaderEntry* blended = FindFogShader(0x401A01FD4E5F8757ull);
-  if (!blended || blended->world != 2 || !blended->alpha) return 152;
+  if (!blended || !blended->alpha) return 152;
   const FogShaderEntry* layer = FindFogShader(0x9C2144E42E95A76Full);
-  if (!layer || layer->world != 4) return 153;
+  if (!layer || layer->alpha) return 153;
   if (!FindFogShader(0x014F8A02DB7B19CAull) || !FindFogShader(0xFC0922A3A8D8DA7Aull)) return 154;  // the first and the last
   if (FindFogShader(0x2B091BD0C45A7454ull) || FindFogShader(kSkyPixelShader) || FindFogShader(0) ||
       FindFogShader(0x00E0000000000000ull)) {

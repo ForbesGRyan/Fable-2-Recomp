@@ -647,8 +647,10 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
     // lit object or trunk. Sized so that the largest block a shader declares at b1 lies inside the
     // buffer from the start of every slot (ClayConstantBufferBytes), and the frame's whole block
     // from offset 0.
-    // (and one small slot each for the mask step's and the sky step's constants, used or not)
-    const uint64_t bytes = ClayConstantBufferBytes(kClayFrameSlots + 2 + uint64_t(terrain_items_.size()) + plant_constants_.size(),
+    // (and one small slot each for the mask step's and the sky step's constants, used or not:
+    // ClayFrameSmallSlots, which counts every terrain record; PlanClayFrameSlots below gives out the
+    // slots of those that are drawn with their material)
+    const uint64_t bytes = ClayConstantBufferBytes(ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size()),
                                                    object_constants_.size());
     if (auto reused = terrain_pool_.Take(bytes, dev->CompletedSubmission())) {
       terrain_cb_ = *reused;
@@ -687,7 +689,7 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
     }
   }
   terrain_sets_.clear();
-  uint32_t slot = kClayFrameSlots;  // (the slots before it: the frame's block)
+  uint32_t slot = kClayFrameTerrainSlot0;  // (the slots before it: the frame's block)
   for (Prepared& p : prepared_) {
     if (!p.terrain) continue;
     const TerrainPlanItem& item = terrain_items_[p.plan];
@@ -770,13 +772,14 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
   st.terrain_tuples = uint32_t(terrain_sets_.size());
   // The lit plants' small slots follow the terrain's, and the lit objects' and trunks' slots
   // (kClayObjectSlotBytes each) follow the small slots that are in use: the frame's block's,
-  // the terrain's, the plants', the mask's and the sky's. (`slot` is then at most kClayFrameSlots + 2 +
-  // terrain_items_.size() + plant_constants_.size(), the count the buffer was sized with.)
-  plant_slot0_ = slot;
-  slot += uint32_t(plant_constants_.size());
-  mask_slot_ = slot++;  // the mask step's constants (Render writes them when the frame has a mask)
-  sky_slot_ = slot++;   // the sky step's (Render writes them when the frame has a sky)
-  object_slot0_ = slot;
+  // the terrain's, the plants', the mask's and the sky's (PlanClayFrameSlots: its object0 is at most
+  // ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size()), the count the buffer was
+  // sized with, because no more terrain records are drawn with their material than there are).
+  const ClayFrameSlotPlan plan = PlanClayFrameSlots(slot - kClayFrameTerrainSlot0, uint32_t(plant_constants_.size()));
+  plant_slot0_ = plan.plant0;
+  mask_slot_ = plan.mask;  // the mask step's constants (Render writes them when the frame has a mask)
+  sky_slot_ = plan.sky;    // the sky step's (Render writes them when the frame has a sky)
+  object_slot0_ = plan.object0;
   if (slots) {
     std::memcpy(slots, &frame_, sizeof(frame_));
     for (size_t i = 0; i < plant_constants_.size(); ++i) {
@@ -936,8 +939,9 @@ void ClayPass::DrawShadows(nrhi::Cmd* cmd, ClayStats& st) {
 }
 
 void ClayPass::DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, bool depth_only, nrhi::TextureView* mask,
-                            uint32_t* light_mode_out, bool* light_bound) {
+                            uint32_t* light_mode_out, DrawFog* fog_out, bool* light_bound) {
   const capture::DrawRecord& r = *p.r;
+  if (fog_out) *fog_out = DrawFog::kNone;
   if (depth_only && p.prepass_flat) {
     // A pre-pass draw whose pixels are all kept (flat clay, or a textured record whose alpha
     // discards nothing; never a terrain record): the flat kind's pipeline, the positions and the
@@ -966,6 +970,7 @@ void ClayPass::DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, 
   const bool has_albedo = p.albedo != nullptr && !terrain_material;
   const bool has_uvs = has_albedo || (p.textured == kTexturedTerrainFar && p.uvs != nullptr);
   uint32_t light_mode = 0, light_count = 0;
+  float fog_scale = 0.0f;
   // (the pre-pass draws depth alone: no steep-ground colour and no light, so no light input at all)
   if (!depth_only) {
     if (terrain_material && p.normals && (p.side || p.lit)) {
@@ -983,10 +988,18 @@ void ClayPass::DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, 
         light_count = p.light_count;  // the smallest count of its normals and its kind's other buffers
       }
     }
-    // A draw without light in a fogged frame, whose pixel shader has the game's fog block: the
-    // unlit fog's bits (UnlitFogOf; the frame's flag is the one its shaders read). The frame's block
-    // is bound at b2 for the whole frame; the bits name no buffer and no slot.
-    light_mode |= UnlitFogMode(UnlitFogOf(frame_.fog.on != 0, light_mode, r.material.ps_hash));
+    // The draw's fog in a fogged frame (DrawFogOf: one rule for lit and unlit draws; the frame's
+    // flag is the one its shaders read): by the game's own pixel shader. A lit draw is fogged by
+    // its lit path, or told not to be by a bit when that shader has no fog; a draw without light
+    // gets the unlit form's bits when the shader has the game's fog block (the alpha factor only
+    // with an albedo: the one program that writes an alpha of its own), or the tree's bit and the
+    // scale in the draw's last word when it is a trunk or a leaf with a usable scale. The frame's
+    // block is bound at b2 for the whole frame; the bits name no buffer and no slot.
+    const DrawFog draw_fog = RecordDrawFog(frame_.fog.on != 0, (light_mode & kLightModeLit) != 0, p.terrain, has_albedo,
+                                           r.material.ps_hash, p.terrain ? nullptr : p.fog_light);
+    light_mode |= DrawFogMode(draw_fog);
+    fog_scale = DrawFogScale(draw_fog, p.fog_light ? p.fog_light->tree_fog : capture::kTreeFogNone, frame_.exposure);
+    if (fog_out) *fog_out = draw_fog;
   }
   if (light_mode_out) *light_mode_out = light_mode;
   float uv[4] = {1.0f, 1.0f, 0.0f, 0.0f};
@@ -1001,8 +1014,9 @@ void ClayPass::DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, 
     uv[0] = p.uv_fix[0];
     uv[1] = p.uv_fix[1];
   }
-  const ClayConstants constants = MakeClayConstants(r, p.vertex_count, ClayColorValue(color, r),
-                                                    uv, has_uvs, p.sampler, p.alpha, light_mode, light_count);
+  ClayConstants constants = MakeClayConstants(r, p.vertex_count, ClayColorValue(color, r),
+                                              uv, has_uvs, p.sampler, p.alpha, light_mode, light_count);
+  constants.pad2 = FloatBits(fog_scale);  // (0 but for an unlit tree's draw: kLightModeUnlitFogTree)
   cmd->SetRootConstants(kParamConstants, kConstantCount, &constants, 0);
   cmd->SetBufferSrv(kParamPositions, p.positions, 0);
   cmd->SetBufferSrv(kParamIndices, p.indices, 0);
@@ -1473,9 +1487,12 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       st.unknown_by_ps.Add(r.material.ps_hash, kTallyAlphaUnknown);
     }
     // A record drawn with its texture and with light inputs: its normals and colours (the light
-    // is of the material; a record that stays flat clay has none; none with the light off).
-    if (p.albedo && light_inputs) {
-      if (const capture::LightInputs* inputs = LightOf(scene, r)) PrepareLight(dev, r, *inputs, p, st);
+    // is of the material; a record that stays flat clay has none; none with the light off). The
+    // inputs are kept for the record's fog whether or not it is lit (an unlit trunk's or leaf's
+    // scale: DrawFogOf).
+    if (light_inputs) {
+      p.fog_light = LightOf(scene, r);
+      if (p.albedo && p.fog_light) PrepareLight(dev, r, *p.fog_light, p, st);
     }
     prepared_.push_back(p);
   }
@@ -1549,8 +1566,10 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   mask_in.constants = terrain_cb_ != nullptr;
   const ClayMaskDecision mask_decision = DecideClayMask(mask_in);
   // (the fog likewise: a frame whose constant buffer could not be made has no light and no fog; its
-  // constants were made zero, the fog's tail with them)
-  fog_in.light_block = frame_.light_on != 0;
+  // constants were made zero, the fog's tail with them. And a frame that has no constant buffer
+  // because nothing of it is drawn, no record and no shadow record prepared, is "no light" too, not
+  // "drawn": ClayFog::kNoLight covers "no constant buffer"; final review, M11.)
+  fog_in.light_block = frame_.light_on != 0 && terrain_cb_ != nullptr;
   const ClayFogDecision fog_decision = DecideClayFog(fog_in);
   st.fog_switch = fog;
   st.fog_block = scene.fog.valid;
@@ -1559,7 +1578,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   st.fog_view = fog_decision.view;
   // (records of another view than the frame's: fogged with a wrong position; review of plan Task 4, M3)
   if (fog_decision.fog == ClayFog::kDrawn) st.fog_view_outliers = mask_frame_view.outliers;
-  CountClayFogFrame(fog && light == ClayLight::kOn, fog_decision.fog, fog_counts_);
+  CountClayFogFrame(fog_decision.fog, fog_counts_);  // (every frame with the fog's switch on; one without light: "no-light")
   st.fog_frames = fog_counts_.frames;
   st.fog_block_frames = fog_counts_.block;
   st.fog_values_frames = fog_counts_.values;
@@ -1660,7 +1679,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     st.sky_place_record = true;
     st.sky_place_ps = prepared_[sky_order.place].r->material.ps_hash;
   }
-  CountClaySkyFrame(fog && light == ClayLight::kOn, sky_decision.sky, sky_texture_missing, sky_counts_, sky_order.early);
+  CountClaySkyFrame(sky_decision.sky, sky_texture_missing, sky_counts_, sky_order.early);
   st.sky_early_frames = sky_counts_.early;
   st.sky_frames = sky_counts_.frames;
   st.sky_nofog_frames = sky_counts_.nofog;
@@ -1817,7 +1836,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
         cmd->SetPipeline(p.prepass);
         bound = p.prepass;
       }
-      DrawPrepared(cmd, p, color, true, white_view_, nullptr, &light_bound);
+      DrawPrepared(cmd, p, color, true, white_view_, nullptr, nullptr, &light_bound);
       ++st.prepass_drawn;
     }
     // 2. The mask: one full-screen step from the pre-pass depth and the two maps. The depth is a
@@ -1886,8 +1905,12 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       bound = p.pipeline;
     }
     uint32_t light_mode = 0;
-    DrawPrepared(cmd, p, color, false, mask_bound, &light_mode, nullptr);
+    DrawFog draw_fog = DrawFog::kNone;
+    DrawPrepared(cmd, p, color, false, mask_bound, &light_mode, &draw_fog, nullptr);
     ++st.drawn;
+    // Its fog in a fogged frame, for the Fog line: an unlit draw's form or why it has none, and a
+    // lit draw that is not fogged because its game shader has no fog.
+    CountDrawFog(draw_fog, st);
     // The light of the drawn record: its family's, or why it has none.
     if (p.lit) {
       ++st.light_drawn[size_t(p.light->family)];
@@ -1898,15 +1921,6 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       ++st.light_unlit[size_t(why)];
       if (why == ClayUnlit::kUnknown || why == ClayUnlit::kNormal) {
         st.light_unlit_by_ps.Add(r.material.ps_hash, uint8_t(why));
-      }
-      // Its fog in a fogged frame: the unlit form, or none (its pixel shader has no fog block).
-      if (frame_.fog.on) {
-        if (light_mode & kLightModeUnlitFog) {
-          ++st.fog_unlit;
-          if (light_mode & kLightModeUnlitFogAlpha) ++st.fog_unlit_alpha;
-        } else {
-          ++st.fog_unlit_none;
-        }
       }
     }
     if (r.deformed) ++st.deformed;
@@ -1923,10 +1937,13 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // which a slow adapter may not reach; the line of the fog's verdict is written before the draws).
   if (st.fog_unlit && !unlit_fog_logged_) {
     unlit_fog_logged_ = true;
-    REXLOG_INFO("[native] clay: first unlit draws fogged at scene frame {}: {} ({} by their alpha), {} without a fog block",
-                scene.frame, st.fog_unlit, st.fog_unlit_alpha, st.fog_unlit_none);
+    REXLOG_INFO("[native] clay: first unlit draws fogged at scene frame {}: {} ({} by their alpha, {} trees by their scale), "
+                "{} trees without a scale, {} not in the fog table; lit draws not fogged {}",
+                scene.frame, st.fog_unlit, st.fog_unlit_alpha, st.fog_unlit_tree, st.fog_unlit_tree_none, st.fog_unlit_none,
+                st.fog_lit_none);
   }
-  // (no blended record: the sky after the last record; no record at all: the sky alone)
+  // (no blended record: the sky after the last record. A frame without a record has no view, so no
+  // fog and no sky: the sky is never drawn alone.)
   if (sky_drawn && sky_order.place >= prepared_.size()) draw_sky();
 
   // The output mapping: every pixel of the mapped target from the linear target

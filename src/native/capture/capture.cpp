@@ -158,6 +158,13 @@ uint32_t g_shadow_block_missing = 0;
 uint32_t g_fog_frames = 0;
 uint32_t g_fog_block_missing[size_t(FogBlockReason::kCount)] = {};
 uint32_t g_sky_block_missing[size_t(SkyBlockReason::kCount)] = {};
+// Frames since the last line whose fog tables, read again when the frame was over, were not the
+// bytes the frame's block was made of (PublishScene), and the frames in which that was asked.
+uint32_t g_fog_tables_checked = 0;
+uint32_t g_fog_tables_changed = 0;
+// Lines written about a frame whose fog block was read and refused (at most kFogRefusedLines).
+uint32_t g_fog_refused_lines = 0;
+constexpr uint32_t kFogRefusedLines = 8;
 
 inline uint64_t Ticks() {
 #if defined(_M_X64) || defined(__x86_64__)
@@ -4190,8 +4197,9 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
       std::copy(std::begin(g_unsupported_by_hook), std::end(g_unsupported_by_hook),
                 std::begin(done->unsupported_by_hook));
       std::fill(std::begin(g_unsupported_by_hook), std::end(g_unsupported_by_hook), 0u);
-      // Records start or stop at a frame boundary, never mid-frame.
-      const bool records = g_records_wanted.load(std::memory_order_relaxed);
+      // Records start or stop at a frame boundary, never mid-frame. (Read with acquire, before the
+      // shadows' and the fog's words: SetRecordsWanted.)
+      const bool records = g_records_wanted.load(std::memory_order_acquire);
       g_records_frame.store(records, std::memory_order_relaxed);
       // The shadow passes with them, and only in a frame with records.
       const bool shadows = records && g_shadows_wanted.load(std::memory_order_relaxed);
@@ -4359,6 +4367,32 @@ void PublishScene(const FinishedScene& done) {
       ++g_fog_frames;
       if (!sc.fog.valid && sc.fog_reason < FogBlockReason::kCount) ++g_fog_block_missing[size_t(sc.fog_reason)];
       if (!sc.sky.valid && sc.sky_reason < SkyBlockReason::kCount) ++g_sky_block_missing[size_t(sc.sky_reason)];
+      // A frame whose fog block was READ and refused (every read of up to kMaxFogTries, at the frame's
+      // successive fogged draws, gave none; the reason is the last read's): its own line, the first
+      // few times, because the 300-frame line names only its own frame (final review: run 416's one
+      // "tf4-texel" frame could not be placed). Only with the fog wanted.
+      if (!sc.fog.valid && sc.fog_tries && g_fog_refused_lines < kFogRefusedLines) {
+        ++g_fog_refused_lines;
+        REXSYS_INFO("[native] capture: frame {} fog block refused: {} reads at the frame's fogged draws gave none, the last: {} "
+                    "({} drawable records; sky {}){}",
+                    sc.frame, sc.fog_tries, FogBlockReasonName(sc.fog_reason), sc.draws.size(),
+                    sc.sky.valid ? "valid" : SkyBlockReasonName(sc.sky_reason),
+                    g_fog_refused_lines == kFogRefusedLines ? " (last such line)" : "");
+      }
+      // A frame WITH a block: are its two tables, now that the frame is over, still the bytes the
+      // block was made of at the frame's first fogged draw? A table the game writes while its frame is
+      // drawn (the design's risk 2: the moment of the read within the ring of three) would show here.
+      // Two hashes of 512 and 1,024 bytes a frame, on this thread, only with the fog wanted; nothing
+      // is done about a difference but to count it.
+      if (sc.fog.valid) {
+        ++g_fog_tables_checked;
+        const uint8_t* p4 = ReadPhysical(sc.fog_source.base[0], uint32_t(kFogScatterBytes));
+        const uint8_t* p5 = ReadPhysical(sc.fog_source.base[1], uint32_t(kFogTransmitBytes));
+        if (!p4 || !p5 || XXH3_64bits(p4, kFogScatterBytes) != sc.fog_source.content[0] ||
+            XXH3_64bits(p5, kFogTransmitBytes) != sc.fog_source.content[1]) {
+          ++g_fog_tables_changed;
+        }
+      }
     }
   }
   if (sc.frame % 300 != 0) return;
@@ -4484,15 +4518,18 @@ void PublishScene(const FinishedScene& done) {
                       g_sky_block_missing[i]);
         sky_missing += buf;
       }
-      // (dropped: fog and sky reads of a frame that was over when they were to be taken, since the last line)
+      // (dropped: fog and sky reads of a frame that was over when they were to be taken, since the last line;
+      // tables changed: frames with a block whose tables were other bytes when the frame was over)
       REXSYS_INFO("[native] capture: frame {} fog: {} | {} in {} of {} frames {{{}}} | {} in {} of {} frames {{{}}} | "
-                  "dropped at a frame's end {}",
+                  "dropped at a frame's end {} | tables changed by the frame's end in {} of {} frames",
                   sc.frame, render::FogLine(sc), kFogBlockReason, fog_total, g_fog_frames, fog_missing, kSkyBlockReason,
-                  sky_total, g_fog_frames, sky_missing, g_fog_dropped.exchange(0, std::memory_order_relaxed));
+                  sky_total, g_fog_frames, sky_missing, g_fog_dropped.exchange(0, std::memory_order_relaxed),
+                  g_fog_tables_changed, g_fog_tables_checked);
     } else {
       REXSYS_INFO("[native] capture: frame {} fog: {}", sc.frame, render::FogLine(sc));
     }
     g_fog_frames = 0;
+    g_fog_tables_checked = g_fog_tables_changed = 0;
     std::fill(std::begin(g_fog_block_missing), std::end(g_fog_block_missing), 0u);
     std::fill(std::begin(g_sky_block_missing), std::end(g_sky_block_missing), 0u);
   }
@@ -4537,8 +4574,12 @@ bool ArmDiscoveryNow(uint32_t frames, uint32_t every) {
   return true;
 }
 
+// Stored with release and read with acquire at the frame's boundary (FinishFrame's latch), where
+// the shadows' and the fog's words are read after it: a caller that switches the records ON stores
+// those two words first (PollFrame), so a boundary that sees the records wanted also sees them,
+// and no frame is recorded without its fog block for the order of three stores (final review, M6).
 void SetRecordsWanted(bool wanted) {
-  g_records_wanted.store(wanted, std::memory_order_relaxed);
+  g_records_wanted.store(wanted, std::memory_order_release);
 }
 
 void SetShadowsWanted(bool wanted) {

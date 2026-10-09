@@ -229,6 +229,37 @@ static_assert(LightFamily(1) == LightFamily::kTerrainLayer && LightFamily(2) == 
               LightFamily(5) == LightFamily::kPlant && LightFamily(6) == LightFamily::kPlantLit &&
               LightFamily(7) == LightFamily::kTreeLeaf && size_t(LightFamily::kCount) == 8);
 
+// The light family of a pixel shader by the generated table alone (ps_albedo_table.inc, the
+// FABLE2_PS_LIGHT lines; capture.cpp has the table's whole rows and the pairs a draw's family also
+// needs): which of the game's forms a pixel shader is, whether or not the draw got light inputs.
+// The pass asks it for the form of a draw's fog (render/clay_logic.h, DrawFogOf).
+struct PsLightFamilyEntry {
+  uint64_t ps_hash;
+  LightFamily family;
+};
+inline constexpr PsLightFamilyEntry kPsLightFamilies[] = {
+#define FABLE2_PS_ALBEDO(...)
+#define FABLE2_PS_NO_ALBEDO(...)
+#define FABLE2_PS_ALPHA(...)
+#define FABLE2_PS_TERRAIN(...)
+#define FABLE2_PS_LIGHT(H, F, M, FS) {H, LightFamily(F)},
+#define FABLE2_PS_LIGHT_VS(...)
+#include "ps_albedo_table.inc"
+#undef FABLE2_PS_ALBEDO
+#undef FABLE2_PS_NO_ALBEDO
+#undef FABLE2_PS_ALPHA
+#undef FABLE2_PS_TERRAIN
+#undef FABLE2_PS_LIGHT
+#undef FABLE2_PS_LIGHT_VS
+};
+// kNone for a shader without an entry.
+constexpr LightFamily PsLightFamily(uint64_t ps_hash) {
+  for (const PsLightFamilyEntry& e : kPsLightFamilies) {
+    if (e.ps_hash == ps_hash) return e.family;
+  }
+  return LightFamily::kNone;
+}
+
 inline const char* LightFamilyName(LightFamily f) {
   switch (f) {
     case LightFamily::kNone: return "none";

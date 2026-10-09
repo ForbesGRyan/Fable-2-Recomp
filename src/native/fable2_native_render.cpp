@@ -33,7 +33,9 @@ REXCVAR_DEFINE_STRING(fable2_native_view, "off", "Fable2",
                       "frame drawn with shadows, and when their objects could not be made, it shows the native picture).");
 REXCVAR_DEFINE_STRING(fable2_native_clay_color, "clay", "Fable2",
                       "Native clay pass color: clay = one clay color; draw = a color per "
-                      "draw; shader = a color per vertex shader.");
+                      "draw; shader = a color per vertex shader. (With the fog on, a flat draw whose "
+                      "shader the game fogs shows its color through the haze; fable2_native_fog=off "
+                      "gives the plain colors.)");
 REXCVAR_DEFINE_INT32(fable2_native_geometry_budget_mb, 256, "Fable2",
                      "GPU memory budget (MB) for decoded native geometry; least recently "
                      "used buffers are evicted above it.");
@@ -60,10 +62,12 @@ REXCVAR_DEFINE_STRING(fable2_native_shadows, "on", "Fable2",
 REXCVAR_DEFINE_STRING(fable2_native_fog, "on", "Fable2",
                       "Native fog and sky: on (or true, 1) = with a composite view and the light on, the capture also reads the "
                       "frame's fog block (the game's six fog registers and its two fog tables) and its sky block at the game's "
-                      "own draws, and the clay pass fogs its lit draws with the game's arithmetic and tables, its unlit draws "
-                      "whose pixel shader has the game's fog block with the same form on their unlit colour, and draws the "
-                      "game's sky where no record is drawn; off (or false, 0) = none of it is read or drawn: the shadows' "
-                      "picture. On by default since the fog's validation (sub-project 9; frame map section 16).");
+                      "own draws, and the clay pass fogs its draws with the game's arithmetic and tables wherever the draw's "
+                      "own pixel shader in the game has fog (lit draws by their family's form, unlit draws by the same form on "
+                      "their unlit colour, trees by their vertex shader's form; a draw whose game shader has none is left "
+                      "unfogged), and draws the game's sky where no record is drawn; off (or false, 0) = none of it is read or "
+                      "drawn: the shadows' picture. On by default since the fog's validation (sub-project 9; frame map "
+                      "section 16).");
 REXCVAR_DEFINE_BOOL(fable2_native_d3d_messages, false, "Fable2",
                     "Write the Direct3D debug layer's errors, corruption and warnings to the game log "
                     "(the layer is the SDK's --d3d12_debug=true; without it there is nothing to write). "
@@ -561,10 +565,20 @@ void PollFrame() {
     }
   }
 #endif
+  // The order of the three stores (final review, M6). The capture latches them at a frame's boundary,
+  // the records' word first (read with acquire), then the shadows' and the fog's. Switching ON: the
+  // shadows' and the fog's words are stored BEFORE the records' (stored with release), so a boundary
+  // that sees the records wanted sees the other two as well: no frame is recorded without its shadow
+  // passes or its fog block because the boundary fell between two stores. Switching OFF: the records'
+  // word first; a boundary between the stores then latches no records, and with no records the other
+  // two words are not read at all. (A boundary that read the records' word just before it went off
+  // may still latch one last frame with records and without fog: the view is off by then and the
+  // frame is not drawn; were it drawn, it would be without fog and the pass would count it "fog-block".)
   const bool wanted = RecordsWanted(CurrentView(), g_latch.IsFailed());
-  capture::SetRecordsWanted(wanted);
+  if (!wanted) capture::SetRecordsWanted(false);
   capture::SetShadowsWanted(ShadowsWanted(wanted));
   capture::SetFogWanted(FogWanted(wanted));
+  if (wanted) capture::SetRecordsWanted(true);
   rex::graphics::RequestNativeGuestOutputPostProcess(wanted);
 }
 

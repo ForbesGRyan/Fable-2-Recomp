@@ -231,7 +231,7 @@ inline std::string ShadowSkippedByVs(const FrameScene& scene) {
 // and format). "off" for a frame in which the fog was not wanted.
 inline std::string FogLine(const FrameScene& scene) {
   if (!scene.fog_records) return "off";
-  char buf[320];
+  char buf[512];  // (sixteen %g values of at most 13 characters each, two addresses, two hashes and the fixed text: about 360)
   std::string out = "block ";
   if (scene.fog.valid) {
     const capture::FogBlock& f = scene.fog;

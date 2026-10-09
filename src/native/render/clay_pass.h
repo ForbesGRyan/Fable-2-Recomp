@@ -83,7 +83,8 @@ class ClayPass {
   // the lit draws' sun is shadowed. Otherwise none of it is drawn and the mask is
   // white; st says which (ClayStats::mask). `fog`: fable2_native_fog as it is read now. On, in a
   // frame drawn with light that has a valid fog block, an eye and one inverse view-projection
-  // (DecideClayFog): the frame's constants carry the fog's tail and the lit pixels are fogged.
+  // (DecideClayFog): the frame's constants carry the fog's tail, every drawn record is fogged as the
+  // game's own pixel shader fogs it or not (DrawFogOf: lit and unlit draws), and the sky is drawn.
   // Otherwise the tail is zero and no pixel is; st says which (ClayStats::fog).
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
               bool textured, ClayLight light, bool shadows, bool fog, ClayStats& st, TextureStats& tst);
@@ -173,6 +174,10 @@ class ClayPass {
     // is where its second region starts. `max_index`: the largest index of the
     // record's list.
     const capture::LightInputs* light = nullptr;
+    // The light inputs of a mesh record for its FOG, whether or not its light's buffers were asked
+    // or built (a record drawn as flat clay has no `light`): an unlit trunk or leaf is fogged with
+    // the scale they carry (DrawFogOf). Null with the light off and for a record without inputs.
+    const capture::LightInputs* fog_light = nullptr;
     nrhi::Buffer* normals = nullptr;
     nrhi::Buffer* colours = nullptr;
     nrhi::Buffer* probe = nullptr;
@@ -286,9 +291,10 @@ class ClayPass {
   void DrawShadows(nrhi::Cmd* cmd, ClayStats& st);
   // One prepared record, drawn with its colour pipeline, or (`depth_only`) with its pre-pass
   // pipeline: the same buffers, constants and textures but for the light (none: light_mode 0) and
-  // the mask (white). `mask`: what the colour draw binds as the screen mask.
+  // the mask (white). `mask`: what the colour draw binds as the screen mask. `fog_out`: the fog of
+  // the colour draw (DrawFogOf; kNone for a pre-pass draw).
   void DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, bool depth_only, nrhi::TextureView* mask,
-                    uint32_t* light_mode_out, bool* light_bound);
+                    uint32_t* light_mode_out, DrawFog* fog_out, bool* light_bound);
   // The light's vertex inputs of a textured mesh record with light inputs:
   // its normals and the other buffers of its vertex kind (a colour stream's
   // colours, the probe weights and sets, an instance set's colours and bend

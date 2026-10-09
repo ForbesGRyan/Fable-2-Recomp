@@ -637,8 +637,12 @@ float3 FogUnlit(float3 c, FogPoint p, float scale) {
     float3 T = fog_transmit(p.s);
     float3 F = f_fog_near + p.t * (S - f_fog_near);
     float3 G = c * T + (1.0 - T) * (f_fog_scatter * f_exposure * scale) * F;
-    c = c + f_fog_amount * (G - c);
+    c = clay_lit(c + f_fog_amount * (G - c));
   }
+  return c;
+}
+float3 FogUnlitTree(float3 c, FogPoint p, float scale) {
+  [branch] if (p.fogged) c = clay_lit(FogForm(c, p, scale, 1.0));
   return c;
 }
 #else
@@ -646,6 +650,7 @@ struct FogPoint { bool fogged; };
 FogPoint FogCoords(float4 pos) { FogPoint o; o.fogged = false; return o; }
 float3 FogForm(float3 c, FogPoint p, float scale, float form) { return c; }
 float3 FogUnlit(float3 c, FogPoint p, float scale) { return c; }
+float3 FogUnlitTree(float3 c, FogPoint p, float scale) { return c; }
 #endif
 )pin";
 static const char kPinVsMain[] = R"pin(VsOut main(uint vid : SV_VertexID) {
@@ -775,6 +780,8 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
       float mask = shadow_mask.SampleLevel(s_linear_clamp, (pos.xy - 0.5) * float2(f_mask_du, f_mask_dv), 0).r;
       // The fog's coordinates of the pixel, from its own depth.
       FogPoint fog = FogCoords(pos);
+      // Bit 9: a lit draw whose own pixel shader in the game has no fog (clay_logic.h, DrawFogOf): none here.
+      if (light_mode & 512) fog.fogged = false;
       [branch] if (light_mode & 16) {
         // An instanced plant: the normal bent as the game's plant pixel shaders bend it, then A times
         // the vertex side's ambient plus the sun, or (light_mode bit 5) the object form with the vertex
@@ -803,6 +810,10 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
       }
       return float4(clay_lit(lit * f_exposure), (alpha_mode & 0x80) ? saturate(a) : 1.0);
     }
+    if (light_mode & 1024) {
+      float3 hazed = FogUnlitTree(clay_linear(t.rgb * (0.75 + 0.25 * facet)), FogCoords(pos), asfloat(pad2));
+      return float4(hazed, (alpha_mode & 0x80) ? saturate(a) : 1.0);
+    }
     if (light_mode & 128) {
       float3 hazed = FogUnlit(clay_linear(t.rgb * (0.75 + 0.25 * facet)), FogCoords(pos), (light_mode & 256) ? saturate(a) : 1.0);
       return float4(hazed, (alpha_mode & 0x80) ? saturate(a) : 1.0);
@@ -811,6 +822,7 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
 #endif
   }
   base = float3((color >> 16) & 255, (color >> 8) & 255, color & 255) / 255.0;
+  if (light_mode & 1024) return float4(FogUnlitTree(clay_linear(base * (0.35 + 0.65 * facet)), FogCoords(pos), asfloat(pad2)), 1.0);
   if (light_mode & 128) return float4(FogUnlit(clay_linear(base * (0.35 + 0.65 * facet)), FogCoords(pos), 1.0), 1.0);
   return float4(clay_linear(base * (0.35 + 0.65 * facet)), 1.0);
 })pin";
@@ -1288,7 +1300,7 @@ int main() {
       const char* out = strstr(src, "return float4(saturate(colour * (shade * shade)), (alpha_mode & 0x80) ? saturate(a) : 1.0);");
       if (!test || !mask || !lit || !shade || !out || !(test < mask && mask < lit && lit < shade && shade < out)) return 38;
       if (strstr(src, "a * a") || strstr(src, "colour * (0.75 + 0.25 * facet)") || Count(src, "clay_lit(colour") != 1 ||
-          Count(src, "clay_lit(") != 2 || Count(src, "f_exposure") != 3) return 38;  // (the block, the lit return, the unlit fog's in-scatter)
+          Count(src, "clay_lit(") != 4 || Count(src, "f_exposure") != 3) return 38;  // (clay_lit: its definition, the lit return, the two unlit fogs' bounds; the exposure: the block, the lit return, the unlit fog's in-scatter)
     }
   }
   // The steep-ground block of the layer shader (frame-map section 13, "Terrain", item 1; the reference
@@ -1381,6 +1393,9 @@ int main() {
     // (the flat shader without its unlit fog's line: it then reads none of the fields left out)
     std::string shorter = Changed(kClayPs, "  if (light_mode & 128) return float4(FogUnlit(clay_linear(base * shade), FogCoords(pos), 1.0), 1.0);\n", "");
     if (shorter.empty()) return 50;
+    // (and without its unlit tree's line, which reads light_mode and pad2)
+    shorter = Changed(shorter.c_str(), "  if (light_mode & 1024) return float4(FogUnlitTree(clay_linear(base * shade), FogCoords(pos), asfloat(pad2)), 1.0);\n", "");
+    if (shorter.empty()) return 50;
     const std::string tail = "float alpha_scale; uint light_mode; uint light_count; uint pad2;";
     at = shorter.find(tail);
     if (at == std::string::npos) return 50;
@@ -1420,7 +1435,8 @@ int main() {
     // shade, the textured draw's colour and its written alpha. (The compiler drops the clamp of flat
     // clay: it proves that range.) Lit (clay_lit: a number, not negative, at most 64): the comparison
     // with 0 and its mask, which turn a NaN and a negative value into 0, and the upper bound, in each of
-    // the three shaders that light; the flat shader has neither.
+    // the three shaders that light; the flat shader has them in its unlit fog alone (final review, M2:
+    // an unlit fogged value is bounded like a lit one), and its program without that fog's bits has neither.
     if (!DisassemblyHas("clay_terrain_layer_ps", kClayTerrainLayerPs, "ps_5_0", "mul_sat r") ||
         !DisassemblyHas("clay_terrain_far_ps", kClayTerrainFarPs, "ps_5_0", "mul_sat r") ||
         !DisassemblyHas("clay_textured_ps", kClayTexturedPs, "ps_5_0", "mul_sat r") ||
@@ -1431,10 +1447,10 @@ int main() {
       if (!DisassemblyHas(clay_ps[i].name, clay_ps[i].src, "ps_5_0", "lt r") ||
           !DisassemblyHas(clay_ps[i].name, clay_ps[i].src, "ps_5_0", "min r")) return 69;
     }
-    // control (the bound's three-component literal; the flat shader's unlit fog has the in-scatter
-    // table's size, a scalar 64, and the flat program without that fog's bit has neither)
-    if (DisassemblyHas("clay_ps", kClayPs, "ps_5_0", "l(64.000000, 64.000000, 64.000000") ||
-        DisassemblyHas("clay_ps", kClayPs, "ps_5_0", "64.000000, 64.000000, 64.000000)") ||
+    // control (the bound's three-component literal: in the flat shader only behind its unlit fog's bits;
+    // the flat program without them has no 64 at all, neither the bound nor the in-scatter table's size)
+    if ((!DisassemblyHas("clay_ps_mode128", WithLightMode(kClayPs, 128).c_str(), "ps_5_0", "l(64.000000, 64.000000, 64.000000") &&
+         !DisassemblyHas("clay_ps_mode128", WithLightMode(kClayPs, 128).c_str(), "ps_5_0", "64.000000, 64.000000, 64.000000)")) ||
         DisassemblyHas("clay_ps_mode0", WithLightMode(kClayPs, 0).c_str(), "ps_5_0", "64.000000")) return 69;
   }
   // The light (frame-map section 14, "Native light"): the functions of light_formulas.py, statement for
@@ -1527,12 +1543,14 @@ int main() {
       }
     }
     // The flat shader lights nothing: its main names no light function, no lit output and no field of
-    // the frame's block; its one test of light_mode is the unlit fog's bit (cases 210 to 212), and the
-    // program of a draw without that bit reads nothing of the frame (case 166).
+    // the frame's block; its two tests of light_mode are the unlit fog's bits (cases 210 to 212: bit 7,
+    // and bit 10 for an unlit tree), and the program of a draw without them reads nothing of the frame
+    // (case 166).
     {
       const char* flat_main = strstr(kClayPs, "float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0) : SV_Target {");
       if (!flat_main || strstr(flat_main, "f_") || strstr(flat_main, "Light") || strstr(flat_main, "clay_lit") || strstr(flat_main, "light_mode & 4") ||
-          Count(flat_main, "light_mode") != 1 || !strstr(flat_main, "if (light_mode & 128) return")) return 81;
+          Count(flat_main, "light_mode") != 2 || !strstr(flat_main, "if (light_mode & 128) return") ||
+          !strstr(flat_main, "if (light_mode & 1024) return")) return 81;
     }
     // The vertex shader: the object's normal through the draw's rows (the game's (R n) * c7.w), the
     // vector of t from the normal as it is, not normalised, and the frame's axis, and the stream
@@ -1656,7 +1674,7 @@ int main() {
       const char* unlit = strstr(t, "return float4(clay_linear(t.rgb * (0.75 + 0.25 * facet)), (alpha_mode & 0x80) ? saturate(a) : 1.0);");
       if (!mask || !branch || !n || !call || !rest || !out || !unlit) return 83;
       if (!(mask < branch && branch < n && n < call && call < rest && rest < out && out < unlit)) return 83;
-      if (strstr(t, "clay_linear(t.rgb * lit") || strstr(t, "facet) * lit") || Count(t, "clay_lit(") != 2 ||
+      if (strstr(t, "clay_linear(t.rgb * lit") || strstr(t, "facet) * lit") || Count(t, "clay_lit(") != 4 ||
           Count(t, "f_exposure") != 3) return 83;  // (the block, the lit return, the unlit fog's in-scatter)
       // The instanced plants (plan Task 8b), before the object's path and under the instance bit: the
       // normal bent per pixel, then by family the object form of the vertex side's colour (the added
@@ -3093,17 +3111,26 @@ int main() {
       if (!coords || !plant || !leaf_light || !leaf || !object_light || !object || !out || !mask) return 203;
       if (!(mask < coords && coords < plant && plant < leaf_light && leaf_light < leaf && leaf < object_light && object_light < object &&
             object < out)) return 203;
-      if (Count(t, "FogForm(") != 5 || Count(t, "FogCoords(") != 5 || Count(t, "o_c26") != 3) return 203;  // (two definitions each; the two unlit returns' coordinates; c26's declaration)
+      // (final review, I1) A lit draw whose game shader has no fog: bit 9 marks its fog point unfogged,
+      // right after the coordinates and before any family's form; no other shader reads the bit.
+      const char* bare = strstr(t, "FogPoint fog = FogCoords(pos);\n"
+                                   "      // Bit 9: a lit draw whose own pixel shader in the game has no fog (clay_logic.h, DrawFogOf): none here.\n"
+                                   "      if (light_mode & 512) fog.fogged = false;\n");
+      if (bare != coords || Count(t, "light_mode & 512") != 1) return 203;
+      for (const char* src : {kClayPs, kClayTerrainLayerPs, kClayTerrainFarPs, kClayVs, kClayShadowPs, kClaySkyPs}) {
+        if (strstr(src, "light_mode & 512")) return 203;
+      }
+      if (Count(t, "FogForm(") != 6 || Count(t, "FogCoords(") != 7 || Count(t, "o_c26") != 3) return 203;  // (FogForm: its two definitions, the three lit calls, the unlit tree's; FogCoords: two definitions, the lit one, the four unlit returns'; c26's declaration)
       const char* l = kClayTerrainLayerPs;
       const char* layer_light = strstr(l, "lin = LightTerrainLayer(");
       const char* layer_fog = strstr(l, "lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);");
       const char* layer_out = strstr(l, "return terrain_out(lin, a, pos, ndc);");
-      if (!layer_light || !layer_fog || !layer_out || !(layer_light < layer_fog && layer_fog < layer_out) || Count(l, "FogForm(") != 3) return 203;
+      if (!layer_light || !layer_fog || !layer_out || !(layer_light < layer_fog && layer_fog < layer_out) || Count(l, "FogForm(") != 4) return 203;
       const char* f = kClayTerrainFarPs;
       const char* far_light = strstr(f, "lin = LightTerrainFar(");
       const char* far_fog = strstr(f, "lin = FogForm(lin, FogCoords(pos), 0.0, 0.0);");
       const char* fade = strstr(f, "if (t_flags & 1) lin *= terrain_fade_in(world);");
-      if (!far_light || !far_fog || !fade || !(far_light < far_fog && far_fog < fade) || Count(f, "FogForm(") != 3) return 203;
+      if (!far_light || !far_fog || !fade || !(far_light < far_fog && far_fog < fade) || Count(f, "FogForm(") != 4) return 203;
     }
     // 204: the forms' numbers are the object block's (kTreeFogForm*), and the tables' sizes the frame's.
     {
@@ -3332,10 +3359,13 @@ int main() {
   // 210 to 212: the unlit draws' fog (fog sub-project, plan Task 6; clay_logic.h, "Unlit draws"): a draw
   // without light whose pixel shader has the game's fog block is fogged in a fogged frame, by two bits
   // of light_mode above the light's seven (128: the unlit fog; 256: its in-scatter times the alpha the
-  // draw writes).
+  // draw writes). Since the final review (M1, M2): an unlit trunk or leaf by a bit of its own (1024: the
+  // trees' form, its scale in Draw's pad2), in the flat and the textured shader; both forms bounded.
+  // 213: a lit draw whose game shader has no fog (512; final review, I1).
   {
     using fable2::native::render::kLightModeCount;
-    static_assert(fable2::native::render::kLightModeUnlitFog == 128u && fable2::native::render::kLightModeUnlitFogAlpha == 256u);
+    static_assert(fable2::native::render::kLightModeUnlitFog == 128u && fable2::native::render::kLightModeUnlitFogAlpha == 256u &&
+                  fable2::native::render::kLightModeLitNoFog == 512u && fable2::native::render::kLightModeUnlitFogTree == 1024u);
     auto fog_off = [](const char* src) {
       std::string text = Changed(src, "float3 f_fog_axis; uint f_fog_on;", "float3 f_fog_axis; uint f_fog_on_word;");
       if (text.empty()) return text;
@@ -3345,10 +3375,11 @@ int main() {
       const char* name;
       const char* src;
       bool alpha;   // the program reads the second bit (the textured shader: the only one that writes an alpha of its own)
-    } unlit_ps[] = {{"clay_ps", kClayPs, false},
-                    {"clay_textured_ps", kClayTexturedPs, true},
-                    {"clay_terrain_layer_ps", kClayTerrainLayerPs, false},
-                    {"clay_terrain_far_ps", kClayTerrainFarPs, false}};
+      bool tree;    // the program reads the tree's bit (a trunk or a leaf is a mesh: never a terrain shader's draw)
+    } unlit_ps[] = {{"clay_ps", kClayPs, false, true},
+                    {"clay_textured_ps", kClayTexturedPs, true, true},
+                    {"clay_terrain_layer_ps", kClayTerrainLayerPs, false, false},
+                    {"clay_terrain_far_ps", kClayTerrainFarPs, false, false}};
     // 210: fog off: equal. For each of the four shaders that draw colour and every light_mode without
     // the lit bit: the program of a draw with the unlit fog's bits, with the frame's flag 0, is line for
     // line the program of the draw without them, which is the program the draw had before this fog
@@ -3377,18 +3408,31 @@ int main() {
         }
         // (the second bit is read where the draw writes an alpha of its own, and nowhere else)
         if ((with[0] != with[1]) != s.alpha) return 210;
+        // The tree's bit: read by the flat and the textured shader, whose program with the flag 0 is
+        // again the unlit program; a terrain shader's program does not change with it at all.
+        const std::string tree = Code(Disassembly(s.name, WithLightMode(s.src, mode | 1024u).c_str(), "ps_5_0"));
+        const std::string tree_folded = Code(Disassembly("fog_off", WithLightMode(off.c_str(), mode | 1024u).c_str(), "ps_5_0"));
+        if (tree.empty() || tree_folded != plain) {
+          std::cerr << s.name << " light_mode " << (mode | 1024u) << ": with the fog's flag 0 the program is not the unlit program\n";
+          return 210;
+        }
+        if ((tree != plain) != s.tree || (s.tree && (tree == with[0] || tree == with[1]))) return 210;
+        if (s.tree) ++fogged_programs;
+        // (bit 9 is a lit draw's: without the lit bit it is nothing)
+        if (Code(Disassembly(s.name, WithLightMode(s.src, mode | 512u).c_str(), "ps_5_0")) != plain) return 210;
       }
       // The second bit alone is nothing: the program of the mode without either.
       if (Code(Disassembly(s.name, WithLightMode(s.src, 256).c_str(), "ps_5_0")) != Code(Disassembly(s.name, WithLightMode(s.src, 0).c_str(), "ps_5_0"))) return 210;
     }
-    if (fogged_programs != 4 * 64 * 2) return 210;
+    if (fogged_programs != 4 * 64 * 2 + 2 * 64) return 210;
     // The vertex shader, the shadow maps' shader and the three depth-only programs read neither bit.
-    for (unsigned mode : {0u, 1u, 2u, 5u, 78u}) {
-      if (Code(Disassembly("clay_vs", WithLightMode(kClayVs, mode | 384u).c_str(), "vs_5_0")) !=
+    // (nor the two bits of the final review: 384 + 512 + 1024)
+    for (unsigned mode : {0u, 1u, 2u, 5u, 22u, 78u}) {
+      if (Code(Disassembly("clay_vs", WithLightMode(kClayVs, mode | 1920u).c_str(), "vs_5_0")) !=
           Code(Disassembly("clay_vs", WithLightMode(kClayVs, mode).c_str(), "vs_5_0"))) return 210;
     }
     for (const char* src : {kClayShadowPs, kClayTexturedDepthPs, kClayTerrainLayerDepthPs, kClayTerrainFarDepthPs}) {
-      const std::string with = Code(Disassembly("depth", WithLightMode(src, 384).c_str(), "ps_5_0"));
+      const std::string with = Code(Disassembly("depth", WithLightMode(src, 1920).c_str(), "ps_5_0"));
       if (with.empty() || with != Code(Disassembly("depth", WithLightMode(src, 0).c_str(), "ps_5_0"))) return 210;
     }
     // Controls: an unlit fog that does not ask the frame's flag, and one outside the fog's names, are
@@ -3411,7 +3455,8 @@ int main() {
     // slot (cb1: an unlit draw binds none of its own).
     for (const auto& s : unlit_ps) {
       const bool terrain = s.src == kClayTerrainLayerPs || s.src == kClayTerrainFarPs;
-      for (unsigned bits : {128u, 384u}) {
+      for (unsigned bits : {128u, 384u, 1024u}) {
+        if (bits == 1024u && !s.tree) continue;
         const std::string listing = Disassembly(s.name, WithLightMode(s.src, bits).c_str(), "ps_5_0");
         const std::string plain = Disassembly(s.name, WithLightMode(s.src, 0).c_str(), "ps_5_0");
         bool dynamic = false;
@@ -3425,7 +3470,8 @@ int main() {
           std::cerr << s.name << ": a guard of the unlit fog is not in the compiled program\n";
           return 211;
         }
-        if (!ReadsComponent(listing, "cb2[2]", 'w') || listing.find("cb2[6]") == std::string::npos || listing.find("cb2[13]") == std::string::npos) return 211;
+        if (ReadsComponent(listing, "cb2[2]", 'w') != (bits != 1024u) || listing.find("cb2[6]") == std::string::npos ||
+            listing.find("cb2[13]") == std::string::npos) return 211;
         for (int reg = 0; reg < 16; ++reg) {
           if (ReadsResource(listing, reg) != ReadsResource(plain, reg)) return 211;
         }
@@ -3435,12 +3481,27 @@ int main() {
         // (none of the light's registers: the sun, the tint's colour, the added light, the floor)
         if (listing.find("cb2[0]") != std::string::npos || listing.find("cb2[1]") != std::string::npos ||
             ReadsComponent(listing, "cb2[2]", 'x') || listing.find("cb2[3]") != std::string::npos) return 211;
+        // (final review, M2) The fogged value is bounded as a lit one: not negative, at most 64.
+        if (!HasLineWith(listing, "min", "l(64.000000") || HasLineWith(plain, "min", "l(64.000000")) return 211;
+        // (final review, M1) The tree's form reads the draw's scale (Draw's pad2: cb0[8].w) and neither of
+        // the ground form's amounts (c28.x, c28.y: cb2[9].z, .w) nor the near colour (cb2[8].xyz); the
+        // ground form reads the amounts and not the draw's word. The exposure is in the tree's scale
+        // already (the pass's product), so its program does not read the frame's.
+        const bool tree = bits == 1024u;
+        if (ReadsComponent(listing, "cb0[8]", 'w') != tree || ReadsComponent(listing, "cb2[9]", 'z') == tree ||
+            ReadsComponent(listing, "cb2[9]", 'w') == tree || ReadsComponent(listing, "cb2[8]", 'x') == tree) {
+          std::cerr << s.name << " light_mode " << bits << ": the unlit fog reads another form's constants\n";
+          return 211;
+        }
       }
     }
     {
       // Control: an unlit fog without the exposure does not read it.
       const std::string bare = Changed(kClayPs, "(f_fog_scatter * f_exposure * scale)", "(f_fog_scatter * scale)");
       if (bare.empty() || ReadsComponent(Disassembly("bare", WithLightMode(bare.c_str(), 128).c_str(), "ps_5_0"), "cb2[2]", 'w')) return 211;
+      // Control: an unlit fog without its bound has no such minimum.
+      const std::string unbounded = Changed(kClayPs, "    c = clay_lit(c + f_fog_amount * (G - c));", "    c = c + f_fog_amount * (G - c);");
+      if (unbounded.empty() || HasLineWith(Disassembly("unbounded", WithLightMode(unbounded.c_str(), 128).c_str(), "ps_5_0"), "min", "l(64.000000")) return 211;
     }
     // 212: the statements, in the text. The unlit form is the ground form with the in-scatter times the
     // exposure and the draw's scale; each unlit return has its fogged twin before it, on the same colour;
@@ -3450,33 +3511,79 @@ int main() {
                                          "    float3 S = fog_scatter(p.a);\n    float3 T = fog_transmit(p.s);\n"
                                          "    float3 F = f_fog_near + p.t * (S - f_fog_near);\n"
                                          "    float3 G = c * T + (1.0 - T) * (f_fog_scatter * f_exposure * scale) * F;\n"
-                                         "    c = c + f_fog_amount * (G - c);\n  }\n  return c;\n}\n");
+                                         "    c = clay_lit(c + f_fog_amount * (G - c));\n  }\n  return c;\n}\n");
       if (!body) return 212;
+      // The tree's: the trees' form (FogForm's form 1) with the scale it is given, bounded the same way.
+      if (!strstr(kClayPs, "float3 FogUnlitTree(float3 c, FogPoint p, float scale) {\n"
+                           "  [branch] if (p.fogged) c = clay_lit(FogForm(c, p, scale, 1.0));\n  return c;\n}\n")) return 212;
+      const char* flat_tree = strstr(kClayPs, "if (light_mode & 1024) return float4(FogUnlitTree(clay_linear(base * shade), FogCoords(pos), asfloat(pad2)), 1.0);");
       const char* flat_fog = strstr(kClayPs, "if (light_mode & 128) return float4(FogUnlit(clay_linear(base * shade), FogCoords(pos), 1.0), 1.0);");
       const char* flat = strstr(kClayPs, "return float4(clay_linear(base * shade), 1.0);");
-      if (!flat_fog || !flat || !(flat_fog < flat) || Count(kClayPs, "FogUnlit(") != 3 || Count(kClayPs, "light_mode &") != 1) return 212;
+      if (!flat_tree || !flat_fog || !flat || !(flat_tree < flat_fog && flat_fog < flat) || Count(kClayPs, "FogUnlit(") != 3 ||
+          Count(kClayPs, "FogUnlitTree(") != 3 || Count(kClayPs, "light_mode &") != 2) return 212;
       const char* t = kClayTexturedPs;
       const char* lit = strstr(t, "return float4(clay_lit(lit * f_exposure),");
       const char* written = strstr(t, "float3 hazed = FogUnlit(clay_linear(t.rgb * (0.75 + 0.25 * facet)), FogCoords(pos), (light_mode & 256) ? saturate(a) : 1.0);");
-      const char* tex_fog = strstr(t, "return float4(hazed, (alpha_mode & 0x80) ? saturate(a) : 1.0);");
+      // (the return right after it: the unlit tree's twin before it has the same statement)
+      const char* tex_fog = written ? strstr(written, "return float4(hazed, (alpha_mode & 0x80) ? saturate(a) : 1.0);") : nullptr;
       const char* tex = strstr(t, "return float4(clay_linear(t.rgb * (0.75 + 0.25 * facet)), (alpha_mode & 0x80) ? saturate(a) : 1.0);");
       const char* base_fog = strstr(t, "if (light_mode & 128) return float4(FogUnlit(clay_linear(base * (0.35 + 0.65 * facet)), FogCoords(pos), 1.0), 1.0);");
       const char* base = strstr(t, "return float4(clay_linear(base * (0.35 + 0.65 * facet)), 1.0);");
       if (!lit || !written || !tex_fog || !tex || !base_fog || !base || !(lit < written && written < tex_fog && tex_fog < tex && tex < base_fog && base_fog < base) ||
           Count(t, "FogUnlit(") != 4 || Count(t, "light_mode & 128") != 2 || Count(t, "light_mode & 256") != 1) return 212;
+      // (the tree's twins: before the textured return's and before the flat return's, on the same colours)
+      const char* tex_tree = strstr(t, "float3 hazed = FogUnlitTree(clay_linear(t.rgb * (0.75 + 0.25 * facet)), FogCoords(pos), asfloat(pad2));");
+      const char* base_tree = strstr(t, "if (light_mode & 1024) return float4(FogUnlitTree(clay_linear(base * (0.35 + 0.65 * facet)), FogCoords(pos), asfloat(pad2)), 1.0);");
+      if (!tex_tree || !base_tree || !(lit < tex_tree && tex_tree < written && tex < base_tree && base_tree < base_fog) ||
+          Count(t, "FogUnlitTree(") != 4 || Count(t, "light_mode & 1024") != 2 || Count(t, "return float4(hazed, (alpha_mode & 0x80) ? saturate(a) : 1.0);") != 2) return 212;
       for (const char* src : {kClayTerrainLayerPs, kClayTerrainFarPs}) {
         const char* lit_out = strstr(src, "if (light_mode & 4) return float4(clay_lit(colour * f_exposure),");
         const char* fog = strstr(src, "if (light_mode & 128) return float4(FogUnlit(saturate(colour * (shade * shade)), FogCoords(pos), 1.0), (alpha_mode & 0x80) ? saturate(a) : 1.0);");
         const char* out = strstr(src, "return float4(saturate(colour * (shade * shade)), (alpha_mode & 0x80) ? saturate(a) : 1.0);");
-        if (!lit_out || !fog || !out || !(lit_out < fog && fog < out) || Count(src, "FogUnlit(") != 3 || Count(src, "light_mode & 256") != 0) return 212;
+        if (!lit_out || !fog || !out || !(lit_out < fog && fog < out) || Count(src, "FogUnlit(") != 3 || Count(src, "light_mode & 256") != 0 ||
+            Count(src, "FogUnlitTree(") != 2 || Count(src, "light_mode & 1024") != 0) return 212;
       }
       // (the vertex shader's text has the function with the shared light text and never calls it)
       if (Count(kClayVs, "FogUnlit(") != 2 || strstr(kClayShadowPs, "FogUnlit(")) return 212;  // (the function and its stub)
+    }
+    // 213: a lit draw whose own pixel shader in the game has no fog (bit 9, 512; final review, I1): its
+    // program is, line for line, the lit program compiled from the text without the fog, for every lit
+    // mode of the textured shader (an object's, a trunk's, a plant's, a leaf's): it reads no table and
+    // tests no flag of the fog. With the bit clear the same modes are fogged (they differ).
+    {
+      const std::string plain_src = Changed(kClayTexturedPs, "#define CLAY_FOG 1\n", "");
+      if (plain_src.empty()) return 213;
+      int bare_programs = 0;
+      for (unsigned mode = 0; mode < kLightModeCount; ++mode) {
+        if (!(mode & 4)) continue;
+        const std::string before = Code(Disassembly("without_fog", WithLightMode(plain_src.c_str(), mode).c_str(), "ps_5_0"));
+        const std::string bare = Code(Disassembly("clay_textured_ps", WithLightMode(kClayTexturedPs, mode | 512u).c_str(), "ps_5_0"));
+        const std::string fogged = Code(Disassembly("clay_textured_ps", WithLightMode(kClayTexturedPs, mode).c_str(), "ps_5_0"));
+        if (before.empty() || bare != before) {
+          std::cerr << "clay_textured_ps light_mode " << (mode | 512u) << ": a lit draw without fog is not the lit program without the fog\n";
+          return 213;
+        }
+        if (fogged == bare) return 213;
+        ++bare_programs;
+      }
+      if (bare_programs != 64) return 213;
+      // On the compiled code of the bare plant's two modes: no table read, of the frame's block the
+      // light's part at most.
+      for (unsigned mode : {22u | 512u, 54u | 512u}) {
+        const std::string listing = Disassembly("clay_textured_ps", WithLightMode(kClayTexturedPs, mode).c_str(), "ps_5_0");
+        bool dynamic = false;
+        if (DeclaredRegisters(listing, 2, &dynamic) > kClayFrameLightSize / 16 || dynamic || listing.find(" + 14]") != std::string::npos ||
+            listing.find(" + 78]") != std::string::npos) return 213;
+      }
+      // Control: a bit that does not reach the fog point leaves the fogged program.
+      const std::string deaf = Changed(kClayTexturedPs, "      if (light_mode & 512) fog.fogged = false;\n", "");
+      if (deaf.empty() || Code(Disassembly("deaf", WithLightMode(deaf.c_str(), 22u | 512u).c_str(), "ps_5_0")) ==
+                              Code(Disassembly("without_fog", WithLightMode(plain_src.c_str(), 22u).c_str(), "ps_5_0"))) return 213;
     }
   }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the lit colour programs alone, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards, the statements; broken shader rejected\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected\n";
   return 0;
 }

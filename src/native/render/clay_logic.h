@@ -131,8 +131,9 @@ constexpr bool ClayMapsDrawn(ClayMask mask) { return mask == ClayMask::kDrawn; }
 // no valid fog block, whatever the capture's reason. kValues: the block is marked valid and holds a
 // value or a texel the pass will not hand a shader (MakeClayFogConstants, SetClayFrameFog). kView:
 // the frame has no usable eye or no single inverse view-projection, from which a pixel's world
-// position is rebuilt (`view` says which, as for the mask). kDrawn: the lit pixels are fogged. The
-// three in the middle are the frames counted "fog-block".
+// position is rebuilt (`view` says which, as for the mask). kDrawn: the frame is fogged (its lit
+// draws by their family's form, its unlit draws by DrawFogOf; the sky goes with it). The three in
+// the middle are the frames counted "fog-block".
 enum class ClayFog : uint8_t { kOff, kNoLight, kBlock, kValues, kView, kDrawn, kCount };
 
 // The pass's decision about the frame's fog (ClayPass::Render), one chain in which the first thing
@@ -419,21 +420,27 @@ struct ClayStats {
   // fog_reason: the scene's fog block and, without one, the capture's reason. fog, fog_view: what
   // the pass did about it (ClayFog), and with kView why. fog_trees: lit trunk and leaf draws with a
   // usable in-scatter scale (the trees' form in a fogged frame); fog_trees_none: those without one,
-  // drawn without fog in any frame. fog_unlit: drawn records without light that were fogged (the
-  // unlit form: "Unlit draws" below), fog_unlit_alpha: those of them with the blended form's alpha
-  // scale; fog_unlit_none: drawn records without light in a fogged frame whose pixel shader has no
-  // fog block (left unfogged). fog_view_outliers: records whose matrix was not the frame's
+  // drawn without fog in any frame. The drawn records of a fogged frame by their fog (DrawFogOf,
+  // CountDrawFog): fog_unlit: records without light that were fogged ("Unlit draws" below),
+  // fog_unlit_alpha: those of them with the blended form's alpha scale, fog_unlit_tree: those of
+  // them that are trunks or leaves, in the trees' form with their own scale; fog_unlit_tree_none:
+  // unlit trunks and leaves left unfogged for want of a usable scale; fog_unlit_none: other records
+  // without light left unfogged, their pixel shader not being in the fog table; fog_lit_none: LIT
+  // records left unfogged because their own pixel shader in the game has no fog (final review, I1).
+  // fog_view_outliers: records whose matrix was not the frame's
   // view-projection (FrameView::outliers) in a fogged frame: their pixels are fogged with the
   // majority's inverse, a wrong position (review of plan Task 4, M3).
   // The frame counts are the pass's totals since it was made, this frame included: frames drawn
-  // with the fog's and the light's switch on, and those of them not fogged for want of a block,
-  // for a value, for a view ("fog-block" is the three together) or for want of light.
+  // with the fog's switch on, and those of them not fogged for want of a block, for a value, for a
+  // view ("fog-block" is the three together) or for want of light ("no-light": the light's switch
+  // or the texture path off, no light block, no constant buffer; final review, M5).
   bool fog_switch = false, fog_block = false;
   capture::FogBlockReason fog_reason = capture::FogBlockReason::kOff;
   ClayFog fog = ClayFog::kOff;
   FrameViewReason fog_view = FrameViewReason::kNone;
   uint32_t fog_trees = 0, fog_trees_none = 0;
-  uint32_t fog_unlit = 0, fog_unlit_alpha = 0, fog_unlit_none = 0, fog_view_outliers = 0;
+  uint32_t fog_unlit = 0, fog_unlit_alpha = 0, fog_unlit_tree = 0, fog_unlit_tree_none = 0, fog_unlit_none = 0;
+  uint32_t fog_lit_none = 0, fog_view_outliers = 0;
   uint64_t fog_frames = 0, fog_block_frames = 0, fog_values_frames = 0, fog_view_frames = 0, fog_nolight_frames = 0;
   // The sky ("Native sky" below; the Sky line). sky_block, sky_reason: the scene's sky block and,
   // without one, the capture's reason. sky, sky_view, sky_rule: what the pass did about it
@@ -446,7 +453,7 @@ struct ClayStats {
   // before a drawn terrain record (SkyOrder::early). sky_ray, sky_axis_cos: of a drawn sky, the view ray of the
   // picture's centre and its cosine to the fog's axis c66 (1: the view looks along the axis, where
   // the in-scatter table is read at its far end). The frame counts are the pass's totals since it was made, this
-  // frame included: frames with the fog's and the light's switch on, and those of them without a
+  // frame included: frames with the fog's switch on, and those of them without a
   // sky by reason: no fog ("fog-block" frames and frames without light), no view, no valid sky
   // block or a refused value ("sky-block" is the two together), no objects; and the frames whose
   // sky was drawn without its textures ("sky-texture").
@@ -463,15 +470,16 @@ struct ClayStats {
   uint64_t sky_frames = 0, sky_nofog_frames = 0, sky_view_frames = 0, sky_block_frames = 0, sky_rules_frames = 0;
   uint64_t sky_objects_frames = 0, sky_texture_frames = 0;
 };
-// The pass's frame counts of the sky, which follow from the frame's verdict: one frame added.
-// `on`: the fog's switch and the light's switch together (the frames that are counted; the sky has
-// no switch of its own). `texture_missing`: a drawn sky without its texture term.
+// The pass's frame counts of the sky, which follow from the frame's verdict alone: one frame added.
+// Counted: every frame with the fog's switch on (the sky has no switch of its own), which is every
+// verdict but kOff; a frame drawn without light is among them, under "no-fog" (final review, M5).
+// `texture_missing`: a drawn sky without its texture term.
 // `early`: a drawn sky whose place lies before a drawn terrain record (SkyOrder::early).
 struct ClaySkyFrames {
   uint64_t frames = 0, nofog = 0, view = 0, block = 0, rules = 0, objects = 0, texture = 0, early = 0;
 };
-inline void CountClaySkyFrame(bool on, ClaySky sky, bool texture_missing, ClaySkyFrames& n, bool early = false) {
-  if (!on) return;
+inline void CountClaySkyFrame(ClaySky sky, bool texture_missing, ClaySkyFrames& n, bool early = false) {
+  if (sky == ClaySky::kOff || size_t(sky) >= size_t(ClaySky::kCount)) return;
   ++n.frames;
   if (sky == ClaySky::kNoFog || sky == ClaySky::kNoLight) ++n.nofog;
   if (sky == ClaySky::kView) ++n.view;
@@ -483,20 +491,24 @@ inline void CountClaySkyFrame(bool on, ClaySky sky, bool texture_missing, ClaySk
 }
 // The frames counted "sky-block": frames that could have had a sky and had none for their sky block.
 inline uint64_t ClaySkyBlockFrames(const ClaySkyFrames& n) { return n.block + n.rules; }
-// The pass's frame counts of the fog, which follow from the frame's verdict: one frame added.
-// `on`: the fog's switch and the light's switch together (the frames that are counted).
+// The pass's frame counts of the fog, which follow from the frame's verdict alone: one frame added.
+// Counted: every frame with the fog's switch on, which is every verdict but kOff (DecideClayFog
+// gives kOff for exactly the frames with the switch off). A frame drawn without light, the light's
+// switch off among the reasons, is counted "no-light" (final review, M5: before it, such a frame
+// with the light's switch off was not counted at all, and the line read "no-light 0" beside
+// "not drawn (no light)": run 421).
 struct ClayFogFrames {
   uint64_t frames = 0, block = 0, values = 0, view = 0, nolight = 0;
 };
-inline void CountClayFogFrame(bool on, ClayFog fog, ClayFogFrames& n) {
-  if (!on) return;
+inline void CountClayFogFrame(ClayFog fog, ClayFogFrames& n) {
+  if (fog == ClayFog::kOff || size_t(fog) >= size_t(ClayFog::kCount)) return;
   ++n.frames;
   if (fog == ClayFog::kBlock) ++n.block;
   if (fog == ClayFog::kValues) ++n.values;
   if (fog == ClayFog::kView) ++n.view;
   if (fog == ClayFog::kNoLight) ++n.nolight;
 }
-// The frames counted "fog-block": lit frames with the switch on that were drawn without fog.
+// The frames counted "fog-block": frames with the switch on and with light that were drawn without fog.
 inline uint64_t ClayFogBlockFrames(const ClayFogFrames& n) { return n.block + n.values + n.view; }
 // Which frames the last two counts take: `shadows_on` is the switch and the light's switch
 // together (the frames shadow_frames counts).
@@ -1248,6 +1260,8 @@ struct ClayConstants {
   float alpha_scale;
   uint32_t light_mode;   // kLightMode* ("Native light" below); 0: the draw has no light and no vertex normal
   uint32_t light_count;  // elements the draw's normal (and colour) buffer holds: read for a vertex below it
+  // The bits of a float: a shadow draw's slope bias (MakeShadowConstants); a colour draw's
+  // in-scatter scale under kLightModeUnlitFogTree (DrawFogScale); 0 otherwise, and read by no other draw.
   uint32_t pad2;
 };
 static_assert(sizeof(ClayConstants) == 144);
@@ -1360,6 +1374,13 @@ inline constexpr uint32_t kLightModeCount = 128u;
 // in-scatter is also multiplied by the alpha the draw writes (the game's blended form). With both
 // clear every program is the one the light's bits name.
 inline constexpr uint32_t kLightModeUnlitFog = 128u, kLightModeUnlitFogAlpha = 256u;
+// Two more, of the final review (DrawFogOf below). kLightModeLitNoFog (with kLightModeLit only; read
+// by the lit path of the textured pixel shader): the draw is lit and its own pixel shader in the
+// game has no fog: its pixels are left unfogged. kLightModeUnlitFogTree (without kLightModeLit and
+// without the two unlit bits above): an unlit trunk or leaf: its unlit colour is fogged with the
+// trees' form, the in-scatter's scale (the draw's vertex c8.x times the frame's exposure) being the
+// float bits of ClayConstants::pad2. No vertex stage reads any of the four.
+inline constexpr uint32_t kLightModeLitNoFog = 512u, kLightModeUnlitFogTree = 1024u;
 
 // The light_mode of a lit mesh record by its vertex kind and family: a colour
 // stream's object (6), an object or trunk with probe colours (14), an
@@ -1996,8 +2017,9 @@ static_assert(sizeof(ClayFogConstants) == 48);
 // The frame's light and fog for the shaders (cbuffer Frame, register b2). One per Render, at the head
 // of the frame's constant buffer (kClayFrameSlots small slots). Two parts. The light's
 // (kClayFrameLightBytes; shaders::kClayFrameFields is its layout) is what every clay shader declares.
-// The fog's tail (shaders::kClayFrameFogFields) is declared by the three lit pixel shaders alone
-// (CLAY_FOG): the fog's constants, the frame's inverse view-projection, from which a lit pixel
+// The fog's tail (shaders::kClayFrameFogFields) is declared by the colour programs of the four pixel
+// shaders that draw the scene (CLAY_FOG: the three that light and, since the unlit draws' fog, the flat
+// shader) and by the sky step's shader: the fog's constants, the frame's inverse view-projection, from which a pixel
 // rebuilds its world position, and the two tables as arrays, which the shader reads as FogTableRead
 // does (the controller's ruling of 2026-10-09: the layout has no binding parameter left for two
 // textures; arrays need no texture, no upload and no neutral object, and the read is table_1d
@@ -2188,6 +2210,11 @@ inline Float3 LeafWorldPosition(const ClayObjectConstants& c, const Float3& p) {
 inline constexpr uint32_t kClayPlantConstantBytes = offsetof(ClayObjectConstants, probe);
 static_assert(offsetof(ClayObjectConstants, colour_power) + sizeof(float) == kClayPlantConstantBytes);
 
+// Whether a tree draw's in-scatter scale may reach its shader ("Native fog" below): a number in
+// [0, kTreeFogScaleMax] (capture::kTreeFogNone, the marker of a draw without one, is not; false for a
+// NaN). A trunk or a leaf without a usable scale is drawn without fog and counted.
+constexpr bool TreeFogScaleUsable(float c8x) { return c8x >= 0.0f && c8x <= capture::kTreeFogScaleMax; }
+
 // False (the draw is then not lit: light-unknown), with `out` all zero, unless the inputs are an
 // object's with a colour stream, an object's, trunk's or leaf's with probe colours or an instanced plant's
 // and EVERY value the kind's shader path reads is a number of usable size. An object or trunk: the
@@ -2243,7 +2270,7 @@ inline bool MakeClayObjectConstants(const capture::LightInputs& l, ClayObjectCon
   c.colour_power = stream ? l.colour_power : 0.0f;
   // The form of the draw's fog: a tree's own (ruling B) with its scale, or none without a usable one.
   if (l.family != capture::LightFamily::kObject) {
-    const bool usable = l.tree_fog >= 0.0f && l.tree_fog <= capture::kTreeFogScaleMax;  // (TreeFogScaleUsable, below)
+    const bool usable = TreeFogScaleUsable(l.tree_fog);
     c.leaf[2] = usable ? l.tree_fog : 0.0f;
     c.leaf[3] = usable ? kTreeFogFormTree : kTreeFogFormNone;
   }
@@ -2321,10 +2348,10 @@ inline constexpr float kFogDistance2Max = 1e30f;
 // addressing (light_formulas.table_1d): texel i has its centre at u = (i + 0.5) / n; between two
 // centres the result is their linear blend; below the first centre and above the last, and outside
 // 0..1, the edge texel alone. A coordinate that is no number reads texel 0. No table: zeros.
-// The native tables are textures of the same sizes read with a linear, clamped sampler at
-// (u, 0.5): the same centres (the host's are at (i + 0.5) / n); the GPU's filter weight has 8
-// fractional bits, so its blend can differ from this one by 1 / 512 of the difference of two
-// neighbouring texels.
+// The native tables are arrays in the frame's constant block (the controller's ruling of plan Task
+// 4: no binding parameter was left for textures), which the shaders read by hand with this
+// arithmetic in single precision (fog_scatter, fog_transmit): the same centres, the same clamps,
+// no sampler and no filter of the GPU's.
 // (K floats a texel, the first three read: the block's tables have three, the frame's arrays four)
 template <size_t K>
 inline void FogTableRead(const float (*table)[K], uint32_t n, double u, double out[3]) {
@@ -2373,11 +2400,6 @@ inline ClayFogConstants MakeClayFogConstants(const capture::FogBlock& b, bool wa
   c.scatter = b.amount[1];
   return c;
 }
-
-// Whether a tree draw's in-scatter scale may reach its shader: a number in [0, kTreeFogScaleMax]
-// (capture::kTreeFogNone, the marker of a draw without one, is not). A trunk or a leaf without a
-// usable scale is drawn without fog and counted.
-inline bool TreeFogScaleUsable(float c8x) { return c8x >= 0.0f && c8x <= capture::kTreeFogScaleMax; }
 
 // The fog's coordinates of a pixel (light_formulas.fog_coords): the in-scatter table's (a), the
 // transmittance table's (s, not clamped: the table's read clamps it) and the near blend (t).
@@ -2484,21 +2506,95 @@ inline void TreeFogMirror(const float C[3], const float P[3], const float eye[3]
 // textured draw's own alpha, saturated (a flat draw has none: 1); the game's is its output alpha
 // before c26.w, the native one is the material's (texture alpha times the draw's scale): an
 // approximation.
-// Which draws: UnlitFogOf. A draw whose pixel shader is not in the table stays unfogged and is
-// counted (the lake's surface 2B09..., which is not of the form, is drawn through the indexed
-// builder and is no record of the pass at all).
-enum class UnlitFog : uint8_t { kNone, kPlain, kAlpha };
-// The unlit fog of a draw with `light_mode` (the light's bits as the pass made them) and pixel
-// shader `ps_hash`, in a frame that is fogged or not (the frame's flag, ClayFogConstants::on).
-inline UnlitFog UnlitFogOf(bool frame_fogged, uint32_t light_mode, uint64_t ps_hash) {
-  if (!frame_fogged || (light_mode & kLightModeLit) != 0) return UnlitFog::kNone;
-  const capture::FogShaderEntry* entry = capture::FindFogShader(ps_hash);
-  if (!entry) return UnlitFog::kNone;
-  return entry->alpha ? UnlitFog::kAlpha : UnlitFog::kPlain;
+// The shader bounds the fogged value like a lit one (clay_lit: a number, not negative, at most 64;
+// final review, M2: with c28.x above 1, which the block allows up to 4, the blend could go below 0
+// and a blended draw would darken what is under it). The mirrors below do not: with the captured
+// c28 = (1, 1) and a colour in 0..1 the value is inside the bound.
+//
+// Which draws, and in which form: DrawFogOf, one rule for every drawn record (final review, I1, M1,
+// M3). The game's own pixel shader decides:
+//   - a shader of the fog table (capture::FindFogShader: the 40 of the game's fog block): fogged.
+//     Lit: by its family's lit path (the ground form; an object's block names it). Unlit: the form
+//     above, with the alpha factor only where the draw's program writes an alpha of its own (a
+//     textured mesh draw; a flat draw and a terrain draw have none: scale 1).
+//   - a trunk's or a leaf's shader (not in the table: a tree's fog is its VERTEX shader's): the
+//     trees' form with the draw's scale c8.x. Lit: through its object block, or none without a
+//     usable scale (MakeClayObjectConstants; counted fog_trees / fog_trees_none). Unlit (its light
+//     could not be made): the same form on the unlit colour, the in-scatter times the frame's
+//     exposure, when the record's light inputs carry a usable scale; unfogged and counted
+//     "trees without a scale" otherwise (no inputs at all among the reasons).
+//   - any other shader: NOT fogged, lit or not. Lit, that is the one plant form without a fog
+//     block, 26052DEFBA688AF2 (22 instructions, no fog register: 4 draws a frame at the bridge),
+//     and whatever a later table adds (test case 597 holds the two tables against each other);
+//     the lit path is told by a bit. Unlit: counted "not in the fog table" (the lake's surface
+//     2B09..., which is not of the form, is drawn through the indexed builder and is no record of
+//     the pass at all).
+// A lit terrain record is always fogged: every terrain shader of the light table is in the fog
+// table (case 597), and the terrain programs have no path without fog.
+enum class DrawFog : uint8_t {
+  kNone,              // the frame is not fogged
+  kLit,               // lit, fogged by its family's lit path
+  kLitNoFog,          // lit, not fogged: its pixel shader has no fog in the game
+  kUnlitPlain,        // unlit, the unlit form
+  kUnlitAlpha,        // unlit, the unlit form with the in-scatter times the alpha the draw writes
+  kUnlitTree,         // an unlit trunk or leaf: the trees' form with its scale
+  kUnlitTreeNoScale,  // an unlit trunk or leaf without a usable scale: not fogged
+  kUnlitNoFog,        // unlit, not fogged: its pixel shader is neither in the fog table nor a tree's
+  kCount
+};
+// What the rule reads. `frame_fogged`: the frame's flag (ClayFogConstants::on). `lit`: the pass
+// lights the draw. `terrain`: a terrain record. `family`: the light family of the draw's pixel
+// shader (capture::PsLightFamily; kNone without one). `in_table`, `alpha`: the shader's entry of
+// the fog table, and its blended form. `own_alpha`: the draw's program writes an alpha of its own
+// (the textured shader with an albedo). `tree_scale`: the record's LightInputs::tree_fog
+// (capture::kTreeFogNone without light inputs).
+struct DrawFogInputs {
+  bool frame_fogged = false, lit = false, terrain = false;
+  capture::LightFamily family = capture::LightFamily::kNone;
+  bool in_table = false, alpha = false, own_alpha = false;
+  float tree_scale = capture::kTreeFogNone;
+};
+constexpr DrawFog DrawFogOf(const DrawFogInputs& in) {
+  if (!in.frame_fogged) return DrawFog::kNone;
+  const bool tree = !in.terrain && (in.family == capture::LightFamily::kTreeTrunk || in.family == capture::LightFamily::kTreeLeaf);
+  if (in.lit) return in.terrain || tree || in.in_table ? DrawFog::kLit : DrawFog::kLitNoFog;
+  if (tree) return TreeFogScaleUsable(in.tree_scale) ? DrawFog::kUnlitTree : DrawFog::kUnlitTreeNoScale;
+  if (!in.in_table) return DrawFog::kUnlitNoFog;
+  return in.alpha && in.own_alpha ? DrawFog::kUnlitAlpha : DrawFog::kUnlitPlain;
 }
-// Its bits of ClayConstants::light_mode.
-constexpr uint32_t UnlitFogMode(UnlitFog fog) {
-  return fog == UnlitFog::kPlain ? kLightModeUnlitFog : fog == UnlitFog::kAlpha ? kLightModeUnlitFog | kLightModeUnlitFogAlpha : 0u;
+// A record's: the family and the entry by its pixel shader, the scale from its light inputs (null:
+// it has none).
+inline DrawFog RecordDrawFog(bool frame_fogged, bool lit, bool terrain, bool own_alpha, uint64_t ps_hash,
+                             const capture::LightInputs* light) {
+  const capture::FogShaderEntry* entry = capture::FindFogShader(ps_hash);
+  DrawFogInputs in;
+  in.frame_fogged = frame_fogged;
+  in.lit = lit;
+  in.terrain = terrain;
+  in.family = capture::PsLightFamily(ps_hash);
+  in.in_table = entry != nullptr;
+  in.alpha = entry && entry->alpha;
+  in.own_alpha = own_alpha;
+  in.tree_scale = light ? light->tree_fog : capture::kTreeFogNone;
+  return DrawFogOf(in);
+}
+// Its bits of ClayConstants::light_mode (none for a draw fogged by its lit path or not at all).
+constexpr uint32_t DrawFogMode(DrawFog fog) {
+  switch (fog) {
+    case DrawFog::kLitNoFog: return kLightModeLitNoFog;
+    case DrawFog::kUnlitPlain: return kLightModeUnlitFog;
+    case DrawFog::kUnlitAlpha: return kLightModeUnlitFog | kLightModeUnlitFogAlpha;
+    case DrawFog::kUnlitTree: return kLightModeUnlitFogTree;
+    default: return 0u;
+  }
+}
+// The scale the draw's constants carry (the float of ClayConstants::pad2): an unlit tree's
+// in-scatter scale times the frame's exposure, which every lit value is multiplied by after its
+// fog and an unlit value is not; 0 for every other draw, and for a product that is no number.
+inline float DrawFogScale(DrawFog fog, float tree_scale, float exposure) {
+  if (fog != DrawFog::kUnlitTree) return 0.0f;
+  const float scale = tree_scale * exposure;
+  return std::isfinite(scale) ? scale : 0.0f;
 }
 // The mirror: FogMirror with the in-scatter times `exposure` and `alpha`. Either not a number: the
 // pixel is left as it is.
@@ -2506,6 +2602,13 @@ template <size_t K>
 inline void UnlitFogMirror(const float C[3], const float P[3], const float eye[3], const ClayFogConstants& f, float exposure,
                            float alpha, const float (*scatter)[K], const float (*transmit)[K], double out[3]) {
   FogMirror(C, P, eye, f, scatter, transmit, out, double(exposure) * double(alpha));
+}
+// An unlit trunk's or leaf's: the trees' form with the scale times the exposure (the single the
+// pass hands the shader). A scale or a product that is no number: the pixel is left as it is.
+template <size_t K>
+inline void UnlitTreeFogMirror(const float C[3], const float P[3], const float eye[3], const ClayFogConstants& f, float c8x,
+                               float exposure, const float (*scatter)[K], const float (*transmit)[K], double out[3]) {
+  TreeFogMirror(C, P, eye, f, c8x * exposure, scatter, transmit, out);
 }
 
 // The fog's tail of the frame's constants (ClayFrameConstants::fog and what follows) from the frame's
@@ -2581,8 +2684,29 @@ inline void FogPixelMirror(const float C[3], float pos_x, float pos_y, float dep
   }
 }
 
+// The counts of the Fog line that follow from a drawn record's fog (the lit trees' two counts are
+// PrepareLight's: fog_trees, fog_trees_none).
+inline void CountDrawFog(DrawFog fog, ClayStats& st) {
+  switch (fog) {
+    case DrawFog::kLitNoFog: ++st.fog_lit_none; break;
+    case DrawFog::kUnlitPlain: ++st.fog_unlit; break;
+    case DrawFog::kUnlitAlpha:
+      ++st.fog_unlit;
+      ++st.fog_unlit_alpha;
+      break;
+    case DrawFog::kUnlitTree:
+      ++st.fog_unlit;
+      ++st.fog_unlit_tree;
+      break;
+    case DrawFog::kUnlitTreeNoScale: ++st.fog_unlit_tree_none; break;
+    case DrawFog::kUnlitNoFog: ++st.fog_unlit_none; break;
+    default: break;
+  }
+}
+
 // The Fog line of the status text and the log: the switch, the frame's block, what the pass did,
-// the frame's tree draws, and the pass's totals since it was made.
+// the frame's tree draws, its unlit draws and its lit draws without fog, and the pass's totals
+// since it was made.
 inline std::string FormatFogText(const ClayStats& st) {
   if (!st.fog_switch) return "Fog: off";
   std::string text = "Fog: on, block ";
@@ -2601,12 +2725,14 @@ inline std::string FormatFogText(const ClayStats& st) {
       break;
     default: text += ", not drawn (off)"; break;
   }
-  char buf[384];
+  char buf[640];  // (the line with every count at its largest is whole: test case 585)
   std::snprintf(buf, sizeof(buf),
-                " | trees %u with a scale, %u without | unlit %u fogged (%u by their alpha), %u without a fog block | "
+                " | trees %u with a scale, %u without | unlit %u fogged (%u by their alpha, %u trees by their scale), "
+                "%u trees without a scale, %u not in the fog table | lit %u not fogged (no fog in their pixel shader) | "
                 "%u records with another view | frames since start %llu: %s %llu {block: %llu, values: %llu, view: %llu}, "
                 "no-light %llu",
-                st.fog_trees, st.fog_trees_none, st.fog_unlit, st.fog_unlit_alpha, st.fog_unlit_none, st.fog_view_outliers,
+                st.fog_trees, st.fog_trees_none, st.fog_unlit, st.fog_unlit_alpha, st.fog_unlit_tree, st.fog_unlit_tree_none,
+                st.fog_unlit_none, st.fog_lit_none, st.fog_view_outliers,
                 static_cast<unsigned long long>(st.fog_frames), capture::kFogBlockReason,
                 static_cast<unsigned long long>(st.fog_block_frames + st.fog_values_frames + st.fog_view_frames),
                 static_cast<unsigned long long>(st.fog_block_frames), static_cast<unsigned long long>(st.fog_values_frames),
@@ -2924,7 +3050,7 @@ inline std::string FormatSkyText(const ClayStats& st) {
   } else {
     std::snprintf(place, sizeof(place), "then the last record");
   }
-  char buf[480];
+  char buf[768];  // (four floats of up to 44 characters each and nine counts at their largest fit)
   std::snprintf(buf, sizeof(buf),
                 " | view (%.3f, %.3f, %.3f), to the fog's axis %.3f | before it %u records, %u without depth write, %s | "
                 "frames since start %llu: %s %llu {block: %llu, rules: %llu}, %s %llu, no-fog %llu, view %llu, no-objects %llu, "
@@ -3012,6 +3138,31 @@ constexpr uint64_t ClayConstantBufferBytes(uint64_t small_slots, uint64_t object
   const uint64_t bytes = ClayObjectSlotOffset(small_slots, objects) + pad;
   return (bytes + kClayConstantBufferStep - 1) / kClayConstantBufferStep * kClayConstantBufferStep;
 }
+// The slot plan of the frame's buffer (clay_pass.cpp, FinishTerrain; final review, test gap 1: the
+// one arithmetic that corrupts memory when wrong, so it is here and under test case 598). Small
+// slots in this order: the frame's block (kClayFrameSlots), one per terrain record DRAWN with its
+// material (from kClayFrameTerrainSlot0, given out in the records' order), one per lit instanced
+// plant (from plant0), the mask step's constants, the sky step's; then the large slots of the lit
+// objects, trunks and leaves (ClayObjectSlotOffset(object0, i)).
+inline constexpr uint32_t kClayFrameTerrainSlot0 = kClayFrameSlots;
+struct ClayFrameSlotPlan {
+  uint32_t plant0 = 0, mask = 0, sky = 0, object0 = 0;
+};
+constexpr ClayFrameSlotPlan PlanClayFrameSlots(uint32_t terrain_drawn, uint32_t plants) {
+  ClayFrameSlotPlan p;
+  p.plant0 = kClayFrameTerrainSlot0 + terrain_drawn;
+  p.mask = p.plant0 + plants;
+  p.sky = p.mask + 1;
+  p.object0 = p.sky + 1;
+  return p;
+}
+// The small slots the buffer is sized with, before it is known which terrain records are drawn with
+// their material: every terrain record counts, so the plan of any number of them drawn fits
+// (PlanClayFrameSlots(drawn, plants).object0 <= this for drawn <= terrain_records).
+constexpr uint64_t ClayFrameSmallSlots(uint64_t terrain_records, uint64_t plants) {
+  return uint64_t(kClayFrameTerrainSlot0) + terrain_records + plants + 2;
+}
+
 // ClayTerrainConstants::flags: the far colour is multiplied by sat(d2 * fade[0] + fade[1]) (the
 // kind terrain-far-fade, shader 2F8A: the underlay the layers add to).
 inline constexpr uint32_t kTerrainFadeIn = 1u;

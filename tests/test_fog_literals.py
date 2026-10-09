@@ -190,8 +190,18 @@ class FogLiterals(unittest.TestCase):
         self.assertEqual(len(re.findall(r"FogForm\(lin, FogCoords\(pos\), 0\.0, 0\.0\)", self.shaders)), 2)
         self.assertEqual(len(re.findall(r"FogForm\(lit, fog, o_leaf\.z, o_leaf\.w\) \* o_c26;", self.shaders)), 2)
         # The two forms' arithmetic, term for term as the mirrors'.
-        for line in ("float3 F = f_fog_near + p.t * (S - f_fog_near);", "c = c + f_fog_amount * (G - c);"):
-            self.assertEqual(self.shaders.count(line), 2, line)  # (the ground form, and the same form of an unlit draw)
+        self.assertEqual(self.shaders.count("float3 F = f_fog_near + p.t * (S - f_fog_near);"), 2)  # (the ground form, and the same form of an unlit draw)
+        # The blend by c28.x: a lit draw's as it is (the lit return bounds the value), an unlit draw's bounded
+        # where it is made (final review, M2: clay_lit, a number, not negative, at most 64).
+        self.assertEqual(self.shaders.count("      c = c + f_fog_amount * (G - c);"), 1)
+        self.assertEqual(self.shaders.count("    c = clay_lit(c + f_fog_amount * (G - c));"), 1)
+        # An unlit trunk or leaf (final review, M1): the trees' form through FogForm's form 1, bounded; three
+        # calls (the flat shader, the textured shader's two unlit returns), the scale from Draw's pad2.
+        self.assertEqual(self.shaders.count("  [branch] if (p.fogged) c = clay_lit(FogForm(c, p, scale, 1.0));"), 1)
+        self.assertEqual(self.shaders.count("FogUnlitTree("), 5)  # (the function, its stub without the fog, three calls)
+        self.assertEqual(len(re.findall(r"FogUnlitTree\([^;]*, FogCoords\(pos\), asfloat\(pad2\)\)", self.shaders)), 3)
+        # A lit draw whose game shader has no fog (final review, I1): one statement, in the textured shader.
+        self.assertEqual(self.shaders.count("      if (light_mode & 512) fog.fogged = false;"), 1)
         for line in ("c = c * T + (1.0 - T) * S * scale;",
                      "float3 G = c * T + (1.0 - T) * f_fog_scatter * F;",
                      "float3 G = c * T + (1.0 - T) * (f_fog_scatter * f_exposure * scale) * F;",
@@ -229,6 +239,10 @@ class FogLiterals(unittest.TestCase):
         self.assertEqual(tuple(int(v) for v in bits), (128, 256))
         self.assertEqual(self.shaders.count("light_mode & 128"), 4)
         self.assertEqual(self.shaders.count("(light_mode & 256) ? "), 1)
+        more = _one(r"inline constexpr uint32_t kLightModeLitNoFog = (\d+)u, kLightModeUnlitFogTree = (\d+)u;", self.logic, "the two later bits")
+        self.assertEqual(tuple(int(v) for v in more), (512, 1024))
+        self.assertEqual(self.shaders.count("light_mode & 512"), 1)
+        self.assertEqual(self.shaders.count("if (light_mode & 1024) "), 3)
 
     def test_the_made_up_set_exercises_what_the_frame_does_not(self):
         real, made = fog_pins.REAL, fog_pins.MADE

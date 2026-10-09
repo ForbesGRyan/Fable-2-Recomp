@@ -364,27 +364,29 @@ inline SkyBlock MakeSkyBlock(const float c31[4], const float c46[4], const float
 // The pixel shaders with the game's fog block (tools/xdk_sigmatch/light_formulas.py,
 // FOG_SHADERS, through gen_fog_table.py): a main-scene colour draw of one of them
 // has the frame's six registers in the bank and the two tables in slots 4 and 5,
-// which is where the frame's block is read. `world`: the interpolator that is
-// the pixel's world position; `alpha`: the blended form, whose in-scatter is
-// scaled by the pixel's alpha (both for the pass that draws the fog). The lake's
+// which is where the frame's block is read. `alpha`: the blended form, whose
+// in-scatter is scaled by the pixel's alpha (for the pass that draws the fog).
+// The generated line's second number, the interpolator that is the pixel's
+// world position in the game's shader, is not carried: the pass rebuilds the
+// position from the pixel's depth (ruling 14) and nothing reads it (final
+// review, M7; the generator and its tests still hold it). The lake's
 // surface (not of the form), the sky and the trees' pixel shaders (which read no
 // fog register: their fog comes from the vertex shader) are not in the table.
 struct FogShaderEntry {
   uint64_t ps_hash;
-  uint8_t world;
   bool alpha;
 };
 inline constexpr FogShaderEntry kFogShaderTable[] = {
-#define FABLE2_FOG_SHADER(PS, WORLD, ALPHA) {PS, uint8_t(WORLD), (ALPHA) != 0},
+#define FABLE2_FOG_SHADER(PS, WORLD, ALPHA) {PS, (ALPHA) != 0},
 #include "fog_shader_table.inc"
 #undef FABLE2_FOG_SHADER
 };
 // What the table may hold: hashes that are not zero, in rising order (so none
-// twice), none of them the sky's, and an interpolator a pixel shader has.
+// twice), none of them the sky's.
 constexpr bool FogShaderTableIsWellFormed() {
   uint64_t last = 0;
   for (const FogShaderEntry& e : kFogShaderTable) {
-    if (e.ps_hash <= last || e.ps_hash == kSkyPixelShader || e.world >= 16) return false;
+    if (e.ps_hash <= last || e.ps_hash == kSkyPixelShader) return false;
     last = e.ps_hash;
   }
   return true;

@@ -89,4 +89,42 @@ inline std::string VertsRowHead(int frame, const char* func, const uint32_t args
                 in_scene ? "true" : "false");
   return buf;
 }
+// The head of an "indx" row, the decoded row of a draw of the indexed immediate builder
+// 0x82217EE8 (xdk_layout.h, "BeginIndexedVertices"; `args` are r4..r10: the primitive type in
+// its low six bits, the base vertex, the vertex count, the index count, the index format with
+// bit 2 set for 32-bit indices, the vertex size in bytes, where the index storage is returned):
+// open, to be continued with the members the other decoded rows have.
+inline std::string IndxRowHead(int frame, const char* func, const uint32_t args[7], uint32_t device,
+                               bool in_scene) {
+  char buf[448];
+  std::snprintf(buf, sizeof(buf),
+                "{\"kind\":\"indx\",\"frame\":%d,\"func\":\"%s\",\"prim\":%u,\"base\":%d,\"vertices\":%u,"
+                "\"indices\":%u,\"index32\":%s,\"stride\":%u,\"args\":[\"0x%08X\",\"0x%08X\",\"0x%08X\","
+                "\"0x%08X\",\"0x%08X\",\"0x%08X\",\"0x%08X\"],\"device\":\"0x%08X\",\"in_scene\":%s",
+                frame, func, args[0] & 0x3F, int32_t(args[1]), args[2], args[3], (args[4] & 4) ? "true" : "false",
+                args[5], args[0], args[1], args[2], args[3], args[4], args[5], args[6], device,
+                in_scene ? "true" : "false");
+  return buf;
+}
+// The dwords of vertex and of index storage that builder reserves (0x82217EF8 `mullw r11,r6,r9`
+// and `rlwinm r19,r11,30,2,31`; 0x82217F24 `addi r11,r23,1`, `rlwinm r18,r11,31,1,31` for 16-bit
+// indices, the count itself for 32-bit ones), with the builder's own 32-bit arithmetic.
+inline uint32_t IndxVertexDwords(uint32_t vertices, uint32_t stride_bytes) {
+  return uint32_t(vertices * stride_bytes) >> 2;
+}
+inline uint32_t IndxIndexDwords(uint32_t indices, bool index32) {
+  return index32 ? indices : uint32_t(indices + 1) >> 1;
+}
+// Bytes as hex, two upper-case digits each, in memory order ("" for none).
+inline std::string HexBytes(const uint8_t* p, size_t n) {
+  static const char kDigits[] = "0123456789ABCDEF";
+  std::string s;
+  if (!p) return s;
+  s.reserve(2 * n);
+  for (size_t i = 0; i < n; ++i) {
+    s += kDigits[p[i] >> 4];
+    s += kDigits[p[i] & 15];
+  }
+  return s;
+}
 }  // namespace fable2::native::capture

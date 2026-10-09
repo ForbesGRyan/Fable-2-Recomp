@@ -144,14 +144,22 @@ inline uint32_t TiledUpperBound2D(uint32_t right, uint32_t bottom, uint32_t pitc
 }
 
 // Block layout of the formats a discovery dump writes in full: the ones the
-// renderer decodes, and two it does not but the terrain reads in its vertex
+// renderer decodes, two it does not but the terrain reads in its vertex
 // shaders: k_16 (24: the heightmap and the far colour tables) and k_DXN (49:
-// the normal map; 4 x 4 blocks of 16 bytes). False for any other format.
+// the normal map; 4 x 4 blocks of 16 bytes), and the game's own targets as its
+// later passes sample them (fog discovery, frame-map section 16):
+// k_16_16_16_16_EXPAND (29: the scene colour before post, 8 bytes a texel) and
+// k_24_8 / k_24_8_FLOAT (22, 23: depth). False for any other format. The
+// product reaches this only for k_DXN (terrain_patch.h, DecodeNormalMap).
 inline bool DumpFormatInfo(uint32_t xenos_format, TexFormatInfo* fi) {
   if (xenos_format == 24) {
     *fi = {1, 2, 1};
   } else if (xenos_format == 49) {
     *fi = {4, 16, 4};
+  } else if (xenos_format == 29) {
+    *fi = {1, 8, 3};  // k_16_16_16_16_EXPAND: the scene colour the post chain reads
+  } else if (xenos_format == 22 || xenos_format == 23) {
+    *fi = {1, 4, 2};  // k_24_8, k_24_8_FLOAT: the scene depth and the shadow maps
   } else {
     *fi = FormatInfo(TexFormatFromXenos(xenos_format));
   }
@@ -174,6 +182,46 @@ inline uint64_t BaseLevelDumpBytes(const uint32_t fc[6]) {
   const uint32_t pitch_blocks = pitch_texels / fi.block;
   if ((fc[0] >> 31) != 0) return TiledUpperBound2D(wb, hb, pitch_blocks, fi.bpb_log2);
   return uint64_t(((pitch_blocks + 31) & ~31u) * fi.bytes_per_block) * (hb - 1) + uint64_t(wb) * fi.bytes_per_block;
+}
+
+// Bytes of one texel of an uncompressed Xenos texture format (xenos::TextureFormat), 0 for a
+// block-compressed, video or unknown format.
+inline uint32_t TexelBytes(uint32_t xenos_format) {
+  switch (xenos_format) {
+    case 2: case 8: case 9: return 1;                       // k_8, k_8_A, k_8_B
+    case 3: case 4: case 5: case 10: case 15: return 2;     // k_1_5_5_5, k_5_6_5, k_6_5_5, k_8_8, k_4_4_4_4
+    case 24: case 27: case 30: return 2;                    // k_16, k_16_EXPAND, k_16_FLOAT
+    case 6: case 7: case 14: case 16: case 17: return 4;    // k_8_8_8_8, k_2_10_10_10, k_8_8_8_8_A, k_10_11_11, k_11_11_10
+    case 22: case 23: return 4;                             // k_24_8, k_24_8_FLOAT
+    case 25: case 28: case 31: case 33: case 36: return 4;  // k_16_16 (plain, EXPAND, FLOAT), k_32, k_32_FLOAT
+    case 26: case 29: case 32: case 34: case 37: return 8;  // k_16_16_16_16 (plain, EXPAND, FLOAT), k_32_32 (plain, FLOAT)
+    case 35: case 38: return 16;                            // k_32_32_32_32, k_32_32_32_32_FLOAT
+    default: return 0;
+  }
+}
+
+// A 1D texture fetch constant (xenos::DataDimension::k1D: the fog tables tf4 and tf5 of
+// frame-map section 16). Its width is the 24-bit field of dword 2 (xe_gpu_texture_fetch_t
+// size_1d), not the 13 bits of a 2D texture.
+inline bool Is1DFetch(const uint32_t fc[6]) { return (fc[0] & 3) == 2 && ((fc[5] >> 9) & 3) == 0; }
+inline uint32_t Fetch1DWidth(const uint32_t fc[6]) { return (fc[2] & 0xFFFFFFu) + 1; }
+
+// Bytes a 1D texture spans from its base address: its texels in one row. 0 when the constant is
+// not a 1D texture, has no base address or its format has no texel size (TexelBytes).
+inline uint64_t Fetch1DDumpBytes(const uint32_t fc[6]) {
+  if (!Is1DFetch(fc) || (fc[1] & 0xFFFFF000u) == 0) return 0;
+  return uint64_t(Fetch1DWidth(fc)) * TexelBytes(fc[1] & 0x3F);
+}
+
+// Whether a discovery dump keeps a texture once per content and not once per address: the
+// textures the game rewrites in place. Every 1D texture (the fog tables sit in a ring of three
+// addresses and are rewritten each frame), and the 2D targets of the formats added above (scene
+// colour and depth, whose memory holds another picture each frame).
+inline bool DumpKeyedByContent(const uint32_t fc[6]) {
+  if ((fc[0] & 3) != 2) return false;
+  if (Is1DFetch(fc)) return true;
+  const uint32_t format = fc[1] & 0x3F;
+  return ((fc[5] >> 9) & 3) == 1 && (format == 29 || format == 22 || format == 23);
 }
 
 // Copies n bytes applying the GPU's endian swap (xenos::Endian): the result is

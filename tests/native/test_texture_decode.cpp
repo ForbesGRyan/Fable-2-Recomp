@@ -304,6 +304,65 @@ int main() {
     MakeFc(d, fc);
     if (BaseLevelDumpBytes(fc) != 31u * 64u * 8u + 64u * 8u) return 82;
   }
+  // --- Fog discovery: 1D tables, and the targets a dump writes in full and keeps by content ---
+  // The fetch constants are the game's own (native_discovery_20261009_065904.jsonl and the oracle
+  // capture native_discovery_20261009_034735.jsonl); the sizes are counted by hand.
+  {
+    // tf4, the in-scatter table: 1D, 64 texels of k_16_16_16_16_EXPAND (8 bytes each).
+    const uint32_t tf4[6] = {0x00804956, 0x1FAB105D, 0x0000003F, 0x00280D11, 0x00000003, 0x00000018};
+    if (!Is1DFetch(tf4) || Fetch1DWidth(tf4) != 64 || Fetch1DDumpBytes(tf4) != 512) return 120;
+    if (BaseLevelDumpBytes(tf4) != 0 || !DumpKeyedByContent(tf4)) return 121;
+    // tf5, the transmittance table: 1D, 256 texels of k_8_8_8_8.
+    const uint32_t tf5[6] = {0x02004802, 0x1FAB0086, 0x000000FF, 0x00280C14, 0x00000003, 0x00000018};
+    if (!Is1DFetch(tf5) || Fetch1DWidth(tf5) != 256 || Fetch1DDumpBytes(tf5) != 1024) return 122;
+    // A 1D k_32_FLOAT table of 512 texels (the composite's luminance table has this shape).
+    uint32_t t1[6] = {0x04000002, 0x1FAA0000u | 36u | (2u << 6), 511, 0, 0, 0};
+    if (!Is1DFetch(t1) || Fetch1DDumpBytes(t1) != 2048 || !DumpKeyedByContent(t1)) return 123;
+    // The width of a 1D texture is 24 bits wide (xe_gpu_texture_fetch_t size_1d), not the 2D field's 13.
+    t1[1] = 0x1FAA0000u | 2u;  // k_8
+    t1[2] = 0x4000 - 1;
+    if (Fetch1DWidth(t1) != 0x4000 || Fetch1DDumpBytes(t1) != 0x4000) return 124;
+    // No size: a compressed format (no texel size), no base address, not a texture, a 2D texture.
+    t1[1] = 0x1FAA0000u | 18u;
+    if (Fetch1DDumpBytes(t1) != 0 || !Is1DFetch(t1) || !DumpKeyedByContent(t1)) return 125;
+    t1[1] = 36u;
+    if (Fetch1DDumpBytes(t1) != 0) return 126;
+    t1[1] = 0x1FAA0000u | 36u;
+    t1[0] = 0x04000003;
+    if (Is1DFetch(t1) || Fetch1DDumpBytes(t1) != 0 || DumpKeyedByContent(t1)) return 127;
+    FcArgs a;
+    a.format = 6;
+    uint32_t fc2[6];
+    MakeFc(a, fc2);
+    if (Is1DFetch(fc2) || Fetch1DDumpBytes(fc2) != 0 || DumpKeyedByContent(fc2)) return 128;
+    // Texel sizes of the uncompressed formats the tables and targets use; 0 for a block format.
+    if (TexelBytes(6) != 4 || TexelBytes(29) != 8 || TexelBytes(36) != 4 || TexelBytes(2) != 1 ||
+        TexelBytes(24) != 2 || TexelBytes(23) != 4 || TexelBytes(38) != 16 || TexelBytes(18) != 0 ||
+        TexelBytes(49) != 0 || TexelBytes(63) != 0) {
+      return 129;
+    }
+    // The scene colour the post chain reads: 1120 x 720 k_16_16_16_16_EXPAND, tiled, pitch 1120 =
+    // 35 tiles of 32 x 32 texels a row, 8192 bytes each; the last texel (1119, 719) is in tile
+    // (34, 22): (22 * 35 + 34) * 8192 = 6,586,368, plus 0x400 << 3. Below the dump's 8 MB cap.
+    const uint32_t scene[6] = {0x88C24956, 0x199E005D, 0x0059E45F, 0x01000D11, 0x00000000, 0x00000218};
+    if (BaseLevelDumpBytes(scene) != 6586368u + 8192u || BaseLevelDumpBytes(scene) > (8u << 20)) return 130;
+    if (Is1DFetch(scene) || !DumpKeyedByContent(scene)) return 131;
+    // The scene depth of the same pass: 1120 x 720 k_24_8_FLOAT, tiled: tiles of 4096 bytes.
+    a = FcArgs{};
+    a.format = 23; a.w = 1120; a.h = 720; a.pitch = 1120;
+    MakeFc(a, fc2);
+    if (BaseLevelDumpBytes(fc2) != (22u * 35u + 34u) * 4096u + 0x1000u || !DumpKeyedByContent(fc2)) return 132;
+    a.format = 22;
+    MakeFc(a, fc2);
+    if (BaseLevelDumpBytes(fc2) != (22u * 35u + 34u) * 4096u + 0x1000u || !DumpKeyedByContent(fc2)) return 133;
+    // An ordinary texture is kept once per address and identity, as before.
+    a = FcArgs{};
+    MakeFc(a, fc2);
+    if (DumpKeyedByContent(fc2)) return 134;
+    a.format = 24;
+    MakeFc(a, fc2);
+    if (DumpKeyedByContent(fc2)) return 135;
+  }
   // --- k_DXN (format 49): two BC4 blocks per 4 x 4 block, the terrain's normal map (tf17) ---
   // The same blocks and numbers as test_decode_dxn of tests/test_terrain_replay.py.
   {

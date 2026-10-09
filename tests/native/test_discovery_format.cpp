@@ -83,6 +83,37 @@ int main() {
     const std::string end = "\"in_scene\":false";
     if (q.size() < end.size() || q.compare(q.size() - end.size(), end.size(), end) != 0) return 22;
   }
+  // The head of an "indx" row (the indexed immediate builder 0x82217EE8: r4 the primitive type,
+  // r5 the base vertex, r6 the vertex count, r7 the index count, r8 the index format with bit 2 for
+  // 32-bit indices, r9 the vertex size in bytes, r10 where it returns the index storage): the sky's
+  // cube is 8 vertices and 36 indices of a triangle list.
+  {
+    using namespace fable2::native::capture;
+    const uint32_t sky[7] = {4, 0, 8, 36, 1, 12, 0x7049CA94};
+    if (IndxRowHead(2, "DrawIndx:82217EE8", sky, 0x4450AD80, true) !=
+        "{\"kind\":\"indx\",\"frame\":2,\"func\":\"DrawIndx:82217EE8\",\"prim\":4,\"base\":0,\"vertices\":8,"
+        "\"indices\":36,\"index32\":false,\"stride\":12,\"args\":[\"0x00000004\",\"0x00000000\",\"0x00000008\","
+        "\"0x00000024\",\"0x00000001\",\"0x0000000C\",\"0x7049CA94\"],\"device\":\"0x4450AD80\",\"in_scene\":true") {
+      return 23;
+    }
+    const uint32_t wide[7] = {0x44, 0xFFFFFFFE, 3, 5, 4, 20, 0};
+    const std::string w = IndxRowHead(1, "f", wide, 0, false);
+    if (w.find("\"prim\":4,\"base\":-2,\"vertices\":3,\"indices\":5,\"index32\":true,\"stride\":20,") ==
+        std::string::npos) {
+      return 24;
+    }
+    // The storage the builder reserves, in dwords (0x82217EF8 `mullw r11,r6,r9` then / 4; 16-bit
+    // indices are rounded up to whole dwords, 0x82217F24 `addi r11,r23,1` and a shift).
+    if (IndxVertexDwords(8, 12) != 24 || IndxVertexDwords(4, 20) != 20 || IndxVertexDwords(3, 6) != 4) return 25;
+    if (IndxIndexDwords(36, false) != 18 || IndxIndexDwords(5, false) != 3 || IndxIndexDwords(5, true) != 5) {
+      return 26;
+    }
+    // A product that does not fit 32 bits is the builder's own wrapped value, never more.
+    if (IndxVertexDwords(0x10000, 0x10000) != 0) return 27;
+    // Bytes as hex, two upper-case digits each, in memory order; nothing for no bytes.
+    const uint8_t b[] = {0x00, 0x3F, 0x80, 0xFF, 0x0A};
+    if (HexBytes(b, 5) != "003F80FF0A" || HexBytes(b, 0) != "" || HexBytes(nullptr, 5) != "") return 28;
+  }
   std::cout << "PASS: discovery format\n";
   return 0;
 }

@@ -15,6 +15,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -238,6 +239,12 @@ std::FILE* g_file = nullptr;
 std::filesystem::path g_tex_dir;
 std::set<std::pair<uint32_t, uint64_t>> g_tex_seen;
 uint32_t g_tex_count = 0;
+// The same for the textures kept once per content (render::DumpKeyedByContent: 1D tables and the
+// game's own targets): the (base address, identity, content hash) triples already dumped, the
+// files and the bytes written.
+std::set<std::tuple<uint32_t, uint64_t, uint64_t>> g_tex_content_seen;
+uint32_t g_tex_content_count = 0;
+uint64_t g_tex_content_bytes = 0;
 // Discovery stream dumps (caller holds g_mutex): the capture's dump folder, the
 // content hashes already dumped per (address, size), files and bytes written.
 std::filesystem::path g_geo_dir;
@@ -1555,17 +1562,44 @@ void AppendPs(std::string& row, const DeviceSnapshot& dev) {
 // far colour tables, normal map: render::BaseLevelDumpBytes). Any other format
 // the renderer does not decode gets kMaxUnsupportedBytes (the census needs to
 // see it; such a dump is not the whole level).
+// Fog discovery (frame-map section 16): a 1D texture is dumped too, its texels in one row
+// (render::Fetch1DDumpBytes; a format without a texel size gets kMaxUnsupported1DTexelBytes a
+// texel, at most kMaxUnsupportedBytes), and the textures the game rewrites in place
+// (render::DumpKeyedByContent: every 1D texture, and 2D targets of the colour and depth formats)
+// are kept once per content and not once per address: the first content seen at (base, identity)
+// under the usual name, every other one as <BASE>_<IDENTITY16>_<XXH3>.bin, each with a "texture"
+// row that carries the frame and the content hash ("frame", "content"; "dim":1 for a 1D
+// texture), written before the row of the draw that sampled it. Such a texture is read and hashed
+// at every row that names it. Bounded apart from the others, so that a long capture's tables
+// cannot use up the ordinary textures' files: kMaxContentTextures files, kMaxContentTextureBytes
+// in all. Returns the content hash of such a texture as it is at this moment (also when that
+// content was dumped before or its file could not be written), for the row's "tfc"; 0 for any
+// other texture and when the bytes were not read.
 constexpr uint32_t kMaxTextures = 768;
 constexpr uint32_t kMaxTextureBytes = 8u << 20;
 constexpr uint32_t kMaxUnsupportedBytes = 64u << 10;
+constexpr uint32_t kMaxUnsupported1DTexelBytes = 16;
+constexpr uint32_t kMaxContentTextures = 512;
+constexpr uint64_t kMaxContentTextureBytes = 512ull << 20;
 
-void DumpTexture(const uint32_t fc[6]) {
-  if (g_tex_dir.empty() || g_tex_count >= kMaxTextures) return;
+uint64_t DumpTexture(const uint32_t fc[6]) {
+  const bool by_content = render::DumpKeyedByContent(fc);
+  if (g_tex_dir.empty() || (by_content ? g_tex_content_count >= kMaxContentTextures : g_tex_count >= kMaxTextures)) {
+    return 0;
+  }
   render::TextureFetch t;
-  const render::FetchError err = render::DecodeTextureFetch(fc, &t);
+  const bool is_1d = render::Is1DFetch(fc);
+  const render::FetchError err = is_1d ? render::FetchError::kNot2D : render::DecodeTextureFetch(fc, &t);
   uint64_t bytes = 0;
   uint32_t base = fc[1] & 0xFFFFF000u;
-  if (err == render::FetchError::kNone) {
+  if (is_1d) {
+    if (!base) return 0;
+    bytes = render::Fetch1DDumpBytes(fc);
+    if (!bytes) {
+      bytes = std::min<uint64_t>(uint64_t(render::Fetch1DWidth(fc)) * kMaxUnsupported1DTexelBytes, kMaxUnsupportedBytes);
+    }
+    bytes = std::min<uint64_t>(bytes, kMaxTextureBytes);
+  } else if (err == render::FetchError::kNone) {
     const render::TexFormatInfo fi = render::FormatInfo(t.format);
     const uint32_t wb = (t.width + fi.block - 1) / fi.block;
     const uint32_t hb = (t.height + fi.block - 1) / fi.block;
@@ -1580,43 +1614,103 @@ void DumpTexture(const uint32_t fc[6]) {
     bytes = render::BaseLevelDumpBytes(fc);
     bytes = bytes ? std::min<uint64_t>(bytes, kMaxTextureBytes) : kMaxUnsupportedBytes;
   } else {
-    return;
+    return 0;
   }
   const uint64_t identity = render::TextureIdentity(fc);
-  if (!g_tex_seen.insert({base, identity}).second || bytes == 0) return;
-  const uint8_t* src = ReadPhysical(base, uint32_t(bytes));
-  if (!src) return;
-  char name[48];
-  std::snprintf(name, sizeof(name), "%08X_%016llX.bin", base, static_cast<unsigned long long>(identity));
+  const uint8_t* src = nullptr;
+  uint64_t content = 0;
+  char name[64];
+  if (by_content) {
+    if (bytes == 0 || g_tex_content_bytes + bytes > kMaxContentTextureBytes) return 0;
+    src = ReadPhysical(base, uint32_t(bytes));
+    if (!src) return 0;
+    content = XXH3_64bits(src, size_t(bytes));
+    if (!g_tex_content_seen.insert({base, identity, content}).second) return content;
+    if (g_tex_seen.insert({base, identity}).second) {
+      std::snprintf(name, sizeof(name), "%08X_%016llX.bin", base, static_cast<unsigned long long>(identity));
+    } else {
+      std::snprintf(name, sizeof(name), "%08X_%016llX_%016llX.bin", base, static_cast<unsigned long long>(identity),
+                    static_cast<unsigned long long>(content));
+    }
+  } else {
+    if (!g_tex_seen.insert({base, identity}).second || bytes == 0) return 0;
+    src = ReadPhysical(base, uint32_t(bytes));
+    if (!src) return 0;
+    std::snprintf(name, sizeof(name), "%08X_%016llX.bin", base, static_cast<unsigned long long>(identity));
+  }
   std::error_code ec;
   std::filesystem::create_directories(g_tex_dir, ec);
   std::FILE* f = std::fopen((g_tex_dir / name).string().c_str(), "wb");
-  if (!f) return;
+  if (!f) return content;
   const bool ok = std::fwrite(src, 1, size_t(bytes), f) == size_t(bytes);
   std::fclose(f);
-  if (!ok) return;
-  ++g_tex_count;
-  char buf[160];
-  std::snprintf(buf, sizeof(buf), "{\"kind\":\"texture\",\"file\":\"%s/%s\",\"bytes\":%llu,\"fc\":",
+  if (!ok) return content;
+  char buf[224];
+  std::snprintf(buf, sizeof(buf), "{\"kind\":\"texture\",\"file\":\"%s/%s\",\"bytes\":%llu",
                 g_tex_dir.filename().string().c_str(), name, static_cast<unsigned long long>(bytes));
   std::string row = buf;
+  if (by_content) {
+    ++g_tex_content_count;
+    g_tex_content_bytes += bytes;
+    std::snprintf(buf, sizeof(buf), ",\"frame\":%d,\"content\":\"0x%016llX\"%s",
+                  g_frames_written.load(std::memory_order_relaxed) + 1, static_cast<unsigned long long>(content),
+                  is_1d ? ",\"dim\":1" : "");
+    row += buf;
+  } else {
+    ++g_tex_count;
+  }
+  row += ",\"fc\":";
   row += HexDwords(fc, 6);
   row += "}\n";
   std::fputs(row.c_str(), g_file);
+  return content;
+}
+
+// A member of a row's "tfc" (the content hash of a slot's texture where DumpTexture gives one:
+// which dump of a texture kept by content the draw sampled): "<slot>":"0x<hash>".
+void AppendTextureContent(std::string& contents, uint32_t slot, uint64_t content) {
+  if (!content) return;
+  char buf[48];
+  std::snprintf(buf, sizeof(buf), "%s\"%u\":\"0x%016llX\"", contents.empty() ? "" : ",", slot,
+                static_cast<unsigned long long>(content));
+  contents += buf;
 }
 
 // Discovery evidence: the texture fetch constants (host-order dwords, read like
 // the terrain heightmap fetch) of every slot the pixel shader samples, and a
-// dump of each distinct 2D texture. Writes "tf":{"<slot>":[6 dwords] | null}.
+// dump of each distinct texture. Writes "tf":{"<slot>":[6 dwords] | null}.
+// Fog discovery (frame-map section 16): the slots the vertex shader samples are
+// in "tf" as well, after the pixel shader's (the trees' and billboards' fog
+// tables tf16 / tf17), and listed by themselves in "vs_tex_slots" (left out
+// when the vertex shader's microcode cannot be read). "tfc" names, for a slot
+// whose texture is kept by content, the content the draw sampled (DumpTexture).
 void AppendTextureFetches(std::string& row, uint32_t device, const DeviceSnapshot& dev) {
   uint32_t obj = 0;
   std::vector<uint32_t> slots;
   if (ChoosePs(dev, &obj)) {
     if (const PsInfo* ps = LookupPs(obj)) slots = ps->tex_slots;  // copy: not held across calls
   }
-  row += ",\"tf\":{";
   char buf[32];
+  VsChoice vc;
+  if (ChooseVs(dev, &vc)) {
+    // The object's own microcode, also on the immediate path: the patched copy the GPU runs then
+    // differs from it only in vertex fetch dwords (WriteDrawRow, "template_diff"), so both name
+    // the same texture slots, and the immediate load's state is not touched from here.
+    const UcodeRef u = ReadVsUcode(vc.obj, vc.variant);
+    if (u.ok) {
+      const std::vector<uint32_t> vs_slots = TextureFetchSlots(u.dwords.data(), u.dwords.size());
+      row += ",\"vs_tex_slots\":[";
+      for (size_t i = 0; i < vs_slots.size(); ++i) {
+        std::snprintf(buf, sizeof(buf), "%s%u", i ? "," : "", vs_slots[i]);
+        row += buf;
+        if (std::find(slots.begin(), slots.end(), vs_slots[i]) == slots.end()) slots.push_back(vs_slots[i]);
+      }
+      row += "]";
+    }
+  }
+  row += ",\"tf\":{";
   bool first = true;
+  std::string contents;
   for (uint32_t slot : slots) {
     if (slot >= 32) continue;
     const uint32_t at =
@@ -1625,13 +1719,15 @@ void AppendTextureFetches(std::string& row, uint32_t device, const DeviceSnapsho
     uint32_t v[6] = {};
     if (p) {
       for (int i = 0; i < 6; ++i) v[i] = LoadBe32(p + 4 * i);
-      DumpTexture(v);
+      AppendTextureContent(contents, slot, DumpTexture(v));
     }
     std::snprintf(buf, sizeof(buf), "%s\"%u\":", first ? "" : ",", slot);
     row += buf;
     row += p ? HexDwords(v, 6) : "null";
     first = false;
   }
+  row += "},\"tfc\":{";
+  row += contents;
   row += "}";
 }
 
@@ -1686,8 +1782,8 @@ std::string DumpStream(uint32_t phys, uint32_t bytes) {
 // its own vertices), and vertex constants c0..c15 as host floats ("vconst").
 // A reset index is written as -1 and counted in "idx_resets": it is not a
 // vertex, but it cuts the strip or fan, which the checker's edge metric needs.
-void AppendGeometry(std::string& row, bool indexed, const LastArgs& args, uint32_t device,
-                    const DeviceSnapshot& dev, const std::vector<VertexFetch>& fetches) {
+// The "fetches" member of a decoded row: the shader's vertex fetches in DecodeVertexFetches order.
+void AppendFetches(std::string& row, const std::vector<VertexFetch>& fetches) {
   char buf[256];
   row += ",\"fetches\":[";
   for (size_t i = 0; i < fetches.size(); ++i) {
@@ -1700,7 +1796,14 @@ void AppendGeometry(std::string& row, bool indexed, const LastArgs& args, uint32
                   f.normalized ? "true" : "false", f.exp_adjust, f.dst_swizzle);
     row += buf;
   }
-  row += "],\"streams\":[";
+  row += "]";
+}
+
+void AppendGeometry(std::string& row, bool indexed, const LastArgs& args, uint32_t device,
+                    const DeviceSnapshot& dev, const std::vector<VertexFetch>& fetches) {
+  char buf[256];
+  AppendFetches(row, fetches);
+  row += ",\"streams\":[";
   uint32_t slots[16];  // distinct fetch slots, in fetch order
   uint32_t n_slots = 0;
   for (const VertexFetch& f : fetches) {
@@ -2280,6 +2383,158 @@ void WriteVertsRow(uint32_t id, const LastArgs& args, uint32_t device, const Dev
   std::fputs(row.c_str(), g_file);
 }
 
+// Discovery only: the storage of the last "indx" row this thread wrote, to be read once the game
+// has filled it (it does that after the builder returns: xdk_layout.h). Written out as an
+// "indxdata" row when this thread enters its next hooked draw.
+struct PendingIndexed {
+  bool valid = false;
+  uint32_t capture = 0;  // g_capture_serial of the capture the row is in
+  int frame = 0;
+  uint32_t row = 0;  // the "indx" row's number ("n")
+  uint32_t vertex_storage = 0, vertex_bytes = 0, stride = 0;
+  uint32_t index_storage = 0, indices = 0;
+  bool index32 = false;
+};
+thread_local PendingIndexed t_pending_indexed;
+uint32_t g_indx_rows = 0;  // "indx" rows of this process, under g_mutex: joins a row and its data
+uint32_t g_capture_serial = 0;  // captures opened by this process (OpenLog), under g_mutex
+constexpr uint32_t kMaxIndxVertexBytes = 4096;
+
+// Caller holds g_mutex. One decoded "indx" row (frame-map section 16, "Discovery") for a draw of
+// the indexed immediate builder 0x82217EE8 (xdk_layout.h): the sky's cube and the lake among
+// them. Discovery only; nothing is recorded from these draws. It carries what a "verts" row
+// carries (render state with "cmd" from the builder's own write pointer, the bool words, the
+// pixel shader with "tf" of both shaders' slots, "pconst", "pfull", "ps_lit", the vertex shader),
+// and besides: the vertex registers ("vfull", when the vertex uploads were followed), the
+// vertex shader's literals ("vs_lit") and vertex fetches ("fetches": the layout of the storage),
+// the whole vertex bank as host floats ("bank", as draw rows have it) and the storage the
+// builder reserved ("vstorage", "vdwords", "istorage", "idwords" from the device, "n" the row's
+// number). The storage is empty at this moment; "storage_ok" says whether the device's index
+// storage is the pointer the builder returned (false: the reservation failed or the fields are
+// another draw's, and no data row follows).
+void WriteIndxRow(uint32_t id, const LastArgs& args, uint32_t device, const DeviceSnapshot& dev,
+                  bool in_scene) {
+  char buf[256];
+  const int frame = g_frames_written.load(std::memory_order_relaxed) + 1;
+  std::string row = IndxRowHead(frame, HookName(id), &args.r[1], device, in_scene);
+  if (const uint8_t* bools = ReadVirtual(device + xdk::kDeviceBoolConstantsOffset, 4)) {
+    std::snprintf(buf, sizeof(buf), ",\"vbool\":\"0x%08X\"", LoadBe32(bools));
+    row += buf;
+  }
+  if (const uint8_t* bools = ReadVirtual(device + xdk::kDevicePsBoolConstantsOffset, 4)) {
+    std::snprintf(buf, sizeof(buf), ",\"pbool\":\"0x%08X\"", LoadBe32(bools));
+    row += buf;
+  }
+  AppendRenderState(row, device, xdk::kDeviceBeginVerticesWriteOffset);
+  const uint32_t n = ++g_indx_rows;
+  uint32_t vstorage = 0, vdwords = 0, istorage = 0, idwords = 0, returned = 0;
+  const bool fields = ReadVirtualBe32(device + xdk::kDeviceBeginVerticesStorageOffset, &vstorage) &&
+                      ReadVirtualBe32(device + xdk::kDeviceBeginVerticesDwordsOffset, &vdwords) &&
+                      ReadVirtualBe32(device + xdk::kDeviceIndexedIndexStorageOffset, &istorage) &&
+                      ReadVirtualBe32(device + xdk::kDeviceIndexedIndexDwordsOffset, &idwords);
+  // r10 is where the builder returned the index storage: the device's fields are this draw's
+  // only when they hold that pointer and the sizes the arguments give.
+  const bool index32 = (args.r[5] & 4) != 0;
+  const bool storage_ok = fields && vstorage != 0 && istorage != 0 && ReadVirtualBe32(args.r[7], &returned) &&
+                          returned == istorage && vdwords == IndxVertexDwords(args.r[3], args.r[6]) &&
+                          idwords == IndxIndexDwords(args.r[4], index32);
+  if (fields) {
+    std::snprintf(buf, sizeof(buf),
+                  ",\"n\":%u,\"vstorage\":\"0x%08X\",\"vdwords\":%u,\"istorage\":\"0x%08X\",\"idwords\":%u,"
+                  "\"storage_ok\":%s",
+                  n, vstorage, vdwords, istorage, idwords, storage_ok ? "true" : "false");
+  } else {
+    std::snprintf(buf, sizeof(buf), ",\"n\":%u,\"storage_ok\":false", n);
+  }
+  row += buf;
+  PendingIndexed& pending = t_pending_indexed;
+  pending = PendingIndexed{};
+  if (storage_ok) {
+    pending.valid = true;
+    pending.capture = g_capture_serial;
+    pending.frame = frame;
+    pending.row = n;
+    pending.vertex_storage = vstorage;
+    pending.vertex_bytes = uint32_t(std::min<uint64_t>(uint64_t(vdwords) * 4, kMaxIndxVertexBytes));
+    pending.stride = args.r[6];
+    pending.index_storage = istorage;
+    pending.indices = std::min(args.r[4], kMaxGeoIndices);
+    pending.index32 = index32;
+  }
+  AppendPs(row, dev);
+  AppendTextureFetches(row, device, dev);
+  AppendPixelConstants(row, device);
+  AppendPixelRegisters(row, device);
+  {
+    uint32_t ps_obj = 0;
+    row += ",\"ps_lit\":";
+    row += ChoosePs(dev, &ps_obj) ? LiteralsJson(kPsLayout, ps_obj, 0) : "null";
+  }
+  VsChoice vc;
+  if (ChooseVs(dev, &vc)) {
+    // The object's microcode, also for an immediate load (AppendTextureFetches): its vertex
+    // fetches name the layout; the patched copy's hash is the immediate load's.
+    const UcodeRef u = ReadVsUcode(vc.obj, vc.variant);
+    const uint64_t hash = vc.immediate ? (t_vs_load.usable ? t_vs_load.hash : 0) : u.hash;
+    std::snprintf(buf, sizeof(buf),
+                  ",\"vs\":{\"obj\":\"0x%08X\",\"source\":\"%s\",\"variant\":%u,\"hash\":\"0x%016llX\","
+                  "\"object_hash\":\"0x%016llX\"}",
+                  vc.obj, vc.immediate ? "immediate" : (vc.gpu_owned ? "gpu_load" : "object"), vc.variant,
+                  static_cast<unsigned long long>(hash), static_cast<unsigned long long>(u.ok ? u.hash : 0));
+    row += buf;
+    AppendVertexRegisters(row, device, vc.obj, vc.variant);
+    row += ",\"vs_lit\":";
+    row += LiteralsJson(kVsLayout, vc.obj, vc.variant);
+    if (u.ok) AppendFetches(row, DecodeVertexFetches(u.dwords.data(), u.dwords.size()));
+  }
+  const uint32_t bank_ptr =
+      g_state.vs_bank_ptr ? g_state.vs_bank_ptr : device + xdk::kDeviceVsConstantsOffset;
+  if (const uint8_t* bank = ReadVirtual(bank_ptr, 256 * 16)) {
+    row += ",\"bank\":";
+    row += BeFloats(bank, 1024);
+  }
+  row += "}\n";
+  std::fputs(row.c_str(), g_file);
+}
+
+// Discovery only. The "indxdata" row of this thread's last "indx" row, if one is pending: the
+// storage as the game filled it after the builder returned. "n" and "frame" are the "indx"
+// row's; "verts" the first bytes of the vertex storage as hex in guest order (at most
+// kMaxIndxVertexBytes; "vbytes" how many, "stride" the vertex size), "idx" the first indices (at
+// most kMaxGeoIndices) as the guest's big-endian words, base vertex not added. A storage that
+// cannot be read leaves its member out. The bytes are read when this thread enters its next
+// hooked draw: that the game has filled them by then, and that nothing has reused the storage, is
+// what the reader checks on the values (a cube's corners, indices below the vertex count).
+void FlushPendingIndexed() {
+  PendingIndexed pending = t_pending_indexed;
+  t_pending_indexed = PendingIndexed{};
+  if (!pending.valid) return;
+  std::lock_guard<std::mutex> lock(g_mutex);
+  if (!g_file || pending.capture != g_capture_serial) return;  // the row's capture is over
+  char buf[160];
+  std::snprintf(buf, sizeof(buf), "{\"kind\":\"indxdata\",\"frame\":%d,\"n\":%u,\"stride\":%u", pending.frame,
+                pending.row, pending.stride);
+  std::string row = buf;
+  if (const uint8_t* v = pending.vertex_bytes ? ReadVirtual(pending.vertex_storage, pending.vertex_bytes) : nullptr) {
+    std::snprintf(buf, sizeof(buf), ",\"vbytes\":%u,\"verts\":\"", pending.vertex_bytes);
+    row += buf;
+    row += HexBytes(v, pending.vertex_bytes);
+    row += "\"";
+  }
+  const uint32_t isize = pending.index32 ? 4 : 2;
+  if (const uint8_t* p = pending.indices ? ReadVirtual(pending.index_storage, pending.indices * isize) : nullptr) {
+    row += ",\"idx\":[";
+    for (uint32_t i = 0; i < pending.indices; ++i) {
+      const uint32_t index = pending.index32 ? LoadBe32(p + 4 * i) : (uint32_t(p[2 * i]) << 8 | p[2 * i + 1]);
+      std::snprintf(buf, sizeof(buf), "%s%u", i ? "," : "", index);
+      row += buf;
+    }
+    row += "]";
+  }
+  row += "}\n";
+  std::fputs(row.c_str(), g_file);
+}
+
 // Caller holds g_mutex. One "tess" row (frame-map section 9) for the
 // tessellated-patch builders DrawIndx:8221C9C8 (r5 first patch, r6 patch
 // count, auto-indexed quad patches) and DrawIndx:82207C30 (adaptive: r7
@@ -2354,6 +2609,7 @@ void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
   slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
   row += "},\"tf\":{";
   first = true;
+  std::string contents;  // "tfc", as AppendTextureFetches writes it
   for (uint32_t t : slots) {
     if (t >= 32) continue;
     const uint32_t at =
@@ -2362,13 +2618,15 @@ void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
     uint32_t v[6] = {};
     if (p) {
       for (int i = 0; i < 6; ++i) v[i] = LoadBe32(p + 4 * i);
-      DumpTexture(v);
+      AppendTextureContent(contents, t, DumpTexture(v));
     }
     std::snprintf(buf, sizeof(buf), "%s\"%u\":", first ? "" : ",", t);
     first = false;
     row += buf;
     row += p ? HexDwords(v, 6) : "null";
   }
+  row += "},\"tfc\":{";
+  row += contents;
   row += "}";
   AppendPixelConstants(row, device);
   AppendPixelRegisters(row, device);
@@ -3724,12 +3982,16 @@ bool OpenLog() {
     return false;
   }
   g_file = fp;
+  ++g_capture_serial;
   {
     std::string stamp = g_path.stem().string();  // native_discovery_<date>_<time>
     stamp.erase(0, std::string("native_discovery_").size());
     g_tex_dir = dir / ("native_tex_" + stamp);
     g_tex_seen.clear();
     g_tex_count = 0;
+    g_tex_content_seen.clear();
+    g_tex_content_count = 0;
+    g_tex_content_bytes = 0;
     g_geo_dir = dir / ("native_geo_" + stamp);
     g_geo_seen.clear();
     g_geo_count = 0;
@@ -3997,6 +4259,8 @@ void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t*) {
       uint32_t pending = 0;
       t_bool_flush_pending = ReadVirtualBe32(ctx.r3.u32 + xdk::kDeviceBoolPendingOffset, &pending) &&
                              (pending & xdk::kDeviceBoolPendingMaskHi) != 0;
+      // The storage of this thread's last "indx" row, filled by the game since (discovery only).
+      if (t_pending_indexed.valid) FlushPendingIndexed();
     }
   }
   switch (id) {
@@ -4081,6 +4345,8 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
     WriteTessRow(id, args, device, dev, in_scene);
   } else if (have_dev && id == kHook_D3DDevice_BeginVertices) {
     WriteVertsRow(id, args, device, dev, in_scene);
+  } else if (have_dev && id == kHook_DrawIndx_82217EE8) {
+    WriteIndxRow(id, args, device, dev, in_scene);
   }
 }
 

@@ -335,6 +335,27 @@ inline constexpr uint32_t kDeviceBeginVerticesWriteOffset = 0x3484;
 inline constexpr uint32_t kDeviceBeginVerticesStorageOffset = 0x3488;
 inline constexpr uint32_t kDeviceBeginVerticesDwordsOffset = 0x3490;
 
+// --- The indexed immediate builder (0x82217EE8; frame-map section 16, "Discovery") ---
+// BeginVertices with an index list (the sky's cube, the lake, quads of four vertices and six
+// indices): r3 device, r4 the primitive type, r5 the base vertex, r6 the vertex count, r7 the
+// index count, r8 the index format (bit 2: 32-bit indices, 0x82217F10 `rlwinm. r22,r24,0,29,29`),
+// r9 the vertex size in bytes (0x82217EF8 `mullw r11,r6,r9`, then / 4: the dwords of vertex
+// storage), r10 where the index storage is returned, and on the stack (the caller's r1 + 84:
+// `lwz r9,308(r1)` under the function's own frame of 224 bytes) where the vertex storage is. It
+// reserves both with 0x82206820, writes its packets and, in its last block (the one that ends
+// with `b 0x822183FC`), returns the two pointers for the caller to fill (`stw r26,0(r17)`,
+// `stw r28,0(r9)`) and keeps for the call that ends the draw: the last dword it wrote at +0x3484
+// and the vertex storage at +0x3488 as BeginVertices does (`stw r11,13444(r31)`,
+// `stw r28,13448(r31)`), the index storage at +0x348C (`stw r26,13452(r31)`), the vertex dwords
+// at +0x3490 (`stw r19,13456(r31)`) and the index dwords at +0x3494 (`stw r18,13460(r31)`: the
+// index count, or half of it rounded up for 16-bit indices). When a reservation fails it stores
+// neither and returns null pointers. Read from the recompiled function
+// (generated/default/fable_2_recomp.177.cpp); at run time the row of such a draw is written only
+// when the pointer returned at r10 is the device's (capture.cpp, WriteIndxRow). The storage is
+// filled by the caller after the builder returns: its bytes are not in the draw's own row.
+inline constexpr uint32_t kDeviceIndexedIndexStorageOffset = 0x348C;
+inline constexpr uint32_t kDeviceIndexedIndexDwordsOffset = 0x3494;
+
 // --- Bin mask (frame-map section 13, "Pre-pass draws and the depth range") ---
 // The device's explicit bin mask, low and high word. SetPredication 0x822655B0
 // (r3 device, r4 mask) stores r4 at +0x31A4 for a non-zero mask (0x822656BC

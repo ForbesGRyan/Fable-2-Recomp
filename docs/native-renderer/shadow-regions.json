@@ -1,0 +1,113 @@
+{
+  "about": "Regions and edges for tools/xdk_sigmatch/region_compare.py: the shadows validation of the native renderer (spec docs/superpowers/specs/2026-10-08-native-renderer-shadows-design.md, success criteria 4 and 5) at the three daylight spots of the -BootSave Hero000 plans. The rectangles of the lighting validation (lighting-regions.json) are repeated here under their names, with a kind that says whether they count for the shadows' criterion.",
+  "coordinates": "rect = [x0, y0, x1, y1] and line = [x0, y0, x1, y1] as fractions of the client area (0, 0 top left). The new rectangles and all segments were chosen on 1296 x 759 window shots (client area 1280 x 720 at 8, 31), which show the game's 1120 x 720 picture: 8 pixels across are 7 of the game's, down they are the same.",
+  "kinds": {
+    "sunlit": "in the sun in the emulated shots, nearer than 35 units: counts for criterion 4's second half (the ratio with shadows within 0.05 of the ratio without)",
+    "fade": "a sunlit surface 35 to 45 units from the eye, where the game's mask fades to split.w: one of the lighting validation's six sunlit regions; its ratio moves with the shadows by design and is reported as it is",
+    "static-shadow": "in the shadow of a caster that does not move (a post, a pole): counts for criterion 4's first half (native mean luminance within 25% of the emulated mean)",
+    "leaf-shadow": "under tree leaves: the game's leaves sway and the native casters stand still (ruling after plan Task 5b), so the region is reported with the emulated shots' own drift and not counted",
+    "undecided": "what shadows the region natively, or whether its emulated shadow is steady, was not established: reported, not counted"
+  },
+  "chosen_on": "out/native-evidence/shadows/task5b_bridge5_shot_<t>s.png (run 377, binary of commit 3ab5833: 36 s emulated, 42 s native, 48 s emulated, 54 s the shadow view) for the new bridge rectangles and the edges; the mask panel of the 54 s shot says which dark shapes are shadows and whose (crops task6_view_bridge_pole_a.png, task6_view_bridge_mask_grid.png). A run with another camera position needs them checked again.",
+  "spots": {
+    "bridge": {
+      "plan": "-BootSave Hero000; an emulated shot, a native shot and an emulated shot from one camera position (run 377: 36, 42, 48 s; run 350's line: 36, 40, 44 s)",
+      "exclude_notes": "the quest banner across the top of the emulated picture; the expression icons at the lower left",
+      "exclude": [
+        [0.0, 0.0, 1.0, 0.165],
+        [0.045, 0.775, 0.15, 0.96]
+      ],
+      "regions": [
+        {"name": "dirt patch", "rect": [0.09, 0.558, 0.145, 0.59], "kind": "sunlit",
+         "note": "the lighting validation's calibration region; no caster: the mask panel is white over it (254.6 of 255)"},
+        {"name": "grass beside it", "rect": [0.252, 0.527, 0.285, 0.548], "kind": "sunlit",
+         "note": "the clump in the sun right of the dirt patch; its emulated shots are not steady (a leaf shadow's edge is near)"},
+        {"name": "bridge planks", "rect": [0.30, 0.615, 0.42, 0.68], "kind": "sunlit",
+         "note": "planks left of the hero, outside the leaf shadows"},
+        {"name": "rock face", "rect": [0.855, 0.645, 0.89, 0.672], "kind": "fade",
+         "note": "the near rock between the two rails at the right. No caster shadows it: the mask panel there is a smooth grey, 202 to 240 of 255 (mean 218, 0.86), between the white of lit pixels and the 122 of split.w: the rock lies in the mask's fade from 35 to 45 units"},
+        {"name": "trunk", "rect": [0.008, 0.18, 0.045, 0.24], "kind": "sunlit",
+         "note": "the big tree at the left edge; sunlit in the lighting file, kept under that kind (its ratio is the same with and without shadows)"},
+        {"name": "hero's shirt", "rect": [0.487, 0.522, 0.513, 0.548], "kind": "sunlit",
+         "note": "the hero's back; the mask panel is white over it (254.9 of 255): the hero stands in the sun in the native mask"},
+        {"name": "pole sunlit side", "rect": [0.302, 0.30, 0.309, 0.40], "kind": "sunlit",
+         "note": "the tall rope pole before the haze: off by the missing post chain with and without shadows (lighting validation)"},
+        {"name": "rope pole shadow on the planks", "rect": [0.228, 0.613, 0.242, 0.622], "kind": "static-shadow",
+         "note": "inside the dark band that runs from the foot of the tall rope pole (x 0.30) to the lower left across the planks. Caster: the pole, a prop that stands still; in the mask panel the band is straight and starts at the pole's foot. Small (18 x 6 pixels): the band is about 10 pixels thick"},
+        {"name": "railing post shadow on the planks", "rect": [0.152, 0.637, 0.164, 0.655], "kind": "static-shadow",
+         "note": "the dark patch on the planks left of the rope-wrapped railing post at x 0.17 to 0.20. Caster: that post (a prop); in the mask panel a dark quadrilateral with straight sides"},
+        {"name": "railing post cap", "rect": [0.42, 0.838, 0.443, 0.855], "kind": "leaf-shadow",
+         "note": "the top face of the railing post nearest the camera; leaf shadows sway over it in the emulated shots (lighting-regions.json)"},
+        {"name": "grass in leaf shadow", "rect": [0.215, 0.515, 0.245, 0.535], "kind": "leaf-shadow",
+         "note": "under a swaying leaf shadow in the emulated shots"},
+        {"name": "planks in leaf shadow", "rect": [0.345, 0.745, 0.42, 0.795], "kind": "leaf-shadow",
+         "note": "the shadow of the big tree's crown across the planks; its edge moves in the emulated shots"}
+      ],
+      "edges_note": "A shadow's edge that runs along a gap between two planks cannot be told from the gap: the control is the same segment on a native shot with the shadows off (run 382), where a shadow's edge must give no step. The two edges marked counted pass it (the tool refuses the segment there); the three of the rope pole's band do not (its shadow runs along the planks and ends at a gap) and are kept as a record, not counted.",
+      "edges": [
+        {"name": "railing post shadow, left edge", "line": [0.1386, 0.6557, 0.168, 0.641], "counted": true,
+         "note": "along one plank from the lit wood into the dark patch at the foot of the rope-wrapped railing post (x 0.17 to 0.20), a prop that stands still: the patch's left edge. With the shadows off the plank is evenly lit along the segment"},
+        {"name": "railing post shadow, right edge", "line": [0.166, 0.652, 0.1871, 0.6415], "counted": true,
+         "note": "along the next plank up, out of the same post's shadow into a strip of lit wood before the post itself: the shadow's right edge. In the emulated shot at 48 s of run 377 a leaf shadow lies over the strip and the edge is not there: it is compared where the strip is lit"},
+        {"name": "rope pole shadow, lower edge at x 0.220", "line": [0.22, 0.612, 0.22, 0.65], "counted": false,
+         "note": "from inside the tall rope pole's shadow band down onto the lit plank. Not counted: the band ends at a gap between two planks, and the shadows-off shot has a step at the same place"},
+        {"name": "rope pole shadow, lower edge at x 0.235", "line": [0.235, 0.612, 0.235, 0.648], "counted": false,
+         "note": "the same edge 19 pixels to the right; not counted, as above"},
+        {"name": "rope pole shadow, lower edge at x 0.250", "line": [0.25, 0.605, 0.25, 0.645], "counted": false,
+         "note": "the same edge 19 pixels further right; not counted, as above"}
+      ]
+    },
+    "third": {
+      "plan": "-BootSave Hero000 with 33:LS=0/-100/3500; an emulated shot, a native shot and an emulated shot (run 381: 44, 50, 56 s)",
+      "exclude_notes": "the hint banner; the expression icons; the build text",
+      "exclude": [
+        [0.0, 0.0, 1.0, 0.135],
+        [0.045, 0.775, 0.15, 0.96],
+        [0.33, 0.955, 0.67, 0.99]
+      ],
+      "regions": [
+        {"name": "planks", "rect": [0.10, 0.62, 0.30, 0.72], "kind": "sunlit",
+         "note": "the deck left of the rope post; no shadow on it in any of the shots looked at"},
+        {"name": "grass by the palisade", "rect": [0.80, 0.50, 0.87, 0.55], "kind": "undecided",
+         "note": "sunlit in the lighting file; darker natively with shadows. It stands under the palisade's tree; what shadows it natively was not established"},
+        {"name": "small post cap", "rect": [0.765, 0.625, 0.79, 0.637], "kind": "leaf-shadow",
+         "note": "the top face of the short post in front of the dog; leaf shadows sway over it (lighting-regions.json)"},
+        {"name": "planks in post shadow", "rect": [0.36, 0.60, 0.41, 0.72], "kind": "undecided",
+         "note": "a band across the deck left of the rope post. In the emulated shot at 44 s it is a dim band, at 56 s a wide leaf shadow lies over it (the two differ by half); the native band is darker than the emulated one at 44 s. Its caster was not established"},
+        {"name": "dirt by the palisade", "rect": [0.955, 0.575, 0.995, 0.625], "kind": "leaf-shadow",
+         "note": "the path at the right edge under soft leaf shadows that move between the shots"},
+        {"name": "tall post sunlit side", "rect": [0.745, 0.21, 0.753, 0.29], "kind": "leaf-shadow",
+         "note": "the tall post that carries the ropes; leaf shadows sway over it"}
+      ],
+      "edges": []
+    },
+    "trees": {
+      "plan": "-BootSave Hero000 with the walk of the trees plan; an emulated shot, a native shot and an emulated shot (run 378: 58, 64, 70 s)",
+      "exclude_notes": "the hint banner; the expression icons; the build text",
+      "exclude": [
+        [0.0, 0.0, 1.0, 0.135],
+        [0.045, 0.775, 0.15, 0.96],
+        [0.33, 0.955, 0.67, 0.99]
+      ],
+      "regions": [
+        {"name": "left stump top", "rect": [0.055, 0.635, 0.095, 0.648], "kind": "sunlit",
+         "note": "the cut face of the stump at the lower left, bright in the emulated shots"},
+        {"name": "post top", "rect": [0.225, 0.513, 0.258, 0.528], "kind": "sunlit",
+         "note": "the cut face of the tall post at x 0.24"},
+        {"name": "right stump top", "rect": [0.77, 0.515, 0.80, 0.53], "kind": "sunlit",
+         "note": "the stump in front of the stone slab"},
+        {"name": "trunk", "rect": [0.258, 0.415, 0.283, 0.47], "kind": "leaf-shadow",
+         "note": "the big trunk behind the posts, under the crowns"},
+        {"name": "path under the trees", "rect": [0.06, 0.49, 0.12, 0.515], "kind": "leaf-shadow",
+         "note": "ground under the canopy (terrain)"},
+        {"name": "ground between the stumps", "rect": [0.725, 0.515, 0.76, 0.535], "kind": "leaf-shadow",
+         "note": "ground under the canopy (terrain)"},
+        {"name": "stone slab", "rect": [0.74, 0.455, 0.83, 0.49], "kind": "leaf-shadow",
+         "note": "the rock face behind the stumps, under the canopy"},
+        {"name": "ferns", "rect": [0.60, 0.63, 0.70, 0.70], "kind": "leaf-shadow",
+         "note": "plants under the canopy; they sway, and the native ones have holes"}
+      ],
+      "edges": []
+    }
+  }
+}

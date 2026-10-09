@@ -1,6 +1,14 @@
 # Native renderer sub-project 8: sun shadows (two cascades and the screen mask)
 
-Status: design of 2026-10-08, not implemented.
+Status: implemented 2026-10-09 (plan Tasks 1 to 6 and the debug round 5b, branch
+`native-renderer-shadows`); measured in `docs/native-renderer/frame-map.md` section 15,
+"Validation". Of the nine success criteria six are met, two are met with a stated limit (4: on
+regions shadowed by things that stand still; leaf shadow is reported, not counted. 7: 30.0 fps at
+two spots, 29.8 to 30.0 at the third) and one is not met as written (5: one of the three named
+edges could be measured). What was ruled during the work and what was built differently is at
+the end, "Implementation notes (deviations)".
+
+Design of 2026-10-08.
 
 Written under the user's standing instruction to proceed on the recommended option at each
 choice and to log it as a ruling ("when these tasks are finished. move onto the next subproject
@@ -268,3 +276,142 @@ The order of the game: depth pre-pass, mask, colour.
 5. Depth pre-pass and the mask binding with a white mask (no picture change), then the mask
    step and the families' sun terms.
 6. Validation, documents, user checks.
+
+## Implementation notes (deviations)
+
+Written 2026-10-09 with plan Task 6. The measurements and their files are in
+`docs/native-renderer/frame-map.md` section 15; this part records what was ruled while the work
+went on (each ruling by the controller under the user's standing instruction, with why and what
+it costs if it is wrong) and where the built thing differs from the design above.
+
+### Rulings made during the work
+
+Numbered on from the ten above.
+
+11. *Before the spec was committed:* ruling 2 was first written as a second colour target
+    composed after the lit pass (`C0 + C1 * mask`) and changed to the game's order (pre-pass,
+    mask step, lit shaders sample the mask) — why: the RHI has one colour target and one target
+    format; the mask fits an existing texture pair — cost if wrong: the scene's depth-writing
+    draws are submitted twice.
+12. The depth bias is applied in the depth-only shaders, not through the RHI (it has none) —
+    why: no SDK change — cost if wrong: the slope part through the output depth switches early
+    depth off in the two map passes.
+13. The product does not capture the mask draws; only discovery decodes them — why: their
+    inputs can be derived — cost if wrong: a mask constant taken as fixed moves (`c77.x` was
+    checked over all logged frames by plan Task 1: one value).
+14. Plan Tasks 1 and 2 ran side by side.
+15. *After plan Task 2:* the sky and every pixel beyond `c12.y` + 10 units take `c12.w` as in
+    the game, not 1 (Design 5 says 1 at the clear depth) — why: the microcode fades to `c12.w`,
+    and a blended draw over the sky reads that value in the game — cost if wrong: none seen.
+16. The bushes' distance dissolve (`0x85A9...`) is not drawn: ruling 8 stands (it is a distance
+    and a dither a pixel, not one comparison of constants).
+17. The half texel of `c36..c43` on native maps: plan Task 4 states where a native map's texel
+    is sampled and plan Task 5 tests the lookup against the pass's own matrix.
+18. *Review of plan Task 2, carried:* the third depth-only pass with the casters
+    `0x4325...`/`0xF1EB...` on surface `0x09000230` must not be taken for a cascade; the leaf
+    casters' alpha-to-mask threshold comes from the captured word `0x2202` (on a one-sample
+    target `0xAA00001C` means alpha at least 0.5, by the SDK's reading) — cost if wrong: canopy
+    shadows too dense or too thin; three statements of `lighting-formulas.md`, "Shadows", are
+    corrected in the documents pass (done: its "Corrected after the later tasks").
+19. *After plan Task 1:* the bias is kept per pass in the shadow block, taken from the pass's
+    records, and all of a pass must be equal or the block is invalid — why: one pair of values
+    a pass in 8,671 shadow draws — cost if wrong: a frame without shadows when a pass mixes
+    values.
+20. The native mask is the arithmetic of `0x0F99...` alone; `0x1B4B...` is not ported — why: in
+    the emulated frame the second rectangle overwrites every pixel; on a console it would
+    differ only through hierarchical stencil (inference) — cost if wrong: distant pixels differ
+    slightly from a console's.
+21. The rotation texture is read from guest memory (`0x1A53B000`, 32 x 32 `k_8_8`); the taps
+    are unrotated only when that read or its check fails, and the frame is counted.
+22. *Review of plan Task 1, carried:* the rotation texture's channel order is fixed from the
+    SDK's `k_8_8` load path and tested (a mirrored rotation cannot be seen by its length); the
+    emulator's bias is scaled with the depth's exponent; a draw is biased only when bits 11 and
+    12 of `0x2205` say so; the small robustness gaps of `shadow_matrices.py` are left (a
+    diagnostic tool).
+23. *After plan Task 3:* the proof's tolerance is 1e-4, not the 1e-3 of Design 3 and criterion
+    1 — why: a texel is 0.00098 and the residual in evidence 2.8e-7 — cost if wrong: frames
+    without shadows where a real residual is larger (counted `shadow-block`).
+24. The depth-only pass on `0x09000230` (the leaf cards at half resolution in the camera's
+    view) is not recorded; what it feeds is not known (a follow-up; by the evidence not a
+    shadow).
+25. *Review of plan Task 3:* the proof is 1e-4 and the half texel with the signs (+, +) on both
+    axes — why: at 1e-3 with any sign a shift of a whole texel passes; 6,612 rows fit (+, +)
+    within 1e-6 — cost if wrong: frames without shadows if the game ever uses another sign.
+    Carried: every drawn frame with the shadows on and no valid block is counted; "an empty
+    cascade removes both" is a limitation; one scratch run with a caster entry removed, and a
+    quiet A/B of the records-on capture (both: frame-map, "Validation").
+26. *After plan Task 4:* the native bias stays the registers' exact values (near 0.001, far
+    0.005 and the slopes), not the emulator's exponent-reduced one — why: the registers are the
+    game's intent; the reduction is a property of the emulator's depth mapping — cost if wrong:
+    native casters lie further from the light than the emulated ones (measured by plan Task
+    5b: 0.05 to 0.08 units in the near map, 0.40 to 0.45 in the far one).
+27. The capture's rule that a clear of another surface ends an open shadow pass is accepted as
+    behaviour (a replay of 24 frames and three runs were unchanged).
+28. *After plan Task 5:* the depth is cleared again before the colour pass (kept; early
+    rejection from the pre-pass depth is a follow-up). A temporary diagnostic that dumps the
+    emulated maps is allowed in plan Task 5b as the oracle (ruling 6 extended) and removed at
+    its end; as built it needed no SDK change (the emulator's `--readback_resolve=full` and a
+    temporary dump in the clay pass).
+29. *After plan Task 5b:* sway stays out (ruling 8) — why: the native near map equals the
+    emulated one in coverage (63.46% against 63.29%) and in shape; what differs is one tree's
+    crown, displaced as a whole by 8 to 18 texels (0.2 to 0.5 units) in the six frames compared,
+    moving from frame to frame as an animation does (first written here, and in the ledger, as
+    "leaves 0.3 to 0.7 units at the ends of branches": corrected by the review of plan Task 5b
+    from the dumps, `task6_sway_displacement.txt`); it belongs to the animation work with the
+    scene's own trees — cost if wrong: regions in leaf shadow do not match a single emulated
+    frame. Open: in those six frames the offset never passes through zero, so a steady lean of
+    that tree in the game is not excluded. Criterion 4 is therefore measured on regions
+    shadowed by casters that stand still; regions in leaf shadow are reported with the emulated
+    shots' own spread and not counted.
+30. Validation runs keep the emulator's default anisotropic setting, so that they compare with
+    the lighting runs (the game asks for none on the leaf texture; no effect on the maps was
+    found).
+31. A change of shader text, bindings or targets is committed only after its clean run on the
+    software adapter.
+32. The light's four registers are bound once a pass instead of at every draw (the shader test
+    holds that no depth-only vertex program loads them).
+33. A depth-writing record that lies wholly beyond the mask's reach (`split.y` + 10 units from
+    the eye, where the mask is `split.w` whatever the depth) is left out of the pre-pass — why:
+    the third spot's frame rate; the mask is the same without it — cost if wrong: a record
+    drawn with another projection than the frame's could be left out wrongly (none in
+    evidence; a limitation).
+34. Game runs with the user at the machine were made by the controller under the user's word
+    "continue until the subproject 8 is finished and verified", read as permission for this
+    sub-project's `-BootSave Hero000` runs; agents never pass `-UserPresent`. Such runs are
+    labelled `RUN UNCHECKED`.
+35. *For the validation (plan Task 6):* a counted region's rectangle may be corrected only for
+    a stated reason, with both figures shown (none was); the sunlit regions are held against
+    their lighting ratios with a tolerance of 0.05; criterion 5 is measured with the `--edge`
+    measure and converted from the window shot's size; criterion 6 rests on the comparison of
+    the compiled programs and on the regions of a shadows-off run; the scratch build with a
+    caster entry removed may be left as a described procedure (it was: frame-map,
+    "Validation", "Not done").
+
+### Built differently from the design
+
+- **Design 1.** The literal tables are not in the binary dumps; they come from the emulated
+  GPU's register file and from the shader object (`"ps_lit"` of the mask rows). The rotation
+  texture is readable and the bias registers are proven, so neither fallback was needed.
+- **Design 2.** `0x5781...` already had a vertex entry; `"uv"` entries were added for the
+  alpha-tested casters. Caster entries are checked against the microcode on random streams
+  (`vs_check.py --casters`), since shadow-pass rows carry no stream dumps.
+- **Design 3.** The proof is 1e-4 with the half texel's sign (rulings 23, 25). The block holds a
+  bias per pass (`bias[2][2]`, ruling 19). A pass is also ended by a clear of another surface
+  (ruling 27).
+- **Design 4.** The native maps hold `z` cleared to 1 with less-equal (the RHI has no
+  greater-equal), which keeps the same caster as the game's reversed range. The bias is added
+  in the pixel shader through the output depth. The leaf cards are also cut by alpha-to-mask as
+  on one sample. Everything the shadows need is made on the first frame that draws them, not
+  with the pass's other targets at start-up.
+- **Design 5.** Pixels at the clear depth get `split.w`, not 1 (ruling 15). The pre-pass leaves
+  out records beyond the mask's reach (ruling 33), draws records without a discard with a
+  flat pipeline, and its depth is cleared before the colour pass (ruling 28). The frame's
+  view-projection is the matrix of the majority of the records that give one (ground,
+  instanced plants, leaves), not required of every static draw. A lit pixel reads the mask at
+  its corner (the mean of four texels), as the game's fetch does, not at its centre. The
+  `Shadow:` line has more fields than designed (README).
+- **Design 6.** Criterion 4 is measured on static casters (ruling 29). The edge measure found
+  one static caster whose shadow edge crosses open wood (a railing post); a trunk's shadow on
+  the ground and the bridge's own edge are in none of the three views. The walking run is a
+  series of shots a second apart, not a film.
+- **Criterion 1** reads 1e-3; the built proof is ten times stricter.

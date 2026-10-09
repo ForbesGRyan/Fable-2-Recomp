@@ -3,6 +3,7 @@
     region_compare.py <emulated_before.png> <native.png> <emulated_after.png> --regions <file>
                       [--spot <name>] [--calibrate <region>] [--exposure <E>]
                       [--exclude x0,y0,x1,y1]... [--client left,top,width,height]
+                      [--edge <name>]...
 
 Lit pictures drift with game time (the sun moves during a run), so pixels are not compared: for each named
 rectangle the mean linear colour of each picture is taken, and the native mean is set against the mean of the
@@ -29,6 +30,23 @@ Regions file (JSON), either one spot at top level or several under "spots" (then
 banner. "kind" and "note" are printed as given (sunlit, shadowed, provisional, ...); the tool does not judge.
 For each pair the brighter of its two regions is named for the emulated and for the native picture.
 
+--edge <name> (repeatable; "all" for every edge of the spot) measures where a shadow's edge lies instead of
+the regions. The regions file names segments under "edges":
+    {"name": "rail post on the planks", "line": [x0, y0, x1, y1], "note": "...",
+     "width": 5, "window": 4, "contrast": 1.25}
+Along the segment from (x0, y0) to (x1, y1) (fractions of the client area) the linear luminance is read once
+a pixel, each sample the mean of "width" pixels across the segment. The step at a position is the mean of the
+"window" samples after it less the mean of the "window" samples before it; the edge is placed at the middle
+of the run of positions around the largest step whose steps are at least half of it (weighted by the step),
+so a hard edge and a soft one (a penumbra) are both placed at their steepest part. For each picture the
+position is printed in pixels from the segment's start, then native less the mean of the two emulated shots,
+the emulated shots' own difference (after less before: how far the game's edge moved by itself), and both
+again in the game's pixels: a window shot shows the game's GAME picture on the client area, so a distance
+along the segment is scaled by GAME / client per axis. A segment is refused when it leaves the picture, when
+it is shorter than two windows, when in any of the three pictures its largest step is under "contrast" (the
+brighter side over the darker, in linear luminance; 1.25 unless the edge says otherwise), or when the step
+rises in one picture and falls in another.
+
 Reads 8-bit RGB and RGBA PNG files (not interlaced) with the standard library alone.
 """
 import argparse
@@ -52,6 +70,18 @@ Image = namedtuple("Image", "w h rgb")  # rgb: bytes, 3 per pixel, rows top to b
 Stats = namedtuple("Stats", "pixels excluded rgb lum hue clipped")
 Row = namedtuple("Row", "name kind note before native after emulated ratio channel_ratio drift hue_diff")
 Pair = namedtuple("Pair", "name a b emulated_brighter native_brighter same emulated_ratio native_ratio")
+
+# The game's picture, which a window shot shows scaled to the client area.
+GAME = (1120, 720)
+# An edge's defaults: pixels averaged across the segment, samples on each side of a step, least contrast.
+EDGE_WIDTH = 5
+EDGE_WINDOW = 4
+EDGE_CONTRAST = 1.25
+
+# position: pixels from the segment's start; low, high: the two sides' linear luminance; contrast: high / low.
+Step = namedtuple("Step", "position low high contrast rising")
+EdgeRow = namedtuple("EdgeRow", "name note length before native after difference spread game_difference "
+                                "game_spread")
 
 
 class RegionError(Exception):
@@ -309,6 +339,124 @@ def compare_pairs(rows, pairs):
     return out
 
 
+# -------------------------------------------------------------------------------------------------- edges
+
+
+def _segment(line, client):
+    """(x0, y0, x1, y1) in pixels of the picture (fractions of a pixel kept) of a relative segment."""
+    if isinstance(line, (str, bytes)) or not hasattr(line, "__len__") or len(line) != 4:
+        raise RegionError("segment %r: four numbers x0, y0, x1, y1 expected" % (line,))
+    for v in line:
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise RegionError("segment %r: four finite numbers expected" % (line,))
+        if v < 0.0 or v > 1.0:
+            raise RegionError("segment %r reaches outside the picture (coordinates are 0 to 1)" % (line,))
+    left, top, cw, ch = client
+    return (left + line[0] * cw, top + line[1] * ch, left + line[2] * cw, top + line[3] * ch)
+
+
+def edge_profile(img, client, line, width=EDGE_WIDTH):
+    """Linear luminance along a relative segment of the client area: one sample a pixel from its start, each
+    the mean of `width` pixels across the segment (the pixel each point falls in)."""
+    if isinstance(width, bool) or not isinstance(width, int) or width < 1:
+        raise RegionError("width %r: a whole number of pixels, at least 1, expected" % (width,))
+    x0, y0, x1, y1 = _segment(line, client)
+    length = math.hypot(x1 - x0, y1 - y0)
+    if length < 1.0:
+        raise RegionError("segment %r is shorter than a pixel" % (line,))
+    ux, uy = (x1 - x0) / length, (y1 - y0) / length
+    left, top, cw, ch = client
+    profile = []
+    for k in range(int(length) + 1):
+        total = 0.0
+        for j in range(width):
+            off = j - (width - 1) / 2.0
+            x = int(math.floor(x0 + k * ux - off * uy))
+            y = int(math.floor(y0 + k * uy + off * ux))
+            if x < left or y < top or x >= left + cw or y >= top + ch or x >= img.w or y >= img.h:
+                raise RegionError("segment %r: its band of %d pixels leaves the picture" % (line, width))
+            at = (y * img.w + x) * 3
+            total += sum(w * LINEAR[v] for w, v in zip(LUMA, img.rgb[at:at + 3]))
+        profile.append(total / width)
+    return profile
+
+
+def steepest_step(profile, window=EDGE_WINDOW, contrast=EDGE_CONTRAST):
+    """The Step of a luminance profile: where its largest step lies, and the two sides."""
+    if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+        raise RegionError("window %r: a whole number of samples, at least 1, expected" % (window,))
+    if isinstance(contrast, bool) or not isinstance(contrast, (int, float)) or not contrast > 1.0:
+        raise RegionError("contrast %r: a number above 1 expected" % (contrast,))
+    n = len(profile)
+    if n < 2 * window + 1:
+        raise RegionError("the segment has %d samples: at least %d are needed for a window of %d"
+                          % (n, 2 * window + 1, window))
+    sides = [(math.fsum(profile[i - window:i]) / window, math.fsum(profile[i:i + window]) / window)
+             for i in range(window, n - window + 1)]
+    steps = [b - a for a, b in sides]
+    best = max(range(len(steps)), key=lambda i: (abs(steps[i]), -i))
+    peak = steps[best]
+    low, high = min(sides[best]), max(sides[best])
+    ratio = high / low if low > 0.0 else (math.inf if high > 0.0 else 1.0)
+    if peak == 0.0 or ratio < contrast:
+        raise RegionError("no step above contrast %.2f (the largest is %.2f)" % (contrast, ratio))
+    # The run around the largest step whose steps have its direction and at least half its size.
+    first = last = best
+    while first > 0 and steps[first - 1] * peak > 0.0 and abs(steps[first - 1]) >= 0.5 * abs(peak):
+        first -= 1
+    while last + 1 < len(steps) and steps[last + 1] * peak > 0.0 and abs(steps[last + 1]) >= 0.5 * abs(peak):
+        last += 1
+    weight = math.fsum(abs(steps[i]) for i in range(first, last + 1))
+    middle = math.fsum(abs(steps[i]) * i for i in range(first, last + 1)) / weight
+    # steps[i] lies between the samples i + window - 1 and i + window.
+    return Step(middle + window - 0.5, low, high, ratio, peak > 0.0)
+
+
+def _game_pixels(distance, line, client):
+    """A distance in picture pixels along a segment, in the game's pixels."""
+    x0, y0, x1, y1 = _segment(line, client)
+    length = math.hypot(x1 - x0, y1 - y0)
+    ux, uy = (x1 - x0) / length, (y1 - y0) / length
+    return distance * math.hypot(ux * GAME[0] / client[2], uy * GAME[1] / client[3])
+
+
+def compare_edges(before, native, after, edges, client=None):
+    """One EdgeRow per edge {"name", "line"[, "note", "width", "window", "contrast"]}."""
+    for img, what in ((native, "native"), (after, "second emulated")):
+        if (img.w, img.h) != (before.w, before.h):
+            raise RegionError("the %s picture's size %d x %d differs from the first emulated picture's %d x %d"
+                              % (what, img.w, img.h, before.w, before.h))
+    area = client_area(before.w, before.h, client)
+    rows, seen = [], set()
+    for edge in edges:
+        name = edge.get("name") if isinstance(edge, dict) else None
+        if not isinstance(name, str) or not name:
+            raise RegionError("an edge without a name: %r" % (edge,))
+        if name in seen:
+            raise RegionError("edge '%s' is named twice" % name)
+        seen.add(name)
+        if "line" not in edge:
+            raise RegionError("edge '%s' has no line" % name)
+        steps = []
+        for img, what in ((before, "first emulated"), (native, "native"), (after, "second emulated")):
+            try:
+                profile = edge_profile(img, area, edge["line"], edge.get("width", EDGE_WIDTH))
+                steps.append(steepest_step(profile, edge.get("window", EDGE_WINDOW),
+                                           edge.get("contrast", EDGE_CONTRAST)))
+            except RegionError as err:
+                raise RegionError("edge '%s', %s picture: %s" % (name, what, err))
+        b, n, a = steps
+        if not b.rising == n.rising == a.rising:
+            raise RegionError("edge '%s': the step is not of one direction in the three pictures (%s)"
+                              % (name, ", ".join("rising" if s.rising else "falling" for s in steps)))
+        difference = n.position - (b.position + a.position) / 2.0
+        spread = a.position - b.position
+        rows.append(EdgeRow(name, str(edge.get("note", "")), len(profile) - 1, b, n, a, difference, spread,
+                            _game_pixels(difference, edge["line"], area),
+                            _game_pixels(spread, edge["line"], area)))
+    return rows
+
+
 def calibrated_exposure(ratio, current):
     """The exposure that makes a region's native / emulated ratio 1, given the one the shot was made with."""
     for v, what in ((current, "the current exposure"), (ratio, "the region's ratio")):
@@ -320,8 +468,8 @@ def calibrated_exposure(ratio, current):
 # --------------------------------------------------------------------------------------------------- main
 
 
-def load_regions(path, spot=None):
-    """(regions, pairs, excludes) of a regions file, for the named spot if the file holds several."""
+def _spot_doc(path, spot=None):
+    """The object of a regions file that holds one spot's lists."""
     try:
         doc = json.loads(Path(path).read_text(encoding="utf-8"))
     except OSError as e:
@@ -342,6 +490,21 @@ def load_regions(path, spot=None):
         doc = spots[spot]
     elif spot is not None:
         raise RegionError("%s has no \"spots\": --spot %s does not apply" % (path, spot))
+    return doc
+
+
+def load_edges(path, spot=None):
+    """The "edges" list of a regions file, for the named spot if the file holds several (may be empty)."""
+    doc = _spot_doc(path, spot)
+    edges = doc.get("edges", []) if isinstance(doc, dict) else None
+    if not isinstance(edges, list):
+        raise RegionError("%s: \"edges\" must be a list" % path)
+    return edges
+
+
+def load_regions(path, spot=None):
+    """(regions, pairs, excludes) of a regions file, for the named spot if the file holds several."""
+    doc = _spot_doc(path, spot)
     regions = doc.get("regions") if isinstance(doc, dict) else None
     if not isinstance(regions, list) or not regions:
         raise RegionError("%s: a non-empty \"regions\" list is expected" % path)
@@ -387,6 +550,50 @@ def report(rows, pairs, out):
                          _fmt(p.emulated_ratio, ".3f"), _fmt(p.native_ratio, ".3f")))
 
 
+def report_edges(rows, out):
+    width = max([len(r.name) for r in rows] + [4])
+    out.write("%-*s  %6s  %8s %8s %8s  %10s %8s  %10s %8s  %s\n"
+              % (width, "edge", "length", "emu bef", "native", "emu aft", "difference", "spread", "game diff",
+                 "spread", "contrast (emulated before, native, emulated after), direction"))
+    for r in rows:
+        out.write("%-*s  %6d  %8.1f %8.1f %8.1f  %10s %8s  %10s %8s  %.2f, %.2f, %.2f, %s\n"
+                  % (width, r.name, r.length, r.before.position, r.native.position, r.after.position,
+                     format(r.difference, "+.1f"), format(r.spread, "+.1f"), format(r.game_difference, "+.1f"),
+                     format(r.game_spread, "+.1f"), r.before.contrast, r.native.contrast, r.after.contrast,
+                     "rising" if r.native.rising else "falling"))
+
+
+def _main_edges(a):
+    try:
+        edges = load_edges(a.regions, a.spot)
+        if not edges:
+            raise RegionError("%s: no \"edges\" to measure" % a.regions)
+        if "all" not in a.edge:
+            by_name = {e.get("name"): e for e in edges if isinstance(e, dict)}
+            for name in a.edge:
+                if name not in by_name:
+                    raise RegionError("--edge: no edge named '%s' (it has: %s)"
+                                      % (name, ", ".join(sorted(str(n) for n in by_name))))
+            edges = [by_name[name] for name in a.edge]
+        client = _numbers(a.client, int, "--client") if a.client else None
+        before, native, after = (read_png(p) for p in (a.emulated_before, a.native, a.emulated_after))
+        rows = compare_edges(before, native, after, edges, client)
+    except RegionError as e:
+        sys.stderr.write("region_compare: %s\n" % e)
+        return 2
+    out = sys.stdout
+    out.write("emulated before: %s\nnative:          %s\nemulated after:  %s\n"
+              % (a.emulated_before, a.native, a.emulated_after))
+    left, top, cw, ch = client_area(before.w, before.h, client)
+    out.write("picture %d x %d; client area: %d x %d at %d, %d\n" % (before.w, before.h, cw, ch, left, top))
+    out.write("position = pixels from the segment's start to the steepest luminance step; difference = native - "
+              "mean of the two emulated; spread = emulated after - before; game = the same in pixels of the "
+              "game's %d x %d picture (x %.4f across, x %.4f down)\n\n"
+              % (GAME[0], GAME[1], GAME[0] / cw, GAME[1] / ch))
+    report_edges(rows, out)
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("emulated_before")
@@ -399,7 +606,11 @@ def main(argv=None):
     ap.add_argument("--exclude", action="append", default=[], metavar="x0,y0,x1,y1",
                     help="a relative rectangle left out of every region (repeatable)")
     ap.add_argument("--client", metavar="left,top,width,height", help="the client area in pixels")
+    ap.add_argument("--edge", action="append", default=[], metavar="NAME",
+                    help="measure this edge of the regions file instead of the regions (repeatable; 'all')")
     a = ap.parse_args(argv)
+    if a.edge:
+        return _main_edges(a)
     try:
         regions, pairs, excludes = load_regions(a.regions, a.spot)
         excludes = list(excludes) + [_numbers(e, float, "--exclude") for e in a.exclude]

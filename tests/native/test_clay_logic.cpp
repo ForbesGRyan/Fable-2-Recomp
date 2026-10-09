@@ -5034,6 +5034,12 @@ int main() {
         const float split[4] = {20.0f, 35.0f, 2.0f, 0.4771f};
         for (float d : {45.0f, 45.001f, 60.0f, 5000.0f}) {
           CHECK(573, float(MaskCombine(d, 0.0, 0.0, split, kMaskFadeSlope)) == split[3]);
+          // (the two terms are not looked at there: fully lit, fully shadowed and mixed values alike)
+          for (double near_term : {0.0, 0.3, 1.0}) {
+            for (double far_term : {0.0, 0.7, 1.0}) {
+              CHECK(573, float(MaskCombine(d, near_term, far_term, split, kMaskFadeSlope)) == split[3]);
+            }
+          }
         }
         CHECK(573, float(MaskCombine(44.9f, 0.0, 0.0, split, kMaskFadeSlope)) != split[3]);
         CHECK(573, PrepassReach(split) == 45.0f + kPrepassReachMargin && kPrepassReachMargin > 0.0f && kPrepassReachMargin <= 0.1f);
@@ -5070,6 +5076,17 @@ int main() {
         CHECK(573, !PrepassBeyondReach(vp, slab(10.0f + 45.0f, 900.0f), vp, eye573, split, less));  // (inside the margin)
         CHECK(573, !PrepassBeyondReach(vp, slab(-100.0f, 900.0f), vp, eye573, split, less));
         CHECK(573, !PrepassBeyondReach(vp, slab(-900.0f, -100.0f), vp, eye573, split, less));  // behind the eye: kept
+        // The distance is measured from the eye, not from the plane w = 0: with a w row whose value at
+        // the eye is not 0 (here 10: clip w = 2 * x - 10 at the same eye) the eye's own w is taken
+        // off. Without that the slab 44.9 units away would read 49.9 and be left out.
+        {
+          float off[4][4];
+          std::memcpy(off, vp, sizeof(off));
+          off[3][3] = -10.0f;
+          CHECK(573, PrepassBeyondReach(off, slab(10.0f + 45.1f, 900.0f), off, eye573, split, less));
+          CHECK(573, !PrepassBeyondReach(off, slab(10.0f + 44.9f, 900.0f), off, eye573, split, less));
+          CHECK(573, !PrepassBeyondReach(off, slab(10.0f + 41.0f, 900.0f), off, eye573, split, less));
+        }
         // The bound is the distance along the view axis, which is never more than the distance from
         // the eye: a point at view depth 45.2 is at least 45.2 units away, wherever it is sideways.
         {

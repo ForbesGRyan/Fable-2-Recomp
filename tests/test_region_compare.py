@@ -444,6 +444,190 @@ class MainTest(unittest.TestCase):
         self.assertIn("client area: 1280 x 720 at 8, 31", out)
 
 
+def step_picture(at, dark=60, bright=160, size=(100, 100), vertical=False, ramp=0):
+    """A picture dark before `at` and bright from it on (along x; along y if vertical); `ramp` pixels of a
+    linear rise in display levels start at `at` instead of a hard step."""
+    c = Canvas(size[0], size[1], grey(dark))
+    for k in range(at, size[1] if vertical else size[0]):
+        v = bright if k >= at + ramp else dark + (bright - dark) * (k - at + 1) // (ramp + 1)
+        if vertical:
+            c.fill(0, k, size[0], k + 1, grey(v))
+        else:
+            c.fill(k, 0, k + 1, size[1], grey(v))
+    return c.image()
+
+
+class EdgeTest(unittest.TestCase):
+    """--edge: where the steepest luminance step lies along a named segment, picture by picture."""
+
+    LINE = {"name": "post shadow", "line": [0.1, 0.5, 0.9, 0.5]}
+
+    def test_a_step_is_found_where_it_is(self):
+        profile = rc.edge_profile(step_picture(40), WHOLE, self.LINE["line"], 3)
+        self.assertEqual(len(profile), 81)  # x 10 to 90, one sample a pixel
+        self.assertAlmostEqual(profile[0], rc.LINEAR[60], places=12)
+        self.assertAlmostEqual(profile[-1], rc.LINEAR[160], places=12)
+        step = rc.steepest_step(profile)
+        self.assertAlmostEqual(step.position, 29.5, places=9)  # between x 39 and x 40, 10 from the start
+        self.assertTrue(step.rising)
+        self.assertAlmostEqual(step.contrast, rc.LINEAR[160] / rc.LINEAR[60], places=9)
+
+    def test_a_shifted_edge_gives_the_shift(self):
+        rows = rc.compare_edges(step_picture(40), step_picture(45), step_picture(40), [self.LINE])
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row.name, "post shadow")
+        self.assertAlmostEqual(row.difference, 5.0, places=9)
+        self.assertAlmostEqual(row.spread, 0.0, places=9)
+        rows = rc.compare_edges(step_picture(40), step_picture(38), step_picture(44), [self.LINE])
+        self.assertAlmostEqual(rows[0].difference, -4.0, places=9)  # 38 against the mean of 40 and 44
+        self.assertAlmostEqual(rows[0].spread, 4.0, places=9)
+
+    def test_a_falling_step_and_a_vertical_segment(self):
+        line = {"name": "down", "line": [0.5, 0.2, 0.5, 0.8]}
+        imgs = [step_picture(at, dark=160, bright=60, vertical=True) for at in (50, 53, 50)]
+        row = rc.compare_edges(*imgs, [line])[0]
+        self.assertAlmostEqual(row.difference, 3.0, places=9)
+        self.assertFalse(row.native.rising)
+
+    def test_a_soft_edge_is_placed_at_its_middle(self):
+        hard = rc.steepest_step(rc.edge_profile(step_picture(50), WHOLE, self.LINE["line"], 3)).position
+        soft = rc.steepest_step(rc.edge_profile(step_picture(40, ramp=20), WHOLE, self.LINE["line"], 3)).position
+        self.assertLess(abs(soft - hard), 3.0)  # the ramp runs from x 40 to x 60: its steepest part is past 50
+        a, b = (step_picture(at, ramp=20) for at in (30, 37))
+        self.assertAlmostEqual(rc.compare_edges(a, b, a, [self.LINE])[0].difference, 7.0, places=6)
+
+    def test_the_shift_in_the_games_pixels(self):
+        # A 1296 x 759 window shot shows the game's 1120 x 720 picture on 1280 x 720: 8 pixels across are 7.
+        size = (1296, 759)
+        across = {"name": "across", "line": [0.1, 0.5, 0.9, 0.5]}
+        imgs = [step_picture(at, size=size) for at in (600, 608, 600)]
+        row = rc.compare_edges(*imgs, [across])[0]
+        self.assertAlmostEqual(row.difference, 8.0, places=9)
+        self.assertAlmostEqual(row.game_difference, 7.0, places=9)
+        down = {"name": "down", "line": [0.5, 0.1, 0.5, 0.9]}
+        imgs = [step_picture(at, size=size, vertical=True) for at in (300, 308, 300)]
+        row = rc.compare_edges(*imgs, [down])[0]
+        self.assertAlmostEqual(row.difference, 8.0, places=9)
+        self.assertAlmostEqual(row.game_difference, 8.0, places=9)
+
+    def test_no_edge_is_refused(self):
+        flat = Canvas(100, 100, grey(90)).image()
+        with self.assertRaisesRegex(rc.RegionError, "post shadow.*no step"):
+            rc.compare_edges(flat, flat, flat, [self.LINE])
+        faint = step_picture(40, dark=100, bright=105)  # 1.10 in linear light: under the stated 1.25
+        with self.assertRaisesRegex(rc.RegionError, "no step"):
+            rc.compare_edges(faint, faint, faint, [self.LINE])
+        self.assertEqual(len(rc.compare_edges(faint, faint, faint, [dict(self.LINE, contrast=1.05)])), 1)
+        # One picture without the step is enough to refuse, and the message names it.
+        with self.assertRaisesRegex(rc.RegionError, "native"):
+            rc.compare_edges(step_picture(40), flat, step_picture(40), [self.LINE])
+
+    def test_steps_of_opposite_direction_are_refused(self):
+        up, down = step_picture(40), step_picture(40, dark=160, bright=60)
+        with self.assertRaisesRegex(rc.RegionError, "direction"):
+            rc.compare_edges(up, down, up, [self.LINE])
+
+    def test_a_segment_outside_the_picture_is_refused(self):
+        img = step_picture(40)
+        for line in ([0.1, 0.5, 1.2, 0.5], [-0.1, 0.5, 0.9, 0.5], [0.5, 0.5, 0.5, 0.5], [0.1, 0.5, 0.9],
+                     [0.1, 0.5, 0.9, float("nan")], "0.1,0.5,0.9,0.5", [0.50, 0.5, 0.53, 0.5]):
+            with self.assertRaises(rc.RegionError, msg=repr(line)):
+                rc.compare_edges(img, img, img, [{"name": "bad", "line": line}])
+        # A band that leaves the picture at the border is refused too, not read from the other side.
+        with self.assertRaisesRegex(rc.RegionError, "edge"):
+            rc.compare_edges(img, img, img, [{"name": "edge", "line": [0.1, 0.0, 0.9, 0.0], "width": 5}])
+        for bad in ({"line": [0.1, 0.5, 0.9, 0.5]}, {"name": "x"}, {"name": "x", "line": [0.1, 0.5, 0.9, 0.5], "width": 0},
+                    {"name": "x", "line": [0.1, 0.5, 0.9, 0.5], "window": 0},
+                    {"name": "x", "line": [0.1, 0.5, 0.9, 0.5], "contrast": 1.0}):
+            with self.assertRaises(rc.RegionError, msg=repr(bad)):
+                rc.compare_edges(img, img, img, [bad])
+
+    def test_pictures_of_different_sizes_are_refused(self):
+        with self.assertRaisesRegex(rc.RegionError, "size"):
+            rc.compare_edges(step_picture(40), step_picture(40, size=(100, 90)), step_picture(40), [self.LINE])
+
+
+class EdgeMainTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def shots(self, positions):
+        out = []
+        for name, at in zip(("before", "native", "after"), positions):
+            c = Canvas(100, 100, grey(60)).fill(at, 0, 100, 100, grey(160))
+            out.append(c.save(self.dir / (name + ".png")))
+        return out
+
+    def regions_file(self, doc):
+        path = self.dir / "regions.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        return str(path)
+
+    def run_main(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = rc.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    DOC = {"regions": [{"name": "dirt", "rect": [0.1, 0.1, 0.3, 0.9]}],
+           "edges": [{"name": "post shadow", "line": [0.1, 0.5, 0.9, 0.5], "note": "the post is static"},
+                     {"name": "nothing there", "line": [0.6, 0.5, 0.9, 0.5]}]}
+
+    def test_edge_report(self):
+        code, out, err = self.run_main(self.shots((40, 46, 42)) + ["--regions", self.regions_file(self.DOC),
+                                                                   "--edge", "post shadow"])
+        self.assertEqual((code, err), (0, ""))
+        line = [l for l in out.splitlines() if l.startswith("post shadow")]
+        self.assertEqual(len(line), 1)
+        self.assertIn("+5.0", line[0])  # 46 against the mean of 40 and 42
+        self.assertIn("+2.0", line[0])  # the emulated shots' own spread
+        self.assertFalse(any(l.startswith("dirt") for l in out.splitlines()))  # an edge run measures edges only
+
+    def test_edge_refusals(self):
+        shots = self.shots((40, 46, 42))
+        regions = self.regions_file(self.DOC)
+        code, out, err = self.run_main(shots + ["--regions", regions, "--edge", "nothing there"])
+        self.assertEqual(code, 2)
+        self.assertIn("no step", err)
+        code, out, err = self.run_main(shots + ["--regions", regions, "--edge", "rail"])
+        self.assertEqual(code, 2)
+        self.assertIn("rail", err)
+        no_edges = self.regions_file({"regions": self.DOC["regions"]})
+        code, out, err = self.run_main(shots + ["--regions", no_edges, "--edge", "post shadow"])
+        self.assertEqual(code, 2)
+
+
+class ShadowRegionsFileTest(unittest.TestCase):
+    """docs/native-renderer/shadow-regions.json, the regions and edges of the shadows validation."""
+
+    PATH = Path(__file__).resolve().parent.parent / "docs" / "native-renderer" / "shadow-regions.json"
+
+    def test_every_spot_loads_and_every_rectangle_and_segment_lies_in_the_picture(self):
+        doc = json.loads(self.PATH.read_text(encoding="utf-8"))
+        self.assertEqual(sorted(doc["spots"]), ["bridge", "third", "trees"])
+        kinds = set(doc["kinds"])
+        img = rc.Image(1296, 759, bytes([90, 120, 60]) * (1296 * 759))
+        counted_edges = 0
+        for spot in sorted(doc["spots"]):
+            regions, pairs, excludes = rc.load_regions(self.PATH, spot)
+            self.assertEqual(len({r["name"] for r in regions}), len(regions), spot)
+            for r in regions:
+                self.assertIn(r["kind"], kinds, "%s: '%s'" % (spot, r["name"]))
+                self.assertTrue(r.get("note"), "%s: '%s' says nothing about its caster" % (spot, r["name"]))
+            self.assertEqual(len(rc.compare(img, img, img, regions, excludes)), len(regions))
+            edges = rc.load_edges(self.PATH, spot)
+            self.assertEqual(len({e["name"] for e in edges}), len(edges), spot)
+            for e in edges:
+                self.assertTrue(e.get("note"), "%s: edge '%s' says nothing about its caster" % (spot, e["name"]))
+                self.assertGreater(len(rc.edge_profile(img, rc.client_area(img.w, img.h), e["line"],
+                                                       e.get("width", rc.EDGE_WIDTH))), 2 * rc.EDGE_WINDOW)
+            counted_edges += len(edges)
+        self.assertGreaterEqual(counted_edges, 3)  # spec criterion 5: three named static shadow edges
+
+
 class RegionsFileTest(unittest.TestCase):
     """docs/native-renderer/lighting-regions.json, the regions of the lighting validation."""
 

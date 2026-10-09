@@ -488,6 +488,24 @@ class CaptureTest(unittest.TestCase):
             self.assertIn("tf5", text)
 
 
+class TreeRowTest(unittest.TestCase):
+    def test_the_first_tree_row_samples_slots_16_and_17(self):
+        # The water's vertex shader samples slot 16 alone (a 2D k_8 texture) and is drawn before the trees:
+        # it is not a tree row.
+        with tempfile.TemporaryDirectory() as d:
+            rows = [{"kind": "draw", "frame": 1, "in_scene": True, "vs_hash": "0xBEAD84BD72072E0E", "vs_tex_slots": [16], "tf": {}},
+                    {"kind": "draw", "frame": 1, "in_scene": False, "vs_hash": "0x475EC9F795E5EDBB", "vs_tex_slots": [16, 17], "tf": {}},
+                    {"kind": "draw", "frame": 1, "in_scene": True, "vs_hash": "0x475EC9F795E5EDBB", "vs_tex_slots": [16, 17], "tf": {}},
+                    {"kind": "draw", "frame": 1, "in_scene": True, "vs_hash": "0xA5846836C90E1192", "vs_tex_slots": [16, 17], "tf": {}},
+                    {"kind": "draw", "frame": 2, "in_scene": True, "vs_hash": "0xBEAD84BD72072E0E", "vs_tex_slots": [16], "tf": {}}]
+            p = Path(d) / "native_discovery_x.jsonl"
+            p.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows))
+            cap = ft.load_capture(p)
+            self.assertEqual(cap.frames[1].tree_row["vs_hash"], "0x475EC9F795E5EDBB")
+            self.assertTrue(cap.frames[1].tree_row["in_scene"])
+            self.assertIsNone(cap.frames[2].tree_row)
+
+
 SKY_FC = [0x00800002, 0x1A544086, 0x0001E00F, 0x00A80C14, 0x00000003, 0x00000218]
 
 

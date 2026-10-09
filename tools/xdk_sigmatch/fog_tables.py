@@ -421,7 +421,7 @@ class Frame:
         self.tf4_content = self.tf5_content = None
         self.fog_row_ps = None
         self.uses = Counter()     # (kind, ps hash, in scene, slot, fc tuple, content or None) -> rows
-        self.tree_row = None      # the first main-scene row whose vertex shader samples slot 16 (parsed)
+        self.tree_row = None      # the first main-scene row whose vertex shader samples slots 16 and 17 (parsed)
         self.indx = []            # "indx" rows (parsed)
         self.indxdata = {}        # n -> "indxdata" row
         self.has_frame_row = False
@@ -524,7 +524,9 @@ def load_capture(path, tex_root=None):
                         fr.regs[reg] = v
             if fr.tree_row is None and kind == "draw":
                 mv = _RE_VS_SLOTS.search(line)
-                if mv and "16" in mv.group(1).split(","):
+                # Slot 16 alone is not a tree: the water's vertex shader BEAD84BD72072E0E fetches a 2D k_8
+                # texture there (one component, at the vertex's own coordinates) and has no fog block.
+                if mv and {"16", "17"} <= set(mv.group(1).split(",")):
                     fr.tree_row = json.loads(line)
     for fr in cap.frames.values():
         for name, decode in (("tf4", decode_tf4), ("tf5", decode_tf5)):

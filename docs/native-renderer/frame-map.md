@@ -3346,6 +3346,8 @@ The words are the same in all 40 rows of each shader (5 captures of 8 frames), a
 
 The dumps are `task1_bridge_0F99_tf6_...bin`, `_tf7_`, `_tf13_`, `_tf14_1A53B000_FB036F07EB514FF4.bin`. The same two fetch words are bound at slots 6 and 7 in 94 scene rows of the bridge capture (the research note names their shader: the blended characters' `0x401A...`). The first 8,192 bytes of the tf14 dump are the same in all five captures of the four runs (SHA-256 `9ffab61500cd24a1...`). The rotation texture can be read by the native pass from guest memory; the fallback of the spec (unrotated taps) is not needed.
 
+Byte order of tf14 (added after the review of Task 1): its fetch constant's second word is `0x1A53B04A`, bits 6 and 7 = 1, the 8-in-16 byte swap (`task1_bridge2_mask_rows.txt` line 111 prints "endian 1"). The two bytes of a texel as they lie in guest memory are therefore exchanged before they become the shader's `.x` and `.y`. The length check above cannot tell the two orders apart (both give unit vectors); the wrong order is a mirrored rotation. Which stored byte is `a` and which `b` of the formula `(a, b) = 2 * tf14.xy - 1` must be fixed by the task that reads the texture, from the SDK's `k_8_8` load path, and tested.
+
 **Constants over frames.**
 
 | Register | At `0x1B4B` | At `0x0F99` | Frames |
@@ -3408,6 +3410,8 @@ The `"verts"` rows are among the paired rows (203 of the first bridge capture's 
 | far | `0xC2A00000` = -80 | `0xBBA3D70A` = -0.005 | slope scale -5, depth bias -0.005 |
 
 Front and back hold the same values and both enables are on. The window depth of the maps is `1 - z` with the test greater-equal, so the negative bias moves a caster away from the light, as a shadow bias must. How the emulator applies the registers (SDK `src/graphics/d3d12/pipeline_cache.cpp`, `include/rex/graphics/util/draw.h`): slope-scaled bias = scale / 16, constant bias = the offset in depth units (as an integer: `ceil(|offset| * 2^21)` steps of 8 for the float depth format). Elsewhere in the frames the offset is on only for one depth-only shader of another pass (`0x87D4404FB36AF71D`: scale 0, offset 0.0001; 3,301 rows of the bridge capture).
+
+Qualification (added after the review of Task 1): the emulator does not apply the offset as an exact depth offset. The SDK turns it into an integer D3D12 bias (`ceil(|offset| * 2^21) << 3`, `include/rex/graphics/util/draw.h` lines 197 to 215), which on a float depth target scales with the exponent of the primitive's largest depth; the factor is chosen for depths in [0.5, 1) (the SDK's comment, lines 166 to 195), and below 0.5 the emulated bias is half or less. A native bias applied as an exact offset therefore differs from the emulated picture for casters with map depth under 0.5. In these captures the eye sits at map depth 0.67 to 0.90 (`task1_map_centre.txt`). Also: the polygon offset registers keep stale near or far values at other draws with the enables off; only bits 11 and 12 of `0x2205` say whether a draw is biased. The upper bound 0.512 of `c12.w` quoted in this section comes from the older capture `native_discovery_20261008_105659` (0.51186); the mined logs and Task 1's captures reach 0.5014.
 
 **What a later task can rely on.** The two bias sets can be read per pass from the first shadow draw's `"rs"` words (the proof above covers every shadow-pass draw of four captures); as constants they are the table above.
 

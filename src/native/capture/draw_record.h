@@ -128,6 +128,52 @@ struct DrawRecord {
 // inputs: an index of 16 bits each).
 static_assert(sizeof(DrawRecord) == 616, "DrawRecord grew or shrank: see the comment above");
 
+// --- The sun layer's depth place (frame-map section 17, "The layer's depth place"; controller ruling 39) ---
+// The game copies its scene's depth in the middle of the scene and starts its sun layer's depth from that
+// copy. What it draws after the copy is not in it. Leaf draws issued after the copy (a tree the game fades
+// to half between the eye and the hero: pixel c15.w 0.5) are put into the layer's depth by a draw of their
+// own, the "tree occluder" (pixel shader F1EB2497108F159D at the layer's target): the same index buffer,
+// range, vertex buffer and vertex c0..c3 as the scene's draw. So a tree occluder names a record of the scene
+// that the game issued after its depth copy, and the first such record is where the native pass takes the
+// layer's depth (nothing recorded says where the copy itself lies: it passes no hooked call).
+// FrameScene::layer_depth_place holds that record's index; kNoDepthPlace: the frame has none.
+inline constexpr uint32_t kNoDepthPlace = 0xFFFFFFFFu;
+// The tree occluder's pixel shader (tools/xdk_sigmatch/light_formulas.py, POST_FURNITURE_SHADERS).
+inline constexpr uint64_t kTreeOccluderPs = 0xF1EB2497108F159Dull;
+// At most this many tree occluders a frame are looked at (three in the frames captured); more: the frame's
+// place is not known.
+inline constexpr uint32_t kMaxLayerOccluders = 16;
+
+enum class OccluderTwin : uint8_t { kFound, kNone, kAmbiguous };
+// The record of `draws` that `occluder` (the record AssembleRecord makes of the occluder's draw) draws
+// again: indexed, with the same primitive type, index format, index buffer, range, base vertex, vertex
+// buffer, transform layout and rows, bit for bit; both drawable (skip none) and neither instanced nor
+// skinned (their positions are built from more than these). Exactly one such record: kFound and its index
+// in *index. None: kNone. More than one: kAmbiguous (which of them the game drew late cannot be told).
+// *index is written only with kFound.
+inline OccluderTwin FindOccluderTwin(const DrawRecord* draws, size_t count, const DrawRecord& occluder, uint32_t* index) {
+  if (!draws || !index || occluder.skip != SkipReason::kNone || !occluder.indexed || occluder.instances.active ||
+      occluder.skin.active) {
+    return OccluderTwin::kNone;
+  }
+  size_t found = 0, at = 0;
+  for (size_t i = 0; i < count; ++i) {
+    const DrawRecord& r = draws[i];
+    if (r.skip != SkipReason::kNone || !r.indexed || r.instances.active || r.skin.active) continue;
+    if (r.prim != occluder.prim || r.index32 != occluder.index32 || r.base_vertex != occluder.base_vertex ||
+        r.start != occluder.start || r.count != occluder.count || r.ib.phys_addr != occluder.ib.phys_addr ||
+        r.ib.size != occluder.ib.size || r.vb.phys_addr != occluder.vb.phys_addr || r.vb.size != occluder.vb.size ||
+        r.layout != occluder.layout || std::memcmp(r.rows, occluder.rows, sizeof(r.rows)) != 0) {
+      continue;
+    }
+    if (found++ == 0) at = i;
+  }
+  if (found == 0 || at >= kNoDepthPlace) return OccluderTwin::kNone;
+  if (found > 1) return OccluderTwin::kAmbiguous;
+  *index = uint32_t(at);
+  return OccluderTwin::kFound;
+}
+
 // --- Shadow-pass records (frame-map section 15; frame_scene.h, FrameScene::shadow_draws) ---
 // A draw of one of the game's two sun shadow passes is a DrawRecord like a
 // scene draw's: geometry (streams, indices, bone palette, instance set), the

@@ -2710,6 +2710,11 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   sun_in.radial = post_constants.sun_on != 0 && SunRadialUsable(post_constants.radial);
   sun_in.quads = sun_in.drawable = sun_in.textures = true;
   sun_in.objects = !sun_objects_failed_;
+  // Where the layer's depth is taken among the records (PlanSunDepthPlace: before the first record the game
+  // issued after its own depth copy, which the frame's tree occluders name; a frame whose place is not known
+  // has no layer). On the feed the depth is the file's, whatever the live frame's place.
+  const SunDepthPlace sun_place = PlanSunDepthPlace(scene.layer_occluders, scene.layer_occluders_failed, scene.layer_depth_place, scene.draws.size());
+  sun_in.depth_place = oracle_fed || sun_place.usable;
   bool oracle_sun = false;
   const capture::QuadRecord* sun_records = scene.quads.data();
   size_t sun_record_count = scene.quads.size();
@@ -2789,6 +2794,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     for (int t = 0; t < 3; ++t) st.sun_drawn[t] = sun_plan.by_target[t];
     st.sun_centre[0] = post_constants.radial[0];
     st.sun_centre[1] = post_constants.radial[1];
+    // (where the layer's depth will be taken, for the Sun line: among the records only off the feed)
+    if (!oracle_sun) st.sun_depth_record = sun_place.record;
   }
   CountClaySunFrame(sun, sun_counts_);
   st.sun_frames = sun_counts_;
@@ -3023,9 +3030,49 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     // depth the pass has written up to here.
     draw_quads(ClayQuadPlace::kAfterSky);
   };
+  // The sun layer's depth, taken in the middle of the colour pass when the frame has records the game
+  // issued after its own depth copy (sun_place; clay_logic.h, PlanSunDepthPlace): before the first of them
+  // the colour pass is interrupted as the pre-pass is for the mask. The scene's depth becomes a shader
+  // resource and the layer's a depth target for the one full-screen step (kClaySunDepthPs: the scene
+  // depth's texel the size ratio names; on the feed the file's depth, never here), then both go back and
+  // the colour pass goes on from the depth it had: no clear. Only in a frame whose layer is drawn (it has
+  // the layer's objects and the frame's constant buffer); the layer's later steps find the depth taken.
+  bool sun_depth_taken = false;
+  auto sun_depth_copy = [&](nrhi::TextureView* source) {
+    cmd->SetRenderTargets(nullptr, sun_depth_);
+    cmd->SetViewport({0.0f, 0.0f, float(kSunLayerWidth), float(kSunLayerHeight), 0.0f, 1.0f});
+    cmd->SetScissor({0, 0, int32_t(kSunLayerWidth), int32_t(kSunLayerHeight)});
+    cmd->ClearDepth(sun_depth_, 1.0f);
+    cmd->SetBindingLayout(post_layout_);
+    cmd->SetPipeline(sun_depth_pipeline_);
+    cmd->SetConstantBuffer(kPostParamConstants, terrain_cb_, ClaySmallSlotOffset(post_slot_));
+    const ClayPostStepConstants words = MakeClaySunStep(ClaySunStep::kDepth, kWidth, kHeight, kSunLayerWidth, kSunLayerHeight);
+    cmd->SetRootConstants(kPostParamStep, kPostStepWords, &words, 0);
+    nrhi::TextureView* const inputs[kPostTableSize] = {source, white_view_, white_view_, white_view_};
+    cmd->SetTextures(kPostParamTextures, inputs, kPostTableSize);
+    cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+    cmd->Draw(3, 0);
+  };
+  const bool sun_depth_early = sun == ClaySun::kDrawn && !oracle_sun && post_frame && terrain_cb_ != nullptr &&
+                               sun_place.record != capture::kNoDepthPlace;
   for (size_t index = 0; index < prepared_.size(); ++index) {
     const Prepared& p = prepared_[index];
     if (left_out) break;        // (no constant buffer: nothing is drawn)
+    if (sun_depth_early && !sun_depth_taken && SunDepthBefore(sun_place, size_t(p.r - scene.draws.data()))) {
+      cmd->Barrier(depth_, nrhi::ResourceState::kDepthWrite, nrhi::ResourceState::kPixelShaderResource);
+      cmd->Barrier(sun_depth_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kDepthWrite);
+      cmd->FlushBarriers();
+      sun_depth_copy(sun_scene_depth_view_);
+      cmd->Barrier(sun_depth_, nrhi::ResourceState::kDepthWrite, nrhi::ResourceState::kPixelShaderResource);
+      cmd->Barrier(depth_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kDepthWrite);
+      cmd->FlushBarriers();
+      cmd->SetRenderTargets(linear_, depth_);
+      cmd->SetViewport({0.0f, 0.0f, float(kWidth), float(kHeight), 0.0f, 1.0f});
+      cmd->SetScissor({0, 0, int32_t(kWidth), int32_t(kHeight)});
+      bind_scene();
+      bound = nullptr;
+      sun_depth_taken = true;
+    }
     if (sky_drawn && index == sky_order.place) draw_sky();
     if (!p.pipeline) continue;  // a terrain record that is not drawn (FinishTerrain)
     const capture::DrawRecord& r = *p.r;
@@ -3159,22 +3206,15 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       // 1. The layer's depth: the scene's depth (resting as a shader resource since the colour pass ended;
       // on the feed the file's) at every texel the size ratio names, written by a full-screen step with no
       // colour target; then the cloud occluders into it, tested and written.
+      // (a frame whose depth place lies among the records took the scene's depth there, in the colour pass:
+      // sun_depth_taken; the layer's depth then holds it, and only the occluders are still to be drawn)
       cmd->Barrier(sun_depth_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kDepthWrite);
       cmd->FlushBarriers();
-      layer_target(nullptr);
-      cmd->ClearDepth(sun_depth_, 1.0f);
-      cmd->SetBindingLayout(post_layout_);
-      cmd->SetPipeline(sun_depth_pipeline_);
-      cmd->SetConstantBuffer(kPostParamConstants, terrain_cb_, ClaySmallSlotOffset(post_slot_));
-      {
-        const ClayPostStepConstants words = MakeClaySunStep(ClaySunStep::kDepth, kWidth, kHeight, kSunLayerWidth, kSunLayerHeight);
-        cmd->SetRootConstants(kPostParamStep, kPostStepWords, &words, 0);
-        nrhi::TextureView* const inputs[kPostTableSize] = {oracle_sun ? oracle_depth_view_ : sun_scene_depth_view_, white_view_, white_view_,
-                                                           white_view_};
-        cmd->SetTextures(kPostParamTextures, inputs, kPostTableSize);
+      if (sun_depth_taken) {
+        layer_target(nullptr);
+      } else {
+        sun_depth_copy(oracle_sun ? oracle_depth_view_ : sun_scene_depth_view_);
       }
-      cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
-      cmd->Draw(3, 0);
       layer_quads(0);
       // 2. Layer 1 (the beam source) and layer 2 (flares, moon glow, sun disc), each cleared and drawn
       // against that one depth, which no colour state writes.

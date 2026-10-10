@@ -166,6 +166,16 @@ struct FrameScene {
   uint32_t quad_over = 0;
   uint32_t quad_kinds[size_t(capture::PostQuadKind::kCount)] = {};
   uint32_t quad_refused[size_t(capture::QuadRecordReason::kCount)] = {};
+  // The sun layer's depth place (draw_record.h, "The sun layer's depth place"): the game's tree occluders of
+  // this frame, each matched to the record of `draws` it draws again. layer_occluders: the occluder calls
+  // seen (only with the quads wanted); layer_occluders_failed: those that named no single record (not read,
+  // no twin, more than one, past capture::kMaxLayerOccluders); layer_depth_place: the smallest index in
+  // `draws` among the twins, capture::kNoDepthPlace when no occluder named one. A consumer takes the sun
+  // layer's depth before that record, after the last record when the frame had no occluder call, and draws
+  // no layer when a call failed (render::PlanSunDepthPlace).
+  uint32_t layer_occluders = 0;
+  uint32_t layer_occluders_failed = 0;
+  uint32_t layer_depth_place = capture::kNoDepthPlace;
   // The quads were wanted this frame (the native view, the light, the post chain and the sun's
   // switch on at the frame's begin).
   bool quad_records = false;
@@ -382,6 +392,17 @@ inline std::string QuadLine(const FrameScene& scene) {
     }
   }
   if (!kinds.empty()) out += " {" + kinds + "}";
+  // (the layer's tree occluders, only in a frame that had one: the place the layer's depth is taken at)
+  if (scene.layer_occluders) {
+    if (scene.layer_depth_place != capture::kNoDepthPlace) {
+      std::snprintf(buf, sizeof(buf), ", tree occluders %u (%u failed), depth before record %u", scene.layer_occluders,
+                    scene.layer_occluders_failed, scene.layer_depth_place);
+    } else {
+      std::snprintf(buf, sizeof(buf), ", tree occluders %u (%u failed), no depth place", scene.layer_occluders,
+                    scene.layer_occluders_failed);
+    }
+    out += buf;
+  }
   return out;
 }
 
@@ -663,6 +684,23 @@ class FrameBuilder {
   }
   bool HasPost() const { return post_.valid; }
 
+  // --- The sun layer's depth place (FrameScene::layer_depth_place) ---
+  // One tree occluder call of the frame's sun layer, after the main scene: `occluder` the record
+  // AssembleRecord makes of the call, null when the call could not be read. Its twin among the frame's
+  // records so far (capture::FindOccluderTwin) gives the place; a call without a single twin, or past
+  // capture::kMaxLayerOccluders, is counted failed. Nothing with the quads off.
+  void LayerOccluderSeen(const capture::DrawRecord* occluder) {
+    if (!quads_on_) return;
+    ++layer_occluders_;
+    uint32_t index = capture::kNoDepthPlace;
+    if (layer_occluders_ > capture::kMaxLayerOccluders || !occluder ||
+        capture::FindOccluderTwin(draws_.data(), draws_.size(), *occluder, &index) != capture::OccluderTwin::kFound) {
+      ++layer_occluders_failed_;
+      return;
+    }
+    if (index < layer_depth_place_) layer_depth_place_ = index;
+  }
+
   // --- The quad records (FrameScene::quads) ---
   // Whether the quads are read from now on (the capture sets it at a frame boundary). Off: every
   // call below does nothing, and the frame's scene says kOff.
@@ -867,6 +905,14 @@ class FrameBuilder {
         s->quads.assign(quads_, quads_ + quad_taken_);
       }
     }
+    // The layer's depth place, as the frame's occluder calls gave it; the next frame starts with none.
+    if (quads_on_) {
+      s->layer_occluders = layer_occluders_;
+      s->layer_occluders_failed = layer_occluders_failed_;
+      s->layer_depth_place = layer_depth_place_;
+    }
+    layer_occluders_ = layer_occluders_failed_ = 0;
+    layer_depth_place_ = capture::kNoDepthPlace;
     quad_seen_ = quad_taken_ = quad_over_ = 0;
     std::fill(std::begin(quad_kinds_), std::end(quad_kinds_), 0u);
     std::fill(std::begin(quad_refused_), std::end(quad_refused_), 0u);
@@ -967,6 +1013,10 @@ class FrameBuilder {
   uint32_t quad_over_ = 0;
   uint32_t quad_kinds_[size_t(capture::PostQuadKind::kCount)] = {};
   uint32_t quad_refused_[size_t(capture::QuadRecordReason::kCount)] = {};
+  // The sun layer's tree occluders of the frame so far (FrameScene::layer_depth_place).
+  uint32_t layer_occluders_ = 0;
+  uint32_t layer_occluders_failed_ = 0;
+  uint32_t layer_depth_place_ = capture::kNoDepthPlace;
   // Shared with the deleters of this builder's scenes. Never reassigned, and
   // locked inside: ReleaseSpares and spare_count need no lock of the caller's.
   std::shared_ptr<SceneBufferPool> pool_ = std::make_shared<SceneBufferPool>();

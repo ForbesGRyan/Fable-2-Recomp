@@ -396,6 +396,88 @@ int main() {
     // A shadow draw is never "depth-only" (that reason is the main scene's: a pre-pass draw).
     if (s.depth_only) return 127;
   }
-  std::puts("PASS: record assembly with instance sets, instance range check and cap, distance cut, skin, render state, depth-only, side indices, shadow casters");
+  {
+    // The sun layer's tree occluder (frame-map section 17, "The layer's depth place"): the game draws a late
+    // leaf draw of its scene again into the layer's depth, with the same index buffer, range, vertex buffer
+    // and transform rows and another vertex shader. FindOccluderTwin names the scene's record it redraws.
+    static float other_bank[256 * 4] = {};
+    static const TransformInfo t{4, TransformLayout::kDot, -1};
+    for (int i = 0; i < 16; ++i) other_bank[4 * 4 + i] = float(i + 1);
+    other_bank[4 * 4 + 3] = 99.0f;  // (another instance of the mesh: one transform component apart)
+    DrawInputs leaf = Good();
+    leaf.count = 18722;
+    leaf.ib = {0x1C2E9380, 37444};
+    leaf.vb = {0x1C25E780, 393336};
+    leaf.vs_hash = 0xA5846836C90E1192ull;
+    DrawInputs instance = leaf;      // the same mesh before the depth copy, at another place
+    instance.transform = &t;
+    instance.bank = other_bank;
+    DrawInputs occluder_in = leaf;   // the occluder: the late draw's geometry with the occluder's vertex shader
+    occluder_in.vs_hash = 0x432563420047C96Cull;
+    const DrawRecord occluder = AssembleRecord(occluder_in, 0);
+    if (occluder.skip != SkipReason::kNone) return 128;
+    std::vector<DrawRecord> draws;
+    draws.push_back(AssembleRecord(Good(), 0));
+    draws.push_back(AssembleRecord(instance, 1));
+    draws.push_back(AssembleRecord(Good(), 2));
+    draws.push_back(AssembleRecord(leaf, 3));
+    draws.push_back(AssembleRecord(Good(), 4));
+    uint32_t at = 77;
+    if (FindOccluderTwin(draws.data(), draws.size(), occluder, &at) != OccluderTwin::kFound || at != 3) return 129;
+    // Each thing that makes it another draw: no twin, and the index is left as it was.
+    auto alone = [&](DrawRecord changed) {
+      uint32_t index = 77;
+      return FindOccluderTwin(draws.data(), draws.size(), changed, &index) == OccluderTwin::kNone && index == 77;
+    };
+    DrawRecord c = occluder;
+    c.ib.phys_addr += 2;
+    if (!alone(c)) return 130;
+    c = occluder; c.ib.size -= 2;
+    if (!alone(c)) return 130;
+    c = occluder; c.vb.phys_addr += 4;
+    if (!alone(c)) return 130;
+    c = occluder; c.vb.size += 4;
+    if (!alone(c)) return 130;
+    c = occluder; c.start = 3;
+    if (!alone(c)) return 130;
+    c = occluder; c.count -= 1;
+    if (!alone(c)) return 130;
+    c = occluder; c.base_vertex = 1;
+    if (!alone(c)) return 130;
+    c = occluder; c.prim = c.prim + 1;
+    if (!alone(c)) return 130;
+    c = occluder; c.index32 = true;
+    if (!alone(c)) return 130;
+    c = occluder; c.indexed = false;
+    if (!alone(c)) return 130;
+    c = occluder; c.layout = TransformLayout::kCombine;
+    if (!alone(c)) return 130;
+    for (int i = 0; i < 16; ++i) {
+      c = occluder;
+      c.rows[i] += 0.5f;
+      if (!alone(c)) return 131;
+    }
+    // An occluder that is no record (it could not be read), or one whose positions are built another way:
+    // no twin. A scene record that is skipped is no twin either: nothing of it is drawn.
+    c = occluder; c.skip = SkipReason::kNoStream;
+    if (!alone(c)) return 132;
+    c = occluder; c.instances.active = true;
+    if (!alone(c)) return 132;
+    c = occluder; c.skin.active = true;
+    if (!alone(c)) return 132;
+    draws[3].skip = SkipReason::kDepthOnly;
+    if (!alone(occluder)) return 133;
+    draws[3].skip = SkipReason::kNone;
+    // Two records it could be: ambiguous, and no index.
+    draws.push_back(AssembleRecord(leaf, 5));
+    at = 77;
+    if (FindOccluderTwin(draws.data(), draws.size(), occluder, &at) != OccluderTwin::kAmbiguous || at != 77) return 134;
+    // No records, no array, nowhere to put the index.
+    if (FindOccluderTwin(draws.data(), 0, occluder, &at) != OccluderTwin::kNone) return 135;
+    if (FindOccluderTwin(nullptr, 4, occluder, &at) != OccluderTwin::kNone) return 135;
+    if (FindOccluderTwin(draws.data(), 4, occluder, nullptr) != OccluderTwin::kNone) return 135;
+    static_assert(kNoDepthPlace == 0xFFFFFFFFu && kTreeOccluderPs == 0xF1EB2497108F159Dull && kMaxLayerOccluders == 16);
+  }
+  std::puts("PASS: record assembly with instance sets, instance range check and cap, distance cut, skin, render state, depth-only, side indices, shadow casters, occluder twin");
   return 0;
 }

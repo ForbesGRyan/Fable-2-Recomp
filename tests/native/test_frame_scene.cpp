@@ -1352,6 +1352,80 @@ static int QuadTests(const capture::DrawRecord& r) {
     auto u = late.Finish(++number);
     if (u->quad_reason != QuadSetReason::kNoDraw || u->quad_seen != 0 || u->quad_taken != 0 || !none(*u)) return 30;
   }
+  {
+    // The sun layer's depth place: the frame's tree occluders, each matched to the record it draws again.
+    // Records: three of the scene (the frame helper adds `r` first), the second of them the late leaf draw.
+    capture::DrawRecord leaf = r, other = r, occluder = r;
+    leaf.indexed = other.indexed = occluder.indexed = true;
+    leaf.skip = other.skip = occluder.skip = capture::SkipReason::kNone;
+    leaf.instances.active = other.instances.active = occluder.instances.active = false;
+    leaf.skin.active = other.skin.active = occluder.skin.active = false;
+    leaf.terrain_index = other.terrain_index = occluder.terrain_index = capture::kNoSideIndex;
+    leaf.ib = occluder.ib = {0x1C2E9380, 37444};
+    leaf.count = occluder.count = 18722;
+    other.ib = {0x1C000000, 600};
+    other.count = 300;
+    occluder.vs_hash = 0x432563420047C96Cull;
+    auto scene_of = [&](render::FrameBuilder& fb) {
+      fb.Add(other);
+      fb.Add(leaf);
+      fb.Add(other);
+    };
+    render::FrameBuilder lb;
+    // Quads off: nothing is counted and the frame has no place.
+    auto off = frame(lb, scene_of, [&](render::FrameBuilder& fb) { fb.LayerOccluderSeen(&occluder); });
+    if (off->layer_occluders != 0 || off->layer_occluders_failed != 0 || off->layer_depth_place != capture::kNoDepthPlace) return 31;
+    lb.QuadsOn(true);
+    // No occluder call: no place, nothing failed.
+    auto plain = frame(lb, scene_of, nothing);
+    if (plain->layer_occluders != 0 || plain->layer_occluders_failed != 0 || plain->layer_depth_place != capture::kNoDepthPlace) return 32;
+    // One occluder: the leaf's record. It is the scene's third record if `r` is drawable, else its second.
+    auto one = frame(lb, scene_of, [&](render::FrameBuilder& fb) { fb.LayerOccluderSeen(&occluder); });
+    const uint32_t leaf_at = uint32_t(one->draws.size()) - 2;
+    if (one->draws.size() < 3 || one->layer_occluders != 1 || one->layer_occluders_failed != 0 || one->layer_depth_place != leaf_at) return 33;
+    if (render::QuadLine(*one).find(", tree occluders 1 (0 failed), depth before record ") == std::string::npos) return 34;
+    // ... and nothing of it is kept for the next frame.
+    auto after_one = frame(lb, scene_of, nothing);
+    if (after_one->layer_occluders != 0 || after_one->layer_depth_place != capture::kNoDepthPlace) return 35;
+    if (render::QuadLine(*after_one).find("tree occluders") != std::string::npos) return 35;
+    // A call that could not be read, and one without a twin: counted failed; the place of the good one stays.
+    capture::DrawRecord stranger = occluder;
+    stranger.count = 17;
+    auto mixed = frame(lb, scene_of, [&](render::FrameBuilder& fb) {
+      fb.LayerOccluderSeen(nullptr);
+      fb.LayerOccluderSeen(&occluder);
+      fb.LayerOccluderSeen(&stranger);
+    });
+    if (mixed->layer_occluders != 3 || mixed->layer_occluders_failed != 2 || mixed->layer_depth_place != leaf_at) return 36;
+    // Failures alone: no place.
+    auto failed = frame(lb, scene_of, [&](render::FrameBuilder& fb) { fb.LayerOccluderSeen(&stranger); });
+    if (failed->layer_occluders != 1 || failed->layer_occluders_failed != 1 || failed->layer_depth_place != capture::kNoDepthPlace) return 37;
+    if (render::QuadLine(*failed).find(", tree occluders 1 (1 failed), no depth place") == std::string::npos) return 37;
+    // Two late draws: the place is the earlier record's, whatever the order of the occluders.
+    capture::DrawRecord leaf2 = leaf, occluder2 = occluder;
+    leaf2.ib = occluder2.ib = {0x1C300000, 2000};
+    leaf2.count = occluder2.count = 1000;
+    auto two = frame(lb, [&](render::FrameBuilder& fb) {
+      fb.Add(other);
+      fb.Add(leaf2);
+      fb.Add(leaf);
+    }, [&](render::FrameBuilder& fb) {
+      fb.LayerOccluderSeen(&occluder);
+      fb.LayerOccluderSeen(&occluder2);
+    });
+    if (two->layer_occluders != 2 || two->layer_occluders_failed != 0 || two->layer_depth_place != uint32_t(two->draws.size()) - 2) return 38;
+    // The same draw twice in the scene: ambiguous, failed.
+    auto twice = frame(lb, [&](render::FrameBuilder& fb) {
+      fb.Add(leaf);
+      fb.Add(leaf);
+    }, [&](render::FrameBuilder& fb) { fb.LayerOccluderSeen(&occluder); });
+    if (twice->layer_occluders_failed != 1 || twice->layer_depth_place != capture::kNoDepthPlace) return 39;
+    // More calls than the bound: those past it fail, also when they have a twin.
+    auto many = frame(lb, scene_of, [&](render::FrameBuilder& fb) {
+      for (uint32_t i = 0; i < capture::kMaxLayerOccluders + 2; ++i) fb.LayerOccluderSeen(&occluder);
+    });
+    if (many->layer_occluders != capture::kMaxLayerOccluders + 2 || many->layer_occluders_failed != 2 || many->layer_depth_place != leaf_at) return 40;
+  }
   // The draw record's size is what it was: the quads are a block of their own.
   static_assert(sizeof(capture::DrawRecord) == 616);
   return 0;

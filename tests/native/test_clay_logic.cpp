@@ -86,7 +86,7 @@ static int Level8(float v) {
 
 // --- the sun layer's cases (a function of their own: main's frame holds every other case's locals) ---
 static void SunLayerTests() {
-  // 640 to 651: the sun layer (sub-project 10, plan Task 14; clay_logic.h, "Native sun layer").
+  // 640 to 652: the sun layer (sub-project 10, plan Task 14; clay_logic.h, "Native sun layer").
   {
     using capture::PostQuadKind;
     using capture::QuadRecord;
@@ -839,7 +839,12 @@ static void SunLayerTests() {
                              : !in.textures  ? ClaySun::kTexture
                                              : ClaySun::kDrawn;
         CHECK(648, DecideClaySun(in) == want);
+        // A depth place that is not usable: its own verdict, after the set's and before the objects are asked.
+        in.depth_place = false;
+        const ClaySun without = (want == ClaySun::kObjects || want == ClaySun::kTexture || want == ClaySun::kDrawn) ? ClaySun::kDepthPlace : want;
+        CHECK(648, DecideClaySun(in) == without);
       }
+      static_assert(ClaySunInputs{}.depth_place);
       // With the switch off nothing else is asked: off for every input.
       static_assert(DecideClaySun(ClaySunInputs{}) == ClaySun::kOff);
       ClaySunInputs all;
@@ -849,13 +854,53 @@ static void SunLayerTests() {
       CHECK(648, DecideClaySun(all) == ClaySun::kDrawn);
       ClaySunFrames n;
       for (ClaySun s : {ClaySun::kOff, ClaySun::kNoFurniture, ClaySun::kNoBloom, ClaySun::kNoRadial, ClaySun::kNoQuads, ClaySun::kState,
-                        ClaySun::kObjects, ClaySun::kTexture, ClaySun::kDrawn, ClaySun::kCount}) {
+                        ClaySun::kObjects, ClaySun::kTexture, ClaySun::kDepthPlace, ClaySun::kDrawn, ClaySun::kCount}) {
         CountClaySunFrame(s, n);
       }
       CountClaySunFrame(ClaySun::kDrawn, n);
-      CHECK(648, n.frames == 9 && n.by[size_t(ClaySun::kOff)] == 0 && n.by[size_t(ClaySun::kDrawn)] == 2 && n.by[size_t(ClaySun::kTexture)] == 1 &&
+      CHECK(648, n.frames == 10 && n.by[size_t(ClaySun::kOff)] == 0 && n.by[size_t(ClaySun::kDrawn)] == 2 && n.by[size_t(ClaySun::kTexture)] == 1 &&
                      n.by[size_t(ClaySun::kNoFurniture)] == 1 && n.by[size_t(ClaySun::kNoBloom)] == 1 && n.by[size_t(ClaySun::kNoRadial)] == 1 &&
-                     n.by[size_t(ClaySun::kNoQuads)] == 1 && n.by[size_t(ClaySun::kState)] == 1 && n.by[size_t(ClaySun::kObjects)] == 1);
+                     n.by[size_t(ClaySun::kNoQuads)] == 1 && n.by[size_t(ClaySun::kState)] == 1 && n.by[size_t(ClaySun::kObjects)] == 1 &&
+                     n.by[size_t(ClaySun::kDepthPlace)] == 1);
+    }
+
+    // 652: where the layer's depth is taken among the scene's records (PlanSunDepthPlace; ruling 39): before
+    // the first record a tree occluder of the game's layer names; after the last record in a frame without
+    // one; and no layer at all when the frame's place cannot be trusted.
+    {
+      const uint32_t kNone = capture::kNoDepthPlace;
+      // No occluder call: usable, after the last record (the frames by the trees; every frame before this rule).
+      static_assert(PlanSunDepthPlace(0, 0, kNone, 950).usable && PlanSunDepthPlace(0, 0, kNone, 950).record == kNone);
+      static_assert(PlanSunDepthPlace(0, 0, kNone, 0).usable);
+      // One occluder that named record 700 of 950 (run 3's frame: one late leaf draw).
+      static_assert(PlanSunDepthPlace(1, 0, 700, 950).usable && PlanSunDepthPlace(1, 0, 700, 950).record == 700);
+      static_assert(PlanSunDepthPlace(3, 0, 0, 950).usable && PlanSunDepthPlace(3, 0, 0, 950).record == 0);
+      static_assert(PlanSunDepthPlace(1, 0, 949, 950).usable);
+      // Not usable: a call that failed (also beside one that named a record), a place beyond the records, a
+      // call without a place, a place without a call.
+      static_assert(!PlanSunDepthPlace(1, 1, kNone, 950).usable && !PlanSunDepthPlace(2, 1, 700, 950).usable);
+      static_assert(!PlanSunDepthPlace(1, 0, 950, 950).usable && !PlanSunDepthPlace(1, 0, 951, 950).usable && !PlanSunDepthPlace(1, 0, 0, 0).usable);
+      static_assert(!PlanSunDepthPlace(1, 0, kNone, 950).usable && !PlanSunDepthPlace(0, 0, 700, 950).usable);
+      static_assert(!PlanSunDepthPlace(0, 1, kNone, 950).usable);
+      // (a plan that is not usable names no record)
+      static_assert(PlanSunDepthPlace(2, 1, 700, 950).record == kNone && PlanSunDepthPlace(1, 0, 950, 950).record == kNone);
+      // The step is taken at the first drawn record at or beyond the plan's (the plan's own may not be drawable
+      // this frame), never before it, and never in a frame whose place is after the last record.
+      const SunDepthPlace at = PlanSunDepthPlace(1, 0, 700, 950);
+      CHECK(652, !SunDepthBefore(at, 0) && !SunDepthBefore(at, 699) && SunDepthBefore(at, 700) && SunDepthBefore(at, 701) && SunDepthBefore(at, 949));
+      const SunDepthPlace end = PlanSunDepthPlace(0, 0, kNone, 950);
+      const SunDepthPlace bad = PlanSunDepthPlace(1, 1, 700, 950);
+      for (size_t i : {size_t(0), size_t(700), size_t(949), size_t(0xFFFFFFFFu), ~size_t(0)}) {
+        CHECK(652, !SunDepthBefore(end, i) && !SunDepthBefore(bad, i) && !SunDepthBefore(SunDepthPlace{}, i));
+      }
+      CHECK(652, SunDepthBefore(PlanSunDepthPlace(1, 0, 0, 1), 0));
+      // The verdict: a frame that would be drawn is not, for its depth place, and the Sun line says so.
+      ClaySunInputs in;
+      in.sun = in.furniture = in.bloom = in.radial = in.drawable = in.quads = in.objects = in.textures = true;
+      in.depth_place = bad.usable;
+      CHECK(652, DecideClaySun(in) == ClaySun::kDepthPlace && std::string(ClaySunName(ClaySun::kDepthPlace)) == "depth place");
+      in.depth_place = at.usable;
+      CHECK(652, DecideClaySun(in) == ClaySun::kDrawn);
     }
 
     // 649: the Sun line.
@@ -877,7 +922,11 @@ static void SunLayerTests() {
       CHECK(649, FormatSunText(st) ==
                      "Sun: on, drawn: occluders 3, layer 1 1, layer 2 2, centre (0.3821, 0.3938), previous frame's share 0.1020 | frames since start 900: drawn 880, "
                      "sun-layer {no furniture: 18, no bloom: 0, no radial registers: 0, no layer quad: 0, a record's state or values: 0, "
-                     "post-objects: 0, quad-texture: 2}");
+                     "post-objects: 0, quad-texture: 2, depth place: 0}");
+      // (a layer whose depth was taken among the records says before which)
+      st.sun_depth_record = 700;
+      CHECK(649, FormatSunText(st).rfind("Sun: on, drawn: occluders 3, layer 1 1, layer 2 2, centre (0.3821, 0.3938), depth before record 700, previous frame's share", 0) == 0);
+      st.sun_depth_record = capture::kNoDepthPlace;
       const std::pair<ClaySun, const char*> words[] = {{ClaySun::kNoFurniture, "not drawn (sun-layer: no furniture)"},
                                                        {ClaySun::kNoBloom, "not drawn (sun-layer: no bloom)"},
                                                        {ClaySun::kNoRadial, "not drawn (sun-layer: no radial registers)"},
@@ -885,6 +934,7 @@ static void SunLayerTests() {
                                                        {ClaySun::kState, "not drawn (sun-layer: a record's state or values)"},
                                                        {ClaySun::kObjects, "not drawn (sun-layer: post-objects)"},
                                                        {ClaySun::kTexture, "not drawn (sun-layer: quad-texture)"},
+                                                       {ClaySun::kDepthPlace, "not drawn (sun-layer: depth place)"},
                                                        {ClaySun::kOff, "not drawn (sun-layer: off)"}};
       for (const auto& [s, word] : words) {
         st.sun = s;
@@ -904,7 +954,7 @@ static void SunLayerTests() {
       st.post_previous = std::numeric_limits<float>::quiet_NaN();
       CHECK(649, FormatSunText(st).find(", previous frame's share 0.0000 | frames") != std::string::npos);
       CHECK(649, longest.size() > 300 && longest.find("centre (0.0000, 0.0000)") != std::string::npos &&
-                     longest.rfind("quad-texture: 18446744073709551615}") == longest.size() - 35);
+                     longest.rfind("depth place: 18446744073709551615}") == longest.size() - 34);
     }
 
     // 650: the steps' constants with the sun's switch: the bright pass's sun flag only with the bloom's flag

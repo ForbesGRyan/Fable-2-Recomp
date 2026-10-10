@@ -4263,6 +4263,56 @@ void FlushPendingQuad() {
   g_builder.AddQuad(record, why);
 }
 
+// One outermost DrawIndexedVertices call outside the main scene in a frame with the quads wanted: the sun
+// layer's tree occluder, if it is one (draw_record.h, "The sun layer's depth place"). Looked at only between
+// the main scene's first call of the indexed builder (the scene's pitch is known from it: QuadFrame) and
+// the frame's composite, as the layer's quads are: the shadow passes' draws come before, the HUD's after,
+// and cost this thread's frame checks alone. Told by the pixel shader (F1EB2497108F159D) and the target (half the
+// scene's pitch, as the layer's quads: ruling 24). Its geometry is read as a scene draw's (FillDrawInputs)
+// and made a record (AssembleRecord), which the frame's builder matches to the scene record it draws again,
+// under the scene's mutex after the frame's recheck. A call whose pixel shader cannot be told, or whose
+// record cannot be made, is handed over as a failed one: the frame then has no place it can trust, and a
+// consumer draws no sun layer for it (at most kMaxLayerOccluders calls a frame are counted).
+void ObserveLayerOccluder(const LastArgs& a, uint32_t device) {
+  QuadFrame& f = CurrentQuadFrame();
+  if (!f.scene_pitch || CurrentPostFrame().done) return;
+  uint32_t vs_field = 0, ps_field = 0;
+  const bool fields = device && ReadVirtualBe32(device + xdk::kVsDeviceFieldOffset, &vs_field) &&
+                      ReadVirtualBe32(device + xdk::kPsDeviceFieldOffset, &ps_field);
+  const uint32_t ps_obj = vs_field ? ps_field : t_gpu_ps;  // (as ChoosePs)
+  if (fields && !ps_obj) return;  // (a draw without a pixel shader is no tree occluder)
+  const PsInfo* ps = fields ? LookupPs(ps_obj) : nullptr;
+  bool read = false;
+  DrawRecord record;
+  if (ps) {
+    if (ps->hash != kTreeOccluderPs) return;
+    uint32_t surface = 0;
+    if (!ReadVirtualBe32(device + xdk::kDeviceSurfaceInfoOffset, &surface)) {
+      surface = 0;
+    } else if ((surface & xdk::kSurfacePitchMask) * 2 != f.scene_pitch) {
+      return;  // (the shader at another target: not the layer's)
+    }
+    if (surface) {
+      DrawInputs in;
+      in.func_id = kHook_D3DDevice_DrawIndexedVertices;
+      in.indexed = true;
+      in.prim = a.r[1];
+      in.base_vertex = int32_t(a.r[2]);
+      in.start = a.r[3];
+      in.count = a.r[4];
+      DrawShaders shaders;
+      const SkipReason extra = IsSupportedPrim(in.prim) ? FillDrawInputs(device, in, &shaders) : SkipReason::kNone;
+      record = AssembleRecord(in, 0);
+      record.skip = ResolveSkip(record.skip, extra);
+      read = record.skip == SkipReason::kNone;
+    }
+  }
+  std::lock_guard<std::mutex> lock(g_scene_mutex);
+  // The frame is checked again under the lock: a call of one frame must not count in the next.
+  if (f.frame != g_light_tries_frame.load(std::memory_order_relaxed)) return;
+  g_builder.LayerOccluderSeen(read ? &record : nullptr);
+}
+
 // One outermost guest draw inside the main scene, as a DrawRecord in the frame.
 // Draw-argument mapping (frame-map section 8): DrawIndexedVertices r4 prim, r5
 // base vertex, r6 start index, r7 index count; DrawVertices r4 prim, r5 start
@@ -4713,6 +4763,10 @@ void AppendFrameQuads(std::string& row, const render::FrameScene& sc) {
     row += "]";
   }
   row += "}";
+  // (the layer's depth place: the tree occluders seen, those that named no record, the record's index or -1)
+  std::snprintf(buf, sizeof(buf), ",\"layer_depth\":{\"occluders\":%u,\"failed\":%u,\"place\":%lld}", sc.layer_occluders,
+                sc.layer_occluders_failed, sc.layer_depth_place == kNoDepthPlace ? -1ll : static_cast<long long>(sc.layer_depth_place));
+  row += buf;
 }
 
 // Ends the frame's bracket and, with the renderer on, finishes the frame's
@@ -5481,6 +5535,8 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
     if (g_post_frame.load(std::memory_order_relaxed)) ObservePostDraw(id, device);
     // And with the quads wanted: the sun layer's quads, at the indexed builder's calls.
     if (id == kHook_DrawIndx_82217EE8 && g_quads_frame.load(std::memory_order_relaxed)) ObserveQuadDraw(args, device, false);
+    // And the layer's tree occluders, at DrawIndexedVertices: they name the records issued after the game's depth copy.
+    if (id == kHook_D3DDevice_DrawIndexedVertices && g_quads_frame.load(std::memory_order_relaxed)) ObserveLayerOccluder(args, device);
   }
   if (!g_armed.load(std::memory_order_relaxed)) return;
   if (!records) t_ps_loads.Observe(in_scene);

@@ -398,8 +398,10 @@ enum class ClayFurniture : uint8_t { kOff, kNoPost, kNoSky, kNoQuads, kRecords, 
 // cannot be drawn as it was captured. kObjects: the layer's objects could not be made ("post-objects").
 // kTexture: a layer quad's texture could not be had this frame (the first frames after a view switch:
 // the upload budget): the layer is all of its quads or none, since one without an occluder is worse
-// than none.
-enum class ClaySun : uint8_t { kOff, kNoFurniture, kNoBloom, kNoRadial, kNoQuads, kState, kObjects, kTexture, kDrawn, kCount };
+// than none. kDepthPlace: where the layer's depth is to be taken is not known for this frame (a tree
+// occluder of the game's layer named no single record of the scene: PlanSunDepthPlace); a layer whose depth
+// held what the game's does not would lose its beams, so none is drawn.
+enum class ClaySun : uint8_t { kOff, kNoFurniture, kNoBloom, kNoRadial, kNoQuads, kState, kObjects, kTexture, kDepthPlace, kDrawn, kCount };
 // The pass's frame counts of the sun layer, by verdict: one frame added. Counted: every frame with the
 // sun's switch on, which is every verdict but kOff.
 struct ClaySunFrames {
@@ -642,6 +644,9 @@ struct ClayStats {
   // centre. sun_frames: the pass's totals since it was made, this frame included, by verdict.
   ClaySun sun = ClaySun::kOff;
   uint32_t sun_drawn[3] = {};
+  // The record of FrameScene::draws before which a drawn layer's depth was taken (PlanSunDepthPlace);
+  // capture::kNoDepthPlace: after the scene's last record.
+  uint32_t sun_depth_record = capture::kNoDepthPlace;
   float sun_centre[2] = {};
   ClaySunFrames sun_frames;
 };
@@ -4211,10 +4216,14 @@ inline std::string FormatFurnitureText(const ClayStats& st) {
 // water, one late leaf draw, the dog's fur and the scene's clouds, brought up by the occluders. The
 // scene's own clouds write depth with their alpha test at 0.0196; the layer's cloud occluders use the
 // same alpha at 0.149, so the layer's depth holds far less cloud than the scene's (with 0.0196 the beam
-// source keeps 11 pixels of 12,310). The native one: the pass's depth after the scene's last record
-// (every record the pass draws with a depth write is in it, the late leaves among them; no step of the
-// pass writes depth after the records: the sky step, the moon and the glare test without writing, and a
-// later cloud step in the scene must not write the depth this copy is taken from), at the texel
+// source keeps 11 pixels of 12,310). The native one: the pass's depth as it is BEFORE the first record the
+// game issued after its depth copy (PlanSunDepthPlace: the frame's tree occluders name those records; the
+// colour pass is interrupted there for the layer's depth step), or, in a frame without such a record, after
+// the scene's last record. The first writing of this comment took the depth after the last record in every
+// frame, "the late leaves among them": that put a tree the game shows at half, and keeps out of its copy,
+// whole into the layer's depth (review of plan Tasks 14 and 15, Important 2). No step of the pass writes
+// depth after the records: the sky step, the moon, the glare and the scene's clouds test without writing.
+// The depth is read at the texel
 // (ratio * x, ratio * y) by point (SunDepthTexel: the game's every second texel of its 1120 x 720 copy,
 // the top left texel of the block at another scale), then the frame's cloud-occluder records drawn into
 // it by 3FF7's rule with the record's own reference. What the native depth lacks against the game's:
@@ -4593,8 +4602,45 @@ inline double SunOccluderAlphaMirror(float texel_alpha, const float world[2], co
   return a > 0.0 ? (a < 1.0 ? a : 1.0) : 0.0;
 }
 
+// Where the layer's depth is taken among the scene's records (draw_record.h, "The sun layer's depth place";
+// controller ruling 39). The game's layer starts from a depth copy made in the middle of the scene; a record
+// the game issued after that copy must not be in the depth the native layer copies (the one captured: a tree
+// faded to half, drawn late, which the native pass draws whole: with it in the depth the beam source loses
+// 2,230 of its 7,567 lit texels on run 3's frame and the beams' root a third of its light). The frame's tree
+// occluders name those records (FrameScene::layer_depth_place). The plan: usable, and before which record of
+// FrameScene::draws the depth is taken (`record`; capture::kNoDepthPlace: after the last one, the frame had
+// no occluder). Not usable, and then no layer is drawn (ClaySun::kDepthPlace): an occluder call that named
+// no single record, a place without a call, a place beyond the records.
+// The game's own tree occluder (F1EB: the late draw into the layer's depth, where its alpha, texture alpha
+// times 0.5, reaches 0.5 on a target without multisampling) is not drawn (rulings 33 and 39): the native
+// layer's depth has nothing of the late draw, the game's a part of it.
+struct SunDepthPlace {
+  bool usable = false;
+  uint32_t record = capture::kNoDepthPlace;
+};
+constexpr SunDepthPlace PlanSunDepthPlace(uint32_t occluders, uint32_t failed, uint32_t place, size_t draws) {
+  SunDepthPlace plan;
+  if (failed != 0) return plan;
+  if (occluders == 0) {
+    plan.usable = place == capture::kNoDepthPlace;
+    return plan;
+  }
+  if (place == capture::kNoDepthPlace || place >= draws) return plan;
+  plan.usable = true;
+  plan.record = place;
+  return plan;
+}
+// Whether the layer's depth is taken before the record at `index` of FrameScene::draws is drawn: at the
+// first record at or beyond the plan's (the plan's own may not be drawable this frame).
+constexpr bool SunDepthBefore(const SunDepthPlace& plan, size_t index) {
+  return plan.usable && plan.record != capture::kNoDepthPlace && index >= plan.record;
+}
+
 struct ClaySunInputs {
   bool sun = false, furniture = false, bloom = false, radial = false, quads = false, drawable = false, objects = false, textures = false;
+  // (true unless the frame's depth place is not usable: the one input that is there by default, so that a
+  // frame without tree occluders, the common one, is judged as before)
+  bool depth_place = true;
 };
 constexpr ClaySun DecideClaySun(const ClaySunInputs& in) {
   if (!in.sun) return ClaySun::kOff;
@@ -4603,6 +4649,7 @@ constexpr ClaySun DecideClaySun(const ClaySunInputs& in) {
   if (!in.radial) return ClaySun::kNoRadial;
   if (!in.drawable) return ClaySun::kState;
   if (!in.quads) return ClaySun::kNoQuads;
+  if (!in.depth_place) return ClaySun::kDepthPlace;
   if (!in.objects) return ClaySun::kObjects;
   if (!in.textures) return ClaySun::kTexture;
   return ClaySun::kDrawn;
@@ -4616,6 +4663,7 @@ constexpr const char* ClaySunName(ClaySun s) {
     case ClaySun::kState: return "a record's state or values";
     case ClaySun::kObjects: return kPostObjectsReason;
     case ClaySun::kTexture: return kQuadTextureReason;
+    case ClaySun::kDepthPlace: return "depth place";
     case ClaySun::kDrawn: return "drawn";
     default: return "off";
   }
@@ -4633,6 +4681,11 @@ inline std::string FormatSunText(const ClayStats& st) {
                   st.sun_drawn[2], std::fabs(st.sun_centre[0]) <= 4.0f ? double(st.sun_centre[0]) : 0.0,
                   std::fabs(st.sun_centre[1]) <= 4.0f ? double(st.sun_centre[1]) : 0.0);
     text += buf;
+    // (where the layer's depth was taken, only when that was among the records: a late draw of the game's)
+    if (st.sun_depth_record != capture::kNoDepthPlace) {
+      std::snprintf(buf, sizeof(buf), ", depth before record %u", st.sun_depth_record);
+      text += buf;
+    }
   } else {
     text += std::string("not drawn (") + kSunLayerReason + ": " + ClaySunName(st.sun) + ")";
   }
@@ -4643,7 +4696,7 @@ inline std::string FormatSunText(const ClayStats& st) {
   text += buf;
   bool first = true;
   for (ClaySun s : {ClaySun::kNoFurniture, ClaySun::kNoBloom, ClaySun::kNoRadial, ClaySun::kNoQuads, ClaySun::kState, ClaySun::kObjects,
-                    ClaySun::kTexture}) {
+                    ClaySun::kTexture, ClaySun::kDepthPlace}) {
     std::snprintf(buf, sizeof(buf), "%s%s: %llu", first ? "" : ", ", ClaySunName(s), static_cast<unsigned long long>(st.sun_frames.by[size_t(s)]));
     text += buf;
     first = false;

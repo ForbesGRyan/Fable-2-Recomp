@@ -44,6 +44,7 @@
 #include "main_scene.h"
 #include "material.h"
 #include "position_decode.h"
+#include "post_block.h"
 #include "render_state.h"
 #include "bone_skin.h"
 #include "instance_expand.h"
@@ -125,6 +126,12 @@ std::atomic<bool> g_shadows_frame{false};
 // read: no register, no fetch constant, no table.
 std::atomic<bool> g_fog_wanted{false};
 std::atomic<bool> g_fog_frame{false};
+// The consumer also wants the frame's post block (SetPostWanted: the native
+// view, the light and the post chain on), latched like the shadows' and set
+// only in a frame with records. With it clear no hooked draw outside the main
+// scene is looked at for the post chain and nothing of it is read.
+std::atomic<bool> g_post_wanted{false};
+std::atomic<bool> g_post_frame{false};
 std::atomic<bool> g_failed{false};
 std::atomic<uint64_t> g_swaps{0};      // guest frames since start (while enabled)
 std::atomic<int> g_frames_written{0};  // discovery frames completed
@@ -165,6 +172,12 @@ uint32_t g_fog_tables_changed = 0;
 // Lines written about a frame whose fog block was read and refused (at most kFogRefusedLines).
 uint32_t g_fog_refused_lines = 0;
 constexpr uint32_t kFogRefusedLines = 8;
+// The same for the post block: frames with it wanted since the last line, those of them without
+// a block ("post-block") by reason, and those whose block is a kept one of an earlier frame
+// (FrameScene::post_age above 0). OnSwap thread only.
+uint32_t g_post_frames = 0;
+uint32_t g_post_block_missing[size_t(PostBlockReason::kCount)] = {};
+uint32_t g_post_kept_frames = 0;
 
 inline uint64_t Ticks() {
 #if defined(_M_X64) || defined(__x86_64__)
@@ -3816,6 +3829,156 @@ void ReadSkyBlock(uint32_t device, FogFrame& f) {
   }
 }
 
+// --- The post block (frame-map section 17, "Post block"; post_block.h) -----------------------
+// Read only in a frame with records and with the post block wanted (g_post_frame), at the
+// game's own post rectangles: outermost calls of D3DDevice_BeginVertices outside the main scene.
+
+// This thread's post state of the current frame (the drawing thread's own, like the fog's;
+// g_light_tries_frame tells one frame from the next): the registers read so far at the bright
+// pass and the blurs, whether the block was taken at the composite, and the reads that gave none.
+struct PostFrame {
+  PostRegisters regs{};
+  bool done = false;
+  uint32_t tries = 0;
+  uint32_t untold = 0;  // rectangles whose pixel shader could not be told (ObservePostDraw)
+  uint32_t frame = 0;
+};
+constinit thread_local PostFrame t_post;
+// At most this many reads at a composite in a frame that gives no block (a read is five
+// ReadPixelConstant calls, one fetch constant and 2 KB of table): what a frame whose table
+// cannot be read costs. The game issues one composite a frame (72 of 72 captured frames).
+constexpr uint32_t kMaxPostTries = 8;
+
+// Post reads made in one frame and found, under the lock, to belong to a frame that is over (the
+// frame's recheck below): dropped, and counted here for the post: log line since its last print.
+std::atomic<uint32_t> g_post_dropped{0};
+
+// The registers of the block are the bank's at any hooked draw: no buffer load names them
+// (post_block.h; ReadPixelConstant would otherwise need the load model's answer, which is kept
+// for the main scene's draws).
+constexpr bool PostRegistersAreBankOnly() {
+  for (uint32_t r : kPostCompositeRegisters) {
+    if (IsBufferLoadRegister(kPixelBank, r)) return false;
+  }
+  for (uint32_t r : kPostBrightRegisters) {
+    if (IsBufferLoadRegister(kPixelBank, r)) return false;
+  }
+  for (uint32_t r : kPostBlurRegisters) {
+    if (IsBufferLoadRegister(kPixelBank, r)) return false;
+  }
+  return true;
+}
+static_assert(PostRegistersAreBankOnly(), "a post register is loaded from a constant buffer");
+
+PostFrame& CurrentPostFrame() {
+  const uint32_t frame = g_light_tries_frame.load(std::memory_order_relaxed);
+  if (t_post.frame != frame) {
+    t_post = PostFrame{};
+    t_post.frame = frame;
+  }
+  return t_post;
+}
+
+// Whether `f` is still the frame being built (as ShadowFrameCurrent: call with g_scene_mutex
+// held; a caller that gets false drops what it holds, and the drop is counted).
+bool PostFrameCurrent(const PostFrame& f) {
+  const bool current = f.frame == g_light_tries_frame.load(std::memory_order_relaxed);
+  if (!current) g_post_dropped.fetch_add(1, std::memory_order_relaxed);
+  return current;
+}
+
+// `n` whole pixel registers through ReadPixelConstant; false when one cannot be read.
+bool ReadPostRegisters(const uint32_t* regs, int n, float out[][4]) {
+  bool read = true;
+  for (int i = 0; read && i < n; ++i) read = ReadPixelConstant(regs[i], out[i]);
+  return read;
+}
+
+// One outermost hooked draw outside the main scene, in a frame with the post block wanted. Only
+// D3DDevice_BeginVertices is looked at: every post rectangle comes through it (frame-map section
+// 17: the "verts" rows of the post shaders). Which step a rectangle is, is told by the pixel
+// shader the draw runs (ChoosePs; its microcode hash through LookupPs, cached per object), as the
+// sky draw is told:
+//   - the bright pass (kPostBrightPs): its c31, c46, c47, c77 into this thread's PostFrame;
+//   - the blurs (kPostBlurXPs, kPostBlurYPs): their c46, c47;
+//   - the composite (kPostCompositePs): its c31, c46, c47, c77, c78, the fetch constant of slot 1,
+//     and the table's 2,048 bytes from guest memory at the constant's base address, read whole or
+//     not at all (ReadPhysical). The registers and the constant are judged before any table byte
+//     is read, by MakePostBlock itself without bytes: its rules come in one order, so a first call
+//     that fails for the table's bytes has passed every rule before them. An address is followed
+//     only for a constant that is the table's pin. The bytes are copied first; the copy is what is
+//     hashed (PostSource: the content a discovery capture names the table by) and decoded, so the
+//     two cannot differ. Then the block is handed to the builder under the scene's mutex, after
+//     the frame's recheck: a block read in one frame must not become the next frame's.
+// The registers are read at the hook's return, where the discovery rows' "pfull" is read too.
+// After the frame's block was taken, and after kMaxPostTries reads that gave none, nothing more
+// is looked at this frame: what remains per call is this thread's frame check. Before that, a
+// call costs the device's snapshot and the shader's lookup (the hash is cached by object).
+// A rectangle whose shader cannot be told (the device or the shader's record unreadable) may have
+// been the composite: it is counted in the frame as a try with "unread", so that a frame which
+// then has no block does not read "no-draw"; those counts have a bound of their own and do not
+// use up the reads above. A draw without a pixel shader (depth only) is no post rectangle.
+void ObservePostDraw(uint32_t id, uint32_t device) {
+  if (id != kHook_D3DDevice_BeginVertices) return;
+  PostFrame& f = CurrentPostFrame();
+  if (f.done || f.tries >= kMaxPostTries) return;
+  DeviceSnapshot dev;
+  uint32_t ps_obj = 0;
+  const bool have_dev = ReadDevice(device, &dev);
+  if (have_dev && !ChoosePs(dev, &ps_obj)) return;
+  const PsInfo* ps = have_dev ? LookupPs(ps_obj) : nullptr;
+  if (!ps) {
+    if (f.untold >= kMaxPostTries) return;
+    std::lock_guard<std::mutex> lock(g_scene_mutex);
+    if (!PostFrameCurrent(f)) return;
+    g_builder.CountPostTry(PostBlockReason::kUnread);
+    ++f.untold;
+    return;
+  }
+  const uint64_t hash = ps->hash;  // (`ps` is the cache's entry: not held across the reads below)
+  if (hash == kPostBrightPs) {
+    f.regs.have_bright = ReadPostRegisters(kPostBrightRegisters, 4, f.regs.bright);
+    return;
+  }
+  if (hash == kPostBlurXPs || hash == kPostBlurYPs) {
+    const int s = hash == kPostBlurYPs ? 1 : 0;
+    f.regs.have_blur[s] = ReadPostRegisters(kPostBlurRegisters, 2, f.regs.blur[s]);
+    return;
+  }
+  if (hash != kPostCompositePs) return;
+  PostRegisters regs = f.regs;
+  regs.have_composite = ReadPostRegisters(kPostCompositeRegisters, 5, regs.composite);
+  uint32_t fc[6] = {};
+  const bool read = regs.have_composite && ReadTextureFetch(device, kPostTableSlot, fc);
+  PostBlockReason why = PostBlockReason::kUnread;
+  PostBlock block{};
+  PostSource source;
+  if (read) MakePostBlock(regs, fc, nullptr, 0, &why);
+  if (read && why == PostBlockReason::kTableBytes) {
+    uint8_t table[kPostTableBytes];
+    const uint32_t base = fc[1] & 0xFFFFF000u;
+    if (const uint8_t* p = ReadPhysical(base, uint32_t(kPostTableBytes))) {
+      std::memcpy(table, p, sizeof(table));
+      block = MakePostBlock(regs, fc, table, sizeof(table), &why);
+      if (block.valid) {
+        source.base = base;
+        source.content = XXH3_64bits(table, sizeof(table));
+      }
+    } else {
+      why = PostBlockReason::kUnread;
+    }
+  }
+  std::lock_guard<std::mutex> lock(g_scene_mutex);
+  if (!PostFrameCurrent(f)) return;
+  if (block.valid) {
+    g_builder.SetPost(block, source);
+    f.done = true;
+  } else {
+    g_builder.CountPostTry(why);
+    ++f.tries;
+  }
+}
+
 // One outermost guest draw inside the main scene, as a DrawRecord in the frame.
 // Draw-argument mapping (frame-map section 8): DrawIndexedVertices r4 prim, r5
 // base vertex, r6 start index, r7 index count; DrawVertices r4 prim, r5 start
@@ -4174,6 +4337,42 @@ void AppendFrameFog(std::string& row, const render::FrameScene& sc) {
   row += "}}";
 }
 
+// Discovery evidence, in the frame row of a frame with records: the frame's post block as the
+// scene carries it, {"post":{"on","valid","reason","age","tries","parts","composite":[6],
+// "bright":[5],"blur":[14],"table":{"base","content"},"texels":[512]}}; the registers, the
+// table's source and the decoded texels only for a valid block. "composite", "bright", "blur" in
+// PostBlock's order; "base", "content": where the table was read and the hash of the bytes that
+// were decoded (PostSource), the same hash the composite's row names the table by in "tfc".
+// tools/xdk_sigmatch/post_tables.py (block) holds all of it against the same frame's rows and
+// dump (spec criterion 3).
+void AppendFramePost(std::string& row, const render::FrameScene& sc) {
+  char buf[192];
+  auto floats = [&](const char* key, const float* v, int n) {
+    row += ",\"";
+    row += key;
+    row += "\":[";
+    for (int i = 0; i < n; ++i) {
+      if (i) row += ",";
+      AppendFloat(row, v[i]);
+    }
+    row += "]";
+  };
+  std::snprintf(buf, sizeof(buf), ",\"post\":{\"on\":%d,\"valid\":%d,\"reason\":\"%s\",\"age\":%u,\"tries\":%u,\"parts\":%u",
+                sc.post_records ? 1 : 0, sc.post.valid ? 1 : 0, PostBlockReasonName(sc.post_reason), sc.post_age, sc.post_tries,
+                unsigned(sc.post.parts));
+  row += buf;
+  if (sc.post.valid) {
+    floats("composite", sc.post.composite, 6);
+    floats("bright", sc.post.bright, 5);
+    floats("blur", &sc.post.blur[0][0], 14);
+    std::snprintf(buf, sizeof(buf), ",\"table\":{\"base\":\"0x%08X\",\"content\":\"0x%016llX\"}", sc.post_source.base,
+                  static_cast<unsigned long long>(sc.post_source.content));
+    row += buf;
+    floats("texels", sc.post.table, int(kPostTableTexels));
+  }
+  row += "}";
+}
+
 // Ends the frame's bracket and, with the renderer on, finishes the frame's
 // scene (`swap` = guest frame number) with its capture time from `timer`,
 // then latches whether the next frame builds records. With `write`
@@ -4210,6 +4409,10 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
       const bool fog = records && g_fog_wanted.load(std::memory_order_relaxed);
       g_fog_frame.store(fog, std::memory_order_relaxed);
       g_builder.FogOn(fog);
+      // The post block likewise.
+      const bool post = records && g_post_wanted.load(std::memory_order_relaxed);
+      g_post_frame.store(post, std::memory_order_relaxed);
+      g_builder.PostOn(post);
       // The next frame reads its own light block (and its own shadow state: CurrentShadowFrame).
       g_light_tries_frame.fetch_add(1, std::memory_order_relaxed);
     }
@@ -4238,6 +4441,7 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
     AppendFrameLight(row, *done->scene);
     AppendFrameShadow(row, *done->scene);
     AppendFrameFog(row, *done->scene);
+    AppendFramePost(row, *done->scene);
   }
   row += "}\n";
   std::fputs(row.c_str(), g_file);
@@ -4396,6 +4600,11 @@ void PublishScene(const FinishedScene& done) {
       }
     }
   }
+  if (sc.records && sc.post_records) {
+    ++g_post_frames;
+    if (!sc.post.valid && sc.post_reason < PostBlockReason::kCount) ++g_post_block_missing[size_t(sc.post_reason)];
+    if (sc.post.valid && sc.post_age != 0) ++g_post_kept_frames;
+  }
   if (sc.frame % 300 != 0) return;
   std::string skipped, unsupported;
   char buf[96];
@@ -4533,6 +4742,30 @@ void PublishScene(const FinishedScene& done) {
     g_fog_tables_checked = g_fog_tables_changed = 0;
     std::fill(std::begin(g_fog_block_missing), std::end(g_fog_block_missing), 0u);
     std::fill(std::begin(g_sky_block_missing), std::end(g_sky_block_missing), 0u);
+    // post: this frame's post block (render::PostLine: its age, the frame's c20.w, the composite's
+    // and the bright pass's registers, where the table was read and its content hash), in how many
+    // of the frames with the post block wanted since the last line there was none (post-block), by
+    // reason, and in how many the block was a kept one of an earlier frame. "off" without it.
+    if (sc.post_records || g_post_frames) {
+      std::string post_missing;
+      uint32_t post_total = 0;
+      for (size_t i = 0; i < size_t(PostBlockReason::kCount); ++i) {
+        if (!g_post_block_missing[i]) continue;
+        post_total += g_post_block_missing[i];
+        std::snprintf(buf, sizeof(buf), "%s%s: %u", post_missing.empty() ? "" : ", ", PostBlockReasonName(PostBlockReason(i)),
+                      g_post_block_missing[i]);
+        post_missing += buf;
+      }
+      // (dropped: post reads of a frame that was over when they were to be taken, since the last line)
+      REXSYS_INFO("[native] capture: frame {} post: {} | {} in {} of {} frames {{{}}} | kept from an earlier frame in {} | "
+                  "dropped at a frame's end {}",
+                  sc.frame, render::PostLine(sc), kPostBlockReason, post_total, g_post_frames, post_missing, g_post_kept_frames,
+                  g_post_dropped.exchange(0, std::memory_order_relaxed));
+    } else {
+      REXSYS_INFO("[native] capture: frame {} post: {}", sc.frame, render::PostLine(sc));
+    }
+    g_post_frames = g_post_kept_frames = 0;
+    std::fill(std::begin(g_post_block_missing), std::end(g_post_block_missing), 0u);
   }
   LogShaderBreakdown(sc);
 }
@@ -4576,8 +4809,8 @@ bool ArmDiscoveryNow(uint32_t frames, uint32_t every) {
 }
 
 // Stored with release and read with acquire at the frame's boundary (FinishFrame's latch), where
-// the shadows' and the fog's words are read after it: a caller that switches the records ON stores
-// those two words first (PollFrame), so a boundary that sees the records wanted also sees them,
+// the shadows', the fog's and the post block's words are read after it: a caller that switches the
+// records ON stores those words first (PollFrame), so a boundary that sees the records wanted also sees them,
 // and no frame is recorded without its fog block for the order of three stores (final review, M6).
 void SetRecordsWanted(bool wanted) {
   g_records_wanted.store(wanted, std::memory_order_release);
@@ -4589,6 +4822,10 @@ void SetShadowsWanted(bool wanted) {
 
 void SetFogWanted(bool wanted) {
   g_fog_wanted.store(wanted, std::memory_order_relaxed);
+}
+
+void SetPostWanted(bool wanted) {
+  g_post_wanted.store(wanted, std::memory_order_relaxed);
 }
 
 // --- Post discovery (frame-map section 17, "Discovery"): resolves and the post buffers' memory ---
@@ -4840,9 +5077,11 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
   if (records) t_ps_loads.Observe(in_scene);
   if (in_scene && records) {
     RecordDraw(id, args, device);
-  } else if (records && g_shadows_frame.load(std::memory_order_relaxed)) {
+  } else if (records) {
     // Outside the scene, in a frame with shadow records: the two shadow passes.
-    ObserveShadowDraw(id, args, device);
+    if (g_shadows_frame.load(std::memory_order_relaxed)) ObserveShadowDraw(id, args, device);
+    // And in a frame with the post block wanted: the game's post rectangles (both, when both are wanted).
+    if (g_post_frame.load(std::memory_order_relaxed)) ObservePostDraw(id, device);
   }
   if (!g_armed.load(std::memory_order_relaxed)) return;
   if (!records) t_ps_loads.Observe(in_scene);

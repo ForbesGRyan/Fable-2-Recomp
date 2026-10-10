@@ -33,6 +33,11 @@ Reports (every number is of the files named on the command line):
         per frame: c20.w, the composite's and the bright pass's registers, c77.y * c20.w, the table at
         scene luminance 0.01 .. 3.99, its change from the frame before, the rules of MakePostBlock (plan
         Task 4) it would fail, and whether the composite's row precedes the frame row.
+  post_tables.py block <capture.jsonl>
+        the post block the capture built for each frame (the frame row's "post", written by a build with plan
+        Task 4) against the same frame's rows and dump: its registers against "pfull" of the composite's, the
+        bright pass's and the blurs' rows bit for bit, its 512 texels against the dump the composite's row
+        names, its age, its blur part, its pairing with c20.w (spec criterion 3).
   post_tables.py ramp <game.log> [--pairs <ramp_092959.txt>]
         the ramp lines of a log: the table at the levels of spec criterion 4 against the measured pairs,
         and how often the table changed.
@@ -406,6 +411,8 @@ class PostFrame:
         self.out_scale = None     # c20.w: the frame row's light block, or the first main-scene row's c20
         self.out_scale_from = None
         self.memdump = None       # the "memdump" row
+        self.block = None         # "post" of the frame row: the post block the capture built (plan Task 4)
+        self.has_frame_row = False
 
 
 class PostCapture:
@@ -457,6 +464,8 @@ def load_capture(path, tex_root=None):
             if kind == "frame":
                 r = json.loads(line)
                 fr.frame_line = line_no
+                fr.has_frame_row = True
+                fr.block = r.get("post")
                 light = r.get("light") or {}
                 if light.get("valid") and isinstance(light.get("out_scale"), (int, float)):
                     fr.out_scale, fr.out_scale_from = float(light["out_scale"]), "the frame row's light block"
@@ -496,6 +505,27 @@ def composite_registers(row):
 def bright_registers(row):
     """(c31.x, c46.x, c47.x, c77.x, c77.y) of a bright-pass row."""
     return (_x(_reg(row, 31)), _x(_reg(row, 46)), _x(_reg(row, 47)), _x(_reg(row, 77)), _x(_reg(row, 77), 1))
+
+
+def blur_registers(row):
+    """(c46.x, c46.y, c46.z, c46.w, c47.x, c47.y, c47.z) of a blur row: the centre tap's weight and those of
+    the taps 1 to 6 texels away; None where the row gives no register."""
+    c46, c47 = _reg(row, 46), _reg(row, 47)
+    if c46 is None or c47 is None:
+        return None
+    return tuple(c46) + tuple(c47[:3])
+
+
+def blur_part(blur_x_row, blur_y_row):
+    """MakePostBlock's rule for the blur part (post_block.h, kPostPartBlur): both blurs' rows are there, every
+    weight is in [0, 1] and each set's w0 + 2 (w1 + .. + w6) is 1 within 1e-3."""
+    for row in (blur_x_row, blur_y_row):
+        w = blur_registers(row)
+        if w is None or not all(math.isfinite(x) and 0.0 <= x <= 1.0 for x in w):
+            return False
+        if not abs(w[0] + 2.0 * sum(w[1:]) - 1.0) <= 1e-3:
+            return False
+    return True
 
 
 def row_texture(cap, row, slot):
@@ -692,6 +722,98 @@ def report_table(cap, full=False):
     return 0
 
 
+def _hex9(values):
+    return "(" + ", ".join("%.9g" % v for v in values) + ")"
+
+
+def report_block(cap):
+    """The post block the capture built for each frame (the frame row's "post") against the same frame's rows
+    and dump. Per frame:
+      registers   "composite" (c31.x, c46.x, c47.x, c77.x, c77.y, c78.x) against "pfull" of the composite's row,
+                  "bright" (c31.x, c46.x, c47.x, c77.x, c77.y) against the bright pass's, bit for bit;
+      blur        "parts" bit 0 against MakePostBlock's rule on the blurs' rows (blur_part), and with the part
+                  the 14 weights against those rows;
+      table       the (address, content) pair the block read against the composite's row's slot 1 ("tf",
+                  "tfc"), and the 512 texels against decode_table of the dump with that content;
+      age         0: the frame's own block (ruling 10);
+      pairing     the block's bright c77.y times the frame's c20.w is 1 within 1e-3.
+    Returns 0 when every frame has a valid block and nothing differs or is missing, else 1."""
+    print("capture %s: %d frames" % (cap.path.name, len(cap.frames)))
+    good = 0
+    for n in sorted(cap.frames):
+        fr = cap.frames[n]
+        b = fr.block
+        if b is None:
+            print("frame %d: no post block in the frame row (%s)" % (
+                n, "a build from before the post block, or a frame without records" if fr.has_frame_row
+                else "the capture has no row of this frame's end"))
+            continue
+        faults = []
+        comp = (fr.rows.get(COMPOSITE_PS) or [None])[0]
+        bright = (fr.rows.get(BRIGHT_PS) or [None])[0]
+        bx = fr.rows.get(BLUR_X_PS) or []
+        by = fr.rows.get(BLUR_Y_PS) or []
+        product = None
+        if not b.get("valid"):
+            faults.append("block invalid(%s), on %s, tries %s" % (b.get("reason"), b.get("on"), b.get("tries")))
+        elif comp is None or bright is None:
+            faults.append("no %s row to hold the block against" % ("composite" if comp is None else "bright-pass"))
+        else:
+            if b.get("age") != 0:
+                faults.append("age %s: not the frame's own block" % b.get("age"))
+            for key, want in (("composite", composite_registers(comp)), ("bright", bright_registers(bright))):
+                got = b.get(key, [])
+                if any(v is None for v in want):
+                    faults.append("%s: the row has no value" % key)
+                elif not ft._same_floats(got, list(want)):
+                    faults.append("%s: block %s, row %s" % (key, _hex9(got), _hex9(want)))
+            part = blur_part(bx[0] if bx else None, by[0] if by else None)
+            has_part = bool(b.get("parts", 0) & 1)
+            if has_part and not part:
+                faults.append("parts %s, but the blurs' rows do not give the part (%d and %d blur rows)" % (
+                    b.get("parts"), len(bx), len(by)))
+            elif part and not has_part:
+                faults.append("parts %s, but the blurs' rows give the part by MakePostBlock's rule" % b.get("parts"))
+            want_blur = list(blur_registers(bx[0]) + blur_registers(by[0])) if part else [0.0] * 14
+            if not ft._same_floats(b.get("blur", []), want_blur):
+                faults.append("blur: block %s, rows %s" % (_hex9(b.get("blur", [])), _hex9(want_blur)))
+            src = b.get("table") or {}
+            pair = (int(src.get("base", "0"), 16), int(src.get("content", "0"), 16))
+            table, fc, content, why = frame_table(cap, fr)
+            row_pair = (fc[1] & 0xFFFFF000 if fc else 0, content or 0)
+            if pair != row_pair:
+                faults.append("table: the block read 0x%08X / %016X, the composite's row names 0x%08X / %016X" % (
+                    pair + row_pair))
+            got = b.get("texels", [])
+            if table is None:
+                faults.append("table: no dump to decode (%s)" % why)
+            elif not ft._same_floats(got, table):
+                bad = [i for i in range(min(len(got), len(table))) if ft._f32(got[i]) != ft._f32(table[i])]
+                faults.append("table: %d texels, the dump %d; %d differ%s" % (
+                    len(got), len(table), len(bad),
+                    " (the first: texel %d, block %.9g, dump %.9g)" % (bad[0], got[bad[0]], table[bad[0]]) if bad else ""))
+            c77y = (b.get("bright") or [None] * 5)[4]
+            if fr.out_scale is None or c77y is None:
+                faults.append("pairing: no c20.w of the frame to hold c77.y against")
+            else:
+                product = c77y * fr.out_scale
+                if not abs(product - 1.0) <= 1e-3:
+                    faults.append("pairing: c77.y * c20.w is %.6f (c20.w %s from %s)" % (
+                        product, _f(fr.out_scale), fr.out_scale_from))
+        if not faults:
+            good += 1
+            src = b["table"]
+            print("frame %d: post block equal to the rows: age 0, 6 + 5 registers, %s, table %s / %s, 512 texels equal "
+                  "to the dump's, c77.y * c20.w %.6f" % (
+                      n, "14 blur weights (parts %d)" % b["parts"] if b.get("parts", 0) & 1
+                      else "no blur weights (parts %d: %d and %d blur rows)" % (b.get("parts", 0), len(bx), len(by)),
+                      src["base"], src["content"][2:], product))
+        for text in faults:
+            print("frame %d: POST %s" % (n, text))
+    print("post block valid, at age 0 and equal to the frame's rows and dump in %d of %d frames" % (good, len(cap.frames)))
+    return 0 if good == len(cap.frames) and good else 1
+
+
 def report_ramp(log_path, pairs_path=None):
     text = Path(log_path).read_text(encoding="utf-8", errors="replace")
     reads = parse_ramp_lines(text)
@@ -839,6 +961,8 @@ def main(argv=None):
     p = sub.add_parser("table")
     p.add_argument("capture")
     p.add_argument("--full", action="store_true")
+    p = sub.add_parser("block")
+    p.add_argument("capture")
     p = sub.add_parser("ramp")
     p.add_argument("log")
     p.add_argument("--pairs")
@@ -849,7 +973,7 @@ def main(argv=None):
     p = sub.add_parser("downsample")
     p.add_argument("capture")
     p.add_argument("--frame", type=int)
-    for name in ("resolves", "table", "find-luminance", "downsample"):
+    for name in ("resolves", "table", "block", "find-luminance", "downsample"):
         sub.choices[name].add_argument("--tex-root")
     args = ap.parse_args(argv)
     if args.cmd == "ramp":
@@ -859,6 +983,8 @@ def main(argv=None):
         return report_resolves(cap, args.frame, args.all)
     if args.cmd == "table":
         return report_table(cap, args.full)
+    if args.cmd == "block":
+        return report_block(cap)
     if args.cmd == "find-luminance":
         return report_find_luminance(cap, args.frame, args.threshold)
     return report_downsample(cap, args.frame)

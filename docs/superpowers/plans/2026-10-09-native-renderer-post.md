@@ -322,7 +322,9 @@ read (`unread`); every component it takes is finite (`register`); `range`: compo
 width 512, format 36 with number format bit 1, endian 2, swizzle `0xB68`, sign fields `0x55`,
 exponent adjust 0, clamp to edge, magnification and minification point, highest mip level 0; the
 captured constant is `04000956 1FAA00A4 000001FF 010016D1 00000000 00000018`); `n` is 2,048 with
-the bytes there; every texel finite and in [0, 4) (`table-texel`). The blur part
+the bytes there; every texel finite and in [0, 4) (`table-texel`). The block carries the texels as
+they are stored; the composite reads the nearest one, `floor(u * 512 + 0.5)` (controller ruling
+19), which is the reader's rule (Task 5), not the block's. The blur part
 (`kPostPartBlur`) is set when both blurs were read, every weight is in [0, 1] and each set's
 `w0 + 2 (w1 + .. + w6)` is 1 within 1e-3; without it the block is still valid. An invalid block
 is all zero.
@@ -400,8 +402,8 @@ composite".
       plan's test extended; the frame constants' test (`f_post` 1 without post, in a frame
       without light too).
 - [ ] Shader text. The composite: scene by `Load`, a value not above 0 is 0, `min(.., 31.875)`;
-      the table's index `min(511, uint(512 * saturate(c46.x * L)))` with the convention Task 3
-      pinned; the power as `exp2(c78.x * log2(|t|))` with 0 for 0; alpha 1. The ramp: `uint(v *
+      the table's index `min(511, uint(512 * saturate(c46.x * L) + 0.5))`: the nearest texel, the
+      convention Task 3 pinned (controller ruling 19; not the floor); the power as `exp2(c78.x * log2(|t|))` with 0 for 0; alpha 1. The ramp: `uint(v *
       255 + 0.5)` clamped to 255, each channel through `p_ramp`. Shader-test cases: the fields'
       offsets, the compiled clamps and index bounds, the lit programs of a frame without post
       line for line today's, the unlit programs today's but for the one multiply (criterion 8's

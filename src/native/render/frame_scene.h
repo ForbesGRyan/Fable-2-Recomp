@@ -17,6 +17,7 @@
 #include "../capture/draw_record.h"
 #include "../capture/fog_block.h"
 #include "../capture/light_block.h"
+#include "../capture/post_block.h"
 #include "../capture/shader_tally.h"
 #include "../capture/shadow_block.h"
 
@@ -116,6 +117,31 @@ struct FrameScene {
   // The fog and the sky were wanted this frame (the native view, the light and
   // the fog's switch on at the frame's begin).
   bool fog_records = false;
+  // The frame's post block (post_block.h): the registers of the game's
+  // composite, bright pass and blurs and the composite's table, decoded, read
+  // at the frame's post rectangles outside the main scene. Valid only when a
+  // block passed capture::MakePostBlock's rules AND pairs with this frame's
+  // light block (capture::PostBlockPairs with light.out_scale): the frame's
+  // own (post_age 0), or, when the frame read none that serves, the last valid
+  // one of an earlier frame while that is at most capture::kPostBlockMaxAge
+  // frames old (post_age 1 to 4: how many frames ago it was read). Otherwise
+  // all zero, with the reason in post_reason (kOff: the post chain was not
+  // wanted this frame and nothing was read; capture::ChoosePostBlock has the
+  // others): a consumer then draws the frame without post ("post-block"),
+  // never with a table older than the bound or one that does not pair. A frame
+  // without a valid light block has no post block.
+  // post_tries: reads at this frame's composite that gave no block (at most
+  // eight a frame). post_source: where the block's table was read (address and
+  // content hash), for the log and the discovery frame row only; zero without
+  // a block.
+  capture::PostBlock post{};
+  capture::PostBlockReason post_reason = capture::PostBlockReason::kOff;
+  uint32_t post_age = 0;
+  capture::PostSource post_source{};
+  uint32_t post_tries = 0;
+  // The post block was wanted this frame (the native view, the light and the
+  // post switch on at the frame's begin).
+  bool post_records = false;
   // The drawable records with light inputs by family (index: LightFamily), how
   // many of them are a family's two- or four-light form, the records without
   // inputs by reason (index: LightReason), and the pixel shaders of those,
@@ -255,6 +281,35 @@ inline std::string FogLine(const FrameScene& scene) {
   }
   out += buf;
   return out;
+}
+
+// The frame's post capture as the log writes it after "post: ":
+//   block valid, age A, tries T, c20.w s, 37B1 (c31.x, c46.x, c47.x, c77.x, c77.y, c78.x), EE92 (c31.x, c46.x, c47.x,
+//   c77.x, c77.y), table 0x<address> <content>, parts P
+// with "block invalid(<reason>), tries T" for a frame without one
+// (capture::PostBlockReasonName). A: 0 for the frame's own block, else how many
+// frames ago the block was read. s: the frame's light block's output scale,
+// which the block pairs with. <address>, <content>: where the table was read
+// and the hash of its bytes (FrameScene::post_source), which a discovery
+// capture of the frame names the table by. P: capture::kPostPartBlur when the
+// blurs' weights are there. "off" for a frame in which the post block was not
+// wanted.
+inline std::string PostLine(const FrameScene& scene) {
+  if (!scene.post_records) return "off";
+  char buf[384];  // (twelve %g values of at most 13 characters each, an address, a hash and the fixed text: about 260)
+  if (scene.post.valid) {
+    const capture::PostBlock& p = scene.post;
+    std::snprintf(buf, sizeof(buf),
+                  "block valid, age %u, tries %u, c20.w %g, 37B1 (%g, %g, %g, %g, %g, %g), EE92 (%g, %g, %g, %g, %g), "
+                  "table 0x%08X %016llX, parts %u",
+                  scene.post_age, scene.post_tries, scene.light.out_scale, p.composite[0], p.composite[1], p.composite[2],
+                  p.composite[3], p.composite[4], p.composite[5], p.bright[0], p.bright[1], p.bright[2], p.bright[3], p.bright[4],
+                  scene.post_source.base, static_cast<unsigned long long>(scene.post_source.content), unsigned(p.parts));
+  } else {
+    std::snprintf(buf, sizeof(buf), "block invalid(%s), tries %u", capture::PostBlockReasonName(scene.post_reason),
+                  scene.post_tries);
+  }
+  return buf;
 }
 
 // The record and side-array buffers of scenes nothing refers to any more, kept
@@ -508,6 +563,33 @@ class FrameBuilder {
   }
   bool HasSky() const { return sky_.valid; }
 
+  // --- The post block (FrameScene::post) ---
+  // Whether the post block is read from now on (the capture sets it at a frame
+  // boundary). Off: every call below does nothing, the frame's scene says kOff,
+  // and Finish drops the block kept from earlier frames.
+  void PostOn(bool on) { post_on_ = on; }
+  // The block read at this frame's composite with where its table was read: the
+  // first valid one offered in the frame is kept. The game issues its post
+  // rectangles after the main scene, so these two do not ask for an open scene
+  // (as the shadow passes' calls do not): the frame is whatever lies between
+  // two calls of Finish. CountPostTry: a read that gave none, with why
+  // (capture::MakePostBlock's reason, or kUnread); the last one's reason is the
+  // frame's when it ends without a block of its own and none kept serves. A
+  // read after the block is not counted.
+  void SetPost(const capture::PostBlock& block, const capture::PostSource& source) {
+    if (post_on_ && block.valid && !post_.valid) {
+      post_ = block;
+      post_source_ = source;
+    }
+  }
+  void CountPostTry(capture::PostBlockReason why) {
+    if (post_on_ && !post_.valid) {
+      ++post_tries_;
+      post_reason_ = why;
+    }
+  }
+  bool HasPost() const { return post_.valid; }
+
   // Frees the spare buffers (any thread; scenes that die later bring theirs).
   void ReleaseSpares() { pool_->Release(); }
   size_t spare_count() const { return pool_->size(); }
@@ -616,6 +698,47 @@ class FrameBuilder {
     sky_ = capture::SkyBlock{};
     sky_reason_ = capture::SkyBlockReason::kNoDraw;
     sky_tries_ = 0;
+    // The post block: the frame's own if it pairs with the frame's light block
+    // (s->light, set above), else the last valid one of an earlier frame within
+    // its age bound, else none with the reason (capture::ChoosePostBlock).
+    s->post_records = post_on_;
+    if (post_on_) {
+      s->post_tries = post_tries_;
+      const capture::PostChoice choice = capture::ChoosePostBlock(
+          post_, post_tries_, post_reason_, post_kept_, post_kept_age_, s->light.valid ? s->light.out_scale : 0.0f);
+      if (choice.pick == capture::PostPick::kOwn) {
+        s->post = post_;
+        s->post_source = post_source_;
+      } else if (choice.pick == capture::PostPick::kKept) {
+        s->post = post_kept_;
+        s->post_source = post_kept_source_;
+      }
+      s->post_age = choice.age;
+      s->post_reason = choice.reason;
+    }
+    // What is kept for the frames after this one: the block this frame read
+    // (valid by its own rules, whether or not it paired here: the last valid
+    // one), one frame old at the next Finish; else the kept one, a frame older,
+    // until it has been found too old once (the frame that says kStale), after
+    // which nothing is kept. With the post block off nothing is kept at all: no
+    // table outlives a stretch in which nothing was read.
+    if (post_on_ && post_.valid) {
+      post_kept_ = post_;
+      post_kept_source_ = post_source_;
+      post_kept_age_ = 1;
+    } else if (post_kept_.valid) {
+      if (!post_on_ || post_kept_age_ > capture::kPostBlockMaxAge) {
+        post_kept_ = capture::PostBlock{};
+        post_kept_source_ = capture::PostSource{};
+        post_kept_age_ = 0;
+      } else {
+        ++post_kept_age_;
+      }
+    }
+    if (post_.valid) post_ = capture::PostBlock{};  // (2 KB: cleared only when a frame set it)
+    post_source_ = capture::PostSource{};
+    post_reason_ = capture::PostBlockReason::kNoDraw;
+    post_tries_ = 0;
     if (!draws_.empty() || !terrain_.empty() || !lights_.empty() || !shadow_draws_[0].empty() || !shadow_draws_[1].empty()) {
       const size_t shadows[2] = {shadow_draws_[0].size(), shadow_draws_[1].size()};
       const size_t records = draws_.size(), patches = terrain_.size(), lit = lights_.size();
@@ -695,6 +818,16 @@ class FrameBuilder {
   capture::SkyBlock sky_{};
   capture::SkyBlockReason sky_reason_ = capture::SkyBlockReason::kNoDraw;
   uint32_t sky_tries_ = 0;
+  // The post block of the frame so far (FrameScene::post), and the last valid
+  // one of an earlier frame with its age in frames (0: none is kept).
+  bool post_on_ = false;
+  capture::PostBlock post_{};
+  capture::PostSource post_source_{};
+  capture::PostBlockReason post_reason_ = capture::PostBlockReason::kNoDraw;
+  uint32_t post_tries_ = 0;
+  capture::PostBlock post_kept_{};
+  capture::PostSource post_kept_source_{};
+  uint32_t post_kept_age_ = 0;
   // Shared with the deleters of this builder's scenes. Never reassigned, and
   // locked inside: ReleaseSpares and spare_count need no lock of the caller's.
   std::shared_ptr<SceneBufferPool> pool_ = std::make_shared<SceneBufferPool>();

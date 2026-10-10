@@ -570,5 +570,176 @@ class CaptureTest(unittest.TestCase):
             self.assertEqual(cap.frames[1].out_scale_from, "c20.w of the first main-scene row")
 
 
+BLUR_X = ((0.2, 0.18, 0.12, 0.06), (0.03, 0.008, 0.002, 0.0))      # 0.2 + 2 * 0.4 = 1
+BLUR_Y = ((0.18, 0.165, 0.12, 0.07), (0.035, 0.015, 0.005, 0.0))   # 0.18 + 2 * 0.41 = 1
+
+
+class BlurTest(unittest.TestCase):
+    def rows(self, x=BLUR_X, y=BLUR_Y):
+        return {"pfull": pfull({46: x[0], 47: x[1]})}, {"pfull": pfull({46: y[0], 47: y[1]})}
+
+    def test_blur_registers_are_the_centre_and_six_taps(self):
+        bx, _ = self.rows()
+        got = pt.blur_registers(bx)
+        self.assertEqual(len(got), 7)
+        for a, b in zip(got, (0.2, 0.18, 0.12, 0.06, 0.03, 0.008, 0.002)):
+            self.assertAlmostEqual(a, b, places=7)
+        self.assertIsNone(pt.blur_registers(None))
+        self.assertIsNone(pt.blur_registers({"pfull": "-" * 32 * 256}))
+
+    def test_blur_part_is_makepostblocks_rule(self):
+        self.assertTrue(pt.blur_part(*self.rows()))
+        self.assertFalse(pt.blur_part(self.rows()[0], None))               # both blurs
+        self.assertFalse(pt.blur_part(None, self.rows()[1]))
+        off = ((0.203, 0.18, 0.12, 0.06), BLUR_X[1])                       # the sum 0.003 off
+        self.assertFalse(pt.blur_part(*self.rows(x=off)))
+        near = ((0.2005, 0.18, 0.12, 0.06), BLUR_X[1])                     # within 1e-3
+        self.assertTrue(pt.blur_part(*self.rows(x=near)))
+        negative = ((0.2, 0.18, 0.12, 0.06), (0.04, -0.002, 0.002, 0.0))   # sums to 1 with a weight below 0
+        self.assertFalse(pt.blur_part(*self.rows(y=negative)))
+        above = ((1.5, 0.0, 0.0, 0.0), (-0.25, 0.0, 0.0, 0.0))
+        self.assertFalse(pt.blur_part(*self.rows(x=above)))
+        nan = ((float("nan"), 0.18, 0.12, 0.06), BLUR_X[1])
+        self.assertFalse(pt.blur_part(*self.rows(x=nan)))
+        w = ((0.2, 0.18, 0.12, 0.06), (0.03, 0.008, 0.002, 7.0))           # c47.w is no tap's weight
+        self.assertTrue(pt.blur_part(*self.rows(x=w)))
+
+
+class BlockTest(unittest.TestCase):
+    """CaptureTest's hand-made capture with the blurs' rows and, in each frame row, the "post" member a build
+    with plan Task 4 writes, made of the same values."""
+
+    def write(self, d, change=None, blur=True, drop_post=False):
+        base = CaptureTest("test_load_capture")
+        p = base.write(d)
+        rows = [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines()]
+        out = []
+        for r in rows:
+            if r["kind"] == "verts" and r["ps_hash"] == "0x" + pt.COMPOSITE_PS and blur:
+                for ps, w in ((pt.BLUR_X_PS, BLUR_X), (pt.BLUR_Y_PS, BLUR_Y)):
+                    out.append({"kind": "verts", "frame": r["frame"], "in_scene": False, "ps_hash": "0x" + ps, "tf": {},
+                                "tfc": {}, "pfull": pfull({46: w[0], 47: w[1]})})
+            if r["kind"] == "frame" and not drop_post:
+                n = r["frame"]
+                table = [0.0] + [0.2 + 0.0001 * i + 0.01 * n for i in range(1, 512)]
+                post = {"on": 1, "valid": 1, "reason": "none", "age": 0, "tries": 0, "parts": 1 if blur else 0,
+                        "composite": [2.973, 0.25, 50.0, -0.0052, 1.1026, 0.45455],
+                        "bright": [1.4865, 0.2, 2.0, 0.0869, 0.125],
+                        "blur": [x for w in (BLUR_X, BLUR_Y) for x in (w[0] + w[1][:3])] if blur else [0.0] * 14,
+                        "table": {"base": "0x1FAA0000", "content": "0x%016X" % (0x1000 + n)}, "texels": table}
+                if change:
+                    change(n, post)
+                r["post"] = post
+            out.append(r)
+        p.write_text("".join(json.dumps(x, separators=(",", ":")) + "\n" for x in out), encoding="utf-8")
+        return p
+
+    def report(self, d, **kw):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            status = pt.report_block(pt.load_capture(self.write(d, **kw)))
+        return status, out.getvalue()
+
+    def test_a_block_equal_to_its_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            status, text = self.report(d)
+            self.assertEqual(status, 0, text)
+            self.assertIn("frame 1: post block equal to the rows: age 0, 6 + 5 registers, 14 blur weights (parts 1), "
+                          "table 0x1FAA0000 / 0000000000001001, 512 texels equal to the dump's, c77.y * c20.w 1.000000", text)
+            self.assertIn("post block valid, at age 0 and equal to the frame's rows and dump in 2 of 2 frames", text)
+
+    def test_a_block_without_the_blurs_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            status, text = self.report(d, blur=False)
+            self.assertEqual(status, 0, text)
+            self.assertIn("no blur weights (parts 0: 0 and 0 blur rows)", text)
+
+    def test_a_capture_from_before_the_block(self):
+        with tempfile.TemporaryDirectory() as d:
+            status, text = self.report(d, drop_post=True)
+            self.assertEqual(status, 1)
+            self.assertIn("frame 1: no post block in the frame row", text)
+            self.assertIn("in 0 of 2 frames", text)
+
+    def faults(self, change, **kw):
+        with tempfile.TemporaryDirectory() as d:
+            status, text = self.report(d, change=change, **kw)
+            self.assertEqual(status, 1, text)
+            self.assertIn("in 1 of 2 frames", text)
+            return text
+
+    def test_a_register_one_bit_off(self):
+        def change(n, post):
+            if n == 2:
+                bits = struct.unpack(">I", struct.pack(">f", post["composite"][4]))[0] + 1
+                post["composite"][4] = struct.unpack(">f", struct.pack(">I", bits))[0]
+        self.assertIn("frame 2: POST composite: block", self.faults(change))
+
+        def bright(n, post):
+            if n == 1:
+                post["bright"][3] = 0.087
+        self.assertIn("frame 1: POST bright: block", self.faults(bright))
+
+    def test_a_texel_or_the_content_differs(self):
+        def texel(n, post):
+            if n == 1:
+                post["texels"][300] += 1e-6
+        self.assertIn("frame 1: POST table: 512 texels, the dump 512; 1 differ (the first: texel 300", self.faults(texel))
+
+        def content(n, post):
+            if n == 2:
+                post["table"]["content"] = "0x0000000000000BAD"
+        self.assertIn("frame 2: POST table: the block read 0x1FAA0000 / 0000000000000BAD, the composite's row names "
+                      "0x1FAA0000 / 0000000000001002", self.faults(content))
+
+        def short(n, post):
+            if n == 2:
+                post["texels"] = post["texels"][:511]
+        self.assertIn("frame 2: POST table: 511 texels, the dump 512", self.faults(short))
+
+    def test_an_aged_or_an_invalid_block(self):
+        def aged(n, post):
+            if n == 2:
+                post["age"] = 1
+        self.assertIn("frame 2: POST age 1: not the frame's own block", self.faults(aged))
+
+        def invalid(n, post):
+            if n == 1:
+                post.clear()
+                post.update({"on": 1, "valid": 0, "reason": "table-texel", "age": 0, "tries": 3, "parts": 0})
+        self.assertIn("frame 1: POST block invalid(table-texel), on 1, tries 3", self.faults(invalid))
+
+    def test_the_blur_part(self):
+        def weight(n, post):
+            if n == 1:
+                post["blur"][9] = 0.12001
+        self.assertIn("frame 1: POST blur: block", self.faults(weight))
+
+        def parts(n, post):
+            if n == 2:
+                post["parts"] = 0
+                post["blur"] = [0.0] * 14
+        self.assertIn("frame 2: POST parts 0, but the blurs' rows give the part by MakePostBlock's rule", self.faults(parts))
+
+        def claimed(n, post):
+            if n == 2:
+                post["parts"] = 1
+        self.assertIn("frame 2: POST parts 1, but the blurs' rows do not give the part", self.faults(claimed, blur=False))
+
+    def test_the_pairing(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.write(d)
+            rows = [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines()]
+            for r in rows:
+                if r["kind"] == "frame" and r["frame"] == 1:
+                    r["light"]["out_scale"] = 8.1
+            p.write_text("".join(json.dumps(x, separators=(",", ":")) + "\n" for x in rows), encoding="utf-8")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                status = pt.report_block(pt.load_capture(p))
+            self.assertEqual(status, 1)
+            self.assertIn("frame 1: POST pairing: c77.y * c20.w is 1.012500", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

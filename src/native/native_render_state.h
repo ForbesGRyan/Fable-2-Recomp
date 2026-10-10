@@ -97,6 +97,15 @@ inline bool FogRecordsWanted(bool records_wanted, bool fog, bool textures, bool 
   return records_wanted && fog && textures && light;
 }
 
+// Whether the capture also reads the frame's post block: only for a frame the
+// clay pass could draw through the game's composite. `records_wanted`:
+// RecordsWanted. `post`: fable2_native_post. `textures`, `light`: the frame is
+// a lit one (the composite's scale is the lit colour's: no textures or no
+// light, today's mapping and no post block).
+inline bool PostRecordsWanted(bool records_wanted, bool post, bool textures, bool light) {
+  return records_wanted && post && textures && light;
+}
+
 // Guest frame times per view, for the log line "[native] frames: ..."
 // (fable2_native_render.cpp, PollFrame): the `[frame] guest` windows of the SDK
 // mix the views a plan switches through, this line does not. One Add per guest

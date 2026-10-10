@@ -68,6 +68,11 @@ REXCVAR_DEFINE_STRING(fable2_native_fog, "on", "Fable2",
                       "unfogged), and draws the game's sky where no record is drawn; off (or false, 0) = none of it is read or "
                       "drawn: the shadows' picture. On by default since the fog's validation (sub-project 9; frame map "
                       "section 16).");
+REXCVAR_DEFINE_STRING(fable2_native_post, "off", "Fable2",
+                      "Native post chain (sub-project 10, in work): on (or true, 1) = with a composite view and the light on, "
+                      "the capture also reads the frame's post block at the game's own post rectangles (the registers of its "
+                      "composite, bright pass and blurs and the composite's 512-texel exposure table); nothing is drawn with "
+                      "it yet, the picture is unchanged; off (or false, 0; the default) = none of it is read.");
 REXCVAR_DEFINE_STRING(fable2_exposure_readback, "off", "Fable2",
                       "The game's exposure in a normal run: on (or true, 1) = the game's luminance resolve (two buffers in turn, "
                       "0x1A385000 and 0x1A34F000) is added to readback_resolve_force_addresses at startup, so that the game "
@@ -257,6 +262,26 @@ bool CurrentFog() {
 bool FogWanted(bool records_wanted) {
   return FogRecordsWanted(records_wanted, CurrentFog(), REXCVAR_GET(fable2_native_textures),
                           CurrentClayLight() == render::ClayLight::kOn);
+}
+
+// fable2_native_post: read like the shadows' switch (the same parser and words); anything else is
+// off, with one warning that names the words.
+bool CurrentPost() {
+  static std::atomic<bool> warned{false};
+  bool recognized = true;
+  const bool on = render::ParseClayLight(REXCVAR_GET(fable2_native_post), &recognized) == render::ClayLight::kOn;
+  if (!recognized && !warned.exchange(true)) {
+    REXLOG_WARN("[native] unknown fable2_native_post '{}', using off (accepted: {})", REXCVAR_GET(fable2_native_post),
+                render::kClaySwitchWords);
+  }
+  return on;
+}
+
+// Whether the capture reads the frame's post block: only for a frame that could be drawn through
+// the game's composite, which is a lit one (PostRecordsWanted).
+bool PostWanted(bool records_wanted) {
+  return PostRecordsWanted(records_wanted, CurrentPost(), REXCVAR_GET(fable2_native_textures),
+                           CurrentClayLight() == render::ClayLight::kOn);
 }
 
 bool EnsureResources(nrhi::Device* device, nrhi::Format format) {
@@ -588,6 +613,9 @@ void Install(rex::memory::Memory* memory) {
   REXLOG_INFO("[native] fog: {} (fable2_native_fog; on: the frame's fog and sky blocks are read with the light on and "
               "the lit draws, and the unlit ones whose shader has the game's fog block, are fogged and the sky is drawn behind them)",
               CurrentFog() ? "on" : "off");
+  REXLOG_INFO("[native] post: {} (fable2_native_post; on: the frame's post block is read with the light on; nothing is "
+              "drawn with it yet)",
+              CurrentPost() ? "on" : "off");
 }
 
 void Shutdown() {
@@ -643,19 +671,20 @@ void PollFrame() {
     }
   }
 #endif
-  // The order of the three stores (final review, M6). The capture latches them at a frame's boundary,
-  // the records' word first (read with acquire), then the shadows' and the fog's. Switching ON: the
-  // shadows' and the fog's words are stored BEFORE the records' (stored with release), so a boundary
-  // that sees the records wanted sees the other two as well: no frame is recorded without its shadow
+  // The order of the four stores (final review, M6). The capture latches them at a frame's boundary,
+  // the records' word first (read with acquire), then the shadows', the fog's and the post block's.
+  // Switching ON: the shadows', the fog's and the post block's words are stored BEFORE the records'
+  // (stored with release), so a boundary that sees the records wanted sees the others as well: no frame is recorded without its shadow
   // passes or its fog block because the boundary fell between two stores. Switching OFF: the records'
   // word first; a boundary between the stores then latches no records, and with no records the other
-  // two words are not read at all. (A boundary that read the records' word just before it went off
+  // words are not read at all. (A boundary that read the records' word just before it went off
   // may still latch one last frame with records and without fog: the view is off by then and the
   // frame is not drawn; were it drawn, it would be without fog and the pass would count it "fog-block".)
   const bool wanted = RecordsWanted(CurrentView(), g_latch.IsFailed());
   if (!wanted) capture::SetRecordsWanted(false);
   capture::SetShadowsWanted(ShadowsWanted(wanted));
   capture::SetFogWanted(FogWanted(wanted));
+  capture::SetPostWanted(PostWanted(wanted));
   if (wanted) capture::SetRecordsWanted(true);
   rex::graphics::RequestNativeGuestOutputPostProcess(wanted);
 }

@@ -923,6 +923,228 @@ static int FogTests(const capture::DrawRecord& r) {
   return 0;
 }
 
+// The frame's post block (FrameScene::post, ::post_age, ::post_source) with its reasons, the block
+// kept across frames and the log's line. Returns 0 or the number of the case that failed.
+static int PostTests(const capture::DrawRecord& r) {
+  using capture::PostBlock;
+  using capture::PostBlockReason;
+  using capture::PostSource;
+  // A block as MakePostBlock gives it, of a scene whose output scale is `scale` (the bright pass's
+  // c77.y is its reciprocal), with a flat table of `texel` (the builder does not judge a block's
+  // values; it pairs it with the frame's light block and carries it).
+  auto post = [](float scale, float texel) {
+    capture::PostRegisters regs{};
+    const float composite[5][4] = {{3.0f}, {0.25f}, {50.0f}, {-0.005f, 1.1f}, {0.4545f}};
+    const float bright[4][4] = {{1.5f}, {0.2f}, {2.0f}, {0.087f, 1.0f / scale}};
+    std::memcpy(regs.composite, composite, sizeof(composite));
+    std::memcpy(regs.bright, bright, sizeof(bright));
+    regs.have_composite = regs.have_bright = true;
+    const uint32_t fc[6] = {0x04000956, 0x1FAA00A4, 0x000001FF, 0x010016D1, 0x00000000, 0x00000018};
+    static uint8_t table[2048];
+    uint32_t bits;
+    std::memcpy(&bits, &texel, sizeof(bits));
+    for (int i = 0; i < 512; ++i) {
+      for (int k = 0; k < 4; ++k) table[4 * i + k] = uint8_t(bits >> (24 - 8 * k));
+    }
+    return capture::MakePostBlock(regs, fc, table, sizeof(table));
+  };
+  auto light = [](float scale) {
+    capture::LightBlock l{};
+    l.out_scale = scale;
+    l.valid = true;
+    return l;
+  };
+  const PostBlock eight = post(8.0f, 0.25f), ten = post(10.0f, 0.5f);
+  if (!eight.valid || !ten.valid || eight.parts != 0) return 1;
+  const PostSource from8{0x1FAA0000, 0x9075910DFD72DC3Dull}, from10{0x1FAA0000, 7};
+  // Nothing of a post block in a scene: every float zero, no part, no source, age 0.
+  auto none = [](const render::FrameScene& s) {
+    static const unsigned char zero[sizeof(PostBlock)] = {};
+    return !s.post.valid && s.post.parts == 0 && std::memcmp(&s.post, zero, offsetof(PostBlock, parts)) == 0 &&
+           s.post_source.base == 0 && s.post_source.content == 0 && s.post_age == 0;
+  };
+  auto has = [](const render::FrameScene& s, const PostBlock& b, const PostSource& from, uint32_t age) {
+    return s.post.valid && s.post_reason == PostBlockReason::kNone && s.post_age == age &&
+           std::memcmp(&s.post, &b, offsetof(PostBlock, valid)) == 0 && s.post_source.base == from.base &&
+           s.post_source.content == from.content;
+  };
+  // One frame: a main scene with a record and, when `scale` is not 0, a light block of that scale;
+  // then, outside the scene, where the game issues its post rectangles, what `after` does.
+  uint64_t number = 100;
+  auto frame = [&](render::FrameBuilder& b, float scale, auto after) {
+    b.Open();
+    b.Add(r);
+    if (scale != 0.0f) b.SetLight(light(scale));
+    b.Close();
+    after(b);
+    return b.Finish(++number);
+  };
+  auto nothing = [](render::FrameBuilder&) {};
+  render::FrameBuilder b;
+  {
+    // Post off (the builder's state at first): nothing is taken, the frame says "off".
+    auto s = frame(b, 8.0f, [&](render::FrameBuilder& fb) {
+      fb.SetPost(eight, from8);
+      fb.CountPostTry(PostBlockReason::kRange);
+      if (fb.HasPost()) std::abort();
+    });
+    if (s->post_records || !none(*s) || s->post_reason != PostBlockReason::kOff || s->post_tries != 0) return 2;
+    if (render::PostLine(*s) != "off") return 3;
+    // ... and nothing of it was kept for the frames after the switch.
+    b.PostOn(true);
+    auto t = frame(b, 8.0f, nothing);
+    if (!t->post_records || !none(*t) || t->post_reason != PostBlockReason::kNoDraw || t->post_tries != 0) return 4;
+    if (render::PostLine(*t) != "block invalid(no-draw), tries 0") return 5;
+  }
+  {
+    // The frame's own block, read outside the main scene, pairing with the frame's light block: the
+    // frame's, at age 0, with its source. The first valid one is kept; an invalid one is none; a
+    // read after the block is not counted.
+    auto s = frame(b, 8.0f, [&](render::FrameBuilder& fb) {
+      fb.SetPost(PostBlock{}, from10);
+      if (fb.HasPost()) std::abort();
+      fb.CountPostTry(PostBlockReason::kUnread);
+      fb.SetPost(eight, from8);
+      if (!fb.HasPost()) std::abort();
+      fb.SetPost(ten, from10);
+      fb.CountPostTry(PostBlockReason::kRange);
+    });
+    if (!s->post_records || !has(*s, eight, from8, 0) || s->post_tries != 1) return 6;
+    const std::string line = render::PostLine(*s);
+    if (line != "block valid, age 0, tries 1, c20.w 8, 37B1 (3, 0.25, 50, -0.005, 1.1, 0.4545), EE92 (1.5, 0.2, 2, 0.087, 0.125), "
+                "table 0x1FAA0000 9075910DFD72DC3D, parts 0") {
+      std::cout << line << "\n";
+      return 7;
+    }
+    // Kept: the frames after it that read none take it at ages 1 to 4 (kPostBlockMaxAge) while it
+    // pairs with their own light block; the fifth has none ("stale"), and after that nothing is
+    // kept any more ("no-draw").
+    for (uint32_t age = 1; age <= 6; ++age) {
+      auto t = frame(b, 8.0f, nothing);
+      if (!t->post_records || t->post_tries != 0) return 8;
+      if (age <= capture::kPostBlockMaxAge) {
+        if (!has(*t, eight, from8, age)) return 9;
+        if (age == 2 && render::PostLine(*t).rfind("block valid, age 2, tries 0, c20.w 8, ", 0) != 0) return 10;
+      } else if (!none(*t) || t->post_reason != (age == 5 ? PostBlockReason::kStale : PostBlockReason::kNoDraw)) {
+        return 11;
+      }
+    }
+    if (render::PostLine(*frame(b, 8.0f, nothing)) != "block invalid(no-draw), tries 0") return 12;
+  }
+  {
+    // Kept and not pairing: the scene's scale moved away from the kept block's. None, "pairing";
+    // the block is still kept, and serves a later frame it pairs with, at its age.
+    (void)frame(b, 8.0f, [&](render::FrameBuilder& fb) { fb.SetPost(eight, from8); });
+    auto s = frame(b, 10.0f, nothing);
+    if (!none(*s) || s->post_reason != PostBlockReason::kPairing) return 13;
+    if (render::PostLine(*s) != "block invalid(pairing), tries 0") return 14;
+    auto t = frame(b, 8.004f, nothing);  // within 1e-3
+    if (!has(*t, eight, from8, 2)) return 15;
+    auto u = frame(b, 8.01f, nothing);  // outside it
+    if (!none(*u) || u->post_reason != PostBlockReason::kPairing) return 16;
+  }
+  {
+    // The frame's own block does not pair with the frame's scene: the kept one if that does (never
+    // the mixed pair); and the block that was read is the one kept from then on.
+    (void)frame(b, 8.0f, [&](render::FrameBuilder& fb) { fb.SetPost(eight, from8); });
+    auto s = frame(b, 8.0f, [&](render::FrameBuilder& fb) { fb.SetPost(ten, from10); });
+    if (!has(*s, eight, from8, 1)) return 17;
+    auto t = frame(b, 8.0f, nothing);
+    if (!none(*t) || t->post_reason != PostBlockReason::kPairing) return 18;  // (kept: ten, age 1)
+    auto u = frame(b, 10.0f, nothing);
+    if (!has(*u, ten, from10, 2)) return 19;
+    // Its own does not pair and nothing kept serves: "pairing".
+    render::FrameBuilder fresh;
+    fresh.PostOn(true);
+    auto v = frame(fresh, 8.0f, [&](render::FrameBuilder& fb) { fb.SetPost(ten, from10); });
+    if (!none(*v) || v->post_reason != PostBlockReason::kPairing || !v->post_records) return 20;
+  }
+  {
+    // A frame without a valid light block has no post block, its own or a kept one.
+    render::FrameBuilder fresh;
+    fresh.PostOn(true);
+    auto s = frame(fresh, 0.0f, [&](render::FrameBuilder& fb) { fb.SetPost(eight, from8); });
+    if (s->light.valid || !none(*s) || s->post_reason != PostBlockReason::kPairing) return 21;
+    auto t = frame(fresh, 0.0f, nothing);
+    if (!none(*t) || t->post_reason != PostBlockReason::kPairing) return 22;
+    auto u = frame(fresh, 8.0f, nothing);  // the block read two frames ago serves the next lit frame
+    if (!has(*u, eight, from8, 2)) return 23;
+    // A light block that is not valid gives no scale, whatever its field says.
+    render::FrameBuilder other;
+    other.PostOn(true);
+    other.Open();
+    capture::LightBlock invalid{};
+    invalid.out_scale = 8.0f;
+    other.SetLight(invalid);
+    other.Close();
+    other.SetPost(eight, from8);
+    auto v = other.Finish(1);
+    if (!none(*v) || v->post_reason != PostBlockReason::kPairing) return 24;
+  }
+  {
+    // Reads that gave no block are counted and the last one's reason is the frame's; with a kept
+    // block that serves, the frame has that block and the count.
+    render::FrameBuilder fresh;
+    fresh.PostOn(true);
+    auto s = frame(fresh, 8.0f, [&](render::FrameBuilder& fb) {
+      fb.CountPostTry(PostBlockReason::kUnread);
+      fb.CountPostTry(PostBlockReason::kTableTexel);
+    });
+    if (!none(*s) || s->post_reason != PostBlockReason::kTableTexel || s->post_tries != 2) return 25;
+    if (render::PostLine(*s) != "block invalid(table-texel), tries 2") return 26;
+    (void)frame(fresh, 8.0f, [&](render::FrameBuilder& fb) { fb.SetPost(eight, from8); });
+    auto t = frame(fresh, 8.0f, [&](render::FrameBuilder& fb) { fb.CountPostTry(PostBlockReason::kRegister); });
+    if (!has(*t, eight, from8, 1) || t->post_tries != 1) return 27;
+    // The next frame starts with no try of the last one.
+    auto u = frame(fresh, 8.0f, nothing);
+    if (!has(*u, eight, from8, 2) || u->post_tries != 0) return 28;
+    // Failed reads and a kept block that is too old: the read's reason, not "stale".
+    (void)frame(fresh, 8.0f, nothing);
+    (void)frame(fresh, 8.0f, nothing);
+    auto v = frame(fresh, 8.0f, [&](render::FrameBuilder& fb) { fb.CountPostTry(PostBlockReason::kRange); });
+    if (!none(*v) || v->post_reason != PostBlockReason::kRange || v->post_tries != 1) return 29;
+  }
+  {
+    // Switched off at a frame boundary with a block read and one kept: that frame has none
+    // ("off"), and neither has the next one with the switch on again (nothing is kept across a
+    // stretch in which nothing was read).
+    render::FrameBuilder fresh;
+    fresh.PostOn(true);
+    (void)frame(fresh, 8.0f, [&](render::FrameBuilder& fb) { fb.SetPost(eight, from8); });
+    auto s = frame(fresh, 8.0f, [&](render::FrameBuilder& fb) {
+      fb.SetPost(eight, from8);
+      fb.PostOn(false);
+    });
+    if (s->post_records || !none(*s) || s->post_reason != PostBlockReason::kOff) return 30;
+    fresh.PostOn(true);
+    auto t = frame(fresh, 8.0f, nothing);
+    if (!t->post_records || !none(*t) || t->post_reason != PostBlockReason::kNoDraw) return 31;
+  }
+  {
+    // The blur part travels with the block.
+    capture::PostRegisters regs{};
+    const float composite[5][4] = {{3.0f}, {0.25f}, {50.0f}, {-0.005f, 1.1f}, {0.4545f}};
+    const float bright[4][4] = {{1.5f}, {0.2f}, {2.0f}, {0.087f, 0.125f}};
+    std::memcpy(regs.composite, composite, sizeof(composite));
+    std::memcpy(regs.bright, bright, sizeof(bright));
+    for (int k = 0; k < 2; ++k) {
+      regs.blur[k][0][0] = 0.5f;
+      regs.blur[k][0][1] = 0.25f;
+      regs.have_blur[k] = true;
+    }
+    regs.have_composite = regs.have_bright = true;
+    const uint32_t fc[6] = {0x04000956, 0x1FAA00A4, 0x000001FF, 0x010016D1, 0x00000000, 0x00000018};
+    static const uint8_t table[2048] = {};
+    const PostBlock blurred = capture::MakePostBlock(regs, fc, table, sizeof(table));
+    render::FrameBuilder fresh;
+    fresh.PostOn(true);
+    auto s = frame(fresh, 8.0f, [&](render::FrameBuilder& fb) { fb.SetPost(blurred, from8); });
+    if (!s->post.valid || s->post.parts != capture::kPostPartBlur || s->post.blur[1][1] != 0.25f) return 32;
+    if (render::PostLine(*s).find(", parts 1") == std::string::npos) return 33;
+  }
+  return 0;
+}
+
 int main() {
   auto r = capture::AssembleRecord(Good(), 7);
   if (r.skip != SkipReason::kNone || r.seq != 7 || r.rows[0] != 1.0f || r.rows[15] != 16.0f) return 1;
@@ -1462,6 +1684,10 @@ int main() {
     std::cout << "FAIL: fog and sky block case " << code << "\n";
     return 131;
   }
+  if (const int code = PostTests(r)) {
+    std::cout << "FAIL: post block case " << code << "\n";
+    return 132;
+  }
 
   render::ScenePublisher pub;
   if (pub.Latest()) return 18;
@@ -1469,6 +1695,6 @@ int main() {
   pub.Publish(s2);
   if (pub.Latest()->frame != 43) return 19;
   std::cout << "PASS: draw record, frame builder, terrain side array, light side array and block, buffer reuse, "
-               "pool under threads, shadow lists and block, fog and sky blocks, publisher\n";
+               "pool under threads, shadow lists and block, fog and sky blocks, post block, publisher\n";
   return 0;
 }

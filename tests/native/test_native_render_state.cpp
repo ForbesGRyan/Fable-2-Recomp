@@ -66,6 +66,13 @@ int main() {
     if (FogRecordsWanted(off != 0, off != 1, off != 2, off != 3)) return 61;
   }
   if (FogRecordsWanted(false, false, false, false)) return 62;
+  // The capture reads the frame's post block only for a frame the pass could draw through the
+  // game's composite: records wanted, the post's and the light's switches and the textures on.
+  if (!PostRecordsWanted(true, true, true, true)) return 240;
+  for (int off = 0; off < 4; ++off) {
+    if (PostRecordsWanted(off != 0, off != 1, off != 2, off != 3)) return 241;
+  }
+  if (PostRecordsWanted(false, false, false, false)) return 242;
 
   // Setting the view to what it already is (a plan's VIEW= token) is no change: it is not counted
   // for the clay log's "(changed)" mark. Every F6 step is one.

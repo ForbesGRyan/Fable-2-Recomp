@@ -35,6 +35,12 @@ void SetShadowsWanted(bool wanted);
 // SetShadowsWanted. Without it no fog register, fetch constant or table is read
 // and a frame's scene says so (FrameScene::fog_records false).
 void SetFogWanted(bool wanted);
+// Whether the consumer also wants the frame's post block (the native view, the
+// light and the post chain on: fable2_native_post). Set and latched like
+// SetShadowsWanted. Without it no hooked draw outside the main scene is looked
+// at for the post chain, no register, fetch constant or table is read, and a
+// frame's scene says so (FrameScene::post_records false).
+void SetPostWanted(bool wanted);
 // Starts a discovery capture of `frames` guest frames (1..100000) sampling every `every`th
 // draw (1..64) at the next guest frame, into a new file, like FABLE2_NATIVE_DISCOVERY
 // after its delay. Callable from any thread. Returns false, with a log line, when the

@@ -175,7 +175,8 @@ this design has a size that is a fraction of W x H** (W/2 x H/2, W/4 x H/4), nev
    and `28DBE18F313350BF` their `c46`, `c47.xyz`; in 10c at the radial blur `4BE4344C27016E04`
    its `c31.xy`, `c46.x`, `c47.x`. `MakePostBlock` validates and fails closed: the fetch constant
    exactly as captured (1D, 512, format 36, endian 8-in-32, swizzle `0xB68`, sign fields 1 1 1 1,
-   exponent adjust 0, clamp, point); every texel finite and in [0, 4); `c46.x` > 0; `c78.x` in
+   exponent adjust 0, clamp, point); every texel finite and in [0, 4) (the block carries the texels; which
+   texel a luminance reads is the reader's rule, the nearest: ruling 19, Design 6); `c46.x` > 0; `c78.x` in
    (0, 1]; every register finite and inside a stated bound; the bright pass's `c47.x` > 0 (it is
    a divisor). **Pairing**: `EE92`'s `c77.y` times the frame's `c20.w` (the light block's) is 1
    within 1e-3, or the frame has no block. The blur weights are a part of their own (not
@@ -195,7 +196,9 @@ this design has a size that is a fraction of W x H** (W/2 x H/2, W/4 x H/4), nev
    luminance 1, bounded at 64), before its fog. So an unlit pixel goes through the composite
    like a lit pixel of the same brightness and joins the bloom as one. The word is 1 in a frame
    without post. The clear colour is not changed (it is the target's creation-time clear value):
-   in a post frame it lies below scene luminance 1 / 128, reads the table's texel 0, which is 0
+   in a post frame it lies below scene luminance 1 / 256, reads the table's texel 0 (the table is
+   read at the nearest texel, `floor(u * 512 + 0.5)` with `u = c46.x * L`: controller ruling 19,
+   from the fetch's half-texel offset; not `floor(u * 512)` as the research has it), which is 0
    in every capture, and shows black where it showed (20, 20, 25) (arithmetic of this design).
 7. **The composite and the ramp: two steps in place of `kOutputMapPs`.** After the scene's
    draws: (a) the composite, `37B1`'s arithmetic with the frame's table and registers, from the

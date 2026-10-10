@@ -457,7 +457,10 @@ Each with how it is measured. "Regions" are the bridge's 26 of `lighting-regions
     the row's; none over the bound. (`post_tables.py quads`.)
 18. *The reference with the sun layer*, on run 3's oracle frame: the share of pixels within 8
     levels of the front buffer is at least 10 points above variant B's on that frame (69.9% on
-    `134312`), and the regions "sun" and "beams" of a new `post-regions.json` are within 15% in
+    `134312` with the bloom sampled at aligned texel centres, as the tools did when this was written;
+    70.7% at the fetch's own place, controller ruling 27, the tools' default since Task 8; on run 3's
+    frame, capture `052158` frame 1: 63.9% for B and 82.7% with the layer, frame map section 17
+    "Sun layer discovery"), and the regions "sun" and "beams" of a new `post-regions.json` are within 15% in
     luminance. (These two thresholds are set here without a measured precedent; the figures
     reached are reported whatever they are.)
 19. *In the game, towards the sun.* Native against the emulated shot of the same run: the "sun"

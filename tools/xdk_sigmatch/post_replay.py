@@ -1,7 +1,7 @@
 """The post chain replayed on the CPU from the scene colour of a read-back capture, with the formulas of
 light_formulas.py, against the game's own final picture of the same capture.
 
-  post_replay.py replay  <capture> <frame> [--variant A|B|N ...] [--table-offset 0.5] [--bias 0] [--ramp R]
+  post_replay.py replay  <capture> <frame> [--variant A|B|C|N ...] [--table-offset 0.5] [--bias 0] [--ramp R]
                                            [--write <prefix>] [--png <prefix>]
   post_replay.py predict <capture> <frame> [--ramp R]
   post_replay.py export  <capture> <frame> <prefix>
@@ -21,6 +21,9 @@ Variants, each a picture of the scene's 1120 x 720 pixels in the front buffer's 
      along y, each stage rounded to the 10 bits of its k_2_10_10_10 target, sampled linearly at the pixel
      (texel centres aligned: the place of the sample is this tool's, not read from the game).
   N  today's native mapping: sqrt(sat(scene / c20.w * 2.22)).
+  C  B with the game's sun layer rasterised from the capture's quad rows and the oracle's depth: the replay of
+     post_sun_layer.py, which this command hands over to (it prints B beside C; its own text has what it reads
+     and what stands on inference). Asked for alone: `--variant C`.
 --table-offset is the table fetch's offset in texels: 0.5 is light_formulas.post_table_texel (the fetch's
 own OffsetX); 0 is floor(u * 512), the reading of the research script this tool came from
 (out/tests/post-research/replay.py), kept to reproduce its figures.
@@ -594,8 +597,14 @@ def _head(fr, say=print):
 
 
 def cmd_replay(args):
-    fr = load_frame(find_capture(args.capture), args.frame)
     variants = [v.upper() for v in (args.variant or ["A", "B"])]
+    if "C" in variants:
+        if variants != ["C"]:
+            raise ReplayError("variant C is asked for alone (it prints B beside it)")
+        import post_sun_layer       # imports this module: not at the top
+        return post_sun_layer.cmd_replay(argparse.Namespace(capture=args.capture, frame=args.frame, bias=args.bias, png=args.png,
+                                                            sun_roles="research", region_file=None, spot=args.spot))
+    fr = load_frame(find_capture(args.capture), args.frame)
     _head(fr)
     print("table offset %g texels%s" % (args.table_offset, "" if args.table_offset == 0.5 else " (not the reference's 0.5)"))
     scene, pictures = _pictures(fr, variants, args.table_offset, args.bias)
@@ -742,7 +751,7 @@ def main(argv=None):
 
     p = sub.add_parser("replay")
     capture(p)
-    p.add_argument("--variant", action="append", choices=("A", "B", "N", "a", "b", "n"))
+    p.add_argument("--variant", action="append", choices=("A", "B", "C", "N", "a", "b", "c", "n"))
     p.add_argument("--table-offset", type=float, default=0.5)
     p.add_argument("--ramp")
     p.add_argument("--write", metavar="PREFIX")

@@ -878,7 +878,7 @@ The last four rows are the research's figures (its section 4 and `out/tests/post
 
 ### Not checked
 
-1. The furniture shaders of the sun layer and the sky (`18D3...`, `0498...`, `8E4D...`, `D72F...`, `4B58...`, `3E77...`, `5D67...`, `686D...`, `6197...`, `3FF7...`, `F1EB...`) and the vertex shaders of the rectangles and quads: plan Task 11.
+1. The vertex shaders of the full-screen rectangles (`B2D9...`, `5181...`, `D5E1...`). (The furniture shaders of the sun layer and the sky and the quads' vertex shaders, listed here before plan Task 11, are checked now: "The sun layer and the sky furniture".)
 2. Everything under "What stands on inference".
 3. The scan-out ramp's 256 entries: no file here holds them. `post_ramp` is the SDK's rule for an 8-bit front buffer by its source (`d3d12/command_processor.cpp`, the swap blit), and the log line `post_replay.py` parses (`[native] ramp: read at clay frame N: valid 1, <256 x rrrgggbbb>`) is the plan's description of what discovery will write, not a line seen.
 4. A replay of a frame other than each capture's first against its own final picture (one front buffer a capture), of a normal run (its scene colour is not in guest memory), of a dark view, night, a town or an interior.
@@ -887,3 +887,158 @@ The last four rows are the research's figures (its section 4 and `out/tests/post
 ### Evidence
 
 In `out/native-evidence/post/` (git-ignored): `task3_post_check.txt`; `task3_replay_<stamp>_f1.txt` and `..._f1_offset0.txt` for the four captures; `task3_table_addressing.txt` with `task3_table_addressing.py`; `task3_predict_092959_f1.txt`; `task3_post_pins.txt`; `task3_compare_B_final_092959_f1.txt` (`compare` of two `--write` pictures); `oracle/task3_trial_092959_f1.scene` and `.block` (a trial of `export`). To rerun: `python tools/xdk_sigmatch/post_check.py`, `python tools/xdk_sigmatch/post_replay.py replay 092959 1`, `python -m unittest discover -s tests -p "test_post_*.py"`.
+
+## The sun layer and the sky furniture
+
+Native renderer sub-project 10, phase 10c, plan Task 11, 2026-10-10. The eleven pixel shaders and three vertex shaders of the game's sky furniture (moon, clouds, glare), of its half-size "sun layer" (the layer's depth, its occluders, the beam source, flares, moon glow, sun disc) and of the previous-frame blend, as closed formulas, each checked against its microcode; the list of quads the capture is to record; and the replay's variant C, the sun layer rasterised on the CPU. Nothing here was run in the game. Every statement rests on the shader dumps, on the research's captures (`native_discovery_20261009_134312.jsonl` towards the sun, `_092959`, `_092633`, `_120818` for the states) and on the research note's sections 1 and 5, whose reading this part checks.
+
+### Result
+
+| What | Shader | Function of `light_formulas.py` | State |
+|---|---|---|---|
+| Moon | ps `18D39DCEBEE4C2FC` | `post_moon` | closed: 2,000 of 2,000 values |
+| Clouds | ps `61976295517D7015` | `post_cloud` (`post_cloud_uv`, `post_cloud_fade`) | closed: 2,000 of 2,000, both branches and every clamp reached; 2,000 of 2,000 with the literals drawn |
+| Glare | ps `04985A0F7296E130` | `post_glare` | closed: 2,000 of 2,000 |
+| Beam source | ps `8E4DBB9E9A63EF67` | `post_beam_source` | closed: 2,000 of 2,000 |
+| Flare | ps `D72FD0903CCE7DD6` | `post_flare` | closed: 2,000 of 2,000 |
+| Moon glow | ps `4B58837D42F08C89` | `post_moon_glow` | closed: 2,000 of 2,000 |
+| Sun disc | ps `3E77B1AD4BC5B900` | `post_sun_disc` | closed: 2,000 of 2,000 |
+| Cloud occluder | ps `3FF79524FCDB71C5` | `post_cloud_occluder` | closed: 2,000 of 2,000 |
+| Layer depth | ps `5D6768847B0602B8` | `post_layer_depth` | closed: 2,500 of 2,500 (colour and depth output) |
+| Tree occluder | ps `F1EB2497108F159D` | `post_tree_occluder` (`post_tree_occluder_uv`) | closed: 2,000 of 2,000; its draws are not quads and are not recorded |
+| Previous-frame blend | ps `686DE15FC84D8B73` | `post_previous_frame` | closed: 2,000 of 2,000; its weight is the draw's blend constant |
+| Quad | vs `81BADE63A169E3DC` | `post_quad_position` | closed: 3,000 of 3,000 (position and coordinate) |
+| Cloud quad | vs `C304C6A1AF18B46F` | `post_quad_position` | closed: 4,500 of 4,500 (position, coordinate, world position) |
+| Cube | vs `D1CC6DC28244C55A` | `post_cube_position` (`post_cube_point`) | closed: 2,000 of 2,000, both faces reached; identified ("What the reading found", 3) |
+
+(`out/native-evidence/post/task11_post_check.txt`: `post_check.py`, 500 trials a shader, tolerance 1e-9 relative, exit code 0; the largest relative difference is 2.2e-16, the cube's; with `--literals random` 3.6e-15, `task11_post_check_random_literals.txt`. `POST_FURNITURE_SHADERS` has the fourteen hashes with stage and role.) The interpreter needed nothing new: `ucode_eval.py` is unchanged. So spec criterion 16 holds for every furniture shader, and none stays out of `POST_QUAD_SHADERS` by ruling 18.
+
+### What the reading found
+
+1. **Five of the eight quad kinds are drawn with the alpha test on**, which neither the research, the spec nor plan Task 12's record names. Register `0x2202` (colour control) is `0x0000000C` at their rows: function 4, "greater", and bit 3, the test's enable; the reference is register `0x210E`. In all four surveyed captures: the moon 1 / 255 (`0x3B808081`), the clouds 5 / 255 (`0x3CA0A0A1`), the cloud occluders 0.149 = 38 / 255 (`0x3E189899`), the moon glow 10 / 255 (`0x3D20A0A1`), the sun disc 0.502 = 128 / 255 (`0x3F008081`). The glare, the beam source and the flares have `0x00000004` (the test off). Consequences: **the sun disc is only its texture's core**, the texels whose alpha is above one half (in `134312` 178 of the quad's 3,233 layer pixels pass the test and the depth); the cloud occluders' "blend word with colour mask 0" (the research's open point) needs no explanation by blending, since the alpha test is what decides where they write depth; and a record that does not hold `0x2202` and `0x210E` cannot draw these five as the game does. `QuadRecord` of plan Task 12 has `blend`, `depth` and `colour_mask` only: see the report's concerns.
+2. **`D72F` is also drawn outside the layer.** At the bridge (`092959`) a frame has 8 `D72F` quads into a target of pitch 280 before the main scene (surface word `0x04020118`, rows 1385 on) and 2 at the layer; at the third spot (`092633`) 16 and 4, by the trees (`120818`) 4 and 2, towards the sun (`134312`) none. The pitch-280 quads have no area (their first two corners have the same position); what they are is not identified here (visibility queries of the flares, by their place among the occlusion-query draws: inference). A flare record belongs to the layer only at the layer's target. `5D67` likewise appears twice a frame at pitch 320 (once sampling a 1024 x 1024 depth, once the scene's) besides its one draw at the layer.
+3. **The three cubes are slabs under the eye.** `D1CC` (instructions 5 to 32) maps a unit cube's vertex `v` to `xy = (2 v.xy - 1) * 2850` and, where `v.z = 1`, to the point `(xy + c9.xy, c9.z)`, else to `(xy, c119.x)`, and transforms that by `c0..c3` (the quads' matrix). In every captured row vertex `c9` is the eye (90.10, 158.37, 47.21 in `134312`, the clouds' pixel `c79` of the same frame to single precision) and `c119.x` is 18.47 for the first cube and 20.00 for the other two. So each is a box 5,700 wide whose upper face lies at the eye's height about the eye and whose lower face lies at the height 18.47 or 20.00 about the world's origin; its 30 indices are the five faces other than the upper one. Seen from the eye it is the plane at that height out to 2,850 (the distance of the sun's and the moon's quads): it gives the layer a depth wherever the eye looks below that plane and the scene has drawn nothing. What stands at those heights in the world (the lake's surface is the candidate) is not identified. In `134312` the cubes change no texel (9,520 pixels each, all behind the scene's depth).
+4. **`5D67` writes no colour**: its colour output is (0, 0, 0, 0) for every input (`sgts` of `-|x|`, which is never above 0) and its depth output is the scene depth's value, clamped. The colour mask is 0 at its rows anyway.
+5. **The moon's alpha is `c31.w * tex.a` and `c31.w` is 0 in every captured row**: with its alpha test (above 1 / 255) the moon draws nothing by day whatever its place.
+6. **The sun disc's `c20.w` is 1 at its rows**, not the scene's scale: a record must take the register at the draw's call (the research has it).
+7. **Every quad has the same six indices**, 0 1 2 1 3 2 (`POST_QUAD_INDICES`): corners 0 and 1 are one edge, 2 and 3 the opposite one (all `"indxdata"` rows of the furniture shaders in `134312` frame 1, by `tests/test_post_sun_layer.py`).
+8. The research's formulas of the short shaders are confirmed as written (its section 5), with their alphas added: the glare's, the beam source's and the flare's alpha is 1; the moon glow's and the sun disc's is the texture's.
+9. **The clouds' `c78` is the view direction, not a light's**: it equals the quads' matrix row `c2.xyz` to five digits in `134312` (looking towards the sun) and in `092959` (looking away). So `a1 = sat(-N . c78)` is how far the cloud's normal faces the eye. `c77` is a point 2,000 from the eye in a direction that is the same in both captures to 2 degrees, (-0.65, 0.06, 0.76) and (-0.62, 0.02, 0.78), 16 degrees from the centre of the beam source's quad: the light's side (what exactly it is: not identified).
+
+### The formulas
+
+Instruction numbers of the dumps in brackets. `tex` is the fetch of slot 13 at the quad's interpolated coordinate (slot 0 for `F1EB`); P is the quad's interpolated world position (interpolator 0 of `C304`).
+
+```
+18D3 moon            rgb = tex.rgb * c31.rgb * tex.a * c20.w         alpha = c31.w * tex.a            (2 to 5)
+0498 glare           rgb = tex.rgb * c31.rgb                         alpha = 1                        (2, 3)
+8E4D beam source     rgb = tex.rgb * c255.x * c31.rgb                alpha = 1     c255.x = 1 / 6     (2 to 4)
+D72F flare           rgb = tex.a * c31.rgb                           alpha = 1                        (2, 3)
+4B58 moon glow       rgb = tex.rgb * c255.x * tex.a                  alpha = tex.a c255.x = 0.2       (2 to 4)
+3E77 sun disc        rgb = tex.rgb * c31.rgb * tex.a * c20.w         alpha = tex.a                    (2 to 5)
+5D67 layer depth     colour = 0;  depth = sat(tex.r)                                                  (2 to 4)
+686D previous frame  out = tex at uv + (0.5, 0.5) texels, point                                       (2, 3)
+F1EB tree occluder   t = tex(uv * c8.xy + c8.zw);  rgb = t.rgb;  alpha = t.a * c15.w                  (2 to 5)
+3FF7 cloud occluder  a = tex(uv * c31.xy + c46.xy).a                                                  (2, 3)
+                     fade = c255.w - sat(c255.z * (sqrt(|(P.xy - c47.xy)^2 + c255.y|) - c255.x))      (4 to 9)
+                     colour = 0;  alpha = a * c77.x * fade              c255 = (1000, 0, 0.001, 1)    (6, 10)
+6197 clouds          t = tex(uv * c31.xy + c46.xy)                                                    (6, 7)
+                     fade = c254.w - sat(c254.y * (sqrt(|(P.xy - c79.xy)^2 + c254.x|) - c254.z))      (8 to 13)
+                     alpha = t.a * c69.x * fade                                                       (10, 14)
+                     alpha <= c254.y:  rgb = (-|P.x| > c254.x) ? 1 : 0     (0 with the literal)       (15 to 17)
+                     else:  g = (t.a at +1 texel in x - t.a at -1, the same in y)                     (18 to 21, 24)
+                            N = (g.x, g.y, c70.x) / sqrt(|c70.x^2 + g.x^2 + g.y^2 + c254.x|)          (25 to 28)
+                            Dn = (P - c77.xyz) / |P - c77.xyz|                                        (22 to 24, 27)
+                            a1 = sat(-N . c78.xyz);  b1 = sat(-Dn . N);  b2 = sat(Dn . N)             (29, 31, 33)
+                            l = b1^2 * (c254.w - t.a) + b2 + b2 * |c254.w - a1|^c255.x                (30 to 36)
+                            rgb = (l * c47.rgb + c71.x) * c51.x * t.rgb                               (37 to 39)
+                     out = (rgb * c20.w, alpha)         c254 = (0, 0.001, 1000, 1), c255.x = 32       (40, 41)
+81BA quad            oPos = (c0 . p, c1 . p, c2 . p, c3 . p), p = (x, y, z, 1);  o0.xy = uv           (3 to 9)
+C304 cloud quad      the same;  o1.xy = uv;  o0.xyz = the position                                    (3 to 10)
+D1CC cube            xy = (v.xy * c254.x + c254.w) * c254.z                c254 = (2, 0, 2850, -1)    (5 to 9)
+                     v.z == c255.x (1):  q = (xy + c9.xy, c9.z);  else q = (xy, c119.x)               (9 to 12, 21, 22)
+                     oPos = (c0 . q, c1 . q, c2 . q, c3 . q), q.w = 1, plus c254.y (0) on two         (13 to 32)
+                     components (x and y at the first face, y and w at the others)
+```
+
+The clouds in words: a layer's texture holds its colour and, in alpha, its density. The density times `c69.x` and a fade (1 within 1,000 of the eye on the ground plane, 0 from 2,000 on) is the alpha; where that is at most 0.001 the colour is black. Elsewhere the density's slope over two texels gives a normal with `c70.x` as its height; the light is a part that comes through the cloud from behind (`b1^2`, weighted by how thin the cloud is, `1 - t.a`) and a part from the front (`b2`, once plainly and once more by the 32nd power of `1 - a1`), where `Dn` is the direction from the far point `c77` (at (-1210, 275, 1563) in `134312`: 2,000 from the eye, on the sun's side) to the pixel and `c78` is the view direction ("What the reading found", 9); then the sun's colour `c47`, an ambient `c71.x`, the layer's brightness `c51.x`, the texture's colour and the output scale. The four neighbour fetches are at texel offsets of the level the sampler reads (the fetches are linear with mips): a native shader has to take the same step, a texel of the mip level in use.
+
+### The draws' state
+
+From the rows of `134312`, `092959`, `092633` and `120818` (4 or 8 frames each); every row of a shader has the same words. Depth word `0x00708766`: test "greater or equal" (the depth is reversed) and write; `...62`: test without write; `...60`: no test. Blend `0x07060706`: source alpha, one less source alpha; `0x01010101`: one, one; `0x00010001`: none. Every texture is fetched linear with mips and wraps (the fetch constants' filter and clamp fields), in slot 13.
+
+| Kind (`POST_QUAD_SHADERS`) | ps / vs | Where | Depth | Blend | Colour mask | Alpha test | Registers | Texture |
+|---|---|---|---|---|---|---|---|---|
+| moon | `18D3` / `81BA` | scene, after the sky | `62` | `0x07060706` | F | above 1 / 255 | c20, c31 | 1024 x 128 DXT4_5 (an atlas; coordinates 0.5 to 0.625) |
+| cloud (3 a frame) | `6197` / `C304` | scene, after the moon | `66` | `0x07060706` | F | above 5 / 255 | c20, c31, c46, c47, c51, c69, c70, c71, c77, c78, c79 | 512 x 512 DXT4_5 (two textures) |
+| glare (1 or 2 a frame) | `0498` / `81BA` | scene, its last draws | `60` | `0x01010101` | F | off | c31 | 256 x 256 DXT4_5 |
+| cloud-occluder (3) | `3FF7` / `C304` | layer, depth | `66` | `0x07060706` | 0 | above 0.149 | c31, c46, c47, c77 | the clouds' |
+| beam-source | `8E4D` / `81BA` | layer, picture 1 | `62` | `0x00010001` | F | off | c31 | the glare's |
+| flare (0, 2 or 4) | `D72F` / `81BA` | layer, picture 2 | `62` | `0x01010101` | F | off | c31 | 256 x 256 `k_8_8_8_8` |
+| moon-glow | `4B58` / `81BA` | layer, picture 2 | `62` | `0x07060706` | F | above 10 / 255 | none | the moon's atlas |
+| sun-disc | `3E77` / `81BA` | layer, picture 2 | `62` | `0x01010101` | F | above 0.502 | c20, c31 | 256 x 256 DXT4_5 |
+| (layer depth) | `5D67` / `D5E1` | layer, depth | `66` | `0x00010001` | 0 | off | none | the scene depth, point |
+| (cubes, 3) | none / `D1CC` | layer, depth | `66` | `0x00010001` | 0 | off | vertex c0..c3, c9, c119 | none |
+| (tree occluders) | `F1EB` / `4325` | layer, depth | `66` | `0x00010001` | 0 | on, with alpha to mask (`0xAA00001C`), reference 0 | c8, c15 | 2048 x 1024 DXT1, slot 0 |
+| (previous frame) | `686D` / `D5E1` | the front target, last | `60` | `0x0F0E0F0E`, constant `0x3DD0D0D2` = 0.10196 | F | off | none | the front buffer |
+
+The rows in brackets are not recorded quads: the native layer's depth comes from the native depth, the cubes and tree occluders are plan Task 17's, the previous-frame blend is plan Task 15's (`POST_PREVIOUS_WEIGHT`).
+
+### The quad table
+
+`POST_QUAD_SHADERS` lists the eight kinds in the order of the record's kinds (plan Task 12), each with its vertex shader, the pixel registers its microcode reads without the literals (ascending: the record's `ps` rows in that order; `FurnitureRealDumps.test_the_quad_lists_registers_are_the_ones_the_microcode_reads` holds the list to the dumps), its texture slot, where it is drawn, its blend and whether the alpha test is on. The literals are the shaders' own and are the functions' defaults. `gen_post_quad_table.py --out src/native/capture/post_quad_table.inc` writes one `FABLE2_POST_QUAD(ps, vs, kind, layer, target, blend, alpha_test, slot_count, slot0..2, register_count, r0..r11)` line a kind (the tool's text has the arguments' meaning); it refuses a shader without a machine check. The file itself is not written by this task: it is plan Task 12's to generate and commit with the code that includes it, and `tests/test_gen_post_quad_table.py` compares it with the list from then on.
+
+### The check
+
+`post_check.py` runs the fourteen beside the post chain's eight, with what they need besides ("The post chain", "The check", for the rest):
+
+- Every register a shader reads is drawn with four different components and the texel's four channels differ, so a wrong component, channel or slot gives a wrong value. The vertex shaders are given their vertex through the interpreter's vertex-fetch callback (position at offset 0, coordinate at offset 3).
+- The clouds' trials are spread over the shader's branches and clamps, and the result counts what they reached (`reached`; `task11_post_check.txt`): of 500, 155 with alpha at or below the threshold (48 of them exactly at it: a texture whose alpha is the literal 0.001, `c69.x` = 1 and a pixel inside the fade's start, where the shader takes the dark branch) and 345 lit; the pixel inside the fade's start in 213, across it in 222, beyond its end in 65; the light term `a1` clamped at 1 in 52, at 0 in 168, between in 125. The cloud occluder: fade 1 in 164, between in 257, 0 in 79. The cube: 272 vertices on the face the shader singles out, 228 off it. The layer depth: the depth below 0 in 125, above 1 in 116.
+- The literals are the capture rows' (`FURNITURE_LITERALS`; `tests/test_post_sun_layer.py`, `RealCapture`, reads the rows of `134312`). With `--literals random` they are drawn as well, because the microcode reads them as registers: that holds what a literal of 0 or 1 hides. Four wrong forms of the clouds pass with the game's literals and fail with drawn ones: the square root, the reciprocal square root and the power without their absolute values (with the literals their operands are never negative), and a dark branch that is always 0 (with the literal `c254.x` = 0 it is). They are no errors for the game's literals; the formula follows the microcode in them all the same.
+- **Wrong forms that fail** (`FurnitureRealDumps.test_wrong_formulas_fail`, 80 forms, and the four above with drawn literals; `out/native-evidence/post/task11_mutations.txt` has each with its count at 500 trials): for every check at least two, and `test_every_furniture_check_has_a_wrong_form_it_catches` holds that none is without. Moon: alpha without the texture's, without `c31.w`, colour without the texture's alpha, without `c20.w`, the register's or the texture's colour reversed. Glare: alpha from the texture, times the texture's alpha, the register reversed, the beam source's sixth. Beam source: no sixth, alpha from the texture, times the texture's alpha, the texture's colour reversed. Flare: the texture's red for its alpha, the texture's colour, alpha from the texture, the register reversed. Moon glow: colour without the alpha, alpha 1, no fifth, colour reversed. Sun disc: the moon's alpha, no `c20.w`, colour without the alpha, alpha 1. Layer depth: not clamped, from green, as colour, one less the depth. Previous frame: red and blue exchanged, alpha 1. Tree occluder: no `c15.w`, colour times `c15.w`, no colour. Cloud occluder: no fade, no `c77.x`, the distance in space, tiling and scroll exchanged, the fade not clamped, the texture's red, one texel off. Quad and cloud quad: the matrix transposed, no translation, rows exchanged. Cube: the faces exchanged, the eye under every face, under none, the heights exchanged, one height, not centred, the matrix transposed, the vertex's y and z exchanged. Clouds, 25 forms from a second writing of the formula in the test (`cloud_form`, which itself passes): the coordinate's tiling and scroll exchanged, the distance in space, the fade not clamped or absent, no `c69.x`, the threshold taken with "at least" (caught only by the 48 trials at the threshold: 1,856 of 2,000), no branch, a step of two texels, the slope reversed or its axes exchanged, the normal's height 1, the eye for the far point, a direction not normalised, the light term not clamped, the two sides exchanged, the power 16 or absent, the back term not squared or without the density, the ambient added first or outside the brightness, the sun's colour reversed, no output scale, no texture colour, the texture's alpha as the alpha.
+- **Wrong microcode that fails** (`test_wrong_microcode_fails`, the dump's text changed in one place): the previous frame's half texel in x or y, a cloud neighbour's offset, the clouds' eye register, the light term's clamp, the occluder's clamp, the tree occluder's coordinate offset, the layer depth's clamp, the cube's `c9` components, the cloud quad's position components.
+
+Not reached by a trial: the draws' state (blend, depth, alpha test and reference, colour mask); the sampler's filter, mip level and addressing, and so the size of the clouds' texel step; single precision; inputs for which the microcode gives no number (a pixel at the clouds' far point; a slope and `c70.x` both 0), where the functions return 0 by their guards.
+
+### Guards and clamps
+
+As the post chain's: a texel's channel that is not finite counts as 0; a register, a position or a coordinate that is not finite gives zeros; a normal or a direction without length is (0, 0, 0). With `clamp` (the default) a result is `(v > 0) ? min(v, top) : 0` with `top` 31.875 for what is drawn into the scene (moon, clouds, glare) and 1 for the layer's `k_2_10_10_10` targets and for every alpha. The microcode has none of this; the check compares with `clamp=False`. Tests feed each function values that are no numbers (`FurnitureQuads`, `Cloud`, `Occluders`).
+
+### Variant C: the reference with the sun layer
+
+`post_sun_layer.py replay <capture> <frame>` (a tool of its own beside `post_replay.py`, whose functions it uses; `post_replay.py replay <capture> <frame> --variant C` hands over to it): the frame's layer draws from the capture's `"indx"` and `"indxdata"` rows (corners as the game filled them, registers, literals, state words), the scene depth the layer's depth draw names (`0x1A02A000`, by content), and the textures the rows name, rasterised at 560 x 360 with the formulas above: the layer's depth, the cloud occluders (alpha test), the cubes, the beam source into picture 1, flares, moon glow and sun disc into picture 2 with their blends, alpha tests and depth tests; both pictures reduced (`post_reduce`), picture 1 twice through `post_radial`, and variant B's bloom with `tf1` = the blurred beams and `tf2` = the reduced picture 2. `post_sun_layer.py quads` lists a frame's furniture quads.
+
+`134312` frame 1 (`out/native-evidence/post/task11_variant_c_134312_f1.txt`; the sun at (0.3785, 0.3914) of the picture, behind leaves):
+
+| | median | mean | 90% | 99% | within 4 levels | within 8 levels |
+|---|---|---|---|---|---|---|
+| variant B (no sun layer) | 1.52 | 8.70 | 26.57 | 86.70 | 57.6% | 69.9% |
+| **variant C** | **0.72** | 3.17 | 7.26 | 41.44 | 76.2% | **88.5%** |
+| variant C with `tf1` and `tf2` exchanged | 0.85 | 3.34 | 8.37 | 36.16 | 72.3% | 86.1% |
+
+(absolute difference from the front buffer `0x1ECFF000` in 8-bit levels, whole picture outside the HUD.) Spec criterion 18's first part (at least 10 points above variant B within 8 levels) is met on this frame: +18.6 points. Its second part (the regions "sun" and "beams" of `post-regions.json` within 15%) cannot be judged: that file is plan Task 10's and does not exist. In its place, and labelled as this tool's: the quarter of the picture about the blur's centre has 0.939 of the final picture's mean luminance in variant B and 1.015 in variant C. What the layer did: the beam source drew 11,435 of its 79,355 pixels (the others behind the scene's depth), the sun disc 178 (1,984 behind the depth, 1,071 below its alpha reference), the moon glow none (its quad lies outside the picture); the cloud occluders wrote depth at 11,949, 17,198 and 4,191 pixels; the cubes changed nothing. The pictures (`task11_134312_f1_C.png` beside `_final.png`, viewed): variant C has the beams fanning down and to the right from the sun through the leaves, across the railing and the planks, and the white-yellow sun behind the upper rail, as the game's picture has them; without the layer (`_B.png`) there is neither. What still differs is beyond 8 levels on 11.5% of the pixels: the HUD's text is outside the statistics, the beams' edges are a little harder than the game's, and the tree occluder draws are missing.
+
+The exchanged assignment fits less well on every figure but the 99th percentile; the difference is small (2.4 points within 8 levels), so this does not settle discovery question 3: it is one frame, and the tree occluders are missing from both.
+
+### What stands on inference
+
+1. **Which picture is `tf1` and which `tf2`**, and that both radial passes are of picture 1 (the research's reading by the weights and the engine's names; plan Task 10). Variant C's figures above are one frame's hint for the research's assignment, no more.
+2. **A pixel's sample point.** The rasteriser samples pixel `i` at its integer position (the post chain's inference 2), so the layer's depth is the scene's texel (2 x, 2 y) and a quad's edge lies where that convention puts it; half a layer pixel of doubt.
+3. **The depth between the two pictures**: taken as kept (the clears between them as colour clears).
+4. **The cubes' culling**: drawn without it. Their cull word is `0x00218002`; seen from inside a box, five faces face the eye if any does. In `134312` it makes no difference (they change nothing).
+5. **Textures**: read as stored (the sign fields of the fetch constants are 0: no gamma decode); the levels are made by means of four, since a dump holds the base level only, and a quad reads the level of its mean footprint (the sun disc: level 2.15); the cloud occluders read level 0.
+6. **What the cubes' heights are** and what the pitch-280 `D72F` quads are ("What the reading found", 2 and 3).
+7. The console's fetches, as in the post chain's inference 6.
+
+### Not checked
+
+1. The clouds, the moon and the glare against a picture: they are in the oracle's scene colour already, so variant C does not draw them, and no capture has clouds or the moon visibly in the picture. `post_cloud` stands on its machine check alone.
+2. The tree occluder draws (`4325` / `F1EB`): the shader is checked, the draws are not replayed (no row holds their vertices).
+3. A flare: `134312` has none; the bridge captures have two a frame with the sun behind the camera.
+4. Variant C on any frame but `134312` frame 1; on a frame of plan Task 10's run 3 when it exists.
+5. The moon glow and the moon in a picture (below the horizon in every capture).
+6. The size of the clouds' texel step under the game's mip selection, and single precision.
+
+### Evidence
+
+In `out/native-evidence/post/` (git-ignored): `task11_post_check.txt` and `task11_post_check_random_literals.txt`; `task11_mutations.txt` with `task11_mutations.py`; `task11_variant_c_134312_f1.txt` and `..._exchanged.txt`; `task11_134312_f1_{B,C,final,layer1_x4,layer2,tf1,tf2}.png`. Tests: `tests/test_post_formulas.py` (the furniture's classes), `tests/test_gen_post_quad_table.py`, `tests/test_post_sun_layer.py`.

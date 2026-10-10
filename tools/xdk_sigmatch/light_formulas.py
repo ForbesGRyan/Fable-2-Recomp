@@ -59,6 +59,11 @@ The post chain's eight pixel shaders follow (post_composite with post_table_texe
 post_bright, post_blur13, post_radial, post_reduce, post_ramp, post_unlit_scale, POST_SHADERS; the post
 sub-project). They work on scene values in the game's scale, after c20.w, and are checked by
 post_check.py.
+
+The sun layer's and the sky furniture's shaders are the last part (post_moon, post_cloud, post_glare,
+post_beam_source, post_flare, post_moon_glow, post_sun_disc, post_cloud_occluder, post_layer_depth,
+post_tree_occluder, post_previous_frame, post_quad_position, post_cube_position; POST_FURNITURE_SHADERS and
+POST_QUAD_SHADERS, the quads the capture records; phase 10c). post_check.py checks them too.
 """
 import collections
 import math
@@ -1083,3 +1088,295 @@ def post_composite(scene, bloom, table, c31x, c46x, c47x, c77, c78x, clamp=True)
     L2 = post_lum(scr)
     out = powc([x + c77[0] * (x - L2) for x in scr], c78x)
     return [sat(x) for x in out] if clamp else out
+
+
+# --- the sun layer and the sky furniture (sub-project 10, phase 10c) -------------------------------------------
+#
+# The eleven pixel shaders and three vertex shaders of the game's sky furniture and of its half-size "sun
+# layer" (POST_FURNITURE_SHADERS), each checked against its microcode by post_check.py; the document's part
+# "The sun layer and the sky furniture" has the instruction numbers, the states they are drawn with and what
+# stands on inference. Colours are four floats, red first, alpha last.
+#
+# What a function is handed. The quad shaders that only scale a texel take that texel (`t`: red, green,
+# blue, alpha as the fetch delivers it; the fetch is at the interpolated coordinate of the quad's corner
+# values, slot 13, filtered as the fetch constant says: linear with mips, wrap, in every captured row). The
+# clouds and their occluder compute their own coordinate and take the texture: `tex(u, v, dx, dy)` at the
+# normalised coordinate (u, v), moved by (dx, dy) texels of the level the sampler reads (the fetches'
+# OffsetX / OffsetY), returning the four channels.
+#
+# The literal registers (c254, c255) are the shaders' own; their values are the functions' defaults, read
+# from the captures' "ps_lit" / "vs_lit" rows (tests/test_post_sun_layer.py holds them to a capture). They are
+# parameters because the microcode reads them as registers: post_check.py also draws them at random, which
+# holds what a literal of 0 or 1 would hide (an absolute value, an added term).
+#
+# Guards (review focus 2): a texel's channel that is not finite counts as 0 (a texel of three channels has
+# alpha 1); a register, a position or a coordinate that is not finite gives zeros; a normal or a direction
+# without length is (0, 0, 0); and with `clamp` (the default) every result is a number in its target's
+# range: (v > 0) ? min(v, top) : 0 with top = 31.875 for what is drawn into the scene (moon, clouds, glare)
+# and 1 for what is drawn into the layer's k_2_10_10_10 targets and for every alpha. The microcode does not
+# clamp; post_check.py compares with `clamp=False`.
+#
+# Not in any function, because it is the draw's state and not the shader's: the blend, the depth test and
+# the ALPHA TEST. Five of the eight quad kinds are drawn with the alpha test on (register 0x2202 bit 3,
+# function "greater", reference 0x210E): the moon (reference 1 / 255), the clouds (5 / 255), the cloud
+# occluders (0.149), the moon glow (10 / 255) and the sun disc (0.502: only the disc's core is drawn).
+# POST_QUAD_SHADERS says which; the reference is the draw's.
+
+POST_QUAD_INDICES = (0, 1, 2, 1, 3, 2)      # the builder's six indices of every captured quad: corners 0 1 / 2 3
+POST_PREVIOUS_BLEND = 0x3DD0D0D2            # the blend constant of pass F's draw (registers 0x2105 to 0x2108)
+POST_PREVIOUS_WEIGHT = 0.10196079313755035  # ... as a float (26 / 255): the share of the previous final picture
+POST_CLOUD_C254 = (0.0, 0.001, 1000.0, 1.0)             # 6197: 0, the alpha threshold and the fade's rate, its start, 1
+POST_CLOUD_C255X = 32.0                                 # 6197: the exponent of the light's falloff
+POST_CLOUD_OCCLUDER_C255 = (1000.0, 0.0, 0.001, 1.0)    # 3FF7: the fade's start, 0, its rate, 1
+POST_BEAM_C255X = 1.0 / 6.0                             # 8E4D
+POST_GLOW_C255X = 0.2                                   # 4B58 (0.200000003 as a float)
+POST_CUBE_C254 = (2.0, 0.0, 2850.0, -1.0)               # D1CC: vertex c254; its c255.x is 1
+
+PostFurnitureShader = collections.namedtuple("PostFurnitureShader", "hash stage role")
+POST_FURNITURE_SHADERS = (
+    PostFurnitureShader("18D39DCEBEE4C2FC", "frag", "moon"),
+    PostFurnitureShader("61976295517D7015", "frag", "cloud"),
+    PostFurnitureShader("04985A0F7296E130", "frag", "glare"),
+    PostFurnitureShader("8E4DBB9E9A63EF67", "frag", "beam-source"),
+    PostFurnitureShader("D72FD0903CCE7DD6", "frag", "flare"),
+    PostFurnitureShader("4B58837D42F08C89", "frag", "moon-glow"),
+    PostFurnitureShader("3E77B1AD4BC5B900", "frag", "sun-disc"),
+    PostFurnitureShader("3FF79524FCDB71C5", "frag", "cloud-occluder"),
+    PostFurnitureShader("5D6768847B0602B8", "frag", "layer-depth"),
+    PostFurnitureShader("F1EB2497108F159D", "frag", "tree-occluder"),
+    PostFurnitureShader("686DE15FC84D8B73", "frag", "previous-frame"),
+    PostFurnitureShader("81BADE63A169E3DC", "vert", "quad"),
+    PostFurnitureShader("C304C6A1AF18B46F", "vert", "cloud-quad"),
+    PostFurnitureShader("D1CC6DC28244C55A", "vert", "cube"),
+)
+
+# The quads the capture records (plan Task 12) and the pass draws (Tasks 13, 14, 16), in the order of the
+# record's kinds. Every one is in POST_FURNITURE_SHADERS and passes post_check.py (spec ruling 18: a shader
+# that did not would not be here).
+#   hash, vs    the pixel shader and the vertex shader it is drawn with in every captured row
+#   registers   the pixel registers the microcode reads, ascending, without the literals: the record's
+#               `ps` rows in this order (the test holds the list to the dump)
+#   slots       its texture slots, in the record's `fetch` order
+#   where       "scene" (the main scene's target), or the sun layer: "layer-depth" (its depth, colour mask
+#               0), "layer1" (the beam source's picture), "layer2" (flares, moon glow, sun disc)
+#   blend       "alpha" (source alpha, inverse source alpha: 0x07060706), "add" (one, one: 0x01010101),
+#               "none" (0x00010001), "depth" (nothing but depth is written)
+#   test        whether the alpha test is on in every captured row (function greater; the reference is
+#               the draw's register 0x210E)
+# D72F is also drawn outside the layer: 8 calls a frame at the bridge into a target of pitch 280 before the
+# main scene, each a quad of no area (its first two corners equal). Those are not the layer's flares; a
+# record belongs to the layer only at the layer's target.
+PostQuadShader = collections.namedtuple("PostQuadShader", "hash kind vs registers slots where blend test")
+_QUAD_VS, _CLOUD_VS = "81BADE63A169E3DC", "C304C6A1AF18B46F"
+POST_QUAD_SHADERS = (
+    PostQuadShader("18D39DCEBEE4C2FC", "moon", _QUAD_VS, (20, 31), (13,), "scene", "alpha", True),
+    PostQuadShader("61976295517D7015", "cloud", _CLOUD_VS, (20, 31, 46, 47, 51, 69, 70, 71, 77, 78, 79), (13,),
+                   "scene", "alpha", True),
+    PostQuadShader("04985A0F7296E130", "glare", _QUAD_VS, (31,), (13,), "scene", "add", False),
+    PostQuadShader("8E4DBB9E9A63EF67", "beam-source", _QUAD_VS, (31,), (13,), "layer1", "none", False),
+    PostQuadShader("D72FD0903CCE7DD6", "flare", _QUAD_VS, (31,), (13,), "layer2", "add", False),
+    PostQuadShader("4B58837D42F08C89", "moon-glow", _QUAD_VS, (), (13,), "layer2", "alpha", True),
+    PostQuadShader("3E77B1AD4BC5B900", "sun-disc", _QUAD_VS, (20, 31), (13,), "layer2", "add", True),
+    PostQuadShader("3FF79524FCDB71C5", "cloud-occluder", _CLOUD_VS, (31, 46, 47, 77), (13,), "layer-depth", "depth", True),
+)
+
+
+def _post_texel(t):
+    """A texel's four channels, one that is not finite read as 0; a texel of three channels has alpha 1."""
+    v = [_finite(x) for x in t[:4]]
+    return v + [1.0] * (4 - len(v))
+
+
+def _post_out(rgb, alpha, clamp, top):
+    if not clamp:
+        return list(rgb) + [alpha]
+    return [(min(v, top) if v > 0.0 else 0.0) for v in rgb] + [sat(alpha)]
+
+
+def post_moon(t, c31, c20w, clamp=True):
+    """18D39DCEBEE4C2FC, the moon (in the scene, right after the sky; alpha blend, alpha test, depth test
+    without write):
+        rgb = tex.rgb * c31.rgb * tex.a * c20.w        alpha = c31.w * tex.a
+    c20.w: the scene's output scale. c31.w is 0 in every captured row (the moon below the horizon by day):
+    its alpha is then 0 and the alpha test drops every pixel."""
+    if not _post_finite(c20w, *c31[:4]):
+        return [0.0, 0.0, 0.0, 0.0]
+    t = _post_texel(t)
+    return _post_out([t[i] * c31[i] * t[3] * c20w for i in range(3)], c31[3] * t[3], clamp, POST_SCENE_MAX)
+
+
+def post_glare(t, c31, clamp=True):
+    """04985A0F7296E130, the glare of the sun and of the moon (the scene's last two draws; additive, no depth
+    test):  rgb = tex.rgb * c31.rgb,  alpha 1. No output scale: c31 carries the brightness."""
+    if not _post_finite(*c31[:3]):
+        return [0.0, 0.0, 0.0, 0.0]
+    t = _post_texel(t)
+    return _post_out([t[i] * c31[i] for i in range(3)], 1.0, clamp, POST_SCENE_MAX)
+
+
+def post_beam_source(t, c31, c255x=POST_BEAM_C255X, clamp=True):
+    """8E4DBB9E9A63EF67, the sun-beam source (layer 1; no blend, depth-tested): the glare's texture again,
+        rgb = tex.rgb * c255.x * c31.rgb,  alpha 1       c255.x = 1 / 6 (literal), c31 = the sun's colour."""
+    if not _post_finite(c255x, *c31[:3]):
+        return [0.0, 0.0, 0.0, 0.0]
+    t = _post_texel(t)
+    return _post_out([t[i] * c255x * c31[i] for i in range(3)], 1.0, clamp, 1.0)
+
+
+def post_flare(t, c31, clamp=True):
+    """D72FD0903CCE7DD6, a flare (layer 2; additive, depth-tested):  rgb = tex.a * c31.rgb,  alpha 1."""
+    if not _post_finite(*c31[:3]):
+        return [0.0, 0.0, 0.0, 0.0]
+    t = _post_texel(t)
+    return _post_out([t[3] * c31[i] for i in range(3)], 1.0, clamp, 1.0)
+
+
+def post_moon_glow(t, c255x=POST_GLOW_C255X, clamp=True):
+    """4B58837D42F08C89, the moon's glow (layer 2; alpha blend, alpha test, depth-tested):
+        rgb = tex.rgb * c255.x * tex.a,  alpha = tex.a       c255.x = 0.2 (literal). It reads no register."""
+    if not _post_finite(c255x):
+        return [0.0, 0.0, 0.0, 0.0]
+    t = _post_texel(t)
+    return _post_out([t[i] * c255x * t[3] for i in range(3)], t[3], clamp, 1.0)
+
+
+def post_sun_disc(t, c31, c20w, clamp=True):
+    """3E77B1AD4BC5B900, the sun's disc (layer 2 only; additive, alpha test above 0.502, depth-tested):
+        rgb = tex.rgb * c31.rgb * tex.a * c20.w,  alpha = tex.a
+    c20.w is the register at the draw's call: 1 in every captured row (not the scene's scale)."""
+    if not _post_finite(c20w, *c31[:3]):
+        return [0.0, 0.0, 0.0, 0.0]
+    t = _post_texel(t)
+    return _post_out([t[i] * c31[i] * t[3] * c20w for i in range(3)], t[3], clamp, 1.0)
+
+
+def post_layer_depth(t):
+    """5D6768847B0602B8, the layer's depth from the scene's: (colour, depth) = ((0, 0, 0, 0), sat(tex.r)).
+    Drawn with colour mask 0, depth test and write: the depth output is what it is for. t: the
+    scene depth's texel at the pixel (a point fetch at the interpolated coordinate)."""
+    return [0.0, 0.0, 0.0, 0.0], sat(t[0])
+
+
+def post_previous_frame(t, clamp=True):
+    """686DE15FC84D8B73, pass F: the previous frame's final picture at the pixel (a point fetch with half a
+    texel in each axis), unchanged. Its weight is not the shader's: the draw blends with the constant factor
+    POST_PREVIOUS_WEIGHT (blend 0x0F0E0F0E)."""
+    t = _post_texel(t)
+    return [sat(v) for v in t] if clamp else t
+
+
+def post_cloud_uv(uv, c31, c46):
+    """The clouds' and their occluders' texture coordinate: uv * c31.xy + c46.xy (tiling, scroll)."""
+    return uv[0] * c31[0] + c46[0], uv[1] * c31[1] + c46[1]
+
+
+def post_cloud_fade(P, eye, start=POST_CLOUD_C254[2], rate=POST_CLOUD_C254[1], zero=POST_CLOUD_C254[0], one=POST_CLOUD_C254[3]):
+    """one - sat(rate * (sqrt(|(P.xy - eye.xy)^2 + zero|) - start)): 1 up to `start` from the eye on the
+    ground plane, 0 from start + 1 / rate on (1000 and 2000 with the literals). The height does not count."""
+    d2 = (P[0] - eye[0]) ** 2 + (P[1] - eye[1]) ** 2 + zero
+    return one - sat(rate * (math.sqrt(abs(d2)) - start))
+
+
+def post_cloud(tex, uv, P, c20w, c31, c46, c47, c51x, c69x, c70x, c71x, c77, c78, c79, c254=POST_CLOUD_C254,
+               c255x=POST_CLOUD_C255X, clamp=True):
+    """61976295517D7015, a cloud layer (in the scene after the moon; alpha blend, alpha test, depth test and
+    write). P: the pixel's world position (the quad's corner positions, interpolated); uv: its coordinate.
+        t      = tex(uv * c31.xy + c46.xy)                         the layer's texture: colour and density
+        alpha  = t.a * c69.x * fade(P, eye = c79)                  post_cloud_fade
+        alpha <= c254.y (0.001):  rgb = 0
+        else:  g  = (t.a at +1 texel in x - t.a at -1, the same in y)       the density's slope
+               N  = (g.x, g.y, c70.x) / |(g.x, g.y, c70.x)|
+               Dn = (P - c77.xyz) / |P - c77.xyz|                  c77: a far point (the sun's side)
+               a1 = sat(-N . c78.xyz);  b1 = sat(-Dn . N);  b2 = sat(Dn . N)       c78: the view direction (captured)
+               l  = b1^2 * (1 - t.a) + b2 * (1 + (1 - a1)^c255.x)
+               rgb = (l * c47.rgb + c71.x) * c51.x * t.rgb
+        out = (rgb * c20.w, alpha)
+    The literals: c254 = (0, 0.001, 1000, 1), c255.x = 32. Written with them as registers: the two zeros of
+    c254.x that are added (to the squared distance and to the slope's squared length), the 1 of c254.w in
+    1 - t.a and 1 - a1, and the thin branch's rgb = (-|P.x| > c254.x) ? 1 : 0, which is 0 with the literal."""
+    regs = (c20w, c51x, c69x, c70x, c71x, c255x, *uv[:2], *P[:3], *c31[:2], *c46[:2], *c47[:3], *c77[:3], *c78[:3],
+            *c79[:2], *c254[:4])
+    if not _post_finite(*regs):
+        return [0.0, 0.0, 0.0, 0.0]
+    u, v = post_cloud_uv(uv, c31, c46)
+    t = _post_texel(tex(u, v, 0, 0))
+    a = t[3]
+    alpha = a * c69x * post_cloud_fade(P, c79, c254[2], c254[1], c254[0], c254[3])
+    if not alpha > c254[1]:
+        dark = c20w if -abs(P[0]) > c254[0] else 0.0
+        return _post_out([dark, dark, dark], alpha, clamp, POST_SCENE_MAX)
+    gx = _finite(tex(u, v, 1, 0)[3]) - _finite(tex(u, v, -1, 0)[3])
+    gy = _finite(tex(u, v, 0, 1)[3]) - _finite(tex(u, v, 0, -1)[3])
+    n2 = abs(c70x * c70x + (gx * gx + gy * gy + c254[0]))
+    inv = 1.0 / math.sqrt(n2) if n2 > 0.0 else 0.0
+    N = (gx * inv, gy * inv, c70x * inv)
+    Dn = normalize([P[i] - c77[i] for i in range(3)])
+    a1 = sat(-dot(N, c78[:3]))
+    towards = dot(Dn, N)
+    b1, b2 = sat(-towards), sat(towards)
+    l = b1 * b1 * (c254[3] - a) + (b2 + b2 * powc([c254[3] - a1], c255x)[0])
+    rgb = [(l * c47[i] + c71x) * c51x * t[i] * c20w for i in range(3)]
+    return _post_out([_finite(x) for x in rgb], alpha, clamp, POST_SCENE_MAX)
+
+
+def post_cloud_occluder(tex, uv, P, c31, c46, c47, c77x, c255=POST_CLOUD_OCCLUDER_C255, clamp=True):
+    """3FF79524FCDB71C5, a cloud layer as an occluder of the sun layer (colour mask 0, alpha test, depth test
+    and write): the alpha the test sees; its colour output is 0.
+        alpha = tex(uv * c31.xy + c46.xy).a * c77.x * (c255.w - sat(c255.z * (|P.xy - c47.xy| - c255.x)))
+    c47 is the eye here (the clouds' c79), c77.x 0.5 in every captured row; the literals (1000, 0, 0.001, 1)
+    are the clouds' fade. The pixel is kept where alpha is above the draw's reference (0.149 captured)."""
+    if not _post_finite(c77x, *uv[:2], *P[:2], *c31[:2], *c46[:2], *c47[:2], *c255[:4]):
+        return 0.0
+    u, v = post_cloud_uv(uv, c31, c46)
+    alpha = _finite(tex(u, v, 0, 0)[3]) * c77x * post_cloud_fade(P, c47, c255[0], c255[2], c255[1], c255[3])
+    return sat(alpha) if clamp else alpha
+
+
+def post_tree_occluder_uv(uv, c8):
+    """F1EB's texture coordinate: uv * c8.xy + c8.zw."""
+    return uv[0] * c8[0] + c8[2], uv[1] * c8[1] + c8[3]
+
+
+def post_tree_occluder(t, c15w, clamp=True):
+    """F1EB2497108F159D, the tree occluders of the sun layer (colour mask 0, alpha test and alpha to mask,
+    depth test and write; slot 0): rgb = tex.rgb, alpha = tex.a * c15.w. Not a quad: its draws are indexed
+    tree geometry (vertex shader 4325...), which no record holds."""
+    t = _post_texel(t)
+    k = _finite(c15w)
+    return _post_out(t[:3], t[3] * k, clamp, 1.0)
+
+
+def post_quad_position(p, c0, c1, c2, c3):
+    """81BADE63A169E3DC and C304C6A1AF18B46F: the clip position of a quad's corner p = (x, y, z):
+    (c0 . p1, c1 . p1, c2 . p1, c3 . p1) with p1 = (x, y, z, 1) and vertex registers c0..c3. Both pass the
+    corner's coordinate on (81BA in interpolator 0, C304 in interpolator 1) and C304 also the position p
+    itself (interpolator 0: the world position the cloud shaders read). No guard: a record's corners and
+    matrix are checked where they are read (MakeQuadRecord)."""
+    q = (p[0], p[1], p[2], 1.0)
+    return [sum(c[i] * q[i] for i in range(4)) for c in (c0, c1, c2, c3)]
+
+
+def post_cube_point(v, c9, c119x, c254=POST_CUBE_C254, c255x=1.0):
+    """The world point D1CC6DC28244C55A makes of a unit cube's vertex v = (x, y, z):
+        xy = (v.xy * c254.x + c254.w) * c254.z                 (2 v - 1) * 2850 with the literals
+        v.z == c255.x (1):  (xy + c9.xy, c9.z)                 the face about the eye (vertex c9), at its height
+        else:               (xy, c119.x)                       the other face: about the origin, at the height c119.x
+    A slab 5,700 wide between the height c119.x (18.47 and 20.00 in the captured rows) and the eye's."""
+    x, y = ((v[i] * c254[0] + c254[3]) * c254[2] for i in range(2))
+    if v[2] == c255x:
+        return x + c9[0], y + c9[1], c9[2]
+    return x, y, c119x
+
+
+def post_cube_bias(v, c254=POST_CUBE_C254, c255x=1.0):
+    """What D1CC adds to the transformed point besides: c254.y (0 with the literal) to x and y at the eye's
+    face, to y and w at the other."""
+    k = c254[1]
+    return [k, k, 0.0, 0.0] if v[2] == c255x else [0.0, k, 0.0, k]
+
+
+def post_cube_position(v, c0, c1, c2, c3, c9, c119x, c254=POST_CUBE_C254, c255x=1.0):
+    """D1CC6DC28244C55A, the three depth-only cubes of the sun layer: post_quad_position of post_cube_point
+    (plus post_cube_bias, which is 0)."""
+    q = post_quad_position(post_cube_point(v, c9, c119x, c254, c255x), c0, c1, c2, c3)
+    return [a + b for a, b in zip(q, post_cube_bias(v, c254, c255x))]

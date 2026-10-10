@@ -749,3 +749,141 @@ Named by shader and instruction, so that nothing above is read as wider than it 
 ### Evidence
 
 In `out/native-evidence/fog/` (git-ignored): `task2_fog_check.txt` (`fog_check.py --trials 200`: the 40 pixel shaders, the four vertex shaders, the six tree pairs, the sky; exit code 0), `task2_fog_one_literal.txt` with its script `task2_fog_one_literal.py`. To rerun: `python tools/xdk_sigmatch/fog_check.py`, `python -m unittest discover -s tests -p "test_fog_formulas.py"`.
+
+## The post chain
+
+Native renderer sub-project 10 (exposure, composite, bloom, sun layer), plan Task 3, 2026-10-09. The eight pixel shaders of the game's post chain as closed formulas, each checked against its microcode; the replay of the chain on the CPU against the game's own final picture; the numbers the C++ mirrors are pinned to. Nothing here was run in the game. Every statement rests on the shader dumps, on the four read-back captures of the research (`out/build/win-amd64-release/logs/native_discovery_20261009_092959.jsonl`, `_121331`, `_132250` at the bridge, `_134312` towards the sun; 4 frames each, made with `--readback_resolve=full`), on the SDK's translator source where it is cited, and on the research note `.superpowers/sdd/post-research.md`, whose reading this part checks and whose section 1 has the pass list.
+
+### Result
+
+| What | Shader | Function of `light_formulas.py` | State |
+|---|---|---|---|
+| Reduce (2 x 2) | `0A96B3FD5121E331` | `post_reduce` | closed: 2,000 of 2,000 values |
+| Downsample (4 x 4) | `87E85199E1E9B260` | `post_downsample` | closed: 2,000 of 2,000; which four texels: inference ("What stands on inference") |
+| Luminance | `5821366EE8FDE893` | `post_lum` | closed: 2,000 of 2,000 |
+| Bright pass | `EE922CFB4426EA83` | `post_bright` | closed: 2,000 of 2,000 |
+| Blur along x, along y | `EA83C7E7E24EC4C8`, `28DBE18F313350BF` | `post_blur13` | closed: 2,000 of 2,000 each |
+| Radial blur | `4BE4344C27016E04` | `post_radial` (`post_radial_taps`) | closed: 2,000 of 2,000, the 14 fetch coordinates in 500 of 500 trials |
+| Composite | `37B186F4BD3288F7` | `post_composite` (`post_table_texel`) | closed: 2,000 of 2,000, the table's coordinate and its texel in 500 of 500 trials |
+| The scan-out ramp | none (the SDK's swap blit) | `post_ramp`, `post_ramp_index` | by the SDK's source; hand cases |
+| An unlit draw's scale | none (spec ruling 9) | `post_unlit_scale` | a rule of the design; hand cases |
+
+(`out/native-evidence/post/task3_post_check.txt`: `post_check.py`, 500 trials a shader, 4 values a trial, tolerance 1e-9 relative, exit code 0; the largest relative difference is 6.3e-16. `POST_SHADERS` has the eight hashes with their roles.)
+
+What differs from the research note, the spec and the plan, found by this reading:
+
+1. **The table is read at the texel nearest `u * 512`, not at `floor(u * 512)`.** The composite's fetch is `tfetch1D r0.x___, r1.w, tf1, MagFilter=point, MinFilter=point, OffsetX=0.5` (instruction 7): by the interpreter's rule for a point fetch and by the SDK's translator the half texel is added before the texel is taken ("The addressing of the table"). The research's replay, spec Design 6 ("below scene luminance 1 / 128 reads the table's texel 0") and plan Task 5's sample index `min(511, uint(512 * saturate(c46.x * L)))` have the floor. With the captured `c46.x` = 0.25 texel `k` serves scene luminance `(k -+ 0.5) / 128`, and texel 0 (0 in every captured table: black) the luminances below 1 / 256. Against the game's front buffer the nearest texel is the better reading in the darks: over the pixels in the table's texels 0 to 3 the replay's median difference falls from 1.36 to 0.32 levels towards the sun and from 1.19 to 0.85 at the bridge ("The replay").
+2. *The research's check could not have failed on the table's addressing*: both sides read a smooth function of the coordinate. The tracked check reads a table of 512 random texels through `ucode_eval.point_texel` on the microcode's side and through `post_table_texel` on the formula's.
+3. *The replay's figures move a little with the addressing* (below): variant A's whole-picture median is 3.14, 3.05, 3.13 levels where the research has 3.18, 3.10, 3.17. With the research's floor (`--table-offset 0`) the tracked tool gives the research's figures to the last printed digit.
+
+### The formulas
+
+With `lum(c) = 0.2125 r + 0.7154 g + 0.0721 b` (`POST_LUM`: the three shaders that need it hold (0.0721, 0.2125, 0.7154) in literal `c255` and compute `dot(c.zxy, c255.xyz)`):
+
+```
+0A96 reduce       out = t(uv + (1, 1) texels), linear                                      (2, 3)
+                  target half the source: pixel (x, y) reads the source at (2 x + 1, 2 y + 1), the mean of a 2 x 2 block
+87E8 downsample   P = 4 * |pixel position|          (param_gen; unnormalised coordinates)  (2)
+                  out = 0.25 * (t(P + (2.5, 2.5)) + t(P + (2.5, 0.5)) + t(P + (0.5, 0.5)) + t(P + (0.5, 2.5))), linear   (3 to 10)
+5821 luminance    out.rgba = lum(t(uv + (0.5, 0.5) texels))                                (2, 3)
+EE92 bright pass  d = tf0, a1 = tf1, a2 = tf2, each at uv + (0.5, 0.5) texels              (2 to 4)
+                  L = lum(d)                                                               (5)
+                  out.rgb = (d * sat(L * c77.y - c77.x) / L * c31.x + a1 * 6 * c46.x + a2) / c47.x;  alpha 1   (6 to 12)
+EA83, 28DB blurs  out = sum over k = -6..6 of w[|k|] * t(uv + (0.5 + k, 0.5) texels)       (4 to 16, 17 to 29)
+                  (28DB: (0.5, 0.5 + k)); point; w = (c46.x, c46.y, c46.z, c46.w, c47.x, c47.y, c47.z)
+4BE4 radial blur  s = 1 + (4/7) * (c47.x - 1);  g = 1 + (4/7) * (c46.x - 1)                (6 to 9)
+                  p_k = c31.xy + (uv - c31.xy) * s^k,  k = 0..13                           (7, 9 to 25, ...)
+                  out = (4/7) * sum of 0.5 * g^k * t(p_k + (0.5, 0.5) texels), point       (26 to 66)
+37B1 composite    scene = tf0.rgb, bloom = tf2.rgb, each at uv + (0.5, 0.5) texels         (3, 6)
+                  L = lum(scene)                                                           (4)
+                  e = c77.y * T(c46.x * L)          (tf1: 1D, 512 texels, point)           (5, 7, 8)
+                  c = sat(e * (L + sat(c47.x * L) * (scene - L)))                          (9 to 11)
+                  b = sat(bloom * c31.x);  s = c + b * (1 - c)                             (8, 12, 13)
+                  t = s + c77.x * (s - lum(s))                                             (14 to 16)
+                  out.rgb = |t| ^ c78.x  (exp2(c78.x * log2 |t|));  alpha = the blue value (17 to 23)
+```
+
+The literals (`c255`; capture `092959` frame 1, the `"ps_lit"` of each shader's first row, read for this part): `87E8` (0.25, 4, 0, 0); `5821` and `37B1` (0.0721, 0.2125, 0.7154, 0); `EE92` the same with w = 6; `4BE4` (0.5, 1, 4/7, 0). The filter of a fetch that names none in the dump (`0A96`'s and `87E8`'s say linear, the blurs' and the table's say point) is the sampler state's: the scene and the bloom in the composite are linear by their fetch constants (research section 1).
+
+What the terms do with the captured registers is in the research (section 2): the table's coordinate is a quarter of the scene's luminance, so the table covers luminance 0 to 4; `sat(50 L)` fades the colour to grey only below `L` = 0.02; `c77.x` = -0.0052 is half a percent of desaturation; `c78.x` = 1 / 2.2; the bright pass with `c77.y` = 1 / `c20.w` keeps the part of the pre-scale luminance above 0.087.
+
+**How the functions take their inputs.** A texture is a callable: `tex(px, py)` of unnormalised coordinates in texels, texel `i`'s centre at `i + 0.5` (`post_texture(rows, linear)` makes one, clamped to the edge); the radial blur's `tex(u, v)` takes the normalised coordinate its taps are computed in. The functions take the pixel's integer position and add the fetch's half texel themselves: `post_blur13(tex, x, y, weights7, vertical)` reads the texel centres `(x + 0.5 + k, y + 0.5)`, `post_reduce(tex, x, y)` reads `(2 x + 1, 2 y + 1)`, `post_downsample(tex, x, y, bias)` reads around `4 * (|x| + bias)`. `post_composite(scene, bloom, table, c31x, c46x, c47x, c77, c78x)` and `post_bright(d, tf1, tf2, c31x, c46x, c47x, c77)` take the texels at the pixel; `table` is the frame's 512 floats.
+
+### The addressing of the table
+
+`post_table_texel(u, n=512)` = `min(n - 1, max(0, floor(u * n + 0.5)))`; a coordinate that is no number, or not above 0, reads texel 0.
+
+- The fetch carries its own offset of half a texel (`OffsetX=0.5`, as nearly every fetch of these shaders does), and it is a point fetch. The interpreter's rule for a point fetch is `floor(coordinate * size + offset)` (`ucode_eval.point_texel`, from the SDK's translator: `dxbc_translator_fetch.cpp`, "Get offsets applied to the coordinates before sampling": the offset in texels, divided by the size, is added to the normalised coordinate, and the host's point sampler takes the texel the result lies in). The translator's own 1.5 / 1024 of a texel on top is not modelled.
+- The address mode is clamp (the fetch constant, research section 3): a coordinate from `(n - 0.5) / n` on reads the last texel.
+- Pinned (`tests/test_post_formulas.py`, `TableTexel`; `post_pins.py`): `u = k / 512 - 1e-6`, `k / 512` and `k / 512 + 1e-6` all read texel `k` for k = 0, 1, 2, 12, 128, 511, and texel 511 for k = 512 (the plan's points: under this convention they lie in the middle of a texel, so they do not tell the two readings apart); the boundaries are at `(k + 0.5) / 512`, pinned on both sides for k = 0, 1, 2, 12, 128, 510 (the pins: 0, 1, 12, 127, 128, 510, 511); 2,000 coordinates from -0.05 to 1.05 against `point_texel`.
+- The machine check holds it against the interpreter: the composite's table is 512 random texels on both sides, and a formula that reads `floor(u * 512)` fails (`RealDumps.test_the_composites_table_texel_is_the_microcodes`).
+- Against the game (the front buffer of the emulated game, whose shaders are the translator's): `out/native-evidence/post/task3_table_addressing.txt` (the research's numpy replay with the offset as a parameter; the script is beside it). Median absolute difference, in 8-bit levels, of variant B over the pixels whose scene luminance lies in the table's texels 0 to 3: 1.19, 1.17, 1.27 with the floor against 0.85, 0.82, 0.91 with the half texel at the bridge (`092959`, `121331`, `132250`: 4,476, 4,380 and 3,963 pixels), and 1.36 against 0.32 towards the sun (`134312`: 11,772 pixels). In texels 4 to 12: 0.74, 0.73, 0.78 against 0.63, 0.61, 0.65, and 0.56 against 0.48. In texels 13 to 39 the two readings agree to 0.01; the whole-picture figures are under "The replay".
+
+What this does not settle: the console itself. That its point fetch with an offset of half a texel reads the nearest texel is the emulator's implementation of it (inference); the game's author would hardly have written the offset otherwise.
+
+**The unlit scale** (spec ruling 9) `post_unlit_scale(c77y, table)` = `1 / max(c77.y * T[128], 1 / 64)` reads texel 128, which is scene luminance 1 under either reading (`u` = 0.25). **The ramp**: `post_ramp_index(v)` = `min(255, floor(v * 255 + 0.5))` is the front target's 8-bit level, `post_ramp(v, ramp)` one channel of the guest's 256-entry table at it.
+
+### Guards and clamps
+
+The microcode has neither; the game's render targets clamp. Each function clamps as its target does unless called with `clamp=False` (the machine check's way), and never raises on numbers (`tests/test_post_formulas.py` feeds each a NaN, both infinities, a negative texel and registers at the bounds of `MakePostBlock`):
+
+- A scene texel's channel is read as `post_scene(v)` = `(v > 0) ? min(v, 31.875) : 0` in the composite, the downsample and the bright pass: a NaN and a negative value count as 0, an infinity as 31.875, the largest value of the game's `k_2_10_10_10_FLOAT` target (spec Design 5, ruling 15).
+- The composite, the bright pass, the blurs, the radial blur and the reduction return `(v > 0) ? min(v, 1) : 0` per channel: the game's `k_2_10_10_10` targets (the composite's too: its `|t|^c78.x` exceeds 1 where the saturation step overshoots). The 10-bit rounding of those targets is not in the functions; the replay applies it (`post_replay.q10`), the native targets do it themselves (spec ruling 14).
+- A texel of a 10-bit target, a bloom value, a table texel or a blur weight that is not finite counts as 0.
+- A register that is not finite gives black (the product refuses such a block); so does a bright-pass divisor `c47.x` that is not above 0.
+- **`L = 0` in the bright pass**: the microcode computes `sat(..) * (1 / 0)` and multiplies the pixel's zero colour by it (not a number in plain arithmetic, 0 by the console's zero-product rule as the SDK has it: "The poles" above); the reference's scene term is 0 there and the two layers remain.
+- No index leaves its array: `post_table_texel` and `post_ramp_index` return 0 for a NaN and the last entry for anything beyond the end.
+
+### The check
+
+`post_check.py` (`check`, `check_text`; `CHECKS` names the trial's body and the formula per hash): each shader in `ucode_eval.Machine` on random inputs, 500 trials, the four components of `oC0` against the formula to 1e-9 relative. The trials are the research script's (`out/tests/post-research/post_check.py`: seed 20261009 per shader, the same draws in the same order), which is why its counts and largest differences come out again but for the composite's, whose table changed (2.2e-16 where the research has 4.4e-16).
+
+- Textures are smooth analytic functions of (slot, coordinate + the fetch's offset) on a 64 x 64 texel grid, so a wrong coordinate or offset gives a wrong value. The formulas get the same function as an unnormalised texture and the interpolator `u` as the position `u * 64` (`u * 32` for the reduce).
+- The radial blur's 14 fetch coordinates are compared with `post_radial_taps` (500 of 500), the composite's table coordinate with `c46.x * lum(scene)` (500 of 500).
+- Wrong forms that fail (`RealDumps.test_wrong_formulas_fail`): the composite without the grey fade and with the bloom added instead of screened; the bright pass without its threshold and with its two layers exchanged; a blur along the other axis and with its weights reversed; a 16-texel box for the downsample; a reduce without its offset; the radial blur's two factors exchanged; a luminance of one channel. On synthetic microcode (`SyntheticDump`): another fetch offset and other weights fail.
+
+Not reached by a trial: the targets' clamps and rounding, single precision, a fetch's filter (the field is continuous), `L = 0`, and whether the downsample's position is integral.
+
+### What stands on inference
+
+1. **The downsample's pixel convention** (discovery question 6). The microcode multiplies the position `param_gen` hands it by 4 and fetches at +0.5 and +2.5. If that position is the pixel's integer index (the SDK's convention for `param_gen`, not checked on data), the four linear fetches are the centres of texels (0, 0), (2, 0), (0, 2), (2, 2) of the pixel's 4 x 4 block: four texels of sixteen, no filtering. If it is the pixel's centre, they are two texels further on in each axis. `post_downsample`'s `bias` (0 or 0.5) is that choice; `post_check.py --bias 0.5` agrees as well as `--bias 0`, because the microcode cannot tell. The replay's variant B fits the game with `bias` 0; the game's own downsample buffer is in no capture (research section 4).
+2. **The interpolators of the full-screen rectangles.** The functions take pixel `i`'s interpolator as `i / N`: with the fetches' half texel that makes every point tap a texel centre and `0A96` the mean of a 2 x 2 block. No row was decoded to confirm the rectangles' coordinates.
+3. **The clamps of the game's targets**: 31.875 for the scene (`k_2_10_10_10_FLOAT`, from the GPU log's target format: research section 3), 1 with 10 bits for the bright, blur and layer targets and for the composite's (`k_2_10_10_10`). From the formats, not from data: the small buffers' memory is reused within a frame.
+4. **Where the composite samples the bloom.** The replay samples it linearly with texel centres aligned (pixel `x` of 1,120 reads the 280-wide bloom at `(x + 0.5) / 4`); under inference 2 the game's fetch would lie 0.375 of a bloom texel further on. The bloom is two blurs of sigma 2 texels wide; no capture can tell.
+5. **Which of the bright pass's two layers is which** (discovery question 3): `tf1` has the weight `6 * c46.x`, `tf2` 1; both are 0 in the replay.
+6. **The console's point fetch** ("The addressing of the table").
+
+### The replay
+
+`post_replay.py replay <capture> <frame>`: the scene colour the frame's composite row names (`0x199E0000`, by content, untiled with `fog_tables.untile_scene`), the frame's table (`0x1FAA0000`, by content) and registers, and the functions above, pixel for pixel in pure Python, against the front buffer of the same capture (`0x1ECFF000`: the composite's output with the HUD, before scan-out; brought from 1,280 to 1,120 columns). Variant A: `post_composite` with bloom 0. Variant B: with the bloom (`post_downsample`, `post_bright` with both layers 0, `post_blur13` twice, each stage rounded to 10 bits). Variant N: today's native mapping, `sqrt(sat(scene / c20.w * 2.22))`. Frame 1 of each capture (`out/native-evidence/post/task3_replay_<stamp>_f1.txt`; with the research's floor: `..._f1_offset0.txt`), the 26 bridge regions' luminance ratio replay / final and the whole picture outside the HUD in 8-bit levels:
+
+| Capture | A regions | A median / within 8 | B regions | B median / 90% / within 8 |
+|---|---|---|---|---|
+| `092959` | 0.817 to 1.018 | 3.14 / 56.0% | 0.976 to 1.029 | 0.73 / 4.11 / 94.2% |
+| `121331` | 0.818 to 1.022 | 3.05 / 56.2% | 0.974 to 1.022 | 0.72 / 3.93 / 94.6% |
+| `132250` | 0.819 to 0.999 | 3.13 / 56.0% | 0.976 to 1.010 | 0.73 / 3.98 / 94.5% |
+| `134312` (towards the sun) | - | 4.92 / 48.9% | - | 1.52 / 26.57 / 69.9% |
+| the same with `--table-offset 0`: `092959` | 0.815 to 1.017 | 3.18 / 55.9% | 0.975 to 1.029 | 0.75 / 4.13 / 94.2% |
+| `121331` | 0.816 to 1.021 | 3.10 / 56.0% | 0.973 to 1.022 | 0.73 / 3.95 / 94.6% |
+| `132250` | 0.818 to 0.998 | 3.17 / 55.9% | 0.975 to 1.010 | 0.74 / 4.00 / 94.5% |
+| `134312` | - | 4.97 / 48.8% | - | 1.57 / 26.62 / 69.9% |
+
+The last four rows are the research's figures (its section 4 and `out/tests/post-research/replay_<stamp>_f1.txt`), digit for digit; `092959`'s 26 region ratios and hue differences of both variants equal `replay_092959_f1.txt`'s columns as printed. Between the two addressings no region's ratio moves by more than 0.002. Variant B's hue: within 5 degrees on 25 of the 26 regions in each bridge capture (the 25th: 2.1, 4.7, 2.7 degrees), the averted pole side 14.5, 19.4 and 18.1. The bridge regions mean nothing in `134312` (another view) and are not given.
+
+`post_replay.py predict` gives per region the variant after the ramp over variant N, the movement the native shots should show when post is switched on (spec criteria 7 and 13); `out/native-evidence/post/task3_predict_092959_f1.txt` is `092959` with the measured stand-in for the ramp (the eight pairs of spec criterion 4 joined by straight lines: the game's own table is the discovery's to capture): A / N from 0.754 (the averted pole side) to 1.093 (sky), B / N from 0.788 to 1.165. `export` writes the oracle feed's two files (plan Task 6), `compare` reads two pictures in the pass's dump format, `excerpt` wrote `tests/post_replay_excerpt.json` (a 16 x 16 block of `092959` frame 1 at (776, 576): scene, bloom, table, registers, the three variants and the front buffer), on which `tests/test_post_replay.py` holds the arithmetic.
+
+### The pins
+
+`post_pins.py` prints the numbers the C++ mirrors of plan Tasks 5, 8 and 14 are held to: the table's texel for 41 coordinates, the unlit scale, the ramp's index, the composite and the bright pass for two register sets (the excerpt's real ones and a made-up set that reaches the grey fade, a strong saturation step and another table coordinate) on points that include values that are no numbers, and the downsample, the two blurs, the radial blur and the reduction on small pictures given by integer formulas. Its table is the excerpt's (`--table` prints the 2,048 bytes as a C array). `out/native-evidence/post/task3_post_pins.txt` is its output.
+
+### Not checked
+
+1. The furniture shaders of the sun layer and the sky (`18D3...`, `0498...`, `8E4D...`, `D72F...`, `4B58...`, `3E77...`, `5D67...`, `686D...`, `6197...`, `3FF7...`, `F1EB...`) and the vertex shaders of the rectangles and quads: plan Task 11.
+2. Everything under "What stands on inference".
+3. The scan-out ramp's 256 entries: no file here holds them. `post_ramp` is the SDK's rule for an 8-bit front buffer by its source (`d3d12/command_processor.cpp`, the swap blit), and the log line `post_replay.py` parses (`[native] ramp: read at clay frame N: valid 1, <256 x rrrgggbbb>`) is the plan's description of what discovery will write, not a line seen.
+4. A replay of a frame other than each capture's first against its own final picture (one front buffer a capture), of a normal run (its scene colour is not in guest memory), of a dark view, night, a town or an interior.
+5. Single precision, and the 7 mantissa bits of the game's scene target against the native target's 6 and 5.
+
+### Evidence
+
+In `out/native-evidence/post/` (git-ignored): `task3_post_check.txt`; `task3_replay_<stamp>_f1.txt` and `..._f1_offset0.txt` for the four captures; `task3_table_addressing.txt` with `task3_table_addressing.py`; `task3_predict_092959_f1.txt`; `task3_post_pins.txt`; `task3_compare_B_final_092959_f1.txt` (`compare` of two `--write` pictures); `oracle/task3_trial_092959_f1.scene` and `.block` (a trial of `export`). To rerun: `python tools/xdk_sigmatch/post_check.py`, `python tools/xdk_sigmatch/post_replay.py replay 092959 1`, `python -m unittest discover -s tests -p "test_post_*.py"`.

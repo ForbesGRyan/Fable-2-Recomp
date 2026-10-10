@@ -54,6 +54,11 @@ sub-project).
 The fog block every family's shader runs on its colour, the trees' vertex form of it, the sky's pixel
 shader and the list of fogged pixel shaders are the last part (table_1d, fog, vertex_fog, fog_apply, sky,
 FOG_SHADERS; the fog sub-project).
+
+The post chain's eight pixel shaders follow (post_composite with post_table_texel, post_downsample,
+post_bright, post_blur13, post_radial, post_reduce, post_ramp, post_unlit_scale, POST_SHADERS; the post
+sub-project). They work on scene values in the game's scale, after c20.w, and are checked by
+post_check.py.
 """
 import collections
 import math
@@ -815,3 +820,266 @@ FOG_VERTEX_SHADERS = (
     FogVertexShader("D57E7E65F94CBB2C", 0, 4, 5),
     FogVertexShader("129F7F2793DA9084", 0, 2, 3),
 )
+
+
+# --- the post chain (sub-project 10) -------------------------------------------------------------------------
+#
+# The eight pixel shaders of the game's post chain as closed formulas (POST_SHADERS), each checked against
+# its microcode by post_check.py; docs/native-renderer/lighting-formulas.md, "The post chain", has the
+# instruction numbers and what stands on inference. Scene values are in the game's scale (colour * c20.w);
+# colours are three floats, red first.
+#
+# Textures are callables. `tex(px, py)` takes UNNORMALISED coordinates, in texels, texel i's centre at
+# i + 0.5 (post_texture makes one from rows of texels, point or linear, clamped to the edge); the radial
+# blur's `tex(u, v)` takes the normalised coordinate its taps are computed in. The half texel the fetches
+# add to an interpolated coordinate (OffsetX=0.5, OffsetY=0.5 in the dumps) is in the functions, which
+# take the pixel's integer position: that the rectangles' interpolator is i / N at pixel i is inference
+# (it is what makes every point tap a texel centre and 0A96 the mean of a 2 x 2 block).
+#
+# Guards (review focus 2, spec Design 5 and 10): nothing here raises on numbers, and with `clamp` (the
+# default) every function returns numbers in its target's range.
+#   - a scene texel's channel is read as post_scene: 0 unless above 0 (a NaN, a negative), at most 31.875
+#     (the game's k_2_10_10_10_FLOAT target's largest value; an infinity counts as that);
+#   - a texel of a 10-bit target, a bloom value or a table texel that is not finite counts as 0 (in the
+#     composite's `sat(bloom * c31.x)` a positive infinity counts as 1);
+#   - a register that is not finite gives black (the product refuses such a block: MakePostBlock);
+#   - the bright pass at L = 0 has no scene term (the microcode multiplies 0 by 1 / 0); a divisor c47.x
+#     that is not above 0 gives black;
+#   - no table or ramp index leaves its array, a NaN's included (index 0).
+# `clamp=True` is the target's own clamp, (v > 0) ? min(v, 1) : 0: the composite's k_2_10_10_10 target and
+# the bright, blur and layer targets; the downsample's is the scene's range. The microcode does not clamp
+# (the render target does); post_check.py compares with `clamp=False` on inputs inside the ranges.
+
+POST_LUM = (0.2125, 0.7154, 0.0721)     # literal c255 of 5821, EE92 and 37B1, read as dot(c.zxy, c255.xyz)
+POST_SCENE_MAX = 31.875                 # the largest value of the game's scene target (7e3)
+POST_TABLE_TEXELS = 512
+
+PostShader = collections.namedtuple("PostShader", "hash role")
+POST_SHADERS = (
+    PostShader("0A96B3FD5121E331", "reduce"),       # C1, C2, C3: 560 x 360 to 280 x 180
+    PostShader("87E85199E1E9B260", "downsample"),   # D: the scene to 280 x 180
+    PostShader("5821366EE8FDE893", "luminance"),    # L: what the CPU measures
+    PostShader("EE922CFB4426EA83", "bright"),       # BP
+    PostShader("EA83C7E7E24EC4C8", "blur-x"),       # H
+    PostShader("28DBE18F313350BF", "blur-y"),       # V
+    PostShader("4BE4344C27016E04", "radial"),       # B1, B2
+    PostShader("37B186F4BD3288F7", "composite"),    # X
+)
+
+
+def post_lum(c):
+    """0.2125 r + 0.7154 g + 0.0721 b. No guard: the callers clamp what they read."""
+    return c[0] * POST_LUM[0] + c[1] * POST_LUM[1] + c[2] * POST_LUM[2]
+
+
+def post_scene(v):
+    """A channel of a scene texel as the post steps read it: (v > 0) ? min(v, 31.875) : 0."""
+    return min(v, POST_SCENE_MAX) if v > 0.0 else 0.0
+
+
+def _post_finite(*values):
+    return all(math.isfinite(v) for v in values)
+
+
+def post_table_texel(u, n=POST_TABLE_TEXELS):
+    """The texel a point-filtered, clamped tfetch1D with OffsetX=0.5 reads of an n-texel table at the
+    normalised coordinate u: min(n - 1, max(0, floor(u * n + 0.5))).
+
+    That is the interpreter's rule for a point fetch (ucode_eval.point_texel: floor(coordinate * size +
+    offset)) with the composite's own fetch (37B1 instruction 7: `tfetch1D r0.x___, r1.w, tf1,
+    MagFilter=point, MinFilter=point, OffsetX=0.5`), and the SDK's translator's: it adds the offset in texels
+    to the coordinate and samples with the host's point filter (dxbc_translator_fetch.cpp, "Get offsets
+    applied to the coordinates before sampling"; its own 1.5 / 1024 of a texel on top is not modelled). So
+    texel k is read for u in [(k - 0.5) / n, (k + 0.5) / n): the texel NEAREST u * n, not floor(u * n). With
+    the captured c46.x = 0.25 texel k serves scene luminance (k -+ 0.5) / 128, and texel 0, which is 0 in every
+    captured table, the luminances below 1 / 256. A coordinate that is not a number, or not above 0, reads
+    texel 0; one beyond the end reads the last texel."""
+    if n < 1:
+        raise ValueError("a table needs at least one texel")
+    if not u > 0.0:
+        return 0
+    x = u * n + 0.5
+    if not x < n:
+        return n - 1
+    return int(math.floor(x))
+
+
+def post_unlit_scale(c77y, table):
+    """The frame's scale of an unlit draw (spec ruling 9): 1 / max(c77.y * T[128], 1 / 64), the reciprocal of
+    the composite's gain at scene luminance 1 (texel 128 with the captured c46.x = 0.25), at most 64. A gain
+    that is not a number, or not above 1 / 64, gives 64."""
+    gain = c77y * table[128]
+    return 1.0 / gain if gain > 1.0 / 64.0 and math.isfinite(gain) else 64.0
+
+
+def post_ramp_index(level):
+    """The scan-out ramp's entry for a front-target value in 0..1: min(255, floor(v * 255 + 0.5)); 0 for a
+    value that is not a number or not above 0."""
+    if not level > 0.0:
+        return 0
+    x = level * 255.0 + 0.5
+    return 255 if not x < 255.0 else int(math.floor(x))
+
+
+def post_ramp(level, ramp):
+    """One channel through the guest's 256-entry gamma ramp, as the swap blit applies it to an 8-bit front
+    buffer: ramp[post_ramp_index(level)]. level: the front target's value in 0..1 (its 8-bit level over
+    255); ramp: 256 floats in 0..1 (one channel of the table)."""
+    if len(ramp) != 256:
+        raise ValueError("the ramp has 256 entries, got %d" % len(ramp))
+    return ramp[post_ramp_index(level)]
+
+
+def post_texture(rows, linear=False):
+    """A picture as a callable tex(px, py) of unnormalised coordinates, clamped to the edge. rows[y][x] is a
+    texel (a sequence of floats). Point: the texel floor(px), floor(py). Linear: the blend of the four
+    texels around the coordinate, centres at i + 0.5, as a host sampler filters. A coordinate that is not a
+    number reads texel 0 of its axis."""
+    data = [[list(t) for t in row] for row in rows]
+    if not data or not data[0]:
+        raise ValueError("a picture needs at least one texel")
+    h, w = len(data), len(data[0])
+
+    def axis(p, n):
+        if p != p:
+            return 0, 0, 0.0
+        if linear:
+            x = min(max(p - 0.5, 0.0), n - 1.0)
+            i = min(int(x), n - 1)
+            return i, min(i + 1, n - 1), x - i
+        i = int(math.floor(min(max(p, 0.0), n - 1.0)))
+        return i, i, 0.0
+
+    def fetch(px, py):
+        x0, x1, fx = axis(px, w)
+        y0, y1, fy = axis(py, h)
+        if fx == 0.0 and fy == 0.0:
+            return list(data[y0][x0])
+        a, b, c, d = data[y0][x0], data[y0][x1], data[y1][x0], data[y1][x1]
+        out = []
+        for i in range(len(a)):
+            top = a[i] + (b[i] - a[i]) * fx if fx else a[i]
+            bottom = c[i] + (d[i] - c[i]) * fx if fx else c[i]
+            out.append(top + (bottom - top) * fy if fy else top)
+        return out
+
+    return fetch
+
+
+def post_reduce(tex, x, y, clamp=True):
+    """0A96B3FD5121E331: one linear fetch at the interpolated coordinate plus (1, 1) texels of the source.
+    With a target half the source's size, pixel (x, y) reads tex(2 x + 1, 2 y + 1): the corner shared by four
+    texels, their mean. tex: the source, linear."""
+    out = list(tex(2.0 * x + 1.0, 2.0 * y + 1.0))
+    return [sat(v) for v in out] if clamp else out
+
+
+def post_downsample(tex, x, y, bias):
+    """87E85199E1E9B260: the scene at a quarter of its size.
+        P = 4 * (|pixel position| + bias)                     param_gen, unnormalised coordinates
+        out = 0.25 * (t(P + (2.5, 2.5)) + t(P + (2.5, 0.5)) + t(P + (0.5, 0.5)) + t(P + (0.5, 2.5)))
+    tex: the scene, linear. (x, y): the pixel; bias 0: the shader is handed the pixel's integral position,
+    so the four fetches are the centres of texels (0, 0), (2, 0), (0, 2), (2, 2) of its 4 x 4 block; bias
+    0.5: its centre, the four fetches two texels further on in each axis (discovery question 6 decides).
+    Every sample's channel is read as post_scene; as many channels as tex returns."""
+    px, py = 4.0 * (abs(x) + bias), 4.0 * (abs(y) + bias)
+    taps = [tex(px + ox, py + oy) for ox, oy in ((2.5, 2.5), (2.5, 0.5), (0.5, 0.5), (0.5, 2.5))]
+    return [0.25 * sum(post_scene(t[i]) for t in taps) for i in range(len(taps[0]))]
+
+
+def post_bright(d, tf1, tf2, c31x, c46x, c47x, c77, clamp=True):
+    """EE922CFB4426EA83, the bright pass (alpha is 1).
+        L   = lum(d)
+        out = (d * sat(L * c77.y - c77.x) / L * c31.x  +  tf1 * 6 * c46.x  +  tf2) / c47.x
+    d: the downsample's texel; tf1, tf2: the two layers of the sun (the radial-blurred beams and the flare
+    layer; which is which is discovery question 3), zero until 10c. With c77.y = 1 / c20.w the scene term is
+    the part of the pre-scale luminance above c77.x, in the pixel's own colour. L = 0: the scene term is 0."""
+    if not _post_finite(c31x, c46x, c47x, c77[0], c77[1]) or not c47x > 0.0:
+        return [0.0, 0.0, 0.0]
+    s = [post_scene(v) for v in d[:3]]
+    L = post_lum(s)
+    k = sat(L * c77[1] - c77[0]) / L * c31x if L > 0.0 else 0.0
+    out = []
+    for i in range(3):
+        v = (s[i] * k + _finite(tf1[i]) * 6.0 * c46x + _finite(tf2[i])) / c47x
+        out.append(sat(v) if clamp else v)
+    return out
+
+
+def post_blur13(tex, x, y, weights7, vertical, clamp=True):
+    """EA83C7E7E24EC4C8 (along x) and 28DBE18F313350BF (along y): 13 point taps at the texel centres
+    (x + 0.5 + k, y + 0.5) or (x + 0.5, y + 0.5 + k), k = -6..6, with the weights weights7[|k|]: c46.x
+    (centre), c46.y, c46.z, c46.w, c47.x, c47.y, c47.z. tex: the source, point; as many channels as it
+    returns. A tap or a weight that is not finite counts as 0."""
+    if len(weights7) != 7:
+        raise ValueError("the blur has 7 weights, got %d" % len(weights7))
+    w = [_finite(v) for v in weights7]
+    out = None
+    for k in range(-6, 7):
+        t = tex(x + 0.5, y + 0.5 + k) if vertical else tex(x + 0.5 + k, y + 0.5)
+        if out is None:
+            out = [0.0] * len(t)
+        for i in range(len(out)):
+            out[i] += w[abs(k)] * _finite(t[i])
+    return [sat(v) for v in out] if clamp else out
+
+
+def post_radial_taps(u, v, c31, c46x, c47x):
+    """The 14 taps of 4BE4344C27016E04 as ((u, v), weight):
+        s = 1 + (4/7) * (c47.x - 1);  g = 1 + (4/7) * (c46.x - 1)
+        p_k = c31.xy + (uv - c31.xy) * s^k;  w_k = 0.5 * g^k,  k = 0..13
+    c31.xy: the blur's centre (the sun's point on the screen), in the normalised coordinate of the
+    interpolator; it may lie outside the picture."""
+    s = (c47x - 1.0) * (4.0 / 7.0) + 1.0
+    g = (c46x - 1.0) * (4.0 / 7.0) + 1.0
+    return [((c31[0] + (u - c31[0]) * s ** k, c31[1] + (v - c31[1]) * s ** k), 0.5 * g ** k) for k in range(14)]
+
+
+def post_radial(tex, u, v, c31, c46x, c47x, clamp=True):
+    """4BE4344C27016E04, one pass of the radial blur: (4/7) * sum of w_k * tex(p_k) over post_radial_taps.
+    tex(u, v): the source at a normalised coordinate, point filtered, with the fetch's half texel
+    (OffsetX = OffsetY = 0.5) applied by the caller's tex. The weights sum to 2.54 with the captured c46.x =
+    0.87, so the target's clamp is part of the picture."""
+    if not _post_finite(u, v, c31[0], c31[1], c46x, c47x):
+        return [0.0, 0.0, 0.0]
+    try:
+        taps = post_radial_taps(u, v, c31, c46x, c47x)
+    except OverflowError:       # a register far outside the block's bounds
+        return [0.0, 0.0, 0.0]
+    out = None
+    for (pu, pv), w in taps:
+        t = tex(pu, pv)
+        if out is None:
+            out = [0.0] * len(t)
+        for i in range(len(out)):
+            out[i] += w * _finite(t[i])
+    out = [_finite(x * (4.0 / 7.0)) for x in out]
+    return [sat(x) for x in out] if clamp else out
+
+
+def post_composite(scene, bloom, table, c31x, c46x, c47x, c77, c78x, clamp=True):
+    """37B186F4BD3288F7, the composite: the front buffer's colour before the scan-out ramp.
+        L = lum(scene)
+        e = c77.y * T(c46.x * L)                              the exposure: a gain by scene luminance
+        c = sat(e * (L + sat(c47.x * L) * (scene - L)))       the colour fades to grey below L = 1 / c47.x
+        b = sat(bloom * c31.x)
+        s = c + b * (1 - c)                                   screen blend
+        t = s + c77.x * (s - lum(s))                          saturation step
+        out = |t| ^ c78.x                                     (the shader's alpha is the blue value)
+    scene: the scene texel (the game's scale; read as post_scene); bloom: the blurred bright pass at the
+    pixel (0, 0, 0 for none). table: the frame's 512 floats, read at post_table_texel(c46.x * L); or a
+    callable of the coordinate (post_check.py's, to compare the coordinate itself)."""
+    if not _post_finite(c31x, c46x, c47x, c77[0], c77[1], c78x):
+        return [0.0, 0.0, 0.0]
+    s = [post_scene(v) for v in scene[:3]]
+    L = post_lum(s)
+    u = c46x * L
+    T = _finite(table(u) if callable(table) else table[post_table_texel(u, len(table))])
+    e = c77[1] * T
+    k = sat(c47x * L)
+    c = [sat(e * (L + k * (x - L))) for x in s]
+    b = [sat(bloom[i] * c31x) for i in range(3)]
+    scr = [c[i] + b[i] * (1.0 - c[i]) for i in range(3)]
+    L2 = post_lum(scr)
+    out = powc([x + c77[0] * (x - L2) for x in scr], c78x)
+    return [sat(x) for x in out] if clamp else out

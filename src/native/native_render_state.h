@@ -292,6 +292,24 @@ inline std::string FormatRampHex(const uint32_t rgb10[256][3]) {
 inline constexpr uint64_t kRampFullLogs = 16;
 inline bool RampLoggedInFull(uint64_t logged) { return logged < kRampFullLogs; }
 
+// Whether a composite frame's ramp is read at all, and anything about it logged: only with
+// fable2_native_post on (`post`), since nothing but a post frame is drawn through it. With the
+// switch off the reader, which names a protected member of the SDK (sdk_gamma_ramp.h), is not
+// called and no "[native] ramp: ..." line is written.
+inline bool RampReadWanted(bool post) { return post; }
+
+// Whether the 256-entry table is the ramp the SDK's swap put the frame's picture through.
+// `front_format`: the format field (6 bits) of the front buffer's texture fetch constant as the
+// swap reads it (the register file's fetch constant 0). The SDK applies its piecewise-linear
+// ramp instead for k_2_10_10_10 (7) and for k_2_10_10_10_AS_16_16_16_16 (54, which its texture
+// key reads as 7): d3d12/command_processor.cpp, `use_pwl_gamma_ramp`; for every other format the
+// table. Fable 2's front buffer is 6 (k_8_8_8_8). A value outside the field is no format: no
+// table. A frame whose table does not apply has no ramp and is drawn without post ("post-ramp").
+inline constexpr uint32_t kFrontFormat2101010 = 7, kFrontFormat2101010As16 = 54;
+inline bool RampTableApplies(uint32_t front_format) {
+  return front_format < 64 && front_format != kFrontFormat2101010 && front_format != kFrontFormat2101010As16;
+}
+
 inline bool SameRamp(const uint32_t a[256][3], const uint32_t b[256][3]) {
   for (int i = 0; i < 256; ++i) {
     for (int c = 0; c < 3; ++c) {

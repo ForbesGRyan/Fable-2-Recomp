@@ -3857,6 +3857,8 @@ struct PostFrame {
   bool done = false;
   uint32_t tries = 0;
   uint32_t untold = 0;  // rectangles whose pixel shader could not be told (ObservePostDraw)
+  uint32_t looks = 0;   // calls looked at this frame (ChoosePostLook)
+  bool over = false;    // the looks' bound was reached and the frame counted "unread" for it
   uint32_t frame = 0;
   // The radial blur's c31, c46, c47 (read only with the quads wanted): the game draws two such
   // rectangles a frame with one set of registers (16 of 16 in capture native_discovery_20261010_052158).
@@ -3866,10 +3868,8 @@ struct PostFrame {
   bool radial_bad = false;
 };
 constinit thread_local PostFrame t_post;
-// At most this many reads at a composite in a frame that gives no block (a read is five
-// ReadPixelConstant calls, one fetch constant and 2 KB of table): what a frame whose table
-// cannot be read costs. The game issues one composite a frame (72 of 72 captured frames).
-constexpr uint32_t kMaxPostTries = 8;
+// (kMaxPostTries, the reads at a composite in a frame that gives no block, and kMaxPostLooks, the
+// calls a frame looked at at all: post_block.h, ChoosePostLook)
 
 // Post reads made in one frame and found, under the lock, to belong to a frame that is over (the
 // frame's recheck below): dropped, and counted here for the post: log line since its last print.
@@ -3941,7 +3941,10 @@ bool ReadPostRegisters(const uint32_t* regs, int n, float out[][4]) {
 // The registers are read at the hook's return, where the discovery rows' "pfull" is read too.
 // After the frame's block was taken, and after kMaxPostTries reads that gave none, nothing more
 // is looked at this frame: what remains per call is this thread's frame check. Before that, a
-// call costs the device's snapshot and the shader's lookup (the hash is cached by object).
+// call costs the device's snapshot and the shader's lookup (the hash is cached by object), and at
+// most kMaxPostLooks calls a frame cost it (ChoosePostLook): a frame without a composite (a menu,
+// a loading screen) is bounded by that. The composite of a frame that reaches the bound may lie
+// beyond it, so such a frame is counted as a try with "unread", once.
 // A rectangle whose shader cannot be told (the device or the shader's record unreadable) may have
 // been the composite: it is counted in the frame as a try with "unread", so that a frame which
 // then has no block does not read "no-draw"; those counts have a bound of their own and do not
@@ -3949,7 +3952,20 @@ bool ReadPostRegisters(const uint32_t* regs, int n, float out[][4]) {
 void ObservePostDraw(uint32_t id, uint32_t device) {
   if (id != kHook_D3DDevice_BeginVertices) return;
   PostFrame& f = CurrentPostFrame();
-  if (f.done || f.tries >= kMaxPostTries) return;
+  switch (ChoosePostLook(f.done, f.tries, f.looks)) {
+    case PostLook::kSkip:
+      return;
+    case PostLook::kOver: {
+      if (f.over) return;
+      f.over = true;
+      std::lock_guard<std::mutex> lock(g_scene_mutex);
+      if (PostFrameCurrent(f)) g_builder.CountPostTry(PostBlockReason::kUnread);
+      return;
+    }
+    case PostLook::kLook:
+      break;
+  }
+  ++f.looks;
   DeviceSnapshot dev;
   uint32_t ps_obj = 0;
   const bool have_dev = ReadDevice(device, &dev);
@@ -4034,6 +4050,9 @@ struct QuadFrame {
   // scene is looked at (the water's reflection views come before the main scene).
   uint32_t scene_pitch = 0;
   uint32_t untold = 0;  // calls whose pixel shader could not be told
+  uint32_t outside_looks = 0;  // calls outside the scene looked at (ChooseQuadLook)
+  bool refused = false;        // the frame was counted refused for its pitch or for the looks' bound
+  uint32_t occluders = 0;      // tree occluder calls handed to the builder (LayerOccluderLooked)
   uint32_t frame = 0;
 };
 constinit thread_local QuadFrame t_quad;
@@ -4115,18 +4134,34 @@ QuadFrame& CurrentQuadFrame() {
 // A call whose pixel shader cannot be told may have been a quad: it is counted as a refused one
 // ("unread"), at most kMaxQuadUntold a frame, so that such a frame draws no furniture rather than
 // some of it. A draw without a pixel shader is no furniture quad.
+// Two more things refuse the frame's set, each counted as one refused call ("unread"), once a frame
+// (ChooseQuadLook): a call inside the scene at which the scene's pitch cannot be read (no call outside
+// the scene could then be told to be the layer's, and the set would read "whole" without the layer's
+// quads), and kMaxQuadLooks calls outside the scene looked at before the frame's composite came.
 void ObserveQuadDraw(const LastArgs& a, uint32_t device, bool in_scene) {
   QuadFrame& f = CurrentQuadFrame();
   uint32_t surface = 0;
   bool have_surface = false;
-  if (in_scene) {
-    if (!f.scene_pitch) {
-      have_surface = device && ReadVirtualBe32(device + xdk::kDeviceSurfaceInfoOffset, &surface);
-      if (have_surface) f.scene_pitch = surface & xdk::kSurfacePitchMask;
-    }
-  } else if (!f.scene_pitch || CurrentPostFrame().done) {
-    return;
+  if (in_scene && !f.scene_pitch) {
+    have_surface = device && ReadVirtualBe32(device + xdk::kDeviceSurfaceInfoOffset, &surface);
+    if (have_surface) f.scene_pitch = surface & xdk::kSurfacePitchMask;
   }
+  switch (ChooseQuadLook(in_scene, f.scene_pitch, !in_scene && CurrentPostFrame().done, f.outside_looks)) {
+    case QuadLook::kSkip:
+      return;
+    case QuadLook::kRefuse: {
+      if (f.refused) return;
+      f.refused = true;
+      std::lock_guard<std::mutex> lock(g_scene_mutex);
+      if (f.frame != g_light_tries_frame.load(std::memory_order_relaxed)) return;
+      g_builder.QuadSeen(PostQuadKind::kCount);
+      g_builder.AddQuad(QuadRecord{}, QuadRecordReason::kUnread);
+      return;
+    }
+    case QuadLook::kLook:
+      break;
+  }
+  if (!in_scene) ++f.outside_looks;
   uint32_t vs_field = 0, ps_field = 0;
   const bool fields = device && ReadVirtualBe32(device + xdk::kVsDeviceFieldOffset, &vs_field) &&
                       ReadVirtualBe32(device + xdk::kPsDeviceFieldOffset, &ps_field);
@@ -4272,10 +4307,12 @@ void FlushPendingQuad() {
 // and made a record (AssembleRecord), which the frame's builder matches to the scene record it draws again,
 // under the scene's mutex after the frame's recheck. A call whose pixel shader cannot be told, or whose
 // record cannot be made, is handed over as a failed one: the frame then has no place it can trust, and a
-// consumer draws no sun layer for it (at most kMaxLayerOccluders calls a frame are counted).
+// consumer draws no sun layer for it (at most kMaxLayerOccluders calls a frame are counted; this thread
+// hands the builder one past that bound, which is what fails the frame's place, and looks at none after
+// it: LayerOccluderLooked).
 void ObserveLayerOccluder(const LastArgs& a, uint32_t device) {
   QuadFrame& f = CurrentQuadFrame();
-  if (!f.scene_pitch || CurrentPostFrame().done) return;
+  if (!f.scene_pitch || CurrentPostFrame().done || !LayerOccluderLooked(f.occluders)) return;
   uint32_t vs_field = 0, ps_field = 0;
   const bool fields = device && ReadVirtualBe32(device + xdk::kVsDeviceFieldOffset, &vs_field) &&
                       ReadVirtualBe32(device + xdk::kPsDeviceFieldOffset, &ps_field);
@@ -4310,6 +4347,7 @@ void ObserveLayerOccluder(const LastArgs& a, uint32_t device) {
   std::lock_guard<std::mutex> lock(g_scene_mutex);
   // The frame is checked again under the lock: a call of one frame must not count in the next.
   if (f.frame != g_light_tries_frame.load(std::memory_order_relaxed)) return;
+  ++f.occluders;
   g_builder.LayerOccluderSeen(read ? &record : nullptr);
 }
 

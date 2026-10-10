@@ -37,6 +37,27 @@ inline constexpr uint8_t kPostPartBlur = 1, kPostPartRadial = 2;
 // Reason string (the plan's): a frame with the post chain wanted that has no post block.
 inline constexpr const char* kPostBlockReason = "post-block";
 
+// What the capture does with one outermost BeginVertices call outside the main scene in a frame
+// with the post block wanted (capture.cpp, ObservePostDraw), before anything of the call is read.
+// kMaxPostTries: at most this many reads at a composite in a frame that gives no block (a read is
+// five ReadPixelConstant calls, one fetch constant and 2 KB of table): what a frame whose table
+// cannot be read costs. The game issues one composite a frame (72 of 72 captured frames).
+// kMaxPostLooks: at most this many calls a frame are looked at at all (a look is the device's
+// snapshot and the shader's lookup): what a frame without a composite costs (a menu, a loading
+// screen). The captures have 11 to 13 such calls a frame up to and with the composite (the "verts"
+// rows outside the scene of six captures of 2026-10-10, 44 frames: 134004, 120435, 120714, 121036,
+// 052158, 034918).
+//   kSkip: the frame's block was taken, or its tries are used up: nothing is looked at;
+//   kOver: the frame's looks are used up without either. The composite may lie beyond the bound,
+//          so the caller counts the frame as a try with "unread", once, and looks at nothing more;
+//   kLook: the call is looked at (and counted in `looks` by the caller).
+inline constexpr uint32_t kMaxPostTries = 8, kMaxPostLooks = 256;
+enum class PostLook : uint8_t { kLook, kSkip, kOver };
+inline constexpr PostLook ChoosePostLook(bool done, uint32_t tries, uint32_t looks) {
+  if (done || tries >= kMaxPostTries) return PostLook::kSkip;
+  return looks >= kMaxPostLooks ? PostLook::kOver : PostLook::kLook;
+}
+
 // composite: 37B1's registers. With L = lum(scene) (0.2125, 0.7154, 0.0721):
 //   e = c77.y * T(c46.x * L);  c = sat(e * (L + sat(c47.x * L) * (scene - L)))
 //   b = sat(bloom * c31.x);  s = c + b * (1 - c);  t = s + c77.x * (s - lum(s));  out = |t| ^ c78.x

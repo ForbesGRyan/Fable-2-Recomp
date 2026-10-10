@@ -143,6 +143,11 @@ inline constexpr uint64_t kTreeOccluderPs = 0xF1EB2497108F159Dull;
 // At most this many tree occluders a frame are looked at (three in the frames captured); more: the frame's
 // place is not known.
 inline constexpr uint32_t kMaxLayerOccluders = 16;
+// Whether the drawing thread looks at one more call that may be a tree occluder, having handed `handed`
+// of this frame to the frame's builder: one past the bound is still handed (the builder counts it failed,
+// which is what tells the frame that its place is not known), none after it (each costs a record's
+// assembly and the scene's mutex).
+inline constexpr bool LayerOccluderLooked(uint32_t handed) { return handed <= kMaxLayerOccluders; }
 
 enum class OccluderTwin : uint8_t { kFound, kNone, kAmbiguous };
 // The record of `draws` that `occluder` (the record AssembleRecord makes of the occluder's draw) draws

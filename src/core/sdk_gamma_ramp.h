@@ -44,13 +44,16 @@ struct RampAccess : rex::graphics::CommandProcessor {
 // Which ramp: this is the 256-entry table, which the SDK's swap blit applies to an 8-bit front
 // buffer only; for a k_2_10_10_10 front buffer it applies the piecewise-linear ramp instead
 // (d3d12/command_processor.cpp, the swap's gamma choice). Fable 2's front buffer is 8-bit (format
-// 6), but nothing here checks it: a consumer that draws with the table (the post plan's Task 5)
-// must fail the ramp ("post-ramp") when the front buffer is not 8-bit.
+// 6). The choice is the consumer's to check: `out_front_format` gets the format field of the
+// front buffer's texture fetch constant (the register file's fetch constant 0, which the swap
+// itself reads through RegisterFile::GetTextureFetch(0): the reader runs inside that swap, on its
+// thread, with no packet executed between), and the native renderer fails the ramp ("post-ramp")
+// when that format takes the other ramp (native_render_state.h, RampTableApplies).
 //
 // `user` is the rex::Runtime. out_rgb10[i] = entry i as red, green, blue (10 bits each).
 // False without a runtime, a graphics system or a command processor. The graphics system is
 // taken to be the SDK's own rex::graphics::GraphicsSystem (what both staged plugins create).
-inline bool ReadSdkGammaRamp(void* user, uint32_t out_rgb10[256][3]) {
+inline bool ReadSdkGammaRamp(void* user, uint32_t out_rgb10[256][3], uint32_t* out_front_format) {
   auto* runtime = static_cast<rex::Runtime*>(user);
   if (!runtime) return false;
   auto* graphics = static_cast<rex::graphics::GraphicsSystem*>(runtime->graphics_system());
@@ -63,6 +66,7 @@ inline bool ReadSdkGammaRamp(void* user, uint32_t out_rgb10[256][3]) {
     out_rgb10[i][1] = table[i].color_10_green;
     out_rgb10[i][2] = table[i].color_10_blue;
   }
+  if (out_front_format) *out_front_format = uint32_t(graphics->register_file()->GetTextureFetch(0).format);
   return true;
 }
 

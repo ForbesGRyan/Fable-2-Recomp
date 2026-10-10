@@ -477,6 +477,10 @@ int main() {
     if (FindOccluderTwin(nullptr, 4, occluder, &at) != OccluderTwin::kNone) return 135;
     if (FindOccluderTwin(draws.data(), 4, occluder, nullptr) != OccluderTwin::kNone) return 135;
     static_assert(kNoDepthPlace == 0xFFFFFFFFu && kTreeOccluderPs == 0xF1EB2497108F159Dull && kMaxLayerOccluders == 16);
+    // The drawing thread hands the frame's builder one call past the bound (the builder counts that one
+    // failed: the frame then has no place) and looks at none after it (final code review, Minor 7).
+    if (!LayerOccluderLooked(0) || !LayerOccluderLooked(kMaxLayerOccluders - 1) || !LayerOccluderLooked(kMaxLayerOccluders)) return 136;
+    if (LayerOccluderLooked(kMaxLayerOccluders + 1) || LayerOccluderLooked(~0u)) return 137;
   }
   std::puts("PASS: record assembly with instance sets, instance range check and cap, distance cut, skin, render state, depth-only, side indices, shadow casters, occluder twin");
   return 0;

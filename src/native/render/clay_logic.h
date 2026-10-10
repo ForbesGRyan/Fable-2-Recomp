@@ -3309,7 +3309,7 @@ inline std::string FormatSkyText(const ClayStats& st) {
 //   L   = lum(scene) = 0.2125 r + 0.7154 g + 0.0721 b        scene: the linear target, read as PostScene
 //   e   = c77.y * T[texel(c46.x * L)]                         the table at the NEAREST texel (PostTableTexel)
 //   c   = sat(e * (L + sat(c47.x * L) * (scene - L)))
-//   b   = sat(bloom * c31.x);  s = c + b * (1 - c)            bloom: 0 until plan Task 8
+//   b   = sat(bloom * c31.x);  s = c + b * (1 - c)            bloom: the bloom's last target; 0 with bloom_on 0
 //   t   = s + c77.x * (s - lum(s));  front = |t| ^ c78.x      into the front target (8 bits)
 //   out = ramp[floor(front * 255 + 0.5)] per channel          into the mapped target
 // and its lit draws write the game's own scale: the frame's exposure word is the light block's c20.w
@@ -3390,12 +3390,13 @@ inline bool SetClayFramePost(ClayFrameConstants& c, const capture::PostBlock& b,
 
 // The post steps' constants (cbuffer Post of shaders::kClayPostCompositePs and kClayPostRampPs,
 // register b0 of the post layout; shaders::kClayPostFields is its layout): kClayPostSlots small slots
-// of the frame's constant buffer. The bright pass's registers, the blurs' weights and the radial
-// blur's registers are carried for the steps of plan Tasks 8 and 14; no shader reads them before.
+// of the frame's constant buffer. The bright pass's registers and the blurs' weights are read by the
+// bloom's steps (shaders::kClayPostBrightPs, kClayPostBlurPs: plan Task 8), the radial blur's registers
+// by the sun layer's (shaders::kClaySunRadialPs: plan Task 14).
 struct ClayPostConstants {
   float composite[6];   // 37B1: c31.x, c46.x, c47.x, c77.x, c77.y, c78.x
   float scene_max;      // 31.875: the clamp of every read of the linear target (spec ruling 15)
-  float previous;       // the previous frame's share of the front target (plan Task 15); 0 until then
+  float previous;       // the previous frame's share of the front target (plan Task 15; StepClayFront: 0 without one)
   float bright[5];      // EE92: c31.x, c46.x, c47.x, c77.x, c77.y
   uint32_t bloom_on;    // 1: the bloom's steps are drawn and the composite reads their result (plan Task 8)
   uint32_t sun_on;      // 1: the sun layer feeds the bright pass (plan Task 14)

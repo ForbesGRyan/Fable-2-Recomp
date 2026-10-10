@@ -615,6 +615,30 @@ static int RadialTests() {
   return 0;
 }
 
+// What an outermost call of the indexed builder is for the frame's quads before its shader is looked at
+// (final code review, Minors 5 and 6). Inside the main scene: looked at when the scene's pitch is known
+// (`scene_pitch`, after the call's own try at reading it); a frame whose pitch could not be read cannot
+// tell the layer's target, so it is refused rather than left a "whole" set without the layer's quads.
+// Outside: nothing before the main scene or after the frame's composite; at most kMaxQuadLooks calls a
+// frame between them, and a frame that reaches the bound is refused (a layer quad may lie beyond it).
+static int LookTests() {
+  static_assert(kMaxQuadLooks == 256);
+  // Inside the scene.
+  if (ChooseQuadLook(true, 1120, false, 0) != QuadLook::kLook) return 240;
+  if (ChooseQuadLook(true, 1, true, ~0u) != QuadLook::kLook) return 241;  // (the bound and the composite are the outside calls')
+  if (ChooseQuadLook(true, 0, false, 0) != QuadLook::kRefuse || ChooseQuadLook(true, 0, true, 0) != QuadLook::kRefuse) return 242;
+  // Outside it.
+  if (ChooseQuadLook(false, 0, false, 0) != QuadLook::kSkip) return 243;      // before the main scene
+  if (ChooseQuadLook(false, 0, false, ~0u) != QuadLook::kSkip) return 244;
+  if (ChooseQuadLook(false, 1120, true, 0) != QuadLook::kSkip) return 245;    // after the composite
+  if (ChooseQuadLook(false, 1120, true, kMaxQuadLooks) != QuadLook::kSkip) return 246;
+  if (ChooseQuadLook(false, 1120, false, 0) != QuadLook::kLook) return 247;
+  if (ChooseQuadLook(false, 1120, false, kMaxQuadLooks - 1) != QuadLook::kLook) return 248;
+  if (ChooseQuadLook(false, 1120, false, kMaxQuadLooks) != QuadLook::kRefuse) return 249;
+  if (ChooseQuadLook(false, 1120, false, ~0u) != QuadLook::kRefuse) return 250;
+  return 0;
+}
+
 int main() {
   // (an exit code would wrap at 256: the case's number is printed)
   int code = TableTests();
@@ -623,6 +647,7 @@ int main() {
   if (!code) code = SetTests();
   if (!code) code = RadialTests();
   if (!code) code = RadialSameTests();
+  if (!code) code = LookTests();
   if (code) {
     std::printf("FAIL: quad record case %d\n", code);
     return 1;

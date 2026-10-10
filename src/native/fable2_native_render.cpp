@@ -192,12 +192,13 @@ void PollD3dMessagesOnce(const char* when);
 
 // The scan-out gamma ramp (SetGammaRampReader; post discovery, frame-map section 17). The reader
 // is set before Install registers the callbacks; the rest is the command-processor thread's.
-std::atomic<bool (*)(void*, uint32_t[256][3])> g_ramp_reader{nullptr};
+std::atomic<bool (*)(void*, uint32_t[256][3], uint32_t*)> g_ramp_reader{nullptr};
 std::atomic<void*> g_ramp_user{nullptr};
 struct RampLog {
   uint32_t last[256][3] = {};
   bool have_last = false;
   uint64_t reads = 0, failed = 0, changes = 0;
+  uint64_t not_table = 0;  // reads at a front buffer whose format takes the SDK's other ramp (RampTableApplies)
   uint64_t full_lines = 0;  // tables logged in full (RampLoggedInFull)
   bool last_valid = false;  // `last` passed MakePostRamp's rule (g_post_ramp holds its floats)
   bool said_none = false;
@@ -699,8 +700,9 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
       REXLOG_INFO("[native] clay: {}{}", by_ps,
                   st.unknown_by_ps.Other() ? " (+ more shaders)" : "");
     }
-    // The scan-out ramp (post discovery): how often it was read and how often it was another table.
-    if (g_ramp_reader.load(std::memory_order_acquire)) {
+    // The scan-out ramp: how often it was read and how often it was another table (nothing with the
+    // post's switch off: the ramp is not read then).
+    if (RampReadWanted(CurrentPost()) && g_ramp_reader.load(std::memory_order_acquire)) {
       REXLOG_INFO("[native] ramp: changes {} (reads {}, without a table {})", g_ramp.changes, g_ramp.reads, g_ramp.failed);
     }
     g_clay_window_max_ms = 0;
@@ -734,14 +736,18 @@ void PollD3dMessagesOnce(const char* when) {
   REXLOG_INFO("[native] {} ({})", g_d3d_messages.Summary(), when);
 }
 
-// Post discovery: the guest's scan-out ramp as the SDK holds it at this composite frame (the table
-// the emulated picture of this frame went through: the callback runs at the end of the swap blit,
-// on its thread). Logged in full at the first read and at the changes after it, up to kRampFullLogs
+// The guest's scan-out ramp as the SDK holds it at this composite frame (the table the emulated
+// picture of this frame went through: the callback runs at the end of the swap blit, on its thread).
+// Only with fable2_native_post on (RampReadWanted): with it off nothing is read and nothing logged.
+// Logged in full at the first read and at the changes after it, up to kRampFullLogs
 // lines in a run (later changes are only counted: "[native] ramp: changes ..."). Read before the clay
 // pass renders the frame, which draws a post frame through it (g_post_ramp); the clay frame's number in
-// its lines is that of the last frame rendered before the read.
+// its lines is that of the last frame rendered before the read. A table read while the front buffer's
+// format takes the SDK's piecewise ramp is not the picture's ramp (RampTableApplies): the frame has
+// none and is drawn without post ("post-ramp"), said once.
 void ReadRamp() {
   g_post_ramp.valid = false;  // (until this frame's table is read and passes its rule)
+  if (!RampReadWanted(CurrentPost())) return;
   const auto reader = g_ramp_reader.load(std::memory_order_acquire);
   if (!reader) {
     if (!g_ramp.said_none) REXLOG_INFO("[native] ramp: no reader registered; the scan-out ramp is not read");
@@ -749,11 +755,20 @@ void ReadRamp() {
     return;
   }
   uint32_t now[256][3] = {};
-  if (!reader(g_ramp_user.load(std::memory_order_acquire), now)) {
+  uint32_t front_format = ~0u;  // (no format: a reader that names none gives no table)
+  if (!reader(g_ramp_user.load(std::memory_order_acquire), now, &front_format)) {
     if (g_ramp.failed++ == 0) REXLOG_WARN("[native] ramp: the reader gave no table at clay frame {}", g_clay_frames);
     return;
   }
   ++g_ramp.reads;
+  if (!RampTableApplies(front_format)) {
+    if (g_ramp.not_table++ == 0) {
+      REXLOG_WARN("[native] ramp: the front buffer's format {} takes the SDK's piecewise ramp, not the 256-entry table, at clay "
+                  "frame {}: such frames are drawn without post (post-ramp)",
+                  front_format, g_clay_frames);
+    }
+    return;
+  }
   if (g_ramp.have_last && SameRamp(now, g_ramp.last)) {
     g_post_ramp.valid = g_ramp.last_valid;  // (the table of the last read: its floats are still there)
     return;
@@ -840,7 +855,7 @@ std::string StatusText() {
   return g_status;
 }
 
-void SetGammaRampReader(bool (*reader)(void* user, uint32_t out_rgb10[256][3]), void* user) {
+void SetGammaRampReader(bool (*reader)(void* user, uint32_t out_rgb10[256][3], uint32_t* out_front_format), void* user) {
   g_ramp_user.store(user, std::memory_order_release);
   g_ramp_reader.store(reader, std::memory_order_release);
 }

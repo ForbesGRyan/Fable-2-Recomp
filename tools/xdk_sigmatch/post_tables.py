@@ -901,6 +901,8 @@ def report_ramp(log_path, pairs_path=None):
     if "[native] ramp: no reader registered" in text:
         print("the log says no reader was registered: the ramp was not read")
     if not reads:
+        print("no ramp line: the ramp is read only in a composite view with --fable2_native_post=on")
+    if not reads:
         return 1
     pairs = [(a, float(b)) for a, b in RAMP_PAIRS]
     extra = parse_pairs(Path(pairs_path).read_text(encoding="utf-8")) if pairs_path else []
@@ -1184,10 +1186,13 @@ def node_kind(node):
     return "cleared" if node["clears"] else "again"
 
 
+CLEARED_NAME = "(cleared, nothing drawn)"
+
+
 def node_name(node):
     kind = node_kind(node)
     if kind == "cleared":
-        return "(cleared, nothing drawn)"
+        return CLEARED_NAME
     if kind == "again":
         return "(the picture of node %s again)" % node["again"]
     names = []
@@ -1213,6 +1218,24 @@ def chain_names(nodes, index, limit=16):
         out.append(node_name(node))
         index = next((producer for _, _, _, producer, _ in node["reads"] if producer is not None), None)
     return out
+
+
+def bright_traces(nodes, bright):
+    """The bright pass's tf1 and tf2 traced back (chain_names), as the report's lines, and the status: 1 when an
+    input has no node of the frame, when its read carries a note (another size than the last resolve there), or
+    when its chain ends in a picture that was cleared and never drawn into (the layer it should carry is not in
+    the frame's rows: capture 034918 frame 4, review of plan Task 10, Minor 1)."""
+    lines, status = [], 0
+    for name, slot, t, producer, note in bright["reads"]:
+        if name != "bright" or slot not in (1, 2):
+            continue
+        chain = chain_names(nodes, producer) if producer is not None else ["(no node of the frame)"]
+        cleared = producer is not None and bool(chain) and chain[-1] == CLEARED_NAME
+        lines.append("the bright pass's tf%d (0x%08X) <- %s%s" % (
+            slot, t["base"], " <- ".join(chain), ": BROKEN, the chain ends in a picture nothing was drawn into" if cleared else ""))
+        if producer is None or note or cleared:
+            status = 1
+    return lines, status
 
 
 def unread_nodes(nodes):
@@ -1398,12 +1421,9 @@ def report_graph(path, frame, tex_root=None, stats=True, all_nodes=False, png=No
         print("no bright pass row (%s) in the frame" % BRIGHT_PS[:4])
         status = 1
     else:
-        for name, slot, t, producer, note in bright["reads"]:
-            if name == "bright" and slot in (1, 2):
-                chain = chain_names(nodes, producer) if producer is not None else ["(no node of the frame)"]
-                print("the bright pass's tf%d (0x%08X) <- %s" % (slot, t["base"], " <- ".join(chain)))
-                if producer is None or note:
-                    status = 1
+        lines, status = bright_traces(nodes, bright)
+        for line in lines:
+            print(line)
     for i in unread_nodes(nodes):
         if i > last_scene or all_nodes:
             d = nodes[i]["dest"]

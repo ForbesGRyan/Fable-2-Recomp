@@ -329,6 +329,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     bloom_objects_failed_ = false;  // (and the bloom's)
     quad_objects_failed_ = false;  // (and the quad step's)
     cloud_objects_failed_ = false;  // (and the clouds')
+    front_second_failed_ = false;  // (and the previous-frame blend's second target)
     sun_objects_failed_ = false;  // (and the sun layer's)
     oracle_failed_ = false;  // (and the oracle feed)
     oracle_sun_failed_ = false;

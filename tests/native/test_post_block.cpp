@@ -545,8 +545,22 @@ static int NameTests() {
   return 0;
 }
 
+// Which outermost BeginVertices call outside the main scene is looked at (final code review, Minor 5): none
+// after the frame's block was taken or after kMaxPostTries reads at a composite gave none; at most
+// kMaxPostLooks a frame otherwise, and the call that finds the bound reached is told so (the composite may
+// lie beyond it: the frame is then counted "unread", once, by the caller).
+static int LookTests() {
+  static_assert(kMaxPostTries == 8 && kMaxPostLooks == 256);
+  if (ChoosePostLook(false, 0, 0) != PostLook::kLook) return 250;
+  if (ChoosePostLook(false, kMaxPostTries - 1, kMaxPostLooks - 1) != PostLook::kLook) return 251;
+  if (ChoosePostLook(true, 0, 0) != PostLook::kSkip || ChoosePostLook(true, 0, kMaxPostLooks) != PostLook::kSkip) return 252;
+  if (ChoosePostLook(false, kMaxPostTries, 0) != PostLook::kSkip || ChoosePostLook(false, ~0u, kMaxPostLooks) != PostLook::kSkip) return 253;
+  if (ChoosePostLook(false, 0, kMaxPostLooks) != PostLook::kOver || ChoosePostLook(false, 7, ~0u) != PostLook::kOver) return 254;
+  return 0;
+}
+
 int main() {
-  for (int (*test)() : {ValidTests, RegisterTests, FetchTests, BytesTests, BlurTests, PairTests, ChoiceTests, NameTests}) {
+  for (int (*test)() : {ValidTests, RegisterTests, FetchTests, BytesTests, BlurTests, PairTests, ChoiceTests, NameTests, LookTests}) {
     if (const int code = test()) {
       std::printf("FAIL: post block case %d\n", code);
       return 1;

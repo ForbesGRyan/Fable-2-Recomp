@@ -63,6 +63,28 @@ def section_lines(sections):
     return out
 
 
+class RetryLiterals(unittest.TestCase):
+    """ClayPass::Ensure has two ways to try its objects anew: another device, and the F6 retry after a failure. No
+    test compiles clay_pass.cpp, so the text is held: every `*_failed_` flag the first clears, the second clears
+    too (final code review, Minor 4: the previous-frame blend's second target stayed refused after a retry)."""
+
+    def setUp(self):
+        body = _one(r"bool ClayPass::Ensure\(nrhi::Device\* dev\) \{\n(.*?)\n\}\n", _text("src/native/render/clay_pass.cpp"),
+                    "ClayPass::Ensure")
+        self.device, self.retry = _one(r"if \(dev != device_\) \{\n(.*?)\n  \} else \{\n(.*?)\n  \}\n", body, "the two branches")
+
+    def test_the_retry_clears_every_flag_another_device_clears(self):
+        cleared = [set(re.findall(r"\b(\w+_failed_) = false;", t)) for t in (self.device, self.retry)]
+        self.assertIn("front_second_failed_", cleared[0])
+        self.assertGreaterEqual(len(cleared[0]), 9)
+        self.assertEqual(cleared[0], cleared[1])
+
+    def test_no_failed_flag_of_the_pass_is_left_out(self):
+        flags = set(re.findall(r"\b(\w+_failed_) = false[,;]", _text("src/native/render/clay_pass.h")))
+        self.assertEqual(len(flags), 10)
+        self.assertEqual(flags, set(re.findall(r"\b(\w+_failed_) = false;", self.retry)))
+
+
 class PreviousBlendLiterals(unittest.TestCase):
     """Plan Task 15: the previous-frame blend's numbers in the reference, the generator, the mirror, the shader."""
 

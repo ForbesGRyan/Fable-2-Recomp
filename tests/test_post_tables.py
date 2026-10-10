@@ -995,6 +995,40 @@ class GraphTest(unittest.TestCase):
         self.assertEqual(pt.chain_names(self.nodes, c1["index"]), ["reduce", "(cleared, nothing drawn)"])
         self.assertEqual([self.nodes[i]["dest"]["base"] for i in pt.unread_nodes(self.nodes)], [C])
 
+    def test_a_traced_chain_that_ends_in_a_cleared_picture_is_broken(self):
+        # (review of plan Task 10, Minor 1: `graph` returned 0 on capture 034918 frame 4, whose tf1 chain ends so)
+        bright = self.node_writing(32)
+        lines, status = pt.bright_traces(self.nodes, bright)
+        self.assertEqual(status, 0)
+        self.assertEqual(lines, ["the bright pass's tf1 (0x12CFD000) <- radial <- radial <- reduce <- beam-source",
+                                 "the bright pass's tf2 (0x12BB9000) <- reduce <- flare + moon-glow + sun-disc"])
+        events = [clear(10) if e.get("name") == "beam-source" else e for e in LAYER_EVENTS]
+        nodes = pt.build_graph(events)
+        bright = next(n for n in nodes if n["dest"] and n["dest"]["line"] == 32)
+        lines, status = pt.bright_traces(nodes, bright)
+        self.assertEqual(status, 1)
+        self.assertEqual(lines[0], "the bright pass's tf1 (0x12CFD000) <- radial <- radial <- reduce <- (cleared, nothing drawn)"
+                                   ": BROKEN, the chain ends in a picture nothing was drawn into")
+        self.assertEqual(lines[1], "the bright pass's tf2 (0x12BB9000) <- reduce <- flare + moon-glow + sun-disc")
+
+    def test_a_traced_input_without_a_node_or_of_another_size_is_broken(self):
+        events = list(LAYER_EVENTS)
+        at = next(i for i, e in enumerate(events) if e.get("name") == "bright")
+        events[at] = row("bright", 31, [(1, fc2d(0x12D33000, 280, 180, 54)), (2, fc2d(D, 280, 180, 54))], pitch=320)
+        nodes = pt.build_graph(events)
+        lines, status = pt.bright_traces(nodes, next(n for n in nodes if n["dest"] and n["dest"]["line"] == 32))
+        self.assertEqual((status, lines[0]), (1, "the bright pass's tf1 (0x12D33000) <- (no node of the frame)"))
+        events[at] = row("bright", 31, [(1, fc2d(B, 560, 360, 54)), (2, fc2d(D, 280, 180, 54))], pitch=320)
+        nodes = pt.build_graph(events)
+        _, status = pt.bright_traces(nodes, next(n for n in nodes if n["dest"] and n["dest"]["line"] == 32))
+        self.assertEqual(status, 1)
+        # A slot that is neither tf1 nor tf2 is not traced and breaks nothing.
+        events[at] = row("bright", 31, [(0, fc2d(0x12D33000, 280, 180, 29)), (1, fc2d(B, 280, 180, 54)), (2, fc2d(D, 280, 180, 54)),
+                                         (3, fc2d(0x12D33000, 280, 180, 29))], pitch=320)
+        nodes = pt.build_graph(events)
+        lines, status = pt.bright_traces(nodes, next(n for n in nodes if n["dest"] and n["dest"]["line"] == 32))
+        self.assertEqual((status, len(lines)), (0, 2))
+
     def test_exchanged_inputs_are_seen(self):
         events = list(LAYER_EVENTS)
         at = next(i for i, e in enumerate(events) if e.get("name") == "bright")

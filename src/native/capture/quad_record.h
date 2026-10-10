@@ -119,6 +119,30 @@ inline constexpr bool QuadTargetMatches(const PostQuadEntry& entry, bool in_scen
   return !in_scene && scene_pitch != 0 && pitch != 0 && pitch * 2 == scene_pitch;
 }
 
+// What the capture does with one outermost call of the indexed builder in a frame with the quads
+// wanted (capture.cpp, ObserveQuadDraw), before the call's shader is looked at. `scene_pitch`: the
+// main scene's pitch of this frame, after an in-scene call's own try at reading it (0: not known);
+// `post_done`: the frame's composite was seen; `outside_looks`: calls outside the scene looked at
+// so far this frame.
+//   kLook:   the call is looked at (an outside one is counted in `outside_looks` by the caller);
+//   kSkip:   a call outside the scene before the main scene's first call of the builder (the
+//            water's reflection views) or after the frame's composite (the HUD): not looked at;
+//   kRefuse: the frame's set cannot be whole, and the caller counts one refused call ("unread"),
+//            once a frame. Inside the scene: the scene's pitch could not be read, so no call
+//            outside it can be told to be the layer's (QuadTargetMatches) and none would be looked
+//            at: without this the set would read "whole" with the scene's quads alone. Outside:
+//            kMaxQuadLooks calls were looked at and the composite has not come: a layer quad may
+//            lie beyond the bound. (The captures have 11 to 16 such calls a frame: the "indx" rows
+//            outside the scene between its first inside row and the composite, in the 44 frames
+//            of the six captures named at kMaxPostLooks, post_block.h.)
+inline constexpr uint32_t kMaxQuadLooks = 256;
+enum class QuadLook : uint8_t { kLook, kSkip, kRefuse };
+inline constexpr QuadLook ChooseQuadLook(bool in_scene, uint32_t scene_pitch, bool post_done, uint32_t outside_looks) {
+  if (in_scene) return scene_pitch != 0 ? QuadLook::kLook : QuadLook::kRefuse;
+  if (scene_pitch == 0 || post_done) return QuadLook::kSkip;
+  return outside_looks >= kMaxQuadLooks ? QuadLook::kRefuse : QuadLook::kLook;
+}
+
 // One quad of the frame. An invalid record is all zero (ps_hash 0: QuadRecordValid).
 struct QuadRecord {
   uint64_t ps_hash, vs_hash;

@@ -44,7 +44,7 @@ bool ArmDiscovery(uint32_t frames, uint32_t every);
 // before Install; it is called on the command-processor thread, in the post-processor callback
 // of each composite frame, and returns false when it has no table. This module only logs what it
 // reads ("[native] ramp: ..."); without a reader it says so once and reads nothing.
-void SetGammaRampReader(bool (*reader)(void* user, uint32_t out_rgb10[256][3]), void* user);
+void SetGammaRampReader(bool (*reader)(void* user, uint32_t out_rgb10[256][3], uint32_t* out_front_format), void* user);
 
 // --fable2_exposure_readback (on, true, 1 / off, false, 0; anything else is off, with one
 // warning): whether the game's luminance resolve is to be read back to guest memory so that the

@@ -246,6 +246,19 @@ int main() {
     // later changes are counted only (a fade done with the ramp changes it every frame).
     if (kRampFullLogs != 16) return 71;
     if (!RampLoggedInFull(0) || !RampLoggedInFull(15) || RampLoggedInFull(16) || RampLoggedInFull(~0ull)) return 72;
+    // The ramp is read, and anything of it logged, only with the post's switch on: nothing but a post frame
+    // uses it (final code review, Minor 1).
+    if (!RampReadWanted(true) || RampReadWanted(false)) return 73;
+    // The 256-entry table is what the SDK's swap puts the picture through unless the front buffer's fetch
+    // constant names a 10-bit format (7, or 54 which the SDK reads as 7): then it applies its piecewise ramp
+    // and this table is not the picture's. A format that is no 6-bit value is no format: no table.
+    if (kFrontFormat2101010 != 7 || kFrontFormat2101010As16 != 54) return 74;
+    if (!RampTableApplies(6) || !RampTableApplies(50) || !RampTableApplies(0) || !RampTableApplies(63)) return 75;
+    if (RampTableApplies(7) || RampTableApplies(54)) return 76;
+    if (RampTableApplies(64) || RampTableApplies(7 + 64) || RampTableApplies(~0u)) return 77;
+    for (uint32_t f = 0; f < 64; ++f) {
+      if (RampTableApplies(f) != (f != 7 && f != 54)) return 78;
+    }
   }
 
   std::cout << "PASS: view parsing/cycling, F6 edge detection, failure latch, frame times per view, d3d message log, scan-out ramp\n";

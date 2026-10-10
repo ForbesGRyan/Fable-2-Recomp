@@ -190,6 +190,24 @@ def _sun(sun_col, n_dot_sun, sun_gate):
     return [_finite(c) * k for c in sun_col]
 
 
+def pwl_gamma_to_linear(g):
+    """What the console's texture fetch gives for a component whose sign field in the fetch constant is 3
+    (gamma): the stored value g in 0..1 through the piecewise linear curve, as the SDK's translators apply it
+    to the filtered sample (thirdparty/rexglue-sdk/src/graphics/xenos.cpp, PWLGammaToLinear; dxbc_translator_fetch.cpp,
+    the case TextureSign::kGamma). With v = 255 g: 1023 * linear is v below 64, 2 v - 64 below 96, 4 v - 256
+    below 192 and 8 v - 1024 from there, each plus the whole part of itself times its slope / 1024. The terrain's
+    base map tf3 (the baked term of terrain_layer and terrain_far) is fetched so in every captured terrain row
+    (signs 3, 3, 3, 0: docs/native-renderer/frame-map.md, section 17, "The base map's gamma sign"). A value
+    that is no number gives 0."""
+    g = sat(g)
+    if g >= 96.0 / 255.0:
+        scale, offset = (8.0 / 1024.0, -1024.0) if g >= 192.0 / 255.0 else (4.0 / 1024.0, -256.0)
+    else:
+        scale, offset = (2.0 / 1024.0, -64.0) if g >= 64.0 / 255.0 else (1.0 / 1024.0, 0.0)
+    linear = g * (255.0 * 1024.0 * scale) + offset
+    return (linear + math.trunc(linear * scale)) / 1023.0
+
+
 def terrain_layer(A, baked, tint, tint_pow, add, floor, t, n_dot_sun, sun_col, c11x=1.0, *, sun_gate):
     """Terrain layer shaders: A * c11x * (pow(baked, tint_pow) * tint * L + add) + A * sun_col * n_dot_sun
     * sun_gate. n_dot_sun: one-light shaders sat(N . c80.xyz) with c80 as it is; multi-light shaders

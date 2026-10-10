@@ -3750,7 +3750,7 @@ struct ClayTerrainConstants {
   uint32_t base_sampler;    // static sampler of the base map
   float c11x;               // pixel c11.x: layers on the ambient part, far terrain on the sun
   float facing_scale;       // layers: the literal of sat(scale * (N . c109)); far terrain: 0
-  uint32_t light_pad;
+  uint32_t base_gamma;      // bits 0 to 2: the base map's r, g, b are fetched with the gamma sign (TerrainBaseGamma)
 };
 static_assert(sizeof(ClayTerrainConstants) == 192);
 inline constexpr uint32_t kClayTerrainSlotBytes = 256;  // the RHI's constant buffer offset alignment
@@ -3886,12 +3886,56 @@ inline ClayTerrainConstants MakeClayTerrainConstants(const capture::TerrainMater
   return c;
 }
 
+// The gamma sign of the base map tf3 (post sub-project, Task 8b; frame-map section 17, "The base map's
+// gamma sign"). A fetch constant has a sign field per stored component (dword 0, bits 2 to 9, two bits
+// each: 0 unsigned, 1 signed, 2 unsigned biased, 3 gamma), and the fetch's result component i takes the
+// field of the stored component its swizzle names (dword 3, three bits a component from bit 1; 4 and 5
+// are the constants 0 and 1, which have no sign): the SDK's texture_util::SwizzleSigns. With the field 3
+// the console gives the filtered texel through its piecewise linear curve (PwlGammaToLinear), and every
+// terrain row of every capture fetches tf3 with 3, 3, 3, 0. TerrainBaseGamma: the result's r, g, b that
+// have the gamma sign, as bits 0 to 2 (the terrain shaders' t_base_gamma); kTerrainBaseGammaRefused when
+// one of the three is signed or biased, which no captured row has and the pass does not read: such a
+// record is not lit (SetClayTerrainLight). Alpha's field is not looked at: the light reads no alpha.
+inline constexpr uint32_t kTerrainBaseGammaRefused = 0xFFFFFFFFu;
+inline uint32_t TerrainBaseGamma(const uint32_t fetch[6]) {
+  uint32_t mask = 0;
+  for (uint32_t i = 0; i < 3; ++i) {
+    const uint32_t from = (fetch[3] >> (1 + 3 * i)) & 7u;
+    if (from & 4u) continue;
+    const uint32_t sign = (fetch[0] >> (2 + 2 * from)) & 3u;
+    if (sign == 1u || sign == 2u) return kTerrainBaseGammaRefused;
+    if (sign == 3u) mask |= 1u << i;
+  }
+  return mask;
+}
+
+// The console's piecewise linear curve from a stored (gamma) value in 0..1 to the linear one, as the
+// SDK applies it to a fetch whose sign field is 3 (thirdparty/rexglue-sdk/src/graphics/xenos.cpp,
+// PWLGammaToLinear; dxbc_translator_fetch.cpp, TextureSign::kGamma): the mirror of the terrain shaders'
+// base_linear and of light_formulas.pwl_gamma_to_linear. With v = 255 g: 1023 * linear is v below 64,
+// 2 v - 64 below 96, 4 v - 256 below 192 and 8 v - 1024 from there, each plus the whole part of itself
+// times its slope / 1024. A value that is no number gives 0 (every comparison is false for it).
+inline float PwlGammaToLinear(float g) {
+  g = (g > 0.0f) ? ((g < 1.0f) ? g : 1.0f) : 0.0f;
+  float scale, offset;
+  if (g >= 96.0f / 255.0f) {
+    scale = (g >= 192.0f / 255.0f) ? 8.0f / 1024.0f : 4.0f / 1024.0f;
+    offset = (g >= 192.0f / 255.0f) ? -1024.0f : -256.0f;
+  } else {
+    scale = (g >= 64.0f / 255.0f) ? 2.0f / 1024.0f : 1.0f / 1024.0f;
+    offset = (g >= 64.0f / 255.0f) ? -64.0f : 0.0f;
+  }
+  const float linear = g * (261120.0f * scale) + offset;
+  return (linear + std::trunc(linear * scale)) / 1023.0f;
+}
+
 // The light's part of a terrain record's constants. `base_fix`, `base_sampler`: the base map's
 // (width / host width, height / host height) and static sampler, as the texture cache resolved
 // it. False, with `c` untouched (the record is then not lit, and with it its ground square:
 // PlanTerrain), unless the inputs are a terrain family's, the record has its base map inputs
-// (TerrainMaterialInputs::base_valid), every value is a number of usable size, and a layer has its
-// facing literal (above 0).
+// (TerrainMaterialInputs::base_valid), every value is a number of usable size, a layer has its
+// facing literal (above 0), and the base map's colour components are unsigned or gamma
+// (TerrainBaseGamma, whose mask goes into the block).
 inline bool SetClayTerrainLight(ClayTerrainConstants& c, const capture::TerrainMaterialInputs& m,
                                 const capture::LightInputs& l, const float base_fix[2], uint32_t base_sampler) {
   const bool layer = l.family == capture::LightFamily::kTerrainLayer;
@@ -3900,6 +3944,8 @@ inline bool SetClayTerrainLight(ClayTerrainConstants& c, const capture::TerrainM
   }
   if (!m.valid || !m.base_valid || !LightValueUsable(l.c11x)) return false;
   if (layer && !(l.facing_scale > 0.0f && LightValueUsable(l.facing_scale))) return false;
+  const uint32_t base_gamma = TerrainBaseGamma(m.base_fetch);
+  if (base_gamma == kTerrainBaseGammaRefused) return false;
   float uv[4];
   for (int i = 0; i < 4; ++i) {
     uv[i] = m.base_uv[i] * base_fix[i & 1];
@@ -3907,6 +3953,7 @@ inline bool SetClayTerrainLight(ClayTerrainConstants& c, const capture::TerrainM
   }
   std::copy(std::begin(uv), std::end(uv), std::begin(c.base_uv));
   c.base_sampler = base_sampler;
+  c.base_gamma = base_gamma;
   c.c11x = l.c11x;
   c.facing_scale = layer ? l.facing_scale : 0.0f;
   return true;

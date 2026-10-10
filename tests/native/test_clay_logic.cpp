@@ -2,6 +2,7 @@
 #include "../../src/native/render/clay_logic.h"
 #include "../../src/native/fable2_native_shaders.h"
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -2701,7 +2702,7 @@ int main() {
     CHECK(461, SetClayTerrainLight(tc, tm, tl, base_fix, 3));
     // The base coordinate is scaled into the host texture's extent like the detail coordinate.
     CHECK(461, f32("t_base_uv", 0) == 4.0f && f32("t_base_uv", 1) == 2.25f && f32("t_base_uv", 2) == 5.0f && f32("t_base_uv", 3) == 2.75f &&
-                   u32("t_base_sampler") == 3 && f32("t_c11x", 0) == 0.75f && f32("t_facing_scale", 0) == 8.0f && u32("t_light_pad") == 0);
+                   u32("t_base_sampler") == 3 && f32("t_c11x", 0) == 0.75f && f32("t_facing_scale", 0) == 8.0f && u32("t_base_gamma") == 0);
     capture::LightInputs tf = tl;
     tf.family = LightFamily::kTerrainFar;
     tf.facing_scale = 0.0f;
@@ -2733,6 +2734,56 @@ int main() {
     wrong_kind.kind = LightVertexKind::kStream;
     CHECK(464, refused(tm, no_facing) && refused(tm, bad_c11) && refused(tm, not_terrain) && refused(tm, wrong_kind) &&
                    refused(tm, capture::LightInputs{}));
+
+    // 618-620 (post sub-project, Task 8b): the base map's gamma sign. Every terrain row fetches tf3 with the
+    // sign fields 3, 3, 3, 0 (fetch dword 0, bits 2 to 9): the console's fetch gives r, g, b through its
+    // piecewise curve. The mask is per component of the RESULT (the fields go through the constant's
+    // swizzle, as the SDK's SwizzleSigns takes them); a signed or biased colour component is refused.
+    {
+      const uint32_t identity = 0x688u << 1;  // result x, y, z, w from stored x, y, z, w
+      auto fetch = [&](uint32_t signs, uint32_t swizzle) {
+        std::array<uint32_t, 6> fc{2u | (signs << 2), 0u, 0u, swizzle, 0u, 0u};
+        return fc;
+      };
+      auto gamma = [&](uint32_t signs, uint32_t swizzle) { return TerrainBaseGamma(fetch(signs, swizzle).data()); };
+      CHECK(618, gamma(0x00, identity) == 0 && gamma(0x3F, identity) == 7 && gamma(0x0C, identity) == 2 &&
+                     gamma(0x03, identity) == 1 && gamma(0x30, identity) == 4);
+      // (alpha's field is not a colour's: gamma, signed or biased there changes nothing)
+      CHECK(618, gamma(0xC0, identity) == 0 && gamma(0x40, identity) == 0 && gamma(0xBF, identity) == 7);
+      // (signed, biased: refused, in any colour component)
+      CHECK(618, gamma(0x01, identity) == kTerrainBaseGammaRefused && gamma(0x08, identity) == kTerrainBaseGammaRefused &&
+                     gamma(0x2F, identity) == kTerrainBaseGammaRefused && kTerrainBaseGammaRefused > 7);
+      // (the swizzle: red from stored w takes w's field; a constant 0 or 1 has none)
+      const uint32_t red_from_w = ((0x688u & ~7u) | 3u) << 1, red_one = ((0x688u & ~7u) | 5u) << 1;
+      CHECK(618, gamma(0xC0, red_from_w) == 1 && gamma(0x03, red_from_w) == 0 && gamma(0x3F, red_one) == 6 &&
+                     gamma(0x40, red_from_w) == kTerrainBaseGammaRefused);
+      // The record's light constants carry the mask; a base map the pass cannot read as the game does: no light.
+      capture::TerrainMaterialInputs signed_base = tm, gamma_base = tm;
+      const std::array<uint32_t, 6> g = fetch(0x3F, identity), s = fetch(0x01, identity);
+      std::copy(g.begin(), g.end(), std::begin(gamma_base.base_fetch));
+      std::copy(s.begin(), s.end(), std::begin(signed_base.base_fetch));
+      tc = MakeClayTerrainConstants(tm, capture::MaterialKind::kTerrainLayer, colour_fix, 1, 3);
+      CHECK(619, u32("t_base_gamma") == 0 && SetClayTerrainLight(tc, gamma_base, tl, base_fix, 3) && u32("t_base_gamma") == 7 &&
+                     f32("t_c11x", 0) == 0.75f);
+      CHECK(619, SetClayTerrainLight(tc, tm, tl, base_fix, 3) && u32("t_base_gamma") == 0);
+      CHECK(619, refused(signed_base, tl) && !refused(gamma_base, tl));
+      // The curve (xenos.cpp, PWLGammaToLinear; light_formulas.pwl_gamma_to_linear; tests/test_terrain_replay.py
+      // has the same points, worked by hand): with v = 255 g, 1023 * linear is v below 64, 2 v - 64 below 96,
+      // 4 v - 256 below 192, else 8 v - 1024, each plus the whole part of itself times its slope / 1024.
+      const int pins[][2] = {{0, 0}, {30, 30}, {70, 76}, {100, 144}, {150, 345}, {200, 580}, {255, 1023}};
+      bool curve = true;
+      for (const auto& p : pins) curve = curve && std::fabs(PwlGammaToLinear(float(p[0]) / 255.0f) - float(p[1]) / 1023.0f) < 2e-6f;
+      CHECK(620, curve && PwlGammaToLinear(1.0f) == 1.0f && PwlGammaToLinear(0.0f) == 0.0f);
+      CHECK(620, PwlGammaToLinear(-0.5f) == 0.0f && PwlGammaToLinear(2.0f) == 1.0f && PwlGammaToLinear(nan) == 0.0f &&
+                     PwlGammaToLinear(inf) == 1.0f && PwlGammaToLinear(-inf) == 0.0f);
+      bool rising = true, below = true;
+      for (int i = 1; i <= 1020; ++i) {
+        const float a = PwlGammaToLinear(float(i - 1) / 1020.0f), b = PwlGammaToLinear(float(i) / 1020.0f);
+        rising = rising && b >= a;
+        below = below && (i == 1020 || b < float(i) / 1020.0f);
+      }
+      CHECK(620, rising && below);
+    }
 
     // 465-469: the draw's light words, and how many elements the light's buffers must hold.
     const capture::DrawRecord r = BaseRecord();

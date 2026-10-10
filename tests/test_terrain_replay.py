@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools" / "xdk_sigmatch"))
 
+import light_formulas as lf  # noqa: E402
 import terrain_replay as tr  # noqa: E402
 import texture_thumb as tt  # noqa: E402
 
@@ -361,6 +362,79 @@ class TexTest(unittest.TestCase):
         c = fc_for(6, 3, 2, endian=2)
         with self.assertRaisesRegex(tr.MissingInput, "has 0 bytes"):
             tr.decode_texture(b"", c, "detail colour")
+
+
+class GammaSignTest(unittest.TestCase):
+    """The base map tf3 is fetched with the gamma sign on r, g, b in every terrain row (fetch dword 0, bits 2 to 9:
+    3, 3, 3, 0): the console's fetch gives the piecewise linear value, not the stored one."""
+
+    def test_the_piecewise_curve_at_points_worked_by_hand(self):
+        # xenos.cpp, PWLGammaToLinear: with v = 255 g, 1023 * linear is v below 64, 2 v - 64 below 96, 4 v - 256
+        # below 192, else 8 v - 1024, each plus the whole part of itself times its slope / 1024.
+        for level, want in ((0, 0), (30, 30), (70, 76), (100, 144), (150, 345), (200, 580), (255, 1023)):
+            self.assertAlmostEqual(lf.pwl_gamma_to_linear(level / 255.0), want / 1023.0, places=12, msg=level)
+        self.assertEqual(lf.pwl_gamma_to_linear(1.0), 1.0)
+        # outside 0..1 and no number: the bounds, and 0
+        self.assertEqual(lf.pwl_gamma_to_linear(-0.5), 0.0)
+        self.assertEqual(lf.pwl_gamma_to_linear(2.0), 1.0)
+        self.assertEqual(lf.pwl_gamma_to_linear(float("nan")), 0.0)
+        # it never falls, and it is below the stored value everywhere between the ends
+        values = [lf.pwl_gamma_to_linear(i / 1020.0) for i in range(1021)]
+        self.assertTrue(all(b >= a for a, b in zip(values, values[1:])))
+        self.assertTrue(all(v < i / 1020.0 for i, v in enumerate(values) if 0 < i < 1020))
+
+    def test_sign_fields_of_a_fetch_constant(self):
+        self.assertEqual(tr.fetch_signs(0x00000002), (0, 0, 0, 0))
+        self.assertEqual(tr.fetch_signs(0x00000002 | 0xFC), (3, 3, 3, 0))        # the terrain's base map
+        self.assertEqual(tr.fetch_signs(0x00000002 | (1 << 2) | (2 << 4) | (3 << 8)), (1, 2, 0, 3))
+
+    def test_a_texture_with_the_gamma_sign_is_linear_after_the_filter(self):
+        texels = [(100 / 255.0, 0.0, 200 / 255.0, 0.5), (200 / 255.0, 1.0, 200 / 255.0, 0.5)]
+        plain = tr.Tex(2, 1, texels, clamp=(2, 2), linear=True)
+        gamma = tr.Tex(2, 1, texels, clamp=(2, 2), linear=True, signs=(3, 3, 0, 0))
+        self.assertEqual(plain.sample(0.25, 0.5), texels[0])
+        got = gamma.sample(0.25, 0.5)                       # a texel centre
+        self.assertAlmostEqual(got[0], 144 / 1023.0, places=12)
+        self.assertEqual(got[1:], (0.0, 200 / 255.0, 0.5))  # green through the curve is 0; blue and alpha as stored
+        mid = gamma.sample(0.5, 0.5)                        # between the two: the curve of the filtered value
+        self.assertAlmostEqual(mid[0], 345 / 1023.0, places=12)     # level 150, not the mean of 144 and 580
+        self.assertAlmostEqual(mid[1], lf.pwl_gamma_to_linear(0.5), places=12)
+        self.assertAlmostEqual(gamma.sample(0.75, 0.5, linear=False)[0], 580 / 1023.0, places=12)
+
+    def test_the_textures_of_a_row_take_the_sign_from_the_fetch_constant(self):
+        with tempfile.TemporaryDirectory() as d:
+            fc = fc_for(6, 4, 4)
+            path = Path(d) / "base.bin"
+            path.write_bytes(dump_8888(4, 4, lambda x, y: (200, 255, 100, 150)))   # (the decode's order: r g b a = 100 150 200 255)
+            index = {(fc[1], fc[2]): path}
+            row = lambda dword0: {"tf": {"3": ["0x%08X" % v for v in [dword0] + fc[1:]]}}
+            plain = tr._Textures(index).get(row(fc[0]), 3, "base map")
+            self.assertEqual(plain.sample(0.5, 0.5), (100 / 255.0, 150 / 255.0, 200 / 255.0, 1.0))
+            both = tr._Textures(index)
+            gamma = both.get(row(fc[0] | 0xFC), 3, "base map")
+            got = gamma.sample(0.5, 0.5)
+            for k, want in enumerate((144, 345, 580)):
+                self.assertAlmostEqual(got[k], want / 1023.0, places=6)
+            self.assertEqual(got[3], 1.0)
+            # (the same bytes read through a constant without the sign, from the same cache, stay as stored)
+            self.assertEqual(both.get(row(fc[0]), 3, "base map").sample(0.5, 0.5)[0], 100 / 255.0)
+            # a signed or biased colour component is not something the replay reads
+            for field in (1, 2):
+                with self.assertRaises(tr.MissingInput) as e:
+                    tr._Textures(index).get(row(fc[0] | (field << 4)), 3, "base map")
+                self.assertIn("sign", str(e.exception))
+
+    def test_the_lit_colour_takes_the_base_map_through_the_curve(self):
+        # A layer whose base map holds level 150 with the gamma sign: the baked term is 345 / 1023, by hand.
+        base = tr.Tex(1, 1, [(150 / 255.0,) * 3 + (1.0,)], signs=(3, 3, 3, 0))
+        block = tr.light_block_of({"light": BLOCK})
+        albedo, n = (0.5, 0.25, 1.0), (0.0, 0.0, 1.0)
+        got = tr.lit_layer_colour(block, {"c11x": 1.0, "facing": 8.0}, albedo, base.sample(0.5, 0.5), n, n)
+        want = layer_by_hand(albedo, [345 / 1023.0] * 3, n, 1.0)
+        stored = layer_by_hand(albedo, [150 / 255.0] * 3, n, 1.0)
+        for k in range(3):
+            self.assertAlmostEqual(got[k], want[k], places=9)
+        self.assertGreater(stored[0] - want[0], 0.05)       # (the two readings are far apart: the test can fail)
 
 
 class InputsTest(unittest.TestCase):

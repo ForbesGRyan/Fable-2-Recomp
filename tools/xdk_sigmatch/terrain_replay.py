@@ -133,11 +133,22 @@ class MissingInput(Exception):
     """The capture does not hold something the replay needs."""
 
 
-class Tex:
-    """A decoded base level: `texels` are row-major tuples of four floats in 0..1."""
+def fetch_signs(dword0):
+    """The four sign fields of a fetch constant (dword 0 bits 2 to 9, two bits a component: 0 unsigned, 1
+    signed, 2 unsigned biased, 3 gamma)."""
+    return tuple((dword0 >> (2 + 2 * i)) & 3 for i in range(4))
 
-    def __init__(self, w, h, texels, clamp=(0, 0), linear=True):
+
+class Tex:
+    """A decoded base level: `texels` are row-major tuples of four floats in 0..1. `signs`: the fetch
+    constant's sign fields; a component whose field is 3 (gamma) is taken through the console's piecewise
+    curve after the filter (light_formulas.pwl_gamma_to_linear), as the fetch gives it: the terrain's base
+    map tf3 has 3, 3, 3, 0 in every captured row."""
+
+    def __init__(self, w, h, texels, clamp=(0, 0), linear=True, signs=(0, 0, 0, 0)):
         self.w, self.h, self.texels, self.clamp, self.linear = w, h, texels, clamp, linear
+        self.signs = tuple(signs)
+        self.gamma = any(s == 3 for s in self.signs)
 
     def _index(self, i, n, mode):
         if mode == 0:
@@ -151,6 +162,13 @@ class Tex:
         return self.texels[self._index(y, self.h, self.clamp[1]) * self.w + self._index(x, self.w, self.clamp[0])]
 
     def sample(self, u, v, linear=None):
+        """The fetch's value at (u, v): the filtered texel, then the gamma sign's curve where a component has it."""
+        s = self._filtered(u, v, linear)
+        if not self.gamma:
+            return s
+        return tuple(lf.pwl_gamma_to_linear(s[k]) if self.signs[k] == 3 else s[k] for k in range(4))
+
+    def _filtered(self, u, v, linear=None):
         linear = self.linear if linear is None else linear
         if not linear:
             return self.texel(math.floor(u * self.w), math.floor(v * self.h))
@@ -765,6 +783,11 @@ class _Textures:
             if key[1:3] not in self.index:
                 raise MissingInput(f"no texture dump for tf{slot} ({what}), fetch dword 1 0x{key[1]:08X}")
             layout = (key[1], key[2], key[0] >> 22)   # the decode of the bytes; the rest is sampler state
+            signs = fetch_signs(key[0])
+            if any(s in (1, 2) for s in signs[:3]):
+                # (a signed or biased colour component: no terrain row has one, and nothing here reads one)
+                raise MissingInput(f"tf{slot} ({what}), fetch dword 0 0x{key[0]:08X}, has the sign fields "
+                                   f"{signs}: a signed or biased component, which this tool does not decode")
             if layout in self.decoded:
                 t = self.decoded[layout]
                 t = Tex(t.w, t.h, t.texels, ((key[0] >> 10) & 7, (key[0] >> 13) & 7), ((key[3] >> 19) & 3) == 1)
@@ -775,6 +798,8 @@ class _Textures:
                     raise MissingInput(f"tf{slot} ({what}), fetch dword 1 0x{key[1]:08X}, is {e}, which this tool "
                                        "does not decode") from None
                 self.decoded[layout] = t
+            if any(signs):
+                t = Tex(t.w, t.h, t.texels, t.clamp, t.linear, signs)
             self.cache[key] = t
         return self.cache[key]
 

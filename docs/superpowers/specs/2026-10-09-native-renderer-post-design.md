@@ -548,7 +548,19 @@ before the validation runs of plan Task 9; the criteria's verdicts come with the
   1.33 without it): the bloom moves the native regions as the replay predicts (criterion 13's
   first reading: 24 of 25 and 18 of 18 within 0.05), and the native scene before the post steps
   is brighter there than the game's. Not the bloom's to mend; open with "Native composite"'s
-  offset.
+  offset. *Corrected by the review of Task 8 and Task 8b:* "0.93 to 1.33 without it" set a native
+  picture without bloom against the game's with it; like for like (native over the replay of the
+  same capture) the far ground is 14 to 65% over without the bloom and 14 to 78% with it, and it
+  is section 16's criterion 4 finding of the fog sub-project, there before any post step.
+- **Task 8b: the cause of the ground's part, and a fix outside the post chain.** Every terrain
+  draw fetches the baked light map tf3 with the gamma sign in its fetch constant; the console
+  gives the shader the texel through its gamma-to-linear curve and the native pass read it as
+  stored, so the ambient part of all lit ground was 1.8 to 2.5 times the game's. Per pixel against
+  the stored scene with the fog taken off, on ground only: 21 to 69% over by channel with the
+  stored reading, within 1 to 4% with the curve (frame map section 17, "The base map's gamma
+  sign"). Fixed in the two terrain shaders (a deviation: the spec changes no scene shader). What
+  it leaves: the wooded far hills (no tree billboards natively), the rock face, the lake. The
+  post-off picture's exposure 2.22 was fitted with the old reading and is not fitted again.
 - **Cost is not measured**: all fifteen runs were on the monitor where the present gate does not
   hold.
 - **With `--fable2_native_bloom=off` the composite and the ramp are plan Task 5's programs but

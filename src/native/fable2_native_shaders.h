@@ -696,6 +696,11 @@ inline constexpr const char* kClayTexturedDepthPs = "#define CLAY_DEPTH_ONLY 1\n
 //          lerp(n, c19, (1 + n . c19) / 2) interpolated;
 //   far    F * (pow(tf3, c21.w) * c21.xyz * L + c20.xyz) + F * c11.x * c87.xyz * sat(N . c80.xyz),
 //          L from t = sat(N . c23.xyz); the underlay's fade multiplies the lit colour.
+// tf3 here is what the game's fetch gives: every terrain row's fetch constant has the gamma sign on
+// r, g, b (sign fields 3, 3, 3, 0), so the console takes the filtered texel through its piecewise
+// linear curve before the shader sees it (base_linear, under the record's word t_base_gamma:
+// TerrainBaseGamma in clay_logic.h; frame-map section 17, "The base map's gamma sign"). Read as stored,
+// the ambient part of all lit ground was 1.8 to 2.5 times the game's.
 // Not read: the fog, the normal maps tf2 and tf14, the lanterns of the two- and
 // four-light shaders.
 // kClayTerrainLayerDepthPs and kClayTerrainFarDepthPs are the two texts compiled with CLAY_DEPTH_ONLY,
@@ -719,7 +724,7 @@ inline constexpr ClayTerrainField kClayTerrainFields[] = {
     {"t_weight_scale", 104, 4},  {"t_weight_bias", 108, 4},   {"t_colour_sampler", 112, 4}, {"t_weight_sampler", 116, 4},
     {"t_flags", 120, 4},         {"t_side_sampler", 124, 4},  {"t_side_uv", 128, 8},       {"t_slope", 136, 8},
     {"t_steep_threshold", 144, 4}, {"t_steep_eps", 148, 4},   {"t_pad", 152, 8},           {"t_base_uv", 160, 16},
-    {"t_base_sampler", 176, 4},  {"t_c11x", 180, 4},          {"t_facing_scale", 184, 4},  {"t_light_pad", 188, 4},
+    {"t_base_sampler", 176, 4},  {"t_c11x", 180, 4},          {"t_facing_scale", 184, 4},  {"t_base_gamma", 188, 4},
 };
 
 #define FABLE2_CLAY_TERRAIN_COMMON_HLSL FABLE2_CLAY_FOG_HLSL FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL R"hlsl(
@@ -734,7 +739,8 @@ cbuffer Terrain : register(b1) {
   float2 t_side_uv; float2 t_slope;                    // steep: (c8.x, -c8.x) into the side texture; c45.xy
   float t_steep_threshold; float t_steep_eps; uint2 t_pad;   // steep: the shader's two literals
   float4 t_base_uv;     // lit: tf3 coordinate of the world position
-  uint t_base_sampler; float t_c11x; float t_facing_scale; uint t_light_pad;   // lit: c11.x; layer: the literal 8
+  uint t_base_sampler; float t_c11x; float t_facing_scale; uint t_base_gamma;  // lit: c11.x; layer: the literal 8;
+                                                       // bits 0 to 2: tf3's r, g, b are fetched with the gamma sign
 };
 Texture2D t_colour : register(t5);
 Texture2D t_weights : register(t6);
@@ -760,13 +766,28 @@ float4 sample_colour(float2 at) {
   if (t_colour_sampler == 2) return t_colour.Sample(s_point_clamp, at);
   return t_colour.Sample(s_linear_clamp, at);
 }
+// What the console's fetch gives for a component whose sign field is 3 (gamma): the stored value through
+// its piecewise linear curve (PwlGammaToLinear in clay_logic.h; light_formulas.pwl_gamma_to_linear).
+float3 base_linear(float3 g) {
+  g = saturate(g);
+  bool3 high = g >= 96.0 / 255.0;
+  float3 scale = high ? ((g >= 192.0 / 255.0) ? 8.0 / 1024.0 : 4.0 / 1024.0) : ((g >= 64.0 / 255.0) ? 2.0 / 1024.0 : 1.0 / 1024.0);
+  float3 offset = high ? ((g >= 192.0 / 255.0) ? -1024.0 : -256.0) : ((g >= 64.0 / 255.0) ? -64.0 : 0.0);
+  float3 l = g * (261120.0 * scale) + offset;
+  return (l + trunc(l * scale)) / 1023.0;
+}
 // The base map at `at` with the screen derivatives d = (ddx, ddy) of the coordinate (the fetch is
-// inside the light's branch, the derivatives are formed outside it).
+// inside the light's branch, the derivatives are formed outside it). Its r, g, b where the draw's
+// fetch constant has the gamma sign (t_base_gamma, a bit a component): through base_linear, after the
+// filter, as the game's fetch gives them.
 float4 sample_base(float2 at, float4 d) {
-  if (t_base_sampler == 0) return t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw);
-  if (t_base_sampler == 1) return t_base.SampleGrad(s_linear_wrap, at, d.xy, d.zw);
-  if (t_base_sampler == 2) return t_base.SampleGrad(s_point_clamp, at, d.xy, d.zw);
-  return t_base.SampleGrad(s_linear_clamp, at, d.xy, d.zw);
+  float4 t;
+  if (t_base_sampler == 0) t = t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw);
+  else if (t_base_sampler == 1) t = t_base.SampleGrad(s_linear_wrap, at, d.xy, d.zw);
+  else if (t_base_sampler == 2) t = t_base.SampleGrad(s_point_clamp, at, d.xy, d.zw);
+  else t = t_base.SampleGrad(s_linear_clamp, at, d.xy, d.zw);
+  float3 l = base_linear(t.rgb);
+  return float4((t_base_gamma & 1) ? l.r : t.r, (t_base_gamma & 2) ? l.g : t.g, (t_base_gamma & 4) ? l.b : t.b, t.a);
 }
 // sat(d2 * c31.x + c31.y): 0 where the layers are whole, 1 where they are gone.
 float terrain_fade_in(float3 world) {

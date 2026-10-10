@@ -964,13 +964,28 @@ static const char kPinTerrainCommon[] = R"pin(float4 sample_colour(float2 at) {
   if (t_colour_sampler == 2) return t_colour.Sample(s_point_clamp, at);
   return t_colour.Sample(s_linear_clamp, at);
 }
+// What the console's fetch gives for a component whose sign field is 3 (gamma): the stored value through
+// its piecewise linear curve (PwlGammaToLinear in clay_logic.h; light_formulas.pwl_gamma_to_linear).
+float3 base_linear(float3 g) {
+  g = saturate(g);
+  bool3 high = g >= 96.0 / 255.0;
+  float3 scale = high ? ((g >= 192.0 / 255.0) ? 8.0 / 1024.0 : 4.0 / 1024.0) : ((g >= 64.0 / 255.0) ? 2.0 / 1024.0 : 1.0 / 1024.0);
+  float3 offset = high ? ((g >= 192.0 / 255.0) ? -1024.0 : -256.0) : ((g >= 64.0 / 255.0) ? -64.0 : 0.0);
+  float3 l = g * (261120.0 * scale) + offset;
+  return (l + trunc(l * scale)) / 1023.0;
+}
 // The base map at `at` with the screen derivatives d = (ddx, ddy) of the coordinate (the fetch is
-// inside the light's branch, the derivatives are formed outside it).
+// inside the light's branch, the derivatives are formed outside it). Its r, g, b where the draw's
+// fetch constant has the gamma sign (t_base_gamma, a bit a component): through base_linear, after the
+// filter, as the game's fetch gives them.
 float4 sample_base(float2 at, float4 d) {
-  if (t_base_sampler == 0) return t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw);
-  if (t_base_sampler == 1) return t_base.SampleGrad(s_linear_wrap, at, d.xy, d.zw);
-  if (t_base_sampler == 2) return t_base.SampleGrad(s_point_clamp, at, d.xy, d.zw);
-  return t_base.SampleGrad(s_linear_clamp, at, d.xy, d.zw);
+  float4 t;
+  if (t_base_sampler == 0) t = t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw);
+  else if (t_base_sampler == 1) t = t_base.SampleGrad(s_linear_wrap, at, d.xy, d.zw);
+  else if (t_base_sampler == 2) t = t_base.SampleGrad(s_point_clamp, at, d.xy, d.zw);
+  else t = t_base.SampleGrad(s_linear_clamp, at, d.xy, d.zw);
+  float3 l = base_linear(t.rgb);
+  return float4((t_base_gamma & 1) ? l.r : t.r, (t_base_gamma & 2) ? l.g : t.g, (t_base_gamma & 4) ? l.b : t.b, t.a);
 }
 // sat(d2 * c31.x + c31.y): 0 where the layers are whole, 1 where they are gone.
 float terrain_fade_in(float3 world) {
@@ -2657,8 +2672,9 @@ int main() {
           {"light_sun", 3, "  return sun_col * (saturate(n_dot_sun) * sun_gate);",
            "  n_dot_sun = 1.0;\n  return sun_col * (saturate(n_dot_sun) * sun_gate);", 6},
           {"AmbientAxis", 0, "  float k = 0.5 + 0.5 * dot(normal, axis);", "  axis = -axis;\n  float k = 0.5 + 0.5 * dot(normal, axis);", 6},
-          {"sample_base", 2, "  if (t_base_sampler == 0) return t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw);",
-           "  at = at * 0.5;\n  if (t_base_sampler == 0) return t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw);", 3},
+          {"sample_base", 2, "  if (t_base_sampler == 0) t = t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw);",
+           "  at = at * 0.5;\n  if (t_base_sampler == 0) t = t_base.SampleGrad(s_point_wrap, at, d.xy, d.zw);", 3},
+          {"base_linear", 3, "  float3 l = g * (261120.0 * scale) + offset;", "  float3 l = g * (261120.0 * scale);", 3},
           {"layer normal", 2, "  [branch] if (light_mode & 4) {\n    float3 N = light_normalize(normal);\n    float facing",
            "  if (light_mode & 4) normal = -normal;\n  [branch] if (light_mode & 4) {\n    float3 N = light_normalize(normal);\n    float facing", 4},
           {"far squared", 3, "  float2 base_at = world.xy * t_base_uv.xy + t_base_uv.zw;",
@@ -4239,9 +4255,40 @@ int main() {
       if (free_tap.empty() || free_l.empty() || HasOp(free_l, "imin") || HasOp(free_l, "imax")) return 240;
     }
   }
+  // 241 (post sub-project, Task 8b): the base map's gamma sign. Every terrain row fetches tf3 with the
+  // sign fields 3, 3, 3, 0, so the game's baked term is the stored texel through the console's piecewise
+  // curve; the two terrain shaders take the base map's r, g, b through base_linear where the record's
+  // word t_base_gamma (cbuffer Terrain, byte 188) has the component's bit. Held here: the curve's
+  // statements with their literals (xenos.cpp, PWLGammaToLinear), that the lit programs read the word and
+  // truncate and the programs without light do neither (they read no base map), and that the word decides
+  // (the program without the selection does not read it).
+  {
+    for (const char* src : {kClayTerrainLayerPs, kClayTerrainFarPs}) {
+      if (!strstr(src, "  g = saturate(g);\n  bool3 high = g >= 96.0 / 255.0;\n") ||
+          !strstr(src, "  float3 scale = high ? ((g >= 192.0 / 255.0) ? 8.0 / 1024.0 : 4.0 / 1024.0) : ((g >= 64.0 / 255.0) ? 2.0 / 1024.0 : 1.0 / 1024.0);\n") ||
+          !strstr(src, "  float3 offset = high ? ((g >= 192.0 / 255.0) ? -1024.0 : -256.0) : ((g >= 64.0 / 255.0) ? -64.0 : 0.0);\n") ||
+          !strstr(src, "  float3 l = g * (261120.0 * scale) + offset;\n  return (l + trunc(l * scale)) / 1023.0;\n") ||
+          !strstr(src, "  float3 l = base_linear(t.rgb);\n") || Count(src, "base_linear(") != 2 || 261120.0 != 255.0 * 1024.0) return 241;
+      const std::string lit = Disassembly("gamma_lit", WithLightMode(src, 5).c_str(), "ps_5_0");
+      const std::string unlit = Disassembly("gamma_unlit", WithLightMode(src, 0).c_str(), "ps_5_0");
+      if (lit.empty() || unlit.empty() || !ReadsComponent(lit, "cb1[11]", 'w') || ReadsComponent(unlit, "cb1[11]", 'w') ||
+          !HasOp(lit, "round_z") || HasOp(unlit, "round_z")) {
+        std::cerr << "the base map's gamma word: the lit program does not read it, or the program without light does\n";
+        return 241;
+      }
+      // Control: without the selection the lit program is another one and reads no such word.
+      const std::string plain = Changed(src, "  return float4((t_base_gamma & 1) ? l.r : t.r, (t_base_gamma & 2) ? l.g : t.g, (t_base_gamma & 4) ? l.b : t.b, t.a);",
+                                        "  return t;");
+      const std::string plain_l = plain.empty() ? std::string() : Disassembly("gamma_plain", WithLightMode(plain.c_str(), 5).c_str(), "ps_5_0");
+      if (plain_l.empty() || ReadsComponent(plain_l, "cb1[11]", 'w') || HasOp(plain_l, "round_z") || Code(plain_l) == Code(lit)) return 241;
+    }
+    bool named = false;
+    for (const ClayTerrainField& f : kClayTerrainFields) named = named || (!strcmp(f.name, "t_base_gamma") && f.offset == 188 && f.bytes == 4);
+    if (!named) return 241;
+  }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads; the base map's gamma sign: the curve, the record's word read by the lit terrain programs alone\n";
   return 0;
 }

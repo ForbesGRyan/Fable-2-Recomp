@@ -117,7 +117,7 @@ colour = A * c11.x * (pow(tf3, c21.w) * c21.xyz * L + c20.xyz) + A * c87.xyz * n
 | Input | Source |
 |---|---|
 | A | the material's colour: `tf0^2`, on steep ground mixed with the side texture (frame-map section 13, item 1). With flat side normal maps the steep block does not change the normal's direction (checked: half of the trials of `9C21...`, `4524...`, `04F2...` are steep) |
-| baked | tf3 at the base coordinate (already a material input: `base_slot`) |
+| baked | tf3 at the base coordinate (already a material input: `base_slot`), **as the fetch gives it**: every terrain row's fetch constant has the gamma sign on r, g, b (sign fields 3, 3, 3, 0), so the value is the filtered texel through the console's piecewise curve (`pwl_gamma_to_linear`; frame-map section 17, "The base map's gamma sign"). The check below feeds the microcode a random texture and cannot see this; the native pass read the texel as stored until the post sub-project's Task 8b |
 | tint, tint_pow, add, floor | frame block: `c21.xyz`, `c21.w`, `c20.xyz`, `c22.xyz` |
 | c11x | per draw: `c11.x` (1 in all 7,344 in-scene layer rows, `fix1_recounts_bridge_trees.txt`; the function's default) |
 | N | the tf17 normal of the vertex shader, `(2x - 1, 2y - 1, sqrt(|1 - x^2 - y^2|))`, normalised by the pixel shader. The vertex shader uses it as decoded, also where `x^2 + y^2 > 1` (checked: about one trial in six) |

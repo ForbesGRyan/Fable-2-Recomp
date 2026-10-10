@@ -5818,8 +5818,10 @@ answer. (2) A linear sample at a texel centre takes its neighbours with weight 0
 neighbour that is no number makes that sample no number, which the step then reads as 0, where
 the mirror reads the centre's texel; the lit paths write no such value. (3) The sun's two layers
 are 0: towards the sun the bloom lacks the beams and the disc (10c). (4) The native scene's far
-ground reads 1.10 to 1.34 of the game's without bloom ("Native composite") and the bloom lifts it
-further; nothing of the bloom is tuned against that. (5) The linear target holds 6 and 5 mantissa
+ground and two near sunlit terrain regions were 13 to 46% over the game's scene before any post
+step (section 16's table; like for like 14 to 65% over through the composite alone and 14 to 78%
+with the bloom on both sides: "The base map's gamma sign" below, where the cause is found);
+nothing of the bloom is tuned against that. (5) The linear target holds 6 and 5 mantissa
 bits where the game's scene target has 7; the downsample's target the same, and that one is
 measured ("Runs", item 5: a tenth of a level, one-sided). (6) One save, late morning, three
 places, a standing camera; no `no-weights` frame, no night, no interior. (7) Cost not measured.
@@ -5827,8 +5829,8 @@ places, a standing camera; no `no-weights` frame, no night, no interior. (7) Cos
 **Runs** (2026-10-10, by the controller with the user at the machine, `RUN UNCHECKED`; binary
 SHA-256 `D928DE53A3A4EFA6`, commit `edfcc24`; logs 469 to 483, all exit 0, 0 `d3d ERROR` lines).
 **Every run was on the 100%-scaled monitor (shot width 1296), where the host's present gate does
-not hold: none gives a timing figure**, the two made for timing (logs 482, 483: 25.5 to 26.5 fps
-with the bloom on and off alike, as that monitor does) included. Evidence:
+not hold: none gives a timing figure**, the two made for timing (logs 482, 483) included.
+Evidence:
 `out/native-evidence/post/t8_*` (`<name>_driver.txt`, `<name>_fable_2_<log>.log`, shots, the
 dumps as `<name>_dump.rgba`; scripts `t8_regions.py` there and `t8_channels.py`,
 `t8_float11.py`, `t8_float11_front.py` in `out/tests/post-task8/`).
@@ -5925,8 +5927,33 @@ dumps as `<name>_dump.rgba`; scripts `t8_regions.py` there and `t8_channels.py`,
    the game's in the far ground by about what the game's own bloom adds, so with both the far
    ground is 14 to 70% over at the bridge (the far peak alone is at 1.00). That is "Native composite"'s open offset (the native scene, the
    frame's exposure and unlit words, or the prediction; the lake and the far hills are unlit
-   placeholders and bare far terrain where the game has water and tree billboards), not
+   placeholders and bare far terrain where the game has water and tree billboards: an inference
+   when this was written, and not the whole of it), not
    something the bloom's formula can or should make up for. Nothing was tuned.
+   **Correction (review of Task 8, Task 8b).** The "without bloom" figures of this item set a
+   native picture without bloom against the game's picture with it. Like for like (native over
+   the replay's variant A or B of the same run's capture; display luminance, in brackets to the
+   power 2.2 as a rough linear figure):
+
+   | Region | native off / A | native on / B | emulated / B |
+   |---|---|---|---|
+   | far mountains left | 1.255 (1.65) | 1.300 (1.78) | 0.988 |
+   | far mountains centre | 1.156 (1.38) | 1.176 (1.43) | 0.987 |
+   | far mountains right | 1.126 (1.30) | 1.121 (1.29) | 0.994 |
+   | far slope | 1.101 (1.24) | 1.131 (1.31) | 0.984 |
+   | island in the lake | 1.095 (1.22) | 1.115 (1.27) | 0.980 |
+   | far rock; below the ridge | 1.073, 1.108 (1.17, 1.25) | 1.063, 1.097 (1.14, 1.23) | 0.992, 0.992 |
+   | dirt patch; rock face | 1.117, 1.132 (1.28, 1.31) | 1.136, 1.150 (1.32, 1.36) | 0.984, 0.982 |
+   | far peak; sky (two); lake | 0.989; 0.986, 0.987; 1.039 | 0.993; 0.994, 0.994; 1.032 | 0.994; 0.994, 0.995; 0.992 |
+
+   So the scene's excess is 14 to 65% through the composite alone and 14 to 78% with the bloom on
+   both sides: the bloom adds -0.03 to +0.13 to it, it does not make it. It is the finding of
+   section 16's criterion 4 table (the same regions at 1.13 to 1.45 before any post step, the
+   peak, the sky and the lake at 0.99 to 1.07), and dirt patch and rock face, near and sunlit, are
+   in it: tree billboards and water cannot be the whole cause. The cause of the ground's part is
+   in "The base map's gamma sign" below. The third spot's sky "1.15 -> 1.23 and 1.42 -> 1.54" is
+   not a native error: native on / B is 1.001 and 0.993 there, and it is the emulated shots at 50
+   and 56 s that are 0.89 and 0.79 of the capture's replay (not explained; not followed).
 9. *Shots viewed.* `t8_9_b_on_full_shot_45s` (native, bloom on) beside `t8_10_b_off_full_shot_45s`
    (native, off) and `t8_9_b_on_full_shot_42s` (emulated): with the bloom the sky, the far
    mountains and the lake carry the game's milky veil and the sky's blue is paler, as in the
@@ -5952,6 +5979,110 @@ against the game): the thresholds held with the fetch's place (above); 12: both 
 the downsample target's precision named (item 5); 13: 24 of 25 and 18 of 18; 14: tests, and the
 guards in the compiled programs; 15: bloom off is plan Task 5's programs but for the rounding
 (case 237), no D3D error (item 1), cost open (item 10).
+
+### The base map's gamma sign
+
+Task 8b of the post sub-project (2026-10-10): why the native scene's ground was brighter than the
+game's. Scripts and outputs: `out/native-evidence/post/t8b_*` (`t8b_scene_space.py`,
+`t8b_ratio_map.py`, `t8b_ground.py`, `t8b_fc.py`, `t8b_rows.py`; their `.txt` and `.png`).
+
+**The finding.** Every terrain row of every capture fetches the base map tf3 (the baked light
+map of `terrain_layer` and `terrain_far`: `pow(tf3, c21.w) * c21.xyz * L + c20.xyz`) with the
+sign fields 3, 3, 3, 0 in its fetch constant (dword 0, bits 2 to 9; 3 is "gamma";
+`t8b_fc.py` on capture `023443`: 567 of 567 in-scene tess rows, and no other texture of a tess or
+mesh row has a gamma field). With that field the console's fetch takes the filtered texel from
+gamma to linear through its piecewise curve before the shader sees it (the SDK's
+`PWLGammaToLinear`, applied by its translators in the case `TextureSign::kGamma`). The native
+pass, the capture's material inputs and `terrain_replay.py` read the texel as stored. A stored
+0.6 is 0.349 through the curve; after the power 1.3 the baked term is half. So **the ambient part
+of all lit ground was 1.8 to 2.5 times the game's** (a factor of 0.40 to 0.55 on it explains the
+far regions channel by channel; a factor on the sun does not: blue would need a negative one).
+The light formulas were checked against the microcode with a random texture as tf3, which cannot
+see what the fetch does to a texel; the fixed exposure 2.22 was then fitted on the dirt patch,
+which hid it there.
+
+**It is section 16's finding.** The offset "Native composite" and "Native bloom" report is the
+table of section 16, "After the reviews: the fix wave" (criterion 4: far rock 1.13 and 1.18, far
+slope 1.19, island 1.18, the ranges 1.22, 1.28, 1.45, dirt patch 1.21, rock face 1.23, with the
+peak, the sky and the lake at 0.99 to 1.07), measured there with the post chain off. Measured
+again here in the scene's own unit (`t8b_scene_bridge_off.txt`: the native shot of run T8-10 at
+57 s taken back through the composite's and the ramp's grey response, over the stored scene of
+capture `023443`, frame 1): dirt patch 1.20, rock face 1.24, far rock 1.13 and 1.19, far slope
+1.19, island 1.18, the ranges 1.21, 1.28, 1.46, lake 1.06; far peak 0.985, sky 0.974 and 0.975,
+grass beside the dirt 0.97, planks 0.97, trunk 1.01. The same regions at the same values with the
+post steps on and off: **the post frame's words (the exposure, the unlit scale, the fog under
+them) are not the cause**, and neither is the oracle: the emulated shot 3 s before is 0.98 to
+0.99 of the replay's variant B of that capture in every region that holds still.
+
+**Like for like, the excess was larger than the earlier tables say** (review of Task 8): "native
+against emulated without bloom" set a native picture without bloom against the game's with it.
+Native over the replay's variant of the same capture (`023305`; display luminance, in brackets to
+the power 2.2): far mountains left 1.255 (1.65) without bloom and 1.300 (1.78) with it, centre
+1.156 (1.38) and 1.176 (1.43), right 1.126 (1.30) and 1.121 (1.29), far slope 1.101 (1.24) and
+1.131 (1.31), island 1.095 (1.22) and 1.115 (1.27), dirt patch and rock face 1.117, 1.132 (1.28,
+1.31) and 1.136, 1.150 (1.32, 1.36); peak, sky and lake 0.99 to 1.04 both ways. The bloom moves
+the error by -0.03 to +0.13, not from 1.33 to 1.70: the bright pass has a threshold the game's
+haze sits just above, so a scene 1.3 times too bright there adds a little more of itself.
+
+**The measurement that separates it** (`t8b_ground_bridge.txt`, `t8b_ground_bridge_gamma.txt`;
+`t8b_ground_third*.txt` for capture `023809`). Per pixel of a region: the game's colour before its
+fog (the stored scene over `c20.w`, the in-scatter taken off and divided by the transmittance at
+the pixel's world position from the stored depth, with the frame's own block and tables) against
+what the native pass draws at that world position without shadows (`terrain_replay.py`'s lit
+replay, far terrain under the layers), counted only where the terrain's own height is the depth's
+(ground, not a tree or a post in front of it). Median of model over game, r / g / b:
+
+| Region (pixels) | tf3 as stored | tf3 through the curve |
+|---|---|---|
+| dirt patch (167; near, inside the fog's start) | 1.21 / 1.29 / 1.43 | **1.00 / 1.02 / 1.00** |
+| far slope (234) | 1.34 / 1.40 / 1.54 | **0.99 / 1.00 / 1.02** |
+| island in the lake (140) | 1.36 / 1.41 / 1.51 | **0.99 / 1.00 / 0.99** |
+| far rock (223); below the ridge (148) | 1.38 / 1.42 / 1.56; 1.40 / 1.43 / 1.65 | **1.00 / 1.00 / 1.00**; 1.02 / 1.01 / 1.05 |
+| far mountains left, centre, right (62, 188, 343: the ground between the trees) | 1.38 to 1.41 / 1.41 to 1.45 / 1.58 to 1.69 | **1.02 to 1.04 / 1.01 to 1.03 / 1.03 to 1.07** |
+| third spot: far mountains left, centre (402, 352) | 1.38, 1.39 / 1.42, 1.44 / 1.61, 1.62 | **1.01, 1.02 / 1.01, 1.02 / 1.00, 1.04** |
+| rock face (91; steep ground) | 1.50 / 1.51 / 1.69 | 1.23 / 1.19 / 1.15 |
+
+With the stored reading the model reproduces the native shots' excess (far slope: 1.34 to 1.40
+before the fog is 1.2 after it, as measured); with the curve it is the game's within 1 to 4% on
+bare ground in all three channels, near and far, at two places. The alternatives the task named:
+the fog's in-scatter or its place against the exposure (a, b): excluded by the peak and the sky
+(0.985, 0.975) and by the dirt patch, which is inside the start; the clamp and the target's format
+(c): the regions are at 0.4 to 2 of a target that holds 64; the unlit scale (e): the regions are
+lit terrain; the oracle (f): above. (d), the baked map, is it.
+
+**What it does not explain.** (1) *The wooded hills.* On the three ranges 45 to 87% of the pixels
+are not ground at the terrain's height: the game's distant trees (`t8b_bridge_off_ratio.png`:
+the excess has the trees' outlines; `t8b_crop_far_mountains_left_*.png`). They are not drawn
+natively (section 16, follow-up 2) and stay brighter than the game's dark crowns. This, not the
+ground, is most of the left range's 1.46. (2) *The rock face* stays 15 to 23% over in the model:
+steep ground, where the game lights with the side normal maps (tf14) the pass does not read, and
+the model has no shadow mask. (3) *Ground under leaf shadow* (the grass regions, the third spot's
+near ground) cannot be judged by a model without the mask. (4) *The lake* is an unlit placeholder.
+
+**The fix** (one change): the two terrain shaders take tf3's r, g, b through `base_linear`
+(the SDK's curve, after the filter, as its translator applies it) where the record's word
+`t_base_gamma` (cbuffer Terrain, byte 188, until now a pad) has the component's bit;
+`TerrainBaseGamma` (`clay_logic.h`) makes the mask from the record's own fetch constant, through
+its swizzle as the SDK's `SwizzleSigns` does, and `SetClayTerrainLight` refuses a base map with a
+signed or biased colour component (none occurs): such a record is not lit. `PwlGammaToLinear` is
+the C++ mirror, `light_formulas.pwl_gamma_to_linear` the reference, and `terrain_replay.py` reads
+every texture through its fetch constant's signs. Only the lit programs of the two terrain shaders
+change (a program without light reads no base map: the shader test compares). `DrawRecord` is
+untouched; no binding, no target and no SDK file changes. Tests: `tests/native/test_clay_logic.cpp`
+cases 618 to 620, `tests/native/test_native_shaders.cpp` case 241 and the pins,
+`tests/test_terrain_replay.py` (`GammaSignTest`).
+
+**What changes in the picture, by the formula** (not yet seen in a run): lit ground's ambient
+part falls to 0.40 to 0.55 of what it was, in post frames and in today's frames alike. So ground
+in shadow gets darker by about that factor and sunlit ground by 13 to 20%, and the fixed exposure
+2.22, fitted on the dirt patch with the stored reading, now leaves the post-off picture's sunlit
+ground about 17% under where it was fitted (it is not fitted again: no constant is tuned). The
+figures of sections 14 to 16 for terrain regions are of the stored reading.
+
+**Runs** asked for (none made yet with this build): the software adapter under the debug layer
+first (shader text changed), then the bridge and the third spot with the post on, the bloom on
+and off, `--readback_resolve=full`; the regions against the replay's A and B of each run's own
+capture, and `t8b_scene_space.py` and `t8b_ground.py` again.
 
 ## Pending
 

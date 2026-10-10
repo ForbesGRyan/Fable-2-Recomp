@@ -129,7 +129,17 @@ int main(int argc, char** argv) {
   std::string exe_dir = exe_path;
   size_t slash = exe_dir.find_last_of("\\/");
   if (slash != std::string::npos) exe_dir.resize(slash);
-  if (!SymInitialize(process, exe_dir.c_str(), TRUE)) {
+  // Plus the Microsoft symbol server for system DLLs (D3D12Core, ntdll, the
+  // driver), cached under %TEMP%\symbols; needs the Debuggers' dbghelp.dll and
+  // symsrv.dll next to this exe. SAMPLER_SYMPATH overrides the whole path.
+  std::string sym_path = exe_dir;
+  if (const char* override_path = std::getenv("SAMPLER_SYMPATH")) {
+    sym_path = override_path;
+  } else if (const char* temp = std::getenv("TEMP")) {
+    sym_path += ";srv*" + std::string(temp) + "\\symbols*https://msdl.microsoft.com/download/symbols";
+  }
+  if (!SymInitialize(process, sym_path.c_str(), TRUE) &&
+      !SymInitialize(process, exe_dir.c_str(), TRUE)) {
     std::fprintf(stderr, "SymInitialize failed: %lu\n", GetLastError());
     return 1;
   }
@@ -149,9 +159,11 @@ int main(int argc, char** argv) {
         r.id = te.th32ThreadID;
         r.h = h;
         r.name = ThreadName(h);
+        // Filters are substrings of the thread description; the token "unnamed"
+        // keeps threads without a description (the main/UI thread among them).
         bool keep = filters.empty();
         for (auto& f : filters) {
-          if (r.name.find(f) != std::string::npos) keep = true;
+          if (f == "unnamed" ? r.name.empty() : r.name.find(f) != std::string::npos) keep = true;
         }
         if (keep) {
           threads.push_back(r);

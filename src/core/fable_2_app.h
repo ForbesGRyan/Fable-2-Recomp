@@ -42,6 +42,7 @@
 // Re-enable to re-measure the frame pacing:
 // #include "fps_probe.h"
 #include "keyboard_gamepad.h"
+#include "readback_force_list.h"
 #include "remote_gamepad_driver.h"
 #include "sdk_gamma_ramp.h"
 #ifdef FABLE2_REMOTE_CONTROL
@@ -153,21 +154,33 @@ class Fable2App : public rex::ReXApp {
     // Force a CPU readback of the render-to-texture resolve that regenerates the
     // hero/dog face+skin texture; the address is Fable-II-specific, so it lives in
     // the app and the SDK only knows "read back resolves to these addresses".
+    // The same list carries the game's luminance resolve when --fable2_exposure_readback
+    // is on (its two addresses; readback_force_list.h), so that the game's own exposure
+    // adapts in a normal run. Either input leaves the other's entries alone. The SDK
+    // reads the list at every resolve; it is seeded once, here, and a list given by hand
+    // (any source but the default) is left as it is.
     {
       const fable2::config::Values& cfg = fable2::config::Get();
-      const std::string_view force_addr =
-          cfg.hero_dog_texture_readback ? "0x12704000" : "";
+      const bool exposure = fable2::native::ExposureReadbackWanted();
+      const std::string force_addr =
+          fable2::ForceReadbackList(cfg.hero_dog_texture_readback, exposure);
       if (rex::cvar::GetFlagSource("readback_resolve_force_addresses") ==
           rex::cvar::Source::kDefault) {
         if (rex::cvar::SetFlagByName("readback_resolve_force_addresses", force_addr)) {
-          REXSYS_INFO("[fable2-config] seeded readback_resolve_force_addresses "
-                      "from fable2_config.toml (hero_dog_texture_readback={})",
-                      cfg.hero_dog_texture_readback);
+          REXSYS_INFO("[fable2-config] seeded readback_resolve_force_addresses '{}' "
+                      "(fable2_config.toml hero_dog_texture_readback={}, "
+                      "fable2_exposure_readback={})",
+                      force_addr, cfg.hero_dog_texture_readback, exposure);
         } else {
           REXSYS_WARN("[fable2-config] cvar readback_resolve_force_addresses "
-                      "rejected '{}'; hero/dog readback fix may be inactive",
-                      std::string{force_addr});
+                      "rejected '{}'; hero/dog readback fix and exposure read-back "
+                      "may be inactive",
+                      force_addr);
         }
+      } else {
+        REXSYS_INFO("[fable2-config] readback_resolve_force_addresses was given by hand; "
+                    "not seeded (hero_dog_texture_readback={}, fable2_exposure_readback={})",
+                    cfg.hero_dog_texture_readback, exposure);
       }
     }
 

@@ -65,6 +65,8 @@ clang++ -std=c++23 "%~dp0native\test_autoplay.cpp" -o "%OUT%\autoplay.exe" || ex
 "%OUT%\autoplay.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_boot_save.cpp" -o "%OUT%\boot_save.exe" || exit /b 1
 "%OUT%\boot_save.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_readback_force_list.cpp" -o "%OUT%\readback_force_list.exe" || exit /b 1
+"%OUT%\readback_force_list.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_texture_decode.cpp" -o "%OUT%\texture_decode.exe" || exit /b 1
 "%OUT%\texture_decode.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_uv_decode.cpp" -o "%OUT%\uv_decode.exe" || exit /b 1

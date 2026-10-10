@@ -68,6 +68,13 @@ REXCVAR_DEFINE_STRING(fable2_native_fog, "on", "Fable2",
                       "unfogged), and draws the game's sky where no record is drawn; off (or false, 0) = none of it is read or "
                       "drawn: the shadows' picture. On by default since the fog's validation (sub-project 9; frame map "
                       "section 16).");
+REXCVAR_DEFINE_STRING(fable2_exposure_readback, "off", "Fable2",
+                      "The game's exposure in a normal run: on (or true, 1) = the game's luminance resolve (two buffers in turn, "
+                      "0x1A385000 and 0x1A34F000) is added to readback_resolve_force_addresses at startup, so that the game "
+                      "measures its own picture and adapts its exposure as under --readback_resolve=full (the emulated picture's "
+                      "brightness and contrast change with it; one wait for the GPU a frame); off (or false, 0) = not read back: "
+                      "the game stays at its blind exposure. Read once at startup, with the native renderer on or off; a "
+                      "--readback_resolve_force_addresses given by hand wins. Frame map section 17.");
 REXCVAR_DEFINE_BOOL(fable2_native_d3d_messages, false, "Fable2",
                     "Write the Direct3D debug layer's errors, corruption and warnings to the game log "
                     "(the layer is the SDK's --d3d12_debug=true; without it there is nothing to write). "
@@ -533,6 +540,20 @@ bool WindowFocused() {
 }
 
 }  // namespace
+
+// fable2_exposure_readback: read like the light's switch (the same parser and words); anything else
+// is off, with one warning that names the words. Not the renderer's: the application seeds the SDK's
+// forced read-back list from it once (Fable2App::OnPostSetup), with the renderer installed or not.
+bool ExposureReadbackWanted() {
+  static std::atomic<bool> warned{false};
+  bool recognized = true;
+  const bool on = render::ParseClayLight(REXCVAR_GET(fable2_exposure_readback), &recognized) == render::ClayLight::kOn;
+  if (!recognized && !warned.exchange(true)) {
+    REXLOG_WARN("[native] unknown fable2_exposure_readback '{}', using off (accepted: {})",
+                REXCVAR_GET(fable2_exposure_readback), render::kClaySwitchWords);
+  }
+  return on;
+}
 
 std::string StatusText() {
   if (!g_installed.load(std::memory_order_acquire)) return {};

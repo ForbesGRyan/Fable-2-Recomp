@@ -3354,13 +3354,17 @@ inline bool MakeClayPostConstants(const capture::PostBlock& b, const float (*ram
   std::memcpy(k.bright, b.bright, sizeof(k.bright));
   k.scene_max = kPostSceneMax;
   if (b.parts & capture::kPostPartBlur) {
+    // A weight outside 0..1 (or no number) is 0 in the constants, and the bloom is then off for the
+    // frame: a kernel short of a tap is not drawn on the strength of the flag.
+    bool weights = true;
     for (int s = 0; s < 2; ++s) {
       for (int i = 0; i < 7; ++i) {
         const float w = b.blur[s][i];
+        weights = weights && w >= 0.0f && w <= 1.0f;
         k.blur[2 * s + (i >> 2)][i & 3] = (w >= 0.0f && w <= 1.0f) ? w : 0.0f;
       }
     }
-    k.bloom_on = bloom ? 1u : 0u;
+    k.bloom_on = (bloom && weights) ? 1u : 0u;
   }
   if (b.parts & capture::kPostPartRadial) {
     bool ok = true;
@@ -3475,8 +3479,10 @@ inline float PostRampMirror(float front, const float ramp[256]) { return ramp[Po
 //
 // kPostBloomFetch: the composite samples the bloom at the scene's own interpolated coordinate with
 // the fetch's half texel (37B1, instruction 6: tfetch2D tf2, OffsetX = OffsetY = 0.5), which at pixel
-// x is bloom texel coordinate x / 4 + 0.5 (the interpolator is x / width at pixel x: what makes the
-// scene's own fetch, instruction 3, a texel centre). Not "texel centres aligned", (x + 0.5) / 4, which
+// x is bloom texel coordinate x / 4 + 0.5: the scene's fetch (instruction 3) and the bloom's take the
+// same interpolated coordinate and the same offset of half a texel of their own texture, so where the
+// scene's fetch is the texel centre x + 0.5 of 1120, the bloom's is x / 4 + 0.5 of 280 (what is left as
+// inference: that the emulator's fetch offsets are the console's). Not "texel centres aligned", (x + 0.5) / 4, which
 // the research's replay and the plan's Task 8 line assumed: against the front buffer the fetch's place
 // fits at a median of 0.565 to 0.578 levels where the aligned centres give 0.716 to 0.732 (same file).
 inline constexpr uint32_t kPostFrontLevels = 255, kPostBloomLevels = 1023;  // R8G8B8A8_UNORM; R10G10B10A2_UNORM

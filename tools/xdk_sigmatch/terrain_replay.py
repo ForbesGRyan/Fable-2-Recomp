@@ -135,7 +135,10 @@ class MissingInput(Exception):
 
 def fetch_signs(dword0):
     """The four sign fields of a fetch constant (dword 0 bits 2 to 9, two bits a component: 0 unsigned, 1
-    signed, 2 unsigned biased, 3 gamma)."""
+    signed, 2 unsigned biased, 3 gamma), by STORED component. The C++ takes them through the constant's
+    swizzle to the shader's components (clay_logic.h, TerrainBaseGamma); this tool does not: every captured
+    terrain row has the identity swizzle (0x688 in dword 3's bits 1 to 12: post_tables.py signs and
+    review-task-8b's scan), where the two are the same."""
     return tuple((dword0 >> (2 + 2 * i)) & 3 for i in range(4))
 
 

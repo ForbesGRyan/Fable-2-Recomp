@@ -7397,6 +7397,17 @@ int main() {
       CHECK(604, k.blur[0][0] == w(1) && k.blur[0][3] == w(4) && k.blur[1][0] == w(5) && k.blur[1][2] == w(7) && k.blur[1][3] == 0.0f &&
                      k.blur[2][0] == w(8) && k.blur[2][3] == w(11) && k.blur[3][0] == w(12) && k.blur[3][2] == w(14) && k.blur[3][3] == 0.0f);
       CHECK(604, MakeClayPostConstants(blurred, ramp, false, false, &k) && k.bloom_on == 0 && k.blur[0][0] == w(1));
+      // A weight outside 0..1, or no number: it is 0 in the constants AND the bloom's flag stays 0 (no kernel short
+      // of a tap is drawn on the strength of the flag: review-task-8, Minor 1); the frame is still a post frame.
+      for (float bad : {1.0005f, -0.01f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
+        for (int at : {0, 6, 7, 13}) {
+          capture::PostBlock off = blurred;
+          off.blur[at / 7][at % 7] = bad;
+          CHECK(604, MakeClayPostConstants(off, ramp, true, true, &k) && k.bloom_on == 0 && k.sun_on == 0 &&
+                         k.blur[2 * (at / 7) + ((at % 7) >> 2)][(at % 7) & 3] == 0.0f);
+        }
+      }
+      CHECK(604, MakeClayPostConstants(blurred, ramp, true, true, &k) && k.bloom_on == 1);
 
       // 605: what is refused, each with the constants left all zero: an invalid block, no ramp, a register
       // that is no number or outside the block's own bound (checked again here: no value reaches a shader

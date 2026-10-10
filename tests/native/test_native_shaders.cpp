@@ -4087,7 +4087,7 @@ int main() {
     // flag the literal 0 reads no second texture, no sampler and nothing of the step but its level count;
     // and with the write's rounding taken out as well it is, instruction for instruction, the program of
     // Task 5's text (kPostCompositeBefore). So is the ramp's. What the two programs do more than Task 5's
-    // is the rounding alone (ruling 25): four instructions, the last four.
+    // is the rounding alone (ruling 25): three instructions each, the last three (the bounds below take 3 to 4 and 3 to 6).
     {
       auto bloom_off = [](std::string text) {
         const std::string field = "uint p_bloom_on;";

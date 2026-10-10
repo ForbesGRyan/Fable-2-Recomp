@@ -333,7 +333,11 @@ def parse_ramp_line(text):
             found = line
     if found is None:
         raise ReplayError("no valid `[native] ramp: read at clay frame` line")
-    entries = re.findall(r"\b[0-9A-Fa-f]{9}\b", found.split("valid 1", 1)[1])
+    tail = found.split("valid 1", 1)[1]
+    # The product writes the 256 entries run together (native_render_state.h, FormatRampHex: 2,304 hex digits);
+    # entries apart by blanks are read as well.
+    run = re.search(r"\b[0-9A-Fa-f]{2304}\b", tail)
+    entries = [run.group(0)[i:i + 9] for i in range(0, 2304, 9)] if run else re.findall(r"\b[0-9A-Fa-f]{9}\b", tail)
     if len(entries) != 256:
         raise ReplayError("the ramp line has %d entries, not 256" % len(entries))
     ramp = [[int(e[3 * c:3 * c + 3], 16) / 1023.0 for e in entries] for c in range(3)]

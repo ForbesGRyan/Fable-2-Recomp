@@ -4928,6 +4928,219 @@ weights is counted; the periodic line prints `parts P` of the one frame it names
 over its window. The count is left to the bloom's task (plan Task 8), which is the first to draw
 with the weights (review, Minor 8).
 
+### Native composite
+
+Plan Task 5 (commits `f8ec8f7` and the one this text came with). With **`--fable2_native_post=on`**
+(still **default off**) the native picture of a frame that has a post block goes through the
+game's own composite and the scan-out ramp; every other frame is drawn as before.
+
+**A frame is a post frame or today's frame** (`DecideClayPost`, `clay_logic.h`, "Native post";
+one chain, the first thing missing decides; decided in `ClayPass::Render` before the frame's two
+words are written and once more when the frame's constant buffer is known):
+
+| Verdict | When | Counted as |
+|---|---|---|
+| `kOff` | the switch is off | not counted |
+| `kNoLight` | the light's switch or the textures off, no usable light block, or the constant buffer could not be made | `no-light` |
+| `kBlock` | no post block in the scene; one older than 4 frames; one that does not pair with the frame's `c20.w`; one whose registers or texels the pass refuses (`MakeClayPostConstants`: the block's own bounds, judged again) | `post-block` |
+| `kRamp` | no scan-out ramp, or one with an entry outside [0, 1] or a channel that decreases | `post-ramp` |
+| `kObjects` | the post steps' GPU objects could not be made (off until the pass is rebuilt; the renderer goes on) | `post-objects` |
+| `kBuffer` | the frame has no constant buffer because nothing of it is drawn | `no-buffer` |
+| `kDrawn` | none of the above | `drawn` |
+
+**A post frame.** (1) The frame's exposure word (`f_exposure`) is the light block's `c20.w`, the
+game's own output scale, in place of the fixed 2.22: lit draws, the sky and the unlit fog's
+in-scatter write the game's scene values. (2) The word at byte 60 of cbuffer Frame, a padding word
+until now, is `f_post`, which every unlit colour is multiplied by before its fog: in a post frame
+the **unlit scale** `U = 1 / (c77.y * T[128])`, at most 64 (spec ruling 9: the reciprocal of the
+composite's gain at scene luminance 1), in every other frame 1. (3) Two full-screen steps with a
+layout of their own replace the output mapping:
+
+- **composite** (`kClayPostCompositePs`): the arithmetic of the game's `37B186F4BD3288F7`
+  (`light_formulas.post_composite`) with the frame's registers and table, from the linear target,
+  texel for texel, into the **front target** (1120 x 720 `R8G8B8A8_UNORM`, 3.1 MB: the game's
+  front buffer before the ramp). The table is read at the **nearest texel**,
+  `min(511, uint(512 * saturate(c46.x * L) + 0.5))` (controller ruling 19), not at the floor. The
+  bloom is (0, 0, 0) until plan Task 8.
+- **ramp** (`kClayPostRampPs`): each channel of the front target through the guest's 256-entry
+  gamma ramp into the mapped target the views sample. The application reads the SDK's table at
+  every composite frame, now before the clay pass renders, so it is the table the emulated picture
+  of that frame went through.
+
+The post layout (3 parameters, pixel stage): b0 the steps' constants (`ClayPostConstants`, 6,288
+bytes: the composite's six registers, the scene's clamp 31.875, the bright pass's registers, the
+blurs' weights and the radial blur's registers for later tasks, the table as `float4[128]`, the
+ramp as `float4[256]`), which lie in 25 small slots of the frame's constant buffer
+(`PlanClayFrameSlots`' `post`, between the sky's slot and the objects'); b1 8 words of a step's
+own (read by no shader yet); t0 a table of 4 textures (entry 0 the step's source); static samplers
+s0 point clamp and s1 linear clamp (not used yet). The table and the ramp are read by index: no
+texture, no upload, the game's point fetch exactly (spec ruling 12).
+
+**Values that are no numbers.** Every reader of the linear target takes a channel that is not
+above 0 as 0 (a NaN, a negative value) and one above 31.875 as 31.875 (an infinity). With the
+block's registers and texels inside their bounds every later term is a number, the table's index
+is bounded at 511 after a saturate and the ramp's at 255 by one; the front target is 8-bit. Held
+by the mirror on 43,008 combinations of such inputs (test case 607) and in the compiled programs
+(shader test cases 234 to 236).
+
+**Today's frame is today's picture.** With the switch off: the verdict is `kOff` for all 64
+combinations of the other inputs (test case 600); the exposure is 2.22 and the mapping is
+`kOutputMapPs`, text and program unchanged. What differs from the build before: each unlit colour
+is multiplied by a word that is 1. With the word the literal 1 every compiled program of the four
+scene pixel shaders is the program before, instruction for instruction; the vertex shader, the
+sky's shader and the terrain shaders' lit programs are the programs before as they stand, the
+textured shader's lit programs once `textured` is fixed too (its branch of a draw without an
+albedo, which no lit draw takes, reads the word); an unlit program gained one `mul` by
+`cb2[3].w` for each colour it can return (shader test cases 230, 231: 111 lit programs equal, 101
+unlit programs with the multiply alone).
+
+**Tests before any run**: the mirrors (`PostTableTexel`, `PostUnlitScale`, `PostCompositeMirror`,
+`PostRampIndex`) against the reference's generated numbers (`post_pins.py`; 41 texel pins, among
+them `(k + 0.5) / 512 -+ 1e-6` and `k / 512`; 24 composite points, worst difference 0); a
+mutation check, 15 of 15 wrong headers caught (`out/native-evidence/post/t5_mutations.txt`);
+`tests/test_post_literals.py`.
+
+**Runs** (2026-10-09, by the controller with `-UserPresent -BootSave Hero000`: `RUN UNCHECKED`;
+binary of 23:30:31, commit `f8ec8f7`; evidence `out/native-evidence/post/t5_*`). **Shot width
+1942 in all seven, 84 to 86 `vsync present gate` lines in the four timing runs**: the usual
+monitor, so the frame times of T5-2 to T5-5 are timing evidence (a user-present machine all the
+same). No `d3d ERROR` line in any log.
+
+| Run | Log | Arguments after `-BootSave Hero000` | Capture |
+|---|---|---|---|
+| T5-1, software adapter | 450 | `-Total 240 -Shots "225" -Plan "32:VIEW=native" -GameArgs --fable2_native_render=true,--fable2_native_post=on,--d3d12_adapter=-2,--d3d12_debug=true,--fable2_native_d3d_messages=true` | none |
+| T5-2, post on | 451 | `-Total 90 -Shots "36,39,42,45,48,51,54,57,86" -Plan "32:VIEW=off,37:VIEW=native,40:VIEW=off,43:VIEW=native,46:VIEW=off,49:VIEW=native,52:VIEW=off,55:VIEW=native,60:DISC=8/1" -GameArgs --fable2_native_render=true,--fable2_native_post=on` | `native_discovery_20261009_234421` |
+| T5-3, post off | 452 | the same with `=off` | `..._234600` |
+| T5-4, post on, read-back switch | 453 | T5-2's with `,--fable2_exposure_readback=on` | `..._234738` |
+| T5-5, post off, read-back switch | 454 | T5-3's with `,--fable2_exposure_readback=on` | `..._234917` |
+| T5-6, post on, full read-back | 455 | T5-2's with `,--readback_resolve=full,--native_render_collect_stats=true` | `..._235055` |
+| T5-7, post off, full read-back | 456 | T5-3's with the same two | `..._235234` |
+
+Not frozen: the 300-frame capture counts vary (979 to 986 captured), the shots of a run differ,
+the views change at the plan's seconds. T5-7 ran slowly (frame median 43 to 44 ms, the guest's
+work median 43 ms with no swap wait, against T5-6's 35 to 39 ms with a work median of 10 ms):
+its shot at 39 s is still the emulated picture and it has three native shots, not four. Why that
+run differs from T5-6 is not explained; neither is a timing run.
+
+**The software adapter** (log 450, 240 s, the debug layer on): no error; 4 warnings, all id 1328
+(`CreateCommittedResource: Ignoring InitialState ...`, the SDK's buffers, known). `post steps
+ready` and the first post frame at scene frame 268: `Post: on, block valid, age 0, drawn | c20.w
+15.9985, unlit scale 6.4494`; the capture's line: `post-block in 0 of 33 frames`. The shot at
+225 s is the lit, fogged bridge with the sky, as the fog's software-adapter shot
+(`out/native-evidence/fog/fix_warp_def_shot_225s.png`); the dog is a flat red silhouette in both
+(its texture on that adapter: not the post's).
+
+**The verdicts** (the Post lines; logs 451, 453, 455): `drawn 300 / 600 / 900` of 300, 600, 900
+frames with the switch on, `post-block 0, post-ramp 0, post-objects 0, no-light 0, no-buffer 0`,
+age 0 in every line. **No frame without post has occurred in a game**, also not while the
+exposure moved (`c20.w` 8.7260 falling to 8.1968 over 900 frames in T5-4, 8.7270 to 8.1642 in
+T5-6: about 6e-4 a frame); the fallbacks, `pairing` among them, are held by tests only. Blind
+(T5-2): `c20.w 16.0000, unlit scale 6.54 to 6.59`, table texels 0, 1, 128: 0, 0.0992, 0.1388,
+largest 0.1397. Under read-back (T5-4): 0, 0.1364, 0.2352, largest 0.3071, unlit scale 3.86
+falling to 3.60. The ramp: one table, `changes 0` in 905 reads.
+
+**Region ratios** (`out/native-evidence/post/t5_regions.txt`, made by `t5_regions.py` beside it;
+the 26 bridge regions of the three regions files; emulated and native shots 3 s apart).
+
+*Post on against post off, native shots, against the prediction* (spec criterion 7, first
+reading). `post_replay.py predict` on T5-6's own capture (frame 1 of `..._235055`, the ramp of
+log 455; `t5_predict_235055_f1.txt`) says what the game's composite without bloom does to the
+game's own scene relative to the fixed mapping (A / N, mean display luminance by region): 0.733
+(pole averted side) to 1.097 (sky). The native shots of T5-6 over those of T5-7, the same
+measure: **23 of 26 regions within 0.05 of the prediction**; the 11 far, sky and lake regions
++0.001 to +0.048 from it (sky 1.104 and 1.101 against 1.097 and 1.093; lake 1.020 against 1.019;
+far peak 1.079 against 1.072), bridge planks 0.872 against 0.869, trunk 0.827 against 0.833, pole
+averted side 0.746 against 0.733. The three outside are regions under moving leaf shadow, whose
+native shots differ among themselves by 8 to 79% within one run: railing post cap (+0.158), rope
+pole shadow on the planks (+0.065), railing post shadow on the planks (-0.055). The far regions
+and the sunlit ground lie 0.02 to 0.05 above the prediction, all on one side: the native scene is
+not the game's scene there (the prediction is made from the game's), and that offset is not
+resolved further here. The read-back switch's pair (T5-4 over T5-5) gives the same picture
+(sky 1.095, 1.093; planks 0.865; trunk 0.841); the blind pair (T5-2 over T5-3) moves less, 0.81
+to 1.05, as a flat table should (sky 1.044, lake 0.998, planks 0.959).
+
+*Native against emulated* (linear luminance, the mean of a run's triples):
+
+| Region | post on, blind | post off, blind | post on, read-back switch | post off, read-back switch |
+|---|---|---|---|---|
+| sky above the ridge | 0.878 | 0.804 | 0.923 | 0.771 |
+| far mountains centre | 1.071 | 1.026 | 1.100 | 1.068 |
+| far rock | 0.914 | 0.842 | 0.930 | 0.835 |
+| lake (unlit placeholder) | 0.800 | 0.801 | 0.833 | 0.804 |
+| dirt patch | 1.034 | 0.997 | 1.054 | 1.039 |
+| bridge planks | 0.985 | 1.029 | 0.981 | 1.239 |
+| trunk | 1.018 | 1.113 | 1.015 | 1.409 |
+| hero's shirt | 0.973 | 0.946 | 0.963 | 1.040 |
+| pole sunlit side | 0.890 | 0.913 | 0.873 | 1.067 |
+| pole averted side | 0.663 | 0.863 | 0.590 | 1.074 |
+
+With the game adapting (the read-back switch) and post off, the native picture's fixed exposure
+no longer fits: near and dark regions read 1.04 to 1.41 of the game's. With post on they read
+0.87 to 1.05 (the averted side apart, below), and the same with the game blind: **the native picture follows the game's exposure**.
+What is worse with post on: **the darkest regions are too dark** (pole averted side 0.59 to
+0.66, where the fixed mapping gave 0.86 blind). That is the composite without the bloom: the
+prediction for that region is 0.733 without and 0.940 with the bloom (`predict`'s B / N), and the
+research's variant A read 0.815 to 1.017 of the game's final picture. Plan Task 8 is the bloom.
+The sky stays 8 to 13% under the game's (0.87 to 0.92), which the bloom's veil is also predicted
+to lift (B / N 1.14 against A / N 1.10 for the sky).
+
+*Post off against the fog's final binary* (spec criterion 8's second half; run 433,
+`out/native-evidence/fog/fix_bridge_shot_45s.png`, against T5-3's shot at 45 s): the native
+linear luminance of the 20 regions without moving leaf shadow is 0.9969 to 1.0053 of run 433's,
+the 11 far, sky and lake regions 0.9996 to 1.0025; the emulated shots of the two runs differ by
+as much or more (0.977 to 1.009 in the same 20 regions): the two runs' scenes are not the same to 0.002.
+**12 of 26 regions are within 0.002, 19 within 0.005; the criterion's 0.002 is not met as
+written**, and cannot be judged by two runs whose emulated pictures differ by 0.003. The six
+others are under leaf shadow (0.96 to 1.52). (Run 433's own native shot at 39 s is not used: its
+dirt patch is 8.6% brighter than the same run's at 45 s.) What stands for "off is today's
+picture" is the program comparison above and this agreement to 0.5%.
+
+**Shots viewed.** T5-6 at 36 s (emulated, the game adapting): the bridge with the HUD, hazed
+blue hills, a bright lake, soft veil over the far ground. T5-6 at 39 s (native, post on): the
+same view without HUD; lit ground, shadows, fog and sky as before; the far mountains crisper and
+without the game's veil, the lake a flat grey-lilac (an unlit placeholder, about as bright as
+with post off), the dog and the hero textured. T5-7 at 45 s (native, post off) and T5-2 and T5-3
+at 45 s (blind, on and off): to the eye the same picture as T5-6's; with post on the sky and far
+hills are a little lighter and the plank shadows a little deeper. Nothing shows the clear colour
+(the sky covers what no record covers), so its near-black is not seen in these shots; no banding
+in the darks is visible at the shots' scale. The software adapter's shot: above.
+
+**Cost** (T5-2 to T5-5, shot width 1942, the present gate holding; a user-present machine):
+
+| | post on (451) | post off (452) | post on, read-back switch (453) | post off, read-back switch (454) |
+|---|---|---|---|---|
+| native view, the last three 150-frame windows | 29.9, 30.0, 29.9 fps (median 33.24, 33.15, 33.46 ms) | 30.0, 30.0, 30.0 (33.29, 33.24, 33.51) | 27.8, 30.1, 30.0 (33.90, 33.39, 33.28) | 30.0, 29.8, 30.0 (33.27, 33.35, 33.17) |
+| native stretches of 89 frames between the shots | 30.0, 30.0 fps | 30.0, 30.1 | 29.9, 30.0 | 30.0, 30.0 |
+| capture median, records on (the two 300-frame lines of the native stretch) | 2.166, 2.167 ms | 2.074, 2.084 ms | 2.093, 2.192 ms | 2.235, 2.055 ms |
+| guest work median, last two windows | 11.44, 11.69 ms | 11.06, 11.00 ms | 11.21, 11.85 ms | 11.79, 10.51 ms |
+
+The first two native windows of each run hold the first native frames and the discovery capture
+(maxima of 0.6 to 2.4 s) and are no steady windows; T5-4's third (27.8 fps, mean 35.96 ms with a
+145 ms frame, median 33.90 ms) is the one steady-looking window below 29.8. Otherwise **30.0 fps
+with post on and with the read-back switch on** (spec criterion 9's bridge part, first reading:
+met in 11 of 12 steady windows; the 27.8 is reported, not explained). **The read-back switch
+holds 30 fps under the gate here**, in both of its runs, and the game adapts with it (`c20.w`
+8.73 to 8.20 in T5-4): measured as stated; its default (ruling 2) is Task 7's decision. The
+capture's records-on median is 0.08 to 0.09 ms higher with post on in the normal pair (inside
+criterion 9's 0.10, at its edge) and within the scatter in the read-back pair (-0.14, +0.14):
+two lines a run, so no more than that is said.
+
+**Limits.** (1) The clear colour of a post frame is not black as spec Design 6 first said: its
+scene luminance, 0.0064, lies above 1 / 256, so the nearest-texel rule reads the table's texel 1
+and it comes out near level 9 of 255 before the ramp with a read-back table (test case 607); not
+seen in a shot. (2) Unlit draws under ruling 9: with a flat table (blind) an unlit value v is
+shown as `v^0.4545`; with a rising table (read-back) bright placeholders are brighter and an
+unlit white is at the front target's ceiling. The lake reads 0.80 to 0.83 of the game's with post
+on or off. (3) No bloom: the darks are too dark (above). (4) No frame without post has run; the
+`pairing` fallback during fast adaptation (the kept block serves almost never: "Post block")
+would show as one frame at the fixed exposure. (5) The front buffer's format is not checked: the
+256-entry ramp is the one the SDK applies to an 8-bit front buffer, which Fable 2's is in every
+capture; the pass has no way to learn the format. (6) No test executes the HLSL; the shaders
+against the game's own front buffer, pixel for pixel, is plan Task 6 (the oracle feed). (7) One
+place, daylight, a standing camera; night, towns, interiors, menus and cutscenes have not run.
+(8) The linear target is `R11G11B10_FLOAT` at the game's scale (5 mantissa bits in blue): no
+step in the darks was seen, none was looked for beyond the shots.
+
 ## Pending
 
 1. **Pitch ablation** (done 2026-10-01, results in section 4; kept for re-runs). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):

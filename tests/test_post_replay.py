@@ -224,6 +224,11 @@ class Ramp(unittest.TestCase):
         self.assertEqual(ramp[1][1], 5 / 1023.0)
         self.assertEqual(ramp[2][1], 1019 / 1023.0)
         self.assertEqual(ramp[0][255], 1020 / 1023.0)
+        # The product's own form: the entries run together (FormatRampHex), as the game's log has them.
+        together = "i> 0001 [native] ramp: read at clay frame 0: valid 1, %s\n" % "".join(entries)
+        self.assertEqual(pr.parse_ramp_line(together), ramp)
+        with self.assertRaises(pr.ReplayError):
+            pr.parse_ramp_line(together.replace("".join(entries), "".join(entries)[:-9]))
 
     def test_a_ramp_line_that_is_not_one(self):
         for text in ("", self.line(["000000000"] * 255), self.line(["000000000"] * 256, valid=0),

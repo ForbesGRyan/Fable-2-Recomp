@@ -196,10 +196,13 @@ this design has a size that is a fraction of W x H** (W/2 x H/2, W/4 x H/4), nev
    luminance 1, bounded at 64), before its fog. So an unlit pixel goes through the composite
    like a lit pixel of the same brightness and joins the bloom as one. The word is 1 in a frame
    without post. The clear colour is not changed (it is the target's creation-time clear value):
-   in a post frame it lies below scene luminance 1 / 256, reads the table's texel 0 (the table is
-   read at the nearest texel, `floor(u * 512 + 0.5)` with `u = c46.x * L`: controller ruling 19,
-   from the fetch's half-texel offset; not `floor(u * 512)` as the research has it), which is 0
-   in every capture, and shows black where it showed (20, 20, 25) (arithmetic of this design).
+   in a post frame its scene luminance is 0.0064, between 1 / 256 and 1 / 128, so it reads the
+   table's texel 1, not texel 0 (the table is read at the nearest texel, `floor(u * 512 + 0.5)`
+   with `u = c46.x * L`: controller ruling 19, from the fetch's half-texel offset; not
+   `floor(u * 512)` as the research has it, which would read texel 0, the 0 of every capture),
+   and shows nearly black, near level 9 of 255 before the ramp with a read-back run's table,
+   where it showed (20, 20, 25) (plan Task 5's mirror, test case 607; this design first said
+   black).
 7. **The composite and the ramp: two steps in place of `kOutputMapPs`.** After the scene's
    draws: (a) the composite, `37B1`'s arithmetic with the frame's table and registers, from the
    linear target, texel for texel, into a new **front target** (W x H, `R8G8B8A8_UNORM`: the

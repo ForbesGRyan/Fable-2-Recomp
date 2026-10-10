@@ -5787,9 +5787,14 @@ towards the sun, where the sun layer is missing):
 
 1. *Where the composite samples the bloom* (`kPostBloomFetch`). The game's composite fetches the
    bloom at the scene's interpolated coordinate with `OffsetX = OffsetY = 0.5` (`37B1`
-   instruction 6, as instruction 3 fetches the scene). With the interpolator `x / width` at pixel
-   `x`, which is what makes the scene's fetch a texel centre, the bloom is read at texel
-   coordinate `x / 4 + 0.5`: pixel 0 reads bloom texel 0 itself. The research's replay, the spec
+   instruction 6, as instruction 3 fetches the scene). The two fetches share the coordinate and
+   the half-texel offset, each in its own texels: the scene is read at `s + 0.5` scene texels,
+   which is `(s + 0.5) / 4` bloom texels, and the bloom at `s / 4 + 0.5`: 0.375 of a bloom texel
+   (1.5 pixels) further on, whatever `s` is at a pixel. So the place needs no reading of the
+   interpolator (review of plan Task 8, Minor 4; the first writing argued from it); what stays
+   inference is that the emulator's fetch offsets are the console's. With the interpolator
+   `x / width` at pixel `x`, which is what makes the scene's fetch a texel centre, the bloom's
+   coordinate is `x / 4 + 0.5`: pixel 0 reads bloom texel 0 itself. The research's replay, the spec
    and the plan had "texel centres aligned" (`(x + 0.5) / 4`), stated then as the tool's own
    choice. The fetch's place fits better on all four captures (first against fourth row), and it
    is what the microcode says; the native composite, `PostBloomFetchMirror` and `post_replay.py`
@@ -5835,8 +5840,8 @@ cases 232 to 240; `tests/test_post_literals.py` (8 tests more); `tests/test_post
 
 **Limits.** (1) No test executes the HLSL; the feed runs are its only execution against a known
 answer. (2) A linear sample at a texel centre takes its neighbours with weight 0: on a GPU a
-neighbour that is no number makes that sample no number, which the step then reads as 0, where
-the mirror reads the centre's texel; the lit paths write no such value. (3) The sun's two layers
+neighbour that is no number, or an infinite one (0 times infinity), makes that sample no number,
+which the step then reads as 0, where the mirror reads the centre's texel; the lit paths write no such value. (3) The sun's two layers
 are 0: towards the sun the bloom lacks the beams and the disc (10c). (4) The native scene's far
 ground and two near sunlit terrain regions were 13 to 46% over the game's scene before any post
 step (section 16's table; like for like 14 to 65% over through the composite alone and 14 to 78%
@@ -5942,7 +5947,7 @@ dumps as `<name>_dump.rgba`; scripts `t8_regions.py` there and `t8_channels.py`,
    1.00 -> 1.26, far slope 1.06 -> 1.31, the island 1.02 -> 1.29, far rock 0.93 -> 1.14 and
    0.97 -> 1.22, rock face 1.12 -> 1.34, dirt patch 1.05 -> 1.31. Third spot: far rock 1.03 ->
    1.25, far mountains 1.15 -> 1.46 and 0.98 -> 1.24, the sky 1.15 -> 1.23 and 1.42 -> 1.54
-   (already over), the lake 0.80 -> 1.02. The bloom does to the native scene what the replay
+   (not a native error and not explained: the correction below), the lake 0.80 -> 1.02. The bloom does to the native scene what the replay
    says it does to the game's (item 7); the native scene before the post steps is brighter than
    the game's in the far ground by about what the game's own bloom adds, so with both the far
    ground is 14 to 70% over at the bridge (the far peak alone is at 1.00). That is "Native composite"'s open offset (the native scene, the

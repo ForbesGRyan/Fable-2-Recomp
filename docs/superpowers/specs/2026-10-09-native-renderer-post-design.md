@@ -75,7 +75,9 @@ passes suppressed (research risk 8).
   bloom 0): 26 bridge regions at 0.815 to 1.017 of the final luminance, whole picture median 3.10
   to 3.18 levels, 55.9 to 56.0% of the pixels within 8 levels. Variant B (A with the bloom):
   every region 0.975 to 1.029, median 0.73 to 0.75, 94.2 to 94.6% within 8, on three bridge
-  captures. Towards the sun B lacks the beams and the sun: median 1.57, 69.9% within 8. A fixed
+  captures (the research's figures, with the bloom sampled at aligned texel centres; at the
+  game's own fetch, controller ruling 27: 0.994 to 1.027, 0.57 to 0.58, 94.5 to 94.8%:
+  "Implementation notes", phase 10b). Towards the sun B lacks the beams and the sun: median 1.57, 69.9% within 8. A fixed
   gain: median 7.7.
 - **The post chain turns no hue** (grass keeps its hue to 0.2 degrees through it).
 - **Scan-out applies the guest's gamma ramp** in the SDK's swap blit, a 256-entry table for an
@@ -428,7 +430,11 @@ Each with how it is measured. "Regions" are the bridge's 26 of `lighting-regions
     captures: every region within 5% in luminance (research: 0.975 to 1.029), hue within 5
     degrees on 25 of 26 (the 7-pixel averted pole side, 14.3 degrees in the research, reported),
     whole-picture median at most 2 levels (0.73 to 0.75) and at least 90% within 8 (94.2 to
-    94.6).
+    94.6). (The bracketed figures are the research's, with the bloom sampled at aligned texel
+    centres. The reference now samples at the game's own fetch, controller ruling 27; with it:
+    every region 0.994 to 1.027, every hue within 4.7 degrees, the averted pole side's among
+    them, median 0.57 to 0.58, 94.5 to 94.8% within 8: `t8_reference_B_<stamp>.txt`,
+    "Implementation notes", phase 10b. The thresholds are unchanged.)
 12. *The shaders on the oracle scene, with bloom.* The read-back mapped target against the
     game's front buffer through the ramp: the thresholds of criterion 11; and against the
     reference's variant B picture: within 2 levels on at least 99% of the pixels.
@@ -515,7 +521,10 @@ before the validation runs of plan Task 9; the criteria's verdicts come with the
 
 - **The composite samples the bloom at its own fetch, not with the texel centres aligned.** The
   game's composite fetches the bloom at the scene's interpolated coordinate with `OffsetX =
-  OffsetY = 0.5` (`37B1`, instruction 6); with the interpolator `x / width` at pixel `x` (which
+  OffsetY = 0.5` (`37B1`, instruction 6), as instruction 3 fetches the scene: the two share
+  coordinate and offset, each in its own texels, so the bloom is read 0.375 of a bloom texel
+  further on than the scene whatever the interpolator is (what stays inference is that the
+  emulator's fetch offsets are the console's); with the interpolator `x / width` at pixel `x` (which
   makes the scene's own fetch a texel centre) that is bloom texel coordinate `x / 4 + 0.5`, 0.375
   of a bloom texel (1.5 pixels) further on than "centres aligned", which the research's replay,
   Design 10 and plan Task 8's line assumed. Against the game's front buffer of the three bridge

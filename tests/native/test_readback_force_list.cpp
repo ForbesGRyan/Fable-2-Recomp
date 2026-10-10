@@ -9,7 +9,9 @@
 using namespace fable2;
 
 // The SDK's rule for the list (CommandProcessor::ShouldForceReadbackResolve,
-// thirdparty/rexglue-sdk/src/graphics/command_processor.cpp): entries divided by commas, blanks
+// thirdparty/rexglue-sdk/src/graphics/command_processor.cpp, lines 203 to 274 when this was
+// written; a COPY, since a pure test takes no SDK header: it does not notice a change of the
+// SDK's window or parsing, so an SDK update is compared with those lines by hand): entries divided by commas, blanks
 // around an entry dropped, each read by std::stoull with base 0 (0x-hex or decimal; a malformed
 // entry is address 0), an entry matching [entry, entry + 64 KiB). Returns the entry that matched,
 // 0 for none; *entries is the number of non-empty entries, *clean whether every one of them was

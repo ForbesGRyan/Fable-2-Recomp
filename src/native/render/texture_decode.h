@@ -160,6 +160,10 @@ inline bool DumpFormatInfo(uint32_t xenos_format, TexFormatInfo* fi) {
     *fi = {1, 8, 3};  // k_16_16_16_16_EXPAND: the scene colour the post chain reads
   } else if (xenos_format == 22 || xenos_format == 23) {
     *fi = {1, 4, 2};  // k_24_8, k_24_8_FLOAT: the scene depth and the shadow maps
+  } else if (xenos_format == 7 || xenos_format == 54) {
+    // k_2_10_10_10 and k_2_10_10_10_AS_16_16_16_16: the post chain's bright, blur and sun-layer
+    // buffers as its passes sample them (post discovery, frame-map section 17): 4 bytes a texel.
+    *fi = {1, 4, 2};
   } else {
     *fi = FormatInfo(TexFormatFromXenos(xenos_format));
   }
@@ -213,15 +217,27 @@ inline uint64_t Fetch1DDumpBytes(const uint32_t fc[6]) {
   return uint64_t(Fetch1DWidth(fc)) * TexelBytes(fc[1] & 0x3F);
 }
 
+// Whether a texture's base address is one the game's post chain resolves into (post discovery,
+// frame-map section 17): the front buffer 0x1ECFF000 (the final picture, which the last pass
+// blends over the next frame), and the block [0x12A00000, 0x12E00000) that holds the sun layer's,
+// the downsample's, the bright pass's and the blurs' buffers (0x12AE1000 .. 0x12D9F000 in the
+// captures of 2026-10-09). Their memory holds another picture each frame, and under
+// --readback_resolve=full it is the picture the next pass samples.
+constexpr bool PostBufferBase(uint32_t base) {
+  return base == 0x1ECFF000u || (base >= 0x12A00000u && base < 0x12E00000u);
+}
+
 // Whether a discovery dump keeps a texture once per content and not once per address: the
 // textures the game rewrites in place. Every 1D texture (the fog tables sit in a ring of three
-// addresses and are rewritten each frame), and the 2D targets of the formats added above (scene
-// colour and depth, whose memory holds another picture each frame).
+// addresses and are rewritten each frame), the 2D targets of the formats added above (scene
+// colour and depth, whose memory holds another picture each frame), and any 2D texture at a post
+// buffer's address (PostBufferBase), whatever its format.
 inline bool DumpKeyedByContent(const uint32_t fc[6]) {
   if ((fc[0] & 3) != 2) return false;
   if (Is1DFetch(fc)) return true;
+  if (((fc[5] >> 9) & 3) != 1) return false;
   const uint32_t format = fc[1] & 0x3F;
-  return ((fc[5] >> 9) & 3) == 1 && (format == 29 || format == 22 || format == 23);
+  return format == 29 || format == 22 || format == 23 || PostBufferBase(fc[1] & 0xFFFFF000u);
 }
 
 // Copies n bytes applying the GPU's endian swap (xenos::Endian): the result is

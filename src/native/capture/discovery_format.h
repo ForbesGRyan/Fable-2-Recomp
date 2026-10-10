@@ -127,4 +127,24 @@ inline std::string HexBytes(const uint8_t* p, size_t n) {
   }
   return s;
 }
+// Post discovery (frame-map section 17). Whether `count` command dwords at `be` (as the guest
+// stores them, big-endian) hold a type-0 packet header whose registers include one of the copy
+// registers 0x2318..0x231B (RB_COPY_CONTROL, RB_COPY_DEST_BASE, RB_COPY_DEST_PITCH,
+// RB_COPY_DEST_INFO): the registers a resolve is issued with. A type-0 header is index in bits
+// 0-14, bit 15 "every value to the base register", count - 1 in bits 16-29, bits 30-31 zero (the
+// SDK's ExecutePacketType0). Every dword is looked at as a header, so a data dword that looks
+// like one counts too: this only decides whether a capture keeps the dwords; the reader
+// (tools/xdk_sigmatch/post_tables.py) walks the packets.
+inline bool NamesCopyRegisters(const uint8_t* be, size_t count) {
+  if (!be) return false;
+  for (size_t i = 0; i < count; ++i) {
+    const uint32_t d = uint32_t(be[4 * i]) << 24 | uint32_t(be[4 * i + 1]) << 16 | uint32_t(be[4 * i + 2]) << 8 |
+                       uint32_t(be[4 * i + 3]);
+    if ((d >> 30) != 0) continue;
+    const uint32_t first = d & 0x7FFF;
+    const uint32_t last = (d & 0x8000) ? first : first + ((d >> 16) & 0x3FFF);
+    if (first <= 0x231B && last >= 0x2318) return true;
+  }
+  return false;
+}
 }  // namespace fable2::native::capture

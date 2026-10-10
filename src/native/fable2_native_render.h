@@ -38,6 +38,14 @@ void SetView(View view);
 // log line while another capture runs. Returns whether it was accepted.
 bool ArmDiscovery(uint32_t frames, uint32_t every);
 
+// Post discovery (frame-map section 17): how this module reads the guest's scan-out gamma ramp,
+// the 256-entry table of 10 bits a channel that the SDK's swap blit applies to the emulated
+// picture (out_rgb10[i] = entry i as red, green, blue). The application registers a reader
+// before Install; it is called on the command-processor thread, in the post-processor callback
+// of each composite frame, and returns false when it has no table. This module only logs what it
+// reads ("[native] ramp: ..."); without a reader it says so once and reads nothing.
+void SetGammaRampReader(bool (*reader)(void* user, uint32_t out_rgb10[256][3]), void* user);
+
 // F3 status lines from the clay pass (empty while the renderer is not
 // installed). Thread-safe copy.
 std::string StatusText();

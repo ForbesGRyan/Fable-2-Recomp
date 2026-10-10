@@ -1587,7 +1587,8 @@ void AppendPs(std::string& row, const DeviceSnapshot& dev) {
 // Fog discovery (frame-map section 16): a 1D texture is dumped too, its texels in one row
 // (render::Fetch1DDumpBytes; a format without a texel size gets kMaxUnsupported1DTexelBytes a
 // texel, at most kMaxUnsupportedBytes), and the textures the game rewrites in place
-// (render::DumpKeyedByContent: every 1D texture, and 2D targets of the colour and depth formats)
+// (render::DumpKeyedByContent: every 1D texture, 2D targets of the colour and depth formats, and since
+// post discovery, frame-map section 17, any 2D texture at a post buffer's address)
 // are kept once per content and not once per address: the first content seen at (base, identity)
 // under the usual name, every other one as <BASE>_<IDENTITY16>_<XXH3>.bin, each with a "texture"
 // row that carries the frame and the content hash ("frame", "content"; "dim":1 for a 1D
@@ -1601,7 +1602,7 @@ constexpr uint32_t kMaxTextures = 768;
 constexpr uint32_t kMaxTextureBytes = 8u << 20;
 constexpr uint32_t kMaxUnsupportedBytes = 64u << 10;
 constexpr uint32_t kMaxUnsupported1DTexelBytes = 16;
-constexpr uint32_t kMaxContentTextures = 512;
+constexpr uint32_t kMaxContentTextures = 1024;
 constexpr uint64_t kMaxContentTextureBytes = 512ull << 20;
 
 uint64_t DumpTexture(const uint32_t fc[6]) {
@@ -4590,6 +4591,150 @@ void SetFogWanted(bool wanted) {
   g_fog_wanted.store(wanted, std::memory_order_relaxed);
 }
 
+// --- Post discovery (frame-map section 17, "Discovery"): resolves and the post buffers' memory ---
+// Rows only; nothing here is read or written unless a capture is armed, and no record is touched.
+//
+// A "resolve" row for every outermost call of DrawIndx2:821EF988 (the game's clear routine, which
+// is entered twice a clear: frame-map section 15): its arguments r4..r10, the device's
+// RB_SURFACE_INFO and the dwords the call wrote to the command buffer, taken between the device's
+// command write pointer (+kDeviceCommandWriteOffset: the address of the last dword written) at
+// the hook's entry and at its return, as hex in guest order ("cmd", at most kMaxResolveDwords;
+// "cmd_ok" false, and no "cmd", when the pointer did not advance by 1 to that many dwords or the
+// dwords cannot be read; "from" is the first dword's address).
+//
+// The post chain's own resolves are not issued through that routine: in the captures of
+// 2026-10-09 no hooked call lies between two consecutive post rectangles (for one, between the
+// "verts" row of the luminance pass 5821366EE8FDE893 and the bright pass's), although the GPU
+// executes a resolve there. So the command stream between two consecutive outermost hooked draws
+// of a thread is looked at too: from the end of the earlier draw's packets (the builder's own
+// pointer, +kDeviceBeginVerticesWriteOffset, for BeginVertices and the indexed immediate builder,
+// which do not store the device's; the device's for every other hook) to the end of the later
+// one's, or to the later one's entry when it is the clear routine (whose own dwords are in its
+// "resolve" row). When those dwords name a copy register (NamesCopyRegisters) they are written as
+// a "cmdgap" row before the later draw's own rows: "func" the later draw's hook, "from" the first
+// dword's address, "dwords" their number, "cmd" as above (at most kMaxGapDwords; a longer or an
+// unreadable stretch is not written). "n" numbers the "resolve" and "cmdgap" rows of a frame
+// together, from 1. tools/xdk_sigmatch/post_tables.py (resolves) walks the packets.
+constexpr uint32_t kMaxResolveDwords = 512;
+constexpr uint32_t kMaxGapDwords = 2048;
+struct StreamMark {
+  bool entry_valid = false;  // the device's write pointer at this thread's last outermost entry of the clear routine
+  uint32_t entry = 0;
+  bool end_valid = false;    // the end of this thread's last outermost hooked draw's packets
+  uint32_t end = 0;
+  uint32_t capture = 0;      // g_capture_serial of the capture `end` was read in
+};
+thread_local StreamMark t_stream;
+uint32_t g_resolve_rows = 0;  // "resolve" and "cmdgap" rows of the frame being written, under g_mutex
+
+// The dwords in (after, last] of the guest's command buffer (both the address of a dword), or
+// nullptr when that is not 1 to `max_dwords` readable dwords. `*count` their number.
+const uint8_t* StreamDwords(uint32_t after, uint32_t last, uint32_t max_dwords, uint32_t* count) {
+  *count = 0;
+  if (last <= after || ((last - after) & 3) != 0 || (last - after) / 4 > max_dwords) return nullptr;
+  const uint8_t* p = ReadVirtual(after + 4, last - after);
+  if (p) *count = (last - after) / 4;
+  return p;
+}
+
+// The outermost hooked draw `id` of this thread has returned while a capture is armed.
+void WriteStreamRows(uint32_t id, const LastArgs& args, uint32_t device) {
+  StreamMark& m = t_stream;
+  const bool clear = id == kHook_DrawIndx2_821EF988;
+  const bool own_pointer = id == kHook_D3DDevice_BeginVertices || id == kHook_DrawIndx_82217EE8;
+  uint32_t end = 0;
+  const bool have_end =
+      device && ReadVirtualBe32(device + (own_pointer ? xdk::kDeviceBeginVerticesWriteOffset
+                                                      : xdk::kDeviceCommandWriteOffset), &end);
+  const bool have_entry = clear && m.entry_valid;
+  m.entry_valid = false;
+  std::lock_guard<std::mutex> lock(g_mutex);
+  if (!g_file) return;
+  char buf[256];
+  const int frame = g_frames_written.load(std::memory_order_relaxed) + 1;
+  // The stream since the last hooked draw of this thread (of this capture).
+  const uint32_t gap_last = clear ? m.entry : end;
+  if (m.end_valid && m.capture == g_capture_serial && (clear ? have_entry : have_end)) {
+    uint32_t count = 0;
+    const uint8_t* p = StreamDwords(m.end, gap_last, kMaxGapDwords, &count);
+    if (p && NamesCopyRegisters(p, count)) {
+      std::snprintf(buf, sizeof(buf), "{\"kind\":\"cmdgap\",\"frame\":%d,\"n\":%u,\"func\":\"%s\",\"from\":\"0x%08X\","
+                                      "\"dwords\":%u,\"cmd\":\"",
+                    frame, ++g_resolve_rows, HookName(id), m.end + 4, count);
+      std::string row = buf;
+      row += HexBytes(p, size_t(count) * 4);
+      row += "\"}\n";
+      std::fputs(row.c_str(), g_file);
+    }
+  }
+  if (clear) {
+    uint32_t surface = 0, count = 0;
+    const bool have_surface = device && ReadVirtualBe32(device + xdk::kDeviceSurfaceInfoOffset, &surface);
+    const uint8_t* p = have_entry && have_end ? StreamDwords(m.entry, end, kMaxResolveDwords, &count) : nullptr;
+    std::snprintf(buf, sizeof(buf), "{\"kind\":\"resolve\",\"frame\":%d,\"n\":%u,\"args\":[", frame, ++g_resolve_rows);
+    std::string row = buf;
+    for (int i = 1; i < 8; ++i) {
+      std::snprintf(buf, sizeof(buf), "%s\"0x%08X\"", i > 1 ? "," : "", args.r[i]);
+      row += buf;
+    }
+    row += "]";
+    if (have_surface) {
+      std::snprintf(buf, sizeof(buf), ",\"surface\":\"0x%08X\"", surface);
+      row += buf;
+    }
+    row += p ? ",\"cmd_ok\":true" : ",\"cmd_ok\":false";
+    if (p) {
+      std::snprintf(buf, sizeof(buf), ",\"from\":\"0x%08X\",\"cmd\":\"", m.entry + 4);
+      row += buf;
+      row += HexBytes(p, size_t(count) * 4);
+      row += "\"";
+    }
+    row += "}\n";
+    std::fputs(row.c_str(), g_file);
+  }
+  m.end_valid = have_end;
+  m.end = end;
+  m.capture = g_capture_serial;
+}
+
+// The block the post chain's small buffers live in (render::PostBufferBase), whole, as it is at the
+// end of capture frame `frame`: native_tex_<stamp>/mem_12A00000_f<N>.bin, a page that cannot be read
+// as zeros, with a "memdump" row ("unreadable": such pages). For finding the luminance resolve by
+// content when no row names its address (post_tables.py find-luminance). Only when the emulator
+// copies resolves to guest memory (--readback_resolve is fast, some or full): otherwise nothing of
+// a resolve is there. Caller holds g_mutex with g_file open.
+constexpr uint32_t kPostMemoryBase = 0x12A00000u, kPostMemoryEnd = 0x12E00000u;
+static_assert(render::PostBufferBase(kPostMemoryBase) && render::PostBufferBase(kPostMemoryEnd - 0x1000) &&
+              !render::PostBufferBase(kPostMemoryEnd));
+void DumpPostMemory(int frame) {
+  if (g_tex_dir.empty()) return;
+  const std::string mode = rex::cvar::GetFlagByName("readback_resolve");
+  if (mode != "fast" && mode != "some" && mode != "full") return;
+  char name[48];
+  std::snprintf(name, sizeof(name), "mem_%08X_f%d.bin", kPostMemoryBase, frame);
+  std::error_code ec;
+  std::filesystem::create_directories(g_tex_dir, ec);
+  std::FILE* f = std::fopen((g_tex_dir / name).string().c_str(), "wb");
+  if (!f) return;
+  static const uint8_t kZeros[0x1000] = {};
+  uint32_t unreadable = 0;
+  bool ok = true;
+  for (uint32_t page = kPostMemoryBase; ok && page < kPostMemoryEnd; page += 0x1000) {
+    const uint8_t* p = ReadPhysical(page, 0x1000);
+    if (!p) ++unreadable;
+    ok = std::fwrite(p ? p : kZeros, 1, 0x1000, f) == 0x1000;
+  }
+  std::fclose(f);
+  if (!ok) return;
+  char buf[224];
+  std::snprintf(buf, sizeof(buf),
+                "{\"kind\":\"memdump\",\"frame\":%d,\"file\":\"%s/%s\",\"base\":\"0x%08X\",\"bytes\":%u,"
+                "\"unreadable\":%u,\"readback_resolve\":\"%s\"}\n",
+                frame, g_tex_dir.filename().string().c_str(), name, kPostMemoryBase, kPostMemoryEnd - kPostMemoryBase,
+                unreadable, mode.c_str());
+  std::fputs(buf, g_file);
+}
+
 void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t*) {
   if (!g_enabled.load(std::memory_order_relaxed) || id >= t_last_args.size()) return;
   // Not timed: eight stores, cheaper than the timer itself.
@@ -4603,7 +4748,8 @@ void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t*) {
   a.r[6] = ctx.r9.u32;
   a.r[7] = ctx.r10.u32;
   if (IsDrawId(id)) {
-    if (t_nesting.Enter()) g_nested_draws.fetch_add(1, std::memory_order_relaxed);
+    const bool nested = t_nesting.Enter();
+    if (nested) g_nested_draws.fetch_add(1, std::memory_order_relaxed);
     // Discovery evidence (t_gpu_pbool): whether this builder will flush the bool shadow.
     if (g_discovery_active.load(std::memory_order_relaxed)) {
       uint32_t pending = 0;
@@ -4611,6 +4757,11 @@ void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t*) {
                              (pending & xdk::kDeviceBoolPendingMaskHi) != 0;
       // The storage of this thread's last "indx" row, filled by the game since (discovery only).
       if (t_pending_indexed.valid) FlushPendingIndexed();
+      // Post discovery: where the command buffer stood when the clear routine was entered (WriteStreamRows).
+      if (id == kHook_DrawIndx2_821EF988 && !nested) {
+        t_stream.entry_valid = g_armed.load(std::memory_order_relaxed) &&
+                               ReadVirtualBe32(ctx.r3.u32 + xdk::kDeviceCommandWriteOffset, &t_stream.entry);
+      }
     }
   }
   switch (id) {
@@ -4681,6 +4832,8 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
   }
   if (!g_armed.load(std::memory_order_relaxed)) return;
   if (!records) t_ps_loads.Observe(in_scene);
+  // Post discovery: every outermost draw, whatever the sampling (a resolve between two draws is one row).
+  if (outermost) WriteStreamRows(id, args, device);
   const uint64_t n = g_draw_count.fetch_add(1, std::memory_order_relaxed);
   if (n % Every() != 0) return;
   DeviceSnapshot dev;
@@ -4746,6 +4899,9 @@ void OnSwap() {
   FinishedScene done;
   std::unique_lock<std::mutex> lock(g_mutex);
   EndMainSceneFrame(g_file != nullptr, frame, swap, timer, &done);
+  g_resolve_rows = 0;  // (the "resolve" and "cmdgap" rows are numbered within a frame)
+  // Post discovery: the post buffers' memory as the capture's first two frames left it.
+  if (g_file && frame <= 2) DumpPostMemory(frame);
   if (g_file) std::fflush(g_file);
   if (frame >= FramesRequested()) {
     g_armed.store(false);

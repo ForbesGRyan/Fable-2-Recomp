@@ -133,6 +133,18 @@ bool g_d3d_messages_started = false;
 uint64_t g_d3d_messages_logged = 0;  // g_clay_frames at the last count line
 void PollD3dMessagesOnce(const char* when);
 
+// The scan-out gamma ramp (SetGammaRampReader; post discovery, frame-map section 17). The reader
+// is set before Install registers the callbacks; the rest is the command-processor thread's.
+std::atomic<bool (*)(void*, uint32_t[256][3])> g_ramp_reader{nullptr};
+std::atomic<void*> g_ramp_user{nullptr};
+struct RampLog {
+  uint32_t last[256][3] = {};
+  bool have_last = false;
+  uint64_t reads = 0, failed = 0, changes = 0;
+  bool said_none = false;
+};
+RampLog g_ramp;
+
 // F3 status text, written on the command-processor thread, read by the UI.
 std::mutex g_status_mutex;
 std::string g_status;
@@ -413,6 +425,10 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
       REXLOG_INFO("[native] clay: {}{}", by_ps,
                   st.unknown_by_ps.Other() ? " (+ more shaders)" : "");
     }
+    // The scan-out ramp (post discovery): how often it was read and how often it was another table.
+    if (g_ramp_reader.load(std::memory_order_acquire)) {
+      REXLOG_INFO("[native] ramp: changes {} (reads {}, without a table {})", g_ramp.changes, g_ramp.reads, g_ramp.failed);
+    }
     g_clay_window_max_ms = 0;
   }
   return true;
@@ -444,11 +460,36 @@ void PollD3dMessagesOnce(const char* when) {
   REXLOG_INFO("[native] {} ({})", g_d3d_messages.Summary(), when);
 }
 
+// Post discovery: the guest's scan-out ramp as the SDK holds it at this composite frame (the table
+// the emulated picture of this frame went through: the callback runs at the end of the swap blit,
+// on its thread). Logged in full at the first read and at every change; nothing is drawn with it.
+void ReadRamp() {
+  const auto reader = g_ramp_reader.load(std::memory_order_acquire);
+  if (!reader) {
+    if (!g_ramp.said_none) REXLOG_INFO("[native] ramp: no reader registered; the scan-out ramp is not read");
+    g_ramp.said_none = true;
+    return;
+  }
+  uint32_t now[256][3] = {};
+  if (!reader(g_ramp_user.load(std::memory_order_acquire), now)) {
+    if (g_ramp.failed++ == 0) REXLOG_WARN("[native] ramp: the reader gave no table at clay frame {}", g_clay_frames);
+    return;
+  }
+  ++g_ramp.reads;
+  if (g_ramp.have_last && SameRamp(now, g_ramp.last)) return;
+  if (g_ramp.have_last) ++g_ramp.changes;
+  g_ramp.have_last = true;
+  std::copy(&now[0][0], &now[0][0] + 256 * 3, &g_ramp.last[0][0]);
+  REXLOG_INFO("[native] ramp: read at clay frame {}: valid {}, {}", g_clay_frames, MakePostRamp(now).valid ? 1 : 0,
+              FormatRampHex(now));
+}
+
 void OverlayCallback(const NativeGuestOutputRenderContext& ctx, void*) {
   const View view = CurrentView();
   if (!Usable(ctx) || !IsCompositeView(view)) return;  // off/pattern: record nothing
   LogD3dMessages();  // (of the frames before this one: the layer reports a call when it is executed)
   if (!RenderClay(ctx)) return;
+  ReadRamp();
   if (!g_clay_scene) return;  // no scene captured yet: leave the emulated frame
   if (!g_composite.Ensure(ctx.device, ctx.guest_output->format())) {
     Fail("composite");
@@ -488,6 +529,11 @@ std::string StatusText() {
   if (!g_latch.IsFailed() && !IsCompositeView(CurrentView())) return {};
   std::lock_guard<std::mutex> lock(g_status_mutex);
   return g_status;
+}
+
+void SetGammaRampReader(bool (*reader)(void* user, uint32_t out_rgb10[256][3]), void* user) {
+  g_ramp_user.store(user, std::memory_order_release);
+  g_ramp_reader.store(reader, std::memory_order_release);
 }
 
 void Install(rex::memory::Memory* memory) {

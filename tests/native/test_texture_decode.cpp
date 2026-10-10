@@ -363,6 +363,44 @@ int main() {
     MakeFc(a, fc2);
     if (DumpKeyedByContent(fc2)) return 135;
   }
+  // --- Post discovery (frame-map section 17): the post chain's own buffers are kept by content ---
+  // The fetch constants are the game's own (native_discovery_20261009_092959.jsonl, frame 1: the
+  // composite's row and the front buffer's); the sizes are counted by hand.
+  {
+    // The front buffer and the block the small post buffers live in; nothing beside them.
+    if (!PostBufferBase(0x1ECFF000) || !PostBufferBase(0x12A00000) || !PostBufferBase(0x12D9F000) ||
+        !PostBufferBase(0x12DFF000)) return 140;
+    if (PostBufferBase(0x12E00000) || PostBufferBase(0x129FF000) || PostBufferBase(0x12704000) ||
+        PostBufferBase(0x1ECFE000) || PostBufferBase(0x1ED00000) || PostBufferBase(0) || PostBufferBase(0x199E0000)) return 141;
+    // The blurred bloom the composite samples (tf2): 280 x 180 k_2_10_10_10_AS_16_16_16_16 (54), tiled,
+    // pitch 288 = 9 tiles a row of 4096 bytes; the last texel (279, 179) is in tile (8, 5).
+    const uint32_t bloom[6] = {0x82424802, 0x12D9F0B6, 0x00166117, 0x01280C14, 0x00000003, 0x00000218};
+    if (!DumpKeyedByContent(bloom) || Is1DFetch(bloom)) return 142;
+    if (BaseLevelDumpBytes(bloom) != (5u * 9u + 8u) * 4096u + 0x1000u) return 143;
+    // The same buffer as a k_2_10_10_10 texture (7: what the blurs sample): the same bytes.
+    uint32_t b7[6] = {0x82424802, 0x12D9F000u | 7u | (2u << 6), 0x00166117, 0x01280C14, 0x00000003, 0x00000218};
+    if (!DumpKeyedByContent(b7) || BaseLevelDumpBytes(b7) != (5u * 9u + 8u) * 4096u + 0x1000u) return 144;
+    // The front buffer pass F samples: 1280 x 720 k_8_8_8_8 (a decoded format: kept by content for its address).
+    FcArgs a;
+    a.format = 6; a.w = 1280; a.h = 720; a.pitch = 1280; a.base = 0x1ECFF000; a.mip = 0; a.tiled = true;
+    uint32_t fc2[6];
+    MakeFc(a, fc2);
+    if (!DumpKeyedByContent(fc2)) return 145;
+    // The same texture anywhere else is kept once per address, and so are 7 and 54 outside the block.
+    a.base = 0x1A000000;
+    MakeFc(a, fc2);
+    if (DumpKeyedByContent(fc2)) return 146;
+    b7[1] = 0x1A000000u | 54u | (2u << 6);
+    if (DumpKeyedByContent(b7) || BaseLevelDumpBytes(b7) != (5u * 9u + 8u) * 4096u + 0x1000u) return 147;
+    // A cube, and a constant that is no texture: never by content, whatever the address.
+    a = FcArgs{};
+    a.base = 0x12D00000; a.dim = 3;
+    MakeFc(a, fc2);
+    if (DumpKeyedByContent(fc2)) return 148;
+    a.dim = 1; a.type = 0;
+    MakeFc(a, fc2);
+    if (DumpKeyedByContent(fc2)) return 149;
+  }
   // --- k_DXN (format 49): two BC4 blocks per 4 x 4 block, the terrain's normal map (tf17) ---
   // The same blocks and numbers as test_decode_dxn of tests/test_terrain_replay.py.
   {

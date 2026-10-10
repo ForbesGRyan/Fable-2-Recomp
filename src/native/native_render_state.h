@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <string_view>
@@ -229,6 +230,52 @@ inline std::string D3dMessagesStartText(bool queue, bool layer) {
          (queue ? "available" : "NOT available (dxgidebug.dll gave no information queue: nothing will be reported)") +
          "; the debug layer is " +
          (layer ? "on (--d3d12_debug=true)" : "OFF (--d3d12_debug=true is not set: nothing will be reported)");
+}
+
+// The scan-out gamma ramp (frame-map section 17, "Discovery"): the guest's 256-entry table of 10
+// bits a channel, which the SDK's swap blit applies to an 8-bit front buffer and the native
+// picture has never passed through. `rgb10[i]` is entry i as red, green, blue. MakePostRamp gives
+// it as floats (entry / 1023); `valid` only when every entry is at most 1023 and no channel
+// decreases from one entry to the next. A ramp that is not valid carries zeros: nothing of a
+// table that failed its rule is handed on.
+struct PostRamp {
+  float rgb[256][3] = {};
+  bool valid = false;
+};
+
+inline PostRamp MakePostRamp(const uint32_t rgb10[256][3]) {
+  PostRamp r;
+  for (int i = 0; i < 256; ++i) {
+    for (int c = 0; c < 3; ++c) {
+      if (rgb10[i][c] > 1023 || (i > 0 && rgb10[i][c] < rgb10[i - 1][c])) return PostRamp{};
+      r.rgb[i][c] = float(rgb10[i][c]) / 1023.0f;
+    }
+  }
+  r.valid = true;
+  return r;
+}
+
+// The ramp as the log line "[native] ramp: read ..." writes it: 256 entries of nine hex digits,
+// rrrgggbbb (10 bits fit three digits; a value that does not is written FFF).
+inline std::string FormatRampHex(const uint32_t rgb10[256][3]) {
+  std::string text;
+  text.reserve(256 * 9);
+  char buf[16];
+  for (int i = 0; i < 256; ++i) {
+    std::snprintf(buf, sizeof(buf), "%03X%03X%03X", unsigned(std::min<uint32_t>(rgb10[i][0], 0xFFF)),
+                  unsigned(std::min<uint32_t>(rgb10[i][1], 0xFFF)), unsigned(std::min<uint32_t>(rgb10[i][2], 0xFFF)));
+    text += buf;
+  }
+  return text;
+}
+
+inline bool SameRamp(const uint32_t a[256][3], const uint32_t b[256][3]) {
+  for (int i = 0; i < 256; ++i) {
+    for (int c = 0; c < 3; ++c) {
+      if (a[i][c] != b[i][c]) return false;
+    }
+  }
+  return true;
 }
 
 class FailureLatch {

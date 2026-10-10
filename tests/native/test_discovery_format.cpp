@@ -1,6 +1,8 @@
 #include "../../src/native/capture/discovery_format.h"
 #include "../../src/native/capture/render_state.h"
+#include <initializer_list>
 #include <iostream>
+#include <string>
 #include <iterator>
 int main() {
   const uint32_t v[2] = {0x1, 0xDEADBEEF};
@@ -113,6 +115,34 @@ int main() {
     // Bytes as hex, two upper-case digits each, in memory order; nothing for no bytes.
     const uint8_t b[] = {0x00, 0x3F, 0x80, 0xFF, 0x0A};
     if (HexBytes(b, 5) != "003F80FF0A" || HexBytes(b, 0) != "" || HexBytes(nullptr, 5) != "") return 28;
+  }
+  {
+    using namespace fable2::native::capture;
+    // Post discovery (frame-map section 17): whether a run of command dwords, as the guest stores them
+    // (big-endian), holds a type-0 packet header that writes one of the copy registers 0x2318..0x231B
+    // (RB_COPY_CONTROL, _DEST_BASE, _DEST_PITCH, _DEST_INFO): what a resolve is issued with.
+    auto be = [](std::initializer_list<uint32_t> dwords) {
+      std::string s;
+      for (uint32_t d : dwords) {
+        s += char(d >> 24); s += char(d >> 16); s += char(d >> 8); s += char(d);
+      }
+      return s;
+    };
+    auto names = [](const std::string& s) {
+      return NamesCopyRegisters(reinterpret_cast<const uint8_t*>(s.data()), s.size() / 4);
+    };
+    // Four registers from 0x2318: header (4 - 1) << 16 | 0x2318.
+    if (!names(be({0x00002200, 0x00708764, 0x00032318, 0x00300000, 0x12D69000, 0x00B40140, 0x00000102}))) return 30;
+    // A run that starts below and reaches them; one that ends just below; one that starts above.
+    if (!names(be({0x00082310, 0, 0, 0, 0, 0, 0, 0, 0, 0}))) return 31;
+    if (names(be({0x00072310, 0, 0, 0, 0, 0, 0, 0, 0}))) return 32;
+    if (names(be({0x0003231C, 0, 0, 0, 0}))) return 33;
+    // With the write-one flag (bit 15) every value goes to the base register.
+    if (!names(be({0x0005A319, 0, 0, 0, 0, 0, 0})) || names(be({0x0005A310, 0, 0, 0, 0, 0, 0}))) return 34;
+    // A type-3 packet (a draw), a type-1 and a type-2 packet are no register runs, whatever their low bits.
+    if (names(be({0xC0012318, 0, 0})) || names(be({0x40002318, 0, 0})) || names(be({0x80002318}))) return 35;
+    // Nothing for no dwords.
+    if (names("") || NamesCopyRegisters(nullptr, 4)) return 36;
   }
   std::cout << "PASS: discovery format\n";
   return 0;

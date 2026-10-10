@@ -189,6 +189,49 @@ int main() {
         D3dMessagesStartText(false, false).find("is OFF") == std::string::npos) return 56;
   }
 
-  std::cout << "PASS: view parsing/cycling, F6 edge detection, failure latch, frame times per view, d3d message log\n";
+  {
+    // The scan-out gamma ramp (frame-map section 17): 256 entries of 10 bits a channel as the SDK
+    // holds them, to floats; valid only when every entry is at most 1023 and no channel decreases.
+    static uint32_t in[256][3];
+    for (uint32_t i = 0; i < 256; ++i) {
+      in[i][0] = i * 4;          // red: 0 .. 1020
+      in[i][1] = i < 255 ? i * 4 : 1023;
+      in[i][2] = i / 2;          // blue: steps, never down
+    }
+    PostRamp r = MakePostRamp(in);
+    if (!r.valid || r.rgb[0][0] != 0.0f || r.rgb[255][1] != 1.0f || r.rgb[1][0] != 4.0f / 1023.0f ||
+        r.rgb[255][2] != 127.0f / 1023.0f || r.rgb[3][2] != r.rgb[2][2]) return 60;
+    // A constant ramp is in order (nothing decreases).
+    static uint32_t flat[256][3] = {};
+    if (!MakePostRamp(flat).valid) return 61;
+    // One entry above 10 bits: not valid, and nothing of it is handed on.
+    in[200][1] = 1024;
+    r = MakePostRamp(in);
+    if (r.valid || r.rgb[10][0] != 0.0f || r.rgb[255][1] != 0.0f) return 62;
+    in[200][1] = 800;
+    if (!MakePostRamp(in).valid) return 63;
+    // One channel decreasing once, at the last entry as anywhere: not valid.
+    in[255][2] = 126;
+    if (MakePostRamp(in).valid) return 64;
+    in[255][2] = 127;
+    in[1][0] = 0; in[0][0] = 1;
+    if (MakePostRamp(in).valid) return 65;
+    in[0][0] = 0; in[1][0] = 4;
+    if (!MakePostRamp(in).valid) return 66;
+    // The log's text: 256 entries of nine hex digits, rrrgggbbb; a value that does not fit three digits is FFF.
+    const std::string text = FormatRampHex(in);
+    if (text.size() != 256 * 9 || text.substr(0, 9) != "000000000" || text.substr(9, 9) != "004004000" ||
+        text.substr(255 * 9, 9) != "3FC3FF07F") return 67;
+    in[2][2] = 0x12345;
+    if (FormatRampHex(in).substr(18, 9) != "008008FFF") return 68;
+    // Whether two reads differ (the change count of the log).
+    static uint32_t other[256][3];
+    for (uint32_t i = 0; i < 256; ++i) for (int c = 0; c < 3; ++c) other[i][c] = in[i][c];
+    if (!SameRamp(in, other)) return 69;
+    other[255][2] ^= 1;
+    if (SameRamp(in, other)) return 70;
+  }
+
+  std::cout << "PASS: view parsing/cycling, F6 edge detection, failure latch, frame times per view, d3d message log, scan-out ramp\n";
   return 0;
 }

@@ -5680,9 +5680,9 @@ open, above.
 ### Native bloom
 
 Plan Task 8 of the post sub-project (phase 10b; spec Design 10, rulings 6, 14, 15, 16; controller
-ruling 25), 2026-10-10. **This part is the code and what was found offline; nothing of it had run
-on a GPU when it was written.** The runs come under "Runs" at the end of this subsection once they
-are made, and the criteria's verdicts are plan Task 9's.
+ruling 25; ruling 27 for the bloom's sample place), 2026-10-10. The code and what was found
+offline come first, as written before any run; the fifteen runs are under "Runs" at the end of
+this subsection. The criteria's verdicts are plan Task 9's.
 
 **The switch**: `--fable2_native_bloom=on|off` (default off; the light switch's parser). It acts
 only in a post frame. Nothing of the capture depends on it: the blurs' weights are part of the
@@ -5774,8 +5774,12 @@ towards the sun, where the sun layer is missing):
    choice. The fetch's place fits better on all four captures (first against fourth row), and it
    is what the microcode says; the native composite, `PostBloomFetchMirror` and `post_replay.py`
    (`--bloom-place fetch`, now the default of `replay` and `predict`; `aligned` reproduces the
-   earlier figures) use it. **Variant C (`post_sun_layer.py`) and the stored excerpt still sample
-   with the centres aligned**: not changed here (another task's files).
+   earlier figures) use it. Controller ruling 27 accepts it. Variant C (`post_sun_layer.py`)
+   and the stored excerpt (`tests/post_replay_excerpt.json`, written again) sample there too
+   since the commit after the runs (`bloom_sampler`'s own default); variant C on `134312` frame
+   1 then reads median 0.48 and 90.2% within 8 levels against variant B's 1.13 and 70.7%
+   (`t8_variant_C_134312_fetch.txt`; with the centres aligned 0.72 and 88.5% against 1.52 and
+   69.9%).
 2. *The downsample's pixel position* (`kPostDownsampleBias` = 0: the four texels (0, 0), (2, 0),
    (0, 2), (2, 2) of each 4 x 4 block). Under the aligned centres bias 0.5 had looked better
    (fifth row against fourth); that was the missing 1.5 pixels of the fetch, which a shift of the
@@ -5809,14 +5813,145 @@ comparison and the minimum with 1 before every rounding (cases 238 to 240).
 mutation check `out/native-evidence/post/t8_mutations.txt`; `tests/native/test_native_shaders.cpp`
 cases 232 to 240; `tests/test_post_literals.py` (8 tests more); `tests/test_post_replay.py`.
 
-**Limits, as written before any run.** (1) No test executes the HLSL; the feed runs are its first
-execution. (2) A linear sample at a texel centre takes its neighbours with weight 0: on a GPU a
+**Limits.** (1) No test executes the HLSL; the feed runs are its only execution against a known
+answer. (2) A linear sample at a texel centre takes its neighbours with weight 0: on a GPU a
 neighbour that is no number makes that sample no number, which the step then reads as 0, where
 the mirror reads the centre's texel; the lit paths write no such value. (3) The sun's two layers
 are 0: towards the sun the bloom lacks the beams and the disc (10c). (4) The native scene's far
 ground reads 1.10 to 1.34 of the game's without bloom ("Native composite") and the bloom lifts it
 further; nothing of the bloom is tuned against that. (5) The linear target holds 6 and 5 mantissa
-bits where the game's scene target has 7; the downsample's target the same.
+bits where the game's scene target has 7; the downsample's target the same, and that one is
+measured ("Runs", item 5: a tenth of a level, one-sided). (6) One save, late morning, three
+places, a standing camera; no `no-weights` frame, no night, no interior. (7) Cost not measured.
+
+**Runs** (2026-10-10, by the controller with the user at the machine, `RUN UNCHECKED`; binary
+SHA-256 `D928DE53A3A4EFA6`, commit `edfcc24`; logs 469 to 483, all exit 0, 0 `d3d ERROR` lines).
+**Every run was on the 100%-scaled monitor (shot width 1296), where the host's present gate does
+not hold: none gives a timing figure**, the two made for timing (logs 482, 483: 25.5 to 26.5 fps
+with the bloom on and off alike, as that monitor does) included. Evidence:
+`out/native-evidence/post/t8_*` (`<name>_driver.txt`, `<name>_fable_2_<log>.log`, shots, the
+dumps as `<name>_dump.rgba`; scripts `t8_regions.py` there and `t8_channels.py`,
+`t8_float11.py`, `t8_float11_front.py` in `out/tests/post-task8/`).
+
+| Run | Log | What |
+|---|---|---|
+| T8-1 | 469 | software adapter, debug layer, 240 s, post and bloom on |
+| T8-2, T8-3 | 470, 471 | software adapter, oracle feed `092959`, bloom on / off |
+| T8-4 | 472 | real GPU (NVIDIA GeForce RTX 5080), feed `092959`, bloom off |
+| T8-5 to T8-8 | 473 to 476 | real GPU, feed `092959`, `121331`, `132250`, `134312`, bloom on |
+| T8-9, T8-10 | 477, 478 | bridge, bloom on / off, full read-back (captures `023305`, `023443`) |
+| T8-11, T8-12 | 479, 480 | third spot, bloom on / off, full read-back (`023626`, `023809`) |
+| T8-13 | 481 | trees, bloom on, full read-back (`024009`) |
+| T8-14, T8-15 | 482, 483 | bridge, bloom on / off, normal: **not timing evidence** |
+
+1. *Software adapter under the debug layer* (logs 469 to 471): no error; warning id 1328 four
+   times (the SDK's buffers, as in every earlier run), nothing new for the 10-bit targets, the
+   sampler or the step's words. `bloom steps ready (... 280 x 180 R11G11B10_FLOAT ... two targets
+   of 280 x 180 R10G10B10A2_UNORM ...)`: spec ruling 14's format is a render target on both
+   adapters, the fallback is not needed. First post frame `drawn, bloom on`.
+2. *Verdicts.* Every post frame of every bloom-on run was drawn with the bloom: `drawn 900
+   (bloom 900, no-weights 0)` in log 482, `drawn 600 (bloom 600, ...)` in logs 473 to 476; bloom
+   off: `(bloom 0, no-weights 0)`. No `no-weights` frame and no `post-objects` frame has occurred
+   in a game. (The full read-back runs have one `post changed` line each and no 300-frame line.)
+3. *Ruling 25, measured again* (`t8_compare_ruling25.txt`, `t8_channels.txt`; feed `092959`,
+   bloom off, against the reference's variant A through log 455's ramp, which is the ramp of
+   every one of these logs, md5 of the entries equal). Channels of 2,419,200 that differ:
+
+   | Dump | From the reference | From the software adapter's dump |
+   |---|---|---|
+   | real GPU before the change (log 458, "Oracle feed") | 124,757 (5.16%), all lower | |
+   | software adapter, this build (log 471) | 6 | |
+   | **real GPU, this build (log 472)** | **7** | **7** (6 one level up, 1 down) |
+
+   `post_replay.py compare`: 100.000% of the pixels within 1 level, largest 2 (one channel),
+   bounds held, for both. **Criterion 6's real-GPU half now reads as its software-adapter half**:
+   first reading met (the verdict is plan Task 9's to state). The software adapter's dump of this
+   build differs from Task 6's in 4 channels (single against double at a boundary).
+4. *The bloom on the game's stored scenes* (`t8_compare_bloom.txt`, `t8_channels.txt`). Against
+   the reference's variant B (`ref455fetch_<stamp>_f1_B.rgba`):
+
+   | Dump | Within 1 level | Within 2 | Largest | Mean signed (r, g, b) |
+   |---|---|---|---|---|
+   | software adapter `092959` | 96.94% | 99.93% | 4 | -0.106, -0.096, -0.106 |
+   | real GPU `092959` | 96.90% | 99.93% | 4 | -0.108, -0.098, -0.107 |
+   | real GPU `121331` | 96.83% | 99.92% | 5 | -0.108, -0.100, -0.108 |
+   | real GPU `132250` | 96.91% | 99.92% | 4 | -0.107, -0.096, -0.108 |
+   | real GPU `134312` | 97.02% | 99.95% | 4 | -0.078, -0.087, -0.142 |
+
+   **Criterion 12's second part (within 2 levels on at least 99% of the pixels): first reading
+   met, on both adapters.** Its first part, the dump against the game's front buffer through the
+   ramp, outside the HUD: 94.62, 94.94, 94.84% within 8 levels (at least 90), median 1 in whole
+   levels (at most 2) for the three bridge captures; `134312` 70.67% (no sun layer). The
+   regions' luminance ratios were not computed from the dumps; the reference's are 0.994 to 1.027
+   and the dump lies a tenth of a level under it.
+5. *The dumps are one-sided under the reference, and the cause is found: the downsample's
+   target.* 9.2% of the channels are lower than the reference's, on the software adapter as on
+   the real card, so it is not a card's rounding. The reference keeps the downsample in double;
+   the pass stores it in `R11G11B10_FLOAT` (6 mantissa bits in red and green, 5 in blue), and the
+   conversion cuts toward zero. With the reference's downsample stored that way
+   (`t8_float11_092959.txt`) the software adapter's dump equals it in **2,419,176 of 2,419,200
+   channels (99.9990%)**, where the double gives 90.81% and a nearest rounding 89.98%. So the five
+   compiled programs are the reference's arithmetic, and the one difference is the precision of
+   the target the plan named. Against the game's front buffer the stored form fits a little
+   worse than the double (`t8_float11_front.txt`: median 0.595, 0.584, 0.594 against 0.578,
+   0.565, 0.573; mean signed -0.08 to -0.21 of a level against +0.02 to -0.11). The game's own
+   downsample target has 7 mantissa bits. **Not changed here**: a target of
+   `R16G16B16A16_FLOAT` (one constant, `kBloomDownFormat`, 0.4 MB more) would take the difference
+   away and needs a software-adapter run of its own; it is a follow-up for the controller.
+6. *The 10-bit writes on the real card.* The real GPU's bloom dump against the software
+   adapter's (`092959`): 99.845% of the channels equal, 3,691 lower and 56 higher by 1 or 2.
+   With the shader's own rounding at every UNORM write that is not a rounding of a stored level;
+   what remains differs between the adapters in the float steps (the linear samples' weights,
+   the float target's conversion). Not separated further; it is inside criterion 12 by a wide
+   margin.
+7. *In the game: bloom on against off* (`t8_regions.txt`, section 2; native shots, display
+   luminance, against `post_replay.py predict`'s B / A on the on-run's own capture; criterion 13,
+   first reading). **Bridge: 24 of 25 regions within 0.05; third spot: 18 of 18.** The far
+   ground, the lake and the dirt patch rise by 8 to 15% (predicted 8 to 15%), the sky by 3.1 to
+   4.6% (3.3 to 4.2%), the planks and the trunk not at all. The one outside: the averted pole
+   side, +51.7% where +33.2% is predicted (7 pixels wide, the darkest region; the veil it gets
+   is its surroundings', which in the native scene are brighter than the game's).
+8. *In the game: native against emulated* (`t8_regions.txt`, section 1; linear luminance, each
+   native shot against the emulated shots 3 s before and after). What came toward 1 with the
+   bloom, bridge: **the sky 0.91 to 0.92 -> 0.997**; the averted pole side 0.56 -> 1.19 (past
+   1); the sunlit pole side 0.87 -> 1.01; the far peak 0.86 -> 1.00; the lake 0.84 -> 1.07; the
+   hero's shirt 0.96 -> 1.06. **What is worse with the bloom: the far ground, which was at or
+   above the game's without it**: far mountains left 1.33 -> **1.70**, centre 1.10 -> 1.40, right
+   1.00 -> 1.26, far slope 1.06 -> 1.31, the island 1.02 -> 1.29, far rock 0.93 -> 1.14 and
+   0.97 -> 1.22, rock face 1.12 -> 1.34, dirt patch 1.05 -> 1.31. Third spot: far rock 1.03 ->
+   1.25, far mountains 1.15 -> 1.46 and 0.98 -> 1.24, the sky 1.15 -> 1.23 and 1.42 -> 1.54
+   (already over), the lake 0.80 -> 1.02. The bloom does to the native scene what the replay
+   says it does to the game's (item 7); the native scene before the post steps is brighter than
+   the game's in the far ground by about what the game's own bloom adds, so with both the far
+   ground is 14 to 70% over at the bridge (the far peak alone is at 1.00). That is "Native composite"'s open offset (the native scene, the
+   frame's exposure and unlit words, or the prediction; the lake and the far hills are unlit
+   placeholders and bare far terrain where the game has water and tree billboards), not
+   something the bloom's formula can or should make up for. Nothing was tuned.
+9. *Shots viewed.* `t8_9_b_on_full_shot_45s` (native, bloom on) beside `t8_10_b_off_full_shot_45s`
+   (native, off) and `t8_9_b_on_full_shot_42s` (emulated): with the bloom the sky, the far
+   mountains and the lake carry the game's milky veil and the sky's blue is paler, as in the
+   emulated shot; the planks and the tree are unchanged. Worse to the eye with the bloom: the far
+   mountains are washed out, paler than the game's, whose slopes are darker and wooded; without
+   the bloom they are crisper and nearer the game's contrast. `t8_feed_on_092959_shot_40s`: the
+   game's own bridge scene (its water, clouds, far trees) through the native steps with the
+   bloom, no HUD: to the eye the emulated shot without its HUD. `t8_1_warp_shot_225s` (software
+   adapter): as the real GPU's native shot; the dog is the flat red silhouette of every
+   software-adapter shot. `t8_13_trees_on_shot_98s` (under the trees): leaves, posts and ferns
+   as before, a soft glow at the bright post caps and the sky's gaps. `t8_11_3_on_full_shot_59s`
+   (third spot): as the bridge, the far mountains pale. The other shots were not viewed; they
+   were measured.
+10. *Cost: open.* No run of this task is timing evidence. Outstanding, on the usual monitor
+   (shot width 1942), back to back: the BRIDGE plan with `-GameArgs
+   --fable2_native_render=true,--fable2_native_post=on,--fable2_native_bloom=on` and the same
+   with `=off` (this task's T8-14 and T8-15), and plan Task 9's THIRD pair. The bloom adds four
+   quarter-size full-screen steps (13 loads a pixel in two of them over 50,400 pixels) and one
+   sample in the composite; criterion 15's cost part stays with criterion 9.
+
+**First readings of the 10b criteria** (the verdicts are plan Task 9's): 11 (the reference
+against the game): the thresholds held with the fetch's place (above); 12: both parts held, with
+the downsample target's precision named (item 5); 13: 24 of 25 and 18 of 18; 14: tests, and the
+guards in the compiled programs; 15: bloom off is plan Task 5's programs but for the rounding
+(case 237), no D3D error (item 1), cost open (item 10).
 
 ## Pending
 

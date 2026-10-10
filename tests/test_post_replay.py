@@ -170,9 +170,9 @@ class Arithmetic(unittest.TestCase):
         with self.assertRaises(pr.ReplayError):
             pr.bloom_picture(flat[:30 * 16 * 3], 30, 16, fr)
 
-    def test_the_bloom_is_sampled_with_the_centres_aligned(self):
+    def test_the_bloom_sampled_with_the_centres_aligned_is_kept(self):
         rows = [[(float(x), float(y), 0.0) for x in range(4)] for y in range(2)]
-        at = pr.bloom_sampler(4, 2, rows, 16, 8)
+        at = pr.bloom_sampler(4, 2, rows, 16, 8, place="aligned")
         self.assertEqual(list(at(2, 2)[:2]), [0.125, 0.125])            # (2.5 / 4 - 0.5, 2.5 / 4 - 0.5)
         self.assertEqual(list(at(0, 0)[:2]), [0.0, 0.0])                # clamped to the edge
         self.assertEqual(list(at(15, 7)[:2]), [3.0, 1.0])
@@ -192,7 +192,7 @@ class Arithmetic(unittest.TestCase):
         aligned = pr.bloom_sampler(4, 2, rows, 16, 8, place="aligned")
         self.assertEqual(list(aligned(2, 2)[:2]), [0.125, 0.125])
         self.assertAlmostEqual(at(6, 0)[0] - aligned(6, 0)[0], 0.375, delta=1e-12)
-        self.assertEqual(list(pr.bloom_sampler(4, 2, rows, 16, 8)(2, 2)[:2]), [0.125, 0.125])   # (the function's own default)
+        self.assertEqual(list(pr.bloom_sampler(4, 2, rows, 16, 8)(2, 2)[:2]), [0.5, 0.5])       # (the function's own default: fetch)
         self.assertEqual((pr.BLOOM_PLACES, pr.BLOOM_PLACE), (("fetch", "aligned"), "fetch"))
         with self.assertRaises(pr.ReplayError):
             pr.bloom_sampler(4, 2, rows, 16, 8, place="corner")

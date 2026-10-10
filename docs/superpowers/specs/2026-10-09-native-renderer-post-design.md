@@ -508,7 +508,8 @@ Said now, with the finding that makes it one (ruling 18).
 
 ### Phase 10b, plan Task 8 (the bloom's code; frame map section 17, "Native bloom")
 
-Stated before the validation runs of plan Task 9; the criteria's verdicts come with them.
+Stated after plan Task 8's own runs (logs 469 to 483; frame map, "Native bloom", "Runs") and
+before the validation runs of plan Task 9; the criteria's verdicts come with them.
 
 - **The composite samples the bloom at its own fetch, not with the texel centres aligned.** The
   game's composite fetches the bloom at the scene's interpolated coordinate with `OffsetX =
@@ -518,8 +519,9 @@ Stated before the validation runs of plan Task 9; the criteria's verdicts come w
   Design 10 and plan Task 8's line assumed. Against the game's front buffer of the three bridge
   captures the replay's variant B fits at a median of 0.565 to 0.578 levels with the fetch's
   place and 0.716 to 0.732 with the centres aligned
-  (`out/native-evidence/post/t8_bloom_fetch.txt`). The native composite, its mirror and
-  `post_replay.py` (`--bloom-place fetch`, the default of `replay` and `predict`; `aligned`
+  (`out/native-evidence/post/t8_bloom_fetch.txt`). Controller ruling 27 accepts it. The native
+  composite, its mirror and `post_replay.py` (`--bloom-place fetch`, the default of `replay` and
+  `predict` and of `bloom_sampler` itself, so of variant C and the stored excerpt; `aligned`
   reproduces the earlier figures) use the fetch's place. Criterion 11's figures with it: every
   bridge region 0.994 to 1.027, median 0.57 to 0.58, 94.5 to 94.8% within 8 levels
   (`t8_reference_B_<stamp>.txt`).
@@ -533,7 +535,22 @@ Stated before the validation runs of plan Task 9; the criteria's verdicts come w
   the same at the bloom's 10-bit writes): `floor(v * levels + 0.5) / levels` as the last
   statement, the level count from the target's format in the step's words. The reference rounds
   each 10-bit stage to the nearest of 1,023 and the game's own targets hold only levels; what
-  the real card does at a 10-bit write was not measured.
+  the real card does at a 10-bit write was not measured. Measured after it: the real card's
+  dump of a stored scene (bloom off) differs from the software adapter's and from the reference
+  in 7 of 2,419,200 channels, where 124,757 were low before (criterion 6's real-GPU half).
+- **The downsample's target loses a tenth of a level, one-sided.** `R11G11B10_FLOAT` (Design
+  10) holds 6 and 5 mantissa bits and its conversion cuts toward zero; the bloom dumps lie 0.08
+  to 0.14 of a level under the reference's variant B for it (the reference with that storage
+  equals the software adapter's dump in 99.9990% of the channels). Criterion 12 holds with it
+  (99.92 to 99.95% of the pixels within 2 levels). A target of `R16G16B16A16_FLOAT` would take
+  it away; not built (it needs its own software-adapter run): a follow-up.
+- **With the bloom the native far ground is 14 to 70% over the game's at the bridge** (0.93 to
+  1.33 without it): the bloom moves the native regions as the replay predicts (criterion 13's
+  first reading: 24 of 25 and 18 of 18 within 0.05), and the native scene before the post steps
+  is brighter there than the game's. Not the bloom's to mend; open with "Native composite"'s
+  offset.
+- **Cost is not measured**: all fifteen runs were on the monitor where the present gate does not
+  hold.
 - **With `--fable2_native_bloom=off` the composite and the ramp are plan Task 5's programs but
   for that rounding** (shader test case 237); criterion 15's "10a's picture" is therefore 10a's
   picture after ruling 25, which on the software adapter is the same bits and on the real card

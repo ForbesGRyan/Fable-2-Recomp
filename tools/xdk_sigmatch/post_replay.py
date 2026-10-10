@@ -35,7 +35,7 @@ texel centre): bloom texel coordinate x / 4 + 0.5. It is what the native composi
 kPostBloomFetch; plan Task 8) and it fits the front buffer better: median 0.565 to 0.578 levels on the three
 bridge captures against 0.716 to 0.732 (out/native-evidence/post/t8_bloom_fetch.txt). `aligned`: texel
 centres aligned, (x + 0.5) / 4, the research's and plan Task 3's reading, kept to reproduce their figures.
-Variant C (post_sun_layer.py) and the stored excerpt still sample with the centres aligned.
+Variant C (post_sun_layer.py) and the stored excerpt sample at `fetch` as well (controller ruling 27).
 --ramp: the scan-out ramp, applied to the 8-bit value of variants A and B and of the front buffer (predict,
 --write, --png; N is what the native picture shows today, which no ramp touches). R is `measured` (the eight
 measured pairs of spec criterion 4, joined by straight lines: a stand-in, not the game's table) or a log
@@ -287,11 +287,12 @@ def bloom_picture(scene, w, h, fr, bias=0.0):
     return bw, bh, stage
 
 
-def bloom_sampler(bw, bh, rows, w, h, place="aligned"):
-    """The bloom at pixel (x, y) of the w x h picture, linear. place `aligned`: texel centres aligned, bloom
-    texel coordinate (x + 0.5) * bw / w. `fetch`: the composite's own fetch, x * bw / w + 0.5 (the scene's
-    interpolated coordinate plus the fetch's half texel; the module's text)."""
+def bloom_sampler(bw, bh, rows, w, h, place=None):
+    """The bloom at pixel (x, y) of the w x h picture, linear. place `fetch` (the default, BLOOM_PLACE): the
+    composite's own fetch, bloom texel coordinate x * bw / w + 0.5 (the scene's interpolated coordinate plus the
+    fetch's half texel; the module's text). `aligned`: texel centres aligned, (x + 0.5) * bw / w."""
     tex = lf.post_texture(rows, linear=True)
+    place = BLOOM_PLACE if place is None else place     # (the default of every caller: controller ruling 27)
     if place == "fetch":
         return lambda x, y: tex(x * bw / w + 0.5, y * bh / h + 0.5)
     if place != "aligned":

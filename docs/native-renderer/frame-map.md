@@ -4817,15 +4817,21 @@ block was at hand and none paired; also every frame without a valid light block 
 block at hand), the frame's last failed read's reason, `stale` (said once, for the frame that
 finds the kept block too old; the block is dropped then) or `no-draw`. The builder keeps the
 last block that passed `MakePostBlock`, whether or not it paired in its own frame, and drops it
-when the switch is off at a frame's end.
+when the switch is off at a frame's end. **The kept block serves almost only a still or blind
+exposure** (review of Task 4, Minor 3): with the pairing at 1e-3 and `c20.w` falling by 6.4e-4 a
+frame (T4-1: 8.58923, 8.58371, ...) a kept block pairs at age 1 only, and at the 2.9e-3 a frame
+of Task 1's turn towards the sun at no age. The bound of 4 frames is then in effect 1 or 0: a
+frame whose own read fails while the exposure moves has no block (`pairing`) and is drawn with
+the fixed mapping. That is ruling 11 as written; the rule is not loosened.
 
 **The bounds against earlier captures** (before any run; `out/native-evidence/post/
 t4_bounds_cpp.txt`, `t4_bounds_python.txt`): the real `MakePostBlock` and `PostBlockPairs`, in a
 harness, on the registers (`"pfull"`), fetch constants and table dumps of 200 captured frames:
 the 128 of Task 1's five runs under read-back (`c20.w` 7.606 to 11.705, largest texel 0.2095 to
 0.3672), the 32 of Task 2's (20 with the read-back switch on or the two addresses by hand, 12
-blind), and 40 blind frames of five earlier normal captures (`c20.w` 15.99999, largest texel
-0.1399 to 0.1463). **200 of 200 valid, with the blur part, pairing**; largest
+blind; largest texel 0.1399 to 0.3467, the 0.1399 in its blind run B), and 40 blind frames of
+five earlier normal captures (`c20.w` 15.99999, largest texel 0.1403 to 0.1463). **200 of 200
+valid, with the blur part, pairing**; largest
 `|c77.y * c20.w - 1|` 5.96e-08.
 
 **Runs** (2026-10-09, by the controller with `-UserPresent -BootSave Hero000`: `RUN UNCHECKED`;
@@ -4847,7 +4853,8 @@ frames under read-back and **4 of 4** blind frames the block is valid, at age 0,
 five registers equal the `"pfull"` of the composite's and the bright pass's rows bit for bit,
 its fourteen blur weights those of the blurs' rows (parts 1), its (address, content) pair the
 one the composite's row names, its 512 texels the dump with that content, and `c77.y * c20.w` is
-1 (largest deviation 2.9e-08 and 5.9e-08; `t4_table_*.txt`). Under read-back `c20.w` is 8.589
+1 (`t4_table_*.txt` print the product as 1.000000; its largest deviation, 2.9e-08 and 5.9e-08,
+is computed from the same frame rows' registers and is in no stored file). Under read-back `c20.w` is 8.589
 falling to 8.551 over the 8 frames with another table in each (largest texel 0.3142 to 0.3161);
 blind it is 15.99999 with a largest texel of 0.1411 to 0.1412 (two of the four blind frames have
 the same table content). The composite's row precedes the frame row in 12 of 12. With the switch
@@ -4886,23 +4893,40 @@ lake and the hazed hills, the sky drawn; no difference to the eye.
 | guest swap median, the same windows | 25.50, 24.88, 24.53, 25.29 ms | 25.16, 24.27, 23.93, 23.95 ms |
 | native view, window medians (same ungated monitor) | 37.06, 35.99, 36.26, 36.28, 36.49, 36.13, 36.99 ms | 34.76, 36.65, 36.42, 34.45, 34.46, 33.80, 33.97 ms |
 
-The capture's own term is the same within 0.03 ms (line by line +0.001, -0.003, +0.028 ms;
-spec criterion 9 allows 0.10) and the view-off term is unchanged and under 0.5 ms. The guest's
+The capture's own term is the same within 0.03 ms (line by line +0.001, -0.003, +0.028 ms) and
+the view-off term is unchanged at 0.06 ms. These are indicative only: the runs are ungated and
+unchecked, and spec criterion 9 (0.10 ms between on and off, view off under 0.5 ms, 30 fps) is
+decided in runs with the shot width at 1942, not here (review of Task 4, Minor 1). The guest's
 work median is 0.01 to 0.25 ms higher with the switch on. The native windows are 0.7 ms lower
 to 3.0 ms higher with it on (the last window 36.99 against 33.97 ms, each run with a capture
 inside one window); the off run's own windows scatter by 2.9 ms, most of the difference lies in the
 swap wait (which no capture code runs in), and nothing of the block reaches the renderer: what
-it is, is not explained by these two runs and is left to Task 7's gated runs. The cost
-statement of this task rests on the capture median and the work median.
+it is, is not explained by these two runs and is left to gated runs (Task 5's, under "Native
+composite", are the first on the usual monitor). This task makes no statement about
+criterion 9.
 
 **Limits.** (1) One place, a standing camera, daylight: no frame without a block, no kept
-block, no failed read has occurred in a game; those paths are held by tests only. (2) The 240 or
+block, no failed read has occurred in a game; those paths are held by tests only. In a frame
+without a composite (a menu, a loading screen) every `BeginVertices` call outside the scene pays
+the device snapshot and the shader lookup for the whole frame (the tries bound only the reads at
+a composite); with 12 such calls a frame at the bridge that was at most 0.25 ms of the work
+median here, and a menu or a cutscene with many quads has not been run (review, Minor 7). (2) The 240 or
 so frames after the last periodic line of a native stretch are not counted in any line. (3) The
 block is read at the composite's call, before the frame's swap, in 12 of 12 captured frames;
 a read that came after its frame's end would be dropped and counted (`dropped at a frame's end`:
 0 in 792 frames). (4) With the exposure blind (`c20.w` 16) the block is as valid as an adapted
 one: nothing in the block says whether the game measures its picture; the log line's `c20.w`
-does. (5) Timing: not valid for any of the three runs.
+does. (5) Timing: not valid for any of the three runs. (6) **Nothing shows that the table is whole
+when it is read** (review, Minor 2). It lies at one address, `0x1FAA0000`, in every frame and the
+CPU rewrites it every frame; which guest thread writes it, and when, is not known. The block's
+equality with the capture's dump does not show it (the dump is read in the same hook's return),
+and the rules cannot see a table written half by one frame and half by the next: both halves
+pass [0, 4). What a tear would cost is bounded by the data: the largest change of a texel between
+consecutive frames is 2.4e-4 to 9.6e-4 (`t4_table_222843.txt`), so a torn table is off by under
+1e-3, of a gain of about 0.3, for one frame. (7) Spec Design 4 says a block without the blurs'
+weights is counted; the periodic line prints `parts P` of the one frame it names and has no count
+over its window. The count is left to the bloom's task (plan Task 8), which is the first to draw
+with the weights (review, Minor 8).
 
 ## Pending
 

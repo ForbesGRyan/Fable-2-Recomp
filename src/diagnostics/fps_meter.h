@@ -29,6 +29,7 @@
 #include "fable2_native_render.h"
 #include "fable2_f5_lua.h"  // F5 external-Lua run (polled per frame)
 #include "guest_frame_rate.h"
+#include "thread_placement.h"  // FABLE2_THREAD_PLACE experiment (inert without it)
 
 // Defined in fable2_d3d_census.h (included by main.cpp after this header).
 namespace fable2::d3dcensus { inline void OnFrame(); }
@@ -126,7 +127,9 @@ inline bool enabled() {
 // is counted once; one skipped is missed. Render thread only.
 struct CpWindows {
   diagnostics::WindowStats busy_ms{300}, wait_reg_ms{300}, idle_ms{300}, present_ms{300},
-      draws{300}, draw_cpu_ms{300}, copies{300}, copy_cpu_ms{300}, interval_ms{300};
+      draws{300}, draw_cpu_ms{300}, copies{300}, copy_cpu_ms{300}, interval_ms{300},
+      submissions{300}, submit_ms{300}, fence_waits{300}, fence_ms{300}, tile_mappings{300},
+      kicks{300};
   uint64_t last_gpu_frame = 0;
   bool acquired = false;
 };
@@ -154,6 +157,12 @@ inline void sample_cp() {
   c.copies.Add(double(gpu.copies));
   c.copy_cpu_ms.Add(double(gpu.copy_cpu_ns) / 1e6);
   c.interval_ms.Add(double(gpu.swap_interval_ns) / 1e6);
+  c.submissions.Add(double(gpu.submissions));
+  c.submit_ms.Add(double(gpu.submit_ns) / 1e6);
+  c.fence_waits.Add(double(gpu.fence_waits));
+  c.fence_ms.Add(double(gpu.fence_wait_ns) / 1e6);
+  c.tile_mappings.Add(double(gpu.tile_mappings));
+  c.kicks.Add(double(gpu.primary_buffer_ends));
 }
 
 inline void poll() {
@@ -175,6 +184,14 @@ inline void poll() {
           c.busy_ms.size(), c.interval_ms.Median(), c.busy_ms.Median(), c.busy_ms.Percentile(0.9),
           c.busy_ms.Max(), c.wait_reg_ms.Median(), c.idle_ms.Median(), c.present_ms.Median(),
           c.draws.Median(), c.draw_cpu_ms.Median(), c.copies.Median(), c.copy_cpu_ms.Median());
+      REXSYS_INFO(
+          "[frame] cp queue: submissions median {:.0f} (max {:.0f}) in {:.2f} ms (p90 {:.2f}), "
+          "fence waits median {:.0f} (max {:.0f}) blocked {:.2f} ms (p90 {:.2f}, max {:.2f}), "
+          "tile mappings median {:.0f} (max {:.0f}), ring kicks median {:.0f}",
+          c.submissions.Median(), c.submissions.Max(), c.submit_ms.Median(),
+          c.submit_ms.Percentile(0.9), c.fence_waits.Median(), c.fence_waits.Max(),
+          c.fence_ms.Median(), c.fence_ms.Percentile(0.9), c.fence_ms.Max(),
+          c.tile_mappings.Median(), c.tile_mappings.Max(), c.kicks.Median());
     }
     c.busy_ms.Reset();
     c.wait_reg_ms.Reset();
@@ -185,6 +202,12 @@ inline void poll() {
     c.copies.Reset();
     c.copy_cpu_ms.Reset();
     c.interval_ms.Reset();
+    c.submissions.Reset();
+    c.submit_ms.Reset();
+    c.fence_waits.Reset();
+    c.fence_ms.Reset();
+    c.tile_mappings.Reset();
+    c.kicks.Reset();
   }
   w.frame_ms.Reset();
   w.work_ms.Reset();
@@ -242,6 +265,8 @@ extern "C" void MainRenderLoop_82B9CD68(PPCContext& ctx, uint8_t* base) {
       }
     }
   }
+  // Thread placement experiment (FABLE2_THREAD_PLACE; applied once, inert otherwise).
+  fable2::threadplace::PollFrame();
   // F6 native-renderer toggle + overlay request (per frame).
   fable2::native::PollFrame();
   // Native capture frame end: finishes and publishes the frame's scene and

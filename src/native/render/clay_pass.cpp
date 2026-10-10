@@ -2775,6 +2775,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // in a post frame with the sun's switch on; with the switch off the share is 0, the one target of
   // before is written and nothing new is made.
   const bool front_wanted = post.sun && post_frame;
+  // (a Render after a stretch without one, the view off: the kept picture is no previous frame's)
+  front_state_ = ClayFrontAfterGap(front_state_, post.gap);
   const ClayFrontStep front_step = StepClayFront(front_state_, post_frame, post.sun, front_wanted && EnsureFrontPrevious(dev), oracle_fed);
   front_state_ = front_step.next;
   post_constants.previous = front_step.share;
@@ -3138,6 +3140,9 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       };
       // The layer's quads of one target, in the records' order, each with the pipeline of its state.
       auto layer_quads = [&](uint8_t target) {
+        // (the quads' own viewport: its origin at half a pixel, so that a pixel's centre is the game's integral
+        // sample point, ruling 38; the full-screen steps and the clears keep layer_target's)
+        cmd->SetViewport({kSunQuadViewportOrigin, kSunQuadViewportOrigin, float(kSunLayerWidth), float(kSunLayerHeight), 0.0f, 1.0f});
         cmd->SetBindingLayout(quad_layout_);
         cmd->SetConstantBuffer(kQuadParamFrame, terrain_cb_, 0);
         cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);

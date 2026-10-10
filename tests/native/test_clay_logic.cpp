@@ -936,6 +936,27 @@ static void SunLayerTests() {
       CHECK(650, std::memcmp(&on, &off, sizeof(on)) == 0);
       static_assert(offsetof(ClayPostConstants, sun_on) == 56 && offsetof(ClayPostConstants, radial) == 128);
     }
+
+    // 651: where a layer quad's pixels are sampled (ruling 38): the game's integral window position, through a
+    // viewport origin of half a pixel. The window positions are the reference's (post_sun_layer._screen on a
+    // 560 x 360 layer: tests/test_post_literals.py holds the same four points).
+    {
+      static_assert(kSunQuadViewportOrigin == 0.5f && kSunQuadViewportOrigin == kShadowViewportOrigin);
+      // (the centre of native pixel i is the game's sample point of pixel i)
+      for (uint32_t i : {0u, 1u, 279u, 559u}) CHECK(651, SunQuadGameSample(i) == double(i));
+      struct Pin { double ndc_x, ndc_y, x, y; };
+      const Pin kPins[] = {{-1.0, 1.0, 0.0, 0.0}, {0.25, -0.5, 350.0, 270.0}, {-0.2358, 0.2124, 213.976, 141.768}, {1.0, -1.0, 560.0, 360.0}};
+      for (const Pin& p : kPins) {
+        const double x = SunQuadWindow(p.ndc_x, 560, false), y = SunQuadWindow(p.ndc_y, 360, true);
+        // the reference's position, half a pixel on: its sample point k is the native centre k + 0.5
+        CHECK(651, std::fabs(x - (p.x + 0.5)) < 1e-9 && std::fabs(y - (p.y + 0.5)) < 1e-9);
+      }
+      // A left edge at the game's window x = 213.3: the game's first covered pixel is 214 (its sample points are
+      // the integers). Natively, by the centre rule, the edge moved by the origin gives 214; left where it is, 213.
+      auto first_covered = [](double edge) { return uint32_t(std::ceil(edge - 0.5)); };  // (Direct3D: a pixel's centre)
+      const double edge = 213.3;
+      CHECK(651, uint32_t(std::ceil(edge)) == 214 && first_covered(edge + double(kSunQuadViewportOrigin)) == 214 && first_covered(edge) == 213);
+    }
   }
 }
 // --- end of the sun layer's cases ---
@@ -1041,6 +1062,17 @@ static void PreviousBlendTests() {
       }
     }
     CHECK(661, StepClayFront(ClayFrontState{0, true}, true, false, false, false).write == 0);
+    // After a stretch in which the pass was not rendered (the view off): no share in the first frame, the
+    // targets in the order they had, and the frame after it blends again. Without a gap nothing changes.
+    {
+      static_assert(ClayFrontAfterGap(ClayFrontState{1, true}, false).valid && ClayFrontAfterGap(ClayFrontState{1, true}, false).current == 1);
+      static_assert(!ClayFrontAfterGap(ClayFrontState{1, true}, true).valid && ClayFrontAfterGap(ClayFrontState{1, true}, true).current == 1);
+      static_assert(!ClayFrontAfterGap(ClayFrontState{0, false}, false).valid);
+      const ClayFrontStep back = StepClayFront(ClayFrontAfterGap(ClayFrontState{1, true}, true), true, true, true, false);
+      CHECK(661, back.share == 0.0f && back.write == 0 && back.read == 1 && back.next.valid);
+      CHECK(661, StepClayFront(ClayFrontAfterGap(back.next, false), true, true, true, false).share == kPostPreviousWeight);
+      CHECK(661, StepClayFront(ClayFrontAfterGap(ClayFrontState{1, true}, false), true, true, true, false).share == kPostPreviousWeight);
+    }
     // The oracle feed: never a share, and its picture is no previous picture for the frame after it.
     const ClayFrontStep fed = StepClayFront(ClayFrontState{0, true}, true, true, true, true);
     CHECK(661, fed.share == 0.0f && fed.write == 1 && !fed.next.valid);

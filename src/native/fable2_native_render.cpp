@@ -157,6 +157,9 @@ std::unique_ptr<render::ClayPass> g_clay;  // created on first use (cvars parsed
 std::shared_ptr<const render::FrameScene> g_clay_scene;  // last scene rendered
 uint64_t g_clay_targets = 0;  // targets generation g_clay_scene was drawn into
 uint64_t g_clay_frames = 0;
+// A presented frame went by without a clay Render (the view was off or not usable, or no scene was there):
+// the next Render is told, so that the previous-frame blend does not mix a picture from before the gap.
+bool g_clay_gap = true;
 double g_clay_window_max_ms = 0;  // worst hash+decode+record over the log window
 // Texture upload burst (frames with uploads or pending textures in a row),
 // logged so area loads show how uploads spread over frames.
@@ -571,6 +574,7 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
     // emulated frame rather than a stale clay target (or stale F3 stats).
     if (g_clay_scene) SetStatus({});
     g_clay_scene = nullptr;
+    g_clay_gap = true;
     return true;
   }
   if (!g_clay) {
@@ -603,6 +607,8 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   post.bloom = CurrentBloom();
   post.sun = CurrentSun();
   post.ramp = g_post_ramp.valid ? g_post_ramp.rgb : nullptr;
+  post.gap = g_clay_gap;
+  g_clay_gap = false;
   // (the oracle feed: null unless its switch is set and both files were valid)
   g_clay->SetPostOracle(g_oracle_valid ? &g_oracle_feed : nullptr);
   g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), CurrentFog(), post,
@@ -755,7 +761,10 @@ void ReadRamp() {
 
 void OverlayCallback(const NativeGuestOutputRenderContext& ctx, void*) {
   const View view = CurrentView();
-  if (!Usable(ctx) || !IsCompositeView(view)) return;  // off/pattern: record nothing
+  if (!Usable(ctx) || !IsCompositeView(view)) {  // off/pattern: record nothing
+    g_clay_gap = true;
+    return;
+  }
   LogD3dMessages();  // (of the frames before this one: the layer reports a call when it is executed)
   ReadRamp();  // (before the clay pass: a post frame is drawn through this frame's ramp)
   if (!RenderClay(ctx)) return;

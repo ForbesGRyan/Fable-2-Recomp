@@ -330,6 +330,9 @@ constexpr ClayPostDecision DecideClayPost(const ClayPostInputs& in) {
 struct ClayPostRequest {
   bool post = false, bloom = false, sun = false;
   const float (*ramp)[3] = nullptr;
+  // The pass was not rendered for a while before this Render (the native view was off, or there was no
+  // scene): what its front targets hold is not the previous frame's picture (ClayFrontAfterGap).
+  bool gap = false;
 };
 // Why the pass cannot use the scene's post block (ClayStats::post_fault; the Post line's word behind
 // "post-block" when the scene has a valid block: review of plan Task 5, Minor 11). kMissing: the scene
@@ -3769,6 +3772,14 @@ struct ClayFrontState {
   uint32_t current = 0;
   bool valid = false;
 };
+// The state a Render starts from when the pass was not rendered for the frames before it (`gap`: the
+// native view was off, or no scene was there to draw): the targets keep their order, and what they hold is
+// seconds old, no previous frame's picture. Without this the first native frame after the view comes back
+// mixed a tenth of the picture from before the switch (review of plan Tasks 14 and 15, Minor 1).
+constexpr ClayFrontState ClayFrontAfterGap(ClayFrontState s, bool gap) {
+  if (gap) s.valid = false;
+  return s;
+}
 // What a Render does with them. write: the target the composite writes and the ramp reads. read: the
 // other one, read by the composite only with a share above 0. share: the constants' `previous`. next:
 // the state after this Render.
@@ -4225,6 +4236,25 @@ inline constexpr float kSunGlowScale = 0.20000000298023224f;  // 4B58 c255.x
 inline constexpr float kSunFadeStart = 1000.0f, kSunFadeRate = 0.0010000000474974513f;  // 3FF7 c255.x, c255.z
 inline constexpr uint32_t kSunRadialTaps = 14;
 inline constexpr double kSunRadialNorm = 4.0 / 7.0;  // 4BE4's literal: of the two factors and of the sum
+
+// Where a layer quad's pixels are sampled (controller ruling 38; review of plan Tasks 14 and 15, Important 1).
+// The game draws the layer with PA_SU_VTX_CNTL = 4 (register 0x2302, bit 0 clear: a pixel is sampled at its
+// integral window position; read from the command words of captures 052158 and 093600 at the cloud
+// occluders, the beam source, the moon glow and the sun disc). Direct3D samples a pixel at its centre. So the
+// layer's quads are drawn with a viewport whose origin is (0.5, 0.5), as the shadow maps are
+// (kShadowViewportOrigin): a clip position lands half a pixel further right and down, and the centre of
+// native pixel i is the game's window position i (SunQuadGameSample). The reference's rasteriser samples at
+// PIXEL_CENTRE = 0 (tools/xdk_sigmatch/post_sun_layer.py); tests/test_post_literals.py holds the two together.
+// The full-screen steps (depth, reduction, radial blur) address their sources by floor(SV_Position) and are
+// drawn with the origin at 0: they were the reference's already.
+inline constexpr float kSunQuadViewportOrigin = 0.5f;
+// The window coordinate of a normalised device coordinate on a layer target of `size` pixels along that axis
+// under the quads' viewport (`down`: the y axis, which runs down the window).
+inline double SunQuadWindow(double ndc, uint32_t size, bool down) {
+  return ((down ? -ndc : ndc) * 0.5 + 0.5) * double(size) + double(kSunQuadViewportOrigin);
+}
+// The game's window position that native pixel `pixel`'s sample point (its centre) stands for.
+inline double SunQuadGameSample(uint32_t pixel) { return double(pixel) + 0.5 - double(kSunQuadViewportOrigin); }
 
 // The depth test of a layer quad as the pass makes it: the quad's z / w against the layer's depth,
 // less-or-equal (the game's greater-or-equal under its reversed range). A NaN on either side fails.

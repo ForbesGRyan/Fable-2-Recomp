@@ -137,6 +137,22 @@ class SunLayerLiterals(unittest.TestCase):
         self.assertIn("rgb = t.rgb * %r * t.a;" % glow, quad)
         self.assertIn("(1.0 - saturate(%r * (length(i.world.xy - u_reg[2].xy) - %r)))" % (rate, start), quad)
 
+    def test_the_layer_quads_are_sampled_where_the_reference_samples_them(self):
+        # Ruling 38: the game's PA_SU_VTX_CNTL is 4 at the layer's draws (a pixel sampled at its integral
+        # position): the reference's PIXEL_CENTRE 0, and natively a viewport origin of half a pixel.
+        import post_sun_layer as sl
+        self.assertEqual(sl.PIXEL_CENTRE, 0.0)
+        origin = float(_one(r"inline constexpr float kSunQuadViewportOrigin = ([0-9.]+)f;", self.logic, "the origin"))
+        self.assertEqual(origin, 0.5 - sl.PIXEL_CENTRE)
+        self.assertIn("cmd->SetViewport({kSunQuadViewportOrigin, kSunQuadViewportOrigin, float(kSunLayerWidth), float(kSunLayerHeight), 0.0f, 1.0f});",
+                      self.pass_cpp)
+        # the four points of test case 651, by the reference's own screen rule on a 560 x 360 layer
+        for ndc_x, ndc_y, x, y in ((-1.0, 1.0, 0.0, 0.0), (0.25, -0.5, 350.0, 270.0), (-0.2358, 0.2124, 213.976, 141.768), (1.0, -1.0, 560.0, 360.0)):
+            sx, sy = sl._screen((ndc_x, ndc_y, 0.5, 1.0), 560, 360)[:2]
+            self.assertAlmostEqual(sx, x, places=9)
+            self.assertAlmostEqual(sy, y, places=9)
+            self.assertIn("{%s, %s, %s, %s}" % (ndc_x, ndc_y, x, y), self.logic_test)
+
     def test_the_radial_blur_is_the_references(self):
         radial = _one(r"inline constexpr const char\* kClaySunRadialPs = FABLE2_CLAY_POST_HLSL R\"hlsl\((.*?)\)hlsl\";", self.shaders,
                       "the radial blur's text")

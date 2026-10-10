@@ -1027,5 +1027,265 @@ class SignCensusTest(unittest.TestCase):
         self.assertEqual(pt.sign_census([{"kind": "tess", "tf": {"3": fc}}])["exp"], {("tess", 3, 18, 2): 1})
 
 
+# --- quads --check: the capture's quad records against the frame's rows (spec criterion 17) ---------------------
+
+QUAD_KINDS = {"moon": ("18D39DCEBEE4C2FC", "81BADE63A169E3DC", 0, (20, 31)),
+              "cloud": ("61976295517D7015", "C304C6A1AF18B46F", 0, (20, 31, 46, 47, 51, 69, 70, 71, 77, 78, 79)),
+              "glare": ("04985A0F7296E130", "81BADE63A169E3DC", 0, (31,)),
+              "beam-source": ("8E4DBB9E9A63EF67", "81BADE63A169E3DC", 1, (31,)),
+              "flare": ("D72FD0903CCE7DD6", "81BADE63A169E3DC", 1, (31,)),
+              "moon-glow": ("4B58837D42F08C89", "81BADE63A169E3DC", 1, ()),
+              "sun-disc": ("3E77B1AD4BC5B900", "81BADE63A169E3DC", 1, (20, 31)),
+              "cloud-occluder": ("3FF79524FCDB71C5", "C304C6A1AF18B46F", 1, (31, 46, 47, 77))}
+QUAD_FC = fc_hex((0x82000002, 0x14E80054, 0x001FE0FF, 0x00A80D10, 0x00000103, 0x14E90A18))
+
+
+def f32_hex(values):
+    return "".join(struct.pack(">f", v).hex().upper() for v in values)
+
+
+def quad_row(kind, n, mark=1.0, in_scene=None, pitch=None, colorcontrol=0x4, alpha_ref=0x3F008081, blend=0x01010101,
+             depth=0x00708762, mask=0xF, func="DrawIndx:82217EE8", idx=(0, 1, 2, 1, 3, 2)):
+    """An "indx" row of a furniture quad with its "indxdata" row under "data", as post_tables reads a frame's rows:
+    four corners told apart by `mark`, registers c<r> = (r + mark, 2, 3, 4), the matrix 1..16 + mark."""
+    ps, vs, layer, registers = QUAD_KINDS[kind]
+    in_scene = (layer == 0) if in_scene is None else in_scene
+    pitch = (1120 if layer == 0 else 560) if pitch is None else pitch
+    corners = [float(mark + 10 * c + k) for c in range(4) for k in range(5)]
+    return {"kind": "indx", "frame": 1, "func": func, "n": n, "in_scene": in_scene, "ps_hash": "0x" + ps,
+            "vs": {"hash": "0x" + vs}, "surface_info": "0x%08X" % (0x09000000 | pitch), "vertices": 4, "indices": 6, "stride": 20,
+            "bank": [float(i + 1 + mark) for i in range(16)] + [0.0] * 1008,
+            "pfull": pfull({r: (r + mark, 2.0, 3.0, 4.0) for r in registers}), "tf": {"13": list(QUAD_FC)},
+            "rs": {"2104": "0x%08X" % mask, "210E": "0x%08X" % alpha_ref, "2200": "0x%08X" % depth, "2201": "0x%08X" % blend,
+                   "2202": "0x%08X" % colorcontrol},
+            "data": {"kind": "indxdata", "frame": 1, "n": n, "stride": 20, "vbytes": 80, "verts": f32_hex(corners),
+                     "idx": list(idx)}}
+
+
+def quad_record(row, seq):
+    """The record a build with plan Task 12 writes for `row` (the frame row's "quads"."records" entry), made by
+    hand of the row's values."""
+    kind = next(k for k, v in QUAD_KINDS.items() if "0x" + v[0] == row["ps_hash"])
+    ps, vs, layer, registers = QUAD_KINDS[kind]
+    regs = "".join(row["pfull"][32 * r:32 * r + 32] for r in registers) + "00000000" * (4 * (12 - len(registers)))
+    control = int(row["rs"]["2202"], 16) & 0xF
+    return {"kind": kind, "layer": layer, "seq": seq, "ps": "0x" + ps, "vs": "0x" + vs, "corners": row["data"]["verts"],
+            "view_proj": f32_hex(row["bank"][:16]), "regs": regs,
+            "fetch": [list(QUAD_FC), ["0x00000000"] * 6, ["0x00000000"] * 6],
+            "blend": row["rs"]["2201"], "depth": row["rs"]["2200"], "mask": int(row["rs"]["2104"], 16) & 0xF,
+            "alpha_control": control, "alpha_ref": row["rs"]["210E"] if control & 8 else "0x00000000"}
+
+
+def quads_of(rows, **kw):
+    q = {"on": 1, "reason": "none", "count": len(rows), "seen": len(rows), "taken": len(rows), "over": 0,
+         "records": [quad_record(r, i) for i, r in enumerate(rows)]}
+    q.update(kw)
+    return q
+
+
+def other_row(kind="verts", ps=None, in_scene=False, pitch=560):
+    return {"kind": kind, "frame": 1, "func": "D3DDevice_BeginVertices?" if kind == "verts" else "DrawIndx:82217EE8",
+            "in_scene": in_scene, "ps_hash": "0x" + (ps or "0A96000000000000"), "surface_info": "0x%08X" % pitch}
+
+
+class QuadCheckTest(unittest.TestCase):
+    def frame(self):
+        """A frame as the game issues it: the water's reflection views with the flare's shader at a quarter of the
+        scene's pitch, the main scene with moon, clouds and the glares, the sun layer, the post rectangles, the HUD."""
+        scene = [quad_row("moon", 35, 1.0, colorcontrol=0xC, alpha_ref=0x3B808081, blend=0x07060706),
+                 quad_row("cloud", 36, 2.0, colorcontrol=0xC, alpha_ref=0x3CA0A0A1, blend=0x07060706, depth=0x00708766),
+                 quad_row("glare", 43, 3.0, depth=0x00708760), quad_row("glare", 44, 4.0, depth=0x00708760)]
+        layer = [quad_row("cloud-occluder", 47, 5.0, colorcontrol=0xC, alpha_ref=0x3E189899, blend=0x07060706, mask=0,
+                          depth=0x00708766),
+                 quad_row("beam-source", 53, 6.0, blend=0x00010001), quad_row("flare", 54, 7.0),
+                 quad_row("sun-disc", 55, 8.0, colorcontrol=0xC)]
+        rows = ([quad_row("flare", 5, 9.0, pitch=280), quad_row("flare", 6, 9.5, pitch=280)]
+                + [other_row("indx", in_scene=True, pitch=1120)] + scene
+                + [other_row()] + layer
+                + [other_row(ps=pt.RADIAL_PS), other_row(ps=pt.COMPOSITE_PS, pitch=1280),
+                   other_row("indx", ps="7B22000000000000", pitch=1280)])
+        return rows, scene + layer
+
+    def test_the_rows_the_capture_reads(self):
+        rows, want = self.frame()
+        self.assertEqual([r["n"] for r in pt.quad_rows_expected(rows)], [r["n"] for r in want])
+
+    def test_a_layer_kind_is_read_at_half_the_scenes_pitch_only(self):
+        rows, want = self.frame()
+        # The reflection views' flares come before the scene; one at a quarter pitch after it is no layer quad
+        # either, nor a scene kind outside the scene, nor a layer kind inside it.
+        extra = [quad_row("flare", 60, 1.0, pitch=280), quad_row("glare", 61, 1.0, in_scene=False, pitch=560),
+                 quad_row("moon", 62, 1.0, in_scene=False, pitch=1120), quad_row("flare", 63, 1.0, in_scene=True, pitch=1120)]
+        at = next(i for i, r in enumerate(rows) if r.get("n") == 55) + 1
+        self.assertEqual([r["n"] for r in pt.quad_rows_expected(rows[:at] + extra + rows[at:])], [r["n"] for r in want])
+        # ... and nothing of the layer's before the frame's main scene has been seen, or after its composite.
+        early = [quad_row("flare", 1, 1.0, pitch=560)]
+        late = [quad_row("flare", 99, 1.0, pitch=560)]
+        self.assertEqual([r["n"] for r in pt.quad_rows_expected(early + rows + late)], [r["n"] for r in want])
+        # Half of another scene's pitch is that scene's layer.
+        wide = [quad_row("moon", 1, 1.0, pitch=1280, colorcontrol=0xC), quad_row("flare", 2, 1.0, pitch=640),
+                quad_row("flare", 3, 1.0, pitch=560)]
+        self.assertEqual([r["n"] for r in pt.quad_rows_expected(wide)], [1, 2])
+
+    def test_another_builder_is_not_read(self):
+        rows, want = self.frame()
+        rows.insert(4, quad_row("glare", 70, 1.0, func="D3DDevice_DrawIndexedVertices?"))
+        self.assertEqual([r["n"] for r in pt.quad_rows_expected(rows)], [r["n"] for r in want])
+
+    def test_records_equal_to_their_rows(self):
+        rows, want = self.frame()
+        self.assertEqual(pt.frame_quad_faults(quads_of(want), rows), [])
+
+    def faults(self, change):
+        rows, want = self.frame()
+        quads = quads_of(want)
+        change(quads, rows)
+        return pt.frame_quad_faults(quads, rows)
+
+    def test_one_bit_of_a_corner(self):
+        def change(quads, rows):
+            c = quads["records"][7]["corners"]
+            quads["records"][7]["corners"] = c[:79] + ("0" if c[79] != "0" else "1") + c[80:]
+        f = self.faults(change)
+        self.assertEqual(len(f), 1)
+        self.assertIn("record 7 (sun-disc, row n 55): corners", f[0])
+
+    def test_a_register_the_matrix_a_fetch_constant_a_state_word(self):
+        def reg(quads, rows):
+            r = quads["records"][1]["regs"]
+            quads["records"][1]["regs"] = r[:32 * 10 + 7] + ("0" if r[32 * 10 + 7] != "0" else "1") + r[32 * 10 + 8:]
+        self.assertIn("regs: c79", self.faults(reg)[0])
+
+        def padding(quads, rows):
+            quads["records"][2]["regs"] = quads["records"][2]["regs"][:32] + "3F800000" + "00000000" * 43
+        self.assertIn("regs: not zero after the kind's 1", self.faults(padding)[0])
+
+        def matrix(quads, rows):
+            quads["records"][0]["view_proj"] = "3F800001" + quads["records"][0]["view_proj"][8:]
+        self.assertIn("view_proj", self.faults(matrix)[0])
+
+        def fetch(quads, rows):
+            quads["records"][3]["fetch"][0][1] = "0x14E80055"
+        self.assertIn("fetch 0 (slot 13)", self.faults(fetch)[0])
+
+        def unused(quads, rows):
+            quads["records"][3]["fetch"][2][5] = "0x00000001"
+        self.assertIn("fetch 2: not zero", self.faults(unused)[0])
+        for key, value in (("blend", "0x07060706"), ("depth", "0x00708766"), ("mask", 7), ("alpha_control", 4),
+                           ("alpha_ref", "0x3F000000"), ("layer", 0), ("seq", 9), ("vs", "0xC304C6A1AF18B46F")):
+            def state(quads, rows, key=key, value=value):
+                quads["records"][7][key] = value
+            f = self.faults(state)
+            self.assertEqual(len(f), 1, (key, f))
+            self.assertIn(key, f[0])
+
+    def test_the_alpha_test_off_has_reference_zero(self):
+        # The stale register (0.502 at a glare's call) is not the record's.
+        def stale(quads, rows):
+            quads["records"][2]["alpha_ref"] = "0x3F008081"
+        self.assertIn("alpha_ref", self.faults(stale)[0])
+
+    def test_the_order_and_the_count(self):
+        def swapped(quads, rows):
+            r = quads["records"]
+            r[2], r[3] = r[3], r[2]
+        f = self.faults(swapped)
+        self.assertTrue(any("record 2 (glare, row n 43)" in x for x in f), f)
+
+        def missing(quads, rows):
+            del quads["records"][6]
+            quads["count"] = 7
+        f = self.faults(missing)
+        self.assertIn("7 records, 8 furniture rows", f[0])
+
+        def another_kind(quads, rows):
+            quads["records"][6]["kind"] = "sun-disc"
+        self.assertIn("kind sun-disc, the row's shader is flare", self.faults(another_kind)[0])
+
+    def test_a_frame_without_a_set(self):
+        rows, want = self.frame()
+        f = pt.frame_quad_faults({"on": 1, "reason": "pending", "count": 0, "seen": 8, "taken": 7, "over": 0}, rows)
+        self.assertEqual(f, ["no set (pending, seen 8, taken 7, over 0) for 8 furniture rows"])
+        f = pt.frame_quad_faults({"on": 0, "reason": "off", "count": 0, "seen": 0, "taken": 0, "over": 0}, rows)
+        self.assertEqual(f, ["no set (off, seen 0, taken 0, over 0) for 8 furniture rows"])
+        # A frame without furniture rows has no set and no fault; one that claims records then has.
+        plain = [other_row("indx", in_scene=True, pitch=1120), other_row(ps=pt.COMPOSITE_PS)]
+        self.assertEqual(pt.frame_quad_faults({"on": 1, "reason": "no-draw", "count": 0, "seen": 0, "taken": 0, "over": 0}, plain), [])
+        self.assertEqual(pt.frame_quad_faults(None, plain), ["no \"quads\" in the frame row"])
+        self.assertIn("1 records, 0 furniture rows", pt.frame_quad_faults(quads_of(want[:1]), plain)[0])
+
+    def test_the_bound(self):
+        rows = [quad_row("moon", 1, 1.0, colorcontrol=0xC)] + [quad_row("flare", 2 + i, float(i)) for i in range(24)]
+        f = pt.frame_quad_faults(quads_of(rows[:24], seen=25, over=1), rows)
+        self.assertTrue(any("over the bound" in x for x in f), f)
+        # 24 is a set.
+        self.assertEqual(pt.frame_quad_faults(quads_of(rows[:24]), rows[:24]), [])
+
+    def test_a_row_without_its_data_cannot_be_held(self):
+        def change(quads, rows):
+            next(r for r in rows if r.get("n") == 53)["data"] = None
+        self.assertIn("record 5 (beam-source, row n 53): the row has no \"indxdata\"", self.faults(change)[0])
+
+    def test_the_indices(self):
+        def change(quads, rows):
+            next(r for r in rows if r.get("n") == 54)["data"]["idx"] = [1, 0, 2, 2, 3, 1]
+        self.assertIn("indices [1, 0, 2, 2, 3, 1]", self.faults(change)[0])
+
+    def write(self, d, frames):
+        """A capture file: per frame its rows (each "indx" row followed, one row later, by its "indxdata") and the
+        frame row with `quads`."""
+        lines = []
+        for n, (rows, quads) in enumerate(frames, 1):
+            pending = None
+            for r in rows:
+                r = dict(r, frame=n)
+                data = r.pop("data", None)
+                lines.append(r)
+                if pending:
+                    lines.append(dict(pending, frame=n))
+                pending = data
+            if pending:
+                lines.append(dict(pending, frame=n))
+            fr = {"kind": "frame", "frame": n}
+            if quads is not None:
+                fr["quads"] = quads
+            lines.append(fr)
+        p = Path(d) / "native_discovery_test.jsonl"
+        p.write_text("".join(json.dumps(x, separators=(",", ":")) + "\n" for x in lines), encoding="utf-8")
+        return p
+
+    def report(self, frames):
+        with tempfile.TemporaryDirectory() as d:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                status = pt.report_quads_check(self.write(d, frames))
+            return status, out.getvalue()
+
+    def test_the_report(self):
+        rows, want = self.frame()
+        status, text = self.report([(rows, quads_of(want)), (rows, quads_of(want))])
+        self.assertEqual(status, 0, text)
+        self.assertIn("frame 1: 8 quad records equal to their rows (moon 1, cloud 1, glare 2, beam-source 1, flare 1, "
+                      "sun-disc 1, cloud-occluder 1)", text)
+        self.assertIn("quad records equal to the frame's rows in 2 of 2 frames; none over the bound of 24", text)
+
+    def test_the_report_fails_on_a_fault_and_on_a_capture_without_records(self):
+        rows, want = self.frame()
+        bad = quads_of(want)
+        bad["records"][0]["blend"] = "0x01010101"
+        status, text = self.report([(rows, quads_of(want)), (rows, bad)])
+        self.assertEqual(status, 1, text)
+        self.assertIn("frame 2: QUADS record 0 (moon, row n 35): blend", text)
+        self.assertIn("in 1 of 2 frames", text)
+        status, text = self.report([(rows, None)])
+        self.assertEqual(status, 1)
+        self.assertIn("frame 1: QUADS no \"quads\" in the frame row", text)
+        # A capture in which no frame has a furniture row checks nothing.
+        plain = [other_row("indx", in_scene=True, pitch=1120)]
+        status, text = self.report([(plain, {"on": 1, "reason": "no-draw", "count": 0, "seen": 0, "taken": 0, "over": 0})])
+        self.assertEqual(status, 1)
+        self.assertIn("no frame of the capture has a quad record", text)
+
+
 if __name__ == "__main__":
     unittest.main()

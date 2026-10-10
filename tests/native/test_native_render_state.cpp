@@ -73,6 +73,11 @@ int main() {
     if (PostRecordsWanted(off != 0, off != 1, off != 2, off != 3)) return 241;
   }
   if (PostRecordsWanted(false, false, false, false)) return 242;
+  // The capture reads the frame's quad records and the radial blur's registers only for a frame
+  // whose post block it reads, and only with the sun's switch on.
+  if (!SunRecordsWanted(true, true)) return 243;
+  if (SunRecordsWanted(false, true) || SunRecordsWanted(true, false) || SunRecordsWanted(false, false)) return 244;
+  if (SunRecordsWanted(PostRecordsWanted(true, true, true, false), true)) return 245;  // (the light off: no post, no quads)
 
   // Setting the view to what it already is (a plan's VIEW= token) is no change: it is not counted
   // for the clay log's "(changed)" mark. Every F6 step is one.

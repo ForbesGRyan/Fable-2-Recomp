@@ -59,6 +59,12 @@ Reports (every number is of the files named on the command line):
         the furniture of every frame: rows a frame by kind and target, the alpha test (enable bit, function,
         reference) with the frames it holds in, the depth and blend words, the builder each kind is drawn
         through; with --frame every quad of that frame with its corners, registers and index pattern.
+  post_tables.py quads <capture.jsonl> --check
+        the quad records the capture built for each frame (the frame row's "quads", written by a build with plan
+        Task 12 and --fable2_native_sun=on) against the same frame's "indx" and "indxdata" rows: which rows the
+        capture reads (kind by target, between the main scene and the composite), then each record's corners,
+        matrix, registers, fetch constants and state words bit for bit, its place, and the bound (spec
+        criterion 17). The capture must hold every draw (DISC=frames/1). Exit code 1 on any difference.
   post_tables.py occluders <capture.jsonl> --frame N
         the sun layer's cubes against the main scene's draws of the same unit cube and vertex c119.x; its tree
         occluder draws against the main scene's leaf draws of the same buffers, before and after the scene's
@@ -1471,6 +1477,223 @@ def report_quads(path, frame=None):
     return status
 
 
+# --- quads --check: the capture's quad records against the frame's rows (spec criterion 17) --------------------
+
+MAX_QUAD_RECORDS = 24                   # quad_record.h, kMaxQuadRecords
+QUAD_RECORD_REGISTERS, QUAD_RECORD_SLOTS = 12, 3
+
+
+def _quad_table():
+    """pixel shader hash -> light_formulas.PostQuadShader, for the kinds the capture records."""
+    import light_formulas as lf
+    return {q.hash: q for q in lf.POST_QUAD_SHADERS}
+
+
+def _pitch(r):
+    return int(r.get("surface_info", "0x0"), 16) & 0x3FFF
+
+
+def quad_rows_expected(rows):
+    """The rows of one frame, in the file's order, that the capture makes a quad record of (capture.cpp,
+    ObserveQuadDraw; quad_record.h, QuadTargetMatches): calls of the indexed builder whose pixel shader is in
+    POST_QUAD_SHADERS, a scene kind inside the main scene, a layer kind outside it at a target of half the
+    scene's pitch (the pitch of the frame's first main-scene row of the builder), after that row and before the
+    frame's composite. rows: the frame's decoded "verts" and "indx" rows."""
+    table = _quad_table()
+    out = []
+    scene_pitch = 0
+    for r in rows:
+        ps, _ = _row_hashes(r)
+        if r.get("kind") == "verts":
+            if ps == COMPOSITE_PS and not r.get("in_scene"):
+                break
+            continue
+        if r.get("kind") != "indx" or r.get("func") != QUAD_BUILDER:
+            continue
+        in_scene = bool(r.get("in_scene"))
+        if in_scene and not scene_pitch:
+            scene_pitch = _pitch(r)
+        q = table.get(ps)
+        if q is None:
+            continue
+        if q.where == "scene":
+            if in_scene:
+                out.append(r)
+        elif not in_scene and scene_pitch and _pitch(r) * 2 == scene_pitch:
+            out.append(r)
+    return out
+
+
+def _bank_bits(values):
+    return "".join("%08X" % struct.unpack(">I", struct.pack(">f", v))[0] for v in values)
+
+
+def quad_record_faults(record, row):
+    """What differs between one record of a frame row's "quads" and the "indx" row of its draw (with the draw's
+    "indxdata" row under "data"), as texts; [] when nothing does. Floats are compared by their bits."""
+    table = _quad_table()
+    ps, vs = _row_hashes(row)
+    q = table[ps]
+    faults = []
+    if record.get("kind") != q.kind:
+        return ["kind %s, the row's shader is %s" % (record.get("kind"), q.kind)]
+    layer = 0 if q.where == "scene" else 1
+    if record.get("layer") != layer:
+        faults.append("layer %s, the kind's is %d" % (record.get("layer"), layer))
+    for key, want in (("ps", ps), ("vs", vs)):
+        got = (record.get(key) or "0x")[2:].upper()
+        if got != want:
+            faults.append("%s %s, the row's %s" % (key, got, want))
+    data = row.get("data")
+    if not data or "verts" not in data or "idx" not in data:
+        faults.append("the row has no \"indxdata\" to hold the corners against")
+    else:
+        if list(data["idx"]) != [0, 1, 2, 1, 3, 2]:
+            faults.append("indices %s in the row's data: no quad of the pattern 0 1 2 1 3 2" % list(data["idx"]))
+        if data.get("stride") != 20 or data.get("vbytes") != 80:
+            faults.append("the row's data is %s bytes at stride %s" % (data.get("vbytes"), data.get("stride")))
+        if (record.get("corners") or "").upper() != data["verts"].upper():
+            faults.append("corners %s, the row's data %s" % (record.get("corners"), data["verts"]))
+    bank = row.get("bank") or []
+    if len(bank) < 16:
+        faults.append("the row has no vertex bank to hold view_proj against")
+    elif (record.get("view_proj") or "").upper() != _bank_bits(bank[:16]):
+        faults.append("view_proj %s, the row's c0..c3 %s" % (record.get("view_proj"), _bank_bits(bank[:16])))
+    regs = (record.get("regs") or "").upper()
+    pf = row.get("pfull") or ""
+    if len(regs) != 32 * QUAD_RECORD_REGISTERS:
+        faults.append("regs: %d hex digits, not %d" % (len(regs), 32 * QUAD_RECORD_REGISTERS))
+    else:
+        for i, reg in enumerate(q.registers):
+            want = pf[32 * reg:32 * reg + 32].upper()
+            if len(want) != 32 or "-" in want:
+                faults.append("regs: the row has no value of c%d" % reg)
+            elif regs[32 * i:32 * i + 32] != want:
+                faults.append("regs: c%d %s, the row's %s" % (reg, regs[32 * i:32 * i + 32], want))
+        if regs[32 * len(q.registers):].strip("0"):
+            faults.append("regs: not zero after the kind's %d" % len(q.registers))
+    fetch = record.get("fetch") or []
+    if len(fetch) != QUAD_RECORD_SLOTS:
+        faults.append("fetch: %d slots, not %d" % (len(fetch), QUAD_RECORD_SLOTS))
+    else:
+        for i in range(QUAD_RECORD_SLOTS):
+            got = [int(x, 16) for x in fetch[i]]
+            if i < len(q.slots):
+                want = [int(x, 16) for x in (row.get("tf") or {}).get(str(q.slots[i]), [])]
+                if got != want:
+                    faults.append("fetch %d (slot %d) %s, the row's %s" % (
+                        i, q.slots[i], " ".join("%08X" % x for x in got), " ".join("%08X" % x for x in want)))
+            elif any(got):
+                faults.append("fetch %d: not zero (the kind has %d slots)" % (i, len(q.slots)))
+    for key, reg in (("blend", 0x2201), ("depth", 0x2200)):
+        got, want = int(record.get(key, "0x0"), 16), _rs(row, reg)
+        if got != want:
+            faults.append("%s 0x%08X, the row's %s" % (key, got, "none" if want is None else "0x%08X" % want))
+    mask = _rs(row, 0x2104)
+    if mask is None or record.get("mask") != mask & 0xF:
+        faults.append("mask %s, the row's %s" % (record.get("mask"), "none" if mask is None else "%X" % (mask & 0xF)))
+    control = _rs(row, 0x2202)
+    if control is None or record.get("alpha_control") != control & 0xF:
+        faults.append("alpha_control %s, the row's %s" % (record.get("alpha_control"), "none" if control is None else control & 0xF))
+    else:
+        # The reference with the test on; 0 with it off (the register is stale then: ruling 23).
+        want = _rs(row, 0x210E, 0) if control & 8 else 0
+        got = int(record.get("alpha_ref", "0x0"), 16)
+        if got != want:
+            faults.append("alpha_ref 0x%08X, the row's 0x%08X (%s)" % (got, want, "test on" if control & 8 else "test off: 0"))
+    return faults
+
+
+def frame_quad_faults(quads, rows):
+    """What is wrong with a frame row's "quads" against the frame's rows (quad_rows_expected), as texts."""
+    if quads is None:
+        return ["no \"quads\" in the frame row"]
+    want = quad_rows_expected(rows)
+    faults = []
+    if quads.get("over") or quads.get("count", 0) > MAX_QUAD_RECORDS:
+        faults.append("over the bound of %d: count %s, over %s" % (MAX_QUAD_RECORDS, quads.get("count"), quads.get("over")))
+    if quads.get("reason") != "none":
+        if want or quads.get("reason") != "no-draw" or quads.get("count"):
+            faults.append("no set (%s, seen %s, taken %s, over %s) for %d furniture rows" % (
+                quads.get("reason"), quads.get("seen"), quads.get("taken"), quads.get("over"), len(want)))
+        return faults
+    records = quads.get("records") or []
+    if len(records) != len(want) or quads.get("count") != len(records):
+        faults.append("%d records, %d furniture rows (count %s)" % (len(records), len(want), quads.get("count")))
+    for i, (record, row) in enumerate(zip(records, want)):
+        where = "record %d (%s, row n %s)" % (i, _quad_table()[_row_hashes(row)[0]].kind, row.get("n"))
+        if record.get("seq") != i:
+            faults.append("%s: seq %s" % (where, record.get("seq")))
+        faults.extend("%s: %s" % (where, text) for text in quad_record_faults(record, row))
+    return faults
+
+
+def _frames_with_data(path):
+    """frame -> (the frame's decoded "verts" and "indx" rows in the file's order, each "indx" row with its
+    "indxdata" row under "data"; the frame row's "quads" or None; whether the frame has a frame row)."""
+    frames = {}
+    by_n = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            head = line[:48]
+            if not head.startswith('{"kind":"'):
+                continue
+            kind = head[9:head.find('"', 9)]
+            if kind not in ("verts", "indx", "indxdata", "frame"):
+                continue
+            r = json.loads(line)
+            fr = frames.setdefault(r["frame"], {"rows": [], "quads": None, "frame_row": False})
+            if kind == "frame":
+                fr["quads"] = r.get("quads")
+                fr["frame_row"] = True
+            elif kind == "indxdata":
+                row = by_n.get((r["frame"], r.get("n")))
+                if row is not None:
+                    row["data"] = r
+            else:
+                if kind == "indx":
+                    by_n[(r["frame"], r.get("n"))] = r
+                fr["rows"].append(r)
+    return frames
+
+
+def report_quads_check(path):
+    """Every frame's quad records against its rows (spec criterion 17). Returns 0 when every frame with a frame
+    row has nothing wrong and at least one frame has a record, else 1."""
+    frames = _frames_with_data(path)
+    table = _quad_table()
+    print("capture %s: %d frames" % (Path(path).name, len(frames)))
+    good = with_records = checked = 0
+    for n in sorted(frames):
+        fr = frames[n]
+        if not fr["frame_row"]:
+            print("frame %d: the capture has no row of this frame's end (not checked)" % n)
+            continue
+        checked += 1
+        faults = frame_quad_faults(fr["quads"], fr["rows"])
+        for text in faults:
+            print("frame %d: QUADS %s" % (n, text))
+        if faults:
+            continue
+        good += 1
+        records = fr["quads"].get("records") or []
+        if not records:
+            print("frame %d: no furniture row and no quad record (%s)" % (n, fr["quads"].get("reason")))
+            continue
+        with_records += 1
+        kinds = [r["kind"] for r in records]
+        order = [q.kind for q in table.values()]
+        print("frame %d: %d quad records equal to their rows (%s)" % (
+            n, len(records), ", ".join("%s %d" % (k, kinds.count(k)) for k in order if k in kinds)))
+    print("quad records equal to the frame's rows in %d of %d frames; %s" % (
+        good, checked, "none over the bound of %d" % MAX_QUAD_RECORDS
+        if all(not (fr["quads"] or {}).get("over") for fr in frames.values()) else "SOME OVER THE BOUND"))
+    if not with_records:
+        print("no frame of the capture has a quad record: nothing was checked (a build without plan Task 12, "
+              "--fable2_native_sun off, or a capture without furniture)")
+    return 0 if checked and good == checked and with_records else 1
+
+
 # --- the occluders: the cubes and the tree draws ----------------------------------------------------------------
 
 def match_tree_occluders(rows, layer_pitch, depth_copy_line):
@@ -1663,6 +1886,7 @@ def main(argv=None):
     p = sub.add_parser("quads")
     p.add_argument("capture")
     p.add_argument("--frame", type=int)
+    p.add_argument("--check", action="store_true", help="the capture's quad records against the frame's rows (criterion 17)")
     p = sub.add_parser("occluders")
     p.add_argument("capture")
     p.add_argument("--frame", type=int, required=True)
@@ -1674,7 +1898,7 @@ def main(argv=None):
     if args.cmd == "graph":
         return report_graph(args.capture, args.frame, args.tex_root, not args.no_stats, args.all, args.png)
     if args.cmd == "quads":
-        return report_quads(args.capture, args.frame)
+        return report_quads_check(args.capture) if args.check else report_quads(args.capture, args.frame)
     if args.cmd == "occluders":
         return report_occluders(args.capture, args.frame)
     if args.cmd == "signs":

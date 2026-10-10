@@ -45,6 +45,7 @@
 #include "material.h"
 #include "position_decode.h"
 #include "post_block.h"
+#include "quad_record.h"
 #include "render_state.h"
 #include "bone_skin.h"
 #include "instance_expand.h"
@@ -132,6 +133,11 @@ std::atomic<bool> g_fog_frame{false};
 // scene is looked at for the post chain and nothing of it is read.
 std::atomic<bool> g_post_wanted{false};
 std::atomic<bool> g_post_frame{false};
+// The consumer also wants the frame's quad records and the radial blur's registers (SetSunWanted:
+// the native view, the light, the post chain and the sun's switch on: fable2_native_sun), and the
+// frame being built is read for them. Latched like the post block's word, and only with it.
+std::atomic<bool> g_sun_wanted{false};
+std::atomic<bool> g_quads_frame{false};
 std::atomic<bool> g_failed{false};
 std::atomic<uint64_t> g_swaps{0};      // guest frames since start (while enabled)
 std::atomic<int> g_frames_written{0};  // discovery frames completed
@@ -178,6 +184,16 @@ constexpr uint32_t kFogRefusedLines = 8;
 uint32_t g_post_frames = 0;
 uint32_t g_post_block_missing[size_t(PostBlockReason::kCount)] = {};
 uint32_t g_post_kept_frames = 0;
+// The same for the quad records: frames with them wanted since the last line, those of them
+// without a set to draw ("quad-record") by reason, and those whose post block has the radial
+// blur's registers. The last frame's reason and the lines written about a change of it (at most
+// kQuadChangeLines). OnSwap thread only.
+uint32_t g_quad_frames = 0;
+uint32_t g_quad_set_missing[size_t(QuadSetReason::kCount)] = {};
+uint32_t g_quad_radial_frames = 0;
+QuadSetReason g_quad_last_reason = QuadSetReason::kOff;
+uint32_t g_quad_change_lines = 0;
+constexpr uint32_t kQuadChangeLines = 16;
 
 inline uint64_t Ticks() {
 #if defined(_M_X64) || defined(__x86_64__)
@@ -3842,6 +3858,12 @@ struct PostFrame {
   uint32_t tries = 0;
   uint32_t untold = 0;  // rectangles whose pixel shader could not be told (ObservePostDraw)
   uint32_t frame = 0;
+  // The radial blur's c31, c46, c47 (read only with the quads wanted): the game draws two such
+  // rectangles a frame with one set of registers (16 of 16 in capture native_discovery_20261010_052158).
+  // radial_bad: a read failed, or the second rectangle's registers were not the first's.
+  float radial[3][4] = {};
+  bool have_radial = false;
+  bool radial_bad = false;
 };
 constinit thread_local PostFrame t_post;
 // At most this many reads at a composite in a frame that gives no block (a read is five
@@ -3864,6 +3886,9 @@ constexpr bool PostRegistersAreBankOnly() {
     if (IsBufferLoadRegister(kPixelBank, r)) return false;
   }
   for (uint32_t r : kPostBlurRegisters) {
+    if (IsBufferLoadRegister(kPixelBank, r)) return false;
+  }
+  for (uint32_t r : kPostRadialRegisters) {
     if (IsBufferLoadRegister(kPixelBank, r)) return false;
   }
   return true;
@@ -3901,6 +3926,9 @@ bool ReadPostRegisters(const uint32_t* regs, int n, float out[][4]) {
 // sky draw is told:
 //   - the bright pass (kPostBrightPs): its c31, c46, c47, c77 into this thread's PostFrame;
 //   - the blurs (kPostBlurXPs, kPostBlurYPs): their c46, c47;
+//   - the radial blur (kPostRadialPs), only with the quads wanted (g_quads_frame): its c31, c46,
+//     c47, which the block takes at the composite (SetPostRadial) when both of its rectangles had
+//     the same registers;
 //   - the composite (kPostCompositePs): its c31, c46, c47, c77, c78, the fetch constant of slot 1,
 //     and the table's 2,048 bytes from guest memory at the constant's base address, read whole or
 //     not at all (ReadPhysical). The registers and the constant are judged before any table byte
@@ -3945,6 +3973,18 @@ void ObservePostDraw(uint32_t id, uint32_t device) {
     f.regs.have_blur[s] = ReadPostRegisters(kPostBlurRegisters, 2, f.regs.blur[s]);
     return;
   }
+  if (hash == kPostRadialPs) {
+    if (!g_quads_frame.load(std::memory_order_relaxed)) return;
+    float radial[3][4] = {};
+    if (!ReadPostRegisters(kPostRadialRegisters, 3, radial)) {
+      f.radial_bad = true;
+      return;
+    }
+    if (f.have_radial && std::memcmp(f.radial, radial, sizeof(radial)) != 0) f.radial_bad = true;
+    std::memcpy(f.radial, radial, sizeof(radial));
+    f.have_radial = true;
+    return;
+  }
   if (hash != kPostCompositePs) return;
   PostRegisters regs = f.regs;
   regs.have_composite = ReadPostRegisters(kPostCompositeRegisters, 5, regs.composite);
@@ -3963,6 +4003,8 @@ void ObservePostDraw(uint32_t id, uint32_t device) {
       if (block.valid) {
         source.base = base;
         source.content = XXH3_64bits(table, sizeof(table));
+        // The radial blur's registers, judged by SetPostRadial; a block without them is still valid.
+        if (f.have_radial && !f.radial_bad) SetPostRadial(&block, f.radial[0], f.radial[1], f.radial[2]);
       }
     } else {
       why = PostBlockReason::kUnread;
@@ -3977,6 +4019,245 @@ void ObservePostDraw(uint32_t id, uint32_t device) {
     g_builder.CountPostTry(why);
     ++f.tries;
   }
+}
+
+// --- The quad records (frame-map section 17, "Quad records"; quad_record.h) -------------------
+// Read only in a frame with records and with the quads wanted (g_quads_frame), at outermost calls
+// of the indexed immediate builder 0x82217EE8: the scene's furniture inside the main scene, the
+// sun layer's quads between the scene and the composite.
+
+// This thread's quad state of the current frame (the drawing thread's own, like the post's;
+// g_light_tries_frame tells one frame from the next).
+struct QuadFrame {
+  // RB_SURFACE_INFO's pitch at the frame's first main-scene call of the builder; 0: no such call
+  // yet. The layer's target is told by it (QuadTargetMatches), and before it no call outside the
+  // scene is looked at (the water's reflection views come before the main scene).
+  uint32_t scene_pitch = 0;
+  uint32_t untold = 0;  // calls whose pixel shader could not be told
+  uint32_t frame = 0;
+};
+constinit thread_local QuadFrame t_quad;
+// At most this many calls a frame are counted as refused for a pixel shader that could not be told.
+constexpr uint32_t kMaxQuadUntold = 8;
+
+// A furniture call whose storage this thread has yet to read: the game fills the vertices and the
+// indices after the builder returns (xdk_layout.h), so they are read when this thread enters its
+// next hooked draw (FlushPendingQuad), as discovery's "indxdata" rows are. Everything else of the
+// record was read at the call's return, where the discovery rows read it too.
+struct PendingQuad {
+  bool valid = false;
+  uint32_t frame = 0;  // QuadFrame::frame of the call
+  const PostQuadEntry* entry = nullptr;
+  uint32_t vertex_storage = 0, index_storage = 0;
+  float view_proj[4][4] = {};
+  float ps[12][4] = {};
+  uint32_t fetch[3][6] = {};
+  uint32_t blend = 0, depth = 0, colour_mask = 0, colour_control = 0, alpha_ref = 0, vport_z_scale = 0, vte_cntl = 0;
+};
+constinit thread_local PendingQuad t_pending_quad;
+
+// Quad records that were not handed to their frame: the frame was over when the storage was read
+// (the frame's recheck under the lock), or another furniture call came before the read. Counted
+// here for the quads: log line since its last print; the frame they belonged to has no set
+// ("pending").
+std::atomic<uint32_t> g_quad_dropped{0};
+// Calls that ran a table shader somewhere else than at its kind's target (ruling 24: the flares
+// drawn into the water's reflection views): not read, counted here for the same line.
+std::atomic<uint32_t> g_quad_elsewhere{0};
+
+// The registers of a record are the bank's at any hooked draw: no buffer load names a pixel
+// register of the table or vertex c0..c3 (light_block.h, kBufferLoadRanges).
+constexpr bool QuadRegistersAreBankOnly() {
+  for (const PostQuadEntry& e : kPostQuadTable) {
+    for (size_t i = 0; i < e.register_count; ++i) {
+      if (IsBufferLoadRegister(kPixelBank, e.registers[i])) return false;
+    }
+  }
+  for (uint32_t r = 0; r < 4; ++r) {
+    if (IsBufferLoadRegister(kVertexBank, r)) return false;
+  }
+  return true;
+}
+static_assert(QuadRegistersAreBankOnly(), "a quad's register is loaded from a constant buffer");
+// The builder's primitive type of a quad: a triangle list (every captured furniture row).
+constexpr uint32_t kQuadPrimitive = 4;
+
+QuadFrame& CurrentQuadFrame() {
+  const uint32_t frame = g_light_tries_frame.load(std::memory_order_relaxed);
+  if (t_quad.frame != frame) {
+    t_quad = QuadFrame{};
+    t_quad.frame = frame;
+  }
+  return t_quad;
+}
+
+// One outermost call of the indexed builder in a frame with the quads wanted, at the hook's
+// return. Which quad it is, is told by the pixel shader the draw runs (the device's two shader
+// fields as ChoosePs reads them; the microcode hash through LookupPs, cached per object) and by
+// where it is drawn (QuadTargetMatches, ruling 24): any other call costs those two reads and the
+// lookup and nothing else, a call outside the scene before the frame's main scene or after its
+// composite only this thread's frame checks.
+// For a furniture call, at this moment: the vertex shader (it must be the one the pixel shader is
+// checked with: spec ruling 18), the builder's arguments and the device's storage fields (a quad
+// of four vertices of 20 bytes and six 16-bit indices from vertex 0, the fields this draw's:
+// the pointer the builder returned at r10 is the device's, as WriteIndxRow asks), vertex c0..c3
+// from the bank (not literals of the vertex shader), the kind's pixel registers through
+// ReadPixelConstant (which refuses a literal), its slots' fetch constants and the seven state
+// words from the device's register shadows. Every count and size comes from the arguments and is
+// held to the quad's before anything is read by it; the storage's two addresses are kept and
+// 80 and 12 bytes are read from them later, whole or not at all.
+// The call is counted in the frame under the scene's mutex after the frame's recheck
+// (FrameBuilder::QuadSeen), refused there at once when something above failed, and otherwise left
+// pending for this thread's next hooked draw.
+// A call whose pixel shader cannot be told may have been a quad: it is counted as a refused one
+// ("unread"), at most kMaxQuadUntold a frame, so that such a frame draws no furniture rather than
+// some of it. A draw without a pixel shader is no furniture quad.
+void ObserveQuadDraw(const LastArgs& a, uint32_t device, bool in_scene) {
+  QuadFrame& f = CurrentQuadFrame();
+  uint32_t surface = 0;
+  bool have_surface = false;
+  if (in_scene) {
+    if (!f.scene_pitch) {
+      have_surface = device && ReadVirtualBe32(device + xdk::kDeviceSurfaceInfoOffset, &surface);
+      if (have_surface) f.scene_pitch = surface & xdk::kSurfacePitchMask;
+    }
+  } else if (!f.scene_pitch || CurrentPostFrame().done) {
+    return;
+  }
+  uint32_t vs_field = 0, ps_field = 0;
+  const bool fields = device && ReadVirtualBe32(device + xdk::kVsDeviceFieldOffset, &vs_field) &&
+                      ReadVirtualBe32(device + xdk::kPsDeviceFieldOffset, &ps_field);
+  const uint32_t ps_obj = vs_field ? ps_field : t_gpu_ps;  // (as ChoosePs)
+  if (fields && !ps_obj) return;
+  const PsInfo* ps = fields ? LookupPs(ps_obj) : nullptr;
+  if (!ps) {
+    if (f.untold >= kMaxQuadUntold) return;
+    std::lock_guard<std::mutex> lock(g_scene_mutex);
+    if (f.frame != g_light_tries_frame.load(std::memory_order_relaxed)) return;
+    g_builder.QuadSeen(PostQuadKind::kCount);
+    g_builder.AddQuad(QuadRecord{}, QuadRecordReason::kUnread);
+    ++f.untold;
+    return;
+  }
+  const PostQuadEntry* entry = FindPostQuad(ps->hash);  // (`ps` is the cache's entry: not held across the reads below)
+  if (!entry) return;
+  if (!have_surface) have_surface = ReadVirtualBe32(device + xdk::kDeviceSurfaceInfoOffset, &surface);
+  if (!QuadTargetMatches(*entry, in_scene, have_surface ? surface & xdk::kSurfacePitchMask : 0, f.scene_pitch)) {
+    g_quad_elsewhere.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  PendingQuad q;
+  q.frame = f.frame;
+  q.entry = entry;
+  QuadRecordReason why = QuadRecordReason::kNone;
+  // The vertex shader, and that c0..c3 are the bank's for it.
+  DeviceSnapshot dev;
+  VsChoice vc;
+  const VsInfo* vs = ReadDevice(device, &dev) && ChooseVs(dev, &vc) ? LookupVs(vc) : nullptr;
+  uint64_t vs_literals[4] = {};
+  if (!vs) {
+    why = QuadRecordReason::kUnread;
+  } else if (vs->hash != entry->vs) {
+    why = QuadRecordReason::kShader;
+  } else if (!ReadLiteralRegisters(kVsLayout, vc.obj, vc.variant, 0, vs_literals) || (vs_literals[0] & 0xF) != 0) {
+    why = QuadRecordReason::kUnread;
+  }
+  // The builder's arguments (r4 the primitive type, r5 the base vertex, r6 the vertex count, r7
+  // the index count, r8 the index format, r9 the vertex size, r10 where the index storage is
+  // returned), then the device's storage fields.
+  if (why == QuadRecordReason::kNone) {
+    const bool index32 = (a.r[5] & 4) != 0;
+    const bool quad = (a.r[1] & 0x3F) == kQuadPrimitive && a.r[2] == 0 && a.r[3] == kQuadVertices &&
+                      a.r[4] == std::size(kQuadIndices) && !index32 && a.r[6] == kQuadStride;
+    uint32_t vdwords = 0, idwords = 0, returned = 0;
+    if (!quad) {
+      why = QuadRecordReason::kStorage;
+    } else if (!ReadVirtualBe32(device + xdk::kDeviceBeginVerticesStorageOffset, &q.vertex_storage) ||
+               !ReadVirtualBe32(device + xdk::kDeviceBeginVerticesDwordsOffset, &vdwords) ||
+               !ReadVirtualBe32(device + xdk::kDeviceIndexedIndexStorageOffset, &q.index_storage) ||
+               !ReadVirtualBe32(device + xdk::kDeviceIndexedIndexDwordsOffset, &idwords) || !ReadVirtualBe32(a.r[7], &returned)) {
+      why = QuadRecordReason::kUnread;
+    } else if (q.vertex_storage == 0 || q.index_storage == 0 || returned != q.index_storage ||
+               vdwords != IndxVertexDwords(kQuadVertices, kQuadStride) ||
+               idwords != IndxIndexDwords(uint32_t(std::size(kQuadIndices)), false)) {
+      why = QuadRecordReason::kStorage;
+    }
+  }
+  if (why == QuadRecordReason::kNone) {
+    float bank[16] = {};
+    bool read = ReadConstantRegisters(VertexBank(device), 0, 4, bank);
+    if (read) std::memcpy(q.view_proj, bank, sizeof(q.view_proj));
+    for (size_t i = 0; read && i < entry->register_count; ++i) read = ReadPixelConstant(entry->registers[i], q.ps[i]);
+    for (size_t i = 0; read && i < entry->slot_count; ++i) read = ReadTextureFetch(device, entry->slots[i], q.fetch[i]);
+    auto reg = [&](uint32_t r, uint32_t* out) { return ReadVirtualBe32(device + xdk::DeviceRegShadowOffset(r), out); };
+    read = read && reg(xdk::kRegBlendControl0, &q.blend) && reg(xdk::kRegDepthControl, &q.depth) &&
+           reg(xdk::kRegColorMask, &q.colour_mask) && reg(xdk::kRegColorControl, &q.colour_control) &&
+           reg(xdk::kRegAlphaRef, &q.alpha_ref) && reg(xdk::kRegVportZScale, &q.vport_z_scale) && reg(xdk::kRegVteCntl, &q.vte_cntl);
+    if (!read) why = QuadRecordReason::kUnread;
+  }
+  std::lock_guard<std::mutex> lock(g_scene_mutex);
+  // The frame is checked again under the lock: a call of one frame must not count in the next.
+  if (f.frame != g_light_tries_frame.load(std::memory_order_relaxed)) {
+    g_quad_dropped.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  g_builder.QuadSeen(entry->kind);
+  if (why != QuadRecordReason::kNone) {
+    g_builder.AddQuad(QuadRecord{}, why);
+    return;
+  }
+  // (a record still pending here was never read: its frame, this one or an earlier, lacks it)
+  if (t_pending_quad.valid) g_quad_dropped.fetch_add(1, std::memory_order_relaxed);
+  t_pending_quad = q;
+  t_pending_quad.valid = true;
+}
+
+// The record of this thread's pending furniture call, now that the game has filled its storage:
+// 80 bytes of vertices and 12 of indices from the two addresses kept at the call, each read whole
+// or not at all and copied before it is judged, so that what MakeQuadRecord accepts is what the
+// record holds. Handed to the builder under the scene's mutex after the frame's recheck; a record
+// of a frame that ended is dropped and counted, and that frame, which was told of the call, has
+// no set (FrameBuilder::Finish, "pending").
+void FlushPendingQuad() {
+  const PendingQuad q = t_pending_quad;
+  t_pending_quad.valid = false;
+  if (!q.valid || !q.entry) return;
+  constexpr uint32_t kVertexBytes = kQuadVertices * kQuadStride, kIndexBytes = 2 * uint32_t(std::size(kQuadIndices));
+  QuadRecordReason why = QuadRecordReason::kUnread;
+  QuadRecord record{};
+  const uint8_t* v = ReadVirtual(q.vertex_storage, kVertexBytes);
+  const uint8_t* x = ReadVirtual(q.index_storage, kIndexBytes);
+  if (v && x) {
+    uint8_t vertices[kVertexBytes];
+    uint16_t indices[std::size(kQuadIndices)];
+    std::memcpy(vertices, v, sizeof(vertices));
+    for (size_t i = 0; i < std::size(indices); ++i) indices[i] = uint16_t(uint32_t(x[2 * i]) << 8 | x[2 * i + 1]);
+    QuadInputs in{};
+    in.vertices = vertices;
+    in.vertex_bytes = sizeof(vertices);
+    in.stride = kQuadStride;
+    in.indices = indices;
+    in.index_count = std::size(indices);
+    in.view_proj = q.view_proj;
+    in.ps = q.ps;
+    in.ps_count = q.entry->register_count;
+    in.fetch = q.fetch;
+    in.fetch_count = q.entry->slot_count;
+    in.blend = q.blend;
+    in.depth = q.depth;
+    in.colour_mask = q.colour_mask;
+    in.colour_control = q.colour_control;
+    in.alpha_ref = q.alpha_ref;
+    in.vport_z_scale = q.vport_z_scale;
+    in.vte_cntl = q.vte_cntl;
+    record = MakeQuadRecord(*q.entry, in, &why);
+  }
+  std::lock_guard<std::mutex> lock(g_scene_mutex);
+  if (q.frame != g_light_tries_frame.load(std::memory_order_relaxed)) {
+    g_quad_dropped.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  g_builder.AddQuad(record, why);
 }
 
 // One outermost guest draw inside the main scene, as a DrawRecord in the frame.
@@ -4042,6 +4323,9 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
       ReadFogBlock(device, fog);
     }
   }
+  // The scene's furniture quads (moon, clouds, glare), at the indexed builder's calls: only in a
+  // frame with the quads wanted.
+  if (id == kHook_DrawIndx_82217EE8 && g_quads_frame.load(std::memory_order_relaxed)) ObserveQuadDraw(a, device, true);
   // Light (frame-map section 14, "Light inputs"). Only for a colour draw that got this far: a
   // draw that is skipped anyway has no use for its inputs.
   LightInputs light;
@@ -4339,7 +4623,7 @@ void AppendFrameFog(std::string& row, const render::FrameScene& sc) {
 
 // Discovery evidence, in the frame row of a frame with records: the frame's post block as the
 // scene carries it, {"post":{"on","valid","reason","age","tries","parts","composite":[6],
-// "bright":[5],"blur":[14],"table":{"base","content"},"texels":[512]}}; the registers, the
+// "bright":[5],"blur":[14],"radial":[4],"table":{"base","content"},"texels":[512]}}; the registers, the
 // table's source and the decoded texels only for a valid block. "composite", "bright", "blur" in
 // PostBlock's order; "base", "content": where the table was read and the hash of the bytes that
 // were decoded (PostSource), the same hash the composite's row names the table by in "tfc".
@@ -4365,10 +4649,65 @@ void AppendFramePost(std::string& row, const render::FrameScene& sc) {
     floats("composite", sc.post.composite, 6);
     floats("bright", sc.post.bright, 5);
     floats("blur", &sc.post.blur[0][0], 14);
+    floats("radial", sc.post.radial, 4);
     std::snprintf(buf, sizeof(buf), ",\"table\":{\"base\":\"0x%08X\",\"content\":\"0x%016llX\"}", sc.post_source.base,
                   static_cast<unsigned long long>(sc.post_source.content));
     row += buf;
     floats("texels", sc.post.table, int(kPostTableTexels));
+  }
+  row += "}";
+}
+
+// Discovery evidence, in the frame row of a frame with records: the frame's quad records as the
+// scene carries them, {"quads":{"on","reason","count","seen","taken","over","records":[{"kind",
+// "layer","seq","ps","vs","corners","view_proj","regs","fetch","blend","depth","mask",
+// "alpha_control","alpha_ref"}]}}. "corners" (20 floats: x y z u v of each corner), "view_proj"
+// (16) and "regs" (48: the kind's registers in the table's order, zeros after them) are the
+// floats' bits, eight hex digits each; "fetch" the three slots' six dwords; "alpha_ref" the
+// reference's bits. "records" only for a whole set. tools/xdk_sigmatch/post_tables.py (quads
+// --check) holds each record against the same frame's "indx" and "indxdata" rows (spec criterion 17).
+void AppendFrameQuads(std::string& row, const render::FrameScene& sc) {
+  char buf[192];
+  auto bits = [&](const char* key, const float* v, int n) {
+    row += ",\"";
+    row += key;
+    row += "\":\"";
+    for (int i = 0; i < n; ++i) {
+      uint32_t word;
+      std::memcpy(&word, &v[i], sizeof(word));
+      std::snprintf(buf, sizeof(buf), "%08X", word);
+      row += buf;
+    }
+    row += "\"";
+  };
+  std::snprintf(buf, sizeof(buf), ",\"quads\":{\"on\":%d,\"reason\":\"%s\",\"count\":%u,\"seen\":%u,\"taken\":%u,\"over\":%u",
+                sc.quad_records ? 1 : 0, QuadSetReasonName(sc.quad_reason), sc.quad_count, sc.quad_seen, sc.quad_taken,
+                sc.quad_over);
+  row += buf;
+  if (sc.quad_reason == QuadSetReason::kNone) {
+    row += ",\"records\":[";
+    for (uint32_t i = 0; i < sc.quads.size() && i < kMaxQuadRecords; ++i) {
+      const QuadRecord& q = sc.quads[i];
+      std::snprintf(buf, sizeof(buf), "%s{\"kind\":\"%s\",\"layer\":%u,\"seq\":%u,\"ps\":\"0x%016llX\",\"vs\":\"0x%016llX\"",
+                    i ? "," : "", PostQuadKindName(q.kind), unsigned(q.layer), unsigned(q.sequence),
+                    static_cast<unsigned long long>(q.ps_hash), static_cast<unsigned long long>(q.vs_hash));
+      row += buf;
+      bits("corners", &q.corners[0][0], 20);
+      bits("view_proj", &q.view_proj[0][0], 16);
+      bits("regs", &q.ps[0][0], 48);
+      row += ",\"fetch\":[";
+      for (int t = 0; t < 3; ++t) {
+        row += t ? "," : "";
+        row += HexDwords(q.fetch[t], 6);
+      }
+      uint32_t ref;
+      std::memcpy(&ref, &q.alpha_ref, sizeof(ref));
+      std::snprintf(buf, sizeof(buf),
+                    "],\"blend\":\"0x%08X\",\"depth\":\"0x%08X\",\"mask\":%u,\"alpha_control\":%u,\"alpha_ref\":\"0x%08X\"}",
+                    q.blend, q.depth, q.colour_mask, q.alpha_control, ref);
+      row += buf;
+    }
+    row += "]";
   }
   row += "}";
 }
@@ -4413,6 +4752,10 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
       const bool post = records && g_post_wanted.load(std::memory_order_relaxed);
       g_post_frame.store(post, std::memory_order_relaxed);
       g_builder.PostOn(post);
+      // The quad records and the radial blur's registers, only with the post block.
+      const bool quads = post && g_sun_wanted.load(std::memory_order_relaxed);
+      g_quads_frame.store(quads, std::memory_order_relaxed);
+      g_builder.QuadsOn(quads);
       // The next frame reads its own light block (and its own shadow state: CurrentShadowFrame).
       g_light_tries_frame.fetch_add(1, std::memory_order_relaxed);
     }
@@ -4442,6 +4785,7 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
     AppendFrameShadow(row, *done->scene);
     AppendFrameFog(row, *done->scene);
     AppendFramePost(row, *done->scene);
+    AppendFrameQuads(row, *done->scene);
   }
   row += "}\n";
   std::fputs(row.c_str(), g_file);
@@ -4605,6 +4949,22 @@ void PublishScene(const FinishedScene& done) {
     if (!sc.post.valid && sc.post_reason < PostBlockReason::kCount) ++g_post_block_missing[size_t(sc.post_reason)];
     if (sc.post.valid && sc.post_age != 0) ++g_post_kept_frames;
   }
+  if (sc.records && sc.quad_records) {
+    ++g_quad_frames;
+    if (sc.quad_reason < QuadSetReason::kCount) ++g_quad_set_missing[size_t(sc.quad_reason)];
+    if (sc.post.valid && (sc.post.parts & kPostPartRadial)) ++g_quad_radial_frames;
+  }
+  // One line when the frame's quad set changes its state (whole, none and why), the first few
+  // times: the 300-frame line names only its own frame.
+  if (sc.records) {
+    const QuadSetReason reason = sc.quad_records ? sc.quad_reason : QuadSetReason::kOff;
+    if (reason != g_quad_last_reason && g_quad_change_lines < kQuadChangeLines) {
+      ++g_quad_change_lines;
+      REXSYS_INFO("[native] capture: frame {} quads changed: {}{}", sc.frame, render::QuadLine(sc),
+                  g_quad_change_lines == kQuadChangeLines ? " (last such line)" : "");
+    }
+    g_quad_last_reason = reason;
+  }
   if (sc.frame % 300 != 0) return;
   std::string skipped, unsupported;
   char buf[96];
@@ -4766,6 +5126,30 @@ void PublishScene(const FinishedScene& done) {
     }
     g_post_frames = g_post_kept_frames = 0;
     std::fill(std::begin(g_post_block_missing), std::end(g_post_block_missing), 0u);
+    // quads: this frame's quad records (render::QuadLine: the set and its kinds, or why there is
+    // none), in how many of the frames with the quads wanted since the last line there was no set
+    // to draw (quad-record) by reason (a frame without a furniture call, "no-draw", is none and is
+    // listed), in how many the post block had the radial blur's registers, the calls of a table
+    // shader at another target than its kind's, and the records dropped. "off" without them.
+    if (sc.quad_records || g_quad_frames) {
+      std::string quad_missing;
+      uint32_t quad_total = 0;
+      for (size_t i = 1; i < size_t(QuadSetReason::kCount); ++i) {
+        if (!g_quad_set_missing[i]) continue;
+        quad_total += g_quad_set_missing[i];
+        std::snprintf(buf, sizeof(buf), "%s%s: %u", quad_missing.empty() ? "" : ", ", QuadSetReasonName(QuadSetReason(i)),
+                      g_quad_set_missing[i]);
+        quad_missing += buf;
+      }
+      REXSYS_INFO("[native] capture: frame {} quads: {} | {} in {} of {} frames {{{}}} | radial registers in {} | "
+                  "at another target {} | dropped {}",
+                  sc.frame, render::QuadLine(sc), kQuadRecordReason, quad_total, g_quad_frames, quad_missing, g_quad_radial_frames,
+                  g_quad_elsewhere.exchange(0, std::memory_order_relaxed), g_quad_dropped.exchange(0, std::memory_order_relaxed));
+    } else {
+      REXSYS_INFO("[native] capture: frame {} quads: {}", sc.frame, render::QuadLine(sc));
+    }
+    g_quad_frames = g_quad_radial_frames = 0;
+    std::fill(std::begin(g_quad_set_missing), std::end(g_quad_set_missing), 0u);
   }
   LogShaderBreakdown(sc);
 }
@@ -4826,6 +5210,10 @@ void SetFogWanted(bool wanted) {
 
 void SetPostWanted(bool wanted) {
   g_post_wanted.store(wanted, std::memory_order_relaxed);
+}
+
+void SetSunWanted(bool wanted) {
+  g_sun_wanted.store(wanted, std::memory_order_relaxed);
 }
 
 // --- Post discovery (frame-map section 17, "Discovery"): resolves and the post buffers' memory ---
@@ -4998,6 +5386,12 @@ void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t*) {
   if (IsDrawId(id)) {
     const bool nested = t_nesting.Enter();
     if (nested) g_nested_draws.fetch_add(1, std::memory_order_relaxed);
+    // The storage of this thread's last furniture quad, filled by the game since (timed: it reads
+    // and takes the scene's mutex; without a pending quad this is one thread-local test).
+    if (t_pending_quad.valid) {
+      CaptureTimer timer;
+      FlushPendingQuad();
+    }
     // Discovery evidence (t_gpu_pbool): whether this builder will flush the bool shadow.
     // A pointer of an earlier entry must not outlive it (a capture that ended between the clear
     // routine's entry and its return, and a later one armed inside a later call).
@@ -5082,6 +5476,8 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
     if (g_shadows_frame.load(std::memory_order_relaxed)) ObserveShadowDraw(id, args, device);
     // And in a frame with the post block wanted: the game's post rectangles (both, when both are wanted).
     if (g_post_frame.load(std::memory_order_relaxed)) ObservePostDraw(id, device);
+    // And with the quads wanted: the sun layer's quads, at the indexed builder's calls.
+    if (id == kHook_DrawIndx_82217EE8 && g_quads_frame.load(std::memory_order_relaxed)) ObserveQuadDraw(args, device, false);
   }
   if (!g_armed.load(std::memory_order_relaxed)) return;
   if (!records) t_ps_loads.Observe(in_scene);

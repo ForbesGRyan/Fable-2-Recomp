@@ -106,6 +106,14 @@ inline bool PostRecordsWanted(bool records_wanted, bool post, bool textures, boo
   return records_wanted && post && textures && light;
 }
 
+// Whether the capture also reads the frame's quad records (the sky furniture
+// and the sun layer's quads) and the radial blur's registers: only for a frame
+// whose post block it reads, since the furniture is drawn in a post frame
+// alone. `post_wanted`: PostRecordsWanted. `sun`: fable2_native_sun.
+inline bool SunRecordsWanted(bool post_wanted, bool sun) {
+  return post_wanted && sun;
+}
+
 // Guest frame times per view, for the log line "[native] frames: ..."
 // (fable2_native_render.cpp, PollFrame): the `[frame] guest` windows of the SDK
 // mix the views a plan switches through, this line does not. One Add per guest

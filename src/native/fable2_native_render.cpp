@@ -89,6 +89,12 @@ REXCVAR_DEFINE_STRING(fable2_native_bloom, "off", "Fable2",
                       "composite (the 4 x 4 downsample, the bright pass and the two 13-tap blurs, in targets a quarter of the "
                       "native target's logical size), and the composite screens it over the picture; off (or false, 0; the "
                       "default) = none of it is made or drawn: the picture of fable2_native_post alone. Frame map section 17.");
+REXCVAR_DEFINE_STRING(fable2_native_sun, "off", "Fable2",
+                      "Native sky furniture and sun layer (sub-project 10, phase 10c, in work; needs fable2_native_post=on): on (or "
+                      "true, 1) = the capture also reads the frame's quad records (the game's moon, cloud, glare, beam-source, "
+                      "flare, moon-glow and sun-disc quads at the indexed builder's calls, at most 24 a frame) and the radial "
+                      "blur's registers; off (or false, 0; the default) = none of it is read or drawn: the picture of "
+                      "fable2_native_post and fable2_native_bloom alone. Frame map section 17.");
 REXCVAR_DEFINE_STRING(fable2_exposure_readback, "off", "Fable2",
                       "The game's exposure in a normal run: on (or true, 1) = the game's luminance resolve (two buffers in turn, "
                       "0x1A385000 and 0x1A34F000) is added to readback_resolve_force_addresses at startup, so that the game "
@@ -333,6 +339,20 @@ bool CurrentBloom() {
 bool PostWanted(bool records_wanted) {
   return PostRecordsWanted(records_wanted, CurrentPost(), REXCVAR_GET(fable2_native_textures),
                            CurrentClayLight() == render::ClayLight::kOn);
+}
+
+// fable2_native_sun: read like the post's switch; anything else is off, with one warning that names
+// the words. The capture reads the quad records and the radial blur's registers with it
+// (SunRecordsWanted).
+bool CurrentSun() {
+  static std::atomic<bool> warned{false};
+  bool recognized = true;
+  const bool on = render::ParseClayLight(REXCVAR_GET(fable2_native_sun), &recognized) == render::ClayLight::kOn;
+  if (!recognized && !warned.exchange(true)) {
+    REXLOG_WARN("[native] unknown fable2_native_sun '{}', using off (accepted: {})", REXCVAR_GET(fable2_native_sun),
+                render::kClaySwitchWords);
+  }
+  return on;
 }
 
 // fable2_native_post_oracle: the two files of the prefix, read whole and parsed (game thread, once).
@@ -780,6 +800,9 @@ void Install(rex::memory::Memory* memory) {
   REXLOG_INFO("[native] bloom: {} (fable2_native_bloom; on: a post frame with the game's blur weights also draws the game's "
               "bloom, in targets a quarter of the logical size)",
               CurrentBloom() ? "on" : "off");
+  REXLOG_INFO("[native] sun: {} (fable2_native_sun; on: with the post block the frame's quad records, the game's sky "
+              "furniture and sun-layer quads, and the radial blur's registers are read)",
+              CurrentSun() ? "on" : "off");
 }
 
 void Shutdown() {
@@ -835,9 +858,9 @@ void PollFrame() {
     }
   }
 #endif
-  // The order of the four stores (final review, M6). The capture latches them at a frame's boundary,
-  // the records' word first (read with acquire), then the shadows', the fog's and the post block's.
-  // Switching ON: the shadows', the fog's and the post block's words are stored BEFORE the records'
+  // The order of the five stores (final review, M6). The capture latches them at a frame's boundary,
+  // the records' word first (read with acquire), then the shadows', the fog's, the post block's and the quads'.
+  // Switching ON: the shadows', the fog's, the post block's and the quads' words are stored BEFORE the records'
   // (stored with release), so a boundary that sees the records wanted sees the others as well: no frame is recorded without its shadow
   // passes or its fog block because the boundary fell between two stores. Switching OFF: the records'
   // word first; a boundary between the stores then latches no records, and with no records the other
@@ -849,6 +872,7 @@ void PollFrame() {
   capture::SetShadowsWanted(ShadowsWanted(wanted));
   capture::SetFogWanted(FogWanted(wanted));
   capture::SetPostWanted(PostWanted(wanted));
+  capture::SetSunWanted(SunRecordsWanted(PostWanted(wanted), CurrentSun()));
   if (wanted) capture::SetRecordsWanted(true);
   rex::graphics::RequestNativeGuestOutputPostProcess(wanted);
 }

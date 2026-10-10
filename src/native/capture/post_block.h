@@ -21,7 +21,7 @@ namespace fable2::native::capture {
 // The post chain's pixel shaders (tools/xdk_sigmatch/light_formulas.py,
 // POST_SHADERS): a hooked BeginVertices call outside the main scene that runs
 // one of them is that step's rectangle. The radial blur's registers are read
-// from plan Task 12 on; until then nothing reads its hash.
+// only with the quads wanted (fable2_native_sun; SetPostRadial).
 inline constexpr uint64_t kPostCompositePs = 0x37B186F4BD3288F7ull, kPostBrightPs = 0xEE922CFB4426EA83ull,
                           kPostBlurXPs = 0xEA83C7E7E24EC4C8ull, kPostBlurYPs = 0x28DBE18F313350BFull,
                           kPostRadialPs = 0x4BE4344C27016E04ull;
@@ -31,7 +31,7 @@ inline constexpr uint64_t kPostCompositePs = 0x37B186F4BD3288F7ull, kPostBrightP
 inline constexpr uint32_t kPostTableSlot = 1, kPostTableTexels = 512, kPostBlockMaxAge = 4;
 // The table's bytes from its fetch constant's base address: 512 texels of one float.
 inline constexpr size_t kPostTableBytes = 2048;
-// PostBlock::parts: the blurs' weights are there; the radial blur's registers are (Task 12).
+// PostBlock::parts: the blurs' weights are there; the radial blur's registers are (SetPostRadial).
 inline constexpr uint8_t kPostPartBlur = 1, kPostPartRadial = 2;
 
 // Reason string (the plan's): a frame with the post chain wanted that has no post block.
@@ -45,7 +45,7 @@ inline constexpr const char* kPostBlockReason = "post-block";
 //   the frame's light block (PostBlockPairs).
 // blur: the 13 point taps' weights of EA83 (along x) and 28DB (along y): the centre's, then those
 //   of the taps 1 to 6 texels away on either side. All zero without kPostPartBlur.
-// radial: 4BE4's (plan Task 12); all zero until then, and kPostPartRadial is never set.
+// radial: 4BE4's (SetPostRadial); all zero without kPostPartRadial.
 // table: T, decoded: texel i is the float stored high byte first at byte 4 * i. The composite
 //   reads it at the NEAREST texel, floor(u * 512 + 0.5) clamped to 511 (controller ruling 19:
 //   the fetch's OffsetX = 0.5), not at floor(u * 512); the block carries the texels, the
@@ -55,7 +55,7 @@ struct PostBlock {
   float composite[6];   // 37B1: c31.x, c46.x, c47.x, c77.x, c77.y, c78.x
   float bright[5];      // EE92: c31.x, c46.x, c47.x, c77.x, c77.y
   float blur[2][7];     // EA83 then 28DB: c46.x (centre), c46.y, .z, .w, c47.x, .y, .z
-  float radial[4];      // 4BE4 (Task 12): c31.x, c31.y, c46.x, c47.x
+  float radial[4];      // 4BE4: c31.x, c31.y, c46.x, c47.x
   float table[512];     // the composite's table, one big-endian float a texel
   uint8_t parts;        // kPostPartBlur, kPostPartRadial
   bool valid;
@@ -241,6 +241,33 @@ inline PostBlock MakePostBlock(const PostRegisters& regs, const uint32_t fetch1[
 inline bool PostBlockPairs(const PostBlock& block, float out_scale) {
   return block.valid && std::fabs(double(block.bright[4]) * double(out_scale) - 1.0) <= 1e-3;
 }
+
+// The radial blur's registers (4BE4, two rectangles a frame with the same registers: the sun
+// layer's beams, plan Task 12) into a valid block: radial = c31.x, c31.y (the blur's centre in the
+// picture's units: the sun's place, (0.5, 0.5) with the sun behind the camera), c46.x and c47.x
+// (the two weights; 0.87 and 0.935 in every captured frame), and the part kPostPartRadial.
+// Taken only when c31.x and c31.y are finite and in [-4, 4] (a sun far outside the picture) and
+// c46.x and c47.x are in (0, 1]; otherwise, and for an invalid block or a null argument, false,
+// with the block's four values zero and the part clear (a consumer then draws no sun layer). The
+// other components of the three registers are not read.
+inline bool SetPostRadial(PostBlock* block, const float c31[4], const float c46[4], const float c47[4]) {
+  if (!block) return false;
+  for (float& v : block->radial) v = 0.0f;
+  block->parts &= uint8_t(~kPostPartRadial);
+  if (!block->valid || !c31 || !c46 || !c47) return false;
+  // (written so that a value that is no number fails its bound)
+  if (!(c31[0] >= -4.0f && c31[0] <= 4.0f) || !(c31[1] >= -4.0f && c31[1] <= 4.0f) || !(c46[0] > 0.0f && c46[0] <= 1.0f) ||
+      !(c47[0] > 0.0f && c47[0] <= 1.0f)) {
+    return false;
+  }
+  block->radial[0] = c31[0];
+  block->radial[1] = c31[1];
+  block->radial[2] = c46[0];
+  block->radial[3] = c47[0];
+  block->parts |= kPostPartRadial;
+  return true;
+}
+inline constexpr uint32_t kPostRadialRegisters[3] = {31, 46, 47};
 
 // Where a frame's post block's table was read, for evidence only (the log and the discovery
 // frame row; no shader input): the base address of the fetch constant and the XXH3 hash of the

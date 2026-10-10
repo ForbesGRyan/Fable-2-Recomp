@@ -41,6 +41,12 @@ void SetFogWanted(bool wanted);
 // at for the post chain, no register, fetch constant or table is read, and a
 // frame's scene says so (FrameScene::post_records false).
 void SetPostWanted(bool wanted);
+// Whether the consumer also wants the frame's quad records and the radial blur's registers (the
+// native view, the light, the post chain and the sun's switch on: fable2_native_sun). Set and
+// latched like SetPostWanted, and it has an effect only in a frame whose post block is wanted.
+// Without it no call of the indexed builder is looked at for a furniture quad, nothing of one is
+// read, and a frame's scene says so (FrameScene::quad_records false).
+void SetSunWanted(bool wanted);
 // Starts a discovery capture of `frames` guest frames (1..100000) sampling every `every`th
 // draw (1..64) at the next guest frame, into a new file, like FABLE2_NATIVE_DISCOVERY
 // after its delay. Callable from any thread. Returns false, with a log line, when the

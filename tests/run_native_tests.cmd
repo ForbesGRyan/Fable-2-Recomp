@@ -90,6 +90,8 @@ clang++ -std=c++23 "%~dp0native\test_fog_block.cpp" -o "%OUT%\fog_block.exe" || 
 "%OUT%\fog_block.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_post_block.cpp" -o "%OUT%\post_block.exe" || exit /b 1
 "%OUT%\post_block.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_quad_record.cpp" -o "%OUT%\quad_record.exe" || exit /b 1
+"%OUT%\quad_record.exe" || exit /b 1
 clang++ -std=c++23 -fsanitize=float-cast-overflow -fsanitize-trap=float-cast-overflow "%~dp0native\test_post_oracle.cpp" -o "%OUT%\post_oracle.exe" || exit /b 1
 "%OUT%\post_oracle.exe" || exit /b 1
 rem Instance constants that map no index must not reach a float-to-int cast here either (trap as above).

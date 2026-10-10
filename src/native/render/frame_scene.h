@@ -18,6 +18,7 @@
 #include "../capture/fog_block.h"
 #include "../capture/light_block.h"
 #include "../capture/post_block.h"
+#include "../capture/quad_record.h"
 #include "../capture/shader_tally.h"
 #include "../capture/shadow_block.h"
 
@@ -142,6 +143,32 @@ struct FrameScene {
   // The post block was wanted this frame (the native view, the light and the
   // post switch on at the frame's begin).
   bool post_records = false;
+  // The frame's quad records (quad_record.h): the game's sky furniture and the quads of its sun
+  // layer, one for each call of the indexed builder 0x82217EE8 that ran a shader of the generated
+  // table at its kind's target, in the order the game issued them (a record's `sequence` is its
+  // index here): the scene's kinds inside the main scene, the layer's after it. A bounded block of
+  // the scene's own (at most capture::kMaxQuadRecords entries, allocated only for a frame that has
+  // a set), not a part of `draws`: no DrawRecord grows for it.
+  // `quads` is the frame's set, and it is whole or empty: it holds quad_count records, which is
+  // not 0 only with quad_reason kNone, which says that every furniture call of the frame gave a
+  // record and all of them fit. Otherwise it is empty and quad_reason says why (kOff: the quads were
+  // not wanted and nothing was read; capture::ChooseQuadSet has the others): a consumer then draws
+  // no furniture at all ("quad-record"), never the part of a set that was read, and never another
+  // frame's (the flares come and go from one frame to the next).
+  // quad_seen: the frame's furniture calls, quad_kinds: by kind; quad_taken: those that gave a
+  // record that was kept; quad_refused: those that gave none, by reason; quad_over: records past
+  // the bound.
+  std::vector<capture::QuadRecord> quads;
+  uint32_t quad_count = 0;
+  capture::QuadSetReason quad_reason = capture::QuadSetReason::kOff;
+  uint32_t quad_seen = 0;
+  uint32_t quad_taken = 0;
+  uint32_t quad_over = 0;
+  uint32_t quad_kinds[size_t(capture::PostQuadKind::kCount)] = {};
+  uint32_t quad_refused[size_t(capture::QuadRecordReason::kCount)] = {};
+  // The quads were wanted this frame (the native view, the light, the post chain and the sun's
+  // switch on at the frame's begin).
+  bool quad_records = false;
   // The drawable records with light inputs by family (index: LightFamily), how
   // many of them are a family's two- or four-light form, the records without
   // inputs by reason (index: LightReason), and the pixel shaders of those,
@@ -310,6 +337,52 @@ inline std::string PostLine(const FrameScene& scene) {
                   scene.post_tries);
   }
   return buf;
+}
+
+// The frame's quad records as the log writes them after "quads: ":
+//   set whole, N records {moon: 1, cloud: 3, ...}
+//   set none(<reason>), seen S, taken T, refused {<reason>: n, ...}, over K {moon: 1, ...}
+// N: the records of the frame's set, by kind in the braces. Without a set: why
+// (capture::QuadSetReasonName), the frame's furniture calls, how many gave a record that was kept
+// ("taken", left out with no call), those that gave none by reason and the records past the bound
+// (each left out when there is none), and the calls by kind. "off" for a frame in which the quads
+// were not wanted.
+inline std::string QuadLine(const FrameScene& scene) {
+  if (!scene.quad_records) return "off";
+  char buf[96];
+  std::string kinds;
+  for (size_t i = 0; i < size_t(capture::PostQuadKind::kCount); ++i) {
+    if (!scene.quad_kinds[i]) continue;
+    std::snprintf(buf, sizeof(buf), "%s%s: %u", kinds.empty() ? "" : ", ", capture::PostQuadKindName(capture::PostQuadKind(i)),
+                  scene.quad_kinds[i]);
+    kinds += buf;
+  }
+  std::string out;
+  if (scene.quad_reason == capture::QuadSetReason::kNone) {
+    std::snprintf(buf, sizeof(buf), "set whole, %u records", scene.quad_count);
+    out = buf;
+  } else {
+    std::snprintf(buf, sizeof(buf), "set none(%s), seen %u", capture::QuadSetReasonName(scene.quad_reason), scene.quad_seen);
+    out = buf;
+    if (scene.quad_seen) {
+      std::snprintf(buf, sizeof(buf), ", taken %u", scene.quad_taken);
+      out += buf;
+    }
+    std::string refused;
+    for (size_t i = 1; i < size_t(capture::QuadRecordReason::kCount); ++i) {
+      if (!scene.quad_refused[i]) continue;
+      std::snprintf(buf, sizeof(buf), "%s%s: %u", refused.empty() ? "" : ", ",
+                    capture::QuadRecordReasonName(capture::QuadRecordReason(i)), scene.quad_refused[i]);
+      refused += buf;
+    }
+    if (!refused.empty()) out += ", refused {" + refused + "}";
+    if (scene.quad_over) {
+      std::snprintf(buf, sizeof(buf), ", over %u", scene.quad_over);
+      out += buf;
+    }
+  }
+  if (!kinds.empty()) out += " {" + kinds + "}";
+  return out;
 }
 
 // The record and side-array buffers of scenes nothing refers to any more, kept
@@ -590,6 +663,44 @@ class FrameBuilder {
   }
   bool HasPost() const { return post_.valid; }
 
+  // --- The quad records (FrameScene::quads) ---
+  // Whether the quads are read from now on (the capture sets it at a frame boundary). Off: every
+  // call below does nothing, and the frame's scene says kOff.
+  void QuadsOn(bool on) { quads_on_ = on; }
+  // A furniture call of the frame: a call of the indexed builder that ran a table shader at its
+  // kind's target. Its storage is filled by the game after the builder returns, so its record
+  // comes later (AddQuad), when the drawing thread enters its next hooked draw; a call that is
+  // refused at once is handed over at once. Counted here so that a frame which ends before a
+  // record arrived knows it lacks one. The layer's quads come after the main scene: like the post
+  // block's calls, these two do not ask for an open scene.
+  void QuadSeen(capture::PostQuadKind kind) {
+    if (!quads_on_) return;
+    ++quad_seen_;
+    if (kind < capture::PostQuadKind::kCount) ++quad_kinds_[size_t(kind)];
+  }
+  // The record of a call counted by QuadSeen, or its refusal: `why` kNone with a valid record of a
+  // kind takes it, at the next place among the frame's (its `sequence`); anything else is a
+  // refusal, counted by its reason ("unread" for a record that is none without a reason, and for
+  // a reason that is none). A valid record past kMaxQuadRecords is counted over the bound and not
+  // kept. Nothing invalid is ever stored.
+  void AddQuad(const capture::QuadRecord& record, capture::QuadRecordReason why) {
+    if (!quads_on_) return;
+    const bool good = why == capture::QuadRecordReason::kNone && capture::QuadRecordValid(record) &&
+                      record.kind < capture::PostQuadKind::kCount;
+    if (!good) {
+      const bool named = why != capture::QuadRecordReason::kNone && why < capture::QuadRecordReason::kCount;
+      ++quad_refused_[size_t(named ? why : capture::QuadRecordReason::kUnread)];
+      return;
+    }
+    if (quad_taken_ >= capture::kMaxQuadRecords) {
+      ++quad_over_;
+      return;
+    }
+    quads_[quad_taken_] = record;
+    quads_[quad_taken_].sequence = uint16_t(quad_taken_);
+    ++quad_taken_;
+  }
+
   // Frees the spare buffers (any thread; scenes that die later bring theirs).
   void ReleaseSpares() { pool_->Release(); }
   size_t spare_count() const { return pool_->size(); }
@@ -739,6 +850,26 @@ class FrameBuilder {
     post_source_ = capture::PostSource{};
     post_reason_ = capture::PostBlockReason::kNoDraw;
     post_tries_ = 0;
+    // The quad records: the frame's set if it is whole (capture::ChooseQuadSet), else none of them
+    // with the reason; the counts either way. The next frame starts with none of it.
+    s->quad_records = quads_on_;
+    if (quads_on_) {
+      // (a record past the bound was a call that gave one: the choice is told of all of them)
+      s->quad_reason = capture::ChooseQuadSet(true, quad_seen_, quad_taken_ + quad_over_, quad_refused_, quad_over_);
+      s->quad_seen = quad_seen_;
+      s->quad_taken = quad_taken_;
+      s->quad_over = quad_over_;
+      std::copy(std::begin(quad_kinds_), std::end(quad_kinds_), std::begin(s->quad_kinds));
+      std::copy(std::begin(quad_refused_), std::end(quad_refused_), std::begin(s->quad_refused));
+      if (s->quad_reason == capture::QuadSetReason::kNone) {
+        // (one allocation of at most 24 records, 10,752 bytes, in a frame that has a set)
+        s->quad_count = quad_taken_;
+        s->quads.assign(quads_, quads_ + quad_taken_);
+      }
+    }
+    quad_seen_ = quad_taken_ = quad_over_ = 0;
+    std::fill(std::begin(quad_kinds_), std::end(quad_kinds_), 0u);
+    std::fill(std::begin(quad_refused_), std::end(quad_refused_), 0u);
     if (!draws_.empty() || !terrain_.empty() || !lights_.empty() || !shadow_draws_[0].empty() || !shadow_draws_[1].empty()) {
       const size_t shadows[2] = {shadow_draws_[0].size(), shadow_draws_[1].size()};
       const size_t records = draws_.size(), patches = terrain_.size(), lit = lights_.size();
@@ -828,6 +959,14 @@ class FrameBuilder {
   capture::PostBlock post_kept_{};
   capture::PostSource post_kept_source_{};
   uint32_t post_kept_age_ = 0;
+  // The quad records of the frame so far (FrameScene::quads): [0, quad_taken_) are held.
+  bool quads_on_ = false;
+  capture::QuadRecord quads_[capture::kMaxQuadRecords] = {};
+  uint32_t quad_seen_ = 0;
+  uint32_t quad_taken_ = 0;
+  uint32_t quad_over_ = 0;
+  uint32_t quad_kinds_[size_t(capture::PostQuadKind::kCount)] = {};
+  uint32_t quad_refused_[size_t(capture::QuadRecordReason::kCount)] = {};
   // Shared with the deleters of this builder's scenes. Never reassigned, and
   // locked inside: ReleaseSpares and spare_count need no lock of the caller's.
   std::shared_ptr<SceneBufferPool> pool_ = std::make_shared<SceneBufferPool>();

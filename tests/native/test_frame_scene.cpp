@@ -1145,6 +1145,218 @@ static int PostTests(const capture::DrawRecord& r) {
   return 0;
 }
 
+// The frame's quad records (FrameScene::quads, ::quad_count, ::quad_reason): a whole set or none of
+// it, the bound, the refusals, a record that never arrived, the log's line. Returns 0 or the number
+// of the case that failed.
+static int QuadTests(const capture::DrawRecord& r) {
+  using capture::PostQuadKind;
+  using capture::QuadRecord;
+  using capture::QuadRecordReason;
+  using capture::QuadSetReason;
+  static_assert(capture::kMaxQuadRecords == 24);
+  // A record as MakeQuadRecord gives it, of `kind`, told apart by `mark` (the builder does not
+  // judge a record's values; it carries it and gives it its place).
+  auto quad = [](PostQuadKind kind, float mark) {
+    QuadRecord q{};
+    q.ps_hash = capture::kPostQuadTable[size_t(kind)].ps;
+    q.vs_hash = capture::kPostQuadTable[size_t(kind)].vs;
+    q.kind = kind;
+    q.layer = capture::kPostQuadTable[size_t(kind)].layer;
+    q.sequence = 999;  // (the builder's to set)
+    q.corners[0][0] = mark;
+    return q;
+  };
+  // Nothing of a quad in a scene.
+  auto none = [](const render::FrameScene& s) {
+    return s.quad_count == 0 && s.quads.empty();
+  };
+  uint64_t number = 300;
+  // One frame: a main scene with a record and what `in_scene` does in it; then, outside the scene,
+  // where the game draws its sun layer, what `after` does.
+  auto frame = [&](render::FrameBuilder& b, auto in_scene, auto after) {
+    b.Open();
+    b.Add(r);
+    in_scene(b);
+    b.Close();
+    after(b);
+    return b.Finish(++number);
+  };
+  auto nothing = [](render::FrameBuilder&) {};
+  // A furniture call and, as the capture does it one hooked draw later, its record.
+  auto whole = [&](render::FrameBuilder& fb, PostQuadKind kind, float mark) {
+    fb.QuadSeen(kind);
+    fb.AddQuad(quad(kind, mark), QuadRecordReason::kNone);
+  };
+  render::FrameBuilder b;
+  {
+    // Quads off (the builder's state at first): nothing is taken, the frame says "off".
+    auto s = frame(b, [&](render::FrameBuilder& fb) { whole(fb, PostQuadKind::kMoon, 1.0f); }, nothing);
+    if (s->quad_records || !none(*s) || s->quad_reason != QuadSetReason::kOff || s->quad_seen != 0) return 1;
+    if (render::QuadLine(*s) != "off") return 2;
+    b.QuadsOn(true);
+    // ... and nothing of it was kept for the frame after the switch: a frame without a furniture call.
+    auto t = frame(b, nothing, nothing);
+    if (!t->quad_records || !none(*t) || t->quad_reason != QuadSetReason::kNoDraw || t->quad_seen != 0) return 3;
+    if (render::QuadLine(*t) != "set none(no-draw), seen 0") return 4;
+  }
+  {
+    // A whole set: the scene's kinds inside the scene, the layer's after it (the builder asks for no
+    // open scene), each record at its place among the frame's, in the order of arrival.
+    auto s = frame(
+        b,
+        [&](render::FrameBuilder& fb) {
+          whole(fb, PostQuadKind::kMoon, 1.0f);
+          whole(fb, PostQuadKind::kCloud, 2.0f);
+          whole(fb, PostQuadKind::kCloud, 3.0f);
+          whole(fb, PostQuadKind::kGlare, 4.0f);
+        },
+        [&](render::FrameBuilder& fb) {
+          whole(fb, PostQuadKind::kBeamSource, 5.0f);
+          whole(fb, PostQuadKind::kFlare, 6.0f);
+          whole(fb, PostQuadKind::kSunDisc, 7.0f);
+        });
+    if (s->quad_reason != QuadSetReason::kNone || s->quad_count != 7 || s->quad_seen != 7 || s->quad_over != 0) return 5;
+    const PostQuadKind kinds[7] = {PostQuadKind::kMoon,       PostQuadKind::kCloud, PostQuadKind::kCloud,  PostQuadKind::kGlare,
+                                   PostQuadKind::kBeamSource, PostQuadKind::kFlare, PostQuadKind::kSunDisc};
+    for (uint32_t i = 0; i < 7; ++i) {
+      const QuadRecord& q = s->quads[i];
+      if (q.kind != kinds[i] || q.sequence != i || q.corners[0][0] != float(i + 1) ||
+          q.ps_hash != capture::kPostQuadTable[size_t(kinds[i])].ps) {
+        return 6;
+      }
+    }
+    if (s->quads.size() != 7) return 7;
+    const uint32_t by_kind[8] = {1, 2, 1, 1, 1, 0, 1, 0};
+    if (std::memcmp(s->quad_kinds, by_kind, sizeof(by_kind)) != 0) return 8;
+    if (render::QuadLine(*s) != "set whole, 7 records {moon: 1, cloud: 2, glare: 1, beam-source: 1, flare: 1, sun-disc: 1}") return 9;
+    // The next frame starts with none of it (the flares come and go between frames).
+    auto t = frame(b, [&](render::FrameBuilder& fb) { whole(fb, PostQuadKind::kGlare, 9.0f); }, nothing);
+    if (t->quad_reason != QuadSetReason::kNone || t->quad_count != 1 || t->quads[0].corners[0][0] != 9.0f ||
+        t->quads[0].sequence != 0 || t->quad_kinds[size_t(PostQuadKind::kMoon)] != 0 || t->quads.size() != 1) {
+      return 10;
+    }
+    // (the first scene is not written again by the builder)
+    if (s->quad_count != 7 || s->quads[3].corners[0][0] != 4.0f) return 11;
+  }
+  {
+    // The bound: 24 records are a set; one call more and the frame has none of them.
+    auto full = frame(b, nothing, [&](render::FrameBuilder& fb) {
+      for (int i = 0; i < 24; ++i) whole(fb, PostQuadKind::kFlare, float(i));
+    });
+    if (full->quad_reason != QuadSetReason::kNone || full->quad_count != 24 || full->quads.size() != 24 || full->quads[23].sequence != 23 ||
+        full->quads[23].corners[0][0] != 23.0f) {
+      return 12;
+    }
+    auto over = frame(b, nothing, [&](render::FrameBuilder& fb) {
+      for (int i = 0; i < 27; ++i) whole(fb, PostQuadKind::kFlare, float(i));
+    });
+    if (over->quad_reason != QuadSetReason::kOverLimit || !none(*over) || over->quad_seen != 27 || over->quad_over != 3) return 13;
+    if (render::QuadLine(*over) != "set none(over-limit), seen 27, taken 24, over 3 {flare: 27}") return 14;
+    // ... and the frame after it is whole again.
+    auto next = frame(b, nothing, [&](render::FrameBuilder& fb) { whole(fb, PostQuadKind::kFlare, 1.0f); });
+    if (next->quad_reason != QuadSetReason::kNone || next->quad_count != 1 || next->quad_over != 0) return 15;
+  }
+  {
+    // A refused record (MakeQuadRecord's reason, or the call's own: the shader, the storage): none
+    // of the frame's records is given, also not those taken before it or after it.
+    auto s = frame(
+        b,
+        [&](render::FrameBuilder& fb) {
+          whole(fb, PostQuadKind::kMoon, 1.0f);
+          fb.QuadSeen(PostQuadKind::kGlare);
+          fb.AddQuad(QuadRecord{}, QuadRecordReason::kCorner);
+          whole(fb, PostQuadKind::kGlare, 3.0f);
+        },
+        [&](render::FrameBuilder& fb) {
+          fb.QuadSeen(PostQuadKind::kSunDisc);
+          fb.AddQuad(QuadRecord{}, QuadRecordReason::kStorage);
+        });
+    if (s->quad_reason != QuadSetReason::kRefused || !none(*s) || s->quad_seen != 4) return 16;
+    if (s->quad_refused[size_t(QuadRecordReason::kCorner)] != 1 || s->quad_refused[size_t(QuadRecordReason::kStorage)] != 1) return 17;
+    if (render::QuadLine(*s) != "set none(refused), seen 4, taken 2, refused {storage: 1, corner: 1} {moon: 1, glare: 2, sun-disc: 1}") {
+      return 18;
+    }
+    // A valid record handed over with a reason is a refusal; a record without a shader handed over
+    // without one is "unread" (nothing invalid is ever stored).
+    auto t = frame(b, nothing, [&](render::FrameBuilder& fb) {
+      fb.QuadSeen(PostQuadKind::kFlare);
+      fb.AddQuad(quad(PostQuadKind::kFlare, 1.0f), QuadRecordReason::kIndices);
+      fb.QuadSeen(PostQuadKind::kFlare);
+      fb.AddQuad(QuadRecord{}, QuadRecordReason::kNone);
+    });
+    if (t->quad_reason != QuadSetReason::kRefused || !none(*t) || t->quad_refused[size_t(QuadRecordReason::kIndices)] != 1 ||
+        t->quad_refused[size_t(QuadRecordReason::kUnread)] != 1) {
+      return 19;
+    }
+    // A reason that is no reason counts as unread.
+    auto u = frame(b, nothing, [&](render::FrameBuilder& fb) {
+      fb.QuadSeen(PostQuadKind::kFlare);
+      fb.AddQuad(QuadRecord{}, QuadRecordReason(200));
+    });
+    if (u->quad_reason != QuadSetReason::kRefused || u->quad_refused[size_t(QuadRecordReason::kUnread)] != 1) return 20;
+    // The frame after refusals is whole again.
+    auto v = frame(b, nothing, [&](render::FrameBuilder& fb) { whole(fb, PostQuadKind::kFlare, 1.0f); });
+    if (v->quad_reason != QuadSetReason::kNone || v->quad_count != 1 || v->quad_refused[size_t(QuadRecordReason::kCorner)] != 0) return 21;
+  }
+  {
+    // The dropped pending record: a call whose storage was not read before the frame ended (the
+    // frame's last quad without a later hooked draw). The frame has no furniture, and the record,
+    // arriving in the next frame, is not that frame's: the capture drops it there (its frame
+    // check); were it handed over all the same, the next frame would hold a record more than it saw
+    // and be no set either.
+    auto s = frame(b, [&](render::FrameBuilder& fb) { whole(fb, PostQuadKind::kMoon, 1.0f); },
+                   [&](render::FrameBuilder& fb) { fb.QuadSeen(PostQuadKind::kSunDisc); });
+    if (s->quad_reason != QuadSetReason::kPending || !none(*s) || s->quad_seen != 2) return 22;
+    if (render::QuadLine(*s) != "set none(pending), seen 2, taken 1 {moon: 1, sun-disc: 1}") return 23;
+    auto t = frame(b, nothing, [&](render::FrameBuilder& fb) { whole(fb, PostQuadKind::kFlare, 2.0f); });
+    if (t->quad_reason != QuadSetReason::kNone || t->quad_count != 1 || t->quads[0].corners[0][0] != 2.0f) return 24;
+    auto u = frame(b, nothing, [&](render::FrameBuilder& fb) {
+      fb.AddQuad(quad(PostQuadKind::kSunDisc, 5.0f), QuadRecordReason::kNone);  // (a stray record)
+      whole(fb, PostQuadKind::kFlare, 2.0f);
+    });
+    if (u->quad_reason != QuadSetReason::kPending || !none(*u)) return 25;
+  }
+  {
+    // A kind that is none counts as a call and refuses the set.
+    auto s = frame(b, nothing, [&](render::FrameBuilder& fb) {
+      fb.QuadSeen(PostQuadKind::kCount);
+      fb.AddQuad(quad(PostQuadKind::kFlare, 1.0f), QuadRecordReason::kNone);
+    });
+    if (s->quad_seen != 1 || s->quad_count != 1 || s->quad_reason != QuadSetReason::kNone) return 26;
+    QuadRecord bad = quad(PostQuadKind::kFlare, 1.0f);
+    bad.kind = PostQuadKind::kCount;
+    auto t = frame(b, nothing, [&](render::FrameBuilder& fb) {
+      fb.QuadSeen(PostQuadKind::kFlare);
+      fb.AddQuad(bad, QuadRecordReason::kNone);
+    });
+    if (t->quad_reason != QuadSetReason::kRefused || !none(*t) || t->quad_refused[size_t(QuadRecordReason::kUnread)] != 1) return 27;
+  }
+  {
+    // The switch off at a boundary: what was seen since is not taken, and nothing is carried over.
+    render::FrameBuilder fresh;
+    fresh.QuadsOn(true);
+    fresh.QuadSeen(PostQuadKind::kMoon);
+    fresh.QuadsOn(false);
+    auto s = frame(fresh, [&](render::FrameBuilder& fb) { whole(fb, PostQuadKind::kMoon, 1.0f); }, nothing);
+    if (s->quad_records || s->quad_reason != QuadSetReason::kOff || !none(*s) || s->quad_seen != 0) return 28;
+    fresh.QuadsOn(true);
+    auto t = frame(fresh, [&](render::FrameBuilder& fb) { whole(fb, PostQuadKind::kMoon, 1.0f); }, nothing);
+    if (t->quad_reason != QuadSetReason::kNone || t->quad_count != 1 || t->quad_seen != 1) return 29;
+    // Calls made while the quads are off do nothing, also when the switch comes on before the frame ends.
+    render::FrameBuilder late;
+    late.Open();
+    late.Add(r);
+    whole(late, PostQuadKind::kMoon, 1.0f);
+    late.QuadsOn(true);
+    late.Close();
+    auto u = late.Finish(++number);
+    if (u->quad_reason != QuadSetReason::kNoDraw || u->quad_seen != 0 || u->quad_taken != 0 || !none(*u)) return 30;
+  }
+  // The draw record's size is what it was: the quads are a block of their own.
+  static_assert(sizeof(capture::DrawRecord) == 616);
+  return 0;
+}
+
 int main() {
   auto r = capture::AssembleRecord(Good(), 7);
   if (r.skip != SkipReason::kNone || r.seq != 7 || r.rows[0] != 1.0f || r.rows[15] != 16.0f) return 1;
@@ -1688,6 +1900,10 @@ int main() {
     std::cout << "FAIL: post block case " << code << "\n";
     return 132;
   }
+  if (const int code = QuadTests(r)) {
+    std::cout << "FAIL: quad records case " << code << "\n";
+    return 133;
+  }
 
   render::ScenePublisher pub;
   if (pub.Latest()) return 18;
@@ -1695,6 +1911,6 @@ int main() {
   pub.Publish(s2);
   if (pub.Latest()->frame != 43) return 19;
   std::cout << "PASS: draw record, frame builder, terrain side array, light side array and block, buffer reuse, "
-               "pool under threads, shadow lists and block, fog and sky blocks, post block, publisher\n";
+               "pool under threads, shadow lists and block, fog and sky blocks, post block, quad records, publisher\n";
   return 0;
 }

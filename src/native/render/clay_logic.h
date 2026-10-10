@@ -1712,6 +1712,11 @@ inline bool ClayLightInputsBuilt(ClayLight light) { return light == ClayLight::k
 // Output in out/native-evidence/lighting/task9/e1_regions_bridge_341.txt.
 // Frame-map section 14, "Validation", has what this one number does and does
 // not bring into line.
+// The fit was made with the terrain's base map read as stored, before commit
+// 5d0f974 gave the base map its fetch constant's gamma sign. It is not fitted
+// again (controller ruling 30: the old mapping is the fallback of a frame
+// without a post block, and the post chain replaces the constant): sunlit
+// ground under the old mapping is about 17% under that fit now.
 inline constexpr float kLitExposure = 2.22f;
 
 // The first word of the output mapping's constants (cbuffer Map's `exposure`): 1 in every frame,

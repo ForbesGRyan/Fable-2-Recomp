@@ -2770,9 +2770,13 @@ int main() {
       // The curve (xenos.cpp, PWLGammaToLinear; light_formulas.pwl_gamma_to_linear; tests/test_terrain_replay.py
       // has the same points, worked by hand): with v = 255 g, 1023 * linear is v below 64, 2 v - 64 below 96,
       // 4 v - 256 below 192, else 8 v - 1024, each plus the whole part of itself times its slope / 1024.
-      const int pins[][2] = {{0, 0}, {30, 30}, {70, 76}, {100, 144}, {150, 345}, {200, 580}, {255, 1023}};
+      // At the knees and just above (review-task-8b, Minor 3): level 192 is on the last piece (512 + 4 = 516; on the
+      // piece below it would be 514), level 96.5 on the third (130; with the knee at 97 it would be 129); levels 64
+      // and 96 give the same number from either side.
+      const float pins[][2] = {{0, 0}, {30, 30}, {70, 76}, {100, 144}, {150, 345}, {200, 580}, {255, 1023},
+                               {192, 516}, {96.5f, 130}, {64, 64}, {96, 128}, {64.5f, 65}};
       bool curve = true;
-      for (const auto& p : pins) curve = curve && std::fabs(PwlGammaToLinear(float(p[0]) / 255.0f) - float(p[1]) / 1023.0f) < 2e-6f;
+      for (const auto& p : pins) curve = curve && std::fabs(PwlGammaToLinear(p[0] / 255.0f) - p[1] / 1023.0f) < 2e-6f;
       CHECK(620, curve && PwlGammaToLinear(1.0f) == 1.0f && PwlGammaToLinear(0.0f) == 0.0f);
       CHECK(620, PwlGammaToLinear(-0.5f) == 0.0f && PwlGammaToLinear(2.0f) == 1.0f && PwlGammaToLinear(nan) == 0.0f &&
                      PwlGammaToLinear(inf) == 1.0f && PwlGammaToLinear(-inf) == 0.0f);

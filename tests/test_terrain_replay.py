@@ -373,6 +373,13 @@ class GammaSignTest(unittest.TestCase):
         # below 192, else 8 v - 1024, each plus the whole part of itself times its slope / 1024.
         for level, want in ((0, 0), (30, 30), (70, 76), (100, 144), (150, 345), (200, 580), (255, 1023)):
             self.assertAlmostEqual(lf.pwl_gamma_to_linear(level / 255.0), want / 1023.0, places=12, msg=level)
+        # At the knees and just above them (review-task-8b, Minor 3). Level 192 is on the last piece (">=":
+        # 8 * 192 - 1024 = 512, plus the whole part of 512 * 8 / 1024 = 4: 516; on the piece below it would
+        # be 512 + 2 = 514). Level 96.5 is on the third piece (4 * 96.5 - 256 = 130, plus the whole part of
+        # 0.51 = 0: 130; with the knee at 97 it would be 2 * 96.5 - 64 = 129). Level 64 and level 96 themselves
+        # give the same number from either side (64 and 128): the curve is continuous there.
+        for level, want in ((192, 516), (96.5, 130), (64, 64), (96, 128), (64.5, 65)):
+            self.assertAlmostEqual(lf.pwl_gamma_to_linear(level / 255.0), want / 1023.0, places=12, msg=level)
         self.assertEqual(lf.pwl_gamma_to_linear(1.0), 1.0)
         # outside 0..1 and no number: the bounds, and 0
         self.assertEqual(lf.pwl_gamma_to_linear(-0.5), 0.0)
@@ -418,6 +425,12 @@ class GammaSignTest(unittest.TestCase):
             self.assertEqual(got[3], 1.0)
             # (the same bytes read through a constant without the sign, from the same cache, stay as stored)
             self.assertEqual(both.get(row(fc[0]), 3, "base map").sample(0.5, 0.5)[0], 100 / 255.0)
+            # (and the other way round, review-task-8b Minor 4: the constant without the sign first, the one
+            # with it second, from one cache: the sign is the constant's, not the first decode's)
+            reverse = tr._Textures(index)
+            self.assertEqual(reverse.get(row(fc[0]), 3, "base map").sample(0.5, 0.5)[0], 100 / 255.0)
+            self.assertAlmostEqual(reverse.get(row(fc[0] | 0xFC), 3, "base map").sample(0.5, 0.5)[0], 144 / 1023.0, places=6)
+            self.assertEqual(reverse.get(row(fc[0]), 3, "base map").sample(0.5, 0.5)[0], 100 / 255.0)
             # a signed or biased colour component is not something the replay reads
             for field in (1, 2):
                 with self.assertRaises(tr.MissingInput) as e:

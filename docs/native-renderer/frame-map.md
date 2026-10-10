@@ -6056,7 +6056,7 @@ the excess has the trees' outlines; `t8b_crop_far_mountains_left_*.png`). They a
 natively (section 16, follow-up 2) and stay brighter than the game's dark crowns. This, not the
 ground, is most of the left range's 1.46. (2) *The rock face* stays 15 to 23% over in the model:
 steep ground, where the game lights with the side normal maps (tf14) the pass does not read, and
-the model has no shadow mask. (3) *Ground under leaf shadow* (the grass regions, the third spot's
+the model has no shadow mask (in the runs it is not over: "Runs", item 5). (3) *Ground under leaf shadow* (the grass regions, the third spot's
 near ground) cannot be judged by a model without the mask. (4) *The lake* is an unlit placeholder.
 
 **The fix** (one change): the two terrain shaders take tf3's r, g, b through `base_linear`
@@ -6072,17 +6072,135 @@ untouched; no binding, no target and no SDK file changes. Tests: `tests/native/t
 cases 618 to 620, `tests/native/test_native_shaders.cpp` case 241 and the pins,
 `tests/test_terrain_replay.py` (`GammaSignTest`).
 
-**What changes in the picture, by the formula** (not yet seen in a run): lit ground's ambient
+**What changes in the picture, by the formula** (written before the runs; "Runs" below has what was seen): lit ground's ambient
 part falls to 0.40 to 0.55 of what it was, in post frames and in today's frames alike. So ground
 in shadow gets darker by about that factor and sunlit ground by 13 to 20%, and the fixed exposure
 2.22, fitted on the dirt patch with the stored reading, now leaves the post-off picture's sunlit
 ground about 17% under where it was fitted (it is not fitted again: no constant is tuned). The
 figures of sections 14 to 16 for terrain regions are of the stored reading.
 
-**Runs** asked for (none made yet with this build): the software adapter under the debug layer
-first (shader text changed), then the bridge and the third spot with the post on, the bloom on
-and off, `--readback_resolve=full`; the regions against the replay's A and B of each run's own
-capture, and `t8b_scene_space.py` and `t8b_ground.py` again.
+**Runs** (2026-10-10, by the controller with the user at the machine, `RUN UNCHECKED`; binary
+SHA-256 `D2AEC2D9A98F1028`, commit `5d0f974`; logs 484 to 489, all exit 0, 0 `d3d ERROR` lines;
+every run at shot width 1296: **no timing figure**). Evidence `out/native-evidence/post/t8b_<n>_*`;
+scripts `t8b_regions.py`, `t8b_scene_space.py`, `t8b_ratio_map.py`, `t8b_shadow.py`,
+`t8b_postoff.py` there, their outputs `t8b_regions.txt`, `t8b_scene_*_after.txt`,
+`t8b_ratio_bridge_off_after.txt`, `t8b_shadow_*.txt`, `t8b_postoff.txt`.
+
+| Run | Log | What |
+|---|---|---|
+| T8b-1 | 484 | software adapter, debug layer, 240 s, post and bloom on |
+| T8b-2, T8b-3 | 485, 486 | bridge, bloom on / off, full read-back (captures `034415`, `034554`) |
+| T8b-4, T8b-5 | 487, 488 | third spot, bloom on / off, full read-back (`034736`, `034918`) |
+| T8b-6 | 489 | bridge, post off, full read-back (`035057`) |
+
+1. *Software adapter under the debug layer* (log 484): no error; warning id 1328 four times (the
+   SDK's buffers, as in every earlier run). First post frame `drawn, bloom on`. The lit terrain
+   programs with the curve have run on both adapters.
+2. *Like for like, before and after* (`t8b_regions.txt`: the run's native shots at 45, 51, 57 s
+   (third spot 53, 59 s) over the replay's variant of the run's OWN capture, A with the bloom
+   off and B with it on, display luminance, to the power 2.2 as a rough linear figure; before =
+   runs T8-9 to T8-12 of the binary before the fix). The replay itself is checked by the emulated
+   shots over B, 0.97 to 1.04 at the bridge in every region that holds still, in all four runs.
+
+   | Region | before, bloom off | after, bloom off | before, bloom on | after, bloom on |
+   |---|---|---|---|---|
+   | dirt patch | 1.28 | **0.95** | 1.32 | **0.93** |
+   | rock face | 1.32 | **0.96** | 1.36 | **0.95** |
+   | far slope | 1.24 | **0.98** | 1.31 | **0.96** |
+   | island in the lake | 1.22 | **0.97** | 1.27 | **0.97** |
+   | far rock; below the ridge | 1.17; 1.25 | 1.05; 1.13 | 1.14; 1.23 | 1.05; 1.11 |
+   | far mountains right, centre, left (wooded in the game) | 1.30, 1.37, 1.66 | 1.15, 1.19, 1.45 | 1.29, 1.43, 1.78 | 1.15, 1.21, 1.55 |
+   | far peak; sky (two); lake | 0.98; 0.98, 0.98; 1.09 | 0.97; 0.98, 0.98; 1.05 | 0.99; 0.99, 0.99; 1.07 | 0.98; 0.99, 0.99; 1.04 |
+   | planks; trunk; grass beside the dirt (not terrain's base map) | 0.95; 1.08; 0.99 | 0.95; 1.08; 0.99 | 0.95; 1.08; 0.97 | 0.95; 1.08; 0.98 |
+   | third spot: far rock; far mountains left, centre | 1.20; 1.44, 1.24 | 1.11; 1.24, 1.08 | 1.22; 1.49, 1.25 | 1.12; 1.27, 1.08 |
+   | third spot: sky (two); lake | 1.00, 0.97; 1.01 | 1.00, 0.97; 1.00 | 1.00, 0.99; 1.01 | 1.00, 0.99; 0.99 |
+
+   The bare ground is now where the planks, the peak and the sky are: 0.95 to 0.98 of the game's.
+   What the fix does not touch did not move (planks, trunk, sky, peak to 0.01).
+3. *In the scene's own unit* (`t8b_scene_bridge_off_after.txt`, the measure of the finding above:
+   the native shot of T8b-3 at 57 s over the stored scene of capture `034554`): dirt patch 1.20 ->
+   **0.95**, rock face 1.24 -> **0.97**, far slope 1.19 -> **0.99**, island 1.18 -> **0.99**, far
+   rock 1.13 -> 1.04 and 1.19 -> 1.10, the ranges 1.21, 1.28, 1.46 -> 1.11, 1.14, 1.32, lake 1.06
+   -> 1.03; far peak 0.98, sky 0.98, planks 0.97, trunk 1.01 as before. Per pixel
+   (`t8b_ratio_bridge_off_after.txt`): the far slope's 10th to 90th percentile was 1.11 to 1.26 and
+   is 0.94 to 1.05 with 75% of its pixels within 5% of 1 (before: 3%); the island 0.93 to 1.06, 70%
+   (4%). `t8b_bridge_off_after_bands.png` (viewed): the far ground between the trees is grey
+   (within 3%), where it was orange (10 to 25% over) from shore to ridge.
+4. *Ground in shadow: not too dark; nearer the game's than before* (`t8b_shadow_*.txt`: every
+   fourth pixel that is ground, classed by how much of the sun the GAME's pixel has, native shot
+   over the stored scene, median with the quartiles; leaf shadows move between shot and capture,
+   so single pixels mean nothing and the spread is wide).
+
+   | Ground | bridge before | bridge after | third spot before | third spot after |
+   |---|---|---|---|---|
+   | in shadow, nearer than 30 units (about 570 and 1,300 pixels) | 1.75 (1.02 to 2.58) | **1.14** (0.89 to 1.80) | 1.52 (0.98 to 2.25) | **1.13** (0.88 to 1.71) |
+   | in shadow, 30 to 100 units | 1.18 | **0.98** | 1.10 | **0.98** |
+   | in shadow, beyond 100 | 1.19 | 1.11 | 1.24 | 1.19 |
+   | half in the sun, 30 to 100; beyond | 1.23; 1.13 | 1.01; 1.02 | 1.12; 1.12 | 0.96; 1.02 |
+   | in the sun, nearer than 30; 30 to 100; beyond | 1.05; 1.13; 1.10 | 0.92; 0.93; 0.98 | 0.72; 1.10; 1.09 | 0.64; 0.95; 0.98 |
+
+   Ground in the game's shadow nearer than 100 units was 10 to 75% brighter natively and is 2%
+   under to 14% over (beyond 100 units 11 and 19% over, from 19 and 24%): the fix took the excess
+   out and did not push it under. Near ground in the sun reads 0.92 to 0.93
+   at the bridge (quartiles 0.76 to 1.05; the dirt patch itself 0.95, the planks beside it 0.95):
+   3 to 5% under the game's as every near lit region, the rest pixels the native shadows cover and
+   the game's do not at that moment. The third spot's near sunlit ground (0.72 before, 0.64 after)
+   lies under moving leaf shadow in both pictures and is no evidence either way.
+5. *What remains over.* (a) **The wooded ranges**: 1.15, 1.19, 1.45 without bloom and 1.15, 1.21,
+   1.55 with it (third spot 1.24, 1.08 and 1.27, 1.08): the game's distant trees, not drawn
+   natively; in the left range 80% of the pixels are still more than 15% over (84% before), in
+   the far slope 2%. (b) Far rock below the ridge 1.11 to 1.13 and far rock 1.05: the same trees at
+   their edges (35% and 20% of their pixels above 1.15, the median within 9% and 0.1%). (c) **The
+   rock face is NOT over any more** (0.95 to 0.97): the model without a shadow mask had it 15 to
+   23% over, the picture does not; that prediction was wrong. (d) The lake, an unlit placeholder:
+   1.04 to 1.05. (e) The third spot's unlit hill 1.14 to 1.20 (a placeholder).
+6. *The bloom on the mended scene.* Native on / B and native off / A now agree within 0.01 in
+   display luminance on every standing region but the left range (+0.036) and the averted pole
+   side (+0.083; +0.123 before), which is criterion 13 again (the bloom moves the native picture as the replay says). Native against the
+   emulated shots (linear luminance), bloom on: sky 0.997, far peak 0.998, far slope 0.99, island
+   1.01, dirt patch 0.96, rock face 0.97, planks 0.99, trunk 1.01, sunlit pole side 0.98, lake
+   1.04, far rock 1.05 and 1.12, averted pole side 1.10, the ranges 1.14, 1.21, 1.50. Bloom off:
+   sky 0.92, far peak 0.85, far slope 0.85, island 0.82, dirt patch 0.81, rock face 0.84, averted
+   pole side 0.57, the ranges 0.90, 0.96, 1.18. So with the scene mended the bloom brings every
+   standing region to within 5% of the game's picture but the wooded ranges, the far rock below
+   the ridge (trees at its edge) and the averted pole side, and without it the
+   native picture is 8 to 19% under on the far ground and the sky; the wooded ranges are the one
+   place the bloom makes worse (they are too bright before it).
+7. *Post off* (T8b-6, `t8b_postoff.txt`; full read-back, so the game adapts and the native
+   picture has the fixed exposure; against "Native composite"'s column "post off, read-back
+   switch"): dirt patch 1.04 -> 0.83, rock face 1.08 -> 0.85, far slope 1.08 -> 0.90, far
+   mountains left and centre 1.28, 1.07 -> 1.16, 0.96, far rock 0.84 -> 0.77; planks 1.24, trunk
+   1.40, sky 0.77 as before. **Controller's ruling 30**: the fix is accepted although it changes the
+   post-off picture; the old mapping's exposure 2.22 is not fitted again; criterion 8 ("post off
+   is today's picture") is judged against commit `5d0f974`'s binary from now on, and ruling 22's
+   program comparison holds for every program but the lit programs of the two terrain shaders.
+8. *Shots viewed.* `t8b_2_b_on_shot_57s` (bridge, native, bloom on) beside `_54s` (emulated): the
+   dirt path is the game's brown where it was pale orange, the slopes at the right and the island
+   have the game's duller green, the haze and the sky match; still different and plain to see:
+   the far ranges are bare rock where the game's are dark with trees (now the largest difference
+   of the far picture, and paler still under the bloom's veil), the lake is a flat lilac-grey, no
+   HUD. `t8b_6_b_postoff_shot_57s` (post off): the picture of before with darker, browner ground;
+   the far ranges crisp. `t8b_4_3_on_shot_59s` beside `_56s` (third spot): the same: ground and
+   haze as the game's, the ranges bare, the lake grey, the palisade's red and green logs as
+   before. `t8b_1_warp_shot_225s` (software adapter): as the real GPU's; the dog is the flat red
+   silhouette of every software-adapter shot. Nothing looks worse than before the fix in the
+   shots viewed; the others were measured, not viewed.
+9. *Mutation check* (`t8b_mutations_logic.txt`, `t8b_mutations_shaders.txt`, `_2.txt`; script
+   `out/tests/post-task8b/mutate.py`, on copies of the sources): cases 618 to 620: **24 of 24**
+   caught (the swizzle, the sign fields' place and width, each refusal, the mask's bits, the
+   record's word, the curve's knees, offsets, whole part, divisor and bounds); case 241 and the
+   pins: **7 of 7** (first pass 5 of 7: two were not applied, their text stands twice in the test;
+   applied to the pin alone both are caught by 241's compiled check).
+
+**The bloom's default, with the far ground mended** (ruling 29 held it off for this cause; not
+changed here). For ON: item 6 (the picture is within 5% of the game's on every standing region
+but the wooded ranges, the far rock below the ridge and the averted pole side, and 8 to 19% under
+without it), criteria 11 to 13's first readings, no D3D
+error on either adapter. Against: (1) **cost is not measured**: no run with the bloom is timing
+evidence (every one at shot width 1296), so criterion 15's cost part is open; (2) the wooded
+ranges go from 1.15 to 1.45 to 1.15 to 1.55 with it; (3) the sun's two layers are 0 until 10c;
+(4) it acts only in a post frame, so its default follows `--fable2_native_post`'s, which waits for
+criterion 9. The picture no longer speaks against ON; the missing timing does.
 
 ## Pending
 

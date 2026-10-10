@@ -561,6 +561,19 @@ before the validation runs of plan Task 9; the criteria's verdicts come with the
   sign"). Fixed in the two terrain shaders (a deviation: the spec changes no scene shader). What
   it leaves: the wooded far hills (no tree billboards natively), the rock face, the lake. The
   post-off picture's exposure 2.22 was fitted with the old reading and is not fitted again.
+  Measured (runs T8b-1 to T8b-6, logs 484 to 489; like for like against the replay of each run's
+  capture): dirt patch 1.28 -> 0.95, rock face 1.32 -> 0.96, far slope 1.24 -> 0.98, island 1.22
+  -> 0.97; planks, peak and sky unmoved; ground in shadow 1.10 to 1.75 -> 0.98 to 1.14; the
+  wooded ranges still 1.15 to 1.45 (1.15 to 1.55 with the bloom); no D3D error.
+- **Criterion 8 after Task 8b (controller's ruling 30).** The gamma fix changes the post-off
+  picture (lit terrain: dirt patch 1.04 -> 0.83 of the adapting game's with the fixed exposure).
+  It is accepted; the exposure 2.22 is not fitted again; "post off is today's picture" is judged
+  against commit `5d0f974`'s binary from now on, and ruling 22's program comparison holds for
+  every program but the lit programs of the two terrain shaders.
+- **The bloom's default after Task 8b: still off, for the cost alone.** With the bloom every
+  standing region but the wooded ranges, the far rock below the ridge (1.12) and the averted pole
+  side (1.10) is within 5% of the emulated picture (without it the far
+  ground and the sky are 8 to 19% under); no run with the bloom counts for timing.
 - **Cost is not measured**: all fifteen runs were on the monitor where the present gate does not
   hold.
 - **With `--fable2_native_bloom=off` the composite and the ramp are plan Task 5's programs but

@@ -528,7 +528,9 @@ class ClayPass {
   ClayFurnitureFrames furniture_counts_;
   ClayFurniture furniture_logged_ = ClayFurniture::kOff;
   uint32_t furniture_drew_logged_[3] = {};  // (of the last logged frame: moons drawn, glares drawn, quads without their texture)
-  uint32_t furniture_log_lines_ = 0;
+  // (two bounds: lines for a change of the verdict, and lines for a change of what a drawn frame drew,
+  // which in play changes with the camera; review of plan Tasks 12 and 13, Minor 6)
+  uint32_t furniture_log_lines_ = 0, furniture_count_lines_ = 0;
   // The oracle feed (SetPostOracle; null: off). oracle_tex_ / oracle_view_: the stored scene, in
   // kPixelShaderResource from its upload on. oracle_frames_: the frames fed since the upload, the
   // upload's own included (it stops counting past the dump's frame). oracle_dump_: the read-back buffer

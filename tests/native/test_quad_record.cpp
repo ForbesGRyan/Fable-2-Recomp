@@ -506,6 +506,35 @@ static int SetTests() {
 }
 
 // The radial blur's registers in the post block (SetPostRadial).
+// The two rectangles of the radial blur are held to one another in the four values the block takes
+// (c31.x, c31.y, c46.x, c47.x), not in the eight components nothing reads (review of plan Tasks 12
+// and 13, Minor 5).
+static int RadialSameTests() {
+  using fable2::native::capture::PostRadialSame;
+  const float a[3][4] = {{0.3821f, 0.3938f, 7.0f, 8.0f}, {0.87f, 1.0f, 2.0f, 3.0f}, {0.935f, 4.0f, 5.0f, 6.0f}};
+  float b[3][4];
+  std::memcpy(b, a, sizeof(b));
+  if (!PostRadialSame(a, a) || !PostRadialSame(a, b)) return 230;
+  // Every unused component may differ, a NaN among them.
+  const int unused[8][2] = {{0, 2}, {0, 3}, {1, 1}, {1, 2}, {1, 3}, {2, 1}, {2, 2}, {2, 3}};
+  for (const auto& at : unused) {
+    std::memcpy(b, a, sizeof(b));
+    b[at[0]][at[1]] = -99.0f;
+    if (!PostRadialSame(a, b)) return 231;
+    b[at[0]][at[1]] = kNaN;
+    if (!PostRadialSame(a, b) || !PostRadialSame(b, a)) return 232;
+  }
+  // Each of the four that are used must be the same, to the bit.
+  const int used[4][2] = {{0, 0}, {0, 1}, {1, 0}, {2, 0}};
+  for (const auto& at : used) {
+    std::memcpy(b, a, sizeof(b));
+    b[at[0]][at[1]] = Up(a[at[0]][at[1]]);
+    if (PostRadialSame(a, b) || PostRadialSame(b, a)) return 233;
+  }
+  if (PostRadialSame(nullptr, a) || PostRadialSame(a, nullptr)) return 234;
+  return 0;
+}
+
 static int RadialTests() {
   PostBlock valid{};
   valid.valid = true;
@@ -593,11 +622,12 @@ int main() {
   if (!code) code = RefusalTests();
   if (!code) code = SetTests();
   if (!code) code = RadialTests();
+  if (!code) code = RadialSameTests();
   if (code) {
     std::printf("FAIL: quad record case %d\n", code);
     return 1;
   }
   std::puts("PASS: quad records: the table's eight kinds, a captured sun disc's record, every refusal, the frame's set, the "
-            "kinds' targets, the radial blur's registers");
+            "kinds' targets, the radial blur's registers and the comparison of its two rectangles");
   return 0;
 }

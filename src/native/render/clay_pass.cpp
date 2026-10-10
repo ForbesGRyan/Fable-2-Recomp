@@ -2327,6 +2327,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       capture::MaterialStatus status = capture::MaterialStatus::kTextureBad;
       nrhi::TextureView* const view = ResolveTerrainTexture(cmd, dev, q.fetch[0], true, &sampler, fix, &status, tst);
       ClayQuadConstants constants{};
+      // (counted "quad-texture" also when the texture is there and its host scale is refused, the one
+      // thing the plan step could not judge; review of plan Tasks 12 and 13, Minor 7)
       if (!view || !MakeClayQuadConstants(q, scene.light.out_scale, sampler, fix, &constants)) {
         ++st.quad_texture;
         continue;
@@ -2636,15 +2638,19 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // and why) or what a drawn frame drew does (the quads by kind, those left out for their texture: the
   // first frame's textures are still to be uploaded, and the 300-frame line may never come in a short
   // stretch), after the draws, so that it says what was drawn.
+  // (two bounds, so that the sun's glare coming and going with the camera cannot use up the lines a
+  // change of the verdict needs; review of plan Tasks 12 and 13, Minor 6)
   constexpr uint32_t kFurnitureLogLines = 16;
   const uint32_t furniture_drew[3] = {st.quad_drawn_moon, st.quad_drawn_glare, st.quad_texture};
-  if ((furniture != furniture_logged_ || std::memcmp(furniture_drew, furniture_drew_logged_, sizeof(furniture_drew)) != 0) &&
-      furniture_log_lines_ < kFurnitureLogLines) {
+  const bool furniture_changed = furniture != furniture_logged_;
+  const bool drew_changed = std::memcmp(furniture_drew, furniture_drew_logged_, sizeof(furniture_drew)) != 0;
+  uint32_t& furniture_lines = furniture_changed ? furniture_log_lines_ : furniture_count_lines_;
+  if ((furniture_changed || drew_changed) && furniture_lines < kFurnitureLogLines) {
     furniture_logged_ = furniture;
     std::memcpy(furniture_drew_logged_, furniture_drew, sizeof(furniture_drew));
-    ++furniture_log_lines_;
+    ++furniture_lines;
     REXLOG_INFO("[native] clay: furniture changed at scene frame {}: {}{}", scene.frame, FormatFurnitureText(st),
-                furniture_log_lines_ == kFurnitureLogLines ? " (last such line)" : "");
+                furniture_lines == kFurnitureLogLines ? (furniture_changed ? " (last such line for the verdict)" : " (last such line for the counts)") : "");
   }
 
   // The output mapping, or in a post frame the two post steps: every pixel of the mapped target

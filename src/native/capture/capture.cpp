@@ -3980,7 +3980,7 @@ void ObservePostDraw(uint32_t id, uint32_t device) {
       f.radial_bad = true;
       return;
     }
-    if (f.have_radial && std::memcmp(f.radial, radial, sizeof(radial)) != 0) f.radial_bad = true;
+    if (f.have_radial && !PostRadialSame(f.radial, radial)) f.radial_bad = true;
     std::memcpy(f.radial, radial, sizeof(radial));
     f.have_radial = true;
     return;
@@ -4061,8 +4061,11 @@ constinit thread_local PendingQuad t_pending_quad;
 // here for the quads: log line since its last print; the frame they belonged to has no set
 // ("pending").
 std::atomic<uint32_t> g_quad_dropped{0};
-// Calls that ran a table shader somewhere else than at its kind's target (ruling 24: the flares
-// drawn into the water's reflection views): not read, counted here for the same line.
+// Calls that ran a table shader somewhere else than at its kind's target (ruling 24), between the
+// main scene's first call of the builder and the frame's composite: a layer kind's shader at a target
+// that is not half the scene's pitch, or inside the scene. Not read, counted here for the same line.
+// (The flares drawn into the water's reflection views are NOT among them: those calls come before the
+// main scene, where no call outside the scene is looked at; review of plan Tasks 12 and 13, Minor 2.)
 std::atomic<uint32_t> g_quad_elsewhere{0};
 
 // The registers of a record are the bank's at any hooked draw: no buffer load names a pixel

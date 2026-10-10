@@ -110,7 +110,10 @@ inline constexpr const PostQuadEntry* FindPostQuad(uint64_t ps_hash) {
 // at a target of half the scene's pitch (`pitch`: the call's RB_SURFACE_INFO pitch; `scene_pitch`:
 // the main scene's of this frame, 0 while none was seen). The flare's shader is also drawn into
 // the water's reflection views, a quarter of the scene's pitch, before the main scene: those are
-// not the layer's flares and are not read. No pitch is carried as a number.
+// not the layer's flares and are not read (the capture does not look at them at all: before the
+// main scene's first call of the builder it looks at no call outside the scene, so they are not
+// counted "at another target" either; this rule would refuse them if it were asked). No pitch is
+// carried as a number.
 inline constexpr bool QuadTargetMatches(const PostQuadEntry& entry, bool in_scene, uint32_t pitch, uint32_t scene_pitch) {
   if (entry.layer == 0) return in_scene;
   return !in_scene && scene_pitch != 0 && pitch != 0 && pitch * 2 == scene_pitch;

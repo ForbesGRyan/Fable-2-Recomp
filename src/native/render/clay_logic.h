@@ -3804,6 +3804,14 @@ constexpr ClayQuadState QuadDrawState(const capture::QuadRecord& q) {
   return ClayQuadState::kNone;
 }
 
+// Whether a record's texture is fetched as stored: the four sign fields of its fetch constant (dword 0,
+// bits 2 to 9) are 0, as in every captured quad (0x82000002, 0x84000002, 0x88000002). A quad whose texture
+// is fetched signed or through the gamma curve (the terrain's base map was one: "The base map's gamma
+// sign") is not drawn: the quad step samples a texture as the cache decoded it and applies no such field
+// (review of plan Tasks 12 and 13, Minor 9).
+inline constexpr uint32_t kFetchSignMask = 0x000003FCu;
+constexpr bool QuadTextureUnsigned(const capture::QuadRecord& q) { return (q.fetch[0][0] & kFetchSignMask) == 0; }
+
 // A quad's constants (cbuffer Quad of shaders::kClayQuadVs / kClayQuadPs, register b0 of the quad
 // step's layout; shaders::kClayQuadFields is its layout): kClayQuadSlots small slots of the frame's
 // constant buffer a quad, kClayQuadFrameSlots a frame (every record of a full set).
@@ -3837,11 +3845,13 @@ inline constexpr float kQuadRegisterMax = 64.0f;
 //     post frame write with; a moon written with another scale would be another frame's);
 //     the glare: c31.rgb in [0, 64];
 //   - an alpha test in use has its reference in [0, 1];
-//   - the texture's scale is finite and in (0, 64] in both axes.
+//   - the texture's scale is finite and in (0, 64] in both axes;
+//   - the texture is fetched as stored (QuadTextureUnsigned).
 inline bool MakeClayQuadConstants(const capture::QuadRecord& q, float out_scale, uint32_t sampler, const float fix[2],
                                   ClayQuadConstants* out) {
   if (!out || !fix || !capture::QuadRecordValid(q) || ClayQuadPlaceOf(q.kind) == ClayQuadPlace::kNotDrawn) return false;
   if (QuadDrawState(q) == ClayQuadState::kNone) return false;
+  if (!QuadTextureUnsigned(q)) return false;
   auto fits = [](float v) { return std::fabs(v) <= capture::kQuadValueBound; };
   auto colour = [](float v) { return v >= 0.0f && v <= kQuadRegisterMax; };
   ClayQuadConstants c{};
@@ -3871,12 +3881,16 @@ inline bool MakeClayQuadConstants(const capture::QuadRecord& q, float out_scale,
     std::memcpy(c.reg[0], q.ps[0], sizeof(c.reg[0]));
     std::memcpy(c.reg[1], q.ps[1], sizeof(c.reg[1]));
     for (int k = 0; k < 3; ++k) c.reg[0][k] = 0.0f;  // (c20.xyz: not read by the moon's shader)
-  } else {
+  } else if (q.kind == capture::PostQuadKind::kGlare) {
     // (the glare's register: c31; its fourth component is not read)
     for (int k = 0; k < 3; ++k) {
       if (!colour(q.ps[0][k])) return false;
       c.reg[0][k] = q.ps[0][k];
     }
+  } else {
+    // (no other kind's registers are known here: a kind that is given a place without its own branch is
+    // refused, not drawn with the glare's reading of its registers; review of plan Tasks 12 and 13, Minor 3)
+    return false;
   }
   const bool test = capture::QuadAlphaTest(q);
   if (test && !(q.alpha_ref >= 0.0f && q.alpha_ref <= 1.0f)) return false;

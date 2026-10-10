@@ -268,6 +268,15 @@ inline bool SetPostRadial(PostBlock* block, const float c31[4], const float c46[
   return true;
 }
 inline constexpr uint32_t kPostRadialRegisters[3] = {31, 46, 47};
+// Whether the radial blur's two rectangles of a frame had the same registers, in the four values the
+// block takes (c31.x, c31.y, c46.x, c47.x: SetPostRadial), bit for bit. The eight other components of
+// the three registers are read by nothing and are not compared: one that differs must not cost the
+// frame its radial part (review of plan Tasks 12 and 13, Minor 5). a, b: c31, c46, c47 as read.
+inline bool PostRadialSame(const float a[3][4], const float b[3][4]) {
+  if (!a || !b) return false;
+  return std::memcmp(&a[0][0], &b[0][0], 2 * sizeof(float)) == 0 && std::memcmp(&a[1][0], &b[1][0], sizeof(float)) == 0 &&
+         std::memcmp(&a[2][0], &b[2][0], sizeof(float)) == 0;
+}
 
 // Where a frame's post block's table was read, for evidence only (the log and the discovery
 // frame row; no shader input): the base address of the fetch constant and the XXH3 hash of the

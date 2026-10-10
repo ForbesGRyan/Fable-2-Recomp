@@ -35,6 +35,13 @@ static_assert(kSkyTableSize <= nrhi::kMaxTextureTableSize && sizeof(ClaySkyConst
 // 8 words at b1, and a table of 4 textures at t0 (entry 0: what the step reads).
 constexpr uint32_t kPostParamConstants = 0, kPostParamStep = 1, kPostParamTextures = 2, kPostTableSize = 4, kPostStepWords = 8;
 static_assert(kPostTableSize <= nrhi::kMaxTextureTableSize && kClayPostSlots * kClayTerrainSlotBytes >= sizeof(ClayPostConstants));
+// The oracle feed (post_oracle.h): its scene is the pass's logical size, as a texture of four halves a
+// texel whose rows, and the read-back rows of the mapped target, lie at the RHI's row pitch.
+constexpr nrhi::Format kOracleFormat = nrhi::Format::kR16G16B16A16_FLOAT;
+constexpr uint32_t kOracleUploadPitch = ClayPass::kWidth * 8;
+static_assert(kOracleWidth == ClayPass::kWidth && kOracleHeight == ClayPass::kHeight, "the oracle scene is the logical size");
+static_assert(kOracleUploadPitch % nrhi::kRowPitchAlignment == 0 && OracleDumpPitch(ClayPass::kWidth) % nrhi::kRowPitchAlignment == 0 &&
+              OracleDumpPitch(ClayPass::kWidth) >= ClayPass::kWidth * 4);
 // The front target: the composite's result before the ramp, 8 bits as the game's front buffer, the
 // clay target's size (a fraction of it: 1 / kFrontDivisor, exactly).
 constexpr nrhi::Format kFrontFormat = nrhi::Format::kR8G8B8A8_UNORM;
@@ -120,6 +127,7 @@ void ClayPass::DestroyObjects() {
   DestroyShadowObjects();  // (first: its view of depth_ and its pipelines of vs_ and layout_)
   DestroySkyObjects();
   DestroyPostObjects();  // (before map_vs_, which its pipelines are made of)
+  DestroyOracleObjects();
   if (device_) {
     for (nrhi::Pipeline* p : pipelines_) device_->DestroyDeferred(p);
     device_->DestroyDeferred(vs_);
@@ -250,6 +258,8 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     ForgetPostObjects();
     post_objects_failed_ = false;  // (another device: its post steps are tried anew)
     post_layout_ = nullptr;
+    ForgetOracleObjects();
+    oracle_failed_ = false;  // (and the oracle feed)
     white_ = nullptr;
     white_view_ = nullptr;
     white_staging_ = nullptr;
@@ -265,6 +275,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     shadow_objects_failed_ = false;
     sky_objects_failed_ = false;  // (the sky's objects likewise)
     post_objects_failed_ = false;  // (and the post steps')
+    oracle_failed_ = false;  // (and the oracle feed)
   }
   ready_ = false;
 
@@ -409,7 +420,8 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
   color.width = kWidth;
   color.height = kHeight;
   color.format = kMappedFormat;
-  color.usage = nrhi::kTextureUsageRenderTarget;
+  // (a copy source for the oracle feed's one read-back, CopyOracleDump; nothing else copies from it)
+  color.usage = nrhi::kTextureUsageRenderTarget | nrhi::kTextureUsageCopySource;
   color.initial_state = nrhi::ResourceState::kPixelShaderResource;
   color_ = dev->CreateTexture(color);  // never cleared: the mapping writes every pixel
   nrhi::TextureDesc depth;
@@ -1513,6 +1525,115 @@ bool ClayPass::EnsurePostObjects(nrhi::Device* dev) {
   return true;
 }
 
+void ClayPass::ForgetOracleObjects() {
+  oracle_tex_ = nullptr;
+  oracle_view_ = nullptr;
+  oracle_dump_ = nullptr;
+  oracle_frames_ = 0;
+  // (a copy that was pending is gone with its buffer: the rebuilt pass makes it again; one that was
+  // taken or failed is not made again)
+  if (oracle_dump_state_ == OracleDump::kPending) oracle_dump_state_ = OracleDump::kNone;
+}
+
+void ClayPass::DestroyOracleObjects() {
+  if (device_) {
+    device_->DestroyDeferred(oracle_view_);
+    device_->DestroyDeferred(oracle_tex_);
+    device_->DestroyDeferred(oracle_dump_);
+  }
+  ForgetOracleObjects();
+}
+
+bool ClayPass::EnsureOracleTexture(nrhi::Cmd* cmd, nrhi::Device* dev) {
+  if (oracle_view_) return true;
+  if (oracle_failed_ || !oracle_ || !ready_ || dev != device_) return false;
+  auto fail = [&](const char* what) {
+    REXLOG_ERROR("[native] clay: post oracle: {} failed: the feed is off until the pass is rebuilt; the post steps read the pass's "
+                 "own scene", what);
+    DestroyOracleObjects();
+    oracle_failed_ = true;
+    return false;
+  };
+  const OracleScene& scene = oracle_->scene;
+  if (!scene.valid || scene.width != kWidth || scene.height != kHeight) return fail("the scene's size check");
+  nrhi::TextureDesc td;
+  td.width = kWidth;
+  td.height = kHeight;
+  td.format = kOracleFormat;
+  td.initial_state = nrhi::ResourceState::kCopyDest;
+  oracle_tex_ = dev->CreateTexture(td);
+  oracle_view_ = oracle_tex_ ? dev->CreateTextureView(oracle_tex_, nrhi::TextureViewDesc{}) : nullptr;
+  if (!oracle_tex_ || !oracle_view_) return fail("texture creation");
+  nrhi::BufferDesc bd;
+  bd.size = uint64_t(kOracleUploadPitch) * kHeight;
+  bd.heap = nrhi::HeapKind::kUpload;
+  bd.bind_class = nrhi::BufferBindClass::kCopySrc;
+  nrhi::Buffer* staging = dev->CreateBuffer(bd);
+  uint8_t* mapped = staging ? static_cast<uint8_t*>(dev->Map(staging)) : nullptr;
+  if (!mapped) {
+    dev->DestroyDeferred(staging);
+    return fail("staging buffer creation");
+  }
+  // (write only: the memory is write-combined. A row is kWidth texels of four halves, the pitch exactly.)
+  for (uint32_t y = 0; y < kHeight; ++y) {
+    OracleSceneRowHalf(scene, y, reinterpret_cast<uint16_t*>(mapped + size_t(y) * kOracleUploadPitch));
+  }
+  dev->Unmap(staging);
+  cmd->FlushBarriers();
+  cmd->CopyBufferToTexture(oracle_tex_, 0, 0, staging, 0, kOracleUploadPitch, kWidth, kHeight, 1);
+  cmd->Barrier(oracle_tex_, nrhi::ResourceState::kCopyDest, nrhi::ResourceState::kPixelShaderResource);
+  cmd->FlushBarriers();
+  dev->DestroyDeferred(staging);
+  oracle_frames_ = 0;
+  const capture::PostBlock& b = oracle_->block;
+  REXLOG_INFO("[native] clay: post oracle: scene uploaded ({} x {} R16G16B16A16_FLOAT, {:.1f} MB); the post steps read it in place of "
+              "the linear target, with the file's block: c20.w {:.5f}, 37B1 ({:.4f}, {:.4f}, {:.3f}, {:.5f}, {:.5f}, {:.5f}), table "
+              "texels 0, 1, 128: {:.5f}, {:.5f}, {:.5f}; the mapped target is read back {} fed frames from now",
+              kWidth, kHeight, double(bd.size) / (1024.0 * 1024.0), oracle_->c20w, b.composite[0], b.composite[1], b.composite[2],
+              b.composite[3], b.composite[4], b.composite[5], b.table[0], b.table[1], b.table[kPostUnlitTexel], kOracleDumpAfter);
+  return true;
+}
+
+void ClayPass::CopyOracleDump(nrhi::Cmd* cmd, nrhi::Device* dev) {
+  const uint32_t pitch = OracleDumpPitch(kWidth);
+  nrhi::BufferDesc bd;
+  bd.size = uint64_t(pitch) * kHeight;
+  bd.heap = nrhi::HeapKind::kReadback;
+  nrhi::Buffer* buffer = dev->CreateBuffer(bd);
+  if (!buffer) {
+    REXLOG_ERROR("[native] clay: post oracle: the read-back buffer could not be made: no dump is written");
+    oracle_dump_state_ = OracleDump::kDone;
+    return;
+  }
+  cmd->Barrier(color_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kCopySource);
+  cmd->FlushBarriers();
+  cmd->CopyTextureToBuffer(buffer, 0, pitch, color_, 0, kWidth, kHeight);
+  cmd->Barrier(color_, nrhi::ResourceState::kCopySource, nrhi::ResourceState::kPixelShaderResource);
+  cmd->FlushBarriers();
+  oracle_dump_ = buffer;
+  oracle_dump_submission_ = dev->CurrentSubmission();
+  oracle_dump_state_ = OracleDump::kPending;
+  REXLOG_INFO("[native] clay: post oracle: the mapped target copied for the dump at fed frame {} (submission {})", oracle_frames_,
+              oracle_dump_submission_);
+}
+
+bool ClayPass::TakePostOracleDump(nrhi::Device* dev, std::vector<uint8_t>* file) {
+  if (oracle_dump_state_ != OracleDump::kPending || !oracle_dump_ || !file || dev != device_) return false;
+  if (dev->CompletedSubmission() < oracle_dump_submission_) return false;  // (the copy has not run yet)
+  const uint32_t pitch = OracleDumpPitch(kWidth);
+  bool ok = false;
+  if (const uint8_t* mapped = static_cast<const uint8_t*>(dev->Map(oracle_dump_))) {
+    dev->InvalidateForRead(oracle_dump_, 0, uint64_t(pitch) * kHeight);
+    ok = PackOracleDump(mapped, pitch, kWidth, kHeight, file);
+    dev->Unmap(oracle_dump_);
+  }
+  if (!ok) REXLOG_ERROR("[native] clay: post oracle: the read-back buffer could not be read: no dump is written");
+  dev->DestroyDeferred(oracle_dump_);
+  oracle_dump_ = nullptr;
+  oracle_dump_state_ = OracleDump::kDone;
+  return ok;
+}
+
 void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
                       bool textured, ClayLight light, bool shadows, bool fog, const ClayPostRequest& post, ClayStats& st,
                       TextureStats& tst) {
@@ -1732,6 +1853,23 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     // without a buffer; were there one, it must not keep a post frame's words under the old mapping.
     // Review of plan Task 5, Minor 5.)
     if (terrain_cb_mapped_) std::memcpy(terrain_cb_mapped_, &frame_, sizeof(frame_));
+  }
+  // The oracle feed (SetPostOracle; a diagnostic: without a feed nothing of it is reached). Only in a
+  // post frame, after its verdict: the steps' constants are then made of the feed's block and this
+  // frame's ramp by the frame's own rule (MakeClayPostConstants), the scene is uploaded on the first
+  // such frame (no target is bound yet), and the composite reads it in place of the linear target.
+  // The frame's two words stay its own block's: only the scene's draws read them, and nothing reads
+  // the scene's draws.
+  bool oracle_fed = false;
+  if (post_frame && oracle_ && !oracle_failed_) {
+    ClayPostConstants oracle_constants{};
+    if (!MakeClayPostConstants(oracle_->block, post.ramp, false, false, &oracle_constants)) {
+      REXLOG_ERROR("[native] clay: post oracle: the file's block gives no constants: the feed is off until the pass is rebuilt");
+      oracle_failed_ = true;
+    } else if (EnsureOracleTexture(cmd, dev)) {
+      post_constants = oracle_constants;
+      oracle_fed = true;
+    }
   }
   if (post_frame) std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(post_slot_), &post_constants, sizeof(post_constants));
   st.post_switch = post.post;
@@ -2171,13 +2309,20 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     };
     cmd->Barrier(front_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
     cmd->FlushBarriers();
-    post_step(front_, post_composite_pipeline_, linear_view_);
+    // (the oracle feed: the stored scene in place of the linear target; both rest in kPixelShaderResource)
+    post_step(front_, post_composite_pipeline_, oracle_fed ? oracle_view_ : linear_view_);
     cmd->Barrier(front_, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
     cmd->Barrier(color_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
     cmd->FlushBarriers();
     post_step(color_, post_ramp_pipeline_, front_view_);
     cmd->Barrier(color_, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
     cmd->FlushBarriers();
+    // The oracle feed's one read-back: the mapped target of the frame kOracleDumpAfter fed frames after
+    // the upload's (frame 1), copied while it rests and left resting.
+    if (oracle_fed) {
+      if (oracle_frames_ <= kOracleDumpAfter) ++oracle_frames_;
+      if (oracle_frames_ == kOracleDumpAfter + 1 && oracle_dump_state_ == OracleDump::kNone) CopyOracleDump(cmd, dev);
+    }
   } else {
   // (today's frame: the mapping as it was before the post chain, its text, its word and its calls)
   cmd->Barrier(color_, nrhi::ResourceState::kPixelShaderResource,

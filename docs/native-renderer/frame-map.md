@@ -5173,6 +5173,99 @@ place, daylight, a standing camera; night, towns, interiors, menus and cutscenes
 (8) The linear target is `R11G11B10_FLOAT` at the game's scale (5 mantissa bits in blue): no
 step in the darks was seen, none was looked for beyond the shots.
 
+### Oracle feed
+
+Plan Task 6 of the post sub-project (spec ruling 17, Design 17, criterion 6): a diagnostic that
+runs the pass's post steps, on the GPU, on a scene whose right answer is known. No test executes
+the HLSL ("Native composite", limit 6); the mirrors of `clay_logic.h` are a second writing of
+the same sentences. The post steps are full-screen steps over one input, so with the game's own
+scene colour as that input their result can be held against the reference's picture and against
+the game's front buffer pixel for pixel, apart from every error of the native scene. It is also
+what separates the two readings of "Native composite"'s one-sided offset (the far and sunlit
+regions 0.02 to 0.05 above the prediction): fed the game's scene, the steps either reproduce the
+reference (then the offset is the native scene's) or they do not (then it is the shaders').
+
+**The switch**: `--fable2_native_post_oracle=<prefix>` (empty by default), with
+`--fable2_native_post=on`. Read once at startup (`fable2_native_render.cpp`, `LoadOracle`, before
+the callbacks are registered): `<prefix>.scene` and `<prefix>.block`, parsed by
+`src/native/render/post_oracle.h` (pure; `tests/native/test_post_oracle.cpp`). A file that is
+missing or refused gives one log line with the fault's word and nothing else changes. Without
+the switch nothing of the feed is reached: the pass's pointer to it stays null.
+
+**The files**, little-endian, written by `tools/xdk_sigmatch/post_replay.py export <capture>
+<frame> <prefix>` from a capture made under `--readback_resolve=full`:
+
+| File | Content | Refused when (`OracleFault`) |
+|---|---|---|
+| `<prefix>.scene` | `"F2OS"`, u32 width, u32 height, width x height x 3 float32: the scene colour the game's composite read (`0x199E0000`, by content), in the game's scale | `short`; `magic`; `size` (not 1120 x 720, the pass's logical size, or a length that is not the header's); `value` (a NaN or an infinity anywhere) |
+| `<prefix>.block` | `"F2OB"`, u32 1, float32 `c20.w`, `PostBlock`'s 541 floats in the struct's order, u32 parts | `short`; `magic`; `version`; `size` (not 2,180 bytes); `scale` (`c20.w` no number or not above 0); `parts` (an unknown bit, or the blur's bit with weights that fail their rule); `value` (a radial float that is no number); `block` (a rule of `MakePostBlock`, named: `register`, `range`, `table-texel`); `pairing` (`c77.y` of the bright pass times `c20.w` not 1 within 1e-3) |
+| `logs/native_post_dump_<stamp>.rgba` | `"F2OD"`, u32 width, u32 height, width x height x 4 bytes: the mapped target | (written by the pass) |
+
+The block is made through the capture's own `MakePostBlock` (with the table's fetch constant as
+every capture holds it, and the table as the bytes the guest holds), so a file can hand the
+pass nothing a guest frame could not; it is then the file's floats bit for bit. The radial part
+(plan Task 12) is accepted and not carried. A scene value that is no number refuses the file:
+the steps would read it as 0 or as the clamp, but the exporter writes none (0 in each of the
+four exports below), so one is a damaged file.
+
+**In the pass** (`clay_pass.cpp`; `ClayPass::SetPostOracle`, `TakePostOracleDump`). The feed
+acts only in a frame that is a post frame by its own verdict (`DecideClayPost`: nothing of
+"a frame without post" changes, and a menu or a frame without a block is today's with the feed
+set as without). In such a frame: the steps' constants are made of the file's block and the
+frame's own ramp by the frame's own rule (`MakeClayPostConstants`); on the first such frame the
+scene is uploaded once as a 1120 x 720 `R16G16B16A16_FLOAT` texture (alpha 1; each value
+bounded to the largest half, 65504, so that no infinity is uploaded; `HalfFromFloat`, the
+nearest half, a tie to the even one, tested against `HalfToFloat` on every half and every tie);
+the composite reads that texture by `Load` in place of the linear target, and the ramp step
+follows as always. The scene's own draws are drawn as in any post frame and nothing reads
+them; the frame's exposure and unlit words stay the live block's. The native view therefore
+shows one still picture, the game's scene through the native steps, while the feed is on. In
+the frame 30 fed frames after the upload's the mapped target, resting in
+`kPixelShaderResource`, is taken to `kCopySource`, copied to a read-back buffer (rows of 4,608
+bytes, the RHI's row pitch above 4,480) and returned to its resting state; when that
+submission has completed the buffer is read once and the file written, once in a run. The
+mapped target has `kTextureUsageCopySource` for this (no effect on Direct3D 12, where the
+SDK's texture creation does not read the flag). A failure of the texture, the staging buffer
+or the read-back buffer turns the feed off until the pass is rebuilt, with one log line, and
+the steps read the pass's own scene again. The texture and a pending buffer are destroyed with
+the pass's other objects; a rebuilt pass uploads again and makes the copy again if none was
+taken.
+
+Log lines: `[native] post oracle: <prefix>: scene W x H (N values a half-float texture changes),
+block c20.w S, parts P; ...` at startup; `[native] clay: post oracle: scene uploaded ...` with
+the block's registers at the first fed frame; `... the mapped target copied for the dump at fed
+frame 31 (submission N)`; `[native] post oracle: wrote <path> (3225612 bytes ...) at clay frame
+N`.
+
+**The exports** (`out/native-evidence/post/oracle/<stamp>_f1.scene` / `.block`; frame 1 of the
+three bridge oracle captures of section 16 and of the trees capture `134312`; each parsed by the
+C++ parser through `out/tests/runtime-unit-tests/post_oracle.exe <prefix>`, output in
+`out/native-evidence/post/t6_oracle_files.txt`):
+
+| Capture | `c20.w` | Largest scene value | Values no number | Values a half changes | Parsed |
+|---|---|---|---|---|---|
+| `092959` | 8.44137 | 4.359375 | 0 | 0 | scene valid, block valid, parts 1 |
+| `121331` | 8.42832 | 4.359375 | 0 | 0 | scene valid, block valid, parts 1 |
+| `132250` | 8.45966 | 3.9375 | 0 | 0 | scene valid, block valid, parts 1 |
+| `134312` | 7.40595 | 4.5625 | 0 | 0 | scene valid, block valid, parts 1 |
+
+No value is changed by the half-float texture (the game's scene target has 7 bits of mantissa
+and at most 31.875), so the GPU reads exactly the numbers the reference computes from. The
+exporter writes parts 3 for these frames (they have a radial row); the parser takes the blur's
+part alone.
+
+**The comparison** (`post_replay.py`, for a capture `<c>` and the log of the run that made the
+dump): `replay <c> 1 --variant A --ramp <log> --write <ref>` writes the reference's variant A
+picture and the game's front buffer, both through that run's own ramp, as `<ref>_A.rgba` and
+`<ref>_final.rgba`; `compare <dump> <ref>_A.rgba` is spec criterion 6 (the command prints the
+whole picture's largest difference, the mean signed difference by channel and whether the
+criterion's bounds hold: at least 99.9% of the pixels within 1 level, all within 2);
+`compare <dump> <ref>_final.rgba` is criterion 5's figures from the GPU (the front buffer holds
+the HUD and the bloom: the line "outside the HUD" and the regions are the ones to read).
+
+**Runs**: none yet at this writing; the software adapter's run and the three real-GPU runs are
+the controller's (the task's report has their lines). What they show is added here.
+
 ## Pending
 
 1. **Pitch ablation** (done 2026-10-01, results in section 4; kept for re-runs). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):

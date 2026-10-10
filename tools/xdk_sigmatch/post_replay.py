@@ -36,7 +36,15 @@ front buffer's and the hue difference, and over the whole picture outside the HU
 native shots' on / off ratio should be). export writes the two files of the oracle feed (plan Task 6):
 <prefix>.scene and <prefix>.block. excerpt writes a 16 x 16 block of a frame with everything the arithmetic
 needs and its results (tests/post_replay_excerpt.json holds one). compare reads two pictures in the dump
-format ("F2OD", width, height, RGBA bytes: the pass's read-back and a --write of this tool).
+format ("F2OD", width, height, RGBA bytes: the pass's read-back and a --write of this tool) and says whether
+spec criterion 6's bounds hold between them (within 1 level on 99.9% of the pixels, within 2 on all).
+
+The oracle feed (plan Task 6; src/native/render/post_oracle.h parses the two files; frame-map section 17,
+"Oracle feed"), for a read-back capture <c> and the log <log> of the run that made the dump:
+  post_replay.py export <c> 1 <prefix>                        the files for --fable2_native_post_oracle=<prefix>
+  post_replay.py replay <c> 1 --variant A --ramp <log> --write <ref>
+  post_replay.py compare <dump> <ref>_A.rgba                  the shaders against the reference (criterion 6)
+  post_replay.py compare <dump> <ref>_final.rgba              against the game's front buffer through that ramp
 
 Pure Python (no numpy, as every tracked tool): a replay of both variants takes about 20 seconds.
 """
@@ -396,6 +404,21 @@ def pack_scene(scene, w, h):
     return b"F2OS" + struct.pack("<II", w, h) + floats.tobytes()
 
 
+HALF_MAX = 65504.0              # the largest half that is a number (post_oracle.h, kHalfMax)
+
+
+def half_changed(scene):
+    """How many values of a scene the pass's half-float texture does not hold exactly (post_oracle.h,
+    OracleHalf: bounded to the largest half, then the nearest half, a tie to the even one)."""
+    changed = 0
+    for at in range(0, len(scene), 65536):
+        chunk = scene[at:at + 65536]
+        bounded = [min(max(v, -HALF_MAX), HALF_MAX) for v in chunk]
+        halves = struct.unpack("<%de" % len(chunk), struct.pack("<%de" % len(chunk), *bounded))
+        changed += sum(1 for v, h in zip(chunk, halves) if v != h)
+    return changed
+
+
 def block_floats(fr):
     """PostBlock's 541 floats in the struct's order, and its parts."""
     out = [fr.reg("composite", 31), fr.reg("composite", 46), fr.reg("composite", 47), fr.reg("composite", 77, 0),
@@ -501,7 +524,7 @@ def outside_hud(w, h):
 def difference_stats(a, b, w, h, spans=None, channels=3, scale=255.0):
     """|a - b| * scale over the spans (all rows whole without): the median, mean, 90th and 99th percentile of
     the channel differences, and the share of pixels whose largest channel difference is within 1, 2, 4 and 8."""
-    diffs, worst = [], []
+    diffs, worst, signed = [], [], [0.0, 0.0, 0.0]
     for y in range(h):
         for x0, x1 in (spans[y] if spans is not None else [(0, w)]):
             lo, hi = (y * w + x0) * channels, (y * w + x1) * channels
@@ -509,14 +532,28 @@ def difference_stats(a, b, w, h, spans=None, channels=3, scale=255.0):
             d = [[abs(p - q) * scale for p, q in zip(ra[c::channels], rb[c::channels])] for c in range(3)]
             for c in range(3):
                 diffs.extend(d[c])
+                signed[c] += (sum(ra[c::channels]) - sum(rb[c::channels])) * scale
             worst.extend(map(max, d[0], d[1], d[2]))
     if not worst:
         return None
     diffs.sort()
     n = float(len(worst))
+    # max: the largest channel difference of any pixel; beyond: the pixels more than 2 levels off; signed:
+    # the mean of a - b by channel (a bias shows here where the absolute figures cannot tell its side).
     return {"pixels": len(worst), "median": percentile(diffs, 50), "mean": sum(diffs) / len(diffs),
-            "p90": percentile(diffs, 90), "p99": percentile(diffs, 99),
+            "p90": percentile(diffs, 90), "p99": percentile(diffs, 99), "max": max(worst),
+            "beyond": sum(1 for v in worst if v > 2), "signed": [s / n for s in signed],
             "within": {k: sum(1 for v in worst if v <= k) / n for k in (1, 2, 4, 8)}}
+
+
+def oracle_verdict(stats):
+    """Spec criterion 6's bounds on a comparison's statistics (8-bit levels): at least 99.9% of the pixels
+    within 1 level and all within 2. (held, the sentence)."""
+    if not stats:
+        return False, "criterion 6's bounds: NOT held (no pixels)"
+    ok = stats["within"][1] >= 0.999 and stats["max"] <= 2
+    return ok, "criterion 6's bounds (99.9%% of the pixels within 1 level, all within 2): %s: %.3f%% within 1, largest %g, %d of %d pixels beyond 2" % (
+        "held" if ok else "NOT held", 100 * stats["within"][1], stats["max"], stats["beyond"], stats["pixels"])
 
 
 def region_rows(picture, front, w, h, spot="bridge"):
@@ -618,8 +655,9 @@ def cmd_export(args):
     Path(args.prefix + ".scene").write_bytes(pack_scene(scene, SCENE_W, SCENE_H))
     Path(args.prefix + ".block").write_bytes(pack_block(fr))
     _head(fr)
-    print("wrote %s.scene (%d x %d, %d values that are no numbers) and %s.block (parts %d)" % (
-        args.prefix, SCENE_W, SCENE_H, bad, args.prefix, block_floats(fr)[1]))
+    print("wrote %s.scene (%d x %d, %d values that are no numbers, %d that a half-float texture changes, largest %g) and "
+          "%s.block (parts %d)" % (args.prefix, SCENE_W, SCENE_H, bad, half_changed(scene) if not bad else -1,
+                                   max(scene), args.prefix, block_floats(fr)[1]))
     return 0
 
 
@@ -663,8 +701,10 @@ def cmd_excerpt(args):
 def compare_report(a, b, w, h, spot=None, say=print):
     """The comparison of two RGBA byte pictures: whole and by region."""
     def line(name, s):
-        say("%-32s %8d px: median %.2f, 90%% %.2f; within 1 level %.2f%%, within 2 %.2f%%, within 8 %.2f%%" % (
-            name[:32], s["pixels"], s["median"], s["p90"], 100 * s["within"][1], 100 * s["within"][2], 100 * s["within"][8]))
+        say("%-32s %8d px: median %.2f, 90%% %.2f, largest %g; within 1 level %.2f%%, within 2 %.2f%%, within 8 %.2f%%; "
+            "mean signed (%+.3f, %+.3f, %+.3f)" % (
+                name[:32], s["pixels"], s["median"], s["p90"], s["max"], 100 * s["within"][1], 100 * s["within"][2],
+                100 * s["within"][8], *s["signed"]))
 
     whole = difference_stats(a, b, w, h, channels=4, scale=1.0)
     line("whole picture", whole)
@@ -683,8 +723,10 @@ def cmd_compare(args):
     w2, h2, b = read_dump(args.picture)
     if (w, h) != (w2, h2):
         raise ReplayError("%d x %d against %d x %d" % (w, h, w2, h2))
-    print("%s against %s (%d x %d), absolute difference in 8-bit levels" % (args.dump, args.picture, w, h))
-    compare_report(a, b, w, h, args.spot)
+    print("%s against %s (%d x %d), absolute difference in 8-bit levels (signed: the first less the second)" % (
+        args.dump, args.picture, w, h))
+    whole = compare_report(a, b, w, h, args.spot)
+    print("whole picture, %s" % oracle_verdict(whole)[1])
     return 0
 
 

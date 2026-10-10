@@ -3,15 +3,20 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <ctime>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
 #endif
 
 #include <rex/cvar.h>
+#include <rex/filesystem.h>
 #include <rex/graphics/native_guest_renderer.h>
 #include <rex/graphics/native_rhi.h>
 #include <rex/logging.h>
@@ -22,6 +27,7 @@
 #include "d3d_messages.h"
 #include "fable2_native_shaders.h"
 #include "native_render_state.h"
+#include "post_oracle.h"
 
 REXCVAR_DEFINE_BOOL(fable2_native_render, false, "Fable2",
                     "Register the native guest-output renderer at startup (restart "
@@ -84,6 +90,14 @@ REXCVAR_DEFINE_STRING(fable2_exposure_readback, "off", "Fable2",
                       "brightness and contrast change with it; one wait for the GPU a frame); off (or false, 0) = not read back: "
                       "the game stays at its blind exposure. Read once at startup, with the native renderer on or off; a "
                       "--readback_resolve_force_addresses given by hand wins. Frame map section 17.");
+REXCVAR_DEFINE_STRING(fable2_native_post_oracle, "", "Fable2",
+                      "Diagnostic of the native post chain (frame map section 17, \"Oracle feed\"): a path prefix. Empty (the "
+                      "default): nothing. Set, with fable2_native_post=on: <prefix>.scene and <prefix>.block (written by "
+                      "tools/xdk_sigmatch/post_replay.py export from a read-back capture) are read once at startup; if both are "
+                      "valid, the post steps of every post frame run on that stored scene with its stored block and the live "
+                      "ramp in place of the frame's own (the native view then shows that one still picture), and 30 such frames "
+                      "after the first the mapped target is written once to logs/native_post_dump_<stamp>.rgba for "
+                      "post_replay.py compare. A file that is missing or refused: one log line, and nothing changes.");
 REXCVAR_DEFINE_BOOL(fable2_native_d3d_messages, false, "Fable2",
                     "Write the Direct3D debug layer's errors, corruption and warnings to the game log "
                     "(the layer is the SDK's --d3d12_debug=true; without it there is nothing to write). "
@@ -166,6 +180,14 @@ RampLog g_ramp;
 // the emulated picture of the frame went through, as floats, valid only when it passed its rule
 // (MakePostRamp); invalid when no reader is registered or the reader gave none.
 PostRamp g_post_ramp;
+
+// The oracle feed (fable2_native_post_oracle; post_oracle.h). Read and parsed once in Install, before
+// the callbacks are registered, and never changed after: the command-processor thread reads it.
+// g_oracle_feed.scene points into g_oracle_scene_bytes. g_oracle_valid: both files were taken.
+std::vector<uint8_t> g_oracle_scene_bytes;
+render::OracleFeed g_oracle_feed;
+bool g_oracle_valid = false;
+bool g_oracle_dump_written = false;  // command-processor thread only
 
 // F3 status text, written on the command-processor thread, read by the UI.
 std::mutex g_status_mutex;
@@ -293,6 +315,85 @@ bool PostWanted(bool records_wanted) {
                            CurrentClayLight() == render::ClayLight::kOn);
 }
 
+// fable2_native_post_oracle: the two files of the prefix, read whole and parsed (game thread, once).
+// Anything missing or refused leaves the feed off, with one line that names the file and the fault.
+void LoadOracle() {
+  const std::string prefix = REXCVAR_GET(fable2_native_post_oracle);
+  if (prefix.empty()) return;
+  auto read = [](const std::string& path, std::vector<uint8_t>* out) {
+    out->clear();
+    std::FILE* fp = std::fopen(path.c_str(), "rb");
+    if (!fp) return false;
+    // (bounded: a scene file is 9.7 MB; nothing larger than 64 MB is read)
+    constexpr size_t kMaxBytes = size_t(64) << 20;
+    uint8_t buf[65536];
+    bool ok = true;
+    for (size_t n; (n = std::fread(buf, 1, sizeof(buf), fp)) > 0;) {
+      if (out->size() + n > kMaxBytes) {
+        ok = false;
+        break;
+      }
+      out->insert(out->end(), buf, buf + n);
+    }
+    ok = ok && !std::ferror(fp);
+    std::fclose(fp);
+    if (!ok) out->clear();
+    return ok;
+  };
+  std::vector<uint8_t> block_bytes;
+  if (!read(prefix + ".scene", &g_oracle_scene_bytes) || !read(prefix + ".block", &block_bytes)) {
+    REXLOG_WARN("[native] post oracle: {}.scene or {}.block could not be read; the feed is off", prefix, prefix);
+    g_oracle_scene_bytes = {};
+    return;
+  }
+  render::OracleFault scene_why = render::OracleFault::kNone, block_why = render::OracleFault::kNone;
+  capture::PostBlockReason rule = capture::PostBlockReason::kNone;
+  render::OracleFeed feed;
+  feed.scene = render::ParseOracleScene(g_oracle_scene_bytes.data(), g_oracle_scene_bytes.size(), &scene_why);
+  feed.block = render::ParseOracleBlock(block_bytes.data(), block_bytes.size(), &feed.c20w, &block_why, &rule);
+  if (!feed.scene.valid || !feed.block.valid) {
+    REXLOG_WARN("[native] post oracle: {}: scene {} ({} bytes), block {}{}{} ({} bytes); the feed is off", prefix,
+                feed.scene.valid ? "valid" : render::OracleFaultName(scene_why), g_oracle_scene_bytes.size(),
+                feed.block.valid ? "valid" : render::OracleFaultName(block_why),
+                block_why == render::OracleFault::kBlock ? ": " : "",
+                block_why == render::OracleFault::kBlock ? capture::PostBlockReasonName(rule) : "", block_bytes.size());
+    g_oracle_scene_bytes = {};
+    return;
+  }
+  g_oracle_feed = feed;
+  g_oracle_valid = true;
+  REXLOG_INFO("[native] post oracle: {}: scene {} x {} ({} values a half-float texture changes), block c20.w {:.5f}, parts {}; "
+              "with fable2_native_post=on the post steps of every post frame read this scene and block, and the mapped target is "
+              "written once to logs/native_post_dump_<stamp>.rgba",
+              prefix, feed.scene.width, feed.scene.height, render::OracleSceneHalfChanged(feed.scene), feed.c20w,
+              unsigned(feed.block.parts));
+}
+
+// The oracle feed's dump, once its copy has run: logs/native_post_dump_<stamp>.rgba (the pass's
+// TakePostOracleDump gives the file's bytes once). Command-processor thread.
+void WriteOracleDump(nrhi::Device* device) {
+  if (!g_oracle_valid || g_oracle_dump_written || !g_clay) return;
+  std::vector<uint8_t> file;
+  if (!g_clay->TakePostOracleDump(device, &file)) return;
+  g_oracle_dump_written = true;
+  char name[64];
+  const std::time_t t = std::time(nullptr);
+  std::strftime(name, sizeof(name), "native_post_dump_%Y%m%d_%H%M%S.rgba", std::localtime(&t));
+  const std::filesystem::path dir = rex::filesystem::GetExecutableFolder() / "logs";
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  const std::string path = (dir / name).string();
+  std::FILE* fp = std::fopen(path.c_str(), "wb");
+  const bool ok = fp && std::fwrite(file.data(), 1, file.size(), fp) == file.size();
+  if (fp) std::fclose(fp);
+  if (ok) {
+    REXLOG_INFO("[native] post oracle: wrote {} ({} bytes: the mapped target, {} x {} RGBA) at clay frame {}", path, file.size(),
+                render::ClayPass::kWidth, render::ClayPass::kHeight, g_clay_frames);
+  } else {
+    REXLOG_WARN("[native] post oracle: {} could not be written", path);
+  }
+}
+
 bool EnsureResources(nrhi::Device* device, nrhi::Format format) {
   if (g_res.device == device && g_res.format == format && g_res.pattern) {
     return true;
@@ -405,6 +506,8 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   render::ClayPostRequest post;
   post.post = CurrentPost();
   post.ramp = g_post_ramp.valid ? g_post_ramp.rgb : nullptr;
+  // (the oracle feed: null unless its switch is set and both files were valid)
+  g_clay->SetPostOracle(g_oracle_valid ? &g_oracle_feed : nullptr);
   g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), CurrentFog(), post,
                  st, tst);
   g_shadows_usable.store(g_clay->shadows_usable(), std::memory_order_relaxed);
@@ -556,6 +659,7 @@ void OverlayCallback(const NativeGuestOutputRenderContext& ctx, void*) {
   LogD3dMessages();  // (of the frames before this one: the layer reports a call when it is executed)
   ReadRamp();  // (before the clay pass: a post frame is drawn through this frame's ramp)
   if (!RenderClay(ctx)) return;
+  WriteOracleDump(ctx.device);  // (the oracle feed's one file; nothing without its switch)
   if (!g_clay_scene) return;  // no scene captured yet: leave the emulated frame
   if (!g_composite.Ensure(ctx.device, ctx.guest_output->format())) {
     Fail("composite");
@@ -623,6 +727,7 @@ void Install(rex::memory::Memory* memory) {
     return;
   }
   g_view.store(ParseViewCvar(), std::memory_order_relaxed);
+  LoadOracle();  // (before the callbacks exist: the feed is never written again)
   rex::graphics::SetNativeGuestOutputRenderer(&RenderCallback, nullptr);
   rex::graphics::SetNativeGuestOutputPostProcessor(&OverlayCallback, nullptr);
   g_installed.store(true, std::memory_order_release);

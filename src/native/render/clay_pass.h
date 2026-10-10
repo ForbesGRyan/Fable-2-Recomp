@@ -50,6 +50,7 @@
 #include "clay_logic.h"
 #include "frame_scene.h"
 #include "geometry_cache.h"
+#include "post_oracle.h"
 #include "texture_cache.h"
 
 namespace fable2::native::render {
@@ -125,6 +126,20 @@ class ClayPass {
   bool shadows_usable() const { return !shadow_objects_failed_; }
   GeometryCache& geometry() { return geometry_; }
   TextureCache& textures() { return textures_; }
+  // The oracle feed (post_oracle.h; fable2_native_post_oracle: a diagnostic, spec ruling 17). `feed`: a
+  // parsed scene and block, the caller's, which outlive every Render; null (as it is unless the switch is
+  // set and both files were valid): nothing of the feed is reached. With a feed, in a POST FRAME only
+  // (every rule of a frame without post stands), the scene is uploaded once as a kWidth x kHeight
+  // R16G16B16A16_FLOAT texture and the composite reads it in place of the linear target, with the steps'
+  // constants made of the feed's block and the frame's own ramp; the scene's draws are drawn as always and
+  // nothing reads them. In the frame kOracleDumpAfter fed frames after the upload's the mapped target is
+  // copied to a read-back buffer, once in the pass's life. A failure (the texture, the buffer) turns the
+  // feed off until the pass is rebuilt, with one log line; the renderer goes on from its own scene.
+  void SetPostOracle(const OracleFeed* feed) { oracle_ = feed; }
+  // The dump of the mapped target: true once, with `file` the dump file's bytes (PackOracleDump), when the
+  // copy's submission has completed; false in every other call (none pending, not yet completed, another
+  // device, or the buffer could not be read: logged). Command-processor thread, outside Render.
+  bool TakePostOracleDump(nrhi::Device* dev, std::vector<uint8_t>* file);
 
  private:
   // One drawable record of the frame, with its buffers and albedo.
@@ -254,6 +269,16 @@ class ClayPass {
   bool EnsurePostObjects(nrhi::Device* dev);
   void DestroyPostObjects();
   void ForgetPostObjects();
+  // The oracle feed's texture (SetPostOracle): made and filled from the feed's scene on the first fed
+  // frame (a copy and barriers on `cmd`: called before render targets are bound); false when it could
+  // not be made, now or before (oracle_failed_). CopyOracleDump: the mapped target, resting in
+  // kPixelShaderResource, into a new read-back buffer (rows of OracleDumpPitch(kWidth) bytes), and back to
+  // its resting state. Both are destroyed with the pass's other objects; a copy still pending then is
+  // dropped and made again by the rebuilt pass.
+  bool EnsureOracleTexture(nrhi::Cmd* cmd, nrhi::Device* dev);
+  void CopyOracleDump(nrhi::Cmd* cmd, nrhi::Device* dev);
+  void DestroyOracleObjects();
+  void ForgetOracleObjects();
   // The pre-pass pipeline of a colour pipeline (PrepassKey), from the pre-pass's own cache; nullptr
   // when the colour pipeline is not one of the cache or does not write depth, or on a failure.
   nrhi::Pipeline* PrepassPipeline(nrhi::Device* dev, nrhi::Pipeline* colour, const ClayAlpha& alpha, bool* flat);
@@ -439,6 +464,20 @@ class ClayPass {
   ClayPostFrames post_counts_;
   ClayPost post_logged_ = ClayPost::kOff;
   uint32_t post_log_lines_ = 0;
+  // The oracle feed (SetPostOracle; null: off). oracle_tex_ / oracle_view_: the stored scene, in
+  // kPixelShaderResource from its upload on. oracle_frames_: the frames fed since the upload, the
+  // upload's own included (it stops counting past the dump's frame). oracle_dump_: the read-back buffer
+  // of the mapped target while its copy is pending, readable once the submission oracle_dump_submission_
+  // has completed. oracle_dump_state_: none yet, pending, or done (taken, or failed: not made again).
+  enum class OracleDump : uint8_t { kNone, kPending, kDone };
+  const OracleFeed* oracle_ = nullptr;
+  nrhi::Texture* oracle_tex_ = nullptr;
+  nrhi::TextureView* oracle_view_ = nullptr;
+  bool oracle_failed_ = false;
+  uint32_t oracle_frames_ = 0;
+  nrhi::Buffer* oracle_dump_ = nullptr;
+  uint64_t oracle_dump_submission_ = 0;
+  OracleDump oracle_dump_state_ = OracleDump::kNone;
   nrhi::BindingLayout* map_layout_ = nullptr;  // the RHI has no layout destruction
   nrhi::Shader* map_vs_ = nullptr;
   nrhi::Shader* map_ps_ = nullptr;

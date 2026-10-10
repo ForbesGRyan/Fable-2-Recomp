@@ -281,6 +281,24 @@ class Files(unittest.TestCase):
         with self.assertRaises(pr.ReplayError):
             pr.pack_scene(scene, 2, 2)
 
+    def test_values_a_half_float_texture_changes(self):
+        # The pass uploads the scene as halves (post_oracle.h, OracleHalf): bounded to 65504, nearest even.
+        scene = array("d", [0.0, 0.5, 31.875, f32(0.1), 1e9, -1e9, 65504.0, 1.0 + 2.0 ** -10, 1.0 + 2.0 ** -11])
+        self.assertEqual(pr.half_changed(scene), 4)     # 0.1, both beyond the largest half, 1 + 2^-11
+        self.assertEqual(pr.half_changed(array("d")), 0)
+
+    def test_the_formats_are_the_pass_parsers(self):
+        # src/native/render/post_oracle.h: the magics, the version, the block's floats, the dump's frame.
+        text = (ROOT / "src" / "native" / "render" / "post_oracle.h").read_text(encoding="utf-8")
+        for magic in ('"F2OS"', '"F2OB"', '"F2OD"'):
+            self.assertIn("std::memcmp(data, %s, 4)" % magic if magic != '"F2OD"' else "std::memcpy(p, %s, 4)" % magic, text)
+        self.assertIn("kOracleBlockFloats = %d;" % pr.BLOCK_FLOATS, text)
+        self.assertIn("kOracleBlockVersion = 1;", text)
+        self.assertIn("kOracleWidth = %d, kOracleHeight = %d;" % (pr.SCENE_W, pr.SCENE_H), text)
+        self.assertEqual(len(pr.pack_block(frame())), 2180)
+        self.assertIn("kOracleBlockBytes == 2180", text)
+        self.assertEqual(pr.pack_block(frame())[4:8], struct.pack("<I", 1))
+
     def test_the_oracle_block(self):
         fr = frame()
         data = pr.pack_block(fr)
@@ -380,6 +398,47 @@ class Statistics(unittest.TestCase):
         self.assertEqual(len(out), 2)
         self.assertIn("whole picture", out[0])
         self.assertIn("within 1 level 93.75%", out[0])
+
+    def test_the_largest_difference_and_the_oracle_verdict(self):
+        # Spec criterion 6: within 1 level on at least 99.9% of the pixels and within 2 on all.
+        w, h = 50, 40                                   # 2,000 pixels: two may be 2 levels off
+        a = bytes([100, 100, 100, 255] * (w * h))
+        b = bytearray(a)
+        b[4 * 7 + 1] = 102
+        b[4 * 900 + 2] = 98
+        s = pr.difference_stats(a, bytes(b), w, h, channels=4, scale=1.0)
+        self.assertEqual((s["max"], s["beyond"]), (2.0, 0))
+        self.assertEqual(s["within"][1], 1998 / 2000)
+        ok, text = pr.oracle_verdict(s)
+        self.assertTrue(ok)
+        self.assertIn("held", text)
+        self.assertNotIn("NOT", text)
+        # the mean signed difference by channel, the first picture less the second
+        self.assertEqual(s["signed"], [0.0, -2 / 2000, 2 / 2000])
+        b[4 * 901] = 101                                # a third pixel off by one: still held (1 level counts as within)
+        self.assertTrue(pr.oracle_verdict(pr.difference_stats(a, bytes(b), w, h, channels=4, scale=1.0))[0])
+        b[4 * 902] = 102                                # a third pixel 2 levels off: 99.85% within 1
+        s = pr.difference_stats(a, bytes(b), w, h, channels=4, scale=1.0)
+        ok, text = pr.oracle_verdict(s)
+        self.assertFalse(ok)
+        self.assertIn("NOT held", text)
+        b[4 * 902] = 100
+        b[4 * 7 + 1] = 103                              # one pixel 3 levels off: not all within 2
+        s = pr.difference_stats(a, bytes(b), w, h, channels=4, scale=1.0)
+        self.assertEqual((s["max"], s["beyond"]), (3.0, 1))
+        self.assertFalse(pr.oracle_verdict(s)[0])
+        self.assertFalse(pr.oracle_verdict(None)[0])
+        # the command prints it
+        with tempfile.TemporaryDirectory() as tmp:
+            pa, pb = Path(tmp) / "a.rgba", Path(tmp) / "b.rgba"
+            pr.write_dump(pa, w, h, a)
+            pr.write_dump(pb, w, h, bytes(b))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(pr.main(["compare", str(pa), str(pb), "--spot", "none"]), 0)
+            self.assertIn("largest 3", out.getvalue())
+            self.assertIn("criterion 6", out.getvalue())
+            self.assertIn("NOT held", out.getvalue())
 
     def test_the_command_line_compares_two_dumps(self):
         with tempfile.TemporaryDirectory() as tmp:

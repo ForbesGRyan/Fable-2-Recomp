@@ -4587,6 +4587,158 @@ takes several bases only as a ring with a period (item 9). Fixed in this text: i
 - No capture was made with the fixed binary before Task 2's runs: the `"skipped"` rows and the
   ramp's bound are tested as pure functions and were first seen in a game in those runs.
 
+### Exposure read-back
+
+Plan Task 2 (commits `d6108dc` and the one this text came with; the review fixes of Task 1 are
+`3f1b57b`). The switch **`--fable2_exposure_readback`** (on, true, 1 / off, false, 0; **default
+off**, see "Cost") adds the game's two luminance buffers to the SDK's forced read-back list, so
+that the game measures its own picture and its exposure adapts in a normal run (no
+`--readback_resolve`).
+
+**How it works.** `src/core/readback_force_list.h` (pure; `tests/native/
+test_readback_force_list.cpp`): `ForceReadbackList(hero_dog, exposure)` gives `""`,
+`"0x12704000"`, `"0x1A385000,0x1A34F000"` or `"0x12704000,0x1A385000,0x1A34F000"`: both
+luminance addresses of question 1, since they lie farther apart than one window; the hero and
+dog texture's entry is the same text whatever the switch says. `Fable2App::OnPostSetup` writes
+the list into the SDK's `readback_resolve_force_addresses` once, only while that switch is at
+its default source (a list given by hand wins), and logs `[fable2-config] seeded
+readback_resolve_force_addresses '<list>' (... hero_dog_texture_readback=B,
+fable2_exposure_readback=B)`. The switch is read with the native renderer on or off.
+
+The SDK's side, unchanged (`thirdparty/rexglue-sdk/src/graphics/command_processor.cpp`,
+`ShouldForceReadbackResolve`, lines 203 to 274; `d3d12/command_processor.cpp`, `IssueCopy`,
+lines 3056 to 3293): the list is read and parsed at every resolve (a hot-reload switch, no
+cached parse), only while `readback_resolve` is `none`; an entry matches a resolve issued as
+`PM4_DRAW_INDX_2`, a rectangle list of 3 indices, with its base in [entry, entry + 64 KiB) (the
+switch's help text says 1 MiB; the code says 64 KiB). A forced resolve is read back at once:
+the command processor ends its submission, **waits for the GPU to finish everything queued**
+(`AwaitAllQueueOperationsCompletion`), and copies the bytes (here 207,360 to 221,184) into
+guest memory. The first 24 forced resolves of a process are logged (`Forced readback-resolve
+for RB_COPY_DEST_BASE=... (matched force address ...)`), never more.
+
+**Runs** (2026-10-09, by the controller with `-UserPresent -BootSave Hero000`: `RUN UNCHECKED`;
+binary of 21:21:47; other programs used 0 to 1% of the graphics card by the controller's word;
+evidence `out/native-evidence/post/t2_*`; no `--readback_resolve` in any):
+
+| Run | Log | Arguments | Captures |
+|---|---|---|---|
+| A, on | 441 | `-Total 132 -Shots "36,48,112,128" -Plan "32:VIEW=off,38:VIEW=native,40:DISC=4/1,98:DISC=8/1,108:VIEW=off" -GameArgs --fable2_native_render=true,--fable2_exposure_readback=on` | `..._213523` (4 frames, 40 s), `..._213621` (8, 98 s) |
+| B, off | 442 | the same with `=off` | `..._213742` (4), `..._213840` (8) |
+| C, only the two | 443 | `-Total 76 -Shots "36,72" -Plan "32:VIEW=off,38:VIEW=native,60:DISC=8/1,70:VIEW=off" -GameArgs '--fable2_native_render=true','--readback_resolve_force_addresses=0x1A385000,0x1A34F000'` | `..._214021` (8, 60 s) |
+| D, on, renderer off | 444 | `-Total 70 -Shots "36,66" -GameArgs --fable2_native_render=false,--fable2_exposure_readback=on` | none possible |
+| E, off, renderer off | 445 | the same with `=off` | none possible |
+
+**Run B froze at about 57 s and is no evidence after that.** It has the freeze signature of
+section 13 in every part: the once-a-second `vsync present gate` counts go 30, 30, 33, 40, 48,
+2, 75, 27 and then 21 to 24 a second until the second capture; from the window that ends at
+21:38:08 the guest's work median is 40.7 to 43.7 ms with a swap median of 0.01 to 0.02 ms (a live world
+window: work 10.7, swap 22.7); the capture's counts are the same in every later 300-frame line
+(captured 981, drawable 948: the frozen counts section 13 names); the table of its 98 s capture
+is the same in all 8 frames to the sixth digit; its 112 s and 128 s shots agree within 0.4% in
+12 of 18 regions (the others are grass, leaves and the regions under leaf shadows). Its shots at 36 and 48 s are 868 x 517 pixels and
+show the upper left of the window at a larger scale, those at 112 and 128 s are 1296 x 759 with
+the title bar of a window that is not in front: the window changed between them. Section 13
+ties the freeze to the game losing the foreground with the user at the machine; that is the
+likeliest here and was not measured. **It is not a cost of this branch's code**: before the
+freeze B's windows are the fog's (native view, medians 33.16 and 33.47 ms; view off 33.29 and
+33.25 ms; capture median 2.08 ms against 2.09 to 2.22 in the fog's run 433; clay hash, decode
+and record times as there), and runs A and C, with the same binary, keep a guest work median
+of 10 to 13 ms to their ends.
+
+**The game adapts** (criterion 2; `t2_A_on_table_*.txt`, `t2_B_off_table_*.txt`,
+`t2_C_force_table_214021.txt`):
+
+| Run | Capture | `c20.w` | `T(3) / T(0.1)` | largest texel |
+|---|---|---|---|---|
+| A, on | 40 s | 8.7187 to 8.7175 | 1.468 to 1.472 | 0.3079 to 0.3085 |
+| A, on | 98 s | 8.0758 to 8.0706 | 1.535 to 1.538 | 0.3458 to 0.3467 |
+| C, only the two addresses | 60 s | 8.4915 to 8.4882 | 1.484 to 1.487 | 0.3170 to 0.3181 |
+| B, off | 40 s (before the freeze) | 15.99999 | 0.987 to 0.988 | 0.1399 to 0.1400 |
+| B, off | 98 s (frozen) | 15.99999 | 0.994 | 0.1405 |
+
+With the switch on every frame is below 12 and the table bends (the bound was 1.2); off, the
+scale is the blind 16 and the table flat, as the research found for a normal run. Under full
+read-back Task 1 had 8.28 to 8.45 at this place and 7.61 to 11.70 over all runs. The scale is
+already at 8.72 at 40 s: the luminance resolve runs, and is read back, from the front end on
+(the SDK's lines begin 5 s after the start). Every `MakePostBlock` rule holds in all 32 frames,
+the composite's row precedes the frame row in all, and the bright pass's `c77.y * c20.w` is 1
+within 5.9e-08. **Run C is the proof of Task 1's inference**: with only the two addresses in
+the list (the hero's entry left out) the game adapts, so its CPU reads exactly these buffers.
+
+**What is forced** (the SDK's own lines; review of Task 1, item 1c). Runs A, C and D have 24
+lines each: 12 for `0x1a385000` and 12 for `0x1a34f000`, strictly in turn, the base equal to
+the matched entry in all 72 (a neighbour inside a window would show another base). In C, after
+a first pair and a gap of 0.3 s, the lines are 14 to 38 ms apart: one forced resolve a frame.
+B and E have 24 lines of `0x12704000`. **The limit of this**: the SDK logs the first 24 of a
+process and they are used up within 7 s of the start, in the front end; no line is of a frame
+in the world, and in A the hero's entry never appears because the 24 lines were gone before its
+first resolve. For the world's frames there are the captures: one resolve after the luminance
+pass in each of 32 frames, the two bases in turn, no other resolve in either window **among
+the stretches the capture holds**; and, for the first time, the count of those it does not
+hold: 27 in 4 frames (26 long, 1 back), 58 in 8, 27 in 4, 56 in 8, 55 in 8
+(`t2_*_resolves_*.txt`), about 7 a frame as the review counted for run 1. What those stretches
+contain no capture reads; that nothing else is forced in a world frame is therefore shown by
+the front end's 72 lines and by the captured stretches, not for every dword of a frame.
+
+**Cost: the switch does not hold 30 fps; it stays off by default** (ruling 2). Frame time per
+150-frame window, medians in ms (`[native] frames: view ...`), windows with a capture or the
+first native frame left out:
+
+| | native view | view off, in the world |
+|---|---|---|
+| fog's final binary, run 433 (off) | 32.97 to 33.39 (30.0 fps) | 33.29 to 33.47 |
+| B, off, before its freeze | 33.16, 33.47 | 33.29, 33.25 |
+| C, the two luminance entries only | 38.03 to 38.12 (25.6 to 25.8 fps) | 33.49, 33.45, 33.62 (29.9, 30.0, 29.4 fps) |
+| A, on (the hero's entry and the two) | 46.78, 46.66, 43.83, 42.16, 41.73, 47.38 (20.1 to 23.8 fps) | 41.12, 43.28 before the native stretch; 36.14, 38.87, 34.61, 34.93 after it |
+
+The term that grew is the guest's wait in its swap, not its work: `[frame] guest` in A has
+work medians of 10.9 to 13.1 ms and swap medians of 30.9 to 33.2 ms; C 10.1 to 10.7 and 26.7
+to 27.7; a live off window (B at 21:37:53, run 433) 10.7 to 12.0 and 21.4 to 22.7. The guest
+waits for the command processor, which waits for the GPU at each forced resolve. A normal run
+already has one such wait a frame for the hero's texture (run 431: 24 lines of `0x12704000`,
+the last 14 one frame apart) and holds 30 fps with it; the luminance wait alone (C) costs
+nothing with the view off and 4.7 ms a frame with the native view; both together (A) cost 1.3
+to 10 ms with the view off and 8.4 to 14 ms with the native view. Why two waits cost more than
+their sum was not examined. These were not gated runs, and A's off-view windows scatter by 9 ms;
+the direction is beyond that scatter, the exact figures are not. No off run of this binary
+reached its steady stretch alive (B froze), so "off holds 30.0" rests on B's four windows before
+the freeze and on run 433; a repeat of B is asked for. **The emulated frame rate with the
+renderer off (D against E) cannot be read**: without the renderer the log has no frame lines.
+
+**The emulated picture's look** (`t2_regions_36s.txt`, `t2_regions_36s_against_full.txt`,
+`t2_regions_66s.txt`, `t2_regions_112s.txt`; made by `out/tests/post-task2/shot_regions.py`
+with `region_compare.py`'s decoding and the bridge's regions, each shot in its own client
+area because the shots have three sizes; mean linear luminance of a region):
+
+- *On against full read-back* (A, C, D at 36 s against Task 1's run 1 at 36 s): the sunlit
+  regions that hold still are within 2% (dirt patch 0.993 to 0.999, bridge planks 1.010 to
+  1.018, rock face 0.990 to 0.996, trunk 0.996 to 1.003, the hero's shirt 0.990 to 0.998), the
+  haze within 0.7%, the two sky regions over the ridge within 0.4% with hues within 0.7
+  degrees; the sky's centre is 2.0 to 2.5% brighter (hue within 0.3). Outside 2%: the grass
+  beside the patch (0.958 to 0.970), the pole (0.961 to 0.971) and the regions under swaying
+  leaf shadows (planks 1.02 to 1.04, grass 1.05 to 1.12, the railing post's cap and side 1.2
+  to 1.9); the pole's two thin regions differ in hue by 10 to 16
+  degrees, which may be the shots' different scale (1942 against 1296 pixels wide) and was not
+  examined. The plan expected 2% and 3 degrees: met where the picture holds still.
+- *Off against on* (E against D, renderer off, 36 s; the same at 66 s within a few percent):
+  with the switch off the dark and middle regions are brighter and the sky darker and bluer:
+  dirt patch +4.6%, planks +21%, trunk +26%, planks in leaf shadow +22%, the hero's shirt
+  +9.7%, far slope +7%; sky over the ridge -4%, its hue +7 degrees. Seen in the shots: on has
+  deeper shadows on the planks and under the tree and a whiter sky at the right; off is the
+  flatter, brighter picture every normal run has had.
+- A's and B's shots at 112 and 128 s are not compared: B's are of the frozen game at 57 s and
+  A's have the sun 55 s further (the hero and the dog stand in the tree's shadow by then).
+- B's shots at 36 and 48 s show a part of the window only and are not used.
+
+**Limits.** (1) The list is two fixed addresses, measured in twelve captures of eight boots of
+one save at one place; elsewhere the game may allocate the buffers at other addresses, and the
+switch then does nothing (blind, as off); nothing detects that yet (a post block whose scale
+stays 16 with the switch on would: Task 4). (2) The SDK's 24 lines. (3) The cost above, which
+only an SDK change could lower (a delayed read-back for forced resolves, as `fast` has: the
+game reads each buffer a frame after it was filled, by the alternation); not asked for here.
+(4) The first captures with `"skipped"` rows and a bounded ramp log are these; no ramp line
+beyond the first appears in any of the five logs (`changes 0`).
+
 ## Pending
 
 1. **Pitch ablation** (done 2026-10-01, results in section 4; kept for re-runs). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):

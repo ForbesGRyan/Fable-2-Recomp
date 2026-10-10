@@ -1048,3 +1048,14 @@ The exchanged assignment fits less well on every figure but the 99th percentile;
 ### Evidence
 
 In `out/native-evidence/post/` (git-ignored): `task11_post_check.txt` and `task11_post_check_random_literals.txt`; `task11_mutations.txt` with `task11_mutations.py`; `task11_variant_c_134312_f1.txt` and `..._exchanged.txt`; `task11_134312_f1_{B,C,final,layer1_x4,layer2,tf1,tf2}.png`. Tests: `tests/test_post_formulas.py` (the furniture's classes), `tests/test_gen_post_quad_table.py`, `tests/test_post_sun_layer.py`.
+
+### Since plan Task 11 (closing note of plan Task 18, 2026-10-10)
+
+This section is plan Task 11's; what the later tasks found is in `docs/native-renderer/frame-map.md` section 17 ("Sun layer discovery" to "Validation (10c)"). In short, against the lists above:
+
+1. **Run 3's frame exists** (capture `20261010_052158` frame 1) and variant C meets spec criterion 18 on it: 82.7% of the pixels within 8 levels against 63.9% without the layer; "sun" 1.021, "beams" 1.132 and 1.100. The beams' excess is at their root (1.16), cause open.
+2. **A pixel is sampled at its integral position** by the game at the layer's draws and in the scene (`PA_SU_VTX_CNTL` = 4 in the captures' command words): the replay's convention, first an inference ("What stands on inference"), is a measurement.
+3. **The tree occluder (`4325` / `F1EB`)** redraws a leaf draw the game issues after its depth copy and fades to half (`c15.w` 0.5); it still cannot be replayed (a draw row holds 512 of the mesh's 18,722 indices). The reference and the native layer both lack it.
+4. **The cloud occluders' fetch**: the reference reads level 0, the game's fetch constant names mips 0 to 5. A per-pixel level in the reference changes layer 1's drawn set by about fifty texels of 12,300 (`out\native-evidence\post\t18_occluder_level_052158_f1.txt`); the tool keeps level 0.
+5. **The clouds against a picture** ("Not checked", 1): held by hue against the game's own scene at the bridge, for place, drift and sign (`tools/xdk_sigmatch/post_cloud_hue.py`, `tests/test_post_cloud_hue.py`); their strength is not decided.
+6. **Still not checked**: a flare in front of the depth, the moon and its glow in a picture, anything at night.

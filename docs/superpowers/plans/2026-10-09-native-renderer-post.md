@@ -805,3 +805,15 @@ the frame map's "Limits" and nothing else.
       previous-frame blend; each switch off); README.
 - [ ] Commit "Sun layer validation (10c): ...". Then the whole-branch code review and the
       documents review.
+
+> **After Task 18** (2026-10-10; controller ruling 42). No game run was made for it: its build
+> changes no binding, target or shader text. The runs listed above were not made as listed (none
+> by the trees with the sun on; none at the third spot without full read-back with it); the
+> verdicts are read from the runs of Tasks 10 to 17 and the two timing sessions, and recomputed
+> where a tool could. Criteria 16 to 18 met; 19 met on the oracle feed and not met in the game;
+> 20's picture by ruling 22, its cost and criterion 9 by ruling 42 (frame rate met, capture-thread
+> median not decidable). `--fable2_native_sun` stays default off, as the three other switches do.
+> The frame map's "Validation (10c)" has the closing table of all 21 criteria; "Outstanding: cost"
+> has become "Cost: the two timing sessions". The task also made the review fixes of Tasks 16 and
+> 17 (own commit): the Clouds line on the oracle feed, a Render after a jump of frame numbers,
+> `tools/xdk_sigmatch/post_cloud_hue.py`.

@@ -1,6 +1,16 @@
 # Native renderer sub-project 10: the post chain (exposure, composite, bloom, sun layer, sky furniture)
 
-Status: design, 2026-10-09, branch `native-renderer-post`. **Phase 10a is built and validated
+Status: **built and validated in its three phases, 2026-10-10** (branch `native-renderer-post`; the
+closing table of all 21 criteria: frame map section 17, "Validation (10c)"; "Implementation notes
+(deviations)" at the end of this document). In short: criteria 1 to 3, 5 to 7, 10 to 12, 14 and
+16 to 18 are met; 4, 8, 15's and 20's picture parts are met by a substituted measure (controller
+rulings 21 and 22); 13 is not met as written in one bridge region of 26 (ruling 31); **19 is met
+on the oracle feed and NOT met in the game**; criterion 9 and the cost parts of 15 and 20 are
+closed by controller ruling 42 as "frame rate met, capture-thread median not decidable". **All
+four switches are off by default** (`--fable2_native_post`, `--fable2_native_bloom`,
+`--fable2_native_sun`, `--fable2_exposure_readback`); turning post and bloom on is the
+recommendation put to the user. The status lines of the phases as they stood when each was
+validated follow, for the record. Design, 2026-10-09. **Phase 10a is built and validated
 with four things open when it was validated** (2026-10-10: criterion 9, the cost; ruling 2, the
 read-back switch's default; criterion 6's real-GPU half, measured again since, after ruling 25's
 change; and, waiting for those, the default of `--fable2_native_post`. Both switches of the phase
@@ -8,7 +18,8 @@ are off by default until the outstanding timing runs: frame map section 17, "Val
 and "Outstanding: cost", and "Implementation notes (deviations)" at the end of this document).
 **Phase 10b is built and validated with one thing open** (the cost: criterion 15's part of
 criterion 9, so `--fable2_native_bloom` stays off by default; criterion 13 is not met as written
-in one of the bridge's 26 regions: frame map section 17, "Validation (10b)"). 10c is not built. Plan:
+in one of the bridge's 26 regions: frame map section 17, "Validation (10b)"). 10c was not built
+then; it is now (above), and "Outstanding: cost" has become "Cost: the two timing sessions". Plan:
 `docs/superpowers/plans/2026-10-09-native-renderer-post.md`. Research:
 `.superpowers/sdd/post-research.md` (untracked; its scripts and outputs in
 `out/tests/post-research/`); every fact below is from it or from the code named beside it, and
@@ -273,6 +284,14 @@ this design has a size that is a fraction of W x H** (W/2 x H/2, W/4 x H/4), nev
     the layer, because without them the layer is worse than none (61.6% of the pixels within 8
     levels against 63.9% without a layer). The tree occluder draws need no draw (the native depth
     holds the leaves); the far lake is missing from the native depth (a limit).
+    *Amended again after the reviews of plan Tasks 14 to 17 (controller rulings 36, 38 and 39):*
+    the last two sentences were wrong. The late leaf draws are faded to half by the game and are
+    NOT in its depth copy, and the native depth held them whole: the native layer's depth is taken
+    **before the first record the game issued after its own depth copy** (after the last record
+    only in a frame without such a record), and the game's tree occluder redraw (`F1EB`), which
+    keeps a part of them, is not built. The layer's quads are drawn with a viewport origin of half
+    a pixel (the game samples a pixel at its integral position, `PA_SU_VTX_CNTL` = 4). Frame map
+    section 17, "The layer's depth place".
 14. **The previous-frame blend (10c, ruling 7)**: a second front target; the composite writes
     `lerp(new, previous front, 0.102)` (the factor from the game's blend constant; in the
     shader, since the RHI has no constant blend factor). One kept target, one blend.
@@ -537,6 +556,62 @@ Said now, with the finding that makes it one (ruling 18).
 10. Every run is likely `RUN UNCHECKED` (the user at the machine); timing needs a quiet machine.
 
 ## Implementation notes (deviations)
+
+### Phase 10c, plan Tasks 10 to 18 (frame map section 17, "Sun layer discovery" to "Validation (10c)")
+
+The criteria's verdicts with their figures are in frame map section 17, "Validation (10c)"; the
+limits and follow-ups in "Limits (10c)" and "Follow-ups (10c)". What was built otherwise than
+designed, or decided on the way:
+
+- **tf1 is the beam source, reduced and blurred radially twice; tf2 is layer 2, reduced** (settled
+  by the resolves' addresses). C1, the 8-bit reduction of a cleared picture, is not built
+  (controller ruling 33).
+- **The layer's depth is not the scene's end depth** (Design 13, amended twice): the game's is its
+  mid-frame depth copy plus the cloud occluders at their own reference, the cubes and a part of
+  the late leaves. The native layer takes the native depth before the game's late records (a mark
+  made at capture from the game's tree occluder calls, as side data: `DrawRecord` stays 616
+  bytes) and draws the three cloud occluders into it (built with the layer, ruling 35). Not
+  built: the tree occluder's redraw, the far lake's cube, the two unidentified cubes (rulings 33
+  and 39).
+- **The layer's quads take the game's sampling convention** (pixel centres at integral positions,
+  measured from `PA_SU_VTX_CNTL`; controller ruling 38, which withdraws ruling 37). The same
+  offset of the whole native scene is NOT changed: measured nowhere, a limit and a follow-up.
+- **The quad record carries the draw's own alpha test** (ruling 23) and is read only at its
+  kind's target (ruling 24); a frame's set is whole or not used.
+- **The scene's clouds write no depth**, though the game's do: with their threshold in the
+  layer's depth the beam source keeps 11 pixels of 12,310. They are drawn at the sky's place.
+- **The previous-frame blend is built** (ruling 7's condition held: one kept target, one mix in
+  the composite). Its share is 0 after a frame without post, after the view was off and after a
+  jump of more than four guest frames.
+- **Criterion 18: met** on run 3's frame (+18.8 points; "sun" 1.021, "beams" 1.132 and 1.100).
+  The reference is 16% over at the beams' root; cause open, inherited by the native layer.
+- **Criterion 19: met on the oracle feed, not met in the game** (controller rulings 36 and 39).
+  On the game's own scene and depth the native layer gives "sun" 1.02 and 1.01 and the beam
+  regions 1.11 to 1.15 of the game's picture. In the game: "sun" 0.59 to 0.76, "beams left" 1.23
+  to 1.35, "beams right" 0.96 to 1.08. Two causes: the native scene without any layer is 0.2 to
+  0.6 of the game's in the sunward regions (leading candidate: foliage the game shows
+  part-covered and the native pass draws whole; not mended, the materials sub-project's rule),
+  and the layer's factor is the reference's, which is 1.4 to 1.7 times the game's own at the
+  root (the excess above). The "over" is consistent with that excess and is not shown to be it
+  alone; "near" is two errors ending close.
+- **The `layers` tool's bound of 99% is not met** on the feed (94.5 to 96.0% of layer 1's written
+  texels within 8 levels; controller ruling 41). The residue is the edge of the cloud occluders'
+  kept set; where both sides drew, layer 1 is within one level everywhere. The texture level of
+  the occluders' fetch is a fifth of it.
+- **The clouds are validated by hue at the bridge for place, drift and sign** against the game's
+  own scene (`tools/xdk_sigmatch/post_cloud_hue.py`); their strength is not decided.
+- **Criterion 20**: the picture part by ruling 22 (the composite's text changed for the blend:
+  shader test case 253 holds the compiled program with the share 0); the cost part by ruling 42.
+- **Criterion 9 and the cost parts of 15 and 20** (controller ruling 42): frame rate met;
+  capture-thread median not decidable, the 0.10 ms bound being narrower than the two-level spread
+  of identical runs (cause unknown; same-level pairs -0.022 to +0.047 ms); view off under 0.5 ms
+  at the bridge and not measured at the third spot. One startup crash with the read-back switch
+  on (1 of 67 starts), unexplained. **All four defaults stay off.**
+- **The plan's runs for Task 18 were not made as listed** (no run by the trees with the sun on;
+  none at the third spot without full read-back with it). No criterion needs them.
+- **Never seen lit or at work in this save**: the moon, the moon's glow, a flare before the
+  depth, the blend's trail in a turn; every hour but late morning
+  (`docs/native-renderer/user-checks.md`, checks 63 to 77).
 
 ### Phase 10b, plan Task 9 (validation; frame map section 17, "Validation (10b)")
 

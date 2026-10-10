@@ -551,15 +551,35 @@ def frame_resolves(fr):
     return out
 
 
+def ring_period(bases):
+    """The period of a ring of bases, frame by frame: the number of different bases P when every frame's base is
+    the base P frames before and every base was seen at least twice (a ring of one needs one frame); None when
+    the bases do not repeat so (a base that was seen once shows no period)."""
+    if not bases:
+        return None
+    period = len(set(bases))
+    if period == 1:
+        return 1
+    if len(bases) < 2 * period or any(bases[i] != bases[i - period] for i in range(period, len(bases))):
+        return None
+    return period
+
+
 def report_resolves(cap, frame=None, show_all=False):
     after_lum = {}
     counts = {"resolve": 0, "cmdgap": 0, "cmd_ok": 0}
+    skipped = {}
+    skipped_frames = set()
     for n in sorted(cap.frames):
         if frame is not None and n != frame:
             continue
         fr = cap.frames[n]
         for ev in fr.events:
-            if ev[0] in counts:
+            if ev[0] == "cmdgap" and ev[2].get("skipped"):
+                # A stretch the capture did not look at (over its cap, the pointer gone back, unreadable).
+                skipped[ev[2]["skipped"]] = skipped.get(ev[2]["skipped"], 0) + 1
+                skipped_frames.add(n)
+            elif ev[0] in counts:
                 counts[ev[0]] += 1
                 counts["cmd_ok"] += 1 if ev[0] == "resolve" and ev[2].get("cmd_ok") else 0
         res = frame_resolves(fr)
@@ -576,6 +596,13 @@ def report_resolves(cap, frame=None, show_all=False):
                     describe_event(e)))
     print("rows: %d \"resolve\" (%d with dwords), %d \"cmdgap\"" % (counts["resolve"], counts["cmd_ok"], counts["cmdgap"]))
     frames = [n for n in sorted(cap.frames) if frame is None or n == frame]
+    if skipped:
+        print("stretches not looked at (a resolve issued inside one is in no row): %d (%s), in %d of %d frames" % (
+            sum(skipped.values()), ", ".join("%s %d" % (k, skipped[k]) for k in sorted(skipped)),
+            len(skipped_frames), len(frames)))
+    else:
+        print("stretches not looked at (a resolve issued inside one is in no row): none recorded "
+              "(a capture made before the \"skipped\" rows existed does not record them)")
     bases = set()
     complete = True
     for n in frames:
@@ -586,13 +613,16 @@ def report_resolves(cap, frame=None, show_all=False):
         if len(ev) != 1 or len(b) != 1:
             complete = False
         bases.update(b)
-    if frames and complete:
+    period = ring_period([after_lum[n][0]["copy"]["base"] for n in frames]) if frames and complete else None
+    if frames and complete and period is None:
+        print("after the luminance pass: %d bases in %d frames that do not repeat with a period" % (len(bases), len(frames)))
+    if period is not None:
         ring = sorted(bases)
         if len(ring) == 1:
             print("outcome (i): one resolve after the luminance pass in each of %d frames, one base: A = 0x%08X" % (
                 len(frames), ring[0]))
         else:
-            print("outcome (i), with a ring: one resolve after the luminance pass in each of %d frames, %d bases: %s" % (
+            print("outcome (i), with a ring: one resolve after the luminance pass in each of %d frames, %d bases in turn: %s" % (
                 len(frames), len(ring), ", ".join("0x%08X" % a for a in ring)))
             print("  by frame: " + " ".join("%d:%08X" % (n, after_lum[n][0]["copy"]["base"]) for n in frames))
         every = [(x, last) for n in frames for x, last, _ in frame_resolves(cap.frames[n])]
@@ -610,9 +640,10 @@ def report_resolves(cap, frame=None, show_all=False):
                 print("  another resolve within 64 KiB above A: 0x%08X, %d times (after %s)" % (
                     b, len(near[b]), ", ".join(sorted(set(near[b])))))
             if not near:
-                print("  no other resolve has its base in [A, A + 64 KiB)")
+                print("  no other resolve has its base in [A, A + 64 KiB) among the stretches the capture holds")
         return 0
-    print("outcome (i) NOT reached: the rows do not name one resolve after the luminance pass in every frame")
+    print("outcome (i) NOT reached: the rows do not name one resolve after the luminance pass in every frame, "
+          "with one base or bases in turn")
     return 1
 
 

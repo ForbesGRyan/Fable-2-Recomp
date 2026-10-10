@@ -4612,9 +4612,12 @@ void SetFogWanted(bool wanted) {
 // one's, or to the later one's entry when it is the clear routine (whose own dwords are in its
 // "resolve" row). When those dwords name a copy register (NamesCopyRegisters) they are written as
 // a "cmdgap" row before the later draw's own rows: "func" the later draw's hook, "from" the first
-// dword's address, "dwords" their number, "cmd" as above (at most kMaxGapDwords; a longer or an
-// unreadable stretch is not written). "n" numbers the "resolve" and "cmdgap" rows of a frame
-// together, from 1. tools/xdk_sigmatch/post_tables.py (resolves) walks the packets.
+// dword's address, "dwords" their number, "cmd" as above (at most kMaxGapDwords). A stretch that is
+// not looked at is written as a "cmdgap" row without "cmd" and with "skipped": "long" (over the
+// cap), "back" (the pointer went back: another segment of the command buffer, or its wrap),
+// "unaligned" or "unreadable" (SkippedGapRow); a resolve issued inside one is in no row, so the
+// reader counts them. "n" numbers the "resolve" and "cmdgap" rows of a frame together, from 1.
+// tools/xdk_sigmatch/post_tables.py (resolves) walks the packets.
 constexpr uint32_t kMaxResolveDwords = 512;
 constexpr uint32_t kMaxGapDwords = 2048;
 struct StreamMark {
@@ -4628,12 +4631,17 @@ thread_local StreamMark t_stream;
 uint32_t g_resolve_rows = 0;  // "resolve" and "cmdgap" rows of the frame being written, under g_mutex
 
 // The dwords in (after, last] of the guest's command buffer (both the address of a dword), or
-// nullptr when that is not 1 to `max_dwords` readable dwords. `*count` their number.
-const uint8_t* StreamDwords(uint32_t after, uint32_t last, uint32_t max_dwords, uint32_t* count) {
-  *count = 0;
-  if (last <= after || ((last - after) & 3) != 0 || (last - after) / 4 > max_dwords) return nullptr;
-  const uint8_t* p = ReadVirtual(after + 4, last - after);
-  if (p) *count = (last - after) / 4;
+// nullptr when that is not 1 to `max_dwords` readable dwords (ClassifyStream has the rule).
+// `*count` their number, or the distance of a stretch over the cap. `*skipped`, when given: why a
+// stretch that holds dwords was not taken (the "skipped" word), nullptr otherwise.
+const uint8_t* StreamDwords(uint32_t after, uint32_t last, uint32_t max_dwords, uint32_t* count,
+                            const char** skipped = nullptr) {
+  uint32_t first = 0;
+  const StreamSpan span = ClassifyStream(after, last, max_dwords, &first, count);
+  if (skipped) *skipped = StreamSkipName(span);
+  if (span != StreamSpan::kDwords) return nullptr;
+  const uint8_t* p = ReadVirtual(first, *count * 4);
+  if (!p && skipped) *skipped = "unreadable";
   return p;
 }
 
@@ -4656,8 +4664,11 @@ void WriteStreamRows(uint32_t id, const LastArgs& args, uint32_t device) {
   const uint32_t gap_last = clear ? m.entry : end;
   if (m.end_valid && m.capture == g_capture_serial && (clear ? have_entry : have_end)) {
     uint32_t count = 0;
-    const uint8_t* p = StreamDwords(m.end, gap_last, kMaxGapDwords, &count);
-    if (p && NamesCopyRegisters(p, count)) {
+    const char* skipped = nullptr;
+    const uint8_t* p = StreamDwords(m.end, gap_last, kMaxGapDwords, &count, &skipped);
+    if (skipped) {
+      std::fputs(SkippedGapRow(frame, ++g_resolve_rows, HookName(id), skipped, m.end, gap_last, count).c_str(), g_file);
+    } else if (p && NamesCopyRegisters(p, count)) {
       std::snprintf(buf, sizeof(buf), "{\"kind\":\"cmdgap\",\"frame\":%d,\"n\":%u,\"func\":\"%s\",\"from\":\"0x%08X\","
                                       "\"dwords\":%u,\"cmd\":\"",
                     frame, ++g_resolve_rows, HookName(id), m.end + 4, count);
@@ -4751,6 +4762,9 @@ void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t*) {
     const bool nested = t_nesting.Enter();
     if (nested) g_nested_draws.fetch_add(1, std::memory_order_relaxed);
     // Discovery evidence (t_gpu_pbool): whether this builder will flush the bool shadow.
+    // A pointer of an earlier entry must not outlive it (a capture that ended between the clear
+    // routine's entry and its return, and a later one armed inside a later call).
+    if (id == kHook_DrawIndx2_821EF988 && !nested) t_stream.entry_valid = false;
     if (g_discovery_active.load(std::memory_order_relaxed)) {
       uint32_t pending = 0;
       t_bool_flush_pending = ReadVirtualBe32(ctx.r3.u32 + xdk::kDeviceBoolPendingOffset, &pending) &&

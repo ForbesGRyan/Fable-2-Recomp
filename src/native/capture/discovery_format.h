@@ -147,4 +147,46 @@ inline bool NamesCopyRegisters(const uint8_t* be, size_t count) {
   }
   return false;
 }
+// Post discovery. The stretch (after, last] of the guest's command buffer between two marks of
+// the device's write pointer (each the address of a dword): kDwords when it is 1 to `max_dwords`
+// whole dwords (`*first` the first dword's address, `*count` their number); kEmpty when the
+// pointer did not move (nothing was written: no drop); otherwise why it is not looked at: kBack
+// (the pointer went back: another segment of the command buffer, or its wrap), kUnaligned (no
+// whole dwords), kLong (more than the cap; `*count` the distance in dwords). Only the arithmetic:
+// the caller reads the dwords, and a stretch it cannot read is skipped as "unreadable".
+enum class StreamSpan : uint8_t { kDwords, kEmpty, kBack, kUnaligned, kLong };
+inline StreamSpan ClassifyStream(uint32_t after, uint32_t last, uint32_t max_dwords, uint32_t* first, uint32_t* count) {
+  *first = 0;
+  *count = 0;
+  if (last == after) return StreamSpan::kEmpty;
+  if (last < after) return StreamSpan::kBack;
+  if (((last - after) & 3) != 0) return StreamSpan::kUnaligned;
+  *count = (last - after) / 4;
+  if (*count > max_dwords) return StreamSpan::kLong;
+  *first = after + 4;  // no wrap: last >= after + 4
+  return StreamSpan::kDwords;
+}
+// The "skipped" member's word for a stretch that is not looked at; nullptr for one that is taken
+// or empty.
+inline const char* StreamSkipName(StreamSpan span) {
+  switch (span) {
+    case StreamSpan::kBack: return "back";
+    case StreamSpan::kUnaligned: return "unaligned";
+    case StreamSpan::kLong: return "long";
+    default: return nullptr;
+  }
+}
+// The "cmdgap" row of a stretch that was not looked at (no "cmd"): `why` is StreamSkipName's word
+// or "unreadable"; "from" the address after the earlier mark, "to" the later mark, "dwords" the
+// distance where it is one (0 for "back" and "unaligned"). A resolve issued inside such a stretch
+// is in no row: the reader counts these rows and says so.
+inline std::string SkippedGapRow(int frame, uint32_t n, const char* func, const char* why, uint32_t after, uint32_t last,
+                                 uint32_t dwords) {
+  char buf[256];
+  std::snprintf(buf, sizeof(buf),
+                "{\"kind\":\"cmdgap\",\"frame\":%d,\"n\":%u,\"func\":\"%s\",\"skipped\":\"%s\",\"from\":\"0x%08X\","
+                "\"to\":\"0x%08X\",\"dwords\":%u}\n",
+                frame, n, func, why, uint32_t(after + 4), last, dwords);
+  return buf;
+}
 }  // namespace fable2::native::capture

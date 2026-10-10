@@ -230,6 +230,10 @@ int main() {
     if (!SameRamp(in, other)) return 69;
     other[255][2] ^= 1;
     if (SameRamp(in, other)) return 70;
+    // The log has the table in full at the first read and at the first kRampFullLogs - 1 changes;
+    // later changes are counted only (a fade done with the ramp changes it every frame).
+    if (kRampFullLogs != 16) return 71;
+    if (!RampLoggedInFull(0) || !RampLoggedInFull(15) || RampLoggedInFull(16) || RampLoggedInFull(~0ull)) return 72;
   }
 
   std::cout << "PASS: view parsing/cycling, F6 edge detection, failure latch, frame times per view, d3d message log, scan-out ramp\n";

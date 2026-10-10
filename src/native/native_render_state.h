@@ -269,6 +269,12 @@ inline std::string FormatRampHex(const uint32_t rgb10[256][3]) {
   return text;
 }
 
+// How many of a run's ramp tables the log holds in full (2.3 KiB a line): the first read and the
+// changes after it up to this many lines; a later change is counted and said once. `logged` is the
+// number of full lines written so far.
+inline constexpr uint64_t kRampFullLogs = 16;
+inline bool RampLoggedInFull(uint64_t logged) { return logged < kRampFullLogs; }
+
 inline bool SameRamp(const uint32_t a[256][3], const uint32_t b[256][3]) {
   for (int i = 0; i < 256; ++i) {
     for (int c = 0; c < 3; ++c) {

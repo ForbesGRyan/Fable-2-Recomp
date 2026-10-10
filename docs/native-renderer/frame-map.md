@@ -4411,7 +4411,13 @@ shots were not looked at for this section.
   not pass through any hooked routine**: between the `"verts"` rows of two post rectangles no
   hooked call lies (seen first in `native_discovery_20261009_092959.jsonl`, frame 1, between the
   luminance pass's row and the bright pass's). Run 1: 54,825 rows (the copy registers are
-  written with most draws' state, so most rows hold no resolve; the reader decides).
+  written with most draws' state, so most rows hold no resolve; the reader decides). **A
+  stretch that is not looked at** (longer than the 2,048 dwords, the write pointer gone back at
+  a change of the command buffer's segment or its wrap, no whole dwords, unreadable) is, since
+  the review fixes, a `"cmdgap"` row without `"cmd"` and with `"skipped":"long"|"back"|
+  "unaligned"|"unreadable"`, `"from"`, `"to"` and the distance in `"dwords"`
+  (`ClassifyStream`, `SkippedGapRow`); `resolves` counts them. The captures of runs 1 to 5b
+  were made before that and do not record their skipped stretches ("Review fixes" below).
 - The post buffers by content: a 2D texture whose base is the front buffer `0x1ECFF000` or lies
   in [`0x12A00000`, `0x12E00000`) (`render::PostBufferBase`) is dumped once per content, formats
   7 and 54 in full; at most 1,024 content files and 512 MB of targets a capture (run 1 reached
@@ -4419,20 +4425,28 @@ shots were not looked at for this section.
 - Under `--readback_resolve` the block [`0x12A00000`, `0x12E00000`) whole at the end of a
   capture's frames 1 and 2 (`mem_12A00000_f<N>.bin`, a `"memdump"` row).
 - In the game log, with a composite view: `[native] ramp: read at clay frame N: valid V, <2,304
-  hex digits>` at the first read and at every change (256 entries of nine digits `rrrgggbbb`,
-  each channel the 10-bit value as three hex digits), and `[native] ramp: changes C (reads R,
-  without a table F)` with the 300-frame lines.
+  hex digits>` at the first read and at the changes after it (256 entries of nine digits
+  `rrrgggbbb`, each channel the 10-bit value as three hex digits; at most 16 such lines a run
+  since the review fixes, `kRampFullLogs`: a ramp that changes every frame is then only
+  counted), and `[native] ramp: changes C (reads R, without a table F)` with the 300-frame lines.
 
 `tools/xdk_sigmatch/post_tables.py` reads them: `resolves` (walks the PM4 packets of both row
-kinds; a resolve is a draw packet under `RB_MODECONTROL` 6), `table`, `ramp`, `find-luminance`,
-`downsample`.
+kinds; a resolve is a draw packet under `RB_MODECONTROL` 6; several bases after the luminance
+pass are an outcome only when they come in turn with a period, each seen at least twice:
+`ring_period`), `table`, `ramp`, `find-luminance`, `downsample`.
 
 **Question 1: where the luminance is resolved to** (`t1_run1_resolves.txt`). Outcome (i), with
 a finding the plan did not expect: **two addresses in turn**. In each of run 1's 40 frames
 exactly one resolve follows the `"verts"` row of the luminance pass `5821366EE8FDE893`; its
-destination is `0x1A385000` in the odd frames and `0x1A34F000` in the even ones (20 each; they
-lie `0x36000` = 221,184 bytes apart, which is the tiled size of the buffer: 280 x 180 texels of
-4 bytes at pitch 288). Both resolves are the same but for the base:
+destination is `0x1A385000` in the capture's odd frames and `0x1A34F000` in its even ones (20
+each; they lie `0x36000` = 221,184 bytes apart, which is the tiled size of the buffer: 280 x 180
+texels of 4 bytes at pitch 288). **The same two addresses, in turn, in all seven captures of the
+five runs** (`resolves` on each, outputs `t2_review_resolves_<stamp>.txt`: 2 + 2 frames in
+`205229`, `205303` and `205802`, 4 + 4 in `205445` and `205645`, 30 + 30 in `205815`; which of
+the two a capture's first frame has differs, `0x1A34F000` in `205229`). The limit of that: five
+boots of one save at one place. The addresses are the game's allocations; another region or
+another way into the game may put the buffers elsewhere, and a fixed list of addresses (Task 2)
+would not follow. Both resolves are the same but for the base:
 
 ```
 RB_COPY_DEST_BASE 0x1A34F000 | 0x1A385000   RB_COPY_DEST_PITCH: pitch 288, height 180
@@ -4442,9 +4456,18 @@ PM4_DRAW_INDX_2, initiator 0x00030088: rectangle list, 3 indices
 ```
 
 The SDK's rule for a forced read-back (`PM4_DRAW_INDX_2`, a rectangle list, 3 indices) matches
-both in all 40 frames. No other resolve of a frame has its base in [A, A + 64 KiB) for either A
-(85 to 88 resolves a frame). The two bases are farther apart than the SDK's 64 KiB window, so a
-forced list needs both entries. The pitch is 288, not the 320 of the surface; neither address
+both in all 40 frames. No other resolve has its base in [A, A + 64 KiB) for either A **among
+the stretches of the command stream the capture holds** (85 to 88 resolves a frame in those).
+That is not all of the stream: a stretch between two hooked draws that is longer than 2,048
+dwords, or across which the write pointer went back, was not written and, in these captures,
+not counted; the review counted them from the rows' own pointers (review-task-1.md, item 1):
+274 stretches over the cap and 9 backward steps in run 1's 40 frames, about 7 a frame, the one
+across each frame's end some 37,000 dwords. A resolve issued inside one of them is in no row.
+So "nothing else in the window" is shown for the captured stretches only; what proves it for a
+whole frame is the SDK's own log of the resolves it forces under Task 2's list (`Forced
+readback-resolve for RB_COPY_DEST_BASE=...`, the first 24 of a run), in "Exposure read-back"
+below. The two bases are farther apart than the SDK's 64 KiB window, so a forced list needs both
+entries. The pitch is 288, not the 320 of the surface; neither address
 is in the block the research and the plan looked in (`0x12A00000` on), so the memory dump could
 not have held it: `find-luminance` found no plane (`t1_run1_find_luminance.txt`), which says
 nothing more than that. That the CPU reads these two buffers is still the research's inference;
@@ -4471,8 +4494,10 @@ moves; no frame would fall back.
 
 What this capture does not show: the lag between a turn and the exposure's first move. The
 camera's eye moves in frames 3 to 6 (the second turn), but the scale was already falling in
-frames 1 to 3 and shows no change of pace at or after the turn that could be told from its
-settling. The exposure was not at rest in any capture of run 2b: 12 s earlier
+frames 1 to 3. After the turn the steps shrink pair by pair with one exception: the pair of
+frames 7 and 8 (-0.0674, -0.0669) is larger than the pair before it (-0.0666, -0.0662), by 1%,
+the only rise after frame 3 in the 60 frames. It may be the turn arriving, one or two frames
+after the eye stopped; one bump of 1% on a settling curve proves nothing either way. The exposure was not at rest in any capture of run 2b: 12 s earlier
 (`..._205802`, 34 s after the start) `c20.w` was 11.70 falling by 0.14 a frame, on its way down
 from the blind 16 of the game's start; run 2's two captures show 8.845 (36 s, before its turns)
 and 7.606 (70 s, after them, constant over 4 frames), the research's "8.4 to 7.4" seen as 8.85
@@ -4497,7 +4522,11 @@ by 1.3, 1.6 and 1.3 (levels 156, 236, 252); against all 23 pairs of
 the table the brighter from level 63 up. The table is the SDK's own, so what differs is either the
 measurement (medians of a window shot scaled to the front buffer's size) or something the
 presenter does after the blit (dithering or rounding to 8 bits); which, is not known. The
-table, not the eight numbers, is what Task 5 should take.
+differences are systematic, not noise: from level 124 up all have one sign (+0.9 to +1.6), and
+rounding the table to 8 bits gives at most 0.5. The table, not the eight numbers, is what Task 5
+should take; and since the cause is unknown, ruling 21's "no cost for the picture" holds only if
+the native pass applies the table exactly as the SDK's blit does: Task 5 compares the native
+picture with the emulated picture of the same frame, not with the shot pairs.
 
 **Question 5: dark and bright places** (`t1_run5a_table.txt`, `t1_run5b_table.txt`). Third
 spot: `c20.w` 8.456 to 8.453, T at 0.1 / 1 / 3 = 0.200 / 0.243 / 0.297, `T(3) / T(0.1)` 1.49.
@@ -4509,7 +4538,8 @@ near the bridge's (`c31.x` 2.9719 to 2.9743, `c46.x` 0.25, `c47.x` 50, `c77.x` -
 `c47.x` 2, `c77.x` 0.0857 to 0.0885, `c77.y` 0.0854 to 0.1315, which is 1 / `c20.w`).
 **Every rule of `MakePostBlock` as plan Task 4 states it holds in 128 of 128 frames**; the
 table's fetch constant is the pin in all. The view under the trees is not much darker for the
-game than the bridge (its scale differs by 1%): a really dark view is still not captured.
+game than the bridge (its scale, 8.524 to 8.569, is 1% to 3.5% above run 1's 8.279 to 8.450): a
+really dark view is still not captured.
 
 **Question 6: the downsample's form** (`t1_run1_downsample.txt`). Not settled. In the 17
 frames of run 1 whose buffer was dumped, the content of `0x12D33000` at the luminance pass's
@@ -4529,13 +4559,33 @@ read at the composite's call is in the frame's own scene (spec "Frame pairing", 
 member (the spec's "public accessors" was wrong for this one): named through a derived class's
 using-declaration, no SDK change. The table is written on the command-processor thread (packet
 execution) and read in the post-processor callback on that thread; a public accessor upstream
-replaces the file.
+replaces the file. It reads the 256-entry table whatever the front buffer is; the SDK applies
+that table to an 8-bit front buffer only and the piecewise-linear ramp to a `k_2_10_10_10` one.
+The game's front buffer is 8-bit (format 6), and nothing checks it yet: Task 5 fails the ramp
+(`post-ramp`) for any other front buffer (said in the header).
 
 **Contradictions with the spec and the plan, in one place**: the luminance resolve has two
 addresses, not one, outside the expected block, at pitch 288 (Task 2's `kLuminanceResolveBase`
 and its four-case list need two addresses); the resolve rows of the plan's hook cannot see a
 post resolve (`"cmdgap"` rows do); the ramp accessor is protected; criterion 4's tolerance is
 not met by the table itself; the adaptation's lag was not measurable; question 6 stays open.
+
+**Review fixes** (review-task-1.md: one Important, nine Minor; commit "Post discovery: review
+fixes"). Fixed in code: the skipped stretches are rows now (item 1b; `ClassifyStream` holds the
+pointer arithmetic that was untested in `capture.cpp`, item 10, with tests of its four refusals
+and of the first dword's address); the clear routine's entry pointer is dropped at every
+outermost entry that is not recorded, so a capture cannot write a `"resolve"` row from an
+earlier capture's pointer (item 2); the ramp's full log lines are bounded (item 3); `resolves`
+takes several bases only as a ring with a period (item 9). Fixed in this text: items 1a, 5, 6,
+7, 8. Left as limits:
+
+- A long stretch is recorded, not read: what a frame's skipped stretches hold is still unknown
+  to a capture (about 7 a frame at the bridge). The proof that only the two luminance bases are
+  forced is the SDK's log, not the capture.
+- Item 4 (the reader does not check the front buffer's format) and item 8 (the ramp applied as
+  the SDK's blit applies it) are Task 5's, stated above.
+- No capture was made with the fixed binary before Task 2's runs: the `"skipped"` rows and the
+  ramp's bound are tested as pure functions and were first seen in a game in those runs.
 
 ## Pending
 

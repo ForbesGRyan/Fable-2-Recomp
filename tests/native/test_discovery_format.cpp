@@ -144,6 +144,38 @@ int main() {
     // Nothing for no dwords.
     if (names("") || NamesCopyRegisters(nullptr, 4)) return 36;
   }
+  {
+    using namespace fable2::native::capture;
+    // The stretch (after, last] of the command buffer between two marks (both the address of a
+    // dword): its first dword's address and its number of dwords, or why it is not looked at.
+    uint32_t first = 1, count = 1;
+    // One dword, and exactly the cap: taken; the first dword is the one after `after`.
+    if (ClassifyStream(0xFF940000, 0xFF940004, 2048, &first, &count) != StreamSpan::kDwords || first != 0xFF940004 || count != 1) return 40;
+    if (ClassifyStream(0xFF940000, 0xFF940000 + 4 * 2048, 2048, &first, &count) != StreamSpan::kDwords || first != 0xFF940004 ||
+        count != 2048)
+      return 41;
+    // One over the cap: long, with the distance in dwords (what a "skipped" row says).
+    if (ClassifyStream(0xFF940000, 0xFF940000 + 4 * 2049, 2048, &first, &count) != StreamSpan::kLong || count != 2049) return 42;
+    // The pointer did not move: nothing was written, which is no drop.
+    if (ClassifyStream(0xFF940000, 0xFF940000, 2048, &first, &count) != StreamSpan::kEmpty || count != 0) return 43;
+    // It went back (another segment of the command buffer, or a wrap): not looked at.
+    if (ClassifyStream(0xFF940010, 0xFF940000, 2048, &first, &count) != StreamSpan::kBack || count != 0) return 44;
+    // No whole number of dwords.
+    if (ClassifyStream(0xFF940000, 0xFF940006, 2048, &first, &count) != StreamSpan::kUnaligned || count != 0) return 45;
+    // The top of the address space: no wrap in the arithmetic.
+    if (ClassifyStream(0xFFFFFFF8, 0xFFFFFFFC, 2048, &first, &count) != StreamSpan::kDwords || first != 0xFFFFFFFC || count != 1) return 46;
+    if (ClassifyStream(0, 0xFFFFFFFC, 2048, &first, &count) != StreamSpan::kLong || count != 0x3FFFFFFF) return 47;
+    // The words of a "skipped" member; a stretch that was taken has none.
+    if (std::string(StreamSkipName(StreamSpan::kLong)) != "long" || std::string(StreamSkipName(StreamSpan::kBack)) != "back" ||
+        std::string(StreamSkipName(StreamSpan::kUnaligned)) != "unaligned" || StreamSkipName(StreamSpan::kDwords) != nullptr ||
+        StreamSkipName(StreamSpan::kEmpty) != nullptr)
+      return 48;
+    // The row of a stretch that was not looked at: no "cmd".
+    if (SkippedGapRow(3, 7, "D3DDevice_BeginVertices?", "long", 0xFF940000, 0xFF949000, 9216) !=
+        "{\"kind\":\"cmdgap\",\"frame\":3,\"n\":7,\"func\":\"D3DDevice_BeginVertices?\",\"skipped\":\"long\","
+        "\"from\":\"0xFF940004\",\"to\":\"0xFF949000\",\"dwords\":9216}\n")
+      return 49;
+  }
   std::cout << "PASS: discovery format\n";
   return 0;
 }

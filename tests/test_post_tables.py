@@ -377,7 +377,7 @@ class CaptureTest(unittest.TestCase):
 
     A = 0x12D69000
 
-    def write(self, d, frames=2, lum_resolves=1, base_step=0, composite_after_frame=False, scale=8.0):
+    def write(self, d, frames=2, lum_resolves=1, base_step=0, base_ring=0, composite_after_frame=False, scale=8.0):
         d = Path(d)
         tex = d / "native_tex_x"
         tex.mkdir()
@@ -392,7 +392,8 @@ class CaptureTest(unittest.TestCase):
             lines.append({"kind": "verts", "frame": n, "in_scene": False, "ps_hash": "0x" + pt.LUMINANCE_PS,
                           "tf": {}, "tfc": {}, "pfull": pfull({})})
             for k in range(lum_resolves):
-                gap = (type0(0x2208, 6) + type0(0x2318, 0, self.A + base_step * (n - 1) + 0x1000 * k, COPY_PITCH, COPY_INFO)
+                step = (n - 1) % base_ring if base_ring else n - 1
+                gap = (type0(0x2208, 6) + type0(0x2318, 0, self.A + base_step * step + 0x1000 * k, COPY_PITCH, COPY_INFO)
                        + type3(0x36, 0x00030088) + type0(0x2208, 4) + type3(0x22, 0, 0x00030008))
                 lines.append({"kind": "cmdgap", "frame": n, "n": k + 1, "func": "D3DDevice_BeginVertices?",
                               "from": "0xFF93F790", "dwords": len(gap), "cmd": cmd_hex(gap)})
@@ -451,17 +452,66 @@ class CaptureTest(unittest.TestCase):
             self.assertIn("no other resolve has its base in [A, A + 64 KiB)", text)
             self.assertIn('rows: 4 "resolve" (2 with dwords), 2 "cmdgap"', text)
 
-    def test_resolves_fails_without_one_base(self):
+    def test_resolves_names_a_ring(self):
         with tempfile.TemporaryDirectory() as d:
-            # The base moves from frame to frame (the game's: two addresses in turn): each is named.
-            status, text = self.run_report(pt.report_resolves, pt.load_capture(self.write(d, base_step=0x36000)))
+            # The base moves from frame to frame and comes back (the game's: two addresses in turn): a ring,
+            # each base named.
+            status, text = self.run_report(pt.report_resolves,
+                                           pt.load_capture(self.write(d, frames=4, base_step=0x36000, base_ring=2)))
             self.assertEqual(status, 0)
-            self.assertIn("outcome (i), with a ring: one resolve after the luminance pass in each of 2 frames, "
-                          "2 bases: 0x12D69000, 0x12D9F000", text)
-            self.assertIn("by frame: 1:12D69000 2:12D9F000", text)
-            self.assertIn("A = 0x12D69000 in 1 frames", text)
-            self.assertIn("A = 0x12D9F000 in 1 frames", text)
+            self.assertIn("outcome (i), with a ring: one resolve after the luminance pass in each of 4 frames, "
+                          "2 bases in turn: 0x12D69000, 0x12D9F000", text)
+            self.assertIn("by frame: 1:12D69000 2:12D9F000 3:12D69000 4:12D9F000", text)
+            self.assertIn("A = 0x12D69000 in 2 frames", text)
+            self.assertIn("A = 0x12D9F000 in 2 frames", text)
             self.assertNotIn("NOT reached", text)
+
+    def test_resolves_fails_on_bases_without_a_period(self):
+        with tempfile.TemporaryDirectory() as d:
+            # Another base in every frame: no ring, whatever the number of bases.
+            status, text = self.run_report(pt.report_resolves, pt.load_capture(self.write(d, frames=4, base_step=0x36000)))
+            self.assertEqual(status, 1)
+            self.assertIn("4 bases in 4 frames that do not repeat with a period", text)
+            self.assertIn("outcome (i) NOT reached", text)
+        with tempfile.TemporaryDirectory() as d:
+            # Two frames, two bases: no base was seen twice, so no period was seen.
+            status, text = self.run_report(pt.report_resolves, pt.load_capture(self.write(d, base_step=0x36000)))
+            self.assertEqual(status, 1)
+            self.assertIn("2 bases in 2 frames that do not repeat with a period", text)
+
+    def test_ring_period(self):
+        self.assertEqual(pt.ring_period([5, 5, 5]), 1)
+        self.assertEqual(pt.ring_period([5]), 1)
+        self.assertEqual(pt.ring_period([1, 2, 1, 2, 1]), 2)
+        self.assertEqual(pt.ring_period([1, 2, 3, 1, 2, 3]), 3)
+        self.assertIsNone(pt.ring_period([1, 2]))             # nothing seen twice
+        self.assertIsNone(pt.ring_period([1, 2, 3, 1, 2]))    # the third base was seen once
+        self.assertIsNone(pt.ring_period([1, 2, 1, 1]))
+        self.assertIsNone(pt.ring_period([1, 2, 3, 4]))
+        self.assertIsNone(pt.ring_period([]))
+
+    def test_resolves_counts_the_stretches_not_looked_at(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.write(d, frames=1)
+            rows = p.read_text(encoding="utf-8").splitlines()
+            extra = [json.dumps({"kind": "cmdgap", "frame": 1, "n": 9 + i, "func": "f", "skipped": why, "from": "0xFF940004",
+                                 "to": "0xFF949000", "dwords": 9216}, separators=(",", ":"))
+                     for i, why in enumerate(("long", "long", "back", "unreadable"))]
+            p.write_text("\n".join(rows[:-1] + extra + rows[-1:]) + "\n", encoding="utf-8")
+            status, text = self.run_report(pt.report_resolves, pt.load_capture(p))
+            self.assertEqual(status, 0)
+            # They are no "cmdgap" rows with dwords.
+            self.assertIn('rows: 2 "resolve" (1 with dwords), 1 "cmdgap"', text)
+            self.assertIn("frame 1: 2 resolves in 2 rows with command dwords", text)
+            self.assertIn("stretches not looked at (a resolve issued inside one is in no row): 4 "
+                          "(back 1, long 2, unreadable 1), in 1 of 1 frames", text)
+            self.assertIn("no other resolve has its base in [A, A + 64 KiB) among the stretches the capture holds", text)
+        with tempfile.TemporaryDirectory() as d:
+            status, text = self.run_report(pt.report_resolves, pt.load_capture(self.write(d)))
+            self.assertIn("stretches not looked at (a resolve issued inside one is in no row): none recorded "
+                          "(a capture made before the \"skipped\" rows existed does not record them)", text)
+
+    def test_resolves_fails_without_one_resolve_a_frame(self):
         with tempfile.TemporaryDirectory() as d:
             # No resolve after the luminance pass at all.
             status, text = self.run_report(pt.report_resolves, pt.load_capture(self.write(d, lum_resolves=0)))

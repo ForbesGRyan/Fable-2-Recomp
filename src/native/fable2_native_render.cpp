@@ -141,6 +141,7 @@ struct RampLog {
   uint32_t last[256][3] = {};
   bool have_last = false;
   uint64_t reads = 0, failed = 0, changes = 0;
+  uint64_t full_lines = 0;  // tables logged in full (RampLoggedInFull)
   bool said_none = false;
 };
 RampLog g_ramp;
@@ -462,7 +463,9 @@ void PollD3dMessagesOnce(const char* when) {
 
 // Post discovery: the guest's scan-out ramp as the SDK holds it at this composite frame (the table
 // the emulated picture of this frame went through: the callback runs at the end of the swap blit,
-// on its thread). Logged in full at the first read and at every change; nothing is drawn with it.
+// on its thread). Logged in full at the first read and at the changes after it, up to kRampFullLogs
+// lines in a run (later changes are only counted: "[native] ramp: changes ..."); nothing is drawn
+// with it.
 void ReadRamp() {
   const auto reader = g_ramp_reader.load(std::memory_order_acquire);
   if (!reader) {
@@ -480,6 +483,14 @@ void ReadRamp() {
   if (g_ramp.have_last) ++g_ramp.changes;
   g_ramp.have_last = true;
   std::copy(&now[0][0], &now[0][0] + 256 * 3, &g_ramp.last[0][0]);
+  if (!RampLoggedInFull(g_ramp.full_lines)) {
+    if (g_ramp.full_lines++ == kRampFullLogs) {
+      REXLOG_INFO("[native] ramp: changed again at clay frame {}; {} tables are in the log, later changes are counted only",
+                  g_clay_frames, kRampFullLogs);
+    }
+    return;
+  }
+  ++g_ramp.full_lines;
   REXLOG_INFO("[native] ramp: read at clay frame {}: valid {}, {}", g_clay_frames, MakePostRamp(now).valid ? 1 : 0,
               FormatRampHex(now));
 }

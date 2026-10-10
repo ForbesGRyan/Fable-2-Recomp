@@ -1126,6 +1126,17 @@ static void PreviousBlendTests() {
       CHECK(661, back.share == 0.0f && back.write == 0 && back.read == 1 && back.next.valid);
       CHECK(661, StepClayFront(ClayFrontAfterGap(back.next, false), true, true, true, false).share == kPostPreviousWeight);
       CHECK(661, StepClayFront(ClayFrontAfterGap(ClayFrontState{1, true}, false), true, true, true, false).share == kPostPreviousWeight);
+      // (review of plan Tasks 16 and 17, Minor 5: a Render whose scene is not the one after the last rendered
+      // scene's, by more than the bound, starts from a gap as well: the scenes between were never drawn. The
+      // next frame, and up to kClaySceneGapFrames on, is no gap; no last scene, or a frame number that went
+      // back, is one.)
+      static_assert(kClaySceneGapFrames == 4);
+      static_assert(ClaySceneGap(false, 0, 1) && ClaySceneGap(false, 7, 8));
+      static_assert(!ClaySceneGap(true, 7, 8) && !ClaySceneGap(true, 7, 7) && !ClaySceneGap(true, 7, 11));
+      static_assert(ClaySceneGap(true, 7, 12) && ClaySceneGap(true, 7, 6) && ClaySceneGap(true, 7, 900));
+      static_assert(ClaySceneGap(true, ~0ull, 0) && !ClaySceneGap(true, ~0ull - 1, ~0ull));
+      CHECK(661, StepClayFront(ClayFrontAfterGap(ClayFrontState{1, true}, ClaySceneGap(true, 100, 130)), true, true, true, false).share == 0.0f);
+      CHECK(661, StepClayFront(ClayFrontAfterGap(ClayFrontState{1, true}, ClaySceneGap(true, 100, 101)), true, true, true, false).share == kPostPreviousWeight);
     }
     // The oracle feed: never a share, and its picture is no previous picture for the frame after it.
     const ClayFrontStep fed = StepClayFront(ClayFrontState{0, true}, true, true, true, true);
@@ -1475,20 +1486,37 @@ static void CloudTests() {
 
   // 675: the verdict over every combination (the first thing missing decides), the frame counts, the line.
   {
-    for (int b = 0; b < 32; ++b) {
+    for (int b = 0; b < 64; ++b) {
       ClayCloudInputs in;
       in.furniture = b & 1;
       in.drawable = b & 2;
       in.any = b & 4;
       in.objects = b & 8;
       in.textures = b & 16;
+      in.feed = b & 32;
+      // (the feed's word comes last: a frame that would not have drawn its clouds anyway keeps its own reason)
       const ClayClouds want = !in.furniture  ? ClayClouds::kOff
                               : !in.drawable ? ClayClouds::kState
                               : !in.any      ? ClayClouds::kNone
                               : !in.objects  ? ClayClouds::kObjects
                               : !in.textures ? ClayClouds::kTexture
+                              : in.feed      ? ClayClouds::kFeed
                                              : ClayClouds::kDrawn;
       CHECK(675, DecideClayClouds(in) == want);
+    }
+    // (review of plan Tasks 16 and 17, Minor 8: on the oracle feed with a sun part the clouds' slots are the
+    // file's quads' and no cloud is drawn; the line must not read "drawn 3" then, and the frame is not counted drawn)
+    {
+      ClayCloudFrames fed;
+      CountClayCloudFrame(ClayClouds::kFeed, fed);
+      CHECK(675, fed.frames == 1 && fed.by[size_t(ClayClouds::kFeed)] == 1 && fed.by[size_t(ClayClouds::kDrawn)] == 0);
+      ClayStats fst;
+      fst.sun_switch = true;
+      fst.clouds = ClayClouds::kFeed;
+      fst.cloud_records = 3;
+      fst.cloud_frames = fed;
+      CHECK(675, FormatCloudText(fst) == "Clouds: not drawn (the oracle feed's sun part) | frames since start 1: drawn 0, no cloud record 0, "
+                                         "a record's state or values 0, post-objects 0, quad-texture 0, the oracle feed's sun part 1");
     }
     ClayCloudFrames n;
     for (ClayClouds c : {ClayClouds::kOff, ClayClouds::kNone, ClayClouds::kState, ClayClouds::kObjects, ClayClouds::kTexture, ClayClouds::kDrawn,
@@ -1523,7 +1551,9 @@ static void CloudTests() {
     st.cloud_frames.frames = ~0ull;
     for (uint64_t& v : st.cloud_frames.by) v = ~0ull;
     const std::string longest = FormatCloudText(st);
-    CHECK(675, longest.size() > 150 && longest.rfind("quad-texture 18446744073709551615") == longest.size() - 33);
+    // (with a fed frame counted the feed's count is the line's last word)
+    CHECK(675, longest.size() > 200 && longest.find("quad-texture 18446744073709551615, ") != std::string::npos &&
+                   longest.rfind("the oracle feed's sun part 18446744073709551615") == longest.size() - 47);
   }
 }
 // --- end of the clouds' cases ---

@@ -2771,19 +2771,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     }
     if (!cloud_in.textures) cloud_draw_count = 0;  // (all of the clouds or none)
   }
-  const ClayClouds clouds = DecideClayClouds(cloud_in);
-  st.clouds = clouds;
-  st.cloud_records = cloud_plan.count;
-  if (post.sun) CountClayCloudFrame(clouds, cloud_counts_);
-  st.cloud_frames = cloud_counts_;
-  constexpr uint32_t kCloudLogLines = 16;
-  if (post.sun && clouds != clouds_logged_ && cloud_log_lines_ < kCloudLogLines) {
-    clouds_logged_ = clouds;
-    ++cloud_log_lines_;
-    st.sun_switch = post.sun;  // (the line reads it; set again below)
-    REXLOG_INFO("[native] clay: clouds changed at scene frame {}: {}{}", scene.frame, FormatCloudText(st),
-                cloud_log_lines_ == kCloudLogLines ? " (last such line)" : "");
-  }
+  // (the clouds' verdict is taken after the sun layer's plan below: on the oracle feed with a sun part the
+  // file's quads take the clouds' slots and no cloud is drawn, which the verdict must say)
   st.sun_switch = post.sun;
   st.quad_set = furniture_in.set;
   st.quad_records = scene.quad_count;
@@ -2895,6 +2884,21 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     // (the file's quads now hold slots the live scene's quads were given: those are not drawn, the clouds neither)
     if (oracle_sun) quad_draw_count = cloud_draw_count = 0;
   }
+  // The clouds' verdict, with the feed's rule in it (review of plan Tasks 16 and 17, Minor 8: taken before
+  // that rule the line read "drawn 3" in fed frames that drew none).
+  cloud_in.feed = oracle_sun;
+  const ClayClouds clouds = DecideClayClouds(cloud_in);
+  st.clouds = clouds;
+  st.cloud_records = cloud_plan.count;
+  if (post.sun) CountClayCloudFrame(clouds, cloud_counts_);
+  st.cloud_frames = cloud_counts_;
+  constexpr uint32_t kCloudLogLines = 16;
+  if (post.sun && clouds != clouds_logged_ && cloud_log_lines_ < kCloudLogLines) {
+    clouds_logged_ = clouds;
+    ++cloud_log_lines_;
+    REXLOG_INFO("[native] clay: clouds changed at scene frame {}: {}{}", scene.frame, FormatCloudText(st),
+                cloud_log_lines_ == kCloudLogLines ? " (last such line)" : "");
+  }
   const ClaySun sun = DecideClaySun(sun_in);
   // The previous-frame blend (clay_logic.h, "The previous-frame blend"; plan Task 15): which front target
   // this frame writes and with what share of the other (StepClayFront). The second target is asked only
@@ -2915,7 +2919,10 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     for (int t = 0; t < 3; ++t) st.sun_drawn[t] = sun_plan.by_target[t];
     st.sun_centre[0] = post_constants.radial[0];
     st.sun_centre[1] = post_constants.radial[1];
-    // (where the layer's depth will be taken, for the Sun line: among the records only off the feed)
+    // (where the layer's depth will be taken, for the Sun line: among the records only off the feed. It is
+    // the plan's record whether or not the step fires inside the colour pass: when no prepared record lies
+    // at or beyond the place the depth is taken after the last record, which is the same depth. Review of
+    // plan Tasks 16 and 17, Minor 11.)
     if (!oracle_sun) st.sun_depth_record = sun_place.record;
   }
   CountClaySunFrame(sun, sun_counts_);

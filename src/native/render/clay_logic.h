@@ -408,8 +408,10 @@ enum class ClaySun : uint8_t { kOff, kNoFurniture, kNoBloom, kNoRadial, kNoQuads
 // frame's furniture is not drawn (the switch off, no post frame, no sky, no whole set: the Furniture line
 // says which). kNone: the set has no cloud record. kState: a cloud record cannot be drawn as it was
 // captured (its state or a value). kObjects: the clouds' objects could not be made ("post-objects").
-// kTexture: a cloud's texture could not be had this frame ("quad-texture").
-enum class ClayClouds : uint8_t { kOff, kNone, kState, kObjects, kTexture, kDrawn, kCount };
+// kTexture: a cloud's texture could not be had this frame ("quad-texture"). kFeed: the oracle feed's sun
+// part is drawn this frame, and its quads hold the slots the scene's quads were given: no cloud is drawn
+// (review of plan Tasks 16 and 17, Minor 8: the line read "drawn 3" in such frames).
+enum class ClayClouds : uint8_t { kOff, kNone, kState, kObjects, kTexture, kDrawn, kFeed, kCount };
 struct ClayCloudFrames {
   uint64_t frames = 0, by[size_t(ClayClouds::kCount)] = {};
 };
@@ -3806,6 +3808,18 @@ constexpr ClayFrontState ClayFrontAfterGap(ClayFrontState s, bool gap) {
   if (gap) s.valid = false;
   return s;
 }
+// Whether the scene of this Render (its guest frame number, `frame`) comes after a stretch of scenes that
+// were never drawn, by the last rendered scene's number (review of plan Tasks 16 and 17, Minor 5: the view's
+// own gap flag covers the view off and "no scene"; it does not see published scenes the pass never drew).
+// A gap: no scene rendered before; a number that went back; more than kClaySceneGapFrames on (the bound of
+// the post block's age, ledger ruling 5: a picture up to four frames old may still be mixed at a tenth, an
+// older one is no previous frame's). NOT covered, by intent: a stretch in which the game itself presents
+// no frame (the numbers then follow one another, and the game's own blend takes the same old picture).
+inline constexpr uint64_t kClaySceneGapFrames = 4;
+constexpr bool ClaySceneGap(bool rendered_before, uint64_t last_frame, uint64_t frame) {
+  if (!rendered_before || frame < last_frame) return true;
+  return frame - last_frame > kClaySceneGapFrames;
+}
 // What a Render does with them. write: the target the composite writes and the ramp reads. read: the
 // other one, read by the composite only with a share above 0. share: the constants' `previous`. next:
 // the state after this Render.
@@ -4365,9 +4379,10 @@ inline ClayCloudPlan PlanClayClouds(const capture::QuadRecord* quads, size_t cou
 }
 
 // The verdict (ClayPass::Render), the first thing missing deciding: the frame's furniture drawn; a cloud
-// record in the set; every one drawable; the clouds' objects, asked last; every cloud's texture.
+// record in the set; every one drawable; the clouds' objects, asked last; every cloud's texture; and, of a
+// frame that would draw them, whether the oracle feed's sun part took their slots (`feed`).
 struct ClayCloudInputs {
-  bool furniture = false, any = false, drawable = false, objects = false, textures = false;
+  bool furniture = false, any = false, drawable = false, objects = false, textures = false, feed = false;
 };
 constexpr ClayClouds DecideClayClouds(const ClayCloudInputs& in) {
   if (!in.furniture) return ClayClouds::kOff;
@@ -4375,6 +4390,7 @@ constexpr ClayClouds DecideClayClouds(const ClayCloudInputs& in) {
   if (!in.any) return ClayClouds::kNone;
   if (!in.objects) return ClayClouds::kObjects;
   if (!in.textures) return ClayClouds::kTexture;
+  if (in.feed) return ClayClouds::kFeed;
   return ClayClouds::kDrawn;
 }
 static_assert(DecideClayClouds(ClayCloudInputs{}) == ClayClouds::kOff);
@@ -4385,6 +4401,7 @@ constexpr const char* ClayCloudsName(ClayClouds c) {
     case ClayClouds::kObjects: return kPostObjectsReason;
     case ClayClouds::kTexture: return kQuadTextureReason;
     case ClayClouds::kDrawn: return "drawn";
+    case ClayClouds::kFeed: return "the oracle feed's sun part";
     default: return "no furniture";
   }
 }
@@ -4405,6 +4422,11 @@ inline std::string FormatCloudText(const ClayStats& st) {
   text += buf;
   for (ClayClouds c : {ClayClouds::kNone, ClayClouds::kState, ClayClouds::kObjects, ClayClouds::kTexture}) {
     std::snprintf(buf, sizeof(buf), ", %s %llu", ClayCloudsName(c), static_cast<unsigned long long>(st.cloud_frames.by[size_t(c)]));
+    text += buf;
+  }
+  // (a run without the oracle feed keeps the line it had)
+  if (const uint64_t fed = st.cloud_frames.by[size_t(ClayClouds::kFeed)]) {
+    std::snprintf(buf, sizeof(buf), ", %s %llu", ClayCloudsName(ClayClouds::kFeed), static_cast<unsigned long long>(fed));
     text += buf;
   }
   return text;

@@ -75,7 +75,8 @@ REXCVAR_DEFINE_STRING(fable2_native_fog, "on", "Fable2",
                       "drawn: the shadows' picture. On by default since the fog's validation (sub-project 9; frame map "
                       "section 16).");
 REXCVAR_DEFINE_STRING(fable2_native_post, "off", "Fable2",
-                      "Native post chain (sub-project 10, in work): on (or true, 1) = with a composite view and the light on, "
+                      "Native post chain (sub-project 10; default off, on recommended: frame map section 17, \"Cost: the two timing "
+                      "sessions\"): on (or true, 1) = with a composite view and the light on, "
                       "the capture also reads the frame's post block at the game's own post rectangles (the registers of its "
                       "composite, bright pass and blurs and the composite's 512-texel exposure table), and the clay pass draws "
                       "a frame that has one through the game's own composite and the scan-out gamma ramp: its lit draws write "
@@ -84,24 +85,31 @@ REXCVAR_DEFINE_STRING(fable2_native_post, "off", "Fable2",
                       "as with the switch off; off (or false, 0; the default) = none of it is read or drawn: the fog's "
                       "picture, the fixed exposure and the square-root mapping.");
 REXCVAR_DEFINE_STRING(fable2_native_bloom, "off", "Fable2",
-                      "Native bloom (sub-project 10, phase 10b, in work; needs fable2_native_post=on): on (or true, 1) = a post "
+                      "Native bloom (sub-project 10, phase 10b; default off, on recommended with the post; needs "
+                      "fable2_native_post=on): on (or true, 1) = a post "
                       "frame whose block carries the game's blur weights also draws the game's bloom between its scene and its "
                       "composite (the 4 x 4 downsample, the bright pass and the two 13-tap blurs, in targets a quarter of the "
                       "native target's logical size), and the composite screens it over the picture; off (or false, 0; the "
                       "default) = none of it is made or drawn: the picture of fable2_native_post alone. Frame map section 17.");
 REXCVAR_DEFINE_STRING(fable2_native_sun, "off", "Fable2",
-                      "Native sky furniture and sun layer (sub-project 10, phase 10c, in work; needs fable2_native_post=on): on (or "
-                      "true, 1) = the capture also reads the frame's quad records (the game's moon, cloud, glare, beam-source, "
-                      "flare, moon-glow and sun-disc quads at the indexed builder's calls, at most 24 a frame) and the radial "
-                      "blur's registers; off (or false, 0; the default) = none of it is read or drawn: the picture of "
-                      "fable2_native_post and fable2_native_bloom alone. Frame map section 17.");
+                      "Native sky furniture and sun layer (sub-project 10, phase 10c; needs fable2_native_post=on, and "
+                      "fable2_native_bloom=on for the sun layer): on (or true, 1) = the capture also reads the frame's quad "
+                      "records (the game's moon, cloud, glare, beam-source, flare, moon-glow, sun-disc and cloud-occluder quads "
+                      "at the indexed builder's calls, at most 24 a frame), the radial blur's registers and the place of the "
+                      "game's late records, and a post frame with a sky draws the moon, the clouds and the glare in its scene, "
+                      "the game's half-size sun layer (beams, flares, moon glow, sun disc) into the bloom's bright pass, and "
+                      "mixes a tenth of the previous frame's picture as the game does; off (or false, 0; the default) = none "
+                      "of it is read or drawn: the picture of fable2_native_post and fable2_native_bloom alone. Off by default "
+                      "because towards the sun the native picture is not yet the game's (the native scene is too dark there): "
+                      "frame map section 17, \"Validation (10c)\".");
 REXCVAR_DEFINE_STRING(fable2_exposure_readback, "off", "Fable2",
                       "The game's exposure in a normal run: on (or true, 1) = the game's luminance resolve (two buffers in turn, "
                       "0x1A385000 and 0x1A34F000) is added to readback_resolve_force_addresses at startup, so that the game "
                       "measures its own picture and adapts its exposure as under --readback_resolve=full (the emulated picture's "
                       "brightness and contrast change with it; one wait for the GPU a frame); off (or false, 0) = not read back: "
-                      "the game stays at its blind exposure. Read once at startup, with the native renderer on or off; a "
-                      "--readback_resolve_force_addresses given by hand wins. Frame map section 17.");
+                      "the game stays at its blind exposure (the default: frame map section 17, \"Cost: the two timing sessions\"). "
+                      "Read once at startup, with the native renderer on or off; a "
+                      "--readback_resolve_force_addresses given by hand wins.");
 REXCVAR_DEFINE_STRING(fable2_native_post_oracle, "", "Fable2",
                       "Diagnostic of the native post chain (frame map section 17, \"Oracle feed\"): a path prefix. Empty (the "
                       "default): nothing. Set, with fable2_native_post=on: <prefix>.scene and <prefix>.block (written by "
@@ -160,6 +168,10 @@ uint64_t g_clay_frames = 0;
 // A presented frame went by without a clay Render (the view was off or not usable, or no scene was there):
 // the next Render is told, so that the previous-frame blend does not mix a picture from before the gap.
 bool g_clay_gap = true;
+// The guest frame number of the last scene the pass rendered, and whether there was one: a scene that is
+// not the next few after it starts from a gap as well (render::ClaySceneGap).
+uint64_t g_clay_scene_frame = 0;
+bool g_clay_scene_rendered = false;
 double g_clay_window_max_ms = 0;  // worst hash+decode+record over the log window
 // Texture upload burst (frames with uploads or pending textures in a row),
 // logged so area loads show how uploads spread over frames.
@@ -607,8 +619,10 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   post.bloom = CurrentBloom();
   post.sun = CurrentSun();
   post.ramp = g_post_ramp.valid ? g_post_ramp.rgb : nullptr;
-  post.gap = g_clay_gap;
+  post.gap = g_clay_gap || render::ClaySceneGap(g_clay_scene_rendered, g_clay_scene_frame, scene->frame);
   g_clay_gap = false;
+  g_clay_scene_frame = scene->frame;
+  g_clay_scene_rendered = true;
   // (the oracle feed: null unless its switch is set and both files were valid)
   g_clay->SetPostOracle(g_oracle_valid ? &g_oracle_feed : nullptr);
   g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), CurrentFog(), post,

@@ -554,10 +554,12 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   render::ClayStats st;
   render::TextureStats tst;
   // The post chain: the switch as it is now and this frame's ramp (null without a valid one: the frame
-  // is then drawn without post, "post-ramp"), and the bloom's switch. The sun layer is a later task's.
+  // is then drawn without post, "post-ramp"), the bloom's switch and the sun's (the scene's furniture; the
+  // sun layer itself is a later task's).
   render::ClayPostRequest post;
   post.post = CurrentPost();
   post.bloom = CurrentBloom();
+  post.sun = CurrentSun();
   post.ramp = g_post_ramp.valid ? g_post_ramp.rgb : nullptr;
   // (the oracle feed: null unless its switch is set and both files were valid)
   g_clay->SetPostOracle(g_oracle_valid ? &g_oracle_feed : nullptr);
@@ -566,7 +568,7 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   g_shadows_usable.store(g_clay->shadows_usable(), std::memory_order_relaxed);
   SetStatus(render::FormatStatusText(*scene, st, textures ? &tst : nullptr) + "\n" +
             render::FormatLightDrawnText(st) + "\n" + render::FormatShadowText(st) + "\n" + render::FormatFogText(st) + "\n" +
-            render::FormatSkyText(st) + "\n" + render::FormatPostText(st));
+            render::FormatSkyText(st) + "\n" + render::FormatPostText(st) + "\n" + render::FormatFurnitureText(st));
   const double cpu_ms = st.hash_ms + st.decode_ms + st.record_ms + tst.decode_ms;
   const uint32_t pending = tst.status[size_t(capture::MaterialStatus::kTexturePending)];
   if (textures && (tst.uploads || pending)) {
@@ -619,6 +621,8 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
     REXLOG_INFO("[native] clay: {}", render::FormatSkyText(st));
     // The post chain: the frame's post block, what the pass did about it, and the frames without post by reason.
     REXLOG_INFO("[native] clay: {}", render::FormatPostText(st));
+    // The scene's furniture: the frame's quad set, what the pass drew of it, and the frames without furniture by reason.
+    REXLOG_INFO("[native] clay: {}", render::FormatFurnitureText(st));
     if (const std::string by_vs = render::FormatShadowSkippedByVs(st); !by_vs.empty()) {
       REXLOG_INFO("[native] clay: shadow draws skipped by vs {{{}}}", by_vs);
     }

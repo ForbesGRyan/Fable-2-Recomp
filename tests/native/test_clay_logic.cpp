@@ -5777,10 +5777,10 @@ int main() {
       static_assert(kClayFrameSlots == 21);
       const ClayFrameSlotPlan none = PlanClayFrameSlots(0, 0);
       CHECK(598, kClayFrameTerrainSlot0 == 21 && none.plant0 == 21 && none.mask == 21 && none.sky == 22 && none.post == 23 &&
-                     none.object0 == 48);
-      CHECK(598, ClayFrameSmallSlots(0, 0) == 48 && ClayFrameSmallSlots(7, 3) == 58 && kClayPostSlots == 25);
+                     none.quad0 == 48 && none.object0 == 96);
+      CHECK(598, ClayFrameSmallSlots(0, 0) == 96 && ClayFrameSmallSlots(7, 3) == 106 && kClayPostSlots == 25);
       const ClayFrameSlotPlan some = PlanClayFrameSlots(5, 3);
-      CHECK(598, some.plant0 == 26 && some.mask == 29 && some.sky == 30 && some.post == 31 && some.object0 == 56);
+      CHECK(598, some.plant0 == 26 && some.mask == 29 && some.sky == 30 && some.post == 31 && some.quad0 == 56 && some.object0 == 104);
       for (uint32_t records : {0u, 1u, 5u, 600u}) {
         for (uint32_t drawn : {0u, 1u, 5u, 600u}) {
           if (drawn > records) continue;
@@ -5790,7 +5790,7 @@ int main() {
               const uint64_t bytes = ClayConstantBufferBytes(ClayFrameSmallSlots(records, plants), objects);
               // In order, nothing shared: frame | terrain | plants | mask | sky | post | objects.
               CHECK(598, kClayFrameTerrainSlot0 + drawn == p.plant0 && p.plant0 + plants == p.mask && p.mask + 1 == p.sky &&
-                             p.sky + 1 == p.post && p.post + kClayPostSlots == p.object0);
+                             p.sky + 1 == p.post && p.post + kClayPostSlots == p.quad0 && p.quad0 + kClayQuadFrameSlots == p.object0);
               CHECK(598, p.object0 <= ClayFrameSmallSlots(records, plants));
               // The frame's block lies before the first other slot; the last byte any slot's block can
               // be read at lies inside the buffer (a small slot is bound at b1 too: cbuffer Object).
@@ -8198,6 +8198,524 @@ int main() {
       }
     }
   }
+  // 630 to 639: the scene's furniture (sub-project 10, plan Task 13; clay_logic.h, "Native furniture").
+  {
+    using capture::PostQuadKind;
+    using capture::QuadRecord;
+    using capture::QuadSetReason;
+    const float kNaN = std::numeric_limits<float>::quiet_NaN(), kInf = std::numeric_limits<float>::infinity();
+    auto bits = [](uint32_t b) {
+      float f;
+      std::memcpy(&f, &b, sizeof(f));
+      return f;
+    };
+    // Frame 1 of capture native_discovery_20261010_052158 (towards the sun): the matrix of every quad of the
+    // frame (vertex c0..c3) and three records, made by the capture's own function from the rows' values:
+    // the moon (n 35), the sun's glare (n 43), a cloud (n 36: a kind this build does not draw).
+    const uint32_t matrix_bits[16] = {0x3EBA04AA, 0x3F684A6D, 0x33BBAA18, 0xC3306FC9, 0x3F3E8525, 0xBE989184, 0x3FC5551A, 0xC2B9462A,
+                                      0xBF52DBA3, 0x3EA8DAD8, 0x3EEC3766, 0x3DCDF642, 0xBF52DA8E, 0x3EA8D9FA, 0x3EEC3630, 0x3E4D6100};
+    float matrix[4][4];
+    for (int i = 0; i < 16; ++i) matrix[i / 4][i % 4] = bits(matrix_bits[i]);
+    auto record = [&](uint64_t ps, const char* verts, std::initializer_list<std::initializer_list<uint32_t>> registers, uint32_t blend,
+                      uint32_t depth, uint32_t control, uint32_t ref) {
+      uint8_t vertices[80];
+      auto digit = [](char c) { return c <= '9' ? c - '0' : c - 'A' + 10; };
+      for (int i = 0; i < 80; ++i) vertices[i] = uint8_t(digit(verts[2 * i]) * 16 + digit(verts[2 * i + 1]));
+      const uint16_t indices[6] = {0, 1, 2, 1, 3, 2};
+      float ps_regs[12][4] = {};
+      size_t n = 0;
+      for (const auto& r : registers) {
+        int k = 0;
+        for (uint32_t b : r) ps_regs[n][k++] = bits(b);
+        ++n;
+      }
+      const uint32_t fetch[3][6] = {{0x82000002, 0x14E60054, 0x001FE0FF, 0x00A80D10, 0x00000103, 0x14E70A18}};
+      capture::QuadInputs in{};
+      in.vertices = vertices;
+      in.vertex_bytes = sizeof(vertices);
+      in.stride = 20;
+      in.indices = indices;
+      in.index_count = 6;
+      in.view_proj = matrix;
+      in.ps = ps_regs;
+      in.ps_count = n;
+      in.fetch = fetch;
+      in.fetch_count = 1;
+      in.blend = blend;
+      in.depth = depth;
+      in.colour_mask = 0xF;
+      in.colour_control = control;
+      in.alpha_ref = ref;
+      in.vport_z_scale = 0xBF800000;
+      in.vte_cntl = 0x43F;
+      const capture::PostQuadEntry* entry = capture::FindPostQuad(ps);
+      return entry ? capture::MakeQuadRecord(*entry, in, nullptr) : QuadRecord{};
+    };
+    const QuadRecord moon = record(0x18D39DCEBEE4C2FCull,
+                                   "C51FC8D6C3BF64BAC55467C13F0000003F800000C511D86A432E38E9C55467C13F2000003F800000"
+                                   "C50FB936C3F2D716C53322773F00000000000000C501C8CA428EA862C53322773F20000000000000",
+                                   {{0x3BC20A12, 0x3D8FC764, 0x3DBABD2A, 0x40F5882E}, {0x3EBD3D25, 0x3EBD3D25, 0x3EBD3D25, 0x00000000}},
+                                   0x07060706, 0x00708762, 0xC, 0x3B808081);
+    const QuadRecord glare = record(0x04985A0F7296E130ull,
+                                    "C5143602C3D96C434381B5C0000000003F800000C4CB7E8C44B1BB3F4381B5C83F8000003F800000"
+                                    "C4BD592CC44274BA44FE3B5E0000000000000000C440D7674486DBF344FE3B603F80000000000000",
+                                    {{0x3E7AC1BC, 0x3E45B561, 0x3DC3477C, 0x00000000}}, 0x01010101, 0x00708760, 0x4, 0x3F008081);
+    const QuadRecord cloud = record(0x61976295517D7015ull,
+                                    "C53B8001C53B800143FA00000000000000000000453B8001C53B800143FA00003F80000000000000"
+                                    "C53B8001453B800143FA0000000000003F800000453B8001453B800143FA00003F8000003F800000",
+                                    {{0, 0, 0, 0x40F5882E}, {0x40A00000, 0x40A00000, 0, 0}, {0}, {0}, {0}, {0}, {0}, {0}, {0}, {0}, {0}},
+                                    0x07060706, 0x00708766, 0xC, 0x3CA0A0A1);
+    const float scale = bits(0x40F5882E);  // the frame's c20.w, 7.6728735
+    const float unit[2] = {1.0f, 1.0f};
+    CHECK(630, capture::QuadRecordValid(moon) && capture::QuadRecordValid(glare) && capture::QuadRecordValid(cloud));
+
+    // 630: where a kind is drawn by this build, and the state the pass draws a record with.
+    {
+      CHECK(630, ClayQuadPlaceOf(PostQuadKind::kMoon) == ClayQuadPlace::kAfterSky &&
+                     ClayQuadPlaceOf(PostQuadKind::kGlare) == ClayQuadPlace::kAfterRecords);
+      for (PostQuadKind k : {PostQuadKind::kCloud, PostQuadKind::kBeamSource, PostQuadKind::kFlare, PostQuadKind::kMoonGlow,
+                             PostQuadKind::kSunDisc, PostQuadKind::kCloudOccluder, PostQuadKind::kCount}) {
+        CHECK(630, ClayQuadPlaceOf(k) == ClayQuadPlace::kNotDrawn);
+      }
+      CHECK(630, QuadDrawState(moon) == ClayQuadState::kAlphaDepth && QuadDrawState(glare) == ClayQuadState::kAdd);
+      // The moon's state, each word changed: a depth write, no depth test, another function (the game's
+      // greater-or-equal alone is the pass's less-or-equal), another blend, a colour channel missing, an
+      // alpha function that is not "greater".
+      for (uint32_t depth : {0x00708766u, 0x00708760u, 0x00708752u, 0x00708772u, 0x00708722u, 0x00708742u}) {
+        QuadRecord q = moon;
+        q.depth = depth;
+        CHECK(630, QuadDrawState(q) == ClayQuadState::kNone);
+      }
+      for (uint32_t blend : {0x01010101u, 0x00010001u, 0x07060707u, 0u}) {
+        QuadRecord q = moon;
+        q.blend = blend;
+        CHECK(630, QuadDrawState(q) == ClayQuadState::kNone);
+      }
+      for (uint32_t control : {0x8u, 0x9u, 0xAu, 0xBu, 0xDu, 0xEu, 0xFu}) {
+        QuadRecord q = moon, g = glare;
+        q.alpha_control = g.alpha_control = control;
+        CHECK(630, QuadDrawState(q) == ClayQuadState::kNone && QuadDrawState(g) == ClayQuadState::kNone);
+      }
+      {
+        // (with the test off its function is nothing: any of the eight)
+        QuadRecord g = glare;
+        for (uint32_t func = 0; func < 8; ++func) {
+          g.alpha_control = func;
+          CHECK(630, QuadDrawState(g) == ClayQuadState::kAdd);
+        }
+        g = glare;
+        g.colour_mask = 7;
+        CHECK(630, QuadDrawState(g) == ClayQuadState::kNone);
+        // The glare: additive with no depth test, whatever the depth word's other bits; with a test it is another draw.
+        g = glare;
+        g.depth = 0x00708764;
+        CHECK(630, QuadDrawState(g) == ClayQuadState::kAdd);
+        g.depth = 0x00708762;
+        CHECK(630, QuadDrawState(g) == ClayQuadState::kNone);
+        g = glare;
+        g.blend = 0x07060706;
+        CHECK(630, QuadDrawState(g) == ClayQuadState::kNone);
+      }
+      static_assert(QuadDrawState(QuadRecord{}) == ClayQuadState::kNone);
+    }
+
+    // 631: a record's constants, each where the shader's block has it.
+    {
+      static_assert(sizeof(ClayQuadConstants) == 416 && kClayQuadSlots == 2 && kClayQuadFrameSlots == 48 &&
+                    kClayQuadSlots * kClayTerrainSlotBytes >= sizeof(ClayQuadConstants) &&
+                    offsetof(ClayQuadConstants, coord) == 64 && offsetof(ClayQuadConstants, view_proj) == 128 &&
+                    offsetof(ClayQuadConstants, reg) == 192 && offsetof(ClayQuadConstants, kind) == 384 &&
+                    offsetof(ClayQuadConstants, alpha_ref) == 396 && offsetof(ClayQuadConstants, fix) == 400 &&
+                    offsetof(ClayQuadConstants, scene_max) == 408);
+      ClayQuadConstants c;
+      const float fix[2] = {0.5f, 0.25f};
+      CHECK(631, MakeClayQuadConstants(moon, scale, 3, fix, &c));
+      for (int i = 0; i < 4; ++i) {
+        CHECK(631, c.corner[i][0] == moon.corners[i][0] && c.corner[i][1] == moon.corners[i][1] && c.corner[i][2] == moon.corners[i][2] &&
+                       c.corner[i][3] == 1.0f && c.coord[i][0] == moon.corners[i][3] && c.coord[i][1] == moon.corners[i][4] &&
+                       c.coord[i][2] == 0.0f && c.coord[i][3] == 0.0f);
+      }
+      CHECK(631, std::memcmp(c.view_proj, matrix, sizeof(matrix)) == 0);
+      // The moon's registers: c20.w alone of c20 (the scale), then c31.
+      CHECK(631, c.reg[0][0] == 0.0f && c.reg[0][1] == 0.0f && c.reg[0][2] == 0.0f && c.reg[0][3] == scale &&
+                     c.reg[1][0] == bits(0x3EBD3D25) && c.reg[1][3] == 0.0f && c.reg[2][0] == 0.0f);
+      CHECK(631, c.kind == 1 && c.sampler == 3 && c.alpha_test == 1 && c.alpha_ref == bits(0x3B808081) && c.fix[0] == 0.5f &&
+                     c.fix[1] == 0.25f && c.scene_max == 31.875f && c.pad == 0);
+      CHECK(631, MakeClayQuadConstants(glare, scale, 6, unit, &c));
+      // The glare: c31.rgb; no alpha test, and no reference (the record's is 0 with the test off).
+      CHECK(631, c.kind == 3 && c.sampler == 2 && c.alpha_test == 0 && c.alpha_ref == 0.0f && c.reg[0][0] == bits(0x3E7AC1BC) &&
+                     c.reg[0][1] == bits(0x3E45B561) && c.reg[0][2] == bits(0x3DC3477C) && c.reg[0][3] == 0.0f && c.reg[1][0] == 0.0f);
+      // The glare does not ask for the frame's scale (its c31 carries the brightness).
+      CHECK(631, MakeClayQuadConstants(glare, 0.0f, 0, unit, &c) && MakeClayQuadConstants(glare, kNaN, 0, unit, &c));
+    }
+
+    // 632: what gives no constants, each with `out` untouched.
+    {
+      auto refused = [&](const QuadRecord& q, float out_scale = 7.6728735f, const float* fix = nullptr) {
+        ClayQuadConstants c;
+        std::memset(&c, 0x5A, sizeof(c));
+        ClayQuadConstants before = c;
+        const float one[2] = {1.0f, 1.0f};
+        return !MakeClayQuadConstants(q, out_scale, 0, fix ? fix : one, &c) && std::memcmp(&c, &before, sizeof(c)) == 0;
+      };
+      CHECK(632, refused(QuadRecord{}) && refused(cloud) && !MakeClayQuadConstants(moon, scale, 0, unit, nullptr) &&
+                     !MakeClayQuadConstants(moon, scale, 0, nullptr, nullptr));
+      {
+        ClayQuadConstants c;
+        CHECK(632, !MakeClayQuadConstants(moon, scale, 0, nullptr, &c));
+      }
+      // A kind this build does not draw gives none, also with a state the pass could draw (a flare as the
+      // glare is drawn): its formula is not in the step.
+      {
+        QuadRecord flare = glare;
+        flare.kind = PostQuadKind::kFlare;
+        CHECK(632, QuadDrawState(flare) == ClayQuadState::kAdd && refused(flare));
+        const QuadRecord set[2] = {glare, flare};
+        const ClayQuadPlan plan = PlanClayQuads(set, 2, scale);
+        CHECK(632, plan.drawable && plan.count == 1 && plan.later == 1);
+      }
+      // A state the pass has no pipeline for.
+      {
+        QuadRecord q = moon;
+        q.depth = 0x00708766;
+        CHECK(632, refused(q));
+        q = glare;
+        q.blend = 0x07060706;
+        CHECK(632, refused(q));
+      }
+      // Every corner value and matrix component: no number, or beyond the bound.
+      for (float v : {kNaN, kInf, -kInf, 2e7f, -2e7f}) {
+        for (int i = 0; i < 4; ++i) {
+          for (int k = 0; k < 5; ++k) {
+            QuadRecord q = glare;
+            q.corners[i][k] = v;
+            CHECK(632, refused(q));
+          }
+          for (int k = 0; k < 4; ++k) {
+            QuadRecord q = moon;
+            q.view_proj[i][k] = v;
+            CHECK(632, refused(q));
+          }
+        }
+      }
+      // The registers: a colour component in [0, 64]; the moon's scale in (0, 64].
+      for (float v : {kNaN, kInf, -kInf, -1e-6f, std::nextafter(64.0f, 100.0f), 1e6f}) {
+        for (int k = 0; k < 4; ++k) {
+          QuadRecord q = moon;
+          q.ps[1][k] = v;
+          CHECK(632, refused(q));
+        }
+        for (int k = 0; k < 3; ++k) {
+          QuadRecord q = glare;
+          q.ps[0][k] = v;
+          CHECK(632, refused(q));
+        }
+        QuadRecord q = moon;
+        q.ps[0][3] = v;
+        CHECK(632, refused(q, v));
+      }
+      {
+        QuadRecord q = moon, g = glare;
+        q.ps[1][0] = q.ps[1][3] = 64.0f;
+        g.ps[0][2] = 64.0f;
+        g.ps[0][3] = kNaN;  // (not read by the glare's shader, not judged, not handed over)
+        q.ps[0][0] = kNaN;  // (c20.x: likewise for the moon)
+        ClayQuadConstants c;
+        CHECK(632, MakeClayQuadConstants(q, scale, 0, unit, &c) && c.reg[1][0] == 64.0f && c.reg[0][0] == 0.0f);
+        CHECK(632, MakeClayQuadConstants(g, scale, 0, unit, &c) && c.reg[0][2] == 64.0f && c.reg[0][3] == 0.0f);
+        q = moon;
+        q.ps[0][3] = 0.0f;
+        CHECK(632, refused(q, 0.0f));
+      }
+      // The moon's scale is the frame's: within a thousandth of it, both sides; another frame's is refused,
+      // and so is a frame without a scale.
+      {
+        ClayQuadConstants c;
+        CHECK(632, MakeClayQuadConstants(moon, scale * 1.0009f, 0, unit, &c) && MakeClayQuadConstants(moon, scale * 0.9991f, 0, unit, &c));
+        CHECK(632, c.reg[0][3] == scale);  // (the record's own, the game's)
+        CHECK(632, refused(moon, scale * 1.0011f) && refused(moon, scale * 0.9989f) && refused(moon, 16.0f) && refused(moon, 0.0f) &&
+                       refused(moon, kNaN) && refused(moon, kInf) && refused(moon, -scale));
+      }
+      // An alpha reference in use, in [0, 1].
+      for (float v : {kNaN, kInf, -0.01f, 1.01f}) {
+        QuadRecord q = moon;
+        q.alpha_ref = v;
+        CHECK(632, refused(q));
+      }
+      // The texture's scale.
+      for (float v : {kNaN, kInf, 0.0f, -1.0f, 65.0f}) {
+        const float a[2] = {v, 1.0f}, b[2] = {1.0f, v};
+        CHECK(632, refused(moon, scale, a) && refused(glare, scale, b));
+      }
+    }
+
+    // 633: the mirrors against the reference's numbers (tools/xdk_sigmatch/post_pins.py).
+    {
+      struct MoonPin { float t[4]; float c31[4]; float c20w; double want[4]; };
+      const MoonPin moon_pins[] = {
+          // quad moon pins (light_formulas.post_moon): the texel, c31, c20.w, the value (rgb, alpha)
+          {{0.5f, 0.25f, 0.125f, 0.75f}, {0.3696109354496002f, 0.3696109354496002f, 0.3696109354496002f, 0.0f}, 7.672873497009277f, {1.0634917315560166, 0.5317458657780083, 0.26587293288900415, 0.0}},
+          {{0.5f, 0.25f, 0.125f, 0.75f}, {0.3696109354496002f, 0.3696109354496002f, 0.3696109354496002f, 1.0f}, 7.672873497009277f, {1.0634917315560166, 0.5317458657780083, 0.26587293288900415, 0.75}},
+          {{1.0f, 0.800000011920929f, 0.6000000238418579f, 1.0f}, {0.8999999761581421f, 0.699999988079071f, 0.5f, 0.5f}, 16.0f, {14.399999618530273, 8.959999980926511, 4.800000190734863, 0.5}},
+          {{1.0f, 1.0f, 1.0f, 1.0f}, {4.0f, 0.5f, 0.25f, 3.0f}, 16.0f, {31.875, 8.0, 4.0, 1.0}},
+          {{0.20000000298023224f, 0.4000000059604645f, 0.6000000238418579f, 0.003921568859368563f}, {1.0f, 1.0f, 1.0f, 1.0f}, 8.449999809265137f, {0.00662745132149361, 0.01325490264298722, 0.019882354458264424, 0.003921568859368563}},
+          {{kNaN, 0.5f, 0.5f, 1.0f}, {1.0f, 1.0f, 1.0f, 1.0f}, 8.0f, {0.0, 4.0, 4.0, 1.0}},
+          {{0.5f, 0.5f, 0.5f, kNaN}, {1.0f, 1.0f, 1.0f, 1.0f}, 8.0f, {0.0, 0.0, 0.0, 0.0}},
+          {{0.5f, kInf, -0.5f, 0.5f}, {1.0f, 1.0f, 1.0f, 1.0f}, 8.0f, {2.0, 0.0, 0.0, 0.5}},
+          {{0.5f, 0.5f, 0.5f, 0.5f}, {1.0f, kNaN, 1.0f, 1.0f}, 8.0f, {0.0, 0.0, 0.0, 0.0}},
+          {{0.5f, 0.5f, 0.5f, 0.5f}, {1.0f, 1.0f, 1.0f, 1.0f}, kInf, {0.0, 0.0, 0.0, 0.0}},
+          {{0.5f, 0.5f, 0.5f, 0.5f}, {-1.0f, 1.0f, 1.0f, -1.0f}, 8.0f, {0.0, 2.0, 2.0, 0.0}},
+      };
+      double worst = 0.0;
+      for (const MoonPin& p : moon_pins) {
+        double out[4];
+        QuadMoonMirror(p.t, p.c31, p.c20w, out);
+        for (int i = 0; i < 4; ++i) {
+          CHECK(633, std::isfinite(out[i]) && std::fabs(out[i] - p.want[i]) <= 1e-12 * std::max(1.0, std::fabs(p.want[i])));
+          worst = std::max(worst, std::fabs(out[i] - p.want[i]));
+          CHECK(633, out[i] >= 0.0 && out[i] <= (i < 3 ? 31.875 : 1.0));
+        }
+      }
+      struct GlarePin { float t[4]; float c31[4]; double want[4]; };
+      const GlarePin glare_pins[] = {
+          // quad glare pins (light_formulas.post_glare): the texel, c31, the value (rgb, alpha)
+          {{0.5f, 0.25f, 0.125f, 0.75f}, {0.2448834776878357f, 0.19307471811771393f, 0.0953512117266655f, 0.0f}, {0.12244173884391785, 0.04826867952942848, 0.011918901465833187, 1.0}},
+          {{1.0f, 1.0f, 1.0f, 0.0f}, {0.0006944444612599909f, 0.0006944444612599909f, 0.0006944444612599909f, 0.0f}, {0.0006944444612599909, 0.0006944444612599909, 0.0006944444612599909, 1.0}},
+          {{1.0f, 0.5f, 0.25f, 1.0f}, {64.0f, 2.0f, 1.0f, 0.0f}, {31.875, 1.0, 0.25, 1.0}},
+          {{kNaN, 0.5f, kInf, 1.0f}, {1.0f, 1.0f, 1.0f, 0.0f}, {0.0, 0.5, 0.0, 1.0}},
+          {{0.5f, 0.5f, 0.5f, 1.0f}, {1.0f, kNaN, 1.0f, 0.0f}, {0.0, 0.0, 0.0, 0.0}},
+          {{0.5f, 0.5f, -0.5f, 1.0f}, {-1.0f, 1.0f, 1.0f, kNaN}, {0.0, 0.5, 0.0, 1.0}},
+      };
+      for (const GlarePin& p : glare_pins) {
+        double out[4];
+        QuadGlareMirror(p.t, p.c31, out);
+        for (int i = 0; i < 4; ++i) {
+          CHECK(633, std::isfinite(out[i]) && std::fabs(out[i] - p.want[i]) <= 1e-12 * std::max(1.0, std::fabs(p.want[i])));
+          worst = std::max(worst, std::fabs(out[i] - p.want[i]));
+        }
+      }
+      struct PositionPin { float corner[3]; double want[4]; };
+      const PositionPin captured_pins[] = {
+          // quad position pins, the captured matrix (light_formulas.post_quad_position): the corner, the clip position
+          {{-2371.37548828125f, -434.8460388183594f, 259.419921875f}, {-1432.5703270674471, -1327.9451350190102, 1929.59304817058, 1929.6543738733762}},
+          {{-2076.54931640625f, 71.32887268066406f, -2866.154052734375f}, {-866.1594391513121, -6077.933593238473, 411.6738536749581, 411.7655744922058}},
+          {{0.0f, 0.0f, 0.0f}, {-176.43666076660156, -92.63703918457031, 0.10056735575199127, 0.20056533813476562}},
+          {{3.0f, -4.0f, 5.5f}, {-178.97625237323606, -80.73331326246262, -1.1521220356225967, -1.0520988702774048}},
+      };
+      const PositionPin made_pins[] = {
+          // quad position pins, the made matrix (light_formulas.post_quad_position): the corner, the clip position
+          {{-2371.37548828125f, -434.8460388183594f, 259.419921875f}, {-3618.918212890625, -740.9821166992188, -145.61352386325598, -145.51352386176586}},
+          {{-2076.54931640625f, 71.32887268066406f, -2866.154052734375f}, {-2395.2854614257812, -1291.4192810058594, -3107.7904991135, -3107.69049911201}},
+          {{0.0f, 0.0f, 0.0f}, {3.0, -1.0, 0.10000000149011612, 0.20000000298023224}},
+          {{3.0f, -4.0f, 5.5f}, {6.125, -6.25, 4.975000001490116, 5.075000002980232}},
+      };
+      const float made[4][4] = {{1.5f, 0.0f, -0.25f, 3.0f}, {0.0f, 2.0f, 0.5f, -1.0f}, {0.125f, 0.25f, 1.0f, 0.1f}, {0.125f, 0.25f, 1.0f, 0.2f}};
+      for (int set = 0; set < 2; ++set) {
+        for (const PositionPin& p : set ? made_pins : captured_pins) {
+          double out[4];
+          QuadPositionMirror(p.corner, set ? made : matrix, out);
+          for (int i = 0; i < 4; ++i) {
+            CHECK(633, std::fabs(out[i] - p.want[i]) <= 1e-12 * std::max(1.0, std::fabs(p.want[i])));
+            worst = std::max(worst, std::fabs(out[i] - p.want[i]) / std::max(1.0, std::fabs(p.want[i])));
+          }
+        }
+      }
+      std::cout << "furniture: the moon's, the glare's and the corner's mirrors against the reference, " << std::size(moon_pins) << " + "
+                << std::size(glare_pins) << " + " << std::size(captured_pins) + std::size(made_pins) << " points: worst difference "
+                << worst << "\n";
+      // The captured moon by day: c31.w is 0, so its alpha is 0 and the draw's alpha test (greater than
+      // 1 / 255) keeps no pixel; the same moon lit would be kept. The sun's glare has no test.
+      double out[4];
+      const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+      QuadMoonMirror(white, moon.ps[1], moon.ps[0][3], out);
+      CHECK(633, out[3] == 0.0 && !QuadAlphaKept(capture::QuadAlphaTest(moon), float(out[3]), moon.alpha_ref) && out[0] > 2.8 && out[0] < 2.9);
+      const float lit[4] = {moon.ps[1][0], moon.ps[1][1], moon.ps[1][2], 1.0f};
+      QuadMoonMirror(white, lit, moon.ps[0][3], out);
+      CHECK(633, out[3] == 1.0 && QuadAlphaKept(true, float(out[3]), moon.alpha_ref));
+      CHECK(633, QuadAlphaKept(false, 0.0f, 0.5f) && QuadAlphaKept(false, kNaN, 0.5f) && !QuadAlphaKept(true, kNaN, 0.5f) &&
+                     !QuadAlphaKept(true, 0.5f, 0.5f) && QuadAlphaKept(true, std::nextafter(0.5f, 1.0f), 0.5f));
+      // A corner of the sun's glare through the frame's matrix lands inside the picture, in front of the eye.
+      QuadPositionMirror(glare.corners[0], matrix, out);
+      CHECK(633, out[3] > 0.0 && std::fabs(out[0] / out[3]) < 1.0 && std::fabs(out[1] / out[3]) < 1.0 && out[2] / out[3] > 0.0 &&
+                     out[2] / out[3] < 1.0);
+    }
+
+    // 634: nothing that is no number leaves a mirror, and nothing outside the target's range.
+    {
+      const float values[] = {kNaN, kInf, -kInf, -1.0f, 0.0f, 1e-30f, 0.5f, 1.0f, 64.0f, 3e38f};
+      int points = 0;
+      for (float t0 : values) {
+        for (float ta : values) {
+          for (float c : values) {
+            for (float s : values) {
+              const float t[4] = {t0, 0.5f, ta, ta}, c31[4] = {c, 1.0f, c, c};
+              double out[4];
+              QuadMoonMirror(t, c31, s, out);
+              for (int i = 0; i < 4; ++i) CHECK(634, out[i] >= 0.0 && out[i] <= (i < 3 ? 31.875 : 1.0));
+              QuadGlareMirror(t, c31, out);
+              for (int i = 0; i < 4; ++i) CHECK(634, out[i] >= 0.0 && out[i] <= (i < 3 ? 31.875 : 1.0));
+              ++points;
+            }
+          }
+        }
+      }
+      CHECK(634, points == 10000);
+    }
+
+    // 635: the frame's plan: the records of the kinds this build draws, in the records' order, each with
+    // its state and place; the others counted; one that cannot be drawn and the frame draws none.
+    {
+      const QuadRecord set[5] = {moon, cloud, glare, cloud, glare};
+      const ClayQuadPlan plan = PlanClayQuads(set, 5, scale);
+      CHECK(635, plan.drawable && plan.count == 3 && plan.later == 2);
+      CHECK(635, plan.items[0].record == 0 && plan.items[0].state == ClayQuadState::kAlphaDepth && plan.items[0].place == ClayQuadPlace::kAfterSky);
+      CHECK(635, plan.items[1].record == 2 && plan.items[1].state == ClayQuadState::kAdd && plan.items[1].place == ClayQuadPlace::kAfterRecords);
+      CHECK(635, plan.items[2].record == 4 && plan.items[2].place == ClayQuadPlace::kAfterRecords);
+      // An empty set, and one of other kinds only: nothing to draw, nothing wrong.
+      const ClayQuadPlan empty = PlanClayQuads(nullptr, 0, scale);
+      CHECK(635, empty.drawable && empty.count == 0 && empty.later == 0);
+      const QuadRecord clouds[2] = {cloud, cloud};
+      const ClayQuadPlan other = PlanClayQuads(clouds, 2, scale);
+      CHECK(635, other.drawable && other.count == 0 && other.later == 2);
+      // One record of a drawn kind that cannot be drawn (its state; its values; another frame's scale; a
+      // record that is none): none of the set, also not those before it.
+      QuadRecord bad_state = glare;
+      bad_state.depth = 0x00708762;
+      QuadRecord bad_value = glare;
+      bad_value.ps[0][1] = kNaN;
+      for (const QuadRecord& bad : {bad_state, bad_value, QuadRecord{}}) {
+        const QuadRecord with[3] = {moon, glare, bad};
+        const ClayQuadPlan none = PlanClayQuads(with, 3, scale);
+        CHECK(635, !none.drawable && none.count == 0 && none.later == 0);
+      }
+      const ClayQuadPlan stale = PlanClayQuads(set, 5, 16.0f);
+      CHECK(635, !stale.drawable && stale.count == 0);
+      // More than the bound, or a count without records: nothing, not drawable (no index leaves the array).
+      QuadRecord many[capture::kMaxQuadRecords + 1];
+      for (QuadRecord& q : many) q = glare;
+      const ClayQuadPlan full = PlanClayQuads(many, capture::kMaxQuadRecords, scale);
+      CHECK(635, full.drawable && full.count == capture::kMaxQuadRecords && full.items[capture::kMaxQuadRecords - 1].record == capture::kMaxQuadRecords - 1);
+      const ClayQuadPlan over = PlanClayQuads(many, capture::kMaxQuadRecords + 1, scale);
+      CHECK(635, !over.drawable && over.count == 0);
+      CHECK(635, !PlanClayQuads(nullptr, 3, scale).drawable);
+    }
+
+    // 636: the decision, over every combination: the first thing missing decides.
+    {
+      for (int bits5 = 0; bits5 < 32; ++bits5) {
+        for (QuadSetReason set : {QuadSetReason::kNone, QuadSetReason::kOff, QuadSetReason::kNoDraw, QuadSetReason::kRefused,
+                                  QuadSetReason::kOverLimit, QuadSetReason::kPending, QuadSetReason::kCount}) {
+          ClayFurnitureInputs in;
+          in.sun = bits5 & 1;
+          in.post_frame = bits5 & 2;
+          in.sky = bits5 & 4;
+          in.drawable = bits5 & 8;
+          in.objects = bits5 & 16;
+          in.set = set;
+          const ClayFurniture want = !in.sun                             ? ClayFurniture::kOff
+                                     : !in.post_frame                    ? ClayFurniture::kNoPost
+                                     : !in.sky                           ? ClayFurniture::kNoSky
+                                     : set == QuadSetReason::kNoDraw     ? ClayFurniture::kNoQuads
+                                     : set != QuadSetReason::kNone       ? ClayFurniture::kRecords
+                                     : !in.drawable                      ? ClayFurniture::kState
+                                     : !in.objects                       ? ClayFurniture::kObjects
+                                                                         : ClayFurniture::kDrawn;
+          CHECK(636, DecideClayFurniture(in) == want);
+        }
+      }
+      // With the switch off nothing else is asked: off for every input.
+      static_assert(DecideClayFurniture(ClayFurnitureInputs{}) == ClayFurniture::kOff);
+      ClayFurnitureInputs all;
+      all.post_frame = all.sky = all.drawable = all.objects = true;
+      all.set = QuadSetReason::kNone;
+      CHECK(636, DecideClayFurniture(all) == ClayFurniture::kOff);
+      all.sun = true;
+      CHECK(636, DecideClayFurniture(all) == ClayFurniture::kDrawn);
+      ClayFurnitureFrames n;
+      for (ClayFurniture f : {ClayFurniture::kOff, ClayFurniture::kDrawn, ClayFurniture::kNoPost, ClayFurniture::kNoSky, ClayFurniture::kNoQuads,
+                              ClayFurniture::kRecords, ClayFurniture::kState, ClayFurniture::kObjects, ClayFurniture::kCount}) {
+        CountClayFurnitureFrame(f, false, n);
+      }
+      CountClayFurnitureFrame(ClayFurniture::kDrawn, true, n);
+      CountClayFurnitureFrame(ClayFurniture::kRecords, true, n);  // (a texture is missed only in a drawn frame)
+      CHECK(636, n.frames == 9 && n.drawn == 2 && n.texture == 1 && n.nopost == 1 && n.nosky == 1 && n.noquads == 1 && n.records == 2 &&
+                     n.state == 1 && n.objects == 1);
+    }
+
+    // 637: the Furniture line.
+    {
+      ClayStats st;
+      CHECK(637, FormatFurnitureText(st) == "Furniture: off");
+      st.sun_switch = true;
+      st.quad_set = QuadSetReason::kNone;
+      st.quad_records = 12;
+      st.furniture = ClayFurniture::kDrawn;
+      st.quad_drawn_moon = 1;
+      st.quad_drawn_glare = 2;
+      st.quad_texture = 0;
+      st.quad_later = 9;
+      st.furniture_frames = 900;
+      st.furniture_drawn_frames = 890;
+      st.furniture_texture_frames = 3;
+      st.furniture_nopost_frames = 4;
+      st.furniture_nosky_frames = 2;
+      st.furniture_noquads_frames = 1;
+      st.furniture_records_frames = 2;
+      st.furniture_state_frames = 1;
+      CHECK(637, FormatFurnitureText(st) ==
+                     "Furniture: on, quads whole (12), drawn: moon 1, glare 2, quad-texture 0, other kinds 9 | frames since start 900: "
+                     "drawn 890 (quad-texture 3), no-post 4, no-sky 2, no-quad 1, quad-record 2, state 1, post-objects 0");
+      st.quad_set = QuadSetReason::kPending;
+      st.furniture = ClayFurniture::kRecords;
+      CHECK(637, FormatFurnitureText(st).rfind("Furniture: on, quads none (quad-record: pending), not drawn (quad-record) | frames", 0) == 0);
+      st.quad_set = QuadSetReason::kNone;
+      st.furniture = ClayFurniture::kState;
+      CHECK(637, FormatFurnitureText(st).find("whole (12), not drawn (quad-record: a record's state or values) |") != std::string::npos);
+      const std::pair<ClayFurniture, const char*> words[] = {{ClayFurniture::kNoPost, "not drawn (no post frame)"},
+                                                             {ClayFurniture::kNoSky, "not drawn (no sky)"},
+                                                             {ClayFurniture::kNoQuads, "not drawn (no quad)"},
+                                                             {ClayFurniture::kObjects, "not drawn (post-objects)"},
+                                                             {ClayFurniture::kOff, "not drawn (off)"}};
+      for (const auto& [f, word] : words) {
+        st.furniture = f;
+        CHECK(637, FormatFurnitureText(st).find(word) != std::string::npos);
+      }
+      // (whole with every count at its largest)
+      st.furniture = ClayFurniture::kDrawn;
+      st.quad_records = st.quad_drawn_moon = st.quad_drawn_glare = st.quad_texture = st.quad_later = ~0u;
+      st.furniture_frames = st.furniture_drawn_frames = st.furniture_texture_frames = st.furniture_nopost_frames = st.furniture_nosky_frames =
+          st.furniture_noquads_frames = st.furniture_records_frames = st.furniture_state_frames = st.furniture_objects_frames = ~0ull;
+      const std::string longest = FormatFurnitureText(st);
+      CHECK(637, longest.size() > 300 && longest.rfind("post-objects 18446744073709551615") == longest.size() - 33);
+    }
+
+    // 638: the frame's constant buffer has the quads' slots: 48 small ones before the objects', a quad's two
+    // inside them for every record of a full set.
+    {
+      const ClayFrameSlotPlan p = PlanClayFrameSlots(5, 3);
+      CHECK(638, p.quad0 == p.post + kClayPostSlots && p.object0 == p.quad0 + kClayQuadFrameSlots);
+      for (uint32_t i = 0; i < capture::kMaxQuadRecords; ++i) {
+        CHECK(638, ClaySmallSlotOffset(p.quad0 + kClayQuadSlots * i) + sizeof(ClayQuadConstants) <=
+                       ClaySmallSlotOffset(p.quad0 + kClayQuadSlots * (i + 1)));
+      }
+      CHECK(638, ClaySmallSlotOffset(p.quad0 + kClayQuadSlots * capture::kMaxQuadRecords) == ClaySmallSlotOffset(p.object0));
+      CHECK(638, p.object0 <= ClayFrameSmallSlots(5, 3) && ClayFrameSmallSlots(0, 0) == 96);
+    }
+
+    // 639: the bloom's verdict when its objects are missing has a word of its own (review of plan Task 8,
+    // Minor 2): not "no-weights", and counted as neither.
+    {
+      for (ClayBloom b : {ClayBloom::kOff, ClayBloom::kNoWeights, ClayBloom::kOn}) {
+        CHECK(639, ClayBloomWithObjects(b, true) == b);
+        CHECK(639, ClayBloomWithObjects(b, false) == (b == ClayBloom::kOn ? ClayBloom::kNoObjects : b));
+      }
+      CHECK(639, std::string(ClayBloomName(ClayBloom::kNoObjects)) == "no-objects");
+      ClayPostFrames n;
+      CountClayBloomFrame(ClayBloom::kNoObjects, n);
+      CHECK(639, n.bloom == 0 && n.noweights == 0);
+    }
+  }
+
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
@@ -8218,7 +8736,9 @@ int main() {
                "against the reference's numbers, nothing that is no number, the steps' constants, the frame's two words, "
                "the Post line; native bloom: the level a target stores, the downsample, the bright pass and the blurs "
                "against the reference's numbers, the place of the bloom's sample, nothing that is no number, the steps' "
-               "words, the verdict\n";
+               "words, the verdict; native furniture: the state a record is drawn with, its constants and what gives none, "
+               "the moon's, the glare's and the corner's mirrors against the reference's numbers, nothing that is no "
+               "number, the frame's plan, the decision and the Furniture line, the quads' slots\n";
 
   return 0;
 }

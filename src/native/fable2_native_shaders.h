@@ -1388,6 +1388,92 @@ float4 main(float4 pos : SV_Position) : SV_Target {
 
 #undef FABLE2_CLAY_POST_HLSL
 
+// The quad step (render/clay_pass.cpp; clay_logic.h, "Native furniture"; sub-project 10, plan Task 13):
+// one of the game's furniture quads, drawn again from its quad record in the colour pass. Its own layout:
+// cbuffer Quad at b0 for both stages (render::ClayQuadConstants, two small slots of the frame's constant
+// buffer; kClayQuadFields is its layout), the frame's block at b2 (declared by the layout; no program of
+// this build reads it), a table of three textures at t0 (the quad's own at t0; the white texture in the
+// others), the four static samplers.
+//   kClayQuadVs: six vertices by SV_VertexID in the game's order 0 1 2 1 3 2 (capture::kQuadIndices), each a
+//     corner of the record through the game's own matrix: clip = (c0 . p, c1 . p, c2 . p, c3 . p), p = (x, y,
+//     z, 1), as the game's 81BADE63A169E3DC (light_formulas.post_quad_position; QuadPositionMirror), with the
+//     corner's coordinate. The clip position is the game's: its z / w is the pass's depth (0 near, 1 far).
+//   kClayQuadPs: the kind's formula by q_kind (capture::PostQuadKind + 1), on the texel of t0 sampled at the
+//     coordinate times the host texture's scale, with the texture's own gradients:
+//       1, the moon (18D39DCEBEE4C2FC, post_moon):   rgb = tex.rgb * c31.rgb * tex.a * c20.w, alpha = c31.w * tex.a
+//       3, the glare (04985A0F7296E130, post_glare): rgb = tex.rgb * c31.rgb,                 alpha = 1
+//     (q_reg holds the kind's registers in the record's order: the moon's c20 and c31, the glare's c31), any
+//     other word: nothing (0, alpha 0). Then the draw's own alpha test, as the game's state has it: with
+//     q_alpha_test the pixel is discarded unless its alpha is above q_alpha_ref. Out: each colour channel
+//     (v > 0) ? min(v, q_scene_max) : 0 and the alpha saturated, so that nothing that is no number is written
+//     (a texel's channel that is no number reads 0: the first statement after the sample). The blend and
+//     the depth test are the pipeline's (ClayQuadState).
+inline constexpr ClayBufferField kClayQuadFields[] = {
+    {"q_corner", 0, 64},    {"q_coord", 64, 64},     {"q_view_proj", 128, 64}, {"q_reg", 192, 192},
+    {"q_kind", 384, 4},     {"q_sampler", 388, 4},   {"q_alpha_test", 392, 4}, {"q_alpha_ref", 396, 4},
+    {"q_fix", 400, 8},      {"q_scene_max", 408, 4}, {"q_pad", 412, 4},
+};
+inline constexpr unsigned kClayQuadSize = 416;
+
+#define FABLE2_CLAY_QUAD_HLSL R"hlsl(
+cbuffer Quad : register(b0) {
+  float4 q_corner[4];      // the corners' positions: x y z, 1
+  float4 q_coord[4];       // their coordinates: u v
+  float4 q_view_proj[4];   // vertex c0..c3 at the game's call
+  float4 q_reg[12];        // the kind's pixel registers, in the record's order
+  uint q_kind; uint q_sampler; uint q_alpha_test; float q_alpha_ref;   // the formula; the static sampler; the alpha test
+  float2 q_fix; float q_scene_max; uint q_pad;                         // the host texture's scale; the scene's clamp
+};
+)hlsl"
+
+inline constexpr const char* kClayQuadVs = FABLE2_CLAY_QUAD_HLSL R"hlsl(
+struct QuadOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
+QuadOut main(uint id : SV_VertexID) {
+  static const uint order[6] = {0, 1, 2, 1, 3, 2};
+  uint c = order[min(id, 5u)];
+  float4 p = float4(q_corner[c].xyz, 1.0);
+  QuadOut o;
+  o.pos = float4(dot(q_view_proj[0], p), dot(q_view_proj[1], p), dot(q_view_proj[2], p), dot(q_view_proj[3], p));
+  o.uv = q_coord[c].xy;
+  return o;
+}
+)hlsl";
+
+inline constexpr const char* kClayQuadPs = FABLE2_CLAY_QUAD_HLSL R"hlsl(
+Texture2D quad_tex : register(t0);
+SamplerState q_point_wrap : register(s0);
+SamplerState q_linear_wrap : register(s1);
+SamplerState q_point_clamp : register(s2);
+SamplerState q_linear_clamp : register(s3);
+float4 quad_sample(float2 at, float2 dx, float2 dy) {
+  float4 c;
+  if (q_sampler == 0) c = quad_tex.SampleGrad(q_point_wrap, at, dx, dy);
+  else if (q_sampler == 1) c = quad_tex.SampleGrad(q_linear_wrap, at, dx, dy);
+  else if (q_sampler == 2) c = quad_tex.SampleGrad(q_point_clamp, at, dx, dy);
+  else c = quad_tex.SampleGrad(q_linear_clamp, at, dx, dy);
+  return c;
+}
+float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
+  float2 at = uv * q_fix;
+  float4 t = quad_sample(at, ddx(at), ddy(at));
+  t = (abs(t) < 3.0e38) ? t : float4(0.0, 0.0, 0.0, 0.0);
+  float3 rgb = float3(0.0, 0.0, 0.0);
+  float a = 0.0;
+  if (q_kind == 1) {
+    rgb = t.rgb * q_reg[1].rgb * t.a * q_reg[0].w;
+    a = q_reg[1].a * t.a;
+  } else if (q_kind == 3) {
+    rgb = t.rgb * q_reg[0].rgb;
+    a = 1.0;
+  }
+  if (q_alpha_test != 0 && !(a > q_alpha_ref)) discard;
+  rgb = (rgb > 0.0) ? min(rgb, q_scene_max) : float3(0.0, 0.0, 0.0);
+  return float4(rgb, saturate(a));
+}
+)hlsl";
+
+#undef FABLE2_CLAY_QUAD_HLSL
+
 // Debug views (render/composite.cpp, fable2_native_view): the clay pass's mapped (8-bit, display) target
 // drawn over the guest output. mode 1 overlay (alpha 0.5), 2 split (right half only), 3 native (opaque).
 inline constexpr const char* kCompositePs = R"hlsl(

@@ -4286,9 +4286,122 @@ int main() {
     for (const ClayTerrainField& f : kClayTerrainFields) named = named || (!strcmp(f.name, "t_base_gamma") && f.offset == 188 && f.bytes == 4);
     if (!named) return 241;
   }
+  // 242 to 246: the quad step (sub-project 10, plan Task 13; clay_logic.h, "Native furniture").
+  {
+    using fable2::native::render::ClayQuadConstants;
+    // 242: both programs compile.
+    if (!Compile("clay_quad_vs", kClayQuadVs, "vs_5_0") || !Compile("clay_quad_ps", kClayQuadPs, "ps_5_0")) return 242;
+    // 243: cbuffer Quad at b0 in both stages, at the table's offsets, which are ClayQuadConstants'; the
+    // texture at t0, the four static samplers at s0..s3.
+    {
+      const unsigned count = sizeof(kClayQuadFields) / sizeof(kClayQuadFields[0]);
+      const struct {
+        const char* name;
+        size_t offset, bytes;
+      } quad_struct[] = {
+          {"q_corner", offsetof(ClayQuadConstants, corner), sizeof(ClayQuadConstants::corner)},
+          {"q_coord", offsetof(ClayQuadConstants, coord), sizeof(ClayQuadConstants::coord)},
+          {"q_view_proj", offsetof(ClayQuadConstants, view_proj), sizeof(ClayQuadConstants::view_proj)},
+          {"q_reg", offsetof(ClayQuadConstants, reg), sizeof(ClayQuadConstants::reg)},
+          {"q_kind", offsetof(ClayQuadConstants, kind), sizeof(ClayQuadConstants::kind)},
+          {"q_sampler", offsetof(ClayQuadConstants, sampler), sizeof(ClayQuadConstants::sampler)},
+          {"q_alpha_test", offsetof(ClayQuadConstants, alpha_test), sizeof(ClayQuadConstants::alpha_test)},
+          {"q_alpha_ref", offsetof(ClayQuadConstants, alpha_ref), sizeof(ClayQuadConstants::alpha_ref)},
+          {"q_fix", offsetof(ClayQuadConstants, fix), sizeof(ClayQuadConstants::fix)},
+          {"q_scene_max", offsetof(ClayQuadConstants, scene_max), sizeof(ClayQuadConstants::scene_max)},
+          {"q_pad", offsetof(ClayQuadConstants, pad), sizeof(ClayQuadConstants::pad)},
+      };
+      if (count != sizeof(quad_struct) / sizeof(quad_struct[0]) || sizeof(ClayQuadConstants) != kClayQuadSize ||
+          kClayQuadSize > fable2::native::render::kClayQuadSlots * fable2::native::render::kClayTerrainSlotBytes) return 243;
+      for (unsigned i = 0; i < count; ++i) {
+        if (strcmp(kClayQuadFields[i].name, quad_struct[i].name) || kClayQuadFields[i].offset != quad_struct[i].offset ||
+            kClayQuadFields[i].bytes != quad_struct[i].bytes) {
+          std::cerr << "kClayQuadFields[" << i << "] is not ClayQuadConstants' field\n";
+          return 243;
+        }
+      }
+      for (const char* stage : {"vs_5_0", "ps_5_0"}) {
+        const char* src = stage[0] == 'v' ? kClayQuadVs : kClayQuadPs;
+        if (int at = BufferLayoutMismatch("clay_quad", src, stage, "Quad", kClayQuadFields, count, kClayQuadSize)) {
+          std::cerr << "cbuffer Quad (" << stage << "): " << at << "\n";
+          return 243;
+        }
+        if (BindPoint("clay_quad", src, stage, "Quad") != 0) return 243;
+      }
+      // Control: two fields exchanged are seen.
+      const std::string swapped = Changed(kClayQuadPs, "uint q_kind; uint q_sampler;", "uint q_sampler; uint q_kind;");
+      if (swapped.empty() || BufferLayoutMismatch("swapped_quad_ps", swapped.c_str(), "ps_5_0", "Quad", kClayQuadFields, count, kClayQuadSize) == 0) return 243;
+      if (BindPoint("clay_quad_ps", kClayQuadPs, "ps_5_0", "quad_tex") != 0 || BindPoint("clay_quad_ps", kClayQuadPs, "ps_5_0", "q_point_wrap") != 0 ||
+          BindPoint("clay_quad_ps", kClayQuadPs, "ps_5_0", "q_linear_wrap") != 1 || BindPoint("clay_quad_ps", kClayQuadPs, "ps_5_0", "q_point_clamp") != 2 ||
+          BindPoint("clay_quad_ps", kClayQuadPs, "ps_5_0", "q_linear_clamp") != 3) return 243;
+    }
+    // 244: the vertex shader: the game's six indices, the corner through the four rows (four dp4 against
+    // cb0[8..11], the matrix at byte 128), its coordinate from cb0[4..7]; it reads no texture and no buffer
+    // but its block, and the vertex's number is bounded before it indexes.
+    {
+      const std::string vs = Disassembly("clay_quad_vs", kClayQuadVs, "vs_5_0");
+      if (vs.empty() || !strstr(kClayQuadVs, "static const uint order[6] = {0, 1, 2, 1, 3, 2};") ||
+          !strstr(kClayQuadVs, "uint c = order[min(id, 5u)];") ||
+          !strstr(kClayQuadVs, "o.pos = float4(dot(q_view_proj[0], p), dot(q_view_proj[1], p), dot(q_view_proj[2], p), dot(q_view_proj[3], p));") ||
+          !strstr(kClayQuadVs, "float4 p = float4(q_corner[c].xyz, 1.0);") || !strstr(kClayQuadVs, "o.uv = q_coord[c].xy;")) return 244;
+      if (vs.find("dcl_resource") != std::string::npos || vs.find("dcl_sampler") != std::string::npos || LoopInstructions(vs) != 0 ||
+          !HasOp(vs, "umin")) return 244;
+      for (const char* row : {"cb0[8]", "cb0[9]", "cb0[10]", "cb0[11]"}) {
+        if (vs.find(row) == std::string::npos) return 244;
+      }
+      // (the registers and the state words of the block are the pixel stage's: not read here)
+      for (const char* other : {"cb0[12]", "cb0[13]", "cb0[24]", "cb0[25]"}) {
+        if (vs.find(other) != std::string::npos) return 244;
+      }
+      // Control: without the bound the index is the vertex's number as it comes.
+      const std::string unbounded = Changed(kClayQuadVs, "order[min(id, 5u)]", "order[id]");
+      if (unbounded.empty() || HasOp(Disassembly("unbounded_quad_vs", unbounded.c_str(), "vs_5_0"), "umin")) return 244;
+    }
+    // 245: the pixel shader's statements, and in its compiled code: one texture, sampled with its own
+    // gradients under each of the four samplers (four sample_d, no other read of it), one discard, the
+    // kind's registers alone (cb0[12] and cb0[13]: q_reg[0] and q_reg[1]), the clamp against the block's
+    // q_scene_max (cb0[25].z), no loop.
+    {
+      const char* s = kClayQuadPs;
+      if (!strstr(s, "  float2 at = uv * q_fix;\n  float4 t = quad_sample(at, ddx(at), ddy(at));\n") ||
+          !strstr(s, "  t = (abs(t) < 3.0e38) ? t : float4(0.0, 0.0, 0.0, 0.0);\n") ||
+          !strstr(s, "  if (q_kind == 1) {\n    rgb = t.rgb * q_reg[1].rgb * t.a * q_reg[0].w;\n    a = q_reg[1].a * t.a;\n  } else if (q_kind == 3) {\n"
+                     "    rgb = t.rgb * q_reg[0].rgb;\n    a = 1.0;\n  }\n") ||
+          !strstr(s, "  if (q_alpha_test != 0 && !(a > q_alpha_ref)) discard;\n") ||
+          !strstr(s, "  rgb = (rgb > 0.0) ? min(rgb, q_scene_max) : float3(0.0, 0.0, 0.0);\n  return float4(rgb, saturate(a));\n")) return 245;
+      const std::string ps = Disassembly("clay_quad_ps", s, "ps_5_0");
+      if (ps.empty() || Count(ps.c_str(), "sample_d") != 4 || Count(ps.c_str(), "discard") != 1 || LoopInstructions(ps) != 0) return 245;
+      if (Count(ps.c_str(), "dcl_resource_texture2d") != 1 || Count(ps.c_str(), "dcl_sampler") != 4) return 245;
+      if (!ReadsComponent(ps, "cb0[12]", 'w') || !ReadsComponent(ps, "cb0[13]", 'w') || !ReadsComponent(ps, "cb0[25]", 'z') ||
+          !ReadsComponent(ps, "cb0[24]", 'w') || !ReadsComponent(ps, "cb0[24]", 'z')) return 245;
+      // (the corners, the matrix and the registers past the two are not the pixel stage's)
+      for (const char* other : {"cb0[0]", "cb0[8]", "cb0[14]", "cb0[23]"}) {
+        if (ps.find(other) != std::string::npos) return 245;
+      }
+      // The numbers of the two kinds are the capture's kinds plus one.
+      static_assert(unsigned(fable2::native::capture::PostQuadKind::kMoon) + 1 == 1 && unsigned(fable2::native::capture::PostQuadKind::kGlare) + 1 == 3);
+      // Controls: without the test there is no discard; without the clamp the block's bound is not read;
+      // without the texel's guard the program is another one.
+      const std::string untested = Changed(s, "  if (q_alpha_test != 0 && !(a > q_alpha_ref)) discard;\n", "");
+      const std::string unclamped = Changed(s, "  rgb = (rgb > 0.0) ? min(rgb, q_scene_max) : float3(0.0, 0.0, 0.0);\n", "");
+      const std::string unguarded = Changed(s, "  t = (abs(t) < 3.0e38) ? t : float4(0.0, 0.0, 0.0, 0.0);\n", "");
+      if (untested.empty() || unclamped.empty() || unguarded.empty()) return 245;
+      if (Count(Disassembly("untested_quad_ps", untested.c_str(), "ps_5_0").c_str(), "discard") != 0 ||
+          ReadsComponent(Disassembly("unclamped_quad_ps", unclamped.c_str(), "ps_5_0"), "cb0[25]", 'z') ||
+          Code(Disassembly("unguarded_quad_ps", unguarded.c_str(), "ps_5_0")) == Code(ps)) return 245;
+    }
+    // 246: the sun's switch off is the picture of before, program for program: the quad step's text is a
+    // text of its own (no program that draws the scene or a post step holds a word of it, and the quad's
+    // block is no other program's), so every other program is compiled from the text it had.
+    for (const char* src : {kClayVs, kClayPs, kClayTexturedPs, kClayTerrainLayerPs, kClayTerrainFarPs, kClayShadowPs, kSkyVs, kClaySkyPs,
+                            kClayMaskPs, kOutputMapPs, kClayPostCompositePs, kClayPostRampPs, kClayPostDownsamplePs, kClayPostBrightPs,
+                            kClayPostBlurPs, kFullscreenVs}) {
+      if (strstr(src, "q_") || strstr(src, "Quad") || strstr(src, "quad")) return 246;
+    }
+  }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads; the base map's gamma sign: the curve, the record's word read by the lit terrain programs alone\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads; the base map's gamma sign: the curve, the record's word read by the lit terrain programs alone; the quad step: the block at the table's offsets in both stages, the six vertices through the game's matrix, the two kinds' statements, one texture under four samplers, the alpha test's discard, the compiled clamp\n";
   return 0;
 }

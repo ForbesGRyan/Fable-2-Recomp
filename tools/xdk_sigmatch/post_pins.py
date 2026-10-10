@@ -118,6 +118,43 @@ UNORM_W, UNORM_H = 16, 16       # the 10-bit pictures of the blurs, the radial b
 DOWNSAMPLE_PIXELS = ((0, 0), (1, 0), (2, 1), (3, 1))
 BLUR_PIXELS = ((0, 0), (7, 7), (3, 12), (15, 15))
 RADIAL_PIXELS = ((0, 0), (12, 3), (8, 8), (15, 15))
+# The scene's furniture (plan Task 13): the moon's points (texel, c31, c20.w) and the glare's (texel, c31). The
+# first of each has the registers of capture native_discovery_20261010_052158 frame 1 (the moon's c31.w is 0
+# there: nothing is drawn by day); the others exercise a lit moon, the scene's clamp, the alpha's clamp and
+# values that are no numbers.
+QUAD_MOON = (
+    ((0.5, 0.25, 0.125, 0.75), (0.36961094, 0.36961094, 0.36961094, 0.0), 7.6728735),
+    ((0.5, 0.25, 0.125, 0.75), (0.36961094, 0.36961094, 0.36961094, 1.0), 7.6728735),
+    ((1.0, 0.8, 0.6, 1.0), (0.9, 0.7, 0.5, 0.5), 16.0),
+    ((1.0, 1.0, 1.0, 1.0), (4.0, 0.5, 0.25, 3.0), 16.0),
+    ((0.2, 0.4, 0.6, 0.0039215689), (1.0, 1.0, 1.0, 1.0), 8.45),
+    ((NAN, 0.5, 0.5, 1.0), (1.0, 1.0, 1.0, 1.0), 8.0),
+    ((0.5, 0.5, 0.5, NAN), (1.0, 1.0, 1.0, 1.0), 8.0),
+    ((0.5, INF, -0.5, 0.5), (1.0, 1.0, 1.0, 1.0), 8.0),
+    ((0.5, 0.5, 0.5, 0.5), (1.0, NAN, 1.0, 1.0), 8.0),
+    ((0.5, 0.5, 0.5, 0.5), (1.0, 1.0, 1.0, 1.0), INF),
+    ((0.5, 0.5, 0.5, 0.5), (-1.0, 1.0, 1.0, -1.0), 8.0),
+)
+QUAD_GLARE = (
+    ((0.5, 0.25, 0.125, 0.75), (0.24488348, 0.19307472, 0.095351212, 0.0)),
+    ((1.0, 1.0, 1.0, 0.0), (0.00069444446, 0.00069444446, 0.00069444446, 0.0)),
+    ((1.0, 0.5, 0.25, 1.0), (64.0, 2.0, 1.0, 0.0)),
+    ((NAN, 0.5, INF, 1.0), (1.0, 1.0, 1.0, 0.0)),
+    ((0.5, 0.5, 0.5, 1.0), (1.0, NAN, 1.0, 0.0)),
+    ((0.5, 0.5, -0.5, 1.0), (-1.0, 1.0, 1.0, NAN)),
+)
+# A quad's corners through the matrix of that capture's frame 1 (vertex c0..c3 as single-precision bits) and a
+# made-up one: the sun's glare's first corner, the moon's last, the origin, a made-up point.
+QUAD_MATRIX_BITS = (0x3EBA04AA, 0x3F684A6D, 0x33BBAA18, 0xC3306FC9, 0x3F3E8525, 0xBE989184, 0x3FC5551A, 0xC2B9462A,
+                    0xBF52DBA3, 0x3EA8DAD8, 0x3EEC3766, 0x3DCDF642, 0xBF52DA8E, 0x3EA8D9FA, 0x3EEC3630, 0x3E4D6100)
+QUAD_MATRIX_MADE = (1.5, 0.0, -0.25, 3.0, 0.0, 2.0, 0.5, -1.0, 0.125, 0.25, 1.0, 0.1, 0.125, 0.25, 1.0, 0.2)
+QUAD_CORNERS = ((-2371.3755, -434.84604, 259.41992), (-2076.5493, 71.328873, -2866.1541), (0.0, 0.0, 0.0), (3.0, -4.0, 5.5))
+
+
+def quad_matrix():
+    """The captured matrix: four rows of four single-precision floats."""
+    v = struct.unpack('>16f', struct.pack('>16I', *QUAD_MATRIX_BITS))
+    return [list(v[4 * i:4 * i + 4]) for i in range(4)]
 REDUCE_PIXELS = ((0, 0), (3, 5), (7, 7))
 
 
@@ -227,6 +264,19 @@ def lines():
         UNORM_W, UNORM_H, UNORM_W // 2, UNORM_H // 2))
     for x, y in REDUCE_PIXELS:
         out.append('    {%d, %d, %s},' % (x, y, doubles(lf.post_reduce(linear, x, y))))
+    out.append('// quad moon pins (light_formulas.post_moon): the texel, c31, c20.w, the value (rgb, alpha)')
+    for t, c31, c20w in QUAD_MOON:
+        out.append('    {%s, %s, %s, %s},' % (floats(t), floats(c31), _num(f32(c20w), True),
+                                              doubles(lf.post_moon([f32(v) for v in t], [f32(v) for v in c31], f32(c20w)))))
+    out.append('// quad glare pins (light_formulas.post_glare): the texel, c31, the value (rgb, alpha)')
+    for t, c31 in QUAD_GLARE:
+        out.append('    {%s, %s, %s},' % (floats(t), floats(c31), doubles(lf.post_glare([f32(v) for v in t], [f32(v) for v in c31]))))
+    made = [[f32(v) for v in QUAD_MATRIX_MADE[4 * i:4 * i + 4]] for i in range(4)]
+    for name, m in (('captured', quad_matrix()), ('made', made)):
+        out.append('// quad position pins, the %s matrix (light_formulas.post_quad_position): the corner, the clip position' % name)
+        for corner in QUAD_CORNERS:
+            p = [f32(v) for v in corner]
+            out.append('    {%s, %s},' % (floats(corner), doubles(lf.post_quad_position(p, m[0], m[1], m[2], m[3]))))
     return out
 
 

@@ -359,15 +359,30 @@ inline ClayPostFault PostBlockFault(const capture::PostBlock& b, uint32_t age, b
 // (ClayPostConstants::bloom_on): the four bloom steps are drawn and the composite reads their result.
 // kNoWeights: a post frame with the switch on whose block has no blur part (capture::kPostPartBlur):
 // drawn without bloom, the composite alone, and counted. kOff: everything else (the switch off, or no
-// post frame): the picture of plan Task 5.
-enum class ClayBloom : uint8_t { kOff, kNoWeights, kOn, kCount };
+// post frame): the picture of plan Task 5. kNoObjects: the verdict would be kOn but the bloom's objects do
+// not exist (ClayBloomWithObjects: not reachable while a frame whose bloom objects failed is no post
+// frame at all, "post-objects"; a word of its own so that such a frame, should the rule change, is not
+// counted "no-weights"): drawn without bloom.
+enum class ClayBloom : uint8_t { kOff, kNoWeights, kOn, kNoObjects, kCount };
 constexpr ClayBloom DecideClayBloom(bool post_frame, bool wanted, bool weights) {
   if (!post_frame || !wanted) return ClayBloom::kOff;
   return weights ? ClayBloom::kOn : ClayBloom::kNoWeights;
 }
-constexpr const char* ClayBloomName(ClayBloom b) {
-  return b == ClayBloom::kOn ? "on" : b == ClayBloom::kNoWeights ? "no-weights" : "off";
+constexpr ClayBloom ClayBloomWithObjects(ClayBloom b, bool objects) {
+  return b == ClayBloom::kOn && !objects ? ClayBloom::kNoObjects : b;
 }
+constexpr const char* ClayBloomName(ClayBloom b) {
+  return b == ClayBloom::kOn ? "on" : b == ClayBloom::kNoWeights ? "no-weights" : b == ClayBloom::kNoObjects ? "no-objects" : "off";
+}
+// The scene's furniture of a frame ("Native furniture" below; ClayStats::furniture; the Furniture line).
+// kDrawn: the frame's quads of the kinds this build draws are drawn. Every other verdict: none of
+// them is. kOff: fable2_native_sun is off. kNoPost: the frame is no post frame. kNoSky: it has no
+// sky. kNoQuads: its scene has no furniture call. kRecords: its scene's quad set is not whole
+// ("quad-record": a call refused, more than the bound, a record that did not arrive, or a scene
+// captured without the quads). kState: a record of a kind this build draws cannot be drawn as it was
+// captured (its state, a value, another frame's scale). kObjects: the quad step's objects could not
+// be made ("post-objects").
+enum class ClayFurniture : uint8_t { kOff, kNoPost, kNoSky, kNoQuads, kRecords, kState, kObjects, kDrawn, kCount };
 
 struct ClayStats {
   uint32_t drawn = 0, skipped_bad_index = 0, uploads = 0, hits = 0;
@@ -577,6 +592,21 @@ struct ClayStats {
   float post_coord = 0.25f;
   ClayBloom bloom = ClayBloom::kOff;
   uint64_t bloom_frames = 0, bloom_noweights_frames = 0;
+  // The scene's furniture ("Native furniture" below; the Furniture line). sun_switch:
+  // fable2_native_sun. quad_set, quad_records: the scene's quad set and, when it is whole, its
+  // records. furniture: what the pass did (ClayFurniture). Of a drawn frame: the quads drawn by kind,
+  // those left out because their texture could not be had ("quad-texture"), and the set's records of
+  // kinds this build does not draw. The frame counts are the pass's totals since it was made, this
+  // frame included: frames with the switch on, those drawn (and of them those with a quad left out
+  // for its texture), and those not drawn by reason.
+  bool sun_switch = false;
+  capture::QuadSetReason quad_set = capture::QuadSetReason::kOff;
+  uint32_t quad_records = 0;
+  ClayFurniture furniture = ClayFurniture::kOff;
+  uint32_t quad_drawn_moon = 0, quad_drawn_glare = 0, quad_texture = 0, quad_later = 0;
+  uint64_t furniture_frames = 0, furniture_drawn_frames = 0, furniture_texture_frames = 0, furniture_nopost_frames = 0;
+  uint64_t furniture_nosky_frames = 0, furniture_noquads_frames = 0, furniture_records_frames = 0, furniture_state_frames = 0;
+  uint64_t furniture_objects_frames = 0;
 };
 // The pass's frame counts of the post chain, which follow from the frame's verdict alone: one frame
 // added. Counted: every frame with the post switch on, which is every verdict but kOff.
@@ -3728,6 +3758,303 @@ inline std::string FormatPostText(const ClayStats& st) {
   return text + buf;
 }
 
+// --- Native furniture (frame-map section 17, "Scene furniture"; sub-project 10, plan Task 13) ---
+// The game's sky furniture in the main scene, drawn again from the frame's quad records
+// (capture/quad_record.h): the moon right after the sky step, the glare (the sun's and the moon's)
+// after the last record. Each quad is the game's own four corners through the game's own matrix
+// (shaders::kClayQuadVs: six vertices by SV_VertexID, the order 0 1 2 1 3 2) and its pixel shader's
+// arithmetic (shaders::kClayQuadPs; the mirrors below are pinned to light_formulas.post_moon,
+// post_glare and post_quad_position, each machine-checked against the microcode):
+//   moon (18D3):   rgb = tex.rgb * c31.rgb * tex.a * c20.w,  alpha = c31.w * tex.a
+//   glare (0498):  rgb = tex.rgb * c31.rgb,                  alpha = 1
+// with the record's own state: the moon blended by its alpha, alpha-tested (greater than the draw's
+// reference) and depth-tested without write; the glare added, without a depth test. What is written
+// is a number of the scene's range: (v > 0) ? min(v, 31.875) : 0, the alpha saturated.
+// Only in a post frame with a sky, with fable2_native_sun on, and only from a WHOLE set of records:
+// a frame whose set is not whole, or in which a record of a kind this build draws cannot be drawn
+// as it was captured, draws no furniture at all (ClayFurniture). A quad whose texture cannot be had
+// this frame is left out alone and counted ("quad-texture").
+// The other kinds of a set (clouds, the sun layer's quads) are later tasks': counted, not drawn.
+inline constexpr const char* kQuadTextureReason = "quad-texture";
+
+// Where a kind is drawn by this build: kAfterSky (the moon), kAfterRecords (the glare), kNotDrawn.
+enum class ClayQuadPlace : uint8_t { kNotDrawn, kAfterSky, kAfterRecords };
+constexpr ClayQuadPlace ClayQuadPlaceOf(capture::PostQuadKind kind) {
+  return kind == capture::PostQuadKind::kMoon    ? ClayQuadPlace::kAfterSky
+         : kind == capture::PostQuadKind::kGlare ? ClayQuadPlace::kAfterRecords
+                                                 : ClayQuadPlace::kNotDrawn;
+}
+
+// The state the pass draws a record with (a pipeline of the quad step each), from the record's own
+// words; kNone: the pass has no pipeline for them, and the record cannot be drawn.
+//   kAlphaDepth: source alpha / inverse source alpha (0x07060706), depth-tested without write. The
+//     game's function must be greater-or-equal, which under its reversed depth range (the record
+//     was made only under it: capture::MakeQuadRecord) is less-or-equal on the pass's depth.
+//   kAdd: one / one (0x01010101), no depth test.
+// An alpha test that is on must be "greater" (every captured row); all four colour channels.
+enum class ClayQuadState : uint8_t { kNone, kAlphaDepth, kAdd, kCount };
+inline constexpr uint32_t kQuadBlendAlpha = 0x07060706u, kQuadBlendAdd = 0x01010101u;
+constexpr ClayQuadState QuadDrawState(const capture::QuadRecord& q) {
+  const bool test = (q.depth & 2) != 0, write = (q.depth & 4) != 0;
+  const uint32_t func = (q.depth >> 4) & 7;
+  if ((q.alpha_control & 8) && (q.alpha_control & 7) != uint32_t(capture::Compare::kGreater)) return ClayQuadState::kNone;
+  if (q.colour_mask != 0xF) return ClayQuadState::kNone;
+  if (q.blend == kQuadBlendAlpha && test && !write && func == uint32_t(capture::Compare::kGreaterEqual)) return ClayQuadState::kAlphaDepth;
+  if (q.blend == kQuadBlendAdd && !test) return ClayQuadState::kAdd;
+  return ClayQuadState::kNone;
+}
+
+// A quad's constants (cbuffer Quad of shaders::kClayQuadVs / kClayQuadPs, register b0 of the quad
+// step's layout; shaders::kClayQuadFields is its layout): kClayQuadSlots small slots of the frame's
+// constant buffer a quad, kClayQuadFrameSlots a frame (every record of a full set).
+struct ClayQuadConstants {
+  float corner[4][4];     // the corners' positions: x y z, 1
+  float coord[4][4];      // their coordinates: u v, 0, 0
+  float view_proj[4][4];  // vertex c0..c3 at the game's call
+  float reg[12][4];       // the kind's pixel registers, in the record's order (the generated table's)
+  uint32_t kind;          // the formula: capture::PostQuadKind + 1 (1 the moon, 3 the glare)
+  uint32_t sampler;       // static sampler of the texture (SamplerIndex)
+  uint32_t alpha_test;    // 1: the pixel is dropped unless its alpha is above alpha_ref
+  float alpha_ref;
+  float fix[2];           // host texture scale (TextureCache::Resolve's uv_fix)
+  float scene_max;        // the clamp of what is written (kPostSceneMax)
+  uint32_t pad;
+};
+static_assert(sizeof(ClayQuadConstants) == 416);
+inline constexpr uint32_t kClayQuadSlots = (sizeof(ClayQuadConstants) + 255) / 256;
+inline constexpr uint32_t kClayQuadFrameSlots = kClayQuadSlots * capture::kMaxQuadRecords;
+static_assert(kClayQuadSlots == 2 && kClayQuadFrameSlots == 48);
+// The bounds of what a quad's shader is handed (each written so that a value that is no number
+// fails it): a colour register's component in [0, 64], the scale in (0, 64].
+inline constexpr float kQuadRegisterMax = 64.0f;
+
+// A record's constants. False, with `out` untouched, unless (checked again here, so that no value
+// reaches a shader on the strength of the capture's flag alone):
+//   - the record is valid, of a kind this build draws, with a state the pass can draw (QuadDrawState);
+//   - every corner value and matrix component is finite and within capture::kQuadValueBound;
+//   - the moon: c31's four components in [0, 64]; c20.w in (0, 64] and equal to the frame's output
+//     scale within 1e-3 of it (`out_scale`: the frame's light block's c20.w, which the lit draws of a
+//     post frame write with; a moon written with another scale would be another frame's);
+//     the glare: c31.rgb in [0, 64];
+//   - an alpha test in use has its reference in [0, 1];
+//   - the texture's scale is finite and in (0, 64] in both axes.
+inline bool MakeClayQuadConstants(const capture::QuadRecord& q, float out_scale, uint32_t sampler, const float fix[2],
+                                  ClayQuadConstants* out) {
+  if (!out || !fix || !capture::QuadRecordValid(q) || ClayQuadPlaceOf(q.kind) == ClayQuadPlace::kNotDrawn) return false;
+  if (QuadDrawState(q) == ClayQuadState::kNone) return false;
+  auto fits = [](float v) { return std::fabs(v) <= capture::kQuadValueBound; };
+  auto colour = [](float v) { return v >= 0.0f && v <= kQuadRegisterMax; };
+  ClayQuadConstants c{};
+  for (int i = 0; i < 4; ++i) {
+    for (int k = 0; k < 5; ++k) {
+      if (!fits(q.corners[i][k])) return false;
+    }
+    for (int k = 0; k < 4; ++k) {
+      if (!fits(q.view_proj[i][k])) return false;
+      c.view_proj[i][k] = q.view_proj[i][k];
+    }
+    c.corner[i][0] = q.corners[i][0];
+    c.corner[i][1] = q.corners[i][1];
+    c.corner[i][2] = q.corners[i][2];
+    c.corner[i][3] = 1.0f;
+    c.coord[i][0] = q.corners[i][3];
+    c.coord[i][1] = q.corners[i][4];
+  }
+  if (q.kind == capture::PostQuadKind::kMoon) {
+    // (the record's registers: c20, c31)
+    const float scale = q.ps[0][3];
+    if (!(scale > 0.0f && scale <= kQuadRegisterMax) || !(out_scale > 0.0f && out_scale <= kQuadRegisterMax)) return false;
+    if (!(std::fabs(double(scale) - double(out_scale)) <= 1e-3 * double(out_scale))) return false;
+    for (int k = 0; k < 4; ++k) {
+      if (!colour(q.ps[1][k])) return false;
+    }
+    std::memcpy(c.reg[0], q.ps[0], sizeof(c.reg[0]));
+    std::memcpy(c.reg[1], q.ps[1], sizeof(c.reg[1]));
+    for (int k = 0; k < 3; ++k) c.reg[0][k] = 0.0f;  // (c20.xyz: not read by the moon's shader)
+  } else {
+    // (the glare's register: c31; its fourth component is not read)
+    for (int k = 0; k < 3; ++k) {
+      if (!colour(q.ps[0][k])) return false;
+      c.reg[0][k] = q.ps[0][k];
+    }
+  }
+  const bool test = capture::QuadAlphaTest(q);
+  if (test && !(q.alpha_ref >= 0.0f && q.alpha_ref <= 1.0f)) return false;
+  if (!(fix[0] > 0.0f && fix[0] <= 64.0f) || !(fix[1] > 0.0f && fix[1] <= 64.0f)) return false;
+  c.kind = uint32_t(q.kind) + 1;
+  c.sampler = sampler & 3u;
+  c.alpha_test = test ? 1u : 0u;
+  c.alpha_ref = test ? q.alpha_ref : 0.0f;
+  c.fix[0] = fix[0];
+  c.fix[1] = fix[1];
+  c.scene_max = kPostSceneMax;
+  *out = c;
+  return true;
+}
+
+// The frame's furniture: which records are drawn, each with its state, in the records' order; how
+// many are other kinds' (`later`); and whether every record of a kind this build draws can be
+// drawn (`drawable`: MakeClayQuadConstants with a unit texture scale). A set with one that cannot is
+// not drawn at all. count above capture::kMaxQuadRecords, or a null array with a count: nothing, not
+// drawable.
+struct ClayQuadItem {
+  uint8_t record = 0;  // its index in the scene's quads
+  ClayQuadState state = ClayQuadState::kNone;
+  ClayQuadPlace place = ClayQuadPlace::kNotDrawn;
+};
+struct ClayQuadPlan {
+  uint32_t count = 0;
+  ClayQuadItem items[capture::kMaxQuadRecords];
+  uint32_t later = 0;
+  bool drawable = true;
+};
+inline ClayQuadPlan PlanClayQuads(const capture::QuadRecord* quads, size_t count, float out_scale) {
+  ClayQuadPlan plan;
+  if (count > capture::kMaxQuadRecords || (count && !quads)) {
+    plan.drawable = false;
+    return plan;
+  }
+  static constexpr float kUnit[2] = {1.0f, 1.0f};
+  for (size_t i = 0; i < count; ++i) {
+    const capture::QuadRecord& q = quads[i];
+    const ClayQuadPlace place = capture::QuadRecordValid(q) ? ClayQuadPlaceOf(q.kind) : ClayQuadPlace::kNotDrawn;
+    if (capture::QuadRecordValid(q) && place == ClayQuadPlace::kNotDrawn) {
+      ++plan.later;
+      continue;
+    }
+    ClayQuadConstants unused;
+    if (!MakeClayQuadConstants(q, out_scale, 0, kUnit, &unused)) {
+      plan = ClayQuadPlan{};
+      plan.drawable = false;
+      return plan;
+    }
+    plan.items[plan.count].record = uint8_t(i);
+    plan.items[plan.count].state = QuadDrawState(q);
+    plan.items[plan.count].place = place;
+    ++plan.count;
+  }
+  return plan;
+}
+
+// The mirrors of the quad step's two shaders (pinned to the reference's numbers: test cases 630 on).
+// A corner's clip position: (c0 . p1, c1 . p1, c2 . p1, c3 . p1), p1 = (x, y, z, 1) (post_quad_position).
+inline void QuadPositionMirror(const float corner[3], const float view_proj[4][4], double out[4]) {
+  for (int i = 0; i < 4; ++i) {
+    out[i] = double(view_proj[i][0]) * double(corner[0]) + double(view_proj[i][1]) * double(corner[1]) +
+             double(view_proj[i][2]) * double(corner[2]) + double(view_proj[i][3]);
+  }
+}
+namespace detail {
+inline double QuadFinite(float v) { return std::isfinite(v) ? double(v) : 0.0; }
+// What the step writes: a colour channel (v > 0) ? min(v, top) : 0, the alpha saturated; a value
+// that is no number is 0.
+inline void QuadOut(const double rgb[3], double alpha, double top, double out[4]) {
+  for (int i = 0; i < 3; ++i) out[i] = rgb[i] > 0.0 ? std::min(rgb[i], top) : 0.0;
+  out[3] = alpha > 0.0 ? std::min(alpha, 1.0) : 0.0;
+}
+}  // namespace detail
+// The moon (post_moon). t: the texel (a channel that is no number reads 0); c31; c20.w. A register
+// that is no number gives zeros.
+inline void QuadMoonMirror(const float t[4], const float c31[4], float c20w, double out[4]) {
+  out[0] = out[1] = out[2] = out[3] = 0.0;
+  if (!std::isfinite(c20w) || !std::isfinite(c31[0]) || !std::isfinite(c31[1]) || !std::isfinite(c31[2]) || !std::isfinite(c31[3])) return;
+  const double a = detail::QuadFinite(t[3]);
+  double rgb[3];
+  for (int i = 0; i < 3; ++i) rgb[i] = detail::QuadFinite(t[i]) * double(c31[i]) * a * double(c20w);
+  detail::QuadOut(rgb, double(c31[3]) * a, double(kPostSceneMax), out);
+}
+// The glare (post_glare): tex.rgb * c31.rgb, alpha 1.
+inline void QuadGlareMirror(const float t[4], const float c31[4], double out[4]) {
+  out[0] = out[1] = out[2] = out[3] = 0.0;
+  if (!std::isfinite(c31[0]) || !std::isfinite(c31[1]) || !std::isfinite(c31[2])) return;
+  double rgb[3];
+  for (int i = 0; i < 3; ++i) rgb[i] = detail::QuadFinite(t[i]) * double(c31[i]);
+  detail::QuadOut(rgb, 1.0, double(kPostSceneMax), out);
+}
+// The alpha test of a record as the step applies it (the shader's discard): kept unless the test is
+// on and the alpha is not above the reference (a NaN alpha is not kept).
+constexpr bool QuadAlphaKept(bool test, float alpha, float ref) { return !test || alpha > ref; }
+
+// The pass's decision about the frame's furniture (ClayPass::Render), one chain in which the first
+// thing missing decides. `sun`: fable2_native_sun as the pass reads it now. `post_frame`: the frame
+// is a post frame (ClayPost::kDrawn). `sky`: its sky is drawn (the moon's place is behind it).
+// `set`: the scene's quad set (FrameScene::quad_reason). `drawable`: every record of a kind this
+// build draws can be drawn (ClayQuadPlan::drawable). `objects`: the quad step's objects exist or
+// may still be made; false once making them has failed.
+struct ClayFurnitureInputs {
+  bool sun = false, post_frame = false, sky = false;
+  capture::QuadSetReason set = capture::QuadSetReason::kOff;
+  bool drawable = false, objects = false;
+};
+constexpr ClayFurniture DecideClayFurniture(const ClayFurnitureInputs& in) {
+  if (!in.sun) return ClayFurniture::kOff;
+  if (!in.post_frame) return ClayFurniture::kNoPost;
+  if (!in.sky) return ClayFurniture::kNoSky;
+  if (in.set == capture::QuadSetReason::kNoDraw) return ClayFurniture::kNoQuads;
+  if (in.set != capture::QuadSetReason::kNone) return ClayFurniture::kRecords;
+  if (!in.drawable) return ClayFurniture::kState;
+  if (!in.objects) return ClayFurniture::kObjects;
+  return ClayFurniture::kDrawn;
+}
+// The pass's frame counts of the furniture, which follow from the frame's verdict alone: one frame
+// added. Counted: every frame with the sun's switch on, which is every verdict but kOff. `texture`:
+// a drawn frame in which a quad was left out for its texture.
+struct ClayFurnitureFrames {
+  uint64_t frames = 0, drawn = 0, nopost = 0, nosky = 0, noquads = 0, records = 0, state = 0, objects = 0, texture = 0;
+};
+inline void CountClayFurnitureFrame(ClayFurniture f, bool texture_missing, ClayFurnitureFrames& n) {
+  if (f == ClayFurniture::kOff || size_t(f) >= size_t(ClayFurniture::kCount)) return;
+  ++n.frames;
+  if (f == ClayFurniture::kDrawn) {
+    ++n.drawn;
+    if (texture_missing) ++n.texture;
+  }
+  if (f == ClayFurniture::kNoPost) ++n.nopost;
+  if (f == ClayFurniture::kNoSky) ++n.nosky;
+  if (f == ClayFurniture::kNoQuads) ++n.noquads;
+  if (f == ClayFurniture::kRecords) ++n.records;
+  if (f == ClayFurniture::kState) ++n.state;
+  if (f == ClayFurniture::kObjects) ++n.objects;
+}
+
+// The Furniture line of the status text and the log: the switch, the scene's quad set, what the pass
+// did (the quads drawn by kind, those left out for their texture, the records of kinds this build
+// does not draw), and the pass's totals since it was made.
+inline std::string FormatFurnitureText(const ClayStats& st) {
+  if (!st.sun_switch) return "Furniture: off";
+  char buf[320];
+  std::string text = "Furniture: on, quads ";
+  if (st.quad_set == capture::QuadSetReason::kNone) {
+    std::snprintf(buf, sizeof(buf), "whole (%u)", st.quad_records);
+    text += buf;
+  } else {
+    text += std::string("none (") + capture::kQuadRecordReason + ": " + capture::QuadSetReasonName(st.quad_set) + ")";
+  }
+  switch (st.furniture) {
+    case ClayFurniture::kDrawn:
+      std::snprintf(buf, sizeof(buf), ", drawn: moon %u, glare %u, %s %u, other kinds %u", st.quad_drawn_moon, st.quad_drawn_glare,
+                    kQuadTextureReason, st.quad_texture, st.quad_later);
+      text += buf;
+      break;
+    case ClayFurniture::kNoPost: text += ", not drawn (no post frame)"; break;
+    case ClayFurniture::kNoSky: text += ", not drawn (no sky)"; break;
+    case ClayFurniture::kNoQuads: text += ", not drawn (no quad)"; break;
+    case ClayFurniture::kRecords: text += std::string(", not drawn (") + capture::kQuadRecordReason + ")"; break;
+    case ClayFurniture::kState: text += std::string(", not drawn (") + capture::kQuadRecordReason + ": a record's state or values)"; break;
+    case ClayFurniture::kObjects: text += std::string(", not drawn (") + kPostObjectsReason + ")"; break;
+    default: text += ", not drawn (off)"; break;
+  }
+  std::snprintf(buf, sizeof(buf),
+                " | frames since start %llu: drawn %llu (%s %llu), no-post %llu, no-sky %llu, no-quad %llu, %s %llu, state %llu, %s %llu",
+                static_cast<unsigned long long>(st.furniture_frames), static_cast<unsigned long long>(st.furniture_drawn_frames),
+                kQuadTextureReason, static_cast<unsigned long long>(st.furniture_texture_frames),
+                static_cast<unsigned long long>(st.furniture_nopost_frames), static_cast<unsigned long long>(st.furniture_nosky_frames),
+                static_cast<unsigned long long>(st.furniture_noquads_frames), capture::kQuadRecordReason,
+                static_cast<unsigned long long>(st.furniture_records_frames), static_cast<unsigned long long>(st.furniture_state_frames),
+                kPostObjectsReason, static_cast<unsigned long long>(st.furniture_objects_frames));
+  return text + buf;
+}
+
 // --- Terrain material (frame-map section 13, "Terrain", "Native terrain material") ---
 // A terrain record whose inputs and textures are usable is drawn by one of the
 // two terrain pixel shaders (fable2_native_shaders.h) with its captured render
@@ -3806,11 +4133,12 @@ constexpr uint64_t ClayConstantBufferBytes(uint64_t small_slots, uint64_t object
 // slots in this order: the frame's block (kClayFrameSlots), one per terrain record DRAWN with its
 // material (from kClayFrameTerrainSlot0, given out in the records' order), one per lit instanced
 // plant (from plant0), the mask step's constants, the sky step's, the post steps' (kClayPostSlots
-// slots: ClayPostConstants); then the large slots of the lit objects, trunks and leaves
-// (ClayObjectSlotOffset(object0, i)).
+// slots: ClayPostConstants), the quads' (kClayQuadFrameSlots: kClayQuadSlots for each record of a
+// full set, ClayQuadConstants; quad i's from quad0 + kClayQuadSlots * i); then the large slots of the
+// lit objects, trunks and leaves (ClayObjectSlotOffset(object0, i)).
 inline constexpr uint32_t kClayFrameTerrainSlot0 = kClayFrameSlots;
 struct ClayFrameSlotPlan {
-  uint32_t plant0 = 0, mask = 0, sky = 0, post = 0, object0 = 0;
+  uint32_t plant0 = 0, mask = 0, sky = 0, post = 0, quad0 = 0, object0 = 0;
 };
 constexpr ClayFrameSlotPlan PlanClayFrameSlots(uint32_t terrain_drawn, uint32_t plants) {
   ClayFrameSlotPlan p;
@@ -3818,14 +4146,15 @@ constexpr ClayFrameSlotPlan PlanClayFrameSlots(uint32_t terrain_drawn, uint32_t 
   p.mask = p.plant0 + plants;
   p.sky = p.mask + 1;
   p.post = p.sky + 1;
-  p.object0 = p.post + kClayPostSlots;
+  p.quad0 = p.post + kClayPostSlots;
+  p.object0 = p.quad0 + kClayQuadFrameSlots;
   return p;
 }
 // The small slots the buffer is sized with, before it is known which terrain records are drawn with
 // their material: every terrain record counts, so the plan of any number of them drawn fits
 // (PlanClayFrameSlots(drawn, plants).object0 <= this for drawn <= terrain_records).
 constexpr uint64_t ClayFrameSmallSlots(uint64_t terrain_records, uint64_t plants) {
-  return uint64_t(kClayFrameTerrainSlot0) + terrain_records + plants + 2 + kClayPostSlots;
+  return uint64_t(kClayFrameTerrainSlot0) + terrain_records + plants + 2 + kClayPostSlots + kClayQuadFrameSlots;
 }
 
 // ClayTerrainConstants::flags: the far colour is multiplied by sat(d2 * fade[0] + fade[1]) (the

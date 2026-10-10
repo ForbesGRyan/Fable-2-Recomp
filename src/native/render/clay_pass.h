@@ -94,7 +94,10 @@ class ClayPass {
   // objects and the frame's constant buffer (DecideClayPost): a POST FRAME, whose lit draws write the
   // game's own scale, whose unlit draws write the frame's unlit scale, and which ends in the game's
   // composite and the ramp. Every other frame is today's: the fixed exposure, the unlit word 1, the
-  // output mapping; st says which and why (ClayStats::post).
+  // output mapping; st says which and why (ClayStats::post). With `post.sun` (fable2_native_sun), in a
+  // post frame with a sky whose scene has a whole set of quad records, the scene's furniture is drawn
+  // from them: the moon after the sky step, the glare after the last record (ClayFurniture; st says
+  // which and why). With it off nothing of the quad step is made, bound or drawn.
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
               bool textured, ClayLight light, bool shadows, bool fog, const ClayPostRequest& post, ClayStats& st,
               TextureStats& tst);
@@ -284,6 +287,16 @@ class ClayPass {
   bool EnsureBloomObjects(nrhi::Device* dev);
   void DestroyBloomObjects();
   void ForgetBloomObjects();
+  // What the quad step alone needs (clay_logic.h, "Native furniture"): its layout, its vertex and pixel
+  // shader and one pipeline for each state a quad is drawn with (ClayQuadState). EnsureQuadObjects makes
+  // them on the first frame that draws furniture; false when they could not be made, now or before: then
+  // they are not tried again until the pass is rebuilt (one log line) and no frame has furniture
+  // (ClayFurniture::kObjects, "post-objects"): the post chain and the renderer go on. With
+  // fable2_native_sun off nothing of them is made. Destroyed with the pass's other objects; a quad's
+  // texture is the texture cache's.
+  bool EnsureQuadObjects(nrhi::Device* dev);
+  void DestroyQuadObjects();
+  void ForgetQuadObjects();
   // The oracle feed's texture (SetPostOracle): made and filled from the feed's scene on the first fed
   // frame (a copy and barriers on `cmd`: called before render targets are bound); false when it could
   // not be made, now or before (oracle_failed_). CopyOracleDump: the mapped target, resting in
@@ -499,6 +512,22 @@ class ClayPass {
   ClayPost post_logged_ = ClayPost::kOff;
   ClayBloom bloom_logged_ = ClayBloom::kOff;
   uint32_t post_log_lines_ = 0;
+  // The quad step (EnsureQuadObjects): its own layout (a quad's constants, two small slots of the
+  // frame's constant buffer, at b0 for both stages; the frame's block at b2; a table of 3 textures at
+  // t0; the four static samplers), its shaders and its pipelines by state (quad_pipelines_[0], no
+  // state, is never made), outside the pipeline cache. quad_slot0_: this Render's first slot of the
+  // quads' constants (quad i's: quad_slot0_ + kClayQuadSlots * i). The pass's frame counts for the
+  // Furniture line, and what it last logged about the furniture (a line when the verdict changes, at
+  // most kFurnitureLogLines of them).
+  bool quad_objects_ = false, quad_objects_failed_ = false;
+  nrhi::BindingLayout* quad_layout_ = nullptr;  // the RHI has no layout destruction
+  nrhi::Shader* quad_vs_ = nullptr;
+  nrhi::Shader* quad_ps_ = nullptr;
+  nrhi::Pipeline* quad_pipelines_[size_t(ClayQuadState::kCount)] = {};
+  uint32_t quad_slot0_ = 0;
+  ClayFurnitureFrames furniture_counts_;
+  ClayFurniture furniture_logged_ = ClayFurniture::kOff;
+  uint32_t furniture_log_lines_ = 0;
   // The oracle feed (SetPostOracle; null: off). oracle_tex_ / oracle_view_: the stored scene, in
   // kPixelShaderResource from its upload on. oracle_frames_: the frames fed since the upload, the
   // upload's own included (it stops counting past the dump's frame). oracle_dump_: the read-back buffer

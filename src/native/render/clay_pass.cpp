@@ -35,6 +35,11 @@ static_assert(kSkyTableSize <= nrhi::kMaxTextureTableSize && sizeof(ClaySkyConst
 // 8 words at b1, and a table of 4 textures at t0 (entry 0: what the step reads).
 constexpr uint32_t kPostParamConstants = 0, kPostParamStep = 1, kPostParamTextures = 2, kPostTableSize = 4, kPostStepWords = 8;
 static_assert(kPostTableSize <= nrhi::kMaxTextureTableSize && kClayPostSlots * kClayTerrainSlotBytes >= sizeof(ClayPostConstants));
+// The quad step's layout: a quad's constants (cbuffer Quad, b0, both stages), the frame's block (b2), and
+// a table of three textures (t0: the quad's own first).
+constexpr uint32_t kQuadParamConstants = 0, kQuadParamFrame = 1, kQuadParamTextures = 2, kQuadTableSize = 3;
+static_assert(kQuadTableSize <= nrhi::kMaxTextureTableSize && kClayQuadSlots * kClayTerrainSlotBytes >= sizeof(ClayQuadConstants) &&
+              std::size(capture::kQuadIndices) == 6);
 // The oracle feed (post_oracle.h): its scene is the pass's logical size, as a texture of four halves a
 // texel whose rows, and the read-back rows of the mapped target, lie at the RHI's row pitch.
 constexpr nrhi::Format kOracleFormat = nrhi::Format::kR16G16B16A16_FLOAT;
@@ -145,6 +150,7 @@ nrhi::CullMode ToCull(uint8_t c) {
 void ClayPass::DestroyObjects() {
   DestroyShadowObjects();  // (first: its view of depth_ and its pipelines of vs_ and layout_)
   DestroySkyObjects();
+  DestroyQuadObjects();
   DestroyBloomObjects();  // (before the post steps' layout's other users and map_vs_)
   DestroyPostObjects();  // (before map_vs_, which its pipelines are made of)
   DestroyOracleObjects();
@@ -280,6 +286,9 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     post_layout_ = nullptr;
     ForgetBloomObjects();
     bloom_objects_failed_ = false;  // (and the bloom's)
+    ForgetQuadObjects();
+    quad_objects_failed_ = false;  // (and the quad step's)
+    quad_layout_ = nullptr;
     ForgetOracleObjects();
     oracle_failed_ = false;  // (and the oracle feed)
     white_ = nullptr;
@@ -298,6 +307,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     sky_objects_failed_ = false;  // (the sky's objects likewise)
     post_objects_failed_ = false;  // (and the post steps')
     bloom_objects_failed_ = false;  // (and the bloom's)
+    quad_objects_failed_ = false;  // (and the quad step's)
     oracle_failed_ = false;  // (and the oracle feed)
   }
   ready_ = false;
@@ -831,6 +841,7 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
   mask_slot_ = plan.mask;  // the mask step's constants (Render writes them when the frame has a mask)
   sky_slot_ = plan.sky;    // the sky step's (Render writes them when the frame has a sky)
   post_slot_ = plan.post;  // the post steps' (kClayPostSlots slots; Render writes them in a post frame)
+  quad_slot0_ = plan.quad0;  // the quads' (kClayQuadFrameSlots slots; Render writes a drawn quad's)
   object_slot0_ = plan.object0;
   if (slots) {
     std::memcpy(slots, &frame_, sizeof(frame_));
@@ -1640,6 +1651,105 @@ bool ClayPass::EnsureBloomObjects(nrhi::Device* dev) {
   return true;
 }
 
+void ClayPass::ForgetQuadObjects() {
+  quad_vs_ = quad_ps_ = nullptr;
+  for (nrhi::Pipeline*& p : quad_pipelines_) p = nullptr;
+  quad_objects_ = false;
+}
+
+void ClayPass::DestroyQuadObjects() {
+  if (device_) {
+    for (nrhi::Pipeline* p : quad_pipelines_) device_->DestroyDeferred(p);
+    device_->DestroyDeferred(quad_vs_);
+    device_->DestroyDeferred(quad_ps_);
+  }
+  ForgetQuadObjects();
+}
+
+bool ClayPass::EnsureQuadObjects(nrhi::Device* dev) {
+  if (quad_objects_) return true;
+  if (quad_objects_failed_ || !ready_ || dev != device_) return false;
+  auto fail = [&](const char* what) {
+    REXLOG_ERROR("[native] clay: {} failed ({}): the scene's furniture is off until the pass is rebuilt (another device, or an F6 "
+                 "retry after a failure of the renderer) or the game is restarted; the post chain goes on without it",
+                 what, kPostObjectsReason);
+    DestroyQuadObjects();
+    quad_objects_failed_ = true;
+    return false;
+  };
+  // The quad step's layout: a quad's constants at b0 for both stages (the vertex shader reads the corners
+  // and the matrix, the pixel shader the registers and the state's words), the frame's block at b2, the
+  // quad's textures at t0 to t2, and the clay layout's four static samplers (s<i>: bit 0 linear, bit 1
+  // clamp).
+  if (!quad_layout_) {
+    nrhi::BindingLayoutDesc desc;
+    desc.params[kQuadParamConstants].kind = nrhi::BindingParamKind::kConstantBuffer;
+    desc.params[kQuadParamConstants].shader_register = 0;
+    desc.params[kQuadParamConstants].count = 1;
+    desc.params[kQuadParamConstants].visibility = nrhi::Visibility::kAll;
+    desc.params[kQuadParamFrame].kind = nrhi::BindingParamKind::kConstantBuffer;
+    desc.params[kQuadParamFrame].shader_register = 2;
+    desc.params[kQuadParamFrame].count = 1;
+    desc.params[kQuadParamFrame].visibility = nrhi::Visibility::kPixel;
+    desc.params[kQuadParamTextures].kind = nrhi::BindingParamKind::kTextureTable;
+    desc.params[kQuadParamTextures].shader_register = 0;
+    desc.params[kQuadParamTextures].count = kQuadTableSize;
+    desc.params[kQuadParamTextures].visibility = nrhi::Visibility::kPixel;
+    desc.param_count = 3;
+    static_assert(kClayStaticSamplers == 4);
+    for (uint32_t i = 0; i < 4; ++i) {
+      desc.static_samplers[i].shader_register = i;
+      desc.static_samplers[i].filter = (i & 1) ? nrhi::Filter::kLinear : nrhi::Filter::kPoint;
+      desc.static_samplers[i].address = (i & 2) ? nrhi::AddressMode::kClamp : nrhi::AddressMode::kWrap;
+    }
+    desc.static_sampler_count = 4;
+    desc.allow_input_layout = false;
+    quad_layout_ = dev->CreateBindingLayout(desc);
+    if (!quad_layout_) return fail("quad binding layout creation");
+  }
+  nrhi::ShaderDesc sd;
+  sd.entry_point = "main";
+  sd.stage = nrhi::ShaderStage::kVertex;
+  sd.name = "fable2_clay_quad_vs";
+  sd.hlsl_source = shaders::kClayQuadVs;
+  quad_vs_ = dev->CreateShader(sd);
+  sd.stage = nrhi::ShaderStage::kPixel;
+  sd.name = "fable2_clay_quad_ps";
+  sd.hlsl_source = shaders::kClayQuadPs;
+  quad_ps_ = dev->CreateShader(sd);
+  if (!quad_vs_ || !quad_ps_) return fail("quad shader compile");
+  // One pipeline a state (ClayQuadState), into the colour pass's targets, no cull, outside the pipeline
+  // cache. kAlphaDepth: source alpha over inverse source alpha, tested less-or-equal against the depth
+  // the pass has written (the game's greater-or-equal under its reversed range), no depth write. kAdd:
+  // one plus one, no depth test, no depth write.
+  nrhi::GraphicsPipelineDesc pipe;
+  pipe.layout = quad_layout_;
+  pipe.vs = quad_vs_;
+  pipe.ps = quad_ps_;
+  pipe.rtv_format = kLinearFormat;
+  pipe.dsv_format = nrhi::Format::kD32_FLOAT;
+  pipe.cull = nrhi::CullMode::kNone;
+  pipe.blend.enable = true;
+  pipe.blend.src = pipe.blend.src_alpha = nrhi::BlendFactor::kSrcAlpha;
+  pipe.blend.dst = pipe.blend.dst_alpha = nrhi::BlendFactor::kInvSrcAlpha;
+  pipe.depth.test_enable = true;
+  pipe.depth.write_enable = false;
+  pipe.depth.func = nrhi::CompareFunc::kLessEqual;
+  quad_pipelines_[size_t(ClayQuadState::kAlphaDepth)] = dev->CreateGraphicsPipeline(pipe);
+  pipe.blend.src = pipe.blend.src_alpha = nrhi::BlendFactor::kOne;
+  pipe.blend.dst = pipe.blend.dst_alpha = nrhi::BlendFactor::kOne;
+  pipe.depth.test_enable = false;
+  quad_pipelines_[size_t(ClayQuadState::kAdd)] = dev->CreateGraphicsPipeline(pipe);
+  if (!quad_pipelines_[size_t(ClayQuadState::kAlphaDepth)] || !quad_pipelines_[size_t(ClayQuadState::kAdd)]) {
+    return fail("quad pipeline creation");
+  }
+  quad_objects_ = true;
+  REXLOG_INFO("[native] clay: quad step ready (six vertices a quad from its record; alpha blend with the depth test and no depth write, "
+              "or additive without a depth test; its own layout: b0 {} bytes of constants in {} slots a quad, b2 the frame's block, "
+              "t0 a table of {} textures)", sizeof(ClayQuadConstants), kClayQuadSlots, kQuadTableSize);
+  return true;
+}
+
 void ClayPass::ForgetOracleObjects() {
   oracle_tex_ = nullptr;
   oracle_view_ = nullptr;
@@ -2000,8 +2110,9 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // The frame's bloom, from the constants the steps will read (the feed's, when it is fed): on only
   // with the switch, in a post frame, with the blurs' weights; the bloom's objects exist then (asked
   // for above whenever the switch is on in a frame that could be a post frame).
-  ClayBloom bloom = DecideClayBloom(post_frame, post.bloom, post_constants.bloom_on != 0);
-  if (bloom == ClayBloom::kOn && !bloom_objects_) bloom = ClayBloom::kNoWeights;  // (unreachable: the verdict would be "post-objects")
+  // (kNoObjects is not reachable today: a frame whose bloom objects failed is no post frame, "post-objects";
+  // the word is its own so that it is never counted "no-weights")
+  const ClayBloom bloom = ClayBloomWithObjects(DecideClayBloom(post_frame, post.bloom, post_constants.bloom_on != 0), bloom_objects_);
   post_constants.bloom_on = bloom == ClayBloom::kOn ? 1u : 0u;
   if (post_frame) std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(post_slot_), &post_constants, sizeof(post_constants));
   st.post_switch = post.post;
@@ -2172,6 +2283,78 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
                 scene.frame, FormatSkyText(st), sky_order.place, prepared_.size(), sky_constants.c31x, sky_constants.c46x,
                 sky_constants.c47x, sky_constants.c67y, sky_log_lines_ == kSkyLogLines ? " (last such line)" : "");
   }
+  // The scene's furniture, decided the same way (DecideClayFurniture: the first thing missing decides):
+  // the sun's switch as it is now, a post frame, a drawn sky (the moon's place is behind it; the frame
+  // then has its constant buffer), the scene's own quad set, whole (never the part of a set that was
+  // read, never another frame's), every record of a kind this build draws drawable as captured
+  // (PlanClayQuads), and, asked last, the quad step's objects. With the switch off nothing below is
+  // reached: no object is made, no slot written, no texture asked.
+  struct QuadDraw {
+    nrhi::TextureView* view = nullptr;
+    ClayQuadState state = ClayQuadState::kNone;
+    ClayQuadPlace place = ClayQuadPlace::kNotDrawn;
+    capture::PostQuadKind kind = capture::PostQuadKind::kCount;
+    uint32_t slot = 0;
+  };
+  QuadDraw quad_draws[capture::kMaxQuadRecords];
+  uint32_t quad_draw_count = 0;
+  ClayFurnitureInputs furniture_in;
+  furniture_in.sun = post.sun;
+  furniture_in.post_frame = post_frame;
+  furniture_in.sky = sky_decision.sky == ClaySky::kDrawn && terrain_cb_mapped_ != nullptr;
+  furniture_in.set = scene.quad_records ? scene.quad_reason : capture::QuadSetReason::kOff;
+  furniture_in.drawable = true;
+  furniture_in.objects = !quad_objects_failed_;
+  ClayQuadPlan quad_plan;
+  if (DecideClayFurniture(furniture_in) == ClayFurniture::kDrawn) {
+    quad_plan = PlanClayQuads(scene.quads.data(), scene.quads.size(), scene.light.out_scale);
+    furniture_in.drawable = quad_plan.drawable;
+  }
+  if (DecideClayFurniture(furniture_in) == ClayFurniture::kDrawn) furniture_in.objects = EnsureQuadObjects(dev);
+  const ClayFurniture furniture = DecideClayFurniture(furniture_in);
+  if (furniture == ClayFurniture::kDrawn) {
+    // Each drawn quad's texture, by the fetch constant its record carries, through the texture cache
+    // (which judges a constant before it follows its address, and bounds the read), and its constants
+    // into its two slots. A texture that cannot be had (no 2D texture, a format the cache does not
+    // decode, pending, changing every frame): that quad is not drawn this frame, counted
+    // "quad-texture". Before any target is bound: an upload records a copy.
+    for (uint32_t i = 0; i < quad_plan.count && i < capture::kMaxQuadRecords; ++i) {
+      const ClayQuadItem& item = quad_plan.items[i];
+      if (item.record >= scene.quads.size()) continue;
+      const capture::QuadRecord& q = scene.quads[item.record];
+      uint32_t sampler = 0;
+      float fix[2] = {1.0f, 1.0f};
+      capture::MaterialStatus status = capture::MaterialStatus::kTextureBad;
+      nrhi::TextureView* const view = ResolveTerrainTexture(cmd, dev, q.fetch[0], true, &sampler, fix, &status, tst);
+      ClayQuadConstants constants{};
+      if (!view || !MakeClayQuadConstants(q, scene.light.out_scale, sampler, fix, &constants)) {
+        ++st.quad_texture;
+        continue;
+      }
+      QuadDraw& d = quad_draws[quad_draw_count++];
+      d.view = view;
+      d.state = item.state;
+      d.place = item.place;
+      d.kind = q.kind;
+      d.slot = quad_slot0_ + kClayQuadSlots * uint32_t(item.record);
+      std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(d.slot), &constants, sizeof(constants));
+    }
+    st.quad_later = quad_plan.later;
+  }
+  st.sun_switch = post.sun;
+  st.quad_set = furniture_in.set;
+  st.quad_records = scene.quad_count;
+  st.furniture = furniture;
+  CountClayFurnitureFrame(furniture, st.quad_texture != 0, furniture_counts_);
+  st.furniture_frames = furniture_counts_.frames;
+  st.furniture_drawn_frames = furniture_counts_.drawn;
+  st.furniture_texture_frames = furniture_counts_.texture;
+  st.furniture_nopost_frames = furniture_counts_.nopost;
+  st.furniture_nosky_frames = furniture_counts_.nosky;
+  st.furniture_noquads_frames = furniture_counts_.noquads;
+  st.furniture_records_frames = furniture_counts_.records;
+  st.furniture_state_frames = furniture_counts_.state;
+  st.furniture_objects_frames = furniture_counts_.objects;
   st.shadow_light_off = scene.shadow.valid && (light != ClayLight::kOn || !frame_.light_on);
   st.light_switch = light == ClayLight::kOn;
   st.light_block = frame_.light_on != 0;
@@ -2354,6 +2537,34 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // and passes only where that depth is still the clear value. Then the clay layout again, with
   // the frame's bindings; every draw binds its own.
   const bool sky_drawn = sky_decision.sky == ClaySky::kDrawn && !left_out && terrain_cb_ != nullptr;
+  // The frame's furniture quads of one place (quad_draws: only a frame whose furniture is drawn has
+  // any, and such a frame has a drawn sky and its constant buffer): each with the pipeline of its
+  // state, its two slots of constants and its texture, six vertices from its record. Into the colour
+  // pass's targets, like the sky step; then the clay layout again.
+  auto draw_quads = [&](ClayQuadPlace place) {
+    bool any = false;
+    for (uint32_t i = 0; i < quad_draw_count; ++i) {
+      const QuadDraw& d = quad_draws[i];
+      if (d.place != place || !quad_pipelines_[size_t(d.state)]) continue;
+      if (!any) {
+        cmd->SetBindingLayout(quad_layout_);
+        cmd->SetConstantBuffer(kQuadParamFrame, terrain_cb_, 0);
+        cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+        any = true;
+      }
+      cmd->SetPipeline(quad_pipelines_[size_t(d.state)]);
+      cmd->SetConstantBuffer(kQuadParamConstants, terrain_cb_, ClaySmallSlotOffset(d.slot));
+      nrhi::TextureView* const views[kQuadTableSize] = {d.view, white_view_, white_view_};
+      cmd->SetTextures(kQuadParamTextures, views, kQuadTableSize);
+      cmd->Draw(uint32_t(std::size(capture::kQuadIndices)), 0);
+      if (d.kind == capture::PostQuadKind::kMoon) ++st.quad_drawn_moon;
+      if (d.kind == capture::PostQuadKind::kGlare) ++st.quad_drawn_glare;
+    }
+    if (any) {
+      bind_scene();
+      bound = nullptr;
+    }
+  };
   auto draw_sky = [&] {
     cmd->SetBindingLayout(sky_layout_);
     cmd->SetPipeline(sky_pipeline_);
@@ -2364,6 +2575,9 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     cmd->Draw(3, 0);
     bind_scene();
     bound = nullptr;
+    // The moon, right after the sky (the game's order: its sky, then its moon), tested against the
+    // depth the pass has written up to here.
+    draw_quads(ClayQuadPlace::kAfterSky);
   };
   for (size_t index = 0; index < prepared_.size(); ++index) {
     const Prepared& p = prepared_[index];
@@ -2416,6 +2630,17 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // (no blended record: the sky after the last record. A frame without a record has no view, so no
   // fog and no sky: the sky is never drawn alone.)
   if (sky_drawn && sky_order.place >= prepared_.size()) draw_sky();
+  // The glare, after the last record (the game's last draws of its scene): added, without a depth test.
+  if (sky_drawn) draw_quads(ClayQuadPlace::kAfterRecords);
+  // A line when the furniture's verdict changes (the first frame with furniture; a frame that lost it
+  // and why), after the draws, so that it says what was drawn.
+  constexpr uint32_t kFurnitureLogLines = 16;
+  if (furniture != furniture_logged_ && furniture_log_lines_ < kFurnitureLogLines) {
+    furniture_logged_ = furniture;
+    ++furniture_log_lines_;
+    REXLOG_INFO("[native] clay: furniture changed at scene frame {}: {}{}", scene.frame, FormatFurnitureText(st),
+                furniture_log_lines_ == kFurnitureLogLines ? " (last such line)" : "");
+  }
 
   // The output mapping, or in a post frame the two post steps: every pixel of the mapped target
   // from the linear target of this Render (cleared and drawn above), so the composite never

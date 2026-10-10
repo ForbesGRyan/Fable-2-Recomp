@@ -30,6 +30,8 @@ TASK5_SECTIONS = ("// table texel pins", "// unlit scale pins", "// ramp pins", 
                   "// made registers", "// made composite pins")
 # The pins of plan Task 8 (the bloom's three mirrors).
 TASK8_SECTIONS = ("// real bright pins", "// made bright pins", "// downsample pins", "// real blur pins", "// made blur pins")
+# The pins of plan Task 13 (the scene's furniture: the moon's, the glare's and a corner's mirrors).
+TASK13_SECTIONS = ("// quad moon pins", "// quad glare pins", "// quad position pins")
 
 
 def f32(x):
@@ -460,6 +462,74 @@ class PostLiterals(unittest.TestCase):
              r"  int2 s_last; .*?\n\};", self.post_block, "cbuffer Step")
         _one(r"static_assert\(sizeof\(ClayPostStepConstants\) == 32\);", self.logic, "the words' size")
         _one(r"static_assert\(sizeof\(ClayPostStepConstants\) == kPostStepWords \* 4\);", self.pass_cpp, "the layout's words")
+
+    # --- plan Task 13: the scene's furniture (the moon and the glare from the quad records) ---
+
+    def test_every_generated_furniture_line_is_in_the_cpp_test(self):
+        # 11 moon points, 6 glare points, 4 corners through each of two matrices, and the four comment lines.
+        lines = section_lines(TASK13_SECTIONS)
+        have = {line.strip() for line in self.logic_test.splitlines()}
+        self.assertEqual(len(lines), 11 + 6 + 4 + 4 + 4)
+        self.assertEqual(sum(1 for line in lines if line.startswith("//")), 4)
+        for line in lines:
+            self.assertIn(line.strip(), have, "not in tests/native/test_clay_logic.cpp: run tools/xdk_sigmatch/post_pins.py")
+        pin = next(line for line in lines if "1.0634917315560166" in line)
+        self.assertNotIn(pin.replace("1.0634917315560166", "1.0634917315560167").strip(), have)
+        # The captured matrix and the made one, as the C++ test holds them.
+        for b in post_pins.QUAD_MATRIX_BITS:
+            self.assertIn("0x%08X" % b, self.logic_test)
+        made = post_pins.QUAD_MATRIX_MADE
+        self.assertIn("const float made[4][4] = {%s};" % ", ".join(
+            "{" + ", ".join("%rf" % v for v in made[4 * i:4 * i + 4]) + "}" for i in range(4)), self.logic_test)
+
+    def test_the_furnitures_formulas(self):
+        quad_ps = _one(r"inline constexpr const char\* kClayQuadPs = FABLE2_CLAY_QUAD_HLSL R\"hlsl\((.*?)\)hlsl\";", self.shaders,
+                       "the quad step's pixel shader")
+        quad_vs = _one(r"inline constexpr const char\* kClayQuadVs = FABLE2_CLAY_QUAD_HLSL R\"hlsl\((.*?)\)hlsl\";", self.shaders,
+                       "the quad step's vertex shader")
+        record = _text("src/native/capture/quad_record.h")
+        # The kinds' numbers are the list's places plus one, and their registers come in the list's order: the
+        # moon's c20 then c31 (q_reg[0], q_reg[1]), the glare's c31 (q_reg[0]).
+        kinds = [q.kind for q in lf.POST_QUAD_SHADERS]
+        moon, glare = lf.POST_QUAD_SHADERS[kinds.index("moon")], lf.POST_QUAD_SHADERS[kinds.index("glare")]
+        self.assertEqual((kinds.index("moon") + 1, kinds.index("glare") + 1), (1, 3))
+        self.assertEqual((moon.registers, glare.registers), ((20, 31), (31,)))
+        self.assertIn("  if (q_kind == 1) {\n    rgb = t.rgb * q_reg[1].rgb * t.a * q_reg[0].w;\n    a = q_reg[1].a * t.a;\n"
+                      "  } else if (q_kind == 3) {\n    rgb = t.rgb * q_reg[0].rgb;\n    a = 1.0;\n  }\n", quad_ps)
+        self.assertEqual((moon.blend, moon.test, moon.where, glare.blend, glare.test, glare.where),
+                         ("alpha", True, "scene", "add", False, "scene"))
+        # The mirrors: the same products, the same output rule, the scene's clamp.
+        _one(r"for \(int i = 0; i < 3; \+\+i\) rgb\[i\] = detail::QuadFinite\(t\[i\]\) \* double\(c31\[i\]\) \* a \* double\(c20w\);",
+             self.logic, "the moon's mirror")
+        _one(r"detail::QuadOut\(rgb, double\(c31\[3\]\) \* a, double\(kPostSceneMax\), out\);", self.logic, "the moon's alpha")
+        _one(r"for \(int i = 0; i < 3; \+\+i\) rgb\[i\] = detail::QuadFinite\(t\[i\]\) \* double\(c31\[i\]\);", self.logic, "the glare's mirror")
+        _one(r"for \(int i = 0; i < 3; \+\+i\) out\[i\] = rgb\[i\] > 0\.0 \? std::min\(rgb\[i\], top\) : 0\.0;", self.logic, "the output rule")
+        self.assertIn("  rgb = (rgb > 0.0) ? min(rgb, q_scene_max) : float3(0.0, 0.0, 0.0);\n  return float4(rgb, saturate(a));\n", quad_ps)
+        _one(r"  c\.scene_max = kPostSceneMax;\n  \*out = c;", self.logic, "the quad's clamp")
+        self.assertEqual(float(_one(r"inline constexpr float kPostSceneMax = (" + NUMBER + r")f;", self.logic, "kPostSceneMax")),
+                         lf.POST_SCENE_MAX)
+        self.assertEqual(lf.post_moon([1.0, 1.0, 1.0, 1.0], [8.0, 1.0, 1.0, 1.0], 8.0)[0], lf.POST_SCENE_MAX)
+        # The alpha test is the draw's: on for the moon in every captured row, "greater" (function 4).
+        self.assertIn("  if (q_alpha_test != 0 && !(a > q_alpha_ref)) discard;\n", quad_ps)
+        _one(r"\(q\.alpha_control & 7\) != uint32_t\(capture::Compare::kGreater\)\) return ClayQuadState::kNone;", self.logic,
+             "the alpha function the pass draws")
+        # The six vertices are the builder's six indices, in the capture's record and in the shader.
+        order = ", ".join(str(i) for i in lf.POST_QUAD_INDICES)
+        self.assertIn("static const uint order[6] = {%s};" % order, quad_vs)
+        self.assertIn("inline constexpr uint16_t kQuadIndices[6] = {%s};" % order, record)
+        # The corner's position: the four rows against (x, y, z, 1).
+        self.assertIn("float4 p = float4(q_corner[c].xyz, 1.0);", quad_vs)
+        self.assertEqual(lf.post_quad_position((2.0, 3.0, 4.0), (1, 0, 0, 5), (0, 1, 0, 6), (0, 0, 1, 7), (0, 0, 0, 1)),
+                         [7.0, 9.0, 11.0, 1.0])
+        # The blend words of the two states are the list's.
+        _one(r"inline constexpr uint32_t kQuadBlendAlpha = 0x07060706u, kQuadBlendAdd = 0x01010101u;", self.logic, "the blend words")
+        self.assertIn("b == PostQuadBlend::kAlpha ? 0x07060706u : b == PostQuadBlend::kAdd ? 0x01010101u : 0x00010001u;", record)
+        # The quad's block: two small slots a quad, 48 a frame; no size of a target in the step's text.
+        self.assertEqual(int(_one(r"inline constexpr unsigned kClayQuadSize = (\d+);", self.shaders, "kClayQuadSize")), 416)
+        _one(r"static_assert\(kClayQuadSlots == 2 && kClayQuadFrameSlots == 48\);", self.logic, "the quads' slots")
+        for text in (quad_ps, quad_vs):
+            for size in ("1120", "720", "560", "360"):
+                self.assertNotIn(size, text)
 
 
 if __name__ == "__main__":

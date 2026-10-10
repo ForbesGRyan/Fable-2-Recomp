@@ -23,7 +23,7 @@ NAN, INF = float("nan"), float("inf")
 REAL = dict(c31x=2.973, c46x=0.25, c47x=50.0, c77=(-0.0052, 1.1026), c78x=1.0 / 2.2)
 
 
-PINS_DIGEST = "1c3c6df5dd5fb3c4e7605a755b7ce1379cdd9734c1b02d700c7a9d7b19c98db9"
+PINS_DIGEST = "fc11790fcaf17cd0a76841a51968d7ad61b08414230a6153ca81544eefa95069"
 
 
 def near(test, got, want, tol=1e-12):

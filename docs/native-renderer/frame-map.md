@@ -5048,7 +5048,7 @@ log 455; `t5_predict_235055_f1.txt`) says what the game's composite without bloo
 game's own scene relative to the fixed mapping (A / N, mean display luminance by region): 0.733
 (pole averted side) to 1.097 (sky). The native shots of T5-6 over those of T5-7, the same
 measure: **23 of 26 regions within 0.05 of the prediction**; the 10 far and sky regions
-+0.004 to +0.048 from it (sky 1.104 and 1.101 against 1.097 and 1.093; far peak 1.079 against
++0.007 to +0.048 from it (sky 1.104 and 1.101 against 1.097 and 1.093; far peak 1.079 against
 1.072), bridge planks 0.872 against 0.869, trunk 0.827 against 0.833, pole averted side 0.746
 against 0.733. (The lake is among the 23, 1.020 against 1.019, and confirms nothing: the native
 lake is an unlit placeholder whose on / off ratio is set by the frame's unlit scale, while the

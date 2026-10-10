@@ -517,8 +517,8 @@ class ClayPass {
   // t0; the four static samplers), its shaders and its pipelines by state (quad_pipelines_[0], no
   // state, is never made), outside the pipeline cache. quad_slot0_: this Render's first slot of the
   // quads' constants (quad i's: quad_slot0_ + kClayQuadSlots * i). The pass's frame counts for the
-  // Furniture line, and what it last logged about the furniture (a line when the verdict changes, at
-  // most kFurnitureLogLines of them).
+  // Furniture line, and what it last logged about the furniture (a line when the verdict or what was
+  // drawn changes, at most kFurnitureLogLines of them).
   bool quad_objects_ = false, quad_objects_failed_ = false;
   nrhi::BindingLayout* quad_layout_ = nullptr;  // the RHI has no layout destruction
   nrhi::Shader* quad_vs_ = nullptr;
@@ -527,6 +527,7 @@ class ClayPass {
   uint32_t quad_slot0_ = 0;
   ClayFurnitureFrames furniture_counts_;
   ClayFurniture furniture_logged_ = ClayFurniture::kOff;
+  uint32_t furniture_drew_logged_[3] = {};  // (of the last logged frame: moons drawn, glares drawn, quads without their texture)
   uint32_t furniture_log_lines_ = 0;
   // The oracle feed (SetPostOracle; null: off). oracle_tex_ / oracle_view_: the stored scene, in
   // kPixelShaderResource from its upload on. oracle_frames_: the frames fed since the upload, the

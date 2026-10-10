@@ -2633,10 +2633,15 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // The glare, after the last record (the game's last draws of its scene): added, without a depth test.
   if (sky_drawn) draw_quads(ClayQuadPlace::kAfterRecords);
   // A line when the furniture's verdict changes (the first frame with furniture; a frame that lost it
-  // and why), after the draws, so that it says what was drawn.
+  // and why) or what a drawn frame drew does (the quads by kind, those left out for their texture: the
+  // first frame's textures are still to be uploaded, and the 300-frame line may never come in a short
+  // stretch), after the draws, so that it says what was drawn.
   constexpr uint32_t kFurnitureLogLines = 16;
-  if (furniture != furniture_logged_ && furniture_log_lines_ < kFurnitureLogLines) {
+  const uint32_t furniture_drew[3] = {st.quad_drawn_moon, st.quad_drawn_glare, st.quad_texture};
+  if ((furniture != furniture_logged_ || std::memcmp(furniture_drew, furniture_drew_logged_, sizeof(furniture_drew)) != 0) &&
+      furniture_log_lines_ < kFurnitureLogLines) {
     furniture_logged_ = furniture;
+    std::memcpy(furniture_drew_logged_, furniture_drew, sizeof(furniture_drew));
     ++furniture_log_lines_;
     REXLOG_INFO("[native] clay: furniture changed at scene frame {}: {}{}", scene.frame, FormatFurnitureText(st),
                 furniture_log_lines_ == kFurnitureLogLines ? " (last such line)" : "");

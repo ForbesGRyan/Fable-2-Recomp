@@ -6439,15 +6439,16 @@ Both defaults are the controller's rulings after the runs of "Outstanding: cost"
     adapting game's).
 13. **Cost: not measured.** ("Outstanding: cost".)
 
-**Left for a builder** (code or tests named by the reviews of plan Task 8 and Task 8b; this task
-changes documents only): an out-of-bounds blur weight is made 0 with the bloom's flag still set
-(`clay_logic.h`, the review's Minor 1); the unreachable fallback that would count a frame without
-bloom objects as `no-weights` (`clay_pass.cpp`, Minor 2); a test comment's "four instructions"
-(`test_native_shaders.cpp`, Minor 3); the comment at `kPostBloomFetch`, which still argues from
-the interpolator (Minor 4); the comment at `kLitExposure`, which does not say that the fit
-predates the gamma fix (review of Task 8b, Important 2); the curve's tests at its knees, and
-`terrain_replay.py`'s decode order and swizzle (Task 8b's Minors 3 to 5); a census line for
-textures with a non-zero sign field (Minor 2).
+**Left for a builder** (code named by the reviews of plan Task 8 and Task 8b; this task changes
+documents only): an out-of-bounds blur weight is made 0 with the bloom's flag still set
+(`clay_logic.h`, the review of plan Task 8, Minor 1); the unreachable fallback that would count a
+frame without bloom objects as `no-weights` (`clay_pass.cpp`, Minor 2); a test comment's "four
+instructions" (`test_native_shaders.cpp`, Minor 3); the comment at `kPostBloomFetch`, which
+still argues from the interpolator (Minor 4); `terrain_replay.py` taking the signs by stored
+component, without the swizzle (review of Task 8b, Minor 5; identity in every captured row); a
+census line for textures with a non-zero sign field (Minor 2). Done since by the builder, commit
+`b90a612`: the comment at `kLitExposure` (Task 8b's Important 2), the curve's tests at its knees
+and the textures' cache order (Minors 3 and 4).
 
 ### Outstanding: cost
 

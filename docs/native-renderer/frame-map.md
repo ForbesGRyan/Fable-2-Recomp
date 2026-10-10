@@ -5410,6 +5410,273 @@ mirrors' tests hold those); bloom off (criterion 12 is plan Task 9's); one real 
 The criterion's real-GPU half stands as not met as written until plan Task 8's feed run under
 ruling 25.
 
+### Validation (10a)
+
+Plan Task 7 of the post sub-project, 2026-10-10: phase 10a (exposure read-back, post block,
+native composite and ramp, oracle feed) held against spec criteria 1 to 10. **Two things are
+open and say so below: criterion 9 (cost) and ruling 2 (the read-back switch's default).** The
+window has opened on the 100%-scaled monitor since run 457 (shot width 1296 in place of 1942),
+where the host's present gate does not hold; no run of this task gives a timing figure, and the
+eight timing runs asked for are outstanding ("Outstanding", below). Both switches keep their
+defaults: `--fable2_native_post=off`, `--fable2_exposure_readback=off`. No code changed in this
+task; the binary is the one of plan Task 6 (sources of `d175fc8`).
+
+**Runs** (the controller's, `-UserPresent`, `RUN UNCHECKED`; all exit 0; shot width 1296 in
+every one; evidence `out/native-evidence/post/t7_*`: `<name>_driver.txt`,
+`<name>_fable_2_<log>.log`, `<name>_shot_<s>s.png`; captures in
+`out/build/win-amd64-release/logs/`). All after `--fable2_native_render=true`:
+
+| Run | `-GameArgs` | Plan | Log | Capture |
+|---|---|---|---|---|
+| `t7_3_on_full` | `--fable2_native_post=on,--readback_resolve=full,--native_render_collect_stats=true` | THIRD | 462 | `native_discovery_20261010_010310` |
+| `t7_3_off_full` | the same with `=off` | THIRD | 463 | `..._010453` |
+| `t7_trees_on_rb` | `--fable2_native_post=on,--fable2_exposure_readback=on` | TREES | 464 | `..._010653` |
+| `t7_b_nofog` | `...post=on,--fable2_exposure_readback=on,--fable2_native_fog=off` | `-Total 66 -Shots "36,39,42,45,62" -Plan "32:VIEW=off,37:VIEW=native,40:VIEW=off,43:VIEW=native"` | 465 | none |
+| `t7_b_noshadow` | the same with `--fable2_native_shadows=off` | the same | 466 | none |
+| `t7_b_nolight` | the same with `--fable2_native_light=off` | the same | 467 | none |
+| `t7_b_on_rb_1` | `--fable2_native_post=on,--fable2_exposure_readback=on` | `-Total 116 -Shots "36,39,42,45,80,112" -Plan "32:VIEW=off,37:VIEW=native,40:VIEW=off,43:VIEW=native,84:DISC=8/1,92:VIEW=off"` | 468 | `..._011253` |
+
+The logs' timeline is in `t7_logs.txt` (script `t7_logs.py` beside it), the regions in
+`t7_regions.txt` (`t7_regions.py`), the clear colour and the ramp's entries in
+`t7_clear_and_ramp.txt`, the banner's check in `t7_third_banner.txt`.
+
+*The state of the runs.* None has section 13's freeze signature (23 to 26 fps with a work
+median near 40 ms): in logs 464 to 468 the guest's work median is 7.3 to 12.9 ms in every
+in-world window and the swap takes 27 to 35 ms, which is the window state of runs 408 and 440
+to 449 (10 to 32 present gate lines a run against 84 to 86 in logs 451 to 454); logs 462 and
+463 have no in-world guest line at all (next sentence) and their native shots at 59 and 90 s
+show the leaf shadows moved, so the picture was live. Native windows read 19 to 23 fps there:
+that is the monitor, and no figure of it is used. **The third spot under
+`--readback_resolve=full` ran at a few frames a second** (logs 462, 463: the 143 frames before
+the first view change took a mean of 169.68 and 174.40 ms; fewer than 150 frames were drawn in
+the 37 s of the last native stretch, so neither log has a periodic clay line; the 8 capture
+frames took 7.4 s): its shots are stills of a standing camera and are used as such; the view
+changes lagged (the shot at 47 s is still emulated in both runs). The two runs are equally slow
+with post on and off, so nothing of that is the post's. Task 5's 43 ms of T5-7 (post off, full
+read-back, bridge) was not run again and stays unexplained.
+
+**Verdicts** (the `Post:` lines). Every frame with the switch and the light on was a post
+frame: `drawn 900` of 900 (log 468), `drawn 600` of 600 at the trees (464), `drawn 300` of 300
+with the fog off (465) and with the shadows off (466), `post-block 0, post-ramp 0,
+post-objects 0, no-light 0, no-buffer 0` and age 0 in each, while `c20.w` moved (8.7496 to
+8.2360 in log 468; 7.7947 rising to 8.6798 at the trees). Log 462 has the one `post changed`
+line of its first post frame (scene frame 445, `c20.w 9.2375`). The capture's own count is
+`post-block in 0 of N frames` in every post line of logs 464, 465, 466 and 468 (N up to 300). **With the light off (467) no
+frame is a post frame, counted**: `Post: on, block invalid (post-block: off), not drawn (no
+light) | today's mapping | frames since start 300: drawn 0, ... no-light 300`, and the capture
+reads nothing (`post: off`, `fog: off`). This is the first fallback seen in a game; `pairing`,
+`post-ramp`, `post-objects` and `no-buffer` are still held by tests only. The ramp: one table,
+`changes 0` in 902, 603, 303, 303 and 302 reads.
+
+**The switches together** (review focus 4; the review of plan Task 5, Minor 9;
+`t7_regions.txt` section 3: each run's native shots at 39 and 45 s over `t7_b_on_rb_1`'s,
+display luminance):
+
+| Region | fog off | shadows off | light off |
+|---|---|---|---|
+| bridge planks | 1.000 | 1.000 | 0.912 |
+| trunk | 1.001 | 1.001 | 1.530 |
+| hero's shirt | 1.000 | 1.001 | 0.701 |
+| dirt patch | 0.999 | 1.028 | 0.589 |
+| rope pole shadow on the planks | 1.008 | 2.320 | 2.042 |
+| railing post shadow on the planks | 1.018 | 2.085 | 1.691 |
+| far rock | 0.649 | 1.000 | 0.369 |
+| far mountains left | 0.646 | 1.000 | 0.473 |
+| sky above the ridge | 0.015 | 0.999 | 0.087 |
+| lake (unlit placeholder) | 0.817 | 0.999 | 0.779 |
+
+Each switch moves what it should and nothing else. *Fog off*: near, unfogged regions are the
+picture with fog to 0.1% (planks, trunk, shirt, dirt 0.999 to 1.001; the rock face, further
+off, 0.976, and the thin pole before the far ground 0.887), the far ground loses its haze (0.60
+to 0.79, the far peak 0.25) and the sky is not drawn. *Shadows off*: everything outside a
+shadow is unchanged (far regions and sky 0.999 to 1.002, the far peak 1.017), the shadowed
+regions are 1.3 to 2.3 times brighter. *Light off*: today's unlit picture through today's mapping, the sky's place at
+exactly (20, 20, 25), the clear colour as section 14 has it.
+
+**The clear colour of a post frame, seen for the first time** (`t7_b_nofog`, where no sky
+covers it; `t7_clear_and_ramp.txt`): **levels (4, 4, 4) at 39 s and (3, 3, 4) at 45 s**, the
+same at every pixel of both sky regions. That is "Native composite"'s limit 1 as predicted (the
+table's texel 1, near level 9 before the ramp; the ramp's entries of levels 9 and 10 are 3.24
+and 3.49), and darker than the (20, 20, 25) of a frame without post. With the fog on the sky
+covers it everywhere in these views.
+
+**Spec criterion 7 at the third spot** (`t7_regions.txt` section 2; the native shots at 53, 59
+and 90 s of `t7_3_on_full` over those of `t7_3_off_full`, display luminance, against
+`post_replay.py predict` on the on-run's own capture, frame 1 of `..._010310` with the ramp of
+log 462: `t7_predict_010310_f1.txt`): **15 of 18 regions within 0.05 of the prediction's A / N**.
+
+| Region | on / off | a run's own shots differ by | A / N | difference |
+|---|---|---|---|---|
+| far rock | 1.002 | 0.8% | 0.985 | +0.017 |
+| far mountains left | 1.018 | 2.4% | 0.989 | +0.029 |
+| far mountains centre | 1.025 | 2.7% | 1.008 | +0.017 |
+| sky above the ridge | 1.095 | 3.1% | 1.096 | -0.001 |
+| sky centre | 1.092 | 3.1% | 1.093 | -0.001 |
+| lake (unlit) | 1.007 | 0.7% | 1.012 | -0.005 |
+| unlit hill, left | 1.081 | 2.2% | 1.065 | +0.016 |
+| planks | 0.856 | 47% | 0.860 | -0.004 |
+| tall post averted side | 0.697 | 37% | 0.744 | -0.047 |
+| red log | 0.619 | 84% | 0.753 | -0.134 |
+| green log | 0.802 | 69% | 0.742 | +0.060 |
+| tall post sunlit side | 0.727 | 31% | 0.879 | -0.152 |
+
+What that is worth: only the first seven regions stand still between a run's own native shots
+(under 3.2%), and all seven are within 0.05; two of them are unlit placeholders, whose ratio is
+set by the frame's unlit scale and confirms nothing about the lit path (as the bridge's lake).
+Every near region of this spot lies under moving leaf shadow (a run's own shots differ by 10 to
+84% there): eight of those eleven are within 0.05 as well, which at that scatter is no evidence
+either way, and the three outside are among them (the table's last three rows). The far ground
+is again above the prediction, on one side (+0.017 to +0.029; bridge +0.007 to +0.048), the sky
+on it. **Criterion 7 is met at both spots on the regions it names**, those without moving leaf
+shadow (bridge: 23 of 26 within 0.05 and the three outside under leaf shadow, "Native
+composite"; third spot: 7 of 7, 5 of them lit), with the one-sided offset of the far ground
+unexplained ("Oracle feed": not the two shaders).
+
+**Native against emulated with the game adapting** (`t7_regions.txt` section 1; linear
+luminance, each native shot over the emulated shots 3 s before and after it).
+
+*Bridge, the read-back switch, post on* (`t7_b_on_rb_1`, shots at 39 and 45 s): a repeat of
+T5-4 in another session, and the same picture.
+
+| Region | this run | T5-4 |
+|---|---|---|
+| bridge planks | 0.995 | 0.981 |
+| trunk | 1.012 | 1.015 |
+| hero's shirt | 0.964 | 0.963 |
+| dirt patch | 1.058 | 1.054 |
+| rock face | 1.127 | 1.125 |
+| pole sunlit side | 0.873 | 0.873 |
+| pole averted side | 0.567 | 0.590 |
+| far rock | 0.931 | 0.930 |
+| far slope | 1.075 | 1.067 |
+| far mountains left | 1.333 | 1.336 |
+| far mountains centre | 1.102 | 1.100 |
+| sky above the ridge | 0.920 | 0.923 |
+| lake (unlit placeholder) | 0.839 | 0.833 |
+
+*Third spot, full read-back* (`t7_3_on_full` against `t7_3_off_full`; the regions that stand
+still). The quest banner lies over the top of the emulated shots at 50 and 56 s and darkens
+three regions by 12 to 35% (`t7_third_banner.txt`), so for those three the native shots are
+held against the emulated shot at 47 s, 6 and 12 s away, which the 3 s rule does not allow: an
+indication.
+
+| Region | post on | post off |
+|---|---|---|
+| planks | 0.969 | 1.200 |
+| far rock | 1.023 | 1.012 |
+| far mountains left | 1.147 | 1.107 |
+| far mountains centre | 0.974 | 0.926 |
+| lake (unlit placeholder) | 0.796 | 0.770 |
+| sky above the ridge (against 47 s) | 0.946, 0.959 | 0.796, 0.802 |
+| sky centre (against 47 s) | 0.920, 0.930 | 0.778, 0.785 |
+| unlit hill, left (against 47 s) | 1.022, 1.031 | 0.876, 0.882 |
+
+As at the bridge: with post on the planks and the sky come to the game's (0.97 for 1.20; 0.92
+to 0.96 for 0.78 to 0.80), and far ground that was above the game's moves a little further
+from it (far mountains left 1.15 for 1.11).
+
+*By the trees, the read-back switch, post on* (`t7_trees_on_rb`; emulated at 58 and 88 s, native
+at 64 and 92 s: 6 and 4 s apart, the plan's TREES line, wider than the 3 s rule; no post-off
+run of this spot was made): cut stumps and posts in the sun 0.92 to 0.98 (left stump top 0.978,
+post top 0.946, right stump top 0.944), the trunk 1.011, the crown 0.983, a stone slab 1.026;
+the stumps' averted sides 0.73 and 0.85 (too dark, as the bridge's averted pole side); the
+ground under the canopy 1.17 to 1.22 and the ferns 1.34 (too bright; whether that is the post's
+or the scene's cannot be said without a post-off run of this spot).
+
+**Shots viewed.** `t7_3_on_full` at 44 and 47 s (emulated, the game adapting: the palisade
+platform, hazed wooded hills, a blue lake, soft veil), at 56 s (emulated, with the quest
+banner across the top), at 59 and 90 s (native, post on: the same view; lit planks with leaf
+shadow, far mountains crisp and bare, the lake a flat grey-lilac, a clear blue sky);
+`t7_3_off_full` at 59 and 90 s (native, post off: to the eye the same; the planks a little
+lighter). `t7_b_on_rb_1` at 42 s (emulated) and 45 s (native): as T5-4's. `t7_b_noshadow` at
+45 s: that picture without the bridge's and the leaves' shadows. **`t7_b_nofog` at 45 s: the
+sky is black** and the far mountains are sharp, green and grey, without haze; the black is the
+clear colour of a post frame, visibly darker than the dark grey of `t7_b_nolight` at 45 s,
+which is the unlit picture (flat, desaturated wood and grass, pale lake, dark grey sky).
+`t7_trees_on_rb` at 88 s (emulated) and 92 s (native): the fence of stumps under the canopy
+with ferns in front; the native picture has the game's overall brightness, without its veil,
+and the ferns and the grass in front are lighter and more yellow than the game's. The native
+sky's blue channel is at 255 over the whole region with post on (blind and adapting), as the
+game's own is (99.9% of the region in the emulated shots); with post off it was not (251.7):
+nothing of the sky's blue above the ceiling is kept in either picture.
+
+**The criteria of 10a.**
+
+| | Criterion | Verdict | Figure and evidence |
+|---|---|---|---|
+| 1 | Formulas | **met** | 2,000 of 2,000 values for each of the eight post shaders, largest relative difference under 1e-15 (`task3_post_check.txt`; plan Task 3; not run again here) |
+| 2 | The game adapts in a normal run | **met** | with the switch and no `--readback_resolve` (log 468, capture `..._011253`): `c20.w` 8.2189 to 8.2232 in all 8 frames (below 12), `T(3) / T(0.1)` 1.516 to 1.520 (at least 1.2), the SDK's `Forced readback-resolve` lines for both addresses (`t7_table_011253.txt`); the same by the trees (`c20.w` 8.634 to 8.657, 1.573 to 1.580: `t7_table_010653.txt`); without the switch `c20.w 16.0000` (log 451) |
+| 3 | The post block | **met** | valid at age 0 and equal to the frame's rows and table dump bit for bit in 8 of 8 frames at the bridge (`t7_block_011253.txt`) and at the third spot (`t7_block_010310.txt`) and in the 5 frames with records by the trees (`t7_block_010653.txt`: its last 3 frames were captured after the plan had switched the view off and hold no records); `post-block in 0 of N frames` in every capture line of logs 464, 465, 466 and 468; the post-off capture reads `invalid(off)` in 8 of 8 (`t7_block_010453.txt`) |
+| 4 | The ramp | **not met as written; met by the substituted measure** (ruling 21: 2 levels) | the table the product read maps the eight levels to 9.72, 31.16, 47.11, 110.92, 145.32, 197.92, 233.56, 251.26: largest difference 1.56 levels (logs 462 and 468, `t7_clear_and_ramp.txt`) |
+| 5 | The reference composite against the game | **met** | plan Task 3 (`task3_replay_<stamp>_f1.txt`; with the reference's nearest-texel addressing the median of `121331` is at the tolerance's edge, 3.05 against 3.10); not run again here |
+| 6 | The shaders on the oracle scene | **met on the software adapter, not met as written on the real GPU** | software adapter 100.000% of the pixels within 1 level; real GPU 99.33 to 99.49% within 1 (99.9% asked), all within 2: the card's conversion ("Oracle feed"); ruling 25 moves the rounding into the shaders in plan Task 8 and measures again |
+| 7 | In the game | **met** on the regions without moving leaf shadow | bridge 23 of 26 within 0.05, the three others under leaf shadow ("Native composite"); third spot 15 of 18, the 7 standing regions all within 0.05 (above); the far ground one-sided above the prediction at both |
+| 8 | Off is today's picture | **met by the substituted measure** (ruling 22) | the program comparison (shader test cases 230, 231) and T5-3 against run 433 within the two runs' emulated spread ("Native composite"); here also: with the light off the picture is today's with the switch on, the clear colour exactly (20, 20, 25) (log 467) |
+| 9 | Cost | **open: timing runs outstanding** | valid so far, Task 5's logs 451 to 454 only: the bridge at 29.8 to 30.1 fps in 11 of 12 steady native windows with post on, off and with the read-back switch, one window at 27.8 (below); "30.0 in every steady window" is not met as written in that reading. Not measured: the third spot's windows, post on against off in one session, a view-off median on a quiet machine. Indication only (wrong monitor): view-off capture medians in the world 0.061 to 0.073 ms (logs 464, 467, 468; the criterion: under 0.5), records-on medians 2.24 to 2.30 ms at the bridge (468) |
+| 10 | No D3D error | **met** for the two builds that changed bindings, targets or shader text | logs 450 and 457: no error, warning id 1328 only; this task changed no build (the runs above were made without the debug layer and say nothing about it) |
+
+**The 27.8 fps window of T5-4** (log 453 line 4150; "Native composite", "Cost"). The three
+native windows after the plan's `60:DISC=8/1` read 21.1, 17.7 and 27.8 fps, with maxima of
+2,151, 572 and 145 ms: it is the third window of the discovery capture's aftermath, not a
+steady one, and the window after it reads 30.1. That is a reading of the same log, not a
+second measurement; the outstanding timing runs put the capture after eight clean windows so
+that the question does not arise.
+
+**Ruling 2 (the read-back switch's default): open; the switch stays default off.** What is
+valid: one on / off pair under the gate (logs 453 and 454 against 451 and 452), 29.8 to 30.1
+fps in every steady window with the switch, and the game adapting in every run with it (runs
+441 and 444 by their captures, "Exposure read-back"; logs 453, 454 and 464 to 468 by their
+`c20.w`). One pair in one session is not enough to change what every run of the game
+looks like. **The rule to apply when the runs are in**: default on only if (a) every steady
+150-frame native window before the capture in runs 1, 3 and 6 below reads 29.8 to 30.1 fps, as
+the off runs 2 and 4 of the same session do, (b) run 6 shows no freeze signature in any of its
+windows, and (c) `c20.w` leaves 16 in each run with the switch (below 12 in every capture
+row). All three: one default changes, with its test, README row and this paragraph. A window
+below 29.8 with the switch that the off runs do not also have: default off, with the figure.
+Anything mixed (a slow window in an off run too, a freeze in run 6): no change, reported.
+
+**Outstanding** (after `tools\drive_game.ps1 -BootSave Hero000`, with the window on the usual
+monitor: a run counts only at shot width 1942). Bridge plan S: `-Total 116 -Shots
+"36,39,42,45,80,112" -Plan
+"32:VIEW=off,37:VIEW=native,40:VIEW=off,43:VIEW=native,84:DISC=8/1,92:VIEW=off"`.
+
+| # | Name | Arguments |
+|---|---|---|
+| 1 | `t7_b_on_rb_1` (again) | S `-GameArgs --fable2_native_render=true,--fable2_native_post=on,--fable2_exposure_readback=on` |
+| 2 | `t7_b_on_1` | S `-GameArgs --fable2_native_render=true,--fable2_native_post=on` |
+| 3 | `t7_b_on_rb_2` | as 1 |
+| 4 | `t7_b_on_2` | as 2 |
+| 5 | `t7_b_off_rb` | S `-GameArgs --fable2_native_render=true,--fable2_native_post=off,--fable2_exposure_readback=on` |
+| 6 | `t7_b_on_rb_long` | `-Total 300 -Shots "36,39,150,295" -Plan "32:VIEW=off,37:VIEW=native" -GameArgs --fable2_native_render=true,--fable2_native_post=on,--fable2_exposure_readback=on` |
+| 7 | `t7_3_on_rb` | `-Total 104 -Shots "44,47,50,53,90,100" -Plan "33:LS=0/-100/3500,40:VIEW=off,45:VIEW=native,48:VIEW=off,51:VIEW=native,94:DISC=8/1" -GameArgs --fable2_native_render=true,--fable2_native_post=on,--fable2_exposure_readback=on` |
+| 8 | `t7_3_off_rb` | as 7 with `--fable2_native_post=off` |
+
+Runs 1 to 4 in that order (the pairs alternate), 7 and 8 back to back. They decide ruling 2
+(1 to 4, 6), criterion 9's bridge part (1 to 6), its third spot (7, 8: no steady window below
+29.2 fps; the records-on capture median with post on against off, at most 0.10 ms apart) and
+the view-off median (the last 24 s of runs 1 to 5). The default of `--fable2_native_post` is
+the controller's ruling after criterion 9 (plan Task 7: on if criteria 3, 6, 8, 9 and 10 are
+met; 6 waits for plan Task 8's feed run as well).
+
+**Limits of 10a**, plainly. (1) **No bloom yet**: the darkest regions are too dark (bridge
+pole averted side 0.57 to 0.66 of the game's, the stumps' averted sides by the trees 0.73 and
+0.85) and the sky is 4 to 13% under the game's (bridge 0.87 to 0.92, third spot 0.92 to 0.96);
+the bloom's veil is predicted to lift both (plan Task 8). (2) **Far ground that was already
+above the game's is a little further above it**: 10 to 34% over at the bridge (rock face 1.10
+to 1.13, far mountains left 1.27 to 1.34, far mountains centre 1.07 to 1.10), 15% at the third
+spot (far mountains left); the bloom is predicted to add to it. (3) **Unlit placeholders** (the
+water, hair and fur cards, flat clay) take one scale a frame: the lake reads 0.80 to 0.84 of
+the game's, a bright placeholder is at the ceiling when the game adapts. (4) **The clear colour
+of a post frame is nearly black** (levels 3 to 4), seen wherever no sky is drawn (the fog off,
+a frame without a sky block). (5) The far ground and the sunlit ground lie 0.007 to 0.048 above
+what the replay predicts for post on against off, on one side; not the two post shaders, not
+separated further. (6) On the real graphics card 0.5 to 0.7% of the pixels are 2 levels under
+the reference (until ruling 25's change). (7) Three places, late morning, a standing camera:
+night, a town, an interior, a menu, a cutscene, a loading screen, a walk from shade into sun and
+a brightness option have not run (`docs/native-renderer/user-checks.md`, checks 48 to 56); of
+the fallbacks only `no-light` has run in a game. (8) Cost and the read-back switch's default:
+open, above.
+
 ## Pending
 
 1. **Pitch ablation** (done 2026-10-01, results in section 4; kept for re-runs). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):

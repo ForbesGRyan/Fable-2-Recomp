@@ -1,6 +1,10 @@
 # Native renderer sub-project 10: the post chain (exposure, composite, bloom, sun layer, sky furniture)
 
-Status: design, 2026-10-09, branch `native-renderer-post`. Nothing is built. Plan:
+Status: design, 2026-10-09, branch `native-renderer-post`. **Phase 10a is built and validated
+with two things open** (2026-10-10: criterion 9, the cost, and ruling 2, the read-back switch's
+default; both switches of the phase are off by default until the outstanding timing runs: frame
+map section 17, "Validation (10a)", and "Implementation notes (deviations)" at the end of this
+document); 10b and 10c are not built. Plan:
 `docs/superpowers/plans/2026-10-09-native-renderer-post.md`. Research:
 `.superpowers/sdd/post-research.md` (untracked; its scripts and outputs in
 `out/tests/post-research/`); every fact below is from it or from the code named beside it, and
@@ -497,3 +501,51 @@ Said now, with the finding that makes it one (ruling 18).
 9. Everything measured is one save, daylight, three spots, a standing camera; the adaptation has
    never been seen at work. Night changes the grey fade and probably the bloom's threshold.
 10. Every run is likely `RUN UNCHECKED` (the user at the machine); timing needs a quiet machine.
+
+## Implementation notes (deviations)
+
+### Phase 10a (plan Tasks 1 to 7; frame map section 17)
+
+Built as designed but for the following; the criteria's verdicts with their figures are in frame
+map section 17, "Validation (10a)".
+
+- **The table is addressed at the nearest texel**, `floor(u * 512 + 0.5)`, not at `floor(u *
+  512)` (controller ruling 19: it is what the shader dump's fetch does). With it the clear
+  colour of a post frame reads texel 1 and is nearly black, not black (Design 6, ruling 9):
+  seen in the game with the fog off as levels 3 to 4.
+- **The ramp's accessor is protected** in the SDK; the application names it through a derived
+  class's using-declaration (controller ruling 20). No SDK change.
+- **Criterion 4** is held to 2 levels, not 1 (controller ruling 21): the product's table differs
+  from the shot-measured pairs by up to 1.56 levels. Not met as written.
+- **Criterion 8**'s "within 0.002" is dropped (controller ruling 22): the program comparison
+  and the regions within the two runs' own emulated spread stand for it.
+- **Criterion 6 is met on the software adapter and not met as written on the real graphics
+  card** (99.33 to 99.49% of the pixels within 1 level, all within 2): the card truncates a
+  float to 12 fractional bits before it takes the nearest 8-bit level. Controller ruling 25:
+  both 8-bit writes write the rounded level themselves, in plan Task 8, and the criterion's
+  real-GPU half is measured again there.
+- **The oracle feed acts only in a frame that is a post frame by its own verdict**, with the
+  live ramp; a run whose live frames are no post frames gives no dump. It shows that the two
+  post shaders return the reference on the game's own scene and block. It does not run the
+  scene-side words of a post frame (the exposure in the lit draws, the unlit scale) or the live
+  block's path, so the one-sided offset of criterion 7's far regions (+0.007 to +0.048 above the
+  prediction) is not the two shaders' and is otherwise unexplained.
+- **`Render` takes a `ClayPostRequest`** (the switches and the ramp); the decision's inputs keep
+  the name `ClayPostInputs`.
+- **Ruling 2 is not decided.** The game adapts with `--fable2_exposure_readback=on` in every run
+  made, and the one valid pair of timing runs (logs 451 to 454) holds 29.8 to 30.1 fps with it;
+  one pair is not taken as enough to change every run's look, and since run 457 the window has
+  opened on a monitor on which the present gate does not hold. The switch stays default off;
+  the runs and the rule are in "Validation (10a)".
+- **Criterion 9 is open** for the same reason: the bridge's first reading is 29.8 to 30.1 fps in
+  11 of 12 steady windows (not "30.0 in every" as written), the twelfth being the third window
+  after a discovery capture; the third spot, post on against off in one session and the
+  view-off median are not measured.
+- **The default of `--fable2_native_post` stays off** (plan Task 7: on only if criteria 3, 6,
+  8, 9 and 10 are met; 9 is open and 6 waits for plan Task 8's feed run).
+- **Criterion 7 at the third spot rests on seven regions** (the far ground, the sky and two
+  unlit placeholders): every near region of that spot lies under moving leaf shadow, and under
+  `--readback_resolve=full` that spot runs at a few frames a second, so its shots are stills.
+- Not seen in any run: the `pairing`, `post-ramp`, `post-objects` and `no-buffer` fallbacks (held
+  by tests; `no-light` has run), the exposure adapting while the camera moves, night, a town, an
+  interior, a menu, a cutscene (`docs/native-renderer/user-checks.md`, checks 48 to 56).

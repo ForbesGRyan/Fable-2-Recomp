@@ -323,14 +323,51 @@ constexpr ClayPostDecision DecideClayPost(const ClayPostInputs& in) {
   if (!in.buffer) return {ClayPost::kBuffer};
   return {ClayPost::kDrawn};
 }
-// What ClayPass::Render is asked about the post chain: the three switches as they are read now (bloom
-// and sun: plan Tasks 8 and 14; nothing reads them before) and the scan-out ramp of this frame, 256
+// What ClayPass::Render is asked about the post chain: the three switches as they are read now (sun:
+// plan Task 14; nothing reads it before) and the scan-out ramp of this frame, 256
 // entries of red, green, blue in 0..1 (native_render_state.h, PostRamp::rgb), null when there is none
 // or it failed its rule.
 struct ClayPostRequest {
   bool post = false, bloom = false, sun = false;
   const float (*ramp)[3] = nullptr;
 };
+// Why the pass cannot use the scene's post block (ClayStats::post_fault; the Post line's word behind
+// "post-block" when the scene has a valid block: review of plan Task 5, Minor 11). kMissing: the scene
+// has none (the capture's reason says why). kAge: it was read more than capture::kPostBlockMaxAge
+// frames ago. kPairing: the frame has no light block, or the block's bright pass does not pair with
+// the frame's c20.w (capture::PostBlockPairs). kValues: MakeClayPostConstants refused a register or a
+// texel. kWords: SetClayFramePost refused the frame's two words (the scale or the unlit scale).
+enum class ClayPostFault : uint8_t { kNone, kMissing, kAge, kPairing, kValues, kWords, kCount };
+constexpr const char* ClayPostFaultName(ClayPostFault f) {
+  switch (f) {
+    case ClayPostFault::kAge: return "age";
+    case ClayPostFault::kPairing: return "pairing";
+    case ClayPostFault::kValues: return "values";
+    case ClayPostFault::kWords: return "words";
+    default: return "none";
+  }
+}
+// The first three rules, in the order the pass asks them (the block; its age; the pairing).
+inline ClayPostFault PostBlockFault(const capture::PostBlock& b, uint32_t age, bool light_valid, float out_scale) {
+  if (!b.valid) return ClayPostFault::kMissing;
+  if (age > capture::kPostBlockMaxAge) return ClayPostFault::kAge;
+  if (!light_valid || !capture::PostBlockPairs(b, out_scale)) return ClayPostFault::kPairing;
+  return ClayPostFault::kNone;
+}
+// The bloom of a frame ("Native bloom" below; ClayStats::bloom; counted on the Post line). kOn: a post
+// frame with fable2_native_bloom on whose steps' constants carry the blurs' weights
+// (ClayPostConstants::bloom_on): the four bloom steps are drawn and the composite reads their result.
+// kNoWeights: a post frame with the switch on whose block has no blur part (capture::kPostPartBlur):
+// drawn without bloom, the composite alone, and counted. kOff: everything else (the switch off, or no
+// post frame): the picture of plan Task 5.
+enum class ClayBloom : uint8_t { kOff, kNoWeights, kOn, kCount };
+constexpr ClayBloom DecideClayBloom(bool post_frame, bool wanted, bool weights) {
+  if (!post_frame || !wanted) return ClayBloom::kOff;
+  return weights ? ClayBloom::kOn : ClayBloom::kNoWeights;
+}
+constexpr const char* ClayBloomName(ClayBloom b) {
+  return b == ClayBloom::kOn ? "on" : b == ClayBloom::kNoWeights ? "no-weights" : "off";
+}
 
 struct ClayStats {
   uint32_t drawn = 0, skipped_bad_index = 0, uploads = 0, hits = 0;
@@ -531,11 +568,21 @@ struct ClayStats {
   float post_scale = 0.0f, post_unlit = 1.0f;
   uint64_t post_frames = 0, post_drawn_frames = 0, post_nolight_frames = 0, post_block_frames = 0, post_ramp_frames = 0;
   uint64_t post_objects_frames = 0, post_buffer_frames = 0;
+  // post_fault: with a valid block the pass could not use (post == kBlock), which of the pass's rules
+  // refused it. post_coord: the composite's c46.x of the frame's block (kPostUnlitCoord, 0.25, in every
+  // capture; the unlit scale is the gain at scene luminance 1 only with that value). bloom: the bloom of
+  // this frame (ClayBloom). bloom_frames, bloom_noweights_frames: post frames since the pass was made
+  // that were drawn with the bloom, and with the switch on but without the blurs' weights.
+  ClayPostFault post_fault = ClayPostFault::kNone;
+  float post_coord = 0.25f;
+  ClayBloom bloom = ClayBloom::kOff;
+  uint64_t bloom_frames = 0, bloom_noweights_frames = 0;
 };
 // The pass's frame counts of the post chain, which follow from the frame's verdict alone: one frame
 // added. Counted: every frame with the post switch on, which is every verdict but kOff.
 struct ClayPostFrames {
   uint64_t frames = 0, drawn = 0, nolight = 0, block = 0, ramp = 0, objects = 0, buffer = 0;
+  uint64_t bloom = 0, noweights = 0;  // of the drawn ones: with the bloom; wanted, without the blurs' weights
 };
 inline void CountClayPostFrame(ClayPost post, ClayPostFrames& n) {
   if (post == ClayPost::kOff || size_t(post) >= size_t(ClayPost::kCount)) return;
@@ -546,6 +593,11 @@ inline void CountClayPostFrame(ClayPost post, ClayPostFrames& n) {
   if (post == ClayPost::kRamp) ++n.ramp;
   if (post == ClayPost::kObjects) ++n.objects;
   if (post == ClayPost::kBuffer) ++n.buffer;
+}
+// The frame's bloom added to the counts (a frame's verdict is kOn or kNoWeights only in a post frame).
+inline void CountClayBloomFrame(ClayBloom bloom, ClayPostFrames& n) {
+  if (bloom == ClayBloom::kOn) ++n.bloom;
+  if (bloom == ClayBloom::kNoWeights) ++n.noweights;
 }
 // The pass's frame counts of the sky, which follow from the frame's verdict alone: one frame added.
 // Counted: every frame with the fog's switch on (the sky has no switch of its own), which is every
@@ -3184,7 +3236,12 @@ inline constexpr float kPostSceneMax = 31.875f;                  // light_formul
 // draw may write (kClayLitMax).
 inline constexpr uint32_t kPostUnlitTexel = 128;
 inline constexpr float kPostUnlitMax = 64.0f;
-static_assert(kPostUnlitMax <= kClayLitMax && kPostUnlitTexel < capture::kPostTableTexels);
+// The c46.x with which texel 128 is scene luminance 1. A block's rule allows (0, 64]: with another
+// value the unlit scale is the gain at scene luminance kPostUnlitCoord / c46.x, and the Post line says
+// so (ClayStats::post_coord; review of plan Task 5, Minor 8).
+inline constexpr float kPostUnlitCoord = 0.25f;
+static_assert(kPostUnlitMax <= kClayLitMax && kPostUnlitTexel < capture::kPostTableTexels &&
+              float(kPostUnlitTexel) == kPostUnlitCoord * float(capture::kPostTableTexels));
 
 // A channel of the linear target as the post steps read it (light_formulas.post_scene).
 inline double PostScene(float v, float scene_max = kPostSceneMax) {
@@ -3376,8 +3433,234 @@ inline uint32_t PostRampIndex(float v) {
 // One channel through the ramp (light_formulas.post_ramp): `ramp` is that channel's 256 entries.
 inline float PostRampMirror(float front, const float ramp[256]) { return ramp[PostRampIndex(front)]; }
 
-// The Post line of the status text and the log: the switch, the scene's block, what the pass did, a
-// post frame's two scales, and the pass's totals since it was made.
+// --- Native bloom (frame-map section 17, "Native bloom"; docs/native-renderer/lighting-formulas.md, "The post chain") ---
+//
+// With fable2_native_bloom on, a post frame whose block carries the blurs' weights (ClayBloom::kOn)
+// draws the game's bloom between its scene and its composite, in targets a quarter of the pass's
+// LOGICAL size (ledger ruling 6; kPostBloomDivisor):
+//   D  = downsample   0.25 * the four scene texels (0, 0), (2, 0), (0, 2), (2, 2) of the pixel's 4 x 4
+//                     block, each read as PostScene                           (game: 0x87E85199E1E9B260)
+//   P  = bright pass  L = lum(D);  sat(D * sat(L * c77.y - c77.x) / L * c31.x / c47.x); 0 for L = 0
+//                     (the sun's two layers, tf1 and tf2, are behind the sun's flag: plan Task 14)  (EE92)
+//   Q  = blur along x of P, P = blur along y of Q: 13 point taps at -6..+6 texels, clamped to the edge,
+//                     with the frame's weights                                 (EA83, 28DB)
+// and the composite's b = sat(bloom * c31.x) reads P linearly at bloom texel coordinate x / 4 + 0.5
+// (kPostBloomFetch). D is a float target in the scene's range; P and Q are 10-bit (the game's
+// k_2_10_10_10: R10G10B10A2_UNORM, spec ruling 14).
+//
+// The level a UNORM target stores is written by the step itself (controller ruling 25): the last
+// statement of every step into an 8-bit or a 10-bit target is floor(sat(v) * levels + 0.5) / levels
+// (PostLevel), with the level count of the target's format in the step's words. Reason: Direct3D lets a
+// card convert a float to UNORM within 0.6 of a level; the real card (NVIDIA RTX 5080; review of plan
+// Task 6) cuts the float to 12 fractional bits before it rounds, so 0.5 to 0.7% of the pixels of the
+// 8-bit writes came out one level low against the reference, which rounds to the nearest. A value that
+// is already a level survives that conversion (test case 610). The 10-bit writes are rounded the same
+// way for the same reason: the reference rounds each of them to the nearest of 1,023 (post_replay.q10),
+// and the game's own targets hold only levels; what the card does at 10 bits was not measured.
+//
+// kPostDownsampleBias: the downsample's pixel position is the pixel's INTEGRAL position, 0 (not its
+// centre, 0.5). Evidence: (1) the emulated picture is the SDK's translation of the game's shader,
+// which hands the shader floor(SV_Position.xy) as param_gen (thirdparty/rexglue-sdk/src/graphics/
+// pipeline/shader/dxbc_translator.cpp, StartPixelShader: OpRoundNI); (2) offline against the game's
+// front buffer of four read-back captures (out/native-evidence/post/t8_bloom_fetch.txt), with the
+// composite's fetch as kPostBloomFetch has it: bias 0 fits at a median of 0.565 to 0.578 levels on the
+// three bridge captures, bias 0.5 at 0.753 to 0.765, a box of the sixteen texels at 0.608 to 0.620. That the console's
+// rasteriser hands the same position is inference. Discovery question 6 (the game's own downsample
+// buffer) stays unsettled: that buffer is in no capture.
+//
+// kPostBloomFetch: the composite samples the bloom at the scene's own interpolated coordinate with
+// the fetch's half texel (37B1, instruction 6: tfetch2D tf2, OffsetX = OffsetY = 0.5), which at pixel
+// x is bloom texel coordinate x / 4 + 0.5 (the interpolator is x / width at pixel x: what makes the
+// scene's own fetch, instruction 3, a texel centre). Not "texel centres aligned", (x + 0.5) / 4, which
+// the research's replay and the plan's Task 8 line assumed: against the front buffer the fetch's place
+// fits at a median of 0.565 to 0.578 levels where the aligned centres give 0.716 to 0.732 (same file).
+inline constexpr uint32_t kPostFrontLevels = 255, kPostBloomLevels = 1023;  // R8G8B8A8_UNORM; R10G10B10A2_UNORM
+inline constexpr uint32_t kPostBloomDivisor = 4;
+inline constexpr float kPostDownsampleBias = 0.0f;
+inline constexpr float kPostBloomFetch = 0.5f;  // in bloom texels
+static_assert(kPostDownsampleBias == 0.0f || kPostDownsampleBias == 0.5f);
+
+// The level of a UNORM target with `levels` steps (255, 1023) a value is stored as, written by the
+// step itself: min(levels, floor(sat(v) * levels + 0.5)); 0 for a value that is no number or not above
+// 0. In single precision, as the shader computes it. With 255 it is PostRampIndex.
+inline uint32_t PostLevelIndex(float v, uint32_t levels) {
+  if (!(v > 0.0f) || levels == 0) return 0;
+  const float x = (v < 1.0f ? v : 1.0f) * float(levels) + 0.5f;
+  const uint32_t i = uint32_t(x);  // (x is in 0.5 .. levels + 0.5)
+  return i < levels ? i : levels;
+}
+// The value a step writes for it: that level over the level count (0 without levels: a float target,
+// which no step rounds).
+inline float PostLevel(float v, uint32_t levels) { return levels ? float(PostLevelIndex(v, levels)) / float(levels) : 0.0f; }
+
+// A picture for the mirrors: w x h texels of three floats (red first), clamped to the edge.
+struct PostPicture {
+  const float* rgb = nullptr;
+  uint32_t w = 0, h = 0;
+};
+// The texel at (x, y), the coordinates clamped into the picture; (0, 0, 0) of a picture without texels.
+inline void PostPictureTexel(const PostPicture& p, int64_t x, int64_t y, float out[3]) {
+  out[0] = out[1] = out[2] = 0.0f;
+  if (!p.rgb || p.w == 0 || p.h == 0) return;
+  const size_t cx = size_t(x < 0 ? 0 : (x >= int64_t(p.w) ? int64_t(p.w) - 1 : x));
+  const size_t cy = size_t(y < 0 ? 0 : (y >= int64_t(p.h) ? int64_t(p.h) - 1 : y));
+  std::memcpy(out, p.rgb + (cy * p.w + cx) * 3, 3 * sizeof(float));
+}
+// The picture read linearly at the unnormalised coordinate (px, py), texel i's centre at i + 0.5,
+// clamped to the edge (light_formulas.post_texture with linear=True, term for term: a texel whose
+// weight is 0 is not read, so a neighbour that is no number does not reach a sample at a centre). A
+// coordinate that is no number reads texel 0 of its axis.
+inline void PostPictureLinear(const PostPicture& p, double px, double py, double out[3]) {
+  out[0] = out[1] = out[2] = 0.0;
+  if (!p.rgb || p.w == 0 || p.h == 0) return;
+  auto axis = [](double c, uint32_t n, int64_t* i0, int64_t* i1, double* f) {
+    if (c != c) {
+      *i0 = *i1 = 0;
+      *f = 0.0;
+      return;
+    }
+    const double last = double(n) - 1.0;
+    double x = c - 0.5;
+    x = x < 0.0 ? 0.0 : (x > last ? last : x);
+    *i0 = int64_t(x);
+    *i1 = *i0 + 1 < int64_t(n) ? *i0 + 1 : int64_t(n) - 1;
+    *f = x - double(*i0);
+  };
+  int64_t x0, x1, y0, y1;
+  double fx, fy;
+  axis(px, p.w, &x0, &x1, &fx);
+  axis(py, p.h, &y0, &y1, &fy);
+  float a[3], b[3], c[3], d[3];
+  PostPictureTexel(p, x0, y0, a);
+  if (fx == 0.0 && fy == 0.0) {
+    for (int i = 0; i < 3; ++i) out[i] = double(a[i]);
+    return;
+  }
+  PostPictureTexel(p, x1, y0, b);
+  PostPictureTexel(p, x0, y1, c);
+  PostPictureTexel(p, x1, y1, d);
+  for (int i = 0; i < 3; ++i) {
+    const double top = fx != 0.0 ? double(a[i]) + (double(b[i]) - double(a[i])) * fx : double(a[i]);
+    const double bottom = fx != 0.0 ? double(c[i]) + (double(d[i]) - double(c[i])) * fx : double(c[i]);
+    out[i] = fy != 0.0 ? top + (bottom - top) * fy : top;
+  }
+}
+
+// The downsample of pixel (x, y) of the quarter-size target (light_formulas.post_downsample): `scene`
+// read linearly at P + (2.5, 2.5), (2.5, 0.5), (0.5, 0.5), (0.5, 2.5) with P = 4 * (pixel + bias), each
+// sample's channel as PostScene, a quarter of their sum: three numbers in [0, scene_max] for any input.
+// `bias`: kPostDownsampleBias in the pass (0: the fetches are four texel centres); a bias that is no
+// number counts as 0.
+inline void PostDownsampleMirror(const PostPicture& scene, uint32_t x, uint32_t y, float bias, float scene_max, double out[3]) {
+  out[0] = out[1] = out[2] = 0.0;
+  if (!std::isfinite(scene_max)) return;
+  const double b = std::isfinite(bias) ? double(bias) : 0.0;
+  const double px = 4.0 * (double(x) + b), py = 4.0 * (double(y) + b);
+  static constexpr double kTaps[4][2] = {{2.5, 2.5}, {2.5, 0.5}, {0.5, 0.5}, {0.5, 2.5}};
+  double sum[3] = {0.0, 0.0, 0.0};
+  for (const auto& tap : kTaps) {
+    double t[3];
+    PostPictureLinear(scene, px + tap[0], py + tap[1], t);
+    // (PostScene on the sample: a sample that is no number is 0; float(t) is exact at a texel centre)
+    for (int i = 0; i < 3; ++i) sum[i] += t[i] > 0.0 ? (t[i] < double(scene_max) ? t[i] : double(scene_max)) : 0.0;
+  }
+  for (int i = 0; i < 3; ++i) out[i] = 0.25 * sum[i];
+}
+
+// The bright pass of one texel (light_formulas.post_bright, with the target's clamp): three numbers in
+// [0, 1] for any input. `d`: the downsample's texel (read as PostScene); `tf1`, `tf2`: the sun's two
+// layers at the texel, which count only with the constants' sun flag (plan Task 14; without it they are
+// not read). L = 0 has no scene term (the game's shader multiplies 0 by 1 / 0 there). A register that
+// is no number, or a divisor c47.x not above 0, gives black (MakeClayPostConstants hands on neither).
+inline void PostBrightMirror(const float d[3], const float tf1[3], const float tf2[3], const ClayPostConstants& k, double out[3]) {
+  auto sat = [](double x) { return x != x ? 0.0 : (x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x)); };
+  auto fin = [](float x) { return std::isfinite(x) ? double(x) : 0.0; };
+  out[0] = out[1] = out[2] = 0.0;
+  for (float r : k.bright) {
+    if (!std::isfinite(r)) return;
+  }
+  if (!std::isfinite(k.scene_max)) return;
+  const double c31x = k.bright[0], c46x = k.bright[1], c47x = k.bright[2], c77x = k.bright[3], c77y = k.bright[4];
+  if (!(c47x > 0.0)) return;
+  double s[3], L = 0.0;
+  for (int i = 0; i < 3; ++i) {
+    s[i] = PostScene(d[i], k.scene_max);
+    L += s[i] * kPostLum[i];
+  }
+  const double gain = L > 0.0 ? sat(L * c77y - c77x) / L * c31x : 0.0;
+  for (int i = 0; i < 3; ++i) {
+    const double v = k.sun_on ? (s[i] * gain + fin(tf1[i]) * 6.0 * c46x + fin(tf2[i])) / c47x : (s[i] * gain) / c47x;
+    out[i] = sat(v);
+  }
+}
+
+// One blur of pixel (x, y) (light_formulas.post_blur13, with the target's clamp): 13 point taps of
+// `src` at -6..+6 texels along x, or along y with `vertical`, clamped to the edge, with the weights of
+// the constants' rows (EA83's in rows 0 and 1, 28DB's in rows 2 and 3; the centre first). A tap or a
+// weight that is no number counts as 0: three numbers in [0, 1] for any input.
+inline void PostBlurMirror(const PostPicture& src, uint32_t x, uint32_t y, const ClayPostConstants& k, bool vertical, double out[3]) {
+  auto fin = [](float v) { return std::isfinite(v) ? double(v) : 0.0; };
+  const int row = vertical ? 2 : 0;
+  double sum[3] = {0.0, 0.0, 0.0};
+  for (int tap = -6; tap <= 6; ++tap) {
+    const int a = tap < 0 ? -tap : tap;
+    const double w = fin(k.blur[row + (a >> 2)][a & 3]);
+    float t[3];
+    PostPictureTexel(src, int64_t(x) + (vertical ? 0 : tap), int64_t(y) + (vertical ? tap : 0), t);
+    for (int i = 0; i < 3; ++i) sum[i] += w * fin(t[i]);
+  }
+  for (int i = 0; i < 3; ++i) out[i] = sum[i] != sum[i] ? 0.0 : (sum[i] < 0.0 ? 0.0 : (sum[i] > 1.0 ? 1.0 : sum[i]));
+}
+
+// The bloom texel coordinate the composite samples at pixel `x` of the scene (either axis): the
+// scene's interpolated coordinate x / width, in bloom texels x / kPostBloomDivisor, plus the fetch's
+// half texel. And the sample: `bloom` (the blurred bright pass, a quarter of the scene's size) read
+// linearly there, clamped to the edge.
+constexpr double PostBloomCoordinate(uint32_t x) { return double(x) / double(kPostBloomDivisor) + double(kPostBloomFetch); }
+inline void PostBloomFetchMirror(const PostPicture& bloom, uint32_t x, uint32_t y, double out[3]) {
+  PostPictureLinear(bloom, PostBloomCoordinate(x), PostBloomCoordinate(y), out);
+}
+
+// A post step's own words (cbuffer Step of the post shaders, register b1 of the post layout;
+// shaders::kClayPostStepFields is its layout). texel: the reciprocal of the width and height of the
+// texture the step addresses by coordinate (the downsample's and the composite's scene), so that no
+// shader holds a size (plan, review focus 6). levels: the level count of the step's target, from its
+// format (255, 1023), for the write's own rounding (PostLevel); 0 for the downsample's float target.
+// offset: the downsample's pixel position (kPostDownsampleBias); the composite's bloom fetch in pixels
+// of the scene (kPostBloomFetch bloom texels: 2); 0 in the other steps. dir: a blur's direction in
+// texels, (1, 0) along x, (0, 1) along y; (0, 0) in the other steps. last: the source's last texel,
+// which a blur's taps are clamped to.
+enum class ClayPostStep : uint8_t { kDownsample, kBright, kBlurX, kBlurY, kComposite, kRamp };
+struct ClayPostStepConstants {
+  float texel[2];
+  float levels;
+  float offset;
+  int32_t dir[2];
+  int32_t last[2];
+};
+static_assert(sizeof(ClayPostStepConstants) == 32);
+// `width`, `height`: the size of the step's source (a size of 0 counts as 1). `levels`: of the step's
+// target's format.
+constexpr ClayPostStepConstants MakeClayPostStep(ClayPostStep step, uint32_t width, uint32_t height, uint32_t levels) {
+  const uint32_t w = width ? width : 1, h = height ? height : 1;
+  ClayPostStepConstants s{};
+  s.texel[0] = 1.0f / float(w);
+  s.texel[1] = 1.0f / float(h);
+  s.levels = float(levels);
+  s.offset = step == ClayPostStep::kDownsample ? kPostDownsampleBias
+             : step == ClayPostStep::kComposite ? kPostBloomFetch * float(kPostBloomDivisor)
+                                                : 0.0f;
+  s.dir[0] = step == ClayPostStep::kBlurX ? 1 : 0;
+  s.dir[1] = step == ClayPostStep::kBlurY ? 1 : 0;
+  s.last[0] = int32_t(w - 1);
+  s.last[1] = int32_t(h - 1);
+  return s;
+}
+
+// The Post line of the status text and the log: the switch, the scene's block, what the pass did (a
+// post frame's bloom with it; behind "post-block" of a valid block the pass's own rule that refused it),
+// a post frame's two scales (and its c46.x when that is not the 0.25 the unlit scale's texel stands
+// for), and the pass's totals since it was made.
 inline std::string FormatPostText(const ClayStats& st) {
   if (!st.post_switch) return "Post: off";
   std::string text = "Post: on, block ";
@@ -3390,13 +3673,15 @@ inline std::string FormatPostText(const ClayStats& st) {
   }
   bool exposure = true;
   switch (st.post) {
-    case ClayPost::kDrawn: text += ", drawn"; break;
+    case ClayPost::kDrawn: text += std::string(", drawn, bloom ") + ClayBloomName(st.bloom); break;
     case ClayPost::kNoLight:
       text += ", not drawn (no light)";
       exposure = false;
       break;
     case ClayPost::kBlock:
-      text += std::string(", not drawn (") + capture::kPostBlockReason + (st.post_block ? ": values)" : ")");
+      text += std::string(", not drawn (") + capture::kPostBlockReason;
+      if (st.post_block) text += std::string(": ") + ClayPostFaultName(st.post_fault);
+      text += ")";
       break;
     case ClayPost::kRamp: text += std::string(", not drawn (") + kPostRampReason + ")"; break;
     case ClayPost::kObjects: text += std::string(", not drawn (") + kPostObjectsReason + ")"; break;
@@ -3408,14 +3693,23 @@ inline std::string FormatPostText(const ClayStats& st) {
   }
   if (st.post == ClayPost::kDrawn) {
     std::snprintf(buf, sizeof(buf), " | c20.w %.4f, unlit scale %.4f", double(st.post_scale), double(st.post_unlit));
+    if (st.post_coord != kPostUnlitCoord) {
+      text += buf;
+      // (bounded for any float: the line with the largest values is whole, test case 609)
+      const double coord = st.post_coord > 0.0f && st.post_coord <= 64.0f ? double(st.post_coord) : 0.0;
+      std::snprintf(buf, sizeof(buf), " (c46.x %.4f: the gain at scene luminance %.3f, not 1)", coord,
+                    coord > 0.0 ? double(kPostUnlitCoord) / coord : 0.0);
+    }
   } else if (exposure) {
     std::snprintf(buf, sizeof(buf), " | today's mapping, exposure %.2f", double(kLitExposure));
   } else {
     std::snprintf(buf, sizeof(buf), " | today's mapping");
   }
   text += buf;
-  std::snprintf(buf, sizeof(buf), " | frames since start %llu: drawn %llu, %s %llu, %s %llu, %s %llu, no-light %llu, no-buffer %llu",
+  std::snprintf(buf, sizeof(buf),
+                " | frames since start %llu: drawn %llu (bloom %llu, no-weights %llu), %s %llu, %s %llu, %s %llu, no-light %llu, no-buffer %llu",
                 static_cast<unsigned long long>(st.post_frames), static_cast<unsigned long long>(st.post_drawn_frames),
+                static_cast<unsigned long long>(st.bloom_frames), static_cast<unsigned long long>(st.bloom_noweights_frames),
                 capture::kPostBlockReason, static_cast<unsigned long long>(st.post_block_frames), kPostRampReason,
                 static_cast<unsigned long long>(st.post_ramp_frames), kPostObjectsReason,
                 static_cast<unsigned long long>(st.post_objects_frames), static_cast<unsigned long long>(st.post_nolight_frames),

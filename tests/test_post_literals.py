@@ -4,8 +4,10 @@ C++ mirrors are pinned to (tools/xdk_sigmatch/post_pins.py), the pinned lines th
 (tests/native/test_clay_logic.cpp, cases 600 on) with the table they were made with
 (tests/native/post_pins_table.inc), the renderer's pure mirrors (src/native/render/clay_logic.h, "Native post":
 PostTableTexel, PostUnlitScale, PostCompositeMirror, PostRampIndex and the steps' constants), the capture's block
-(src/native/capture/post_block.h) and the two post shaders (src/native/fable2_native_shaders.h:
-kClayPostCompositePs, kClayPostRampPs). This test reads the C++ texts and holds them to one set of numbers, as
+(src/native/capture/post_block.h) and the post shaders (src/native/fable2_native_shaders.h:
+kClayPostCompositePs, kClayPostRampPs, and the bloom's kClayPostDownsamplePs, kClayPostBrightPs, kClayPostBlurPs of
+plan Task 8, with the mirrors PostDownsampleMirror, PostBrightMirror, PostBlurMirror, PostLevel and the place of the
+composite's bloom sample). This test reads the C++ texts and holds them to one set of numbers, as
 tests/test_fog_literals.py does for the fog."""
 import math
 import re
@@ -19,12 +21,15 @@ sys.path.insert(0, str(ROOT / "tools" / "xdk_sigmatch"))
 
 import light_formulas as lf  # noqa: E402
 import post_pins  # noqa: E402
+import post_replay  # noqa: E402
 
 NUMBER = r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?"
 
 # The pins of plan Task 5 (the composite and the ramp); the generator's other sections are later tasks'.
 TASK5_SECTIONS = ("// table texel pins", "// unlit scale pins", "// ramp pins", "// real registers", "// real composite pins",
                   "// made registers", "// made composite pins")
+# The pins of plan Task 8 (the bloom's three mirrors).
+TASK8_SECTIONS = ("// real bright pins", "// made bright pins", "// downsample pins", "// real blur pins", "// made blur pins")
 
 
 def f32(x):
@@ -42,15 +47,19 @@ def _one(pattern, text, what):
     return found[0]
 
 
-def task5_lines():
-    """The generator's lines of the sections above: each section's comment line and the pins under it."""
+def section_lines(sections):
+    """The generator's lines of the sections named: each section's comment line and the pins under it."""
     out, taking = [], False
     for line in post_pins.lines():
         if line.startswith("//"):
-            taking = line.startswith(TASK5_SECTIONS)
+            taking = line.startswith(sections)
         if taking:
             out.append(line)
     return out
+
+
+def task5_lines():
+    return section_lines(TASK5_SECTIONS)
 
 
 class PostLiterals(unittest.TestCase):
@@ -62,6 +71,16 @@ class PostLiterals(unittest.TestCase):
         cls.shaders = _text("src/native/fable2_native_shaders.h")
         cls.table_inc = _text("tests/native/post_pins_table.inc")
         cls.lines = task5_lines()
+        cls.bloom_lines = section_lines(TASK8_SECTIONS)
+        cls.pass_cpp = _text("src/native/render/clay_pass.cpp")
+        cls.render_cpp = _text("src/native/fable2_native_render.cpp")
+        cls.post_block = _one(r"#define FABLE2_CLAY_POST_HLSL R\"hlsl\((.*?)\)hlsl\"", cls.shaders, "the post steps' shared text")
+        cls.downsample = _one(r"inline constexpr const char\* kClayPostDownsamplePs = FABLE2_CLAY_POST_HLSL R\"hlsl\((.*?)\)hlsl\";",
+                              cls.shaders, "the downsample's text")
+        cls.bright = _one(r"inline constexpr const char\* kClayPostBrightPs = FABLE2_CLAY_POST_HLSL R\"hlsl\((.*?)\)hlsl\";", cls.shaders,
+                          "the bright pass's text")
+        cls.blur = _one(r"inline constexpr const char\* kClayPostBlurPs = FABLE2_CLAY_POST_HLSL R\"hlsl\((.*?)\)hlsl\";", cls.shaders,
+                        "the blur's text")
         cls.composite = _one(r"inline constexpr const char\* kClayPostCompositePs = FABLE2_CLAY_POST_HLSL R\"hlsl\((.*?)\)hlsl\";", cls.shaders,
                              "the composite's text")
         cls.ramp = _one(r"inline constexpr const char\* kClayPostRampPs = FABLE2_CLAY_POST_HLSL R\"hlsl\((.*?)\)hlsl\";", cls.shaders,
@@ -138,7 +157,7 @@ class PostLiterals(unittest.TestCase):
                    "kPostLum")
         self.assertEqual(tuple(float(v) for v in lum), lf.POST_LUM)
         shader_lum = _one(r"float post_lum\(float3 c\) \{ return dot\(c, float3\((" + NUMBER + r"), (" + NUMBER + r"), (" + NUMBER +
-                          r")\)\); \}", self.composite, "post_lum")
+                          r")\)\); \}", self.post_block, "post_lum")
         self.assertEqual(tuple(float(v) for v in shader_lum), lf.POST_LUM)
         scene_max = float(_one(r"inline constexpr float kPostSceneMax = (" + NUMBER + r")f;", self.logic, "kPostSceneMax"))
         self.assertEqual(scene_max, lf.POST_SCENE_MAX)
@@ -147,7 +166,11 @@ class PostLiterals(unittest.TestCase):
         for v, want in ((float("nan"), 0.0), (-1.0, 0.0), (0.0, 0.0), (2.5, 2.5), (40.0, 31.875), (float("inf"), 31.875)):
             self.assertEqual(lf.post_scene(v), want)
         _one(r"float3 post_scene\(float3 v\) \{ return \(v > 0\.0\) \? min\(v, p_scene_max\) : float3\(0\.0, 0\.0, 0\.0\); \}",
-             self.composite, "post_scene")
+             self.post_block, "post_scene")
+        # (one definition for every step: the composite, the downsample and the bright pass read the scene by it)
+        for text in (self.composite, self.ramp, self.downsample, self.bright, self.blur):
+            self.assertNotIn("float3 post_scene(", text)
+            self.assertNotIn("0.2125", text)
         _one(r"if \(!\(v > 0\.0f\)\) return 0\.0;\n  return double\(v < scene_max \? v : scene_max\);", self.logic, "PostScene")
         _one(r"k\.scene_max = kPostSceneMax;", self.logic, "the block's clamp")
 
@@ -225,8 +248,9 @@ class PostLiterals(unittest.TestCase):
         self.assertEqual((lf.post_ramp_index(float("nan")), lf.post_ramp_index(-1.0), lf.post_ramp_index(9.0)), (0, 0, 255))
         self.assertEqual(int(_one(r"float4 p_ramp\[(\d+)\];", self.shaders, "the ramp's array")), 256)
         _one(r"float ramp\[256\]\[4\];", self.logic, "ClayPostConstants::ramp")
-        _one(r"return float4\(p_ramp\[post_ramp_index\(v\.r\)\]\.r, p_ramp\[post_ramp_index\(v\.g\)\]\.g, "
-             r"p_ramp\[post_ramp_index\(v\.b\)\]\.b, 1\.0\);", self.ramp, "the ramp's read")
+        _one(r"float3 mapped = float3\(p_ramp\[post_ramp_index\(v\.r\)\]\.r, p_ramp\[post_ramp_index\(v\.g\)\]\.g, "
+             r"p_ramp\[post_ramp_index\(v\.b\)\]\.b\);\n  return float4\(post_level\(saturate\(mapped\)\), 1\.0\);", self.ramp,
+             "the ramp's read")
 
     def test_the_layout(self):
         self.assertEqual(_one(r'\{"p_table", (\d+), (\d+)\}', self.shaders, "p_table's field"), ("144", str(128 * 16)))
@@ -245,6 +269,197 @@ class PostLiterals(unittest.TestCase):
                                   "}\n")
         self.assertEqual(float(_one(r"inline constexpr float kLitExposure = (" + NUMBER + r")f;", self.logic, "kLitExposure")), 2.22)
         self.assertEqual(float(_one(r"inline constexpr float kClayMapExposure = (" + NUMBER + r")f;", self.logic, "kClayMapExposure")), 1.0)
+
+    # --- plan Task 8: the bloom, and the writes' own rounding (controller ruling 25) ---
+
+    def test_every_generated_bloom_line_is_in_the_cpp_test(self):
+        # 8 bright points for each register set, 8 downsample pixels (two conventions), 4 pixels for each of the
+        # four blurs, and the seven comment lines that name them.
+        have = {line.strip() for line in self.logic_test.splitlines()}
+        self.assertEqual(len(self.bloom_lines), 8 + 8 + 8 + 4 * 4 + 7)
+        self.assertEqual(sum(1 for line in self.bloom_lines if line.startswith("//")), 7)
+        for line in self.bloom_lines:
+            self.assertIn(line.strip(), have, "not in tests/native/test_clay_logic.cpp: run tools/xdk_sigmatch/post_pins.py")
+        pin = next(line for line in self.bloom_lines if "0.09379039276015376" in line)
+        self.assertNotIn(pin.replace("0.09379039276015376", "0.09379039276015377").strip(), have)
+        # The blurs' weights of the two sets and the pins' pictures, as the C++ test makes them.
+        for name, regs in post_pins.SETS:
+            rows = ",\n".join(" " * 37 + post_pins.floats(w) for w in regs["blur"]).strip()
+            self.assertIn("const float %s_blur[2][7] = {%s};" % (name, rows), self.logic_test)
+        self.assertIn("scene_px[(y * 16 + x) * 3 + c] = float((7 * x + 13 * y + 5 * c) % 32) / 8.0f;", self.logic_test)
+        self.assertIn("unorm_px[(y * 16 + x) * 3 + c] = float(double((37 * x + 101 * y + 59 * c) % 1024) / 1023.0);", self.logic_test)
+        self.assertEqual((post_pins.SCENE_W, post_pins.SCENE_H, post_pins.UNORM_W, post_pins.UNORM_H), (16, 8, 16, 16))
+        self.assertEqual(post_pins.scene_texel(3, 2), tuple(((7 * 3 + 13 * 2 + 5 * c) % 32) / 8.0 for c in range(3)))
+        self.assertEqual(post_pins.unorm_texel(5, 9), tuple(f32(((37 * 5 + 101 * 9 + 59 * c) % 1024) / 1023.0) for c in range(3)))
+        for (x, y), want in (((0, 0), "kNaN, 1.0f, 1.0f"), ((2, 0), "kInf, 1.0f, 1.0f"), ((0, 2), "-1.0f, 1.0f, 1.0f"),
+                             ((10, 6), "40.0f, -kInf, kNaN")):
+            self.assertIn("set_scene(%d, %d, %s);" % (x, y, want), self.logic_test)
+            self.assertEqual(post_pins.floats(post_pins.scene_texel(x, y)), "{" + want + "}")
+
+    def test_the_level_a_target_stores(self):
+        # Ruling 25: every step into a UNORM target writes the rounded level itself, floor(v * levels + 0.5) /
+        # levels, the level count from the target's format. The reference rounds the same way: the 8-bit level is
+        # post_ramp_index (to_bytes), the 10-bit one post_replay.q10.
+        levels8, levels10 = _one(r"inline constexpr uint32_t kPostFrontLevels = (\d+), kPostBloomLevels = (\d+);", self.logic, "the level counts")
+        self.assertEqual((int(levels8), int(levels10)), (255, 1023))
+        _one(r"float3 post_level\(float3 v\) \{ return floor\(v \* s_levels \+ 0\.5\) / s_levels; \}", self.post_block, "post_level")
+        _one(r"const float x = \(v < 1\.0f \? v : 1\.0f\) \* float\(levels\) \+ 0\.5f;", self.logic, "PostLevelIndex")
+        _one(r"inline float PostLevel\(float v, uint32_t levels\) \{ return levels \? float\(PostLevelIndex\(v, levels\)\) / float\(levels\) : 0\.0f; \}",
+             self.logic, "PostLevel")
+
+        def level(v, n):                                        # the mirror's rule, in Python
+            return min(n, int(math.floor(min(max(v, 0.0), 1.0) * n + 0.5))) if v > 0.0 else 0
+        for v in (0.0, 0.2, 0.5 / 255.0 - 1e-6, 0.5 / 255.0 + 1e-6, 100.49 / 255.0, 100.51 / 255.0, 0.999, 1.0, 1.7, -0.3):
+            self.assertEqual(level(v, 255), lf.post_ramp_index(v))
+            self.assertEqual(level(v, 1023) / 1023.0, post_replay.q10(v))
+        for v in (0.31, 0.777, 0.0004):                         # (away from a tie: Python's round is to even there)
+            self.assertEqual(post_replay.q10(v), math.floor(v * 1023.0 + 0.5) / 1023.0)
+        # The level count is the format's, in one place (review of plan Task 6, Minor 2): no step's text holds 255
+        # or 1023 for the rounding, and the pass derives its three counts from its formats.
+        for text in (self.composite, self.downsample, self.bright, self.blur, self.post_block.split("cbuffer Step")[0]):
+            self.assertNotIn("255", text)
+        for text in (self.composite, self.ramp, self.downsample, self.bright, self.blur, self.post_block.split("cbuffer Step")[0]):
+            self.assertNotIn("1023", text)
+        self.assertEqual(self.ramp.count("255"), 2)             # (the ramp's index: its entry count, not a level)
+        _one(r"return f == nrhi::Format::kR8G8B8A8_UNORM \? 255u : f == nrhi::Format::kR10G10B10A2_UNORM \? 1023u : 0u;", self.pass_cpp,
+             "UnormLevels")
+        _one(r"constexpr uint32_t kFrontLevels = UnormLevels\(kFrontFormat\), kMappedLevels = UnormLevels\(kMappedFormat\), "
+             r"kBloomLevels = UnormLevels\(kBloomFormat\);", self.pass_cpp, "the pass's level counts")
+        _one(r"static_assert\(kFrontLevels == kPostFrontLevels && kMappedLevels == kPostFrontLevels && kBloomLevels == kPostBloomLevels",
+             self.pass_cpp, "the counts against the mirrors'")
+        for step, levels in (("kComposite, kWidth, kHeight, kFrontLevels", 1), ("kRamp, kWidth, kHeight, kMappedLevels", 1),
+                             ("kBright, kBloomWidth, kBloomHeight, kBloomLevels", 1), ("kBlurX, kBloomWidth, kBloomHeight, kBloomLevels", 1),
+                             ("kBlurY, kBloomWidth, kBloomHeight, kBloomLevels", 1),
+                             ("kDownsample, kWidth, kHeight, UnormLevels(kBloomDownFormat)", 1)):
+            self.assertEqual(self.pass_cpp.count("MakeClayPostStep(ClayPostStep::" + step + ")"), levels, step)
+        # Every step into a UNORM target ends in the rounding; the downsample (a float target) has none.
+        for text in (self.composite, self.ramp, self.bright, self.blur):
+            self.assertEqual(text.count("  return float4(post_level("), 1)
+        self.assertNotIn("post_level", self.downsample)
+
+    def test_the_blooms_targets(self):
+        # Ruling 6: a quarter of the LOGICAL size; spec ruling 14: the game's own 10 bits for the bright pass and
+        # the blurs. No size is a literal: of the pass, of a shader.
+        self.assertEqual(int(_one(r"inline constexpr uint32_t kPostBloomDivisor = (\d+);", self.logic, "the divisor")), 4)
+        _one(r"constexpr nrhi::Format kBloomDownFormat = nrhi::Format::kR11G11B10_FLOAT;", self.pass_cpp, "the downsample's format")
+        _one(r"constexpr nrhi::Format kBloomFormat = nrhi::Format::kR10G10B10A2_UNORM;", self.pass_cpp, "the bloom's format")
+        _one(r"static_assert\(ClayPass::kWidth % kPostBloomDivisor == 0 && ClayPass::kHeight % kPostBloomDivisor == 0\);", self.pass_cpp,
+             "the exact division")
+        _one(r"constexpr uint32_t kBloomWidth = ClayPass::kWidth / kPostBloomDivisor, kBloomHeight = ClayPass::kHeight / kPostBloomDivisor;",
+             self.pass_cpp, "the bloom's size")
+        for size in ("280", "180"):
+            self.assertNotIn(size, self.pass_cpp)
+        for text in (self.composite, self.ramp, self.downsample, self.bright, self.blur, self.post_block):
+            for size in ("1120", "720", "280", "180"):
+                self.assertNotIn(size, text)
+        # The switch is off by default (spec ruling 16).
+        _one(r'REXCVAR_DEFINE_STRING\(fable2_native_bloom, "off", "Fable2",', self.render_cpp, "the bloom's switch")
+        _one(r"post\.bloom = CurrentBloom\(\);", self.render_cpp, "the switch in the request")
+
+    def test_the_downsample(self):
+        # The reference's four fetches in its order, P = 4 * (pixel + bias); the bias is the pixel's integral position.
+        bias = float(_one(r"inline constexpr float kPostDownsampleBias = (" + NUMBER + r")f;", self.logic, "kPostDownsampleBias"))
+        self.assertEqual(bias, 0.0)
+        factor = float(_one(r"float2 p = (" + NUMBER + r") \* \(floor\(pos\.xy\) \+ s_offset\);", self.downsample, "the downsample's position"))
+        self.assertEqual(factor, 4.0)
+        taps = re.findall(r"post_tap\(p, float2\((" + NUMBER + r"), (" + NUMBER + r")\)\)", self.downsample)
+        self.assertEqual([(float(a), float(b)) for a, b in taps], [(2.5, 2.5), (2.5, 0.5), (0.5, 0.5), (0.5, 2.5)])
+        mirror = _one(r"static constexpr double kTaps\[4\]\[2\] = \{(.*?)\};", self.logic, "the mirror's taps")
+        self.assertEqual([float(v) for v in re.findall(NUMBER, mirror)], [2.5, 2.5, 2.5, 0.5, 0.5, 0.5, 0.5, 2.5])
+        _one(r"return float4\((" + NUMBER + r") \* sum, 1\.0\);", self.downsample, "the quarter")
+        _one(r"const double px = 4\.0 \* \(double\(x\) \+ b\), py = 4\.0 \* \(double\(y\) \+ b\);", self.logic, "the mirror's position")
+        # The reference on a hand case: with bias 0 the four fetches are the texels (0, 0), (2, 0), (0, 2), (2, 2)
+        # of the pixel's block; a value that is no number counts as 0 and one above the clamp as the clamp.
+        rows = [[(float(10 * y + x),) for x in range(8)] for y in range(8)]
+        tex = lf.post_texture(rows, linear=True)
+        self.assertEqual(lf.post_downsample(tex, 1, 1, bias), [31.875])     # (44, 46, 64, 66: each at the clamp)
+        rows = [[(float(y + x),) for x in range(8)] for y in range(8)]
+        self.assertEqual(lf.post_downsample(lf.post_texture(rows, linear=True), 1, 1, bias), [0.25 * (8.0 + 10.0 + 10.0 + 12.0)])
+        # The step's offset word is that bias.
+        _one(r"s\.offset = step == ClayPostStep::kDownsample \? kPostDownsampleBias\n", self.logic, "the step's offset")
+
+    def test_the_bright_pass(self):
+        body = _one(r"float4 main\(float4 pos : SV_Position\) : SV_Target \{\n(.*?)\n\}", self.bright, "the bright pass")
+        self.assertEqual([line.strip() for line in body.split("\n")], [
+            "int3 at = int3(pos.xy, 0);",
+            "float3 d = post_scene(down_target.Load(at).rgb);",
+            "float L = post_lum(d);",
+            "float gain = (L > 0.0) ? saturate(L * p_b77y - p_b77x) / L * p_b31x : 0.0;",
+            "float3 v = d * gain;",
+            "if (p_sun_on != 0) v += sun_tf1.Load(at).rgb * 6.0 * p_b46x + sun_tf2.Load(at).rgb;",
+            "return float4(post_level(post_unit(v / p_b47x)), 1.0);",
+        ])
+        _one(r"float p_b31x; float p_b46x; float p_b47x; float p_b77x; +// the bright pass EE92: c31\.x, c46\.x, c47\.x, c77\.x", self.shaders,
+             "cbuffer Post's third row")
+        _one(r"float bright\[5\];      // EE92: c31\.x, c46\.x, c47\.x, c77\.x, c77\.y", self.block, "PostBlock::bright")
+        _one(r"const double c31x = k\.bright\[0\], c46x = k\.bright\[1\], c47x = k\.bright\[2\], c77x = k\.bright\[3\], c77y = k\.bright\[4\];",
+             self.logic, "the mirror's registers")
+        _one(r"const double gain = L > 0\.0 \? sat\(L \* c77y - c77x\) / L \* c31x : 0\.0;", self.logic, "the mirror's gain")
+        _one(r"\(s\[i\] \* gain \+ fin\(tf1\[i\]\) \* 6\.0 \* c46x \+ fin\(tf2\[i\]\)\) / c47x", self.logic, "the mirror's layers")
+        _one(r"float3 post_unit\(float3 v\) \{ return \(v > 0\.0\) \? min\(v, 1\.0\) : float3\(0\.0, 0\.0, 0\.0\); \}", self.post_block,
+             "post_unit")
+        # The reference on hand cases: the part of the luminance above the threshold, in the pixel's colour; L = 0.
+        out = lf.post_bright([2.0, 2.0, 2.0], [0.0] * 3, [0.0] * 3, 1.5, 0.2, 2.0, (0.25, 0.5))
+        for v in out:
+            self.assertAlmostEqual(v, 2.0 * (2.0 * 0.5 - 0.25) / 2.0 * 1.5 / 2.0, places=12)
+        self.assertEqual(lf.post_bright([0.0] * 3, [0.0] * 3, [0.0] * 3, 1.5, 0.2, 2.0, (0.25, 0.5)), [0.0, 0.0, 0.0])
+        self.assertEqual(lf.post_bright([0.0] * 3, [0.1] * 3, [0.05] * 3, 1.5, 0.5, 2.0, (0.25, 0.5)), [(0.1 * 6.0 * 0.5 + 0.05) / 2.0] * 3)
+
+    def test_the_blur(self):
+        # 13 taps at -6..6 along the step's direction, the weight by the distance: the centre first.
+        _one(r"return w \* blur_source\.Load\(int3\(clamp\(at \+ k \* s_dir, int2\(0, 0\), s_last\), 0\)\)\.rgb;", self.blur, "a tap")
+        taps = re.findall(r"post_blur_tap\(at, (-?\d+), (w[01])\.([xyzw])\)", self.blur)
+        self.assertEqual(sorted(int(k) for k, _, _ in taps), list(range(-6, 7)))
+        place = {0: ("w0", "x"), 1: ("w0", "y"), 2: ("w0", "z"), 3: ("w0", "w"), 4: ("w1", "x"), 5: ("w1", "y"), 6: ("w1", "z")}
+        for k, row, component in taps:
+            self.assertEqual((row, component), place[abs(int(k))])
+        _one(r"float4 w0 = vertical \? p_blur\[2\] : p_blur\[0\];\n  float4 w1 = vertical \? p_blur\[3\] : p_blur\[1\];", self.blur,
+             "the weights' rows")
+        _one(r"k\.blur\[2 \* s \+ \(i >> 2\)\]\[i & 3\] = \(w >= 0\.0f && w <= 1\.0f\) \? w : 0\.0f;", self.logic, "the constants' rows")
+        _one(r"const double w = fin\(k\.blur\[row \+ \(a >> 2\)\]\[a & 3\]\);", self.logic, "the mirror's weight")
+        _one(r"for \(int tap = -6; tap <= 6; \+\+tap\) \{", self.logic, "the mirror's taps")
+        _one(r"float blur\[2\]\[7\];     // EA83 then 28DB: c46\.x \(centre\), c46\.y, \.z, \.w, c47\.x, \.y, \.z", self.block, "PostBlock::blur")
+        # The reference on a hand case: one bright texel spreads by the weights, along its own axis only.
+        rows = [[(1.0,) if (x, y) == (8, 8) else (0.0,) for x in range(17)] for y in range(17)]
+        weights = [0.4, 0.2, 0.05, 0.02, 0.015, 0.01, 0.005]
+        tex = lf.post_texture(rows)
+        for k in range(-6, 7):
+            self.assertEqual(lf.post_blur13(tex, 8 + k, 8, weights, False), [weights[abs(k)]])
+            self.assertEqual(lf.post_blur13(tex, 8, 8 + k, weights, True), [weights[abs(k)]])
+        self.assertEqual(lf.post_blur13(tex, 8, 9, weights, False), [0.0])
+
+    def test_where_the_composite_samples_the_bloom(self):
+        # The composite's own fetch (37B1 instruction 6): the scene's interpolated coordinate plus half a bloom
+        # texel: bloom texel coordinate x / 4 + 0.5. The shader makes it of the step's words, the mirror by
+        # PostBloomCoordinate, the reference tool by bloom_sampler(place="fetch"), its default.
+        fetch = float(_one(r"inline constexpr float kPostBloomFetch = (" + NUMBER + r")f;", self.logic, "kPostBloomFetch"))
+        self.assertEqual(fetch, 0.5)
+        _one(r"constexpr double PostBloomCoordinate\(uint32_t x\) \{ return double\(x\) / double\(kPostBloomDivisor\) \+ double\(kPostBloomFetch\); \}",
+             self.logic, "PostBloomCoordinate")
+        _one(r": step == ClayPostStep::kComposite \? kPostBloomFetch \* float\(kPostBloomDivisor\)\n", self.logic, "the composite's offset word")
+        _one(r"if \(p_bloom_on != 0\) bloom = bloom_target\.SampleLevel\(linear_clamp, \(floor\(pos\.xy\) \+ s_offset\) \* s_texel, 0\.0\)\.rgb;",
+             self.composite, "the composite's sample")
+        self.assertEqual(post_replay.BLOOM_PLACE, "fetch")
+        rows = [[(float(x), float(y)) for x in range(280 // 4)] for y in range(180 // 4)]
+        at = post_replay.bloom_sampler(70, 45, rows, 280, 180, place="fetch")
+        for x, y in ((0, 0), (1, 3), (2, 2), (4, 8), (130, 77), (279, 179)):
+            want = (min(max(x / 4.0 + fetch - 0.5, 0.0), 69.0), min(max(y / 4.0 + fetch - 0.5, 0.0), 44.0))
+            got = at(x, y)
+            self.assertAlmostEqual(got[0], want[0], delta=1e-12)
+            self.assertAlmostEqual(got[1], want[1], delta=1e-12)
+            # (the shader's coordinate: (x + offset) * texel of the scene, in bloom texels)
+            self.assertAlmostEqual((x + fetch * 4.0) / 280.0 * 70.0, x / 4.0 + fetch, delta=1e-12)
+
+    def test_the_steps_words(self):
+        table = _one(r"inline constexpr ClayBufferField kClayPostStepFields\[\] = \{(.*?)\n\};", self.shaders, "kClayPostStepFields")
+        fields = re.findall(r'\{"(s_\w+)", (\d+), (\d+)\}', table)
+        self.assertEqual(fields, [("s_texel", "0", "8"), ("s_levels", "8", "4"), ("s_offset", "12", "4"), ("s_dir", "16", "8"),
+                                  ("s_last", "24", "8")])
+        self.assertEqual(int(_one(r"inline constexpr unsigned kClayPostStepSize = (\d+);", self.shaders, "kClayPostStepSize")), 32)
+        _one(r"cbuffer Step : register\(b1\) \{\n  float2 s_texel; .*?\n  float s_levels; .*?\n  float s_offset; .*?\n  int2 s_dir; .*?\n"
+             r"  int2 s_last; .*?\n\};", self.post_block, "cbuffer Step")
+        _one(r"static_assert\(sizeof\(ClayPostStepConstants\) == 32\);", self.logic, "the words' size")
+        _one(r"static_assert\(sizeof\(ClayPostStepConstants\) == kPostStepWords \* 4\);", self.pass_cpp, "the layout's words")
 
 
 if __name__ == "__main__":

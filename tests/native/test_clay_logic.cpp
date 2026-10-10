@@ -7612,15 +7612,39 @@ int main() {
       st.post_nolight_frames = 2;
       st.post_buffer_frames = 0;
       std::string t = FormatPostText(st);
-      CHECK(609, t == "Post: on, block valid, age 2, drawn | c20.w 8.4413, unlit scale 3.7369 | frames since start 900: drawn 880, "
-                      "post-block 7, post-ramp 6, post-objects 5, no-light 2, no-buffer 0");
+      CHECK(609, t == "Post: on, block valid, age 2, drawn, bloom off | c20.w 8.4413, unlit scale 3.7369 | frames since start 900: "
+                      "drawn 880 (bloom 0, no-weights 0), post-block 7, post-ramp 6, post-objects 5, no-light 2, no-buffer 0");
+      // The bloom's verdict of the frame and its counts (plan Task 8).
+      st.bloom = ClayBloom::kOn;
+      st.bloom_frames = 870;
+      st.bloom_noweights_frames = 4;
+      t = FormatPostText(st);
+      CHECK(609, t.find("age 2, drawn, bloom on | c20.w") != std::string::npos && t.find(": drawn 880 (bloom 870, no-weights 4), post-block 7,") != std::string::npos);
+      st.bloom = ClayBloom::kNoWeights;
+      CHECK(609, FormatPostText(st).find("age 2, drawn, bloom no-weights | c20.w") != std::string::npos);
+      // The unlit scale is the composite's gain at scene luminance 1 only while c46.x is 0.25 (the table's
+      // texel 128); with another c46.x the line says at which luminance it is (review of plan Task 5, Minor 8).
+      CHECK(609, t.find("c46.x") == std::string::npos && st.post_coord == kPostUnlitCoord && kPostUnlitCoord == 0.25f);
+      st.post_coord = 0.5f;
+      CHECK(609, FormatPostText(st).find("unlit scale 3.7369 (c46.x 0.5000: the gain at scene luminance 0.500, not 1) | frames") != std::string::npos);
+      st.post_coord = kPostUnlitCoord;
       st.post = ClayPost::kBlock;
       st.post_block = false;
       st.post_reason = capture::PostBlockReason::kNoDraw;
       t = FormatPostText(st);
       CHECK(609, t.find("Post: on, block invalid (post-block: no-draw), not drawn (post-block) | today's mapping, exposure 2.22 | frames") == 0);
+      CHECK(609, t.find("bloom o") == std::string::npos && t.find("bloom no") == std::string::npos);  // (a frame that is not drawn has no bloom verdict)
+      // A valid block the pass could not use: the line says which of the pass's rules refused it (review of
+      // plan Task 5, Minor 11: a pairing fallback must be told from a refused value).
       st.post_block = true;
+      st.post_fault = ClayPostFault::kValues;
       CHECK(609, FormatPostText(st).find("block valid, age 2, not drawn (post-block: values)") != std::string::npos);
+      st.post_fault = ClayPostFault::kPairing;
+      CHECK(609, FormatPostText(st).find("block valid, age 2, not drawn (post-block: pairing)") != std::string::npos);
+      st.post_fault = ClayPostFault::kAge;
+      CHECK(609, FormatPostText(st).find("block valid, age 2, not drawn (post-block: age)") != std::string::npos);
+      st.post_fault = ClayPostFault::kWords;
+      CHECK(609, FormatPostText(st).find("block valid, age 2, not drawn (post-block: words)") != std::string::npos);
       st.post = ClayPost::kRamp;
       CHECK(609, FormatPostText(st).find(", not drawn (post-ramp) |") != std::string::npos);
       st.post = ClayPost::kObjects;
@@ -7631,12 +7655,481 @@ int main() {
       CHECK(609, FormatPostText(st).find(", not drawn (no constant buffer) |") != std::string::npos);
       // (the line with every count at its largest is whole)
       st.post_frames = st.post_drawn_frames = st.post_block_frames = st.post_ramp_frames = st.post_objects_frames = st.post_nolight_frames =
-          st.post_buffer_frames = ~0ull;
+          st.post_buffer_frames = st.bloom_frames = st.bloom_noweights_frames = ~0ull;
+      st.post_coord = -3.4e38f;
       st.post_age = ~0u;
       st.post = ClayPost::kDrawn;
       st.post_scale = st.post_unlit = -3.4e38f;
       t = FormatPostText(st);
       CHECK(609, t.size() > 100 && t.rfind("no-buffer 18446744073709551615") == t.size() - 30);
+    }
+
+    // 610-617: the native bloom (plan Task 8 of the post sub-project; clay_logic.h, "Native bloom"): the level
+    // a UNORM target stores (controller ruling 25), the downsample's, the bright pass's and the blurs' mirrors
+    // against the reference's numbers (post_pins.py; test_post_literals.py holds the lines), the place of the
+    // composite's bloom sample, nothing that is no number (spec criterion 14), the steps' words, the verdict.
+    {
+      auto in_scene = [](double v) { return v >= 0.0 && v <= 31.875; };  // (false for a value that is no number)
+      // The pins' pictures (post_pins.py: scene_texel, unorm_texel), made here by the same integer formulas.
+      static float scene_px[16 * 8 * 3], unorm_px[16 * 16 * 3];
+      for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 16; ++x) {
+          for (int c = 0; c < 3; ++c) scene_px[(y * 16 + x) * 3 + c] = float((7 * x + 13 * y + 5 * c) % 32) / 8.0f;
+        }
+      }
+      auto set_scene = [&](int x, int y, float r, float g, float b) {
+        float* t = scene_px + (y * 16 + x) * 3;
+        t[0] = r, t[1] = g, t[2] = b;
+      };
+      set_scene(0, 0, kNaN, 1.0f, 1.0f);
+      set_scene(2, 0, kInf, 1.0f, 1.0f);
+      set_scene(0, 2, -1.0f, 1.0f, 1.0f);
+      set_scene(10, 6, 40.0f, -kInf, kNaN);
+      for (int y = 0; y < 16; ++y) {
+        for (int x = 0; x < 16; ++x) {
+          for (int c = 0; c < 3; ++c) unorm_px[(y * 16 + x) * 3 + c] = float(double((37 * x + 101 * y + 59 * c) % 1024) / 1023.0);
+        }
+      }
+      const PostPicture scene_pic{scene_px, 16, 8}, unorm_pic{unorm_px, 16, 16};
+      const float real_blur[2][7] = {{0.20737524330615997f, 0.18119974434375763f, 0.12088140845298767f, 0.06156909465789795f, 0.023942377418279648f, 0.00710842153057456f, 0.0016113145975396037f},
+                                     {0.1818615347146988f, 0.16401202976703644f, 0.12030407786369324f, 0.07177194207906723f, 0.03482561185956001f, 0.013743981719017029f, 0.004411600064486265f}};
+      const float made_blur[2][7] = {{1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},
+                                     {0.07692307978868484f, 0.07692307978868484f, 0.07692307978868484f, 0.07692307978868484f, 0.07692307978868484f, 0.07692307978868484f, 0.07692307978868484f}};
+      // The two register sets' constants with their blurs' weights and the bloom asked for.
+      auto bloom_constants = [&](capture::PostBlock b, const float blur[2][7]) {
+        std::memcpy(b.blur, blur, sizeof(b.blur));
+        b.parts = capture::kPostPartBlur;
+        ClayPostConstants k;
+        CHECK(611, MakeClayPostConstants(b, ramp, true, false, &k) && k.bloom_on == 1 && k.sun_on == 0);
+        return k;
+      };
+      const ClayPostConstants real_k = bloom_constants(real_block, real_blur), made_k = bloom_constants(made_block, made_blur);
+
+      // 610: the level a UNORM target stores, written by the shader itself (controller ruling 25: the
+      // picture must not depend on a card's own rounding): floor(sat(v) * levels + 0.5) / levels, the
+      // reference's rounding (light_formulas.post_ramp_index for 8 bits, post_replay.q10 for 10). Every
+      // level is its own; and the stored value survives the conversion the real card was found to make
+      // (review of plan Task 6: the float cut to 12 fractional bits, then the nearest level).
+      {
+        static_assert(kPostFrontLevels == 255 && kPostBloomLevels == 1023);
+        for (uint32_t levels : {kPostFrontLevels, kPostBloomLevels}) {
+          for (uint32_t n = 0; n <= levels; ++n) {
+            const float v = float(n) / float(levels);
+            CHECK(610, PostLevelIndex(v, levels) == n && PostLevel(v, levels) == v);
+            const double cut = std::floor(double(PostLevel(v, levels)) * 4096.0) / 4096.0;
+            CHECK(610, uint32_t(std::floor(cut * double(levels) + 0.5)) == n);
+            if (n < levels) {
+              CHECK(610, PostLevelIndex((float(n) + 0.49f) / float(levels), levels) == n);
+              CHECK(610, PostLevelIndex((float(n) + 0.51f) / float(levels), levels) == n + 1);
+            }
+          }
+          for (float v : {kNaN, -kInf, -1.0f, -0.0f, 0.0f, 1e-45f}) CHECK(610, PostLevelIndex(v, levels) == 0 && PostLevel(v, levels) == 0.0f);
+          for (float v : {kInf, 3.4e38f, 1.0f, 1.5f}) CHECK(610, PostLevelIndex(v, levels) == levels && PostLevel(v, levels) == 1.0f);
+        }
+        // (8 bits: the ramp's entry of the value is the level it was stored as)
+        for (float v : {0.0f, 0.001959784422069788f, 0.001961784204468131f, 0.39407843351364136f, 0.39415687322616577f, 0.5f, 0.9980401992797852f, kNaN, kInf}) {
+          CHECK(610, PostLevelIndex(v, kPostFrontLevels) == PostRampIndex(v) && PostRampIndex(PostLevel(v, kPostFrontLevels)) == PostRampIndex(v));
+        }
+        // (no levels: a float target, which no step rounds; the mirror gives 0, never a division by 0)
+        CHECK(610, PostLevelIndex(0.5f, 0) == 0 && PostLevel(0.5f, 0) == 0.0f);
+      }
+
+      // 611: the downsample against the reference (light_formulas.post_downsample), both conventions of the
+      // pixel's position. The scene holds a NaN, an infinity, a negative texel and one above the clamp.
+      {
+        static const struct { uint32_t x, y; double bias; double out[3]; } kPins[] = {
+          // downsample pins (scene_texel, 16 x 8, linear): the pixel, the bias, the value
+          {0, 0, 0.0, {8.21875, 1.15625, 1.3125}},
+          {1, 0, 0.0, {2.0, 1.625, 1.25}},
+          {2, 1, 0.0, {9.34375, 1.84375, 1.3125}},
+          {3, 1, 0.0, {1.5, 2.125, 1.75}},
+          {0, 0, 0.5, {1.5, 2.125, 1.75}},
+          {1, 0, 0.5, {2.0, 1.625, 2.25}},
+          {2, 1, 0.5, {8.53125, 1.03125, 1.5}},
+          {3, 1, 0.5, {2.25, 1.875, 1.5}},
+        };
+        CHECK(611, std::size(kPins) == 8);
+        double worst = 0.0;
+        for (const auto& p : kPins) {
+          double out[3];
+          PostDownsampleMirror(scene_pic, p.x, p.y, float(p.bias), kPostSceneMax, out);
+          for (int i = 0; i < 3; ++i) {
+            CHECK(611, in_scene(out[i]));
+            worst = std::fmax(worst, std::fabs(out[i] - p.out[i]));
+          }
+        }
+        CHECK(611, worst < 1e-12);
+        // The convention the pass draws with: the pixel's integral position (the four texels (0, 0), (2, 0),
+        // (0, 2), (2, 2) of the pixel's 4 x 4 block), and a quarter of the logical size.
+        static_assert(kPostDownsampleBias == 0.0f && kPostBloomDivisor == 4);
+        double out[3], by_hand[3] = {0.0, 0.0, 0.0};
+        PostDownsampleMirror(scene_pic, 1, 1, kPostDownsampleBias, kPostSceneMax, out);
+        for (int ty : {4, 6}) {
+          for (int tx : {4, 6}) {
+            for (int c = 0; c < 3; ++c) by_hand[c] += 0.25 * double(scene_px[(ty * 16 + tx) * 3 + c]);
+          }
+        }
+        CHECK(611, out[0] == by_hand[0] && out[1] == by_hand[1] && out[2] == by_hand[2]);
+        // A picture's texel and its linear read are clamped to the edge; a picture without texels reads 0.
+        float t[3];
+        double l[3];
+        PostPictureTexel(unorm_pic, -5, 99, t);
+        CHECK(611, t[0] == unorm_px[(15 * 16 + 0) * 3] && t[2] == unorm_px[(15 * 16 + 0) * 3 + 2]);
+        PostPictureLinear(unorm_pic, 1e9, -1e9, l);
+        CHECK(611, l[0] == double(unorm_px[15 * 3]) && l[1] == double(unorm_px[15 * 3 + 1]));
+        PostPictureLinear(unorm_pic, double(kNaN), 3.5, l);
+        CHECK(611, l[0] == double(unorm_px[(3 * 16 + 0) * 3]));
+        PostPictureTexel(PostPicture{}, 0, 0, t);
+        PostPictureLinear(PostPicture{}, 0.5, 0.5, l);
+        CHECK(611, t[0] == 0.0f && t[1] == 0.0f && t[2] == 0.0f && l[0] == 0.0 && l[1] == 0.0 && l[2] == 0.0);
+      }
+
+      // 612: the bright pass against the reference (light_formulas.post_bright), both register sets, with
+      // the sun's two layers as the reference takes them (the pins give them values: the sun's flag set by
+      // hand; without it they are not read). Among the points: L = 0, the clamp, values that are no numbers.
+      {
+        struct BrightPin { float d[3], tf1[3], tf2[3]; double out[3]; };
+        static const BrightPin kReal[] = {
+          // real bright pins: d, tf1, tf2, the bright target's value
+          {{2.0f, 1.5f, 1.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.09379039276015376, 0.07034279457011532, 0.04689519638007688}},
+          {{0.5f, 0.5f, 0.5f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0, 0.0, 0.0}},
+          {{3.0f, 3.0f, 3.0f}, {0.10000000149011612f, 0.10000000149011612f, 0.10000000149011612f}, {0.20000000298023224f, 0.25f, 0.30000001192092896f}, {0.3595263576775233, 0.38452635618740716, 0.40952636214787164}},
+          {{0.0f, 0.0f, 0.0f}, {0.10000000149011612f, 0.20000000298023224f, 0.30000001192092896f}, {0.05000000074505806f, 0.0f, 0.4000000059604645f}, {0.08500000216066839, 0.12000000357627871, 0.38000001281499873}},
+          {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0, 0.0, 0.0}},
+          {{31.875f, 31.875f, 31.875f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.7432486414909363, 0.7432486414909363, 0.7432486414909363}},
+          {{kNaN, 1.0f, 1.0f}, {kInf, 0.0f, 0.0f}, {0.0f, -1.0f, kNaN}, {0.0, 0.0, 0.005992890613482019}},
+          {{-2.0f, kInf, 0.5f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0, 1.0, 0.016271176736956737}},
+        };
+        static const BrightPin kMade[] = {
+          // made bright pins: d, tf1, tf2, the bright target's value
+          {{2.0f, 1.5f, 1.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.49936739290382626, 0.3745255446778697, 0.24968369645191313}},
+          {{0.5f, 0.5f, 0.5f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.1066666692495346, 0.1066666692495346, 0.1066666692495346}},
+          {{3.0f, 3.0f, 3.0f}, {0.10000000149011612f, 0.10000000149011612f, 0.10000000149011612f}, {0.20000000298023224f, 0.25f, 0.30000001192092896f}, {1.0, 1.0, 1.0}},
+          {{0.0f, 0.0f, 0.0f}, {0.10000000149011612f, 0.20000000298023224f, 0.30000001192092896f}, {0.05000000074505806f, 0.0f, 0.4000000059604645f}, {0.23333333681027094, 0.4000000059604645, 0.8666666944821676}},
+          {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0, 0.0, 0.0}},
+          {{31.875f, 31.875f, 31.875f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {1.0, 1.0, 1.0}},
+          {{kNaN, 1.0f, 1.0f}, {kInf, 0.0f, 0.0f}, {0.0f, -1.0f, kNaN}, {0.0, 0.0, 0.23280423753476018}},
+          {{-2.0f, kInf, 0.5f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, {0.0, 1.0, 0.029189292929514058}},
+        };
+        CHECK(612, std::size(kReal) == 8 && std::size(kMade) == 8);
+        double worst = 0.0;
+        int below = 0;
+        for (int set = 0; set < 2; ++set) {
+          ClayPostConstants sunny = set ? made_k : real_k;
+          sunny.sun_on = 1;
+          const ClayPostConstants& plain = set ? made_k : real_k;
+          for (const BrightPin& p : set ? kMade : kReal) {
+            double out[3], dry[3], none[3];
+            PostBrightMirror(p.d, p.tf1, p.tf2, sunny, out);
+            for (int i = 0; i < 3; ++i) {
+              CHECK(612, in01(out[i]));
+              worst = std::fmax(worst, std::fabs(out[i] - p.out[i]));
+            }
+            // Without the sun's flag the two layers are not read: the result is that of two black layers.
+            const float black[3] = {0.0f, 0.0f, 0.0f};
+            PostBrightMirror(p.d, p.tf1, p.tf2, plain, dry);
+            PostBrightMirror(p.d, black, black, sunny, none);
+            CHECK(612, std::memcmp(dry, none, sizeof(dry)) == 0 && in01(dry[0]) && in01(dry[1]) && in01(dry[2]));
+            below += set == 0 && p.d[0] == 0.5f && dry[0] == 0.0 && dry[1] == 0.0 && dry[2] == 0.0;
+          }
+        }
+        std::printf("post: the bright pass's mirror against the reference, 16 points: worst difference %.2e\n", worst);
+        // (the real set's point below the threshold is black: the bloom takes only what is above c77.x)
+        CHECK(612, worst < 1e-12 && below == 1);
+      }
+
+      // 613: the two blurs against the reference (light_formulas.post_blur13): 13 point taps along x, along
+      // y, clamped to the edge, the weights from the constants' four rows.
+      {
+        struct BlurPin { uint32_t x, y; double out[3]; };
+        static const BlurPin kRealX[] = {
+          // real blur pins along x (unorm_texel, 16 x 16, point), weights {0.20737524330615997f, 0.18119974434375763f, 0.12088140845298767f, 0.06156909465789795f, 0.023942377418279648f, 0.00710842153057456f, 0.0016113145975396037f}: the pixel, the value
+          {0, 0, {0.027077248821215653, 0.08475075677923871, 0.1424242650386999}},
+          {7, 7, {0.7289586054778714, 0.3976772754153809, 0.27397391791108006}},
+          {3, 12, {0.29383258829226144, 0.3515060931646031, 0.4091796010198255}},
+          {15, 15, {0.39112789151367205, 0.1464249554322099, 0.14246918446430037}},
+        };
+        static const BlurPin kRealY[] = {
+          // real blur pins along y (unorm_texel, 16 x 16, point), weights {0.1818615347146988f, 0.16401202976703644f, 0.12030407786369324f, 0.07177194207906723f, 0.03482561185956001f, 0.013743981719017029f, 0.004411600064486265f}: the pixel, the value
+          {0, 0, {0.0843570138782874, 0.14203052274906286, 0.19970403567237777}},
+          {7, 7, {0.5348124321450349, 0.41044663055240405, 0.468120139676623}},
+          {3, 12, {0.40969386942411135, 0.3955252788128213, 0.418339137573319}},
+          {15, 15, {0.3466174807590675, 0.404290992581688, 0.2977921455835798}},
+        };
+        static const BlurPin kMadeX[] = {
+          // made blur pins along x (unorm_texel, 16 x 16, point), weights {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}: the pixel, the value
+          {0, 0, {0.0, 0.057673510164022446, 0.11534702032804489}},
+          {7, 7, {0.9442815184593201, 0.0009775171056389809, 0.05865102633833885}},
+          {3, 12, {0.29227760434150696, 0.3499511182308197, 0.40762463212013245}},
+          {15, 15, {0.02150537632405758, 0.07917888462543488, 0.13685239851474762}},
+        };
+        static const BlurPin kMadeY[] = {
+          // made blur pins along y (unorm_texel, 16 x 16, point), weights {0.07692307978868484f, 0.07692307978868484f, 0.07692307978868484f, 0.07692307978868484f, 0.07692307978868484f, 0.07692307978868484f, 0.07692307978868484f}: the pixel, the value
+          {0, 0, {0.15948568018959625, 0.21715919020963795, 0.2748327042415309}},
+          {7, 7, {0.4822919213135505, 0.4629671557693894, 0.5206406674371558}},
+          {3, 12, {0.5547033732073341, 0.5353786130361882, 0.5160538549426079}},
+          {15, 15, {0.3240093361360558, 0.38168284916498585, 0.36235808555511023}},
+        };
+        double worst = 0.0;
+        auto run = [&](const BlurPin* pins, size_t count, const ClayPostConstants& k, bool vertical) {
+          CHECK(613, count == 4);
+          for (size_t n = 0; n < count; ++n) {
+            double out[3];
+            PostBlurMirror(unorm_pic, pins[n].x, pins[n].y, k, vertical, out);
+            for (int i = 0; i < 3; ++i) {
+              CHECK(613, in01(out[i]));
+              worst = std::fmax(worst, std::fabs(out[i] - pins[n].out[i]));
+            }
+          }
+        };
+        run(kRealX, std::size(kRealX), real_k, false);
+        run(kRealY, std::size(kRealY), real_k, true);
+        run(kMadeX, std::size(kMadeX), made_k, false);
+        run(kMadeY, std::size(kMadeY), made_k, true);
+        std::printf("post: the blurs' mirror against the reference, 16 points: worst difference %.2e\n", worst);
+        CHECK(613, worst < 1e-12);
+        // The weights' places: EA83's seven in rows 0 and 1 (the centre first), 28DB's in rows 2 and 3.
+        CHECK(613, real_k.blur[0][0] == real_blur[0][0] && real_k.blur[1][2] == real_blur[0][6] && real_k.blur[2][0] == real_blur[1][0] &&
+                       real_k.blur[3][2] == real_blur[1][6] && real_k.blur[1][3] == 0.0f && real_k.blur[3][3] == 0.0f);
+        // The centre alone (the made set along x) is the texel itself.
+        double out[3];
+        PostBlurMirror(unorm_pic, 5, 9, made_k, false, out);
+        CHECK(613, out[0] == double(unorm_px[(9 * 16 + 5) * 3]) && out[2] == double(unorm_px[(9 * 16 + 5) * 3 + 2]));
+      }
+
+      // 614: where the composite samples the bloom: at the scene's own interpolated coordinate with the
+      // fetch's half texel (the game's 37B1, instruction 6: tfetch2D tf2, OffsetX = OffsetY = 0.5), which at
+      // pixel x of the scene is bloom texel coordinate x / 4 + 0.5, linear: pixel 0 reads texel 0 itself,
+      // pixel 4 texel 1, pixel 2 the mean of the two; not the centres aligned ((x + 0.5) / 4).
+      {
+        static_assert(kPostBloomFetch == 0.5f);
+        CHECK(614, PostBloomCoordinate(0) == 0.5 && PostBloomCoordinate(4) == 1.5 && PostBloomCoordinate(2) == 1.0 &&
+                       PostBloomCoordinate(1119) == 280.25);
+        double out[3];
+        PostBloomFetchMirror(unorm_pic, 0, 0, out);
+        CHECK(614, out[0] == double(unorm_px[0]) && out[1] == double(unorm_px[1]) && out[2] == double(unorm_px[2]));
+        PostBloomFetchMirror(unorm_pic, 4, 8, out);
+        CHECK(614, out[0] == double(unorm_px[(2 * 16 + 1) * 3]) && out[2] == double(unorm_px[(2 * 16 + 1) * 3 + 2]));
+        PostBloomFetchMirror(unorm_pic, 2, 0, out);
+        CHECK(614, std::fabs(out[0] - 0.5 * (double(unorm_px[0]) + double(unorm_px[3]))) < 1e-15);
+        // (the last pixels read the last texel: clamped)
+        PostBloomFetchMirror(unorm_pic, 63, 63, out);
+        CHECK(614, out[0] == double(unorm_px[(15 * 16 + 15) * 3]));
+        // The composite with the bloom it reads there: the screen blend lifts every channel, never above 1.
+        const float grey[3] = {0.6f, 0.55f, 0.4f}, none[3] = {0.0f, 0.0f, 0.0f};
+        const float veil[3] = {float(out[0]), float(out[1]), float(out[2])};
+        double with[3], without[3];
+        PostCompositeMirror(grey, veil, real_k, with);
+        PostCompositeMirror(grey, none, real_k, without);
+        CHECK(614, with[0] > without[0] && with[1] > without[1] && with[2] > without[2] && in01(with[0]) && in01(with[1]) && in01(with[2]));
+      }
+
+      // 615: nothing that is no number (spec criterion 14; review focus 2): a scene texel of NaN, of
+      // infinity, a negative one, L = 0, weights at their bounds, registers at theirs. Every output of every
+      // step's mirror is a number in its target's range, and the level stored for it is one of the target's.
+      {
+        const float kValues[] = {kNaN, kInf, -kInf, -1.0f, -0.0f, 0.0f, 1e-45f, 1e-6f, 0.5f, 1.0f, 3.9f, 31.875f, 32.0f, 3.4e38f};
+        long checked = 0;
+        // The downsample: a scene of one value, and that value among ordinary texels.
+        static float flat[16 * 8 * 3];
+        for (float v : kValues) {
+          for (int mixed = 0; mixed < 2; ++mixed) {
+            for (size_t i = 0; i < std::size(flat); ++i) flat[i] = (mixed && (i % 5) != 0) ? 0.25f * float(i % 7) : v;
+            for (float bias : {0.0f, 0.5f}) {
+              for (uint32_t x = 0; x < 4; ++x) {
+                for (uint32_t y = 0; y < 2; ++y) {
+                  double out[3] = {-1.0, -1.0, -1.0};
+                  PostDownsampleMirror(PostPicture{flat, 16, 8}, x, y, bias, kPostSceneMax, out);
+                  CHECK(615, in_scene(out[0]) && in_scene(out[1]) && in_scene(out[2]));
+                  ++checked;
+                }
+              }
+            }
+          }
+        }
+        double out[3];
+        for (size_t i = 0; i < std::size(flat); ++i) flat[i] = kNaN;
+        PostDownsampleMirror(PostPicture{flat, 16, 8}, 1, 1, 0.0f, kPostSceneMax, out);
+        CHECK(615, out[0] == 0.0 && out[1] == 0.0 && out[2] == 0.0);
+        for (size_t i = 0; i < std::size(flat); ++i) flat[i] = kInf;
+        PostDownsampleMirror(PostPicture{flat, 16, 8}, 1, 1, 0.0f, kPostSceneMax, out);
+        CHECK(615, out[0] == 31.875 && out[1] == 31.875 && out[2] == 31.875);
+        // (a pixel outside the target and a position that is no number read the edge: numbers)
+        PostDownsampleMirror(scene_pic, 4000000000u, 4000000000u, kNaN, kPostSceneMax, out);
+        CHECK(615, in_scene(out[0]) && in_scene(out[1]) && in_scene(out[2]));
+        // The bright pass: every value in every channel, the layers that are no numbers, both flags, the
+        // two sets and registers at the bounds MakeClayPostConstants allows (the divisor c47.x at its
+        // smallest, 1e-3: everything above the threshold is at the target's ceiling).
+        ClayPostConstants edge_k = real_k;
+        const float edge_bright[5] = {64.0f, 64.0f, 1e-3f, -4.0f, 64.0f};
+        std::memcpy(edge_k.bright, edge_bright, sizeof(edge_bright));
+        ClayPostConstants low_k = real_k;
+        const float low_bright[5] = {0.0f, 0.0f, 64.0f, 4.0f, std::nextafter(0.0f, 1.0f)};
+        std::memcpy(low_k.bright, low_bright, sizeof(low_bright));
+        for (ClayPostConstants k : {real_k, made_k, edge_k, low_k}) {
+          for (uint32_t sun = 0; sun < 2; ++sun) {
+            k.sun_on = sun;
+            for (float r : kValues) {
+              for (float g : kValues) {
+                for (float layer : {kNaN, kInf, -kInf, -1.0f, 0.0f, 0.3f}) {
+                  const float d[3] = {r, g, 0.25f}, tf1[3] = {layer, 0.1f, layer}, tf2[3] = {0.2f, layer, layer};
+                  out[0] = out[1] = out[2] = -1.0;
+                  PostBrightMirror(d, tf1, tf2, k, out);
+                  CHECK(615, in01(out[0]) && in01(out[1]) && in01(out[2]));
+                  for (int i = 0; i < 3; ++i) CHECK(615, PostLevelIndex(float(out[i]), kPostBloomLevels) <= kPostBloomLevels);
+                  ++checked;
+                }
+              }
+            }
+          }
+        }
+        // L = 0 (a black texel; the microcode multiplies 0 by 1 / 0): the scene term is 0, exactly; so is
+        // that of a texel that is no number and of a negative one.
+        const float black[3] = {0.0f, 0.0f, 0.0f}, some[3] = {0.1f, 0.2f, 0.3f};
+        const float nan_d[3] = {kNaN, kNaN, kNaN}, neg_d[3] = {-1.0f, -kInf, -0.0f};
+        for (const float* d : {black, nan_d, neg_d}) {
+          PostBrightMirror(d, some, some, real_k, out);
+          CHECK(615, out[0] == 0.0 && out[1] == 0.0 && out[2] == 0.0);
+          PostBrightMirror(d, some, some, edge_k, out);
+          CHECK(615, out[0] == 0.0 && out[1] == 0.0 && out[2] == 0.0);
+        }
+        // A register that is no number, or a divisor not above 0 (which MakeClayPostConstants refuses; set
+        // by hand): black.
+        const float bright_d[3] = {3.0f, 3.0f, 3.0f};
+        for (int i = 0; i < 5; ++i) {
+          for (float value : {kNaN, kInf, -kInf}) {
+            ClayPostConstants broken = real_k;
+            broken.bright[i] = value;
+            PostBrightMirror(bright_d, some, some, broken, out);
+            CHECK(615, out[0] == 0.0 && out[1] == 0.0 && out[2] == 0.0);
+          }
+        }
+        for (float divisor : {0.0f, -2.0f}) {
+          ClayPostConstants broken = real_k;
+          broken.bright[2] = divisor;
+          PostBrightMirror(bright_d, some, some, broken, out);
+          CHECK(615, out[0] == 0.0 && out[1] == 0.0 && out[2] == 0.0);
+        }
+        // The blurs: a source of one value (a 10-bit target holds only numbers in [0, 1]; the mirror takes
+        // anything), weights all at their upper bound, all at their lower, and weights that are no numbers.
+        ClayPostConstants heavy_k = real_k, none_k = real_k, nan_k = real_k;
+        for (int r = 0; r < 4; ++r) {
+          for (int c = 0; c < 4; ++c) {
+            heavy_k.blur[r][c] = 1.0f;
+            none_k.blur[r][c] = 0.0f;
+            nan_k.blur[r][c] = (r + c) % 2 ? kNaN : kInf;
+          }
+        }
+        static float source[16 * 16 * 3];
+        for (float v : {kNaN, kInf, -kInf, -1.0f, 0.0f, 0.5f, 1.0f, 2.0f}) {
+          for (size_t i = 0; i < std::size(source); ++i) source[i] = (i % 3) == 1 ? 0.25f : v;
+          const ClayPostConstants* const sets[] = {&real_k, &made_k, &heavy_k, &none_k, &nan_k};
+          for (const ClayPostConstants* k : sets) {
+            for (int vertical = 0; vertical < 2; ++vertical) {
+              for (uint32_t at : {0u, 7u, 15u, 4000000000u}) {
+                out[0] = out[1] = out[2] = -1.0;
+                PostBlurMirror(PostPicture{source, 16, 16}, at, 15 - (at & 15), *k, vertical != 0, out);
+                CHECK(615, in01(out[0]) && in01(out[1]) && in01(out[2]));
+                ++checked;
+              }
+            }
+          }
+        }
+        for (size_t i = 0; i < std::size(source); ++i) source[i] = 0.5f;
+        PostBlurMirror(PostPicture{source, 16, 16}, 7, 7, heavy_k, false, out);
+        CHECK(615, out[0] == 1.0 && out[1] == 1.0 && out[2] == 1.0);  // (13 taps of 0.5 at weight 1: the target's ceiling)
+        PostBlurMirror(PostPicture{source, 16, 16}, 7, 7, none_k, true, out);
+        CHECK(615, out[0] == 0.0 && out[1] == 0.0 && out[2] == 0.0);
+        PostBlurMirror(PostPicture{source, 16, 16}, 7, 7, nan_k, true, out);
+        CHECK(615, out[0] == 0.0 && out[1] == 0.0 && out[2] == 0.0);
+        // (a weight that is no number counts as 0, an infinite one too: not the target's ceiling)
+        ClayPostConstants inf_k = real_k;
+        for (auto& row : inf_k.blur) {
+          for (float& w : row) w = kInf;
+        }
+        PostBlurMirror(PostPicture{source, 16, 16}, 7, 7, inf_k, false, out);
+        CHECK(615, out[0] == 0.0 && out[1] == 0.0 && out[2] == 0.0);
+        CHECK(615, checked == 14 * 2 * 2 * 4 * 2 + 4 * 2 * 14 * 14 * 6 + 8 * 5 * 2 * 4);
+      }
+
+      // 616: a step's own words (cbuffer Step, b1 of the post layout): the reciprocal of its source's size
+      // (texel sizes are constants of the step, never literals of a shader: review focus 6), the level
+      // count of its target's format, the step's offset (the downsample's pixel convention; the composite's
+      // bloom fetch, in pixels), a blur's direction and its source's last texel.
+      {
+        static_assert(sizeof(ClayPostStepConstants) == 32 && offsetof(ClayPostStepConstants, texel) == 0 &&
+                      offsetof(ClayPostStepConstants, levels) == 8 && offsetof(ClayPostStepConstants, offset) == 12 &&
+                      offsetof(ClayPostStepConstants, dir) == 16 && offsetof(ClayPostStepConstants, last) == 24);
+        const ClayPostStepConstants down = MakeClayPostStep(ClayPostStep::kDownsample, 1120, 720, 0);
+        CHECK(616, down.texel[0] == 1.0f / 1120.0f && down.texel[1] == 1.0f / 720.0f && down.levels == 0.0f && down.offset == kPostDownsampleBias &&
+                       down.dir[0] == 0 && down.dir[1] == 0 && down.last[0] == 1119 && down.last[1] == 719);
+        const ClayPostStepConstants bright = MakeClayPostStep(ClayPostStep::kBright, 280, 180, kPostBloomLevels);
+        CHECK(616, bright.texel[0] == 1.0f / 280.0f && bright.levels == 1023.0f && bright.offset == 0.0f && bright.dir[0] == 0 && bright.dir[1] == 0);
+        const ClayPostStepConstants bx = MakeClayPostStep(ClayPostStep::kBlurX, 280, 180, kPostBloomLevels);
+        const ClayPostStepConstants by = MakeClayPostStep(ClayPostStep::kBlurY, 280, 180, kPostBloomLevels);
+        CHECK(616, bx.dir[0] == 1 && bx.dir[1] == 0 && by.dir[0] == 0 && by.dir[1] == 1 && bx.last[0] == 279 && bx.last[1] == 179 &&
+                       by.last[0] == 279 && by.last[1] == 179 && bx.levels == 1023.0f && by.levels == 1023.0f && bx.offset == 0.0f);
+        const ClayPostStepConstants comp = MakeClayPostStep(ClayPostStep::kComposite, 1120, 720, kPostFrontLevels);
+        // (the bloom's fetch: half a bloom texel is two pixels of the scene)
+        CHECK(616, comp.texel[0] == 1.0f / 1120.0f && comp.texel[1] == 1.0f / 720.0f && comp.levels == 255.0f && comp.offset == 2.0f &&
+                       comp.offset == kPostBloomFetch * float(kPostBloomDivisor) && comp.dir[0] == 0 && comp.dir[1] == 0);
+        // (the coordinate the shader makes of them is the mirror's: (x + offset) * texel in the scene's
+        // normalised coordinate is x / 4 + 0.5 in bloom texels)
+        for (uint32_t x : {0u, 1u, 2u, 4u, 559u, 1119u}) {
+          CHECK(616, std::fabs((double(x) + double(comp.offset)) / 1120.0 * 280.0 - PostBloomCoordinate(x)) < 1e-9);
+        }
+        const ClayPostStepConstants ramp_step = MakeClayPostStep(ClayPostStep::kRamp, 1120, 720, kPostFrontLevels);
+        CHECK(616, ramp_step.levels == 255.0f && ramp_step.offset == 0.0f && ramp_step.dir[0] == 0);
+        // A size of 0 gives no infinity and no negative texel.
+        const ClayPostStepConstants none = MakeClayPostStep(ClayPostStep::kBlurX, 0, 0, kPostBloomLevels);
+        CHECK(616, none.texel[0] == 1.0f && none.texel[1] == 1.0f && none.last[0] == 0 && none.last[1] == 0);
+      }
+
+      // 617: the bloom's verdict of a frame (ClayBloom; the Post line counts it): on only in a post frame
+      // with the switch on and the blurs' weights in the steps' constants; a post frame with the switch on
+      // and no weights is drawn without bloom and counted (no-weights); everything else is off.
+      {
+        for (int bits = 0; bits < 8; ++bits) {
+          const bool post_frame = bits & 1, wanted = bits & 2, weights = bits & 4;
+          const ClayBloom want = !post_frame || !wanted ? ClayBloom::kOff : weights ? ClayBloom::kOn : ClayBloom::kNoWeights;
+          CHECK(617, DecideClayBloom(post_frame, wanted, weights) == want);
+        }
+        static_assert(DecideClayBloom(true, true, true) == ClayBloom::kOn && DecideClayBloom(false, true, true) == ClayBloom::kOff &&
+                      DecideClayBloom(true, false, true) == ClayBloom::kOff && DecideClayBloom(true, true, false) == ClayBloom::kNoWeights);
+        CHECK(617, std::string(ClayBloomName(ClayBloom::kOn)) == "on" && std::string(ClayBloomName(ClayBloom::kOff)) == "off" &&
+                       std::string(ClayBloomName(ClayBloom::kNoWeights)) == "no-weights" && std::string(ClayBloomName(ClayBloom::kCount)) == "off");
+        ClayPostFrames n;
+        for (ClayBloom b : {ClayBloom::kOff, ClayBloom::kOn, ClayBloom::kOn, ClayBloom::kNoWeights, ClayBloom::kCount}) CountClayBloomFrame(b, n);
+        CHECK(617, n.bloom == 2 && n.noweights == 1 && n.frames == 0 && n.drawn == 0);
+        // The constants' flag is the verdict's `weights`: set only with the switch and the block's part.
+        capture::PostBlock with_weights = real_block;
+        std::memcpy(with_weights.blur, real_blur, sizeof(with_weights.blur));
+        with_weights.parts = capture::kPostPartBlur;
+        ClayPostConstants k;
+        CHECK(617, MakeClayPostConstants(with_weights, ramp, true, false, &k) && k.bloom_on == 1 &&
+                       DecideClayBloom(true, true, k.bloom_on != 0) == ClayBloom::kOn);
+        CHECK(617, MakeClayPostConstants(real_block, ramp, true, false, &k) && k.bloom_on == 0 &&
+                       DecideClayBloom(true, true, k.bloom_on != 0) == ClayBloom::kNoWeights);
+        CHECK(617, MakeClayPostConstants(with_weights, ramp, false, false, &k) && k.bloom_on == 0 &&
+                       DecideClayBloom(true, false, k.bloom_on != 0) == ClayBloom::kOff);
+        // Why the pass cannot use a scene's block (the Post line's word; review of plan Task 5, Minor 11).
+        capture::PostBlock paired = real_block;
+        paired.bright[4] = 1.0f / 8.4413f;
+        capture::PostBlock invalid = paired;
+        invalid.valid = false;
+        CHECK(617, PostBlockFault(paired, 0, true, 8.4413f) == ClayPostFault::kNone &&
+                       PostBlockFault(paired, capture::kPostBlockMaxAge, true, 8.4413f) == ClayPostFault::kNone &&
+                       PostBlockFault(invalid, 0, true, 8.4413f) == ClayPostFault::kMissing &&
+                       PostBlockFault(paired, capture::kPostBlockMaxAge + 1, true, 8.4413f) == ClayPostFault::kAge &&
+                       PostBlockFault(paired, 0, false, 8.4413f) == ClayPostFault::kPairing &&
+                       PostBlockFault(paired, 0, true, 16.0f) == ClayPostFault::kPairing &&
+                       PostBlockFault(paired, 0, true, kNaN) == ClayPostFault::kPairing &&
+                       PostBlockFault(invalid, 99, false, kNaN) == ClayPostFault::kMissing &&
+                       PostBlockFault(paired, 99, false, 16.0f) == ClayPostFault::kAge);
+        CHECK(617, std::string(ClayPostFaultName(ClayPostFault::kAge)) == "age" && std::string(ClayPostFaultName(ClayPostFault::kPairing)) == "pairing" &&
+                       std::string(ClayPostFaultName(ClayPostFault::kValues)) == "values" && std::string(ClayPostFaultName(ClayPostFault::kWords)) == "words" &&
+                       std::string(ClayPostFaultName(ClayPostFault::kMissing)) == "none" && std::string(ClayPostFaultName(ClayPostFault::kNone)) == "none");
+      }
     }
   }
   if (g_fail) return g_fail;
@@ -7657,7 +8150,9 @@ int main() {
                "rules and constants, the decision and the Sky line, the step's place among the records, the view rays; "
                "native post: the decision, the table's nearest texel, the unlit scale, the ramp's entry and the composite "
                "against the reference's numbers, nothing that is no number, the steps' constants, the frame's two words, "
-               "the Post line\n";
+               "the Post line; native bloom: the level a target stores, the downsample, the bright pass and the blurs "
+               "against the reference's numbers, the place of the bloom's sample, nothing that is no number, the steps' "
+               "words, the verdict\n";
 
   return 0;
 }

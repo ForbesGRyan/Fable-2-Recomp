@@ -1190,13 +1190,19 @@ float4 main(float4 pos : SV_Position) : SV_Target {
 }
 )hlsl";
 
-// The post steps (render/clay_pass.cpp; clay_logic.h, "Native post"; frame-map section 17, "Native composite";
-// kFullscreenVs draws them): in a post frame the game's composite and the scan-out ramp in place of
-// kOutputMapPs. Both declare cbuffer Post at b0 of the post layout (ClayPostConstants, kClayPostSlots small
-// slots of the frame's constant buffer; kClayPostFields is its layout, which the tests hold against the
-// compiled shaders and the C++ struct) and read their one texture at t0 with Load: texel for texel, no
-// sampler, no filter. The table and the ramp are arrays of the block, read by index: the game's point fetch
-// exactly.
+// The post steps (render/clay_pass.cpp; clay_logic.h, "Native post" and "Native bloom"; frame-map section 17,
+// "Native composite" and "Native bloom"; kFullscreenVs draws them): in a post frame the game's composite and
+// the scan-out ramp in place of kOutputMapPs, and with the bloom before them its four steps. All declare
+// cbuffer Post at b0 of the post layout (ClayPostConstants, kClayPostSlots small slots of the frame's constant
+// buffer; kClayPostFields is its layout, which the tests hold against the compiled shaders and the C++
+// struct) and cbuffer Step at b1 (ClayPostStepConstants, the step's own 8 words; kClayPostStepFields), and
+// read their first texture at t0. The table and the ramp are arrays of the block, read by index: the game's
+// point fetch exactly. No shader holds a size: texel sizes are the step's words.
+//   The level of a UNORM target is written by the step itself (controller ruling 25; clay_logic.h,
+//   PostLevel): the last statement of every step but the downsample (a float target) is
+//   post_level(v) = floor(v * s_levels + 0.5) / s_levels of a value already in [0, 1], s_levels the level
+//   count of the target's format (255, 1023), so that the stored value has no fraction for a card to round
+//   its own way.
 //   kClayPostCompositePs: the arithmetic of the game's 0x37B186F4BD3288F7 (light_formulas.post_composite;
 //     PostCompositeMirror is the mirror, held to the reference's numbers) from the linear target into the
 //     front target (8 bits, before the ramp):
@@ -1205,8 +1211,11 @@ float4 main(float4 pos : SV_Position) : SV_Target {
 //       c = sat(e * (L + sat(p_c47x * L) * (s - L)));  b = sat(bloom * p_c31x);  scr = c + b * (1 - c)
 //       t = scr + p_c77x * (scr - lum(scr));  out = sat(|t| ^ p_c78x), alpha 1
 //     The table is read at the NEAREST texel (controller ruling 19: the game's fetch has a half-texel
-//     offset), not at the floor. The bloom is (0, 0, 0) until plan Task 8: the screen blend is written and
-//     folds away. Guards, each a comparison that is false for a value that is no number: a scene channel
+//     offset), not at the floor. The bloom is (0, 0, 0) unless the block's bloom flag is set (ClayBloom::kOn);
+//     then it is the blurred bright pass at t1, sampled linearly (s1, clamped) at the scene's interpolated
+//     coordinate plus the fetch's half bloom texel, (floor(pos.xy) + s_offset) * s_texel with s_offset 2 pixels
+//     (clay_logic.h, kPostBloomFetch). With the flag 0 the program does what plan Task 5's did, and the
+//     picture is that one's. Guards, each a comparison that is false for a value that is no number: a scene channel
 //     that is not above 0 is 0 (a NaN, a negative value), one above the clamp is the clamp (an infinity);
 //     the coordinate is saturated before it is made an integer and the index bounded after; the power of a
 //     base that is not above 0 or not below 3e38 is 0. With registers and texels inside the block's bounds
@@ -1215,6 +1224,20 @@ float4 main(float4 pos : SV_Position) : SV_Target {
 //     the SDK's swap blit applies it to the emulated picture (light_formulas.post_ramp; PostRampIndex,
 //     PostRampMirror): out.c = p_ramp[min(255, uint(saturate(v.c) * 255 + 0.5))].c, alpha 1, into the mapped
 //     target the composite views sample.
+//   The bloom's three programs (plan Task 8; the game's 87E8, EE92, EA83 and 28DB; light_formulas.
+//   post_downsample, post_bright, post_blur13; PostDownsampleMirror, PostBrightMirror, PostBlurMirror):
+//   kClayPostDownsamplePs: the scene (t0) into the quarter-size float target: a quarter of the sum of four
+//     linear samples (s1, clamped) at P + (2.5, 2.5), (2.5, 0.5), (0.5, 0.5), (0.5, 2.5) texels, P = 4 *
+//     (floor(pos.xy) + s_offset), each sample read as post_scene (0 unless above 0, at most p_scene_max). With
+//     s_offset 0 (kPostDownsampleBias) the four are texel centres: four texels of the pixel's sixteen.
+//   kClayPostBrightPs: the downsample's texel (t0, Load) into the first 10-bit target: d = post_scene(texel),
+//     L = lum(d), v = d * (L > 0 ? sat(L * p_b77y - p_b77x) / L * p_b31x : 0); with the sun's flag
+//     (plan Task 14) plus tf1 * 6 * p_b46x + tf2 (t1, t2: unread without the flag, the white texture bound);
+//     out = post_level(post_unit(v / p_b47x)).
+//   kClayPostBlurPs: one program for both blurs, the direction in the step's words: 13 Loads of t0 at
+//     at + k * s_dir, k = -6..6, each coordinate clamped to [0, s_last], weighted p_blur's row 0 and 1 (along
+//     x) or 2 and 3 (along y) by |k|; out = post_level(post_unit(sum)).
+//   post_unit(v) = (v > 0) ? min(v, 1) : 0: a value that is no number is 0, so none enters or leaves a blur.
 inline constexpr ClayBufferField kClayPostFields[] = {
     {"p_c31x", 0, 4},     {"p_c46x", 4, 4},       {"p_c47x", 8, 4},     {"p_c77x", 12, 4},
     {"p_c77y", 16, 4},    {"p_c78x", 20, 4},      {"p_scene_max", 24, 4}, {"p_previous", 28, 4},
@@ -1223,24 +1246,40 @@ inline constexpr ClayBufferField kClayPostFields[] = {
     {"p_blur", 64, 64},   {"p_radial", 128, 16},  {"p_table", 144, 2048}, {"p_ramp", 2192, 4096},
 };
 inline constexpr unsigned kClayPostSize = 6288;
+// cbuffer Step (b1 of the post layout): render::ClayPostStepConstants.
+inline constexpr ClayBufferField kClayPostStepFields[] = {
+    {"s_texel", 0, 8}, {"s_levels", 8, 4}, {"s_offset", 12, 4}, {"s_dir", 16, 8}, {"s_last", 24, 8},
+};
+inline constexpr unsigned kClayPostStepSize = 32;
 
 #define FABLE2_CLAY_POST_HLSL R"hlsl(
 cbuffer Post : register(b0) {
   float p_c31x; float p_c46x; float p_c47x; float p_c77x;          // the composite 37B1: c31.x, c46.x, c47.x, c77.x
   float p_c77y; float p_c78x; float p_scene_max; float p_previous; // c77.y, c78.x; the scene's clamp; (plan Task 15)
-  float p_b31x; float p_b46x; float p_b47x; float p_b77x;          // the bright pass EE92 (plan Task 8)
-  float p_b77y; uint p_bloom_on; uint p_sun_on; uint p_pad;
-  float4 p_blur[4];                                                // the blurs' weights (plan Task 8)
+  float p_b31x; float p_b46x; float p_b47x; float p_b77x;          // the bright pass EE92: c31.x, c46.x, c47.x, c77.x
+  float p_b77y; uint p_bloom_on; uint p_sun_on; uint p_pad;        // c77.y; the bloom's flag; the sun's (plan Task 14)
+  float4 p_blur[4];                                                // the blurs' weights: EA83's in rows 0 and 1, 28DB's in 2 and 3
   float4 p_radial;                                                 // the radial blur's registers (plan Task 14)
   float4 p_table[128];                                             // the composite's table: texel i at [i >> 2][i & 3]
   float4 p_ramp[256];                                              // the scan-out ramp: entry i (rgb)
 };
+cbuffer Step : register(b1) {
+  float2 s_texel;   // 1 / the width and height of the texture the step addresses by coordinate
+  float s_levels;   // the level count of the step's target's format (255, 1023); 0 for a float target
+  float s_offset;   // the downsample's pixel position; the composite's bloom fetch in pixels
+  int2 s_dir;       // a blur's direction in texels: (1, 0) along x, (0, 1) along y
+  int2 s_last;      // the last texel of a blur's source
+};
+float post_lum(float3 c) { return dot(c, float3(0.2125, 0.7154, 0.0721)); }
+float3 post_scene(float3 v) { return (v > 0.0) ? min(v, p_scene_max) : float3(0.0, 0.0, 0.0); }
+float3 post_unit(float3 v) { return (v > 0.0) ? min(v, 1.0) : float3(0.0, 0.0, 0.0); }
+float3 post_level(float3 v) { return floor(v * s_levels + 0.5) / s_levels; }
 )hlsl"
 
 inline constexpr const char* kClayPostCompositePs = FABLE2_CLAY_POST_HLSL R"hlsl(
 Texture2D<float4> scene_target : register(t0);
-float post_lum(float3 c) { return dot(c, float3(0.2125, 0.7154, 0.0721)); }
-float3 post_scene(float3 v) { return (v > 0.0) ? min(v, p_scene_max) : float3(0.0, 0.0, 0.0); }
+Texture2D<float4> bloom_target : register(t1);
+SamplerState linear_clamp : register(s1);
 float post_table(float u) {
   uint i = min(uint(512.0 * saturate(u) + 0.5), 511u);
   return p_table[i >> 2][i & 3];
@@ -1261,7 +1300,9 @@ float3 PostComposite(float3 scene, float3 bloom) {
 }
 float4 main(float4 pos : SV_Position) : SV_Target {
   float3 scene = scene_target.Load(int3(pos.xy, 0)).rgb;
-  return float4(PostComposite(scene, float3(0.0, 0.0, 0.0)), 1.0);
+  float3 bloom = float3(0.0, 0.0, 0.0);
+  if (p_bloom_on != 0) bloom = bloom_target.SampleLevel(linear_clamp, (floor(pos.xy) + s_offset) * s_texel, 0.0).rgb;
+  return float4(post_level(PostComposite(scene, bloom)), 1.0);
 }
 )hlsl";
 
@@ -1270,7 +1311,57 @@ Texture2D<float4> front_target : register(t0);
 uint post_ramp_index(float v) { return min(uint(saturate(v) * 255.0 + 0.5), 255u); }
 float4 main(float4 pos : SV_Position) : SV_Target {
   float3 v = front_target.Load(int3(pos.xy, 0)).rgb;
-  return float4(p_ramp[post_ramp_index(v.r)].r, p_ramp[post_ramp_index(v.g)].g, p_ramp[post_ramp_index(v.b)].b, 1.0);
+  float3 mapped = float3(p_ramp[post_ramp_index(v.r)].r, p_ramp[post_ramp_index(v.g)].g, p_ramp[post_ramp_index(v.b)].b);
+  return float4(post_level(saturate(mapped)), 1.0);
+}
+)hlsl";
+
+inline constexpr const char* kClayPostDownsamplePs = FABLE2_CLAY_POST_HLSL R"hlsl(
+Texture2D<float4> scene_target : register(t0);
+SamplerState linear_clamp : register(s1);
+float3 post_tap(float2 p, float2 offset) {
+  return post_scene(scene_target.SampleLevel(linear_clamp, (p + offset) * s_texel, 0.0).rgb);
+}
+float4 main(float4 pos : SV_Position) : SV_Target {
+  float2 p = 4.0 * (floor(pos.xy) + s_offset);
+  float3 sum = post_tap(p, float2(2.5, 2.5)) + post_tap(p, float2(2.5, 0.5)) + post_tap(p, float2(0.5, 0.5)) + post_tap(p, float2(0.5, 2.5));
+  return float4(0.25 * sum, 1.0);
+}
+)hlsl";
+
+inline constexpr const char* kClayPostBrightPs = FABLE2_CLAY_POST_HLSL R"hlsl(
+Texture2D<float4> down_target : register(t0);
+Texture2D<float4> sun_tf1 : register(t1);
+Texture2D<float4> sun_tf2 : register(t2);
+float4 main(float4 pos : SV_Position) : SV_Target {
+  int3 at = int3(pos.xy, 0);
+  float3 d = post_scene(down_target.Load(at).rgb);
+  float L = post_lum(d);
+  float gain = (L > 0.0) ? saturate(L * p_b77y - p_b77x) / L * p_b31x : 0.0;
+  float3 v = d * gain;
+  if (p_sun_on != 0) v += sun_tf1.Load(at).rgb * 6.0 * p_b46x + sun_tf2.Load(at).rgb;
+  return float4(post_level(post_unit(v / p_b47x)), 1.0);
+}
+)hlsl";
+
+inline constexpr const char* kClayPostBlurPs = FABLE2_CLAY_POST_HLSL R"hlsl(
+Texture2D<float4> blur_source : register(t0);
+float3 post_blur_tap(int2 at, int k, float w) {
+  return w * blur_source.Load(int3(clamp(at + k * s_dir, int2(0, 0), s_last), 0)).rgb;
+}
+float4 main(float4 pos : SV_Position) : SV_Target {
+  int2 at = int2(pos.xy);
+  bool vertical = s_dir.y != 0;
+  float4 w0 = vertical ? p_blur[2] : p_blur[0];
+  float4 w1 = vertical ? p_blur[3] : p_blur[1];
+  float3 sum = post_blur_tap(at, 0, w0.x);
+  sum += post_blur_tap(at, -1, w0.y) + post_blur_tap(at, 1, w0.y);
+  sum += post_blur_tap(at, -2, w0.z) + post_blur_tap(at, 2, w0.z);
+  sum += post_blur_tap(at, -3, w0.w) + post_blur_tap(at, 3, w0.w);
+  sum += post_blur_tap(at, -4, w1.x) + post_blur_tap(at, 4, w1.x);
+  sum += post_blur_tap(at, -5, w1.y) + post_blur_tap(at, 5, w1.y);
+  sum += post_blur_tap(at, -6, w1.z) + post_blur_tap(at, 6, w1.z);
+  return float4(post_level(post_unit(sum)), 1.0);
 }
 )hlsl";
 

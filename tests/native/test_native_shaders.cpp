@@ -453,6 +453,106 @@ static unsigned DeclaredRegisters(const std::string& listing, int index, bool* d
   return unsigned(std::strtoul(listing.c_str() + at + needle.size(), nullptr, 10));
 }
 
+// The two post shaders as plan Task 5 of the post sub-project committed them (e7e5ff7; before the bloom and
+// before the writes' own rounding): case 237 holds today's programs against them.
+static const char* const kPostCompositeBefore = R"hlsl(
+cbuffer Post : register(b0) {
+  float p_c31x; float p_c46x; float p_c47x; float p_c77x;          // the composite 37B1: c31.x, c46.x, c47.x, c77.x
+  float p_c77y; float p_c78x; float p_scene_max; float p_previous; // c77.y, c78.x; the scene's clamp; (plan Task 15)
+  float p_b31x; float p_b46x; float p_b47x; float p_b77x;          // the bright pass EE92 (plan Task 8)
+  float p_b77y; uint p_bloom_on; uint p_sun_on; uint p_pad;
+  float4 p_blur[4];                                                // the blurs' weights (plan Task 8)
+  float4 p_radial;                                                 // the radial blur's registers (plan Task 14)
+  float4 p_table[128];                                             // the composite's table: texel i at [i >> 2][i & 3]
+  float4 p_ramp[256];                                              // the scan-out ramp: entry i (rgb)
+};
+)hlsl" R"hlsl(
+Texture2D<float4> scene_target : register(t0);
+float post_lum(float3 c) { return dot(c, float3(0.2125, 0.7154, 0.0721)); }
+float3 post_scene(float3 v) { return (v > 0.0) ? min(v, p_scene_max) : float3(0.0, 0.0, 0.0); }
+float post_table(float u) {
+  uint i = min(uint(512.0 * saturate(u) + 0.5), 511u);
+  return p_table[i >> 2][i & 3];
+}
+float3 post_pow(float3 base, float exponent) {
+  float3 b = abs(base);
+  return (b > 0.0 && b < 3.0e38) ? exp2(exponent * log2(b)) : float3(0.0, 0.0, 0.0);
+}
+float3 PostComposite(float3 scene, float3 bloom) {
+  float3 s = post_scene(scene);
+  float L = post_lum(s);
+  float e = p_c77y * post_table(p_c46x * L);
+  float3 c = saturate(e * (L + saturate(p_c47x * L) * (s - L)));
+  float3 b = saturate(bloom * p_c31x);
+  float3 scr = c + b * (1.0 - c);
+  float3 t = scr + p_c77x * (scr - post_lum(scr));
+  return saturate(post_pow(t, p_c78x));
+}
+float4 main(float4 pos : SV_Position) : SV_Target {
+  float3 scene = scene_target.Load(int3(pos.xy, 0)).rgb;
+  return float4(PostComposite(scene, float3(0.0, 0.0, 0.0)), 1.0);
+}
+)hlsl";
+static const char* const kPostRampBefore = R"hlsl(
+cbuffer Post : register(b0) {
+  float p_c31x; float p_c46x; float p_c47x; float p_c77x;          // the composite 37B1: c31.x, c46.x, c47.x, c77.x
+  float p_c77y; float p_c78x; float p_scene_max; float p_previous; // c77.y, c78.x; the scene's clamp; (plan Task 15)
+  float p_b31x; float p_b46x; float p_b47x; float p_b77x;          // the bright pass EE92 (plan Task 8)
+  float p_b77y; uint p_bloom_on; uint p_sun_on; uint p_pad;
+  float4 p_blur[4];                                                // the blurs' weights (plan Task 8)
+  float4 p_radial;                                                 // the radial blur's registers (plan Task 14)
+  float4 p_table[128];                                             // the composite's table: texel i at [i >> 2][i & 3]
+  float4 p_ramp[256];                                              // the scan-out ramp: entry i (rgb)
+};
+)hlsl" R"hlsl(
+Texture2D<float4> front_target : register(t0);
+uint post_ramp_index(float v) { return min(uint(saturate(v) * 255.0 + 0.5), 255u); }
+float4 main(float4 pos : SV_Position) : SV_Target {
+  float3 v = front_target.Load(int3(pos.xy, 0)).rgb;
+  return float4(p_ramp[post_ramp_index(v.r)].r, p_ramp[post_ramp_index(v.g)].g, p_ramp[post_ramp_index(v.b)].b, 1.0);
+}
+)hlsl";
+
+// The smallest number of nested `if` blocks around an instruction `op` that names the texture at register
+// t<reg> (0: one outside every block; -1: none at all), and how many such instructions there are.
+static int TextureReadDepth(const std::string& listing, const char* op, int reg, int* count = nullptr) {
+  const std::string needle = ", t" + std::to_string(reg) + ".";
+  const size_t n = strlen(op);
+  int depth = 0, least = -1, found = 0;
+  size_t at = 0;
+  while (at < listing.size()) {
+    size_t end = listing.find('\n', at);
+    if (end == std::string::npos) end = listing.size();
+    const size_t first = listing.find_first_not_of(" \t", at);
+    if (first < end && listing[first] != '/') {
+      const std::string line = listing.substr(first, end - first);
+      if (line.compare(0, 3, "if_") == 0) ++depth;
+      if (line.compare(0, 5, "endif") == 0) --depth;
+      if (line.compare(0, n, op) == 0 && line.find(needle) != std::string::npos) {
+        ++found;
+        least = least < 0 ? depth : (depth < least ? depth : least);
+      }
+    }
+    at = end + 1;
+  }
+  if (count) *count = found;
+  return least;
+}
+
+// The number of instruction lines of a listing (declarations and comments left out).
+static int Instructions(const std::string& listing) {
+  int n = 0;
+  size_t at = 0;
+  while (at < listing.size()) {
+    size_t end = listing.find('\n', at);
+    if (end == std::string::npos) end = listing.size();
+    const size_t first = listing.find_first_not_of(" \t\r", at);
+    if (first < end && listing[first] != '/' && listing.compare(first, 4, "dcl_") != 0 && listing.compare(first, 3, "ps_") != 0) ++n;
+    at = end + 1;
+  }
+  return n;
+}
+
 // The clay shader `src` with the draw's light_mode a compile-time constant instead of the root word: the
 // program a draw with that light_mode runs, with everything it cannot reach folded away by the compiler.
 // Empty when the cbuffer's text is not found (the caller fails).
@@ -3655,7 +3755,8 @@ int main() {
     }
     // (the shaders that are no scene pixel shader's colour program name no such word)
     if (strstr(kClayShadowPs, "f_post") || strstr(kOutputMapPs, "f_post") || strstr(kClayMaskPs, "f_post") || strstr(kCompositePs, "f_post") ||
-        strstr(kClayPostCompositePs, "f_post") || strstr(kClayPostRampPs, "f_post")) return 230;
+        strstr(kClayPostCompositePs, "f_post") || strstr(kClayPostRampPs, "f_post") || strstr(kClayPostDownsamplePs, "f_post") ||
+        strstr(kClayPostBrightPs, "f_post") || strstr(kClayPostBlurPs, "f_post")) return 230;
     // `textured` fixed at 1 beside the mode: the program of a draw with an albedo.
     auto with_albedo = [](std::string text) {
       const std::string field = "uint textured;", mode = "static const uint light_mode";
@@ -3755,12 +3856,15 @@ int main() {
     if (leak.empty() || Code(Disassembly("leak", WithLightMode(leak.c_str(), 5).c_str(), "ps_5_0")) ==
                             Code(Disassembly("before", WithLightMode(far_before.c_str(), 5).c_str(), "ps_5_0"))) return 231;
   }
-  // 232 to 236: the two post steps (clay_logic.h, "Native post"): the composite and the ramp, drawn in a
-  // post frame in place of the output mapping, whose text and program are untouched (cases 65 to 78).
+  // 232 to 241: the post steps (clay_logic.h, "Native post" and "Native bloom"): the composite and the ramp,
+  // drawn in a post frame in place of the output mapping, whose text and program are untouched (cases 65 to
+  // 78), and before them, with the bloom, the downsample, the bright pass and the two blurs (plan Task 8).
   {
     using fable2::native::render::ClayPostConstants;
+    using fable2::native::render::ClayPostStepConstants;
     const unsigned post_count = sizeof(kClayPostFields) / sizeof(kClayPostFields[0]);
-    // The layout: the table against the C++ struct, and against both compiled shaders.
+    const unsigned step_count = sizeof(kClayPostStepFields) / sizeof(kClayPostStepFields[0]);
+    // The layout: the tables against the C++ structs, and against every compiled shader.
     const ClayBufferField post_struct[] = {
         {"p_c31x", offsetof(ClayPostConstants, composite) + 0, 4},  {"p_c46x", offsetof(ClayPostConstants, composite) + 4, 4},
         {"p_c47x", offsetof(ClayPostConstants, composite) + 8, 4},  {"p_c77x", offsetof(ClayPostConstants, composite) + 12, 4},
@@ -3778,6 +3882,13 @@ int main() {
         {"p_table", offsetof(ClayPostConstants, table), sizeof(ClayPostConstants::table)},
         {"p_ramp", offsetof(ClayPostConstants, ramp), sizeof(ClayPostConstants::ramp)},
     };
+    const ClayBufferField step_struct[] = {
+        {"s_texel", offsetof(ClayPostStepConstants, texel), sizeof(ClayPostStepConstants::texel)},
+        {"s_levels", offsetof(ClayPostStepConstants, levels), sizeof(ClayPostStepConstants::levels)},
+        {"s_offset", offsetof(ClayPostStepConstants, offset), sizeof(ClayPostStepConstants::offset)},
+        {"s_dir", offsetof(ClayPostStepConstants, dir), sizeof(ClayPostStepConstants::dir)},
+        {"s_last", offsetof(ClayPostStepConstants, last), sizeof(ClayPostStepConstants::last)},
+    };
     if (post_count != 20 || sizeof(post_struct) / sizeof(post_struct[0]) != post_count || kClayPostSize != sizeof(ClayPostConstants) ||
         kClayPostSize > fable2::native::render::kClayPostSlots * fable2::native::render::kClayTerrainSlotBytes) return 232;
     for (unsigned i = 0; i < post_count; ++i) {
@@ -3787,25 +3898,87 @@ int main() {
         return 232;
       }
     }
+    // (the step's words: 8 of them, the layout's root constants at b1)
+    if (step_count != 5 || sizeof(step_struct) / sizeof(step_struct[0]) != step_count || kClayPostStepSize != sizeof(ClayPostStepConstants) ||
+        kClayPostStepSize != 8 * 4) return 232;
+    for (unsigned i = 0; i < step_count; ++i) {
+      if (strcmp(kClayPostStepFields[i].name, step_struct[i].name) || kClayPostStepFields[i].offset != step_struct[i].offset ||
+          kClayPostStepFields[i].bytes != step_struct[i].bytes) {
+        std::cerr << "kClayPostStepFields[" << i << "] is not ClayPostStepConstants' field\n";
+        return 232;
+      }
+    }
+    // 233: every step. Its two blocks at b0 and b1 with the tables' layouts; its first texture at t0; the
+    // textures it reads and how (t0 by Load, or by the linear sampler s1 in the downsample; the composite's
+    // bloom and the bright pass's two sun layers only behind their flag: inside an `if`); no sampler but s1,
+    // no loop, nothing of the frame's block, alpha 1. And the write's own rounding (controller ruling 25) as
+    // the program's last arithmetic in every step into a UNORM target: the value times the step's level
+    // count plus a half, rounded down, divided by the level count (cb1[0].z); never in the downsample, whose
+    // target is a float one.
     const struct {
       const char* name;
       const char* src;
       const char* texture;
-    } steps[] = {{"clay_post_composite_ps", kClayPostCompositePs, "scene_target"}, {"clay_post_ramp_ps", kClayPostRampPs, "front_target"}};
+      bool unorm;           // the step writes a UNORM target
+      int loads0, samples0; // instructions that load / sample t0
+      unsigned gated;       // bit r: t<r> is read, and only inside an `if`
+      bool sampler;         // the step declares s1
+    } steps[] = {{"clay_post_composite_ps", kClayPostCompositePs, "scene_target", true, 1, 0, 1u << 1, true},
+                 {"clay_post_ramp_ps", kClayPostRampPs, "front_target", true, 1, 0, 0, false},
+                 {"clay_post_downsample_ps", kClayPostDownsamplePs, "scene_target", false, 0, 4, 0, true},
+                 {"clay_post_bright_ps", kClayPostBrightPs, "down_target", true, 1, 0, (1u << 1) | (1u << 2), false},
+                 {"clay_post_blur_ps", kClayPostBlurPs, "blur_source", true, 13, 0, 0, false}};
     for (const auto& s : steps) {
       if (!Compile(s.name, s.src, "ps_5_0")) return 233;
       if (int at = BufferLayoutMismatch(s.name, s.src, "ps_5_0", "Post", kClayPostFields, post_count, kClayPostSize)) {
         std::cerr << s.name << ": cbuffer Post is not kClayPostFields (" << at << ")\n";
         return 233;
       }
+      if (int at = BufferLayoutMismatch(s.name, s.src, "ps_5_0", "Step", kClayPostStepFields, step_count, kClayPostStepSize)) {
+        std::cerr << s.name << ": cbuffer Step is not kClayPostStepFields (" << at << ")\n";
+        return 233;
+      }
       const std::string listing = Disassembly(s.name, s.src, "ps_5_0");
-      // One texture, at t0, read with Load; the one block, at b0; no sampler, no loop, nothing else bound.
+      int loads = 0, samples = 0;
+      const int load_depth = TextureReadDepth(listing, "ld_indexable", 0, &loads);
+      const int sample_depth = TextureReadDepth(listing, "sample_l", 0, &samples);
       if (listing.empty() || BindPoint(s.name, s.src, "ps_5_0", s.texture) != 0 || BindPoint(s.name, s.src, "ps_5_0", "Post") != 0 ||
-          !ReadsResource(listing, 0) || listing.find("ld_indexable") == std::string::npos || listing.find("sample") != std::string::npos ||
-          listing.find("dcl_sampler") != std::string::npos || LoopInstructions(listing) != 0 || ReadsBlock(listing, "cb1") ||
-          ReadsBlock(listing, "cb2") || strstr(s.src, "SamplerState") || !HasLineWith(listing, "mov", "o0.w, l(1.000000)")) return 233;
+          BindPoint(s.name, s.src, "ps_5_0", "Step") != 1 || loads != s.loads0 || samples != s.samples0 ||
+          (loads && load_depth != 0) || (samples && sample_depth != 0) || LoopInstructions(listing) != 0 || ReadsBlock(listing, "cb2") ||
+          !HasLineWith(listing, "mov", "o0.w, l(1.000000)") || listing.find("dcl_sampler s0") != std::string::npos ||
+          (listing.find("dcl_sampler s1") != std::string::npos) != s.sampler || (strstr(s.src, "SamplerState") != nullptr) != s.sampler ||
+          (s.sampler && BindPoint(s.name, s.src, "ps_5_0", "linear_clamp") != 1)) {
+        std::cerr << s.name << ": the step's bindings or its reads of t0 are not the ones stated (" << loads << " loads, " << samples << " samples)\n";
+        return 233;
+      }
       for (int reg = 1; reg < 8; ++reg) {
-        if (ReadsResource(listing, reg) || listing.find("dcl_resource_texture2d (float,float,float,float) t" + std::to_string(reg)) != std::string::npos) return 233;
+        const bool wanted = (s.gated >> reg) & 1u;
+        int n = 0;
+        const int ld = TextureReadDepth(listing, "ld_indexable", reg, &n);
+        int m = 0;
+        const int smp = TextureReadDepth(listing, "sample_l", reg, &m);
+        if (ReadsResource(listing, reg) != wanted || (wanted && ((n && ld < 1) || (m && smp < 1) || n + m != 1))) {
+          std::cerr << s.name << ": t" << reg << " is read where it must not be, or outside its flag's test\n";
+          return 233;
+        }
+      }
+      // The shared functions are the block's, once; the rounding is the last statement of a UNORM step.
+      for (const char* shared : {"float post_lum(float3 c) { return dot(c, float3(0.2125, 0.7154, 0.0721)); }",
+                                 "float3 post_scene(float3 v) { return (v > 0.0) ? min(v, p_scene_max) : float3(0.0, 0.0, 0.0); }",
+                                 "float3 post_unit(float3 v) { return (v > 0.0) ? min(v, 1.0) : float3(0.0, 0.0, 0.0); }",
+                                 "float3 post_level(float3 v) { return floor(v * s_levels + 0.5) / s_levels; }"}) {
+        if (Count(s.src, shared) != 1) return 233;
+      }
+      const bool rounds = HasLineWith(listing, "round_ni", "r0.xyz, r0.xyzx") && HasLineWith(listing, "div", "cb1[0].zzzz") && HasLineWith(listing, "div", "o0.xyz") &&
+                          HasLineWith(listing, "mad", "cb1[0].zzzz, l(0.500000, 0.500000, 0.500000, 0.000000)");
+      if (s.unorm != rounds || s.unorm != (Count(s.src, "  return float4(post_level(") == 1) || Count(s.src, "post_level(") != (s.unorm ? 2 : 1) ||
+          (!s.unorm && (HasOp(listing, "div") || ReadsComponent(listing, "cb1[0]", 'z')))) {
+        std::cerr << s.name << ": the write's own rounding is not where it must be\n";
+        return 233;
+      }
+      // No literal of a size: neither the logical size nor the bloom's is in any step's text.
+      for (const char* size : {"1120", "720", "280", "180", "1280"}) {
+        if (strstr(s.src, size)) return 233;
       }
     }
     // The composite's statements, in the text (the reference's terms: light_formulas.post_composite), and
@@ -3813,14 +3986,14 @@ int main() {
     {
       const char* c = kClayPostCompositePs;
       const char* statements[] = {
-          "float post_lum(float3 c) { return dot(c, float3(0.2125, 0.7154, 0.0721)); }",
-          "float3 post_scene(float3 v) { return (v > 0.0) ? min(v, p_scene_max) : float3(0.0, 0.0, 0.0); }",
           "  uint i = min(uint(512.0 * saturate(u) + 0.5), 511u);\n  return p_table[i >> 2][i & 3];",
           "  return (b > 0.0 && b < 3.0e38) ? exp2(exponent * log2(b)) : float3(0.0, 0.0, 0.0);",
           "  float3 s = post_scene(scene);\n  float L = post_lum(s);\n  float e = p_c77y * post_table(p_c46x * L);\n"
           "  float3 c = saturate(e * (L + saturate(p_c47x * L) * (s - L)));\n  float3 b = saturate(bloom * p_c31x);\n"
           "  float3 scr = c + b * (1.0 - c);\n  float3 t = scr + p_c77x * (scr - post_lum(scr));\n  return saturate(post_pow(t, p_c78x));",
-          "  float3 scene = scene_target.Load(int3(pos.xy, 0)).rgb;\n  return float4(PostComposite(scene, float3(0.0, 0.0, 0.0)), 1.0);",
+          "  float3 scene = scene_target.Load(int3(pos.xy, 0)).rgb;\n  float3 bloom = float3(0.0, 0.0, 0.0);\n"
+          "  if (p_bloom_on != 0) bloom = bloom_target.SampleLevel(linear_clamp, (floor(pos.xy) + s_offset) * s_texel, 0.0).rgb;\n"
+          "  return float4(post_level(PostComposite(scene, bloom)), 1.0);",
       };
       for (const char* statement : statements) {
         if (!strstr(c, statement)) {
@@ -3831,22 +4004,27 @@ int main() {
       // On the compiled code: the scene's rule (a comparison with 0 and a mask, the minimum with the
       // block's clamp), the saturated coordinate times 512 plus a half made an unsigned integer and
       // bounded at 511 before it indexes the table (register 9 on: byte 144), the power's two tests, and
-      // the last clamp. The block is declared to the table's end and no further: the ramp is not read.
+      // the clamp before the rounding. The block is declared to the table's end and no further: the ramp is
+      // not read. The bloom: its flag's test (cb0[3].y), and inside it one sample of t1 with s1 at the
+      // pixel's floor plus the step's offset (cb1[0].w) times the step's texel size (cb1[0].xy).
       const std::string listing = Disassembly("clay_post_composite_ps", c, "ps_5_0");
       bool dynamic = false;
-      const size_t load = listing.find("ld_indexable"), positive = listing.find("lt r1.xyz, l(0.000000, 0.000000, 0.000000, 0.000000), r0.xyzx");
-      const size_t scale = listing.find("l(512.000000), l(0.500000)"), to_uint = listing.find("ftou"), bound = listing.find("umin");
-      const size_t table = listing.find(" + 9]");
-      if (DeclaredRegisters(listing, 0, &dynamic) != 144 / 16 + 128 || !dynamic || load == std::string::npos || positive == std::string::npos ||
+      const size_t load = listing.find("ld_indexable"), scale = listing.find("l(512.000000), l(0.500000)"), to_uint = listing.find("ftou");
+      const size_t bound = listing.find("umin"), table = listing.find(" + 9]"), round = listing.rfind("round_ni"), flag = listing.find("if_nz");
+      const size_t sample = listing.find("sample_l");
+      if (DeclaredRegisters(listing, 0, &dynamic) != 144 / 16 + 128 || !dynamic || DeclaredRegisters(listing, 1) != 1 || load == std::string::npos ||
           scale == std::string::npos || to_uint == std::string::npos || bound == std::string::npos || table == std::string::npos ||
-          !(load < positive && positive < scale && scale < to_uint && to_uint < bound && bound < table)) {
+          round == std::string::npos || flag == std::string::npos || sample == std::string::npos ||
+          !(scale < to_uint && to_uint < bound && bound < table && table < round && flag < sample && sample < round)) {
         std::cerr << "the composite's compiled program lacks a guard or has them out of order\n";
         return 234;
       }
       if (!HasLineWith(listing, "min", "cb0[1].zzzz") || !HasLineWith(listing, "umin", "l(511)") || !HasLineWith(listing, "mul_sat", "cb0[0].yzyy") ||
-          !HasLineWith(listing, "lt", "l(300000000549775575777803994281145270272.000000") || !HasLineWith(listing, "min", "o0.xyz") ||
+          !HasLineWith(listing, "lt", "l(300000000549775575777803994281145270272.000000") ||
           !HasLineWith(listing, "mad", "l(512.000000), l(0.500000)") || !HasOp(listing, "log") || !HasOp(listing, "exp") || HasOp(listing, "sqrt") ||
-          Count(listing.c_str(), "ftou") != 1 || Count(listing.c_str(), " + 9]") != 1) return 234;
+          Count(listing.c_str(), "ftou") != 1 || Count(listing.c_str(), " + 9]") != 1 || !HasLineWith(listing, "if_nz", "cb0[3].y") ||
+          !HasLineWith(listing, "sample_l_indexable(texture2d)(float,float,float,float)", "t1.xyzw, s1, l(0.000000)") || !ReadsComponent(listing, "cb1[0]", 'w') || !ReadsComponent(listing, "cb1[0]", 'x') ||
+          !ReadsComponent(listing, "cb1[0]", 'y') || !HasOp(listing, "round_ni") || Count(listing.c_str(), "sample_l") != 1) return 234;
       // Controls: without the index's bound, without the scene's clamp, with the floor's addressing and
       // without the coordinate's saturate, each is seen.
       const std::string unbounded = Changed(c, "min(uint(512.0 * saturate(u) + 0.5), 511u)", "uint(512.0 * saturate(u) + 0.5)");
@@ -3863,33 +4041,207 @@ int main() {
     // The ramp: the front target's value saturated (a value that is no number is 0), times 255 plus a
     // half, made an unsigned integer: at most 255, which the compiler takes from the saturate (it drops
     // the written minimum as implied, as it does the fog tables' first index), and the block is declared
-    // to the ramp's last entry (register 137 on: byte 2,192; 256 entries).
+    // to the ramp's last entry (register 137 on: byte 2,192; 256 entries). The entry is then rounded to the
+    // mapped target's own level by the step.
     {
       const char* r = kClayPostRampPs;
       if (!strstr(r, "uint post_ramp_index(float v) { return min(uint(saturate(v) * 255.0 + 0.5), 255u); }") ||
           !strstr(r, "  float3 v = front_target.Load(int3(pos.xy, 0)).rgb;\n"
-                     "  return float4(p_ramp[post_ramp_index(v.r)].r, p_ramp[post_ramp_index(v.g)].g, p_ramp[post_ramp_index(v.b)].b, 1.0);")) return 236;
+                     "  float3 mapped = float3(p_ramp[post_ramp_index(v.r)].r, p_ramp[post_ramp_index(v.g)].g, p_ramp[post_ramp_index(v.b)].b);\n"
+                     "  return float4(post_level(saturate(mapped)), 1.0);")) return 236;
       const std::string listing = Disassembly("clay_post_ramp_ps", r, "ps_5_0");
       bool dynamic = false;
       const size_t load = listing.find("ld_indexable"), sat = listing.find("mov_sat"), scale = listing.find("l(255.000000, 255.000000, 255.000000, 0.000000), l(0.500000, 0.500000, 0.500000, 0.000000)");
-      const size_t to_uint = listing.find("ftou"), entry = listing.find(" + 137]");
+      const size_t to_uint = listing.find("ftou"), entry = listing.find(" + 137]"), round = listing.find("round_ni");
       if (DeclaredRegisters(listing, 0, &dynamic) != 2192 / 16 + 256 || !dynamic || load == std::string::npos || sat == std::string::npos ||
-          scale == std::string::npos || to_uint == std::string::npos || entry == std::string::npos ||
-          !(load < sat && sat < scale && scale < to_uint && to_uint < entry) || Count(listing.c_str(), " + 137]") != 3 ||
-          !HasLineWith(listing, "mov", "o0.x, cb0[r0.x + 137].x") || !HasLineWith(listing, "mov", "o0.y, cb0[r0.y + 137].y") ||
-          !HasLineWith(listing, "mov", "o0.z, cb0[r0.z + 137].z")) {
+          scale == std::string::npos || to_uint == std::string::npos || entry == std::string::npos || round == std::string::npos ||
+          !(load < sat && sat < scale && scale < to_uint && to_uint < entry && entry < round) || Count(listing.c_str(), " + 137]") != 3 ||
+          !HasLineWith(listing, "mov_sat", "cb0[r0.x + 137].x") || !HasLineWith(listing, "mov_sat", "cb0[r0.y + 137].y") ||
+          !HasLineWith(listing, "mov_sat", "cb0[r0.z + 137].z")) {
         std::cerr << "the ramp's compiled program lacks its saturate or reads another entry\n";
         return 236;
       }
       // Control: without the saturate the written minimum is what bounds the index, and it is compiled.
       const std::string loose = Changed(r, "min(uint(saturate(v) * 255.0 + 0.5), 255u)", "min(uint(v * 255.0 + 0.5), 255u)");
       const std::string loose_l = Disassembly("loose_ramp", loose.c_str(), "ps_5_0");
-      if (loose.empty() || loose_l.empty() || !HasLineWith(loose_l, "umin", "l(255") || loose_l.find("mov_sat") != std::string::npos) return 236;
+      if (loose.empty() || loose_l.empty() || !HasLineWith(loose_l, "umin", "l(255")) return 236;
+    }
+    // 237: with the bloom's flag 0 the picture is plan Task 5's (spec criterion 15: bloom off is 10a's
+    // picture), shown on the programs as Task 5 showed "post off" (cases 230, 231). The composite with the
+    // flag the literal 0 reads no second texture, no sampler and nothing of the step but its level count;
+    // and with the write's rounding taken out as well it is, instruction for instruction, the program of
+    // Task 5's text (kPostCompositeBefore). So is the ramp's. What the two programs do more than Task 5's
+    // is the rounding alone (ruling 25): four instructions, the last four.
+    {
+      auto bloom_off = [](std::string text) {
+        const std::string field = "uint p_bloom_on;";
+        const size_t at = text.find(field);
+        if (at == std::string::npos) return std::string();
+        text.replace(at, field.size(), "uint p_bloom_word;");
+        const size_t block_end = text.find("float post_lum(");
+        if (block_end == std::string::npos) return std::string();
+        text.insert(block_end, "static const uint p_bloom_on = 0;\n");
+        return text;
+      };
+      const std::string off = bloom_off(kClayPostCompositePs);
+      const std::string off_plain = Changed(off.c_str(), "return float4(post_level(PostComposite(scene, bloom)), 1.0);", "return float4(PostComposite(scene, bloom), 1.0);");
+      const std::string ramp_plain = Changed(kClayPostRampPs, "return float4(post_level(saturate(mapped)), 1.0);", "return float4(mapped, 1.0);");
+      if (off.empty() || off_plain.empty() || ramp_plain.empty()) return 237;
+      const std::string now_l = Disassembly("composite", kClayPostCompositePs, "ps_5_0"), off_l = Disassembly("bloom_off", off.c_str(), "ps_5_0");
+      const std::string off_plain_l = Disassembly("bloom_off_plain", off_plain.c_str(), "ps_5_0");
+      const std::string before_l = Disassembly("composite_before", kPostCompositeBefore, "ps_5_0");
+      const std::string ramp_l = Disassembly("ramp", kClayPostRampPs, "ps_5_0"), ramp_plain_l = Disassembly("ramp_plain", ramp_plain.c_str(), "ps_5_0");
+      const std::string ramp_before_l = Disassembly("ramp_before", kPostRampBefore, "ps_5_0");
+      if (now_l.empty() || off_l.empty() || off_plain_l.empty() || before_l.empty() || ramp_l.empty() || ramp_plain_l.empty() || ramp_before_l.empty()) return 237;
+      if (Code(off_plain_l) != Code(before_l)) {
+        std::cerr << "the composite with the bloom's flag 0 and without the write's rounding is not plan Task 5's program\n";
+        return 237;
+      }
+      if (Code(ramp_plain_l) != Code(ramp_before_l)) {
+        std::cerr << "the ramp without the write's rounding is not plan Task 5's program\n";
+        return 237;
+      }
+      // (the flag 0: no second texture, no sampler, no test; of the step's words the level count alone)
+      if (ReadsResource(off_l, 1) || off_l.find("sample") != std::string::npos || off_l.find("dcl_sampler") != std::string::npos ||
+          HasOp(off_l, "if_nz") || ReadsComponent(off_l, "cb1[0]", 'x') || ReadsComponent(off_l, "cb1[0]", 'y') || ReadsComponent(off_l, "cb1[0]", 'w') ||
+          !ReadsComponent(off_l, "cb1[0]", 'z') || ReadsBlock(off_plain_l, "cb1") || ReadsBlock(ramp_plain_l, "cb1")) return 237;
+      const int more_composite = Instructions(off_l) - Instructions(before_l), more_ramp = Instructions(ramp_l) - Instructions(ramp_before_l);
+      std::cout << "bloom off: the composite and the ramp are plan Task 5's programs but for the write's rounding (" << more_composite << " and "
+                << more_ramp << " instructions more); with the bloom's flag a root word the composite has " << Instructions(now_l) - Instructions(off_l)
+                << " more\n";
+      if (more_composite < 3 || more_composite > 4 || more_ramp < 3 || more_ramp > 6 || Instructions(now_l) <= Instructions(off_l)) return 237;
+      // Control: a bloom that reached the picture with the flag 0 would be seen.
+      const std::string leak = Changed(off.c_str(), "if (p_bloom_on != 0) bloom =", "bloom =");
+      if (leak.empty() || !ReadsResource(Disassembly("leak", leak.c_str(), "ps_5_0"), 1)) return 237;
+    }
+    // 238: the downsample. Four linear samples of the scene at P + (2.5, 2.5), (2.5, 0.5), (0.5, 0.5),
+    // (0.5, 2.5) texels with P = 4 * (the pixel's floor + the step's offset), the coordinates made with the
+    // step's texel size; each sample through the scene's rule (the comparison with 0, the minimum with the
+    // block's clamp: four of each); a quarter of the sum; nothing of the block but the clamp.
+    {
+      const char* d = kClayPostDownsamplePs;
+      if (!strstr(d, "  return post_scene(scene_target.SampleLevel(linear_clamp, (p + offset) * s_texel, 0.0).rgb);") ||
+          !strstr(d, "  float2 p = 4.0 * (floor(pos.xy) + s_offset);\n"
+                     "  float3 sum = post_tap(p, float2(2.5, 2.5)) + post_tap(p, float2(2.5, 0.5)) + post_tap(p, float2(0.5, 0.5)) + post_tap(p, float2(0.5, 2.5));\n"
+                     "  return float4(0.25 * sum, 1.0);")) return 238;
+      const std::string listing = Disassembly("clay_post_downsample_ps", d, "ps_5_0");
+      int mins = 0, lts = 0;
+      {
+        size_t at = 0;
+        while (at < listing.size()) {
+          size_t end = listing.find('\n', at);
+          if (end == std::string::npos) end = listing.size();
+          const size_t first = listing.find_first_not_of(" \t", at);
+          if (first < end) {
+            const std::string line = listing.substr(first, end - first);
+            if (line.compare(0, 4, "min ") == 0 && line.find("cb0[1].zzzz") != std::string::npos) ++mins;
+            if (line.compare(0, 3, "lt ") == 0 && line.find("l(0.000000, 0.000000, 0.000000, 0.000000)") != std::string::npos) ++lts;
+          }
+          at = end + 1;
+        }
+      }
+      if (listing.empty() || mins != 4 || lts != 4 || Count(listing.c_str(), "sample_l") != 4 || HasOp(listing, "div") ||
+          DeclaredRegisters(listing, 0) != 2 || DeclaredRegisters(listing, 1) != 1 || !ReadsComponent(listing, "cb1[0]", 'x') ||
+          !ReadsComponent(listing, "cb1[0]", 'y') || !ReadsComponent(listing, "cb1[0]", 'w') || listing.find("2.500000") == std::string::npos ||
+          listing.find("l(4.000000") == std::string::npos || listing.find("0.250000") == std::string::npos) {
+        std::cerr << "the downsample's compiled program is not four clamped samples (" << mins << " minimums, " << lts << " comparisons)\n";
+        return 238;
+      }
+      // Controls: a sample taken as it is has no clamp; a literal texel size reads no step word for it.
+      const std::string raw = Changed(d, "return post_scene(scene_target.SampleLevel(linear_clamp, (p + offset) * s_texel, 0.0).rgb);",
+                                      "return scene_target.SampleLevel(linear_clamp, (p + offset) * s_texel, 0.0).rgb;");
+      const std::string sized = Changed(d, "(p + offset) * s_texel", "(p + offset) * float2(1.0 / 1120.0, 1.0 / 720.0)");
+      const std::string raw_l = Disassembly("raw", raw.c_str(), "ps_5_0"), sized_l = Disassembly("sized", sized.c_str(), "ps_5_0");
+      if (raw.empty() || sized.empty() || raw_l.empty() || sized_l.empty() || HasLineWith(raw_l, "min", "cb0[1].zzzz") ||
+          ReadsComponent(sized_l, "cb1[0]", 'x')) return 238;
+    }
+    // 239: the bright pass. The downsample's texel through the scene's rule; the gain behind a test of
+    // L > 0 (the game's shader multiplies 0 by 1 / 0 there); the sun's two layers only behind their flag
+    // (cb0[3].z), each one Load; the division by c47.x; then the target's clamp (a value that is no number
+    // is 0) and the rounding to its 1,023 levels.
+    {
+      const char* b = kClayPostBrightPs;
+      if (!strstr(b, "  int3 at = int3(pos.xy, 0);\n  float3 d = post_scene(down_target.Load(at).rgb);\n  float L = post_lum(d);\n"
+                     "  float gain = (L > 0.0) ? saturate(L * p_b77y - p_b77x) / L * p_b31x : 0.0;\n  float3 v = d * gain;\n"
+                     "  if (p_sun_on != 0) v += sun_tf1.Load(at).rgb * 6.0 * p_b46x + sun_tf2.Load(at).rgb;\n"
+                     "  return float4(post_level(post_unit(v / p_b47x)), 1.0);")) return 239;
+      const std::string listing = Disassembly("clay_post_bright_ps", b, "ps_5_0");
+      const size_t load = listing.find("ld_indexable"), clamp = listing.find("cb0[1].zzzz"), flag = listing.find("if_nz"), round = listing.rfind("round_ni");
+      if (listing.empty() || load == std::string::npos || clamp == std::string::npos || flag == std::string::npos || round == std::string::npos ||
+          !(load < clamp && clamp < flag && flag < round) || !HasLineWith(listing, "if_nz", "cb0[3].z") || !HasLineWith(listing, "min", "cb0[1].zzzz") ||
+          !HasLineWith(listing, "lt", "l(0.000000)") || !ReadsComponent(listing, "cb0[2]", 'z') || !ReadsComponent(listing, "cb0[2]", 'w') ||
+          !ReadsComponent(listing, "cb0[3]", 'x') || !ReadsComponent(listing, "cb0[2]", 'x') || !ReadsComponent(listing, "cb0[2]", 'y') ||
+          listing.find("6.000000") == std::string::npos || !HasLineWith(listing, "min", "l(1.000000, 1.000000, 1.000000, 0.000000)") ||
+          DeclaredRegisters(listing, 0) != 4 || ReadsComponent(listing, "cb0[3]", 'y')) {
+        std::cerr << "the bright pass's compiled program lacks a guard or reads another register\n";
+        return 239;
+      }
+      // Controls: without the test of L the gain is a bare division; without the target's clamp the value
+      // is rounded as it is; with the sun's layers outside their flag they are read in every frame.
+      const std::string bare = Changed(b, "(L > 0.0) ? saturate(L * p_b77y - p_b77x) / L * p_b31x : 0.0", "saturate(L * p_b77y - p_b77x) / L * p_b31x");
+      const std::string open = Changed(b, "post_level(post_unit(v / p_b47x))", "post_level(v / p_b47x)");
+      const std::string always = Changed(b, "if (p_sun_on != 0) v +=", "v +=");
+      const std::string bare_l = Disassembly("bare", bare.c_str(), "ps_5_0"), open_l = Disassembly("open", open.c_str(), "ps_5_0");
+      const std::string always_l = Disassembly("always", always.c_str(), "ps_5_0");
+      if (bare.empty() || open.empty() || always.empty() || bare_l.empty() || open_l.empty() || always_l.empty() ||
+          Instructions(bare_l) >= Instructions(listing) || HasLineWith(open_l, "min", "l(1.000000, 1.000000, 1.000000, 0.000000)") ||
+          TextureReadDepth(always_l, "ld_indexable", 1) != 0 || HasOp(always_l, "if_nz")) return 239;
+    }
+    // 240: the blur, one program for both directions. Thirteen Loads of t0, every coordinate clamped
+    // between 0 and the step's last texel (cb1[1].zw) after the tap's offset times the step's direction
+    // (cb1[1].xy); the weights from the block's rows 4 to 7 (byte 64 on), chosen by the direction; the
+    // target's clamp and the rounding. Nothing of the block but the weights.
+    {
+      const char* b = kClayPostBlurPs;
+      if (!strstr(b, "  return w * blur_source.Load(int3(clamp(at + k * s_dir, int2(0, 0), s_last), 0)).rgb;") ||
+          !strstr(b, "  bool vertical = s_dir.y != 0;\n  float4 w0 = vertical ? p_blur[2] : p_blur[0];\n  float4 w1 = vertical ? p_blur[3] : p_blur[1];\n"
+                     "  float3 sum = post_blur_tap(at, 0, w0.x);\n") ||
+          !strstr(b, "  return float4(post_level(post_unit(sum)), 1.0);") || Count(b, "post_blur_tap(at, ") != 13) return 240;
+      for (int k = 1; k <= 6; ++k) {
+        const char* weight[] = {"", "w0.y", "w0.z", "w0.w", "w1.x", "w1.y", "w1.z"};
+        const std::string pair = "  sum += post_blur_tap(at, -" + std::to_string(k) + ", " + weight[k] + ") + post_blur_tap(at, " + std::to_string(k) + ", " +
+                                 weight[k] + ");\n";
+        if (!strstr(b, pair.c_str())) return 240;
+      }
+      const std::string listing = Disassembly("clay_post_blur_ps", b, "ps_5_0");
+      int imax = 0, imin = 0;
+      {
+        size_t at = 0;
+        while (at < listing.size()) {
+          size_t end = listing.find('\n', at);
+          if (end == std::string::npos) end = listing.size();
+          const size_t first = listing.find_first_not_of(" \t", at);
+          if (first < end) {
+            // (the compiler bounds two taps in one instruction where it can: four components are two taps)
+            const std::string line = listing.substr(first, end - first);
+            const int taps = line.find(".xyzw, ") != std::string::npos ? 2 : 1;
+            if (line.compare(0, 5, "imax ") == 0 && line.find("l(0, 0, 0, 0)") != std::string::npos) imax += taps;
+            if (line.compare(0, 5, "imin ") == 0 && line.find("cb1[1].zw") != std::string::npos) imin += taps;
+          }
+          at = end + 1;
+        }
+      }
+      if (listing.empty() || Count(listing.c_str(), "ld_indexable") != 13 || imax != 13 || imin != 13 || DeclaredRegisters(listing, 0) != 8 ||
+          DeclaredRegisters(listing, 1) != 2 || !ReadsComponent(listing, "cb0[4]", 'x') || !ReadsComponent(listing, "cb0[6]", 'x') || !ReadsComponent(listing, "cb0[5]", 'z') || !ReadsComponent(listing, "cb0[7]", 'z') || !ReadsComponent(listing, "cb1[1]", 'x') ||
+          !ReadsComponent(listing, "cb1[1]", 'y') || !HasLineWith(listing, "min", "l(1.000000, 1.000000, 1.000000, 0.000000)") ||
+          listing.find("sample") != std::string::npos) {
+        std::cerr << "the blur's compiled program is not thirteen clamped loads (" << imax << " lower and " << imin << " upper bounds)\n";
+        return 240;
+      }
+      for (int reg = 0; reg < 4; ++reg) {
+        for (char c : {'x', 'y', 'z', 'w'}) {
+          if (ReadsComponent(listing, ("cb0[" + std::to_string(reg) + "]").c_str(), c)) return 240;
+        }
+      }
+      // Control: a tap that is not clamped has no bound.
+      const std::string free_tap = Changed(b, "clamp(at + k * s_dir, int2(0, 0), s_last)", "at + k * s_dir");
+      const std::string free_l = Disassembly("free_tap", free_tap.c_str(), "ps_5_0");
+      if (free_tap.empty() || free_l.empty() || HasOp(free_l, "imin") || HasOp(free_l, "imax")) return 240;
     }
   }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block at the table's offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads\n";
   return 0;
 }

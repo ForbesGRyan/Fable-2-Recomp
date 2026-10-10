@@ -130,7 +130,8 @@ class ClayPass {
   // parsed scene and block, the caller's, which outlive every Render; null (as it is unless the switch is
   // set and both files were valid): nothing of the feed is reached. With a feed, in a POST FRAME only
   // (every rule of a frame without post stands), the scene is uploaded once as a kWidth x kHeight
-  // R16G16B16A16_FLOAT texture and the composite reads it in place of the linear target, with the steps'
+  // R16G16B16A16_FLOAT texture and the composite (with the bloom also the downsample: every step that reads
+  // the scene) reads it in place of the linear target, with the steps'
   // constants made of the feed's block and the frame's own ramp; the scene's draws are drawn as always and
   // nothing reads them. In the frame kOracleDumpAfter fed frames after the upload's the mapped target is
   // copied to a read-back buffer, once in the pass's life. A failure (the texture, the buffer) turns the
@@ -140,6 +141,9 @@ class ClayPass {
   // copy's submission has completed; false in every other call (none pending, not yet completed, another
   // device, or the buffer could not be read: logged). Command-processor thread, outside Render.
   bool TakePostOracleDump(nrhi::Device* dev, std::vector<uint8_t>* file);
+  // Whether the dump is over: taken, or failed (its buffer could not be made or read): nothing more
+  // comes, and the caller need not ask again (review of plan Task 6, Minor 8).
+  bool PostOracleDumpDone() const { return oracle_dump_state_ == OracleDump::kDone; }
 
  private:
   // One drawable record of the frame, with its buffers and albedo.
@@ -269,6 +273,17 @@ class ClayPass {
   bool EnsurePostObjects(nrhi::Device* dev);
   void DestroyPostObjects();
   void ForgetPostObjects();
+  // What the bloom's steps need besides (clay_logic.h, "Native bloom"): three pixel shaders, three
+  // targets a quarter of the logical size (the downsample's float one, the bright pass's and the
+  // blurs' two 10-bit ones) with their views, three pipelines; the layout is the post steps'.
+  // EnsureBloomObjects makes them on the first frame that could be a post frame with
+  // fable2_native_bloom on (after EnsurePostObjects); false when they could not be made, now or
+  // before: then they are not tried again until the pass is rebuilt (one log line), and every frame
+  // with the bloom's switch on is today's ("post-objects"); with the switch off the post goes on
+  // without them. Destroyed with the pass's other objects.
+  bool EnsureBloomObjects(nrhi::Device* dev);
+  void DestroyBloomObjects();
+  void ForgetBloomObjects();
   // The oracle feed's texture (SetPostOracle): made and filled from the feed's scene on the first fed
   // frame (a copy and barriers on `cmd`: called before render targets are bound); false when it could
   // not be made, now or before (oracle_failed_). CopyOracleDump: the mapped target, resting in
@@ -459,10 +474,30 @@ class ClayPass {
   nrhi::Texture* front_ = nullptr;
   nrhi::TextureView* front_view_ = nullptr;
   uint32_t post_slot_ = 0;
+  // The bloom's steps (EnsureBloomObjects): the downsample's, the bright pass's and the blur's shaders
+  // and pipelines (the post layout, map_vs_), and three targets of kWidth / 4 x kHeight / 4 whatever
+  // the scene target's size (ledger ruling 6): bloom_d_ (the downsample, a float target in the
+  // scene's range), bloom_p_ (the bright pass, then the blur along y: what the composite samples) and
+  // bloom_q_ (the blur along x), the two 10-bit. Each rests in kPixelShaderResource and is a target
+  // only for its own step; none is read in a frame that did not write it.
+  bool bloom_objects_ = false, bloom_objects_failed_ = false;
+  nrhi::Shader* post_downsample_ps_ = nullptr;
+  nrhi::Shader* post_bright_ps_ = nullptr;
+  nrhi::Shader* post_blur_ps_ = nullptr;
+  nrhi::Pipeline* post_downsample_pipeline_ = nullptr;
+  nrhi::Pipeline* post_bright_pipeline_ = nullptr;
+  nrhi::Pipeline* post_blur_pipeline_ = nullptr;
+  nrhi::Texture* bloom_d_ = nullptr;
+  nrhi::Texture* bloom_p_ = nullptr;
+  nrhi::Texture* bloom_q_ = nullptr;
+  nrhi::TextureView* bloom_d_view_ = nullptr;
+  nrhi::TextureView* bloom_p_view_ = nullptr;
+  nrhi::TextureView* bloom_q_view_ = nullptr;
   // The pass's frame counts for the Post line, and what it last logged about the post (a line when
-  // the verdict changes, at most kPostLogLines of them).
+  // the verdict or the bloom's changes, at most kPostLogLines of them).
   ClayPostFrames post_counts_;
   ClayPost post_logged_ = ClayPost::kOff;
+  ClayBloom bloom_logged_ = ClayBloom::kOff;
   uint32_t post_log_lines_ = 0;
   // The oracle feed (SetPostOracle; null: off). oracle_tex_ / oracle_view_: the stored scene, in
   // kPixelShaderResource from its upload on. oracle_frames_: the frames fed since the upload, the

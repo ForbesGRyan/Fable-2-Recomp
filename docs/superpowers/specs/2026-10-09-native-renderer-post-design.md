@@ -235,7 +235,9 @@ this design has a size that is a fraction of W x H** (W/2 x H/2, W/4 x H/4), nev
     the pixel-position convention is one constant that discovery question 6 decides), bright
     pass (tf1 and tf2 unread until 10c; `L = 0` gives 0), blur along x (P to Q), blur along y
     (Q to P), then the composite's `b = sat(bloom * c31.x)`, `s = c + b (1 - c)` with the bloom
-    sampled linearly. Every step writes `(v > 0) ? min(v, 1) : 0` (D: its range is the scene's):
+    sampled linearly, at the composite's own fetch: bloom texel coordinate `x / 4 + 0.5` at pixel
+    `x`, not with the texel centres aligned (plan Task 8's finding; "Implementation notes", phase
+    10b). Every step writes `(v > 0) ? min(v, 1) : 0` (D: its range is the scene's):
     no value that is not a number can enter or leave a blur.
 11. **Quad record (10c)**: a side array of the frame's scene (at most 24 a frame), one for each
     call of the indexed builder whose pixel shader is in a generated table of furniture shaders:
@@ -503,6 +505,47 @@ Said now, with the finding that makes it one (ruling 18).
 10. Every run is likely `RUN UNCHECKED` (the user at the machine); timing needs a quiet machine.
 
 ## Implementation notes (deviations)
+
+### Phase 10b, plan Task 8 (the bloom's code; frame map section 17, "Native bloom")
+
+Stated before the validation runs of plan Task 9; the criteria's verdicts come with them.
+
+- **The composite samples the bloom at its own fetch, not with the texel centres aligned.** The
+  game's composite fetches the bloom at the scene's interpolated coordinate with `OffsetX =
+  OffsetY = 0.5` (`37B1`, instruction 6); with the interpolator `x / width` at pixel `x` (which
+  makes the scene's own fetch a texel centre) that is bloom texel coordinate `x / 4 + 0.5`, 0.375
+  of a bloom texel (1.5 pixels) further on than "centres aligned", which the research's replay,
+  Design 10 and plan Task 8's line assumed. Against the game's front buffer of the three bridge
+  captures the replay's variant B fits at a median of 0.565 to 0.578 levels with the fetch's
+  place and 0.716 to 0.732 with the centres aligned
+  (`out/native-evidence/post/t8_bloom_fetch.txt`). The native composite, its mirror and
+  `post_replay.py` (`--bloom-place fetch`, the default of `replay` and `predict`; `aligned`
+  reproduces the earlier figures) use the fetch's place. Criterion 11's figures with it: every
+  bridge region 0.994 to 1.027, median 0.57 to 0.58, 94.5 to 94.8% within 8 levels
+  (`t8_reference_B_<stamp>.txt`).
+- **The downsample's pixel position is the integral one (`kPostDownsampleBias` 0)**: the
+  emulated picture's translator hands the shader `floor(SV_Position.xy)`
+  (`dxbc_translator.cpp`, `StartPixelShader`), and with the fetch's place above bias 0 fits the
+  front buffer at 0.565 to 0.578 levels where bias 0.5 gives 0.753 to 0.765 and a box of the
+  sixteen texels 0.608 to 0.620. Discovery question 6 itself (the game's own downsample buffer)
+  stays unsettled; that the console's rasteriser hands the same position is inference.
+- **Every step into a UNORM target writes the rounded level itself** (controller ruling 25, and
+  the same at the bloom's 10-bit writes): `floor(v * levels + 0.5) / levels` as the last
+  statement, the level count from the target's format in the step's words. The reference rounds
+  each 10-bit stage to the nearest of 1,023 and the game's own targets hold only levels; what
+  the real card does at a 10-bit write was not measured.
+- **With `--fable2_native_bloom=off` the composite and the ramp are plan Task 5's programs but
+  for that rounding** (shader test case 237); criterion 15's "10a's picture" is therefore 10a's
+  picture after ruling 25, which on the software adapter is the same bits and on the real card
+  is what criterion 6 asked for.
+- **The bloom's objects are part of the post steps' while the bloom's switch is on**: if they
+  cannot be made, a frame with the switch on is today's (`post-objects`); with the switch off
+  the post goes on without them. Spec ruling 14's fallback (`R11G11B10_FLOAT` for the bright
+  and blur targets) is not built: it is a change of one format constant, to be made only if the
+  software-adapter run shows `R10G10B10A2_UNORM` cannot be a render target.
+- **The Post line** says the frame's bloom and counts it, names which of the pass's rules
+  refused a valid block (`age`, `pairing`, `values`, `words`), and says the composite's `c46.x`
+  when it is not 0.25 (reviews of plan Task 5, Minors 8 and 11).
 
 ### Phase 10a (plan Tasks 1 to 7; frame map section 17)
 

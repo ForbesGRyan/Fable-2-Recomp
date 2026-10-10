@@ -80,9 +80,15 @@ REXCVAR_DEFINE_STRING(fable2_native_post, "off", "Fable2",
                       "composite, bright pass and blurs and the composite's 512-texel exposure table), and the clay pass draws "
                       "a frame that has one through the game's own composite and the scan-out gamma ramp: its lit draws write "
                       "the game's output scale in place of the fixed exposure, its unlit draws one scale of the frame, and the "
-                      "clear colour comes out nearly black (no bloom yet); a frame without a block, a ramp or light is drawn "
+                      "clear colour comes out nearly black (the bloom is fable2_native_bloom); a frame without a block, a ramp or light is drawn "
                       "as with the switch off; off (or false, 0; the default) = none of it is read or drawn: the fog's "
                       "picture, the fixed exposure and the square-root mapping.");
+REXCVAR_DEFINE_STRING(fable2_native_bloom, "off", "Fable2",
+                      "Native bloom (sub-project 10, phase 10b, in work; needs fable2_native_post=on): on (or true, 1) = a post "
+                      "frame whose block carries the game's blur weights also draws the game's bloom between its scene and its "
+                      "composite (the 4 x 4 downsample, the bright pass and the two 13-tap blurs, in targets a quarter of the "
+                      "native target's logical size), and the composite screens it over the picture; off (or false, 0; the "
+                      "default) = none of it is made or drawn: the picture of fable2_native_post alone. Frame map section 17.");
 REXCVAR_DEFINE_STRING(fable2_exposure_readback, "off", "Fable2",
                       "The game's exposure in a normal run: on (or true, 1) = the game's luminance resolve (two buffers in turn, "
                       "0x1A385000 and 0x1A34F000) is added to readback_resolve_force_addresses at startup, so that the game "
@@ -308,6 +314,20 @@ bool CurrentPost() {
   return on;
 }
 
+// fable2_native_bloom: read like the post's switch; anything else is off, with one warning that names
+// the words. It acts only in a post frame (ClayBloom): nothing of the capture depends on it (the
+// blurs' weights are part of the post block, read with fable2_native_post).
+bool CurrentBloom() {
+  static std::atomic<bool> warned{false};
+  bool recognized = true;
+  const bool on = render::ParseClayLight(REXCVAR_GET(fable2_native_bloom), &recognized) == render::ClayLight::kOn;
+  if (!recognized && !warned.exchange(true)) {
+    REXLOG_WARN("[native] unknown fable2_native_bloom '{}', using off (accepted: {})", REXCVAR_GET(fable2_native_bloom),
+                render::kClaySwitchWords);
+  }
+  return on;
+}
+
 // Whether the capture reads the frame's post block: only for a frame that could be drawn through
 // the game's composite, which is a lit one (PostRecordsWanted).
 bool PostWanted(bool records_wanted) {
@@ -320,31 +340,36 @@ bool PostWanted(bool records_wanted) {
 void LoadOracle() {
   const std::string prefix = REXCVAR_GET(fable2_native_post_oracle);
   if (prefix.empty()) return;
-  auto read = [](const std::string& path, std::vector<uint8_t>* out) {
+  // (null: the file was read whole; otherwise what failed. Review of plan Task 6, Minor 5: the line
+  // names the file and the cause.)
+  auto read = [](const std::string& path, std::vector<uint8_t>* out) -> const char* {
     out->clear();
     std::FILE* fp = std::fopen(path.c_str(), "rb");
-    if (!fp) return false;
+    if (!fp) return "could not be opened";
     // (bounded: a scene file is 9.7 MB; nothing larger than 64 MB is read)
     constexpr size_t kMaxBytes = size_t(64) << 20;
     uint8_t buf[65536];
-    bool ok = true;
+    const char* why = nullptr;
     for (size_t n; (n = std::fread(buf, 1, sizeof(buf), fp)) > 0;) {
       if (out->size() + n > kMaxBytes) {
-        ok = false;
+        why = "is larger than 64 MB";
         break;
       }
       out->insert(out->end(), buf, buf + n);
     }
-    ok = ok && !std::ferror(fp);
+    if (!why && std::ferror(fp)) why = "could not be read to its end";
     std::fclose(fp);
-    if (!ok) out->clear();
-    return ok;
+    if (why) out->clear();
+    return why;
   };
   std::vector<uint8_t> block_bytes;
-  if (!read(prefix + ".scene", &g_oracle_scene_bytes) || !read(prefix + ".block", &block_bytes)) {
-    REXLOG_WARN("[native] post oracle: {}.scene or {}.block could not be read; the feed is off", prefix, prefix);
-    g_oracle_scene_bytes = {};
-    return;
+  for (const char* suffix : {".scene", ".block"}) {
+    const std::string path = prefix + suffix;
+    if (const char* why = read(path, suffix[1] == 's' ? &g_oracle_scene_bytes : &block_bytes)) {
+      REXLOG_WARN("[native] post oracle: {} {}; the feed is off", path, why);
+      g_oracle_scene_bytes = {};
+      return;
+    }
   }
   render::OracleFault scene_why = render::OracleFault::kNone, block_why = render::OracleFault::kNone;
   capture::PostBlockReason rule = capture::PostBlockReason::kNone;
@@ -374,7 +399,12 @@ void LoadOracle() {
 void WriteOracleDump(nrhi::Device* device) {
   if (!g_oracle_valid || g_oracle_dump_written || !g_clay) return;
   std::vector<uint8_t> file;
-  if (!g_clay->TakePostOracleDump(device, &file)) return;
+  if (!g_clay->TakePostOracleDump(device, &file)) {
+    // (a dump that failed, its buffer not made or not read, is over too: nothing more is asked.
+    // Review of plan Task 6, Minor 8.)
+    if (g_clay->PostOracleDumpDone()) g_oracle_dump_written = true;
+    return;
+  }
   g_oracle_dump_written = true;
   char name[64];
   const std::time_t t = std::time(nullptr);
@@ -382,15 +412,17 @@ void WriteOracleDump(nrhi::Device* device) {
   const std::filesystem::path dir = rex::filesystem::GetExecutableFolder() / "logs";
   std::error_code ec;
   std::filesystem::create_directories(dir, ec);
-  const std::string path = (dir / name).string();
-  std::FILE* fp = std::fopen(path.c_str(), "wb");
+  // (the wide path: a folder outside the ANSI code page must not throw here, on the command-processor
+  // thread; the name itself is ASCII. Review of plan Task 6, Minor 4.)
+  const std::filesystem::path full = dir / name;
+  std::FILE* fp = _wfopen(full.c_str(), L"wb");
   const bool ok = fp && std::fwrite(file.data(), 1, file.size(), fp) == file.size();
   if (fp) std::fclose(fp);
   if (ok) {
-    REXLOG_INFO("[native] post oracle: wrote {} ({} bytes: the mapped target, {} x {} RGBA) at clay frame {}", path, file.size(),
+    REXLOG_INFO("[native] post oracle: wrote logs/{} ({} bytes: the mapped target, {} x {} RGBA) at clay frame {}", name, file.size(),
                 render::ClayPass::kWidth, render::ClayPass::kHeight, g_clay_frames);
   } else {
-    REXLOG_WARN("[native] post oracle: {} could not be written", path);
+    REXLOG_WARN("[native] post oracle: logs/{} could not be written", name);
   }
 }
 
@@ -502,9 +534,10 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   render::ClayStats st;
   render::TextureStats tst;
   // The post chain: the switch as it is now and this frame's ramp (null without a valid one: the frame
-  // is then drawn without post, "post-ramp"). The bloom and the sun layer are later tasks' switches.
+  // is then drawn without post, "post-ramp"), and the bloom's switch. The sun layer is a later task's.
   render::ClayPostRequest post;
   post.post = CurrentPost();
+  post.bloom = CurrentBloom();
   post.ramp = g_post_ramp.valid ? g_post_ramp.rgb : nullptr;
   // (the oracle feed: null unless its switch is set and both files were valid)
   g_clay->SetPostOracle(g_oracle_valid ? &g_oracle_feed : nullptr);
@@ -744,6 +777,9 @@ void Install(rex::memory::Memory* memory) {
   REXLOG_INFO("[native] post: {} (fable2_native_post; on: the frame's post block is read with the light on, and a frame "
               "that has one is drawn through the game's composite and the scan-out ramp)",
               CurrentPost() ? "on" : "off");
+  REXLOG_INFO("[native] bloom: {} (fable2_native_bloom; on: a post frame with the game's blur weights also draws the game's "
+              "bloom, in targets a quarter of the logical size)",
+              CurrentBloom() ? "on" : "off");
 }
 
 void Shutdown() {

@@ -177,6 +177,29 @@ class Arithmetic(unittest.TestCase):
         self.assertEqual(list(at(0, 0)[:2]), [0.0, 0.0])                # clamped to the edge
         self.assertEqual(list(at(15, 7)[:2]), [3.0, 1.0])
 
+    def test_the_bloom_is_sampled_at_the_composites_own_fetch(self):
+        # 37B1 instruction 6: tfetch2D tf2 at the scene's interpolated coordinate (x / w at pixel x), OffsetX =
+        # OffsetY = 0.5 texels of the bloom: bloom texel coordinate x * bw / w + 0.5. Pixel 0 reads texel 0
+        # itself, pixel 4 texel 1, pixel 2 the mean of the two: 0.375 of a bloom texel further on than the
+        # centres aligned. It is what the native composite does (clay_logic.h, kPostBloomFetch) and the
+        # default of replay and predict.
+        rows = [[(float(x), float(y), 0.0) for x in range(4)] for y in range(2)]
+        at = pr.bloom_sampler(4, 2, rows, 16, 8, place="fetch")
+        self.assertEqual(list(at(0, 0)[:2]), [0.0, 0.0])
+        self.assertEqual(list(at(4, 4)[:2]), [1.0, 1.0])
+        self.assertEqual(list(at(2, 2)[:2]), [0.5, 0.5])
+        self.assertEqual(list(at(15, 7)[:2]), [3.0, 1.0])               # clamped to the edge
+        aligned = pr.bloom_sampler(4, 2, rows, 16, 8, place="aligned")
+        self.assertEqual(list(aligned(2, 2)[:2]), [0.125, 0.125])
+        self.assertAlmostEqual(at(6, 0)[0] - aligned(6, 0)[0], 0.375, delta=1e-12)
+        self.assertEqual(list(pr.bloom_sampler(4, 2, rows, 16, 8)(2, 2)[:2]), [0.125, 0.125])   # (the function's own default)
+        self.assertEqual((pr.BLOOM_PLACES, pr.BLOOM_PLACE), (("fetch", "aligned"), "fetch"))
+        with self.assertRaises(pr.ReplayError):
+            pr.bloom_sampler(4, 2, rows, 16, 8, place="corner")
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                pr.main(["replay", "no_such_capture_stamp", "1", "--bloom-place", "corner"])
+
     def test_a_variants_picture(self):
         fr = frame()
         scene = array("d", [0.4, 0.4, 0.4, 2.0, 1.0, 0.5, 0.0, 0.0, 0.0, 0.001, 0.001, 0.001])

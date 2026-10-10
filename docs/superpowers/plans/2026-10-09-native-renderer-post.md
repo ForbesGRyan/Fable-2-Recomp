@@ -504,7 +504,10 @@ verdict (`on`, `off`, `no-weights`), counted on the Post line.
       flag; the white texture bound there), blur along x (`bloom_p_` to `bloom_q_`), blur along
       y (back), 13 `Load`s with clamped integer coordinates; every step ends in `(v > 0) ?
       min(v, 1) : 0`; the composite samples `bloom_p_` with the linear clamp sampler at the
-      pixel's own normalised coordinate.
+      scene's interpolated coordinate plus the fetch's half bloom texel (bloom texel coordinate
+      `x / 4 + 0.5`: Task 8's finding, spec "Implementation notes", phase 10b; this line first
+      said "at the pixel's own normalised coordinate"). Every step into a UNORM target then
+      writes the rounded level itself (controller ruling 25).
 - [ ] Suites; build; NEEDS_RUN: WARP with `--fable2_native_post=on,--fable2_native_bloom=on`;
       the oracle feed on the software adapter and on the real GPU for the three bridge prefixes
       (Task 6's lines with `--fable2_native_bloom=on` added); BRIDGE with bloom off and on,

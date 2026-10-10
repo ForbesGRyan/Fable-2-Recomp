@@ -5677,6 +5677,147 @@ a brightness option have not run (`docs/native-renderer/user-checks.md`, checks 
 the fallbacks only `no-light` has run in a game. (8) Cost and the read-back switch's default:
 open, above.
 
+### Native bloom
+
+Plan Task 8 of the post sub-project (phase 10b; spec Design 10, rulings 6, 14, 15, 16; controller
+ruling 25), 2026-10-10. **This part is the code and what was found offline; nothing of it had run
+on a GPU when it was written.** The runs come under "Runs" at the end of this subsection once they
+are made, and the criteria's verdicts are plan Task 9's.
+
+**The switch**: `--fable2_native_bloom=on|off` (default off; the light switch's parser). It acts
+only in a post frame. Nothing of the capture depends on it: the blurs' weights are part of the
+post block, read with `--fable2_native_post=on` since plan Task 4.
+
+**The steps** (`clay_pass.cpp`, `Render`; `clay_logic.h`, "Native bloom";
+`fable2_native_shaders.h`), between the scene's last draw and the composite, each a full-screen
+triangle through the post layout:
+
+| Step | Game shader | Reads | Writes | What |
+|---|---|---|---|---|
+| downsample | `87E85199E1E9B260` | the scene (linear target; the oracle scene when fed), four linear samples | `bloom_d_`, 280 x 180 `R11G11B10_FLOAT` | `0.25 * (t(P + (2.5, 2.5)) + t(P + (2.5, 0.5)) + t(P + (0.5, 0.5)) + t(P + (0.5, 2.5)))`, `P = 4 * (pixel + bias)`, each sample 0 unless above 0 and at most 31.875 |
+| bright pass | `EE922CFB4426EA83` | `bloom_d_` by `Load` (the sun's two layers at t1, t2 only behind the sun's flag, 0 until plan Task 14; the white texture is bound there) | `bloom_p_`, 280 x 180 `R10G10B10A2_UNORM` | `L = lum(d)`; `d * sat(L * c77.y - c77.x) / L * c31.x / c47.x`, 0 for `L = 0` |
+| blur along x | `EA83C7E7E24EC4C8` | `bloom_p_`, 13 `Load`s at -6..+6 texels, clamped | `bloom_q_`, the same format | the frame's seven weights of that blur |
+| blur along y | `28DBE18F313350BF` | `bloom_q_`, 13 `Load`s | `bloom_p_` | the frame's seven weights of that blur; one program for both, the direction in the step's words |
+| composite | `37B186F4BD3288F7` | the scene by `Load`, `bloom_p_` by one linear sample | the front target | `b = sat(bloom * c31.x)`, `s = c + b * (1 - c)`, then as before |
+
+The targets are `ClayPass::kWidth / 4` x `kHeight / 4` with a static assert that the division is
+exact (ledger ruling 6: a quarter of the LOGICAL size, whatever the scene target's size or sample
+count becomes; the blurs' weights are the game's, in texels of these). Each rests in
+`kPixelShaderResource` and is a target for its own step alone; no step reads what it writes; none
+is read in a frame that did not write it. They are made on the first frame that could be a post
+frame with the switch on (`EnsureBloomObjects`), destroyed and forgotten with the pass's other
+objects. If they cannot be made, every frame with the bloom's switch on is today's
+(`post-objects`, one log line) and with the switch off the post goes on without them. Spec ruling
+14's fallback format is not built (one constant, `kBloomFormat`, if the software adapter refuses
+`R10G10B10A2_UNORM` as a target).
+
+**The step's words** (cbuffer `Step`, b1 of the post layout, 8 words; `ClayPostStepConstants`,
+`MakeClayPostStep`): the reciprocal of the source's width and height, the level count of the
+target's format, the step's offset (the downsample's pixel position; the composite's bloom fetch
+in pixels), a blur's direction, the source's last texel. No shader holds a size (the test looks
+for 1120, 720, 280, 180 in every step's text).
+
+**The verdict** (`ClayBloom`, `DecideClayBloom`): `on` in a post frame with the switch on whose
+steps' constants carry the blurs' weights; `no-weights` in a post frame with the switch on whose
+block has no blur part (drawn without bloom, counted); `off` otherwise. The Post line: `Post: on,
+block valid, age A, drawn, bloom on | c20.w S, unlit scale U | frames since start N: drawn D
+(bloom B, no-weights W), post-block ...`, and one `post changed` line when the bloom's verdict
+changes. Two more words on that line come from the review of plan Task 5: behind `post-block` of
+a valid block the pass's own rule that refused it (`age`, `pairing`, `values`, `words`: Minor 11),
+and `(c46.x X: the gain at scene luminance L, not 1)` after the unlit scale when the composite's
+`c46.x` is not the 0.25 that makes table texel 128 scene luminance 1 (Minor 8).
+
+**Bloom off is plan Task 5's picture** (spec criterion 15, shown as criterion 8's first half
+was). The composite reads the bloom only inside a test of the block's flag. Shader test case 237:
+with the flag the literal 0 the composite reads no second texture, no sampler and of the step's
+words the level count alone; with the write's rounding (below) taken out as well it is,
+instruction for instruction, the program of plan Task 5's committed text, which the test holds as
+a string; the ramp likewise. What the two programs do more than Task 5's is the rounding: 3
+instructions each. With the switch off no bloom object is made and no bloom step is drawn.
+
+**The write's own rounding (controller ruling 25).** On the real card 0.5 to 0.7% of the pixels
+of an oracle dump were one level under the reference ("Oracle feed"): the card cuts a float to 12
+fractional bits before it takes the nearest 8-bit level. Every step into a UNORM target now ends
+in `floor(v * levels + 0.5) / levels` of a value already in [0, 1] (`post_level`; `PostLevel` is
+its mirror), `levels` in the step's words from the target's format (`UnormLevels` in
+`clay_pass.cpp`: 255 for `R8G8B8A8_UNORM`, 1023 for `R10G10B10A2_UNORM`; review of plan Task 6,
+Minor 2). A value that is a level already loses less than a level under that card's rule and
+comes back as itself (test case 610, every level of both counts). **The 10-bit writes are rounded
+the same way**, decided by what the game's targets and the reference do: the game's bright and
+blur targets hold only 10-bit levels, and the reference rounds each stage to the nearest of 1,023
+(`post_replay.q10`). What this card does at a 10-bit write was not measured; with the rounding in
+the shader it does not matter within Direct3D's tolerance. Expected of the feed run after this
+change: the real GPU's dump equal to the software adapter's but for a handful of channels;
+anything else is a new finding.
+
+**Two conventions, decided offline against the game's front buffer** (four read-back captures,
+frame 1; `out/native-evidence/post/t8_downsample_forms.txt`, `t8_bloom_fetch.txt`; scripts in
+`out/tests/post-task8/`). Median absolute difference in 8-bit levels of the replay's variant B
+against the front buffer, whole picture outside the HUD (`092959`, `121331`, `132250`; `134312`,
+towards the sun, where the sun layer is missing):
+
+| Downsample | Bloom sampled | Bridge captures | `134312` | Within 1 level (bridge) |
+|---|---|---|---|---|
+| four texels, bias 0 | composite's fetch, `x / 4 + 0.5` | **0.578, 0.565, 0.573** | 1.129 | 52.4, 53.2, 52.8% |
+| box of sixteen | composite's fetch | 0.620, 0.608, 0.617 | 1.422 | 50.3, 51.0, 50.6% |
+| four texels, bias 0.5 | composite's fetch | 0.761, 0.753, 0.765 | 1.713 | 44.4, 44.6, 44.2% |
+| four texels, bias 0 | centres aligned, `(x + 0.5) / 4` | 0.732, 0.716, 0.727 | 1.521 | 45.7, 46.3, 45.9% |
+| four texels, bias 0.5 | centres aligned | 0.639, 0.629, 0.640 | 1.351 | 49.4, 49.9, 49.4% |
+| box of sixteen | centres aligned | 0.693, 0.678, 0.689 | 1.511 | 47.2, 47.8, 47.4% |
+
+1. *Where the composite samples the bloom* (`kPostBloomFetch`). The game's composite fetches the
+   bloom at the scene's interpolated coordinate with `OffsetX = OffsetY = 0.5` (`37B1`
+   instruction 6, as instruction 3 fetches the scene). With the interpolator `x / width` at pixel
+   `x`, which is what makes the scene's fetch a texel centre, the bloom is read at texel
+   coordinate `x / 4 + 0.5`: pixel 0 reads bloom texel 0 itself. The research's replay, the spec
+   and the plan had "texel centres aligned" (`(x + 0.5) / 4`), stated then as the tool's own
+   choice. The fetch's place fits better on all four captures (first against fourth row), and it
+   is what the microcode says; the native composite, `PostBloomFetchMirror` and `post_replay.py`
+   (`--bloom-place fetch`, now the default of `replay` and `predict`; `aligned` reproduces the
+   earlier figures) use it. **Variant C (`post_sun_layer.py`) and the stored excerpt still sample
+   with the centres aligned**: not changed here (another task's files).
+2. *The downsample's pixel position* (`kPostDownsampleBias` = 0: the four texels (0, 0), (2, 0),
+   (0, 2), (2, 2) of each 4 x 4 block). Under the aligned centres bias 0.5 had looked better
+   (fifth row against fourth); that was the missing 1.5 pixels of the fetch, which a shift of the
+   downsample by two texels makes up for. With the fetch's place bias 0 is the best of the three
+   forms. It is also what the emulated picture's own shader is handed: the SDK's translator gives
+   `param_gen` as `floor(SV_Position.xy)` (`dxbc_translator.cpp`, `StartPixelShader`). The front
+   buffer of a capture is the emulator's picture, so this settles the constant for the picture the
+   native one is held against; that the console's rasteriser hands the same position is
+   inference, and discovery question 6 (the game's own downsample buffer, which is in no capture)
+   stays unsettled.
+
+Criterion 11 with these two (`t8_reference_B_<stamp>.txt`): bridge regions 0.997 to 1.027,
+0.997 to 1.022, 0.994 to 1.009 (the criterion: within 5%), median 0.58, 0.57, 0.57 (at most 2),
+94.5, 94.8, 94.8% within 8 levels (at least 90). The reference pictures for criterion 12 are
+written from them through log 455's ramp: `out/native-evidence/post/oracle/ref455fetch_<stamp>_f1_B.rgba`.
+
+**The oracle feed with the bloom** (review of plan Task 6, Minor 7): the bloom's switch goes
+through to the feed's constants, and every step that reads the scene (the composite and the
+downsample) reads the stored scene. Also from that review: the dump's file is opened by its wide
+path (Minor 4), a file that cannot be read is named with its cause (Minor 5), and a dump that
+failed is not asked for again (Minor 8).
+
+**Values that are no numbers** (spec criterion 14; test case 615, 10,176 combinations): a scene
+texel of NaN, of infinity, a negative one, `L = 0`, registers at their bounds, weights at theirs
+and weights that are no numbers: every output of the downsample's mirror is in [0, 31.875] and of
+the bright pass's and the blurs' in [0, 1]. In the compiled programs: four comparisons with 0 and
+four minimums with the block's clamp in the downsample, the gain masked by `L > 0`, the
+comparison and the minimum with 1 before every rounding (cases 238 to 240).
+
+**Tests**: `tests/native/test_clay_logic.cpp` cases 610 to 617 and the Post line's in 609;
+mutation check `out/native-evidence/post/t8_mutations.txt`; `tests/native/test_native_shaders.cpp`
+cases 232 to 240; `tests/test_post_literals.py` (8 tests more); `tests/test_post_replay.py`.
+
+**Limits, as written before any run.** (1) No test executes the HLSL; the feed runs are its first
+execution. (2) A linear sample at a texel centre takes its neighbours with weight 0: on a GPU a
+neighbour that is no number makes that sample no number, which the step then reads as 0, where
+the mirror reads the centre's texel; the lit paths write no such value. (3) The sun's two layers
+are 0: towards the sun the bloom lacks the beams and the disc (10c). (4) The native scene's far
+ground reads 1.10 to 1.34 of the game's without bloom ("Native composite") and the bloom lifts it
+further; nothing of the bloom is tuned against that. (5) The linear target holds 6 and 5 mantissa
+bits where the game's scene target has 7; the downsample's target the same.
+
 ## Pending
 
 1. **Pitch ablation** (done 2026-10-01, results in section 4; kept for re-runs). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):

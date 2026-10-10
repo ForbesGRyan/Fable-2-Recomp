@@ -47,6 +47,25 @@ static_assert(kOracleUploadPitch % nrhi::kRowPitchAlignment == 0 && OracleDumpPi
 constexpr nrhi::Format kFrontFormat = nrhi::Format::kR8G8B8A8_UNORM;
 constexpr uint32_t kFrontDivisor = 1;
 static_assert(ClayPass::kWidth % kFrontDivisor == 0 && ClayPass::kHeight % kFrontDivisor == 0);
+// The bloom's targets (clay_logic.h, "Native bloom"): a quarter of the LOGICAL size, exactly, whatever
+// the scene target's sample count or size will be (ledger ruling 6: the blurs' weights are the game's,
+// in texels of these). The downsample's is a float target in the scene's range; the bright pass's and
+// the blurs' two are the game's own 10 bits (spec ruling 14).
+constexpr nrhi::Format kBloomDownFormat = nrhi::Format::kR11G11B10_FLOAT;
+constexpr nrhi::Format kBloomFormat = nrhi::Format::kR10G10B10A2_UNORM;
+static_assert(ClayPass::kWidth % kPostBloomDivisor == 0 && ClayPass::kHeight % kPostBloomDivisor == 0);
+constexpr uint32_t kBloomWidth = ClayPass::kWidth / kPostBloomDivisor, kBloomHeight = ClayPass::kHeight / kPostBloomDivisor;
+// The level count of a UNORM format: what a step that writes such a target rounds to itself
+// (controller ruling 25; review of plan Task 6, Minor 2: the count is the format's, not a second
+// literal). 0: not a UNORM format a post step writes.
+constexpr uint32_t UnormLevels(nrhi::Format f) {
+  return f == nrhi::Format::kR8G8B8A8_UNORM ? 255u : f == nrhi::Format::kR10G10B10A2_UNORM ? 1023u : 0u;
+}
+constexpr uint32_t kFrontLevels = UnormLevels(kFrontFormat), kMappedLevels = UnormLevels(kMappedFormat), kBloomLevels = UnormLevels(kBloomFormat);
+// (the mirrors and the reference round to the same counts; the downsample's target has none)
+static_assert(kFrontLevels == kPostFrontLevels && kMappedLevels == kPostFrontLevels && kBloomLevels == kPostBloomLevels &&
+              UnormLevels(kBloomDownFormat) == 0);
+static_assert(sizeof(ClayPostStepConstants) == kPostStepWords * 4);
 constexpr uint32_t kConstantCount = sizeof(ClayConstants) / 4;  // 36
 static_assert(kConstantCount == 36);
 // Binding parameters: indices into kClayBindings (clay_logic.h), from which
@@ -126,6 +145,7 @@ nrhi::CullMode ToCull(uint8_t c) {
 void ClayPass::DestroyObjects() {
   DestroyShadowObjects();  // (first: its view of depth_ and its pipelines of vs_ and layout_)
   DestroySkyObjects();
+  DestroyBloomObjects();  // (before the post steps' layout's other users and map_vs_)
   DestroyPostObjects();  // (before map_vs_, which its pipelines are made of)
   DestroyOracleObjects();
   if (device_) {
@@ -258,6 +278,8 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     ForgetPostObjects();
     post_objects_failed_ = false;  // (another device: its post steps are tried anew)
     post_layout_ = nullptr;
+    ForgetBloomObjects();
+    bloom_objects_failed_ = false;  // (and the bloom's)
     ForgetOracleObjects();
     oracle_failed_ = false;  // (and the oracle feed)
     white_ = nullptr;
@@ -275,6 +297,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     shadow_objects_failed_ = false;
     sky_objects_failed_ = false;  // (the sky's objects likewise)
     post_objects_failed_ = false;  // (and the post steps')
+    bloom_objects_failed_ = false;  // (and the bloom's)
     oracle_failed_ = false;  // (and the oracle feed)
   }
   ready_ = false;
@@ -1456,8 +1479,9 @@ bool ClayPass::EnsurePostObjects(nrhi::Device* dev) {
   };
   // One layout for every post step: the steps' constants (ClayPostConstants, slots of the frame's
   // constant buffer) at b0, a step's own 8 words at b1, a table of 4 textures at t0, and two static
-  // samplers (s0 point, s1 linear, both clamped), all for the pixel stage. The composite and the ramp
-  // read their one texture with Load and neither the words nor a sampler; the steps of plan Task 8 do.
+  // samplers (s0 point, s1 linear, both clamped), all for the pixel stage. Every step reads its words
+  // (the level count of its target, at least); the composite samples the bloom and the downsample the
+  // scene with s1; s0 is declared for the layout and read by no step of this build.
   if (!post_layout_) {
     nrhi::BindingLayoutDesc desc;
     desc.params[kPostParamConstants].kind = nrhi::BindingParamKind::kConstantBuffer;
@@ -1522,6 +1546,97 @@ bool ClayPass::EnsurePostObjects(nrhi::Device* dev) {
               kWidth / kFrontDivisor, kHeight / kFrontDivisor,
               double(ClayTargetBytes(kWidth / kFrontDivisor, kHeight / kFrontDivisor, kClayMappedTexelBytes)) / (1024.0 * 1024.0),
               sizeof(ClayPostConstants), kClayPostSlots, kPostStepWords, kPostTableSize);
+  return true;
+}
+
+void ClayPass::ForgetBloomObjects() {
+  post_downsample_ps_ = post_bright_ps_ = post_blur_ps_ = nullptr;
+  post_downsample_pipeline_ = post_bright_pipeline_ = post_blur_pipeline_ = nullptr;
+  bloom_d_ = bloom_p_ = bloom_q_ = nullptr;
+  bloom_d_view_ = bloom_p_view_ = bloom_q_view_ = nullptr;
+  bloom_objects_ = false;
+}
+
+void ClayPass::DestroyBloomObjects() {
+  if (device_) {
+    device_->DestroyDeferred(post_downsample_pipeline_);
+    device_->DestroyDeferred(post_bright_pipeline_);
+    device_->DestroyDeferred(post_blur_pipeline_);
+    device_->DestroyDeferred(post_downsample_ps_);
+    device_->DestroyDeferred(post_bright_ps_);
+    device_->DestroyDeferred(post_blur_ps_);
+    device_->DestroyDeferred(bloom_d_view_);
+    device_->DestroyDeferred(bloom_p_view_);
+    device_->DestroyDeferred(bloom_q_view_);
+    device_->DestroyDeferred(bloom_d_);
+    device_->DestroyDeferred(bloom_p_);
+    device_->DestroyDeferred(bloom_q_);
+  }
+  ForgetBloomObjects();
+}
+
+bool ClayPass::EnsureBloomObjects(nrhi::Device* dev) {
+  if (bloom_objects_) return true;
+  if (bloom_objects_failed_ || !post_objects_ || !post_layout_ || !ready_ || dev != device_) return false;
+  auto fail = [&](const char* what) {
+    REXLOG_ERROR("[native] clay: {} failed ({}): the native bloom is off until the pass is rebuilt (another device, or an F6 retry "
+                 "after a failure of the renderer) or the game is restarted; while fable2_native_bloom is on every frame is drawn "
+                 "with the fixed exposure and the output mapping, and with it off the post chain goes on without the bloom",
+                 what, kPostObjectsReason);
+    DestroyBloomObjects();
+    bloom_objects_failed_ = true;
+    return false;
+  };
+  nrhi::ShaderDesc sd;
+  sd.entry_point = "main";
+  sd.stage = nrhi::ShaderStage::kPixel;
+  sd.name = "fable2_clay_post_downsample_ps";
+  sd.hlsl_source = shaders::kClayPostDownsamplePs;
+  post_downsample_ps_ = dev->CreateShader(sd);
+  sd.name = "fable2_clay_post_bright_ps";
+  sd.hlsl_source = shaders::kClayPostBrightPs;
+  post_bright_ps_ = dev->CreateShader(sd);
+  sd.name = "fable2_clay_post_blur_ps";
+  sd.hlsl_source = shaders::kClayPostBlurPs;
+  post_blur_ps_ = dev->CreateShader(sd);
+  if (!post_downsample_ps_ || !post_bright_ps_ || !post_blur_ps_) return fail("bloom shader compile");
+  // Three targets of a quarter of the logical size. Their contents are undefined until a frame with the
+  // bloom writes them, and no step reads one in a frame that did not write it.
+  nrhi::TextureDesc td;
+  td.width = kBloomWidth;
+  td.height = kBloomHeight;
+  td.usage = nrhi::kTextureUsageRenderTarget;
+  td.initial_state = nrhi::ResourceState::kPixelShaderResource;
+  td.format = kBloomDownFormat;
+  bloom_d_ = dev->CreateTexture(td);
+  td.format = kBloomFormat;
+  bloom_p_ = dev->CreateTexture(td);
+  bloom_q_ = dev->CreateTexture(td);
+  bloom_d_view_ = bloom_d_ ? dev->CreateTextureView(bloom_d_, nrhi::TextureViewDesc{}) : nullptr;
+  bloom_p_view_ = bloom_p_ ? dev->CreateTextureView(bloom_p_, nrhi::TextureViewDesc{}) : nullptr;
+  bloom_q_view_ = bloom_q_ ? dev->CreateTextureView(bloom_q_, nrhi::TextureViewDesc{}) : nullptr;
+  if (!bloom_d_ || !bloom_p_ || !bloom_q_ || !bloom_d_view_ || !bloom_p_view_ || !bloom_q_view_) return fail("bloom target creation");
+  // Three full-screen triangles more (the output mapping's vertex shader): no depth, no blend, no cull.
+  nrhi::GraphicsPipelineDesc pipe;
+  pipe.layout = post_layout_;
+  pipe.vs = map_vs_;
+  pipe.ps = post_downsample_ps_;
+  pipe.rtv_format = kBloomDownFormat;
+  post_downsample_pipeline_ = dev->CreateGraphicsPipeline(pipe);
+  pipe.ps = post_bright_ps_;
+  pipe.rtv_format = kBloomFormat;
+  post_bright_pipeline_ = dev->CreateGraphicsPipeline(pipe);
+  pipe.ps = post_blur_ps_;
+  post_blur_pipeline_ = dev->CreateGraphicsPipeline(pipe);
+  if (!post_downsample_pipeline_ || !post_bright_pipeline_ || !post_blur_pipeline_) return fail("bloom pipeline creation");
+  bloom_objects_ = true;
+  REXLOG_INFO("[native] clay: bloom steps ready (the downsample into {} x {} R11G11B10_FLOAT, the bright pass and the two blurs "
+              "into two targets of {} x {} R10G10B10A2_UNORM: a quarter of the logical {} x {}, {:.2f} MB together; downsample "
+              "position {:.1f}, the composite's bloom fetch {:.1f} bloom texels on; the steps round their own writes to {} and {} "
+              "levels)",
+              kBloomWidth, kBloomHeight, kBloomWidth, kBloomHeight, kWidth, kHeight,
+              double(3 * ClayTargetBytes(kBloomWidth, kBloomHeight, 4)) / (1024.0 * 1024.0), double(kPostDownsampleBias),
+              double(kPostBloomFetch), kBloomLevels, kFrontLevels);
   return true;
 }
 
@@ -1662,18 +1777,27 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   post_in.post = post.post;
   post_in.light = light == ClayLight::kOn;
   post_in.lit = frame_.light_on != 0;
-  post_in.block = scene.post.valid && scene.post_age <= capture::kPostBlockMaxAge && scene.light.valid &&
-                  capture::PostBlockPairs(scene.post, scene.light.out_scale);
+  // (which of the pass's rules refuses a block is kept for the Post line: ClayPostFault)
+  ClayPostFault post_fault = PostBlockFault(scene.post, scene.post_age, scene.light.valid, scene.light.out_scale);
+  post_in.block = post_fault == ClayPostFault::kNone;
   post_in.ramp = PostRampUsable(post.ramp);
-  post_in.objects = !post_objects_failed_;
+  // (with the bloom's switch on its objects are the post steps' too: a frame that cannot have them is
+  // today's, "post-objects"; with the switch off they are neither made nor asked for)
+  post_in.objects = !post_objects_failed_ && !(post.bloom && bloom_objects_failed_);
   post_in.buffer = true;  // (FinishTerrain, below)
   ClayPostConstants post_constants{};
-  // (the bloom's and the sun's flags stay 0: no step of this build reads them; plan Tasks 8 and 14)
+  // (the bloom's flag is set only with the switch and the block's blur part; the sun's flag stays 0: no
+  // step of this build draws its layers; plan Task 14)
   if (DecideClayPost(post_in).post == ClayPost::kDrawn) {
-    post_in.block = MakeClayPostConstants(scene.post, post.ramp, false, false, &post_constants);
+    post_in.block = MakeClayPostConstants(scene.post, post.ramp, post.bloom, false, &post_constants);
+    if (!post_in.block) post_fault = ClayPostFault::kValues;
   }
   if (DecideClayPost(post_in).post == ClayPost::kDrawn) post_in.objects = EnsurePostObjects(dev);
-  if (DecideClayPost(post_in).post == ClayPost::kDrawn) post_in.block = SetClayFramePost(frame_, scene.post, scene.light.out_scale);
+  if (DecideClayPost(post_in).post == ClayPost::kDrawn && post.bloom) post_in.objects = EnsureBloomObjects(dev);
+  if (DecideClayPost(post_in).post == ClayPost::kDrawn) {
+    post_in.block = SetClayFramePost(frame_, scene.post, scene.light.out_scale);
+    if (!post_in.block) post_fault = ClayPostFault::kWords;
+  }
   const bool post_words = DecideClayPost(post_in).post == ClayPost::kDrawn;  // (the frame's two words are a post frame's)
   // With the light off no light input is asked of the geometry cache: every record is prepared as
   // one without light inputs (its light buffers null, its light_mode without an object bit, the
@@ -1863,7 +1987,9 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   bool oracle_fed = false;
   if (post_frame && oracle_ && !oracle_failed_) {
     ClayPostConstants oracle_constants{};
-    if (!MakeClayPostConstants(oracle_->block, post.ramp, false, false, &oracle_constants)) {
+    // (the bloom's switch goes through to the feed's constants: with it on and the file's block carrying
+    // the blurs' weights the bloom's steps run on the stored scene; review of plan Task 6, Minor 7)
+    if (!MakeClayPostConstants(oracle_->block, post.ramp, post.bloom, false, &oracle_constants)) {
       REXLOG_ERROR("[native] clay: post oracle: the file's block gives no constants: the feed is off until the pass is rebuilt");
       oracle_failed_ = true;
     } else if (EnsureOracleTexture(cmd, dev)) {
@@ -1871,17 +1997,29 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       oracle_fed = true;
     }
   }
+  // The frame's bloom, from the constants the steps will read (the feed's, when it is fed): on only
+  // with the switch, in a post frame, with the blurs' weights; the bloom's objects exist then (asked
+  // for above whenever the switch is on in a frame that could be a post frame).
+  ClayBloom bloom = DecideClayBloom(post_frame, post.bloom, post_constants.bloom_on != 0);
+  if (bloom == ClayBloom::kOn && !bloom_objects_) bloom = ClayBloom::kNoWeights;  // (unreachable: the verdict would be "post-objects")
+  post_constants.bloom_on = bloom == ClayBloom::kOn ? 1u : 0u;
   if (post_frame) std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(post_slot_), &post_constants, sizeof(post_constants));
   st.post_switch = post.post;
   st.post_block = scene.post.valid;
   st.post_reason = scene.post_reason;
   st.post_age = scene.post_age;
   st.post = post_decision.post;
+  st.post_fault = post_fault;
+  st.bloom = bloom;
   if (post_frame) {
     st.post_scale = frame_.exposure;
     st.post_unlit = frame_.post;
+    st.post_coord = scene.post.composite[1];
   }
   CountClayPostFrame(post_decision.post, post_counts_);  // (every frame with the post switch on)
+  CountClayBloomFrame(bloom, post_counts_);
+  st.bloom_frames = post_counts_.bloom;
+  st.bloom_noweights_frames = post_counts_.noweights;
   st.post_frames = post_counts_.frames;
   st.post_drawn_frames = post_counts_.drawn;
   st.post_nolight_frames = post_counts_.nolight;
@@ -1891,8 +2029,9 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   st.post_buffer_frames = post_counts_.buffer;
   // A line when the verdict changes (the first post frame; a frame that lost its post and why).
   constexpr uint32_t kPostLogLines = 16;
-  if (post_decision.post != post_logged_ && post_log_lines_ < kPostLogLines) {
+  if ((post_decision.post != post_logged_ || bloom != bloom_logged_) && post_log_lines_ < kPostLogLines) {
     post_logged_ = post_decision.post;
+    bloom_logged_ = bloom;
     ++post_log_lines_;
     const capture::PostBlock& b = scene.post;
     float largest = 0.0f;
@@ -2288,33 +2427,59 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   if (post_frame) {
     // A post frame (DecideClayPost: with the steps' objects and the frame's constant buffer, whose post
     // slots hold this frame's constants): the game's composite and the scan-out ramp in place of the
-    // mapping. Each step binds the layout anew (SetBindingLayout resets the bindings) and reads one
-    // texture with Load; no target is read and written in one step: the composite reads the linear
-    // target and writes the front target, the ramp reads the front target and writes the mapped one,
-    // and each is a target only for its own step.
-    const float step_constants[kPostStepWords] = {1.0f / float(kWidth), 1.0f / float(kHeight), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-    auto post_step = [&](nrhi::Texture* target, nrhi::Pipeline* pipeline, nrhi::TextureView* source) {
+    // mapping, and before them, with the bloom, its four steps. Each step binds the layout anew
+    // (SetBindingLayout resets the bindings); no target is read and written in one step: the composite
+    // reads the linear target (and the bloom's) and writes the front target, the ramp reads the front
+    // target and writes the mapped one, and each is a target only for its own step.
+    // A step: its target (of `width` x `height`), its program, its own words (the size of its source,
+    // the level count of its target's format, its offset, a blur's direction) and its textures: `source`
+    // at t0 and `second` at t1 (the composite's bloom), the white texture in every entry the step does
+    // not read (the bright pass's two sun layers, which it reads only with the sun's flag, among them).
+    auto post_step = [&](nrhi::Texture* target, uint32_t width, uint32_t height, nrhi::Pipeline* pipeline, const ClayPostStepConstants& words,
+                         nrhi::TextureView* source, nrhi::TextureView* second) {
       cmd->SetRenderTargets(target, nullptr);
-      cmd->SetViewport({0.0f, 0.0f, float(kWidth), float(kHeight), 0.0f, 1.0f});
-      cmd->SetScissor({0, 0, int32_t(kWidth), int32_t(kHeight)});
+      cmd->SetViewport({0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f});
+      cmd->SetScissor({0, 0, int32_t(width), int32_t(height)});
       cmd->SetBindingLayout(post_layout_);
       cmd->SetPipeline(pipeline);
       cmd->SetConstantBuffer(kPostParamConstants, terrain_cb_, ClaySmallSlotOffset(post_slot_));
-      cmd->SetRootConstants(kPostParamStep, kPostStepWords, step_constants, 0);
-      // (the white texture in the table's entries no step of this build reads)
-      nrhi::TextureView* const inputs[kPostTableSize] = {source, white_view_, white_view_, white_view_};
+      cmd->SetRootConstants(kPostParamStep, kPostStepWords, &words, 0);
+      nrhi::TextureView* const inputs[kPostTableSize] = {source, second ? second : white_view_, white_view_, white_view_};
       cmd->SetTextures(kPostParamTextures, inputs, kPostTableSize);
       cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
       cmd->Draw(3, 0);
     };
+    // (the oracle feed: the stored scene in place of the linear target, for every step that reads the
+    // scene: the composite and, with the bloom, the downsample; both rest in kPixelShaderResource)
+    nrhi::TextureView* const scene_view = oracle_fed ? oracle_view_ : linear_view_;
+    const bool bloom_on = bloom == ClayBloom::kOn;
+    if (bloom_on) {
+      // The bloom (clay_logic.h, "Native bloom"), between the scene and the composite: the downsample
+      // of the scene into bloom_d_, the bright pass of that into bloom_p_, the blur along x into
+      // bloom_q_ and the blur along y back into bloom_p_, which the composite then samples. Each target
+      // is a target for its own step alone and rests as a shader resource before and after it.
+      auto bloom_step = [&](nrhi::Texture* target, nrhi::Pipeline* pipeline, const ClayPostStepConstants& words, nrhi::TextureView* source) {
+        cmd->Barrier(target, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
+        cmd->FlushBarriers();
+        post_step(target, kBloomWidth, kBloomHeight, pipeline, words, source, nullptr);
+        cmd->Barrier(target, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
+        cmd->FlushBarriers();
+      };
+      bloom_step(bloom_d_, post_downsample_pipeline_, MakeClayPostStep(ClayPostStep::kDownsample, kWidth, kHeight, UnormLevels(kBloomDownFormat)),
+                 scene_view);
+      bloom_step(bloom_p_, post_bright_pipeline_, MakeClayPostStep(ClayPostStep::kBright, kBloomWidth, kBloomHeight, kBloomLevels), bloom_d_view_);
+      bloom_step(bloom_q_, post_blur_pipeline_, MakeClayPostStep(ClayPostStep::kBlurX, kBloomWidth, kBloomHeight, kBloomLevels), bloom_p_view_);
+      bloom_step(bloom_p_, post_blur_pipeline_, MakeClayPostStep(ClayPostStep::kBlurY, kBloomWidth, kBloomHeight, kBloomLevels), bloom_q_view_);
+    }
     cmd->Barrier(front_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
     cmd->FlushBarriers();
-    // (the oracle feed: the stored scene in place of the linear target; both rest in kPixelShaderResource)
-    post_step(front_, post_composite_pipeline_, oracle_fed ? oracle_view_ : linear_view_);
+    post_step(front_, kWidth / kFrontDivisor, kHeight / kFrontDivisor, post_composite_pipeline_,
+              MakeClayPostStep(ClayPostStep::kComposite, kWidth, kHeight, kFrontLevels), scene_view, bloom_on ? bloom_p_view_ : nullptr);
     cmd->Barrier(front_, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
     cmd->Barrier(color_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
     cmd->FlushBarriers();
-    post_step(color_, post_ramp_pipeline_, front_view_);
+    post_step(color_, kWidth, kHeight, post_ramp_pipeline_, MakeClayPostStep(ClayPostStep::kRamp, kWidth, kHeight, kMappedLevels), front_view_,
+              nullptr);
     cmd->Barrier(color_, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
     cmd->FlushBarriers();
     // The oracle feed's one read-back: the mapped target of the frame kOracleDumpAfter fed frames after

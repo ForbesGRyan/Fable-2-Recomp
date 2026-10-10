@@ -2,8 +2,8 @@
 light_formulas.py, against the game's own final picture of the same capture.
 
   post_replay.py replay  <capture> <frame> [--variant A|B|C|N ...] [--table-offset 0.5] [--bias 0] [--ramp R]
-                                           [--write <prefix>] [--png <prefix>]
-  post_replay.py predict <capture> <frame> [--ramp R]
+                                           [--bloom-place fetch|aligned] [--write <prefix>] [--png <prefix>]
+  post_replay.py predict <capture> <frame> [--ramp R] [--bloom-place fetch|aligned]
   post_replay.py export  <capture> <frame> <prefix>
   post_replay.py excerpt <capture> <frame> --at X,Y --out <file.json>
   post_replay.py compare <dump> <picture> [--spot bridge]
@@ -19,7 +19,7 @@ Variants, each a picture of the scene's 1120 x 720 pixels in the front buffer's 
   A  light_formulas.post_composite with bloom 0: table, grey fade, saturation step, power.
   B  A with the bloom: post_downsample (--bias), post_bright with tf1 = tf2 = 0, post_blur13 along x and
      along y, each stage rounded to the 10 bits of its k_2_10_10_10 target, sampled linearly at the pixel
-     (texel centres aligned: the place of the sample is this tool's, not read from the game).
+     (--bloom-place, below).
   N  today's native mapping: sqrt(sat(scene / c20.w * 2.22)).
   C  B with the game's sun layer rasterised from the capture's quad rows and the oracle's depth: the replay of
      post_sun_layer.py, which this command hands over to (it prints B beside C; its own text has what it reads
@@ -28,6 +28,14 @@ Variants, each a picture of the scene's 1120 x 720 pixels in the front buffer's 
 --table-offset is the table fetch's offset in texels: 0.5 is light_formulas.post_table_texel (the fetch's
 own OffsetX); 0 is floor(u * 512), the reading of the research script this tool came from
 (out/tests/post-research/replay.py), kept to reproduce its figures.
+--bloom-place is where the composite samples the bloom (variant B of replay and predict). `fetch`, the
+default: the composite's own fetch (37B1 instruction 6: tfetch2D tf2 at the scene's interpolated coordinate,
+OffsetX = OffsetY = 0.5), the interpolator taken as x / width at pixel x (which makes the scene's own fetch a
+texel centre): bloom texel coordinate x / 4 + 0.5. It is what the native composite does (clay_logic.h,
+kPostBloomFetch; plan Task 8) and it fits the front buffer better: median 0.565 to 0.578 levels on the three
+bridge captures against 0.716 to 0.732 (out/native-evidence/post/t8_bloom_fetch.txt). `aligned`: texel
+centres aligned, (x + 0.5) / 4, the research's and plan Task 3's reading, kept to reproduce their figures.
+Variant C (post_sun_layer.py) and the stored excerpt still sample with the centres aligned.
 --ramp: the scan-out ramp, applied to the 8-bit value of variants A and B and of the front buffer (predict,
 --write, --png; N is what the native picture shows today, which no ramp touches). R is `measured` (the eight
 measured pairs of spec criterion 4, joined by straight lines: a stand-in, not the game's table) or a log
@@ -84,6 +92,8 @@ HUD_TOP = 0.165
 HUD_BOX = (0.045, 0.775, 0.15, 0.96)
 
 PART_BLUR, PART_RADIAL = 1, 2   # post_block.h: kPostPartBlur, kPostPartRadial
+BLOOM_PLACES = ("fetch", "aligned")     # where the composite samples the bloom (the module's text)
+BLOOM_PLACE = "fetch"                   # replay's and predict's default: clay_logic.h, kPostBloomFetch
 BLOCK_FLOATS = 541              # PostBlock: composite[6], bright[5], blur[2][7], radial[4], table[512]
 
 
@@ -277,9 +287,15 @@ def bloom_picture(scene, w, h, fr, bias=0.0):
     return bw, bh, stage
 
 
-def bloom_sampler(bw, bh, rows, w, h):
-    """The bloom at pixel (x, y) of the w x h picture: linear, texel centres aligned."""
+def bloom_sampler(bw, bh, rows, w, h, place="aligned"):
+    """The bloom at pixel (x, y) of the w x h picture, linear. place `aligned`: texel centres aligned, bloom
+    texel coordinate (x + 0.5) * bw / w. `fetch`: the composite's own fetch, x * bw / w + 0.5 (the scene's
+    interpolated coordinate plus the fetch's half texel; the module's text)."""
     tex = lf.post_texture(rows, linear=True)
+    if place == "fetch":
+        return lambda x, y: tex(x * bw / w + 0.5, y * bh / h + 0.5)
+    if place != "aligned":
+        raise ReplayError("the bloom's place is one of %s, not %r" % (", ".join(BLOOM_PLACES), place))
     return lambda x, y: tex((x + 0.5) * bw / w, (y + 0.5) * bh / h)
 
 
@@ -572,7 +588,7 @@ def region_rows(picture, front, w, h, spot="bridge"):
 
 # --- the commands --------------------------------------------------------------------------------------------
 
-def _pictures(fr, variants, table_offset, bias, say=print):
+def _pictures(fr, variants, table_offset, bias, say=print, place=BLOOM_PLACE):
     scene = load_scene(fr)
     bad = sum(1 for v in scene if not math.isfinite(v))
     lum = sorted(lf.post_lum([lf.post_scene(scene[i]), lf.post_scene(scene[i + 1]), lf.post_scene(scene[i + 2])])
@@ -583,9 +599,9 @@ def _pictures(fr, variants, table_offset, bias, say=print):
     if "B" in variants:
         bw, bh, rows = bloom_picture(scene, SCENE_W, SCENE_H, fr, bias)
         flat = [v for row in rows for t in row for v in t]
-        say("bloom (%d x %d, downsample bias %g): mean %.4f, max %.4f; times the composite's c31.x: mean %.4f" % (
-            bw, bh, bias, sum(flat) / len(flat), max(flat), sum(flat) / len(flat) * fr.reg("composite", 31)))
-        bloom = bloom_sampler(bw, bh, rows, SCENE_W, SCENE_H)
+        say("bloom (%d x %d, downsample bias %g, sampled at `%s`): mean %.4f, max %.4f; times the composite's c31.x: mean %.4f" % (
+            bw, bh, bias, place, sum(flat) / len(flat), max(flat), sum(flat) / len(flat) * fr.reg("composite", 31)))
+        bloom = bloom_sampler(bw, bh, rows, SCENE_W, SCENE_H, place)
     return scene, {v: variant_picture(v, scene, SCENE_W, SCENE_H, fr, bloom, table_offset) for v in variants}
 
 
@@ -610,7 +626,7 @@ def cmd_replay(args):
     fr = load_frame(find_capture(args.capture), args.frame)
     _head(fr)
     print("table offset %g texels%s" % (args.table_offset, "" if args.table_offset == 0.5 else " (not the reference's 0.5)"))
-    scene, pictures = _pictures(fr, variants, args.table_offset, args.bias)
+    scene, pictures = _pictures(fr, variants, args.table_offset, args.bias, place=args.bloom_place)
     front = load_front(fr)
     spans = outside_hud(SCENE_W, SCENE_H)
     for v in variants:
@@ -648,7 +664,7 @@ def cmd_predict(args):
     _head(fr)
     print("ramp: %s" % ("the measured stand-in (spec criterion 4's pairs, straight lines between)"
                         if args.ramp == "measured" else args.ramp))
-    scene, pictures = _pictures(fr, ["A", "B", "N"], 0.5, args.bias)
+    scene, pictures = _pictures(fr, ["A", "B", "N"], 0.5, args.bias, place=args.bloom_place)
     shown = {v: array("d", [b / 255.0 for b in to_bytes(p, None if v == "N" else ramp)]) for v, p in pictures.items()}
     print()
     print("mean luminance of the display values, by region: the variant after the ramp over N (today's mapping, no ramp)")
@@ -750,6 +766,8 @@ def main(argv=None):
         p.add_argument("capture")
         p.add_argument("frame", type=int)
         p.add_argument("--bias", type=float, default=0.0, help="the downsample's pixel position: 0 integral, 0.5 the centre")
+        p.add_argument("--bloom-place", choices=BLOOM_PLACES, default=BLOOM_PLACE,
+                       help="where the composite samples the bloom (replay, predict): its own fetch, or texel centres aligned")
         p.add_argument("--spot", default="bridge")
 
     p = sub.add_parser("replay")

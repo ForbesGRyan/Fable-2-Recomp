@@ -67,6 +67,7 @@ POST_QUAD_SHADERS, the quads the capture records; phase 10c). post_check.py chec
 """
 import collections
 import math
+import struct
 
 
 def _finite(x):
@@ -1429,3 +1430,103 @@ def post_cube_position(v, c0, c1, c2, c3, c9, c119x, c254=POST_CUBE_C254, c255x=
     (plus post_cube_bias, which is 0)."""
     q = post_quad_position(post_cube_point(v, c9, c119x, c254, c255x), c0, c1, c2, c3)
     return [a + b for a, b in zip(q, post_cube_bias(v, c254, c255x))]
+
+
+# --- the wind of the foliage's vertex shaders (sub-project 11, phase 11a) ---------------------------------------
+#
+# Twelve vertex shaders move their vertices in the wind (frame-map section 18; lighting-formulas.md, "Wind"):
+# three families, each one closed formula that wind_check.py holds against the shaders' microcode. A formula
+# takes the position AT REST (what the native pass draws today: the fetched position read as yxw1, for a plant
+# through its copy's rows and the draw's offset c7) and gives the position the shader puts through c0..c3.
+#
+# A shader's literal registers are data (spec ruling 9): the shaders of one family hold the same numbers in
+# other registers and components. WIND_LITERALS has a family's numbers by name (single precision, as the
+# shader objects' tables hold them), WIND_LITERAL_ORDER the names in the order the generated table and the
+# native constants keep them, and each row of WIND_SHADERS says where its shader holds each ("lit_at": name ->
+# (register, component)). The names of WIND_STRUCTURE are not read by a formula: in the microcode they are a
+# select's condition, an added zero, or the constant 1 that is also the position's w, and the formula is the
+# microcode's with them at the values given here; they are in the rows so that a shader object whose table
+# differs there is not drawn with the formula either.
+
+def _wind_f32(x):
+    return struct.unpack("<f", struct.pack("<f", x))[0]
+
+
+WIND_STRUCTURE = {"zero": 0.0, "sel_zero": 0.0, "sel_one": 1.0, "unit": 1.0}
+WIND_LITERAL_ORDER = {
+    "plant": ("lo", "two_pi", "inv_two_pi", "gain", "height", "half", "unit"),
+}
+WIND_LITERALS = {
+    # lo, two_pi, inv_two_pi and half wrap the phase to [-pi, pi); gain is the share of a copy's seed in its
+    # own rate; height is the mesh height (in the mesh's own units, 1 / height) at which the sway is whole;
+    # unit is the 1 of the phase, which is also the w the shader gives its position (structure).
+    "plant": dict(zip(WIND_LITERAL_ORDER["plant"],
+                      (_wind_f32(v) for v in (-math.pi, 2.0 * math.pi, 1.0 / (2.0 * math.pi), 0.1, 5.0, 0.5, 1.0)))),
+}
+WIND_REGISTERS = {"plant": (10, 21, 22, 25, 26)}      # vertex registers, in WindInputs' order
+_WIND_EVIDENCE = ("wind_check.py formulas, rows and identities (out/native-evidence/foliage/t7_wind_check.txt); "
+                  "lighting-formulas.md, \"Wind\"")
+
+
+def _wind_row(family, role, lit_at, elements=(), note=""):
+    """A row of WIND_SHADERS: `lit_at` is "name=register.component ..." for every name of the family."""
+    places = {}
+    for item in lit_at.split():
+        name, place = item.split("=")
+        reg, comp = place.split(".")
+        places[name] = (int(reg), "xyzw".index(comp))
+    order = WIND_LITERAL_ORDER[family]
+    if set(places) != set(order):
+        raise ValueError("wind row: literals %s" % sorted(set(places) ^ set(order)))
+    return {"family": family, "role": role, "reg": WIND_REGISTERS[family],
+            "lit_reg": tuple(sorted({reg for reg, _ in places.values()})),
+            "lit": dict(WIND_LITERALS[family]), "lit_at": {name: places[name] for name in order},
+            "elements": tuple(elements), "evidence": (note + " " if note else "") + _WIND_EVIDENCE}
+
+
+_PLANT_NEAR = "Checked with the push loop's count at 0: the push away from characters is not drawn (spec ruling 10)."
+WIND_SHADERS = {            # the twelve; a shader not machine-checked is not in it
+    # The instanced plants: the sway alone. "elements" is empty: what the formula reads per vertex (the copy's
+    # rows and the mesh position) is what the instance entry of vs-transforms.json already names.
+    "8123C16DBF583F92": _wind_row("plant", "scene", "lo=253.x two_pi=253.y inv_two_pi=253.z gain=254.w height=255.w "
+                                                    "half=254.z unit=254.y"),
+    "B636821F95DC9D8E": _wind_row("plant", "scene", "lo=253.x two_pi=254.z inv_two_pi=253.z gain=255.w height=253.y "
+                                                    "half=254.w unit=254.y"),
+    "48D30ECCF684F488": _wind_row("plant", "scene", "lo=253.x two_pi=253.z inv_two_pi=253.w gain=254.w height=255.w "
+                                                    "half=254.z unit=254.y", note=_PLANT_NEAR),
+    "FC4F2EF6930768BE": _wind_row("plant", "scene", "lo=253.x two_pi=253.z inv_two_pi=253.w gain=254.w height=255.w "
+                                                    "half=254.z unit=254.y", note=_PLANT_NEAR),
+    "33C00226C154C1F2": _wind_row("plant", "scene", "lo=253.x two_pi=253.w inv_two_pi=253.z gain=254.w height=255.w "
+                                                    "half=254.z unit=254.y", note=_PLANT_NEAR),
+    "A8A5B2A89F70336A": _wind_row("plant", "caster", "lo=253.y two_pi=253.x inv_two_pi=253.z gain=254.w height=255.w "
+                                                     "half=254.z unit=254.y"),
+}
+
+
+def _wind_frac(x):
+    return x - math.floor(x)
+
+
+def wind_plant(p, z, a3, b3, c7xy, c10x, c21, c22, c25x, c26xy, lit):
+    """p + sat(lit.height * z) * cos(theta) * (c26x * c21 + c26y * c22); R A1.
+
+    The instanced plants (8123, instr 38 to 58; B636, 48D3, FC4F, 33C0 and the caster A8A5 hold the same block):
+        f     = frac(c7.x + c7.y + B3 + A3)                      the copy's seed: a3, b3 are the fourth stored
+                                                                 components of its first two rows (its x and y)
+        theta = 1 + f - c10.x * c25.x * (1 + gain * f)           the clock c10.x, the rate c25.x
+        theta = frac(theta * inv_two_pi + half) * two_pi + lo    wrapped to [-pi, pi)
+        h     = sat(height * z)                                  z: the mesh vertex's third coordinate
+        p'    = p + h * cos(theta) * (c26.x * c21 + c26.y * c22)
+    `p` is the copy-transformed position with the draw's offset c7 added (the microcode's r5 at instr 31), which
+    the distance cut has tested before (the cut is not this function's). A vertex at or below the root (z <= 0)
+    stands; with c26 = 0 the plant stands (ruling 26: c25.x = 0 with c26 = 0 in the bridge's caster rows)."""
+    f = _wind_frac(c7xy[0] + c7xy[1] + b3 + a3)
+    theta = 1.0 - c10x * c25x * (f * lit["gain"] + 1.0) + f
+    theta = _wind_frac(theta * lit["inv_two_pi"] + lit["half"]) * lit["two_pi"] + lit["lo"]
+    s = sat(lit["height"] * z) * math.cos(theta)
+    return tuple(p[k] + s * (c21[k] * c26xy[0] + c22[k] * c26xy[1]) for k in range(3))
+
+
+def wind_reach_plant(c21, c22, c26xy):      # an upper bound of |offset|: |c26x c21 + c26y c22|
+    """The largest distance wind_plant moves a vertex: h and the cosine are at most 1."""
+    return math.sqrt(sum((c21[k] * c26xy[0] + c22[k] * c26xy[1]) ** 2 for k in range(3)))

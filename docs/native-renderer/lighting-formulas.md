@@ -1060,3 +1060,78 @@ This section is plan Task 11's; what the later tasks found is in `docs/native-re
 5. **The clouds against a picture** ("Not checked", 1): held by hue against the game's own scene at the bridge: place, drift and sign, one pair confirmed by the tool's rule, two at its edge (51% against 50%); strength not decided (controller ruling 43; `tools/xdk_sigmatch/post_cloud_hue.py`, `tests/test_post_cloud_hue.py`).
 6. **Still not checked**: a flare in front of the depth, the moon and its glow in a picture, anything at night.
 7. **The clouds' texel step** ("What stands on inference": "for plan Task 16 the choice is open"): plan Task 16 took a texel of the base level (`CloudTexelStep`), the emulator's reading; which the console has is still not measured.
+
+## Wind
+
+Native renderer sub-project 11 (foliage), phase 11a, plan Tasks 5 to 7, 2026-10-10. The wind of the game's vertex shaders as closed formulas of the position, each checked against its microcode: what the native pass will compute where it draws a "deformed" record at rest today (frame-map section 12, "Wind and displacement"; section 18). Nothing here was run in the game. Every statement rests on the shader dumps and on the capture rows of `native_discovery_20261010_182130.jsonl` (towards the sun), `_182313` (the bridge) and `_121036` (the third spot).
+
+### Result
+
+| Family | Shader | Role | Function of `light_formulas.py` | State |
+|---|---|---|---|---|
+| Plant | `8123C16DBF583F92` (grass, ferns) | scene | `wind_plant` | closed: 2,000 of 2,000 made draws; 1,496 capture rows, 90,966 of 90,966 vertices |
+| Plant | `B636821F95DC9D8E` (bushes) | scene | `wind_plant` | closed: 2,000 of 2,000; 844 rows, 54,016 of 54,016 |
+| Plant | `48D30ECCF684F488` (near) | scene | `wind_plant` | closed: 2,000 of 2,000, the push loop at 0; 99 rows, 6,226 of 6,226 |
+| Plant | `FC4F2EF6930768BE` (near) | scene | `wind_plant` | closed: 2,000 of 2,000, the push loop at 0; 69 rows, 4,416 of 4,416 |
+| Plant | `33C00226C154C1F2` (near) | scene | `wind_plant` | closed: 2,000 of 2,000, the push loop at 0; 48 rows, 3,072 of 3,072 |
+| Plant | `A8A5B2A89F70336A` | shadow caster | `wind_plant` | closed: 2,000 of 2,000; 279 rows of its own streams (two captures), 17,856 of 17,856, of which 2,305 are beyond the cut |
+
+(`wind_check.py formulas` and `rows`; the bound is spec criterion 1's, `1e-4 * max(1, |oPos|)` in every component; the largest relative difference on made draws is 1.4e-14 and on capture rows 1.4e-14: the two sides are the same arithmetic in double precision. `WIND_SHADERS` has the hashes with family, role, registers, literal places and elements.) `36B543CECAE5C781` (the push alone) and `6AD4108C3FF07966` (nothing) have no row. The trunks and the leaves are plan Tasks 6 and 7.
+
+### The plants' formula
+
+`wind_plant(p, z, a3, b3, c7xy, c10x, c21, c22, c25x, c26xy, lit)`, the block every one of the six shaders holds (instruction numbers of `8123`; frame-map section 12, "Instancing", has the fetches and the cut before it):
+
+```
+f     = frac(c7.x + c7.y + B3 + A3)                     39 to 42    the copy's seed
+theta = 1 + f - c10.x * c25.x * (1 + gain * f)          39, 43 to 45
+theta = frac(theta * inv_two_pi + half) * two_pi + lo   47, 48, 50   wrapped to [-pi, pi)
+h     = sat(height * z)                                 52
+p'    = p + h * cos(theta) * (c26.x * c21 + c26.y * c22)   51 to 58
+```
+
+- `p` is the world position of the vertex at rest: the mesh position through the copy's three rows plus the draw's offset `c7.xyz` (`r5` at instr 31), exactly what the instance entry of `vs-transforms.json` draws today. The distance cut (32 to 37) has tested `p` before: a vertex beyond it never reaches the block, and the cut stays the entry's.
+- `A3`, `B3` are the fourth stored components of the copy's first two rows (its x and y translation), `z` the mesh vertex's third coordinate: a blade stands at its root and sways whole from `z = 1 / height` (0.2 of the mesh's units) up.
+- `c10.x` is the clock in seconds, `c25.x` the rate (1, or 0.2 for some bushes and casters), `c21` the wind's direction in the world (a unit vector that turns in steps), `c22` a second direction ((-0.35, 1.53, 0) in every row), `c26.xy` the two amplitudes ((0.025, 0.0637)). One cosine a copy; its period is `2 pi / (c25.x * (1 + gain * f))`, 5.7 to 6.3 s at rate 1.
+- The largest offset is `wind_reach_plant(c21, c22, c26xy)` = `|c26.x c21 + c26.y c22|`: 0.108 units at the bridge.
+- With `c26` = 0 the plant stands. The bridge's caster rows with `c25.x` = 0 have `c26` = 0 (ledger ruling 26: the bound of `c25.x` is [0, 64]).
+- The four near shaders then push `xy` away from up to four points in a loop over integer constant `i0` (`c[56 + a0]` on). The push is not drawn (spec ruling 10) and not in the formula; the check runs the loop 0 times and says so.
+
+### The literals are data
+
+The shaders of one family hold the same numbers in other registers and components, so a formula takes them by name (`lit`) and `WIND_SHADERS[hash]["lit_at"]` says where each shader holds each (spec ruling 9). `WIND_LITERALS[family]` has the single-precision values, `WIND_LITERAL_ORDER[family]` the names in the order the generated table and the native constants keep them. The plants':
+
+| Name | Value | `8123` | `B636` | `48D3`, `FC4F` | `33C0` | `A8A5` |
+|---|---|---|---|---|---|---|
+| `lo` | -pi | `c253.x` | `c253.x` | `c253.x` | `c253.x` | `c253.y` |
+| `two_pi` | 2 pi | `c253.y` | `c254.z` | `c253.z` | `c253.w` | `c253.x` |
+| `inv_two_pi` | 1 / (2 pi) | `c253.z` | `c253.z` | `c253.w` | `c253.z` | `c253.z` |
+| `gain` | 0.1 | `c254.w` | `c255.w` | `c254.w` | `c254.w` | `c254.w` |
+| `height` | 5 | `c255.w` | `c253.y` | `c255.w` | `c255.w` | `c255.w` |
+| `half` | 0.5 | `c254.z` | `c254.w` | `c254.z` | `c254.z` | `c254.z` |
+| `unit` | 1 | `c254.y` | `c254.y` | `c254.y` | `c254.y` | `c254.y` |
+
+`unit` is structure (`WIND_STRUCTURE`): the 1 of the phase is also the `w` the shader gives its position (instr 25), so the formula has it as the number 1 and the row keeps it only so that a shader object whose table differs there is not drawn with the formula. `half` is also the bias of the instancing index (the entry's `"bias"`). The other five are the formula's alone.
+
+### The check
+
+`tools/xdk_sigmatch/wind_check.py` (its module text has the method; `tests/test_wind_formulas.py` runs a reduced count):
+
+- **One trial** is a draw (microcode, constant bank, vertex streams as bytes) and one vertex index. The microcode gives `oPos`. Beside it, from the same bytes and registers but through nothing of the interpreter's, the elements are decoded at the places the entry names, the formula moves the position at rest and `c0..c3` make a clip position. Agreement is criterion 1's bound in every component. A trial "moved" when the microcode's `oPos` is more than 1e-3 from the clip position at rest, and a check passes only if at least half of its trials moved (review focus 3).
+- **Made draws** (`formulas`): the wind registers inside the spec's Design 5 bounds, each component at its lower or upper edge in about three trials of ten (the clock's size spread over eight decades up to 1e7), every other register drawn, the elements over their whole ranges; one trial in 25 is a draw without sway (`c26` = 0, half of them with `c25.x` = 0) and one in 25 a vertex beyond the cut (the microcode's position is then no number, and so must the check's be). Every value is rounded to single precision first. The literal registers of a made draw hold **only what the row names, at the row's places**: a literal that a row misplaces or leaves out fails.
+- **Capture rows** (`rows`): every wind draw row that has streams, 64 vertices a draw (all of a smaller one): the main scene's rows and, since plan Task 1, the casters' own. The row's registers are rounded to single precision (the capture prints nine digits); the row's own `"vs_lit"` must hold the table's literals bit for bit, and its `"fetches"` the table's elements. All 176,552 vertices of the 2,835 plant rows of the three captures agree (run of plan Task 5; 90,926 of them moved; the rest are at or below their root, beyond the cut or in a draw without sway). The caster's rows at the bridge hold 2,305 vertices beyond the cut, where `oPos` is no number in x, y, z and 1 in w (the shadow projection's fourth row is 0 0 0 1): the check requires exactly that.
+- **Identities** (`identities`, criterion 2): the caster's microcode on a scene draw's streams and bank against the scene shader's `oPos`. `A8A5` on `8123`: 1,496 rows, 14,082 vertices, largest difference **0.0**; on `B636`: 844 rows, 9,842 vertices, **0.0**; the scene shader's own `oPos` is up to 0.089 to 0.106 from rest in the same vertices, so the comparison can fail. The caster's literals are its row's, at its row's places (`A8A5` holds `two_pi` and `lo` exchanged against `8123`).
+- **Mutations that must fail** (`MUTATIONS`; `test_mutations_fail`): `c22` for `c21` (`register`), the copy's seed read from its rows' third components (`bytes`), the direction's sign (`sign`), `gain` changed by 1% (`literal`): 109 to 147 of 200 made trials disagree for each of the six shaders (the trials that stand or are cut cannot tell). On real rows of the bridge the `sign` mutation fails too (`OnACapture`).
+- **Every literal is where the row says** (`test_every_literal_is_where_the_row_says`): each of `lo`, `two_pi`, `inv_two_pi`, `gain`, `height`, `half`, in each shader, changed by 1% in the formula alone is caught, and changed in the formula and at the row's place in the microcode's constants the two agree again.
+- `trace <hash> --instr N` prints the interpreter's registers after an instruction for a made draw (the transcription's oracle: `test_trace_gives_the_register_after_an_instruction`).
+
+### What stands on inference, and what is not checked
+
+1. Single precision. Both sides compute in double precision on single-precision inputs. At the captured clocks (56 to 73 s) the game's own single-precision phase differs from this by about 1e-5 of a turn; at a clock of 1e7 the game's arithmetic has no phase left at all, and neither would a native mirror: the check there is of the formula's shape, not of a picture.
+2. The push of the near plants (not drawn), and the loop's count (in no capture row).
+3. A vertex texture: none is on the position's path of these shaders.
+4. What the registers mean (the clock's unit, the direction's turning) is frame-map section 18's, measured there; the formula only says how they are used.
+
+### Evidence
+
+`out/native-evidence/foliage/` (git-ignored): `t7_wind_check.txt` (the three subcommands on the three captures, written at plan Task 7). Tests: `tests/test_wind_formulas.py`.

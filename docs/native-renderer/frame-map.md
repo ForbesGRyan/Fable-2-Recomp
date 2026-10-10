@@ -5180,10 +5180,15 @@ runs the pass's post steps, on the GPU, on a scene whose right answer is known. 
 the HLSL ("Native composite", limit 6); the mirrors of `clay_logic.h` are a second writing of
 the same sentences. The post steps are full-screen steps over one input, so with the game's own
 scene colour as that input their result can be held against the reference's picture and against
-the game's front buffer pixel for pixel, apart from every error of the native scene. It is also
-what separates the two readings of "Native composite"'s one-sided offset (the far and sunlit
-regions 0.02 to 0.05 above the prediction): fed the game's scene, the steps either reproduce the
-reference (then the offset is the native scene's) or they do not (then it is the shaders').
+the game's front buffer pixel for pixel, apart from every error of the native scene. For
+"Native composite"'s one-sided offset (the far and sunlit regions 0.02 to 0.05 above the
+prediction) it can exclude one cause and no more: fed the game's scene, the composite's and the
+ramp's compiled shaders either reproduce the reference (then the offset is not theirs) or they
+do not (then it is). The feed does not run, and so cannot clear, the scene-side words of a post
+frame (the exposure `c20.w` in the lit draws, the unlit scale), the live block's path from the
+capture, the prediction's own model of today's mapping, or the measuring of regions in window
+shots. (Review of plan Task 6, Important 1: the first writing said "then the offset is the
+native scene's".)
 
 **The switch**: `--fable2_native_post_oracle=<prefix>` (empty by default), with
 `--fable2_native_post=on`. Read once at startup (`fable2_native_render.cpp`, `LoadOracle`, before
@@ -5320,13 +5325,31 @@ addressing. Neither: it is how this graphics card stores a float in an 8-bit tar
   the reference's in 2.66 to 3.10% of the channels, and in every one of them the reference's
   unrounded level lies 0 to 0.062 of a level above the boundary (median 0.015 to 0.020, 99%
   0.053 to 0.057); **no other difference remains, in any of the four captures (0 channels)**.
-  So this card stores `floor(v * 255 + 0.5 - d)` with d near 0.04 to 0.06 where the reference
-  and the software adapter store the nearest level. Direct3D allows a float-to-UNORM conversion
-  a tolerance of 0.6 of a level, so this is a conforming conversion, not an error of the card
-  or the pass. (A single offset d for both writes fits 98.5% of the channels at best, d =
-  0.035, against 94.8% for d = 0: `t6_rounding_model_092959.txt`; the conversion's threshold is
-  not one number, which is why the two writes are analysed apart.) The two effects can meet in
-  one pixel, and the ramp has 18 steps of 2 levels a channel, hence the pixels 2 levels off.
+  The rule that fits is the reviewer's (review of plan Task 6, question 4 and Minor 1; found
+  with the reviewer's own scripts, which are not in the repository, on three of the four
+  captures, and not rerun here): **the card (an NVIDIA GeForce RTX 5080, log 458 line 11)
+  truncates the float to 12 fractional bits and then takes the nearest level**,
+  `floor(floor(v * 4096) / 4096 * 255 + 0.5)`, at both writes, where the reference and the
+  software adapter take the nearest level of the float itself. Applied to the reference's float
+  at the composite's write and to the ramp's entry at the ramp's write, it gives the real GPU's
+  dump in 2,418,698 of 2,419,200 channels of `092959` (99.9792%), in 99.9780% of `121331` and
+  99.9915% of `134312`; the nearest level alone gives 94.843% of `092959`, truncation to 11
+  bits 94.243%, to 13 bits 98.279%, rounding to 12 bits 96.051%. Of the 502, 533 and 205
+  channels the rule misses, 493, 526 and 199 are one case: front level 128, where the truncated
+  value is exactly 0.5 and 0.5 x 255 is the tie 127.5, which the card takes down (dump 114
+  where the ramp's entry of level 128 gives 115); the other 6 to 9 channels of 2.4 million are
+  the single-against-double noise the software adapter also shows (its 8). The rule's largest
+  shortfall is 255 / 4096 = 0.0623 of a level: the 0 to 0.062 above. So the dump is one
+  function of the reference's own output value, the same at both writes, one of them a write
+  with no arithmetic before it (the ramp step stores a constant): a wrong table texel or a
+  different power cannot be that function, and no shader difference hides in the pattern.
+  Direct3D allows a float-to-UNORM conversion a tolerance of 0.6 of a level, so this is a
+  conforming conversion, not an error of the card or the pass. (The first writing said "this
+  card stores `floor(v * 255 + 0.5 - d)` with d near 0.04 to 0.06 ... the conversion's
+  threshold is not one number": an inference from `t6_rounding_model_092959.txt`, in which a
+  single offset d for both writes fits 98.5% of the channels at best, d = 0.035, against 94.8%
+  for d = 0. The truncation is why no offset fits.) The two effects can meet in one pixel, and
+  the ramp has 18 steps of 2 levels a channel, hence the pixels 2 levels off.
 - *The two implementations against each other* (the software adapter's dump against the real
   GPU's, the same file): 99.333% of the pixels within 1 level, all within 2, the real GPU lower
   by 0.060, 0.060, 0.041 on average: the same figures as the real GPU against the reference,
@@ -5335,9 +5358,19 @@ addressing. Neither: it is how this graphics card stores a float in an 8-bit tar
   as the last statement of both pixel shaders, so that the stored value has no fraction for the
   conversion to round. Not done here: it changes shader text (the shader test's cases 232 to
   236 and a software-adapter run with it), and whether the criterion is to be met that way or
-  restated is the controller's ruling. For the picture it is at most one level of the front
-  target and one of the mapped target, always down; the emulated picture of the same machine
-  goes through the same card's conversion at its own two writes.
+  restated is the controller's ruling. (Since ruled, controller ruling 25 in the ledger: both
+  writes write the rounded level themselves, in plan Task 8, whose shader-text change needs the
+  software-adapter run anyway; criterion 6's real-GPU half is measured again there with one
+  feed run. A stored `m / 255` loses less than 0.0623 of a level under this card's rule and
+  returns to m; the tie cannot occur, since 128 / 255 is not 0.5. The expectation for that run
+  is sharp: the real GPU's dump equal to the software adapter's but for a handful of channels.
+  The ruling covers these two writes only: the same rule will show at every later UNORM write
+  that cannot be rounded in the shader, such as a blended write, or that is not 8 bits, such as
+  the sun layer's `R10G10B10A2`. Review of plan Task 6, Minor 2.) For the picture it is at most
+  one level of the front target and one of the mapped target, always down. (That the emulated
+  picture of the same machine goes through the same conversion at its own writes is an
+  expectation, not a measurement: the SDK's writes and their formats were not looked at. Review
+  of plan Task 6, Minor 3.)
 
 *Against the game's front buffer through the ramp* (spec criterion 5's figures, from the GPU;
 `t6_compare_front.txt`; the reference `_final.rgba` is the capture's front buffer with HUD and
@@ -5355,7 +5388,14 @@ of it under the bloom).
 the prediction, all on one side, and the text left open whether the native scene or the
 shaders differed. Fed the game's own scene, the steps return the reference to the level (the
 software adapter exactly, the real GPU within its conversion, and that goes down, not up). **The
-offset is the native scene's**, not the post steps'.
+offset is not the composite's or the ramp's shader.** That is all the feed excludes. The cause
+is in what the two shaders are fed in a live frame (the native scene, and with it the frame's
+exposure and unlit words: post-chain code of plan Task 5 that only the scene's draws read, and
+nothing reads those draws under the feed; were it off, it would give exactly a one-sided offset
+in lit regions), in the live block's path from the capture, or on the prediction's side (its
+model of today's mapping, the measuring of regions in window shots), and is not separated
+further here. (Review of plan Task 6, Important 1: the first writing concluded "the offset is
+the native scene's" by elimination from two alternatives where there are more.)
 
 *Shots viewed*: T6-2 at 40 s and the software adapter's at 225 s show the bridge of capture
 `092959` as the game drew it (the game's own water, clouds, far trees and leaf shadows, which
@@ -5367,7 +5407,8 @@ own scene shows.
 *Limits*: one dump a run, one frame of each capture; daylight scenes whose largest scene value
 is 4.6 (the clamp at 31.875 and the table's last texels are not reached by these scenes: the
 mirrors' tests hold those); bloom off (criterion 12 is plan Task 9's); one real graphics card.
-The criterion's real-GPU half stands as not met as written until the ruling above.
+The criterion's real-GPU half stands as not met as written until plan Task 8's feed run under
+ruling 25.
 
 ## Pending
 

@@ -101,6 +101,56 @@ class PreviousBlendLiterals(unittest.TestCase):
         self.assertIn("StepClayFront(front_state_, post_frame, post.sun, front_wanted && EnsureFrontPrevious(dev), oracle_fed)", self.pass_cpp)
 
 
+class CloudLiterals(unittest.TestCase):
+    """Plan Task 16: the scene clouds' numbers in the reference, the generator, the C++ mirror and the shader."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.logic = _text("src/native/render/clay_logic.h")
+        cls.logic_test = _text("tests/native/test_clay_logic.cpp")
+        cls.shaders = _text("src/native/fable2_native_shaders.h")
+        cls.pass_cpp = _text("src/native/render/clay_pass.cpp")
+
+    def test_every_generated_line_is_in_the_cpp_test(self):
+        have = {line.strip() for line in self.logic_test.splitlines()}
+        lines = post_pins.cloud_lines()
+        self.assertEqual(len(lines), 15 + 1)
+        for line in lines:
+            self.assertIn(line.strip(), have, "not in tests/native/test_clay_logic.cpp: run out of tools/xdk_sigmatch/post_pins.py")
+        pin = lines[1]
+        self.assertNotIn(pin.replace("0.5f}, {0.6000000238418579f", "0.5f}, {0.6000000238418580f").strip(), have)
+
+    def test_the_literals_are_the_references(self):
+        zero, thin, start, one = (f32(v) for v in lf.POST_CLOUD_C254)
+        power = f32(lf.POST_CLOUD_C255X)
+        self.assertEqual((zero, one, start, power), (0.0, 1.0, 1000.0, 32.0))
+        self.assertEqual(post_pins.CLOUD_C254, (zero, thin, start, one))
+        self.assertIn("inline constexpr float kCloudThin = %rf;" % thin, self.logic)
+        self.assertIn("inline constexpr float kCloudFadeRate = %rf;" % thin, self.logic)
+        self.assertIn("inline constexpr float kCloudFadeStart = %rf;" % start, self.logic)
+        self.assertIn("inline constexpr float kCloudPower = %rf;" % power, self.logic)
+        ps = _one(r"inline constexpr const char\* kClayCloudPs = FABLE2_CLAY_CLOUD_HLSL R\"hlsl\((.*?)\)hlsl\";", self.shaders, "the clouds' text")
+        self.assertIn("saturate(%r * (length(i.world.xy - k_reg[10].xy) - %r))" % (thin, start), ps)
+        self.assertIn("if (alpha > %r) {" % thin, ps)
+        self.assertIn("pow(base, %r)" % power, ps)
+
+    def test_the_registers_are_the_tables_in_its_order(self):
+        cloud = next(q for q in lf.POST_QUAD_SHADERS if q.kind == "cloud")
+        registers = cloud[3]
+        self.assertEqual(tuple(registers), (20, 31, 46, 47, 51, 69, 70, 71, 77, 78, 79))
+        names = ", ".join("kCloudC%d" % r for r in registers)
+        self.assertIn("enum : uint32_t { kCloudC20 = 0, " + names.split(", ", 1)[1] + ", kCloudRegisters };", self.logic)
+
+    def test_the_clouds_write_no_depth(self):
+        # (the sun layer's depth must not hold the scene's clouds: plan Task 16 as amended)
+        block = _one(r"bool ClayPass::EnsureCloudObjects\(nrhi::Device\* dev\) \{(.*?)\n\}\n", self.pass_cpp, "the clouds' objects")
+        self.assertIn("pipe.depth.test_enable = true;", block)
+        self.assertIn("pipe.depth.write_enable = false;", block)
+        self.assertNotIn("write_enable = true", block)
+        self.assertNotIn("SV_Depth", _one(r"inline constexpr const char\* kClayCloudPs = FABLE2_CLAY_CLOUD_HLSL R\"hlsl\((.*?)\)hlsl\";", self.shaders,
+                                          "the clouds' text"))
+
+
 class SunLayerLiterals(unittest.TestCase):
     """Plan Task 14: the sun layer's numbers in the reference, the generator, the C++ mirrors and the shaders."""
 

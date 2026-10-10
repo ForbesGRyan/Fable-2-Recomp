@@ -310,6 +310,14 @@ class ClayPass {
   bool EnsureQuadObjects(nrhi::Device* dev);
   void DestroyQuadObjects();
   void ForgetQuadObjects();
+  // What the scene's clouds alone need (clay_logic.h, "Native clouds"): two programs and one pipeline under
+  // the quad step's layout. EnsureCloudObjects makes them on the first frame that draws clouds (the quad
+  // step's objects exist then); false when they could not be made, now or before: then no frame has clouds
+  // (ClayClouds::kObjects) and the furniture, the sun layer and the post chain go on. With
+  // fable2_native_sun off nothing of them is made.
+  bool EnsureCloudObjects(nrhi::Device* dev);
+  void DestroyCloudObjects();
+  void ForgetCloudObjects();
   // What the sun layer alone needs (clay_logic.h, "Native sun layer"): six programs, the layer's depth
   // target, its two pictures and three quarter-size targets with their views, a view of the scene's depth,
   // and seven pipelines (the depth step, the reduction, the radial blur under the post layout; one a state
@@ -560,6 +568,16 @@ class ClayPass {
   nrhi::Shader* quad_vs_ = nullptr;
   nrhi::Shader* quad_ps_ = nullptr;
   nrhi::Pipeline* quad_pipelines_[size_t(ClayQuadState::kCount)] = {};
+  // The clouds' step (EnsureCloudObjects): its two programs and its pipeline (the quad step's layout; blended
+  // by the alpha, depth-tested, no depth write), the pass's frame counts for the Clouds line and what it
+  // last logged about the clouds (a line when the verdict changes, at most kCloudLogLines of them).
+  bool cloud_objects_ = false, cloud_objects_failed_ = false;
+  nrhi::Shader* cloud_vs_ = nullptr;
+  nrhi::Shader* cloud_ps_ = nullptr;
+  nrhi::Pipeline* cloud_pipeline_ = nullptr;
+  ClayCloudFrames cloud_counts_;
+  ClayClouds clouds_logged_ = ClayClouds::kOff;
+  uint32_t cloud_log_lines_ = 0;
   uint32_t quad_slot0_ = 0;
   ClayFurnitureFrames furniture_counts_;
   ClayFurniture furniture_logged_ = ClayFurniture::kOff;

@@ -4688,9 +4688,92 @@ int main() {
     std::cout << "previous-frame blend: with the share 0 the composite is the program of before; the blended form has "
               << Instructions(now_l) - Instructions(off_l) << " instructions more\n";
   }
+  // 254: the scene's clouds (sub-project 10, plan Task 16; clay_logic.h, "Native clouds").
+  {
+    using fable2::native::render::ClayQuadConstants;
+    if (!Compile("clay_cloud_vs", kClayCloudVs, "vs_5_0") || !Compile("clay_cloud_ps", kClayCloudPs, "ps_5_0")) return 254;
+    // The block: cbuffer Cloud at b0 in both programs, at the table's offsets, which are ClayQuadConstants' and,
+    // field for field, the scene quads' (the same two slots of a record).
+    const unsigned count = sizeof(kClayCloudFields) / sizeof(kClayCloudFields[0]);
+    const unsigned quad_count = sizeof(kClayQuadFields) / sizeof(kClayQuadFields[0]);
+    if (count != quad_count || sizeof(ClayQuadConstants) != kClayCloudSize || kClayCloudSize != kClayQuadSize) return 254;
+    for (unsigned i = 0; i < count; ++i) {
+      if (kClayCloudFields[i].offset != kClayQuadFields[i].offset || kClayCloudFields[i].bytes != kClayQuadFields[i].bytes ||
+          strcmp(kClayCloudFields[i].name + 1, kClayQuadFields[i].name + 1) != 0 || kClayCloudFields[i].name[0] != 'k') {
+        std::cerr << "kClayCloudFields[" << i << "] is not the quad block's field\n";
+        return 254;
+      }
+    }
+    if (BufferLayoutMismatch("clay_cloud_vs", kClayCloudVs, "vs_5_0", "Cloud", kClayCloudFields, count, kClayCloudSize) ||
+        BufferLayoutMismatch("clay_cloud_ps", kClayCloudPs, "ps_5_0", "Cloud", kClayCloudFields, count, kClayCloudSize)) return 254;
+    static_assert(unsigned(fable2::native::capture::PostQuadKind::kCloud) + 1 == 2);
+    static_assert(fable2::native::render::kCloudC20 == 0 && fable2::native::render::kCloudC31 == 1 && fable2::native::render::kCloudC46 == 2 &&
+                  fable2::native::render::kCloudC47 == 3 && fable2::native::render::kCloudC51 == 4 && fable2::native::render::kCloudC69 == 5 &&
+                  fable2::native::render::kCloudC70 == 6 && fable2::native::render::kCloudC71 == 7 && fable2::native::render::kCloudC77 == 8 &&
+                  fable2::native::render::kCloudC78 == 9 && fable2::native::render::kCloudC79 == 10 && fable2::native::render::kCloudStepRegister == 11);
+    static_assert(fable2::native::render::kCloudThin == 0.0010000000474974513f && fable2::native::render::kCloudFadeRate == 0.0010000000474974513f &&
+                  fable2::native::render::kCloudFadeStart == 1000.0f && fable2::native::render::kCloudPower == 32.0f);
+    // The vertex program: the game's order, the corner through the matrix, its coordinate and its own position.
+    const char* v = kClayCloudVs;
+    if (!strstr(v, "  static const uint order[6] = {0, 1, 2, 1, 3, 2};\n") ||
+        !strstr(v, "  o.pos = float4(dot(k_view_proj[0], p), dot(k_view_proj[1], p), dot(k_view_proj[2], p), dot(k_view_proj[3], p));\n"
+                   "  o.uv = k_coord[c].xy;\n  o.world = k_corner[c].xyz;\n")) return 254;
+    // The pixel program's statements, as the reference's.
+    const char* s = kClayCloudPs;
+    if (!strstr(s, "  float2 at = (i.uv * k_reg[1].xy + k_reg[2].xy) * k_fix;\n  float2 dx = ddx(at);\n  float2 dy = ddy(at);\n"
+                   "  float4 t = cloud_sample(at, dx, dy);\n"
+                   "  float fade = 1.0 - saturate(0.0010000000474974513 * (length(i.world.xy - k_reg[10].xy) - 1000.0));\n"
+                   "  float alpha = t.a * k_reg[5].x * fade;\n"
+                   "  if (k_kind != 2 || k_alpha_test == 0 || !(alpha > k_alpha_ref)) discard;\n") ||
+        !strstr(s, "  if (alpha > 0.0010000000474974513) {\n    float2 step = k_reg[11].xy * k_fix;\n"
+                   "    float gx = cloud_sample(at + float2(step.x, 0.0), dx, dy).a - cloud_sample(at - float2(step.x, 0.0), dx, dy).a;\n"
+                   "    float gy = cloud_sample(at + float2(0.0, step.y), dx, dy).a - cloud_sample(at - float2(0.0, step.y), dx, dy).a;\n"
+                   "    float3 n = cloud_unit(float3(gx, gy, k_reg[6].x));\n    float3 d = cloud_unit(i.world - k_reg[8].xyz);\n"
+                   "    float a1 = saturate(-dot(n, k_reg[9].xyz));\n    float towards = dot(d, n);\n    float b1 = saturate(-towards);\n"
+                   "    float b2 = saturate(towards);\n    float base = abs(1.0 - a1);\n    float lobe = (base > 0.0) ? pow(base, 32.0) : 0.0;\n"
+                   "    float l = b1 * b1 * (1.0 - t.a) + (b2 + b2 * lobe);\n"
+                   "    rgb = (l * k_reg[3].rgb + k_reg[7].x) * k_reg[4].x * t.rgb * k_reg[0].w;\n  }\n") ||
+        !strstr(s, "  rgb = (rgb > 0.0) ? min(rgb, k_scene_max) : float3(0.0, 0.0, 0.0);\n  return float4(rgb, saturate(alpha));\n") ||
+        !strstr(s, "  return (abs(c) < 3.0e38) ? c : float4(0.0, 0.0, 0.0, 0.0);\n") ||
+        !strstr(s, "  return (n2 > 0.0 && n2 < 3.0e38) ? v * rsqrt(n2) : float3(0.0, 0.0, 0.0);\n")) return 254;
+    const std::string ps = Disassembly("clay_cloud_ps", s, "ps_5_0");
+    if (ps.empty() || Count(ps.c_str(), "discard") < 1 || Count(ps.c_str(), "sample_d") < 5 || LoopInstructions(ps) != 0 ||
+        Count(ps.c_str(), "dcl_resource_texture2d") != 1 || Count(ps.c_str(), "dcl_sampler") != 4 || ps.find("dcl_output o0") == std::string::npos ||
+        ps.find("oDepth") != std::string::npos) return 254;
+    // every register the formula reads is read, the texel step and the clamp among them
+    if (!ReadsComponent(ps, "cb0[12]", 'w') || !ReadsComponent(ps, "cb0[13]", 'x') || !ReadsComponent(ps, "cb0[14]", 'x') ||
+        !ReadsComponent(ps, "cb0[15]", 'x') || !ReadsComponent(ps, "cb0[16]", 'x') || !ReadsComponent(ps, "cb0[17]", 'x') ||
+        !ReadsComponent(ps, "cb0[18]", 'x') || !ReadsComponent(ps, "cb0[19]", 'x') || !ReadsComponent(ps, "cb0[20]", 'x') ||
+        !ReadsComponent(ps, "cb0[21]", 'x') || !ReadsComponent(ps, "cb0[22]", 'x') || !ReadsComponent(ps, "cb0[23]", 'x') ||
+        !ReadsComponent(ps, "cb0[24]", 'w') || !ReadsComponent(ps, "cb0[25]", 'z')) return 254;
+    // (the pixel program reads no corner and no matrix)
+    for (const char* other : {"cb0[0]", "cb0[4]", "cb0[8]", "cb0[11]"}) {
+      if (ps.find(other) != std::string::npos) return 254;
+    }
+    // Controls: without the test's statement nothing is dropped; without the neighbours the step is not read;
+    // without the clamp its word is not read.
+    const std::string untested = Changed(s, "  if (k_kind != 2 || k_alpha_test == 0 || !(alpha > k_alpha_ref)) discard;\n", "");
+    const std::string stepless = Changed(s, "float2 step = k_reg[11].xy * k_fix;", "float2 step = float2(0.0, 0.0);");
+    const std::string unclamped = Changed(s, "min(rgb, k_scene_max)", "rgb");
+    if (untested.empty() || stepless.empty() || unclamped.empty() ||
+        Count(Disassembly("untested_cloud_ps", untested.c_str(), "ps_5_0").c_str(), "discard") != 0 ||
+        ReadsComponent(Disassembly("stepless_cloud_ps", stepless.c_str(), "ps_5_0"), "cb0[23]", 'x') ||
+        ReadsComponent(Disassembly("unclamped_cloud_ps", unclamped.c_str(), "ps_5_0"), "cb0[25]", 'z')) return 254;
+    // The sun's switch off is the picture of before, program for program: the clouds' programs are texts of
+    // their own, and no other program holds a word of them.
+    for (const char* src : {kClayVs, kClayPs, kClayTexturedPs, kClayTerrainLayerPs, kClayTerrainFarPs, kClayShadowPs, kSkyVs, kClaySkyPs,
+                            kClayMaskPs, kOutputMapPs, kClayPostCompositePs, kClayPostRampPs, kClayPostDownsamplePs, kClayPostBrightPs,
+                            kClayPostBlurPs, kFullscreenVs, kClayQuadVs, kClayQuadPs, kClaySunDepthPs, kClaySunReducePs, kClaySunRadialPs,
+                            kClaySunQuadVs, kClaySunQuadPs, kClaySunOccluderPs}) {
+      for (const char* word : {"cbuffer Cloud", "cloud_sample", "cloud_unit", "cloud_tex", "k_reg", "k_kind", "CloudOut"}) {
+        if (strstr(src, word)) return 254;
+      }
+    }
+    std::cout << "clouds: the block at the quad block's offsets in both programs, the statements, the texel step and the clamp read\n";
+  }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads; the base map's gamma sign: the curve, the record's word read by the lit terrain programs alone; the quad step: the block at the table's offsets in both stages, the six vertices through the game's matrix, the two kinds' statements, one texture under four samplers, the alpha test's discard, the compiled clamp; the sun layer: the blocks at their tables' offsets, the depth step's one bounded load written as depth, the reduction's one sample, the radial blur's fourteen bounded loads, the four kinds' statements and the occluder's form, the writes' own rounding, no other program's text touched; the previous-frame blend: with the share 0 the composite of before, the blended form behind the share's test with one bounded load of the previous picture\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads; the base map's gamma sign: the curve, the record's word read by the lit terrain programs alone; the quad step: the block at the table's offsets in both stages, the six vertices through the game's matrix, the two kinds' statements, one texture under four samplers, the alpha test's discard, the compiled clamp; the sun layer: the blocks at their tables' offsets, the depth step's one bounded load written as depth, the reduction's one sample, the radial blur's fourteen bounded loads, the four kinds' statements and the occluder's form, the writes' own rounding, no other program's text touched; the previous-frame blend: with the share 0 the composite of before, the blended form behind the share's test with one bounded load of the previous picture; the scene's clouds: the block at the quad block's offsets, the corner's position passed on, the statements of the reference, the alpha test's discard, the base level's texel step, the compiled clamp, no other program's text touched\n";
   return 0;
 }

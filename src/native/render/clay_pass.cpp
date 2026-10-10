@@ -163,6 +163,7 @@ void ClayPass::DestroyObjects() {
   DestroyShadowObjects();  // (first: its view of depth_ and its pipelines of vs_ and layout_)
   DestroySkyObjects();
   DestroySunObjects();  // (before the quad step's and the post steps' layouts' other users, and its view of depth_)
+  DestroyCloudObjects();  // (before the quad step's layout's other users)
   DestroyQuadObjects();
   DestroyBloomObjects();  // (before the post steps' layout's other users and map_vs_)
   DestroyPostObjects();  // (before map_vs_, which its pipelines are made of)
@@ -301,6 +302,8 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     bloom_objects_failed_ = false;  // (and the bloom's)
     ForgetQuadObjects();
     quad_objects_failed_ = false;  // (and the quad step's)
+    ForgetCloudObjects();
+    cloud_objects_failed_ = false;  // (and the clouds')
     front_second_failed_ = false;  // (and the previous-frame blend's second target)
     ForgetSunObjects();
     sun_objects_failed_ = false;  // (and the sun layer's)
@@ -325,6 +328,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     post_objects_failed_ = false;  // (and the post steps')
     bloom_objects_failed_ = false;  // (and the bloom's)
     quad_objects_failed_ = false;  // (and the quad step's)
+    cloud_objects_failed_ = false;  // (and the clouds')
     sun_objects_failed_ = false;  // (and the sun layer's)
     oracle_failed_ = false;  // (and the oracle feed)
     oracle_sun_failed_ = false;
@@ -1806,6 +1810,69 @@ bool ClayPass::EnsureQuadObjects(nrhi::Device* dev) {
   return true;
 }
 
+void ClayPass::ForgetCloudObjects() {
+  cloud_vs_ = cloud_ps_ = nullptr;
+  cloud_pipeline_ = nullptr;
+  cloud_objects_ = false;
+}
+
+void ClayPass::DestroyCloudObjects() {
+  if (device_) {
+    device_->DestroyDeferred(cloud_pipeline_);
+    device_->DestroyDeferred(cloud_vs_);
+    device_->DestroyDeferred(cloud_ps_);
+  }
+  ForgetCloudObjects();
+}
+
+bool ClayPass::EnsureCloudObjects(nrhi::Device* dev) {
+  if (cloud_objects_) return true;
+  // (clouds are drawn only in a frame whose furniture is: the quad step's layout exists)
+  if (cloud_objects_failed_ || !ready_ || dev != device_ || !quad_objects_ || !quad_layout_) return false;
+  auto fail = [&](const char* what) {
+    REXLOG_ERROR("[native] clay: {} failed ({}): the scene's clouds are off until the pass is rebuilt (another device, or an F6 retry "
+                 "after a failure of the renderer) or the game is restarted; the furniture, the sun layer and the post chain go on "
+                 "without them", what, kPostObjectsReason);
+    DestroyCloudObjects();
+    cloud_objects_failed_ = true;
+    return false;
+  };
+  nrhi::ShaderDesc sd;
+  sd.entry_point = "main";
+  sd.stage = nrhi::ShaderStage::kVertex;
+  sd.name = "fable2_clay_cloud_vs";
+  sd.hlsl_source = shaders::kClayCloudVs;
+  cloud_vs_ = dev->CreateShader(sd);
+  sd.stage = nrhi::ShaderStage::kPixel;
+  sd.name = "fable2_clay_cloud_ps";
+  sd.hlsl_source = shaders::kClayCloudPs;
+  cloud_ps_ = dev->CreateShader(sd);
+  if (!cloud_vs_ || !cloud_ps_) return fail("cloud shader compile");
+  // One pipeline, into the colour pass's targets, no cull, outside the pipeline cache: source alpha over
+  // inverse source alpha, tested less-or-equal against the depth the pass has written (the game's
+  // greater-or-equal under its reversed range), NO depth write (clay_logic.h, "Native clouds": the sun
+  // layer's depth must not hold the scene's clouds).
+  nrhi::GraphicsPipelineDesc pipe;
+  pipe.layout = quad_layout_;
+  pipe.vs = cloud_vs_;
+  pipe.ps = cloud_ps_;
+  pipe.rtv_format = kLinearFormat;
+  pipe.dsv_format = nrhi::Format::kD32_FLOAT;
+  pipe.cull = nrhi::CullMode::kNone;
+  pipe.blend.enable = true;
+  pipe.blend.src = pipe.blend.src_alpha = nrhi::BlendFactor::kSrcAlpha;
+  pipe.blend.dst = pipe.blend.dst_alpha = nrhi::BlendFactor::kInvSrcAlpha;
+  pipe.depth.test_enable = true;
+  pipe.depth.write_enable = false;
+  pipe.depth.func = nrhi::CompareFunc::kLessEqual;
+  cloud_pipeline_ = dev->CreateGraphicsPipeline(pipe);
+  if (!cloud_pipeline_) return fail("cloud pipeline creation");
+  cloud_objects_ = true;
+  REXLOG_INFO("[native] clay: clouds ready (six vertices a layer from its record; alpha blend with the depth test and no depth write; the "
+              "quad step's layout)");
+  return true;
+}
+
 void ClayPass::ForgetSunObjects() {
   sun_depth_ps_ = sun_reduce_ps_ = sun_radial_ps_ = sun_quad_vs_ = sun_quad_ps_ = sun_occluder_ps_ = nullptr;
   sun_depth_pipeline_ = sun_reduce_pipeline_ = sun_radial_pipeline_ = nullptr;
@@ -2663,6 +2730,60 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     }
     st.quad_later = quad_plan.later;
   }
+  // The scene's clouds, decided the same way (DecideClayClouds), with a verdict of their own: every cloud
+  // record of the frame's set or none, and the moon and the glare are drawn or not without them. Only in a
+  // frame whose furniture is drawn (the switch, a post frame, a sky, a whole set): with the switch off
+  // nothing below is reached. Each cloud's texture through the texture cache and its constants into its
+  // record's two slots, before any target is bound.
+  struct CloudDraw {
+    nrhi::TextureView* view = nullptr;
+    uint32_t slot = 0;
+  };
+  CloudDraw cloud_draws[capture::kMaxQuadRecords];
+  uint32_t cloud_draw_count = 0;
+  ClayCloudInputs cloud_in;
+  cloud_in.furniture = furniture == ClayFurniture::kDrawn;
+  cloud_in.drawable = cloud_in.textures = true;
+  cloud_in.objects = !cloud_objects_failed_;
+  ClayCloudPlan cloud_plan;
+  if (cloud_in.furniture) {
+    cloud_plan = PlanClayClouds(scene.quads.data(), scene.quads.size(), scene.light.out_scale);
+    cloud_in.drawable = cloud_plan.drawable;
+    cloud_in.any = cloud_plan.count != 0;
+  }
+  if (DecideClayClouds(cloud_in) == ClayClouds::kDrawn) cloud_in.objects = EnsureCloudObjects(dev);
+  if (DecideClayClouds(cloud_in) == ClayClouds::kDrawn) {
+    for (uint32_t i = 0; i < cloud_plan.count && i < capture::kMaxQuadRecords; ++i) {
+      const capture::QuadRecord& q = scene.quads[cloud_plan.records[i]];
+      uint32_t sampler = 0;
+      float fix[2] = {1.0f, 1.0f};
+      capture::MaterialStatus status = capture::MaterialStatus::kTextureBad;
+      nrhi::TextureView* const view = ResolveTerrainTexture(cmd, dev, q.fetch[0], true, &sampler, fix, &status, tst);
+      ClayQuadConstants constants{};
+      if (!view || !MakeClayCloudConstants(q, scene.light.out_scale, sampler, fix, &constants)) {
+        cloud_in.textures = false;
+        break;
+      }
+      CloudDraw& d = cloud_draws[cloud_draw_count++];
+      d.view = view;
+      d.slot = quad_slot0_ + kClayQuadSlots * uint32_t(cloud_plan.records[i]);
+      std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(d.slot), &constants, sizeof(constants));
+    }
+    if (!cloud_in.textures) cloud_draw_count = 0;  // (all of the clouds or none)
+  }
+  const ClayClouds clouds = DecideClayClouds(cloud_in);
+  st.clouds = clouds;
+  st.cloud_records = cloud_plan.count;
+  if (post.sun) CountClayCloudFrame(clouds, cloud_counts_);
+  st.cloud_frames = cloud_counts_;
+  constexpr uint32_t kCloudLogLines = 16;
+  if (post.sun && clouds != clouds_logged_ && cloud_log_lines_ < kCloudLogLines) {
+    clouds_logged_ = clouds;
+    ++cloud_log_lines_;
+    st.sun_switch = post.sun;  // (the line reads it; set again below)
+    REXLOG_INFO("[native] clay: clouds changed at scene frame {}: {}{}", scene.frame, FormatCloudText(st),
+                cloud_log_lines_ == kCloudLogLines ? " (last such line)" : "");
+  }
   st.sun_switch = post.sun;
   st.quad_set = furniture_in.set;
   st.quad_records = scene.quad_count;
@@ -2771,8 +2892,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       d.slot = quad_slot0_ + kClayQuadSlots * uint32_t(item.record);
       std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(d.slot), &constants, sizeof(constants));
     }
-    // (the file's quads now hold slots the live scene's quads were given: those are not drawn)
-    if (oracle_sun) quad_draw_count = 0;
+    // (the file's quads now hold slots the live scene's quads were given: those are not drawn, the clouds neither)
+    if (oracle_sun) quad_draw_count = cloud_draw_count = 0;
   }
   const ClaySun sun = DecideClaySun(sun_in);
   // The previous-frame blend (clay_logic.h, "The previous-frame blend"; plan Task 15): which front target
@@ -3029,6 +3150,23 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     // The moon, right after the sky (the game's order: its sky, then its moon), tested against the
     // depth the pass has written up to here.
     draw_quads(ClayQuadPlace::kAfterSky);
+    // The scene's clouds, after the moon (the game's order), each blended by its alpha and tested against
+    // the depth the pass has written up to here; they write none (clay_logic.h, "Native clouds").
+    if (cloud_draw_count && cloud_pipeline_) {
+      cmd->SetBindingLayout(quad_layout_);
+      cmd->SetConstantBuffer(kQuadParamFrame, terrain_cb_, 0);
+      cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+      cmd->SetPipeline(cloud_pipeline_);
+      for (uint32_t i = 0; i < cloud_draw_count; ++i) {
+        const CloudDraw& d = cloud_draws[i];
+        cmd->SetConstantBuffer(kQuadParamConstants, terrain_cb_, ClaySmallSlotOffset(d.slot));
+        nrhi::TextureView* const views[kQuadTableSize] = {d.view, white_view_, white_view_};
+        cmd->SetTextures(kQuadParamTextures, views, kQuadTableSize);
+        cmd->Draw(uint32_t(std::size(capture::kQuadIndices)), 0);
+      }
+      bind_scene();
+      bound = nullptr;
+    }
   };
   // The sun layer's depth, taken in the middle of the colour pass when the frame has records the game
   // issued after its own depth copy (sun_place; clay_logic.h, PlanSunDepthPlace): before the first of them

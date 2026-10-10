@@ -1139,6 +1139,380 @@ static void PreviousBlendTests() {
   }
 }
 // --- end of the previous-frame blend's cases ---
+// --- the scene's clouds' cases (plan Task 16; clay_logic.h, "Native clouds") ---
+static void CloudTests() {
+  using capture::PostQuadKind;
+  using capture::QuadRecord;
+  const float kNaN = std::numeric_limits<float>::quiet_NaN(), kInf = std::numeric_limits<float>::infinity();
+  auto bits = [](uint32_t b) {
+    float f;
+    std::memcpy(&f, &b, sizeof(f));
+    return f;
+  };
+  // The first cloud layer of capture native_discovery_20261010_093600, frame 1 (towards the sun), its
+  // registers rounded as the pins have them; the matrix is a made one (the capture's is the scene quads').
+  QuadRecord cloud{};
+  cloud.ps_hash = capture::kPostQuadTable[size_t(PostQuadKind::kCloud)].ps;
+  cloud.vs_hash = capture::kPostQuadTable[size_t(PostQuadKind::kCloud)].vs;
+  cloud.kind = PostQuadKind::kCloud;
+  cloud.layer = 0;
+  const float corners[4][5] = {{-3000.0f, -3000.0f, 500.0f, 0.0f, 0.0f}, {3000.0f, -3000.0f, 500.0f, 1.0f, 0.0f},
+                               {-3000.0f, 3000.0f, 500.0f, 0.0f, 1.0f}, {3000.0f, 3000.0f, 500.0f, 1.0f, 1.0f}};
+  std::memcpy(cloud.corners, corners, sizeof(corners));
+  for (int i = 0; i < 4; ++i) {
+    for (int k = 0; k < 4; ++k) cloud.view_proj[i][k] = float(i == k) + 0.01f * float(i * 4 + k);
+  }
+  const float regs[11][4] = {{0.00654f, 0.07078f, 0.09179f, 7.42912f}, {5.0f, 5.0f, 0.0f, 0.0f}, {0.34148f, 0.68296f, 0.0f, 0.0f},
+                             {0.99215f, 0.83292f, 0.40139f, 1.0f}, {1.0f, 0.0f, 0.0f, 0.0f}, {0.5f, 0.0f, 0.0f, 0.0f},
+                             {0.5f, 0.0f, 0.0f, 0.0f}, {0.9f, 0.0f, 0.0f, 0.0f}, {-1189.1177f, 244.89037f, 1582.1741f, 1.0f},
+                             {-0.82365f, 0.32979f, 0.46135f, 0.0f}, {90.09702f, 158.37025f, 47.20699f, 1.0f}};
+  std::memcpy(cloud.ps, regs, sizeof(regs));
+  const uint32_t fetch[6] = {0x84000002u, 0x163E0054u, 0x003FE1FFu, 0x00A80D10u, 0x00000143u, 0x16420A18u};
+  std::memcpy(cloud.fetch[0], fetch, sizeof(fetch));
+  cloud.blend = 0x07060706u;
+  cloud.depth = 0x00708766u;
+  cloud.colour_mask = 0xF;
+  cloud.alpha_control = 12;
+  cloud.alpha_ref = bits(0x3CA0A0A1u);  // 5 / 255
+  const float kScale = 7.42912f;
+  const float kUnit[2] = {1.0f, 1.0f};
+
+  // 670: the state a cloud record is drawn with, and what gives none.
+  {
+    static_assert(unsigned(PostQuadKind::kCloud) == 1 && kCloudRegisters == 11 && kCloudStepRegister == 11);
+    static_assert(capture::kPostQuadTable[size_t(PostQuadKind::kCloud)].register_count == kCloudRegisters);
+    CHECK(670, capture::QuadRecordValid(cloud) && CloudDrawState(cloud) && cloud.alpha_ref > 0.0196f && cloud.alpha_ref < 0.0197f);
+    // (the scene quads' own rule refuses it: the record writes depth; the clouds have their own)
+    CHECK(670, QuadDrawState(cloud) == ClayQuadState::kNone && ClayQuadPlaceOf(PostQuadKind::kCloud) == ClayQuadPlace::kNotDrawn);
+    QuadRecord q = cloud;
+    q.depth = 0x00708762u;  // (the same test without the depth write: drawable as well; the pass writes none either way)
+    CHECK(670, CloudDrawState(q));
+    q = cloud; q.blend = kQuadBlendAdd;
+    CHECK(670, !CloudDrawState(q));
+    q = cloud; q.blend = 0x00010001u;
+    CHECK(670, !CloudDrawState(q));
+    q = cloud; q.colour_mask = 7;
+    CHECK(670, !CloudDrawState(q));
+    q = cloud; q.depth &= ~2u;  // no depth test
+    CHECK(670, !CloudDrawState(q));
+    for (uint32_t func = 0; func < 8; ++func) {
+      q = cloud;
+      q.depth = (q.depth & ~0x70u) | (func << 4);
+      CHECK(670, CloudDrawState(q) == (func == 6));
+    }
+    q = cloud; q.alpha_control = 4;  // the test off
+    CHECK(670, !CloudDrawState(q));
+    for (uint32_t func = 0; func < 8; ++func) {
+      q = cloud;
+      q.alpha_control = 8 | func;
+      CHECK(670, CloudDrawState(q) == (func == 4));
+    }
+  }
+
+  // 671: a cloud record's constants, each at the place the shader reads, and what gives none.
+  {
+    ClayQuadConstants c{};
+    const float fix[2] = {0.5f, 0.25f};
+    CHECK(671, MakeClayCloudConstants(cloud, kScale, 5, fix, &c));
+    CHECK(671, c.kind == 2 && c.sampler == 1 && c.alpha_test == 1 && c.alpha_ref == cloud.alpha_ref && c.fix[0] == 0.5f && c.fix[1] == 0.25f &&
+                   c.scene_max == kPostSceneMax && c.pad == 0);
+    for (int i = 0; i < 4; ++i) {
+      CHECK(671, c.corner[i][0] == corners[i][0] && c.corner[i][1] == corners[i][1] && c.corner[i][2] == 500.0f && c.corner[i][3] == 1.0f &&
+                     c.coord[i][0] == corners[i][3] && c.coord[i][1] == corners[i][4] && c.coord[i][2] == 0.0f && c.coord[i][3] == 0.0f);
+      CHECK(671, std::memcmp(c.view_proj[i], cloud.view_proj[i], sizeof(c.view_proj[i])) == 0);
+    }
+    // the registers the shader reads, and nothing of what it does not read
+    CHECK(671, c.reg[0][0] == 0.0f && c.reg[0][1] == 0.0f && c.reg[0][2] == 0.0f && c.reg[0][3] == 7.42912f);
+    CHECK(671, c.reg[1][0] == 5.0f && c.reg[1][1] == 5.0f && c.reg[2][0] == 0.34148f && c.reg[2][1] == 0.68296f);
+    CHECK(671, c.reg[3][0] == 0.99215f && c.reg[3][1] == 0.83292f && c.reg[3][2] == 0.40139f && c.reg[3][3] == 0.0f);
+    CHECK(671, c.reg[4][0] == 1.0f && c.reg[5][0] == 0.5f && c.reg[6][0] == 0.5f && c.reg[7][0] == 0.9f);
+    CHECK(671, c.reg[8][0] == -1189.1177f && c.reg[8][1] == 244.89037f && c.reg[8][2] == 1582.1741f && c.reg[8][3] == 0.0f);
+    CHECK(671, c.reg[9][0] == -0.82365f && c.reg[9][1] == 0.32979f && c.reg[9][2] == 0.46135f);
+    CHECK(671, c.reg[10][0] == 90.09702f && c.reg[10][1] == 158.37025f && c.reg[10][2] == 0.0f && c.reg[10][3] == 0.0f);
+    // The base level's texel step: the texture is 512 x 512 by its fetch constant.
+    CHECK(671, c.reg[11][0] == 1.0f / 512.0f && c.reg[11][1] == 1.0f / 512.0f && c.reg[11][2] == 0.0f && c.reg[11][3] == 0.0f);
+    float step[2];
+    const uint32_t wide[6] = {0, 0, (255u << 13) | 1023u, 0, 0, 0};
+    CloudTexelStep(wide, step);
+    CHECK(671, step[0] == 1.0f / 1024.0f && step[1] == 1.0f / 256.0f);
+    const uint32_t one[6] = {0, 0, 0, 0, 0, 0}, largest[6] = {0, 0, 0xFFFFFFFFu, 0, 0, 0};
+    CloudTexelStep(one, step);
+    CHECK(671, step[0] == 1.0f && step[1] == 1.0f);
+    CloudTexelStep(largest, step);
+    CHECK(671, step[0] == 1.0f / 8192.0f && step[1] == 1.0f / 8192.0f);
+    static_assert(offsetof(ClayQuadConstants, reg) == 192 && offsetof(ClayQuadConstants, kind) == 384 && sizeof(ClayQuadConstants) == 416);
+    // What gives none, `out` untouched.
+    ClayQuadConstants keep;
+    std::memset(&keep, 0x5A, sizeof(keep));
+    auto refused = [&](const QuadRecord& q, float scale, const float* f) {
+      ClayQuadConstants out = keep;
+      return !MakeClayCloudConstants(q, scale, 0, f, &out) && std::memcmp(&out, &keep, sizeof(out)) == 0;
+    };
+    CHECK(671, !MakeClayCloudConstants(cloud, kScale, 0, kUnit, nullptr) && refused(cloud, kScale, nullptr));
+    CHECK(671, refused(QuadRecord{}, kScale, kUnit));
+    QuadRecord q = cloud;
+    q.kind = PostQuadKind::kMoon;
+    CHECK(671, refused(q, kScale, kUnit));
+    q = cloud; q.kind = PostQuadKind::kCloudOccluder;
+    CHECK(671, refused(q, kScale, kUnit));
+    q = cloud; q.layer = 1;
+    CHECK(671, refused(q, kScale, kUnit));
+    q = cloud; q.blend = kQuadBlendAdd;
+    CHECK(671, refused(q, kScale, kUnit));
+    q = cloud; q.fetch[0][0] |= 0x4u;  // a sign field
+    CHECK(671, refused(q, kScale, kUnit));
+    // the scale: the frame's, within a thousandth
+    CHECK(671, refused(cloud, kScale * 1.002f, kUnit) && refused(cloud, kScale * 0.998f, kUnit) && !refused(cloud, kScale * 1.0005f, kUnit));
+    CHECK(671, refused(cloud, 0.0f, kUnit) && refused(cloud, kNaN, kUnit) && refused(cloud, kInf, kUnit) && refused(cloud, 65.0f, kUnit));
+    for (float bad : {kNaN, kInf, 0.0f, -1.0f, 64.5f}) {
+      q = cloud; q.ps[kCloudC20][3] = bad;
+      CHECK(671, refused(q, kScale, kUnit) && refused(q, bad, kUnit));
+    }
+    // every value the shader is handed, at each bound
+    for (float bad : {kNaN, kInf, -kInf}) {
+      for (int i = 0; i < 4; ++i) {
+        for (int k = 0; k < 5; ++k) {
+          q = cloud; q.corners[i][k] = bad;
+          CHECK(671, refused(q, kScale, kUnit));
+        }
+        for (int k = 0; k < 4; ++k) {
+          q = cloud; q.view_proj[i][k] = bad;
+          CHECK(671, refused(q, kScale, kUnit));
+        }
+      }
+      const std::pair<uint32_t, int> read[] = {{kCloudC31, 0}, {kCloudC31, 1}, {kCloudC46, 0}, {kCloudC46, 1}, {kCloudC47, 0}, {kCloudC47, 1},
+                                               {kCloudC47, 2}, {kCloudC51, 0}, {kCloudC69, 0}, {kCloudC70, 0}, {kCloudC71, 0}, {kCloudC77, 0},
+                                               {kCloudC77, 1}, {kCloudC77, 2}, {kCloudC78, 0}, {kCloudC78, 1}, {kCloudC78, 2}, {kCloudC79, 0},
+                                               {kCloudC79, 1}};
+      CHECK(671, std::size(read) == 19);
+      for (const auto& [reg, k] : read) {
+        q = cloud; q.ps[reg][k] = bad;
+        CHECK(671, refused(q, kScale, kUnit));
+      }
+      // (a component the shader does not read is not judged and not handed on)
+      q = cloud; q.ps[kCloudC31][3] = bad;
+      ClayQuadConstants out{};
+      CHECK(671, MakeClayCloudConstants(q, kScale, 0, kUnit, &out) && out.reg[kCloudC31][3] == 0.0f);
+      q = cloud; q.alpha_ref = bad;
+      CHECK(671, refused(q, kScale, kUnit));
+      const float f0[2] = {bad, 1.0f}, f1[2] = {1.0f, bad};
+      CHECK(671, refused(cloud, kScale, f0) && refused(cloud, kScale, f1));
+    }
+    q = cloud; q.ps[kCloudC31][0] = 4096.5f;
+    CHECK(671, refused(q, kScale, kUnit));
+    q = cloud; q.ps[kCloudC31][0] = -4096.0f;
+    CHECK(671, !refused(q, kScale, kUnit));
+    q = cloud; q.ps[kCloudC46][1] = 5000.0f;
+    CHECK(671, refused(q, kScale, kUnit));
+    q = cloud; q.ps[kCloudC47][2] = -0.01f;
+    CHECK(671, refused(q, kScale, kUnit));
+    q = cloud; q.ps[kCloudC47][0] = 64.5f;
+    CHECK(671, refused(q, kScale, kUnit));
+    for (uint32_t reg : {uint32_t(kCloudC51), uint32_t(kCloudC69), uint32_t(kCloudC71)}) {
+      q = cloud; q.ps[reg][0] = -0.01f;
+      CHECK(671, refused(q, kScale, kUnit));
+      q = cloud; q.ps[reg][0] = 64.5f;
+      CHECK(671, refused(q, kScale, kUnit));
+      q = cloud; q.ps[reg][0] = 64.0f;
+      CHECK(671, !refused(q, kScale, kUnit));
+    }
+    q = cloud; q.ps[kCloudC70][0] = -4097.0f;
+    CHECK(671, refused(q, kScale, kUnit));
+    q = cloud; q.ps[kCloudC70][0] = -0.5f;  // (a normal's third component may be negative)
+    CHECK(671, !refused(q, kScale, kUnit));
+    q = cloud; q.ps[kCloudC78][1] = 64.5f;
+    CHECK(671, refused(q, kScale, kUnit));
+    q = cloud; q.ps[kCloudC77][2] = 2.0e7f;
+    CHECK(671, refused(q, kScale, kUnit));
+    q = cloud; q.ps[kCloudC79][0] = -2.0e7f;
+    CHECK(671, refused(q, kScale, kUnit));
+    q = cloud; q.alpha_ref = 1.5f;
+    CHECK(671, refused(q, kScale, kUnit));
+    q = cloud; q.alpha_ref = -0.1f;
+    CHECK(671, refused(q, kScale, kUnit));
+    const float zero[2] = {0.0f, 1.0f}, large[2] = {1.0f, 64.5f};
+    CHECK(671, refused(cloud, kScale, zero) && refused(cloud, kScale, large));
+  }
+
+  // 672: the mirror against the reference (light_formulas.post_cloud; tools/xdk_sigmatch/post_pins.py).
+  {
+    struct CloudPin { float t[4], n[4], P[3], c20w, c47[3], c51x, c69x, c70x, c71x, c77[3], c78[3], c79[2]; double want[4]; };
+    const CloudPin cloud_pins[] = {
+          // cloud pins (light_formulas.post_cloud, c254 {0.0f, 0.0010000000474974513f, 1000.0f, 1.0f}, c255.x 32.0f): the texel, its neighbours' alphas (+x, -x, +y, -y), the world position, c20.w, c47.rgb, c51.x, c69.x, c70.x, c71.x, c77.xyz, c78.xyz, c79.xy, the value (rgb, alpha)
+          {{0.800000011920929f, 0.699999988079071f, 0.6000000238418579f, 0.5f}, {0.6000000238418579f, 0.4000000059604645f, 0.550000011920929f, 0.44999998807907104f}, {120.0f, -340.0f, 500.0f}, 7.429120063781738f, {0.9921500086784363f, 0.8329200148582458f, 0.4013899862766266f}, 1.0f, 0.5f, 0.5f, 0.8999999761581421f, {-1189.11767578125f, 244.89036560058594f, 1582.174072265625f}, {-0.8236500024795532f, 0.32978999614715576f, 0.4613499939441681f}, {90.0970230102539f, 158.37025451660156f}, {5.69638533504734, 4.93554945088943, 4.117140265998651, 0.25}},
+          {{0.8999999761581421f, 0.8500000238418579f, 0.800000011920929f, 0.30000001192092896f}, {0.20000000298023224f, 0.5f, 0.10000000149011612f, 0.6000000238418579f}, {-800.0f, 300.0f, 350.0f}, 7.429120063781738f, {0.9921500086784363f, 0.8329200148582458f, 0.4013899862766266f}, 0.6000000238418579f, 0.5f, 0.20000000298023224f, 1.0f, {-1189.11767578125f, 244.89036560058594f, 1582.174072265625f}, {-0.8236500024795532f, 0.32978999614715576f, 0.4613499939441681f}, {90.0970230102539f, 158.37025451660156f}, {4.68091024468202, 4.319428986756659, 3.806626302729454, 0.15000000596046448}},
+          {{0.5f, 0.5f, 0.5f, 0.8999999761581421f}, {0.8999999761581421f, 0.8999999761581421f, 0.8999999761581421f, 0.8999999761581421f}, {90.0f, 158.0f, 400.0f}, 7.429120063781738f, {0.9921500086784363f, 0.8329200148582458f, 0.4013899862766266f}, 0.8999999761581421f, 0.5f, 0.5f, 1.0f, {-1189.11767578125f, 244.89036560058594f, 1582.174072265625f}, {-0.8236500024795532f, 0.32978999614715576f, 0.4613499939441681f}, {90.0970230102539f, 158.37025451660156f}, {3.4955237005152973, 3.4710618779175255, 3.4047677661643365, 0.44999998807907104}},
+          {{0.800000011920929f, 0.699999988079071f, 0.6000000238418579f, 1.0f}, {1.0f, 0.0f, 0.30000001192092896f, 0.30000001192092896f}, {1290.0f, 958.0f, 500.0f}, 7.429120063781738f, {0.9921500086784363f, 0.8329200148582458f, 0.4013899862766266f}, 1.0f, 0.5f, 0.5f, 0.8999999761581421f, {-1189.11767578125f, 244.89036560058594f, 1582.174072265625f}, {-0.8236500024795532f, 0.32978999614715576f, 0.4613499939441681f}, {90.0970230102539f, 158.37025451660156f}, {9.002811372184697, 7.364355350157521, 5.120390522781585, 0.2790327773426008}},
+          {{0.800000011920929f, 0.699999988079071f, 0.6000000238418579f, 1.0f}, {1.0f, 0.0f, 0.30000001192092896f, 0.30000001192092896f}, {3000.0f, -3000.0f, 500.0f}, 7.429120063781738f, {0.9921500086784363f, 0.8329200148582458f, 0.4013899862766266f}, 1.0f, 0.5f, 0.5f, 0.8999999761581421f, {-1189.11767578125f, 244.89036560058594f, 1582.174072265625f}, {-0.8236500024795532f, 0.32978999614715576f, 0.4613499939441681f}, {90.0970230102539f, 158.37025451660156f}, {0.0, 0.0, 0.0, 0.0}},
+          {{0.800000011920929f, 0.699999988079071f, 0.6000000238418579f, 0.0019000000320374966f}, {0.6000000238418579f, 0.4000000059604645f, 0.550000011920929f, 0.44999998807907104f}, {120.0f, -340.0f, 500.0f}, 7.429120063781738f, {0.9921500086784363f, 0.8329200148582458f, 0.4013899862766266f}, 1.0f, 0.5f, 0.5f, 0.8999999761581421f, {-1189.11767578125f, 244.89036560058594f, 1582.174072265625f}, {-0.8236500024795532f, 0.32978999614715576f, 0.4613499939441681f}, {90.0970230102539f, 158.37025451660156f}, {0.0, 0.0, 0.0, 0.0009500000160187483}},
+          {{0.800000011920929f, 0.699999988079071f, 0.6000000238418579f, 0.002099999925121665f}, {0.6000000238418579f, 0.4000000059604645f, 0.550000011920929f, 0.44999998807907104f}, {120.0f, -340.0f, 500.0f}, 7.429120063781738f, {0.9921500086784363f, 0.8329200148582458f, 0.4013899862766266f}, 1.0f, 0.5f, 0.5f, 0.8999999761581421f, {-1189.11767578125f, 244.89036560058594f, 1582.174072265625f}, {-0.8236500024795532f, 0.32978999614715576f, 0.4613499939441681f}, {90.0970230102539f, 158.37025451660156f}, {6.042345126622573, 5.189681608466732, 4.222112899844386, 0.0010499999625608325}},
+          {{0.5f, 0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, 0.5f, 0.5f}, {120.0f, -340.0f, 500.0f}, 7.429120063781738f, {0.9921500086784363f, 0.8329200148582458f, 0.4013899862766266f}, 1.0f, 0.5f, 0.0f, 0.8999999761581421f, {-1189.11767578125f, 244.89036560058594f, 1582.174072265625f}, {-0.8236500024795532f, 0.32978999614715576f, 0.4613499939441681f}, {90.0970230102539f, 158.37025451660156f}, {3.3431039401397697, 3.3431039401397697, 3.3431039401397697, 0.25}},
+          {{0.800000011920929f, 0.699999988079071f, 0.6000000238418579f, 0.5f}, {0.6000000238418579f, 0.4000000059604645f, 0.550000011920929f, 0.44999998807907104f}, {-1189.11767578125f, 244.89036560058594f, 1582.174072265625f}, 7.429120063781738f, {0.9921500086784363f, 0.8329200148582458f, 0.4013899862766266f}, 1.0f, 0.5f, 0.5f, 0.8999999761581421f, {-1189.11767578125f, 244.89036560058594f, 1582.174072265625f}, {-0.8236500024795532f, 0.32978999614715576f, 0.4613499939441681f}, {-1189.0f, 245.0f}, {5.348966383929441, 4.680345436489868, 4.011724887579342, 0.25}},
+          {{1.0f, 1.0f, 1.0f, 0.20000000298023224f}, {0.0f, 1.0f, 0.0f, 1.0f}, {120.0f, -340.0f, 500.0f}, 64.0f, {4.0f, 4.0f, 4.0f}, 4.0f, 1.0f, 0.5f, 2.0f, {500.0f, -900.0f, -4000.0f}, {0.30000001192092896f, 0.20000000298023224f, -0.8999999761581421f}, {90.0970230102539f, 158.37025451660156f}, {31.875, 31.875, 31.875, 0.20000000298023224}},
+          {{kNaN, 0.699999988079071f, kInf, 0.5f}, {0.6000000238418579f, kNaN, -kInf, 0.44999998807907104f}, {120.0f, -340.0f, 500.0f}, 7.429120063781738f, {0.9921500086784363f, 0.8329200148582458f, 0.4013899862766266f}, 1.0f, 0.5f, 0.5f, 0.8999999761581421f, {-1189.11767578125f, 244.89036560058594f, 1582.174072265625f}, {-0.8236500024795532f, 0.32978999614715576f, 0.4613499939441681f}, {90.0970230102539f, 158.37025451660156f}, {0.0, 6.038147882575574, 0.0, 0.25}},
+          {{0.800000011920929f, 0.699999988079071f, 0.6000000238418579f, kNaN}, {0.6000000238418579f, 0.4000000059604645f, 0.550000011920929f, 0.44999998807907104f}, {120.0f, -340.0f, 500.0f}, 7.429120063781738f, {0.9921500086784363f, 0.8329200148582458f, 0.4013899862766266f}, 1.0f, 0.5f, 0.5f, 0.8999999761581421f, {-1189.11767578125f, 244.89036560058594f, 1582.174072265625f}, {-0.8236500024795532f, 0.32978999614715576f, 0.4613499939441681f}, {90.0970230102539f, 158.37025451660156f}, {0.0, 0.0, 0.0, 0.0}},
+          {{0.800000011920929f, 0.699999988079071f, 0.6000000238418579f, 0.5f}, {0.6000000238418579f, 0.4000000059604645f, 0.550000011920929f, 0.44999998807907104f}, {kNaN, -340.0f, 500.0f}, 7.429120063781738f, {0.9921500086784363f, 0.8329200148582458f, 0.4013899862766266f}, 1.0f, 0.5f, 0.5f, 0.8999999761581421f, {-1189.11767578125f, 244.89036560058594f, 1582.174072265625f}, {-0.8236500024795532f, 0.32978999614715576f, 0.4613499939441681f}, {90.0970230102539f, 158.37025451660156f}, {0.0, 0.0, 0.0, 0.0}},
+          {{0.800000011920929f, 0.699999988079071f, 0.6000000238418579f, 0.5f}, {0.6000000238418579f, 0.4000000059604645f, 0.550000011920929f, 0.44999998807907104f}, {120.0f, -340.0f, 500.0f}, kInf, {0.9921500086784363f, 0.8329200148582458f, 0.4013899862766266f}, 1.0f, 0.5f, 0.5f, 0.8999999761581421f, {-1189.11767578125f, 244.89036560058594f, 1582.174072265625f}, {-0.8236500024795532f, 0.32978999614715576f, 0.4613499939441681f}, {90.0970230102539f, 158.37025451660156f}, {0.0, 0.0, 0.0, 0.0}},
+          {{0.800000011920929f, 0.699999988079071f, 0.6000000238418579f, 0.5f}, {0.6000000238418579f, 0.4000000059604645f, 0.550000011920929f, 0.44999998807907104f}, {120.0f, -340.0f, 500.0f}, 7.429120063781738f, {0.9921500086784363f, 0.8329200148582458f, 0.4013899862766266f}, 1.0f, 0.5f, 0.5f, 0.8999999761581421f, {-1189.11767578125f, 244.89036560058594f, 1582.174072265625f}, {kNaN, 0.30000001192092896f, 0.4000000059604645f}, {90.0970230102539f, 158.37025451660156f}, {0.0, 0.0, 0.0, 0.0}},
+    };
+    double worst = 0.0;
+    for (const CloudPin& p : cloud_pins) {
+      double got[4];
+      CloudMirror(p.t, p.n, p.P, p.c20w, p.c47, p.c51x, p.c69x, p.c70x, p.c71x, p.c77, p.c78, p.c79, got);
+      for (int i = 0; i < 4; ++i) {
+        const double tolerance = 1e-12 * std::max(1.0, std::fabs(p.want[i]));
+        CHECK(672, std::isfinite(got[i]) && got[i] >= 0.0 && got[i] <= (i == 3 ? 1.0 : double(kPostSceneMax)) && std::fabs(got[i] - p.want[i]) <= tolerance);
+        worst = std::max(worst, std::fabs(got[i] - p.want[i]) / std::max(1.0, std::fabs(p.want[i])));
+      }
+    }
+    CHECK(672, std::size(cloud_pins) == 15);
+    std::cout << "clouds: the mirror against the reference, 15 points: worst relative difference " << worst << "\n";
+    CHECK(672, worst < 1e-12);
+    CHECK(672, kCloudThin == bits(0x3A83126Fu) && kCloudFadeRate == kCloudThin && kCloudFadeStart == 1000.0f && kCloudPower == 32.0f);
+    // What the formula does, at points one can reason about. Straight under the eye, no slope: the normal is
+    // straight up; the alpha is the texel's times c69.x.
+    const float t[4] = {0.5f, 0.5f, 0.5f, 0.8f}, flat[4] = {0.8f, 0.8f, 0.8f, 0.8f};
+    const float P[3] = {90.0f, 158.0f, 400.0f}, tint[3] = {1.0f, 1.0f, 1.0f}, eye[2] = {90.0f, 158.0f};
+    const float above[3] = {90.0f, 158.0f, 2000.0f}, below[3] = {90.0f, 158.0f, -2000.0f}, view[3] = {0.0f, 0.0f, -1.0f};
+    double lit[4], dark[4];
+    CloudMirror(t, flat, P, 1.0f, tint, 1.0f, 0.5f, 0.5f, 0.0f, below, view, eye, lit);
+    // Dn = (0, 0, 1) (from a point below), N = (0, 0, 1): b2 = 1, b1 = 0; a1 = sat(-N . view) = 1: l = 1 + 0^32 = 1.
+    CHECK(672, std::fabs(lit[3] - 0.4) < 1e-7 && std::fabs(lit[0] - 0.5) < 1e-12 && lit[0] == lit[1] && lit[1] == lit[2]);
+    CloudMirror(t, flat, P, 1.0f, tint, 1.0f, 0.5f, 0.5f, 0.0f, above, view, eye, dark);
+    // from above: b1 = 1, b2 = 0: l = 1 - t.a = 0.2 (single precision's).
+    CHECK(672, std::fabs(dark[0] - 0.5 * (1.0 - double(0.8f))) < 1e-12 && dark[3] == lit[3]);
+    // c71.x is added whatever the light; c51.x and c20.w scale all of it.
+    double more[4];
+    CloudMirror(t, flat, P, 2.0f, tint, 3.0f, 0.5f, 0.5f, 0.25f, above, view, eye, more);
+    CHECK(672, std::fabs(more[0] - (0.5 * (1.0 - double(0.8f)) + 0.125) * 6.0) < 1e-12);
+    // A slope tilts the normal: the same pixel is no longer lit the same.
+    const float slope[4] = {1.0f, 0.0f, 0.8f, 0.8f};
+    double tilted[4];
+    CloudMirror(t, slope, P, 1.0f, tint, 1.0f, 0.5f, 0.5f, 0.0f, below, view, eye, tilted);
+    CHECK(672, tilted[0] < lit[0] && tilted[3] == lit[3]);
+    // The neighbours' order: +x, -x, +y, -y (exchanging a pair turns the slope round: with the sun to one side
+    // the two differ).
+    const float side[3] = {-3000.0f, 158.0f, 400.0f}, sx[4] = {1.0f, 0.0f, 0.5f, 0.5f}, sx_back[4] = {0.0f, 1.0f, 0.5f, 0.5f};
+    const float sy[4] = {0.5f, 0.5f, 1.0f, 0.0f};
+    double a[4], b[4], c[4];
+    CloudMirror(t, sx, P, 1.0f, tint, 1.0f, 0.5f, 0.5f, 0.0f, side, view, eye, a);
+    CloudMirror(t, sx_back, P, 1.0f, tint, 1.0f, 0.5f, 0.5f, 0.0f, side, view, eye, b);
+    CloudMirror(t, sy, P, 1.0f, tint, 1.0f, 0.5f, 0.5f, 0.0f, side, view, eye, c);
+    CHECK(672, std::fabs(a[0] - b[0]) > 0.05 && std::fabs(a[0] - c[0]) > 0.05 && std::fabs(b[0] - c[0]) > 0.05);
+    // The alpha test as the step applies it (the reference 5 / 255): a pixel at the reference is dropped.
+    CHECK(672, QuadAlphaKept(true, float(lit[3]), cloud.alpha_ref) && !QuadAlphaKept(true, cloud.alpha_ref, cloud.alpha_ref) && !QuadAlphaKept(true, kNaN, cloud.alpha_ref));
+  }
+
+  // 673: nothing that is no number: every output a number in its range, whatever is no number among the inputs.
+  {
+    const float values[] = {kNaN, kInf, -kInf, 0.0f, -1.0f, 0.5f, 3.0e38f, -3.0e38f, 1.0e-30f, 2000.0f};
+    uint32_t seed = 16;
+    auto next = [&] {
+      seed = seed * 1664525u + 1013904223u;
+      return values[(seed >> 16) % std::size(values)];
+    };
+    for (int trial = 0; trial < 10000; ++trial) {
+      float t[4], n[4], P[3], c47[3], c77[3], c78[3], c79[2];
+      for (float& v : t) v = next();
+      for (float& v : n) v = next();
+      for (float& v : P) v = next();
+      for (float& v : c47) v = next();
+      for (float& v : c77) v = next();
+      for (float& v : c78) v = next();
+      for (float& v : c79) v = next();
+      const float c20w = next(), c51x = next(), c69x = next(), c70x = next(), c71x = next();
+      double out[4];
+      CloudMirror(t, n, P, c20w, c47, c51x, c69x, c70x, c71x, c77, c78, c79, out);
+      for (int i = 0; i < 4; ++i) CHECK(673, std::isfinite(out[i]) && out[i] >= 0.0 && out[i] <= (i == 3 ? 1.0 : double(kPostSceneMax)));
+    }
+  }
+
+  // 674: the frame's plan: the cloud records of the set, in order; one that cannot be drawn: none.
+  {
+    QuadRecord moon{};
+    moon.ps_hash = capture::kPostQuadTable[size_t(PostQuadKind::kMoon)].ps;
+    moon.kind = PostQuadKind::kMoon;
+    QuadRecord second = cloud, third = cloud;
+    second.ps[kCloudC31][0] = 6.0f;
+    third.ps[kCloudC31][0] = 7.0f;
+    const QuadRecord set[] = {moon, cloud, second, QuadRecord{}, third, moon};
+    const ClayCloudPlan plan = PlanClayClouds(set, std::size(set), kScale);
+    CHECK(674, plan.drawable && plan.count == 3 && plan.records[0] == 1 && plan.records[1] == 2 && plan.records[2] == 4);
+    // no cloud in the set: drawable, none
+    const QuadRecord bare[] = {moon, moon};
+    const ClayCloudPlan none = PlanClayClouds(bare, 2, kScale);
+    CHECK(674, none.drawable && none.count == 0);
+    CHECK(674, PlanClayClouds(nullptr, 0, kScale).drawable && PlanClayClouds(nullptr, 0, kScale).count == 0);
+    // one cloud that cannot be drawn takes all of them
+    QuadRecord broken[] = {moon, cloud, second, third};
+    broken[2].ps[kCloudC69][0] = kNaN;
+    const ClayCloudPlan refused = PlanClayClouds(broken, 4, kScale);
+    CHECK(674, !refused.drawable && refused.count == 0);
+    // another frame's scale: none
+    CHECK(674, !PlanClayClouds(set, std::size(set), kScale * 1.5f).drawable);
+    // too many records, or none where some are named
+    CHECK(674, !PlanClayClouds(set, capture::kMaxQuadRecords + 1, kScale).drawable && !PlanClayClouds(nullptr, 3, kScale).drawable);
+    // a full set of clouds fits the plan
+    QuadRecord full[capture::kMaxQuadRecords];
+    for (QuadRecord& q : full) q = cloud;
+    const ClayCloudPlan all = PlanClayClouds(full, capture::kMaxQuadRecords, kScale);
+    CHECK(674, all.drawable && all.count == capture::kMaxQuadRecords && all.records[capture::kMaxQuadRecords - 1] == capture::kMaxQuadRecords - 1);
+  }
+
+  // 675: the verdict over every combination (the first thing missing decides), the frame counts, the line.
+  {
+    for (int b = 0; b < 32; ++b) {
+      ClayCloudInputs in;
+      in.furniture = b & 1;
+      in.drawable = b & 2;
+      in.any = b & 4;
+      in.objects = b & 8;
+      in.textures = b & 16;
+      const ClayClouds want = !in.furniture  ? ClayClouds::kOff
+                              : !in.drawable ? ClayClouds::kState
+                              : !in.any      ? ClayClouds::kNone
+                              : !in.objects  ? ClayClouds::kObjects
+                              : !in.textures ? ClayClouds::kTexture
+                                             : ClayClouds::kDrawn;
+      CHECK(675, DecideClayClouds(in) == want);
+    }
+    ClayCloudFrames n;
+    for (ClayClouds c : {ClayClouds::kOff, ClayClouds::kNone, ClayClouds::kState, ClayClouds::kObjects, ClayClouds::kTexture, ClayClouds::kDrawn,
+                         ClayClouds::kCount}) {
+      CountClayCloudFrame(c, n);
+    }
+    CountClayCloudFrame(ClayClouds::kDrawn, n);
+    CHECK(675, n.frames == 6 && n.by[size_t(ClayClouds::kOff)] == 0 && n.by[size_t(ClayClouds::kDrawn)] == 2 && n.by[size_t(ClayClouds::kNone)] == 1 &&
+                   n.by[size_t(ClayClouds::kState)] == 1 && n.by[size_t(ClayClouds::kObjects)] == 1 && n.by[size_t(ClayClouds::kTexture)] == 1);
+    ClayStats st;
+    CHECK(675, FormatCloudText(st) == "Clouds: off");
+    st.sun_switch = true;
+    st.clouds = ClayClouds::kDrawn;
+    st.cloud_records = 3;
+    st.cloud_frames.frames = 900;
+    st.cloud_frames.by[size_t(ClayClouds::kDrawn)] = 890;
+    st.cloud_frames.by[size_t(ClayClouds::kTexture)] = 3;
+    st.cloud_frames.by[size_t(ClayClouds::kNone)] = 7;
+    CHECK(675, FormatCloudText(st) == "Clouds: drawn 3 | frames since start 900: drawn 890, no cloud record 7, a record's state or values 0, "
+                                      "post-objects 0, quad-texture 3");
+    const std::pair<ClayClouds, const char*> words[] = {{ClayClouds::kOff, "Clouds: not drawn (no furniture) | frames"},
+                                                        {ClayClouds::kNone, "Clouds: not drawn (no cloud record) | frames"},
+                                                        {ClayClouds::kState, "Clouds: not drawn (a record's state or values) | frames"},
+                                                        {ClayClouds::kObjects, "Clouds: not drawn (post-objects) | frames"},
+                                                        {ClayClouds::kTexture, "Clouds: not drawn (quad-texture) | frames"}};
+    for (const auto& [c, word] : words) {
+      st.clouds = c;
+      CHECK(675, FormatCloudText(st).rfind(word, 0) == 0);
+    }
+    st.clouds = ClayClouds::kDrawn;
+    st.cloud_records = ~0u;
+    st.cloud_frames.frames = ~0ull;
+    for (uint64_t& v : st.cloud_frames.by) v = ~0ull;
+    const std::string longest = FormatCloudText(st);
+    CHECK(675, longest.size() > 150 && longest.rfind("quad-texture 18446744073709551615") == longest.size() - 33);
+  }
+}
+// --- end of the clouds' cases ---
 int main() {
   // 1-4: clay color cvar parsing.
   {
@@ -9775,6 +10149,7 @@ int main() {
   // (on a thread of its own: main's frame leaves too little of the stack for another function's locals)
   std::thread(SunLayerTests).join();
   std::thread(PreviousBlendTests).join();
+  std::thread(CloudTests).join();
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
@@ -9802,7 +10177,8 @@ int main() {
                "quad formulas, the radial blur and the reduction against the reference's numbers, nothing that is no "
                "number, the layer's depth texel and the steps' words, the layer's plan, the decision and the Sun line, "
                "the sun's flag in the steps' constants; the previous-frame blend against the reference's numbers, the share 0 "
-               "bit for bit, the front targets' exchange\n";
+               "bit for bit, the front targets' exchange; the scene's clouds: a record's state and constants and what gives none, "
+               "the mirror against the reference's numbers, nothing that is no number, the plan, the verdict and the Clouds line\n";
 
   return 0;
 }

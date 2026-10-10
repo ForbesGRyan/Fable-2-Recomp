@@ -1662,6 +1662,107 @@ inline constexpr const char* kClaySunOccluderPs = "#define CLAY_SUN_OCCLUDER 1\n
 #undef FABLE2_CLAY_SUN_QUAD_PS_HLSL
 #undef FABLE2_CLAY_SUN_QUAD_HLSL
 
+// The scene's clouds (render/clay_pass.cpp; clay_logic.h, "Native clouds"; sub-project 10, plan Task 16): the
+// game's three cloud layers, drawn again from the frame's quad records in the colour pass, after the moon.
+// Two programs under the quad step's layout, neither made, bound or drawn with fable2_native_sun off, and no
+// other program's text changed for them:
+//   kClayCloudVs: six vertices as kClayQuadVs makes them, with the corner's own position passed on as the
+//     pixel's world position (the game's C304C6A1AF18B46F).
+//   kClayCloudPs (61976295517D7015, post_cloud; cbuffer Cloud at b0: render::ClayQuadConstants with the
+//     cloud's registers, kClayCloudFields): at = (uv * c31.xy + c46.xy) scaled into the host texture;
+//     t = the texel at `at`, sampled with `at`'s own gradients under the sampler the cache names;
+//     alpha = t.a * c69.x * (1 - sat(0.001 * (|P.xy - c79.xy| - 1000))); the pixel is dropped unless the word
+//     is a cloud's (2), the alpha test is on and the alpha is above k_alpha_ref (the draw's own reference).
+//     Where alpha is above 0.001: g = t.a one texel OF THE BASE LEVEL on less one back, in x and in y (the
+//     twelfth register holds that step; the four samples keep the pixel's gradients: the emulator's fetch
+//     offset), N = normalize(g.x, g.y, c70.x), Dn = normalize(P - c77.xyz), a1 = sat(-N . c78.xyz),
+//     b1 = sat(-Dn . N), b2 = sat(Dn . N), l = b1^2 (1 - t.a) + b2 (1 + (1 - a1)^32),
+//     rgb = (l c47.rgb + c71.x) c51.x t.rgb c20.w; else rgb = 0. Out: each channel (v > 0) ? min(v,
+//     k_scene_max) : 0, the alpha saturated. A vector of length 0 normalises to 0; a texel's channel that is
+//     no number reads 0. The blend (by the alpha) and the depth test are the pipeline's; it writes no depth.
+// The registers, in the record's order: 0 c20, 1 c31, 2 c46, 3 c47, 4 c51, 5 c69, 6 c70, 7 c71, 8 c77, 9 c78,
+// 10 c79 (render::kCloudC20 and on); 11: the base level's texel step, x y (render::kCloudStepRegister).
+inline constexpr ClayBufferField kClayCloudFields[] = {
+    {"k_corner", 0, 64},    {"k_coord", 64, 64},     {"k_view_proj", 128, 64}, {"k_reg", 192, 192},
+    {"k_kind", 384, 4},     {"k_sampler", 388, 4},   {"k_alpha_test", 392, 4}, {"k_alpha_ref", 396, 4},
+    {"k_fix", 400, 8},      {"k_scene_max", 408, 4}, {"k_pad", 412, 4},
+};
+inline constexpr unsigned kClayCloudSize = 416;
+
+#define FABLE2_CLAY_CLOUD_HLSL R"hlsl(
+cbuffer Cloud : register(b0) {
+  float4 k_corner[4];      // the corners' positions: x y z, 1
+  float4 k_coord[4];       // their coordinates: u v
+  float4 k_view_proj[4];   // vertex c0..c3 at the game's call
+  float4 k_reg[12];        // the cloud's pixel registers, in the record's order; the twelfth: the texel step
+  uint k_kind; uint k_sampler; uint k_alpha_test; float k_alpha_ref;   // the formula; the static sampler; the alpha test
+  float2 k_fix; float k_scene_max; uint k_pad;                         // the host texture's scale; the scene's clamp
+};
+struct CloudOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; float3 world : TEXCOORD1; };
+)hlsl"
+
+inline constexpr const char* kClayCloudVs = FABLE2_CLAY_CLOUD_HLSL R"hlsl(
+CloudOut main(uint id : SV_VertexID) {
+  static const uint order[6] = {0, 1, 2, 1, 3, 2};
+  uint c = order[min(id, 5u)];
+  float4 p = float4(k_corner[c].xyz, 1.0);
+  CloudOut o;
+  o.pos = float4(dot(k_view_proj[0], p), dot(k_view_proj[1], p), dot(k_view_proj[2], p), dot(k_view_proj[3], p));
+  o.uv = k_coord[c].xy;
+  o.world = k_corner[c].xyz;
+  return o;
+}
+)hlsl";
+
+inline constexpr const char* kClayCloudPs = FABLE2_CLAY_CLOUD_HLSL R"hlsl(
+Texture2D cloud_tex : register(t0);
+SamplerState k_point_wrap : register(s0);
+SamplerState k_linear_wrap : register(s1);
+SamplerState k_point_clamp : register(s2);
+SamplerState k_linear_clamp : register(s3);
+float4 cloud_sample(float2 at, float2 dx, float2 dy) {
+  float4 c;
+  if (k_sampler == 0) c = cloud_tex.SampleGrad(k_point_wrap, at, dx, dy);
+  else if (k_sampler == 1) c = cloud_tex.SampleGrad(k_linear_wrap, at, dx, dy);
+  else if (k_sampler == 2) c = cloud_tex.SampleGrad(k_point_clamp, at, dx, dy);
+  else c = cloud_tex.SampleGrad(k_linear_clamp, at, dx, dy);
+  return (abs(c) < 3.0e38) ? c : float4(0.0, 0.0, 0.0, 0.0);
+}
+float3 cloud_unit(float3 v) {
+  float n2 = dot(v, v);
+  return (n2 > 0.0 && n2 < 3.0e38) ? v * rsqrt(n2) : float3(0.0, 0.0, 0.0);
+}
+float4 main(CloudOut i) : SV_Target {
+  float2 at = (i.uv * k_reg[1].xy + k_reg[2].xy) * k_fix;
+  float2 dx = ddx(at);
+  float2 dy = ddy(at);
+  float4 t = cloud_sample(at, dx, dy);
+  float fade = 1.0 - saturate(0.0010000000474974513 * (length(i.world.xy - k_reg[10].xy) - 1000.0));
+  float alpha = t.a * k_reg[5].x * fade;
+  if (k_kind != 2 || k_alpha_test == 0 || !(alpha > k_alpha_ref)) discard;
+  float3 rgb = float3(0.0, 0.0, 0.0);
+  if (alpha > 0.0010000000474974513) {
+    float2 step = k_reg[11].xy * k_fix;
+    float gx = cloud_sample(at + float2(step.x, 0.0), dx, dy).a - cloud_sample(at - float2(step.x, 0.0), dx, dy).a;
+    float gy = cloud_sample(at + float2(0.0, step.y), dx, dy).a - cloud_sample(at - float2(0.0, step.y), dx, dy).a;
+    float3 n = cloud_unit(float3(gx, gy, k_reg[6].x));
+    float3 d = cloud_unit(i.world - k_reg[8].xyz);
+    float a1 = saturate(-dot(n, k_reg[9].xyz));
+    float towards = dot(d, n);
+    float b1 = saturate(-towards);
+    float b2 = saturate(towards);
+    float base = abs(1.0 - a1);
+    float lobe = (base > 0.0) ? pow(base, 32.0) : 0.0;
+    float l = b1 * b1 * (1.0 - t.a) + (b2 + b2 * lobe);
+    rgb = (l * k_reg[3].rgb + k_reg[7].x) * k_reg[4].x * t.rgb * k_reg[0].w;
+  }
+  rgb = (rgb > 0.0) ? min(rgb, k_scene_max) : float3(0.0, 0.0, 0.0);
+  return float4(rgb, saturate(alpha));
+}
+)hlsl";
+
+#undef FABLE2_CLAY_CLOUD_HLSL
+
 // Debug views (render/composite.cpp, fable2_native_view): the clay pass's mapped (8-bit, display) target
 // drawn over the guest output. mode 1 overlay (alpha 0.5), 2 split (right half only), 3 native (opaque).
 inline constexpr const char* kCompositePs = R"hlsl(

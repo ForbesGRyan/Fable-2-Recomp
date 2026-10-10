@@ -240,6 +240,63 @@ PREVIOUS = (
 )
 
 
+# The scene's clouds (plan Task 16; light_formulas.post_cloud, 6197): the texel, the alpha of its four
+# neighbours (+x, -x, +y, -y, a texel of the base level each way), the pixel's world position, c20.w, c47.rgb,
+# c51.x, c69.x, c70.x, c71.x, c77.xyz, c78.xyz, c79.xy. The registers of the first point are capture 093600's
+# first cloud layer's, rounded; the shader's literals in single precision, as the microcode holds them.
+CLOUD_C254 = tuple(f32(v) for v in lf.POST_CLOUD_C254)
+CLOUD_C255X = f32(lf.POST_CLOUD_C255X)
+_CLOUD_SUN = (-1189.1177, 244.89037, 1582.1741)
+_CLOUD_VIEW = (-0.82365, 0.32979, 0.46135)
+_CLOUD_EYE = (90.09702, 158.37025)
+_CLOUD_TINT = (0.99215, 0.83292, 0.40139)
+CLOUD = (
+    ((0.8, 0.7, 0.6, 0.5), (0.6, 0.4, 0.55, 0.45), (120.0, -340.0, 500.0), 7.42912, _CLOUD_TINT, 1.0, 0.5, 0.5, 0.9, _CLOUD_SUN, _CLOUD_VIEW, _CLOUD_EYE),
+    ((0.9, 0.85, 0.8, 0.3), (0.2, 0.5, 0.1, 0.6), (-800.0, 300.0, 350.0), 7.42912, _CLOUD_TINT, 0.6, 0.5, 0.2, 1.0, _CLOUD_SUN, _CLOUD_VIEW, _CLOUD_EYE),
+    ((0.5, 0.5, 0.5, 0.9), (0.9, 0.9, 0.9, 0.9), (90.0, 158.0, 400.0), 7.42912, _CLOUD_TINT, 0.9, 0.5, 0.5, 1.0, _CLOUD_SUN, _CLOUD_VIEW, _CLOUD_EYE),   # no slope: the normal is straight up
+    ((0.8, 0.7, 0.6, 1.0), (1.0, 0.0, 0.3, 0.3), (1290.0, 958.0, 500.0), 7.42912, _CLOUD_TINT, 1.0, 0.5, 0.5, 0.9, _CLOUD_SUN, _CLOUD_VIEW, _CLOUD_EYE),  # 1,442 from the eye: inside the fade
+    ((0.8, 0.7, 0.6, 1.0), (1.0, 0.0, 0.3, 0.3), (3000.0, -3000.0, 500.0), 7.42912, _CLOUD_TINT, 1.0, 0.5, 0.5, 0.9, _CLOUD_SUN, _CLOUD_VIEW, _CLOUD_EYE),  # beyond 2,000: alpha 0, colour 0
+    ((0.8, 0.7, 0.6, 0.0019), (0.6, 0.4, 0.55, 0.45), (120.0, -340.0, 500.0), 7.42912, _CLOUD_TINT, 1.0, 0.5, 0.5, 0.9, _CLOUD_SUN, _CLOUD_VIEW, _CLOUD_EYE),  # alpha 0.00095: the thin branch, colour 0
+    ((0.8, 0.7, 0.6, 0.0021), (0.6, 0.4, 0.55, 0.45), (120.0, -340.0, 500.0), 7.42912, _CLOUD_TINT, 1.0, 0.5, 0.5, 0.9, _CLOUD_SUN, _CLOUD_VIEW, _CLOUD_EYE),  # alpha 0.00105: just above it
+    ((0.5, 0.5, 0.5, 0.5), (0.5, 0.5, 0.5, 0.5), (120.0, -340.0, 500.0), 7.42912, _CLOUD_TINT, 1.0, 0.5, 0.0, 0.9, _CLOUD_SUN, _CLOUD_VIEW, _CLOUD_EYE),   # no slope and c70.x 0: no normal
+    ((0.8, 0.7, 0.6, 0.5), (0.6, 0.4, 0.55, 0.45), _CLOUD_SUN, 7.42912, _CLOUD_TINT, 1.0, 0.5, 0.5, 0.9, _CLOUD_SUN, _CLOUD_VIEW, (-1189.0, 245.0)),        # the pixel at c77: no direction
+    ((1.0, 1.0, 1.0, 0.2), (0.0, 1.0, 0.0, 1.0), (120.0, -340.0, 500.0), 64.0, (4.0, 4.0, 4.0), 4.0, 1.0, 0.5, 2.0, (500.0, -900.0, -4000.0), (0.3, 0.2, -0.9), _CLOUD_EYE),  # the scene's clamp
+    ((NAN, 0.7, INF, 0.5), (0.6, NAN, -INF, 0.45), (120.0, -340.0, 500.0), 7.42912, _CLOUD_TINT, 1.0, 0.5, 0.5, 0.9, _CLOUD_SUN, _CLOUD_VIEW, _CLOUD_EYE),
+    ((0.8, 0.7, 0.6, NAN), (0.6, 0.4, 0.55, 0.45), (120.0, -340.0, 500.0), 7.42912, _CLOUD_TINT, 1.0, 0.5, 0.5, 0.9, _CLOUD_SUN, _CLOUD_VIEW, _CLOUD_EYE),
+    ((0.8, 0.7, 0.6, 0.5), (0.6, 0.4, 0.55, 0.45), (NAN, -340.0, 500.0), 7.42912, _CLOUD_TINT, 1.0, 0.5, 0.5, 0.9, _CLOUD_SUN, _CLOUD_VIEW, _CLOUD_EYE),
+    ((0.8, 0.7, 0.6, 0.5), (0.6, 0.4, 0.55, 0.45), (120.0, -340.0, 500.0), INF, _CLOUD_TINT, 1.0, 0.5, 0.5, 0.9, _CLOUD_SUN, _CLOUD_VIEW, _CLOUD_EYE),
+    ((0.8, 0.7, 0.6, 0.5), (0.6, 0.4, 0.55, 0.45), (120.0, -340.0, 500.0), 7.42912, _CLOUD_TINT, 1.0, 0.5, 0.5, 0.9, _CLOUD_SUN, (NAN, 0.3, 0.4), _CLOUD_EYE),
+)
+
+
+def cloud_pin(t, n, P, c20w, c47, c51x, c69x, c70x, c71x, c77, c78, c79):
+    """post_cloud with the texel and its four neighbours' alphas given (the coordinate plays no part in the pin:
+    c31 and c46 are the identity) and the shader's single-precision literals."""
+    tn = [f32(v) for v in n]
+    alphas = {(0, 0): None, (1, 0): tn[0], (-1, 0): tn[1], (0, 1): tn[2], (0, -1): tn[3]}
+    tt = tuple(f32(v) for v in t)
+
+    def tex(u, v, dx, dy):
+        a = alphas[(dx, dy)]
+        return tt if a is None else (0.0, 0.0, 0.0, a)
+
+    return lf.post_cloud(tex, (0.0, 0.0), [f32(v) for v in P], f32(c20w), (1.0, 1.0), (0.0, 0.0), [f32(v) for v in c47], f32(c51x), f32(c69x),
+                         f32(c70x), f32(c71x), [f32(v) for v in c77], [f32(v) for v in c78], [f32(v) for v in c79], CLOUD_C254, CLOUD_C255X)
+
+
+def cloud_lines():
+    """The clouds' pins as the lines of the C++ test (plan Task 16)."""
+    out = ['// cloud pins (light_formulas.post_cloud, c254 %s, c255.x %s): the texel, its neighbours\' alphas (+x, -x, +y, -y), the world '
+           'position, c20.w, c47.rgb, c51.x, c69.x, c70.x, c71.x, c77.xyz, c78.xyz, c79.xy, the value (rgb, alpha)' % (
+               floats(CLOUD_C254), _num(CLOUD_C255X, True))]
+    for t, n, P, c20w, c47, c51x, c69x, c70x, c71x, c77, c78, c79 in CLOUD:
+        out.append('    {%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s},' % (
+            floats(t), floats(n), floats(P), _num(f32(c20w), True), floats(c47), _num(f32(c51x), True), _num(f32(c69x), True),
+            _num(f32(c70x), True), _num(f32(c71x), True), floats(c77), floats(c78), floats(c79),
+            doubles(cloud_pin(t, n, P, c20w, c47, c51x, c69x, c70x, c71x, c77, c78, c79))))
+    return out
+
+
 def quad_matrix():
     """The captured matrix: four rows of four single-precision floats."""
     v = struct.unpack('>16f', struct.pack('>16I', *QUAD_MATRIX_BITS))

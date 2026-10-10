@@ -402,6 +402,22 @@ enum class ClayFurniture : uint8_t { kOff, kNoPost, kNoSky, kNoQuads, kRecords, 
 // occluder of the game's layer named no single record of the scene: PlanSunDepthPlace); a layer whose depth
 // held what the game's does not would lose its beams, so none is drawn.
 enum class ClaySun : uint8_t { kOff, kNoFurniture, kNoBloom, kNoRadial, kNoQuads, kState, kObjects, kTexture, kDepthPlace, kDrawn, kCount };
+// What the pass did about the scene's clouds of a frame (ClayStats::clouds; "Native clouds" below; the
+// Clouds line). kDrawn: every cloud record of the frame's set was drawn. Every other verdict: no cloud is
+// drawn (the clouds are all of the set's or none; the moon and the glare keep their own verdict). kOff: the
+// frame's furniture is not drawn (the switch off, no post frame, no sky, no whole set: the Furniture line
+// says which). kNone: the set has no cloud record. kState: a cloud record cannot be drawn as it was
+// captured (its state or a value). kObjects: the clouds' objects could not be made ("post-objects").
+// kTexture: a cloud's texture could not be had this frame ("quad-texture").
+enum class ClayClouds : uint8_t { kOff, kNone, kState, kObjects, kTexture, kDrawn, kCount };
+struct ClayCloudFrames {
+  uint64_t frames = 0, by[size_t(ClayClouds::kCount)] = {};
+};
+inline void CountClayCloudFrame(ClayClouds c, ClayCloudFrames& n) {
+  if (c == ClayClouds::kOff || size_t(c) >= size_t(ClayClouds::kCount)) return;
+  ++n.frames;
+  ++n.by[size_t(c)];
+}
 // The pass's frame counts of the sun layer, by verdict: one frame added. Counted: every frame with the
 // sun's switch on, which is every verdict but kOff.
 struct ClaySunFrames {
@@ -643,6 +659,11 @@ struct ClayStats {
   // layer: its quads by target (0 the occluders into its depth, 1 layer 1, 2 layer 2) and the radial blur's
   // centre. sun_frames: the pass's totals since it was made, this frame included, by verdict.
   ClaySun sun = ClaySun::kOff;
+  // The scene's clouds ("Native clouds" below; the Clouds line): what the pass did, the cloud records of
+  // the frame's set, and the pass's frame counts by verdict.
+  ClayClouds clouds = ClayClouds::kOff;
+  uint32_t cloud_records = 0;
+  ClayCloudFrames cloud_frames;
   uint32_t sun_drawn[3] = {};
   // The record of FrameScene::draws before which a drawn layer's depth was taken (PlanSunDepthPlace);
   // capture::kNoDepthPlace: after the scene's last record.
@@ -4185,6 +4206,251 @@ inline std::string FormatFurnitureText(const ClayStats& st) {
                 static_cast<unsigned long long>(st.furniture_records_frames), static_cast<unsigned long long>(st.furniture_state_frames),
                 kPostObjectsReason, static_cast<unsigned long long>(st.furniture_objects_frames));
   return text + buf;
+}
+
+// --- Native clouds (frame-map section 17, "Clouds"; sub-project 10, plan Task 16) ---
+// The scene's cloud layers (three quads high over the world, pixel shader 61976295517D7015 with vertex shader
+// C304C6A1AF18B46F), drawn again from the frame's quad records after the moon, with fable2_native_sun on, in a
+// frame whose furniture is drawn. A quad is the game's four corners through the game's matrix, the corner's
+// own position passed on as the pixel's world position, and the shader's arithmetic (shaders::kClayCloudPs;
+// CloudMirror is pinned to light_formulas.post_cloud, machine-checked against the microcode):
+//   t      = tex(uv * c31.xy + c46.xy)                    the layer's texture: colour and density
+//   alpha  = t.a * c69.x * (1 - sat(0.001 * (|P.xy - c79.xy| - 1000)))
+//   alpha <= 0.001:  rgb = 0
+//   else   g  = (t.a one texel on in x less one texel back, the same in y)
+//          N  = (g.x, g.y, c70.x) normalised;  Dn = (P - c77.xyz) normalised
+//          a1 = sat(-N . c78.xyz);  b1 = sat(-Dn . N);  b2 = sat(Dn . N)
+//          l  = b1^2 (1 - t.a) + b2 (1 + (1 - a1)^32)
+//          rgb = (l c47.rgb + c71.x) c51.x t.rgb c20.w
+// "One texel" is a texel of the texture's BASE level (CloudTexelStep), whatever level the sample itself is
+// taken from: that is what the emulator's fetch offset does, and the native picture is measured against
+// emulated ones (plan Task 16 as amended; frame map, "Sun layer discovery", "The clouds").
+// State, from the record: blended by its alpha (0x07060706), alpha-tested ("greater" than the draw's
+// reference, 0.0196 captured), depth-tested (the game's greater-or-equal, less-or-equal on the pass's depth).
+// THE NATIVE CLOUDS WRITE NO DEPTH, although the game's do (0x00708766): the sun layer's depth must not hold
+// them (the game takes its layer's depth copy before them; with the scene clouds' threshold in the layer's
+// depth the beam source keeps 11 pixels of 12,310), and after them the pass draws nothing that is tested
+// against their depth but the records the game issued later, which the game's clouds hide only where their
+// alpha is above 0.0196 at one sample. So the layer's depth is the same whether it is taken before a late
+// record or after the last one (PlanSunDepthPlace), and the clouds need no place of their own in it.
+// What is written is a number of the scene's range: (v > 0) ? min(v, 31.875) : 0, the alpha saturated.
+inline constexpr float kCloudThin = 0.0010000000474974513f;       // 6197 c254.y: the alpha at or below which the colour is 0
+inline constexpr float kCloudFadeRate = 0.0010000000474974513f;   // c254.y again: the distance fade's rate
+inline constexpr float kCloudFadeStart = 1000.0f;                 // c254.z
+inline constexpr float kCloudPower = 32.0f;                       // c255.x
+// The bounds of a cloud record's values (each written so that a value that is no number fails it): the
+// tiling and the scroll within 4,096 (as a cloud occluder's), the scales in [0, 64], the normal's third
+// component within 4,096, a direction's component within 64, positions within the capture's bound.
+inline constexpr float kCloudTilingMax = 4096.0f;
+// The record's registers, in the generated table's order (c20, c31, c46, c47, c51, c69, c70, c71, c77, c78, c79).
+enum : uint32_t { kCloudC20 = 0, kCloudC31, kCloudC46, kCloudC47, kCloudC51, kCloudC69, kCloudC70, kCloudC71, kCloudC77, kCloudC78, kCloudC79, kCloudRegisters };
+// (the twelfth register of the constants holds the base level's texel step: CloudTexelStep)
+inline constexpr uint32_t kCloudStepRegister = 11;
+static_assert(kCloudRegisters == 11);
+
+// Whether the pass can draw a cloud record as it was captured: blended by its alpha, all four colour
+// channels, depth-tested greater-or-equal (with or without the depth write, which the pass does not make),
+// the alpha test on with "greater".
+constexpr bool CloudDrawState(const capture::QuadRecord& q) {
+  const bool test = (q.depth & 2) != 0;
+  const uint32_t func = (q.depth >> 4) & 7;
+  return q.blend == kQuadBlendAlpha && q.colour_mask == 0xF && test && func == uint32_t(capture::Compare::kGreaterEqual) &&
+         (q.alpha_control & 8) != 0 && (q.alpha_control & 7) == uint32_t(capture::Compare::kGreater);
+}
+// One texel of the base level of a cloud's texture, in the texture's own coordinate: (1 / width, 1 / height)
+// by its fetch constant's size field (dword 2: the width less 1 in bits 0 to 12, the height less 1 in bits
+// 13 to 25).
+inline void CloudTexelStep(const uint32_t fetch[6], float step[2]) {
+  step[0] = 1.0f / float((fetch[2] & 0x1FFFu) + 1u);
+  step[1] = 1.0f / float(((fetch[2] >> 13) & 0x1FFFu) + 1u);
+}
+// A cloud record's constants (the quad step's block: shaders::kClayCloudFields is its layout, the scene
+// quads' with the texel step in the twelfth register). False, with `out` untouched, unless: the record is
+// valid, a cloud, drawable (CloudDrawState), its texture fetched as stored; every corner value and matrix
+// component within capture::kQuadValueBound; c20.w in (0, 64] and the frame's output scale within a
+// thousandth of it (as the moon's: a cloud written with another scale would be another frame's); the tiling
+// and the scroll within 4,096; c47.rgb, c51.x, c69.x and c71.x in [0, 64]; c70.x within 4,096; c77.xyz and
+// c79.xy within the capture's bound; c78.xyz within 64; the alpha reference in [0, 1]; the texture's scale
+// finite and in (0, 64].
+inline bool MakeClayCloudConstants(const capture::QuadRecord& q, float out_scale, uint32_t sampler, const float fix[2],
+                                   ClayQuadConstants* out) {
+  if (!out || !fix || !capture::QuadRecordValid(q) || q.kind != capture::PostQuadKind::kCloud || q.layer != 0) return false;
+  if (!CloudDrawState(q) || !QuadTextureUnsigned(q)) return false;
+  auto fits = [](float v) { return std::fabs(v) <= capture::kQuadValueBound; };
+  auto scale = [](float v) { return v >= 0.0f && v <= kQuadRegisterMax; };
+  auto within = [](float v, float bound) { return std::fabs(v) <= bound; };
+  ClayQuadConstants c{};
+  for (int i = 0; i < 4; ++i) {
+    for (int k = 0; k < 5; ++k) {
+      if (!fits(q.corners[i][k])) return false;
+    }
+    for (int k = 0; k < 4; ++k) {
+      if (!fits(q.view_proj[i][k])) return false;
+      c.view_proj[i][k] = q.view_proj[i][k];
+    }
+    c.corner[i][0] = q.corners[i][0];
+    c.corner[i][1] = q.corners[i][1];
+    c.corner[i][2] = q.corners[i][2];
+    c.corner[i][3] = 1.0f;
+    c.coord[i][0] = q.corners[i][3];
+    c.coord[i][1] = q.corners[i][4];
+  }
+  const float c20w = q.ps[kCloudC20][3];
+  if (!(c20w > 0.0f && c20w <= kQuadRegisterMax) || !(out_scale > 0.0f && out_scale <= kQuadRegisterMax)) return false;
+  if (!(std::fabs(double(c20w) - double(out_scale)) <= 1e-3 * double(out_scale))) return false;
+  for (int k = 0; k < 2; ++k) {
+    if (!within(q.ps[kCloudC31][k], kCloudTilingMax) || !within(q.ps[kCloudC46][k], kCloudTilingMax) || !fits(q.ps[kCloudC79][k])) return false;
+  }
+  for (int k = 0; k < 3; ++k) {
+    if (!scale(q.ps[kCloudC47][k]) || !fits(q.ps[kCloudC77][k]) || !within(q.ps[kCloudC78][k], kQuadRegisterMax)) return false;
+  }
+  if (!scale(q.ps[kCloudC51][0]) || !scale(q.ps[kCloudC69][0]) || !scale(q.ps[kCloudC71][0]) || !within(q.ps[kCloudC70][0], kCloudTilingMax)) return false;
+  if (!(q.alpha_ref >= 0.0f && q.alpha_ref <= 1.0f)) return false;
+  if (!(fix[0] > 0.0f && fix[0] <= 64.0f) || !(fix[1] > 0.0f && fix[1] <= 64.0f)) return false;
+  // (only the components the shader reads are handed on; the others are 0)
+  c.reg[kCloudC20][3] = c20w;
+  for (int k = 0; k < 2; ++k) {
+    c.reg[kCloudC31][k] = q.ps[kCloudC31][k];
+    c.reg[kCloudC46][k] = q.ps[kCloudC46][k];
+    c.reg[kCloudC79][k] = q.ps[kCloudC79][k];
+  }
+  for (int k = 0; k < 3; ++k) {
+    c.reg[kCloudC47][k] = q.ps[kCloudC47][k];
+    c.reg[kCloudC77][k] = q.ps[kCloudC77][k];
+    c.reg[kCloudC78][k] = q.ps[kCloudC78][k];
+  }
+  c.reg[kCloudC51][0] = q.ps[kCloudC51][0];
+  c.reg[kCloudC69][0] = q.ps[kCloudC69][0];
+  c.reg[kCloudC70][0] = q.ps[kCloudC70][0];
+  c.reg[kCloudC71][0] = q.ps[kCloudC71][0];
+  CloudTexelStep(q.fetch[0], c.reg[kCloudStepRegister]);
+  c.kind = uint32_t(q.kind) + 1;
+  c.sampler = sampler & 3u;
+  c.alpha_test = 1u;
+  c.alpha_ref = q.alpha_ref;
+  c.scene_max = kPostSceneMax;  // (the scene's clamp, as the scene quads')
+  c.fix[0] = fix[0];
+  c.fix[1] = fix[1];
+  *out = c;
+  return true;
+}
+
+// The frame's clouds: the cloud records of the set, in the records' order, and whether every one of them
+// can be drawn (MakeClayCloudConstants with a unit texture scale). One that cannot: none is drawn. count
+// above capture::kMaxQuadRecords, or a null array with a count: nothing, not drawable.
+struct ClayCloudPlan {
+  uint32_t count = 0;
+  uint8_t records[capture::kMaxQuadRecords] = {};
+  bool drawable = true;
+};
+inline ClayCloudPlan PlanClayClouds(const capture::QuadRecord* quads, size_t count, float out_scale) {
+  ClayCloudPlan plan;
+  if (count > capture::kMaxQuadRecords || (count && !quads)) {
+    plan.drawable = false;
+    return plan;
+  }
+  static constexpr float kUnit[2] = {1.0f, 1.0f};
+  for (size_t i = 0; i < count; ++i) {
+    const capture::QuadRecord& q = quads[i];
+    if (!capture::QuadRecordValid(q) || q.kind != capture::PostQuadKind::kCloud) continue;
+    ClayQuadConstants unused;
+    if (!MakeClayCloudConstants(q, out_scale, 0, kUnit, &unused)) {
+      plan = ClayCloudPlan{};
+      plan.drawable = false;
+      return plan;
+    }
+    plan.records[plan.count++] = uint8_t(i);
+  }
+  return plan;
+}
+
+// The verdict (ClayPass::Render), the first thing missing deciding: the frame's furniture drawn; a cloud
+// record in the set; every one drawable; the clouds' objects, asked last; every cloud's texture.
+struct ClayCloudInputs {
+  bool furniture = false, any = false, drawable = false, objects = false, textures = false;
+};
+constexpr ClayClouds DecideClayClouds(const ClayCloudInputs& in) {
+  if (!in.furniture) return ClayClouds::kOff;
+  if (!in.drawable) return ClayClouds::kState;
+  if (!in.any) return ClayClouds::kNone;
+  if (!in.objects) return ClayClouds::kObjects;
+  if (!in.textures) return ClayClouds::kTexture;
+  return ClayClouds::kDrawn;
+}
+static_assert(DecideClayClouds(ClayCloudInputs{}) == ClayClouds::kOff);
+constexpr const char* ClayCloudsName(ClayClouds c) {
+  switch (c) {
+    case ClayClouds::kNone: return "no cloud record";
+    case ClayClouds::kState: return "a record's state or values";
+    case ClayClouds::kObjects: return kPostObjectsReason;
+    case ClayClouds::kTexture: return kQuadTextureReason;
+    case ClayClouds::kDrawn: return "drawn";
+    default: return "no furniture";
+  }
+}
+// The Clouds line of the status text and the log: what the pass did about the frame's clouds, and the
+// pass's totals since it was made by verdict. "Clouds: off" with the sun's switch off.
+inline std::string FormatCloudText(const ClayStats& st) {
+  if (!st.sun_switch) return "Clouds: off";
+  char buf[256];
+  std::string text = "Clouds: ";
+  if (st.clouds == ClayClouds::kDrawn) {
+    std::snprintf(buf, sizeof(buf), "drawn %u", st.cloud_records);
+    text += buf;
+  } else {
+    text += std::string("not drawn (") + ClayCloudsName(st.clouds) + ")";
+  }
+  std::snprintf(buf, sizeof(buf), " | frames since start %llu: drawn %llu", static_cast<unsigned long long>(st.cloud_frames.frames),
+                static_cast<unsigned long long>(st.cloud_frames.by[size_t(ClayClouds::kDrawn)]));
+  text += buf;
+  for (ClayClouds c : {ClayClouds::kNone, ClayClouds::kState, ClayClouds::kObjects, ClayClouds::kTexture}) {
+    std::snprintf(buf, sizeof(buf), ", %s %llu", ClayCloudsName(c), static_cast<unsigned long long>(st.cloud_frames.by[size_t(c)]));
+    text += buf;
+  }
+  return text;
+}
+
+// The cloud's mirror (post_cloud). t: the texel; n: the alpha of its four neighbours, a texel of the base
+// level on in x, back in x, on in y, back in y; P: the pixel's world position; the registers as the record
+// names them. out: rgb and alpha as the step writes them. A register or position that is no number gives
+// zeros; a texel's channel that is no number reads 0.
+inline void CloudMirror(const float t[4], const float n[4], const float P[3], float c20w, const float c47[3], float c51x, float c69x,
+                        float c70x, float c71x, const float c77[3], const float c78[3], const float c79[2], double out[4]) {
+  out[0] = out[1] = out[2] = out[3] = 0.0;
+  const float all[] = {P[0], P[1], P[2], c20w, c47[0], c47[1], c47[2], c51x, c69x, c70x, c71x, c77[0], c77[1], c77[2],
+                       c78[0], c78[1], c78[2], c79[0], c79[1]};
+  for (float v : all) {
+    if (!std::isfinite(v)) return;
+  }
+  const double a = detail::QuadFinite(t[3]);
+  const double ex = double(P[0]) - double(c79[0]), ey = double(P[1]) - double(c79[1]);
+  const double reach = double(kCloudFadeRate) * (std::sqrt(std::fabs(ex * ex + ey * ey)) - double(kCloudFadeStart));
+  const double fade = 1.0 - (reach > 0.0 ? (reach < 1.0 ? reach : 1.0) : 0.0);
+  const double alpha = a * double(c69x) * fade;
+  double rgb[3] = {0.0, 0.0, 0.0};
+  if (alpha > double(kCloudThin)) {
+    const double gx = detail::QuadFinite(n[0]) - detail::QuadFinite(n[1]);
+    const double gy = detail::QuadFinite(n[2]) - detail::QuadFinite(n[3]);
+    const double n2 = std::fabs(double(c70x) * double(c70x) + (gx * gx + gy * gy));
+    const double inv = n2 > 0.0 ? 1.0 / std::sqrt(n2) : 0.0;
+    const double N[3] = {gx * inv, gy * inv, double(c70x) * inv};
+    const double d[3] = {double(P[0]) - double(c77[0]), double(P[1]) - double(c77[1]), double(P[2]) - double(c77[2])};
+    const double d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    const double dk = (d2 > 0.0 && std::isfinite(d2)) ? 1.0 / std::sqrt(d2) : 0.0;
+    const double Dn[3] = {d[0] * dk, d[1] * dk, d[2] * dk};
+    auto sat = [](double v) { return v > 0.0 ? (v < 1.0 ? v : 1.0) : 0.0; };
+    const double a1 = sat(-(N[0] * double(c78[0]) + N[1] * double(c78[1]) + N[2] * double(c78[2])));
+    const double towards = Dn[0] * N[0] + Dn[1] * N[1] + Dn[2] * N[2];
+    const double b1 = sat(-towards), b2 = sat(towards);
+    const double base = std::fabs(1.0 - a1);
+    const double lobe = base > 0.0 ? std::pow(base, double(kCloudPower)) : 0.0;
+    const double l = b1 * b1 * (1.0 - a) + (b2 + b2 * lobe);
+    for (int i = 0; i < 3; ++i) {
+      const double v = (l * double(c47[i]) + double(c71x)) * double(c51x) * detail::QuadFinite(t[i]) * double(c20w);
+      rgb[i] = std::isfinite(v) ? v : 0.0;
+    }
+  }
+  detail::QuadOut(rgb, alpha, double(kPostSceneMax), out);
 }
 
 // --- Native sun layer (frame-map section 17, "Sun layer"; sub-project 10, plan Task 14) ---

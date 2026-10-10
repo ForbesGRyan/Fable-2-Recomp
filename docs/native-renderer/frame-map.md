@@ -5263,8 +5263,111 @@ criterion's bounds hold: at least 99.9% of the pixels within 1 level, all within
 `compare <dump> <ref>_final.rgba` is criterion 5's figures from the GPU (the front buffer holds
 the HUD and the bloom: the line "outside the HUD" and the regions are the ones to read).
 
-**Runs**: none yet at this writing; the software adapter's run and the three real-GPU runs are
-the controller's (the task's report has their lines). What they show is added here.
+**Runs** (the controller's, `-UserPresent`, `RUN UNCHECKED`; all exit 0; the window on the
+100%-scaled monitor, shot width 1296: no timing is taken from them; evidence
+`out/native-evidence/post/t6_*`, each run's dump copied there as `<name>_dump.rgba`):
+
+| Run | `-GameArgs` after `--fable2_native_render=true,--fable2_native_post=on,--fable2_native_post_oracle=...\oracle\<prefix>` | Log | Dump |
+|---|---|---|---|
+| T6-1 `t6_warp`, software adapter, `092959_f1` | `,--d3d12_adapter=-2,--d3d12_debug=true,--fable2_native_d3d_messages=true`; `-Total 240 -Shots "225" -Plan "32:VIEW=native"` | 457 | `native_post_dump_20261010_004046.rgba` |
+| T6-2 `t6_2_092959_f1`, real GPU | `-Total 60 -Shots "40,50" -Plan "32:VIEW=native"` | 458 | `..._004323.rgba` |
+| T6-3 `t6_3_121331_f1` | the same | 459 | `..._004431.rgba` |
+| T6-4 `t6_4_132250_f1` | the same | 460 | `..._004539.rgba` |
+| T6-5 `t6_5_134312_f1` (the trees' capture) | the same | 461 | `..._004647.rgba` |
+
+*The feed ran as written* in all five: the startup line (scene 1120 x 720, 0 values a
+half-float texture changes), `scene uploaded` with the file's registers, `the mapped target
+copied for the dump at fed frame 31`, `wrote ... (3225612 bytes ...) at clay frame 32`. The
+live frames were post frames throughout (`drawn 600` of 600 in each real-GPU run, blind:
+`c20.w 16.0000`). The ramp line of all five logs is the table of log 455 (the same text;
+`changes 0`), so the references are those written through log 455's ramp
+(`oracle/ref455_<stamp>_f1_A.rgba`, `_final.rgba`).
+
+*Software adapter, debug layer* (log 457; spec criterion 10 for this build): no `d3d ERROR`
+line; warning id 1328 only, as in log 450. The half-float texture, the copy-source state and
+the read-back buffer raised nothing.
+
+*Spec criterion 6, the shaders against the reference's variant A after the ramp*
+(`t6_compare_reference.txt`; `post_replay.py compare`, 806,400 pixels):
+
+| Dump | Within 1 level | Within 2 | Largest | Mean signed (dump less reference), r g b | The criterion's bounds |
+|---|---|---|---|---|---|
+| software adapter, `092959` | 100.000% | 100% | 2 | -0.000, +0.000, +0.000 | **held** |
+| real GPU, `092959` | 99.333% | 100% | 2 | -0.060, -0.060, -0.041 | not held (99.9% within 1) |
+| real GPU, `121331` | 99.495% | 100% | 2 | -0.055, -0.066, -0.042 | not held |
+| real GPU, `132250` | 99.354% | 100% | 2 | -0.053, -0.059, -0.040 | not held |
+| real GPU, `134312` | 99.476% | 100% | 2 | -0.048, -0.055, -0.036 | not held |
+
+**Criterion 6 is met on the software adapter and not met as written on the real GPU**: every
+pixel is within 2 levels there, but 0.5 to 0.7% of the pixels are 2 levels off where the
+criterion allows 0.1%. The plan asks which is at fault, the shader or the reference's
+addressing. Neither: it is how this graphics card stores a float in an 8-bit target.
+
+- *On the software adapter the steps are the reference* (`t6_analyse_092959.txt`): taken back
+  through the ramp, 2,419,192 of 2,419,200 channels hold the reference's front level; the 8
+  others (5 one level down, 3 up) are pixels whose unrounded reference value lies within
+  0.00001 of a level of a rounding boundary. So the table's nearest-texel addressing (ruling
+  19), the fade, the power and the ramp's index are, as compiled HLSL, what
+  `light_formulas.post_composite` and `post_ramp` say, on the game's own scene and block.
+- *The real GPU differs only downward, and only at rounding boundaries*
+  (`t6_ramp_levels_092959.txt`, `t6_boundary_<stamp>.txt`; scripts beside them). Two writes
+  into 8-bit targets are involved. (1) The ramp step's: a ramp entry whose value times 255 has
+  a fraction of 0.5015 to 0.5337 is stored one level low at every pixel of its front level (25
+  channel-levels of capture `092959`, for example front level 96: entry 81.51, reference 82,
+  dump 81; 0.86% of the channels); entries with a fraction of 0.5513 and above are stored as
+  the reference rounds them (146 of them between 0.55 and 0.75). (2) The composite's: with the
+  ramp step's results taken as this card's, the dump holds the entry of the front level below
+  the reference's in 2.66 to 3.10% of the channels, and in every one of them the reference's
+  unrounded level lies 0 to 0.062 of a level above the boundary (median 0.015 to 0.020, 99%
+  0.053 to 0.057); **no other difference remains, in any of the four captures (0 channels)**.
+  So this card stores `floor(v * 255 + 0.5 - d)` with d near 0.04 to 0.06 where the reference
+  and the software adapter store the nearest level. Direct3D allows a float-to-UNORM conversion
+  a tolerance of 0.6 of a level, so this is a conforming conversion, not an error of the card
+  or the pass. (A single offset d for both writes fits 98.5% of the channels at best, d =
+  0.035, against 94.8% for d = 0: `t6_rounding_model_092959.txt`; the conversion's threshold is
+  not one number, which is why the two writes are analysed apart.) The two effects can meet in
+  one pixel, and the ramp has 18 steps of 2 levels a channel, hence the pixels 2 levels off.
+- *The two implementations against each other* (the software adapter's dump against the real
+  GPU's, the same file): 99.333% of the pixels within 1 level, all within 2, the real GPU lower
+  by 0.060, 0.060, 0.041 on average: the same figures as the real GPU against the reference,
+  as they must be when the software adapter equals the reference.
+- *What would make the real GPU exact*: writing the level itself, `floor(v * 255 + 0.5) / 255`,
+  as the last statement of both pixel shaders, so that the stored value has no fraction for the
+  conversion to round. Not done here: it changes shader text (the shader test's cases 232 to
+  236 and a software-adapter run with it), and whether the criterion is to be met that way or
+  restated is the controller's ruling. For the picture it is at most one level of the front
+  target and one of the mapped target, always down; the emulated picture of the same machine
+  goes through the same card's conversion at its own two writes.
+
+*Against the game's front buffer through the ramp* (spec criterion 5's figures, from the GPU;
+`t6_compare_front.txt`; the reference `_final.rgba` is the capture's front buffer with HUD and
+bloom, the dump has neither, so "outside the HUD" is the line to read): median 3 levels (whole
+levels here; the float replay gave 3.14, 3.05, 3.13) and **56.06, 56.19, 56.08% of the pixels
+within 8 levels** for `092959`, `121331`, `132250` on the real GPU (56.12% for the software
+adapter's dump of `092959`), against the float replay's 56.0, 56.2, 56.0%
+(`t6_reference_ramp455.txt`) and the criterion's 55.9, 56.0, 55.9 within 0.5 points. By region
+the picture is the research's: planks, trunk and the plank shadows within a few levels (median
+0 to 1), the far ground, the sky and the lake 5 to 22 levels under the game's, which is the
+bloom's veil that variant A does not have. The trees' capture: median 5, 48.9% within 8 (more
+of it under the bloom).
+
+*What this settles for "Native composite"*: its far and sunlit regions lay 0.02 to 0.05 above
+the prediction, all on one side, and the text left open whether the native scene or the
+shaders differed. Fed the game's own scene, the steps return the reference to the level (the
+software adapter exactly, the real GPU within its conversion, and that goes down, not up). **The
+offset is the native scene's**, not the post steps'.
+
+*Shots viewed*: T6-2 at 40 s and the software adapter's at 225 s show the bridge of capture
+`092959` as the game drew it (the game's own water, clouds, far trees and leaf shadows, which
+the native scene does not have), still, without HUD and without the bloom's veil; the two look
+the same to the eye. T6-5 at 40 s shows the trees' capture from under the bridge with a pink
+sky through the leaves. In all three the picture fills the native view; nothing of the pass's
+own scene shows.
+
+*Limits*: one dump a run, one frame of each capture; daylight scenes whose largest scene value
+is 4.6 (the clamp at 31.875 and the table's last texels are not reached by these scenes: the
+mirrors' tests hold those); bloom off (criterion 12 is plan Task 9's); one real graphics card.
+The criterion's real-GPU half stands as not met as written until the ruling above.
 
 ## Pending
 

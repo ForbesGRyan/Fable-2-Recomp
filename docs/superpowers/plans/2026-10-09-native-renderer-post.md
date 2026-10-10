@@ -416,9 +416,10 @@ composite".
       four.
 - [ ] From the runs: the Post line's counts; frame rates and capture medians (criterion 9, as
       measured on that machine); shots viewed and described, what looks worse included (the
-      clear colour black, the placeholders under ruling 9); `post_replay.py predict` against
+      clear colour near black: table texel 1, the placeholders under ruling 9); `post_replay.py predict` against
       the on / off region ratios (criterion 7, first reading); the off-run's regions against the
-      fog's final binary's (criterion 8's second half).
+      fog's final binary's (criterion 8's second half: within the spread of the two runs'
+      emulated shots, controller ruling 22; not the 0.002 the criterion first named).
 - [ ] Frame map; commit "Native composite: ...".
 
 ### Task 6: Oracle feed and target dump (diagnostic)

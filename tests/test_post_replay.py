@@ -229,6 +229,9 @@ class Ramp(unittest.TestCase):
         self.assertEqual(pr.parse_ramp_line(together), ramp)
         with self.assertRaises(pr.ReplayError):
             pr.parse_ramp_line(together.replace("".join(entries), "".join(entries)[:-9]))
+        # (and one entry too long: 2,313 digits are no table either)
+        with self.assertRaises(pr.ReplayError):
+            pr.parse_ramp_line(together.replace("".join(entries), "".join(entries) + entries[0]))
 
     def test_a_ramp_line_that_is_not_one(self):
         for text in ("", self.line(["000000000"] * 255), self.line(["000000000"] * 256, valid=0),

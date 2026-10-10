@@ -5047,10 +5047,13 @@ reading). `post_replay.py predict` on T5-6's own capture (frame 1 of `..._235055
 log 455; `t5_predict_235055_f1.txt`) says what the game's composite without bloom does to the
 game's own scene relative to the fixed mapping (A / N, mean display luminance by region): 0.733
 (pole averted side) to 1.097 (sky). The native shots of T5-6 over those of T5-7, the same
-measure: **23 of 26 regions within 0.05 of the prediction**; the 11 far, sky and lake regions
-+0.001 to +0.048 from it (sky 1.104 and 1.101 against 1.097 and 1.093; lake 1.020 against 1.019;
-far peak 1.079 against 1.072), bridge planks 0.872 against 0.869, trunk 0.827 against 0.833, pole
-averted side 0.746 against 0.733. The three outside are regions under moving leaf shadow, whose
+measure: **23 of 26 regions within 0.05 of the prediction**; the 10 far and sky regions
++0.004 to +0.048 from it (sky 1.104 and 1.101 against 1.097 and 1.093; far peak 1.079 against
+1.072), bridge planks 0.872 against 0.869, trunk 0.827 against 0.833, pole averted side 0.746
+against 0.733. (The lake is among the 23, 1.020 against 1.019, and confirms nothing: the native
+lake is an unlit placeholder whose on / off ratio is set by the frame's unlit scale, while the
+prediction is made from the game's lit water; the agreement is a coincidence of the two. Review of
+plan Task 5, Minor 7.) The three outside are regions under moving leaf shadow, whose
 native shots differ among themselves by 8 to 79% within one run: railing post cap (+0.158), rope
 pole shadow on the planks (+0.065), railing post shadow on the planks (-0.055). The far regions
 and the sunlit ground lie 0.02 to 0.05 above the prediction, all on one side: the native scene is
@@ -5064,10 +5067,13 @@ to 1.05, as a flat table should (sky 1.044, lake 0.998, planks 0.959).
 | Region | post on, blind | post off, blind | post on, read-back switch | post off, read-back switch |
 |---|---|---|---|---|
 | sky above the ridge | 0.878 | 0.804 | 0.923 | 0.771 |
+| far mountains left | 1.271 | 1.217 | 1.336 | 1.279 |
 | far mountains centre | 1.071 | 1.026 | 1.100 | 1.068 |
+| far slope | 1.048 | 1.013 | 1.067 | 1.080 |
 | far rock | 0.914 | 0.842 | 0.930 | 0.835 |
 | lake (unlit placeholder) | 0.800 | 0.801 | 0.833 | 0.804 |
 | dirt patch | 1.034 | 0.997 | 1.054 | 1.039 |
+| rock face | 1.099 | 1.047 | 1.125 | 1.082 |
 | bridge planks | 0.985 | 1.029 | 0.981 | 1.239 |
 | trunk | 1.018 | 1.113 | 1.015 | 1.409 |
 | hero's shirt | 0.973 | 0.946 | 0.963 | 1.040 |
@@ -5076,8 +5082,22 @@ to 1.05, as a flat table should (sky 1.044, lake 0.998, planks 0.959).
 
 With the game adapting (the read-back switch) and post off, the native picture's fixed exposure
 no longer fits: near and dark regions read 1.04 to 1.41 of the game's. With post on they read
-0.87 to 1.05 (the averted side apart, below), and the same with the game blind: **the native picture follows the game's exposure**.
-What is worse with post on: **the darkest regions are too dark** (pole averted side 0.59 to
+0.87 to 1.13 (the averted side apart, below; the upper end is the rock face, 1.099 blind and
+1.125 with the switch), and the same with the game blind: **the native picture follows the
+game's exposure** in the planks, the trunk, the hero and the poles; the rock face and the dirt
+patch do not come nearer.
+What is worse with post on (review of plan Task 5, Important 1: the first writing of this
+paragraph gave the range as 0.87 to 1.05 and left these regions out). **Regions that were
+already above the game's move further from it**: rock face 1.099 / 1.125 with post on against
+1.047 / 1.082 off (blind / read-back switch); far mountains left 1.271 / 1.336 against 1.217 /
+1.279; far mountains centre 1.071 / 1.100 against 1.026 / 1.068; dirt patch 1.034 / 1.054 against
+0.997 / 1.039; far slope 1.048 / 1.067 against 1.013 / 1.080 (mixed: nearer with the switch).
+**The bloom is predicted to lift these further**: `t5_predict_235055_f1.txt`'s B / N against
+A / N is 1.073 against 0.993 for the rock face, 1.078 against 0.980 for far mountains left, 1.103
+against 0.988 for far mountains centre, 1.088 against 0.986 for the dirt patch and 1.059 against
+0.975 for the far slope, so 10b starts from a native far ground that is already 10 to 34% over
+the game's there (the native scene's own excess: the fog's follow-ups 2 and 15, not the post's).
+**The darkest regions are too dark** (pole averted side 0.59 to
 0.66, where the fixed mapping gave 0.86 blind). That is the composite without the bloom: the
 prediction for that region is 0.733 without and 0.940 with the bloom (`predict`'s B / N), and the
 research's variant A read 0.815 to 1.017 of the game's final picture. Plan Task 8 is the bloom.
@@ -5091,7 +5111,12 @@ the 11 far, sky and lake regions 0.9996 to 1.0025; the emulated shots of the two
 as much or more (0.977 to 1.009 in the same 20 regions): the two runs' scenes are not the same to 0.002.
 **12 of 26 regions are within 0.002, 19 within 0.005; the criterion's 0.002 is not met as
 written**, and cannot be judged by two runs whose emulated pictures differ by 0.003. The six
-others are under leaf shadow (0.96 to 1.52). (Run 433's own native shot at 39 s is not used: its
+others are under leaf shadow (0.96 to 1.52). **Controller ruling 22** (the ledger; the review of
+plan Task 5, Minor 1) has since dropped the 0.002: the criterion is judged by the shader test's
+program comparison and by the post-off native regions lying within the spread of the two runs'
+emulated shots, which they do here (0.9969 to 1.0053 against 0.977 to 1.009); the reviewer's own
+pixel comparison found the native pair closer than the emulated one (58.5% of the pixels equal
+against 35 to 51%). (Run 433's own native shot at 39 s is not used: its
 dirt patch is 8.6% brighter than the same run's at 45 s.) What stands for "off is today's
 picture" is the program comparison above and this agreement to 0.5%.
 
@@ -5115,15 +5140,22 @@ in the darks is visible at the shots' scale. The software adapter's shot: above.
 | guest work median, last two windows | 11.44, 11.69 ms | 11.06, 11.00 ms | 11.21, 11.85 ms | 11.79, 10.51 ms |
 
 The first two native windows of each run hold the first native frames and the discovery capture
-(maxima of 0.6 to 2.4 s) and are no steady windows; T5-4's third (27.8 fps, mean 35.96 ms with a
-145 ms frame, median 33.90 ms) is the one steady-looking window below 29.8. Otherwise **30.0 fps
-with post on and with the read-back switch on** (spec criterion 9's bridge part, first reading:
-met in 11 of 12 steady windows; the 27.8 is reported, not explained). **The read-back switch
+(maxima of 0.6 to 2.4 s) and are no steady windows; T5-4's third (27.8 fps, mean 35.96 ms,
+median 33.90 ms) is the one steady-looking window below 29.8. It was slower as a whole, not by
+one frame: its 145 ms frame adds 0.75 ms to the mean of 150, the mean is 2.6 ms over, and its
+90th percentile is 40.76 ms against 36.4 to 37.2 ms in the windows around it; it follows the
+discovery capture's window directly (log 453). The other 11 windows read **29.8 to 30.1 fps with
+post on and with the read-back switch on** (29.8 once, log 454; 29.9 twice, log 451; the first
+writing called all of them 30.0). Spec criterion 9's bridge part, "30.0 fps in every steady
+window", is therefore **not met as written** in this first reading (one window at 27.8, three at
+29.8 to 29.9); the 27.8 is reported, not explained (review of plan Task 5, Minors 3 and 4). **The read-back switch
 holds 30 fps under the gate here**, in both of its runs, and the game adapts with it (`c20.w`
 8.73 to 8.20 in T5-4): measured as stated; its default (ruling 2) is Task 7's decision. The
 capture's records-on median is 0.08 to 0.09 ms higher with post on in the normal pair (inside
 criterion 9's 0.10, at its edge) and within the scatter in the read-back pair (-0.14, +0.14):
-two lines a run, so no more than that is said.
+two lines a run, so no more than that is said. The criterion asks for post on against off **in
+one session**; these are two sessions (logs 451 and 452), so the +0.08 to +0.09 is an indication
+and not the criterion's measurement (review of plan Task 5, Minor 6).
 
 **Limits.** (1) The clear colour of a post frame is not black as spec Design 6 first said: its
 scene luminance, 0.0064, lies above 1 / 256, so the nearest-texel rule reads the table's texel 1

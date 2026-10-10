@@ -1728,6 +1728,10 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   if (post_words && !post_frame) {
     frame_.exposure = frame_.light_on ? ClayExposure(ClayLight::kOn) : 0.0f;
     frame_.post = 1.0f;
+    // (FinishTerrain has copied the block into the buffer already. Today the verdict falls here only
+    // without a buffer; were there one, it must not keep a post frame's words under the old mapping.
+    // Review of plan Task 5, Minor 5.)
+    if (terrain_cb_mapped_) std::memcpy(terrain_cb_mapped_, &frame_, sizeof(frame_));
   }
   if (post_frame) std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(post_slot_), &post_constants, sizeof(post_constants));
   st.post_switch = post.post;

@@ -317,12 +317,14 @@ recommended option.
    `bool rex::graphics::GetGuestGammaRamp256(uint32_t out_rgb10[256])`, and an SDK rebuild.
 9. Ruling: unlit draws and placeholder clay take one unlit scale a frame, the reciprocal of the
    composite's gain at scene luminance 1, and go through the composite and the bloom like lit
-   pixels; the clear colour stays as it is and shows black in a post frame — why: the linear
+   pixels; the clear colour stays as it is and shows near black in a post frame (table texel 1,
+   near level 9 of 255 before the ramp: Design 6; this ruling first said black) — why: the linear
    target has no alpha for a per-pixel flag, a second target or a mask would cost a binding and
    a pass for placeholders, and the gain is flat in a blind run — cost if wrong: under
    adaptation the table rises with luminance (0.20 to 0.32), so a dark placeholder is up to a
    third dimmer and a bright one brighter than today; bright placeholders (the water, flat clay)
-   feed the bloom.
+   feed the bloom; and with a flat table (a blind run) every unlit value v shows as `v^0.4545`
+   through the ramp where it showed as `sqrt(v)`.
 10. Ruling: the block read at a frame's composite goes into that frame's own scene (the capture
     publishes at the swap, which follows the composite); the age bound of ruling 5 serves only a
     frame whose own read gave none — why: it is what the code allows, and it removes ruling 3's
@@ -401,7 +403,10 @@ Each with how it is measured. "Regions" are the bridge's 26 of `lighting-regions
    regions where no leaf shadow moves; the others are reported.
 8. *Off is today's picture.* With `--fable2_native_post=off` the lit programs equal today's line
    for line and the unlit ones but for one multiply by a word that is 1 (program comparison);
-   bridge regions within 0.002 of a run of the fog's final binary where no leaf shadow moves.
+   bridge regions of a post-off run against a run of the fog's final binary within the spread
+   of the same two runs' emulated shots, where no leaf shadow moves (controller ruling 22, the
+   ledger: this criterion first said "within 0.002", which two sessions cannot decide, since
+   their emulated shots differ by more; the figure is dropped).
 9. *Cost.* Bridge: 30.0 fps in every steady 150-frame native window, with post on and with the
    read-back switch on. Third spot: no steady window below 29.2 fps (today's worst there);
    records-on capture median stated beside today's 2.64 to 2.92 ms, and post on against off in
@@ -483,7 +488,7 @@ Said now, with the finding that makes it one (ruling 18).
    oracle feed compares it with the game.
 4. Game-scale values in `R11G11B10_FLOAT`: 5 mantissa bits in blue against the game's 7; a rising
    table and a bloom can show a step the square-root mapping hid.
-5. Unlit draws under ruling 9; the clear colour turning black.
+5. Unlit draws under ruling 9; the clear colour turning near black (table texel 1).
 6. A NaN in the linear target: each reader takes it as 0; the UNORM targets cannot hold one.
 7. Capture cost: every hooked `BeginVertices` call outside the main scene is now looked at (the
    pixel shader's hash, cached by object) in a frame with post wanted.

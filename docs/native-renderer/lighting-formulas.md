@@ -1025,7 +1025,7 @@ The exchanged assignment fits less well on every figure but the 99th percentile;
 ### What stands on inference
 
 1. **Which picture is `tf1` and which `tf2`**, and that both radial passes are of picture 1 (the research's reading by the weights and the engine's names; plan Task 10). Variant C's figures above are one frame's hint for the research's assignment, no more.
-2. **A pixel's sample point.** The rasteriser samples pixel `i` at its integer position (the post chain's inference 2), so the layer's depth is the scene's texel (2 x, 2 y) and a quad's edge lies where that convention puts it; half a layer pixel of doubt.
+2. **A pixel's sample point.** The rasteriser samples pixel `i` at its integer position (the post chain's inference 2), so the layer's depth is the scene's texel (2 x, 2 y) and a quad's edge lies where that convention puts it; half a layer pixel of doubt (measured since: see "Since plan Task 11", 2).
 3. **The depth between the two pictures**: taken as kept (the clears between them as colour clears).
 4. **The cubes' culling**: drawn without it. Their cull word is `0x00218002`; seen from inside a box, five faces face the eye if any does. In `134312` it makes no difference (they change nothing).
 5. **Textures**: read as stored (the sign fields of the fetch constants are 0: no gamma decode); the levels are made by means of four, since a dump holds the base level only, and a quad reads the level of its mean footprint (the sun disc: level 2.15); the cloud occluders read level 0.
@@ -1057,5 +1057,6 @@ This section is plan Task 11's; what the later tasks found is in `docs/native-re
 2. **A pixel is sampled at its integral position** by the game at the layer's draws and in the scene (`PA_SU_VTX_CNTL` = 4 in the captures' command words): the replay's convention, first an inference ("What stands on inference"), is a measurement.
 3. **The tree occluder (`4325` / `F1EB`)** redraws a leaf draw the game issues after its depth copy and fades to half (`c15.w` 0.5); it still cannot be replayed (a draw row holds 512 of the mesh's 18,722 indices). The reference and the native layer both lack it.
 4. **The cloud occluders' fetch**: the reference reads level 0, the game's fetch constant names mips 0 to 5. A per-pixel level in the reference changes layer 1's drawn set by about fifty texels of 12,300 (`out\native-evidence\post\t18_occluder_level_052158_f1.txt`); the tool keeps level 0.
-5. **The clouds against a picture** ("Not checked", 1): held by hue against the game's own scene at the bridge, for place, drift and sign (`tools/xdk_sigmatch/post_cloud_hue.py`, `tests/test_post_cloud_hue.py`); their strength is not decided.
+5. **The clouds against a picture** ("Not checked", 1): held by hue against the game's own scene at the bridge: place, drift and sign, one pair confirmed by the tool's rule, two at its edge (51% against 50%); strength not decided (controller ruling 43; `tools/xdk_sigmatch/post_cloud_hue.py`, `tests/test_post_cloud_hue.py`).
 6. **Still not checked**: a flare in front of the depth, the moon and its glow in a picture, anything at night.
+7. **The clouds' texel step** ("What stands on inference": "for plan Task 16 the choice is open"): plan Task 16 took a texel of the base level (`CloudTexelStep`), the emulator's reading; which the console has is still not measured.

@@ -4,7 +4,7 @@ Status: **built and validated in its three phases, 2026-10-10** (branch `native-
 closing table of all 21 criteria: frame map section 17, "Validation (10c)"; "Implementation notes
 (deviations)" at the end of this document). In short: criteria 1 to 3, 5 to 7, 10 to 12, 14 and
 16 to 18 are met; 4, 8, 15's and 20's picture parts are met by a substituted measure (controller
-rulings 21 and 22); 13 is not met as written in one bridge region of 26 (ruling 31); **19 is met
+rulings 21 and 22; 15's by the measure's program half, and by its regions in 8 of 10); 13 is not met as written in one bridge region of 26 (ruling 31); **19 is met
 on the oracle feed and NOT met in the game**; criterion 9 and the cost parts of 15 and 20 are
 closed by controller ruling 42 as "frame rate met, capture-thread median not decidable". **All
 four switches are off by default** (`--fable2_native_post`, `--fable2_native_bloom`,
@@ -598,8 +598,9 @@ designed, or decided on the way:
   texels within 8 levels; controller ruling 41). The residue is the edge of the cloud occluders'
   kept set; where both sides drew, layer 1 is within one level everywhere. The texture level of
   the occluders' fetch is a fifth of it.
-- **The clouds are validated by hue at the bridge for place, drift and sign** against the game's
-  own scene (`tools/xdk_sigmatch/post_cloud_hue.py`); their strength is not decided.
+- **The clouds, by hue against the game's own scene at the bridge: place, drift and sign: one
+  pair confirmed by the tool's rule, two at its edge (control 51% of the best correlation against
+  50%); strength not decided** (controller ruling 43; `tools/xdk_sigmatch/post_cloud_hue.py`).
 - **Criterion 20**: the picture part by ruling 22 (the composite's text changed for the blend:
   shader test case 253 holds the compiled program with the share 0); the cost part by ruling 42.
 - **Criterion 9 and the cost parts of 15 and 20** (controller ruling 42): frame rate met;
@@ -614,6 +615,9 @@ designed, or decided on the way:
   (`docs/native-renderer/user-checks.md`, checks 63 to 77).
 
 ### Phase 10b, plan Task 9 (validation; frame map section 17, "Validation (10b)")
+
+*As this phase stood. Criterion 9, ruling 2 and the defaults were closed since by controller ruling 42
+(phase 10c above); "Outstanding: cost" is now the frame map's "Cost: the two timing sessions".*
 
 No run was made and no code changed for the validation; the verdicts are read from plan Task 8's
 runs (logs 469 to 483) and Task 8b's (logs 484 to 489, the binary with the base map's gamma fix),
@@ -651,6 +655,9 @@ and what the reviews had left open is computed in `out/native-evidence/post/t9_c
   28); the sun's layers absent until 10c; one save, late morning, two places.
 
 ### Phase 10b, plan Task 8 (the bloom's code; frame map section 17, "Native bloom")
+
+*As this phase stood. Criterion 9, ruling 2 and the defaults were closed since by controller ruling 42
+(phase 10c above); "Outstanding: cost" is now the frame map's "Cost: the two timing sessions".*
 
 Stated after plan Task 8's own runs (logs 469 to 483; frame map, "Native bloom", "Runs") and
 before the validation runs of plan Task 9; the criteria's verdicts come with them.
@@ -737,6 +744,9 @@ before the validation runs of plan Task 9; the criteria's verdicts come with the
   when it is not 0.25 (reviews of plan Task 5, Minors 8 and 11).
 
 ### Phase 10a (plan Tasks 1 to 7; frame map section 17)
+
+*As this phase stood. Criterion 9, ruling 2 and the defaults were closed since by controller ruling 42
+(phase 10c above); "Outstanding: cost" is now the frame map's "Cost: the two timing sessions".*
 
 Built as designed but for the following; the criteria's verdicts with their figures are in frame
 map section 17, "Validation (10a)".

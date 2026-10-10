@@ -534,7 +534,7 @@ with the gamma fix, and SUNWARD (left to 10c's own runs). Criterion 11's figures
 the research's, with the bloom sampled at aligned texel centres; the reference now samples at
 the game's own fetch (ledger ruling 27) and the verdicts are stated with it. The timing runs of
 this task and of Task 7 are one list with its decision rules: frame map section 17,
-"Outstanding: cost" (every run since log 457 was on a monitor on which timing does not count).
+"Outstanding: cost" (now "Cost: the two timing sessions"; every run since log 457 was on a monitor on which timing does not count).
 The deferred document fixes of the reviews of Tasks 7, 8 and 8b were made in this task, each as
 its own commit.
 

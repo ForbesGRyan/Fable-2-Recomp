@@ -664,6 +664,33 @@ static void SunLayerTests() {
       }
       SunRadialMirror(PostPicture{}, 1, 1, real, out);
       CHECK(644, out[0] == 0.0 && out[1] == 0.0 && out[2] == 0.0);
+      // One texel that is no number among numbers counts as 0 and does not take the others' sum away: the
+      // picture with it is the picture with a black texel in its place.
+      {
+        float holed[16 * 16 * 3], black[16 * 16 * 3];
+        std::memcpy(holed, quarter, sizeof(holed));
+        std::memcpy(black, quarter, sizeof(black));
+        for (int ch = 0; ch < 3; ++ch) {
+          holed[(8 * 16 + 9) * 3 + ch] = ch == 1 ? kInf : kNaN;
+          black[(8 * 16 + 9) * 3 + ch] = 0.0f;
+        }
+        const PostPicture holed_pic{holed, 16, 16}, black_pic{black, 16, 16};
+        double with_hole[3], with_black[3];
+        int differ = 0;
+        for (uint32_t y = 6; y < 11; ++y) {
+          for (uint32_t x = 7; x < 12; ++x) {
+            SunRadialMirror(holed_pic, x, y, real, with_hole);
+            SunRadialMirror(black_pic, x, y, real, with_black);
+            SunRadialMirror(quarter_pic, x, y, real, out);
+            for (int i = 0; i < 3; ++i) {
+              // (the pixel beside the centre reads the holed texel with every tap: black there, as the black one)
+              CHECK(644, with_hole[i] == with_black[i] && (with_hole[i] > 0.0 || (x == 9 && y == 8)));
+              differ += with_hole[i] != out[i];
+            }
+          }
+        }
+        CHECK(644, differ > 0);  // (the texel is read by these pixels: the case is not empty)
+      }
     }
 
     // 645: the reduction against the reference (light_formulas.post_reduce): the mean of the pixel's four

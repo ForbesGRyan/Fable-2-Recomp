@@ -518,6 +518,9 @@ static int SunTests() {
   for (int i = 0; i < 3; ++i) {
     const fable2::native::capture::QuadRecord& q = s.quads[i];
     if (!fable2::native::capture::QuadRecordValid(q) || q.kind != kinds[i] || q.layer != 1 || q.sequence != i || q.ps_hash != good.quads[i].ps) return 124;
+    for (int k = 0; k < 16; ++k) {
+      if (q.view_proj[k / 4][k % 4] != good.quads[i].view_proj[k]) return 129;  // (row by row, as the capture's c0..c3)
+    }
     if (q.view_proj[0][0] != good.quads[i].view_proj[0] || q.view_proj[3][3] != good.quads[i].view_proj[15] || q.fetch[0][1] != good.quads[i].fetch[1] ||
         q.blend != good.quads[i].blend || q.depth != good.quads[i].depth) return 125;
   }
@@ -661,7 +664,8 @@ static int DumpTests() {
   // A layer's dump has its own magic; anything that is not four characters counts as the picture's.
   if (!PackOracleDump(rows.data(), 256, 3, 2, &out, "F2OL") || std::memcmp(out.data(), "F2OL", 4) != 0 || out.size() != 36 ||
       std::memcmp(out.data() + 4, want + 4, 32) != 0) return 114;
-  if (!PackOracleDump(rows.data(), 256, 3, 2, &out, "F2") || std::memcmp(out.data(), "F2OD", 4) != 0) return 115;
+  if (!PackOracleDump(rows.data(), 256, 3, 2, &out, "XY") || std::memcmp(out.data(), "F2OD", 4) != 0) return 115;
+  if (!PackOracleDump(rows.data(), 256, 3, 2, &out, "F2OLX") || std::memcmp(out.data(), "F2OD", 4) != 0) return 117;
   if (!PackOracleDump(rows.data(), 256, 3, 2, &out, nullptr) || std::memcmp(out.data(), "F2OD", 4) != 0) return 116;
   // The names of the faults, each once.
   const char* names[] = {"none", "short", "magic", "version", "size", "value", "scale", "parts", "block", "pairing", "radial", "quad"};

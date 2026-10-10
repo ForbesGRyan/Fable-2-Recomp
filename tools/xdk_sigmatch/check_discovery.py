@@ -8,9 +8,14 @@ stride, format) is an attribute of one of the same shader's logged bindings and
 its vertex-buffer address (base + stream offset) equals that binding's fetch
 constant address (rows without fc_match and bindings without an fc line never
 match). Exit code 0 when at least 20 draws were checked and all matched.
+
+Foliage discovery (frame-map section 18): every index file a "draw" row's "ib" names
+must exist beside the capture with the row's "file_bytes" and hold the draw's range,
+and the "frame" rows' "scene_frame" must rise; a problem with either fails the check.
 """
 import argparse
 import json
+import os
 import re
 
 VS = re.compile(r"\[vbind\] vs=(0x[0-9A-Fa-f]+) dwords=(\d+)")
@@ -69,6 +74,56 @@ def check_rows(rows, vbind):
     return checked, matched
 
 
+def check_index_files(rows, base_dir):
+    """(named, problems) over "draw" rows whose "ib" names a file (frame-map section 18).
+
+    The file is the index buffer's bytes as the guest holds them, from byte "file_offset" of the
+    buffer, "file_bytes" long, at `base_dir` / "file". A problem: the file is missing or has
+    another size, it ends past the buffer, or the draw's own range is not inside it.
+    """
+    named, problems = 0, []
+    sizes = {}
+    for n, r in enumerate(rows):
+        ib = r.get("ib") if r.get("kind") == "draw" else None
+        if not ib or "file" not in ib:
+            continue
+        named += 1
+        name, first, length = ib["file"], ib.get("file_offset", 0), ib.get("file_bytes", 0)
+        if name not in sizes:
+            path = os.path.join(str(base_dir), *name.split("/"))
+            sizes[name] = os.path.getsize(path) if os.path.isfile(path) else None
+        if sizes[name] is None:
+            problems.append(f"row {n}: {name} is missing")
+        elif sizes[name] != length:
+            problems.append(f"row {n}: {name} has {sizes[name]} bytes, the row says {length} bytes")
+        elif first + length > ib["size"]:
+            problems.append(f"row {n}: {name} ends past the buffer ({first} + {length} > {ib['size']})")
+        else:
+            width = 4 if ib["index32"] else 2
+            if ib["start"] * width < first or (ib["start"] + ib["count"]) * width > first + length:
+                problems.append(f"row {n}: the draw's range is not inside {name}")
+    return named, problems
+
+
+def check_scene_frames(rows):
+    """(seen, problems) over "frame" rows: "scene_frame" (the scene published at the row's swap)
+    is above 0 and rises from row to row. A row without it published no scene (an older capture,
+    the renderer off, or a frame without records: no native view was drawn) and is no problem.
+    """
+    frames = [r for r in rows if r.get("kind") == "frame"]
+    seen = sum(1 for r in frames if "scene_frame" in r)
+    problems, last = [], 0
+    for r in frames:
+        value = r.get("scene_frame")
+        if value is None:
+            continue
+        if value <= last:
+            problems.append(f"frame {r.get('frame')}: scene_frame {value} does not rise (after {last})")
+        else:
+            last = value
+    return seen, problems
+
+
 def read_rows(lines):
     """JSON rows; a partial last line (capture cut off by closing the game) is dropped."""
     lines = [l for l in lines if l.strip()]
@@ -99,7 +154,14 @@ def main(argv=None):
     print(f"{len(draws)} draw rows, {len(vbind)} logged shaders; not checked: "
           f"{no_pos} without a position element, {unknown} with a shader hash not in the log")
     print(f"checked {checked} sampled draws, {matched} matched")
-    return 0 if checked >= 20 and matched == checked else 1
+    named, file_problems = check_index_files(rows, os.path.dirname(os.path.abspath(a.discovery)))
+    seen, frame_problems = check_scene_frames(rows)
+    if named or seen or file_problems or frame_problems:
+        print(f"{named} draw rows name an index file, {len(file_problems)} problems; "
+              f"{seen} frame rows have a scene_frame, {len(frame_problems)} problems")
+    for line in (file_problems + frame_problems)[:20]:
+        print("  " + line)
+    return 0 if checked >= 20 and matched == checked and not file_problems and not frame_problems else 1
 
 
 if __name__ == "__main__":

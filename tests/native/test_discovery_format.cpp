@@ -176,6 +176,34 @@ int main() {
         "\"from\":\"0xFF940004\",\"to\":\"0xFF949000\",\"dwords\":9216}\n")
       return 49;
   }
+  {
+    // Foliage discovery (frame-map section 18): the bytes of a draw's index buffer a row keeps as
+    // a file. The buffer whole when it is at most the cap; else the draw's own range; else none.
+    using namespace fable2::native::capture;
+    const uint32_t cap = 1u << 20;
+    IndexDump d = IndexDumpRange(37444, 0, 18722, false, cap);              // the late leaf mesh: whole
+    if (!(d.whole && d.offset_bytes == 0 && d.bytes == 37444)) return 60;
+    d = IndexDumpRange(4u << 20, 100, 600, false, cap);                      // a shared buffer: the draw's range
+    if (!(!d.whole && d.offset_bytes == 200 && d.bytes == 1200)) return 61;
+    d = IndexDumpRange(4u << 20, 100, 600, true, cap);
+    if (!(!d.whole && d.offset_bytes == 400 && d.bytes == 2400)) return 62;
+    if (IndexDumpRange(4u << 20, 0, 600000, false, cap).bytes != 0) return 63;       // the range over the cap
+    if (IndexDumpRange(4u << 20, 0x7FFFFFFFu, 2, false, cap).bytes != 0) return 64;  // a range past the buffer
+    if (IndexDumpRange(4u << 20, 0xFFFFFFFFu, 0xFFFFFFFFu, true, cap).bytes != 0) return 65;  // no 32-bit wrap
+    if (IndexDumpRange(0, 0, 0, false, cap).bytes != 0 || IndexDumpRange(4u << 20, 5, 0, false, cap).bytes != 0) return 66;
+    d = IndexDumpRange(cap, 7, 3, false, cap);                               // exactly the cap: whole
+    if (!(d.whole && d.bytes == cap)) return 67;
+    // A small buffer is kept whole only for a draw whose range lies inside it (a draw that reads
+    // past its buffer names no file), and one byte over the cap is no longer whole.
+    if (IndexDumpRange(37444, 18000, 1000, false, cap).bytes != 0) return 68;
+    d = IndexDumpRange(cap + 1, 7, 3, false, cap);
+    if (!(!d.whole && d.offset_bytes == 14 && d.bytes == 6)) return 69;
+    // The range's end exactly at the buffer's end, and exactly the cap: taken.
+    d = IndexDumpRange(4u << 20, (4u << 20) / 2 - 10, 10, false, cap);
+    if (!(!d.whole && d.offset_bytes == (4u << 20) - 20 && d.bytes == 20)) return 70;
+    d = IndexDumpRange(4u << 20, 0, cap / 4, true, cap);
+    if (!(!d.whole && d.offset_bytes == 0 && d.bytes == cap)) return 71;
+  }
   std::cout << "PASS: discovery format\n";
   return 0;
 }

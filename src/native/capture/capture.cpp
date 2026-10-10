@@ -2210,13 +2210,30 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
       std::snprintf(buf, sizeof(buf),
                     ",\"ib\":{\"obj\":\"0x%08X\",\"common\":\"0x%08X\",\"phys_addr\":%u,\"size\":%u,"
                     "\"index32\":%s,\"endian\":%u,\"base_vertex\":%u,\"start\":%u,\"count\":%u,"
-                    "\"max_index\":%lld,\"restarts\":%u,\"fits\":%s,\"aligned\":%s}",
+                    "\"max_index\":%lld,\"restarts\":%u,\"fits\":%s,\"aligned\":%s",
                     dev.ib_obj, ib.common, ib.addr, ib.size, ib.index32 ? "true" : "false",
                     ib.endian, args.r[2], args.r[3], args.r[4],
                     static_cast<long long>(scan.max_index), scan.restarts,
                     end <= ib.size ? "true" : "false",
                     (ib.addr % 4 == 0 && ib.addr < 0x20000000u) ? "true" : "false");
       row += buf;
+      // Foliage discovery (frame-map section 18): the index buffer's bytes as the guest holds
+      // them (no endian swap), as a file beside the stream dumps: the buffer whole or the draw's
+      // own range (IndexDumpRange). "file_offset" is the file's first byte in the buffer. Left
+      // out when the range gives none, the bytes are unreadable or a dump cap is hit.
+      const IndexDump dump = IndexDumpRange(ib.size, args.r[3], args.r[4], ib.index32, kMaxGeoStreamBytes);
+      if (dump.bytes != 0 && ib.addr <= UINT32_MAX - dump.offset_bytes) {
+        const std::string file = DumpStream(ib.addr + dump.offset_bytes, dump.bytes);
+        if (!file.empty()) {
+          row += ",\"file\":\"";
+          row += g_geo_dir.filename().string();
+          row += "/";
+          row += file;
+          std::snprintf(buf, sizeof(buf), "\",\"file_offset\":%u,\"file_bytes\":%u", dump.offset_bytes, dump.bytes);
+          row += buf;
+        }
+      }
+      row += "}";
     } else {
       row += ",\"ib\":null";
     }
@@ -2290,7 +2307,11 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
   // Position element.
   PosLayout pos;
   std::vector<VertexFetch> fetches = DecodeVertexFetches(ucode.data(), ucode.size());
-  if (in_scene) AppendGeometry(row, indexed, args, device, dev, fetches);
+  // In the main scene, and outside it for a shader whose table entry is "deformed" (the three
+  // swaying shadow casters, with them the sun layer's tree occluder): their own fetch lists and
+  // streams are evidence for the wind (frame-map section 18, "Discovery").
+  const TransformInfo* deformed_entry = in_scene ? nullptr : FindTransform(hash);
+  if (in_scene || (deformed_entry && deformed_entry->deformed)) AppendGeometry(row, indexed, args, device, dev, fetches);
   const VertexFetch* pf = nullptr;
   for (const auto& f : fetches) {
     if (!f.mini) { pf = &f; break; }
@@ -4874,6 +4895,13 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
   AppendPitches(row, "pitch_in", e.pitch_in);
   AppendPitches(row, "pitch_out", e.pitch_out);
   row += "}";
+  // The scene published at this swap, by its frame number: what pairs a stored native scene
+  // with this capture frame (frame-map section 18). Left out when none is published: the
+  // renderer off, or a frame without records (PublishScene).
+  if (done->scene && done->scene->records) {
+    std::snprintf(buf, sizeof(buf), ",\"scene_frame\":%llu", static_cast<unsigned long long>(done->scene->frame));
+    row += buf;
+  }
   // The frame's light as the records have it (a frame with records only).
   if (done->scene && done->scene->records) {
     AppendFrameLight(row, *done->scene);

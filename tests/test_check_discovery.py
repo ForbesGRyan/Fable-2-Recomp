@@ -97,6 +97,76 @@ class CheckDiscoveryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cd.main([str(d / "y.jsonl"), str(d / "g.log")])
 
+    def test_index_files_exist_with_their_bytes(self):
+        # Foliage discovery (frame-map section 18): a row's "ib" names a file of "file_bytes" bytes.
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "native_geo_x").mkdir()
+            (d / "native_geo_x" / "a.bin").write_bytes(bytes(12))
+            row = draw()
+            row["ib"] = {"size": 12, "index32": False, "start": 0, "count": 6,
+                         "file": "native_geo_x/a.bin", "file_offset": 0, "file_bytes": 12}
+            old = draw()
+            old["ib"] = {"size": 12, "index32": False, "start": 0, "count": 6}   # no file: not counted
+            self.assertEqual(cd.check_index_files([row, old, draw()], d), (1, []))
+            short = json.loads(json.dumps(row))
+            short["ib"]["file_bytes"] = 16                                         # the file is shorter
+            missing = json.loads(json.dumps(row))
+            missing["ib"]["file"] = "native_geo_x/b.bin"
+            outside = json.loads(json.dumps(row))                                  # the draw's range is not in the file
+            (d / "native_geo_x" / "c.bin").write_bytes(bytes(8))
+            outside["ib"].update(file="native_geo_x/c.bin", file_offset=4, file_bytes=8, start=0, count=6)
+            past = json.loads(json.dumps(row))                                     # the file ends past the buffer
+            past["ib"].update(size=8)
+            named, problems = cd.check_index_files([row, short, missing, outside, past], d)
+            self.assertEqual(named, 5)
+            self.assertEqual(len(problems), 4)
+            self.assertIn("16 bytes", problems[0])
+            self.assertIn("missing", problems[1])
+            self.assertIn("range", problems[2])
+            self.assertIn("buffer", problems[3])
+
+    def test_index_range_inside_a_part_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "g").mkdir()
+            (d / "g" / "p.bin").write_bytes(bytes(2400))
+            row = draw()
+            row["ib"] = {"size": 4 << 20, "index32": True, "start": 100, "count": 600,
+                         "file": "g/p.bin", "file_offset": 400, "file_bytes": 2400}
+            self.assertEqual(cd.check_index_files([row], d), (1, []))
+
+    def test_scene_frame_rises_by_frame(self):
+        frames = [{"kind": "frame", "frame": i + 1, "scene_frame": 900 + i} for i in range(3)]
+        self.assertEqual(cd.check_scene_frames(frames), (3, []))
+        self.assertEqual(cd.check_scene_frames([{"kind": "frame", "frame": 1}]), (0, []))   # an older capture
+        frames[2]["scene_frame"] = 901                                                         # the same scene twice
+        seen, problems = cd.check_scene_frames(frames)
+        self.assertEqual(seen, 3)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("frame 3", problems[0])
+        frames[2]["scene_frame"] = 0                                                           # no scene number
+        self.assertEqual(len(cd.check_scene_frames(frames)[1]), 1)
+        # A frame that published no scene (no records: the view was not a native one) has no number
+        # and is no problem; the numbers of the others must still rise.
+        del frames[1]["scene_frame"]
+        self.assertEqual(len(cd.check_scene_frames(frames)[1]), 1)
+        frames[2]["scene_frame"] = 902
+        self.assertEqual(cd.check_scene_frames(frames), (2, []))
+
+    def test_cli_fails_on_a_missing_index_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "g.log").write_text(LOG)
+            rows = [draw() for _ in range(20)]
+            rows[0]["ib"] = {"size": 12, "index32": False, "start": 0, "count": 6,
+                             "file": "native_geo_x/a.bin", "file_offset": 0, "file_bytes": 12}
+            (d / "x.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+            self.assertEqual(cd.main([str(d / "x.jsonl"), str(d / "g.log")]), 1)
+            (d / "native_geo_x").mkdir()
+            (d / "native_geo_x" / "a.bin").write_bytes(bytes(12))
+            self.assertEqual(cd.main([str(d / "x.jsonl"), str(d / "g.log")]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

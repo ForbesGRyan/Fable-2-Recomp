@@ -189,4 +189,24 @@ inline std::string SkippedGapRow(int frame, uint32_t n, const char* func, const 
                 frame, n, func, why, uint32_t(after + 4), last, dwords);
   return buf;
 }
+// Foliage discovery (frame-map section 18). The bytes of a draw's index buffer a discovery row
+// keeps as a file, as an offset into the buffer and a length: the buffer whole when it is at most
+// `cap` bytes; else the draw's own range [start, start + count) when that is; else none (`bytes`
+// 0). A draw without indices, a buffer without bytes and a range that does not lie inside the
+// buffer give none, whatever the buffer's size: a row names only bytes its draw could read. The
+// arithmetic is 64-bit (the guest's start and count are any 32-bit words).
+struct IndexDump {
+  uint32_t offset_bytes = 0, bytes = 0;
+  bool whole = false;
+};
+inline IndexDump IndexDumpRange(uint32_t ib_size, uint32_t start, uint32_t count, bool index32, uint32_t cap) {
+  IndexDump none;
+  if (ib_size == 0 || count == 0) return none;
+  const uint64_t isize = index32 ? 4 : 2;
+  const uint64_t first = uint64_t(start) * isize, bytes = uint64_t(count) * isize;
+  if (first + bytes > ib_size) return none;
+  if (ib_size <= cap) return IndexDump{0, ib_size, true};
+  if (bytes > cap) return none;
+  return IndexDump{uint32_t(first), uint32_t(bytes), false};
+}
 }  // namespace fable2::native::capture

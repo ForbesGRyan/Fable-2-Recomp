@@ -4763,6 +4763,147 @@ game reads each buffer a frame after it was filled, by the alternation); not ask
 (4) The first captures with `"skipped"` rows and a bounded ramp log are these; no ramp line
 beyond the first appears in any of the five logs (`changes 0`).
 
+### Post block
+
+Plan Task 4 (commit `f24588b` and the one this text came with). Capture only: nothing is drawn
+with the block yet, and no shader, binding or target changed. The switch
+**`--fable2_native_post`** (on, true, 1 / off, false, 0; **default off**) makes the capture read
+the frame's post block; it is read only in a frame with records, with the light and the textures
+on (`PostRecordsWanted`), latched at the frame's boundary with the records' word.
+
+**The block** (`src/native/capture/post_block.h`, pure; `capture::PostBlock`, 2,168 bytes, in
+`FrameScene::post`):
+
+| Field | From | |
+|---|---|---|
+| `composite[6]` | `37B186F4BD3288F7` | `c31.x` (bloom scale), `c46.x` (table scale), `c47.x` (grey fade), `c77.x` (saturation), `c77.y` (gain), `c78.x` (exponent) |
+| `bright[5]` | `EE922CFB4426EA83` | `c31.x`, `c46.x`, `c47.x` (a divisor), `c77.x`, `c77.y` (= 1 / `c20.w`) |
+| `blur[2][7]` | `EA83C7E7E24EC4C8`, `28DBE18F313350BF` | the centre tap's weight and those of the taps 1 to 6 texels away: `c46.xyzw`, `c47.xyz` |
+| `radial[4]` | `4BE4344C27016E04` | zero until plan Task 12 |
+| `table[512]` | fetch slot 1 of the composite | the 2,048 bytes at the constant's base, one float a texel, high byte first |
+| `parts`, `valid` | | `kPostPartBlur` when the fourteen weights are there |
+
+**Where it is read** (`capture.cpp`, `ObservePostDraw`, beside `ObserveShadowDraw` in
+`OnXdkReturn`): at the return of an outermost `D3DDevice_BeginVertices` hook outside the main
+scene, on the guest's drawing thread. Which step a rectangle is, is told by the pixel shader's
+microcode hash (`ChoosePs`, `LookupPs`, as the sky draw is told). The bright pass's and the
+blurs' registers wait in a thread-local of the frame; at the composite its registers and the
+fetch constant are read and judged first (`MakePostBlock` without bytes), the address is
+followed only for a constant that is the pin, the 2,048 bytes are read whole or not at all,
+copied, and the copy is hashed (`PostSource`: the content a capture's `"tfc"` names the table by)
+and decoded. The block goes to the builder under the scene's mutex after the frame's recheck. At
+most 8 reads a frame at a composite that give none (and 8 counts more for rectangles whose
+shader could not be told); after the frame's block nothing more is looked at that frame.
+
+**`MakePostBlock`'s rules, in order** (the first that fails is the reason; an invalid block is
+all zero): `unread` (the composite's or the bright pass's registers, or the fetch constant);
+`register` (one of the eleven components is not finite); `range` (composite `c31.x` in [0, 64],
+`c46.x` in (0, 64], `c47.x` in [0, 1e6], `|c77.x|` <= 4, `c77.y` in (0, 64], `c78.x` in (0, 1];
+bright `c31.x` in [0, 64], `c46.x` in [0, 64], `c47.x` in [1e-3, 64], `|c77.x|` <= 4, `c77.y` in
+(0, 64]); `table-dimension`, `-base`, `-width`, `-format`, `-endian`, `-swizzle`, `-sign`,
+`-exp-adjust`, `-clamp`, `-filter`, `-mip` (the pin: 1D, an address, 512 texels, format 36 with
+number format bit 1, endian 2, swizzle `0xB68`, sign fields `0x55`, exponent adjust 0, clamp to
+edge, point filter, one level; the captured constant is `04000956 1FAA00A4 000001FF 010016D1
+00000000 00000018`); `table-bytes`; `table-texel` (every texel finite and in [0, 4)). The blur
+part needs both blurs read, every weight in [0, 1] and each set's `w0 + 2 (w1 + .. + w6)` within
+1e-3 of 1; a block without it is valid. The table is carried as stored; which texel a luminance
+reads is the reader's rule, the nearest, `floor(u * 512 + 0.5)` (controller ruling 19).
+
+**The frame's decision** (`ChoosePostBlock`, called by `FrameBuilder::Finish`): the frame's own
+block if it pairs with the frame's light block (`PostBlockPairs`: bright `c77.y` times
+`out_scale` is 1 within 1e-3); else the last valid block of an earlier frame if it is at most
+`kPostBlockMaxAge` = 4 frames old and pairs (`post_age` 1 to 4); else none, with `pairing` (a
+block was at hand and none paired; also every frame without a valid light block that had a
+block at hand), the frame's last failed read's reason, `stale` (said once, for the frame that
+finds the kept block too old; the block is dropped then) or `no-draw`. The builder keeps the
+last block that passed `MakePostBlock`, whether or not it paired in its own frame, and drops it
+when the switch is off at a frame's end.
+
+**The bounds against earlier captures** (before any run; `out/native-evidence/post/
+t4_bounds_cpp.txt`, `t4_bounds_python.txt`): the real `MakePostBlock` and `PostBlockPairs`, in a
+harness, on the registers (`"pfull"`), fetch constants and table dumps of 200 captured frames:
+the 128 of Task 1's five runs under read-back (`c20.w` 7.606 to 11.705, largest texel 0.2095 to
+0.3672), the 32 of Task 2's (20 with the read-back switch on or the two addresses by hand, 12
+blind), and 40 blind frames of five earlier normal captures (`c20.w` 15.99999, largest texel
+0.1399 to 0.1463). **200 of 200 valid, with the blur part, pairing**; largest
+`|c77.y * c20.w - 1|` 5.96e-08.
+
+**Runs** (2026-10-09, by the controller with `-UserPresent -BootSave Hero000`: `RUN UNCHECKED`;
+binary of 22:26:47; evidence `out/native-evidence/post/t4_*`). **All three opened on the
+100%-scaled monitor (shot width 1296; 1, 3 and 0 `vsync present gate` lines): none of their
+frame times is timing evidence.** Not frozen: in 448 and 449 the 300-frame capture counts vary
+(977, 988, 987 and 977, 989, 989 captured) and the guest's work median is 7.8 to 10.7 ms with a
+swap median of 24 to 26 ms.
+
+| Run | Log | Arguments | Capture |
+|---|---|---|---|
+| T4-1, post on, full read-back | 447 | `-Total 80 -Shots "36,42,48,54,74" -Plan "32:VIEW=off,38:VIEW=native,44:VIEW=split,50:VIEW=overlay,56:VIEW=native,60:DISC=8/1" -GameArgs --fable2_native_render=true,--fable2_native_post=on,--readback_resolve=full,--native_render_collect_stats=true` | `native_discovery_20261009_222843.jsonl`, 8 frames |
+| T4-2, post on, normal | 448 | `-Total 100 -Shots "36,60,96" -Plan "32:VIEW=off,38:VIEW=native,70:DISC=4/1,80:VIEW=off" -GameArgs --fable2_native_render=true,--fable2_native_post=on` | `..._223021`, 4 frames |
+| T4-3, post off, normal | 449 | the same with `=off` | `..._223205`, 4 frames |
+
+**The block against the rows of the same frames** (spec criterion 3; `post_tables.py block`,
+outputs `t4_block_222843.txt`, `t4_block_223021.txt`, `t4_block_223205.txt`): in **8 of 8**
+frames under read-back and **4 of 4** blind frames the block is valid, at age 0, its six and
+five registers equal the `"pfull"` of the composite's and the bright pass's rows bit for bit,
+its fourteen blur weights those of the blurs' rows (parts 1), its (address, content) pair the
+one the composite's row names, its 512 texels the dump with that content, and `c77.y * c20.w` is
+1 (largest deviation 2.9e-08 and 5.9e-08; `t4_table_*.txt`). Under read-back `c20.w` is 8.589
+falling to 8.551 over the 8 frames with another table in each (largest texel 0.3142 to 0.3161);
+blind it is 15.99999 with a largest texel of 0.1411 to 0.1412 (two of the four blind frames have
+the same table content). The composite's row precedes the frame row in 12 of 12. With the switch
+off the frame rows say `"on":0`, `"reason":"off"` in 4 of 4 (the tool then exits 1, as it
+should: there is no block).
+
+**In the periodic lines** (log 448, a normal run; frames 1200, 1500, 1800):
+
+```
+post: block valid, age 0, tries 0, c20.w 16, 37B1 (2.97377, 0.25, 50, -0.00486424, 1.10201, 0.454545), EE92 (1.48689, 0.2, 2, 0.0878277, 0.0625), table 0x1FAA0000 0C38D82FF14E12AC, parts 1 | post-block in 0 of 192 frames {} | kept from an earlier frame in 0 | dropped at a frame's end 0
+```
+
+`post-block in 0 of 192`, `0 of 300`, `0 of 300` frames: **792 frames with the block wanted,
+none without a block, none with a kept block, no read dropped, no failed read in the three
+frames the lines name.** The frames between frame 1800 and the view's end at 80 s (about 240)
+are in no line: the line is written only for a frame with records, and the next multiple of 300
+came with the view off. Log 447 has no `post:` line at all (no multiple of 300 fell in its
+native stretches; its capture's 8 frame rows are its evidence). Log 449: `post: off` three
+times. So what a game has shown: the bridge, standing, one save; no frame without a block has
+been seen, and so no reason other than `off` has been seen outside the tests.
+
+**The picture is unchanged** (`t4_shots_60s_on_off.txt`): the native shots at 60 s of T4-2 and
+T4-3, two runs, pixel by pixel: 67.2% of the client area identical and 87.4% within 2 levels,
+mean level 114.59 against 114.66; sky, far hills, lake and the dirt patch each within 0.1 of a
+level in the mean and 98.6 to 100% within 2 levels. The rest is what moves between two runs
+(leaves, leaf shadows, the dog). Both shots viewed: the bridge with the hero and the dog, the
+lake and the hazed hills, the sky drawn; no difference to the eye.
+
+**Cost** (logs 448 and 449; ungated, so no frame rate here is a statement about 30 fps):
+
+| | post on (448) | post off (449) |
+|---|---|---|
+| capture median, records on, three 300-frame lines | 2.035, 2.105, 2.065 ms | 2.034, 2.108, 2.037 ms |
+| capture median, view off, in the world | 0.060, 0.058 ms | 0.059, 0.060 ms |
+| guest work median, the four windows with the native view | 9.95, 10.68, 10.31, 10.10 ms | 9.88, 10.67, 10.06, 9.94 ms |
+| guest swap median, the same windows | 25.50, 24.88, 24.53, 25.29 ms | 25.16, 24.27, 23.93, 23.95 ms |
+| native view, window medians (same ungated monitor) | 37.06, 35.99, 36.26, 36.28, 36.49, 36.13, 36.99 ms | 34.76, 36.65, 36.42, 34.45, 34.46, 33.80, 33.97 ms |
+
+The capture's own term is the same within 0.03 ms (line by line +0.001, -0.003, +0.028 ms;
+spec criterion 9 allows 0.10) and the view-off term is unchanged and under 0.5 ms. The guest's
+work median is 0.01 to 0.25 ms higher with the switch on. The native windows are 0.7 ms lower
+to 3.0 ms higher with it on (the last window 36.99 against 33.97 ms, each run with a capture
+inside one window); the off run's own windows scatter by 2.9 ms, most of the difference lies in the
+swap wait (which no capture code runs in), and nothing of the block reaches the renderer: what
+it is, is not explained by these two runs and is left to Task 7's gated runs. The cost
+statement of this task rests on the capture median and the work median.
+
+**Limits.** (1) One place, a standing camera, daylight: no frame without a block, no kept
+block, no failed read has occurred in a game; those paths are held by tests only. (2) The 240 or
+so frames after the last periodic line of a native stretch are not counted in any line. (3) The
+block is read at the composite's call, before the frame's swap, in 12 of 12 captured frames;
+a read that came after its frame's end would be dropped and counted (`dropped at a frame's end`:
+0 in 792 frames). (4) With the exposure blind (`c20.w` 16) the block is as valid as an adapted
+one: nothing in the block says whether the game measures its picture; the log line's `c20.w`
+does. (5) Timing: not valid for any of the three runs.
+
 ## Pending
 
 1. **Pitch ablation** (done 2026-10-01, results in section 4; kept for re-runs). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):

@@ -38,6 +38,18 @@ class Raster(unittest.TestCase):
         depth, ident = fr.raster([(half(), TRI, 7)], size=(8, 8), origin=0.5)
         self.assertEqual(int((ident == 7).sum()), 28)        # i + j < 7
 
+    def test_cover_at_the_stored_depths_sample(self):
+        """Task 4's measurement: the game's depth copy holds the sample a quarter pixel up and left of the
+        pixel's integral position. Pixel (i, j) is then sampled at (i - 0.25, j - 0.25): column 0 and row 0 lie
+        outside the picture's border, and the slanted edge lets i + j = 8 in."""
+        self.assertEqual(fr.SAMPLE_ORIGIN, -0.25)
+        self.assertEqual(fr.ORIGINS[0][1], fr.SAMPLE_ORIGIN)       # tried first; a tie stays with it
+        self.assertEqual(sorted(o for _, o in fr.ORIGINS), [-0.25, 0.0, 0.5])
+        depth, ident = fr.raster([(half(), TRI, 7)], size=(8, 8), origin=fr.SAMPLE_ORIGIN)
+        self.assertEqual(int((ident == 7).sum()), 28)        # i, j >= 1 and i + j <= 8
+        self.assertTrue(ident[0, 0] == 0 and ident[0, 3] == 0 and ident[3, 0] == 0)
+        self.assertTrue(ident[1, 1] == 7 and ident[4, 4] == 7 and ident[1, 7] == 7 and ident[7, 1] == 7 and ident[5, 4] == 0)
+
     def test_two_halves_share_no_pixel_and_miss_none(self):
         other = np.array([[1.0, 1.0, 0.5, 1.0], [1.0, -1.0, 0.5, 1.0], [-1.0, -1.0, 0.5, 1.0]])
         for origin in (0.0, 0.5):
@@ -497,34 +509,118 @@ class Judgement(unittest.TestCase):
     def test_the_tolerance_is_the_99th_percentile(self):
         stored = self.stored.copy()
         flat = np.flatnonzero(self.ident.ravel() == 2)
-        stored.ravel()[flat[:2]] += 0.5                      # 2 of 28 pixels of draw 2 far off: above the 99th percentile
+        stored.ravel()[flat[:2]] -= 0.2                      # 2 of 28 pixels of draw 2 far off: above the 99th percentile
         rel = fr.relations(stored, self.depth, self.ident, [2])["1 - z / w"]
         self.assertEqual(rel.pixels, 28)
-        self.assertGreater(rel.tolerance, 0.2)
+        self.assertGreater(rel.tolerance, 0.1)
         self.assertEqual(rel.at_tolerance.within, 28)        # 99% by construction: it proves nothing alone
-        self.assertEqual((rel.fixed.within, rel.fixed.nearer), (26, 2))
-        self.assertFalse(fr.relation_verdict(rel)[0])        # 92.9% at the fixed tolerance
+        self.assertEqual((rel.fixed.within, rel.fixed.farther), (26, 2))
+        verdict, text = fr.relation_verdict(rel, judged_min=1)
+        self.assertFalse(verdict)                             # 92.9% at the fixed tolerance
+        self.assertIn("NOT MET", text)
 
-    def test_the_bound_is_95_percent_at_the_fixed_tolerance_and_can_fail(self):
+    def test_the_bound_is_95_percent_of_the_judged_pixels_and_can_fail(self):
         self.assertEqual(fr.FIXED_TOLERANCE, 16 * 2.0 ** -24)
+        self.assertEqual(fr.SHARE_MIN, 0.95)
         ids = [1, 2]
         whole = fr.relations(self.stored, self.depth, self.ident, ids)["1 - z / w"]
-        self.assertEqual(fr.relation_verdict(whole)[0], True)
+        self.assertEqual(fr.relation_verdict(whole, judged_min=1)[0], True)
         flat = np.flatnonzero(self.ident.ravel() != 0)
         for off, met in ((3, True), (4, False)):             # 61 of 64 is 95.3%, 60 of 64 is 93.75%
-            for by in (2.0 * fr.FIXED_TOLERANCE, -2.0 * fr.FIXED_TOLERANCE):
-                stored = self.stored.copy()
-                stored.ravel()[flat[:off]] += by
-                rel = fr.relations(stored, self.depth, self.ident, ids)["1 - z / w"]
-                verdict, text = fr.relation_verdict(rel)
-                self.assertEqual(verdict, met, text)
-                self.assertIn("95", text)
+            stored = self.stored.copy()
+            stored.ravel()[flat[:off]] -= 2.0 * fr.FIXED_TOLERANCE      # the replay in front of the game: judged, and off
+            rel = fr.relations(stored, self.depth, self.ident, ids)["1 - z / w"]
+            verdict, text = fr.relation_verdict(rel, judged_min=1)
+            self.assertEqual(verdict, met, text)
+            self.assertIn("95", text)
+            self.assertTrue(text.startswith("met" if met else "NOT MET"), text)
         stored = self.stored.copy()
         stored.ravel()[flat[:8]] += 0.5 * fr.FIXED_TOLERANCE      # inside the tolerance: nothing is off
         self.assertEqual(fr.relations(stored, self.depth, self.ident, ids)["1 - z / w"].fixed.share, 1.0)
         verdict, text = fr.relation_verdict(fr.relations(self.stored, self.depth, self.ident, [9])["1 - z / w"])
         self.assertFalse(verdict)                             # no pixel: no verdict
         self.assertIn("not decidable", text)
+
+    def test_a_pixel_the_game_hides_is_not_judged(self):
+        """Ruling 24: where the stored depth shows something nearer than the replay by more than the tolerance
+        the pixel is hidden, not judged; a replay in front of the game's depth still counts against the bound."""
+        ids = [1, 2]
+        flat = np.flatnonzero(self.ident.ravel() != 0)
+        stored = self.stored.copy()
+        stored.ravel()[flat[:30]] += 2.0 * fr.FIXED_TOLERANCE      # 30 of 64 hidden: beyond the tolerance, nearer
+        a = fr.agreement(stored, self.depth, self.ident, ids, fr.FIXED_TOLERANCE)
+        self.assertEqual((a.pixels, a.within, a.nearer, a.farther, a.judged), (64, 34, 30, 0, 34))
+        self.assertEqual(a.share_judged, 1.0)
+        self.assertAlmostEqual(a.share, 34 / 64)                  # the two-sided share: no longer the criterion
+        verdict, text = fr.relation_verdict(fr.relations(stored, self.depth, self.ident, ids)["1 - z / w"], judged_min=1)
+        self.assertTrue(verdict, text)
+        self.assertIn("30 hidden, not judged", text)
+        stored.ravel()[flat[30]] -= 2.0 * fr.FIXED_TOLERANCE       # one of the 34 in front of the game: 33 of 34, 97.1%
+        self.assertTrue(fr.relation_verdict(fr.relations(stored, self.depth, self.ident, ids)["1 - z / w"], judged_min=1)[0])
+        stored.ravel()[flat[31]] -= 2.0 * fr.FIXED_TOLERANCE       # two: 32 of 34, 94.1%
+        rel = fr.relations(stored, self.depth, self.ident, ids)["1 - z / w"]
+        self.assertEqual((rel.fixed.judged, rel.fixed.within), (34, 32))
+        verdict, text = fr.relation_verdict(rel, judged_min=1)
+        self.assertFalse(verdict)
+        self.assertTrue(text.startswith("NOT MET"), text)
+        stored = self.stored.copy()
+        stored.ravel()[flat[:4]] += fr.FIXED_TOLERANCE            # exactly the tolerance nearer: within, and judged
+        a = fr.agreement(stored, self.depth, self.ident, ids, fr.FIXED_TOLERANCE)
+        self.assertEqual((a.within, a.nearer, a.judged), (64, 0, 64))
+        hidden = fr.agreement(self.stored + 0.5, self.depth, self.ident, ids, fr.FIXED_TOLERANCE)
+        self.assertEqual(hidden.judged, 0)                        # everything hidden: no share at all
+        self.assertTrue(np.isnan(hidden.share_judged))
+
+    def test_fewer_than_a_thousand_judged_pixels_is_not_decidable(self):
+        self.assertEqual(fr.JUDGED_MIN, 1000)
+        whole = np.array([[-1.0, 1.0, 0.5, 1.0], [1.0, 1.0, 0.5, 1.0], [-1.0, -1.0, 0.5, 1.0], [1.0, -1.0, 0.5, 1.0]])
+        depth, ident = fr.raster([(whole, np.array([[0, 1, 2], [2, 1, 3]]), 1)], size=(40, 40))
+        truth = fr.stored_depth(depth)
+        for hidden, state in ((600, "met"), (601, "not decidable")):       # 1,000 and 999 judged of 1,600
+            stored = truth.copy()
+            stored.ravel()[:hidden] += 0.25
+            rel = fr.relations(stored, depth, ident, [1])["1 - z / w"]
+            self.assertEqual(rel.fixed.judged, 1600 - hidden)
+            verdict, text = fr.relation_verdict(rel)
+            self.assertEqual(verdict, state == "met", text)
+            self.assertTrue(text.startswith(state), text)
+        stored = truth.copy()                                 # too few and all of them wrong: still "not decidable"
+        stored.ravel()[:601] += 0.25
+        stored.ravel()[601:] -= 0.25
+        verdict, text = fr.relation_verdict(fr.relations(stored, depth, ident, [1])["1 - z / w"])
+        self.assertFalse(verdict)
+        self.assertTrue(text.startswith("not decidable"), text)
+        stored = truth.copy()                                 # enough, and 51 of 1,000 in front of the game: 94.9%
+        stored.ravel()[:600] += 0.25
+        stored.ravel()[600:651] -= 0.25
+        verdict, text = fr.relation_verdict(fr.relations(stored, depth, ident, [1])["1 - z / w"])
+        self.assertFalse(verdict)
+        self.assertTrue(text.startswith("NOT MET"), text)
+
+    def test_the_winds_part_of_criterion_5(self):
+        A = fr.Agreement
+        proving = A(4000, 1940, 2000, 60)                     # 97.0% of 2,000 judged
+        met, text = fr.wind_verdict(proving, A(3000, 1920, 1000, 80), A(3000, 1500, 1000, 500))   # 96.0%, 75.0%
+        self.assertTrue(met, text)
+        self.assertTrue(text.startswith("met"), text)
+        for wind, rest, state in (
+                (A(3000, 1880, 1000, 120), A(3000, 1840, 1000, 160), "met"),        # 94.0% (3 below), 92.0% (2 below)
+                (A(3000, 1878, 1000, 122), A(3000, 1500, 1000, 500), "NOT MET"),    # 93.9%: more than 3 points off
+                (A(3000, 2000, 1000, 0), A(3000, 1500, 1000, 500), "met"),          # 100%: 3 points above
+                (A(3000, 1920, 1000, 80), A(3000, 1882, 1000, 118), "NOT MET"),     # at rest 94.1%: 1.9 below
+                (A(3000, 1920, 1000, 80), A(3000, 1960, 1000, 40), "NOT MET"),      # at rest better than with wind
+                (A(3000, 959, 2001, 40), A(3000, 1500, 1000, 500), "not decidable"),   # 999 judged with wind
+                (A(3000, 1920, 1000, 80), A(3000, 500, 2001, 499), "not decidable"),   # 999 judged at rest
+                (A(0, 0, 0, 0), A(3000, 1500, 1000, 500), "not decidable")):
+            met, text = fr.wind_verdict(proving, wind, rest)
+            self.assertEqual(met, state == "met", text)
+            self.assertTrue(text.startswith(state), text)
+        for bad in (A(4000, 1880, 2000, 120), A(4000, 960, 3001, 39)):      # the first part not met; not decidable
+            met, text = fr.wind_verdict(bad, A(3000, 1920, 1000, 80), A(3000, 1500, 1000, 500))
+            self.assertFalse(met)
+            self.assertTrue(text.startswith("not decidable"), text)
+        met, text = fr.wind_verdict(A(40, 39, 0, 1), A(30, 29, 0, 1), A(30, 20, 0, 10), judged_min=1)
+        self.assertTrue(met, text)
 
     def test_the_share_among_the_pixels_with_nothing_nearer(self):
         stored = self.stored.copy()
@@ -534,7 +630,113 @@ class Judgement(unittest.TestCase):
         a = fr.agreement(stored, self.depth, self.ident, [1, 2], fr.FIXED_TOLERANCE)
         self.assertEqual((a.within, a.nearer, a.farther), (44, 16, 4))
         self.assertAlmostEqual(a.share, 44 / 64)
-        self.assertAlmostEqual(a.share_unhidden, 44 / 48)
+        self.assertEqual(a.judged, 48)
+        self.assertAlmostEqual(a.share_judged, 44 / 48)
+
+
+class SamplingPlace(unittest.TestCase):
+    """The review of Tasks 1 to 3, I1: a sloped made surface whose stored depth was sampled a quarter pixel up
+    and left of the integral position: two triangles in two planes (one plane alone gives one equation for the
+    two offsets). One pixel changes the depth by about 100,000 steps of 2^-24 here."""
+
+    QUAD = np.array([[0, 1, 2], [2, 1, 3]])
+
+    def slope(self, shift=0.0):
+        return np.array([[-1.0, 1.0, 0.2 + shift, 1.0], [1.0, 1.0, 0.6 + shift, 1.0],
+                         [-1.0, -1.0, 0.4 + shift, 1.0], [1.0, -1.0, 0.7 + shift, 1.0]])
+
+    def setUp(self):
+        self.draws = [(self.slope(), self.QUAD, 1)]
+        depth, ident = fr.raster(self.draws, size=(64, 64), origin=fr.SAMPLE_ORIGIN)
+        self.stored = np.where(ident == 1, fr.stored_depth(depth), 0.0)
+
+    def test_the_bound_fails_at_the_integral_place_and_holds_at_the_samples(self):
+        for origin, state in ((0.0, "not decidable"), (0.5, "not decidable"), (-0.125, "not decidable"), (-0.5, "NOT MET"),
+                              (-0.375, "NOT MET"), (fr.SAMPLE_ORIGIN, "met")):
+            depth, ident = fr.raster(self.draws, size=(64, 64), origin=origin)
+            rel = fr.relations(self.stored, depth, ident, [1])["1 - z / w"]
+            verdict, text = fr.relation_verdict(rel)
+            self.assertEqual(verdict, state == "met", "%s: %s" % (origin, text))
+            self.assertTrue(text.startswith(state), "%s: %s" % (origin, text))
+            if state == "met":
+                self.assertEqual(rel.fixed.within, rel.fixed.pixels)
+                continue
+            # the depth rises to the right and downwards: a replay sampled too far right or down lies behind the
+            # stored depth (every pixel "hidden", none left to judge), one sampled too far left or up in front
+            self.assertLess(rel.fixed.within, 200, origin)
+            self.assertGreater(rel.fixed.nearer if state == "not decidable" else rel.fixed.farther, 3000, origin)
+
+    def test_the_place_is_fitted_from_the_slope(self):
+        place = fr.fit_place(self.stored, self.draws, [1], size=(64, 64))
+        self.assertAlmostEqual(place.x, -0.25, delta=1e-6)
+        self.assertAlmostEqual(place.y, -0.25, delta=1e-6)
+        self.assertGreater(place.pixels, 3000)
+        self.assertEqual(fr.round_place(place), (-0.25, -0.25))
+        for ox, oy in ((0.0, 0.0), (0.125, -0.375), (-0.5, 0.25)):         # x and y are found each by itself
+            depth, ident = fr.raster(self.draws, size=(64, 64), origin=(ox, oy))
+            stored = np.where(ident == 1, fr.stored_depth(depth), 0.0)
+            place = fr.fit_place(stored, self.draws, [1], size=(64, 64))
+            self.assertAlmostEqual(place.x, ox, delta=1e-6)
+            self.assertAlmostEqual(place.y, oy, delta=1e-6)
+        self.assertEqual(fr.round_place(fr.Place(-0.249, -0.264, 9)), (-0.25, -0.25))
+        self.assertEqual(fr.round_place(fr.Place(0.07, -0.19, 9)), (0.125, -0.25))
+
+    def test_hidden_pixels_and_another_draw_do_not_move_the_fit(self):
+        stored = self.stored.copy()
+        stored[:20] = 0.999                                    # a third of the picture behind something not replayed
+        stored[40:44] = 0.0                                    # and a band where the game has nothing
+        place = fr.fit_place(stored, self.draws, [1], size=(64, 64))
+        self.assertAlmostEqual(place.x, -0.25, delta=1e-6)
+        self.assertAlmostEqual(place.y, -0.25, delta=1e-6)
+        self.assertLess(place.pixels, 64 * 41)
+        corner = np.array([[-1.0, -0.2, 0.05, 1.0], [0.0, -0.2, 0.05, 1.0], [-1.0, -1.0, 0.05, 1.0]])
+        front = [(corner, TRI, 2)] + self.draws                # draw 2 in front of a corner, not asked for
+        again = fr.fit_place(stored, front, [1], size=(64, 64))
+        self.assertLess(again.pixels, place.pixels)
+        self.assertAlmostEqual(again.x, -0.25, delta=1e-6)
+
+    def test_a_flat_surface_or_no_pixel_gives_no_place(self):
+        flat = np.array([[-1.0, 1.0, 0.5, 1.0], [1.0, 1.0, 0.5, 1.0], [-1.0, -1.0, 0.5, 1.0], [1.0, -1.0, 0.5, 1.0]])
+        depth, ident = fr.raster([(flat, self.QUAD, 1)], size=(64, 64))
+        self.assertIsNone(fr.fit_place(fr.stored_depth(depth), [(flat, self.QUAD, 1)], [1], size=(64, 64)))
+        self.assertIsNone(fr.fit_place(self.stored, self.draws, [9], size=(64, 64)))
+        one = [(self.slope(), np.array([[0, 1, 2]]), 1)]         # one plane: a line of places fits, so none is given
+        depth, ident = fr.raster(one, size=(64, 64), origin=fr.SAMPLE_ORIGIN)
+        self.assertIsNone(fr.fit_place(np.where(ident == 1, fr.stored_depth(depth), 0.0), one, [1], size=(64, 64)))
+        self.assertIsNone(fr.fit_place(self.stored + 0.5, self.draws, [1], size=(64, 64)))     # all of it hidden
+
+    def test_the_cover_that_the_stored_depth_shows(self):
+        """Review M7: a wind draw's pixel is in the mask only where the game's depth does not show something
+        nearer; a draw issued after the depth copy is not in the copy and is not tested."""
+        depth, ident = fr.raster(self.draws, size=(64, 64), origin=fr.SAMPLE_ORIGIN)
+        stored = self.stored.copy()
+        stored[:16] = 0.999
+        seen = fr.seen_cover(stored, depth, ident, tested=[1], untested=[], tolerance=fr.FIXED_TOLERANCE)
+        self.assertEqual(int(seen.sum()), int((ident[16:] == 1).sum()))
+        self.assertFalse(seen[:16].any())
+        late = fr.seen_cover(stored, depth, ident, tested=[], untested=[1], tolerance=fr.FIXED_TOLERANCE)
+        self.assertEqual(int(late.sum()), int((ident == 1).sum()))
+        self.assertEqual(int(fr.seen_cover(stored, depth, ident, tested=[2], untested=[3], tolerance=1e-6).sum()), 0)
+        missing = self.stored.copy()
+        missing[20:24] = 0.0                                   # the game has nothing there: the replay's pixel stays
+        self.assertEqual(int(fr.seen_cover(missing, depth, ident, [1], [], fr.FIXED_TOLERANCE).sum()), int((ident == 1).sum()))
+
+    def test_wind_and_rest_are_judged_on_the_draws_both_have(self):
+        """Review M6: a draw that replays on one side only drops out of both."""
+        whole = fr.Geometry(None, None, None, "whole", "", None, {})
+        partial = fr.Geometry(None, None, None, "partial", "512 of 900", None, {})
+        none = fr._none("none", "", "no table entry")
+
+        def items(geometries):
+            return [fr.Item(n, {"line": 100 + n}, g, True, "trunk", False) for n, g in enumerate(geometries, 1)]
+
+        wind = items([whole, whole, whole, partial, whole])
+        rest = items([whole, none, whole, whole, partial])
+        a, b, dropped = fr.common_whole(wind, rest, lambda i: True)
+        self.assertEqual((a, b, dropped), ([1, 3], [1, 3], 3))
+        a, b, dropped = fr.common_whole(wind, rest, lambda i: i.ident != 1)
+        self.assertEqual((a, b, dropped), ([3], [3], 3))
+        self.assertEqual(fr.common_whole(wind, wind, lambda i: True), ([1, 2, 3, 5], [1, 2, 3, 5], 1))
 
 
 class AlphaCover(unittest.TestCase):
@@ -719,6 +921,16 @@ class RealRows(unittest.TestCase):
             self.assertEqual(fr.best_relation(rel), "1 - z / w")
             shifted = fr.raster([(g.clip + np.array([0.0, 0.0, 0.0, 0.01]) * g.clip[:, 3:4], g.tris, 1)])    # w 1% larger
             self.assertLess(fr.relations(f.depth, shifted[0], shifted[1], [1])["1 - z / w"].fixed.share, 0.2)
+            # at the stored depth's own sample (a quarter pixel up and left) hardly a pixel of the replay lies in
+            # front of the game's depth: 2 and 0, where the integral place leaves 8 and 9 and the centre 26 and 28
+            at = {}
+            for origin in (fr.SAMPLE_ORIGIN, 0.0, 0.5):
+                depth, ident = fr.raster([(g.clip, g.tris, 1)], origin=origin)
+                at[origin] = fr.agreement(f.depth, depth, ident, [1], fr.FIXED_TOLERANCE)
+            self.assertLessEqual(at[fr.SAMPLE_ORIGIN].farther, 2, line)
+            self.assertGreater(at[fr.SAMPLE_ORIGIN].share_judged, 0.98, line)
+            self.assertGreater(at[0.0].farther, 3 * max(at[fr.SAMPLE_ORIGIN].farther, 1), line)
+            self.assertGreater(at[0.5].farther, 2 * at[0.0].farther, line)
 
 
 if __name__ == "__main__":

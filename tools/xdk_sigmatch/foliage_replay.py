@@ -4,6 +4,7 @@ ruling 19, criterion 5): the triangles of a capture row, their positions from th
 game's depth copy of the same frame.
 
   foliage_replay.py selftest
+  foliage_replay.py fit            <capture> <frame> [--cache DIR]
   foliage_replay.py depth-relation <capture> <frame> [--cache DIR]
   foliage_replay.py wind           <capture> <frame> [--cache DIR]
   foliage_replay.py pixels         <capture> <frame> [--spot NAME] [--cache DIR]
@@ -14,8 +15,9 @@ game's depth copy of the same frame.
 <capture> is a path or the end of a capture's name in the logs folder (120714).
 
 The rasteriser (`raster`, `fragments`). A pixel (i, j) is sampled at (i + origin, j + origin) pixels from the
-picture's upper left corner (origin 0.0: the game's integral position, PA_SU_VTX_CNTL = 4, measured in
-sub-project 10; 0.5: D3D's pixel centre; a pair gives x and y their own). Window positions are snapped to
+picture's upper left corner (origin 0.0: the pixel's integral position, the game's PA_SU_VTX_CNTL = 4, which
+is NOT where the scene's depth copy holds its sample; 0.5: D3D's pixel centre; -0.25, SAMPLE_ORIGIN: the
+sample the depth copy holds, below; a pair gives x and y their own). Window positions are snapped to
 1 / 256 pixel and the edge functions are then whole numbers, so the top-left rule is exact: two triangles that
 share an edge share no pixel and miss none (what is interpolated takes its weights from the positions as
 computed, not snapped). Depth is z / w, linear on the screen; the nearest (smallest) is
@@ -36,8 +38,20 @@ The stored depth (`load_frame`). The game's depth copy 0x1A02A000 as the sun lay
 pitch 560) names it: a read-back capture has its content. The copy is taken in the middle of the scene (the
 last write of RB_COPY_CONTROL 0x2318 with source 4 in a "cmdgap" row, as the research's coverage_census.py
 found it): only draws before it are in it. The rows' depth range is scale -1, offset 1: stored = 1 - z / w,
-1 at the near plane, 0 where nothing was drawn. `depth-relation` tries both forms and both sampling places
-and prints which holds.
+1 at the near plane, 0 where nothing was drawn. `depth-relation` tries both forms and three sampling places
+and prints which holds. Measured in plan Task 4 on the two captures with whole index buffers (182130 sunward,
+182313 bridge; out/native-evidence/foliage/t4_origin_scan_*.txt): the copy holds the scene's sample a QUARTER
+PIXEL UP AND LEFT of the pixel's integral position, (i - 0.25, j - 0.25): there 98.6% and 76.6% of all
+proving pixels (99.6% and 99.99% of the judged ones) lie within 16 steps at a median of 1.0 and 0.6 steps,
+against 44.1% and 3.9% at the integral position, and a sixteenth of a pixel to either side loses a quarter of
+them. The scene has two samples a pixel; this is the one the copy keeps. The place is measured per capture, not
+assumed: `fit_place` solves it from the slope of the proving set's surfaces (stored - replayed at the integral
+position is the surface's change over the offset), `fit` prints it, and `depth-relation`, `wind`, `pixels` and
+`mask` judge at the fitted place rounded to 1 / 8 pixel (at SAMPLE_ORIGIN, said, when nothing can be fitted).
+NOT KNOWN: whether that quarter pixel is the console's first sample of two or only how this emulator's host
+renders and reads back the two-sample surface; and where the second sample sits (the copy holds one sample;
+no capture row holds the other). The one-sample sun layer target has not been measured either: `occluder`
+keeps its own --origin, 0.0 by default.
 
 What `depth-relation` judges, and its bound. The proving set is the draws that do not move (a table entry
 that is not "deformed" and has no "skin"), write depth, have no alpha test and no alpha-to-mask, lie before
@@ -45,18 +59,30 @@ the copy and have every index. Over the pixels the replay calls nearest for them
   - the tolerance printed is the 99th percentile of |stored - replayed| (the plan's definition). 99% of the
     pixels hold it by construction, so it proves nothing alone, and one pixel in a hundred hidden behind what
     the replay did not draw makes it meaningless;
-  - the bound is therefore taken at a tolerance fixed beforehand: at least 95% of those pixels within
-    FIXED_TOLERANCE, 16 steps of 2^-24 (criterion 5's first part). Why that size: the game's vertex shader
-    forms z and w in single precision and the stored depth is their difference over w, so its error is a few
-    steps of 2^-24 whatever the distance (measured on the bridge capture's visible unmoving draws: a median
-    of 1.4 to 1.6 steps); a surface a pixel aside differs by far more. The constant is this task's choice.
-Pixels outside the tolerance are split: the game has something nearer there (hidden by what the replay did
-not draw: terrain, immediate rows, the rest of a partial draw; an inference from the sign alone), or the game
-has nothing as near (the replay draws what the game does not: the serious kind). The share among the pixels
-where the game has nothing nearer is printed beside the bound's share; it is not the criterion.
+  - the bound is therefore taken at a tolerance fixed beforehand, FIXED_TOLERANCE, 16 steps of 2^-24. Why
+    that size: the game's vertex shader forms z and w in single precision and the stored depth is their
+    difference over w, so its error is a few steps of 2^-24 whatever the distance (measured on the bridge
+    capture's visible unmoving draws: a median of 1.4 to 1.6 steps); a surface a pixel aside differs by far
+    more. The constant is Task 3's choice.
+  - the bound is one-sided, on visible pixels (the ledger's ruling 24). A pixel where the stored depth shows
+    something NEARER than the replay by more than the tolerance is "hidden, not judged": the replay does not
+    draw terrain or immediate rows, so a prop behind a hill is no fault of it (an inference from the sign
+    alone). Among the rest, the judged pixels, at least 95% (SHARE_MIN) must lie within the tolerance; the
+    others are pixels where the game has nothing as near, the replay in front of the game's depth: the error
+    a wrong position makes. A set with fewer than JUDGED_MIN (1,000) judged pixels reads "not decidable".
+    What the ruling costs: a draw replayed too far BACK hides among the hidden pixels. The two-sided share
+    (within over all nearest pixels) is printed beside every one-sided share for that reason, and `wind`
+    prints the shares with the wind and at rest side by side.
+`wind` (criterion 5's second part) judges the trunk draws without an alpha test the same way: their share
+with the wind must be within 3 points of the proving set's and their share at rest at least 2 points below
+their share with the wind, each of the two on at least JUDGED_MIN judged pixels (`wind_verdict`), and both on
+the same draws: a draw that replays whole on one side only is left out of both and counted (`common_whole`).
+`mask` holds a wind draw's pixel only where the stored depth does not show something nearer (`seen_cover`:
+terrain is not replayed, so a tree behind a hill would be in the mask otherwise); draws issued after the depth
+copy are not in the copy and are not tested. Without a stored depth `mask` and `pixels` say so and exit 1.
 Exit code: 0 when the bound is met on a frame without a partial draw, 1 when it is not or cannot be decided
-(no stored depth, no copy, no proving pixel) or the output is not a result (partial draws; `pixels`, `mask`
-and `occluder` also when a draw could not be made), 2 when the capture cannot be read.
+(no stored depth, no copy, too few judged pixels) or the output is not a result (partial draws; `pixels`,
+`mask` and `occluder` also when a draw could not be made), 2 when the capture cannot be read.
 
 Limits, said once: terrain ("tess") and immediate ("indx", "verts") rows are not replayed; a vertex texture
 is not read; the alpha of a leaf's edge is the base level's, bilinear (`alpha_cover`), where the game takes a
@@ -95,10 +121,13 @@ FAMILY_A = ("7CD57B81550F19E3", "00E09D1BC5295D52", "58D3FAAAA84A48AA", "2FBE9B4
 WIND_KINDS = {"475E": "trunk", "A584": "leaf", "D7DD": "leaf", "2D40": "leaf", "8123": "plant", "B636": "plant",
               "48D3": "plant", "FC4F": "plant", "33C0": "plant", "36B5": "plant"}      # research A1, by the hash's start
 RELATIONS = {"1 - z / w": (-1.0, 1.0), "z / w": (1.0, 0.0)}      # name -> (scale, offset) of stored = z / w * scale + offset
-ORIGINS = (("integral (0, 0)", 0.0), ("centre (0.5, 0.5)", 0.5))
+SAMPLE_ORIGIN = -0.25       # the sample the game's depth copy holds: a quarter pixel up and left (Task 4, measured)
+ORIGINS = (("quarter (-0.25, -0.25)", SAMPLE_ORIGIN), ("integral (0, 0)", 0.0), ("centre (0.5, 0.5)", 0.5))
+PLACE_UNIT = 0.125          # a fitted sampling place is rounded to this before anything is judged at it
 DEPTH_STEP = 2.0 ** -24     # single precision's step below 1: the unit of the stored depth's error
 FIXED_TOLERANCE = 16 * DEPTH_STEP    # this task's choice (module text): the share within it must reach SHARE_MIN
-SHARE_MIN = 0.95            # criterion 5, first part
+SHARE_MIN = 0.95            # criterion 5, first part: of the judged pixels (ruling 24)
+JUDGED_MIN = 1000           # ruling 24: a judged set needs this many judged pixels, or it reads "not decidable"
 WIND_NEAR_POINTS = 3.0      # criterion 5, second part: with wind within this of the unmoving draws' share
 WIND_REST_POINTS = 2.0      # ... and at rest at least this far below the share with wind
 MOTION_LEVELS = 8
@@ -503,9 +532,15 @@ class Agreement(namedtuple("Agreement", "pixels within nearer farther")):
         return self.within / self.pixels if self.pixels else math.nan
 
     @property
-    def share_unhidden(self):
-        """The share among the pixels where the game has nothing nearer."""
-        return self.within / (self.within + self.farther) if self.within + self.farther else math.nan
+    def judged(self):
+        """The pixels that are judged (ruling 24): those where the game has nothing nearer beyond the
+        tolerance. `nearer` is the hidden ones."""
+        return self.within + self.farther
+
+    @property
+    def share_judged(self):
+        """The share of the judged pixels that lie within the tolerance: criterion 5's share."""
+        return self.within / self.judged if self.judged else math.nan
 
 
 Relation = namedtuple("Relation", "name pixels tolerance median at_tolerance fixed")
@@ -564,15 +599,120 @@ def best_relation(rel):
     return best
 
 
-def relation_verdict(rel):
+Place = namedtuple("Place", "x y pixels")
+
+
+def fit_place(stored, draws, ids, size=SIZE, relation="1 - z / w", step=0.25, reach=1.5):
+    """Where in the pixel the stored depth was sampled, from the slope of the surfaces of the draws `ids`:
+    Place(x, y, pixels) as offsets from the integral position, or None when nothing can be fitted. On a plane
+    z / w = a x + b y + c the depth at the place (ox, oy) differs from the depth at the integral position by
+    a ox + b oy, so stored - replayed(0, 0) = scale * (a ox + b oy): two unknowns, least squares over every
+    pixel that (1) is the same draw's at the integral position and a quarter pixel to each side, on one plane
+    (so that a and b are the plane's own), (2) changes by more than the tolerance over a pixel, and (3) differs
+    from the stored depth by at most `reach` pixels' change (a hidden pixel, or one where the game has nothing,
+    differs by more); the fit is made twice, the second time without the pixels that miss the first by more
+    than an eighth of a pixel's change."""
+    scale, offset = RELATIONS[relation]
+    d0, i0 = raster(draws, size, 0.0)
+    sel = _nearest(i0, ids)
+    grads = []
+    with np.errstate(invalid="ignore"):
+        for o in ((step, 0.0), (0.0, step)):
+            dp, ip = raster(draws, size, o)
+            dm, im = raster(draws, size, (-o[0], -o[1]))
+            g = (dp - dm) / (2.0 * step)
+            sel &= (ip == i0) & (im == i0) & np.isfinite(g)
+            sel &= np.abs(dp + dm - 2.0 * d0) <= 0.01 * step * np.abs(g) + 1e-12       # one plane through the three
+            grads.append(g)
+        a, b = grads
+        change = np.abs(a) + np.abs(b)
+        diff = stored - stored_depth(d0, scale, offset)
+        keep = sel & (change > FIXED_TOLERANCE) & (np.abs(diff) <= reach * change)
+    place = None
+    for _ in range(2):
+        n = int(keep.sum())
+        if n < 16:
+            return None
+        m = np.stack([a[keep], b[keep]], axis=1) * scale
+        solution, _, rank, _ = np.linalg.lstsq(m, diff[keep], rcond=None)
+        if rank < 2:
+            return None
+        place = Place(float(solution[0]), float(solution[1]), n)
+        with np.errstate(invalid="ignore"):
+            miss = np.abs(diff - scale * (a * place.x + b * place.y))
+            keep = keep & (miss <= 0.125 * change + FIXED_TOLERANCE)
+    return place
+
+
+def round_place(place, unit=PLACE_UNIT):
+    """A fitted place as the pair a raster takes, each coordinate at the nearest `unit`."""
+    return (round(place.x / unit) * unit + 0.0, round(place.y / unit) * unit + 0.0)
+
+
+def seen_cover(stored, depth, ident, tested, untested, tolerance, zscale=-1.0, zoffset=1.0):
+    """The pixels the replay calls nearest for the draws `tested` where the stored depth does not show something
+    nearer by more than `tolerance`, and every nearest pixel of the draws `untested` (issued after the depth
+    copy: the copy does not hold them)."""
+    mine = _nearest(ident, tested)
+    with np.errstate(invalid="ignore"):
+        diff = stored - stored_depth(depth, zscale, zoffset)
+        hidden = diff > tolerance if zscale < 0 else diff < -tolerance
+    return (mine & ~hidden) | _nearest(ident, untested)
+
+
+def _whole(item):
+    return item.geometry.reason is None and item.geometry.state == "whole"
+
+
+def common_whole(a_items, b_items, pick):
+    """(idents in a, idents in b, dropped) of the rows `pick` takes that are replayed whole in both lists (two
+    replays of the same rows in the same order); dropped counts the picked rows that are not."""
+    a_ids, b_ids, dropped = [], [], 0
+    for i, j in zip(a_items, b_items):
+        if not pick(i):
+            continue
+        if _whole(i) and _whole(j):
+            a_ids.append(i.ident)
+            b_ids.append(j.ident)
+        else:
+            dropped += 1
+    return a_ids, b_ids, dropped
+
+
+def agreement_verdict(a, judged_min=JUDGED_MIN):
+    """(met, text) for criterion 5's bound on one Agreement at the fixed tolerance, as ruling 24 has it: the
+    text begins "met", "NOT MET" or "not decidable" (fewer than `judged_min` judged pixels)."""
+    counts = "of the %d nearest pixels %d hidden, not judged (the game has something nearer)" % (a.pixels, a.nearer)
+    if a.judged < judged_min or a.judged == 0:
+        return False, "not decidable: %d judged pixels, fewer than %d; %s" % (a.judged, max(judged_min, 1), counts)
+    text = "%.2f%% of the %d judged pixels within %.2e (%d steps of 2^-24); %s" % (
+        100.0 * a.share_judged, a.judged, FIXED_TOLERANCE, round(FIXED_TOLERANCE / DEPTH_STEP), counts)
+    if not a.share_judged >= SHARE_MIN:
+        return False, "NOT MET: %s; below %.0f%%" % (text, 100.0 * SHARE_MIN)
+    return True, "met: %s; at least %.0f%%" % (text, 100.0 * SHARE_MIN)
+
+
+def relation_verdict(rel, judged_min=JUDGED_MIN):
     """(met, text) for criterion 5's first part on one relation (the module text has the bound)."""
-    if rel.pixels == 0:
-        return False, "not decidable: no pixel of the proving set is nearest"
-    text = "%.2f%% of the %d pixels within %.2e (%d steps of 2^-24)" % (
-        100.0 * rel.fixed.share, rel.pixels, FIXED_TOLERANCE, round(FIXED_TOLERANCE / DEPTH_STEP))
-    if not rel.fixed.share >= SHARE_MIN:
-        return False, "NOT MET: %s, below %.0f%%" % (text, 100.0 * SHARE_MIN)
-    return True, "met: %s, at least %.0f%%" % (text, 100.0 * SHARE_MIN)
+    return agreement_verdict(rel.fixed, judged_min)
+
+
+def wind_verdict(proving, wind, rest, judged_min=JUDGED_MIN):
+    """(met, text) for criterion 5's second part from three Agreements at the fixed tolerance: the proving
+    set's, the judged trunk draws' with the wind and theirs at rest. Shares are of judged pixels."""
+    if not agreement_verdict(proving, judged_min)[0]:
+        return False, "not decidable (the first part is not met)"
+    for name, a in (("with the wind", wind), ("at rest", rest)):
+        if a.judged < judged_min or a.judged == 0:
+            return False, "not decidable: %d judged pixels of the trunk draws %s, fewer than %d" % (
+                a.judged, name, max(judged_min, 1))
+    near = abs(wind.share_judged - proving.share_judged) * 100.0 <= WIND_NEAR_POINTS + 1e-9
+    below = (wind.share_judged - rest.share_judged) * 100.0 >= WIND_REST_POINTS - 1e-9
+    return near and below, "%s: with wind %.2f%% of %d judged pixels against the proving set's %.2f%% (within %.0f points: %s); " \
+        "at rest %.2f%% of %d (at least %.0f points below: %s)" % (
+            "met" if near and below else "NOT MET", 100.0 * wind.share_judged, wind.judged, 100.0 * proving.share_judged,
+            WIND_NEAR_POINTS, "yes" if near else "no", 100.0 * rest.share_judged, rest.judged, WIND_REST_POINTS,
+            "yes" if below else "no")
 
 
 # --- alpha ---------------------------------------------------------------------------------------------------
@@ -833,19 +973,49 @@ def _partial_lines(items, say, limit=400):
             say("    partial: line %d vs %s (%s): %s" % (i.row["line"], cr.vs_hash(i.row)[:4], i.kind, i.geometry.note))
 
 
-def _proving(fr, items, say, origins=ORIGINS):
-    """Rasters the items at each sampling place and judges the proving set; returns (origin, relation name,
-    Relation, depth, ident) of the best, or None when nothing can be judged."""
+def _relation_name(fr):
+    return "1 - z / w" if fr.zscale < 0 else "z / w"
+
+
+def sample_place(fr, items, say):
+    """The pair at which the frame's stored depth is judged: the place fitted over the proving set of `items`
+    (rows before the depth copy), rounded to PLACE_UNIT; (SAMPLE_ORIGIN, SAMPLE_ORIGIN), said, when the frame
+    has no stored depth or fewer than JUDGED_MIN pixels carry the fit."""
+    fallback = (SAMPLE_ORIGIN, SAMPLE_ORIGIN)
+    if fr.depth is None:
+        say("  the sampling place: not fitted (no stored depth: %s); (%g, %g) is taken, Task 4's measurement" % (
+            (fr.depth_note,) + fallback))
+        return fallback
     ids = [i.ident for i in items if i.judged]
+    place = fit_place(fr.depth, _draw_list(items), ids, relation=_relation_name(fr))
+    if place is None or place.pixels < JUDGED_MIN:
+        say("  the sampling place: not fitted (%d sloped pixels of the proving set, fewer than %d); (%g, %g) is taken, "
+            "Task 4's measurement" % ((place.pixels if place else 0, JUDGED_MIN) + fallback))
+        return fallback
+    rounded = round_place(place)
+    say("  the sampling place of the stored depth, fitted over %d sloped pixels of the proving set: (%.3f, %.3f) pixel from "
+        "the integral position; judged at (%g, %g)" % ((place.pixels, place.x, place.y) + rounded))
+    return rounded
+
+
+def _proving(fr, items, say, origins=ORIGINS):
+    """Rasters the items at the fitted sampling place and at each place of `origins`, and judges the proving
+    set; returns (origin, relation name, Relation, depth, ident) of the best, or None when nothing can be
+    judged."""
+    ids = [i.ident for i in items if i.judged]
+    place = sample_place(fr, items, say)
+    places = [("fitted (%g, %g)" % place, place)] + [(label, o) for label, o in origins if _origin(o) != place]
     best = None
-    for label, origin in origins:
+    for label, origin in places:
         depth, ident = raster(_draw_list(items), SIZE, origin)
         rel = relations(fr.depth, depth, ident, ids)
         for name in RELATIONS:
             r = rel[name]
-            say("  sampled at %-18s stored = %-9s: %7d pixels, median |stored - replayed| %.3e, 99th percentile %.3e; "
-                "within %.2e: %s" % (label + ",", name, r.pixels, r.median, r.tolerance, FIXED_TOLERANCE,
-                                     "%.2f%%" % (100.0 * r.fixed.share) if r.pixels else "-"))
+            say("  sampled at %-28s stored = %-9s: %7d pixels, median |stored - replayed| %.3e, 99th percentile %.3e; "
+                "within %.2e: %s of all, %s of the %d judged" % (
+                    label + ",", name, r.pixels, r.median, r.tolerance, FIXED_TOLERANCE,
+                    "%.2f%%" % (100.0 * r.fixed.share) if r.pixels else "-",
+                    "%.2f%%" % (100.0 * r.fixed.share_judged) if r.fixed.judged else "-", r.fixed.judged))
             if r.pixels and (best is None or _better(r, best[2])):
                 best = (origin, name, r, depth, ident)
     return best
@@ -859,6 +1029,41 @@ def _undecidable(fr, say):
         say("not decidable: the depth copy's place in the scene was not found")
         return True
     return False
+
+
+def cmd_fit(args, say=print):
+    """The stored depth's sampling place, fitted on each kind of whole draw without an alpha test."""
+    fr = load_frame(cr.find_capture(args.capture), args.frame)
+    _head(fr, say)
+    if _undecidable(fr, say):
+        return 1
+    table = load_table()
+    items = replay_rows(fr, fr.rows_before_copy(), table, cache=args.cache)
+    draws = _draw_list(items)
+    say("the sampling place of the stored depth (offsets from the pixel's integral position; least squares over sloped "
+        "pixels, `fit_place`), by kind of draw, whole draws that write depth without an alpha test:")
+    found = None
+    for kind in ("still", "trunk", "skinned", "leaf", "plant"):
+        ids = [i.ident for i in items if i.kind == kind and _whole(i) and writes_depth(i.row) and not alpha_tested(i.row)]
+        place = fit_place(fr.depth, draws, ids, relation=_relation_name(fr)) if ids else None
+        if place is None:
+            say("  %-8s %3d draws: no fit" % (kind, len(ids)))
+            continue
+        rounded = round_place(place)
+        depth, ident = raster(draws, SIZE, rounded)
+        a = agreement(fr.depth, depth, ident, ids, FIXED_TOLERANCE, _relation_name(fr))
+        say("  %-8s %3d draws: (%.3f, %.3f) over %d pixels; at (%g, %g): %d nearest pixels, %d hidden, %.2f%% of the %d "
+            "judged within %.2e" % (kind, len(ids), place.x, place.y, place.pixels, rounded[0], rounded[1], a.pixels,
+                                    a.nearer, 100.0 * a.share_judged, a.judged, FIXED_TOLERANCE))
+        if kind == "still":
+            found = place
+    partial = any(i.geometry.reason is None and i.geometry.state == "partial" for i in items)
+    if partial:
+        say("NOT A RESULT: draws of this frame are partial (a capture without whole index buffers)")
+    if found is None or found.pixels < JUDGED_MIN:
+        say("the proving set (kind 'still') carries no fit on %d pixels or more: not decidable" % JUDGED_MIN)
+        return 1
+    return 1 if partial else 0
 
 
 def cmd_depth_relation(args, say=print):
@@ -889,10 +1094,10 @@ def cmd_depth_relation(args, say=print):
     say("  at that tolerance: %d of %d pixels within (%.2f%%: 99%% by construction); the game has something nearer in %d, "
         "nothing as near in %d" % (a.within, a.pixels, 100.0 * a.share, a.nearer, a.farther))
     a = rel.fixed
-    say("  at the fixed tolerance %.2e: %d of %d within (%.2f%%); something nearer in %d (hidden by what was not "
-        "replayed: inferred from the sign), nothing as near in %d; among the pixels with nothing nearer %.2f%% within "
-        "(not the criterion)" % (FIXED_TOLERANCE, a.within, a.pixels, 100.0 * a.share, a.nearer, a.farther,
-                                 100.0 * a.share_unhidden))
+    say("  at the fixed tolerance %.2e: %d of %d within (%.2f%% of all: the two-sided share, not the criterion); something "
+        "nearer in %d (hidden by what was not replayed: inferred from the sign; not judged, ruling 24), nothing as near in "
+        "%d; judged %d, within %.2f%% of them" % (FIXED_TOLERANCE, a.within, a.pixels, 100.0 * a.share, a.nearer, a.farther,
+                                                  a.judged, 100.0 * a.share_judged))
     say("  by kind and vertex shader, whole draws without an alpha test (fixed tolerance; the proving set is 'still'):")
     by_vs = {}
     for i in drawn:
@@ -900,8 +1105,9 @@ def cmd_depth_relation(args, say=print):
             by_vs.setdefault((i.kind, cr.vs_hash(i.row)), []).append(i.ident)
     for (kind, h), ids in sorted(by_vs.items(), key=lambda kv: (kv[0][0] != "still", -len(kv[1]))):
         a = agreement(fr.depth, depth, ident, ids, FIXED_TOLERANCE, name)
-        say("    %-8s %s: %3d draws, %7d pixels, within %6.2f%%, nearer %d, nothing as near %d" % (
-            kind, h, len(ids), a.pixels, 100.0 * a.share if a.pixels else math.nan, a.nearer, a.farther))
+        say("    %-8s %s: %3d draws, %7d pixels, hidden %7d, judged %7d, within %6.2f%% of the judged (%6.2f%% of all), "
+            "nothing as near %d" % (kind, h, len(ids), a.pixels, a.nearer, a.judged, 100.0 * a.share_judged,
+                                    100.0 * a.share if a.pixels else math.nan, a.farther))
     met, text = relation_verdict(rel)
     say("criterion 5, first part: %s" % text)
     partial = any(i.geometry.reason is None and i.geometry.state == "partial" for i in items)
@@ -934,38 +1140,30 @@ def cmd_wind(args, say=print):
     met, text = relation_verdict(rel)
     say("criterion 5, first part: %s" % text)
     depth_rest, ident_rest = raster(_draw_list(at_rest), SIZE, origin)
-    unmoving = rel.fixed.share
-    say("shares of the nearest pixels within the fixed tolerance %.2e (sampled at %s, stored = %s); in brackets the share "
-        "among the pixels with nothing nearer (not the criterion):" % (FIXED_TOLERANCE, origin, name))
-    say("  %-37s %8d pixels  %6.2f%% [%6.2f%%]" % ("the proving set (not moving)", rel.fixed.pixels, 100.0 * unmoving,
-                                                   100.0 * rel.fixed.share_unhidden))
+    say("shares of the judged pixels within the fixed tolerance %.2e (sampled at %s, stored = %s; judged: the game has "
+        "nothing nearer, ruling 24); in brackets the two-sided share of all nearest pixels (not the criterion):" % (
+            FIXED_TOLERANCE, origin, name))
+    say("  %-37s %8d pixels, %7d judged  %6.2f%% [%6.2f%%]" % ("the proving set (not moving)", rel.fixed.pixels,
+                                                               rel.fixed.judged, 100.0 * rel.fixed.share_judged,
+                                                               100.0 * rel.fixed.share))
     shares = {}
     for label, pick in (("trunks without an alpha test (judged)", lambda i: i.kind == "trunk" and not alpha_tested(i.row)),
                         ("trunks with an alpha test (reported)", lambda i: i.kind == "trunk" and alpha_tested(i.row)),
                         ("leaves (reported)", lambda i: i.kind == "leaf"),
                         ("plants (reported)", lambda i: i.kind == "plant")):
-        ids = [i.ident for i in with_wind if pick(i) and i.geometry.reason is None and i.geometry.state == "whole"]
-        ids_rest = [i.ident for i in at_rest if pick(i) and i.geometry.reason is None and i.geometry.state == "whole"]
+        ids, ids_rest, dropped = common_whole(with_wind, at_rest, pick)
+        if dropped:
+            say("  %-37s %3d draws left out of both sides: not replayed whole with the wind and at rest alike" % (label, dropped))
         a = agreement(fr.depth, depth, ident, ids, FIXED_TOLERANCE, name)
         b = agreement(fr.depth, depth_rest, ident_rest, ids_rest, FIXED_TOLERANCE, name)
         shares[label] = (a, b)
-        say("  %-37s %3d draws: with wind %7d pixels %6.2f%% [%6.2f%%]; at rest %3d draws %7d pixels %6.2f%% [%6.2f%%]" % (
-            label, len(ids), a.pixels, 100.0 * a.share, 100.0 * a.share_unhidden,
-            len(ids_rest), b.pixels, 100.0 * b.share, 100.0 * b.share_unhidden))
+        say("  %-37s %3d draws: with wind %7d pixels, %7d judged %6.2f%% [%6.2f%%]; at rest %3d draws %7d pixels, %7d judged "
+            "%6.2f%% [%6.2f%%]" % (label, len(ids), a.pixels, a.judged, 100.0 * a.share_judged, 100.0 * a.share,
+                                   len(ids_rest), b.pixels, b.judged, 100.0 * b.share_judged, 100.0 * b.share))
     a, b = shares["trunks without an alpha test (judged)"]
-    if not met:
-        say("criterion 5, second part: not decidable (the first part is not met)")
-        return 1
-    if a.pixels == 0 or b.pixels == 0:
-        say("criterion 5, second part: not decidable: no whole trunk draw without an alpha test is nearest anywhere")
-        return 1
-    near = abs(a.share - unmoving) * 100.0 <= WIND_NEAR_POINTS
-    below = (a.share - b.share) * 100.0 >= WIND_REST_POINTS
-    say("criterion 5, second part: %s: with wind %.2f%% against the proving set's %.2f%% (within %.0f points: %s); at rest "
-        "%.2f%% (at least %.0f points below: %s)" % ("met" if near and below else "NOT MET", 100.0 * a.share, 100.0 * unmoving,
-                                                    WIND_NEAR_POINTS, "yes" if near else "no", 100.0 * b.share,
-                                                    WIND_REST_POINTS, "yes" if below else "no"))
-    return 0 if near and below and not partial else 1
+    second, text = wind_verdict(rel.fixed, a, b)
+    say("criterion 5, second part: %s" % text)
+    return 0 if second and not partial else 1
 
 
 # --- pixel counts, the mask, the occluder --------------------------------------------------------------------
@@ -1069,14 +1267,16 @@ def cmd_pixels(args, say=print):
         if late or _fade(r) < 1.0:
             picked.append((r, late))
     say("family A draws under alpha-to-mask that fade (pixel c15.w below 1) or are late (after the depth copy): %d" % len(picked))
-    say("  a pixel's samples: both take the first sample's place; alpha at the base level, bilinear. 'seen': not behind "
-        "the stored depth (%s)" % ("within %.2e" % FIXED_TOLERANCE if fr.depth is not None else "NOT AVAILABLE: " + fr.depth_note))
+    place = sample_place(fr, replay_rows(fr, fr.rows_before_copy(), table, cache=args.cache) if fr.depth is not None else [], say)
+    say("  a pixel's samples: both take the stored depth's sample (%g, %g); alpha at the base level, bilinear. 'seen': not behind "
+        "the stored depth (%s)" % (place[0], place[1],
+                                   "within %.2e" % FIXED_TOLERANCE if fr.depth is not None else "NOT AVAILABLE: " + fr.depth_note))
     total = Counter()
     not_made = Counter()
     any_partial = False
     for r, late in picked:
         try:
-            count, depth, g = covered(fr, r, table, cache=args.cache)
+            count, depth, g = covered(fr, r, table, origin=place, cache=args.cache)
         except Unreadable as e:
             not_made[str(e)] += 1
             continue
@@ -1104,15 +1304,16 @@ def cmd_pixels(args, say=print):
     for name in ["the picture"] + [reg["name"] for reg in regions]:
         say("  %-20s early: one sample %7d, two %7d; late: one %7d, two %7d" % (
             name, total[(name, "early", 1)], total[(name, "early", 2)], total[(name, "late", 1)], total[(name, "late", 2)]))
-    if any_partial or not_made:
+    if any_partial or not_made or fr.depth is None:
         say("NOT A RESULT: %s" % ("draws are partial (a capture without whole index buffers): the counts are lower bounds"
-                                  if any_partial else "some draws could not be made"))
+                                  if any_partial else "some draws could not be made" if not_made else
+                                  "no stored depth: the counts are not depth-tested"))
         return 1
     return 0
 
 
 def cmd_mask(args, say=print):
-    fr = load_frame(cr.find_capture(args.capture), args.frame, depth=False)
+    fr = load_frame(cr.find_capture(args.capture), args.frame)
     _head(fr, say)
     table = load_table()
     rows = [r for r in fr.scene if r["kind"] in ("draw", "tess")]
@@ -1120,16 +1321,32 @@ def cmd_mask(args, say=print):
     for line in reasons(items):
         say(line)
     _partial_lines(items, say)
-    depth, ident = raster(_draw_list(items), SIZE, 0.0)
+    tested_depth = fr.depth is not None and fr.copy_line is not None
+    before = [i for i in items if tested_depth and i.row["line"] < fr.copy_line]
+    place = sample_place(fr, before, say)
+    depth, ident = raster(_draw_list(items), SIZE, place)
     wind_ids = [i.ident for i in items if i.moving]
-    mask = _nearest(ident, wind_ids)
+    cover = _nearest(ident, wind_ids)
+    if tested_depth:
+        early = [i.ident for i in items if i.moving and i.row["line"] < fr.copy_line]
+        late = [i.ident for i in items if i.moving and i.row["line"] > fr.copy_line]
+        mask = seen_cover(fr.depth, depth, ident, early, late, FIXED_TOLERANCE, fr.zscale, fr.zoffset)
+    else:
+        mask = cover
     np.save(args.out, mask)
     by_kind = Counter()
     for i in items:
         if i.moving and i.geometry.reason is None:
-            by_kind[i.kind] += int((ident == i.ident).sum())
+            by_kind[i.kind] += int((mask & (ident == i.ident)).sum())
     say("the wind draws' cover (nearest among what was replayed; triangles whole, no texture cut-out): %d of %d pixels "
-        "(%.2f%%): %s" % (int(mask.sum()), mask.size, 100.0 * mask.mean(), ", ".join("%s %d" % kv for kv in by_kind.most_common())))
+        "(%.2f%%)" % (int(cover.sum()), cover.size, 100.0 * cover.mean()))
+    if tested_depth:
+        say("the mask: of them, where the stored depth shows nothing nearer (draws before the depth copy; the %d wind draws "
+            "after it are not in the copy and are kept untested): %d pixels (%.2f%%): %s" % (
+                len(late), int(mask.sum()), 100.0 * mask.mean(), ", ".join("%s %d" % kv for kv in by_kind.most_common())))
+    else:
+        say("the mask is that cover, NOT DEPTH-TESTED (%s): wind draws behind terrain, which is not replayed, are in it" % (
+            fr.depth_note if fr.depth is None else "the depth copy's place was not found"))
     say("written: %s" % args.out)
     partial = any(i.geometry.reason is None and i.geometry.state == "partial" for i in items if i.moving)
     missing = sum(1 for i in items if i.moving and i.geometry.reason)
@@ -1137,7 +1354,7 @@ def cmd_mask(args, say=print):
         say("NOT A RESULT: %d wind draws are partial and %d were not replayed: the mask is smaller than the cover" % (
             sum(1 for i in items if i.moving and i.geometry.reason is None and i.geometry.state == "partial"), missing))
         return 1
-    return 0
+    return 0 if tested_depth else 1
 
 
 def _shot(path):
@@ -1285,7 +1502,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("selftest")
-    for name in ("depth-relation", "wind", "pixels", "mask", "occluder"):
+    for name in ("fit", "depth-relation", "wind", "pixels", "mask", "occluder"):
         p = sub.add_parser(name)
         p.add_argument("capture")
         p.add_argument("frame", type=int)
@@ -1296,7 +1513,7 @@ def main(argv=None):
         if name == "mask":
             p.add_argument("--out", required=True)
         if name == "occluder":
-            p.add_argument("--origin", type=float, default=0.0, help="the layer's sampling place")
+            p.add_argument("--origin", type=float, default=0.0, help="the one-sample layer's sampling place (not measured)")
             p.add_argument("--out", help="the closed texels, a numpy file")
     p = sub.add_parser("motion")
     p.add_argument("mask")
@@ -1306,7 +1523,7 @@ def main(argv=None):
     try:
         if args.cmd == "selftest":
             return 1 if selftest() else 0
-        return {"depth-relation": cmd_depth_relation, "wind": cmd_wind, "pixels": cmd_pixels, "mask": cmd_mask,
+        return {"fit": cmd_fit, "depth-relation": cmd_depth_relation, "wind": cmd_wind, "pixels": cmd_pixels, "mask": cmd_mask,
                 "motion": cmd_motion, "occluder": cmd_occluder}[args.cmd](args)
     except (Unreadable, OSError) as e:
         print("cannot be read: %s" % e, file=sys.stderr)

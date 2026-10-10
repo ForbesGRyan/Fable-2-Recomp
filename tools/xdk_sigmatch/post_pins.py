@@ -140,6 +140,11 @@ def _rows(w, h, texel):
     return [[texel(x, y) for x in range(w)] for y in range(h)]
 
 
+def composite_u(regs, scene):
+    """The table coordinate of a composite point, from the single-precision inputs the lines print."""
+    return f32(regs['c46x']) * lf.post_lum([lf.post_scene(f32(v)) for v in scene])
+
+
 def composite_pin(regs, scene, bloom, table):
     return lf.post_composite([f32(v) for v in scene], [f32(v) for v in bloom], table, regs['c31x'], regs['c46x'],
                              regs['c47x'], regs['c77'], regs['c78x'])
@@ -177,7 +182,7 @@ def lines():
     out.append('// unlit scale pins: c77.y, T[128], the scale (the two sets with the excerpt\'s table, then made-up pairs)')
     for name, regs in SETS:
         out.append('    {%s, %s, %r},  // %s' % (_num(f32(regs['c77'][1]), True), _num(table[128], True),
-                                                 lf.post_unlit_scale(regs['c77'][1], table), name))
+                                                 lf.post_unlit_scale(f32(regs['c77'][1]), table), name))
     for c77y, t in UNLIT:
         made = [0.0] * lf.POST_TABLE_TEXELS
         made[128] = f32(t)
@@ -192,8 +197,7 @@ def lines():
                                          regs['bright']['c77'][0], regs['bright']['c77'][1]))))
         out.append('// %s composite pins (the excerpt\'s table): scene, bloom, the table\'s texel, the front value' % name)
         for scene, bloom in COMPOSITE_POINTS:
-            L = lf.post_lum([lf.post_scene(f32(v)) for v in scene])
-            out.append('    {%s, %s, %d, %s},' % (floats(scene), floats(bloom), lf.post_table_texel(regs['c46x'] * L),
+            out.append('    {%s, %s, %d, %s},' % (floats(scene), floats(bloom), lf.post_table_texel(composite_u(regs, scene)),
                                                   doubles(composite_pin(regs, scene, bloom, table))))
         out.append('// %s bright pins: d, tf1, tf2, the bright target\'s value' % name)
         for d, tf1, tf2 in BRIGHT_POINTS:

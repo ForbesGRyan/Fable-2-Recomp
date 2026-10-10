@@ -18,7 +18,8 @@ seed 20261009 per shader, the same draws in the same order). What differs:
     ucode_eval.point_texel of the fetch (its own OffsetX=0.5 included) and by the formula at
     light_formulas.post_table_texel. So the check holds the formula's addressing to the interpreter's rule
     for a point fetch, texel for texel, and the coordinate c46.x * L besides (the research read a smooth
-    function of the coordinate on both sides, which no addressing could fail);
+    function of the coordinate on both sides, which no addressing could fail), and half its trials draw
+    c77.x from 1.5 to 4, where the research's -0.3 to 0.3 never made t negative;
   - the formulas take pixel positions and unnormalised textures (light_formulas, "the post chain"): the
     trial's texture is 64 x 64 texels, an interpolator u is the position u * 64 (u * 32 for the reduce, whose
     target is half its source).
@@ -182,7 +183,10 @@ def _radial(text, shader, rng, aux, formula, opts):
 def _composite(text, shader, rng, aux, formula, opts):
     uv = _uv(rng)
     c = {31: [rng.uniform(0, 4)] * 4, 46: [rng.uniform(0.05, 0.5)] * 4,
-         47: [rng.choice([50.0, rng.uniform(0.2, 3)])] * 4, 77: [rng.uniform(-0.3, 0.3), rng.uniform(0.3, 2.5), 0, 0],
+         47: [rng.choice([50.0, rng.uniform(0.2, 3)])] * 4,
+         # Half the trials get a saturation step strong enough to drive a channel of t below zero: the
+         # shader's |t| (instructions 17 to 19) is then held (a formula with max(t, 0) fails).
+         77: [rng.choice([rng.uniform(-0.3, 0.3), rng.uniform(1.5, 4.0)]), rng.uniform(0.3, 2.5), 0, 0],
          78: [rng.uniform(0.3, 1.0)] * 4}
     scale = rng.choice([0.2, 1.0, 3.0])
     table = [aux.uniform(0.0, 0.6) for _ in range(lf.POST_TABLE_TEXELS)]

@@ -23,6 +23,9 @@ NAN, INF = float("nan"), float("inf")
 REAL = dict(c31x=2.973, c46x=0.25, c47x=50.0, c77=(-0.0052, 1.1026), c78x=1.0 / 2.2)
 
 
+PINS_DIGEST = "1c3c6df5dd5fb3c4e7605a755b7ce1379cdd9734c1b02d700c7a9d7b19c98db9"
+
+
 def near(test, got, want, tol=1e-12):
     test.assertEqual(len(got), len(want))
     for g, w in zip(got, want):
@@ -559,6 +562,22 @@ class Pins(unittest.TestCase):
                 self.assertEqual(post_pins.composite_pin(regs, scene, bloom, table), want)
                 numbers(self, want)
 
+    def test_no_composite_point_lies_near_a_texel_boundary(self):
+        # A single-precision mirror must land in the texel the line prints: u * 512 + 0.5 is at least 1e-3
+        # from an integer at every point.
+        for name, regs in post_pins.SETS:
+            for scene, _ in post_pins.COMPOSITE_POINTS:
+                x = post_pins.composite_u(regs, scene) * 512 + 0.5
+                if math.isfinite(x) and 0.0 < x < 512.0:
+                    self.assertGreaterEqual(abs(x - round(x)), 1e-3, (name, scene))
+
+    def test_the_lines_are_the_ones_last_looked_at(self):
+        # The digest of post_pins.lines(): a change of the reference, of the excerpt or of the points changes
+        # it, and the C++ lines copied from it are then stale. After such a change: look at the lines
+        # (python tools/xdk_sigmatch/post_pins.py), update the C++ test, then this digest.
+        import hashlib
+        self.assertEqual(hashlib.sha256(chr(10).join(self.lines).encode("ascii")).hexdigest(), PINS_DIGEST)
+
     def test_the_points_reach_the_guards(self):
         flat = [x for scene, bloom in post_pins.COMPOSITE_POINTS for x in tuple(scene) + tuple(bloom)]
         self.assertTrue(any(x != x for x in flat))
@@ -597,6 +616,13 @@ class RealDumps(unittest.TestCase):
             a = lf.post_composite(scene, (0.0, 0.0, 0.0), table, c31x, c46x, c47x, (0.0, c77[1]), 1.0, clamp=False)
             return [abs(a[i] + lf.sat(bloom[i] * c31x)) ** c78x for i in range(3)]
 
+        def no_absolute_value(scene, bloom, table, c31x, c46x, c47x, c77, c78x, clamp=True):
+            one = lf.post_composite(scene, bloom, table, c31x, c46x, c47x, c77, 1.0, clamp=False)      # |t|
+            none = lf.post_composite(scene, bloom, table, c31x, c46x, c47x, (0.0, c77[1]), 1.0, clamp=False)   # s
+            L2 = lf.post_lum(none)
+            t = [s + c77[0] * (s - L2) for s in none]
+            return [max(x, 0.0) ** c78x if x > 0.0 else 0.0 for x in t]
+
         def bright_no_threshold(d, tf1, tf2, c31x, c46x, c47x, c77, clamp=True):
             return lf.post_bright(d, tf1, tf2, c31x, c46x, c47x, (0.0, c77[1]), clamp=clamp)
 
@@ -620,6 +646,7 @@ class RealDumps(unittest.TestCase):
             return lf.post_radial(tex, u, v, c31, c47x, c46x, clamp=clamp)
 
         for shader, formula in (("37B186F4BD3288F7", no_fade), ("37B186F4BD3288F7", bloom_added),
+                                ("37B186F4BD3288F7", no_absolute_value),
                                 ("EE922CFB4426EA83", bright_no_threshold), ("EE922CFB4426EA83", bright_inputs_exchanged),
                                 ("EA83C7E7E24EC4C8", blur_other_axis), ("28DBE18F313350BF", blur_other_axis),
                                 ("EA83C7E7E24EC4C8", blur_weights_reversed), ("87E85199E1E9B260", downsample_box),

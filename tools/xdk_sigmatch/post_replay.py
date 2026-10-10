@@ -63,7 +63,8 @@ SCENE_W, SCENE_H = 1120, 720
 FRONT_W = 1280
 NATIVE_EXPOSURE = 2.22          # clay_logic.h, kLitExposure: today's mapping (variant N)
 ROLES = {s.hash: s.role for s in lf.POST_SHADERS}
-# The measured scan-out curve (spec criterion 4; research `ramp_092959.txt`): front level -> shot level.
+# The stand-in for the scan-out ramp: front level -> shot level. The eight inner pairs are measured (spec
+# criterion 4; research `ramp_092959.txt`); the two ends, (0, 0) and (255, 255), are assumed.
 MEASURED_RAMP_PAIRS = ((0, 0), (23, 10), (47, 32), (63, 47), (124, 110), (156, 144), (204, 197), (236, 232),
                        (252, 250), (255, 255))
 # The HUD's places, as fractions of the picture: the strip at the top and the box at the lower left.
@@ -583,7 +584,8 @@ def cmd_replay(args):
             else:
                 write_dump("%s_%s.rgba" % (prefix, name), SCENE_W, SCENE_H, rgba)
         print("wrote %s_{%s}.%s%s" % (prefix, ",".join(list(pictures) + ["final"]), "png" if png else "rgba",
-                                      " through the ramp `%s`" % args.ramp if ramp else " (no ramp)"))
+                                      " (no ramp)" if not ramp else " through the measured STAND-IN ramp, not the game's table"
+                                      if args.ramp == "measured" else " through the ramp `%s`" % args.ramp))
     return 0
 
 

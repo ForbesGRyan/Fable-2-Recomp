@@ -499,6 +499,19 @@ class RealCapture(unittest.TestCase):
         self.assertEqual(fr.weights("blur-x"), doc["regs"]["blur-x"]["c46"] + doc["regs"]["blur-x"]["c47"][:3])
         self.assertEqual(pr.block_floats(fr)[1], pr.PART_BLUR | pr.PART_RADIAL)
 
+    def test_the_checks_literals_are_the_rows(self):
+        # post_check.LITERALS is typed in: each shader's c255 is the last four floats of its first row's
+        # "ps_lit" (16 floats from register 508: c252 to c255), and a shader without one has no such row entry.
+        import post_check as pc
+        fr = pr.load_frame(CAPTURE, 1)
+        for s in lf.POST_SHADERS:
+            lit = fr.rows[s.role].get("ps_lit")
+            if s.hash not in pc.LITERALS:
+                self.assertEqual(lit, [], s.role)
+                continue
+            self.assertEqual([e["reg"] for e in lit], [508], s.role)
+            self.assertEqual([f32(v) for v in lit[0]["v"][12:16]], [f32(v) for v in pc.LITERALS[s.hash]], s.role)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -768,7 +768,7 @@ Native renderer sub-project 10 (exposure, composite, bloom, sun layer), plan Tas
 | The scan-out ramp | none (the SDK's swap blit) | `post_ramp`, `post_ramp_index` | by the SDK's source; hand cases |
 | An unlit draw's scale | none (spec ruling 9) | `post_unlit_scale` | a rule of the design; hand cases |
 
-(`out/native-evidence/post/task3_post_check.txt`: `post_check.py`, 500 trials a shader, 4 values a trial, tolerance 1e-9 relative, exit code 0; the largest relative difference is 6.3e-16. `POST_SHADERS` has the eight hashes with their roles.)
+(`out/native-evidence/post/task3_post_check.txt`: `post_check.py`, 500 trials a shader, 4 values a trial, tolerance 1e-9 relative, exit code 0; the largest relative difference is 1.1e-15, the composite's. `POST_SHADERS` has the eight hashes with their roles.)
 
 What differs from the research note, the spec and the plan, found by this reading:
 
@@ -814,12 +814,12 @@ What the terms do with the captured registers is in the research (section 2): th
 `post_table_texel(u, n=512)` = `min(n - 1, max(0, floor(u * n + 0.5)))`; a coordinate that is no number, or not above 0, reads texel 0.
 
 - The fetch carries its own offset of half a texel (`OffsetX=0.5`, as nearly every fetch of these shaders does), and it is a point fetch. The interpreter's rule for a point fetch is `floor(coordinate * size + offset)` (`ucode_eval.point_texel`, from the SDK's translator: `dxbc_translator_fetch.cpp`, "Get offsets applied to the coordinates before sampling": the offset in texels, divided by the size, is added to the normalised coordinate, and the host's point sampler takes the texel the result lies in). The translator's own 1.5 / 1024 of a texel on top is not modelled.
-- The address mode is clamp (the fetch constant, research section 3): a coordinate from `(n - 0.5) / n` on reads the last texel.
+- The address mode is clamp to edge: the clamp field of the table's fetch constant (word 0 of `04000956 1FAA00A4 ...` in the composite's row, bits 10 to 12, is 2; `fog_tables.describe_fc` prints it; research section 3). Both sides of the check clamp by their own code, so the check does not hold it; the constant does: a coordinate from `(n - 0.5) / n` on reads the last texel.
 - Pinned (`tests/test_post_formulas.py`, `TableTexel`; `post_pins.py`): `u = k / 512 - 1e-6`, `k / 512` and `k / 512 + 1e-6` all read texel `k` for k = 0, 1, 2, 12, 128, 511, and texel 511 for k = 512 (the plan's points: under this convention they lie in the middle of a texel, so they do not tell the two readings apart); the boundaries are at `(k + 0.5) / 512`, pinned on both sides for k = 0, 1, 2, 12, 128, 510 (the pins: 0, 1, 12, 127, 128, 510, 511); 2,000 coordinates from -0.05 to 1.05 against `point_texel`.
 - The machine check holds it against the interpreter: the composite's table is 512 random texels on both sides, and a formula that reads `floor(u * 512)` fails (`RealDumps.test_the_composites_table_texel_is_the_microcodes`).
 - Against the game (the front buffer of the emulated game, whose shaders are the translator's): `out/native-evidence/post/task3_table_addressing.txt` (the research's numpy replay with the offset as a parameter; the script is beside it). Median absolute difference, in 8-bit levels, of variant B over the pixels whose scene luminance lies in the table's texels 0 to 3: 1.19, 1.17, 1.27 with the floor against 0.85, 0.82, 0.91 with the half texel at the bridge (`092959`, `121331`, `132250`: 4,476, 4,380 and 3,963 pixels), and 1.36 against 0.32 towards the sun (`134312`: 11,772 pixels). In texels 4 to 12: 0.74, 0.73, 0.78 against 0.63, 0.61, 0.65, and 0.56 against 0.48. In texels 13 to 39 the two readings agree to 0.01; the whole-picture figures are under "The replay".
 
-What this does not settle: the console itself. That its point fetch with an offset of half a texel reads the nearest texel is the emulator's implementation of it (inference); the game's author would hardly have written the offset otherwise.
+What this does not settle: the console itself. The front buffer is the emulator's picture, made with the translator's shaders, so the comparison above is the emulator against itself: it confirms the reading of the emulator, not of the console. That the console's point fetch with an offset of half a texel reads the nearest texel is **inference** (the emulator's implementation of it; the game's author would hardly have written the offset otherwise).
 
 **The unlit scale** (spec ruling 9) `post_unlit_scale(c77y, table)` = `1 / max(c77.y * T[128], 1 / 64)` reads texel 128, which is scene luminance 1 under either reading (`u` = 0.25). **The ramp**: `post_ramp_index(v)` = `min(255, floor(v * 255 + 0.5))` is the front target's 8-bit level, `post_ramp(v, ramp)` one channel of the guest's 256-entry table at it.
 
@@ -836,11 +836,11 @@ The microcode has neither; the game's render targets clamp. Each function clamps
 
 ### The check
 
-`post_check.py` (`check`, `check_text`; `CHECKS` names the trial's body and the formula per hash): each shader in `ucode_eval.Machine` on random inputs, 500 trials, the four components of `oC0` against the formula to 1e-9 relative. The trials are the research script's (`out/tests/post-research/post_check.py`: seed 20261009 per shader, the same draws in the same order), which is why its counts and largest differences come out again but for the composite's, whose table changed (2.2e-16 where the research has 4.4e-16).
+`post_check.py` (`check`, `check_text`; `CHECKS` names the trial's body and the formula per hash): each shader in `ucode_eval.Machine` on random inputs, 500 trials, the four components of `oC0` against the formula to 1e-9 relative. The trials are the research script's (`out/tests/post-research/post_check.py`: seed 20261009 per shader, the same draws in the same order), which is why its counts and largest differences come out again but for the composite's, whose table and `c77.x` changed (1.1e-15 where the research has 4.4e-16). Half the composite's trials draw `c77.x` from 1.5 to 4, which drives a channel of `t` below zero: the research's range of -0.3 to 0.3 never did, and a formula with `max(t, 0)` in the place of `|t|` passed the check in all 2,000 values (found by the review of this task; it now fails).
 
 - Textures are smooth analytic functions of (slot, coordinate + the fetch's offset) on a 64 x 64 texel grid, so a wrong coordinate or offset gives a wrong value. The formulas get the same function as an unnormalised texture and the interpolator `u` as the position `u * 64` (`u * 32` for the reduce).
 - The radial blur's 14 fetch coordinates are compared with `post_radial_taps` (500 of 500), the composite's table coordinate with `c46.x * lum(scene)` (500 of 500).
-- Wrong forms that fail (`RealDumps.test_wrong_formulas_fail`): the composite without the grey fade and with the bloom added instead of screened; the bright pass without its threshold and with its two layers exchanged; a blur along the other axis and with its weights reversed; a 16-texel box for the downsample; a reduce without its offset; the radial blur's two factors exchanged; a luminance of one channel. On synthetic microcode (`SyntheticDump`): another fetch offset and other weights fail.
+- Wrong forms that fail (`RealDumps.test_wrong_formulas_fail`): the composite without the grey fade, with the bloom added instead of screened and without the absolute value; the bright pass without its threshold and with its two layers exchanged; a blur along the other axis and with its weights reversed; a 16-texel box for the downsample; a reduce without its offset; the radial blur's two factors exchanged; a luminance of one channel. On synthetic microcode (`SyntheticDump`): another fetch offset and other weights fail.
 
 Not reached by a trial: the targets' clamps and rounding, single precision, a fetch's filter (the field is continuous), `L = 0`, and whether the downsample's position is integral.
 
@@ -851,7 +851,7 @@ Not reached by a trial: the targets' clamps and rounding, single precision, a fe
 3. **The clamps of the game's targets**: 31.875 for the scene (`k_2_10_10_10_FLOAT`, from the GPU log's target format: research section 3), 1 with 10 bits for the bright, blur and layer targets and for the composite's (`k_2_10_10_10`). From the formats, not from data: the small buffers' memory is reused within a frame.
 4. **Where the composite samples the bloom.** The replay samples it linearly with texel centres aligned (pixel `x` of 1,120 reads the 280-wide bloom at `(x + 0.5) / 4`); under inference 2 the game's fetch would lie 0.375 of a bloom texel further on. The bloom is two blurs of sigma 2 texels wide; no capture can tell.
 5. **Which of the bright pass's two layers is which** (discovery question 3): `tf1` has the weight `6 * c46.x`, `tf2` 1; both are 0 in the replay.
-6. **The console's point fetch** ("The addressing of the table").
+6. **The console's point fetch** ("The addressing of the table"). The radial blur's 14 point taps stand on the same inference: each reads the texel `floor(coordinate * size + 0.5)` (as `post_pins.py`'s radial pins take it), and the check, whose textures are continuous fields, can tell neither that rounding nor a point tap from a linear one, for the blurs' taps either.
 
 ### The replay
 

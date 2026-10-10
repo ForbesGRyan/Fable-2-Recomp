@@ -43,6 +43,7 @@
 // #include "fps_probe.h"
 #include "keyboard_gamepad.h"
 #include "remote_gamepad_driver.h"
+#include "sdk_gamma_ramp.h"
 #ifdef FABLE2_REMOTE_CONTROL
 #include "remote_control_server.h"
 // 1-second game-state classifier (src/diagnostics/fable2_state_probe.h, single-TU inline).
@@ -305,7 +306,9 @@ class Fable2App : public rex::ReXApp {
       return stats;
     });
 
-    // Native guest-output renderer (registers SDK callbacks if enabled).
+    // Native guest-output renderer (registers SDK callbacks if enabled). Before it: how it
+    // reads the guest's scan-out gamma ramp (sdk_gamma_ramp.h: a protected SDK member).
+    fable2::native::SetGammaRampReader(&fable2::ReadSdkGammaRamp, runtime());
     fable2::native::Install(runtime()->memory());
   }
 

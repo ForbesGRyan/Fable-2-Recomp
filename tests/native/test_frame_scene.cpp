@@ -1414,12 +1414,32 @@ static int QuadTests(const capture::DrawRecord& r) {
       fb.LayerOccluderSeen(&occluder2);
     });
     if (two->layer_occluders != 2 || two->layer_occluders_failed != 0 || two->layer_depth_place != uint32_t(two->draws.size()) - 2) return 38;
+    // (the other order of the calls: the earlier record's occluder first, the later one's last)
+    auto two_back = frame(lb, [&](render::FrameBuilder& fb) {
+      fb.Add(other);
+      fb.Add(leaf2);
+      fb.Add(leaf);
+    }, [&](render::FrameBuilder& fb) {
+      fb.LayerOccluderSeen(&occluder2);
+      fb.LayerOccluderSeen(&occluder);
+    });
+    if (two_back->layer_occluders != 2 || two_back->layer_depth_place != uint32_t(two_back->draws.size()) - 2) return 38;
     // The same draw twice in the scene: ambiguous, failed.
     auto twice = frame(lb, [&](render::FrameBuilder& fb) {
       fb.Add(leaf);
       fb.Add(leaf);
     }, [&](render::FrameBuilder& fb) { fb.LayerOccluderSeen(&occluder); });
     if (twice->layer_occluders_failed != 1 || twice->layer_depth_place != capture::kNoDepthPlace) return 39;
+    // A call made while the quads are off does nothing, also when the switch comes on before the frame ends.
+    render::FrameBuilder late_on;
+    late_on.Open();
+    late_on.Add(other);
+    late_on.Add(leaf);
+    late_on.Close();
+    late_on.LayerOccluderSeen(&occluder);
+    late_on.QuadsOn(true);
+    auto late_scene = late_on.Finish(++number);
+    if (late_scene->layer_occluders != 0 || late_scene->layer_occluders_failed != 0 || late_scene->layer_depth_place != capture::kNoDepthPlace) return 41;
     // More calls than the bound: those past it fail, also when they have a twin.
     auto many = frame(lb, scene_of, [&](render::FrameBuilder& fb) {
       for (uint32_t i = 0; i < capture::kMaxLayerOccluders + 2; ++i) fb.LayerOccluderSeen(&occluder);

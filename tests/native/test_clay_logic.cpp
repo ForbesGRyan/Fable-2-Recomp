@@ -894,6 +894,10 @@ static void SunLayerTests() {
         CHECK(652, !SunDepthBefore(end, i) && !SunDepthBefore(bad, i) && !SunDepthBefore(SunDepthPlace{}, i));
       }
       CHECK(652, SunDepthBefore(PlanSunDepthPlace(1, 0, 0, 1), 0));
+      // (a plan that says it is not usable is not followed, whatever record it names)
+      SunDepthPlace forged;
+      forged.record = 700;
+      CHECK(652, !SunDepthBefore(forged, 700) && !SunDepthBefore(forged, 900));
       // The verdict: a frame that would be drawn is not, for its depth place, and the Sun line says so.
       ClaySunInputs in;
       in.sun = in.furniture = in.bloom = in.radial = in.drawable = in.quads = in.objects = in.textures = true;
@@ -1438,6 +1442,16 @@ static void CloudTests() {
     const QuadRecord set[] = {moon, cloud, second, QuadRecord{}, third, moon};
     const ClayCloudPlan plan = PlanClayClouds(set, std::size(set), kScale);
     CHECK(674, plan.drawable && plan.count == 3 && plan.records[0] == 1 && plan.records[1] == 2 && plan.records[2] == 4);
+    // the set's other kinds (the glare, the layer's quads, the cloud OCCLUDERS) are not the clouds' to judge
+    QuadRecord glare{}, occluder{};
+    glare.ps_hash = capture::kPostQuadTable[size_t(PostQuadKind::kGlare)].ps;
+    glare.kind = PostQuadKind::kGlare;
+    occluder.ps_hash = capture::kPostQuadTable[size_t(PostQuadKind::kCloudOccluder)].ps;
+    occluder.kind = PostQuadKind::kCloudOccluder;
+    occluder.layer = 1;
+    const QuadRecord mixed[] = {glare, cloud, occluder, second, occluder, third, glare};
+    const ClayCloudPlan among = PlanClayClouds(mixed, std::size(mixed), kScale);
+    CHECK(674, among.drawable && among.count == 3 && among.records[0] == 1 && among.records[1] == 3 && among.records[2] == 5);
     // no cloud in the set: drawable, none
     const QuadRecord bare[] = {moon, moon};
     const ClayCloudPlan none = PlanClayClouds(bare, 2, kScale);

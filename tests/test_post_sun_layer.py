@@ -507,7 +507,9 @@ class FeedFile(unittest.TestCase):
         self.assertTrue(sl.layers_verdict("tf2", sl.layer_compare(e, e)))
         # one level off on every written texel is inside the bound; nine levels on a tenth of them is not
         near = [[[max(0.0, v - 1.0 / 1023.0) for v in t] for t in row] for row in disc]
-        self.assertEqual(sl.layers_verdict("tf2", sl.layer_compare(sl.layer_words(near), a)), [])
+        close = sl.layer_compare(sl.layer_words(near), a)
+        self.assertEqual(sl.layers_verdict("tf2", close), [])
+        self.assertEqual((close["written"], close["written_equal"], close["written_within"][2]), (16, 0, 16))
         far = [[list(t) for t in row] for row in disc]
         far[10][10] = [0.5 - 9.0 / 1023.0, 0.25, 0.125]
         far[10][11] = [0.5 - 9.0 / 1023.0, 0.25, 0.125]

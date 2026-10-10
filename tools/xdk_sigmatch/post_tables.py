@@ -47,6 +47,25 @@ Reports (every number is of the files named on the command line):
   post_tables.py downsample <capture.jsonl> [--frame N]
         the downsample buffer the luminance pass sampled against the CPU downsample of the scene colour
         the downsample pass sampled, with the pixel position integral and at the pixel's centre.
+  post_tables.py graph <capture.jsonl> --frame N [--all] [--no-stats]
+        the sun layer and the post chain as a graph (plan Task 10): every render target of the frame after
+        the main scene as a node (the rows drawn into it, the colour clears before them, the resolve that
+        copies it: base, size, format), each sampled buffer with the node that last resolved to its base and,
+        where the capture kept its content (formats 6, 7, 54), what the dump holds (--png <prefix> writes
+        each as a picture); then the bright pass's
+        tf1 and tf2 traced back to the layer that was drawn, the nodes no later row reads, and the indirect
+        buffers called.
+  post_tables.py quads <capture.jsonl> [--frame N]
+        the furniture of every frame: rows a frame by kind and target, the alpha test (enable bit, function,
+        reference) with the frames it holds in, the depth and blend words, the builder each kind is drawn
+        through; with --frame every quad of that frame with its corners, registers and index pattern.
+  post_tables.py occluders <capture.jsonl> --frame N
+        the sun layer's cubes against the main scene's draws of the same unit cube and vertex c119.x; its tree
+        occluder draws against the main scene's leaf draws of the same buffers, before and after the scene's
+        depth copy.
+  post_tables.py signs <capture.jsonl> [<capture.jsonl> ...]
+        the sign fields and exponent adjusts of every texture bound at every decoded row: what is not all
+        zero, and whether the native pass knows it (review-task-8b, Minor 2). Exit code 1 if anything is not.
 The texture dumps are read relative to the capture's folder (or --tex-root).
 """
 
@@ -951,6 +970,668 @@ def _frame_downsample(cap, fr):
     return best
 
 
+# --- the sun layer: its graph, its quads, its occluders (plan Task 10) ------------------------------------------
+
+PM4_INDIRECT_BUFFER = 0x3F
+REG_SURFACE_INFO, REG_COLOR_INFO = 0x2000, 0x2001
+PACKED10_FORMATS = (7, 54)   # k_2_10_10_10 and k_2_10_10_10_AS_16_16_16_16: one storage, 10 bits a channel
+QUAD_BUILDER = "DrawIndx:82217EE8"
+LEAF_PS, TREE_OCCLUDER_PS = "7CD5", "F1EB"
+CUBE_VS = "D1CC6DC28244C55A"
+SCENE_DEPTH_BASE = 0x1A02A000
+
+
+def fetch_texture(fc):
+    """What a texture fetch constant (six dwords) names: base, width, height (1 for a 1D texture), format,
+    tiled, the four sign fields, the exponent adjust."""
+    two_d = ((fc[5] >> 9) & 3) == 1
+    return {
+        "base": fc[1] & 0xFFFFF000, "format": fc[1] & 0x3F, "tiled": bool(fc[0] >> 31),
+        "width": ((fc[2] & 0x1FFF) if two_d else (fc[2] & 0xFFFFFF)) + 1,
+        "height": ((fc[2] >> 13) & 0x1FFF) + 1 if two_d else 1,
+        "signs": tuple(ft.sign_fields(fc)), "exp": ft.exp_adjust(fc),
+    }
+
+
+def packed10(word):
+    """(r, g, b) of a k_2_10_10_10 texel: red in the low ten bits, green and blue above it, each over 1023."""
+    return (word & 0x3FF) / 1023.0, ((word >> 10) & 0x3FF) / 1023.0, ((word >> 20) & 0x3FF) / 1023.0
+
+
+def decode_packed10(data, fc):
+    """(width, height, [(r, g, b)] row-major) of a 2D texture of format 7 or 54 (the sun layer's and the bloom's
+    buffers as the rows that sample them name them)."""
+    t = fetch_texture(fc)
+    if t["format"] not in PACKED10_FORMATS or ((fc[5] >> 9) & 3) != 1:
+        raise ValueError("format %d is not a 2D k_2_10_10_10" % t["format"])
+    w, h = t["width"], t["height"]
+    pitch = max(((fc[0] >> 22) & 0x1FF) << 5, w)
+    row_bytes = ((pitch + 31) & ~31) * 4
+    endian = (fc[1] >> 6) & 3
+    order = ">I" if endian == 2 else "<I"
+    if endian not in (0, 2):
+        raise ValueError("endian %d" % endian)
+    out = []
+    for y in range(h):
+        for x in range(w):
+            o = tiled_offset_2d(x, y, pitch, 2) if t["tiled"] else y * row_bytes + x * 4
+            if o + 4 > len(data):
+                raise ValueError("texel (%d, %d) at %d lies outside the %d bytes" % (x, y, o, len(data)))
+            out.append(packed10(struct.unpack_from(order, data, o)[0]))
+    return w, h, out
+
+
+def stream_steps(dwords):
+    """What a run of command dwords does to a render target, in order: every draw as {"type": "resolve"} (with
+    the copy's base, pitch, height, format, source) or {"type": "draw"} ("mode" RB_MODECONTROL's low bits as
+    the run left them, 4 colour and depth, 5 depth only; "colour_format" of RB_COLOR_INFO and "surface"
+    RB_SURFACE_INFO as the run left them; None where the run wrote none; in a "resolve" row, the clear
+    routine's, such a draw is a clear rectangle; in a "cmdgap" row it is a hooked draw's own packet), and
+    every PM4_INDIRECT_BUFFER call as {"type": "indirect", "address", "dwords"}: its packets are not in the
+    row."""
+    regs = {}
+    out = []
+    draws = {e["at"]: e for e in draw_events(dwords)}
+    for p in pm4_packets(dwords):
+        for reg, value in register_writes(p):
+            regs[reg] = value
+        if p["type"] != 3:
+            continue
+        if p["opcode"] == PM4_INDIRECT_BUFFER and len(p["data"]) >= 2:
+            out.append({"type": "indirect", "address": p["data"][0], "dwords": p["data"][1] & 0xFFFFF})
+        e = draws.get(p["at"])
+        if e is None:
+            continue
+        if e["resolve"]:
+            c = e["copy"]
+            out.append({"type": "resolve", "base": c["base"], "pitch": c.get("pitch"), "height": c.get("height"),
+                        "format": c.get("format"), "source": c.get("src_select")})
+        else:
+            mode, colour = regs.get(REG_MODECONTROL), regs.get(REG_COLOR_INFO)
+            out.append({"type": "draw", "mode": None if mode is None else mode & 7,
+                        "colour_format": None if colour is None else (colour >> 16) & 0xF,
+                        "surface": regs.get(REG_SURFACE_INFO)})
+    return out
+
+
+def build_graph(events):
+    """The frame's render targets as nodes, from its events in row order: {"type": "row", "line", "name",
+    "pitch", "in_scene", "reads": [(slot, fetch_texture)]}, {"type": "resolve", "line", "base", "pitch", "height",
+    "format", "source"}, {"type": "clear", "line", "mode", "colour_format"}.
+    A node is what one resolve copies: {"index", "draws" (the rows outside the main scene since the resolve
+    before, or since the last colour clear after it), "earlier" (the rows before that clear: they are not in
+    the colour picture; depth, or another target), "scene_rows" (a count of the main scene's), "clears" (the
+    clear rectangles that write colour, mode 4), "again" (the node whose picture this resolve copies once more:
+    nothing drawn and no colour cleared since), "dest" (the resolve; None for the rows after the last one),
+    "reads": [(row name, slot, texture, the node that last resolved to that base or None, a note or None)] of
+    "draws", "earlier_reads" the same of "earlier"}.
+    The guest's order of issue is the GPU's order of execution, so "the last resolve to a base before the
+    row" is what the row samples."""
+    nodes = []
+    writer = {}      # base -> node index of the last resolve there
+    cur = None
+    last_colour = None   # the node that holds the colour target's picture as it stands
+
+    def fresh():
+        return {"index": len(nodes), "draws": [], "earlier": [], "scene_rows": 0, "clears": [], "again": None, "dest": None,
+                "reads": [], "earlier_reads": []}
+
+    for e in events:
+        if cur is None:
+            cur = fresh()
+        if e["type"] == "row":
+            if e.get("in_scene"):
+                cur["scene_rows"] += 1
+            else:
+                cur["draws"].append(e)
+            for slot, t in e.get("reads", ()):
+                producer = writer.get(t["base"])
+                note = None
+                if producer is not None:
+                    d = nodes[producer]["dest"]
+                    if d["height"] != t["height"] or d["pitch"] != ((t["width"] + 31) & ~31):
+                        note = "the last resolve there is %d x %d, the row reads %d x %d" % (
+                            d["pitch"], d["height"], t["width"], t["height"])
+                if not e.get("in_scene"):
+                    cur["reads"].append((e["name"], slot, t, producer, note))
+        elif e["type"] == "clear":
+            if e.get("mode") == 5:
+                continue    # depth only: the colour stands
+            # A colour clear after draws without a resolve between: those draws are not in the colour picture.
+            cur["earlier"] += cur["draws"]
+            cur["earlier_reads"] += cur["reads"]
+            cur["draws"], cur["reads"] = [], []
+            cur["clears"].append(e)
+        elif e["type"] == "resolve":
+            cur["dest"] = e
+            if not (cur["draws"] or cur["earlier"] or cur["scene_rows"] or cur["clears"]):
+                cur["again"] = last_colour
+            nodes.append(cur)
+            if e.get("base") is not None:
+                writer[e["base"]] = cur["index"]
+            if cur["again"] is None:
+                last_colour = cur["index"]
+            cur = None
+    if cur is not None and (cur["draws"] or cur["earlier"] or cur["scene_rows"]):
+        nodes.append(cur)
+    return nodes
+
+
+def node_kind(node):
+    """"drawn" (rows since the resolve before), "cleared" (colour clears alone), "again" (neither: the picture
+    of the resolve before, copied once more)."""
+    if node["draws"] or (node["scene_rows"] and not node["clears"]):
+        return "drawn"
+    return "cleared" if node["clears"] else "again"
+
+
+def node_name(node):
+    kind = node_kind(node)
+    if kind == "cleared":
+        return "(cleared, nothing drawn)"
+    if kind == "again":
+        return "(the picture of node %s again)" % node["again"]
+    names = []
+    for d in node["draws"]:
+        if not names or names[-1] != d["name"]:
+            names.append(d["name"])
+    if node["scene_rows"] and not node["clears"]:
+        names.insert(0, "the main scene (%d rows)" % node["scene_rows"])
+    return " + ".join(names)
+
+
+def chain_names(nodes, index, limit=16):
+    """The names of a node and of what it was made from, following each node's first read that a node of the
+    frame produced (a reduction, a blur: one input), down to a node that reads none."""
+    out = []
+    seen = set()
+    while index is not None and index not in seen and len(out) < limit:
+        seen.add(index)
+        node = nodes[index]
+        if node_kind(node) == "again" and node["again"] is not None:
+            index = node["again"]
+            continue
+        out.append(node_name(node))
+        index = next((producer for _, _, _, producer, _ in node["reads"] if producer is not None), None)
+    return out
+
+
+def unread_nodes(nodes):
+    """The nodes with a destination that no later row of the frame reads before the base is resolved to again
+    (by base alone: what a later frame or the CPU reads is not in the rows)."""
+    read = {producer for n in nodes for _, _, _, producer, _ in n["reads"] if producer is not None}
+    again = {n["again"] for n in nodes if n["again"] is not None}
+    return [n["index"] for n in nodes if n["dest"] is not None and n["index"] not in read and n["index"] not in again]
+
+
+def _row_name(ps, vs, roles):
+    if ps in POST_PS:
+        return POST_PS[ps]
+    return roles.get(ps) or roles.get(vs) or ("ps %s" % ps[:4] if ps else "vs %s" % vs[:4])
+
+
+def _furniture_roles():
+    import light_formulas as lf
+    roles = {s.hash: s.role for s in lf.POST_FURNITURE_SHADERS}
+    roles.update({s.hash: s.role for s in lf.POST_SHADERS})
+    return roles
+
+
+def _row_hashes(r):
+    ps = (r.get("ps_hash") or "0x")[2:].upper()
+    vs = (r.get("vs_hash") or (r.get("vs") or {}).get("hash") or (r.get("vs") or {}).get("object_hash") or "0x")[2:].upper()
+    return ps, vs
+
+
+def _rs(r, reg, default=None):
+    v = (r.get("rs") or {}).get("%04X" % reg)
+    return default if v is None else int(v, 16)
+
+
+def frame_rows(path, frame, kinds=("draw", "tess", "verts", "indx", "resolve", "cmdgap", "frame")):
+    """(line number, parsed row) of one frame's rows of the kinds named, in the file's order."""
+    mark = '"frame":%d,' % frame
+    with open(path, encoding="utf-8") as f:
+        for line_no, line in enumerate(f):
+            head = line[:48]
+            if not head.startswith('{"kind":"') or mark not in head:
+                continue
+            if head[9:head.find('"', 9)] in kinds:
+                yield line_no, json.loads(line)
+
+
+def graph_events(path, frame):
+    """build_graph's events of one frame of a capture, and the rows by line."""
+    roles = _furniture_roles()
+    events, rows = [], {}
+    for line_no, r in frame_rows(path, frame):
+        kind = r["kind"]
+        if kind == "frame":
+            break
+        if kind in ("resolve", "cmdgap"):
+            if r.get("skipped"):
+                # A stretch of the command stream the capture did not look at: a resolve inside it is in no row.
+                events.append({"type": "skipped", "line": line_no, "why": r["skipped"]})
+            if r.get("cmd"):
+                for step in stream_steps(hex_dwords(r["cmd"])):
+                    if step["type"] == "draw":
+                        if kind != "resolve":
+                            continue    # a hooked draw's own packet: the draw has its row
+                        step["type"] = "clear"
+                    step["line"] = line_no
+                    step["n"] = r.get("n")
+                    events.append(step)
+            continue
+        ps, vs = _row_hashes(r)
+        reads = []
+        for slot, fc in sorted((r.get("tf") or {}).items(), key=lambda kv: int(kv[0])):
+            t = fetch_texture([int(x, 16) for x in fc])
+            content = (r.get("tfc") or {}).get(slot)
+            t["content"] = int(content, 16) if content else None
+            t["fc"] = [int(x, 16) for x in fc]
+            reads.append((int(slot), t))
+        rows[line_no] = r
+        events.append({"type": "row", "line": line_no, "name": _row_name(ps, vs, roles), "ps": ps, "vs": vs,
+                       "pitch": int(r.get("surface_info", "0x0"), 16) & 0x3FFF, "in_scene": bool(r.get("in_scene")),
+                       "rt_format": (_rs(r, 0x2001, 0) >> 16) & 0xF, "mask": _rs(r, 0x2104, 0xF) & 0xF, "reads": reads})
+    return events, rows
+
+
+def _picture_stats(cap, t, png=None):
+    """A line on a small buffer's dump (formats 6, 7, 54), or why there is none; with `png` (a path prefix) the
+    dump is also written as <prefix>_<base>_<width>x<height>_f<format>_<content>.png."""
+    if t.get("content") is None:
+        return "no content kept"
+    tex = cap.by_content.get((t["base"], t["content"]))
+    if tex is None or not tex.path.is_file():
+        return "content %016X: no dump" % t["content"]
+    try:
+        if t["format"] in PACKED10_FORMATS:
+            _, _, texels = decode_packed10(tex.read(), t["fc"])
+        elif t["format"] == 6:
+            _, _, texels = ft.decode_2d(tex.read(), t["fc"])
+        else:
+            return "content %016X (format %d: not decoded here)" % (t["content"], t["format"])
+    except ValueError as e:
+        return "content %016X: %s" % (t["content"], e)
+    n = len(texels)
+    if png:
+        import post_sun_layer as sl
+        w = t["width"]
+        sl._rows_png("%s_%08X_%dx%d_f%d_%016X.png" % (png, t["base"], w, t["height"], t["format"], t["content"]),
+                     [[tuple(q[:3]) for q in texels[y * w:(y + 1) * w]] for y in range(t["height"])])
+    lum = [luminance(p[0], p[1], p[2]) for p in texels]
+    lit = sum(1 for v in lum if v > 0.0)
+    return "content %016X: mean (%.4f, %.4f, %.4f), largest luminance %.4f, %d of %d texels above 0" % (
+        t["content"], sum(p[0] for p in texels) / n, sum(p[1] for p in texels) / n, sum(p[2] for p in texels) / n,
+        max(lum), lit, n)
+
+
+def _dest_text(d):
+    if d is None:
+        return "no resolve follows in the frame's rows"
+    return "-> 0x%08X %s x %s format %s%s" % (
+        d["base"] or 0, d.get("pitch"), d.get("height"), d.get("format"), " (depth)" if d.get("source") == 4 else "")
+
+
+def report_graph(path, frame, tex_root=None, stats=True, all_nodes=False, png=None):
+    """Every pass of the frame after the main scene with its real destination (the resolve rows), what it reads
+    and which pass wrote that; then the bright pass's tf1 and tf2 traced back."""
+    events, _ = graph_events(path, frame)
+    if not events:
+        print("frame %d: no rows" % frame)
+        return 1
+    nodes = build_graph(events)
+    cap = load_capture(path, tex_root) if stats else None
+    resolves = sum(1 for e in events if e["type"] == "resolve")
+    print("%s frame %d: %d rows, %d resolves, %d nodes" % (Path(path).name, frame, sum(1 for e in events if e["type"] == "row"),
+                                                          resolves, len(nodes)))
+    if not resolves:
+        print("no resolve in the frame's rows: a capture made before the \"cmdgap\" rows (plan Task 1) cannot give the graph")
+        return 1
+    last_scene = max((n["index"] for n in nodes if n["scene_rows"]), default=-1)
+    first_line = min((d["line"] for n in nodes if n["index"] > last_scene for d in n["draws"] + n["earlier"]), default=0)
+    skipped = [e for e in events if e["type"] == "skipped" and e["line"] >= first_line]
+    if skipped:
+        print("%d stretches of the command stream after the main scene were not looked at (lines %s): a resolve inside one "
+              "is in no row, and a node below may then name the wrong writer" % (
+                  len(skipped), ", ".join("%d (%s)" % (e["line"], e["why"]) for e in skipped[:8])))
+    indirect = {}
+    for e in events:
+        if e["type"] == "indirect":
+            indirect[(e["address"], e["dwords"])] = indirect.get((e["address"], e["dwords"]), 0) + 1
+    for n in nodes:
+        if not all_nodes and n["index"] <= last_scene:
+            continue
+        pitches = sorted({d["pitch"] for d in n["draws"]})
+        formats = sorted({d["rt_format"] for d in n["draws"] if "rt_format" in d})
+        masks = sorted({d["mask"] for d in n["draws"] if "mask" in d})
+        print("node %d: %s%s %s" % (
+            n["index"], node_name(n),
+            " | target pitch %s, colour format %s, colour mask %s" % (
+                "/".join(map(str, pitches)), "/".join(map(str, formats)), "/".join("%X" % m for m in masks)) if n["draws"] else "",
+            _dest_text(n["dest"])))
+        if n["clears"]:
+            print("    colour clears: %d (colour format %s)" % (
+                len(n["clears"]), "/".join(str(c.get("colour_format")) for c in n["clears"])))
+        if n["earlier"]:
+            names = []
+            for d in n["earlier"]:
+                if not names or names[-1] != d["name"]:
+                    names.append(d["name"])
+            print("    drawn before the last colour clear (not in the colour picture: depth, or another target): %s" % " + ".join(names))
+        for name, slot, t, producer, note in n["reads"]:
+            if producer is None and t["base"] not in {m["dest"]["base"] for m in nodes if m["dest"]}:
+                continue    # a texture no resolve of the frame writes: an asset
+            print("    %s tf%d reads 0x%08X %d x %d format %d: %s%s%s" % (
+                name, slot, t["base"], t["width"], t["height"], t["format"],
+                "written by node %d (%s)" % (producer, node_name(nodes[producer])) if producer is not None
+                else "resolved to later in the frame only (an earlier frame's)",
+                "; " + note if note else "", "; " + _picture_stats(cap, t, png) if cap else ""))
+    status = 0
+    bright = next((n for n in nodes if any(d.get("ps") == BRIGHT_PS for d in n["draws"])), None)
+    print()
+    if cap:
+        print("(a content is the base's memory when the row was issued on the guest's thread: the GPU's thread may not have run")
+        print(" this frame's resolves by then, and several of these bases are resolved to more than once a frame; so a dump")
+        print(" is some earlier state of the base, not what the row's draw sampled. The nodes are by address, not by content.)")
+    if bright is None:
+        print("no bright pass row (%s) in the frame" % BRIGHT_PS[:4])
+        status = 1
+    else:
+        for name, slot, t, producer, note in bright["reads"]:
+            if name == "bright" and slot in (1, 2):
+                chain = chain_names(nodes, producer) if producer is not None else ["(no node of the frame)"]
+                print("the bright pass's tf%d (0x%08X) <- %s" % (slot, t["base"], " <- ".join(chain)))
+                if producer is None or note:
+                    status = 1
+    for i in unread_nodes(nodes):
+        if i > last_scene or all_nodes:
+            d = nodes[i]["dest"]
+            print("read by no later row of the frame: node %d, %s, 0x%08X %s x %s format %s" % (
+                i, " <- ".join(chain_names(nodes, i)), d["base"] or 0, d.get("pitch"), d.get("height"), d.get("format")))
+    for (address, dwords), count in sorted(indirect.items()):
+        print("indirect buffer 0x%08X, %d dwords: called %d times in the frame's rows (its packets are not in a row)" % (
+            address, dwords, count))
+    return status
+
+
+# --- the furniture's census -----------------------------------------------------------------------------------
+
+def furniture_census(rows):
+    """Counts over rows {"frame", "role", "kind", "func", "pitch", "in_scene", "depth", "blend", "mask",
+    "colorcontrol" (register 0x2202), "alpha_ref" (register 0x210E), "vertices", "indices"}:
+      "counts"   (role, pitch, in scene) -> {frame: rows}
+      "alpha"    (role, pitch, in scene) -> {(test on, function, reference word or None when off): [frames]}
+      "words"    (role, pitch, in scene) -> {(depth word, blend word, colour mask)}
+      "builders" role -> {(row kind, hooked function): rows}
+      "shapes"   role -> {(vertices, indices): rows}"""
+    out = {"counts": {}, "alpha": {}, "words": {}, "builders": {}, "shapes": {}}
+    for r in rows:
+        key = (r["role"], r["pitch"], bool(r["in_scene"]))
+        frames = out["counts"].setdefault(key, {})
+        frames[r["frame"]] = frames.get(r["frame"], 0) + 1
+        on = bool(r["colorcontrol"] & 8)
+        state = (on, r["colorcontrol"] & 7, r["alpha_ref"] if on else None)
+        seen = out["alpha"].setdefault(key, {}).setdefault(state, [])
+        if r["frame"] not in seen:
+            seen.append(r["frame"])
+        out["words"].setdefault(key, set()).add((r["depth"], r["blend"], r["mask"]))
+        b = out["builders"].setdefault(r["role"], {})
+        b[(r["kind"], r["func"])] = b.get((r["kind"], r["func"]), 0) + 1
+        s = out["shapes"].setdefault(r["role"], {})
+        s[(r.get("vertices"), r.get("indices"))] = s.get((r.get("vertices"), r.get("indices")), 0) + 1
+    return out
+
+
+_RE_KIND_FRAME = re.compile(r'^\{"kind":"(draw|tess|verts|indx)","frame":(\d+),')
+
+
+def furniture_rows(path):
+    """furniture_census's rows of a whole capture: every decoded row whose pixel shader is a furniture shader, or
+    whose vertex shader is the cubes'."""
+    roles = _furniture_roles()
+    furniture = {h: role for h, role in roles.items() if h not in POST_PS and role != "reduce"}
+    marks = ['"0x%s"' % h for h in furniture]
+    out = []
+    with open(path, encoding="utf-8") as f:
+        for line_no, line in enumerate(f):
+            m = _RE_KIND_FRAME.match(line[:48])
+            if not m or not any(k in line for k in marks):
+                continue
+            r = json.loads(line)
+            ps, vs = _row_hashes(r)
+            role = furniture.get(ps) or (furniture.get(vs) if vs == CUBE_VS else None)
+            if role is None:
+                continue
+            out.append({"frame": int(m.group(2)), "role": role, "kind": m.group(1), "func": r.get("func", ""), "line": line_no,
+                        "pitch": int(r.get("surface_info", "0x0"), 16) & 0x3FFF, "in_scene": bool(r.get("in_scene")),
+                        "depth": _rs(r, 0x2200, 0), "blend": _rs(r, 0x2201, 0), "mask": _rs(r, 0x2104, 0xF) & 0xF,
+                        "colorcontrol": _rs(r, 0x2202, 0), "alpha_ref": _rs(r, 0x210E, 0),
+                        "vertices": r.get("vertices"),
+                        "indices": r.get("indices") if m.group(1) == "indx" else (r.get("ib") or {}).get("count")})
+    return out
+
+
+def _word_float(word):
+    return struct.unpack(">f", struct.pack(">I", word & 0xFFFFFFFF))[0]
+
+
+def report_quads(path, frame=None):
+    """The furniture of a capture: per kind and target the rows a frame, the alpha test, the state words, the
+    builder; then every quad of one frame with its corners and registers (post_sun_layer's reading)."""
+    rows = furniture_rows(path)
+    if not rows:
+        print("%s: no furniture row" % Path(path).name)
+        return 1
+    c = furniture_census(rows)
+    frames = sorted({r["frame"] for r in rows})
+    print("%s: %d furniture rows in frames %d to %d" % (Path(path).name, len(rows), frames[0], frames[-1]))
+    print()
+    print("rows a frame, by kind and target (pitch; in the main scene or not):")
+    for key in sorted(c["counts"], key=lambda k: (k[0], -k[1])):
+        per = c["counts"][key]
+        counts = [per.get(n, 0) for n in frames]
+        alpha = c["alpha"][key]
+        print("  %-14s pitch %4d %-9s %s a frame%s | alpha test %s | depth, blend, mask %s" % (
+            key[0], key[1], "scene" if key[2] else "outside",
+            str(counts[0]) if len(set(counts)) == 1 else "%d to %d (%s)" % (min(counts), max(counts), " ".join(map(str, counts))),
+            "" if len(set(counts)) == 1 else " VARIES",
+            "; ".join("%s in %d frames" % (
+                "greater than %.4f (0x%08X)" % (_word_float(ref), ref) if on and func == 4 else
+                "function %d against %.4f" % (func, _word_float(ref)) if on else "off", len(fr))
+                for (on, func, ref), fr in sorted(alpha.items(), key=str)),
+            ", ".join("0x%08X 0x%08X %X" % w for w in sorted(c["words"][key]))))
+    print()
+    status = 0
+    for role in sorted(c["builders"]):
+        b = c["builders"][role]
+        shapes = ", ".join("%s vertices %s indices x %d" % (v, i, n) for (v, i), n in sorted(c["shapes"][role].items(), key=str))
+        print("  %-14s drawn through %s | %s" % (role, ", ".join("%s %s x %d" % (k, f, n) for (k, f), n in sorted(b.items())), shapes))
+    quad_roles = {"moon", "cloud", "glare", "beam-source", "flare", "moon-glow", "sun-disc", "cloud-occluder", "layer-depth",
+                  "previous-frame"}
+    other = sorted({(role, k, f) for role, b in c["builders"].items() if role in quad_roles for (k, f) in b if (k, f) != ("indx", QUAD_BUILDER)})
+    print("every quad kind through the indexed builder %s alone: %s" % (
+        QUAD_BUILDER, "yes" if not other else "NO: " + ", ".join("%s as %s %s" % o for o in other)))
+    if frame is None:
+        return status
+    import post_sun_layer as sl
+    print()
+    print("frame %d, every quad (corners x y z u v; the registers POST_QUAD_SHADERS names):" % frame)
+    draws, _ = sl._furniture_rows(path, frame)
+    pattern = set()
+    for d in draws:
+        if d.role is None:
+            continue    # a row that only names a furniture shader beside its own (a HUD quad's alternative hash)
+        print("  n %-4s %s" % (d.row.get("n"), sl.describe(d)))
+        print("         " + " ".join("(" + ", ".join("%.6g" % x for x in v) + ")" for v in d.vertices[:8]))
+        if len(d.vertices) == 4:
+            pattern.add(tuple(d.indices))
+    print("index pattern of the 4-vertex quads: %s" % ", ".join(" ".join(map(str, p)) for p in sorted(pattern)))
+    return status
+
+
+# --- the occluders: the cubes and the tree draws ----------------------------------------------------------------
+
+def match_tree_occluders(rows, layer_pitch, depth_copy_line):
+    """The tree occluder draws (pixel shader F1EB at the layer's target) against the frame's main-scene leaf
+    draws (pixel shader 7CD5), over rows {"line", "vs", "ps", "buffers" (index buffer address, index count,
+    vertex buffer address), "pitch", "in_scene", "indices"}:
+      "matches"            [(occluder row, [main-scene leaf rows with the same buffers])]
+      "scene_leaf_before"  main-scene leaf draws issued before the scene's depth copy (None without the line)
+      "scene_leaf_after"   and after it
+      "after_all_matched"  whether every leaf draw after the copy has an occluder with its buffers"""
+    leaf = [r for r in rows if r["in_scene"] and r["ps"].startswith(LEAF_PS)]
+    occ = [r for r in rows if not r["in_scene"] and r["pitch"] == layer_pitch and r["ps"].startswith(TREE_OCCLUDER_PS)]
+    matches = [(o, [r for r in leaf if r["buffers"] == o["buffers"]]) for o in occ]
+    if depth_copy_line is None:
+        return {"matches": matches, "scene_leaf_before": None, "scene_leaf_after": None, "after_all_matched": None}
+    after = [r for r in leaf if r["line"] > depth_copy_line]
+    return {"matches": matches, "scene_leaf_before": len(leaf) - len(after), "scene_leaf_after": len(after),
+            "after_all_matched": all(any(o["buffers"] == r["buffers"] for o in occ) for r in after)}
+
+
+def report_occluders(path, frame):
+    """What the sun layer's occluders are, from one frame's rows: each cube (vertex shader D1CC) against the
+    main scene's draws of the same unit cube and the same vertex c119.x; each tree occluder draw against the
+    main scene's leaf draws of the same buffers, and where the scene's depth copy lies between them."""
+    scene_pitch = None
+    depth_copy = None
+    draws, cubes = [], []
+    for line_no, r in frame_rows(path, frame, kinds=("draw", "indx", "cmdgap", "resolve")):
+        kind = r["kind"]
+        if kind in ("cmdgap", "resolve"):
+            if r.get("cmd") and depth_copy is None and "1A02A000" in r["cmd"].upper():
+                for step in stream_steps(hex_dwords(r["cmd"])):
+                    if step["type"] == "resolve" and step["base"] == SCENE_DEPTH_BASE:
+                        depth_copy = line_no
+            continue
+        ps, vs = _row_hashes(r)
+        pitch = int(r.get("surface_info", "0x0"), 16) & 0x3FFF
+        if r.get("in_scene") and scene_pitch is None:
+            scene_pitch = pitch
+        if kind == "draw":
+            ib, vb = r.get("ib") or {}, r.get("vb") or {}
+            draws.append({"line": line_no, "vs": vs[:4], "ps": ps[:4], "pitch": pitch, "in_scene": bool(r.get("in_scene")),
+                          "buffers": (ib.get("phys_addr"), ib.get("count"), vb.get("phys_addr")), "indices": ib.get("count"),
+                          "vertices": vb.get("vertices"), "depth": _rs(r, 0x2200, 0), "colorcontrol": _rs(r, 0x2202, 0),
+                          "alpha_ref": _rs(r, 0x210E, 0), "matrix": tuple((r.get("bank") or [])[:16])})
+        elif r.get("vertices") == 8 and r.get("indices") == 30:
+            bank = r.get("bank") or []
+            cubes.append({"line": line_no, "n": r.get("n"), "vs": vs[:4], "ps": ps[:4] or "none", "pitch": pitch,
+                          "in_scene": bool(r.get("in_scene")), "c119x": bank[476] if len(bank) > 476 else None,
+                          "c9": tuple(bank[36:40]) if len(bank) >= 40 else None, "depth": _rs(r, 0x2200, 0)})
+    if scene_pitch is None:
+        print("frame %d: no main-scene row" % frame)
+        return 1
+    layer_pitch = scene_pitch // 2
+    print("%s frame %d: the scene's target has pitch %d, the layer's %d; the scene's depth copy (resolve to 0x%08X) is at line %s" % (
+        Path(path).name, frame, scene_pitch, layer_pitch, SCENE_DEPTH_BASE, depth_copy))
+    print()
+    print("unit cubes (8 vertices, 30 indices, the indexed builder):")
+    for c in cubes:
+        where = "main scene" if c["in_scene"] else "outside, pitch %d" % c["pitch"]
+        twins = [o for o in cubes if o is not c and o["in_scene"] != c["in_scene"] and o["c119x"] == c["c119x"]]
+        print("  line %d n %s vs %s ps %s %s: c119.x %s, depth word 0x%08X%s%s" % (
+            c["line"], c["n"], c["vs"], c["ps"], where, "%.6f" % c["c119x"] if c["c119x"] is not None else "?", c["depth"],
+            "" if depth_copy is None or not c["in_scene"] else ", %s the depth copy" % ("after" if c["line"] > depth_copy else "BEFORE"),
+            "; the same c119.x as " + ", ".join("line %d (vs %s ps %s)" % (o["line"], o["vs"], o["ps"]) for o in twins) if twins
+            else "; no cube with the same c119.x on the other side"))
+    m = match_tree_occluders(draws, layer_pitch, depth_copy)
+    print()
+    print("tree occluder draws (ps %s at pitch %d): %d" % (TREE_OCCLUDER_PS, layer_pitch, len(m["matches"])))
+    for o, same in m["matches"]:
+        print("  line %d vs %s: %s indices, %s vertices, depth 0x%08X, register 0x2202 0x%08X, alpha reference %.4f" % (
+            o["line"], o["vs"], o["indices"], o["vertices"], o["depth"], o["colorcontrol"], _word_float(o["alpha_ref"])))
+        for r in same:
+            print("      the same index buffer, count and vertex buffer: main-scene line %d, vs %s ps %s, depth 0x%08X, 0x2202 0x%08X%s; "
+                  "vertex c0..c3 %s" % (
+                      r["line"], r["vs"], r["ps"], r["depth"], r["colorcontrol"],
+                      "" if depth_copy is None else ", %s the depth copy" % ("after" if r["line"] > depth_copy else "before"),
+                      "equal to the occluder's (the same instance)" if r["matrix"] and r["matrix"] == o["matrix"]
+                      else "not the occluder's (another instance of the mesh)"))
+        if not same:
+            print("      no main-scene leaf draw has the same buffers")
+    if m["scene_leaf_before"] is not None:
+        print("main-scene leaf draws (ps %s): %d before the depth copy, %d after it; each of those after it has an occluder with its buffers: %s" % (
+            LEAF_PS, m["scene_leaf_before"], m["scene_leaf_after"], "yes" if m["after_all_matched"] else "NO"))
+    return 0
+
+
+# --- sign fields of every bound texture (review-task-8b, Minor 2) -----------------------------------------------
+
+FLOAT_FORMATS = (29, 30, 31, 32, 36, 37, 38)
+
+
+def sign_known(kind, slot, fmt, signs):
+    """Whether a non-zero set of sign fields is one the native pass handles: the terrain's base map (a "tess"
+    row's slot 3 with gamma on r, g, b and nothing on alpha: the curve, since 5d0f974), or a float format with
+    all four fields 1 (its values are its own whatever the fields say; the fog and post blocks pin theirs)."""
+    if kind == "tess" and slot == 3 and tuple(signs) == (3, 3, 3, 0):
+        return True
+    return fmt in FLOAT_FORMATS and tuple(signs) == (1, 1, 1, 1)
+
+
+def sign_census(rows):
+    """Over rows with "kind" and "tf" (slot -> six hex words): {"textures": fetch constants looked at,
+    "fields": {(row kind, slot, format, sign fields): count} for every constant with a field that is not 0,
+    "exp": {(row kind, slot, format, exponent adjust): count} for every adjust that is not 0}."""
+    out = {"textures": 0, "fields": {}, "exp": {}}
+    for r in rows:
+        for slot, fc in (r.get("tf") or {}).items():
+            fc = [int(x, 16) for x in fc]
+            out["textures"] += 1
+            signs = tuple(ft.sign_fields(fc))
+            fmt = fc[1] & 0x3F
+            if any(signs):
+                key = (r["kind"], int(slot), fmt, signs)
+                out["fields"][key] = out["fields"].get(key, 0) + 1
+            e = ft.exp_adjust(fc)
+            if e:
+                key = (r["kind"], int(slot), fmt, e)
+                out["exp"][key] = out["exp"].get(key, 0) + 1
+    return out
+
+
+_RE_TF = re.compile(r'"tf":(\{[^}]*\})')
+_RE_ANY_KIND = re.compile(r'^\{"kind":"(draw|tess|verts|indx)"')
+
+
+def report_signs(paths):
+    """The sign fields and exponent adjusts of every texture bound at every decoded row of the captures named:
+    what is not all zero, and whether the native pass knows it."""
+    total = {"textures": 0, "fields": {}, "exp": {}}
+    unknown = 0
+    for path in paths:
+        def rows():
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    m = _RE_ANY_KIND.match(line[:24])
+                    if not m:
+                        continue
+                    t = _RE_TF.search(line)
+                    if t and len(t.group(1)) > 2:
+                        yield {"kind": m.group(1), "tf": json.loads(t.group(1))}
+        c = sign_census(rows())
+        bad = sum(n for k, n in c["fields"].items() if not sign_known(*k)) + sum(c["exp"].values())
+        unknown += bad
+        print("%s: %d bound textures, %d with a sign field that is not 0 (%d not known to the pass), %d with an exponent adjust" % (
+            Path(path).name, c["textures"], sum(c["fields"].values()), bad - sum(c["exp"].values()), sum(c["exp"].values())))
+        total["textures"] += c["textures"]
+        for part in ("fields", "exp"):
+            for k, n in c[part].items():
+                total[part][k] = total[part].get(k, 0) + n
+    print()
+    print("all %d captures: %d bound textures" % (len(paths), total["textures"]))
+    for (kind, slot, fmt, signs), n in sorted(total["fields"].items(), key=str):
+        print("  %-5s slot %2d format %2d signs %s: %d rows%s" % (
+            kind, slot, fmt, " ".join(map(str, signs)), n, "" if sign_known(kind, slot, fmt, signs) else "   <-- NOT KNOWN TO THE PASS"))
+    for (kind, slot, fmt, e), n in sorted(total["exp"].items(), key=str):
+        print("  %-5s slot %2d format %2d exponent adjust %d: %d rows   <-- NOT KNOWN TO THE PASS" % (kind, slot, fmt, e, n))
+    print("sign fields or exponent adjusts the pass does not know: %s" % ("none" if not unknown else "%d rows" % unknown))
+    return 1 if unknown else 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -973,9 +1654,31 @@ def main(argv=None):
     p = sub.add_parser("downsample")
     p.add_argument("capture")
     p.add_argument("--frame", type=int)
-    for name in ("resolves", "table", "block", "find-luminance", "downsample"):
+    p = sub.add_parser("graph")
+    p.add_argument("capture")
+    p.add_argument("--frame", type=int, required=True)
+    p.add_argument("--all", action="store_true", help="every node, not only those after the main scene")
+    p.add_argument("--no-stats", action="store_true", help="do not read the buffers' dumps")
+    p.add_argument("--png", help="a path prefix: every decoded buffer is also written as a picture")
+    p = sub.add_parser("quads")
+    p.add_argument("capture")
+    p.add_argument("--frame", type=int)
+    p = sub.add_parser("occluders")
+    p.add_argument("capture")
+    p.add_argument("--frame", type=int, required=True)
+    p = sub.add_parser("signs")
+    p.add_argument("captures", nargs="+")
+    for name in ("resolves", "table", "block", "find-luminance", "downsample", "graph"):
         sub.choices[name].add_argument("--tex-root")
     args = ap.parse_args(argv)
+    if args.cmd == "graph":
+        return report_graph(args.capture, args.frame, args.tex_root, not args.no_stats, args.all, args.png)
+    if args.cmd == "quads":
+        return report_quads(args.capture, args.frame)
+    if args.cmd == "occluders":
+        return report_occluders(args.capture, args.frame)
+    if args.cmd == "signs":
+        return report_signs(args.captures)
     if args.cmd == "ramp":
         return report_ramp(args.log, args.pairs)
     cap = load_capture(args.capture, args.tex_root)

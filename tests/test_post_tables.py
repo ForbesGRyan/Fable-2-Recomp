@@ -741,5 +741,291 @@ class BlockTest(unittest.TestCase):
             self.assertIn("frame 1: POST pairing: c77.y * c20.w is 1.012500", out.getvalue())
 
 
+# --- the sun layer's graph, the furniture's census, the occluders, the sign fields (plan Task 10) ------------------
+
+def fc2d(base, w, h, fmt, tiled=True, signs=(0, 0, 0, 0), endian=2):
+    """A 2D texture fetch constant as the rows hold it (six hex words)."""
+    d0 = 2 | (0x80000000 if tiled else 0) | sum(s << (2 + 2 * i) for i, s in enumerate(signs))
+    words = [d0, base | fmt | (endian << 6), (w - 1) | ((h - 1) << 13), 0x00A80D10, 0, 1 << 9]
+    return ["0x%08X" % x for x in words]
+
+
+def row(name, line, reads=(), pitch=560, in_scene=False):
+    return {"type": "row", "line": line, "name": name, "pitch": pitch, "in_scene": in_scene,
+            "reads": [(slot, pt.fetch_texture([int(x, 16) for x in fc])) for slot, fc in reads]}
+
+
+def resolve(line, base, pitch, height, fmt):
+    return {"type": "resolve", "line": line, "base": base, "pitch": pitch, "height": height, "format": fmt, "source": 0}
+
+
+def clear(line, mode=4, colour_format=0):
+    return {"type": "clear", "line": line, "mode": mode, "colour_format": colour_format}
+
+
+A, B, C, D, E = 0x12AE1000, 0x12CFD000, 0x12CC7000, 0x12BB9000, 0x12D9F000
+
+# The sun layer as the captures have it (frame-map section 17, "Sun layer discovery"), bases as there.
+LAYER_EVENTS = [
+    row("beam-source", 10, [(13, fc2d(0x14DE0000, 256, 256, 20))]),
+    resolve(11, A, 576, 360, 7),
+    clear(12), clear(13, mode=5),
+    resolve(14, B, 576, 360, 6),
+    row("reduce", 15, [(0, fc2d(B, 560, 360, 6))], pitch=320),
+    resolve(16, C, 288, 180, 6),
+    clear(17, colour_format=2), clear(18, mode=5, colour_format=2),
+    row("flare", 19), row("moon-glow", 20), row("sun-disc", 21),
+    resolve(22, B, 576, 360, 7),
+    row("reduce", 23, [(0, fc2d(B, 560, 360, 54))], pitch=320),
+    resolve(24, D, 288, 180, 7),
+    row("reduce", 25, [(0, fc2d(A, 560, 360, 54))], pitch=320),
+    resolve(26, B, 288, 180, 7),
+    row("radial", 27, [(0, fc2d(B, 280, 180, 7))], pitch=320),
+    resolve(28, B, 288, 180, 7),
+    row("radial", 29, [(0, fc2d(B, 280, 180, 7))], pitch=320),
+    resolve(30, B, 288, 180, 7),
+    row("bright", 31, [(0, fc2d(0x12D33000, 280, 180, 29)), (1, fc2d(B, 280, 180, 54)), (2, fc2d(D, 280, 180, 54))], pitch=320),
+    resolve(32, E, 288, 180, 7),
+    row("composite", 33, [(2, fc2d(E, 280, 180, 54))], pitch=1280),
+]
+
+
+class FetchTextureTest(unittest.TestCase):
+    def test_a_2d_constant(self):
+        t = pt.fetch_texture([int(x, 16) for x in fc2d(0x12CFD000, 560, 360, 54, signs=(3, 3, 3, 0))])
+        self.assertEqual((t["base"], t["width"], t["height"], t["format"], t["tiled"], t["signs"]),
+                         (0x12CFD000, 560, 360, 54, True, (3, 3, 3, 0)))
+
+    def test_a_1d_constant(self):
+        t = pt.fetch_texture(list(pt.TABLE_FC))
+        self.assertEqual((t["base"], t["width"], t["height"], t["format"], t["tiled"], t["signs"]),
+                         (0x1FAA0000, 512, 1, 36, False, (1, 1, 1, 1)))
+
+
+class Packed10Test(unittest.TestCase):
+    def test_the_three_fields(self):
+        # r in bits 0 to 9, g in 10 to 19, b in 20 to 29 of the word as the GPU reads it; stored 8-in-32.
+        word = 1023 | (512 << 10) | (1 << 20) | (3 << 30)
+        self.assertEqual(pt.packed10(word), (1.0, 512 / 1023.0, 1 / 1023.0))
+        self.assertEqual(pt.packed10(0), (0.0, 0.0, 0.0))
+
+    def test_a_linear_picture(self):
+        words = [1023, 1023 << 10, 1023 << 20] + [0] * 29     # one row of the pitch, 32 texels
+        data = struct.pack(">64I", *(words + words))
+        fc = [int(x, 16) for x in fc2d(0x12CFD000, 3, 2, 7, tiled=False)]
+        w, h, texels = pt.decode_packed10(data, fc)
+        self.assertEqual((w, h), (3, 2))
+        self.assertEqual(texels[:3], [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)])
+        self.assertEqual(texels[3:], texels[:3])
+
+    def test_another_format_or_too_few_bytes_is_refused(self):
+        with self.assertRaises(ValueError):
+            pt.decode_packed10(bytes(256), [int(x, 16) for x in fc2d(0x12CFD000, 3, 2, 6, tiled=False)])
+        with self.assertRaises(ValueError):
+            pt.decode_packed10(bytes(8), [int(x, 16) for x in fc2d(0x12CFD000, 3, 2, 7, tiled=False)])
+
+
+class StreamStepsTest(unittest.TestCase):
+    def test_a_clear_a_resolve_and_an_indirect_buffer(self):
+        d = (type0(0x2000, 0x09000230, 0x00000000) + type0(0x2208, 4) + type3(0x36, 0x00030088)
+             + type3(0x3F, 0x1FA98980, 0x30) + RESOLVE)
+        steps = pt.stream_steps(d)
+        self.assertEqual([s["type"] for s in steps], ["draw", "indirect", "resolve"])
+        self.assertEqual((steps[0]["mode"], steps[0]["colour_format"], steps[0]["surface"]), (4, 0, 0x09000230))
+        self.assertEqual((steps[1]["address"], steps[1]["dwords"]), (0x1FA98980, 0x30))
+        self.assertEqual((steps[2]["base"], steps[2]["pitch"], steps[2]["height"], steps[2]["format"]),
+                         (0x12D69000, 320, 180, 36))
+
+    def test_the_colour_format_is_of_the_draw_not_of_the_run(self):
+        d = (type0(0x2001, 0x00020000) + type0(0x2208, 4) + type3(0x36, 0x00030088)
+             + type0(0x2001, 0x00000000) + type3(0x36, 0x00030088))
+        self.assertEqual([s["colour_format"] for s in pt.stream_steps(d)], [2, 0])
+
+    def test_a_run_without_the_registers_says_none(self):
+        steps = pt.stream_steps(type3(0x36, 0x00030088))
+        self.assertEqual((steps[0]["type"], steps[0]["mode"], steps[0]["colour_format"]), ("draw", None, None))
+
+
+class GraphTest(unittest.TestCase):
+    def setUp(self):
+        self.nodes = pt.build_graph(LAYER_EVENTS)
+
+    def node_writing(self, line):
+        return next(n for n in self.nodes if n["dest"] and n["dest"]["line"] == line)
+
+    def test_every_resolve_ends_a_node_and_the_rest_is_the_last(self):
+        self.assertEqual(len(self.nodes), 10)   # nine resolves and the composite after the last
+        self.assertIsNone(self.nodes[-1]["dest"])
+        self.assertEqual([d["name"] for d in self.nodes[-1]["draws"]], ["composite"])
+
+    def test_several_draws_share_one_resolve(self):
+        self.assertEqual([d["name"] for d in self.node_writing(22)["draws"]], ["flare", "moon-glow", "sun-disc"])
+
+    def test_a_resolve_after_clears_alone_is_a_cleared_picture(self):
+        n = self.node_writing(14)
+        # One colour clear; the depth-only rectangle (mode 5) beside it is not one.
+        self.assertEqual((n["draws"], len(n["clears"]), pt.node_kind(n)), ([], 1, "cleared"))
+
+    def test_a_resolve_after_nothing_is_the_picture_again(self):
+        nodes = pt.build_graph([row("beam-source", 1), resolve(2, A, 576, 360, 7), resolve(3, B, 576, 360, 6)])
+        self.assertEqual([pt.node_kind(n) for n in nodes], ["drawn", "again"])
+        self.assertEqual(nodes[1]["again"], 0)
+
+    def test_a_depth_clear_alone_leaves_the_colour(self):
+        nodes = pt.build_graph([row("beam-source", 1), resolve(2, A, 576, 360, 7), clear(3, mode=5), resolve(4, B, 576, 360, 6)])
+        self.assertEqual(pt.node_kind(nodes[1]), "again")
+
+    def test_draws_before_a_colour_clear_are_not_in_the_picture(self):
+        # The layer's depth and its occluders, then the colour clear, then the beam source: one resolve.
+        nodes = pt.build_graph([row("layer-depth", 1, [(13, fc2d(0x1A02A000, 1120, 720, 23))]), row("cube", 2), clear(3, mode=5),
+                                clear(4), row("beam-source", 5), resolve(6, A, 576, 360, 7)])
+        self.assertEqual(([d["name"] for d in nodes[0]["draws"]], [d["name"] for d in nodes[0]["earlier"]]),
+                         (["beam-source"], ["layer-depth", "cube"]))
+        self.assertEqual((pt.node_name(nodes[0]), nodes[0]["reads"], len(nodes[0]["earlier_reads"])), ("beam-source", [], 1))
+
+    def test_a_scene_that_is_cleared_away_is_not_the_picture(self):
+        nodes = pt.build_graph([row("ps 9C21", 1, in_scene=True, pitch=1120), clear(2), resolve(3, B, 576, 360, 6)])
+        self.assertEqual(pt.node_kind(nodes[0]), "cleared")
+
+    def test_a_read_names_the_last_writer_of_its_base_and_size(self):
+        bright = self.node_writing(32)
+        by_slot = {slot: producer for _, slot, _, producer, _ in bright["reads"]}
+        self.assertEqual(self.nodes[by_slot[1]]["dest"]["line"], 30)   # the second radial blur
+        self.assertEqual(self.nodes[by_slot[2]]["dest"]["line"], 24)   # the reduction of layer 2
+        self.assertIsNone(by_slot[0])                                  # nothing in these events wrote 12D33000
+
+    def test_a_read_of_another_size_than_the_last_write_is_said(self):
+        nodes = pt.build_graph([row("x", 1), resolve(2, B, 576, 360, 7), row("reduce", 3, [(0, fc2d(B, 280, 180, 7))])])
+        _, _, _, producer, note = nodes[1]["reads"][0]
+        self.assertEqual((producer, note), (0, "the last resolve there is 576 x 360, the row reads 280 x 180"))
+
+    def test_tf1_is_the_beams_and_tf2_the_second_layer(self):
+        bright = self.node_writing(32)
+        by_slot = {slot: producer for _, slot, _, producer, _ in bright["reads"]}
+        self.assertEqual(pt.chain_names(self.nodes, by_slot[1]), ["radial", "radial", "reduce", "beam-source"])
+        self.assertEqual(pt.chain_names(self.nodes, by_slot[2]), ["reduce", "flare + moon-glow + sun-disc"])
+
+    def test_the_first_reduction_reads_the_cleared_picture_and_nobody_reads_it(self):
+        c1 = self.node_writing(16)
+        self.assertEqual(pt.chain_names(self.nodes, c1["index"]), ["reduce", "(cleared, nothing drawn)"])
+        self.assertEqual([self.nodes[i]["dest"]["base"] for i in pt.unread_nodes(self.nodes)], [C])
+
+    def test_exchanged_inputs_are_seen(self):
+        events = list(LAYER_EVENTS)
+        at = next(i for i, e in enumerate(events) if e.get("name") == "bright")
+        events[at] = row("bright", 31, [(1, fc2d(D, 280, 180, 54)), (2, fc2d(B, 280, 180, 54))], pitch=320)
+        nodes = pt.build_graph(events)
+        bright = next(n for n in nodes if n["dest"] and n["dest"]["line"] == 32)
+        by_slot = {slot: producer for _, slot, _, producer, _ in bright["reads"]}
+        self.assertEqual(pt.chain_names(nodes, by_slot[1])[-1], "flare + moon-glow + sun-disc")
+        self.assertEqual(pt.chain_names(nodes, by_slot[2])[-1], "beam-source")
+
+    def test_main_scene_rows_are_counted_not_listed(self):
+        nodes = pt.build_graph([row("ps 9C21", 1, in_scene=True, pitch=1120), row("ps 9C21", 2, in_scene=True, pitch=1120),
+                                resolve(3, 0x1A02A000, 1120, 720, 6)])
+        self.assertEqual((nodes[0]["draws"], nodes[0]["scene_rows"], pt.node_kind(nodes[0])), ([], 2, "drawn"))
+
+
+def census_row(frame, role, **kw):
+    r = {"frame": frame, "role": role, "kind": "indx", "func": "DrawIndx:82217EE8", "pitch": 560, "in_scene": False,
+         "depth": 0x00708762, "blend": 0x01010101, "mask": 0xF, "colorcontrol": 0x4, "alpha_ref": 0x3F008081,
+         "vertices": 4, "indices": 6}
+    r.update(kw)
+    return r
+
+
+class FurnitureCensusTest(unittest.TestCase):
+    def test_counts_by_frame_role_and_target(self):
+        rows = [census_row(1, "flare"), census_row(1, "flare"), census_row(1, "flare", pitch=280), census_row(2, "flare")]
+        c = pt.furniture_census(rows)
+        self.assertEqual(c["counts"][("flare", 560, False)], {1: 2, 2: 1})
+        self.assertEqual(c["counts"][("flare", 280, False)], {1: 1})
+
+    def test_the_alpha_test_is_the_enable_bit_with_the_reference(self):
+        rows = [census_row(1, "sun-disc", colorcontrol=0xC), census_row(2, "sun-disc", colorcontrol=0xC),
+                census_row(1, "flare")]
+        c = pt.furniture_census(rows)
+        self.assertEqual(c["alpha"][("sun-disc", 560, False)], {(True, 4, 0x3F008081): [1, 2]})
+        # Off: the reference register's stale word is not a state of the draw.
+        self.assertEqual(c["alpha"][("flare", 560, False)], {(False, 4, None): [1]})
+
+    def test_a_state_that_changes_between_frames_shows_as_two(self):
+        rows = [census_row(1, "moon", colorcontrol=0xC, alpha_ref=0x3B808081), census_row(2, "moon", colorcontrol=0xC, alpha_ref=0x3C008081)]
+        self.assertEqual(len(pt.furniture_census(rows)["alpha"][("moon", 560, False)]), 2)
+
+    def test_another_builder_or_row_kind_is_named(self):
+        rows = [census_row(1, "glare"), census_row(1, "glare", kind="verts", func="D3DDevice_BeginVertices?")]
+        self.assertEqual(pt.furniture_census(rows)["builders"]["glare"],
+                         {("indx", "DrawIndx:82217EE8"): 1, ("verts", "D3DDevice_BeginVertices?"): 1})
+
+    def test_the_words(self):
+        rows = [census_row(1, "glare", depth=0x00708760), census_row(2, "glare", depth=0x00708762)]
+        self.assertEqual(sorted(pt.furniture_census(rows)["words"][("glare", 560, False)]),
+                         [(0x00708760, 0x01010101, 0xF), (0x00708762, 0x01010101, 0xF)])
+
+    def test_the_shape(self):
+        rows = [census_row(1, "glare"), census_row(1, "cube", vertices=8, indices=30)]
+        c = pt.furniture_census(rows)
+        self.assertEqual(c["shapes"]["glare"], {(4, 6): 1})
+        self.assertEqual(c["shapes"]["cube"], {(8, 30): 1})
+
+
+def draw_row(line, vs, ps, key, pitch=1120, in_scene=True, count=100):
+    return {"line": line, "vs": vs, "ps": ps, "buffers": key, "pitch": pitch, "in_scene": in_scene, "indices": count}
+
+
+class OccluderTest(unittest.TestCase):
+    def test_a_tree_occluder_is_matched_by_its_buffers(self):
+        rows = [draw_row(10, "A584", "7CD5", (1, 300, 2)), draw_row(20, "A584", "7CD5", (3, 500, 4)),
+                draw_row(30, "A584", "7CD5", (5, 700, 6)),
+                draw_row(40, "4325", "F1EB", (5, 700, 6), pitch=560, in_scene=False),
+                draw_row(41, "4325", "F1EB", (9, 9, 9), pitch=560, in_scene=False),
+                draw_row(5, "4325", "F1EB", (1, 300, 2), pitch=1040, in_scene=False)]
+        m = pt.match_tree_occluders(rows, layer_pitch=560, depth_copy_line=25)
+        self.assertEqual([(o["line"], [r["line"] for r in same]) for o, same in m["matches"]], [(40, [30]), (41, [])])
+        self.assertEqual((m["scene_leaf_before"], m["scene_leaf_after"]), (2, 1))
+        self.assertEqual(m["after_all_matched"], True)
+
+    def test_a_late_leaf_draw_without_an_occluder_is_seen(self):
+        rows = [draw_row(30, "A584", "7CD5", (5, 700, 6)), draw_row(31, "A584", "7CD5", (7, 700, 8))]
+        m = pt.match_tree_occluders(rows + [draw_row(40, "4325", "F1EB", (5, 700, 6), pitch=560, in_scene=False)],
+                                    layer_pitch=560, depth_copy_line=25)
+        self.assertEqual(m["after_all_matched"], False)
+
+    def test_no_depth_copy_line_means_no_before_and_after(self):
+        m = pt.match_tree_occluders([draw_row(30, "A584", "7CD5", (5, 700, 6))], layer_pitch=560, depth_copy_line=None)
+        self.assertEqual((m["scene_leaf_before"], m["scene_leaf_after"], m["after_all_matched"]), (None, None, None))
+
+
+class SignCensusTest(unittest.TestCase):
+    def test_fields_that_are_not_zero_are_counted_by_kind_slot_and_format(self):
+        tess = {"kind": "tess", "tf": {"3": fc2d(0x17000000, 512, 512, 18, signs=(3, 3, 3, 0)), "0": fc2d(0x17100000, 64, 64, 18)}}
+        post = {"kind": "verts", "tf": {"1": ["0x%08X" % x for x in pt.TABLE_FC]}}
+        other = {"kind": "draw", "tf": {"2": fc2d(0x18000000, 64, 64, 6, signs=(0, 2, 0, 0))}}
+        c = pt.sign_census([tess, tess, post, other])
+        self.assertEqual(c["textures"], 6)
+        self.assertEqual(c["fields"][("tess", 3, 18, (3, 3, 3, 0))], 2)
+        self.assertEqual(c["fields"][("verts", 1, 36, (1, 1, 1, 1))], 1)
+        self.assertEqual(c["fields"][("draw", 2, 6, (0, 2, 0, 0))], 1)
+        self.assertEqual(len(c["fields"]), 3)
+
+    def test_known_and_unknown(self):
+        # Known: the terrain's base map (tess slot 3, gamma on r g b: the pass applies the curve since 5d0f974) and
+        # the float formats with all four fields 1, whose values are their own whatever the fields say. Anything
+        # else is to be reported.
+        self.assertTrue(pt.sign_known("tess", 3, 18, (3, 3, 3, 0)))
+        self.assertTrue(pt.sign_known("draw", 4, 29, (1, 1, 1, 1)))
+        self.assertTrue(pt.sign_known("verts", 1, 36, (1, 1, 1, 1)))
+        self.assertFalse(pt.sign_known("tess", 0, 18, (3, 3, 3, 0)))
+        self.assertFalse(pt.sign_known("tess", 3, 18, (3, 3, 3, 3)))
+        self.assertFalse(pt.sign_known("draw", 2, 6, (0, 2, 0, 0)))
+        self.assertFalse(pt.sign_known("draw", 2, 6, (1, 1, 1, 1)))
+
+    def test_exponent_adjust_is_counted(self):
+        fc = fc2d(0x17000000, 512, 512, 18)
+        fc[3] = "0x%08X" % (int(fc[3], 16) | (2 << 13))
+        self.assertEqual(pt.sign_census([{"kind": "tess", "tf": {"3": fc}}])["exp"], {("tess", 3, 18, 2): 1})
+
+
 if __name__ == "__main__":
     unittest.main()

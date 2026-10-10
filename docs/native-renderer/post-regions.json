@@ -1,0 +1,20 @@
+{
+  "about": "Regions for the sun layer of the native renderer (spec docs/superpowers/specs/2026-10-09-native-renderer-post-design.md, success criteria 18 and 19), read by tools/xdk_sigmatch/post_sun_layer.py (replay ... --region-file post-regions --spot sunward) and tools/xdk_sigmatch/region_compare.py. The view is the plan's SUNWARD line (-BootSave Hero000, two turns of the right stick, then the camera raised): the hero on the bridge seen from below, the sun behind the upper rail left of the post.",
+  "coordinates": "rect = [x0, y0, x1, y1] as fractions of the picture (0, 0 top left). DRAFT of plan Task 10: chosen on the game's front buffer of capture native_discovery_20261009_134312 frame 1 at the scene's width (out/native-evidence/post/task11_134312_f1_final.png, 1120 x 720; run 413, the same driver line), because plan run 3 (SUNWARD under read-back with the current binary) had not been made. To be confirmed on run 3's emulated shot before a criterion is judged with them: the camera's end position after the 14 s raise is the driver's, and a shot of another run may sit a few pixels off.",
+  "kinds": {
+    "sun": "the sun's own place: the radial blur's centre (pixel c31.xy of 4BE4, (0.3785, 0.3914) in the capture) with the glow about it, behind the upper rail",
+    "beams": "a beam of the sun layer across darker ground (rail, planks, the hero): where the reference without the sun layer (variant B) is darkest against the game's picture",
+    "sky": "open sky beside the sun, clear of leaves, rails and the text box: the control (little of the layer reaches it)"
+  },
+  "spots": {
+    "sunward": {
+      "plan": "-Total 80 -Shots \"44,47,50,76\" -Plan \"32:VIEW=off,33:RS=-100/0/500,36:RS=-100/0/500,41:RS=0/100/14000,45:VIEW=native,48:VIEW=off,51:VIEW=native,52:DISC=8/1\"",
+      "regions": [
+        {"name": "sun", "kind": "sun", "rect": [0.340, 0.330, 0.420, 0.450]},
+        {"name": "beams left", "kind": "beams", "rect": [0.360, 0.470, 0.410, 0.640]},
+        {"name": "beams right", "kind": "beams", "rect": [0.430, 0.520, 0.500, 0.700]},
+        {"name": "sky beside the sun", "kind": "sky", "rect": [0.560, 0.200, 0.620, 0.300]}
+      ]
+    }
+  }
+}

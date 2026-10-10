@@ -5056,9 +5056,10 @@ prediction is made from the game's lit water; the agreement is a coincidence of 
 plan Task 5, Minor 7.) The three outside are regions under moving leaf shadow, whose
 native shots differ among themselves by 8 to 79% within one run: railing post cap (+0.158), rope
 pole shadow on the planks (+0.065), railing post shadow on the planks (-0.055). The far regions
-and the sunlit ground lie 0.02 to 0.05 above the prediction, all on one side: the native scene is
-not the game's scene there (the prediction is made from the game's), and that offset is not
-resolved further here. The read-back switch's pair (T5-4 over T5-5) gives the same picture
+and the sunlit ground lie 0.02 to 0.05 above the prediction, all on one side. That offset is not explained: the
+oracle feed later showed that it is not the composite's or the ramp's shader, and nothing shows
+that it is the native scene ("Oracle feed": "That is all the feed excludes"; the first
+writing here gave the native scene as its cause: review of plan Task 7, Minor 11). The read-back switch's pair (T5-4 over T5-5) gives the same picture
 (sky 1.095, 1.093; planks 0.865; trunk 0.841); the blind pair (T5-2 over T5-3) moves less, 0.81
 to 1.05, as a flat table should (sky 1.044, lake 0.998, planks 0.959).
 
@@ -5148,8 +5149,9 @@ discovery capture's window directly (log 453). The other 11 windows read **29.8 
 post on and with the read-back switch on** (29.8 once, log 454; 29.9 twice, log 451; the first
 writing called all of them 30.0). Spec criterion 9's bridge part, "30.0 fps in every steady
 window", is therefore **not met as written** in this first reading (one window at 27.8, three at
-29.8 to 29.9); the 27.8 is reported, not explained (review of plan Task 5, Minors 3 and 4). **The read-back switch
-holds 30 fps under the gate here**, in both of its runs, and the game adapts with it (`c20.w`
+29.8 to 29.9); the 27.8 is reported, not explained (review of plan Task 5, Minors 3 and 4). **With the read-back
+switch 5 of these 6 windows read 29.8 to 30.1 fps under the gate** (the sixth is the 27.8, in the
+run with post on; without the switch 6 of 6 read 29.9 to 30.0), and the game adapts with it (`c20.w`
 8.73 to 8.20 in T5-4): measured as stated; its default (ruling 2) is Task 7's decision. The
 capture's records-on median is 0.08 to 0.09 ms higher with post on in the normal pair (inside
 criterion 9's 0.10, at its edge) and within the scatter in the read-back pair (-0.14, +0.14):
@@ -5413,13 +5415,17 @@ ruling 25.
 ### Validation (10a)
 
 Plan Task 7 of the post sub-project, 2026-10-10: phase 10a (exposure read-back, post block,
-native composite and ramp, oracle feed) held against spec criteria 1 to 10. **Two things are
-open and say so below: criterion 9 (cost) and ruling 2 (the read-back switch's default).** The
-window has opened on the 100%-scaled monitor since run 457 (shot width 1296 in place of 1942),
-where the host's present gate does not hold; no run of this task gives a timing figure, and the
-eight timing runs asked for are outstanding ("Outstanding", below). Both switches keep their
-defaults: `--fable2_native_post=off`, `--fable2_exposure_readback=off`. No code changed in this
-task; the binary is the one of plan Task 6 (sources of `d175fc8`).
+native composite and ramp, oracle feed) held against spec criteria 1 to 10. **Four things were
+open when this was written, and say so below: criterion 9 (cost); ruling 2 (the read-back
+switch's default); criterion 6's real-GPU half, not met as written here and measured again after
+ruling 25's change ("Native bloom", "Runs", item 3); and, waiting for those, the default of
+`--fable2_native_post`.** The window has opened on the 100%-scaled monitor since run 457 (shot
+width 1296 in place of 1942), where the host's present gate does not hold; no run of this task
+gives a timing figure, and the timing runs are outstanding ("Outstanding: cost", at the end of
+this section). Both switches keep their defaults: `--fable2_native_post=off`,
+`--fable2_exposure_readback=off`. No code changed in this task; the binary of this subsection's
+runs is the one of plan Task 6 (sources of `d175fc8`): before the bloom, before ruling 25's
+rounding and before the base map's gamma fix.
 
 **Runs** (the controller's, `-UserPresent`, `RUN UNCHECKED`; all exit 0; shot width 1296 in
 every one; evidence `out/native-evidence/post/t7_*`: `<name>_driver.txt`,
@@ -5451,8 +5457,10 @@ that is the monitor, and no figure of it is used. **The third spot under
 the first view change took a mean of 169.68 and 174.40 ms; fewer than 150 frames were drawn in
 the 37 s of the last native stretch, so neither log has a periodic clay line; the 8 capture
 frames took 7.4 s): its shots are stills of a standing camera and are used as such; the view
-changes lagged (the shot at 47 s is still emulated in both runs). The two runs are equally slow
-with post on and off, so nothing of that is the post's. Task 5's 43 ms of T5-7 (post off, full
+changes lagged (the shot at 47 s is still emulated in both runs). Both runs drew fewer than
+150 native frames in those 37 s; the cause is not looked for, and neither run says anything about
+the post's cost (the 143 frames above are view-off frames, in which the post does nothing, on the
+monitor where no frame time counts). Task 5's 43 ms of T5-7 (post off, full
 read-back, bridge) was not run again and stays unexplained.
 
 **Verdicts** (the `Post:` lines). Every frame with the switch and the light on was a post
@@ -5485,13 +5493,18 @@ display luminance):
 | sky above the ridge | 0.015 | 0.999 | 0.087 |
 | lake (unlit placeholder) | 0.817 | 0.999 | 0.779 |
 
-Each switch moves what it should and nothing else. *Fog off*: near, unfogged regions are the
-picture with fog to 0.1% (planks, trunk, shirt, dirt 0.999 to 1.001; the rock face, further
-off, 0.976, and the thin pole before the far ground 0.887), the far ground loses its haze (0.60
-to 0.79, the far peak 0.25) and the sky is not drawn. *Shadows off*: everything outside a
-shadow is unchanged (far regions and sky 0.999 to 1.002, the far peak 1.017), the shadowed
-regions are 1.3 to 2.3 times brighter. *Light off*: today's unlit picture through today's mapping, the sky's place at
-exactly (20, 20, 25), the clear colour as section 14 has it.
+Each switch moves what it should; what else moves is small and is named here (review of plan
+Task 7, Minor 5). *Fog off*: near, unfogged regions are the picture with fog to 0.1% (planks,
+trunk, shirt, dirt 0.999 to 1.001; the rock face, further off, 0.976, and the thin pole before
+the far ground 0.887), the far ground loses its haze (0.60 to 0.79, the far peak 0.25) and the
+sky is not drawn; the lake (0.817) and the small tree leaves (0.924) move too, which is taken for
+the haze before them (inference). *Shadows off*: the far regions and the sky are unchanged (0.999
+to 1.002, the far peak 1.017) and the shadowed regions are 1.3 to 2.3 times brighter; the sunlit
+dirt patch, the grass beside it and the rock face read 1.028, 1.030 and 1.029, not 1: taken for
+the soft edges of the leaf shadows that cross them (inference; not followed). *Light off*:
+today's unlit picture through today's mapping, the sky's place at exactly (20, 20, 25), the clear
+colour as section 14 has it. That statement rests on the `Post:` line and on the clear colour: no
+light-off run without the post switch was compared with it by region.
 
 **The clear colour of a post frame, seen for the first time** (`t7_b_nofog`, where no sky
 covers it; `t7_clear_and_ramp.txt`): **levels (4, 4, 4) at 39 s and (3, 3, 4) at 45 s**, the
@@ -5604,78 +5617,85 @@ nothing of the sky's blue above the ceiling is kept in either picture.
 
 | | Criterion | Verdict | Figure and evidence |
 |---|---|---|---|
-| 1 | Formulas | **met** | 2,000 of 2,000 values for each of the eight post shaders, largest relative difference under 1e-15 (`task3_post_check.txt`; plan Task 3; not run again here) |
+| 1 | Formulas | **met** | 2,000 of 2,000 values for each of the eight post shaders, largest relative difference 1.08e-15 for the composite and under 1e-15 for the seven others (`task3_post_check.txt`; plan Task 3; not run again here) |
 | 2 | The game adapts in a normal run | **met** | with the switch and no `--readback_resolve` (log 468, capture `..._011253`): `c20.w` 8.2189 to 8.2232 in all 8 frames (below 12), `T(3) / T(0.1)` 1.516 to 1.520 (at least 1.2), the SDK's `Forced readback-resolve` lines for both addresses (`t7_table_011253.txt`); the same by the trees (`c20.w` 8.634 to 8.657, 1.573 to 1.580: `t7_table_010653.txt`); without the switch `c20.w 16.0000` (log 451) |
-| 3 | The post block | **met** | valid at age 0 and equal to the frame's rows and table dump bit for bit in 8 of 8 frames at the bridge (`t7_block_011253.txt`) and at the third spot (`t7_block_010310.txt`) and in the 5 frames with records by the trees (`t7_block_010653.txt`: its last 3 frames were captured after the plan had switched the view off and hold no records); `post-block in 0 of N frames` in every capture line of logs 464, 465, 466 and 468; the post-off capture reads `invalid(off)` in 8 of 8 (`t7_block_010453.txt`) |
+| 3 | The post block | **met** | valid at age 0 and equal to the frame's rows and table dump bit for bit in 8 of 8 frames at the bridge (`t7_block_011253.txt`) and at the third spot (`t7_block_010310.txt`) and in the 5 frames with records by the trees (`t7_block_010653.txt`: its last 3 frames were captured after the plan had switched the view off and hold no records); `post-block in 0 of N frames` in every capture line of logs 464, 465, 466 and 468; the post-off capture reads `invalid(off)` in 8 of 8 (`t7_block_010453.txt`). At the third spot the verdict rests on those 8 captured frames and the one `post changed` line of log 462: fewer than 300 native frames were drawn there, so the log has no counted line |
 | 4 | The ramp | **not met as written; met by the substituted measure** (ruling 21: 2 levels) | the table the product read maps the eight levels to 9.72, 31.16, 47.11, 110.92, 145.32, 197.92, 233.56, 251.26: largest difference 1.56 levels (logs 462 and 468, `t7_clear_and_ramp.txt`) |
 | 5 | The reference composite against the game | **met** | plan Task 3 (`task3_replay_<stamp>_f1.txt`; with the reference's nearest-texel addressing the median of `121331` is at the tolerance's edge, 3.05 against 3.10); not run again here |
-| 6 | The shaders on the oracle scene | **met on the software adapter, not met as written on the real GPU** | software adapter 100.000% of the pixels within 1 level; real GPU 99.33 to 99.49% within 1 (99.9% asked), all within 2: the card's conversion ("Oracle feed"); ruling 25 moves the rounding into the shaders in plan Task 8 and measures again |
-| 7 | In the game | **met** on the regions without moving leaf shadow | bridge 23 of 26 within 0.05, the three others under leaf shadow ("Native composite"); third spot 15 of 18, the 7 standing regions all within 0.05 (above); the far ground one-sided above the prediction at both |
-| 8 | Off is today's picture | **met by the substituted measure** (ruling 22) | the program comparison (shader test cases 230, 231) and T5-3 against run 433 within the two runs' emulated spread ("Native composite"); here also: with the light off the picture is today's with the switch on, the clear colour exactly (20, 20, 25) (log 467) |
-| 9 | Cost | **open: timing runs outstanding** | valid so far, Task 5's logs 451 to 454 only: the bridge at 29.8 to 30.1 fps in 11 of 12 steady native windows with post on, off and with the read-back switch, one window at 27.8 (below); "30.0 in every steady window" is not met as written in that reading. Not measured: the third spot's windows, post on against off in one session, a view-off median on a quiet machine. Indication only (wrong monitor): view-off capture medians in the world 0.061 to 0.073 ms (logs 464, 467, 468; the criterion: under 0.5), records-on medians 2.24 to 2.30 ms at the bridge (468) |
+| 6 | The shaders on the oracle scene | **met on the software adapter, not met as written on the real GPU** | software adapter 100.000% of the pixels within 1 level; real GPU 99.33 to 99.49% within 1 (99.9% asked), all within 2: the card's conversion ("Oracle feed"); ruling 25 moves the rounding into the shaders in plan Task 8 and measures again (since done: "Native bloom", "Runs", item 3) |
+| 7 | In the game | **met** on the regions without moving leaf shadow | which regions stand still is decided after the fact, by the scatter of a run's own native shots (under 3.2%); bridge 23 of 26 within 0.05 (regions under leaf shadow among the 23), the three others under leaf shadow ("Native composite"); third spot 15 of 18, the 7 standing regions all within 0.05 (above); the far ground one-sided above the prediction at both |
+| 8 | Off is today's picture | **met by the substituted measure** (ruling 22) | the program comparison (shader test cases 230, 231) and T5-3 against run 433 within the two runs' emulated spread ("Native composite"); here also: with the light off the picture is today's with the switch on, the clear colour exactly (20, 20, 25) (log 467); that rests on the `Post:` line and the clear colour, no light-off run without the switch was compared by region |
+| 9 | Cost | **open: timing runs outstanding** | valid so far, Task 5's logs 451 to 454 only (a binary without the bloom, ruling 25's rounding and the gamma fix). By controller ruling 26's bound (every steady 150-frame native window not within three windows after a capture at 29.7 fps or more): 8 of 8 windows at 29.8 to 30.1 fps, with post on, off and with the read-back switch; "30.0 in every steady window" as written is not met (29.8 in the post-off run 454). The third window from the capture, which ruling 26 leaves out, reads 29.9, 30.0, 27.8 and 30.0 in the four runs: the 27.8 is the run with post on and the switch, unexplained (below). Not measured: the third spot's windows, post on against off back to back, a view-off median on a quiet machine, and anything of the present binary ("Outstanding: cost") |
 | 10 | No D3D error | **met** for the two builds that changed bindings, targets or shader text | logs 450 and 457: no error, warning id 1328 only; this task changed no build (the runs above were made without the debug layer and say nothing about it) |
 
-**The 27.8 fps window of T5-4** (log 453 line 4150; "Native composite", "Cost"). The three
-native windows after the plan's `60:DISC=8/1` read 21.1, 17.7 and 27.8 fps, with maxima of
-2,151, 572 and 145 ms: it is the third window of the discovery capture's aftermath, not a
-steady one, and the window after it reads 30.1. That is a reading of the same log, not a
-second measurement; the outstanding timing runs put the capture after eight clean windows so
-that the question does not arise.
+**The 27.8 fps window of T5-4: unexplained** (log 453 line 4150; "Native composite", "Cost").
+The four valid runs have one plan, and in each the capture is requested in the first 150-frame
+native window. Their five windows, fps (largest frame, ms):
+
+| Log | 1st (capture requested) | 2nd | 3rd | 4th | 5th |
+|---|---|---|---|---|---|
+| 451, post on | 20.4 (2,360) | 17.4 (619) | 29.9 (44) | 30.0 | 29.9 |
+| 452, post off | 20.8 (2,253) | 17.6 (595) | 30.0 (43) | 30.0 | 30.0 |
+| 453, post on, read-back switch | 21.1 (2,151) | 17.7 (572) | **27.8** (146) | 30.1 | 30.0 |
+| 454, post off, read-back switch | 20.3 (2,424) | 16.4 (720) | 30.0 (43) | 29.8 | 30.0 |
+
+The capture's stalls end with the second window in three of the four runs; the third window is
+steady in them and slow in one, the run with post on and the read-back switch, which is the
+configuration ruling 2 is about. One window cannot say whether the switch, the post, the two
+together or chance made it slow. It is the only window under 29.8 in all valid timing. (The
+first writing of this paragraph called it "the capture's aftermath, not a steady one"; the same
+window of the three other runs says otherwise: review of plan Task 7, Important 1.) Controller
+ruling 26 keeps the three windows from a capture out of criterion 9's bound: a rule for the
+bound, not an explanation. The third window from the capture is therefore reported for every
+outstanding run, the runs with the switch beside those without ("Outstanding: cost").
 
 **Ruling 2 (the read-back switch's default): open; the switch stays default off.** What is
-valid: one on / off pair under the gate (logs 453 and 454 against 451 and 452), 29.8 to 30.1
-fps in every steady window with the switch, and the game adapting in every run with it (runs
-441 and 444 by their captures, "Exposure read-back"; logs 453, 454 and 464 to 468 by their
-`c20.w`). One pair in one session is not enough to change what every run of the game
-looks like. **The rule to apply when the runs are in**: default on only if (a) every steady
-150-frame native window before the capture in runs 1, 3 and 6 below reads 29.8 to 30.1 fps, as
-the off runs 2 and 4 of the same session do, (b) run 6 shows no freeze signature in any of its
-windows, and (c) `c20.w` leaves 16 in each run with the switch (below 12 in every capture
-row). All three: one default changes, with its test, README row and this paragraph. A window
-below 29.8 with the switch that the off runs do not also have: default off, with the figure.
-Anything mixed (a slow window in an off run too, a freeze in run 6): no change, reported.
+valid: one on / off pair under the gate (logs 453 and 454 against 451 and 452). With the switch
+5 of the 6 windows after the capture's two read 29.8 to 30.1 fps and one reads 27.8 (above);
+without it 6 of 6 read 29.9 to 30.0. By ruling 26's bound, which leaves the third window out, 4
+of 4 with the switch read 29.8 to 30.1. The game adapts in every run with it (runs 441 and 444 by
+their captures, "Exposure read-back"; logs 453, 454 and 464 to 468 by their `c20.w`). One pair in
+one session, with its one slow window in that very configuration, is not enough to change what
+every run of the game looks like. The runs and the rule by which the default is then decided are
+in "Outstanding: cost", (b).
 
-**Outstanding** (after `tools\drive_game.ps1 -BootSave Hero000`, with the window on the usual
-monitor: a run counts only at shot width 1942). Bridge plan S: `-Total 116 -Shots
-"36,39,42,45,80,112" -Plan
-"32:VIEW=off,37:VIEW=native,40:VIEW=off,43:VIEW=native,84:DISC=8/1,92:VIEW=off"`.
+**Outstanding.** The eight runs first listed here are replaced by the one list of "Outstanding:
+cost" at the end of this section (review of plan Task 7, Important 2: the first list did not name
+its binary, let two runs of different sessions decide "on against off", gave criterion 9's bridge
+part no bound, had the third spot only with the switch on, asked capture rows of a run without a
+capture, and did not say how a run comes to count). The default of `--fable2_native_post` is the
+controller's ruling after criterion 9 (plan Task 7: on if criteria 3, 6, 8, 9 and 10 are met).
 
-| # | Name | Arguments |
-|---|---|---|
-| 1 | `t7_b_on_rb_1` (again) | S `-GameArgs --fable2_native_render=true,--fable2_native_post=on,--fable2_exposure_readback=on` |
-| 2 | `t7_b_on_1` | S `-GameArgs --fable2_native_render=true,--fable2_native_post=on` |
-| 3 | `t7_b_on_rb_2` | as 1 |
-| 4 | `t7_b_on_2` | as 2 |
-| 5 | `t7_b_off_rb` | S `-GameArgs --fable2_native_render=true,--fable2_native_post=off,--fable2_exposure_readback=on` |
-| 6 | `t7_b_on_rb_long` | `-Total 300 -Shots "36,39,150,295" -Plan "32:VIEW=off,37:VIEW=native" -GameArgs --fable2_native_render=true,--fable2_native_post=on,--fable2_exposure_readback=on` |
-| 7 | `t7_3_on_rb` | `-Total 104 -Shots "44,47,50,53,90,100" -Plan "33:LS=0/-100/3500,40:VIEW=off,45:VIEW=native,48:VIEW=off,51:VIEW=native,94:DISC=8/1" -GameArgs --fable2_native_render=true,--fable2_native_post=on,--fable2_exposure_readback=on` |
-| 8 | `t7_3_off_rb` | as 7 with `--fable2_native_post=off` |
-
-Runs 1 to 4 in that order (the pairs alternate), 7 and 8 back to back. They decide ruling 2
-(1 to 4, 6), criterion 9's bridge part (1 to 6), its third spot (7, 8: no steady window below
-29.2 fps; the records-on capture median with post on against off, at most 0.10 ms apart) and
-the view-off median (the last 24 s of runs 1 to 5). The default of `--fable2_native_post` is
-the controller's ruling after criterion 9 (plan Task 7: on if criteria 3, 6, 8, 9 and 10 are
-met; 6 waits for plan Task 8's feed run as well).
-
-**Limits of 10a**, plainly. (1) **No bloom yet**: the darkest regions are too dark (bridge
-pole averted side 0.57 to 0.66 of the game's, the stumps' averted sides by the trees 0.73 and
-0.85) and the sky is 4 to 13% under the game's (bridge 0.87 to 0.92, third spot 0.92 to 0.96);
-the bloom's veil is predicted to lift both (plan Task 8). (2) **Far ground that was already
-above the game's is a little further above it**: 10 to 34% over at the bridge (rock face 1.10
-to 1.13, far mountains left 1.27 to 1.34, far mountains centre 1.07 to 1.10), 15% at the third
-spot (far mountains left); the bloom is predicted to add to it. (3) **Unlit placeholders** (the
-water, hair and fur cards, flat clay) take one scale a frame: the lake reads 0.80 to 0.84 of
-the game's, a bright placeholder is at the ceiling when the game adapts. (4) **The clear colour
-of a post frame is nearly black** (levels 3 to 4), seen wherever no sky is drawn (the fog off,
-a frame without a sky block). (5) The far ground and the sunlit ground lie 0.007 to 0.048 above
-what the replay predicts for post on against off, on one side; not the two post shaders, not
-separated further. (6) On the real graphics card 0.5 to 0.7% of the pixels are 2 levels under
-the reference (until ruling 25's change). (7) Three places, late morning, a standing camera:
-night, a town, an interior, a menu, a cutscene, a loading screen, a walk from shade into sun and
-a brightness option have not run (`docs/native-renderer/user-checks.md`, checks 48 to 56); of
-the fallbacks only `no-light` has run in a game. (8) Cost and the read-back switch's default:
-open, above.
+**Limits of 10a**, plainly (as of this phase's own runs; the bloom and the base map's gamma fix
+came after it and change items 1, 2 and 6: "Native bloom", "The base map's gamma sign"). (1)
+**Without the bloom** the darkest regions are too dark (bridge pole averted side 0.57 to 0.66 of
+the game's, the stumps' averted sides by the trees 0.73 and 0.85) and the sky is under the
+game's: 8 to 13% at the bridge (0.87 to 0.92); the third spot's 0.92 to 0.96 is an indication
+only (held against an emulated shot 6 and 12 s away, outside the 3 s rule). (2) **Some ground
+that was already above the game's is a little further above it**: at the bridge the rock face,
+the far mountains left and centre and the far slope are 5 to 34% over (rock face 1.10 to 1.13,
+far mountains left 1.27 to 1.34, centre 1.07 to 1.10, far slope 1.05 to 1.08), the other far
+regions 0.85 to 1.03 (far peak 0.85, far rock 0.93, far rock below the ridge 0.975, far mountains
+right 1.01, island 1.03: `t7_regions.txt`); at the third spot far mountains left is 15% over. (3)
+**Unlit placeholders** (the water, hair and fur cards, flat clay) take one scale a frame: the
+lake reads 0.80 to 0.84 of the game's, a bright placeholder is at the ceiling when the game
+adapts. (4) **The clear colour of a post frame is nearly black** (levels 3 to 4), seen wherever
+no sky is drawn (the fog off, a frame without a sky block). (5) The far ground and the sunlit
+ground lie 0.007 to 0.048 above what the replay predicts for post on against off, on one side:
+not the two post shaders, not separated further, unexplained. (6) On the real graphics card 0.5
+to 0.7% of the pixels were 2 levels under the reference; ruling 25's change has since taken that
+away ("Native bloom", "Runs", item 3). (7) **Criterion 7 at the third spot rests on seven far
+regions** (far ground, sky and two unlit placeholders; five of them lit): every near region there
+lies under moving leaf shadow. (8) **By the trees** the ground under the canopy is 17 to 22% and
+the ferns 34% over the game's; no post-off run of that spot was made, so whether that is the
+post's or the scene's is not known, and its native shots are 4 and 6 s from their emulated
+counterparts. (9) **The third spot under `--readback_resolve=full` ran at a few frames a
+second** in both runs (cause not looked for): its shots are stills. T5-7's 43 ms a frame (post
+off, full read-back, bridge) is unexplained as well. (10) Three places, late morning, a standing
+camera: night, a town, an interior, a menu, a cutscene, a loading screen, a walk from shade into
+sun and a brightness option have not run (`docs/native-renderer/user-checks.md`, checks 48 to
+56); of the fallbacks only `no-light` has run in a game. (11) Cost and the read-back switch's
+default: open ("Outstanding: cost").
 
 ### Native bloom
 
@@ -5967,10 +5987,9 @@ dumps as `<name>_dump.rgba`; scripts `t8_regions.py` there and `t8_channels.py`,
    as before, a soft glow at the bright post caps and the sky's gaps. `t8_11_3_on_full_shot_59s`
    (third spot): as the bridge, the far mountains pale. The other shots were not viewed; they
    were measured.
-10. *Cost: open.* No run of this task is timing evidence. Outstanding, on the usual monitor
-   (shot width 1942), back to back: the BRIDGE plan with `-GameArgs
-   --fable2_native_render=true,--fable2_native_post=on,--fable2_native_bloom=on` and the same
-   with `=off` (this task's T8-14 and T8-15), and plan Task 9's THIRD pair. The bloom adds four
+10. *Cost: open.* No run of this task is timing evidence. The runs that measure it are in
+   "Outstanding: cost" at the end of this section (its `bloom` and `bloom_rb` runs against
+   `post` and `post_rb`, at the bridge and at the third spot). The bloom adds four
    quarter-size full-screen steps (13 loads a pixel in two of them over 50,400 pixels) and one
    sample in the composite; criterion 15's cost part stays with criterion 9.
 
@@ -6201,6 +6220,175 @@ evidence (every one at shot width 1296), so criterion 15's cost part is open; (2
 ranges go from 1.15 to 1.45 to 1.15 to 1.55 with it; (3) the sun's two layers are 0 until 10c;
 (4) it acts only in a post frame, so its default follows `--fable2_native_post`'s, which waits for
 criterion 9. The picture no longer speaks against ON; the missing timing does.
+
+### Outstanding: cost
+
+The one list of the timing runs still to make for phases 10a and 10b, with the rules by which
+they decide (a) spec criterion 9 and criterion 15's cost part, (b) ledger ruling 2 (the default of
+`--fable2_exposure_readback`) and (c) the defaults of `--fable2_native_post` and
+`--fable2_native_bloom`. It replaces the eight runs first listed in "Validation (10a)" and item
+10 of "Native bloom", "Runs" (review of plan Task 7, Important 2). Written 2026-10-10 by plan
+Task 9 of the post sub-project. **None of these runs has been made.**
+
+**What exists.** The only valid timing of this sub-project is Task 5's logs 451 to 454 ("Native
+composite", "Cost"): the bridge, post on and off, with and without the read-back switch, one run
+each, on a binary WITHOUT the bloom, ruling 25's rounding and the base map's gamma fix. Every run
+since log 457 (and runs 440 to 449 before) had its window on the 100%-scaled monitor (shot width
+1296), where the host's vsync present gate does not hold: nothing of them is timing evidence, and
+no sentence of this section uses a frame time of theirs.
+
+**The binary.** Sources that hold `edfcc24` (the bloom and ruling 25's rounding) and `5d0f974`
+(the gamma fix): the build Task 8b left in `out\build\win-amd64-release` (SHA-256 beginning
+`C8680F3B45EA6AF4` by its report; its runs were of `D2AEC2D9A98F1028`, the same sources) or a
+later one. A later build that changed bindings, targets or shader text needs its own clean 240 s
+software-adapter run first (plan, Global Constraints). All runs of one spot are made on ONE
+binary, and its hash (`Get-FileHash out\build\win-amd64-release\fable_2.exe`) is written beside
+the results. So these runs measure 10a as it now is (the composite and the ramp with ruling 25's
+three instructions each, the terrain's curve), not the binary of logs 451 to 454, and what they
+say of "post off" is that binary's post-off picture (ruling 30).
+
+**When a run counts.** All four, or the run is made again and not used:
+
+1. Its shots are **1942 pixels wide** (any `shot_<s>s.png` of the run). 1296 means the window
+   opened on the 100%-scaled monitor: the run is repeated, up to three tries, and is otherwise
+   reported as not made. Nothing in the driver chooses the monitor, and why the window went there
+   at runs 440 and 457 is not known; the controller's own script for these runs repeats a run by
+   this rule. A second sign: the log has about one `vsync present gate:` line a second (86 in log
+   453; 2 in log 485).
+2. The driver's last line and exit code as the implementer rules ask (`RUN CLEAN`, or `RUN
+   UNCHECKED` for a run the controller makes with the user's leave); no `fable_2.exe` before or
+   after it.
+3. No freeze signature (section 13: 23 to 26 fps with a guest work median near 40 ms) in any
+   window.
+4. A quiet machine: no other 3D load above about 20% (the ledger's limit).
+
+**Plans.** Each line follows `tools\drive_game.ps1 -BootSave Hero000`.
+
+| Plan | Arguments | What it holds |
+|---|---|---|
+| S (bridge) | `-Total 136 -Shots "36,39,42,45,80,132" -Plan "32:VIEW=off,37:VIEW=native,40:VIEW=off,43:VIEW=native,84:DISC=8/1,108:VIEW=off"` | two 3 s native stretches for the shots; native from 43 s: eight 150-frame windows before the capture at 84 s, then the capture's three windows and one more; view off for the last 28 s |
+| T (third spot) | `-Total 124 -Shots "44,47,50,53,90,120" -Plan "33:LS=0/-100/3500,40:VIEW=off,45:VIEW=native,48:VIEW=off,51:VIEW=native,94:DISC=8/1,118:VIEW=off"` | the same at the third spot: native from 51 s, the capture at 94 s |
+| L (bridge, long) | `-Total 300 -Shots "36,39,150,295" -Plan "32:VIEW=off,37:VIEW=native"` | 263 s of native view without a capture |
+
+Plan S is the plan of the first list with the last view change moved from 92 to 108 s, so that
+the third window from the capture exists in every run; S and T in this form have not been run
+(their tokens are those of the plans that have).
+
+**Configurations** (`-GameArgs`, after `--fable2_native_render=true,`):
+
+| Name | `-GameArgs` |
+|---|---|
+| `off` | `--fable2_native_post=off` |
+| `off_rb` | `--fable2_native_post=off,--fable2_exposure_readback=on` |
+| `post` | `--fable2_native_post=on,--fable2_native_bloom=off` |
+| `post_rb` | `--fable2_native_post=on,--fable2_native_bloom=off,--fable2_exposure_readback=on` |
+| `bloom` | `--fable2_native_post=on,--fable2_native_bloom=on` |
+| `bloom_rb` | `--fable2_native_post=on,--fable2_native_bloom=on,--fable2_exposure_readback=on` |
+
+**The runs, in this order** (25; evidence copied to `out\native-evidence\post\` as
+`<name>_driver.txt`, `<name>_fable_2_<log>.log`, `<name>_shot_<s>s.png`):
+
+| # | Name | Plan | Configuration |
+|---|---|---|---|
+| 1 to 6 | `t9_b_<configuration>_1` | S | `off`, `off_rb`, `post`, `post_rb`, `bloom`, `bloom_rb` |
+| 7 to 12 | `t9_b_<configuration>_2` | S | the six in the reverse order: `bloom_rb`, `bloom`, `post_rb`, `post`, `off_rb`, `off` |
+| 13 | `t9_b_bloom_rb_long` | L | `bloom_rb` |
+| 14 to 19 | `t9_3_<configuration>_1` | T | as 1 to 6 |
+| 20 to 25 | `t9_3_<configuration>_2` | T | as 7 to 12 |
+
+Written out, run 1 is `tools\drive_game.ps1 -BootSave Hero000 -Total 136 -Shots
+"36,39,42,45,80,132" -Plan
+"32:VIEW=off,37:VIEW=native,40:VIEW=off,43:VIEW=native,84:DISC=8/1,108:VIEW=off" -GameArgs
+--fable2_native_render=true,--fable2_native_post=off`, and run 13 `tools\drive_game.ps1 -BootSave
+Hero000 -Total 300 -Shots "36,39,150,295" -Plan "32:VIEW=off,37:VIEW=native" -GameArgs
+--fable2_native_render=true,--fable2_native_post=on,--fable2_native_bloom=on,--fable2_exposure_readback=on`.
+The two rounds of a spot are made back to back, without another program started between them.
+**On against off is decided only between runs of one round, and only if both rounds agree**: in
+round 1 every "off" of a pair runs before its "on", in round 2 after it, so a drift of the machine
+over the session shows as opposite signs in the two rounds and is not taken for a cost. Two runs
+of different sessions decide nothing against each other ("Native composite", "Cost": the review of
+plan Task 5, Minor 6). The pairs: post on against off is `post` against `off` (and `post_rb`
+against `off_rb`); the bloom is `bloom` against `post` (`bloom_rb` against `post_rb`); the
+read-back switch is each `<x>_rb` against `<x>`. A decision that needs only some pairs may be made
+from those runs alone, if both rounds of them were made in the order above.
+
+**What is read from each log.**
+
+- *Steady windows*: every line `frames: view native (window): 150 frames, mean M ms (F fps), ...
+  max X ms`, but for the three windows of a capture: the one in which `[native-discovery] capture
+  requested` falls and the two after it (controller ruling 26: "not within three windows after a
+  capture"). In logs 451 to 454 those three read 20.3 to 21.1, 16.4 to 17.7 and 27.8 to 30.0 fps.
+- *The third window from the capture* of every S and T run, with its largest frame: reported for
+  each run, the runs with the switch beside those without. It does not enter a bound (ruling 26).
+  This is the window that read 27.8 fps (largest frame 146 ms) in log 453, post on with the
+  switch, and 29.9 to 30.0 in logs 451, 452 and 454: unexplained ("Validation (10a)").
+- *The capture's records-on median*: the `median` of every line `capture: frame N ... | records
+  on | capture C ms (median M, ...over 300 frames)` whose 300 frames lie wholly in the native
+  stretch before the capture (from 43 s in S, from 51 s in T); a run's figure is the mean of
+  those lines' medians, and the lines are given.
+- *The view-off median* (S and T): the `median` of the `capture:` lines with `records off` whose
+  300 frames lie wholly after the last `VIEW=off`.
+- *The exposure*: in a run with a capture, `c20.w` of every main-scene row of its 8 frames
+  (`post_tables.py table` on the capture, as spec criterion 2 was read). Run 13 has no capture: a
+  rule cannot ask capture rows of it; there it is the `c20.w` of every `Post:` line after 60 s.
+
+**(a) Criterion 9, and criterion 15's cost part.**
+
+- *Bridge, by ruling 26*: every steady window of runs 3 to 6 and 7 to 10 (post on; with the bloom
+  and with the switch among them) and of run 13 at **29.7 fps or more**. Criterion 9 as written
+  ("30.0 in every steady window") is not what is judged: the valid post-off run 454 itself reads
+  29.8 in one window. The verdict's words are then "met by ruling 26", with the lowest window.
+- *Third spot*: no steady window of runs 16 to 19 and 20 to 23 below **29.2 fps** (the fog
+  sub-project's worst there).
+- *The capture's median*: for each pair and each round, the on-run's records-on median less the
+  off-run's, at the bridge and at the third spot; **at most 0.10 ms in both rounds** for post on
+  against off (criterion 9) and for the bloom on against off (criterion 15). The third spot's
+  figures are stated beside the fog's 2.64 to 2.92 ms. If the two rounds of a pair disagree (one
+  within 0.10, one not), the pair is not decided and is run again.
+- *View off*: under **0.5 ms** in every S and T run.
+- A steady window below its bound in an "off" run of the same round as well is the machine's, not
+  the post's: that round is made again and no verdict is drawn from it.
+- Criterion 9 is met (by ruling 26 at the bridge) when all four hold for the `post` and `post_rb`
+  runs against `off` and `off_rb`; criterion 15's cost part when they hold for `bloom` and
+  `bloom_rb` as well, with the bloom's pairs. Anything else: not met, with the window or the
+  difference that failed.
+
+**(b) Ruling 2, the read-back switch's default.** Default ON only if all of:
+
+1. every steady window of the bridge runs with the switch (2, 4, 6, 7, 9, 11) is at 29.7 fps or
+   more and of the third spot's (15, 17, 19, 20, 22, 24) at 29.2 or more, as the runs without it
+   in the same round are;
+2. run 13 has no freeze signature and every window after its first at 29.7 fps or more;
+3. the game adapts in each of those runs: `c20.w` below 12 in every main-scene capture row (16.000
+   is the blind value), and in run 13 in every `Post:` line after 60 s;
+4. the third window from the capture is not slower with the switch than without it in both
+   rounds. If it is (the 27.8 of log 453 repeating), the switch costs something in the seconds
+   after a diagnostic capture: that is put before the controller with the figures and the default
+   is not changed without a ruling on it.
+
+All four: one default changes (a builder's commit: the switch's test, the README's row, the
+paragraph "Ruling 2" of "Validation (10a)"). A window below the bound with the switch that the
+runs without it do not have: default OFF, with the figure. Anything mixed (a slow window without
+the switch too, a freeze in run 13, an invalid run): no change, reported. The earlier text counted
+"29.8 to 30.1 in every steady window with the switch" for it; that left the 27.8 out and is
+withdrawn.
+
+**(c) The defaults of `--fable2_native_post` and `--fable2_native_bloom`** (spec ruling 16: off
+until the phase is validated; the controller's rulings, each one code change with its test and
+README row, made by a builder and not by this task).
+
+- `--fable2_native_post`: on if criteria 3, 6, 8, 9 and 10 are met (plan Task 7). 3 and 10 are
+  met, 6 is met since ruling 25's change, 8 by ruling 22 against the binary of `5d0f974` (ruling
+  30): "Validation (10a)" and "Native bloom", "Runs", item 3. **Criterion 9 is the open one**: (a) above, for
+  `post` and `post_rb`. With the default on every normal run also reads the post block: the
+  `post` against `off` capture medians are that cost.
+- `--fable2_native_bloom`: on if criteria 12, 14 and 15 are met (plan Task 9). 12 and 14 are met
+  and 15's picture and D3D parts are by their first readings ("Native bloom"; the verdicts are
+  plan Task 9's); **15's cost part is the open one**: (a)
+  above, for `bloom` and `bloom_rb`. The picture supports ON since the gamma fix ("The base map's
+  gamma sign", "Runs", item 6). The bloom acts only in a post frame, so its default cannot be on
+  while `--fable2_native_post`'s is off.
+- If the post's part of (a) is met and the bloom's is not: post on, bloom off, with the figure.
 
 ## Pending
 

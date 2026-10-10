@@ -1,10 +1,12 @@
 # Native renderer sub-project 10: the post chain (exposure, composite, bloom, sun layer, sky furniture)
 
 Status: design, 2026-10-09, branch `native-renderer-post`. **Phase 10a is built and validated
-with two things open** (2026-10-10: criterion 9, the cost, and ruling 2, the read-back switch's
-default; both switches of the phase are off by default until the outstanding timing runs: frame
-map section 17, "Validation (10a)", and "Implementation notes (deviations)" at the end of this
-document); 10b and 10c are not built. Plan:
+with four things open when it was validated** (2026-10-10: criterion 9, the cost; ruling 2, the
+read-back switch's default; criterion 6's real-GPU half, measured again since, after ruling 25's
+change; and, waiting for those, the default of `--fable2_native_post`. Both switches of the phase
+are off by default until the outstanding timing runs: frame map section 17, "Validation (10a)"
+and "Outstanding: cost", and "Implementation notes (deviations)" at the end of this document).
+10b's code is built (plan Task 8; its validation is plan Task 9's); 10c is not built. Plan:
 `docs/superpowers/plans/2026-10-09-native-renderer-post.md`. Research:
 `.superpowers/sdd/post-research.md` (untracked; its scripts and outputs in
 `out/tests/post-research/`); every fact below is from it or from the code named beside it, and
@@ -618,14 +620,20 @@ map section 17, "Validation (10a)".
 - **`Render` takes a `ClayPostRequest`** (the switches and the ramp); the decision's inputs keep
   the name `ClayPostInputs`.
 - **Ruling 2 is not decided.** The game adapts with `--fable2_exposure_readback=on` in every run
-  made, and the one valid pair of timing runs (logs 451 to 454) holds 29.8 to 30.1 fps with it;
-  one pair is not taken as enough to change every run's look, and since run 457 the window has
-  opened on a monitor on which the present gate does not hold. The switch stays default off;
-  the runs and the rule are in "Validation (10a)".
+  made. In the one valid pair of timing runs (logs 451 to 454) 5 of the 6 windows after a
+  capture's two read 29.8 to 30.1 fps with it and one reads 27.8 (the run with post on and the
+  switch; the same window of the three other runs reads 29.9 to 30.0; unexplained); one pair,
+  with that window in it, is not taken as enough to change every run's look, and since run 457
+  the window has opened on a monitor on which the present gate does not hold. The switch stays
+  default off; the runs and the rule are in frame map section 17, "Outstanding: cost".
 - **Criterion 9 is open** for the same reason: the bridge's first reading is 29.8 to 30.1 fps in
-  11 of 12 steady windows (not "30.0 in every" as written), the twelfth being the third window
-  after a discovery capture; the third spot, post on against off in one session and the
-  view-off median are not measured.
+  11 of 12 windows after a capture's two (not "30.0 in every" as written); the twelfth, 27.8,
+  is the third window from the capture in the run with post on and the read-back switch, steady
+  in the three other runs and unexplained. Controller ruling 26 has since set the bridge's bound
+  at 29.7 fps in every steady window not within three windows after a capture (the valid
+  post-off run itself reads 29.8 once); by it the first reading is 8 of 8 windows at 29.8 to
+  30.1. The third spot, post on against off back to back and the view-off median are not
+  measured, and nothing of a binary with the bloom or the gamma fix is.
 - **The default of `--fable2_native_post` stays off** (plan Task 7: on only if criteria 3, 6,
   8, 9 and 10 are met; 9 is open and 6 waits for plan Task 8's feed run).
 - **Criterion 7 at the third spot rests on seven regions** (the far ground, the sky and two

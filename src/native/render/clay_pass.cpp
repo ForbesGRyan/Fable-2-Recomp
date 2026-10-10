@@ -60,6 +60,18 @@ constexpr nrhi::Format kBloomDownFormat = nrhi::Format::kR11G11B10_FLOAT;
 constexpr nrhi::Format kBloomFormat = nrhi::Format::kR10G10B10A2_UNORM;
 static_assert(ClayPass::kWidth % kPostBloomDivisor == 0 && ClayPass::kHeight % kPostBloomDivisor == 0);
 constexpr uint32_t kBloomWidth = ClayPass::kWidth / kPostBloomDivisor, kBloomHeight = ClayPass::kHeight / kPostBloomDivisor;
+// The sun layer's targets (clay_logic.h, "Native sun layer"): a half and a quarter of the LOGICAL size,
+// exactly, whatever the scene target's sample count or size will be (the radial blur's registers are in
+// the picture's own coordinates and the reductions are by the sizes' ratio, which the steps are handed).
+// The format is the game's k_2_10_10_10, as the bloom's.
+constexpr nrhi::Format kSunFormat = nrhi::Format::kR10G10B10A2_UNORM;
+static_assert(ClayPass::kWidth % kSunLayerDivisor == 0 && ClayPass::kHeight % kSunLayerDivisor == 0 &&
+              ClayPass::kWidth % kSunSmallDivisor == 0 && ClayPass::kHeight % kSunSmallDivisor == 0 &&
+              kSunSmallDivisor % kSunLayerDivisor == 0 && kSunSmallDivisor == kPostBloomDivisor,
+              "the sun layer's targets are exact fractions of the logical size, and tf1 and tf2 are the bright pass's size");
+constexpr uint32_t kSunLayerWidth = ClayPass::kWidth / kSunLayerDivisor, kSunLayerHeight = ClayPass::kHeight / kSunLayerDivisor;
+constexpr uint32_t kSunSmallWidth = ClayPass::kWidth / kSunSmallDivisor, kSunSmallHeight = ClayPass::kHeight / kSunSmallDivisor;
+static_assert(sizeof(ClaySunQuadConstants) <= kClayQuadSlots * kClayTerrainSlotBytes);
 // The level count of a UNORM format: what a step that writes such a target rounds to itself
 // (controller ruling 25; review of plan Task 6, Minor 2: the count is the format's, not a second
 // literal). 0: not a UNORM format a post step writes.
@@ -150,6 +162,7 @@ nrhi::CullMode ToCull(uint8_t c) {
 void ClayPass::DestroyObjects() {
   DestroyShadowObjects();  // (first: its view of depth_ and its pipelines of vs_ and layout_)
   DestroySkyObjects();
+  DestroySunObjects();  // (before the quad step's and the post steps' layouts' other users, and its view of depth_)
   DestroyQuadObjects();
   DestroyBloomObjects();  // (before the post steps' layout's other users and map_vs_)
   DestroyPostObjects();  // (before map_vs_, which its pipelines are made of)
@@ -288,9 +301,12 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     bloom_objects_failed_ = false;  // (and the bloom's)
     ForgetQuadObjects();
     quad_objects_failed_ = false;  // (and the quad step's)
+    ForgetSunObjects();
+    sun_objects_failed_ = false;  // (and the sun layer's)
     quad_layout_ = nullptr;
     ForgetOracleObjects();
     oracle_failed_ = false;  // (and the oracle feed)
+    oracle_sun_failed_ = false;
     white_ = nullptr;
     white_view_ = nullptr;
     white_staging_ = nullptr;
@@ -308,7 +324,9 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     post_objects_failed_ = false;  // (and the post steps')
     bloom_objects_failed_ = false;  // (and the bloom's)
     quad_objects_failed_ = false;  // (and the quad step's)
+    sun_objects_failed_ = false;  // (and the sun layer's)
     oracle_failed_ = false;  // (and the oracle feed)
+    oracle_sun_failed_ = false;
   }
   ready_ = false;
 
@@ -1750,10 +1768,177 @@ bool ClayPass::EnsureQuadObjects(nrhi::Device* dev) {
   return true;
 }
 
+void ClayPass::ForgetSunObjects() {
+  sun_depth_ps_ = sun_reduce_ps_ = sun_radial_ps_ = sun_quad_vs_ = sun_quad_ps_ = sun_occluder_ps_ = nullptr;
+  sun_depth_pipeline_ = sun_reduce_pipeline_ = sun_radial_pipeline_ = nullptr;
+  for (nrhi::Pipeline*& p : sun_pipelines_) p = nullptr;
+  sun_depth_ = nullptr;
+  sun_scene_depth_view_ = nullptr;
+  for (size_t i = 0; i < 2; ++i) {
+    sun_layer_[i] = nullptr;
+    sun_layer_view_[i] = nullptr;
+  }
+  for (size_t i = 0; i < 3; ++i) {
+    sun_small_[i] = nullptr;
+    sun_small_view_[i] = nullptr;
+  }
+  sun_objects_ = false;
+}
+
+void ClayPass::DestroySunObjects() {
+  if (device_) {
+    device_->DestroyDeferred(sun_depth_pipeline_);
+    device_->DestroyDeferred(sun_reduce_pipeline_);
+    device_->DestroyDeferred(sun_radial_pipeline_);
+    for (nrhi::Pipeline* p : sun_pipelines_) device_->DestroyDeferred(p);
+    device_->DestroyDeferred(sun_depth_ps_);
+    device_->DestroyDeferred(sun_reduce_ps_);
+    device_->DestroyDeferred(sun_radial_ps_);
+    device_->DestroyDeferred(sun_quad_vs_);
+    device_->DestroyDeferred(sun_quad_ps_);
+    device_->DestroyDeferred(sun_occluder_ps_);
+    device_->DestroyDeferred(sun_scene_depth_view_);
+    for (size_t i = 0; i < 2; ++i) {
+      device_->DestroyDeferred(sun_layer_view_[i]);
+      device_->DestroyDeferred(sun_layer_[i]);
+    }
+    for (size_t i = 0; i < 3; ++i) {
+      device_->DestroyDeferred(sun_small_view_[i]);
+      device_->DestroyDeferred(sun_small_[i]);
+    }
+    device_->DestroyDeferred(sun_depth_);
+  }
+  ForgetSunObjects();
+}
+
+bool ClayPass::EnsureSunObjects(nrhi::Device* dev) {
+  if (sun_objects_) return true;
+  // (the layer is drawn only in a frame whose furniture and bloom are: their objects and layouts exist)
+  if (sun_objects_failed_ || !ready_ || dev != device_ || !post_objects_ || !post_layout_ || !quad_objects_ || !quad_layout_ || !depth_) {
+    return false;
+  }
+  auto fail = [&](const char* what) {
+    REXLOG_ERROR("[native] clay: {} failed ({}): the sun layer is off until the pass is rebuilt (another device, or an F6 retry after "
+                 "a failure of the renderer) or the game is restarted; the post chain, its bloom and the scene's furniture go on "
+                 "without it", what, kPostObjectsReason);
+    DestroySunObjects();
+    sun_objects_failed_ = true;
+    return false;
+  };
+  auto shader = [&](const char* name, const char* source, nrhi::ShaderStage stage) {
+    nrhi::ShaderDesc sd;
+    sd.entry_point = "main";
+    sd.stage = stage;
+    sd.name = name;
+    sd.hlsl_source = source;
+    return dev->CreateShader(sd);
+  };
+  sun_depth_ps_ = shader("fable2_clay_sun_depth_ps", shaders::kClaySunDepthPs, nrhi::ShaderStage::kPixel);
+  sun_reduce_ps_ = shader("fable2_clay_sun_reduce_ps", shaders::kClaySunReducePs, nrhi::ShaderStage::kPixel);
+  sun_radial_ps_ = shader("fable2_clay_sun_radial_ps", shaders::kClaySunRadialPs, nrhi::ShaderStage::kPixel);
+  sun_quad_vs_ = shader("fable2_clay_sun_quad_vs", shaders::kClaySunQuadVs, nrhi::ShaderStage::kVertex);
+  sun_quad_ps_ = shader("fable2_clay_sun_quad_ps", shaders::kClaySunQuadPs, nrhi::ShaderStage::kPixel);
+  sun_occluder_ps_ = shader("fable2_clay_sun_occluder_ps", shaders::kClaySunOccluderPs, nrhi::ShaderStage::kPixel);
+  if (!sun_depth_ps_ || !sun_reduce_ps_ || !sun_radial_ps_ || !sun_quad_vs_ || !sun_quad_ps_ || !sun_occluder_ps_) {
+    return fail("sun layer shader compile");
+  }
+  // The layer's depth and its two pictures, half the logical size; three targets of a quarter. Their
+  // contents are undefined until a frame with the layer writes them, and no step reads one in a frame
+  // that did not write it. (The three the oracle feed reads back may be copied from.)
+  nrhi::TextureDesc td;
+  td.width = kSunLayerWidth;
+  td.height = kSunLayerHeight;
+  td.format = nrhi::Format::kD32_FLOAT;
+  td.usage = nrhi::kTextureUsageDepthStencil;
+  td.initial_state = nrhi::ResourceState::kPixelShaderResource;
+  td.clear_depth = 1.0f;
+  sun_depth_ = dev->CreateTexture(td);
+  td.format = kSunFormat;
+  for (size_t i = 0; i < 2; ++i) {
+    td.usage = nrhi::kTextureUsageRenderTarget | (i == 0 ? nrhi::kTextureUsageCopySource : 0u);
+    sun_layer_[i] = dev->CreateTexture(td);
+    sun_layer_view_[i] = sun_layer_[i] ? dev->CreateTextureView(sun_layer_[i], nrhi::TextureViewDesc{}) : nullptr;
+  }
+  td.width = kSunSmallWidth;
+  td.height = kSunSmallHeight;
+  for (size_t i = 0; i < 3; ++i) {
+    td.usage = nrhi::kTextureUsageRenderTarget | (i != 1 ? nrhi::kTextureUsageCopySource : 0u);
+    sun_small_[i] = dev->CreateTexture(td);
+    sun_small_view_[i] = sun_small_[i] ? dev->CreateTextureView(sun_small_[i], nrhi::TextureViewDesc{}) : nullptr;
+  }
+  sun_scene_depth_view_ = dev->CreateTextureView(depth_, nrhi::TextureViewDesc{});
+  if (!sun_depth_ || !sun_scene_depth_view_ || !sun_layer_[0] || !sun_layer_[1] || !sun_layer_view_[0] || !sun_layer_view_[1] ||
+      !sun_small_[0] || !sun_small_[1] || !sun_small_[2] || !sun_small_view_[0] || !sun_small_view_[1] || !sun_small_view_[2]) {
+    return fail("sun layer target creation");
+  }
+  // The three full-screen steps (the post layout, the output mapping's vertex shader). The depth step has
+  // no colour target and writes every texel of the layer's depth: test "always", write.
+  nrhi::GraphicsPipelineDesc pipe;
+  pipe.layout = post_layout_;
+  pipe.vs = map_vs_;
+  pipe.ps = sun_depth_ps_;
+  pipe.dsv_format = nrhi::Format::kD32_FLOAT;
+  pipe.depth.test_enable = true;
+  pipe.depth.write_enable = true;
+  pipe.depth.func = nrhi::CompareFunc::kAlways;
+  sun_depth_pipeline_ = dev->CreateGraphicsPipeline(pipe);
+  pipe = nrhi::GraphicsPipelineDesc{};
+  pipe.layout = post_layout_;
+  pipe.vs = map_vs_;
+  pipe.ps = sun_reduce_ps_;
+  pipe.rtv_format = kSunFormat;
+  sun_reduce_pipeline_ = dev->CreateGraphicsPipeline(pipe);
+  pipe.ps = sun_radial_ps_;
+  sun_radial_pipeline_ = dev->CreateGraphicsPipeline(pipe);
+  // One pipeline a state (ClaySunState), under the quad step's layout, no cull, each tested less-or-equal
+  // against the layer's depth (the game's greater-or-equal under its reversed range: SunDepthPasses).
+  // The three colour states write no depth; the occluders' has no colour target and writes it.
+  pipe = nrhi::GraphicsPipelineDesc{};
+  pipe.layout = quad_layout_;
+  pipe.vs = sun_quad_vs_;
+  pipe.ps = sun_quad_ps_;
+  pipe.rtv_format = kSunFormat;
+  pipe.dsv_format = nrhi::Format::kD32_FLOAT;
+  pipe.cull = nrhi::CullMode::kNone;
+  pipe.depth.test_enable = true;
+  pipe.depth.write_enable = false;
+  pipe.depth.func = nrhi::CompareFunc::kLessEqual;
+  sun_pipelines_[size_t(ClaySunState::kReplace)] = dev->CreateGraphicsPipeline(pipe);
+  pipe.blend.enable = true;
+  pipe.blend.src = pipe.blend.src_alpha = nrhi::BlendFactor::kOne;
+  pipe.blend.dst = pipe.blend.dst_alpha = nrhi::BlendFactor::kOne;
+  sun_pipelines_[size_t(ClaySunState::kAdd)] = dev->CreateGraphicsPipeline(pipe);
+  pipe.blend.src = pipe.blend.src_alpha = nrhi::BlendFactor::kSrcAlpha;
+  pipe.blend.dst = pipe.blend.dst_alpha = nrhi::BlendFactor::kInvSrcAlpha;
+  sun_pipelines_[size_t(ClaySunState::kAlpha)] = dev->CreateGraphicsPipeline(pipe);
+  pipe.blend = nrhi::BlendStateDesc{};
+  pipe.ps = sun_occluder_ps_;
+  pipe.rtv_format = nrhi::Format::kUnknown;
+  pipe.depth.write_enable = true;
+  sun_pipelines_[size_t(ClaySunState::kDepth)] = dev->CreateGraphicsPipeline(pipe);
+  if (!sun_depth_pipeline_ || !sun_reduce_pipeline_ || !sun_radial_pipeline_ || !sun_pipelines_[size_t(ClaySunState::kReplace)] ||
+      !sun_pipelines_[size_t(ClaySunState::kAdd)] || !sun_pipelines_[size_t(ClaySunState::kAlpha)] ||
+      !sun_pipelines_[size_t(ClaySunState::kDepth)]) {
+    return fail("sun layer pipeline creation");
+  }
+  sun_objects_ = true;
+  REXLOG_INFO("[native] clay: sun layer ready (its depth {} x {} D32_FLOAT from the scene's at every {}th texel, two pictures of that "
+              "size and three of {} x {}, R10G10B10A2_UNORM, {:.2f} MB together; quads tested less-or-equal against the layer's "
+              "depth; the steps round their own writes to {} levels)",
+              kSunLayerWidth, kSunLayerHeight, kSunLayerDivisor, kSunSmallWidth, kSunSmallHeight,
+              double(3 * ClayTargetBytes(kSunLayerWidth, kSunLayerHeight, 4) + 3 * ClayTargetBytes(kSunSmallWidth, kSunSmallHeight, 4)) /
+                  (1024.0 * 1024.0),
+              kSunLevels);
+  return true;
+}
+
 void ClayPass::ForgetOracleObjects() {
   oracle_tex_ = nullptr;
   oracle_view_ = nullptr;
   oracle_dump_ = nullptr;
+  oracle_depth_tex_ = nullptr;
+  oracle_depth_view_ = nullptr;
+  for (nrhi::Buffer*& b : oracle_layer_dump_) b = nullptr;
   oracle_frames_ = 0;
   // (a copy that was pending is gone with its buffer: the rebuilt pass makes it again; one that was
   // taken or failed is not made again)
@@ -1765,6 +1950,9 @@ void ClayPass::DestroyOracleObjects() {
     device_->DestroyDeferred(oracle_view_);
     device_->DestroyDeferred(oracle_tex_);
     device_->DestroyDeferred(oracle_dump_);
+    device_->DestroyDeferred(oracle_depth_view_);
+    device_->DestroyDeferred(oracle_depth_tex_);
+    for (nrhi::Buffer* b : oracle_layer_dump_) device_->DestroyDeferred(b);
   }
   ForgetOracleObjects();
 }
@@ -1817,6 +2005,99 @@ bool ClayPass::EnsureOracleTexture(nrhi::Cmd* cmd, nrhi::Device* dev) {
               kWidth, kHeight, double(bd.size) / (1024.0 * 1024.0), oracle_->c20w, b.composite[0], b.composite[1], b.composite[2],
               b.composite[3], b.composite[4], b.composite[5], b.table[0], b.table[1], b.table[kPostUnlitTexel], kOracleDumpAfter);
   return true;
+}
+
+bool ClayPass::EnsureOracleSunDepth(nrhi::Cmd* cmd, nrhi::Device* dev) {
+  if (oracle_depth_view_) return true;
+  if (oracle_sun_failed_ || !oracle_ || !oracle_->sun.valid || !ready_ || dev != device_) return false;
+  auto fail = [&](const char* what) {
+    REXLOG_ERROR("[native] clay: post oracle: the sun part's {} failed: the feed has no sun layer until the pass is rebuilt", what);
+    dev->DestroyDeferred(oracle_depth_view_);
+    dev->DestroyDeferred(oracle_depth_tex_);
+    oracle_depth_view_ = nullptr;
+    oracle_depth_tex_ = nullptr;
+    oracle_sun_failed_ = true;
+    return false;
+  };
+  const OracleSun& sun = oracle_->sun;
+  if (sun.width != kWidth || sun.height != kHeight) return fail("size check");
+  nrhi::TextureDesc td;
+  td.width = kWidth;
+  td.height = kHeight;
+  td.format = nrhi::Format::kR32_FLOAT;
+  td.initial_state = nrhi::ResourceState::kCopyDest;
+  oracle_depth_tex_ = dev->CreateTexture(td);
+  oracle_depth_view_ = oracle_depth_tex_ ? dev->CreateTextureView(oracle_depth_tex_, nrhi::TextureViewDesc{}) : nullptr;
+  if (!oracle_depth_tex_ || !oracle_depth_view_) return fail("depth texture creation");
+  // (rows of four bytes a texel at the RHI's row pitch, the read-back rows' pitch)
+  const uint32_t pitch = OracleDumpPitch(kWidth);
+  nrhi::BufferDesc bd;
+  bd.size = uint64_t(pitch) * kHeight;
+  bd.heap = nrhi::HeapKind::kUpload;
+  bd.bind_class = nrhi::BufferBindClass::kCopySrc;
+  nrhi::Buffer* staging = dev->CreateBuffer(bd);
+  uint8_t* mapped = staging ? static_cast<uint8_t*>(dev->Map(staging)) : nullptr;
+  if (!mapped) {
+    dev->DestroyDeferred(staging);
+    return fail("staging buffer creation");
+  }
+  // (write only: the memory is write-combined; a row is assembled on the stack and copied)
+  std::vector<float> row(kWidth);
+  for (uint32_t y = 0; y < kHeight; ++y) {
+    for (uint32_t x = 0; x < kWidth; ++x) row[x] = OracleSunDepth(sun, size_t(y) * kWidth + x);
+    std::memcpy(mapped + size_t(y) * pitch, row.data(), size_t(kWidth) * 4);
+  }
+  dev->Unmap(staging);
+  cmd->FlushBarriers();
+  cmd->CopyBufferToTexture(oracle_depth_tex_, 0, 0, staging, 0, pitch, kWidth, kHeight, 1);
+  cmd->Barrier(oracle_depth_tex_, nrhi::ResourceState::kCopyDest, nrhi::ResourceState::kPixelShaderResource);
+  cmd->FlushBarriers();
+  dev->DestroyDeferred(staging);
+  REXLOG_INFO("[native] clay: post oracle: the sun part's depth uploaded ({} x {} R32_FLOAT); the layer is drawn from the file's {} "
+              "quads, each with the texture of the live frame's quad of its kind", kWidth, kHeight, sun.count);
+  return true;
+}
+
+void ClayPass::CopyOracleLayerDumps(nrhi::Cmd* cmd, nrhi::Device* dev) {
+  nrhi::Texture* const sources[kOracleLayerDumps] = {sun_layer_[0], sun_small_[0], sun_small_[2]};
+  const uint32_t widths[kOracleLayerDumps] = {kSunLayerWidth, kSunSmallWidth, kSunSmallWidth};
+  const uint32_t heights[kOracleLayerDumps] = {kSunLayerHeight, kSunSmallHeight, kSunSmallHeight};
+  for (size_t i = 0; i < kOracleLayerDumps; ++i) {
+    if (!sources[i] || oracle_layer_dump_[i]) continue;
+    const uint32_t pitch = OracleDumpPitch(widths[i]);
+    nrhi::BufferDesc bd;
+    bd.size = uint64_t(pitch) * heights[i];
+    bd.heap = nrhi::HeapKind::kReadback;
+    nrhi::Buffer* buffer = dev->CreateBuffer(bd);
+    if (!buffer) {
+      REXLOG_ERROR("[native] clay: post oracle: a layer's read-back buffer could not be made: that picture is not written");
+      continue;
+    }
+    cmd->Barrier(sources[i], nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kCopySource);
+    cmd->FlushBarriers();
+    cmd->CopyTextureToBuffer(buffer, 0, pitch, sources[i], 0, widths[i], heights[i]);
+    cmd->Barrier(sources[i], nrhi::ResourceState::kCopySource, nrhi::ResourceState::kPixelShaderResource);
+    cmd->FlushBarriers();
+    oracle_layer_dump_[i] = buffer;
+  }
+  REXLOG_INFO("[native] clay: post oracle: the sun layer's layer 1, tf1 and tf2 copied for their dumps at fed frame {}", oracle_frames_);
+}
+
+bool ClayPass::TakePostOracleLayerDump(nrhi::Device* dev, size_t index, std::vector<uint8_t>* file) {
+  if (index >= kOracleLayerDumps || !oracle_layer_dump_[index] || !file || dev != device_) return false;
+  if (dev->CompletedSubmission() < oracle_dump_submission_) return false;  // (the copy has not run yet)
+  const uint32_t width = index == 0 ? kSunLayerWidth : kSunSmallWidth, height = index == 0 ? kSunLayerHeight : kSunSmallHeight;
+  const uint32_t pitch = OracleDumpPitch(width);
+  bool ok = false;
+  if (const uint8_t* mapped = static_cast<const uint8_t*>(dev->Map(oracle_layer_dump_[index]))) {
+    dev->InvalidateForRead(oracle_layer_dump_[index], 0, uint64_t(pitch) * height);
+    ok = PackOracleDump(mapped, pitch, width, height, file, "F2OL");
+    dev->Unmap(oracle_layer_dump_[index]);
+  }
+  if (!ok) REXLOG_ERROR("[native] clay: post oracle: a layer's read-back buffer could not be read: that picture is not written");
+  dev->DestroyDeferred(oracle_layer_dump_[index]);
+  oracle_layer_dump_[index] = nullptr;
+  return ok;
 }
 
 void ClayPass::CopyOracleDump(nrhi::Cmd* cmd, nrhi::Device* dev) {
@@ -1896,10 +2177,11 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   post_in.objects = !post_objects_failed_ && !(post.bloom && bloom_objects_failed_);
   post_in.buffer = true;  // (FinishTerrain, below)
   ClayPostConstants post_constants{};
-  // (the bloom's flag is set only with the switch and the block's blur part; the sun's flag stays 0: no
-  // step of this build draws its layers; plan Task 14)
+  // (the bloom's flag is set only with the switch and the block's blur part; the sun's only with its
+  // switch, the bloom's flag and the block's radial part, and it is taken back below unless the frame's
+  // sun layer is drawn: DecideClaySun)
   if (DecideClayPost(post_in).post == ClayPost::kDrawn) {
-    post_in.block = MakeClayPostConstants(scene.post, post.ramp, post.bloom, false, &post_constants);
+    post_in.block = MakeClayPostConstants(scene.post, post.ramp, post.bloom, post.sun, &post_constants);
     if (!post_in.block) post_fault = ClayPostFault::kValues;
   }
   if (DecideClayPost(post_in).post == ClayPost::kDrawn) post_in.objects = EnsurePostObjects(dev);
@@ -2099,7 +2381,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     ClayPostConstants oracle_constants{};
     // (the bloom's switch goes through to the feed's constants: with it on and the file's block carrying
     // the blurs' weights the bloom's steps run on the stored scene; review of plan Task 6, Minor 7)
-    if (!MakeClayPostConstants(oracle_->block, post.ramp, post.bloom, false, &oracle_constants)) {
+    if (!MakeClayPostConstants(oracle_->block, post.ramp, post.bloom, post.sun, &oracle_constants)) {
       REXLOG_ERROR("[native] clay: post oracle: the file's block gives no constants: the feed is off until the pass is rebuilt");
       oracle_failed_ = true;
     } else if (EnsureOracleTexture(cmd, dev)) {
@@ -2114,7 +2396,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // the word is its own so that it is never counted "no-weights")
   const ClayBloom bloom = ClayBloomWithObjects(DecideClayBloom(post_frame, post.bloom, post_constants.bloom_on != 0), bloom_objects_);
   post_constants.bloom_on = bloom == ClayBloom::kOn ? 1u : 0u;
-  if (post_frame) std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(post_slot_), &post_constants, sizeof(post_constants));
+  // (the steps' constants go into the buffer below, once the frame's sun layer is decided: its flag is theirs)
   st.post_switch = post.post;
   st.post_block = scene.post.valid;
   st.post_reason = scene.post_reason;
@@ -2357,6 +2639,117 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   st.furniture_records_frames = furniture_counts_.records;
   st.furniture_state_frames = furniture_counts_.state;
   st.furniture_objects_frames = furniture_counts_.objects;
+  // The frame's sun layer, decided the same way (DecideClaySun: the first thing missing decides), with a
+  // verdict of its own: the scene's furniture is drawn or not without it, and a layer record that cannot
+  // be drawn takes the layer away, not the moon and the glare (review of plan Tasks 12 and 13, item 6).
+  // The switch; the frame's furniture drawn (a post frame with a sky and a whole set, never a part of
+  // one, never another frame's); its bloom on (the bright pass is what the layer feeds); the radial
+  // blur's registers in the steps' constants, inside their bounds; every layer record of the set drawable
+  // as captured, and at least one that draws into one of the two pictures (PlanClaySunQuads: the target is
+  // the kind's, not the order's); the layer's objects, asked last; and every layer quad's texture, the
+  // occluders' among them: a layer without an occluder or without its beam source is not drawn at all
+  // that frame (the first frames after a view switch, while the upload budget lasts). With the switch
+  // off nothing below is reached: no object made, no slot written, no texture asked, no draw.
+  // On the oracle feed with a sun part the records are the file's and the depth the file's; each quad's
+  // texture is the live frame's layer quad's of the same kind and place among its kind (the file's third
+  // occluder takes the live third's), or, when the live frame has fewer of the kind (flares come and go),
+  // its first of that kind; and only when the two fetch constants differ in nothing but their addresses
+  // (OracleFetchSameKind). The file's quads take the slots of their own places in the file, so the live
+  // scene's moon and glare, whose slots those may be, are not drawn in such a frame (nothing reads the
+  // scene's draws on the feed).
+  struct SunDraw {
+    nrhi::TextureView* view = nullptr;
+    ClaySunState state = ClaySunState::kNone;
+    uint8_t target = 0;
+    uint32_t slot = 0;
+  };
+  SunDraw sun_draws[capture::kMaxQuadRecords];
+  uint32_t sun_draw_count = 0;
+  ClaySunInputs sun_in;
+  sun_in.sun = post.sun;
+  sun_in.furniture = furniture == ClayFurniture::kDrawn;
+  sun_in.bloom = bloom == ClayBloom::kOn;
+  sun_in.radial = post_constants.sun_on != 0 && SunRadialUsable(post_constants.radial);
+  sun_in.quads = sun_in.drawable = sun_in.textures = true;
+  sun_in.objects = !sun_objects_failed_;
+  bool oracle_sun = false;
+  const capture::QuadRecord* sun_records = scene.quads.data();
+  size_t sun_record_count = scene.quads.size();
+  if (oracle_fed && DecideClaySun(sun_in) == ClaySun::kDrawn) {
+    // (a feed without a sun part, or whose depth could not be uploaded, has no sun layer: no record)
+    oracle_sun = EnsureOracleSunDepth(cmd, dev);
+    sun_records = oracle_sun ? oracle_->sun.quads : nullptr;
+    sun_record_count = oracle_sun ? oracle_->sun.count : 0;
+  }
+  ClaySunPlan sun_plan;
+  if (DecideClaySun(sun_in) == ClaySun::kDrawn) {
+    sun_plan = PlanClaySunQuads(sun_records, sun_record_count);
+    sun_in.drawable = sun_plan.drawable;
+    sun_in.quads = sun_plan.by_target[1] + sun_plan.by_target[2] != 0;
+  }
+  if (DecideClaySun(sun_in) == ClaySun::kDrawn) sun_in.objects = EnsureSunObjects(dev);
+  if (DecideClaySun(sun_in) == ClaySun::kDrawn) {
+    uint32_t of_kind[size_t(capture::PostQuadKind::kCount)] = {};
+    for (uint32_t i = 0; i < sun_plan.count && i < capture::kMaxQuadRecords; ++i) {
+      const ClaySunItem& item = sun_plan.items[i];
+      const capture::QuadRecord& q = sun_records[item.record];
+      const uint32_t* fetch = q.fetch[0];
+      if (oracle_sun) {
+        const uint32_t place = of_kind[size_t(q.kind)]++;
+        const capture::QuadRecord* live = nullptr;
+        uint32_t seen = 0;
+        for (size_t k = 0; k < scene.quads.size() && k < capture::kMaxQuadRecords; ++k) {
+          if (scene.quads[k].layer != 1 || scene.quads[k].kind != q.kind) continue;
+          if (!live) live = &scene.quads[k];  // (the kind's first, unless its place is found)
+          if (seen++ == place) {
+            live = &scene.quads[k];
+            break;
+          }
+        }
+        if (!live || !OracleFetchSameKind(q.fetch[0], live->fetch[0])) {
+          sun_in.textures = false;
+          break;
+        }
+        fetch = live->fetch[0];
+      }
+      uint32_t sampler = 0;
+      float fix[2] = {1.0f, 1.0f};
+      capture::MaterialStatus status = capture::MaterialStatus::kTextureBad;
+      nrhi::TextureView* const view = ResolveTerrainTexture(cmd, dev, fetch, true, &sampler, fix, &status, tst);
+      ClaySunQuadConstants constants{};
+      if (!view || !MakeClaySunQuadConstants(q, sampler, fix, &constants)) {
+        sun_in.textures = false;
+        break;
+      }
+      SunDraw& d = sun_draws[sun_draw_count++];
+      d.view = view;
+      d.state = item.state;
+      d.target = item.target;
+      d.slot = quad_slot0_ + kClayQuadSlots * uint32_t(item.record);
+      std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(d.slot), &constants, sizeof(constants));
+    }
+    // (the file's quads now hold slots the live scene's quads were given: those are not drawn)
+    if (oracle_sun) quad_draw_count = 0;
+  }
+  const ClaySun sun = DecideClaySun(sun_in);
+  // The bright pass's sun flag is the verdict's, and the steps' constants are final: into the buffer.
+  post_constants.sun_on = sun == ClaySun::kDrawn ? 1u : 0u;
+  if (post_frame) std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(post_slot_), &post_constants, sizeof(post_constants));
+  st.sun = sun;
+  if (sun == ClaySun::kDrawn) {
+    for (int t = 0; t < 3; ++t) st.sun_drawn[t] = sun_plan.by_target[t];
+    st.sun_centre[0] = post_constants.radial[0];
+    st.sun_centre[1] = post_constants.radial[1];
+  }
+  CountClaySunFrame(sun, sun_counts_);
+  st.sun_frames = sun_counts_;
+  constexpr uint32_t kSunLogLines = 16;
+  if (sun != sun_logged_ && sun_log_lines_ < kSunLogLines) {
+    sun_logged_ = sun;
+    ++sun_log_lines_;
+    REXLOG_INFO("[native] clay: sun layer changed at scene frame {}: {}{}{}", scene.frame, FormatSunText(st),
+                oracle_sun ? " (the oracle feed's records and depth)" : "", sun_log_lines_ == kSunLogLines ? " (last such line)" : "");
+  }
   st.shadow_light_off = scene.shadow.valid && (light != ClayLight::kOn || !frame_.light_on);
   st.light_switch = light == ClayLight::kOn;
   st.light_block = frame_.light_on != 0;
@@ -2672,7 +3065,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     // at t0 and `second` at t1 (the composite's bloom), the white texture in every entry the step does
     // not read (the bright pass's two sun layers, which it reads only with the sun's flag, among them).
     auto post_step = [&](nrhi::Texture* target, uint32_t width, uint32_t height, nrhi::Pipeline* pipeline, const ClayPostStepConstants& words,
-                         nrhi::TextureView* source, nrhi::TextureView* second) {
+                         nrhi::TextureView* source, nrhi::TextureView* second, nrhi::TextureView* third = nullptr) {
       cmd->SetRenderTargets(target, nullptr);
       cmd->SetViewport({0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f});
       cmd->SetScissor({0, 0, int32_t(width), int32_t(height)});
@@ -2680,11 +3073,86 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       cmd->SetPipeline(pipeline);
       cmd->SetConstantBuffer(kPostParamConstants, terrain_cb_, ClaySmallSlotOffset(post_slot_));
       cmd->SetRootConstants(kPostParamStep, kPostStepWords, &words, 0);
-      nrhi::TextureView* const inputs[kPostTableSize] = {source, second ? second : white_view_, white_view_, white_view_};
+      nrhi::TextureView* const inputs[kPostTableSize] = {source, second ? second : white_view_, third ? third : white_view_, white_view_};
       cmd->SetTextures(kPostParamTextures, inputs, kPostTableSize);
       cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
       cmd->Draw(3, 0);
     };
+    // The sun layer (clay_logic.h, "Native sun layer"), before the bloom, whose bright pass reads its two
+    // results. Only in a frame whose verdict is drawn: its objects exist, its quads' constants are in
+    // their slots and their textures were asked before any target was bound.
+    const bool sun_on = sun == ClaySun::kDrawn;
+    if (sun_on) {
+      const float kNone[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+      auto layer_target = [&](nrhi::Texture* colour) {
+        cmd->SetRenderTargets(colour, sun_depth_);
+        cmd->SetViewport({0.0f, 0.0f, float(kSunLayerWidth), float(kSunLayerHeight), 0.0f, 1.0f});
+        cmd->SetScissor({0, 0, int32_t(kSunLayerWidth), int32_t(kSunLayerHeight)});
+      };
+      // The layer's quads of one target, in the records' order, each with the pipeline of its state.
+      auto layer_quads = [&](uint8_t target) {
+        cmd->SetBindingLayout(quad_layout_);
+        cmd->SetConstantBuffer(kQuadParamFrame, terrain_cb_, 0);
+        cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+        for (uint32_t i = 0; i < sun_draw_count; ++i) {
+          const SunDraw& d = sun_draws[i];
+          if (d.target != target || !sun_pipelines_[size_t(d.state)]) continue;
+          cmd->SetPipeline(sun_pipelines_[size_t(d.state)]);
+          cmd->SetConstantBuffer(kQuadParamConstants, terrain_cb_, ClaySmallSlotOffset(d.slot));
+          nrhi::TextureView* const views[kQuadTableSize] = {d.view, white_view_, white_view_};
+          cmd->SetTextures(kQuadParamTextures, views, kQuadTableSize);
+          cmd->Draw(uint32_t(std::size(capture::kQuadIndices)), 0);
+        }
+      };
+      // 1. The layer's depth: the scene's depth (resting as a shader resource since the colour pass ended;
+      // on the feed the file's) at every texel the size ratio names, written by a full-screen step with no
+      // colour target; then the cloud occluders into it, tested and written.
+      cmd->Barrier(sun_depth_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kDepthWrite);
+      cmd->FlushBarriers();
+      layer_target(nullptr);
+      cmd->ClearDepth(sun_depth_, 1.0f);
+      cmd->SetBindingLayout(post_layout_);
+      cmd->SetPipeline(sun_depth_pipeline_);
+      cmd->SetConstantBuffer(kPostParamConstants, terrain_cb_, ClaySmallSlotOffset(post_slot_));
+      {
+        const ClayPostStepConstants words = MakeClaySunStep(ClaySunStep::kDepth, kWidth, kHeight, kSunLayerWidth, kSunLayerHeight);
+        cmd->SetRootConstants(kPostParamStep, kPostStepWords, &words, 0);
+        nrhi::TextureView* const inputs[kPostTableSize] = {oracle_sun ? oracle_depth_view_ : sun_scene_depth_view_, white_view_, white_view_,
+                                                           white_view_};
+        cmd->SetTextures(kPostParamTextures, inputs, kPostTableSize);
+      }
+      cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+      cmd->Draw(3, 0);
+      layer_quads(0);
+      // 2. Layer 1 (the beam source) and layer 2 (flares, moon glow, sun disc), each cleared and drawn
+      // against that one depth, which no colour state writes.
+      for (uint8_t layer = 0; layer < 2; ++layer) {
+        cmd->Barrier(sun_layer_[layer], nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
+        cmd->FlushBarriers();
+        layer_target(sun_layer_[layer]);
+        cmd->ClearRenderTarget(sun_layer_[layer], kNone);
+        layer_quads(uint8_t(layer + 1));
+        cmd->Barrier(sun_layer_[layer], nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
+        cmd->FlushBarriers();
+      }
+      cmd->Barrier(sun_depth_, nrhi::ResourceState::kDepthWrite, nrhi::ResourceState::kPixelShaderResource);
+      cmd->FlushBarriers();
+      // 3. Layer 1 reduced into sun_small_[0], blurred radially into [1] and back into [0] (the bright
+      // pass's tf1); layer 2 reduced into [2] (its tf2). No target is read and written in one step.
+      auto small_step = [&](nrhi::Texture* target, nrhi::Pipeline* pipeline, const ClayPostStepConstants& words, nrhi::TextureView* source) {
+        cmd->Barrier(target, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
+        cmd->FlushBarriers();
+        post_step(target, kSunSmallWidth, kSunSmallHeight, pipeline, words, source, nullptr);
+        cmd->Barrier(target, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
+        cmd->FlushBarriers();
+      };
+      const ClayPostStepConstants reduce = MakeClaySunStep(ClaySunStep::kReduce, kSunLayerWidth, kSunLayerHeight, kSunSmallWidth, kSunSmallHeight);
+      const ClayPostStepConstants radial = MakeClaySunStep(ClaySunStep::kRadial, kSunSmallWidth, kSunSmallHeight, kSunSmallWidth, kSunSmallHeight);
+      small_step(sun_small_[0], sun_reduce_pipeline_, reduce, sun_layer_view_[0]);
+      small_step(sun_small_[1], sun_radial_pipeline_, radial, sun_small_view_[0]);
+      small_step(sun_small_[0], sun_radial_pipeline_, radial, sun_small_view_[1]);
+      small_step(sun_small_[2], sun_reduce_pipeline_, reduce, sun_layer_view_[1]);
+    }
     // (the oracle feed: the stored scene in place of the linear target, for every step that reads the
     // scene: the composite and, with the bloom, the downsample; both rest in kPixelShaderResource)
     nrhi::TextureView* const scene_view = oracle_fed ? oracle_view_ : linear_view_;
@@ -2694,16 +3162,20 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       // of the scene into bloom_d_, the bright pass of that into bloom_p_, the blur along x into
       // bloom_q_ and the blur along y back into bloom_p_, which the composite then samples. Each target
       // is a target for its own step alone and rests as a shader resource before and after it.
-      auto bloom_step = [&](nrhi::Texture* target, nrhi::Pipeline* pipeline, const ClayPostStepConstants& words, nrhi::TextureView* source) {
+      auto bloom_step = [&](nrhi::Texture* target, nrhi::Pipeline* pipeline, const ClayPostStepConstants& words, nrhi::TextureView* source,
+                            nrhi::TextureView* second = nullptr, nrhi::TextureView* third = nullptr) {
         cmd->Barrier(target, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
         cmd->FlushBarriers();
-        post_step(target, kBloomWidth, kBloomHeight, pipeline, words, source, nullptr);
+        post_step(target, kBloomWidth, kBloomHeight, pipeline, words, source, second, third);
         cmd->Barrier(target, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
         cmd->FlushBarriers();
       };
       bloom_step(bloom_d_, post_downsample_pipeline_, MakeClayPostStep(ClayPostStep::kDownsample, kWidth, kHeight, UnormLevels(kBloomDownFormat)),
                  scene_view);
-      bloom_step(bloom_p_, post_bright_pipeline_, MakeClayPostStep(ClayPostStep::kBright, kBloomWidth, kBloomHeight, kBloomLevels), bloom_d_view_);
+      // (the bright pass reads the sun layer's two results at t1 and t2 only with the sun's flag, which is
+      // set only in a frame that drew them; in every other frame the white texture is bound and unread)
+      bloom_step(bloom_p_, post_bright_pipeline_, MakeClayPostStep(ClayPostStep::kBright, kBloomWidth, kBloomHeight, kBloomLevels), bloom_d_view_,
+                 sun_on ? sun_small_view_[0] : nullptr, sun_on ? sun_small_view_[2] : nullptr);
       bloom_step(bloom_q_, post_blur_pipeline_, MakeClayPostStep(ClayPostStep::kBlurX, kBloomWidth, kBloomHeight, kBloomLevels), bloom_p_view_);
       bloom_step(bloom_p_, post_blur_pipeline_, MakeClayPostStep(ClayPostStep::kBlurY, kBloomWidth, kBloomHeight, kBloomLevels), bloom_q_view_);
     }
@@ -2722,7 +3194,11 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     // the upload's (frame 1), copied while it rests and left resting.
     if (oracle_fed) {
       if (oracle_frames_ <= kOracleDumpAfter) ++oracle_frames_;
-      if (oracle_frames_ == kOracleDumpAfter + 1 && oracle_dump_state_ == OracleDump::kNone) CopyOracleDump(cmd, dev);
+      if (oracle_frames_ == kOracleDumpAfter + 1 && oracle_dump_state_ == OracleDump::kNone) {
+        CopyOracleDump(cmd, dev);
+        // (the sun layer's three pictures of the same frame, when the feed's sun part drew it)
+        if (sun_on && oracle_sun && oracle_dump_state_ == OracleDump::kPending) CopyOracleLayerDumps(cmd, dev);
+      }
     }
   } else {
   // (today's frame: the mapping as it was before the post chain, its text, its word and its calls)

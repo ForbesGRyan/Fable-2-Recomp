@@ -437,6 +437,7 @@ class PostFrame:
         self.out_scale_from = None
         self.memdump = None       # the "memdump" row
         self.block = None         # "post" of the frame row: the post block the capture built (plan Task 4)
+        self.quads_on = False     # "quads" of the frame row says the quads were wanted (plan Task 12): the radial read's gate
         self.has_frame_row = False
 
 
@@ -491,6 +492,7 @@ def load_capture(path, tex_root=None):
                 fr.frame_line = line_no
                 fr.has_frame_row = True
                 fr.block = r.get("post")
+                fr.quads_on = bool((r.get("quads") or {}).get("on"))
                 light = r.get("light") or {}
                 if light.get("valid") and isinstance(light.get("out_scale"), (int, float)):
                     fr.out_scale, fr.out_scale_from = float(light["out_scale"]), "the frame row's light block"
@@ -539,6 +541,23 @@ def blur_registers(row):
     if c46 is None or c47 is None:
         return None
     return tuple(c46) + tuple(c47[:3])
+
+
+def radial_registers(row):
+    """(c31.x, c31.y, c46.x, c47.x) of a radial blur's row (4BE4): the four values the block takes; None where
+    the row gives no register."""
+    c31, c46, c47 = _reg(row, 31), _reg(row, 46), _reg(row, 47)
+    if c31 is None or c46 is None or c47 is None:
+        return None
+    return [c31[0], c31[1], c46[0], c47[0]]
+
+
+def radial_part(values):
+    """SetPostRadial's rule for the radial part (post_block.h, kPostPartRadial): c31.x and c31.y finite and in
+    [-4, 4], c46.x and c47.x in (0, 1]. values: radial_registers of a row, or None."""
+    if values is None or len(values) != 4 or not all(math.isfinite(v) for v in values):
+        return False
+    return all(-4.0 <= v <= 4.0 for v in values[:2]) and all(0.0 < v <= 1.0 for v in values[2:])
 
 
 def blur_part(blur_x_row, blur_y_row):
@@ -758,6 +777,11 @@ def report_block(cap):
                   "bright" (c31.x, c46.x, c47.x, c77.x, c77.y) against the bright pass's, bit for bit;
       blur        "parts" bit 0 against MakePostBlock's rule on the blurs' rows (blur_part), and with the part
                   the 14 weights against those rows;
+      radial      "parts" bit 1 and "radial" (c31.x, c31.y, c46.x, c47.x) against the frame's radial blur rows
+                  (4BE4) by SetPostRadial's rule: with the part, at least one row, every row the same four
+                  values, inside the rule's bounds, and the block's four equal to them bit for bit; without it
+                  the four are 0, and the rows must not give the part in a frame whose quads were wanted (the
+                  frame row's "quads" says "on": the capture reads the registers only then);
       table       the (address, content) pair the block read against the composite's row's slot 1 ("tf",
                   "tfc"), and the 512 texels against decode_table of the dump with that content;
       age         0: the frame's own block (ruling 10);
@@ -774,6 +798,7 @@ def report_block(cap):
                 else "the capture has no row of this frame's end"))
             continue
         faults = []
+        radial_text = "radial not checked"
         comp = (fr.rows.get(COMPOSITE_PS) or [None])[0]
         bright = (fr.rows.get(BRIGHT_PS) or [None])[0]
         bx = fr.rows.get(BLUR_X_PS) or []
@@ -802,6 +827,34 @@ def report_block(cap):
             want_blur = list(blur_registers(bx[0]) + blur_registers(by[0])) if part else [0.0] * 14
             if not ft._same_floats(b.get("blur", []), want_blur):
                 faults.append("blur: block %s, rows %s" % (_hex9(b.get("blur", [])), _hex9(want_blur)))
+            radial_rows = [radial_registers(r) for r in fr.rows.get(RADIAL_PS) or []]
+            got_radial = list(b.get("radial") or [0.0] * 4)
+            rule = bool(radial_rows) and all(radial_part(v) for v in radial_rows) \
+                and all(ft._same_floats(v, radial_rows[0]) for v in radial_rows)
+            if b.get("parts", 0) & 2:
+                if not radial_rows:
+                    faults.append("radial: parts %s, but the frame has no 4BE4 row" % b.get("parts"))
+                elif any(v is None for v in radial_rows):
+                    faults.append("radial: a 4BE4 row has no value")
+                elif not all(ft._same_floats(v, radial_rows[0]) for v in radial_rows):
+                    faults.append("radial: the frame's %d 4BE4 rows differ: %s" % (
+                        len(radial_rows), ", ".join(_hex9(v) for v in radial_rows)))
+                elif not rule:
+                    faults.append("radial: the rows %s fail SetPostRadial's rule, the block has the part" % _hex9(radial_rows[0]))
+                elif not ft._same_floats(got_radial, radial_rows[0]):
+                    faults.append("radial: block %s, rows %s" % (_hex9(got_radial), _hex9(radial_rows[0])))
+                else:
+                    radial_text = "radial %s equal to %s 4BE4 rows" % (
+                        _hex9(got_radial), "both" if len(radial_rows) == 2 else "the %d" % len(radial_rows))
+            else:
+                if any(v != 0.0 for v in got_radial):
+                    faults.append("radial: parts %s, but the block holds %s" % (b.get("parts"), _hex9(got_radial)))
+                elif fr.quads_on and rule:
+                    faults.append("radial: parts %s, but the 4BE4 rows give the part by SetPostRadial's rule in a frame whose "
+                                  "quads were wanted" % b.get("parts"))
+                else:
+                    radial_text = "no radial part (%s)" % (
+                        "the quads were not wanted" if not fr.quads_on else "%d 4BE4 rows that do not give it" % len(radial_rows))
             src = b.get("table") or {}
             pair = (int(src.get("base", "0"), 16), int(src.get("content", "0"), 16))
             table, fc, content, why = frame_table(cap, fr)
@@ -829,10 +882,10 @@ def report_block(cap):
             good += 1
             src = b["table"]
             print("frame %d: post block equal to the rows: age 0, 6 + 5 registers, %s, table %s / %s, 512 texels equal "
-                  "to the dump's, c77.y * c20.w %.6f" % (
+                  "to the dump's, c77.y * c20.w %.6f; %s" % (
                       n, "14 blur weights (parts %d)" % b["parts"] if b.get("parts", 0) & 1
                       else "no blur weights (parts %d: %d and %d blur rows)" % (b.get("parts", 0), len(bx), len(by)),
-                      src["base"], src["content"][2:], product))
+                      src["base"], src["content"][2:], product, radial_text))
         for text in faults:
             print("frame %d: POST %s" % (n, text))
     print("post block valid, at age 0 and equal to the frame's rows and dump in %d of %d frames" % (good, len(cap.frames)))

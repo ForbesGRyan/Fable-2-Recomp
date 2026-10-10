@@ -151,11 +151,84 @@ QUAD_MATRIX_MADE = (1.5, 0.0, -0.25, 3.0, 0.0, 2.0, 0.5, -1.0, 0.125, 0.25, 1.0,
 QUAD_CORNERS = ((-2371.3755, -434.84604, 259.41992), (-2076.5493, 71.328873, -2866.1541), (0.0, 0.0, 0.0), (3.0, -4.0, 5.5))
 
 
+# The sun layer's quads (plan Task 14): the beam source's and the flare's points (texel, c31), the moon glow's
+# (texel), the sun disc's (texel, c31, c20.w) and the cloud occluder's (the texel's alpha, the pixel's world x y,
+# the eye c47.xy, c77.x). The first of each has the registers of capture native_discovery_20261010_052158 frame 1
+# (the flare's: of 20261010_034415 frame 1); the others exercise the target's clamp and values that are no numbers.
+# The shaders' own literals are single-precision floats, as the microcode holds them (SUN_BEAM_SCALE and the
+# others below): the pins are made with those, not with the doubles of light_formulas' defaults.
+SUN_BEAM_SCALE = f32(lf.POST_BEAM_C255X)
+SUN_GLOW_SCALE = f32(lf.POST_GLOW_C255X)
+SUN_OCCLUDER_C255 = tuple(f32(v) for v in lf.POST_CLOUD_OCCLUDER_C255)
+SUN_BEAM = (
+    ((1.0, 1.0, 1.0, 1.0), (0.81996822, 0.64650178, 0.31927904, 0.0)),
+    ((0.5, 0.25, 0.125, 0.75), (0.81996822, 0.64650178, 0.31927904, 0.0)),
+    ((1.0, 0.5, 0.25, 0.0), (64.0, 6.0, 1.0, 0.0)),
+    ((NAN, 0.5, INF, 1.0), (1.0, 1.0, 1.0, 0.0)),
+    ((0.5, 0.5, 0.5, 1.0), (1.0, NAN, 1.0, 0.0)),
+    ((0.5, 0.5, -0.5, 1.0), (-1.0, 1.0, 1.0, NAN)),
+)
+SUN_FLARE = (
+    ((0.1, 0.2, 0.3, 1.0), (0.40544403, 0.18920721, 0.023849649, 0.2599)),
+    ((0.9, 0.9, 0.9, 0.5), (0.40544403, 0.18920721, 0.023849649, 0.2599)),
+    ((0.0, 0.0, 0.0, 1.0), (64.0, 1.0, 0.5, 0.0)),
+    ((0.5, 0.5, 0.5, NAN), (1.0, 1.0, 1.0, 0.0)),
+    ((0.5, 0.5, 0.5, INF), (1.0, 1.0, 1.0, 0.0)),
+    ((0.5, 0.5, 0.5, 0.5), (1.0, INF, -1.0, 0.0)),
+)
+SUN_GLOW = (
+    (1.0, 1.0, 1.0, 1.0),
+    (0.5, 0.25, 0.125, 0.75),
+    (1.0, 1.0, 1.0, 0.039215688),
+    (0.2, 0.4, 0.6, 0.0),
+    (NAN, 0.5, 0.5, 1.0),
+    (0.5, 0.5, 0.5, NAN),
+    (0.5, INF, -0.5, 0.5),
+    (0.5, 0.5, 0.5, 3.0),
+)
+SUN_DISC = (
+    ((1.0, 1.0, 1.0, 1.0), (0.87670386, 0.69123483, 0.34137076, 0.0), 1.0),
+    ((0.5, 0.25, 0.125, 0.75), (0.87670386, 0.69123483, 0.34137076, 0.0), 1.0),
+    ((1.0, 1.0, 1.0, 0.50196081), (0.87670386, 0.69123483, 0.34137076, 0.0), 1.0),
+    ((1.0, 0.5, 0.25, 1.0), (2.0, 1.0, 0.5, 0.0), 8.0),
+    ((NAN, 0.5, 0.5, 1.0), (1.0, 1.0, 1.0, 0.0), 1.0),
+    ((0.5, 0.5, 0.5, NAN), (1.0, 1.0, 1.0, 0.0), 1.0),
+    ((0.5, 0.5, 0.5, 0.5), (1.0, NAN, 1.0, 0.0), 1.0),
+    ((0.5, 0.5, 0.5, 0.5), (1.0, 1.0, 1.0, 0.0), INF),
+    ((0.5, 0.5, 0.5, 0.5), (-1.0, 1.0, 1.0, 0.0), 1.0),
+)
+SUN_OCCLUDER_EYE = (90.097015, 158.37025)
+SUN_OCCLUDER = (
+    (1.0, (90.0, 158.0), SUN_OCCLUDER_EYE, 0.5),                # under the eye: the fade is 1
+    (0.29803923, (90.0, 158.0), SUN_OCCLUDER_EYE, 0.5),         # alpha 76 / 255, halved: the reference 38 / 255 itself (not above it)
+    (0.29411766, (90.0, 158.0), SUN_OCCLUDER_EYE, 0.5),         # alpha 75 / 255: below it
+    (1.0, (1290.0, 958.0), SUN_OCCLUDER_EYE, 0.5),              # 1,442 from the eye: inside the fade
+    (1.0, (3000.0, -3000.0), SUN_OCCLUDER_EYE, 0.5),            # beyond 2,000: 0
+    (0.5, (1090.0, 158.0), (90.0, 158.0), 2.0),                 # exactly at the fade's start; the clamp at 1
+    (NAN, (90.0, 158.0), SUN_OCCLUDER_EYE, 0.5),
+    (1.0, (NAN, 158.0), SUN_OCCLUDER_EYE, 0.5),
+    (1.0, (90.0, 158.0), (INF, 0.0), 0.5),
+    (1.0, (90.0, 158.0), SUN_OCCLUDER_EYE, NAN),
+    (1.0, (90.0, 158.0), SUN_OCCLUDER_EYE, -1.0),
+)
+
+
+def sun_occluder_pin(alpha, world, eye, c77x):
+    """post_cloud_occluder with the texel's alpha given (its coordinate plays no part in the pin: c31 and c46
+    are the identity) and the shader's single-precision literals."""
+    tex = lambda u, v, dx, dy: (0.0, 0.0, 0.0, f32(alpha))      # noqa: E731
+    return lf.post_cloud_occluder(tex, (0.0, 0.0), (f32(world[0]), f32(world[1]), 0.0), (1.0, 1.0), (0.0, 0.0),
+                                  (f32(eye[0]), f32(eye[1])), f32(c77x), SUN_OCCLUDER_C255)
+
+
 def quad_matrix():
     """The captured matrix: four rows of four single-precision floats."""
     v = struct.unpack('>16f', struct.pack('>16I', *QUAD_MATRIX_BITS))
     return [list(v[4 * i:4 * i + 4]) for i in range(4)]
 REDUCE_PIXELS = ((0, 0), (3, 5), (7, 7))
+# The radial blur with its centre on the picture's top edge: c31.y exactly 0, as captured with the sun just above
+# the picture (frames 7 and 8 of capture native_discovery_20261010_065553); the factors are the real set's.
+RADIAL_EDGE = {'c31': (f32(0.3821), 0.0), 'c46x': REAL['radial']['c46x'], 'c47x': REAL['radial']['c47x']}
 
 
 def scene_texel(x, y):
@@ -260,6 +333,11 @@ def lines():
             tex = lambda u, v: [0.25 * t for t in point(u * UNORM_W + 0.5, v * UNORM_H + 0.5)]      # noqa: E731
             out.append('    {%d, %d, %s},' % (x, y, doubles(lf.post_radial(tex, x / float(UNORM_W), y / float(UNORM_H), r['c31'],
                                                                          r['c46x'], r['c47x']))))
+    r = RADIAL_EDGE
+    out.append('// edge radial pins (as the real ones), c31.xy, c46.x, c47.x %s: the pixel, the value' % floats((r['c31'][0], r['c31'][1], r['c46x'], r['c47x'])))
+    for x, y in RADIAL_PIXELS:
+        tex = lambda u, v: [0.25 * t for t in point(u * UNORM_W + 0.5, v * UNORM_H + 0.5)]      # noqa: E731
+        out.append('    {%d, %d, %s},' % (x, y, doubles(lf.post_radial(tex, x / float(UNORM_W), y / float(UNORM_H), r['c31'], r['c46x'], r['c47x']))))
     out.append('// reduce pins (unorm_texel, %d x %d, linear, to %d x %d): the pixel, the value' % (
         UNORM_W, UNORM_H, UNORM_W // 2, UNORM_H // 2))
     for x, y in REDUCE_PIXELS:
@@ -277,6 +355,25 @@ def lines():
         for corner in QUAD_CORNERS:
             p = [f32(v) for v in corner]
             out.append('    {%s, %s},' % (floats(corner), doubles(lf.post_quad_position(p, m[0], m[1], m[2], m[3]))))
+    out.append('// sun beam pins (light_formulas.post_beam_source, c255.x %s): the texel, c31, the value (rgb, alpha)' % _num(SUN_BEAM_SCALE, True))
+    for t, c31 in SUN_BEAM:
+        out.append('    {%s, %s, %s},' % (floats(t), floats(c31), doubles(lf.post_beam_source([f32(v) for v in t], [f32(v) for v in c31],
+                                                                                           SUN_BEAM_SCALE))))
+    out.append('// sun flare pins (light_formulas.post_flare): the texel, c31, the value (rgb, alpha)')
+    for t, c31 in SUN_FLARE:
+        out.append('    {%s, %s, %s},' % (floats(t), floats(c31), doubles(lf.post_flare([f32(v) for v in t], [f32(v) for v in c31]))))
+    out.append('// sun glow pins (light_formulas.post_moon_glow, c255.x %s): the texel, the value (rgb, alpha)' % _num(SUN_GLOW_SCALE, True))
+    for t in SUN_GLOW:
+        out.append('    {%s, %s},' % (floats(t), doubles(lf.post_moon_glow([f32(v) for v in t], SUN_GLOW_SCALE))))
+    out.append('// sun disc pins (light_formulas.post_sun_disc): the texel, c31, c20.w, the value (rgb, alpha)')
+    for t, c31, c20w in SUN_DISC:
+        out.append('    {%s, %s, %s, %s},' % (floats(t), floats(c31), _num(f32(c20w), True),
+                                              doubles(lf.post_sun_disc([f32(v) for v in t], [f32(v) for v in c31], f32(c20w)))))
+    out.append('// sun occluder pins (light_formulas.post_cloud_occluder, c255 %s): the alpha of the texel, the world x y, the eye c47.xy, '
+               'c77.x, the alpha the test sees' % floats(SUN_OCCLUDER_C255))
+    for alpha, world, eye, c77x in SUN_OCCLUDER:
+        out.append('    {%s, %s, %s, %s, %s},' % (_num(f32(alpha), True), floats(world), floats(eye), _num(f32(c77x), True),
+                                                  _num(sun_occluder_pin(alpha, world, eye, c77x), False)))
     return out
 
 

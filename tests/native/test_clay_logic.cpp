@@ -10,6 +10,7 @@
 #include <cmath>
 #include <limits>
 #include <string>
+#include <thread>
 
 using namespace fable2::native;
 using namespace fable2::native::render;
@@ -83,6 +84,829 @@ static int Level8(float v) {
   return int(std::floor(c * 255.0f + 0.5f));
 }
 
+// --- the sun layer's cases (a function of their own: main's frame holds every other case's locals) ---
+static void SunLayerTests() {
+  // 640 to 651: the sun layer (sub-project 10, plan Task 14; clay_logic.h, "Native sun layer").
+  {
+    using capture::PostQuadKind;
+    using capture::QuadRecord;
+    const float kNaN = std::numeric_limits<float>::quiet_NaN(), kInf = std::numeric_limits<float>::infinity();
+    auto bits = [](uint32_t b) {
+      float f;
+      std::memcpy(&f, &b, sizeof(f));
+      return f;
+    };
+    // Frame 1 of capture native_discovery_20261010_052158 (towards the sun): the frame's quad matrix and its
+    // layer records, made by the capture's own function from the rows' values: the first cloud occluder (n
+    // 47), the beam source (n 53), the moon glow (n 54), the sun disc (n 55); a flare of capture
+    // 20261010_034415 frame 1 (n 77: the sunward frame has none); and the scene's sun glare (n 43).
+    const uint32_t matrix_bits[16] = {0x3EBA04AA, 0x3F684A6D, 0x33BBAA18, 0xC3306FC9, 0x3F3E8525, 0xBE989184, 0x3FC5551A, 0xC2B9462A,
+                                      0xBF52DBA3, 0x3EA8DAD8, 0x3EEC3766, 0x3DCDF642, 0xBF52DA8E, 0x3EA8D9FA, 0x3EEC3630, 0x3E4D6100};
+    float matrix[4][4];
+    for (int i = 0; i < 16; ++i) matrix[i / 4][i % 4] = bits(matrix_bits[i]);
+    struct Fetch { uint32_t w[6]; };
+    auto record = [&](uint64_t ps, const char* verts, std::initializer_list<std::initializer_list<uint32_t>> registers, uint32_t blend,
+                      uint32_t depth, uint32_t mask, uint32_t control, uint32_t ref, const Fetch& texture) {
+      uint8_t vertices[80];
+      auto digit = [](char c) { return c <= '9' ? c - '0' : c - 'A' + 10; };
+      for (int i = 0; i < 80; ++i) vertices[i] = uint8_t(digit(verts[2 * i]) * 16 + digit(verts[2 * i + 1]));
+      const uint16_t indices[6] = {0, 1, 2, 1, 3, 2};
+      float ps_regs[12][4] = {};
+      size_t n = 0;
+      for (const auto& r : registers) {
+        int k = 0;
+        for (uint32_t b : r) ps_regs[n][k++] = bits(b);
+        ++n;
+      }
+      uint32_t fetch[3][6] = {};
+      std::memcpy(fetch[0], texture.w, sizeof(fetch[0]));
+      capture::QuadInputs in{};
+      in.vertices = vertices;
+      in.vertex_bytes = sizeof(vertices);
+      in.stride = 20;
+      in.indices = indices;
+      in.index_count = 6;
+      in.view_proj = matrix;
+      in.ps = ps_regs;
+      in.ps_count = n;
+      in.fetch = fetch;
+      in.fetch_count = 1;
+      in.blend = blend;
+      in.depth = depth;
+      in.colour_mask = mask;
+      in.colour_control = control;
+      in.alpha_ref = ref;
+      in.vport_z_scale = 0xBF800000;
+      in.vte_cntl = 0x43F;
+      const capture::PostQuadEntry* entry = capture::FindPostQuad(ps);
+      return entry ? capture::MakeQuadRecord(*entry, in, nullptr) : QuadRecord{};
+    };
+    const Fetch glow_texture = {{0x82000002, 0x14E60054, 0x001FE0FF, 0x00A80D10, 0x00000103, 0x14E70A18}};
+    const Fetch cloud_texture = {{0x84000002, 0x163E0054, 0x003FE1FF, 0x00A80D10, 0x00000143, 0x16420A18}};
+    const QuadRecord occluder = record(0x3FF79524FCDB71C5ull,
+                                       "C53B8001C53B800143FA00000000000000000000453B8001C53B800143FA00003F80000000000000"
+                                       "C53B8001453B800143FA0000000000003F800000453B8001453B800143FA00003F8000003F800000",
+                                       {{0x40A00000, 0x40A00000, 0x00000000, 0x00000000}, {0x3E8BA2EF, 0x3F0BA2EF, 0x00000000, 0x00000000},
+                                        {0x42B431AC, 0x431E5EC9, 0x423CD3F5, 0x3F800000}, {0x3F000000, 0x00000000, 0x00000000, 0x00000000}},
+                                       0x07060706, 0x00708766, 0x0, 0xC, 0x3E189899, cloud_texture);
+    const QuadRecord beam = record(0x8E4DBB9E9A63EF67ull,
+                                   "C50A1176C3B7A1D44392D8AA000000003F800000C4C0806644A2F86E4392D8B23F8000003F800000"
+                                   "C4B3C528C428FC7444EC55E80000000000000000C44045444478C55344EC55EA3F80000000000000",
+                                   {{0x3F51E970, 0x3F258124, 0x3EA3788B, 0x00000000}}, 0x00010001, 0x00708762, 0xF, 0x4, 0x3F008081, glow_texture);
+    const QuadRecord glow = record(0x4B58837D42F08C89ull,
+                                   "C524C8D8C3E53C87C559F34D3F0000003F800000C51232F4438E1A61C559F34D3F2000003F800000"
+                                   "C50F5EACC414EA81C52D96EB3F00000000000000C4F99190431303CCC52D96EB3F20000000000000",
+                                   {}, 0x07060706, 0x00708762, 0xF, 0xC, 0x3D20A0A1, glow_texture);
+    const QuadRecord disc = record(0x3E77B1AD4BC5B900ull,
+                                   "C4CC22CE4331ACB944691F55000000003F800000C4BB68B443FFF0AB44691F553F8000003F800000"
+                                   "C4B8DCDA42E7E096449C7C6A0000000000000000C4A822C043E11273449C7C6A3F80000000000000",
+                                   {{0x3BC20A12, 0x3D8FC764, 0x3DBABD2A, 0x3F800000}, {0x3F606FAA, 0x3F30F4C4, 0x3EAEC826, 0x00000000}},
+                                   0x01010101, 0x00708762, 0xF, 0xC, 0x3F008081, glow_texture);
+    const QuadRecord flare = record(0xD72FD0903CCE7DD6ull,
+                                    "42E75881431E794C42249D81000000000000000042E7F815431DF01842249D813F80000000000000"
+                                    "42E7891F431E876E42270E57000000003F80000042E828B3431DFE3A42270E573F8000003F800000",
+                                    {{0x3ECF965C, 0x3E41BF89, 0x3CC36057, 0x3E85119D}}, 0x01010101, 0x00708762, 0xF, 0x4, 0x3F008081, glow_texture);
+    const QuadRecord glare = record(0x04985A0F7296E130ull,
+                                    "C5143602C3D96C434381B5C0000000003F800000C4CB7E8C44B1BB3F4381B5C83F8000003F800000"
+                                    "C4BD592CC44274BA44FE3B5E0000000000000000C440D7674486DBF344FE3B603F80000000000000",
+                                    {{0x3E7AC1BC, 0x3E45B561, 0x3DC3477C, 0x00000000}}, 0x01010101, 0x00708760, 0xF, 0x4, 0x3F008081, glow_texture);
+    const QuadRecord* const layer_records[5] = {&occluder, &beam, &glow, &disc, &flare};
+    for (const QuadRecord* q : layer_records) CHECK(640, capture::QuadRecordValid(*q) && q->layer == 1);
+    CHECK(640, capture::QuadRecordValid(glare) && glare.layer == 0);
+    const float unit[2] = {1.0f, 1.0f};
+
+    // 640: the state a layer record is drawn with, the target of its kind, and the depth test's direction.
+    {
+      CHECK(640, SunQuadDrawState(occluder) == ClaySunState::kDepth && SunQuadDrawState(beam) == ClaySunState::kReplace &&
+                     SunQuadDrawState(glow) == ClaySunState::kAlpha && SunQuadDrawState(disc) == ClaySunState::kAdd &&
+                     SunQuadDrawState(flare) == ClaySunState::kAdd);
+      // The scene's quad step draws none of them (their kinds have no place in it), and the layer none of the scene's.
+      for (const QuadRecord* q : layer_records) CHECK(640, ClayQuadPlaceOf(q->kind) == ClayQuadPlace::kNotDrawn);
+      CHECK(640, SunQuadDrawState(glare) == ClaySunState::kNone && QuadDrawState(disc) == ClayQuadState::kNone &&
+                     QuadDrawState(flare) == ClayQuadState::kNone && QuadDrawState(beam) == ClayQuadState::kNone &&
+                     QuadDrawState(occluder) == ClayQuadState::kNone);
+      // The target is the kind's (a record does not carry it; the order of the records does not decide it).
+      CHECK(640, SunQuadTarget(PostQuadKind::kCloudOccluder) == 0 && SunQuadTarget(PostQuadKind::kBeamSource) == 1 &&
+                     SunQuadTarget(PostQuadKind::kFlare) == 2 && SunQuadTarget(PostQuadKind::kMoonGlow) == 2 &&
+                     SunQuadTarget(PostQuadKind::kSunDisc) == 2);
+      for (const QuadRecord* base : layer_records) {
+        // No depth test; another function than greater-or-equal; a depth write a colour kind must not have,
+        // or the lack of the one the occluder must have; a colour mask that is not the kind's; an alpha
+        // function that is not "greater"; another kind's blend; a record that is not the layer's.
+        QuadRecord q = *base;
+        q.depth &= ~2u;
+        CHECK(640, SunQuadDrawState(q) == ClaySunState::kNone);
+        for (uint32_t func = 0; func < 8; ++func) {
+          q = *base;
+          q.depth = (q.depth & ~0x70u) | (func << 4);
+          CHECK(640, (SunQuadDrawState(q) != ClaySunState::kNone) == (func == 6));
+        }
+        q = *base;
+        q.depth ^= 4u;
+        CHECK(640, SunQuadDrawState(q) == ClaySunState::kNone);
+        q = *base;
+        q.colour_mask ^= 0xFu;
+        CHECK(640, SunQuadDrawState(q) == ClaySunState::kNone);
+        q = *base;
+        q.colour_mask = 0x7;
+        CHECK(640, SunQuadDrawState(q) == ClaySunState::kNone);
+        for (uint32_t func = 0; func < 8; ++func) {
+          q = *base;
+          q.alpha_control = 8u | func;
+          CHECK(640, (SunQuadDrawState(q) != ClaySunState::kNone) == (func == 4));
+        }
+        q = *base;
+        q.layer = 0;
+        CHECK(640, SunQuadDrawState(q) == ClaySunState::kNone);
+        if (base != &occluder) {
+          for (uint32_t blend : {kQuadBlendReplace, kQuadBlendAdd, kQuadBlendAlpha, 0x00000000u}) {
+            q = *base;
+            q.blend = blend;
+            CHECK(640, (SunQuadDrawState(q) != ClaySunState::kNone) == (blend == base->blend));
+          }
+        }
+      }
+      // The direction: the game's greater-or-equal on 1 - z / w is less-or-equal on z / w. The beam source's
+      // corners lie at z / w 0.99997: in front of the cleared depth (the sky), behind everything nearer.
+      double clip[4];
+      QuadPositionMirror(beam.corners[0], matrix, clip);
+      const float z = float(clip[2] / clip[3]);
+      CHECK(640, clip[3] > 0.0 && z > 0.9999f && z < 1.0f);
+      CHECK(640, SunDepthPasses(z, 1.0f) && SunDepthPasses(z, z) && !SunDepthPasses(z, 0.5f) && !SunDepthPasses(z, std::nextafter(z, 0.0f)));
+      CHECK(640, !SunDepthPasses(kNaN, 1.0f) && !SunDepthPasses(0.5f, kNaN));
+      // The same test in the game's terms, on both sides of the stored value.
+      for (float stored : {0.0f, 0.25f, z, 1.0f}) {
+        for (float quad : {0.0f, 0.25f, 0.5f, z, 1.0f}) CHECK(640, SunDepthPasses(quad, stored) == (1.0f - quad >= 1.0f - stored));
+      }
+    }
+
+    // 641: a layer record's constants, each where the shader's block has it, and what gives none.
+    {
+      static_assert(sizeof(ClaySunQuadConstants) == 416 && offsetof(ClaySunQuadConstants, reg) == 192 && offsetof(ClaySunQuadConstants, kind) == 384 &&
+                    offsetof(ClaySunQuadConstants, alpha_ref) == 396 && offsetof(ClaySunQuadConstants, fix) == 400 &&
+                    offsetof(ClaySunQuadConstants, levels) == 408);
+      CHECK(641, sizeof(ClaySunQuadConstants) <= size_t(kClayQuadSlots) * 256);
+      ClaySunQuadConstants c;
+      const float fix[2] = {0.5f, 0.25f};
+      CHECK(641, MakeClaySunQuadConstants(beam, 3, fix, &c));
+      CHECK(641, c.kind == 4 && c.sampler == 3 && c.alpha_test == 0 && c.alpha_ref == 0.0f && c.levels == 1023.0f && c.pad == 0 &&
+                     c.fix[0] == 0.5f && c.fix[1] == 0.25f);
+      CHECK(641, c.reg[0][0] == beam.ps[0][0] && c.reg[0][1] == beam.ps[0][1] && c.reg[0][2] == beam.ps[0][2] && c.reg[0][3] == 0.0f &&
+                     c.reg[0][0] > 0.81f && c.reg[0][0] < 0.83f);
+      for (int i = 0; i < 4; ++i) {
+        CHECK(641, c.corner[i][0] == beam.corners[i][0] && c.corner[i][2] == beam.corners[i][2] && c.corner[i][3] == 1.0f &&
+                       c.coord[i][0] == beam.corners[i][3] && c.coord[i][1] == beam.corners[i][4] && c.coord[i][2] == 0.0f);
+        for (int k = 0; k < 4; ++k) CHECK(641, c.view_proj[i][k] == matrix[i][k]);
+      }
+      CHECK(641, MakeClaySunQuadConstants(flare, 1, unit, &c) && c.kind == 5 && c.reg[0][0] == flare.ps[0][0] && c.reg[0][3] == 0.0f &&
+                     c.alpha_test == 0);
+      CHECK(641, MakeClaySunQuadConstants(glow, 1, unit, &c) && c.kind == 6 && c.alpha_test == 1 && c.alpha_ref == bits(0x3D20A0A1));
+      for (int i = 0; i < 12; ++i) {
+        for (int k = 0; k < 4; ++k) CHECK(641, c.reg[i][k] == 0.0f);
+      }
+      // The sun disc: c20.w where the shader reads it (1 in the layer: not the scene's scale, and held to no
+      // frame's), c31 beside it; its alpha test with the draw's reference.
+      CHECK(641, MakeClaySunQuadConstants(disc, 1, unit, &c) && c.kind == 7 && c.reg[0][3] == 1.0f && c.reg[0][0] == 0.0f &&
+                     c.reg[0][1] == 0.0f && c.reg[1][0] == disc.ps[1][0] && c.reg[1][2] == disc.ps[1][2] && c.reg[1][3] == 0.0f &&
+                     c.alpha_test == 1 && c.alpha_ref == bits(0x3F008081));
+      // A cloud occluder: tiling, scroll, the eye's x and y, c77.x; the draw's reference 0.149.
+      CHECK(641, MakeClaySunQuadConstants(occluder, 1, unit, &c) && c.kind == 8 && c.reg[0][0] == 5.0f && c.reg[0][1] == 5.0f &&
+                     c.reg[1][0] == bits(0x3E8BA2EF) && c.reg[1][1] == bits(0x3F0BA2EF) && c.reg[2][0] == bits(0x42B431AC) &&
+                     c.reg[2][1] == bits(0x431E5EC9) && c.reg[2][2] == 0.0f && c.reg[2][3] == 0.0f && c.reg[3][0] == 0.5f &&
+                     c.alpha_test == 1 && c.alpha_ref == bits(0x3E189899) && c.alpha_ref > 0.1489f && c.alpha_ref < 0.1491f);
+      // What gives none, each with `out` untouched.
+      auto refused = [&](const QuadRecord& q, const float* scale = nullptr) {
+        ClaySunQuadConstants out;
+        std::memset(&out, 0x5A, sizeof(out));
+        ClaySunQuadConstants before = out;
+        return !MakeClaySunQuadConstants(q, 0, scale ? scale : unit, &out) && std::memcmp(&out, &before, sizeof(out)) == 0;
+      };
+      CHECK(641, !MakeClaySunQuadConstants(beam, 0, unit, nullptr) && !MakeClaySunQuadConstants(beam, 0, nullptr, &c));
+      CHECK(641, refused(QuadRecord{}) && refused(glare));
+      for (const QuadRecord* base : layer_records) {
+        for (float v : {kNaN, kInf, -kInf, 2e7f, -2e7f}) {
+          for (int i = 0; i < 4; ++i) {
+            for (int k = 0; k < 5; ++k) {
+              QuadRecord q = *base;
+              q.corners[i][k] = v;
+              CHECK(641, refused(q));
+            }
+            for (int k = 0; k < 4; ++k) {
+              QuadRecord q = *base;
+              q.view_proj[i][k] = v;
+              CHECK(641, refused(q));
+            }
+          }
+        }
+        for (float v : {kNaN, kInf, 0.0f, -1.0f, 65.0f}) {
+          const float a[2] = {v, 1.0f}, b[2] = {1.0f, v};
+          CHECK(641, refused(*base, a) && refused(*base, b));
+        }
+        // A texture that is fetched signed or through the gamma curve is not drawn as stored.
+        for (uint32_t sign : {0x4u, 0x30u, 0x200u, 0x3FCu}) {
+          QuadRecord q = *base;
+          q.fetch[0][0] |= sign;
+          CHECK(641, refused(q));
+        }
+      }
+      for (float v : {kNaN, kInf, -kInf, -1e-6f, std::nextafter(64.0f, 100.0f), 1e6f}) {
+        for (int k = 0; k < 3; ++k) {
+          QuadRecord q = beam;
+          q.ps[0][k] = v;
+          CHECK(641, refused(q));
+          q = flare;
+          q.ps[0][k] = v;
+          CHECK(641, refused(q));
+          q = disc;
+          q.ps[1][k] = v;
+          CHECK(641, refused(q));
+        }
+        QuadRecord q = disc;
+        q.ps[0][3] = v;
+        CHECK(641, refused(q));
+        q = occluder;
+        q.ps[3][0] = v;
+        CHECK(641, refused(q));
+      }
+      {
+        // The bounds themselves pass; what the shaders do not read is neither judged nor handed over.
+        QuadRecord q = beam;
+        q.ps[0][0] = 64.0f;
+        q.ps[0][3] = kNaN;
+        CHECK(641, MakeClaySunQuadConstants(q, 0, unit, &c) && c.reg[0][0] == 64.0f && c.reg[0][3] == 0.0f);
+        q = disc;
+        q.ps[0][3] = 64.0f;
+        q.ps[0][0] = kNaN;
+        q.ps[1][3] = kNaN;
+        CHECK(641, MakeClaySunQuadConstants(q, 0, unit, &c) && c.reg[0][3] == 64.0f && c.reg[0][0] == 0.0f && c.reg[1][3] == 0.0f);
+        q = disc;
+        q.ps[0][3] = 0.0f;
+        CHECK(641, refused(q));
+        // The sun disc's scale is its own: the layer's 1 is drawn whatever the frame's output scale is.
+        q = disc;
+        q.ps[0][3] = 7.6f;
+        CHECK(641, MakeClaySunQuadConstants(q, 0, unit, &c) && c.reg[0][3] == 7.6f);
+      }
+      for (float v : {kNaN, kInf, 5000.0f, -5000.0f}) {
+        for (int r = 0; r < 2; ++r) {
+          for (int k = 0; k < 2; ++k) {
+            QuadRecord q = occluder;
+            q.ps[r][k] = v;
+            CHECK(641, refused(q));
+          }
+        }
+      }
+      for (float v : {kNaN, kInf, 2e7f}) {
+        for (int k = 0; k < 2; ++k) {
+          QuadRecord q = occluder;
+          q.ps[2][k] = v;
+          CHECK(641, refused(q));
+        }
+      }
+      {
+        QuadRecord q = occluder;
+        q.ps[0][0] = q.ps[1][1] = 4096.0f;
+        q.ps[2][2] = kNaN;  // (the eye's height: not read)
+        CHECK(641, MakeClaySunQuadConstants(q, 0, unit, &c) && c.reg[0][0] == 4096.0f && c.reg[2][2] == 0.0f);
+        // An occluder without its alpha test would write its depth over the whole quad: not drawn.
+        q = occluder;
+        q.alpha_control = 0x4;
+        CHECK(641, refused(q));
+      }
+      for (float v : {kNaN, kInf, -0.01f, 1.01f}) {
+        for (const QuadRecord* base : {&occluder, &glow, &disc}) {
+          QuadRecord q = *base;
+          q.alpha_ref = v;
+          CHECK(641, refused(q));
+        }
+      }
+      // The scene's quads: the same rule for the texture's sign fields (review of plan Tasks 12 and 13, Minor 9).
+      {
+        ClayQuadConstants s;
+        CHECK(641, MakeClayQuadConstants(glare, 16.0f, 0, unit, &s) && QuadTextureUnsigned(glare));
+        for (uint32_t sign : {0x4u, 0x30u, 0x200u, 0x3FCu}) {
+          QuadRecord q = glare;
+          q.fetch[0][0] |= sign;
+          CHECK(641, !QuadTextureUnsigned(q) && !MakeClayQuadConstants(q, 16.0f, 0, unit, &s));
+        }
+        QuadRecord q = glare;
+        q.fetch[0][0] |= 0xFFFFFC00u;  // (bits outside the sign fields are not the rule's)
+        CHECK(641, QuadTextureUnsigned(q));
+      }
+    }
+
+    // 642: the layer quads' mirrors against the reference's numbers (tools/xdk_sigmatch/post_pins.py).
+    {
+      double worst = 0.0;
+      auto close = [&](const double out[4], const double want[4]) {
+        for (int i = 0; i < 4; ++i) {
+          CHECK(642, std::isfinite(out[i]) && out[i] >= 0.0 && out[i] <= 1.0 && std::fabs(out[i] - want[i]) <= 1e-12);
+          worst = std::max(worst, std::fabs(out[i] - want[i]));
+        }
+      };
+      struct TwoPin { float t[4]; float c31[4]; double want[4]; };
+      const TwoPin beam_pins[] = {
+          // sun beam pins (light_formulas.post_beam_source, c255.x 0.1666666716337204f): the texel, c31, the value (rgb, alpha)
+          {{1.0f, 1.0f, 1.0f, 1.0f}, {0.8199682235717773f, 0.6465017795562744f, 0.3192790448665619f, 0.0f}, {0.13666137466812245, 0.10775029980392148, 0.05321317573030315, 1.0}},
+          {{0.5f, 0.25f, 0.125f, 0.75f}, {0.8199682235717773f, 0.6465017795562744f, 0.3192790448665619f, 0.0f}, {0.06833068733406122, 0.02693757495098037, 0.006651646966287894, 1.0}},
+          {{1.0f, 0.5f, 0.25f, 0.0f}, {64.0f, 6.0f, 1.0f, 0.0f}, {1.0, 0.5000000149011612, 0.0416666679084301, 1.0}},
+          {{kNaN, 0.5f, kInf, 1.0f}, {1.0f, 1.0f, 1.0f, 0.0f}, {0.0, 0.0833333358168602, 0.0, 1.0}},
+          {{0.5f, 0.5f, 0.5f, 1.0f}, {1.0f, kNaN, 1.0f, 0.0f}, {0.0, 0.0, 0.0, 0.0}},
+          {{0.5f, 0.5f, -0.5f, 1.0f}, {-1.0f, 1.0f, 1.0f, kNaN}, {0.0, 0.0833333358168602, 0.0, 1.0}},
+      };
+      for (const TwoPin& p : beam_pins) {
+        double out[4];
+        SunBeamMirror(p.t, p.c31, out);
+        close(out, p.want);
+      }
+      const TwoPin flare_pins[] = {
+          // sun flare pins (light_formulas.post_flare): the texel, c31, the value (rgb, alpha)
+          {{0.10000000149011612f, 0.20000000298023224f, 0.30000001192092896f, 1.0f}, {0.40544402599334717f, 0.18920721113681793f, 0.023849649354815483f, 0.2599000036716461f}, {0.40544402599334717, 0.18920721113681793, 0.023849649354815483, 1.0}},
+          {{0.8999999761581421f, 0.8999999761581421f, 0.8999999761581421f, 0.5f}, {0.40544402599334717f, 0.18920721113681793f, 0.023849649354815483f, 0.2599000036716461f}, {0.20272201299667358, 0.09460360556840897, 0.011924824677407742, 1.0}},
+          {{0.0f, 0.0f, 0.0f, 1.0f}, {64.0f, 1.0f, 0.5f, 0.0f}, {1.0, 1.0, 0.5, 1.0}},
+          {{0.5f, 0.5f, 0.5f, kNaN}, {1.0f, 1.0f, 1.0f, 0.0f}, {0.0, 0.0, 0.0, 1.0}},
+          {{0.5f, 0.5f, 0.5f, kInf}, {1.0f, 1.0f, 1.0f, 0.0f}, {0.0, 0.0, 0.0, 1.0}},
+          {{0.5f, 0.5f, 0.5f, 0.5f}, {1.0f, kInf, -1.0f, 0.0f}, {0.0, 0.0, 0.0, 0.0}},
+      };
+      for (const TwoPin& p : flare_pins) {
+        double out[4];
+        SunFlareMirror(p.t, p.c31, out);
+        close(out, p.want);
+      }
+      struct GlowPin { float t[4]; double want[4]; };
+      const GlowPin glow_pins[] = {
+          // sun glow pins (light_formulas.post_moon_glow, c255.x 0.20000000298023224f): the texel, the value (rgb, alpha)
+          {{1.0f, 1.0f, 1.0f, 1.0f}, {0.20000000298023224, 0.20000000298023224, 0.20000000298023224, 1.0}},
+          {{0.5f, 0.25f, 0.125f, 0.75f}, {0.07500000111758709, 0.037500000558793545, 0.018750000279396772, 0.75}},
+          {{1.0f, 1.0f, 1.0f, 0.03921568766236305f}, {0.007843137649344467, 0.007843137649344467, 0.007843137649344467, 0.03921568766236305}},
+          {{0.20000000298023224f, 0.4000000059604645f, 0.6000000238418579f, 0.0f}, {0.0, 0.0, 0.0, 0.0}},
+          {{kNaN, 0.5f, 0.5f, 1.0f}, {0.0, 0.10000000149011612, 0.10000000149011612, 1.0}},
+          {{0.5f, 0.5f, 0.5f, kNaN}, {0.0, 0.0, 0.0, 0.0}},
+          {{0.5f, kInf, -0.5f, 0.5f}, {0.05000000074505806, 0.0, 0.0, 0.5}},
+          {{0.5f, 0.5f, 0.5f, 3.0f}, {0.30000000447034836, 0.30000000447034836, 0.30000000447034836, 1.0}},
+      };
+      for (const GlowPin& p : glow_pins) {
+        double out[4];
+        SunGlowMirror(p.t, out);
+        close(out, p.want);
+      }
+      struct DiscPin { float t[4]; float c31[4]; float c20w; double want[4]; };
+      const DiscPin disc_pins[] = {
+          // sun disc pins (light_formulas.post_sun_disc): the texel, c31, c20.w, the value (rgb, alpha)
+          {{1.0f, 1.0f, 1.0f, 1.0f}, {0.8767038583755493f, 0.691234827041626f, 0.34137076139450073f, 0.0f}, 1.0f, {0.8767038583755493, 0.691234827041626, 0.34137076139450073, 1.0}},
+          {{0.5f, 0.25f, 0.125f, 0.75f}, {0.8767038583755493f, 0.691234827041626f, 0.34137076139450073f, 0.0f}, 1.0f, {0.328763946890831, 0.12960653007030487, 0.032003508880734444, 0.75}},
+          {{1.0f, 1.0f, 1.0f, 0.501960813999176f}, {0.8767038583755493f, 0.691234827041626f, 0.34137076139450073f, 0.0f}, 1.0f, {0.44007098238640907, 0.3469727964463942, 0.17135474526510208, 0.501960813999176}},
+          {{1.0f, 0.5f, 0.25f, 1.0f}, {2.0f, 1.0f, 0.5f, 0.0f}, 8.0f, {1.0, 1.0, 1.0, 1.0}},
+          {{kNaN, 0.5f, 0.5f, 1.0f}, {1.0f, 1.0f, 1.0f, 0.0f}, 1.0f, {0.0, 0.5, 0.5, 1.0}},
+          {{0.5f, 0.5f, 0.5f, kNaN}, {1.0f, 1.0f, 1.0f, 0.0f}, 1.0f, {0.0, 0.0, 0.0, 0.0}},
+          {{0.5f, 0.5f, 0.5f, 0.5f}, {1.0f, kNaN, 1.0f, 0.0f}, 1.0f, {0.0, 0.0, 0.0, 0.0}},
+          {{0.5f, 0.5f, 0.5f, 0.5f}, {1.0f, 1.0f, 1.0f, 0.0f}, kInf, {0.0, 0.0, 0.0, 0.0}},
+          {{0.5f, 0.5f, 0.5f, 0.5f}, {-1.0f, 1.0f, 1.0f, 0.0f}, 1.0f, {0.0, 0.25, 0.25, 0.5}},
+      };
+      for (const DiscPin& p : disc_pins) {
+        double out[4];
+        SunDiscMirror(p.t, p.c31, p.c20w, out);
+        close(out, p.want);
+      }
+      struct OccluderPin { float alpha; float world[2]; float eye[2]; float c77x; double want; };
+      const OccluderPin occluder_pins[] = {
+          // sun occluder pins (light_formulas.post_cloud_occluder, c255 {1000.0f, 0.0f, 0.0010000000474974513f, 1.0f}): the alpha of the texel, the world x y, the eye c47.xy, c77.x, the alpha the test sees
+          {1.0f, {90.0f, 158.0f}, {90.09701538085938f, 158.37025451660156f}, 0.5f, 0.5},
+          {0.2980392277240753f, {90.0f, 158.0f}, {90.09701538085938f, 158.37025451660156f}, 0.5f, 0.14901961386203766},
+          {0.29411765933036804f, {90.0f, 158.0f}, {90.09701538085938f, 158.37025451660156f}, 0.5f, 0.14705882966518402},
+          {1.0f, {1290.0f, 958.0f}, {90.09701538085938f, 158.37025451660156f}, 0.5f, 0.2790327741682076},
+          {1.0f, {3000.0f, -3000.0f}, {90.09701538085938f, 158.37025451660156f}, 0.5f, 0.0},
+          {0.5f, {1090.0f, 158.0f}, {90.0f, 158.0f}, 2.0f, 1.0},
+          {kNaN, {90.0f, 158.0f}, {90.09701538085938f, 158.37025451660156f}, 0.5f, 0.0},
+          {1.0f, {kNaN, 158.0f}, {90.09701538085938f, 158.37025451660156f}, 0.5f, 0.0},
+          {1.0f, {90.0f, 158.0f}, {kInf, 0.0f}, 0.5f, 0.0},
+          {1.0f, {90.0f, 158.0f}, {90.09701538085938f, 158.37025451660156f}, kNaN, 0.0},
+          {1.0f, {90.0f, 158.0f}, {90.09701538085938f, 158.37025451660156f}, -1.0f, 0.0},
+      };
+      for (const OccluderPin& p : occluder_pins) {
+        const double a = SunOccluderAlphaMirror(p.alpha, p.world, p.eye, p.c77x);
+        CHECK(642, a >= 0.0 && a <= 1.0 && std::fabs(a - p.want) <= 1e-12);
+        worst = std::max(worst, std::fabs(a - p.want));
+      }
+      CHECK(642, std::size(beam_pins) == 6 && std::size(flare_pins) == 6 && std::size(glow_pins) == 8 && std::size(disc_pins) == 9 &&
+                     std::size(occluder_pins) == 11);
+      std::cout << "sun layer: the beam source's, the flare's, the moon glow's, the sun disc's and the cloud occluder's mirrors against the "
+                   "reference, 40 points: worst difference " << worst << "\n";
+      CHECK(642, worst < 1e-12);
+      // The shaders' own literals are the captured ones.
+      CHECK(642, kSunBeamScale == bits(0x3E2AAAAB) && kSunGlowScale == 0.2f && kSunFadeStart == 1000.0f && kSunFadeRate == 0.001f);
+      // The captured records through their mirrors. The beam source at a white texel is c31 / 6; the sun
+      // disc's alpha test (greater than 0.502) keeps the texture's core and drops its rim; the moon glow's
+      // (0.0392) and the occluder's (0.149: a texel alpha of 77 / 255 at half is kept; 76 / 255, half of which is the reference itself, is not).
+      const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+      double out[4];
+      SunBeamMirror(white, beam.ps[0], out);
+      CHECK(642, std::fabs(out[0] - 0.136661) < 1e-6 && out[3] == 1.0 && PostLevelIndex(float(out[0]), kSunLevels) == 140);
+      const float rim[4] = {1.0f, 1.0f, 1.0f, 0.5f}, core[4] = {1.0f, 1.0f, 1.0f, 0.51f};
+      SunDiscMirror(rim, disc.ps[1], disc.ps[0][3], out);
+      CHECK(642, !QuadAlphaKept(capture::QuadAlphaTest(disc), float(out[3]), disc.alpha_ref));
+      SunDiscMirror(core, disc.ps[1], disc.ps[0][3], out);
+      CHECK(642, QuadAlphaKept(capture::QuadAlphaTest(disc), float(out[3]), disc.alpha_ref) && out[0] > 0.44 && out[0] < 0.45);
+      const float under[2] = {90.0f, 158.0f};
+      CHECK(642, QuadAlphaKept(true, float(SunOccluderAlphaMirror(77.0f / 255.0f, under, occluder.ps[2], occluder.ps[3][0])), occluder.alpha_ref) &&
+                     !QuadAlphaKept(true, float(SunOccluderAlphaMirror(76.0f / 255.0f, under, occluder.ps[2], occluder.ps[3][0])), occluder.alpha_ref));
+      // With the scene clouds' reference (0.0196) the same occluder would keep a texel of 11 / 255: the two
+      // depths are not one (review of plan Task 10, Important 1).
+      CHECK(642, SunOccluderAlphaMirror(11.0f / 255.0f, under, occluder.ps[2], occluder.ps[3][0]) > 0.0196 &&
+                     !QuadAlphaKept(true, float(SunOccluderAlphaMirror(11.0f / 255.0f, under, occluder.ps[2], occluder.ps[3][0])), occluder.alpha_ref));
+    }
+
+    // 643: nothing that is no number leaves a mirror, and nothing outside the target's range.
+    {
+      const float values[] = {kNaN, kInf, -kInf, -1.0f, 0.0f, 1e-30f, 0.5f, 1.0f, 64.0f, 3e38f};
+      int points = 0;
+      for (float t0 : values) {
+        for (float ta : values) {
+          for (float c : values) {
+            for (float s : values) {
+              const float t[4] = {t0, 0.5f, ta, ta}, c31[4] = {c, 1.0f, c, c};
+              double out[4];
+              SunBeamMirror(t, c31, out);
+              for (int i = 0; i < 4; ++i) CHECK(643, out[i] >= 0.0 && out[i] <= 1.0);
+              SunFlareMirror(t, c31, out);
+              for (int i = 0; i < 4; ++i) CHECK(643, out[i] >= 0.0 && out[i] <= 1.0);
+              SunGlowMirror(t, out);
+              for (int i = 0; i < 4; ++i) CHECK(643, out[i] >= 0.0 && out[i] <= 1.0);
+              SunDiscMirror(t, c31, s, out);
+              for (int i = 0; i < 4; ++i) CHECK(643, out[i] >= 0.0 && out[i] <= 1.0);
+              const float world[2] = {t0, c}, eye[2] = {s, 0.5f};
+              const double a = SunOccluderAlphaMirror(ta, world, eye, c);
+              CHECK(643, a >= 0.0 && a <= 1.0);
+              ++points;
+            }
+          }
+        }
+      }
+      CHECK(643, points == 10000);
+    }
+
+    // The 10-bit picture of the pins (unorm_texel, 16 x 16) and a quarter of it.
+    float unorm[16 * 16 * 3], quarter[16 * 16 * 3];
+    for (int y = 0; y < 16; ++y) {
+      for (int x = 0; x < 16; ++x) {
+        for (int ch = 0; ch < 3; ++ch) {
+          unorm[(y * 16 + x) * 3 + ch] = float(double((37 * x + 101 * y + 59 * ch) % 1024) / 1023.0);
+          quarter[(y * 16 + x) * 3 + ch] = 0.25f * unorm[(y * 16 + x) * 3 + ch];
+        }
+      }
+    }
+    const PostPicture unorm_pic{unorm, 16, 16}, quarter_pic{quarter, 16, 16};
+
+    // 644: the radial blur against the reference (light_formulas.post_radial): the captured registers of a
+    // frame with the sun behind the camera (the centre in the picture's middle), a centre outside the
+    // picture with both factors 1, and a centre on the picture's top edge (c31.y exactly 0, as captured).
+    {
+      struct RadialPin { uint32_t x, y; double out[3]; };
+      static const RadialPin kReal[] = {
+          // real radial pins (a quarter of unorm_texel as a point texture read at texel floor(u * 16 + 0.5), floor(v * 16 + 0.5)), c31.xy, c46.x, c47.x {0.5f, 0.5f, 0.8700000047683716f, 0.9350000619888306f}: the pixel (u = x / 16, v = y / 16), the value
+          {0, 0, {0.12066428460653203, 0.15729953612402622, 0.19393479217571166}},
+          {12, 3, {0.503901224504457, 0.5405364845864565, 0.4852271307974158}},
+          {8, 8, {0.04967492491394564, 0.08631018499594534, 0.12294543561245769}},
+          {15, 15, {0.4057886287771564, 0.4424238880905299, 0.21496519530881011}},
+      };
+      static const RadialPin kMade[] = {
+          // made radial pins (a quarter of unorm_texel as a point texture read at texel floor(u * 16 + 0.5), floor(v * 16 + 0.5)), c31.xy, c46.x, c47.x {-0.30000001192092896f, 1.399999976158142f, 1.0f, 1.0f}: the pixel (u = x / 16, v = y / 16), the value
+          {0, 0, {0.0, 0.057673510164022446, 0.11534702032804489}},
+          {12, 3, {0.7302052974700928, 0.7878788113594055, 0.8455523252487183}},
+          {8, 8, {0.07820136845111847, 0.1358748823404312, 0.19354838132858276}},
+          {15, 15, {0.02150537632405758, 0.07917888462543488, 0.13685239851474762}},
+      };
+      static const RadialPin kEdge[] = {
+          // edge radial pins (as the real ones), c31.xy, c46.x, c47.x {0.382099986076355f, 0.0f, 0.8700000047683716f, 0.9350000619888306f}: the pixel, the value
+          {0, 0, {0.02273804999312984, 0.0593733069926832, 0.09600856633423856}},
+          {12, 3, {0.4087836412407442, 0.44541889326901063, 0.4820541533510102}},
+          {8, 8, {0.4539571963036139, 0.2714928571381059, 0.30812811353961067}},
+          {15, 15, {0.37831467864579804, 0.4149499383286594, 0.32412777810549465}},
+      };
+      const float real[4] = {0.5f, 0.5f, 0.8700000047683716f, 0.9350000619888306f};
+      const float made[4] = {-0.30000001192092896f, 1.399999976158142f, 1.0f, 1.0f};
+      const float edge[4] = {0.382099986076355f, 0.0f, 0.8700000047683716f, 0.9350000619888306f};
+      CHECK(644, SunRadialUsable(real) && SunRadialUsable(made) && SunRadialUsable(edge));
+      double worst = 0.0;
+      auto run = [&](const RadialPin* pins, size_t count, const float* radial) {
+        CHECK(644, count == 4);
+        for (size_t n = 0; n < count; ++n) {
+          double out[3];
+          SunRadialMirror(quarter_pic, pins[n].x, pins[n].y, radial, out);
+          for (int i = 0; i < 3; ++i) {
+            CHECK(644, out[i] >= 0.0 && out[i] <= 1.0);
+            worst = std::fmax(worst, std::fabs(out[i] - pins[n].out[i]));
+          }
+        }
+      };
+      run(kReal, std::size(kReal), real);
+      run(kMade, std::size(kMade), made);
+      run(kEdge, std::size(kEdge), edge);
+      std::printf("sun layer: the radial blur's mirror against the reference, 12 points: worst difference %.2e\n", worst);
+      CHECK(644, worst < 1e-12);
+      // The taps: the first at the pixel itself with half the weight, each next one nearer the centre by s
+      // and lighter by g; the weights' sum times 4 / 7 is 2.54 with the captured c46.x (so the target's
+      // clamp is part of the picture).
+      SunRadialTap taps[kSunRadialTaps];
+      SunRadialTaps(0.75, 0.25, real, taps);
+      const double s = (double(real[3]) - 1.0) * (4.0 / 7.0) + 1.0, g = (double(real[2]) - 1.0) * (4.0 / 7.0) + 1.0;
+      CHECK(644, taps[0].u == 0.75 && taps[0].v == 0.25 && taps[0].w == 0.5);
+      double sum = 0.0;
+      for (uint32_t k = 0; k < kSunRadialTaps; ++k) {
+        CHECK(644, std::fabs(taps[k].u - (0.5 + 0.25 * std::pow(s, double(k)))) < 1e-15 &&
+                       std::fabs(taps[k].v - (0.5 - 0.25 * std::pow(s, double(k)))) < 1e-15 && std::fabs(taps[k].w - 0.5 * std::pow(g, double(k))) < 1e-15);
+        if (k) CHECK(644, taps[k].w < taps[k - 1].w && std::fabs(taps[k].u - 0.5) < std::fabs(taps[k - 1].u - 0.5));
+        sum += taps[k].w;
+      }
+      CHECK(644, kSunRadialTaps == 14 && std::fabs(sum * kSunRadialNorm - 2.541) < 2e-3);
+      // At the centre every tap is the centre: the value times the weights' sum, clamped at 1.
+      double out[3];
+      SunRadialMirror(unorm_pic, 8, 8, real, out);
+      for (int i = 0; i < 3; ++i) CHECK(644, out[i] == std::fmin(1.0, double(unorm[(8 * 16 + 8) * 3 + i]) * sum * kSunRadialNorm) || std::fabs(out[i] - std::fmin(1.0, double(unorm[(8 * 16 + 8) * 3 + i]) * sum * kSunRadialNorm)) < 1e-12);
+      // The texel a tap reads: the point fetch with its half texel, clamped to the source; texel 0 for a
+      // coordinate that is no number or below the picture, the last beyond it.
+      CHECK(644, SunRadialTexel(0.0, 16) == 0 && SunRadialTexel(0.5 / 16.0 - 1e-9, 16) == 0 && SunRadialTexel(0.5 / 16.0 + 1e-9, 16) == 1 &&
+                     SunRadialTexel(0.5, 16) == 8 && SunRadialTexel(1.0, 16) == 15 && SunRadialTexel(40.0, 16) == 15 &&
+                     SunRadialTexel(-3.0, 16) == 0 && SunRadialTexel(double(kNaN), 16) == 0 && SunRadialTexel(1e300, 16) == 15 &&
+                     SunRadialTexel(0.3, 0) == 0 && SunRadialTexel(0.99, 1) == 0);
+      // Registers outside their bounds, or no numbers: not usable, no tap, black.
+      for (int i = 0; i < 4; ++i) {
+        for (float v : {kNaN, kInf, -kInf, 4.5f, -4.5f}) {
+          float bad[4] = {real[0], real[1], real[2], real[3]};
+          bad[i] = v;
+          CHECK(644, !SunRadialUsable(bad));
+          SunRadialMirror(unorm_pic, 3, 3, bad, out);
+          CHECK(644, out[0] == 0.0 && out[1] == 0.0 && out[2] == 0.0);
+          SunRadialTaps(0.5, 0.5, bad, taps);
+          for (const SunRadialTap& tap : taps) CHECK(644, tap.w == 0.0 && tap.u == 0.0 && tap.v == 0.0);
+        }
+      }
+      for (int i = 2; i < 4; ++i) {
+        for (float v : {0.0f, -0.5f, 1.0001f}) {
+          float bad[4] = {real[0], real[1], real[2], real[3]};
+          bad[i] = v;
+          CHECK(644, !SunRadialUsable(bad));
+        }
+      }
+      const float corner[4] = {4.0f, -4.0f, 1.0f, std::numeric_limits<float>::min()};
+      CHECK(644, SunRadialUsable(corner) && !SunRadialUsable(nullptr));
+      // A source with texels that are no numbers, and no source: numbers in the range.
+      float broken[4 * 4 * 3];
+      for (float& v : broken) v = kNaN;
+      broken[0] = kInf;
+      broken[5] = -3.0f;
+      const PostPicture broken_pic{broken, 4, 4};
+      for (uint32_t y = 0; y < 4; ++y) {
+        for (uint32_t x = 0; x < 4; ++x) {
+          SunRadialMirror(broken_pic, x, y, real, out);
+          for (int i = 0; i < 3; ++i) CHECK(644, out[i] >= 0.0 && out[i] <= 1.0);
+        }
+      }
+      SunRadialMirror(PostPicture{}, 1, 1, real, out);
+      CHECK(644, out[0] == 0.0 && out[1] == 0.0 && out[2] == 0.0);
+    }
+
+    // 645: the reduction against the reference (light_formulas.post_reduce): the mean of the pixel's four
+    // texels at the game's ratio 2.
+    {
+      struct ReducePin { uint32_t x, y; double out[3]; };
+      static const ReducePin kPins[] = {
+          // reduce pins (unorm_texel, 16 x 16, linear, to 8 x 8): the pixel, the value
+          {0, 0, {0.06744868215173483, 0.12512218859046698, 0.18279570154845715}},
+          {3, 5, {0.2707722410559654, 0.32844575494527817, 0.3861192539334297}},
+          {7, 7, {0.7047898373566568, 0.5122189661487937, 0.0694037158973515}},
+      };
+      double worst = 0.0;
+      for (const ReducePin& p : kPins) {
+        double out[3];
+        SunReduceMirror(unorm_pic, p.x, p.y, 2, out);
+        for (int i = 0; i < 3; ++i) worst = std::fmax(worst, std::fabs(out[i] - p.out[i]));
+      }
+      std::printf("sun layer: the reduction's mirror against the reference, 3 points: worst difference %.2e\n", worst);
+      CHECK(645, std::size(kPins) == 3 && worst < 1e-12);
+      double out[3];
+      SunReduceMirror(unorm_pic, 2, 6, 2, out);
+      for (int i = 0; i < 3; ++i) {
+        const double mean = 0.25 * (double(unorm[(12 * 16 + 4) * 3 + i]) + double(unorm[(12 * 16 + 5) * 3 + i]) +
+                                    double(unorm[(13 * 16 + 4) * 3 + i]) + double(unorm[(13 * 16 + 5) * 3 + i]));
+        CHECK(645, std::fabs(out[i] - mean) < 1e-15);
+      }
+      // Another ratio reads the block's middle; ratio 0 counts as 1 (the texel itself).
+      SunReduceMirror(unorm_pic, 1, 1, 4, out);
+      CHECK(645, std::fabs(out[0] - 0.25 * (double(unorm[(5 * 16 + 5) * 3]) + double(unorm[(5 * 16 + 6) * 3]) + double(unorm[(6 * 16 + 5) * 3]) +
+                                             double(unorm[(6 * 16 + 6) * 3]))) < 1e-15);
+      SunReduceMirror(unorm_pic, 3, 3, 0, out);
+      CHECK(645, out[0] == double(unorm[(3 * 16 + 3) * 3]));
+      // Texels above 1, below 0 and no numbers: numbers in [0, 1].
+      float wild[4 * 4 * 3];
+      for (int i = 0; i < 48; ++i) wild[i] = (i % 5 == 0) ? kNaN : (i % 5 == 1) ? 7.0f : (i % 5 == 2) ? -2.0f : (i % 5 == 3) ? kInf : 0.5f;
+      const PostPicture wild_pic{wild, 4, 4};
+      for (uint32_t y = 0; y < 2; ++y) {
+        for (uint32_t x = 0; x < 2; ++x) {
+          SunReduceMirror(wild_pic, x, y, 2, out);
+          for (int i = 0; i < 3; ++i) CHECK(645, out[i] >= 0.0 && out[i] <= 1.0);
+        }
+      }
+      // What the step stores: the level of 1,023 nearest the mean (controller ruling 25).
+      CHECK(645, PostLevelIndex(0.5f, kSunLevels) == 512 && PostLevel(0.25f * (1.0f + 2.0f / 1023.0f), kSunLevels) == 256.0f / 1023.0f);
+    }
+
+    // 646: the layer's depth: the scene depth's texel a layer texel takes, its value, and the steps' words.
+    {
+      // The game's every second texel: texel (2 x, 2 y) of the 1120 x 720 copy, by point; at another scale the
+      // top left texel of the block; never beyond the last texel.
+      CHECK(646, SunDepthTexel(0, 2, 1119) == 0 && SunDepthTexel(1, 2, 1119) == 2 && SunDepthTexel(559, 2, 1119) == 1118 &&
+                     SunDepthTexel(560, 2, 1119) == 1119 && SunDepthTexel(359, 2, 719) == 718 && SunDepthTexel(7, 4, 2239) == 28 &&
+                     SunDepthTexel(5, 1, 100) == 5 && SunDepthTexel(5, 0, 100) == 5 && SunDepthTexel(0xFFFFFFFFu, 0xFFFFFFFFu, 7) == 7);
+      CHECK(646, SunDepthValue(0.25f) == 0.25f && SunDepthValue(1.0f) == 1.0f && SunDepthValue(1.5f) == 1.0f && SunDepthValue(-0.5f) == 0.0f &&
+                     SunDepthValue(kInf) == 1.0f && SunDepthValue(-kInf) == 0.0f && SunDepthValue(kNaN) == 0.0f);
+      // (a depth that is no number is the nearest: nothing of the layer passes it)
+      CHECK(646, !SunDepthPasses(0.5f, SunDepthValue(kNaN)));
+      static_assert(kSunLayerDivisor == 2 && kSunSmallDivisor == 4 && kSunLevels == kPostBloomLevels);
+      const ClayPostStepConstants depth = MakeClaySunStep(ClaySunStep::kDepth, 1120, 720, 560, 360);
+      CHECK(646, depth.dir[0] == 2 && depth.dir[1] == 2 && depth.last[0] == 1119 && depth.last[1] == 719 && depth.levels == 0.0f &&
+                     depth.texel[0] == 1.0f / 1120.0f && depth.texel[1] == 1.0f / 720.0f && depth.offset == 0.0f);
+      const ClayPostStepConstants reduce = MakeClaySunStep(ClaySunStep::kReduce, 560, 360, 280, 180);
+      CHECK(646, reduce.dir[0] == 2 && reduce.dir[1] == 2 && reduce.levels == 1023.0f && reduce.texel[0] == 1.0f / 560.0f &&
+                     reduce.texel[1] == 1.0f / 360.0f && reduce.last[0] == 559 && reduce.last[1] == 359);
+      const ClayPostStepConstants radial = MakeClaySunStep(ClaySunStep::kRadial, 280, 180, 280, 180);
+      CHECK(646, radial.dir[0] == 0 && radial.dir[1] == 0 && radial.levels == 1023.0f && radial.texel[0] == 1.0f / 280.0f &&
+                     radial.texel[1] == 1.0f / 180.0f && radial.last[0] == 279 && radial.last[1] == 179);
+      // A scene target of twice the size (supersampling later): the same layer, the ratio 4.
+      const ClayPostStepConstants scaled = MakeClaySunStep(ClaySunStep::kDepth, 2240, 1440, 560, 360);
+      CHECK(646, scaled.dir[0] == 4 && scaled.dir[1] == 4 && scaled.last[0] == 2239 && scaled.last[1] == 1439);
+      // Sizes that do not divide, or none: a ratio of 1 and a size of 1, never a division by zero.
+      const ClayPostStepConstants odd = MakeClaySunStep(ClaySunStep::kReduce, 561, 0, 280, 0);
+      CHECK(646, odd.dir[0] == 1 && odd.dir[1] == 1 && odd.last[0] == 560 && odd.last[1] == 0 && odd.texel[1] == 1.0f);
+    }
+
+    // 647: the layer's plan: the set's layer records in the records' order, each with its state and the
+    // target of its kind; the scene's records skipped; one that cannot be drawn and the layer has none.
+    {
+      const QuadRecord set[9] = {glare, occluder, occluder, occluder, beam, flare, glow, disc, glare};
+      const ClaySunPlan plan = PlanClaySunQuads(set, 9);
+      CHECK(647, plan.drawable && plan.count == 7 && plan.by_target[0] == 3 && plan.by_target[1] == 1 && plan.by_target[2] == 3);
+      const uint8_t want_record[7] = {1, 2, 3, 4, 5, 6, 7}, want_target[7] = {0, 0, 0, 1, 2, 2, 2};
+      const ClaySunState want_state[7] = {ClaySunState::kDepth, ClaySunState::kDepth, ClaySunState::kDepth, ClaySunState::kReplace,
+                                          ClaySunState::kAdd,   ClaySunState::kAlpha, ClaySunState::kAdd};
+      for (int i = 0; i < 7; ++i) {
+        CHECK(647, plan.items[i].record == want_record[i] && plan.items[i].target == want_target[i] && plan.items[i].state == want_state[i] &&
+                       plan.items[i].kind == set[want_record[i]].kind);
+      }
+      // The target is the kind's whatever the order: a beam source after the disc is still layer 1's.
+      const QuadRecord shuffled[3] = {disc, beam, occluder};
+      const ClaySunPlan other = PlanClaySunQuads(shuffled, 3);
+      CHECK(647, other.drawable && other.count == 3 && other.items[0].target == 2 && other.items[1].target == 1 && other.items[2].target == 0);
+      // No layer record (a set of the scene's alone; an empty set): nothing to draw, nothing wrong.
+      const QuadRecord scene_only[2] = {glare, glare};
+      const ClaySunPlan none = PlanClaySunQuads(scene_only, 2);
+      CHECK(647, none.drawable && none.count == 0 && none.by_target[1] + none.by_target[2] == 0);
+      const ClaySunPlan empty = PlanClaySunQuads(nullptr, 0);
+      CHECK(647, empty.drawable && empty.count == 0);
+      // One layer record that cannot be drawn (its state; a value; no record at all): none of the layer,
+      // also not those before it. The scene's furniture has its own plan and is not asked here.
+      QuadRecord bad_state = flare;
+      bad_state.depth = 0x00708760;
+      QuadRecord bad_value = occluder;
+      bad_value.ps[3][0] = kNaN;
+      for (const QuadRecord& bad : {bad_state, bad_value, QuadRecord{}}) {
+        const QuadRecord with[4] = {occluder, beam, bad, disc};
+        const ClaySunPlan p = PlanClaySunQuads(with, 4);
+        CHECK(647, !p.drawable && p.count == 0 && p.by_target[0] == 0 && p.by_target[1] == 0 && p.by_target[2] == 0);
+      }
+      // ... and an undrawable flare leaves the scene's plan as it was (two verdicts).
+      {
+        const QuadRecord with[3] = {glare, bad_state, glare};
+        CHECK(647, !PlanClaySunQuads(with, 3).drawable);
+        const ClayQuadPlan scene_plan = PlanClayQuads(with, 3, 16.0f);
+        CHECK(647, scene_plan.drawable && scene_plan.count == 2 && scene_plan.later == 1);
+      }
+      // More than the bound, or a count without records: nothing, not drawable (no index leaves the array).
+      QuadRecord many[capture::kMaxQuadRecords + 1];
+      for (QuadRecord& q : many) q = flare;
+      const ClaySunPlan full = PlanClaySunQuads(many, capture::kMaxQuadRecords);
+      CHECK(647, full.drawable && full.count == capture::kMaxQuadRecords && full.by_target[2] == capture::kMaxQuadRecords &&
+                     full.items[capture::kMaxQuadRecords - 1].record == capture::kMaxQuadRecords - 1);
+      CHECK(647, !PlanClaySunQuads(many, capture::kMaxQuadRecords + 1).drawable && !PlanClaySunQuads(nullptr, 3).drawable);
+    }
+
+    // 648: the decision, over every combination: the first thing missing decides; and the frame counts.
+    {
+      for (int b = 0; b < 256; ++b) {
+        ClaySunInputs in;
+        in.sun = b & 1;
+        in.furniture = b & 2;
+        in.bloom = b & 4;
+        in.radial = b & 8;
+        in.drawable = b & 16;
+        in.quads = b & 32;
+        in.objects = b & 64;
+        in.textures = b & 128;
+        const ClaySun want = !in.sun         ? ClaySun::kOff
+                             : !in.furniture ? ClaySun::kNoFurniture
+                             : !in.bloom     ? ClaySun::kNoBloom
+                             : !in.radial    ? ClaySun::kNoRadial
+                             : !in.drawable  ? ClaySun::kState
+                             : !in.quads     ? ClaySun::kNoQuads
+                             : !in.objects   ? ClaySun::kObjects
+                             : !in.textures  ? ClaySun::kTexture
+                                             : ClaySun::kDrawn;
+        CHECK(648, DecideClaySun(in) == want);
+      }
+      // With the switch off nothing else is asked: off for every input.
+      static_assert(DecideClaySun(ClaySunInputs{}) == ClaySun::kOff);
+      ClaySunInputs all;
+      all.furniture = all.bloom = all.radial = all.drawable = all.quads = all.objects = all.textures = true;
+      CHECK(648, DecideClaySun(all) == ClaySun::kOff);
+      all.sun = true;
+      CHECK(648, DecideClaySun(all) == ClaySun::kDrawn);
+      ClaySunFrames n;
+      for (ClaySun s : {ClaySun::kOff, ClaySun::kNoFurniture, ClaySun::kNoBloom, ClaySun::kNoRadial, ClaySun::kNoQuads, ClaySun::kState,
+                        ClaySun::kObjects, ClaySun::kTexture, ClaySun::kDrawn, ClaySun::kCount}) {
+        CountClaySunFrame(s, n);
+      }
+      CountClaySunFrame(ClaySun::kDrawn, n);
+      CHECK(648, n.frames == 9 && n.by[size_t(ClaySun::kOff)] == 0 && n.by[size_t(ClaySun::kDrawn)] == 2 && n.by[size_t(ClaySun::kTexture)] == 1 &&
+                     n.by[size_t(ClaySun::kNoFurniture)] == 1 && n.by[size_t(ClaySun::kNoBloom)] == 1 && n.by[size_t(ClaySun::kNoRadial)] == 1 &&
+                     n.by[size_t(ClaySun::kNoQuads)] == 1 && n.by[size_t(ClaySun::kState)] == 1 && n.by[size_t(ClaySun::kObjects)] == 1);
+    }
+
+    // 649: the Sun line.
+    {
+      ClayStats st;
+      CHECK(649, FormatSunText(st) == "Sun: off");
+      st.sun_switch = true;
+      st.sun = ClaySun::kDrawn;
+      st.sun_drawn[0] = 3;
+      st.sun_drawn[1] = 1;
+      st.sun_drawn[2] = 2;
+      st.sun_centre[0] = 0.3821f;
+      st.sun_centre[1] = 0.3938f;
+      st.sun_frames.frames = 900;
+      st.sun_frames.by[size_t(ClaySun::kDrawn)] = 880;
+      st.sun_frames.by[size_t(ClaySun::kTexture)] = 2;
+      st.sun_frames.by[size_t(ClaySun::kNoFurniture)] = 18;
+      CHECK(649, FormatSunText(st) ==
+                     "Sun: on, drawn: occluders 3, layer 1 1, layer 2 2, centre (0.3821, 0.3938) | frames since start 900: drawn 880, "
+                     "sun-layer {no furniture: 18, no bloom: 0, no radial registers: 0, no layer quad: 0, a record's state or values: 0, "
+                     "post-objects: 0, quad-texture: 2}");
+      const std::pair<ClaySun, const char*> words[] = {{ClaySun::kNoFurniture, "not drawn (sun-layer: no furniture)"},
+                                                       {ClaySun::kNoBloom, "not drawn (sun-layer: no bloom)"},
+                                                       {ClaySun::kNoRadial, "not drawn (sun-layer: no radial registers)"},
+                                                       {ClaySun::kNoQuads, "not drawn (sun-layer: no layer quad)"},
+                                                       {ClaySun::kState, "not drawn (sun-layer: a record's state or values)"},
+                                                       {ClaySun::kObjects, "not drawn (sun-layer: post-objects)"},
+                                                       {ClaySun::kTexture, "not drawn (sun-layer: quad-texture)"},
+                                                       {ClaySun::kOff, "not drawn (sun-layer: off)"}};
+      for (const auto& [s, word] : words) {
+        st.sun = s;
+        CHECK(649, FormatSunText(st).rfind(std::string("Sun: on, ") + word + " | frames", 0) == 0);
+      }
+      CHECK(649, std::string(kSunLayerReason) == "sun-layer");
+      // (whole with every count at its largest and a centre that is no number)
+      st.sun = ClaySun::kDrawn;
+      st.sun_drawn[0] = st.sun_drawn[1] = st.sun_drawn[2] = ~0u;
+      st.sun_centre[0] = kNaN;
+      st.sun_centre[1] = kInf;
+      st.sun_frames.frames = ~0ull;
+      for (uint64_t& v : st.sun_frames.by) v = ~0ull;
+      const std::string longest = FormatSunText(st);
+      CHECK(649, longest.size() > 300 && longest.find("centre (0.0000, 0.0000)") != std::string::npos &&
+                     longest.rfind("quad-texture: 18446744073709551615}") == longest.size() - 35);
+    }
+
+    // 650: the steps' constants with the sun's switch: the bright pass's sun flag only with the bloom's flag
+    // and the block's radial part, the registers copied; and without the switch the constants of before.
+    {
+      capture::PostBlock b{};
+      b.valid = true;
+      const float composite[6] = {2.9736f, 0.25f, 50.0f, -0.00495f, 1.10216f, 0.45455f}, bright[5] = {1.4868f, 0.2f, 2.0f, 0.08761f, 0.13033f};
+      std::memcpy(b.composite, composite, sizeof(composite));
+      std::memcpy(b.bright, bright, sizeof(bright));
+      for (float& t : b.table) t = 0.5f;
+      for (int s2 = 0; s2 < 2; ++s2) {
+        b.blur[s2][0] = 0.4f;
+        for (int i = 1; i < 7; ++i) b.blur[s2][i] = 0.05f;
+      }
+      b.parts = capture::kPostPartBlur;
+      static float ramp[256][3];
+      for (int i = 0; i < 256; ++i) ramp[i][0] = ramp[i][1] = ramp[i][2] = float(i) / 255.0f;
+      const float c31[4] = {0.3821f, 0.3938f, 0.0f, 0.0f}, c46[4] = {0.87f, 0.0f, 0.0f, 0.0f}, c47[4] = {0.935f, 0.0f, 0.0f, 0.0f};
+      ClayPostConstants plain, off, on, no_bloom;
+      CHECK(650, MakeClayPostConstants(b, ramp, true, true, &plain) && plain.sun_on == 0 && plain.radial[0] == 0.0f);  // (no radial part)
+      CHECK(650, capture::SetPostRadial(&b, c31, c46, c47) && (b.parts & capture::kPostPartRadial));
+      CHECK(650, MakeClayPostConstants(b, ramp, true, false, &off) && MakeClayPostConstants(b, ramp, true, true, &on) &&
+                     MakeClayPostConstants(b, ramp, false, true, &no_bloom));
+      CHECK(650, off.sun_on == 0 && on.sun_on == 1 && on.bloom_on == 1 && no_bloom.sun_on == 0 && no_bloom.bloom_on == 0);
+      CHECK(650, on.radial[0] == 0.3821f && on.radial[1] == 0.3938f && on.radial[2] == 0.87f && on.radial[3] == 0.935f && SunRadialUsable(on.radial));
+      // The switch changes the one word and nothing else.
+      on.sun_on = 0;
+      CHECK(650, std::memcmp(&on, &off, sizeof(on)) == 0);
+      static_assert(offsetof(ClayPostConstants, sun_on) == 56 && offsetof(ClayPostConstants, radial) == 128);
+    }
+  }
+}
+// --- end of the sun layer's cases ---
 int main() {
   // 1-4: clay color cvar parsing.
   {
@@ -8716,6 +9540,8 @@ int main() {
     }
   }
 
+  // (on a thread of its own: main's frame leaves too little of the stack for another function's locals)
+  std::thread(SunLayerTests).join();
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
@@ -8738,7 +9564,11 @@ int main() {
                "against the reference's numbers, the place of the bloom's sample, nothing that is no number, the steps' "
                "words, the verdict; native furniture: the state a record is drawn with, its constants and what gives none, "
                "the moon's, the glare's and the corner's mirrors against the reference's numbers, nothing that is no "
-               "number, the frame's plan, the decision and the Furniture line, the quads' slots\n";
+               "number, the frame's plan, the decision and the Furniture line, the quads' slots; native sun layer: "
+               "a layer record's state, target and constants and what gives none, the depth test's direction, the five "
+               "quad formulas, the radial blur and the reduction against the reference's numbers, nothing that is no "
+               "number, the layer's depth texel and the steps' words, the layer's plan, the decision and the Sun line, "
+               "the sun's flag in the steps' constants\n";
 
   return 0;
 }

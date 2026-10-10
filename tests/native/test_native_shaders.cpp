@@ -4399,9 +4399,235 @@ int main() {
       if (strstr(src, "q_") || strstr(src, "Quad") || strstr(src, "quad")) return 246;
     }
   }
+  // 247 to 252: the sun layer (sub-project 10, plan Task 14; clay_logic.h, "Native sun layer").
+  {
+    using fable2::native::render::ClaySunQuadConstants;
+    const unsigned post_fields = sizeof(kClayPostFields) / sizeof(kClayPostFields[0]);
+    const unsigned step_fields = sizeof(kClayPostStepFields) / sizeof(kClayPostStepFields[0]);
+    // 247: the six programs compile.
+    if (!Compile("clay_sun_depth_ps", kClaySunDepthPs, "ps_5_0") || !Compile("clay_sun_reduce_ps", kClaySunReducePs, "ps_5_0") ||
+        !Compile("clay_sun_radial_ps", kClaySunRadialPs, "ps_5_0") || !Compile("clay_sun_quad_vs", kClaySunQuadVs, "vs_5_0") ||
+        !Compile("clay_sun_quad_ps", kClaySunQuadPs, "ps_5_0") || !Compile("clay_sun_occluder_ps", kClaySunOccluderPs, "ps_5_0")) return 247;
+    // 248: the blocks. cbuffer SunQuad at b0 in the three quad programs, at the table's offsets, which are
+    // ClaySunQuadConstants' and, field for field, the scene quads' (the same two slots of a record); the
+    // texture at t0, the four static samplers at s0..s3. The three steps under the post layout: cbuffer
+    // Step at b1 with the post steps' table; cbuffer Post at b0 in the one that reads it (the radial blur).
+    {
+      const unsigned count = sizeof(kClaySunQuadFields) / sizeof(kClaySunQuadFields[0]);
+      const struct {
+        const char* name;
+        size_t offset, bytes;
+      } sun_struct[] = {
+          {"u_corner", offsetof(ClaySunQuadConstants, corner), sizeof(ClaySunQuadConstants::corner)},
+          {"u_coord", offsetof(ClaySunQuadConstants, coord), sizeof(ClaySunQuadConstants::coord)},
+          {"u_view_proj", offsetof(ClaySunQuadConstants, view_proj), sizeof(ClaySunQuadConstants::view_proj)},
+          {"u_reg", offsetof(ClaySunQuadConstants, reg), sizeof(ClaySunQuadConstants::reg)},
+          {"u_kind", offsetof(ClaySunQuadConstants, kind), sizeof(ClaySunQuadConstants::kind)},
+          {"u_sampler", offsetof(ClaySunQuadConstants, sampler), sizeof(ClaySunQuadConstants::sampler)},
+          {"u_alpha_test", offsetof(ClaySunQuadConstants, alpha_test), sizeof(ClaySunQuadConstants::alpha_test)},
+          {"u_alpha_ref", offsetof(ClaySunQuadConstants, alpha_ref), sizeof(ClaySunQuadConstants::alpha_ref)},
+          {"u_fix", offsetof(ClaySunQuadConstants, fix), sizeof(ClaySunQuadConstants::fix)},
+          {"u_levels", offsetof(ClaySunQuadConstants, levels), sizeof(ClaySunQuadConstants::levels)},
+          {"u_pad", offsetof(ClaySunQuadConstants, pad), sizeof(ClaySunQuadConstants::pad)},
+      };
+      const unsigned quad_count = sizeof(kClayQuadFields) / sizeof(kClayQuadFields[0]);
+      if (count != sizeof(sun_struct) / sizeof(sun_struct[0]) || count != quad_count || sizeof(ClaySunQuadConstants) != kClaySunQuadSize ||
+          kClaySunQuadSize != kClayQuadSize) return 248;
+      for (unsigned i = 0; i < count; ++i) {
+        if (strcmp(kClaySunQuadFields[i].name, sun_struct[i].name) || kClaySunQuadFields[i].offset != sun_struct[i].offset ||
+            kClaySunQuadFields[i].bytes != sun_struct[i].bytes || kClaySunQuadFields[i].offset != kClayQuadFields[i].offset ||
+            kClaySunQuadFields[i].bytes != kClayQuadFields[i].bytes) {
+          std::cerr << "kClaySunQuadFields[" << i << "] is not ClaySunQuadConstants' field\n";
+          return 248;
+        }
+      }
+      const struct {
+        const char* name;
+        const char* src;
+        const char* stage;
+      } quads[] = {{"clay_sun_quad_vs", kClaySunQuadVs, "vs_5_0"}, {"clay_sun_quad_ps", kClaySunQuadPs, "ps_5_0"},
+                   {"clay_sun_occluder_ps", kClaySunOccluderPs, "ps_5_0"}};
+      for (const auto& q : quads) {
+        if (int at = BufferLayoutMismatch(q.name, q.src, q.stage, "SunQuad", kClaySunQuadFields, count, kClaySunQuadSize)) {
+          std::cerr << "cbuffer SunQuad (" << q.name << "): " << at << "\n";
+          return 248;
+        }
+        if (BindPoint(q.name, q.src, q.stage, "SunQuad") != 0) return 248;
+        if (q.stage[0] == 'p' && (BindPoint(q.name, q.src, q.stage, "quad_tex") != 0 || BindPoint(q.name, q.src, q.stage, "u_point_wrap") != 0 ||
+                                  BindPoint(q.name, q.src, q.stage, "u_linear_wrap") != 1 || BindPoint(q.name, q.src, q.stage, "u_point_clamp") != 2 ||
+                                  BindPoint(q.name, q.src, q.stage, "u_linear_clamp") != 3)) return 248;
+      }
+      const std::string swapped = Changed(kClaySunQuadPs, "float2 u_fix; float u_levels;", "float u_levels; float2 u_fix;");
+      if (swapped.empty() || BufferLayoutMismatch("swapped_sun_quad_ps", swapped.c_str(), "ps_5_0", "SunQuad", kClaySunQuadFields, count, kClaySunQuadSize) == 0) return 248;
+      for (const char* src : {kClaySunDepthPs, kClaySunReducePs, kClaySunRadialPs}) {
+        if (int at = BufferLayoutMismatch("clay_sun_step", src, "ps_5_0", "Step", kClayPostStepFields, step_fields, kClayPostStepSize)) {
+          std::cerr << "a sun step's cbuffer Step is not kClayPostStepFields (" << at << ")\n";
+          return 248;
+        }
+        if (BindPoint("clay_sun_step", src, "ps_5_0", "Step") != 1) return 248;
+      }
+      if (int at = BufferLayoutMismatch("clay_sun_radial_ps", kClaySunRadialPs, "ps_5_0", "Post", kClayPostFields, post_fields, kClayPostSize)) {
+        std::cerr << "the radial blur's cbuffer Post is not kClayPostFields (" << at << ")\n";
+        return 248;
+      }
+      if (BindPoint("clay_sun_radial_ps", kClaySunRadialPs, "ps_5_0", "Post") != 0) return 248;
+    }
+    // 249: the layer's depth step. One Load of t0 at the pixel's position times the step's ratio, bounded by
+    // its last texel (cb1[1]: s_dir and s_last; no size in the text), written as the depth, clamped; no
+    // colour output, no sampler, nothing of the frame's or the post's block.
+    {
+      const char* d = kClaySunDepthPs;
+      if (!strstr(d, "float main(float4 pos : SV_Position) : SV_Depth {\n  int2 at = min(int2(pos.xy) * s_dir, s_last);\n"
+                     "  float d = sun_depth_source.Load(int3(at, 0)).r;\n  return (d > 0.0) ? min(d, 1.0) : 0.0;\n}")) return 249;
+      const std::string listing = Disassembly("clay_sun_depth_ps", d, "ps_5_0");
+      int loads = 0;
+      const int depth = TextureReadDepth(listing, "ld_indexable", 0, &loads);
+      if (listing.empty() || loads != 1 || depth != 0 || listing.find("oDepth") == std::string::npos || listing.find("dcl_output o0") != std::string::npos ||
+          listing.find("dcl_sampler") != std::string::npos || ReadsBlock(listing, "cb0") || ReadsBlock(listing, "cb2") ||
+          !ReadsComponent(listing, "cb1[1]", 'x') || !ReadsComponent(listing, "cb1[1]", 'z') || !HasOp(listing, "imin") || !HasOp(listing, "imul") ||
+          LoopInstructions(listing) != 0 || BindPoint("clay_sun_depth_ps", d, "ps_5_0", "sun_depth_source") != 0) return 249;
+      // Controls: without the bound no minimum is taken; a literal ratio reads nothing of the step's direction.
+      const std::string unbounded = Changed(d, "min(int2(pos.xy) * s_dir, s_last)", "int2(pos.xy) * s_dir");
+      const std::string literal = Changed(d, "int2(pos.xy) * s_dir", "int2(pos.xy) * 2");
+      if (unbounded.empty() || literal.empty() || HasOp(Disassembly("unbounded_sun_depth", unbounded.c_str(), "ps_5_0"), "imin") ||
+          ReadsComponent(Disassembly("literal_sun_depth", literal.c_str(), "ps_5_0"), "cb1[1]", 'x')) return 249;
+      // No size of a target is in any of the layer's texts (a number standing alone: not digits of a literal).
+      auto holds_number = [](const char* src, const char* number) {
+        const size_t n = strlen(number);
+        for (const char* at = strstr(src, number); at; at = strstr(at + 1, number)) {
+          const bool before = at != src && (isdigit(static_cast<unsigned char>(at[-1])) || at[-1] == '.');
+          const bool after = isdigit(static_cast<unsigned char>(at[n])) != 0;
+          if (!before && !after) return true;
+        }
+        return false;
+      };
+      if (!holds_number("x * 560;", "560") || holds_number("0.1666666716337204", "720") || holds_number("15600", "560")) return 249;
+      for (const char* size : {"1120", "720", "560", "360", "280", "180"}) {
+        for (const char* src : {kClaySunDepthPs, kClaySunReducePs, kClaySunRadialPs, kClaySunQuadVs, kClaySunQuadPs, kClaySunOccluderPs}) {
+          if (holds_number(src, size)) return 249;
+        }
+      }
+    }
+    // 250: the reduction and the radial blur. The reduction: one linear sample of t0 (s1) at the corner the
+    // block's middle texels share, the ratio and the texel size from the step's words, the target's clamp
+    // and the write's own rounding. The radial blur: one Load of t0 in a loop the compiler keeps, which
+    // ends at fourteen (ige against 14), each tap's place bounded on both sides before it is made an integer
+    // (a comparison against 0 and a minimum against the last texel, both before the ftoi), the registers
+    // from the block's p_radial (cb0[8]) alone, the clamp and the rounding.
+    {
+      const char* r = kClaySunReducePs;
+      if (!strstr(r, "  float2 ratio = float2(s_dir);\n  float3 v = reduce_source.SampleLevel(linear_clamp, (ratio * floor(pos.xy) + 0.5 * ratio) * s_texel, 0.0).rgb;\n"
+                     "  return float4(post_level(post_unit(v)), 1.0);\n")) return 250;
+      const std::string reduce = Disassembly("clay_sun_reduce_ps", r, "ps_5_0");
+      int samples = 0;
+      TextureReadDepth(reduce, "sample_l", 0, &samples);
+      if (reduce.empty() || samples != 1 || LoopInstructions(reduce) != 0 || ReadsBlock(reduce, "cb0") || ReadsBlock(reduce, "cb2") ||
+          !ReadsComponent(reduce, "cb1[1]", 'x') || !ReadsComponent(reduce, "cb1[0]", 'x') || !HasLineWith(reduce, "mov", "o0.w, l(1.000000)") ||
+          !HasLineWith(reduce, "div", "cb1[0].zzzz") || !HasOp(reduce, "round_ni") || BindPoint("clay_sun_reduce_ps", r, "ps_5_0", "linear_clamp") != 1 ||
+          BindPoint("clay_sun_reduce_ps", r, "ps_5_0", "reduce_source") != 0) return 250;
+      const char* b = kClaySunRadialPs;
+      if (!strstr(b, "  float2 uv = floor(pos.xy) * s_texel;\n  float2 centre = p_radial.xy;\n"
+                     "  float s = (p_radial.w - 1.0) * (4.0 / 7.0) + 1.0;\n  float g = (p_radial.z - 1.0) * (4.0 / 7.0) + 1.0;\n") ||
+          !strstr(b, "  for (int k = 0; k < 14; ++k) {\n    float2 p = (centre + (uv - centre) * sk) * size + 0.5;\n"
+                     "    p = (p > 0.0) ? min(p, last) : float2(0.0, 0.0);\n"
+                     "    sum += w * post_unit(radial_source.Load(int3(int2(p), 0)).rgb);\n    sk *= s;\n    w *= g;\n  }\n"
+                     "  return float4(post_level(post_unit(sum * (4.0 / 7.0))), 1.0);\n") ||
+          !strstr(b, "  float sk = 1.0;\n  float w = 0.5;\n")) return 250;
+      const std::string radial = Disassembly("clay_sun_radial_ps", b, "ps_5_0");
+      int loads = 0;
+      const int depth = TextureReadDepth(radial, "ld_indexable", 0, &loads);
+      if (radial.empty() || loads != 1 || depth != 0 || LoopInstructions(radial) == 0 || !HasLineWith(radial, "ige", "l(14)") ||
+          !HasLineWith(radial, "min", "r0.xxxy") || !HasOp(radial, "ftoi") || radial.find("dcl_sampler") != std::string::npos ||
+          ReadsBlock(radial, "cb2") || !ReadsComponent(radial, "cb0[8]", 'x') || !ReadsComponent(radial, "cb0[8]", 'y') ||
+          !ReadsComponent(radial, "cb0[8]", 'z') || !ReadsComponent(radial, "cb0[8]", 'w') || !HasLineWith(radial, "mov", "o0.w, l(1.000000)") ||
+          !HasLineWith(radial, "div", "cb1[0].zzzz") || !HasOp(radial, "round_ni") || BindPoint("clay_sun_radial_ps", b, "ps_5_0", "radial_source") != 0) {
+        std::cerr << "the radial blur's compiled code: " << loads << " loads of t0\n";
+        return 250;
+      }
+      // (nothing of the block but the radial registers: not the composite's, the bright pass's, the table or the ramp)
+      for (const char* other : {"cb0[0]", "cb0[1]", "cb0[3]", "cb0[4]", "cb0[9]", "cb0[137]"}) {
+        if (radial.find(other) != std::string::npos) return 250;
+      }
+      // Controls: without the tap's bound the program is another one; with thirteen taps the loop ends at thirteen.
+      const std::string unbounded = Changed(b, "    p = (p > 0.0) ? min(p, last) : float2(0.0, 0.0);\n", "");
+      const std::string thirteen = Changed(b, "k < 14", "k < 13");
+      if (unbounded.empty() || thirteen.empty() || Code(Disassembly("unbounded_sun_radial", unbounded.c_str(), "ps_5_0")) == Code(radial)) return 250;
+      const std::string fewer = Disassembly("thirteen_sun_radial", thirteen.c_str(), "ps_5_0");
+      if (HasLineWith(fewer, "ige", "l(14)") || !HasLineWith(fewer, "ige", "l(13)")) return 250;
+    }
+    // 251: the layer quads. The vertex shader: the game's six indices, the corner through the four rows, its
+    // coordinate and its own position passed on. The pixel shader: the four kinds' statements with the
+    // shaders' own literals, one texture under the four samplers with its own gradients, the alpha test's
+    // discard, the clamp at 1 and the write's own rounding with the block's level count (cb0[25].z). The
+    // occluder's form: no output at all, the kind's four registers, the fade's two literals, the discard.
+    {
+      const char* v = kClaySunQuadVs;
+      if (!strstr(v, "static const uint order[6] = {0, 1, 2, 1, 3, 2};") || !strstr(v, "uint c = order[min(id, 5u)];") ||
+          !strstr(v, "o.pos = float4(dot(u_view_proj[0], p), dot(u_view_proj[1], p), dot(u_view_proj[2], p), dot(u_view_proj[3], p));") ||
+          !strstr(v, "float4 p = float4(u_corner[c].xyz, 1.0);") || !strstr(v, "o.uv = u_coord[c].xy;") || !strstr(v, "o.world = u_corner[c].xyz;")) return 251;
+      const std::string vs = Disassembly("clay_sun_quad_vs", v, "vs_5_0");
+      if (vs.empty() || vs.find("dcl_resource") != std::string::npos || LoopInstructions(vs) != 0 || !HasOp(vs, "umin")) return 251;
+      for (const char* row : {"cb0[8]", "cb0[9]", "cb0[10]", "cb0[11]"}) {
+        if (vs.find(row) == std::string::npos) return 251;
+      }
+      for (const char* other : {"cb0[12]", "cb0[13]", "cb0[24]", "cb0[25]"}) {
+        if (vs.find(other) != std::string::npos) return 251;
+      }
+      const char* s = kClaySunQuadPs;
+      if (!strstr(s, "  if (u_kind == 4) {\n    rgb = t.rgb * 0.1666666716337204 * u_reg[0].rgb;\n    a = 1.0;\n  } else if (u_kind == 5) {\n"
+                     "    rgb = t.a * u_reg[0].rgb;\n    a = 1.0;\n  } else if (u_kind == 6) {\n    rgb = t.rgb * 0.20000000298023224 * t.a;\n    a = t.a;\n"
+                     "  } else if (u_kind == 7) {\n    rgb = t.rgb * u_reg[1].rgb * t.a * u_reg[0].w;\n    a = t.a;\n  } else {\n    known = false;\n  }\n") ||
+          !strstr(s, "  if (!known || (u_alpha_test != 0 && !(a > u_alpha_ref))) discard;\n") ||
+          !strstr(s, "  rgb = (rgb > 0.0) ? min(rgb, 1.0) : float3(0.0, 0.0, 0.0);\n  return float4(floor(rgb * u_levels + 0.5) / u_levels, saturate(a));\n") ||
+          !strstr(s, "  return (abs(c) < 3.0e38) ? c : float4(0.0, 0.0, 0.0, 0.0);\n") ||
+          !strstr(s, "  float2 at = i.uv * u_fix;\n  float4 t = sun_sample(at, ddx(at), ddy(at));\n")) return 251;
+      static_assert(unsigned(fable2::native::capture::PostQuadKind::kBeamSource) + 1 == 4 && unsigned(fable2::native::capture::PostQuadKind::kFlare) + 1 == 5 &&
+                    unsigned(fable2::native::capture::PostQuadKind::kMoonGlow) + 1 == 6 && unsigned(fable2::native::capture::PostQuadKind::kSunDisc) + 1 == 7 &&
+                    unsigned(fable2::native::capture::PostQuadKind::kCloudOccluder) + 1 == 8);
+      static_assert(fable2::native::render::kSunBeamScale == 0.1666666716337204f && fable2::native::render::kSunGlowScale == 0.20000000298023224f &&
+                    fable2::native::render::kSunFadeRate == 0.0010000000474974513f && fable2::native::render::kSunFadeStart == 1000.0f);
+      const std::string ps = Disassembly("clay_sun_quad_ps", s, "ps_5_0");
+      if (ps.empty() || Count(ps.c_str(), "sample_d") != 4 || Count(ps.c_str(), "discard") < 1 || LoopInstructions(ps) != 0 ||
+          Count(ps.c_str(), "dcl_resource_texture2d") != 1 || Count(ps.c_str(), "dcl_sampler") != 4 || !HasOp(ps, "round_ni")) return 251;
+      if (!ReadsComponent(ps, "cb0[12]", 'w') || !ReadsComponent(ps, "cb0[13]", 'x') || !ReadsComponent(ps, "cb0[25]", 'z') ||
+          !ReadsComponent(ps, "cb0[24]", 'w') || !ReadsComponent(ps, "cb0[24]", 'z') || !ReadsComponent(ps, "cb0[24]", 'x')) return 251;
+      for (const char* other : {"cb0[0]", "cb0[8]", "cb0[14]", "cb0[15]", "cb0[23]"}) {
+        if (ps.find(other) != std::string::npos) return 251;
+      }
+      const std::string untested = Changed(s, "  if (!known || (u_alpha_test != 0 && !(a > u_alpha_ref))) discard;\n", "");
+      const std::string unrounded = Changed(s, "floor(rgb * u_levels + 0.5) / u_levels", "rgb");
+      if (untested.empty() || unrounded.empty() || Count(Disassembly("untested_sun_quad_ps", untested.c_str(), "ps_5_0").c_str(), "discard") != 0 ||
+          ReadsComponent(Disassembly("unrounded_sun_quad_ps", unrounded.c_str(), "ps_5_0"), "cb0[25]", 'z')) return 251;
+      const char* o = kClaySunOccluderPs;
+      if (strncmp(o, "#define CLAY_SUN_OCCLUDER 1\n", 28) != 0 || strcmp(o + 28, s) != 0) return 251;  // (one text, two programs)
+      if (!strstr(o, "void main(SunQuadOut i) {\n  float2 at = (i.uv * u_reg[0].xy + u_reg[1].xy) * u_fix;\n  float4 t = sun_sample(at, ddx(at), ddy(at));\n"
+                     "  float a = 0.0;\n  if (u_kind == 8) a = saturate(t.a * u_reg[3].x * (1.0 - saturate(0.0010000000474974513 * (length(i.world.xy - "
+                     "u_reg[2].xy) - 1000.0))));\n  if (u_kind != 8 || u_alpha_test == 0 || !(a > u_alpha_ref)) discard;\n}")) return 251;
+      const std::string occluder = Disassembly("clay_sun_occluder_ps", o, "ps_5_0");
+      if (occluder.empty() || occluder.find("dcl_output") != std::string::npos || Count(occluder.c_str(), "discard") < 1 ||
+          Count(occluder.c_str(), "sample_d") != 4 || LoopInstructions(occluder) != 0 || !ReadsComponent(occluder, "cb0[12]", 'x') ||
+          !ReadsComponent(occluder, "cb0[13]", 'x') || !ReadsComponent(occluder, "cb0[14]", 'x') || !ReadsComponent(occluder, "cb0[15]", 'x') ||
+          !ReadsComponent(occluder, "cb0[24]", 'w') || ReadsComponent(occluder, "cb0[25]", 'z')) return 251;
+      // (the colour program writes a colour and reads none of the occluder's registers past its own two)
+      if (ps.find("dcl_output o0") == std::string::npos) return 251;
+    }
+    // 252: the sun's switch off is the picture of before, program for program: the layer's programs are
+    // texts of their own (no program that draws the scene, a post step or a scene quad holds a word of
+    // them), so every other program, the bright pass with its sun flag among them, is compiled from the
+    // text it had.
+    for (const char* src : {kClayVs, kClayPs, kClayTexturedPs, kClayTerrainLayerPs, kClayTerrainFarPs, kClayShadowPs, kSkyVs, kClaySkyPs,
+                            kClayMaskPs, kOutputMapPs, kClayPostCompositePs, kClayPostRampPs, kClayPostDownsamplePs, kClayPostBrightPs,
+                            kClayPostBlurPs, kFullscreenVs, kClayQuadVs, kClayQuadPs}) {
+      for (const char* word : {"SunQuad", "sun_sample", "u_reg", "u_kind", "u_levels", "radial_source", "reduce_source", "sun_depth_source", "CLAY_SUN"}) {
+        if (strstr(src, word)) return 252;
+      }
+    }
+    // (and the bright pass's own text still has the two layers behind the flag, as plan Task 8 wrote it)
+    if (!strstr(kClayPostBrightPs, "  if (p_sun_on != 0) v += sun_tf1.Load(at).rgb * 6.0 * p_b46x + sun_tf2.Load(at).rgb;\n")) return 252;
+  }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads; the base map's gamma sign: the curve, the record's word read by the lit terrain programs alone; the quad step: the block at the table's offsets in both stages, the six vertices through the game's matrix, the two kinds' statements, one texture under four samplers, the alpha test's discard, the compiled clamp\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads; the base map's gamma sign: the curve, the record's word read by the lit terrain programs alone; the quad step: the block at the table's offsets in both stages, the six vertices through the game's matrix, the two kinds' statements, one texture under four samplers, the alpha test's discard, the compiled clamp; the sun layer: the blocks at their tables' offsets, the depth step's one bounded load written as depth, the reduction's one sample, the radial blur's fourteen bounded loads, the four kinds' statements and the occluder's form, the writes' own rounding, no other program's text touched\n";
   return 0;
 }

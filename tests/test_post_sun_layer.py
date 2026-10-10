@@ -417,6 +417,80 @@ class SunInputs(unittest.TestCase):
 
 # --- reading a capture ------------------------------------------------------------------------------------
 
+class FeedFile(unittest.TestCase):
+    """The oracle feed's third file and the layer's dumps (plan Task 14; src/native/render/post_oracle.h)."""
+
+    def quad(self, **kw):
+        d = draw("0x8E4DBB9E9A63EF67", regs={31: (0.8, 0.6, 0.3, 0.0)}, lit=(1.0 / 6.0, 0.0, 0.0, 0.0), alpha_ref=f32(0.50196081), **kw)
+        d.rs[0x2206] = 0x43F
+        return d
+
+    def test_a_quads_record(self):
+        d = self.quad()
+        rec = sl.pack_quad(d)
+        self.assertEqual(len(rec), sl.QUAD_FILE_BYTES)
+        self.assertEqual(struct.unpack_from("<II", rec, 0), (0x9A63EF67, 0x8E4DBB9E))
+        self.assertEqual(rec[8:88], bytes.fromhex(d.data["verts"]))            # the storage as it is, guest order
+        self.assertEqual(list(struct.unpack_from("<16f", rec, 88)), [f32(v) for row in d.view_proj for v in row])
+        self.assertEqual(struct.unpack_from("<I", rec, 152)[0], 1)              # the beam source reads one register
+        self.assertEqual(list(struct.unpack_from("<4f", rec, 156)), [f32(v) for v in (0.8, 0.6, 0.3, 0.0)])
+        self.assertEqual(struct.unpack_from("<44f", rec, 172), (0.0,) * 44)
+        self.assertEqual(struct.unpack_from("<I6I", rec, 348), (1, 0x82000002, 0x14E60054, 0x001FE0FF, 0x00A80D10, 0x00000103, 0x14E70A18))
+        self.assertEqual(struct.unpack_from("<12I", rec, 376), (0,) * 12)
+        blend, depth, mask, control, ref, zscale, vte = struct.unpack_from("<7I", rec, 424)
+        self.assertEqual((blend, depth, mask, ref, zscale, vte), (d.blend_word, d.depth_word, 0xF, 0x3F008081, 0xBF800000, 0x43F))
+        self.assertEqual(control, d.rs.get(0x2202, 0))
+
+    def test_what_is_no_record(self):
+        with self.assertRaises(sl.ReplayError):
+            sl.pack_quad(draw("0x5D6768847B0602B8"))
+        d = self.quad()
+        d.indices = [0, 1, 2, 2, 3, 0]
+        with self.assertRaises(sl.ReplayError):
+            sl.pack_quad(d)
+
+    def test_the_depth_as_the_pass_holds_it(self):
+        # The game's reversed window depth (1 near, 0 where nothing is) turned round; clamped as 5D67 clamps it.
+        self.assertEqual(list(sl.native_depth([0.0, 1.0, 0.25, 1.5, -0.5], -1.0, 1.0)), [1.0, 0.0, 0.75, 0.0, 1.0])
+        got = sl.native_depth([3.4e-5], -1.0, 1.0)[0]
+        self.assertEqual(got, f32(1.0 - 3.4e-5))
+        for scale, offset in ((1.0, 0.0), (-1.0, 0.0), (-0.5, 1.0)):
+            with self.assertRaises(sl.ReplayError):
+                sl.native_depth([0.5], scale, offset)
+
+    def test_a_layers_words_and_their_comparison(self):
+        rows = [[[0.0, 0.5, 1.0], [1.0 / 1023.0, 2.0, -1.0]], [[0.25, 0.25, 0.25], [0.0, 0.0, 0.0]]]
+        words = sl.layer_words(rows, bytearray([1, 0, 1, 1]))
+        self.assertEqual(list(words), [(512 << 10) | (1023 << 20) | (3 << 30), 1 | (1023 << 10), 256 | (256 << 10) | (256 << 20) | (3 << 30),
+                                       3 << 30])
+        self.assertEqual(sl.layer_words(rows)[1] >> 30, 3)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "x_layer1.r10"
+            sl.write_layer(p, rows, bytearray([1, 0, 1, 1]))
+            w, h, back = sl.read_layer(p)
+            self.assertEqual((w, h, list(back)), (2, 2, list(words)))
+            p.write_bytes(b"F2OD" + p.read_bytes()[4:])
+            with self.assertRaises(sl.ReplayError):
+                sl.read_layer(p)
+        other = sl.layer_words([[[0.0, 0.5, 1.0], [3.0 / 1023.0, 1.0, 0.0]], [[0.25, 0.25, 0.26], [0.0, 0.0, 0.0]]], bytearray([1, 1, 0, 1]))
+        c = sl.layer_compare(words, other)
+        self.assertEqual((c["texels"], c["equal"], c["largest"]), (4, 2, 10))
+        self.assertEqual(c["within"], {1: 2, 2: 3, 4: 3, 8: 3})
+        self.assertEqual((c["alpha_a"], c["alpha_b"], c["alpha_both"]), (3, 3, 2))
+        with self.assertRaises(sl.ReplayError):
+            sl.layer_compare(words, other[:3])
+
+    def test_the_drawn_texels_are_marked(self):
+        drawn = {}
+        one, two, lines = sl.sun_layer([draw("0x5D6768847B0602B8"), draw("0x8E4DBB9E9A63EF67", regs={31: (0.0, 0.0, 0.0, 0.0)},
+                                                                       lit=(1.0 / 6.0, 0.0, 0.0, 0.0))], scene_depth(), W, H,
+                                       lambda d, slot: Flat((0.6, 0.6, 0.6, 1.0)), drawn)
+        # (a beam source of colour 0 writes zeros, and its texels are drawn all the same)
+        self.assertEqual(sum(drawn["layer1"]), len(one) * len(one[0]))
+        self.assertEqual(sum(drawn["layer2"]), 0)
+        self.assertTrue(all(max(t) == 0.0 for row in one for t in row))
+
+
 class Reader(unittest.TestCase):
     def test_the_layers_draws_of_a_frame_in_their_order(self):
         def rows(d, n, **over):

@@ -1,5 +1,5 @@
-// Synthetic standalone test; no game or GPU. With one argument, a prefix, it also parses the two files
-// <prefix>.scene and <prefix>.block of tools/xdk_sigmatch/post_replay.py export and prints what they hold
+// Synthetic standalone test; no game or GPU. With one argument, a prefix, it also parses the files
+// <prefix>.scene, <prefix>.block and, if there, <prefix>.sun of tools/xdk_sigmatch/post_replay.py export and prints what they hold
 // (by hand, against real exports: out/native-evidence/post/oracle/).
 #define _CRT_SECURE_NO_WARNINGS  // (fopen, in that report)
 #include "../../src/native/render/post_oracle.h"
@@ -380,19 +380,253 @@ static int BlockTests() {
       }
     }
   }
-  // The radial part (plan Task 12): its bit is accepted and nothing of it is taken; its floats must be numbers.
+  // The radial part (plan Task 14: the sun layer on the feed): with its bit the four registers are taken
+  // through the capture's own rule (SetPostRadial), bit for bit; its floats must be numbers (kValue) and
+  // inside the rule's bounds (kRadial); without the bit nothing of it is taken, whatever the floats are.
   {
     BlockFile f;
     f.parts = 3;
     f.floats[25] = 0.5f, f.floats[26] = -0.25f, f.floats[27] = 0.9f, f.floats[28] = 0.8f;
-    const std::vector<uint8_t> bytes = f.Bytes();
+    std::vector<uint8_t> bytes = f.Bytes();
     const PostBlock r = ParseOracleBlock(bytes.data(), bytes.size());
-    if (!r.valid || r.parts != kPostPartBlur || (r.parts & kPostPartRadial)) return 87;
-    for (float v : r.radial) {
-      if (v != 0.0f) return 88;
-    }
+    if (!r.valid || r.parts != (kPostPartBlur | kPostPartRadial)) return 87;
+    if (r.radial[0] != 0.5f || r.radial[1] != -0.25f || r.radial[2] != 0.9f || r.radial[3] != 0.8f) return 88;
     f.floats[27] = kNaN;
     if (!BlockRefused(f.Bytes(), OracleFault::kValue)) return 89;
+    const struct { int at; float v; } bad[] = {{25, 4.5f}, {25, -4.5f}, {26, 5.0f}, {27, 0.0f}, {27, 1.5f}, {28, 0.0f}, {28, -0.5f}, {28, 1.01f}};
+    for (const auto& b : bad) {
+      BlockFile g;
+      g.parts = 3;
+      g.floats[25] = 0.5f, g.floats[26] = -0.25f, g.floats[27] = 0.9f, g.floats[28] = 0.8f;
+      g.floats[b.at] = b.v;
+      if (!BlockRefused(g.Bytes(), OracleFault::kRadial)) return 92;
+    }
+    // (a centre exactly on the picture's edge, and outside it, is a place like any other)
+    f.floats[25] = 0.0f, f.floats[26] = -4.0f, f.floats[27] = 1.0f;
+    bytes = f.Bytes();
+    if (!(ParseOracleBlock(bytes.data(), bytes.size()).parts & kPostPartRadial)) return 93;
+    f.parts = 1;
+    f.floats[25] = 77.0f;
+    bytes = f.Bytes();
+    const PostBlock without = ParseOracleBlock(bytes.data(), bytes.size());
+    if (!without.valid || without.parts != kPostPartBlur) return 94;
+    for (float v : without.radial) {
+      if (v != 0.0f) return 95;
+    }
+  }
+  return 0;
+}
+
+// --- <prefix>.sun ---
+
+// A sun file of a 4 x 2 depth and the layer quads of capture native_discovery_20261010_052158 frame 1 (the
+// first cloud occluder, the beam source, the sun disc), as post_replay.py's pack_sun writes them.
+struct SunQuad {
+  uint64_t ps = 0;
+  uint8_t vertices[80] = {};
+  float view_proj[16] = {};
+  uint32_t reg_count = 0;
+  float regs[48] = {};
+  uint32_t fetch_count = 1;
+  uint32_t fetch[18] = {};
+  uint32_t blend = 0, depth = 0, mask = 0, control = 0, ref = 0, z_scale = 0xBF800000, vte = 0x43F;
+};
+static SunQuad MakeSunQuad(uint64_t ps, const char* verts, std::initializer_list<uint32_t> regs, uint32_t blend, uint32_t depth, uint32_t mask,
+                           uint32_t control, uint32_t ref, uint32_t fetch0, uint32_t fetch1) {
+  SunQuad q;
+  q.ps = ps;
+  auto digit = [](char c) { return c <= '9' ? c - '0' : c - 'A' + 10; };
+  for (int i = 0; i < 80; ++i) q.vertices[i] = uint8_t(digit(verts[2 * i]) * 16 + digit(verts[2 * i + 1]));
+  const uint32_t matrix[16] = {0x3EBA04AA, 0x3F684A6D, 0x33BBAA18, 0xC3306FC9, 0x3F3E8525, 0xBE989184, 0x3FC5551A, 0xC2B9462A,
+                               0xBF52DBA3, 0x3EA8DAD8, 0x3EEC3766, 0x3DCDF642, 0xBF52DA8E, 0x3EA8D9FA, 0x3EEC3630, 0x3E4D6100};
+  for (int i = 0; i < 16; ++i) q.view_proj[i] = Bits(matrix[i]);
+  int n = 0;
+  for (uint32_t r : regs) q.regs[n++] = Bits(r);
+  q.reg_count = uint32_t(n / 4);
+  q.fetch[0] = fetch0, q.fetch[1] = fetch1, q.fetch[2] = 0x001FE0FF, q.fetch[3] = 0x00A80D10, q.fetch[4] = 0x00000103, q.fetch[5] = fetch1 + 0x10000 + 0x9C4;
+  q.blend = blend, q.depth = depth, q.mask = mask, q.control = control, q.ref = ref;
+  return q;
+}
+struct SunFile {
+  const char* magic = "F2OU";
+  uint32_t version = 1, width = 4, height = 2;
+  std::vector<float> depth = {1.0f, 0.5f, 0.25f, 0.0f, 0.999966f, 1.0f, 0.75f, 0.125f};
+  std::vector<SunQuad> quads;
+  SunFile() {
+    quads.push_back(MakeSunQuad(0x3FF79524FCDB71C5ull,
+                                "C53B8001C53B800143FA00000000000000000000453B8001C53B800143FA00003F80000000000000"
+                                "C53B8001453B800143FA0000000000003F800000453B8001453B800143FA00003F8000003F800000",
+                                {0x40A00000, 0x40A00000, 0, 0, 0x3E8BA2EF, 0x3F0BA2EF, 0, 0, 0x42B431AC, 0x431E5EC9, 0x423CD3F5, 0x3F800000, 0x3F000000, 0, 0, 0},
+                                0x07060706, 0x00708766, 0x0, 0xC, 0x3E189899, 0x84000002, 0x163E0054));
+    quads.push_back(MakeSunQuad(0x8E4DBB9E9A63EF67ull,
+                                "C50A1176C3B7A1D44392D8AA000000003F800000C4C0806644A2F86E4392D8B23F8000003F800000"
+                                "C4B3C528C428FC7444EC55E80000000000000000C44045444478C55344EC55EA3F80000000000000",
+                                {0x3F51E970, 0x3F258124, 0x3EA3788B, 0}, 0x00010001, 0x00708762, 0xF, 0x4, 0x3F008081, 0x82000002, 0x14E60054));
+    quads.push_back(MakeSunQuad(0x3E77B1AD4BC5B900ull,
+                                "C4CC22CE4331ACB944691F55000000003F800000C4BB68B443FFF0AB44691F553F8000003F800000"
+                                "C4B8DCDA42E7E096449C7C6A0000000000000000C4A822C043E11273449C7C6A3F80000000000000",
+                                {0x3BC20A12, 0x3D8FC764, 0x3DBABD2A, 0x3F800000, 0x3F606FAA, 0x3F30F4C4, 0x3EAEC826, 0}, 0x01010101, 0x00708762, 0xF,
+                                0xC, 0x3F008081, 0x82000002, 0x14E80054));
+  }
+  std::vector<uint8_t> Bytes(int count_word = -1) const {
+    std::vector<uint8_t> out(magic, magic + 4);
+    PutU32(out, version);
+    PutU32(out, width);
+    PutU32(out, height);
+    PutU32(out, count_word < 0 ? uint32_t(quads.size()) : uint32_t(count_word));
+    for (float d : depth) PutFloat(out, d);
+    for (const SunQuad& q : quads) {
+      PutU32(out, uint32_t(q.ps));
+      PutU32(out, uint32_t(q.ps >> 32));
+      out.insert(out.end(), q.vertices, q.vertices + 80);
+      for (float v : q.view_proj) PutFloat(out, v);
+      PutU32(out, q.reg_count);
+      for (float v : q.regs) PutFloat(out, v);
+      PutU32(out, q.fetch_count);
+      for (uint32_t v : q.fetch) PutU32(out, v);
+      for (uint32_t v : {q.blend, q.depth, q.mask, q.control, q.ref, q.z_scale, q.vte}) PutU32(out, v);
+    }
+    return out;
+  }
+};
+static bool SunRefused(const std::vector<uint8_t>& file, OracleFault want,
+                       fable2::native::capture::QuadRecordReason want_rule = fable2::native::capture::QuadRecordReason::kNone) {
+  OracleFault why = OracleFault::kNone;
+  fable2::native::capture::QuadRecordReason rule = fable2::native::capture::QuadRecordReason::kCount;
+  const OracleSun s = ParseOracleSun(file.data(), file.size(), &why, &rule, 4, 2);
+  static const OracleSun zero{};
+  return !s.valid && s.count == 0 && s.depth == nullptr && std::memcmp(s.quads, zero.quads, sizeof(s.quads)) == 0 && why == want && rule == want_rule;
+}
+
+static int SunTests() {
+  using fable2::native::capture::PostQuadKind;
+  using fable2::native::capture::QuadRecordReason;
+  static_assert(kOracleSunVersion == 1 && kOracleSunHeaderBytes == 20 && kOracleQuadBytes == 452 && kOracleLayerDumps == 3);
+  const SunFile good;
+  const std::vector<uint8_t> file = good.Bytes();
+  if (file.size() != 20 + 8 * 4 + 3 * kOracleQuadBytes) return 120;
+  OracleFault why = OracleFault::kShort;
+  QuadRecordReason rule = QuadRecordReason::kCount;
+  const OracleSun s = ParseOracleSun(file.data(), file.size(), &why, &rule, 4, 2);
+  if (!s.valid || why != OracleFault::kNone || rule != QuadRecordReason::kNone || s.width != 4 || s.height != 2 || s.count != 3) return 121;
+  for (size_t i = 0; i < 8; ++i) {
+    if (OracleSunDepth(s, i) != good.depth[i]) return 122;
+  }
+  if (OracleSunDepth(s, 8) != 0.0f || OracleSunDepth(OracleSun{}, 0) != 0.0f) return 123;  // (beyond it: the nearest depth)
+  // The records are the capture's own function's of the file's inputs, in the file's order.
+  const PostQuadKind kinds[3] = {PostQuadKind::kCloudOccluder, PostQuadKind::kBeamSource, PostQuadKind::kSunDisc};
+  for (int i = 0; i < 3; ++i) {
+    const fable2::native::capture::QuadRecord& q = s.quads[i];
+    if (!fable2::native::capture::QuadRecordValid(q) || q.kind != kinds[i] || q.layer != 1 || q.sequence != i || q.ps_hash != good.quads[i].ps) return 124;
+    if (q.view_proj[0][0] != good.quads[i].view_proj[0] || q.view_proj[3][3] != good.quads[i].view_proj[15] || q.fetch[0][1] != good.quads[i].fetch[1] ||
+        q.blend != good.quads[i].blend || q.depth != good.quads[i].depth) return 125;
+  }
+  if (s.quads[0].colour_mask != 0 || s.quads[0].alpha_ref != Bits(0x3E189899) || s.quads[0].ps[2][0] != Bits(0x42B431AC) ||
+      s.quads[1].corners[0][0] != Bits(0xC50A1176) || s.quads[1].corners[3][4] != 0.0f || s.quads[1].ps[0][0] != Bits(0x3F51E970) ||
+      s.quads[1].alpha_ref != 0.0f || s.quads[2].ps[0][3] != 1.0f || s.quads[2].ps[1][0] != Bits(0x3F606FAA)) return 126;
+  for (int i = 3; i < int(fable2::native::capture::kMaxQuadRecords); ++i) {
+    if (fable2::native::capture::QuadRecordValid(s.quads[i])) return 127;
+  }
+  // A file without a quad is a valid one (a depth alone: the pass then has no layer record).
+  {
+    SunFile f;
+    f.quads.clear();
+    const std::vector<uint8_t> bytes = f.Bytes();
+    const OracleSun none = ParseOracleSun(bytes.data(), bytes.size(), nullptr, nullptr, 4, 2);
+    if (!none.valid || none.count != 0) return 128;
+  }
+  // Short, long, another kind, version or size.
+  if (!SunRefused({}, OracleFault::kShort) || ParseOracleSun(nullptr, 100).valid) return 130;
+  for (size_t n : {size_t(1), size_t(4), size_t(19)}) {
+    if (!SunRefused(std::vector<uint8_t>(file.begin(), file.begin() + n), OracleFault::kShort)) return 131;
+  }
+  for (size_t n : {size_t(20), size_t(52), file.size() - 1}) {
+    if (!SunRefused(std::vector<uint8_t>(file.begin(), file.begin() + n), OracleFault::kSize)) return 132;
+  }
+  {
+    std::vector<uint8_t> longer = file;
+    longer.push_back(0);
+    if (!SunRefused(longer, OracleFault::kSize)) return 133;
+    SunFile f;
+    f.magic = "F2OS";
+    if (!SunRefused(f.Bytes(), OracleFault::kMagic)) return 134;
+    f = SunFile();
+    f.version = 2;
+    if (!SunRefused(f.Bytes(), OracleFault::kVersion)) return 135;
+    f = SunFile();
+    f.width = 2, f.height = 4;
+    if (!SunRefused(f.Bytes(), OracleFault::kSize)) return 136;
+    // (the count's word against the records that follow, and the bound)
+    f = SunFile();
+    if (!SunRefused(f.Bytes(2), OracleFault::kSize) || !SunRefused(f.Bytes(4), OracleFault::kSize) || !SunRefused(f.Bytes(25), OracleFault::kSize) ||
+        !SunRefused(f.Bytes(0x7FFFFFFF), OracleFault::kSize)) return 137;
+    for (int i = 0; i < 22; ++i) f.quads.push_back(f.quads[1]);
+    std::vector<uint8_t> many = f.Bytes();
+    if (SunRefused(many, OracleFault::kNone) || ParseOracleSun(many.data(), many.size(), nullptr, nullptr, 4, 2).count != 0) return 138;  // (25 records: over the bound)
+    f.quads.pop_back();
+    many = f.Bytes();
+    if (ParseOracleSun(many.data(), many.size(), nullptr, nullptr, 4, 2).count != 24) return 139;
+  }
+  // The pass's logical size is the default: a file of another size is refused there.
+  if (ParseOracleSun(file.data(), file.size()).valid) return 140;
+  // A depth value that is no number or outside [0, 1].
+  for (float d : {kNaN, kInf, -kInf, -1e-6f, 1.0001f}) {
+    for (size_t at : {size_t(0), size_t(7)}) {
+      SunFile f;
+      f.depth[at] = d;
+      if (!SunRefused(f.Bytes(), OracleFault::kValue)) return 141;
+    }
+  }
+  // A record: a shader of no layer kind (the scene's glare; no table shader at all); counts that are not the
+  // kind's; and whatever the capture's own rule refuses, with its word.
+  {
+    SunFile f;
+    f.quads[1].ps = 0x04985A0F7296E130ull;
+    if (!SunRefused(f.Bytes(), OracleFault::kQuad, QuadRecordReason::kShader)) return 142;
+    f.quads[1].ps = 0x1234;
+    if (!SunRefused(f.Bytes(), OracleFault::kQuad, QuadRecordReason::kShader)) return 143;
+    f = SunFile();
+    f.quads[2].reg_count = 1;
+    if (!SunRefused(f.Bytes(), OracleFault::kQuad, QuadRecordReason::kUnread)) return 144;
+    f = SunFile();
+    f.quads[0].fetch_count = 2;
+    if (!SunRefused(f.Bytes(), OracleFault::kQuad, QuadRecordReason::kUnread)) return 145;
+    f = SunFile();
+    f.quads[1].vertices[0] = 0x7F, f.quads[1].vertices[1] = 0xC0;  // (a NaN corner)
+    if (!SunRefused(f.Bytes(), OracleFault::kQuad, QuadRecordReason::kCorner)) return 146;
+    f = SunFile();
+    f.quads[1].view_proj[5] = kInf;
+    if (!SunRefused(f.Bytes(), OracleFault::kQuad, QuadRecordReason::kMatrix)) return 147;
+    f = SunFile();
+    f.quads[2].regs[4] = kNaN;
+    if (!SunRefused(f.Bytes(), OracleFault::kQuad, QuadRecordReason::kRegister)) return 148;
+    f = SunFile();
+    f.quads[1].blend = 0x01010101;
+    if (!SunRefused(f.Bytes(), OracleFault::kQuad, QuadRecordReason::kState)) return 149;
+    f = SunFile();
+    f.quads[0].mask = 0xF;
+    if (!SunRefused(f.Bytes(), OracleFault::kQuad, QuadRecordReason::kState)) return 150;
+    f = SunFile();
+    f.quads[1].z_scale = 0x3F800000;  // (not the reversed range)
+    if (!SunRefused(f.Bytes(), OracleFault::kQuad, QuadRecordReason::kState)) return 151;
+    f = SunFile();
+    f.quads[2].ref = 0x40000000;
+    if (!SunRefused(f.Bytes(), OracleFault::kQuad, QuadRecordReason::kAlpha)) return 152;
+  }
+  // Two fetch constants of one kind of texture at two places: every bit but the two addresses.
+  {
+    const uint32_t a[6] = {0x82000002, 0x14E60054, 0x001FE0FF, 0x00A80D10, 0x00000103, 0x14E70A18};
+    uint32_t b[6] = {0x82000002, 0x14EC0054, 0x001FE0FF, 0x00A80D10, 0x00000103, 0x14ED0A18};
+    if (!OracleFetchSameKind(a, a) || !OracleFetchSameKind(a, b) || !OracleFetchSameKind(b, a)) return 153;
+    const uint32_t flip[6] = {0x04000000, 0x00000004, 0x00002000, 0x00000100, 0x00000040, 0x00000800};
+    for (int i = 0; i < 6; ++i) {
+      uint32_t c[6];
+      std::memcpy(c, b, sizeof(c));
+      c[i] ^= flip[i];
+      if (OracleFetchSameKind(a, c)) return 154;
+    }
+    b[1] = 0xFFFFF054, b[5] = 0x00000A18;
+    if (!OracleFetchSameKind(a, b)) return 155;
   }
   return 0;
 }
@@ -424,8 +658,13 @@ static int DumpTests() {
   if (PackOracleDump(rows.data(), 11, 3, 2, &out) || !out.empty()) return 108;
   if (PackOracleDump(rows.data(), 256, 3, 2, nullptr)) return 109;
   if (PackOracleDump(rows.data(), 12, 3, 2, &out) && out.size() != 36) return 110;  // (a pitch of exactly a row is one)
+  // A layer's dump has its own magic; anything that is not four characters counts as the picture's.
+  if (!PackOracleDump(rows.data(), 256, 3, 2, &out, "F2OL") || std::memcmp(out.data(), "F2OL", 4) != 0 || out.size() != 36 ||
+      std::memcmp(out.data() + 4, want + 4, 32) != 0) return 114;
+  if (!PackOracleDump(rows.data(), 256, 3, 2, &out, "F2") || std::memcmp(out.data(), "F2OD", 4) != 0) return 115;
+  if (!PackOracleDump(rows.data(), 256, 3, 2, &out, nullptr) || std::memcmp(out.data(), "F2OD", 4) != 0) return 116;
   // The names of the faults, each once.
-  const char* names[] = {"none", "short", "magic", "version", "size", "value", "scale", "parts", "block", "pairing"};
+  const char* names[] = {"none", "short", "magic", "version", "size", "value", "scale", "parts", "block", "pairing", "radial", "quad"};
   if (sizeof(names) / sizeof(names[0]) != size_t(OracleFault::kCount)) return 111;
   for (size_t i = 0; i < size_t(OracleFault::kCount); ++i) {
     if (std::string(OracleFaultName(OracleFault(i))) != names[i]) return 112;
@@ -478,17 +717,38 @@ static int Report(const char* prefix) {
     std::printf(" (%s)", fable2::native::capture::PostBlockReasonName(rule));
   }
   std::printf("\n");
+  // The optional third file.
+  std::vector<uint8_t> sun_bytes;
+  if (read(std::string(prefix) + ".sun", &sun_bytes)) {
+    OracleFault sun_why;
+    fable2::native::capture::QuadRecordReason quad_why;
+    const OracleSun sun = ParseOracleSun(sun_bytes.data(), sun_bytes.size(), &sun_why, &quad_why);
+    std::printf("%s.sun: %zu bytes, %s", prefix, sun_bytes.size(), sun.valid ? "valid" : OracleFaultName(sun_why));
+    if (sun.valid) {
+      size_t far = 0;
+      for (size_t i = 0; i < size_t(sun.width) * sun.height; ++i) far += OracleSunDepth(sun, i) == 1.0f;
+      std::printf(", depth %u x %u (%zu texels at the far depth 1), %u layer quads:", sun.width, sun.height, far, sun.count);
+      for (uint32_t i = 0; i < sun.count; ++i) std::printf(" %s", fable2::native::capture::PostQuadKindName(sun.quads[i].kind));
+      std::printf("; radial part %s (%.4f, %.4f, %.4f, %.4f)", (block.parts & kPostPartRadial) ? "taken" : "NOT in the block", double(block.radial[0]),
+                  double(block.radial[1]), double(block.radial[2]), double(block.radial[3]));
+    } else if (sun_why == OracleFault::kQuad) {
+      std::printf(" (%s)", fable2::native::capture::QuadRecordReasonName(quad_why));
+    }
+    std::printf("\n");
+    if (!sun.valid) return 1;
+  }
   return scene.valid && block.valid ? 0 : 1;
 }
 
 int main(int argc, char** argv) {
-  for (int (*test)() : {HalfTests, SceneTests, BlockTests, DumpTests}) {
+  for (int (*test)() : {HalfTests, SceneTests, BlockTests, SunTests, DumpTests}) {
     if (const int code = test()) {
       std::printf("FAIL: post oracle case %d\n", code);
       return 1;
     }
   }
   std::puts("PASS: post oracle files: the half conversion against HalfToFloat (every half, every tie), the scene's and the block's "
-            "parsers (short files, magic, size, values that are no numbers, the block's rules, parts and pairing), the dump's rows");
+            "parsers (short files, magic, size, values that are no numbers, the block's rules, parts and pairing, the radial part through "
+            "the capture's rule), the sun file's parser (its depth, its quads through the capture's rule, every refusal), the dumps' rows");
   return argc > 1 ? Report(argv[1]) : 0;
 }

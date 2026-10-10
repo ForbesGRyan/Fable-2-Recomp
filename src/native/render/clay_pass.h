@@ -97,7 +97,11 @@ class ClayPass {
   // output mapping; st says which and why (ClayStats::post). With `post.sun` (fable2_native_sun), in a
   // post frame with a sky whose scene has a whole set of quad records, the scene's furniture is drawn
   // from them: the moon after the sky step, the glare after the last record (ClayFurniture; st says
-  // which and why). With it off nothing of the quad step is made, bound or drawn.
+  // which and why). With it off nothing of the quad step is made, bound or drawn. With it, in a frame
+  // whose furniture is drawn, whose bloom is on and whose post block has the radial blur's registers, the
+  // sun layer is drawn from the set's layer records and feeds the bright pass (ClaySun; st says which
+  // and why, "sun-layer"); in every other frame the bright pass's sun flag is 0 and nothing of the layer
+  // is made, bound or drawn.
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
               bool textured, ClayLight light, bool shadows, bool fog, const ClayPostRequest& post, ClayStats& st,
               TextureStats& tst);
@@ -147,6 +151,12 @@ class ClayPass {
   // Whether the dump is over: taken, or failed (its buffer could not be made or read): nothing more
   // comes, and the caller need not ask again (review of plan Task 6, Minor 8).
   bool PostOracleDumpDone() const { return oracle_dump_state_ == OracleDump::kDone; }
+  // The sun layer's pictures of the dump's frame, when the feed has a sun part and the layer was drawn from
+  // it (plan Task 14): `index` 0 layer 1 (kWidth / 2 x kHeight / 2; its alpha is set where the beam source
+  // was drawn), 1 the bright pass's tf1, 2 its tf2 (kWidth / 4 x kHeight / 4), each as PackOracleDump's
+  // bytes with the magic "F2OL" (the words of R10G10B10A2_UNORM). True once for each, when the copy's
+  // submission has completed; false in every other call. Command-processor thread, outside Render.
+  bool TakePostOracleLayerDump(nrhi::Device* dev, size_t index, std::vector<uint8_t>* file);
 
  private:
   // One drawable record of the frame, with its buffers and albedo.
@@ -297,6 +307,23 @@ class ClayPass {
   bool EnsureQuadObjects(nrhi::Device* dev);
   void DestroyQuadObjects();
   void ForgetQuadObjects();
+  // What the sun layer alone needs (clay_logic.h, "Native sun layer"): six programs, the layer's depth
+  // target, its two pictures and three quarter-size targets with their views, a view of the scene's depth,
+  // and seven pipelines (the depth step, the reduction, the radial blur under the post layout; one a state
+  // of ClaySunState under the quad step's layout). EnsureSunObjects makes them on the first frame that
+  // draws the layer (the post steps' and the quad step's objects exist then); false when they could not be
+  // made, now or before: then they are not tried again until the pass is rebuilt (one log line) and no
+  // frame has a sun layer (ClaySun::kObjects, "post-objects"): the bloom, the furniture and the renderer
+  // go on. With fable2_native_sun off nothing of them is made. Destroyed with the pass's other objects.
+  bool EnsureSunObjects(nrhi::Device* dev);
+  void DestroySunObjects();
+  void ForgetSunObjects();
+  // The oracle feed's depth (OracleFeed::sun): a kWidth x kHeight R32_FLOAT texture filled once from the
+  // file (a copy and barriers on `cmd`: before render targets are bound); false when it could not be
+  // made, now or before: the feed then has no sun layer. CopyOracleLayerDumps: the layer's three pictures,
+  // resting in kPixelShaderResource, into read-back buffers, and back.
+  bool EnsureOracleSunDepth(nrhi::Cmd* cmd, nrhi::Device* dev);
+  void CopyOracleLayerDumps(nrhi::Cmd* cmd, nrhi::Device* dev);
   // The oracle feed's texture (SetPostOracle): made and filled from the feed's scene on the first fed
   // frame (a copy and barriers on `cmd`: called before render targets are bound); false when it could
   // not be made, now or before (oracle_failed_). CopyOracleDump: the mapped target, resting in
@@ -531,6 +558,35 @@ class ClayPass {
   // (two bounds: lines for a change of the verdict, and lines for a change of what a drawn frame drew,
   // which in play changes with the camera; review of plan Tasks 12 and 13, Minor 6)
   uint32_t furniture_log_lines_ = 0, furniture_count_lines_ = 0;
+  // The sun layer (EnsureSunObjects). sun_depth_: the layer's depth, kWidth / 2 x kHeight / 2 D32_FLOAT, a
+  // depth target for the layer's three steps and never sampled. sun_scene_depth_view_: depth_ as the
+  // layer's depth step reads it. sun_layer_[0], [1]: layer 1 and layer 2, the same size, R10G10B10A2_UNORM.
+  // sun_small_[0..2]: kWidth / 4 x kHeight / 4, the same format: [0] layer 1 reduced, then the second
+  // radial pass's result, which is the bright pass's tf1; [1] the first radial pass's; [2] layer 2 reduced,
+  // the bright pass's tf2. Each rests in kPixelShaderResource and is a target only for its own step; none
+  // is read in a frame that did not write it. sun_pipelines_: by ClaySunState ([0], no state, is never
+  // made). The pass's frame counts for the Sun line and what it last logged (a line when the verdict
+  // changes, at most kSunLogLines of them).
+  bool sun_objects_ = false, sun_objects_failed_ = false;
+  nrhi::Shader* sun_depth_ps_ = nullptr;
+  nrhi::Shader* sun_reduce_ps_ = nullptr;
+  nrhi::Shader* sun_radial_ps_ = nullptr;
+  nrhi::Shader* sun_quad_vs_ = nullptr;
+  nrhi::Shader* sun_quad_ps_ = nullptr;
+  nrhi::Shader* sun_occluder_ps_ = nullptr;
+  nrhi::Pipeline* sun_depth_pipeline_ = nullptr;
+  nrhi::Pipeline* sun_reduce_pipeline_ = nullptr;
+  nrhi::Pipeline* sun_radial_pipeline_ = nullptr;
+  nrhi::Pipeline* sun_pipelines_[size_t(ClaySunState::kCount)] = {};
+  nrhi::Texture* sun_depth_ = nullptr;
+  nrhi::TextureView* sun_scene_depth_view_ = nullptr;
+  nrhi::Texture* sun_layer_[2] = {};
+  nrhi::TextureView* sun_layer_view_[2] = {};
+  nrhi::Texture* sun_small_[3] = {};
+  nrhi::TextureView* sun_small_view_[3] = {};
+  ClaySunFrames sun_counts_;
+  ClaySun sun_logged_ = ClaySun::kOff;
+  uint32_t sun_log_lines_ = 0;
   // The oracle feed (SetPostOracle; null: off). oracle_tex_ / oracle_view_: the stored scene, in
   // kPixelShaderResource from its upload on. oracle_frames_: the frames fed since the upload, the
   // upload's own included (it stops counting past the dump's frame). oracle_dump_: the read-back buffer
@@ -545,6 +601,13 @@ class ClayPass {
   nrhi::Buffer* oracle_dump_ = nullptr;
   uint64_t oracle_dump_submission_ = 0;
   OracleDump oracle_dump_state_ = OracleDump::kNone;
+  // The feed's sun part: its depth as a texture (in kPixelShaderResource from its upload on;
+  // oracle_sun_failed_: it could not be made, and the feed has no sun layer until the pass is rebuilt), and
+  // the read-back buffers of the layer's three pictures, copied with the dump and readable with it.
+  nrhi::Texture* oracle_depth_tex_ = nullptr;
+  nrhi::TextureView* oracle_depth_view_ = nullptr;
+  bool oracle_sun_failed_ = false;
+  nrhi::Buffer* oracle_layer_dump_[kOracleLayerDumps] = {};
   nrhi::BindingLayout* map_layout_ = nullptr;  // the RHI has no layout destruction
   nrhi::Shader* map_vs_ = nullptr;
   nrhi::Shader* map_ps_ = nullptr;

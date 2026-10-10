@@ -648,6 +648,91 @@ class BlockTest(unittest.TestCase):
                           "table 0x1FAA0000 / 0000000000001001, 512 texels equal to the dump's, c77.y * c20.w 1.000000", text)
             self.assertIn("post block valid, at age 0 and equal to the frame's rows and dump in 2 of 2 frames", text)
 
+    # The radial part (plan Task 14; review of plan Tasks 12 and 13, Minor 10): "parts" bit 1 and "radial"
+    # against the frame's 4BE4 rows by SetPostRadial's rule.
+    RADIAL = [0.3821, 0.3938, 0.87, 0.935]
+
+    def radial_capture(self, d, rows=((0.3821, 0.3938, 0.87, 0.935),) * 2, member=None, parts=3, quads_on=True):
+        """BlockTest's capture with radial rows before each composite row and the block's radial part."""
+        p = self.write(d)
+        out = []
+        for r in (json.loads(x) for x in p.read_text(encoding="utf-8").splitlines()):
+            if r["kind"] == "verts" and r["ps_hash"] == "0x" + pt.COMPOSITE_PS:
+                for c31x, c31y, c46x, c47x in rows:
+                    out.append({"kind": "verts", "frame": r["frame"], "in_scene": False, "ps_hash": "0x" + pt.RADIAL_PS, "tf": {},
+                                "tfc": {}, "pfull": pfull({31: [c31x, c31y, 7.0, 8.0], 46: [c46x, 0.0, 0.0, 0.0],
+                                                           47: [c47x, 0.0, 0.0, 0.0]})})
+            if r["kind"] == "frame":
+                r["post"]["parts"] = parts
+                r["post"]["radial"] = list(self.RADIAL if member is None else member)
+                if quads_on is not None:
+                    r["quads"] = {"on": 1 if quads_on else 0, "reason": "none" if quads_on else "off", "count": 0, "seen": 0,
+                                  "taken": 0, "over": 0}
+            out.append(r)
+        p.write_text("".join(json.dumps(x, separators=(",", ":")) + "\n" for x in out), encoding="utf-8")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            status = pt.report_block(pt.load_capture(p))
+        return status, out.getvalue()
+
+    def test_the_radial_part_equal_to_its_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            status, text = self.radial_capture(d)
+            self.assertEqual(status, 0, text)
+            self.assertIn("radial (0.3821, 0.3938, 0.87, 0.935) equal to both 4BE4 rows", text)
+            self.assertIn("post block valid, at age 0 and equal to the frame's rows and dump in 2 of 2 frames", text)
+
+    def test_a_radial_value_that_is_not_the_rows(self):
+        for at in range(4):
+            member = list(self.RADIAL)
+            member[at] = pt.ft._f32(member[at]) * 1.0000002
+            with tempfile.TemporaryDirectory() as d:
+                status, text = self.radial_capture(d, member=member)
+                self.assertEqual(status, 1, text)
+                self.assertIn("POST radial: block", text)
+
+    def test_the_radial_part_without_its_rows_or_against_the_rule(self):
+        cases = (((), "no 4BE4 row"),                                                       # the part without a row
+                 (((0.3821, 0.3938, 0.87, 0.935), (0.3821, 0.3939, 0.87, 0.935)), "differ"),  # two rectangles that differ
+                 (((4.5, 0.3938, 0.87, 0.935),) * 2, "SetPostRadial's rule"),               # a centre outside [-4, 4]
+                 (((0.3821, 0.3938, 0.0, 0.935),) * 2, "SetPostRadial's rule"),             # a factor outside (0, 1]
+                 (((0.3821, 0.3938, 0.87, 1.5),) * 2, "SetPostRadial's rule"))
+        for rows, word in cases:
+            with tempfile.TemporaryDirectory() as d:
+                status, text = self.radial_capture(d, rows=rows, member=[r for r in (rows[0] if rows else self.RADIAL)])
+                self.assertEqual(status, 1, text)
+                self.assertIn("POST radial", text)
+                self.assertIn(word, text)
+
+    def test_a_block_without_the_radial_part(self):
+        # The quads were not wanted (the sun's switch off): the rows are there, the part is not, the four are 0.
+        with tempfile.TemporaryDirectory() as d:
+            status, text = self.radial_capture(d, parts=1, member=[0.0] * 4, quads_on=False)
+            self.assertEqual(status, 0, text)
+            self.assertIn("no radial part (the quads were not wanted)", text)
+        # ... but values without the part are a fault,
+        with tempfile.TemporaryDirectory() as d:
+            status, text = self.radial_capture(d, parts=1, quads_on=False)
+            self.assertEqual(status, 1, text)
+            self.assertIn("POST radial: parts 1, but the block holds", text)
+        # and so is a missing part when the quads were wanted and the rows give it.
+        with tempfile.TemporaryDirectory() as d:
+            status, text = self.radial_capture(d, parts=1, member=[0.0] * 4, quads_on=True)
+            self.assertEqual(status, 1, text)
+            self.assertIn("the 4BE4 rows give the part by SetPostRadial's rule", text)
+        # A centre component of exactly 0 is a place like any other.
+        with tempfile.TemporaryDirectory() as d:
+            status, text = self.radial_capture(d, rows=((0.3533, 0.0, 0.87, 0.935),) * 2, member=[0.3533, 0.0, 0.87, 0.935])
+            self.assertEqual(status, 0, text)
+
+    def test_radial_part_is_setpostradials_rule(self):
+        self.assertTrue(pt.radial_part([0.3821, 0.3938, 0.87, 0.935]))
+        self.assertTrue(pt.radial_part([-4.0, 4.0, 1.0, 1e-30]))
+        self.assertTrue(pt.radial_part([0.0, -0.0, 0.5, 0.5]))
+        for bad in ([4.0001, 0.0, 0.5, 0.5], [0.0, -4.0001, 0.5, 0.5], [0.0, 0.0, 0.0, 0.5], [0.0, 0.0, 0.5, 1.0001],
+                    [float("nan"), 0.0, 0.5, 0.5], [0.0, float("inf"), 0.5, 0.5], [0.0, 0.0, float("nan"), 0.5], None, [0.5, 0.5, 0.5]):
+            self.assertFalse(pt.radial_part(bad), bad)
+
     def test_a_block_without_the_blurs_rows(self):
         with tempfile.TemporaryDirectory() as d:
             status, text = self.report(d, blur=False)

@@ -384,6 +384,30 @@ constexpr const char* ClayBloomName(ClayBloom b) {
 // be made ("post-objects").
 enum class ClayFurniture : uint8_t { kOff, kNoPost, kNoSky, kNoQuads, kRecords, kState, kObjects, kDrawn, kCount };
 
+// What the pass did about the frame's sun layer (ClayStats::sun; the Sun line). kDrawn: the layer's
+// depth, its two pictures, the reductions and the radial blur were drawn and the bright pass read them.
+// Every other verdict: nothing of the layer is drawn and the bright pass's sun flag is 0, the picture of
+// the bloom alone. kOff: fable2_native_sun is off. kNoFurniture: the frame's furniture is not drawn (no
+// post frame, no sky, no whole set of quad records, a scene record that cannot be drawn, the quad
+// step's objects: the Furniture line says which). kNoBloom: the frame's bloom is not on (the bright
+// pass, which the layer feeds, is not drawn). kNoRadial: the post block has no radial blur's registers,
+// or they fail their bounds. kNoQuads: the set has no record of the layer. kState: a layer record
+// cannot be drawn as it was captured. kObjects: the layer's objects could not be made ("post-objects").
+// kTexture: a layer quad's texture could not be had this frame (the first frames after a view switch:
+// the upload budget): the layer is all of its quads or none, since one without an occluder is worse
+// than none.
+enum class ClaySun : uint8_t { kOff, kNoFurniture, kNoBloom, kNoRadial, kNoQuads, kState, kObjects, kTexture, kDrawn, kCount };
+// The pass's frame counts of the sun layer, by verdict: one frame added. Counted: every frame with the
+// sun's switch on, which is every verdict but kOff.
+struct ClaySunFrames {
+  uint64_t frames = 0, by[size_t(ClaySun::kCount)] = {};
+};
+inline void CountClaySunFrame(ClaySun s, ClaySunFrames& n) {
+  if (s == ClaySun::kOff || size_t(s) >= size_t(ClaySun::kCount)) return;
+  ++n.frames;
+  ++n.by[size_t(s)];
+}
+
 struct ClayStats {
   uint32_t drawn = 0, skipped_bad_index = 0, uploads = 0, hits = 0;
   uint64_t resident_bytes = 0;
@@ -607,6 +631,13 @@ struct ClayStats {
   uint64_t furniture_frames = 0, furniture_drawn_frames = 0, furniture_texture_frames = 0, furniture_nopost_frames = 0;
   uint64_t furniture_nosky_frames = 0, furniture_noquads_frames = 0, furniture_records_frames = 0, furniture_state_frames = 0;
   uint64_t furniture_objects_frames = 0;
+  // The sun layer ("Native sun layer" below; the Sun line). sun: what the pass did (ClaySun). Of a drawn
+  // layer: its quads by target (0 the occluders into its depth, 1 layer 1, 2 layer 2) and the radial blur's
+  // centre. sun_frames: the pass's totals since it was made, this frame included, by verdict.
+  ClaySun sun = ClaySun::kOff;
+  uint32_t sun_drawn[3] = {};
+  float sun_centre[2] = {};
+  ClaySunFrames sun_frames;
 };
 // The pass's frame counts of the post chain, which follow from the frame's verdict alone: one frame
 // added. Counted: every frame with the post switch on, which is every verdict but kOff.
@@ -4067,6 +4098,453 @@ inline std::string FormatFurnitureText(const ClayStats& st) {
                 static_cast<unsigned long long>(st.furniture_records_frames), static_cast<unsigned long long>(st.furniture_state_frames),
                 kPostObjectsReason, static_cast<unsigned long long>(st.furniture_objects_frames));
   return text + buf;
+}
+
+// --- Native sun layer (frame-map section 17, "Sun layer"; sub-project 10, plan Task 14) ---
+//
+// After its main scene the game draws a "sun layer" at half the scene's size and feeds it to the bloom's
+// bright pass (frame map, "Sun layer discovery": the graph by the resolves' addresses):
+//   depth    the scene's mid-frame depth copy at every second texel (5D67), then into it, colour mask 0, the
+//            three cloud quads where their alpha is above the draw's reference (3FF7; 0.149 captured), the
+//            far water's cube and the scene's late leaf draws;
+//   layer 1  cleared; the beam source (8E4D), depth-tested: tex.rgb * (1 / 6) * c31.rgb;
+//   layer 2  cleared; flares (D72F, added: tex.a * c31.rgb), the moon glow (4B58, blended by its alpha,
+//            alpha-tested: tex.rgb * 0.2 * tex.a) and the sun disc (3E77, added, alpha-tested: tex.rgb *
+//            c31.rgb * tex.a * c20.w), each depth-tested against the same depth;
+//   tf1      layer 1 reduced to a quarter of the scene's size (0A96: the mean of four) and blurred radially
+//            twice about the sun's point (4BE4: 14 point taps, p_k = c + (uv - c) * s^k, w_k = g^k / 2,
+//            s = 1 + (4 / 7) (c47.x - 1), g = 1 + (4 / 7) (c46.x - 1), the sum times 4 / 7);
+//   tf2      layer 2 reduced;
+// and the bright pass adds tf1 * 6 * c46.x + tf2 (PostBrightMirror, with the sun's flag). The 8-bit
+// reduction of a cleared picture the game also makes (C1) has no reader and is not built (ruling 33).
+//
+// The native layer (ClaySun::kDrawn), with fable2_native_sun on, in a frame whose furniture is drawn (a
+// post frame with a sky and a whole set of quad records), whose bloom is on and whose post block has the
+// radial blur's registers: the same steps from the frame's own quad records, in targets of the pass's
+// LOGICAL size divided by 2 and by 4 (kSunLayerDivisor, kSunSmallDivisor), whatever the scene target's
+// sample count or scale becomes.
+//
+// THE LAYER'S DEPTH IS NOT THE SCENE'S END DEPTH IN THE GAME, and what the native one is must be said
+// exactly (review of plan Task 10, Important 1 to 3). The game's: the depth copy taken before the far
+// water, one late leaf draw, the dog's fur and the scene's clouds, brought up by the occluders. The
+// scene's own clouds write depth with their alpha test at 0.0196; the layer's cloud occluders use the
+// same alpha at 0.149, so the layer's depth holds far less cloud than the scene's (with 0.0196 the beam
+// source keeps 11 pixels of 12,310). The native one: the pass's depth after the scene's last record
+// (every record the pass draws with a depth write is in it, the late leaves among them; no step of the
+// pass writes depth after the records: the sky step, the moon and the glare test without writing, and a
+// later cloud step in the scene must not write the depth this copy is taken from), at the texel
+// (ratio * x, ratio * y) by point (SunDepthTexel: the game's every second texel of its 1120 x 720 copy,
+// the top left texel of the block at another scale), then the frame's cloud-occluder records drawn into
+// it by 3FF7's rule with the record's own reference. What the native depth lacks against the game's:
+// the far lake (2B09 is not drawn natively, so the layer sees the lake's bed, not its surface) and
+// whatever the pass does not draw (the distant trees: beams pass where the game's far woods stand).
+// Direction: the game tests greater-or-equal on its reversed window depth 1 - z / w; the pass's depth
+// holds z / w (0 near, 1 far), on which the same test is less-or-equal (SunDepthPasses).
+//
+// Every write into a 10-bit target is a level of 1,023, rounded by the step itself (controller ruling
+// 25; PostLevel). The one exception is the moon glow's blend (source alpha / inverse source alpha into
+// layer 2): its result is the card's to round, the RHI having no way to round after a blend.
+inline constexpr const char* kSunLayerReason = "sun-layer";
+inline constexpr uint32_t kSunLayerDivisor = 2, kSunSmallDivisor = 4;
+inline constexpr uint32_t kSunLevels = 1023;  // R10G10B10A2_UNORM, the game's k_2_10_10_10
+// The shaders' own literals, single-precision as the microcode holds them (captured "ps_lit" rows;
+// tools/xdk_sigmatch/post_pins.py makes the pins with the same floats).
+inline constexpr float kSunBeamScale = 0.1666666716337204f;  // 8E4D c255.x: 1 / 6
+inline constexpr float kSunGlowScale = 0.20000000298023224f;  // 4B58 c255.x
+inline constexpr float kSunFadeStart = 1000.0f, kSunFadeRate = 0.0010000000474974513f;  // 3FF7 c255.x, c255.z
+inline constexpr uint32_t kSunRadialTaps = 14;
+inline constexpr double kSunRadialNorm = 4.0 / 7.0;  // 4BE4's literal: of the two factors and of the sum
+
+// The depth test of a layer quad as the pass makes it: the quad's z / w against the layer's depth,
+// less-or-equal (the game's greater-or-equal under its reversed range). A NaN on either side fails.
+constexpr bool SunDepthPasses(float quad, float stored) { return quad <= stored; }
+
+// The scene depth's texel a texel of the layer's depth takes (either axis): `ratio` times its position,
+// by point, never beyond `last`. ratio: the scene depth's size over the layer's (2 today: the game's
+// every second texel); 0 counts as 1.
+constexpr uint32_t SunDepthTexel(uint32_t x, uint32_t ratio, uint32_t last) {
+  const uint64_t at = uint64_t(x) * (ratio ? ratio : 1);
+  return at < last ? uint32_t(at) : last;
+}
+// The layer's depth of a scene depth value: clamped to [0, 1]; a value that is no number is 0, the
+// nearest depth, behind which nothing of the layer is drawn (fail closed: no light where the depth is
+// not known).
+inline float SunDepthValue(float d) { return d > 0.0f ? (d < 1.0f ? d : 1.0f) : 0.0f; }
+
+// The radial blur's registers as the pass hands them to its shader (ClayPostConstants::radial: c31.x,
+// c31.y, c46.x, c47.x): the capture's rule judged again (post_block.h, SetPostRadial): the centre's two
+// coordinates in [-4, 4], the two factors in (0, 1]. Written so that a value that is no number fails.
+inline bool SunRadialUsable(const float radial[4]) {
+  return radial && std::fabs(radial[0]) <= 4.0f && std::fabs(radial[1]) <= 4.0f && radial[2] > 0.0f && radial[2] <= 1.0f &&
+         radial[3] > 0.0f && radial[3] <= 1.0f;
+}
+
+// The 14 taps of one radial pass at the normalised coordinate (u, v) (light_formulas.post_radial_taps):
+// tap k at c + (uv - c) * s^k with the weight g^k / 2. With registers that are not usable: no tap
+// (every weight 0, every place the origin).
+struct SunRadialTap {
+  double u = 0.0, v = 0.0, w = 0.0;
+};
+inline void SunRadialTaps(double u, double v, const float radial[4], SunRadialTap taps[kSunRadialTaps]) {
+  for (uint32_t k = 0; k < kSunRadialTaps; ++k) taps[k] = SunRadialTap{};
+  if (!SunRadialUsable(radial) || !std::isfinite(u) || !std::isfinite(v)) return;
+  const double cx = radial[0], cy = radial[1];
+  const double s = (double(radial[3]) - 1.0) * kSunRadialNorm + 1.0, g = (double(radial[2]) - 1.0) * kSunRadialNorm + 1.0;
+  for (uint32_t k = 0; k < kSunRadialTaps; ++k) {
+    const double sk = std::pow(s, double(k));
+    taps[k].u = cx + (u - cx) * sk;
+    taps[k].v = cy + (v - cy) * sk;
+    taps[k].w = 0.5 * std::pow(g, double(k));
+  }
+}
+// The texel of an `n`-texel axis a tap's coordinate reads: the point fetch with its half texel,
+// floor(min(max(c * n + 0.5, 0), n - 1)); texel 0 for a coordinate that is no number.
+inline uint32_t SunRadialTexel(double c, uint32_t n) {
+  if (n == 0) return 0;
+  const double p = c * double(n) + 0.5;
+  if (!(p > 0.0)) return 0;
+  const double last = double(n) - 1.0;
+  return uint32_t(p < last ? p : last);
+}
+// One radial pass of pixel (x, y) of a target the source's size (light_formulas.post_radial, with the
+// target's clamp): the pixel's coordinate is (x / w, y / h), the sum of the 14 taps times 4 / 7. A tap's
+// channel that is no number counts as 0: three numbers in [0, 1] for any input.
+inline void SunRadialMirror(const PostPicture& src, uint32_t x, uint32_t y, const float radial[4], double out[3]) {
+  out[0] = out[1] = out[2] = 0.0;
+  if (!src.rgb || src.w == 0 || src.h == 0) return;
+  SunRadialTap taps[kSunRadialTaps];
+  SunRadialTaps(double(x) / double(src.w), double(y) / double(src.h), radial, taps);
+  double sum[3] = {0.0, 0.0, 0.0};
+  for (const SunRadialTap& tap : taps) {
+    float t[3];
+    PostPictureTexel(src, int64_t(SunRadialTexel(tap.u, src.w)), int64_t(SunRadialTexel(tap.v, src.h)), t);
+    for (int i = 0; i < 3; ++i) sum[i] += tap.w * (std::isfinite(t[i]) ? double(t[i]) : 0.0);
+  }
+  for (int i = 0; i < 3; ++i) {
+    const double v = sum[i] * kSunRadialNorm;
+    out[i] = v != v ? 0.0 : (v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v));
+  }
+}
+
+// The reduction of pixel (x, y) of a target 1 / ratio of the source's size (light_formulas.post_reduce:
+// one linear fetch at the corner the block's middle four texels share, ratio * pixel + ratio / 2; with
+// the game's ratio 2 the mean of the pixel's four texels), clamped to [0, 1]; a sample that is no
+// number is 0. ratio 0 counts as 1.
+inline void SunReduceMirror(const PostPicture& src, uint32_t x, uint32_t y, uint32_t ratio, double out[3]) {
+  const double r = double(ratio ? ratio : 1);
+  PostPictureLinear(src, r * double(x) + 0.5 * r, r * double(y) + 0.5 * r, out);
+  for (int i = 0; i < 3; ++i) out[i] = out[i] > 0.0 ? (out[i] < 1.0 ? out[i] : 1.0) : 0.0;
+}
+
+// A step of the layer that is drawn as a post step (the post layout, cbuffer Step's eight words):
+//   kDepth   the layer's depth from the scene's: `dir` the size ratio, `last` the scene depth's last texel;
+//   kReduce  a picture at 1 / ratio of its size: `texel` the source's reciprocal size, `dir` the ratio,
+//            `levels` 1,023;
+//   kRadial  one radial pass: `texel` the reciprocal size and `last` the last texel of the source (which
+//            is the target's size), `levels` 1,023.
+// Sizes that do not divide (or a zero) give a ratio of 1.
+enum class ClaySunStep : uint8_t { kDepth, kReduce, kRadial };
+constexpr ClayPostStepConstants MakeClaySunStep(ClaySunStep step, uint32_t source_w, uint32_t source_h, uint32_t target_w,
+                                                uint32_t target_h) {
+  const uint32_t w = source_w ? source_w : 1, h = source_h ? source_h : 1;
+  const uint32_t rx = target_w && w % target_w == 0 ? w / target_w : 1, ry = target_h && h % target_h == 0 ? h / target_h : 1;
+  ClayPostStepConstants s{};
+  s.texel[0] = 1.0f / float(w);
+  s.texel[1] = 1.0f / float(h);
+  s.levels = step == ClaySunStep::kDepth ? 0.0f : float(kSunLevels);
+  s.offset = 0.0f;
+  s.dir[0] = step == ClaySunStep::kRadial ? 0 : int32_t(rx);
+  s.dir[1] = step == ClaySunStep::kRadial ? 0 : int32_t(ry);
+  s.last[0] = int32_t(w - 1);
+  s.last[1] = int32_t(h - 1);
+  return s;
+}
+
+// The state the pass draws a layer record with (a pipeline of the layer each), from the record's own
+// words; kNone: the pass has no pipeline for them, and the record cannot be drawn. Every state tests the
+// depth with the game's greater-or-equal (SunDepthPasses) and a colour state writes none:
+//   kReplace  no blend (0x00010001), all four channels: the beam source;
+//   kAdd      one / one (0x01010101): the flares, the sun disc;
+//   kAlpha    source alpha / inverse source alpha (0x07060706): the moon glow;
+//   kDepth    colour mask 0, depth test AND write: the cloud occluders.
+// An alpha test that is on must be "greater". The state must be the kind's (a beam source with the
+// flares' blend is not drawn).
+enum class ClaySunState : uint8_t { kNone, kReplace, kAdd, kAlpha, kDepth, kCount };
+inline constexpr uint32_t kQuadBlendReplace = 0x00010001u;
+constexpr ClaySunState SunQuadDrawState(const capture::QuadRecord& q) {
+  const bool test = (q.depth & 2) != 0, write = (q.depth & 4) != 0;
+  const uint32_t func = (q.depth >> 4) & 7;
+  if (q.layer != 1 || !test || func != uint32_t(capture::Compare::kGreaterEqual)) return ClaySunState::kNone;
+  if ((q.alpha_control & 8) && (q.alpha_control & 7) != uint32_t(capture::Compare::kGreater)) return ClaySunState::kNone;
+  switch (q.kind) {
+    case capture::PostQuadKind::kCloudOccluder:
+      return q.colour_mask == 0 && write ? ClaySunState::kDepth : ClaySunState::kNone;
+    case capture::PostQuadKind::kBeamSource:
+      return q.colour_mask == 0xF && !write && q.blend == kQuadBlendReplace ? ClaySunState::kReplace : ClaySunState::kNone;
+    case capture::PostQuadKind::kFlare:
+    case capture::PostQuadKind::kSunDisc:
+      return q.colour_mask == 0xF && !write && q.blend == kQuadBlendAdd ? ClaySunState::kAdd : ClaySunState::kNone;
+    case capture::PostQuadKind::kMoonGlow:
+      return q.colour_mask == 0xF && !write && q.blend == kQuadBlendAlpha ? ClaySunState::kAlpha : ClaySunState::kNone;
+    default: return ClaySunState::kNone;
+  }
+}
+// Which of the layer's three targets a state is drawn into: 0 its depth, 1 layer 1, 2 layer 2.
+constexpr uint32_t SunQuadTarget(capture::PostQuadKind kind) {
+  return kind == capture::PostQuadKind::kCloudOccluder ? 0u : kind == capture::PostQuadKind::kBeamSource ? 1u : 2u;
+}
+
+// A layer quad's constants (cbuffer SunQuad of shaders::kClaySunQuadVs / kClaySunQuadPs, register b0 of
+// the quad step's layout; shaders::kClaySunQuadFields is its layout): the scene quads' block
+// (ClayQuadConstants) with the target's level count where that has the scene's clamp, in the same two
+// small slots of the record.
+struct ClaySunQuadConstants {
+  float corner[4][4];     // the corners' positions: x y z, 1
+  float coord[4][4];      // their coordinates: u v, 0, 0
+  float view_proj[4][4];  // vertex c0..c3 at the game's call
+  float reg[12][4];       // the kind's pixel registers, in the record's order (the generated table's)
+  uint32_t kind;          // the formula: capture::PostQuadKind + 1 (4 beam source, 5 flare, 6 moon glow, 7 sun disc, 8 cloud occluder)
+  uint32_t sampler;       // static sampler of the texture (SamplerIndex)
+  uint32_t alpha_test;    // 1: the pixel is dropped unless its alpha is above alpha_ref
+  float alpha_ref;
+  float fix[2];           // host texture scale (TextureCache::Resolve's uv_fix)
+  float levels;           // the level count of the layer's targets (kSunLevels), for the write's own rounding
+  uint32_t pad;
+};
+static_assert(sizeof(ClaySunQuadConstants) == sizeof(ClayQuadConstants) && offsetof(ClaySunQuadConstants, levels) == 408);
+// The bound of a cloud occluder's tiling and scroll (c31.xy, c46.xy; 5 to 7 and below 1 captured): the
+// coordinate they make of a corner's (0 to 1) stays far inside what a sampler takes.
+inline constexpr float kSunTilingMax = 4096.0f;
+
+// A layer record's constants. False, with `out` untouched, unless (checked again here, as the scene
+// quads' are):
+//   - the record is valid, of the layer, with a state the pass can draw (SunQuadDrawState);
+//   - every corner value and matrix component is finite and within capture::kQuadValueBound;
+//   - the beam source and the flares: c31.rgb in [0, 64]; the sun disc: c31.rgb in [0, 64] and c20.w in
+//     (0, 64] (1 in every captured row: the register at the draw's call, not the scene's scale); the
+//     moon glow reads no register; a cloud occluder: c31.xy and c46.xy within kSunTilingMax, the eye
+//     c47.xy within capture::kQuadValueBound, c77.x in [0, 64];
+//   - an alpha test in use has its reference in [0, 1]; a cloud occluder has the test on (without it
+//     the quad would write its depth everywhere: nothing of the kind was captured);
+//   - the texture's scale is finite and in (0, 64] in both axes, and it is fetched as stored
+//     (QuadTextureUnsigned).
+inline bool MakeClaySunQuadConstants(const capture::QuadRecord& q, uint32_t sampler, const float fix[2], ClaySunQuadConstants* out) {
+  if (!out || !fix || !capture::QuadRecordValid(q) || SunQuadDrawState(q) == ClaySunState::kNone) return false;
+  if (!QuadTextureUnsigned(q)) return false;
+  auto fits = [](float v) { return std::fabs(v) <= capture::kQuadValueBound; };
+  auto colour = [](float v) { return v >= 0.0f && v <= kQuadRegisterMax; };
+  auto tiling = [](float v) { return std::fabs(v) <= kSunTilingMax; };
+  ClaySunQuadConstants c{};
+  for (int i = 0; i < 4; ++i) {
+    for (int k = 0; k < 5; ++k) {
+      if (!fits(q.corners[i][k])) return false;
+    }
+    for (int k = 0; k < 4; ++k) {
+      if (!fits(q.view_proj[i][k])) return false;
+      c.view_proj[i][k] = q.view_proj[i][k];
+    }
+    c.corner[i][0] = q.corners[i][0];
+    c.corner[i][1] = q.corners[i][1];
+    c.corner[i][2] = q.corners[i][2];
+    c.corner[i][3] = 1.0f;
+    c.coord[i][0] = q.corners[i][3];
+    c.coord[i][1] = q.corners[i][4];
+  }
+  const bool test = capture::QuadAlphaTest(q);
+  switch (q.kind) {
+    case capture::PostQuadKind::kBeamSource:
+    case capture::PostQuadKind::kFlare:
+      // (the record's register: c31; its fourth component is not read)
+      for (int k = 0; k < 3; ++k) {
+        if (!colour(q.ps[0][k])) return false;
+        c.reg[0][k] = q.ps[0][k];
+      }
+      break;
+    case capture::PostQuadKind::kMoonGlow: break;
+    case capture::PostQuadKind::kSunDisc:
+      // (the record's registers: c20, c31; c20.xyz and c31.w are not read)
+      if (!(q.ps[0][3] > 0.0f && q.ps[0][3] <= kQuadRegisterMax)) return false;
+      c.reg[0][3] = q.ps[0][3];
+      for (int k = 0; k < 3; ++k) {
+        if (!colour(q.ps[1][k])) return false;
+        c.reg[1][k] = q.ps[1][k];
+      }
+      break;
+    case capture::PostQuadKind::kCloudOccluder:
+      // (the record's registers: c31 the tiling, c46 the scroll, c47 the eye, c77; two components of each
+      // of the first three and one of the last are read)
+      if (!test) return false;
+      for (int k = 0; k < 2; ++k) {
+        if (!tiling(q.ps[0][k]) || !tiling(q.ps[1][k]) || !fits(q.ps[2][k])) return false;
+        c.reg[0][k] = q.ps[0][k];
+        c.reg[1][k] = q.ps[1][k];
+        c.reg[2][k] = q.ps[2][k];
+      }
+      if (!colour(q.ps[3][0])) return false;
+      c.reg[3][0] = q.ps[3][0];
+      break;
+    default: return false;
+  }
+  if (test && !(q.alpha_ref >= 0.0f && q.alpha_ref <= 1.0f)) return false;
+  if (!(fix[0] > 0.0f && fix[0] <= 64.0f) || !(fix[1] > 0.0f && fix[1] <= 64.0f)) return false;
+  c.kind = uint32_t(q.kind) + 1;
+  c.sampler = sampler & 3u;
+  c.alpha_test = test ? 1u : 0u;
+  c.alpha_ref = test ? q.alpha_ref : 0.0f;
+  c.fix[0] = fix[0];
+  c.fix[1] = fix[1];
+  c.levels = float(kSunLevels);
+  *out = c;
+  return true;
+}
+
+// The layer's records of a frame's set: each with its state and its target (SunQuadTarget), in the
+// records' order, which is the game's order of drawing; the count by target; and whether every layer
+// record can be drawn (`drawable`: MakeClaySunQuadConstants with a unit texture scale). A set with one
+// that cannot is not drawn at all (a layer without one of its occluders is worse than no layer). Records
+// of the scene's kinds are not the layer's and are skipped. count above capture::kMaxQuadRecords, or a
+// null array with a count: nothing, not drawable.
+struct ClaySunItem {
+  uint8_t record = 0;  // its index in the set
+  ClaySunState state = ClaySunState::kNone;
+  uint8_t target = 0;  // 0 the layer's depth, 1 layer 1, 2 layer 2
+  capture::PostQuadKind kind = capture::PostQuadKind::kCount;
+};
+struct ClaySunPlan {
+  uint32_t count = 0;
+  ClaySunItem items[capture::kMaxQuadRecords];
+  uint32_t by_target[3] = {};
+  bool drawable = true;
+};
+inline ClaySunPlan PlanClaySunQuads(const capture::QuadRecord* quads, size_t count) {
+  ClaySunPlan plan;
+  if (count > capture::kMaxQuadRecords || (count && !quads)) {
+    plan.drawable = false;
+    return plan;
+  }
+  static constexpr float kUnit[2] = {1.0f, 1.0f};
+  for (size_t i = 0; i < count; ++i) {
+    const capture::QuadRecord& q = quads[i];
+    if (capture::QuadRecordValid(q) && q.layer == 0) continue;
+    ClaySunQuadConstants unused;
+    if (!MakeClaySunQuadConstants(q, 0, kUnit, &unused)) {
+      plan = ClaySunPlan{};
+      plan.drawable = false;
+      return plan;
+    }
+    ClaySunItem& item = plan.items[plan.count++];
+    item.record = uint8_t(i);
+    item.state = SunQuadDrawState(q);
+    item.target = uint8_t(SunQuadTarget(q.kind));
+    item.kind = q.kind;
+    ++plan.by_target[item.target];
+  }
+  return plan;
+}
+
+// The mirrors of the layer quads' formulas (pinned to the reference's numbers: test cases 640 on). What
+// a colour kind writes: each channel (v > 0) ? min(v, 1) : 0, the alpha saturated; a texel's channel
+// that is no number reads 0; a register that is no number gives zeros.
+// The beam source (post_beam_source): tex.rgb * (1 / 6) * c31.rgb, alpha 1.
+inline void SunBeamMirror(const float t[4], const float c31[4], double out[4]) {
+  out[0] = out[1] = out[2] = out[3] = 0.0;
+  if (!std::isfinite(c31[0]) || !std::isfinite(c31[1]) || !std::isfinite(c31[2])) return;
+  double rgb[3];
+  for (int i = 0; i < 3; ++i) rgb[i] = detail::QuadFinite(t[i]) * double(kSunBeamScale) * double(c31[i]);
+  detail::QuadOut(rgb, 1.0, 1.0, out);
+}
+// A flare (post_flare): tex.a * c31.rgb, alpha 1.
+inline void SunFlareMirror(const float t[4], const float c31[4], double out[4]) {
+  out[0] = out[1] = out[2] = out[3] = 0.0;
+  if (!std::isfinite(c31[0]) || !std::isfinite(c31[1]) || !std::isfinite(c31[2])) return;
+  double rgb[3];
+  for (int i = 0; i < 3; ++i) rgb[i] = detail::QuadFinite(t[3]) * double(c31[i]);
+  detail::QuadOut(rgb, 1.0, 1.0, out);
+}
+// The moon glow (post_moon_glow): tex.rgb * 0.2 * tex.a, alpha tex.a.
+inline void SunGlowMirror(const float t[4], double out[4]) {
+  const double a = detail::QuadFinite(t[3]);
+  double rgb[3];
+  for (int i = 0; i < 3; ++i) rgb[i] = detail::QuadFinite(t[i]) * double(kSunGlowScale) * a;
+  detail::QuadOut(rgb, a, 1.0, out);
+}
+// The sun disc (post_sun_disc): tex.rgb * c31.rgb * tex.a * c20.w, alpha tex.a.
+inline void SunDiscMirror(const float t[4], const float c31[4], float c20w, double out[4]) {
+  out[0] = out[1] = out[2] = out[3] = 0.0;
+  if (!std::isfinite(c20w) || !std::isfinite(c31[0]) || !std::isfinite(c31[1]) || !std::isfinite(c31[2])) return;
+  const double alpha = detail::QuadFinite(t[3]);
+  double rgb[3];
+  for (int i = 0; i < 3; ++i) rgb[i] = detail::QuadFinite(t[i]) * double(c31[i]) * alpha * double(c20w);
+  detail::QuadOut(rgb, alpha, 1.0, out);
+}
+// The alpha a cloud occluder's test sees (post_cloud_occluder): the texel's alpha times c77.x times the
+// clouds' distance fade, 1 - sat(0.001 * (|P.xy - eye.xy| - 1000)), P the pixel's world position (the
+// corners' positions, interpolated) and the eye the record's c47.xy; in [0, 1]. Anything that is no
+// number gives 0: the pixel is not kept, and the layer's depth stays the scene's there.
+inline double SunOccluderAlphaMirror(float texel_alpha, const float world[2], const float eye[2], float c77x) {
+  if (!std::isfinite(world[0]) || !std::isfinite(world[1]) || !std::isfinite(eye[0]) || !std::isfinite(eye[1]) || !std::isfinite(c77x)) {
+    return 0.0;
+  }
+  const double dx = double(world[0]) - double(eye[0]), dy = double(world[1]) - double(eye[1]);
+  const double reach = double(kSunFadeRate) * (std::sqrt(dx * dx + dy * dy) - double(kSunFadeStart));
+  const double fade = 1.0 - (reach > 0.0 ? (reach < 1.0 ? reach : 1.0) : 0.0);
+  const double a = detail::QuadFinite(texel_alpha) * double(c77x) * fade;
+  return a > 0.0 ? (a < 1.0 ? a : 1.0) : 0.0;
+}
+
+struct ClaySunInputs {
+  bool sun = false, furniture = false, bloom = false, radial = false, quads = false, drawable = false, objects = false, textures = false;
+};
+constexpr ClaySun DecideClaySun(const ClaySunInputs& in) {
+  if (!in.sun) return ClaySun::kOff;
+  if (!in.furniture) return ClaySun::kNoFurniture;
+  if (!in.bloom) return ClaySun::kNoBloom;
+  if (!in.radial) return ClaySun::kNoRadial;
+  if (!in.drawable) return ClaySun::kState;
+  if (!in.quads) return ClaySun::kNoQuads;
+  if (!in.objects) return ClaySun::kObjects;
+  if (!in.textures) return ClaySun::kTexture;
+  return ClaySun::kDrawn;
+}
+constexpr const char* ClaySunName(ClaySun s) {
+  switch (s) {
+    case ClaySun::kNoFurniture: return "no furniture";
+    case ClaySun::kNoBloom: return "no bloom";
+    case ClaySun::kNoRadial: return "no radial registers";
+    case ClaySun::kNoQuads: return "no layer quad";
+    case ClaySun::kState: return "a record's state or values";
+    case ClaySun::kObjects: return kPostObjectsReason;
+    case ClaySun::kTexture: return kQuadTextureReason;
+    case ClaySun::kDrawn: return "drawn";
+    default: return "off";
+  }
+}
+// The Sun line of the status text and the log: the switch, what the pass did (a drawn layer's quads by
+// target and the blur's centre), and the pass's totals since it was made, every frame that was not
+// drawn under "sun-layer" by reason.
+inline std::string FormatSunText(const ClayStats& st) {
+  if (!st.sun_switch) return "Sun: off";
+  char buf[512];
+  std::string text = "Sun: on, ";
+  if (st.sun == ClaySun::kDrawn) {
+    std::snprintf(buf, sizeof(buf), "drawn: occluders %u, layer 1 %u, layer 2 %u, centre (%.4f, %.4f)", st.sun_drawn[0], st.sun_drawn[1],
+                  st.sun_drawn[2], std::fabs(st.sun_centre[0]) <= 4.0f ? double(st.sun_centre[0]) : 0.0,
+                  std::fabs(st.sun_centre[1]) <= 4.0f ? double(st.sun_centre[1]) : 0.0);
+    text += buf;
+  } else {
+    text += std::string("not drawn (") + kSunLayerReason + ": " + ClaySunName(st.sun) + ")";
+  }
+  std::snprintf(buf, sizeof(buf), " | frames since start %llu: drawn %llu, %s {", static_cast<unsigned long long>(st.sun_frames.frames),
+                static_cast<unsigned long long>(st.sun_frames.by[size_t(ClaySun::kDrawn)]), kSunLayerReason);
+  text += buf;
+  bool first = true;
+  for (ClaySun s : {ClaySun::kNoFurniture, ClaySun::kNoBloom, ClaySun::kNoRadial, ClaySun::kNoQuads, ClaySun::kState, ClaySun::kObjects,
+                    ClaySun::kTexture}) {
+    std::snprintf(buf, sizeof(buf), "%s%s: %llu", first ? "" : ", ", ClaySunName(s), static_cast<unsigned long long>(st.sun_frames.by[size_t(s)]));
+    text += buf;
+    first = false;
+  }
+  return text + "}";
 }
 
 // --- Terrain material (frame-map section 13, "Terrain", "Native terrain material") ---

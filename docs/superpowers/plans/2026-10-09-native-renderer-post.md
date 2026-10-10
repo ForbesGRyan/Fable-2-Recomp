@@ -669,6 +669,26 @@ only in a post frame with a sky.
 
 ### Task 14: The sun layer: beams, flares, moon glow, sun disc
 
+> **Amended after the review of Task 10** (2026-10-10; `review-task-10.md`, rulings 33 and 35; where this note and
+> the text below disagree, this note holds; the frame map's "Sun layer discovery" and "Sun layer" have the
+> findings):
+> - tf1 is the beam source, reduced and blurred radially twice; tf2 is layer 2, reduced. C1 (the 8-bit reduction)
+>   is not built: two reductions.
+> - **The layer's depth is not the scene's end depth in the game.** It is the mid-frame depth copy plus the cloud
+>   occluders at their own reference (0.149), the cubes and the late leaves; the scene's own clouds write depth
+>   at 0.0196 and are not in it. The native layer takes the native depth after the scene's last record, which
+>   no native cloud step may have written, and draws the set's `3FF7` occluders into it.
+> - **The `3FF7` cloud occluders are built here**, not in Task 16 (ruling 35): without them the layer is worse
+>   than none (61.6% against 63.9%). A layer that lacks an occluder's or the beam source's texture for a frame
+>   is not drawn that frame.
+> - Before any in-game shot: the oracle feed with its sun part (the beam source's drawn count against the
+>   reference's 12,310 on run 3's frame; layer 1, tf1 and tf2 against the reference's).
+> - The software-adapter run faces the sun (WARP-SUN stretched: the first execution of any quad program under
+>   the debug layer; review of Tasks 12 and 13). Criterion 19 is judged with the occluders in, the beams' root
+>   and a far part of a beam apart (regions "beam root", "beam far left", "beam far right").
+> - The sun layer's verdict is its own: an undrawable layer record takes the layer away, not the scene's moon
+>   and glare.
+
 **Files:** as Task 13; frame map "Sun layer".
 
 **Consumes:** Task 10's graph (tf1, tf2); `PostBlock::radial`; the mirrors of `post_radial`,
@@ -711,6 +731,15 @@ the sun flag off, counted `sun-layer` by reason.
 
 ### Task 16: Clouds and their occluders
 
+> **Amended after the review of Task 10** (2026-10-10; rulings 33 and 35): the layer's `3FF7` occluders are
+> built in Task 14; this task keeps the scene's clouds (`6197`) alone. **The scene clouds' depth write must not
+> reach the depth the sun layer copies**: in the game they write depth after the layer's depth copy, with
+> their alpha test at 0.0196, and with that threshold in the layer's depth the beam source keeps 11 pixels of
+> 12,310. So the native cloud step either writes no depth, or the layer's copy is taken before it; the task
+> shows which, with the beam source's count on the oracle feed unchanged. Validate by hue (blue share 1 to 2
+> points lower under most cover), not by a sky region's luminance; the occluders' count against 11,466 /
+> 17,167 / 4,525 if the layer's depth is touched at all; the occluders' mip level need not be exact.
+
 Only for the shaders Task 11 checked (`6197`, `3FF7`); otherwise this task is the paragraph in
 the frame map's "Limits" and nothing else.
 
@@ -726,6 +755,16 @@ the frame map's "Limits" and nothing else.
       "Clouds: ...".
 
 ### Task 17: The remaining occluders, or their limits
+
+> **Amended after the review of Task 10** (2026-10-10; rulings 33 and 35). What is known, and what this task
+> documents as limits unless it builds it: (1) the cubes (`D1CC`) are the far water; **the far lake is not in
+> the native depth** (`2B09` is not drawn natively), so the layer sees the lake's bed, a limit for a sun low
+> over open water (the cube's floor is no quad: 8 vertices, 30 indices, `c119.x`); (2) the two cubes at
+> 20.0024 are unidentified; (3) the tree draws (`4325` / `F1EB`) are the scene's leaf draws issued after the
+> depth copy, which the native depth holds already: nothing to build, the difference left is `F1EB`'s alpha
+> rule against the native leaf pass's; (4) the native picture has no distant trees: beams pass where the game's
+> far woods stand; (5) the dog's fur shells (`014F`) write depth after the copy, have no occluder and are not
+> drawn natively. The 24 point draws write nothing.
 
 - [ ] From Task 10's findings, for each of the cubes (`D1CC`) and the tree occluder draws
       (`4325` / `F1EB`): build it only if its transform or its draws are identified, its shader

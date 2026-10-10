@@ -687,6 +687,19 @@ def cmd_export(args):
     print("wrote %s.scene (%d x %d, %d values that are no numbers, %d that a half-float texture changes, largest %g) and "
           "%s.block (parts %d)" % (args.prefix, SCENE_W, SCENE_H, bad, half_changed(scene) if not bad else -1,
                                    max(scene), args.prefix, block_floats(fr)[1]))
+    # The feed's third file, for the sun layer (plan Task 14): the scene's depth copy and the layer's quads.
+    # Only for a frame that has the layer's rows; a frame without them has no third file, and says why.
+    import post_sun_layer       # imports this module: not at the top
+    try:
+        draws, _ = post_sun_layer.load_layer_draws(fr.path, fr.number)
+        data, roles = post_sun_layer.pack_sun(fr, draws)
+    except Exception as e:      # (post_sun_layer's ReplayError is this module's class under its imported name)
+        if type(e).__name__ != "ReplayError":
+            raise
+        print("no %s.sun: %s" % (args.prefix, e))
+        return 0
+    Path(args.prefix + ".sun").write_bytes(data)
+    print("wrote %s.sun (the depth copy as native depth, %d layer quads: %s)" % (args.prefix, len(roles), ", ".join(roles)))
     return 0
 
 

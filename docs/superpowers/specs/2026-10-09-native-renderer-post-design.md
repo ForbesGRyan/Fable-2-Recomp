@@ -262,6 +262,17 @@ this design has a size that is a fraction of W x H** (W/2 x H/2, W/4 x H/4), nev
     reduced into tf2. Occluders the native depth does not hold (cloud quads, the cubes, the tree
     occluder draws) are added last, each only if its shader is checked and its draw can be
     recorded inside the cost bounds.
+    *Amended after the review of plan Task 10 (2026-10-10; controller rulings 33 and 35):* the
+    reductions are two (the 8-bit one of a cleared picture, C1, has no reader and is not built)
+    and the quarter-size targets three (the reduction of layer 1 and its blur partner, the
+    reduction of layer 2). The game's layer depth is **not** its scene's end depth: it is the
+    mid-frame depth copy plus the cloud quads at their own alpha reference (0.149; the scene's
+    clouds write depth at 0.0196 and are not in it), the cubes (the far water) and the late leaf
+    draws. The native layer takes the native depth after the scene's last record, which no cloud
+    step may have written, and the cloud occluders are **not** "added last": they are built with
+    the layer, because without them the layer is worse than none (61.6% of the pixels within 8
+    levels against 63.9% without a layer). The tree occluder draws need no draw (the native depth
+    holds the leaves); the far lake is missing from the native depth (a limit).
 14. **The previous-frame blend (10c, ruling 7)**: a second front target; the composite writes
     `lerp(new, previous front, 0.102)` (the factor from the game's blend constant; in the
     shader, since the RHI has no constant blend factor). One kept target, one blend.
@@ -486,6 +497,14 @@ Said now, with the finding that makes it one (ruling 18).
 - **Clouds and their occluders** (`6197`, `3FF7`): a limit if the 58-instruction shader does not
   reach 2,000 of 2,000 or reads an input no capture holds. Then the sky stays plain and the
   beams are not cut by clouds.
+  *Amended after the review of plan Task 10:* "the beams are not cut by clouds" cannot end as a
+  limit with the sun layer on: without the `3FF7` occluders the layer is worse than none. Both
+  shaders reached their check; the occluders are built with the layer (ruling 35), and the
+  scene's clouds stay plan Task 16's.
+- **The far lake in the layer's depth** (added after the review of plan Task 10): the cube that
+  stands for it in the game's layer is not drawn, and the native depth does not hold the lake:
+  a limit for a sun low over open water. **No distant trees**: beams pass where the game's far
+  woods stand.
 - **Moon, moon glow**: built from checked formulas but below the horizon in every capture: held
   by tests, unseen (a user check).
 - **Flares**: 0, 2 or 4 small quads a frame; what they add to the picture has not been seen.

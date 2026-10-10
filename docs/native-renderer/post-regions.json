@@ -4,7 +4,9 @@
   "kinds": {
     "sun": "the sun's own place: the radial blur's centre (pixel c31.xy of 4BE4, (0.3785, 0.3914) in the capture) with the glow about it, behind the upper rail",
     "beams": "a beam of the sun layer across darker ground (rail, planks, the hero): where the reference without the sun layer (variant B) is darkest against the game's picture",
-    "sky": "open sky beside the sun, clear of leaves, rails and the text box: the control (little of the layer reaches it)"
+    "sky": "open sky beside the sun, clear of leaves, rails and the text box: the control (little of the layer reaches it)",
+    "root": "the beams' root, just below the sun's place (pixels 420 to 490 by 320 to 400 of 1120 x 720; review of plan Task 10, Important 4): where the reference with the sun layer is about 1.6 times the game's addition. The regions \"beams left\" and \"beams right\" both reach into this zone, so their figures measure the root more than the beams",
+    "far": "a beam far down from the sun (pixels 400 to 470 and 470 to 560 by 480 to 640), across the lower rail and the planks: where the reference adds what the game adds"
   },
   "spots": {
     "sunward": {
@@ -13,7 +15,10 @@
         {"name": "sun", "kind": "sun", "rect": [0.340, 0.330, 0.420, 0.450]},
         {"name": "beams left", "kind": "beams", "rect": [0.360, 0.470, 0.410, 0.640]},
         {"name": "beams right", "kind": "beams", "rect": [0.430, 0.520, 0.500, 0.700]},
-        {"name": "sky beside the sun", "kind": "sky", "rect": [0.560, 0.200, 0.620, 0.300]}
+        {"name": "sky beside the sun", "kind": "sky", "rect": [0.560, 0.200, 0.620, 0.300]},
+        {"name": "beam root", "kind": "root", "rect": [0.375, 0.444, 0.4375, 0.556]},
+        {"name": "beam far left", "kind": "far", "rect": [0.357, 0.667, 0.420, 0.889]},
+        {"name": "beam far right", "kind": "far", "rect": [0.420, 0.667, 0.500, 0.889]}
       ]
     }
   }

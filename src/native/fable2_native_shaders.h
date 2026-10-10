@@ -1386,6 +1386,52 @@ float4 main(float4 pos : SV_Position) : SV_Target {
 }
 )hlsl";
 
+// The sun layer's three steps under the post layout (plan Task 14; described with the layer's other programs
+// below, "The sun layer"): the layer's depth, the reduction, the radial blur. They share the post steps' text
+// above (cbuffer Post, cbuffer Step, post_unit, post_level), which is unchanged; in cbuffer Step they read
+// s_dir as the size ratio of the step's source to its target.
+inline constexpr const char* kClaySunDepthPs = FABLE2_CLAY_POST_HLSL R"hlsl(
+Texture2D<float4> sun_depth_source : register(t0);
+float main(float4 pos : SV_Position) : SV_Depth {
+  int2 at = min(int2(pos.xy) * s_dir, s_last);
+  float d = sun_depth_source.Load(int3(at, 0)).r;
+  return (d > 0.0) ? min(d, 1.0) : 0.0;
+}
+)hlsl";
+
+inline constexpr const char* kClaySunReducePs = FABLE2_CLAY_POST_HLSL R"hlsl(
+Texture2D<float4> reduce_source : register(t0);
+SamplerState linear_clamp : register(s1);
+float4 main(float4 pos : SV_Position) : SV_Target {
+  float2 ratio = float2(s_dir);
+  float3 v = reduce_source.SampleLevel(linear_clamp, (ratio * floor(pos.xy) + 0.5 * ratio) * s_texel, 0.0).rgb;
+  return float4(post_level(post_unit(v)), 1.0);
+}
+)hlsl";
+
+inline constexpr const char* kClaySunRadialPs = FABLE2_CLAY_POST_HLSL R"hlsl(
+Texture2D<float4> radial_source : register(t0);
+float4 main(float4 pos : SV_Position) : SV_Target {
+  float2 last = float2(s_last);
+  float2 size = last + 1.0;
+  float2 uv = floor(pos.xy) * s_texel;
+  float2 centre = p_radial.xy;
+  float s = (p_radial.w - 1.0) * (4.0 / 7.0) + 1.0;
+  float g = (p_radial.z - 1.0) * (4.0 / 7.0) + 1.0;
+  float3 sum = float3(0.0, 0.0, 0.0);
+  float sk = 1.0;
+  float w = 0.5;
+  for (int k = 0; k < 14; ++k) {
+    float2 p = (centre + (uv - centre) * sk) * size + 0.5;
+    p = (p > 0.0) ? min(p, last) : float2(0.0, 0.0);
+    sum += w * post_unit(radial_source.Load(int3(int2(p), 0)).rgb);
+    sk *= s;
+    w *= g;
+  }
+  return float4(post_level(post_unit(sum * (4.0 / 7.0))), 1.0);
+}
+)hlsl";
+
 #undef FABLE2_CLAY_POST_HLSL
 
 // The quad step (render/clay_pass.cpp; clay_logic.h, "Native furniture"; sub-project 10, plan Task 13):
@@ -1473,6 +1519,130 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 )hlsl";
 
 #undef FABLE2_CLAY_QUAD_HLSL
+
+// The sun layer (render/clay_pass.cpp; clay_logic.h, "Native sun layer"; sub-project 10, plan Task 14): the
+// game's half-size layer of beams, flares, moon glow and sun disc, drawn again from the frame's quad records
+// and fed to the bright pass (kClayPostBrightPs, whose text is unchanged: its sun flag was there). Six
+// programs, none of them made, bound or drawn with fable2_native_sun off, and no other program's text
+// changed for them (the first three stand above, with the post steps whose shared text they use):
+//   kClaySunDepthPs (the post layout; kFullscreenVs): the layer's depth from the scene's, depth only. A
+//     texel of the layer takes the scene depth's texel s_dir * floor(pos.xy), by Load, never beyond s_last
+//     (the game's 5D67 takes every second texel of its depth copy by point: SunDepthTexel; s_dir is the
+//     size ratio, so no size is in the text). Out: SV_Depth = (d > 0) ? min(d, 1) : 0 (SunDepthValue).
+//   kClaySunQuadVs, kClaySunQuadPs, kClaySunOccluderPs (the quad step's layout; cbuffer SunQuad at b0,
+//     render::ClaySunQuadConstants: the scene quads' block with the target's level count; kClaySunQuadFields):
+//     a layer quad, six vertices as kClayQuadVs makes them, with the corner's own position passed on as
+//     the pixel's world position (the game's C304C6A1AF18B46F does the same for the clouds). The pixel
+//     shader's formula by q_kind (capture::PostQuadKind + 1), on the texel of t0:
+//       4, the beam source (8E4D, post_beam_source):  rgb = tex.rgb * (1 / 6) * c31.rgb,          alpha 1
+//       5, a flare (D72F, post_flare):                rgb = tex.a * c31.rgb,                      alpha 1
+//       6, the moon glow (4B58, post_moon_glow):      rgb = tex.rgb * 0.2 * tex.a,                alpha tex.a
+//       7, the sun disc (3E77, post_sun_disc):        rgb = tex.rgb * c31.rgb * tex.a * c20.w,    alpha tex.a
+//     any other word: the pixel is dropped. Then the draw's own alpha test (dropped unless the alpha is
+//     above q_alpha_ref). Out: each channel (v > 0) ? min(v, 1) : 0, as a level of the target's format,
+//     floor(v * q_levels + 0.5) / q_levels (controller ruling 25), the alpha saturated. The blend and the
+//     depth test are the pipeline's (ClaySunState).
+//     kClaySunOccluderPs is the same text compiled with CLAY_SUN_OCCLUDER: kind 8, a cloud occluder (3FF7,
+//     post_cloud_occluder), drawn with no colour target. It writes nothing but the depth of the pixels it
+//     keeps: alpha = tex(uv * c31.xy + c46.xy).a * c77.x * (1 - sat(0.001 * (|P.xy - c47.xy| - 1000))), kept
+//     where that is above q_alpha_ref (the draw's reference, 0.149 captured); any other kind, or a draw
+//     without the alpha test, keeps no pixel.
+//   kClaySunReducePs (the post layout): a picture at 1 / s_dir of its size, one linear sample (s1, clamped)
+//     at (s_dir * floor(pos.xy) + s_dir / 2) * s_texel: with the ratio 2 the corner four texels share,
+//     their mean (the game's 0A96, post_reduce). Out: post_level(post_unit(v)).
+//   kClaySunRadialPs (the post layout): one pass of the radial blur (4BE4, post_radial) about p_radial.xy:
+//     14 Loads of t0, tap k at texel floor(min(max((c + (uv - c) * s^k) * size + 0.5, 0), s_last)) with the
+//     weight g^k / 2, uv = floor(pos.xy) * s_texel, s = 1 + (4 / 7)(p_radial.w - 1), g = 1 + (4 / 7)
+//     (p_radial.z - 1); out = post_level(post_unit(sum * 4 / 7)). The tap's place is bounded by a
+//     comparison that is false for a value that is no number, so no index leaves the source.
+inline constexpr ClayBufferField kClaySunQuadFields[] = {
+    {"u_corner", 0, 64},    {"u_coord", 64, 64},     {"u_view_proj", 128, 64}, {"u_reg", 192, 192},
+    {"u_kind", 384, 4},     {"u_sampler", 388, 4},   {"u_alpha_test", 392, 4}, {"u_alpha_ref", 396, 4},
+    {"u_fix", 400, 8},      {"u_levels", 408, 4},    {"u_pad", 412, 4},
+};
+inline constexpr unsigned kClaySunQuadSize = 416;
+
+#define FABLE2_CLAY_SUN_QUAD_HLSL R"hlsl(
+cbuffer SunQuad : register(b0) {
+  float4 u_corner[4];      // the corners' positions: x y z, 1
+  float4 u_coord[4];       // their coordinates: u v
+  float4 u_view_proj[4];   // vertex c0..c3 at the game's call
+  float4 u_reg[12];        // the kind's pixel registers, in the record's order
+  uint u_kind; uint u_sampler; uint u_alpha_test; float u_alpha_ref;   // the formula; the static sampler; the alpha test
+  float2 u_fix; float u_levels; uint u_pad;                            // the host texture's scale; the target's level count
+};
+struct SunQuadOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; float3 world : TEXCOORD1; };
+)hlsl"
+
+inline constexpr const char* kClaySunQuadVs = FABLE2_CLAY_SUN_QUAD_HLSL R"hlsl(
+SunQuadOut main(uint id : SV_VertexID) {
+  static const uint order[6] = {0, 1, 2, 1, 3, 2};
+  uint c = order[min(id, 5u)];
+  float4 p = float4(u_corner[c].xyz, 1.0);
+  SunQuadOut o;
+  o.pos = float4(dot(u_view_proj[0], p), dot(u_view_proj[1], p), dot(u_view_proj[2], p), dot(u_view_proj[3], p));
+  o.uv = u_coord[c].xy;
+  o.world = u_corner[c].xyz;
+  return o;
+}
+)hlsl";
+
+#define FABLE2_CLAY_SUN_QUAD_PS_HLSL FABLE2_CLAY_SUN_QUAD_HLSL R"hlsl(
+Texture2D quad_tex : register(t0);
+SamplerState u_point_wrap : register(s0);
+SamplerState u_linear_wrap : register(s1);
+SamplerState u_point_clamp : register(s2);
+SamplerState u_linear_clamp : register(s3);
+float4 sun_sample(float2 at, float2 dx, float2 dy) {
+  float4 c;
+  if (u_sampler == 0) c = quad_tex.SampleGrad(u_point_wrap, at, dx, dy);
+  else if (u_sampler == 1) c = quad_tex.SampleGrad(u_linear_wrap, at, dx, dy);
+  else if (u_sampler == 2) c = quad_tex.SampleGrad(u_point_clamp, at, dx, dy);
+  else c = quad_tex.SampleGrad(u_linear_clamp, at, dx, dy);
+  return (abs(c) < 3.0e38) ? c : float4(0.0, 0.0, 0.0, 0.0);
+}
+#ifdef CLAY_SUN_OCCLUDER
+void main(SunQuadOut i) {
+  float2 at = (i.uv * u_reg[0].xy + u_reg[1].xy) * u_fix;
+  float4 t = sun_sample(at, ddx(at), ddy(at));
+  float a = 0.0;
+  if (u_kind == 8) a = saturate(t.a * u_reg[3].x * (1.0 - saturate(0.0010000000474974513 * (length(i.world.xy - u_reg[2].xy) - 1000.0))));
+  if (u_kind != 8 || u_alpha_test == 0 || !(a > u_alpha_ref)) discard;
+}
+#else
+float4 main(SunQuadOut i) : SV_Target {
+  float2 at = i.uv * u_fix;
+  float4 t = sun_sample(at, ddx(at), ddy(at));
+  float3 rgb = float3(0.0, 0.0, 0.0);
+  float a = 0.0;
+  bool known = true;
+  if (u_kind == 4) {
+    rgb = t.rgb * 0.1666666716337204 * u_reg[0].rgb;
+    a = 1.0;
+  } else if (u_kind == 5) {
+    rgb = t.a * u_reg[0].rgb;
+    a = 1.0;
+  } else if (u_kind == 6) {
+    rgb = t.rgb * 0.20000000298023224 * t.a;
+    a = t.a;
+  } else if (u_kind == 7) {
+    rgb = t.rgb * u_reg[1].rgb * t.a * u_reg[0].w;
+    a = t.a;
+  } else {
+    known = false;
+  }
+  if (!known || (u_alpha_test != 0 && !(a > u_alpha_ref))) discard;
+  rgb = (rgb > 0.0) ? min(rgb, 1.0) : float3(0.0, 0.0, 0.0);
+  return float4(floor(rgb * u_levels + 0.5) / u_levels, saturate(a));
+}
+#endif
+)hlsl"
+
+inline constexpr const char* kClaySunQuadPs = FABLE2_CLAY_SUN_QUAD_PS_HLSL;
+inline constexpr const char* kClaySunOccluderPs = "#define CLAY_SUN_OCCLUDER 1\n" FABLE2_CLAY_SUN_QUAD_PS_HLSL;
+
+#undef FABLE2_CLAY_SUN_QUAD_PS_HLSL
+#undef FABLE2_CLAY_SUN_QUAD_HLSL
 
 // Debug views (render/composite.cpp, fable2_native_view): the clay pass's mapped (8-bit, display) target
 // drawn over the guest output. mode 1 overlay (alpha 0.5), 2 split (right half only), 3 native (opaque).

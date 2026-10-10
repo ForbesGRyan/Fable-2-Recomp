@@ -32,6 +32,9 @@ TASK5_SECTIONS = ("// table texel pins", "// unlit scale pins", "// ramp pins", 
 TASK8_SECTIONS = ("// real bright pins", "// made bright pins", "// downsample pins", "// real blur pins", "// made blur pins")
 # The pins of plan Task 13 (the scene's furniture: the moon's, the glare's and a corner's mirrors).
 TASK13_SECTIONS = ("// quad moon pins", "// quad glare pins", "// quad position pins")
+# The pins of plan Task 14 (the sun layer: the radial blur's, the reduction's and the five layer quads' mirrors).
+TASK14_SECTIONS = ("// real radial pins", "// made radial pins", "// edge radial pins", "// reduce pins", "// sun beam pins",
+                   "// sun flare pins", "// sun glow pins", "// sun disc pins", "// sun occluder pins")
 
 
 def f32(x):
@@ -58,6 +61,73 @@ def section_lines(sections):
         if taking:
             out.append(line)
     return out
+
+
+class SunLayerLiterals(unittest.TestCase):
+    """Plan Task 14: the sun layer's numbers in the reference, the generator, the C++ mirrors and the shaders."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.logic = _text("src/native/render/clay_logic.h")
+        cls.logic_test = _text("tests/native/test_clay_logic.cpp")
+        cls.shaders = _text("src/native/fable2_native_shaders.h")
+        cls.pass_cpp = _text("src/native/render/clay_pass.cpp")
+        cls.oracle = _text("src/native/render/post_oracle.h")
+        cls.lines = section_lines(TASK14_SECTIONS)
+
+    def test_every_generated_line_is_in_the_cpp_test(self):
+        have = {line.strip() for line in self.logic_test.splitlines()}
+        # 4 + 4 + 4 radial points, 3 of the reduction, 6 + 6 + 8 + 9 + 11 of the quads, and nine comment lines.
+        self.assertEqual(len(self.lines), 12 + 3 + 40 + 9)
+        self.assertEqual(sum(1 for line in self.lines if line.startswith("//")), 9)
+        for line in self.lines:
+            self.assertIn(line.strip(), have, "not in tests/native/test_clay_logic.cpp: run out of tools/xdk_sigmatch/post_pins.py")
+        pin = next(line for line in self.lines if "0.13666137466812245" in line)
+        self.assertNotIn(pin.replace("0.13666137466812245", "0.13666137466812246").strip(), have)
+
+    def test_the_shaders_literals_are_the_captured_ones(self):
+        # Single-precision, as the microcode's literal registers hold them (the reference's defaults are doubles).
+        beam, glow = f32(lf.POST_BEAM_C255X), f32(lf.POST_GLOW_C255X)
+        start, zero, rate, one = (f32(v) for v in lf.POST_CLOUD_OCCLUDER_C255)
+        self.assertEqual((zero, one), (0.0, 1.0))
+        self.assertIn("inline constexpr float kSunBeamScale = %rf;" % beam, self.logic)
+        self.assertIn("inline constexpr float kSunGlowScale = %rf;" % glow, self.logic)
+        self.assertIn("inline constexpr float kSunFadeStart = %rf, kSunFadeRate = %rf;" % (start, rate), self.logic)
+        self.assertEqual((post_pins.SUN_BEAM_SCALE, post_pins.SUN_GLOW_SCALE, post_pins.SUN_OCCLUDER_C255), (beam, glow, (start, zero, rate, one)))
+        quad = _one(r"#define FABLE2_CLAY_SUN_QUAD_PS_HLSL FABLE2_CLAY_SUN_QUAD_HLSL R\"hlsl\((.*?)\)hlsl\"", self.shaders, "the layer quads' text")
+        self.assertIn("rgb = t.rgb * %r * u_reg[0].rgb;" % beam, quad)
+        self.assertIn("rgb = t.rgb * %r * t.a;" % glow, quad)
+        self.assertIn("(1.0 - saturate(%r * (length(i.world.xy - u_reg[2].xy) - %r)))" % (rate, start), quad)
+
+    def test_the_radial_blur_is_the_references(self):
+        radial = _one(r"inline constexpr const char\* kClaySunRadialPs = FABLE2_CLAY_POST_HLSL R\"hlsl\((.*?)\)hlsl\";", self.shaders,
+                      "the radial blur's text")
+        taps = lf.post_radial_taps(0.25, 0.75, (0.5, 0.5), 0.87, 0.935)
+        self.assertEqual(len(taps), 14)
+        self.assertIn("for (int k = 0; k < %d; ++k) {" % len(taps), radial)
+        self.assertEqual(int(_one(r"inline constexpr uint32_t kSunRadialTaps = (\d+);", self.logic, "the taps")), len(taps))
+        self.assertEqual(taps[0], ((0.25, 0.75), 0.5))
+        self.assertIn("float w = 0.5;", radial)
+        self.assertEqual(_one(r"inline constexpr double kSunRadialNorm = ([^;]+);", self.logic, "the norm"), "4.0 / 7.0")
+        self.assertEqual(radial.count("(4.0 / 7.0)"), 3)
+        # The capture's bounds, which the pass judges again and the exporter applies.
+        self.assertIn("std::fabs(radial[0]) <= 4.0f && std::fabs(radial[1]) <= 4.0f && radial[2] > 0.0f && radial[2] <= 1.0f &&", self.logic)
+
+    def test_the_levels_and_the_sizes(self):
+        self.assertIn("inline constexpr uint32_t kSunLayerDivisor = 2, kSunSmallDivisor = 4;", self.logic)
+        self.assertIn("inline constexpr uint32_t kSunLevels = 1023;", self.logic)
+        self.assertEqual(round(post_replay.q10(0.5) * 1023), 512)
+        self.assertIn("constexpr nrhi::Format kSunFormat = nrhi::Format::kR10G10B10A2_UNORM;", self.pass_cpp)
+        # The layer's targets are fractions of the logical size, not numbers.
+        ensure = _one(r"bool ClayPass::EnsureSunObjects\(nrhi::Device\* dev\) \{(.*?)\n\}\n", self.pass_cpp, "EnsureSunObjects")
+        for number in ("1120", "720", "560", "360", "280", "180"):
+            self.assertNotIn(number, ensure)
+
+    def test_the_feeds_quad_record_is_the_exporters(self):
+        import post_sun_layer
+        self.assertEqual(int(_one(r"static_assert\(kOracleQuadBytes == (\d+)\);", self.oracle, "the record's size")), post_sun_layer.QUAD_FILE_BYTES)
+        self.assertIn('std::memcmp(data, "F2OU", 4)', self.oracle)
+        self.assertEqual(sorted(post_sun_layer.QUAD_FILE_ROLES), sorted(s.kind for s in lf.POST_QUAD_SHADERS if s.where != "scene"))
 
 
 def task5_lines():

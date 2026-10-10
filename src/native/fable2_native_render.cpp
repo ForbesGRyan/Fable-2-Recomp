@@ -197,6 +197,7 @@ PostRamp g_post_ramp;
 // the callbacks are registered, and never changed after: the command-processor thread reads it.
 // g_oracle_feed.scene points into g_oracle_scene_bytes. g_oracle_valid: both files were taken.
 std::vector<uint8_t> g_oracle_scene_bytes;
+std::vector<uint8_t> g_oracle_sun_bytes;  // (the optional third file, <prefix>.sun: g_oracle_feed.sun.depth points into it)
 render::OracleFeed g_oracle_feed;
 bool g_oracle_valid = false;
 bool g_oracle_dump_written = false;  // command-processor thread only
@@ -405,13 +406,34 @@ void LoadOracle() {
     g_oracle_scene_bytes = {};
     return;
   }
+  // The optional third file, <prefix>.sun (plan Task 14: the sun layer on the feed): the scene's depth and
+  // the layer's quads. Missing: the feed has no sun layer and says so. Present and refused: the same, with
+  // the fault's word; the scene and the block are fed as without it.
+  std::string sun_text = "no sun file";
+  if (const char* why = read(prefix + ".sun", &g_oracle_sun_bytes)) {
+    sun_text = std::string("sun file ") + why + ": the feed has no sun layer";
+  } else {
+    render::OracleFault sun_why = render::OracleFault::kNone;
+    capture::QuadRecordReason quad_why = capture::QuadRecordReason::kNone;
+    feed.sun = render::ParseOracleSun(g_oracle_sun_bytes.data(), g_oracle_sun_bytes.size(), &sun_why, &quad_why);
+    if (feed.sun.valid) {
+      sun_text = "sun file valid: the scene's depth and " + std::to_string(feed.sun.count) +
+                 " layer quads (with fable2_native_sun=on the layer is drawn from them, each quad with the texture of the "
+                 "live frame's quad of its kind, and layer 1, tf1 and tf2 are written beside the dump)";
+    } else {
+      sun_text = std::string("sun file refused (") + render::OracleFaultName(sun_why) +
+                 (sun_why == render::OracleFault::kQuad ? std::string(": ") + capture::QuadRecordReasonName(quad_why) : std::string()) +
+                 "): the feed has no sun layer";
+      g_oracle_sun_bytes = {};
+    }
+  }
   g_oracle_feed = feed;
   g_oracle_valid = true;
   REXLOG_INFO("[native] post oracle: {}: scene {} x {} ({} values a half-float texture changes), block c20.w {:.5f}, parts {}; "
               "with fable2_native_post=on the post steps of every post frame read this scene and block, and the mapped target is "
-              "written once to logs/native_post_dump_<stamp>.rgba",
+              "written once to logs/native_post_dump_<stamp>.rgba; {}",
               prefix, feed.scene.width, feed.scene.height, render::OracleSceneHalfChanged(feed.scene), feed.c20w,
-              unsigned(feed.block.parts));
+              unsigned(feed.block.parts), sun_text);
 }
 
 // The oracle feed's dump, once its copy has run: logs/native_post_dump_<stamp>.rgba (the pass's
@@ -443,6 +465,26 @@ void WriteOracleDump(nrhi::Device* device) {
                 render::ClayPass::kWidth, render::ClayPass::kHeight, g_clay_frames);
   } else {
     REXLOG_WARN("[native] post oracle: logs/{} could not be written", name);
+  }
+  // The sun layer's three pictures of the same frame, when the feed drew the layer (plan Task 14): layer 1
+  // (its alpha says where the beam source was drawn), and the bright pass's tf1 and tf2, as the words of
+  // R10G10B10A2_UNORM. Beside the dump, under its name.
+  static constexpr const char* kLayerNames[render::kOracleLayerDumps] = {"layer1", "tf1", "tf2"};
+  for (size_t i = 0; i < render::kOracleLayerDumps; ++i) {
+    std::vector<uint8_t> layer;
+    if (!g_clay->TakePostOracleLayerDump(device, i, &layer)) continue;
+    std::string layer_name(name);
+    layer_name = layer_name.substr(0, layer_name.size() - 5) + "_" + kLayerNames[i] + ".r10";
+    const std::filesystem::path layer_full = dir / layer_name;
+    std::FILE* lp = _wfopen(layer_full.c_str(), L"wb");
+    const bool layer_ok = lp && std::fwrite(layer.data(), 1, layer.size(), lp) == layer.size();
+    if (lp) std::fclose(lp);
+    if (layer_ok) {
+      REXLOG_INFO("[native] post oracle: wrote logs/{} ({} bytes: the sun layer's {}, R10G10B10A2 words)", layer_name, layer.size(),
+                  kLayerNames[i]);
+    } else {
+      REXLOG_WARN("[native] post oracle: logs/{} could not be written", layer_name);
+    }
   }
 }
 
@@ -554,8 +596,8 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   render::ClayStats st;
   render::TextureStats tst;
   // The post chain: the switch as it is now and this frame's ramp (null without a valid one: the frame
-  // is then drawn without post, "post-ramp"), the bloom's switch and the sun's (the scene's furniture; the
-  // sun layer itself is a later task's).
+  // is then drawn without post, "post-ramp"), the bloom's switch and the sun's (the scene's furniture and
+  // the sun layer).
   render::ClayPostRequest post;
   post.post = CurrentPost();
   post.bloom = CurrentBloom();
@@ -568,7 +610,7 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   g_shadows_usable.store(g_clay->shadows_usable(), std::memory_order_relaxed);
   SetStatus(render::FormatStatusText(*scene, st, textures ? &tst : nullptr) + "\n" +
             render::FormatLightDrawnText(st) + "\n" + render::FormatShadowText(st) + "\n" + render::FormatFogText(st) + "\n" +
-            render::FormatSkyText(st) + "\n" + render::FormatPostText(st) + "\n" + render::FormatFurnitureText(st));
+            render::FormatSkyText(st) + "\n" + render::FormatPostText(st) + "\n" + render::FormatFurnitureText(st) + "\n" + render::FormatSunText(st));
   const double cpu_ms = st.hash_ms + st.decode_ms + st.record_ms + tst.decode_ms;
   const uint32_t pending = tst.status[size_t(capture::MaterialStatus::kTexturePending)];
   if (textures && (tst.uploads || pending)) {
@@ -623,6 +665,7 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
     REXLOG_INFO("[native] clay: {}", render::FormatPostText(st));
     // The scene's furniture: the frame's quad set, what the pass drew of it, and the frames without furniture by reason.
     REXLOG_INFO("[native] clay: {}", render::FormatFurnitureText(st));
+    REXLOG_INFO("[native] clay: {}", render::FormatSunText(st));
     if (const std::string by_vs = render::FormatShadowSkippedByVs(st); !by_vs.empty()) {
       REXLOG_INFO("[native] clay: shadow draws skipped by vs {{{}}}", by_vs);
     }

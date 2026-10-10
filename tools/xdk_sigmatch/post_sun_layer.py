@@ -3,7 +3,17 @@ CPU from a capture's quad rows and the oracle's depth (plan Task 11, spec criter
 
   post_sun_layer.py replay <capture> <frame> [--bias 0] [--sun-roles research|exchanged] [--png <prefix>]
                                              [--region-file NAME ...] [--spot bridge]
+                                             [--write <prefix> [--ramp <log>]]
   post_sun_layer.py quads  <capture> <frame>
+  post_sun_layer.py layers <dump> <reference prefix> [--region-file NAME ...] [--spot sunward]
+
+`replay --write <prefix>` writes the reference for the oracle feed's sun part (frame map section 17, "Sun layer"):
+<prefix>_C.rgba, _B.rgba and _final.rgba (the pictures as post_replay.py writes its variants, through --ramp's
+table) and <prefix>_layer1.r10, _tf1.r10, _tf2.r10 (the layer's first picture and the bright pass's two inputs as
+words of R10G10B10A2; layer 1's two alpha bits are set where the beam source was drawn). `layers` holds the
+native pass's dump of a fed run (logs/native_post_dump_<stamp>.rgba with its _layer1.r10, _tf1.r10, _tf2.r10)
+against them: the beam source's drawn texels, the three pictures level by level, and the mapped target against
+variant C. post_replay.py export writes the feed's third file, <prefix>.sun, with pack_sun below.
 
 <capture>: a read-back capture, as post_replay.py takes it. Read besides what variant B reads: the "indx" rows
 of the frame whose pixel shader is one of light_formulas.POST_FURNITURE_SHADERS (or whose vertex shader is the
@@ -446,14 +456,18 @@ def _shader(d, tex, lod):
     return shade
 
 
-def sun_layer(draws, depth, w, h, texture):
+def sun_layer(draws, depth, w, h, texture, drawn=None):
     """The layer's two pictures at (w / 2) x (h / 2) from the frame's layer draws (load_layer_draws) and the
     scene depth (w * h floats). texture(draw, slot): the draw's texture (an object with `sample`, as
-    MipTexture). Returns (layer 1, layer 2, a line for each draw): rows of [r, g, b] in 0..1, in 10 bits."""
+    MipTexture). Returns (layer 1, layer 2, a line for each draw): rows of [r, g, b] in 0..1, in 10 bits.
+    drawn: a dict that is given, for "layer1" and "layer2", a bytearray of (w / 2) * (h / 2) with 1 where a
+    draw wrote the picture (whatever value: a beam source's texel of 0 is drawn too)."""
     lw, lh = w // 2, h // 2
     pictures = {"layer1": [[[0.0, 0.0, 0.0] for _ in range(lw)] for _ in range(lh)],
                 "layer2": [[[0.0, 0.0, 0.0] for _ in range(lw)] for _ in range(lh)]}
     zbuf, lines = None, []
+    if drawn is not None:
+        drawn["layer1"], drawn["layer2"] = bytearray(lw * lh), bytearray(lw * lh)
     for d in draws:
         if d.role == "layer-depth":
             zbuf = layer_depth(depth, w, h)
@@ -494,6 +508,8 @@ def sun_layer(draws, depth, w, h, texture):
                 out = [pr.q10(v) for v in blend(word, colour, target[y][x])]
                 target[y][x] = out
                 tally["max"] = max(tally["max"], *out)
+                if drawn is not None:
+                    drawn[d.where][i] = 1
             tally["drawn"] += 1
 
         raster(vertices, d.indices, lw, lh, pixel)
@@ -543,6 +559,129 @@ def bloom_picture(scene, w, h, fr, bias=0.0, sun=None):
         src, weights = lf.post_texture(stage), fr.weights(role)
         stage = [[[pr.q10(v) for v in lf.post_blur13(src, x, y, weights, vertical)] for x in range(bw)] for y in range(bh)]
     return bw, bh, stage
+
+
+# --- the oracle feed's sun part (frame map section 17, "Sun layer"; src/native/render/post_oracle.h) -------------
+
+QUAD_FILE_ROLES = ("cloud-occluder", "beam-source", "flare", "moon-glow", "sun-disc")     # the layer's record kinds
+QUAD_FILE_BYTES = 452           # post_oracle.h, kOracleQuadBytes
+_QUAD_HASH = {s.kind: s.hash for s in lf.POST_QUAD_SHADERS}
+_QUAD_REGISTERS = {s.kind: s.registers for s in lf.POST_QUAD_SHADERS}
+
+
+def native_depth(depth, zscale, zoffset):
+    """The scene's depth copy as the native pass holds a depth: z / w, 0 near and 1 far. The game stores the
+    window depth z / w * zscale + zoffset (-1 and 1 in every captured row: the reversed range), which the
+    layer's depth draw clamps (post_layer_depth); any other range is refused, as the capture refuses it."""
+    if zscale != -1.0 or zoffset != 1.0:
+        raise ReplayError("the layer's depth range is scale %r offset %r, not the reversed -1 and 1" % (zscale, zoffset))
+    out = array("f", [1.0 - lf.post_layer_depth((v,))[1] for v in depth])
+    if any(not 0.0 <= v <= 1.0 for v in out):
+        raise ReplayError("a depth value outside 0..1")
+    return out
+
+
+def pack_quad(d):
+    """One layer draw as post_oracle.h's record: what the capture reads at the call (capture::QuadInputs)."""
+    if d.role not in QUAD_FILE_ROLES:
+        raise ReplayError("a %s draw is no record kind of the layer" % d.role)
+    raw = bytes.fromhex(d.data["verts"])
+    if len(raw) != 80 or d.data["stride"] != 20 or list(d.indices) != list(lf.POST_QUAD_INDICES):
+        raise ReplayError("%s: not a quad of four vertices of 20 bytes with the builder's six indices" % d.role)
+    registers = _QUAD_REGISTERS[d.role]
+    regs = [v for r in registers for v in d.reg(r)] + [0.0] * (4 * (12 - len(registers)))
+    slot = min(d.fc)
+    fetch = list(d.fc[slot]) + [0] * 12
+    words = [d.rs.get(0x2201, 0), d.rs.get(0x2200, 0), d.rs.get(0x2104, 0), d.rs.get(0x2202, 0), d.rs.get(0x210E, 0),
+             d.rs.get(0x2113, 0), d.rs.get(0x2206, 0)]
+    ps = int(_QUAD_HASH[d.role], 16)
+    out = struct.pack("<II", ps & 0xFFFFFFFF, ps >> 32) + raw + struct.pack("<16f", *[v for row in d.view_proj for v in row])
+    out += struct.pack("<I48f", len(registers), *regs) + struct.pack("<I18I", 1, *fetch) + struct.pack("<7I", *words)
+    if len(out) != QUAD_FILE_BYTES:
+        raise ReplayError("%d bytes in a quad's record" % len(out))
+    return out
+
+
+def pack_sun(fr, draws):
+    """<prefix>.sun: "F2OU", u32 1, u32 width, u32 height, u32 count, the scene's depth copy as native depth
+    (float32), then the layer's quads in the rows' order (the layer's depth draw, the cubes and the tree draws
+    are no records). Returns (the bytes, the quads' roles)."""
+    first = next((d for d in draws if d.role == "layer-depth"), None)
+    if first is None:
+        raise ReplayError("frame %d: no layer depth draw" % fr.number)
+    depth = native_depth(_scene_depth(fr, draws), first.zscale, first.zoffset)
+    if sys.byteorder != "little":
+        depth.byteswap()
+    quads = [d for d in draws if d.role in QUAD_FILE_ROLES]
+    if len(quads) > 24:
+        raise ReplayError("%d layer quads: more than the record bound of 24" % len(quads))
+    out = b"F2OU" + struct.pack("<IIII", 1, pr.SCENE_W, pr.SCENE_H, len(quads)) + depth.tobytes()
+    return out + b"".join(pack_quad(d) for d in quads), [d.role for d in quads]
+
+
+def layer_words(rows, drawn=None):
+    """A picture of [r, g, b] rows in 0..1 as words of R10G10B10A2 (red in the low bits; the two alpha bits set
+    where `drawn` is, or everywhere without it: a full-screen step writes alpha 1)."""
+    out = array("I")
+    i = 0
+    for row in rows:
+        for t in row:
+            r, g, b = (int(round(lf.sat(v) * 1023.0)) for v in t)
+            a = 3 if drawn is None or drawn[i] else 0
+            out.append(r | (g << 10) | (b << 20) | (a << 30))
+            i += 1
+    return out
+
+
+def write_layer(path, rows, drawn=None):
+    words = layer_words(rows, drawn)
+    if sys.byteorder != "little":
+        words.byteswap()
+    Path(path).write_bytes(b"F2OL" + struct.pack("<II", len(rows[0]), len(rows)) + words.tobytes())
+
+
+def read_layer(path):
+    """(width, height, the words) of a layer's dump."""
+    data = Path(path).read_bytes()
+    if len(data) < 12 or data[:4] != b"F2OL":
+        raise ReplayError("%s: not a layer dump" % path)
+    w, h = struct.unpack_from("<II", data, 4)
+    if w == 0 or h == 0 or len(data) != 12 + w * h * 4:
+        raise ReplayError("%s: %d bytes for %d x %d" % (path, len(data), w, h))
+    words = array("I")
+    words.frombytes(data[12:])
+    if sys.byteorder != "little":
+        words.byteswap()
+    return w, h, words
+
+
+def layer_compare(a, b):
+    """Two layers' words against each other: per texel the largest channel difference in 10-bit levels, and
+    the alpha bits. Returns a dict: texels, equal, within {1, 2, 4, 8}, largest, mean (of each, all channels,
+    in 0..1), alpha_a, alpha_b (texels with an alpha bit), alpha_both."""
+    if len(a) != len(b):
+        raise ReplayError("%d words against %d" % (len(a), len(b)))
+    within = {1: 0, 2: 0, 4: 0, 8: 0}
+    equal = largest = alpha_a = alpha_b = both = 0
+    sums = [0, 0]
+    for x, y in zip(a, b):
+        d = 0
+        for shift in (0, 10, 20):
+            p, q = (x >> shift) & 1023, (y >> shift) & 1023
+            sums[0] += p
+            sums[1] += q
+            d = max(d, abs(p - q))
+        equal += d == 0
+        for k in within:
+            within[k] += d <= k
+        largest = max(largest, d)
+        pa, pb = x >> 30 != 0, y >> 30 != 0
+        alpha_a += pa
+        alpha_b += pb
+        both += pa and pb
+    n = len(a)
+    return {"texels": n, "equal": equal, "within": within, "largest": largest, "mean": [v / (3.0 * 1023.0 * n) for v in sums],
+            "alpha_a": alpha_a, "alpha_b": alpha_b, "alpha_both": both}
 
 
 # --- the commands --------------------------------------------------------------------------------------------
@@ -632,7 +771,8 @@ def cmd_replay(args):
         c31[0], c31[1], c46x, c47x, "tf1 = the blurred beams, tf2 = layer 2 (the research's reading by the weights: inference)"
         if args.sun_roles == "research" else "EXCHANGED: tf1 = layer 2, tf2 = the blurred beams"))
     draws, other = load_layer_draws(path, args.frame)
-    one, two, lines = sun_layer(draws, _scene_depth(fr, draws), pr.SCENE_W, pr.SCENE_H, _texture_of(fr))
+    drawn = {}
+    one, two, lines = sun_layer(draws, _scene_depth(fr, draws), pr.SCENE_W, pr.SCENE_H, _texture_of(fr), drawn)
     print()
     print("the sun layer, %d x %d, %d draws:" % (pr.SCENE_W // 2, pr.SCENE_H // 2, len(draws)))
     for line in lines:
@@ -682,7 +822,67 @@ def cmd_replay(args):
         _rows_png("%s_tf1.png" % args.png, tf1)
         _rows_png("%s_tf2.png" % args.png, tf2)
         print("wrote %s_{B,C,final,layer1_x4,layer2,tf1,tf2}.png (no ramp; layer 1 times 4)" % args.png)
+    if getattr(args, "write", None):
+        ramp = pr.load_ramp(getattr(args, "ramp", None))
+        for name, picture in (("B", pictures["B"]), ("C", pictures["C"]), ("final", front)):
+            pr.write_dump("%s_%s.rgba" % (args.write, name), pr.SCENE_W, pr.SCENE_H, pr.to_bytes(picture, ramp))
+        write_layer("%s_layer1.r10" % args.write, one, drawn["layer1"])
+        write_layer("%s_tf1.r10" % args.write, tf1)
+        write_layer("%s_tf2.r10" % args.write, tf2)
+        print("wrote %s_{B,C,final}.rgba (%s) and %s_{layer1,tf1,tf2}.r10 (layer 1: %d texels drawn)" % (
+            args.write, "no ramp" if not ramp else "through the ramp `%s`" % args.ramp, args.write, sum(drawn["layer1"])))
     return 0
+
+
+def cmd_layers(args):
+    """The native pass's dumps of a fed run against the reference's (replay --write)."""
+    stem = args.dump[:-5] if args.dump.endswith(".rgba") else args.dump
+    status = 0
+    for name in ("layer1", "tf1", "tf2"):
+        w, h, a = read_layer("%s_%s.r10" % (stem, name))
+        w2, h2, b = read_layer("%s_%s.r10" % (args.reference, name))
+        if (w, h) != (w2, h2):
+            raise ReplayError("%s: %d x %d against %d x %d" % (name, w, h, w2, h2))
+        c = layer_compare(a, b)
+        n = c["texels"]
+        print("%-6s %d x %d: equal %.2f%%, within 1 level of 1,023 %.2f%%, within 2 %.2f%%, within 4 %.2f%%, within 8 %.2f%%, largest "
+              "%d; mean native %.5f, reference %.5f (ratio %s)" % (
+                  name, w, h, 100.0 * c["equal"] / n, 100.0 * c["within"][1] / n, 100.0 * c["within"][2] / n, 100.0 * c["within"][4] / n,
+                  100.0 * c["within"][8] / n, c["largest"], c["mean"][0], c["mean"][1],
+                  "%.4f" % (c["mean"][0] / c["mean"][1]) if c["mean"][1] else "-"))
+        if name == "layer1":
+            print("       the beam source's drawn texels (alpha set): native %d, reference %d, in both %d" % (
+                c["alpha_a"], c["alpha_b"], c["alpha_both"]))
+            if c["alpha_b"] == 0 or abs(c["alpha_a"] - c["alpha_b"]) > 0.02 * c["alpha_b"]:
+                status = 1
+        if c["within"][8] < 0.99 * n:
+            status = 1
+    w, h, a = pr.read_dump(args.dump)
+    w2, h2, b = pr.read_dump("%s_C.rgba" % args.reference)
+    if (w, h) != (w2, h2):
+        raise ReplayError("the picture: %d x %d against %d x %d" % (w, h, w2, h2))
+    print()
+    print("%s against %s_C.rgba (%d x %d), absolute difference in 8-bit levels (signed: the first less the second)" % (args.dump, args.reference, w, h))
+
+    def line(text, st):
+        print("%-36s %8d px: median %.2f, 90%% %.2f, largest %g; within 1 level %.2f%%, within 2 %.2f%%, within 8 %.2f%%; mean signed "
+              "(%+.3f, %+.3f, %+.3f)" % (text[:36], st["pixels"], st["median"], st["p90"], st["max"], 100 * st["within"][1],
+                                         100 * st["within"][2], 100 * st["within"][8], *st["signed"]))
+
+    whole = pr.difference_stats(a, b, w, h, channels=4, scale=1.0)
+    line("whole picture", whole)
+    for name in args.region_file or []:
+        doc = json.loads((pr.REPO / "docs" / "native-renderer" / (name + ".json")).read_text(encoding="utf-8"))
+        for r in doc.get("spots", {}).get(args.spot, {}).get("regions", []):
+            x0, y0, x1, y1 = pr.region_box(r["rect"], w, h)
+            spans = [[(x0, min(x1, w))] if y0 <= y < y1 else [] for y in range(h)]
+            st = pr.difference_stats(a, b, w, h, spans, channels=4, scale=1.0)
+            if st:
+                line(r["name"], st)
+    print("whole picture, %s" % pr.oracle_verdict(whole)[1])
+    print("the layer's pictures: %s" % ("the beam source's count within 2% of the reference's and each picture within 8 levels of "
+                                        "1,023 on at least 99% of its texels" if status == 0 else "NOT within those bounds"))
+    return status
 
 
 def main(argv=None):
@@ -696,11 +896,19 @@ def main(argv=None):
     p.add_argument("--region-file", action="append", metavar="NAME", help="a region file of docs/native-renderer, without .json")
     p.add_argument("--spot", default="sunward")
     p.add_argument("--png", metavar="PREFIX")
+    p.add_argument("--write", metavar="PREFIX", help="the reference for the oracle feed's sun part: pictures and the layer's words")
+    p.add_argument("--ramp", help="a log with the run's ramp line (as post_replay.py replay --ramp)")
     p.set_defaults(run=cmd_replay)
     p = sub.add_parser("quads")
     p.add_argument("capture")
     p.add_argument("frame", type=int)
     p.set_defaults(run=cmd_quads)
+    p = sub.add_parser("layers")
+    p.add_argument("dump", help="logs/native_post_dump_<stamp>.rgba of a fed run (its _layer1.r10, _tf1.r10, _tf2.r10 beside it)")
+    p.add_argument("reference", help="the prefix of replay --write")
+    p.add_argument("--region-file", action="append", metavar="NAME")
+    p.add_argument("--spot", default="sunward")
+    p.set_defaults(run=cmd_layers)
     args = ap.parse_args(argv)
     try:
         return args.run(args)

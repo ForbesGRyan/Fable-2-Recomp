@@ -118,6 +118,15 @@ class ResolveTest(unittest.TestCase):
         self.assertTrue(ev[0]["resolve"])
         self.assertIsNone(ev[0]["copy"]["base"])
 
+    def test_copy_registers_reset_after_a_resolve_make_no_second_resolve(self):
+        # The game's own stream (run 1, native_discovery_20261009_205049.jsonl): after the resolve the copy
+        # control and info are written back to 0 and the mode to colour, then the next rectangle is drawn.
+        d = RESOLVE + type0(0x2318, 0) + type0(0x231B, 0) + type0(0x2208, 4) + type3(0x22, 0, 0x00030088)
+        ev = pt.draw_events(d)
+        self.assertEqual([e["resolve"] for e in ev], [True, False])
+        self.assertEqual(ev[1]["fresh"], [0x2318, 0x231B])
+        self.assertEqual(ev[1]["copy"]["base"], 0x12D69000)
+
     def test_a_resolve_issued_as_draw_indx_is_not_what_the_sdk_forces(self):
         d = type0(0x2318, 0, 0x12D69000, COPY_PITCH, COPY_INFO) + type3(0x22, 0, 0x00030088)
         e = pt.draw_events(d)[0]
@@ -444,10 +453,15 @@ class CaptureTest(unittest.TestCase):
 
     def test_resolves_fails_without_one_base(self):
         with tempfile.TemporaryDirectory() as d:
-            # The base moves from frame to frame.
-            status, text = self.run_report(pt.report_resolves, pt.load_capture(self.write(d, base_step=0x20000)))
-            self.assertEqual(status, 1)
-            self.assertIn("outcome (i) NOT reached", text)
+            # The base moves from frame to frame (the game's: two addresses in turn): each is named.
+            status, text = self.run_report(pt.report_resolves, pt.load_capture(self.write(d, base_step=0x36000)))
+            self.assertEqual(status, 0)
+            self.assertIn("outcome (i), with a ring: one resolve after the luminance pass in each of 2 frames, "
+                          "2 bases: 0x12D69000, 0x12D9F000", text)
+            self.assertIn("by frame: 1:12D69000 2:12D9F000", text)
+            self.assertIn("A = 0x12D69000 in 1 frames", text)
+            self.assertIn("A = 0x12D9F000 in 1 frames", text)
+            self.assertNotIn("NOT reached", text)
         with tempfile.TemporaryDirectory() as d:
             # No resolve after the luminance pass at all.
             status, text = self.run_report(pt.report_resolves, pt.load_capture(self.write(d, lum_resolves=0)))

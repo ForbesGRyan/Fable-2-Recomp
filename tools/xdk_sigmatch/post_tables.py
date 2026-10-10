@@ -7,8 +7,8 @@ Decoders (pure, tested on hand-made bytes in tests/test_post_tables.py):
   draw_events(dwords)          -> every draw packet (PM4_DRAW_INDX 0x22, PM4_DRAW_INDX_2 0x36) of such a run
                                   with its initiator, and the copy registers 0x2318..0x231B and RB_MODECONTROL
                                   as the run's own packets left them at that draw: a resolve is a draw in copy
-                                  mode (RB_MODECONTROL's low three bits 6) or one whose copy registers the run
-                                  wrote since its previous draw.
+                                  mode (RB_MODECONTROL's low three bits 6), or, in a run that never writes the
+                                  mode, one whose copy registers the run wrote since its previous draw.
   decode_copy(control, base, pitch, info) -> the fields of the four copy registers (SDK registers.h).
   decode_table(bytes)          -> the composite's table: 512 floats, each stored big-endian (1D k_32_FLOAT,
                                   endian 8-in-32: fetch constant 04000956 1FAA00A4 000001FF 010016D1 .. ..).
@@ -172,7 +172,9 @@ def draw_events(dwords):
             "prim": None if initiator is None else initiator & 0x3F,
             "indices": None if initiator is None else initiator >> 16,
             "copy": decode_copy(*(regs.get(r) for r in COPY_REGS)), "fresh": sorted(fresh), "mode": mode,
-            "resolve": bool(fresh) or (mode is not None and (mode & 7) == 6),
+            # The run's own mode word decides where it has one: the game writes the copy registers once more
+            # after a resolve (control and info back to 0), before an ordinary draw in colour mode.
+            "resolve": (mode & 7) == 6 if mode is not None else bool(fresh),
         })
         fresh = set()
     return out
@@ -584,28 +586,33 @@ def report_resolves(cap, frame=None, show_all=False):
         if len(ev) != 1 or len(b) != 1:
             complete = False
         bases.update(b)
-    if frames and complete and len(bases) == 1:
-        a = bases.pop()
-        e = after_lum[frames[0]][0]
-        print("outcome (i): one resolve after the luminance pass in each of %d frames, one base: A = 0x%08X" % (
-            len(frames), a))
-        print("  %s" % describe_event(e))
-        print("  the SDK's forced read-back takes it (PM4_DRAW_INDX_2, rectangles, 3 indices): %s" % (
-            "yes" if all(forced_by_sdk(x) for n in frames for x in after_lum[n]) else "NO"))
-        near = {}
-        for n in frames:
-            for x, last, _ in frame_resolves(cap.frames[n]):
+    if frames and complete:
+        ring = sorted(bases)
+        if len(ring) == 1:
+            print("outcome (i): one resolve after the luminance pass in each of %d frames, one base: A = 0x%08X" % (
+                len(frames), ring[0]))
+        else:
+            print("outcome (i), with a ring: one resolve after the luminance pass in each of %d frames, %d bases: %s" % (
+                len(frames), len(ring), ", ".join("0x%08X" % a for a in ring)))
+            print("  by frame: " + " ".join("%d:%08X" % (n, after_lum[n][0]["copy"]["base"]) for n in frames))
+        every = [(x, last) for n in frames for x, last, _ in frame_resolves(cap.frames[n])]
+        for a in ring:
+            mine = [after_lum[n][0] for n in frames if after_lum[n][0]["copy"]["base"] == a]
+            print("  A = 0x%08X in %d frames: %s" % (a, len(mine), describe_event(mine[0])))
+            print("  the SDK's forced read-back takes it (PM4_DRAW_INDX_2, rectangles, 3 indices): %s" % (
+                "yes" if all(forced_by_sdk(x) for x in mine) else "NO"))
+            near = {}
+            for x, last in every:
                 b = x["copy"]["base"]
                 if b is not None and b != a and a <= b < a + FORCE_WINDOW:
-                    near.setdefault(b, []).append((n, last[1][:4] if last else "-"))
-        for b in sorted(near):
-            print("  another resolve within 64 KiB above A: 0x%08X, %d times (after %s)" % (
-                b, len(near[b]), ", ".join(sorted({p for _, p in near[b]}))))
-        if not near:
-            print("  no other resolve has its base in [A, A + 64 KiB)")
+                    near.setdefault(b, []).append(last[1][:4] if last else "-")
+            for b in sorted(near):
+                print("  another resolve within 64 KiB above A: 0x%08X, %d times (after %s)" % (
+                    b, len(near[b]), ", ".join(sorted(set(near[b])))))
+            if not near:
+                print("  no other resolve has its base in [A, A + 64 KiB)")
         return 0
-    print("outcome (i) NOT reached: the rows do not name one resolve with one base after the luminance pass in "
-          "every frame")
+    print("outcome (i) NOT reached: the rows do not name one resolve after the luminance pass in every frame")
     return 1
 
 

@@ -4376,6 +4376,167 @@ The verdict of criterion 7 stands, **not met as written**, on this binary too: a
 18. **Run 435's camera**: the bridge's emulated picture stood elsewhere in one run of four with the same plan; cause not established.
 19. **A tally by pixel shader on the Fog line** (the fix wave's review, C1; not built): `lit N not fogged {shader: N}`, as the Light line has it for unlit draws. The reason: the count of lit draws not fogged moves by itself, as the game swaps plant batches to `26052DEF...` with the fog's start, so a second, wrongly excluded shader would not stand out in the bare number (ruling 21's cost).
 
+## 17. The post chain
+
+Sub-project 10 (spec `docs/superpowers/specs/2026-10-09-native-renderer-post-design.md`, plan
+`docs/superpowers/plans/2026-10-09-native-renderer-post.md`): the game's exposure, composite,
+bloom, sun layer and sky furniture. This section grows task by task.
+
+### Discovery
+
+Plan Task 1, capture only: nothing the pass draws changed. Evidence in
+`out/native-evidence/post/` (`t1_*`); captures in `out/build/win-amd64-release/logs/`. All five
+runs were made by the controller with `-UserPresent` (`RUN UNCHECKED`, the last line of each
+`t1_<run>_driver.txt`), under `--readback_resolve=full`; their frame rates are no timing
+evidence (a capture at every draw runs at 2 to 20 fps). What is used of them is what the
+captures hold; the captures show the game advancing (the eye moves, the exposure moves). The
+shots were not looked at for this section.
+
+| Run | Log | Capture(s) | What |
+|---|---|---|---|
+| 1 | 436 | `native_discovery_20261009_205049.jsonl`, 40 frames | bridge, standing |
+| 2 | 437 | `..._205229` (4 frames, 36 s), `..._205303` (4 frames, 70 s) | the 60-frame capture was lost (its token came while the first capture was still writing) |
+| 2b | 440 | `..._205802` (4 frames, 34 s), `..._205815` (60 frames from 47 s) | two turns of the camera, the second inside the long capture |
+| 5a | 438 | `..._205445`, 8 frames | third spot |
+| 5b | 439 | `..._205645`, 8 frames | under the trees |
+
+**What a capture holds since this task** (commits `01caf6a`, `0ca7dc7`):
+
+- `"resolve"` rows: every outermost call of `DrawIndx2:821EF988` (the clear routine) with the
+  dwords it wrote to the command buffer (`"cmd"`, hex in guest order, at most 512 dwords;
+  `"cmd_ok"`). Run 1: 2,640 rows, all with dwords (66 a frame).
+- `"cmdgap"` rows: the command stream between two consecutive outermost hooked draws of a
+  thread, written when it names a copy register (`0x2318..0x231B`; `NamesCopyRegisters`,
+  `discovery_format.h`; at most 2,048 dwords). They exist because **the post chain's resolves do
+  not pass through any hooked routine**: between the `"verts"` rows of two post rectangles no
+  hooked call lies (seen first in `native_discovery_20261009_092959.jsonl`, frame 1, between the
+  luminance pass's row and the bright pass's). Run 1: 54,825 rows (the copy registers are
+  written with most draws' state, so most rows hold no resolve; the reader decides).
+- The post buffers by content: a 2D texture whose base is the front buffer `0x1ECFF000` or lies
+  in [`0x12A00000`, `0x12E00000`) (`render::PostBufferBase`) is dumped once per content, formats
+  7 and 54 in full; at most 1,024 content files and 512 MB of targets a capture (run 1 reached
+  the bytes after frame 17: later frames have their tables only).
+- Under `--readback_resolve` the block [`0x12A00000`, `0x12E00000`) whole at the end of a
+  capture's frames 1 and 2 (`mem_12A00000_f<N>.bin`, a `"memdump"` row).
+- In the game log, with a composite view: `[native] ramp: read at clay frame N: valid V, <2,304
+  hex digits>` at the first read and at every change (256 entries of nine digits `rrrgggbbb`,
+  each channel the 10-bit value as three hex digits), and `[native] ramp: changes C (reads R,
+  without a table F)` with the 300-frame lines.
+
+`tools/xdk_sigmatch/post_tables.py` reads them: `resolves` (walks the PM4 packets of both row
+kinds; a resolve is a draw packet under `RB_MODECONTROL` 6), `table`, `ramp`, `find-luminance`,
+`downsample`.
+
+**Question 1: where the luminance is resolved to** (`t1_run1_resolves.txt`). Outcome (i), with
+a finding the plan did not expect: **two addresses in turn**. In each of run 1's 40 frames
+exactly one resolve follows the `"verts"` row of the luminance pass `5821366EE8FDE893`; its
+destination is `0x1A385000` in the odd frames and `0x1A34F000` in the even ones (20 each; they
+lie `0x36000` = 221,184 bytes apart, which is the tiled size of the buffer: 280 x 180 texels of
+4 bytes at pitch 288). Both resolves are the same but for the base:
+
+```
+RB_COPY_DEST_BASE 0x1A34F000 | 0x1A385000   RB_COPY_DEST_PITCH: pitch 288, height 180
+RB_COPY_DEST_INFO: format 36 (k_32_FLOAT), endian 2 (8-in-32)
+RB_COPY_CONTROL 0x00100000 (copy command 1, convert; source 0; no clear)   RB_MODECONTROL 6
+PM4_DRAW_INDX_2, initiator 0x00030088: rectangle list, 3 indices
+```
+
+The SDK's rule for a forced read-back (`PM4_DRAW_INDX_2`, a rectangle list, 3 indices) matches
+both in all 40 frames. No other resolve of a frame has its base in [A, A + 64 KiB) for either A
+(85 to 88 resolves a frame). The two bases are farther apart than the SDK's 64 KiB window, so a
+forced list needs both entries. The pitch is 288, not the 320 of the surface; neither address
+is in the block the research and the plan looked in (`0x12A00000` on), so the memory dump could
+not have held it: `find-luminance` found no plane (`t1_run1_find_luminance.txt`), which says
+nothing more than that. That the CPU reads these two buffers is still the research's inference;
+Task 2's run (only these addresses forced) is its proof. By the alternation the CPU can read
+one buffer while the GPU fills the other (inference).
+
+The other post resolves, as the same rows give them (frame 1): radial blurs to `0x12CFD000`
+(format 7), the downsample to `0x12D33000` (format 32, `k_16_16_16_16_FLOAT`, endian 1), bright
+pass and both blurs to `0x12D9F000` (format 7), all at pitch 288, height 180, all
+`PM4_DRAW_INDX_2` rectangle lists of 3 indices. After each resolve the game writes the copy
+control and info back to 0 and draws the next rectangle in colour mode (`RB_MODECONTROL` 4).
+
+**Question 2: the adaptation** (`t1_run2b_series_205815.txt`, `t1_run2b_eye_205815.txt`,
+`t1_run2b_table_205815.txt`; run 2b's 60 consecutive guest frames). `c20.w` falls from 9.271 to
+7.738, in every frame, by at most 0.0712 a frame (0.8% of its value; frames 3 and 4), the steps
+shrinking to 0.002 at the end (by about 6% a frame: 0.071 at frame 3, 0.0020 at frame 59); the
+steps come in pairs of nearly equal size (-0.0706, -0.0666, -0.0662, -0.0674, -0.0669, -0.0587,
+-0.0583, ..): the rate is renewed every second frame, as the two luminance buffers would have it
+(inference). The table moves with it in every frame (largest change of a texel 0.0031 a frame;
+T at scene luminance 1 from 0.2176 to 0.2707, `T(3) / T(0.1)` from 1.448 to 1.551). **The
+bright pass's `c77.y * c20.w` is 1 within 5.7e-08 in all 60 frames** (and within 4.4e-08 in the
+other 68 frames of the five runs): the pairing rule of spec ruling 11 holds while the exposure
+moves; no frame would fall back.
+
+What this capture does not show: the lag between a turn and the exposure's first move. The
+camera's eye moves in frames 3 to 6 (the second turn), but the scale was already falling in
+frames 1 to 3 and shows no change of pace at or after the turn that could be told from its
+settling. The exposure was not at rest in any capture of run 2b: 12 s earlier
+(`..._205802`, 34 s after the start) `c20.w` was 11.70 falling by 0.14 a frame, on its way down
+from the blind 16 of the game's start; run 2's two captures show 8.845 (36 s, before its turns)
+and 7.606 (70 s, after them, constant over 4 frames), the research's "8.4 to 7.4" seen as 8.85
+to 7.61. So: speed measured (a step of at most 0.8% a frame, an approach by about 6% a frame),
+scale and table of one frame belong together (the pairing), lag not measured.
+
+**Question 4: the ramp** (`t1_run1_ramp.txt` and the other four). The reader works: one table
+is logged at the first composite frame of each run, valid, the three channels equal in all 256
+entries, **the same 2,304 digits in all five runs**, and `changes 0` wherever a 300-frame line
+was written (602, 902 and 303 reads in runs 1, 2 and 5a). Entries 0, 64, 128, 192, 255: 0, 193,
+462, 741, 1023. Against the pairs of spec criterion 4 (front-buffer level to shot level,
+measured on run 395's shot):
+
+| Level | 23 | 47 | 63 | 124 | 156 | 204 | 236 | 252 |
+|---|---|---|---|---|---|---|---|---|
+| measured on the shot | 10 | 32 | 47 | 110 | 144 | 197 | 232 | 250 |
+| the table (entry * 255 / 1023) | 9.7 | 31.2 | 47.1 | 110.9 | 145.3 | 197.9 | 233.6 | 251.3 |
+
+**Criterion 4 as written (within 1 level) is not met**: five pairs are within 1, three are off
+by 1.3, 1.6 and 1.3 (levels 156, 236, 252); against all 23 pairs of
+`out/tests/post-research/ramp_092959.txt` the largest difference is 1.74 and the median 1.05,
+the table the brighter from level 63 up. The table is the SDK's own, so what differs is either the
+measurement (medians of a window shot scaled to the front buffer's size) or something the
+presenter does after the blit (dithering or rounding to 8 bits); which, is not known. The
+table, not the eight numbers, is what Task 5 should take.
+
+**Question 5: dark and bright places** (`t1_run5a_table.txt`, `t1_run5b_table.txt`). Third
+spot: `c20.w` 8.456 to 8.453, T at 0.1 / 1 / 3 = 0.200 / 0.243 / 0.297, `T(3) / T(0.1)` 1.49.
+Under the trees: `c20.w` 8.524 to 8.569, T = 0.188 / 0.243 / 0.299, ratio 1.59. Over all 128
+frames of the five runs: `c20.w` between 7.606 and 11.705, every table finite with texel 0 = 0
+and its largest texel between 0.2095 and 0.3672, the composite's and bright pass's registers as
+near the bridge's (`c31.x` 2.9719 to 2.9743, `c46.x` 0.25, `c47.x` 50, `c77.x` -0.0046 to
+-0.0057, `c77.y` 1.1016 to 1.1035, `c78.x` 0.45455; bright `c31.x` 1.4859 to 1.4872, `c46.x` 0.2,
+`c47.x` 2, `c77.x` 0.0857 to 0.0885, `c77.y` 0.0854 to 0.1315, which is 1 / `c20.w`).
+**Every rule of `MakePostBlock` as plan Task 4 states it holds in 128 of 128 frames**; the
+table's fetch constant is the pin in all. The view under the trees is not much darker for the
+game than the bridge (its scale differs by 1%): a really dark view is still not captured.
+
+**Question 6: the downsample's form** (`t1_run1_downsample.txt`). Not settled. In the 17
+frames of run 1 whose buffer was dumped, the content of `0x12D33000` at the luminance pass's
+row is no downsample of the scene the downsample pass's row names: the nearest form in the
+nearest frame differs by a median of 2.25 against a median level of 0.71. The buffer's memory
+holds neither form when the capture reads it (the guest runs ahead of the GPU, and the sun
+layer's 560 x 360 resolves into `0x12CFD000` reach over this address: inference from the sizes).
+The four-texel form stands on the microcode reading and on variant B's fit alone, as the spec's
+table of open questions provides.
+
+**Row order** (`t1_run1_table.txt` and the others): the composite's row precedes the frame row
+of the same frame in 40 of 40 frames of run 1, and in all 128 frames of the five runs: a block
+read at the composite's call is in the frame's own scene (spec "Frame pairing", ruling 10).
+
+**The ramp's source** (controller ruling 20): `src/core/sdk_gamma_ramp.h` reads the SDK's
+256-entry table through `CommandProcessor::gamma_ramp_256_entry_table()`, which is a protected
+member (the spec's "public accessors" was wrong for this one): named through a derived class's
+using-declaration, no SDK change. The table is written on the command-processor thread (packet
+execution) and read in the post-processor callback on that thread; a public accessor upstream
+replaces the file.
+
+**Contradictions with the spec and the plan, in one place**: the luminance resolve has two
+addresses, not one, outside the expected block, at pitch 288 (Task 2's `kLuminanceResolveBase`
+and its four-case list need two addresses); the resolve rows of the plan's hook cannot see a
+post resolve (`"cmdgap"` rows do); the ramp accessor is protected; criterion 4's tolerance is
+not met by the table itself; the adaptation's lag was not measurable; question 6 stays open.
+
 ## Pending
 
 1. **Pitch ablation** (done 2026-10-01, results in section 4; kept for re-runs). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):

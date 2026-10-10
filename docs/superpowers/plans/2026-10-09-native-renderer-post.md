@@ -766,7 +766,10 @@ the frame map's "Limits" and nothing else.
 > documents as limits unless it builds it: (1) the cubes (`D1CC`) are the far water; **the far lake is not in
 > the native depth** (`2B09` is not drawn natively), so the layer sees the lake's bed, a limit for a sun low
 > over open water (the cube's floor is no quad: 8 vertices, 30 indices, `c119.x`); (2) the two cubes at
-> 20.0024 are unidentified; (3) the tree draws (`4325` / `F1EB`) are the scene's leaf draws issued after the
+> 20.0024 are unidentified; (3) **rewritten after the review of Tasks 14 and 15 and rulings 36 and 39: "nothing to build" was wrong.**
+> The late leaf draws are faded to half by the game (`c15.w` 0.5: one sample of two), are NOT in its depth copy, and were whole in
+> the native depth the layer copied; the layer's depth is now taken before them (frame map, "The layer's depth place"). The
+> `F1EB` redraw itself is not built (ruling 39). The first writing: the tree draws (`4325` / `F1EB`) are the scene's leaf draws issued after the
 > depth copy, which the native depth holds already: nothing to build, the difference left is `F1EB`'s alpha
 > rule against the native leaf pass's; (4) the native picture has no distant trees: beams pass where the game's
 > far woods stand; (5) the dog's fur shells (`014F`) write depth after the copy, have no occluder and are not

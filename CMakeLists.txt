@@ -176,7 +176,9 @@ endif()
 # bottom of fable2_func_trace.h (which redefines REX_FUNC_PROLOGUE) runs with
 # the generated pch already loaded, and the patched macro is baked into the
 # PCH used by every recompiled TU.
-if(TARGET fable_2_recomp)
+option(FABLE2_FUNC_TRACE
+    "Compile the guest function-call trace hook into every recompiled function (a call per guest function entry even when tracing is off; OFF removes it for performance builds)" ON)
+if(TARGET fable_2_recomp AND FABLE2_FUNC_TRACE)
     target_precompile_headers(fable_2_recomp PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/core/fable2_func_trace.h)
 endif()

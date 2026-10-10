@@ -23,8 +23,16 @@ in the order of the list, which is the order of the record's kinds (plan Task 12
 A list is refused (ValueError naming the shader) rather than read loosely: a hash is 16 hex digits (written
 in upper case), never zero, listed once whatever its letters' case; a kind is one of the eight, once; at most
 12 registers, each an integer 0 to 251 (c252 on are literals), ascending without repeats; one to three
-different slots 0 to 31; a shader of the post chain's eight is no quad; and a shader without a machine check
-(not in POST_FURNITURE_SHADERS, pixel or vertex) is not written (spec ruling 18); an empty list is no table.
+different slots 0 to 31; a kind is drawn where the game draws it (KIND_TARGETS) and "depth" is the blend of
+the layer's depth and of nothing else; a shader of the post chain's eight is no quad; and a shader without a
+machine check is not written (spec ruling 18): the pixel shader must be among the checked pixel shaders and
+its vertex shader among the checked vertex shaders (a pixel shader's hash is no vertex shader). generate()
+has no open default: the caller names what is excluded and what is checked. An empty list is no table.
+
+The table says what may be read, not what is read: a reader takes "not in the table" as "not read" and uses
+the two counts (a padded register 0 and a padded slot 0 are valid numbers). alpha_test is what every captured
+row had; the record carries the draw's own words (ruling 23: on / off, function, reference), and with the
+test off register 0x210E still holds a stale 0.502, so the enable bit is what tells, never the reference.
 
 usage: gen_post_quad_table.py --out src/native/capture/post_quad_table.inc
 """
@@ -41,6 +49,9 @@ KINDS = {"moon": "Moon", "cloud": "Cloud", "glare": "Glare", "beam-source": "Bea
          "moon-glow": "MoonGlow", "sun-disc": "SunDisc", "cloud-occluder": "CloudOccluder"}
 TARGETS = {"scene": ("Scene", 0), "layer-depth": ("LayerDepth", 1), "layer1": ("Layer1", 1), "layer2": ("Layer2", 1)}
 BLENDS = {"alpha": "Alpha", "add": "Add", "none": "Replace", "depth": "Depth"}
+# Where each kind is drawn in every captured row: the main scene's target, or one of the sun layer's.
+KIND_TARGETS = {"moon": "scene", "cloud": "scene", "glare": "scene", "beam-source": "layer1", "flare": "layer2",
+                "moon-glow": "layer2", "sun-disc": "layer2", "cloud-occluder": "layer-depth"}
 MAX_REGISTERS, MAX_SLOTS = 12, 3            # QuadRecord::ps and QuadRecord::fetch
 ARGUMENTS = 7 + 1 + MAX_SLOTS + 1 + MAX_REGISTERS
 _HASH = re.compile(r"[0-9A-Fa-f]{16}")
@@ -59,14 +70,14 @@ def _integers(values, lo, hi):
     return all(isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi for v in values)
 
 
-def generate(shaders, not_quads=(), checked=None):
-    """The table text for a list of light_formulas.PostQuadShader. not_quads: hashes that must not be in it;
-    checked: the hashes that have a machine check (None: no such condition)."""
+def generate(shaders, not_quads, checked_ps, checked_vs):
+    """The table text for a list of light_formulas.PostQuadShader. not_quads: hashes that must not be in it
+    (the post chain's); checked_ps, checked_vs: the pixel and the vertex shaders that have a machine check."""
     shaders = list(shaders)
     if not shaders:
         raise ValueError("no quad shader: the table is not generated from an empty list")
     excluded = {int(h, 16) for h in not_quads}
-    known = None if checked is None else {int(h, 16) for h in checked}
+    known_ps, known_vs = {int(h, 16) for h in checked_ps}, {int(h, 16) for h in checked_vs}
     seen, kinds, lines = set(), set(), []
     for s in shaders:
         value = _hash(s.hash, "pixel shader")
@@ -77,8 +88,10 @@ def generate(shaders, not_quads=(), checked=None):
         seen.add(value)
         if value in excluded:
             raise ValueError(f"{name}: not a quad of the furniture (a shader of the post chain)")
-        if known is not None and (value not in known or vs not in known):
-            raise ValueError(f"{name}: no machine check of it or of its vertex shader {vs:016X} (POST_FURNITURE_SHADERS)")
+        if value not in known_ps:
+            raise ValueError(f"{name}: no machine check of the pixel shader (POST_FURNITURE_SHADERS)")
+        if vs not in known_vs:
+            raise ValueError(f"{name}: no machine check of {vs:016X} as a vertex shader (POST_FURNITURE_SHADERS)")
         if not isinstance(s.kind, str) or s.kind not in KINDS:
             raise ValueError(f"{name}: kind {s.kind!r} is not one of {', '.join(KINDS)}")
         if s.kind in kinds:
@@ -97,6 +110,10 @@ def generate(shaders, not_quads=(), checked=None):
             raise ValueError(f"{name}: where {s.where!r} is not one of {', '.join(TARGETS)}")
         if not isinstance(s.blend, str) or s.blend not in BLENDS:
             raise ValueError(f"{name}: blend {s.blend!r} is not one of {', '.join(BLENDS)}")
+        if s.where != KIND_TARGETS[s.kind]:
+            raise ValueError(f"{name}: a {s.kind} is drawn at {KIND_TARGETS[s.kind]}, not at {s.where}")
+        if (s.blend == "depth") != (s.where == "layer-depth"):
+            raise ValueError(f"{name}: blend {s.blend} at {s.where}: depth is the layer depth's blend and only its")
         if not isinstance(s.test, bool):
             raise ValueError(f"{name}: test {s.test!r} is not True or False")
         target, layer = TARGETS[s.where]
@@ -110,7 +127,8 @@ def generate(shaders, not_quads=(), checked=None):
 def table():
     """The table of light_formulas.POST_QUAD_SHADERS."""
     return generate(lf.POST_QUAD_SHADERS, not_quads=[s.hash for s in lf.POST_SHADERS],
-                    checked=[s.hash for s in lf.POST_FURNITURE_SHADERS])
+                    checked_ps=[s.hash for s in lf.POST_FURNITURE_SHADERS if s.stage == "frag"],
+                    checked_vs=[s.hash for s in lf.POST_FURNITURE_SHADERS if s.stage == "vert"])
 
 
 def main(argv=None):

@@ -1101,8 +1101,14 @@ def post_composite(scene, bloom, table, c31x, c46x, c47x, c77, c78x, clamp=True)
 # blue, alpha as the fetch delivers it; the fetch is at the interpolated coordinate of the quad's corner
 # values, slot 13, filtered as the fetch constant says: linear with mips, wrap, in every captured row). The
 # clouds and their occluder compute their own coordinate and take the texture: `tex(u, v, dx, dy)` at the
-# normalised coordinate (u, v), moved by (dx, dy) texels of the level the sampler reads (the fetches'
-# OffsetX / OffsetY), returning the four channels.
+# normalised coordinate (u, v), moved by (dx, dy) texels (the fetches' OffsetX / OffsetY), returning the four
+# channels. TEXELS OF WHICH LEVEL is open, and the caller's tex decides it: the SDK's translator applies a
+# fetch's offsets in texels of the BASE level whatever level is sampled (dxbc_translator_fetch.cpp, "Get
+# offsets applied to the coordinates before sampling": "FIXME: Offsets need to be applied at the LOD being
+# fetched, not at LOD 0"), so every emulated picture and capture has a step of one base-level texel; the
+# console, by that note, steps one texel of the level fetched (not measured here or anywhere in this
+# project). The slope 6197 takes over two such steps is about 2^k times larger at level k under the
+# console's reading. The microcode check cannot tell (its field has one level).
 #
 # The literal registers (c254, c255) are the shaders' own; their values are the functions' defaults, read
 # from the captures' "ps_lit" / "vs_lit" rows (tests/test_post_sun_layer.py holds them to a capture). They are
@@ -1161,11 +1167,16 @@ POST_FURNITURE_SHADERS = (
 #               0), "layer1" (the beam source's picture), "layer2" (flares, moon glow, sun disc)
 #   blend       "alpha" (source alpha, inverse source alpha: 0x07060706), "add" (one, one: 0x01010101),
 #               "none" (0x00010001), "depth" (nothing but depth is written)
-#   test        whether the alpha test is on in every captured row (function greater; the reference is
-#               the draw's register 0x210E)
-# D72F is also drawn outside the layer: 8 calls a frame at the bridge into a target of pitch 280 before the
-# main scene, each a quad of no area (its first two corners equal). Those are not the layer's flares; a
-# record belongs to the layer only at the layer's target.
+#   test        the alpha test's enable bit (register 0x2202 bit 3) as every captured row has it; the
+#               function is "greater" wherever it is on. A record carries the draw's own words (ruling 23:
+#               on / off, function, reference). The enable bit is what tells: with the test off, register
+#               0x210E still holds a stale 0.502, the sun disc's reference.
+# A record is read only where its kind is drawn (ruling 24), kind by kind: moon, clouds and glare at the
+# main scene's target, inside the scene; the cloud occluders, the beam source, flares, moon glow and sun
+# disc at the sun layer's target, half the scene's size (pitch 560 in the captures: half of 1120, not a
+# number to carry). D72F is also drawn elsewhere: 4 to 16 calls a frame into a target of pitch 280 before
+# the main scene, each a quad of no area (its first two corners at one position). Those are not the layer's
+# flares. (5D67, no recorded kind, is likewise drawn twice a frame at a target of pitch 320.)
 PostQuadShader = collections.namedtuple("PostQuadShader", "hash kind vs registers slots where blend test")
 _QUAD_VS, _CLOUD_VS = "81BADE63A169E3DC", "C304C6A1AF18B46F"
 POST_QUAD_SHADERS = (
@@ -1284,10 +1295,12 @@ def post_cloud(tex, uv, P, c20w, c31, c46, c47, c51x, c69x, c70x, c71x, c77, c78
         t      = tex(uv * c31.xy + c46.xy)                         the layer's texture: colour and density
         alpha  = t.a * c69.x * fade(P, eye = c79)                  post_cloud_fade
         alpha <= c254.y (0.001):  rgb = 0
-        else:  g  = (t.a at +1 texel in x - t.a at -1, the same in y)       the density's slope
+        else:  g  = (t.a at +1 texel in x - t.a at -1, the same in y)       the density's slope (which
+                                                                   level's texel: open, see the part's head)
                N  = (g.x, g.y, c70.x) / |(g.x, g.y, c70.x)|
                Dn = (P - c77.xyz) / |P - c77.xyz|                  c77: a far point (the sun's side)
-               a1 = sat(-N . c78.xyz);  b1 = sat(-Dn . N);  b2 = sat(Dn . N)       c78: the view direction (captured)
+               a1 = sat(-N . c78.xyz);  b1 = sat(-Dn . N);  b2 = sat(Dn . N)       c78: the view direction (the
+                                                                   quads' matrix row c3.xyz in every capture)
                l  = b1^2 * (1 - t.a) + b2 * (1 + (1 - a1)^c255.x)
                rgb = (l * c47.rgb + c71.x) * c51.x * t.rgb
         out = (rgb * c20.w, alpha)

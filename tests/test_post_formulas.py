@@ -1012,7 +1012,7 @@ def cloud_form(**flag):
         fade = c254[3] - (ramp if flag.get("fade_unclamped") else lf.sat(ramp))
         if flag.get("no_fade"):
             fade = 1.0
-        alpha = a * (1.0 if flag.get("no_density_scale") else c69x) * fade
+        alpha = a * (1.0 if flag.get("no_density_scale") else abs(c69x) if flag.get("abs_density_scale") else c69x) * fade
         above = alpha >= c254[1] if flag.get("at_the_threshold") else alpha > c254[1]
         if flag.get("no_branch"):
             above = True
@@ -1020,6 +1020,10 @@ def cloud_form(**flag):
             k = 1.0 if -abs(P[0]) > c254[0] else 0.0
             if flag.get("dark_is_zero"):
                 k = 0.0
+            if flag.get("dark_component_y"):
+                k = 1.0 if -abs(P[1]) > c254[0] else 0.0
+            if flag.get("dark_not_strict"):
+                k = 1.0 if -abs(P[0]) >= c254[0] else 0.0
             return [k * c20w] * 3 + [alpha]
         step = 2 if flag.get("two_texels") else 1
         gx = tex(u, v, step, 0)[3] - tex(u, v, -step, 0)[3]
@@ -1028,7 +1032,7 @@ def cloud_form(**flag):
             gx, gy = -gx, -gy
         if flag.get("gradient_exchanged"):
             gx, gy = gy, gx
-        nz = 1.0 if flag.get("normal_z_one") else c70x
+        nz = 1.0 if flag.get("normal_z_one") else abs(c70x) if flag.get("abs_height") else c70x
         n2 = nz * nz + (gx * gx + gy * gy + c254[0])
         if flag.get("no_abs_normal"):
             inv = 1.0 / math.sqrt(n2) if n2 > 0 else 0.0
@@ -1079,9 +1083,11 @@ CLOUD_FLAGS = ("uv_exchanged", "distance_in_space", "fade_unclamped", "no_fade",
                "no_branch", "two_texels", "gradient_reversed", "gradient_exchanged", "normal_z_one", "far_point_is_the_eye",
                "direction_not_normalised", "light_unclamped", "sides_exchanged", "power_16", "no_power", "back_not_squared",
                "no_density_in_light", "ambient_first", "colour_reversed", "ambient_outside", "no_scale", "no_texture_colour",
-               "alpha_is_the_textures")
-# Wrong only where a literal is not the game's: caught by the trials that draw the literals.
-CLOUD_LITERAL_FLAGS = ("no_abs_distance", "no_abs_normal", "no_abs_power", "dark_is_zero")
+               "alpha_is_the_textures", "abs_density_scale", "abs_height")
+# Wrong only where a literal is not the game's: caught by the trials that draw the literals. (The dark
+# branch's colour is 0 with the literal c254.x = 0 whatever is compared with it.)
+CLOUD_LITERAL_FLAGS = ("no_abs_distance", "no_abs_normal", "no_abs_power", "dark_is_zero", "dark_component_y",
+                       "dark_not_strict")
 
 
 def _wrong_furniture():
@@ -1099,6 +1105,10 @@ def _wrong_furniture():
          lambda t, c31, c20w, clamp=True: P(t, (c31[2], c31[1], c31[0], c31[3]), c20w, clamp=clamp)),
         (MOON, "the texture's colour reversed",
          lambda t, c31, c20w, clamp=True: P((t[2], t[1], t[0], t[3]), c31, c20w, clamp=clamp)),
+        (MOON, "the texture's alpha not below 0 in the colour",
+         lambda t, c31, c20w, clamp=True: [t[i] * c31[i] * max(t[3], 0.0) * c20w for i in range(3)] + [c31[3] * t[3]]),
+        (MOON, "the texture's colour clamped", lambda t, c31, c20w, clamp=True: P([lf.sat(v) for v in t[:3]] + [t[3]], c31, c20w, clamp=clamp)),
+        (GLARE, "the texture's colour clamped", lambda t, c31, clamp=True: G([lf.sat(v) for v in t], c31, clamp=clamp)),
         (GLARE, "alpha is the texture's", lambda t, c31, clamp=True: G(t, c31, clamp=clamp)[:3] + [t[3]]),
         (GLARE, "times the texture's alpha", lambda t, c31, clamp=True: [x * t[3] for x in G(t, c31, clamp=clamp)[:3]] + [1.0]),
         (GLARE, "the register's colour reversed", lambda t, c31, clamp=True: G(t, c31[2::-1], clamp=clamp)),
@@ -1109,6 +1119,9 @@ def _wrong_furniture():
          lambda t, c31, c255x=1.0 / 6.0, clamp=True: [x * t[3] for x in B(t, c31, c255x, clamp=clamp)[:3]] + [1.0]),
         (BEAM, "the texture's colour reversed",
          lambda t, c31, c255x=1.0 / 6.0, clamp=True: B((t[2], t[1], t[0], t[3]), c31, c255x, clamp=clamp)),
+        (BEAM, "the texture's colour not below 0",
+         lambda t, c31, c255x=1.0 / 6.0, clamp=True: B([max(v, 0.0) for v in t], c31, c255x, clamp=clamp)),
+        (FLARE, "the texture's alpha clamped", lambda t, c31, clamp=True: F((0, 0, 0, lf.sat(t[3])), c31, clamp=clamp)),
         (FLARE, "the texture's red for its alpha", lambda t, c31, clamp=True: F((0, 0, 0, t[0]), c31, clamp=clamp)),
         (FLARE, "the texture's colour", lambda t, c31, clamp=True: G(t, c31, clamp=clamp)),
         (FLARE, "alpha is the texture's", lambda t, c31, clamp=True: F(t, c31, clamp=clamp)[:3] + [t[3]]),
@@ -1117,6 +1130,11 @@ def _wrong_furniture():
         (GLOW, "alpha 1", lambda t, c255x=0.2, clamp=True: W(t, c255x, clamp=clamp)[:3] + [1.0]),
         (GLOW, "no fifth", lambda t, c255x=0.2, clamp=True: W(t, 1.0, clamp=clamp)),
         (GLOW, "the texture's colour reversed", lambda t, c255x=0.2, clamp=True: W((t[2], t[1], t[0], t[3]), c255x, clamp=clamp)),
+        (GLOW, "alpha clamped", lambda t, c255x=0.2, clamp=True: W(t, c255x, clamp=clamp)[:3] + [lf.sat(t[3])]),
+        (GLOW, "the texture's alpha not below 0 in the colour",
+         lambda t, c255x=0.2, clamp=True: [t[i] * c255x * max(t[3], 0.0) for i in range(3)] + [t[3]]),
+        (DISC, "alpha clamped", lambda t, c31, c20w, clamp=True: S(t, c31, c20w, clamp=clamp)[:3] + [lf.sat(t[3])]),
+        (DISC, "alpha's absolute value", lambda t, c31, c20w, clamp=True: S(t, c31, c20w, clamp=clamp)[:3] + [abs(t[3])]),
         (DISC, "the moon's alpha", lambda t, c31, c20w, clamp=True: P(t, c31, c20w, clamp=clamp)),
         (DISC, "no output scale", lambda t, c31, c20w, clamp=True: S(t, c31, 1.0, clamp=clamp)),
         (DISC, "colour without the texture's alpha",
@@ -1128,6 +1146,8 @@ def _wrong_furniture():
         (LAYER_DEPTH, "one minus the depth", lambda t: ([0.0] * 4, 1.0 - lf.sat(t[0]))),
         (PREVIOUS, "blue and red exchanged", lambda t: [t[2], t[1], t[0], t[3]]),
         (PREVIOUS, "alpha 1", lambda t: list(t[:3]) + [1.0]),
+        (PREVIOUS, "clamped", lambda t: [lf.sat(v) for v in t]),
+        (TREE_OCCLUDER, "the texture's colour clamped", lambda t, c15w, clamp=True: [lf.sat(v) for v in t[:3]] + [t[3] * c15w]),
         (TREE_OCCLUDER, "no c15.w", lambda t, c15w, clamp=True: list(t)),
         (TREE_OCCLUDER, "colour times c15.w", lambda t, c15w, clamp=True: [x * c15w for x in t]),
         (TREE_OCCLUDER, "no colour", lambda t, c15w, clamp=True: [0.0, 0.0, 0.0, t[3] * c15w]),
@@ -1219,6 +1239,12 @@ class FurnitureRealDumps(unittest.TestCase):
         self.assertGreaterEqual(res.reached.get("lit", 0), 200)
         self.assertGreaterEqual(res.reached.get("light clamped at 1", 0), 20)
         self.assertGreaterEqual(res.reached.get("fade between", 0), 50)
+        for word in ("c69.x below 0", "c70.x below 0"):
+            self.assertGreaterEqual(res.reached.get(word, 0), 40, word)
+        # With drawn literals: the thin branch with c254.x at -|P.x| and between two components' values.
+        res = pc.check(CLOUD, trials=self.TRIALS, dumps=DUMPS, literals="random")
+        for word in ("thin, -|P.x| at c254.x", "thin, c254.x between -|P.x| and -|P.y|"):
+            self.assertGreaterEqual(res.reached.get(word, 0), 40, word)
         res = pc.check(CLOUD_OCCLUDER, trials=self.TRIALS, dumps=DUMPS)
         for word in ("fade 1", "fade between", "fade 0"):
             self.assertGreaterEqual(res.reached.get(word, 0), 50, word)
@@ -1248,11 +1274,22 @@ class FurnitureRealDumps(unittest.TestCase):
             res = pc.check(CLOUD, trials=200, dumps=DUMPS, formula=cloud_form(), literals=literals)
             self.assertTrue(res.ok, f"{res.line()} {res.first_bad}")
 
+    def test_wrong_microcode_in_the_thin_branch_fails_with_other_literals(self):
+        import ucode_eval as ue
+        text = ue.load(DUMPS, CLOUD, "frag")
+        for old, new in (("sgt r0.xyz_, -r_abs[0].xxxx, c254.xxxx", "sgt r0.xyz_, -r_abs[0].yyyy, c254.xxxx"),
+                         ("sgt r0.xyz_, -r_abs[0].xxxx, c254.xxxx", "sge r0.xyz_, -r_abs[0].xxxx, c254.xxxx")):
+            with self.subTest(new=new):
+                self.assertIn(old, text)
+                self.assertFalse(pc.check_text(CLOUD, text.replace(old, new), trials=200, literals="random").ok)
+
     def test_wrong_microcode_fails(self):
         import ucode_eval as ue
         cases = ((PREVIOUS, "frag", "OffsetX=0.5", "OffsetX=1.5"), (PREVIOUS, "frag", "OffsetY=0.5", "OffsetY=0"),
                  (CLOUD, "frag", "OffsetX=-1", "OffsetX=-2"), (CLOUD, "frag", "OffsetY=1", "OffsetY=2"),
                  (CLOUD, "frag", "c79.yxxx", "c77.yxxx"),
+                 (DISC, "frag", "maxs oC0.___w, r0.ww", "maxs_sat oC0.___w, r0.ww"),
+                 (MOON, "frag", "maxs r0.x___, r0.xx", "maxs_sat r0.x___, r0.xx"),
                  (CLOUD, "frag", "dp3_sat r0.x___, r1.yzww, -c78.zxyy", "dp3 r0.x___, r1.yzww, -c78.zxyy"),
                  (CLOUD_OCCLUDER, "frag", "mulsc_sat", "mulsc"), (TREE_OCCLUDER, "frag", "c8.zwww", "c8.xyyy"),
                  (LAYER_DEPTH, "frag", "maxs_sat", "maxs"), (CUBE_VS, "vert", "c9.xyyy", "c9.yxxx"),

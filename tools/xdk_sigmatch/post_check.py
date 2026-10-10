@@ -33,20 +33,27 @@ sides), and L = 0 in the bright pass (0 * (1 / 0) in the microcode; the formula'
 The furniture (light_formulas.POST_FURNITURE_SHADERS: eleven pixel and three vertex shaders of the sun layer and
 the sky furniture; plan Task 11, spec criterion 16) is checked the same way, with what its shaders need besides:
   - every register a shader reads is drawn with four different components, and the texel's four channels
-    differ, so a wrong component, channel or slot gives a wrong value;
+    differ, so a wrong component, channel or slot gives a wrong value; a third of the quad shaders' trials
+    read texels whose channels go below 0 and above 1 (_texels_wide), so a clamp or an absolute value on a
+    texel, which no quad shader has, gives a wrong value too;
   - a trial compares oC0's four components (the layer's depth shader: oDepth too; a vertex shader: oPos and
     every interpolator it writes), so a shader has 2,000 values or more at 500 trials;
   - the clouds' trials are spread over both sides of every branch and clamp, and the result counts them
     (`reached`): pixels inside, across and beyond the fade; alpha below, above and (a tenth of the trials)
-    exactly at the threshold c254.y, where the shader takes the dark branch; a light term clamped at 1. The
-    cube's trials take vertices on the face the shader singles out and off it;
+    exactly at the threshold c254.y, where the shader takes the dark branch; a light term clamped at 1;
+    c69.x and c70.x of either sign. The cube's trials take vertices on the face the shader singles out and
+    off it;
   - the literals (c254, c255) are the capture rows' (FURNITURE_LITERALS); with --literals random they are
     drawn, which holds what a literal of 0 or 1 hides: the absolute values under 6197's square root, its
-    reciprocal square root and its power, the thin branch's comparison with c254.x, the term D1CC adds.
+    reciprocal square root and its power, the term D1CC adds, and the thin branch's comparison with c254.x:
+    a third of the drawn trials put c254.x between -|P.x| and -|P.y| or exactly at -|P.x| under a thin
+    cloud, which holds the comparison's component and its strictness (with the literal 0 the branch's
+    colour is 0 whatever is compared).
 What a furniture trial cannot reach: everything of the draw's state (blend, depth, the alpha test and its
 reference, the colour mask), the sampler's filter, mip level and addressing (the texel offsets of 6197 are in
 texels of "the level the sampler reads": here a field of 64 texels), single precision, and inputs for which
-the microcode gives no number (a pixel at the clouds' far point, a slope and c70.x both 0).
+the microcode gives no number (a pixel at the clouds' far point, a slope and c70.x both 0). The clouds' and
+their occluder's texture stays the smooth field (0.25 to 0.95): a density below 0 or above 1 is not drawn.
 """
 import argparse
 import math
@@ -287,10 +294,28 @@ def _furniture(text, shader, consts, regs, sampler, rng, opts, vfetch=None):
     return m, m.run(), c
 
 
+def _texels_wide(rng):
+    """(the interpreter's sampler, tex(slot, x, y)) of a trial's texture. Two trials of three read the smooth
+    field (0.25 to 0.95); the third reads it stretched and moved, so that its channels go below 0 and above 1:
+    a clamp or an absolute value on a texel's channel, which the microcode does not have (its `maxs x, x` is
+    x), then gives another value."""
+    k, o = (3.0, rng.uniform(-2.6, -0.4)) if rng.random() < 1.0 / 3.0 else (1.0, 0.0)
+
+    def tex(slot, x, y):
+        return [v * k + o for v in field(slot, x, y)]
+
+    def sampler(slot, coords, attrs):
+        ox, oy, _ = ue.fetch_offsets(attrs)
+        return tex(slot, coords[0] + ox / SIZE, coords[1] + oy / SIZE)
+
+    return sampler, tex
+
+
 def _moon(text, shader, rng, aux, formula, opts):
     uv = _uv(rng)
-    _, out, c = _furniture(text, shader, {31: _reg4(rng), 20: _reg4(rng, 0.5, 16.0)}, {0: uv}, _normalised, rng, opts)
-    return _Trial(out["oC0"], formula(field(QUAD_SLOT, uv[0], uv[1]), c[31], c[20][3], clamp=False))
+    sampler, tex = _texels_wide(rng)
+    _, out, c = _furniture(text, shader, {31: _reg4(rng), 20: _reg4(rng, 0.5, 16.0)}, {0: uv}, sampler, rng, opts)
+    return _Trial(out["oC0"], formula(tex(QUAD_SLOT, uv[0], uv[1]), c[31], c[20][3], clamp=False))
 
 
 _disc = _moon       # the same inputs; another alpha
@@ -298,8 +323,9 @@ _disc = _moon       # the same inputs; another alpha
 
 def _glare(text, shader, rng, aux, formula, opts):
     uv = _uv(rng)
-    _, out, c = _furniture(text, shader, {31: _reg4(rng)}, {0: uv}, _normalised, rng, opts)
-    return _Trial(out["oC0"], formula(field(QUAD_SLOT, uv[0], uv[1]), c[31], clamp=False))
+    sampler, tex = _texels_wide(rng)
+    _, out, c = _furniture(text, shader, {31: _reg4(rng)}, {0: uv}, sampler, rng, opts)
+    return _Trial(out["oC0"], formula(tex(QUAD_SLOT, uv[0], uv[1]), c[31], clamp=False))
 
 
 _flare = _glare
@@ -307,14 +333,16 @@ _flare = _glare
 
 def _beam(text, shader, rng, aux, formula, opts):
     uv = _uv(rng)
-    _, out, c = _furniture(text, shader, {31: _reg4(rng)}, {0: uv}, _normalised, rng, opts)
-    return _Trial(out["oC0"], formula(field(QUAD_SLOT, uv[0], uv[1]), c[31], c[255][0], clamp=False))
+    sampler, tex = _texels_wide(rng)
+    _, out, c = _furniture(text, shader, {31: _reg4(rng)}, {0: uv}, sampler, rng, opts)
+    return _Trial(out["oC0"], formula(tex(QUAD_SLOT, uv[0], uv[1]), c[31], c[255][0], clamp=False))
 
 
 def _glow(text, shader, rng, aux, formula, opts):
     uv = _uv(rng)
-    _, out, c = _furniture(text, shader, {}, {0: uv}, _normalised, rng, opts)
-    return _Trial(out["oC0"], formula(field(QUAD_SLOT, uv[0], uv[1]), c[255][0], clamp=False))
+    sampler, tex = _texels_wide(rng)
+    _, out, c = _furniture(text, shader, {}, {0: uv}, sampler, rng, opts)
+    return _Trial(out["oC0"], formula(tex(QUAD_SLOT, uv[0], uv[1]), c[255][0], clamp=False))
 
 
 def _layer_depth(text, shader, rng, aux, formula, opts):
@@ -333,18 +361,20 @@ def _layer_depth(text, shader, rng, aux, formula, opts):
 
 def _previous(text, shader, rng, aux, formula, opts):
     uv = _uv(rng)
-    m, out, _ = _furniture(text, shader, {}, {0: uv}, _normalised, rng, opts)
+    sampler, tex = _texels_wide(rng)
+    m, out, _ = _furniture(text, shader, {}, {0: uv}, sampler, rng, opts)
     if len(m.fetches) != 1:
         raise ValueError(f"{len(m.fetches)} fetches, not 1")
-    t = field(QUAD_SLOT, uv[0] + 0.5 / SIZE, uv[1] + 0.5 / SIZE)       # the fetch's half texel in each axis
+    t = tex(QUAD_SLOT, uv[0] + 0.5 / SIZE, uv[1] + 0.5 / SIZE)         # the fetch's half texel in each axis
     return _Trial(out["oC0"], formula(t, clamp=False) if formula is lf.post_previous_frame else formula(t))
 
 
 def _tree_occluder(text, shader, rng, aux, formula, opts):
     uv = _uv(rng)
-    _, out, c = _furniture(text, shader, {8: _reg4(rng, 0.2, 3.0), 15: _reg4(rng)}, {0: uv}, _normalised, rng, opts)
+    sampler, tex = _texels_wide(rng)
+    _, out, c = _furniture(text, shader, {8: _reg4(rng, 0.2, 3.0), 15: _reg4(rng)}, {0: uv}, sampler, rng, opts)
     u, v = lf.post_tree_occluder_uv(uv, c[8])
-    return _Trial(out["oC0"], formula(field(0, u, v), c[15][3], clamp=False))
+    return _Trial(out["oC0"], formula(tex(0, u, v), c[15][3], clamp=False))
 
 
 def _cloud_point(rng):
@@ -391,6 +421,11 @@ def _cloud(text, shader, rng, aux, formula, opts):
               51: _reg4(rng, 0.3, 1.5), 69: _reg4(rng, 0.2, 1.0), 70: _reg4(rng, 0.05, 1.0), 71: _reg4(rng, 0.2, 1.2),
               77: [rng.uniform(-2000.0, 2000.0) for _ in range(3)] + [rng.uniform(-1.0, 1.0)],
               78: [x / length * strength for x in direction] + [rng.uniform(-1.0, 1.0)], 79: eye}
+    for reg in (69, 70):                    # a fifth of each with the other sign: |c69.x| or |c70.x| is another value
+        if rng.random() < 0.2:
+            consts[reg][0] = -consts[reg][0]
+    if rng.random() < 0.3:                  # c78 against the normal's height: the light term a1 at its clamp of 1
+        consts[78][:3] = [0.1 * consts[78][0], 0.1 * consts[78][1], -math.copysign(2.5, consts[70][0])]
     kind = rng.random()
     if kind < 0.15:                         # a thin cloud: alpha near the threshold of 0.001, on both sides of it
         consts[69][0] = rng.uniform(0.0, 0.004)
@@ -401,6 +436,14 @@ def _cloud(text, shader, rng, aux, formula, opts):
         consts[69][0] = 1.0
         P[0], P[1], where = eye[0] + 300.0, eye[1] - 400.0, "inside"
     lits = _random_literals(shader, rng) if opts.get("literals") == "random" else FURNITURE_LITERALS[shader]
+    if opts.get("literals") == "random" and not edge and rng.random() < 1.0 / 3.0:
+        # The thin branch's comparison (-|P.x| > c254.x) near its operand: c254.x between -|P.x| and
+        # -|P.y| (another component gives the other answer), or exactly -|P.x| (not above it); and a thin
+        # cloud, so that the branch is the one taken.
+        lo, hi = sorted((-abs(P[0]), -abs(P[1])))
+        lits = dict(lits)
+        lits[254] = [rng.choice([rng.uniform(lo, hi), -abs(P[0])])] + list(lits[254][1:])
+        consts[69][0] = rng.uniform(-0.002, 0.002)
     sampler, tex = _cloud_texture(lits[254][1] if edge else None)
     c = dict(consts)
     c.update({k: list(v) for k, v in lits.items()})
@@ -413,10 +456,18 @@ def _cloud(text, shader, rng, aux, formula, opts):
     u, v = lf.post_cloud_uv(uv, c[31], c[46])
     alpha = tex(u, v, 0, 0)[3] * c[69][0] * lf.post_cloud_fade(P, eye, c254[2], c254[1], c254[0], c254[3])
     reached = ["fade " + where]
+    if c[69][0] < 0.0:
+        reached.append("c69.x below 0")
+    if c[70][0] < 0.0:
+        reached.append("c70.x below 0")
     if alpha == c254[1]:
         reached.append("at the threshold")
     if not alpha > c254[1]:
         reached.append("thin")
+        if -abs(P[0]) == c254[0]:
+            reached.append("thin, -|P.x| at c254.x")
+        elif (-abs(P[0]) > c254[0]) != (-abs(P[1]) > c254[0]):
+            reached.append("thin, c254.x between -|P.x| and -|P.y|")
         if len(m.fetches) != 1:
             raise ValueError(f"{len(m.fetches)} fetches in the thin branch, not 1")
     else:

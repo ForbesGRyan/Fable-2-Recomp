@@ -470,6 +470,25 @@ class VariantC(unittest.TestCase):
         a = seen[0]
         self.assertEqual((a.capture, a.frame, a.bias, a.png, a.sun_roles, a.region_file), ("some.jsonl", 3, 0.5, "out/x", "research", None))
 
+    def test_variant_c_refuses_what_it_would_drop(self):
+        # C always reads the table at the reference's half texel and writes no picture dump: asked for
+        # anything else, the command says so instead of leaving it out silently.
+        for extra in (["--ramp", "measured"], ["--write", "out/x"], ["--table-offset", "0"], ["--variant", "A"]):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(pr.main(["replay", "some.jsonl", "1", "--variant", "C"] + extra), 2, extra)
+            self.assertIn("variant C", err.getvalue())
+
+    def test_the_criterions_line_names_the_frame_and_its_part(self):
+        line = sl.criterion_line("native_discovery_x.jsonl", 3, 0.885, 0.699)
+        self.assertIn("+18.6 points", line)
+        self.assertIn("native_discovery_x.jsonl frame 3", line)
+        self.assertIn("first part only", line)
+        self.assertIn("run 3", line)                      # the criterion's own frame, which this may not be
+        self.assertIn("at least +10 on this frame: yes", line)
+        self.assertIn("at least +10 on this frame: NO", sl.criterion_line("c.jsonl", 1, 0.75, 0.70))
+        self.assertNotIn("held", line)
+
     def test_a_missing_capture_is_said_for_variant_c_too(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):

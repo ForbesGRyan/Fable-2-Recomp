@@ -22,9 +22,13 @@ def quad(hash_=A, kind="moon", vs=V, registers=(20, 31), slots=(13,), where="sce
     return lf.PostQuadShader(hash_, kind, vs, registers, slots, where, blend, test)
 
 
+def generate(shaders, not_quads=(), ps=(A, B, "00000000000000C3"), vs=(V,)):
+    return gq.generate(shaders, not_quads, ps, vs)
+
+
 class Generate(unittest.TestCase):
     def test_lines(self):
-        out = gq.generate([quad(), quad(B, "cloud-occluder", registers=(31, 46, 47, 77), where="layer-depth", blend="depth"),
+        out = generate([quad(), quad(B, "cloud-occluder", registers=(31, 46, 47, 77), where="layer-depth", blend="depth"),
                            quad("00000000000000C3", "beam-source", registers=(), slots=(13, 2), where="layer1", blend="none",
                                 test=False)]).splitlines()
         self.assertEqual(out[0], HEAD)
@@ -40,7 +44,7 @@ class Generate(unittest.TestCase):
         ])
 
     def test_every_line_has_the_same_number_of_arguments(self):
-        for line in gq.generate(lf.POST_QUAD_SHADERS).splitlines()[1:]:
+        for line in gq.table().splitlines()[1:]:
             self.assertEqual(line.count(","), gq.ARGUMENTS - 1, line)
             self.assertTrue(line.startswith("FABLE2_POST_QUAD(") and line.endswith(")"), line)
 
@@ -69,33 +73,49 @@ class Generate(unittest.TestCase):
             ([quad(slots=(1.0,))], "slot"),
             ([quad(where="front")], "where"),
             ([quad(blend="multiply")], "blend"),
+            ([quad(where="layer2")], "a moon is drawn at scene"),
+            ([quad(kind="sun-disc", blend="add")], "a sun-disc is drawn at layer2"),
+            ([quad(blend="depth")], "depth is the layer depth's blend"),
+            ([quad(kind="cloud-occluder", where="layer-depth", blend="alpha")], "depth is the layer depth's blend"),
             ([quad(test=1)], "test"),
             ([quad(test=None)], "test"),
         ]
         for shaders, word in cases:
             with self.subTest(word=word, shaders=shaders):
                 with self.assertRaises(ValueError) as e:
-                    gq.generate(shaders)
+                    generate(shaders)
                 self.assertIn(word, str(e.exception))
         with self.assertRaises(ValueError) as e:
-            gq.generate([quad(), quad(B, "cloud", where="nowhere")])
+            generate([quad(), quad(B, "cloud", where="nowhere")])
         self.assertIn("00000000000000B2", str(e.exception))
 
     def test_a_shader_of_the_post_chain_or_one_that_is_not_checked_is_refused(self):
         with self.assertRaises(ValueError) as e:
-            gq.generate([quad()], not_quads=(A.lower(),))
+            generate([quad()], not_quads=(A.lower(),))
         self.assertIn("not a quad", str(e.exception))
         with self.assertRaises(ValueError) as e:
-            gq.generate([quad()], checked=(B,))
-        self.assertIn("no machine check", str(e.exception))
+            generate([quad()], ps=(B,))
+        self.assertIn("no machine check of the pixel shader", str(e.exception))
         with self.assertRaises(ValueError) as e:
-            gq.generate([quad()], checked=(A,))                # its vertex shader has none
-        self.assertIn("no machine check", str(e.exception))
-        self.assertTrue(gq.generate([quad()], checked=(A.lower(), V)))
+            generate([quad()], vs=())                           # its vertex shader has none
+        self.assertIn("as a vertex shader", str(e.exception))
+        # A pixel shader's hash is no vertex shader, its own least of all.
+        for vs in (B, A):
+            with self.assertRaises(ValueError) as e:
+                generate([quad(vs=vs)])
+            self.assertIn("as a vertex shader", str(e.exception))
+        self.assertTrue(generate([quad()], ps=(A.lower(),), vs=(V.lower(),)))
+
+    def test_nothing_is_open_by_default(self):
+        # What is excluded and what is checked must be said: a call without them is an error, not a table.
+        with self.assertRaises(TypeError):
+            gq.generate([quad()])
+        with self.assertRaises(TypeError):
+            gq.generate([quad()], ())
 
     def test_an_empty_list_is_refused(self):
         with self.assertRaises(ValueError):
-            gq.generate([])
+            generate([])
 
 
 class TheList(unittest.TestCase):

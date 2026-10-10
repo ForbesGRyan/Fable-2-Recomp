@@ -547,6 +547,15 @@ def bloom_picture(scene, w, h, fr, bias=0.0, sun=None):
 
 # --- the commands --------------------------------------------------------------------------------------------
 
+def criterion_line(capture, frame, c_within, b_within):
+    """What a replay says about spec criterion 18: the figure of its first part on the frame replayed. The
+    criterion's own frame is run 3's oracle frame; whether a frame is that one is not this tool's to know."""
+    gain = 100.0 * (c_within - b_within)
+    return ("criterion 18, first part only, on %s frame %d (the criterion names run 3's oracle frame: say whether this is "
+            "it): the share within 8 levels is %+.1f points with the sun layer (%.1f%% against %.1f%%); at least +10 on "
+            "this frame: %s" % (capture, frame, gain, 100.0 * c_within, 100.0 * b_within, "yes" if gain >= 10.0 else "NO"))
+
+
 def _texture_of(fr):
     cache = {}
 
@@ -648,11 +657,8 @@ def cmd_replay(args):
         print("variant %s against the front buffer 0x%08X, whole picture outside the HUD: |d| in 8-bit levels: median %.2f, "
               "mean %.2f, 90%% %.2f, 99%% %.2f; share within 4 levels %.1f%%, within 8 %.1f%%" % (
                   name, pr.FRONT_BASE, s["median"], s["mean"], s["p90"], s["p99"], 100 * s["within"][4], 100 * s["within"][8]))
-    gain = 100 * (stats["C"]["within"][8] - stats["B"]["within"][8])
     print()
-    print("criterion 18, first part: the share within 8 levels is %+.1f points with the sun layer (%.1f%% against %.1f%%); "
-          "asked: at least +10: %s" % (gain, 100 * stats["C"]["within"][8], 100 * stats["B"]["within"][8],
-                                       "held" if gain >= 10.0 else "NOT held"))
+    print(criterion_line(path.name, args.frame, stats["C"]["within"][8], stats["B"]["within"][8]))
     regions = [("the quarter about the blur's centre (this tool's box)",
                 [max(c31[0] - 0.125, 0.0), max(c31[1] - 0.125, 0.0), min(c31[0] + 0.125, 1.0), min(c31[1] + 0.125, 1.0)], "tool")]
     for name in args.region_file or []:

@@ -192,7 +192,7 @@ int main() {
     if (IndexDumpRange(4u << 20, 0xFFFFFFFFu, 0xFFFFFFFFu, true, cap).bytes != 0) return 65;  // no 32-bit wrap
     if (IndexDumpRange(0, 0, 0, false, cap).bytes != 0 || IndexDumpRange(4u << 20, 5, 0, false, cap).bytes != 0) return 66;
     d = IndexDumpRange(cap, 7, 3, false, cap);                               // exactly the cap: whole
-    if (!(d.whole && d.bytes == cap)) return 67;
+    if (!(d.whole && d.offset_bytes == 0 && d.bytes == cap)) return 67;      // (a whole buffer begins at its byte 0, whatever the draw's start)
     // A small buffer is kept whole only for a draw whose range lies inside it (a draw that reads
     // past its buffer names no file), and one byte over the cap is no longer whole.
     if (IndexDumpRange(37444, 18000, 1000, false, cap).bytes != 0) return 68;
@@ -203,6 +203,11 @@ int main() {
     if (!(!d.whole && d.offset_bytes == (4u << 20) - 20 && d.bytes == 20)) return 70;
     d = IndexDumpRange(4u << 20, 0, cap / 4, true, cap);
     if (!(!d.whole && d.offset_bytes == 0 && d.bytes == cap)) return 71;
+    // A start or a count whose byte offset wraps to a small number in 32 bits is still past the buffer.
+    if (IndexDumpRange(4u << 20, 0x80000000u, 2, false, cap).bytes != 0) return 72;
+    if (IndexDumpRange(4u << 20, 0, 0x80000001u, false, cap).bytes != 0) return 73;
+    // A draw without indices names no file, also of a small buffer.
+    if (IndexDumpRange(37444, 5, 0, false, cap).bytes != 0 || IndexDumpRange(37444, 5, 0, false, cap).whole) return 74;
   }
   std::cout << "PASS: discovery format\n";
   return 0;

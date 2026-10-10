@@ -784,6 +784,14 @@ the frame map's "Limits" and nothing else.
 - [ ] If anything is built: tests first, WARP, SUNWARD with READBACK, the beams' regions with
       and without it. Commit "Sun layer occluders: ...".
 
+> **After Tasks 16 and 17** (2026-10-10; rulings 38 and 39): nothing was built by Task 17 itself. Built before it,
+> by ruling: the layer's depth place (the depth taken before the game's late records; the `F1EB` redraw is not
+> built), the half-pixel origin of the layer's quads, the reset of the previous-frame share after a stretch
+> without a Render. Task 16's clouds write no depth. The limits and follow-ups: frame map, "Limits (10c)" and
+> "Follow-ups (10c)". For Task 18: criterion 19 is "met on the oracle feed, not met in the game" (limit 1); the
+> feed is to be judged with `post_sun_layer.py layers` as mended (limit 13); the scene's own half pixel (limit 12)
+> stands under every pixel-by-pixel figure of native shots.
+
 ### Task 18: Validation and documents (10c)
 
 - [ ] Runs on a quiet machine: SUNWARD, BRIDGE and THIRD with sun on and off (post and bloom

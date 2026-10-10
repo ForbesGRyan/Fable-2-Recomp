@@ -1,0 +1,35 @@
+{
+  "about": "Regions for the foliage sub-project of the native renderer (spec docs/superpowers/specs/2026-10-10-native-renderer-foliage-design.md, criteria 5, 6, 12; plan Task 4): boxes on swaying trees and grass, and one or more \"still\" boxes of wood or far ground at each spot, for the frame-to-frame figures of tools/xdk_sigmatch/foliage_replay.py motion (--box name=x0,y0,x1,y1) and for pixel counts by region. The sun layer's regions stay in post-regions.json.",
+  "coordinates": "rect = [x0, y0, x1, y1] as fractions of the picture (0, 0 top left), the picture being the 16:9 client area of a window shot (below its title bar) or the scene at 1120 x 720. Drawn on the emulated shots of the controller's runs of 2026-10-10 (RUN UNCHECKED): bridge out/native-evidence/post/f12_3_bridge_shot_35s.png (log 596), sunward out/native-evidence/post/f12_2_sunward_shot_52s.png (log 595). Every box lies inside rows 0.17 to 0.77 of the picture, clear of the objective's text box and of the HUD's corner. The bridge's camera is the one -BootSave Hero000 gives with no stick entry; the sunward view is the plan's SUNWARD line (the camera raised to its stop).",
+  "kinds": {
+    "tree": "leaves and branches of a tree that the wind moves (vertex shaders 475E, A584, D7DD)",
+    "plant": "grass, ferns and bushes (the instanced plants 8123, B636, 48D3, FC4F, 33C0)",
+    "still": "wood, rock or far ground that no wind draw covers and no swaying shadow crosses: the control of a standing camera (D near 0 there is the proof that the camera stood)",
+    "mixed": "a still surface crossed by the swaying shadows of leaves or by the sun layer's beams: it moves in the game's picture although no wind draw covers it; never a control"
+  },
+  "spots": {
+    "bridge": {
+      "plan": "-Total 96 -Shots \"35,39,43,47,51,55,59,63,92\" -Plan \"32:VIEW=off,36:VIEW=native,40:VIEW=off,44:VIEW=native,48:VIEW=off,52:VIEW=native,56:VIEW=off,60:VIEW=native,66:DISC=8/1\"",
+      "regions": [
+        {"name": "trees left", "kind": "tree", "rect": [0.060, 0.200, 0.200, 0.430]},
+        {"name": "crown by the post", "kind": "tree", "rect": [0.205, 0.180, 0.290, 0.360]},
+        {"name": "tree right edge", "kind": "tree", "rect": [0.935, 0.300, 0.995, 0.520]},
+        {"name": "grass left", "kind": "plant", "rect": [0.070, 0.500, 0.290, 0.550]},
+        {"name": "fern", "kind": "plant", "rect": [0.130, 0.425, 0.180, 0.490]},
+        {"name": "still post", "kind": "still", "rect": [0.302, 0.270, 0.320, 0.470]},
+        {"name": "still far ridge", "kind": "still", "rect": [0.800, 0.270, 0.910, 0.370]},
+        {"name": "planks under the leaves' shadow", "kind": "mixed", "rect": [0.250, 0.620, 0.440, 0.740]}
+      ]
+    },
+    "sunward": {
+      "plan": "-Total 86 -Shots \"44,48,52,56,82\" -Plan \"32:VIEW=off,33:RS=-100/0/500,36:RS=-100/0/500,41:RS=0/100/14000,45:VIEW=native,49:VIEW=off,53:VIEW=native,58:DISC=8/1\"",
+      "regions": [
+        {"name": "crown left", "kind": "tree", "rect": [0.080, 0.310, 0.300, 0.390]},
+        {"name": "crown right", "kind": "tree", "rect": [0.700, 0.180, 0.970, 0.300]},
+        {"name": "crown under the rail", "kind": "tree", "rect": [0.620, 0.560, 0.700, 0.640]},
+        {"name": "still block", "kind": "still", "rect": [0.100, 0.640, 0.240, 0.700]},
+        {"name": "lower rail under the beams", "kind": "mixed", "rect": [0.050, 0.790, 0.400, 0.850]}
+      ]
+    }
+  }
+}

@@ -198,9 +198,10 @@ W/2 x H/2, made only for a diagnostic.
    alpha-tested albedo are kept when the dump path reaches them (open question 7).
 2. **The rasterising replay** (`tools/xdk_sigmatch/foliage_replay.py`; ruling 6 (2)): triangles of
    a capture row, positions from the game's own microcode (`ucode_eval`) or from the table entry
-   at rest, rasterised on the CPU with the game's sampling place (a pixel sampled at its integral
-   position, `PA_SU_VTX_CNTL` = 4) and the first sample's alpha rule, against the game's depth
-   copy of the same frame. It is the like-for-like oracle of the wind (silhouettes with wind
+   at rest, rasterised on the CPU at the place where the game's depth copy holds its sample
+   (measured in plan Task 4: a quarter pixel up and left of the pixel's integral position, fitted
+   per capture; not the integral position of `PA_SU_VTX_CNTL` = 4 that this text first gave) and
+   the first sample's alpha rule, against the game's depth copy of the same frame. It is the like-for-like oracle of the wind (silhouettes with wind
    against at rest), of the coverage's pixel counts, and of `F1EB`'s kept set. It first proves
    itself on draws that do not move (open question 4).
 3. **A stored native scene before post** (diagnostic, `--fable2_native_scene_dump=on`; default
@@ -482,13 +483,22 @@ threshold set here without a measured one before it (ruling 20).
 4. *Positions through the table.* `position_check.py` with the wind terms: over every wind draw
    of the three captures the entry's position against the microcode's `oPos`, 99th percentile
    below 0.05 pixel of 1120 x 720, and none above 0.5.
-5. *Against the game's depth, one frame (no precedent).* First the replay itself: on the
-   depth-writing draws that do not move, issued before the depth copy, at least 95% of the pixels
-   the replay calls nearest hold the stored depth within the tolerance the tool prints. Then the
+5. *Against the game's depth, one frame (no precedent; amended by the ledger's rulings 24 and
+   25, 2026-10-10).* The replay is sampled at the place fitted on the capture's own unmoving
+   draws (ruling 25). The criterion is judged one-sidedly, on visible pixels: a pixel the replay calls
+   nearest where the game's stored depth shows something NEARER by more than 16 steps of 2^-24 is
+   "hidden, not judged" (terrain and immediate rows are not replayed); the rest are the judged
+   pixels, and a judged set needs at least 1,000 of them or reads "not decidable". First the
+   replay itself: on the depth-writing draws that do not move, issued before the depth copy, at
+   least 95% of the judged pixels hold the stored depth within 16 steps of 2^-24. Then the
    trunk draws issued before the copy, sunward and bridge, frame 1: that share with wind is
    within 3 points of the unmoving draws' share, and the share at rest is at least 2 points below
    the share with wind. If the first part fails the criterion is "not decidable" (open question
-   4). (`foliage_replay.py depth-relation`, `wind`.)
+   4). A replay in front of the game's depth still fails; a draw replayed too far back hides
+   among the hidden pixels, which is why the two-sided shares with the wind and at rest are
+   printed beside the judged ones. (`foliage_replay.py depth-relation`, `wind`. As first
+   written: "at least 95% of the pixels the replay calls nearest hold the stored depth within the
+   tolerance the tool prints".)
 6. *In the game, a standing camera (no precedent).* Run STAND, with the wind on and with it off:
    shots 3 s apart, emulated pairs and native pairs; `D` = the share of pixels that differ by
    more than 8 levels, inside the mask of the wind draws' rasterised cover and outside it.
@@ -619,4 +629,26 @@ threshold set here without a measured one before it (ruling 20).
 
 ## Implementation notes (deviations)
 
-None yet. Each phase's notes are added here when it is validated.
+Each phase's notes are added here when it is validated. Before that, from plan Task 4 (frame map
+section 18, "Discovery runs"; figures and files there):
+
+- Design 2 and criterion 5 are amended above (rulings 24 and 25): the sampling place is fitted,
+  the bound is one-sided on visible pixels with a floor of 1,000 judged pixels. On the two
+  captures with whole index buffers both parts of criterion 5 are met (99.59% and 99.99%; trunks
+  100.00% with the wind against 18.08% and 61.43% at rest). Whether the quarter pixel is the
+  console's first sample or this emulator's read-back convention is not known: it matters for
+  Design 10's first-sample rule (plan Task 12).
+- Open question 1: the clock is seconds of real time, one unit a second, from the process's
+  start, unclamped (two runs agree to 10 ms). Open question 2: the direction turns in steps of 2
+  to 3.5 degrees inside 17 to 28 degrees of azimuth in 17 s of clock; the strength is constant.
+  Open question 3: the pixel counts exist. Open question 4: yes. Open question 6: the fading and
+  the late draws are in the pre-pass bins. Open question 7: not settled (base level alone in a
+  capture). Open question 10: `2D40` is in capture `182130`, frame 8.
+- **Design 5's bound of `c25.x`, (0, 64], does not hold on the plant caster**: `A8A5` rows with
+  `c25.x` = 0 and `c26` = 0 (no sway) occur at the bridge, 4 to 5 a frame. To be ruled before
+  plan Task 8 (zero admitted, or those rows counted at rest).
+- **Criterion 6's precondition does not hold as written** at a camera that provably stands (the
+  capture's eye and rows are bit-equal over eight frames): the emulated `D` outside the mask is
+  9 to 12% (characters, water, the leaves' shadows, the moving sun); in a still box it is 0.9 to
+  1.3%. To be ruled: the still boxes of `docs/native-renderer/foliage-regions.json` as the
+  control.

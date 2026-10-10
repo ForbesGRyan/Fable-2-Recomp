@@ -141,6 +141,9 @@ std::atomic<bool> g_quads_frame{false};
 std::atomic<bool> g_failed{false};
 std::atomic<uint64_t> g_swaps{0};      // guest frames since start (while enabled)
 std::atomic<int> g_frames_written{0};  // discovery frames completed
+// The scene published with the running (or last) capture's first frame, by its frame number; 0
+// until then (DiscoveryFirstSceneFrame). Written by OnSwap alone, with discovery armed.
+std::atomic<uint64_t> g_discovery_first_scene{0};
 std::atomic<uint64_t> g_draw_count{0};
 std::atomic<uint64_t> g_nested_draws{0};  // draw hooks entered inside another draw hook
 std::atomic<uint32_t> g_vs_bank_ptr{0};   // vertex constant bank pointer (lock-free, records)
@@ -5295,6 +5298,8 @@ void SetMemory(rex::memory::Memory* memory) {
 
 bool Enabled() { return g_enabled.load(std::memory_order_relaxed); }
 
+uint64_t DiscoveryFirstSceneFrame() { return g_discovery_first_scene.load(std::memory_order_acquire); }
+
 bool ArmDiscoveryNow(uint32_t frames, uint32_t every) {
   if (frames < 1 || frames > 100000 || every < 1 || every > 64) {
     REXSYS_WARN("[native-discovery] refused: frames {} every {} out of range", frames, every);
@@ -5664,6 +5669,7 @@ void OnSwap() {
         return;
       }
     }
+    g_discovery_first_scene.store(0, std::memory_order_release);  // (this capture's first frame is not published yet)
     g_armed.store(true);
     REXSYS_INFO("[native-discovery] armed after {:.1f} s", elapsed);
     return;
@@ -5673,6 +5679,9 @@ void OnSwap() {
   FinishedScene done;
   std::unique_lock<std::mutex> lock(g_mutex);
   EndMainSceneFrame(g_file != nullptr, frame, swap, timer, &done);
+  // (the capture's first frame: its scene's number, before the scene is published below; a frame
+  // without records publishes none, PublishScene)
+  if (frame == 1 && done.scene && done.scene->records) g_discovery_first_scene.store(done.scene->frame, std::memory_order_release);
   g_resolve_rows = 0;  // (the "resolve" and "cmdgap" rows are numbered within a frame)
   // Post discovery: the post buffers' memory as the capture's first two frames left it.
   if (g_file && frame <= 2) DumpPostMemory(frame);

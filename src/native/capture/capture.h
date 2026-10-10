@@ -53,6 +53,13 @@ void SetSunWanted(bool wanted);
 // arguments are out of range, the capture layer is off, or a capture is running or still
 // waiting for its environment delay (no queue).
 bool ArmDiscoveryNow(uint32_t frames, uint32_t every);
+// The frame number of the scene published with the first frame of the discovery capture that is
+// running or ran last (that frame row's "scene_frame"): 0 from the moment a capture is armed until
+// its first frame is published, and when that frame published no scene (the renderer off, or a frame
+// without records: no native view was drawn). Stored before the scene is
+// published, so whoever holds that scene reads its number here. For the stored native scene
+// (render/scene_dump.h), which is paired with a capture by it. Callable from any thread.
+uint64_t DiscoveryFirstSceneFrame();
 // The main-scene FrameScene, published at each OnSwap while the native
 // renderer is on (fable2_native_render). Frames without records publish
 // nullptr.

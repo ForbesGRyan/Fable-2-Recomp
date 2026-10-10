@@ -102,6 +102,13 @@ REXCVAR_DEFINE_STRING(fable2_native_sun, "off", "Fable2",
                       "of it is read or drawn: the picture of fable2_native_post and fable2_native_bloom alone. Off by default "
                       "because towards the sun the native picture is not yet the game's (the native scene is too dark there): "
                       "frame map section 17, \"Validation (10c)\".");
+REXCVAR_DEFINE_STRING(fable2_native_scene_dump, "off", "Fable2",
+                      "Diagnostic of the native renderer (frame map section 18, \"Stored native scene\"): on (or true, 1) = "
+                      "each discovery capture made while the native picture is drawn also writes the native scene of its "
+                      "first frame before post to logs/native_scene_<stamp>.f2ns (the linear target, the scene's depth and, "
+                      "with the sun layer drawn, the layer's depth; about 15 MB a file, at most 8 a run), for "
+                      "tools/xdk_sigmatch to lay beside the game's scene of the same frame; off (or false, 0; the default) = "
+                      "nothing of it is made, read or drawn.");
 REXCVAR_DEFINE_STRING(fable2_exposure_readback, "off", "Fable2",
                       "The game's exposure in a normal run: on (or true, 1) = the game's luminance resolve (two buffers in turn, "
                       "0x1A385000 and 0x1A34F000) is added to readback_resolve_force_addresses at startup, so that the game "
@@ -217,6 +224,9 @@ std::vector<uint8_t> g_oracle_sun_bytes;  // (the optional third file, <prefix>.
 render::OracleFeed g_oracle_feed;
 bool g_oracle_valid = false;
 bool g_oracle_dump_written = false;  // command-processor thread only
+// The stored native scene (fable2_native_scene_dump): the capture's first scene frame a dump was last
+// asked for (0: none yet), so that each capture asks once. Command-processor thread only.
+uint64_t g_scene_dump_asked = 0;
 
 // F3 status text, written on the command-processor thread, read by the UI.
 std::mutex g_status_mutex;
@@ -372,6 +382,19 @@ bool CurrentSun() {
   return on;
 }
 
+// fable2_native_scene_dump (a diagnostic): read like the sun's switch; anything else is off, with one
+// warning that names the words.
+bool CurrentSceneDump() {
+  static std::atomic<bool> warned{false};
+  bool recognized = true;
+  const bool on = render::ParseClayLight(REXCVAR_GET(fable2_native_scene_dump), &recognized) == render::ClayLight::kOn;
+  if (!recognized && !warned.exchange(true)) {
+    REXLOG_WARN("[native] unknown fable2_native_scene_dump '{}', using off (accepted: {})", REXCVAR_GET(fable2_native_scene_dump),
+                render::kClaySwitchWords);
+  }
+  return on;
+}
+
 // fable2_native_post_oracle: the two files of the prefix, read whole and parsed (game thread, once).
 // Anything missing or refused leaves the feed off, with one line that names the file and the fault.
 void LoadOracle() {
@@ -450,6 +473,36 @@ void LoadOracle() {
               "written once to logs/native_post_dump_<stamp>.rgba; {}",
               prefix, feed.scene.width, feed.scene.height, render::OracleSceneHalfChanged(feed.scene), feed.c20w,
               unsigned(feed.block.parts), sun_text);
+}
+
+// The stored native scene's file, once the copies of a requested dump have run:
+// logs/native_scene_<stamp>.f2ns (the pass's TakeSceneDump gives the file's bytes once a dump). The
+// stamp is the time of writing; a file is paired with its capture by the frame number in its head.
+// Command-processor thread. Not reached without the switch.
+void WriteSceneDump(nrhi::Device* device) {
+  if (!g_clay) return;
+  std::vector<uint8_t> file;
+  if (!g_clay->TakeSceneDump(device, &file)) return;
+  char name[64];
+  const std::time_t t = std::time(nullptr);
+  std::strftime(name, sizeof(name), "native_scene_%Y%m%d_%H%M%S.f2ns", std::localtime(&t));
+  const std::filesystem::path dir = rex::filesystem::GetExecutableFolder() / "logs";
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  // (the wide path, as for the oracle feed's dump: a folder outside the ANSI code page must not throw here)
+  const std::filesystem::path full = dir / name;
+  std::FILE* fp = _wfopen(full.c_str(), L"wb");
+  const bool ok = fp && std::fwrite(file.data(), 1, file.size(), fp) == file.size();
+  if (fp) std::fclose(fp);
+  const render::SceneDumpHeader& head = g_clay->scene_dump_head();
+  if (ok) {
+    REXLOG_INFO("[native] scene dump: frame {} (asked {}), flags {}, bad values {} -> logs/{} ({} bytes, {} x {}, exposure {:.5f}; "
+                "file {} of at most {} this run)", head.scene_frame, head.asked_frame, head.flags, head.bad_values, name, file.size(),
+                head.width, head.height, head.exposure, g_clay->scene_dump_counts().written, render::kSceneDumpMaxFiles);
+  } else {
+    REXLOG_ERROR("[native] scene dump: refused (write): logs/{} could not be written (frame {}, {} bytes)", name, head.scene_frame,
+                 file.size());
+  }
 }
 
 // The oracle feed's dump, once its copy has run: logs/native_post_dump_<stamp>.rgba (the pass's
@@ -626,6 +679,17 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   g_clay_scene_rendered = true;
   // (the oracle feed: null unless its switch is set and both files were valid)
   g_clay->SetPostOracle(g_oracle_valid ? &g_oracle_feed : nullptr);
+  // The stored native scene (a diagnostic; nothing of it without its switch): once for each discovery
+  // capture, when the scene of its first frame is known, the pass is asked for a dump of that scene. The
+  // capture stores the number before it publishes the scene, so the Render of that very scene, below,
+  // already has the request; a Render that got a later scene dumps that one and says so.
+  if (CurrentSceneDump()) {
+    const uint64_t first = capture::DiscoveryFirstSceneFrame();
+    if (render::SceneDumpNewRequest(first, g_scene_dump_asked)) {
+      g_scene_dump_asked = first;
+      g_clay->RequestSceneDump(first);
+    }
+  }
   g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), CurrentFog(), post,
                  st, tst);
   g_shadows_usable.store(g_clay->shadows_usable(), std::memory_order_relaxed);
@@ -800,6 +864,7 @@ void OverlayCallback(const NativeGuestOutputRenderContext& ctx, void*) {
   ReadRamp();  // (before the clay pass: a post frame is drawn through this frame's ramp)
   if (!RenderClay(ctx)) return;
   WriteOracleDump(ctx.device);  // (the oracle feed's one file; nothing without its switch)
+  if (CurrentSceneDump()) WriteSceneDump(ctx.device);  // (the stored native scene's files; nothing without its switch)
   if (!g_clay_scene) return;  // no scene captured yet: leave the emulated frame
   if (!g_composite.Ensure(ctx.device, ctx.guest_output->format())) {
     Fail("composite");
@@ -890,6 +955,12 @@ void Install(rex::memory::Memory* memory) {
   REXLOG_INFO("[native] sun: {} (fable2_native_sun; on: with the post block the frame's quad records, the game's sky "
               "furniture and sun-layer quads, and the radial blur's registers are read)",
               CurrentSun() ? "on" : "off");
+  // (a diagnostic: its line only when it is on, so that a normal run's log is the one of before)
+  if (CurrentSceneDump()) {
+    REXLOG_INFO("[native] scene dump: on (fable2_native_scene_dump; each discovery capture made in a native view writes the native "
+                "scene of its first frame before post to logs/native_scene_<stamp>.f2ns, at most {} files a run)",
+                render::kSceneDumpMaxFiles);
+  }
 }
 
 void Shutdown() {

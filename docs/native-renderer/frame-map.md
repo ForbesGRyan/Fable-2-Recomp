@@ -6970,6 +6970,40 @@ Three additions to a discovery capture (section 8's rows), all inside the discov
 
 `tools/xdk_sigmatch/check_discovery.py` checks the new members of a capture (`check_index_files`: every named file exists beside the capture with the row's `"file_bytes"`, does not end past the buffer and holds the draw's range; `check_scene_frames`: `"scene_frame"` is above 0 and rises from frame row to frame row, a row without it being no problem; a capture without the members has nothing to check) and exits 1 on a problem (`tests/test_check_discovery.py`).
 
+### Stored native scene
+
+A diagnostic (`--fable2_native_scene_dump=on`; default off; spec Design 3, ruling 17): the native scene of one frame **before the post chain**, in a file, paired with a discovery capture by the scene's frame number, so that the native picture can be laid beside the game's scene of the same frame (the capture's oracle scene, `post_replay.py`). With the switch off nothing of it is made, read or drawn: no target, no program, no buffer, no log line; the per-frame cost is the switch's own read, and no program of the pass differs (`tests/native/test_native_shaders.cpp`, return 255: the step is a text of its own and no other program holds a word of it). **It has run in no game yet**; what the first runs must show is in the task's report.
+
+**The request.** `capture::DiscoveryFirstSceneFrame()` is 0 from the moment a capture is armed until its first frame is published, then that frame's `"scene_frame"` (stored before the scene is published, so the Render of that very scene finds it). `RenderClay` asks the pass once a capture (`SceneDumpNewRequest`, `ClayPass::RequestSceneDump`). The first `Render` whose scene is the frame asked for **or a later one** makes the copies (`SceneDumpDue`); a later one is said so: the file's head has both numbers (`scene_frame`, `asked_frame`) and the log line both. A capture whose first frame published no scene (no native view was drawn at that frame) makes no request and gets no file; one whose first scene is published but never drawn (the view went off just then) gets its file from the first Render that follows, whenever that is, with `asked_frame` differing.
+
+**The copies** (`ClayPass::BeginSceneDump`, `DumpLayerPlane`), after the scene's last draw (the glare) and before the first post step or the output mapping, with the linear target and the scene's depth resting as shader resources; nothing the frame draws changes:
+
+1. the linear target (R11G11B10_FLOAT, 1120 x 720) copied to a read-back buffer as it is;
+2. the scene's depth through one full-screen step, `kClayDepthPackPs` (the output mapping's layout and vertex shader; one `Load` of the depth at the pixel; no sampler, no constant read), into an R8G8B8A8 target of the logical size as the depth's **24-bit level**, the low byte in r, the middle in g, the high in b, and that target copied. The level is `DepthLevel24`: 0 unless the depth is above 0 (a value that is no number fails the comparison), else the whole number nearest to `min(d, 1) * 16777215`, a half rounded up, at most 16777215. Each byte is a whole level of the 8-bit target, so the write is the rounded level itself. The plan's form `uint(saturate(d) * 16777215.0 + 0.5)` was not taken: in single precision 16777215 + 0.5 rounds to 16777216, so the far plane and every cleared pixel (depth 1.0) would have been written as bytes (0, 0, 255), level 16711680; the step takes the whole part and adds one when the rest is a half or above, and the C++ mirror does the same in single precision, statement for statement;
+3. in a frame that draws the sun layer, the layer's depth (560 x 360) through the same step twice, into two targets of half the logical size: once **before the tree occluders** and once **after** them. Both are taken after the cloud occluders and before layer 1; the occluders' redraw (plan Task 16) comes between the two, and until it exists both planes hold the same depth.
+
+The step's objects (the program, its pipeline, the three targets, 4.61 MB) are made on the first request that meets its Render and kept; the read-back buffers (two of 4608 x 720 bytes, two of 2304 x 360) live from the copy to the take. The sizes are `ClayPass::kWidth` x `kHeight` and half of each (static asserts: both even, the layer's size the sun layer's); no size is a literal.
+
+**The file** `logs/native_scene_<stamp>.f2ns` (`render/scene_dump.h`, `PackSceneDump`, `ParseSceneDump`; the stamp is the time of writing, the pairing is by frame number), little-endian:
+
+| Bytes | Field |
+|---|---|
+| 0 | `u32` magic `F2NS` (0x534E3246), `u32` version 1, `u32` width, `u32` height |
+| 16 | `u64` scene_frame (the frame drawn; the capture's first frame row's `"scene_frame"` when it is the frame asked for), `u64` asked_frame |
+| 32 | `u32` flags: 1 a post frame, 2 the layer's two planes follow, 4 the frame's shadow mask (with its depth pre-pass) was drawn |
+| 36 | `f32` exposure (the frame's lit scale: the game's `c20.w` in a post frame, the fixed one else), `u32` bad_values, `u32` reserved (0) |
+| 48 | width x height x 3 `f32`: the linear target, r g b, rows from the top |
+| then | width x height `u32`: the scene depth's level (0 the near plane; 16777215 the far plane and every pixel no record wrote) |
+| then, with flag 2 | two planes of (width / 2) x (height / 2) `u32`: the layer's depth before and after the tree occluders |
+
+A value of the linear target that is not finite (the float format's exponent 31) is written as 0 and counted in `bad_values`; the head holds no value that is not finite. `ParseSceneDump` takes a file only with the magic, version 1, no flag it does not know, the reserved word 0, sides of 1 to 8192 (even ones with the layer's planes) and exactly the bytes its head asks for. A file is 12,902,448 bytes without the layer's planes and 14,515,248 with them.
+
+**Bounds and refusals** (fail closed; each counted in `SceneDumpCounts` and logged as `[native] clay: scene dump: refused (<reason>): ...`): `over-limit` (at most 8 requests are taken in the pass's life, `kSceneDumpMaxFiles`), `replaced` (a request that comes while another waits for its Render or its take: the earlier one gives no file), `objects` (the step's program, pipeline or targets could not be made; tried again at the next request), `buffer` (a read-back buffer or a view could not be made; for a layer plane the file is written without the layer's planes), `read` (a buffer could not be mapped), `lost` (the pass was rebuilt for another device while copies were pending); and `[native] scene dump: refused (write)` when the file could not be written. A file is whole or not written.
+
+**Log lines**: at startup with the switch on `[native] scene dump: on (...)`; `[native] clay: scene dump: asked for scene frame N (request K of at most 8)`; once `[native] clay: scene dump ready (...)`; `[native] clay: scene dump: scene frame N (asked M) copied before post (submission S): ...`; and for each file `[native] scene dump: frame N (asked M), flags F, bad values B -> logs/native_scene_<stamp>.f2ns (...)`.
+
+**Deviations from the plan's Task 2**, each for a reason found in the code: (1) the level's rounding, above; (2) the depth step is under the output mapping's layout, not the post layout: the post layout binds the frame's constant buffer and exists only once a post frame was drawn, and the dump is also taken in a frame without post (flag 1 clear); (3) the linear target is created with the RHI's "copy source" usage bit in every run. The bit names the use; neither backend of the SDK reads it (`kTextureUsageCopySource` occurs in `native_rhi.h` alone), so the resource made is the one of before; (4) the pure rules are in `scene_dump.h` and nothing was added to `clay_logic.h`; (5) the request is made by `RenderClay` from `DiscoveryFirstSceneFrame`, not inside `ArmDiscovery`: a capture started by the environment variable is served too, and the number is not known when a capture is armed.
+
 ## Pending
 
 1. **Pitch ablation** (done 2026-10-01, results in section 4; kept for re-runs). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):

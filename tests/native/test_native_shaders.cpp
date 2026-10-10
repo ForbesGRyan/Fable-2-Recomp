@@ -4771,6 +4771,49 @@ int main() {
     }
     std::cout << "clouds: the block at the quad block's offsets in both programs, the statements, the texel step and the clamp read\n";
   }
+  // 255: the stored native scene's depth step (sub-project 11, plan Task 2; render/scene_dump.h; a diagnostic).
+  {
+    const char* s = kClayDepthPackPs;
+    if (!Compile("clay_depth_pack_ps", s, "ps_5_0")) return 255;
+    // The statements: render::DepthLevel24's, one for one (test_scene_dump.cpp holds that function), and the
+    // three bytes of the level over 255.
+    if (!strstr(s, "  float d = pack_depth.Load(int3(int2(pos.xy), 0)).r;\n  uint level = 0u;\n  if (d > 0.0) {\n"
+                   "    float x = min(d, 1.0) * 16777215.0;\n    level = uint(x);\n    if (x - float(level) >= 0.5) level += 1u;\n"
+                   "    level = min(level, 16777215u);\n  }\n"
+                   "  return float4(float(level & 255u), float((level >> 8) & 255u), float(level >> 16), 255.0) / 255.0;\n")) return 255;
+    const std::string ps = Disassembly("clay_depth_pack_ps", s, "ps_5_0");
+    const std::string code = Code(ps);
+    // One texture at t0, read by one Load and never sampled; no sampler, no constant buffer (the layout's
+    // constants are not read); the level count as a number and as a bound; a colour, no depth.
+    if (ps.empty() || BindPoint("clay_depth_pack_ps", s, "ps_5_0", "pack_depth") != 0 || Count(code.c_str(), "dcl_resource_texture2d") != 1 ||
+        Count(code.c_str(), "ld_indexable") != 1 || Count(code.c_str(), "sample") != 0 || Count(code.c_str(), "dcl_sampler") != 0 ||
+        Count(code.c_str(), "dcl_constantbuffer") != 0 || Count(code.c_str(), "16777215") < 2 || code.find("dcl_output o0") == std::string::npos ||
+        code.find("oDepth") != std::string::npos || LoopInstructions(ps) != 0 || !ReadsResource(ps, 0)) {
+      std::cerr << "the depth step's compiled program:\n" << code;
+      return 255;
+    }
+    // Controls: each rule of the level is in the compiled program (without it the program is another one).
+    const std::string unbounded = Changed(s, "min(d, 1.0) * 16777215.0", "d * 16777215.0");
+    const std::string truncated = Changed(s, "    if (x - float(level) >= 0.5) level += 1u;\n", "");
+    const std::string unguarded = Changed(s, "  if (d > 0.0) {\n", "  {\n");
+    const std::string uncapped = Changed(s, "    level = min(level, 16777215u);\n", "");
+    if (unbounded.empty() || truncated.empty() || unguarded.empty() || uncapped.empty()) return 255;
+    for (const std::string* other : {&unbounded, &truncated, &unguarded, &uncapped}) {
+      const std::string listing = Disassembly("depth_pack_control", other->c_str(), "ps_5_0");
+      if (listing.empty() || Code(listing) == code) return 255;
+    }
+    // The switch off is the picture of before, program for program: the step is a text of its own, and no
+    // other program holds a word of it.
+    for (const char* src : {kClayVs, kClayPs, kClayTexturedPs, kClayTerrainLayerPs, kClayTerrainFarPs, kClayShadowPs, kSkyVs, kClaySkyPs,
+                            kClayMaskPs, kOutputMapPs, kClayPostCompositePs, kClayPostRampPs, kClayPostDownsamplePs, kClayPostBrightPs,
+                            kClayPostBlurPs, kFullscreenVs, kClayQuadVs, kClayQuadPs, kClaySunDepthPs, kClaySunReducePs, kClaySunRadialPs,
+                            kClaySunQuadVs, kClaySunQuadPs, kClaySunOccluderPs, kClayCloudVs, kClayCloudPs}) {
+      for (const char* word : {"pack_depth", "16777215", "uint level"}) {
+        if (strstr(src, word)) return 255;
+      }
+    }
+    std::cout << "scene dump: the depth step's one load, its level's four rules in the compiled program, no other program's text touched\n";
+  }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;

@@ -51,6 +51,7 @@
 #include "frame_scene.h"
 #include "geometry_cache.h"
 #include "post_oracle.h"
+#include "scene_dump.h"
 #include "texture_cache.h"
 
 namespace fable2::native::render {
@@ -157,6 +158,23 @@ class ClayPass {
   // bytes with the magic "F2OL" (the words of R10G10B10A2_UNORM). True once for each, when the copy's
   // submission has completed; false in every other call. Command-processor thread, outside Render.
   bool TakePostOracleLayerDump(nrhi::Device* dev, size_t index, std::vector<uint8_t>* file);
+  // The stored native scene (scene_dump.h; fable2_native_scene_dump: a diagnostic, frame-map section 18).
+  // Never called with the switch off: then nothing of it exists, no object, no buffer, no step.
+  // RequestSceneDump: asks for one file of the scene of `frame` (a discovery capture's first frame, by its
+  // FrameScene::frame). The first Render whose scene is that frame, or a later one, copies its linear
+  // target and its depth (and, when it draws the sun layer, the layer's depth) to read-back buffers, after
+  // its scene's last draw and before its first post step; nothing it draws changes. A request while
+  // another waits for its Render replaces it; past kSceneDumpMaxFiles requests in the pass's life it is
+  // refused; both are counted and logged (SceneDumpCounts). The dump's own objects are made on the first
+  // request that meets its Render and kept; a failure refuses that dump with its reason and is tried
+  // again at the next request.
+  // TakeSceneDump: true once a dump, with `file` the file's bytes (PackSceneDump), when the copies'
+  // submission has completed; false in every other call. Command-processor thread, outside Render.
+  void RequestSceneDump(uint64_t frame);
+  bool TakeSceneDump(nrhi::Device* dev, std::vector<uint8_t>* file);
+  // The file's head of the dump last taken, and the counts, for the caller's log line.
+  const SceneDumpHeader& scene_dump_head() const { return scene_dump_head_; }
+  const SceneDumpCounts& scene_dump_counts() const { return scene_dump_counts_; }
 
  private:
   // One drawable record of the frame, with its buffers and albedo.
@@ -345,6 +363,24 @@ class ClayPass {
   void CopyOracleDump(nrhi::Cmd* cmd, nrhi::Device* dev);
   void DestroyOracleObjects();
   void ForgetOracleObjects();
+  // The stored native scene's objects (scene_dump.h): the depth step's program and pipeline under the
+  // output mapping's layout, and its three R8G8B8A8 targets (dump_depth_ of the logical size,
+  // dump_layer_[2] of half of it), made on the first dump and kept; false, with the reason logged, when
+  // one could not be made. BeginSceneDump: with the linear target and the scene's depth resting in
+  // kPixelShaderResource, the copy of the first and the depth step of the second into dump_depth_, each
+  // into a new read-back buffer; false (the request is over, counted) when an object or a buffer could
+  // not be made. DumpLayerPlane: the sun layer's depth, which is bound for writing, through the same
+  // step into dump_layer_[index] and its read-back buffer, and back to kDepthWrite; the caller binds its
+  // targets again. FailSceneDump: the pending dump's buffers released, the reason counted and logged.
+  bool EnsureSceneDumpObjects(nrhi::Device* dev);
+  bool BeginSceneDump(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, uint32_t flags);
+  void DumpLayerPlane(nrhi::Cmd* cmd, nrhi::Device* dev, size_t index);
+  void DepthPackStep(nrhi::Cmd* cmd, nrhi::Device* dev, nrhi::TextureView* view, nrhi::Texture* target, uint32_t width, uint32_t height,
+                     nrhi::Buffer* readback);
+  void FailSceneDump(SceneDumpFault fault, const char* what);
+  void ReleaseSceneDumpBuffers();
+  void DestroySceneDumpObjects();
+  void ForgetSceneDumpObjects();
   // The pre-pass pipeline of a colour pipeline (PrepassKey), from the pre-pass's own cache; nullptr
   // when the colour pipeline is not one of the cache or does not write depth, or on a failure.
   nrhi::Pipeline* PrepassPipeline(nrhi::Device* dev, nrhi::Pipeline* colour, const ClayAlpha& alpha, bool* flat);
@@ -635,6 +671,26 @@ class ClayPass {
   nrhi::TextureView* oracle_depth_view_ = nullptr;
   bool oracle_sun_failed_ = false;
   nrhi::Buffer* oracle_layer_dump_[kOracleLayerDumps] = {};
+  // The stored native scene (RequestSceneDump; nothing of it exists until the first request meets its
+  // Render). scene_dump_asked_: the frame asked for while scene_dump_state_ is kAsked. The step's program,
+  // pipeline and targets, kept once made. scene_dump_buffer_: the read-back buffers of a dump whose copies
+  // are pending (0 the linear target, 1 the depth step's target, 2 and 3 the layer's two planes), readable
+  // once the submission scene_dump_submission_ has completed; scene_dump_layer_planes_: how many of the
+  // layer's planes were copied (the file has them only with both). scene_dump_head_: the head of the dump
+  // pending or last taken (PackSceneDump fills its counts).
+  enum class SceneDumpState : uint8_t { kNone, kAsked, kPending };
+  SceneDumpState scene_dump_state_ = SceneDumpState::kNone;
+  uint64_t scene_dump_asked_ = 0;
+  SceneDumpCounts scene_dump_counts_;
+  SceneDumpHeader scene_dump_head_{};
+  nrhi::Shader* dump_depth_ps_ = nullptr;
+  nrhi::Pipeline* dump_depth_pipeline_ = nullptr;
+  nrhi::Texture* dump_depth_ = nullptr;
+  nrhi::Texture* dump_layer_[2] = {};
+  bool scene_dump_objects_ = false;
+  nrhi::Buffer* scene_dump_buffer_[4] = {};
+  uint32_t scene_dump_layer_planes_ = 0;
+  uint64_t scene_dump_submission_ = 0;
   nrhi::BindingLayout* map_layout_ = nullptr;  // the RHI has no layout destruction
   nrhi::Shader* map_vs_ = nullptr;
   nrhi::Shader* map_ps_ = nullptr;

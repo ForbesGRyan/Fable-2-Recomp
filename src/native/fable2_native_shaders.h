@@ -1829,4 +1829,29 @@ float4 main(float4 pos : SV_Position) : SV_Target {
 }
 )hlsl";
 
+// The stored native scene's depth step (render/clay_pass.cpp, the scene dump; render/scene_dump.h;
+// frame-map section 18, "Stored native scene"): a diagnostic, compiled, bound and drawn only for a
+// requested dump with --fable2_native_scene_dump=on, and a text of its own (no other program holds
+// a word of it). Under the output mapping's layout (kFullscreenVs draws it; the layout's constants
+// are not read): one depth texture at t0, read texel for texel by Load (the target has the
+// source's size), written into an R8G8B8A8 target as the depth's 24-bit level, the low byte in r,
+// the middle in g, the high in b, alpha 1. The level is render::DepthLevel24's, statement for
+// statement: 0 unless the depth is above 0 (a value that is no number fails the comparison), else
+// the nearest whole number to min(d, 1) * 16777215, a half rounded up, at most 16777215. Each
+// byte is a whole level of the 8-bit target (b / 255), so the write is the rounded level itself.
+inline constexpr const char* kClayDepthPackPs = R"hlsl(
+Texture2D<float4> pack_depth : register(t0);
+float4 main(float4 pos : SV_Position) : SV_Target {
+  float d = pack_depth.Load(int3(int2(pos.xy), 0)).r;
+  uint level = 0u;
+  if (d > 0.0) {
+    float x = min(d, 1.0) * 16777215.0;
+    level = uint(x);
+    if (x - float(level) >= 0.5) level += 1u;
+    level = min(level, 16777215u);
+  }
+  return float4(float(level & 255u), float((level >> 8) & 255u), float(level >> 16), 255.0) / 255.0;
+}
+)hlsl";
+
 }  // namespace fable2::native::shaders

@@ -17,6 +17,8 @@ namespace {
 // Every pipeline of the cache renders into the linear format, so PipelineKey
 // does not hold it.
 constexpr nrhi::Format kLinearFormat = nrhi::Format::kR11G11B10_FLOAT;
+// The stored native scene's depth step writes a 24-bit level as three bytes (scene_dump.h; kClayDepthPackPs).
+constexpr nrhi::Format kSceneDumpDepthFormat = nrhi::Format::kR8G8B8A8_UNORM;
 constexpr nrhi::Format kMappedFormat = nrhi::Format::kR8G8B8A8_UNORM;
 // The output mapping's binding parameters: its constants (word 0 the factor of
 // the linear value, 1 in every frame: kClayMapExposure) and the linear target at t0.
@@ -70,6 +72,13 @@ static_assert(ClayPass::kWidth % kSunLayerDivisor == 0 && ClayPass::kHeight % kS
               kSunSmallDivisor % kSunLayerDivisor == 0 && kSunSmallDivisor == kPostBloomDivisor,
               "the sun layer's targets are exact fractions of the logical size, and tf1 and tf2 are the bright pass's size");
 constexpr uint32_t kSunLayerWidth = ClayPass::kWidth / kSunLayerDivisor, kSunLayerHeight = ClayPass::kHeight / kSunLayerDivisor;
+// The stored native scene: its layer planes are the sun layer's size, which is half the logical size (the
+// file's rule), and a file's size is bounded.
+static_assert(ClayPass::kWidth % 2 == 0 && ClayPass::kHeight % 2 == 0 && kSunLayerWidth == ClayPass::kWidth / 2 &&
+              kSunLayerHeight == ClayPass::kHeight / 2);
+static_assert(SceneDumpBytes(ClayPass::kWidth, ClayPass::kHeight, kSceneDumpLayer) != 0 &&
+              SceneDumpBytes(ClayPass::kWidth, ClayPass::kHeight, kSceneDumpLayer) <= (32ull << 20));
+static_assert(OracleDumpPitch(kSunLayerWidth) % nrhi::kRowPitchAlignment == 0 && OracleDumpPitch(kSunLayerWidth) >= kSunLayerWidth * 4);
 constexpr uint32_t kSunSmallWidth = ClayPass::kWidth / kSunSmallDivisor, kSunSmallHeight = ClayPass::kHeight / kSunSmallDivisor;
 static_assert(sizeof(ClaySunQuadConstants) <= kClayQuadSlots * kClayTerrainSlotBytes);
 // The level count of a UNORM format: what a step that writes such a target rounds to itself
@@ -168,6 +177,7 @@ void ClayPass::DestroyObjects() {
   DestroyBloomObjects();  // (before the post steps' layout's other users and map_vs_)
   DestroyPostObjects();  // (before map_vs_, which its pipelines are made of)
   DestroyOracleObjects();
+  DestroySceneDumpObjects();  // (before map_vs_, which its pipeline is made of)
   if (device_) {
     for (nrhi::Pipeline* p : pipelines_) device_->DestroyDeferred(p);
     device_->DestroyDeferred(vs_);
@@ -311,6 +321,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     ForgetOracleObjects();
     oracle_failed_ = false;  // (and the oracle feed)
     oracle_sun_failed_ = false;
+    ForgetSceneDumpObjects();  // (and the stored scene's step; a request that waits is served by the new pass)
     white_ = nullptr;
     white_view_ = nullptr;
     white_staging_ = nullptr;
@@ -468,7 +479,10 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
   linear.width = kWidth;
   linear.height = kHeight;
   linear.format = kLinearFormat;
-  linear.usage = nrhi::kTextureUsageRenderTarget;
+  // (a copy source for the stored native scene's read-back, BeginSceneDump: a diagnostic's one copy of a
+  // requested frame; nothing else copies from it. The RHI's backends make the same resource with or
+  // without the bit, which names the use.)
+  linear.usage = nrhi::kTextureUsageRenderTarget | nrhi::kTextureUsageCopySource;
   linear.initial_state = nrhi::ResourceState::kPixelShaderResource;
   for (int i = 0; i < 4; ++i) linear.clear_color[i] = kClayClearLinear[i];
   linear_ = dev->CreateTexture(linear);
@@ -2246,6 +2260,245 @@ bool ClayPass::TakePostOracleDump(nrhi::Device* dev, std::vector<uint8_t>* file)
   return ok;
 }
 
+// --- The stored native scene (scene_dump.h; frame-map section 18, "Stored native scene") -------------
+// A diagnostic: nothing below is reached unless RequestSceneDump was called, which its switch alone does.
+
+void ClayPass::ReleaseSceneDumpBuffers() {
+  for (nrhi::Buffer*& b : scene_dump_buffer_) {
+    if (device_) device_->DestroyDeferred(b);
+    b = nullptr;
+  }
+  scene_dump_layer_planes_ = 0;
+}
+
+void ClayPass::ForgetSceneDumpObjects() {
+  dump_depth_ps_ = nullptr;
+  dump_depth_pipeline_ = nullptr;
+  dump_depth_ = nullptr;
+  for (nrhi::Texture*& t : dump_layer_) t = nullptr;
+  scene_dump_objects_ = false;
+  for (nrhi::Buffer*& b : scene_dump_buffer_) b = nullptr;
+  scene_dump_layer_planes_ = 0;
+  // (copies that were pending are gone with their buffers: counted, and no file comes of them; a request
+  // that still waits for its Render is served by the rebuilt pass)
+  if (scene_dump_state_ == SceneDumpState::kPending) {
+    scene_dump_state_ = SceneDumpState::kNone;
+    CountSceneDumpFault(SceneDumpFault::kLost, scene_dump_counts_);
+    REXLOG_WARN("[native] clay: scene dump: refused ({}): the pass was rebuilt while the copies of scene frame {} were pending; "
+                "no file is written for it", SceneDumpFaultName(SceneDumpFault::kLost), scene_dump_head_.scene_frame);
+  }
+}
+
+void ClayPass::DestroySceneDumpObjects() {
+  if (device_) {
+    device_->DestroyDeferred(dump_depth_pipeline_);
+    device_->DestroyDeferred(dump_depth_ps_);
+    device_->DestroyDeferred(dump_depth_);
+    for (nrhi::Texture* t : dump_layer_) device_->DestroyDeferred(t);
+    for (nrhi::Buffer* b : scene_dump_buffer_) device_->DestroyDeferred(b);
+  }
+  ForgetSceneDumpObjects();
+}
+
+void ClayPass::FailSceneDump(SceneDumpFault fault, const char* what) {
+  ReleaseSceneDumpBuffers();
+  scene_dump_state_ = SceneDumpState::kNone;
+  CountSceneDumpFault(fault, scene_dump_counts_);
+  REXLOG_ERROR("[native] clay: scene dump: refused ({}): {}; no file is written for the request of scene frame {}",
+               SceneDumpFaultName(fault), what, scene_dump_asked_);
+}
+
+void ClayPass::RequestSceneDump(uint64_t frame) {
+  const bool waiting = scene_dump_state_ != SceneDumpState::kNone;
+  switch (AskSceneDump(frame, waiting, scene_dump_counts_)) {
+    case SceneDumpAsk::kNoFrame:
+      return;
+    case SceneDumpAsk::kOverLimit:
+      REXLOG_WARN("[native] clay: scene dump: refused ({}): {} requests were taken in this run, the limit; scene frame {} is not "
+                  "dumped ({} refused so)", SceneDumpFaultName(SceneDumpFault::kOverLimit), scene_dump_counts_.asked, frame,
+                  scene_dump_counts_.over_limit);
+      return;
+    case SceneDumpAsk::kTaken:
+      break;
+  }
+  if (waiting) {
+    // (the earlier request met no Render, or its copies were not taken: it gives no file)
+    REXLOG_WARN("[native] clay: scene dump: refused ({}): the request of scene frame {} is replaced by one of scene frame {}",
+                SceneDumpFaultName(SceneDumpFault::kReplaced), scene_dump_asked_, frame);
+    ReleaseSceneDumpBuffers();
+  }
+  scene_dump_asked_ = frame;
+  scene_dump_state_ = SceneDumpState::kAsked;
+  REXLOG_INFO("[native] clay: scene dump: asked for scene frame {} (request {} of at most {})", frame, scene_dump_counts_.asked,
+              kSceneDumpMaxFiles);
+}
+
+bool ClayPass::EnsureSceneDumpObjects(nrhi::Device* dev) {
+  if (scene_dump_objects_) return true;
+  if (!ready_ || dev != device_ || !map_layout_ || !map_vs_) return false;
+  nrhi::ShaderDesc sd;
+  sd.entry_point = "main";
+  sd.stage = nrhi::ShaderStage::kPixel;
+  sd.name = "fable2_clay_depth_pack_ps";
+  sd.hlsl_source = shaders::kClayDepthPackPs;
+  dump_depth_ps_ = dev->CreateShader(sd);
+  // One full-screen triangle (the output mapping's vertex shader and layout): no depth, no blend, no cull.
+  nrhi::GraphicsPipelineDesc pipe;
+  pipe.layout = map_layout_;
+  pipe.vs = map_vs_;
+  pipe.ps = dump_depth_ps_;
+  pipe.rtv_format = kSceneDumpDepthFormat;
+  dump_depth_pipeline_ = dump_depth_ps_ ? dev->CreateGraphicsPipeline(pipe) : nullptr;
+  // The step's targets: the logical size for the scene's depth, half of it for the layer's two planes.
+  // Their contents are undefined until a dump writes them, and nothing reads one but that dump's copy.
+  nrhi::TextureDesc td;
+  td.width = kWidth;
+  td.height = kHeight;
+  td.format = kSceneDumpDepthFormat;
+  td.usage = nrhi::kTextureUsageRenderTarget | nrhi::kTextureUsageCopySource;
+  td.initial_state = nrhi::ResourceState::kPixelShaderResource;
+  dump_depth_ = dev->CreateTexture(td);
+  td.width = kSunLayerWidth;
+  td.height = kSunLayerHeight;
+  for (nrhi::Texture*& t : dump_layer_) t = dev->CreateTexture(td);
+  if (!dump_depth_ps_ || !dump_depth_pipeline_ || !dump_depth_ || !dump_layer_[0] || !dump_layer_[1]) {
+    DestroySceneDumpObjects();
+    return false;
+  }
+  scene_dump_objects_ = true;
+  REXLOG_INFO("[native] clay: scene dump ready (the depth step's target {} x {} and two of {} x {}, R8G8B8A8_UNORM, {:.2f} MB together; "
+              "a file is at most {:.1f} MB, at most {} a run)",
+              kWidth, kHeight, kSunLayerWidth, kSunLayerHeight,
+              double(ClayTargetBytes(kWidth, kHeight, 4) + 2 * ClayTargetBytes(kSunLayerWidth, kSunLayerHeight, 4)) / (1024.0 * 1024.0),
+              double(SceneDumpBytes(kWidth, kHeight, kSceneDumpLayer)) / (1024.0 * 1024.0), kSceneDumpMaxFiles);
+  return true;
+}
+
+void ClayPass::DepthPackStep(nrhi::Cmd* cmd, nrhi::Device* dev, nrhi::TextureView* view, nrhi::Texture* target, uint32_t width, uint32_t height,
+                             nrhi::Buffer* readback) {
+  // (`view`: the source's, which rests in kPixelShaderResource; it lives for this step alone)
+  cmd->Barrier(target, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
+  cmd->FlushBarriers();
+  cmd->SetRenderTargets(target, nullptr);
+  cmd->SetViewport({0.0f, 0.0f, float(width), float(height), 0.0f, 1.0f});
+  cmd->SetScissor({0, 0, int32_t(width), int32_t(height)});
+  cmd->SetBindingLayout(map_layout_);
+  cmd->SetPipeline(dump_depth_pipeline_);
+  // (the layout's constants, which the step does not read, hold zeros)
+  const float none[kMapConstantCount] = {0.0f, 0.0f, 0.0f, 0.0f};
+  cmd->SetRootConstants(kMapParamConstants, kMapConstantCount, none, 0);
+  cmd->SetTexture(kMapParamLinear, view);
+  cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+  cmd->Draw(3, 0);
+  cmd->Barrier(target, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kCopySource);
+  cmd->FlushBarriers();
+  cmd->CopyTextureToBuffer(readback, 0, OracleDumpPitch(width), target, 0, width, height);
+  cmd->Barrier(target, nrhi::ResourceState::kCopySource, nrhi::ResourceState::kPixelShaderResource);
+  cmd->FlushBarriers();
+  dev->DestroyDeferred(view);
+}
+
+bool ClayPass::BeginSceneDump(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, uint32_t flags) {
+  if (!EnsureSceneDumpObjects(dev)) {
+    FailSceneDump(SceneDumpFault::kObjects, "the depth step's program, pipeline or targets could not be made");
+    return false;
+  }
+  const uint32_t pitch = OracleDumpPitch(kWidth);
+  nrhi::BufferDesc bd;
+  bd.size = uint64_t(pitch) * kHeight;
+  bd.heap = nrhi::HeapKind::kReadback;
+  for (size_t i = 0; i < 2; ++i) scene_dump_buffer_[i] = dev->CreateBuffer(bd);
+  nrhi::TextureView* const depth_view = dev->CreateTextureView(depth_, nrhi::TextureViewDesc{});
+  if (!scene_dump_buffer_[0] || !scene_dump_buffer_[1] || !depth_view) {
+    dev->DestroyDeferred(depth_view);
+    FailSceneDump(SceneDumpFault::kBuffer, "a read-back buffer or the depth's view could not be made");
+    return false;
+  }
+  // The linear target, resting as a shader resource since the colour pass ended (the caller's barriers).
+  cmd->FlushBarriers();
+  cmd->Barrier(linear_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kCopySource);
+  cmd->FlushBarriers();
+  cmd->CopyTextureToBuffer(scene_dump_buffer_[0], 0, pitch, linear_, 0, kWidth, kHeight);
+  cmd->Barrier(linear_, nrhi::ResourceState::kCopySource, nrhi::ResourceState::kPixelShaderResource);
+  cmd->FlushBarriers();
+  // The scene's depth through the step, as levels.
+  DepthPackStep(cmd, dev, depth_view, dump_depth_, kWidth, kHeight, scene_dump_buffer_[1]);
+  scene_dump_layer_planes_ = 0;
+  scene_dump_submission_ = dev->CurrentSubmission();
+  scene_dump_head_ = SceneDumpHeader{kSceneDumpMagic, kSceneDumpVersion, kWidth, kHeight, scene.frame, scene_dump_asked_, flags, frame_.exposure, 0, 0};
+  scene_dump_state_ = SceneDumpState::kPending;
+  REXLOG_INFO("[native] clay: scene dump: scene frame {} (asked {}) copied before post (submission {}): the linear target and the "
+              "scene's depth{}", scene.frame, scene_dump_asked_, scene_dump_submission_,
+              scene.frame != scene_dump_asked_ ? "; a later scene than the one asked for" : "");
+  return true;
+}
+
+void ClayPass::DumpLayerPlane(nrhi::Cmd* cmd, nrhi::Device* dev, size_t index) {
+  if (index >= 2 || scene_dump_state_ != SceneDumpState::kPending || !sun_depth_ || !dump_layer_[index] || scene_dump_buffer_[2 + index]) return;
+  nrhi::BufferDesc bd;
+  bd.size = uint64_t(OracleDumpPitch(kSunLayerWidth)) * kSunLayerHeight;
+  bd.heap = nrhi::HeapKind::kReadback;
+  nrhi::Buffer* const buffer = dev->CreateBuffer(bd);
+  nrhi::TextureView* const view = buffer ? dev->CreateTextureView(sun_depth_, nrhi::TextureViewDesc{}) : nullptr;
+  if (!buffer || !view) {
+    dev->DestroyDeferred(view);
+    dev->DestroyDeferred(buffer);
+    CountSceneDumpFault(SceneDumpFault::kBuffer, scene_dump_counts_);
+    REXLOG_ERROR("[native] clay: scene dump: refused ({}): a layer plane's read-back buffer or view could not be made; the file is "
+                 "written without the layer's planes", SceneDumpFaultName(SceneDumpFault::kBuffer));
+    return;
+  }
+  // (the layer's depth is bound for writing here: a shader resource for the step alone, then back)
+  cmd->Barrier(sun_depth_, nrhi::ResourceState::kDepthWrite, nrhi::ResourceState::kPixelShaderResource);
+  cmd->FlushBarriers();
+  DepthPackStep(cmd, dev, view, dump_layer_[index], kSunLayerWidth, kSunLayerHeight, buffer);
+  cmd->Barrier(sun_depth_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kDepthWrite);
+  cmd->FlushBarriers();
+  scene_dump_buffer_[2 + index] = buffer;
+  ++scene_dump_layer_planes_;
+  scene_dump_submission_ = dev->CurrentSubmission();
+}
+
+bool ClayPass::TakeSceneDump(nrhi::Device* dev, std::vector<uint8_t>* file) {
+  if (scene_dump_state_ != SceneDumpState::kPending || !file || dev != device_) return false;
+  if (dev->CompletedSubmission() < scene_dump_submission_) return false;  // (the copies have not run yet)
+  const bool layer = scene_dump_layer_planes_ == 2 && scene_dump_buffer_[2] && scene_dump_buffer_[3];
+  const size_t count = layer ? 4 : 2;
+  const uint8_t* mapped[4] = {};
+  bool ok = true;
+  for (size_t i = 0; i < count; ++i) {
+    const uint32_t width = i < 2 ? kWidth : kSunLayerWidth, height = i < 2 ? kHeight : kSunLayerHeight;
+    mapped[i] = scene_dump_buffer_[i] ? static_cast<const uint8_t*>(dev->Map(scene_dump_buffer_[i])) : nullptr;
+    if (mapped[i]) dev->InvalidateForRead(scene_dump_buffer_[i], 0, uint64_t(OracleDumpPitch(width)) * height);
+    ok = ok && mapped[i] != nullptr;
+  }
+  if (ok) {
+    SceneDumpPlanes planes;
+    planes.linear = mapped[0];
+    planes.depth = mapped[1];
+    planes.linear_pitch = planes.depth_pitch = OracleDumpPitch(kWidth);
+    planes.layer[0] = mapped[2];
+    planes.layer[1] = mapped[3];
+    planes.layer_pitch = OracleDumpPitch(kSunLayerWidth);
+    const SceneDumpHeader& h = scene_dump_head_;
+    ok = PackSceneDump(kWidth, kHeight, h.scene_frame, h.asked_frame, (h.flags & ~kSceneDumpLayer) | (layer ? kSceneDumpLayer : 0u), h.exposure,
+                       planes, file);
+  }
+  for (size_t i = 0; i < count; ++i) {
+    if (mapped[i]) dev->Unmap(scene_dump_buffer_[i]);
+  }
+  if (!ok) {
+    file->clear();
+    FailSceneDump(SceneDumpFault::kRead, "a read-back buffer could not be read");
+    return false;
+  }
+  ReleaseSceneDumpBuffers();
+  scene_dump_state_ = SceneDumpState::kNone;
+  ++scene_dump_counts_.written;
+  std::memcpy(&scene_dump_head_, file->data(), sizeof(scene_dump_head_));  // (with the file's flags and its count of bad values)
+  return true;
+}
+
 void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
                       bool textured, ClayLight light, bool shadows, bool fog, const ClayPostRequest& post, ClayStats& st,
                       TextureStats& tst) {
@@ -3295,6 +3548,15 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
                nrhi::ResourceState::kPixelShaderResource);
   cmd->Barrier(depth_, nrhi::ResourceState::kDepthWrite,
                nrhi::ResourceState::kPixelShaderResource);
+  // The stored native scene (a diagnostic; scene_dump.h): only for a request (RequestSceneDump, which the
+  // switch alone makes) whose frame this scene is, or a later one. Here, after the scene's last draw and
+  // before the first post step, with both targets resting: the linear target is copied and the depth goes
+  // through the depth step, each into a read-back buffer. Nothing the frame draws changes; the steps
+  // below bind their own targets, viewports and layouts.
+  bool scene_dumping = false;
+  if (scene_dump_state_ == SceneDumpState::kAsked && SceneDumpDue(scene_dump_asked_, scene.frame)) {
+    scene_dumping = BeginSceneDump(cmd, dev, scene, (post_frame ? kSceneDumpPost : 0u) | (mask == ClayMask::kDrawn ? kSceneDumpPrepass : 0u));
+  }
   if (post_frame) {
     // A post frame (DecideClayPost: with the steps' objects and the frame's constant buffer, whose post
     // slots hold this frame's constants): the game's composite and the scan-out ramp in place of the
@@ -3362,6 +3624,11 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
         sun_depth_copy(oracle_sun ? oracle_depth_view_ : sun_scene_depth_view_);
       }
       layer_quads(0);
+      // (the stored native scene's two planes of the layer's depth: before the tree occluders and after
+      // them. The occluders' redraw comes between the two, plan Task 16; until then both planes hold the
+      // depth the cloud occluders left. The loop below binds its targets, viewport and layout anew.)
+      if (scene_dumping) DumpLayerPlane(cmd, dev, 0);
+      if (scene_dumping) DumpLayerPlane(cmd, dev, 1);
       // 2. Layer 1 (the beam source) and layer 2 (flares, moon glow, sun disc), each cleared and drawn
       // against that one depth, which no colour state writes.
       for (uint8_t layer = 0; layer < 2; ++layer) {

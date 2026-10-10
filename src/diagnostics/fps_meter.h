@@ -22,6 +22,7 @@
 
 #include <rex/logging/macros.h>
 #include <rex/ppc/func.h>
+#include <rex/graphics/native_guest_renderer.h>
 
 #include "fable2_func_trace.h"
 #include "capture.h"
@@ -119,6 +120,42 @@ inline bool enabled() {
   return env || fable2::native::capture::Enabled();
 }
 
+// Command-processor (GPU emulation thread) time per closed GPU frame, sampled
+// once per guest frame from the SDK's emulated-frame stats (FABLE2_GUEST_WORK_LOG=1
+// also turns the collection on). A GPU frame that repeats across guest frames
+// is counted once; one skipped is missed. Render thread only.
+struct CpWindows {
+  diagnostics::WindowStats busy_ms{300}, wait_reg_ms{300}, idle_ms{300}, present_ms{300},
+      draws{300}, draw_cpu_ms{300}, copies{300}, copy_cpu_ms{300}, interval_ms{300};
+  uint64_t last_gpu_frame = 0;
+  bool acquired = false;
+};
+inline CpWindows& cp_windows() {
+  static CpWindows w;
+  return w;
+}
+
+inline void sample_cp() {
+  if (!enabled()) return;
+  CpWindows& c = cp_windows();
+  if (!c.acquired) {
+    rex::graphics::AcquireEmulatedFrameStats();
+    c.acquired = true;
+  }
+  rex::graphics::EmulatedFrameStats gpu;
+  if (!rex::graphics::GetLastEmulatedFrameStats(&gpu) || gpu.frame == c.last_gpu_frame) return;
+  c.last_gpu_frame = gpu.frame;
+  c.busy_ms.Add(double(gpu.cp_busy_ns) / 1e6);
+  c.wait_reg_ms.Add(double(gpu.cp_wait_reg_ns) / 1e6);
+  c.idle_ms.Add(double(gpu.cp_idle_ns) / 1e6);
+  c.present_ms.Add(double(gpu.cp_present_ns) / 1e6);
+  c.draws.Add(double(gpu.draws));
+  c.draw_cpu_ms.Add(double(gpu.draw_cpu_ns) / 1e6);
+  c.copies.Add(double(gpu.copies));
+  c.copy_cpu_ms.Add(double(gpu.copy_cpu_ns) / 1e6);
+  c.interval_ms.Add(double(gpu.swap_interval_ns) / 1e6);
+}
+
 inline void poll() {
   auto& w = fable2::guest_frame_rate::windows();
   if (!w.work_ms.full()) return;
@@ -129,6 +166,25 @@ inline void poll() {
         "(p90 {:.2f}), swap median {:.2f} ms, wait median {:.2f} ms",
         w.work_ms.size(), mean_frame > 0 ? 1000.0 / mean_frame : 0.0, w.frame_ms.Median(),
         w.work_ms.Median(), w.work_ms.Percentile(0.9), w.swap_ms.Median(), w.wait_ms.Median());
+    CpWindows& c = cp_windows();
+    if (c.busy_ms.size() > 0) {
+      REXSYS_INFO(
+          "[frame] cp {} gpu frames: interval median {:.2f} ms, busy median {:.2f} ms (p90 {:.2f}, "
+          "max {:.2f}), wait_reg median {:.2f} ms, idle median {:.2f} ms, present median {:.2f} ms; "
+          "draws median {:.0f} (draw cpu {:.2f} ms), resolves median {:.0f} ({:.2f} ms)",
+          c.busy_ms.size(), c.interval_ms.Median(), c.busy_ms.Median(), c.busy_ms.Percentile(0.9),
+          c.busy_ms.Max(), c.wait_reg_ms.Median(), c.idle_ms.Median(), c.present_ms.Median(),
+          c.draws.Median(), c.draw_cpu_ms.Median(), c.copies.Median(), c.copy_cpu_ms.Median());
+    }
+    c.busy_ms.Reset();
+    c.wait_reg_ms.Reset();
+    c.idle_ms.Reset();
+    c.present_ms.Reset();
+    c.draws.Reset();
+    c.draw_cpu_ms.Reset();
+    c.copies.Reset();
+    c.copy_cpu_ms.Reset();
+    c.interval_ms.Reset();
   }
   w.frame_ms.Reset();
   w.work_ms.Reset();
@@ -151,6 +207,7 @@ extern "C" void MainRenderLoop_82B9CD68(PPCContext& ctx, uint8_t* base) {
   // Guest frame time for the F3 overlay (see guest_frame_rate.h).
   fable2::guest_frame_rate::record_frame(frame_us);
   // Periodic guest work log line (A/B measurements, see guest_work_log).
+  fable2::guest_work_log::sample_cp();
   fable2::guest_work_log::poll();
   // Bounded unfiltered trace window (FABLE2_TRACE_WINDOW=1); see above.
   fable2::functrace_window::run_window(frame_us);

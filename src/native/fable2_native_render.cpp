@@ -71,8 +71,12 @@ REXCVAR_DEFINE_STRING(fable2_native_fog, "on", "Fable2",
 REXCVAR_DEFINE_STRING(fable2_native_post, "off", "Fable2",
                       "Native post chain (sub-project 10, in work): on (or true, 1) = with a composite view and the light on, "
                       "the capture also reads the frame's post block at the game's own post rectangles (the registers of its "
-                      "composite, bright pass and blurs and the composite's 512-texel exposure table); nothing is drawn with "
-                      "it yet, the picture is unchanged; off (or false, 0; the default) = none of it is read.");
+                      "composite, bright pass and blurs and the composite's 512-texel exposure table), and the clay pass draws "
+                      "a frame that has one through the game's own composite and the scan-out gamma ramp: its lit draws write "
+                      "the game's output scale in place of the fixed exposure, its unlit draws one scale of the frame, and the "
+                      "clear colour comes out nearly black (no bloom yet); a frame without a block, a ramp or light is drawn "
+                      "as with the switch off; off (or false, 0; the default) = none of it is read or drawn: the fog's "
+                      "picture, the fixed exposure and the square-root mapping.");
 REXCVAR_DEFINE_STRING(fable2_exposure_readback, "off", "Fable2",
                       "The game's exposure in a normal run: on (or true, 1) = the game's luminance resolve (two buffers in turn, "
                       "0x1A385000 and 0x1A34F000) is added to readback_resolve_force_addresses at startup, so that the game "
@@ -154,9 +158,14 @@ struct RampLog {
   bool have_last = false;
   uint64_t reads = 0, failed = 0, changes = 0;
   uint64_t full_lines = 0;  // tables logged in full (RampLoggedInFull)
+  bool last_valid = false;  // `last` passed MakePostRamp's rule (g_post_ramp holds its floats)
   bool said_none = false;
 };
 RampLog g_ramp;
+// The ramp of this composite frame as the clay pass takes it (ReadRamp, before RenderClay): the table
+// the emulated picture of the frame went through, as floats, valid only when it passed its rule
+// (MakePostRamp); invalid when no reader is registered or the reader gave none.
+PostRamp g_post_ramp;
 
 // F3 status text, written on the command-processor thread, read by the UI.
 std::mutex g_status_mutex;
@@ -391,12 +400,17 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   g_clay->textures().BeginFrame(g_clay_frames, TextureBudgetBytes(), TextureUploadBytes());
   render::ClayStats st;
   render::TextureStats tst;
-  g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), CurrentFog(), st,
-                 tst);
+  // The post chain: the switch as it is now and this frame's ramp (null without a valid one: the frame
+  // is then drawn without post, "post-ramp"). The bloom and the sun layer are later tasks' switches.
+  render::ClayPostRequest post;
+  post.post = CurrentPost();
+  post.ramp = g_post_ramp.valid ? g_post_ramp.rgb : nullptr;
+  g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), CurrentFog(), post,
+                 st, tst);
   g_shadows_usable.store(g_clay->shadows_usable(), std::memory_order_relaxed);
   SetStatus(render::FormatStatusText(*scene, st, textures ? &tst : nullptr) + "\n" +
             render::FormatLightDrawnText(st) + "\n" + render::FormatShadowText(st) + "\n" + render::FormatFogText(st) + "\n" +
-            render::FormatSkyText(st));
+            render::FormatSkyText(st) + "\n" + render::FormatPostText(st));
   const double cpu_ms = st.hash_ms + st.decode_ms + st.record_ms + tst.decode_ms;
   const uint32_t pending = tst.status[size_t(capture::MaterialStatus::kTexturePending)];
   if (textures && (tst.uploads || pending)) {
@@ -447,6 +461,8 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
     REXLOG_INFO("[native] clay: {}", render::FormatFogText(st));
     // The sky: the frame's sky block, what the pass did about it, its place, and the frames without a sky by reason.
     REXLOG_INFO("[native] clay: {}", render::FormatSkyText(st));
+    // The post chain: the frame's post block, what the pass did about it, and the frames without post by reason.
+    REXLOG_INFO("[native] clay: {}", render::FormatPostText(st));
     if (const std::string by_vs = render::FormatShadowSkippedByVs(st); !by_vs.empty()) {
       REXLOG_INFO("[native] clay: shadow draws skipped by vs {{{}}}", by_vs);
     }
@@ -496,9 +512,11 @@ void PollD3dMessagesOnce(const char* when) {
 // Post discovery: the guest's scan-out ramp as the SDK holds it at this composite frame (the table
 // the emulated picture of this frame went through: the callback runs at the end of the swap blit,
 // on its thread). Logged in full at the first read and at the changes after it, up to kRampFullLogs
-// lines in a run (later changes are only counted: "[native] ramp: changes ..."); nothing is drawn
-// with it.
+// lines in a run (later changes are only counted: "[native] ramp: changes ..."). Read before the clay
+// pass renders the frame, which draws a post frame through it (g_post_ramp); the clay frame's number in
+// its lines is that of the last frame rendered before the read.
 void ReadRamp() {
+  g_post_ramp.valid = false;  // (until this frame's table is read and passes its rule)
   const auto reader = g_ramp_reader.load(std::memory_order_acquire);
   if (!reader) {
     if (!g_ramp.said_none) REXLOG_INFO("[native] ramp: no reader registered; the scan-out ramp is not read");
@@ -511,7 +529,12 @@ void ReadRamp() {
     return;
   }
   ++g_ramp.reads;
-  if (g_ramp.have_last && SameRamp(now, g_ramp.last)) return;
+  if (g_ramp.have_last && SameRamp(now, g_ramp.last)) {
+    g_post_ramp.valid = g_ramp.last_valid;  // (the table of the last read: its floats are still there)
+    return;
+  }
+  g_post_ramp = MakePostRamp(now);
+  g_ramp.last_valid = g_post_ramp.valid;
   if (g_ramp.have_last) ++g_ramp.changes;
   g_ramp.have_last = true;
   std::copy(&now[0][0], &now[0][0] + 256 * 3, &g_ramp.last[0][0]);
@@ -523,7 +546,7 @@ void ReadRamp() {
     return;
   }
   ++g_ramp.full_lines;
-  REXLOG_INFO("[native] ramp: read at clay frame {}: valid {}, {}", g_clay_frames, MakePostRamp(now).valid ? 1 : 0,
+  REXLOG_INFO("[native] ramp: read at clay frame {}: valid {}, {}", g_clay_frames, g_post_ramp.valid ? 1 : 0,
               FormatRampHex(now));
 }
 
@@ -531,8 +554,8 @@ void OverlayCallback(const NativeGuestOutputRenderContext& ctx, void*) {
   const View view = CurrentView();
   if (!Usable(ctx) || !IsCompositeView(view)) return;  // off/pattern: record nothing
   LogD3dMessages();  // (of the frames before this one: the layer reports a call when it is executed)
+  ReadRamp();  // (before the clay pass: a post frame is drawn through this frame's ramp)
   if (!RenderClay(ctx)) return;
-  ReadRamp();
   if (!g_clay_scene) return;  // no scene captured yet: leave the emulated frame
   if (!g_composite.Ensure(ctx.device, ctx.guest_output->format())) {
     Fail("composite");
@@ -613,8 +636,8 @@ void Install(rex::memory::Memory* memory) {
   REXLOG_INFO("[native] fog: {} (fable2_native_fog; on: the frame's fog and sky blocks are read with the light on and "
               "the lit draws, and the unlit ones whose shader has the game's fog block, are fogged and the sky is drawn behind them)",
               CurrentFog() ? "on" : "off");
-  REXLOG_INFO("[native] post: {} (fable2_native_post; on: the frame's post block is read with the light on; nothing is "
-              "drawn with it yet)",
+  REXLOG_INFO("[native] post: {} (fable2_native_post; on: the frame's post block is read with the light on, and a frame "
+              "that has one is drawn through the game's composite and the scan-out ramp)",
               CurrentPost() ? "on" : "off");
 }
 

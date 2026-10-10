@@ -15,6 +15,8 @@ using namespace fable2::native::render;
 
 // The two fog tables of a captured frame (kFixtureTf4, kFixtureTf5): cases 580 on.
 #include "fog_table_fixture.inc"
+// The composite's table the post pins were made with (kPinsPostTable): cases 600 on.
+#include "post_pins_table.inc"
 
 static int g_fail = 0;
 #define CHECK(id, cond)                                         \
@@ -2516,20 +2518,29 @@ int main() {
       CHECK(441, frame.sun_dir[i] == block_sun[i] && frame.sun_col[i] == 0.1f + float(i) && frame.tint[i] == 1.1f + float(i) &&
                      frame.add[i] == 0.01f + float(i) && frame.axis[i] == 0.2f + float(i));
     }
-    // The output scale (16) is not in the block the shaders get. The exposure is: the lit pixel
-    // paths multiply their value by it (cbuffer Frame's f_exposure), and a lit frame carries the
-    // calibrated constant.
-    CHECK(442, frame.pad0 == 0.0f && frame.mask_du == 0.0f && frame.mask_dv == 0.0f && frame.exposure == kLitExposure &&
+    // The output scale (16) is not in the block the shaders get (a post frame's apart: case 608). The
+    // exposure is: the lit pixel paths multiply their value by it (cbuffer Frame's f_exposure), and a lit
+    // frame carries the calibrated constant. The unlit word (f_post) is 1: a frame without post.
+    CHECK(442, frame.post == 1.0f && offsetof(ClayFrameConstants, post) == 60 && frame.mask_du == 0.0f && frame.mask_dv == 0.0f && frame.exposure == kLitExposure &&
                    frame.exposure == ClayExposure(ClayLight::kOn) && offsetof(ClayFrameConstants, exposure) == 44);
     // The switch off, or no block: nothing lit, everything zero, the exposure too (no draw reads it:
-    // the frame is the materials picture, written and mapped as it is).
+    // the frame is the materials picture, written and mapped as it is), but for the unlit word, which
+    // every unlit colour is multiplied by: 1 in such a frame as in every frame without post.
     const ClayFrameConstants none{};
+    {
+      ClayFrameConstants zeroed = none;
+      zeroed.post = 0.0f;
+      const unsigned char* bytes = reinterpret_cast<const unsigned char*>(&zeroed);
+      bool all_zero = true;
+      for (size_t i = 0; i < sizeof(zeroed); ++i) all_zero = all_zero && bytes[i] == 0;
+      CHECK(443, all_zero && none.post == 1.0f);
+    }
     frame = MakeClayFrameConstants(block, ClayLight::kOff);
-    CHECK(443, std::memcmp(&frame, &none, sizeof(frame)) == 0 && frame.exposure == 0.0f);
+    CHECK(443, std::memcmp(&frame, &none, sizeof(frame)) == 0 && frame.exposure == 0.0f && frame.post == 1.0f);
     capture::LightBlock invalid = block;
     invalid.valid = false;
     frame = MakeClayFrameConstants(invalid, ClayLight::kOn);
-    CHECK(444, std::memcmp(&frame, &none, sizeof(frame)) == 0 && frame.exposure == 0.0f);
+    CHECK(444, std::memcmp(&frame, &none, sizeof(frame)) == 0 && frame.exposure == 0.0f && frame.post == 1.0f);
     frame = MakeClayFrameConstants(capture::LightBlock{}, ClayLight::kOn);
     CHECK(444, std::memcmp(&frame, &none, sizeof(frame)) == 0);
     // A value that is not a number or not of usable size never reaches a shader: the frame is not lit.
@@ -5704,15 +5715,17 @@ int main() {
 
     // 598: the slot plan of the frame's constant buffer (final review, test gap 1): the frame's block at
     // the head, then the terrain records drawn with their material, the lit plants, the mask step's and
-    // the sky step's constants, one small slot each, then the large slots. No two uses share a slot, and
+    // the sky step's constants, one small slot each, the post steps' 25 small slots (plan Task 5 of the
+    // post sub-project), then the large slots. No two uses share a slot, and
     // the buffer sized for the frame (every terrain record, drawn with its material or not) holds them.
     {
       static_assert(kClayFrameSlots == 21);
       const ClayFrameSlotPlan none = PlanClayFrameSlots(0, 0);
-      CHECK(598, kClayFrameTerrainSlot0 == 21 && none.plant0 == 21 && none.mask == 21 && none.sky == 22 && none.object0 == 23);
-      CHECK(598, ClayFrameSmallSlots(0, 0) == 23 && ClayFrameSmallSlots(7, 3) == 33);
+      CHECK(598, kClayFrameTerrainSlot0 == 21 && none.plant0 == 21 && none.mask == 21 && none.sky == 22 && none.post == 23 &&
+                     none.object0 == 48);
+      CHECK(598, ClayFrameSmallSlots(0, 0) == 48 && ClayFrameSmallSlots(7, 3) == 58 && kClayPostSlots == 25);
       const ClayFrameSlotPlan some = PlanClayFrameSlots(5, 3);
-      CHECK(598, some.plant0 == 26 && some.mask == 29 && some.sky == 30 && some.object0 == 31);
+      CHECK(598, some.plant0 == 26 && some.mask == 29 && some.sky == 30 && some.post == 31 && some.object0 == 56);
       for (uint32_t records : {0u, 1u, 5u, 600u}) {
         for (uint32_t drawn : {0u, 1u, 5u, 600u}) {
           if (drawn > records) continue;
@@ -5720,16 +5733,18 @@ int main() {
             for (uint32_t objects : {0u, 1u, 200u}) {
               const ClayFrameSlotPlan p = PlanClayFrameSlots(drawn, plants);
               const uint64_t bytes = ClayConstantBufferBytes(ClayFrameSmallSlots(records, plants), objects);
-              // In order, nothing shared: frame | terrain | plants | mask | sky | objects.
+              // In order, nothing shared: frame | terrain | plants | mask | sky | post | objects.
               CHECK(598, kClayFrameTerrainSlot0 + drawn == p.plant0 && p.plant0 + plants == p.mask && p.mask + 1 == p.sky &&
-                             p.sky + 1 == p.object0);
+                             p.sky + 1 == p.post && p.post + kClayPostSlots == p.object0);
               CHECK(598, p.object0 <= ClayFrameSmallSlots(records, plants));
               // The frame's block lies before the first other slot; the last byte any slot's block can
               // be read at lies inside the buffer (a small slot is bound at b1 too: cbuffer Object).
               CHECK(598, sizeof(ClayFrameConstants) <= ClaySmallSlotOffset(kClayFrameTerrainSlot0));
               CHECK(598, ClaySmallSlotOffset(p.sky) + kClayObjectSlotBytes <= bytes);
               CHECK(598, ClaySmallSlotOffset(p.mask) + sizeof(ClayMaskConstants) <= ClaySmallSlotOffset(p.sky) &&
-                             ClaySmallSlotOffset(p.sky) + sizeof(ClaySkyConstants) <= ClaySmallSlotOffset(p.object0));
+                             ClaySmallSlotOffset(p.sky) + sizeof(ClaySkyConstants) <= ClaySmallSlotOffset(p.post) &&
+                             ClaySmallSlotOffset(p.post) + sizeof(ClayPostConstants) <= ClaySmallSlotOffset(p.object0) &&
+                             ClaySmallSlotOffset(p.post) + sizeof(ClayPostConstants) <= bytes);
               if (objects) CHECK(598, ClayObjectSlotOffset(p.object0, objects - 1) + kClayObjectSlotBytes <= bytes);
             }
           }
@@ -7087,6 +7102,543 @@ int main() {
       }
     }
   }
+  // 600-619: the native post (plan Task 5 of the post sub-project; clay_logic.h, "Native post"): the frame's
+  // decision, the unlit scale, the table's addressing, the composite's and the ramp's mirrors against the
+  // reference's numbers (tools/xdk_sigmatch/post_pins.py; tests/test_post_literals.py holds the lines below to
+  // its output), the step's constants, the frame's two words and the Post line.
+  {
+    const float kNaN = std::numeric_limits<float>::quiet_NaN(), kInf = std::numeric_limits<float>::infinity();
+    auto in01 = [](double v) { return v >= 0.0 && v <= 1.0; };  // (false for a value that is no number)
+    // The excerpt's table decoded as the block decodes it: texel i the float stored high byte first.
+    float table[512];
+    for (uint32_t i = 0; i < 512; ++i) {
+      const unsigned char* p = kPinsPostTable + 4 * i;
+      const uint32_t bits = (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+      std::memcpy(&table[i], &bits, 4);
+    }
+    // A block of a register set with that table, and a ramp of 256 rising entries (a channel apart).
+    auto block_of = [&](const float composite[6], const float bright[5]) {
+      capture::PostBlock b{};
+      std::memcpy(b.composite, composite, sizeof(b.composite));
+      std::memcpy(b.bright, bright, sizeof(b.bright));
+      std::memcpy(b.table, table, sizeof(b.table));
+      b.valid = true;
+      return b;
+    };
+    static float ramp[256][3];
+    for (int i = 0; i < 256; ++i) {
+      for (int c = 0; c < 3; ++c) ramp[i][c] = float(i * 4 + (i > 127 ? c : 0)) / 1023.0f;
+    }
+    // real registers: composite c31.x, c46.x, c47.x, c77.x, c77.y, c78.x {2.972994565963745f, 0.25f, 50.0f, -0.005211588926613331f, 1.10260808467865f, 0.45454543828964233f}; bright c31.x, c46.x, c47.x, c77.x, c77.y {1.4864972829818726f, 0.20000000298023224f, 2.0f, 0.08694084733724594f, 0.11846417933702469f}
+    const float real_composite[6] = {2.972994565963745f, 0.25f, 50.0f, -0.005211588926613331f, 1.10260808467865f, 0.45454543828964233f};
+    const float real_bright[5] = {1.4864972829818726f, 0.20000000298023224f, 2.0f, 0.08694084733724594f, 0.11846417933702469f};
+    // made registers: composite c31.x, c46.x, c47.x, c77.x, c77.y, c78.x {1.5f, 0.5f, 3.0f, 0.25f, 0.8999999761581421f, 0.6000000238418579f}; bright c31.x, c46.x, c47.x, c77.x, c77.y {2.0f, 0.5f, 1.5f, 0.019999999552965164f, 0.20000000298023224f}
+    const float made_composite[6] = {1.5f, 0.5f, 3.0f, 0.25f, 0.8999999761581421f, 0.6000000238418579f};
+    const float made_bright[5] = {2.0f, 0.5f, 1.5f, 0.019999999552965164f, 0.20000000298023224f};
+    const capture::PostBlock real_block = block_of(real_composite, real_bright), made_block = block_of(made_composite, made_bright);
+
+    // 600: the decision, every combination of its seven inputs: one chain, the first thing missing
+    // decides, and only the frame that lacks nothing is a post frame. With the switch off the verdict
+    // is kOff whatever else holds: the frame is today's (frame-map section 17, "Native composite").
+    {
+      int drawn = 0, off = 0;
+      for (uint32_t bits = 0; bits < 128; ++bits) {
+        ClayPostInputs in;
+        in.post = bits & 1;
+        in.light = bits & 2;
+        in.lit = bits & 4;
+        in.block = bits & 8;
+        in.ramp = bits & 16;
+        in.objects = bits & 32;
+        in.buffer = bits & 64;
+        const ClayPost want = !in.post                 ? ClayPost::kOff
+                              : !in.light || !in.lit   ? ClayPost::kNoLight
+                              : !in.block              ? ClayPost::kBlock
+                              : !in.ramp               ? ClayPost::kRamp
+                              : !in.objects            ? ClayPost::kObjects
+                              : !in.buffer             ? ClayPost::kBuffer
+                                                       : ClayPost::kDrawn;
+        const ClayPost got = DecideClayPost(in).post;
+        CHECK(600, got == want);
+        CHECK(600, (got == ClayPost::kDrawn) == (bits == 127) && (got == ClayPost::kOff) == !(bits & 1));
+        drawn += got == ClayPost::kDrawn;
+        off += got == ClayPost::kOff;
+      }
+      CHECK(600, drawn == 1 && off == 64 && DecideClayPost(ClayPostInputs{}).post == ClayPost::kOff);
+      static_assert(DecideClayPost(ClayPostInputs{true, true, true, true, true, true, true}).post == ClayPost::kDrawn);
+      static_assert(DecideClayPost(ClayPostInputs{false, true, true, true, true, true, true}).post == ClayPost::kOff);
+      // The frame counts follow from the verdict; a frame with the switch off is not counted.
+      ClayPostFrames n;
+      for (ClayPost p : {ClayPost::kOff, ClayPost::kNoLight, ClayPost::kBlock, ClayPost::kBlock, ClayPost::kRamp, ClayPost::kObjects,
+                         ClayPost::kBuffer, ClayPost::kDrawn, ClayPost::kDrawn, ClayPost::kDrawn, ClayPost::kCount}) {
+        CountClayPostFrame(p, n);
+      }
+      CHECK(600, n.frames == 9 && n.nolight == 1 && n.block == 2 && n.ramp == 1 && n.objects == 1 && n.buffer == 1 && n.drawn == 3);
+      CHECK(600, std::string(capture::kPostBlockReason) == "post-block" && std::string(kPostRampReason) == "post-ramp" &&
+                     std::string(kPostObjectsReason) == "post-objects");
+    }
+
+    // 601: the table's addressing (controller ruling 19): the NEAREST texel, floor(u * 512 + 0.5) clamped to
+    // 511, not floor(u * 512). The pins at (k + 0.5) / 512 -+ 1e-6 are the telling ones (a floor would read
+    // k on both sides); those at k / 512 lie in the middle of texel k.
+    {
+      static const struct { float u; uint32_t texel; } kPins[] = {
+        // table texel pins: u, the texel of a 512-texel table (light_formulas.post_table_texel: floor(u * 512 + 0.5), clamped)
+        {-9.999999974752427e-07f, 0},
+        {0.0f, 0},
+        {9.999999974752427e-07f, 0},
+        {0.0019521249923855066f, 1},
+        {0.001953125f, 1},
+        {0.0019541250076144934f, 1},
+        {0.0039052499923855066f, 2},
+        {0.00390625f, 2},
+        {0.00390724977478385f, 2},
+        {0.023436499759554863f, 12},
+        {0.0234375f, 12},
+        {0.023438500240445137f, 12},
+        {0.2499990016222f, 128},
+        {0.25f, 128},
+        {0.2500010132789612f, 128},
+        {0.9980458617210388f, 511},
+        {0.998046875f, 511},
+        {0.9980478882789612f, 511},
+        {0.9999989867210388f, 511},
+        {1.0f, 511},
+        {1.0000009536743164f, 511},
+        {0.0009755624923855066f, 0},
+        {0.0009775625076144934f, 1},
+        {0.0029286874923855066f, 1},
+        {0.0029306875076144934f, 2},
+        {0.024413062259554863f, 12},
+        {0.024415062740445137f, 13},
+        {0.2490224391222f, 127},
+        {0.2490244358778f, 128},
+        {0.2509755492210388f, 128},
+        {0.2509775757789612f, 129},
+        {0.9970692992210388f, 510},
+        {0.9970713257789612f, 511},
+        {0.9990224242210388f, 511},
+        {0.9990244507789612f, 511},
+        {-1.0f, 0},
+        {2.5f, 511},
+        {1.0000000150474662e+30f, 511},
+        {kNaN, 0},
+        {kInf, 511},
+        {-kInf, 0},
+      };
+      CHECK(601, std::size(kPins) == 41);
+      int halves = 0;
+      for (const auto& p : kPins) {
+        CHECK(601, PostTableTexel(p.u) == p.texel);
+        CHECK(601, PostTableTexel(p.u) < capture::kPostTableTexels);
+        // (the pins a floor would fail: a coordinate inside the table whose nearest texel is not its floor)
+        if (p.u > 0.0f && p.u < 0.99f && uint32_t(std::floor(double(p.u) * 512.0)) != p.texel) ++halves;
+      }
+      CHECK(601, halves >= 8);
+      // Every texel is reached, in order, from the centre of its own interval; no index leaves the table
+      // for any float, the largest and the smallest included.
+      for (uint32_t k = 0; k < 512; ++k) CHECK(601, PostTableTexel(float(k) / 512.0f) == k);
+      for (float u : {kNaN, kInf, -kInf, 3.4e38f, -3.4e38f, 1e-45f, -0.0f, 0.99999994f, 1.0000001f}) {
+        CHECK(601, PostTableTexel(u) < capture::kPostTableTexels);
+      }
+      CHECK(601, PostTableTexel(kNaN) == 0 && PostTableTexel(kInf) == 511 && PostTableTexel(1e-45f) == 0);
+      static_assert(kPostUnlitTexel == 128 && capture::kPostTableTexels == 512);
+    }
+
+    // 602: the unlit scale (spec ruling 9): 1 / (c77.y * T[128]), at most 64; 64 for a gain that is no
+    // number or not above 1 / 64. A frame without a block has the word of a frame without post: 1.
+    {
+      static const struct { float c77y, t128; double scale; } kPins[] = {
+        // unlit scale pins: c77.y, T[128], the scale (the two sets with the excerpt's table, then made-up pairs)
+        {1.10260808467865f, 0.24269776046276093f, 3.7369136159839127},  // real
+        {0.8999999761581421f, 0.24269776046276093f, 4.578168082090692},  // made
+        {1.0f, 0.0f, 64.0},
+        {1.0f, 0.015625f, 64.0},
+        {1.0f, 0.019999999552965164f, 50.00000111758712},
+        {64.0f, 3.999000072479248f, 0.0039072267358857575},
+        {kNaN, 0.25f, 64.0},
+        {1.0f, kNaN, 64.0},
+        {-1.0f, 0.25f, 64.0},
+        {kInf, 0.25f, 64.0},
+      };
+      CHECK(602, std::size(kPins) == 10);
+      for (size_t i = 0; i < std::size(kPins); ++i) {
+        capture::PostBlock b{};
+        b.valid = true;
+        b.composite[4] = kPins[i].c77y;
+        b.table[kPostUnlitTexel] = kPins[i].t128;
+        const float got = PostUnlitScale(b);
+        CHECK(602, std::fabs(double(got) - kPins[i].scale) <= 1e-6 * kPins[i].scale);
+        CHECK(602, got > 0.0f && got <= kPostUnlitMax);
+      }
+      CHECK(602, std::fabs(double(PostUnlitScale(real_block)) - 3.7369136159839127) < 4e-6 &&
+                     std::fabs(double(PostUnlitScale(made_block)) - 4.578168082090692) < 5e-6);
+      CHECK(602, PostUnlitScale(capture::PostBlock{}) == 1.0f && kPostUnlitMax == 64.0f && kPostUnlitMax <= kClayLitMax);
+    }
+
+    // 603: the ramp's entry of a front-target value: min(255, floor(v * 255 + 0.5)), 0 for a value that is
+    // no number or not above 0; and the mirror's read of one channel.
+    {
+      static const struct { float v; uint32_t entry; } kPins[] = {
+        // ramp pins: the front target's value, the ramp's entry (min(255, floor(v * 255 + 0.5)); 0 for no number)
+        {0.0f, 0},
+        {0.001959784422069788f, 0},
+        {0.001961784204468131f, 1},
+        {0.09019608050584793f, 23},
+        {0.5f, 128},
+        {0.39407843351364136f, 100},
+        {0.39415687322616577f, 101},
+        {0.9980382323265076f, 254},
+        {0.9980401992797852f, 255},
+        {1.0f, 255},
+        {1.5f, 255},
+        {-0.25f, 0},
+        {kNaN, 0},
+        {kInf, 255},
+        {-kInf, 0},
+      };
+      CHECK(603, std::size(kPins) == 15);
+      float channel[256];
+      for (int i = 0; i < 256; ++i) channel[i] = float(i) * 0.001f + 0.5f;
+      for (const auto& p : kPins) {
+        CHECK(603, PostRampIndex(p.v) == p.entry && PostRampIndex(p.v) < 256);
+        CHECK(603, PostRampMirror(p.v, channel) == channel[p.entry]);
+      }
+      // Every 8-bit level of the front target reads its own entry.
+      for (uint32_t n = 0; n < 256; ++n) CHECK(603, PostRampIndex(float(n) / 255.0f) == n);
+      for (float v : {3.4e38f, -3.4e38f, 1e-45f}) CHECK(603, PostRampIndex(v) < 256);
+    }
+
+    // 604-607: the step's constants and the composite's mirror against the reference.
+    {
+      static_assert(sizeof(ClayPostConstants) == 6288 && kClayPostSlots == 25 && offsetof(ClayPostConstants, scene_max) == 24 &&
+                    offsetof(ClayPostConstants, previous) == 28 && offsetof(ClayPostConstants, bright) == 32 &&
+                    offsetof(ClayPostConstants, bloom_on) == 52 && offsetof(ClayPostConstants, sun_on) == 56 &&
+                    offsetof(ClayPostConstants, blur) == 64 && offsetof(ClayPostConstants, radial) == 128 &&
+                    offsetof(ClayPostConstants, table) == 144 && offsetof(ClayPostConstants, ramp) == 2192);
+      ClayPostConstants real_k, made_k;
+      CHECK(604, MakeClayPostConstants(real_block, ramp, false, false, &real_k) && MakeClayPostConstants(made_block, ramp, false, false, &made_k));
+      CHECK(604, real_k.scene_max == 31.875f && real_k.scene_max == kPostSceneMax && real_k.previous == 0.0f && real_k.bloom_on == 0 &&
+                     real_k.sun_on == 0 && real_k.pad == 0);
+      for (int i = 0; i < 6; ++i) CHECK(604, real_k.composite[i] == real_composite[i] && made_k.composite[i] == made_composite[i]);
+      for (int i = 0; i < 5; ++i) CHECK(604, real_k.bright[i] == real_bright[i]);
+      // Texel i at [i >> 2][i & 3]; entry i's rgb at [i], the fourth float 0.
+      for (uint32_t i = 0; i < 512; ++i) CHECK(604, real_k.table[i >> 2][i & 3] == table[i]);
+      for (int i = 0; i < 256; ++i) {
+        CHECK(604, real_k.ramp[i][0] == ramp[i][0] && real_k.ramp[i][1] == ramp[i][1] && real_k.ramp[i][2] == ramp[i][2] && real_k.ramp[i][3] == 0.0f);
+      }
+      CHECK(604, table[0] == 0.0f && table[128] == 0.24269776046276093f);
+      // Without the blur part the weights are zero and the bloom's flag stays 0 whatever is asked; with it
+      // the fourteen weights lie in four rows (x: 0 to 3 and 4 to 6, then y) and the flag follows the ask.
+      capture::PostBlock blurred = real_block;
+      for (int s = 0; s < 2; ++s) {
+        for (int i = 0; i < 7; ++i) blurred.blur[s][i] = 0.01f * float(1 + i + 7 * s);
+      }
+      ClayPostConstants k;
+      CHECK(604, MakeClayPostConstants(blurred, ramp, true, true, &k) && k.bloom_on == 0 && k.sun_on == 0 && k.blur[0][0] == 0.0f);
+      blurred.parts = capture::kPostPartBlur;
+      CHECK(604, MakeClayPostConstants(blurred, ramp, true, true, &k) && k.bloom_on == 1 && k.sun_on == 0);
+      auto w = [](int n) { return 0.01f * float(n); };
+      CHECK(604, k.blur[0][0] == w(1) && k.blur[0][3] == w(4) && k.blur[1][0] == w(5) && k.blur[1][2] == w(7) && k.blur[1][3] == 0.0f &&
+                     k.blur[2][0] == w(8) && k.blur[2][3] == w(11) && k.blur[3][0] == w(12) && k.blur[3][2] == w(14) && k.blur[3][3] == 0.0f);
+      CHECK(604, MakeClayPostConstants(blurred, ramp, false, false, &k) && k.bloom_on == 0 && k.blur[0][0] == w(1));
+
+      // 605: what is refused, each with the constants left all zero: an invalid block, no ramp, a register
+      // that is no number or outside the block's own bound (checked again here: no value reaches a shader
+      // on the strength of a flag), a texel outside [0, 4), a ramp entry outside [0, 1] or out of order.
+      const ClayPostConstants zero{};
+      auto refused = [&](const capture::PostBlock& b, const float (*r)[3]) {
+        ClayPostConstants out;
+        std::memset(&out, 0xFF, sizeof(out));
+        return !MakeClayPostConstants(b, r, false, false, &out) && std::memcmp(&out, &zero, sizeof(out)) == 0;
+      };
+      capture::PostBlock bad = real_block;
+      bad.valid = false;
+      CHECK(605, refused(bad, ramp) && refused(real_block, nullptr) && !MakeClayPostConstants(real_block, ramp, false, false, nullptr));
+      const struct { int index; float value; } kBadComposite[] = {
+          {0, kNaN}, {0, -0.001f}, {0, 64.5f}, {1, 0.0f}, {1, kInf}, {1, 64.5f}, {2, -1.0f}, {2, 2e6f}, {3, 4.5f}, {3, -4.5f}, {3, kNaN},
+          {4, 0.0f}, {4, 64.5f}, {4, -kInf}, {5, 0.0f}, {5, 1.0001f}, {5, kNaN}};
+      for (const auto& c : kBadComposite) {
+        bad = real_block;
+        bad.composite[c.index] = c.value;
+        CHECK(605, refused(bad, ramp));
+      }
+      const struct { int index; float value; } kBadBright[] = {{0, kNaN}, {0, 64.5f}, {1, -0.5f}, {2, 0.0f}, {2, 65.0f}, {3, 5.0f}, {4, 0.0f}, {4, kInf}};
+      for (const auto& c : kBadBright) {
+        bad = real_block;
+        bad.bright[c.index] = c.value;
+        CHECK(605, refused(bad, ramp));
+      }
+      for (float texel : {kNaN, kInf, -kInf, -1e-6f, 4.0f}) {
+        for (uint32_t at : {0u, 128u, 511u}) {
+          bad = real_block;
+          bad.table[at] = texel;
+          CHECK(605, refused(bad, ramp));
+        }
+      }
+      // (the bounds themselves are inside)
+      bad = real_block;
+      bad.composite[0] = 64.0f;
+      bad.composite[1] = 64.0f;
+      bad.composite[2] = 1e6f;
+      bad.composite[3] = -4.0f;
+      bad.composite[4] = 64.0f;
+      bad.composite[5] = 1.0f;
+      bad.table[511] = std::nextafter(4.0f, 0.0f);
+      ClayPostConstants edge_k;
+      CHECK(605, MakeClayPostConstants(bad, ramp, false, false, &edge_k));
+      static float bad_ramp[256][3];
+      for (float entry : {kNaN, kInf, -0.001f, 1.001f}) {
+        std::memcpy(bad_ramp, ramp, sizeof(bad_ramp));
+        bad_ramp[200][1] = entry;
+        CHECK(605, refused(real_block, bad_ramp));
+      }
+      std::memcpy(bad_ramp, ramp, sizeof(bad_ramp));
+      bad_ramp[100][2] = bad_ramp[99][2] - 0.001f;  // out of order
+      CHECK(605, refused(real_block, bad_ramp) && !PostRampUsable(bad_ramp));
+      std::memcpy(bad_ramp, ramp, sizeof(bad_ramp));
+      bad_ramp[100][2] = bad_ramp[99][2];  // (equal neighbours are in order: a flat stretch)
+      CHECK(605, MakeClayPostConstants(real_block, bad_ramp, false, false, &k));
+      CHECK(605, PostRampUsable(ramp) && PostRampUsable(bad_ramp) && !PostRampUsable(nullptr));
+
+      // 606: the composite against the reference (light_formulas.post_composite), both register sets, with
+      // the table's texel each point reads. Among the points: a scene channel that is no number, an
+      // infinity, a negative one, a value above the scene's clamp, and a bloom that is no number.
+      struct CompositePin { float scene[3], bloom[3]; uint32_t texel; double out[3]; };
+      static const CompositePin kReal[] = {
+        // real composite pins (the excerpt's table): scene, bloom, the table's texel, the front value
+        {{0.6000000238418579f, 0.550000011920929f, 0.4000000059604645f}, {0.0f, 0.0f, 0.0f}, 70, {0.4214398567838915, 0.4051769275027731, 0.350885269768029}},
+        {{2.5f, 2.4000000953674316f, 2.200000047683716f}, {0.05000000074505806f, 0.05000000074505806f, 0.05999999865889549f}, 308, {0.9088072669106293, 0.8952616204735997, 0.872425955666359}},
+        {{0.003000000026077032f, 0.0020000000949949026f, 0.0010000000474974513f}, {0.0f, 0.0f, 0.0f}, 0, {0.0, 0.0, 0.0}},
+        {{0.004000000189989805f, 0.0044999998062849045f, 0.004000000189989805f}, {0.0f, 0.0f, 0.0f}, 1, {0.03029541777417399, 0.03064171611944725, 0.03029541777417399}},
+        {{0.019999999552965164f, 0.029999999329447746f, 0.009999999776482582f}, {0.009999999776482582f, 0.0f, 0.0f}, 3, {0.21033910517523582, 0.08422364060150728, 0.0516774235894812}},
+        {{0.20000000298023224f, 0.05000000074505806f, 0.30000001192092896f}, {0.0f, 0.0f, 0.0f}, 13, {0.24265157730704884, 0.12967586916339888, 0.29164382390294946}},
+        {{1.0f, 1.0f, 1.0f}, {1.0f, 1.0f, 1.0f}, 128, {1.0, 1.0, 1.0}},
+        {{3.9000000953674316f, 3.9000000953674316f, 3.9000000953674316f}, {0.0f, 0.0f, 0.0f}, 499, {1.0, 1.0, 1.0}},
+        {{40.0f, 0.5f, 0.5f}, {0.0f, 0.0f, 0.0f}, 511, {0.9984631056366018, 0.4561292391910362, 0.4561292391910362}},
+        {{0.0f, 0.0f, 0.0f}, {0.20000000298023224f, 0.30000001192092896f, 0.4000000059604645f}, 0, {0.790301372085062, 0.949187898597747, 0.9996126329972699}},
+        {{kNaN, 0.5f, 0.5f}, {0.10000000149011612f, 0.10000000149011612f, 0.10000000149011612f}, 50, {0.5764660021784105, 0.6456876995275248, 0.6456876995275248}},
+        {{kInf, -1.0f, 0.20000000298023224f}, {kNaN, kInf, -0.5f}, 511, {0.9998412735077766, 0.9998412735077766, 0.3085638410837448}},
+      };
+      static const CompositePin kMade[] = {
+        // made composite pins (the excerpt's table): scene, bloom, the table's texel, the front value
+        {{0.6000000238418579f, 0.550000011920929f, 0.4000000059604645f}, {0.0f, 0.0f, 0.0f}, 141, {0.301511444844308, 0.28265719769909525, 0.22010954390127868}},
+        {{2.5f, 2.4000000953674316f, 2.200000047683716f}, {0.05000000074505806f, 0.05000000074505806f, 0.05999999865889549f}, 511, {0.8407916234366455, 0.8180950360626932, 0.7762553481150124}},
+        {{0.003000000026077032f, 0.0020000000949949026f, 0.0010000000474974513f}, {0.0f, 0.0f, 0.0f}, 1, {0.005791209344443126, 0.0057782112648116744, 0.0057651936615754785}},
+        {{0.004000000189989805f, 0.0044999998062849045f, 0.004000000189989805f}, {0.0f, 0.0f, 0.0f}, 1, {0.00884786129232474, 0.008857824759342634, 0.00884786129232474}},
+        {{0.019999999552965164f, 0.029999999329447746f, 0.009999999776482582f}, {0.009999999776482582f, 0.0f, 0.0f}, 7, {0.10143626444081504, 0.033907748794771896, 0.03203083407406161}},
+        {{0.20000000298023224f, 0.05000000074505806f, 0.30000001192092896f}, {0.0f, 0.0f, 0.0f}, 26, {0.11159444714009235, 0.08139620594050266, 0.12896402461293227}},
+        {{1.0f, 1.0f, 1.0f}, {1.0f, 1.0f, 1.0f}, 256, {1.0, 1.0, 1.0}},
+        {{3.9000000953674316f, 3.9000000953674316f, 3.9000000953674316f}, {0.0f, 0.0f, 0.0f}, 511, {1.0, 1.0, 1.0}},
+        {{40.0f, 0.5f, 0.5f}, {0.0f, 0.0f, 0.0f}, 511, {1.0, 0.24960538349993153, 0.24960538349993153}},
+        {{0.0f, 0.0f, 0.0f}, {0.20000000298023224f, 0.30000001192092896f, 0.4000000059604645f}, 0, {0.45357830497898444, 0.6236753233075342, 0.7670635229785596}},
+        {{kNaN, 0.5f, 0.5f}, {0.10000000149011612f, 0.10000000149011612f, 0.10000000149011612f}, 101, {0.29701177328174616, 0.43015871661694743, 0.43015871661694743}},
+        {{kInf, -1.0f, 0.20000000298023224f}, {kNaN, kInf, -0.5f}, 511, {1.0, 1.0, 0.33403624790515585}},
+      };
+      CHECK(606, std::size(kReal) == 12 && std::size(kMade) == 12);
+      double worst = 0.0;
+      int texel0 = 0, half = 0;
+      for (int set = 0; set < 2; ++set) {
+        const ClayPostConstants& c = set ? made_k : real_k;
+        for (const CompositePin& p : set ? kMade : kReal) {
+          double out[3];
+          PostCompositeMirror(p.scene, p.bloom, c, out);
+          const double u = PostCompositeCoordinate(p.scene, c);
+          CHECK(606, PostTableTexel(float(u)) == p.texel);
+          for (int i = 0; i < 3; ++i) {
+            CHECK(606, in01(out[i]));
+            worst = std::fmax(worst, std::fabs(out[i] - p.out[i]));
+          }
+          texel0 += p.texel == 0;
+          half += p.texel != uint32_t(std::floor(u * 512.0)) && p.texel < 511;
+        }
+      }
+      std::printf("post: the composite's mirror against the reference, 24 points: worst difference %.2e\n", worst);
+      CHECK(606, worst < 1e-12);
+      // (points in the table's texel 0, which is 0: black; and points whose nearest texel is not the floor)
+      CHECK(606, texel0 >= 2 && half >= 4);
+
+      // 607: nothing that is no number leaves the composite (review focus 2). The rule: a scene channel
+      // not above 0 (a NaN and a negative among them) is 0, one above 31.875 (an infinity among them) is
+      // 31.875; a bloom channel that is no number is 0; a register or a table texel that is no number gives
+      // black. Every output is a number in [0, 1] for every combination below, with every register set,
+      // the one at the block's bounds included, and a table whose texels are at their bound.
+      const float kValues[] = {kNaN, kInf, -kInf, -1.0f, -0.0f, 0.0f, 1e-45f, 1e-6f, 0.004f, 0.5f, 1.0f, 3.9f, 31.875f, 32.0f, 1e30f, 3.4e38f};
+      ClayPostConstants high_k = real_k;
+      for (auto& row : high_k.table) {
+        for (float& t : row) t = std::nextafter(4.0f, 0.0f);
+      }
+      long checked = 0;
+      for (const ClayPostConstants* c : {&real_k, &made_k, &edge_k, &high_k}) {
+        for (float r : kValues) {
+          for (float g : kValues) {
+            for (float b : {kNaN, kInf, -2.0f, 0.0f, 0.3f, 40.0f}) {
+              for (float bloom : {kNaN, kInf, -kInf, -0.5f, 0.0f, 0.2f, 5.0f}) {
+                const float scene[3] = {r, g, b}, bl[3] = {bloom, 0.1f, bloom};
+                double out[3] = {-1.0, -1.0, -1.0};
+                PostCompositeMirror(scene, bl, *c, out);
+                CHECK(607, in01(out[0]) && in01(out[1]) && in01(out[2]));
+                CHECK(607, PostTableTexel(float(PostCompositeCoordinate(scene, *c))) < capture::kPostTableTexels);
+                ++checked;
+              }
+            }
+          }
+        }
+      }
+      CHECK(607, checked == 4 * 16 * 16 * 6 * 7);
+      // A scene that is no number is the black scene's pixel, an infinity the clamp's: the rule, channel by channel.
+      {
+        const float none[3] = {0.0f, 0.0f, 0.0f};
+        const float nan_scene[3] = {kNaN, 0.5f, 0.25f}, zero_scene[3] = {0.0f, 0.5f, 0.25f}, neg_scene[3] = {-3.0f, 0.5f, 0.25f};
+        const float inf_scene[3] = {kInf, 0.5f, 0.25f}, max_scene[3] = {31.875f, 0.5f, 0.25f}, over_scene[3] = {1e30f, 0.5f, 0.25f};
+        double a[3], b[3], c[3];
+        PostCompositeMirror(nan_scene, none, real_k, a);
+        PostCompositeMirror(zero_scene, none, real_k, b);
+        PostCompositeMirror(neg_scene, none, real_k, c);
+        CHECK(607, std::memcmp(a, b, sizeof(a)) == 0 && std::memcmp(c, b, sizeof(c)) == 0);
+        PostCompositeMirror(inf_scene, none, real_k, a);
+        PostCompositeMirror(max_scene, none, real_k, b);
+        PostCompositeMirror(over_scene, none, real_k, c);
+        CHECK(607, std::memcmp(a, b, sizeof(a)) == 0 && std::memcmp(c, b, sizeof(c)) == 0);
+        CHECK(607, PostScene(kNaN) == 0.0 && PostScene(-kInf) == 0.0 && PostScene(kInf) == 31.875 && PostScene(2.5f) == 2.5 &&
+                       PostScene(-0.0f) == 0.0);
+        // A register or a texel that is no number (which MakeClayPostConstants refuses; set by hand): black.
+        const float grey[3] = {0.6f, 0.55f, 0.4f};
+        for (int i = 0; i < 6; ++i) {
+          for (float value : {kNaN, kInf, -kInf}) {
+            ClayPostConstants broken = real_k;
+            broken.composite[i] = value;
+            PostCompositeMirror(grey, none, broken, a);
+            CHECK(607, a[0] == 0.0 && a[1] == 0.0 && a[2] == 0.0);
+          }
+        }
+        ClayPostConstants broken = real_k;
+        for (auto& row : broken.table) {
+          for (float& t : row) t = kNaN;
+        }
+        PostCompositeMirror(grey, none, broken, a);
+        CHECK(607, a[0] == 0.0 && a[1] == 0.0 && a[2] == 0.0);
+        // The clear colour of a post frame. Its scene luminance is 0.0064: above 1 / 256, so under the
+        // nearest-texel rule it reads the table's texel 1, not texel 0 (the floor would read 0, and spec
+        // Design 6 says black): it comes out nearly black, not black. Stated in frame-map section 17.
+        PostCompositeMirror(kClayClearLinear, none, real_k, a);
+        const double clear_L = kClayClearLinear[0] * 0.2125 + kClayClearLinear[1] * 0.7154 + kClayClearLinear[2] * 0.0721;
+        std::printf("post: the clear colour through the real set's composite: scene luminance %.5f, texel %u, front (%.4f, %.4f, %.4f)\n",
+                    clear_L, PostTableTexel(float(PostCompositeCoordinate(kClayClearLinear, real_k))), a[0], a[1], a[2]);
+        CHECK(607, clear_L > 1.0 / 256.0 && clear_L < 1.0 / 128.0 && PostTableTexel(float(PostCompositeCoordinate(kClayClearLinear, real_k))) == 1);
+        CHECK(607, a[0] > 0.0 && a[0] < 0.06 && a[2] > a[0] && a[2] < 0.06);
+        // The unlit scale U is the reciprocal of the composite's gain at scene luminance 1 (texel 128 with
+        // c46.x = 0.25). An unlit grey v is written as v * U; the one that lands on scene luminance 1
+        // (v = 1 / U) comes out as (gain * 1)^c78.x = v^c78.x, which is what a flat table gives every unlit
+        // value (the blind run). An unlit white lands at scene luminance U, far up the table: with this
+        // rising table (a read-back run's) it is at the front target's ceiling.
+        const float U = PostUnlitScale(real_block);
+        const float one[3] = {1.0f, 1.0f, 1.0f};
+        PostCompositeMirror(one, none, real_k, a);
+        CHECK(607, PostTableTexel(float(PostCompositeCoordinate(one, real_k))) == kPostUnlitTexel &&
+                       std::fabs(a[0] - std::pow(1.0 / double(U), double(real_composite[5]))) < 1e-6 && a[0] > 0.5 && a[0] < 0.6);
+        const float white[3] = {U, U, U};
+        PostCompositeMirror(white, none, real_k, a);
+        std::printf("post: an unlit white through the real set's composite: %.4f (scene %.4f, texel %u)\n", a[0], double(U),
+                    PostTableTexel(float(PostCompositeCoordinate(white, real_k))));
+        CHECK(607, a[0] > 0.9 && a[0] <= 1.0);
+      }
+    }
+
+    // 608: the frame's two words (cbuffer Frame's f_exposure and f_post). Without post: the exposure the
+    // calibrated constant in a lit frame and the unlit word 1 in EVERY frame, a frame without light
+    // included (never 0: every unlit colour is multiplied by it). In a post frame: the game's scale c20.w
+    // and the block's unlit scale. Never the game's scale without the block's pairing, never 2.22 with it.
+    {
+      capture::LightBlock light{};
+      for (int i = 0; i < 3; ++i) {
+        light.sun_dir[i] = 0.5f;
+        light.sun_col[i] = 0.8f;
+        light.tint[i] = 1.0f;
+        light.axis[i] = 0.3f;
+        light.eye[i] = 10.0f;
+      }
+      light.tint_pow = 1.0f;
+      light.out_scale = 8.4413f;
+      light.valid = true;
+      static_assert(offsetof(ClayFrameConstants, post) == 60 && offsetof(ClayFrameConstants, exposure) == 44);
+      const ClayFrameConstants lit = MakeClayFrameConstants(light, ClayLight::kOn);
+      const ClayFrameConstants unlit = MakeClayFrameConstants(light, ClayLight::kOff);
+      const ClayFrameConstants fresh{};
+      CHECK(608, lit.light_on == 1 && lit.exposure == kLitExposure && lit.post == 1.0f);
+      CHECK(608, unlit.light_on == 0 && unlit.exposure == 0.0f && unlit.post == 1.0f && fresh.post == 1.0f && fresh.exposure == 0.0f);
+      // A post frame: the block pairs with the frame's scale (the bright pass's c77.y is 1 / c20.w).
+      capture::PostBlock paired = real_block;
+      paired.bright[4] = 1.0f / light.out_scale;
+      ClayFrameConstants frame = MakeClayFrameConstants(light, ClayLight::kOn);
+      CHECK(608, SetClayFramePost(frame, paired, light.out_scale) && frame.exposure == 8.4413f && frame.post == PostUnlitScale(paired) &&
+                     frame.post > 3.7f && frame.post < 3.8f);
+      // (nothing else of the frame's block changed)
+      ClayFrameConstants same = frame;
+      same.exposure = lit.exposure;
+      same.post = lit.post;
+      CHECK(608, std::memcmp(&same, &lit, sizeof(same)) == 0);
+      // Refused, with the two words left as a frame without post has them: a frame without light, an
+      // invalid block, a scale the block does not pair with, a scale that is no number or not usable.
+      auto untouched = [&](ClayFrameConstants f, const capture::PostBlock& b, float scale) {
+        const ClayFrameConstants before = f;
+        return !SetClayFramePost(f, b, scale) && std::memcmp(&f, &before, sizeof(f)) == 0;
+      };
+      capture::PostBlock invalid = paired;
+      invalid.valid = false;
+      CHECK(608, untouched(unlit, paired, light.out_scale) && untouched(lit, invalid, light.out_scale) &&
+                     untouched(lit, paired, 16.0f) && untouched(lit, paired, kNaN) && untouched(lit, paired, kInf) &&
+                     untouched(lit, paired, 0.0f) && untouched(lit, paired, -8.4413f));
+      capture::PostBlock huge = paired;
+      huge.bright[4] = 1.0f / 2048.0f;  // (pairs with a scale beyond what a light value may be)
+      CHECK(608, untouched(lit, huge, 2048.0f));
+    }
+
+    // 609: the Post line.
+    {
+      ClayStats st;
+      CHECK(609, FormatPostText(st) == "Post: off");
+      st.post_switch = true;
+      st.post = ClayPost::kDrawn;
+      st.post_block = true;
+      st.post_age = 2;
+      st.post_scale = 8.4413f;
+      st.post_unlit = 3.7369f;
+      st.post_frames = 900;
+      st.post_drawn_frames = 880;
+      st.post_block_frames = 7;
+      st.post_ramp_frames = 6;
+      st.post_objects_frames = 5;
+      st.post_nolight_frames = 2;
+      st.post_buffer_frames = 0;
+      std::string t = FormatPostText(st);
+      CHECK(609, t == "Post: on, block valid, age 2, drawn | c20.w 8.4413, unlit scale 3.7369 | frames since start 900: drawn 880, "
+                      "post-block 7, post-ramp 6, post-objects 5, no-light 2, no-buffer 0");
+      st.post = ClayPost::kBlock;
+      st.post_block = false;
+      st.post_reason = capture::PostBlockReason::kNoDraw;
+      t = FormatPostText(st);
+      CHECK(609, t.find("Post: on, block invalid (post-block: no-draw), not drawn (post-block) | today's mapping, exposure 2.22 | frames") == 0);
+      st.post_block = true;
+      CHECK(609, FormatPostText(st).find("block valid, age 2, not drawn (post-block: values)") != std::string::npos);
+      st.post = ClayPost::kRamp;
+      CHECK(609, FormatPostText(st).find(", not drawn (post-ramp) |") != std::string::npos);
+      st.post = ClayPost::kObjects;
+      CHECK(609, FormatPostText(st).find(", not drawn (post-objects) |") != std::string::npos);
+      st.post = ClayPost::kNoLight;
+      CHECK(609, FormatPostText(st).find(", not drawn (no light) |") != std::string::npos);
+      st.post = ClayPost::kBuffer;
+      CHECK(609, FormatPostText(st).find(", not drawn (no constant buffer) |") != std::string::npos);
+      // (the line with every count at its largest is whole)
+      st.post_frames = st.post_drawn_frames = st.post_block_frames = st.post_ramp_frames = st.post_objects_frames = st.post_nolight_frames =
+          st.post_buffer_frames = ~0ull;
+      st.post_age = ~0u;
+      st.post = ClayPost::kDrawn;
+      st.post_scale = st.post_unlit = -3.4e38f;
+      t = FormatPostText(st);
+      CHECK(609, t.size() > 100 && t.rfind("no-buffer 18446744073709551615") == t.size() - 30);
+    }
+  }
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
@@ -7102,7 +7654,10 @@ int main() {
                "fog's tail, the decision and the Fog line, the form of a draw's fog, a pixel's position from its depth, "
                "an unlit draw's fog against the reference's numbers and which draws take it; "
                "native sky: the lat-long coordinate, the paths and the sky against the reference's numbers, guards, the sky's "
-               "rules and constants, the decision and the Sky line, the step's place among the records, the view rays\n";
+               "rules and constants, the decision and the Sky line, the step's place among the records, the view rays; "
+               "native post: the decision, the table's nearest texel, the unlit scale, the ramp's entry and the composite "
+               "against the reference's numbers, nothing that is no number, the steps' constants, the frame's two words, "
+               "the Post line\n";
 
   return 0;
 }

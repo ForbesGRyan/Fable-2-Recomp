@@ -4,7 +4,9 @@
 // linear colour (R11G11B10_FLOAT) with D32 depth, then one full-screen
 // output mapping, display = sqrt(saturate(linear)), into the 8-bit
 // target (R8G8B8A8) the composite views sample (clay_logic.h, "Linear target
-// and output mapping"). Vertices are pulled from the geometry cache's
+// and output mapping"); or, in a post frame (fable2_native_post; clay_logic.h,
+// "Native post"), the game's composite into an 8-bit front target and the
+// scan-out ramp from it into that same mapped target. Vertices are pulled from the geometry cache's
 // StructuredBuffers by SV_VertexID and transformed by each draw's captured
 // rows. With textures on, draws whose capture resolved an albedo and UVs
 // sample it (texture cache, unlit, softened facet shade); terrain records are
@@ -85,12 +87,20 @@ class ClayPass {
   // frame drawn with light that has a valid fog block, an eye and one inverse view-projection
   // (DecideClayFog): the frame's constants carry the fog's tail, every drawn record is fogged as the
   // game's own pixel shader fogs it or not (DrawFogOf: lit and unlit draws), and the sky is drawn.
-  // Otherwise the tail is zero and no pixel is; st says which (ClayStats::fog).
+  // Otherwise the tail is zero and no pixel is; st says which (ClayStats::fog). `post`:
+  // fable2_native_post as it is read now, and the frame's scan-out ramp. On, in a frame drawn with
+  // light whose scene has a post block that pairs with its c20.w, with a usable ramp, the post steps'
+  // objects and the frame's constant buffer (DecideClayPost): a POST FRAME, whose lit draws write the
+  // game's own scale, whose unlit draws write the frame's unlit scale, and which ends in the game's
+  // composite and the ramp. Every other frame is today's: the fixed exposure, the unlit word 1, the
+  // output mapping; st says which and why (ClayStats::post).
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
-              bool textured, ClayLight light, bool shadows, bool fog, ClayStats& st, TextureStats& tst);
+              bool textured, ClayLight light, bool shadows, bool fog, const ClayPostRequest& post, ClayStats& st,
+              TextureStats& tst);
   // The mapped target (display values, 8 bits): what the composite views
   // sample. Left in kPixelShaderResource after Render, and written by the same
-  // Render that drew the linear target.
+  // Render that drew the linear target (by the output mapping, or by the ramp
+  // step of a post frame: every Render writes every pixel of it).
   nrhi::Texture* color() const { return color_; }
   nrhi::Texture* depth() const { return depth_; }  // left in kPixelShaderResource after Render
   // The two shadow maps (0 near, 1 far): kShadowMapSize squared, D32_FLOAT, viewed as R32_FLOAT;
@@ -236,6 +246,14 @@ class ClayPass {
   bool EnsureSkyObjects(nrhi::Device* dev);
   void DestroySkyObjects();
   void ForgetSkyObjects();
+  // What the post steps alone need (clay_logic.h, "Native post"): their layout, the two pixel shaders,
+  // the front target with its view and the two pipelines. EnsurePostObjects makes them on the first
+  // frame that could be a post frame; false when they could not be made, now or before: then they
+  // are not tried again until the pass is rebuilt (one log line) and every frame is today's
+  // (ClayPost::kObjects, "post-objects"): the renderer goes on. Destroyed with the pass's other objects.
+  bool EnsurePostObjects(nrhi::Device* dev);
+  void DestroyPostObjects();
+  void ForgetPostObjects();
   // The pre-pass pipeline of a colour pipeline (PrepassKey), from the pre-pass's own cache; nullptr
   // when the colour pipeline is not one of the cache or does not write depth, or on a failure.
   nrhi::Pipeline* PrepassPipeline(nrhi::Device* dev, nrhi::Pipeline* colour, const ClayAlpha& alpha, bool* flat);
@@ -400,6 +418,27 @@ class ClayPass {
   ClaySky sky_logged_ = ClaySky::kOff;
   bool sky_textured_logged_ = false;  // (of the last logged drawn sky: with its textures or without)
   uint32_t sky_log_lines_ = 0;
+  // The post steps (EnsurePostObjects): one layout for every step (the steps' constants, a run of
+  // small slots of the frame's constant buffer, at b0; 8 words of a step's own constants at b1; a
+  // table of 4 textures at t0; static samplers s0 point clamp, s1 linear clamp; all for the pixel
+  // stage), the composite's and the ramp's shaders and pipelines (drawn with map_vs_), and the front
+  // target: the composite's 8-bit result before the ramp, the clay target's size, in
+  // kPixelShaderResource whenever Render is not running and written only by a post frame (no step
+  // reads it in any other). post_slot_: this Render's first slot of the steps' constants.
+  bool post_objects_ = false, post_objects_failed_ = false;
+  nrhi::BindingLayout* post_layout_ = nullptr;  // the RHI has no layout destruction
+  nrhi::Shader* post_composite_ps_ = nullptr;
+  nrhi::Shader* post_ramp_ps_ = nullptr;
+  nrhi::Pipeline* post_composite_pipeline_ = nullptr;
+  nrhi::Pipeline* post_ramp_pipeline_ = nullptr;
+  nrhi::Texture* front_ = nullptr;
+  nrhi::TextureView* front_view_ = nullptr;
+  uint32_t post_slot_ = 0;
+  // The pass's frame counts for the Post line, and what it last logged about the post (a line when
+  // the verdict changes, at most kPostLogLines of them).
+  ClayPostFrames post_counts_;
+  ClayPost post_logged_ = ClayPost::kOff;
+  uint32_t post_log_lines_ = 0;
   nrhi::BindingLayout* map_layout_ = nullptr;  // the RHI has no layout destruction
   nrhi::Shader* map_vs_ = nullptr;
   nrhi::Shader* map_ps_ = nullptr;

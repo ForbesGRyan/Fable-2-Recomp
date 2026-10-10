@@ -283,6 +283,55 @@ constexpr SkyOrder SkyPlace(const SkyOrderItem* items, size_t count) {
   return o;
 }
 
+// What the pass did about the frame's post chain ("Native post" below; ClayStats::post; the Post line).
+// A frame is either a POST FRAME (kDrawn: its lit draws write the game's own scale c20.w, its unlit
+// draws the frame's unlit scale, and the game's composite and the scan-out ramp are drawn in place of
+// the output mapping) or TODAY'S FRAME (everything else: the fixed exposure, the unlit word 1, the
+// output mapping as it was), never a mixture. kOff: fable2_native_post is off. kNoLight: the frame is
+// drawn without light (the light's switch, the textures, no light block). kBlock: the frame has no
+// post block the pass can use (none in the scene, whatever the capture's reason, one older than
+// capture::kPostBlockMaxAge frames, one that does not pair with the frame's c20.w, or one whose values
+// the pass will not hand a shader): "post-block". kRamp: no scan-out ramp, or one that fails its rule:
+// "post-ramp". kObjects: the post steps' GPU objects could not be made (off until the pass is rebuilt):
+// "post-objects". kBuffer: the frame has no constant buffer (nothing of it is drawn, or the buffer could
+// not be made: then no record is drawn at all).
+inline constexpr const char* kPostRampReason = "post-ramp";
+inline constexpr const char* kPostObjectsReason = "post-objects";
+enum class ClayPost : uint8_t { kOff, kNoLight, kBlock, kRamp, kObjects, kBuffer, kDrawn, kCount };
+
+// The pass's decision about the frame's post (ClayPass::Render), one chain in which the first thing
+// missing decides; made before the frame's exposure and unlit word are written, and once more when the
+// frame's constant buffer is known. `post`: fable2_native_post as the pass reads it now. `light`: the
+// light's switch (and the textures). `lit`: the frame's constants are lit (MakeClayFrameConstants).
+// `block`: the scene's post block is valid, within the age bound, pairs with the frame's c20.w, and the
+// step's constants and the frame's two words could be made of it (MakeClayPostConstants,
+// SetClayFramePost). `ramp`: a scan-out ramp was handed over and passes its rule. `objects`: the post
+// steps' objects exist or may still be made; false once making them has failed. `buffer`: the frame's
+// constant buffer was made.
+struct ClayPostInputs {
+  bool post = false, light = false, lit = false, block = false, ramp = false, objects = false, buffer = false;
+};
+struct ClayPostDecision {
+  ClayPost post = ClayPost::kOff;
+};
+constexpr ClayPostDecision DecideClayPost(const ClayPostInputs& in) {
+  if (!in.post) return {ClayPost::kOff};
+  if (!in.light || !in.lit) return {ClayPost::kNoLight};
+  if (!in.block) return {ClayPost::kBlock};
+  if (!in.ramp) return {ClayPost::kRamp};
+  if (!in.objects) return {ClayPost::kObjects};
+  if (!in.buffer) return {ClayPost::kBuffer};
+  return {ClayPost::kDrawn};
+}
+// What ClayPass::Render is asked about the post chain: the three switches as they are read now (bloom
+// and sun: plan Tasks 8 and 14; nothing reads them before) and the scan-out ramp of this frame, 256
+// entries of red, green, blue in 0..1 (native_render_state.h, PostRamp::rgb), null when there is none
+// or it failed its rule.
+struct ClayPostRequest {
+  bool post = false, bloom = false, sun = false;
+  const float (*ramp)[3] = nullptr;
+};
+
 struct ClayStats {
   uint32_t drawn = 0, skipped_bad_index = 0, uploads = 0, hits = 0;
   uint64_t resident_bytes = 0;
@@ -469,7 +518,35 @@ struct ClayStats {
   float sky_ray[3] = {}, sky_axis_cos = 0.0f;
   uint64_t sky_frames = 0, sky_nofog_frames = 0, sky_view_frames = 0, sky_block_frames = 0, sky_rules_frames = 0;
   uint64_t sky_objects_frames = 0, sky_texture_frames = 0;
+  // The post chain ("Native post" below; the Post line). post_switch: fable2_native_post. post_block,
+  // post_reason, post_age: the scene's post block, without one the capture's reason, and with one how
+  // many frames ago it was read (0: the frame's own). post: what the pass did (ClayPost). post_scale,
+  // post_unlit: of a post frame, the scale its lit draws wrote (the game's c20.w) and its unlit scale.
+  // The frame counts are the pass's totals since it was made, this frame included: frames with the
+  // switch on, those drawn as post frames, and those drawn as today's by reason.
+  bool post_switch = false, post_block = false;
+  capture::PostBlockReason post_reason = capture::PostBlockReason::kOff;
+  ClayPost post = ClayPost::kOff;
+  uint32_t post_age = 0;
+  float post_scale = 0.0f, post_unlit = 1.0f;
+  uint64_t post_frames = 0, post_drawn_frames = 0, post_nolight_frames = 0, post_block_frames = 0, post_ramp_frames = 0;
+  uint64_t post_objects_frames = 0, post_buffer_frames = 0;
 };
+// The pass's frame counts of the post chain, which follow from the frame's verdict alone: one frame
+// added. Counted: every frame with the post switch on, which is every verdict but kOff.
+struct ClayPostFrames {
+  uint64_t frames = 0, drawn = 0, nolight = 0, block = 0, ramp = 0, objects = 0, buffer = 0;
+};
+inline void CountClayPostFrame(ClayPost post, ClayPostFrames& n) {
+  if (post == ClayPost::kOff || size_t(post) >= size_t(ClayPost::kCount)) return;
+  ++n.frames;
+  if (post == ClayPost::kDrawn) ++n.drawn;
+  if (post == ClayPost::kNoLight) ++n.nolight;
+  if (post == ClayPost::kBlock) ++n.block;
+  if (post == ClayPost::kRamp) ++n.ramp;
+  if (post == ClayPost::kObjects) ++n.objects;
+  if (post == ClayPost::kBuffer) ++n.buffer;
+}
 // The pass's frame counts of the sky, which follow from the frame's verdict alone: one frame added.
 // Counted: every frame with the fog's switch on (the sky has no switch of its own), which is every
 // verdict but kOff; a frame drawn without light is among them, under "no-fog" (final review, M5).
@@ -1590,7 +1667,8 @@ inline constexpr float kLitExposure = 2.22f;
 inline constexpr float kClayMapExposure = 1.0f;
 
 // The exposure E of the lit output: one number for the frame, no draw's own, and the lit draws'
-// alone. kLitExposure with light on: MakeClayFrameConstants puts it into a lit frame's block
+// alone. kLitExposure with light on (in a post frame the game's own scale c20.w takes its place:
+// SetClayFramePost, "Native post"): MakeClayFrameConstants puts it into a lit frame's block
 // (ClayFrameConstants::exposure, the one place a shader gets it from), and each lit pixel path
 // writes ClayLit(value * E). 1 with light off, where nothing is lit and nothing reads it. The lit
 // linear values are the game's before its output scale c20.w (16), which its own later passes
@@ -2030,9 +2108,11 @@ struct ClayFrameConstants {
   float sun_col[3];     // c87.xyz
   float tint_pow;       // c21.w
   float tint[3];        // c21.xyz
-  float exposure;       // E of the lit output (ClayExposure of "on"): the lit pixel paths multiply by it
-  float add[3];         // c20.xyz (c20.w, the output scale, is not applied)
-  float pad0;
+  float exposure;       // E of the lit output: the lit pixel paths multiply by it. ClayExposure of "on"; in a post
+                        // frame the game's output scale c20.w (SetClayFramePost)
+  float add[3];         // c20.xyz
+  float post = 1.0f;    // what every unlit colour is multiplied by: the unlit scale of a post frame, 1 in every
+                        // other frame, one without light included (never 0: SetClayFramePost, "Native post")
   float floor[3];       // c22.xyz; the block carries x and y, z is 0 (0 in every row captured)
   float mask_du;        // 1 / the clay target's width: a lit pixel reads the screen mask at (pos.xy - 0.5) * (mask_du, mask_dv)
   float axis[3];        // c23.xyz (= vertex c19.xyz)
@@ -2051,7 +2131,8 @@ static_assert(kClayFrameLightBytes == 112 && sizeof(ClayFrameConstants) == 5344 
 
 // The frame's constants from its light block. Lit only with the switch on and a valid block whose
 // every value is a number of usable size (the block's own rules: light_block.h, MakeLightBlock; a
-// frame without one is "light-block"); else everything is zero. The eye is not among those values:
+// frame without one is "light-block"); else everything is zero but the unlit word, which is 1 (a frame
+// without post: "Native post" below). The eye is not among those values:
 // a frame whose eye is not usable is lit all the same, without it (eye_on 0: LightFrameLights).
 inline ClayFrameConstants MakeClayFrameConstants(const capture::LightBlock& b, ClayLight light) {
   ClayFrameConstants c{};
@@ -3066,6 +3147,282 @@ inline std::string FormatSkyText(const ClayStats& st) {
   return text + buf;
 }
 
+// --- Native post (frame-map section 17, "Native composite"; docs/native-renderer/lighting-formulas.md, "The post chain") ---
+//
+// The game ends a frame with a composite (pixel shader 0x37B186F4BD3288F7) that maps its scene target
+// to the 8-bit front buffer through a table of 512 floats the CPU rewrites every frame (the exposure:
+// a gain by scene luminance), and scan-out then puts the front buffer through the guest's 256-entry
+// gamma ramp. A POST FRAME of the native pass (DecideClayPost) does the same in two full-screen steps
+// in place of the output mapping, with the frame's own post block (capture::PostBlock) and ramp:
+//   L   = lum(scene) = 0.2125 r + 0.7154 g + 0.0721 b        scene: the linear target, read as PostScene
+//   e   = c77.y * T[texel(c46.x * L)]                         the table at the NEAREST texel (PostTableTexel)
+//   c   = sat(e * (L + sat(c47.x * L) * (scene - L)))
+//   b   = sat(bloom * c31.x);  s = c + b * (1 - c)            bloom: 0 until plan Task 8
+//   t   = s + c77.x * (s - lum(s));  front = |t| ^ c78.x      into the front target (8 bits)
+//   out = ramp[floor(front * 255 + 0.5)] per channel          into the mapped target
+// and its lit draws write the game's own scale: the frame's exposure word is the light block's c20.w
+// instead of kLitExposure, and its unlit draws write their colour times the frame's unlit scale
+// (PostUnlitScale: spec ruling 9), so that they pass the composite as a lit pixel of that value would.
+// Every other frame is today's: the exposure kLitExposure, the unlit word 1, shaders::kOutputMapPs.
+//
+// The table and the ramp travel as arrays in the steps' constants (ClayPostConstants: spec ruling 12),
+// read by index: no texture, no filter, the game's point fetch exactly.
+//
+// Values that are no numbers (plan, review focus 2). The rule of every reader of the linear target:
+// a channel that is not above 0 is 0 (a NaN, for which no comparison holds, and a negative value among
+// them) and one above 31.875, the largest value of the game's scene target, is 31.875 (an infinity
+// among them). With that, and with registers and texels inside the block's bounds, every later term is
+// a number: nothing that is no number leaves the composite, and no index leaves the table or the ramp.
+// The mirrors below compute in double on the single-precision values a shader gets and are pinned to
+// the reference by the numbers of tools/xdk_sigmatch/post_pins.py; like the reference they give black
+// for a register or texel that is no number, which MakeClayPostConstants never hands on.
+
+inline constexpr double kPostLum[3] = {0.2125, 0.7154, 0.0721};  // the composite's literal c255 (light_formulas.POST_LUM)
+inline constexpr float kPostSceneMax = 31.875f;                  // light_formulas.POST_SCENE_MAX
+// The table's texel of scene luminance 1 with the captured c46.x = 0.25 (the unlit scale's), and the
+// largest unlit scale: an unlit value is at most 1, so what an unlit draw writes stays within what a lit
+// draw may write (kClayLitMax).
+inline constexpr uint32_t kPostUnlitTexel = 128;
+inline constexpr float kPostUnlitMax = 64.0f;
+static_assert(kPostUnlitMax <= kClayLitMax && kPostUnlitTexel < capture::kPostTableTexels);
+
+// A channel of the linear target as the post steps read it (light_formulas.post_scene).
+inline double PostScene(float v, float scene_max = kPostSceneMax) {
+  if (!(v > 0.0f)) return 0.0;
+  return double(v < scene_max ? v : scene_max);
+}
+
+// The texel of the 512-texel table a coordinate reads (light_formulas.post_table_texel; controller
+// ruling 19): the NEAREST, floor(u * 512 + 0.5) clamped to 511, which is the composite's point fetch
+// with its half-texel offset; not floor(u * 512). Texel k serves u in [(k - 0.5) / 512, (k + 0.5) / 512).
+// In single precision, as the shader computes it (min(511, uint(512 * saturate(u) + 0.5))); the
+// reference computes in double, and the two agree at every pin: u * 512 is exact in a single, and the
+// pins lie 5e-4 of a texel from a boundary, eight times a single's step there. A coordinate that is no
+// number or not above 0 reads texel 0; one at or beyond the end the last texel.
+inline uint32_t PostTableTexel(float u) {
+  if (!(u > 0.0f)) return 0;
+  const float x = 512.0f * (u < 1.0f ? u : 1.0f) + 0.5f;
+  const uint32_t i = uint32_t(x);  // (x is in 0.5 .. 512.5)
+  return i < capture::kPostTableTexels - 1 ? i : capture::kPostTableTexels - 1;
+}
+
+// The frame's unlit scale (spec ruling 9; light_formulas.post_unlit_scale): 1 / (c77.y * T[128]), the
+// reciprocal of the composite's gain at scene luminance 1, at most 64; 64 for a gain that is no number
+// or not above 1 / 64. An invalid block has none: 1, the word of a frame without post.
+inline float PostUnlitScale(const capture::PostBlock& b) {
+  if (!b.valid) return 1.0f;
+  const double gain = double(b.composite[4]) * double(b.table[kPostUnlitTexel]);
+  return (gain > 1.0 / 64.0 && std::isfinite(gain)) ? float(1.0 / gain) : kPostUnlitMax;
+}
+
+// The frame's two words of a post frame (cbuffer Frame's f_exposure and f_post), written over those
+// MakeClayFrameConstants gave: the exposure becomes the game's output scale c20.w (`out_scale`, the
+// frame's light block's) and the unlit word the block's unlit scale. Only for a lit frame and a valid
+// block that pairs with that scale (capture::PostBlockPairs, checked again here), a scale that is a
+// usable light value above 0 and an unlit scale in (0, 64]; else false and nothing is touched: the
+// frame keeps today's words. So the game's scale never stands without its block.
+inline bool SetClayFramePost(ClayFrameConstants& c, const capture::PostBlock& b, float out_scale) {
+  if (!c.light_on || !b.valid || !capture::PostBlockPairs(b, out_scale)) return false;
+  if (!(out_scale > 0.0f) || !LightValueUsable(out_scale)) return false;
+  const float unlit = PostUnlitScale(b);
+  if (!(unlit > 0.0f && unlit <= kPostUnlitMax)) return false;
+  c.exposure = out_scale;
+  c.post = unlit;
+  return true;
+}
+
+// The post steps' constants (cbuffer Post of shaders::kClayPostCompositePs and kClayPostRampPs,
+// register b0 of the post layout; shaders::kClayPostFields is its layout): kClayPostSlots small slots
+// of the frame's constant buffer. The bright pass's registers, the blurs' weights and the radial
+// blur's registers are carried for the steps of plan Tasks 8 and 14; no shader reads them before.
+struct ClayPostConstants {
+  float composite[6];   // 37B1: c31.x, c46.x, c47.x, c77.x, c77.y, c78.x
+  float scene_max;      // 31.875: the clamp of every read of the linear target (spec ruling 15)
+  float previous;       // the previous frame's share of the front target (plan Task 15); 0 until then
+  float bright[5];      // EE92: c31.x, c46.x, c47.x, c77.x, c77.y
+  uint32_t bloom_on;    // 1: the bloom's steps are drawn and the composite reads their result (plan Task 8)
+  uint32_t sun_on;      // 1: the sun layer feeds the bright pass (plan Task 14)
+  uint32_t pad;
+  float blur[4][4];     // EA83's seven weights in rows 0 and 1 (the centre first), 28DB's in rows 2 and 3
+  float radial[4];      // 4BE4: c31.x, c31.y, c46.x, c47.x
+  float table[capture::kPostTableTexels / 4][4];  // texel i at [i >> 2][i & 3]
+  float ramp[256][4];   // entry i: red, green, blue in 0..1 (the fourth float 0)
+};
+static_assert(sizeof(ClayPostConstants) == 6288 && offsetof(ClayPostConstants, table) == 144 &&
+              offsetof(ClayPostConstants, ramp) == 2192 && sizeof(ClayPostConstants::table) == sizeof(capture::PostBlock::table));
+
+// The scan-out ramp as the pass takes it: 256 entries of red, green, blue, every one a number in [0, 1]
+// and no channel decreasing from one entry to the next (native_render_state.h, PostRamp's rule, judged
+// again on the floats: a frame whose ramp fails it is drawn without post, "post-ramp").
+inline bool PostRampUsable(const float (*ramp)[3]) {
+  if (!ramp) return false;
+  for (int i = 0; i < 256; ++i) {
+    for (int ch = 0; ch < 3; ++ch) {
+      if (!(ramp[i][ch] >= 0.0f && ramp[i][ch] <= 1.0f) || (i > 0 && !(ramp[i][ch] >= ramp[i - 1][ch]))) return false;
+    }
+  }
+  return true;
+}
+
+// The steps' constants of a frame. False, with `out` all zero, unless: the block is valid; each of its
+// composite's and bright pass's registers is inside the bound the block's own rule gives it
+// (post_block.h, MakePostBlock: judged again here, so that no value reaches a shader on the strength of
+// a flag alone; a value that is no number fails its bound); every texel is in [0, 4); and `ramp` is
+// usable (PostRampUsable). `bloom`, `sun`: the switches; the flags are set only with the block's part they need
+// (the blurs' weights; the radial blur's registers), whose values are copied when the block has them.
+inline bool MakeClayPostConstants(const capture::PostBlock& b, const float (*ramp)[3], bool bloom, bool sun, ClayPostConstants* out) {
+  if (!out) return false;
+  *out = ClayPostConstants{};
+  if (!b.valid || !PostRampUsable(ramp)) return false;
+  const float* c = b.composite;
+  const float* h = b.bright;
+  if (!(c[0] >= 0.0f && c[0] <= 64.0f) || !(c[1] > 0.0f && c[1] <= 64.0f) || !(c[2] >= 0.0f && c[2] <= 1e6f) ||
+      !(std::fabs(c[3]) <= 4.0f) || !(c[4] > 0.0f && c[4] <= 64.0f) || !(c[5] > 0.0f && c[5] <= 1.0f)) {
+    return false;
+  }
+  if (!(h[0] >= 0.0f && h[0] <= 64.0f) || !(h[1] >= 0.0f && h[1] <= 64.0f) || !(h[2] >= 1e-3f && h[2] <= 64.0f) ||
+      !(std::fabs(h[3]) <= 4.0f) || !(h[4] > 0.0f && h[4] <= 64.0f)) {
+    return false;
+  }
+  for (float texel : b.table) {
+    if (!(texel >= 0.0f && texel < 4.0f)) return false;
+  }
+  ClayPostConstants k{};
+  std::memcpy(k.composite, b.composite, sizeof(k.composite));
+  std::memcpy(k.bright, b.bright, sizeof(k.bright));
+  k.scene_max = kPostSceneMax;
+  if (b.parts & capture::kPostPartBlur) {
+    for (int s = 0; s < 2; ++s) {
+      for (int i = 0; i < 7; ++i) {
+        const float w = b.blur[s][i];
+        k.blur[2 * s + (i >> 2)][i & 3] = (w >= 0.0f && w <= 1.0f) ? w : 0.0f;
+      }
+    }
+    k.bloom_on = bloom ? 1u : 0u;
+  }
+  if (b.parts & capture::kPostPartRadial) {
+    bool ok = true;
+    for (float v : b.radial) ok = ok && std::isfinite(v);
+    if (ok) {
+      std::memcpy(k.radial, b.radial, sizeof(k.radial));
+      k.sun_on = (sun && k.bloom_on) ? 1u : 0u;
+    }
+  }
+  static_assert(sizeof(k.table) == sizeof(b.table));
+  std::memcpy(k.table, b.table, sizeof(k.table));
+  for (int i = 0; i < 256; ++i) {
+    for (int ch = 0; ch < 3; ++ch) k.ramp[i][ch] = ramp[i][ch];
+  }
+  *out = k;
+  return true;
+}
+// The small slots the constants take in the frame's constant buffer.
+inline constexpr uint32_t kClayPostSlots = (sizeof(ClayPostConstants) + 255) / 256;
+static_assert(kClayPostSlots == 25);
+
+// The table coordinate of a scene texel, c46.x * lum(scene as PostScene reads it); 0 with a register
+// that is no number.
+inline double PostCompositeCoordinate(const float scene[3], const ClayPostConstants& k) {
+  if (!std::isfinite(k.composite[1]) || !std::isfinite(k.scene_max)) return 0.0;
+  double L = 0.0;
+  for (int i = 0; i < 3; ++i) L += PostScene(scene[i], k.scene_max) * kPostLum[i];
+  return double(k.composite[1]) * L;
+}
+
+// The composite of one pixel (light_formulas.post_composite, with the target's clamp): the front
+// target's value before the ramp, three numbers in [0, 1] for any input. `scene`: the linear target's
+// texel; `bloom`: the blurred bright pass at the pixel, (0, 0, 0) for none.
+inline void PostCompositeMirror(const float scene[3], const float bloom[3], const ClayPostConstants& k, double out[3]) {
+  auto sat = [](double x) { return x != x ? 0.0 : (x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x)); };
+  out[0] = out[1] = out[2] = 0.0;
+  for (float r : k.composite) {
+    if (!std::isfinite(r)) return;
+  }
+  if (!std::isfinite(k.scene_max)) return;
+  const double c31x = k.composite[0], c47x = k.composite[2], c77x = k.composite[3], c77y = k.composite[4], c78x = k.composite[5];
+  double s[3], L = 0.0;
+  for (int i = 0; i < 3; ++i) {
+    s[i] = PostScene(scene[i], k.scene_max);
+    L += s[i] * kPostLum[i];
+  }
+  const uint32_t texel = PostTableTexel(float(PostCompositeCoordinate(scene, k)));
+  const float stored = k.table[texel >> 2][texel & 3];
+  const double T = std::isfinite(stored) ? double(stored) : 0.0;
+  const double e = c77y * T;
+  const double fade = sat(c47x * L);
+  double scr[3], L2 = 0.0;
+  for (int i = 0; i < 3; ++i) {
+    const double c = sat(e * (L + fade * (s[i] - L)));
+    const double b = sat(double(bloom[i]) * c31x);
+    scr[i] = c + b * (1.0 - c);
+    L2 += scr[i] * kPostLum[i];
+  }
+  for (int i = 0; i < 3; ++i) {
+    const double base = std::fabs(scr[i] + c77x * (scr[i] - L2));
+    const double p = (base > 0.0 && std::isfinite(base)) ? std::pow(base, c78x) : 0.0;
+    out[i] = sat(std::isfinite(p) ? p : 0.0);
+  }
+}
+
+// The ramp's entry of a front-target value (light_formulas.post_ramp_index): min(255, floor(v * 255 +
+// 0.5)); 0 for a value that is no number or not above 0. In single precision, as the shader computes
+// it; an 8-bit level n over 255 reads entry n.
+inline uint32_t PostRampIndex(float v) {
+  if (!(v > 0.0f)) return 0;
+  const float x = (v < 1.0f ? v : 1.0f) * 255.0f + 0.5f;
+  const uint32_t i = uint32_t(x);  // (x is in 0.5 .. 255.5)
+  return i < 255u ? i : 255u;
+}
+// One channel through the ramp (light_formulas.post_ramp): `ramp` is that channel's 256 entries.
+inline float PostRampMirror(float front, const float ramp[256]) { return ramp[PostRampIndex(front)]; }
+
+// The Post line of the status text and the log: the switch, the scene's block, what the pass did, a
+// post frame's two scales, and the pass's totals since it was made.
+inline std::string FormatPostText(const ClayStats& st) {
+  if (!st.post_switch) return "Post: off";
+  std::string text = "Post: on, block ";
+  char buf[512];  // (the line with every count and both floats at their largest is whole: test case 609)
+  if (st.post_block) {
+    std::snprintf(buf, sizeof(buf), "valid, age %u", st.post_age);
+    text += buf;
+  } else {
+    text += std::string("invalid (") + capture::kPostBlockReason + ": " + capture::PostBlockReasonName(st.post_reason) + ")";
+  }
+  bool exposure = true;
+  switch (st.post) {
+    case ClayPost::kDrawn: text += ", drawn"; break;
+    case ClayPost::kNoLight:
+      text += ", not drawn (no light)";
+      exposure = false;
+      break;
+    case ClayPost::kBlock:
+      text += std::string(", not drawn (") + capture::kPostBlockReason + (st.post_block ? ": values)" : ")");
+      break;
+    case ClayPost::kRamp: text += std::string(", not drawn (") + kPostRampReason + ")"; break;
+    case ClayPost::kObjects: text += std::string(", not drawn (") + kPostObjectsReason + ")"; break;
+    case ClayPost::kBuffer:
+      text += ", not drawn (no constant buffer)";
+      exposure = false;
+      break;
+    default: text += ", not drawn (off)"; break;
+  }
+  if (st.post == ClayPost::kDrawn) {
+    std::snprintf(buf, sizeof(buf), " | c20.w %.4f, unlit scale %.4f", double(st.post_scale), double(st.post_unlit));
+  } else if (exposure) {
+    std::snprintf(buf, sizeof(buf), " | today's mapping, exposure %.2f", double(kLitExposure));
+  } else {
+    std::snprintf(buf, sizeof(buf), " | today's mapping");
+  }
+  text += buf;
+  std::snprintf(buf, sizeof(buf), " | frames since start %llu: drawn %llu, %s %llu, %s %llu, %s %llu, no-light %llu, no-buffer %llu",
+                static_cast<unsigned long long>(st.post_frames), static_cast<unsigned long long>(st.post_drawn_frames),
+                capture::kPostBlockReason, static_cast<unsigned long long>(st.post_block_frames), kPostRampReason,
+                static_cast<unsigned long long>(st.post_ramp_frames), kPostObjectsReason,
+                static_cast<unsigned long long>(st.post_objects_frames), static_cast<unsigned long long>(st.post_nolight_frames),
+                static_cast<unsigned long long>(st.post_buffer_frames));
+  return text + buf;
+}
+
 // --- Terrain material (frame-map section 13, "Terrain", "Native terrain material") ---
 // A terrain record whose inputs and textures are usable is drawn by one of the
 // two terrain pixel shaders (fable2_native_shaders.h) with its captured render
@@ -3143,25 +3500,27 @@ constexpr uint64_t ClayConstantBufferBytes(uint64_t small_slots, uint64_t object
 // one arithmetic that corrupts memory when wrong, so it is here and under test case 598). Small
 // slots in this order: the frame's block (kClayFrameSlots), one per terrain record DRAWN with its
 // material (from kClayFrameTerrainSlot0, given out in the records' order), one per lit instanced
-// plant (from plant0), the mask step's constants, the sky step's; then the large slots of the lit
-// objects, trunks and leaves (ClayObjectSlotOffset(object0, i)).
+// plant (from plant0), the mask step's constants, the sky step's, the post steps' (kClayPostSlots
+// slots: ClayPostConstants); then the large slots of the lit objects, trunks and leaves
+// (ClayObjectSlotOffset(object0, i)).
 inline constexpr uint32_t kClayFrameTerrainSlot0 = kClayFrameSlots;
 struct ClayFrameSlotPlan {
-  uint32_t plant0 = 0, mask = 0, sky = 0, object0 = 0;
+  uint32_t plant0 = 0, mask = 0, sky = 0, post = 0, object0 = 0;
 };
 constexpr ClayFrameSlotPlan PlanClayFrameSlots(uint32_t terrain_drawn, uint32_t plants) {
   ClayFrameSlotPlan p;
   p.plant0 = kClayFrameTerrainSlot0 + terrain_drawn;
   p.mask = p.plant0 + plants;
   p.sky = p.mask + 1;
-  p.object0 = p.sky + 1;
+  p.post = p.sky + 1;
+  p.object0 = p.post + kClayPostSlots;
   return p;
 }
 // The small slots the buffer is sized with, before it is known which terrain records are drawn with
 // their material: every terrain record counts, so the plan of any number of them drawn fits
 // (PlanClayFrameSlots(drawn, plants).object0 <= this for drawn <= terrain_records).
 constexpr uint64_t ClayFrameSmallSlots(uint64_t terrain_records, uint64_t plants) {
-  return uint64_t(kClayFrameTerrainSlot0) + terrain_records + plants + 2;
+  return uint64_t(kClayFrameTerrainSlot0) + terrain_records + plants + 2 + kClayPostSlots;
 }
 
 // ClayTerrainConstants::flags: the far colour is multiplied by sat(d2 * fade[0] + fade[1]) (the

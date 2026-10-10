@@ -30,6 +30,16 @@ constexpr uint32_t kMaskParamConstants = 0, kMaskParamTextures = 1, kMaskTableSi
 // buffer) at b0, and its table at t0, t1: the game's two sky textures.
 constexpr uint32_t kSkyParamFrame = 0, kSkyParamConstants = 1, kSkyParamTextures = 2, kSkyTableSize = 2;
 static_assert(kSkyTableSize <= nrhi::kMaxTextureTableSize && sizeof(ClaySkyConstants) <= kClayTerrainSlotBytes);
+// The post steps' binding parameters (one layout for every step): the steps' constants
+// (ClayPostConstants, kClayPostSlots small slots of the frame's constant buffer) at b0, a step's own
+// 8 words at b1, and a table of 4 textures at t0 (entry 0: what the step reads).
+constexpr uint32_t kPostParamConstants = 0, kPostParamStep = 1, kPostParamTextures = 2, kPostTableSize = 4, kPostStepWords = 8;
+static_assert(kPostTableSize <= nrhi::kMaxTextureTableSize && kClayPostSlots * kClayTerrainSlotBytes >= sizeof(ClayPostConstants));
+// The front target: the composite's result before the ramp, 8 bits as the game's front buffer, the
+// clay target's size (a fraction of it: 1 / kFrontDivisor, exactly).
+constexpr nrhi::Format kFrontFormat = nrhi::Format::kR8G8B8A8_UNORM;
+constexpr uint32_t kFrontDivisor = 1;
+static_assert(ClayPass::kWidth % kFrontDivisor == 0 && ClayPass::kHeight % kFrontDivisor == 0);
 constexpr uint32_t kConstantCount = sizeof(ClayConstants) / 4;  // 36
 static_assert(kConstantCount == 36);
 // Binding parameters: indices into kClayBindings (clay_logic.h), from which
@@ -109,6 +119,7 @@ nrhi::CullMode ToCull(uint8_t c) {
 void ClayPass::DestroyObjects() {
   DestroyShadowObjects();  // (first: its view of depth_ and its pipelines of vs_ and layout_)
   DestroySkyObjects();
+  DestroyPostObjects();  // (before map_vs_, which its pipelines are made of)
   if (device_) {
     for (nrhi::Pipeline* p : pipelines_) device_->DestroyDeferred(p);
     device_->DestroyDeferred(vs_);
@@ -236,6 +247,9 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     ForgetSkyObjects();
     sky_objects_failed_ = false;
     sky_layout_ = nullptr;
+    ForgetPostObjects();
+    post_objects_failed_ = false;  // (another device: its post steps are tried anew)
+    post_layout_ = nullptr;
     white_ = nullptr;
     white_view_ = nullptr;
     white_staging_ = nullptr;
@@ -250,6 +264,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     // and F6 does not come here for it: those stay off until this path, another device or a restart.)
     shadow_objects_failed_ = false;
     sky_objects_failed_ = false;  // (the sky's objects likewise)
+    post_objects_failed_ = false;  // (and the post steps')
   }
   ready_ = false;
 
@@ -647,7 +662,8 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
     // lit object or trunk. Sized so that the largest block a shader declares at b1 lies inside the
     // buffer from the start of every slot (ClayConstantBufferBytes), and the frame's whole block
     // from offset 0.
-    // (and one small slot each for the mask step's and the sky step's constants, used or not:
+    // (and one small slot each for the mask step's and the sky step's constants and kClayPostSlots for
+    // the post steps', used or not:
     // ClayFrameSmallSlots, which counts every terrain record; PlanClayFrameSlots below gives out the
     // slots of those that are drawn with their material)
     const uint64_t bytes = ClayConstantBufferBytes(ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size()),
@@ -779,6 +795,7 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
   plant_slot0_ = plan.plant0;
   mask_slot_ = plan.mask;  // the mask step's constants (Render writes them when the frame has a mask)
   sky_slot_ = plan.sky;    // the sky step's (Render writes them when the frame has a sky)
+  post_slot_ = plan.post;  // the post steps' (kClayPostSlots slots; Render writes them in a post frame)
   object_slot0_ = plan.object0;
   if (slots) {
     std::memcpy(slots, &frame_, sizeof(frame_));
@@ -1394,8 +1411,111 @@ bool ClayPass::EnsureSkyObjects(nrhi::Device* dev) {
   return true;
 }
 
+void ClayPass::ForgetPostObjects() {
+  post_composite_ps_ = post_ramp_ps_ = nullptr;
+  post_composite_pipeline_ = post_ramp_pipeline_ = nullptr;
+  front_ = nullptr;
+  front_view_ = nullptr;
+  post_objects_ = false;
+}
+
+void ClayPass::DestroyPostObjects() {
+  if (device_) {
+    device_->DestroyDeferred(post_composite_pipeline_);
+    device_->DestroyDeferred(post_ramp_pipeline_);
+    device_->DestroyDeferred(post_composite_ps_);
+    device_->DestroyDeferred(post_ramp_ps_);
+    device_->DestroyDeferred(front_view_);
+    device_->DestroyDeferred(front_);
+  }
+  ForgetPostObjects();
+}
+
+bool ClayPass::EnsurePostObjects(nrhi::Device* dev) {
+  if (post_objects_) return true;
+  if (post_objects_failed_ || !ready_ || dev != device_) return false;
+  auto fail = [&](const char* what) {
+    REXLOG_ERROR("[native] clay: {} failed ({}): the native post chain is off until the pass is rebuilt (another device, or an F6 "
+                 "retry after a failure of the renderer) or the game is restarted; every frame is drawn with the fixed exposure "
+                 "and the output mapping", what, kPostObjectsReason);
+    DestroyPostObjects();
+    post_objects_failed_ = true;
+    return false;
+  };
+  // One layout for every post step: the steps' constants (ClayPostConstants, slots of the frame's
+  // constant buffer) at b0, a step's own 8 words at b1, a table of 4 textures at t0, and two static
+  // samplers (s0 point, s1 linear, both clamped), all for the pixel stage. The composite and the ramp
+  // read their one texture with Load and neither the words nor a sampler; the steps of plan Task 8 do.
+  if (!post_layout_) {
+    nrhi::BindingLayoutDesc desc;
+    desc.params[kPostParamConstants].kind = nrhi::BindingParamKind::kConstantBuffer;
+    desc.params[kPostParamConstants].shader_register = 0;
+    desc.params[kPostParamConstants].count = 1;
+    desc.params[kPostParamConstants].visibility = nrhi::Visibility::kPixel;
+    desc.params[kPostParamStep].kind = nrhi::BindingParamKind::kConstants;
+    desc.params[kPostParamStep].shader_register = 1;
+    desc.params[kPostParamStep].count = kPostStepWords;
+    desc.params[kPostParamStep].visibility = nrhi::Visibility::kPixel;
+    desc.params[kPostParamTextures].kind = nrhi::BindingParamKind::kTextureTable;
+    desc.params[kPostParamTextures].shader_register = 0;
+    desc.params[kPostParamTextures].count = kPostTableSize;
+    desc.params[kPostParamTextures].visibility = nrhi::Visibility::kPixel;
+    desc.param_count = 3;
+    for (uint32_t i = 0; i < 2; ++i) {
+      desc.static_samplers[i].shader_register = i;
+      desc.static_samplers[i].filter = i ? nrhi::Filter::kLinear : nrhi::Filter::kPoint;
+      desc.static_samplers[i].address = nrhi::AddressMode::kClamp;
+    }
+    desc.static_sampler_count = 2;
+    desc.allow_input_layout = false;
+    post_layout_ = dev->CreateBindingLayout(desc);
+    if (!post_layout_) return fail("post binding layout creation");
+  }
+  nrhi::ShaderDesc sd;
+  sd.entry_point = "main";
+  sd.stage = nrhi::ShaderStage::kPixel;
+  sd.name = "fable2_clay_post_composite_ps";
+  sd.hlsl_source = shaders::kClayPostCompositePs;
+  post_composite_ps_ = dev->CreateShader(sd);
+  sd.name = "fable2_clay_post_ramp_ps";
+  sd.hlsl_source = shaders::kClayPostRampPs;
+  post_ramp_ps_ = dev->CreateShader(sd);
+  if (!post_composite_ps_ || !post_ramp_ps_) return fail("post shader compile");
+  // The front target: the composite's result, 8 bits, before the ramp (the game's front buffer). Its
+  // contents are undefined until a post frame writes it, and nothing reads it in any other frame.
+  nrhi::TextureDesc front;
+  front.width = kWidth / kFrontDivisor;
+  front.height = kHeight / kFrontDivisor;
+  front.format = kFrontFormat;
+  front.usage = nrhi::kTextureUsageRenderTarget;
+  front.initial_state = nrhi::ResourceState::kPixelShaderResource;
+  front_ = dev->CreateTexture(front);
+  front_view_ = front_ ? dev->CreateTextureView(front_, nrhi::TextureViewDesc{}) : nullptr;
+  if (!front_ || !front_view_) return fail("front target creation");
+  // Two full-screen triangles (the output mapping's vertex shader): no depth, no blend, no cull.
+  nrhi::GraphicsPipelineDesc pipe;
+  pipe.layout = post_layout_;
+  pipe.vs = map_vs_;
+  pipe.ps = post_composite_ps_;
+  pipe.rtv_format = kFrontFormat;
+  post_composite_pipeline_ = dev->CreateGraphicsPipeline(pipe);
+  pipe.ps = post_ramp_ps_;
+  pipe.rtv_format = kMappedFormat;
+  post_ramp_pipeline_ = dev->CreateGraphicsPipeline(pipe);
+  if (!post_composite_pipeline_ || !post_ramp_pipeline_) return fail("post pipeline creation");
+  post_objects_ = true;
+  REXLOG_INFO("[native] clay: post steps ready (the composite into a front target {} x {} R8G8B8A8, {:.1f} MB, then the ramp into "
+              "the mapped target; their own layout: b0 {} bytes of constants in {} slots of the frame's constant buffer, b1 {} "
+              "words, t0 a table of {} textures)",
+              kWidth / kFrontDivisor, kHeight / kFrontDivisor,
+              double(ClayTargetBytes(kWidth / kFrontDivisor, kHeight / kFrontDivisor, kClayMappedTexelBytes)) / (1024.0 * 1024.0),
+              sizeof(ClayPostConstants), kClayPostSlots, kPostStepWords, kPostTableSize);
+  return true;
+}
+
 void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
-                      bool textured, ClayLight light, bool shadows, bool fog, ClayStats& st, TextureStats& tst) {
+                      bool textured, ClayLight light, bool shadows, bool fog, const ClayPostRequest& post, ClayStats& st,
+                      TextureStats& tst) {
   if (!ready_ || dev != device_) return;
   // A latched texture cache (RHI failure) resolves nothing: skip the UV decode
   // too, and report the latch on F3.
@@ -1408,6 +1528,32 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   if (!textured) light = ClayLight::kOff;
   frame_ = MakeClayFrameConstants(scene.light, light);
   SetClayFrameMask(frame_, kWidth, kHeight);  // (where a lit pixel reads the screen mask)
+  // The frame's post (DecideClayPost: one chain, the first thing missing decides), here, before
+  // anything reads the frame's exposure or its unlit word: a frame is a post frame or today's, never a
+  // mixture. The switch as it is now; the frame's light; the scene's own post block (never one beyond
+  // the age bound, never one that does not pair with the frame's c20.w: the capture's rules, judged
+  // again); a usable ramp; the steps' constants made of them; the steps' objects, asked last so that
+  // nothing is made for a frame that cannot use it; and only then the frame's two words
+  // (SetClayFramePost: the game's scale and the unlit scale). In every other case the words stay as
+  // MakeClayFrameConstants left them: the fixed exposure and 1. The frame's constant buffer is known
+  // after FinishTerrain; the verdict is final there.
+  ClayPostInputs post_in;
+  post_in.post = post.post;
+  post_in.light = light == ClayLight::kOn;
+  post_in.lit = frame_.light_on != 0;
+  post_in.block = scene.post.valid && scene.post_age <= capture::kPostBlockMaxAge && scene.light.valid &&
+                  capture::PostBlockPairs(scene.post, scene.light.out_scale);
+  post_in.ramp = PostRampUsable(post.ramp);
+  post_in.objects = !post_objects_failed_;
+  post_in.buffer = true;  // (FinishTerrain, below)
+  ClayPostConstants post_constants{};
+  // (the bloom's and the sun's flags stay 0: no step of this build reads them; plan Tasks 8 and 14)
+  if (DecideClayPost(post_in).post == ClayPost::kDrawn) {
+    post_in.block = MakeClayPostConstants(scene.post, post.ramp, false, false, &post_constants);
+  }
+  if (DecideClayPost(post_in).post == ClayPost::kDrawn) post_in.objects = EnsurePostObjects(dev);
+  if (DecideClayPost(post_in).post == ClayPost::kDrawn) post_in.block = SetClayFramePost(frame_, scene.post, scene.light.out_scale);
+  const bool post_words = DecideClayPost(post_in).post == ClayPost::kDrawn;  // (the frame's two words are a post frame's)
   // With the light off no light input is asked of the geometry cache: every record is prepared as
   // one without light inputs (its light buffers null, its light_mode without an object bit, the
   // positions at t9 to t12 at its draw; a steep layer's terrain normals are the material's and
@@ -1571,6 +1717,50 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // "drawn": ClayFog::kNoLight covers "no constant buffer"; final review, M11.)
   fog_in.light_block = frame_.light_on != 0 && terrain_cb_ != nullptr;
   const ClayFogDecision fog_decision = DecideClayFog(fog_in);
+  // (the post likewise. A frame whose constant buffer could not be made has no light, and one that has
+  // none because nothing of it is drawn has no record to draw: in both no draw reads the frame's two
+  // words, the frame is today's, and the output mapping maps its cleared target. The words go back to
+  // today's with the verdict, so that nothing of a post frame is left in a frame that is none.)
+  post_in.lit = frame_.light_on != 0;
+  post_in.buffer = terrain_cb_mapped_ != nullptr;
+  const ClayPostDecision post_decision = DecideClayPost(post_in);
+  const bool post_frame = post_decision.post == ClayPost::kDrawn;
+  if (post_words && !post_frame) {
+    frame_.exposure = frame_.light_on ? ClayExposure(ClayLight::kOn) : 0.0f;
+    frame_.post = 1.0f;
+  }
+  if (post_frame) std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(post_slot_), &post_constants, sizeof(post_constants));
+  st.post_switch = post.post;
+  st.post_block = scene.post.valid;
+  st.post_reason = scene.post_reason;
+  st.post_age = scene.post_age;
+  st.post = post_decision.post;
+  if (post_frame) {
+    st.post_scale = frame_.exposure;
+    st.post_unlit = frame_.post;
+  }
+  CountClayPostFrame(post_decision.post, post_counts_);  // (every frame with the post switch on)
+  st.post_frames = post_counts_.frames;
+  st.post_drawn_frames = post_counts_.drawn;
+  st.post_nolight_frames = post_counts_.nolight;
+  st.post_block_frames = post_counts_.block;
+  st.post_ramp_frames = post_counts_.ramp;
+  st.post_objects_frames = post_counts_.objects;
+  st.post_buffer_frames = post_counts_.buffer;
+  // A line when the verdict changes (the first post frame; a frame that lost its post and why).
+  constexpr uint32_t kPostLogLines = 16;
+  if (post_decision.post != post_logged_ && post_log_lines_ < kPostLogLines) {
+    post_logged_ = post_decision.post;
+    ++post_log_lines_;
+    const capture::PostBlock& b = scene.post;
+    float largest = 0.0f;
+    for (float texel : b.table) largest = std::max(largest, texel);
+    REXLOG_INFO("[native] clay: post changed at scene frame {}: {} | 37B1 ({:.4f}, {:.4f}, {:.3f}, {:.5f}, {:.5f}, {:.5f}), table texels "
+                "0, 1, 128: {:.5f}, {:.5f}, {:.5f}, largest {:.5f}, capture's c20.w {:.4f}{}",
+                scene.frame, FormatPostText(st), b.composite[0], b.composite[1], b.composite[2], b.composite[3], b.composite[4],
+                b.composite[5], b.table[0], b.table[1], b.table[kPostUnlitTexel], largest, scene.light.out_scale,
+                post_log_lines_ == kPostLogLines ? " (last such line)" : "");
+  }
   st.fog_switch = fog;
   st.fog_block = scene.fog.valid;
   st.fog_reason = scene.fog_reason;
@@ -1946,13 +2136,46 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // fog and no sky: the sky is never drawn alone.)
   if (sky_drawn && sky_order.place >= prepared_.size()) draw_sky();
 
-  // The output mapping: every pixel of the mapped target from the linear target
-  // of this Render (cleared and drawn above), so the composite never samples a
-  // mapped target older than its linear one, or one that was never written.
+  // The output mapping, or in a post frame the two post steps: every pixel of the mapped target
+  // from the linear target of this Render (cleared and drawn above), so the composite never
+  // samples a mapped target older than its linear one, or one that was never written.
   cmd->Barrier(linear_, nrhi::ResourceState::kRenderTarget,
                nrhi::ResourceState::kPixelShaderResource);
   cmd->Barrier(depth_, nrhi::ResourceState::kDepthWrite,
                nrhi::ResourceState::kPixelShaderResource);
+  if (post_frame) {
+    // A post frame (DecideClayPost: with the steps' objects and the frame's constant buffer, whose post
+    // slots hold this frame's constants): the game's composite and the scan-out ramp in place of the
+    // mapping. Each step binds the layout anew (SetBindingLayout resets the bindings) and reads one
+    // texture with Load; no target is read and written in one step: the composite reads the linear
+    // target and writes the front target, the ramp reads the front target and writes the mapped one,
+    // and each is a target only for its own step.
+    const float step_constants[kPostStepWords] = {1.0f / float(kWidth), 1.0f / float(kHeight), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    auto post_step = [&](nrhi::Texture* target, nrhi::Pipeline* pipeline, nrhi::TextureView* source) {
+      cmd->SetRenderTargets(target, nullptr);
+      cmd->SetViewport({0.0f, 0.0f, float(kWidth), float(kHeight), 0.0f, 1.0f});
+      cmd->SetScissor({0, 0, int32_t(kWidth), int32_t(kHeight)});
+      cmd->SetBindingLayout(post_layout_);
+      cmd->SetPipeline(pipeline);
+      cmd->SetConstantBuffer(kPostParamConstants, terrain_cb_, ClaySmallSlotOffset(post_slot_));
+      cmd->SetRootConstants(kPostParamStep, kPostStepWords, step_constants, 0);
+      // (the white texture in the table's entries no step of this build reads)
+      nrhi::TextureView* const inputs[kPostTableSize] = {source, white_view_, white_view_, white_view_};
+      cmd->SetTextures(kPostParamTextures, inputs, kPostTableSize);
+      cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+      cmd->Draw(3, 0);
+    };
+    cmd->Barrier(front_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
+    cmd->FlushBarriers();
+    post_step(front_, post_composite_pipeline_, linear_view_);
+    cmd->Barrier(front_, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
+    cmd->Barrier(color_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
+    cmd->FlushBarriers();
+    post_step(color_, post_ramp_pipeline_, front_view_);
+    cmd->Barrier(color_, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
+    cmd->FlushBarriers();
+  } else {
+  // (today's frame: the mapping as it was before the post chain, its text, its word and its calls)
   cmd->Barrier(color_, nrhi::ResourceState::kPixelShaderResource,
                nrhi::ResourceState::kRenderTarget);
   cmd->FlushBarriers();
@@ -1971,6 +2194,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   cmd->Barrier(color_, nrhi::ResourceState::kRenderTarget,
                nrhi::ResourceState::kPixelShaderResource);
   cmd->FlushBarriers();
+  }
 
   if (terrain_cb_) {
     // In use by this submission: reusable once it has completed.

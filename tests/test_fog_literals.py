@@ -179,11 +179,11 @@ class FogLiterals(unittest.TestCase):
         self.assertEqual(float(_one(r"    if \(form == (" + NUMBER + r")\) \{", self.shaders, "the trees' form")), float(forms[1]))
         # An unlit draw's fog (plan Task 6) is a function of its own, FogUnlit: the lit forms' text is
         # untouched. Four calls: the flat shader, the textured shader's two unlit returns, the terrain's.
-        self.assertEqual(len(re.findall(r"FogUnlit\(clay_linear\(base \* shade\), FogCoords\(pos\), 1\.0\)", self.shaders)), 1)
-        self.assertEqual(len(re.findall(r"FogUnlit\(clay_linear\(t\.rgb \* \(0\.75 \+ 0\.25 \* facet\)\), FogCoords\(pos\), "
+        self.assertEqual(len(re.findall(r"FogUnlit\(clay_linear\(base \* shade\) \* f_post, FogCoords\(pos\), 1\.0\)", self.shaders)), 1)
+        self.assertEqual(len(re.findall(r"FogUnlit\(clay_linear\(t\.rgb \* \(0\.75 \+ 0\.25 \* facet\)\) \* f_post, FogCoords\(pos\), "
                                         r"\(light_mode & 256\) \? saturate\(a\) : 1\.0\)", self.shaders)), 1)
-        self.assertEqual(len(re.findall(r"FogUnlit\(clay_linear\(base \* \(0\.35 \+ 0\.65 \* facet\)\), FogCoords\(pos\), 1\.0\)", self.shaders)), 1)
-        self.assertEqual(len(re.findall(r"FogUnlit\(saturate\(colour \* \(shade \* shade\)\), FogCoords\(pos\), 1\.0\)", self.shaders)), 1)
+        self.assertEqual(len(re.findall(r"FogUnlit\(clay_linear\(base \* \(0\.35 \+ 0\.65 \* facet\)\) \* f_post, FogCoords\(pos\), 1\.0\)", self.shaders)), 1)
+        self.assertEqual(len(re.findall(r"FogUnlit\(saturate\(colour \* \(shade \* shade\)\) \* f_post, FogCoords\(pos\), 1\.0\)", self.shaders)), 1)
         self.assertEqual(self.shaders.count("FogUnlit("), 6)  # (the function, its stub without the fog, four calls)
         # The ground form is passed as two literal zeros where a draw has no object block's register to read.
         self.assertEqual(len(re.findall(r"FogForm\(lit, fog, 0\.0, 0\.0\)", self.shaders)), 1)

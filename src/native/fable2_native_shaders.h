@@ -69,12 +69,17 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 // it, so that no NaN, negative value or value over 1 is written: a float target
 // would keep a NaN and blending would spread it (the albedo textures are UNORM
 // and the shade is finite, so none arises; where the compiler can prove the
-// range it drops the clamp, and it keeps it for the terrain layers' mix). A lit
+// range it drops the clamp, and it keeps it for the terrain layers' mix). The
+// clamped value is then multiplied by the frame's unlit word (Frame's f_post:
+// 1 in every frame but a post frame, where it is the frame's unlit scale, a
+// number in (0, 64]: clay_logic.h, "Native post"), before the draw's fog. A lit
 // draw (light_mode bit 2, below) writes its light function's value times the
 // frame's exposure (Frame's f_exposure; no other value takes it: an unlit draw
-// and the clear are written as they are and the output mapping multiplies by
-// 1, so lit and unlit values have one unit in the target and a blend of the
-// two is consistent), without the facet shade and without the clamp at 1,
+// takes the unlit word and the clear is written as it is, and the output
+// mapping multiplies by 1, so lit and unlit values have one unit in the target
+// and a blend of the two is consistent; in a post frame the exposure is the
+// game's own output scale c20.w and the game's composite follows in place of
+// the mapping), without the facet shade and without the clamp at 1,
 // through clay_lit: a number, not negative, at most 64. Alpha is not squared;
 // the alpha test and alpha-to-mask read it as it is, and it is clamped where it
 // is written for the blend (the 8-bit target clamped it there; the float
@@ -123,7 +128,9 @@ float4 main(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
 // the index range of a record is checked at both ends before it is drawn
 // (IndexRangeValid). The pass also binds something that covers the
 // draw's vertices at all four light registers at every draw (clay_pass.cpp).
-// A draw without bit 2 reads neither Frame nor Object and is the unlit colour.
+// A draw without bit 2 reads nothing of Object and of Frame only the unlit word
+// (f_post, in its pixel shader; with the fog's bits also the fog's fields) and is
+// the unlit colour.
 // kClayFrameFields and kClayObjectFields are the two buffers' layouts, which the
 // tests hold against the compiled shaders and the C++ structs.
 struct ClayBufferField {
@@ -133,7 +140,7 @@ struct ClayBufferField {
 };
 inline constexpr ClayBufferField kClayFrameFields[] = {
     {"f_sun_dir", 0, 12},  {"f_light_on", 12, 4},  {"f_sun_col", 16, 12}, {"f_tint_pow", 28, 4},
-    {"f_tint", 32, 12},    {"f_exposure", 44, 4},  {"f_add", 48, 12},     {"f_pad0", 60, 4},
+    {"f_tint", 32, 12},    {"f_exposure", 44, 4},  {"f_add", 48, 12},     {"f_post", 60, 4},
     {"f_floor", 64, 12},   {"f_mask_du", 76, 4},   {"f_axis", 80, 12},    {"f_mask_dv", 92, 4},
     {"f_eye", 96, 12},     {"f_eye_on", 108, 4},
 };
@@ -212,7 +219,7 @@ cbuffer Frame : register(b2) {
   float3 f_sun_dir; uint f_light_on;     // c80.xyz of a one-light draw (= c109.xyz), as it is; 1: the frame is lit
   float3 f_sun_col; float f_tint_pow;    // c87.xyz; c21.w
   float3 f_tint; float f_exposure;       // c21.xyz; the exposure, which the lit pixel paths alone multiply by
-  float3 f_add; float f_pad0;            // c20.xyz (c20.w, the output scale, is not applied)
+  float3 f_add; float f_post;            // c20.xyz; what every unlit colour is multiplied by (1 but in a post frame)
   float3 f_floor; float f_mask_du;       // c22.xyz; 1 / the target's width: with f_mask_dv the screen mask's coordinate
   float3 f_axis; float f_mask_dv;        // c23.xyz (= vertex c19.xyz); 1 / the target's height
   float3 f_eye; uint f_eye_on;           // c19.xyz, the eye (= vertex c9.xyz of the leaf shaders); 1: it is usable
@@ -509,7 +516,7 @@ VsOut main(uint vid : SV_VertexID) {
 // fog (clay_logic.h, "Unlit draws") it declares the frame's block for one thing: under light_mode's
 // bit 7 the colour is fogged (FogUnlit, scale 1: a flat draw writes no alpha of its own), under bit 10
 // with the trees' form (FogUnlitTree: an unlit trunk or leaf drawn flat). With both bits clear it reads
-// nothing of the frame. (So in a fogged frame a flat draw of such a shader shows its debug colour through
+// the frame's unlit word alone (f_post, which its colour is multiplied by). (So in a fogged frame a flat draw of such a shader shows its debug colour through
 // the haze; --fable2_native_fog=off gives the plain colours.)
 inline constexpr const char* kClayPs = FABLE2_CLAY_FOG_HLSL FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL R"hlsl(
 float3 clay_linear(float3 d) { d = saturate(d); return d * d; }
@@ -517,9 +524,9 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0) : SV_Target {
   float3 n = normalize(cross(ddx(ndc), ddy(ndc)));
   float shade = 0.35 + 0.65 * saturate(abs(dot(n, normalize(float3(0.4, 0.6, -0.7)))));
   float3 base = float3((color >> 16) & 255, (color >> 8) & 255, color & 255) / 255.0;
-  if (light_mode & 1024) return float4(FogUnlitTree(clay_linear(base * shade), FogCoords(pos), asfloat(pad2)), 1.0);
-  if (light_mode & 128) return float4(FogUnlit(clay_linear(base * shade), FogCoords(pos), 1.0), 1.0);
-  return float4(clay_linear(base * shade), 1.0);
+  if (light_mode & 1024) return float4(FogUnlitTree(clay_linear(base * shade) * f_post, FogCoords(pos), asfloat(pad2)), 1.0);
+  if (light_mode & 128) return float4(FogUnlit(clay_linear(base * shade) * f_post, FogCoords(pos), 1.0), 1.0);
+  return float4(clay_linear(base * shade) * f_post, 1.0);
 }
 )hlsl";
 
@@ -631,20 +638,20 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
       return float4(clay_lit(lit * f_exposure), (alpha_mode & 0x80) ? saturate(a) : 1.0);
     }
     if (light_mode & 1024) {
-      float3 hazed = FogUnlitTree(clay_linear(t.rgb * (0.75 + 0.25 * facet)), FogCoords(pos), asfloat(pad2));
+      float3 hazed = FogUnlitTree(clay_linear(t.rgb * (0.75 + 0.25 * facet)) * f_post, FogCoords(pos), asfloat(pad2));
       return float4(hazed, (alpha_mode & 0x80) ? saturate(a) : 1.0);
     }
     if (light_mode & 128) {
-      float3 hazed = FogUnlit(clay_linear(t.rgb * (0.75 + 0.25 * facet)), FogCoords(pos), (light_mode & 256) ? saturate(a) : 1.0);
+      float3 hazed = FogUnlit(clay_linear(t.rgb * (0.75 + 0.25 * facet)) * f_post, FogCoords(pos), (light_mode & 256) ? saturate(a) : 1.0);
       return float4(hazed, (alpha_mode & 0x80) ? saturate(a) : 1.0);
     }
-    return float4(clay_linear(t.rgb * (0.75 + 0.25 * facet)), (alpha_mode & 0x80) ? saturate(a) : 1.0);
+    return float4(clay_linear(t.rgb * (0.75 + 0.25 * facet)) * f_post, (alpha_mode & 0x80) ? saturate(a) : 1.0);
 #endif
   }
   base = float3((color >> 16) & 255, (color >> 8) & 255, color & 255) / 255.0;
-  if (light_mode & 1024) return float4(FogUnlitTree(clay_linear(base * (0.35 + 0.65 * facet)), FogCoords(pos), asfloat(pad2)), 1.0);
-  if (light_mode & 128) return float4(FogUnlit(clay_linear(base * (0.35 + 0.65 * facet)), FogCoords(pos), 1.0), 1.0);
-  return float4(clay_linear(base * (0.35 + 0.65 * facet)), 1.0);
+  if (light_mode & 1024) return float4(FogUnlitTree(clay_linear(base * (0.35 + 0.65 * facet)) * f_post, FogCoords(pos), asfloat(pad2)), 1.0);
+  if (light_mode & 128) return float4(FogUnlit(clay_linear(base * (0.35 + 0.65 * facet)) * f_post, FogCoords(pos), 1.0), 1.0);
+  return float4(clay_linear(base * (0.35 + 0.65 * facet)) * f_post, 1.0);
 }
 )hlsl"
 inline constexpr const char* kClayTexturedPs = FABLE2_CLAY_TEXTURED_HLSL;
@@ -789,8 +796,8 @@ float4 terrain_out(float3 colour, float a, float4 pos, float3 ndc) {
   float shade = 0.75 + 0.25 * facet;
   // (a terrain draw without light under bit 7: FogUnlit on what it writes; for a far draw that fades
   // in, after its fade and not before it as the lit path: such a draw has not occurred in a run)
-  if (light_mode & 128) return float4(FogUnlit(saturate(colour * (shade * shade)), FogCoords(pos), 1.0), (alpha_mode & 0x80) ? saturate(a) : 1.0);
-  return float4(saturate(colour * (shade * shade)), (alpha_mode & 0x80) ? saturate(a) : 1.0);
+  if (light_mode & 128) return float4(FogUnlit(saturate(colour * (shade * shade)) * f_post, FogCoords(pos), 1.0), (alpha_mode & 0x80) ? saturate(a) : 1.0);
+  return float4(saturate(colour * (shade * shade)) * f_post, (alpha_mode & 0x80) ? saturate(a) : 1.0);
 #endif
 }
 )hlsl"
@@ -1168,7 +1175,8 @@ float4 main(float4 pos : SV_Position) : SV_Target {
 // value times the buffer's first word, as a display value in the 8-bit target the composite samples:
 // display = sqrt(saturate(linear * exposure)), alpha 1. The pass sets that word to 1 in every frame
 // (kClayMapExposure): the exposure of a lit frame is in the lit draws' own values (Frame's f_exposure),
-// so that it does not reach the unlit draws and the clear. The linear target is read texel for texel (the
+// so that it does not reach the unlit draws and the clear. Not drawn in a post frame, which ends in the
+// two post steps below instead; its text and its word are what they were. The linear target is read texel for texel (the
 // two targets have one size). A negative value, a NaN (no comparison holds for it) and 0 * infinity
 // give 0, +infinity gives 1: nothing but a value in [0, 1] reaches the root (OutputMap in clay_logic.h
 // is the same rule).
@@ -1181,6 +1189,92 @@ float4 main(float4 pos : SV_Position) : SV_Target {
   return float4(sqrt(v), 1.0);
 }
 )hlsl";
+
+// The post steps (render/clay_pass.cpp; clay_logic.h, "Native post"; frame-map section 17, "Native composite";
+// kFullscreenVs draws them): in a post frame the game's composite and the scan-out ramp in place of
+// kOutputMapPs. Both declare cbuffer Post at b0 of the post layout (ClayPostConstants, kClayPostSlots small
+// slots of the frame's constant buffer; kClayPostFields is its layout, which the tests hold against the
+// compiled shaders and the C++ struct) and read their one texture at t0 with Load: texel for texel, no
+// sampler, no filter. The table and the ramp are arrays of the block, read by index: the game's point fetch
+// exactly.
+//   kClayPostCompositePs: the arithmetic of the game's 0x37B186F4BD3288F7 (light_formulas.post_composite;
+//     PostCompositeMirror is the mirror, held to the reference's numbers) from the linear target into the
+//     front target (8 bits, before the ramp):
+//       s = the scene texel, each channel (v > 0) ? min(v, p_scene_max) : 0      p_scene_max: 31.875
+//       L = lum(s);  e = p_c77y * table[min(511, uint(512 * saturate(p_c46x * L) + 0.5))]
+//       c = sat(e * (L + sat(p_c47x * L) * (s - L)));  b = sat(bloom * p_c31x);  scr = c + b * (1 - c)
+//       t = scr + p_c77x * (scr - lum(scr));  out = sat(|t| ^ p_c78x), alpha 1
+//     The table is read at the NEAREST texel (controller ruling 19: the game's fetch has a half-texel
+//     offset), not at the floor. The bloom is (0, 0, 0) until plan Task 8: the screen blend is written and
+//     folds away. Guards, each a comparison that is false for a value that is no number: a scene channel
+//     that is not above 0 is 0 (a NaN, a negative value), one above the clamp is the clamp (an infinity);
+//     the coordinate is saturated before it is made an integer and the index bounded after; the power of a
+//     base that is not above 0 or not below 3e38 is 0. With registers and texels inside the block's bounds
+//     (MakeClayPostConstants) every term is then a number, and the 8-bit target holds nothing else.
+//   kClayPostRampPs: each channel of the front target's texel through the guest's 256-entry gamma ramp, as
+//     the SDK's swap blit applies it to the emulated picture (light_formulas.post_ramp; PostRampIndex,
+//     PostRampMirror): out.c = p_ramp[min(255, uint(saturate(v.c) * 255 + 0.5))].c, alpha 1, into the mapped
+//     target the composite views sample.
+inline constexpr ClayBufferField kClayPostFields[] = {
+    {"p_c31x", 0, 4},     {"p_c46x", 4, 4},       {"p_c47x", 8, 4},     {"p_c77x", 12, 4},
+    {"p_c77y", 16, 4},    {"p_c78x", 20, 4},      {"p_scene_max", 24, 4}, {"p_previous", 28, 4},
+    {"p_b31x", 32, 4},    {"p_b46x", 36, 4},      {"p_b47x", 40, 4},    {"p_b77x", 44, 4},
+    {"p_b77y", 48, 4},    {"p_bloom_on", 52, 4},  {"p_sun_on", 56, 4},  {"p_pad", 60, 4},
+    {"p_blur", 64, 64},   {"p_radial", 128, 16},  {"p_table", 144, 2048}, {"p_ramp", 2192, 4096},
+};
+inline constexpr unsigned kClayPostSize = 6288;
+
+#define FABLE2_CLAY_POST_HLSL R"hlsl(
+cbuffer Post : register(b0) {
+  float p_c31x; float p_c46x; float p_c47x; float p_c77x;          // the composite 37B1: c31.x, c46.x, c47.x, c77.x
+  float p_c77y; float p_c78x; float p_scene_max; float p_previous; // c77.y, c78.x; the scene's clamp; (plan Task 15)
+  float p_b31x; float p_b46x; float p_b47x; float p_b77x;          // the bright pass EE92 (plan Task 8)
+  float p_b77y; uint p_bloom_on; uint p_sun_on; uint p_pad;
+  float4 p_blur[4];                                                // the blurs' weights (plan Task 8)
+  float4 p_radial;                                                 // the radial blur's registers (plan Task 14)
+  float4 p_table[128];                                             // the composite's table: texel i at [i >> 2][i & 3]
+  float4 p_ramp[256];                                              // the scan-out ramp: entry i (rgb)
+};
+)hlsl"
+
+inline constexpr const char* kClayPostCompositePs = FABLE2_CLAY_POST_HLSL R"hlsl(
+Texture2D<float4> scene_target : register(t0);
+float post_lum(float3 c) { return dot(c, float3(0.2125, 0.7154, 0.0721)); }
+float3 post_scene(float3 v) { return (v > 0.0) ? min(v, p_scene_max) : float3(0.0, 0.0, 0.0); }
+float post_table(float u) {
+  uint i = min(uint(512.0 * saturate(u) + 0.5), 511u);
+  return p_table[i >> 2][i & 3];
+}
+float3 post_pow(float3 base, float exponent) {
+  float3 b = abs(base);
+  return (b > 0.0 && b < 3.0e38) ? exp2(exponent * log2(b)) : float3(0.0, 0.0, 0.0);
+}
+float3 PostComposite(float3 scene, float3 bloom) {
+  float3 s = post_scene(scene);
+  float L = post_lum(s);
+  float e = p_c77y * post_table(p_c46x * L);
+  float3 c = saturate(e * (L + saturate(p_c47x * L) * (s - L)));
+  float3 b = saturate(bloom * p_c31x);
+  float3 scr = c + b * (1.0 - c);
+  float3 t = scr + p_c77x * (scr - post_lum(scr));
+  return saturate(post_pow(t, p_c78x));
+}
+float4 main(float4 pos : SV_Position) : SV_Target {
+  float3 scene = scene_target.Load(int3(pos.xy, 0)).rgb;
+  return float4(PostComposite(scene, float3(0.0, 0.0, 0.0)), 1.0);
+}
+)hlsl";
+
+inline constexpr const char* kClayPostRampPs = FABLE2_CLAY_POST_HLSL R"hlsl(
+Texture2D<float4> front_target : register(t0);
+uint post_ramp_index(float v) { return min(uint(saturate(v) * 255.0 + 0.5), 255u); }
+float4 main(float4 pos : SV_Position) : SV_Target {
+  float3 v = front_target.Load(int3(pos.xy, 0)).rgb;
+  return float4(p_ramp[post_ramp_index(v.r)].r, p_ramp[post_ramp_index(v.g)].g, p_ramp[post_ramp_index(v.b)].b, 1.0);
+}
+)hlsl";
+
+#undef FABLE2_CLAY_POST_HLSL
 
 // Debug views (render/composite.cpp, fable2_native_view): the clay pass's mapped (8-bit, display) target
 // drawn over the guest output. mode 1 overlay (alpha 0.5), 2 split (right half only), 3 native (opaque).

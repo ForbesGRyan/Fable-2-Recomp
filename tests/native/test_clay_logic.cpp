@@ -846,8 +846,9 @@ static void SunLayerTests() {
       st.sun_frames.by[size_t(ClaySun::kDrawn)] = 880;
       st.sun_frames.by[size_t(ClaySun::kTexture)] = 2;
       st.sun_frames.by[size_t(ClaySun::kNoFurniture)] = 18;
+      st.post_previous = kPostPreviousWeight;
       CHECK(649, FormatSunText(st) ==
-                     "Sun: on, drawn: occluders 3, layer 1 1, layer 2 2, centre (0.3821, 0.3938) | frames since start 900: drawn 880, "
+                     "Sun: on, drawn: occluders 3, layer 1 1, layer 2 2, centre (0.3821, 0.3938), previous frame's share 0.1020 | frames since start 900: drawn 880, "
                      "sun-layer {no furniture: 18, no bloom: 0, no radial registers: 0, no layer quad: 0, a record's state or values: 0, "
                      "post-objects: 0, quad-texture: 2}");
       const std::pair<ClaySun, const char*> words[] = {{ClaySun::kNoFurniture, "not drawn (sun-layer: no furniture)"},
@@ -860,7 +861,7 @@ static void SunLayerTests() {
                                                        {ClaySun::kOff, "not drawn (sun-layer: off)"}};
       for (const auto& [s, word] : words) {
         st.sun = s;
-        CHECK(649, FormatSunText(st).rfind(std::string("Sun: on, ") + word + " | frames", 0) == 0);
+        CHECK(649, FormatSunText(st).rfind(std::string("Sun: on, ") + word + ", previous frame's share 0.1020 | frames", 0) == 0);
       }
       CHECK(649, std::string(kSunLayerReason) == "sun-layer");
       // (whole with every count at its largest and a centre that is no number)
@@ -871,6 +872,10 @@ static void SunLayerTests() {
       st.sun_frames.frames = ~0ull;
       for (uint64_t& v : st.sun_frames.by) v = ~0ull;
       const std::string longest = FormatSunText(st);
+      st.post_previous = 0.0f;
+      CHECK(649, FormatSunText(st).find(", previous frame's share 0.0000 | frames") != std::string::npos);
+      st.post_previous = std::numeric_limits<float>::quiet_NaN();
+      CHECK(649, FormatSunText(st).find(", previous frame's share 0.0000 | frames") != std::string::npos);
       CHECK(649, longest.size() > 300 && longest.find("centre (0.0000, 0.0000)") != std::string::npos &&
                      longest.rfind("quad-texture: 18446744073709551615}") == longest.size() - 35);
     }
@@ -907,6 +912,124 @@ static void SunLayerTests() {
   }
 }
 // --- end of the sun layer's cases ---
+// --- the previous-frame blend's cases (plan Task 15) ---
+static void PreviousBlendTests() {
+  const float kNaN = std::numeric_limits<float>::quiet_NaN(), kInf = std::numeric_limits<float>::infinity();
+  // 660: the blend against the reference (light_formulas.post_previous_blend): the composite's level mixed
+  // with the previous picture's by the share and stored as a level of 255; no share, or one that is no
+  // number or outside (0, 1], is the composite's value bit for bit.
+  {
+    struct PreviousPin { float composite[3], previous[3], share; double want[3]; };
+    static const PreviousPin kPins[] = {
+        // previous blend pins (light_formulas.post_previous_blend, the weight 0.10196079313755035f): the composite, the previous picture, the share, the front value
+        {{0.7843137383460999f, 0.3921568691730499f, 0.0f}, {0.3921568691730499f, 0.7843137383460999f, 1.0f}, 0.10196079313755035f, {0.7450980392156863, 0.43137254901960786, 0.10196078431372549}},
+        {{1.0f, 1.0f, 1.0f}, {0.0f, 0.0f, 0.0f}, 0.10196079313755035f, {0.8980392156862745, 0.8980392156862745, 0.8980392156862745}},
+        {{0.0f, 0.0f, 0.0f}, {1.0f, 1.0f, 1.0f}, 0.10196079313755035f, {0.10196078431372549, 0.10196078431372549, 0.10196078431372549}},
+        {{0.14509804546833038f, 0.14901961386203766f, 0.15294118225574493f}, {0.14509804546833038f, 0.14901961386203766f, 0.15294118225574493f}, 0.10196079313755035f, {0.1450980392156863, 0.14901960784313725, 0.15294117647058825}},
+        {{0.501960813999176f, 0.501960813999176f, 0.501960813999176f}, {0.5215686559677124f, 0.5176470875740051f, 0.48627451062202454f}, 0.10196079313755035f, {0.5058823529411764, 0.5019607843137255, 0.5019607843137255}},
+        {{0.7843137383460999f, 0.3921568691730499f, 0.19607843458652496f}, {0.3921568691730499f, 0.7843137383460999f, 0.9803921580314636f}, 0.0f, {0.7843137383460999, 0.3921568691730499, 0.19607843458652496}},
+        {{0.7843137383460999f, 0.3921568691730499f, 0.19607843458652496f}, {0.3921568691730499f, 0.7843137383460999f, 0.9803921580314636f}, 1.0f, {0.39215686274509803, 0.7843137254901961, 0.9803921568627451}},
+        {{0.7843137383460999f, 0.3921568691730499f, 0.19607843458652496f}, {kNaN, kInf, -1.0f}, 0.10196079313755035f, {0.7058823529411765, 0.35294117647058826, 0.17647058823529413}},
+        {{0.7843137383460999f, 0.3921568691730499f, 0.19607843458652496f}, {0.3921568691730499f, 0.7843137383460999f, 0.9803921580314636f}, kNaN, {0.7843137383460999, 0.3921568691730499, 0.19607843458652496}},
+        {{0.7843137383460999f, 0.3921568691730499f, 0.19607843458652496f}, {0.3921568691730499f, 0.7843137383460999f, 0.9803921580314636f}, -0.5f, {0.7843137383460999, 0.3921568691730499, 0.19607843458652496}},
+        {{0.7843137383460999f, 0.3921568691730499f, 0.19607843458652496f}, {0.3921568691730499f, 0.7843137383460999f, 0.9803921580314636f}, 1.5f, {0.7843137383460999, 0.3921568691730499, 0.19607843458652496}},
+    };
+    CHECK(660, std::size(kPins) == 11);
+    double worst = 0.0;
+    for (const PreviousPin& p : kPins) {
+      for (int i = 0; i < 3; ++i) {
+        const double got = PostPreviousMirror(p.composite[i], p.previous[i], p.share);
+        CHECK(660, got >= 0.0 && got <= 1.0);
+        worst = std::fmax(worst, std::fabs(got - p.want[i]));
+        if (!(p.share > 0.0f && p.share <= 1.0f)) CHECK(660, got == double(p.composite[i]));
+      }
+    }
+    std::printf("post: the previous-frame blend's mirror against the reference, 33 values: worst difference %.2e\n", worst);
+    CHECK(660, worst < 1e-12);
+    CHECK(660, kPostPreviousWeight == 0.10196079313755035f && std::fabs(double(kPostPreviousWeight) - 26.0 / 255.0) < 1e-8);
+    // The share 0 is today's value bit for bit, for every level and whatever the previous picture holds.
+    for (uint32_t level = 0; level <= 255; ++level) {
+      const float v = float(level) / 255.0f;
+      for (float prev : {0.0f, 1.0f, 0.3f, kNaN, kInf}) {
+        const double got = PostPreviousMirror(v, prev, 0.0f);
+        const float back = float(got);
+        CHECK(660, std::memcmp(&back, &v, sizeof(v)) == 0);
+      }
+    }
+    // A standing picture is itself at every level; one level off stays where it is (the blend's rounding
+    // holds it: within one level of the picture without the blend).
+    for (uint32_t level = 0; level <= 255; ++level) {
+      const float v = float(level) / 255.0f;
+      CHECK(660, PostPreviousMirror(v, v, kPostPreviousWeight) == double(float(level)) / 255.0 ||
+                     std::fabs(PostPreviousMirror(v, v, kPostPreviousWeight) - double(level) / 255.0) < 1e-9);
+      if (level > 0) {
+        const float below = float(level - 1) / 255.0f;
+        CHECK(660, std::fabs(PostPreviousMirror(v, below, kPostPreviousWeight) - double(level) / 255.0) < 1e-9);
+      }
+    }
+    // From black to white the picture comes within one level of the new one in a bounded number of frames.
+    float held = 0.0f;
+    int frames = 0;
+    while (frames < 200 && held < 254.0f / 255.0f) {
+      held = float(PostPreviousMirror(1.0f, held, kPostPreviousWeight));
+      ++frames;
+    }
+    CHECK(660, frames >= 2 && frames <= 4 && held >= 254.0f / 255.0f);
+    // Values that are no numbers: a number in the range.
+    for (float c : {kNaN, kInf, -kInf, -1.0f, 2.0f, 0.5f}) {
+      for (float p : {kNaN, kInf, -kInf, -1.0f, 2.0f, 0.5f}) {
+        for (float s : {kNaN, kInf, -1.0f, 0.0f, 0.102f, 1.0f, 2.0f}) {
+          const double got = PostPreviousMirror(c, p, s);
+          CHECK(660, got >= 0.0 && got <= 1.0);
+        }
+      }
+    }
+  }
+  // 661: which front target a frame writes, which it reads, and with what share (StepClayFront): the share
+  // is the game's only in a post frame with the switch on and the second target, right after a post frame,
+  // and not on the oracle feed; 0 in the first frame after the targets were made, after a frame without
+  // post, and with the switch off. With the switch off the one target of before is written, every frame.
+  {
+    static_assert(StepClayFront(ClayFrontState{}, false, false, false, false).share == 0.0f);
+    ClayFrontState s;  // (the targets were just made)
+    ClayFrontStep a = StepClayFront(s, true, true, true, false);
+    CHECK(661, a.write == 1 && a.read == 0 && a.share == 0.0f && a.next.current == 1 && a.next.valid);
+    ClayFrontStep b = StepClayFront(a.next, true, true, true, false);
+    CHECK(661, b.write == 0 && b.read == 1 && b.share == kPostPreviousWeight && b.next.current == 0 && b.next.valid);
+    ClayFrontStep c = StepClayFront(b.next, true, true, true, false);
+    CHECK(661, c.write == 1 && c.read == 0 && c.share == kPostPreviousWeight);
+    // A frame without post: nothing is written, and the frame after it has no previous picture.
+    ClayFrontStep fallback = StepClayFront(c.next, false, true, true, false);
+    CHECK(661, fallback.share == 0.0f && !fallback.next.valid && fallback.next.current == c.next.current);
+    ClayFrontStep after = StepClayFront(fallback.next, true, true, true, false);
+    CHECK(661, after.share == 0.0f && after.write != after.read && after.next.valid);
+    CHECK(661, StepClayFront(after.next, true, true, true, false).share == kPostPreviousWeight);
+    // The switch off: the target it has, no read, no share; the next frame with the switch on blends with it.
+    for (uint32_t current : {0u, 1u}) {
+      for (bool valid : {false, true}) {
+        const ClayFrontStep off = StepClayFront(ClayFrontState{current, valid}, true, false, true, false);
+        CHECK(661, off.write == current && off.share == 0.0f && off.next.current == current && off.next.valid);
+        const ClayFrontStep none = StepClayFront(ClayFrontState{current, valid}, true, true, false, false);
+        CHECK(661, none.write == current && none.share == 0.0f && none.next.current == current);
+      }
+    }
+    CHECK(661, StepClayFront(ClayFrontState{0, true}, true, false, false, false).write == 0);
+    // The oracle feed: never a share, and its picture is no previous picture for the frame after it.
+    const ClayFrontStep fed = StepClayFront(ClayFrontState{0, true}, true, true, true, true);
+    CHECK(661, fed.share == 0.0f && fed.write == 1 && !fed.next.valid);
+    // No target but the two: a state that is none of them is taken as the first.
+    const ClayFrontStep wild = StepClayFront(ClayFrontState{7, true}, true, true, true, false);
+    CHECK(661, wild.write < 2 && wild.read < 2 && wild.write != wild.read);
+    // Over every input: the share is the weight exactly when all five hold.
+    for (int bits = 0; bits < 64; ++bits) {
+      const bool post = bits & 1, wanted = bits & 2, second = bits & 4, fed2 = bits & 8, valid = bits & 16;
+      const ClayFrontStep st = StepClayFront(ClayFrontState{uint32_t((bits >> 5) & 1), valid}, post, wanted, second, fed2);
+      CHECK(661, (st.share == kPostPreviousWeight) == (post && wanted && second && !fed2 && valid) && (st.share == 0.0f || st.share == kPostPreviousWeight));
+      CHECK(661, st.write < 2 && st.read < 2 && st.next.current < 2 && (st.share == 0.0f || st.write != st.read));
+    }
+  }
+}
+// --- end of the previous-frame blend's cases ---
 int main() {
   // 1-4: clay color cvar parsing.
   {
@@ -9542,6 +9665,7 @@ int main() {
 
   // (on a thread of its own: main's frame leaves too little of the stack for another function's locals)
   std::thread(SunLayerTests).join();
+  std::thread(PreviousBlendTests).join();
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
@@ -9568,7 +9692,8 @@ int main() {
                "a layer record's state, target and constants and what gives none, the depth test's direction, the five "
                "quad formulas, the radial blur and the reduction against the reference's numbers, nothing that is no "
                "number, the layer's depth texel and the steps' words, the layer's plan, the decision and the Sun line, "
-               "the sun's flag in the steps' constants\n";
+               "the sun's flag in the steps' constants; the previous-frame blend against the reference's numbers, the share 0 "
+               "bit for bit, the front targets' exchange\n";
 
   return 0;
 }

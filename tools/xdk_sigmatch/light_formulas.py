@@ -1294,6 +1294,24 @@ def post_previous_frame(t, clamp=True):
     return [sat(v) for v in t] if clamp else t
 
 
+def post_previous_blend(new, previous, weight=POST_PREVIOUS_WEIGHT, levels=255):
+    """Pass F's blend as the front buffer ends up: new * (1 - weight) + previous * weight a channel (the draw's
+    constant blend factor, 0x0F0E0F0E: source the previous picture times the constant, destination the new
+    one times its complement), stored as a level of an 8-bit target (the nearest; 0 for a value that is not
+    a number). new: the composite's value as the front buffer holds it (a level); previous: the previous
+    frame's final picture at the pixel. A weight that is not in (0, 1], or not a number, leaves the new
+    value as it is (no blend)."""
+    out = []
+    for n, p in zip(new[:3], previous[:3]):
+        n, p = sat(_finite(n)), sat(_finite(p))
+        if not (weight == weight and 0.0 < weight <= 1.0):
+            out.append(n)
+            continue
+        v = sat(n + (p - n) * weight)
+        out.append(math.floor(v * levels + 0.5) / levels)
+    return out
+
+
 def post_cloud_uv(uv, c31, c46):
     """The clouds' and their occluders' texture coordinate: uv * c31.xy + c46.xy (tiling, scroll)."""
     return uv[0] * c31[0] + c46[0], uv[1] * c31[1] + c46[1]

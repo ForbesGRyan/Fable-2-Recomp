@@ -301,6 +301,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     bloom_objects_failed_ = false;  // (and the bloom's)
     ForgetQuadObjects();
     quad_objects_failed_ = false;  // (and the quad step's)
+    front_second_failed_ = false;  // (and the previous-frame blend's second target)
     ForgetSunObjects();
     sun_objects_failed_ = false;  // (and the sun layer's)
     quad_layout_ = nullptr;
@@ -1478,8 +1479,11 @@ bool ClayPass::EnsureSkyObjects(nrhi::Device* dev) {
 void ClayPass::ForgetPostObjects() {
   post_composite_ps_ = post_ramp_ps_ = nullptr;
   post_composite_pipeline_ = post_ramp_pipeline_ = nullptr;
-  front_ = nullptr;
-  front_view_ = nullptr;
+  for (size_t i = 0; i < 2; ++i) {
+    front_[i] = nullptr;
+    front_view_[i] = nullptr;
+  }
+  front_state_ = ClayFrontState{};  // (new targets hold no previous picture)
   post_objects_ = false;
 }
 
@@ -1489,8 +1493,10 @@ void ClayPass::DestroyPostObjects() {
     device_->DestroyDeferred(post_ramp_pipeline_);
     device_->DestroyDeferred(post_composite_ps_);
     device_->DestroyDeferred(post_ramp_ps_);
-    device_->DestroyDeferred(front_view_);
-    device_->DestroyDeferred(front_);
+    for (size_t i = 0; i < 2; ++i) {
+      device_->DestroyDeferred(front_view_[i]);
+      device_->DestroyDeferred(front_[i]);
+    }
   }
   ForgetPostObjects();
 }
@@ -1554,9 +1560,10 @@ bool ClayPass::EnsurePostObjects(nrhi::Device* dev) {
   front.format = kFrontFormat;
   front.usage = nrhi::kTextureUsageRenderTarget;
   front.initial_state = nrhi::ResourceState::kPixelShaderResource;
-  front_ = dev->CreateTexture(front);
-  front_view_ = front_ ? dev->CreateTextureView(front_, nrhi::TextureViewDesc{}) : nullptr;
-  if (!front_ || !front_view_) return fail("front target creation");
+  front_[0] = dev->CreateTexture(front);
+  front_view_[0] = front_[0] ? dev->CreateTextureView(front_[0], nrhi::TextureViewDesc{}) : nullptr;
+  if (!front_[0] || !front_view_[0]) return fail("front target creation");
+  front_state_ = ClayFrontState{};
   // Two full-screen triangles (the output mapping's vertex shader): no depth, no blend, no cull.
   nrhi::GraphicsPipelineDesc pipe;
   pipe.layout = post_layout_;
@@ -1575,6 +1582,37 @@ bool ClayPass::EnsurePostObjects(nrhi::Device* dev) {
               kWidth / kFrontDivisor, kHeight / kFrontDivisor,
               double(ClayTargetBytes(kWidth / kFrontDivisor, kHeight / kFrontDivisor, kClayMappedTexelBytes)) / (1024.0 * 1024.0),
               sizeof(ClayPostConstants), kClayPostSlots, kPostStepWords, kPostTableSize);
+  return true;
+}
+
+bool ClayPass::EnsureFrontPrevious(nrhi::Device* dev) {
+  if (front_[1] && front_view_[1]) return true;
+  if (front_second_failed_ || !post_objects_ || !front_[0] || dev != device_) return false;
+  // The first front target's twin: the same size and format, resting as a shader resource. Its contents
+  // are undefined until a post frame writes it, and the composite reads it only after one did
+  // (StepClayFront's share).
+  nrhi::TextureDesc front;
+  front.width = kWidth / kFrontDivisor;
+  front.height = kHeight / kFrontDivisor;
+  front.format = kFrontFormat;
+  front.usage = nrhi::kTextureUsageRenderTarget;
+  front.initial_state = nrhi::ResourceState::kPixelShaderResource;
+  front_[1] = dev->CreateTexture(front);
+  front_view_[1] = front_[1] ? dev->CreateTextureView(front_[1], nrhi::TextureViewDesc{}) : nullptr;
+  if (!front_[1] || !front_view_[1]) {
+    REXLOG_ERROR("[native] clay: the second front target could not be made: the previous-frame blend is off until the pass is "
+                 "rebuilt; the post chain goes on without it");
+    dev->DestroyDeferred(front_view_[1]);
+    dev->DestroyDeferred(front_[1]);
+    front_view_[1] = nullptr;
+    front_[1] = nullptr;
+    front_second_failed_ = true;
+    return false;
+  }
+  REXLOG_INFO("[native] clay: previous-frame blend ready (a second front target {} x {} R8G8B8A8, {:.1f} MB; the composite mixes its "
+              "level with the previous frame's by {:.4f})", kWidth / kFrontDivisor, kHeight / kFrontDivisor,
+              double(ClayTargetBytes(kWidth / kFrontDivisor, kHeight / kFrontDivisor, kClayMappedTexelBytes)) / (1024.0 * 1024.0),
+              double(kPostPreviousWeight));
   return true;
 }
 
@@ -2732,6 +2770,15 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     if (oracle_sun) quad_draw_count = 0;
   }
   const ClaySun sun = DecideClaySun(sun_in);
+  // The previous-frame blend (clay_logic.h, "The previous-frame blend"; plan Task 15): which front target
+  // this frame writes and with what share of the other (StepClayFront). The second target is asked only
+  // in a post frame with the sun's switch on; with the switch off the share is 0, the one target of
+  // before is written and nothing new is made.
+  const bool front_wanted = post.sun && post_frame;
+  const ClayFrontStep front_step = StepClayFront(front_state_, post_frame, post.sun, front_wanted && EnsureFrontPrevious(dev), oracle_fed);
+  front_state_ = front_step.next;
+  post_constants.previous = front_step.share;
+  st.post_previous = front_step.share;
   // The bright pass's sun flag is the verdict's, and the steps' constants are final: into the buffer.
   post_constants.sun_on = sun == ClaySun::kDrawn ? 1u : 0u;
   if (post_frame) std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(post_slot_), &post_constants, sizeof(post_constants));
@@ -3179,14 +3226,18 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       bloom_step(bloom_q_, post_blur_pipeline_, MakeClayPostStep(ClayPostStep::kBlurX, kBloomWidth, kBloomHeight, kBloomLevels), bloom_p_view_);
       bloom_step(bloom_p_, post_blur_pipeline_, MakeClayPostStep(ClayPostStep::kBlurY, kBloomWidth, kBloomHeight, kBloomLevels), bloom_q_view_);
     }
-    cmd->Barrier(front_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
+    // (the front target this frame writes; the other, the previous frame's picture, is read at t2 only
+    // with a share above 0, and is never the one written: StepClayFront)
+    nrhi::Texture* const front = front_[front_step.write];
+    cmd->Barrier(front, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
     cmd->FlushBarriers();
-    post_step(front_, kWidth / kFrontDivisor, kHeight / kFrontDivisor, post_composite_pipeline_,
-              MakeClayPostStep(ClayPostStep::kComposite, kWidth, kHeight, kFrontLevels), scene_view, bloom_on ? bloom_p_view_ : nullptr);
-    cmd->Barrier(front_, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
+    post_step(front, kWidth / kFrontDivisor, kHeight / kFrontDivisor, post_composite_pipeline_,
+              MakeClayPostStep(ClayPostStep::kComposite, kWidth, kHeight, kFrontLevels), scene_view, bloom_on ? bloom_p_view_ : nullptr,
+              front_step.share > 0.0f && front_step.read != front_step.write ? front_view_[front_step.read] : nullptr);
+    cmd->Barrier(front, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
     cmd->Barrier(color_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
     cmd->FlushBarriers();
-    post_step(color_, kWidth, kHeight, post_ramp_pipeline_, MakeClayPostStep(ClayPostStep::kRamp, kWidth, kHeight, kMappedLevels), front_view_,
+    post_step(color_, kWidth, kHeight, post_ramp_pipeline_, MakeClayPostStep(ClayPostStep::kRamp, kWidth, kHeight, kMappedLevels), front_view_[front_step.write],
               nullptr);
     cmd->Barrier(color_, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
     cmd->FlushBarriers();

@@ -284,6 +284,9 @@ class ClayPass {
   // are not tried again until the pass is rebuilt (one log line) and every frame is today's
   // (ClayPost::kObjects, "post-objects"): the renderer goes on. Destroyed with the pass's other objects.
   bool EnsurePostObjects(nrhi::Device* dev);
+  // The second front target (plan Task 15): made on the first post frame that wants the previous-frame
+  // blend; false when it could not be made, now or before (one log line; the blend is then off).
+  bool EnsureFrontPrevious(nrhi::Device* dev);
   void DestroyPostObjects();
   void ForgetPostObjects();
   // What the bloom's steps need besides (clay_logic.h, "Native bloom"): three pixel shaders, three
@@ -511,8 +514,14 @@ class ClayPass {
   nrhi::Shader* post_ramp_ps_ = nullptr;
   nrhi::Pipeline* post_composite_pipeline_ = nullptr;
   nrhi::Pipeline* post_ramp_pipeline_ = nullptr;
-  nrhi::Texture* front_ = nullptr;
-  nrhi::TextureView* front_view_ = nullptr;
+  // (two since plan Task 15, the previous-frame blend: front_[1] is made on the first post frame with
+  // fable2_native_sun on, EnsureFrontPrevious, and never without the switch; front_state_ says which the
+  // last post frame wrote and whether it holds a previous picture: StepClayFront. front_second_failed_:
+  // making the second failed; the blend is off until the pass is rebuilt, the post chain goes on.)
+  nrhi::Texture* front_[2] = {};
+  nrhi::TextureView* front_view_[2] = {};
+  ClayFrontState front_state_;
+  bool front_second_failed_ = false;
   uint32_t post_slot_ = 0;
   // The bloom's steps (EnsureBloomObjects): the downsample's, the bright pass's and the blur's shaders
   // and pipelines (the post layout, map_vs_), and three targets of kWidth / 4 x kHeight / 4 whatever

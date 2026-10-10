@@ -715,6 +715,12 @@ the sun flag off, counted `sun-layer` by reason.
 
 ### Task 15: The previous-frame blend (ruling 7)
 
+> **Note after the build** (2026-10-10): the cost was found to be what the first step allows (one more front
+> target, the composite's mix, one more texture of the table it had, the constants' float that was reserved),
+> so it is built. Additions to the list of frames with `p_prev` 0: the oracle feed (its picture is held
+> against a reference without the blend). The switch is `--fable2_native_sun`. The frame map's
+> "Previous-frame blend" has the rest.
+
 **Files:** as Task 13.
 
 - [ ] First the cost, in writing: it must be one more front target (`front_[2]`, exchanged each

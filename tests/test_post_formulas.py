@@ -23,7 +23,7 @@ NAN, INF = float("nan"), float("inf")
 REAL = dict(c31x=2.973, c46x=0.25, c47x=50.0, c77=(-0.0052, 1.1026), c78x=1.0 / 2.2)
 
 
-PINS_DIGEST = "ffafb332e01d07ffea8b05f13f9f54f812012710ae85d4d91e02850c0eaf8b34"
+PINS_DIGEST = "8427f59be4e14a937d972a0e5faa98aed60a21f865201216ee7800117a1eb7a8"
 
 
 def near(test, got, want, tol=1e-12):
@@ -720,6 +720,18 @@ class FurnitureQuads(unittest.TestCase):
     def test_the_previous_frame_is_its_texel(self):
         self.assertEqual(lf.post_previous_frame(TEX), list(TEX))
         self.assertEqual(lf.POST_PREVIOUS_BLEND, 0x3DD0D0D2)
+        # The blend the front buffer ends up with (plan Task 15): the new picture times 1 - w plus the previous
+        # times w, as a level of 255; no weight, or one that is no number, leaves the new value as it is.
+        import struct
+        w = lf.POST_PREVIOUS_WEIGHT
+        self.assertEqual(struct.unpack(">f", struct.pack(">I", lf.POST_PREVIOUS_BLEND))[0], struct.unpack("<f", struct.pack("<f", w))[0])
+        self.assertEqual(lf.post_previous_blend((1.0, 0.0, 0.5), (0.0, 1.0, 0.5)), [229 / 255, 26 / 255, 128 / 255])
+        self.assertEqual(lf.post_previous_blend((0.25, 0.5, 0.75), (1.0, 1.0, 1.0), 0.0), [0.25, 0.5, 0.75])
+        self.assertEqual(lf.post_previous_blend((0.25, 0.5, 0.75), (1.0, 1.0, 1.0), float("nan")), [0.25, 0.5, 0.75])
+        self.assertEqual(lf.post_previous_blend((0.25, 0.5, 0.75), (1.0, 1.0, 1.0), 1.0), [1.0, 1.0, 1.0])
+        self.assertEqual(lf.post_previous_blend((2.0, -1.0, float("nan")), (float("inf"), float("nan"), 1.0), 0.5), [128 / 255, 0.0, 128 / 255])
+        for level in range(256):
+            self.assertEqual(lf.post_previous_blend((level / 255,) * 3, (level / 255,) * 3), [level / 255] * 3)
         self.assertAlmostEqual(lf.POST_PREVIOUS_WEIGHT, 0.102, delta=5e-4)
 
     def test_the_targets_clamps(self):

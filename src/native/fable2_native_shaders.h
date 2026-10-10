@@ -1241,6 +1241,14 @@ float4 main(float4 pos : SV_Position) : SV_Target {
 //     the coordinate is saturated before it is made an integer and the index bounded after; the power of a
 //     base that is not above 0 or not below 3e38 is 0. With registers and texels inside the block's bounds
 //     (MakeClayPostConstants) every term is then a number, and the 8-bit target holds nothing else.
+//     The previous-frame blend (plan Task 15; clay_logic.h, "The previous-frame blend"; the game's pass F,
+//     light_formulas.post_previous_blend; PostPreviousMirror): only with p_previous above 0, the level
+//     just made is mixed with the other front target's texel (t2, Load; taken into [0, 1], a value that is
+//     no number as 0) by p_previous (at most 1) and the level of the mix is written:
+//       out = post_level(sat(now + (before - now) * p_previous)),  now = post_level(PostComposite(...))
+//     With p_previous 0 (every frame with fable2_native_sun off, the first post frame, the frame after one
+//     without post, the oracle feed) the first statement's test fails, t2 is not read, and what follows is
+//     the text of before, statement for statement (the blended form is a function of its own, PostBlended).
 //   kClayPostRampPs: each channel of the front target's texel through the guest's 256-entry gamma ramp, as
 //     the SDK's swap blit applies it to the emulated picture (light_formulas.post_ramp; PostRampIndex,
 //     PostRampMirror): out.c = p_ramp[min(255, uint(saturate(v.c) * 255 + 0.5))].c, alpha 1, into the mapped
@@ -1300,6 +1308,7 @@ float3 post_level(float3 v) { return floor(v * s_levels + 0.5) / s_levels; }
 inline constexpr const char* kClayPostCompositePs = FABLE2_CLAY_POST_HLSL R"hlsl(
 Texture2D<float4> scene_target : register(t0);
 Texture2D<float4> bloom_target : register(t1);
+Texture2D<float4> previous_front : register(t2);
 SamplerState linear_clamp : register(s1);
 float post_table(float u) {
   uint i = min(uint(512.0 * saturate(u) + 0.5), 511u);
@@ -1319,7 +1328,16 @@ float3 PostComposite(float3 scene, float3 bloom) {
   float3 t = scr + p_c77x * (scr - post_lum(scr));
   return saturate(post_pow(t, p_c78x));
 }
+float3 PostBlended(float4 pos) {
+  float3 veil = float3(0.0, 0.0, 0.0);
+  if (p_bloom_on != 0) veil = bloom_target.SampleLevel(linear_clamp, (floor(pos.xy) + s_offset) * s_texel, 0.0).rgb;
+  float3 now = post_level(PostComposite(scene_target.Load(int3(pos.xy, 0)).rgb, veil));
+  float3 before = previous_front.Load(int3(pos.xy, 0)).rgb;
+  before = (before > 0.0 && before < 3.0e38) ? min(before, 1.0) : float3(0.0, 0.0, 0.0);
+  return post_level(saturate(now + (before - now) * min(p_previous, 1.0)));
+}
 float4 main(float4 pos : SV_Position) : SV_Target {
+  if (p_previous > 0.0) return float4(PostBlended(pos), 1.0);
   float3 scene = scene_target.Load(int3(pos.xy, 0)).rgb;
   float3 bloom = float3(0.0, 0.0, 0.0);
   if (p_bloom_on != 0) bloom = bloom_target.SampleLevel(linear_clamp, (floor(pos.xy) + s_offset) * s_texel, 0.0).rgb;

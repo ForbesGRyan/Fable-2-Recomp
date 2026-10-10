@@ -605,6 +605,9 @@ struct ClayStats {
   ClayPost post = ClayPost::kOff;
   uint32_t post_age = 0;
   float post_scale = 0.0f, post_unlit = 1.0f;
+  // (the share of the previous frame's picture in this frame's front target: kPostPreviousWeight or 0;
+  // plan Task 15; on the Sun line)
+  float post_previous = 0.0f;
   uint64_t post_frames = 0, post_drawn_frames = 0, post_nolight_frames = 0, post_block_frames = 0, post_ramp_frames = 0;
   uint64_t post_objects_frames = 0, post_buffer_frames = 0;
   // post_fault: with a valid block the pass could not use (post == kBlock), which of the pass's rules
@@ -3729,6 +3732,74 @@ constexpr ClayPostStepConstants MakeClayPostStep(ClayPostStep step, uint32_t wid
   return s;
 }
 
+// --- The previous-frame blend (sub-project 10, plan Task 15; ledger ruling 7) ---
+// The game's last draw of a frame lays the previous frame's final picture over the new one with a
+// constant weight of 26 / 255 (pass F, 686D: blend 0x0F0E0F0E with the blend constant 0x3DD0D0D2; frame
+// map, "Sun layer discovery"): front = new * (1 - w) + previous * w, in the 8-bit front buffer, and that
+// result is the next frame's "previous". The native pass does it in the composite (the RHI has no
+// constant blend factor): two front targets, exchanged each post frame; the composite writes its own
+// level, mixes it with the other target's texel by the share and writes the level of that
+// (PostPreviousMirror). The cost is what ruling 7 allows: one more kept target, one mix, one more
+// texture in the composite's table.
+// The share (StepClayFront) is the game's weight only with fable2_native_sun on (the switch of phase
+// 10c), in a post frame whose predecessor was a post frame; 0 in the first frame after the targets were
+// made, after a frame without post, with the switch off, and on the oracle feed (whose picture is held
+// against a reference without the blend). With the share 0 the composite writes what it wrote before,
+// bit for bit, and with the switch off the second target is never made.
+inline constexpr float kPostPreviousWeight = 0.10196079313755035f;  // light_formulas.POST_PREVIOUS_WEIGHT: 26 / 255
+
+// One channel of the front target with the blend (light_formulas.post_previous_blend). composite: the
+// level the composite wrote; previous: the other front target's texel; share: the constants' `previous`.
+// A share that is not in (0, 1] (0, or no number) gives the composite's value as it is. Otherwise the
+// level of `levels` nearest composite + (previous - composite) * share, both values taken into [0, 1]
+// first (one that is no number as 0): a number in [0, 1] for any input.
+inline double PostPreviousMirror(float composite, float previous, float share, uint32_t levels = kPostFrontLevels) {
+  auto unit = [](float v) { return std::isfinite(v) ? (v > 0.0f ? (v < 1.0f ? double(v) : 1.0) : 0.0) : 0.0; };
+  const double n = unit(composite);
+  if (!(share > 0.0f && share <= 1.0f) || levels == 0) return n;
+  const double v = n + (unit(previous) - n) * double(share);
+  const double level = std::floor((v > 0.0 ? (v < 1.0 ? v : 1.0) : 0.0) * double(levels) + 0.5);
+  return level / double(levels);
+}
+
+// The pass's two front targets from one Render to the next. current: the target the last post frame
+// wrote; valid: the last Render was a post frame of the scene's own picture, so that target holds the
+// previous frame's final picture.
+struct ClayFrontState {
+  uint32_t current = 0;
+  bool valid = false;
+};
+// What a Render does with them. write: the target the composite writes and the ramp reads. read: the
+// other one, read by the composite only with a share above 0. share: the constants' `previous`. next:
+// the state after this Render.
+struct ClayFrontStep {
+  uint32_t write = 0, read = 0;
+  float share = 0.0f;
+  ClayFrontState next;
+};
+// post_frame: this Render is a post frame. wanted: fable2_native_sun as it is read now. second: the
+// second front target exists. fed: the oracle feed's scene is drawn. Without post nothing is written
+// and the next frame has no previous picture. With the switch off, or without the second target, the
+// target of before is written again and nothing is read. Otherwise the targets are exchanged, and the
+// share is the game's weight when the last Render left a valid picture and this one is not fed.
+constexpr ClayFrontStep StepClayFront(ClayFrontState s, bool post_frame, bool wanted, bool second, bool fed) {
+  const uint32_t current = s.current & 1u;
+  ClayFrontStep step;
+  step.write = step.read = current;
+  step.next.current = current;
+  if (!post_frame) return step;
+  if (!wanted || !second) {
+    step.next.valid = !fed;
+    return step;
+  }
+  step.write = current ^ 1u;
+  step.read = current;
+  step.share = (s.valid && !fed) ? kPostPreviousWeight : 0.0f;
+  step.next.current = step.write;
+  step.next.valid = !fed;
+  return step;
+}
+
 // The Post line of the status text and the log: the switch, the scene's block, what the pass did (a
 // post frame's bloom with it; behind "post-block" of a valid block the pass's own rule that refused it),
 // a post frame's two scales (and its c46.x when that is not the 0.25 the unlit scale's texel stands
@@ -4520,8 +4591,9 @@ constexpr const char* ClaySunName(ClaySun s) {
   }
 }
 // The Sun line of the status text and the log: the switch, what the pass did (a drawn layer's quads by
-// target and the blur's centre), and the pass's totals since it was made, every frame that was not
-// drawn under "sun-layer" by reason.
+// target and the blur's centre), the share of the previous frame's picture in the front target (plan
+// Task 15), and the pass's totals since it was made, every frame that was not drawn under "sun-layer"
+// by reason.
 inline std::string FormatSunText(const ClayStats& st) {
   if (!st.sun_switch) return "Sun: off";
   char buf[512];
@@ -4534,6 +4606,8 @@ inline std::string FormatSunText(const ClayStats& st) {
   } else {
     text += std::string("not drawn (") + kSunLayerReason + ": " + ClaySunName(st.sun) + ")";
   }
+  std::snprintf(buf, sizeof(buf), ", previous frame's share %.4f", st.post_previous > 0.0f && st.post_previous <= 1.0f ? double(st.post_previous) : 0.0);
+  text += buf;
   std::snprintf(buf, sizeof(buf), " | frames since start %llu: drawn %llu, %s {", static_cast<unsigned long long>(st.sun_frames.frames),
                 static_cast<unsigned long long>(st.sun_frames.by[size_t(ClaySun::kDrawn)]), kSunLayerReason);
   text += buf;

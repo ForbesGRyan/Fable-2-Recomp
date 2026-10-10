@@ -63,6 +63,44 @@ def section_lines(sections):
     return out
 
 
+class PreviousBlendLiterals(unittest.TestCase):
+    """Plan Task 15: the previous-frame blend's numbers in the reference, the generator, the mirror, the shader."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.logic = _text("src/native/render/clay_logic.h")
+        cls.logic_test = _text("tests/native/test_clay_logic.cpp")
+        cls.shaders = _text("src/native/fable2_native_shaders.h")
+        cls.pass_cpp = _text("src/native/render/clay_pass.cpp")
+        cls.lines = section_lines(("// previous blend pins",))
+
+    def test_every_generated_line_is_in_the_cpp_test(self):
+        have = {line.strip() for line in self.logic_test.splitlines()}
+        self.assertEqual(len(self.lines), 12)
+        for line in self.lines:
+            self.assertIn(line.strip(), have, "not in tests/native/test_clay_logic.cpp: run tools/xdk_sigmatch/post_pins.py")
+        pin = next(line for line in self.lines if "0.7450980392156863" in line)
+        self.assertNotIn(pin.replace("0.7450980392156863", "0.7450980392156864").strip(), have)
+
+    def test_the_weight_is_the_games_blend_constant(self):
+        w = f32(lf.POST_PREVIOUS_WEIGHT)
+        self.assertEqual(struct.unpack(">I", struct.pack(">f", w))[0], lf.POST_PREVIOUS_BLEND)
+        self.assertIn("inline constexpr float kPostPreviousWeight = %rf;" % w, self.logic)
+        self.assertEqual(post_pins.PREVIOUS_W, w)
+
+    def test_the_shader_blends_as_the_reference(self):
+        composite = _one(r"inline constexpr const char\* kClayPostCompositePs = FABLE2_CLAY_POST_HLSL R\"hlsl\((.*?)\)hlsl\";", self.shaders,
+                         "the composite's text")
+        self.assertIn("  if (p_previous > 0.0) return float4(PostBlended(pos), 1.0);\n", composite)
+        self.assertIn("  return post_level(saturate(now + (before - now) * min(p_previous, 1.0)));\n", composite)
+        self.assertIn("  float3 now = post_level(PostComposite(scene_target.Load(int3(pos.xy, 0)).rgb, veil));\n", composite)
+        # The pass hands the share the pure rule gives, to the constants' field the shader reads, and reads the
+        # other front target, never the one it writes.
+        self.assertIn("post_constants.previous = front_step.share;", self.pass_cpp)
+        self.assertIn("front_step.share > 0.0f && front_step.read != front_step.write ? front_view_[front_step.read] : nullptr", self.pass_cpp)
+        self.assertIn("StepClayFront(front_state_, post_frame, post.sun, front_wanted && EnsureFrontPrevious(dev), oracle_fed)", self.pass_cpp)
+
+
 class SunLayerLiterals(unittest.TestCase):
     """Plan Task 14: the sun layer's numbers in the reference, the generator, the C++ mirrors and the shaders."""
 

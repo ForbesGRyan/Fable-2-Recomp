@@ -1275,6 +1275,17 @@ static int MapLayoutMismatch(const char* name, const char* src) {
   return result;
 }
 
+// The composite's text with the previous frame's share (cbuffer Post's p_previous, plan Task 15) a literal 0
+// where the program tests it: the program of every frame that has no previous-frame blend (the block keeps
+// its field). Empty when the test's text is not found (the caller fails).
+static std::string PreviousOff(std::string text) {
+  const std::string test = "if (p_previous > 0.0) return float4(PostBlended(pos), 1.0);";
+  const size_t at = text.find(test);
+  if (at == std::string::npos || text.find(test, at + 1) != std::string::npos) return std::string();
+  text.replace(at, test.size(), "if (0.0 > 0.0) return float4(PostBlended(pos), 1.0);");
+  return text;
+}
+
 int main() {
   using namespace fable2::native::shaders;
   if (!Compile("fullscreen_vs", kFullscreenVs, "vs_5_0")) return 1;
@@ -3931,6 +3942,11 @@ int main() {
     // the program's last arithmetic in every step into a UNORM target: the value times the step's level
     // count plus a half, rounded down, divided by the level count (cb1[0].z); never in the downsample, whose
     // target is a float one.
+    // (the composite: with the previous frame's share a literal 0, the program of a frame without that
+    // blend; the blended form is case 253's. Its text still holds the blended function: four uses of
+    // post_level where the other steps have two.)
+    const std::string composite_plain = PreviousOff(kClayPostCompositePs);
+    if (composite_plain.empty()) return 233;
     const struct {
       const char* name;
       const char* src;
@@ -3939,7 +3955,7 @@ int main() {
       int loads0, samples0; // instructions that load / sample t0
       unsigned gated;       // bit r: t<r> is read, and only inside an `if`
       bool sampler;         // the step declares s1
-    } steps[] = {{"clay_post_composite_ps", kClayPostCompositePs, "scene_target", true, 1, 0, 1u << 1, true},
+    } steps[] = {{"clay_post_composite_ps", composite_plain.c_str(), "scene_target", true, 1, 0, 1u << 1, true},
                  {"clay_post_ramp_ps", kClayPostRampPs, "front_target", true, 1, 0, 0, false},
                  {"clay_post_downsample_ps", kClayPostDownsamplePs, "scene_target", false, 0, 4, 0, true},
                  {"clay_post_bright_ps", kClayPostBrightPs, "down_target", true, 1, 0, (1u << 1) | (1u << 2), false},
@@ -3987,7 +4003,7 @@ int main() {
       }
       const bool rounds = HasLineWith(listing, "round_ni", "r0.xyz, r0.xyzx") && HasLineWith(listing, "div", "cb1[0].zzzz") && HasLineWith(listing, "div", "o0.xyz") &&
                           HasLineWith(listing, "mad", "cb1[0].zzzz, l(0.500000, 0.500000, 0.500000, 0.000000)");
-      if (s.unorm != rounds || s.unorm != (Count(s.src, "  return float4(post_level(") == 1) || Count(s.src, "post_level(") != (s.unorm ? 2 : 1) ||
+      if (s.unorm != rounds || s.unorm != (Count(s.src, "  return float4(post_level(") == 1) || Count(s.src, "post_level(") != (s.src == composite_plain.c_str() ? 4 : s.unorm ? 2 : 1) ||
           (!s.unorm && (HasOp(listing, "div") || ReadsComponent(listing, "cb1[0]", 'z')))) {
         std::cerr << s.name << ": the write's own rounding is not where it must be\n";
         return 233;
@@ -4023,7 +4039,9 @@ int main() {
       // the clamp before the rounding. The block is declared to the table's end and no further: the ramp is
       // not read. The bloom: its flag's test (cb0[3].y), and inside it one sample of t1 with s1 at the
       // pixel's floor plus the step's offset (cb1[0].w) times the step's texel size (cb1[0].xy).
-      const std::string listing = Disassembly("clay_post_composite_ps", c, "ps_5_0");
+      const std::string plain = PreviousOff(c);  // (the frame without the previous-frame blend: case 253 has the other)
+      if (plain.empty()) return 234;
+      const std::string listing = Disassembly("clay_post_composite_ps", plain.c_str(), "ps_5_0");
       bool dynamic = false;
       const size_t load = listing.find("ld_indexable"), scale = listing.find("l(512.000000), l(0.500000)"), to_uint = listing.find("ftou");
       const size_t bound = listing.find("umin"), table = listing.find(" + 9]"), round = listing.rfind("round_ni"), flag = listing.find("if_nz");
@@ -4043,10 +4061,10 @@ int main() {
           !ReadsComponent(listing, "cb1[0]", 'y') || !HasOp(listing, "round_ni") || Count(listing.c_str(), "sample_l") != 1) return 234;
       // Controls: without the index's bound, without the scene's clamp, with the floor's addressing and
       // without the coordinate's saturate, each is seen.
-      const std::string unbounded = Changed(c, "min(uint(512.0 * saturate(u) + 0.5), 511u)", "uint(512.0 * saturate(u) + 0.5)");
-      const std::string unclamped = Changed(c, "(v > 0.0) ? min(v, p_scene_max) : float3(0.0, 0.0, 0.0)", "v");
-      const std::string floored = Changed(c, "512.0 * saturate(u) + 0.5", "512.0 * saturate(u)");
-      const std::string loose = Changed(c, "512.0 * saturate(u) + 0.5", "512.0 * u + 0.5");
+      const std::string unbounded = Changed(plain.c_str(), "min(uint(512.0 * saturate(u) + 0.5), 511u)", "uint(512.0 * saturate(u) + 0.5)");
+      const std::string unclamped = Changed(plain.c_str(), "(v > 0.0) ? min(v, p_scene_max) : float3(0.0, 0.0, 0.0)", "v");
+      const std::string floored = Changed(plain.c_str(), "512.0 * saturate(u) + 0.5", "512.0 * saturate(u)");
+      const std::string loose = Changed(plain.c_str(), "512.0 * saturate(u) + 0.5", "512.0 * u + 0.5");
       if (unbounded.empty() || unclamped.empty() || floored.empty() || loose.empty()) return 235;
       const std::string unbounded_l = Disassembly("unbounded", unbounded.c_str(), "ps_5_0"), unclamped_l = Disassembly("unclamped", unclamped.c_str(), "ps_5_0");
       const std::string floored_l = Disassembly("floored", floored.c_str(), "ps_5_0"), loose_l = Disassembly("loose", loose.c_str(), "ps_5_0");
@@ -4099,11 +4117,11 @@ int main() {
         text.insert(block_end, "static const uint p_bloom_on = 0;\n");
         return text;
       };
-      const std::string off = bloom_off(kClayPostCompositePs);
+      const std::string off = bloom_off(PreviousOff(kClayPostCompositePs));  // (and no previous-frame blend: case 253)
       const std::string off_plain = Changed(off.c_str(), "return float4(post_level(PostComposite(scene, bloom)), 1.0);", "return float4(PostComposite(scene, bloom), 1.0);");
       const std::string ramp_plain = Changed(kClayPostRampPs, "return float4(post_level(saturate(mapped)), 1.0);", "return float4(mapped, 1.0);");
       if (off.empty() || off_plain.empty() || ramp_plain.empty()) return 237;
-      const std::string now_l = Disassembly("composite", kClayPostCompositePs, "ps_5_0"), off_l = Disassembly("bloom_off", off.c_str(), "ps_5_0");
+      const std::string now_l = Disassembly("composite", PreviousOff(kClayPostCompositePs).c_str(), "ps_5_0"), off_l = Disassembly("bloom_off", off.c_str(), "ps_5_0");
       const std::string off_plain_l = Disassembly("bloom_off_plain", off_plain.c_str(), "ps_5_0");
       const std::string before_l = Disassembly("composite_before", kPostCompositeBefore, "ps_5_0");
       const std::string ramp_l = Disassembly("ramp", kClayPostRampPs, "ps_5_0"), ramp_plain_l = Disassembly("ramp_plain", ramp_plain.c_str(), "ps_5_0");
@@ -4625,9 +4643,54 @@ int main() {
     // (and the bright pass's own text still has the two layers behind the flag, as plan Task 8 wrote it)
     if (!strstr(kClayPostBrightPs, "  if (p_sun_on != 0) v += sun_tf1.Load(at).rgb * 6.0 * p_b46x + sun_tf2.Load(at).rgb;\n")) return 252;
   }
+  // 253: the previous-frame blend in the composite (plan Task 15). With the share a literal 0 the program
+  // is, instruction for instruction, the one of before the blend (the text of before with the share's test
+  // in front); with the share a word of the block the blended form is behind a test of it (cb0[1].w above
+  // 0), reads t2 by one Load there and nowhere else, bounds the previous texel on both sides, mixes by the
+  // share bounded at 1 and rounds twice (the composite's level, then the mix's).
+  {
+    const char* c = kClayPostCompositePs;
+    if (!strstr(c, "Texture2D<float4> previous_front : register(t2);") ||
+        !strstr(c, "float3 PostBlended(float4 pos) {\n  float3 veil = float3(0.0, 0.0, 0.0);\n"
+                   "  if (p_bloom_on != 0) veil = bloom_target.SampleLevel(linear_clamp, (floor(pos.xy) + s_offset) * s_texel, 0.0).rgb;\n"
+                   "  float3 now = post_level(PostComposite(scene_target.Load(int3(pos.xy, 0)).rgb, veil));\n"
+                   "  float3 before = previous_front.Load(int3(pos.xy, 0)).rgb;\n"
+                   "  before = (before > 0.0 && before < 3.0e38) ? min(before, 1.0) : float3(0.0, 0.0, 0.0);\n"
+                   "  return post_level(saturate(now + (before - now) * min(p_previous, 1.0)));\n}") ||
+        !strstr(c, "float4 main(float4 pos : SV_Position) : SV_Target {\n  if (p_previous > 0.0) return float4(PostBlended(pos), 1.0);\n"
+                   "  float3 scene = scene_target.Load(int3(pos.xy, 0)).rgb;")) return 253;
+    const std::string off = PreviousOff(c);
+    const std::string without = Changed(c, "  if (p_previous > 0.0) return float4(PostBlended(pos), 1.0);\n", "");
+    if (off.empty() || without.empty()) return 253;
+    const std::string now_l = Disassembly("composite", c, "ps_5_0"), off_l = Disassembly("previous_off", off.c_str(), "ps_5_0");
+    const std::string without_l = Disassembly("previous_without", without.c_str(), "ps_5_0");
+    if (now_l.empty() || off_l.empty() || without_l.empty()) return 253;
+    if (Code(off_l) != Code(without_l)) {
+      std::cerr << "the composite with the previous frame's share 0 is not the program without the blend\n";
+      return 253;
+    }
+    if (ReadsResource(off_l, 2) || ReadsComponent(off_l, "cb0[1]", 'w')) return 253;
+    int loads2 = 0;
+    const int depth2 = TextureReadDepth(now_l, "ld_indexable", 2, &loads2);
+    if (!ReadsResource(now_l, 2) || loads2 != 1 || depth2 < 1 || !ReadsComponent(now_l, "cb0[1]", 'w') || BindPoint("composite", c, "ps_5_0", "previous_front") != 2 ||
+        Count(now_l.c_str(), "round_ni") < 3 || Instructions(now_l) <= Instructions(off_l)) {
+      std::cerr << "the composite's blended form: t2 loaded " << loads2 << " times at depth " << depth2 << "\n";
+      return 253;
+    }
+    // Controls: a blend that reached the picture with the share 0 would be seen; without the previous texel's
+    // bounds, or the share's, the program is another one.
+    const std::string leak = Changed(off.c_str(), "if (0.0 > 0.0) return", "return");
+    const std::string unbounded = Changed(c, "  before = (before > 0.0 && before < 3.0e38) ? min(before, 1.0) : float3(0.0, 0.0, 0.0);\n", "");
+    const std::string full = Changed(c, "* min(p_previous, 1.0)", "* p_previous");
+    if (leak.empty() || unbounded.empty() || full.empty() || !ReadsResource(Disassembly("previous_leak", leak.c_str(), "ps_5_0"), 2) ||
+        Code(Disassembly("previous_unbounded", unbounded.c_str(), "ps_5_0")) == Code(now_l) ||
+        Code(Disassembly("previous_full", full.c_str(), "ps_5_0")) == Code(now_l)) return 253;
+    std::cout << "previous-frame blend: with the share 0 the composite is the program of before; the blended form has "
+              << Instructions(now_l) - Instructions(off_l) << " instructions more\n";
+  }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads; the base map's gamma sign: the curve, the record's word read by the lit terrain programs alone; the quad step: the block at the table's offsets in both stages, the six vertices through the game's matrix, the two kinds' statements, one texture under four samplers, the alpha test's discard, the compiled clamp; the sun layer: the blocks at their tables' offsets, the depth step's one bounded load written as depth, the reduction's one sample, the radial blur's fourteen bounded loads, the four kinds' statements and the occluder's form, the writes' own rounding, no other program's text touched\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads; the base map's gamma sign: the curve, the record's word read by the lit terrain programs alone; the quad step: the block at the table's offsets in both stages, the six vertices through the game's matrix, the two kinds' statements, one texture under four samplers, the alpha test's discard, the compiled clamp; the sun layer: the blocks at their tables' offsets, the depth step's one bounded load written as depth, the reduction's one sample, the radial blur's fourteen bounded loads, the four kinds' statements and the occluder's form, the writes' own rounding, no other program's text touched; the previous-frame blend: with the share 0 the composite of before, the blended form behind the share's test with one bounded load of the previous picture\n";
   return 0;
 }

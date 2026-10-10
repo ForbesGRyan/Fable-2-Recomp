@@ -221,6 +221,25 @@ def sun_occluder_pin(alpha, world, eye, c77x):
                                   (f32(eye[0]), f32(eye[1])), f32(c77x), SUN_OCCLUDER_C255)
 
 
+# The previous-frame blend (plan Task 15): (the composite's value, the previous picture's, the share). Values are
+# levels of 255 (what the two 8-bit targets hold) but for those that are no numbers; no point lies within a
+# hundredth of a level of a tie.
+PREVIOUS_W = f32(lf.POST_PREVIOUS_WEIGHT)
+PREVIOUS = (
+    ((200 / 255.0, 100 / 255.0, 0.0), (100 / 255.0, 200 / 255.0, 1.0), PREVIOUS_W),
+    ((1.0, 1.0, 1.0), (0.0, 0.0, 0.0), PREVIOUS_W),
+    ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), PREVIOUS_W),
+    ((37 / 255.0, 38 / 255.0, 39 / 255.0), (37 / 255.0, 38 / 255.0, 39 / 255.0), PREVIOUS_W),     # a standing picture: itself
+    ((128 / 255.0, 128 / 255.0, 128 / 255.0), (133 / 255.0, 132 / 255.0, 124 / 255.0), PREVIOUS_W),  # five levels apart: half a level of the old one comes in
+    ((200 / 255.0, 100 / 255.0, 50 / 255.0), (100 / 255.0, 200 / 255.0, 250 / 255.0), 0.0),      # no share: the composite's value
+    ((200 / 255.0, 100 / 255.0, 50 / 255.0), (100 / 255.0, 200 / 255.0, 250 / 255.0), 1.0),
+    ((200 / 255.0, 100 / 255.0, 50 / 255.0), (NAN, INF, -1.0), PREVIOUS_W),
+    ((200 / 255.0, 100 / 255.0, 50 / 255.0), (100 / 255.0, 200 / 255.0, 250 / 255.0), NAN),
+    ((200 / 255.0, 100 / 255.0, 50 / 255.0), (100 / 255.0, 200 / 255.0, 250 / 255.0), -0.5),
+    ((200 / 255.0, 100 / 255.0, 50 / 255.0), (100 / 255.0, 200 / 255.0, 250 / 255.0), 1.5),
+)
+
+
 def quad_matrix():
     """The captured matrix: four rows of four single-precision floats."""
     v = struct.unpack('>16f', struct.pack('>16I', *QUAD_MATRIX_BITS))
@@ -374,6 +393,11 @@ def lines():
     for alpha, world, eye, c77x in SUN_OCCLUDER:
         out.append('    {%s, %s, %s, %s, %s},' % (_num(f32(alpha), True), floats(world), floats(eye), _num(f32(c77x), True),
                                                   _num(sun_occluder_pin(alpha, world, eye, c77x), False)))
+    out.append('// previous blend pins (light_formulas.post_previous_blend, the weight %s): the composite, the previous picture, the '
+               'share, the front value' % _num(PREVIOUS_W, True))
+    for new, previous, share in PREVIOUS:
+        out.append('    {%s, %s, %s, %s},' % (floats(new), floats(previous), _num(f32(share), True),
+                                              doubles(lf.post_previous_blend([f32(v) for v in new], [f32(v) for v in previous], f32(share)))))
     return out
 
 

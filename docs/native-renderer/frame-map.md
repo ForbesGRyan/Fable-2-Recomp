@@ -5714,7 +5714,7 @@ default: open ("Outstanding: cost").
 Plan Task 8 of the post sub-project (phase 10b; spec Design 10, rulings 6, 14, 15, 16; controller
 ruling 25; ruling 27 for the bloom's sample place), 2026-10-10. The code and what was found
 offline come first, as written before any run; the fifteen runs are under "Runs" at the end of
-this subsection. The criteria's verdicts are plan Task 9's.
+this subsection. The criteria's verdicts are in "Validation (10b)".
 
 **The switch**: `--fable2_native_bloom=on|off` (default off; the light switch's parser). It acts
 only in a post frame. Nothing of the capture depends on it: the blurs' weights are part of the
@@ -6010,7 +6010,7 @@ dumps as `<name>_dump.rgba`; scripts `t8_regions.py` there and `t8_channels.py`,
    quarter-size full-screen steps (13 loads a pixel in two of them over 50,400 pixels) and one
    sample in the composite; criterion 15's cost part stays with criterion 9.
 
-**First readings of the 10b criteria** (the verdicts are plan Task 9's): 11 (the reference
+**First readings of the 10b criteria** (the verdicts: "Validation (10b)"): 11 (the reference
 against the game): the thresholds held with the fetch's place (above); 12: both parts held, with
 the downsample target's precision named (item 5); 13: 24 of 25 and 18 of 18; 14: tests, and the
 guards in the compiled programs; 15: bloom off is plan Task 5's programs but for the rounding
@@ -6275,6 +6275,180 @@ variant B is 1.00 and 0.99), so that spot supports it neither way (review of Tas
 (6) near ground in shadow is not decided (item 4). The picture no longer speaks against ON at the
 bridge; the missing timing does.
 
+### Validation (10b)
+
+Plan Task 9 of the post sub-project, 2026-10-10: phase 10b (the bloom, with ruling 25's rounding
+and, since Task 8b, the base map's gamma fix under it) held against spec criteria 11 to 15, and
+criterion 6's real-GPU half, which 10a left for it. **No run was made for this task and no code
+changed**: the verdicts are read from the runs of plan Task 8 (logs 469 to 483, binary
+`D928DE53A3A4EFA6`, commit `edfcc24`) and of Task 8b (logs 484 to 489, binary `D2AEC2D9A98F1028`,
+commit `5d0f974`: the figures for native against emulated are these, Task 8's are of before the
+fix). What the reviews left to compute is computed here: `out/native-evidence/post/t9_criteria.py`
+and its output `t9_criteria.txt`. **One thing is open: the cost** (criterion 15's part of
+criterion 9). Every run since log 457 was on the 100%-scaled monitor (shot width 1296): none is
+timing evidence, and none of its frame times is used. `--fable2_native_bloom` stays default off.
+
+**The plan's runs for this task were not made as listed.** The plan asked for BRIDGE and THIRD
+with the bloom on and off, each with and without the read-back switch, TREES with the bloom on
+and SUNWARD with the bloom and the switch (10c's baseline). What exists on the binary with the
+gamma fix: bridge and third spot, bloom on and off, under `--readback_resolve=full` (T8b-2 to
+T8b-5), and the bridge with post off (T8b-6). Not on that binary: the trees (T8-13 is of the
+binary before the fix), a run with the read-back switch in place of full read-back, a blind run
+(T8-14, T8-15 are of the binary before the fix). Not made at all: SUNWARD (the stored scene
+`134312` through the feed stands for "towards the sun without the sun layer" below; the live
+baseline is left to 10c's own runs). Every criterion can be read without them; what they would
+have added is said under "Limits".
+
+**The criteria of 10b.**
+
+| | Criterion | Verdict | Figure and evidence |
+|---|---|---|---|
+| 6 | The shaders on the oracle scene, the real GPU's half (left open by 10a) | **met**, on both adapters, since ruling 25's rounding | feed `092959`, bloom off, against the reference's variant A: real GPU (log 472) 100.000% of the pixels within 1 level, largest difference 2, in one channel; 7 of 2,419,200 channels differ at all (before the change, log 458: 124,757). The software adapter (log 471): 6 channels, the same one at 2 (`t8_compare_ruling25.txt`, `t8_channels.txt`). That channel: pixel (100, 210), blue, 172 for the reference's 170, in both dumps (`t9_criteria.txt`, section 4) |
+| 11 | The reference bloom against the game | **met**, with the reference at the game's own fetch (controller ruling 27) | captures `092959`, `121331`, `132250`, frame 1 (`t8_reference_B_<stamp>.txt`): 26 of 26 regions within 5% in luminance in each (0.997 to 1.027, 0.997 to 1.022, 0.994 to 1.009); hue within 5 degrees on 26 of 26 in each (largest 1.9, 4.7, 2.8; 25 of 26 asked); median 0.58, 0.57, 0.57 levels (at most 2); 94.5, 94.8, 94.8% within 8 (at least 90). With the centres aligned, as the criterion's text still quotes from the research: 0.975 to 1.029, 0.73 to 0.75, 94.2 to 94.6: also inside the thresholds |
+| 12 | The shaders on the oracle scene, with bloom | **met**, both parts, on both adapters | *Against the game's front buffer through the ramp* (computed here; table below): on the three bridge captures every region within 5% (0.991 to 1.033), hue within 5 degrees on 26, 25 and 26 of 26 (25 asked; the one outside is the averted pole side of `121331`, 6.1 degrees), median 1 level in whole levels (at most 2), 94.62, 94.94, 94.84% within 8 (at least 90). *Against the reference's variant B*: 99.92 to 99.95% of the pixels within 2 levels (at least 99) on the real GPU for four captures and on the software adapter for one (`t8_compare_bloom.txt`) |
+| 13 | In the game | **not met as written at the bridge: 25 of 26 regions; met at the third spot: 18 of 18** | bloom on over off of the native shots against the replay's B / A, on the binary with the gamma fix (T8b-2 over T8b-3, T8b-4 over T8b-5; `t9_criteria.txt`, section 3). The one outside: the averted pole side, +46.3% where +32.8% is predicted (+0.134; +0.186 before the fix). All others within 0.035 |
+| 14 | Nothing that is no number | **met** (tests; not run again here) | `tests/native/test_clay_logic.cpp` case 615 (10,176 combinations: NaN, infinity, a negative texel, `L = 0`, registers and weights at their bounds and no numbers: every output in its target's range); the guards in the compiled programs, `tests/native/test_native_shaders.cpp` cases 238 to 240; 33 `PASS` lines on the tree of `5d0f974` (`t8b_native_tests.log`); mutation check 41 of 41 (`t8_mutations.txt`) |
+| 15 | Criterion 8 with the bloom off | **met by the substituted measure's first half (ruling 22); its second half 8 of 10 regions** | the composite and the ramp with the bloom's flag 0 are plan Task 5's programs but for ruling 25's rounding, 3 instructions each (shader test case 237); with the switch off no bloom object is made (no `bloom steps ready` line in logs 478, 480, 483, 486, 488; `(bloom 0, no-weights 0)`). Regions, a bloom-off run of the binary with the bloom's code over plan Task 5's (T8-10 over T5-6, both post on under full read-back; `t9_criteria.txt`, section 5): the ten standing regions read 0.990 to 1.023 natively where the two runs' emulated shots read 0.983 to 1.007; eight lie inside that spread, the bridge planks (1.023) and the lake (1.010) above it. Two sessions, and two window sizes (1296 against 1942) |
+| 15 | Criterion 9 (cost) for 10b's builds | **open: no valid timing run exists** | no run with the bloom, with ruling 25's rounding or with the gamma fix was made at shot width 1942; "Outstanding: cost" has the runs and the rule |
+| 15 | Criterion 10 (no D3D error) for 10b's builds | **met** | 240 s on the software adapter under the debug layer for the bloom's build (log 469; the feed runs 470, 471) and for the gamma fix's (log 484): no `d3d ERROR` line, warning id 1328 only; no error line in the real-GPU logs 472 to 483 and 485 to 489 either |
+
+**Criterion 12's first part, by region** (review of plan Task 8, Minor 7: the regions' ratios had
+not been computed from the dumps). Each dump is the mapped target, after the ramp; it is held
+against the game's own front buffer of the same capture put through the same ramp
+(`oracle/ref455fetch_<stamp>_f1_final.rgba`, the ramp of log 455), with `post_replay.py`'s own
+region measure (the mean colour of the region; luminance ratio; hue difference). Both ways of
+reading "through the ramp" are given: on the 8-bit values after the ramp, as the criterion is
+written, and with both pictures taken back through the ramp's inverse into the front buffer's own
+unit, which is criterion 11's.
+
+| Dump | Regions, after the ramp | Hue within 5 degrees (largest) | Regions, ramp taken off | Median; within 8 levels (outside the HUD) |
+|---|---|---|---|---|
+| software adapter `092959` (log 470) | 0.996 to 1.033 | 26 of 26 (4.2) | 0.997 to 1.027 | 1; 94.62% |
+| real GPU `092959` (log 473) | 0.996 to 1.033 | 26 of 26 (4.3) | 0.997 to 1.027 | 1; 94.62% |
+| real GPU `121331` (log 474) | 0.996 to 1.031 | 25 of 26 (6.1, the averted pole side) | 0.997 to 1.021 | 1; 94.94% |
+| real GPU `132250` (log 475) | 0.991 to 1.010 | 26 of 26 (3.7) | 0.993 to 1.008 | 1; 94.84% |
+| real GPU `134312` (log 476; towards the sun, not one of the criterion's three) | 0.379 to 1.000, 17 of 26 within 5% | 17 of 26 (99.5) | 0.484 to 1.000 | 1; 70.67% |
+
+The GPU's regions are the reference's to the third decimal with the ramp taken off (the
+reference: 0.997 to 1.027, 0.997 to 1.022, 0.994 to 1.009): the tenth of a level the downsample's
+target loses does not show in a region's mean. The largest hue difference is the averted pole
+side in each of the three (3.7 to 6.1 degrees; the reference's own is 0.5 to 4.0 there): a region 7
+pixels wide and the darkest of the 26, where one level is a large part of a channel; the
+criterion's "25 of 26" was written for it. `134312` is the scene towards the sun put through a
+bloom without the sun's two layers: what 10c has to add, not a failure of 10b (the reference's
+own variant B reads 70.7% there).
+
+**Criterion 13 on the binary with the gamma fix** (`t9_criteria.txt`, section 3; the measure of
+"Native bloom", "Runs", item 7, on runs T8b-2 to T8b-5: the mean display luminance of a run's
+native shots, bloom on over bloom off, against `post_replay.py predict`'s B / A on the on-run's
+own capture, `034415` and `034736`). Bridge, the regions that move and the one outside:
+
+| Region | on / off | B / A | difference |
+|---|---|---|---|
+| dirt patch | 1.094 | 1.102 | -0.009 |
+| rock face | 1.079 | 1.081 | -0.002 |
+| far rock | 1.118 | 1.122 | -0.004 |
+| far slope | 1.081 | 1.085 | -0.004 |
+| far mountains left | 1.132 | 1.097 | +0.035 |
+| far mountains centre | 1.126 | 1.115 | +0.010 |
+| far mountains right | 1.128 | 1.131 | -0.003 |
+| far peak | 1.081 | 1.077 | +0.004 |
+| island in the lake | 1.114 | 1.109 | +0.005 |
+| sky above the ridge; above the towers | 1.036; 1.043 | 1.035; 1.042 | +0.002; +0.001 |
+| lake (unlit placeholder) | 1.131 | 1.137 | -0.007 |
+| pole sunlit side | 1.086 | 1.066 | +0.020 |
+| **pole averted side** | **1.463** | **1.328** | **+0.134** |
+| bridge planks; trunk | 1.001; 1.001 | 1.000; 1.000 | +0.001; +0.001 |
+
+With the scene mended the far ground and the near sunlit ground follow the prediction within
+0.01, where they lay 0.02 to 0.04 above it before the fix (far slope +0.031, island +0.021, dirt
+patch and rock face +0.018): the small one-sided excess was the bright pass's threshold working
+on a scene that was too bright, as the review of plan Task 8 read it. Left over: far mountains
+left, +0.035 (a wooded range, still 45 to 55% over the game's), and the averted pole side. That
+region is 7 pixels wide and the darkest of the 26; the veil it gets is its surroundings', and
+behind the pole stand the wooded ranges, which are brighter natively than in the game: that is
+the likely cause and it is inference. As criterion 7 was judged, by the regions that stand still
+in a run's own shots (under 3.2% between them; here with the shot after the capture among them,
+so only 5 at the bridge and 7 at the third spot qualify): 5 of 5 and 7 of 7. The averted pole
+side's own shots differ by 12.7%; it is not under leaf shadow, so the criterion as written counts
+it, and as written the bridge is 25 of 26. Third spot: 18 of 18, the largest difference -0.038
+(the red log, under leaf shadow).
+
+**The 10-bit writes on the real card are not verified by any of this** (review of plan Task 8,
+Minor 8). The real GPU's bloom dump differs from the software adapter's in 0.155% of the
+channels by 1 or 2 levels ("Native bloom", "Runs", item 6): far inside criterion 12, and not
+separated into the card's 10-bit conversion, its linear samples' weights and its float target.
+What is shown is that the picture after all five steps is within criterion 12 on that card.
+
+**The feed's dumps are of the binary before the gamma fix.** The fix changed the two terrain
+shaders' lit programs and nothing of the post steps (`git diff edfcc24 5d0f974 --
+src/native/fable2_native_shaders.h`: `base_linear`, `sample_base` and the one field's name; the
+shader test's pins of the post programs are untouched), so criteria 6 and 12 are read from Task
+8's feed runs. The feed was not run again on the later binary: by the diff, not by a dump.
+
+**The defaults.** `--fable2_native_bloom`: on if criteria 12, 14 and 15 are met (plan Task 9).
+12 and 14 are met; of 15 the D3D part is met, the picture part by the programs, and **the cost
+part is open**: the default stays off. `--fable2_native_post`: on if criteria 3, 6, 8, 9 and 10
+are met (plan Task 7); 6 is met now, 9 is open: off. For the picture the bloom's ON is supported
+at the bridge since the gamma fix ("The base map's gamma sign", "Runs", item 6: with the bloom
+every standing region but the wooded ranges, the far rock under them and the averted pole side
+within 5% of the emulated picture; without it the far ground and the sky 8 to 19% under).
+Both defaults are the controller's rulings after the runs of "Outstanding: cost", (c).
+
+**Limits of 10b**, plainly.
+
+1. **The wooded far ranges are 15 to 55% over the game's** (like for like, native over the
+   replay of the run's own capture: 1.15, 1.19, 1.45 without the bloom and 1.15, 1.21, 1.55 with
+   it; third spot 1.24, 1.08 and 1.27, 1.08). The game's distant trees are not drawn natively:
+   the native ranges are bare. The bloom makes this one place worse, and it is now the largest
+   difference of the far picture. Far rock below the ridge (1.11 to 1.13) and far rock (1.05)
+   have those trees at their edges.
+2. **The lake and the other unlit placeholders** take one scale a frame and go through the bloom
+   like lit pixels: the lake reads 1.04 to 1.05 of the game's and is a flat grey to the eye where
+   the game has water; the third spot's unlit hill reads 1.14 to 1.20. A bright placeholder
+   feeds the bloom.
+3. **Ground in shadow beyond 100 units is 11 to 19% over** in the one measure there is
+   (`t8b_shadow_*.txt`; 19 to 24% before the fix). Not followed. That measure admits low trees as
+   ground at that distance, and the native picture lacks the far trees' shadows: both inference.
+4. **Near ground in shadow may now be too dark** (0.67 to 0.70 of the emulated shots at one
+   region, the dirt by the palisade, under a native shadow of another shape than the game's); the
+   native shadow's strength was last judged on the old, too bright ambient; not followed here
+   ("The base map's gamma sign", "Runs", item 4; user check 61).
+5. **The downsample's target loses a tenth of a level, on one side** (`R11G11B10_FLOAT`: the
+   dumps lie 0.08 to 0.14 of a level under the reference; controller ruling 28 keeps the format;
+   a 16-bit float target is a follow-up with its own software-adapter run).
+6. **The sun's two layers of the bright pass are 0 until 10c**: towards the sun the bloom has
+   neither the beams nor the disc (the stored scene `134312` through the feed: 70.67% of the
+   pixels within 8 levels of the game's picture, against 94.6 to 94.9% at the bridge).
+7. **The averted pole side** (criterion 13's one region outside) reads 1.10 of the emulated
+   picture with the bloom and 0.57 without it: thin, dark things before the wooded ranges get a
+   veil that is too bright.
+8. **The card's 10-bit writes** are not verified apart from the whole (above).
+9. **No test executes the HLSL**; its only execution against a known answer is the feed, on the
+   binary before the gamma fix.
+10. **Fallbacks not seen in a game**: no `no-weights` frame and no `post-objects` frame has
+    occurred; both are held by tests.
+11. **One save, late morning, two places** (the bridge and the third spot; the trees only on the
+    binary before the fix), a standing camera, three runs' leaf shadows. Night, dawn and dusk, a
+    town, an interior, a torch, a lit window, a walk from shade into sun: not seen with the bloom
+    (`docs/native-renderer/user-checks.md`, checks 57 to 62). The third spot's emulated sky does
+    not hold still (its shots read 0.94 and 0.89 of the capture's replay in the two sky regions,
+    the bridge's 0.99: `t8b_regions.txt`), so that spot says nothing about the sky.
+12. **The post-off picture is darker on lit ground than before** (ruling 30: the exposure 2.22
+    was fitted on the old reading of the base map and is not fitted again; dirt patch 0.83 of the
+    adapting game's).
+13. **Cost: not measured.** ("Outstanding: cost".)
+
+**Left for a builder** (code or tests named by the reviews of plan Task 8 and Task 8b; this task
+changes documents only): an out-of-bounds blur weight is made 0 with the bloom's flag still set
+(`clay_logic.h`, the review's Minor 1); the unreachable fallback that would count a frame without
+bloom objects as `no-weights` (`clay_pass.cpp`, Minor 2); a test comment's "four instructions"
+(`test_native_shaders.cpp`, Minor 3); the comment at `kPostBloomFetch`, which still argues from
+the interpolator (Minor 4); the comment at `kLitExposure`, which does not say that the fit
+predates the gamma fix (review of Task 8b, Important 2); the curve's tests at its knees, and
+`terrain_replay.py`'s decode order and swizzle (Task 8b's Minors 3 to 5); a census line for
+textures with a non-zero sign field (Minor 2).
+
 ### Outstanding: cost
 
 The one list of the timing runs still to make for phases 10a and 10b, with the rules by which
@@ -6433,12 +6607,13 @@ README row, made by a builder and not by this task).
 
 - `--fable2_native_post`: on if criteria 3, 6, 8, 9 and 10 are met (plan Task 7). 3 and 10 are
   met, 6 is met since ruling 25's change, 8 by ruling 22 against the binary of `5d0f974` (ruling
-  30): "Validation (10a)" and "Native bloom", "Runs", item 3. **Criterion 9 is the open one**: (a) above, for
+  30): "Validation (10a)" and "Validation (10b)". **Criterion 9 is the open one**: (a) above, for
   `post` and `post_rb`. With the default on every normal run also reads the post block: the
   `post` against `off` capture medians are that cost.
 - `--fable2_native_bloom`: on if criteria 12, 14 and 15 are met (plan Task 9). 12 and 14 are met
-  and 15's picture and D3D parts are by their first readings ("Native bloom"; the verdicts are
-  plan Task 9's); **15's cost part is the open one**: (a)
+  and 15's D3D part is, its picture part by the programs ("Validation (10b)"); criterion 13 is
+  not among the plan's conditions and is not met as written in one bridge region; **15's cost
+  part is the open one**: (a)
   above, for `bloom` and `bloom_rb`. The picture supports ON since the gamma fix ("The base map's
   gamma sign", "Runs", item 6). The bloom acts only in a post frame, so its default cannot be on
   while `--fable2_native_post`'s is off.

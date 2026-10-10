@@ -6,7 +6,9 @@ read-back switch's default; criterion 6's real-GPU half, measured again since, a
 change; and, waiting for those, the default of `--fable2_native_post`. Both switches of the phase
 are off by default until the outstanding timing runs: frame map section 17, "Validation (10a)"
 and "Outstanding: cost", and "Implementation notes (deviations)" at the end of this document).
-10b's code is built (plan Task 8; its validation is plan Task 9's); 10c is not built. Plan:
+**Phase 10b is built and validated with one thing open** (the cost: criterion 15's part of
+criterion 9, so `--fable2_native_bloom` stays off by default; criterion 13 is not met as written
+in one of the bridge's 26 regions: frame map section 17, "Validation (10b)"). 10c is not built. Plan:
 `docs/superpowers/plans/2026-10-09-native-renderer-post.md`. Research:
 `.superpowers/sdd/post-research.md` (untracked; its scripts and outputs in
 `out/tests/post-research/`); every fact below is from it or from the code named beside it, and
@@ -513,6 +515,43 @@ Said now, with the finding that makes it one (ruling 18).
 10. Every run is likely `RUN UNCHECKED` (the user at the machine); timing needs a quiet machine.
 
 ## Implementation notes (deviations)
+
+### Phase 10b, plan Task 9 (validation; frame map section 17, "Validation (10b)")
+
+No run was made and no code changed for the validation; the verdicts are read from plan Task 8's
+runs (logs 469 to 483) and Task 8b's (logs 484 to 489, the binary with the base map's gamma fix),
+and what the reviews had left open is computed in `out/native-evidence/post/t9_criteria.txt`.
+
+- **Criterion 6, the real GPU's half: met** since ruling 25's rounding (100.000% of the pixels
+  within 1 level, one channel at 2, the same channel on the software adapter).
+- **Criterion 11: met** with the reference at the game's own fetch (ruling 27): 26 of 26 regions
+  within 5% and within 5 degrees of hue on each of the three bridge captures, median 0.57 to
+  0.58, 94.5 to 94.8% within 8. The figures in the criterion's text are the research's.
+- **Criterion 12: met**, both parts, on both adapters. The dumps against the game's front buffer
+  through the ramp, by region (computed in this task): 0.991 to 1.033, hue within 5 degrees on
+  26, 25 and 26 of 26, median 1 level, 94.62 to 94.94% within 8; against the reference 99.92 to
+  99.95% within 2 levels.
+- **Criterion 13: not met as written at the bridge (25 of 26 regions), met at the third spot (18
+  of 18)**, on the binary with the gamma fix. The one outside is the averted side of a thin pole
+  (+46.3% for +32.8% predicted). The far and the sunlit ground now follow the prediction within
+  0.01 (0.02 to 0.04 above it before the fix).
+- **Criterion 14: met** by the tests (not run again).
+- **Criterion 15**: its D3D part is met (logs 469 and 484); its picture part is met by ruling
+  22's program comparison, and by ruling 22's regions 8 of 10 standing regions lie inside the two
+  runs' emulated spread (planks and lake 1.6% and 0.3% above it; two sessions and two window
+  sizes); **its cost part is open**: no run with the bloom counts for timing.
+- **The plan's runs for Task 9 were not made as listed**: no run with the read-back switch in
+  place of full read-back, no trees run and no blind run on the binary with the gamma fix, and no
+  SUNWARD run (left to 10c). No criterion needs them.
+- **The defaults stay off**: `--fable2_native_bloom` waits for criterion 15's cost part and
+  `--fable2_native_post` for criterion 9. The one list of the timing runs for 10a and 10b, with
+  the rules for criterion 9, ruling 2 and the two defaults, is frame map section 17,
+  "Outstanding: cost".
+- **Limits** (frame map, "Validation (10b)", "Limits of 10b"): the wooded far ranges 15 to 55%
+  over (distant trees are not drawn; the bloom makes it worse); the lake and the unlit
+  placeholders; ground in shadow beyond 100 units 11 to 19% over, not followed; near ground in
+  shadow not decided and possibly too dark; the downsample target's tenth of a level (ruling
+  28); the sun's layers absent until 10c; one save, late morning, two places.
 
 ### Phase 10b, plan Task 8 (the bloom's code; frame map section 17, "Native bloom")
 

@@ -526,6 +526,18 @@ verdict (`on`, `off`, `no-weights`), counted on the Post line.
       bright sky at dawn or dusk; a torch or a window at night; bloom on against off), README.
 - [ ] Commit "Bloom validation (10b): ...". Then the phase's review.
 
+*As done (2026-10-10).* No run was made for this task. The verdicts are read from Task 8's runs
+and from the runs of a Task 8b that the ledger added before this one (ruling 29: the base map's
+gamma sign; bridge and third spot, bloom on and off, under full read-back, and the bridge with
+post off). Not made: the runs with the read-back switch, TREES and a blind run on the binary
+with the gamma fix, and SUNWARD (left to 10c's own runs). Criterion 11's figures in the spec are
+the research's, with the bloom sampled at aligned texel centres; the reference now samples at
+the game's own fetch (ledger ruling 27) and the verdicts are stated with it. The timing runs of
+this task and of Task 7 are one list with its decision rules: frame map section 17,
+"Outstanding: cost" (every run since log 457 was on a monitor on which timing does not count).
+The deferred document fixes of the reviews of Tasks 7, 8 and 8b were made in this task, each as
+its own commit.
+
 ## Phase 10c: sun layer and sky furniture
 
 Order: what has the fewest unknowns first; each task ends in a working picture. Task 11 is

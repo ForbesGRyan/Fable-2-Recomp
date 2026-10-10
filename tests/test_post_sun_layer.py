@@ -480,6 +480,54 @@ class FeedFile(unittest.TestCase):
         with self.assertRaises(sl.ReplayError):
             sl.layer_compare(words, other[:3])
 
+    def test_the_layers_are_judged_on_the_texels_either_side_wrote(self):
+        # (review of plan Tasks 14 and 15, Important 4: a picture that is black but for a small disc agrees with
+        # an empty one, and with another frame's, on 99.8% of its texels; the bound is on the written texels)
+        disc = [[[0.0, 0.0, 0.0] for _ in range(40)] for _ in range(40)]
+        for y in range(4):
+            for x in range(4):
+                disc[10 + y][10 + x] = [0.5, 0.25, 0.125]
+        empty = [[[0.0, 0.0, 0.0] for _ in range(40)] for _ in range(40)]
+        moved = [[[0.0, 0.0, 0.0] for _ in range(40)] for _ in range(40)]
+        for y in range(4):
+            for x in range(4):
+                moved[20 + y][20 + x] = [0.5, 0.25, 0.125]
+        a, e, m = sl.layer_words(disc), sl.layer_words(empty), sl.layer_words(moved)
+        same = sl.layer_compare(a, a)
+        self.assertEqual((same["written"], same["written_equal"], same["written_within"][8]), (16, 16, 16))
+        self.assertEqual(sl.layers_verdict("tf2", same), [])
+        gone = sl.layer_compare(e, a)
+        self.assertEqual(gone["within"][8], 1600 - 16)          # (99% of the whole picture: the old bound passed)
+        self.assertEqual((gone["written"], gone["written_within"][8]), (16, 0))
+        self.assertTrue(any("written" in line for line in sl.layers_verdict("tf2", gone)))
+        other = sl.layer_compare(m, a)
+        self.assertEqual((other["written"], other["written_within"][8]), (32, 0))
+        self.assertTrue(sl.layers_verdict("tf2", other))
+        # (a reference that wrote nothing cannot be met by saying nothing)
+        self.assertTrue(sl.layers_verdict("tf2", sl.layer_compare(e, e)))
+        # one level off on every written texel is inside the bound; nine levels on a tenth of them is not
+        near = [[[max(0.0, v - 1.0 / 1023.0) for v in t] for t in row] for row in disc]
+        self.assertEqual(sl.layers_verdict("tf2", sl.layer_compare(sl.layer_words(near), a)), [])
+        far = [[list(t) for t in row] for row in disc]
+        far[10][10] = [0.5 - 9.0 / 1023.0, 0.25, 0.125]
+        far[10][11] = [0.5 - 9.0 / 1023.0, 0.25, 0.125]
+        self.assertTrue(sl.layers_verdict("tf2", sl.layer_compare(sl.layer_words(far), a)))
+
+    def test_the_beam_source_is_judged_by_the_texels_both_drew(self):
+        # (the count alone meets by accident: two masks of one size at different places)
+        rows = [[[0.1, 0.1, 0.1] for _ in range(10)] for _ in range(10)]
+        left, right = bytearray(100), bytearray(100)
+        for i in range(50):
+            left[i] = 1
+            right[50 + i] = 1
+        a, b = sl.layer_words(rows, left), sl.layer_words(rows, right)
+        c = sl.layer_compare(a, b)
+        self.assertEqual((c["alpha_a"], c["alpha_b"], c["alpha_both"]), (50, 50, 0))
+        self.assertTrue(any("in both" in line for line in sl.layers_verdict("layer1", c)))
+        self.assertEqual(sl.layers_verdict("layer1", sl.layer_compare(a, a)), [])
+        nothing = sl.layer_words(rows, bytearray(100))
+        self.assertTrue(sl.layers_verdict("layer1", sl.layer_compare(nothing, nothing)))
+
     def test_the_drawn_texels_are_marked(self):
         drawn = {}
         one, two, lines = sl.sun_layer([draw("0x5D6768847B0602B8"), draw("0x8E4DBB9E9A63EF67", regs={31: (0.0, 0.0, 0.0, 0.0)},

@@ -658,11 +658,16 @@ def read_layer(path):
 def layer_compare(a, b):
     """Two layers' words against each other: per texel the largest channel difference in 10-bit levels, and
     the alpha bits. Returns a dict: texels, equal, within {1, 2, 4, 8}, largest, mean (of each, all channels,
-    in 0..1), alpha_a, alpha_b (texels with an alpha bit), alpha_both."""
+    in 0..1), alpha_a, alpha_b (texels with an alpha bit), alpha_both; and the same counts over the texels
+    either side wrote (a colour channel above 0, in a or in b; the alpha bits are layer 1's drawn mask, judged by
+    alpha_both, and are set in every texel of the other two pictures): written, written_equal,
+    written_within. A picture that is black but for a small disc agrees with an empty one on nearly all of its
+    texels; on the written ones it does not (layers_verdict)."""
     if len(a) != len(b):
         raise ReplayError("%d words against %d" % (len(a), len(b)))
     within = {1: 0, 2: 0, 4: 0, 8: 0}
-    equal = largest = alpha_a = alpha_b = both = 0
+    written_within = {1: 0, 2: 0, 4: 0, 8: 0}
+    equal = largest = alpha_a = alpha_b = both = written = written_equal = 0
     sums = [0, 0]
     for x, y in zip(a, b):
         d = 0
@@ -675,13 +680,48 @@ def layer_compare(a, b):
         for k in within:
             within[k] += d <= k
         largest = max(largest, d)
+        if (x | y) & 0x3FFFFFFF:
+            written += 1
+            written_equal += d == 0
+            for k in written_within:
+                written_within[k] += d <= k
         pa, pb = x >> 30 != 0, y >> 30 != 0
         alpha_a += pa
         alpha_b += pb
         both += pa and pb
     n = len(a)
     return {"texels": n, "equal": equal, "within": within, "largest": largest, "mean": [v / (3.0 * 1023.0 * n) for v in sums],
-            "alpha_a": alpha_a, "alpha_b": alpha_b, "alpha_both": both}
+            "alpha_a": alpha_a, "alpha_b": alpha_b, "alpha_both": both,
+            "written": written, "written_equal": written_equal, "written_within": written_within}
+
+
+# The bounds of `layers` (review of plan Tasks 14 and 15, Important 4: the first bound, 99% of the whole picture
+# within 8 levels, was met by an empty tf2 and by another frame's).
+LAYERS_WRITTEN_SHARE = 0.99      # of the texels either side wrote: within LAYERS_LEVELS levels of 1,023
+LAYERS_LEVELS = 8
+LAYERS_COUNT_SHARE = 0.02        # layer 1: the two drawn counts apart by at most this share of the reference's
+LAYERS_BOTH_SHARE = 0.98         # layer 1: of the reference's drawn texels, drawn by both
+
+
+def layers_verdict(name, c):
+    """What a comparison (layer_compare: the native picture first, the reference second) fails, as lines; an
+    empty list: inside the bounds. Every picture: the texels either side wrote, of which LAYERS_WRITTEN_SHARE
+    are within LAYERS_LEVELS levels (no written texel at all is a failure: nothing was judged). Layer 1 besides:
+    the beam source's drawn counts and the texels both drew."""
+    out = []
+    if c["written"] == 0:
+        out.append("%s: neither side wrote a texel: nothing to judge" % name)
+    elif c["written_within"][LAYERS_LEVELS] < LAYERS_WRITTEN_SHARE * c["written"]:
+        out.append("%s: of the %d written texels %.2f%% are within %d levels (the bound: %.0f%%)" % (
+            name, c["written"], 100.0 * c["written_within"][LAYERS_LEVELS] / c["written"], LAYERS_LEVELS, 100.0 * LAYERS_WRITTEN_SHARE))
+    if name == "layer1":
+        if c["alpha_b"] == 0 or abs(c["alpha_a"] - c["alpha_b"]) > LAYERS_COUNT_SHARE * c["alpha_b"]:
+            out.append("layer1: the beam source's drawn texels, %d against the reference's %d, are more than %.0f%% apart" % (
+                c["alpha_a"], c["alpha_b"], 100.0 * LAYERS_COUNT_SHARE))
+        if c["alpha_both"] < LAYERS_BOTH_SHARE * c["alpha_b"]:
+            out.append("layer1: drawn in both %d of the reference's %d (the bound: %.0f%%)" % (
+                c["alpha_both"], c["alpha_b"], 100.0 * LAYERS_BOTH_SHARE))
+    return out
 
 
 # --- the commands --------------------------------------------------------------------------------------------
@@ -850,12 +890,14 @@ def cmd_layers(args):
                   name, w, h, 100.0 * c["equal"] / n, 100.0 * c["within"][1] / n, 100.0 * c["within"][2] / n, 100.0 * c["within"][4] / n,
                   100.0 * c["within"][8] / n, c["largest"], c["mean"][0], c["mean"][1],
                   "%.4f" % (c["mean"][0] / c["mean"][1]) if c["mean"][1] else "-"))
+        m = c["written"]
+        print("       the texels either side wrote: %d; of them equal %s, within 8 levels %s" % (
+            m, "%.2f%%" % (100.0 * c["written_equal"] / m) if m else "-", "%.2f%%" % (100.0 * c["written_within"][8] / m) if m else "-"))
         if name == "layer1":
             print("       the beam source's drawn texels (alpha set): native %d, reference %d, in both %d" % (
                 c["alpha_a"], c["alpha_b"], c["alpha_both"]))
-            if c["alpha_b"] == 0 or abs(c["alpha_a"] - c["alpha_b"]) > 0.02 * c["alpha_b"]:
-                status = 1
-        if c["within"][8] < 0.99 * n:
+        for fault in layers_verdict(name, c):
+            print("       NOT MET: " + fault)
             status = 1
     w, h, a = pr.read_dump(args.dump)
     w2, h2, b = pr.read_dump("%s_C.rgba" % args.reference)
@@ -880,8 +922,9 @@ def cmd_layers(args):
             if st:
                 line(r["name"], st)
     print("whole picture, %s" % pr.oracle_verdict(whole)[1])
-    print("the layer's pictures: %s" % ("the beam source's count within 2% of the reference's and each picture within 8 levels of "
-                                        "1,023 on at least 99% of its texels" if status == 0 else "NOT within those bounds"))
+    print("the layer's pictures: %s" % ("the beam source's count within 2% of the reference's, 98% of the reference's drawn texels drawn "
+                                        "by both, and each picture within 8 levels of 1,023 on at least 99% of the texels either "
+                                        "side wrote" if status == 0 else "NOT within the bounds (the lines above)"))
     return status
 
 

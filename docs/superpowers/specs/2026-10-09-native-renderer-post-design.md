@@ -574,7 +574,7 @@ before the validation runs of plan Task 9; the criteria's verdicts come with the
   post-off picture's exposure 2.22 was fitted with the old reading and is not fitted again.
   Measured (runs T8b-1 to T8b-6, logs 484 to 489; like for like against the replay of each run's
   capture): dirt patch 1.28 -> 0.95, rock face 1.32 -> 0.96, far slope 1.24 -> 0.98, island 1.22
-  -> 0.97; planks, peak and sky unmoved; ground in shadow 1.10 to 1.75 -> 0.98 to 1.14; the
+  -> 0.97; planks, peak and sky unmoved; ground in shadow: not decided (the classification first quoted, 1.10 to 1.75 -> 0.98 to 1.14, does not isolate shadowed ground; the one shadowed terrain region read directly, the dirt by the palisade at the third spot, went from 1.14 to 0.67 to 0.70 of the emulated shots under a shadow of another shape: review of Task 8b, Important 1; frame map, the same part, "Runs", item 4); the
   wooded ranges still 1.15 to 1.45 (1.15 to 1.55 with the bloom); no D3D error.
 - **Criterion 8 after Task 8b (controller's ruling 30).** The gamma fix changes the post-off
   picture (lit terrain: dirt patch 1.04 -> 0.83 of the adapting game's with the fixed exposure).
@@ -582,7 +582,7 @@ before the validation runs of plan Task 9; the criteria's verdicts come with the
   against commit `5d0f974`'s binary from now on, and ruling 22's program comparison holds for
   every program but the lit programs of the two terrain shaders.
 - **The bloom's default after Task 8b: still off, for the cost alone.** With the bloom every
-  standing region but the wooded ranges, the far rock below the ridge (1.12) and the averted pole
+  standing region of the bridge but the wooded ranges, the far rock below the ridge (1.12) and the averted pole
   side (1.10) is within 5% of the emulated picture (without it the far
   ground and the sky are 8 to 19% under); no run with the bloom counts for timing.
 - **Cost is not measured**: all fifteen runs were on the monitor where the present gate does not

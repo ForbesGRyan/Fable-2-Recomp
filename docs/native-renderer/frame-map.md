@@ -3075,6 +3075,8 @@ Everything else is drawn as the materials picture draws it, the unlit linear col
 
 **Scale.** The value written is the formula's value without the game's output scale `c20.w` (16): the game multiplies every scene shader's colour by it and its later passes take it back; here the exposure of the lit output stands in its place ("The exposure", next). `c49.xyz` is inside the object's function. `c26.xyz`, which the game applies together with `c20.w` after its fog, multiplies the function's result. Both are (1, 1, 1) in every captured row.
 
+*Note of 2026-10-10 (post sub-project, Task 8b; ledger ruling 30).* The exposure 2.22 and every terrain figure of this section are of the base map tf3 read as stored, which made the ambient part of lit ground 1.8 to 2.5 times the game's. Since commit `5d0f974` the pass reads it through its fetch constant's gamma curve; the exposure is deliberately not fitted again, and at 2.22 the dirt patch reads 0.83 of the adapting game's where it was fitted to 1: section 17, "The base map's gamma sign".
+
 **The exposure.** `ClayExposure(on)` is `kLitExposure`, 2.22, calibrated in plan Task 9 ("Validation" below; it was 1 until then, and the figures of the runs before that task in this subsection are under exposure 1). It is the lit draws' alone (the final fix wave, 2026-10-08). `MakeClayFrameConstants` puts it into a lit frame's block (`ClayFrameConstants::exposure`, cbuffer `Frame`'s `f_exposure` at byte 44; 0 in a frame without light, where no draw reads it), and the three pixel shaders that light multiply their value by it in front of the bound: `clay_lit(lit * f_exposure)` in the textured shader, `clay_lit(colour * f_exposure)` in the terrain shaders' common output. Nothing else takes it: an unlit draw writes its colour as it is, the clear is the clear, and the output mapping multiplies by its own word, which the pass sets to 1 in every frame (`kClayMapExposure`). So lit and unlit values have one unit in the target, a blend of a lit and an unlit draw is consistent, and what is not lit in a lit frame is shown exactly as with the light off. *As built in plan Task 9* the exposure was the mapping's word, `ClayFrameExposure`, 2.22 for a lit frame and 1 for a frame without light. That was a defect, found by the whole-branch review: the mapping multiplied every pixel, so the clear of a lit frame showed levels (30, 30, 37) for (20, 20, 25) and every unlit draw of a lit frame was `sqrt(2.22)` = 1.49 times too bright on the display ("Validation", "The exposure", has the figures). What the fix changes in the compiled programs: nothing in the vertex shader (every one of its 128 fixed-mode programs and the whole program are line for line those of commit `24c1751`), nothing in any pixel program without bit 2, the flat shader, the mapping and the composite; one `mul` by `cb2[2].w` in the lit pixel programs; no load, no binding and no buffer size (`fix\programs_fix_a.txt`; shader test code 166 holds the same against the text as it was). Tests: case 418 (the clear at its levels in a lit frame, an unlit level d shown as d, a lit v as `sqrt(min(v * E, 1))`), cases 442 to 444 (the frame's constants carry the exposure when lit and 0 otherwise), shader codes 38, 83, 89, 161 and 166.
 
 **Where the values reach the shaders.**
@@ -3157,6 +3159,8 @@ Written 2026-10-08 for the binary of that day, 14:06:58 (`fable_2.exe`, 109,593,
 | 348 renderer off | `task9_control_fable_2_348.log` | `-Total 80 -Shots "36,74"`, `--fable2_native_render=false` | meant as the frame-rate control; gave none (criterion 7) |
 
 All with `-GameArgs "--fable2_native_render=true","--fable2_native_view=native"` but the last. Shots are 1942 x 1136 window shots (client area 1920 x 1080); a native shot is the 1120 x 720 picture scaled to the window.
+
+*Note of 2026-10-10 (post sub-project, Task 8b; ledger ruling 30).* The fit below, the criteria's table and the region tables after it (the dirt patch at 1.00, the six sunlit regions, "one exposure for the three spots") are of the base map tf3 read as stored, with an ambient 1.8 to 2.5 times the game's on lit ground. They no longer describe the picture since commit `5d0f974`, and the exposure is not fitted again: section 17, "The base map's gamma sign" ("Runs", item 7: the dirt patch at 0.83 with post off).
 
 **The exposure.** `kLitExposure` = 2.22 (`clay_logic.h`), fitted once on the region "dirt patch" at the bridge from run 341's three shots: mean linear luminance (the square of the display value) 0.32914 and 0.33498 in the emulated shots before and after, 0.14926 in the native shot between them, ratio 0.4495, so 2.2248; the two emulated shots are 1.8% apart, and two decimals are kept (`task9\e1_regions_bridge_341.txt`). Taken on red, green or blue alone it would be 2.30, 2.20, 1.97. Measured back with the calibrated binary (run 344): the dirt patch reads 0.997 of the emulated mean. Run 344's native shots are run 341's with every level times `sqrt(2.22)`: 99.9% of the pixels within two levels, mean 1.0001 (`task9\pictures_9.txt`); nothing else changed. In the binary of this section (plan Task 9's) the exposure was the output mapping's factor and therefore also scaled what is not lit: the clear colour, so the undrawn sky of a lit frame showed levels (30, 30, 37) where an unlit frame shows (20, 20, 25); and every unlit draw inside a lit frame, 1.49 times its former display value: clean water of the lake, flat and unlit, read (216, 207, 187) in run 344 where it read (145, 139, 125) in run 341 and with the light off, and the unlit left mountain at the third spot (230, 220, 199) where it read (154, 147, 134) (the whole-branch review's measurements). This was a defect, not a property to be left: fixed in the final fix wave ("After the review: the fix wave" below), since which the exposure multiplies the lit draws' values only. (As first written this paragraph gave the lake as (140, 138, 119) against (94, 92, 80): those figures are wrong, the rectangle they were measured on, `task9\pictures_9.py` line 28, being half rock.) At 2.22 a channel exceeds 1 and is clamped in 0.004% (bridge), 0.05% (third) and 0.15% (trees) of a native picture's pixels (`task9\grass_pole_341.txt`).
 
@@ -3243,7 +3247,7 @@ All with `-GameArgs "--fable2_native_render=true","--fable2_native_view=native"`
 - *No further lights.* The two- and four-light shaders (190 of 895 lit draws at the bridge, 278 of 953 at the third spot, 118 of 835 by the trees) are drawn with the sun alone; the lanterns of their light sets give nothing.
 - *No normal maps, no specular, no emissive or cube-map terms.* Rock, bark and planks are lit by their vertex normals.
 - *No fog, in-scatter, sky or post chain.* Hazed far ground reads 0.4 to 0.7 of the game's and is not blue; leaves stand at about 0.56 of the game's relative to the planks; thin things before the haze differ as the rope pole does; the game's glow on bright faces is missing.
-- *One fixed exposure.* It is fitted at one place and one time of day; the game's own exposure belongs to its post chain. Regions of the three spots agree within 0.83 to 1.11; nothing is known of a scene whose exposure the game sets otherwise (night, interiors: user checks 30 and 31). Since the final fix wave it multiplies the lit draws only. What that leaves: an unlit draw of a lit frame (hair and fur cards, water, a draw whose light inputs could not be read) is shown as with the light off, so against its lit surroundings it is now 1.49 times darker on the display than in plan Task 9's binary; it has no light, and no exposure can stand in for one.
+- *One fixed exposure.* It is fitted at one place and one time of day, and on the base map read as stored (note of 2026-10-10 at "The exposure" above: not fitted again after the gamma fix of section 17); the game's own exposure belongs to its post chain. Regions of the three spots agree within 0.83 to 1.11; nothing is known of a scene whose exposure the game sets otherwise (night, interiors: user checks 30 and 31). Since the final fix wave it multiplies the lit draws only. What that leaves: an unlit draw of a lit frame (hair and fur cards, water, a draw whose light inputs could not be read) is shown as with the light off, so against its lit surroundings it is now 1.49 times darker on the display than in plan Task 9's binary; it has no light, and no exposure can stand in for one.
 - *Daylight, one area, standing still.* Everything measured is the Bower Lake bridge and two spots near it between about 36 s and 100 s of the save's clock.
 - *The plants' shadow side.* Where a plant turns from the sun the picture was brighter than the replay; with the alpha test applied, of the ten largest bright blobs by the trees three are cut-away texture, four fit at a shift of 17 to 20 pixels (the wind the pass does not have) and three, 363 pixels, are unexplained (`task9b\`).
 - *The leaf replay's trend.* At the bridge measured over predicted falls from 1.15 to 0.99 across the bins of front light, in two runs alike; the cause is not separated (cards beyond the first 512 indices, cut-away texels, 2 s between shot and capture). By the trees the replay holds for level and colour only (1.19 to 1.21), the unlit picture of the same view being missing; a separate light-off run would not have given it, the view there shifting by 8 to 10 pixels between some runs.
@@ -3457,6 +3461,8 @@ Plan Task 4 (2026-10-09). The clay pass draws the game's two maps itself, from t
 
 ### Native shadows
 
+*Note of 2026-10-10 (post sub-project, Task 8b; ledger ruling 30).* The terrain figures of this subsection, the shadowed ground regions above all (dirt by the palisade, grass in leaf shadow), are of the base map tf3 read as stored, with an ambient 1.8 to 2.5 times the game's; ground in shadow is ambient alone and is what that reading moved most. Since commit `5d0f974` they no longer describe the picture, and the native shadow's strength has not been judged again on the right ambient: section 17, "The base map's gamma sign" ("Runs", item 4).
+
 Plan Task 5 (2026-10-09). With the shadows on, the clay pass keeps the game's order: depth pre-pass, mask, colour. The rules are in `src/native/render/clay_logic.h`, "Native shadows"; `test_clay_logic.cpp` cases 560 to 570, `test_native_shaders.cpp` 190 to 199 and `test_texture_decode.cpp` 120 to 129 hold them; `tests/test_light_check.py`, `MaskPinnedForTheRenderer`, has the reference's side of the pinned numbers. The runs are at the end of this part.
 
 | | Native |
@@ -3546,6 +3552,8 @@ Read with care. At the bridge five of the six sunlit regions are within 0.03 of 
 
 ### Oracle and fix round (plan Task 5b)
 
+*Note of 2026-10-10 (post sub-project, Task 8b; ledger ruling 30).* The terrain figures of this subsection, the shadowed ground regions above all (dirt by the palisade, grass in leaf shadow), are of the base map tf3 read as stored, with an ambient 1.8 to 2.5 times the game's; ground in shadow is ambient alone and is what that reading moved most. Since commit `5d0f974` they no longer describe the picture, and the native shadow's strength has not been judged again on the right ambient: section 17, "The base map's gamma sign" ("Runs", item 4).
+
 Plan Task 5b (2026-10-09), after the runs above: the canopy's shadow that read as too dense, the third spot's frame rate, the two adapters' masks, and the fix round of the review of plan Task 5. Evidence files are `task5b_*`.
 
 **The oracle.** No SDK change was needed. The emulator's `--readback_resolve=full` copies every resolve back into guest memory, so the two maps (`0x12BE1000`, `0x12FE1000`: `k_24_8_FLOAT`, tiled, big-endian, the 20e4 depth float in the upper 24 bits, holding `1 - z`) and the scene depth (`0x1A02A000`) can be read there at the frame's end. A temporary diagnostic in `clay_pass.cpp` (`task5b_diag_clay_pass.patch`; behind `FABLE2_NATIVE_SHADOW_DUMP`; removed again, not in any commit) wrote, for consecutive frames, those guest ranges and the native maps, pre-pass depth and mask read back from the GPU, with the mask's constants and the tile. `task5b_oracle.py` compares them. Runs 372 (`task5b_bridge_oracle_*`: the bridge plan of plan Task 5) and 373 (`task5b_bridge_split_*`: `38:VIEW=split`), both `RUN CLEAN`; with the read-back the game runs at about 2.5 fps, which does not matter for a comparison of one frame's textures. Limits: the mask's memory (`0x12B17000`) and a band of rows of the near map are reused by later resolves of the frame (76% of the mask's bytes are zero at the frame's end; the band shows in `task5b_bridge_oracle_cmp_01_near_emulated.png`), so the emulated mask itself was **not** read; comparisons of the near map use the rows below the band.
@@ -3601,6 +3609,8 @@ Shots viewed (runs 375 to 378): the software adapter's shadow view (maps left, t
 **Fix round (review of plan Task 5).** (1) The lit shaders read the mask as the game's fetch does: `0x26052DEFBA688AF2` instr 4 and 5 (and `0xA7E45D07F5CF6627` instr 7) fetch tf8 at `|r4.xy| * c0.zw + c0.xy`, `r4` the pixel position register (whole pixel coordinates: the SDK's translator rounds the position down, `dxbc_translator.cpp` line 659), `c0` = (0, 0, 1/1120, 1/720), and tf8's fetch constant (`0x88C24802 0x12B17002 0x0059E45F 0x00281400 ...`: 1120 x 720, `k_8`, magnification and minification linear, clamped): the pixel's corner, the mean of four texels. Native: `(pos.xy - 0.5) * (1 / width, 1 / height)` with the linear clamped sampler; mirrors `MaskReadCoordinate`, `MaskRead`, `MaskReadValue` (case 571). (2) Frames with the switch and the light on that are drawn with the white mask for want of the light block or of the shadows' objects are counted: `no-light L, no-objects O` at the end of the `Shadow:` line. (3) `FrameInverseViewProj` takes the matrix of the majority of the records that give one (more than half agree within the tolerance), counts the others (`mask drawn (K records with another view)`) and fails closed without a majority (case 568). (4) The pre-pass's lighter draw, above (`PrepassDiscards`, `PrepassKey` with the record's alpha: case 572). (5) Comments. This changes shader text and the binding pattern: it needs the software-adapter run before any run on the real GPU.
 
 ### Validation (plan Task 6)
+
+*Note of 2026-10-10 (post sub-project, Task 8b; ledger ruling 30).* The terrain figures of this subsection, the shadowed ground regions above all (dirt by the palisade, grass in leaf shadow), are of the base map tf3 read as stored, with an ambient 1.8 to 2.5 times the game's; ground in shadow is ambient alone and is what that reading moved most. Since commit `5d0f974` they no longer describe the picture, and the native shadow's strength has not been judged again on the right ambient: section 17, "The base map's gamma sign" ("Runs", item 4).
 
 Written 2026-10-09 for the binary of that day, 04:50 (`fable_2.exe`, 109,747,712 bytes, sha256 `571648DC...11127A9D`: the tree of commit `3484927`, `task5b_build_game_3.txt`); runs 377 and 378 are of the commit before it, `3ab5833`, which differs in the pre-pass's reach alone ("The pre-pass's reach": no shader text, binding or target). Plan Task 6 changed no code of the renderer. The tools are `tools\xdk_sigmatch\region_compare.py` (with the edge measure of this task: `--edge`, tests in `tests\test_region_compare.py`, seen failing first: `task6_edge_tests_red.txt`) and the regions and segments of [`shadow-regions.json`](shadow-regions.json). Files named `task6_*` are in the evidence folder.
 
@@ -4191,6 +4201,8 @@ Plan Task 6 (2026-10-09). Binary of commit `7242edb` (109,877,760 bytes) for run
 | 56 to 63 | 27,541 | 1.020, 1.080, 1.034 | **0.800, 0.752, 0.785** |
 
 Median within 10% per channel over the sky pixels of the read-back picture: **met** on both pictures as the criterion is written (whole-picture medians). Said beside it: one band's green is 11% over; the excess is most likely what the game draws over its sky there, the clouds, the sun's disc and glow (inference from `task6_sunward_pair.png`: streaks and a pale glow in the oracle, a smooth gradient natively; it was not separated, a median 8% high over 27,541 pixels needs the overlay on more than half of them, and a table or a `c20.w` 5 to 8% off in this run would read the same; "Unlit draws and the reviews' fixes" has the draws). **This is the first comparison of tf4 beyond its first texel with the game:** the table's upper 40 texels are the game's sky within 1 to 11% (if the excess is the overlay). **The texel addressing is not settled to half a texel:** read half a texel lower or higher the medians move by 1% (red 1.040 / 1.031 / 1.021), less than the residual; what the view bounds is an error of a few texels (red rises about 2% a texel there and the red-to-blue ratio of the bands stays within 9%: about four texels; inference).
+
+*Note of 2026-10-10 (post sub-project, Task 8b; ledger ruling 30).* The excess of the terrain regions in the table below (far rock, far slope, island, the three ranges, dirt patch, rock face: 13 to 45% over) has its cause found: the base map tf3 was read as stored. It is fixed in commit `5d0f974`; what stays over is the wooded ranges, whose distant trees are not drawn: section 17, "The base map's gamma sign".
 
 **Criterion 4, the native target against the oracle** (`task6_oracle_regions_45s.txt`, `task6_oracle_pair.png`: frame 1 of capture `145136` divided by `c20.w` beside the native shot at 45 s, 5 s before the capture, taken back to the value before the exposure; native over oracle; the 56 s shot, 6 s after, in `task6_oracle_regions_56s.txt`):
 
@@ -6010,11 +6022,15 @@ Task 8b of the post sub-project (2026-10-10): why the native scene's ground was 
 game's. Scripts and outputs: `out/native-evidence/post/t8b_*` (`t8b_scene_space.py`,
 `t8b_ratio_map.py`, `t8b_ground.py`, `t8b_fc.py`, `t8b_rows.py`; their `.txt` and `.png`).
 
-**The finding.** Every terrain row of every capture fetches the base map tf3 (the baked light
+**The finding.** Every terrain row of the captures read fetches the base map tf3 (the baked light
 map of `terrain_layer` and `terrain_far`: `pow(tf3, c21.w) * c21.xyz * L + c20.xyz`) with the
 sign fields 3, 3, 3, 0 in its fetch constant (dword 0, bits 2 to 9; 3 is "gamma";
 `t8b_fc.py` on capture `023443`: 567 of 567 in-scene tess rows, and no other texture of a tess or
-mesh row has a gamma field). With that field the console's fetch takes the filtered texel from
+mesh row has a gamma field; the review of Task 8b scanned every row of every kind and frame of
+captures `034554` and `034918`: 4,976 of 4,976 and 4,896 of 4,896 tess rows, DXT1, identity
+swizzle, exponent adjust 0, and the same single entry in seven older captures:
+`out\tests\review-task8b\scan_signs.py`, `scan_gamma.py`; every capture is of one save and one
+region of the world). With that field the console's fetch takes the filtered texel from
 gamma to linear through its piecewise curve before the shader sees it (the SDK's
 `PWLGammaToLinear`, applied by its translators in the case `TextureSign::kGamma`). The native
 pass, the capture's material inputs and `terrain_replay.py` read the texel as stored. A stored
@@ -6066,6 +6082,12 @@ replay, far terrain under the layers), counted only where the terrain's own heig
 | third spot: far mountains left, centre (402, 352) | 1.38, 1.39 / 1.42, 1.44 / 1.61, 1.62 | **1.01, 1.02 / 1.01, 1.02 / 1.00, 1.04** |
 | rock face (91; steep ground) | 1.50 / 1.51 / 1.69 | 1.23 / 1.19 / 1.15 |
 
+The two grass regions of the bridge are left out of the table: they are covered by grass
+plants, not bare terrain, and the terrain model does not describe them (with the curve its red is
+1.51 and 1.60 of the game's on "grass beside it" and "grass in leaf shadow", its green 1.01 and
+0.88: `t8b_ground_bridge_gamma.txt`). The native shots of "grass beside it" did not move with the
+fix (0.994 -> 0.995 like for like: "Runs", item 2).
+
 With the stored reading the model reproduces the native shots' excess (far slope: 1.34 to 1.40
 before the fog is 1.2 after it, as measured); with the curve it is the game's within 1 to 4% on
 bare ground in all three channels, near and far, at two places. The alternatives the task named:
@@ -6092,7 +6114,12 @@ signed or biased colour component (none occurs): such a record is not lit. `PwlG
 the C++ mirror, `light_formulas.pwl_gamma_to_linear` the reference, and `terrain_replay.py` reads
 every texture through its fetch constant's signs. Only the lit programs of the two terrain shaders
 change (a program without light reads no base map: the shader test compares). `DrawRecord` is
-untouched; no binding, no target and no SDK file changes. Tests: `tests/native/test_clay_logic.cpp`
+untouched; no binding, no target and no SDK file changes. **The sign is checked for tf3 alone**: the other
+textures the pass reads as stored (the terrain's tf0, tf13 and weights, every mesh material
+texture) have no sign check and no census, so a gamma or biased field there would be drawn as
+stored without a word, and tf3's exponent adjust (0 in every row) is not checked either. None
+occurs in the captures scanned, all of one save and one region; a census line (bound textures
+with a non-zero sign field a frame) is a follow-up (review of Task 8b, Minors 1 and 2). Tests: `tests/native/test_clay_logic.cpp`
 cases 618 to 620, `tests/native/test_native_shaders.cpp` case 241 and the pins,
 `tests/test_terrain_replay.py` (`GammaSignTest`).
 
@@ -6150,10 +6177,12 @@ scripts `t8b_regions.py`, `t8b_scene_space.py`, `t8b_ratio_map.py`, `t8b_shadow.
    is 0.94 to 1.05 with 75% of its pixels within 5% of 1 (before: 3%); the island 0.93 to 1.06, 70%
    (4%). `t8b_bridge_off_after_bands.png` (viewed): the far ground between the trees is grey
    (within 3%), where it was orange (10 to 25% over) from shore to ridge.
-4. *Ground in shadow: not too dark; nearer the game's than before* (`t8b_shadow_*.txt`: every
-   fourth pixel that is ground, classed by how much of the sun the GAME's pixel has, native shot
-   over the stored scene, median with the quartiles; leaf shadows move between shot and capture,
-   so single pixels mean nothing and the spread is wide).
+4. *Ground in shadow: NOT DECIDED* (review of Task 8b, Important 1; the first writing of this
+   item said "not too dark; nearer the game's than before", which its measure does not show).
+   The measure (`t8b_shadow_*.txt`): every fourth pixel that is ground, classed by how much of
+   the sun the GAME's pixel has, native shot over the stored scene, median with the quartiles
+   (leaf shadows move between shot and capture, so single pixels mean nothing and the spread is
+   wide).
 
    | Ground | bridge before | bridge after | third spot before | third spot after |
    |---|---|---|---|---|
@@ -6163,13 +6192,29 @@ scripts `t8b_regions.py`, `t8b_scene_space.py`, `t8b_ratio_map.py`, `t8b_shadow.
    | half in the sun, 30 to 100; beyond | 1.23; 1.13 | 1.01; 1.02 | 1.12; 1.12 | 0.96; 1.02 |
    | in the sun, nearer than 30; 30 to 100; beyond | 1.05; 1.13; 1.10 | 0.92; 0.93; 0.98 | 0.72; 1.10; 1.09 | 0.64; 0.95; 0.98 |
 
-   Ground in the game's shadow nearer than 100 units was 10 to 75% brighter natively and is 2%
-   under to 14% over (beyond 100 units 11 and 19% over, from 19 and 24%): the fix took the excess
-   out and did not push it under. Near ground in the sun reads 0.92 to 0.93
-   at the bridge (quartiles 0.76 to 1.05; the dirt patch itself 0.95, the planks beside it 0.95):
-   3 to 5% under the game's as every near lit region, the rest pixels the native shadows cover and
-   the game's do not at that moment. The third spot's near sunlit ground (0.72 before, 0.64 after)
-   lies under moving leaf shadow in both pictures and is no evidence either way.
+   What the table does not show. The class is made from the game's pixel alone, and the ratio
+   has that same pixel as its denominator: picking low game values pushes native over game up in
+   the "shadow" class and down in the "sun" class whatever the native picture does (the sun class
+   reads 0.92, 0.93 and 0.64). In the 30 to 100 band the two classes moved by the same factor at
+   the bridge (1.18 -> 0.98 and 1.13 -> 0.93: both 0.83), where ground in shadow in both pictures
+   would have moved by the ambient's own factor (0.40 to 0.55), as the near band partly does
+   (1.75 -> 1.14: 0.65). So the 30 to 100 "shadow" pixels are not shadowed ground in the native
+   picture, and their 0.98 says nothing about shadowed ground. What stands: the near band's fall
+   (1.75 -> 1.14, 1.52 -> 1.13) is what the formula predicts, and no region that holds still
+   shows shadowed ground under the game's. **The one direct figure points the other way**: "dirt
+   by the palisade" at the third spot, shadowed terrain (`t8b_regions.txt`; native over the
+   emulated shots, linear luminance), reads **1.14 before and 0.67 (bloom off) and 0.70 (bloom
+   on) after**; "grass in leaf shadow" at the bridge 1.21 -> 1.16. At the palisade the native
+   shadow covers the whole rectangle while the emulated one is dappled and its shots drift by 40%
+   (the reviewer's crops, `out\tests\review-task8b\palisade_dirt.png`), so 0.67 is in part the
+   shadow's shape and no proof of an ambient that is too dark. **Near ground in shadow may now be
+   too dark (0.67 to 0.70 at one region); the native shadow's strength was last judged on the
+   old, too bright ambient (section 15); not followed here.** What would decide it: class by both
+   pictures (the game's share of sun below 0.25 and the native mask's value at the pixel) and
+   report only pixels shadowed in both. Until then it is the eye's: user check 61. Near ground in
+   the sun reads 0.92 to 0.93 at the bridge in this measure (the dirt patch itself 0.95, the
+   planks beside it 0.95); the third spot's near sunlit ground (0.72 before, 0.64 after) lies
+   under moving leaf shadow in both pictures and is no evidence either way.
 5. *What remains over.* (a) **The wooded ranges**: 1.15, 1.19, 1.45 without bloom and 1.15, 1.21,
    1.55 with it (third spot 1.24, 1.08 and 1.27, 1.08): the game's distant trees, not drawn
    natively; in the left range 80% of the pixels are still more than 15% over (84% before), in
@@ -6186,7 +6231,7 @@ scripts `t8b_regions.py`, `t8b_scene_space.py`, `t8b_ratio_map.py`, `t8b_shadow.
    1.04, far rock 1.05 and 1.12, averted pole side 1.10, the ranges 1.14, 1.21, 1.50. Bloom off:
    sky 0.92, far peak 0.85, far slope 0.85, island 0.82, dirt patch 0.81, rock face 0.84, averted
    pole side 0.57, the ranges 0.90, 0.96, 1.18. So with the scene mended the bloom brings every
-   standing region to within 5% of the game's picture but the wooded ranges, the far rock below
+   standing region of the bridge to within 5% of the game's picture but the wooded ranges, the far rock below
    the ridge (trees at its edge) and the averted pole side, and without it the
    native picture is 8 to 19% under on the far ground and the sky; the wooded ranges are the one
    place the bloom makes worse (they are too bright before it).
@@ -6217,14 +6262,18 @@ scripts `t8b_regions.py`, `t8b_scene_space.py`, `t8b_ratio_map.py`, `t8b_shadow.
    applied to the pin alone both are caught by 241's compiled check).
 
 **The bloom's default, with the far ground mended** (ruling 29 held it off for this cause; not
-changed here). For ON: item 6 (the picture is within 5% of the game's on every standing region
+changed here). For ON: item 6 (at the bridge the picture is within 5% of the game's on every standing region
 but the wooded ranges, the far rock below the ridge and the averted pole side, and 8 to 19% under
 without it), criteria 11 to 13's first readings, no D3D
 error on either adapter. Against: (1) **cost is not measured**: no run with the bloom is timing
 evidence (every one at shot width 1296), so criterion 15's cost part is open; (2) the wooded
 ranges go from 1.15 to 1.45 to 1.15 to 1.55 with it; (3) the sun's two layers are 0 until 10c;
 (4) it acts only in a post frame, so its default follows `--fable2_native_post`'s, which waits for
-criterion 9. The picture no longer speaks against ON; the missing timing does.
+criterion 9; (5) the "within 5%" is a bridge statement: at the third spot the emulated sky does
+not hold still (native over emulated 1.23 and 1.54 with the bloom, while native over the replay's
+variant B is 1.00 and 0.99), so that spot supports it neither way (review of Task 8b, Minor 9);
+(6) near ground in shadow is not decided (item 4). The picture no longer speaks against ON at the
+bridge; the missing timing does.
 
 ### Outstanding: cost
 

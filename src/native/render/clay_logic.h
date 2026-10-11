@@ -6697,8 +6697,7 @@ inline float WindLeafLiftMirror(const float p[3], const float q[3], const float 
   const float turn = Frac(clock * Lit(c, flutter_y) + v[1]);  // (the shader doubles it and takes half of that)
   const float s8 = std::sin(Frac((turn + turn) * Lit(c, half) + Lit(c, half)) * Lit(c, two_pi) + Lit(c, lo));
   const float k = -(Lit(c, amp) * s6) > 0.0f ? Lit(c, back) * s6 : Lit(c, amp) * s6;
-  const float beyond = length + Lit(c, slack);
-  const float push = Lit(c, amp) * s7 * (beyond > 0.0f ? beyond : 0.0f) * c16[3];
+  const float push = Lit(c, amp) * s7 * std::max(length + Lit(c, slack), 0.0f) * c16[3];
   const float lift = c15[3] * (std::fabs(k) * Lit(c, amp) * s8) * k;
   return push * (c17[2] * Lit(c, push_gust) + Lit(c, one)) + lift * (c17[2] * Lit(c, lift_gust) + Lit(c, one));
 }

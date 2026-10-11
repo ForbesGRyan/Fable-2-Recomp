@@ -2280,6 +2280,29 @@ static void NativeWindTests() {
       CHECK(735, WindReach(wi, *capture::FindWind(pin.hash), extent) == got);
     }
     CHECK(735, plants == 3 && trunks == 6 && leaves == 6);
+    // Rounded UP from the double: over 400 made plants (the two amplitudes varied), against the reference's
+    // expression computed here in double, the reach is never below it (a reach rounded to the nearest single is
+    // below it in about half of them) and never more than one step of single precision above it.
+    {
+      ClayWindConstants c;
+      WindFamily family = WindFamily::kNone;
+      CHECK(735, Constants(kReach[0].hash, kReach[0].reg, &c, &family) && family == WindFamily::kPlant);
+      int below_nearest = 0;
+      for (int i = 0; i < 400; ++i) {
+        c.reg[0][2] = 0.025f + 1.0e-4f * float(i);
+        c.reg[0][3] = 0.0637f + 3.0e-5f * float(i % 37);
+        double sum = 0.0;
+        for (int k = 0; k < 3; ++k) {
+          const double x = double(c.reg[1][k]) * double(c.reg[0][2]) + double(c.reg[2][k]) * double(c.reg[0][3]);
+          sum += x * x;
+        }
+        const double want = std::sqrt(sum);
+        const float got = ClayWindReach(family, c, WindExtent{});
+        CHECK(735, double(got) >= want && got <= std::nextafter(float(want), std::numeric_limits<float>::infinity()));
+        below_nearest += double(float(want)) < want;
+      }
+      CHECK(735, below_nearest > 100);
+    }
     // (a leaf's reach grows with the mesh's largest distance from a pivot: ledger ruling 32)
     CHECK(735, F(kReach[9].length) == 0.0f && F(kReach[11].length) > 19.9f && F(kReach[11].reach) > F(kReach[10].reach) &&
                    F(kReach[10].reach) > F(kReach[9].reach));

@@ -130,6 +130,40 @@ class Slots(unittest.TestCase):
         reach = set(re.findall(r"\blit\((\w+)\)", cpp_function(self.logic, "ClayWindReach")))
         self.assertEqual(reach, reference_names(lf.wind_reach_tree, lf.wind_reach_leaf))
 
+    def test_the_program_names_its_literals_in_the_mirrors_order(self):
+        """Term by term: the literal names a function of the vertex program reads, in the order it reads them, are
+        those of its C++ mirror (which the pins hold to the reference's numbers). A set of names cannot see a
+        literal taken for another in one term (W_one for W_half in the flutter's wrap: both are read elsewhere in
+        the function), nor a term rewritten with one read fewer; the sequence does."""
+        def hlsl(prefix, name):
+            return re.findall(r"\b" + prefix + r"_(\w+)\b", hlsl_function(self.shaders, name))
+
+        def mirror(name):
+            return [n[2:] if n.startswith("p_") else n
+                    for n in re.findall(r"\bLit\(c, (?:wind_slot::)?(\w+)\)", cpp_function(self.logic, name))]
+
+        self.assertEqual(hlsl("W", "WindPhase"), mirror("TreePhase"))
+        self.assertEqual(hlsl("W", "WindPhase"), ["half", "two_pi", "lo"])
+        self.assertEqual(hlsl("P", "WindPlant"), mirror("WindPlantMirror"))
+        self.assertEqual(len(hlsl("P", "WindPlant")), 6)
+        offset = hlsl("W", "WindTreeOffset")
+        self.assertEqual(offset, mirror("WindTreeOffsetMirror"))
+        self.assertEqual(len(offset), 22)
+        # A leaf: the program's one function is the mirror's two (the gust and the lift, then nothing more).
+        leaf = hlsl("W", "WindLeaf")
+        self.assertEqual(leaf, mirror("WindLeafLiftMirror") + mirror("WindLeafMirror"))
+        self.assertEqual(len(leaf), 22)
+        self.assertEqual(leaf[leaf.index("flutter_y") + 1:leaf.index("flutter_y") + 5], ["half", "half", "two_pi", "lo"])
+        # ... and the reference's own order where it is written the same way (its `k` names the back gain first).
+        ref = re.findall(r'lit\["(\w+)"\]', inspect.getsource(lf.wind_tree_terms).split('"""')[2] +
+                         inspect.getsource(lf.wind_tree_offset).split('"""')[2])
+        self.assertEqual(ref, offset)
+        ref = re.findall(r'lit\["(\w+)"\]', inspect.getsource(lf.wind_leaf_lift).split('"""')[2])
+        at = ref.index("back")
+        self.assertEqual(ref[at:at + 3], ["back", "amp", "amp"])
+        ref[at:at + 3] = ["amp", "back", "amp"]
+        self.assertEqual(ref, leaf)
+
     def test_no_literal_of_the_table_is_hlsl_text(self):
         """The three functions' numbers are the reference's own (0 and the phase's 1); every other number comes from
         o_wind_lit by name."""

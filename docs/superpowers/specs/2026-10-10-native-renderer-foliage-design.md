@@ -2,8 +2,8 @@
 
 Status: **phase 11a (wind) built and validated by stills and by the native depth, 2026-10-11, with two parts left open by ledger ruling 49:
 criterion 9's cost (no timing evidence yet) and criterion 8's fourth part (no pair of runs of the two commits at one width)** (verdicts with
-each criterion and in FM section 18, "Validation (11a)"; the switch stays off by default); **phase 11b: the rules and the late draws built,
-not yet run in the game (plan Tasks 12 and 13)**; phases 11b and 11c: design, 2026-10-10 (branch `native-renderer-foliage`). Plan:
+each criterion and in FM section 18, "Validation (11a)"; the switch stays off by default); **phase 11b: the rules built; the late draws built and run (criteria 10 and 11 met for them, criterion 12 not decidable as written
+and shown by a substituted measure); the fading draws built, not yet run (plan Tasks 12 to 14)**; phases 11b and 11c: design, 2026-10-10 (branch `native-renderer-foliage`). Plan:
 `docs/superpowers/plans/2026-10-10-native-renderer-foliage.md`. Research:
 `.superpowers/sdd/foliage-research.md` (untracked; its scripts and outputs in
 `out/native-evidence/foliage/research/`). Ledger:
@@ -630,6 +630,8 @@ threshold set here without a measured one before it (ruling 20).
     covered and the half-covered sets are disjoint and their union is exactly the set
     `AlphaToMaskCovers` keeps. (Test; the shader test finds the two thresholds in the compiled
     programs.)
+    **Verdict (plan Task 13): met** (1,311,744 inputs against the emulator's instructions; the compiled kept
+    sets of the half and the full program against `CoveredSamples`).
 11. *Order and depth.* `PlanCoverageOrder`'s test: for every arrangement of up to six records
     (opaque, early, late, blended) with every sky place and depth place, the sky precedes every
     blend, the early tail precedes the layer's depth step and every late record, and no record is
@@ -637,6 +639,9 @@ threshold set here without a measured one before it (ruling 20).
     today's order for every input. In the stored native scene of run PAIR-SUN with coverage on:
     the layer's depth before the tree occluders has no texel of the late twins' rasterised cover
     (at most 0.5% of that cover, the edge), and criterion 7's holes count holds with coverage on.
+    **Verdict (plan Task 13): met for the late records** (the plan function's cases; run D's layer depth
+    holds the late tree's own depth on 0.02% of its cover; 0 holes in four scene files). The early records'
+    part is plan Task 14's, not yet run.
 12. *In the game, the late draws (no precedent for the band).* Sunward, sun off, post and bloom
     on, coverage on against off (two runs of one plan whose emulated shots agree within 0.97 to
     1.03 per region; three brackets; no shot within 3 s of a view switch): native on over native
@@ -645,6 +650,12 @@ threshold set here without a measured one before it (ruling 20).
     0.97 to 1.12 (1.06), "beams left" 0.97 to 1.13 (1.075), "beams right" 0.97 to 1.13 (1.07).
     **The predicted change at "sun" is small, and the criterion says so: this step is not
     expected to mend the sun region.**
+    **Verdict (plan Task 13): not decidable as written** (in the view the shots were taken in, the late tree
+    holds no pixel of any region, and without read-back the game's exposure stood at its ceiling of 16);
+    **shown by a substituted measure**: on the tree's own pixels the stored linear scene with coverage is
+    1.36 to 1.38 of the scene without, 1.04 to 1.06 of the half blend's prediction, the depth cover equal
+    within a third of a point. The regions' band is still to be measured in the held sunward view (FM
+    section 18, "Native coverage: the first runs").
 13. *In the game, the fading draws.* The same pair with the `87` draws built, against the late
     draws alone: per region between 0.97 and the model's upper bound times 1.03 (model B over C:
     "sun" 1.25, "beams left" 1.05, "beams right" 1.13, "beam root" 1.02), and the replay's pixel
@@ -809,3 +820,29 @@ wind", "Validation (11a)", "Limits (11a)"; figures and files there):
 - **The fern** (ledger rulings 43, 44; review of Task 11): no code fix, on the native depth; the
   account of the shots by the sway's phase is consistent with them and not shown; its look at rest
   is a limit older than the wind (FM "Limits (11a)" 8).
+
+From plan Tasks 12 to 14 (FM section 18, "Coverage: the rule and the order", "Native coverage", "Native
+coverage: the first runs", "Native coverage: the fading draws", "Stored mip levels in a capture"):
+
+- **Design 11 and ruling 14, amended (plan Task 14's design check): an early record's pre-pass draw is today's**
+  (the first sample's pixels), not its fully covered pixels alone. The pre-pass feeds the shadow mask alone;
+  the game's mask reads its depth copy, which holds the first sample of every row issued before it, so a
+  half-covered pixel of a fading tree takes the shadow at the tree's depth in the game. So the mask is the one
+  of before for every early record, ruling 15 holds with nothing given up, no depth-only full program exists,
+  and Design 11's limit "the shadow mask ... gives a half-covered pixel the sun's shadow of what lies behind
+  it" applies to no early record. A late record is in no pre-pass, which is likely the game's own behaviour
+  [inferred from the bin masks: open question 6].
+- **Open question 6**: the fading and the late rows are in the pre-pass bins (`bin_mask_lo` = `FFFFFFFF` in
+  every family A row); the game's mask draw is issued under a colour bin alone and reads the depth copy's
+  address.
+- **The order of the game's rows**: the late rows are issued after the game's sky and after 30 to 35 blended
+  rows; natively the sky's place lies before the late record once the frame's textures are there, and the sky
+  step moves only in a run's first native frame.
+- **A late record whose scale would admit fully covered pixels** is today's record (`coverage: full`): a
+  verdict the design did not have; none is captured.
+- **The sunward view exists only while the stick is held**; released, the camera returns above the bridge
+  within 5 s. Criterion 12's regions need shots taken during the hold.
+- **Ruling 13's premise is in doubt** (ledger ruling 54): a minified alpha-to-mask plant at fade 1 may have
+  half-covered pixels well inside its cut-out. The discovery capture now dumps a texture's stored mip levels
+  so that this can be measured; the early records' scheme would carry such a draw by widening `CoverageOf`
+  alone (its pre-pass is today's, so nothing would leave the mask's depth). Not built before the measurement.

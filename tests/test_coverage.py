@@ -185,6 +185,7 @@ class SwitchOff(unittest.TestCase):
         # the half program and a half key are asked for in one place, inside the switch's block of the prepare loop
         self.assertEqual(s.count("EnsureCoverageShader(dev)"), 1)
         self.assertEqual(s.count("CoverageHalfKey("), 1)
+        self.assertEqual(s.count("CoverageFullKey("), 1)
         a = s.index("    if (coverage) {\n      ClayCoverageInputs cin;")
         b = s.index("    if (d.alpha_tested) ++st.alpha_tested;", a)
         block = s[a:b]
@@ -192,10 +193,18 @@ class SwitchOff(unittest.TestCase):
         self.assertIn("CoverageHalfKey(d.key)", block)
         self.assertIn("p.coverage_half = true;", block)
         self.assertEqual(s.count("p.coverage_half = true;"), 1)
-        # the half pixel shader goes into a pipeline only for a key with the member
-        self.assertEqual(s.count("pipe.ps = coverage_half_ps_;"), 1)
-        self.assertIn("  if (key.coverage) {\n    if (key.coverage != 1 || kind != 1 || depth_only || !coverage_half_ps_) return nullptr;\n"
-                      "    pipe.ps = coverage_half_ps_;\n  }\n", s)
+        # an early record's parts are set in the same block and nowhere else (plan Task 14)
+        self.assertIn("CoverageFullKey(d.key)", block)
+        self.assertIn("p.coverage_tail = half;", block)
+        self.assertIn("p.coverage_place = false;", block)
+        self.assertEqual(s.count("p.coverage_tail = half;"), 1)
+        self.assertEqual(s.count("p.coverage_place = false;"), 1)
+        self.assertEqual(s.count("p.coverage_tail = "), 2)             # here, and the wind's moved one in PrepareWind
+        # a coverage pixel shader goes into a pipeline only for a key with the member
+        self.assertIn("  if (key.coverage) {\n"
+                      "    nrhi::Shader* const part = key.coverage == 1 ? coverage_half_ps_ : key.coverage == 2 ? coverage_full_ps_ : nullptr;\n"
+                      "    if (kind != 1 || depth_only || !part) return nullptr;\n    pipe.ps = part;\n  }\n", s)
+        self.assertEqual(s.count("pipe.ps = part;"), 1)
         # the sky step's place: SkyPlace's unless the switch's block moves it; PlanCoverageOrder is asked nowhere else
         self.assertIn("  size_t sky_at = sky_order.place;\n", s)
         self.assertEqual(s.count("PlanCoverageOrder("), 1)
@@ -203,8 +212,18 @@ class SwitchOff(unittest.TestCase):
         d = s.index("  for (size_t index = 0; index < prepared_.size(); ++index) {", c)
         self.assertIn("  if (coverage) {\n    coverage_items_.clear();", s[c:d])
         self.assertEqual(s[c:d].count("sky_at = "), 2)
-        self.assertEqual(s.count("draw_sky();"), 2)
-        self.assertIn("if (sky_drawn && index == sky_at) draw_sky();", s)
+        # the tail: no tail unless the switch's block names one; drawn in two places (at its index, after the last record)
+        self.assertIn("  size_t tail_at = kNoCoverageTail;\n", s[c:d])
+        self.assertEqual(s[c:d].count("tail_at = "), 2)
+        self.assertEqual(s.count("draw_tail("), 2)
+        self.assertIn("    if (tail_at == index) {\n      if (sky_drawn && index == sky_at) {\n        draw_sky();\n        sky_done = true;\n      }\n"
+                      "      draw_tail(index);\n    }\n    if (sun_depth_early && !sun_depth_taken && SunDepthBefore(", s)
+        self.assertEqual(s.count("draw_sky();"), 3)
+        self.assertIn("if (sky_drawn && index == sky_at && !sky_done) draw_sky();", s)
+        # a record without coverage parts is drawn as before: one in-place draw, behind a flag that is true for it
+        self.assertIn("    if (p.coverage_place) {\n      if (p.pipeline != bound) {\n        cmd->SetPipeline(p.pipeline);\n        bound = p.pipeline;\n      }\n"
+                      "      DrawPrepared(cmd, p, color, false, mask_bound, &light_mode, &draw_fog, nullptr);\n    }\n", s)
+        self.assertIn("const bool half_here = p.coverage_tail && !CoverageHalfInTail(CoverageKind::kEarly, index, tail_at);", s)
         self.assertIn("if (sky_drawn && sky_at >= prepared_.size()) draw_sky();", s)
         # the log's line only with the switch
         self.assertIn("  if (coverage) {\n    const uint32_t form = ", s)
@@ -219,11 +238,28 @@ class SwitchOff(unittest.TestCase):
         # for SkyPlace a half record is the opaque record it is in the game's state
         self.assertIn("      item.blend = key && key->blend != 0 && !p.coverage_half;\n", s)
 
-    def test_the_retry_and_the_release_know_the_half_program(self):
+    def test_the_retry_and_the_release_know_the_two_programs(self):
         s = self.source
         self.assertEqual(s.count("coverage_half_failed_ = false;"), 2)      # another device, and the F6 retry
-        self.assertEqual(s.count("coverage_half_ps_ = nullptr;"), 2)       # the release, and another device
+        self.assertEqual(s.count("coverage_half_ps_ = coverage_full_ps_ = nullptr;"), 2)       # the release, and another device
         self.assertEqual(s.count("device_->DestroyDeferred(coverage_half_ps_);"), 1)
+        self.assertEqual(s.count("device_->DestroyDeferred(coverage_full_ps_);"), 1)
+
+    def test_an_early_record_keeps_todays_prepass(self):
+        # (the design check of plan Task 14: the pre-pass feeds the mask alone and holds the first sample's pixels, as
+        # the game's depth copy does) nothing in the pre-pass's two loops asks for an early record's parts
+        s = self.source
+        a = s.index("    // The pre-pass's pipelines, one a depth-writing record")
+        b = s.index("  st.mask = mask;", a)
+        self.assertNotIn("coverage_tail", s[a:b])
+        self.assertNotIn("coverage_place", s[a:b])
+        c = s.index("    // 1. The depth pre-pass: every record that writes depth")
+        d = s.index("    // 2. The mask:", c)
+        self.assertNotIn("coverage_tail", s[c:d])
+        self.assertNotIn("coverage_place", s[c:d])
+        header = (ROOT / "src" / "native" / "fable2_native_shaders.h").read_text(encoding="utf-8")
+        self.assertNotIn("kClayTexturedFullDepthPs", header)
+        self.assertNotIn("kClayTexturedFullDepthPs", s)
 
 
 if __name__ == "__main__":

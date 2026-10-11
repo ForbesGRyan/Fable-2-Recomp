@@ -112,11 +112,10 @@ REXCVAR_DEFINE_STRING(fable2_native_wind, "off", "Fable2",
                       "section 18.");
 REXCVAR_DEFINE_STRING(fable2_native_coverage, "off", "Fable2",
                       "Native coverage (sub-project 11, phase 11b; not yet validated): on (or true, 1) = the native view "
-                      "draws a tree that fades between the eye and the hero (a late draw under alpha-to-mask, at fade one "
-                      "half) as the game's two samples resolve it, its pixels at one half over what lies behind, and "
-                      "leaves it out of the shadow mask's depth pre-pass (F3: the Coverage line); off (or false, 0; the "
-                      "default) = it is drawn whole, as before, and nothing of the coverage is made or drawn. Frame map "
-                      "section 18.");
+                      "draws a tree that fades (between the eye and the hero, or by distance) as the game's two samples "
+                      "resolve it under alpha-to-mask: the pixels with both samples covered whole, the pixels with one at "
+                      "one half over what lies behind (F3: the Coverage line); off (or false, 0; the default) = such a tree "
+                      "is drawn whole, as before, and nothing of the coverage is made or drawn. Frame map section 18.");
 REXCVAR_DEFINE_STRING(fable2_native_scene_dump, "off", "Fable2",
                       "Diagnostic of the native renderer (frame map section 18, \"Stored native scene\"): on (or true, 1) = "
                       "each discovery capture made while the native picture is drawn also writes the native scene of its "
@@ -1007,8 +1006,8 @@ void Install(rex::memory::Memory* memory) {
                 "frame with records, and the native view draws those records moved)");
   }
   if (CurrentCoverage()) {
-    REXLOG_INFO("[native] coverage: on (fable2_native_coverage; the native view draws a late coverage record's half-covered pixels at one "
-                "half over what lies behind, and leaves it out of the depth pre-pass)");
+    REXLOG_INFO("[native] coverage: on (fable2_native_coverage; the native view draws a coverage record's half-covered pixels at one half "
+                "over what lies behind: a late record's in its place, an early record's in a tail after the opaque records)");
   }
   // (a diagnostic: its line only when it is on, so that a normal run's log is the one of before)
   if (CurrentSceneDump()) {

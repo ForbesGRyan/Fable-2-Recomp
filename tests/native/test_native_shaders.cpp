@@ -904,7 +904,9 @@ static const char kPinVsMain[] = R"pin(VsOut main(uint vid : SV_VertexID) {
 })pin";
 static const char kPinTexturedMain[] = R"pin(float3 clay_linear(float3 d) { d = saturate(d); return d * d; }
 #ifdef CLAY_COVERAGE
+#if CLAY_COVERAGE == 1
 #define main clay_textured
+#endif
 #endif
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1, float3 world : TEXCOORD2,
             float3 normal : TEXCOORD3, float3 axis : TEXCOORD4, float3 vcolour : TEXCOORD5,
@@ -940,7 +942,7 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
       uint cindex = ((cp.x & 1) << 1) | (cp.y & 1);
       float t0 = 0.5 - float((alpha_mode >> (16 + 2 * cindex)) & 3) * 0.125;
       int covered = (a >= t0 ? 1 : 0) + (a >= t0 + 0.5 ? 1 : 0);
-      if ((alpha_mode & 0x100) == 0 || ((alpha_mode >> 24) & 3) != 1 || covered != 1) discard;
+      if ((alpha_mode & 0x100) == 0 || ((alpha_mode >> 24) & 3) != 1 || covered != CLAY_COVERAGE) discard;
     }
 #endif
 #ifdef CLAY_DEPTH_ONLY
@@ -999,12 +1001,14 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
   return float4(clay_linear(base * (0.35 + 0.65 * facet)) * f_post, 1.0);
 }
 #ifdef CLAY_COVERAGE
+#if CLAY_COVERAGE == 1
 #undef main
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1, float3 world : TEXCOORD2,
             float3 normal : TEXCOORD3, float3 axis : TEXCOORD4, float3 vcolour : TEXCOORD5,
             float4 bend : TEXCOORD6) : SV_Target {
   return float4(clay_textured(pos, ndc, uv, world, normal, axis, vcolour, bend).rgb, 0.5);
 }
+#endif
 #endif)pin";
 static const char kPinTerrainCommon[] = R"pin(float4 sample_colour(float2 at) {
   if (t_colour_sampler == 0) return t_colour.Sample(s_point_wrap, at);
@@ -3055,7 +3059,7 @@ int main() {
       // light text has the fog's tail of the frame's block and the fog's functions under it, with
       // names that do nothing in its place otherwise)
       if (strstr(p.colour, "#define CLAY_DEPTH_ONLY") || Count(p.colour, "#ifdef CLAY_DEPTH_ONLY") != 1 || Count(p.colour, "#else") != 2 ||
-          Count(p.colour, "#endif") != (i == 0 ? 8 : 4) || Count(p.colour, "#ifdef CLAY_WIND") != (i == 0 ? 1 : 0) ||  // (the object block's wind tail: the textured shader's text has the block; case 52 holds its compiled bytes to those of before)
+          Count(p.colour, "#endif") != (i == 0 ? 10 : 4) || Count(p.colour, "#ifdef CLAY_WIND") != (i == 0 ? 1 : 0) ||  // (the object block's wind tail: the textured shader's text has the block; case 52 holds its compiled bytes to those of before)
           Count(p.colour, "#ifdef CLAY_COVERAGE") != (i == 0 ? 3 : 0) ||  // (the half program's three blocks, each with its #endif: the textured shader's text alone; case 53 holds the compiled bytes to those of before)
           Count(p.colour, "#ifdef CLAY_FOG") != 2 || Count(p.colour, "#ifndef CLAY_DEPTH_ONLY") != 1 ||
           Count(p.colour, "#define CLAY_FOG 1") != 1 || strstr(p.colour, "#ifndef CLAY_DEPTH_ONLY") != p.colour) return 192;
@@ -5117,8 +5121,12 @@ int main() {
     // The text's rule: everything of the coverage stands between #ifdef CLAY_COVERAGE and its #endif, three times
     // in the textured text (the entry's other name, the kept set, the entry); the half program is the define and
     // that text; no other program's text names the define or the count.
-    if (Count(kClayTexturedPs, "#ifdef CLAY_COVERAGE\n") != 3 || Count(kClayTexturedPs, "CLAY_COVERAGE") != 3 || strstr(kClayTexturedPs, "#define CLAY_COVERAGE") ||
+    // (since plan Task 14: the entry's two blocks stand under "#if CLAY_COVERAGE == 1" inside, the kept set compares
+    // with the define's value, and the full program is the define 2 and the same text)
+    if (Count(kClayTexturedPs, "#ifdef CLAY_COVERAGE\n") != 3 || Count(kClayTexturedPs, "CLAY_COVERAGE") != 6 || strstr(kClayTexturedPs, "#define CLAY_COVERAGE") ||
+        Count(kClayTexturedPs, "#if CLAY_COVERAGE == 1\n") != 2 || Count(kClayTexturedPs, "covered != CLAY_COVERAGE) discard;") != 1 ||
         strncmp(kClayTexturedHalfPs, "#define CLAY_COVERAGE 1\n", 24) != 0 || strcmp(kClayTexturedHalfPs + 24, kClayTexturedPs) != 0 ||
+        strncmp(kClayTexturedFullPs, "#define CLAY_COVERAGE 2\n", 24) != 0 || strcmp(kClayTexturedFullPs + 24, kClayTexturedPs) != 0 ||
         Count(kClayTexturedPs, "covered") != 2 || Count(kClayTexturedPs, "clay_textured") != 2) return fails(__LINE__);
     for (const char* src : {kClayVs, kClayWindVs, kClayPs, kClayTerrainLayerPs, kClayTerrainFarPs, kClayTerrainLayerDepthPs, kClayTerrainFarDepthPs, kClayShadowPs,
                             kClaySkyPs, kClayMaskPs, kClayQuadPs, kClayCloudPs}) {
@@ -5166,24 +5174,27 @@ int main() {
       const std::string block(begin + strlen("#ifdef CLAY_COVERAGE\n"), end + strlen("    }\n"));
       if (block.find("float t0 = 0.5 - float((alpha_mode >> (16 + 2 * cindex)) & 3) * 0.125;") == std::string::npos ||
           block.find("int covered = (a >= t0 ? 1 : 0) + (a >= t0 + 0.5 ? 1 : 0);") == std::string::npos ||
-          block.find("if ((alpha_mode & 0x100) == 0 || ((alpha_mode >> 24) & 3) != 1 || covered != 1) discard;") == std::string::npos ||
+          block.find("if ((alpha_mode & 0x100) == 0 || ((alpha_mode >> 24) & 3) != 1 || covered != CLAY_COVERAGE) discard;") == std::string::npos ||
           block.find("uint cindex = ((cp.x & 1) << 1) | (cp.y & 1);") == std::string::npos) return fails(__LINE__);
       // (the block stands after the alpha test and today's alpha-to-mask discard and before any colour)
       const char* mask = strstr(kClayTexturedHalfPs, "if (!(a >= mask_base - offset * per_offset)) discard;");
       const char* lit = strstr(kClayTexturedHalfPs, "    if (light_mode & 4) {");
       if (!mask || !lit || !(mask < begin && begin < lit)) return fails(__LINE__);
-      const auto discards = [&](const std::string& text, uint32_t mode, uint32_t x, uint32_t y, float a, bool* ok) {
-        char head[320];
+      const auto discards_as = [&](unsigned program, const std::string& text, uint32_t mode, uint32_t x, uint32_t y, float a, bool* ok) {
+        char head[352];
         std::snprintf(head, sizeof(head),
-                      "float4 main(float4 p0 : SV_Position) : SV_Target {\n  static const uint alpha_mode = %uu;\n  static const float a = %.9g;\n"
+                      "#define CLAY_COVERAGE %u\nfloat4 main(float4 p0 : SV_Position) : SV_Target {\n  static const uint alpha_mode = %uu;\n  static const float a = %.9g;\n"
                       "  static const float4 pos = float4(%u.5, %u.5, 0.0, 1.0);\n",
-                      mode, double(a), x, y);
+                      program, mode, double(a), x, y);
         const std::string listing = Disassembly("coverage_block", (std::string(head) + text + "  return float4(p0.xy, 0.0, 1.0);\n}\n").c_str(), "ps_5_0");
         *ok = *ok && !listing.empty();
         return listing.find("discard") != std::string::npos;
       };
+      const auto discards = [&](const std::string& text, uint32_t mode, uint32_t x, uint32_t y, float a, bool* ok) {
+        return discards_as(1, text, mode, x, y, a, ok);
+      };
       bool ok = true;
-      int kept = 0, dropped = 0;
+      int kept = 0, dropped = 0, full_kept = 0;
       for (const uint32_t offsets : {0x87u, 0xAAu, 0x1Bu, 0xE4u}) {
         for (uint32_t parity = 0; parity < 4; ++parity) {
           const uint32_t x = 6 + (parity >> 1), y = 10 + (parity & 1u);
@@ -5197,16 +5208,44 @@ int main() {
               return fails(__LINE__);
             }
             ++(gone ? dropped : kept);
+            // The full program (plan Task 14): kept exactly where both samples are covered; so with the half program
+            // it parts the pixels today's rule keeps: each in exactly one, and a pixel that rule drops in neither.
+            const bool full_gone = discards_as(2, block, mode, x, y, a, &ok);
+            const uint32_t n = CoveredSamples(uint8_t(offsets), x, y, a);
+            if (!ok || full_gone != (n != 2u) || (!gone && !full_gone) || ((!gone || !full_gone) != AlphaToMaskCovers(uint8_t(offsets), x, y, a, 1))) {
+              std::cerr << "the full program's kept set: offsets " << std::hex << offsets << std::dec << " pixel (" << x << ", " << y << ") alpha " << a << ": "
+                        << (full_gone ? "discarded" : "kept") << ", covered samples " << n << "\n";
+              return fails(__LINE__);
+            }
+            full_kept += full_gone ? 0 : 1;
+            if (!discards_as(2, block, mode & ~(3u << 24), x, y, a, &ok) || !discards_as(2, block, mode & ~0x100u, x, y, a, &ok) || !ok) return fails(__LINE__);
             // (not two samples, or no alpha-to-mask: nothing is kept)
             if (!discards(block, mode & ~(3u << 24), x, y, a, &ok) || !discards(block, (mode & ~(3u << 24)) | (2u << 24), x, y, a, &ok) ||
                 !discards(block, mode & ~0x100u, x, y, a, &ok) || !ok) return fails(__LINE__);
           }
         }
       }
-      if (kept < 32 || dropped < 64) return fails(__LINE__);   // (both verdicts occur: 3 of 7 alphas a parity are kept)
+      if (kept < 32 || dropped < 64 || full_kept < 32) return fails(__LINE__);   // (both verdicts occur: 3 of 7 alphas a parity are kept by the half program, 2 by the full)
+      // The full program itself: it compiles, binds and reads the draw's constants as the textured program does, is
+      // another program than both, and its alpha is not the half program's constant (its entry is the text's own).
+      {
+        if (!Compile("clay_textured_full_ps", kClayTexturedFullPs, "ps_5_0")) return fails(__LINE__);
+        if (BindingsMismatch("clay_textured_full_ps", kClayTexturedFullPs, "ps_5_0", false) || DrawLayoutMismatch("clay_textured_full_ps", kClayTexturedFullPs, "ps_5_0")) return fails(__LINE__);
+        const std::string full = Disassembly("clay_textured_full_ps", kClayTexturedFullPs, "ps_5_0");
+        if (full.empty() || Code(full) == Code(whole) || Code(full) == Code(half) || HasLineWith(full, "mov", "o0.w, l(0.500000)")) return fails(__LINE__);
+        // (it is the textured program but for the kept set: with the block's one discard taken out, the bytes of before)
+        const std::string never = Changed(kClayTexturedFullPs, "      if ((alpha_mode & 0x100) == 0 || ((alpha_mode >> 24) & 3) != 1 || covered != CLAY_COVERAGE) discard;\n", "");
+        size_t size = 0;
+        if (never.empty()) return fails(__LINE__);
+        const uint64_t hash = CodeHash("clay_textured_full_never", never.c_str(), "ps_5_0", &size), base = CodeHash("clay_textured_ps", kClayTexturedPs, "ps_5_0", &size);
+        if (hash == 0 || hash != base) {
+          std::cerr << "the full program without its discard is not the textured program\n";
+          return fails(__LINE__);
+        }
+      }
       // Controls: a block that keeps the fully covered pixels, one whose second threshold is a quarter above the
       // first, and one with "greater" for "at least" each disagree with CoveredSamples somewhere on the same inputs.
-      for (const auto& change : {std::pair<const char*, const char*>{"covered != 1) discard;", "covered != 2) discard;"},
+      for (const auto& change : {std::pair<const char*, const char*>{"covered != CLAY_COVERAGE) discard;", "covered != 2) discard;"},
                                  std::pair<const char*, const char*>{"(a >= t0 + 0.5 ? 1 : 0)", "(a >= t0 + 0.25 ? 1 : 0)"},
                                  std::pair<const char*, const char*>{"int covered = (a >= t0 ? 1 : 0)", "int covered = (a > t0 ? 1 : 0)"},
                                  std::pair<const char*, const char*>{"& 3) * 0.125;", "& 3) * 0.25;"},
@@ -5227,7 +5266,8 @@ int main() {
         }
       }
       std::cout << "coverage: without the define the textured programs' bytes of before; the half program keeps the pixels with one covered sample of two ("
-                << kept << " kept, " << dropped << " discarded of " << kept + dropped << " evaluated), nothing under another sample count, and writes the alpha one half\n";
+                << kept << " kept, " << dropped << " discarded of " << kept + dropped << " evaluated), nothing under another sample count, and writes the alpha one half; "
+                << "the full program keeps the pixels with both (" << full_kept << " kept) and is the textured program otherwise; the two part today's kept set\n";
     }
   }
   // Negative control: broken HLSL must fail (proves the harness reports errors).

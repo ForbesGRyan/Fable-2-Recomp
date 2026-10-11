@@ -2586,18 +2586,21 @@ static void CoverageTests() {
       CHECK(752, !CoverageDrawable(hand));
     }
   }
-  // 753: the verdict, one chain: off; no late record (an early one is Task 14's and is today's record here); not
-  // drawable; a late record that could have fully covered pixels (today's record until the full program exists);
-  // no pipeline; drawn. Drawn only with everything, and never with the switch off.
+  // 753: the verdict, one chain: off; no coverage record; not drawable; a late record that could have fully
+  // covered pixels (today's record: none is captured, and a late record's place in the pre-pass is unsettled for
+  // it); a pipeline missing; drawn. Drawn only with everything, and never with the switch off. An early record
+  // is drawn whatever its scale: its fully covered pixels have the full program (plan Task 14).
   for (uint32_t bits = 0; bits < 16; ++bits) {
     for (CoverageKind kind : {CoverageKind::kNone, CoverageKind::kEarly, CoverageKind::kLate}) {
       const ClayCoverageInputs in{(bits & 1u) != 0, kind, (bits & 2u) != 0, (bits & 4u) != 0, (bits & 8u) != 0};
       const ClayCoverage c = DecideClayCoverage(in);
-      const bool all = in.on && kind == CoverageKind::kLate && in.drawable && !in.has_full && in.has_pipeline;
+      const bool all = in.on && kind != CoverageKind::kNone && in.drawable && !(kind == CoverageKind::kLate && in.has_full) && in.has_pipeline;
       CHECK(753, (c == ClayCoverage::kDrawn) == all);
       CHECK(753, in.on || c == ClayCoverage::kOff);
       if (in.on && kind == CoverageKind::kLate && in.drawable) {
         CHECK(753, c == (in.has_full ? ClayCoverage::kFull : in.has_pipeline ? ClayCoverage::kDrawn : ClayCoverage::kPipeline));
+      } else if (in.on && kind == CoverageKind::kEarly && in.drawable) {
+        CHECK(753, c == (in.has_pipeline ? ClayCoverage::kDrawn : ClayCoverage::kPipeline));
       } else if (in.on) {
         CHECK(753, c == ClayCoverage::kNone);
       }
@@ -2610,19 +2613,22 @@ static void CoverageTests() {
     ClayStats st;
     CHECK(754, FormatCoverageText(st) == "Coverage: off");
     st.coverage_switch = true;
-    CHECK(754, FormatCoverageText(st) == "Coverage: on, late 0, early 0 | not drawn: {}");
+    CHECK(754, FormatCoverageText(st) == "Coverage: on, late 0, early 0 (0 in the tail) | not drawn: {}");
     st.coverage_late = 3;
-    CHECK(754, FormatCoverageText(st) == "Coverage: on, late 3, early 0 | not drawn: {}");
+    CHECK(754, FormatCoverageText(st) == "Coverage: on, late 3, early 0 (0 in the tail) | not drawn: {}");
+    st.coverage_early = 28;
+    st.coverage_tail_draws = 26;
+    CHECK(754, FormatCoverageText(st) == "Coverage: on, late 3, early 28 (26 in the tail) | not drawn: {}");
     st.coverage_rest[size_t(ClayCoverage::kPipeline)] = 2;
     st.coverage_rest[size_t(ClayCoverage::kNone)] = 900;     // (not a reason: a record that is no coverage record)
-    CHECK(754, FormatCoverageText(st) == "Coverage: on, late 3, early 0 | not drawn: {coverage: pipeline 2}");
+    CHECK(754, FormatCoverageText(st) == "Coverage: on, late 3, early 28 (26 in the tail) | not drawn: {coverage: pipeline 2}");
     st.coverage_rest[size_t(ClayCoverage::kFull)] = 1;
-    CHECK(754, FormatCoverageText(st) == "Coverage: on, late 3, early 0 | not drawn: {coverage: full 1, coverage: pipeline 2}");
+    CHECK(754, FormatCoverageText(st) == "Coverage: on, late 3, early 28 (26 in the tail) | not drawn: {coverage: full 1, coverage: pipeline 2}");
     st.coverage_sky_moved = true;
     st.coverage_sky_over = 5;
     st.coverage_sky_over_no_depth = 1;
-    CHECK(754, FormatCoverageText(st) == "Coverage: on, late 3, early 0 | not drawn: {coverage: full 1, coverage: pipeline 2} | "
-                                         "the sky step moved before the first late record, over 5 records (1 without depth write)");
+    CHECK(754, FormatCoverageText(st) == "Coverage: on, late 3, early 28 (26 in the tail) | not drawn: {coverage: full 1, coverage: pipeline 2} | "
+                                         "the sky step moved before the first blend, over 5 other records (1 without depth write)");
   }
   // 755: the frame's depth place among the prepared records, for PlanCoverageOrder: the first prepared record at or
   // beyond the plan's record; the count when the layer's depth is not taken among the records.
@@ -2642,6 +2648,59 @@ static void CoverageTests() {
     plan.record = capture::kNoDepthPlace;
     CHECK(755, CoverageDepthPlace(plan, true, records, 5) == 5);
     for (size_t i = 0; i < 5; ++i) CHECK(755, (i >= CoverageDepthPlace({true, 9}, true, records, 5)) == SunDepthBefore({true, 9}, records[i]));
+  }
+  // 756: an early record's three keys (plan Task 14): its pre-pass key is today's (the pre-pass holds the first
+  // sample's pixels, as the game's depth copy does: the mask is the one of before); its full key is its own key
+  // with the full program and nothing else changed; its half key is the late records'.
+  {
+    const capture::DrawRecord early = CoverageRecord(kCoveragePs[1], 0.7f);
+    capture::RenderState rs = CoverageState(0x87);
+    rs.cull = capture::Cull::kBack;
+    const DrawState d = DecideDrawState(rs, early.material, 1, false);
+    CHECK(756, CoverageOf(true, early, rs) == CoverageKind::kEarly && CoverageDrawable(d) && CoverageHasFull(0x87, 0.7f));
+    const PipelineKey full = CoverageFullKey(d.key), half = CoverageHalfKey(d.key);
+    PipelineKey want = d.key;
+    want.coverage = 2;
+    CHECK(756, full == want && full.blend == 0 && full.depth_write == 1 && !(full == d.key) && !(full == half) && half.coverage == 1);
+    CHECK(756, PrepassKey(full) == PrepassKey(d.key) && PrepassKey(full, d.alpha) == PrepassKey(d.key, d.alpha) && PrepassKey(full).coverage == 0);
+    PipelineKey wind = d.key;
+    wind.wind = 1;
+    CHECK(756, CoverageFullKey(wind).wind == 1 && CoverageFullKey(wind).coverage == 2);
+    std::vector<PipelineKey> keys;
+    for (const PipelineKey& k : {d.key, full, half, wind, CoverageFullKey(wind), CoverageHalfKey(wind)}) FindOrAddPipelineSlot(keys, k);
+    CHECK(756, keys.size() == 6);
+  }
+  // 757: where an early record's half-covered pixels are drawn: in the tail when the record lies before it, else in
+  // its own place, as a late record's are (an early record at or beyond the tail is treated as late); a late
+  // record's never in the tail; without a tail in place.
+  {
+    CHECK(757, CoverageHalfInTail(CoverageKind::kEarly, 3, 5) && !CoverageHalfInTail(CoverageKind::kEarly, 5, 5) &&
+                   !CoverageHalfInTail(CoverageKind::kEarly, 6, 5) && !CoverageHalfInTail(CoverageKind::kEarly, 0, kNoCoverageTail) &&
+                   !CoverageHalfInTail(CoverageKind::kLate, 3, 5) && !CoverageHalfInTail(CoverageKind::kNone, 3, 5) &&
+                   CoverageHalfInTail(CoverageKind::kEarly, 0, 1));
+    // with PlanCoverageOrder: every early record before the tail is in it, and the tail holds no other
+    const CoverageItem items[6] = {{CoverageKind::kEarly, false}, {CoverageKind::kNone, false}, {CoverageKind::kEarly, false},
+                                   {CoverageKind::kLate, false},  {CoverageKind::kEarly, false}, {CoverageKind::kNone, true}};
+    const CoverageOrder o = PlanCoverageOrder(items, 6, 5, 6);
+    CHECK(757, o.tail == 3 && o.sky == 3);
+    int in_tail = 0;
+    for (size_t i = 0; i < 6; ++i) in_tail += CoverageHalfInTail(items[i].kind, i, o.tail);
+    CHECK(757, in_tail == 2 && !CoverageHalfInTail(items[4].kind, 4, o.tail));
+  }
+  // 758: the pre-pass: an early record is in it as it is today (the first sample's pixels); a late record is not.
+  CHECK(758, CoverageInPrepass(CoverageKind::kNone) && CoverageInPrepass(CoverageKind::kEarly) && !CoverageInPrepass(CoverageKind::kLate));
+  // 759: the two parts of a coverage record part today's kept set at every pixel: with the half program keeping
+  // covered == 1 and the full program covered == 2, a pixel today's rule keeps is in exactly one of them and a pixel
+  // it drops in neither (the shader test evaluates the compiled programs against the same function).
+  for (uint32_t offsets : {0x87u, 0xAAu, 0x1Bu, 0x00u, 0xFFu}) {
+    for (uint32_t parity = 0; parity < 4; ++parity) {
+      for (int i = 0; i <= 1280; ++i) {
+        const float a = float(i) / 1024.0f;
+        const uint32_t n = CoveredSamples(uint8_t(offsets), parity >> 1, parity & 1u, a);
+        const bool half = n == 1, full = n == 2, today = AlphaToMaskCovers(uint8_t(offsets), parity >> 1, parity & 1u, a, 1);
+        CHECK(759, !(half && full) && (half || full) == today);
+      }
+    }
   }
 }
 

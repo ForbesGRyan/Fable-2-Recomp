@@ -734,7 +734,9 @@ bool alpha_passes(float a, float ref, uint func) {
 }
 float3 clay_linear(float3 d) { d = saturate(d); return d * d; }
 #ifdef CLAY_COVERAGE
+#if CLAY_COVERAGE == 1
 #define main clay_textured
+#endif
 #endif
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1, float3 world : TEXCOORD2,
             float3 normal : TEXCOORD3, float3 axis : TEXCOORD4, float3 vcolour : TEXCOORD5,
@@ -770,7 +772,7 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
       uint cindex = ((cp.x & 1) << 1) | (cp.y & 1);
       float t0 = 0.5 - float((alpha_mode >> (16 + 2 * cindex)) & 3) * 0.125;
       int covered = (a >= t0 ? 1 : 0) + (a >= t0 + 0.5 ? 1 : 0);
-      if ((alpha_mode & 0x100) == 0 || ((alpha_mode >> 24) & 3) != 1 || covered != 1) discard;
+      if ((alpha_mode & 0x100) == 0 || ((alpha_mode >> 24) & 3) != 1 || covered != CLAY_COVERAGE) discard;
     }
 #endif
 #ifdef CLAY_DEPTH_ONLY
@@ -829,12 +831,14 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
   return float4(clay_linear(base * (0.35 + 0.65 * facet)) * f_post, 1.0);
 }
 #ifdef CLAY_COVERAGE
+#if CLAY_COVERAGE == 1
 #undef main
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1, float3 world : TEXCOORD2,
             float3 normal : TEXCOORD3, float3 axis : TEXCOORD4, float3 vcolour : TEXCOORD5,
             float4 bend : TEXCOORD6) : SV_Target {
   return float4(clay_textured(pos, ndc, uv, world, normal, axis, vcolour, bend).rgb, 0.5);
 }
+#endif
 #endif
 )hlsl"
 inline constexpr const char* kClayTexturedPs = FABLE2_CLAY_TEXTURED_HLSL;
@@ -849,6 +853,12 @@ inline constexpr const char* kClayTexturedDepthPs = "#define CLAY_DEPTH_ONLY 1\n
 // sample of two. Without the define the text compiles to the programs it compiled to before (the shader test
 // holds the bytes of the colour and the depth-only program).
 inline constexpr const char* kClayTexturedHalfPs = "#define CLAY_COVERAGE 1\n" FABLE2_CLAY_TEXTURED_HLSL;
+// The full program of a coverage record (plan Task 14): the same text under CLAY_COVERAGE 2. It keeps a pixel only
+// where BOTH samples are covered (covered == 2) and is the textured program otherwise: its own entry, its own
+// alpha, drawn opaque with the record's own state. With the half program it parts the pixels today's program
+// keeps: each in exactly one of the two (the shader test evaluates both kept sets against CoveredSamples).
+// There is no depth-only form: a coverage record's pre-pass draw is today's (clay_logic.h, "Coverage").
+inline constexpr const char* kClayTexturedFullPs = "#define CLAY_COVERAGE 2\n" FABLE2_CLAY_TEXTURED_HLSL;
 
 // Terrain material of the clay pass (frame-map section 13, "Terrain", "Native
 // terrain material"; the reference is tools/xdk_sigmatch/terrain_replay.py,

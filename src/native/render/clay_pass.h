@@ -217,6 +217,14 @@ class ClayPass {
     // A late coverage record drawn at half (DecideClayCoverage: kDrawn): `pipeline` is its half
     // pipeline (CoverageHalfKey; with the wind program when it is moved), and it has no pre-pass draw.
     bool coverage_half = false;
+    // An early coverage record drawn by its two parts (plan Task 14): `coverage_tail` is its half pipeline
+    // (null: no such record), drawn in the tail or in place (CoverageHalfInTail); `pipeline` is its full
+    // pipeline (CoverageFullKey) and is drawn in place, or, with `coverage_place` false (its scale admits no
+    // fully covered pixel), its own pipeline, which then only names its state (the pre-pass's key, the sky's
+    // order) and is not drawn in the colour pass. Its pre-pass draw is today's. With the wind, both are the
+    // wind program's.
+    nrhi::Pipeline* coverage_tail = nullptr;
+    bool coverage_place = true;
     bool prepass_flat = false;  // its pre-pass draw is the flat kind's (PrepassKey with the record's alpha)
     ClayAlpha alpha;
     // A terrain record. With its material (`textured` 2 or 3): `albedo` is the
@@ -503,10 +511,10 @@ class ClayPass {
   void PrepareWind(nrhi::Device* dev, const capture::DrawRecord& r, const capture::WindInputs* wind, bool prepass, Prepared& p,
                    ClayStats& st);
   void BindWind(nrhi::Cmd* cmd, nrhi::Buffer* words, uint32_t slot);
-  // The coverage's half program (shaders::kClayTexturedHalfPs), compiled at the first frame with a late
-  // coverage record that would be drawn with it (never with the switch off); false when it could not
-  // be made, now or before (not tried again until the pass is rebuilt; one log line): every such
-  // record is then today's record (coverage: pipeline).
+  // The coverage's two programs (shaders::kClayTexturedHalfPs, kClayTexturedFullPs), compiled at the
+  // first frame with a coverage record that would be drawn with them (never with the switch off); false
+  // when one could not be made, now or before (not tried again until the pass is rebuilt; one log line):
+  // every such record is then today's record (coverage: pipeline).
   bool EnsureCoverageShader(nrhi::Device* dev);
   // The texture behind a fetch constant, through the texture cache; with `memo`
   // looked up once per frame (terrain_textures_).
@@ -539,6 +547,7 @@ class ClayPass {
   // coverage_records_: the frame's prepared records for PlanCoverageOrder and CoverageDepthPlace.
   // coverage_logged_, coverage_log_lines_: the Coverage line's last logged form.
   nrhi::Shader* coverage_half_ps_ = nullptr;
+  nrhi::Shader* coverage_full_ps_ = nullptr;  // (of every pipeline whose key has `coverage` 2)
   bool coverage_half_failed_ = false;
   std::vector<CoverageItem> coverage_items_;
   std::vector<uint32_t> coverage_records_;

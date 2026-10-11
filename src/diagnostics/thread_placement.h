@@ -7,7 +7,7 @@
 //   cpu is a logical processor index (0..63). Several cpus may be given as a
 //   mask with '+': "GPU Commands=2+3" pins to logical 2 and 3 (one physical
 //   core with SMT).
-// FABLE2_THREAD_PLACE=auto
+// FABLE2_THREAD_PLACE=auto (the default when the variable is unset; "off" disables)
 //   The rules are built from the processor topology: the physical cores of the
 //   cache group (CCD) with the largest L3, in order, skipping the first core
 //   (logical 0/1, where the interrupt and system work lands), one core each for
@@ -143,8 +143,10 @@ inline std::vector<Rule> AutoRules() {
 
 // Applies the rules once. Returns the number of threads placed.
 inline int Apply() {
-  const char* spec = std::getenv("FABLE2_THREAD_PLACE");
-  if (!spec || !*spec) return 0;
+  // Default: auto. FABLE2_THREAD_PLACE=off (or 0) disables the placement.
+  const char* env = std::getenv("FABLE2_THREAD_PLACE");
+  const char* spec = (env && *env) ? env : "auto";
+  if (std::string(spec) == "off" || std::string(spec) == "0") return 0;
   const char* mode_env = std::getenv("FABLE2_THREAD_PLACE_MODE");
   const bool ideal = mode_env && std::string(mode_env) == "ideal";
   const std::vector<Rule> rules = std::string(spec) == "auto" ? AutoRules() : ParseRules(spec);

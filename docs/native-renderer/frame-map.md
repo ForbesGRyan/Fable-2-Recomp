@@ -7612,9 +7612,10 @@ The Sun line reads `..., depth before record N, tree occluders drawn K of N[ (no
 
 Held without the game: `test_frame_scene.cpp` returns 42 to 48 (three twins in the calls' order, a twin once, a failed call empties the list at any place, the seventeenth, sixteen), `test_clay_logic.cpp` cases 760 to 764 (the mode of one sample, 0.5 at every parity through `ShadowAlphaToMaskThreshold`, kept at alpha 1 and dropped at 254 / 255; fail closed; the Sun line), `tests/test_wind_literals.py` (the redraw takes the wind program exactly for `p.wind != nullptr`), `tests/test_foliage_replay.py::OccluderCover`.
 
-The reference for criterion 15 (`foliage_replay.py occluder`, `occluder_cover`; `foliage_trace.py occluder`): the twin's triangles from the game's microcode with the wind, the alpha rule on one sample at the albedo's base level or a stored level (`--level`; the capture's `"mips"` member). In the held sunward view (capture `054346` frame 1, no read-back: its depth copy is empty, so no depth test) the alpha rule keeps **43,295 of the layer's 201,600 texels at the base level, 42,435 / 41,033 / 38,625 at levels 1 to 3** [replay]: a fifth of the layer, against 18,569 in the moving frame of capture `182130` (Task 4). Against a native layer depth of before the redraw (dump `062107` with capture `062104`, another view): replay 9,565 texels (level 0), native 0: the baseline `foliage_trace.py occluder` gives before this task. **Criterion 15 is not judged yet**: it needs a dump of this build.
+The reference for criterion 15 (`foliage_replay.py occluder`, `occluder_cover`; `foliage_trace.py occluder`): the twin's triangles from the game's microcode with the wind, the alpha rule on one sample at the albedo's base level or a stored level (`--level`; the capture's `"mips"` member). In the held sunward view (capture `054346` frame 1, no read-back: its depth copy is empty, so no depth test) the alpha rule keeps **43,295 of the layer's 201,600 texels at the base level, 42,435 / 41,033 / 38,625 at levels 1 to 3** [replay]: a fifth of the layer, against 18,569 in the moving frame of capture `182130` (Task 4). Against a native layer depth of before the redraw (dump `062107` with capture `062104`, another view): replay 9,565 texels (level 0), native 0: the baseline `foliage_trace.py occluder` gives before this task. **Criterion 15: judged in "The redraw and the trace in the game (11c, runs o16)", below** (not met against the base level, met against the fetch's own level).
 
-Limits: (1) "exactly 1" is a knife edge on the fetch's level and filter; the native texture has the base level alone, the game's fetch at the half-size target may take a lower one (the replay's count falls by 2% a level). (2) The twin's scale is the scene shader's `c15.w * c26.w`; `F1EB` has `c15.w` alone; equal while `c26.w` is 1 (every family A row captured). (3) A twin's alpha test uses the twin's state words, which the captures show equal to the occluder's; the occluder's own record is not kept.
+Limits: (1) "exactly 1" is a knife edge on the fetch's level and filter; the native texture holds the stored levels and its fetch takes its own level between two of them (as first written here: "the base level alone", which the runs showed wrong).
+ (2) The twin's scale is the scene shader's `c15.w * c26.w`; `F1EB` has `c15.w` alone; equal while `c26.w` is 1 (every family A row captured). (3) A twin's alpha test uses the twin's state words, which the captures show equal to the occluder's; the occluder's own record is not kept.
 
 ### The darkness about the sun (11c)
 
@@ -7644,7 +7645,74 @@ Reading, step by step from the linear scene on:
 
 The half pixel (`halfpixel`, `t17_halfpixel_182130_f1.txt`): over the trunk-and-wood class the native picture is best the game's sampled at (+0.25, +0.25) pixels (correlation 0.971, steps of a quarter): the native pixel centre against the game's first sample a quarter pixel up and left of the integral position (the replay's fitted sampling place, (-0.25, -0.25): Task 4). Reported, not changed.
 
+### The redraw and the trace in the game (11c, runs o16)
+
+Six runs by the controller, user present (**RUN UNCHECKED**), binary `94E18C03293F6062` before and after, all exit 0, 0 `d3d ERROR` lines, shots 1296 wide (no timing evidence). Copies `out/native-evidence/post/o16_*`; figures in `out/native-evidence/foliage/t16_*`, `t17_*`.
+
+| Run | Log | Capture, scene file | Switches | The log's tree lines |
+|---|---|---|---|---|
+| 0 `o16_warp` | 629 | | software adapter, debug layer; sun, wind, coverage | `tree occluder pipeline ready (the wind program; ...)`, `drawn 3 of 3 ... (3 by the wind program)` at scene frame 280; warning id 1328 only; no message about a pixel shader output without a render target |
+| A `o16_a_all` | 630 | `073406`, `073409` (frame 2582) | sun, wind, coverage | drawn 1 of 1 (1 by the wind program) |
+| B `o16_b_nowind` | 631 | `073554`, `073557` | sun, coverage | `pipeline ready (the clay vertex shader; ...)`, drawn 1 of 1 (0 by the wind program) |
+| C `o16_c_nocov` | 632 | `073742`, `073745` | sun, wind | drawn 1 of 1 (1 by the wind program) |
+| D `o16_d_nosun` | 633 | `073931`, `073933` (flags 5) | wind, coverage | `Sun: off`; no tree occluder line of any kind (0 lines) |
+| E `o16_e_all_readback` | 634 | `074119`, `074121` (frame 524) | A's with `--readback_resolve=full` | drawn 1 of 1 |
+
+Run E ran slowly (scene frame 524 at the capture against about 2,600) but its camera had arrived: its dump's depth-written mask equals run A's on 97.07% of the picture (run B against A: 97.31%), and the redraw closed 9,551 texels against 9,671. Holes: 0 in all five dumps (`t16_holes.txt`).
+
+**Criterion 15** (`t16_occluder_{a,b,c,e}.txt`, `t16_occluder_lod_{a,b,c}.txt`):
+
+| Reference | Run | replay | native | native holds of the replay's | native alone | verdict |
+|---|---|---|---|---|---|---|
+| base level (the criterion as written) | A | 18,567 | 9,671 | 51.66% | 0.43% | **not met** |
+| levels 1 / 2 / 3 | A | 18,212 / 17,686 / 16,858 | 9,671 | 52.5% / 53.8% / 56.0% | 0.6% / 0.9% / 1.4% | not met |
+| the fetch's own level (median 5.46; both levels about it must read 1) | A | 9,471 | 9,671 | **97.17%** | 4.94% | met |
+| the same, one level lower / higher | A | 12,533 / 6,450 | 9,671 | 71.5% / 87.8% | 5.7% / 62.1% | not met |
+| the fetch's own level | C (no coverage) | 9,568 | 9,694 | 96.40% | 4.91% | met |
+| the fetch's own level | B (wind off: the native occluder at rest, the game's swaying) | 9,464 | 9,561 | 61.58% | 39.44% | not met |
+
+- **As written, not met; by a substituted reference, met.** The native set is a subset of the base-level replay's (native alone under 1%) and half its size: the native fetch does not read the base level. The texture cache uploads the stored levels (12 for this 2048 x 1024 albedo) and the sampler is linear across them, so at the half-size layer a card's fetch lies near level 5.5 and keeps a texel only where both levels read exactly 1. A replay with that rule (`t16_occluder_lod.py`: the level from the coordinate's screen-space step, per triangle) gives the native set to 97%; one level either way does not. Open question 7's answer: no single stored level fits (52 to 56%); the fetch's own level does. The earlier concern "the native side takes the base level" was wrong: it takes the level a fetch takes.
+- **The wind is worth 97% against 62%** of the kept set (run B): the occluder at rest stands beside the swaying tree.
+- **Sun off draws nothing** (run D): `Sun: off`, no pipeline, no tree line, a dump without the layer's planes.
+- **What the console would do, not built** [code + inferred]: the occluder's own fetch constant differs from its twin's in one field, the level bias (`0x000202C3` against `0x000002C3`: bits 12 to 21 = 32, five fractional bits: **+1.0**; `xenos.h`, `lod_bias`). The emulator applies only a fetch instruction's bias (`dxbc_translator_fetch.cpp`; `F1EB`'s `tfetch2D` has none), so the emulated game, the reference of every comparison here, fetches without it, as the native redraw does. On the console the occluder would be a level blurrier and close fewer texels (the replay with +1: 6,450 against 9,471). A limit of the emulator, noted for whoever compares with a console's picture.
+- Coverage off (run C): of the 9,694 texels the redraw closed, the layer's first plane equals the scene's end depth (which holds the whole tree) on 28: the first plane holds nothing of the late tree. (The two planes are sampled half a pixel apart, so the count is a weak one.)
+
+**Criterion 16, the trace in the held view** (run E: dump `074121`, capture `074119` frame 1, scene frame 524 and exposure 7.29878 in both; coverage, wind and the redraw in; `t17_trace_074119_f1.txt`, classes `t17_classes_074119_f1.txt`: 185 draws replayed, none refused, 19 pixels in class 5):
+
+| Region | native over game | open sky | late tree over sky | leaf | trunk and wood | late tree over closed | verdict |
+|---|---|---|---|---|---|---|---|
+| sun | **0.739** | 0.794 (-0.023) | 0.760 (-0.066) | 0.703 (-0.033) | 1.117 (+0.005) | 0.687 (-0.144) | assigned |
+| beams left | 0.869 | 0.901 (-0.040) | 0.687 (-0.066) | 0.860 (-0.014) | 1.007 (+0.002) | 0.708 (-0.013) | assigned |
+| beams right | 0.908 | 0.831 (-0.043) | 0.835 (-0.011) | 0.854 (-0.025) | 1.018 (+0.007) | 0.829 (-0.020) | assigned |
+| beam root | **0.755** | 0.815 (17 px) | 0.716 (-0.231) | (3 px) | 0.994 (-0.001) | 0.637 (-0.011) | assigned |
+| sky beside the sun | 0.986 | 0.986 | | | | | assigned |
+| whole picture | 0.928 | 0.941 (-0.032) | 0.901 (-0.015) | 0.865 (-0.023) | 1.017 (+0.002) | 0.821 (-0.005) | assigned |
+
+Against the frame before wind and coverage ("The darkness about the sun", above): sun 0.637 -> 0.739, root 0.524 -> 0.755, the picture 0.856 -> 0.928. **The model was not reached**: it gave about 0.84 at "sun", 1.0 at the root and 0.96 for the late tree over sky; measured 0.74, 0.76 and 0.90 (0.72 to 0.76 near the sun).
+
+Where the remainder lies, class by class:
+
+1. **The late tree over sky: the half blend is applied more than once** [code + model]. The game shows such a pixel at exactly one half sky (one sample of two, whatever the number of leaf cards behind one another). The native half draw blends at one half with the record's depth test and write, card after card of the same record: a nearer card issued after a farther one passes the test and blends again, leaving a quarter of the sky, then an eighth. With the game's inferred tree colour, the share of sky left in the native pixel (`t17_late_blend.py` -> `t17_late_blend_074119_f1.txt`): one half on 65% of the class's pixels over the picture, but on 28% at the root (a quarter on 18%, an eighth on 32%, less on 22%) and on 42% at "sun". The root's native over game, 0.716, is what two blends give (1.20 against 1.67 for a tree of 0.8 under a sky of 2.5). This is the limit "two half-covered records at one pixel" of the coverage design, met inside ONE record. **Not a wrong sign, level or constant of a light formula; a fault of 11b's half draw. Proposed, not built**: the half part in two steps, its depth first (colour mask 0, the record's test and write: the depth ends as today's), then its colour with the test "equal" and no write, so that exactly the nearest card blends once; two pipeline states more, a software-adapter run, criteria 10 to 13 again.
+2. **The late tree over closed pixels** (0.64 to 0.83): the same, over leaves and wood instead of sky.
+3. **Leaf** (0.865 over 154,890 pixels; 0.70 at "sun" on 1,013): **open.** The leaf formula's own check passes (`light_check.py --family tree-leaf` and `tree-leaf-multi`: 2,000 of 2,000 trials each, worst relative difference 6.5e-16; the capture's 41 leaf draws a frame are of the checked pairs; `t17_light_check_leaf.txt`), so no formula fault is shown (ruling 5: nothing mended). What the check switches off is the candidate: the leaf's normal map, read flat by the native pass (lighting's ruling 4). In the earlier frame (no coverage) the class read 0.931: the early fading records' half draws now lie in it too, with item 1's fault.
+4. **Open sky inside the foliage regions** (0.79 to 0.83; 0.986 beside the sun, 0.94 over the picture): pixels the game shows as sky and the native picture partly as leaf; with the wind in, displacement no longer explains it. The native picture is the game's sampled a quarter pixel down and right (`halfpixel`: (+0.25, +0.25), correlation 0.978): edge pixels differ by that. **Open** (candidate, not measured).
+5. Trunk and wood 1.017 over 439,989 pixels, as before.
+
+**Verdict (ruling 18's form)**: every region **assigned** (class 5 holds 19 pixels; none counted out). Classes outside 0.85 to 1.18 and their names: both late-tree classes (item 1: cause named, fix proposed, not built), leaf at "sun" and "beams right" (open; formula check passes), open sky in "sun" and "beams right" (open), ground over the picture (385 pixels, 1.185). No existing formula's check fails; nothing was mended or tuned.
+
+**The picture** (shots, `t16_shots.py` -> `t16_shots.txt`; native 62 s over emulated 56 s, 62 over 68, 74 over 68; emulated 68 over 56 within 0.94 to 1.05 except in run E):
+
+| Run | sun | beams left | beams right | beam root |
+|---|---|---|---|---|
+| A all on | 0.670, 0.684, 0.691 | 0.878, 0.860, 0.827 | 0.945, 0.932, **1.390** | 0.655, 0.646, 0.696 |
+| B wind off | 0.651, 0.671, 0.708 | 0.882, 0.850, 0.808 | 0.954, 0.918, 1.271 | 0.684, 0.652, 0.658 |
+| C coverage off | 0.474, 0.491, 0.490 | 0.829, 0.804, 0.747 | 0.903, 0.864, 1.227 | 0.382, 0.366, 0.315 |
+| D sun off | 0.453, 0.465, 0.440 | 0.642, 0.629, 0.627 | 0.554, 0.539, 0.540 | 0.444, 0.436, 0.455 |
+
+With the redraw the beam regions are no longer over (sub-project 10: beams left 1.23 to 1.35): beams left reads what its scene reads (0.87 in the trace), and "sun" and the root read a little under their scenes (0.74, 0.76). The third bracket's "beams right" (1.23 to 1.39 in three runs, native at 74 s) is **not explained**. Viewed (A at 56, 62 s; C at 62 s): nothing torn; the faded tree at the upper left is see-through with coverage and solid without; two distinct beams cross the rails left of the post in both native shots, where the emulated shot shows a broad haze with fainter streaks: the native beams look sharper-edged than the game's though the regions' means are under. No beam was seen through a place the game blocks or blocked where the game lets it through, at this one view. Criterion 17's judgement with its prediction is Task 18's.
+
 ## Pending
+
 
 
 1. **Pitch ablation** (done 2026-10-01, results in section 4; kept for re-runs). One run per significant pitch `<p>` (1120, 1040, 320, 1280, 560, 280):

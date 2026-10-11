@@ -13,6 +13,12 @@
 //   (logical 0/1, where the interrupt and system work lands), one core each for
 //   "GPU Commands", "D3D12 Submit", "3D Engine" and "GameThread". Fewer than
 //   five physical cores in that group: no placement.
+// FABLE2_THREAD_PLACE_ISOLATE=1 (default with affinity mode; 0 disables)
+//   Every other thread of the process is confined to the logical processors
+//   outside the hot threads' cores, so the audio, VFS, vblank, timer and D3D12
+//   background threads cannot preempt a hot thread on its core.
+// FABLE2_THREAD_PLACE_PRIORITY=1 (default; 0 disables)
+//   The hot threads get THREAD_PRIORITY_ABOVE_NORMAL.
 // FABLE2_THREAD_PLACE_MODE=affinity (default) | ideal
 //   affinity: SetThreadAffinityMask (hard); ideal: SetThreadIdealProcessor (soft hint).
 // FABLE2_THREAD_PLACE_AT=<guest frame> (default 200): the frame at which the
@@ -154,10 +160,25 @@ inline int Apply() {
     REXSYS_WARN("[threadplace] FABLE2_THREAD_PLACE set but no valid rule in \"{}\"", spec);
     return 0;
   }
+  auto env_flag = [](const char* name, bool default_value) {
+    const char* v = std::getenv(name);
+    if (!v || !*v) return default_value;
+    return !(v[0] == '0' || v[0] == 'n' || v[0] == 'N' || v[0] == 'f' || v[0] == 'F');
+  };
+  const bool isolate = !ideal && env_flag("FABLE2_THREAD_PLACE_ISOLATE", true);
+  const bool raise_priority = env_flag("FABLE2_THREAD_PLACE_PRIORITY", true);
+  // The hot threads' cores (with their SMT siblings), and everything else.
+  uint64_t hot_mask = 0;
+  for (const Rule& r : rules) hot_mask |= r.mask;
+  DWORD_PTR process_mask = 0, system_mask = 0;
+  GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask);
+  const uint64_t other_mask = uint64_t(process_mask) & ~hot_mask;
+
   const DWORD pid = GetCurrentProcessId();
   HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
   if (snap == INVALID_HANDLE_VALUE) return 0;
   int placed = 0;
+  int isolated = 0;
   THREADENTRY32 te;
   te.dwSize = sizeof(te);
   if (Thread32First(snap, &te)) {
@@ -167,8 +188,10 @@ inline int Apply() {
                             te.th32ThreadID);
       if (!h) continue;
       const std::string desc = Description(h);
+      bool is_hot = false;
       for (const Rule& r : rules) {
         if (desc.find(r.name) == std::string::npos) continue;
+        is_hot = true;
         bool ok;
         if (ideal) {
           unsigned long cpu = 0;
@@ -182,17 +205,22 @@ inline int Apply() {
         } else {
           ok = SetThreadAffinityMask(h, DWORD_PTR(r.mask)) != 0;
         }
-        REXSYS_INFO("[threadplace] {} thread {} \"{}\" -> mask 0x{:X}: {}",
+        if (raise_priority) SetThreadPriority(h, THREAD_PRIORITY_ABOVE_NORMAL);
+        REXSYS_INFO("[threadplace] {} thread {} \"{}\" -> mask 0x{:X}: {}{}",
                     ideal ? "ideal" : "affinity", te.th32ThreadID, desc, r.mask,
-                    ok ? "ok" : "FAILED");
+                    ok ? "ok" : "FAILED", raise_priority ? ", above normal" : "");
         if (ok) ++placed;
         break;
+      }
+      if (!is_hot && isolate && other_mask) {
+        if (SetThreadAffinityMask(h, DWORD_PTR(other_mask))) ++isolated;
       }
       CloseHandle(h);
     } while (Thread32Next(snap, &te));
   }
   CloseHandle(snap);
-  REXSYS_INFO("[threadplace] placed {} thread(s)", placed);
+  REXSYS_INFO("[threadplace] placed {} thread(s); {} other thread(s) confined to mask 0x{:X}",
+              placed, isolated, isolate ? other_mask : 0);
   return placed;
 }
 

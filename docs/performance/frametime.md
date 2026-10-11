@@ -12,6 +12,8 @@ Measured at the bridge (save Hero000), standing, native view off, `REX_VSYNC=0`,
 | async submit + deferred read-backs + coalescing (log 010) | 61 | 16.5 ms | 9.5 ms | |
 | + thread placement (log 012) | 74 to 78 | 12.6 ms | 6.2 ms | |
 | + one submission a frame (on flush) (logs 014 to 016) | **97 to 115** | **8.5 to 8.7 ms** | 6.2 ms (p90 6.5) | 7.5 ms (p90 7.8) |
+| the defaults, plain launch, 160 to 200 s (logs 018, 021) | **110 to 114** | 8.5 to 8.7 ms, p90 9.0 to 9.4, p99 13.1 to 14.6, max 13 to 17 | 6.2 ms | 7.5 ms |
+| the defaults with FABLE2_THREAD_PLACE=off (log 020) | 80 | 12.5 ms | 9.5 ms | |
 
 The game's own render thread needs 5.1 ms a frame in this configuration; it spends the rest in
 the swap waiting for the GPU-emulation thread.
@@ -52,9 +54,17 @@ default off until merged; the app-side ones are environment variables.
    at the swap flush, with a full UAV and aliasing barrier between the merged streams.
 5. `--d3d12_async_submit_flush_queries=false`: an occlusion-query read reports "not ready" until the
    worker has executed on its own instead of forcing an execute.
-6. `FABLE2_THREAD_PLACE=auto` (or `"GPU Commands=2;D3D12 Submit=4;3D Engine=6;GameThread=8"`): each
-   of the four long serial threads on its own physical core of the V-cache CCD. About a third off
-   every one of them; the biggest single step after the worker.
+6. `FABLE2_THREAD_PLACE=auto` (the default; `off` disables; or an explicit list such as
+   `"GPU Commands=2;D3D12 Submit=4;3D Engine=6;GameThread=8"`): each of the four long serial
+   threads on its own physical core of the largest-L3 cache group (the V-cache CCD), the group's
+   first core left out. About a third off every one of them; 30 fps on the final binary (log 020
+   against 021). With it, `FABLE2_THREAD_PLACE_ISOLATE=1` confines the process's other threads to
+   the remaining cores and `FABLE2_THREAD_PLACE_PRIORITY=1` runs the hot threads above normal
+   priority (both default on; a small gain at the tail: p99 13.1 to 13.4 against 13.4 to 16.7).
+7. The idle achievement toast no longer asks for a UI repaint at every 240 Hz tick
+   (`ImGuiDialog::WantsContinuousRepaint`), so the main thread presents only with the guest's
+   frames: fewer `Present` calls holding the queue mutex the worker's execute waits on. Measured
+   in batch 10 (pending when this was written).
 
 Experiments that did not pay: `--d3d12_submit_on_primary_buffer_end=false` alone (moves the cost
 into the swap), `--d3d12_tiled_shared_memory=false` (slower), `FABLE2_LIMITER_YIELD` (not measured
@@ -62,9 +72,17 @@ to a conclusion).
 
 ## How to run and measure
 
+Since commit 7425ff2 every lever is the default: a plain launch with `REX_VSYNC=0` (the
+uncapped launcher) is the fast configuration. To measure:
+
 ```
-tools\drive_game.ps1 -BootSave Hero000 -Total 100 -Env @{REX_VSYNC="0"; FABLE2_GUEST_WORK_LOG="1"; FABLE2_THREAD_PLACE="auto"} -GameArgs @("--d3d12_async_submit=true","--readback_memexport_deferred=true","--readback_resolve_force_delayed=true","--d3d12_async_submit_coalesce=64","--d3d12_async_submit_on_flush=true","--d3d12_async_submit_flush_queries=false")
+tools\drive_game.ps1 -BootSave Hero000 -Total 100 -Env @{REX_VSYNC="0"; FABLE2_GUEST_WORK_LOG="1"; FABLE2_HITCH_MS="12"}
 ```
+
+To switch a lever off: `--d3d12_async_submit=false`, `--readback_memexport_deferred=false`,
+`--readback_resolve_force_delayed=false`, `--d3d12_async_submit_on_flush=false`,
+`--d3d12_async_submit_flush_queries=true`, `FABLE2_THREAD_PLACE=off`,
+`FABLE2_THREAD_PLACE_ISOLATE=0`, `FABLE2_THREAD_PLACE_PRIORITY=0`.
 
 The log then carries, every 300 guest frames: `[frame] guest` (fps, frame median/p90/p99/max,
 work, swap), `[frame] cp` (emulation thread busy/idle/present, draws, resolves), `[frame] cp
@@ -82,8 +100,12 @@ the CMake manifest step ran for minutes.
 
 ## Open
 
-- Stability: five of 38 windows in the 200 s run dip to 85 to 99 fps mean with the median
-  unchanged (isolated long frames). The hitch line attributes them from the next run on.
+- Stability: the 1% tail sits at 13.1 to 13.5 ms (p90 9.0 to 9.4). The hitch lines (logs 019,
+  021) show the long frames come in bursts of 0.1 to 0.5 s, about 7% of frames at 12 to 14 ms,
+  with the guest's swap wait +4.4 ms and the CP +1.7 ms, GPU unchanged: the worker's one
+  execute waiting behind the main thread's `Present` on the shared queue. Thread isolation did
+  not change it; the idle-toast repaint change (lever 7) is the first answer, a presenter queue
+  of its own the full one.
 - Other places: only the bridge is measured. The third spot and a town have more draws.
 - The GPU at 7.5 ms is now within 1.2 ms of the frame: the tile replay (3,300 of 3,780 draws)
   is the lever that cuts the emulation thread, the worker and the GPU at once (`--dump_pm4_frame`

@@ -1742,3 +1742,27 @@ def wind_table_member(hash_):
             "elements": [{"name": name, "fetch": fetch, "format": fmt, "offset": offset, "source": source}
                          for name, fetch, fmt, offset, source, _count in row["elements"]],
             "evidence": row["evidence"]}
+
+
+# --- coverage: the samples a pixel covers under alpha-to-mask (sub-project 11, phase 11b) ------------------------
+# The main scene has two samples a pixel (RB_SURFACE_INFO 0x11810460). Under alpha-to-mask (RB_COLORCONTROL bit 4,
+# the four 2-bit offsets in bits 24 to 31, by the pixel's parity (x & 1) * 2 + (y & 1) from bit 0) the first
+# sample is covered iff alpha >= 0.5 - offset / 8 and the second iff alpha >= 1 - offset / 8 (the emulator: SDK
+# dxbc_translator_om.cpp, CompletePixelShader_AlphaToMask; tests/test_coverage.py transcribes its instructions).
+# The game's resolve shows a pixel with one sample of two at one half over what lies behind; its depth copy holds
+# the first sample (frame-map section 18). The C++ mirror: CoveredSamples in src/native/render/clay_logic.h.
+
+COVERAGE_PS = ("7CD57B81550F19E3", "00E09D1BC5295D52", "58D3FAAAA84A48AA", "2FBE9B4EE822609A")   # family A
+
+
+def covered_samples(offsets, x, y, alpha):
+    """How many of the scene's two samples are covered at pixel (x, y) for an alpha: 0, 1 or 2. No number: 0."""
+    index = ((int(x) & 1) << 1) | (int(y) & 1)
+    offset = (int(offsets) >> (2 * index)) & 3
+    return int(alpha >= 0.5 - 0.125 * offset) + int(alpha >= 1.0 - 0.125 * offset)
+
+
+def coverage_has_full(offsets, scale):
+    """Whether any pixel of a draw whose alpha is at most `scale` can have both samples covered."""
+    most = max((int(offsets) >> (2 * index)) & 3 for index in range(4))
+    return scale >= 1.0 - 0.125 * most

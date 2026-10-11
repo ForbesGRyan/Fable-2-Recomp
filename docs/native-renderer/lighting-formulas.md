@@ -1260,3 +1260,36 @@ A single-precision phase is down to 1 / 256 of a turn at 2^15 turns: the leaf's 
 ### Evidence
 
 `out/native-evidence/foliage/` (git-ignored): `t7_wind_check.txt` (`formulas --mutations`, `rows`, `identities` on the three captures), `t7_wind_check_more.txt` (the eight newer captures), `t7_position_check_wind.txt` (criterion 4, as first printed) and `fix57_position_check_wind.txt` (the same run with the "not judged" verdict), `t7_mutations.txt` (the mutation check of the tools). Tests: `tests/test_wind_formulas.py`, `WindTableTest` of `tests/test_gen_transform_table.py`, `WindTest` of `tests/test_position_check.py`.
+
+## Covered samples (alpha-to-mask)
+
+Sub-project 11, phase 11b (plan Task 12). The samples a pixel covers under alpha-to-mask on the main scene's two samples; reference `light_formulas.covered_samples`, mirror `CoveredSamples` in `src/native/render/clay_logic.h`.
+
+### The rule
+
+`RB_COLORCONTROL` (0x2202): bit 4 alpha-to-mask, bits 24 to 31 four 2-bit offsets, one a pixel parity, index `(x & 1) * 2 + (y & 1)` from bit 0. On a surface of two samples (`RB_SURFACE_INFO` bits 16 to 17 = 1; the main scene's `0x11810460`):
+
+```
+t0 = 0.5 - offset / 8          the first sample's threshold
+t1 = 1.0 - offset / 8 = t0 + 0.5   the second sample's
+covered = (alpha >= t0) + (alpha >= t1)        0, 1 or 2; an alpha that is no number covers nothing
+```
+
+`alpha` is the pixel shader's output alpha, not clamped: for family A (leaf `7CD5`, trunk and branch `00E0`, `58D3`, `2FBE`) the albedo's w times pixel `c26.w` times `c15.w`, the fade word (`ps_albedo_table.inc`: scale refs 107 and 63; `c26.w` is 1 in every captured row); for the plants' pixel shaders the albedo's alone, after an alpha test "greater than 0.50196".
+
+| offsets | index 0 (x even, y even) | 1 (even, odd) | 2 (odd, even) | 3 (odd, odd) |
+|---|---|---|---|---|
+| `87` (fading draws, and every plant) | 0.125 / 0.625 | 0.375 / 0.875 | 0.5 / 1.0 | 0.25 / 0.75 |
+| `AA` (trees at fade 1; the late draws at fade 0.5) | 0.25 / 0.75 | 0.25 / 0.75 | 0.25 / 0.75 | 0.25 / 0.75 |
+
+Since `t1 = t0 + 0.5`, a covered second sample implies a covered first: "one sample" is always the first, which is the sample the game's depth copy holds (frame-map section 18, "Discovery runs"). The fully covered set (`covered` = 2) and the half-covered set (`covered` = 1) part exactly the set the one-sample native target keeps today (`AlphaToMaskCovers` under two samples: `alpha >= t0`).
+
+A draw whose alpha is at most `scale` has a fully covered pixel only if `scale >= 1 - max(offset) / 8` (`coverage_has_full`, `CoverageHasFull`): 0.625 under `87`, 0.75 under `AA`. The late draws (`AA`, 0.5) have none: every pixel they cover is half-covered.
+
+### The check
+
+`tests/test_coverage.py`: `covered_samples` against a transcription of the emulator's instruction sequence (SDK `src/graphics/pipeline/shader/dxbc_translator_om.cpp`, `CompletePixelShader_AlphaToMask` and `CompletePixelShader_AlphaToMaskSample`, lines 1674 to 1790: the float-to-unsigned of the position, the bit insert of x's low bit above y's, the 2-bit field of the constant `(RB_COLORCONTROL >> 24) | 0x100`, the multiply-add `offset * -scale + base` in single precision, the greater-or-equal) for all 256 offset bytes, the four parities and the alphas 0 to 1.25 in steps of 1 / 1024: 1,311,744 inputs, 0 differ. Four wrong rules (x and y exchanged, "greater" for "at least", one threshold for both samples, the offsets' bits shifted) each differ. `tests/native/test_clay_logic.cpp` cases 700 to 703 hold the C++ mirror to the same closed form and to `AlphaToMaskCovers` on the same grid.
+
+### What stands on inference
+
+That the console's hardware covers samples as the emulator does (the emulator is the oracle of every picture this renderer is compared with). Which of the console's two samples is "the first": the emulator's top sample; the game's depth copy holds the sample at (-0.25, -0.25) of the pixel (measured, plan Task 4), and whether that is the console's convention or the emulator's read-back is not known.

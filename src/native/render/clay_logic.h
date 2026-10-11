@@ -1666,6 +1666,97 @@ inline DrawState DecideDrawState(const capture::RenderState& rs, const capture::
   return d;
 }
 
+// --- Coverage (sub-project 11, phase 11b; frame-map section 18, "Coverage: the rule and the order") ----------
+// The main scene has two samples a pixel, and under alpha-to-mask the game covers each by its own
+// threshold (AlphaToMaskCovers, above: the first at 0.5 - offset / 8, the second at 1 - offset / 8). The
+// clay target has one sample: today a pixel is drawn whole where the FIRST sample is covered. A draw
+// that fades (its alpha scale below 1) has pixels with the first sample alone, which the game's
+// resolve shows at one half over what lies behind; drawn whole they are a solid tree where the game has
+// a see-through one. Under --fable2_native_coverage such a record's pixels are parted by their covered
+// samples: both, drawn as today; one, blended at one half over what the target holds (ruling 14 of the
+// design; the pass: "Native coverage" below).
+
+// How many of the scene's two samples the game covers at pixel (x, y): 0, 1 or 2 (two samples alone).
+// The emulator's rule (SDK dxbc_translator_om.cpp, CompletePixelShader_AlphaToMask, the 2x branch: the
+// threshold is base - offset / 8 for the bases 0.5 and 1, and a sample is covered iff alpha >= it; no
+// number covers nothing). 1 or 2 exactly where AlphaToMaskCovers(offsets, x, y, alpha, 1) keeps the pixel.
+constexpr uint32_t CoveredSamples(uint8_t offsets, uint32_t x, uint32_t y, float alpha) {
+  const uint32_t index = ((x & 1u) << 1) | (y & 1u);
+  const float offset = float((uint32_t(offsets) >> (2 * index)) & 3u);
+  return (alpha >= 0.5f - 0.125f * offset ? 1u : 0u) + (alpha >= 1.0f - 0.125f * offset ? 1u : 0u);
+}
+
+// Family A: the pixel shaders of the tree leaf and of the trunk and branch, whose alpha is the albedo's
+// times pixel c15.w (the fade word) times c26.w (ps_albedo_table.inc: scale refs 107 and 63). The plants'
+// pixel shaders (family B) are under alpha-to-mask too and never fade: no coverage record.
+inline constexpr uint64_t kCoveragePs[] = {0x7CD57B81550F19E3ull, 0x00E09D1BC5295D52ull, 0x58D3FAAAA84A48AAull,
+                                           0x2FBE9B4EE822609Aull};   // family A: leaf, trunk and branch
+enum class CoverageKind : uint8_t { kNone, kEarly, kLate };
+// A coverage record: the switch on, a family A pixel shader, a textured material whose alpha is the albedo's, the
+// state valid with alpha-to-mask on two samples, no blend, a depth write, and an alpha scale that is a number in
+// [0, 1). Late for offsets 0xAA (the tree between the eye and the hero, at fade 0.5, which the game issues after
+// its depth copy), early for any other (0x87: a tree dissolving by distance). A draw at scale 1 keeps today's
+// rule (ruling 13): its half-covered pixels are edge texels alone.
+inline CoverageKind CoverageOf(bool on, const capture::DrawRecord& r, const capture::RenderState& rs) {
+  if (!on || r.terrain_index != capture::kNoSideIndex) return CoverageKind::kNone;
+  const capture::Material& m = r.material;
+  bool family = false;
+  for (const uint64_t ps : kCoveragePs) family = family || ps == m.ps_hash;
+  if (!family || m.status != capture::MaterialStatus::kTextured || m.alpha.source != capture::AlphaSource::kAlbedo) {
+    return CoverageKind::kNone;
+  }
+  if (!rs.valid || !rs.alpha_to_mask || rs.alpha_to_mask_samples != 1 || rs.blend || !rs.depth_test || !rs.depth_write) {
+    return CoverageKind::kNone;
+  }
+  if (!(m.alpha_scale >= 0.0f && m.alpha_scale < 1.0f)) return CoverageKind::kNone;  // (no number: none)
+  return rs.alpha_to_mask_offsets == 0xAA ? CoverageKind::kLate : CoverageKind::kEarly;
+}
+// Whether any pixel of a record of this scale can have both samples covered (its alpha is at most `scale`):
+// the scale reaches the second sample's lowest threshold of the four parities. False for a late record at
+// 0.5 (0xAA: 0.75 everywhere), which therefore has no fully covered pixel and no place in the pre-pass.
+constexpr bool CoverageHasFull(uint8_t offsets, float scale) {
+  uint32_t most = 0;
+  for (uint32_t index = 0; index < 4; ++index) {
+    const uint32_t offset = (uint32_t(offsets) >> (2 * index)) & 3u;
+    most = offset > most ? offset : most;
+  }
+  return scale >= 1.0f - 0.125f * float(most);
+}
+// The colour pass's order under coverage (PlanCoverageOrder). One item a drawn record, in the frame's order:
+// its coverage kind, and whether it is a blended record that is no terrain record (what SkyPlace looks for).
+struct CoverageItem { CoverageKind kind; bool blends; };          // one drawn record, in the frame's order
+inline constexpr size_t kNoCoverageTail = ~size_t(0);
+struct CoverageOrder { size_t sky; size_t tail; };                // drawn before the record at this index (count: after the last)
+// `sky_place`: SkyPlace's index. `depth_place`: the index of the first drawn record at or beyond the frame's
+// depth place, `count` when the layer's depth is taken after the last record or not at all.
+// A half-covered pixel is blended over what the target holds, so everything the game shows behind it must
+// be there first: the sky step is drawn before the first such blend (it writes no depth, so by SkyPlace's
+// own argument drawing it earlier changes no pixel of a record that writes depth), and the early records'
+// half-covered pixels are drawn together in a TAIL, after the opaque records before it, which lies before
+// the sun layer's depth is taken (the game's depth copy holds every pixel whose first sample an early
+// record covers), before the first late record and before the first blended record.
+//   no early and no late item: {sky_place, kNoCoverageTail}: today's order, whatever the other inputs.
+//   first_late = the first late item's index (count if none);
+//   tail = min(sky_place, depth_place, first_late) when an early item lies before that index, else none;
+//   sky  = min(sky_place, tail, first_late).
+// An early item at or beyond `tail` (or with no tail) is drawn as a late one: blended in place.
+// At index i the pass does: the sky step if sky == i, then the early tail if tail == i, then the layer's
+// depth step if it is due, then record i.
+constexpr CoverageOrder PlanCoverageOrder(const CoverageItem* items, size_t count, size_t sky_place, size_t depth_place) {
+  size_t first_late = count, first_early = count;
+  for (size_t i = count; i-- > 0;) {
+    if (items[i].kind == CoverageKind::kLate) first_late = i;
+    if (items[i].kind == CoverageKind::kEarly) first_early = i;
+  }
+  if (first_late == count && first_early == count) return {sky_place, kNoCoverageTail};
+  size_t bound = sky_place < depth_place ? sky_place : depth_place;
+  bound = first_late < bound ? first_late : bound;
+  const size_t tail = first_early < bound ? bound : kNoCoverageTail;
+  size_t sky = sky_place < first_late ? sky_place : first_late;
+  sky = tail < sky ? tail : sky;
+  return {sky, tail};
+}
+
 // Root constants, laid out as the clay HLSL cbuffer (36 dwords).
 struct ClayConstants {
   float rows[16];

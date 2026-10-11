@@ -2332,6 +2332,179 @@ static void NativeWindTests() {
   }
 }
 
+// Coverage (sub-project 11, phase 11b; clay_logic.h, "Coverage"): cases 700 to 719 and 740 to 759.
+static capture::DrawRecord CoverageRecord(uint64_t ps, float scale) {
+  capture::DrawRecord r;
+  r.material.status = capture::MaterialStatus::kTextured;
+  r.material.ps_hash = ps;
+  r.material.alpha.source = capture::AlphaSource::kAlbedo;
+  r.material.alpha_scale = scale;
+  return r;
+}
+static capture::RenderState CoverageState(uint8_t offsets) {
+  capture::RenderState rs = capture::DefaultRenderState();
+  rs.valid = true;
+  rs.alpha_test = true;
+  rs.alpha_func = capture::Compare::kGreater;
+  rs.alpha_to_mask = true;
+  rs.alpha_to_mask_offsets = offsets;
+  rs.alpha_to_mask_samples = 1;
+  rs.depth_test = true;
+  rs.depth_write = true;
+  return rs;
+}
+static void CoverageTests() {
+  // CoveredSamples: the emulator's two thresholds, and the partition of today's set (plan Task 12; Review Focus 4)
+  for (uint32_t offsets = 0; offsets < 256; ++offsets) {
+    for (uint32_t parity = 0; parity < 4; ++parity) {
+      const uint32_t x = parity >> 1, y = parity & 1u;
+      const float o = float((offsets >> (2 * parity)) & 3u);
+      for (int i = 0; i <= 1280; ++i) {
+        const float a = float(i) / 1024.0f;
+        const uint32_t n = CoveredSamples(uint8_t(offsets), x, y, a);
+        CHECK(700, n == (a >= 0.5f - 0.125f * o ? 1u : 0u) + (a >= 1.0f - 0.125f * o ? 1u : 0u));
+        CHECK(701, (n >= 1u) == AlphaToMaskCovers(uint8_t(offsets), x, y, a, 1));
+      }
+    }
+  }
+  CHECK(702, CoveredSamples(0x87, 0, 0, std::numeric_limits<float>::quiet_NaN()) == 0);
+  // (the pixel's parity alone decides: any pixel of a parity reads that parity's two bits)
+  // (0x87: offsets 3, 1, 0, 2 for the indices 0 to 3: thresholds 0.125 / 0.625, 0.375 / 0.875, 0.5 / 1, 0.25 / 0.75)
+  CHECK(702, CoveredSamples(0x87, 5, 2, 0.6f) == CoveredSamples(0x87, 1, 0, 0.6f) && CoveredSamples(0x87, 5, 2, 0.6f) == 1 &&
+                 CoveredSamples(0x87, 5, 2, 0.4f) == 0 && CoveredSamples(0x87, 4, 3, 0.4f) == 1 && CoveredSamples(0x87, 4, 3, 0.3f) == 0 &&
+                 CoveredSamples(0x87, 1, 1, 0.75f) == 2 && CoveredSamples(0x87, 0, 0, 0.6f) == 1 && CoveredSamples(0x87, 0, 0, 0.625f) == 2 &&
+                 CoveredSamples(0xAA, 9, 9, 0.5f) == 1 && CoveredSamples(0xAA, 9, 9, 0.75f) == 2 && CoveredSamples(0xAA, 9, 9, 0.2f) == 0);
+  CHECK(703, !CoverageHasFull(0xAA, 0.5f) && CoverageHasFull(0xAA, 0.75f) && !CoverageHasFull(0x87, 0.6f) &&
+                 CoverageHasFull(0x87, 0.625f));
+  // (CoverageHasFull is exactly "some parity and some alpha up to the scale has both samples", for every offsets byte)
+  for (uint32_t offsets = 0; offsets < 256; ++offsets) {
+    for (int i = 0; i <= 1024; ++i) {
+      const float scale = float(i) / 1024.0f;
+      bool any = false;
+      for (uint32_t parity = 0; parity < 4; ++parity) any = any || CoveredSamples(uint8_t(offsets), parity >> 1, parity & 1u, scale) == 2;
+      CHECK(703, CoverageHasFull(uint8_t(offsets), scale) == any);
+    }
+  }
+  CHECK(703, !CoverageHasFull(0xFF, std::numeric_limits<float>::quiet_NaN()));
+  // 704 to 709: CoverageOf. The four pixel shaders of family A; each condition switched off in turn gives none.
+  {
+    using capture::AlphaSource;
+    using capture::MaterialStatus;
+    CHECK(704, std::size(kCoveragePs) == 4 && kCoveragePs[0] == 0x7CD57B81550F19E3ull && kCoveragePs[1] == 0x00E09D1BC5295D52ull &&
+                   kCoveragePs[2] == 0x58D3FAAAA84A48AAull && kCoveragePs[3] == 0x2FBE9B4EE822609Aull);
+    for (const uint64_t ps : kCoveragePs) {
+      CHECK(704, CoverageOf(true, CoverageRecord(ps, 0.5f), CoverageState(0xAA)) == CoverageKind::kLate);
+      CHECK(704, CoverageOf(true, CoverageRecord(ps, 0.5f), CoverageState(0x87)) == CoverageKind::kEarly);
+      CHECK(704, CoverageOf(true, CoverageRecord(ps, 0.5f), CoverageState(0x00)) == CoverageKind::kEarly);
+      CHECK(705, CoverageOf(false, CoverageRecord(ps, 0.5f), CoverageState(0xAA)) == CoverageKind::kNone);
+    }
+    const uint64_t leaf = kCoveragePs[0];
+    // (a plant's pixel shader, alpha-to-mask under 0x87 in every capture, is of family B: no coverage record)
+    CHECK(705, CoverageOf(true, CoverageRecord(0xA7E4000000000000ull, 0.5f), CoverageState(0x87)) == CoverageKind::kNone &&
+                   CoverageOf(true, CoverageRecord(0, 0.5f), CoverageState(0x87)) == CoverageKind::kNone &&
+                   CoverageOf(true, CoverageRecord(leaf ^ 1u, 0.5f), CoverageState(0xAA)) == CoverageKind::kNone);
+    {
+      capture::DrawRecord r = CoverageRecord(leaf, 0.5f);
+      r.material.status = MaterialStatus::kPsUnknown;
+      CHECK(706, CoverageOf(true, r, CoverageState(0xAA)) == CoverageKind::kNone);
+      r = CoverageRecord(leaf, 0.5f);
+      r.material.alpha.source = AlphaSource::kOne;
+      CHECK(706, CoverageOf(true, r, CoverageState(0xAA)) == CoverageKind::kNone);
+      r.material.alpha.source = AlphaSource::kFetch;
+      CHECK(706, CoverageOf(true, r, CoverageState(0xAA)) == CoverageKind::kNone);
+      r.material.alpha.source = AlphaSource::kNone;
+      CHECK(706, CoverageOf(true, r, CoverageState(0xAA)) == CoverageKind::kNone);
+      r = CoverageRecord(leaf, 0.5f);
+      r.terrain_index = 0;
+      CHECK(706, CoverageOf(true, r, CoverageState(0xAA)) == CoverageKind::kNone);
+    }
+    {
+      const capture::DrawRecord r = CoverageRecord(leaf, 0.5f);
+      capture::RenderState rs = CoverageState(0xAA);
+      rs.valid = false;
+      CHECK(707, CoverageOf(true, r, rs) == CoverageKind::kNone);
+      rs = CoverageState(0xAA);
+      rs.alpha_to_mask = false;
+      CHECK(707, CoverageOf(true, r, rs) == CoverageKind::kNone);
+      for (uint8_t samples : {uint8_t(0), uint8_t(2), uint8_t(3)}) {  // (one sample, four, and what is no count)
+        rs = CoverageState(0xAA);
+        rs.alpha_to_mask_samples = samples;
+        CHECK(707, CoverageOf(true, r, rs) == CoverageKind::kNone);
+      }
+      rs = CoverageState(0xAA);
+      rs.blend = true;
+      CHECK(707, CoverageOf(true, r, rs) == CoverageKind::kNone);
+      rs = CoverageState(0xAA);
+      rs.depth_write = false;
+      CHECK(707, CoverageOf(true, r, rs) == CoverageKind::kNone);
+      rs = CoverageState(0xAA);
+      rs.depth_test = false;
+      CHECK(707, CoverageOf(true, r, rs) == CoverageKind::kNone);
+      // (the alpha test is not asked for: on or off, the record is a coverage record)
+      rs = CoverageState(0xAA);
+      rs.alpha_test = false;
+      CHECK(707, CoverageOf(true, r, rs) == CoverageKind::kLate);
+    }
+    // The scale: a number in [0, 1). Exactly 1 (a draw that does not fade), anything above, a negative, no number: none.
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    for (const float scale : {1.0f, 1.5f, -0.1f, nan, inf, -inf, std::nextafter(0.0f, -1.0f)}) {
+      CHECK(708, CoverageOf(true, CoverageRecord(leaf, scale), CoverageState(0xAA)) == CoverageKind::kNone);
+      CHECK(708, CoverageOf(true, CoverageRecord(leaf, scale), CoverageState(0x87)) == CoverageKind::kNone);
+    }
+    for (const float scale : {0.0f, -0.0f, 0.5f, std::nextafter(1.0f, 0.0f)}) {
+      CHECK(709, CoverageOf(true, CoverageRecord(leaf, scale), CoverageState(0xAA)) == CoverageKind::kLate);
+      CHECK(709, CoverageOf(true, CoverageRecord(leaf, scale), CoverageState(0x87)) == CoverageKind::kEarly);
+    }
+  }
+  // PlanCoverageOrder: every arrangement of up to six records
+  for (size_t count = 0; count <= 6; ++count) {
+    for (uint32_t code = 0; code < (1u << (2 * count)); ++code) {
+      CoverageItem items[6];
+      size_t sky_place = count, first_late = count, first_early = count;
+      bool any = false;
+      for (size_t i = 0; i < count; ++i) {
+        const uint32_t k = (code >> (2 * i)) & 3u;                  // 0 opaque, 1 early, 2 late, 3 blended
+        items[i] = {k == 1 ? CoverageKind::kEarly : k == 2 ? CoverageKind::kLate : CoverageKind::kNone, k == 3};
+        if (k == 3 && sky_place == count) sky_place = i;
+        if (k == 2 && first_late == count) first_late = i;
+        if (k == 1 && first_early == count) first_early = i;
+        any = any || k == 1 || k == 2;
+      }
+      for (size_t depth_place = 0; depth_place <= count; ++depth_place) {
+        const CoverageOrder o = PlanCoverageOrder(items, count, sky_place, depth_place);
+        if (!any) {
+          CHECK(740, o.sky == sky_place && o.tail == kNoCoverageTail);
+          continue;
+        }
+        CHECK(741, o.sky <= sky_place && o.sky <= first_late);                      // the sky before every blend
+        if (o.tail != kNoCoverageTail) {
+          CHECK(742, o.sky <= o.tail && o.tail <= depth_place && o.tail <= first_late && o.tail <= sky_place);
+          CHECK(743, first_early < o.tail);                                         // a tail only for an early record before it
+        } else {
+          CHECK(744, first_early >= std::min(std::min(sky_place, depth_place), first_late));
+        }
+        // (and exactly: the tail as late as its three bounds allow, the sky as late as its own allow; so a frame whose
+        // sky place already precedes its coverage records keeps the place it has)
+        const size_t bound = std::min(std::min(sky_place, depth_place), first_late);
+        CHECK(745, o.tail == (first_early < bound ? bound : kNoCoverageTail));
+        CHECK(745, o.sky == std::min(std::min(sky_place, first_late), o.tail));
+      }
+    }
+  }
+  // (the sky place may lie anywhere, not at the first blended record alone: a place before every record, and beyond them)
+  {
+    const CoverageItem items[3] = {{CoverageKind::kNone, false}, {CoverageKind::kLate, false}, {CoverageKind::kNone, true}};
+    CHECK(746, PlanCoverageOrder(items, 3, 0, 3).sky == 0 && PlanCoverageOrder(items, 3, 3, 3).sky == 1 &&
+                   PlanCoverageOrder(items, 3, 2, 3).sky == 1 && PlanCoverageOrder(items, 3, 2, 0).tail == kNoCoverageTail);
+    CHECK(746, PlanCoverageOrder(nullptr, 0, 0, 0).sky == 0 && PlanCoverageOrder(nullptr, 0, 0, 0).tail == kNoCoverageTail);
+    const CoverageItem early[3] = {{CoverageKind::kEarly, false}, {CoverageKind::kNone, false}, {CoverageKind::kLate, false}};
+    const CoverageOrder o = PlanCoverageOrder(early, 3, 3, 1);
+    CHECK(746, o.tail == 1 && o.sky == 1);                                         // the depth place bounds the tail, the tail the sky
+    static_assert(PlanCoverageOrder(nullptr, 0, 0, 0).tail == kNoCoverageTail);
+    static_assert(CoveredSamples(0xAA, 0, 0, 0.5f) == 1 && !CoverageHasFull(0xAA, 0.5f));
+  }
+}
+
 int main() {
   // 1-4: clay color cvar parsing.
   {
@@ -10973,6 +11146,7 @@ int main() {
   std::thread(CloudTests).join();
   std::thread(WindWordTests).join();
   std::thread(NativeWindTests).join();
+  std::thread(CoverageTests).join();
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "

@@ -103,12 +103,13 @@ REXCVAR_DEFINE_STRING(fable2_native_sun, "off", "Fable2",
                       "because towards the sun the native picture is not yet the game's (the native scene is too dark there): "
                       "frame map section 17, \"Validation (10c)\".");
 REXCVAR_DEFINE_STRING(fable2_native_wind, "off", "Fable2",
-                      "Native wind (sub-project 11, phase 11a; in the making): on (or true, 1) = with a composite view "
+                      "Native wind (sub-project 11, phase 11a; not yet validated): on (or true, 1) = with a composite view "
                       "the capture also reads the wind inputs of the draws whose vertex shader sways (trunks, leaves, "
                       "instanced plants and their shadow casters: three to five vertex registers a draw, the shader's "
-                      "literal table once, a tree's vertex elements) into a side array of the frame; nothing is drawn "
-                      "with them yet, the picture is the one without; off (or false, 0; the default) = none of it is "
-                      "read. Frame map section 18.");
+                      "literal table once a frame, a tree's vertex elements) into a side array of the frame, and the native "
+                      "view draws those records moved as the game's vertex shader moves them, in colour, depth and shadow "
+                      "(F3: the Wind line); off (or false, 0; the default) = none of it is read, made or drawn. Frame map "
+                      "section 18.");
 REXCVAR_DEFINE_STRING(fable2_native_scene_dump, "off", "Fable2",
                       "Diagnostic of the native renderer (frame map section 18, \"Stored native scene\"): on (or true, 1) = "
                       "each discovery capture made while the native picture is drawn also writes the native scene of its "
@@ -981,7 +982,7 @@ void Install(rex::memory::Memory* memory) {
   // (off by default and in the making: its line only when it is on, so that a normal run's log is the one of before)
   if (CurrentWind()) {
     REXLOG_INFO("[native] wind: on (fable2_native_wind; the wind inputs of the draws whose vertex shader sways are read in a "
-                "frame with records; nothing is drawn with them yet)");
+                "frame with records, and the native view draws those records moved)");
   }
   // (a diagnostic: its line only when it is on, so that a normal run's log is the one of before)
   if (CurrentSceneDump()) {

@@ -19,9 +19,11 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
      (One run, log 643, shots 1296 wide, `RUN UNCHECKED`; the figures "before" are another session's, binary
      and window width: `frame-map.md`, "Validation (11c)".)
    - *Not achieved*: sub-project 10's criterion 19 is still not met in the game (the sun region under in
-     half its figures; a shaft of the native layer several times the game's: below); **the cost of the
-     three switches is not measured** (the game window stood on the other monitor in every run); nobody
-     has judged the moving picture; all switches stay off by default.
+     half its figures; a shaft of the native layer several times the game's: below); the cost of the three switches
+     is measured at the bridge alone, after the fix wave (no steady window below 37.4 fps uncapped with
+     all on; no cost outside one run's own spread: `frame-map.md`, "After the fix wave"), not at the
+     third spot and for no switch alone; nobody has judged the moving picture; all switches stay off by
+     default.
    - What follows is the item as it was written before the work:
    - Wind: trees and bushes stand still in the native view. The game moves them in the vertex
      shader (`frame-map.md`, "Wind and displacement"); the native programs take the wind terms as
@@ -78,9 +80,15 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
 
 ### Follow-ups of sub-project 11 (`frame-map.md` section 18, "Limits (11a)", "Limits (11b)", "Limits (11c)", "Follow-ups (11)")
 
-- **The cost of wind, coverage and the redraw: unmeasured.** Two runs at the bridge and two at the third
-  spot with the window on the usual monitor (user check 91). Indication at the wrong window size (logs 646,
-  647; not timing evidence): about half a millisecond a frame for wind and coverage together.
+- **The cost of wind, coverage and the redraw: measured at the bridge, not elsewhere** (logs 654 to 656,
+  width 1942, made alone, uncapped: with all on every steady native window at 37.4 fps or more, mean frame
+  19.41 ms against 19.36 with post and bloom alone, capture median +0.13 ms). Left: the third spot's pair
+  (user check 91), each switch alone, a capped pair, and how much two runs of one configuration differ
+  uncapped (a window's rate moves by 20 fps inside one run, so the criterion's 30 fps bound no longer
+  says "no cost"). The run with the sun alone had a frame of 76 to 93 ms in every window, in its emulated
+  view too: not explained.
+- **The dog is drawn flat red on the software adapter** in every textured run since sub-project 10 at
+  least (not on the real GPU): never looked into.
 - **The native sun layer's sweeping shaft** (ledger ruling 64; an open item of sub-project 10's layer, with
   "why the reference's sun-layer factor is 1.4 to 1.7 times the game's" above): a shaft across the bridge's
   planks 2 to 4.6 times the game's at "beam far right" and 1.35 to 1.77 at "beams right" at moments, moving
@@ -124,5 +132,5 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
 - Defaults of `--fable2_native_post` and `--fable2_native_bloom` (the timing supports turning
   both on; kept off until the user says so).
 - Defaults of `--fable2_native_wind` and `--fable2_native_coverage` (recommended on once user checks 81
-  to 84 and 91 are done; kept off until the user says so); `--fable2_native_sun` stays off.
+  to 88 are done: the cost at the bridge is judged; kept off until the user says so); `--fable2_native_sun` stays off.
 - User checks 40 to 92 in `user-checks.md`.

@@ -8,8 +8,10 @@ against blended records is a limit with a user check (ruling 55) (FM section 18,
 scenes, 2026-10-11: criterion 15 not met as written and met against the level a fetch takes (ledger ruling 62), 16 met, 17 not met as
 written, 18 met but for the cost and the picture against master's binary; sub-project 10's criterion 19 met on the oracle feed and NOT
 met in the game ("sun" 0.67 to 0.78, "beams left" 0.87 to 1.10, "beams right" 0.95 to 1.15 and, across a sweeping shaft, 1.35 and 1.77);
-the cost of every phase and criterion 8's fourth part are not judged, the window not having stood on the usual monitor (ledger rulings
-49 and 65); every switch stays off by default (FM section 18, "Validation (11c)", "Limits (11c)", "Follow-ups (11)"; plan Tasks 16 to
+the cost of every phase and criterion 8's fourth part were not judged at that closing, the window not having stood on the usual monitor
+(ledger rulings 49 and 65), **and were judged after the fix wave on runs at width 1942 (ledger ruling 69): at the bridge the frame rate is
+met (no steady window below 37.4 fps with everything on, uncapped), the capture median is not decidable, the third spot is not judged;
+criterion 8's fourth part is met in 22 of 24 bridge regions and not in two of moving leaf shadow** (FM section 18, "After the fix wave"); every switch stays off by default (FM section 18, "Validation (11c)", "Limits (11c)", "Follow-ups (11)"; plan Tasks 16 to
 18)**. **Sub-project closed 2026-10-11**, the closing table of all 19 criteria at the end of this file (branch `native-renderer-foliage`). Plan:
 `docs/superpowers/plans/2026-10-10-native-renderer-foliage.md`. Research:
 `.superpowers/sdd/foliage-research.md` (untracked; its scripts and outputs in
@@ -294,7 +296,7 @@ W/2 x H/2, made only for a diagnostic.
    before the sway (the game's order). The light's world position and the normal stay those at
    rest (a few hundredths of a unit: ruling 21, a stated approximation; the game lights the moved
    position). The fog and the shadow mask follow by themselves (per pixel, from the depth). The
-   box of a wind buffer's positions grows by the record's reach (`WindReach`, an upper bound
+   box of a wind buffer's positions grows by the record's reach (`ClayWindReach`; as first written `WindReach`, removed in the fix wave; an upper bound
    proved with the formula; a tree's is bounded from its mesh's extent of Design 6, a leaf's
    from the mesh's largest `|P - Q|`, which no register holds: ledger ruling 32) wherever a box
    decides something (the pre-pass's reach rule,
@@ -634,6 +636,11 @@ threshold set here without a measured one before it (ruling 20).
    **Closing (plan Task 18): the fourth part stays not judged: the window was not on the usual monitor** (ledger ruling 65). The
    closing run with every switch at its default (log 645) holds no line of the wind, the coverage, the tree occluder, the scene dump or
    the post; its shots are 1296 wide and the one run of master's binary with that plan 1942 wide: an indication only (FM section 18, "Validation (11c)").
+   **After the fix wave (ledger ruling 69): the fourth part met in 22 of 24 bridge regions, not met in two regions of moving leaf
+   shadow.** Log 657 against master's log 590, the same plan, both 1942 wide: the native shots agree within 0.02 in 20 of the 24
+   named regions; "railing post side" (1.379) and "planks in leaf shadow" (0.694) lie outside the emulated pair's range (0.940 to
+   1.245); the sun's direction turns within seconds in both logs. The comparison carries exposure, fog, far ground and materials; it
+   cannot carry a pixel under a moving shadow (FM section 18, "After the fix wave").
 9. *Cost and errors.* On a quiet machine at shot width 1942, wind on: every steady 150-frame
    native window at 30.0 fps or more at the bridge, none below 29.2 at the third spot; the
    capture median stated beside the off-run's (a difference under a third of a millisecond is
@@ -647,6 +654,12 @@ threshold set here without a measured one before it (ruling 20).
    run. An indication at width 1296, uncapped, not evidence: steady native windows at the bridge 28.8 to 29.6 fps with sun, wind and
    coverage against 28.8 to 30.0 with the sun alone (mean frame 34.24 against 33.71 ms; capture median 1.99 against 1.94 ms): by the
    letter both fail the bound, the off run too, which says the bound is not readable on that monitor (FM section 18, "Validation (11c)").
+   **After the fix wave (ledger ruling 69): cost: frame rate met at the bridge; capture median not decidable; the third spot not
+   judged (not run).** Log 654 (wind, coverage and sun on, made alone, 1942 wide, the head's uncapped default): 15 of 15 steady
+   native windows at 37.4 fps or more; capture median 1.995 ms against 1.932 (the sun alone) and 1.865 (post and bloom alone). The
+   bound was written for the capped game; uncapped, a window's rate moves by 20 fps inside one run, so the bound is met with room
+   and no longer says "no cost": no cost shows outside a run's own spread (mean frame 19.41 against 19.36 ms), a few tenths of a
+   millisecond are neither shown nor excluded (FM section 18, "After the fix wave").
 
 **11b, coverage**
 
@@ -712,6 +725,8 @@ threshold set here without a measured one before it (ruling 20).
     text; six off-runs without a line of it); **errors met** (logs 615 and 620: 0 `d3d ERROR` in 240 s each on the software
     adapter, warning id 1328 alone); **cost not judged** (no timing evidence: 1296 wide, a user present).
     **Closing (plan Task 18): cost not judged: the window** (as criterion 9).
+    **After the fix wave: cost as criterion 9** (the coverage is never on without the wind in a timing run); the configuration
+    recommended as a default (wind and coverage alone) and three reduced ones ran clean under the debug layer (logs 648 to 651).
 
 **11c, the tree occluder, the darkness, criterion 19**
 
@@ -756,6 +771,10 @@ threshold set here without a measured one before it (ruling 20).
     **Verdict (plan Task 18): off met** (program bytes; logs 633, 639, 645: no tree line with the sun off; logs 635, 645: no dump line
     without its switch); **errors met with a reservation** (logs 629, 635 clean on the software adapter; the redraw's rest pipeline ran on
     the real adapter alone); **cost not judged: the window**.
+    **After the fix wave (ledger ruling 69): errors met** (log 652: the redraw's rest pipeline under the debug layer, drawn 3 of 3,
+    0 errors); **cost: frame rate met at the bridge** (the sun alone, log 655: lowest window 38.9 fps, with a frame of 76 to 93 ms in
+    every window that the run's emulated view has too: the run's, not shown to be the switch's); **picture: as criterion 8's fourth
+    part**.
 
 **All phases**
 
@@ -1003,17 +1022,17 @@ tree occluder (11c)" to "The half blend, once: in the game")**
 | 5 | met as amended (ledger rulings 24, 25) |
 | 6 | not decidable as written; met by a substituted measure (rulings 27, 29), the amplitude on the native depth (ruling 51) |
 | 7 | met as written; the measure cannot fail for its reason |
-| 8 | parts 1 to 3 met; part 4 not judged: the window |
-| 9 | errors met; cost not judged: the window; the third spot not run |
+| 8 | parts 1 to 3 met; part 4 met in 22 of 24 bridge regions, not met in two of moving leaf shadow (after the fix wave, ruling 69) |
+| 9 | errors met; cost: frame rate met at the bridge, capture median not decidable, the third spot not judged (after the fix wave, ruling 69) |
 | 12 | not met as written, met in direction (ruling 56) |
 | 13 | met by a substituted baseline |
-| 14 | off met (programs and logs; the picture not judged); errors met; cost not judged: the window |
+| 14 | off met (programs and logs; the picture as criterion 8's part 4); errors met; cost as criterion 9, never apart from the wind |
 | 15 | not met as written; met against the level a fetch takes (ruling 62) |
 | 17 | not met as written; sub-project 10's criterion 19: met on the oracle feed, NOT met in the game |
-| 18 | off met; errors met with a reservation; cost and the picture against master's binary not judged: the window |
+| 18 | off met; errors met (log 652 closes the reservation); cost: frame rate met at the bridge; picture as criterion 8's part 4 |
 | 19 | followed |
 
-Figures and files: FM section 18, "Validation (11c)", "The closing table".
+Figures and files: FM section 18, "Validation (11c)", "The closing table", and "After the fix wave" for rows 8, 9, 14 and 18.
 
 **The fix wave after the whole-branch reviews (ledger ruling 67).** The colour pass has two pipeline caches since:
 the ordinary 64 keys, and 448 keys for the keys of the wind and the coverage (seven variants of a state), neither

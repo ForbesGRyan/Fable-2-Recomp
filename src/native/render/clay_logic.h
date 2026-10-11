@@ -15,6 +15,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -421,6 +422,27 @@ inline void CountClayCloudFrame(ClayClouds c, ClayCloudFrames& n) {
   ++n.frames;
   ++n.by[size_t(c)];
 }
+// What the pass does about one record's wind ("Native wind" below; DecideClayWind; the Wind line).
+// kDrawn: the record is moved, in every pass that draws it, by the wind vertex program. Every other
+// verdict: it is today's record at rest, by today's program, in every pass. kOff: the frame has no
+// wind (the switch off, or a scene captured without it). kNone: the record has no wind inputs (its
+// shader does not sway, or the capture refused it and counted why: capture::WindReason); a terrain
+// record never has. kBuffer: its wind words could not be had for every vertex it draws. kPipeline:
+// the wind program or a pipeline of it for the record's state could not be made (the colour pass's,
+// or the depth-only one of the pre-pass or of a shadow map). kSlot: no slot of the frame's
+// constant buffer was left for its wind constants.
+enum class ClayWind : uint8_t { kOff, kNone, kBuffer, kPipeline, kSlot, kDrawn, kCount };
+constexpr const char* ClayWindName(ClayWind w) {
+  switch (w) {
+    case ClayWind::kOff: return "off";
+    case ClayWind::kNone: return "none";
+    case ClayWind::kBuffer: return "buffer";
+    case ClayWind::kPipeline: return "pipeline";
+    case ClayWind::kSlot: return "slot";
+    case ClayWind::kDrawn: return "drawn";
+    default: return "?";
+  }
+}
 // The pass's frame counts of the sun layer, by verdict: one frame added. Counted: every frame with the
 // sun's switch on, which is every verdict but kOff.
 struct ClaySunFrames {
@@ -509,6 +531,19 @@ struct ClayStats {
   uint32_t wind_words = 0;
   uint64_t wind_words_bytes = 0;
   uint32_t wind_build[size_t(WindBuild::kCount)] = {};
+  // The wind as drawn ("Native wind" below; the Wind line). wind_switch: fable2_native_wind as the
+  // Render read it; wind_scene: the scene was captured with the wind (FrameScene::wind_records): only
+  // with both is anything moved. wind_moved: the scene's records drawn moved, by family (index:
+  // capture::WindFamily; counted at the colour draw). wind_casters: the shadow records drawn moved
+  // (both maps). wind_rest: records and casters that have wind inputs and are drawn at rest, by the
+  // pass's reason (index: ClayWind; kBuffer, kPipeline, kSlot), counted when they are prepared.
+  // wind_capture_rest: the frame's draws the capture gave no inputs for a fault of their own, scene
+  // and shadow passes together (index: capture::WindReason, the reasons past kNoEntry).
+  bool wind_switch = false, wind_scene = false;
+  uint32_t wind_moved[size_t(capture::WindFamily::kCount)] = {};
+  uint32_t wind_casters = 0;
+  uint32_t wind_rest[size_t(ClayWind::kCount)] = {};
+  uint32_t wind_capture_rest[size_t(capture::WindReason::kCount)] = {};
   uint32_t light_rotation[size_t(RotationKind::kCount)] = {};
   capture::ShaderTally<32> light_rotation_by_vs;
   // The light as drawn ("Native light" below; the Light line). light_switch:
@@ -1285,6 +1320,7 @@ struct PipelineKey {
   uint8_t color_mask = 0xF;
   uint8_t depth_test = 1, depth_write = 1, depth_func = 1;   // Compare values
   uint8_t cull = 0;          // Cull values
+  uint8_t wind = 0;          // 1: the wind vertex program ("Native wind" below); 0: the clay vertex shader, as always
   bool operator==(const PipelineKey&) const = default;
 };
 
@@ -1646,6 +1682,18 @@ inline constexpr uint32_t kLightModeUnlitFog = 128u, kLightModeUnlitFogAlpha = 2
 // trees' form, the in-scatter's scale (the draw's vertex c8.x times the frame's exposure) being the
 // float bits of ClayConstants::pad2. No vertex stage reads any of the four.
 inline constexpr uint32_t kLightModeLitNoFog = 512u, kLightModeUnlitFogTree = 1024u;
+// Two bits above those, which only the WIND vertex program reads ("Native wind" below): the wind
+// family of a record that is moved (a capture::WindFamily: 1 a trunk, 2 a leaf, 3 an instanced
+// plant), 0 for every draw at rest. The pass sets them only together with the wind program's
+// pipeline, the record's wind words at t9 and its wind constants in the slot at b1; no other
+// program reads them (the pixel shaders test single bits of the word, none of them these).
+inline constexpr uint32_t kLightModeWindShift = 12, kLightModeWindMask = 3u << kLightModeWindShift;
+static_assert(uint32_t(capture::WindFamily::kCount) - 1 <= (kLightModeWindMask >> kLightModeWindShift) &&
+              (kLightModeWindMask & (kLightModeCount - 1 + kLightModeUnlitFog + kLightModeUnlitFogAlpha + kLightModeLitNoFog +
+                                     kLightModeUnlitFogTree)) == 0);
+constexpr uint32_t LightModeWind(capture::WindFamily f) {
+  return f == capture::WindFamily::kNone || f >= capture::WindFamily::kCount ? 0u : uint32_t(f) << kLightModeWindShift;
+}
 
 // The light_mode of a lit mesh record by its vertex kind and family: a colour
 // stream's object (6), an object or trunk with probe colours (14), an
@@ -5835,10 +5883,13 @@ inline bool ShadowMapLookup(const float map_rows[4][4], const float world[3], do
 // A scene record is in the pre-pass when its colour pipeline tests and writes
 // depth. Its pre-pass pipeline: the same pixel shader kind, depth function and
 // cull, no colour written, no blend. At most 4 kinds x 3 functions (always,
-// less, less-equal) x 3 cull modes = 36 keys, the size of the pre-pass's own
+// less, less-equal) x 3 cull modes = 36 keys, and, with the wind ("Native wind"), the same
+// for the wind program's two kinds (flat and textured: a wind record is never a terrain
+// record), 18 more: 54, the size of the pre-pass's own
 // pipeline cache: it cannot overflow, and the State line's count is the colour
 // pass's alone.
-inline constexpr size_t kMaxPrepassPipelines = 36;
+inline constexpr size_t kMaxPrepassRestPipelines = 36, kMaxPrepassWindPipelines = 18;
+inline constexpr size_t kMaxPrepassPipelines = kMaxPrepassRestPipelines + kMaxPrepassWindPipelines;
 inline bool InPrepass(const PipelineKey& colour) { return colour.depth_test != 0 && colour.depth_write != 0; }
 inline PipelineKey PrepassKey(const PipelineKey& colour) {
   PipelineKey k;
@@ -5848,6 +5899,7 @@ inline PipelineKey PrepassKey(const PipelineKey& colour) {
   k.depth_write = 1;
   k.depth_func = colour.depth_func;
   k.cull = colour.cull;
+  k.wind = colour.wind;  // (the pre-pass draws a wind record with the wind program too: one program for every pass)
   return k;
 }
 // Whether a textured record's alpha can discard a pixel (the alpha test, alpha-to-mask). One whose
@@ -6328,6 +6380,304 @@ inline bool PrepassBeyondReach(const float m[4][4], const PositionBounds& box, c
   const double reach = double(PrepassReach(split));
   if (!std::isfinite(view_proj[3][3]) || !std::isfinite(w_min) || !std::isfinite(w_eye) || !std::isfinite(reach) || !(length2 > 0.0)) return false;
   return (w_min - w_eye) / std::sqrt(length2) >= reach;
+}
+
+// --- Native wind (frame-map section 18, "Native wind"; docs/native-renderer/lighting-formulas.md, "Wind") ---
+//
+// The game sways its trunks, leaves and instanced plants in the vertex shader. The pass draws a
+// record that has wind inputs (FrameScene::wind, ::shadow_wind) with ONE wind vertex program
+// (shaders::kClayWindVs: the clay vertex shader's text under CLAY_WIND) in every pass that draws
+// it: the colour pass, the depth pre-pass and its shadow map. The program moves the position by the
+// family's function before the rows; the family is two bits of light_mode (kLightModeWind*). What
+// it reads: the per-vertex wind words at t9 (wind_decode.h; a wind record is never a terrain
+// record), and ClayWindConstants in the tail of the record's slot at b1. Everything else of the
+// draw (the cut's test, the light's inputs, the normals) is of the position at rest (spec ruling
+// 21). A record whose verdict is not kDrawn is today's record with today's program in every pass
+// (DecideClayWind: all or none), never "the wind program with zero constants".
+//
+// Arithmetic (ledger ruling 35): the mirrors below and the three HLSL functions compute in single
+// precision, in the order of operations of the reference (tools/xdk_sigmatch/light_formulas.py:
+// wind_plant; wind_tree_terms, wind_tree_offset; wind_leaf_lift, wind_leaf), term for term; the
+// clock is the game's single-precision register and no phase is reduced before it is narrowed. The
+// tests hold the mirrors to the pins of tools/xdk_sigmatch/wind_pins.py within 2e-5 of a unit.
+// Ledger ruling 36: where a leaf's moved offset has zero squared length in this precision the
+// position is the moved pivot, and nothing is divided by that length.
+
+// The wind's constants of one record: the tail of cbuffer Object under CLAY_WIND (o_wind_reg,
+// o_wind_lit). reg: a tree's c15, c16, c17 as the capture read them; a plant's five registers
+// packed: (c10.x, c25.x, c26.x, c26.y), (c21.xyz, c7.x + c7.y), (c22.xyz, 0). lit: the family's
+// literals by SLOT, slot k at lit[k / 4][k % 4] (ledger ruling 31; wind_slot below), each the bits
+// of the table row's literal; a slot the family does not have is zero.
+struct ClayWindConstants {
+  float reg[3][4];
+  float lit[7][4];
+};
+inline constexpr uint32_t kClayWindOffset = 288;  // the block's place in the record's slot: behind cbuffer Object's own fields
+static_assert(sizeof(ClayWindConstants) == 160 && kClayWindOffset == sizeof(ClayObjectConstants) &&
+              kClayWindOffset + sizeof(ClayWindConstants) <= kClayObjectSlotBytes &&
+              capture::kWindLiterals == 28 && sizeof(ClayWindConstants::lit) == capture::kWindLiterals * sizeof(float));
+// The new large slots (kClayObjectSlotBytes each) a frame's wind records may take beyond the lit
+// objects' own: an unlit record's, a lit plant's and a caster's. 4096 (2 MB): about ten times what
+// a captured frame needs (132 to 228 scene draws and 110 to 228 casters). A record past it is at
+// rest (ClayWind::kSlot).
+inline constexpr uint32_t kClayWindSlotsMax = 4096;
+
+// The literals' slots by name: light_formulas.WIND_LITERAL_ORDER, a tree's (a leaf's 28, of which
+// a trunk has the first 18) and a plant's (7). tests/test_wind_literals.py holds both lists, and
+// the HLSL's, to that order name by name: two literals of one value (flutter_y and one are both 1)
+// are told apart by no pin.
+namespace wind_slot {
+enum Tree : uint32_t {
+  half, base, rate1, rate2, two_pi, quarter, lean, gust, phase_x, phase_y, lo, amp, along, across, rate0, zero, sel_zero, sel_one,
+  hundred, slack, phase_f, flutter_x, flutter_y, one, back, push_gust, lift_gust, rate_f, kTreeCount
+};
+enum Plant : uint32_t { p_lo, p_two_pi, p_inv_two_pi, p_gain, p_height, p_half, p_unit, kPlantCount };
+}  // namespace wind_slot
+static_assert(wind_slot::kTreeCount == capture::WindLiteralCount(capture::WindFamily::kLeaf) &&
+              wind_slot::hundred == capture::WindLiteralCount(capture::WindFamily::kTrunk) &&
+              wind_slot::kPlantCount == capture::WindLiteralCount(capture::WindFamily::kPlant));
+
+// The constants of a record's inputs and its table row, `c7_sum` being a plant's c7.x + c7.y (the
+// draw's offset: the constant part of every copy's seed), rounded to single precision.
+inline ClayWindConstants PackClayWindConstants(const capture::WindInputs& wind, const capture::WindSpec& spec, float c7_sum) {
+  ClayWindConstants c{};
+  if (wind.family == capture::WindFamily::kPlant) {
+    const float (*r)[4] = wind.reg;  // c10, c21, c22, c25, c26
+    c.reg[0][0] = r[0][0]; c.reg[0][1] = r[3][0]; c.reg[0][2] = r[4][0]; c.reg[0][3] = r[4][1];
+    c.reg[1][0] = r[1][0]; c.reg[1][1] = r[1][1]; c.reg[1][2] = r[1][2]; c.reg[1][3] = c7_sum;
+    c.reg[2][0] = r[2][0]; c.reg[2][1] = r[2][1]; c.reg[2][2] = r[2][2]; c.reg[2][3] = 0.0f;
+  } else {
+    std::memcpy(c.reg, wind.reg, sizeof(c.reg));  // c15, c16, c17
+  }
+  const uint32_t count = spec.lit_count < capture::kWindLiterals ? spec.lit_count : capture::kWindLiterals;
+  for (uint32_t k = 0; k < count; ++k) std::memcpy(&c.lit[k / 4][k % 4], &spec.lit_bits[k], sizeof(float));
+  return c;
+}
+inline ClayWindConstants MakeClayWindConstants(const capture::WindInputs& wind, const capture::WindSpec& spec, const capture::DrawRecord& r) {
+  return PackClayWindConstants(wind, spec, r.instances.offset[0] + r.instances.offset[1]);
+}
+// Whether every value of the block is a number (the registers are, by the capture's rule; the sum
+// of a plant's offset is made here).
+inline bool ClayWindConstantsFinite(const ClayWindConstants& c) {
+  for (const auto& row : c.reg) {
+    for (float v : row) {
+      if (!std::isfinite(v)) return false;
+    }
+  }
+  for (const auto& row : c.lit) {
+    for (float v : row) {
+      if (!std::isfinite(v)) return false;
+    }
+  }
+  return true;
+}
+
+// What the pass knows of one record when it decides its wind, and the verdict: the first thing
+// missing decides, and only a record with everything is moved (kDrawn), in every pass that draws
+// it. on: the frame has the wind. has_inputs: the record has wind inputs. terrain: it is a terrain
+// record (t9 is its normals': never moved). has_words: its wind words exist for every vertex it
+// draws. has_colour_pipeline, has_depth_pipeline: the wind program's pipelines of the record's
+// state (a caster: its map's, both; a record that is not in the pre-pass: its colour pipeline's,
+// both). has_slot: a slot for its constants, which are all numbers.
+struct ClayWindInputs {
+  bool on, has_inputs, terrain, has_words, has_colour_pipeline, has_depth_pipeline, has_slot;
+};
+constexpr ClayWind DecideClayWind(const ClayWindInputs& in) {
+  if (!in.on) return ClayWind::kOff;
+  if (!in.has_inputs || in.terrain) return ClayWind::kNone;
+  if (!in.has_words) return ClayWind::kBuffer;
+  if (!in.has_colour_pipeline || !in.has_depth_pipeline) return ClayWind::kPipeline;
+  if (!in.has_slot) return ClayWind::kSlot;
+  return ClayWind::kDrawn;
+}
+
+namespace wind_detail {
+inline float Frac(float x) { return x - std::floor(x); }
+inline float Lit(const ClayWindConstants& c, uint32_t slot) { return c.lit[slot / 4][slot % 4]; }
+// A phase as the tree shaders wrap it, in [-pi, pi): its sine is sin(2 pi q).
+inline float TreePhase(float q, const ClayWindConstants& c) {
+  return Frac(Frac(q) + Lit(c, wind_slot::half)) * Lit(c, wind_slot::two_pi) + Lit(c, wind_slot::lo);
+}
+}  // namespace wind_detail
+
+// light_formulas.wind_plant: `p` the position at rest (in the world), `seed` A3 + B3 of the
+// vertex's copy and `z` the mesh vertex's third coordinate (the two wind words), `c` a plant's
+// constants. A vertex at or below its root stands, exactly.
+inline void WindPlantMirror(const float p[3], float seed, float z, const ClayWindConstants& c, float out[3]) {
+  using namespace wind_slot;
+  using wind_detail::Frac;
+  using wind_detail::Lit;
+  const float c10x = c.reg[0][0], c25x = c.reg[0][1], c26x = c.reg[0][2], c26y = c.reg[0][3];
+  const float f = Frac(c.reg[1][3] + seed);
+  float theta = 1.0f - c10x * c25x * (f * Lit(c, p_gain) + 1.0f) + f;
+  theta = Frac(theta * Lit(c, p_inv_two_pi) + Lit(c, p_half)) * Lit(c, p_two_pi) + Lit(c, p_lo);
+  const float h = Lit(c, p_height) * z;
+  const float s = (h < 0.0f ? 0.0f : h > 1.0f ? 1.0f : h) * std::cos(theta);
+  for (int k = 0; k < 3; ++k) out[k] = p[k] + s * (c.reg[1][k] * c26x + c.reg[2][k] * c26y);
+}
+
+// light_formulas.wind_tree_offset (with wind_tree_terms): what the wind adds to a trunk vertex and
+// to a leaf's pivot. `w` = (b, a, d, c): the four weights in the fetch's source order; `c` a tree's
+// constants (c15, c16, c17).
+inline void WindTreeOffsetMirror(const float w[4], const ClayWindConstants& c, float off[3]) {
+  using namespace wind_slot;
+  using wind_detail::Lit;
+  using wind_detail::TreePhase;
+  const float* c15 = c.reg[0];
+  const float* c16 = c.reg[1];
+  const float* c17 = c.reg[2];
+  const float b = w[0], a = w[1], d = w[2], cc = w[3];
+  const float t = c15[0];
+  const float g = c17[3] * Lit(c, gust);
+  const float s0 = std::sin(TreePhase(t * Lit(c, rate0), c));
+  const float s1 = std::sin(TreePhase(b * Lit(c, rate0) + (d * c16[0] + ((c16[1] + Lit(c, rate1)) * t + g)), c));
+  const float s2 = std::sin(TreePhase(d * c16[0] + ((c16[1] + Lit(c, rate2)) * t + g), c));
+  const float dd = d * c17[2] * d;
+  const float along_v =
+      dd * Lit(c, along) * (Lit(c, amp) * s1 * (std::fabs(Lit(c, amp) * s0) * Lit(c, quarter) + Lit(c, base)) + c17[2] * Lit(c, lean));
+  const float across_v = dd * Lit(c, across) * s2;
+  const float s3 = std::sin(TreePhase(t * Lit(c, phase_y) + b, c));
+  const float turn = c16[2] * t + g;
+  const float s4 = std::sin(TreePhase((turn + Lit(c, phase_x)) * cc + b, c));
+  const float s5 = std::sin(TreePhase((turn + Lit(c, phase_y)) * cc + b, c));
+  const float scale = (Lit(c, amp) * s3 + Lit(c, half)) * a * (Lit(c, half) * c17[2]) * c15[2];
+  const float u = Lit(c, amp) * s4 * scale, v = Lit(c, amp) * s5 * scale;
+  off[0] = along_v * c17[0] - across_v * c17[1] + u;
+  off[1] = along_v * c17[1] + across_v * c17[0] + v;
+  off[2] = -(along_v * along_v) * Lit(c, quarter) - (u * u + v * v) * Lit(c, half);
+}
+
+// light_formulas.wind_trunk: p + the offset. A vertex whose four weights are zero stands, exactly.
+inline void WindTrunkMirror(const float p[3], const float w[4], const ClayWindConstants& c, float out[3]) {
+  float off[3];
+  WindTreeOffsetMirror(w, c, off);
+  for (int k = 0; k < 3; ++k) out[k] = p[k] + off[k];
+}
+
+// light_formulas.wind_leaf_lift: what the flutter adds to the third coordinate of P - Q. `v`: the
+// flutter's three values (source x, y, z of fetch 5; ledger ruling 30).
+inline float WindLeafLiftMirror(const float p[3], const float q[3], const float w[4], const float v[3], const ClayWindConstants& c) {
+  using namespace wind_slot;
+  using wind_detail::Frac;
+  using wind_detail::Lit;
+  using wind_detail::TreePhase;
+  const float* c15 = c.reg[0];
+  const float* c16 = c.reg[1];
+  const float* c17 = c.reg[2];
+  const float b = w[0], d = w[2];
+  const float t = c15[0];
+  const float g = c17[3] * Lit(c, gust);
+  const float dx = p[0] - q[0], dy = p[1] - q[1], dz = p[2] - q[2];
+  const float length = std::sqrt(dx * dx + dy * dy + dz * dz);
+  const float clock = t + c17[3] * Lit(c, rate_f);
+  const float s6 =
+      std::sin(TreePhase(b * Lit(c, rate_f) + (((c16[1] + Lit(c, rate1)) * t + g) + c16[0] * d + Lit(c, phase_f)), c));
+  const float s7 = std::sin(TreePhase((clock * Lit(c, flutter_x) + v[2]) + Lit(c, hundred) * v[0], c));
+  const float turn = Frac(clock * Lit(c, flutter_y) + v[1]);  // (the shader doubles it and takes half of that)
+  const float s8 = std::sin(Frac((turn + turn) * Lit(c, half) + Lit(c, half)) * Lit(c, two_pi) + Lit(c, lo));
+  const float k = -(Lit(c, amp) * s6) > 0.0f ? Lit(c, back) * s6 : Lit(c, amp) * s6;
+  const float beyond = length + Lit(c, slack);
+  const float push = Lit(c, amp) * s7 * (beyond > 0.0f ? beyond : 0.0f) * c16[3];
+  const float lift = c15[3] * (std::fabs(k) * Lit(c, amp) * s8) * k;
+  return push * (c17[2] * Lit(c, push_gust) + Lit(c, one)) + lift * (c17[2] * Lit(c, lift_gust) + Lit(c, one));
+}
+
+// light_formulas.wind_leaf: the pivot sways as a trunk vertex does, and the vertex keeps its
+// distance from it while its direction's third coordinate is lifted. `q` the pivot, `w` the four
+// weights, `v` the flutter's three values. Ledger ruling 36: where the moved offset has zero
+// squared length in this function's own precision (a vertex at its pivot whose lift is 0, or a
+// square that underflows), out is the moved pivot, and nothing is divided by that length.
+inline void WindLeafMirror(const float p[3], const float q[3], const float w[4], const float v[3], const ClayWindConstants& c, float out[3]) {
+  float off[3];
+  WindTreeOffsetMirror(w, c, off);
+  const float pivot[3] = {q[0] + off[0], q[1] + off[1], q[2] + off[2]};
+  float d[3] = {p[0] - q[0], p[1] - q[1], p[2] - q[2]};
+  const float length = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+  d[2] += WindLeafLiftMirror(p, q, w, v, c);
+  const float turned2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+  if (!(turned2 > 0.0f)) {
+    for (int k = 0; k < 3; ++k) out[k] = pivot[k];
+    return;
+  }
+  const float turned = std::sqrt(turned2);
+  for (int k = 0; k < 3; ++k) out[k] = pivot[k] + d[k] / turned * length;
+}
+
+// An upper bound of how far the wind moves a vertex of a record (light_formulas.wind_reach_plant,
+// wind_reach_tree, wind_reach_leaf: every sine at 1), computed in double and rounded up, so that it
+// is never below the reference's: what a box of the record's rest positions is grown by
+// (GrowBounds). A plant's is its registers' alone; a tree's needs the mesh's extent (ledger ruling
+// 32: the largest weight; a leaf's largest |P - Q|), as the geometry cache gives it with the wind
+// words. +infinity for no family and for anything that is no number or below zero (GrowBounds
+// then gives no box: the record is kept wherever a box would decide).
+inline float ClayWindReach(capture::WindFamily family, const ClayWindConstants& c, const WindExtent& extent) {
+  using namespace wind_slot;
+  const float inf = std::numeric_limits<float>::infinity();
+  auto lit = [&](uint32_t slot) { return double(wind_detail::Lit(c, slot)); };
+  double reach = -1.0;
+  if (family == capture::WindFamily::kPlant) {
+    double sum = 0.0;
+    for (int k = 0; k < 3; ++k) {
+      const double x = double(c.reg[1][k]) * double(c.reg[0][2]) + double(c.reg[2][k]) * double(c.reg[0][3]);
+      sum += x * x;
+    }
+    reach = std::sqrt(sum);
+  } else if (family == capture::WindFamily::kTrunk || family == capture::WindFamily::kLeaf) {
+    const double c15z = c.reg[0][2], c15w = c.reg[0][3], c16w = c.reg[1][3], c17x = c.reg[2][0], c17y = c.reg[2][1], c17z = c.reg[2][2];
+    const double w = std::fabs(double(extent.weight_max));
+    const double dd = w * w * std::fabs(c17z);
+    const double along_v = dd * std::fabs(lit(along)) *
+                           (std::fabs(lit(amp)) * (std::fabs(lit(amp)) * std::fabs(lit(quarter)) + std::fabs(lit(base))) + std::fabs(c17z * lit(lean)));
+    const double across_v = dd * std::fabs(lit(across));
+    const double wobble = std::fabs(lit(amp)) * (std::fabs(lit(amp)) + std::fabs(lit(half))) * w * std::fabs(lit(half) * c17z) * std::fabs(c15z);
+    const double flat = std::hypot(c17x, c17y) * std::hypot(along_v, across_v) + std::sqrt(2.0) * wobble;
+    const double drop = std::fabs(lit(quarter)) * along_v * along_v + std::fabs(lit(half)) * 2.0 * wobble * wobble;
+    reach = std::hypot(flat, drop);
+    if (family == capture::WindFamily::kLeaf) {
+      const double length = std::fabs(double(extent.length_max));
+      const double k = std::max(std::fabs(lit(amp)), std::fabs(lit(back)));
+      const double push = std::fabs(lit(amp)) * std::max(length + lit(slack), 0.0) * std::fabs(c16w);
+      const double lift = std::fabs(c15w) * k * std::fabs(lit(amp)) * k;
+      const double turn = push * (std::fabs(c17z * lit(push_gust)) + std::fabs(lit(one))) + lift * (std::fabs(c17z * lit(lift_gust)) + std::fabs(lit(one)));
+      reach += std::min(2.0 * turn, 2.0 * length);
+    }
+  }
+  if (!std::isfinite(reach) || reach < 0.0) return inf;
+  float up = float(reach);
+  if (double(up) < reach) up = std::nextafter(up, inf);
+  return up;
+}
+inline float WindReach(const capture::WindInputs& wind, const capture::WindSpec& spec, const WindExtent& extent) {
+  if (wind.family != spec.family) return std::numeric_limits<float>::infinity();
+  return ClayWindReach(wind.family, PackClayWindConstants(wind, spec, 0.0f), extent);
+}
+
+// The log's and F3's Wind line. "Wind: off" with the switch off. With it on and a scene captured
+// without the wind (the frames around a switch): that. Else the scene's records drawn moved, by
+// family, the shadow records drawn moved, and what has a wind shader and is drawn at rest, by
+// reason: the capture's reasons (capture::WindReasonName past "no-entry": scene and shadow draws
+// together) and the pass's (buffer, pipeline, slot).
+inline std::string FormatWindText(const ClayStats& st) {
+  if (!st.wind_switch) return "Wind: off";
+  if (!st.wind_scene) return "Wind: on, no wind inputs in the scene";
+  const uint32_t trunk = st.wind_moved[size_t(capture::WindFamily::kTrunk)], leaf = st.wind_moved[size_t(capture::WindFamily::kLeaf)],
+                 plant = st.wind_moved[size_t(capture::WindFamily::kPlant)];
+  char buf[160];
+  std::snprintf(buf, sizeof(buf), "Wind: on, moved %u (trunk %u, leaf %u, plant %u), casters %u | at rest: {", trunk + leaf + plant, trunk,
+                leaf, plant, st.wind_casters);
+  std::string text = buf;
+  bool first = true;
+  auto add = [&](const char* name, uint32_t n) {
+    if (!n) return;
+    std::snprintf(buf, sizeof(buf), "%s%s: %u", first ? "" : ", ", name, n);
+    text += buf;
+    first = false;
+  };
+  for (size_t i = size_t(capture::WindReason::kNoEntry) + 1; i < size_t(capture::WindReason::kCount); ++i) {
+    add(capture::WindReasonName(capture::WindReason(i)), st.wind_capture_rest[i]);
+  }
+  for (ClayWind w : {ClayWind::kBuffer, ClayWind::kPipeline, ClayWind::kSlot}) add(ClayWindName(w), st.wind_rest[size_t(w)]);
+  return text + "}";
 }
 
 // The log line of the maps, written when the pass's targets are created.

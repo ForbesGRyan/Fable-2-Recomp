@@ -1745,6 +1745,361 @@ static void WindWordTests() {
   }
 }
 
+// 720-739: native wind (foliage sub-project, plan Task 10; clay_logic.h, "Native wind").
+namespace wind_pins {
+struct Plant {
+  uint64_t hash;
+  uint32_t p[3], seed, z, reg[3][4], pos[3];
+};
+struct Trunk {
+  uint64_t hash;
+  uint32_t p[3], w[4], reg[3][4], pos[3];
+};
+struct Leaf {
+  uint64_t hash;
+  uint32_t p[3], q[3], w[4], v[3], reg[3][4], pos[3];
+};
+struct Reach {
+  uint64_t hash;
+  uint32_t reg[3][4], weight, length, reach;
+};
+static const Plant kPlant[] = {
+#define FABLE2_WIND_PINS_PLANT
+#include "wind_pins.inc"
+#undef FABLE2_WIND_PINS_PLANT
+};
+static const Trunk kTrunk[] = {
+#define FABLE2_WIND_PINS_TRUNK
+#include "wind_pins.inc"
+#undef FABLE2_WIND_PINS_TRUNK
+};
+static const Leaf kLeaf[] = {
+#define FABLE2_WIND_PINS_LEAF
+#include "wind_pins.inc"
+#undef FABLE2_WIND_PINS_LEAF
+};
+static const Reach kReach[] = {
+#define FABLE2_WIND_PINS_REACH
+#include "wind_pins.inc"
+#undef FABLE2_WIND_PINS_REACH
+};
+static float F(uint32_t bits) {
+  float f;
+  std::memcpy(&f, &bits, 4);
+  return f;
+}
+// The constants a pin's shader and registers give: the registers as the line has them (a plant's
+// packed already), the literals of the shader's own table row by slot.
+static bool Constants(uint64_t hash, const uint32_t reg[3][4], ClayWindConstants* c, capture::WindFamily* family) {
+  const capture::WindSpec* spec = capture::FindWind(hash);
+  if (!spec) return false;
+  capture::WindInputs none;
+  none.family = spec->family;
+  *c = PackClayWindConstants(none, *spec, 0.0f);  // (the literals; the registers below)
+  std::memcpy(c->reg, reg, sizeof(c->reg));
+  *family = spec->family;
+  return true;
+}
+// Ledger ruling 35: a mirror computes in single precision in the reference's order and is held to a
+// pin (the double reference rounded to single) within 2e-5 of a unit, at the captured clocks.
+inline constexpr float kTolerance = 2e-5f;
+static bool Near(const float got[3], const uint32_t want[3], float* worst) {
+  bool ok = true;
+  for (int k = 0; k < 3; ++k) {
+    const float d = std::fabs(got[k] - F(want[k]));
+    if (!(d <= kTolerance)) ok = false;  // (a result that is no number fails)
+    if (d > *worst) *worst = d;
+  }
+  return ok;
+}
+}  // namespace wind_pins
+
+static void NativeWindTests() {
+  using capture::WindFamily;
+  // DecideClayWind: all or none (plan Task 10; Review Focus 1 and 2)
+  for (uint32_t bits = 0; bits < 128; ++bits) {
+    const ClayWindInputs in{(bits & 1) != 0, (bits & 2) != 0, (bits & 4) != 0, (bits & 8) != 0,
+                            (bits & 16) != 0, (bits & 32) != 0, (bits & 64) != 0};
+    const ClayWind w = DecideClayWind(in);
+    const bool all = in.on && in.has_inputs && !in.terrain && in.has_words && in.has_colour_pipeline &&
+                     in.has_depth_pipeline && in.has_slot;
+    CHECK(720, (w == ClayWind::kDrawn) == all);
+    CHECK(721, !in.terrain || w != ClayWind::kDrawn);
+    CHECK(722, in.on || w == ClayWind::kOff);
+  }
+  // (the first thing missing decides, in this order)
+  CHECK(722, DecideClayWind({true, false, false, false, false, false, false}) == ClayWind::kNone &&
+                 DecideClayWind({true, true, true, true, true, true, true}) == ClayWind::kNone &&
+                 DecideClayWind({true, true, false, false, false, false, false}) == ClayWind::kBuffer &&
+                 DecideClayWind({true, true, false, true, false, true, false}) == ClayWind::kPipeline &&
+                 DecideClayWind({true, true, false, true, true, false, false}) == ClayWind::kPipeline &&
+                 DecideClayWind({true, true, false, true, true, true, false}) == ClayWind::kSlot &&
+                 DecideClayWind({true, true, false, true, true, true, true}) == ClayWind::kDrawn);
+  CHECK(722, std::string(ClayWindName(ClayWind::kBuffer)) == "buffer" && std::string(ClayWindName(ClayWind::kPipeline)) == "pipeline" &&
+                 std::string(ClayWindName(ClayWind::kSlot)) == "slot" && std::string(ClayWindName(ClayWind::kOff)) == "off");
+  // The constants of a plant: the registers' packing and the seed's constant part
+  {
+    capture::WindInputs wi;
+    wi.family = WindFamily::kPlant;
+    const float regs[5][4] = {{58.0f, 58.0f, 58.0f, 58.0f}, {0.9024f, 0.4099f, 0.1329f, 0.0f}, {-0.35f, 1.53f, 0.0f, 0.0f},
+                              {1.0f, 0.0f, 0.0f, 0.0f}, {0.025f, 0.0637f, 0.8687f, 0.0333f}};
+    std::memcpy(wi.reg, regs, sizeof(regs));
+    capture::DrawRecord r;
+    r.instances.offset[0] = 0.1f;
+    r.instances.offset[1] = 0.2f;
+    // (the table's row of a plant shader: its literals are the formula's)
+    const capture::WindSpec* row = capture::FindWind(0x8123C16DBF583F92ull);
+    CHECK(723, row && row->family == WindFamily::kPlant);
+    if (!row) return;
+    const capture::WindSpec& spec = *row;
+    const ClayWindConstants c = MakeClayWindConstants(wi, spec, r);
+    CHECK(723, c.reg[0][0] == 58.0f && c.reg[0][1] == 1.0f && c.reg[0][2] == 0.025f && c.reg[0][3] == 0.0637f);
+    CHECK(724, c.reg[1][0] == 0.9024f && c.reg[1][3] == 0.1f + 0.2f && c.reg[2][1] == 1.53f && c.reg[2][3] == 0.0f);
+    CHECK(724, c.reg[1][1] == 0.4099f && c.reg[1][2] == 0.1329f && c.reg[2][0] == -0.35f && c.reg[2][2] == 0.0f);
+    // The literals by slot: the row's bits at lit[k / 4][k % 4], zero past the family's seven.
+    for (uint32_t k = 0; k < 28; ++k) {
+      uint32_t bits;
+      std::memcpy(&bits, &c.lit[k / 4][k % 4], 4);
+      CHECK(724, bits == (k < 7 ? spec.lit_bits[k] : 0u));
+    }
+    CHECK(724, c.lit[0][0] == -3.14159274f && c.lit[0][1] == 6.28318548f && c.lit[0][3] == 0.1f && c.lit[1][0] == 5.0f &&
+                   c.lit[1][1] == 0.5f && c.lit[1][2] == 1.0f);
+    CHECK(724, ClayWindConstantsFinite(c));
+    // a vertex at the root stands, a tip moves, and never past the reach
+    float out[3];
+    const float p[3] = {10.0f, 20.0f, 3.0f};
+    WindPlantMirror(p, 0.75f, 0.0f, c, out);
+    CHECK(725, out[0] == p[0] && out[1] == p[1] && out[2] == p[2]);
+    WindPlantMirror(p, 0.75f, -0.5f, c, out);
+    CHECK(725, out[0] == p[0] && out[1] == p[1] && out[2] == p[2]);
+    const float reach = WindReach(wi, spec, WindExtent{});
+    CHECK(725, reach > 0.09f && reach < 0.12f);
+    float far_most = 0.0f;
+    for (int i = 0; i < 400; ++i) {
+      ClayWindConstants at = c;
+      at.reg[0][0] = 58.0f + 0.05f * float(i);  // (the clock over three periods)
+      WindPlantMirror(p, 0.75f, 0.5f, at, out);
+      const float d = std::sqrt((out[0] - p[0]) * (out[0] - p[0]) + (out[1] - p[1]) * (out[1] - p[1]) + (out[2] - p[2]) * (out[2] - p[2]));
+      CHECK(725, d <= reach * 1.0001f);
+      far_most = std::max(far_most, d);
+    }
+    CHECK(725, far_most > 0.9f * reach);
+    // A constant that is no number is seen.
+    capture::DrawRecord bad = r;
+    bad.instances.offset[1] = std::numeric_limits<float>::infinity();
+    CHECK(726, !ClayWindConstantsFinite(MakeClayWindConstants(wi, spec, bad)));
+    // A tree's registers go through as they are, and its literals are its row's 18 or 28.
+    capture::WindInputs tree;
+    tree.family = WindFamily::kTrunk;
+    for (int i = 0; i < 3; ++i) {
+      for (int k = 0; k < 4; ++k) tree.reg[i][k] = float(10 * i + k) + 0.5f;
+    }
+    const capture::WindSpec* trunk = capture::FindWind(0x475EC9F795E5EDBBull);
+    const capture::WindSpec* leaf = capture::FindWind(0xA5846836C90E1192ull);
+    CHECK(726, trunk && leaf);
+    if (!trunk || !leaf) return;
+    const ClayWindConstants tc = MakeClayWindConstants(tree, *trunk, r);
+    CHECK(726, std::memcmp(tc.reg, tree.reg, sizeof(tc.reg)) == 0 && tc.lit[0][0] == 0.5f && tc.lit[0][1] == 0.7f && tc.lit[4][1] == 1.0f &&
+                   tc.lit[4][2] == 0.0f && tc.lit[5][0] == 0.0f && tc.lit[6][3] == 0.0f);
+    tree.family = WindFamily::kLeaf;
+    const ClayWindConstants lc = MakeClayWindConstants(tree, *leaf, r);
+    CHECK(726, lc.lit[4][2] == 100.0f && lc.lit[4][3] == -0.3f && lc.lit[5][3] == 1.0f && lc.lit[6][3] == 0.15f && lc.lit[0][1] == 0.7f);
+    // The reach of a family the inputs are not, of no family, and of a value that is no number: no bound.
+    CHECK(726, std::isinf(WindReach(tree, *trunk, WindExtent{1.0f, 1.0f})) && std::isinf(ClayWindReach(WindFamily::kNone, lc, WindExtent{})));
+    ClayWindConstants nan = lc;
+    nan.reg[2][2] = std::numeric_limits<float>::quiet_NaN();
+    CHECK(726, std::isinf(ClayWindReach(WindFamily::kLeaf, nan, WindExtent{1.0f, 1.0f})) &&
+                   std::isfinite(ClayWindReach(WindFamily::kLeaf, lc, WindExtent{1.0f, 1.0f})));
+    CHECK(726, !GrowBounds(PositionBounds{{0, 0, 0, 1}, {1, 1, 1, 1}, true}, ClayWindReach(WindFamily::kLeaf, nan, WindExtent{1.0f, 1.0f})).valid);
+  }
+  // The slots by name are the reference's order (tests/test_wind_literals.py holds the names; here the count and two ends).
+  CHECK(727, wind_slot::half == 0 && wind_slot::sel_one == 17 && wind_slot::hundred == 18 && wind_slot::rate_f == 27 &&
+                 wind_slot::p_lo == 0 && wind_slot::p_unit == 6);
+  CHECK(727, LightModeWind(WindFamily::kTrunk) == 0x1000u && LightModeWind(WindFamily::kLeaf) == 0x2000u &&
+                 LightModeWind(WindFamily::kPlant) == 0x3000u && LightModeWind(WindFamily::kNone) == 0u &&
+                 LightModeWind(WindFamily::kCount) == 0u && kLightModeWindMask == 0x3000u);
+  // (the wind bits change nothing the light's bits decide: the buffers of every mode with them are those without)
+  for (uint32_t mode = 0; mode < kLightModeCount; ++mode) {
+    const ClayLightBuffers a = LightBufferSources(mode), b = LightBufferSources(mode | kLightModeWindMask);
+    CHECK(727, std::memcmp(&a, &b, sizeof(a)) == 0 && LightModeBlockOf(mode) == LightModeBlockOf(mode | kLightModeWindMask));
+  }
+  // The key of a wind record's pipelines: the record's with the wind's field, in the pre-pass too.
+  {
+    PipelineKey colour;
+    colour.textured = 1;
+    colour.cull = uint8_t(capture::Cull::kBack);
+    PipelineKey wind = colour;
+    wind.wind = 1;
+    CHECK(728, !(wind == colour) && PrepassKey(wind).wind == 1 && PrepassKey(colour).wind == 0 && InPrepass(wind) == InPrepass(colour));
+    ClayAlpha solid;
+    CHECK(728, PrepassKey(wind, solid).wind == 1 && PrepassKey(wind, solid).textured == 0);
+    // The pre-pass's cache holds every rest key and every wind key (a wind record is flat or textured).
+    std::vector<PipelineKey> keys;
+    for (uint8_t w = 0; w < 2; ++w) {
+      for (uint8_t textured = 0; textured < (w ? 2 : kClayPixelShaders); ++textured) {
+        for (capture::Compare f : {capture::Compare::kAlways, capture::Compare::kLess, capture::Compare::kLessEqual}) {
+          for (capture::Cull cull : {capture::Cull::kNone, capture::Cull::kFront, capture::Cull::kBack}) {
+            PipelineKey key;
+            key.textured = textured;
+            key.depth_func = uint8_t(f);
+            key.cull = uint8_t(cull);
+            key.wind = w;
+            CHECK(728, FindOrAddPipelineSlot(keys, PrepassKey(key), kMaxPrepassPipelines) != kNoPipelineSlot);
+          }
+        }
+      }
+    }
+    CHECK(728, keys.size() == 54 && kMaxPrepassPipelines == 54 && kMaxPrepassWindPipelines == 18);
+  }
+  // 730-733: each pinned line of wind_pins.py against the three mirrors and the reach.
+  {
+    using namespace wind_pins;
+    float worst = 0.0f;
+    int moved = 0;
+    for (const Plant& pin : kPlant) {
+      ClayWindConstants c;
+      WindFamily family = WindFamily::kNone;
+      const bool ok = Constants(pin.hash, pin.reg, &c, &family);
+      CHECK(730, ok && family == WindFamily::kPlant);
+      if (!ok) continue;
+      const float p[3] = {F(pin.p[0]), F(pin.p[1]), F(pin.p[2])};
+      float out[3];
+      WindPlantMirror(p, F(pin.seed), F(pin.z), c, out);
+      CHECK(730, Near(out, pin.pos, &worst));
+      moved += std::fabs(F(pin.pos[0]) - p[0]) > 1e-3f || std::fabs(F(pin.pos[1]) - p[1]) > 1e-3f;
+    }
+    CHECK(730, std::size(kPlant) == 13 && moved >= 9);
+    moved = 0;
+    for (const Trunk& pin : kTrunk) {
+      ClayWindConstants c;
+      WindFamily family = WindFamily::kNone;
+      const bool ok = Constants(pin.hash, pin.reg, &c, &family);
+      CHECK(731, ok && family == WindFamily::kTrunk);
+      if (!ok) continue;
+      const float p[3] = {F(pin.p[0]), F(pin.p[1]), F(pin.p[2])};
+      const float w[4] = {F(pin.w[0]), F(pin.w[1]), F(pin.w[2]), F(pin.w[3])};
+      float out[3];
+      WindTrunkMirror(p, w, c, out);
+      CHECK(731, Near(out, pin.pos, &worst));
+      moved += std::fabs(F(pin.pos[0]) - p[0]) > 1e-3f || std::fabs(F(pin.pos[1]) - p[1]) > 1e-3f;
+    }
+    CHECK(731, std::size(kTrunk) == 7 && moved >= 6);
+    // (the made trunk vertex without weights stands, exactly)
+    {
+      const Trunk& pin = kTrunk[5];
+      ClayWindConstants c;
+      WindFamily family = WindFamily::kNone;
+      float out[3] = {};
+      const float p[3] = {F(pin.p[0]), F(pin.p[1]), F(pin.p[2])};
+      const float w[4] = {F(pin.w[0]), F(pin.w[1]), F(pin.w[2]), F(pin.w[3])};
+      if (Constants(pin.hash, pin.reg, &c, &family)) WindTrunkMirror(p, w, c, out);
+      CHECK(731, w[0] == 0.0f && w[1] == 0.0f && w[2] == 0.0f && w[3] == 0.0f && out[0] == p[0] && out[1] == p[1] && out[2] == p[2]);
+    }
+    moved = 0;
+    for (size_t i = 0; i < std::size(kLeaf); ++i) {
+      const Leaf& pin = kLeaf[i];
+      ClayWindConstants c;
+      WindFamily family = WindFamily::kNone;
+      const bool ok = Constants(pin.hash, pin.reg, &c, &family);
+      CHECK(732, ok && family == WindFamily::kLeaf);
+      if (!ok) continue;
+      const float p[3] = {F(pin.p[0]), F(pin.p[1]), F(pin.p[2])}, q[3] = {F(pin.q[0]), F(pin.q[1]), F(pin.q[2])};
+      const float w[4] = {F(pin.w[0]), F(pin.w[1]), F(pin.w[2]), F(pin.w[3])}, v[3] = {F(pin.v[0]), F(pin.v[1]), F(pin.v[2])};
+      float out[3];
+      WindLeafMirror(p, q, w, v, c, out);
+      const bool near = Near(out, pin.pos, &worst);
+      CHECK(732, near);
+      if (!near) std::cerr << "leaf pin " << i << ": " << out[0] << ", " << out[1] << ", " << out[2] << "\n";
+      moved += std::fabs(F(pin.pos[0]) - p[0]) > 1e-3f || std::fabs(F(pin.pos[1]) - p[1]) > 1e-3f;
+    }
+    CHECK(732, std::size(kLeaf) == 12 && moved >= 9);
+    // Ledger ruling 36: the last made leaf line is a vertex at its pivot whose lift is exactly 0 (c15.w
+    // = 0 and c16.w = 0): its position is the moved pivot, a number, and the pivot has moved.
+    {
+      const Leaf& pin = kLeaf[std::size(kLeaf) - 1];
+      CHECK(733, std::memcmp(pin.p, pin.q, sizeof(pin.p)) == 0 && pin.reg[0][3] == 0u && pin.reg[1][3] == 0u);
+      ClayWindConstants c;
+      WindFamily family = WindFamily::kNone;
+      float out[3] = {}, off[3] = {};
+      const float p[3] = {F(pin.p[0]), F(pin.p[1]), F(pin.p[2])};
+      const float w[4] = {F(pin.w[0]), F(pin.w[1]), F(pin.w[2]), F(pin.w[3])}, v[3] = {F(pin.v[0]), F(pin.v[1]), F(pin.v[2])};
+      if (Constants(pin.hash, pin.reg, &c, &family)) {
+        WindLeafMirror(p, p, w, v, c, out);
+        WindTreeOffsetMirror(w, c, off);
+      }
+      CHECK(733, std::isfinite(out[0]) && std::isfinite(out[1]) && std::isfinite(out[2]) && WindLeafLiftMirror(p, p, w, v, c) == 0.0f);
+      CHECK(733, out[0] == p[0] + off[0] && out[1] == p[1] + off[1] && out[2] == p[2] + off[2] && std::fabs(off[0]) + std::fabs(off[1]) > 0.01f);
+      // (and the made line with the hundredfold byte neither 0 nor 255 is another position than its
+      // real row's: the flutter's source x is read)
+      const Leaf& real = kLeaf[0];
+      const Leaf& byte = kLeaf[std::size(kLeaf) - 2];
+      CHECK(733, std::memcmp(real.p, byte.p, sizeof(real.p)) == 0 && real.v[0] != byte.v[0] && real.v[1] == byte.v[1] &&
+                     std::fabs(F(real.pos[2]) - F(byte.pos[2])) > 1e-3f);
+    }
+    CHECK(734, worst > 0.0f && worst <= kTolerance);
+    std::cout << "wind pins: " << std::size(kPlant) << " plant, " << std::size(kTrunk) << " trunk, " << std::size(kLeaf)
+              << " leaf lines; the single-precision mirrors are within " << worst << " of them (bound 2e-5: ledger ruling 35)\n";
+    // The reach: never below the reference's, and no more than its rounding above it.
+    size_t plants = 0, trunks = 0, leaves = 0;
+    for (const Reach& pin : kReach) {
+      ClayWindConstants c;
+      WindFamily family = WindFamily::kNone;
+      const bool ok = Constants(pin.hash, pin.reg, &c, &family);
+      CHECK(735, ok);
+      if (!ok) continue;
+      const WindExtent extent{F(pin.weight), F(pin.length)};
+      const float got = ClayWindReach(family, c, extent), want = F(pin.reach);
+      CHECK(735, std::isfinite(got) && got >= want && got <= want * 1.000001f + 1e-12f);
+      plants += family == WindFamily::kPlant;
+      trunks += family == WindFamily::kTrunk;
+      leaves += family == WindFamily::kLeaf;
+      // (WindReach, from inputs: a tree's registers as they are; a plant's unpacked from the line)
+      capture::WindInputs wi;
+      wi.family = family;
+      if (family == WindFamily::kPlant) {
+        wi.reg[0][0] = c.reg[0][0];
+        wi.reg[3][0] = c.reg[0][1];
+        wi.reg[4][0] = c.reg[0][2];
+        wi.reg[4][1] = c.reg[0][3];
+        for (int k = 0; k < 3; ++k) {
+          wi.reg[1][k] = c.reg[1][k];
+          wi.reg[2][k] = c.reg[2][k];
+        }
+      } else {
+        std::memcpy(wi.reg, c.reg, sizeof(c.reg));
+      }
+      CHECK(735, WindReach(wi, *capture::FindWind(pin.hash), extent) == got);
+    }
+    CHECK(735, plants == 3 && trunks == 6 && leaves == 6);
+    // (a leaf's reach grows with the mesh's largest distance from a pivot: ledger ruling 32)
+    CHECK(735, F(kReach[9].length) == 0.0f && F(kReach[11].length) > 19.9f && F(kReach[11].reach) > F(kReach[10].reach) &&
+                   F(kReach[10].reach) > F(kReach[9].reach));
+  }
+  // 736: the Wind line.
+  {
+    ClayStats st;
+    CHECK(736, FormatWindText(st) == "Wind: off");
+    st.wind_switch = true;
+    CHECK(736, FormatWindText(st) == "Wind: on, no wind inputs in the scene");
+    st.wind_scene = true;
+    CHECK(736, FormatWindText(st) == "Wind: on, moved 0 (trunk 0, leaf 0, plant 0), casters 0 | at rest: {}");
+    st.wind_moved[size_t(WindFamily::kTrunk)] = 30;
+    st.wind_moved[size_t(WindFamily::kLeaf)] = 22;
+    st.wind_moved[size_t(WindFamily::kPlant)] = 126;
+    st.wind_casters = 121;
+    CHECK(736, FormatWindText(st) == "Wind: on, moved 178 (trunk 30, leaf 22, plant 126), casters 121 | at rest: {}");
+    st.wind_rest[size_t(ClayWind::kBuffer)] = 2;
+    st.wind_rest[size_t(ClayWind::kSlot)] = 1;
+    st.wind_rest[size_t(ClayWind::kNone)] = 500;   // (not a reason: a record without inputs)
+    st.wind_capture_rest[size_t(capture::WindReason::kRegisterRange)] = 3;
+    st.wind_capture_rest[size_t(capture::WindReason::kNoEntry)] = 700;  // (every draw that does not sway: not named)
+    CHECK(736, FormatWindText(st) ==
+                   "Wind: on, moved 178 (trunk 30, leaf 22, plant 126), casters 121 | at rest: {register-range: 3, buffer: 2, slot: 1}");
+    st.wind_rest[size_t(ClayWind::kPipeline)] = 4;
+    CHECK(736, FormatWindText(st).find("buffer: 2, pipeline: 4, slot: 1}") != std::string::npos);
+  }
+}
+
 int main() {
   // 1-4: clay color cvar parsing.
   {
@@ -3997,7 +4352,8 @@ int main() {
                    "depth D32_FLOAT 3.1 MB");
     // The linear format is one for every pipeline of the pass, so the key has no field for it: the
     // same keys, and the same number of pipelines, as with the 8-bit target.
-    CHECK(414, sizeof(PipelineKey) == 13);
+    // (14 since the wind's field: foliage plan Task 10; 0 in every key of a frame without the wind)
+    CHECK(414, sizeof(PipelineKey) == 14 && PipelineKey{}.wind == 0);
   }
 
   // 420-489: the light (frame-map section 14, "Native light").
@@ -6109,7 +6465,8 @@ int main() {
             }
           }
         }
-        CHECK(562, keys.size() == 36 && kMaxPrepassPipelines == 36);
+        // (the rest keys; with the wind program's keys the cache holds 54: case 728)
+        CHECK(562, keys.size() == 36 && kMaxPrepassRestPipelines == 36);
       }
       // 563: the compare directions. The game: lit iff 1 - z > g (near), 1 - z >= g (far), g the map's
       // value 1 - z_caster. Native map: n = z_caster: lit iff z < n (near), z <= n (far).
@@ -10383,6 +10740,7 @@ int main() {
   std::thread(PreviousBlendTests).join();
   std::thread(CloudTests).join();
   std::thread(WindWordTests).join();
+  std::thread(NativeWindTests).join();
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
@@ -10412,7 +10770,9 @@ int main() {
                "the sun's flag in the steps' constants; the previous-frame blend against the reference's numbers, the share 0 "
                "bit for bit, the front targets' exchange; the scene's clouds: a record's state and constants and what gives none, "
                "the mirror against the reference's numbers, nothing that is no number, the plan, the verdict and the Clouds line; "
-               "wind words: the box grown by the reach, the words' keys, the Geometry line\n";
+               "wind words: the box grown by the reach, the words' keys, the Geometry line; native wind: the verdict all or "
+               "none, the constants' packing and literal slots, the three mirrors against the reference's numbers within "
+               "2e-5 (single precision), a leaf at its pivot, the reach never below the reference's, the keys, the Wind line\n";
 
   return 0;
 }

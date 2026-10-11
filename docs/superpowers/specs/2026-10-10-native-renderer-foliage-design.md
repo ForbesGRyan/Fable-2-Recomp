@@ -3,7 +3,9 @@
 Status: **phase 11a (wind) built and validated by stills and by the native depth, 2026-10-11, with two parts left open by ledger ruling 49:
 criterion 9's cost (no timing evidence yet) and criterion 8's fourth part (no pair of runs of the two commits at one width)** (verdicts with
 each criterion and in FM section 18, "Validation (11a)"; the switch stays off by default); **phase 11b: the rules built; the late draws built and run (criteria 10 and 11 met for them, criterion 12 not decidable as written
-and shown by a substituted measure); the fading draws built, not yet run (plan Tasks 12 to 14)**; phases 11b and 11c: design, 2026-10-10 (branch `native-renderer-foliage`). Plan:
+and shown by a substituted measure); the fading draws built and run (criterion 13 met by a substituted baseline; criterion 12 measured in the held sunward view: above the model's band at
+"sun"; criterion 11's layer depth for the early records not judged); a flicker behind a late tree is possible in principle and measured at 0 pixels
+in one view (FM "Native coverage: the fading draws' runs"); the fern is not explained by coverage (plan Tasks 12 to 14)**; phases 11b and 11c: design, 2026-10-10 (branch `native-renderer-foliage`). Plan:
 `docs/superpowers/plans/2026-10-10-native-renderer-foliage.md`. Research:
 `.superpowers/sdd/foliage-research.md` (untracked; its scripts and outputs in
 `out/native-evidence/foliage/research/`). Ledger:
@@ -655,12 +657,25 @@ threshold set here without a measured one before it (ruling 20).
     **shown by a substituted measure**: on the tree's own pixels the stored linear scene with coverage is
     1.36 to 1.38 of the scene without, 1.04 to 1.06 of the half blend's prediction, the depth cover equal
     within a third of a point. The regions' band is still to be measured in the held sunward view (FM
-    section 18, "Native coverage: the first runs").
+    section 18, "Native coverage: the first runs"). (The 1.36 to 1.38 is a ratio of means over the tree's
+    pixels; the median of the per-pixel ratio is 1.106 and 1.086, the review's figures: the bright sky
+    behind a minority of the pixels carries the mean.)
+    **Verdict (plan Task 14, the held sunward view, runs D against E): not met as written at "sun"** (stored
+    linear scene 1.313, shots 1.47 and 1.40, against 0.97 to 1.12) **and, in the shots, at the root** (2.24
+    and 2.57 against 1.30 to 2.05; the linear scene 1.926 is inside); **met at "beams left"** (1.095; 1.11,
+    1.13); **"beams right" at the bound** (1.084; 1.13, 1.14). The precondition is met (the emulated shots
+    agree within 0.999 to 1.007). The change is larger than the model's, towards the game in every region
+    (native over emulated at "sun" 0.33 -> 0.47 to 0.49, at the root 0.19 to 0.21 -> 0.47 to 0.48) and past
+    it in none; the model's frame had the tree on 27% of "sun", this view has it on 58.7%.
 13. *In the game, the fading draws.* The same pair with the `87` draws built, against the late
     draws alone: per region between 0.97 and the model's upper bound times 1.03 (model B over C:
     "sun" 1.25, "beams left" 1.05, "beams right" 1.13, "beam root" 1.02), and the replay's pixel
     count of the fading draws in each region is stated beside it. A region that darkens by more
     than 3% fails.
+    **Verdict (plan Task 14): met by a substituted baseline.** No run has "the late draws alone" on the
+    binary with the fading draws; in the standing view the late tree holds no pixel of any region, so
+    coverage on against off is the fading draws alone: "sun" 1.006 (472 fading pixels), "beams left" 0.998,
+    "beams right" 1.014, "beam root" 1.004 (no fading pixel in the three). None darkens.
 14. Criteria 8 and 9 again for `--fable2_native_coverage` (off: 11a's picture and programs; cost;
     the software-adapter run).
 
@@ -826,8 +841,10 @@ coverage: the first runs", "Native coverage: the fading draws", "Stored mip leve
 
 - **Design 11 and ruling 14, amended (plan Task 14's design check): an early record's pre-pass draw is today's**
   (the first sample's pixels), not its fully covered pixels alone. The pre-pass feeds the shadow mask alone;
-  the game's mask reads its depth copy, which holds the first sample of every row issued before it, so a
-  half-covered pixel of a fading tree takes the shadow at the tree's depth in the game. So the mask is the one
+  the game's mask reads a depth copy that holds the first sample of every fading row and nothing of the late
+  rows (which copy is not established: this frame's by the bins' order, or, as the emulator executes the rows
+  in issue order with the mask draw issued before the copy, the one standing there, a frame late; either
+  serves), so a half-covered pixel of a fading tree takes the shadow at the tree's depth in the game. So the mask is the one
   of before for every early record, ruling 15 holds with nothing given up, no depth-only full program exists,
   and Design 11's limit "the shadow mask ... gives a half-covered pixel the sun's shadow of what lies behind
   it" applies to no early record. A late record is in no pre-pass, which is likely the game's own behaviour
@@ -835,9 +852,14 @@ coverage: the first runs", "Native coverage: the fading draws", "Stored mip leve
 - **Open question 6**: the fading and the late rows are in the pre-pass bins (`bin_mask_lo` = `FFFFFFFF` in
   every family A row); the game's mask draw is issued under a colour bin alone and reads the depth copy's
   address.
-- **The order of the game's rows**: the late rows are issued after the game's sky and after 30 to 35 blended
-  rows; natively the sky's place lies before the late record once the frame's textures are there, and the sky
-  step moves only in a run's first native frame.
+- **The order of the game's rows**: the late rows are issued inside the game's blended group at a place that
+  changes with the view and from frame to frame (after 30 to 35 blended draw rows in three captures, after
+  none in the held sunward view; log 623 alternates within one run). The sky step is drawn before the first
+  blend in every form. A blended record without depth write behind a late tree is shown at half or hidden by
+  that order: a possible flicker, 0 pixels in the held view, not measured elsewhere (FM "Native coverage: the
+  fading draws' runs"; a limit until ruled). (As first written here: "natively the sky's place lies before the
+  late record once the frame's textures are there, and the sky step moves only in a run's first native
+  frame": wrong.)
 - **A late record whose scale would admit fully covered pixels** is today's record (`coverage: full`): a
   verdict the design did not have; none is captured.
 - **The sunward view exists only while the stick is held**; released, the camera returns above the bridge
@@ -846,3 +868,8 @@ coverage: the first runs", "Native coverage: the fading draws", "Stored mip leve
   half-covered pixels well inside its cut-out. The discovery capture now dumps a texture's stored mip levels
   so that this can be measured; the early records' scheme would carry such a draw by widening `CoverageOf`
   alone (its pre-pass is today's, so nothing would leave the mask's depth). Not built before the measurement.
+  **Measured (run F): the premise holds weakly and the fern is not explained.** The stored levels' alpha is
+  one bit at every level; on them 24.0% of the fern's held pixels have one sample of two (16.3% on the base
+  level; not the half to two thirds a box filter suggests), the native cover already is the rule's on the
+  stored levels (99.3%), and at one half the fern's mean would be 8% lighter, where the game's is darker.
+  The third case is not built (FM "The fern on its stored mip levels").

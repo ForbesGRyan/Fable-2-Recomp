@@ -208,6 +208,42 @@ index 7f1eb7f..68277b7 100644
  
    D3D12_RECT* ClearDepthStencilViewAllocatedRects(D3D12_CPU_DESCRIPTOR_HANDLE depth_stencil_view,
                                                    D3D12_CLEAR_FLAGS clear_flags, FLOAT depth,
+diff --git a/include/rex/ui/imgui_dialog.h b/include/rex/ui/imgui_dialog.h
+index a7ab6b3..4ab2397 100644
+--- a/include/rex/ui/imgui_dialog.h
++++ b/include/rex/ui/imgui_dialog.h
+@@ -51,6 +51,10 @@ class ImGuiDialog {
+   virtual void OnShow() {}
+   virtual void OnClose() {}
+   virtual void OnDraw(ImGuiIO& io) { (void)io; }
++  // True when the dialog is animating or showing something and the UI must be
++  // repainted at every UI tick; false lets the presenter paint only when the
++  // guest produces a frame (an idle dialog costs no host presents then).
++  virtual bool WantsContinuousRepaint() const { return true; }
+ 
+  private:
+   ImGuiDrawer* imgui_drawer_ = nullptr;
+diff --git a/include/rex/ui/overlay/achievement_toast.h b/include/rex/ui/overlay/achievement_toast.h
+index 7642601..3f884bf 100644
+--- a/include/rex/ui/overlay/achievement_toast.h
++++ b/include/rex/ui/overlay/achievement_toast.h
+@@ -37,6 +37,7 @@ class AchievementToastDialog : public AchievementNotificationDialog {
+ 
+  protected:
+   void OnDraw(ImGuiIO& io) override;
++  bool WantsContinuousRepaint() const override;
+ 
+  private:
+   static constexpr float kDisplaySeconds = 4.5f;
+@@ -47,7 +48,7 @@ class AchievementToastDialog : public AchievementNotificationDialog {
+     std::optional<std::chrono::steady_clock::time_point> visible_since;
+   };
+ 
+-  std::mutex mutex_;
++  mutable std::mutex mutex_;
+   std::deque<PendingToast> queue_;
+   AchievementIconCache icon_cache_;
+ };
 diff --git a/src/graphics/native_guest_renderer.cpp b/src/graphics/native_guest_renderer.cpp
 index 7d053e7..5618b58 100644
 --- a/src/graphics/native_guest_renderer.cpp
@@ -1031,3 +1067,46 @@ index 41fa768..2b87468 100644
  ?GetLastEmulatedFrameStats@graphics@rex@@YA_NPEAUEmulatedFrameStats@12@@Z
  ?NoteCommandProcessorTime@graphics@rex@@YAX_K000@Z
  ?AcquireEmulatedFrameStats@graphics@rex@@YAXXZ
+diff --git a/src/ui/imgui_drawer.cpp b/src/ui/imgui_drawer.cpp
+index f270f3c..1e9ceeb 100644
+--- a/src/ui/imgui_drawer.cpp
++++ b/src/ui/imgui_drawer.cpp
+@@ -437,9 +437,19 @@ void ImGuiDrawer::Draw(UIDrawContext& ui_draw_context) {
+   DetachIfLastDialogRemoved();
+ 
+   if (!dialogs_.empty()) {
+-    // Repaint (and handle input) continuously if still active. In detached mode
+-    // there is no presenter; the app drives repaint via its own present loop.
+-    if (presenter_) {
++    // Repaint (and handle input) continuously while a dialog wants it (an idle
++    // achievement toast does not: the UI is then painted with the guest's
++    // frames only, and the main thread stops presenting at every UI tick). In
++    // detached mode there is no presenter; the app drives repaint via its own
++    // present loop.
++    bool wants_repaint = false;
++    for (ImGuiDialog* dialog : dialogs_) {
++      if (dialog->WantsContinuousRepaint()) {
++        wants_repaint = true;
++        break;
++      }
++    }
++    if (presenter_ && wants_repaint) {
+       presenter_->RequestUIPaintFromUIThread();
+     }
+   }
+diff --git a/src/ui/overlay/achievement_toast.cpp b/src/ui/overlay/achievement_toast.cpp
+index 53b8c0b..0dbef1c 100644
+--- a/src/ui/overlay/achievement_toast.cpp
++++ b/src/ui/overlay/achievement_toast.cpp
+@@ -29,6 +29,11 @@ void AchievementToastDialog::Push(const rex::system::AchievementEvent& event) {
+   queue_.push_back({event, std::chrono::steady_clock::now()});
+ }
+ 
++bool AchievementToastDialog::WantsContinuousRepaint() const {
++  std::lock_guard<std::mutex> lock(mutex_);
++  return !queue_.empty();
++}
++
+ void AchievementToastDialog::OnDraw(ImGuiIO& io) {
+   auto now = std::chrono::steady_clock::now();
+ 

@@ -605,6 +605,16 @@ struct ClayStats {
   uint32_t coverage_depth_steps = 0;
   uint32_t coverage_rest[size_t(ClayCoverage::kCount)] = {};
   uint32_t coverage_sky_over = 0, coverage_sky_over_no_depth = 0;
+  // The impostors as drawn ("Native impostors" below; the Impostors line). impostor_mode: fable2_native_impostors
+  // as the Render read it, in a scene captured with it (ClayImpostorMode); kOff: every count is 0. impostors_seen:
+  // the game's calls of the pair in the frame (FrameScene::impostor_seen); impostors_drawn, impostor_quads: the
+  // records the step drew and their quads; impostor_skip: the frame's records it did not draw, by the pass's
+  // reason (index: ClayImpostorSkip as a number); impostor_capture: the calls that gave no record, by the
+  // capture's reason (index: capture::ImpostorReason; FrameScene::impostor_refused).
+  capture::ImpostorMode impostor_mode = capture::ImpostorMode::kOff;
+  uint32_t impostors_seen = 0, impostors_drawn = 0, impostor_quads = 0;
+  uint32_t impostor_skip[16] = {};
+  uint32_t impostor_capture[size_t(capture::ImpostorReason::kCount)] = {};
   uint32_t light_rotation[size_t(RotationKind::kCount)] = {};
   capture::ShaderTally<32> light_rotation_by_vs;
   // The light as drawn ("Native light" below; the Light line). light_switch:
@@ -7071,11 +7081,14 @@ constexpr bool ImpostorKept(uint32_t kept, bool alpha_test, uint32_t covered) {
 inline constexpr uint8_t kImpostorMaskOffsets = 0xAA;   // RB_COLORCONTROL bits 24 to 31 of every captured draw (the record's `state` rule)
 
 // Why a record of the frame is not drawn by the step (the Impostors line and F3: "impostors not drawn {...}").
+// kPlace (ledger ruling 38's companion, review of Tasks 8 and 9, Minor 4; not among the spec's strings): the frame's
+// impostor records do not lie in one run among the drawn records (ImpostorPlacesOneRun), so no one place is the
+// game's for all of them: none is drawn.
 enum class ClayImpostorSkip : uint8_t { kNone, kPipeline, kSlot, kBuffer, kScale, kPictureBase, kPictureUnread,
-                                        kPictureContent, kPictureUpload, kCount };
+                                        kPictureContent, kPictureUpload, kPlace, kCount };
 constexpr const char* ClayImpostorSkipName(ClayImpostorSkip s) {
   constexpr const char* kNames[] = {"none", "pipeline", "slot", "buffer", "scale", "picture: base",
-                                    "picture: unread", "picture: content", "picture: upload"};
+                                    "picture: unread", "picture: content", "picture: upload", "place"};
   static_assert(sizeof(kNames) / sizeof(kNames[0]) == size_t(ClayImpostorSkip::kCount));
   return s < ClayImpostorSkip::kCount ? kNames[size_t(s)] : "?";
 }
@@ -7161,9 +7174,13 @@ static_assert(impostor_detail::LiteralBits(0, 254, 2) == 0x40000000u && impostor
 // one value a quad) and o1, in single precision and in the reference's order of operations
 // (light_formulas.impostor_position, single=True, term for term; the instruction numbers are there).
 // The console's product rule (a zero factor gives +0 whatever the other is) is NOT imitated (ledger ruling 27):
-// where it matters the reference lands a quad at the view's origin, and here the position is no number, which a
-// rasteriser drops: a quad of no size (refused before: the record's `quad` rule; guarded again here) and a view
-// whose second row has no part of either axis. A corner that is no number in the reference is no number here.
+// where it matters the reference lands a quad at the view's origin, and here the position is no number: a quad of
+// no size (refused before: the record's `quad` rule; guarded again here) and a view whose second row has no part
+// of either axis. A corner that is no number in the reference is no number here.
+// THAT "NO NUMBER" IS A SIGNAL TO THE CALLER, NEVER A POSITION TO HAND ON (ledger ruling 37, which stands over
+// this contract's earlier wording, "which a rasteriser drops"): the vertex program (shaders::kClayImpostorVs)
+// tests the quad's size, the two weights' sum and the four components and emits one fixed clipped position
+// instead, so nothing that is no number reaches the rasteriser (tests/test_impostor_hlsl.py holds it).
 inline void ImpostorPositionMirror(uint32_t k, const float word[4], const ClayImpostorConstants& c, float pos[4], float place[3], float uv[2]) {
 #pragma clang fp contract(off)
   const float nan = std::numeric_limits<float>::quiet_NaN();
@@ -7330,6 +7347,97 @@ constexpr size_t PlanImpostorPlace(const uint32_t* seqs, size_t count, uint32_t 
   if (tail_at < at) at = tail_at;   // (kNoCoverageTail is the largest index: no bound)
   if (depth_at < at) at = depth_at;
   return at;
+}
+
+// Whether the frame's impostor records lie in one run among the records the pass draws: no drawn record's seq
+// (`seqs`, the prepared records' DrawRecord::seq in the frame's order) lies strictly between the smallest and the
+// largest place of the impostor records (`first`, `last`). PlanImpostorPlace gives ONE place, the first record's;
+// with a drawn record between two runs the second run would be drawn before a record the game draws it after
+// (it matters where that record blends). Such a frame's impostors are not drawn at all ("place"). Every captured
+// frame has one run (places 426 to 439 and 498 to 511).
+constexpr bool ImpostorPlacesOneRun(const uint32_t* seqs, size_t count, uint32_t first, uint32_t last) {
+  if (last < first) return false;
+  for (size_t i = 0; seqs && i < count; ++i) {
+    if (seqs[i] > first && seqs[i] < last) return false;
+  }
+  return true;
+}
+
+// The impostor step (plan Task 10; clay_pass.cpp, EnsureImpostorObjects and Render; shaders::kClayImpostorVs and
+// kClayImpostorPs; frame-map section 19, "The impostor step").
+static_assert(size_t(ClayImpostorSkip::kCount) <= std::size(ClayStats{}.impostor_skip));
+// The step's small slots in the frame's constant buffer, taken only in a frame that draws the step
+// (PlanClayFrameSlots' and ClayFrameSmallSlots' `impostor_slots`): the records' constants (kClayImpostorFrameSlots:
+// record i's at impostor0 + kClayImpostorSlots * i), then the frame's quad words, four floats a quad, for the
+// capture's bound of quads (ClayImpostorWordsSlot). The words are bound to the vertex program from there as a
+// buffer by address: they live and die with the frame's buffer, so no frame in flight reads another frame's.
+inline constexpr uint32_t kClayImpostorWordBytes = 16;   // StructuredBuffer<float4>: x, y, z, s
+inline constexpr uint32_t kClayImpostorWordSlots =
+    (capture::kMaxImpostorQuads * kClayImpostorWordBytes + kClayTerrainSlotBytes - 1) / kClayTerrainSlotBytes;
+inline constexpr uint32_t kClayImpostorStepSlots = kClayImpostorFrameSlots + kClayImpostorWordSlots;
+static_assert(kClayImpostorWordSlots == 256 && kClayImpostorStepSlots == 320);
+constexpr uint32_t ClayImpostorWordsSlot(const ClayFrameSlotPlan& plan) { return plan.impostor0 + kClayImpostorFrameSlots; }
+// Whether a record's words lie inside the scene's array of `floats` floats (FrameScene::impostor_words: four a
+// quad, the record's from 4 * first_quad) and inside the capture's bound; else the record is not drawn ("buffer").
+// Written so that nothing wraps.
+constexpr bool ImpostorWordsHeld(const capture::ImpostorRecord& r, size_t floats) {
+  if (r.quads == 0 || r.quads > capture::kMaxImpostorQuads || r.first_quad > capture::kMaxImpostorQuads - r.quads) return false;
+  return floats / 4 >= size_t(r.first_quad) + size_t(r.quads);
+}
+// The step's mode in a frame: the switch as the Render reads it now, in a scene that was captured with the
+// impostors wanted (FrameScene::impostor_mode; a scene of before the switch came on has no records). Off when
+// either is off.
+constexpr capture::ImpostorMode ClayImpostorMode(capture::ImpostorMode now, capture::ImpostorMode scene) {
+  return now == capture::ImpostorMode::kOff || scene == capture::ImpostorMode::kOff ? capture::ImpostorMode::kOff : now;
+}
+// The flat picture's one texel (R8G8B8A8_UNORM): kImpostorFlatColour rounded to bytes, alpha 255. The picture
+// has no shape in `flat`: its alpha is 1 at every place of the quad (spec Design 11).
+constexpr void ImpostorFlatTexel(uint8_t texel[4]) {
+  for (int i = 0; i < 3; ++i) texel[i] = uint8_t(kImpostorFlatColour[i] * 255.0f + 0.5f);
+  texel[3] = 255;
+}
+// The log's and F3's Impostors line. "Impostors: off" with the mode off. Else the mode, the records drawn of the
+// game's calls seen, their quads, the frame's records the step did not draw by the pass's reason, and the calls
+// that gave no record by the capture's.
+inline std::string FormatImpostorText(const ClayStats& st) {
+  if (st.impostor_mode == capture::ImpostorMode::kOff) return "Impostors: off";
+  char buf[160];
+  std::snprintf(buf, sizeof(buf), "Impostors: %s, drawn %u of %u (%u quads) | not drawn {", capture::ImpostorModeName(st.impostor_mode),
+                st.impostors_drawn, st.impostors_seen, st.impostor_quads);
+  std::string text = buf;
+  bool first = true;
+  auto add = [&](const char* name, uint32_t n) {
+    if (!n) return;
+    std::snprintf(buf, sizeof(buf), "%s%s: %u", first ? "" : ", ", name, n);
+    text += buf;
+    first = false;
+  };
+  for (size_t i = size_t(ClayImpostorSkip::kNone) + 1; i < size_t(ClayImpostorSkip::kCount); ++i) {
+    add(ClayImpostorSkipName(ClayImpostorSkip(i)), st.impostor_skip[i]);
+  }
+  text += "} | ";
+  text += capture::kImpostorRecordReason;
+  text += " {";
+  first = true;
+  for (size_t i = size_t(capture::ImpostorReason::kNone) + 1; i < size_t(capture::ImpostorReason::kCount); ++i) {
+    add(capture::ImpostorReasonName(capture::ImpostorReason(i)), st.impostor_capture[i]);
+  }
+  return text + "}";
+}
+// What the pass logs a change of (at most 16 lines a run): the mode, the drawn count, the quads and every
+// reason's count, as one number (FNV-1a over the words).
+constexpr uint64_t ImpostorStepForm(const ClayStats& st) {
+  uint64_t h = 0xCBF29CE484222325ull;
+  auto mix = [&](uint32_t v) {
+    for (int i = 0; i < 4; ++i) h = (h ^ ((v >> (8 * i)) & 0xFFu)) * 0x100000001B3ull;
+  };
+  mix(uint32_t(st.impostor_mode));
+  mix(st.impostors_seen);
+  mix(st.impostors_drawn);
+  mix(st.impostor_quads);
+  for (uint32_t n : st.impostor_skip) mix(n);
+  for (uint32_t n : st.impostor_capture) mix(n);
+  return h;
 }
 
 // --- Native wind (frame-map section 18, "Native wind"; docs/native-renderer/lighting-formulas.md, "Wind") ---

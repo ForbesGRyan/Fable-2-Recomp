@@ -121,9 +121,16 @@ class ClayPass {
   // blend of a coverage record when its own place lies after it (PlanCoverageOrder;
   // ClayStats::coverage_*; the Coverage line). With it off nothing of the coverage is made, bound or
   // drawn, and the colour pass's order is the one of before.
+  // `impostors` (fable2_native_impostors; clay_logic.h, "Native impostors"; frame-map section 19, "The impostor
+  // step"): with `flat`, in a scene captured with the switch, the frame's impostor records are drawn by one
+  // step of its own layout and programs in the colour pass, at the records' place (PlanImpostorPlace): six
+  // vertices a quad, the position by the game's formula, one flat colour, the game's dissolve, light scalars
+  // and per-tree fog, depth-tested and depth-written. No pre-pass draw, no shadow-map draw. With `on` nothing
+  // is drawn (this build has no pictures: every record is counted "picture: unread"). With `off` nothing of
+  // the step is made, bound, reserved or drawn, and the frame's slot plan is the one of before.
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
-              bool textured, ClayLight light, bool shadows, bool fog, bool wind, bool coverage, const ClayPostRequest& post, ClayStats& st,
-              TextureStats& tst);
+              bool textured, ClayLight light, bool shadows, bool fog, bool wind, bool coverage, capture::ImpostorMode impostors,
+              const ClayPostRequest& post, ClayStats& st, TextureStats& tst);
   // The mapped target (display values, 8 bits): what the composite views
   // sample. Left in kPixelShaderResource after Render, and written by the same
   // Render that drew the linear target (by the output mapping, or by the ramp
@@ -383,6 +390,14 @@ class ClayPass {
   bool EnsureQuadObjects(nrhi::Device* dev);
   void DestroyQuadObjects();
   void ForgetQuadObjects();
+  // What the impostor step alone needs (clay_logic.h, "Native impostors"): its layout, its two programs, its
+  // one pipeline and the flat picture. EnsureImpostorObjects makes them on the first frame that has a record
+  // to draw, never with the switch off; false when they could not be made, now or before: then they are not
+  // tried again until the pass is rebuilt (one log line) and every record of every frame is counted
+  // "pipeline": the pass and the renderer go on. Destroyed with the pass's other objects.
+  bool EnsureImpostorObjects(nrhi::Device* dev);
+  void DestroyImpostorObjects();
+  void ForgetImpostorObjects();
   // What the scene's clouds alone need (clay_logic.h, "Native clouds"): two programs and one pipeline under
   // the quad step's layout. EnsureCloudObjects makes them on the first frame that draws clouds (the quad
   // step's objects exist then); false when they could not be made, now or before: then no frame has clouds
@@ -734,6 +749,28 @@ class ClayPass {
   // Furniture line, and what it last logged about the furniture (a line when the verdict or what was
   // drawn changes, at most kFurnitureLogLines of them).
   bool quad_objects_ = false, quad_objects_failed_ = false;
+  // The impostor step (EnsureImpostorObjects): its own layout (a record's constants, two small slots of the
+  // frame's constant buffer, at b0 for both stages; the frame's block at b2; the frame's quad words, a region
+  // of the frame's constant buffer, as a buffer at t1 of the vertex stage; one texture at t0 of the pixel
+  // stage; the four static samplers), its two programs, its one pipeline (the colour pass's targets, depth
+  // test less-or-equal with the depth write, no blend, no cull), outside the pipeline cache, and the flat
+  // picture (1 x 1, uploaded once from its staging buffer). impostor_step_slots_: the small slots this
+  // Render's FinishTerrain takes for the step (0 unless the frame draws it: the plan of before);
+  // impostor_slot0_: the first of them (record i's constants at impostor_slot0_ + kClayImpostorSlots * i);
+  // impostor_words_slot_: where the frame's quad words lie. What the pass last logged about the step (a line
+  // when the Impostors line's counts change, at most 16 of them).
+  bool impostor_objects_ = false, impostor_objects_failed_ = false;
+  nrhi::BindingLayout* impostor_layout_ = nullptr;  // the RHI has no layout destruction
+  nrhi::Shader* impostor_vs_ = nullptr;
+  nrhi::Shader* impostor_ps_ = nullptr;
+  nrhi::Pipeline* impostor_pipeline_ = nullptr;
+  nrhi::Texture* impostor_flat_ = nullptr;
+  nrhi::TextureView* impostor_flat_view_ = nullptr;
+  nrhi::Buffer* impostor_flat_staging_ = nullptr;
+  uint32_t impostor_step_slots_ = 0, impostor_slot0_ = 0, impostor_words_slot_ = 0;
+  uint64_t impostor_logged_ = 0;
+  uint32_t impostor_log_lines_ = 0;
+  std::vector<uint32_t> impostor_seqs_, impostor_place_seqs_;  // (scratch: the drawn records' and the prepared records' seq)
   nrhi::BindingLayout* quad_layout_ = nullptr;  // the RHI has no layout destruction
   nrhi::Shader* quad_vs_ = nullptr;
   nrhi::Shader* quad_ps_ = nullptr;

@@ -267,6 +267,9 @@ and part 11; 12c = part 12 and the half part of part 10, entered only if run COS
    (a zero under the `log` with a zero exponent's product, a zero under the reciprocal) the
    formula returns what `ucode_eval` returns, and a quad with a corner that is no number is not
    drawn: its position stays no number in the native program, which the rasteriser drops.
+   *(Ledger rulings 27 and 37, which stand over this sentence)*: the native program hands the
+   rasteriser no position that is no number; it tests the quad and the corner and emits one
+   fixed clipped position instead.
    `impostor_pins.py` writes the numbers the C++ mirror and the HLSL are pinned to;
    `tests/test_impostor_formulas.py` holds a reduced count. **A formula that does not close
    draws nothing** (ruling 18).
@@ -510,6 +513,9 @@ and part 11; 12c = part 12 and the half part of part 10, entered only if run COS
 - A draw is drawn by the formula or not at all: no approximate billboard, no flat quad for a
   model whose picture is missing.
 - A position that is no number in the reference is no number natively; nothing else may be.
+  *(Ledger rulings 27 and 37, which stand over this line)*: such a quad is refused by the vertex
+  program's own tests and given one fixed clipped position; no position that is no number or
+  infinite reaches the rasteriser.
 - The read-back list is a seeded constant; a picture whose base is not in it is not used.
 - With the switch off nothing of this sub-project is reached.
 

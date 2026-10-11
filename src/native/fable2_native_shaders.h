@@ -1261,6 +1261,246 @@ float4 main(float4 pos : SV_Position) : SV_Target {
 }
 )hlsl";
 
+// The impostor step (render/clay_pass.cpp; clay_logic.h, "Native impostors"; sub-project 12, plan Task 10;
+// frame-map section 19, "The impostor step"): the far woods' quads, one camera-turned quad a tree, drawn again
+// from the frame's impostor records in the colour pass. Two programs of their own, neither made, bound or drawn
+// with fable2_native_impostors off, and no other program's text changed for them. Its own layout: cbuffer
+// Impostor at b0 for both stages (render::ClayImpostorConstants, two small slots of the frame's constant buffer
+// a record; kClayImpostorFields is its layout), the frame's block at b2 with the fog's tail (the two fog tables,
+// read by the vertex program), the frame's quad words at t1 of the vertex stage (a buffer bound by address: NO
+// bounds check), the picture at t0 of the pixel stage, the four static samplers.
+//   kClayImpostorVs (the game's 129F7F2793DA9084; light_formulas.impostor_position and impostor_fog;
+//     ImpostorPositionMirror, ImpostorFogMirror): six vertices a quad by SV_VertexID, the quad's corners 0 1 2,
+//     0 2 3. The quad's word (x, y, z, s) is loaded inside the one branch that holds the quad's number below the
+//     record's count; outside it nothing is loaded and the vertex is the refused position. ImpostorPosition is
+//     the reference term for term, in its order of operations, every local marked `precise` (the compiler may
+//     neither reorder nor contract it); the power is exp2(y * log2(x)). The fog pair (o2, o3) is made once a
+//     vertex from the raised place and the frame's tables (the trees' vertex form without a c8.x factor) and
+//     handed on without interpolation, as the place is.
+//     NO POSITION THAT IS NO NUMBER LEAVES THE PROGRAM (ledger rulings 27 and 37; the console's zero-product
+//     rule is not imitated): a quad of no size, a quad whose two weights are no numbers (a view without extent
+//     of either axis: 0 * infinity in IEEE arithmetic; a power beyond the range), and any corner whose four
+//     components are not all numbers below 3e38, gets kRefused = (0, 0, 2, 1): w = 1 and z / w = 2, beyond the
+//     far plane, so the triangle is clipped whole. The first two tests read the quad's word and the record's
+//     registers alone, never the corner: a quad is placed whole or refused whole.
+//     NO COMPONENT THAT NO FORMULA READS IS TOUCHED (ledger rulings 34 and 38): such components reach the block
+//     as the game left them, numbers or not, and IEEE arithmetic has no zero-product rule. The text names every
+//     register by component (I_C47.xyz, never a dot or a product with a whole row that has an unread component).
+//   kClayImpostorPs (the game's 4B1D3E6E8E58D3AC; light_formulas.impostor_distance, impostor_pixel, impostor_out;
+//     ImpostorPixelMirror): the picture's texel (a channel that is no number reads 0) by the static sampler
+//     i_sampler, d = |c19 - place|, colour = texel.rgb * c31.x * (1 + sat(0.1 * (d - c12.y)) * (c12.w - 1)),
+//     alpha = texel.a * sat((d - c29.x) * c29.y); the pixel is discarded unless it is kept: the draw's alpha
+//     test (alpha > i_alpha_ref) and the kept set i_kept under the game's two samples with offsets 0xAA (first
+//     sample alpha >= 0.25, second alpha >= 0.75): 1 the first sample covered (drawn whole: `flat`, and every
+//     frame of this build), 2 both, 3 exactly one. Out: ((colour * o2 + o3) * i_out_scale), each channel
+//     (v > 0) ? min(v, 31.875) : 0, alpha 1. The depth test and write are the pipeline's.
+//     In `flat` the picture is a 1 x 1 texture of one colour with alpha 1 (kImpostorFlatColour): the quad has no
+//     tree shape, and every pixel of a quad beyond the dissolve is kept.
+inline constexpr ClayBufferField kClayImpostorFields[] = {
+    {"i_vs", 0, 224},         {"i_ps", 224, 80},        {"i_first_quad", 304, 4}, {"i_quads", 308, 4},
+    {"i_kept", 312, 4},       {"i_sampler", 316, 4},    {"i_alpha_ref", 320, 4},  {"i_out_scale", 324, 4},
+    {"i_fog_on", 328, 4},     {"i_pad", 332, 4},
+};
+inline constexpr unsigned kClayImpostorSize = 336;
+
+#define FABLE2_CLAY_IMPOSTOR_HLSL R"hlsl(
+cbuffer Impostor : register(b0) {
+  float4 i_vs[14];        // vertex c8, c46, c47, c72..c75, c110, c111, c113..c117: capture::kImpostorVsRegister's order
+  float4 i_ps[5];         // pixel c12, c19, c20, c29, c31
+  uint i_first_quad; uint i_quads; uint i_kept; uint i_sampler;   // the record's words in the buffer; the kept set; the static sampler
+  float i_alpha_ref; float i_out_scale; float i_fog_on; float i_pad;   // the alpha test's reference; the output scale; 1: the frame's fog is on
+};
+struct ImpostorVsOut {
+  float4 pos : SV_Position;
+  nointerpolation float3 place : TEXCOORD0;        // o0: the raised place, one value a quad
+  float2 uv : TEXCOORD1;                           // o1
+  nointerpolation float3 fog_factor : TEXCOORD2;   // o2
+  nointerpolation float3 fog_add : TEXCOORD3;      // o3
+};
+)hlsl"
+
+inline constexpr const char* kClayImpostorVs = "#define CLAY_FOG 1\n" FABLE2_CLAY_LIGHT_HLSL FABLE2_CLAY_IMPOSTOR_HLSL R"hlsl(
+StructuredBuffer<float4> impostor_words : register(t1);   // bound by address: no bounds check
+// IMPOSTOR VERTEX TEXT BEGIN
+#define I_C8 i_vs[0]
+#define I_C46 i_vs[1]
+#define I_C47 i_vs[2]
+#define I_C72 i_vs[3]
+#define I_C73 i_vs[4]
+#define I_C74 i_vs[5]
+#define I_C75 i_vs[6]
+#define I_C110 i_vs[7]
+#define I_C111 i_vs[8]
+#define I_C113 i_vs[9]
+#define I_C114 i_vs[10]
+#define I_C115 i_vs[11]
+#define I_C116 i_vs[12]
+#define I_C117 i_vs[13]
+float3 ImpostorPlace(float4 word) {
+  precise float lift = word.w * I_C8.z;
+  precise float raised = word.z + lift;
+  return float3(word.x, word.y, raised);
+}
+float2 ImpostorCoord(float k) {
+  precise float u = (k >= 2.0) ? 1.0 : 0.0;
+  precise float upper = (k == 1.0 || k == 2.0) ? 1.0 : 0.0;
+  precise float v = -upper + 1.0;
+  return float2(u * I_C113.x + I_C113.y, v * I_C113.w + I_C113.z);
+}
+float4 ImpostorPosition(float k, float4 word) {
+  precise float X = word.x;
+  precise float Y = word.y;
+  precise float Z = word.z;
+  precise float S = word.w;
+  precise float lift = S * I_C8.z;
+  precise float fore_x = S * I_C46.x + X;
+  precise float fore_y = S * I_C46.y + Y;
+  precise float fore_z = (S * I_C46.z + lift) + Z;
+  precise float back_x = (-S) * I_C46.x + X;
+  precise float back_y = I_C46.y * (-S) + Y;
+  precise float back_z = (I_C46.z * (-S) + lift) + Z;
+  precise float top_z = (lift + S) + Z;
+  precise float bottom_z = (lift + (-S)) + Z;
+  precise float raised = Z + lift;
+  precise float u = (k >= 2.0) ? 1.0 : 0.0;
+  precise float upper = (k == 1.0 || k == 2.0) ? 1.0 : 0.0;
+  precise float xy115 = (X * I_C115.x + Y * I_C115.y) + 0.0;
+  precise float xy116 = (X * I_C116.x + Y * I_C116.y) + 0.0;
+  precise float xy117 = X * I_C117.x + Y * I_C117.y;
+  precise float3 top = float3((xy115 + top_z * I_C115.z) + I_C115.w, I_C116.w + (top_z * I_C116.z + xy116), (top_z * I_C117.z + xy117) + I_C117.w);
+  precise float3 bottom = float3((xy115 + bottom_z * I_C115.z) + I_C115.w, I_C116.w + (xy116 + bottom_z * I_C116.z), I_C117.w + (I_C117.z * bottom_z + xy117));
+  precise float3 fore = float3(((fore_x * I_C115.x + fore_y * I_C115.y) + fore_z * I_C115.z) + I_C115.w, (fore_z * I_C116.z + (fore_x * I_C116.x + fore_y * I_C116.y)) + I_C116.w, (fore_z * I_C117.z + (I_C117.x * fore_x + I_C117.y * fore_y)) + I_C117.w);
+  precise float3 back = float3((((0.0 + back_z * I_C115.z) + back_y * I_C115.y) + back_x * I_C115.x) + I_C115.w, (((0.0 + back_z * I_C116.z) + back_y * I_C116.y) + back_x * I_C116.x) + I_C116.w, (((0.0 + back_z * I_C117.z) + back_y * I_C117.y) + back_x * I_C117.x) + I_C117.w);
+  precise float upright = abs(top.y + (-bottom.y));
+  precise float lying = abs(fore.y + (-back.y));
+  precise float ev = exp2(I_C114.y * log2(abs(I_C114.x * upright)));
+  precise float eh = exp2(I_C114.y * log2(lying));
+  precise float total = ev + eh;
+  precise float4 pos = float4(0.0, 0.0, 2.0, 1.0);
+  [branch] if (S > 0.0 && total > 0.0 && total < 3.0e38) {
+    precise float inverse = 1.0 / total;
+    precise float wv = ev * inverse;
+    precise float wh = eh * inverse;
+    precise float above = (raised > I_C47.z) ? 1.0 : 0.0;
+    precise float3 end = (upper != 0.0) ? top : bottom;
+    precise float3 side = (upper != above) ? fore : back;
+    precise float q_x = wv * end.x + wh * side.x;
+    precise float q_y = wh * side.y + wv * end.y;
+    precise float q_z = wh * side.z + wv * end.z;
+    precise float moved = ((u * 2.0 + -1.0) * S) + q_x;
+    precise float w = (abs(moved) >= 0.0) ? 1.0 : 0.0;
+    precise float4 clip = float4((((0.0 + I_C72.z * q_z) + I_C72.y * q_y) + I_C72.x * moved) + I_C72.w * w, (((0.0 + I_C73.z * q_z) + I_C73.y * q_y) + I_C73.x * moved) + I_C73.w * w, (((0.0 + I_C74.z * q_z) + I_C74.y * q_y) + I_C74.x * moved) + I_C74.w * w, (((0.0 + I_C75.z * q_z) + I_C75.y * q_y) + I_C75.x * moved) + I_C75.w * w);
+    [branch] if (abs(clip.x) < 3.0e38 && abs(clip.y) < 3.0e38 && abs(clip.z) < 3.0e38 && abs(clip.w) < 3.0e38) pos = clip;
+  }
+  return pos;
+}
+float3 ImpostorFogCoords(float3 place) {
+  float3 V = I_C47.xyz - place;
+  float d2 = dot(V, V);
+  float reach = (d2 > 0.0 && d2 < 1.0e30) ? 1.0 : 0.0;
+  float q = (reach != 0.0) ? d2 : 1.0;
+  float inv = rsqrt(q);
+  float dD = q * inv - I_C111.x;
+  float a = saturate(dot(V, I_C110.xyz) * -inv);
+  float s = I_C111.w * dD;
+  float fogged = (i_fog_on != 0.0 && f_fog_on != 0 && reach != 0.0 && dD > 0.0 && abs(s) < 3.0e38) ? 1.0 : 0.0;
+  return float3(a, s, fogged);
+}
+float3 ImpostorFogFactor(float3 at) {
+  float3 T = float3(1.0, 1.0, 1.0);
+  [branch] if (at.z != 0.0) T = fog_transmit(at.y);
+  return T;
+}
+float3 ImpostorFogAdd(float3 at, float3 T) {
+  float3 add = float3(0.0, 0.0, 0.0);
+  [branch] if (at.z != 0.0) add = (1.0 - T) * fog_scatter(at.x);
+  return add;
+}
+// IMPOSTOR VERTEX TEXT END
+ImpostorVsOut main(uint id : SV_VertexID) {
+  static const uint kCorner[6] = {0, 1, 2, 0, 2, 3};
+  ImpostorVsOut o;
+  o.pos = float4(0.0, 0.0, 2.0, 1.0);
+  o.place = float3(0.0, 0.0, 0.0);
+  o.uv = float2(0.0, 0.0);
+  o.fog_factor = float3(1.0, 1.0, 1.0);
+  o.fog_add = float3(0.0, 0.0, 0.0);
+  uint quad = id / 6u;
+  [branch] if (quad < i_quads) {
+    float4 word = impostor_words[i_first_quad + quad];
+    float k = float(kCorner[id % 6u]);
+    precise float4 pos = ImpostorPosition(k, word);
+    precise float3 place = ImpostorPlace(word);
+    o.pos = pos;
+    o.place = place;
+    o.uv = ImpostorCoord(k);
+    float3 at = ImpostorFogCoords(place);
+    o.fog_factor = ImpostorFogFactor(at);
+    o.fog_add = ImpostorFogAdd(at, o.fog_factor);
+  }
+  return o;
+}
+)hlsl";
+
+inline constexpr const char* kClayImpostorPs = "#define CLAY_FOG 1\n" FABLE2_CLAY_LIGHT_HLSL FABLE2_CLAY_IMPOSTOR_HLSL R"hlsl(
+Texture2D<float4> impostor_picture : register(t0);
+SamplerState i_point_wrap : register(s0);
+SamplerState i_linear_wrap : register(s1);
+SamplerState i_point_clamp : register(s2);
+SamplerState i_linear_clamp : register(s3);
+// IMPOSTOR PIXEL TEXT BEGIN
+#define I_P12 i_ps[0]
+#define I_P19 i_ps[1]
+#define I_P29 i_ps[3]
+#define I_P31 i_ps[4]
+float ImpostorDistance(float3 place) {
+  precise float3 v = I_P19.xyz - place;
+  precise float d = sqrt(abs(((0.0 + v.z * v.z) + v.x * v.x) + v.y * v.y));
+  return d;
+}
+float4 ImpostorPixel(float4 texel, float d) {
+  precise float span = I_P12.w + -1.0;
+  precise float fall = saturate(0.1 * (d + -I_P12.y));
+  precise float dissolve = saturate((d - I_P29.x) * I_P29.y);
+  precise float light = fall * span + 1.0;
+  precise float3 colour = (texel.xyz * I_P31.x) * light;
+  precise float alpha = texel.w * dissolve;
+  return float4(colour, alpha);
+}
+float ImpostorKeep(float alpha) {
+  float first = (alpha >= 0.25) ? 1.0 : 0.0;
+  float second = (alpha >= 0.75) ? 1.0 : 0.0;
+  float keep = (i_kept == 1) ? first : 0.0;
+  keep = (i_kept == 2) ? second : keep;
+  keep = (i_kept == 3) ? first - second : keep;
+  keep = (alpha > i_alpha_ref) ? keep : 0.0;
+  return keep;
+}
+float3 ImpostorOut(float3 colour, float3 o2, float3 o3) {
+  float3 v = (colour * o2 + o3) * i_out_scale;
+  return v;
+}
+// IMPOSTOR PIXEL TEXT END
+float4 impostor_sample(float2 at, float2 dx, float2 dy) {
+  float4 c;
+  if (i_sampler == 0) c = impostor_picture.SampleGrad(i_point_wrap, at, dx, dy);
+  else if (i_sampler == 1) c = impostor_picture.SampleGrad(i_linear_wrap, at, dx, dy);
+  else if (i_sampler == 2) c = impostor_picture.SampleGrad(i_point_clamp, at, dx, dy);
+  else c = impostor_picture.SampleGrad(i_linear_clamp, at, dx, dy);
+  return c;
+}
+float4 main(ImpostorVsOut i) : SV_Target {
+  float4 t = impostor_sample(i.uv, ddx(i.uv), ddy(i.uv));
+  t = (abs(t) < 3.0e38) ? t : float4(0.0, 0.0, 0.0, 0.0);
+  float4 c = ImpostorPixel(t, ImpostorDistance(i.place));
+  if (!(ImpostorKeep(c.a) > 0.0)) discard;
+  float3 v = ImpostorOut(c.rgb, i.fog_factor, i.fog_add);
+  v = (v > 0.0) ? min(v, 31.875) : float3(0.0, 0.0, 0.0);
+  return float4(v, 1.0);
+}
+)hlsl";
+
+#undef FABLE2_CLAY_IMPOSTOR_HLSL
 #undef FABLE2_CLAY_TERRAIN_FAR_HLSL
 #undef FABLE2_CLAY_TERRAIN_LAYER_HLSL
 #undef FABLE2_CLAY_TERRAIN_COMMON_HLSL

@@ -757,12 +757,12 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
       g_clay->RequestSceneDump(first);
     }
   }
-  g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), CurrentFog(), CurrentWind(), CurrentCoverage(), post,
-                 st, tst);
+  g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), CurrentFog(), CurrentWind(), CurrentCoverage(),
+                 CurrentImpostors(), post, st, tst);
   g_shadows_usable.store(g_clay->shadows_usable(), std::memory_order_relaxed);
   SetStatus(render::FormatStatusText(*scene, st, textures ? &tst : nullptr) + "\n" +
             render::FormatLightDrawnText(st) + "\n" + render::FormatShadowText(st) + "\n" + render::FormatFogText(st) + "\n" +
-            render::FormatSkyText(st) + "\n" + render::FormatPostText(st) + "\n" + render::FormatFurnitureText(st) + "\n" + render::FormatSunText(st) + "\n" + render::FormatCloudText(st) + "\n" + render::FormatWindText(st) + "\n" + render::FormatCoverageText(st));
+            render::FormatSkyText(st) + "\n" + render::FormatPostText(st) + "\n" + render::FormatFurnitureText(st) + "\n" + render::FormatSunText(st) + "\n" + render::FormatCloudText(st) + "\n" + render::FormatWindText(st) + "\n" + render::FormatCoverageText(st) + "\n" + render::FormatImpostorText(st));
   const double cpu_ms = st.hash_ms + st.decode_ms + st.record_ms + tst.decode_ms;
   const uint32_t pending = tst.status[size_t(capture::MaterialStatus::kTexturePending)];
   if (textures && (tst.uploads || pending)) {
@@ -825,6 +825,9 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
     if (st.wind_switch) REXLOG_INFO("[native] clay: {}", render::FormatWindText(st));
     // The coverage likewise: only with the switch on.
     if (st.coverage_switch) REXLOG_INFO("[native] clay: {}", render::FormatCoverageText(st));
+    // The impostors likewise: only with the mode not off (the step drawn, the records not drawn by reason, the
+    // calls without a record by the capture's reason).
+    if (st.impostor_mode != capture::ImpostorMode::kOff) REXLOG_INFO("[native] clay: {}", render::FormatImpostorText(st));
     if (const std::string by_vs = render::FormatShadowSkippedByVs(st); !by_vs.empty()) {
       REXLOG_INFO("[native] clay: shadow draws skipped by vs {{{}}}", by_vs);
     }

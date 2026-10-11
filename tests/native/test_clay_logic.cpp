@@ -2231,6 +2231,14 @@ static void ImpostorTests() {
     for (int i = 0; i < 4; ++i) CHECK(821, Near(pos[i], p.pos[i]));
     for (int i = 0; i < 3; ++i) CHECK(822, Near(at[i], p.place[i]));
     for (int i = 0; i < 2; ++i) CHECK(823, Near(uv[i], p.uv[i]));
+    // (review of Tasks 8 and 9, Minor 3: "bit for bit" asserted, not only observed. The mirror is the reference's
+    // operations in the reference's order with contraction off, and its power goes through the C library's log2
+    // and exp2 in double as the reference's does: under this compiler and library every pinned number is the
+    // reference's own bits. Another library's log2 or exp2 may differ in a last place: this check then says so,
+    // and criterion 1's bound of 1e-4, held above, is what remains.)
+    for (int i = 0; i < 4; ++i) CHECK(836, std::bit_cast<uint32_t>(pos[i]) == p.pos[i]);
+    for (int i = 0; i < 3; ++i) CHECK(836, std::bit_cast<uint32_t>(at[i]) == p.place[i]);
+    for (int i = 0; i < 2; ++i) CHECK(836, std::bit_cast<uint32_t>(uv[i]) == p.uv[i]);
     corners |= 1u << p.corner;
     (at[2] > k.vs[capture::kImpC47][2] ? above : below) += 1;
   }
@@ -2323,6 +2331,120 @@ static void ImpostorTests() {
     CHECK(829, o2[0] == 1.0f && o2[1] == 1.0f && o2[2] == 1.0f && o3[0] == 0.0f && o3[1] == 0.0f && o3[2] == 0.0f);
   }
   delete frame;
+
+  // The impostor step (plan Task 10).
+  // 830: the step's small slots: the records' constants, then the frame's quad words, 16 bytes a quad for the
+  // capture's bound, in whole slots; behind them the large slots, and all of it inside the buffer the frame is
+  // sized with, for every count of terrain records, plants and objects.
+  static_assert(kClayImpostorWordBytes == 16 && kClayImpostorWordSlots == 256 && kClayImpostorStepSlots == 320 &&
+                kClayImpostorStepSlots == kClayImpostorFrameSlots + kClayImpostorWordSlots &&
+                uint64_t(kClayImpostorWordSlots) * kClayTerrainSlotBytes >= uint64_t(capture::kMaxImpostorQuads) * kClayImpostorWordBytes);
+  for (uint32_t terrain : {0u, 1u, 7u, 300u}) {
+    for (uint32_t plants : {0u, 3u, 90u}) {
+      for (uint32_t objects : {0u, 1u, 500u}) {
+        const ClayFrameSlotPlan plan = PlanClayFrameSlots(terrain, plants, kClayImpostorStepSlots);
+        const uint64_t words = ClaySmallSlotOffset(ClayImpostorWordsSlot(plan));
+        const uint64_t bytes = ClayConstantBufferBytes(ClayFrameSmallSlots(terrain, plants, kClayImpostorStepSlots), objects);
+        CHECK(830, ClayImpostorWordsSlot(plan) == plan.impostor0 + kClayImpostorFrameSlots);
+        // (the last record's constants end where the words begin; the words end where the large slots begin)
+        CHECK(830, ClaySmallSlotOffset(plan.impostor0 + kClayImpostorSlots * (capture::kMaxImpostorRecords - 1)) + sizeof(ClayImpostorConstants) <= words);
+        CHECK(830, words + uint64_t(capture::kMaxImpostorQuads) * kClayImpostorWordBytes <= ClayObjectSlotOffset(plan.object0, 0));
+        CHECK(830, ClayObjectSlotOffset(plan.object0, objects) <= bytes && words % 256 == 0);
+        // (and the quads' slots before them are untouched: the plan of a frame without the step, slot for slot)
+        const ClayFrameSlotPlan off = PlanClayFrameSlots(terrain, plants);
+        CHECK(830, plan.quad0 == off.quad0 && plan.impostor0 == off.object0);
+      }
+    }
+  }
+  // 831: a record's words lie inside the scene's array, or the record is not drawn ("buffer").
+  {
+    capture::ImpostorRecord w{};
+    w.first_quad = 10;
+    w.quads = 5;
+    CHECK(831, ImpostorWordsHeld(w, 60) && ImpostorWordsHeld(w, 61) && !ImpostorWordsHeld(w, 59) && !ImpostorWordsHeld(w, 0));
+    w.quads = 0;
+    CHECK(831, !ImpostorWordsHeld(w, 60));
+    w.first_quad = capture::kMaxImpostorQuads - 1;
+    w.quads = 2;      // (past the capture's bound, whatever the array holds)
+    CHECK(831, !ImpostorWordsHeld(w, size_t(4) * (capture::kMaxImpostorQuads + 1)));
+    w.first_quad = 0xFFFFFFFFu;
+    w.quads = 2;      // (no 32-bit wrap)
+    CHECK(831, !ImpostorWordsHeld(w, ~size_t(0)));
+    w.first_quad = capture::kMaxImpostorQuads - 2;
+    CHECK(831, ImpostorWordsHeld(w, size_t(4) * capture::kMaxImpostorQuads) && !ImpostorWordsHeld(w, size_t(4) * capture::kMaxImpostorQuads - 1));
+  }
+  // 832: the step's mode: the switch as it is now, in a scene captured with it; off when either is off.
+  {
+    using capture::ImpostorMode;
+    CHECK(832, ClayImpostorMode(ImpostorMode::kFlat, ImpostorMode::kFlat) == ImpostorMode::kFlat &&
+                   ClayImpostorMode(ImpostorMode::kOn, ImpostorMode::kOn) == ImpostorMode::kOn &&
+                   ClayImpostorMode(ImpostorMode::kOn, ImpostorMode::kFlat) == ImpostorMode::kOn &&
+                   ClayImpostorMode(ImpostorMode::kFlat, ImpostorMode::kOn) == ImpostorMode::kFlat);
+    for (ImpostorMode m : {ImpostorMode::kOff, ImpostorMode::kFlat, ImpostorMode::kOn}) {
+      CHECK(832, ClayImpostorMode(ImpostorMode::kOff, m) == ImpostorMode::kOff && ClayImpostorMode(m, ImpostorMode::kOff) == ImpostorMode::kOff);
+    }
+  }
+  // 833: the flat picture's one texel: kImpostorFlatColour rounded to bytes, alpha 255.
+  {
+    uint8_t texel[4] = {};
+    ImpostorFlatTexel(texel);
+    CHECK(833, texel[0] == 37 && texel[1] == 64 && texel[2] == 13 && texel[3] == 255);
+    for (int i = 0; i < 3; ++i) CHECK(833, std::fabs(float(texel[i]) / 255.0f - kImpostorFlatColour[i]) <= 0.5f / 255.0f);
+  }
+  // 834: the Impostors line.
+  {
+    ClayStats s;
+    CHECK(834, FormatImpostorText(s) == "Impostors: off");
+    s.impostor_mode = capture::ImpostorMode::kFlat;
+    s.impostors_seen = 14;
+    s.impostors_drawn = 14;
+    s.impostor_quads = 928;
+    CHECK(834, FormatImpostorText(s) == "Impostors: flat, drawn 14 of 14 (928 quads) | not drawn {} | impostor-record {}");
+    s.impostors_drawn = 12;
+    s.impostor_quads = 800;
+    s.impostor_skip[size_t(ClayImpostorSkip::kScale)] = 1;
+    s.impostor_skip[size_t(ClayImpostorSkip::kBuffer)] = 1;
+    s.impostor_capture[size_t(capture::ImpostorReason::kQuad)] = 1;
+    s.impostor_capture[size_t(capture::ImpostorReason::kPending)] = 2;
+    CHECK(834, FormatImpostorText(s) ==
+                   "Impostors: flat, drawn 12 of 14 (800 quads) | not drawn {buffer: 1, scale: 1} | impostor-record {quad: 1, pending: 2}");
+    ClayStats on;
+    on.impostor_mode = capture::ImpostorMode::kOn;
+    on.impostors_seen = 14;
+    on.impostor_skip[size_t(ClayImpostorSkip::kPictureUnread)] = 14;
+    CHECK(834, FormatImpostorText(on) == "Impostors: on, drawn 0 of 14 (0 quads) | not drawn {picture: unread: 14} | impostor-record {}");
+    // (the form the pass logs a change of: the mode, the drawn count, the quads and every reason's count)
+    CHECK(834, ImpostorStepForm(s) != ImpostorStepForm(on) && ImpostorStepForm(s) == ImpostorStepForm(s));
+    ClayStats t = s;
+    t.impostor_quads = 801;
+    CHECK(834, ImpostorStepForm(t) != ImpostorStepForm(s));
+    t = s;
+    t.impostor_skip[size_t(ClayImpostorSkip::kSlot)] = 1;
+    CHECK(834, ImpostorStepForm(t) != ImpostorStepForm(s));
+    t = s;
+    t.impostor_capture[size_t(capture::ImpostorReason::kQuad)] = 2;
+    CHECK(834, ImpostorStepForm(t) != ImpostorStepForm(s));
+    t = s;
+    t.drawn = 99;     // (nothing of another line)
+    CHECK(834, ImpostorStepForm(t) == ImpostorStepForm(s));
+    ClayStats p;
+    p.impostor_mode = capture::ImpostorMode::kFlat;
+    p.impostors_seen = 14;
+    p.impostor_skip[size_t(ClayImpostorSkip::kPlace)] = 14;
+    CHECK(834, FormatImpostorText(p) == "Impostors: flat, drawn 0 of 14 (0 quads) | not drawn {place: 14} | impostor-record {}");
+  }
+  // 835: the frame's impostor records lie in one run among the drawn records, or none is drawn ("place").
+  {
+    const uint32_t seqs[] = {3, 9, 420, 425, 440, 441, 600};
+    CHECK(835, ImpostorPlacesOneRun(seqs, std::size(seqs), 426, 439));
+    CHECK(835, ImpostorPlacesOneRun(seqs, std::size(seqs), 425, 440));        // (the run's own ends may be records' seqs)
+    CHECK(835, !ImpostorPlacesOneRun(seqs, std::size(seqs), 424, 439));       // 425 lies between
+    CHECK(835, !ImpostorPlacesOneRun(seqs, std::size(seqs), 426, 441));       // 440 lies between
+    CHECK(835, !ImpostorPlacesOneRun(seqs, std::size(seqs), 0, 0xFFFFFFFFu));
+    CHECK(835, ImpostorPlacesOneRun(seqs, std::size(seqs), 430, 430) && ImpostorPlacesOneRun(nullptr, 0, 1, 99) && ImpostorPlacesOneRun(seqs, 0, 1, 99));
+    CHECK(835, !ImpostorPlacesOneRun(seqs, std::size(seqs), 439, 426));       // (the ends exchanged: no run)
+    CHECK(835, std::string(ClayImpostorSkipName(ClayImpostorSkip::kPlace)) == "place" && size_t(ClayImpostorSkip::kCount) == 10);
+  }
 }
 
 // 720-739: native wind (foliage sub-project, plan Task 10; clay_logic.h, "Native wind").

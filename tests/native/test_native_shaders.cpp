@@ -5270,9 +5270,329 @@ int main() {
                 << "the full program keeps the pixels with both (" << full_kept << " kept) and is the textured program otherwise; the two part today's kept set\n";
     }
   }
+  // 54 (a free number below 256; the plan's 260 to 263): the impostor step's two programs (sub-project 12, plan Task
+  // 10; clay_logic.h, "Native impostors").
+  {
+    using namespace fable2::native::render;
+    const auto fails = [](int line) {
+      std::cerr << "the impostor programs: the check at line " << line << " failed\n";
+      return 54;
+    };
+    // (a) With this task's header every program the header had before compiles to the bytes it compiled to before:
+    // the hashes (FNV-1a 64 of the whole compiled blob, the runtime's flags) and sizes recorded at commit 6e53676,
+    // the commit before the task, by out/tests/dt10/baseline_hashes.cpp with this compiler
+    // (out/tests/dt10/baseline_hashes_6e53676.txt). The canary is a program of no shader of the pass: where IT
+    // compiles to other bytes the compiler is another one and the comparison is not made (said aloud).
+    const struct {
+      const char* name;
+      const char* src;
+      const char* target;
+      uint64_t hash;
+      size_t size;
+    } before[] = {
+        {"kFullscreenVs", kFullscreenVs, "vs_5_0", 0x2CA6AC1051441F86ull, 736},
+        {"kPatternPs", kPatternPs, "ps_5_0", 0x335F8BDAD9F39207ull, 1036},
+        {"kGridPs", kGridPs, "ps_5_0", 0xA7462A7107F0D99Eull, 784},
+        {"kClayVs", kClayVs, "vs_5_0", 0xC1D649CF4B9205C4ull, 10200},
+        {"kClayWindVs", kClayWindVs, "vs_5_0", 0x28D8FB586A9C2B79ull, 19168},
+        {"kClayPs", kClayPs, "ps_5_0", 0xA7ECF4E6B3AACD13ull, 8052},
+        {"kClayTexturedPs", kClayTexturedPs, "ps_5_0", 0x0A1DC9F23AF13290ull, 23936},
+        {"kClayTexturedDepthPs", kClayTexturedDepthPs, "ps_5_0", 0xF057CCDD7BE1C5C7ull, 6016},
+        {"kClayTexturedHalfPs", kClayTexturedHalfPs, "ps_5_0", 0xF2EC866E7560C7AAull, 23912},
+        {"kClayTexturedFullPs", kClayTexturedFullPs, "ps_5_0", 0xC6A183D761A3549Aull, 24236},
+        {"kClayTerrainLayerPs", kClayTerrainLayerPs, "ps_5_0", 0x6642A40C9496D997ull, 16452},
+        {"kClayTerrainLayerDepthPs", kClayTerrainLayerDepthPs, "ps_5_0", 0x277FB8D3A19E5FC8ull, 5484},
+        {"kClayTerrainFarPs", kClayTerrainFarPs, "ps_5_0", 0xBE457649660BC0AAull, 13324},
+        {"kClayTerrainFarDepthPs", kClayTerrainFarDepthPs, "ps_5_0", 0x1DB48924B7D66149ull, 2580},
+        {"kClayShadowPs", kClayShadowPs, "ps_5_0", 0x2AEE57793156E0D9ull, 3920},
+        {"kSkyVs", kSkyVs, "vs_5_0", 0x1261ACAA62F3AF95ull, 668},
+        {"kClaySkyPs", kClaySkyPs, "ps_5_0", 0xDD2C6D7B5E83AE48ull, 7012},
+        {"kClayMaskPs", kClayMaskPs, "ps_5_0", 0x849E900311D40504ull, 12476},
+        {"kOutputMapPs", kOutputMapPs, "ps_5_0", 0x70D413120D3278B1ull, 1072},
+        {"kClayPostCompositePs", kClayPostCompositePs, "ps_5_0", 0x3A946A88248D92DEull, 5692},
+        {"kClayPostRampPs", kClayPostRampPs, "ps_5_0", 0x886207A6760B671Eull, 2636},
+        {"kClayPostDownsamplePs", kClayPostDownsamplePs, "ps_5_0", 0x2640F5A69768BEC0ull, 3272},
+        {"kClayPostBrightPs", kClayPostBrightPs, "ps_5_0", 0x3E3403312A4C0A60ull, 3232},
+        {"kClayPostBlurPs", kClayPostBlurPs, "ps_5_0", 0x617918EC27AFC1C0ull, 5044},
+        {"kClaySunDepthPs", kClaySunDepthPs, "ps_5_0", 0xA944A42941179B46ull, 1224},
+        {"kClaySunReducePs", kClaySunReducePs, "ps_5_0", 0xD17DC100F159B17Bull, 1480},
+        {"kClaySunRadialPs", kClaySunRadialPs, "ps_5_0", 0x57A3562FECD4C5AEull, 3348},
+        {"kClayQuadVs", kClayQuadVs, "vs_5_0", 0xFDE8EBFB2126299Cull, 1808},
+        {"kClayQuadPs", kClayQuadPs, "ps_5_0", 0xC31B1079E4B34EE1ull, 2700},
+        {"kClaySunQuadVs", kClaySunQuadVs, "vs_5_0", 0x826600476B3BB40Full, 1868},
+        {"kClaySunQuadPs", kClaySunQuadPs, "ps_5_0", 0xFF2027E04208858Bull, 3280},
+        {"kClaySunOccluderPs", kClaySunOccluderPs, "ps_5_0", 0x0D63EC9EEF64EA99ull, 2680},
+        {"kClayCloudVs", kClayCloudVs, "vs_5_0", 0x0B9DFEAB41354376ull, 1872},
+        {"kClayCloudPs", kClayCloudPs, "ps_5_0", 0xB141BBE8050CD462ull, 5804},
+        {"kCompositePs", kCompositePs, "ps_5_0", 0x19D6BE7E821E13DAull, 1148},
+        {"kShadowViewPs", kShadowViewPs, "ps_5_0", 0x709681412917DA48ull, 3364},
+        {"kClayDepthPackPs", kClayDepthPackPs, "ps_5_0", 0xF95B335D4903FCCDull, 1100},
+        {"canary", "float4 main(float4 p : SV_Position) : SV_Target { return p * 0.25 + 1.0; }", "ps_5_0", 0x144FCFF10FDFCCA2ull, 532},
+    };
+    size_t canary_size = 0;
+    const auto& canary = before[std::size(before) - 1];
+    const bool same_compiler = CodeHash(canary.name, canary.src, canary.target, &canary_size) == canary.hash && canary_size == canary.size;
+    if (!same_compiler) {
+      std::cout << "impostors: NOT JUDGED: this compiler is not the one the programs' bytes of before the impostor step were recorded with\n";
+    } else {
+      for (size_t i = 0; i + 1 < std::size(before); ++i) {
+        size_t size = 0;
+        const uint64_t hash = CodeHash(before[i].name, before[i].src, before[i].target, &size);
+        if (hash != before[i].hash || size != before[i].size) {
+          std::cerr << before[i].name << " is not the program of before the impostor step: " << size << " bytes, hash " << std::hex << hash << std::dec << "\n";
+          return fails(__LINE__);
+        }
+      }
+      // (control: the comparison sees one changed operand of the sky's program, the new programs' neighbour)
+      size_t size = 0;
+      const std::string other = Changed(kClaySkyPs, "sky * f_exposure", "sky * f_exposure * 1.01");
+      if (other.empty() || CodeHash("clay_sky_other", other.c_str(), "ps_5_0", &size) == 0xDD2C6D7B5E83AE48ull) return fails(__LINE__);
+    }
+    // (the text's rule: no program of before names anything of the step; the two new programs are the frame's
+    // light text with the fog's tail and their own)
+    for (size_t i = 0; i + 1 < std::size(before); ++i) {
+      for (const char* word : {"impostor", "Impostor", "IMPOSTOR", "i_vs", "i_ps", "i_quads"}) {
+        if (strstr(before[i].src, word)) return fails(__LINE__);
+      }
+    }
+    const char* v = kClayImpostorVs;
+    const char* s = kClayImpostorPs;
+    if (strncmp(v, "#define CLAY_FOG 1\n", 19) != 0 || strncmp(s, "#define CLAY_FOG 1\n", 19) != 0 || Count(v, "cbuffer Frame : register(b2)") != 1 ||
+        Count(s, "cbuffer Frame : register(b2)") != 1 || Count(v, "cbuffer Impostor : register(b0)") != 1 || Count(s, "cbuffer Impostor : register(b0)") != 1) {
+      return fails(__LINE__);
+    }
+
+    // (b) Both compile. Cbuffer Impostor: ClayImpostorConstants, field for field, 336 bytes at b0 of both stages;
+    // the quad words a buffer of 16-byte elements at t1 of the vertex program alone; the picture at t0 of the
+    // pixel program alone; the frame's block (whole: the fog's tail) at b2 of the vertex program.
+    if (!Compile("clay_impostor_vs", v, "vs_5_0") || !Compile("clay_impostor_ps", s, "ps_5_0")) return fails(__LINE__);
+    static_assert(kClayImpostorSize == sizeof(ClayImpostorConstants) && kClayImpostorSize == 336);
+    static_assert(offsetof(ClayImpostorConstants, vs) == 0 && offsetof(ClayImpostorConstants, ps) == 224 && offsetof(ClayImpostorConstants, first_quad) == 304 &&
+                  offsetof(ClayImpostorConstants, quads) == 308 && offsetof(ClayImpostorConstants, kept) == 312 && offsetof(ClayImpostorConstants, sampler) == 316 &&
+                  offsetof(ClayImpostorConstants, alpha_ref) == 320 && offsetof(ClayImpostorConstants, out_scale) == 324 &&
+                  offsetof(ClayImpostorConstants, fog_on) == 328 && offsetof(ClayImpostorConstants, pad) == 332);
+    const unsigned count = unsigned(std::size(kClayImpostorFields));
+    if (count != 10 || kClayImpostorFields[2].offset != 304 || kClayImpostorFields[6].offset != 320 || strcmp(kClayImpostorFields[2].name, "i_first_quad") != 0 ||
+        strcmp(kClayImpostorFields[6].name, "i_alpha_ref") != 0) return fails(__LINE__);
+    if (int at = BufferLayoutMismatch("clay_impostor_vs", v, "vs_5_0", "Impostor", kClayImpostorFields, count, kClayImpostorSize)) {
+      std::cerr << "the impostor vertex program's cbuffer Impostor: mismatch " << at << "\n";
+      return fails(__LINE__);
+    }
+    if (int at = BufferLayoutMismatch("clay_impostor_ps", s, "ps_5_0", "Impostor", kClayImpostorFields, count, kClayImpostorSize)) {
+      std::cerr << "the impostor pixel program's cbuffer Impostor: mismatch " << at << "\n";
+      return fails(__LINE__);
+    }
+    {
+      // (control: two fields exchanged are seen)
+      const std::string swapped = Changed(s, "float i_alpha_ref; float i_out_scale;", "float i_out_scale; float i_alpha_ref;");
+      if (swapped.empty() || BufferLayoutMismatch("swapped_impostor_ps", swapped.c_str(), "ps_5_0", "Impostor", kClayImpostorFields, count, kClayImpostorSize) < 10) return fails(__LINE__);
+    }
+    const std::string vs = Disassembly("clay_impostor_vs", v, "vs_5_0"), ps = Disassembly("clay_impostor_ps", s, "ps_5_0");
+    if (vs.empty() || ps.empty()) return fails(__LINE__);
+    if (BindPoint("clay_impostor_vs", v, "vs_5_0", "Impostor") != 0 || BindPoint("clay_impostor_ps", s, "ps_5_0", "Impostor") != 0 ||
+        BindPoint("clay_impostor_vs", v, "vs_5_0", "Frame") != 2 || BindPoint("clay_impostor_vs", v, "vs_5_0", "impostor_words") != 1 ||
+        BindPoint("clay_impostor_ps", s, "ps_5_0", "impostor_picture") != 0 || BindPoint("clay_impostor_ps", s, "ps_5_0", "i_point_wrap") != 0 ||
+        BindPoint("clay_impostor_ps", s, "ps_5_0", "i_linear_wrap") != 1 || BindPoint("clay_impostor_ps", s, "ps_5_0", "i_point_clamp") != 2 ||
+        BindPoint("clay_impostor_ps", s, "ps_5_0", "i_linear_clamp") != 3) return fails(__LINE__);
+    bool dynamic = false;
+    if (!HasLineWith(vs, "dcl_resource_structured", "t1, 16") || DeclaredRegisters(vs, 0) != kClayImpostorSize / 16 ||
+        DeclaredRegisters(vs, 2, &dynamic) != kClayFrameSize / 16 || !dynamic || DeclaredRegisters(ps, 0) != kClayImpostorSize / 16) {
+      std::cerr << "the impostor programs' declarations\n" << Code(vs);
+      return fails(__LINE__);
+    }
+
+    // (d, the plan's 263) Neither program declares a resource the step's layout does not bind: the vertex program
+    // b0, b2 and the buffer at t1, no texture and no sampler; the pixel program b0, the one texture at t0 and the
+    // four samplers, no buffer and nothing of the frame's block.
+    if (Count(vs.c_str(), "dcl_constantbuffer") != 2 || Count(vs.c_str(), "dcl_resource") != 1 || Count(vs.c_str(), "dcl_sampler") != 0 ||
+        Count(ps.c_str(), "dcl_constantbuffer") != 1 || Count(ps.c_str(), "dcl_resource") != 1 || Count(ps.c_str(), "dcl_resource_texture2d") != 1 ||
+        Count(ps.c_str(), "dcl_sampler") != 4 || ReadsBlock(ps, "cb2") || BindPoint("clay_impostor_ps", s, "ps_5_0", "Frame") != -1 ||
+        BindPoint("clay_impostor_ps", s, "ps_5_0", "impostor_words") != -1 || BindPoint("clay_impostor_vs", v, "vs_5_0", "impostor_picture") != -1) {
+      return fails(__LINE__);
+    }
+
+    // (c, the plan's 262) The one load from the quad words lies inside the block whose test compares the quad's
+    // number, made of SV_VertexID alone, with i_quads (word 1 of register 19); the buffer has no bounds check.
+    if (!strstr(v, "  uint quad = id / 6u;\n  [branch] if (quad < i_quads) {\n    float4 word = impostor_words[i_first_quad + quad];\n") ||
+        Count(v, "impostor_words[") != 1 || !strstr(v, "  static const uint kCorner[6] = {0, 1, 2, 0, 2, 3};\n") ||
+        !strstr(v, "    float k = float(kCorner[id % 6u]);\n")) return fails(__LINE__);
+    if (BufferLoadGuard(vs, 1) != 1 || LoadCount(vs, 1) != 1 || InnerLoadDepth(vs, 1) != 1 || !HasLineWith(vs, "ult", "cb0[19].y") ||
+        !HasLineWith(vs, "udiv", "v0.x, l(6)") || !HasLineWith(vs, "iadd", "cb0[19].x") || LoopInstructions(vs) != 0 || LoopInstructions(ps) != 0) {
+      std::cerr << "the impostor vertex program's load of the quad words: " << LoadDepths(vs, 1) << "\n" << Code(vs);
+      return fails(__LINE__);
+    }
+    {
+      // (the block's test is the first instruction pair: the quad's number, then the comparison, then the block)
+      const std::string code = Code(vs);
+      const size_t test = code.find("ult "), block = code.find("if_nz"), load = code.find("ld_structured");
+      if (test == std::string::npos || block == std::string::npos || load == std::string::npos || !(test < block && block < load) ||
+          code.find("if_") != block) return fails(__LINE__);
+      // Controls: a word read before the block, and a block without the bound, are seen.
+      const std::string early = Changed(v, "  }\n  return o;\n}\n", "  }\n  o.uv += impostor_words[id].xy;\n  return o;\n}\n");
+      const std::string unbound = Changed(v, "  [branch] if (quad < i_quads) {\n", "  [branch] if (quad < 4096u) {\n");
+      const std::string early_l = Disassembly("clay_impostor_vs_early", early.c_str(), "vs_5_0"), unbound_l = Disassembly("clay_impostor_vs_unbound", unbound.c_str(), "vs_5_0");
+      if (early.empty() || unbound.empty() || early_l.empty() || unbound_l.empty() || BufferLoadGuard(early_l, 1) != 0 || HasLineWith(unbound_l, "ult", "cb0[19].y")) return fails(__LINE__);
+    }
+
+    // (e) The position: marked precise throughout, no multiply-add contracted into it, the power by log and exp
+    // (base 2: exp2(y * log2(x))), one division (the reciprocal of the two weights' sum) inside the quad's test.
+    if (!strstr(v, "  precise float ev = exp2(I_C114.y * log2(abs(I_C114.x * upright)));\n  precise float eh = exp2(I_C114.y * log2(lying));\n") ||
+        !strstr(v, "// IMPOSTOR VERTEX TEXT BEGIN\n") || strstr(strstr(v, "// IMPOSTOR VERTEX TEXT BEGIN\n"), "pow(") || HasOp(vs, "sqrt")) return fails(__LINE__);
+    {
+      int precise = 0, contracted = 0;
+      size_t at = 0;
+      while (at < vs.size()) {
+        size_t end = vs.find('\n', at);
+        if (end == std::string::npos) end = vs.size();
+        const std::string line = vs.substr(at, end - at);
+        const size_t first = line.find_first_not_of(" \t");
+        if (first != std::string::npos && line[first] != '/' && line.find("[precise") != std::string::npos) {
+          ++precise;
+          contracted += line.compare(first, 4, "mad ") == 0;
+        }
+        at = end + 1;
+      }
+      if (precise < 120 || contracted != 0 || !HasOp(vs, "log") || !HasOp(vs, "exp") || OpDepths(vs, "div") != "2" || OpDepths(vs, "log") != "1,1" ||
+          OpDepths(vs, "exp") != "1,1") {
+        std::cerr << "the impostor vertex program: " << precise << " precise instructions, " << contracted << " of them a multiply-add; divisions at depths "
+                  << OpDepths(vs, "div") << "\n" << Code(vs);
+        return fails(__LINE__);
+      }
+      // (control: without the marks, the function's and the main's, the compiler contracts)
+      std::string plain = v;
+      const size_t from = plain.find("// IMPOSTOR VERTEX TEXT BEGIN\n");
+      if (from == std::string::npos) return fails(__LINE__);
+      for (size_t hit = plain.find("precise ", from); hit != std::string::npos; hit = plain.find("precise ", hit)) plain.erase(hit, 8);
+      const std::string plain_l = Disassembly("clay_impostor_vs_plain", plain.c_str(), "vs_5_0");
+      if (plain_l.empty() || Code(plain_l) == Code(vs) || !HasOp(plain_l, "mad") || Count(plain_l.c_str(), "[precise") != 0) return fails(__LINE__);
+    }
+
+    // (f) Ledger rulings 27 and 37: no position that is no number leaves the program. The position is written four
+    // times: the corner's own, three blocks deep (the quad's number, the quad's test, the four components' test),
+    // and the refused position (0, 0, 2, 1) on each of the three other paths.
+    if (!strstr(v, "  precise float4 pos = float4(0.0, 0.0, 2.0, 1.0);\n  [branch] if (S > 0.0 && total > 0.0 && total < 3.0e38) {\n") ||
+        !strstr(v, "    [branch] if (abs(clip.x) < 3.0e38 && abs(clip.y) < 3.0e38 && abs(clip.z) < 3.0e38 && abs(clip.w) < 3.0e38) pos = clip;\n  }\n  return pos;\n") ||
+        !strstr(v, "  o.pos = float4(0.0, 0.0, 2.0, 1.0);\n")) return fails(__LINE__);
+    const auto position_writes = [](const std::string& listing, int* refused) {
+      // the if-depths of the writes of o0 that are not the refused literal, as text; the refused ones counted
+      std::string depths;
+      int depth = 0;
+      *refused = 0;
+      size_t at = 0;
+      while (at < listing.size()) {
+        size_t end = listing.find('\n', at);
+        if (end == std::string::npos) end = listing.size();
+        const size_t first = listing.find_first_not_of(" \t", at);
+        if (first < end && listing[first] != '/') {
+          const std::string line = listing.substr(first, end - first);
+          if (line.compare(0, 3, "if_") == 0) ++depth;
+          if (line.compare(0, 5, "endif") == 0) --depth;
+          if (line.compare(0, 4, "dcl_") != 0 && line.find(" o0.") != std::string::npos) {
+            if (line.find("o0.xyzw, l(0,0,2.000000,1.000000)") != std::string::npos) {
+              ++*refused;
+            } else {
+              depths += (depths.empty() ? "" : ",") + std::to_string(depth);
+            }
+          }
+        }
+        at = end + 1;
+      }
+      return depths;
+    };
+    {
+      int refused = 0;
+      const std::string own = position_writes(vs, &refused);
+      if (own != "3" || refused != 3 || Count(vs.c_str(), "l(300000000549775575777803994281145270272.000000, 300000000549775575777803994281145270272.000000") != 1) {
+        std::cerr << "the impostor vertex program's writes of the position: its own at depths " << own << ", " << refused << " refused\n" << Code(vs);
+        return fails(__LINE__);
+      }
+      // Control: without the last test the corner's own write is not three blocks deep.
+      const std::string unchecked = Changed(v, "    [branch] if (abs(clip.x) < 3.0e38 && abs(clip.y) < 3.0e38 && abs(clip.z) < 3.0e38 && abs(clip.w) < 3.0e38) pos = clip;\n", "    pos = clip;\n");
+      const std::string unchecked_l = Disassembly("clay_impostor_vs_unchecked", unchecked.c_str(), "vs_5_0");
+      if (unchecked.empty() || unchecked_l.empty() || position_writes(unchecked_l, &refused) == "3" ||
+          Count(unchecked_l.c_str(), "l(300000000549775575777803994281145270272.000000, 300000000549775575777803994281145270272.000000") != 0) return fails(__LINE__);
+    }
+
+    // (g) Ledger rulings 34 and 38: no component that no formula reads is an operand of the compiled programs (9 of
+    // the vertex registers, 11 of the pixel's; c20 reaches the pixel as the block's output scale and is not read
+    // at all), and the read ones are.
+    {
+      const struct {
+        const char* reg;
+        const char* unread;
+        const char* read;
+      } vertex[] = {{"cb0[0]", "xyw", "z"},  {"cb0[1]", "w", "xyz"},   {"cb0[2]", "w", "xyz"},  {"cb0[3]", "", "xyzw"},  {"cb0[4]", "", "xyzw"},
+                    {"cb0[5]", "", "xyzw"},  {"cb0[6]", "", "xyzw"},   {"cb0[7]", "w", "xyz"},  {"cb0[8]", "yz", "xw"},  {"cb0[9]", "", "xyzw"},
+                    {"cb0[10]", "zw", "xy"}, {"cb0[11]", "", "xyzw"},  {"cb0[12]", "", "xyzw"}, {"cb0[13]", "", "xyzw"}, {"cb0[14]", "xyzw", ""},
+                    {"cb0[15]", "xyzw", ""}, {"cb0[16]", "xyzw", ""},  {"cb0[17]", "xyzw", ""}, {"cb0[18]", "xyzw", ""}},
+        pixel[] = {{"cb0[14]", "xz", "yw"},   {"cb0[15]", "w", "xyz"},  {"cb0[16]", "xyzw", ""}, {"cb0[17]", "zw", "xy"}, {"cb0[18]", "yzw", "x"},
+                   {"cb0[0]", "xyzw", ""},    {"cb0[7]", "xyzw", ""},   {"cb0[13]", "xyzw", ""}};
+      int unread = 0;
+      for (const auto& r : vertex) {
+        for (const char* c = r.unread; *c; ++c) {
+          if (ReadsComponent(vs, r.reg, *c)) {
+            std::cerr << "the impostor vertex program reads " << r.reg << "." << *c << "\n";
+            return fails(__LINE__);
+          }
+          unread += r.reg[5] == ']' || (r.reg[4] == '1' && r.reg[5] < '4');   // (the fourteen vertex registers' own)
+        }
+        for (const char* c = r.read; *c; ++c) {
+          if (!ReadsComponent(vs, r.reg, *c)) return fails(__LINE__);
+        }
+      }
+      // (c111.z, the near blend's slope, is on the reference's list and not in this text: the trees' tables have no
+      // blend, so nothing of the pair depends on it; the capture bounds it all the same)
+      if (unread != 9 + 1) return fails(__LINE__);
+      for (const auto& r : pixel) {
+        for (const char* c = r.unread; *c; ++c) {
+          if (ReadsComponent(ps, r.reg, *c)) {
+            std::cerr << "the impostor pixel program reads " << r.reg << "." << *c << "\n";
+            return fails(__LINE__);
+          }
+        }
+        for (const char* c = r.read; *c; ++c) {
+          if (!ReadsComponent(ps, r.reg, *c)) return fails(__LINE__);
+        }
+      }
+      // (control: an unread component as an operand is seen. A product of one with a literal zero is NOT seen here:
+      // this compiler drops it, which is why tests/test_impostor_hlsl.py holds the text itself with such components
+      // no numbers)
+      const std::string whole = Changed(v, "dot(V, I_C110.xyz) * -inv", "dot(V, I_C110.xyw) * -inv");
+      const std::string whole_l = Disassembly("clay_impostor_vs_whole", whole.c_str(), "vs_5_0");
+      if (whole.empty() || whole_l.empty() || !ReadsComponent(whole_l, "cb0[7]", 'w')) return fails(__LINE__);
+    }
+
+    // (h) The pixel program: the place and the fog pair arrive without interpolation; the texel's guard; the kept
+    // set's two thresholds and the alpha test's reference; one discard; what is written is at most 31.875 a
+    // channel and 0 for a value that is no number or not above 0; alpha 1. The fog's tables are read by the vertex
+    // program behind a test.
+    if (!HasLineWith(ps, "dcl_input_ps", "constant v1.xyz") || !HasLineWith(ps, "dcl_input_ps", "linear v2.xy") ||
+        !HasLineWith(ps, "dcl_input_ps", "constant v3.xyz") || !HasLineWith(ps, "dcl_input_ps", "constant v4.xyz") ||
+        Count(ps.c_str(), "discard") != 1 || !HasLineWith(ps, "ge", "l(0.250000, 0.750000") || !HasLineWith(ps, "lt", "cb0[20].x") ||
+        !HasLineWith(ps, "min", "l(31.875000, 31.875000, 31.875000") || !HasLineWith(ps, "mov", "o0.w, l(1.000000)") ||
+        !HasLineWith(ps, "mul_sat", "l(0.100000)") || !ReadsComponent(ps, "cb0[20]", 'y') || !ReadsComponent(ps, "cb0[19]", 'z') ||
+        !ReadsComponent(ps, "cb0[19]", 'w') || Count(ps.c_str(), "sample_d") != 4 ||
+        !strstr(s, "  t = (abs(t) < 3.0e38) ? t : float4(0.0, 0.0, 0.0, 0.0);\n") || !strstr(s, "  if (!(ImpostorKeep(c.a) > 0.0)) discard;\n") ||
+        !strstr(s, "  v = (v > 0.0) ? min(v, 31.875) : float3(0.0, 0.0, 0.0);\n  return float4(v, 1.0);\n")) {
+      std::cerr << "the impostor pixel program\n" << Code(ps);
+      return fails(__LINE__);
+    }
+    static_assert(kPostSceneMax == 31.875f && kImpostorKeepFirst == 1 && kImpostorKeepFull == 2 && kImpostorKeepHalf == 3);
+    {
+      const std::string code = Code(vs);
+      const size_t table = code.find(" + 78]"), scatter = code.find(" + 14]");
+      const size_t test = code.rfind("if_nz", table);
+      if (table == std::string::npos || scatter == std::string::npos || test == std::string::npos || code.find("endif", test) < table ||
+          !ReadsComponent(vs, "cb0[20]", 'z') || !ReadsComponent(vs, "cb2[7]", 'w')) return fails(__LINE__);
+    }
+    std::cout << "impostors: the " << std::size(before) - 1 << " programs of before compile to their bytes of before; cbuffer Impostor 336 bytes at the table's offsets in both stages; "
+              << "the quad words 16 bytes an element at t1, one load, inside the test of the quad's number against the record's count; "
+              << Count(vs.c_str(), "[precise") << " precise instructions, none a multiply-add; the position written once, behind three tests, and refused on three paths; "
+              << "no unread register component an operand; the pixel program's one discard and its clamp\n";
+  }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads; the base map's gamma sign: the curve, the record's word read by the lit terrain programs alone; the quad step: the block at the table's offsets in both stages, the six vertices through the game's matrix, the two kinds' statements, one texture under four samplers, the alpha test's discard, the compiled clamp; the sun layer: the blocks at their tables' offsets, the depth step's one bounded load written as depth, the reduction's one sample, the radial blur's fourteen bounded loads, the four kinds' statements and the occluder's form, the writes' own rounding, no other program's text touched; the previous-frame blend: with the share 0 the composite of before, the blended form behind the share's test with one bounded load of the previous picture; the scene's clouds: the block at the quad block's offsets, the corner's position passed on, the statements of the reference, the alpha test's discard, the base level's texel step, the compiled clamp, no other program's text touched; the wind vertex program: without its define the nine clay programs' bytes of before the wind, t9 a buffer of floats loaded only for a vertex the draw names of a draw with a wind family, the wind's constants at 288 and 336 of a 448-byte block, a leaf's division behind the test of the squared length, the three functions marked precise; the coverage half program: without its define the textured programs' bytes of before, the pixels with one covered sample of two kept and no other, the alpha one half\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads; the base map's gamma sign: the curve, the record's word read by the lit terrain programs alone; the quad step: the block at the table's offsets in both stages, the six vertices through the game's matrix, the two kinds' statements, one texture under four samplers, the alpha test's discard, the compiled clamp; the sun layer: the blocks at their tables' offsets, the depth step's one bounded load written as depth, the reduction's one sample, the radial blur's fourteen bounded loads, the four kinds' statements and the occluder's form, the writes' own rounding, no other program's text touched; the previous-frame blend: with the share 0 the composite of before, the blended form behind the share's test with one bounded load of the previous picture; the scene's clouds: the block at the quad block's offsets, the corner's position passed on, the statements of the reference, the alpha test's discard, the base level's texel step, the compiled clamp, no other program's text touched; the wind vertex program: without its define the nine clay programs' bytes of before the wind, t9 a buffer of floats loaded only for a vertex the draw names of a draw with a wind family, the wind's constants at 288 and 336 of a 448-byte block, a leaf's division behind the test of the squared length, the three functions marked precise; the coverage half program: without its define the textured programs' bytes of before, the pixels with one covered sample of two kept and no other, the alpha one half; the impostor programs: every program of before at its bytes of before, the block at ClayImpostorConstants' offsets, the quad words loaded once behind the record's count, the position precise and never without a number, no unread register component read\n";
   return 0;
 }

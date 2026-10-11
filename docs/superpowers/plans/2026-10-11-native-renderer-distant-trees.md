@@ -94,6 +94,8 @@ scripts and outputs are in `out/native-evidence/distant-trees/`, "DT" below). "F
   - A draw is drawn by the formula or not at all: no approximate billboard, no flat quad for a
     model whose picture is missing.
   - A position that is no number in the reference is no number natively; nothing else may be.
+    *(Ledger rulings 27 and 37 stand over this line: such a quad gets one fixed clipped position
+    from the vertex program; no position that is no number reaches the rasteriser.)*
   - The read-back list is a seeded constant; a picture whose base is not in it is not used.
   - With the switch off nothing of this sub-project is reached.
 - **With `--fable2_native_impostors=off`** (the default; also `false`, `0`): nothing is read, no
@@ -246,6 +248,8 @@ own first commit.**
 | which bit of the pixel bool word is `b129` | bit 1 (`0x00000002`). **As fixed by Task 5**: bit 1 (`light_formulas.IMPOSTOR_B129`), from the SDK's bool layout (bit `N & 31` of register `0x4900 + (N >> 5)`: `interpreter.cpp`) and `ucode_eval`'s numbering; clear in the captured word `0x00000100`. The rows' `"pbool"` is the device's shadow, which FM section 12 ("The bool word") refutes as the GPU's value: Task 8 tests the word the GPU is given | Task 5 | Task 8 |
 | the alpha test's reference at a `129F` draw | unknown; carried in the record and applied (`alpha > ref`). **As fixed by Task 3**: `0x3F008081` = 128 / 255 in 116 of 116 rows (still carried and applied); with it a whole-alpha tree is absent below 52.02 units, not 50 | Task 3 | Tasks 6, 9 |
 | `sizeof(ClayImpostorConstants)`, the slots a draw takes | 336 bytes, 2 slots. **As fixed by Task 6**: the components read are those of the Tasks 4-5 report (nothing a captured row adds or removes); the byte count was not recomputed by Task 6: Task 9 holds it by its own static assert. **As recomputed by Task 9**: 336 bytes (224 + 80 + 16 + 16), 2 slots a record, 64 a frame; `first_quad` at 304, `alpha_ref` at 320 | Task 6 (which components the formula reads) | Tasks 9, 10 |
+| the words' buffer (`impostor_words_`), the step's slots | a buffer of the pass's own, written each frame; `PlanClayFrameSlots(..., kClayImpostorFrameSlots)`. **As fixed by Task 10**: the words are a region of the frame's constant buffer (256 small slots behind the records' 64: `kClayImpostorStepSlots` = 320, the number `PlanClayFrameSlots` is given, only in a frame that draws the step), bound to `t1` by address at that offset: a buffer rewritten every frame would be read by a frame in flight | Task 10 | Task 10 |
+| the shader test's case numbers | 260 to 263. **As fixed by Task 10**: one case, 54 (the file's "free number below 256"), parts (a) to (h) | Task 10 | Task 10 |
 | the flat colour (`kImpostorFlatColour`) | none: a literal that Task 7 writes with its source file. **As fixed by Task 7**: `kImpostorFlatColour` = {0.145376, 0.250169, 0.050493} in `clay_logic.h`, the mean of D1's 172,125 covered texels AS THE SHADER RECEIVES IT (through the fetch's swizzle (2, 1, 0, 3)); a 1 x 1 picture of it is sampled without a swizzle | Task 7 (its D1 step) | Task 10 |
 | the format-3 field order (which five bits are red) | red in bits 0 to 4 after the 8-in-16 swap [inferred from the SDK's name `R5G5B5A1ToB5G5R5A1`]. **As fixed by Task 7**: so [code: the SDK's load shader, disassembled; measured: the game's scene colour is the pixel formula's within 0.3% a channel with the texel through the swizzle and 13% off in red without]; these are the texture's channels, before the fetch's swizzle, which is (2, 1, 0, 3) (`0x60A`) in every row: `kImpostorSwizzle` of Task 8 is `0x60A`, not 0 | Task 7 | Tasks 13, 14 |
 | the level rule's alpha threshold, the content rule's two bounds | none | Task 13 (fitted to D1 and D2) | Task 14 |
@@ -1747,6 +1751,9 @@ struct ImpostorVsOut {
 //   float4 word = float4(0, 0, 0, 0);
 //   [branch] if (quad < i_quads) word = impostor_words[i_first_quad + quad];   // the ONLY load of the buffer
 //   else { o.pos = float4(0, 0, 0, 0) / 0; return o; }                          // (no number: the rasteriser drops it)
+//   ^ STRUCK BY LEDGER RULING 37 (which stands over this text): no position that is no number or infinite leaves the
+//     vertex program. As built by Task 10: the vertex is the fixed clipped position (0, 0, 2, 1) there, and
+//     ImpostorPosition ends with a finite test of the four components that emits the same position where it fails.
 //   precise: ImpostorPosition(kCorner[id % 6], word, o.pos, o.place, o.uv);     // the reference, term for term
 //   ImpostorFog(o.place, o.fog_factor, o.fog_add);                              // (1, 0) unless i_fog_on
 // pixel main: ImpostorPixel: the picture's texel by i_sampler, the dissolve and the light from |i_ps[1].xyz - place|,

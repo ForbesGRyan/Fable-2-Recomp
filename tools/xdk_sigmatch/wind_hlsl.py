@@ -13,6 +13,11 @@ test and not a picture nobody measured (review of plan Task 10, Important 1; led
 What it does not reach: the compiler and the GPU (single precision, `precise`, the device's sin and cos), and
 the loads of the words from t9 in the vertex main (held by text in tests/test_wind_literals.py).
 
+The translation is not the wind's alone: `translate` and `region` take the two strings a text stands between and
+the functions it must hold, and `Region` compiles any such text and runs it in a caller's environment. The far
+woods' impostor programs are held the same way (distant trees, plan Task 10: tests/test_impostor_hlsl.py; the
+strings are IMPOSTOR_VERTEX and IMPOSTOR_PIXEL below).
+
   wind_hlsl.py [<fable2_native_shaders.h>]     prints the translated program
 """
 import math
@@ -25,6 +30,11 @@ SHADERS = REPO / "src" / "native" / "fable2_native_shaders.h"
 BEGIN = "StructuredBuffer<float> wind_words : register(t9);"
 END = "#else\nStructuredBuffer<float2> terrain_normals"
 FUNCTIONS = ("WindFrac", "WindPhase", "WindPlant", "WindTreeOffset", "WindTrunk", "WindLeaf")
+# The impostor step's two texts (shaders::kClayImpostorVs, kClayImpostorPs): (begin, end, the functions).
+IMPOSTOR_VERTEX = ("// IMPOSTOR VERTEX TEXT BEGIN\n", "// IMPOSTOR VERTEX TEXT END\n",
+                   ("ImpostorPlace", "ImpostorCoord", "ImpostorPosition", "ImpostorFogCoords", "ImpostorFogFactor", "ImpostorFogAdd"))
+IMPOSTOR_PIXEL = ("// IMPOSTOR PIXEL TEXT BEGIN\n", "// IMPOSTOR PIXEL TEXT END\n",
+                  ("ImpostorDistance", "ImpostorPixel", "ImpostorKeep", "ImpostorOut"))
 
 
 class Untranslated(ValueError):
@@ -88,40 +98,49 @@ def saturate(x):
     return min(max(x, 0.0), 1.0)
 
 
+def region(header_text, begin=BEGIN, end=END):
+    """The lines of a text in the shader header: after `begin`, before the next `end`. Exactly one `begin` (the
+    wind's: the declaration of the words, and the `#else` of the terrain normals), or ValueError."""
+    text = header_text.replace("\r\n", "\n")
+    if text.count(begin) != 1:
+        raise ValueError("%d times %r in the header" % (text.count(begin), begin))
+    start = text.index(begin) + len(begin)
+    stop = text.find(end, start)
+    if stop < 0:
+        raise ValueError("no %r after %r" % (end, begin))
+    return text[start:stop]
+
+
 def wind_text(header_text):
     """The lines of the wind's text in the shader header: after the declaration of the words, before the
     `#else`. Exactly one such block, or ValueError."""
-    text = header_text.replace("\r\n", "\n")
-    if text.count(BEGIN) != 1:
-        raise ValueError("%d declarations of the wind words at t9" % text.count(BEGIN))
-    start = text.index(BEGIN) + len(BEGIN)
-    end = text.find(END, start)
-    if end < 0:
-        raise ValueError("no `#else` of the terrain normals after the wind text")
-    return text[start:end]
+    return region(header_text)
 
 
-def translate(header_text):
-    """(Python source, {literal name: "o_wind_lit[r].c"}) of the wind text. Rules, a line each: a comment is
-    dropped; `#define NAME o_wind_lit[r].c` names a literal's slot and the name is replaced where it is used;
-    `float|float3 Name(args) {` opens a function (a body on the same line ends in `}`); `}` closes it;
-    `precise` and a declaration's type are dropped; `[branch] if (c) x = y;` is an if; `x = (c) ? a : b;` is a
-    conditional; `float3(` and `float4(` build a Vec. Anything left that still reads as HLSL raises
-    Untranslated."""
+def translate(header_text, begin=BEGIN, end=END, functions=FUNCTIONS):
+    """(Python source, {a define's name: the place it names}) of the text between `begin` and `end` (the wind's
+    by default). Rules, a line each: a comment is dropped; `#define NAME block[r].c` (or `block[r]`) names a
+    place in a constant block (a literal's slot `o_wind_lit[r].c`, a register row `i_vs[r]`) and the name is
+    replaced where it is used; `float|float2|float3|float4 Name(args) {` opens a function (a body on the same
+    line ends in `}`); `}` closes it or a block; `precise` and a declaration's type are dropped;
+    `[branch] if (c) x = y;` is an if, `[branch] if (c) {` an if whose statements are the lines indented under
+    it; `x = (c) ? a : b;` is a conditional; `&&` and `||` are `and` and `or`; `float2(`, `float3(` and
+    `float4(` build a Vec. Anything left that still reads as HLSL raises Untranslated, and so does a text
+    without one of `functions`."""
     defines, out = {}, []
-    for raw in wind_text(header_text).split("\n"):
+    for raw in region(header_text, begin, end).split("\n"):
         line = raw.split("//")[0].rstrip()
         if not line.strip():
             continue
-        m = re.fullmatch(r"#define (\w+) (o_wind_lit\[\d\]\.[xyzw])", line)
+        m = re.fullmatch(r"#define (\w+) (\w+\[\d+\](?:\.[xyzw])?)", line)
         if m:
             if m.group(1) in defines:
-                raise Untranslated("literal %s defined twice" % m.group(1))
+                raise Untranslated("%s defined twice" % m.group(1))
             defines[m.group(1)] = m.group(2)
             continue
         if line.startswith("#"):
             raise Untranslated(raw)
-        m = re.fullmatch(r"(?:float|float3) (\w+)\(([^)]*)\) \{(.*)", line)
+        m = re.fullmatch(r"(?:float|float2|float3|float4) (\w+)\(([^)]*)\) \{(.*)", line)
         if m:
             args = ", ".join(a.split()[-1] for a in m.group(2).split(","))
             out.append("def %s(%s):" % (m.group(1), args))
@@ -131,28 +150,49 @@ def translate(header_text):
                     raise Untranslated(raw)
                 out.append("  " + rest[:-1].strip().rstrip(";"))
             continue
-        if line == "}":
+        if line.strip() == "}":
             continue
         line = line.replace("precise ", "")
-        line = re.sub(r"^(\s*)(?:float4|float3|float) (\w+) = ", r"\1\2 = ", line)
+        line = line.replace(" && ", " and ").replace(" || ", " or ")
+        line = re.sub(r"^(\s*)(?:float4|float3|float2|float) (\w+) = ", r"\1\2 = ", line)
+        m = re.fullmatch(r"(\s*)\[branch\] if \((.*)\) \{", line)
+        if m:
+            out.append("%sif %s:" % (m.group(1), m.group(2)))
+            continue
         m = re.fullmatch(r"(\s*)\[branch\] if \((.*)\) (\w+ = .*);", line)
         if m:
             line = "%sif %s: %s" % (m.group(1), m.group(2), m.group(3))
         m = re.fullmatch(r"(\s*\w+ = )\((.*)\) \? (.*) : (.*);", line)
         if m:
             line = "%s(%s) if (%s) else (%s)" % (m.group(1), m.group(3), m.group(2), m.group(4))
-        line = re.sub(r"\bfloat[34]\(", "Vec(", line)
+        line = re.sub(r"\bfloat[234]\(", "Vec(", line)
         out.append(line.rstrip(";"))
     code = "\n".join(out)
     for name, place in defines.items():
         code = re.sub(r"\b%s\b" % re.escape(name), place, code)
-    for mark in ("?", "[branch]", "float", "precise", "#", "{", "}", ";"):
+    for mark in ("?", "[branch]", "float", "precise", "#", "{", "}", ";", "&", "|"):
         if mark in code:
             raise Untranslated("`%s` is left in the translated text" % mark)
-    for name in FUNCTIONS:
+    for name in functions:
         if "def %s(" % name not in code:
-            raise Untranslated("no function %s in the wind text" % name)
+            raise Untranslated("no function %s in the text" % name)
     return code, defines
+
+
+class Region:
+    """A text of the shader header between two strings, translated and compiled once. `functions(env)` gives
+    its functions with `env`'s names for everything the text does not define itself: the constant blocks (lists
+    of Vec, numbers), the intrinsics it calls and the functions of other texts. `Vec` and `saturate` are given."""
+
+    def __init__(self, header_text, begin, end, functions):
+        self.source, self.defines = translate(header_text, begin, end, functions)
+        self.code = compile(self.source, "<a text of fable2_native_shaders.h>", "exec")
+
+    def functions(self, env):
+        names = {"Vec": Vec, "saturate": saturate}
+        names.update(env)
+        exec(self.code, names)
+        return names
 
 
 class Program:

@@ -174,7 +174,7 @@ class SwitchOff(unittest.TestCase):
     def test_the_switch_is_off_by_default_and_read_by_the_pass_alone(self):
         self.assertRegex(self.front, r'REXCVAR_DEFINE_STRING\(fable2_native_coverage, "off", "Fable2",')
         self.assertEqual(self.front.count("CurrentCoverage()"), 3)      # its definition, the Render's argument, the start line
-        self.assertIn("CurrentFog(), CurrentWind(), CurrentCoverage(), post,", self.front)
+        self.assertIn("CurrentFog(), CurrentWind(), CurrentCoverage(),\n                 CurrentImpostors(), post, st, tst);", self.front)
         self.assertIn('if (st.coverage_switch) REXLOG_INFO("[native] clay: {}", render::FormatCoverageText(st));', self.front)
         capture = (ROOT / "src" / "native" / "capture" / "capture.cpp").read_text(encoding="utf-8")
         for word in ("fable2_native_coverage", "CoverageOf", "CoveredSamples", "kCoveragePs"):   # the capture reads nothing for it
@@ -241,7 +241,10 @@ class SwitchOff(unittest.TestCase):
         # the record's place in FrameScene::draws, each where it belongs, and does what it says in its order.
         self.assertIn("  colour_order.sky_drawn = sky_drawn;\n  colour_order.sky_at = sky_at;\n  colour_order.tail_at = tail_at;\n"
                       "  colour_order.depth_early = sun_depth_early;\n  colour_order.depth = sun_place;\n", s[c:d])
+        # (distant trees, plan Task 10: the impostor step is due first; with its switch off `due.impostors` is never set)
         self.assertIn("    const ColourDue due = ColourStepsDue(colour_order, index, size_t(p.r - scene.draws.data()), sky_done, sun_depth_taken);\n"
+                      "    // The impostor step, first of this record's steps (it is opaque and writes depth).\n"
+                      "    if (due.impostors) draw_impostors();\n"
                       "    // The early tail, before the layer's depth is taken; the sky step first when it is due here.\n"
                       "    if (due.tail) {\n      if (due.sky_first) {\n        draw_sky();\n        sky_done = true;\n      }\n"
                       "      draw_tail(index);\n    }\n    if (due.layer_depth) {\n", s)
@@ -249,7 +252,9 @@ class SwitchOff(unittest.TestCase):
         self.assertEqual(s.count("sun_depth_taken = true;"), 1)
         self.assertEqual(s.count("draw_sky();"), 3)
         self.assertIn("    if (due.sky) draw_sky();\n    if (!p.pipeline) continue;", s)
-        self.assertIn("  const ColourDue after = ColourStepsAfter(colour_order, prepared_.size());\n  if (after.sky) draw_sky();\n", s)
+        self.assertIn("  const ColourDue after = ColourStepsAfter(colour_order, prepared_.size());\n"
+                      "  // (the impostor step of a frame whose place lies after the last record: before the sky step)\n"
+                      "  if (!left_out && after.impostors) draw_impostors();\n  if (after.sky) draw_sky();\n", s)
         self.assertIn("  if (!left_out && after.tail) draw_tail(prepared_.size());\n", s)
         self.assertEqual(s.count("SunDepthBefore("), 0)             # (the loop no longer asks it itself)
         # a record without coverage parts is drawn as before: one in-place draw, behind a flag that is true for it

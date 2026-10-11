@@ -40,6 +40,11 @@ static_assert(kPostTableSize <= nrhi::kMaxTextureTableSize && kClayPostSlots * k
 // The quad step's layout: a quad's constants (cbuffer Quad, b0, both stages), the frame's block (b2), and
 // a table of three textures (t0: the quad's own first).
 constexpr uint32_t kQuadParamConstants = 0, kQuadParamFrame = 1, kQuadParamTextures = 2, kQuadTableSize = 3;
+// The impostor step's layout (EnsureImpostorObjects): a record's constants at b0 and the frame's block at b2,
+// both stages' and the vertex stage's; the frame's quad words at t1 of the vertex stage, a buffer bound by
+// address; the picture at t0 of the pixel stage; the four static samplers.
+constexpr uint32_t kImpostorParamConstants = 0, kImpostorParamFrame = 1, kImpostorParamWords = 2, kImpostorParamPicture = 3;
+static_assert(sizeof(ClayImpostorConstants) == shaders::kClayImpostorSize && kClayImpostorWordBytes == 4 * sizeof(float));
 static_assert(kQuadTableSize <= nrhi::kMaxTextureTableSize && kClayQuadSlots * kClayTerrainSlotBytes >= sizeof(ClayQuadConstants) &&
               std::size(capture::kQuadIndices) == 6);
 // The oracle feed (post_oracle.h): its scene is the pass's logical size, as a texture of four halves a
@@ -174,6 +179,7 @@ void ClayPass::DestroyObjects() {
   DestroySunObjects();  // (before the quad step's and the post steps' layouts' other users, and its view of depth_)
   DestroyCloudObjects();  // (before the quad step's layout's other users)
   DestroyQuadObjects();
+  DestroyImpostorObjects();
   DestroyBloomObjects();  // (before the post steps' layout's other users and map_vs_)
   DestroyPostObjects();  // (before map_vs_, which its pipelines are made of)
   DestroyOracleObjects();
@@ -383,6 +389,9 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     bloom_objects_failed_ = false;  // (and the bloom's)
     ForgetQuadObjects();
     quad_objects_failed_ = false;  // (and the quad step's)
+    ForgetImpostorObjects();
+    impostor_objects_failed_ = false;  // (and the impostor step's)
+    impostor_layout_ = nullptr;
     ForgetCloudObjects();
     cloud_objects_failed_ = false;  // (and the clouds')
     front_second_failed_ = false;  // (and the previous-frame blend's second target)
@@ -410,6 +419,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     post_objects_failed_ = false;  // (and the post steps')
     bloom_objects_failed_ = false;  // (and the bloom's)
     quad_objects_failed_ = false;  // (and the quad step's)
+    impostor_objects_failed_ = false;  // (and the impostor step's)
     cloud_objects_failed_ = false;  // (and the clouds')
     front_second_failed_ = false;  // (and the previous-frame blend's second target)
     sun_objects_failed_ = false;  // (and the sun layer's)
@@ -822,7 +832,9 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
     // the post steps', used or not:
     // ClayFrameSmallSlots, which counts every terrain record; PlanClayFrameSlots below gives out the
     // slots of those that are drawn with their material)
-    const uint64_t bytes = ClayConstantBufferBytes(ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size()),
+    // (impostor_step_slots_: the impostor step's constants and quad words, only in a frame that draws the step;
+    // 0 in every other frame, and then the size and the plan below are the ones of before)
+    const uint64_t bytes = ClayConstantBufferBytes(ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size(), impostor_step_slots_),
                                                    object_constants_.size());
     if (auto reused = terrain_pool_.Take(bytes, dev->CompletedSubmission())) {
       terrain_cb_ = *reused;
@@ -945,9 +957,11 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
   // The lit plants' small slots follow the terrain's, and the lit objects' and trunks' slots
   // (kClayObjectSlotBytes each) follow the small slots that are in use: the frame's block's,
   // the terrain's, the plants', the mask's and the sky's (PlanClayFrameSlots: its object0 is at most
-  // ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size()), the count the buffer was
+  // ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size(), impostor_step_slots_), the count the buffer was
   // sized with, because no more terrain records are drawn with their material than there are).
-  const ClayFrameSlotPlan plan = PlanClayFrameSlots(slot - kClayFrameTerrainSlot0, uint32_t(plant_constants_.size()));
+  const ClayFrameSlotPlan plan = PlanClayFrameSlots(slot - kClayFrameTerrainSlot0, uint32_t(plant_constants_.size()), impostor_step_slots_);
+  impostor_slot0_ = plan.impostor0;  // the impostor step's (Render writes a drawn record's constants and the frame's quad words)
+  impostor_words_slot_ = ClayImpostorWordsSlot(plan);
   plant_slot0_ = plan.plant0;
   mask_slot_ = plan.mask;  // the mask step's constants (Render writes them when the frame has a mask)
   sky_slot_ = plan.sky;    // the sky step's (Render writes them when the frame has a sky)
@@ -2106,6 +2120,130 @@ bool ClayPass::EnsureQuadObjects(nrhi::Device* dev) {
   return true;
 }
 
+void ClayPass::ForgetImpostorObjects() {
+  impostor_vs_ = impostor_ps_ = nullptr;
+  impostor_pipeline_ = nullptr;
+  impostor_flat_ = nullptr;
+  impostor_flat_view_ = nullptr;
+  impostor_flat_staging_ = nullptr;
+  impostor_objects_ = false;
+}
+
+void ClayPass::DestroyImpostorObjects() {
+  if (device_) {
+    device_->DestroyDeferred(impostor_pipeline_);
+    device_->DestroyDeferred(impostor_vs_);
+    device_->DestroyDeferred(impostor_ps_);
+    device_->DestroyDeferred(impostor_flat_view_);
+    device_->DestroyDeferred(impostor_flat_);
+    device_->DestroyDeferred(impostor_flat_staging_);
+  }
+  ForgetImpostorObjects();
+}
+
+bool ClayPass::EnsureImpostorObjects(nrhi::Device* dev) {
+  if (impostor_objects_) return true;
+  if (impostor_objects_failed_ || !ready_ || dev != device_) return false;
+  auto fail = [&](const char* what) {
+    REXLOG_ERROR("[native] clay: {} failed: the far woods' impostors are off until the pass is rebuilt (another device, or an F6 retry "
+                 "after a failure of the renderer) or the game is restarted; every record is counted \"pipeline\" and the pass goes on "
+                 "without them (logged once)", what);
+    DestroyImpostorObjects();
+    impostor_objects_failed_ = true;
+    return false;
+  };
+  // The step's layout: a record's constants at b0 for both stages (the vertex shader reads the registers of
+  // the position and the fog and the record's place in the words, the pixel shader its own registers and the
+  // state's words), the frame's block at b2 for the vertex stage (the fog's two tables), the frame's quad
+  // words at t1 of the vertex stage, the picture at t0 of the pixel stage, and the clay layout's four static
+  // samplers (s<i>: bit 0 linear, bit 1 clamp).
+  if (!impostor_layout_) {
+    nrhi::BindingLayoutDesc desc;
+    desc.params[kImpostorParamConstants].kind = nrhi::BindingParamKind::kConstantBuffer;
+    desc.params[kImpostorParamConstants].shader_register = 0;
+    desc.params[kImpostorParamConstants].count = 1;
+    desc.params[kImpostorParamConstants].visibility = nrhi::Visibility::kAll;
+    desc.params[kImpostorParamFrame].kind = nrhi::BindingParamKind::kConstantBuffer;
+    desc.params[kImpostorParamFrame].shader_register = 2;
+    desc.params[kImpostorParamFrame].count = 1;
+    desc.params[kImpostorParamFrame].visibility = nrhi::Visibility::kVertex;
+    desc.params[kImpostorParamWords].kind = nrhi::BindingParamKind::kBufferSrv;
+    desc.params[kImpostorParamWords].shader_register = 1;
+    desc.params[kImpostorParamWords].count = 1;
+    desc.params[kImpostorParamWords].visibility = nrhi::Visibility::kVertex;
+    desc.params[kImpostorParamPicture].kind = nrhi::BindingParamKind::kTextureTable;
+    desc.params[kImpostorParamPicture].shader_register = 0;
+    desc.params[kImpostorParamPicture].count = 1;
+    desc.params[kImpostorParamPicture].visibility = nrhi::Visibility::kPixel;
+    desc.param_count = 4;
+    static_assert(kClayStaticSamplers == 4);
+    for (uint32_t i = 0; i < 4; ++i) {
+      desc.static_samplers[i].shader_register = i;
+      desc.static_samplers[i].filter = (i & 1) ? nrhi::Filter::kLinear : nrhi::Filter::kPoint;
+      desc.static_samplers[i].address = (i & 2) ? nrhi::AddressMode::kClamp : nrhi::AddressMode::kWrap;
+    }
+    desc.static_sampler_count = 4;
+    desc.allow_input_layout = false;
+    impostor_layout_ = dev->CreateBindingLayout(desc);
+    if (!impostor_layout_) return fail("impostor binding layout creation");
+  }
+  nrhi::ShaderDesc sd;
+  sd.entry_point = "main";
+  sd.stage = nrhi::ShaderStage::kVertex;
+  sd.name = "fable2_clay_impostor_vs";
+  sd.hlsl_source = shaders::kClayImpostorVs;
+  impostor_vs_ = dev->CreateShader(sd);
+  sd.stage = nrhi::ShaderStage::kPixel;
+  sd.name = "fable2_clay_impostor_ps";
+  sd.hlsl_source = shaders::kClayImpostorPs;
+  impostor_ps_ = dev->CreateShader(sd);
+  if (!impostor_vs_ || !impostor_ps_) return fail("impostor shader compile");
+  // One pipeline: into the colour pass's targets, no blend, no cull, tested less-or-equal against the depth the
+  // pass has written and writing its own (the game's greater-or-equal with the depth write under its reversed
+  // range: the one state the capture's `state` rule lets through).
+  nrhi::GraphicsPipelineDesc pipe;
+  pipe.layout = impostor_layout_;
+  pipe.vs = impostor_vs_;
+  pipe.ps = impostor_ps_;
+  pipe.rtv_format = kLinearFormat;
+  pipe.dsv_format = nrhi::Format::kD32_FLOAT;
+  pipe.cull = nrhi::CullMode::kNone;
+  pipe.blend.enable = false;
+  pipe.depth.test_enable = true;
+  pipe.depth.write_enable = true;
+  pipe.depth.func = nrhi::CompareFunc::kLessEqual;
+  impostor_pipeline_ = dev->CreateGraphicsPipeline(pipe);
+  if (!impostor_pipeline_) return fail("impostor pipeline creation");
+  // The flat picture (spec Design 11): 1 x 1, kImpostorFlatColour rounded to bytes, alpha 255. Its one texel is
+  // copied from the staging buffer by the first Render that draws the step.
+  nrhi::TextureDesc td;
+  td.width = td.height = 1;
+  td.format = nrhi::Format::kR8G8B8A8_UNORM;
+  td.initial_state = nrhi::ResourceState::kCopyDest;
+  impostor_flat_ = dev->CreateTexture(td);
+  if (!impostor_flat_) return fail("impostor flat picture creation");
+  impostor_flat_view_ = dev->CreateTextureView(impostor_flat_, nrhi::TextureViewDesc{});
+  nrhi::BufferDesc bd;
+  bd.size = nrhi::kRowPitchAlignment;
+  bd.heap = nrhi::HeapKind::kUpload;
+  bd.bind_class = nrhi::BufferBindClass::kCopySrc;
+  impostor_flat_staging_ = dev->CreateBuffer(bd);
+  void* mapped = impostor_flat_view_ && impostor_flat_staging_ ? dev->Map(impostor_flat_staging_) : nullptr;
+  if (!mapped) return fail("impostor flat picture upload");
+  uint8_t texel[4];
+  ImpostorFlatTexel(texel);
+  std::memcpy(mapped, texel, sizeof(texel));
+  dev->Unmap(impostor_flat_staging_);
+  impostor_objects_ = true;
+  REXLOG_INFO("[native] clay: impostor step ready (six vertices a quad from the frame's quad words, the position by the game's formula; "
+              "depth test less-or-equal with the depth write, no blend, no cull; its own layout: b0 {} bytes of constants in {} slots a "
+              "record, b2 the frame's block, t1 the quad words ({} bytes a quad, at most {} quads, in {} small slots of the frame's "
+              "constant buffer), t0 the picture; the flat picture 1 x 1 ({}, {}, {}, 255))",
+              sizeof(ClayImpostorConstants), kClayImpostorSlots, kClayImpostorWordBytes, capture::kMaxImpostorQuads, kClayImpostorWordSlots,
+              texel[0], texel[1], texel[2]);
+  return true;
+}
+
 void ClayPass::ForgetCloudObjects() {
   cloud_vs_ = cloud_ps_ = nullptr;
   cloud_pipeline_ = nullptr;
@@ -2829,9 +2967,33 @@ bool ClayPass::TakeSceneDump(nrhi::Device* dev, std::vector<uint8_t>* file) {
 }
 
 void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
-                      bool textured, ClayLight light, bool shadows, bool fog, bool wind, bool coverage, const ClayPostRequest& post, ClayStats& st,
-                      TextureStats& tst) {
+                      bool textured, ClayLight light, bool shadows, bool fog, bool wind, bool coverage, capture::ImpostorMode impostors,
+                      const ClayPostRequest& post, ClayStats& st, TextureStats& tst) {
   if (!ready_ || dev != device_) return;
+  // The frame's impostors: the switch as it is now, in a scene captured with it (ClayImpostorMode). Off: nothing
+  // below makes an object, reserves a slot, binds or draws anything of the step, and the frame's slot plan is
+  // the one of before. `on`: this build has no pictures; nothing is drawn and every record is counted
+  // "picture: unread" (ledger rulings 23 and 31). `flat`: the step's objects are asked here, on the first frame
+  // that has a record, before FinishTerrain sizes the frame's buffer with the step's slots.
+  const capture::ImpostorMode impostor_mode = ClayImpostorMode(impostors, scene.impostor_mode);
+  st.impostor_mode = impostor_mode;
+  impostor_step_slots_ = 0;
+  bool impostor_step = false;
+  if (impostor_mode != capture::ImpostorMode::kOff) {
+    st.impostors_seen = scene.impostor_seen;
+    for (size_t i = 0; i < size_t(capture::ImpostorReason::kCount); ++i) st.impostor_capture[i] = scene.impostor_refused[i];
+    if (!scene.impostors.empty()) {
+      const ClayImpostorSkip picture = DecideImpostorPicture(impostor_mode, ImpostorPicture::kNone);
+      if (picture != ClayImpostorSkip::kNone) {
+        st.impostor_skip[size_t(picture)] += uint32_t(scene.impostors.size());
+      } else if (!EnsureImpostorObjects(dev)) {
+        st.impostor_skip[size_t(ClayImpostorSkip::kPipeline)] += uint32_t(scene.impostors.size());
+      } else {
+        impostor_step = true;
+        impostor_step_slots_ = kClayImpostorStepSlots;
+      }
+    }
+  }
   // The frame's coverage: the switch as it is now. Without it nothing below asks for the half
   // program or a half key, and the colour pass's order is SkyPlace's.
   st.coverage_switch = coverage;
@@ -3660,6 +3822,13 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     dev->DestroyDeferred(white_staging_);
     white_staging_ = nullptr;
   }
+  // (the impostor step's flat picture likewise, once, before any target is bound: only with the step's objects)
+  if (impostor_step && impostor_flat_staging_) {
+    cmd->CopyBufferToTexture(impostor_flat_, 0, 0, impostor_flat_staging_, 0, nrhi::kRowPitchAlignment, 1, 1, 1);
+    cmd->Barrier(impostor_flat_, nrhi::ResourceState::kCopyDest, nrhi::ResourceState::kPixelShaderResource);
+    dev->DestroyDeferred(impostor_flat_staging_);
+    impostor_flat_staging_ = nullptr;
+  }
 
   // The frame's mask: drawn only for a lit frame of its own valid block which has one inverse
   // view-projection, an eye and the frame's constant buffer (mask_decision, above; the maps are
@@ -3984,11 +4153,103 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   colour_order.tail_at = tail_at;
   colour_order.depth_early = sun_depth_early;
   colour_order.depth = sun_place;
+  // The impostor step (clay_logic.h, "Native impostors"): only in a frame whose mode is `flat`, with records and
+  // the step's objects (impostor_step, decided at the head of this Render, where its slots were reserved). Each
+  // record is drawn whole or not at all, by the first rule that fails: no frame buffer ("slot"); the frame's
+  // records not in one run among the drawn records ("place": none is drawn); its words not inside the scene's
+  // array ("buffer"); its constants refused ("scale": a register outside its bound, or its c20.w not the
+  // frame's scale in a post frame, or a frame without an output scale). The constants go into the record's two
+  // slots and the frame's quad words into their region of the frame's buffer, whole, once.
+  struct ImpostorDraw {
+    uint32_t slot = 0, quads = 0;
+  };
+  ImpostorDraw impostor_draws[capture::kMaxImpostorRecords];
+  uint32_t impostor_draw_count = 0;
+  size_t impostor_at = ~size_t(0);
+  if (impostor_step) {
+    const size_t records = std::min<size_t>(scene.impostors.size(), capture::kMaxImpostorRecords);
+    uint32_t first_place = 0xFFFFFFFFu, last_place = 0;
+    for (size_t i = 0; i < records; ++i) {
+      first_place = std::min(first_place, scene.impostors[i].place);
+      last_place = std::max(last_place, scene.impostors[i].place);
+    }
+    impostor_seqs_.clear();
+    for (const Prepared& p : prepared_) {
+      if (p.pipeline) impostor_seqs_.push_back(p.r->seq);
+    }
+    const size_t word_floats = std::min<size_t>(scene.impostor_words.size(), size_t(4) * capture::kMaxImpostorQuads);
+    ClayImpostorSkip all = ClayImpostorSkip::kNone;
+    if (left_out || !terrain_cb_ || !terrain_cb_mapped_ || impostor_step_slots_ != kClayImpostorStepSlots) {
+      all = ClayImpostorSkip::kSlot;
+    } else if (!ImpostorPlacesOneRun(impostor_seqs_.data(), impostor_seqs_.size(), first_place, last_place)) {
+      all = ClayImpostorSkip::kPlace;
+    }
+    if (all != ClayImpostorSkip::kNone) {
+      st.impostor_skip[size_t(all)] += uint32_t(scene.impostors.size());
+    } else {
+      // (the frame's output scale: the lit draws' exposure, which in a post frame is the game's c20.w; a frame
+      // without light has none, and its records are refused)
+      const float out_scale = frame_.light_on ? frame_.exposure : 0.0f;
+      const bool fog_on = frame_.fog.on != 0;
+      for (size_t i = 0; i < scene.impostors.size(); ++i) {
+        const capture::ImpostorRecord& r = scene.impostors[i];
+        ClayImpostorConstants constants{};
+        if (i >= records || !ImpostorWordsHeld(r, word_floats)) {
+          ++st.impostor_skip[size_t(ClayImpostorSkip::kBuffer)];
+          continue;
+        }
+        if (!MakeClayImpostorConstants(r, out_scale, post_frame, fog_on, kImpostorKeepFirst, 0, &constants)) {
+          ++st.impostor_skip[size_t(ClayImpostorSkip::kScale)];
+          continue;
+        }
+        ImpostorDraw& d = impostor_draws[impostor_draw_count++];
+        d.slot = impostor_slot0_ + kClayImpostorSlots * uint32_t(i);
+        d.quads = r.quads;
+        std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(d.slot), &constants, sizeof(constants));
+      }
+      if (impostor_draw_count) {
+        std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(impostor_words_slot_), scene.impostor_words.data(), word_floats * sizeof(float));
+        // Its place among the prepared records: before the first at or beyond the records' smallest place, and
+        // never after the sky step, the early tail or the layer's depth (PlanImpostorPlace).
+        impostor_place_seqs_.clear();
+        for (const Prepared& p : prepared_) impostor_place_seqs_.push_back(p.r->seq);
+        // (the layer's depth place among the prepared records, as the coverage's order has it: CoverageDepthPlace,
+        // from the prepared records' places in FrameScene::draws; the scratch array is free again here)
+        impostor_seqs_.clear();
+        for (const Prepared& p : prepared_) impostor_seqs_.push_back(uint32_t(p.r - scene.draws.data()));
+        const size_t depth_at = CoverageDepthPlace(sun_place, sun_depth_early, impostor_seqs_.data(), impostor_seqs_.size());
+        impostor_at = PlanImpostorPlace(impostor_place_seqs_.data(), impostor_place_seqs_.size(), first_place,
+                                        sky_drawn ? sky_at : prepared_.size(), tail_at, depth_at);
+      }
+    }
+  }
+  colour_order.impostors_at = impostor_at;
+  auto draw_impostors = [&] {
+    if (!impostor_draw_count) return;
+    cmd->SetBindingLayout(impostor_layout_);
+    cmd->SetPipeline(impostor_pipeline_);
+    cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+    cmd->SetConstantBuffer(kImpostorParamFrame, terrain_cb_, 0);
+    cmd->SetBufferSrv(kImpostorParamWords, terrain_cb_, ClaySmallSlotOffset(impostor_words_slot_));
+    cmd->SetTexture(kImpostorParamPicture, impostor_flat_view_);
+    for (uint32_t i = 0; i < impostor_draw_count; ++i) {
+      const ImpostorDraw& d = impostor_draws[i];
+      cmd->SetConstantBuffer(kImpostorParamConstants, terrain_cb_, ClaySmallSlotOffset(d.slot));
+      cmd->Draw(6 * d.quads, 0);
+      ++st.impostors_drawn;
+      st.impostor_quads += d.quads;
+    }
+    impostor_draw_count = 0;  // (drawn once)
+    bind_scene();
+    bound = nullptr;
+  };
   bool sky_done = false;
   for (size_t index = 0; index < prepared_.size(); ++index) {
     const Prepared& p = prepared_[index];
     if (left_out) break;        // (no constant buffer: nothing is drawn)
     const ColourDue due = ColourStepsDue(colour_order, index, size_t(p.r - scene.draws.data()), sky_done, sun_depth_taken);
+    // The impostor step, first of this record's steps (it is opaque and writes depth).
+    if (due.impostors) draw_impostors();
     // The early tail, before the layer's depth is taken; the sky step first when it is due here.
     if (due.tail) {
       if (due.sky_first) {
@@ -4117,12 +4378,29 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // (no blended record: the sky after the last record. A frame without a record has no view, so no
   // fog and no sky: the sky is never drawn alone.)
   const ColourDue after = ColourStepsAfter(colour_order, prepared_.size());
+  // (the impostor step of a frame whose place lies after the last record: before the sky step)
+  if (!left_out && after.impostors) draw_impostors();
   if (after.sky) draw_sky();
   // (a tail after the last record: a frame with early records and no blended record, late record or depth
   // place; after the sky step, which its blends lie over)
   if (!left_out && after.tail) draw_tail(prepared_.size());
   // The glare, after the last record (the game's last draws of its scene): added, without a depth test.
   if (sky_drawn) draw_quads(ClayQuadPlace::kAfterRecords);
+  // A line when the Impostors line's counts change (the first frame with the step drawn, a reason appearing or
+  // going, another number of records or quads with the camera): the 300-frame line may never come on a slow
+  // adapter. With the mode off nothing is written.
+  if (impostor_mode != capture::ImpostorMode::kOff) {
+    constexpr uint32_t kImpostorLogLines = 16;
+    const uint64_t form = ImpostorStepForm(st);
+    if (form != impostor_logged_ && impostor_log_lines_ < kImpostorLogLines) {
+      impostor_logged_ = form;
+      ++impostor_log_lines_;
+      REXLOG_INFO("[native] clay: impostors changed at scene frame {}: {} | the step {} of {} prepared records, {} records in the scene{}",
+                  scene.frame, FormatImpostorText(st),
+                  impostor_at == ~size_t(0) ? std::string("not drawn") : "before record " + std::to_string(impostor_at), prepared_.size(),
+                  scene.impostors.size(), impostor_log_lines_ == kImpostorLogLines ? " (last such line)" : "");
+    }
+  }
   // A line when the furniture's verdict changes (the first frame with furniture; a frame that lost it
   // and why) or what a drawn frame drew does (the quads by kind, those left out for their texture: the
   // first frame's textures are still to be uploaded, and the 300-frame line may never come in a short

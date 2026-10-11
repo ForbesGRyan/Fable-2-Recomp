@@ -81,7 +81,7 @@ class RetryLiterals(unittest.TestCase):
 
     def test_no_failed_flag_of_the_pass_is_left_out(self):
         flags = set(re.findall(r"\b(\w+_failed_) = false[,;]", _text("src/native/render/clay_pass.h")))
-        self.assertEqual(len(flags), 12)   # (the eleventh: the wind vertex program's, foliage plan Task 10; the twelfth: the coverage half program's, Task 13)
+        self.assertEqual(len(flags), 13)   # (the eleventh: the wind vertex program's, foliage plan Task 10; the twelfth: the coverage half program's, Task 13; the thirteenth: the impostor step's, distant trees plan Task 10)
         self.assertEqual(flags, set(re.findall(r"\b(\w+_failed_) = false;", self.retry)))
 
 

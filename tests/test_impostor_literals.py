@@ -161,5 +161,182 @@ class ImpostorLiterals(unittest.TestCase):
         self.assertEqual(sorted(named(pixel, "P") + [20]), sorted(r for k, r in gen.READ if k == "ps"))
 
 
+class ImpostorShaderText(unittest.TestCase):
+    """The HLSL side (plan Task 10): shaders::kClayImpostorVs and kClayImpostorPs in src/native/fable2_native_shaders.h."""
+
+    @classmethod
+    def setUpClass(cls):
+        import wind_hlsl
+        cls.header = _text("src/native/fable2_native_shaders.h")
+        cls.logic = _text("src/native/render/clay_logic.h")
+        cls.vertex = _code(wind_hlsl.region(cls.header, *wind_hlsl.IMPOSTOR_VERTEX[:2]))
+        cls.pixel = _code(wind_hlsl.region(cls.header, *wind_hlsl.IMPOSTOR_PIXEL[:2]))
+
+    def test_the_block_is_the_structs_fields_in_order(self):
+        body = re.search(r"cbuffer Impostor : register\(b0\) \{\n(.*?)\n\};", self.header, re.S).group(1)
+        fields = []
+        for line in _code(body).split("\n"):
+            for part in line.split(";"):
+                if part.strip():
+                    kind, name = part.strip().split(" ")
+                    fields.append((kind, name))
+        self.assertEqual(fields, [("float4", "i_vs[14]"), ("float4", "i_ps[5]"), ("uint", "i_first_quad"), ("uint", "i_quads"), ("uint", "i_kept"),
+                                  ("uint", "i_sampler"), ("float", "i_alpha_ref"), ("float", "i_out_scale"), ("float", "i_fog_on"), ("float", "i_pad")])
+        # the same names, in the struct's order, at the struct's offsets (the shader test holds the table to the compiled programs)
+        struct = re.search(r"struct ClayImpostorConstants \{\n(.*?)\n\};", self.logic, re.S).group(1)
+        names = [n.strip().split("[")[0] for line in _code(struct).split("\n") if line.strip() for n in line.strip().rstrip(";").split(" ", 1)[1].split(",")]
+        self.assertEqual(["i_" + n for n in names], [name.split("[")[0] for _, name in fields])
+        table = re.search(r"kClayImpostorFields\[\] = \{\n(.*?)\n\};", self.header, re.S).group(1)
+        got = [(n, int(o), int(b)) for n, o, b in re.findall(r'\{"(\w+)", (\d+), (\d+)\}', table)]
+        sizes = {"float4": 16, "uint": 4, "float": 4}
+        want, at = [], 0
+        for kind, name in fields:
+            count = int(name.split("[")[1].rstrip("]")) if "[" in name else 1
+            want.append((name.split("[")[0], at, sizes[kind] * count))
+            at += sizes[kind] * count
+        self.assertEqual(got, want)
+        self.assertEqual(at, 336)
+        self.assertIn("inline constexpr unsigned kClayImpostorSize = 336;", self.header)
+        self.assertEqual((len(lf.IMPOSTOR_SHADER["reg"]), len(lf.IMPOSTOR_SHADER["ps_reg"])), (14, 5))
+
+    def test_the_corners_and_the_one_load(self):
+        # six vertices a quad: the quad's corners 0 1 2, 0 2 3 (the game's quad list has four, in this order)
+        self.assertEqual(self.header.count("static const uint kCorner[6] = {0, 1, 2, 0, 2, 3};"), 1)
+        self.assertEqual(self.header.count("impostor_words["), 1)
+        self.assertIn("  uint quad = id / 6u;\n  [branch] if (quad < i_quads) {\n    float4 word = impostor_words[i_first_quad + quad];\n", self.header)
+        lit = lf.impostor_literals("vs")
+        self.assertEqual((lit["two"], lit["minus_one"], lit["one"]), (2.0, -1.0, 1.0))
+
+    def test_a_register_is_named_only_by_a_component_the_reference_reads(self):
+        """Ledger rulings 34 and 38: every use of a register in the two texts is `I_Cnn.<components>`, each component on
+        the generator's READ list; the blocks' rows are named nowhere else in the programs."""
+        import gen_impostor_table as gen
+        for text, prefix, kind, block in ((self.vertex, "I_C", "vs", "i_vs"), (self.pixel, "I_P", "ps", "i_ps")):
+            body = "\n".join(line for line in text.split("\n") if not line.startswith("#define"))
+            self.assertNotIn(block + "[", body)
+            uses = re.findall(r"\b%s(\d+)\b(\.[xyzw]+)?" % prefix, body)
+            self.assertGreater(len(uses), 5)
+            seen = {}
+            for reg, comps in uses:
+                self.assertTrue(comps, "%s%s is used whole" % (prefix, reg))
+                for c in comps[1:]:
+                    self.assertIn("xyzw".index(c), gen.READ[(kind, int(reg))], "%s%s.%s is not read by the reference" % (prefix, reg, c))
+                    seen.setdefault(int(reg), set()).add("xyzw".index(c))
+            # and everything on the list is read, but c111.z (the near blend's slope: the trees' tables have no blend,
+            # so nothing of the fog pair depends on it) and c20.w (it reaches the pixel as the block's output scale)
+            want = {reg: set(comps) for (k, reg), comps in gen.READ.items() if k == kind}
+            if kind == "vs":
+                want[111] = want[111] - {2}
+            else:
+                del want[20]
+            self.assertEqual(seen, want)
+        # the programs' mains name no register at all
+        for name in ("kClayImpostorVs", "kClayImpostorPs"):
+            start = self.header.index("inline constexpr const char* %s" % name)
+            main = self.header[self.header.index("TEXT END", start):self.header.index(')hlsl";', start)]
+            self.assertIsNone(re.search(r"\bI_[CP]\d+|\bi_vs\b|\bi_ps\b", main), name)
+
+    def test_a_literal_is_in_the_text_only_where_the_reference_has_it(self):
+        def body(text, name):
+            found = re.findall(r"\n(?:float|float2|float3|float4) %s\([^)]*\) \{\n(.*?)\n\}\n" % name, "\n" + text, re.S)
+            self.assertEqual(len(found), 1, name)
+            return re.sub(r"\bI_[CP]\d+", "", found[0])
+
+        position = body(self.vertex, "ImpostorPosition")
+        # 2 and -1 once, in the last horizontal term (instr 67, 69); the refused position's 2; the guards' 3e38; 0 and 1
+        self.assertIn("precise float moved = ((u * 2.0 + -1.0) * S) + q_x;", position)
+        self.assertIn("precise float4 pos = float4(0.0, 0.0, 2.0, 1.0);", position)
+        rest = position.replace("((u * 2.0 + -1.0) * S)", "").replace("float4(0.0, 0.0, 2.0, 1.0)", "")
+        self.assertEqual(sorted(set(numbers(rest))), [0.0, 1.0, 2.0, 3.0e38])      # (2: the corner numbers k >= 2.0 and k == 2.0)
+        self.assertEqual(rest.count("2.0"), 2)
+        self.assertEqual(rest.count("3.0e38"), 5)
+        pixel = body(self.pixel, "ImpostorPixel")
+        self.assertIn("precise float fall = saturate(0.1 * (d + -I_P12.y));", self.pixel)
+        self.assertEqual(sorted(set(numbers(pixel))), [-1.0, 0.1, 1.0])
+        self.assertEqual(pixel.count("0.1"), 1)
+        keep = body(self.pixel, "ImpostorKeep")
+        self.assertEqual(sorted(set(numbers(keep))), [0.0, 0.25, 0.75, 1.0, 2.0, 3.0])     # the samples' thresholds under offsets 0xAA; the three kept sets
+        self.assertEqual([0.5 - 0.125 * 2, 1.0 - 0.125 * 2], [0.25, 0.75])
+        for name in ("ImpostorFogCoords", "ImpostorFogFactor", "ImpostorFogAdd"):
+            self.assertEqual([n for n in numbers(body(self.vertex, name)) if n not in (0.0, 1.0, 1.0e30, 3.0e38)], [], name)
+        self.assertNotIn("I_C8", self.vertex[self.vertex.index("float3 ImpostorFogCoords"):])       # no c8.x factor in the fog
+
+
+class ImpostorPassText(unittest.TestCase):
+    """The pass's side of the step (plan Task 10), by its text: with the switch off nothing of the step is reached, and
+    the step is drawn in the colour pass alone."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pass_ = _text("src/native/render/clay_pass.cpp")
+        cls.front = _text("src/native/fable2_native_render.cpp")
+
+    def test_nothing_of_the_step_without_the_mode(self):
+        s = self.pass_
+        head = ("  const capture::ImpostorMode impostor_mode = ClayImpostorMode(impostors, scene.impostor_mode);\n"
+                "  st.impostor_mode = impostor_mode;\n  impostor_step_slots_ = 0;\n  bool impostor_step = false;\n"
+                "  if (impostor_mode != capture::ImpostorMode::kOff) {\n")
+        self.assertEqual(s.count(head), 1)
+        # the one place that makes the step's objects and takes its slots lies inside that test, behind the picture's verdict
+        block = s[s.index(head) + len(head):s.index("  // The frame's coverage: the switch as it is now.")]
+        self.assertEqual(s.count("EnsureImpostorObjects(dev)"), 1)             # (the one call)
+        self.assertEqual(block.count("EnsureImpostorObjects(dev)"), 1)
+        self.assertEqual(s.count("impostor_step_slots_ = kClayImpostorStepSlots;"), 1)
+        self.assertEqual(block.count("impostor_step_slots_ = kClayImpostorStepSlots;"), 1)
+        self.assertEqual(s.count("impostor_step = true;"), 1)
+        self.assertEqual(block.count("impostor_step = true;"), 1)
+        self.assertIn("      const ClayImpostorSkip picture = DecideImpostorPicture(impostor_mode, ImpostorPicture::kNone);\n"
+                      "      if (picture != ClayImpostorSkip::kNone) {\n", block)
+        self.assertLess(block.index("DecideImpostorPicture("), block.index("EnsureImpostorObjects(dev)"))     # `on`: no object is made
+        # everything else of the step asks `impostor_step` or the draws it prepared
+        self.assertEqual(s.count("  if (impostor_step && impostor_flat_staging_) {\n"), 1)
+        self.assertEqual(s.count("  if (impostor_step) {\n"), 1)
+        self.assertEqual(s.count("    if (!impostor_draw_count) return;\n"), 1)
+        # the frame's buffer and plan take the step's slots from the one member, 0 in every other frame
+        self.assertIn("ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size(), impostor_step_slots_)", s)
+        self.assertIn("PlanClayFrameSlots(slot - kClayFrameTerrainSlot0, uint32_t(plant_constants_.size()), impostor_step_slots_);", s)
+        self.assertEqual(s.count("PlanClayFrameSlots("), 1)
+        self.assertEqual(s.count("ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size(), impostor_step_slots_)"), 2)   # (the call and its comment)
+        self.assertEqual(s.count("ClayFrameSmallSlots("), 2)
+
+    def test_the_step_is_drawn_in_the_colour_pass_alone(self):
+        s = self.pass_
+        # its layout and pipeline are bound in one lambda, called at its place among the records and after the last
+        self.assertEqual(s.count("cmd->SetBindingLayout(impostor_layout_);"), 1)
+        self.assertEqual(s.count("cmd->SetPipeline(impostor_pipeline_);"), 1)
+        self.assertEqual(s.count("draw_impostors"), 3)
+        self.assertIn("    if (due.impostors) draw_impostors();\n", s)
+        self.assertIn("  if (!left_out && after.impostors) draw_impostors();\n", s)
+        colour = s.index("  // 3. The colour pass, as always:")
+        self.assertGreater(s.index("auto draw_impostors = [&] {"), colour)       # after the pre-pass and the mask: no pre-pass draw
+        for name in ("DrawShadows", "PrepareShadows", "DrawPrepared"):
+            body = s[s.index("void ClayPass::%s(" % name):]
+            body = body[:body.index("\n}\n")]
+            self.assertNotIn("impostor", body.lower(), name)
+        lam = s[s.index("auto draw_impostors = [&] {"):]
+        lam = lam[:lam.index("\n  };\n")]
+        self.assertIn("    cmd->SetBufferSrv(kImpostorParamWords, terrain_cb_, ClaySmallSlotOffset(impostor_words_slot_));\n", lam)
+        self.assertIn("      cmd->Draw(6 * d.quads, 0);\n", lam)
+        self.assertIn("    bind_scene();\n    bound = nullptr;", lam)
+        # `flat` keeps the first sample's set, the picture is the flat one, and a record is whole or not drawn
+        self.assertEqual(s.count("MakeClayImpostorConstants("), 1)
+        self.assertIn("MakeClayImpostorConstants(r, out_scale, post_frame, fog_on, kImpostorKeepFirst, 0, &constants)", s)
+        self.assertEqual(s.count("cmd->SetTexture(kImpostorParamPicture, impostor_flat_view_);"), 1)
+        self.assertIn("    } else if (!ImpostorPlacesOneRun(impostor_seqs_.data(), impostor_seqs_.size(), first_place, last_place)) {\n"
+                      "      all = ClayImpostorSkip::kPlace;\n", s)
+        self.assertIn("        if (i >= records || !ImpostorWordsHeld(r, word_floats)) {\n", s)
+        # one pipeline: depth test less-or-equal with the depth write, no blend, no cull
+        made = s[s.index("bool ClayPass::EnsureImpostorObjects("):s.index("void ClayPass::ForgetCloudObjects()")]
+        self.assertEqual(made.count("CreateGraphicsPipeline("), 1)
+        for line in ("  pipe.cull = nrhi::CullMode::kNone;\n", "  pipe.blend.enable = false;\n", "  pipe.depth.test_enable = true;\n",
+                     "  pipe.depth.write_enable = true;\n", "  pipe.depth.func = nrhi::CompareFunc::kLessEqual;\n"):
+            self.assertEqual(made.count(line), 1, line)
+
+    def test_the_front_end_hands_the_switch_on_and_writes_the_line(self):
+        self.assertEqual(self.front.count("CurrentImpostors()"), 4)     # its definition, the Render's argument, the install line, the capture's
+        self.assertIn('render::FormatCoverageText(st) + "\\n" + render::FormatImpostorText(st));', self.front)
+        self.assertIn('if (st.impostor_mode != capture::ImpostorMode::kOff) REXLOG_INFO("[native] clay: {}", render::FormatImpostorText(st));', self.front)
+
+
 if __name__ == "__main__":
     unittest.main()

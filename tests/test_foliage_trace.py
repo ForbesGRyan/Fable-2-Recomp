@@ -3,6 +3,7 @@ arithmetic on made arrays (the classes' parts sum to the region's ratio less 1, 
 counted out and said, the verdict's bound), the stored native scene's file on made bytes, the holes count, the
 classes of a made depth copy, the redraw's kept set, the half-pixel fit on a made shift, the model of
 criterion 17 on made numbers."""
+import math
 import struct
 import sys
 import tempfile
@@ -14,6 +15,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools" / "xdk_sigmatch"))
 
+import foliage_replay as fp  # noqa: E402
 import foliage_trace as ft  # noqa: E402
 
 
@@ -203,6 +205,62 @@ class KeptSet(unittest.TestCase):
         self.assertEqual(ft.kept_verdict(ft.kept_set(before, after, replay)), "met")
         replay[0, 13] = False                                                               # 86 in the replay, 14 alone = 16.3%
         self.assertEqual(ft.kept_verdict(ft.kept_set(before, after, replay)), "not met")
+
+
+class FetchLevel(unittest.TestCase):
+    """The occluder's replay with the level a fetch takes (ledger ruling 62; criterion 15's substituted reference)."""
+    ROW = {"rs": {"2202": "0xAA00001C", "210E": "0x00000000"}}
+
+    def test_the_level_of_a_triangle(self):
+        """log2 of the larger screen-space step of the coordinate in base-level texels, plus the bias, held to the
+        stored levels."""
+        win = np.array([[0.0, 0.0], [8.0, 0.0], [0.0, 8.0]])
+        self.assertAlmostEqual(ft.fetch_level(win, np.array([[0.0, 0.0], [32.0, 0.0], [0.0, 32.0]]), 0.0, 11), 2.0)   # 4 texels a pixel
+        self.assertAlmostEqual(ft.fetch_level(win, np.array([[0.0, 0.0], [32.0, 0.0], [0.0, 8.0]]), 0.0, 11), 2.0)    # the larger step
+        self.assertAlmostEqual(ft.fetch_level(win, np.array([[0.0, 0.0], [0.0, 16.0], [64.0, 0.0]]), 0.0, 11), 3.0)   # turned: x takes v
+        self.assertAlmostEqual(ft.fetch_level(win, np.array([[0.0, 0.0], [32.0, 0.0], [0.0, 32.0]]), 1.0, 11), 3.0)
+        self.assertAlmostEqual(ft.fetch_level(win, np.array([[0.0, 0.0], [12.0, 0.0], [0.0, 12.0]]), 0.0, 11), math.log2(1.5))
+        self.assertEqual(ft.fetch_level(win, np.array([[0.0, 0.0], [4.0, 0.0], [0.0, 4.0]]), 0.0, 11), 0.0)           # magnified: the base
+        self.assertEqual(ft.fetch_level(win, np.array([[0.0, 0.0], [32.0, 0.0], [0.0, 32.0]]), 0.0, 1), 1.0)          # no level beyond the last
+        self.assertEqual(ft.fetch_level(win, np.zeros((3, 2)), 0.0, 11), 0.0)                                         # one texel: the base
+        self.assertIsNone(ft.fetch_level(np.array([[0.0, 0.0], [8.0, 0.0], [16.0, 0.0]]), np.ones((3, 2)), 0.0, 11))  # no area on the screen
+        self.assertIsNone(ft.fetch_level(win, np.array([[0.0, 0.0], [np.nan, 0.0], [0.0, 1.0]]), 0.0, 11))
+
+    def test_a_mixture_of_two_levels(self):
+        one, half = fp.Alpha(np.ones((2, 2))), fp.Alpha(np.full((1, 1), 0.5))
+        uv = np.array([[0.25, 0.25], [0.75, 0.75]])
+        self.assertEqual(list(ft.LevelMix([one, half], 0.0).sample(uv)), [1.0, 1.0])
+        self.assertEqual(list(ft.LevelMix([one, half], 1.0).sample(uv)), [0.5, 0.5])
+        self.assertEqual(list(ft.LevelMix([one, half], 0.5).sample(uv)), [0.75, 0.75])
+        self.assertEqual(list(ft.LevelMix([one, half], 7.0).sample(uv)), [0.5, 0.5])          # beyond the last: the last
+        self.assertEqual(list(ft.LevelMix([one, half], -1.0).sample(uv)), [1.0, 1.0])
+
+    def test_a_card_is_kept_only_where_both_levels_read_one(self):
+        """A card over an 8 x 4 layer, its coordinate running over 16 x 8 base texels: two texels a pixel, level 1.
+        The base reads 1 everywhere; level 1 reads 1 in its left half alone: the left half is kept. With a bias
+        of -1 the base decides and all is kept; with -0.5 both levels must read 1."""
+        clip = np.array([[-1.0, 1.0, 0.5, 1.0], [1.0, 1.0, 0.5, 1.0], [-1.0, -1.0, 0.5, 1.0], [1.0, -1.0, 0.5, 1.0]])
+        uv = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+        tris = np.array([[0, 1, 2], [1, 3, 2]])
+        level1 = np.ones((4, 8))
+        level1[:, 4:] = 254.0 / 255.0
+        textures = [fp.Alpha(np.ones((8, 16)), wrap=False), fp.Alpha(level1, wrap=False)]
+        closed, kept, depth, lods = ft.occluder_cover_fetch(self.ROW, clip, tris, uv, textures, 0.5, (8, 4))
+        self.assertTrue(np.allclose(lods, 1.0))
+        self.assertTrue(closed[:, :4].all() and not closed[:, 5:].any())
+        self.assertTrue(np.array_equal(closed, kept))
+        self.assertTrue(ft.occluder_cover_fetch(self.ROW, clip, tris, uv, textures, 0.5, (8, 4), bias=-1.0)[0].all())
+        mixed = ft.occluder_cover_fetch(self.ROW, clip, tris, uv, textures, 0.5, (8, 4), bias=-0.5)[0]
+        self.assertTrue(mixed[:, :4].all() and not mixed[:, 5:].any())
+        # the layer's depth test, as occluder_cover's: the native form
+        layer = np.ones((4, 8))
+        layer[0] = 0.25
+        self.assertFalse(ft.occluder_cover_fetch(self.ROW, clip, tris, uv, textures, 0.5, (8, 4), layer=layer, zscale=1.0, zoffset=0.0)[0][0].any())
+
+    def test_the_levels_argument(self):
+        self.assertEqual(ft.parse_levels("0,2,fetch,fetch+1,fetch-0.5"), [0, 2, ("fetch", 0.0), ("fetch", 1.0), ("fetch", -0.5)])
+        with self.assertRaises(ValueError):
+            ft.parse_levels("0,base")
 
 
 class HalfPixel(unittest.TestCase):

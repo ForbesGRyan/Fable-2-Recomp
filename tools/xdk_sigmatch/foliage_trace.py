@@ -7,7 +7,7 @@ scene of the same frame (a read-back capture's scene colour, as post_replay.py r
   foliage_trace.py classes   <capture> <frame> --out <npy> [--cache DIR]
   foliage_trace.py trace     <dump> <capture> <frame> [--spot sunward] [--classes <npy>] [--cache DIR] [--scale S]
   foliage_trace.py halfpixel <dump> <capture> <frame> [--classes <npy>] [--cache DIR]
-  foliage_trace.py occluder  <dump> <capture> <frame> [--levels 0,1,2] [--origin 0.0] [--cache DIR]
+  foliage_trace.py occluder  <dump> <capture> <frame> [--levels 0,1,fetch,fetch+1] [--origin 0.0] [--cache DIR]
   foliage_trace.py predict   <inputs.json>
 
 <capture> is a path or the end of a capture's name in the logs folder. `classes`, `trace` and `halfpixel` need a
@@ -51,7 +51,11 @@ each of which the report names with its cause or as open.
 its first, against the replay's (foliage_replay.occluder_replay: the twin's triangles with the wind, the alpha
 rule on one sample, tested against the NATIVE layer's first plane so that only the redraw is compared), at each
 texture level asked for. Met: the native set holds at least 90% of the replay's and the texels the native set
-alone holds are at most 15% of the replay's count.
+alone holds are at most 15% of the replay's count. A level is a stored one (0 the base, the criterion as written)
+or `fetch`: the level each triangle's fetch takes by the coordinate's step on the screen, the mixture of the two
+stored levels about it (`occluder_cover_fetch`; ledger ruling 62: the criterion stands "not met as written, met
+against the level a fetch takes", which is the rule the native fetch and the emulated game's follow; the game's
+fetch constant also names a bias of +1 that the emulator does not apply: `fetch+1` shows what it would do).
 
 `predict` (criterion 17): per region, the figure of sub-project 10's run T16-5 moved by the measured change of
 the linear scene (coverage) and of the layer (the redraw), through the screen formula (`predict_region`).
@@ -347,6 +351,107 @@ def kept_set(before, after, replay_closed):
     return k
 
 
+# --- the occluder with the level a fetch takes (ledger ruling 62) ---------------------------------------------
+
+def parse_levels(text):
+    """"0,2,fetch,fetch+1" -> [0, 2, ("fetch", 0.0), ("fetch", 1.0)]: a stored level, or the fetch's own with a bias."""
+    out = []
+    for item in text.split(","):
+        item = item.strip()
+        if item.startswith("fetch"):
+            out.append(("fetch", float(item[5:]) if item[5:] else 0.0))
+        else:
+            out.append(int(item))
+    return out
+
+
+def fetch_level(win, texels, bias, last):
+    """The level a fetch takes over one triangle: log2 of the larger screen-space step of the coordinate, in
+    base-level texels a pixel, plus `bias`, held to 0..last. win [3, 2]: the corners on the screen in pixels;
+    texels [3, 2]: their coordinates in base-level texels. The coordinate is taken as affine over the triangle
+    on the screen (a far card's nearly is). None for a triangle without area on the screen or a value that is no
+    number."""
+    win, texels = np.asarray(win, dtype=np.float64), np.asarray(texels, dtype=np.float64)
+    if not (np.isfinite(win).all() and np.isfinite(texels).all()):
+        return None
+    m = np.array([win[1] - win[0], win[2] - win[0]])
+    if abs(float(np.linalg.det(m))) < 1e-12:
+        return None
+    grad = np.linalg.solve(m, np.array([texels[1] - texels[0], texels[2] - texels[0]]))     # rows: d / dx, d / dy of (u, v)
+    rho = max(float(np.hypot(grad[0][0], grad[0][1])), float(np.hypot(grad[1][0], grad[1][1])))
+    lod = (math.log2(rho) + bias) if rho > 0 else 0.0
+    return min(max(lod, 0.0), float(last))
+
+
+class LevelMix:
+    """A texture's alpha between two of its levels (each an fp.Alpha, sampled bilinear): level `lod`'s."""
+
+    def __init__(self, levels, lod):
+        lod = min(max(float(lod), 0.0), len(levels) - 1.0)
+        self.low = levels[int(math.floor(lod))]
+        self.high = levels[min(int(math.floor(lod)) + 1, len(levels) - 1)]
+        self.part = lod - math.floor(lod)
+
+    def sample(self, uv):
+        if self.part == 0.0:
+            return self.low.sample(uv)
+        return self.low.sample(uv) * (1.0 - self.part) + self.high.sample(uv) * self.part
+
+
+def occluder_cover_fetch(row, clip, tris, uv, textures, scale, size, origin=0.0, layer=None, zscale=-1.0, zoffset=1.0, bias=0.0):
+    """foliage_replay.occluder_cover with the alpha of the level each triangle's fetch takes (fetch_level; the
+    mixture of the two stored levels about it, LevelMix): (closed, kept, depth, the level of every kept or dropped
+    fragment). textures: the albedo's levels as fp.Alpha, the base first. At the fade 0.5 under 0xAA a texel is
+    kept only where BOTH levels read exactly 1."""
+    kept = np.zeros((size[1], size[0]), dtype=bool)
+    depth = np.full((size[1], size[0]), np.inf)
+    clip, uv, tris = np.asarray(clip, dtype=np.float64), np.asarray(uv, dtype=np.float64), np.asarray(tris)
+    wx, wy, _, _ = fp.window(clip, size)
+    win = np.stack([wx, wy], axis=1)
+    th, tw = textures[0].alpha.shape
+    texels = uv * (tw, th)
+    both = np.concatenate([clip, uv], axis=1)
+    levels, lods = {}, []
+    for t, ys, xs, d, attrs in fp.fragments(both, tris, size, origin):
+        if t not in levels:
+            levels[t] = fetch_level(win[tris[t]], texels[tris[t]], bias, len(textures) - 1)
+        if levels[t] is None:
+            continue
+        first, _ = fp.alpha_cover(row, attrs, LevelMix(textures, levels[t]), (xs & 1) * 2 + (ys & 1), samples=1, scale=scale)
+        keep = first & (d <= depth[ys, xs])
+        depth[ys[keep], xs[keep]] = d[keep]
+        kept[ys[keep], xs[keep]] = True
+        lods.append(np.full(len(xs), levels[t]))
+    closed = kept.copy()
+    if layer is not None:
+        stored = fp.stored_depth(depth, zscale, zoffset)
+        with np.errstate(invalid="ignore"):
+            closed &= (stored >= layer) if zscale < 0 else (stored <= layer)
+    return closed, kept, depth, (np.concatenate(lods) if lods else np.zeros(0))
+
+
+def occluder_replay_fetch(fr, r, twin, table, size, origin, bias, layer, zscale, zoffset, cache=None):
+    """occluder_cover_fetch for one occluder row of a capture frame (as foliage_replay.occluder_replay): the
+    albedo's base level and every stored level the capture kept."""
+    scale = fp._fade(r)
+    if not math.isfinite(scale):
+        raise Unreadable("no pixel c15 in the layer's row")
+    entry = fp._albedo_entry(cr.ps_hash(twin))
+    names, uv_of, base = fp.cover_inputs(fr, twin, entry)
+    textures = [base]
+    while len(textures) < 16:
+        try:
+            textures.append(fp.cover_inputs(fr, twin, entry, level=len(textures))[2])
+        except Unreadable:
+            break
+    g = fp._cached_geometry(twin, fr, True, table, names, cache)
+    if g.reason:
+        raise Unreadable(g.reason)
+    closed, kept, depth, lods = occluder_cover_fetch(r, g.clip, g.tris, uv_of(g.outputs), textures, scale, size, origin, layer,
+                                                     zscale, zoffset, bias)
+    return closed, g, lods, len(textures)
+
+
 def kept_verdict(k):
     if not k["replay"]:
         return "not decidable"
@@ -487,13 +592,18 @@ def cmd_occluder(args, say=print):
     worst = 0
     for level in args.levels:
         closed = np.zeros(layers[0].shape, dtype=bool)
-        made = 0
+        made, note = 0, ""
         for r, twin in pairs:
             if twin is None:
                 say("  line %d: no twin" % r["line"])
                 continue
             try:
-                shut, _, _, g = fp.occluder_replay(fr, r, twin, table, size, args.origin, level, before, 1.0, 0.0, cache=args.cache)
+                if isinstance(level, tuple):
+                    shut, g, lods, stored = occluder_replay_fetch(fr, r, twin, table, size, args.origin, level[1], before, 1.0, 0.0, args.cache)
+                    note = " (%d stored levels; fragments' levels 10%% %.2f, median %.2f, 90%% %.2f)" % (
+                        (stored,) + tuple(np.percentile(lods, [10, 50, 90]) if len(lods) else [math.nan] * 3))
+                else:
+                    shut, _, _, g = fp.occluder_replay(fr, r, twin, table, size, args.origin, level, before, 1.0, 0.0, cache=args.cache)
             except Unreadable as e:
                 say("  level %d, line %d: not made: %s" % (level, r["line"], e))
                 continue
@@ -502,9 +612,10 @@ def cmd_occluder(args, say=print):
         k = kept_set(layers[0], layers[1], closed)
         v = kept_verdict(k) if made == len(pairs) and pairs else "not decidable"
         worst = max(worst, 0 if v == "met" else 1)
-        say("level %d (sampled at %g): replay %d, native %d, both %d = %.2f%% of the replay's (at least 90%%), native alone %d = %.2f%% "
+        say("level %s (sampled at %g): replay %d, native %d, both %d = %.2f%% of the replay's (at least 90%%), native alone %d = %.2f%% "
             "(at most 15%%), replay alone %d, moved farther %d: %s" % (
-                level, args.origin, k["replay"], k["native"], k["both"], 100.0 * k["closed_share"], k["native_alone"],
+                ("the fetch's own%s%s" % ("" if not level[1] else " %+g" % level[1], note)) if isinstance(level, tuple) else level,
+                args.origin, k["replay"], k["native"], k["both"], 100.0 * k["closed_share"], k["native_alone"],
                 100.0 * k["alone_share"], k["replay_alone"], k["farther"], v))
     return worst
 
@@ -535,7 +646,8 @@ def main(argv=None):
         p.add_argument("frame", type=int)
         p.add_argument("--cache")
         if name == "occluder":
-            p.add_argument("--levels", type=lambda s: [int(x) for x in s.split(",")], default=[0])
+            p.add_argument("--levels", type=parse_levels, default=[0],
+                           help="stored levels, and `fetch` (the level each triangle's fetch takes; `fetch+1`: with a bias)")
             p.add_argument("--origin", type=float, default=0.0)
         else:
             p.add_argument("--classes", help="a numpy file of class ids: read when it is there, else written")

@@ -51,6 +51,14 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
   the lit plant's light, and the level the game's own fetch takes (needs a capture with read-back and
   the mip files, at the bridge).
 
+- **What the darkness trace left** (sub-project 11, phase 11c; `frame-map.md`, "The half blend, once: in the
+  game"): tree leaves read 0.88 of the game's in the linear scene (the formula's check passes; candidate: the
+  leaf's normal map, read flat); edge pixels of foliage against the sky read 0.95 (candidate: the native pixel
+  centre against the game's first sample a quarter pixel away; belongs with item 5); a native sun beam at
+  "beams right" of the sunward view that the game's picture does not show (cause not found; item 2's distant
+  trees are a candidate); the console's level bias of +1.0 on the tree occluder's fetch, which the emulator does
+  not apply and the native redraw does not have; two different coverage records' half parts at one pixel.
+
 ## Open with the user
 
 - Push of the local commits on `master`.

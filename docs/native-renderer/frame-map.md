@@ -7732,7 +7732,64 @@ Held without the game: `test_clay_logic.cpp` cases 750 and 765 (the two keys; fo
 
 **"Beams right" in the third bracket** (1.23 to 1.39; an hour's look, `t16_shots.txt` and log 630): the native shot at 74 s is 1.49 times the native shot at 62 s in that region with the sun on (A: 0.231 against 0.155; C the same; at 96 s 0.139) and unchanged with the sun off (D: 0.0915, 0.0914): it is the layer. The Sun line's blur centre moves through the hold, (0.3608, 0.3791) at the first drawn layer, then (0.3332, 0.3591), (0.3117, 0.3430), (0.2966, 0.3313) at the next three 300-frame lines: **the sun's place on the screen drifts while the stick is held**, and a beam crosses the region from its right edge (74 over 62 by sixths of the region's width: 1.10, 1.26, 1.28, 1.77, 2.27, 3.32) and has left it by 96 s. The emulated shots are at 56 and 68 s, before the crossing: the third bracket compares a native picture with an emulated one of six seconds earlier, across the crossing. Whether the game shows the same beam at 74 s is **not known** (no emulated shot after 68 s); the next runs take one at 85 s. Not a previous-frame or view-switch effect (the shot is 3 s after the switch and the 62 s shot, also 3 s after one, does not show it).
 
+### The half blend, once: in the game (runs r60)
+
+Five runs by the controller, user present (**RUN UNCHECKED**), binary `63A4B6A3FD5BCE43` before and after, all exit 0, 0 `d3d ERROR` lines, shots 1296 wide. Copies `out/native-evidence/post/r60_*`; figures `out/native-evidence/foliage/t60_*`.
+
+| Run | Log | Capture, scene file | What |
+|---|---|---|---|
+| 0 `r60_warp` | 635 | | software adapter, debug layer, warning id 1328 only: `half parts in two steps 2` at scene frame 277 (early 2), `15` at 278 (late 2, early 13): the new draws ran |
+| F `r60_f_all_readback` | 636 | `082325`, `082328` (frame 519) | all on, full read-back; late 1, early 21 |
+| G `r60_g_all` | 637 | `082513`, `082515` (frame 2477) | all on |
+| H `r60_h_nocov` | 638 | `082701`, `082703` | coverage off |
+| I `r60_i_fade` | 639 | `082858`, `082901` (flags 5) | the standing view after the look, wind and coverage on: late 1, early 18 with 19 two-step parts at frame 2097, `early 28 (28 in the tail)` in the later lines |
+
+**Run F's camera had NOT reached the held framing** (unlike run E's): its eye is (91.17, 159.37, 46.78) against (90.10, 158.37, 47.21) in G and H, and its depth-written mask equals G's on 81.38% of the picture (G against run A: 96.62%). Its pair is of one scene frame (519 in both heads, exposure 7.10842) and the late tree, the sun and the bridge are in it, so **its figures by class stand; its figures by region are of another framing** than run E's and are not set beside E's.
+
+**The per-card table again** (`t60_card_count_082325_f1.txt`; bound set beforehand: the sky's share at two and three replayed cards within 0.40 to 0.55):
+
+| replayed cards (k) | pixels | median sky share, run F | run E (before the mend) | native over game, F | E |
+|---|---|---|---|---|---|
+| 1 | 63,881 | 0.450 | 0.451 | 0.984 | 0.960 |
+| 2 | 17,893 | **0.445** | 0.194 | 0.970 | 0.694 |
+| 3 | 3,147 | **0.447** | 0.078 | 0.966 | 0.543 |
+| 4 | 415 | 0.450 | -0.021 | 0.972 | 0.493 |
+
+**Met**: one half of the sky whatever the number of cards. The assumption held: the colour step's depth is the depth step's (no dots, below).
+
+**Criterion 16 by class** (`t60_trace_082325_f1.txt`; 193 draws replayed, none refused; class 5: 683 pixels, 0.08%):
+
+| Class, over the picture | run F (after the mend) | run E (before) |
+|---|---|---|
+| late tree over sky | **0.986** (92,861 px) | 0.901 |
+| late tree over closed | 0.856 (15,982 px) | 0.821 |
+| leaf | 0.881 (119,182 px) | 0.865 |
+| open sky | 0.951 | 0.941 |
+| trunk and wood | 1.028 | 1.017 |
+| the picture | **0.957** | 0.928 |
+
+By region in run F's own framing: sun 0.940, beams left 0.954, beams right 0.905, beam root 0.847, sky beside the sun 0.979, every region **assigned**. In the held framing the game's scene after the mend is in no evidence (run F did not arrive); an estimate from two runs [model]: run G's native scene over run E's, each over its exposure, times run E's measured ratio: sun 0.739 -> about **0.79**, root 0.755 -> about **0.97**, beams left 0.869 -> about 0.97, beams right 0.908 -> about 0.91, the picture 0.928 -> about 0.94 (run A's native scene over run E's: 0.987 to 0.994, the size of the run-to-run difference). Coverage on over off in the linear scene, G over H (A over C before the mend): root x 1.977 (1.604), sun x 1.290 (1.282), beams left x 1.152 (1.080).
+
+**What stays open, with its size** (run F, over the picture; part = the class's share of the picture's shortfall of -0.043):
+- **leaf 0.881**, part -0.013; 0.79 to 0.81 in "beam root" and "beams right" of F's framing. Not the multiple blend (it moved from 0.865). The leaf formula's check passes; candidate: the flat normal map (lighting's ruling 4), the mask at half-covered edges. Roadmap.
+- **open sky 0.951**, part -0.028, the largest part left; 0.83 inside "beams right", 0.90 inside "sun", 0.979 beside the sun. Edge pixels the game shows as sky; candidate: the quarter-pixel sampling place (+0.25, +0.25). Roadmap (with the MSAA item).
+- **late tree over closed 0.856**, part -0.003: a late tree's half over an early record's half or over leaves at 0.88: two different records' half parts at one pixel, and the leaf class behind it. Small.
+- late tree over sky 0.986: closed.
+
+**Criteria 10 to 13 and 15 again.**
+- 10, 11 (`t60_runs_late.txt`): the native end depth holds the late tree on 36.24% of its replayed cover with coverage (G) and 36.17% without (H): the end depth is the one draw's; the layer's first plane holds the tree's own depth on 0.02% of the tree's pixels in F, G and H (bound 0.5%). Holes 0 in the four dumps (`t60_holes.txt`).
+- 12: the tree's pixels read 2.27 times the scene without coverage (G 1.2713 over H 0.5589, exposures 7.63 and 7.53; before the mend 1.36 to 1.38); toward the game in every class, past it in none (late tree over sky 0.986). The criterion's band was of another frame (ruling 56 stands).
+- 13 (run I, `t60_fading_082858.txt`): the native depth holds the 28 fading rows on 14,482 pixels with one sample and 304 with two, against 14,298 and 293 with coverage off (Task 14, `044337`): the depth as before. The picture's linear luminance over its exposure: 1.006 of Task 14's coverage-on dump (`054018`), 1.032 of its coverage-off dump (`054206`): nothing darkens.
+- 15 (`t60_occluder_{f,g,h}.txt`): not met at the base level (G 52.86%, F 46.80%), met at the level a fetch takes: G 96.29% and 4.92% alone, H 96.18% and 4.76%, F 95.85% and 5.68%. As ruling 62 has it.
+
+**Shots, every native one viewed** for dots or holes in the faded trees: F at 62 s and 74 s (the view from farther back and lower: the faded tree at the upper left see-through and even, the sky and branches behind it showing; no dot, no hole); G at 62 s and 74 s (the held framing: the same tree see-through and even; no dot, no hole; lighter than in run A's shot, as the measure says); I at 68, 80 and 96 s (the standing view: the near trees whole, the fading tree at the top centre faint and even; no dot, no hole). At 1296 wide a single-pixel dot could escape the eye; the dumps' holes count is 0.
+
+**The third bracket, with the emulated shot at 85 s** (run G; run H the same): "beams right" reads 0.1597 native at 62 s, **0.2228 native at 74 s**, and emulated 0.1646 at 56 s, 0.1721 at 68 s, **0.1343 at 85 s**, 0.1444 at 96 s. The game's picture does not brighten there between 68 and 85 s; the native picture at 74 s is 1.30 of the emulated before it and 1.66 of the emulated after it. So the native picture has a beam at the right edge of "beams right" about 74 s that the game's picture on either side of that second does not show: **an over of the native layer, not a mismatch of seconds alone. Cause not found** (candidates: what the native layer's depth lacks, the distant trees and the far lake; the drift of the sun's place). Left to Task 18 and the roadmap. The other regions after the mend (G, four brackets): sun 0.73 to 0.76, beams left 0.89 to 0.96, root 0.88 to 0.95 (before: 0.67 to 0.69, 0.83 to 0.88, 0.65 to 0.70).
+
+**Verdict (ruling 18's form), after the mend**: every region assigned in both pairs (E, F). Classes outside 0.85 to 1.18 in run F's regions, each named: leaf in "beams right" (0.81), "beam root" (0.79) and "beam far right" (0.83): open, formula check passes; open sky in "beams right" (0.83) and 17 pixels of the root: open, sampling place the candidate; late tree over closed in "beams right" (0.83) and the root (0.79): two records' halves and the leaf behind; late tree over sky in "beams right" (40 px) and the root (107 px, 0.80): too few pixels to read. **Ruling 5's question is closed: no existing light formula is at fault**; the one fault found was coverage's half draw, mended. To the roadmap: the leaf's remaining 12% (normal maps), the edge sampling place with the MSAA item, the console's level bias on the occluder, the native beam at "beams right".
+
 ## Pending
+
 
 
 

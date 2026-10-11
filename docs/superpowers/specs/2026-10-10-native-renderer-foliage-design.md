@@ -894,3 +894,33 @@ From plan Task 15 (FM section 18, "Validation (11b)", "Limits (11b)"):
 - **What the closing runs owe phase 11b**: cost at width 1942 with the window on the usual monitor (wind and
   coverage on against off). No verdict needs a repeat with full read-back; the game's scene under the late
   tree (criterion 12 like for like) comes with 11c's trace.
+
+**Phase 11c, Tasks 16 and 17, and the mend of the half draw (ledger rulings 60 to 62; frame map section 18, "The
+tree occluder (11c)" to "The half blend, once: in the game")**
+
+- **Criterion 15: not met as written, met against the level a fetch takes** (ruling 62). Against the replay at
+  the base level the native redraw holds 46.8 to 52.9% of the replay's texels (0.4 to 0.6% alone); against the
+  replay that takes each triangle's own level between two stored levels, 95.9 to 97.2% (4.8 to 5.7% alone) in
+  five dumps; with the wind off 61.6% (39.4% alone). Open question 7: no single stored level fits; the fetch's
+  own does. "With a sun-off run the redraw draws nothing": met.
+- **The occluder's level bias** (ruling 61): the game's fetch constant for the occluder names a bias of +1.0
+  which the emulator does not apply; the native redraw keeps the emulator's fetch. A limit.
+- **Design 12 as built**: the depth-only program is an object of the layer's own (the pre-pass's text); a twin
+  is left out for `state`, `alpha`, `texture`, `record` or `pipeline`; a twin moved in the scene is never drawn
+  at rest; nothing is redrawn on the oracle feed.
+- **Design 11 amended (ruling 60)**: a coverage record's half-covered pixels are drawn in TWO steps where the
+  design had one: their depth (the half program, no colour, the record's depth test and write), then their
+  colour (the half blend, tested less-or-equal, no depth write), so that the nearest of a record's leaf cards
+  blends once. The one draw blended once for every card nearer than all before it (measured: the sky's share
+  0.45 / 0.19 / 0.08 under one, two, three cards; after the mend 0.45 at each). The end depth is unchanged.
+  Left: two different records' half parts at one pixel.
+- **Criterion 16: met** (the table and the names; every region assigned in both paired frames). Linear scene,
+  native over game, by class over the picture after the mend: late tree over sky 0.986, late tree over closed
+  0.856, leaf 0.881, open sky 0.951, trunk and wood 1.028, the picture 0.957. In the held framing before the
+  mend (run E): sun 0.739, root 0.755; after it the game's scene of that framing is in no evidence (the
+  read-back run did not reach it): about 0.79 and 0.97 by an estimate from two runs. Classes of 13 has two
+  more than the plan's six (late tree over closed, plant).
+- **Ruling 5's question is closed**: no existing light formula is at fault (the leaf formula's check passes);
+  the one fault found was the half draw, mended. Open, to the roadmap: the leaf class at 0.88, open sky at
+  edges at 0.95, a native beam at "beams right" the game's picture does not show.
+- Criteria 17 to 19 and the cost are Task 18's.

@@ -1,6 +1,7 @@
 # Native renderer sub-project 11: foliage (wind, part coverage, the tree occluder)
 
-Status: **design, 2026-10-10** (branch `native-renderer-foliage`; nothing built). Plan:
+Status: **phase 11a (wind) built and validated, 2026-10-11** (verdicts with each criterion and in FM section 18, "Validation (11a)"; the
+switch stays off by default); phases 11b and 11c: design, 2026-10-10 (branch `native-renderer-foliage`). Plan:
 `docs/superpowers/plans/2026-10-10-native-renderer-foliage.md`. Research:
 `.superpowers/sdd/foliage-research.md` (untracked; its scripts and outputs in
 `out/native-evidence/foliage/research/`). Ledger:
@@ -508,11 +509,13 @@ threshold set here without a measured one before it (ruling 20).
    Each of these mutations of a formula must fail the check: `c16` for `c15`; two bytes of fetch 4
    exchanged; the sign of the wind's direction; a literal changed by 1%. (Tool; a reduced count in
    `tests/test_wind_formulas.py`.)
+   **Verdict (plan Task 11): met.**
 2. *Identities.* A caster's microcode on a scene draw's streams and bank equals the scene
    shader's `oPos` exactly (largest difference 0.0) for `FBD3` on `475E`, `4325` on `A584`,
    `A8A5` on `8123` and on `B636`; the occluder's on its twin's exactly in every captured frame;
    and on the casters' own streams (new captures) the formula of the caster's family holds within
    criterion 1's bound. (`wind_check.py identities`.)
+   **Verdict (plan Task 11): met**, every identity exact (0.0).
 3. *Wind inputs.* In every frame of a capture at each of the three spots, with the switch on:
    each record's registers equal its row's bank bit for bit and its elements its row's fetches
    (`wind_check.py inputs`); every wind draw row has inputs or a counted reason, and no reason
@@ -525,7 +528,11 @@ threshold set here without a measured one before it (ruling 20).
    entries (ledger ruling 40): 7,011 of 7,011 entries of 20 frames of captures `002046`, `002354`,
    `002534`, each equal to a member row of the same shader value for value. With the switch off the
    frame row says `"wind":"off"` (it has no counts) and no row has a member (captures `221257`,
-   `002231`). The verdict is plan Task 11's.
+   `002231`).
+   **Verdict (plan Task 11): met.** On the validation session's captures `022417`, `022755`,
+   `022921`, `023101`, `023243`: 10,502 of 10,502 stored entries of 32 frames and 11,606 of 11,606
+   member rows; no reason beside `none` and `no-entry`; off-run `022606` says `"wind":"off"` with
+   no member.
 4. *Positions through the table.* `position_check.py` with the wind terms: over every wind draw
    of the three captures the entry's position against the microcode's `oPos`, 99th percentile
    below 0.05 pixel of 1120 x 720, and none above 0.5.
@@ -545,6 +552,9 @@ threshold set here without a measured one before it (ruling 20).
    at least one capture. What the deviation leaves open: for a vertex near the eye the
    clip-space bound allows more than 0.5 pixel in principle (1e-4 units over a small w); the
    largest measured difference is about a twelfth of that bound.
+   **Verdict (plan Task 11): not judged as written; met inside this deviation**, also on the
+   validation session's captures (10 of 10, 11 of 11, 11 of 11 shaders with a vertex in view;
+   largest 99th percentile 7.35e-4 pixel).
 5. *Against the game's depth, one frame (no precedent; amended by the ledger's rulings 24 and
    25, 2026-10-10).* The replay is sampled at the place fitted on the capture's own unmoving
    draws (ruling 25). The criterion is judged one-sidedly, on visible pixels: a pixel the replay calls
@@ -561,6 +571,8 @@ threshold set here without a measured one before it (ruling 20).
    printed beside the judged ones. (`foliage_replay.py depth-relation`, `wind`. As first
    written: "at least 95% of the pixels the replay calls nearest hold the stored depth within the
    tolerance the tool prints".)
+   **Verdict (plan Task 11): met** as amended (sunward and bridge: 99.59% and 99.99%; trunks
+   100.00% with the wind against 18.08% and 61.43% at rest).
 6. *In the game, a standing camera (no precedent).* Run STAND, with the wind on and with it off:
    shots 3 s apart, emulated pairs and native pairs; `D` = the share of pixels that differ by
    more than 8 levels, inside the mask of the wind draws' rasterised cover and outside it.
@@ -568,22 +580,39 @@ threshold set here without a measured one before it (ruling 20).
    question 5). Then native-on `D` inside the mask is 0.6 to 1.4 of the emulated one; native-off
    `D` inside is at most half of the emulated one (so the measure can tell the two apart);
    outside the mask native-on and native-off agree within 1 point. (`foliage_replay.py motion`.)
+   **Verdict (plan Task 11): not decidable as written** (the precondition: the emulated `D`
+   outside the mask is 8.2 to 9.8% at a camera that provably stands); **met by the substituted
+   measure of ledger rulings 27 and 29** (the control is the still post, 1.07 to 1.67%; 3 s pairs at
+   the bridge, each run's own depth-tested mask): native with the wind 0.97 to 1.10 and, in the
+   repeat, 0.99 to 1.09 of the run's emulated mean; without it 0.22 to 0.31; the rise 34.9 to 38.7
+   points. Outside the mask on is 0.2 to 1.9 points above off (the 1 point as first written is not
+   met on the later pairs). Shots 1296 wide, read-back runs at 2 to 5 frames a second, `RUN
+   UNCHECKED`: FM section 18, "Validation (11a)".
 7. *No depth-test loss.* In a stored native scene with the wind on and the shadows on: the pixels
    whose depth is nearer than the clear depth and whose colour is the clear colour are at most
    0.01% of the picture, and not more than in the dump of the same run pattern with the wind off
    plus 0.01%. (`foliage_trace.py holes`.)
+   **Verdict (plan Task 11): met as written (0 holes in six scene files), and the measure cannot
+   fail for its reason** (in a post frame no pixel keeps the clear colour; the colour pass clears
+   the depth again): the all-or-none rule is held by tests instead.
 8. *Off is today's picture.* With `--fable2_native_wind=off`: every compiled clay program equals
    the program of the commit before the phase, instruction for instruction (shader test); no wind
    program, buffer or slot is made (`DecideClayWind` returns none for every input: test); the
    capture reads none of the wind registers (the frame row's `"wind"` is `off`, tries 0); bridge
    regions of an off-run against a run of the branch's first commit within the spread of the same
    two runs' emulated shots.
+   **Verdict (plan Task 11): the first three parts met** (shader test case 52; `DecideClayWind`
+   off; run 2's frame rows `"wind":"off"`, no member, no wind line); **the fourth not judged** (no
+   pair of runs of the two commits at one width).
 9. *Cost and errors.* On a quiet machine at shot width 1942, wind on: every steady 150-frame
    native window at 30.0 fps or more at the bridge, none below 29.2 at the third spot; the
    capture median stated beside the off-run's (a difference under a third of a millisecond is
    "not decidable": sub-project 10's ruling 42). No `d3d ERROR` in a 240 s software-adapter run
    under the debug layer for each build that changes bindings, targets or shader text; warnings
    listed by id.
+   **Verdict (plan Task 11): cost not judged** (no run of the phase is timing evidence: 1296 wide
+   or with read-back, a user present; to be repeated at width 1942, wind on and off); **errors
+   met** (log 604: 0 `d3d ERROR` lines in 240 s on the software adapter, warning id 1328 only).
 
 **11b, coverage**
 

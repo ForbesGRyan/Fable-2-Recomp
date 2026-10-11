@@ -1063,6 +1063,8 @@ This section is plan Task 11's; what the later tasks found is in `docs/native-re
 
 ## Wind
 
+(Since plan Task 11: the native pass computes these formulas in one vertex program, validated in the game; frame-map section 18, "Native wind" and "Validation (11a)". The program's HLSL text is held to this section's reference by value in `tests/test_wind_hlsl.py`.)
+
 Native renderer sub-project 11 (foliage), phase 11a, plan Tasks 5 to 7, 2026-10-10. The wind of the game's vertex shaders as closed formulas of the position, each checked against its microcode: what the native pass will compute where it draws a "deformed" record at rest today (frame-map section 12, "Wind and displacement"; section 18). Nothing here was run in the game. Every statement rests on the shader dumps and on the capture rows of `native_discovery_20261010_182130.jsonl` (towards the sun), `_182313` (the bridge) and `_121036` (the third spot).
 
 ### Result

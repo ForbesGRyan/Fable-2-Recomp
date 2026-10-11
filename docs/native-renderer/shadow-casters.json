@@ -9,7 +9,7 @@
     "vs": "0xFBD39C64463E180B",
     "ps": null,
     "kind": "opaque",
-    "limitation": "the vertex shader's sway is not drawn (the table entry is \"deformed\"): the trunk's shadow stands still",
+    "limitation": "with --fable2_native_wind=off (the default) the vertex shader's sway is not drawn (the table entry is \"deformed\") and the trunk's shadow stands still; with it on the caster is drawn moved by the wind vertex program that moves the scene's record (frame map section 18), which no measurement in the game has shown yet (\"Validation (11a)\", the casters)",
     "evidence": "400, 376 and 400 rows of the decoded rows with surface word 0x10000410 (the two shadow passes; all outside the main scene) of native_discovery_20261008_105316.jsonl (bridge), _105659.jsonl (third spot) and _105833.jsonl (bridge), 8 frames each: out/native-evidence/shadows/task2_caster_rows.txt; no pixel shader in any of them. Tree trunks, from vertex buffers no main-scene draw uses. State: depth word 0x2200 = 0x00708766 (test greater-equal, write) in every row; no alpha test (0x2202 = 0xAA000004: the test bit 3 and the alpha-to-mask bit 4 are clear), 0x2205 = 0x00219806. Vertex shader's table entry: vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt)"
   },
   {
@@ -32,7 +32,7 @@
       "texture_slot": 0,
       "scale_register": "c15.w"
     },
-    "limitation": "the vertex shader's sway is not drawn (\"deformed\"): the canopy's shadow stands still. The alpha-to-mask of these draws (0x2202 bit 4, offsets 0xAA) is applied as on one sample a pixel, which is what a map has: after the alpha test (above the reference 0) a texel is kept iff its alpha is at least 1 - offset / 4, 0.5 at every pixel for 0xAA (clay_logic.h, ShadowAlphaToMaskThreshold; since plan Task 4)",
+    "limitation": "with --fable2_native_wind=off (the default) the vertex shader's sway is not drawn (\"deformed\") and the canopy's shadow stands still; with it on the caster is drawn moved as the scene's leaves are (frame map section 18; not shown by a measurement in the game). The alpha-to-mask of these draws (0x2202 bit 4, offsets 0xAA) is applied as on one sample a pixel, which is what a map has: after the alpha test (above the reference 0) a texel is kept iff its alpha is at least 1 - offset / 4, 0.5 at every pixel for 0xAA (clay_logic.h, ShadowAlphaToMaskThreshold; since plan Task 4)",
     "evidence": "368, 336 and 368 rows of the decoded rows with surface word 0x10000410 (the two shadow passes; all outside the main scene) of native_discovery_20261008_105316.jsonl (bridge), _105659.jsonl (third spot) and _105833.jsonl (bridge), 8 frames each: out/native-evidence/shadows/task2_caster_rows.txt, every one with this pixel shader. Tree leaf cards, from vertex buffers no main-scene draw uses. Alpha (dump shader_F1EB2497108F159D.ucode.frag): oC0.w = r0.w * c15.w (instr 4) with r0 = tf0 (instr 3 tfetch2D r0, r0.xy, tf0); the texture is read at interpolator 0 (xy) times c8.xy plus c8.zw (instr 2, 3); no kill. shader_trace.py --alpha: fetch slot 0, component w, scale [c15.w]. c15 is (0, 0, 0, 1) in all 1072 rows, so the alpha is the texture's there. State: depth word 0x2200 = 0x00708766 (test greater-equal, write) in every row; alpha test greater with reference 0 and alpha-to-mask (0x2202 = 0xAA00001C, 0x210E = 0), no cull (0x2205 = 0x00219800). Vertex shader's table entry and its uv: vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt)"
   },
   {

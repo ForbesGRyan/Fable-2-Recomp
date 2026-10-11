@@ -1557,6 +1557,194 @@ static void CloudTests() {
   }
 }
 // --- end of the clouds' cases ---
+// 680-686: the wind words in the geometry cache (foliage plan Task 9): the box grown by a record's reach, the
+// words' cache keys, the Geometry line.
+static void WindWordTests() {
+  using capture::WindFamily;
+  using capture::WindInputs;
+  // 680: GrowBounds. The box wider by exactly the reach in x, y, z; w as it was; an invalid box stays invalid;
+  // a reach that is no number, not finite or below zero gives an invalid box (whoever asks then keeps the record).
+  {
+    PositionBounds box;
+    const float lo[4] = {1.0f, 2.0f, 3.0f, 1.0f}, hi[4] = {4.0f, 5.0f, 6.0f, 1.0f};
+    std::memcpy(box.lo, lo, sizeof(lo));
+    std::memcpy(box.hi, hi, sizeof(hi));
+    box.valid = true;
+    const PositionBounds g = GrowBounds(box, 0.5f);
+    CHECK(680, g.valid && g.lo[0] == 0.5f && g.lo[1] == 1.5f && g.lo[2] == 2.5f && g.lo[3] == 1.0f && g.hi[0] == 4.5f &&
+                   g.hi[1] == 5.5f && g.hi[2] == 6.5f && g.hi[3] == 1.0f);
+    const PositionBounds same = GrowBounds(box, 0.0f);
+    CHECK(680, same.valid && std::memcmp(same.lo, box.lo, sizeof(box.lo)) == 0 && std::memcmp(same.hi, box.hi, sizeof(box.hi)) == 0);
+    CHECK(680, !GrowBounds(PositionBounds{}, 0.5f).valid);
+    for (float bad : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
+                      -std::numeric_limits<float>::infinity(), -0.25f}) {
+      CHECK(680, !GrowBounds(box, bad).valid);
+    }
+    // (a grown box is never the narrower one: a record at the reach's edge is kept by the pre-pass's rule)
+    const float eye[3] = {0.0f, 0.0f, 0.0f}, split[4] = {20.0f, 35.0f, 2.0f, 0.5f};
+    float vp[4][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {1, 0, 0, 0}};   // w = x: the distance along x
+    PositionBounds far;
+    const float flo[4] = {81.0f, -1.0f, -1.0f, 1.0f}, fhi[4] = {90.0f, 1.0f, 1.0f, 1.0f};
+    std::memcpy(far.lo, flo, sizeof(flo));
+    std::memcpy(far.hi, fhi, sizeof(fhi));
+    far.valid = true;
+    const uint8_t less = uint8_t(capture::Compare::kLess);
+    const bool beyond = PrepassBeyondReach(vp, far, vp, eye, split, less);
+    const bool grown = PrepassBeyondReach(vp, GrowBounds(far, 40.0f), vp, eye, split, less);
+    CHECK(680, beyond && !grown);
+  }
+  // 681-685: WindKey.
+  {
+    capture::DrawRecord r = BaseRecord();
+    r.pos.format = capture::PosFormat::kHalf4;
+    r.pos.stride_bytes = 36;
+    r.pos.swap16 = true;
+    r.vb = {0x200000, 3600};
+    auto element = [&](uint16_t offset, uint8_t format, uint8_t source, uint8_t count) {
+      capture::LightElement e;
+      e.vb = {r.vb.phys_addr, r.vb.size};
+      e.offset_bytes = offset;
+      e.stride_bytes = 36;
+      e.format = format;
+      e.source = source;
+      e.source_count = count;
+      e.flags = 10;
+      return e;
+    };
+    WindInputs trunk;
+    trunk.family = WindFamily::kTrunk;
+    trunk.spec = 3;
+    trunk.element[capture::kWindWeights] = element(28, 6, 0xE4, 4);
+    WindInputs leaf = trunk;
+    leaf.family = WindFamily::kLeaf;
+    leaf.element[capture::kWindPivot] = element(20, 32, 0x31, 3);
+    leaf.element[capture::kWindFlutter] = element(32, 6, 0x24, 3);
+    const GeoKey tk = WindKey(r, trunk), lk = WindKey(r, leaf);
+    CHECK(681, tk.kind == 15 && lk.kind == 15 && tk.addr == r.vb.phys_addr && tk.size == r.vb.size && tk.stride == 36 && !(tk == lk));
+    CHECK(681, !(tk == PositionKey(r, nullptr)) && !(tk == MeshPositionKey(r)));
+    // Nothing of the draw's registers, of the row, or of the record's transform and material: the words are the mesh's.
+    {
+      WindInputs b = leaf;
+      b.reg[0][0] = 99.0f;
+      b.reg[2][3] = 198.0f;
+      b.spec = 9;
+      capture::DrawRecord q = r;
+      q.rows[3] = 7.0f;
+      q.vs_hash = 0x1234;
+      q.material.ps_hash = 0x99;
+      q.wind_index = 4;
+      CHECK(682, WindKey(q, b) == lk);
+    }
+    // Every field that changes what a reader takes from an element changes the key, for each element the family reads.
+    for (uint32_t e = 0; e < capture::kWindElements; ++e) {
+      for (int field = 0; field < 7; ++field) {
+        WindInputs b = leaf;
+        capture::LightElement& el = b.element[e];
+        switch (field) {
+          case 0: el.vb.phys_addr += 0x100; break;
+          case 1: el.vb.size += 36; break;
+          case 2: el.stride_bytes += 4; break;
+          case 3: el.offset_bytes += 4; break;
+          case 4: el.format = uint8_t(el.format == 6 ? 32 : 6); break;
+          case 5: el.source ^= 0x5; break;
+          default: el.source_count = uint8_t(el.source_count == 3 ? 4 : 3); break;
+        }
+        CHECK(683, !(WindKey(r, b) == lk));
+      }
+    }
+    // A leaf's extent is measured against its positions: their stream and layout are in a leaf's key.
+    for (int field = 0; field < 6; ++field) {
+      capture::DrawRecord q = r;
+      switch (field) {
+        case 0: q.vb.phys_addr += 0x100; break;
+        case 1: q.vb.size += 36; break;
+        case 2: q.pos.offset_bytes += 4; break;
+        case 3: q.pos.swizzle ^= 0x9; break;
+        case 4: q.pos.swap16 = !q.pos.swap16; break;
+        default: q.pos.format = capture::PosFormat::kFloat3; break;
+      }
+      CHECK(684, !(WindKey(q, leaf) == lk));
+    }
+    {
+      // (a trunk reads its weights alone: neither a pivot it does not have nor the positions)
+      WindInputs b = trunk;
+      b.element[capture::kWindPivot] = element(20, 32, 0x31, 3);
+      capture::DrawRecord q = r;
+      q.pos.swizzle ^= 0x9;
+      CHECK(684, WindKey(q, b) == tk);
+      b = trunk;
+      b.element[capture::kWindWeights].offset_bytes = 24;
+      CHECK(684, !(WindKey(r, b) == tk));
+    }
+    // A plant: the mesh's position stream with its layout and the instance set as the flat normals have it
+    // (kind 16); not the set's offset, which moves positions only, and nothing of the registers.
+    capture::DrawRecord i = BaseRecord();
+    i.instances.active = true;
+    i.instances.rows_addr = 0x5000;
+    i.instances.rows_size = 280;
+    i.instances.inv_count = 0.25f;
+    i.instances.count = 4.0f;
+    i.instances.bias = 0.5f;
+    i.instances.flat_count = 40;
+    WindInputs plant;
+    plant.family = WindFamily::kPlant;
+    const GeoKey pk = WindKey(i, plant);
+    CHECK(685, pk.kind == 16 && pk.addr == i.vb.phys_addr && pk.size == i.vb.size && pk.stride == i.pos.stride_bytes &&
+                   !(pk == InstanceBendKey(i)) && !(pk == PositionKey(i, nullptr)) && !(pk == MeshPositionKey(i)));
+    {
+      capture::DrawRecord i2 = i;
+      i2.instances.offset[0] = 3.0f;
+      WindInputs p2 = plant;
+      p2.reg[0][0] = 60.0f;
+      CHECK(685, WindKey(i2, p2) == pk);
+    }
+    for (int field = 0; field < 11; ++field) {
+      capture::DrawRecord i2 = i;
+      switch (field) {
+        case 0: i2.instances.rows_addr = 0x6000; break;
+        case 1: i2.instances.rows_size = 308; break;
+        case 2: i2.instances.rows[1].offset_bytes = 8; break;
+        case 3: i2.instances.inv_count = 0.2f; break;
+        case 4: i2.instances.count = 5.0f; break;
+        case 5: i2.instances.first = 2.0f; break;
+        case 6: i2.instances.bias = 0.25f; break;
+        case 7: i2.instances.flat_count = 44; break;
+        case 8: i2.vb.phys_addr += 0x100; break;
+        case 9: i2.pos.offset_bytes += 4; break;
+        default: i2.pos.swizzle ^= 0x9; break;
+      }
+      CHECK(685, !(WindKey(i2, plant) == pk));
+    }
+    // No family: no key that could meet another's.
+    WindInputs none;
+    CHECK(685, WindKey(r, none).kind == 15 && !(WindKey(r, none) == tk) && !(WindKey(r, none) == lk));
+  }
+  // 686: the Geometry line. Without wind words it is the line of before, to the character; with them it names
+  // the records served, the buffers' bytes and what was refused.
+  {
+    FrameScene s;
+    ClayStats st;
+    st.uploads = 12;
+    st.hits = 1818;
+    st.resident_bytes = 47710208;
+    const std::string before = FormatStatusText(s, st, nullptr);
+    CHECK(686, before.find("Geometry: 12 uploads, 1818 hits, 45.5 MB resident, instanced 0, skinned 0 | hash 0.00 ms, "
+                           "decode 0.00 ms, record 0.00 ms\n") != std::string::npos &&
+                   before.find("wind") == std::string::npos);
+    st.wind_words = 228;
+    st.wind_words_bytes = 3355443;
+    const std::string with = FormatStatusText(s, st, nullptr);
+    CHECK(686, with.find("record 0.00 ms | wind words: 228 records, 3.2 MB\n") != std::string::npos);
+    st.wind_build[size_t(WindBuild::kStream)] = 2;
+    st.wind_build[size_t(WindBuild::kValue)] = 1;
+    const std::string refused = FormatStatusText(s, st, nullptr);
+    CHECK(686, refused.find("record 0.00 ms | wind words: 228 records, 3.2 MB, refused {stream: 2, value: 1}\n") != std::string::npos);
+    ClayStats only;
+    only.wind_build[size_t(WindBuild::kElement)] = 4;
+    CHECK(686, FormatStatusText(s, only, nullptr).find(" | wind words: 0 records, 0.0 MB, refused {element: 4}\n") != std::string::npos);
+  }
+}
+
 int main() {
   // 1-4: clay color cvar parsing.
   {
@@ -10194,6 +10382,7 @@ int main() {
   std::thread(SunLayerTests).join();
   std::thread(PreviousBlendTests).join();
   std::thread(CloudTests).join();
+  std::thread(WindWordTests).join();
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
@@ -10222,7 +10411,8 @@ int main() {
                "number, the layer's depth texel and the steps' words, the layer's plan, the decision and the Sun line, "
                "the sun's flag in the steps' constants; the previous-frame blend against the reference's numbers, the share 0 "
                "bit for bit, the front targets' exchange; the scene's clouds: a record's state and constants and what gives none, "
-               "the mirror against the reference's numbers, nothing that is no number, the plan, the verdict and the Clouds line\n";
+               "the mirror against the reference's numbers, nothing that is no number, the plan, the verdict and the Clouds line; "
+               "wind words: the box grown by the reach, the words' keys, the Geometry line\n";
 
   return 0;
 }

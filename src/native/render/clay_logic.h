@@ -27,6 +27,7 @@
 #include "frame_scene.h"
 #include "geometry_cache_index.h"
 #include "normal_decode.h"
+#include "wind_decode.h"
 
 namespace fable2::native::render {
 
@@ -502,6 +503,12 @@ struct ClayStats {
   // buffers (16 a flat position; a buffer two records share is counted twice).
   uint32_t light_bend = 0;
   uint64_t light_bend_bytes = 0;
+  // The wind words of the frame's wind records (GeometryCache::WindWords counts them itself): the
+  // calls that were given a buffer and the bytes of those buffers (a buffer two records share is
+  // counted twice), and the calls that were given none, by reason (index: WindBuild).
+  uint32_t wind_words = 0;
+  uint64_t wind_words_bytes = 0;
+  uint32_t wind_build[size_t(WindBuild::kCount)] = {};
   uint32_t light_rotation[size_t(RotationKind::kCount)] = {};
   capture::ShaderTally<32> light_rotation_by_vs;
   // The light as drawn ("Native light" below; the Light line). light_switch:
@@ -1054,6 +1061,40 @@ inline GeoKey InstanceBendKey(const capture::DrawRecord& r) {
   GeoKey k = MeshPositionKey(r);
   k.extra = HashCombine32({k.extra, InstanceNormalHash(r.instances)});
   k.kind = 14;
+  return k;
+}
+
+// Cache key of a record's wind words (wind_decode.h; frame-map section 18, "Wind words").
+// A tree's (kind 15: BuildTreeWindWords): the weights' stream, the family, and of each element the
+// family reads its stream, where it lies and the source components the reader takes; a leaf's adds
+// the position stream and every layout field that changes its decode, because the entry also holds
+// the mesh's extent (the largest distance of a vertex from its pivot). A plant's (kind 16:
+// ExpandPlantWindWords): the mesh's position stream with its layout (MeshPositionKey: z is the
+// decoded position's third component) and the instance set as the flat normals have it
+// (InstanceNormalHash: the seed is of the rows; the offset moves positions only). Nothing of the
+// draw's registers, of its table row or of its transform: the words are the mesh's, and the wind
+// rebuilds nothing. The content hash is the streams'.
+inline GeoKey WindKey(const capture::DrawRecord& r, const capture::WindInputs& w) {
+  if (w.family == capture::WindFamily::kPlant) {
+    GeoKey k = MeshPositionKey(r);
+    k.extra = HashCombine32({k.extra, InstanceNormalHash(r.instances)});
+    k.kind = 16;
+    return k;
+  }
+  const capture::LightElement& weights = w.element[capture::kWindWeights];
+  GeoKey k;
+  k.addr = weights.vb.phys_addr;
+  k.size = weights.vb.size;
+  k.stride = weights.stride_bytes;
+  uint32_t h = uint32_t(w.family);
+  for (uint32_t e = 0; e < capture::kWindElements; ++e) {
+    if (!wind_detail::Reads(w.family, e)) continue;
+    const capture::LightElement& el = w.element[e];
+    h = HashCombine32({h, e, el.vb.phys_addr, el.vb.size, el.stride_bytes, el.offset_bytes, el.format, el.source, el.source_count});
+  }
+  if (w.family == capture::WindFamily::kLeaf) h = HashCombine32({h, r.vb.phys_addr, r.vb.size, r.pos.stride_bytes, LayoutHash(r.pos)});
+  k.extra = h;
+  k.kind = 15;
   return k;
 }
 
@@ -6250,6 +6291,21 @@ inline PositionBounds MakePositionBounds(const capture::Float4* p, size_t count)
   return b;
 }
 
+// A box grown by `reach` in x, y and z (w as it was): the box of a wind record's positions wherever
+// a box decides something, the reach an upper bound of how far the wind moves a vertex (foliage spec
+// Design 8). An invalid box stays invalid, and a reach that is no number, not finite or below zero
+// gives an invalid one: whoever asks then decides as for a record without a box (it is kept).
+inline PositionBounds GrowBounds(const PositionBounds& box, float reach) {
+  PositionBounds out;
+  if (!box.valid || !std::isfinite(reach) || reach < 0.0f) return out;
+  out = box;
+  for (int k = 0; k < 3; ++k) {
+    out.lo[k] = box.lo[k] - reach;
+    out.hi[k] = box.hi[k] + reach;
+  }
+  return out;
+}
+
 // Whether a record with matrix `m` (RecordMatrix) and position box `box`, whose pre-pass depth
 // function is `depth_func` (a capture::Compare on the pass's depth), lies wholly beyond the mask's
 // reach in the frame of view-projection `view_proj`, eye and split (above).
@@ -6655,9 +6711,30 @@ inline std::string FormatStatusText(const FrameScene& scene, const ClayStats& st
                 "hash %.2f ms, decode %.2f ms, record %.2f ms",
                 st.uploads, st.hits, double(st.resident_bytes) / (1024.0 * 1024.0), st.instanced,
                 st.skinned, st.hash_ms, st.decode_ms, st.record_ms);
+  // The wind words (foliage plan Task 9): only in a frame that asked for some, so that a frame
+  // without the wind has the line of before.
+  std::string wind_words;
+  {
+    uint32_t refused = 0;
+    for (size_t i = 1; i < size_t(WindBuild::kCount); ++i) refused += st.wind_build[i];
+    if (st.wind_words || refused) {
+      char buf[64];
+      std::snprintf(buf, sizeof(buf), " | wind words: %u records, %.1f MB", st.wind_words,
+                    double(st.wind_words_bytes) / (1024.0 * 1024.0));
+      wind_words = buf;
+      bool first = true;
+      for (size_t i = 1; i < size_t(WindBuild::kCount); ++i) {
+        if (!st.wind_build[i]) continue;
+        std::snprintf(buf, sizeof(buf), "%s%s: %u", first ? ", refused {" : ", ", WindBuildName(WindBuild(i)), st.wind_build[i]);
+        wind_words += buf;
+        first = false;
+      }
+      if (!first) wind_words += "}";
+    }
+  }
   char cap[64];
   std::snprintf(cap, sizeof(cap), "\nCapture: %.2f ms guest time per frame\n", scene.capture_ms);
-  return text + geo + "\n" + FormatStateText(st) + cap +
+  return text + geo + wind_words + "\n" + FormatStateText(st) + cap +
          (tex ? FormatTextureText(*tex, st.drawn, st.alpha_unknown, st.blend_unknown) : std::string("Textures: off"));
 }
 

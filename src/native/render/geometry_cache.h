@@ -150,6 +150,26 @@ class GeometryCache {
   nrhi::Buffer* InstanceBend(nrhi::Device* dev, const capture::DrawRecord& r, uint32_t need, ClayStats& st,
                              LightSecond* why, uint32_t* count, uint64_t* bytes);
 
+  // 32-bit float wind words of a record with wind inputs (`wind`: WindOf / ShadowWindOf), as
+  // wind_decode.h lays them out: a trunk vertex 4, a leaf vertex 10, an instanced plant's flat
+  // position 2 (WindWordsPerVertex). A tree's buffer holds every vertex its elements' streams
+  // (and, for a leaf, its position stream) hold whole: the mesh's, whichever part a draw names;
+  // a plant's one pair per flat position. Mesh-intrinsic: no register is in it (keys WindKey;
+  // content hash of the streams read). All or nothing: nullptr, with the cause in `why`, when the
+  // record is not the family's kind (a plant without its instance set, a tree with one, a skinned
+  // record) or an element is not one a reader decodes as the family's (element); a stream is
+  // unreadable, the buffer would hold fewer than `need` vertices or more words than 32 bits count,
+  // or a copy the draw names lies past the instance stream (stream); a pivot, a position, a seed
+  // or a height is not a number (value); or the upload fails (upload). `need`: the vertices the
+  // draw's indices name (LightVertexNeed; an instanced draw: its flat positions). `count` receives
+  // the vertices the buffer holds: a reader takes words only for a vertex below it. `extent`
+  // (optional) receives a tree mesh's extent, the reach's inputs that no register holds (ledger
+  // ruling 32; zero for a plant). Counts itself in `st` (wind_words, wind_words_bytes, wind_build).
+  // Reads are bounded by the streams' sizes. Nothing calls this yet: the pass binds the buffer in
+  // plan Task 10.
+  nrhi::Buffer* WindWords(nrhi::Device* dev, const capture::DrawRecord& r, const capture::WindInputs& wind, uint32_t need,
+                          ClayStats& st, WindBuild* why, uint32_t* count, WindExtent* extent = nullptr);
+
   void BeginFrame(uint64_t frame, uint64_t budget_bytes);
   // DestroyDeferred all (dev may be nullptr: forget the buffers without
   // destroying them, e.g. after a device change).
@@ -165,6 +185,7 @@ class GeometryCache {
     uint64_t bytes = 0;      // allocation size
     uint32_t min_index = 0;  // indices only: the smallest index of the list
     PositionBounds bounds;   // positions only: the box of the buffer's vertices
+    WindExtent wind_extent;  // a tree's wind words only: the mesh's extent
   };
   // Replaced buffers, reused by Upload (animated skinned streams re-decode
   // every frame; creating a buffer costs far more than filling one).
@@ -227,6 +248,7 @@ class GeometryCache {
   std::vector<uint32_t> colours_;     // a record's colours (a colour stream's, an instance set's) being built
   std::vector<uint8_t> probe_;        // a mesh's probe buffer being built (BuildProbe)
   std::vector<capture::Float4> bend_; // an instanced record's bend inputs being built (ExpandInstanceBend)
+  std::vector<float> wind_words_;     // a mesh's wind words being built (wind_decode.h)
   std::vector<uint32_t> indices_;
   std::vector<uint32_t> evicted_;
 };

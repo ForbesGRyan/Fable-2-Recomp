@@ -958,6 +958,54 @@ class WindTest(Base):
         self.assertTrue(pc.format_wind("0xAB", bad).endswith(": NOT MET"))
         self.assertEqual(pc.format_wind("0xAB", dict(met, rows=0)), "VS 0xAB wind: no row with streams")
 
+    def judged(self, **changes):
+        r = {"rows": 2, "vertices": 100, "outside": 3, "outside_worst": 1e-7, "cut": 1, "problems": {}, "p50": 1e-4, "p99": 2e-3,
+             "max": 0.01}
+        r.update(changes)
+        return r
+
+    def test_a_shader_with_no_vertex_in_view_is_not_judged(self):
+        """Review of Tasks 5 to 7, M2: criterion 4 is a bound in pixels; a shader whose every compared vertex is
+        off the picture has no pixel and is neither met nor failed (FC4F and 48D3 in capture 182130)."""
+        none = self.judged(vertices=0, outside=1536, outside_worst=7.14e-6, p50=0.0, p99=0.0, max=0.0)
+        self.assertEqual(pc.wind_verdict(none), "not judged")
+        line = pc.format_wind("0xAB", none)
+        self.assertTrue(line.endswith(": not judged (no vertex in view)"), line)
+        self.assertNotIn(": met", line)
+        self.assertNotIn("NOT MET", line)
+        # ... but what it does hold can still fail: the clip-space bound, a problem
+        self.assertEqual(pc.wind_verdict(dict(none, outside_worst=2e-4)), "NOT MET")
+        self.assertEqual(pc.wind_verdict(dict(none, problems={"sides differ": 1})), "NOT MET")
+        # every vertex beyond the cut: nothing to judge either
+        self.assertEqual(pc.wind_verdict(self.judged(vertices=0, outside=0, outside_worst=0.0, cut=64, p99=0.0, max=0.0)), "not judged")
+        # one vertex in view is judged
+        self.assertEqual(pc.wind_verdict(self.judged(vertices=1)), "met")
+
+    def test_the_verdicts_bounds(self):
+        self.assertEqual(pc.wind_verdict(self.judged()), "met")
+        self.assertEqual(pc.wind_verdict(self.judged(p99=0.05)), "NOT MET")                # below, not at
+        self.assertEqual(pc.wind_verdict(self.judged(p99=0.049, max=0.5)), "met")          # none ABOVE 0.5
+        self.assertEqual(pc.wind_verdict(self.judged(max=0.51)), "NOT MET")
+        self.assertEqual(pc.wind_verdict(self.judged(outside_worst=1.1e-4)), "NOT MET")
+        self.assertEqual(pc.wind_verdict(self.judged(problems={"x": 1})), "NOT MET")
+
+    def test_the_summary_counts_only_judged_shaders(self):
+        none = self.judged(vertices=0, outside=64, p50=0.0, p99=0.0, max=0.0)
+        report = {"0x01": self.judged(), "0x02": self.judged(), "0x03": none, "0x04": self.judged(rows=0, vertices=0)}
+        line, code = pc.wind_summary(report)
+        self.assertEqual(line, "wind: 2 of 2 shaders with a vertex in view met; 1 with rows but no vertex in view: not judged; "
+                               "1 without a row")
+        self.assertEqual(code, 0)
+        # a failure anywhere is the exit code, a not-judged shader's clip-space bound included
+        self.assertEqual(pc.wind_summary(dict(report, **{"0x02": self.judged(max=0.6)}))[1], 1)
+        self.assertIn("1 of 2 shaders", pc.wind_summary(dict(report, **{"0x02": self.judged(max=0.6)}))[0])
+        failed = pc.wind_summary(dict(report, **{"0x03": dict(none, outside_worst=1e-3)}))
+        self.assertEqual(failed[1], 1)
+        self.assertIn("NOT MET on the clip-space bound or a problem: 1", failed[0])
+        # nothing judged at all is not a result
+        self.assertEqual(pc.wind_summary({"0x03": none})[1], 1)
+        self.assertEqual(pc.wind_summary({})[1], 1)
+
 
 LOGS = Path(__file__).resolve().parent.parent / "out" / "build" / "win-amd64-release" / "logs"
 BRIDGE = LOGS / "native_discovery_20261010_182313.jsonl"
@@ -973,7 +1021,15 @@ class WindOnACaptureTest(unittest.TestCase):
         with_rows = {k: r for k, r in report.items() if r["rows"]}
         self.assertGreaterEqual(len(with_rows), 9)
         for key, r in with_rows.items():
-            self.assertTrue(r["met"], pc.format_wind(key, r))
+            self.assertNotEqual(r["verdict"], "NOT MET", pc.format_wind(key, r))
+            self.assertEqual(r["met"], r["vertices"] > 0, pc.format_wind(key, r))
+        # In so few rows three shaders have no vertex in view (their 24 are all off the picture): they are not
+        # judged and do not count; before the review's M2 this test took them for met.
+        self.assertEqual({k for k, r in with_rows.items() if r["verdict"] == "not judged"},
+                         {"0x48D30ECCF684F488", "0x8123C16DBF583F92", "0xFBD39C64463E180B"})
+        self.assertEqual(sum(r["met"] for r in with_rows.values()), len(with_rows) - 3)
+        self.assertGreaterEqual(sum(r["met"] for r in with_rows.values()), 7)
+        self.assertEqual(pc.wind_summary(report)[1], 0)
         # the entry at rest (the member's formula taken away) does not meet it: the measure can fail
         still = {k: e for k, e in entries.items()}
         with mock.patch.object(pc, "wind_positions", lambda row, entry, get, positions, info: positions):

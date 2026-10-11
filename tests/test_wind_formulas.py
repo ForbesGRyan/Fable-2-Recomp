@@ -637,7 +637,7 @@ class Pins(unittest.TestCase):
     def test_the_sections(self):
         s = self.sections()
         self.assertEqual(list(s), ["wind plant pins", "wind trunk pins", "wind leaf pins", "wind reach pins"])
-        self.assertEqual([len(s[k]) for k in s], [len(wind_pins.PLANT) + 4, len(wind_pins.TRUNK) + 2, len(wind_pins.LEAF) + 4, 15])
+        self.assertEqual([len(s[k]) for k in s], [len(wind_pins.PLANT) + 4, len(wind_pins.TRUNK) + 2, len(wind_pins.LEAF) + 5, 15])
         for name, rows, where in (("plant", wind_pins.PLANT, wind_pins.PLANT_ROWS), ("trunk", wind_pins.TRUNK, wind_pins.TRUNK_ROWS),
                                   ("leaf", wind_pins.LEAF, wind_pins.LEAF_ROWS)):
             self.assertEqual(len(rows), len(where), name)
@@ -738,6 +738,138 @@ class Pins(unittest.TestCase):
                     self.assertEqual(wind_pins._floats(row[-3]), tuple(case.consts[15]))
                 seen += 1
         self.assertGreaterEqual(seen, 9)
+
+
+SUNWARD = LOGS / "native_discovery_20261010_182130.jsonl"
+
+
+class LeafAtItsPivot(unittest.TestCase):
+    """Review of Tasks 5 to 7, I1, and ledger ruling 36: where a leaf's moved offset D' has no length the
+    position is the moved pivot Q'. The made pin holds it; the captures show such vertices are drawn."""
+
+    def rows(self):
+        """The made leaf rows at their pivot whose lift is exactly 0 (c15.w = 0 and c16.w = 0)."""
+        return [r for r in wind_pins.LEAF_MADE if r[1] == r[2] and r[5][3] == 0 and r[6][3] == 0]
+
+    def test_there_is_a_made_pin_at_the_pivot_with_no_lift(self):
+        rows = self.rows()
+        self.assertEqual(len(rows), 1)
+        (hash_, p, q, w4, v3, regs), pos = wind_pins.leaf_pin(rows[0])
+        lit = lf.WIND_SHADERS[hash_]["lit"]
+        self.assertEqual(p, q)
+        # the lift is exactly zero, so D' = (0, 0, 0 + 0): an unguarded L * D' / |D'| is 0 * (0 / 0)
+        lift = lf.wind_leaf_lift(p, q, w4, v3, *regs, lit)
+        self.assertEqual(lift, 0.0)
+        self.assertEqual([p[k] - q[k] for k in range(3)], [0.0, 0.0, 0.0])
+        # the pin expects the MOVED pivot, which is neither the vertex at rest nor the pivot at rest
+        off = lf.wind_tree_offset(w4, *regs, lit)
+        self.assertEqual(pos, tuple(q[k] + off[k] for k in range(3)))
+        self.assertGreater(max(abs(o) for o in off), 0.05)
+        self.assertTrue(all(math.isfinite(x) for x in pos))
+        # every other register and element is the first real row's, so the row differs from it in nothing
+        # but the place of the vertex and the two strengths
+        real = wind_pins.LEAF[0]
+        self.assertEqual((rows[0][0], rows[0][2], rows[0][3], rows[0][4], rows[0][7]), (real[0], real[2], real[3], real[4], real[7]))
+        self.assertEqual((rows[0][5][:3], rows[0][6][:3]), (real[5][:3], real[6][:3]))
+
+    def test_the_pins_line_holds_it(self):
+        (hash_, _p, q, w4, _v3, regs), _pos = wind_pins.leaf_pin(self.rows()[0])
+        off = lf.wind_tree_offset(w4, *regs, lf.WIND_SHADERS[hash_]["lit"])
+        want = [f32(q[k] + off[k]) for k in range(3)]
+        found = []
+        for line in wind_pins.lines():
+            v = from_line(line)
+            if "// made" in line and len(v) == 28 and v[0:3] == v[3:6] and v[16] == 0.0 and v[20] == 0.0:
+                found.append(v[25:28])
+        self.assertEqual(found, [want])
+
+    def test_the_other_made_pins_at_the_pivot_have_a_lift(self):
+        """Why they did not hold the case (the review's point): with c15.w = 0.32 the lift gives D' a length."""
+        others = [r for r in wind_pins.LEAF_MADE if r[1] == r[2] and r not in self.rows()]
+        self.assertEqual(len(others), 2)
+        for row in others:
+            (hash_, p, q, w4, v3, regs), _pos = wind_pins.leaf_pin(row)
+            self.assertNotEqual(lf.wind_leaf_lift(p, q, w4, v3, *regs, lf.WIND_SHADERS[hash_]["lit"]), 0.0)
+
+    def test_in_single_precision_too(self):
+        """Ruling 35's arithmetic (every operation rounded to single) reaches the same pin: the lift is exactly
+        0 there too, and the moved pivot is within the pins' tolerance of 2e-5."""
+        (hash_, p, q, w4, v3, regs), ref = wind_pins.leaf_pin(self.rows()[0])
+        lit = {k: F(v) for k, v in lf.WIND_SHADERS[hash_]["lit"].items()}
+        args = (singles(p), singles(q), singles(w4), singles(v3), singles(regs[0]), singles(regs[1]), singles(regs[2]), lit)
+        self.assertEqual(float(lf.wind_leaf_lift(*args)), 0.0)
+        got = lf.wind_leaf(*args)
+        self.assertLess(max(abs(float(a) - b) for a, b in zip(got, ref)), 2e-5)
+
+
+def leaf_streams(capture):
+    """{stream file: (positions [n, 3], pivots [n, 3], the vertices a leaf draw indexes, the rows naming it)}
+    of a capture's leaf draw rows, every frame, whole streams and whole index files."""
+    import numpy as np
+    import capture_replay as cr
+    import foliage_replay as fr
+    out = {}
+    for r in cr.rows(capture, kinds=("draw",)):
+        h = cr.vs_hash(r)
+        if h not in lf.WIND_SHADERS or lf.WIND_SHADERS[h]["family"] != "leaf" or not r.get("streams") or not r.get("bank"):
+            continue
+        mesh = [s for s in r["streams"] if s["slot"] == 95 and s.get("file")]
+        if not mesh:
+            continue
+        name = mesh[0]["file"]
+        if name not in out:
+            stride = r["fetches"][0]["stride"]
+            halves = np.frombuffer(cr.stream_bytes(Path(capture).parent / name), dtype=">f2")
+            halves = halves[:len(halves) // (2 * stride) * 2 * stride].reshape(-1, 2 * stride).astype(np.float64)
+            out[name] = [halves[:, 0:3], halves[:, 10:13], set(), 0]          # the position: dword 0; the pivot: dword 5
+        idx, state, _note = fr.draw_indices(r, Path(capture).parent)
+        if state != "whole":
+            raise AssertionError("line %d: the draw's indices are not whole" % r["line"])
+        out[name][2] |= {int(i) + int(r.get("base_vertex", 0)) for i in idx if int(i) >= 0}
+        out[name][3] += 1
+    return out
+
+
+@unittest.skipUnless(BRIDGE.is_file() and SUNWARD.is_file(), f"no captures {SUNWARD.name}, {BRIDGE.name} in {LOGS}")
+class LeafMeshesOfTheCaptures(unittest.TestCase):
+    """What the two captures with whole streams and whole index files say about |P - Q| of the leaf meshes: the
+    lengths wind_pins.REACH_LENGTHS are made at (review M9), and the vertices exactly at their pivot (I1)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.streams = {c.stem[-6:]: leaf_streams(c) for c in (SUNWARD, BRIDGE)}
+
+    def lengths(self, streams):
+        import numpy as np
+        return np.sort(np.concatenate([np.sqrt(((p - q) ** 2).sum(axis=1)) for p, q, _ids, _n in streams.values()]))
+
+    def test_the_reach_lengths_are_the_whole_streams(self):
+        zero, median, largest = wind_pins.REACH_LENGTHS
+        self.assertEqual(zero, 0.0)
+        seen = []
+        for name, streams in self.streams.items():
+            d = self.lengths(streams)
+            self.assertGreater(len(d), 50000, name)
+            self.assertAlmostEqual(float(d[len(d) // 2]), median, delta=0.01, msg=name)
+            self.assertGreaterEqual(largest, float(d[-1]), name)          # no captured leaf vertex is farther
+            seen.append(float(d[-1]))
+            # every vertex of every stream is indexed by a leaf draw: the whole stream is what is drawn
+            for file, (p, _q, ids, _n) in streams.items():
+                self.assertEqual(len(ids), len(p), file)
+        self.assertLess(largest, max(seen) * 1.001)                       # ... and it is the largest, not a guess above it
+        self.assertGreater(min(seen), 19.0)                               # frame-map section 12's sampled 12.4 is not
+
+    def test_vertices_at_their_pivot_are_drawn(self):
+        import numpy as np
+        for name, streams in self.streams.items():
+            at = []
+            for file, (p, q, ids, rows) in streams.items():
+                for v in np.nonzero((p == q).all(axis=1))[0]:
+                    at.append((len(p), int(v), int(v) in ids, rows))
+            # three in each capture, in two meshes (14,334 and 600 vertices), every one indexed by every
+            # draw row that names its stream
+            self.assertEqual(sorted((n, v) for n, v, _i, _r in at), [(600, 230), (14334, 91), (14334, 7863)], name)
+            self.assertTrue(all(indexed and rows >= 16 for _n, _v, indexed, rows in at), (name, at))
 
 
 if __name__ == "__main__":

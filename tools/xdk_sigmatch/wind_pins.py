@@ -8,8 +8,9 @@ and _182130, towards the sun), one vertex a row: the vertex the wind moves most 
 tuple names its shader, capture, line, frame and vertex; tests/test_wind_formulas.py reads the bridge's again
 from the capture when it is there. Beside them a few made vertices that the real ones do not reach: a plant
 vertex at and below its root and at the height where the sway is whole, a trunk vertex without weights, a
-leaf vertex at its pivot and one within the slack of it. Every number is a single-precision bit pattern, as
-the renderer holds it.
+leaf vertex at its pivot (with a lift, and with the lift exactly 0: the zero-length case of ledger ruling 36,
+whose position is the moved pivot) and one within the slack of it. Every number is a single-precision bit
+pattern, as the renderer holds it.
 
 What a line pins. The inputs as the native constants and wind words pack them, and the position the reference
 gives AT THOSE packed inputs, computed in double precision and rounded to single:
@@ -178,8 +179,21 @@ LEAF_MADE = (
     (_L0[0], _L0[2], _L0[2], (0, 0, 0, 0), (0, 0, 0)) + _L0[5:],    # at its pivot, no weights
     (_L0[0], tuple(bits(from_bits(b) + d) for b, d in zip(_L0[2], (0.125, -0.125, 0.0625))), _L0[2]) + _L0[3:],   # inside the slack
     (_L0[0], _L0[1], _L0[2], _L0[3], (bits(28.0 / 255.0),) + _L0[4][1:]) + _L0[5:],   # the hundredfold byte, neither 0 nor 255
+    # At its pivot with the lift EXACTLY 0 (c15.w = 0 and c16.w = 0): the moved offset D' has no length. The
+    # position is the moved pivot Q' (ledger ruling 36). The two rows above keep c15.w = 0.32, whose lift gives
+    # D' a length, so they pass without the rule; this one does not: L * D' / |D'| is 0 * (0 / 0) in IEEE
+    # arithmetic, where the console's product with a zero factor is +0. Such vertices are drawn: three of each
+    # capture's leaf vertices are at their pivot bit for bit (vertex 230 of a 600-vertex mesh, 91 and 7863 of a
+    # 14,334-vertex one), each indexed by every draw of its mesh (tests/test_wind_formulas.py,
+    # LeafMeshesOfTheCaptures), and their lift passes through 0 with its sine.
+    (_L0[0], _L0[2], _L0[2], _L0[3], _L0[4], _L0[5][:3] + (0,), _L0[6][:3] + (0,), _L0[7]),
 )
-REACH_LENGTHS = (0.0, 1.1, 12.4)        # |P - Q| of the leaf meshes: the median and the largest seen (frame-map section 12)
+# The |P - Q| the leaves' reach pins are made at: none, the median and the largest over the WHOLE leaf streams of
+# captures 182130 and 182313 (54,582 vertices of 24 streams, 56,839 of 28; every one indexed by a leaf draw):
+# medians 1.476 and 1.478, largest 19.299 and 19.908 (tests/test_wind_formulas.py, LeafMeshesOfTheCaptures). The
+# "12.4 at most" of frame-map section 12 was of 8,890 sampled vertices of one frame's 22 draws and is not the
+# largest (review of Tasks 5 to 7, M9).
+REACH_LENGTHS = (0.0, 1.48, 19.91)
 
 
 def _floats(t):

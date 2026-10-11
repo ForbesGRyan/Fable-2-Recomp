@@ -61,8 +61,12 @@ shader whose entry has a "wind" member, the entry's position with the wind (the 
 light_formulas.py on the row's registers and elements) against the microcode's own oPos, as
 `wind: p50 / p99 / max pixel` over the wind draw rows that hold streams (the main scene's, the
 casters' own, the reflection views'), --wind-per-draw vertices a row. Met: the 99th percentile
-below 0.05 pixel of 1120 x 720 and no vertex above 0.5; the exit code is then 1 if a shader with
-rows is not met.
+below 0.05 pixel of 1120 x 720 and no vertex above 0.5, over the vertices the microcode puts inside
+the clip volume; a vertex outside it has no pixel and is held to 1e-4 relative in clip space
+instead. A shader with rows and no vertex in view is "not judged": it is not counted as met (it
+has no pixel to judge), and it fails only on that clip-space bound or on a row that could not be
+compared. The exit code is then 0 if at least one shader was judged, every judged one is met and
+none fails, and 1 otherwise.
 
 --entry overlays candidate entries (same shape as vs-transforms.json) without touching the
 table. --cpp-fixture prints, for one sampled draw of that shader, C++ arrays (the stream
@@ -657,7 +661,8 @@ def wind_report(capture_path, entries, per_draw=64, only_vs=None, dumps=None, fr
     """Criterion 4: for every draw row with streams whose entry has "wind", the entry's position with the wind
     (replay, wind_positions, the entry's rows) against the microcode's oPos (capture_replay.Draw), in pixels of
     1120 x 720, on up to `per_draw` of the vertices the row's "idx" names. {shader key: {"rows", "vertices",
-    "p50", "p99", "max", "outside", "outside_worst", "cut", "problems": {reason: rows}}}. The pixels are
+    "p50", "p99", "max", "outside", "outside_worst", "cut", "problems": {reason: rows}, "verdict" (wind_verdict),
+    "met" (the verdict is "met": False for a shader that is not judged)}}. The pixels are
     measured on the vertices the microcode puts inside the clip volume. A vertex outside it (off the picture
     or behind the eye, where x / w has no bound: the near plants stand at the camera's feet) has no pixel; its
     two clip positions are held to WIND_OUTSIDE_MAX times max(1, |oPos|) instead, and the largest such
@@ -718,8 +723,22 @@ def wind_report(capture_path, entries, per_draw=64, only_vs=None, dumps=None, fr
     for r in report.values():
         d = sorted(r.pop("_d"))
         r["p50"], r["p99"], r["max"] = _percentile(d, 0.5), _percentile(d, 0.99), (d[-1] if d else 0.0)
-        r["met"] = (bool(d) or r["outside"] > 0) and not r["problems"] and r["p99"] < WIND_P99_MAX and r["max"] <= WIND_MAX             and r["outside_worst"] <= WIND_OUTSIDE_MAX
+        r["verdict"] = wind_verdict(r)
+        r["met"] = r["verdict"] == "met"
     return report
+
+
+def wind_verdict(r):
+    """A shader's line of the report as criterion 4 judges it: "met", "NOT MET" or "not judged". The criterion
+    is a bound in pixels, so only a shader with a vertex in view can meet it: one whose every compared vertex
+    is off the picture or beyond the cut is "not judged" and counts for nothing (review of Tasks 5 to 7, M2).
+    What such a shader does hold, the clip-space bound of its vertices outside the view, can still fail it, and
+    so can a row that could not be compared."""
+    if r["problems"] or r["outside_worst"] > WIND_OUTSIDE_MAX:
+        return "NOT MET"
+    if not r["vertices"]:
+        return "not judged"
+    return "met" if r["p99"] < WIND_P99_MAX and r["max"] <= WIND_MAX else "NOT MET"
 
 
 def format_wind(key, r):
@@ -730,7 +749,23 @@ def format_wind(key, r):
         line += "; problems: " + ", ".join(f"{k} ({v} rows)" for k, v in sorted(r["problems"].items()))
     if not r["rows"]:
         return f"VS {key} wind: no row with streams"
-    return line + (": met" if r["met"] else ": NOT MET")
+    verdict = wind_verdict(r)
+    return line + ": " + ("not judged (no vertex in view)" if verdict == "not judged" else verdict)
+
+
+def wind_summary(report):
+    """(the report's last line, the exit code). Criterion 4 counts the shaders with a vertex in view; the exit
+    code is 0 when there is one, every one of them is met and no other shader with rows fails what it holds."""
+    with_rows = [r for r in report.values() if r["rows"]]
+    verdicts = [wind_verdict(r) for r in with_rows]
+    judged = [v for r, v in zip(with_rows, verdicts) if r["vertices"]]
+    unjudged = [v for r, v in zip(with_rows, verdicts) if not r["vertices"]]
+    line = (f"wind: {judged.count('met')} of {len(judged)} shaders with a vertex in view met; "
+            f"{unjudged.count('not judged')} with rows but no vertex in view: not judged; "
+            f"{len(report) - len(with_rows)} without a row")
+    if unjudged.count("NOT MET"):
+        line += f"; with no vertex in view and NOT MET on the clip-space bound or a problem: {unjudged.count('NOT MET')}"
+    return line, 0 if judged and "NOT MET" not in verdicts else 1
 
 
 # --- Capture ------------------------------------------------------------------
@@ -1192,13 +1227,13 @@ def main(argv=None):
     if a.wind:
         report = wind_report(a.capture, entries, a.wind_per_draw, a.vs)
         print(f"{Path(a.capture).name}: wind entries against the microcode's oPos, up to {a.wind_per_draw} vertices a row; "
-              f"met: p99 below {WIND_P99_MAX} pixel of {WIND_SIZE[0]} x {WIND_SIZE[1]} and none above {WIND_MAX}")
+              f"met: p99 below {WIND_P99_MAX} pixel of {WIND_SIZE[0]} x {WIND_SIZE[1]} and none above {WIND_MAX}, on the "
+              f"vertices in view; a vertex outside the view: within {WIND_OUTSIDE_MAX} relative in clip space")
         for key, r in sorted(report.items(), key=lambda kv: -kv[1]["rows"]):
             print(format_wind(key, r))
-        with_rows = [r for r in report.values() if r["rows"]]
-        print(f"wind: {sum(1 for r in with_rows if r['met'])} of {len(with_rows)} shaders with rows met; "
-              f"{len(report) - len(with_rows)} without a row")
-        return 0 if with_rows and all(r["met"] for r in with_rows) else 1
+        line, code = wind_summary(report)
+        print(line)
+        return code
     index = scan(a.capture)
     report = check(a.capture, entries, a.max_draws, a.vs, index, a.cpp_fixture, table, max(a.bones, 0))
     baseline = report.pop("_baseline")

@@ -115,6 +115,15 @@ hero_dog_texture_readback = true
 # Default: 8
 hotfunc_yield_every = 8
 
+# Uncapped frame rate. Seeds the SDK cvar guest_vblank_pacing=false: the guest's
+# vblank counter advances at 1 kHz instead of 60 Hz, so the game's swap wait of
+# two vblanks (33 ms = the 30 fps lock) completes in about 2 ms. The host present
+# stays limited to the monitor refresh (the vsync cvar). false = original 30 fps.
+# REX_VSYNC=0 (tools\fable2-uncapped.cmd) is the older, stronger lever: it also
+# drops the host present gate.
+# Default: true
+uncapped_frame_rate = true
+
 [native]
 # Experimental native renderer (docs/superpowers/specs/
 # 2026-10-01-native-renderer-foundation-design.md). true = register the native
@@ -231,6 +240,8 @@ bool Load(const std::filesystem::path& path) {
     values.hotfunc_yield_every = static_cast<int32_t>(Read<int64_t>(
         perf_table, "perf", "hotfunc_yield_every", "integer",
         values.hotfunc_yield_every));
+    values.uncapped_frame_rate = Read<bool>(perf_table, "perf", "uncapped_frame_rate",
+                                            "boolean", values.uncapped_frame_rate);
   }
   const toml::path native_path{"native"};
   const auto native = root[native_path];

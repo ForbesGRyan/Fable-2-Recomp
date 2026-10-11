@@ -22,12 +22,14 @@
 
 #include <rex/logging/macros.h>
 #include <rex/ppc/func.h>
+#include <rex/graphics/native_guest_renderer.h>
 
 #include "fable2_func_trace.h"
 #include "capture.h"
 #include "fable2_native_render.h"
 #include "fable2_f5_lua.h"  // F5 external-Lua run (polled per frame)
 #include "guest_frame_rate.h"
+#include "thread_placement.h"  // FABLE2_THREAD_PLACE experiment (inert without it)
 
 // Defined in fable2_d3d_census.h (included by main.cpp after this header).
 namespace fable2::d3dcensus { inline void OnFrame(); }
@@ -119,16 +121,148 @@ inline bool enabled() {
   return env || fable2::native::capture::Enabled();
 }
 
+// Command-processor (GPU emulation thread) time per closed GPU frame, sampled
+// once per guest frame from the SDK's emulated-frame stats (FABLE2_GUEST_WORK_LOG=1
+// also turns the collection on). A GPU frame that repeats across guest frames
+// is counted once; one skipped is missed. Render thread only.
+struct CpWindows {
+  diagnostics::WindowStats busy_ms{300}, wait_reg_ms{300}, idle_ms{300}, present_ms{300},
+      draws{300}, draw_cpu_ms{300}, copies{300}, copy_cpu_ms{300}, interval_ms{300},
+      submissions{300}, submit_ms{300}, fence_waits{300}, fence_ms{300}, tile_mappings{300},
+      kicks{300}, tiles{300}, pred_draws{300}, pred_skips{300}, bin_selects{300},
+      gpu_busy_ms{300}, gpu_timed{300};
+  uint64_t last_gpu_frame = 0;
+  bool acquired = false;
+};
+inline CpWindows& cp_windows() {
+  static CpWindows w;
+  return w;
+}
+
+// One line per guest frame longer than FABLE2_HITCH_MS milliseconds (default 20; 0 = off), with
+// the last closed GPU frame's counters, for attributing hitches.
+inline double hitch_threshold_ms() {
+  static const double v = [] {
+    const char* e = std::getenv("FABLE2_HITCH_MS");
+    return e ? std::atof(e) : 20.0;
+  }();
+  return v;
+}
+
+inline void log_hitch(const rex::graphics::EmulatedFrameStats& gpu) {
+  const auto& raw = fable2::guest_frame_rate::raw();
+  const double frame_ms = double(raw.frame_us.load(std::memory_order_relaxed)) / 1000.0;
+  const double threshold = hitch_threshold_ms();
+  if (threshold <= 0 || frame_ms < threshold || frame_ms > 1000.0) return;
+  REXSYS_INFO(
+      "[frame] hitch {:.1f} ms (swap {:.1f}, wait {:.1f}): gpu frame {} draws {} (cpu {:.1f} ms) "
+      "resolves {} ({:.1f} ms) cp busy {:.1f} present {:.1f} idle {:.1f} submissions {} fence waits "
+      "{} ({:.1f} ms) tile mappings {} gpu busy {:.1f}",
+      frame_ms, double(raw.swap_us.load(std::memory_order_relaxed)) / 1000.0,
+      double(raw.wait_us.load(std::memory_order_relaxed)) / 1000.0, gpu.frame, gpu.draws,
+      double(gpu.draw_cpu_ns) / 1e6, gpu.copies, double(gpu.copy_cpu_ns) / 1e6,
+      double(gpu.cp_busy_ns) / 1e6, double(gpu.cp_present_ns) / 1e6, double(gpu.cp_idle_ns) / 1e6,
+      gpu.submissions, gpu.fence_waits, double(gpu.fence_wait_ns) / 1e6, gpu.tile_mappings,
+      double(gpu.gpu_busy_ns) / 1e6);
+}
+
+inline void sample_cp() {
+  if (!enabled()) return;
+  CpWindows& c = cp_windows();
+  if (!c.acquired) {
+    rex::graphics::AcquireEmulatedFrameStats();
+    c.acquired = true;
+  }
+  rex::graphics::EmulatedFrameStats gpu;
+  if (!rex::graphics::GetLastEmulatedFrameStats(&gpu)) return;
+  log_hitch(gpu);
+  if (gpu.frame == c.last_gpu_frame) return;
+  c.last_gpu_frame = gpu.frame;
+  c.busy_ms.Add(double(gpu.cp_busy_ns) / 1e6);
+  c.wait_reg_ms.Add(double(gpu.cp_wait_reg_ns) / 1e6);
+  c.idle_ms.Add(double(gpu.cp_idle_ns) / 1e6);
+  c.present_ms.Add(double(gpu.cp_present_ns) / 1e6);
+  c.draws.Add(double(gpu.draws));
+  c.draw_cpu_ms.Add(double(gpu.draw_cpu_ns) / 1e6);
+  c.copies.Add(double(gpu.copies));
+  c.copy_cpu_ms.Add(double(gpu.copy_cpu_ns) / 1e6);
+  c.interval_ms.Add(double(gpu.swap_interval_ns) / 1e6);
+  c.submissions.Add(double(gpu.submissions));
+  c.submit_ms.Add(double(gpu.submit_ns) / 1e6);
+  c.fence_waits.Add(double(gpu.fence_waits));
+  c.fence_ms.Add(double(gpu.fence_wait_ns) / 1e6);
+  c.tile_mappings.Add(double(gpu.tile_mappings));
+  c.kicks.Add(double(gpu.primary_buffer_ends));
+  c.tiles.Add(double(gpu.tiles));
+  c.pred_draws.Add(double(gpu.predicated_draws));
+  c.pred_skips.Add(double(gpu.predicated_skips));
+  c.bin_selects.Add(double(gpu.bin_select_writes));
+  c.gpu_busy_ms.Add(double(gpu.gpu_busy_ns) / 1e6);
+  c.gpu_timed.Add(double(gpu.gpu_timed_submissions));
+}
+
 inline void poll() {
   auto& w = fable2::guest_frame_rate::windows();
   if (!w.work_ms.full()) return;
   if (enabled()) {
     const double mean_frame = w.frame_ms.Mean();
     REXSYS_INFO(
-        "[frame] guest {} frames: {:.1f} fps, frame median {:.2f} ms, work median {:.2f} ms "
-        "(p90 {:.2f}), swap median {:.2f} ms, wait median {:.2f} ms",
+        "[frame] guest {} frames: {:.1f} fps, frame median {:.2f} ms (p90 {:.2f}, p99 {:.2f}, "
+        "max {:.2f}), work median {:.2f} ms (p90 {:.2f}), swap median {:.2f} ms, wait median "
+        "{:.2f} ms",
         w.work_ms.size(), mean_frame > 0 ? 1000.0 / mean_frame : 0.0, w.frame_ms.Median(),
+        w.frame_ms.Percentile(0.9), w.frame_ms.Percentile(0.99), w.frame_ms.Max(),
         w.work_ms.Median(), w.work_ms.Percentile(0.9), w.swap_ms.Median(), w.wait_ms.Median());
+    CpWindows& c = cp_windows();
+    if (c.busy_ms.size() > 0) {
+      REXSYS_INFO(
+          "[frame] cp {} gpu frames: interval median {:.2f} ms, busy median {:.2f} ms (p90 {:.2f}, "
+          "max {:.2f}), wait_reg median {:.2f} ms, idle median {:.2f} ms, present median {:.2f} ms; "
+          "draws median {:.0f} (draw cpu {:.2f} ms), resolves median {:.0f} ({:.2f} ms)",
+          c.busy_ms.size(), c.interval_ms.Median(), c.busy_ms.Median(), c.busy_ms.Percentile(0.9),
+          c.busy_ms.Max(), c.wait_reg_ms.Median(), c.idle_ms.Median(), c.present_ms.Median(),
+          c.draws.Median(), c.draw_cpu_ms.Median(), c.copies.Median(), c.copy_cpu_ms.Median());
+      REXSYS_INFO(
+          "[frame] cp queue: submissions median {:.0f} (max {:.0f}) in {:.2f} ms (p90 {:.2f}), "
+          "fence waits median {:.0f} (max {:.0f}) blocked {:.2f} ms (p90 {:.2f}, max {:.2f}), "
+          "tile mappings median {:.0f} (max {:.0f}), ring kicks median {:.0f}",
+          c.submissions.Median(), c.submissions.Max(), c.submit_ms.Median(),
+          c.submit_ms.Percentile(0.9), c.fence_waits.Median(), c.fence_waits.Max(),
+          c.fence_ms.Median(), c.fence_ms.Percentile(0.9), c.fence_ms.Max(),
+          c.tile_mappings.Median(), c.tile_mappings.Max(), c.kicks.Median());
+      REXSYS_INFO(
+          "[frame] cp tiling: tiles median {:.0f}, bin selects median {:.0f}, predicated draws "
+          "median {:.0f}, predicated packets skipped median {:.0f}",
+          c.tiles.Median(), c.bin_selects.Median(), c.pred_draws.Median(), c.pred_skips.Median());
+      if (c.gpu_timed.Max() > 0) {
+        REXSYS_INFO(
+            "[frame] gpu: busy median {:.2f} ms (p90 {:.2f}, max {:.2f}) over {:.0f} timed "
+            "submissions a frame (worker timestamps; the result lands a frame or two late)",
+            c.gpu_busy_ms.Median(), c.gpu_busy_ms.Percentile(0.9), c.gpu_busy_ms.Max(),
+            c.gpu_timed.Median());
+      }
+    }
+    c.busy_ms.Reset();
+    c.wait_reg_ms.Reset();
+    c.idle_ms.Reset();
+    c.present_ms.Reset();
+    c.draws.Reset();
+    c.draw_cpu_ms.Reset();
+    c.copies.Reset();
+    c.copy_cpu_ms.Reset();
+    c.interval_ms.Reset();
+    c.submissions.Reset();
+    c.submit_ms.Reset();
+    c.fence_waits.Reset();
+    c.fence_ms.Reset();
+    c.tile_mappings.Reset();
+    c.kicks.Reset();
+    c.tiles.Reset();
+    c.pred_draws.Reset();
+    c.pred_skips.Reset();
+    c.bin_selects.Reset();
+    c.gpu_busy_ms.Reset();
+    c.gpu_timed.Reset();
   }
   w.frame_ms.Reset();
   w.work_ms.Reset();
@@ -151,6 +285,7 @@ extern "C" void MainRenderLoop_82B9CD68(PPCContext& ctx, uint8_t* base) {
   // Guest frame time for the F3 overlay (see guest_frame_rate.h).
   fable2::guest_frame_rate::record_frame(frame_us);
   // Periodic guest work log line (A/B measurements, see guest_work_log).
+  fable2::guest_work_log::sample_cp();
   fable2::guest_work_log::poll();
   // Bounded unfiltered trace window (FABLE2_TRACE_WINDOW=1); see above.
   fable2::functrace_window::run_window(frame_us);
@@ -185,6 +320,8 @@ extern "C" void MainRenderLoop_82B9CD68(PPCContext& ctx, uint8_t* base) {
       }
     }
   }
+  // Thread placement experiment (FABLE2_THREAD_PLACE; applied once, inert otherwise).
+  fable2::threadplace::PollFrame();
   // F6 native-renderer toggle + overlay request (per frame).
   fable2::native::PollFrame();
   // Native capture frame end: finishes and publishes the frame's scene and

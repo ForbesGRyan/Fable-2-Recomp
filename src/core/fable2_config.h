@@ -72,6 +72,11 @@ struct Values {
   // original (yield every call), 0 = never yield. Larger = fewer context
   // switches, less frequent CPU rotation to other guest threads.
   int32_t hotfunc_yield_every = 8;
+  // Uncapped frame rate: seeds the SDK cvar guest_vblank_pacing=false, so the
+  // guest's vblank counter runs at 1 kHz and its "+2 vblanks" swap wait no
+  // longer holds the game at 30 fps; the host present stays gated at the
+  // monitor refresh when the vsync cvar is on. false = the original 30 fps.
+  bool uncapped_frame_rate = true;
 };
 
 // Load the config from `path`.

@@ -84,6 +84,11 @@ inline int EnsureComplete(const std::filesystem::path& game_data_root) {
                    [](unsigned char c) {
                      return static_cast<char>(std::tolower(c));
                    });
+    // Compare in the manifest's own form (backslashes): generic_string() gives
+    // forward slashes, so this comparison matched nothing and every start
+    // appended the whole tree again (582 copies of each entry were found in a
+    // staged manifest on 2026-10-10).
+    std::replace(rel.begin(), rel.end(), '/', '\\');
     if (std::binary_search(existing.begin(), existing.end(), rel)) continue;
     missing.push_back(std::move(rel));
   }
@@ -107,9 +112,7 @@ inline int EnsureComplete(const std::filesystem::path& game_data_root) {
   }
   for (const auto& m : missing) {
     // lowercase relative path with backslashes = the canonical manifest form
-    std::string entry = m;
-    std::replace(entry.begin(), entry.end(), '/', '\\');
-    out << entry << "\r\n";
+    out << m << "\r\n";
   }
   out.flush();
   REXSYS_INFO("[manifest] appended {} missing entr{} to {}", missing.size(),

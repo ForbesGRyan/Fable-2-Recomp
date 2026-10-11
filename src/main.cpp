@@ -9,6 +9,7 @@
 #include "fable_2_app.h"
 #include "fps_meter.h"
 #include "guest_wait_timer.h"
+#include "limiter_yield.h"  // FABLE2_LIMITER_YIELD experiment (inert without it)
 #include "fable2_d3d_census.h"
 #include "xdk_dispatch.h"
 #include "fable2_text_probe.h"

@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <algorithm>
+#include <cstdlib>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -42,6 +44,16 @@ inline constexpr uint32_t kSignedInMask = 0x834968D8;   // u32, bit per user, tr
 inline constexpr uint32_t kActiveUser = 0x83496934;     // u32, the pad that pressed A
 
 inline constexpr uint32_t kAttemptEvery = 30;  // frames between load attempts (about one second)
+// FABLE2_BOOT_SAVE_MIN_UPDATE=N: no load attempt before main-loop update N (default 0). A
+// knob for the startup race seen twice (logs 575 and perf worktree 002: a guest read of
+// 0x4 on the game thread in the millisecond the first attempt started the load).
+inline uint32_t MinUpdate() {
+  static const uint32_t v = [] {
+    const char* e = std::getenv("FABLE2_BOOT_SAVE_MIN_UPDATE");
+    return e ? uint32_t(std::max(0, std::atoi(e))) : 0u;
+  }();
+  return v;
+}
 inline constexpr uint32_t kMaxAttempts = 60;   // then give up and leave the menu alone
 
 // Set once at startup, before any guest thread runs; read-only afterwards.
@@ -88,6 +100,7 @@ struct Trigger {
       return false;
     }
     seen_front_end = true;
+    if (updates < MinUpdate()) return false;
     if (updates % kAttemptEvery != 0) return false;
     if (attempts >= kMaxAttempts) {
       done = true;

@@ -184,6 +184,22 @@ class Fable2App : public rex::ReXApp {
       }
     }
 
+    // Uncapped frame rate (fable2_config.toml [perf] uncapped_frame_rate, default
+    // true): the guest's vblank pacing off, unless guest_vblank_pacing was given by
+    // hand. REX_VSYNC=0 covers this too (vsync off implies no guest pacing).
+    {
+      const fable2::config::Values& cfg = fable2::config::Get();
+      if (cfg.uncapped_frame_rate &&
+          rex::cvar::GetFlagSource("guest_vblank_pacing") == rex::cvar::Source::kDefault) {
+        if (rex::cvar::SetFlagByName("guest_vblank_pacing", "false")) {
+          REXSYS_INFO("[fable2-config] seeded guest_vblank_pacing=false (uncapped_frame_rate)");
+        } else {
+          REXSYS_WARN("[fable2-config] cvar guest_vblank_pacing rejected 'false'; the game "
+                      "stays at 30 fps unless REX_VSYNC=0");
+        }
+      }
+    }
+
     // Feed the F3 debug overlay with guest FPS (below). The GPU plugin
     // records per-guest-swap frame timing into the shared perf registry
     // (rex::perf, state lives in rexruntime.dll and is shared with the

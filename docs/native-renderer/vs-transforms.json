@@ -76,6 +76,108 @@
       "a0": "z",
       "scale": "c7.w",
       "evidence": "Entered 2026-10-08 (lighting plan Task 8c). dump shader_2D40B53C926109BE.ucode.vert, fetches in order: 0 the position (vfetch_full r6.yxwz of vf0, FMT_16_16_16_16_FLOAT, Stride=9), 1 the normal (vfetch_mini r3.xyz_ Offset=2 FMT_10_11_11), 2 the UV, 3 the pivot (Offset=5), 4 and 5 the two 8_8_8_8 wind elements (Offset=7, Offset=8), 6 the weights (vfetch_full r9 of vf1, FMT_32_32_32_32_FLOAT, Stride=4). Normal: the 10_11_11 element through the rows c4..c6, times c7.w, NOT normalised (instr 100); then negated where it faces away from the eye c9 (the predicate of instr 112 to 114): the leaf cards are drawn with no culling (register 0x2205 = 0x00218000 in every leaf row of four captures, out/native-evidence/lighting/task8c/leaf_cull.txt), and the shader lights the side the viewer sees. Probe colour: c[28+a0].xyz + (c[29+a0] . w, c[30+a0] . w, c[31+a0] . w) (instr 142 to 144, 146; every dp4 pairs the fetched register and the constant with one swizzle, yxzw: the weights are source x, y, z, w), a0 = trunc of the position fetch's w as fetched yxwz, the fetch's source z (truncs r4.z, r6.w; maxas, 141, 145). The colour goes through pow(|x|, c18.w * c255.x) * c18.xyz + c54.xyz to o1; the two scalars of the light, times the light's colour, to o2 and o3 (lighting-formulas.md, \"Tree leaves\"). Checked by light_check.py with pixel shader 7CD57B81550F19E3 (out/native-evidence/lighting/task8c/light_check_leaves.txt; with the sun in its slot behind dark lanterns: light_check_multi_sun.txt)."
+    },
+    "wind": {
+      "family": "leaf",
+      "role": "scene",
+      "reg": [
+        15,
+        16,
+        17
+      ],
+      "lit_reg": [
+        248,
+        249,
+        250,
+        251,
+        252,
+        253,
+        254
+      ],
+      "lit": {
+        "half": 0.5,
+        "base": 0.699999988079071,
+        "rate1": 0.03500000014901161,
+        "rate2": 0.47200000286102295,
+        "two_pi": 6.2831854820251465,
+        "quarter": 0.25,
+        "lean": 0.03999999910593033,
+        "gust": 0.02500000037252903,
+        "phase_x": 0.23000000417232513,
+        "phase_y": 0.10999999940395355,
+        "lo": -3.1415927410125732,
+        "amp": 0.3849000036716461,
+        "along": 0.30000001192092896,
+        "across": 0.019245000556111336,
+        "rate0": 0.10000000149011612,
+        "zero": 0.0,
+        "sel_zero": 0.0,
+        "sel_one": 1.0,
+        "hundred": 100.0,
+        "slack": -0.30000001192092896,
+        "phase_f": 0.05000000074505806,
+        "flutter_x": 0.25,
+        "flutter_y": 1.0,
+        "one": 1.0,
+        "back": 0.2886750102043152,
+        "push_gust": 0.550000011920929,
+        "lift_gust": 0.8999999761581421,
+        "rate_f": 0.15000000596046448
+      },
+      "lit_at": {
+        "half": "c252.z",
+        "base": "c248.z",
+        "rate1": "c252.x",
+        "rate2": "c252.y",
+        "two_pi": "c250.x",
+        "quarter": "c250.y",
+        "lean": "c251.x",
+        "gust": "c251.y",
+        "phase_x": "c250.w",
+        "phase_y": "c250.z",
+        "lo": "c248.x",
+        "amp": "c253.x",
+        "along": "c253.y",
+        "across": "c253.z",
+        "rate0": "c254.w",
+        "zero": "c251.z",
+        "sel_zero": "c251.z",
+        "sel_one": "c251.w",
+        "hundred": "c248.w",
+        "slack": "c249.x",
+        "phase_f": "c249.y",
+        "flutter_x": "c249.z",
+        "flutter_y": "c249.w",
+        "one": "c252.w",
+        "back": "c253.w",
+        "push_gust": "c254.x",
+        "lift_gust": "c254.y",
+        "rate_f": "c254.z"
+      },
+      "elements": [
+        {
+          "name": "pivot",
+          "fetch": 3,
+          "format": 32,
+          "offset": 5,
+          "source": "yxw"
+        },
+        {
+          "name": "weights",
+          "fetch": 4,
+          "format": 6,
+          "offset": 7,
+          "source": "xyzw"
+        },
+        {
+          "name": "flutter",
+          "fetch": 5,
+          "format": 6,
+          "offset": 8,
+          "source": "xyz"
+        }
+      ],
+      "evidence": "In one capture only (native_discovery_20261010_182130, frame 8: three rows); otherwise held by made inputs. wind_check.py formulas, rows and identities (out/native-evidence/foliage/t7_wind_check.txt); lighting-formulas.md, \"Wind\""
     }
   },
   "0x33C00226C154C1F2": {
@@ -140,6 +242,42 @@
         "source": "zyx"
       },
       "evidence": "dump shader_33C00226C154C1F2.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched zyx_: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz (the pixel shader applies the ambient factor and c20). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source y, x, w, the first three halves of the element in memory, whatever the fetch's destination swizzle (yxwz or yzxw); the instance colour's red, green, blue are source z, y, x. Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
+    },
+    "wind": {
+      "family": "plant",
+      "role": "scene",
+      "reg": [
+        10,
+        21,
+        22,
+        25,
+        26
+      ],
+      "lit_reg": [
+        253,
+        254,
+        255
+      ],
+      "lit": {
+        "lo": -3.1415927410125732,
+        "two_pi": 6.2831854820251465,
+        "inv_two_pi": 0.15915493667125702,
+        "gain": 0.10000000149011612,
+        "height": 5.0,
+        "half": 0.5,
+        "unit": 1.0
+      },
+      "lit_at": {
+        "lo": "c253.x",
+        "two_pi": "c253.w",
+        "inv_two_pi": "c253.z",
+        "gain": "c254.w",
+        "height": "c255.w",
+        "half": "c254.z",
+        "unit": "c254.y"
+      },
+      "elements": [],
+      "evidence": "Checked with the push loop's count at 0: the push away from characters is not drawn (spec ruling 10). wind_check.py formulas, rows and identities (out/native-evidence/foliage/t7_wind_check.txt); lighting-formulas.md, \"Wind\""
     }
   },
   "0x36B543CECAE5C781": {
@@ -316,7 +454,109 @@
       }
     },
     "uv_manual": true,
-    "uv_evidence": "dump shader_432563420047C96C.ucode.vert: o0.xy = r3.xy (instr 92 max o0.xy__, r3.xyyy) <- vfetch_mini r3.yx__ Offset=3 FMT_16_16_FLOAT (instr 10, fetch ordinal 1); the wind code writes r3.z and r3.w only (15, 25, 29 to 32, 64); shader_trace gives the same. vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt): the entry replayed by position_check.py's functions on random streams against the shader's microcode: 1200 of 1200 random vertices, uv only (the position is deformed and has no switch for the sway). In the shadow passes with the caster pixel shader 0xF1EB2497108F159D (368, 336 and 368 rows of the three captures of 2026-10-08), which reads r0.xy * c8.xy + c8.zw"
+    "uv_evidence": "dump shader_432563420047C96C.ucode.vert: o0.xy = r3.xy (instr 92 max o0.xy__, r3.xyyy) <- vfetch_mini r3.yx__ Offset=3 FMT_16_16_FLOAT (instr 10, fetch ordinal 1); the wind code writes r3.z and r3.w only (15, 25, 29 to 32, 64); shader_trace gives the same. vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt): the entry replayed by position_check.py's functions on random streams against the shader's microcode: 1200 of 1200 random vertices, uv only (the position is deformed and has no switch for the sway). In the shadow passes with the caster pixel shader 0xF1EB2497108F159D (368, 336 and 368 rows of the three captures of 2026-10-08), which reads r0.xy * c8.xy + c8.zw",
+    "wind": {
+      "family": "leaf",
+      "role": "caster",
+      "reg": [
+        15,
+        16,
+        17
+      ],
+      "lit_reg": [
+        249,
+        250,
+        251,
+        252,
+        253,
+        254,
+        255
+      ],
+      "lit": {
+        "half": 0.5,
+        "base": 0.699999988079071,
+        "rate1": 0.03500000014901161,
+        "rate2": 0.47200000286102295,
+        "two_pi": 6.2831854820251465,
+        "quarter": 0.25,
+        "lean": 0.03999999910593033,
+        "gust": 0.02500000037252903,
+        "phase_x": 0.23000000417232513,
+        "phase_y": 0.10999999940395355,
+        "lo": -3.1415927410125732,
+        "amp": 0.3849000036716461,
+        "along": 0.30000001192092896,
+        "across": 0.019245000556111336,
+        "rate0": 0.10000000149011612,
+        "zero": 0.0,
+        "sel_zero": 0.0,
+        "sel_one": 1.0,
+        "hundred": 100.0,
+        "slack": -0.30000001192092896,
+        "phase_f": 0.05000000074505806,
+        "flutter_x": 0.25,
+        "flutter_y": 1.0,
+        "one": 1.0,
+        "back": 0.2886750102043152,
+        "push_gust": 0.550000011920929,
+        "lift_gust": 0.8999999761581421,
+        "rate_f": 0.15000000596046448
+      },
+      "lit_at": {
+        "half": "c249.y",
+        "base": "c250.w",
+        "rate1": "c253.x",
+        "rate2": "c253.y",
+        "two_pi": "c252.z",
+        "quarter": "c252.w",
+        "lean": "c254.x",
+        "gust": "c254.y",
+        "phase_x": "c251.y",
+        "phase_y": "c251.x",
+        "lo": "c249.x",
+        "amp": "c255.x",
+        "along": "c255.y",
+        "across": "c255.z",
+        "rate0": "c250.z",
+        "zero": "c254.z",
+        "sel_zero": "c254.z",
+        "sel_one": "c254.w",
+        "hundred": "c252.y",
+        "slack": "c251.z",
+        "phase_f": "c251.w",
+        "flutter_x": "c250.x",
+        "flutter_y": "c250.y",
+        "one": "c254.w",
+        "back": "c255.w",
+        "push_gust": "c253.z",
+        "lift_gust": "c253.w",
+        "rate_f": "c252.x"
+      },
+      "elements": [
+        {
+          "name": "pivot",
+          "fetch": 2,
+          "format": 32,
+          "offset": 5,
+          "source": "yxw"
+        },
+        {
+          "name": "weights",
+          "fetch": 3,
+          "format": 6,
+          "offset": 7,
+          "source": "xyzw"
+        },
+        {
+          "name": "flutter",
+          "fetch": 4,
+          "format": 6,
+          "offset": 8,
+          "source": "xyz"
+        }
+      ],
+      "evidence": "wind_check.py formulas, rows and identities (out/native-evidence/foliage/t7_wind_check.txt); lighting-formulas.md, \"Wind\""
+    }
   },
   "0x475EC9F795E5EDBB": {
     "base": 0,
@@ -376,6 +616,72 @@
       "a0": "z",
       "scale": "c7.w",
       "evidence": "dump shader_475EC9F795E5EDBB.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Normal: vfetch_mini r2.xyz_ Offset=2 FMT_10_11_11 of vf0 (fetch 1); o1 = the 10_11_11 normal through the rows c4..c6, times c7.w (instr 62-64, 73-75); the axis of the ambient factor is built from it and c19.xyz. Weights: vfetch_full r6 of vf1, FMT_32_32_32_32_FLOAT, Stride=4 (fetch 5); the probe colour goes to o8 (instr 16, 31, 65-68, 77). a0 = trunc of the position fetch's r1.w (fetched wxyz) (truncs / maxas, instr 31, 65), the fetch's source z: 0, 4 or 8 in every sampled vertex (out/native-evidence/lighting/task2/fix1_recounts_bridge_trees.txt). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source x, y, z whatever the fetch's destination swizzle (xyz_ here and in the trunks' shader, _xyz in the two skinned ones); the weights are source x, y, z, w: every dp4 of the probe colour pairs the fetched register and the constant with one swizzle or its exact undoing (dp4 r3.yxzw, c[30+a0].yxzw where the fetch is xyzw; dp4 r3.wzyx, c[30+a0].yxzw where it is wzxy). Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
+    },
+    "wind": {
+      "family": "trunk",
+      "role": "scene",
+      "reg": [
+        15,
+        16,
+        17
+      ],
+      "lit_reg": [
+        251,
+        252,
+        253,
+        254,
+        255
+      ],
+      "lit": {
+        "half": 0.5,
+        "base": 0.699999988079071,
+        "rate1": 0.03500000014901161,
+        "rate2": 0.47200000286102295,
+        "two_pi": 6.2831854820251465,
+        "quarter": 0.25,
+        "lean": 0.03999999910593033,
+        "gust": 0.02500000037252903,
+        "phase_x": 0.23000000417232513,
+        "phase_y": 0.10999999940395355,
+        "lo": -3.1415927410125732,
+        "amp": 0.3849000036716461,
+        "along": 0.30000001192092896,
+        "across": 0.019245000556111336,
+        "rate0": 0.10000000149011612,
+        "zero": 0.0,
+        "sel_zero": 0.0,
+        "sel_one": 1.0
+      },
+      "lit_at": {
+        "half": "c251.x",
+        "base": "c251.y",
+        "rate1": "c252.x",
+        "rate2": "c252.y",
+        "two_pi": "c252.z",
+        "quarter": "c252.w",
+        "lean": "c253.x",
+        "gust": "c253.y",
+        "phase_x": "c254.x",
+        "phase_y": "c254.y",
+        "lo": "c254.z",
+        "amp": "c255.x",
+        "along": "c255.y",
+        "across": "c255.z",
+        "rate0": "c255.w",
+        "zero": "c254.w",
+        "sel_zero": "c253.z",
+        "sel_one": "c253.w"
+      },
+      "elements": [
+        {
+          "name": "weights",
+          "fetch": 4,
+          "format": 6,
+          "offset": 7,
+          "source": "xyzw"
+        }
+      ],
+      "evidence": "wind_check.py formulas, rows and identities (out/native-evidence/foliage/t7_wind_check.txt); lighting-formulas.md, \"Wind\""
     }
   },
   "0x48D30ECCF684F488": {
@@ -440,6 +746,42 @@
         "source": "zyx"
       },
       "evidence": "dump shader_48D30ECCF684F488.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched _zyx: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz plus c54.xyz. Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source y, x, w, the first three halves of the element in memory, whatever the fetch's destination swizzle (yxwz or yzxw); the instance colour's red, green, blue are source z, y, x. Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
+    },
+    "wind": {
+      "family": "plant",
+      "role": "scene",
+      "reg": [
+        10,
+        21,
+        22,
+        25,
+        26
+      ],
+      "lit_reg": [
+        253,
+        254,
+        255
+      ],
+      "lit": {
+        "lo": -3.1415927410125732,
+        "two_pi": 6.2831854820251465,
+        "inv_two_pi": 0.15915493667125702,
+        "gain": 0.10000000149011612,
+        "height": 5.0,
+        "half": 0.5,
+        "unit": 1.0
+      },
+      "lit_at": {
+        "lo": "c253.x",
+        "two_pi": "c253.z",
+        "inv_two_pi": "c253.w",
+        "gain": "c254.w",
+        "height": "c255.w",
+        "half": "c254.z",
+        "unit": "c254.y"
+      },
+      "elements": [],
+      "evidence": "Checked with the push loop's count at 0: the push away from characters is not drawn (spec ruling 10). wind_check.py formulas, rows and identities (out/native-evidence/foliage/t7_wind_check.txt); lighting-formulas.md, \"Wind\""
     }
   },
   "0x5003700B7C9B1C16": {
@@ -798,6 +1140,42 @@
         "source": "zyx"
       },
       "evidence": "dump shader_8123C16DBF583F92.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched zyx_: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz plus c54.xyz (instr 17, 26-33). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source y, x, w, the first three halves of the element in memory, whatever the fetch's destination swizzle (yxwz or yzxw); the instance colour's red, green, blue are source z, y, x. Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
+    },
+    "wind": {
+      "family": "plant",
+      "role": "scene",
+      "reg": [
+        10,
+        21,
+        22,
+        25,
+        26
+      ],
+      "lit_reg": [
+        253,
+        254,
+        255
+      ],
+      "lit": {
+        "lo": -3.1415927410125732,
+        "two_pi": 6.2831854820251465,
+        "inv_two_pi": 0.15915493667125702,
+        "gain": 0.10000000149011612,
+        "height": 5.0,
+        "half": 0.5,
+        "unit": 1.0
+      },
+      "lit_at": {
+        "lo": "c253.x",
+        "two_pi": "c253.y",
+        "inv_two_pi": "c253.z",
+        "gain": "c254.w",
+        "height": "c255.w",
+        "half": "c254.z",
+        "unit": "c254.y"
+      },
+      "elements": [],
+      "evidence": "wind_check.py formulas, rows and identities (out/native-evidence/foliage/t7_wind_check.txt); lighting-formulas.md, \"Wind\""
     }
   },
   "0x82F6433A69263C75": {
@@ -1070,6 +1448,108 @@
       "a0": "z",
       "scale": "c7.w",
       "evidence": "Entered 2026-10-08 (lighting plan Task 8c). dump shader_A5846836C90E1192.ucode.vert, fetches in order: 0 the position (vfetch_full r6.yxwz of vf0, FMT_16_16_16_16_FLOAT, Stride=9), 1 the normal (vfetch_mini r3.xyz_ Offset=2 FMT_10_11_11), 2 the UV, 3 the pivot (Offset=5), 4 and 5 the two 8_8_8_8 wind elements (Offset=7, Offset=8), 6 the weights (vfetch_full r9 of vf1, FMT_32_32_32_32_FLOAT, Stride=4). Normal: the 10_11_11 element through the rows c4..c6, times c7.w, NOT normalised (instr 83, 87, 95, 96); then negated where it faces away from the eye c9 (the predicate of instr 108 to 110): the leaf cards are drawn with no culling (register 0x2205 = 0x00218000 in every leaf row of four captures, out/native-evidence/lighting/task8c/leaf_cull.txt), and the shader lights the side the viewer sees. Probe colour: c[28+a0].xyz + (c[29+a0] . w, c[30+a0] . w, c[31+a0] . w) (instr 115 to 117, 122; every dp4 pairs the fetched register and the constant with one swizzle, yxzw: the weights are source x, y, z, w), a0 = trunc of the position fetch's w as fetched yxwz, the fetch's source z (truncs r5.w, r6.w, instr 31; maxas, 113). The colour goes through pow(|x|, c18.w * c249.w) * c18.xyz + c54.xyz to o1; the two scalars of the light, times the light's colour, to o2 and o3 (lighting-formulas.md, \"Tree leaves\"). Checked by light_check.py with pixel shader 7CD57B81550F19E3 (out/native-evidence/lighting/task8c/light_check_leaves.txt)."
+    },
+    "wind": {
+      "family": "leaf",
+      "role": "scene",
+      "reg": [
+        15,
+        16,
+        17
+      ],
+      "lit_reg": [
+        249,
+        250,
+        251,
+        252,
+        253,
+        254,
+        255
+      ],
+      "lit": {
+        "half": 0.5,
+        "base": 0.699999988079071,
+        "rate1": 0.03500000014901161,
+        "rate2": 0.47200000286102295,
+        "two_pi": 6.2831854820251465,
+        "quarter": 0.25,
+        "lean": 0.03999999910593033,
+        "gust": 0.02500000037252903,
+        "phase_x": 0.23000000417232513,
+        "phase_y": 0.10999999940395355,
+        "lo": -3.1415927410125732,
+        "amp": 0.3849000036716461,
+        "along": 0.30000001192092896,
+        "across": 0.019245000556111336,
+        "rate0": 0.10000000149011612,
+        "zero": 0.0,
+        "sel_zero": 0.0,
+        "sel_one": 1.0,
+        "hundred": 100.0,
+        "slack": -0.30000001192092896,
+        "phase_f": 0.05000000074505806,
+        "flutter_x": 0.25,
+        "flutter_y": 1.0,
+        "one": 1.0,
+        "back": 0.2886750102043152,
+        "push_gust": 0.550000011920929,
+        "lift_gust": 0.8999999761581421,
+        "rate_f": 0.15000000596046448
+      },
+      "lit_at": {
+        "half": "c253.z",
+        "base": "c249.y",
+        "rate1": "c253.x",
+        "rate2": "c253.y",
+        "two_pi": "c251.x",
+        "quarter": "c251.y",
+        "lean": "c252.x",
+        "gust": "c252.y",
+        "phase_x": "c251.w",
+        "phase_y": "c251.z",
+        "lo": "c249.x",
+        "amp": "c254.x",
+        "along": "c254.y",
+        "across": "c254.z",
+        "rate0": "c255.w",
+        "zero": "c252.z",
+        "sel_zero": "c252.z",
+        "sel_one": "c252.w",
+        "hundred": "c249.z",
+        "slack": "c250.x",
+        "phase_f": "c250.y",
+        "flutter_x": "c250.z",
+        "flutter_y": "c250.w",
+        "one": "c253.w",
+        "back": "c254.w",
+        "push_gust": "c255.x",
+        "lift_gust": "c255.y",
+        "rate_f": "c255.z"
+      },
+      "elements": [
+        {
+          "name": "pivot",
+          "fetch": 3,
+          "format": 32,
+          "offset": 5,
+          "source": "yxw"
+        },
+        {
+          "name": "weights",
+          "fetch": 4,
+          "format": 6,
+          "offset": 7,
+          "source": "xyzw"
+        },
+        {
+          "name": "flutter",
+          "fetch": 5,
+          "format": 6,
+          "offset": 8,
+          "source": "xyz"
+        }
+      ],
+      "evidence": "wind_check.py formulas, rows and identities (out/native-evidence/foliage/t7_wind_check.txt); lighting-formulas.md, \"Wind\""
     }
   },
   "0xA8A5B2A89F70336A": {
@@ -1118,7 +1598,43 @@
       }
     },
     "uv_manual": true,
-    "uv_evidence": "dump: o0.xy = r2.xy (instr 52 max o0.xy__, r2.xyyy); r2.x = r0.w (45, after both branches; r0.w = source z of the mesh position fetch vfetch_full r0.yxwz, instr 17, ordinal 3, which neither branch writes: 28 and 41 to 44 write r0.xyz, 29 to 39 r0.x and r0.y); r2.y = source z of vfetch_mini r2._z__ Offset=2 (18, ordinal 4), not written again (24, 25, 26, 40 write r2.x, r2.z, r2.w). u and v are the fourth halves of the mesh vertex's two elements, as in 0x8123... (the runtime reads them with UvLayoutFromFetches). shader_trace refuses the export (jumps); vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt): the entry replayed by position_check.py's functions on random streams against the shader's microcode. Used by the caster pixel shader 0x85A9A5EC510A9700, which reads r0.xy * c8.xy + c8.zw"
+    "uv_evidence": "dump: o0.xy = r2.xy (instr 52 max o0.xy__, r2.xyyy); r2.x = r0.w (45, after both branches; r0.w = source z of the mesh position fetch vfetch_full r0.yxwz, instr 17, ordinal 3, which neither branch writes: 28 and 41 to 44 write r0.xyz, 29 to 39 r0.x and r0.y); r2.y = source z of vfetch_mini r2._z__ Offset=2 (18, ordinal 4), not written again (24, 25, 26, 40 write r2.x, r2.z, r2.w). u and v are the fourth halves of the mesh vertex's two elements, as in 0x8123... (the runtime reads them with UvLayoutFromFetches). shader_trace refuses the export (jumps); vs_check.py --casters (out/native-evidence/shadows/task2_vs_check_casters.txt): the entry replayed by position_check.py's functions on random streams against the shader's microcode. Used by the caster pixel shader 0x85A9A5EC510A9700, which reads r0.xy * c8.xy + c8.zw",
+    "wind": {
+      "family": "plant",
+      "role": "caster",
+      "reg": [
+        10,
+        21,
+        22,
+        25,
+        26
+      ],
+      "lit_reg": [
+        253,
+        254,
+        255
+      ],
+      "lit": {
+        "lo": -3.1415927410125732,
+        "two_pi": 6.2831854820251465,
+        "inv_two_pi": 0.15915493667125702,
+        "gain": 0.10000000149011612,
+        "height": 5.0,
+        "half": 0.5,
+        "unit": 1.0
+      },
+      "lit_at": {
+        "lo": "c253.y",
+        "two_pi": "c253.x",
+        "inv_two_pi": "c253.z",
+        "gain": "c254.w",
+        "height": "c255.w",
+        "half": "c254.z",
+        "unit": "c254.y"
+      },
+      "elements": [],
+      "evidence": "wind_check.py formulas, rows and identities (out/native-evidence/foliage/t7_wind_check.txt); lighting-formulas.md, \"Wind\""
+    }
   },
   "0xB636821F95DC9D8E": {
     "base": 0,
@@ -1182,6 +1698,42 @@
         "source": "zyx"
       },
       "evidence": "dump shader_B636821F95DC9D8E.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched zyx_: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz (the pixel shader applies the ambient factor and c20). Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source y, x, w, the first three halves of the element in memory, whatever the fetch's destination swizzle (yxwz or yzxw); the instance colour's red, green, blue are source z, y, x. Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
+    },
+    "wind": {
+      "family": "plant",
+      "role": "scene",
+      "reg": [
+        10,
+        21,
+        22,
+        25,
+        26
+      ],
+      "lit_reg": [
+        253,
+        254,
+        255
+      ],
+      "lit": {
+        "lo": -3.1415927410125732,
+        "two_pi": 6.2831854820251465,
+        "inv_two_pi": 0.15915493667125702,
+        "gain": 0.10000000149011612,
+        "height": 5.0,
+        "half": 0.5,
+        "unit": 1.0
+      },
+      "lit_at": {
+        "lo": "c253.x",
+        "two_pi": "c254.z",
+        "inv_two_pi": "c253.z",
+        "gain": "c255.w",
+        "height": "c253.y",
+        "half": "c254.w",
+        "unit": "c254.y"
+      },
+      "elements": [],
+      "evidence": "wind_check.py formulas, rows and identities (out/native-evidence/foliage/t7_wind_check.txt); lighting-formulas.md, \"Wind\""
     }
   },
   "0xBEAD84BD72072E0E": {
@@ -1360,6 +1912,108 @@
       "a0": "z",
       "scale": "c7.w",
       "evidence": "Entered 2026-10-08 (lighting plan Task 8c). dump shader_D7DD31B9BF194DE8.ucode.vert, fetches in order: 0 the position (vfetch_full r5.yxwz of vf0, FMT_16_16_16_16_FLOAT, Stride=9), 1 the normal (vfetch_mini r3.xyz_ Offset=2 FMT_10_11_11), 2 the UV, 3 the pivot (Offset=5), 4 and 5 the two 8_8_8_8 wind elements (Offset=7, Offset=8), 6 the weights (vfetch_full r7 of vf1, FMT_32_32_32_32_FLOAT, Stride=4). Normal: the 10_11_11 element through the rows c4..c6, times c7.w, NOT normalised (instr 98); then negated where it faces away from the eye c9 (the predicate of instr 110 to 112): the leaf cards are drawn with no culling (register 0x2205 = 0x00218000 in every leaf row of four captures, out/native-evidence/lighting/task8c/leaf_cull.txt), and the shader lights the side the viewer sees. Probe colour: c[28+a0].xyz + (c[29+a0] . w, c[30+a0] . w, c[31+a0] . w) (instr 117 to 119, 125; every dp4 pairs the fetched register and the constant with one swizzle, yxzw: the weights are source x, y, z, w), a0 = trunc of the position fetch's w as fetched yxwz, the fetch's source z (truncs r8.w, r5.w; maxas, 115). The colour goes through pow(|x|, c18.w * c248.w) * c18.xyz + c54.xyz to o1; the two scalars of the light, times the light's colour, to o2 and o3 (lighting-formulas.md, \"Tree leaves\"). Checked by light_check.py with pixel shader 7CD57B81550F19E3 (out/native-evidence/lighting/task8c/light_check_leaves.txt; with the sun in its slot behind a dark lantern: light_check_multi_sun.txt)."
+    },
+    "wind": {
+      "family": "leaf",
+      "role": "scene",
+      "reg": [
+        15,
+        16,
+        17
+      ],
+      "lit_reg": [
+        248,
+        249,
+        250,
+        251,
+        252,
+        253,
+        254
+      ],
+      "lit": {
+        "half": 0.5,
+        "base": 0.699999988079071,
+        "rate1": 0.03500000014901161,
+        "rate2": 0.47200000286102295,
+        "two_pi": 6.2831854820251465,
+        "quarter": 0.25,
+        "lean": 0.03999999910593033,
+        "gust": 0.02500000037252903,
+        "phase_x": 0.23000000417232513,
+        "phase_y": 0.10999999940395355,
+        "lo": -3.1415927410125732,
+        "amp": 0.3849000036716461,
+        "along": 0.30000001192092896,
+        "across": 0.019245000556111336,
+        "rate0": 0.10000000149011612,
+        "zero": 0.0,
+        "sel_zero": 0.0,
+        "sel_one": 1.0,
+        "hundred": 100.0,
+        "slack": -0.30000001192092896,
+        "phase_f": 0.05000000074505806,
+        "flutter_x": 0.25,
+        "flutter_y": 1.0,
+        "one": 1.0,
+        "back": 0.2886750102043152,
+        "push_gust": 0.550000011920929,
+        "lift_gust": 0.8999999761581421,
+        "rate_f": 0.15000000596046448
+      },
+      "lit_at": {
+        "half": "c252.z",
+        "base": "c248.y",
+        "rate1": "c252.x",
+        "rate2": "c252.y",
+        "two_pi": "c250.x",
+        "quarter": "c250.y",
+        "lean": "c251.x",
+        "gust": "c251.y",
+        "phase_x": "c250.w",
+        "phase_y": "c250.z",
+        "lo": "c248.x",
+        "amp": "c253.x",
+        "along": "c253.y",
+        "across": "c253.z",
+        "rate0": "c254.w",
+        "zero": "c251.z",
+        "sel_zero": "c251.z",
+        "sel_one": "c251.w",
+        "hundred": "c248.z",
+        "slack": "c249.x",
+        "phase_f": "c249.y",
+        "flutter_x": "c249.z",
+        "flutter_y": "c249.w",
+        "one": "c252.w",
+        "back": "c253.w",
+        "push_gust": "c254.x",
+        "lift_gust": "c254.y",
+        "rate_f": "c254.z"
+      },
+      "elements": [
+        {
+          "name": "pivot",
+          "fetch": 3,
+          "format": 32,
+          "offset": 5,
+          "source": "yxw"
+        },
+        {
+          "name": "weights",
+          "fetch": 4,
+          "format": 6,
+          "offset": 7,
+          "source": "xyzw"
+        },
+        {
+          "name": "flutter",
+          "fetch": 5,
+          "format": 6,
+          "offset": 8,
+          "source": "xyz"
+        }
+      ],
+      "evidence": "wind_check.py formulas, rows and identities (out/native-evidence/foliage/t7_wind_check.txt); lighting-formulas.md, \"Wind\""
     }
   },
   "0xECD66A10092E6562": {
@@ -1461,6 +2115,72 @@
         "score": 1.0,
         "samples": 7
       }
+    },
+    "wind": {
+      "family": "trunk",
+      "role": "caster",
+      "reg": [
+        15,
+        16,
+        17
+      ],
+      "lit_reg": [
+        251,
+        252,
+        253,
+        254,
+        255
+      ],
+      "lit": {
+        "half": 0.5,
+        "base": 0.699999988079071,
+        "rate1": 0.03500000014901161,
+        "rate2": 0.47200000286102295,
+        "two_pi": 6.2831854820251465,
+        "quarter": 0.25,
+        "lean": 0.03999999910593033,
+        "gust": 0.02500000037252903,
+        "phase_x": 0.23000000417232513,
+        "phase_y": 0.10999999940395355,
+        "lo": -3.1415927410125732,
+        "amp": 0.3849000036716461,
+        "along": 0.30000001192092896,
+        "across": 0.019245000556111336,
+        "rate0": 0.10000000149011612,
+        "zero": 0.0,
+        "sel_zero": 0.0,
+        "sel_one": 1.0
+      },
+      "lit_at": {
+        "half": "c251.x",
+        "base": "c254.w",
+        "rate1": "c252.x",
+        "rate2": "c252.y",
+        "two_pi": "c252.z",
+        "quarter": "c252.w",
+        "lean": "c253.x",
+        "gust": "c253.y",
+        "phase_x": "c254.x",
+        "phase_y": "c254.y",
+        "lo": "c254.z",
+        "amp": "c255.x",
+        "along": "c255.y",
+        "across": "c255.z",
+        "rate0": "c255.w",
+        "zero": "c253.z",
+        "sel_zero": "c253.z",
+        "sel_one": "c253.w"
+      },
+      "elements": [
+        {
+          "name": "weights",
+          "fetch": 1,
+          "format": 6,
+          "offset": 7,
+          "source": "xyzw"
+        }
+      ],
+      "evidence": "wind_check.py formulas, rows and identities (out/native-evidence/foliage/t7_wind_check.txt); lighting-formulas.md, \"Wind\""
     }
   },
   "0xFC4F2EF6930768BE": {
@@ -1525,6 +2245,42 @@
         "source": "zyx"
       },
       "evidence": "dump shader_FC4F2EF6930768BE.ucode.vert (fetches in order: out/native-evidence/lighting/task4_table_facts.txt). Instance colour: the 8_8_8_8 element at dword 6 of the instance stream vf1 (Stride=7; fetch 3, fetched _zyx: channels z, y, x are red, green, blue), raised to c18.w and tinted by c18.xyz plus c54.xyz. Normal: the 16_16_16_16_FLOAT element at dword 2 of the mesh stream vf0 (Stride=6; fetch 5), through the instance's three rows, normalised, and bent towards the instance's up axis with c45 (lighting-formulas.md, \"Instanced plants\"). Checked by light_check.py with the pixel shaders that list this shader (ps-albedo.json \"light\"; out/native-evidence/lighting/task4_light_check_all.txt). Source components (fix round 1): the normal is source y, x, w, the first three halves of the element in memory, whatever the fetch's destination swizzle (yxwz or yzxw); the instance colour's red, green, blue are source z, y, x. Measured on the dumped streams of two captures (out/native-evidence/lighting/task4_fix1_elements_bridge_C.txt, ..._trees_C.txt): the normal taken this way has unit length in every sampled vertex."
+    },
+    "wind": {
+      "family": "plant",
+      "role": "scene",
+      "reg": [
+        10,
+        21,
+        22,
+        25,
+        26
+      ],
+      "lit_reg": [
+        253,
+        254,
+        255
+      ],
+      "lit": {
+        "lo": -3.1415927410125732,
+        "two_pi": 6.2831854820251465,
+        "inv_two_pi": 0.15915493667125702,
+        "gain": 0.10000000149011612,
+        "height": 5.0,
+        "half": 0.5,
+        "unit": 1.0
+      },
+      "lit_at": {
+        "lo": "c253.x",
+        "two_pi": "c253.z",
+        "inv_two_pi": "c253.w",
+        "gain": "c254.w",
+        "height": "c255.w",
+        "half": "c254.z",
+        "unit": "c254.y"
+      },
+      "elements": [],
+      "evidence": "Checked with the push loop's count at 0: the push away from characters is not drawn (spec ruling 10). wind_check.py formulas, rows and identities (out/native-evidence/foliage/t7_wind_check.txt); lighting-formulas.md, \"Wind\""
     }
   }
 }

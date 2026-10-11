@@ -21,8 +21,8 @@ more than MOVED from the clip position at rest (a check on vertices that stand p
 Which copy and which mesh vertex an instanced index names is taken from the microcode's own fetches (the
 index arithmetic is the instance entry's, not the wind's).
 
-Made inputs (criterion 1): the wind registers inside the spec's Design 5 bounds (REGISTER_BOUNDS; c25.x from 0:
-ledger ruling 26), each component at its lower or upper edge in about three trials of ten, the clock's size
+Made inputs (criterion 1): the wind registers inside the spec's Design 5 bounds (REGISTER_BOUNDS; c25.x from 0
+and |c17.xy| to 16: ledger rulings 26 and 28), each component at its lower or upper edge in about three trials of ten, the clock's size
 spread over eight decades; positions and pivots as halves, the 8_8_8_8 elements over all their values; every
 25th trial is a draw without sway (zero weights; a plant with c26 = 0), every 25th a vertex beyond a plant's
 distance cut (the microcode's position is then no number, and so must the check's be) or a leaf vertex at its
@@ -70,10 +70,11 @@ _FORMATS = {32: "FMT_16_16_16_16_FLOAT", 6: "FMT_8_8_8_8"}
 _FORMAT_CODES = {name: code for code, name in _FORMATS.items()}
 MESH_SLOT, COPY_SLOT = 95, 94       # vf0, vf1 (a stream vfN is fetch slot 95 - N)
 
-# The spec's Design 5 bounds, (register, component) -> (lowest, highest); c25.x from 0 (ledger ruling 26).
+# The spec's Design 5 bounds, (register, component) -> (lowest, highest), as the ledger amended them: c25.x from
+# 0 (ruling 26), c17.xy to 16 (ruling 28: 12.5 occurs in the first frame after loading, capture 191202).
 _TREE_BOUNDS = {(15, 0): (-1e7, 1e7), (15, 1): (0.0, 4.0), (15, 2): (0.0, 4.0), (15, 3): (0.0, 4.0),
                 (16, 0): (-4.0, 4.0), (16, 1): (-4.0, 4.0), (16, 2): (-4.0, 4.0), (16, 3): (-4.0, 4.0),
-                (17, 0): (-8.0, 8.0), (17, 1): (-8.0, 8.0), (17, 2): (0.0, 16.0), (17, 3): (-2e7, 2e7)}
+                (17, 0): (-16.0, 16.0), (17, 1): (-16.0, 16.0), (17, 2): (0.0, 16.0), (17, 3): (-2e7, 2e7)}
 REGISTER_BOUNDS = {
     "plant": {(10, 0): (-1e7, 1e7), (21, 0): (-4.0, 4.0), (21, 1): (-4.0, 4.0), (21, 2): (-4.0, 4.0),
               (22, 0): (-8.0, 8.0), (22, 1): (-8.0, 8.0), (22, 2): (-8.0, 8.0), (25, 0): (0.0, 64.0),

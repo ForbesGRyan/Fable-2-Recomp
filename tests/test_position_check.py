@@ -821,5 +821,165 @@ class CommittedLeafEntriesTest(unittest.TestCase):
             self.assertEqual(pc.parse_entry(table[vs]), want, vs)
 
 
+
+def byte4(*source):
+    """An 8_8_8_8 element whose SOURCE components x to w are the bytes given (stored 8-in-32)."""
+    return struct.pack(">I", sum(b << (8 * k) for k, b in enumerate(source)))
+
+
+class WindTest(Base):
+    """An entry's "wind" member: the position with the wind, and criterion 4's report (plan Task 7)."""
+    C15, C16, C17 = [59.734234, 0.63, 0.72, 0.32], [0.012, 0.06, 0.4, 0.035], [-0.66, -0.63, 2.0, 111.802376]
+
+    def setUp(self):
+        super().setUp()
+        import light_formulas
+        self.lf = light_formulas
+
+    def tree(self, hash_, vertices):
+        """A tree row of `vertices` = [(p, q, weight bytes, flutter bytes)] with the shader's own fetch ordinals."""
+        member = self.lf.wind_table_member(hash_)
+        data = b""
+        for p, q, w, v in vertices:
+            data += struct.pack(">4e", *p, 0.0) + bytes(12) + struct.pack(">4e", *q, 0.0) + byte4(*w) + byte4(*v)
+        fetches = [fetch(i, 95, 16, 2, 9, mini=True) for i in range(6)]
+        fetches[0] = fetch(0, 95, 32, 0, 9, swz=swz("yxwz"), norm=False, signed=True)
+        for el in member["elements"]:
+            fetches[el["fetch"]] = fetch(el["fetch"], 95, el["format"], el["offset"], 9, mini=True)
+        vconst = list(IDENTITY) + [0.0] * 240
+        for reg, value in ((15, self.C15), (16, self.C16), (17, self.C17)):
+            vconst[4 * reg:4 * reg + 4] = value
+        row = self.row("0x" + hash_, fetches, [self.stream(95, 0x1000, data, 36)], list(range(len(vertices))), vconst)
+        entry = {"base": 0, "layout": "dot", "pos_fetch": 0, "pos_swizzle": "yxw1", "deformed": True, "wind": member}
+        return row, entry
+
+    def moved(self, row, entry):
+        get = pc.stream_reader(row, self.dir)
+        rest, info = pc.replay(row, pc.parse_entry(entry), get)
+        return rest, pc.wind_positions(row, entry, get, rest, info)
+
+    def test_a_trunk_vertex_is_moved_by_its_four_bytes_in_source_order(self):
+        p = (1.5, -2.25, 4.0)
+        row, entry = self.tree("475EC9F795E5EDBB", [(p, p, (51, 102, 204, 255), (0, 0, 0, 0)), (p, p, (0, 0, 0, 0), (9, 9, 9, 9))])
+        rest, moved = self.moved(row, entry)
+        self.assertEqual(rest[0], p + (1.0,))
+        reg = [[pc.f32(x) for x in r] for r in (self.C15, self.C16, self.C17)]
+        want = self.lf.wind_trunk(p, (51 / 255, 102 / 255, 204 / 255, 1.0), *reg, entry["wind"]["lit"])
+        self.assertEqual(moved[0], tuple(want) + (1.0,))
+        self.assertGreater(max(abs(a - b) for a, b in zip(moved[0], rest[0])), 0.01)
+        self.assertEqual(moved[1], rest[1])                              # no weights: it stands
+        # another order of the bytes is another position
+        other = self.lf.wind_trunk(p, (102 / 255, 51 / 255, 204 / 255, 1.0), *reg, entry["wind"]["lit"])
+        self.assertNotEqual(moved[0][:3], tuple(other))
+
+    def test_a_leaf_vertex_turns_about_its_pivot(self):
+        p, q = (1.5, -2.25, 4.0), (1.0, -2.0, 3.0)
+        row, entry = self.tree("A5846836C90E1192", [(p, q, (51, 102, 204, 255), (28, 77, 140, 0))])
+        rest, moved = self.moved(row, entry)
+        reg = [[pc.f32(x) for x in r] for r in (self.C15, self.C16, self.C17)]
+        lit = entry["wind"]["lit"]
+        want = self.lf.wind_leaf(p, q, (51 / 255, 102 / 255, 204 / 255, 1.0), (28 / 255, 77 / 255, 140 / 255), *reg, lit)
+        self.assertEqual(moved[0], tuple(want) + (1.0,))
+        pivot = [q[k] + o for k, o in enumerate(self.lf.wind_tree_offset((51 / 255, 102 / 255, 204 / 255, 1.0), *reg, lit))]
+        self.assertAlmostEqual(math.dist(moved[0][:3], pivot), math.dist(p, q), places=9)
+        # the caster reads the same elements at its own fetch ordinals
+        row, entry = self.tree("432563420047C96C", [(p, q, (51, 102, 204, 255), (28, 77, 140, 0))])
+        self.assertEqual(self.moved(row, entry)[1][0], tuple(want) + (1.0,))
+
+    def test_a_row_the_member_does_not_fit_is_unsupported(self):
+        p = (1.5, -2.25, 4.0)
+        row, entry = self.tree("475EC9F795E5EDBB", [(p, p, (1, 2, 3, 4), (0, 0, 0, 0))])
+        row["fetches"][4]["off"] = 8
+        with self.assertRaises(pc.Unsupported):
+            self.moved(row, entry)
+        row, entry = self.tree("475EC9F795E5EDBB", [(p, p, (1, 2, 3, 4), (0, 0, 0, 0))])
+        row["streams"][0]["endian"] = 1
+        with self.assertRaises(pc.Unsupported):
+            self.moved(row, entry)
+
+    def plant(self, c26=(0.025, 0.0637), cut=None):
+        mesh = b"".join(struct.pack(">4e", x, 0.0, z, 0.0) for x, z in ((0.0, 0.0), (0.25, 0.1), (0.5, 1.0)))
+        inst = b"".join(struct.pack(">4e", 1, 0, 0, dx) + struct.pack(">4e", 0, 1, 0, dy) + struct.pack(">4e", 0, 0, 1, 0)
+                        for dx, dy in ((0.0, 0.25), (0.5, 0.75)))
+        half4 = dict(swz=swz("yxwz"), norm=False, signed=True)
+        fetches = [fetch(0, 94, 32, 0, 6, **half4), fetch(1, 94, 32, 2, 6, mini=True, **half4),
+                   fetch(2, 94, 32, 4, 6, mini=True, **half4), fetch(3, 95, 32, 0, 2, **half4)]
+        vconst = list(IDENTITY) + [0.0] * 240
+        vconst[48:52] = [1.0 / 3.0, 3.0, 0.0, 0.0]                           # c12
+        vconst[28:31] = [0.1, 0.2, 0.0]                                      # c7
+        vconst[40] = 58.0                                                    # c10.x
+        vconst[84:87], vconst[88:91] = [0.9024, 0.4099, 0.1329], [-0.35, 1.53, 0.0]
+        vconst[100], vconst[104:106] = 1.0, list(c26)
+        member = self.lf.wind_table_member("A8A5B2A89F70336A")
+        entry = {"base": 0, "layout": "dot", "pos_swizzle": "yxw1", "deformed": True, "wind": member,
+                 "instance": {"mesh_fetch": 3, "row_fetches": [0, 1, 2], "row_swizzles": ["yxwz", "yxwz", "yxwz"],
+                              "inv_count": "c12.x", "count": "c12.y", "first": "c12.z", "bias": 0.5, "offset": "c7.xyz"}}
+        if cut is not None:
+            entry["instance"]["cut"] = {"eye": "c9.xyz", "dist2": "c13.z"}
+            vconst[54] = cut
+        row = self.row("0xA8A5B2A89F70336A", fetches, [self.stream(94, 0x2000, inst, 24), self.stream(95, 0x3000, mesh, 8)],
+                       [0, 1, 2, 3, 4, 5], vconst)
+        return row, entry
+
+    def test_a_plant_vertex_sways_by_its_height_and_its_copys_seed(self):
+        row, entry = self.plant()
+        rest, moved = self.moved(row, entry)
+        self.assertEqual(moved[0], rest[0])                                  # at the root
+        self.assertEqual(moved[3], rest[3])
+        lit = entry["wind"]["lit"]
+        f = pc.f32
+        for i, (copy, z) in ((1, (0, 0.1)), (2, (0, 1.0)), (5, (1, 1.0))):
+            a3, b3 = ((0.0, 0.25), (0.5, 0.75))[copy]
+            want = self.lf.wind_plant(rest[i][:3], struct.unpack(">e", struct.pack(">e", z))[0], a3, b3, (f(0.1), f(0.2)), 58.0,
+                                      [f(x) for x in (0.9024, 0.4099, 0.1329)], [f(x) for x in (-0.35, 1.53, 0.0)], 1.0,
+                                      [f(0.025), f(0.0637)], lit)
+            self.assertEqual(moved[i], tuple(want) + (1.0,), i)
+            self.assertNotEqual(moved[i], rest[i])
+        self.assertNotEqual([a - b for a, b in zip(moved[2], rest[2])], [a - b for a, b in zip(moved[5], rest[5])])   # the seeds differ
+        # no sway (ledger ruling 26) and a vertex beyond the cut: at rest
+        row, entry = self.plant(c26=(0.0, 0.0))
+        rest, moved = self.moved(row, entry)
+        self.assertEqual(moved, rest)
+        row, entry = self.plant(cut=0.0)
+        rest, moved = self.moved(row, entry)
+        self.assertEqual(moved, rest)
+
+    def test_the_report_and_its_line(self):
+        self.assertEqual(pc._percentile([], 0.99), 0.0)
+        self.assertEqual(pc._percentile([1.0, 2.0, 3.0, 4.0], 0.5), 2.0)
+        self.assertEqual(pc._percentile([float(i) for i in range(1, 201)], 0.99), 198.0)
+        met = {"rows": 2, "vertices": 100, "outside": 3, "outside_worst": 1e-7, "cut": 1, "problems": {}, "p50": 1e-4, "p99": 2e-3,
+               "max": 0.01, "met": True}
+        line = pc.format_wind("0xAB", met)
+        self.assertIn("wind: p50 / p99 / max pixel 1.00e-04 / 2.00e-03 / 1.00e-02", line)
+        self.assertTrue(line.endswith(": met"))
+        bad = dict(met, problems={"sides differ": 1}, met=False)
+        self.assertIn("problems: sides differ (1 rows)", pc.format_wind("0xAB", bad))
+        self.assertTrue(pc.format_wind("0xAB", bad).endswith(": NOT MET"))
+        self.assertEqual(pc.format_wind("0xAB", dict(met, rows=0)), "VS 0xAB wind: no row with streams")
+
+
+LOGS = Path(__file__).resolve().parent.parent / "out" / "build" / "win-amd64-release" / "logs"
+BRIDGE = LOGS / "native_discovery_20261010_182313.jsonl"
+DUMPS = Path(__file__).resolve().parent.parent / "out" / "shader_dump"
+VS_TABLE = Path(__file__).resolve().parent.parent / "docs" / "native-renderer" / "vs-transforms.json"
+
+
+@unittest.skipUnless(BRIDGE.is_file() and DUMPS.is_dir(), f"no capture {BRIDGE.name} or no shader dumps")
+class WindOnACaptureTest(unittest.TestCase):
+    def test_criterion_4_on_a_few_rows_of_the_bridge(self):
+        entries = json.loads(VS_TABLE.read_text())
+        report = pc.wind_report(BRIDGE, entries, per_draw=8, frames=(1,), per_shader=3)
+        with_rows = {k: r for k, r in report.items() if r["rows"]}
+        self.assertGreaterEqual(len(with_rows), 9)
+        for key, r in with_rows.items():
+            self.assertTrue(r["met"], pc.format_wind(key, r))
+        # the entry at rest (the member's formula taken away) does not meet it: the measure can fail
+        still = {k: e for k, e in entries.items()}
+        with mock.patch.object(pc, "wind_positions", lambda row, entry, get, positions, info: positions):
+            report = pc.wind_report(BRIDGE, still, per_draw=8, frames=(1,), per_shader=3, only_vs="0x475EC9F795E5EDBB")
+        self.assertFalse(report["0x475EC9F795E5EDBB"]["met"])
+
+
 if __name__ == "__main__":
     unittest.main()

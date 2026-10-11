@@ -56,10 +56,18 @@ Rows that cannot be judged are counted apart from the draws:
                (instance-unsupported / skin-unsupported) or an endian is not handled
   bad-index    garbage instance constants or a copy past the instance stream
 
+--wind prints, instead of the lines above, criterion 4 of the foliage sub-project: for every
+shader whose entry has a "wind" member, the entry's position with the wind (the closed formula of
+light_formulas.py on the row's registers and elements) against the microcode's own oPos, as
+`wind: p50 / p99 / max pixel` over the wind draw rows that hold streams (the main scene's, the
+casters' own, the reflection views'), --wind-per-draw vertices a row. Met: the 99th percentile
+below 0.05 pixel of 1120 x 720 and no vertex above 0.5; the exit code is then 1 if a shader with
+rows is not met.
+
 --entry overlays candidate entries (same shape as vs-transforms.json) without touching the
 table. --cpp-fixture prints, for one sampled draw of that shader, C++ arrays (the stream
 bytes used, the constants, the first 16 expected positions) for a native regression test.
-The exit code is always 0: the report is the result.
+The exit code is always 0 without --wind: the report is the result.
 """
 import argparse
 import json
@@ -550,6 +558,181 @@ def positions_for(row, entry, capture_dir):
     return replay(row, parse_entry(entry), stream_reader(row, capture_dir))[0]
 
 
+# --- Wind ---------------------------------------------------------------------
+#
+# An entry's "wind" member (the foliage sub-project, spec Design 5): the family's closed formula of
+# light_formulas.py moves the position replay() gives. Criterion 4 holds the result against the
+# microcode's own oPos, vertex by vertex (wind_report; `--wind`).
+
+WIND_SIZE = (1120, 720)     # the picture the criterion's pixels are of
+WIND_P99_MAX = 0.05         # criterion 4: the 99th percentile below this many pixels ...
+WIND_MAX = 0.5              # ... and no vertex above this
+WIND_OUTSIDE_MAX = 1e-4     # a vertex off the picture: the clip positions within this, relative (criterion 1's bound)
+_WIND_BYTES = {32: 8, 6: 4}
+
+
+def _wind_source(stream, at, fmt):
+    """A vertex element's SOURCE components (x to w of the GPU's fetch) from a stream stored 8-in-32."""
+    if fmt == 32:
+        m = struct.unpack_from(">4e", stream.data, at)
+        return (m[1], m[0], m[3], m[2])
+    word = struct.unpack_from(">I", stream.data, at)[0]
+    return tuple(((word >> (8 * k)) & 0xFF) / 255.0 for k in range(4))
+
+
+def wind_positions(row, entry, get, positions, info):
+    """replay()'s positions (at rest) moved by the entry's "wind" member: the family's formula with the row's
+    registers (as single-precision numbers) and the elements the member names, read from the row's streams.
+    A position that is no number, and a plant vertex beyond the distance cut, stay as they are. Raises
+    Unsupported for a row the member does not fit (a fetch that is not the element's, an endian this reader
+    does not know)."""
+    import light_formulas as lf
+    wind, spec = entry["wind"], parse_entry(entry)
+    family, lit = wind["family"], wind["lit"]
+    c = _constants(row, max(wind["reg"]) * 4 + 3)
+    reg = {r: [f32(x) for x in c[4 * r:4 * r + 4]] for r in wind["reg"]}
+    fetches = row["fetches"]
+    out = []
+    if family == "plant":
+        if spec is None or spec["kind"] != "instance":
+            raise Unsupported("a plant's wind without an instance entry")
+        pos = info["pos"]
+        vb = get(pos.slot)
+        rows = _rows(fetches, spec, pos.slot)
+        stream = get(rows[0].slot)
+        for layout in rows:
+            if not apply_fetch_endian(layout, stream.endian):
+                raise Unsupported("instance row endian")
+        k = _constants(row, spec["offset"] + 1)
+        c7 = (f32(k[spec["offset"]]), f32(k[spec["offset"] + 1]))
+        cut = info.get("cut") or [False] * len(positions)
+        for i, p in enumerate(positions):
+            cv = info["pairs"][i]
+            if cv is None or p[0] != p[0] or cut[i]:
+                out.append(p)
+                continue
+            mesh = decode_position(vb, pos, cv[1])
+            a, b = decode_position(stream, rows[0], cv[0]), decode_position(stream, rows[1], cv[0])
+            moved = lf.wind_plant(p[:3], mesh[2], a[3], b[3], c7, reg[10][0], reg[21][:3], reg[22][:3], reg[25][0],
+                                  reg[26][:2], lit)
+            out.append(tuple(moved) + (1.0,))
+        return out
+    elements = []
+    for el in wind["elements"]:
+        f = fetches[el["fetch"]] if el["fetch"] < len(fetches) else None
+        if f is None or f["fmt"] != el["format"] or f["off"] != el["offset"] or f["fmt"] not in _WIND_BYTES:
+            raise Unsupported("wind element %s is not the row's fetch %d" % (el["name"], el["fetch"]))
+        stream = get(f["slot"])
+        if stream.endian != 2:
+            raise Unsupported("wind element endian")
+        elements.append((el["name"], stream, f, el["source"]))
+    for i, p in enumerate(positions):
+        vertex = info["flat"][i]
+        values = {}
+        for name, stream, f, source in elements:
+            at = stream.at((vertex * f["stride"] + f["off"]) * 4, _WIND_BYTES[f["fmt"]]) if vertex >= 0 else None
+            if at is None:
+                values = None
+                break
+            src = _wind_source(stream, at, f["fmt"])
+            values[name] = tuple(src[_COMP.index(ch)] for ch in source)
+        if p[0] != p[0] or values is None:
+            out.append(p if values is not None else NAN_POSITION)
+            continue
+        if family == "trunk":
+            moved = lf.wind_trunk(p[:3], values["weights"], reg[15], reg[16], reg[17], lit)
+        else:
+            moved = lf.wind_leaf(p[:3], values["pivot"], values["weights"], values["flutter"], reg[15], reg[16], reg[17], lit)
+        out.append(tuple(moved) + (1.0,))
+    return out
+
+
+def _percentile(sorted_values, share):
+    if not sorted_values:
+        return 0.0
+    return sorted_values[min(len(sorted_values) - 1, int(math.ceil(share * len(sorted_values))) - 1)]
+
+
+def wind_report(capture_path, entries, per_draw=64, only_vs=None, dumps=None, frames=None, per_shader=None):
+    """Criterion 4: for every draw row with streams whose entry has "wind", the entry's position with the wind
+    (replay, wind_positions, the entry's rows) against the microcode's oPos (capture_replay.Draw), in pixels of
+    1120 x 720, on up to `per_draw` of the vertices the row's "idx" names. {shader key: {"rows", "vertices",
+    "p50", "p99", "max", "outside", "outside_worst", "cut", "problems": {reason: rows}}}. The pixels are
+    measured on the vertices the microcode puts inside the clip volume. A vertex outside it (off the picture
+    or behind the eye, where x / w has no bound: the near plants stand at the camera's feet) has no pixel; its
+    two clip positions are held to WIND_OUTSIDE_MAX times max(1, |oPos|) instead, and the largest such
+    difference is reported. A vertex both sides cut is counted; one that only one side cuts is the problem
+    "sides differ". A caster's projection is a shadow map's: its "pixel" is the same unit, half the clip range
+    over 560 and 360, not a texel of the map."""
+    import capture_replay as cr
+    import random
+    path = Path(capture_path)
+    capture_dir = path.parent
+    kwargs = {} if dumps is None else {"dumps": dumps}
+    specs = {}
+    for key, entry in entries.items():
+        if isinstance(entry, dict) and "wind" in entry:
+            specs[cr.vs_hash({"vs_hash": key})] = (key, entry, parse_entry(entry))
+    report = {key: {"rows": 0, "vertices": 0, "outside": 0, "outside_worst": 0.0, "cut": 0, "problems": {}, "_d": []}
+              for key, _e, _s in specs.values()}
+    for row in cr.rows(path, kinds=("draw",)):
+        h = cr.vs_hash(row)
+        if h not in specs or not row.get("streams") or not row.get("bank") or (frames and row.get("frame") not in frames):
+            continue
+        key, entry, spec = specs[h]
+        if only_vs and int(key, 16) != int(str(only_vs), 16):
+            continue
+        r = report[key]
+        if per_shader is not None and r["rows"] >= per_shader:
+            continue
+        r["rows"] += 1
+        ids = sorted({int(i) for i in row.get("idx") or [] if int(i) >= 0})
+        if len(ids) > per_draw:
+            ids = sorted(random.Random(int(row.get("line", 0))).sample(ids, per_draw))
+        sub = dict(row, idx=ids)
+        try:
+            get = stream_reader(row, capture_dir)
+            rest, info = replay(sub, spec, get)
+            moved = wind_positions(sub, entry, get, rest, info)
+            draw = cr.Draw(path, row, **kwargs)
+            cut = info.get("cut") or [False] * len(moved)
+            for i, p in enumerate(moved):
+                got = draw.run(info["flat"][i])[0]["oPos"]
+                gone = any(x != x for x in got)
+                if cut[i] or gone or p[0] != p[0]:
+                    if not (cut[i] or p[0] != p[0]) or not gone:
+                        raise Unsupported("sides differ")
+                    r["cut"] += 1
+                    continue
+                want = project(row, spec, p)
+                if not in_clip(got):
+                    r["outside"] += 1
+                    r["outside_worst"] = max(r["outside_worst"], max(abs(g - w) / max(1.0, abs(g)) for g, w in zip(got, want)))
+                    continue
+                r["_d"].append(math.hypot((got[0] / got[3] - want[0] / want[3]) * WIND_SIZE[0] / 2,
+                                          (got[1] / got[3] - want[1] / want[3]) * WIND_SIZE[1] / 2))
+                r["vertices"] += 1
+        except (Unreadable, Unsupported, BadIndex, cr.Unreadable, IndexError, KeyError, NotImplementedError) as e:
+            reason = str(e) or type(e).__name__
+            r["problems"][reason] = r["problems"].get(reason, 0) + 1
+    for r in report.values():
+        d = sorted(r.pop("_d"))
+        r["p50"], r["p99"], r["max"] = _percentile(d, 0.5), _percentile(d, 0.99), (d[-1] if d else 0.0)
+        r["met"] = (bool(d) or r["outside"] > 0) and not r["problems"] and r["p99"] < WIND_P99_MAX and r["max"] <= WIND_MAX             and r["outside_worst"] <= WIND_OUTSIDE_MAX
+    return report
+
+
+def format_wind(key, r):
+    line = (f"VS {key} wind: p50 / p99 / max pixel {r['p50']:.2e} / {r['p99']:.2e} / {r['max']:.2e} over {r['vertices']} "
+            f"vertices in view of {r['rows']} rows (outside the view {r['outside']}: largest relative difference "
+            f"{r['outside_worst']:.2e}; beyond the cut {r['cut']})")
+    if r["problems"]:
+        line += "; problems: " + ", ".join(f"{k} ({v} rows)" for k, v in sorted(r["problems"].items()))
+    if not r["rows"]:
+        return f"VS {key} wind: no row with streams"
+    return line + (": met" if r["met"] else ": NOT MET")
+
+
 # --- Capture ------------------------------------------------------------------
 
 
@@ -999,11 +1182,23 @@ def main(argv=None):
     ap.add_argument("--cpp-fixture", metavar="HASH", help="print C++ arrays for one sampled draw of this shader")
     ap.add_argument("--bones", type=int, default=0, metavar="N",
                     help="list each skin entry's N bone uses that deviate most from orthonormal")
+    ap.add_argument("--wind", action="store_true", help="the wind entries' positions against the microcode's oPos")
+    ap.add_argument("--wind-per-draw", type=int, default=64, help="--wind: vertices compared per draw row")
     a = ap.parse_args(argv)
     table = json.loads(Path(a.json).read_text())
     entries = dict(table)
     if a.entry:
         entries.update(json.loads(Path(a.entry).read_text()))
+    if a.wind:
+        report = wind_report(a.capture, entries, a.wind_per_draw, a.vs)
+        print(f"{Path(a.capture).name}: wind entries against the microcode's oPos, up to {a.wind_per_draw} vertices a row; "
+              f"met: p99 below {WIND_P99_MAX} pixel of {WIND_SIZE[0]} x {WIND_SIZE[1]} and none above {WIND_MAX}")
+        for key, r in sorted(report.items(), key=lambda kv: -kv[1]["rows"]):
+            print(format_wind(key, r))
+        with_rows = [r for r in report.values() if r["rows"]]
+        print(f"wind: {sum(1 for r in with_rows if r['met'])} of {len(with_rows)} shaders with rows met; "
+              f"{len(report) - len(with_rows)} without a row")
+        return 0 if with_rows and all(r["met"] for r in with_rows) else 1
     index = scan(a.capture)
     report = check(a.capture, entries, a.max_draws, a.vs, index, a.cpp_fixture, table, max(a.bones, 0))
     baseline = report.pop("_baseline")

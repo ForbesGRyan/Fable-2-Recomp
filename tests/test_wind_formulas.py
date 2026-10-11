@@ -107,6 +107,23 @@ class Literals(unittest.TestCase):
         self.assertEqual(plant["inv_two_pi"], f32(1 / (2 * math.pi)))
         self.assertEqual((plant["gain"], plant["height"], plant["half"], plant["unit"]), (f32(0.1), 5.0, 0.5, 1.0))
 
+    def test_the_values_are_the_tracked_literal_tables(self):
+        """Without a capture: the literal tables light_check.py and vs_check.py hold (each read from capture rows
+        in an earlier sub-project) have every wind literal at the row's place. FBD3 has no such table: its values
+        are held by its capture rows alone (wind_check.py rows)."""
+        import light_check
+        import vs_check
+        tables = dict(light_check._PLANT_VS)
+        tables.update({h: v["literals"] for h, v in light_check._LEAF_VS.items()})
+        tables["475EC9F795E5EDBB"] = light_check._OBJECT_VS["475EC9F795E5EDBB"]["literals"]
+        tables.update({h: vs_check.CASTER_LITERALS[h] for h in ("A8A5B2A89F70336A", "432563420047C96C")})
+        self.assertEqual(set(lf.WIND_SHADERS) - set(tables), {"FBD39C64463E180B"})
+        for hash_, row in lf.WIND_SHADERS.items():
+            if hash_ not in tables:
+                continue
+            for name, (reg, comp) in row["lit_at"].items():
+                self.assertEqual(f32(tables[hash_][reg][comp]), row["lit"][name], (hash_, name))
+
     def test_the_structure_is_zero_and_one(self):
         """What a formula takes as structure (a select's condition, an added zero, the 1 that is also the
         position's w) is in the row all the same, so that the capture holds the shader object's table against it."""
@@ -180,6 +197,17 @@ class AgainstMicrocode(unittest.TestCase):
         case.consts[13][2] = 1e12                       # not cut after all: the check may not call it cut
         t = wind_check.evaluate(case)
         self.assertTrue(t.ok and t.error is not None, t)
+
+    def test_a_draw_without_sway_does_not_count_as_moved(self):
+        """The floor on the moved trials means something only if a still vertex is not counted."""
+        for hash_ in lf.WIND_SHADERS:
+            case = wind_check.made_case(hash_, seed=11, trial=0, dumps=DUMPS)
+            self.assertEqual(case.kind, "still")
+            t = wind_check.evaluate(case)
+            self.assertTrue(t.ok and not t.moved, (hash_, t))
+            moving = wind_check.evaluate(wind_check.made_case(hash_, seed=11, trial=3, dumps=DUMPS))
+            self.assertTrue(moving.ok, (hash_, moving))
+        self.assertGreater(sum(wind_check.evaluate(wind_check.made_case(GRASS, 11, k, DUMPS)).moved for k in range(2, 12)), 4)
 
     def test_the_near_plants_are_checked_without_their_push(self):
         """Ruling 10: the push loop of the four near shaders runs 0 times in the check, and the check says so."""
@@ -354,6 +382,362 @@ class TrunkAgainstMicrocode(unittest.TestCase):
             rest = wind_check.project(case.consts, wind_check.formula_inputs(case, m)["p"])
             moved += max(abs(x - y) for x, y in zip(a["oPos"], rest)) > 1e-3
         self.assertGreater(moved, 40)
+
+
+
+LEAF, LEAF_CASTER = "A5846836C90E1192", "432563420047C96C"
+LEAVES = (LEAF, "D7DD31B9BF194DE8", "2D40B53C926109BE", LEAF_CASTER)
+C16_LEAF = C16[:3] + (0.035,)                   # c16.w is 0.035 in every leaf row and -1 in every trunk row (frame map 18)
+
+
+def made_leaf(i):
+    """The i-th made leaf input: (p, q, w4, v3, c15, c16, c17)."""
+    p, w4, c15, c16, c17 = made_tree(i)
+    reach = 0.05 + 0.03 * (i % 97)
+    q = (p[0] + reach * math.cos(0.7 * i), p[1] + reach * math.sin(0.7 * i) * 0.8, p[2] - reach * 0.6 * math.cos(1.3 * i))
+    v3 = tuple(((i * k) % 256) / 255.0 for k in (11, 17, 23))
+    return p, q, w4, v3, c15, (c16[0], c16[1], c16[2], 0.035 * (i % 6)), c17
+
+
+class Leaf(unittest.TestCase):
+    def lit(self):
+        return lf.WIND_SHADERS[LEAF]["lit"]
+
+    def test_a_vertex_at_its_pivot_without_weights_is_the_pivot(self):
+        """The direction has no length to turn, and a pivot without weights stands."""
+        q = (4.0, -2.0, 7.5)
+        zero4, zero3 = (0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
+        self.assertEqual(lf.wind_leaf(q, q, zero4, zero3, C15, C16_LEAF, C17, self.lit()), q)
+        # with weights the pivot moves as a trunk vertex does, and the vertex at it goes with it
+        w4 = (0.3, 0.6, 0.9, 0.2)
+        self.assertEqual(lf.wind_leaf(q, q, w4, zero3, C15, C16_LEAF, C17, self.lit()), lf.wind_trunk(q, w4, C15, C16_LEAF, C17, self.lit()))
+        # no lift at all (c15.w = 0) and no length: still the pivot, not a division by zero
+        still = lf.wind_leaf(q, q, w4, (0.1, 0.2, 0.3), C15[:3] + (0.0,), C16_LEAF, C17, self.lit())
+        self.assertEqual(still, lf.wind_trunk(q, w4, C15, C16_LEAF, C17, self.lit()))
+
+    def test_the_vertex_keeps_its_distance_from_the_pivot(self):
+        """Instr 98: the turned direction is brought back to the length |P - Q|."""
+        turned = 0
+        for i in range(400):
+            p, q, w4, v3, c15, c16, c17 = made_leaf(i)
+            got = lf.wind_leaf(p, q, w4, v3, c15, c16, c17, self.lit())
+            off = lf.wind_tree_offset(w4, c15, c16, c17, self.lit())
+            moved_pivot = tuple(q[k] + off[k] for k in range(3))
+            length = math.sqrt(sum((p[k] - q[k]) ** 2 for k in range(3)))
+            self.assertAlmostEqual(math.sqrt(sum((got[k] - moved_pivot[k]) ** 2 for k in range(3))), length, delta=1e-5, msg=i)
+            # only the third coordinate of the direction is pushed: the horizontal direction is kept
+            d, e = (p[0] - q[0], p[1] - q[1]), (got[0] - moved_pivot[0], got[1] - moved_pivot[1])
+            self.assertAlmostEqual(d[0] * e[1] - d[1] * e[0], 0.0, delta=1e-9 * max(1.0, length * length))
+            self.assertGreaterEqual(d[0] * e[0] + d[1] * e[1], 0.0)
+            turned += abs((got[2] - moved_pivot[2]) - (p[2] - q[2])) > 1e-4
+        self.assertGreater(turned, 200)
+
+    def test_the_offset_never_leaves_its_reach(self):
+        for i in range(400):
+            p, q, w4, v3, c15, c16, c17 = made_leaf(i)
+            got = lf.wind_leaf(p, q, w4, v3, c15, c16, c17, self.lit())
+            dist = math.sqrt(sum((g - x) ** 2 for g, x in zip(got, p)))
+            length = math.sqrt(sum((p[k] - q[k]) ** 2 for k in range(3)))
+            self.assertLessEqual(dist, lf.wind_reach_leaf(max(w4), length, c15, c16, c17, self.lit()) * (1.0 + 1e-6), i)
+        # a mesh of longer leaves has the larger bound, and a mesh without weights only the turn
+        self.assertLess(lf.wind_reach_leaf(1.0, 1.0, C15, C16_LEAF, C17, self.lit()), lf.wind_reach_leaf(1.0, 8.0, C15, C16_LEAF, C17, self.lit()))
+        self.assertGreater(lf.wind_reach_leaf(0.0, 2.0, C15, C16_LEAF, C17, self.lit()), 0.0)
+        self.assertEqual(lf.wind_reach_leaf(0.0, 0.0, C15, C16_LEAF, C17, self.lit()), 0.0)
+
+    def test_the_flutter_written_out(self):
+        """The reading of A584's instr 72 to 93 with the shader's numbers written as decimals."""
+        def s(x):
+            return math.sin(2.0 * math.pi * x)
+
+        k = f32
+        for i in (3, 41, 207, 388):
+            p, q, (b, a, d, c), v3, c15, c16, c17 = made_leaf(i)
+            t, g = c15[0], c17[3] * k(0.025)
+            length = math.sqrt(sum((p[n] - q[n]) ** 2 for n in range(3)))
+            clock = t + k(0.15) * c17[3]
+            s6 = s(k(0.15) * b + (c16[1] + k(0.035)) * t + g + c16[0] * d + k(0.05))
+            s7 = s(0.25 * clock + v3[2] + 100.0 * v3[0])
+            s8 = s(clock + v3[1])
+            kk = k(0.3849) * s6 if s6 >= 0.0 else k(0.28867501) * s6
+            push = k(0.3849) * s7 * max(length - k(0.3), 0.0) * c16[3]
+            lift = c15[3] * abs(kk) * k(0.3849) * s8 * kk
+            want = push * (k(0.55) * c17[2] + 1.0) + lift * (k(0.9) * c17[2] + 1.0)
+            got = lf.wind_leaf_lift(p, q, (b, a, d, c), v3, c15, c16, c17, self.lit())
+            self.assertAlmostEqual(got, want, delta=2e-5 * max(1.0, abs(want)), msg=i)
+
+    def test_what_a_leaf_reads_of_fetch_5(self):
+        """Three values, not two: the first (source x) enters at a hundredfold, so that a byte of 0 or 255, which
+        most vertices hold, adds a whole number of turns and nothing else (why the research's perturbation of
+        real vertices saw two)."""
+        p, q, w4, v3, c15, c16, c17 = made_leaf(77)
+        base = lf.wind_leaf_lift(p, q, w4, v3, c15, c16, c17, self.lit())
+        for n in range(3):
+            other = tuple(v3[m] + (0.003 if m == n else 0.0) for m in range(3))
+            self.assertNotEqual(lf.wind_leaf_lift(p, q, w4, other, c15, c16, c17, self.lit()), base, n)
+        zero = lf.wind_leaf_lift(p, q, w4, (0.0, v3[1], v3[2]), c15, c16, c17, self.lit())
+        full = lf.wind_leaf_lift(p, q, w4, (1.0, v3[1], v3[2]), c15, c16, c17, self.lit())
+        self.assertAlmostEqual(zero, full, delta=1e-9)
+        self.assertNotAlmostEqual(lf.wind_leaf_lift(p, q, w4, (28.0 / 255.0, v3[1], v3[2]), c15, c16, c17, self.lit()), zero, delta=1e-6)
+
+    def test_the_rows(self):
+        for hash_ in LEAVES:
+            row = lf.WIND_SHADERS[hash_]
+            self.assertEqual((row["family"], row["reg"]), ("leaf", (15, 16, 17)), hash_)
+            self.assertEqual(row["role"], "caster" if hash_ == LEAF_CASTER else "scene")
+            self.assertEqual([e[0] for e in row["elements"]], ["pivot", "weights", "flutter"])
+            self.assertEqual([e[2:] for e in row["elements"]], [(32, 5, "yxw", 3), (6, 7, "xyzw", 4), (6, 8, "xyz", 3)])
+            self.assertEqual(len(row["lit_reg"]), 7)                 # seven literal registers, not five
+        self.assertEqual(lf.WIND_SHADERS[LEAF]["lit_reg"], tuple(range(249, 256)))
+        self.assertEqual(lf.WIND_SHADERS["D7DD31B9BF194DE8"]["lit_reg"], tuple(range(248, 255)))
+        self.assertEqual(len(lf.WIND_LITERAL_ORDER["leaf"]), 28)
+        self.assertEqual(lf.WIND_LITERAL_ORDER["leaf"][:18], lf.WIND_LITERAL_ORDER["trunk"])
+        self.assertIn("182130", lf.WIND_SHADERS["2D40B53C926109BE"]["evidence"])
+        self.assertEqual(len(lf.WIND_SHADERS), 12)
+
+
+@unittest.skipUnless(DUMPS.is_dir(), NO_DUMPS)
+class LeafAgainstMicrocode(unittest.TestCase):
+    def test_trace_gives_the_transcriptions_steps(self):
+        """A584: instr 74 holds the moved pivot in r5 (z, y, x), instr 93 the direction's third coordinate with
+        the flutter in r0.x."""
+        case = wind_check.made_case(LEAF, seed=3, trial=2, dumps=DUMPS)
+        ins = wind_check.formula_inputs(case)
+        c, lit = case.consts, case.row["lit"]
+        off = lf.wind_tree_offset(ins["weights"], c[15], c[16], c[17], lit)
+        r = wind_check.trace(case, 74)
+        for got, want in zip((r[5][2], r[5][1], r[5][0]), (ins["pivot"][k] + off[k] for k in range(3))):
+            self.assertAlmostEqual(got, want, delta=1e-9 * max(1.0, abs(want)))
+        r = wind_check.trace(case, 93)
+        want = ins["p"][2] - ins["pivot"][2] + lf.wind_leaf_lift(ins["p"], ins["pivot"], ins["weights"], ins["flutter"], c[15], c[16], c[17], lit)
+        self.assertAlmostEqual(r[0][0], want, delta=1e-9 * max(1.0, abs(want)))
+
+    def test_the_caster_is_the_scene_shader_on_made_inputs(self):
+        """Criterion 2's identity without a capture: 4325 on the made draws of A584, D7DD and 2D40. Exact but for
+        the caster's own order of two sums: the bound is a rounding of the double arithmetic, not the criterion's."""
+        for scene in LEAVES[:3]:
+            worst, moved = 0.0, 0
+            for k in range(60):
+                case = wind_check.made_case(scene, seed=7, trial=k, dumps=DUMPS)
+                a, m = wind_check.run_microcode(case)
+                b = wind_check.run_microcode(wind_check._as_other(case, LEAF_CASTER, case.consts, DUMPS))[0]
+                worst = max(worst, max(abs(x - y) / max(1.0, abs(x)) for x, y in zip(a["oPos"], b["oPos"])))
+                rest = wind_check.project(case.consts, wind_check.formula_inputs(case, m)["p"])
+                moved += max(abs(x - y) for x, y in zip(a["oPos"], rest)) > 1e-3
+            self.assertLess(worst, 1e-9, scene)
+            self.assertGreater(moved, 40)
+
+    def test_the_made_leaf_trials(self):
+        seen = wind_check.made_ranges(LEAF, trials=400, seed=11, dumps=DUMPS)
+        for key, (lo, hi) in wind_check.REGISTER_BOUNDS["leaf"].items():
+            self.assertEqual(seen[key], (f32(lo), f32(hi)), key)
+        self.assertGreater(seen["still"], 0)
+        self.assertGreater(seen["pivot"], 0)
+
+
+
+import json  # noqa: E402
+import re  # noqa: E402
+
+import gen_transform_table as gtt  # noqa: E402
+import wind_pins  # noqa: E402
+
+VS_TABLE = ROOT / "docs" / "native-renderer" / "vs-transforms.json"
+WIND_TABLE = ROOT / "src" / "native" / "capture" / "wind_table.inc"
+
+
+class Table(unittest.TestCase):
+    """vs-transforms.json's "wind" members are the rows of WIND_SHADERS, and wind_table.inc is made of them."""
+
+    def test_the_tables_members_are_the_rows(self):
+        table = gtt.load(VS_TABLE)
+        with_wind = {key[2:].upper() for key, e in table.items() if isinstance(e, dict) and "wind" in e}
+        self.assertEqual(with_wind, set(lf.WIND_SHADERS))
+        for hash_ in lf.WIND_SHADERS:
+            self.assertEqual(table["0x" + hash_]["wind"], lf.wind_table_member(hash_), hash_)
+            self.assertIs(table["0x" + hash_].get("deformed"), True)
+
+    def test_the_generators_families_are_the_formulas(self):
+        self.assertEqual(set(gtt.WIND_FAMILIES), set(lf.WIND_LITERAL_ORDER))
+        for family, (code, regs, names, elements) in gtt.WIND_FAMILIES.items():
+            self.assertEqual(names, lf.WIND_LITERAL_ORDER[family])
+            self.assertEqual(regs, lf.WIND_REGISTERS[family])
+            self.assertLessEqual(len(names), gtt.WIND_LITERALS_MAX)
+            rows = [r for r in lf.WIND_SHADERS.values() if r["family"] == family]
+            for row in rows:
+                self.assertEqual([(e[0], e[2], e[5]) for e in row["elements"]], list(elements))
+        self.assertEqual(len(lf.WIND_LITERAL_ORDER["leaf"]), gtt.WIND_LITERALS_MAX)
+
+    def test_the_generated_table_is_current(self):
+        want = gtt.generate_wind(gtt.load(VS_TABLE))
+        self.assertEqual(WIND_TABLE.read_text(encoding="ascii"), want,
+                         "run gen_transform_table.py --json docs/native-renderer/vs-transforms.json --wind-out " + str(WIND_TABLE))
+        self.assertEqual(len(re.findall(r"^FABLE2_WIND\(", want, re.M)), 12)
+        self.assertEqual(len(re.findall(r"^FABLE2_WIND_LITERAL\(", want, re.M)), 6 * 7 + 2 * 18 + 4 * 28)
+        # a literal's line is the row's place and the value's bits
+        self.assertIn("FABLE2_WIND_LITERAL(0x8123C16DBF583F92ull, 0, 253, 0, 0xC0490FDBu)", want)         # lo = -pi at c253.x
+        self.assertIn("FABLE2_WIND_LITERAL(0xA8A5B2A89F70336Aull, 0, 253, 1, 0xC0490FDBu)", want)         # ... at c253.y
+        self.assertIn("FABLE2_WIND(0x432563420047C96Cull, 2, 1, 15, 16, 17, 255, 255, 2, 32, 5, 0x331, 3, 6, 7, 0x4E4, 4, 6, 8, 0x324)", want)
+
+
+class F(float):
+    """A number whose every operation is rounded to single precision (a stand-in for a C++ float mirror)."""
+
+    def __new__(cls, x):
+        return float.__new__(cls, f32(float(x)))
+
+    def __add__(self, o):
+        return F(float(self) + float(o))
+
+    __radd__ = __add__
+
+    def __sub__(self, o):
+        return F(float(self) - float(o))
+
+    def __rsub__(self, o):
+        return F(float(o) - float(self))
+
+    def __mul__(self, o):
+        return F(float(self) * float(o))
+
+    __rmul__ = __mul__
+
+    def __truediv__(self, o):
+        return F(float(self) / float(o))
+
+    def __rtruediv__(self, o):
+        return F(float(o) / float(self))
+
+    def __neg__(self):
+        return F(-float(self))
+
+    def __abs__(self):
+        return F(abs(float(self)))
+
+
+def singles(values):
+    return tuple(F(v) for v in values)
+
+
+def from_line(line):
+    """The float bit patterns of a pin's line, in order (the shader's hash left out)."""
+    return [wind_pins.from_bits(int(b, 16)) for b in re.findall(r"0x([0-9A-F]{8})u", line)]
+
+
+class Pins(unittest.TestCase):
+    def sections(self):
+        out, name = {}, None
+        for line in wind_pins.lines():
+            if line.startswith("// "):
+                name = line[3:line.index(":")]
+                out[name] = []
+            else:
+                out[name].append(line)
+        return out
+
+    def test_the_sections(self):
+        s = self.sections()
+        self.assertEqual(list(s), ["wind plant pins", "wind trunk pins", "wind leaf pins", "wind reach pins"])
+        self.assertEqual([len(s[k]) for k in s], [len(wind_pins.PLANT) + 4, len(wind_pins.TRUNK) + 2, len(wind_pins.LEAF) + 4, 15])
+        for name, rows, where in (("plant", wind_pins.PLANT, wind_pins.PLANT_ROWS), ("trunk", wind_pins.TRUNK, wind_pins.TRUNK_ROWS),
+                                  ("leaf", wind_pins.LEAF, wind_pins.LEAF_ROWS)):
+            self.assertEqual(len(rows), len(where), name)
+            self.assertTrue(all(lf.WIND_SHADERS[r[0]]["family"] == name for r in rows))
+        # every one of the twelve shaders is pinned by a real row
+        pinned = {r[0] for r in wind_pins.PLANT + wind_pins.TRUNK + wind_pins.LEAF}
+        self.assertEqual(pinned, set(lf.WIND_SHADERS))
+
+    def test_a_line_is_the_formula_at_its_inputs(self):
+        s = self.sections()
+        moved = 0
+        for line in s["wind trunk pins"]:
+            v = from_line(line)
+            hash_ = re.search(r"0x([0-9A-F]{16})ull", line).group(1)
+            p, w4, c15, c16, c17, pos = v[0:3], v[3:7], v[7:11], v[11:15], v[15:19], v[19:22]
+            want = lf.wind_trunk(p, w4, c15, c16, c17, lf.WIND_SHADERS[hash_]["lit"])
+            self.assertEqual(pos, [f32(x) for x in want], line)
+            moved += max(abs(a - b) for a, b in zip(pos, p)) > 1e-3
+        self.assertGreaterEqual(moved, len(wind_pins.TRUNK))
+        for line in s["wind leaf pins"]:
+            v = from_line(line)
+            hash_ = re.search(r"0x([0-9A-F]{16})ull", line).group(1)
+            want = lf.wind_leaf(v[0:3], v[3:6], v[6:10], v[10:13], v[13:17], v[17:21], v[21:25], lf.WIND_SHADERS[hash_]["lit"])
+            self.assertEqual(v[25:28], [f32(x) for x in want], line)
+        for line in s["wind plant pins"]:
+            v = from_line(line)
+            hash_ = re.search(r"0x([0-9A-F]{16})ull", line).group(1)
+            p, seed, z, r0, r1, r2, pos = v[0:3], v[3], v[4], v[5:9], v[9:13], v[13:17], v[17:20]
+            want = lf.wind_plant(p, z, seed, 0.0, (r1[3], 0.0), r0[0], r1[:3], r2[:3], r0[1], r0[2:], lf.WIND_SHADERS[hash_]["lit"])
+            self.assertEqual(pos, [f32(x) for x in want], line)
+            self.assertEqual(r2[3], 0.0)
+        # the made plant vertices at and below the root stand
+        for line in s["wind plant pins"][len(wind_pins.PLANT):len(wind_pins.PLANT) + 2]:
+            v = from_line(line)
+            self.assertEqual(v[17:20], v[0:3])
+        for line in s["wind reach pins"]:
+            v = from_line(line)
+            self.assertTrue(math.isfinite(v[-1]) and v[-1] >= 0.0)
+
+    def test_the_packed_plant_is_the_plant(self):
+        """One word for A3 + B3 and one constant for c7.x + c7.y move the vertex as the two pairs do (the seed's
+        sum is exact; the constant's rounding is 1.5e-5 of a turn of the seed)."""
+        for row in wind_pins.PLANT:
+            hash_, p, a3, b3, z, c7, c10x, c21, c22, c25x, c26 = row
+            fl = wind_pins._floats
+            whole = lf.wind_plant(fl(p), wind_pins.from_bits(z), wind_pins.from_bits(a3), wind_pins.from_bits(b3), fl(c7),
+                                  wind_pins.from_bits(c10x), fl(c21), fl(c22), wind_pins.from_bits(c25x), fl(c26),
+                                  lf.WIND_SHADERS[hash_]["lit"])
+            _ins, packed = wind_pins.plant_pin(row)
+            for a, b in zip(whole, packed):
+                self.assertAlmostEqual(a, b, delta=2e-5)
+
+    def test_a_single_precision_evaluation_is_near(self):
+        """What a C++ float mirror can reach: the same expressions with every operation rounded to single
+        precision are within 2e-5 of a unit of the pinned positions (measured: plants 7e-6, trees 2e-6)."""
+        worst = 0.0
+        for row in wind_pins.PLANT + wind_pins.PLANT_MADE:
+            (hash_, p, seed, z, regs), ref = wind_pins.plant_pin(row)
+            lit = {k: F(v) for k, v in lf.WIND_SHADERS[hash_]["lit"].items()}
+            got = lf.wind_plant(singles(p), F(z), F(seed), F(0.0), (F(regs[1][3]), F(0.0)), F(regs[0][0]), singles(regs[1][:3]),
+                                singles(regs[2][:3]), F(regs[0][1]), singles(regs[0][2:]), lit)
+            worst = max(worst, max(abs(float(a) - b) for a, b in zip(got, ref)))
+        for row in wind_pins.TRUNK + wind_pins.TRUNK_MADE:
+            (hash_, p, w4, regs), ref = wind_pins.trunk_pin(row)
+            lit = {k: F(v) for k, v in lf.WIND_SHADERS[hash_]["lit"].items()}
+            got = lf.wind_trunk(singles(p), singles(w4), singles(regs[0]), singles(regs[1]), singles(regs[2]), lit)
+            worst = max(worst, max(abs(float(a) - b) for a, b in zip(got, ref)))
+        for row in wind_pins.LEAF + wind_pins.LEAF_MADE:
+            (hash_, p, q, w4, v3, regs), ref = wind_pins.leaf_pin(row)
+            lit = {k: F(v) for k, v in lf.WIND_SHADERS[hash_]["lit"].items()}
+            got = lf.wind_leaf(singles(p), singles(q), singles(w4), singles(v3), singles(regs[0]), singles(regs[1]), singles(regs[2]), lit)
+            worst = max(worst, max(abs(float(a) - b) for a, b in zip(got, ref)))
+        self.assertLess(worst, 2e-5)
+        self.assertGreater(worst, 0.0)
+
+    @unittest.skipUnless(DUMPS.is_dir() and BRIDGE.is_file(), NO_CAPTURE)
+    def test_the_bridges_tuples_are_the_captures(self):
+        import capture_replay as cr
+        by_line = None
+        seen = 0
+        for rows, where in ((wind_pins.PLANT, wind_pins.PLANT_ROWS), (wind_pins.TRUNK, wind_pins.TRUNK_ROWS),
+                            (wind_pins.LEAF, wind_pins.LEAF_ROWS)):
+            for row, (capture, line, vertex) in zip(rows, where):
+                if capture != "182313":
+                    continue
+                if by_line is None:
+                    by_line = {r["line"]: r for r in cr.rows(BRIDGE, kinds=("draw",))}
+                case = wind_check.row_case(BRIDGE, by_line[line], DUMPS)
+                self.assertEqual(case.hash_, row[0])
+                case.index = vertex
+                ins = wind_check.formula_inputs(case)
+                self.assertEqual(wind_pins._floats(row[1]), tuple(f32(x) for x in ins["p"]), line)
+                if case.family == "plant":
+                    self.assertEqual(wind_pins.from_bits(row[4]), ins["z"])
+                    self.assertEqual(wind_pins._floats(row[7]), tuple(case.consts[21][:3]))
+                else:
+                    self.assertEqual(wind_pins._floats(row[2 if case.family == "trunk" else 3]), tuple(f32(x) for x in ins["weights"]))
+                    self.assertEqual(wind_pins._floats(row[-3]), tuple(case.consts[15]))
+                seen += 1
+        self.assertGreaterEqual(seen, 9)
 
 
 if __name__ == "__main__":

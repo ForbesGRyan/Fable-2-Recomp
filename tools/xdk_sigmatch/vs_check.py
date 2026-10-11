@@ -165,7 +165,8 @@ def run(trials=400):
 # against the shader's microcode run on the same bytes: the clip position, the vertices an instance
 # entry's distance cut drops (the microcode gives them a NaN position), and the entry's "uv". A shader
 # marked "deformed" in the table moves its vertices in the wind; the check then runs with the sway's
-# amplitude constants zero (CASTER_SWAY_OFF) or, where there is no such switch, compares the uv alone.
+# amplitude constants zero (CASTER_SWAY_OFF), or with the entry's "wind" member (the closed formula of
+# light_formulas.py through position_check.wind_positions), or, with neither, compares the uv alone.
 
 TABLE = Path(__file__).resolve().parents[2] / "docs" / "native-renderer" / "vs-transforms.json"
 _PI = math.pi
@@ -187,8 +188,10 @@ CASTER_LITERALS = {
 # Deformed shaders whose sway has an amplitude in constants: the registers set to zero for the position
 # check (A8A5...: instr 42, 43 multiply the displacement by c26.y and c26.x).
 CASTER_SWAY_OFF = {"A8A5B2A89F70336A": (26,)}
-# Deformed shaders without such a switch: the uv alone is compared.
-CASTER_UV_ONLY = ("432563420047C96C",)
+# Deformed shaders without such a switch and without a "wind" member in their entry: the uv alone is compared.
+# None since the foliage sub-project (plan Task 7): the leaves' caster 4325 has the member, and its position
+# is compared with the wind on (position_check.wind_positions).
+CASTER_UV_ONLY = ()
 _VERTEX_FORMATS = {"FMT_16_16_16_16_FLOAT": 32, "FMT_16_16_FLOAT": 31, "FMT_8_8_8_8": 6}
 
 
@@ -284,6 +287,8 @@ def caster_trial(hash_, entry, text, rng, sway=False):
         return pc.Stream(streams[slot], len(streams[slot]), 2)
 
     positions, info = pc.replay(row, spec, get)
+    if "wind" in entry and hash_ not in CASTER_SWAY_OFF:
+        positions = pc.wind_positions(row, entry, get, positions, info)
     dropped = info.get("cut") or [False] * len(positions)
     consts = {i: bank[4 * i:4 * i + 4] for i in range(64)}
     consts.update(CASTER_LITERALS[hash_])

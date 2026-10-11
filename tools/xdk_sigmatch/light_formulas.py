@@ -1627,3 +1627,118 @@ def wind_reach_tree(w4_max, c15, c16, c17, lit):
     flat = math.hypot(c17[0], c17[1]) * math.hypot(along, across) + math.sqrt(2.0) * wobble
     drop = abs(lit["quarter"]) * along * along + abs(lit["half"]) * 2.0 * wobble * wobble
     return math.hypot(flat, drop)
+
+
+# --- the trees: leaf clumps (plan Task 7) -----------------------------------------------------------------------
+
+WIND_LITERAL_ORDER["leaf"] = WIND_LITERAL_ORDER["trunk"] + (
+    "hundred", "slack", "phase_f", "flutter_x", "flutter_y", "one", "back", "push_gust", "lift_gust", "rate_f")
+WIND_LITERALS["leaf"] = dict(WIND_LITERALS["trunk"], **dict(zip(WIND_LITERAL_ORDER["leaf"][18:], (_wind_f32(v) for v in (
+    100.0, -0.3, 0.05, 0.25, 1.0, 1.0, 0.28867501, 0.55, 0.9, 0.15)))))
+WIND_REGISTERS["leaf"] = (15, 16, 17)
+# A leaf's elements: the pivot (three halves of dword 5, read as the position is: yxw), the 8_8_8_8 of dword 7
+# as a trunk's, and the 8_8_8_8 of dword 8, of which the flutter reads three values (source x, y, z).
+
+
+def _leaf_elements(pivot, weights, flutter):
+    return (("pivot", pivot, 32, 5, "yxw", 3), ("weights", weights, 6, 7, "xyzw", 4), ("flutter", flutter, 6, 8, "xyz", 3))
+
+
+_LEAF_D7DD = ("half=252.z base=248.y rate1=252.x rate2=252.y two_pi=250.x quarter=250.y lean=251.x gust=251.y "
+              "phase_x=250.w phase_y=250.z lo=248.x amp=253.x along=253.y across=253.z rate0=254.w zero=251.z "
+              "sel_zero=251.z sel_one=251.w hundred=248.z slack=249.x phase_f=249.y flutter_x=249.z flutter_y=249.w "
+              "one=252.w back=253.w push_gust=254.x lift_gust=254.y rate_f=254.z")
+WIND_SHADERS.update({
+    "A5846836C90E1192": _wind_row(
+        "leaf", "scene", "half=253.z base=249.y rate1=253.x rate2=253.y two_pi=251.x quarter=251.y lean=252.x "
+        "gust=252.y phase_x=251.w phase_y=251.z lo=249.x amp=254.x along=254.y across=254.z rate0=255.w zero=252.z "
+        "sel_zero=252.z sel_one=252.w hundred=249.z slack=250.x phase_f=250.y flutter_x=250.z flutter_y=250.w "
+        "one=253.w back=254.w push_gust=255.x lift_gust=255.y rate_f=255.z", elements=_leaf_elements(3, 4, 5)),
+    # A584 with two lights: its literals one register lower.
+    "D7DD31B9BF194DE8": _wind_row("leaf", "scene", _LEAF_D7DD, elements=_leaf_elements(3, 4, 5)),
+    # A584 with four lights: D7DD's places but for the three of its c248.
+    "2D40B53C926109BE": _wind_row(
+        "leaf", "scene", _LEAF_D7DD.replace("base=248.y", "base=248.z").replace("hundred=248.z", "hundred=248.w"),
+        elements=_leaf_elements(3, 4, 5),
+        note="In one capture only (native_discovery_20261010_182130, frame 8: three rows); otherwise held by made inputs."),
+    # The leaves' shadow caster, and with the pixel shader F1EB the sun layer's tree occluder.
+    "432563420047C96C": _wind_row(
+        "leaf", "caster", "half=249.y base=250.w rate1=253.x rate2=253.y two_pi=252.z quarter=252.w lean=254.x "
+        "gust=254.y phase_x=251.y phase_y=251.x lo=249.x amp=255.x along=255.y across=255.z rate0=250.z zero=254.z "
+        "sel_zero=254.z sel_one=254.w hundred=252.y slack=251.z phase_f=251.w flutter_x=250.x flutter_y=250.y "
+        "one=254.w back=255.w push_gust=253.z lift_gust=253.w rate_f=252.x", elements=_leaf_elements(2, 3, 4)),
+})
+
+
+def wind_leaf_lift(p, q, w4, v3, c15, c16, c17, lit):
+    """What the flutter adds to the third coordinate of a leaf vertex's direction P - Q before it is brought
+    back to its length. `v3`: the three values (source x, y, z) of the 8_8_8_8 of dword 8.
+
+    With t, g, b, d as wind_tree_terms has them, L = |P - Q| and T = t + c17.w * rate_f (instruction numbers
+    of A584):
+        s6 = s(rate_f * b + (c16.y + rate1) * t + g + c16.x * d + phase_f)       29, 73, 76 to 82
+        s7 = s(T * flutter_x + v.z + hundred * v.x)                              72 to 79, 83, 86, 88
+        s8 = s(T * flutter_y + v.y)                                              75, 77 to 87
+        k  = amp * s6 where s6 >= 0, back * s6 where it is below                  84, 85
+        push = amp * s7 * max(L + slack, 0) * c16.w                              73, 89 to 92
+        lift = c15.w * (|k| * amp * s8) * k                                      88 to 91
+        push * (push_gust * c17.z + one) + lift * (lift_gust * c17.z + one)      72, 79, 93
+    push grows with the vertex's distance from its pivot beyond -slack; lift is the same for a whole clump."""
+    b, d = w4[0], w4[2]
+    t = c15[0]
+    g = c17[3] * lit["gust"]
+    length = math.sqrt(sum((p[k] - q[k]) ** 2 for k in range(3)))
+    clock = t + c17[3] * lit["rate_f"]
+    s6 = math.sin(_wind_phase(b * lit["rate_f"] + (((c16[1] + lit["rate1"]) * t + g) + c16[0] * d + lit["phase_f"]), lit))
+    s7 = math.sin(_wind_phase((clock * lit["flutter_x"] + v3[2]) + lit["hundred"] * v3[0], lit))
+    turn = _wind_frac(clock * lit["flutter_y"] + v3[1])        # the shader doubles it and takes half of that (78, 80)
+    s8 = math.sin(_wind_frac((turn + turn) * lit["half"] + lit["half"]) * lit["two_pi"] + lit["lo"])
+    k = lit["back"] * s6 if -(lit["amp"] * s6) > 0.0 else lit["amp"] * s6
+    push = lit["amp"] * s7 * max(length + lit["slack"], 0.0) * c16[3]
+    lift = c15[3] * (abs(k) * lit["amp"] * s8) * k
+    return push * (c17[2] * lit["push_gust"] + lit["one"]) + lift * (c17[2] * lit["lift_gust"] + lit["one"])
+
+
+def wind_leaf(p, q, w4, v3, c15, c16, c17, lit):
+    """The position A584's instr 98 makes (D7DD 100, 2D40 102, the caster 4325 87):
+        Q' = Q + wind_tree_offset(w4, ...)                       the pivot sways as a trunk vertex does (22 to 74)
+        D  = P - Q,  D' = (D.x, D.y, D.z + wind_leaf_lift(...))  (26, 75 to 93)
+        position = Q' + |D| * D' / |D'|                           (35, 40, 94 to 98)
+    `p` the fetched position read as yxw1, `q` the pivot (fetch 3, read the same way), `w4` the four values of
+    fetch 4 and `v3` the first three of fetch 5 in the fetches' source order. The vertex keeps its distance from
+    its pivot. Where D' has no length (a vertex at its pivot with no lift) the position is Q': the microcode
+    multiplies 0 by 1 / 0 there, which is +0 by the console's rule for a product with a zero factor."""
+    off = wind_tree_offset(w4, c15, c16, c17, lit)
+    pivot = tuple(q[k] + off[k] for k in range(3))
+    d = [p[k] - q[k] for k in range(3)]
+    length = math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2])
+    d[2] += wind_leaf_lift(p, q, w4, v3, c15, c16, c17, lit)
+    turned = math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2])
+    if turned == 0.0:
+        return pivot
+    return tuple(pivot[k] + d[k] / turned * length for k in range(3))
+
+
+def wind_reach_leaf(w4_max, length_max, c15, c16, c17, lit):
+    """An upper bound of |wind_leaf - p| for a mesh whose four values are at most `w4_max` and whose vertices
+    are at most `length_max` from their pivots: the pivot's reach, and the turn of the direction, which moves
+    the vertex by at most twice the lift (and never by more than twice its distance from the pivot)."""
+    length = abs(length_max)
+    k = max(abs(lit["amp"]), abs(lit["back"]))
+    push = abs(lit["amp"]) * max(length + lit["slack"], 0.0) * abs(c16[3])
+    lift = abs(c15[3]) * k * abs(lit["amp"]) * k
+    turn = push * (abs(c17[2] * lit["push_gust"]) + abs(lit["one"])) + lift * (abs(c17[2] * lit["lift_gust"]) + abs(lit["one"]))
+    return wind_reach_tree(w4_max, c15, c16, c17, lit) + min(2.0 * turn, 2.0 * length)
+
+
+def wind_table_member(hash_):
+    """The "wind" member of a shader's entry of docs/native-renderer/vs-transforms.json, from its row of
+    WIND_SHADERS (tests/test_wind_formulas.py holds the committed table to it; gen_transform_table.py writes
+    src/native/capture/wind_table.inc from the table)."""
+    row = WIND_SHADERS[hash_]
+    return {"family": row["family"], "role": row["role"], "reg": list(row["reg"]), "lit_reg": list(row["lit_reg"]),
+            "lit": dict(row["lit"]),
+            "lit_at": {name: "c%d.%s" % (reg, "xyzw"[comp]) for name, (reg, comp) in row["lit_at"].items()},
+            "elements": [{"name": name, "fetch": fetch, "format": fmt, "offset": offset, "source": source}
+                         for name, fetch, fmt, offset, source, _count in row["elements"]],
+            "evidence": row["evidence"]}

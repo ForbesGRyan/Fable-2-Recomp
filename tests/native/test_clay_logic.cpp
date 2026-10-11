@@ -2715,6 +2715,144 @@ static void CoverageTests() {
   }
 }
 
+// The sun layer's tree occluders drawn again (sub-project 11, phase 11c; clay_logic.h, "The tree occluders'
+// redraw"): cases 760 to 764.
+static void SunTreeTests() {
+  using capture::Compare;
+  const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+  // The late leaf draw as the captures hold it (054346 line 5297, 220514 lines 5054 to 5060): pixel shader 7CD5,
+  // 0x2202 = 0xAA00001C (the test greater than the reference 0, alpha-to-mask, offsets 0xAA), c15.w 0.5, the
+  // scene's two samples.
+  capture::DrawRecord twin = CoverageRecord(0x7CD57B81550F19E3ull, 0.5f);
+  twin.material.alpha.component = 3;
+  capture::RenderState rs = CoverageState(0xAA);
+  rs.alpha_ref = 0.0f;
+  {
+    // 760: drawn, with the alpha's fields of ONE sample (the layer has one, whatever the record's surface says).
+    const SunTreeDraw d = DecideSunTree(twin, rs, true);
+    CHECK(760, d.skip == SunTreeSkip::kNone);
+    CHECK(760, d.alpha.mode == (kAlphaTest | uint32_t(Compare::kGreater) | kAlphaFromAlbedo | (3u << 5) | kAlphaToMask |
+                                (0xAAu << kAlphaToMaskShift)));
+    CHECK(760, rs.alpha_to_mask_samples == 1 && ((d.alpha.mode >> kAlphaToMaskSamplesShift) & 3u) == 0);
+    CHECK(760, d.alpha.ref == 0.0f && d.alpha.scale == 0.5f);
+    // The threshold the mode stands for is 0.5 at every parity, the leaf cards' word's (ShadowAlphaToMaskThreshold):
+    // at the scale 0.5 a texel is kept only where the texture's alpha is exactly 1.
+    const uint8_t offsets = uint8_t(d.alpha.mode >> kAlphaToMaskShift);
+    for (uint32_t x = 0; x < 2; ++x) {
+      for (uint32_t y = 0; y < 2; ++y) {
+        CHECK(760, ShadowAlphaToMaskThreshold(0xAA00001Cu, x, y) == 0.5f);
+        CHECK(760, AlphaToMaskCovers(offsets, x, y, 1.0f * d.alpha.scale, (d.alpha.mode >> kAlphaToMaskSamplesShift) & 3u));
+        CHECK(760, !AlphaToMaskCovers(offsets, x, y, (254.0f / 255.0f) * d.alpha.scale, (d.alpha.mode >> kAlphaToMaskSamplesShift) & 3u));
+        // (under the scene's two samples the same record keeps a texel from alpha 0.5 on: the redraw is not that)
+        CHECK(760, AlphaToMaskCovers(offsets, x, y, 0.6f * d.alpha.scale, 1));
+      }
+    }
+    // The record's own offsets, function and reference: another word gives another mode.
+    capture::RenderState other = CoverageState(0x87);
+    other.alpha_ref = 0.25f;
+    other.alpha_func = Compare::kGreaterEqual;
+    const SunTreeDraw o = DecideSunTree(twin, other, true);
+    CHECK(760, o.skip == SunTreeSkip::kNone && uint8_t(o.alpha.mode >> kAlphaToMaskShift) == 0x87 && (o.alpha.mode & 7u) == uint32_t(Compare::kGreaterEqual) &&
+                   o.alpha.ref == 0.25f);
+    // Without the alpha test: alpha-to-mask alone, no function bits.
+    other = rs;
+    other.alpha_test = false;
+    CHECK(760, DecideSunTree(twin, other, true).alpha.mode == (kAlphaFromAlbedo | (3u << 5) | kAlphaToMask | (0xAAu << kAlphaToMaskShift)));
+    // The albedo's component is the material's.
+    capture::DrawRecord red = twin;
+    red.material.alpha.component = 0;
+    CHECK(760, ((DecideSunTree(red, rs, true).alpha.mode >> 5) & 3u) == 0);
+  }
+  {
+    // 761: fail closed. An untextured twin (no albedo or no coordinates this frame): not drawn, never solid.
+    CHECK(761, DecideSunTree(twin, rs, false).skip == SunTreeSkip::kTexture);
+    CHECK(761, DecideSunTree(twin, rs, false).alpha.mode == 0);
+    // A state that was not read, or without alpha-to-mask (the occluder's kept set is not known then), or an alpha
+    // test whose reference is no number: `state`.
+    capture::RenderState bad = rs;
+    bad.valid = false;
+    CHECK(761, DecideSunTree(twin, bad, true).skip == SunTreeSkip::kState);
+    bad = rs;
+    bad.alpha_to_mask = false;
+    CHECK(761, DecideSunTree(twin, bad, true).skip == SunTreeSkip::kState);
+    for (float v : {nan, inf, -inf}) {
+      bad = rs;
+      bad.alpha_ref = v;
+      CHECK(761, DecideSunTree(twin, bad, true).skip == SunTreeSkip::kState);
+      bad.alpha_test = false;  // (a reference no test reads does not matter)
+      CHECK(761, DecideSunTree(twin, bad, true).skip == SunTreeSkip::kNone);
+    }
+    // A material without the albedo's alpha, a scale that is no number or out of size, a coordinate transform that
+    // is no number: `alpha`.
+    capture::DrawRecord m = twin;
+    m.material.status = capture::MaterialStatus::kPsUnknown;
+    CHECK(761, DecideSunTree(m, rs, true).skip == SunTreeSkip::kAlpha);
+    m = twin;
+    m.material.alpha.source = capture::AlphaSource::kNone;
+    CHECK(761, DecideSunTree(m, rs, true).skip == SunTreeSkip::kAlpha);
+    m.material.alpha.source = capture::AlphaSource::kOne;
+    CHECK(761, DecideSunTree(m, rs, true).skip == SunTreeSkip::kAlpha);
+    for (float v : {nan, inf, -inf, 4096.0f}) {
+      m = twin;
+      m.material.alpha_scale = v;
+      CHECK(761, DecideSunTree(m, rs, true).skip == SunTreeSkip::kAlpha);
+    }
+    for (int i = 0; i < 4; ++i) {
+      m = twin;
+      m.material.uv_xform[i] = i % 2 ? nan : inf;
+      CHECK(761, DecideSunTree(m, rs, true).skip == SunTreeSkip::kAlpha);
+    }
+    // The order: the state first, then the material, then the texture.
+    bad = rs;
+    bad.valid = false;
+    m = twin;
+    m.material.alpha_scale = nan;
+    CHECK(761, DecideSunTree(m, bad, false).skip == SunTreeSkip::kState && DecideSunTree(m, rs, false).skip == SunTreeSkip::kAlpha);
+    CHECK(761, std::string(SunTreeSkipName(SunTreeSkip::kState)) == "state" && std::string(SunTreeSkipName(SunTreeSkip::kAlpha)) == "alpha" &&
+                   std::string(SunTreeSkipName(SunTreeSkip::kTexture)) == "texture" && std::string(SunTreeSkipName(SunTreeSkip::kRecord)) == "record" &&
+                   std::string(SunTreeSkipName(SunTreeSkip::kPipeline)) == "pipeline");
+  }
+  {
+    // 762: the Sun line. A drawn layer of a frame with twins says how many of them were drawn; a frame without
+    // twins, a layer that is not drawn and the switch off say nothing of them (case 649 holds those lines whole).
+    ClayStats st;
+    st.sun_trees = 3;
+    st.sun_trees_drawn = 3;
+    CHECK(762, FormatSunText(st) == "Sun: off");
+    st.sun_switch = true;
+    st.sun = ClaySun::kDrawn;
+    st.sun_drawn[0] = 3;
+    st.sun_drawn[1] = 1;
+    st.sun_drawn[2] = 2;
+    st.sun_depth_record = 700;
+    CHECK(762, FormatSunText(st).rfind("Sun: on, drawn: occluders 3, layer 1 1, layer 2 2, centre (0.0000, 0.0000), depth before record 700, "
+                                       "tree occluders drawn 3 of 3, previous frame's share", 0) == 0);
+    st.sun_trees_drawn = 1;
+    st.sun_tree_skipped[size_t(SunTreeSkip::kTexture)] = 1;
+    st.sun_tree_skipped[size_t(SunTreeSkip::kPipeline)] = 1;
+    CHECK(762, FormatSunText(st).find(", tree occluders drawn 1 of 3 (not drawn {texture: 1, pipeline: 1}), previous frame's share") != std::string::npos);
+    st.sun_tree_skipped[size_t(SunTreeSkip::kTexture)] = st.sun_tree_skipped[size_t(SunTreeSkip::kPipeline)] = 0;
+    st.sun_tree_skipped[size_t(SunTreeSkip::kState)] = st.sun_tree_skipped[size_t(SunTreeSkip::kAlpha)] = 1;
+    st.sun_tree_skipped[size_t(SunTreeSkip::kRecord)] = ~0u;
+    st.sun_trees = ~0u;
+    CHECK(762, FormatSunText(st).find(", tree occluders drawn 1 of 4294967295 (not drawn {state: 1, alpha: 1, record: 4294967295}), previous") != std::string::npos);
+    st.sun = ClaySun::kDepthPlace;
+    CHECK(762, FormatSunText(st).find("tree occluders") == std::string::npos);
+    st.sun = ClaySun::kDrawn;
+    st.sun_trees = 0;
+    CHECK(762, FormatSunText(st).find("tree occluders") == std::string::npos);
+  }
+  {
+    // 763: the redraw's pipeline slot: rest 0, the wind program 1; two pipelines, no more.
+    static_assert(kSunTreePipelines == 2 && SunTreePipelineSlot(false) == 0 && SunTreePipelineSlot(true) == 1);
+    // 764: which prepared record a twin's index names: the one whose record index it is, or none.
+    const uint32_t records[] = {0, 3, 4, 9};
+    CHECK(764, SunTreeRecord(records, 4, 0) == 0 && SunTreeRecord(records, 4, 4) == 2 && SunTreeRecord(records, 4, 9) == 3);
+    CHECK(764, SunTreeRecord(records, 4, 5) == kNoSunTreeRecord && SunTreeRecord(records, 4, capture::kNoDepthPlace) == kNoSunTreeRecord &&
+                   SunTreeRecord(records, 0, 0) == kNoSunTreeRecord && SunTreeRecord(nullptr, 4, 0) == kNoSunTreeRecord);
+  }
+}
+
 int main() {
   // 1-4: clay color cvar parsing.
   {
@@ -11358,6 +11496,7 @@ int main() {
   std::thread(WindWordTests).join();
   std::thread(NativeWindTests).join();
   std::thread(CoverageTests).join();
+  std::thread(SunTreeTests).join();
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
@@ -11391,7 +11530,8 @@ int main() {
                "none, the constants' packing and literal slots, the three mirrors against the reference's numbers within "
                "2e-5 (single precision), a leaf at its pivot, the reach never below the reference's, the keys, the Wind line; "
                "coverage: the covered samples against the emulator's thresholds and today's set, the coverage record, the "
-               "colour pass's order for every arrangement of up to six records, the half key, the verdict, the Coverage line\n";
+               "colour pass's order for every arrangement of up to six records, the half key, the verdict, the Coverage line; "
+               "the tree occluders' redraw: the alpha of one sample from the twin's own state, what is not drawn and why, the Sun line\n";
 
   return 0;
 }

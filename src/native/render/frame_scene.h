@@ -177,6 +177,17 @@ struct FrameScene {
   uint32_t layer_occluders = 0;
   uint32_t layer_occluders_failed = 0;
   uint32_t layer_depth_place = capture::kNoDepthPlace;
+  // The twins themselves (foliage plan Task 16: the tree occluders' redraw): the index in `draws` of each
+  // record a tree occluder of this frame draws again, once each, in the order the occluders were seen;
+  // entries from layer_twin_count on hold capture::kNoDepthPlace. Empty in a frame with a failed call (that
+  // frame has no layer: PlanSunDepthPlace), so a consumer that draws the layer may draw every entry.
+  uint32_t layer_twins[capture::kMaxLayerOccluders] = {
+      capture::kNoDepthPlace, capture::kNoDepthPlace, capture::kNoDepthPlace, capture::kNoDepthPlace,
+      capture::kNoDepthPlace, capture::kNoDepthPlace, capture::kNoDepthPlace, capture::kNoDepthPlace,
+      capture::kNoDepthPlace, capture::kNoDepthPlace, capture::kNoDepthPlace, capture::kNoDepthPlace,
+      capture::kNoDepthPlace, capture::kNoDepthPlace, capture::kNoDepthPlace, capture::kNoDepthPlace};
+  uint32_t layer_twin_count = 0;
+  static_assert(capture::kMaxLayerOccluders == 16, "layer_twins' initialiser names sixteen entries");
   // The quads were wanted this frame (the native view, the light, the post chain and the sun's
   // switch on at the frame's begin).
   bool quad_records = false;
@@ -835,6 +846,12 @@ class FrameBuilder {
       return;
     }
     if (index < layer_depth_place_) layer_depth_place_ = index;
+    // (the twin's index once: two occluders of one record are one redraw. At most kMaxLayerOccluders calls
+    // reach this line, so the list cannot overflow; the bound is checked all the same.)
+    for (uint32_t i = 0; i < layer_twin_count_; ++i) {
+      if (layer_twins_[i] == index) return;
+    }
+    if (layer_twin_count_ < capture::kMaxLayerOccluders) layer_twins_[layer_twin_count_++] = index;
   }
 
   // --- The quad records (FrameScene::quads) ---
@@ -1061,7 +1078,13 @@ class FrameBuilder {
       s->layer_occluders = layer_occluders_;
       s->layer_occluders_failed = layer_occluders_failed_;
       s->layer_depth_place = layer_depth_place_;
+      // (the twins only of a frame none of whose calls failed: a frame with a failed call has no layer)
+      if (layer_occluders_failed_ == 0) {
+        s->layer_twin_count = layer_twin_count_;
+        std::copy(layer_twins_, layer_twins_ + layer_twin_count_, s->layer_twins);
+      }
     }
+    layer_twin_count_ = 0;
     layer_occluders_ = layer_occluders_failed_ = 0;
     layer_depth_place_ = capture::kNoDepthPlace;
     quad_seen_ = quad_taken_ = quad_over_ = 0;
@@ -1212,6 +1235,8 @@ class FrameBuilder {
   // The sun layer's tree occluders of the frame so far (FrameScene::layer_depth_place).
   uint32_t layer_occluders_ = 0;
   uint32_t layer_occluders_failed_ = 0;
+  uint32_t layer_twins_[capture::kMaxLayerOccluders] = {};
+  uint32_t layer_twin_count_ = 0;
   uint32_t layer_depth_place_ = capture::kNoDepthPlace;
   // Shared with the deleters of this builder's scenes. Never reassigned, and
   // locked inside: ReleaseSpares and spare_count need no lock of the caller's.

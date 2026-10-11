@@ -806,6 +806,76 @@ class AlphaCover(unittest.TestCase):
             fr.alpha_cover(self.row(), uv, tex, parity, samples=4, scale=1.0)
 
 
+class OccluderCover(unittest.TestCase):
+    """The tree occluder at the one-sample layer (plan Task 16; criterion 15's reference)."""
+    ROW = {"rs": {"2202": "0xAA00001C", "210E": "0x00000000"}}
+    SIZE = (8, 4)
+
+    def card(self, z=0.5):
+        """A card over the whole layer: u runs 0..1 from left to right, v is 0.5."""
+        clip = np.array([[-1.0, 1.0, z, 1.0], [1.0, 1.0, z, 1.0], [-1.0, -1.0, z, 1.0], [1.0, -1.0, z, 1.0]])
+        uv = np.array([[0.0, 0.5], [1.0, 0.5], [0.0, 0.5], [1.0, 0.5]])
+        return clip, np.array([[0, 1, 2], [1, 3, 2]]), uv
+
+    def test_only_texels_of_alpha_exactly_one_are_kept(self):
+        """Under AA on one sample the threshold is 0.5 and the alpha at most 0.5: kept iff the filtered texture
+        alpha is exactly 1. Four texels 1, 1, 254/255, 254/255 across eight layer texels sampled at their
+        integral position: columns 0 to 3 read 1 (the fourth is the second texel's centre), column 4 a mixture."""
+        clip, tris, uv = self.card()
+        tex = fr.Alpha(np.array([[1.0, 1.0, 254.0 / 255.0, 254.0 / 255.0]]), wrap=False)
+        closed, kept, depth = fr.occluder_cover(self.ROW, clip, tris, uv, tex, 0.5, self.SIZE)
+        self.assertEqual(closed.shape, (4, 8))
+        self.assertTrue(closed[:, :4].all())
+        self.assertFalse(closed[:, 4:].any())
+        self.assertTrue(np.array_equal(closed, kept))                    # no layer depth: nothing more is dropped
+        self.assertTrue(np.allclose(depth[closed], 0.5) and np.isinf(depth[~closed]).all())
+        # A texture of 254/255 everywhere keeps nothing; one of 1 everywhere keeps every texel.
+        self.assertFalse(fr.occluder_cover(self.ROW, clip, tris, uv, fr.Alpha(np.full((1, 4), 254.0 / 255.0)), 0.5, self.SIZE)[0].any())
+        self.assertTrue(fr.occluder_cover(self.ROW, clip, tris, uv, fr.Alpha(np.ones((1, 4))), 0.5, self.SIZE)[0].all())
+        # At the scene's fade 1 the same word keeps from alpha 0.5 on: the scale is the caster's c15.w.
+        self.assertTrue(fr.occluder_cover(self.ROW, clip, tris, uv, tex, 1.0, self.SIZE)[0].all())
+
+    def test_the_layers_depth_test_is_greater_or_equal_on_the_stored_depth(self):
+        clip, tris, uv = self.card(z=0.5)                                # stored 1 - z / w = 0.5
+        tex = fr.Alpha(np.ones((1, 4)))
+        layer = np.zeros((4, 8))
+        layer[0] = 0.75                                                  # something nearer in the first row
+        layer[1] = 0.5                                                   # at the same depth: drawn
+        closed, kept, _ = fr.occluder_cover(self.ROW, clip, tris, uv, tex, 0.5, self.SIZE, layer=layer)
+        self.assertTrue(kept.all())
+        self.assertFalse(closed[0].any())
+        self.assertTrue(closed[1:].all())
+        # The native layer's own form (z / w, the test less or equal): scale 1, offset 0, the comparison reversed.
+        native = np.ones((4, 8))
+        native[0] = 0.25
+        native[1] = 0.5
+        closed, _, _ = fr.occluder_cover(self.ROW, clip, tris, uv, tex, 0.5, self.SIZE, layer=native, zscale=1.0, zoffset=0.0)
+        self.assertFalse(closed[0].any())
+        self.assertTrue(closed[1:].all())
+
+    def test_the_nearest_kept_fragment_closes_a_texel(self):
+        """Two cards: the nearer keeps nothing of its right half (alpha below 1), the farther keeps everything:
+        the right half's depth is the farther card's."""
+        near, tris, uv = self.card(z=0.25)
+        far, _, _ = self.card(z=0.5)
+        clip = np.concatenate([near, far])
+        uvs = np.concatenate([uv, np.full((4, 2), 0.01)])
+        both = np.concatenate([tris, tris + 4])
+        tex = fr.Alpha(np.array([[1.0, 1.0, 0.5, 0.5]]), wrap=False)
+        closed, _, depth = fr.occluder_cover(self.ROW, clip, both, uvs, tex, 0.5, self.SIZE)
+        self.assertTrue(closed.all())
+        self.assertTrue(np.allclose(depth[:, :4], 0.25) and np.allclose(depth[:, 4:], 0.5))
+
+    def test_a_stored_level_of_the_texture(self):
+        """mip_alpha: the alpha plane of a stored level, the base level for 0; a level the row does not hold is
+        unreadable, never the base level in its place."""
+        planes = {0: np.ones((2, 2)), 1: np.full((1, 1), 0.5)}
+        self.assertTrue(np.array_equal(fr.level_plane(planes, 0), planes[0]))
+        self.assertTrue(np.array_equal(fr.level_plane(planes, 1), planes[1]))
+        with self.assertRaises(cr.Unreadable):
+            fr.level_plane(planes, 2)
+
+
 class DepthCopy(unittest.TestCase):
     def test_the_copy_is_the_last_write_of_0x2318_with_source_4_inside_the_scene(self):
         def gap(line, words):

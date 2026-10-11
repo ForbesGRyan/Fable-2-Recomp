@@ -1445,6 +1445,75 @@ static int QuadTests(const capture::DrawRecord& r) {
       for (uint32_t i = 0; i < capture::kMaxLayerOccluders + 2; ++i) fb.LayerOccluderSeen(&occluder);
     });
     if (many->layer_occluders != capture::kMaxLayerOccluders + 2 || many->layer_occluders_failed != 2 || many->layer_depth_place != leaf_at) return 40;
+    // The twins themselves (FrameScene::layer_twins; foliage plan Task 16): each found twin's index once, in the
+    // order its occluder was seen; none in a frame with a failed call (it has no layer), none with the quads off.
+    static_assert(sizeof(one->layer_twins) / sizeof(one->layer_twins[0]) == capture::kMaxLayerOccluders);
+    if (off->layer_twin_count != 0 || plain->layer_twin_count != 0 || after_one->layer_twin_count != 0) return 42;
+    if (one->layer_twin_count != 1 || one->layer_twins[0] != leaf_at) return 42;
+    capture::DrawRecord leaf3 = leaf, occluder3 = occluder;
+    leaf3.ib = occluder3.ib = {0x1C400000, 4000};
+    leaf3.count = occluder3.count = 2000;
+    auto three_scene = [&](render::FrameBuilder& fb) {
+      fb.Add(leaf3);
+      fb.Add(other);
+      fb.Add(leaf2);
+      fb.Add(leaf);
+    };
+    // Three calls with three twins: three indices, in the calls' order (not the records').
+    auto three = frame(lb, three_scene, [&](render::FrameBuilder& fb) {
+      fb.LayerOccluderSeen(&occluder);
+      fb.LayerOccluderSeen(&occluder3);
+      fb.LayerOccluderSeen(&occluder2);
+    });
+    const uint32_t n3 = uint32_t(three->draws.size());
+    if (three->layer_occluders != 3 || three->layer_occluders_failed != 0 || three->layer_depth_place != n3 - 4) return 43;
+    if (three->layer_twin_count != 3 || three->layer_twins[0] != n3 - 1 || three->layer_twins[1] != n3 - 4 || three->layer_twins[2] != n3 - 2) return 43;
+    // The same twin twice: once in the list (both calls counted, neither failed).
+    auto same = frame(lb, three_scene, [&](render::FrameBuilder& fb) {
+      fb.LayerOccluderSeen(&occluder2);
+      fb.LayerOccluderSeen(&occluder);
+      fb.LayerOccluderSeen(&occluder2);
+    });
+    if (same->layer_occluders != 3 || same->layer_occluders_failed != 0) return 44;
+    if (same->layer_twin_count != 2 || same->layer_twins[0] != n3 - 2 || same->layer_twins[1] != n3 - 1) return 44;
+    // A failed call empties the list, whether it comes first, between or last; and a later good call adds nothing.
+    for (int place = 0; place < 3; ++place) {
+      auto broken = frame(lb, three_scene, [&](render::FrameBuilder& fb) {
+        if (place == 0) fb.LayerOccluderSeen(&stranger);
+        fb.LayerOccluderSeen(&occluder);
+        if (place == 1) fb.LayerOccluderSeen(nullptr);
+        fb.LayerOccluderSeen(&occluder3);
+        if (place == 2) fb.LayerOccluderSeen(&stranger);
+      });
+      if (broken->layer_occluders != 3 || broken->layer_occluders_failed != 1 || broken->layer_twin_count != 0) return 45;
+      for (uint32_t t : broken->layer_twins) {
+        if (t != capture::kNoDepthPlace) return 45;
+      }
+    }
+    if (mixed->layer_twin_count != 0 || failed->layer_twin_count != 0 || twice->layer_twin_count != 0) return 45;
+    // ... and nothing of a frame's list is kept for the next.
+    auto after_three = frame(lb, three_scene, nothing);
+    if (after_three->layer_twin_count != 0 || after_three->layer_twins[0] != capture::kNoDepthPlace) return 46;
+    // The seventeenth call: failed (the bound), so the frame has no list, though each call had a twin.
+    if (many->layer_twin_count != 0) return 47;
+    // Sixteen calls with sixteen twins: all kept.
+    std::vector<capture::DrawRecord> leaves, occluders;
+    for (uint32_t i = 0; i < capture::kMaxLayerOccluders; ++i) {
+      capture::DrawRecord l = leaf, o = occluder;
+      l.ib = o.ib = {0x1D000000u + 0x10000u * i, 600};
+      l.count = o.count = 300 + i;
+      leaves.push_back(l);
+      occluders.push_back(o);
+    }
+    auto full = frame(lb, [&](render::FrameBuilder& fb) {
+      for (const capture::DrawRecord& l : leaves) fb.Add(l);
+    }, [&](render::FrameBuilder& fb) {
+      for (const capture::DrawRecord& o : occluders) fb.LayerOccluderSeen(&o);
+    });
+    if (full->layer_occluders_failed != 0 || full->layer_twin_count != capture::kMaxLayerOccluders) return 48;
+    for (uint32_t i = 0; i < capture::kMaxLayerOccluders; ++i) {
+      if (full->layer_twins[i] != uint32_t(full->draws.size()) - capture::kMaxLayerOccluders + i) return 48;
+    }
   }
   // The draw record's size is what it was: the quads are a block of their own.
   static_assert(sizeof(capture::DrawRecord) == 616);

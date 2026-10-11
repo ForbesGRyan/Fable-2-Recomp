@@ -10,7 +10,7 @@ game's depth copy of the same frame.
   foliage_replay.py pixels         <capture> <frame> [--spot NAME] [--cache DIR]
   foliage_replay.py mask           <capture> <frame> --out <npy> [--cache DIR]
   foliage_replay.py motion         <mask npy> <shot a> <shot b> ... [--box name=x0,y0,x1,y1]
-  foliage_replay.py occluder       <capture> <frame> [--origin 0.0] [--out <npy>] [--cache DIR]
+  foliage_replay.py occluder       <capture> <frame> [--origin 0.0] [--level 0] [--out <npy>] [--cache DIR]
 
 <capture> is a path or the end of a capture's name in the logs folder (120714).
 
@@ -867,7 +867,11 @@ def load_frame(path, number, depth=True):
     rows = cr.rows(path, cr.SCENE_KINDS + ("cmdgap", "texture"), frame=number)
     if not any(r["kind"] != "texture" for r in rows):
         raise Unreadable("%s has no frame %d" % (Path(path).name, number))
-    fr.textures = [fog_tables.Texture(r, Path(path).parent) for r in rows if r["kind"] == "texture"]
+    for r in rows:
+        if r["kind"] == "texture":
+            t = fog_tables.Texture(r, Path(path).parent)
+            t.mips = r.get("mips")                  # the stored levels below the base, when the capture kept them
+            fr.textures.append(t)
     fr.scene = [r for r in rows if r["kind"] in cr.SCENE_KINDS and r.get("in_scene")]
     fr.layer = [r for r in rows if r["kind"] in cr.SCENE_KINDS and not r.get("in_scene") and _pitch(r) == LAYER_PITCH]
     fr.copy_line = depth_copy_line(rows)
@@ -1183,10 +1187,20 @@ def _component(text):
     return int(name[1:]), "xyzw".index(comp)
 
 
-def cover_inputs(fr, row, entry):
+def level_plane(planes, level):
+    """The plane of `level` among a texture's planes ({level: array}); Unreadable when it holds none (never
+    another level in its place)."""
+    if level not in planes:
+        raise Unreadable("no stored level %d of the texture (it holds %s)" % (level, sorted(planes)))
+    return planes[level]
+
+
+def cover_inputs(fr, row, entry, level=0):
     """(interpolators needed, a function of the outputs -> uv [n, 2], the Alpha of the row's albedo) for a
     row whose pixel shader's albedo entry is `entry` (ps-albedo.json): the coordinate's interpolator and its
-    scale and offset stage from the row's pixel constants."""
+    scale and offset stage from the row's pixel constants. `level`: the texture's level the alpha is taken
+    from: 0 the base level, above it a stored level of the texture row's "mips" member (plan Task 14's capture
+    addition; Unreadable when the row holds none)."""
     if not entry or "u" not in entry or "v" not in entry:
         raise Unreadable("no albedo coordinates for pixel shader %s" % cr.ps_hash(row))
     pconst = row.get("pconst") or []
@@ -1207,10 +1221,21 @@ def cover_inputs(fr, row, entry):
         raise Unreadable("no fetch constant of the albedo's slot %d" % slot)
     fc = [int(x, 16) for x in tf]
     content = (row.get("tfc") or {}).get(str(slot))
-    from texture_thumb import decode_rgba
+    from texture_thumb import decode_mip_levels, decode_rgba
     t = fr.texture(fc[1] & 0xFFFFF000, int(content, 16) if content else None)
-    w, h, rgba = decode_rgba(t.read(), fc)
-    plane = np.frombuffer(bytes(rgba), dtype=np.uint8).reshape(h, w, 4)[:, :, "xyzw".index(entry.get("alpha", {}).get("component", "w"))] / 255.0
+    component = "xyzw".index(entry.get("alpha", {}).get("component", "w"))
+    if level == 0:
+        w, h, rgba = decode_rgba(t.read(), fc)
+    else:
+        mips = getattr(t, "mips", None)
+        if not mips:
+            raise Unreadable("the texture row of 0x%08X names no stored levels" % t.base)
+        try:
+            stored = {lv: (lw, lh, data) for lv, lw, lh, data in decode_mip_levels((fr.path.parent / mips["file"]).read_bytes(), t.fc, mips)}
+        except (OSError, ValueError, KeyError) as e:
+            raise Unreadable("the stored levels of 0x%08X cannot be read: %s" % (t.base, e))
+        w, h, rgba = level_plane(stored, level)
+    plane = np.frombuffer(bytes(rgba), dtype=np.uint8).reshape(h, w, 4)[:, :, component] / 255.0
     alpha = Alpha(plane, wrap=((fc[0] >> 10) & 7) == 0)
 
     def uv(outputs):
@@ -1413,14 +1438,60 @@ def twin_of(scene, row):
     return None
 
 
+def occluder_cover(row, clip, tris, uv, texture, scale, size, origin=0.0, layer=None, zscale=-1.0, zoffset=1.0):
+    """(closed, kept, depth), each [rows, columns] of the one-sample layer target `size`: the texels a tree
+    occluder's triangles close. clip [n, 4] and uv [n, 2] per vertex, tris [m, 3]; `row` gives the alpha state
+    (0x2202, 0x210E), `texture` an Alpha, `scale` the caster's c15.w. A fragment is kept where the row's alpha
+    rule holds ON ONE SAMPLE (alpha_cover, samples = 1: under 0xAA at the scale 0.5 only where the filtered
+    texture alpha is exactly 1); `kept`: the texels with a kept fragment, `depth` the nearest one's z / w (inf
+    elsewhere). `closed`: of them, those not behind `layer`, the layer's depth before the occluder, in the
+    stored form scale * z / w + offset: the game's (scale -1, offset 1: greater or equal) or the native
+    layer's (scale 1, offset 0: less or equal); without a layer, `kept`."""
+    kept = np.zeros((size[1], size[0]), dtype=bool)
+    depth = np.full((size[1], size[0]), np.inf)
+    both = np.concatenate([np.asarray(clip, dtype=np.float64), np.asarray(uv, dtype=np.float64)], axis=1)
+    for _, ys, xs, d, attrs in fragments(both, tris, size, origin):
+        first, _ = alpha_cover(row, attrs, texture, (xs & 1) * 2 + (ys & 1), samples=1, scale=scale)
+        keep = first & (d <= depth[ys, xs])
+        depth[ys[keep], xs[keep]] = d[keep]
+        kept[ys[keep], xs[keep]] = True
+    closed = kept.copy()
+    if layer is not None:
+        stored = stored_depth(depth, zscale, zoffset)
+        with np.errstate(invalid="ignore"):
+            closed &= (stored >= layer) if zscale < 0 else (stored <= layer)
+    return closed, kept, depth
+
+
+def occluder_rows(fr):
+    """The frame's tree occluder draws at the layer's target, each with its main-scene twin (None: none)."""
+    return [(r, twin_of(fr.scene, r)) for r in fr.layer if r["kind"] == "draw" and cr.ps_hash(r) == TREE_OCCLUDER_PS]
+
+
+def occluder_replay(fr, r, twin, table, size, origin=0.0, level=0, layer=None, zscale=None, zoffset=None, cache=None):
+    """occluder_cover for one occluder row of a capture frame: the twin's triangles and coordinates from the
+    game's own microcode (with the wind), the twin's albedo at `level`, the occluder row's alpha state and
+    c15.w. Returns (closed, kept, depth, the Geometry); Unreadable when it cannot be made."""
+    scale = _fade(r)                                      # the caster's alpha: the texture's times pixel c15.w
+    if not math.isfinite(scale):
+        raise Unreadable("no pixel c15 in the layer's row")
+    names, uv_of, alpha = cover_inputs(fr, twin, _albedo_entry(cr.ps_hash(twin)), level=level)
+    g = _cached_geometry(twin, fr, True, table, names, cache)
+    if g.reason:
+        raise Unreadable(g.reason)
+    closed, kept, depth = occluder_cover(r, g.clip, g.tris, uv_of(g.outputs), alpha, scale, size, origin, layer,
+                                         fr.zscale if zscale is None else zscale, fr.zoffset if zoffset is None else zoffset)
+    return closed, kept, depth, g
+
+
 def cmd_occluder(args, say=print):
     fr = load_frame(cr.find_capture(args.capture), args.frame)
     _head(fr, say)
     table = load_table()
     rows = [r for r in fr.layer if r["kind"] == "draw" and cr.ps_hash(r) == TREE_OCCLUDER_PS]
     size = (SIZE[0] // 2, SIZE[1] // 2)
-    say("tree occluder draws at the layer (pixel shader F1EB, pitch %d): %d; target %d x %d, one sample, sampled at %g" % (
-        LAYER_PITCH, len(rows), size[0], size[1], args.origin))
+    say("tree occluder draws at the layer (pixel shader F1EB, pitch %d): %d; target %d x %d, one sample, sampled at %g; "
+        "the texture's level %d" % (LAYER_PITCH, len(rows), size[0], size[1], args.origin, args.level))
     layer = None
     if fr.depth is not None:
         layer = np.clip(fr.depth[::2, ::2], 0.0, 1.0)     # the layer's depth: the scene's at every second texel
@@ -1435,24 +1506,19 @@ def cmd_occluder(args, say=print):
             failed += 1
             continue
         try:
-            scale = _fade(r)                              # the caster's alpha: the texture's times pixel c15.w
-            if not math.isfinite(scale):
-                raise Unreadable("no pixel c15 in the layer's row")
-            count, depth, g = covered(fr, r, table, size=size, origin=args.origin, samples=1, scale=scale,
-                                      cache=args.cache, geometry_row=twin)
+            # (the layer's test with the game's depth copy: greater or equal on the stored depth)
+            shut, kept, depth, g = occluder_replay(fr, r, twin, table, size, args.origin, args.level, layer, cache=args.cache)
         except Unreadable as e:
             say("  line %d (twin line %d): not made: %s" % (r["line"], twin["line"], e))
             failed += 1
             continue
-        kept = count > 0
         line = "  line %d (twin line %d, %s/%s, %d indices, %s): alpha scale %.4f, kept by the alpha rule %d texels" % (
             r["line"], twin["line"], cr.vs_hash(twin)[:4], cr.ps_hash(twin)[:4], (twin.get("ib") or {}).get("count", 0),
-            g.state, scale, int(kept.sum()))
+            g.state, _fade(r), int(kept.sum()))
         if layer is not None:
-            kept &= stored_depth(depth, fr.zscale, fr.zoffset) >= layer      # the layer's test: greater or equal
-            line += ", of them not behind the layer's depth %d" % int(kept.sum())
+            line += ", of them not behind the layer's depth %d" % int(shut.sum())
         partial += g.state == "partial"
-        closed |= kept
+        closed |= shut
         say(line + (" [%s]" % g.note if g.note else ""))
     say("texels the replay's tree occluders close: %d of %d" % (int(closed.sum()), closed.size))
     if args.out:
@@ -1515,6 +1581,8 @@ def main(argv=None):
         if name == "occluder":
             p.add_argument("--origin", type=float, default=0.0, help="the one-sample layer's sampling place (not measured)")
             p.add_argument("--out", help="the closed texels, a numpy file")
+            p.add_argument("--level", type=int, default=0, help="the albedo's level the alpha is taken from (0: the base; "
+                           "above it a stored level of the capture's \"mips\" member)")
     p = sub.add_parser("motion")
     p.add_argument("mask")
     p.add_argument("shots", nargs="+")

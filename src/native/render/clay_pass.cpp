@@ -2127,6 +2127,9 @@ void ClayPass::ForgetSunObjects() {
   sun_depth_ps_ = sun_reduce_ps_ = sun_radial_ps_ = sun_quad_vs_ = sun_quad_ps_ = sun_occluder_ps_ = nullptr;
   sun_depth_pipeline_ = sun_reduce_pipeline_ = sun_radial_pipeline_ = nullptr;
   for (nrhi::Pipeline*& p : sun_pipelines_) p = nullptr;
+  for (nrhi::Pipeline*& p : sun_tree_pipelines_) p = nullptr;
+  for (bool& failed : sun_tree_failed_) failed = false;
+  sun_tree_ps_ = nullptr;
   sun_depth_ = nullptr;
   sun_scene_depth_view_ = nullptr;
   for (size_t i = 0; i < 2; ++i) {
@@ -2146,6 +2149,8 @@ void ClayPass::DestroySunObjects() {
     device_->DestroyDeferred(sun_reduce_pipeline_);
     device_->DestroyDeferred(sun_radial_pipeline_);
     for (nrhi::Pipeline* p : sun_pipelines_) device_->DestroyDeferred(p);
+    for (nrhi::Pipeline* p : sun_tree_pipelines_) device_->DestroyDeferred(p);  // (before wind_vs_, which one is made of)
+    device_->DestroyDeferred(sun_tree_ps_);
     device_->DestroyDeferred(sun_depth_ps_);
     device_->DestroyDeferred(sun_reduce_ps_);
     device_->DestroyDeferred(sun_radial_ps_);
@@ -2164,6 +2169,49 @@ void ClayPass::DestroySunObjects() {
     device_->DestroyDeferred(sun_depth_);
   }
   ForgetSunObjects();
+}
+
+// The redraw's pipeline of one vertex program (clay_logic.h, "The tree occluders' redraw"): the clay layout,
+// the textured depth-only program, no colour target, the layer's depth tested less-or-equal (the game's
+// greater-or-equal under its reversed range) and written, no cull. Made on first use, in a frame whose
+// layer is drawn and has a twin; null when it cannot be made (logged once a slot), and its twins are then
+// left out.
+nrhi::Pipeline* ClayPass::SunTreePipeline(nrhi::Device* dev, bool wind) {
+  const size_t slot = SunTreePipelineSlot(wind);
+  if (sun_tree_pipelines_[slot]) return sun_tree_pipelines_[slot];
+  if (sun_tree_failed_[slot] || !ready_ || dev != device_ || !sun_objects_ || !layout_ || !vs_ || (wind && !wind_vs_)) return nullptr;
+  if (!sun_tree_ps_) {
+    nrhi::ShaderDesc sd;
+    sd.entry_point = "main";
+    sd.stage = nrhi::ShaderStage::kPixel;
+    sd.name = "fable2_clay_sun_tree_ps";
+    sd.hlsl_source = shaders::kClayTexturedDepthPs;
+    sun_tree_ps_ = dev->CreateShader(sd);
+  }
+  if (sun_tree_ps_) {
+    nrhi::GraphicsPipelineDesc pipe;
+    pipe.layout = layout_;
+    pipe.vs = wind ? wind_vs_ : vs_;
+    pipe.ps = sun_tree_ps_;
+    pipe.rtv_format = nrhi::Format::kUnknown;
+    pipe.dsv_format = nrhi::Format::kD32_FLOAT;
+    pipe.cull = nrhi::CullMode::kNone;
+    pipe.depth.test_enable = true;
+    pipe.depth.write_enable = true;
+    pipe.depth.func = nrhi::CompareFunc::kLessEqual;
+    sun_tree_pipelines_[slot] = dev->CreateGraphicsPipeline(pipe);
+  }
+  if (!sun_tree_pipelines_[slot]) {
+    sun_tree_failed_[slot] = true;
+    REXLOG_ERROR("[native] clay: the tree occluders' {} failed for the {} ({}): its twins are not drawn into the sun layer's depth (the "
+                 "layer is drawn without them) until the pass is rebuilt or the game is restarted",
+                 sun_tree_ps_ ? "pipeline creation" : "program's compile", wind ? "wind program" : "clay vertex shader",
+                 SunTreeSkipName(SunTreeSkip::kPipeline));
+    return nullptr;
+  }
+  REXLOG_INFO("[native] clay: tree occluder pipeline ready ({}; the textured depth-only program, no colour target, the layer's depth "
+              "tested less-or-equal and written, no cull)", wind ? "the wind program" : "the clay vertex shader");
+  return sun_tree_pipelines_[slot];
 }
 
 bool ClayPass::EnsureSunObjects(nrhi::Device* dev) {
@@ -3452,6 +3500,63 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
                 cloud_log_lines_ == kCloudLogLines ? " (last such line)" : "");
   }
   const ClaySun sun = DecideClaySun(sun_in);
+  // The tree occluders' redraw (clay_logic.h, "The tree occluders' redraw"): which of the frame's twins are
+  // drawn into the layer's depth, decided here, where every record's pipeline and wind are final, and before
+  // the Sun line. Only in a frame whose layer is drawn from the live scene (on the feed the depth is the
+  // file's, of another frame: none). Each twin by its prepared record: the alpha of one sample from its own
+  // state (DecideSunTree), the pipeline of the vertex program the scene draws it with (a twin drawn moved
+  // is drawn moved here, with the same wind words and slot, or not at all); what cannot be drawn is counted
+  // by reason and left out.
+  struct SunTree {
+    size_t prepared = 0;
+    ClayAlpha alpha;
+    nrhi::Pipeline* pipeline = nullptr;
+  };
+  SunTree sun_trees[capture::kMaxLayerOccluders];
+  uint32_t sun_tree_count = 0, sun_tree_wind = 0;
+  if (sun == ClaySun::kDrawn && !oracle_sun && scene.layer_twin_count) {
+    sun_tree_records_.clear();
+    for (const Prepared& p : prepared_) sun_tree_records_.push_back(uint32_t(p.r - scene.draws.data()));
+    const uint32_t twins = std::min<uint32_t>(scene.layer_twin_count, capture::kMaxLayerOccluders);
+    st.sun_trees = twins;
+    for (uint32_t i = 0; i < twins; ++i) {
+      const size_t at = SunTreeRecord(sun_tree_records_.data(), sun_tree_records_.size(), scene.layer_twins[i]);
+      SunTreeSkip why = SunTreeSkip::kRecord;
+      if (at != kNoSunTreeRecord && prepared_[at].pipeline && !prepared_[at].terrain) {
+        const Prepared& p = prepared_[at];
+        const SunTreeDraw d = DecideSunTree(*p.r, capture::DecodeRenderState(p.r->state_words), p.albedo != nullptr && p.uvs != nullptr);
+        why = d.skip;
+        if (why == SunTreeSkip::kNone) {
+          nrhi::Pipeline* const pipeline = SunTreePipeline(dev, p.wind != nullptr);
+          if (pipeline) {
+            sun_trees[sun_tree_count++] = {at, d.alpha, pipeline};
+            if (p.wind) ++sun_tree_wind;
+          } else {
+            why = SunTreeSkip::kPipeline;
+          }
+        }
+      }
+      if (why != SunTreeSkip::kNone) ++st.sun_tree_skipped[size_t(why)];
+    }
+    st.sun_trees_drawn = sun_tree_count;
+  }
+  // (a line when the redraw's counts change: the Sun line's own comes only with the verdict)
+  if (post.sun) {
+    uint32_t form = st.sun_trees_drawn | (st.sun_trees << 8) | (sun_tree_wind << 16);
+    for (size_t i = 0; i < size_t(SunTreeSkip::kCount); ++i) form |= st.sun_tree_skipped[i] ? 0x1000000u << i : 0u;
+    constexpr uint32_t kSunTreeLogLines = 16;
+    if (form != sun_tree_logged_ && sun_tree_log_lines_ < kSunTreeLogLines) {
+      sun_tree_logged_ = form;
+      ++sun_tree_log_lines_;
+      REXLOG_INFO("[native] clay: tree occluders changed at scene frame {}: drawn {} of {} into the layer's depth ({} by the wind program; not "
+                  "drawn {{state: {}, alpha: {}, texture: {}, record: {}, pipeline: {}}}), first twin record {}{}",
+                  scene.frame, st.sun_trees_drawn, st.sun_trees, sun_tree_wind, st.sun_tree_skipped[size_t(SunTreeSkip::kState)],
+                  st.sun_tree_skipped[size_t(SunTreeSkip::kAlpha)], st.sun_tree_skipped[size_t(SunTreeSkip::kTexture)],
+                  st.sun_tree_skipped[size_t(SunTreeSkip::kRecord)], st.sun_tree_skipped[size_t(SunTreeSkip::kPipeline)],
+                  st.sun_trees ? std::to_string(scene.layer_twins[0]) : std::string("none"),
+                  sun_tree_log_lines_ == kSunTreeLogLines ? " (last such line)" : "");
+    }
+  }
   // The previous-frame blend (clay_logic.h, "The previous-frame blend"; plan Task 15): which front target
   // this frame writes and with what share of the other (StepClayFront). The second target is asked only
   // in a post frame with the sun's switch on; with the switch off the share is 0, the one target of
@@ -4048,9 +4153,32 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       }
       layer_quads(0);
       // (the stored native scene's two planes of the layer's depth: before the tree occluders and after
-      // them. The occluders' redraw comes between the two, plan Task 16; until then both planes hold the
-      // depth the cloud occluders left. The loop below binds its targets, viewport and layout anew.)
+      // them, the occluders' redraw between the two. The loop below binds its targets, viewport and layout
+      // anew.)
       if (scene_dumping) DumpLayerPlane(cmd, dev, 0);
+      // The tree occluders' redraw (sun_trees, decided above): each twin once more, depth only, into the
+      // layer's depth the cloud occluders left: the layer's target with the quads' half-pixel origin (a
+      // pixel's centre is the game's integral sample point: the game draws F1EB at the same target), the
+      // clay layout with the frame's bindings, the twin's own buffers, texture, constants and wind
+      // (DrawPrepared, as the pre-pass draws it) with the alpha fields of one sample in place of its
+      // scene draw's.
+      if (sun_tree_count) {
+        layer_target(nullptr);
+        cmd->SetViewport({kSunQuadViewportOrigin, kSunQuadViewportOrigin, float(kSunLayerWidth), float(kSunLayerHeight), 0.0f, 1.0f});
+        bind_scene();
+        nrhi::Pipeline* tree_bound = nullptr;
+        for (uint32_t i = 0; i < sun_tree_count; ++i) {
+          const SunTree& t = sun_trees[i];
+          Prepared twin = prepared_[t.prepared];
+          twin.alpha = t.alpha;
+          twin.prepass_flat = false;
+          if (t.pipeline != tree_bound) {
+            cmd->SetPipeline(t.pipeline);
+            tree_bound = t.pipeline;
+          }
+          DrawPrepared(cmd, twin, color, true, white_view_, nullptr, nullptr, nullptr);
+        }
+      }
       if (scene_dumping) DumpLayerPlane(cmd, dev, 1);
       // 2. Layer 1 (the beam source) and layer 2 (flares, moon glow, sun disc), each cleared and drawn
       // against that one depth, which no colour state writes.

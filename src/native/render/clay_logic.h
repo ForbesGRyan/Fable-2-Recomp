@@ -47,6 +47,24 @@ namespace fable2::native::render {
 enum class ShadowDrawSkip : uint8_t {
   kNone, kState, kMatrix, kBias, kAlpha, kGeometry, kTexture, kPipeline, kConstants, kTwin, kUnread, kCount
 };
+// Why a tree occluder's twin is not drawn into the sun layer's depth ("The tree occluders' redraw", below;
+// counted on the Sun line). kState: the twin's state words were not read, it has no alpha-to-mask (the
+// occluder's kept set is not known then) or its alpha test's reference is no number. kAlpha: its material
+// has not the albedo's alpha, or a scale or coordinate transform that is no number. kTexture: its
+// coordinates or texture are not there this frame (never drawn solid). kRecord: the twin is not among the
+// frame's drawn records. kPipeline: no pipeline of its vertex program (a twin drawn moved in the scene is
+// never drawn at rest in the layer).
+enum class SunTreeSkip : uint8_t { kNone, kState, kAlpha, kTexture, kRecord, kPipeline, kCount };
+inline const char* SunTreeSkipName(SunTreeSkip s) {
+  switch (s) {
+    case SunTreeSkip::kState: return "state";
+    case SunTreeSkip::kAlpha: return "alpha";
+    case SunTreeSkip::kTexture: return "texture";
+    case SunTreeSkip::kRecord: return "record";
+    case SunTreeSkip::kPipeline: return "pipeline";
+    default: return "none";
+  }
+}
 
 inline const char* ShadowDrawSkipName(ShadowDrawSkip s) {
   switch (s) {
@@ -748,6 +766,11 @@ struct ClayStats {
   // The record of FrameScene::draws before which a drawn layer's depth was taken (PlanSunDepthPlace);
   // capture::kNoDepthPlace: after the scene's last record.
   uint32_t sun_depth_record = capture::kNoDepthPlace;
+  // The tree occluders' redraw of a drawn layer ("The tree occluders' redraw"): the frame's twins
+  // (FrameScene::layer_twin_count; 0 on the oracle feed, whose depth is the file's), those drawn into the
+  // layer's depth, and the others by reason (index: SunTreeSkip).
+  uint32_t sun_trees = 0, sun_trees_drawn = 0;
+  uint32_t sun_tree_skipped[size_t(SunTreeSkip::kCount)] = {};
   float sun_centre[2] = {};
   ClaySunFrames sun_frames;
 };
@@ -5326,8 +5349,9 @@ inline double SunOccluderAlphaMirror(float texel_alpha, const float world[2], co
 // no occluder). Not usable, and then no layer is drawn (ClaySun::kDepthPlace): an occluder call that named
 // no single record, a place without a call, a place beyond the records.
 // The game's own tree occluder (F1EB: the late draw into the layer's depth, where its alpha, texture alpha
-// times 0.5, reaches 0.5 on a target without multisampling) is not drawn (rulings 33 and 39): the native
-// layer's depth has nothing of the late draw, the game's a part of it.
+// times 0.5, reaches 0.5 on a target without multisampling) is drawn again after the cloud occluders
+// ("The tree occluders' redraw", below; sub-project 11, phase 11c): the layer's depth as it is taken has
+// nothing of the late draw, and the redraw puts into it the part the game's has.
 struct SunDepthPlace {
   bool usable = false;
   uint32_t record = capture::kNoDepthPlace;
@@ -5359,6 +5383,63 @@ constexpr size_t CoverageDepthPlace(const SunDepthPlace& plan, bool early, const
     if (SunDepthBefore(plan, records[i])) return i;
   }
   return count;
+}
+
+// --- The tree occluders' redraw (sub-project 11, phase 11c; frame-map section 18, "The tree occluder") ---
+// The game draws each late leaf draw once more into its sun layer's depth (pixel shader F1EB at the layer's
+// target, colour mask 0, depth test greater-or-equal with write, no cull): the mesh, the transform and the
+// wind of the scene's draw (its twin: capture::FindOccluderTwin; FrameScene::layer_twins), with the leaf
+// caster's alpha, the texture's times pixel c15.w, under the record's alpha test and alpha-to-mask ON ONE
+// SAMPLE (the layer's target has no multisampling: alpha >= 1 - offset / 4, ShadowAlphaToMaskThreshold; the
+// captured word 0xAA00001C gives 0.5 at every pixel, and at the fade 0.5 a texel is kept only where the
+// filtered texture alpha is exactly 1). The pass does the same with the twin's own record, after the cloud
+// occluders and before layer 1: the textured depth-only program (the pre-pass's text; the wind program when
+// the twin is drawn moved in the scene, with the same wind words and slot), the layer's viewport with the
+// quads' half-pixel origin, tested less-or-equal against the layer's depth (SunDepthPasses) and written.
+// Under fable2_native_sun, no switch of its own (ruling 16); a twin that cannot be drawn is left out and
+// counted, and the layer is then today's there (fail closed towards the layer of before).
+// The twin's alpha scale is the scene shader's (c15.w times c26.w; F1EB has c15.w alone): equal while c26.w
+// is 1, as it is in every family A row captured (plan Task 12).
+struct SunTreeDraw {
+  SunTreeSkip skip = SunTreeSkip::kNone;
+  ClayAlpha alpha;  // the root constants' alpha fields of the redraw; the default when skipped
+};
+// `twin`: the scene's record; `rs`: its decoded state; `textured`: its coordinates and albedo are there this
+// frame. The alpha fields: from the albedo's component; the test with the record's function and reference;
+// alpha-to-mask with the record's offsets and the sample count's bits 0 (one sample); the record's scale.
+inline SunTreeDraw DecideSunTree(const capture::DrawRecord& twin, const capture::RenderState& rs, bool textured) {
+  SunTreeDraw d;
+  auto skip = [&](SunTreeSkip why) {
+    d = SunTreeDraw{};
+    d.skip = why;
+    return d;
+  };
+  if (!rs.valid || !rs.alpha_to_mask || (rs.alpha_test && !std::isfinite(rs.alpha_ref))) return skip(SunTreeSkip::kState);
+  const capture::Material& m = twin.material;
+  bool usable = m.status == capture::MaterialStatus::kTextured && m.alpha.source == capture::AlphaSource::kAlbedo &&
+                std::fabs(m.alpha_scale) <= 1024.0f;  // (false for a NaN)
+  for (float v : m.uv_xform) usable = usable && std::isfinite(v);
+  if (!usable) return skip(SunTreeSkip::kAlpha);
+  if (!textured) return skip(SunTreeSkip::kTexture);
+  d.alpha.mode = kAlphaFromAlbedo | (uint32_t(m.alpha.component & 3) << 5) | kAlphaToMask |
+                 (uint32_t(rs.alpha_to_mask_offsets) << kAlphaToMaskShift);
+  if (rs.alpha_test) d.alpha.mode |= (uint32_t(rs.alpha_func) & 7u) | kAlphaTest;
+  d.alpha.ref = rs.alpha_test ? rs.alpha_ref : 0.0f;
+  d.alpha.scale = m.alpha_scale;
+  return d;
+}
+// The redraw's two pipelines: the clay vertex shader (0) and the wind program (1).
+inline constexpr size_t kSunTreePipelines = 2;
+constexpr size_t SunTreePipelineSlot(bool wind) { return wind ? 1 : 0; }
+// Which of the frame's prepared records a twin's index names: the place in `records` (each prepared
+// record's index in FrameScene::draws, in the frame's order) of `twin`; kNoSunTreeRecord when none is it.
+inline constexpr size_t kNoSunTreeRecord = ~size_t(0);
+constexpr size_t SunTreeRecord(const uint32_t* records, size_t count, uint32_t twin) {
+  if (!records) return kNoSunTreeRecord;
+  for (size_t i = 0; i < count; ++i) {
+    if (records[i] == twin) return i;
+  }
+  return kNoSunTreeRecord;
 }
 
 struct ClaySunInputs {
@@ -5410,6 +5491,18 @@ inline std::string FormatSunText(const ClayStats& st) {
     if (st.sun_depth_record != capture::kNoDepthPlace) {
       std::snprintf(buf, sizeof(buf), ", depth before record %u", st.sun_depth_record);
       text += buf;
+    }
+    // (the tree occluders' redraw, only in a frame that had a twin: those drawn, and the others by reason)
+    if (st.sun_trees) {
+      std::snprintf(buf, sizeof(buf), ", tree occluders drawn %u of %u", st.sun_trees_drawn, st.sun_trees);
+      text += buf;
+      std::string why;
+      for (SunTreeSkip s : {SunTreeSkip::kState, SunTreeSkip::kAlpha, SunTreeSkip::kTexture, SunTreeSkip::kRecord, SunTreeSkip::kPipeline}) {
+        if (!st.sun_tree_skipped[size_t(s)]) continue;
+        std::snprintf(buf, sizeof(buf), "%s%s: %u", why.empty() ? "" : ", ", SunTreeSkipName(s), st.sun_tree_skipped[size_t(s)]);
+        why += buf;
+      }
+      if (!why.empty()) text += " (not drawn {" + why + "})";
     }
   } else {
     text += std::string("not drawn (") + kSunLayerReason + ": " + ClaySunName(st.sun) + ")";

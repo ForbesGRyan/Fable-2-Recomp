@@ -744,6 +744,22 @@ class ClayPass {
   ClaySunFrames sun_counts_;
   ClaySun sun_logged_ = ClaySun::kOff;
   uint32_t sun_log_lines_ = 0;
+  // The tree occluders' redraw (clay_logic.h, "The tree occluders' redraw"; SunTreePipeline): made on the
+  // first drawn layer that has a twin, never with fable2_native_sun off. sun_tree_ps_: the textured
+  // depth-only program (the pre-pass's text, an object of the layer's own: the pre-pass's exists only with
+  // the shadows). sun_tree_pipelines_: by SunTreePipelineSlot (the clay vertex shader; the wind program),
+  // the clay layout, no colour target, the layer's depth tested less-or-equal and written, no cull.
+  // sun_tree_failed_: making that slot's pipeline (or the program) failed once: its twins are left out
+  // (SunTreeSkip::kPipeline). sun_tree_records_: each prepared record's index in FrameScene::draws, the
+  // frame's scratch. What was last logged of the redraw (a line when its counts change, at most
+  // kSunTreeLogLines of them).
+  nrhi::Shader* sun_tree_ps_ = nullptr;
+  nrhi::Pipeline* sun_tree_pipelines_[kSunTreePipelines] = {};
+  bool sun_tree_failed_[kSunTreePipelines] = {};
+  std::vector<uint32_t> sun_tree_records_;
+  uint32_t sun_tree_logged_ = 0;
+  uint32_t sun_tree_log_lines_ = 0;
+  nrhi::Pipeline* SunTreePipeline(nrhi::Device* dev, bool wind);
   // The oracle feed (SetPostOracle; null: off). oracle_tex_ / oracle_view_: the stored scene, in
   // kPixelShaderResource from its upload on. oracle_frames_: the frames fed since the upload, the
   // upload's own included (it stops counting past the dump's frame). oracle_dump_: the read-back buffer

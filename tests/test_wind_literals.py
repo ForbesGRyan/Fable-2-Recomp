@@ -256,7 +256,15 @@ class OnePass(unittest.TestCase):
         s = self.source
         # Every vertex shader a pipeline of the pass is given.
         given = re.findall(r"\.vs = ([^;]+);", s)
-        self.assertEqual([g for g in given if "wind_vs_" in g], ["key.wind ? wind_vs_ : vs_"])
+        # (two since plan Task 16: the tree occluders' redraw into the sun layer's depth has a pipeline of its own for
+        # each program, and takes the wind program exactly for a twin the scene draws moved: below)
+        self.assertEqual([g for g in given if "wind_vs_" in g], ["key.wind ? wind_vs_ : vs_", "wind ? wind_vs_ : vs_"])
+        tree = pass_function(s, "SunTreePipeline")
+        self.assertIn("    pipe.vs = wind ? wind_vs_ : vs_;\n", tree)
+        self.assertIn("(wind && !wind_vs_)) return nullptr;", tree)
+        self.assertEqual(re.findall(r"\bSunTreePipeline\(dev, ([^)]+)\)", s), ["p.wind != nullptr"])
+        # ... and a twin whose pipeline cannot be made is left out, never drawn with the other program.
+        self.assertIn("          } else {\n            why = SunTreeSkip::kPipeline;\n          }\n", s)
         create = pass_function(s, "CreatePipeline")
         self.assertIn("  if (key.wind && !wind_vs_) return nullptr;\n  pipe.vs = key.wind ? wind_vs_ : vs_;\n", create)
         # The colour pass's and the pre-pass's pipelines are both made by CreatePipeline, from keys.

@@ -146,6 +146,9 @@ static_assert(offsetof(DrawRecord, wind_index) == 614, "DrawRecord::wind_index i
 // that the game issued after its depth copy, and the first such record is where the native pass takes the
 // layer's depth (nothing recorded says where the copy itself lies: it passes no hooked call).
 // FrameScene::layer_depth_place holds that record's index; kNoDepthPlace: the frame has none.
+// FrameScene::layer_twins holds every such record's index (each once, in the occluders' order): the native
+// pass draws each of them again into the layer's depth, as the game's tree occluder does (render/clay_logic.h,
+// "The tree occluders' redraw"; sub-project 11, phase 11c).
 inline constexpr uint32_t kNoDepthPlace = 0xFFFFFFFFu;
 // The tree occluder's pixel shader (tools/xdk_sigmatch/light_formulas.py, POST_FURNITURE_SHADERS).
 inline constexpr uint64_t kTreeOccluderPs = 0xF1EB2497108F159Dull;

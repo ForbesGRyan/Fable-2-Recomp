@@ -663,8 +663,8 @@ the last made leaf line is the vertex at its pivot with the lift exactly 0 (ledg
 inputs".
 
 **Consumes:** `RegisterView`, `LightStream`, `LightElement`, `LightFetchSpec`, `LightFetch`,
-`MakeLightElement`, `LightElementBytes` (`material.h` lines 440 to 640); `ReadBankRegisters`
-(`capture.cpp` 2843); `ReadLiteralRegisters` and `LiteralsJson` (the literal table's reader);
+`MakeLightElement`, `LightElementBytes` (`material.h` lines 440 to 640); `ReadConstantRegisters`
+(`capture.cpp`; as built, into a bank of the wind's own; as first written `ReadBankRegisters`); `ReadLiteralRegisters` and `LiteralsJson` (the literal table's reader);
 `ResolveLightStream`; `FillLightInputs` (3282) as the pattern; `FrameBuilder::Add` (line 494),
 `AddShadow` (580); Task 7's `wind_table.inc`.
 
@@ -753,16 +753,19 @@ capture::WindReason::kOff` as last parameters: with the wind on, a drawable reco
 are appended and the record gets the index; an array at 65,535 entries gives `kOverLimit`; every
 other record gets `kNoSideIndex` whatever index it came with.
 
-In `capture.cpp`: `VsInfo` gains `const WindSpec* wind` and `bool wind_literals` (set once in
+In `capture.cpp`: `VsInfo` gains `const WindSpec* wind` and `WindLiteralVerdict wind_literals` (as
+built: three states, read at the object's first wind draw and asked again once a wind frame, never
+in `FillShader`, which runs with the switch off; as first written `bool wind_literals`, set once in
 `FillShader` / at the first lookup of the object: the object's literal table read over
 `c248..c255` and held against the row literal by literal, at the row's register and component:
 ledger ruling 31); `g_wind_wanted`, `g_wind_frame` latched with the records at the frame boundary
 (as the fog's); `FillWindInputs(uint32_t device, const DeviceSnapshot& dev, const VsInfo* vs, bool
 instanced, int64_t max_vertex, WindInputs* out)` called in `RecordDraw` beside `FillLightInputs`
-(for a draw that is not skipped and whose shader has a row) and in `ObserveShadowDraw` for a
-caster record; the discovery row's `"wind"` member (the inputs as the record gets them, or the
+(for a draw that is not skipped and whose shader has a row) and in `RecordShadowDraw` (as built; as
+first written `ObserveShadowDraw`) for a caster record; the discovery row's `"wind"` member (the inputs as the record gets them, or the
 reason), the frame row's `"wind":{"records", "by family", "by reason"}` (`"off"` with the switch
-off), and the periodic line `[native] capture: frame N wind: trunk a, leaf b, plant c, casters d |
+off; as built the keys are those the frame map's "Wind inputs" lists, and since Task 10 the stored
+entries), and the periodic line `[native] capture: frame N wind: trunk a, leaf b, plant c, casters d |
 at rest {reason: n} | by vs {hash: n}`.
 
 - [ ] Tests first. `tests/native/test_wind_inputs.cpp` (see it fail):
@@ -862,7 +865,7 @@ int main() {
 
       `tests/native/test_draw_record.cpp`: a
       record `AssembleRecord` makes has `wind_index == kNoSideIndex` (return 150).
-      `tests/native/test_frame_scene.cpp` (returns 151 to 156): `Add` with valid inputs and the
+      `tests/native/test_frame_scene.cpp` (returns 151 to 156; as built 151 to 159, and 160 since Task 10): `Add` with valid inputs and the
       wind on gives index 0 then 1 and `scene.wind.size() == 2`; with the wind off, or inputs of
       family none, or a skipped record: `kNoSideIndex` and no entry; a record that comes with a
       stale `wind_index` of 7 and no inputs leaves with `kNoSideIndex`; `AddShadow`'s index names
@@ -933,7 +936,8 @@ section 12), so a test of the extent on a made stream should reach a length of t
 All or nothing: a value that is not finite, a stream that holds fewer than `count` vertices, a
 copy past the instance stream: no buffer. Keys `WindKey` (the elements and the streams' content
 hashes; a plant's: the mesh's position stream and layout and the instance set as the flat normals
-have it) with their test in `test_geometry_cache_index.cpp`.
+have it) with their test in `test_geometry_cache_index.cpp` (as built: `WindKey` lies in
+`clay_logic.h` and its test is `tests/native/test_clay_logic.cpp`, cases 681 to 685).
 
 - [ ] Tests first (`tests/native/test_wind_decode.cpp`): a made 8_8_8_8 stream of three vertices
       read through a made element gives the twelve values `byte / 255` in the element's source

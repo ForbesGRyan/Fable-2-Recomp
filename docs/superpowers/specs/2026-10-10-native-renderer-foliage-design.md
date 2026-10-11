@@ -230,7 +230,7 @@ W/2 x H/2, made only for a diagnostic.
    first written: "the shader's literal registers with their values", five registers). The table
    is X-macro lines, `FABLE2_WIND` a shader and `FABLE2_WIND_LITERAL` a literal, written by the
    generator alone (ledger ruling 33). At a draw whose vertex shader has a row, in a frame with
-   the wind wanted, the capture reads the registers (`ReadBankRegisters`) and resolves the
+   the wind wanted, the capture reads the registers (`ReadConstantRegisters`, as built; as first written `ReadBankRegisters`) and resolves the
    elements' streams, and `MakeWindInputs` validates: every register read and finite and inside
    its bound (trees: `|c15.x|` <= 1e7, `c15.yzw` in [0, 4], `c16` components in [-4, 4],
    `|c17.xy|` <= 16 (ledger ruling 28: 12.5 occurs in the world's first frame after loading; as
@@ -518,6 +518,14 @@ threshold set here without a measured one before it (ruling 20).
    (`wind_check.py inputs`); every wind draw row has inputs or a counted reason, and no reason
    other than `no-entry` occurs in more than 1% of the wind draws; `sizeof(DrawRecord)` is 616
    (static assert). With the switch off the frame row's wind counts are all zero.
+   *As judged so far (plan Tasks 8 to 10; review of Tasks 8 and 9, Important 1):* `wind_check.py
+   inputs` holds a row's `"wind"` member, which is a re-read at the draw, not the record's stored
+   entry: 8,949 of 8,949 member rows of captures `220514`, `220658`, `221114`. The record's entry
+   itself is held by `inputs --entries` on captures whose frame rows carry the scene's stored
+   entries (ledger ruling 40): 7,011 of 7,011 entries of 20 frames of captures `002046`, `002354`,
+   `002534`, each equal to a member row of the same shader value for value. With the switch off the
+   frame row says `"wind":"off"` (it has no counts) and no row has a member (captures `221257`,
+   `002231`). The verdict is plan Task 11's.
 4. *Positions through the table.* `position_check.py` with the wind terms: over every wind draw
    of the three captures the entry's position against the microcode's `oPos`, 99th percentile
    below 0.05 pixel of 1120 x 720, and none above 0.5.

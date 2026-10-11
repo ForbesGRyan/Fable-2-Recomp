@@ -139,6 +139,33 @@ inline CpWindows& cp_windows() {
   return w;
 }
 
+// One line per guest frame longer than FABLE2_HITCH_MS milliseconds (default 20; 0 = off), with
+// the last closed GPU frame's counters, for attributing hitches.
+inline double hitch_threshold_ms() {
+  static const double v = [] {
+    const char* e = std::getenv("FABLE2_HITCH_MS");
+    return e ? std::atof(e) : 20.0;
+  }();
+  return v;
+}
+
+inline void log_hitch(const rex::graphics::EmulatedFrameStats& gpu) {
+  const auto& raw = fable2::guest_frame_rate::raw();
+  const double frame_ms = double(raw.frame_us.load(std::memory_order_relaxed)) / 1000.0;
+  const double threshold = hitch_threshold_ms();
+  if (threshold <= 0 || frame_ms < threshold || frame_ms > 1000.0) return;
+  REXSYS_INFO(
+      "[frame] hitch {:.1f} ms (swap {:.1f}, wait {:.1f}): gpu frame {} draws {} (cpu {:.1f} ms) "
+      "resolves {} ({:.1f} ms) cp busy {:.1f} present {:.1f} idle {:.1f} submissions {} fence waits "
+      "{} ({:.1f} ms) tile mappings {} gpu busy {:.1f}",
+      frame_ms, double(raw.swap_us.load(std::memory_order_relaxed)) / 1000.0,
+      double(raw.wait_us.load(std::memory_order_relaxed)) / 1000.0, gpu.frame, gpu.draws,
+      double(gpu.draw_cpu_ns) / 1e6, gpu.copies, double(gpu.copy_cpu_ns) / 1e6,
+      double(gpu.cp_busy_ns) / 1e6, double(gpu.cp_present_ns) / 1e6, double(gpu.cp_idle_ns) / 1e6,
+      gpu.submissions, gpu.fence_waits, double(gpu.fence_wait_ns) / 1e6, gpu.tile_mappings,
+      double(gpu.gpu_busy_ns) / 1e6);
+}
+
 inline void sample_cp() {
   if (!enabled()) return;
   CpWindows& c = cp_windows();
@@ -147,7 +174,9 @@ inline void sample_cp() {
     c.acquired = true;
   }
   rex::graphics::EmulatedFrameStats gpu;
-  if (!rex::graphics::GetLastEmulatedFrameStats(&gpu) || gpu.frame == c.last_gpu_frame) return;
+  if (!rex::graphics::GetLastEmulatedFrameStats(&gpu)) return;
+  log_hitch(gpu);
+  if (gpu.frame == c.last_gpu_frame) return;
   c.last_gpu_frame = gpu.frame;
   c.busy_ms.Add(double(gpu.cp_busy_ns) / 1e6);
   c.wait_reg_ms.Add(double(gpu.cp_wait_reg_ns) / 1e6);
@@ -178,9 +207,11 @@ inline void poll() {
   if (enabled()) {
     const double mean_frame = w.frame_ms.Mean();
     REXSYS_INFO(
-        "[frame] guest {} frames: {:.1f} fps, frame median {:.2f} ms, work median {:.2f} ms "
-        "(p90 {:.2f}), swap median {:.2f} ms, wait median {:.2f} ms",
+        "[frame] guest {} frames: {:.1f} fps, frame median {:.2f} ms (p90 {:.2f}, p99 {:.2f}, "
+        "max {:.2f}), work median {:.2f} ms (p90 {:.2f}), swap median {:.2f} ms, wait median "
+        "{:.2f} ms",
         w.work_ms.size(), mean_frame > 0 ? 1000.0 / mean_frame : 0.0, w.frame_ms.Median(),
+        w.frame_ms.Percentile(0.9), w.frame_ms.Percentile(0.99), w.frame_ms.Max(),
         w.work_ms.Median(), w.work_ms.Percentile(0.9), w.swap_ms.Median(), w.wait_ms.Median());
     CpWindows& c = cp_windows();
     if (c.busy_ms.size() > 0) {

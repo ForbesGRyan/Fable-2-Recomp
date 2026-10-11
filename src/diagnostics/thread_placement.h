@@ -7,6 +7,12 @@
 //   cpu is a logical processor index (0..63). Several cpus may be given as a
 //   mask with '+': "GPU Commands=2+3" pins to logical 2 and 3 (one physical
 //   core with SMT).
+// FABLE2_THREAD_PLACE=auto
+//   The rules are built from the processor topology: the physical cores of the
+//   cache group (CCD) with the largest L3, in order, skipping the first core
+//   (logical 0/1, where the interrupt and system work lands), one core each for
+//   "GPU Commands", "D3D12 Submit", "3D Engine" and "GameThread". Fewer than
+//   five physical cores in that group: no placement.
 // FABLE2_THREAD_PLACE_MODE=affinity (default) | ideal
 //   affinity: SetThreadAffinityMask (hard); ideal: SetThreadIdealProcessor (soft hint).
 // FABLE2_THREAD_PLACE_AT=<guest frame> (default 200): the frame at which the
@@ -23,6 +29,7 @@
 #include <windows.h>
 #include <tlhelp32.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -82,13 +89,65 @@ inline std::string Description(HANDLE h) {
   return name;
 }
 
+// Rules from the topology: one physical core of the largest-L3 cache group per
+// hot thread, the group's first core left out. Empty when the machine is too small.
+inline std::vector<Rule> AutoRules() {
+  std::vector<Rule> rules;
+  DWORD length = 0;
+  GetLogicalProcessorInformationEx(RelationAll, nullptr, &length);
+  if (!length) return rules;
+  std::vector<uint8_t> buffer(length);
+  auto* info = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data());
+  if (!GetLogicalProcessorInformationEx(RelationAll, info, &length)) return rules;
+  // Largest L3 group (group 0 only).
+  uint64_t best_l3_mask = 0;
+  uint64_t best_l3_size = 0;
+  std::vector<uint64_t> core_masks;  // one mask per physical core
+  for (DWORD offset = 0; offset < length;) {
+    auto* entry = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data() + offset);
+    if (entry->Relationship == RelationCache && entry->Cache.Level == 3 &&
+        entry->Cache.GroupMask.Group == 0) {
+      if (entry->Cache.CacheSize > best_l3_size) {
+        best_l3_size = entry->Cache.CacheSize;
+        best_l3_mask = entry->Cache.GroupMask.Mask;
+      }
+    } else if (entry->Relationship == RelationProcessorCore && entry->Processor.GroupCount >= 1 &&
+               entry->Processor.GroupMask[0].Group == 0) {
+      core_masks.push_back(entry->Processor.GroupMask[0].Mask);
+    }
+    offset += entry->Size;
+  }
+  if (!best_l3_mask || core_masks.empty()) return rules;
+  std::vector<uint64_t> cores_in_group;
+  for (uint64_t m : core_masks) {
+    if (m & best_l3_mask) cores_in_group.push_back(m);
+  }
+  std::sort(cores_in_group.begin(), cores_in_group.end());
+  if (cores_in_group.size() < 5) return rules;
+  static const char* kThreads[] = {"GPU Commands", "D3D12 Submit", "3D Engine", "GameThread"};
+  for (size_t i = 0; i < 4; ++i) {
+    Rule r;
+    r.name = kThreads[i];
+    r.mask = cores_in_group[i + 1];  // skip the group's first core
+    rules.push_back(r);
+  }
+  REXSYS_INFO("[threadplace] auto: L3 group mask 0x{:X} ({} MB), {} cores; rules {}",
+              best_l3_mask, best_l3_size >> 20, cores_in_group.size(),
+              [&] {
+                std::string t;
+                for (auto& r : rules) t += r.name + "=0x" + std::to_string(r.mask) + " ";
+                return t;
+              }());
+  return rules;
+}
+
 // Applies the rules once. Returns the number of threads placed.
 inline int Apply() {
   const char* spec = std::getenv("FABLE2_THREAD_PLACE");
   if (!spec || !*spec) return 0;
   const char* mode_env = std::getenv("FABLE2_THREAD_PLACE_MODE");
   const bool ideal = mode_env && std::string(mode_env) == "ideal";
-  const std::vector<Rule> rules = ParseRules(spec);
+  const std::vector<Rule> rules = std::string(spec) == "auto" ? AutoRules() : ParseRules(spec);
   if (rules.empty()) {
     REXSYS_WARN("[threadplace] FABLE2_THREAD_PLACE set but no valid rule in \"{}\"", spec);
     return 0;

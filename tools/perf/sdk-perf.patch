@@ -64,20 +64,38 @@ index f8c1669..6c8f393 100644
  void AcquireEmulatedFrameStats();
  void ReleaseEmulatedFrameStats();
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
-index 01daca6..827b4d6 100644
+index 01daca6..a848276 100644
 --- a/include/rex/graphics/command_processor.h
 +++ b/include/rex/graphics/command_processor.h
-@@ -11,6 +11,10 @@
+@@ -11,6 +11,11 @@
  
  #pragma once
  
 +#include <rex/cvar.h>
++#include <cstdio>
 +REXCVAR_DECLARE(bool, readback_memexport_deferred);
 +REXCVAR_DECLARE(bool, readback_resolve_force_delayed);
 +
  #include <atomic>
  #include <cstring>
  #include <functional>
+@@ -256,6 +261,16 @@ class CommandProcessor {
+ 
+   uint32_t counter_ = 0;
+ 
++  // One-frame PM4 dump (cvar dump_pm4_frame=N: the N-th swap-delimited frame is
++  // written as text to pm4_frame_N.txt in the working directory): every type-0
++  // register write of interest and every type-3 packet with its predication state,
++  // and for draws the surface, window and scissor registers.
++  std::FILE* pm4_dump_file_ = nullptr;
++  uint32_t pm4_dump_frames_ = 0;
++  void Pm4DumpSwap();
++  void Pm4DumpType0(uint32_t base_index, uint32_t count, bool write_one_reg);
++  void Pm4DumpType3(uint32_t opcode, uint32_t count, bool predicated, bool skipped);
++
+   uint32_t primary_buffer_ptr_ = 0;
+   uint32_t primary_buffer_size_ = 0;
+ 
 diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
 index e8f9d8b..adb2184 100644
 --- a/include/rex/graphics/d3d12/command_processor.h
@@ -227,13 +245,27 @@ index 7d053e7..5618b58 100644
    std::lock_guard<std::mutex> lock(g_stats_mutex);
    g_stats_acc.AddCopy(cpu_ns);
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index dc60cf6..fbfae10 100644
+index dc60cf6..81b84a5 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
-@@ -88,6 +88,21 @@ REXCVAR_DEFINE_BOOL(readback_memexport_fast, true, "GPU",
+@@ -10,6 +10,7 @@
+  */
+ 
+ #include <algorithm>
++#include <cstdio>
+ #include <cctype>
+ #include <chrono>
+ #include <cinttypes>
+@@ -88,6 +89,27 @@ REXCVAR_DEFINE_BOOL(readback_memexport_fast, true, "GPU",
                      "automatic fallback to full synchronous readback")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
++REXCVAR_DEFINE_UINT32(dump_pm4_frame, 0, "GPU",
++                      "Write the PM4 stream of this swap-delimited frame (1-based; 0 = off) as "
++                      "text to pm4_frame_N.txt in the working directory: register writes of "
++                      "interest, type-3 packets with their predication, draws with surface, "
++                      "window and scissor state.");
++
 +REXCVAR_DEFINE_BOOL(readback_memexport_deferred, false, "GPU",
 +                    "With readback_memexport_fast: when the previous readback slot's submission "
 +                    "has not completed yet, skip the copy-back for this draw instead of draining "
@@ -252,7 +284,7 @@ index dc60cf6..fbfae10 100644
  REXCVAR_DEFINE_INT32(query_occlusion_fake_sample_count, 1000, "GPU",
                       "Fake sample count for occlusion queries")
      .range(1, 100000)
-@@ -498,9 +513,13 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
+@@ -498,9 +520,13 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
  
    // Volatile for the WAIT_REG_MEM loop.
    const_cast<volatile uint32_t&>(regs.values[index]) = value;
@@ -266,6 +298,139 @@ index dc60cf6..fbfae10 100644
  
    // Scratch register writeback.
    if (index >= XE_GPU_REG_SCRATCH_REG0 && index <= XE_GPU_REG_SCRATCH_REG7) {
+@@ -850,6 +876,9 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
+     uint32_t target_index = write_one_reg ? base_index : base_index + m;
+     WriteRegister(target_index, reg_data);
+   }
++  if (pm4_dump_file_) {
++    Pm4DumpType0(base_index, count, write_one_reg != 0);
++  }
+ 
+   return true;
+ }
+@@ -893,10 +922,15 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
+     if (ShouldCollectEmulatedFrameStats()) {
+       NoteEmulatedPredicatedPacket(!skip, opcode == PM4_DRAW_INDX || opcode == PM4_DRAW_INDX_2);
+     }
++    if (pm4_dump_file_) {
++      Pm4DumpType3(opcode, count, true, skip);
++    }
+     if (skip) {
+       reader->AdvanceRead(count * sizeof(uint32_t));
+       return true;
+     }
++  } else if (pm4_dump_file_) {
++    Pm4DumpType3(opcode, count, false, false);
+   }
+ 
+   bool result = false;
+@@ -1116,9 +1150,106 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+   }
+ 
+   ++counter_;
++  Pm4DumpSwap();
+   return true;
+ }
+ 
++void CommandProcessor::Pm4DumpSwap() {
++  const uint32_t wanted = REXCVAR_GET(dump_pm4_frame);
++  ++pm4_dump_frames_;
++  if (pm4_dump_file_) {
++    std::fprintf(pm4_dump_file_, "SWAP (end of frame %u)\n", pm4_dump_frames_);
++    std::fclose(pm4_dump_file_);
++    pm4_dump_file_ = nullptr;
++    REXGPU_INFO("PM4 dump of frame {} written", pm4_dump_frames_);
++  }
++  if (wanted && pm4_dump_frames_ + 1 == wanted) {
++    char name[64];
++    std::snprintf(name, sizeof(name), "pm4_frame_%u.txt", wanted);
++    pm4_dump_file_ = std::fopen(name, "w");
++    if (pm4_dump_file_) {
++      std::fprintf(pm4_dump_file_, "frame %u: type-3 packets and register writes of interest\n",
++                   wanted);
++    }
++  }
++}
++
++void CommandProcessor::Pm4DumpType0(uint32_t base_index, uint32_t count, bool write_one_reg) {
++  const RegisterFile& regs = *register_file_;
++  // Shader constants, fetch constants and the like are too many: only the
++  // scalar state registers below 0x2000 are listed, and a range is listed by
++  // its first register plus the count.
++  if (base_index >= 0x2000) {
++    return;
++  }
++  const uint32_t listed = std::min(count, uint32_t(8));
++  for (uint32_t m = 0; m < listed; ++m) {
++    const uint32_t index = write_one_reg ? base_index : base_index + m;
++    const RegisterInfo* info = RegisterFile::GetRegisterInfo(index);
++    std::fprintf(pm4_dump_file_, "  R %04X %-32s = %08X\n", index, info ? info->name : "?",
++                 regs.values[index]);
++  }
++  if (count > listed) {
++    std::fprintf(pm4_dump_file_, "  R ... %u more\n", count - listed);
++  }
++}
++
++void CommandProcessor::Pm4DumpType3(uint32_t opcode, uint32_t count, bool predicated,
++                                    bool skipped) {
++  const RegisterFile& regs = *register_file_;
++  const char* name = "";
++  switch (opcode) {
++    case PM4_DRAW_INDX: name = "DRAW_INDX"; break;
++    case PM4_DRAW_INDX_2: name = "DRAW_INDX_2"; break;
++    case PM4_SET_BIN_MASK: name = "SET_BIN_MASK"; break;
++    case PM4_SET_BIN_SELECT: name = "SET_BIN_SELECT"; break;
++    case PM4_SET_BIN_MASK_LO: name = "SET_BIN_MASK_LO"; break;
++    case PM4_SET_BIN_MASK_HI: name = "SET_BIN_MASK_HI"; break;
++    case PM4_SET_BIN_SELECT_LO: name = "SET_BIN_SELECT_LO"; break;
++    case PM4_SET_BIN_SELECT_HI: name = "SET_BIN_SELECT_HI"; break;
++    case PM4_INDIRECT_BUFFER: name = "INDIRECT_BUFFER"; break;
++    case PM4_INDIRECT_BUFFER_PFD: name = "INDIRECT_BUFFER_PFD"; break;
++    case PM4_WAIT_REG_MEM: name = "WAIT_REG_MEM"; break;
++    case PM4_EVENT_WRITE: name = "EVENT_WRITE"; break;
++    case PM4_EVENT_WRITE_SHD: name = "EVENT_WRITE_SHD"; break;
++    case PM4_EVENT_WRITE_EXT: name = "EVENT_WRITE_EXT"; break;
++    case PM4_XE_SWAP: name = "XE_SWAP"; break;
++    case PM4_SET_CONSTANT: name = "SET_CONSTANT"; break;
++    case PM4_SET_SHADER_CONSTANTS: name = "SET_SHADER_CONSTANTS"; break;
++    case PM4_LOAD_ALU_CONSTANT: name = "LOAD_ALU_CONSTANT"; break;
++    case PM4_IM_LOAD: name = "IM_LOAD"; break;
++    case PM4_IM_LOAD_IMMEDIATE: name = "IM_LOAD_IMMEDIATE"; break;
++    case PM4_INVALIDATE_STATE: name = "INVALIDATE_STATE"; break;
++    case PM4_NOP: name = "NOP"; break;
++    case PM4_MEM_WRITE: name = "MEM_WRITE"; break;
++    case PM4_REG_RMW: name = "REG_RMW"; break;
++    case PM4_COND_WRITE: name = "COND_WRITE"; break;
++    case PM4_CONTEXT_UPDATE: name = "CONTEXT_UPDATE"; break;
++    default: break;
++  }
++  const bool is_draw = opcode == PM4_DRAW_INDX || opcode == PM4_DRAW_INDX_2;
++  const bool is_copy = regs.Get<reg::RB_MODECONTROL>().edram_mode == xenos::EdramMode::kCopy;
++  std::fprintf(pm4_dump_file_, "T3 %02X %-20s n=%u%s%s sel=%016llX mask=%016llX", opcode, name,
++               count, predicated ? " pred" : "", skipped ? " SKIP" : "",
++               (unsigned long long)bin_select_, (unsigned long long)bin_mask_);
++  if (is_draw && !skipped) {
++    std::fprintf(pm4_dump_file_,
++                 " %s surf=%08X color=%08X depth=%08X winoff=%08X wscis=%08X/%08X "
++                 "sscis=%08X/%08X vport=%08X,%08X copy=%08X/%08X",
++                 is_copy ? "COPY" : "DRAW", regs.values[XE_GPU_REG_RB_SURFACE_INFO],
++                 regs.values[XE_GPU_REG_RB_COLOR_INFO], regs.values[XE_GPU_REG_RB_DEPTH_INFO],
++                 regs.values[XE_GPU_REG_PA_SC_WINDOW_OFFSET],
++                 regs.values[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL],
++                 regs.values[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR],
++                 regs.values[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_TL],
++                 regs.values[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR],
++                 regs.values[XE_GPU_REG_PA_CL_VPORT_XOFFSET],
++                 regs.values[XE_GPU_REG_PA_CL_VPORT_YOFFSET],
++                 regs.values[XE_GPU_REG_RB_COPY_CONTROL], regs.values[XE_GPU_REG_RB_COPY_DEST_BASE]);
++  }
++  std::fputc('\n', pm4_dump_file_);
++}
++
+ bool CommandProcessor::ExecutePacketType3_INDIRECT_BUFFER(memory::RingBuffer* reader,
+                                                           uint32_t packet, uint32_t count) {
+   // indirect buffer dispatch
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
 index 4d4848b..03b8ec5 100644
 --- a/src/graphics/d3d12/command_processor.cpp

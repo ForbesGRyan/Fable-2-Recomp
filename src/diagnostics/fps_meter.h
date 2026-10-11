@@ -129,7 +129,7 @@ struct CpWindows {
   diagnostics::WindowStats busy_ms{300}, wait_reg_ms{300}, idle_ms{300}, present_ms{300},
       draws{300}, draw_cpu_ms{300}, copies{300}, copy_cpu_ms{300}, interval_ms{300},
       submissions{300}, submit_ms{300}, fence_waits{300}, fence_ms{300}, tile_mappings{300},
-      kicks{300};
+      kicks{300}, tiles{300}, pred_draws{300}, pred_skips{300}, bin_selects{300};
   uint64_t last_gpu_frame = 0;
   bool acquired = false;
 };
@@ -163,6 +163,10 @@ inline void sample_cp() {
   c.fence_ms.Add(double(gpu.fence_wait_ns) / 1e6);
   c.tile_mappings.Add(double(gpu.tile_mappings));
   c.kicks.Add(double(gpu.primary_buffer_ends));
+  c.tiles.Add(double(gpu.tiles));
+  c.pred_draws.Add(double(gpu.predicated_draws));
+  c.pred_skips.Add(double(gpu.predicated_skips));
+  c.bin_selects.Add(double(gpu.bin_select_writes));
 }
 
 inline void poll() {
@@ -192,6 +196,10 @@ inline void poll() {
           c.submit_ms.Percentile(0.9), c.fence_waits.Median(), c.fence_waits.Max(),
           c.fence_ms.Median(), c.fence_ms.Percentile(0.9), c.fence_ms.Max(),
           c.tile_mappings.Median(), c.tile_mappings.Max(), c.kicks.Median());
+      REXSYS_INFO(
+          "[frame] cp tiling: tiles median {:.0f}, bin selects median {:.0f}, predicated draws "
+          "median {:.0f}, predicated packets skipped median {:.0f}",
+          c.tiles.Median(), c.bin_selects.Median(), c.pred_draws.Median(), c.pred_skips.Median());
     }
     c.busy_ms.Reset();
     c.wait_reg_ms.Reset();
@@ -208,6 +216,10 @@ inline void poll() {
     c.fence_ms.Reset();
     c.tile_mappings.Reset();
     c.kicks.Reset();
+    c.tiles.Reset();
+    c.pred_draws.Reset();
+    c.pred_skips.Reset();
+    c.bin_selects.Reset();
   }
   w.frame_ms.Reset();
   w.work_ms.Reset();

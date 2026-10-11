@@ -3,7 +3,7 @@
 # foliage session's tests ran during the run (ninja, clang, lld-link, cmake, exes under
 # out\tests\runtime-unit-tests, or a changed write time of the shared fable_2.exe).
 # Usage: ab_runs.ps1 -Configs @("", "--x=false") -Total 100 -Tag t -ExtraEnv @{K="v"}
-param([string[]]$Configs = @(""), [int]$Total = 100, [string]$Tag = "ab", [hashtable]$ExtraEnv = @{})
+param([string[]]$Configs = @(""), [int]$Total = 100, [string]$Tag = "ab", [hashtable]$ExtraEnv = @{}, [string]$Shots = "")
 $W = "C:\Users\Ryan\code\Fable-2-Recomp\.claude\worktrees\perf-frametime"
 $SharedExe = "C:\Users\Ryan\code\Fable-2-Recomp\out\build\win-amd64-release\fable_2.exe"
 Set-Location $W
@@ -18,7 +18,9 @@ foreach ($cfg in $Configs) {
   if ($cfg) { $argText = " -GameArgs @('" + ($cfg.Split(' ') -join "','") + "')" }
   $drv = "$env:TEMP\perf_${Tag}_run${i}_driver.txt"
   if (Test-Path $drv) { Remove-Item $drv }
-  $cmd = "& '$W\tools\drive_game.ps1' -BootSave Hero000 -Total $Total -Env @{$envText}$argText -IdleWaitSeconds 1800"
+  $shotText = ""
+  if ($Shots) { $shotText = " -Shots '$Shots' -ShotDir '$W\out\build\win-amd64-release\logs\shots\${Tag}_run${i}'" }
+  $cmd = "& '$W\tools\drive_game.ps1' -BootSave Hero000 -Total $Total -Env @{$envText}$argText$shotText -IdleWaitSeconds 1800"
   Write-Output "=== run $i/$($Configs.Count): args [$cfg] env [$envText]  $(Get-Date -Format HH:mm:ss)"
   $p = Start-Process pwsh -ArgumentList @("-NoProfile", "-NonInteractive", "-Command", $cmd) -RedirectStandardOutput $drv -PassThru -WindowStyle Hidden
   $started = $false; $disturbed = @{}; $exeTime = $null

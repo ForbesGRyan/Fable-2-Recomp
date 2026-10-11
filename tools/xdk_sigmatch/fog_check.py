@@ -25,7 +25,10 @@ pixel   The fog block of every pixel shader of light_formulas.FOG_SHADERS agains
         their kill and their nested predicate compare literals: trials they kill, and trials whose outer
         predicate keeps the pixel out of the block, are counted apart and are no evidence.
 vertex  The trees' vertex form (VERTEX_CHECKED) against lf.vertex_fog: the vertex shader's two exported
-        interpolators and the coordinates of its two fetches, from the world position it exports.
+        interpolators and the coordinates of its two fetches, from the world position it exports. The
+        distant trees' impostors (129F...) are of the form without the c8.x factor and with the eye in c47:
+        against lf.impostor_fog, from the raised place the shader exports (impostor_check.py checks the same
+        block from the formula's own place, with its mutations).
 apply   The tree pixel shaders with bool b132 set and a random factor and add in the two interpolators,
         against lf.fog_apply of the family's formula (light_check's drivers supply the lit colour).
 sky     Pixel shader F760... against lf.sky on random directions and on SKY_SPECIAL (the lat-long seam, the
@@ -277,8 +280,20 @@ def check_pixel(shader, trials=200, seed=1234, dumps=DUMPS, formula=lf.fog, tol=
 
 # --- the vertex form --------------------------------------------------------------------------------
 
-# The vertex shaders whose literal tables light_check.py has (captures; its _OBJECT_VS and _LEAF_VS).
-VERTEX_CHECKED = ("475EC9F795E5EDBB", "A5846836C90E1192", "D7DD31B9BF194DE8", "2D40B53C926109BE")
+# The vertex shaders whose literal tables light_check.py has (captures; its _OBJECT_VS and _LEAF_VS), and the
+# impostors' 129F..., whose table is lf.IMPOSTOR_SHADER's (frame-map section 12, "Literals").
+VERTEX_CHECKED = ("475EC9F795E5EDBB", "A5846836C90E1192", "D7DD31B9BF194DE8", "2D40B53C926109BE", "129F7F2793DA9084")
+
+
+def _impostor_fog(P, eye, c8x, c110, c111, tf16, tf17):
+    return lf.impostor_fog(P, eye, c110, c111, tf16, tf17)
+
+
+# What a shader of VERTEX_CHECKED has differently: its literal table, the register of the eye (default c9), its
+# formula (default lf.vertex_fog).
+_VERTEX_EXTRA = {
+    "129F7F2793DA9084": dict(literals=lf.IMPOSTOR_SHADER["vs_lit"], eye=47, formula=_impostor_fog),
+}
 
 
 class VertexResult:
@@ -309,12 +324,16 @@ def _smooth(rng, channels):
     return lambda x, y: [a + b * x + c * y + d * x * y for a, b, c, d in k]
 
 
-def check_vertex(vs, trials=200, seed=1, dumps=DUMPS, formula=lf.vertex_fog, tol=TOLERANCE):
+def check_vertex(vs, trials=200, seed=1, dumps=DUMPS, formula=None, tol=TOLERANCE):
     """One vertex shader of VERTEX_CHECKED: its fog interpolators against formula(P, eye, c8.x, c110, c111,
     tf16, tf17), P the world position it exports. Every register is random, the literals are the shader's
-    (light_check.py), tf16 is a random 256-texel table and tf17 a random smooth function."""
+    (light_check.py; _VERTEX_EXTRA), tf16 is a random 256-texel table and tf17 a random smooth function.
+    formula: default lf.vertex_fog, or the shader's own of _VERTEX_EXTRA."""
     info = next(s for s in lf.FOG_VERTEX_SHADERS if s.hash == vs)
-    literals = (lc._OBJECT_VS.get(vs) or lc._LEAF_VS[vs])["literals"]
+    extra = _VERTEX_EXTRA.get(vs, {})
+    formula = formula or extra.get("formula", lf.vertex_fog)
+    eye = extra.get("eye", 9)
+    literals = extra.get("literals") or (lc._OBJECT_VS.get(vs) or lc._LEAF_VS[vs])["literals"]
     text = ue.load(dumps, vs, "vert")
     rng = random.Random(seed)
     res = VertexResult()
@@ -329,6 +348,7 @@ def check_vertex(vs, trials=200, seed=1, dumps=DUMPS, formula=lf.vertex_fog, tol
         if rng.random() < 0.25:         # a near vertex: the eye within a few units of the tree, the start beyond
             c[9] = [rng.uniform(-3, 3) for _ in range(3)] + [1.0]
             c[111][0] = rng.uniform(15, 30)
+        c[eye] = list(c[9])
         c.update({r: list(v) for r, v in literals.items()})
         tf16 = lf.table_1d([[rng.random() for _ in range(3)] for _ in range(256)])
         tf17 = _smooth(rng, 3)
@@ -361,7 +381,7 @@ def check_vertex(vs, trials=200, seed=1, dumps=DUMPS, formula=lf.vertex_fog, tol
             seen[17] = (a, t)
             return tf17(a, t)
 
-        factor, add = formula(P, c[9][:3], c[8][0], c[110], c[111], t16, t17)
+        factor, add = formula(P, c[eye][:3], c[8][0], c[110], c[111], t16, t17)
         fetched = {f[1]: f[2] for f in m.fetches}
         if not fetched:
             res.near += 1

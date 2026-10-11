@@ -243,7 +243,7 @@ own first commit.**
 | the half4's component order and the fetch's endian (`kImpostorWordSource`, `kImpostorWordEndian`) | (1, 0, 3, 2), endian 2 [inferred from `vfetch_full r6.yxwz`] | Task 3 (open question 2), held by Task 6's `rows` | Tasks 6, 8 |
 | where the vertex fetch constant is read (the device's shadow of fetch slot 31, or the builder's packet) | the shadow | Task 3 | Task 8 |
 | the bounds of `MakeImpostorRecord`'s `quad` and `register` rules that the spec leaves to D1 and D2 (size; `c8`, `c46`, `c47`, `c110`, `c111`, `c113..c117`) | four times the largest magnitude in D1 and D2 | Task 6 (`impostor_check.py bounds`) | Task 8 |
-| which bit of the pixel bool word is `b129` | bit 1 (`0x00000002`) [inferred: `b128 + i` is bit `i`; the captured word is `0x00000100`] | Task 5 | Task 8 |
+| which bit of the pixel bool word is `b129` | bit 1 (`0x00000002`). **As fixed by Task 5**: bit 1 (`light_formulas.IMPOSTOR_B129`), from the SDK's bool layout (bit `N & 31` of register `0x4900 + (N >> 5)`: `interpreter.cpp`) and `ucode_eval`'s numbering; clear in the captured word `0x00000100`. The rows' `"pbool"` is the device's shadow, which FM section 12 ("The bool word") refutes as the GPU's value: Task 8 tests the word the GPU is given | Task 5 | Task 8 |
 | the alpha test's reference at a `129F` draw | unknown; carried in the record and applied (`alpha > ref`) | Task 3 | Tasks 6, 9 |
 | `sizeof(ClayImpostorConstants)`, the slots a draw takes | 336 bytes, 2 slots | Task 6 (which components the formula reads) | Tasks 9, 10 |
 | the flat colour (`kImpostorFlatColour`) | none: a literal that Task 7 writes with its source file | Task 7 (its D1 step) | Task 10 |

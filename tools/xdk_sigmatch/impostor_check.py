@@ -1,8 +1,12 @@
-"""The machine check of the far woods' impostors (light_formulas.impostor_position) against the game's own
-microcode (ucode_eval): vertex shader 129F7F2793DA9084. The distant-trees sub-project, plan Task 4, spec
-criterion 1 (its first half: made inputs; the captured rows are plan Task 6's).
+"""The machine check of the far woods' impostors (light_formulas.impostor_position, impostor_pixel, impostor_out,
+impostor_fog) against the game's own microcode (ucode_eval): vertex shader 129F7F2793DA9084 and pixel shader
+4B1D3E6E8E58D3AC. The distant-trees sub-project, plan Tasks 4 and 5, spec criterion 1 (its first half: made
+inputs; the captured rows are plan Task 6's).
 
   formulas [--trials 2000] [--seed 1]       the position on made draws, and each mutation (each must fail)
+  pixel [--trials 2000] [--seed 1]          the pixel shader and the per-tree fog on made inputs, each mutation,
+                                            the pixel once more with the three captured views' constants, and
+                                            which bit bool b129 is
   trace --instr N [--seed S] [--trial T]    the interpreter's registers after instruction N of 129F for a made
                                             draw (the transcription's oracle, register by register)
   words <capture>                           the quad words of every in-scene 129F "verts" row with its storage
@@ -47,6 +51,30 @@ Mutations (POSITION_MUTATIONS; each must fail, tests/test_impostor_formulas.py):
 exchanged, and 2 and 3; "exponent" c114.y changed by 1%; "raise" the raise left out (c8.z = 0); "matrix" c72
 and c73 exchanged. ("literal", name) changes one literal by 1% in the formula alone; `shift=(name, factor)`
 scales it in the formula AND at its place in the microcode's constants: the two must then agree again.
+
+What one pixel trial is (`pixel`, check_pixel). The pixel shader's microcode runs with bool b129 clear on made
+interpolators (o0 the tree's raised place, o1 the picture's coordinate, o2 and o3 a fog pair: a real pair in three
+trials of four, (1, 0) otherwise) and a made picture (a smooth function of its coordinate, so that a fetch at
+another place would show; any other texture is an error). Beside it impostor_distance(o0, c19),
+impostor_pixel(the picture at o1, ...) and impostor_out give oC0; the bound is PIXEL_TOLERANCE * max(1, |value|)
+in each of its four components. Of 100 trials the distance is drawn nearer than the dissolve's start (c29.x) in
+15, inside the dissolve in 30, up to 200 units beyond it in 25, inside the light's fall (c12.y to c12.y + 10) in
+20 and anywhere within 400 units in 10; the registers within the ranges at this file's head, or, with `view`,
+the c12, c29, c31.x and c20.w of one of the three captured views (CAPTURED_VIEWS). Four trials of 40 are degenerate
+(PIXEL_KINDS): "texel_nan" a picture alpha that is no number on an absent tree (0 * no number), "light_inf" an
+infinite c12.w on a tree nearer than c12.y (0 * infinity), "colour_inf" an infinite picture colour with c31.x = 0;
+an IEEE machine disagrees in these three and nowhere else; "place_nan" a place that is no number (both
+saturates give 0: the colour is the picture's times c31.x, the alpha 0).
+
+What one fog trial is (check_fog). The position check's made draw; the microcode's o2 and o3 against
+impostor_fog at impostor_position's raised place (not at the microcode's own o0) with the eye c47, the two
+tables the case's on both sides, and the coordinates of the microcode's two fetches against the formula's. One
+draw in four lies before the start: no fetch, exactly (1, 1, 1) and (0, 0, 0).
+
+PIXEL_MUTATIONS, each of which must fail: "start" c12.y for c29.x; "tenth" the literal 0.1 by 1%; "exposure"
+c31.x left out; "sign" the light factor's sign ((1 - c12.w) for (c12.w - 1)); "picture" the alpha without the
+picture's; and of the fog (FOG_MUTATIONS, through check_fog) "one_minus" the (1 - o2) left out, "c8x" a c8.x
+factor put in (the trees' vertex_fog).
 """
 import argparse
 import math
@@ -83,6 +111,34 @@ KINDS = {3: "size0", 9: "level", 15: "down", 21: "flat", 27: "nan", 33: "inf", 3
 TILT = (0.02, 0.98)
 
 POSITION_MUTATIONS = ("rows", "components", "sign", "corners", "exponent", "raise", "matrix")
+
+# The pixel check (module text).
+PIXEL_TOLERANCE = 1e-5      # spec Design 5: within 1e-5 of max(1, |value|)
+PIXEL_MUTATIONS = ("start", "tenth", "exposure", "sign", "picture", "one_minus", "c8x")
+FOG_MUTATIONS = PIXEL_MUTATIONS[5:]         # these two are the vertex shader's: check_fog
+LIGHT_START, LIGHT_FAR = (10.0, 60.0), (0.0, 1.5)           # c12.y, c12.w
+DISSOLVE_START, DISSOLVE_SLOPE = (20.0, 80.0), (0.02, 1.0)  # c29.x, c29.y
+EXPOSURE_UNDO = (0.05, 2.0)                                 # c31.x
+OUT_SCALES = (1.0, 2.5, 8.62517, 16.0)                      # c20.w
+PIXEL_KINDS = {5: "texel_nan", 17: "light_inf", 29: "colour_inf", 37: "place_nan"}      # by trial % 40
+# Pixel c12, c29, c31.x and c20.w of the 129F rows of three captures, the same in every row of a frame
+# (out/native-evidence/distant-trees/impostor_consts.txt, which prints six digits of each): the bridge, the held
+# sunward view, the third spot.
+CAPTURED_VIEWS = {
+    "054648": {"c12": (20.0, 35.0, 2.0, 0.46779), "c29": (48.0, 0.125, 998.4, 25.6), "c31x": 0.366827, "c20w": 8.62517},
+    "074119": {"c12": (20.0, 35.0, 2.0, 0.498972), "c29": (48.0, 0.125, 998.4, 25.6), "c31x": 0.357012, "c20w": 7.29878},
+    "022921": {"c12": (20.0, 35.0, 2.0, 0.488728), "c29": (48.0, 0.125, 998.4, 25.6), "c31x": 0.359691, "c20w": 16.0},
+}
+CAPTURED_PBOOL = 0x00000100     # the rows' "pbool" (the device's shadow of the pixel bool word) in every 129F row there
+
+# trials; those that disagree; those with a real fog pair in o2, o3; by the distance: nearer than the dissolve's
+# start, inside the dissolve, beyond it; with the light factor strictly between its ends; the largest relative
+# error; the first failure's text (None); the trials of each degenerate kind.
+PixelResult = namedtuple("PixelResult", "trials failed fogged absent dissolving whole falling worst first_failure kinds")
+# trials; those that disagree; those in which the microcode fetched the tables; those before the start; those not
+# compared (a raised place that is no number); the begun ones whose two fetch coordinates are the formula's; the
+# largest relative error; the first failure's text (None).
+FogResult = namedtuple("FogResult", "trials failed fogged near unnumbered coords worst first_failure")
 
 # trials; those that disagree; the trials at each corner; by the height comparison of instr 31; with both powers
 # on numbers; the largest relative error of a component that could be compared; the first failure's text (None);
@@ -433,6 +489,217 @@ def single_gap(trials=2000, seed=1, dumps=DUMPS):
     return (n, gaps[n // 2], gaps[min(n - 1, int(n * 0.99))], gaps[-1]) if n else (0, 0.0, 0.0, 0.0)
 
 
+# --- the pixel shader ---------------------------------------------------------------------------------------------
+
+class PixelCase:
+    """One pixel of 4B1D: the microcode's text, its constants, the four interpolators ({0: o0, the raised place;
+    1: o1, the picture's coordinate; 2: o2 and 3: o3, the fog pair}, each four floats), the picture (a callable
+    (u, v) -> four values), the made distance, whether the fog pair is a real pair, and the kind ("" or a name
+    of PIXEL_KINDS)."""
+
+    def __init__(self, text, consts, regs, picture, distance, fogged, kind=""):
+        self.text, self.consts, self.regs, self.picture, self.distance, self.fogged, self.kind = (
+            text, consts, regs, picture, distance, fogged, kind)
+
+
+def made_pixel(seed=1, trial=0, dumps=DUMPS, text=None, view=None):
+    """The made pixel of one trial (deterministic in seed and trial). `view`: a name of CAPTURED_VIEWS, whose c12,
+    c29, c31.x and c20.w then stand in the made ones' place."""
+    rng = random.Random("impostor-pixel/%d/%d" % (seed, trial))
+    text = text if text is not None else _text(dumps, PS, "frag")
+    kind = PIXEL_KINDS.get(trial % 40, "")
+    c = {reg: [f32(rng.uniform(-1.0, 1.0)) for _ in range(4)] for reg in range(248)}
+    c[12][1], c[12][3] = f32(rng.uniform(*LIGHT_START)), f32(rng.uniform(*LIGHT_FAR))
+    c[29][0], c[29][1] = f32(rng.uniform(*DISSOLVE_START)), f32(rng.uniform(*DISSOLVE_SLOPE))
+    c[31][0] = f32(rng.uniform(*EXPOSURE_UNDO))
+    c[20][3] = f32(rng.choice(OUT_SCALES))
+    if view is not None:
+        v = CAPTURED_VIEWS[view]
+        c[12], c[29] = [f32(x) for x in v["c12"]], [f32(x) for x in v["c29"]]
+        c[31][0], c[20][3] = f32(v["c31x"]), f32(v["c20w"])
+    c[19] = [f32(rng.uniform(-PLACE_NEAR, PLACE_NEAR)) for _ in range(3)] + [1.0]
+    band = 1.0 / c[29][1]
+    where = rng.random()
+    if where < 0.15 or kind == "texel_nan":
+        distance = rng.uniform(0.0, c[29][0])                               # absent
+    elif where < 0.45:
+        distance = c[29][0] + rng.uniform(0.0, band)                        # dissolving
+    elif where < 0.7:
+        distance = c[29][0] + band + rng.uniform(0.0, 200.0)                # whole
+    elif where < 0.9:
+        distance = c[12][1] + rng.uniform(0.0, 1.0 / lf.impostor_literals("ps")["tenth"])     # the light falling
+    else:
+        distance = rng.uniform(0.0, 400.0)
+    if kind == "light_inf":
+        distance = rng.uniform(0.0, c[12][1])
+        c[12][3] = math.inf
+    way = _unit(rng)
+    place = [f32(c[19][k] + distance * way[k]) for k in range(3)]
+    if kind == "place_nan":
+        place[trial // 40 % 3] = math.nan
+    fogged = rng.random() < 0.75
+    factor = [f32(rng.uniform(0.05, 1.0)) for _ in range(3)] if fogged else [1.0, 1.0, 1.0]
+    add = [f32(rng.uniform(0.0, 2.0)) for _ in range(3)] if fogged else [0.0, 0.0, 0.0]
+    regs = {0: place + [f32(rng.uniform(-1.0, 1.0))],
+            1: [f32(rng.uniform(-0.5, 1.5)), f32(rng.uniform(-0.5, 1.5)), f32(rng.uniform(-1.0, 1.0)), f32(rng.uniform(-1.0, 1.0))],
+            2: factor + [f32(rng.uniform(-1.0, 1.0))], 3: add + [f32(rng.uniform(-1.0, 1.0))]}
+    smooth = _smooth(rng, 4)
+    picture = smooth
+    if kind == "texel_nan":
+        picture = lambda u, v: smooth(u, v)[:3] + [math.nan]                # noqa: E731
+    elif kind == "colour_inf":
+        c[31][0] = 0.0
+        picture = lambda u, v: [math.inf, -math.inf, math.inf] + smooth(u, v)[3:]      # noqa: E731
+    c.update(_literal_registers("ps"))
+    return PixelCase(text, c, regs, picture, distance, fogged, kind)
+
+
+def run_pixel(case, consts=None, zero_product=True, bools=()):
+    """(the pixel shader's outputs, the machine). tf0 is the case's picture at the coordinate the microcode
+    fetches at; any other texture is an error (tf11 and tf12 are read only under bool b129)."""
+
+    def sampler(slot, coords, attrs):
+        if slot == 0:
+            return list(case.picture(coords[0], coords[1]))
+        raise KeyError("pixel texture tf%d" % slot)
+
+    m = ue.Machine(case.text, consts or case.consts, sampler, regs={r: list(v) for r, v in case.regs.items()},
+                   bools=bools, zero_product=zero_product)
+    return m.run(), m
+
+
+def formula_pixel(case, mutation=None, lit=None, consts=None):
+    """impostor_out of impostor_pixel for the case, and the alpha: oC0 as a list of four. The picture is read at
+    interpolator o1, the distance is impostor_distance of o0 and c19. `mutation`: one of PIXEL_MUTATIONS' first
+    five or ("literal", name)."""
+    c = consts or case.consts
+    lit = dict(lit or lf.impostor_literals("ps"))
+    if isinstance(mutation, tuple):
+        lit[mutation[1]] *= 1.01
+    texel = list(case.picture(case.regs[1][0], case.regs[1][1]))
+    c12, c29, c31x = list(c[12]), list(c[29]), c[31][0]
+    if mutation == "start":
+        c29[0] = c12[1]
+    elif mutation == "tenth":
+        lit["tenth"] *= 1.01
+    elif mutation == "exposure":
+        c31x = 1.0
+    elif mutation == "sign":
+        c12[3] = 2.0 * lit["one"] - c12[3]                  # (c12.w - 1) with its sign changed
+    elif mutation == "picture":
+        texel[3] = 1.0
+    d = lf.impostor_distance(case.regs[0][:3], c[19][:3])
+    colour, alpha = lf.impostor_pixel(texel, d, c12, c29, c31x, lit=lit)
+    return list(lf.impostor_out(colour, case.regs[2][:3], case.regs[3][:3], c[20][3])) + [alpha]
+
+
+def check_pixel(trials=2000, seed=1, mutation=None, dumps=DUMPS, shift=None, zero_product=True, view=None):
+    """`trials` made pixels of 4B1D with bool b129 clear against impostor_out(impostor_pixel(...)): PixelResult.
+    The bound: PIXEL_TOLERANCE * max(1, |value|) in every component of oC0."""
+    _check_mutation(mutation, PIXEL_MUTATIONS[:5], lf.IMPOSTOR_SHADER["ps_lit_at"])
+    text = _text(dumps, PS, "frag")
+    failed = fogged = absent = dissolving = whole = falling = 0
+    worst, first, kinds = 0.0, None, {}
+    for k in range(trials):
+        case = made_pixel(seed, k, text=text, view=view)
+        consts, lit = case.consts, lf.impostor_literals("ps")
+        if shift is not None:
+            consts, lit = _shifted(consts, "ps", lit, shift)
+        out, m = run_pixel(case, consts=consts, zero_product=zero_product)
+        got = [float(x) for x in out["oC0"]]
+        want = formula_pixel(case, mutation, lit, consts)
+        ok, error = _compare(got, want, PIXEL_TOLERANCE)
+        ok = ok and [f[1] for f in m.fetches] == [0] and list(m.fetches[0][2]) == case.regs[1][:2]
+        worst = max(worst, error)
+        past = (case.distance - consts[29][0]) * consts[29][1]
+        fall = (case.distance - consts[12][1]) * lf.impostor_literals("ps")["tenth"]
+        fogged += case.fogged
+        absent += past <= 0.0
+        dissolving += 0.0 < past < 1.0
+        whole += past >= 1.0
+        falling += 0.0 < fall < 1.0
+        if case.kind:
+            kinds[case.kind] = kinds.get(case.kind, 0) + 1
+        if not ok:
+            failed += 1
+            first = first or "trial %d (seed %d%s, %.6g units): relative error %.3e; microcode %s, formula %s" % (
+                k, seed, ", " + case.kind if case.kind else "", case.distance, error, got, want)
+    return PixelResult(trials, failed, fogged, absent, dissolving, whole, falling, worst, first, kinds)
+
+
+def b129_reads_the_ground_fog(dumps=DUMPS, seed=1, trial=0):
+    """Whether the pixel shader with bool b129 set reaches the ground-fog block (its first fetch is tf12, which a
+    made pixel does not have): the block the formula does not model."""
+    try:
+        run_pixel(made_pixel(seed, trial, dumps), bools={129})
+    except KeyError as e:
+        return "tf12" in str(e)
+    return False
+
+
+# --- the fog of the vertex shader -----------------------------------------------------------------------------
+
+def check_fog(trials=2000, seed=1, mutation=None, dumps=DUMPS, zero_product=True):
+    """`trials` made draws of 129F (made_case: the position check's draws), the microcode's o2 and o3 against
+    impostor_fog at impostor_position's raised place with the eye c47: FogResult. The two tables are the case's
+    (tf16 a random 256-texel table read by lf.table_1d, tf17 a random smooth function of its two coordinates) on
+    both sides; the coordinates of the microcode's two fetches must be the formula's. A draw before the start
+    must fetch nothing and give exactly (1, 1, 1) and (0, 0, 0). A draw whose raised place is no number
+    ("unnumbered": the kinds nan and inf) is not compared: the formula gives the pair of "before the start" there
+    by its guard, the microcode fetches at a coordinate that is no number."""
+    if mutation is not None and mutation not in FOG_MUTATIONS:
+        raise ValueError("unknown fog mutation %r (one of %s)" % (mutation, ", ".join(FOG_MUTATIONS)))
+    text = _text(dumps)
+    failed = fogged = near = unnumbered = coords_ok = 0
+    worst, first = 0.0, None
+    for k in range(trials):
+        case = made_case(seed, k, text=text)
+        c = {reg: case.consts[reg] for reg in lf.IMPOSTOR_SHADER["reg"]}
+        quad, corner = lf.impostor_corner(case.index)
+        place = lf.impostor_position(corner, case_words(case)[quad], c)["place"]
+        if not all(math.isfinite(x) for x in place):
+            unnumbered += 1
+            continue
+        out, m = run_microcode(case, zero_product=zero_product)
+        got = [float(x) for x in out["o2"][:3]] + [float(x) for x in out["o3"][:3]]
+        seen = {}
+
+        def t16(s):
+            seen[16] = (s,)
+            return case.tf16(s)
+
+        def t17(a, t):
+            seen[17] = (a, t)
+            seen["scatter"] = case.tf17(a, t)
+            return seen["scatter"]
+
+        if mutation == "c8x":
+            factor, add = lf.vertex_fog(place, c[47][:3], c[8][0], c[110], c[111], t16, t17)
+        else:
+            factor, add = lf.impostor_fog(place, c[47][:3], c[110], c[111], t16, t17)
+            if mutation == "one_minus" and "scatter" in seen:
+                add = list(seen["scatter"][:3])
+        want = list(factor) + list(add)
+        fetched = {f[1]: f[2] for f in m.fetches}
+        if not fetched:
+            near += 1
+            ok, error = (not seen and got == [1.0, 1.0, 1.0, 0.0, 0.0, 0.0] == want), 0.0
+        else:
+            fogged += 1
+            same = (set(fetched) == {16, 17} and set(seen) == {16, 17, "scatter"}
+                    and abs(seen[16][0] - fetched[16][0]) <= 1e-9 * max(1.0, abs(fetched[16][0]))
+                    and all(abs(a - b) <= 1e-9 for a, b in zip(seen[17], fetched[17])))
+            coords_ok += same
+            ok, error = _compare(got, want, PIXEL_TOLERANCE)
+            ok = ok and same
+        worst = max(worst, error)
+        if not ok:
+            failed += 1
+            first = first or "trial %d (seed %d%s): relative error %.3e; microcode o2, o3 %s, formula %s; fetched at %s, formula at %s" % (
+                k, seed, ", " + case.kind if case.kind else "", error, got, want, fetched, {s: seen[s] for s in (16, 17) if s in seen})
+    return FogResult(trials, failed, fogged, near, unnumbered, coords_ok, worst, first)
+
+
 # --- capture rows (the rows' own check is plan Task 6's) ----------------------------------------------------------
 
 def impostor_rows(path):
@@ -551,6 +818,92 @@ def cmd_formulas(args, say=print):
     return 1 if bad else 0
 
 
+def _pixel_line(name, r):
+    return ("%s %d / %d; with a fog pair %d; absent %d, dissolving %d, whole %d; the light falling %d; degenerate %s; "
+            "worst relative error %.3e" % (name, r.trials - r.failed, r.trials, r.fogged, r.absent, r.dissolving, r.whole,
+                                           r.falling, ", ".join("%s %d" % kv for kv in sorted(r.kinds.items())) or "none", r.worst))
+
+
+def pixel_floors(r):
+    """The floors a run of check_pixel must reach to count, as problems (texts)."""
+    out = []
+    if r.fogged < r.trials // 2:
+        out.append("the fog pair is a real pair in fewer than half of the trials")
+    if r.absent < r.trials // 10:
+        out.append("fewer than a tenth of the trials are nearer than the dissolve's start")
+    if min(r.dissolving, r.whole) < r.trials // 5:
+        out.append("fewer than a fifth of the trials are inside the dissolve, or beyond it")
+    if r.falling < r.trials // 10:
+        out.append("the light factor is strictly between its ends in fewer than a tenth of the trials")
+    return out
+
+
+def fog_floors(r):
+    """The floors a run of check_fog must reach to count, as problems (texts)."""
+    out = []
+    if r.fogged < r.trials // 2:
+        out.append("the fog is begun in fewer than half of the trials")
+    if r.near < r.trials // 10:
+        out.append("fewer than a tenth of the trials lie before the start")
+    return out
+
+
+def cmd_pixel(args, say=print):
+    bad = 0
+    say("pixel shader %s (bool b129 clear) against light_formulas.impostor_out(impostor_pixel): %d made pixels, seed %d; "
+        "bound %g * max(1, |value|) in every component of oC0" % (PS, args.trials, args.seed, PIXEL_TOLERANCE))
+    r = check_pixel(args.trials, args.seed, dumps=args.dumps)
+    problems = pixel_floors(r) + (["first failure: %s" % r.first_failure] if r.failed else [])
+    say(_pixel_line("pixel", r) + (": OK" if not problems else ": FAILED"))
+    for text in problems:
+        say("  " + text)
+    bad += bool(problems)
+    ieee = check_pixel(args.trials, args.seed, dumps=args.dumps, zero_product=False)
+    say("without the console's product rule in the interpreter: %d of %d disagree (the trials of kind texel_nan, "
+        "light_inf, colour_inf: %d)" % (ieee.failed, ieee.trials, sum(n for kind, n in ieee.kinds.items() if kind != "place_nan")))
+    say("vertex shader %s, o2 and o3, against light_formulas.impostor_fog at the raised place: %d made draws, seed %d" % (
+        VS, args.trials, args.seed))
+    f = check_fog(args.trials, args.seed, dumps=args.dumps)
+    problems = fog_floors(f) + (["first failure: %s" % f.first_failure] if f.failed else [])
+    say("fog %d / %d; begun %d (both fetches at the formula's coordinates in %d), before the start %d, not compared "
+        "(a place that is no number) %d; worst relative error %.3e%s" % (
+            f.trials - f.unnumbered - f.failed, f.trials - f.unnumbered, f.fogged, f.coords, f.near, f.unnumbered, f.worst,
+            ": OK" if not problems else ": FAILED"))
+    for text in problems:
+        say("  " + text)
+    bad += bool(problems)
+    for name in PIXEL_MUTATIONS:
+        check = check_fog if name in FOG_MUTATIONS else check_pixel
+        m = check(min(args.trials, 400), args.seed, mutation=name, dumps=args.dumps)
+        bad += m.failed == 0
+        say("  mutation %-10s: %d of %d trials disagree%s" % (name, m.failed, m.trials, "" if m.failed else ": NOT CAUGHT"))
+    for name in ("one", "tenth"):
+        alone = check_pixel(min(args.trials, 400), args.seed, mutation=("literal", name), dumps=args.dumps)
+        both = check_pixel(min(args.trials, 400), args.seed, shift=(name, 1.01), dumps=args.dumps)
+        ok = alone.failed > 0 and both.failed == 0
+        bad += not ok
+        say("  literal %-9s (c%d.%s) by 1%%: in the formula alone %d of %d disagree; in the formula and at its place %d%s" % (
+            name, lf.IMPOSTOR_SHADER["ps_lit_at"][name][0], "xyzw"[lf.IMPOSTOR_SHADER["ps_lit_at"][name][1]],
+            alone.failed, alone.trials, both.failed, "" if ok else ": NOT HELD"))
+    for view, v in CAPTURED_VIEWS.items():
+        r = check_pixel(args.trials, args.seed, dumps=args.dumps, view=view)
+        problems = pixel_floors(r) + (["first failure: %s" % r.first_failure] if r.failed else [])
+        say(_pixel_line("pixel with the constants of capture %s (c12 %s, c29 %s, c31.x %g, c20.w %g):" % (
+            view, v["c12"], v["c29"], v["c31x"], v["c20w"]), r) + (": OK" if not problems else ": FAILED"))
+        for text in problems:
+            say("  " + text)
+        bad += bool(problems)
+    reads = b129_reads_the_ground_fog(args.dumps, args.seed)
+    clear = not CAPTURED_PBOOL & lf.IMPOSTOR_B129
+    ok = reads and clear and lf.IMPOSTOR_B129 == 1 << (129 & 31)
+    bad += not ok
+    say("bool b129 is bit %d of the pixel bool word (mask 0x%08X); with it set the microcode goes on to the ground-fog "
+        "block (its fetch of tf12): %s; the captured word 0x%08X has it clear: %s%s" % (
+            129 & 31, lf.IMPOSTOR_B129, "yes" if reads else "NO", CAPTURED_PBOOL, "yes" if clear else "NO", "" if ok else ": FAILED"))
+    say("all agree" if not bad else "%d checks FAILED" % bad)
+    return 1 if bad else 0
+
+
 def cmd_trace(args, say=print):
     case = made_case(args.seed, args.trial, args.dumps)
     regs = trace(case, args.instr)
@@ -574,6 +927,10 @@ def main(argv=None, say=print):
     p.add_argument("--trials", type=int, default=2000)
     p.add_argument("--seed", type=int, default=1)
     p.set_defaults(run=cmd_formulas)
+    p = sub.add_parser("pixel")
+    p.add_argument("--trials", type=int, default=2000)
+    p.add_argument("--seed", type=int, default=1)
+    p.set_defaults(run=cmd_pixel)
     p = sub.add_parser("trace")
     p.add_argument("--instr", type=int, required=True)
     p.add_argument("--seed", type=int, default=1)

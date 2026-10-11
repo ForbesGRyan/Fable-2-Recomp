@@ -1,6 +1,7 @@
-"""The far woods' impostors as closed formulas (light_formulas.impostor_position) and their machine check against
-the microcode of vertex shader 129F7F2793DA9084 (impostor_check.py): the distant-trees sub-project, plan Task 4,
-spec criterion 1's first half (made inputs; the captured rows are plan Task 6's)."""
+"""The far woods' impostors as closed formulas (light_formulas.impostor_position, impostor_pixel, impostor_out,
+impostor_fog) and their machine check against the microcode of vertex shader 129F7F2793DA9084 and pixel shader
+4B1D3E6E8E58D3AC (impostor_check.py): the distant-trees sub-project, plan Tasks 4 and 5, spec criterion 1's first
+half (made inputs; the captured rows are plan Task 6's)."""
 import math
 import struct
 import sys
@@ -301,6 +302,219 @@ class AgainstMicrocode(unittest.TestCase):
         self.assertEqual(impostor_check.main(["--dumps", str(DUMPS), "trace", "--instr", "29"], say=said.append), 0)
         self.assertTrue(any(line.strip().startswith("r6") for line in said))
         self.assertEqual(impostor_check.main(["--dumps", str(ROOT / "no-such-folder"), "formulas"], say=said.append), 1)
+
+
+C12, C29, C31X = (20.0, 35.0, 2.0, 0.46779), (48.0, 0.125, 998.4, 25.6), 0.366827     # the bridge, R 3.2
+TEXEL = (0.5, 0.25, 0.125, 1.0)
+
+
+class Pixel(unittest.TestCase):
+    def test_the_formula_written_out(self):
+        colour, alpha = lf.impostor_pixel(TEXEL, 40.0, C12, C29, C31X)
+        light = 1.0 + 0.5 * (0.46779 - 1.0)                 # sat(0.1 * (40 - 35)) = 0.5
+        for got, t in zip(colour, TEXEL):
+            self.assertAlmostEqual(got, t * C31X * light, delta=1e-7)
+        self.assertEqual(alpha, 0.0)                         # 40 units: nearer than c29.x
+
+    def test_the_light_is_one_near_and_the_mean_term_far(self):
+        near = lf.impostor_pixel(TEXEL, 30.0, C12, C29, C31X)[0]
+        self.assertAlmostEqual(near[0], 0.5 * C31X, delta=1e-7)
+        for d in (45.0, 300.0):
+            self.assertAlmostEqual(lf.impostor_pixel(TEXEL, d, C12, C29, C31X)[0][0], 0.5 * C31X * 0.46779, delta=1e-7)
+
+    def test_the_dissolve_is_three_steps_a_tree(self):       # spec, "Read for this design": no dither under offsets AA
+        for d, want in ((49.9, 0), (50.0, 1), (53.9, 1), (54.0, 2), (200.0, 2)):
+            alpha = lf.impostor_pixel((1.0, 1.0, 1.0, 1.0), d, C12, C29, C31X)[1]
+            for x, y in ((0, 0), (1, 0), (0, 1), (3, 5)):
+                self.assertEqual(lf.covered_samples(0xAA, x, y, alpha), want)
+
+    def test_the_alpha_is_the_pictures_times_the_dissolve(self):
+        self.assertAlmostEqual(lf.impostor_pixel((1.0, 1.0, 1.0, 0.5), 52.0, C12, C29, C31X)[1], 0.25)
+        self.assertEqual(lf.impostor_pixel((1.0, 1.0, 1.0, 0.0), 500.0, C12, C29, C31X)[1], 0.0)
+
+    def test_the_output(self):
+        out = lf.impostor_out((0.25, 0.5, 1.0), (0.5, 0.5, 0.5), (0.125, 0.0, 0.25), 8.0)
+        self.assertEqual(tuple(out), (2.0, 2.0, 6.0))
+
+    def test_the_distance_is_from_the_eye_to_the_trees_place(self):
+        self.assertEqual(lf.impostor_distance((1.0, 2.0, 3.0), (4.0, 6.0, 15.0)), 13.0)
+        self.assertEqual(lf.impostor_distance((7.0, 7.0, 7.0), (7.0, 7.0, 7.0)), 0.0)
+        self.assertTrue(math.isnan(lf.impostor_distance((math.nan, 0.0, 0.0), (0.0, 0.0, 0.0))))
+
+    def test_the_alpha_test_is_greater(self):               # colour control 0xAA00001C: function 4, the test on
+        self.assertEqual(0xAA00001C & 0xF, 0x8 | 4)
+        self.assertTrue(lf.impostor_alpha_test(0.26, 0.25))
+        self.assertFalse(lf.impostor_alpha_test(0.25, 0.25))
+        self.assertFalse(lf.impostor_alpha_test(math.nan, 0.0))
+        self.assertTrue(lf.impostor_alpha_test(1e-6, 0.0))
+        self.assertFalse(lf.impostor_alpha_test(0.0, 0.0))  # an absent tree fails at any reference of [0, 1]
+
+    def test_the_consoles_product_rule_at_the_pixels_degenerate_points(self):
+        # A zero factor gives +0 whatever the other factor is: an absent tree's alpha is 0 for a picture alpha
+        # that is no number; a near tree's light is 1 under an infinite c12.w; no exposure is no colour.
+        self.assertEqual(lf.impostor_pixel((1.0, 1.0, 1.0, math.nan), 40.0, C12, C29, C31X)[1], 0.0)
+        colour = lf.impostor_pixel(TEXEL, 30.0, (20.0, 35.0, 2.0, math.inf), C29, 2.0)[0]
+        self.assertEqual(tuple(colour), (1.0, 0.5, 0.25))
+        self.assertEqual(lf.impostor_pixel((math.inf, 1.0, 1.0, 1.0), 60.0, C12, C29, 0.0)[0][0], 0.0)
+        self.assertEqual(tuple(lf.impostor_out((math.inf, 1.0, 1.0), (0.0, 0.5, 0.5), (0.25, 0.0, 0.0), 2.0)), (0.5, 1.0, 1.0))
+
+    def test_b129_is_bit_one_of_the_pixel_word(self):
+        # Bool constant N is bit N & 31 of register 0x4900 + (N >> 5) (the SDK's interpreter); the pixel word is
+        # the fifth (b128..b159). The captured word has b136 alone.
+        self.assertEqual(lf.IMPOSTOR_B129, 1 << (129 & 31))
+        self.assertEqual(129 >> 5, 4)
+        self.assertEqual(impostor_check.CAPTURED_PBOOL, 1 << (136 & 31))
+        self.assertEqual(impostor_check.CAPTURED_PBOOL & lf.IMPOSTOR_B129, 0)
+
+    def test_the_literals_are_the_captured_table(self):
+        # c255 of the pixel shader in every row of out/native-evidence/distant-trees/impostor_consts.txt.
+        self.assertEqual(lf.IMPOSTOR_SHADER["ps_lit"], {255: (0.0, 1.0, 0.1, 0.5)})
+        self.assertEqual(lf.impostor_literals("ps"), {"one": 1.0, "tenth": 0.1})
+        self.assertEqual(lf.IMPOSTOR_SHADER["ps_reg"], (12, 19, 20, 29, 31))
+
+
+class Fog(unittest.TestCase):
+    def tables(self):
+        return (lambda s: [0.5, 0.25, 0.125, 0.0]), (lambda a, t: [0.2, 0.4, 0.8, 0.0])
+
+    def test_before_the_start_nothing(self):
+        tf16, tf17 = self.tables()
+        got = lf.impostor_fog((0.0, 0.0, 5.0), (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (10.0, 0.0, 0.1, 0.01), tf16, tf17)
+        self.assertEqual(got, ([1.0, 1.0, 1.0], [0.0, 0.0, 0.0]))
+
+    def test_it_is_the_trees_form_without_the_scale(self):
+        tf16, tf17 = self.tables()
+        args = ((300.0, 40.0, 5.0), (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (10.0, 0.0, 0.1, 0.01), tf16, tf17)
+        o2, o3 = lf.impostor_fog(*args)
+        self.assertEqual((o2, o3), lf.vertex_fog(args[0], args[1], 1.0, *args[2:]))
+        self.assertEqual(o2, [0.5, 0.25, 0.125])
+        self.assertEqual(o3, [(1.0 - 0.5) * 0.2, (1.0 - 0.25) * 0.4, (1.0 - 0.125) * 0.8])
+
+    def test_the_tables_are_read_at_the_distance_past_the_start_and_the_angle(self):
+        seen = {}
+
+        def tf16(s):
+            seen["s"] = s
+            return [0.5, 0.5, 0.5]
+
+        def tf17(a, t):
+            seen["a"], seen["t"] = a, t
+            return [1.0, 1.0, 1.0]
+
+        # The place 50 units from the eye along x; the start 10; the axis along the way from the eye to the place.
+        lf.impostor_fog((50.0, 0.0, 0.0), (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (10.0, 0.0, 0.005, 0.01), tf16, tf17)
+        self.assertEqual(seen, {"s": 0.01 * 40.0, "a": 1.0, "t": 0.005 * 40.0})
+
+    def test_a_place_that_is_no_number_is_before_the_start(self):
+        tf16, tf17 = self.tables()
+        got = lf.impostor_fog((math.nan, 0.0, 0.0), (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (10.0, 0.0, 0.1, 0.01), tf16, tf17)
+        self.assertEqual(got, ([1.0, 1.0, 1.0], [0.0, 0.0, 0.0]))
+
+
+@unittest.skipUnless(DUMPS.is_dir(), NO_DUMPS)
+class PixelAgainstMicrocode(unittest.TestCase):
+    def test_pixel_and_fog_on_made_inputs(self):
+        for check in (impostor_check.check_pixel, impostor_check.check_fog):
+            r = check(trials=200, seed=11, dumps=DUMPS)
+            self.assertEqual(r.failed, 0, r.first_failure)
+            self.assertGreaterEqual(r.fogged, r.trials // 2)        # a fog check before the start proves nothing
+            self.assertLess(r.worst, 1e-9)                          # the same arithmetic, not merely inside the bound
+
+    def test_pixel_mutations_fail(self):
+        for name in impostor_check.PIXEL_MUTATIONS:
+            with self.subTest(mutation=name):
+                check = impostor_check.check_fog if name in ("one_minus", "c8x") else impostor_check.check_pixel
+                self.assertGreater(check(trials=200, seed=11, mutation=name, dumps=DUMPS).failed, 0, f"{name} was not caught")
+
+    def test_the_mutations_are_the_seven_and_each_check_refuses_the_others(self):
+        self.assertEqual(impostor_check.PIXEL_MUTATIONS, ("start", "tenth", "exposure", "sign", "picture", "one_minus", "c8x"))
+        self.assertEqual(impostor_check.FOG_MUTATIONS, ("one_minus", "c8x"))
+        with self.assertRaises(ValueError):
+            impostor_check.check_pixel(trials=1, mutation="c8x", dumps=DUMPS)
+        with self.assertRaises(ValueError):
+            impostor_check.check_fog(trials=1, mutation="start", dumps=DUMPS)
+
+    def test_the_made_pixels_reach_every_part_of_the_formula(self):
+        r = impostor_check.check_pixel(trials=400, seed=3, dumps=DUMPS)
+        self.assertEqual(r.failed, 0, r.first_failure)
+        self.assertEqual(impostor_check.pixel_floors(r), [])
+        self.assertGreaterEqual(r.absent, r.trials // 10)           # nearer than the dissolve's start: alpha 0
+        self.assertGreaterEqual(r.dissolving, r.trials // 5)
+        self.assertGreaterEqual(r.whole, r.trials // 5)
+        self.assertGreaterEqual(r.falling, r.trials // 10)          # the light factor strictly between 1 and c12.w
+        for kind in ("texel_nan", "light_inf", "colour_inf", "place_nan"):
+            self.assertGreaterEqual(r.kinds.get(kind, 0), 2, kind)
+
+    def test_without_the_consoles_product_rule_the_pixels_degenerate_points_disagree(self):
+        r = impostor_check.check_pixel(trials=400, seed=3, dumps=DUMPS, zero_product=False)
+        self.assertEqual(r.failed, sum(n for kind, n in r.kinds.items() if kind != "place_nan"))
+
+    def test_a_place_that_is_no_number_is_an_absent_tree_in_the_pictures_colour(self):
+        # Both saturates give 0 for no number (instr 12): light 1, alpha 0. The machine says the same.
+        case = impostor_check.made_pixel(seed=3, trial=37, dumps=DUMPS)
+        self.assertEqual(case.kind, "place_nan")
+        got = impostor_check.run_pixel(case)[0]["oC0"]
+        self.assertEqual(got[3], 0.0)
+        self.assertTrue(all(math.isfinite(x) for x in got))
+        self.assertEqual(list(got), impostor_check.formula_pixel(case))
+        colour, alpha = lf.impostor_pixel(TEXEL, math.nan, C12, C29, C31X)
+        self.assertEqual((tuple(colour), alpha), (tuple(t * C31X for t in TEXEL[:3]), 0.0))
+
+    def test_the_made_draws_reach_both_sides_of_the_fogs_start(self):
+        r = impostor_check.check_fog(trials=400, seed=3, dumps=DUMPS)
+        self.assertEqual(r.failed, 0, r.first_failure)
+        self.assertEqual(impostor_check.fog_floors(r), [])
+        self.assertEqual(r.coords, r.fogged)                        # both fetches at the formula's coordinates
+        self.assertGreaterEqual(r.near, r.trials // 10)             # before the start: exactly 1 and 0, no fetch
+        self.assertEqual(r.fogged + r.near + r.unnumbered, r.trials)
+        self.assertLessEqual(r.unnumbered, r.trials // 20)          # a place that is no number is not compared
+
+    def test_every_pixel_literal_is_where_the_table_says(self):
+        for name in ("one", "tenth"):
+            with self.subTest(literal=name):
+                alone = impostor_check.check_pixel(trials=120, seed=11, mutation=("literal", name), dumps=DUMPS)
+                self.assertGreater(alone.failed, 0, f"{name} changed in the formula alone was not caught")
+                both = impostor_check.check_pixel(trials=120, seed=11, shift=(name, 1.01), dumps=DUMPS)
+                self.assertEqual(both.failed, 0, both.first_failure)
+
+    def test_the_three_captured_views_constants(self):
+        self.assertEqual(sorted(impostor_check.CAPTURED_VIEWS), ["022921", "054648", "074119"])
+        for view, v in impostor_check.CAPTURED_VIEWS.items():
+            with self.subTest(view=view):
+                self.assertEqual(tuple(v["c29"]), (48.0, 0.125, 998.4, 25.6))
+                self.assertEqual(tuple(v["c12"][:3]), (20.0, 35.0, 2.0))
+                r = impostor_check.check_pixel(trials=120, seed=11, dumps=DUMPS, view=view)
+                self.assertEqual(r.failed, 0, r.first_failure)
+                self.assertGreater(min(r.absent, r.dissolving, r.whole, r.falling), 0)
+
+    def test_the_check_runs_the_pixel_shader_on_the_picture_at_o1(self):
+        case = impostor_check.made_pixel(seed=11, trial=4, dumps=DUMPS)
+        out, machine = impostor_check.run_pixel(case)
+        self.assertEqual([(f[1], list(f[2])) for f in machine.fetches], [(0, case.regs[1][:2])])
+        want = impostor_check.formula_pixel(case)
+        self.assertNotEqual(list(out["oC0"]), [0.0] * 4)
+        for g, w in zip(out["oC0"], want):
+            self.assertAlmostEqual(g, w, delta=1e-12 * max(1.0, abs(g)))
+        self.assertEqual(machine.used_consts - set(range(248, 256)), set(lf.IMPOSTOR_SHADER["ps_reg"]))
+        self.assertEqual(machine.used_consts & set(range(248, 256)), set(lf.IMPOSTOR_SHADER["ps_lit"]))
+
+    def test_with_b129_set_the_microcode_reads_the_ground_fog(self):
+        # The block the formula does not model (instr 16 to 57): with the bool set the shader goes on to fetch tf12.
+        self.assertTrue(impostor_check.b129_reads_the_ground_fog(DUMPS))
+        case = impostor_check.made_pixel(seed=11, trial=4, dumps=DUMPS)
+        clear = impostor_check.run_pixel(case)[0]["oC0"]
+        self.assertEqual(impostor_check.run_pixel(case, bools={136})[0]["oC0"], clear)      # the captured word's bit
+        with self.assertRaises(KeyError):
+            impostor_check.run_pixel(case, bools={129})
+
+    def test_the_pixel_command(self):
+        said = []
+        self.assertEqual(impostor_check.main(["--dumps", str(DUMPS), "pixel", "--trials", "80", "--seed", "11"], say=said.append), 0)
+        self.assertEqual(said[-1], "all agree")
+        self.assertTrue(any(line.startswith("pixel 80 / 80") for line in said), said)
+        self.assertTrue(any(line.startswith("fog ") and line.endswith(": OK") for line in said), said)
+        self.assertEqual(sum(line.startswith("pixel with the constants of capture") for line in said), 3)
+        self.assertTrue(any(line.startswith("bool b129 is bit 1") for line in said), said)
 
 
 if __name__ == "__main__":

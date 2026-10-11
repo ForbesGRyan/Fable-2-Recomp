@@ -832,9 +832,10 @@ FOG_NOT_OF_THE_FORM = ("2B091BD0C45A7454",)
 
 # The vertex shaders with the trees' form: (hash, the interpolator that is the world position, the
 # interpolators of factor and add). The first four are checked by fog_check.py (trunks 475E...; leaves
-# with one, two and four lights A584..., D7DD..., 2D40...). The last two are read only: D57E... (the same
-# block as the leaves': dump instructions 209 to 217) and the distant-tree billboards 129F... (75 to 85),
-# whose block has no c8.x and takes the eye from vertex c47, not c9.
+# with one, two and four lights A584..., D7DD..., 2D40...), and so is the last, the distant trees'
+# impostors 129F... (instructions 70 to 85), whose block has no c8.x and takes the eye from vertex c47,
+# not c9: its formula is impostor_fog, checked also by impostor_check.py at the raised place. D57E... is
+# read only (the same block as the leaves': dump instructions 209 to 217).
 FogVertexShader = collections.namedtuple("FogVertexShader", "hash world factor add")
 FOG_VERTEX_SHADERS = (
     FogVertexShader("475EC9F795E5EDBB", 2, 6, 7),
@@ -1957,3 +1958,72 @@ def impostor_position(k, word, c, lit=None, single=False):
            for row in (72, 73, 74, 75)]                     # 75, 73, 74, 76
     uv = (ad(m(u, c[113][0]), c[113][1]), ad(m(v, c[113][3]), c[113][2]))           # 68
     return {"pos": pos, "place": place, "uv": uv}
+
+
+# The pixel shader 4B1D... (instr 7 to 15 and 58 to 60; 16 to 57 lie under bool b129) and the fog block of 129F...
+# (instr 70 to 85), plan Task 5; impostor_check.py `pixel` holds each to its microcode.
+#
+# IMPOSTOR_B129: the bit of the pixel bool word that is b129 (`cjmp !b129, L13`: the ground-fog volume, not
+# modelled; a draw with the bit set is refused, spec ruling 20). A bool constant N is bit N & 31 of the register
+# 0x4900 + (N >> 5) (the SDK: graphics/pipeline/shader/interpreter.cpp, `bool_constants[bool_address >> 5] &
+# (1 << (bool_address & 31))`; register_table.inc, SHADER_CONSTANT_BOOL_000_031 at 0x4900), and the dumps print
+# that N (translator_disasm.cpp), which ucode_eval's `bools` takes as printed: b129 is bit 1 of the pixel word
+# 0x4904 (b128..b159). The captured word, 0x00000100 (b136 alone), has it clear.
+IMPOSTOR_B129 = 0x00000002
+
+
+def _imp_sat(x):
+    """The microcode's saturate: clamped to [0, 1]; no number gives 0."""
+    return min(max(x, 0.0), 1.0) if x == x else 0.0
+
+
+def impostor_distance(place, eye):
+    """d of the pixel shader: |c19 - o0| (instr 8 to 10), the squares summed in the microcode's order (z, x, y).
+    place: interpolator o0, the raised place (one value a tree). eye: pixel c19.xyz."""
+    v = [eye[i] - place[i] for i in range(3)]
+    return math.sqrt(abs(0.0 + _imp_mul(v[2], v[2]) + _imp_mul(v[0], v[0]) + _imp_mul(v[1], v[1])))
+
+
+def impostor_pixel(texel, d, c12, c29, c31x, lit=None):
+    """texel: tf0's four values as fetched (rgb, alpha). d: |c19 - o0| (impostor_distance). Returns (colour (3), alpha):
+        colour = texel.rgb * c31x * (1 + sat(0.1 * (d - c12.y)) * (c12.w - 1))      instr 10 to 15
+        alpha  = texel.a * sat((d - c29.x) * c29.y)                                  instr 11, 12, 15
+    The colour is linear and before the fog pair and the output scale (impostor_out). With the captured registers
+    (c12 = (20, 35, 2, w), c29 = (48, 0.125, ..)) the light factor is 1 up to 35 units and c12.w from 45, and the
+    alpha is the picture's times sat((d - 48) / 8). Products follow the console's rule (a zero factor gives +0):
+    a picture alpha that is no number is 0 while the tree is absent, an infinite c12.w leaves a near tree's
+    light 1. `lit`: the literals by name (default: the table's "one" and "tenth")."""
+    lit = lit or impostor_literals("ps")
+    one, tenth = lit["one"], lit["tenth"]
+    span = c12[3] + -one                                    # 10
+    fall = _imp_sat(_imp_mul(tenth, d + -c12[1]))           # 11, 12 (the scalar operation)
+    dissolve = _imp_sat(_imp_mul(d - c29[0], c29[1]))       # 11 (the scalar operation), 12
+    light = _imp_mul(fall, span) + one                      # 14
+    colour = [_imp_mul(_imp_mul(texel[i], c31x), light) for i in range(3)]      # 13, 15
+    alpha = _imp_mul(texel[3], dissolve)                    # 15 (the scalar operation)
+    return colour, alpha
+
+
+def impostor_out(colour, o2, o3, c20w):
+    """oC0.rgb = (colour * o2 + o3) * c20w (instr 58, 59): the fog pair of the vertex shader (impostor_fog), then
+    the output scale, pixel c20.w. oC0.a is impostor_pixel's alpha, untouched (60)."""
+    return [_imp_mul(_imp_mul(colour[i], o2[i]) + o3[i], c20w) for i in range(3)]
+
+
+def impostor_alpha_test(alpha, ref):
+    """Whether a pixel passes the draw's alpha test: alpha > ref. The function is the state's, not the shader's:
+    colour control 0xAA00001C has the test on (bit 3) with function 4, "greater" (bits 0 to 2); the reference
+    (RB_ALPHA_REF) is in no capture and travels with the draw. An alpha that is no number fails. The samples a
+    passing pixel covers are covered_samples(0xAA, x, y, alpha): the same word's alpha-to-mask (bit 4) and offsets."""
+    return alpha > ref
+
+
+def impostor_fog(place, eye, c110, c111, tf16, tf17):
+    """(o2, o3) of 129F, instr 70 to 85: the trees' vertex form (vertex_fog) with no c8.x factor, once a tree.
+        (a, s, t) = fog_coords(place, eye, c110, c111);  before the start: ((1, 1, 1), (0, 0, 0)), no table read
+        o2 = tf16(s).rgb;  o3 = (1 - o2) * tf17(a, t).rgb
+    place: the raised place, impostor_position's "place" (instr 70 reads r6 after the raise of 29). eye: vertex
+    c47.xyz (not c9). c8 is not read by the block: this shader's c8.z is the raise. A place, eye or register that
+    is no number gives the pair of "before the start" (vertex_fog's guard; the microcode fetches at a coordinate
+    that is no number there, and the quad's position is no number too)."""
+    return vertex_fog(place, eye, 1.0, c110, c111, tf16, tf17)

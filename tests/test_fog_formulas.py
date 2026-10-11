@@ -765,7 +765,7 @@ class RealDumps(unittest.TestCase):
                 self.assertGreater(res.fog, 10)
                 self.assertGreater(res.near, 2)
         self.assertEqual(set(fc.VERTEX_CHECKED), {"475EC9F795E5EDBB", "A5846836C90E1192", "D7DD31B9BF194DE8",
-                                                  "2D40B53C926109BE"})
+                                                  "2D40B53C926109BE", "129F7F2793DA9084"})
 
     def test_a_wrong_vertex_formula_fails(self):
         def no_c8(P, eye, c8x, c110, c111, tf16, tf17):
@@ -777,6 +777,25 @@ class RealDumps(unittest.TestCase):
         for formula in (no_c8, coordinates_exchanged):
             self.assertFalse(fc.check_vertex("475EC9F795E5EDBB", trials=40, dumps=DUMPS, formula=formula).ok)
             self.assertFalse(fc.check_vertex("A5846836C90E1192", trials=40, dumps=DUMPS, formula=formula).ok)
+
+    def test_the_impostors_form_has_no_c8x_and_its_eye_is_c47(self):
+        # 129F... (the distant trees' impostors): lf.impostor_fog. The trees' form with the draw's c8.x fails
+        # there, and so does an eye that is not c47.
+        impostor = "129F7F2793DA9084"
+
+        def with_c8x(P, eye, c8x, c110, c111, tf16, tf17):
+            return lf.vertex_fog(P, eye, c8x, c110, c111, tf16, tf17)
+
+        def coordinates_exchanged(P, eye, c8x, c110, c111, tf16, tf17):
+            return lf.impostor_fog(P, eye, c110, c111, tf16, lambda a, t: tf17(t, a))
+
+        def eye_moved(P, eye, c8x, c110, c111, tf16, tf17):
+            return lf.impostor_fog(P, [x + 1.0 for x in eye], c110, c111, tf16, tf17)
+
+        for formula in (with_c8x, coordinates_exchanged, eye_moved):
+            self.assertFalse(fc.check_vertex(impostor, trials=40, dumps=DUMPS, formula=formula).ok, formula.__name__)
+        self.assertEqual(fc._VERTEX_EXTRA[impostor]["eye"], 47)
+        self.assertEqual(fc._VERTEX_EXTRA[impostor]["literals"], lf.IMPOSTOR_SHADER["vs_lit"])
 
     def test_the_tree_pixel_shaders_apply_factor_and_add(self):
         self.assertEqual({(f, ps) for f, ps, _ in fc.APPLY_PAIRS},

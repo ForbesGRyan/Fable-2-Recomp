@@ -654,13 +654,13 @@ pixel, under bool b132:  colour = colour * factor + add          (then * c20.w *
 
 `P` is the world position the vertex shader exports, after the wind. Instruction numbers: `475E...` the vector to the eye and `d^2` (81, 82), d (83), `dD` (85), the predicate (86), t and `1 / d` (87), the view direction (88), a and s (89), the fetches (90, 91), `S2 * c8.x` (92), `1 - T` (93), add (94), the near values (95, 96), exported as `o6`, `o7` with the world position in `o2` (101, 105, 106). `A584...`: `dD` and the predicate (136, 137), s, a and t (138, 139), the fetches (140, 141), `S2 * c8.x` (142), `1 - T` (143), add (144), the near values (145, 146), exported as `o4`, `o5` with the world position in `o0` (149, 151, 152). `D7DD...` (143, 144, 147 to 155) and `2D40...` (161, 168 to 176) have the block with the predicate inverted.
 
-The check (`--only vertex`, `check_vertex`): every vertex register random, the literal tables those of `light_check.py` (captures), tf16 a random 256-texel table, tf17 a random smooth function of its two coordinates; the two exported interpolators and the coordinates of both fetches against the formula evaluated at the exported world position. 147 + 143 + 143 + 143 fog trials and 53 + 57 + 57 + 57 near trials agree (200 each). A formula without `c8.x` and one with tf17's coordinates exchanged fail.
+The check (`--only vertex`, `check_vertex`): every vertex register random, the literal tables those of `light_check.py` (captures), tf16 a random 256-texel table, tf17 a random smooth function of its two coordinates; the two exported interpolators and the coordinates of both fetches against the formula evaluated at the exported world position. 147 + 143 + 143 + 143 fog trials and 53 + 57 + 57 + 57 near trials agree (200 each); for `129F...` (since sub-project 12, against `impostor_fog`, the eye in `c47`) 142 and 58. A formula without `c8.x` and one with tf17's coordinates exchanged fail.
 
 The pixel side (`--only apply`, `check_apply`): `light_check`'s case of each tree pair with `b132` set and a random factor and add in the two interpolators against `fog_apply` of the family's formula: 200 of 200 for each of the six pairs (`00E0...` 16 and 44, `7CD5...` 10 and 25 are the bool and the product; `c49` is on the colour, not on the add). The earlier check of these families ran `b132` only with factor 1 and add 0.
 
 **What ruling 4 rests on.** `vertex_fog` followed by `fog_apply` equals `fog` at the vertex if, and only as far as, tf16 is tf5, `tf17(a, t)` is `c68 + t * (tf4(a) - c68)`, vertex `c8.x` is pixel `c28.y`, vertex `c110`, `c111`, `c9` are pixel `c66`, `c67`, `c19`, and `c28.x` is 1 (`VertexFog.test_it_is_the_pixel_form_if_the_tables_are_what_ruling_4_takes_them_for`: 300 random cases to 1e-12). The registers agree in the research's rows. The tables (findings 4 and 5, settled by the captures): tf16 is tf5, tf17 is tf4 without the blend from `c68`, so the vertex form is `T = tf5(s)`, `add = (1 - T) * tf4(a) * c8.x`: the pixel form with `t` = 1 and `c28.x` = 1. With `c67.z` = 1 the two differ only within one unit past the fog start, where tf5 reads its first texel, (1, 1, 1) in every captured frame, so both give the colour unchanged there. What stays a difference in any case is the interpolation of factor and add across a triangle against the per-pixel evaluation.
 
-Read only, by `FOG_VERTEX_SHADERS`: `D57E...` (a leaf shader whose literal table is in no file here; its block, 209 to 217, is the leaves' line for line) and the distant-tree billboards `129F...` (75 to 85), whose block has **no `c8.x`** and takes the eye from vertex `c47`, not `c9`; their pixel shader `4B1D...` applies the pair without a bool (58).
+Read only, by `FOG_VERTEX_SHADERS`: `D57E...` (a leaf shader whose literal table is in no file here; its block, 209 to 217, is the leaves' line for line). The distant trees' impostors `129F...` (70 to 85), whose block has **no `c8.x`** and takes the eye from vertex `c47`, not `c9`, were read only until sub-project 12 and are checked since (`VERTEX_CHECKED` has five; "The impostors" below: `impostor_fog`); their pixel shader `4B1D...` applies the pair without a bool (58).
 
 ### The sky
 
@@ -1304,8 +1304,11 @@ Native renderer sub-project 12 (distant trees), phase 12a, plan Tasks 4 and 5, 2
 |---|---|---|
 | The corner of a vertex | `impostor_corner(i)` | closed with the position |
 | `oPos`, `o0`, `o1` of `129F` | `impostor_position(k, word, c)` | closed on made inputs: 2,000 of 2,000 made draws, largest relative difference 1.5e-13; seven mutations and four literals each fail; no captured row yet |
+| `oC0` of `4B1D` (bool `b129` clear) | `impostor_distance`, `impostor_pixel`, `impostor_out`; the state's `impostor_alpha_test` | closed on made inputs: 2,000 of 2,000 made pixels, and 2,000 of 2,000 with each of three captured views' constants; five mutations and two literals each fail |
+| `o2`, `o3` of `129F` (the fog, once a tree) | `impostor_fog` | closed on made inputs: 1,900 of 1,900 compared made draws (1,413 begun, 487 before the start), the fetches' coordinates included; two mutations fail; also in `fog_check.py` |
+| Which bit is `b129` | `IMPOSTOR_B129` = `0x00000002` | bit 1 of the pixel bool word, by the SDK's layout; clear in the captured word |
 
-(`impostor_check.py formulas`, seed 1: `out/native-evidence/distant-trees/t4_formulas.txt`. The bound is spec criterion 1's, `1e-4 * max(1, |value|)` in every component of `oPos`, `o0` and `o1`; the two sides are the same arithmetic in double precision, which a test holds below 1e-9.)
+(`impostor_check.py formulas` and `pixel`, seed 1: `out/native-evidence/distant-trees/t4_formulas.txt`, `t5_pixel.txt`; the pixel's and the fog's bound is 1e-5, "The check of the pixel shader and of the fog" below. The position's bound is spec criterion 1's, `1e-4 * max(1, |value|)` in every component of `oPos`, `o0` and `o1`; the two sides are the same arithmetic in double precision, which a test holds below 1e-9.)
 
 ### The position: what `129F` computes
 
@@ -1405,3 +1408,68 @@ Both sides of the check compute in double precision on single-precision inputs (
 2. What the registers mean (`c46` the lying axis, `V` a view, `c72..c75` a projection, `c114` the blend's exponent and gain, `c8.z` the raise) is read from the form; no value of any of the fourteen is in a capture.
 3. That `ucode_eval` is the console, the product rule included, as for every formula of this document.
 4. The fetch's index rounding: the dump has no `RoundIndex`, so the index is floored; with the literals 0.5 and 0.25 the index of vertex `i` is `i / 4 + 0.125`, never nearer than 0.125 to a whole number.
+
+### The pixel shader `4B1D`
+
+(Plan Task 5.) Interpolators: `o0` the tree's raised place (one value a tree: all four corners export the same), `o1` the picture's coordinate, `o2` and `o3` the fog pair. Pixel registers `IMPOSTOR_SHADER["ps_reg"]`: `c12`, `c19`, `c20`, `c29`, `c31`, and no other with bool `b129` clear (`test_the_check_runs_the_pixel_shader_on_the_picture_at_o1`: the interpreter's own list). Literal `c255` = (0, 1, 0.1, 0.5), the same in every `129F` row of three captures (`out/native-evidence/distant-trees/impostor_consts.txt`); the formula reads `one` (`c255.y`) and `tenth` (`c255.z`).
+
+    d      = |c19 - o0|                                              impostor_distance (instr 8, 9, 10)
+    colour = texel.rgb * c31.x * (1 + sat(0.1 * (d - c12.y)) * (c12.w - 1))        impostor_pixel (10 to 15)
+    alpha  = texel.a * sat((d - c29.x) * c29.y)                                    (11, 12, 15)
+    oC0.rgb = (colour * o2 + o3) * c20.w;   oC0.a = alpha                          impostor_out (58 to 60)
+
+| Instr | Register | Holds |
+|---|---|---|
+| 7 | `r4` | the picture at `o1.xy` (`tfetch2D`, `tf0`) |
+| 8, 9 | `r1.xyz`, `r0.w` | `c19 - o0`; its square, summed z, x, y |
+| 10 | `r1.w`; `r1.y` | `c12.w - 1`; `d` (`sqrt` of the absolute value) |
+| 11 | `r0.w`; `r1.x` | `d - c12.y`; `d - c29.x` |
+| 12 | `r2.w`; `r0.w` | `sat((d - c29.x) * c29.y)`: the dissolve; `sat(0.1 * (d - c12.y))` |
+| 13 | `r1.xyz` | the picture's colour times `c31.x` (blue, green, red; turned back at 15); prev = the dissolve |
+| 14 | `r0.w` | the light factor `sat(..) * (c12.w - 1) + 1` |
+| 15 | `r4.xyz`; `r2.w` | `colour`; `alpha` = the picture's alpha times the dissolve (`muls_prev`) |
+| (2.0) | | `cjmp !b129, L13`: instructions 16 to 57, the ground-fog volume, are skipped |
+| 58, 59, 60 | `r0.xyz`, `r2.xyz`, `oC0` | `colour * o2 + o3`; times `c20.w`; the output, its alpha `r2.w` |
+
+With the captured registers (`c12` = (20, 35, 2, 0.468 to 0.499), `c29` = (48, 0.125, 998.4, 25.6)): the light factor is 1 up to 35 units and `c12.w` from 45; the alpha is the picture's times `sat((d - 48) / 8)`. Under the draw's alpha-to-mask with offsets `AA` (thresholds 0.25 and 0.75 at every pixel, `covered_samples`) a tree whose picture alpha is 1 is absent below 50 units, covers one sample of two from 50 to 54 and both from 54: three steps a tree, no dither (`test_the_dissolve_is_three_steps_a_tree`).
+
+**The alpha test** is the state's, not the shader's: colour control `0xAA00001C` has the test on (bit 3) with function 4, "greater" (bits 0 to 2). `impostor_alpha_test(alpha, ref)` is `alpha > ref`; **the reference is in no capture** and travels with the draw (plan Task 3 reads it, Task 8 carries it). At any reference in [0, 1] an absent tree (alpha 0) fails.
+
+**Bool `b129`** (`IMPOSTOR_B129` = `0x00000002`; as fixed by plan Task 5): a bool constant N is bit `N & 31` of register `0x4900 + (N >> 5)` (the SDK's `graphics/pipeline/shader/interpreter.cpp`: `bool_constants[bool_address >> 5] & (1 << (bool_address & 31))`; `register_table.inc`: `SHADER_CONSTANT_BOOL_000_031` at `0x4900`), the dumps print that N, and `ucode_eval` takes it as printed. So `b129` is **bit 1 of the pixel bool word** (register `0x4904`, `b128..b159`), as the plan inferred. The captured word, `0x00000100` (`b136` alone), has it clear in every `129F` row of the three captures, and the GPU's own register had `b129` clear in every compared main-scene colour execution of two GPU logs (frame-map section 12, "The bool word": 0 of 14,320 and 0 of 12,980; whether a `129F` draw is among those executions was not looked up). With the bool set the microcode goes on to the block's first fetch (`tf12`): `test_with_b129_set_the_microcode_reads_the_ground_fog`. **A caution for plan Task 8**: the rows' `"pbool"` is the device's shadow of the word, which the same section of the frame map refutes as the GPU's value for draws whose shaders come from `GpuLoadShaders` (the engine keeps its own word and has a setter for `b129` at `0x8226E060`); the `ground-fog` rule should test the word the GPU is given, not the shadow alone.
+
+**The console's product rule at the pixel** (`zero_product`; the formula has it): an absent tree's alpha is +0 also for a picture alpha that is no number; a tree nearer than `c12.y` has light 1 also under an infinite `c12.w`; `c31.x` = 0 gives no colour also from an infinite texel. An IEEE interpreter disagrees in exactly the 150 made trials of these three kinds. A place that is no number makes both saturates 0 (`sat` of no number is 0): the colour is the picture's times `c31.x`, the alpha 0.
+
+### The impostors' fog
+
+`impostor_fog(place, eye, c110, c111, tf16, tf17)` is the block of `129F`, instructions 70 to 85 (the comment in `light_formulas.py` and this document said "75 to 85"; the block starts at 70 with the vector to the eye): **the trees' vertex form without the `c8.x` factor**, evaluated once a tree at the raised place with the eye from vertex `c47` (not `c9`):
+
+    (a, s, t) = fog_coords(place, c47, c110, c111);  before the start: o2 = (1, 1, 1), o3 = (0, 0, 0), no table read
+    o2 = tf16(s).rgb;   o3 = (1 - o2) * tf17(a, t).rgb
+
+Instructions: the vector `c47 - place` and its square (70, 71; `r6` is the raised place since 29), `d` (74), `d - c111.x` (75), the predicate (76), `t` and `1 / d` (77), the direction (78), `a` and `s` (79), the fetches (80: `tf17` at (a, t); 81: `tf16` at s), `1 - T` (82), the add (83), the values before the start (84, 85), exported as `o2`, `o3` (89, 90). `c8.x` is not read: this shader's `c8` is the raise (`c8.z`).
+
+Where the place, the eye or a register is no number the formula gives the pair of "before the start" (`vertex_fog`'s guard); the microcode fetches at a coordinate that is no number there. Such draws are not compared by the check (100 of 2,000 made draws: the kinds `nan` and `inf` whose place is no number), and the record's rules refuse them.
+
+### The check of the pixel shader and of the fog
+
+`impostor_check.py pixel` (seed 1; `out/native-evidence/distant-trees/t5_pixel.txt`); the bound is spec Design 5's, `1e-5 * max(1, |value|)`; both sides are the same arithmetic, held below 1e-9 by the tests (measured: 0.0 on the made pixels).
+
+- **Pixel**: 2,000 of 2,000 made pixels, each of `oC0`'s four components; the picture is a smooth function of its coordinate and the microcode's one fetch must be `tf0` at `o1.xy`; any other texture is an error (so the `b129` block is shown not to run). Floors: a real fog pair in 1,498; nearer than the dissolve's start 658, inside the dissolve 575, beyond it 767; the light factor strictly between its ends in 528; 50 each of the four degenerate kinds.
+- **With each captured view's constants** (`c12`, `c29`, `c31.x`, `c20.w` of captures `054648`, `074119`, `022921`, as `impostor_consts.txt` prints them, six digits): 2,000 of 2,000 each (absent 794, dissolving 563, whole 643, the light falling 479).
+- **Fog** (`check_fog`): the position check's made draws; the microcode's `o2`, `o3` against `impostor_fog` at `impostor_position`'s raised place (not at the microcode's own `o0`): 1,900 of 1,900 compared; begun in 1,413, both fetches at the formula's coordinates in 1,413; before the start 487 (no fetch, exactly 1 and 0).
+- **Mutations that must fail** (`PIXEL_MUTATIONS`, of 400): `start` (`c12.y` for `c29.x`) 196; `tenth` (the literal 0.1 by 1%) 102; `exposure` (`c31.x` left out) 400; `sign` (the light factor's) 297; `picture` (the alpha without the picture's) 265; of the fog `one_minus` (the `(1 - o2)` left out) 277; `c8x` (a `c8.x` factor put in) 277.
+- **Literals by their place**: `one` (`c255.y`) and `tenth` (`c255.z`) changed by 1% in the formula alone fail 195 and 102 of 400; changed in the formula and at their place the two agree again.
+- **`fog_check.py`** now holds `129F` among its checked vertex shaders (`VERTEX_CHECKED`, five; before this task it listed four and `FOG_VERTEX_SHADERS` called `129F` "read only", so no machine check held its fog): 142 fog trials and 58 near trials of 200 agree, the coordinates of both fetches included; the trees' form with `c8.x`, exchanged coordinates and a moved eye each fail (`test_the_impostors_form_has_no_c8x_and_its_eye_is_c47`). There the place is the one the shader exports; `check_fog` above takes it from the formula.
+- **Mutations of the tools themselves** (a scratch copy; `t5_mutations.txt`): eighteen changes of `light_formulas.py`, `impostor_check.py` and `fog_check.py` (the dissolve not saturated; `c12.x` and `c12.z` for the light's two ends; the light without its 1; the alpha without the picture; the add outside the scale; eye and place exchanged in the fog; a wrong square in the distance; `b129` as bit 8; the alpha test as "greater or equal"; `sat` of no number; the IEEE product; `fog_check` with the eye in `c9` or with the trees' formula; four changes that make a check unable to fail): each turns at least one test red.
+
+### What stands on inference, and what is not checked (pixel and fog)
+
+1. The ground-fog block under `b129` (instructions 16 to 57) is not modelled; a draw with the bit set is refused (spec ruling 20).
+2. The alpha test's reference and the registers' values at a `129F` draw other than the five pixel registers of three views: in no capture.
+3. The two tables: that vertex slots 16 and 17 are the frame's fog tables (`tf5`, `tf4`) at a `129F` draw is plan Task 6's identity; the check's tables are made ones.
+4. The picture's fetch: its filter and its level are the sampler's, not the microcode's (`tfetch2D` with no attribute); the formula takes the texel as fetched.
+5. Single precision is not modelled on this side either; the pixel formula has no cancellation of the position's kind.
+
+### Evidence
+
+`out/native-evidence/distant-trees/` (git-ignored): `t4_formulas.txt` (`impostor_check.py formulas`), `t4_mutations.txt` (the tools' mutations, position), `t5_pixel.txt` (`impostor_check.py pixel`, then `fog_check.py --only vertex`), `t5_mutations.txt`. Tests: `tests/test_impostor_formulas.py`; `tests/test_fog_formulas.py` (`test_the_vertex_form`, `test_the_impostors_form_has_no_c8x_and_its_eye_is_c47`).

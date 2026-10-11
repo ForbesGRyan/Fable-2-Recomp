@@ -308,9 +308,10 @@ bool ClayPass::TakePipelines(nrhi::Device* dev, Prepared& p, bool sway, ClayStat
   p.coverage_place = got.plan != CoveragePlan::kEarlyHalf;
   if (!p.pipeline) {
     // No pipeline of its own state (the ordinary cache is full, or the creation failed): the default one of its
-    // kind, or, for a state that blends, no draw (DefaultPipelineServes). Counted in the State line's overflow.
+    // kind, blended or not, exactly as PipelineFor gave it before the two caches (ledger ruling 68). Counted in
+    // the State line's overflow.
     ++st.pipeline_overflow;
-    if (DefaultPipelineServes(p.key)) p.pipeline = pipelines_[p.key.textured < kClayPixelShaders ? p.key.textured : 0];
+    p.pipeline = pipelines_[p.key.textured < kClayPixelShaders ? p.key.textured : 0];
   }
   return got.moved;
 }
@@ -4012,7 +4013,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       sun_depth_taken = true;
     }
     if (due.sky) draw_sky();
-    if (!p.pipeline) continue;  // a record that is not drawn (a terrain record: FinishTerrain; no pipeline for a blend)
+    if (!p.pipeline) continue;  // a terrain record that is not drawn (FinishTerrain)
     const capture::DrawRecord& r = *p.r;
     uint32_t light_mode = 0;
     DrawFog draw_fog = DrawFog::kNone;

@@ -290,6 +290,12 @@ class OnePass(unittest.TestCase):
         self.assertIn("    if (variant) ++variant_refused_;\n    if (!pipeline_refusal_logged_[variant ? 1 : 0]) {\n"
                       "      pipeline_refusal_logged_[variant ? 1 : 0] = true;\n      REXLOG_ERROR(", take)
         self.assertIn("  variant_refused_ = 0;\n", pass_function(s, "Render"))
+        # a record whose own key finds no pipeline takes the default one of its kind, blended or not, as before
+        # the two caches (ledger ruling 68: nothing changes with every switch off, past the bound too)
+        self.assertIn("  if (!p.pipeline) {\n", pass_function(s, "TakePipelines"))
+        self.assertIn("    ++st.pipeline_overflow;\n    p.pipeline = pipelines_[p.key.textured < kClayPixelShaders ? p.key.textured : 0];\n",
+                      pass_function(s, "TakePipelines"))
+        self.assertNotIn("DefaultPipelineServes", s + self.logic)
         self.assertIn("  st.pipeline_refused = variant_refused_;\n", pass_function(s, "Render"))
         self.assertIn("prepass_pipelines_.push_back(CreatePipeline(dev, prepass_keys_[slot], true));", pass_function(s, "PrepassPipeline"))
         self.assertIn("const PipelineKey prepass = PrepassKey(*key, alpha);", pass_function(s, "PrepassPipeline"))

@@ -458,8 +458,7 @@ class ClayPass {
   // TakeRecordPipelines: with `sway` the wind program's first, the rest pipelines only when those are
   // refused): sets p.pipeline, p.coverage_tail, p.coverage_depth, p.coverage_half and p.coverage_place.
   // True: every one is the wind program's. A record that finds no pipeline of its own state is counted
-  // in st.pipeline_overflow and takes the default pipeline of its kind, or none when its state blends
-  // (DefaultPipelineServes: it is then not drawn).
+  // in st.pipeline_overflow and takes the default pipeline of its kind, as before the two caches.
   bool TakePipelines(nrhi::Device* dev, Prepared& p, bool sway, ClayStats& st);
   // TryPipeline, or else (counted in st.pipeline_overflow) `fallback`, by
   // default the default pipeline of the key's `textured`.

@@ -1018,8 +1018,8 @@ Figures and files: FM section 18, "Validation (11c)", "The closing table".
 **The fix wave after the whole-branch reviews (ledger ruling 67).** The colour pass has two pipeline caches since:
 the ordinary 64 keys, and 448 keys for the keys of the wind and the coverage (seven variants of a state), neither
 evicted; a record with wind inputs asks the wind program's pipelines first and makes no rest pipeline when it is
-drawn moved; past a bound a record is at rest or whole (a variant), or has the default pipeline, or is left out
-when its state blends (an ordinary key), counted and logged once. The colour loop's steps before each record are
+drawn moved; past a bound a record is at rest or whole (a variant), or has the default pipeline exactly as before
+(an ordinary key: ledger ruling 68), counted and logged once. The colour loop's steps before each record are
 an executed test. No shader text changed (shader cases 52 and 53 stand); `DrawRecord` is 616 bytes. Not shown: a
 full cache in a run; the five closing software-adapter runs (the wind and the coverage alone at defaults, with
 the shadows, the fog or the textures off, and the sun on with the wind off) are recorded in the ledger when

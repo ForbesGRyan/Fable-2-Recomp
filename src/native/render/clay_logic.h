@@ -522,8 +522,7 @@ struct ClayStats {
   // counted), and records that found no pipeline for their state because the
   // cache was full or the pipeline could not be created: drawn records that
   // used the default pipeline, and terrain records that lost their material
-  // for it (terrain-inputs; counted once, also when their flat draw finds none),
-  // and blended records left out for it (DefaultPipelineServes).
+  // for it (terrain-inputs; counted once, also when their flat draw finds none).
   // pipeline_variants: of `pipelines`, those of the wind's and the coverage's own cache (VariantKey);
   // pipeline_refused: the keys that cache refused this frame because it was full (the record is then
   // drawn at rest or whole, by its ordinary pipeline, and counted on the Wind or the Coverage line too).
@@ -1606,7 +1605,8 @@ inline constexpr size_t kNoPipelineSlot = ~size_t(0);
 // (PipelineRefusalText):
 //   a variant: the record is drawn as before the switches (a wind key: at rest; a coverage key: whole), by its
 //   ordinary pipeline: TakeRecordPipelines;
-//   an ordinary key: DefaultPipelineServes.
+//   an ordinary key: the record is drawn with the default pipeline of its kind, blended or not, exactly as
+//   before the two switches (ledger ruling 68: with every switch off nothing changes, past the bound too).
 inline constexpr size_t kClayVariantsOfAState = 7;
 inline constexpr size_t kMaxClayVariantPipelines = kClayVariantsOfAState * kMaxClayPipelines;
 constexpr bool VariantKey(const PipelineKey& k) { return k.wind != 0 || k.coverage != 0; }
@@ -1620,15 +1620,9 @@ constexpr const char* PipelineRefusalText(PipelineKeyKind kind) {
   switch (kind) {
     case PipelineKeyKind::kWind: return "a wind key: its records are drawn at rest";
     case PipelineKeyKind::kCoverage: return "a coverage key: its records are drawn whole";
-    default: return "an ordinary key: its records are drawn with the default pipeline, or left out when their state blends";
+    default: return "an ordinary key: its records are drawn with the default pipeline";
   }
 }
-// A record whose state has no pipeline (the cache is full, or the pipeline could not be created): true, it is
-// drawn with the default pipeline of its kind (opaque, depth less with write, no cull: wrong in cull or depth at
-// most); false, it is left out: its state blends, and drawn opaque with a depth write it would cover what the
-// game shows through it and what is drawn behind it afterwards (the rule of a blend whose colour is not known:
-// DecideDrawState). Counted in the State line's overflow either way.
-constexpr bool DefaultPipelineServes(const PipelineKey& k) { return k.blend == 0; }
 
 // Index of `k` in `keys`, appended if absent and there is room; kNoPipelineSlot when the
 // cache is full (the caller then draws with the default pipeline and counts the overflow).
@@ -1979,7 +1973,7 @@ struct RecordPipelines {
 // colour asked first, the part in its place last; the first complete set of this order is the record's:
 //   1. moved, with its coverage parts;   2. at rest, with its coverage parts (the wind's verdict: pipeline);
 //   3. moved, whole (the coverage's verdict: pipeline);   4. at rest, whole: `place` alone, which may be none
-//   (the caller's rule then: DefaultPipelineServes).
+//   (the caller then draws with the default pipeline of the record's kind, as always).
 // So a record that is drawn moved has asked for no rest key: no rest pipeline is made for it, and none of its
 // rest keys takes a slot. A record that cannot sway asks for no wind key, and without a plan for its own key
 // alone: the pass of before the switches.

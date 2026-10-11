@@ -3642,7 +3642,7 @@ int main() {
     k.coverage = 1;
     CHECK(766, VariantKey(k) && PipelineKeyKindOf(k) == PipelineKeyKind::kCoverage);
     CHECK(766, std::string(PipelineRefusalText(PipelineKeyKind::kOrdinary)).find("default pipeline") != std::string::npos &&
-                   std::string(PipelineRefusalText(PipelineKeyKind::kOrdinary)).find("left out") != std::string::npos &&
+                   std::string(PipelineRefusalText(PipelineKeyKind::kOrdinary)).find("left out") == std::string::npos &&
                    std::string(PipelineRefusalText(PipelineKeyKind::kWind)).find("at rest") != std::string::npos &&
                    std::string(PipelineRefusalText(PipelineKeyKind::kCoverage)).find("drawn whole") != std::string::npos);
     // A full ordinary cache of textured states, and every part every plan asks of each, at rest and moved: all fit.
@@ -3692,25 +3692,8 @@ int main() {
       CHECK(766, FindOrAddPipelineSlot(at_limit, v, kMaxClayVariantPipelines) == i);
     }
   }
-  // 767: a record whose state finds no pipeline (the cache full, the creation failed): drawn with the default
-  // pipeline when its state does not blend, left out when it does (drawn opaque with a depth write it would
-  // cover what the game shows through it: the rule of a blend whose colour is unknown).
-  {
-    PipelineKey k;
-    CHECK(767, DefaultPipelineServes(k) && DefaultPipelineServes(TerrainFlatDefaultKey()));
-    k.cull = 2;
-    k.depth_write = 0;
-    k.color_mask = 0;
-    CHECK(767, DefaultPipelineServes(k));
-    k.blend = 1;
-    CHECK(767, !DefaultPipelineServes(k));
-    capture::RenderState rs = State(0x00708767, 0x07060706u, 0x00000004, 0x00218006);
-    capture::Material m;
-    m.status = capture::MaterialStatus::kTextured;
-    m.alpha.source = capture::AlphaSource::kAlbedo;
-    const DrawState d = DecideDrawState(rs, m, 1, false);
-    CHECK(767, rs.valid && DefaultPipelineServes(d.key) == (d.key.blend == 0));
-  }
+  // (767: withdrawn with ledger ruling 68. A record whose ordinary key finds no pipeline takes the default
+  // pipeline, blended or not, as before the fix wave; the pass has no rule of its own for it.)
   // 768: which pipelines a record asks for and in which order (TakeRecordPipelines). A record that may be drawn
   // moved asks for the wind program's pipelines FIRST and its rest pipelines only when one of those is refused: no
   // rest pipeline is made for a record that is then drawn moved (final review, I1). All or nothing a set; the order
@@ -3802,7 +3785,7 @@ int main() {
     log.clear();
     got = TakeRecordPipelines<int>(own, CoveragePlan::kEarlyFull, true, ask);
     CHECK(768, !got.moved && got.plan == CoveragePlan::kNone && got.place == 1 && got.tail == 0 && got.depth == 0);
-    // Everything refused: no pipeline (the caller's rule: DefaultPipelineServes).
+    // Everything refused: no pipeline (the caller then draws with the default pipeline, as always).
     refused = 0xFFu;
     got = TakeRecordPipelines<int>(own, CoveragePlan::kLate, true, ask);
     CHECK(768, !got.moved && got.plan == CoveragePlan::kNone && got.place == 0 && got.tail == 0 && got.depth == 0);

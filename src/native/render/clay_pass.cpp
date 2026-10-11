@@ -202,7 +202,6 @@ void ClayPass::DestroyObjects() {
   pipelines_.clear();
   vs_ = nullptr;
   wind_vs_ = nullptr;
-  wind_vs_failed_ = false;
   for (nrhi::Shader*& ps : ps_) ps = nullptr;
   map_pipeline_ = nullptr;
   map_vs_ = map_ps_ = nullptr;
@@ -298,7 +297,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     pipelines_.clear();
     vs_ = nullptr;
     wind_vs_ = nullptr;
-    wind_vs_failed_ = false;
+    wind_vs_failed_ = false;  // (another device: its wind program is tried anew)
     for (nrhi::Shader*& ps : ps_) ps = nullptr;
     map_pipeline_ = nullptr;
     map_vs_ = map_ps_ = nullptr;
@@ -352,6 +351,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     sun_objects_failed_ = false;  // (and the sun layer's)
     oracle_failed_ = false;  // (and the oracle feed)
     oracle_sun_failed_ = false;
+    wind_vs_failed_ = false;  // (and the wind vertex program)
   }
   ready_ = false;
 

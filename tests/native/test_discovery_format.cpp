@@ -228,6 +228,42 @@ int main() {
         MipDumpAllowed(4096, (256ull << 20) - 4095, 8u << 20, 256ull << 20) || !MipDumpAllowed(4096, (256ull << 20) - 4096, 8u << 20, 256ull << 20)) return 78;
     if (MipDumpAllowed(0xFFFFFFFFFFFFFFFFull, 1, 8u << 20, 256ull << 20)) return 79;   // (no wrap)
   }
+  // 80 to 89: the storage and the fetch constant of a BeginVertices draw (distant trees, frame-map section 19).
+  {
+    using namespace fable2::native::capture;
+    // FindFetchPacket: the six dwords after the LAST header of the stretch (plan Task 1).
+    uint8_t be[4 * 20] = {};
+    auto put = [&](size_t i, uint32_t v) {
+      be[4 * i] = uint8_t(v >> 24); be[4 * i + 1] = uint8_t(v >> 16); be[4 * i + 2] = uint8_t(v >> 8); be[4 * i + 3] = uint8_t(v);
+    };
+    put(1, kVertsFetchHeader);
+    for (uint32_t k = 0; k < 6; ++k) put(2 + k, 0x1000u + k);
+    uint32_t got[6] = {7, 7, 7, 7, 7, 7};
+    if (!FindFetchPacket(be, 20, kVertsFetchHeader, got) || got[0] != 0x1000u || got[5] != 0x1005u) return 80;
+    put(10, kVertsFetchHeader);                                   // a later header wins
+    for (uint32_t k = 0; k < 6; ++k) put(11 + k, 0x2000u + k);
+    if (!FindFetchPacket(be, 20, kVertsFetchHeader, got) || got[0] != 0x2000u || got[5] != 0x2005u) return 81;
+    put(16, kVertsFetchHeader);                                   // a header with three dwords after it is no packet
+    if (!FindFetchPacket(be, 20, kVertsFetchHeader, got) || got[0] != 0x2000u) return 82;
+    uint32_t keep[6] = {9, 9, 9, 9, 9, 9};
+    if (FindFetchPacket(be, 1, kVertsFetchHeader, keep) || keep[0] != 9) return 83;      // too short: out untouched
+    if (FindFetchPacket(nullptr, 20, kVertsFetchHeader, keep) || FindFetchPacket(be, 0, kVertsFetchHeader, keep)) return 84;
+    if (VertsDataBytes(1140, kMaxVertsDataBytes) != 4560) return 85;                     // the bridge's largest draw: 285 quads
+    if (VertsDataBytes(16384, kMaxVertsDataBytes) != 65536 || VertsDataBytes(16385, kMaxVertsDataBytes) != 0) return 86;
+    if (VertsDataBytes(0, kMaxVertsDataBytes) != 0 || VertsDataBytes(0xFFFFFFFFu, kMaxVertsDataBytes) != 0 ||
+        VertsDataBytes(0x40000001u, kMaxVertsDataBytes) != 0) return 87;   // (no 32-bit wrap: the last would be 4 bytes)
+    // A header in the stretch's last dword, and one exactly six dwords before its end.
+    uint8_t tail[4 * 8] = {};
+    auto put2 = [&](size_t i, uint32_t v) {
+      tail[4 * i] = uint8_t(v >> 24); tail[4 * i + 1] = uint8_t(v >> 16); tail[4 * i + 2] = uint8_t(v >> 8); tail[4 * i + 3] = uint8_t(v);
+    };
+    put2(7, kVertsFetchHeader);
+    if (FindFetchPacket(tail, 8, kVertsFetchHeader, keep) || keep[0] != 9) return 88;
+    put2(1, kVertsFetchHeader);
+    put2(7, 0xABCD0007u);
+    if (!FindFetchPacket(tail, 8, kVertsFetchHeader, keep) || keep[5] != 0xABCD0007u || keep[0] != 0) return 89;
+    if (kVertsFetchHeader != 0x000548BAu || kVertsCmdTailDwords != 96 || kMaxVertsDataBytes != 65536u) return 89;
+  }
   std::cout << "PASS: discovery format\n";
   return 0;
 }

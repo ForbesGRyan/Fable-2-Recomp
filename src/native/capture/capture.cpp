@@ -1700,8 +1700,12 @@ constexpr uint32_t kMaxContentTextures = 1024;
 constexpr uint64_t kMaxContentTextureBytes = 512ull << 20;
 
 // Discovery only (caller holds g_mutex with g_file open; called by DumpTexture alone, once a texture, for a 2D
-// texture the renderer decodes): the guest bytes of the texture's stored mip levels, whole, to
-// <BASE>_<IDENTITY16>_mips.bin, and the texture row's "mips" member that names each level's place in the file
+// texture the renderer decodes, and once a content for a 2D texture of format 3, the impostors' pictures of
+// frame-map section 19, which the renderer does not decode: `fi` is the format's block layout and `content`
+// the base level's content hash, 0 for a texture kept once per address): the guest bytes of the texture's
+// stored mip levels, whole, to <BASE>_<IDENTITY16>_mips.bin (with a content: <BASE>_<IDENTITY16>_<XXH3>_mips.bin,
+// the levels as they are at the moment that base level is dumped), and the texture row's "mips" member that
+// names each level's place in the file
 // (discovery_format.h, FormatMipsMember). The levels' layout is the SDK's (GetGuestTextureLayout), read as the
 // texture cache reads it (render::TextureCache::BuildPlan: levels at or past the packed level live in the
 // packed tail, at the block offset GetPackedMipOffset gives). Whole or nothing: no mip address, a layout that
@@ -1710,13 +1714,13 @@ constexpr uint64_t kMaxContentTextureBytes = 512ull << 20;
 constexpr uint64_t kMaxMipDumpBytes = 256ull << 20;
 constexpr uint32_t kMaxMipDumpLevels = 16;
 
-std::string DumpTextureMips(const render::TextureFetch& t, uint32_t base, uint64_t identity) {
+std::string DumpTextureMips(const render::TextureFetch& t, const render::TexFormatInfo& fi, uint32_t base, uint64_t identity,
+                            uint64_t content) {
   namespace texture_util = rex::graphics::texture_util;
   namespace xenos = rex::graphics::xenos;
-  if (g_tex_dir.empty() || !t.mip_phys || t.format == render::TexFormat::kDxt3a) return {};
+  if (g_tex_dir.empty() || !t.mip_phys || t.format == render::TexFormat::kDxt3a || fi.bytes_per_block == 0) return {};
   const uint32_t levels = std::min(render::LevelCount(t), kMaxMipDumpLevels);
   if (levels < 2) return {};
-  const render::TexFormatInfo fi = render::FormatInfo(t.format);
   const xenos::TextureFormat format = xenos::TextureFormat(t.xenos_format);
   const texture_util::TextureGuestLayout layout = texture_util::GetGuestTextureLayout(
       xenos::DataDimension::k2DOrStacked, t.pitch_texels >> 5, t.width, t.height, 1, t.tiled, format, t.packed_mips, true, levels - 1);
@@ -1748,7 +1752,12 @@ std::string DumpTextureMips(const render::TextureFetch& t, uint32_t base, uint64
   const uint8_t* src = ReadPhysical(t.mip_phys, uint32_t(extent));
   if (!src) return {};
   char name[72];
-  std::snprintf(name, sizeof(name), "%08X_%016llX_mips.bin", base, static_cast<unsigned long long>(identity));
+  if (content) {
+    std::snprintf(name, sizeof(name), "%08X_%016llX_%016llX_mips.bin", base, static_cast<unsigned long long>(identity),
+                  static_cast<unsigned long long>(content));
+  } else {
+    std::snprintf(name, sizeof(name), "%08X_%016llX_mips.bin", base, static_cast<unsigned long long>(identity));
+  }
   std::FILE* f = std::fopen((g_tex_dir / name).string().c_str(), "wb");
   if (!f) return {};
   const bool ok = std::fwrite(src, 1, size_t(extent), f) == size_t(extent);
@@ -1838,10 +1847,17 @@ uint64_t DumpTexture(const uint32_t fc[6]) {
                   g_frames_written.load(std::memory_order_relaxed) + 1, static_cast<unsigned long long>(content),
                   is_1d ? ",\"dim\":1" : "");
     row += buf;
+    // (the stored levels of an impostor's picture, format 3, as they are beside this content of its base level:
+    // DumpTextureMips is otherwise not reached for a texture kept by content)
+    render::TextureFetch picture;
+    render::TexFormatInfo picture_fi;
+    if (!is_1d && (fc[1] & 0x3F) == 3 && render::DumpFetch(fc, &picture, &picture_fi)) {
+      row += DumpTextureMips(picture, picture_fi, base, identity, content);
+    }
   } else {
     ++g_tex_count;
     // (the stored mip levels of a 2D texture the renderer decodes, beside its base level; after the folder exists)
-    if (!is_1d && err == render::FetchError::kNone) row += DumpTextureMips(t, base, identity);
+    if (!is_1d && err == render::FetchError::kNone) row += DumpTextureMips(t, render::FormatInfo(t.format), base, identity, 0);
   }
   row += ",\"fc\":";
   row += HexDwords(fc, 6);
@@ -2112,6 +2128,30 @@ void AppendRenderState(std::string& row, uint32_t device,
   }
 }
 
+// Distant trees discovery (frame-map section 19): the viewport and the scissor of a draw that
+// renders an impostor's picture, a draw outside the main scene at surface pitch 320, as
+// "vp":{"<REG>":"0x<word>",...}: PA_CL_VPORT_XSCALE .. ZOFFSET (0x210F to 0x2114, floats as
+// their bits), PA_SC_WINDOW_OFFSET and the window scissor (0x2080 to 0x2082) and the screen
+// scissor (0x200E, 0x200F), from the device's register shadows. A register the device has no
+// shadow for (DeviceRegShadowOffset gives 0: 0x2080 to 0x2082 as the layout stands) or whose
+// shadow cannot be read is left out; no member for any other draw.
+inline constexpr uint32_t kImpostorRenderPitch = 320;
+inline constexpr uint32_t kViewportRegisters[] = {0x210F, 0x2110, 0x2111, 0x2112, 0x2113, 0x2114,
+                                                  0x2080, 0x2081, 0x2082, 0x200E, 0x200F};
+void AppendPictureViewport(std::string& row, uint32_t device) {
+  uint32_t surface = 0;
+  if (!device || !ReadVirtualBe32(device + xdk::kDeviceSurfaceInfoOffset, &surface) ||
+      (surface & 0x3FFF) != kImpostorRenderPitch) {
+    return;
+  }
+  row += ",\"vp\":{";
+  row += RegisterWords(kViewportRegisters, std::size(kViewportRegisters), [device](uint32_t reg, uint32_t* word) {
+    const uint32_t at = xdk::DeviceRegShadowOffset(reg);
+    return at && ReadVirtualBe32(device + at, word);
+  });
+  row += "}";
+}
+
 // Discovery evidence (frame-map section 13, "Alpha and missing shaders"): pixel
 // constants c0..c31 as host floats ("pconst", 128 values; left out when the
 // bank cannot be read), from the bank ReadPsBankRegisters reads for the draw's
@@ -2314,6 +2354,7 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
     row += buf;
   }
   AppendRenderState(row, device);
+  if (!in_scene) AppendPictureViewport(row, device);
   auto finish = [&](const char* error) {
     if (error) {
       row += ",\"error\":\"";
@@ -2543,11 +2584,34 @@ void WriteDrawRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
 // the vertex bank ("consts", which render_state_check.py confirms a pair by) and
 // where the builder put the vertices ("storage", "storage_dwords": the caller
 // fills them after the builder returns, so their values are not in the row).
+// A row inside the main scene (distant trees discovery, frame-map section 19: the
+// far woods' impostors are such draws) has besides, as an "indx" row has them: its
+// number "n" (from g_indx_rows, so that "indx" and "verts" rows never share one),
+// the vertex registers ("vfull", when the vertex uploads were followed), the vertex
+// shader's literals ("vs_lit") and vertex fetches ("fetches"), the whole vertex
+// bank ("bank", 1,024 floats) and the storage's vertex fetch constant twice
+// ("vfetch": "shadow", the six dwords of fetch slot 31 as the device holds them,
+// null when they cannot be read; "packet", the six dwords after the last
+// kVertsFetchHeader among the kVertsCmdTailDwords command dwords that end at the
+// builder's own write pointer, null when those cannot be read or hold no header).
+// Its storage follows in a "vertsdata" row (FlushPendingVerts). A row outside the
+// scene is the row of before.
+struct PendingVerts {
+  bool valid = false;
+  uint32_t capture = 0;  // g_capture_serial of the capture the row is in
+  int frame = 0;
+  uint32_t row = 0;      // the "verts" row's number ("n")
+  uint32_t storage = 0, want = 0;
+};
+constinit thread_local PendingVerts t_pending_verts;
+uint32_t g_indx_rows = 0;  // "indx" and in-scene "verts" rows of this process, under g_mutex: joins a row and its data
+uint32_t g_capture_serial = 0;  // captures opened by this process (OpenLog), under g_mutex
+
 void WriteVertsRow(uint32_t id, const LastArgs& args, uint32_t device, const DeviceSnapshot& dev,
                    bool in_scene) {
   char buf[256];
-  std::string row = VertsRowHead(g_frames_written.load(std::memory_order_relaxed) + 1, HookName(id), &args.r[1],
-                                 device, in_scene);
+  const int frame = g_frames_written.load(std::memory_order_relaxed) + 1;
+  std::string row = VertsRowHead(frame, HookName(id), &args.r[1], device, in_scene);
   if (const uint8_t* bools = ReadVirtual(device + xdk::kDeviceBoolConstantsOffset, 4)) {
     std::snprintf(buf, sizeof(buf), ",\"vbool\":\"0x%08X\"", LoadBe32(bools));
     row += buf;
@@ -2558,10 +2622,45 @@ void WriteVertsRow(uint32_t id, const LastArgs& args, uint32_t device, const Dev
   }
   AppendRenderState(row, device, xdk::kDeviceBeginVerticesWriteOffset);
   uint32_t storage = 0, dwords = 0;
-  if (ReadVirtualBe32(device + xdk::kDeviceBeginVerticesStorageOffset, &storage) &&
-      ReadVirtualBe32(device + xdk::kDeviceBeginVerticesDwordsOffset, &dwords)) {
+  const bool storage_read = ReadVirtualBe32(device + xdk::kDeviceBeginVerticesStorageOffset, &storage) &&
+                            ReadVirtualBe32(device + xdk::kDeviceBeginVerticesDwordsOffset, &dwords);
+  if (storage_read) {
     std::snprintf(buf, sizeof(buf), ",\"storage\":\"0x%08X\",\"storage_dwords\":%u", storage, dwords);
     row += buf;
+  }
+  // A storage of an earlier row that was never written out (no hooked draw of this thread came
+  // between) is dropped: its bytes are another draw's by now.
+  t_pending_verts = PendingVerts{};
+  if (in_scene) {
+    const uint32_t n = ++g_indx_rows;
+    std::snprintf(buf, sizeof(buf), ",\"n\":%u", n);
+    row += buf;
+    const uint32_t want = storage_read ? VertsDataBytes(dwords, kMaxVertsDataBytes) : 0;
+    if (storage_read && storage != 0 && want != 0) {
+      t_pending_verts = PendingVerts{true, g_capture_serial, frame, n, storage, want};
+    }
+    // The storage's fetch constant: the device's shadow of slot 31, and the packet the builder wrote.
+    uint32_t fc[6] = {};
+    row += ",\"vfetch\":{\"shadow\":";
+    const uint8_t* shadow = ReadVirtual(device + xdk::kDeviceVertexFetchOffset + xdk::kDeviceTextureFetchStride * 31, 24);
+    if (shadow) {
+      for (int i = 0; i < 6; ++i) fc[i] = LoadBe32(shadow + 4 * i);
+    }
+    row += shadow ? HexDwords(fc, 6) : "null";
+    row += ",\"packet\":";
+    uint32_t write = 0;
+    bool found = false;
+    constexpr uint32_t kTailBytes = 4 * kVertsCmdTailDwords;
+    if (ReadVirtualBe32(device + xdk::kDeviceBeginVerticesWriteOffset, &write) && (write & 3) == 0 && write >= kTailBytes) {
+      // (copied before it is looked at: the header found and the dwords after it are of one moment)
+      if (const uint8_t* tail = ReadVirtual(write + 4 - kTailBytes, kTailBytes)) {
+        uint8_t copy[kTailBytes];
+        std::memcpy(copy, tail, kTailBytes);
+        found = FindFetchPacket(copy, kVertsCmdTailDwords, kVertsFetchHeader, fc);
+      }
+    }
+    row += found ? HexDwords(fc, 6) : "null";
+    row += "}";
   }
   AppendPs(row, dev);
   AppendTextureFetches(row, device, dev);
@@ -2574,13 +2673,21 @@ void WriteVertsRow(uint32_t id, const LastArgs& args, uint32_t device, const Dev
   }
   VsChoice vc;
   if (ChooseVs(dev, &vc)) {
-    const UcodeRef u = vc.immediate ? UcodeRef{} : ReadVsUcode(vc.obj, vc.variant);
+    // (inside the scene the object's microcode is read also for an immediate load, as WriteIndxRow reads it:
+    // its vertex fetches name the layout of the storage)
+    const UcodeRef u = vc.immediate && !in_scene ? UcodeRef{} : ReadVsUcode(vc.obj, vc.variant);
     const uint64_t hash = vc.immediate ? (t_vs_load.usable ? t_vs_load.hash : 0) : u.hash;
     std::snprintf(buf, sizeof(buf),
                   ",\"vs\":{\"obj\":\"0x%08X\",\"source\":\"%s\",\"variant\":%u,\"hash\":\"0x%016llX\"}", vc.obj,
                   vc.immediate ? "immediate" : (vc.gpu_owned ? "gpu_load" : "object"), vc.variant,
                   static_cast<unsigned long long>(hash));
     row += buf;
+    if (in_scene) {
+      AppendVertexRegisters(row, device, vc.obj, vc.variant);
+      row += ",\"vs_lit\":";
+      row += LiteralsJson(kVsLayout, vc.obj, vc.variant);
+      if (u.ok) AppendFetches(row, DecodeVertexFetches(u.dwords.data(), u.dwords.size()));
+    }
   }
   const uint32_t bank_ptr =
       g_state.vs_bank_ptr ? g_state.vs_bank_ptr : device + xdk::kDeviceVsConstantsOffset;
@@ -2588,6 +2695,42 @@ void WriteVertsRow(uint32_t id, const LastArgs& args, uint32_t device, const Dev
     row += ",\"consts\":{\"c0\":";
     row += BeFloats(p, 4);
     row += "}";
+  }
+  if (in_scene) {
+    if (const uint8_t* bank = ReadVirtual(bank_ptr, 256 * 16)) {
+      row += ",\"bank\":";
+      row += BeFloats(bank, 1024);
+    }
+  }
+  row += "}\n";
+  std::fputs(row.c_str(), g_file);
+}
+
+// Discovery only. The "vertsdata" row of this thread's last in-scene "verts" row, if one is
+// pending: the storage whole, as the game filled it after the builder returned. "n" and "frame"
+// are the "verts" row's; "storage" its address, "want" the bytes asked for (VertsDataBytes: the
+// device's storage_dwords * 4, at most kMaxVertsDataBytes), "read" whether they could be read
+// and "bytes" their hex in guest order (left out when they could not). The bytes are read when
+// this thread enters its next hooked draw, whole or not at all (ReadVirtual checks the range
+// against the guest's page tables): that the game has filled them by then, and that nothing has
+// reused the storage, is what the reader checks on the values (finite places, sizes above 0).
+// No row once the row's capture is over.
+void FlushPendingVerts() {
+  const PendingVerts pending = t_pending_verts;
+  t_pending_verts = PendingVerts{};
+  if (!pending.valid || pending.storage == 0 || pending.want == 0 || pending.want > kMaxVertsDataBytes) return;
+  std::lock_guard<std::mutex> lock(g_mutex);
+  if (!g_file || pending.capture != g_capture_serial) return;  // the row's capture is over
+  char buf[160];
+  std::snprintf(buf, sizeof(buf), "{\"kind\":\"vertsdata\",\"frame\":%d,\"n\":%u,\"storage\":\"0x%08X\",\"want\":%u",
+                pending.frame, pending.row, pending.storage, pending.want);
+  std::string row = buf;
+  if (const uint8_t* p = ReadVirtual(pending.storage, pending.want)) {
+    row += ",\"read\":true,\"bytes\":\"";
+    row += HexBytes(p, pending.want);
+    row += "\"";
+  } else {
+    row += ",\"read\":false";
   }
   row += "}\n";
   std::fputs(row.c_str(), g_file);
@@ -2606,8 +2749,6 @@ struct PendingIndexed {
   bool index32 = false;
 };
 thread_local PendingIndexed t_pending_indexed;
-uint32_t g_indx_rows = 0;  // "indx" rows of this process, under g_mutex: joins a row and its data
-uint32_t g_capture_serial = 0;  // captures opened by this process (OpenLog), under g_mutex
 constexpr uint32_t kMaxIndxVertexBytes = 4096;
 
 // Caller holds g_mutex. One decoded "indx" row (frame-map section 16, "Discovery") for a draw of
@@ -5831,6 +5972,8 @@ void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t*) {
                              (pending & xdk::kDeviceBoolPendingMaskHi) != 0;
       // The storage of this thread's last "indx" row, filled by the game since (discovery only).
       if (t_pending_indexed.valid) FlushPendingIndexed();
+      // And of its last in-scene "verts" row (distant trees discovery).
+      if (t_pending_verts.valid) FlushPendingVerts();
       // Post discovery: where the command buffer stood when the clear routine was entered (WriteStreamRows).
       if (id == kHook_DrawIndx2_821EF988 && !nested) {
         t_stream.entry_valid = g_armed.load(std::memory_order_relaxed) &&

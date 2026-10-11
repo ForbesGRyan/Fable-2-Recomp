@@ -149,10 +149,12 @@ inline uint32_t TiledUpperBound2D(uint32_t right, uint32_t bottom, uint32_t pitc
 // the normal map; 4 x 4 blocks of 16 bytes), and the game's own targets as its
 // later passes sample them (fog discovery, frame-map section 16):
 // k_16_16_16_16_EXPAND (29: the scene colour before post, 8 bytes a texel) and
-// k_24_8 / k_24_8_FLOAT (22, 23: depth). False for any other format. The
-// product reaches this only for k_DXN (terrain_patch.h, DecodeNormalMap).
+// k_24_8 / k_24_8_FLOAT (22, 23: depth), and k_1_5_5_5 (3: the pictures of the far
+// woods' impostors, frame-map section 19; 2 bytes a texel). False for any other
+// format. The product reaches this only for k_DXN (terrain_patch.h,
+// DecodeNormalMap).
 inline bool DumpFormatInfo(uint32_t xenos_format, TexFormatInfo* fi) {
-  if (xenos_format == 24) {
+  if (xenos_format == 24 || xenos_format == 3) {
     *fi = {1, 2, 1};
   } else if (xenos_format == 49) {
     *fi = {4, 16, 4};
@@ -230,14 +232,51 @@ constexpr bool PostBufferBase(uint32_t base) {
 // Whether a discovery dump keeps a texture once per content and not once per address: the
 // textures the game rewrites in place. Every 1D texture (the fog tables sit in a ring of three
 // addresses and are rewritten each frame), the 2D targets of the formats added above (scene
-// colour and depth, whose memory holds another picture each frame), and any 2D texture at a post
-// buffer's address (PostBufferBase), whatever its format.
+// colour and depth, whose memory holds another picture each frame), any 2D texture at a post
+// buffer's address (PostBufferBase), whatever its format, and a 2D texture of format 3 (k_1_5_5_5:
+// the impostors' pictures, which the game renders again every frame; frame-map section 19).
 inline bool DumpKeyedByContent(const uint32_t fc[6]) {
   if ((fc[0] & 3) != 2) return false;
   if (Is1DFetch(fc)) return true;
   if (((fc[5] >> 9) & 3) != 1) return false;
   const uint32_t format = fc[1] & 0x3F;
-  return format == 29 || format == 22 || format == 23 || PostBufferBase(fc[1] & 0xFFFFF000u);
+  return format == 29 || format == 22 || format == 23 || format == 3 || PostBufferBase(fc[1] & 0xFFFFF000u);
+}
+
+// A 2D fetch constant of any format DumpFormatInfo has, as DecodeTextureFetch reads one (the same
+// fields from the same bits); `out->format` is TexFormatFromXenos's (kUnsupported for a format the
+// renderer does not decode) and `*fi` the format's block layout. False, with `out` and `fi`
+// untouched, as DecodeTextureFetch is for a constant that is no 2D texture, has no base or a pitch
+// below its width, and for a format without a layout. Discovery only: no record, material or
+// texture of the pass is made from it.
+inline bool DumpFetch(const uint32_t fc[6], TextureFetch* out, TexFormatInfo* fi) {
+  if ((fc[0] & 3) != 2 || ((fc[5] >> 9) & 3) != 1) return false;
+  TexFormatInfo info;
+  if (!DumpFormatInfo(fc[1] & 0x3F, &info)) return false;
+  TextureFetch t;
+  t.xenos_format = fc[1] & 0x3F;
+  t.format = TexFormatFromXenos(t.xenos_format);
+  t.endian = (fc[1] >> 6) & 3;
+  t.base_phys = fc[1] & 0xFFFFF000u;
+  t.mip_phys = fc[5] & 0xFFFFF000u;
+  t.width = (fc[2] & 0x1FFF) + 1;
+  t.height = ((fc[2] >> 13) & 0x1FFF) + 1;
+  t.pitch_texels = ((fc[0] >> 22) & 0x1FF) << 5;
+  t.tiled = (fc[0] >> 31) != 0;
+  t.packed_mips = ((fc[5] >> 11) & 1) != 0;
+  t.mip_min = (fc[4] >> 2) & 0xF;
+  t.mip_max = (fc[4] >> 6) & 0xF;
+  for (int i = 0; i < 4; ++i) {
+    const uint8_t s = uint8_t((fc[3] >> (1 + 3 * i)) & 7);
+    t.swizzle[i] = s <= 5 ? s : 4;
+  }
+  t.clamp_x = uint8_t((fc[0] >> 10) & 7);
+  t.clamp_y = uint8_t((fc[0] >> 13) & 7);
+  t.linear_filter = ((fc[3] >> 19) & 3) == 1;
+  if (t.base_phys == 0 || t.pitch_texels < t.width) return false;
+  *out = t;
+  *fi = info;
+  return true;
 }
 
 // Copies n bytes applying the GPU's endian swap (xenos::Endian): the result is

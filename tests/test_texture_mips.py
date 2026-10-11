@@ -150,9 +150,13 @@ class CheckMipFiles(unittest.TestCase):
         for key in ("mips", "file", "phys", "bytes", "tiled", "levels", "level", "offset", "pitch", "w", "h", "x", "y"):
             self.assertIn('\\"%s\\":' % key, text)
         capture = (ROOT / "src" / "native" / "capture" / "capture.cpp").read_text(encoding="utf-8")
-        self.assertEqual(capture.count("DumpTextureMips("), 2)            # its definition, and DumpTexture's one call
-        self.assertIn("    if (!is_1d && err == render::FetchError::kNone) row += DumpTextureMips(t, base, identity);", capture)
-        self.assertIn("  if (g_tex_dir.empty() || !t.mip_phys || t.format == render::TexFormat::kDxt3a) return {};", capture)
+        # its definition and DumpTexture's two calls: a texture the renderer decodes, once an address, and (distant
+        # trees, frame-map section 19) a 2D texture of format 3, once a content, with that format's own layout
+        self.assertEqual(capture.count("DumpTextureMips("), 3)
+        self.assertIn("    if (!is_1d && err == render::FetchError::kNone) row += DumpTextureMips(t, render::FormatInfo(t.format), base, identity, 0);", capture)
+        self.assertIn("    if (!is_1d && (fc[1] & 0x3F) == 3 && render::DumpFetch(fc, &picture, &picture_fi)) {", capture)
+        self.assertIn("      row += DumpTextureMips(picture, picture_fi, base, identity, content);", capture)
+        self.assertIn("  if (g_tex_dir.empty() || !t.mip_phys || t.format == render::TexFormat::kDxt3a || fi.bytes_per_block == 0) return {};", capture)
         json.dumps(self.rows(tempfile.gettempdir(), write=None))
 
 

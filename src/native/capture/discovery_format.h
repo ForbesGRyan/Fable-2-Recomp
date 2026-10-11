@@ -242,4 +242,31 @@ inline std::string FormatMipsMember(const char* file, uint32_t phys, uint64_t by
 inline bool MipDumpAllowed(uint64_t bytes, uint64_t used, uint64_t cap, uint64_t budget) {
   return bytes != 0 && bytes <= cap && used <= budget && bytes <= budget - used;
 }
+// Distant trees discovery (frame-map section 19). BeginVertices writes fetch slot 31 (vertex fetch
+// constants 93 to 95) for its storage as a type-0 packet of six dwords with this header
+// (xdk_layout.h, "BeginVertices").
+inline constexpr uint32_t kVertsFetchHeader = 0x000548BAu;
+inline constexpr uint32_t kVertsCmdTailDwords = 96;      // the command dwords a "verts" row looks back over
+inline constexpr uint32_t kMaxVertsDataBytes = 64u << 10;
+// The six dwords that follow the LAST `header` among `dwords` big-endian command dwords at `be`;
+// false (out untouched) when there is none with six dwords after it. Every dword is looked at as
+// a header (a data dword that equals it counts too: the reader holds the result to the device's
+// own shadow of the slot).
+inline bool FindFetchPacket(const uint8_t* be, size_t dwords, uint32_t header, uint32_t out[6]) {
+  if (!be || dwords < 7) return false;
+  auto at = [be](size_t i) {
+    return uint32_t(be[4 * i]) << 24 | uint32_t(be[4 * i + 1]) << 16 | uint32_t(be[4 * i + 2]) << 8 | uint32_t(be[4 * i + 3]);
+  };
+  for (size_t i = dwords - 6; i-- > 0;) {
+    if (at(i) != header) continue;
+    for (size_t k = 0; k < 6; ++k) out[k] = at(i + 1 + k);
+    return true;
+  }
+  return false;
+}
+// Bytes of a "vertsdata" row: the storage whole when it is at most `cap` bytes, else 0. 64-bit arithmetic.
+inline uint32_t VertsDataBytes(uint32_t storage_dwords, uint32_t cap) {
+  const uint64_t bytes = uint64_t(storage_dwords) * 4;
+  return bytes <= cap ? uint32_t(bytes) : 0;
+}
 }  // namespace fable2::native::capture

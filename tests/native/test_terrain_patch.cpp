@@ -532,6 +532,15 @@ int main() {
       std::memcpy(nfc, kTf17, sizeof(nfc));
       nfc[1] = (nfc[1] & ~0x3Fu) | 24;  // k_16: not a normal map
       if (DecodeNormalMap(nfc, &nm)) return 217;
+      // k_1_5_5_5 (the impostors' pictures, which a discovery dump now has a layout for: distant trees, plan
+      // Task 1): the one product caller of BaseLevelDumpBytes is not reached for it, and `nm` stays as it was.
+      std::memcpy(nfc, kTf17, sizeof(nfc));
+      nfc[1] = (nfc[1] & ~0x3Fu) | 3;
+      {
+        NormalMap kept;
+        kept.width = 77;
+        if (DecodeNormalMap(nfc, &kept) || kept.width != 77) return 260;
+      }
       std::memcpy(nfc, kTf17, sizeof(nfc));
       nfc[3] |= 1u << 19;  // linear mag filter: the vertex shader's fetch is a point sample
       if (DecodeNormalMap(nfc, &nm)) return 218;

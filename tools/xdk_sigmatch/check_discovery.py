@@ -164,6 +164,67 @@ def check_scene_frames(rows):
     return seen, problems
 
 
+VERTS_DATA_CAP = 64 << 10   # discovery_format.h, kMaxVertsDataBytes
+
+
+def check_verts_data(rows):
+    """(checked, problems) over the in-scene "verts" rows (BeginVertices draws: the far woods' impostors,
+    frame-map section 19). Each has a number "n", the whole vertex bank (1,024 floats), the device's shadow of
+    fetch slot 31 (six dwords) and exactly one "vertsdata" row of its frame and number, whose "want" is the
+    storage whole (storage_dwords * 4) and whose "bytes" are that many, read. A storage of no bytes has no data
+    row; one past the cap has none and is named. A capture from before the storage was kept (no in-scene row
+    with a number and no data row at all) is not checked. A row outside the scene has neither member."""
+    verts = [r for r in rows if r.get("kind") == "verts" and r.get("in_scene")]
+    data = {}
+    for r in rows:
+        if r.get("kind") == "vertsdata":
+            data.setdefault((r.get("frame"), r.get("n")), []).append(r)
+    if not data and not any("n" in r for r in verts):
+        return 0, []
+    checked, problems, owned = 0, [], set()
+    for r in verts:
+        where = "frame %s verts %s" % (r.get("frame"), r.get("n"))
+        if "n" not in r:
+            problems.append("frame %s: an in-scene verts row without a number" % r.get("frame"))
+            continue
+        checked += 1
+        key = (r.get("frame"), r.get("n"))
+        owned.add(key)
+        if len(r.get("bank") or []) != 1024:
+            problems.append("%s: the vertex bank is not whole (%d floats)" % (where, len(r.get("bank") or [])))
+        if len((r.get("vfetch") or {}).get("shadow") or []) != 6:
+            problems.append("%s: no shadow of the vertex fetch constant" % where)
+        got = data.get(key, [])
+        dwords = r.get("storage_dwords")
+        if dwords is None:
+            problems.append("%s: the device's storage fields were not read" % where)
+            continue
+        if dwords * 4 > VERTS_DATA_CAP:
+            problems.append("%s: the storage is %d bytes, over the cap: not kept" % (where, dwords * 4))
+            continue
+        if dwords == 0 and not got:
+            continue
+        if len(got) != 1:
+            problems.append("%s: %d data rows" % (where, len(got)))
+            continue
+        d = got[0]
+        if d.get("want") != dwords * 4:
+            problems.append("%s: the data row wants %s bytes of a storage of %d" % (where, d.get("want"), dwords * 4))
+        elif not d.get("read"):
+            problems.append("%s: the storage was not read" % where)
+        else:
+            text = d.get("bytes") or ""
+            try:
+                size = len(bytes.fromhex(text))
+            except ValueError:
+                size = -1
+            if size != d["want"]:
+                problems.append("%s: the data row has %s bytes of %d" % (where, "no hex for" if size < 0 else size, d["want"]))
+    for key in sorted(k for k in data if k not in owned):
+        problems.append("frame %s vertsdata %s: no verts row owns it" % key)
+    return checked, problems
+
+
 def read_rows(lines):
     """JSON rows; a partial last line (capture cut off by closing the game) is dropped."""
     lines = [l for l in lines if l.strip()]
@@ -202,9 +263,13 @@ def main(argv=None):
     with_mips, mip_problems = check_mip_files(rows, os.path.dirname(os.path.abspath(a.discovery)))
     if with_mips or mip_problems:
         print(f"{with_mips} texture rows name a mips file, {len(mip_problems)} problems")
-    for line in (file_problems + frame_problems + mip_problems)[:20]:
+    with_data, verts_problems = check_verts_data(rows)
+    if with_data or verts_problems:
+        print(f"{with_data} in-scene verts rows checked for their storage, {len(verts_problems)} problems")
+    for line in (file_problems + frame_problems + mip_problems + verts_problems)[:20]:
         print("  " + line)
-    return 0 if checked >= 20 and matched == checked and not file_problems and not frame_problems and not mip_problems else 1
+    return 0 if (checked >= 20 and matched == checked and not file_problems and not frame_problems and not mip_problems
+                 and not verts_problems) else 1
 
 
 if __name__ == "__main__":

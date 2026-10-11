@@ -154,6 +154,60 @@ class CheckDiscoveryTests(unittest.TestCase):
         frames[2]["scene_frame"] = 902
         self.assertEqual(cd.check_scene_frames(frames), (2, []))
 
+    def test_verts_rows_have_their_data(self):
+        verts = {"kind": "verts", "frame": 1, "n": 7, "in_scene": True, "count": 8, "storage_dwords": 8,
+                 "bank": [0.0] * 1024, "vfetch": {"shadow": ["0x00000000"] * 6, "packet": None}}
+        data = {"kind": "vertsdata", "frame": 1, "n": 7, "want": 32, "read": True, "bytes": "00" * 32}
+        self.assertEqual(cd.check_verts_data([verts, data]), (1, []))
+        short = dict(data, bytes="00" * 31)
+        self.assertEqual(len(cd.check_verts_data([verts, short])[1]), 1)       # fewer bytes than "want"
+        self.assertEqual(len(cd.check_verts_data([verts])[1]), 1)              # no data row
+        self.assertEqual(len(cd.check_verts_data([verts, data, data])[1]), 1)  # two data rows
+        self.assertEqual(len(cd.check_verts_data([verts, dict(data, want=16, bytes="00" * 16)])[1]), 1)   # not storage_dwords * 4
+        self.assertEqual(len(cd.check_verts_data([dict(verts, bank=[0.0] * 4), data])[1]), 1)             # the bank is not whole
+        unread = {"kind": "vertsdata", "frame": 1, "n": 7, "want": 32, "read": False}
+        self.assertEqual(cd.check_verts_data([verts, unread]), (1, ["frame 1 verts 7: the storage was not read"]))
+        outside = dict(verts, in_scene=False)
+        outside.pop("n")
+        self.assertEqual(cd.check_verts_data([outside]), (0, []))             # a row outside the scene has neither
+
+    def test_verts_data_more(self):
+        verts = {"kind": "verts", "frame": 1, "n": 7, "in_scene": True, "count": 8, "storage_dwords": 8,
+                 "bank": [0.0] * 1024, "vfetch": {"shadow": ["0x00000000"] * 6, "packet": None}}
+        data = {"kind": "vertsdata", "frame": 1, "n": 7, "want": 32, "read": True, "bytes": "00" * 32}
+        # A capture from before the storage was kept: no in-scene row has a number and no data row exists.
+        old = dict(verts)
+        old.pop("n")
+        self.assertEqual(cd.check_verts_data([old, old]), (0, []))
+        # But a numbered row beside an unnumbered one, or a data row no "verts" row owns, is a problem.
+        self.assertEqual(len(cd.check_verts_data([old, verts, data])[1]), 1)
+        self.assertEqual(len(cd.check_verts_data([verts, data, dict(data, n=8)])[1]), 1)
+        # The same number in another frame is another row.
+        self.assertEqual(len(cd.check_verts_data([verts, dict(data, frame=2)])[1]), 2)
+        # No fetch constant; a shadow that is not six dwords; bytes that are no hex.
+        self.assertEqual(len(cd.check_verts_data([{k: v for k, v in verts.items() if k != "vfetch"}, data])[1]), 1)
+        self.assertEqual(len(cd.check_verts_data([dict(verts, vfetch={"shadow": None, "packet": None}), data])[1]), 1)
+        self.assertEqual(len(cd.check_verts_data([verts, dict(data, bytes="0G" * 32)])[1]), 1)
+        # A storage past the cap has no data row and is said so; an empty one has none and is no problem.
+        big = dict(verts, storage_dwords=16385)
+        self.assertEqual(cd.check_verts_data([big]), (1, ["frame 1 verts 7: the storage is 65540 bytes, over the cap: not kept"]))
+        self.assertEqual(cd.check_verts_data([dict(verts, storage_dwords=0)]), (1, []))
+        # A row without the device's storage fields has no data row and is said so.
+        self.assertEqual(len(cd.check_verts_data([{k: v for k, v in verts.items() if k != "storage_dwords"}])[1]), 1)
+
+    def test_cli_fails_on_a_missing_verts_data_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "g.log").write_text(LOG)
+            rows = [draw() for _ in range(20)]
+            rows.append({"kind": "verts", "frame": 1, "n": 1, "in_scene": True, "count": 8, "storage_dwords": 8,
+                         "bank": [0.0] * 1024, "vfetch": {"shadow": ["0x00000000"] * 6, "packet": None}})
+            (d / "x.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+            self.assertEqual(cd.main([str(d / "x.jsonl"), str(d / "g.log")]), 1)
+            rows.append({"kind": "vertsdata", "frame": 1, "n": 1, "want": 32, "read": True, "bytes": "00" * 32})
+            (d / "x.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+            self.assertEqual(cd.main([str(d / "x.jsonl"), str(d / "g.log")]), 0)
+
     def test_cli_fails_on_a_missing_index_file(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)

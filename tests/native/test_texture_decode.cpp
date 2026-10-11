@@ -401,6 +401,51 @@ int main() {
     MakeFc(a, fc2);
     if (DumpKeyedByContent(fc2)) return 149;
   }
+  // --- Format 3 (k_1_5_5_5): the impostors' pictures in a discovery dump (plan Task 1) ---
+  {
+    TexFormatInfo fi;
+    if (!DumpFormatInfo(3, &fi) || fi.block != 1 || fi.bytes_per_block != 2 || fi.bpb_log2 != 1) return 150;
+    if (TexFormatFromXenos(3) != TexFormat::kUnsupported) return 151;   // spec ruling 14: no record's material changes
+    FcArgs a;
+    a.format = 3; a.w = 256; a.h = 256; a.pitch = 256; a.endian = 1; a.base = 0x12704000; a.mip = 0x12724000;
+    a.mip_max = 3; a.packed = false; a.clamp_x = 6; a.clamp_y = 6;
+    uint32_t p[6];
+    MakeFc(a, p);
+    if (BaseLevelDumpBytes(p) != 131072u) return 153;                   // whole: it was cut at 65,536 before
+    if (!DumpKeyedByContent(p)) return 154;                             // its memory holds another picture each frame
+    TextureFetch t;
+    if (DecodeTextureFetch(p, &t) != FetchError::kFormat) return 155;   // the texture cache still refuses it
+    TexFormatInfo dfi;
+    if (!DumpFetch(p, &t, &dfi) || t.width != 256 || t.height != 256 || t.base_phys != 0x12704000u ||
+        t.mip_phys != 0x12724000u || !t.tiled || t.endian != 1 || t.mip_max != 3 ||
+        t.format != TexFormat::kUnsupported || dfi.bytes_per_block != 2) return 156;
+    a.format = 4;                                                       // k_5_6_5: no layout, as before
+    MakeFc(a, p);
+    if (DumpFetch(p, &t, &dfi) || BaseLevelDumpBytes(p) != 0 || DumpKeyedByContent(p)) return 157;
+    a.format = 3; a.dim = 0;                                            // a 1D constant: no 2D layout
+    MakeFc(a, p);
+    if (DumpFetch(p, &t, &dfi)) return 158;
+    // DumpFetch reads a constant as DecodeTextureFetch does: every field equal for a format both take, and
+    // the same refusals (no texture, no base, a pitch below the width), with `out` untouched.
+    FcArgs b;
+    uint32_t q[6];
+    MakeFc(b, q);
+    TextureFetch d1, d2;
+    if (DecodeTextureFetch(q, &d1) != FetchError::kNone || !DumpFetch(q, &d2, &dfi) || dfi.bytes_per_block != 8) return 159;
+    if (d1.base_phys != d2.base_phys || d1.mip_phys != d2.mip_phys || d1.width != d2.width || d1.height != d2.height ||
+        d1.pitch_texels != d2.pitch_texels || d1.xenos_format != d2.xenos_format || d1.format != d2.format ||
+        d1.endian != d2.endian || d1.tiled != d2.tiled || d1.packed_mips != d2.packed_mips || d1.mip_min != d2.mip_min ||
+        d1.mip_max != d2.mip_max || std::memcmp(d1.swizzle, d2.swizzle, 4) != 0 || d1.clamp_x != d2.clamp_x ||
+        d1.clamp_y != d2.clamp_y || d1.linear_filter != d2.linear_filter) return 159;
+    TextureFetch keep;
+    keep.width = 77;
+    b = FcArgs{}; b.format = 3; b.type = 0; MakeFc(b, q);
+    if (DumpFetch(q, &keep, &dfi) || keep.width != 77) return 159;
+    b = FcArgs{}; b.format = 3; b.base = 0; MakeFc(b, q);
+    if (DumpFetch(q, &keep, &dfi) || keep.width != 77) return 159;
+    b = FcArgs{}; b.format = 3; b.pitch = 128; MakeFc(b, q);
+    if (DumpFetch(q, &keep, &dfi) || keep.width != 77) return 159;
+  }
   // --- k_DXN (format 49): two BC4 blocks per 4 x 4 block, the terrain's normal map (tf17) ---
   // The same blocks and numbers as test_decode_dxn of tests/test_terrain_replay.py.
   {

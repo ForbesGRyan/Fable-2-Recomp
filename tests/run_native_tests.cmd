@@ -106,4 +106,6 @@ clang++ -std=c++23 -fsanitize=float-cast-overflow -fsanitize-trap=float-cast-ove
 rem Instance constants that map no index must not reach a float-to-int cast here either (trap as above).
 clang++ -std=c++23 -fsanitize=float-cast-overflow -fsanitize-trap=float-cast-overflow "%~dp0native\test_normal_decode.cpp" -o "%OUT%\normal_decode.exe" || exit /b 1
 "%OUT%\normal_decode.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_impostor_picture.cpp" -o "%OUT%\impostor_picture.exe" || exit /b 1
+"%OUT%\impostor_picture.exe" || exit /b 1
 exit /b 0

@@ -18,6 +18,11 @@ channel 2.
   impostor_pictures.py mean <capture.jsonl> <frame>
       the mean of the texels with the alpha bit set over the pictures of the frame's impostor draws, in stored
       units 0 to 1: the texture's red, green, blue, and the same as the fetch's swizzle gives them
+  impostor_pictures.py levels <capture.jsonl>...
+      the fit of the native levels' rule (make_levels) to the levels the game stores: every rule of the family
+      against every picture of the captures' impostor draws (captures made under --readback_resolve=full)
+  impostor_pictures.py content <capture.jsonl>...
+      the content rule's two counts (content_stats) for every whole format-3 base of the captures, and its verdict
   impostor_pictures.py compare <bin> <fc>
       a dumped base level through decode_1555 against the C++ test's <bin>.cpp.rgba (FABLE2_1555_BIN /
       FABLE2_1555_FC of tests/native/test_texture_decode.cpp); <fc>: the six dwords as hex, comma-separated
@@ -347,6 +352,159 @@ def compare(bin_path, fcs):
     return 1
 
 
+# --- The native levels and the content rule (plan Task 13; frame-map section 19, "The pictures: levels and content")
+#
+# The game's read-back list brings a picture's base level to guest memory and not its three stored levels, so the
+# native view makes levels 1 to 3 itself (render::MakeImpostorLevels, src/native/render/impostor_picture.h). The
+# rule is one of a family, fitted to the levels the game stores (captures made under --readback_resolve=full):
+#   source  "above": a level from the level above it, as this rule made it; "base": from the base's 2^k x 2^k block
+#   colour  "all": each five-bit field the mean of all parents', a half rounded up; "covered": of the covered
+#           parents' alone (zero without one)
+#   count   a texel is covered when at least count of 4 parents are (from the base: that share of its block)
+LEVEL_SOURCES, LEVEL_COLOURS = ("above", "base"), ("all", "covered")
+LEVEL_RULE = ("above", "all", 3)      # as fitted to D1 and D2 (`levels`); kImpostorLevelAlphaCount is its count
+PICTURE_SIZE = 256
+RING_TEXELS = 4 * (PICTURE_SIZE - 1)
+# The content rule (`content`): of the base's outermost ring at least RING_CLEAR_MIN texels are clear, and the
+# covered texels lie in [COVER_MIN, COVER_MAX]. The native kImpostorRingClearMin, kImpostorCoverMin, kImpostorCoverMax.
+RING_CLEAR_MIN, COVER_MIN, COVER_MAX = 944, 1024, 25800
+
+
+def _reduce(fields, factor, colour, count):
+    """One level from `fields` by blocks of factor x factor parents."""
+    h, w = fields.shape[0] // factor, fields.shape[1] // factor
+    blocks = fields.reshape(h, factor, w, factor, 4).astype(np.int64)
+    parents = factor * factor
+    covered = blocks[..., 3].sum(axis=(1, 3))
+    out = np.zeros((h, w, 4), dtype=np.uint8)
+    if colour == "all":
+        total = blocks[..., :3].sum(axis=(1, 3))
+        out[..., :3] = (2 * total + parents) // (2 * parents)
+    else:
+        total = (blocks[..., :3] * blocks[..., 3:4]).sum(axis=(1, 3))
+        n = np.maximum(covered, 1)[..., None]
+        out[..., :3] = np.where(covered[..., None] > 0, (2 * total + n) // (2 * n), 0)
+    out[..., 3] = covered * 4 >= count * parents
+    return out
+
+
+def make_levels(base_fields, source=LEVEL_RULE[0], colour=LEVEL_RULE[1], count=LEVEL_RULE[2], levels=3):
+    """The lower levels of a picture from its base, each uint8 [y, x, 4] of fields as fields_1555 gives them
+    (three five-bit fields and the alpha bit): `levels` arrays of half, a quarter, ... of the base's edge.
+    ValueError for a rule outside the family or a base that is not a square of a power of two with that many
+    halvings."""
+    if source not in LEVEL_SOURCES or colour not in LEVEL_COLOURS or count not in (1, 2, 3, 4):
+        raise ValueError("no such rule: %r, %r, %r" % (source, colour, count))
+    edge = base_fields.shape[0]
+    if base_fields.ndim != 3 or base_fields.shape[1] != edge or base_fields.shape[2] != 4 or edge & (edge - 1) or edge >> levels < 1:
+        raise ValueError("no base for %d levels: shape %r" % (levels, base_fields.shape))
+    out, above = [], base_fields
+    for k in range(1, levels + 1):
+        level = _reduce(above, 2, colour, count) if source == "above" else _reduce(base_fields, 1 << k, colour, count)
+        out.append(level)
+        above = level
+    return out
+
+
+def content_stats(base_fields):
+    """(ring_clear, covered) of a 256 x 256 base: how many of the 1,020 texels of its outermost ring have the alpha
+    bit clear, and how many texels of the level have it set (render::MeasureImpostorPicture)."""
+    if base_fields.shape != (PICTURE_SIZE, PICTURE_SIZE, 4):
+        raise ValueError("not a base level: shape %r" % (base_fields.shape,))
+    a = base_fields[..., 3] != 0
+    ring = np.zeros(a.shape, dtype=bool)
+    ring[0, :] = ring[-1, :] = ring[:, 0] = ring[:, -1] = True
+    return int((ring & ~a).sum()), int(a.sum())
+
+
+def picture_usable(ring_clear, covered):
+    """render::ImpostorPictureUsable: a clear ring and a covered middle of a tree's size."""
+    return ring_clear >= RING_CLEAR_MIN and COVER_MIN <= covered <= COVER_MAX
+
+
+def _frame_bases(capture, frames=None):
+    """[(frame, texture row)] of the pictures of a capture's impostor draws, for every frame row (or `frames`)."""
+    capture = Path(capture)
+    rows = read_rows(capture)
+    numbers = frames or sorted({r.get("frame") for r in rows if r.get("kind") == "verts" and r.get("in_scene")
+                                and IMPOSTOR_VS in str((r.get("vs") or {}).get("hash", "")).upper()})
+    return capture, rows, [(n, t) for n in numbers for _, t in frame_pictures(rows, n) if t is not None]
+
+
+def levels_cli(captures, out=sys.stdout):
+    """The fit: every rule of the family against the stored levels of the captures' pictures. Per rule and level
+    the share of texels whose alpha bit is the rule's, and of the texels the game's level covers the share whose
+    three fields are within 2 (of 31) of the rule's; the worst picture of each. Criterion 5: 97% and 95%."""
+    pictures = []
+    for capture in captures:
+        capture, _, bases = _frame_bases(capture)
+        for frame, t in bases:
+            try:
+                base = _level_fields(capture.parent, t, 0)[0]
+                stored = [_level_fields(capture.parent, t, k)[0] for k in (1, 2, 3)]
+            except ValueError as e:
+                print("%s frame %s %s: left out: %s" % (capture.stem, frame, t.get("file"), e), file=out)
+                continue
+            pictures.append((capture.stem[-6:], frame, t["file"].split("/")[-1][:8], base, stored))
+    print("%d pictures with a base and three stored levels, of %s" % (len(pictures), ", ".join(Path(c).stem[-6:] for c in captures)), file=out)
+    if not pictures:
+        return 1
+    results = []
+    for source in LEVEL_SOURCES:
+        for colour in LEVEL_COLOURS:
+            for count in (1, 2, 3, 4):
+                alpha_ok, alpha_n, col_ok, col_n = np.zeros(3), np.zeros(3), np.zeros(3), np.zeros(3)
+                worst_a, worst_c = [1.0] * 3, [1.0] * 3
+                for _, _, _, base, stored in pictures:
+                    made = make_levels(base, source, colour, count)
+                    for k in range(3):
+                        same = made[k][..., 3] == stored[k][..., 3]
+                        on = stored[k][..., 3] == 1
+                        near = (np.abs(made[k][..., :3].astype(np.int16) - stored[k][..., :3].astype(np.int16)) <= 2).all(axis=-1)
+                        alpha_ok[k] += same.sum(); alpha_n[k] += same.size
+                        col_ok[k] += (near & on).sum(); col_n[k] += on.sum()
+                        worst_a[k] = min(worst_a[k], float(same.mean()))
+                        if on.any():
+                            worst_c[k] = min(worst_c[k], float((near & on).sum()) / float(on.sum()))
+                results.append((source, colour, count, alpha_ok / alpha_n, col_ok / np.maximum(col_n, 1), worst_a, worst_c))
+    print("rule (source, colour, count): alpha equal at levels 1, 2, 3 (worst picture) | colour within 2 on the game's covered texels (worst picture)", file=out)
+    for source, colour, count, a, c, wa, wc in results:
+        mark = "  <- LEVEL_RULE" if (source, colour, count) == LEVEL_RULE else ""
+        print("  %-5s %-7s %d: alpha %s (%s) | colour %s (%s)%s" % (
+            source, colour, count, " ".join("%.4f" % v for v in a), " ".join("%.4f" % v for v in wa),
+            " ".join("%.4f" % v for v in c), " ".join("%.4f" % v for v in wc), mark), file=out)
+    best = max(results, key=lambda r: (float(min(r[3])) + float(min(r[4])), float(r[3].sum() + r[4].sum())))
+    print("best by the lower of its figures: %s %s %d" % best[:3], file=out)
+    fitted = next(r for r in results if r[:3] == LEVEL_RULE)
+    met = bool((fitted[3] >= 0.97).all() and (fitted[4] >= 0.95).all())
+    print("criterion 5 for LEVEL_RULE %r (alpha 97%% of the texels of each level, colour 95%% of the covered ones): %s" % (
+        LEVEL_RULE, "met" if met else "not met as written"), file=out)
+    return 0 if best[:3] == LEVEL_RULE else 1
+
+
+def content_cli(captures, out=sys.stdout):
+    """The content rule's two counts for every format-3 base of the captures (whole dumps only), and what the rule
+    says of each."""
+    used = refused = 0
+    for capture in captures:
+        capture = Path(capture)
+        rows = read_rows(capture)
+        for t in format3_rows(rows):
+            try:
+                base = _level_fields(capture.parent, t, 0)[0]
+            except ValueError as e:
+                print("%s %s: not whole: %s" % (capture.stem[-6:], t["file"].split("/")[-1], e), file=out)
+                continue
+            ring, covered = content_stats(base)
+            ok = picture_usable(ring, covered)
+            used += ok
+            refused += not ok
+            print("%s %-48s ring clear %4d of %d, covered %5d (%.3f): %s" % (
+                capture.stem[-6:], t["file"].split("/")[-1], ring, RING_TEXELS, covered, covered / 65536.0, "usable" if ok else "REFUSED"), file=out)
+    print("usable %d, refused %d; the rule: ring clear >= %d and %d <= covered <= %d" % (used, refused, RING_CLEAR_MIN, COVER_MIN, COVER_MAX), file=out)
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -360,7 +518,15 @@ def main(argv=None):
     c = sub.add_parser("compare")
     c.add_argument("bin")
     c.add_argument("fc")
+    lv = sub.add_parser("levels")
+    lv.add_argument("captures", nargs="+")
+    ct = sub.add_parser("content")
+    ct.add_argument("captures", nargs="+")
     a = ap.parse_args(argv)
+    if a.cmd == "levels":
+        return levels_cli(a.captures)
+    if a.cmd == "content":
+        return content_cli(a.captures)
     if a.cmd == "sheet":
         return sheet(a.capture, a.frame, a.out)
     if a.cmd == "mean":

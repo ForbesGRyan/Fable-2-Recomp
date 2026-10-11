@@ -291,5 +291,142 @@ class FlatColour(unittest.TestCase):
             self.assertAlmostEqual(got, want, delta=5e-7)
 
 
+def made_base():
+    """An 8 x 8 base of fields (field 0 alone carries numbers; fields 1 and 2 are field 0 + 1 and 31 - field 0).
+    Its 2 x 2 blocks, as (alpha of the four parents; field 0 of the four), parents in the order (0,0) (1,0) (0,1) (1,1):
+      A (0,0): 1 1 0 0;  10 20 30  4      B (1,0): 1 1 0 0;   1  2  2  2
+      C (0,1): 1 1 0 0;   1  1  1  2      D (1,1): 1 0 0 0;   8  0  0  0
+      E (2,0): 1 1 1 1;   1  1  2  2      F (3,0): 1 1 1 0;  31 31 31  0
+      the lower half (rows 4 to 7): alpha 0, field 0 = 0."""
+    f = np.zeros((8, 8, 4), dtype=np.uint8)
+    f[..., 1] = 1
+    f[..., 2] = 31
+    blocks = {(0, 0): ((1, 1, 0, 0), (10, 20, 30, 4)), (1, 0): ((1, 1, 0, 0), (1, 2, 2, 2)), (0, 1): ((1, 1, 0, 0), (1, 1, 1, 2)),
+              (1, 1): ((1, 0, 0, 0), (8, 0, 0, 0)), (2, 0): ((1, 1, 1, 1), (1, 1, 2, 2)), (3, 0): ((1, 1, 1, 0), (31, 31, 31, 0))}
+    for (bx, by), (alpha, value) in blocks.items():
+        for k, (dx, dy) in enumerate(((0, 0), (1, 0), (0, 1), (1, 1))):
+            f[by * 2 + dy, bx * 2 + dx] = (value[k], min(31, value[k] + 1), 31 - value[k], alpha[k])
+    return f
+
+
+class Levels(unittest.TestCase):
+    """make_levels, the Python twin of render::MakeImpostorLevels (plan Task 13), each rule of the fitted family on
+    made_base() against numbers worked by hand."""
+
+    def test_sizes_and_the_refusals(self):
+        levels = ip.make_levels(made_base(), levels=3)
+        self.assertEqual([l.shape for l in levels], [(4, 4, 4), (2, 2, 4), (1, 1, 4)])
+        with self.assertRaises(ValueError):
+            ip.make_levels(made_base(), source="sideways")
+        with self.assertRaises(ValueError):
+            ip.make_levels(made_base(), colour="none")
+        with self.assertRaises(ValueError):
+            ip.make_levels(made_base(), count=5)
+        with self.assertRaises(ValueError):
+            ip.make_levels(np.zeros((6, 8, 4), dtype=np.uint8))          # not a power of two square
+
+    def test_the_colour_of_all_four_parents(self):
+        l1 = ip.make_levels(made_base(), source="above", colour="all", count=2)[0]
+        # A: (10 + 20 + 30 + 4) / 4 = 16; B: 7 / 4 = 1.75 -> 2; C: 5 / 4 = 1.25 -> 1; D: 8 / 4 = 2; E: 6 / 4 = 1.5 -> 2
+        # (a half goes up); F: 93 / 4 = 23.25 -> 23
+        self.assertEqual([int(l1[0, 0, 0]), int(l1[0, 1, 0]), int(l1[1, 0, 0]), int(l1[1, 1, 0]), int(l1[0, 2, 0]), int(l1[0, 3, 0])],
+                         [16, 2, 1, 2, 2, 23])
+        self.assertEqual(int(l1[0, 0, 1]), 17)       # field 1 of A: (11 + 21 + 31 + 5) / 4 = 17
+        self.assertEqual(int(l1[0, 0, 2]), 15)       # field 2 of A: (21 + 11 + 1 + 27) / 4 = 15
+
+    def test_the_colour_of_the_covered_parents_alone(self):
+        l1 = ip.make_levels(made_base(), source="above", colour="covered", count=1)[0]
+        # A: (10 + 20) / 2 = 15; B: 3 / 2 = 1.5 -> 2; C: 2 / 2 = 1; D: 8; E: 6 / 4 -> 2; F: 93 / 3 = 31
+        self.assertEqual([int(l1[0, 0, 0]), int(l1[0, 1, 0]), int(l1[1, 0, 0]), int(l1[1, 1, 0]), int(l1[0, 2, 0]), int(l1[0, 3, 0])],
+                         [15, 2, 1, 8, 2, 31])
+        self.assertEqual([int(v) for v in l1[3, 3]], [0, 0, 0, 0])        # no covered parent: zero
+
+    def test_the_alpha_at_each_count(self):
+        # covered parents: A 2, B 2, C 2, D 1, E 4, F 3, the lower half 0
+        want = {1: [1, 1, 1, 1, 1, 1], 2: [1, 1, 1, 0, 1, 1], 3: [0, 0, 0, 0, 1, 1], 4: [0, 0, 0, 0, 1, 0]}
+        for count, alphas in want.items():
+            l1 = ip.make_levels(made_base(), count=count)[0]
+            got = [int(l1[0, 0, 3]), int(l1[0, 1, 3]), int(l1[1, 0, 3]), int(l1[1, 1, 3]), int(l1[0, 2, 3]), int(l1[0, 3, 3])]
+            self.assertEqual(got, alphas, count)
+            self.assertEqual(int(l1[2:, :, 3].sum()), 0)
+
+    def test_a_level_from_the_level_above_or_from_the_base(self):
+        # level 2's texel (0, 0) covers A, B, C, D: seven covered base texels of sixteen. From the level above at
+        # count 2: three of its four parents are covered -> covered. From the base: 7 of 16 is below 2 of 4 -> not.
+        above = ip.make_levels(made_base(), source="above", colour="all", count=2)
+        base = ip.make_levels(made_base(), source="base", colour="all", count=2)
+        self.assertEqual((int(above[1][0, 0, 3]), int(base[1][0, 0, 3])), (1, 0))
+        # its colour: from the level above the mean of 16, 2, 1, 2 = 5.25 -> 5; from the base 84 / 16 = 5.25 -> 5;
+        # texel (1, 0) covers E, F and two empty blocks: above (2 + 23 + 0 + 0) / 4 = 6.25 -> 6, base 99 / 16 = 6.19 -> 6
+        self.assertEqual((int(above[1][0, 0, 0]), int(base[1][0, 0, 0])), (5, 5))
+        self.assertEqual((int(above[1][0, 1, 0]), int(base[1][0, 1, 0])), (6, 6))
+        # E and F: 7 covered of 16 from the base (not covered at 2); above: both covered of four parents -> covered
+        self.assertEqual((int(above[1][0, 1, 3]), int(base[1][0, 1, 3])), (1, 0))
+        # level 3, the one texel: above 2 of 4 parents covered -> covered; base 14 of 64 -> not, nor at count 1 (below a quarter)
+        self.assertEqual((int(above[2][0, 0, 3]), int(base[2][0, 0, 3])), (1, 0))
+        self.assertEqual(int(ip.make_levels(made_base(), source="base", count=1)[2][0, 0, 3]), 0)
+        self.assertEqual(int(above[1][1, 0, 3]) + int(above[1][1, 1, 3]), 0)
+
+    def test_the_fitted_rule_is_the_default(self):
+        fitted = ip.make_levels(made_base())
+        named = ip.make_levels(made_base(), source=ip.LEVEL_RULE[0], colour=ip.LEVEL_RULE[1], count=ip.LEVEL_RULE[2])
+        for a, b in zip(fitted, named):
+            self.assertTrue(np.array_equal(a, b))
+
+    def test_the_native_constants_are_the_tool_s(self):
+        import re
+        text = (ROOT / "src" / "native" / "render" / "impostor_picture.h").read_text(encoding="utf-8")
+        got = {}
+        for name in ("kImpostorLevelAlphaCount", "kImpostorRingClearMin", "kImpostorCoverMin", "kImpostorCoverMax"):
+            m = re.search(name + r" = (\d+)[;,]", text)
+            self.assertIsNotNone(m, name)
+            got[name] = int(m.group(1))
+        self.assertEqual(got, {"kImpostorLevelAlphaCount": ip.LEVEL_RULE[2], "kImpostorRingClearMin": ip.RING_CLEAR_MIN,
+                               "kImpostorCoverMin": ip.COVER_MIN, "kImpostorCoverMax": ip.COVER_MAX})
+
+
+class Content(unittest.TestCase):
+    """content_stats and picture_usable, the twins of render::MeasureImpostorPicture and ImpostorPictureUsable."""
+
+    def test_the_counts_of_a_made_picture(self):
+        f = np.zeros((256, 256, 4), dtype=np.uint8)
+        self.assertEqual(ip.content_stats(f), (1020, 0))
+        f[..., 3] = 1
+        self.assertEqual(ip.content_stats(f), (0, 65536))
+        f[0, 0, 3] = f[0, 255, 3] = f[255, 0, 3] = f[100, 255, 3] = f[100, 100, 3] = 0   # four on the ring, one inside
+        self.assertEqual(ip.content_stats(f), (4, 65531))
+        with self.assertRaises(ValueError):
+            ip.content_stats(np.zeros((128, 128, 4), dtype=np.uint8))
+
+    def test_usable(self):
+        self.assertFalse(ip.picture_usable(1020, 0))                                   # empty
+        self.assertFalse(ip.picture_usable(0, 65536))                                  # covered to its edge
+        self.assertTrue(ip.picture_usable(1020, (ip.COVER_MIN + ip.COVER_MAX) // 2))
+        self.assertFalse(ip.picture_usable(1020, ip.COVER_MAX + 1))
+        self.assertFalse(ip.picture_usable(1020, ip.COVER_MIN - 1))
+        self.assertFalse(ip.picture_usable(ip.RING_CLEAR_MIN - 1, ip.COVER_MIN))
+        self.assertTrue(ip.picture_usable(ip.RING_CLEAR_MIN, ip.COVER_MIN))
+        self.assertTrue(ip.picture_usable(ip.RING_CLEAR_MIN, ip.COVER_MAX))
+
+
+class RealLevels(unittest.TestCase):
+    """render::MakeImpostorLevels and MeasureImpostorPicture against the Python twins on a real dumped base."""
+
+    def test_real_dump_levels_match_cpp(self):
+        """FABLE2_1555_BIN and FABLE2_1555_FC as the decoder's real-dump test, and the output of
+        tests/native/test_impostor_picture.cpp's tool mode (<bin>.cpp.levels, <bin>.cpp.stats); SKIPS (never passes
+        silently) when any is missing."""
+        bin_path, fcs = os.environ.get("FABLE2_1555_BIN"), os.environ.get("FABLE2_1555_FC")
+        if not bin_path or not fcs or not Path(bin_path + ".cpp.levels").is_file() or not Path(bin_path + ".cpp.stats").is_file():
+            self.skipTest("no made levels: set FABLE2_1555_BIN and FABLE2_1555_FC and run the two native tests first")
+        f = ip.fetch([int(v, 16) for v in fcs.split(",")])
+        fields = ip.fields_1555(Path(bin_path).read_bytes(), f["width"], f["height"], f["pitch"], f["tiled"], f["endian"])
+        mine = b"".join(ip._rgba(level, ip.LOW_FIELD_CHANNEL).tobytes() for level in ip.make_levels(fields))
+        self.assertEqual(len(mine), (128 * 128 + 64 * 64 + 32 * 32) * 4)
+        self.assertEqual(mine, Path(bin_path + ".cpp.levels").read_bytes())
+        ring, covered = ip.content_stats(fields)
+        self.assertEqual(Path(bin_path + ".cpp.stats").read_text().split(), [str(ring), str(covered), "1" if ip.picture_usable(ring, covered) else "0"])
+
+
 if __name__ == "__main__":
     unittest.main()

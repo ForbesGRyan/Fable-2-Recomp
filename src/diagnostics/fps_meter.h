@@ -129,7 +129,8 @@ struct CpWindows {
   diagnostics::WindowStats busy_ms{300}, wait_reg_ms{300}, idle_ms{300}, present_ms{300},
       draws{300}, draw_cpu_ms{300}, copies{300}, copy_cpu_ms{300}, interval_ms{300},
       submissions{300}, submit_ms{300}, fence_waits{300}, fence_ms{300}, tile_mappings{300},
-      kicks{300}, tiles{300}, pred_draws{300}, pred_skips{300}, bin_selects{300};
+      kicks{300}, tiles{300}, pred_draws{300}, pred_skips{300}, bin_selects{300},
+      gpu_busy_ms{300}, gpu_timed{300};
   uint64_t last_gpu_frame = 0;
   bool acquired = false;
 };
@@ -167,6 +168,8 @@ inline void sample_cp() {
   c.pred_draws.Add(double(gpu.predicated_draws));
   c.pred_skips.Add(double(gpu.predicated_skips));
   c.bin_selects.Add(double(gpu.bin_select_writes));
+  c.gpu_busy_ms.Add(double(gpu.gpu_busy_ns) / 1e6);
+  c.gpu_timed.Add(double(gpu.gpu_timed_submissions));
 }
 
 inline void poll() {
@@ -200,6 +203,13 @@ inline void poll() {
           "[frame] cp tiling: tiles median {:.0f}, bin selects median {:.0f}, predicated draws "
           "median {:.0f}, predicated packets skipped median {:.0f}",
           c.tiles.Median(), c.bin_selects.Median(), c.pred_draws.Median(), c.pred_skips.Median());
+      if (c.gpu_timed.Max() > 0) {
+        REXSYS_INFO(
+            "[frame] gpu: busy median {:.2f} ms (p90 {:.2f}, max {:.2f}) over {:.0f} timed "
+            "submissions a frame (worker timestamps; the result lands a frame or two late)",
+            c.gpu_busy_ms.Median(), c.gpu_busy_ms.Percentile(0.9), c.gpu_busy_ms.Max(),
+            c.gpu_timed.Median());
+      }
     }
     c.busy_ms.Reset();
     c.wait_reg_ms.Reset();
@@ -220,6 +230,8 @@ inline void poll() {
     c.pred_draws.Reset();
     c.pred_skips.Reset();
     c.bin_selects.Reset();
+    c.gpu_busy_ms.Reset();
+    c.gpu_timed.Reset();
   }
   w.frame_ms.Reset();
   w.work_ms.Reset();

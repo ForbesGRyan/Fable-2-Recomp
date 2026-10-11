@@ -1,8 +1,8 @@
 diff --git a/include/rex/graphics/emulated_frame_stats.h b/include/rex/graphics/emulated_frame_stats.h
-index 9a538ea..e8a3406 100644
+index 9a538ea..4ad1f6b 100644
 --- a/include/rex/graphics/emulated_frame_stats.h
 +++ b/include/rex/graphics/emulated_frame_stats.h
-@@ -26,6 +26,15 @@ struct EmulatedFrameStats {
+@@ -26,6 +26,19 @@ struct EmulatedFrameStats {
    uint64_t cp_idle_ns = 0;
    // Time blocked in IssueSwap (present); lands in the next closed frame.
    uint64_t cp_present_ns = 0;
@@ -15,10 +15,14 @@ index 9a538ea..e8a3406 100644
 +  uint64_t fence_wait_ns = 0;
 +  uint32_t tile_mappings = 0;
 +  uint32_t primary_buffer_ends = 0;
++  // GPU execution time of the submissions whose timestamps were read this
++  // frame (async submit worker only; a frame or two late).
++  uint64_t gpu_busy_ns = 0;
++  uint32_t gpu_timed_submissions = 0;
    // Predicated tiling: SET_BIN_SELECT* packets, distinct non-zero bin selects
    // (= tiles, saturating at kMaxTiles), predicated draw packets that executed,
    // and predicated packets of any kind skipped by the bin check.
-@@ -90,6 +99,17 @@ class EmulatedFrameAccumulator {
+@@ -90,6 +103,21 @@ class EmulatedFrameAccumulator {
      current_.copy_cpu_ns += cpu_ns;
    }
  
@@ -31,16 +35,20 @@ index 9a538ea..e8a3406 100644
 +    current_.fence_wait_ns += ns;
 +  }
 +  void AddTileMapping() { ++current_.tile_mappings; }
++  void AddGpuTime(uint64_t ns) {
++    current_.gpu_busy_ns += ns;
++    ++current_.gpu_timed_submissions;
++  }
 +  void AddPrimaryBufferEnd() { ++current_.primary_buffer_ends; }
 +
    void AddCpTime(uint64_t busy_ns, uint64_t wait_reg_ns, uint64_t idle_ns, uint64_t present_ns) {
      current_.cp_present_ns += present_ns;
      current_.cp_busy_ns += busy_ns;
 diff --git a/include/rex/graphics/native_guest_renderer.h b/include/rex/graphics/native_guest_renderer.h
-index f8c1669..92c8e3e 100644
+index f8c1669..6c8f393 100644
 --- a/include/rex/graphics/native_guest_renderer.h
 +++ b/include/rex/graphics/native_guest_renderer.h
-@@ -122,6 +122,13 @@ void NoteEmulatedCopy(uint64_t cpu_ns);
+@@ -122,6 +122,14 @@ void NoteEmulatedCopy(uint64_t cpu_ns);
  void NoteEmulatedSwap(uint64_t now_ns);
  void NoteCommandProcessorTime(uint64_t busy_ns, uint64_t wait_reg_ns, uint64_t idle_ns,
                               uint64_t present_ns);
@@ -50,6 +58,7 @@ index f8c1669..92c8e3e 100644
 +void NoteEmulatedSubmission(uint64_t cpu_ns);
 +void NoteEmulatedFenceWait(uint64_t blocked_ns);
 +void NoteEmulatedTileMapping();
++void NoteEmulatedGpuTime(uint64_t gpu_ns);
 +void NoteEmulatedPrimaryBufferEnd();
  // Refcounted collection request (e.g. the F3 overlay); coexists with the cvar.
  void AcquireEmulatedFrameStats();
@@ -70,7 +79,7 @@ index 01daca6..827b4d6 100644
  #include <cstring>
  #include <functional>
 diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
-index e8f9d8b..6228696 100644
+index e8f9d8b..adb2184 100644
 --- a/include/rex/graphics/d3d12/command_processor.h
 +++ b/include/rex/graphics/d3d12/command_processor.h
 @@ -14,7 +14,10 @@
@@ -84,7 +93,18 @@ index e8f9d8b..6228696 100644
  #include <memory>
  #include <optional>
  #include <string>
-@@ -460,6 +463,35 @@ class D3D12CommandProcessor : public CommandProcessor {
+@@ -381,6 +384,10 @@ class D3D12CommandProcessor : public CommandProcessor {
+     uint32_t written_size[2] = {0, 0};
+     uint32_t current_index = 0;
+     uint64_t last_used_frame = 0;
++    // Forced resolve read-backs: the first resolve of a key is read back
++    // synchronously (the guest reads the texture right after it: the dog's face
++    // is resolved once), later ones the delayed way.
++    bool forced_sync_done = false;
+   };
+   void EvictOldReadbackBuffers(std::unordered_map<uint64_t, ReadbackBuffer>& buffer_map);
+   static constexpr uint32_t kReadbackBufferSizeIncrement = 16 * 1024 * 1024;
+@@ -460,6 +467,67 @@ class D3D12CommandProcessor : public CommandProcessor {
    ID3D12GraphicsCommandList1* command_list_1_ = nullptr;
    DeferredCommandList deferred_command_list_;
  
@@ -103,6 +123,37 @@ index e8f9d8b..6228696 100644
 +    uint64_t fence_value = 0;
 +    bool collect_stats = false;
 +  };
++  // Forced resolve read-backs taken the delayed way (readback_resolve_force_delayed):
++  // the copy to guest memory happens once the submission that filled the
++  // read-back buffer has completed, checked at the start of each frame, so a
++  // resolve that happens once (the dog's face) still reaches the guest.
++  struct PendingForcedReadback {
++    uint64_t resolve_key;
++    uint32_t buffer_index;
++    uint32_t address;
++    uint32_t length;
++    uint64_t submission;
++  };
++  std::vector<PendingForcedReadback> pending_forced_readbacks_;
++  void CompletePendingForcedReadbacks(bool wait);
++
++  // GPU timestamps around each worker submission (stats only): a query heap of
++  // kGpuTimestampSlots pairs, resolved into a persistently mapped read-back
++  // buffer, read once the submission's fence has passed.
++  static constexpr uint32_t kGpuTimestampSlots = 64;
++  ID3D12QueryHeap* gpu_timestamp_heap_ = nullptr;
++  ID3D12Resource* gpu_timestamp_readback_ = nullptr;
++  const uint64_t* gpu_timestamp_mapped_ = nullptr;
++  uint64_t gpu_timestamp_frequency_ = 0;
++  uint32_t gpu_timestamp_next_slot_ = 0;
++  struct PendingGpuTimestamp {
++    uint32_t slot;
++    uint64_t fence_value;
++  };
++  std::deque<PendingGpuTimestamp> pending_gpu_timestamps_;
++  bool InitializeGpuTimestamps();
++  void ReadCompletedGpuTimestamps();
++
 +  bool async_submit_enabled_ = false;
 +  std::thread async_submit_thread_;
 +  std::mutex async_submit_mutex_;
@@ -110,6 +161,7 @@ index e8f9d8b..6228696 100644
 +  std::condition_variable async_submit_done_cv_;
 +  std::deque<AsyncSubmission> async_submit_queue_;
 +  bool async_submit_running_ = false;
++  bool async_submit_flush_requested_ = false;  // execute what is recorded now
 +  uint64_t async_submissions_enqueued_ = 0;   // fence value of the last hand-over
 +  uint64_t async_submissions_executed_ = 0;   // fence value of the last executed one
 +  void AsyncSubmitThreadMain();
@@ -139,10 +191,10 @@ index 7f1eb7f..68277b7 100644
    D3D12_RECT* ClearDepthStencilViewAllocatedRects(D3D12_CPU_DESCRIPTOR_HANDLE depth_stencil_view,
                                                    D3D12_CLEAR_FLAGS clear_flags, FLOAT depth,
 diff --git a/src/graphics/native_guest_renderer.cpp b/src/graphics/native_guest_renderer.cpp
-index 7d053e7..9852ded 100644
+index 7d053e7..5618b58 100644
 --- a/src/graphics/native_guest_renderer.cpp
 +++ b/src/graphics/native_guest_renderer.cpp
-@@ -199,6 +199,26 @@ void NoteEmulatedPredicatedPacket(bool executed, bool is_draw) {
+@@ -199,6 +199,31 @@ void NoteEmulatedPredicatedPacket(bool executed, bool is_draw) {
    g_stats_acc.AddPredicatedPacket(executed, is_draw);
  }
  
@@ -159,6 +211,11 @@ index 7d053e7..9852ded 100644
 +void NoteEmulatedTileMapping() {
 +  std::lock_guard<std::mutex> lock(g_stats_mutex);
 +  g_stats_acc.AddTileMapping();
++}
++
++void NoteEmulatedGpuTime(uint64_t gpu_ns) {
++  std::lock_guard<std::mutex> lock(g_stats_mutex);
++  g_stats_acc.AddGpuTime(gpu_ns);
 +}
 +
 +void NoteEmulatedPrimaryBufferEnd() {
@@ -210,10 +267,10 @@ index dc60cf6..fbfae10 100644
    // Scratch register writeback.
    if (index >= XE_GPU_REG_SCRATCH_REG0 && index <= XE_GPU_REG_SCRATCH_REG7) {
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
-index 4d4848b..ddf0eb0 100644
+index 4d4848b..03b8ec5 100644
 --- a/src/graphics/d3d12/command_processor.cpp
 +++ b/src/graphics/d3d12/command_processor.cpp
-@@ -59,6 +59,20 @@ REXCVAR_DEFINE_BOOL(d3d12_submit_on_primary_buffer_end, true, "GPU/D3D12",
+@@ -59,6 +59,33 @@ REXCVAR_DEFINE_BOOL(d3d12_submit_on_primary_buffer_end, true, "GPU/D3D12",
                      "Submit command list when PM4 primary buffer ends")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
@@ -231,10 +288,23 @@ index 4d4848b..ddf0eb0 100644
 +                      "submission.")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +
++REXCVAR_DEFINE_BOOL(d3d12_async_submit_flush_queries, true, "GPU/D3D12",
++                    "With d3d12_async_submit: flush the worker when the guest reads an occlusion "
++                    "query result (false: the result is reported not ready until the worker has "
++                    "executed the submission on its own, a frame later).")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_BOOL(d3d12_async_submit_on_flush, false, "GPU/D3D12",
++                    "With d3d12_async_submit: the worker records arriving submissions into one "
++                    "open command list as they come and calls ExecuteCommandLists only when the "
++                    "GPU-emulation thread flushes (the swap, a fence wait) or the coalesce "
++                    "count is reached: about one call per frame.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
  namespace rex::graphics::d3d12 {
  
  // Generated with `xb buildshaders`.
-@@ -909,6 +923,7 @@ bool D3D12CommandProcessor::SetupContext() {
+@@ -909,6 +936,7 @@ bool D3D12CommandProcessor::SetupContext() {
      REXGPU_ERROR("Failed to create the fence completion event");
      return false;
    }
@@ -242,15 +312,22 @@ index 4d4848b..ddf0eb0 100644
    if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&submission_fence_)))) {
      REXGPU_ERROR("Failed to create the submission fence");
      return false;
-@@ -1666,6 +1681,7 @@ bool D3D12CommandProcessor::SetupContext() {
+@@ -1666,6 +1694,14 @@ bool D3D12CommandProcessor::SetupContext() {
  
  void D3D12CommandProcessor::ShutdownContext() {
    AwaitAllQueueOperationsCompletion();
 +  StopAsyncSubmitThread();
++  pending_gpu_timestamps_.clear();
++  if (gpu_timestamp_readback_) {
++    gpu_timestamp_readback_->Unmap(0, nullptr);
++    gpu_timestamp_mapped_ = nullptr;
++  }
++  ui::d3d12::util::ReleaseAndNull(gpu_timestamp_readback_);
++  ui::d3d12::util::ReleaseAndNull(gpu_timestamp_heap_);
    if (native_rhi_device_ != nullptr) {
      DestroyNativeRhiDevice(native_rhi_device_);
      native_rhi_device_ = nullptr;
-@@ -2120,6 +2136,7 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -2120,6 +2156,7 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
            if (TryRenderNativeGuestOutput(native_context)) {
              SubmitBarriers();
              EndSubmission(true);
@@ -258,7 +335,7 @@ index 4d4848b..ddf0eb0 100644
              return true;
            }
          }
-@@ -2348,6 +2365,7 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -2348,6 +2385,7 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
          // queue.
          SubmitBarriers();
          EndSubmission(true);
@@ -266,7 +343,7 @@ index 4d4848b..ddf0eb0 100644
          return true;
        });
  
-@@ -2357,6 +2375,9 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -2357,6 +2395,9 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
  }
  
  void D3D12CommandProcessor::OnPrimaryBufferEnd() {
@@ -276,7 +353,7 @@ index 4d4848b..ddf0eb0 100644
    if (REXCVAR_GET(d3d12_submit_on_primary_buffer_end) && submission_open_ &&
        CanEndSubmissionImmediately()) {
      EndSubmission(false);
-@@ -3038,7 +3059,9 @@ bool D3D12CommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_s
+@@ -3038,7 +3079,9 @@ bool D3D12CommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_s
                               readback.submission_written[read_index] &&
                               readback.submission_written[read_index] <= submission_completed_;
    if (!previous_slot_ready) {
@@ -287,18 +364,52 @@ index 4d4848b..ddf0eb0 100644
      readback.current_index = read_index;
      return true;
    }
-@@ -3261,7 +3284,9 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -3260,6 +3303,44 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
+   }
  
    ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(d3d12_readback_resolve));
++  if (readback_mode == ReadbackResolveMode::kDisabled &&
++      REXCVAR_GET(readback_resolve_force_delayed) && rb.forced_sync_done) {
++    // Forced read-back, delayed: end the submission so the copy is queued, remember
++    // it, and copy it to guest memory once its fence has passed (next frames).
++    // The buffer slot alternates, so a slot is reused only after the copy of the
++    // resolve two back, which CompletePendingForcedReadbacks forces if needed.
++    if (submission_open_) {
++      EndSubmission(false);
++    }
++    for (PendingForcedReadback& pending : pending_forced_readbacks_) {
++      if (pending.resolve_key == resolve_key && pending.buffer_index == write_index) {
++        // The same slot is being overwritten before its copy: complete it now.
++        CheckSubmissionFence(pending.submission);
++        uint8_t* destination = memory_->TranslatePhysical(pending.address);
++        if (destination && rb.mapped_data[pending.buffer_index]) {
++          std::memcpy(destination, static_cast<uint8_t*>(rb.mapped_data[pending.buffer_index]),
++                      pending.length);
++        }
++        pending.length = 0;
++      }
++    }
++    pending_forced_readbacks_.erase(
++        std::remove_if(pending_forced_readbacks_.begin(), pending_forced_readbacks_.end(),
++                       [](const PendingForcedReadback& p) { return p.length == 0; }),
++        pending_forced_readbacks_.end());
++    PendingForcedReadback pending;
++    pending.resolve_key = resolve_key;
++    pending.buffer_index = write_index;
++    pending.address = written_address;
++    pending.length = written_length;
++    pending.submission = submission_current_ - 1;
++    pending_forced_readbacks_.push_back(pending);
++    rb.current_index = 1 - rb.current_index;
++    return true;
++  }
++  if (readback_mode == ReadbackResolveMode::kDisabled) {
++    rb.forced_sync_done = true;
++  }
    bool use_delayed_sync =
--      readback_mode == ReadbackResolveMode::kFast || readback_mode == ReadbackResolveMode::kSome;
-+      readback_mode == ReadbackResolveMode::kFast || readback_mode == ReadbackResolveMode::kSome ||
-+      (readback_mode == ReadbackResolveMode::kDisabled &&
-+       REXCVAR_GET(readback_resolve_force_delayed));
+       readback_mode == ReadbackResolveMode::kFast || readback_mode == ReadbackResolveMode::kSome;
    uint32_t read_index = write_index;
-   if (use_delayed_sync) {
-     read_index = 1 - write_index;
-@@ -3302,13 +3327,24 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
+@@ -3302,13 +3383,24 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
      // submission, but just in case of a failure, or queue operations being done
      // outside of a submission, await explicitly.
      if (queue_operations_done_since_submission_signal_) {
@@ -324,7 +435,7 @@ index 4d4848b..ddf0eb0 100644
          queue_operations_done_since_submission_signal_ = false;
        } else {
          REXGPU_ERROR(
-@@ -3321,13 +3357,28 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
+@@ -3321,13 +3413,28 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
      await_submission = submission_current_ - 1;
    }
  
@@ -354,7 +465,15 @@ index 4d4848b..ddf0eb0 100644
        submission_completed_ = submission_fence_->GetCompletedValue();
      }
    }
-@@ -3613,12 +3664,32 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+@@ -3520,6 +3627,7 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
+   }
+ 
+   if (is_opening_frame) {
++    CompletePendingForcedReadbacks(false);
+     frame_open_ = true;
+ 
+     // Reset bindings that depend on the data stored in the pools.
+@@ -3613,12 +3721,32 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
      // happens between Xenia submissions.
      ID3D12CommandAllocator* command_allocator =
          command_allocator_writable_first_->command_allocator;
@@ -393,7 +512,7 @@ index 4d4848b..ddf0eb0 100644
      command_allocator_writable_first_->last_usage_submission = submission_current_;
      if (command_allocator_submitted_last_) {
        command_allocator_submitted_last_->next = command_allocator_writable_first_;
-@@ -3632,7 +3703,17 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+@@ -3632,7 +3760,17 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
        command_allocator_writable_last_ = nullptr;
      }
  
@@ -412,14 +531,103 @@ index 4d4848b..ddf0eb0 100644
  
      submission_open_ = false;
  
-@@ -3690,6 +3771,107 @@ bool D3D12CommandProcessor::CanEndSubmissionImmediately() const {
+@@ -3690,6 +3828,248 @@ bool D3D12CommandProcessor::CanEndSubmissionImmediately() const {
    return !submission_open_ || !pipeline_cache_->IsCreatingPipelines();
  }
  
++void D3D12CommandProcessor::CompletePendingForcedReadbacks(bool wait) {
++  if (pending_forced_readbacks_.empty()) {
++    return;
++  }
++  if (wait) {
++    uint64_t newest = 0;
++    for (const PendingForcedReadback& p : pending_forced_readbacks_) {
++      newest = std::max(newest, p.submission);
++    }
++    CheckSubmissionFence(newest);
++  } else {
++    submission_completed_ = std::max(submission_completed_, submission_fence_->GetCompletedValue());
++  }
++  for (PendingForcedReadback& p : pending_forced_readbacks_) {
++    if (p.submission > submission_completed_) {
++      continue;
++    }
++    auto it = readback_buffers_.find(p.resolve_key);
++    if (it != readback_buffers_.end()) {
++      ReadbackBuffer& rb = it->second;
++      uint8_t* destination = memory_->TranslatePhysical(p.address);
++      if (destination && rb.mapped_data[p.buffer_index] && p.length <= rb.sizes[p.buffer_index]) {
++        std::memcpy(destination, static_cast<uint8_t*>(rb.mapped_data[p.buffer_index]), p.length);
++      }
++    }
++    p.length = 0;
++  }
++  pending_forced_readbacks_.erase(
++      std::remove_if(pending_forced_readbacks_.begin(), pending_forced_readbacks_.end(),
++                     [](const PendingForcedReadback& p) { return p.length == 0; }),
++      pending_forced_readbacks_.end());
++}
++
++bool D3D12CommandProcessor::InitializeGpuTimestamps() {
++  if (gpu_timestamp_heap_) {
++    return true;
++  }
++  const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
++  ID3D12Device* device = provider.GetDevice();
++  if (FAILED(provider.GetDirectQueue()->GetTimestampFrequency(&gpu_timestamp_frequency_)) ||
++      !gpu_timestamp_frequency_) {
++    return false;
++  }
++  D3D12_QUERY_HEAP_DESC heap_desc = {};
++  heap_desc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
++  heap_desc.Count = kGpuTimestampSlots * 2;
++  if (FAILED(device->CreateQueryHeap(&heap_desc, IID_PPV_ARGS(&gpu_timestamp_heap_)))) {
++    return false;
++  }
++  D3D12_RESOURCE_DESC buffer_desc;
++  ui::d3d12::util::FillBufferResourceDesc(buffer_desc, kGpuTimestampSlots * 2 * sizeof(uint64_t),
++                                          D3D12_RESOURCE_FLAG_NONE);
++  if (FAILED(device->CreateCommittedResource(
++          &ui::d3d12::util::kHeapPropertiesReadback, provider.GetHeapFlagCreateNotZeroed(),
++          &buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
++          IID_PPV_ARGS(&gpu_timestamp_readback_)))) {
++    ui::d3d12::util::ReleaseAndNull(gpu_timestamp_heap_);
++    return false;
++  }
++  D3D12_RANGE read_range = {0, kGpuTimestampSlots * 2 * sizeof(uint64_t)};
++  void* mapped = nullptr;
++  if (FAILED(gpu_timestamp_readback_->Map(0, &read_range, &mapped))) {
++    ui::d3d12::util::ReleaseAndNull(gpu_timestamp_readback_);
++    ui::d3d12::util::ReleaseAndNull(gpu_timestamp_heap_);
++    return false;
++  }
++  gpu_timestamp_mapped_ = static_cast<const uint64_t*>(mapped);
++  return true;
++}
++
++// Worker thread only. Reads the timestamps of submissions whose fence has passed.
++void D3D12CommandProcessor::ReadCompletedGpuTimestamps() {
++  if (pending_gpu_timestamps_.empty()) {
++    return;
++  }
++  const uint64_t completed = submission_fence_->GetCompletedValue();
++  while (!pending_gpu_timestamps_.empty() &&
++         pending_gpu_timestamps_.front().fence_value <= completed) {
++    const PendingGpuTimestamp& p = pending_gpu_timestamps_.front();
++    const uint64_t t0 = gpu_timestamp_mapped_[p.slot * 2];
++    const uint64_t t1 = gpu_timestamp_mapped_[p.slot * 2 + 1];
++    if (t1 > t0 && gpu_timestamp_frequency_) {
++      NoteEmulatedGpuTime(uint64_t((t1 - t0) * 1000000000.0 / double(gpu_timestamp_frequency_)));
++    }
++    pending_gpu_timestamps_.pop_front();
++  }
++}
++
 +void D3D12CommandProcessor::StartAsyncSubmitThread() {
 +  if (async_submit_running_) {
 +    return;
 +  }
++  InitializeGpuTimestamps();
 +  async_submit_running_ = true;
 +  async_submit_thread_ = std::thread([this]() {
 +    SetThreadDescription(GetCurrentThread(), L"D3D12 Submit");
@@ -447,6 +655,11 @@ index 4d4848b..ddf0eb0 100644
 +    return;
 +  }
 +  std::unique_lock<std::mutex> lock(async_submit_mutex_);
++  if (async_submit_queue_.empty() && async_submissions_executed_ >= async_submissions_enqueued_) {
++    return;
++  }
++  async_submit_flush_requested_ = true;
++  async_submit_cv_.notify_one();
 +  async_submit_done_cv_.wait(lock, [this]() {
 +    return async_submit_queue_.empty() &&
 +           async_submissions_executed_ >= async_submissions_enqueued_;
@@ -455,36 +668,58 @@ index 4d4848b..ddf0eb0 100644
 +
 +void D3D12CommandProcessor::AsyncSubmitThreadMain() {
 +  ID3D12CommandQueue* direct_queue = GetD3D12Provider().GetDirectQueue();
++  // The open command list: jobs recorded into it since the last ExecuteCommandLists.
++  bool list_open = false;
++  uint32_t recorded = 0;
++  uint64_t last_fence_value = 0;
++  bool collect_stats = false;
++  std::chrono::steady_clock::time_point t0{};
 +  std::vector<AsyncSubmission> jobs;
 +  while (true) {
 +    jobs.clear();
++    bool execute_now = false;
 +    {
 +      std::unique_lock<std::mutex> lock(async_submit_mutex_);
 +      async_submit_cv_.wait(lock, [this]() {
-+        return !async_submit_queue_.empty() || !async_submit_running_;
++        return !async_submit_queue_.empty() || async_submit_flush_requested_ ||
++               !async_submit_running_;
 +      });
-+      if (async_submit_queue_.empty()) {
++      if (async_submit_queue_.empty() && !async_submit_flush_requested_) {
 +        if (!async_submit_running_) {
 +          return;
 +        }
 +        continue;
 +      }
 +      const uint32_t coalesce = std::max(uint32_t(1), REXCVAR_GET(d3d12_async_submit_coalesce));
-+      while (!async_submit_queue_.empty() && jobs.size() < coalesce) {
++      while (!async_submit_queue_.empty() && recorded + jobs.size() < coalesce) {
 +        jobs.push_back(std::move(async_submit_queue_.front()));
 +        async_submit_queue_.pop_front();
 +      }
++      // Execute when asked to flush, when the cap is reached, or (without the
++      // on-flush mode) whenever something was recorded.
++      const bool on_flush = REXCVAR_GET(d3d12_async_submit_on_flush);
++      execute_now = async_submit_flush_requested_ ||
++                    recorded + jobs.size() >= coalesce || !on_flush;
++      if (async_submit_flush_requested_ && async_submit_queue_.empty()) {
++        async_submit_flush_requested_ = false;
++      }
 +    }
-+    const bool collect_stats = jobs.front().collect_stats;
-+    const auto t0 = collect_stats ? std::chrono::steady_clock::now()
-+                                  : std::chrono::steady_clock::time_point{};
-+    // All merged submissions record into the first job's allocator; the others'
-+    // allocators are left reset-free (they are recycled by the fence like any
-+    // other, and reset before their next use).
-+    jobs.front().command_allocator->Reset();
-+    command_list_->Reset(jobs.front().command_allocator, nullptr);
-+    for (size_t i = 0; i < jobs.size(); ++i) {
-+      if (i != 0) {
++    for (AsyncSubmission& job : jobs) {
++      if (!list_open) {
++        // All merged submissions record into this job's allocator; the others'
++        // allocators are recycled by the fence like any other and reset before
++        // their next use.
++        collect_stats = job.collect_stats;
++        if (collect_stats) t0 = std::chrono::steady_clock::now();
++        job.command_allocator->Reset();
++        command_list_->Reset(job.command_allocator, nullptr);
++        list_open = true;
++        if (collect_stats && gpu_timestamp_heap_ &&
++            pending_gpu_timestamps_.size() < kGpuTimestampSlots - 1) {
++          command_list_->EndQuery(gpu_timestamp_heap_, D3D12_QUERY_TYPE_TIMESTAMP,
++                                  gpu_timestamp_next_slot_ * 2);
++        }
++      } else {
 +        // The ExecuteCommandLists boundary the subsystems assume between
 +        // submissions is a full UAV and aliasing barrier.
 +        D3D12_RESOURCE_BARRIER barriers[2] = {};
@@ -495,20 +730,45 @@ index 4d4848b..ddf0eb0 100644
 +        barriers[1].Aliasing.pResourceAfter = nullptr;
 +        command_list_->ResourceBarrier(2, barriers);
 +      }
-+      DeferredCommandList::ExecuteStream(jobs[i].stream.data(), jobs[i].stream.size(), *this,
++      DeferredCommandList::ExecuteStream(job.stream.data(), job.stream.size(), *this,
 +                                         command_list_, command_list_1_);
++      last_fence_value = job.fence_value;
++      ++recorded;
++    }
++    if (!execute_now || !list_open) {
++      if (!list_open) {
++        // A flush with nothing recorded: nothing to execute.
++        async_submit_done_cv_.notify_all();
++      }
++      continue;
++    }
++    bool timed = false;
++    if (collect_stats && gpu_timestamp_heap_ &&
++        pending_gpu_timestamps_.size() < kGpuTimestampSlots - 1) {
++      const uint32_t slot = gpu_timestamp_next_slot_;
++      command_list_->EndQuery(gpu_timestamp_heap_, D3D12_QUERY_TYPE_TIMESTAMP, slot * 2 + 1);
++      command_list_->ResolveQueryData(gpu_timestamp_heap_, D3D12_QUERY_TYPE_TIMESTAMP, slot * 2, 2,
++                                      gpu_timestamp_readback_, slot * 2 * sizeof(uint64_t));
++      timed = true;
 +    }
 +    command_list_->Close();
 +    ID3D12CommandList* execute_command_lists[] = {command_list_};
 +    direct_queue->ExecuteCommandLists(1, execute_command_lists);
-+    const uint64_t last_fence_value = jobs.back().fence_value;
 +    direct_queue->Signal(submission_fence_, last_fence_value);
++    if (timed) {
++      pending_gpu_timestamps_.push_back({gpu_timestamp_next_slot_, last_fence_value});
++      gpu_timestamp_next_slot_ = (gpu_timestamp_next_slot_ + 1) % kGpuTimestampSlots;
++    }
++    ReadCompletedGpuTimestamps();
 +    if (collect_stats) {
-+      // Reported as "submit" time measured on the worker, not the CP thread's time.
++      // Reported as "submit" time measured on the worker (replay included), not the
++      // CP thread's time.
 +      NoteEmulatedSubmission(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
 +                                          std::chrono::steady_clock::now() - t0)
 +                                          .count()));
 +    }
++    list_open = false;
++    recorded = 0;
 +    {
 +      std::lock_guard<std::mutex> lock(async_submit_mutex_);
 +      async_submissions_executed_ = last_fence_value;
@@ -520,6 +780,20 @@ index 4d4848b..ddf0eb0 100644
  void D3D12CommandProcessor::ClearCommandAllocatorCache() {
    while (command_allocator_submitted_first_) {
      auto next = command_allocator_submitted_first_->next;
+@@ -5134,7 +5514,12 @@ bool D3D12CommandProcessor::EndGuestOcclusionQuery(
+   }
+ 
+   uint64_t query_submission = submission_current_ ? submission_current_ - 1 : 0;
+-  CheckSubmissionFence(query_submission);
++  if (async_submit_enabled_ && !REXCVAR_GET(d3d12_async_submit_flush_queries)) {
++    // No flush and no wait: ready when the fence has passed by itself.
++    submission_completed_ = std::max(submission_completed_, submission_fence_->GetCompletedValue());
++  } else {
++    CheckSubmissionFence(query_submission);
++  }
+   if (submission_completed_ < query_submission) {
+     return false;
+   }
 diff --git a/src/graphics/d3d12/deferred_command_list.cpp b/src/graphics/d3d12/deferred_command_list.cpp
 index e6d6277..668a657 100644
 --- a/src/graphics/d3d12/deferred_command_list.cpp
@@ -577,16 +851,17 @@ index a5c97a0..80651c8 100644
    return true;
  }
 diff --git a/src/system/rexruntime.def b/src/system/rexruntime.def
-index 41fa768..ac6580e 100644
+index 41fa768..2b87468 100644
 --- a/src/system/rexruntime.def
 +++ b/src/system/rexruntime.def
-@@ -500,6 +500,10 @@ __imp__vswprintf
+@@ -500,6 +500,11 @@ __imp__vswprintf
  ?NoteEmulatedPredicatedPacket@graphics@rex@@YAX_N0@Z
  ?NoteEmulatedCopy@graphics@rex@@YAX_K@Z
  ?NoteEmulatedSwap@graphics@rex@@YAX_K@Z
 +?NoteEmulatedSubmission@graphics@rex@@YAX_K@Z
 +?NoteEmulatedFenceWait@graphics@rex@@YAX_K@Z
 +?NoteEmulatedTileMapping@graphics@rex@@YAXXZ
++?NoteEmulatedGpuTime@graphics@rex@@YAX_K@Z
 +?NoteEmulatedPrimaryBufferEnd@graphics@rex@@YAXXZ
  ?GetLastEmulatedFrameStats@graphics@rex@@YA_NPEAUEmulatedFrameStats@12@@Z
  ?NoteCommandProcessorTime@graphics@rex@@YAX_K000@Z

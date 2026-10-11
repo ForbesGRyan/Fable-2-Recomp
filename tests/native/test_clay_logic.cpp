@@ -1954,6 +1954,377 @@ static void WindWordTests() {
   }
 }
 
+// 800-829: native impostors (distant trees, plan Task 9; clay_logic.h, "Native impostors"). The pins are
+// tools/xdk_sigmatch/impostor_pins.py's (tests/native/impostor_pins.inc): the Python reference alone, never a mirror.
+namespace impostor_pins {
+struct Position {
+  uint32_t corner, word[4], reg[14][4], pos[4], place[3], uv[2];
+};
+struct Pixel {
+  uint32_t texel[4], place[3], eye[3], c12[4], c29[4], c31x, o2[3], o3[3], c20w, distance, rgb[3], alpha;
+};
+struct Fog {
+  uint32_t place[3], eye[3], c110[4], c111[4], transmit[3], scatter[3], runs, coords[3], o2[3], o3[3];
+};
+static const Position kPosition[] = {
+#define FABLE2_IMPOSTOR_PINS_POSITION
+#include "impostor_pins.inc"
+#undef FABLE2_IMPOSTOR_PINS_POSITION
+};
+static const Pixel kPixel[] = {
+#define FABLE2_IMPOSTOR_PINS_PIXEL
+#include "impostor_pins.inc"
+#undef FABLE2_IMPOSTOR_PINS_PIXEL
+};
+static const Fog kFog[] = {
+#define FABLE2_IMPOSTOR_PINS_FOG
+#include "impostor_pins.inc"
+#undef FABLE2_IMPOSTOR_PINS_FOG
+};
+static float F(uint32_t bits) {
+  float f;
+  std::memcpy(&f, &bits, 4);
+  return f;
+}
+// Criterion 1's bound: within 1e-4 * max(1, |value|) of the pinned value (the single-precision reference for a
+// position: ledger ruling 26).
+static float g_worst = 0.0f;   // the largest error of a compared value, over max(1, |value|)
+static bool Near(float got, uint32_t want_bits, float bound = 1e-4f) {
+  const float want = F(want_bits);
+  const float error = std::fabs(got - want) / std::max(1.0f, std::fabs(want));
+  if (!(error <= g_worst)) g_worst = error;   // (an error that is no number is kept and shown)
+  return std::fabs(got - want) <= bound * std::max(1.0f, std::fabs(want));
+}
+}  // namespace impostor_pins
+
+static void ImpostorTests() {
+  using namespace impostor_pins;
+  // Native impostors (plan Task 9).
+  capture::ImpostorRecord r{};
+  r.ps_hash = capture::kImpostorPs;
+  r.vs_hash = capture::kImpostorVs;
+  r.quads = 928;
+  r.first_quad = 0;
+  for (auto& reg : r.vs) for (float& v : reg) v = 0.5f;
+  const float ps[5][4] = {{20.0f, 35.0f, 2.0f, 0.468f}, {82.0f, 157.0f, 50.0f, 1.0f}, {0.005f, 0.07f, 0.09f, 8.6f},
+                          {48.0f, 0.125f, 998.4f, 25.6f}, {0.3668f, 0.0f, 0.0f, 0.0f}};
+  std::memcpy(r.ps, ps, sizeof(ps));
+  ClayImpostorConstants c{};
+  CHECK(800, MakeClayImpostorConstants(r, 8.6f, true, true, kImpostorKeepFirst, 0, &c));
+  CHECK(801, c.first_quad == 0 && c.quads == 928 && c.kept == kImpostorKeepFirst && c.out_scale == 8.6f && c.fog_on == 1.0f);
+  CHECK(802, c.ps[capture::kImpP29][0] == 48.0f && c.vs[capture::kImpC8][2] == 0.5f && c.sampler == 0 && c.alpha_ref == 0.0f && c.pad == 0.0f);
+  static_assert(sizeof(ClayImpostorConstants) == 336 && kClayImpostorSlots == 2 && kClayImpostorFrameSlots == 64);
+  ClayImpostorConstants same = c;
+  CHECK(803, !MakeClayImpostorConstants(capture::ImpostorRecord{}, 8.6f, true, true, kImpostorKeepFirst, 0, &c) &&
+                 std::memcmp(&same, &c, sizeof(c)) == 0);                                  // an invalid record: out untouched
+  capture::ImpostorRecord bad = r;
+  bad.vs[capture::kImpC116][1] = std::numeric_limits<float>::infinity();
+  CHECK(804, !MakeClayImpostorConstants(bad, 8.6f, true, true, kImpostorKeepFirst, 0, &c) && std::memcmp(&same, &c, sizeof(c)) == 0);
+  bad = r;
+  bad.ps[capture::kImpP29][1] = 0.0f;                                                      // the dissolve's slope outside (0, 4]
+  CHECK(804, !MakeClayImpostorConstants(bad, 8.6f, true, true, kImpostorKeepFirst, 0, &c));
+  bad = r;                                                                                 // ledger ruling 34: an unread component is carried, not judged
+  bad.vs[capture::kImpC111][1] = 8000.0f;
+  bad.ps[capture::kImpP12][0] = std::numeric_limits<float>::quiet_NaN();
+  CHECK(804, MakeClayImpostorConstants(bad, 8.6f, true, true, kImpostorKeepFirst, 0, &c) && c.vs[capture::kImpC111][1] == 8000.0f);
+  bad = r;
+  bad.quads = 0;
+  CHECK(805, !MakeClayImpostorConstants(bad, 8.6f, true, true, kImpostorKeepFirst, 0, &c));
+  // Review Focus 1: no draw whose words lie past the buffer's end.
+  bad = r;
+  bad.first_quad = capture::kMaxImpostorQuads - 927;
+  CHECK(806, !MakeClayImpostorConstants(bad, 8.6f, true, true, kImpostorKeepFirst, 0, &c));
+  bad.first_quad = capture::kMaxImpostorQuads - 928;
+  CHECK(806, MakeClayImpostorConstants(bad, 8.6f, true, true, kImpostorKeepFirst, 0, &c) && c.first_quad == capture::kMaxImpostorQuads - 928);
+  bad.first_quad = 0xFFFFFFF0u;                                                             // no 32-bit wrap
+  CHECK(806, !MakeClayImpostorConstants(bad, 8.6f, true, true, kImpostorKeepFirst, 0, &c));
+  bad = r;
+  bad.quads = 0xFFFFFFFFu;
+  bad.first_quad = 2;
+  CHECK(806, !MakeClayImpostorConstants(bad, 8.6f, true, true, kImpostorKeepFirst, 0, &c));
+  // The scale: another frame's record is not drawn in a post frame; without post the frame's own exposure stands.
+  CHECK(807, !MakeClayImpostorConstants(r, 8.7f, true, true, kImpostorKeepFirst, 0, &c));   // 1.2% off
+  CHECK(808, MakeClayImpostorConstants(r, 8.6f * 1.0005f, true, true, kImpostorKeepFirst, 0, &c));
+  CHECK(809, MakeClayImpostorConstants(r, 1.25f, false, true, kImpostorKeepFirst, 0, &c) && c.out_scale == 1.25f);
+  CHECK(809, !MakeClayImpostorConstants(r, 0.0f, false, true, kImpostorKeepFirst, 0, &c) &&
+                 !MakeClayImpostorConstants(r, 65.0f, false, true, kImpostorKeepFirst, 0, &c) &&
+                 !MakeClayImpostorConstants(r, std::numeric_limits<float>::quiet_NaN(), true, true, kImpostorKeepFirst, 0, &c));
+  bad = r;
+  bad.alpha_ref = 1.5f;
+  CHECK(809, !MakeClayImpostorConstants(bad, 8.6f, true, true, kImpostorKeepFirst, 0, &c) &&
+                 !MakeClayImpostorConstants(r, 8.6f, true, true, 0, 0, &c) && !MakeClayImpostorConstants(r, 8.6f, true, true, 4, 0, &c) &&
+                 !MakeClayImpostorConstants(r, 8.6f, true, true, kImpostorKeepFirst, 0, nullptr));
+  // The kept sets part the pixels: full and half are disjoint and together are the first sample's set.
+  for (uint32_t covered = 0; covered <= 2; ++covered) {
+    for (bool test : {false, true}) {
+      const bool first = ImpostorKept(kImpostorKeepFirst, test, covered), full = ImpostorKept(kImpostorKeepFull, test, covered),
+                 half = ImpostorKept(kImpostorKeepHalf, test, covered);
+      CHECK(810, first == (test && covered >= 1) && full == (test && covered == 2) && half == (test && covered == 1));
+      CHECK(811, !(full && half) && (full || half) == first && !ImpostorKept(0, test, covered) && !ImpostorKept(7, test, covered));
+    }
+  }
+  // Review Focus 4: without impostor slots the plan is today's, for every input.
+  for (uint32_t terrain = 0; terrain < 40; ++terrain) {
+    for (uint32_t plants = 0; plants < 12; ++plants) {
+      const ClayFrameSlotPlan a = PlanClayFrameSlots(terrain, plants), b = PlanClayFrameSlots(terrain, plants, 0);
+      CHECK(812, a.plant0 == b.plant0 && a.mask == b.mask && a.sky == b.sky && a.post == b.post && a.quad0 == b.quad0 &&
+                     a.object0 == b.object0);
+      // (today's arithmetic, written out: clay_logic.h as of the commit before this task)
+      CHECK(812, a.plant0 == kClayFrameTerrainSlot0 + terrain && a.mask == a.plant0 + plants && a.sky == a.mask + 1 &&
+                     a.post == a.sky + 1 && a.quad0 == a.post + kClayPostSlots && a.object0 == a.quad0 + kClayQuadFrameSlots);
+      CHECK(812, ClayFrameSmallSlots(terrain, plants) == ClayFrameSmallSlots(terrain, plants, 0) &&
+                     ClayFrameSmallSlots(terrain, plants) == uint64_t(kClayFrameTerrainSlot0) + terrain + plants + 2 + kClayPostSlots + kClayQuadFrameSlots);
+      const ClayFrameSlotPlan on = PlanClayFrameSlots(terrain, plants, kClayImpostorFrameSlots);
+      CHECK(812, on.impostor0 == a.object0 && on.object0 == a.object0 + kClayImpostorFrameSlots &&
+                     on.object0 <= ClayFrameSmallSlots(terrain, plants, kClayImpostorFrameSlots) && on.quad0 == a.quad0 &&
+                     ClayFrameSmallSlots(terrain, plants, kClayImpostorFrameSlots) == ClayFrameSmallSlots(terrain, plants) + 64);
+    }
+  }
+  // Its place: at the game's place, never after the sky step, the tail or the layer's depth.
+  const uint32_t seqs[6] = {10, 20, 1060, 1100, 1200, 1300};
+  const size_t none = ~size_t(0);
+  CHECK(813, PlanImpostorPlace(seqs, 6, 1059, 5, none, 6) == 2);       // the first record at or beyond the place
+  CHECK(813, PlanImpostorPlace(seqs, 6, 1060, 5, none, 6) == 2 && PlanImpostorPlace(seqs, 6, 1061, 5, none, 6) == 3);
+  CHECK(813, PlanImpostorPlace(seqs, 6, 5, 5, none, 6) == 0 && PlanImpostorPlace(seqs, 6, 2000, 6, none, 6) == 6);
+  CHECK(814, PlanImpostorPlace(seqs, 6, 1059, 1, none, 6) == 1);       // the sky step lies earlier: before it
+  CHECK(814, PlanImpostorPlace(seqs, 6, 1059, 5, 1, 6) == 1 && PlanImpostorPlace(seqs, 6, 1059, 5, none, 0) == 0);
+  CHECK(814, PlanImpostorPlace(nullptr, 0, 1059, 0, none, 0) == 0);
+  for (size_t sky = 0; sky <= 6; ++sky) {
+    for (size_t tail = 0; tail <= 7; ++tail) {
+      for (size_t depth = 0; depth <= 6; ++depth) {
+        const size_t t = tail == 7 ? none : tail, at = PlanImpostorPlace(seqs, 6, 1059, sky, t, depth);
+        CHECK(814, at <= 2 && at <= sky && at <= depth && (t == none || at <= t));
+        CHECK(814, at == std::min(std::min(size_t(2), sky), std::min(t, depth)));
+        // The colour loop: the step is due exactly once, at its place, before that index's other steps.
+        ColourOrder order;
+        order.impostors_at = at;
+        size_t due = 0;
+        for (size_t index = 0; index < 6; ++index) due += ColourStepsDue(order, index, index, false, false).impostors ? 1 : 0;
+        due += ColourStepsAfter(order, 6).impostors ? 1 : 0;
+        CHECK(814, due == 1 && (at >= 6 || ColourStepsDue(order, at, at, false, false).impostors));
+      }
+    }
+  }
+  {
+    ColourOrder late;                                                     // a place after the last record: due after it, once
+    for (size_t at : {size_t(6), size_t(9)}) {
+      late.impostors_at = at;
+      bool among = false;
+      for (size_t index = 0; index < 6; ++index) among = among || ColourStepsDue(late, index, index, false, false).impostors;
+      CHECK(814, !among && ColourStepsAfter(late, 6).impostors);
+    }
+    ColourOrder order;                                                    // a frame without an impostor step: never due
+    bool due = ColourStepsAfter(order, 6).impostors;
+    for (size_t index = 0; index < 6; ++index) due = due || ColourStepsDue(order, index, index, false, false).impostors;
+    CHECK(814, !due);
+  }
+  // Review Focus 5: in `on` nothing but a usable picture is drawn; never a flat quad in a picture's place.
+  for (uint32_t p = 0; p <= uint32_t(ImpostorPicture::kUpload); ++p) {
+    const ImpostorPicture picture = ImpostorPicture(p);
+    CHECK(815, DecideImpostorPicture(capture::ImpostorMode::kFlat, picture) == ClayImpostorSkip::kNone);
+    CHECK(815, (DecideImpostorPicture(capture::ImpostorMode::kOn, picture) == ClayImpostorSkip::kNone) == (picture == ImpostorPicture::kUsable));
+    CHECK(815, DecideImpostorPicture(capture::ImpostorMode::kOff, picture) != ClayImpostorSkip::kNone);
+  }
+  CHECK(815, DecideImpostorPicture(capture::ImpostorMode::kOn, ImpostorPicture::kNone) == ClayImpostorSkip::kPictureUnread &&
+                 DecideImpostorPicture(capture::ImpostorMode::kOn, ImpostorPicture::kUnread) == ClayImpostorSkip::kPictureUnread &&
+                 DecideImpostorPicture(capture::ImpostorMode::kOn, ImpostorPicture::kBase) == ClayImpostorSkip::kPictureBase &&
+                 DecideImpostorPicture(capture::ImpostorMode::kOn, ImpostorPicture::kContent) == ClayImpostorSkip::kPictureContent &&
+                 DecideImpostorPicture(capture::ImpostorMode::kOn, ImpostorPicture::kUpload) == ClayImpostorSkip::kPictureUpload);
+  CHECK(815, std::string(ClayImpostorSkipName(ClayImpostorSkip::kPictureUnread)) == "picture: unread" &&
+                 std::string(ClayImpostorSkipName(ClayImpostorSkip::kPictureBase)) == "picture: base" &&
+                 std::string(ClayImpostorSkipName(ClayImpostorSkip::kPictureContent)) == "picture: content" &&
+                 std::string(ClayImpostorSkipName(ClayImpostorSkip::kPictureUpload)) == "picture: upload" &&
+                 std::string(ClayImpostorSkipName(ClayImpostorSkip::kBuffer)) == "buffer" && std::string(ClayImpostorSkipName(ClayImpostorSkip::kSlot)) == "slot" &&
+                 std::string(ClayImpostorSkipName(ClayImpostorSkip::kScale)) == "scale" && std::string(ClayImpostorSkipName(ClayImpostorSkip::kPipeline)) == "pipeline" &&
+                 std::string(ClayImpostorSkipName(ClayImpostorSkip::kCount)) == "?");
+  // The fog: nothing with the frame's fog off and before the start.
+  ClayFrameConstants* frame = new ClayFrameConstants{};
+  CHECK(800, MakeClayImpostorConstants(r, 8.6f, true, false, kImpostorKeepFirst, 0, &c) && c.fog_on == 0.0f);
+  const float place[3] = {300.0f, 40.0f, 5.0f};
+  float o2[3], o3[3];
+  ImpostorFogMirror(place, c, *frame, o2, o3);
+  CHECK(816, o2[0] == 1.0f && o2[1] == 1.0f && o2[2] == 1.0f && o3[0] == 0.0f && o3[1] == 0.0f && o3[2] == 0.0f);
+  // The pixel: the dissolve's three steps with a whole picture and a reference of 0 (the record's own reference,
+  // 128 / 255 in every captured row, is the pins': a pixel whose alpha is a half does not pass it).
+  const float one[3] = {1.0f, 1.0f, 1.0f}, zero[3] = {0.0f, 0.0f, 0.0f}, texel[4] = {0.5f, 0.25f, 0.125f, 1.0f};
+  for (uint32_t kept : {kImpostorKeepFirst, kImpostorKeepFull, kImpostorKeepHalf}) {
+    CHECK(800, MakeClayImpostorConstants(r, 8.6f, true, false, kept, 0, &c));
+    for (float d : {49.9f, 50.0f, 53.9f, 54.0f, 200.0f}) {
+      const float at[3] = {82.0f + d, 157.0f, 50.0f};       // d units from the record's c19
+      float out[3];
+      bool keep = true;
+      ImpostorPixelMirror(texel, at, one, zero, c, out, &keep);
+      const uint32_t covered = d < 50.0f ? 0u : d < 54.0f ? 1u : 2u;
+      CHECK(817, keep == ImpostorKept(kept, true, covered));
+    }
+  }
+  {
+    // With the captured reference a whole-alpha tree is absent up to 52.02 units (alpha must be ABOVE 128 / 255).
+    capture::ImpostorRecord real = r;
+    real.alpha_ref = F(0x3F008081u);
+    CHECK(800, MakeClayImpostorConstants(real, 8.6f, true, false, kImpostorKeepFirst, 0, &c));
+    for (float d : {50.0f, 52.0f, 52.03f, 53.0f, 60.0f}) {
+      const float at[3] = {82.0f + d, 157.0f, 50.0f};
+      float out[3];
+      bool keep = false;
+      ImpostorPixelMirror(texel, at, one, zero, c, out, &keep);
+      CHECK(817, keep == (d > 52.02f));
+    }
+  }
+  {
+    CHECK(800, MakeClayImpostorConstants(r, 8.6f, true, false, kImpostorKeepFirst, 0, &c));
+    const float at[3] = {82.0f + 200.0f, 157.0f, 50.0f};
+    float out[3];
+    bool keep = false;
+    ImpostorPixelMirror(texel, at, one, zero, c, out, &keep);
+    CHECK(818, keep && std::fabs(out[0] - 0.5f * 0.3668f * 0.468f * 8.6f) < 1e-5f);    // far: the mean shadow term, the output scale
+    const float nan_texel[4] = {std::numeric_limits<float>::quiet_NaN(), 0.25f, 0.125f, 1.0f};
+    ImpostorPixelMirror(nan_texel, at, one, zero, c, out, &keep);
+    CHECK(818, out[0] == 0.0f && out[1] > 0.0f);                                         // a texel that is no number reads 0
+    const float big[4] = {1e6f, 0.25f, 0.125f, 1.0f};
+    ImpostorPixelMirror(big, at, one, zero, c, out, &keep);
+    CHECK(818, out[0] == kPostSceneMax);
+    const float negative[4] = {-1.0f, 0.25f, 0.125f, 1.0f};
+    ImpostorPixelMirror(negative, at, one, zero, c, out, &keep);
+    CHECK(818, out[0] == 0.0f);
+    const float clear[4] = {0.5f, 0.25f, 0.125f, std::numeric_limits<float>::quiet_NaN()};   // an alpha that is no number keeps nothing
+    ImpostorPixelMirror(clear, at, one, zero, c, out, &keep);
+    CHECK(818, !keep);
+  }
+  // Ledger ruling 27: a quad of no size, a size that is no number and a corner that is none are no position
+  // (never a quad at the view's origin, where the console's product rule lands them), and a place that is no
+  // number is no position either.
+  {
+    ClayImpostorConstants k{};
+    for (auto& reg : k.vs) for (float& v : reg) v = 0.5f;
+    float pos[4], at[3], uv[2];
+    const float none_[4] = {100.0f, 200.0f, 30.0f, 0.0f}, nan_size[4] = {100.0f, 200.0f, 30.0f, std::numeric_limits<float>::quiet_NaN()},
+                good[4] = {100.0f, 200.0f, 30.0f, 8.0f}, nan_place[4] = {std::numeric_limits<float>::quiet_NaN(), 200.0f, 30.0f, 8.0f},
+                negative[4] = {100.0f, 200.0f, 30.0f, -8.0f};
+    ImpostorPositionMirror(0, none_, k, pos, at, uv);
+    CHECK(819, pos[0] != pos[0] && pos[1] != pos[1] && pos[2] != pos[2] && pos[3] != pos[3]);
+    ImpostorPositionMirror(1, nan_size, k, pos, at, uv);
+    CHECK(819, pos[0] != pos[0] && pos[3] != pos[3]);
+    ImpostorPositionMirror(2, negative, k, pos, at, uv);
+    CHECK(819, pos[0] != pos[0] && pos[3] != pos[3]);
+    ImpostorPositionMirror(4, good, k, pos, at, uv);
+    CHECK(819, pos[0] != pos[0] && pos[3] != pos[3]);
+    ImpostorPositionMirror(3, nan_place, k, pos, at, uv);
+    CHECK(819, pos[0] != pos[0] && pos[1] != pos[1] && pos[2] != pos[2] && pos[3] != pos[3]);
+    ImpostorPositionMirror(3, good, k, pos, at, uv);
+    CHECK(819, std::isfinite(pos[0]) && std::isfinite(pos[1]) && std::isfinite(pos[2]) && std::isfinite(pos[3]) && at[2] == 30.0f + 8.0f * 0.5f);
+    // A view whose second row has no part of either axis: both extents 0, no weights, no position.
+    ClayImpostorConstants flat = k;
+    for (float& v : flat.vs[capture::kImpC116]) v = 0.0f;
+    ImpostorPositionMirror(3, good, flat, pos, at, uv);
+    CHECK(819, pos[0] != pos[0] && pos[1] != pos[1] && pos[2] != pos[2] && pos[3] != pos[3]);
+  }
+  // The pins (criterion 1's bound against the single-precision reference).
+  CHECK(820, std::size(kPosition) == 16 && std::size(kPixel) == 9 && std::size(kFog) == 6);
+  uint32_t corners = 0, above = 0, below = 0;
+  for (const Position& p : kPosition) {
+    ClayImpostorConstants k{};
+    for (int i = 0; i < 14; ++i) for (int j = 0; j < 4; ++j) k.vs[i][j] = F(p.reg[i][j]);
+    const float word[4] = {F(p.word[0]), F(p.word[1]), F(p.word[2]), F(p.word[3])};
+    float pos[4], at[3], uv[2];
+    ImpostorPositionMirror(p.corner, word, k, pos, at, uv);
+    for (int i = 0; i < 4; ++i) CHECK(821, Near(pos[i], p.pos[i]));
+    for (int i = 0; i < 3; ++i) CHECK(822, Near(at[i], p.place[i]));
+    for (int i = 0; i < 2; ++i) CHECK(823, Near(uv[i], p.uv[i]));
+    corners |= 1u << p.corner;
+    (at[2] > k.vs[capture::kImpC47][2] ? above : below) += 1;
+  }
+  CHECK(824, corners == 0xF && above >= 2 && below >= 2);      // every corner and both sides of the height comparison are pinned
+  const float worst_position = g_worst;
+  g_worst = 0.0f;
+  uint32_t kept_pixels = 0, absent = 0, one_sample = 0;
+  for (const Pixel& p : kPixel) {
+    ClayImpostorConstants k{};
+    for (int j = 0; j < 4; ++j) {
+      k.ps[capture::kImpP12][j] = F(p.c12[j]);
+      k.ps[capture::kImpP29][j] = F(p.c29[j]);
+    }
+    for (int j = 0; j < 3; ++j) k.ps[capture::kImpP19][j] = F(p.eye[j]);
+    k.ps[capture::kImpP31][0] = F(p.c31x);
+    k.ps[capture::kImpP20][3] = k.out_scale = F(p.c20w);
+    k.alpha_ref = F(0x3F008081u);
+    k.kept = kImpostorKeepFirst;
+    const float texel4[4] = {F(p.texel[0]), F(p.texel[1]), F(p.texel[2]), F(p.texel[3])};
+    const float at[3] = {F(p.place[0]), F(p.place[1]), F(p.place[2])}, f2[3] = {F(p.o2[0]), F(p.o2[1]), F(p.o2[2])},
+                f3[3] = {F(p.o3[0]), F(p.o3[1]), F(p.o3[2])};
+    const ImpostorPixelValues core = ImpostorPixelCore(texel4, at, k);
+    CHECK(825, Near(core.distance, p.distance) && Near(core.alpha, p.alpha));
+    float out[3];
+    bool keep = false;
+    ImpostorPixelMirror(texel4, at, f2, f3, k, out, &keep);
+    for (int i = 0; i < 3; ++i) CHECK(826, Near(out[i], p.rgb[i]));
+    // The kept set from the pinned alpha itself: above the reference, and the first sample covered.
+    const float alpha = F(p.alpha);
+    CHECK(827, keep == (alpha > F(0x3F008081u) && alpha >= 0.25f));
+    kept_pixels += keep ? 1 : 0;
+    absent += alpha == 0.0f ? 1 : 0;
+    k.kept = kImpostorKeepHalf;
+    ImpostorPixelMirror(texel4, at, f2, f3, k, out, &keep);
+    one_sample += keep ? 1 : 0;
+    CHECK(827, keep == (alpha > F(0x3F008081u) && alpha >= 0.25f && alpha < 0.75f));
+  }
+  CHECK(827, kept_pixels >= 3 && absent >= 2 && one_sample >= 1);   // the pins cross the dissolve: absent, one sample, both
+  const float worst_pixel = g_worst;
+  g_worst = 0.0f;
+  uint32_t fogged = 0, clear = 0;
+  for (const Fog& p : kFog) {
+    ClayImpostorConstants k{};
+    for (int j = 0; j < 3; ++j) k.vs[capture::kImpC47][j] = F(p.eye[j]);
+    for (int j = 0; j < 4; ++j) {
+      k.vs[capture::kImpC110][j] = F(p.c110[j]);
+      k.vs[capture::kImpC111][j] = F(p.c111[j]);
+    }
+    k.fog_on = 1.0f;
+    const float at[3] = {F(p.place[0]), F(p.place[1]), F(p.place[2])};
+    const FogPoint point = ImpostorFogCoords(at, k);
+    CHECK(828, point.fogged == (p.runs != 0));
+    if (point.fogged) {
+      CHECK(828, Near(float(point.a), p.coords[0]) && Near(float(point.s), p.coords[1]) && Near(float(point.t), p.coords[2]));
+    }
+    // (the frame's two tables hold the line's two texels at every place: what a read at s and at a returns)
+    frame->fog.on = 1;
+    for (uint32_t i = 0; i < kFogTransmitTexels; ++i) for (int j = 0; j < 3; ++j) frame->transmit[i][j] = F(p.transmit[j]);
+    for (uint32_t i = 0; i < kFogScatterTexels; ++i) for (int j = 0; j < 3; ++j) frame->scatter[i][j] = F(p.scatter[j]);
+    ImpostorFogMirror(at, k, *frame, o2, o3);
+    for (int i = 0; i < 3; ++i) CHECK(829, Near(o2[i], p.o2[i]) && Near(o3[i], p.o3[i]));
+    (p.runs ? fogged : clear) += 1;
+    // With the fog off in the frame, or in the record's constants: (1, 0).
+    frame->fog.on = 0;
+    ImpostorFogMirror(at, k, *frame, o2, o3);
+    CHECK(829, o2[0] == 1.0f && o3[0] == 0.0f);
+    frame->fog.on = 1;
+    k.fog_on = 0.0f;
+    ImpostorFogMirror(at, k, *frame, o2, o3);
+    CHECK(829, o2[1] == 1.0f && o3[1] == 0.0f);
+  }
+  CHECK(829, fogged >= 3 && clear >= 2);
+  std::cout << "impostor pins: " << std::size(kPosition) << " position, " << std::size(kPixel) << " pixel, " << std::size(kFog)
+            << " fog lines; the single-precision mirrors are within " << worst_position << ", " << worst_pixel << " and " << g_worst
+            << " of them, over max(1, |value|) (bound 1e-4: criterion 1, against the single-precision reference for a position: "
+               "ledger ruling 26)\n";
+  {
+    // A table texel that is no number: (1, 0), never a colour that is none.
+    const Fog& p = kFog[4];
+    ClayImpostorConstants k{};
+    for (int j = 0; j < 3; ++j) k.vs[capture::kImpC47][j] = F(p.eye[j]);
+    for (int j = 0; j < 4; ++j) {
+      k.vs[capture::kImpC110][j] = F(p.c110[j]);
+      k.vs[capture::kImpC111][j] = F(p.c111[j]);
+    }
+    k.fog_on = 1.0f;
+    const float at[3] = {F(p.place[0]), F(p.place[1]), F(p.place[2])};
+    for (uint32_t i = 0; i < kFogTransmitTexels; ++i) frame->transmit[i][1] = std::numeric_limits<float>::quiet_NaN();
+    ImpostorFogMirror(at, k, *frame, o2, o3);
+    CHECK(829, o2[0] == 1.0f && o2[1] == 1.0f && o2[2] == 1.0f && o3[0] == 0.0f && o3[1] == 0.0f && o3[2] == 0.0f);
+  }
+  delete frame;
+}
+
 // 720-739: native wind (foliage sub-project, plan Task 10; clay_logic.h, "Native wind").
 namespace wind_pins {
 struct Plant {
@@ -11909,6 +12280,7 @@ int main() {
     CHECK(794, byte(kImpostorFlatColour[0]) == 37 && byte(kImpostorFlatColour[1]) == 64 && byte(kImpostorFlatColour[2]) == 13);
   }
   std::thread(SunTreeTests).join();
+  ImpostorTests();
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "
@@ -11943,7 +12315,9 @@ int main() {
                "2e-5 (single precision), a leaf at its pivot, the reach never below the reference's, the keys, the Wind line; "
                "coverage: the covered samples against the emulator's thresholds and today's set, the coverage record, the "
                "colour pass's order for every arrangement of up to six records, the half key, the verdict, the Coverage line; "
-               "the tree occluders' redraw: the alpha of one sample from the twin's own state, what is not drawn and why, the Sun line\n";
+               "the tree occluders' redraw: the alpha of one sample from the twin's own state, what is not drawn and why, the Sun line; "
+               "native impostors: the constants and their bounds, the kept sets, the slot plan without them as before, the place, "
+               "the three mirrors against the reference's pins within 1e-4, no position for a quad of no size\n";
 
   return 0;
 }

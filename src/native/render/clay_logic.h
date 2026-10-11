@@ -7,6 +7,7 @@
 // texture counters and the F3 status text.
 
 #include <algorithm>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <cstddef>
@@ -5539,13 +5540,19 @@ struct ColourOrder {
   size_t tail_at = kNoCoverageTail;
   bool depth_early = false;
   SunDepthPlace depth;
+  // Where the impostor step is drawn: before the prepared record at this index (PlanImpostorPlace; at or beyond
+  // the count: after the last); ~size_t(0): the frame has no impostor step.
+  size_t impostors_at = ~size_t(0);
 };
 // What is due right before the prepared record at `index`, whose place in FrameScene::draws is `record`, in this
 // order: the tail (with the sky step first when it is due at the same record: `sky_first`), the layer's depth,
 // the sky step. `sky_done`: the sky step was drawn with a tail before (the loop sets it on `sky_first`).
 // `depth_taken`: the layer's depth was taken at an earlier record.
+// `impostors`: the impostor step, due first of an index's steps (it is opaque and writes depth: PlanImpostorPlace
+// puts it at or before the sky step, the tail and the layer's depth).
 struct ColourDue {
   bool sky_first = false, tail = false, layer_depth = false, sky = false;
+  bool impostors = false;
 };
 constexpr ColourDue ColourStepsDue(const ColourOrder& order, size_t index, size_t record, bool sky_done, bool depth_taken) {
   ColourDue due;
@@ -5554,6 +5561,7 @@ constexpr ColourDue ColourStepsDue(const ColourOrder& order, size_t index, size_
   due.sky_first = due.tail && sky_here;
   due.layer_depth = order.depth_early && !depth_taken && SunDepthBefore(order.depth, record);
   due.sky = sky_here && !due.sky_first;
+  due.impostors = order.impostors_at == index;
   return due;
 }
 // After the last of `count` prepared records: the sky step of a frame without a blended record, then a tail
@@ -5562,6 +5570,7 @@ constexpr ColourDue ColourStepsAfter(const ColourOrder& order, size_t count) {
   ColourDue due;
   due.sky = order.sky_drawn && order.sky_at >= count;
   due.tail = order.tail_at != kNoCoverageTail && order.tail_at >= count;
+  due.impostors = order.impostors_at != ~size_t(0) && order.impostors_at >= count;
   return due;
 }
 
@@ -5783,25 +5792,30 @@ constexpr uint64_t ClayConstantBufferBytes(uint64_t small_slots, uint64_t object
 // slots: ClayPostConstants), the quads' (kClayQuadFrameSlots: kClayQuadSlots for each record of a
 // full set, ClayQuadConstants; quad i's from quad0 + kClayQuadSlots * i); then the large slots of the
 // lit objects, trunks and leaves (ClayObjectSlotOffset(object0, i)).
+// `impostor_slots`: the small slots of the impostor step's constants, after the quads' (kClayImpostorFrameSlots in a
+// frame with the impostors' switch not off: record i's at impostor0 + kClayImpostorSlots * i; 0, the default, in
+// every other frame, whose plan is then the one of before the impostors, slot for slot).
 inline constexpr uint32_t kClayFrameTerrainSlot0 = kClayFrameSlots;
 struct ClayFrameSlotPlan {
   uint32_t plant0 = 0, mask = 0, sky = 0, post = 0, quad0 = 0, object0 = 0;
+  uint32_t impostor0 = 0;
 };
-constexpr ClayFrameSlotPlan PlanClayFrameSlots(uint32_t terrain_drawn, uint32_t plants) {
+constexpr ClayFrameSlotPlan PlanClayFrameSlots(uint32_t terrain_drawn, uint32_t plants, uint32_t impostor_slots = 0) {
   ClayFrameSlotPlan p;
   p.plant0 = kClayFrameTerrainSlot0 + terrain_drawn;
   p.mask = p.plant0 + plants;
   p.sky = p.mask + 1;
   p.post = p.sky + 1;
   p.quad0 = p.post + kClayPostSlots;
-  p.object0 = p.quad0 + kClayQuadFrameSlots;
+  p.impostor0 = p.quad0 + kClayQuadFrameSlots;
+  p.object0 = p.impostor0 + impostor_slots;
   return p;
 }
 // The small slots the buffer is sized with, before it is known which terrain records are drawn with
 // their material: every terrain record counts, so the plan of any number of them drawn fits
 // (PlanClayFrameSlots(drawn, plants).object0 <= this for drawn <= terrain_records).
-constexpr uint64_t ClayFrameSmallSlots(uint64_t terrain_records, uint64_t plants) {
-  return uint64_t(kClayFrameTerrainSlot0) + terrain_records + plants + 2 + kClayPostSlots + kClayQuadFrameSlots;
+constexpr uint64_t ClayFrameSmallSlots(uint64_t terrain_records, uint64_t plants, uint64_t impostor_slots = 0) {
+  return uint64_t(kClayFrameTerrainSlot0) + terrain_records + plants + 2 + kClayPostSlots + kClayQuadFrameSlots + impostor_slots;
 }
 
 // ClayTerrainConstants::flags: the far colour is multiplied by sat(d2 * fade[0] + fade[1]) (the
@@ -7017,6 +7031,306 @@ inline bool PrepassBeyondReach(const float m[4][4], const PositionBounds& box, c
 // by Decode1555Level holds the texture's channels and needs the swizzle applied (its red and blue exchanged).
 inline constexpr float kImpostorFlatColour[3] = {0.145376f, 0.250169f, 0.050493f};
 inline constexpr uint32_t kImpostorFlatSwizzle = 0x60Au;   // x <- 2, y <- 1, z <- 0, w <- 3 (three bits a component)
+static_assert(kImpostorFlatSwizzle == capture::kImpostorSwizzle, "the flat colour was taken through another swizzle than the record's fetch has");
+
+// The draw's rules and mirrors (plan Task 9; pure: no binding, target or shader text is in this section).
+// The game's two formulas are light_formulas.impostor_position (vertex shader 129F), impostor_pixel /
+// impostor_out and impostor_fog (docs/native-renderer/lighting-formulas.md, "The impostors"); the three mirrors
+// below are pinned to them by tests/native/impostor_pins.inc (tools/xdk_sigmatch/impostor_pins.py).
+
+// cbuffer Impostor: register b0 of the impostor step's own layout. One a drawn record.
+// 224 + 80 + 16 + 16 bytes (recomputed by plan Task 9 from what is carried: the plan's 336 stands).
+struct ClayImpostorConstants {
+  float vs[capture::kImpostorVsRegisters][4];   // the record's vertex registers, in the table's order
+  float ps[capture::kImpostorPsRegisters][4];   // c12, c19, c20, c29, c31
+  uint32_t first_quad, quads;                   // the record's words in the frame's buffer; first_quad + quads <= kMaxImpostorQuads
+  uint32_t kept;                                // kImpostorKeepFirst, kImpostorKeepFull or kImpostorKeepHalf
+  uint32_t sampler;                             // the static sampler of the picture's fetch (0 in flat)
+  float alpha_ref, out_scale, fog_on, pad;      // the alpha test's reference; what the colour is multiplied by; 1: the frame's fog is on
+};
+static_assert(sizeof(ClayImpostorConstants) == 336 && offsetof(ClayImpostorConstants, ps) == 224 &&
+              offsetof(ClayImpostorConstants, first_quad) == 304 && offsetof(ClayImpostorConstants, alpha_ref) == 320);
+inline constexpr uint32_t kClayImpostorSlots = (sizeof(ClayImpostorConstants) + 255) / 256;
+inline constexpr uint32_t kClayImpostorFrameSlots = kClayImpostorSlots * capture::kMaxImpostorRecords;   // only with the switch not off
+static_assert(kClayImpostorSlots == 2 && kClayImpostorFrameSlots == 64);
+
+// Which pixels a draw shades (spec ruling 13; `covered`: CoveredSamples under the draw's offsets 0xAA, the game's
+// two samples; `alpha_test`: alpha > the draw's reference).
+//   kImpostorKeepFirst: the alpha test passed and the first sample is covered. With --fable2_native_coverage off,
+//                       and always in `flat`: the pixel is drawn whole, with depth, and the native depth is the
+//                       game's first sample's, which is what its depth copy holds.
+//   kImpostorKeepFull:  both samples (the part drawn in place under the coverage's switch).
+//   kImpostorKeepHalf:  exactly one (the part the coverage's tail would draw at one half).
+// Full and half part the first set. No step that draws the half part exists in this sub-project (it is closed at
+// `flat`: ledger ruling 31; what that costs is in frame-map section 19, "The draw's rules").
+enum : uint32_t { kImpostorKeepFirst = 1, kImpostorKeepFull = 2, kImpostorKeepHalf = 3 };
+constexpr bool ImpostorKept(uint32_t kept, bool alpha_test, uint32_t covered) {
+  if (!alpha_test) return false;
+  return kept == kImpostorKeepFirst ? covered >= 1 : kept == kImpostorKeepFull ? covered == 2 : kept == kImpostorKeepHalf ? covered == 1 : false;
+}
+inline constexpr uint8_t kImpostorMaskOffsets = 0xAA;   // RB_COLORCONTROL bits 24 to 31 of every captured draw (the record's `state` rule)
+
+// Why a record of the frame is not drawn by the step (the Impostors line and F3: "impostors not drawn {...}").
+enum class ClayImpostorSkip : uint8_t { kNone, kPipeline, kSlot, kBuffer, kScale, kPictureBase, kPictureUnread,
+                                        kPictureContent, kPictureUpload, kCount };
+constexpr const char* ClayImpostorSkipName(ClayImpostorSkip s) {
+  constexpr const char* kNames[] = {"none", "pipeline", "slot", "buffer", "scale", "picture: base",
+                                    "picture: unread", "picture: content", "picture: upload"};
+  static_assert(sizeof(kNames) / sizeof(kNames[0]) == size_t(ClayImpostorSkip::kCount));
+  return s < ClayImpostorSkip::kCount ? kNames[size_t(s)] : "?";
+}
+// What is known of a record's picture. kNone: no picture at all (nothing was read for it).
+enum class ImpostorPicture : uint8_t { kNone, kUsable, kBase, kUnread, kContent, kUpload };
+// flat: drawn with the flat texture whatever the picture's state. on: drawn only with a usable picture; anything
+// else is its reason, and no picture at all is "picture: unread": never a flat quad in a picture's place, which
+// would put depth and colour where the game has neither. (This build reads no picture: with the switch at `on`
+// every record is kNone here and nothing is drawn: ledger rulings 23 and 31.) off: never asked; "pipeline".
+constexpr ClayImpostorSkip DecideImpostorPicture(capture::ImpostorMode mode, ImpostorPicture picture) {
+  if (mode == capture::ImpostorMode::kFlat) return ClayImpostorSkip::kNone;
+  if (mode != capture::ImpostorMode::kOn) return ClayImpostorSkip::kPipeline;
+  switch (picture) {
+    case ImpostorPicture::kUsable: return ClayImpostorSkip::kNone;
+    case ImpostorPicture::kBase: return ClayImpostorSkip::kPictureBase;
+    case ImpostorPicture::kContent: return ClayImpostorSkip::kPictureContent;
+    case ImpostorPicture::kUpload: return ClayImpostorSkip::kPictureUpload;
+    default: return ClayImpostorSkip::kPictureUnread;
+  }
+}
+
+// The constants of one record's draw. False, with `out` untouched, unless: the record is valid; quads > 0 and
+// first_quad + quads <= kMaxImpostorQuads (no 32-bit wrap: the words are read from a buffer bound by address,
+// which has no bounds check); every component of every register that a formula reads is a number inside the
+// table's bound (checked again here, as the capture checked it; a component no formula reads is carried as it is:
+// ledger ruling 34); c20.w in (0, 64]; `out_scale` in (0, 64]; in a post frame (`post_frame`) c20.w equal to
+// `out_scale` within a thousandth of it (the record is the frame's own: as the moon's quad); alpha_ref in [0, 1];
+// `kept` one of the three sets.
+inline bool MakeClayImpostorConstants(const capture::ImpostorRecord& r, float out_scale, bool post_frame, bool fog_on, uint32_t kept,
+                                      uint32_t sampler, ClayImpostorConstants* out) {
+  if (!out || !capture::ImpostorRecordValid(r)) return false;
+  if (r.quads == 0 || r.quads > capture::kMaxImpostorQuads || r.first_quad > capture::kMaxImpostorQuads - r.quads) return false;
+  for (uint32_t i = 0; i < capture::kImpostorVsRegisters; ++i) {
+    for (uint32_t k = 0; k < 4; ++k) {
+      if (!capture::detail::ImpostorBounded(0, i, k, r.vs[i][k])) return false;
+    }
+  }
+  for (uint32_t i = 0; i < capture::kImpostorPsRegisters; ++i) {
+    for (uint32_t k = 0; k < 4; ++k) {
+      if (!capture::detail::ImpostorBounded(1, i, k, r.ps[i][k])) return false;
+    }
+  }
+  const float scale = r.ps[capture::kImpP20][3];
+  if (!(scale > 0.0f && scale <= capture::kImpostorScaleMax) || !(out_scale > 0.0f && out_scale <= capture::kImpostorScaleMax)) return false;
+  if (post_frame && !(std::fabs(scale - out_scale) <= 1e-3f * out_scale)) return false;
+  if (!(r.alpha_ref >= 0.0f && r.alpha_ref <= 1.0f)) return false;
+  if (kept != kImpostorKeepFirst && kept != kImpostorKeepFull && kept != kImpostorKeepHalf) return false;
+  ClayImpostorConstants c{};
+  std::memcpy(c.vs, r.vs, sizeof(c.vs));
+  std::memcpy(c.ps, r.ps, sizeof(c.ps));
+  c.first_quad = r.first_quad;
+  c.quads = r.quads;
+  c.kept = kept;
+  c.sampler = sampler;
+  c.alpha_ref = r.alpha_ref;
+  c.out_scale = out_scale;
+  c.fog_on = fog_on ? 1.0f : 0.0f;
+  *out = c;
+  return true;
+}
+
+// The shaders' own literals the mirrors use, by name, held to the table's (impostor_table.inc: the vertex shader's
+// c254 = (0.5, 0.25, 2, 0) and c255 = (0, 1, -1, 4); the pixel shader's c255 = (0, 1, 0.1, 0.5)). Of the vertex
+// shader's, 0.5, 0.25 and 4 only make the corner's number from the vertex index (light_formulas.impostor_corner),
+// which a mirror is given; of the pixel shader's, 0.5 is read only under bool b129.
+namespace impostor_detail {
+constexpr uint32_t LiteralBits(uint32_t kind, uint32_t reg, uint32_t comp) {
+  for (const capture::ImpostorTable::Literal& l : capture::kImpostorTable.literal) {
+    if (l.kind == kind && l.reg == reg) return l.bits[comp];
+  }
+  return 0xFFFFFFFFu;
+}
+}  // namespace impostor_detail
+inline constexpr float kImpostorTwo = 2.0f, kImpostorMinusOne = -1.0f, kImpostorOne = 1.0f;
+inline constexpr float kImpostorTenth = std::bit_cast<float>(impostor_detail::LiteralBits(1, 255, 2));
+static_assert(impostor_detail::LiteralBits(0, 254, 2) == 0x40000000u && impostor_detail::LiteralBits(0, 255, 2) == 0xBF800000u &&
+              impostor_detail::LiteralBits(0, 255, 1) == 0x3F800000u && impostor_detail::LiteralBits(0, 255, 0) == 0u &&
+              impostor_detail::LiteralBits(1, 255, 1) == 0x3F800000u && impostor_detail::LiteralBits(1, 255, 2) == 0x3DCCCCCDu,
+              "the mirrors' literals are not the table's");
+
+// IMPOSTOR MIRRORS BEGIN (tests/test_impostor_literals.py reads the text between the two markers)
+// The position of corner `k` (0 to 3) of the quad whose word is `word` (x, y, z, s): oPos, o0 (the raised place,
+// one value a quad) and o1, in single precision and in the reference's order of operations
+// (light_formulas.impostor_position, single=True, term for term; the instruction numbers are there).
+// The console's product rule (a zero factor gives +0 whatever the other is) is NOT imitated (ledger ruling 27):
+// where it matters the reference lands a quad at the view's origin, and here the position is no number, which a
+// rasteriser drops: a quad of no size (refused before: the record's `quad` rule; guarded again here) and a view
+// whose second row has no part of either axis. A corner that is no number in the reference is no number here.
+inline void ImpostorPositionMirror(uint32_t k, const float word[4], const ClayImpostorConstants& c, float pos[4], float place[3], float uv[2]) {
+#pragma clang fp contract(off)
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float X = word[0], Y = word[1], Z = word[2], S = word[3];
+  if (k > 3 || !(S > 0.0f)) {   // (also a size that is no number)
+    for (int i = 0; i < 4; ++i) pos[i] = nan;
+    for (int i = 0; i < 3; ++i) place[i] = nan;
+    uv[0] = uv[1] = nan;
+    return;
+  }
+  const float* a = c.vs[capture::kImpC46];
+  const float* r115 = c.vs[capture::kImpC115];
+  const float* r116 = c.vs[capture::kImpC116];
+  const float* r117 = c.vs[capture::kImpC117];
+  const float* c114 = c.vs[capture::kImpC114];
+  const float lift = S * c.vs[capture::kImpC8][2];
+  // The four points: the lying axis's two ends, the upright axis's two heights. The raise is added before the place's height.
+  const float fore[3] = {S * a[0] + X, S * a[1] + Y, (S * a[2] + lift) + Z};
+  const float back[3] = {(-S) * a[0] + X, a[1] * (-S) + Y, (a[2] * (-S) + lift) + Z};
+  const float top_z = (lift + S) + Z;
+  const float bottom_z = (lift + (-S)) + Z;
+  place[0] = X;
+  place[1] = Y;
+  place[2] = Z + lift;
+  // The corner: u, "the picture's top edge", v.
+  const float u = (k == 2 || k == 3) ? kImpostorOne : 0.0f;
+  const bool upper = k == 1 || k == 2;
+  const float v = -(upper ? kImpostorOne : 0.0f) + kImpostorOne;
+  // The view's rows on the points, sum by sum.
+  const float xy115 = (X * r115[0] + Y * r115[1]) + 0.0f;
+  const float xy116 = (X * r116[0] + Y * r116[1]) + 0.0f;
+  const float xy117 = X * r117[0] + Y * r117[1];
+  const float top[3] = {(xy115 + top_z * r115[2]) + r115[3], r116[3] + (top_z * r116[2] + xy116), (top_z * r117[2] + xy117) + r117[3]};
+  const float bottom[3] = {(xy115 + bottom_z * r115[2]) + r115[3], r116[3] + (xy116 + bottom_z * r116[2]),
+                           r117[3] + (r117[2] * bottom_z + xy117)};
+  const float fore_v[3] = {((fore[0] * r115[0] + fore[1] * r115[1]) + fore[2] * r115[2]) + r115[3],
+                           (fore[2] * r116[2] + (fore[0] * r116[0] + fore[1] * r116[1])) + r116[3],
+                           (fore[2] * r117[2] + (r117[0] * fore[0] + r117[1] * fore[1])) + r117[3]};
+  auto dp3 = [&](const float* row) { return ((0.0f + back[2] * row[2]) + back[1] * row[1]) + back[0] * row[0]; };
+  const float back_v[3] = {dp3(r115) + r115[3], dp3(r116) + r116[3], dp3(r117) + r117[3]};
+  // The two weights: each axis's extent in the view's second row, to the power c114.y (the upright one scaled by c114.x).
+  const float upright = std::fabs(top[1] + (-bottom[1]));
+  const float lying = std::fabs(fore_v[1] + (-back_v[1]));
+  auto power = [&](float extent) {   // 2 ^ (c114.y * log2 extent); an extent of 0 has no weight
+    const float log = float(std::log2(double(extent)));
+    return float(std::exp2(double(log * c114[1])));
+  };
+  const float ev = power(std::fabs(c114[0] * upright));
+  const float eh = power(lying);
+  const float total = ev + eh;
+  const float inverse = 1.0f / total;   // (infinite for no extent at all: the weights are then no numbers)
+  const float wv = ev * inverse, wh = eh * inverse;
+  const bool above = place[2] > c.vs[capture::kImpC47][2];
+  const float* end = upper ? top : bottom;
+  const float* side = upper ? (above ? back_v : fore_v) : (above ? fore_v : back_v);
+  float q[3] = {wv * end[0] + wh * side[0], wh * side[1] + wv * end[1], wh * side[2] + wv * end[2]};
+  q[0] = ((u * kImpostorTwo + kImpostorMinusOne) * S) + q[0];
+  const float w = std::fabs(q[0]) >= 0.0f ? kImpostorOne : 0.0f;   // 0 where q[0] is no number
+  const uint32_t rows[4] = {capture::kImpC72, capture::kImpC73, capture::kImpC74, capture::kImpC75};
+  for (int i = 0; i < 4; ++i) {
+    const float* row = c.vs[rows[i]];
+    pos[i] = (((0.0f + row[2] * q[2]) + row[1] * q[1]) + row[0] * q[0]) + row[3] * w;
+  }
+  const float* c113 = c.vs[capture::kImpC113];
+  uv[0] = u * c113[0] + c113[1];
+  uv[1] = v * c113[3] + c113[2];
+}
+
+// The fog's three coordinates at a raised place, from the record's own registers: the eye c47.xyz, the axis
+// c110.xyz, the range c111 (.x the start, .z the near blend's slope, .w the transmittance table's scale; .y is
+// the sky's and is not read). `fogged` false before the start, for a value that is no number, and with the
+// frame's fog off in the constants (light_formulas.fog_coords, through FogCoords).
+inline FogPoint ImpostorFogCoords(const float place[3], const ClayImpostorConstants& c) {
+  if (!(c.fog_on != 0.0f)) return FogPoint{};
+  ClayFogConstants f{};
+  for (int i = 0; i < 3; ++i) f.axis[i] = c.vs[capture::kImpC110][i];
+  f.on = 1;
+  f.start = c.vs[capture::kImpC111][0];
+  f.slope = c.vs[capture::kImpC111][2];
+  f.scale = c.vs[capture::kImpC111][3];
+  return FogCoords(place, c.vs[capture::kImpC47], f);
+}
+// (o2, o3) at the raised place (light_formulas.impostor_fog: the trees' vertex form without a c8.x factor, once a
+// tree): o2 the transmittance table at s, o3 the in-scatter table at the angle times (1 - o2), from the frame's two
+// tables (which the record's slots 16 and 17 are: the capture's `fog-table` rule). (1, 0) with the frame's fog off
+// (in the record's constants or in the frame's), before the start, and for any value that is no number.
+inline void ImpostorFogMirror(const float place[3], const ClayImpostorConstants& c, const ClayFrameConstants& frame, float o2[3], float o3[3]) {
+  for (int i = 0; i < 3; ++i) {
+    o2[i] = 1.0f;
+    o3[i] = 0.0f;
+  }
+  if (!frame.fog.on) return;
+  const FogPoint at = ImpostorFogCoords(place, c);
+  if (!at.fogged) return;
+  double T[3], S2[3], add[3];
+  FogTableRead(frame.transmit, kFogTransmitTexels, at.s, T);
+  FogTableRead(frame.scatter, kFogScatterTexels, at.a, S2);
+  for (int i = 0; i < 3; ++i) {
+    add[i] = (1.0 - T[i]) * S2[i];
+    if (!std::isfinite(T[i]) || !std::isfinite(S2[i]) || !std::isfinite(add[i])) return;
+  }
+  for (int i = 0; i < 3; ++i) {
+    o2[i] = float(T[i]);
+    o3[i] = float(add[i]);
+  }
+}
+
+// The pixel shader's values before the fog pair (light_formulas.impostor_distance, impostor_pixel): the distance
+// d = |c19 - o0|, the colour texel.rgb * c31.x * (1 + sat(0.1 * (d - c12.y)) * (c12.w - 1)) and the alpha
+// texel.a * sat((d - c29.x) * c29.y). `texel`: the picture's four values as the fetch gives them to the shader.
+struct ImpostorPixelValues {
+  float distance = 0.0f, alpha = 0.0f;
+  float colour[3] = {};
+};
+inline ImpostorPixelValues ImpostorPixelCore(const float texel[4], const float place[3], const ClayImpostorConstants& c) {
+#pragma clang fp contract(off)
+  auto sat = [](float x) { return x != x ? 0.0f : (x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x)); };   // (no number gives 0)
+  const float* c12 = c.ps[capture::kImpP12];
+  const float* c19 = c.ps[capture::kImpP19];
+  const float* c29 = c.ps[capture::kImpP29];
+  const float vx = c19[0] - place[0], vy = c19[1] - place[1], vz = c19[2] - place[2];
+  ImpostorPixelValues out;
+  out.distance = std::sqrt(std::fabs(((0.0f + vz * vz) + vx * vx) + vy * vy));
+  const float span = c12[3] + (-kImpostorOne);
+  const float fall = sat(kImpostorTenth * (out.distance + (-c12[1])));
+  const float dissolve = sat((out.distance - c29[0]) * c29[1]);
+  const float light = fall * span + kImpostorOne;
+  for (int i = 0; i < 3; ++i) out.colour[i] = (texel[i] * c.ps[capture::kImpP31][0]) * light;
+  out.alpha = texel[3] * dissolve;
+  return out;
+}
+// The written colour, ((colour * o2 + o3) * the output scale) as the lit draws write the linear target
+// ((v > 0) ? min(v, kPostSceneMax) : 0 a channel; a texel that is no number reads 0), and whether the pixel is kept
+// by `c.kept`: the alpha test (alpha > the draw's reference) and the covered samples under the offsets 0xAA
+// (ImpostorKept). The scale is the constants' out_scale: the game's c20.w in a post frame (MakeClayImpostorConstants).
+inline void ImpostorPixelMirror(const float texel[4], const float place[3], const float o2[3], const float o3[3],
+                                const ClayImpostorConstants& c, float out[3], bool* kept) {
+#pragma clang fp contract(off)
+  const ImpostorPixelValues p = ImpostorPixelCore(texel, place, c);
+  for (int i = 0; i < 3; ++i) {
+    const float v = (p.colour[i] * o2[i] + o3[i]) * c.out_scale;
+    out[i] = v > 0.0f ? (v < kPostSceneMax ? v : kPostSceneMax) : 0.0f;   // (no number: 0)
+  }
+  if (kept) *kept = ImpostorKept(c.kept, p.alpha > c.alpha_ref, CoveredSamples(kImpostorMaskOffsets, 0, 0, p.alpha));
+}
+// IMPOSTOR MIRRORS END
+
+// Where the impostor step is drawn in the colour loop: before the prepared record at the returned index (`count`:
+// after the last). `seqs`: the prepared records' DrawRecord::seq in the frame's order; `place`: the smallest place
+// of the frame's impostor records (the seq their calls were counted under: where the game issues them, before the
+// terrain layers). The first record at or beyond the place, moved forward so that the step lies at or before the
+// sky step (`sky_at`), the early records' tail (`tail_at`; kNoCoverageTail: none) and the layer's depth
+// (`depth_at`): it is opaque and writes depth, so drawn earlier it changes no pixel, and drawn after one of the
+// three it would miss the sky's test, a blend or the sun layer's depth.
+constexpr size_t PlanImpostorPlace(const uint32_t* seqs, size_t count, uint32_t place, size_t sky_at, size_t tail_at, size_t depth_at) {
+  size_t at = count;
+  for (size_t i = 0; seqs && i < count; ++i) {
+    if (seqs[i] >= place) {
+      at = i;
+      break;
+    }
+  }
+  if (sky_at < at) at = sky_at;
+  if (tail_at < at) at = tail_at;   // (kNoCoverageTail is the largest index: no bound)
+  if (depth_at < at) at = depth_at;
+  return at;
+}
 
 // --- Native wind (frame-map section 18, "Native wind"; docs/native-renderer/lighting-formulas.md, "Wind") ---
 //

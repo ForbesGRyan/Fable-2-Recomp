@@ -2081,7 +2081,7 @@ static void NativeWindTests() {
     CHECK(725, out[0] == p[0] && out[1] == p[1] && out[2] == p[2]);
     WindPlantMirror(p, 0.75f, -0.5f, c, out);
     CHECK(725, out[0] == p[0] && out[1] == p[1] && out[2] == p[2]);
-    const float reach = WindReach(wi, spec, WindExtent{});
+    const float reach = ClayWindReach(wi.family, c, WindExtent{});
     CHECK(725, reach > 0.09f && reach < 0.12f);
     float far_most = 0.0f;
     for (int i = 0; i < 400; ++i) {
@@ -2113,8 +2113,8 @@ static void NativeWindTests() {
     tree.family = WindFamily::kLeaf;
     const ClayWindConstants lc = MakeClayWindConstants(tree, *leaf, r);
     CHECK(726, lc.lit[4][2] == 100.0f && lc.lit[4][3] == -0.3f && lc.lit[5][3] == 1.0f && lc.lit[6][3] == 0.15f && lc.lit[0][1] == 0.7f);
-    // The reach of a family the inputs are not, of no family, and of a value that is no number: no bound.
-    CHECK(726, std::isinf(WindReach(tree, *trunk, WindExtent{1.0f, 1.0f})) && std::isinf(ClayWindReach(WindFamily::kNone, lc, WindExtent{})));
+    // The reach of no family, and of a value that is no number: no bound.
+    CHECK(726, std::isinf(ClayWindReach(WindFamily::kNone, lc, WindExtent{})));
     ClayWindConstants nan = lc;
     nan.reg[2][2] = std::numeric_limits<float>::quiet_NaN();
     CHECK(726, std::isinf(ClayWindReach(WindFamily::kLeaf, nan, WindExtent{1.0f, 1.0f})) &&
@@ -2262,22 +2262,6 @@ static void NativeWindTests() {
       plants += family == WindFamily::kPlant;
       trunks += family == WindFamily::kTrunk;
       leaves += family == WindFamily::kLeaf;
-      // (WindReach, from inputs: a tree's registers as they are; a plant's unpacked from the line)
-      capture::WindInputs wi;
-      wi.family = family;
-      if (family == WindFamily::kPlant) {
-        wi.reg[0][0] = c.reg[0][0];
-        wi.reg[3][0] = c.reg[0][1];
-        wi.reg[4][0] = c.reg[0][2];
-        wi.reg[4][1] = c.reg[0][3];
-        for (int k = 0; k < 3; ++k) {
-          wi.reg[1][k] = c.reg[1][k];
-          wi.reg[2][k] = c.reg[2][k];
-        }
-      } else {
-        std::memcpy(wi.reg, c.reg, sizeof(c.reg));
-      }
-      CHECK(735, WindReach(wi, *capture::FindWind(pin.hash), extent) == got);
     }
     CHECK(735, plants == 3 && trunks == 6 && leaves == 6);
     // Rounded UP from the double: over 400 made plants (the two amplitudes varied), against the reference's
@@ -3641,6 +3625,374 @@ int main() {
       CHECK(178, slot == (i < kMaxClayPipelines ? i : kNoPipelineSlot));
     }
     CHECK(179, full.size() == kMaxClayPipelines && kMaxClayPipelines == 64);
+  }
+  // 766: the wind's and the coverage's keys have a cache of their own (final review of sub-project 11, I1): which
+  // cache a key belongs to; every variant of a full ordinary cache fits; at the bound a new key is refused, the old
+  // ones are found and nothing is replaced; no variant ever takes a slot of the ordinary cache.
+  {
+    CHECK(766, kClayVariantsOfAState == 7 && kMaxClayVariantPipelines == 448 && kMaxClayVariantPipelines == 7 * kMaxClayPipelines);
+    PipelineKey k;
+    CHECK(766, !VariantKey(k) && PipelineKeyKindOf(k) == PipelineKeyKind::kOrdinary);
+    k.wind = 1;
+    CHECK(766, VariantKey(k) && PipelineKeyKindOf(k) == PipelineKeyKind::kWind);
+    k.coverage = 2;
+    CHECK(766, VariantKey(k) && PipelineKeyKindOf(k) == PipelineKeyKind::kWind);  // (a moved coverage part: the wind's)
+    k.wind = 0;
+    CHECK(766, VariantKey(k) && PipelineKeyKindOf(k) == PipelineKeyKind::kCoverage);
+    k.coverage = 1;
+    CHECK(766, VariantKey(k) && PipelineKeyKindOf(k) == PipelineKeyKind::kCoverage);
+    CHECK(766, std::string(PipelineRefusalText(PipelineKeyKind::kOrdinary)).find("default pipeline") != std::string::npos &&
+                   std::string(PipelineRefusalText(PipelineKeyKind::kOrdinary)).find("left out") != std::string::npos &&
+                   std::string(PipelineRefusalText(PipelineKeyKind::kWind)).find("at rest") != std::string::npos &&
+                   std::string(PipelineRefusalText(PipelineKeyKind::kCoverage)).find("drawn whole") != std::string::npos);
+    // A full ordinary cache of textured states, and every part every plan asks of each, at rest and moved: all fit.
+    std::vector<PipelineKey> ordinary, variants;
+    size_t asked = 0;
+    for (size_t i = 0; i < kMaxClayPipelines; ++i) {
+      PipelineKey own;
+      own.textured = 1;
+      own.color_mask = uint8_t(i & 0xF);
+      own.cull = uint8_t((i >> 4) & 3);
+      CHECK(766, FindOrAddPipelineSlot(ordinary, own) == i);
+      std::vector<PipelineKey> of_state;
+      for (bool wind : {false, true}) {
+        for (CoveragePlan plan : {CoveragePlan::kNone, CoveragePlan::kLate, CoveragePlan::kEarlyFull, CoveragePlan::kEarlyHalf}) {
+          const RecordKeys keys = RecordPipelineKeys(own, plan, wind);
+          for (const PipelineKey* key : {&keys.place, keys.has_tail ? &keys.tail : nullptr, keys.has_depth ? &keys.depth : nullptr}) {
+            if (!key) continue;
+            CHECK(766, VariantKey(*key) == !(*key == own));  // (the one key that is no variant: the state's own, at rest)
+            if (!VariantKey(*key)) continue;
+            ++asked;
+            FindOrAddPipelineSlot(of_state, *key, 64);
+            CHECK(766, FindOrAddPipelineSlot(variants, *key, kMaxClayVariantPipelines) != kNoPipelineSlot);
+          }
+        }
+      }
+      CHECK(766, of_state.size() == kClayVariantsOfAState);  // (own+wind; half, its depth step, full; those three moved)
+    }
+    CHECK(766, asked == kMaxClayPipelines * 16 && variants.size() <= kMaxClayVariantPipelines && ordinary.size() == kMaxClayPipelines);
+    // At the bound: made keys until it is full, then no slot; the ordinary cache is not touched by it.
+    std::vector<PipelineKey> at_limit;
+    for (size_t i = 0; i < kMaxClayVariantPipelines + 10; ++i) {
+      PipelineKey v;
+      v.wind = 1;
+      v.color_mask = uint8_t(i & 0xF);
+      v.src = uint8_t((i >> 4) & 0xF);
+      v.dst = uint8_t(i >> 8);
+      const size_t slot = FindOrAddPipelineSlot(at_limit, v, kMaxClayVariantPipelines);
+      CHECK(766, slot == (i < kMaxClayVariantPipelines ? i : kNoPipelineSlot));
+    }
+    CHECK(766, at_limit.size() == kMaxClayVariantPipelines);
+    for (size_t i = 0; i < kMaxClayVariantPipelines; i += 37) {
+      PipelineKey v;
+      v.wind = 1;
+      v.color_mask = uint8_t(i & 0xF);
+      v.src = uint8_t((i >> 4) & 0xF);
+      v.dst = uint8_t(i >> 8);
+      CHECK(766, FindOrAddPipelineSlot(at_limit, v, kMaxClayVariantPipelines) == i);
+    }
+  }
+  // 767: a record whose state finds no pipeline (the cache full, the creation failed): drawn with the default
+  // pipeline when its state does not blend, left out when it does (drawn opaque with a depth write it would
+  // cover what the game shows through it: the rule of a blend whose colour is unknown).
+  {
+    PipelineKey k;
+    CHECK(767, DefaultPipelineServes(k) && DefaultPipelineServes(TerrainFlatDefaultKey()));
+    k.cull = 2;
+    k.depth_write = 0;
+    k.color_mask = 0;
+    CHECK(767, DefaultPipelineServes(k));
+    k.blend = 1;
+    CHECK(767, !DefaultPipelineServes(k));
+    capture::RenderState rs = State(0x00708767, 0x07060706u, 0x00000004, 0x00218006);
+    capture::Material m;
+    m.status = capture::MaterialStatus::kTextured;
+    m.alpha.source = capture::AlphaSource::kAlbedo;
+    const DrawState d = DecideDrawState(rs, m, 1, false);
+    CHECK(767, rs.valid && DefaultPipelineServes(d.key) == (d.key.blend == 0));
+  }
+  // 768: which pipelines a record asks for and in which order (TakeRecordPipelines). A record that may be drawn
+  // moved asks for the wind program's pipelines FIRST and its rest pipelines only when one of those is refused: no
+  // rest pipeline is made for a record that is then drawn moved (final review, I1). All or nothing a set; the order
+  // of the sets: moved with its coverage parts, at rest with them, moved whole, at rest whole.
+  {
+    PipelineKey own;
+    own.textured = 1;
+    own.cull = 2;
+    PipelineKey own_w = own;
+    own_w.wind = 1;
+    // (the keys of each plan)
+    for (bool wind : {false, true}) {
+      const PipelineKey base = wind ? own_w : own;
+      RecordKeys keys = RecordPipelineKeys(own, CoveragePlan::kNone, wind);
+      CHECK(768, keys.place == base && !keys.has_tail && !keys.has_depth);
+      keys = RecordPipelineKeys(own, CoveragePlan::kLate, wind);
+      CHECK(768, keys.place == CoverageHalfKey(base) && !keys.has_tail && keys.has_depth && keys.depth == CoverageHalfDepthKey(base));
+      keys = RecordPipelineKeys(own, CoveragePlan::kEarlyFull, wind);
+      CHECK(768, keys.place == CoverageFullKey(base) && keys.has_tail && keys.tail == CoverageHalfKey(base) && keys.has_depth &&
+                     keys.depth == CoverageHalfDepthKey(base));
+      keys = RecordPipelineKeys(own, CoveragePlan::kEarlyHalf, wind);
+      CHECK(768, keys.place == base && keys.has_tail && keys.tail == CoverageHalfKey(base) && keys.has_depth &&
+                     keys.depth == CoverageHalfDepthKey(base));
+      CHECK(768, keys.place.wind == (wind ? 1 : 0) && keys.tail.wind == keys.place.wind && keys.depth.wind == keys.place.wind);
+    }
+    // The eight keys a record can ask for; `refused`: bit i refuses candidate i. The handle of a granted key is its
+    // index + 1 (0: refused).
+    const PipelineKey candidates[8] = {own,   CoverageHalfKey(own),   CoverageHalfDepthKey(own),   CoverageFullKey(own),
+                                       own_w, CoverageHalfKey(own_w), CoverageHalfDepthKey(own_w), CoverageFullKey(own_w)};
+    for (int a = 0; a < 8; ++a) {
+      for (int b = a + 1; b < 8; ++b) CHECK(768, !(candidates[a] == candidates[b]));
+    }
+    std::vector<int> log;
+    uint32_t refused = 0;
+    auto ask = [&](const PipelineKey& key) -> int {
+      for (int i = 0; i < 8; ++i) {
+        if (candidates[i] == key) {
+          log.push_back(i);
+          return (refused >> i) & 1u ? 0 : i + 1;
+        }
+      }
+      log.push_back(-1);  // (a key that is none of the record's)
+      return 0;
+    };
+    auto asked_rest = [&] { return std::count_if(log.begin(), log.end(), [](int i) { return i < 4; }) != 0; };
+    // Nothing refused. A moved record: the wind program's keys alone, never a rest key.
+    log.clear();
+    RecordPipelines<int> got = TakeRecordPipelines<int>(own, CoveragePlan::kNone, true, ask);
+    CHECK(768, got.moved && got.plan == CoveragePlan::kNone && got.place == 5 && got.tail == 0 && got.depth == 0 && log == std::vector<int>({4}));
+    log.clear();
+    got = TakeRecordPipelines<int>(own, CoveragePlan::kLate, true, ask);
+    CHECK(768, got.moved && got.plan == CoveragePlan::kLate && got.place == 6 && got.tail == 0 && got.depth == 7 && log == std::vector<int>({5, 6}));
+    log.clear();
+    got = TakeRecordPipelines<int>(own, CoveragePlan::kEarlyFull, true, ask);
+    CHECK(768, got.moved && got.plan == CoveragePlan::kEarlyFull && got.place == 8 && got.tail == 6 && got.depth == 7 &&
+                   log == std::vector<int>({5, 6, 7}));
+    log.clear();
+    got = TakeRecordPipelines<int>(own, CoveragePlan::kEarlyHalf, true, ask);
+    CHECK(768, got.moved && got.plan == CoveragePlan::kEarlyHalf && got.place == 5 && got.tail == 6 && got.depth == 7 &&
+                   log == std::vector<int>({5, 6, 4}));
+    // A record that cannot sway: its rest keys alone, never a wind key; without coverage its own key alone (the pass
+    // of before the switches).
+    log.clear();
+    got = TakeRecordPipelines<int>(own, CoveragePlan::kNone, false, ask);
+    CHECK(768, !got.moved && got.plan == CoveragePlan::kNone && got.place == 1 && log == std::vector<int>({0}));
+    log.clear();
+    got = TakeRecordPipelines<int>(own, CoveragePlan::kLate, false, ask);
+    CHECK(768, !got.moved && got.plan == CoveragePlan::kLate && got.place == 2 && got.depth == 3 && log == std::vector<int>({1, 2}));
+    log.clear();
+    got = TakeRecordPipelines<int>(own, CoveragePlan::kEarlyFull, false, ask);
+    CHECK(768, !got.moved && got.plan == CoveragePlan::kEarlyFull && got.place == 4 && got.tail == 2 && got.depth == 3 &&
+                   log == std::vector<int>({1, 2, 3}));
+    log.clear();
+    got = TakeRecordPipelines<int>(own, CoveragePlan::kEarlyHalf, false, ask);
+    CHECK(768, !got.moved && got.plan == CoveragePlan::kEarlyHalf && got.place == 1 && got.tail == 2 && got.depth == 3 &&
+                   log == std::vector<int>({1, 2, 0}));
+    // One moved key refused: the record rests in every pipeline, with its coverage parts.
+    refused = 1u << 6;
+    log.clear();
+    got = TakeRecordPipelines<int>(own, CoveragePlan::kLate, true, ask);
+    CHECK(768, !got.moved && got.plan == CoveragePlan::kLate && got.place == 2 && got.depth == 3 && log == std::vector<int>({5, 6, 1, 2}));
+    // No half program's pipeline at all: moved whole (today's record, moved).
+    refused = (1u << 1) | (1u << 5);
+    log.clear();
+    got = TakeRecordPipelines<int>(own, CoveragePlan::kEarlyFull, true, ask);
+    CHECK(768, got.moved && got.plan == CoveragePlan::kNone && got.place == 5 && got.tail == 0 && got.depth == 0 && log == std::vector<int>({5, 1, 4}));
+    // Every variant refused (the variants' cache full): the record of before the switches.
+    refused = 0xFEu;
+    log.clear();
+    got = TakeRecordPipelines<int>(own, CoveragePlan::kEarlyFull, true, ask);
+    CHECK(768, !got.moved && got.plan == CoveragePlan::kNone && got.place == 1 && got.tail == 0 && got.depth == 0);
+    // Everything refused: no pipeline (the caller's rule: DefaultPipelineServes).
+    refused = 0xFFu;
+    got = TakeRecordPipelines<int>(own, CoveragePlan::kLate, true, ask);
+    CHECK(768, !got.moved && got.plan == CoveragePlan::kNone && got.place == 0 && got.tail == 0 && got.depth == 0);
+    // Every plan, swaying or not, under every set of refusals: the result is the first complete set of the order,
+    // exactly its keys, each asked and granted; a moved result asked no rest key before it was granted unless a
+    // moved set was refused first; a record that cannot sway never asks a wind key; no key of another record.
+    for (CoveragePlan plan : {CoveragePlan::kNone, CoveragePlan::kLate, CoveragePlan::kEarlyFull, CoveragePlan::kEarlyHalf}) {
+      for (bool sway : {false, true}) {
+        for (refused = 0; refused < 256; ++refused) {
+          log.clear();
+          got = TakeRecordPipelines<int>(own, plan, sway, ask);
+          auto handle = [&](const PipelineKey& key) {
+            for (int i = 0; i < 8; ++i) {
+              if (candidates[i] == key) return (refused >> i) & 1u ? 0 : i + 1;
+            }
+            return 0;
+          };
+          auto complete = [&](CoveragePlan p, bool wind, RecordPipelines<int>* out) {
+            const RecordKeys keys = RecordPipelineKeys(own, p, wind);
+            out->place = handle(keys.place);
+            out->tail = keys.has_tail ? handle(keys.tail) : 0;
+            out->depth = keys.has_depth ? handle(keys.depth) : 0;
+            out->moved = wind;
+            out->plan = p;
+            return out->place && (!keys.has_tail || out->tail) && (!keys.has_depth || out->depth);
+          };
+          RecordPipelines<int> want;
+          bool found = false;
+          if (!found && sway && plan != CoveragePlan::kNone) found = complete(plan, true, &want);
+          if (!found && plan != CoveragePlan::kNone) found = complete(plan, false, &want);
+          if (!found && sway) found = complete(CoveragePlan::kNone, true, &want);
+          if (!found) found = complete(CoveragePlan::kNone, false, &want);
+          if (!found) want = RecordPipelines<int>{};
+          CHECK(768, got.place == want.place && got.tail == want.tail && got.depth == want.depth && got.moved == want.moved && got.plan == want.plan);
+          CHECK(768, std::count(log.begin(), log.end(), -1) == 0);
+          if (!sway) CHECK(768, std::count_if(log.begin(), log.end(), [](int i) { return i >= 4; }) == 0);
+          if (sway && (refused & 0xF0u) == 0) CHECK(768, got.moved && !asked_rest());
+          for (int part : {got.place, got.tail, got.depth}) {
+            if (part) CHECK(768, std::count(log.begin(), log.end(), part - 1) != 0 && !((refused >> (part - 1)) & 1u));
+          }
+        }
+      }
+    }
+    refused = 0;
+  }
+  // 769: the colour loop's steps before each record (ColourStepsDue) and after the last (ColourStepsAfter): the sky
+  // step, the early records' tail and the layer's depth, in that order, at places that are PREPARED-record places
+  // for the sky and the tail and FrameScene::draws places for the layer's depth (final review, section 7: the two
+  // index spaces). The walk below is the pass's loop, statement for statement.
+  {
+    const char kSkyStep = 'S', kTailStep = 'T', kDepthStep = 'D', kRecordStep = 'r';
+    auto walk = [](const ColourOrder& order, const std::vector<uint32_t>& records) {
+      std::string steps;
+      bool sky_done = false, depth_taken = false;
+      for (size_t index = 0; index < records.size(); ++index) {
+        const ColourDue due = ColourStepsDue(order, index, records[index], sky_done, depth_taken);
+        if (due.tail) {
+          if (due.sky_first) {
+            steps += kSkyStep;
+            sky_done = true;
+          }
+          steps += kTailStep;
+        }
+        if (due.layer_depth) {
+          steps += kDepthStep;
+          depth_taken = true;
+        }
+        if (due.sky) steps += kSkyStep;
+        steps += kRecordStep;
+      }
+      const ColourDue after = ColourStepsAfter(order, records.size());
+      if (after.sky) steps += kSkyStep;
+      if (after.tail) steps += kTailStep;
+      return steps;
+    };
+    // The prepared records' places in FrameScene::draws: not their places among the prepared ones.
+    const std::vector<uint32_t> records = {3, 7, 9, 20, 21};
+    ColourOrder order;
+    // (nothing: the loop of before)
+    CHECK(769, walk(order, records) == "rrrrr");
+    order.sky_drawn = true;
+    order.sky_at = 2;
+    CHECK(769, walk(order, records) == "rrSrrr");
+    order.sky_at = 5;
+    CHECK(769, walk(order, records) == "rrrrrS");
+    order.sky_at = 9;  // (a place beyond the records: after the last, once)
+    CHECK(769, walk(order, records) == "rrrrrS");
+    // The layer's depth: before the first prepared record whose place in FrameScene::draws is at or beyond the
+    // plan's record: record 8 lies before the THIRD prepared record (draws place 9), not before prepared place 8
+    // (none) and not before the plan's own number taken as a prepared place.
+    order.sky_at = 4;
+    order.depth_early = true;
+    order.depth = PlanSunDepthPlace(1, 0, 8, 30);
+    CHECK(769, order.depth.usable && walk(order, records) == "rrDrrSr");
+    order.depth = PlanSunDepthPlace(1, 0, 3, 30);
+    CHECK(769, walk(order, records) == "DrrrrSr");
+    order.depth = PlanSunDepthPlace(1, 0, 4, 30);
+    CHECK(769, walk(order, records) == "rDrrrSr");
+    order.depth = PlanSunDepthPlace(1, 0, 22, 30);  // (no prepared record at or beyond it: not taken among them)
+    CHECK(769, walk(order, records) == "rrrrSr");
+    order.depth = PlanSunDepthPlace(1, 0, 8, 30);
+    order.depth_early = false;  // (no drawn layer, or the feed)
+    CHECK(769, walk(order, records) == "rrrrSr");
+    order.depth_early = true;
+    // The tail at the depth's place: the tail first, then the depth; with the sky there too: sky, tail, depth, once each.
+    order.tail_at = 2;
+    CHECK(769, walk(order, records) == "rrTDrrSr");
+    order.sky_at = 2;
+    CHECK(769, walk(order, records) == "rrSTDrrr");
+    order.sky_at = 1;
+    CHECK(769, walk(order, records) == "rSrTDrrr");
+    // A tail after the last record: after the sky step.
+    order.tail_at = 5;
+    order.sky_at = 5;
+    CHECK(769, walk(order, records) == "rrDrrrST");
+    order.sky_drawn = false;  // (a frame without a sky step: no sky anywhere, the tail and the depth as they are)
+    CHECK(769, walk(order, records) == "rrDrrrT");
+    order.tail_at = 2;
+    order.sky_at = 2;
+    CHECK(769, walk(order, records) == "rrTDrrr");
+    // With PlanCoverageOrder and CoverageDepthPlace, for every arrangement of up to five records and every depth
+    // place: one sky step, at most one tail and one depth step; the tail never after the depth step, never after a
+    // late record and never before the sky step; the sky step before every late record and before every blended
+    // record that follows a coverage record's place; the depth step before exactly the record CoverageDepthPlace names.
+    const CoverageItem kinds[4] = {{CoverageKind::kNone, false}, {CoverageKind::kNone, true}, {CoverageKind::kEarly, false}, {CoverageKind::kLate, false}};
+    size_t walked = 0;
+    for (size_t count = 0; count <= 5; ++count) {
+      size_t arrangements = 1;
+      for (size_t i = 0; i < count; ++i) arrangements *= 4;
+      for (size_t a = 0; a < arrangements; ++a) {
+        std::vector<CoverageItem> items;
+        std::vector<uint32_t> places;
+        for (size_t i = 0, rest = a; i < count; ++i, rest /= 4) {
+          items.push_back(kinds[rest % 4]);
+          places.push_back(uint32_t(10 + 3 * i));  // (draws places 10, 13, 16, ...)
+        }
+        size_t sky_place = count;  // (SkyPlace: before the first blended record)
+        for (size_t i = count; i-- > 0;) {
+          if (items[i].blends) sky_place = i;
+        }
+        for (uint32_t depth_record : {capture::kNoDepthPlace, 0u, 11u, 13u, 17u, 40u}) {
+          ColourOrder o;
+          o.sky_drawn = true;
+          o.depth_early = depth_record != capture::kNoDepthPlace;
+          o.depth = PlanSunDepthPlace(depth_record == capture::kNoDepthPlace ? 0 : 1, 0, depth_record, 64);
+          const size_t depth_place = CoverageDepthPlace(o.depth, o.depth_early, places.data(), count);
+          const CoverageOrder planned = PlanCoverageOrder(items.data(), count, sky_place, depth_place);
+          o.sky_at = planned.sky;
+          o.tail_at = planned.tail;
+          const std::string steps = walk(o, places);
+          ++walked;
+          CHECK(769, std::count(steps.begin(), steps.end(), char(kSkyStep)) == 1);
+          CHECK(769, std::count(steps.begin(), steps.end(), char(kRecordStep)) == std::ptrdiff_t(count));
+          CHECK(769, std::count(steps.begin(), steps.end(), char(kTailStep)) == (planned.tail == kNoCoverageTail ? 0 : 1));
+          CHECK(769, std::count(steps.begin(), steps.end(), char(kDepthStep)) == (depth_place < count ? 1 : 0));
+          const size_t sky_pos = steps.find(char(kSkyStep)), tail_pos = steps.find(char(kTailStep)), depth_pos = steps.find(char(kDepthStep));
+          if (tail_pos != std::string::npos) {
+            CHECK(769, sky_pos < tail_pos);
+            if (depth_pos != std::string::npos) CHECK(769, tail_pos < depth_pos);
+          }
+          // (the records before each step: the step's place among the prepared records)
+          auto before = [&](size_t pos) { return size_t(std::count(steps.begin(), steps.begin() + std::ptrdiff_t(pos), char(kRecordStep))); };
+          if (depth_pos != std::string::npos) CHECK(769, before(depth_pos) == depth_place);
+          CHECK(769, before(sky_pos) == (planned.sky < count ? planned.sky : count));
+          if (tail_pos != std::string::npos) CHECK(769, before(tail_pos) == (planned.tail < count ? planned.tail : count));
+          for (size_t i = 0; i < count; ++i) {
+            if (items[i].kind == CoverageKind::kLate) {
+              CHECK(769, before(sky_pos) <= i);
+              if (tail_pos != std::string::npos) CHECK(769, before(tail_pos) <= i);
+            }
+          }
+        }
+      }
+    }
+    CHECK(769, walked == (1 + 4 + 16 + 64 + 256 + 1024) * 6);
+  }
+  // 770: the State line names the wind's and the coverage's pipelines when there are any, and the keys their cache
+  // refused; without them it is the line of before.
+  {
+    ClayStats st;
+    st.pipelines = 29;
+    st.pipeline_variants = 16;
+    CHECK(770, FormatStateText(st) == "State: 29 pipelines (wind and coverage 16 of 448), alpha test 0, blended 0, invalid 0");
+    st.pipeline_refused = 3;
+    st.pipeline_overflow = 2;
+    CHECK(770, FormatStateText(st) == "State: 29 pipelines (wind and coverage 16 of 448, refused 3) (overflow 2), alpha test 0, blended 0, invalid 0");
+    st.pipeline_variants = 0;
+    CHECK(770, FormatStateText(st) == "State: 29 pipelines (wind and coverage 0 of 448, refused 3) (overflow 2), alpha test 0, blended 0, invalid 0");
+    st.pipeline_refused = 0;
+    CHECK(770, FormatStateText(st) == "State: 29 pipelines (overflow 2), alpha test 0, blended 0, invalid 0");
   }
   // 180-199: what the pass does with a record's state and material (Review Focus 3).
   {

@@ -97,13 +97,16 @@ REXCVAR_DEFINE_STRING(fable2_native_sun, "off", "Fable2",
                       "records (the game's moon, cloud, glare, beam-source, flare, moon-glow, sun-disc and cloud-occluder quads "
                       "at the indexed builder's calls, at most 24 a frame), the radial blur's registers and the place of the "
                       "game's late records, and a post frame with a sky draws the moon, the clouds and the glare in its scene, "
-                      "the game's half-size sun layer (beams, flares, moon glow, sun disc) into the bloom's bright pass, and "
+                      "the game's half-size sun layer (beams, flares, moon glow, sun disc) into the bloom's bright pass, "
+                      "draws the game's late tree occluders again into that layer's depth (sub-project 11, phase 11c: no "
+                      "switch of its own), and "
                       "mixes a tenth of the previous frame's picture as the game does; off (or false, 0; the default) = none "
                       "of it is read or drawn: the picture of fable2_native_post and fable2_native_bloom alone. Off by default "
                       "because towards the sun the native picture is not yet the game's (the native scene is too dark there): "
                       "frame map section 17, \"Validation (10c)\".");
 REXCVAR_DEFINE_STRING(fable2_native_wind, "off", "Fable2",
-                      "Native wind (sub-project 11, phase 11a; not yet validated): on (or true, 1) = with a composite view "
+                      "Native wind (sub-project 11, phase 11a; default off until the user's checks: frame map section 18, "
+                      "\"Validation (11a)\"): on (or true, 1) = with a composite view "
                       "the capture also reads the wind inputs of the draws whose vertex shader sways (trunks, leaves, "
                       "instanced plants and their shadow casters: three to five vertex registers a draw, the shader's "
                       "literal table once a frame, a tree's vertex elements) into a side array of the frame, and the native "
@@ -111,7 +114,8 @@ REXCVAR_DEFINE_STRING(fable2_native_wind, "off", "Fable2",
                       "(F3: the Wind line); off (or false, 0; the default) = none of it is read, made or drawn. Frame map "
                       "section 18.");
 REXCVAR_DEFINE_STRING(fable2_native_coverage, "off", "Fable2",
-                      "Native coverage (sub-project 11, phase 11b; not yet validated): on (or true, 1) = the native view "
+                      "Native coverage (sub-project 11, phase 11b; default off until the user's checks: frame map section "
+                      "18, \"Validation (11b)\"): on (or true, 1) = the native view "
                       "draws a tree that fades (between the eye and the hero, or by distance) as the game's two samples "
                       "resolve it under alpha-to-mask: the pixels with both samples covered whole, the pixels with one at "
                       "one half over what lies behind (F3: the Coverage line); off (or false, 0; the default) = such a tree "

@@ -522,8 +522,13 @@ struct ClayStats {
   // counted), and records that found no pipeline for their state because the
   // cache was full or the pipeline could not be created: drawn records that
   // used the default pipeline, and terrain records that lost their material
-  // for it (terrain-inputs; counted once, also when their flat draw finds none).
+  // for it (terrain-inputs; counted once, also when their flat draw finds none),
+  // and blended records left out for it (DefaultPipelineServes).
+  // pipeline_variants: of `pipelines`, those of the wind's and the coverage's own cache (VariantKey);
+  // pipeline_refused: the keys that cache refused this frame because it was full (the record is then
+  // drawn at rest or whole, by its ordinary pipeline, and counted on the Wind or the Coverage line too).
   uint32_t pipelines = 0, pipeline_overflow = 0;
+  uint32_t pipeline_variants = 0, pipeline_refused = 0;
   // alpha_unknown and blend_unknown by pixel shader (kTallyAlphaUnknown, kTallyBlendUnknown).
   capture::ShaderTally<32> unknown_by_ps;
   // Terrain layer records left out because their ground square is drawn as flat
@@ -1505,7 +1510,8 @@ struct PipelineKey {
   uint8_t wind = 0;          // 1: the wind vertex program ("Native wind" below); 0: the clay vertex shader, as always
   // 1: the half program of a coverage record ("Coverage" below: the pixels with one sample of two, blended at one
   // half); 2: the full program (the pixels with both samples, as the record's own state draws them); 0: the kind's
-  // own pixel shader, as always. Only CoverageHalfKey and CoverageFullKey set it; no pre-pass key has it.
+  // own pixel shader, as always. Only CoverageHalfKey, CoverageHalfDepthKey and CoverageFullKey set it; no
+  // pre-pass key has it.
   uint8_t coverage = 0;
   bool operator==(const PipelineKey&) const = default;
 };
@@ -1586,6 +1592,43 @@ inline PipelineKey MakePipelineKey(const capture::RenderState& s, uint8_t textur
 
 inline constexpr size_t kMaxClayPipelines = 64;
 inline constexpr size_t kNoPipelineSlot = ~size_t(0);
+
+// The colour pass has TWO pipeline caches, neither evicted within a run (final review of sub-project 11, I1):
+//   the ordinary one, kMaxClayPipelines keys: every key without `wind` and without `coverage`, the cache of
+//   before the two switches, which holds exactly what it held then (no variant ever takes a slot of it);
+//   the variants' one, kMaxClayVariantPipelines keys: every key with `wind` or `coverage` (VariantKey).
+// A render state has at most seven variants (its own moved; its half part, that part's depth step and its
+// full part; those three moved: RecordPipelineKeys), so the variants' cache holds every variant of a full
+// ordinary cache: 7 x 64 = 448. Host memory at the bound: 448 keys of 15 bytes and 448 pointers, about 10 KB,
+// and one pipeline object of the driver's for each key made (not measured; the programs are shared). A lookup
+// is a linear search over the keys (at most 6.7 KB), a few a record.
+// Beyond a bound nothing is replaced and the key is refused, every frame anew, counted and logged once a cache
+// (PipelineRefusalText):
+//   a variant: the record is drawn as before the switches (a wind key: at rest; a coverage key: whole), by its
+//   ordinary pipeline: TakeRecordPipelines;
+//   an ordinary key: DefaultPipelineServes.
+inline constexpr size_t kClayVariantsOfAState = 7;
+inline constexpr size_t kMaxClayVariantPipelines = kClayVariantsOfAState * kMaxClayPipelines;
+constexpr bool VariantKey(const PipelineKey& k) { return k.wind != 0 || k.coverage != 0; }
+// What a refused key was, for the log: a key of the wind program (a moved coverage part too), a coverage
+// part at rest, or an ordinary key.
+enum class PipelineKeyKind : uint8_t { kOrdinary, kWind, kCoverage };
+constexpr PipelineKeyKind PipelineKeyKindOf(const PipelineKey& k) {
+  return k.wind ? PipelineKeyKind::kWind : k.coverage ? PipelineKeyKind::kCoverage : PipelineKeyKind::kOrdinary;
+}
+constexpr const char* PipelineRefusalText(PipelineKeyKind kind) {
+  switch (kind) {
+    case PipelineKeyKind::kWind: return "a wind key: its records are drawn at rest";
+    case PipelineKeyKind::kCoverage: return "a coverage key: its records are drawn whole";
+    default: return "an ordinary key: its records are drawn with the default pipeline, or left out when their state blends";
+  }
+}
+// A record whose state has no pipeline (the cache is full, or the pipeline could not be created): true, it is
+// drawn with the default pipeline of its kind (opaque, depth less with write, no cull: wrong in cull or depth at
+// most); false, it is left out: its state blends, and drawn opaque with a depth write it would cover what the
+// game shows through it and what is drawn behind it afterwards (the rule of a blend whose colour is not known:
+// DecideDrawState). Counted in the State line's overflow either way.
+constexpr bool DefaultPipelineServes(const PipelineKey& k) { return k.blend == 0; }
 
 // Index of `k` in `keys`, appended if absent and there is room; kNoPipelineSlot when the
 // cache is full (the caller then draws with the default pipeline and counts the overflow).
@@ -1832,11 +1875,12 @@ constexpr CoverageOrder PlanCoverageOrder(const CoverageItem* items, size_t coun
 }
 
 // Native coverage, the late records (plan Task 13). A late record that the frame draws with its texture is
-// drawn ONCE in the colour pass, at its own place, by the half program (shaders::kClayTexturedHalfPs: it keeps
-// the pixels with exactly one covered sample and writes the constant alpha one half) blended source alpha over
-// inverse source alpha with the record's own depth test and depth write; and it is left out of the depth
-// pre-pass, where a coverage record writes its fully covered pixels alone and a late record has none
-// (!CoverageHasFull). So its end depth is today's (every pixel its first sample covers), the layer's depth and
+// drawn in the colour pass alone, at its own place, by the half program (shaders::kClayTexturedHalfPs: it keeps
+// the pixels with exactly one covered sample and writes the constant alpha one half), in two steps since ledger
+// ruling 60 ("The half part is drawn in TWO STEPS", below): its depth with the record's own depth test and depth
+// write, then its colour blended source alpha over inverse source alpha without a depth write; and it is in no
+// depth pre-pass (CoverageInPrepass: the game's depth copy has nothing of it; an early record keeps today's
+// pre-pass draw). So its end depth is today's (every pixel its first sample covers), the layer's depth and
 // the depth place are untouched, and what lies behind it shows through at one half: the game's resolve of two
 // samples for everything drawn before it. The shadow mask is not rebuilt (ruling 15): a half-covered pixel's
 // sun term takes the mask of what lies behind it. All or nothing a record: one that cannot have its half
@@ -1891,12 +1935,93 @@ constexpr PipelineKey CoverageFullKey(PipelineKey k) {
   k.coverage = 2;
   return k;
 }
+// The pipelines one record is drawn by, and the order they are asked in (final review of sub-project 11, I1).
+// CoveragePlan: the parts a coverage record is drawn by. kLate: its half part in place (and that part's depth
+// step). kEarlyFull: its full part in place, its half part in the tail or in place. kEarlyHalf: an early record
+// whose scale admits no fully covered pixel: its half part alone; its `place` pipeline is its own, which only
+// names its state (the pre-pass's key, the sky's order) and is not drawn in the colour pass. kNone: today's record.
+enum class CoveragePlan : uint8_t { kNone, kLate, kEarlyFull, kEarlyHalf };
+constexpr CoveragePlan CoveragePlanOf(CoverageKind kind, bool has_full) {
+  return kind == CoverageKind::kLate    ? CoveragePlan::kLate
+         : kind == CoverageKind::kEarly ? (has_full ? CoveragePlan::kEarlyFull : CoveragePlan::kEarlyHalf)
+                                        : CoveragePlan::kNone;
+}
+// The keys of a record's parts under a plan, at rest or moved (`wind`: every one is the wind program's; `own`:
+// DecideDrawState's key, which has neither member).
+struct RecordKeys {
+  PipelineKey place, tail, depth;
+  bool has_tail = false, has_depth = false;
+};
+constexpr RecordKeys RecordPipelineKeys(PipelineKey own, CoveragePlan plan, bool wind) {
+  own.wind = wind ? 1 : 0;
+  RecordKeys keys;
+  keys.place = plan == CoveragePlan::kLate ? CoverageHalfKey(own) : plan == CoveragePlan::kEarlyFull ? CoverageFullKey(own) : own;
+  if (plan != CoveragePlan::kNone) {
+    keys.depth = CoverageHalfDepthKey(own);
+    keys.has_depth = true;
+  }
+  if (plan == CoveragePlan::kEarlyFull || plan == CoveragePlan::kEarlyHalf) {
+    keys.tail = CoverageHalfKey(own);
+    keys.has_tail = true;
+  }
+  return keys;
+}
+// T: a pipeline handle that is false when there is none (the pass: nrhi::Pipeline*). `moved`: every part is the
+// wind program's. `plan`: the plan the parts are of (kNone: `place` alone, the record's own state).
+template <class T>
+struct RecordPipelines {
+  T place{}, tail{}, depth{};
+  bool moved = false;
+  CoveragePlan plan = CoveragePlan::kNone;
+};
+// `ask(key)`: the cached pipeline of the key, made on first use; false when it is refused. `sway`: the record
+// may be drawn moved (it has wind words and the wind program exists). A set is all or nothing, its half part's
+// colour asked first, the part in its place last; the first complete set of this order is the record's:
+//   1. moved, with its coverage parts;   2. at rest, with its coverage parts (the wind's verdict: pipeline);
+//   3. moved, whole (the coverage's verdict: pipeline);   4. at rest, whole: `place` alone, which may be none
+//   (the caller's rule then: DefaultPipelineServes).
+// So a record that is drawn moved has asked for no rest key: no rest pipeline is made for it, and none of its
+// rest keys takes a slot. A record that cannot sway asks for no wind key, and without a plan for its own key
+// alone: the pass of before the switches.
+template <class T, class Ask>
+RecordPipelines<T> TakeRecordPipelines(const PipelineKey& own, CoveragePlan plan, bool sway, Ask&& ask) {
+  auto take = [&](CoveragePlan of, bool wind, RecordPipelines<T>* out) {
+    const RecordKeys keys = RecordPipelineKeys(own, of, wind);
+    RecordPipelines<T> got;
+    got.moved = wind;
+    got.plan = of;
+    if (of == CoveragePlan::kLate) {
+      got.place = ask(keys.place);
+      if (!got.place) return false;
+    } else if (keys.has_tail) {
+      got.tail = ask(keys.tail);
+      if (!got.tail) return false;
+    }
+    if (keys.has_depth) {
+      got.depth = ask(keys.depth);
+      if (!got.depth) return false;
+    }
+    if (of != CoveragePlan::kLate) {
+      got.place = ask(keys.place);
+      if (!got.place) return false;
+    }
+    *out = got;
+    return true;
+  };
+  RecordPipelines<T> got;
+  if (sway && plan != CoveragePlan::kNone && take(plan, true, &got)) return got;
+  if (plan != CoveragePlan::kNone && take(plan, false, &got)) return got;
+  if (sway && take(CoveragePlan::kNone, true, &got)) return got;
+  take(CoveragePlan::kNone, false, &got);
+  return got;
+}
 // Native coverage, the early records (plan Task 14; the design check is in the task's report). An early record
 // (a tree dissolving by distance: offsets 0x87, a scale below 1) is drawn by its two parts: the fully covered
 // pixels in place by the full program (left out when its scale admits none: !CoverageHasFull), the half-covered
 // pixels by the half program at one half, TOGETHER with the other early records' in a tail
 // (PlanCoverageOrder::tail: after the opaque records before it; before the sun layer's depth is taken, before
-// the first late record and before the first blended record), each with the record's depth test and write. An
+// the first late record and before the first blended record), each in the half part's two steps (its depth with
+// the record's depth test and write, then its colour without a depth write: CoverageHalfDepthKey). An
 // early record at or beyond the tail has its half-covered pixels drawn in its own place, as a late record's.
 // After the tail the depth holds every pixel an early record's first sample covers: the game's depth copy, and
 // today's depth.
@@ -5408,6 +5533,43 @@ constexpr size_t CoverageDepthPlace(const SunDepthPlace& plan, bool early, const
   }
   return count;
 }
+// The colour loop's steps that are no record's own: the sky step, the early records' tail and the layer's depth.
+// Two index spaces meet here (final review of sub-project 11, section 7): `sky_at` and `tail_at` are places among
+// the frame's PREPARED records (SkyPlace, PlanCoverageOrder; a place at or beyond their count: after the last),
+// while the layer's depth is taken before the first prepared record whose place in FrameScene::draws is at or
+// beyond the plan's (`depth`, SunDepthBefore). `sky_drawn`: the frame has a sky step. `depth_early`: the layer's
+// depth is taken among the records (a drawn layer of the frame's own scene with a place).
+struct ColourOrder {
+  bool sky_drawn = false;
+  size_t sky_at = 0;
+  size_t tail_at = kNoCoverageTail;
+  bool depth_early = false;
+  SunDepthPlace depth;
+};
+// What is due right before the prepared record at `index`, whose place in FrameScene::draws is `record`, in this
+// order: the tail (with the sky step first when it is due at the same record: `sky_first`), the layer's depth,
+// the sky step. `sky_done`: the sky step was drawn with a tail before (the loop sets it on `sky_first`).
+// `depth_taken`: the layer's depth was taken at an earlier record.
+struct ColourDue {
+  bool sky_first = false, tail = false, layer_depth = false, sky = false;
+};
+constexpr ColourDue ColourStepsDue(const ColourOrder& order, size_t index, size_t record, bool sky_done, bool depth_taken) {
+  ColourDue due;
+  const bool sky_here = order.sky_drawn && index == order.sky_at && !sky_done;
+  due.tail = order.tail_at == index;
+  due.sky_first = due.tail && sky_here;
+  due.layer_depth = order.depth_early && !depth_taken && SunDepthBefore(order.depth, record);
+  due.sky = sky_here && !due.sky_first;
+  return due;
+}
+// After the last of `count` prepared records: the sky step of a frame without a blended record, then a tail
+// whose place is after the last record.
+constexpr ColourDue ColourStepsAfter(const ColourOrder& order, size_t count) {
+  ColourDue due;
+  due.sky = order.sky_drawn && order.sky_at >= count;
+  due.tail = order.tail_at != kNoCoverageTail && order.tail_at >= count;
+  return due;
+}
 
 // --- The tree occluders' redraw (sub-project 11, phase 11c; frame-map section 18, "The tree occluder") ---
 // The game draws each late leaf draw once more into its sun layer's depth (pixel shader F1EB at the layer's
@@ -7110,10 +7272,6 @@ inline float ClayWindReach(capture::WindFamily family, const ClayWindConstants& 
   if (double(up) < reach) up = std::nextafter(up, inf);
   return up;
 }
-inline float WindReach(const capture::WindInputs& wind, const capture::WindSpec& spec, const WindExtent& extent) {
-  if (wind.family != spec.family) return std::numeric_limits<float>::infinity();
-  return ClayWindReach(wind.family, PackClayWindConstants(wind, spec, 0.0f), extent);
-}
 
 // The log's and F3's Wind line. "Wind: off" with the switch off. With it on and a scene captured
 // without the wind (the frames around a switch): that. Else the scene's records drawn moved, by
@@ -7340,11 +7498,17 @@ inline std::string FormatTextureText(const TextureStats& ts, uint32_t drawn, uin
   return text;
 }
 
-// The F3 state line: pipelines in the pass's cache (with the draws that found
-// no pipeline there, when there are any) and the drawn records with the alpha
-// test applied, with a blend, and with an invalid state.
+// The F3 state line: pipelines in the pass's two caches (with those of the wind's
+// and the coverage's cache and the keys it refused, when there are any, and with
+// the draws that found no pipeline, when there are any) and the drawn records with
+// the alpha test applied, with a blend, and with an invalid state.
 inline std::string FormatStateText(const ClayStats& st) {
   std::string text = "State: " + std::to_string(st.pipelines) + " pipelines";
+  if (st.pipeline_variants || st.pipeline_refused) {
+    text += " (wind and coverage " + std::to_string(st.pipeline_variants) + " of " + std::to_string(kMaxClayVariantPipelines);
+    if (st.pipeline_refused) text += ", refused " + std::to_string(st.pipeline_refused);
+    text += ")";
+  }
   if (st.pipeline_overflow) text += " (overflow " + std::to_string(st.pipeline_overflow) + ")";
   return text + ", alpha test " + std::to_string(st.alpha_tested) + ", blended " +
          std::to_string(st.blended) + ", invalid " + std::to_string(st.state_invalid);

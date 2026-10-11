@@ -1,5 +1,5 @@
 """The numbers the C++ mirrors of the wind are pinned to (the foliage sub-project, plan Task 10: WindPlantMirror,
-WindTrunkMirror, WindLeafMirror and WindReach), made by light_formulas.py: wind_plant, wind_trunk, wind_leaf and
+WindTrunkMirror, WindLeafMirror and ClayWindReach), made by light_formulas.py: wind_plant, wind_trunk, wind_leaf and
 the three reach bounds.
 
 Inputs, all in this file (nothing is read from a capture when the lines are made): the registers and the

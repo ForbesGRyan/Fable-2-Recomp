@@ -131,6 +131,15 @@ std::atomic<bool> g_fog_frame{false};
 // view and the wind's switch on), latched like the shadows' and set only in a
 // frame with records. With it clear nothing of the wind is read: no register,
 // no literal table, no stream is resolved, and a draw costs one branch.
+// A draw reads g_wind_frame BEFORE it takes g_scene_mutex, and the frame's
+// builder is told under that mutex (WindOn), so one draw can straddle the latch
+// in the frame the wind comes on or goes (final review of sub-project 11, M1).
+// Benign, and left so: read "off" in a frame with the wind, the draw has no
+// inputs, is drawn at rest for that one frame and is counted
+// WindReason::kOff by FrameBuilder::TakeWind (a count no log line shows: the
+// Wind line lists the reasons past kNoEntry; an armed capture's frame row has
+// it); read "on" in a frame without the wind, its inputs are ignored. Nothing
+// is torn: a draw's inputs are thread-local and copied under the mutex.
 std::atomic<bool> g_wind_wanted{false};
 std::atomic<bool> g_wind_frame{false};
 // A count of the frames with the wind: a shader object's literal verdict is one frame's (WindLiteralVerdict).

@@ -269,23 +269,55 @@ class OnePass(unittest.TestCase):
         self.assertIn("  if (key.wind && !wind_vs_) return nullptr;\n  pipe.vs = key.wind ? wind_vs_ : vs_;\n", create)
         # The colour pass's and the pre-pass's pipelines are both made by CreatePipeline, from keys.
         self.assertEqual(len(re.findall(r"\bCreatePipeline\(dev, ", s)), 3)   # the two caches, and Ensure's defaults (default keys)
-        self.assertIn("pipelines_.push_back(CreatePipeline(dev, key));", pass_function(s, "TryPipeline"))
+        # (the colour pass has two caches since the final review, I1: a key with `wind` or `coverage` goes to the
+        # variants' own, by clay_logic.h's VariantKey, and never takes a slot of the ordinary one)
+        take = pass_function(s, "TryPipeline")
+        self.assertIn("pipelines.push_back(CreatePipeline(dev, key));", take)
+        self.assertIn("  const bool variant = VariantKey(key);\n"
+                      "  std::vector<PipelineKey>& keys = variant ? variant_keys_ : pipeline_keys_;\n"
+                      "  std::vector<nrhi::Pipeline*>& pipelines = variant ? variant_pipelines_ : pipelines_;\n"
+                      "  const size_t max = variant ? kMaxClayVariantPipelines : kMaxClayPipelines;\n"
+                      "  const size_t slot = FindOrAddPipelineSlot(keys, key, max);\n", take)
+        self.assertEqual(s.count("FindOrAddPipelineSlot("), 2)     # this, and the pre-pass's own cache
+        # both caches are released, forgotten on another device and searched for a pipeline's key
+        self.assertEqual(s.count("variant_keys_.clear();"), 2)
+        self.assertEqual(s.count("variant_pipelines_.clear();"), 2)
+        self.assertEqual(s.count("for (nrhi::Pipeline* p : variant_pipelines_) device_->DestroyDeferred(p);"), 1)
+        self.assertLess(s.index("for (nrhi::Pipeline* p : variant_pipelines_) device_->DestroyDeferred(p);"),
+                        s.index("device_->DestroyDeferred(wind_vs_);"))      # the pipelines before the programs they are made of
+        self.assertIn("    if (variant_pipelines_[i] == pipeline && pipeline) return &variant_keys_[i];\n", s[s.index("const PipelineKey* ClayPass::KeyOf("):])
+        # a cache's first refusal is logged, a variant's refusals counted
+        self.assertIn("    if (variant) ++variant_refused_;\n    if (!pipeline_refusal_logged_[variant ? 1 : 0]) {\n"
+                      "      pipeline_refusal_logged_[variant ? 1 : 0] = true;\n      REXLOG_ERROR(", take)
+        self.assertIn("  variant_refused_ = 0;\n", pass_function(s, "Render"))
+        self.assertIn("  st.pipeline_refused = variant_refused_;\n", pass_function(s, "Render"))
         self.assertIn("prepass_pipelines_.push_back(CreatePipeline(dev, prepass_keys_[slot], true));", pass_function(s, "PrepassPipeline"))
         self.assertIn("const PipelineKey prepass = PrepassKey(*key, alpha);", pass_function(s, "PrepassPipeline"))
         self.assertIn("  k.wind = colour.wind;", self.logic)
-        # A key gets the wind's field in one place: a moved record's, in PrepareWind, after the program exists.
-        # (two since plan Task 14: an early coverage record's second colour pipeline, its half one, is moved with it)
+        # A key gets the wind's field in one place: clay_logic.h's RecordPipelineKeys, for every part of a record
+        # at once (its own key, its half part, that part's depth step, its full part), and the pass asks a scene
+        # record's pipelines through TakeRecordPipelines alone (executed: test_clay_logic.cpp, case 768: the wind
+        # program's set first and all or none, the rest set only when it is refused). The pass sets the field nowhere.
         prepare = pass_function(s, "PrepareWind")
-        # (three since ruling 60: a coverage record's half part has a depth step, moved with it too)
-        self.assertEqual(len(re.findall(r"\.wind = 1;", s)), 3)
-        self.assertEqual(len(re.findall(r"\.wind = 1;", prepare)), 3)
-        self.assertIn("        depth_step = step_key ? TryPipeline(dev, step_moved) : nullptr;\n        if (!depth_step) colour = nullptr;\n", prepare)
-        self.assertIn("  if (p.coverage_depth) p.coverage_depth = depth_step;\n", prepare)
-        self.assertIn("        tail = half_key ? TryPipeline(dev, half_moved) : nullptr;\n        if (!tail) colour = nullptr;\n", prepare)
-        self.assertIn("  if (in.has_words && EnsureWindShader(dev)) {\n    if (const PipelineKey* key = KeyOf(p.pipeline)) {\n"
-                      "      PipelineKey moved = *key;  // (a copy: the cache's keys may move when one is added)\n"
-                      "      moved.wind = 1;\n      colour = TryPipeline(dev, moved);\n", prepare)
-        self.assertIn("if (colour && in_prepass) depth = PrepassPipeline(dev, colour, p.alpha, &flat);", prepare)
+        self.assertEqual(re.findall(r"(\w+)\.wind = ", s), ["p"])              # (a prepared record's inputs: no key)
+        self.assertEqual(self.logic.count("  own.wind = wind ? 1 : 0;\n"), 1)
+        self.assertEqual(sorted(re.findall(r"(\w+)\.wind = ", self.logic)), ["k", "own"])   # that, and the pre-pass key's copy (above)
+        self.assertEqual(s.count("TakeRecordPipelines<nrhi::Pipeline*>("), 1)
+        self.assertIn("TakeRecordPipelines<nrhi::Pipeline*>(p.key, p.parts, sway, [&](const PipelineKey& key) { return TryPipeline(dev, key); });",
+                      pass_function(s, "TakePipelines"))
+        # ... with `sway` only after the record's words and the program exist, and the rest pipelines of a record
+        # that had the wind program's and rests all the same (no pre-pass pipeline, no slot) asked then
+        self.assertIn("  const bool moved = TakePipelines(dev, p, in.has_words && EnsureWindShader(dev), st);\n", prepare)
+        self.assertIn("  if (verdict != ClayWind::kDrawn) {\n"
+                      "    // (it has the wind program's pipelines and rests all the same, for want of a pre-pass pipeline or a slot:\n"
+                      "    // its rest pipelines now)\n"
+                      "    if (moved) TakePipelines(dev, p, false, st);\n", prepare)
+        self.assertEqual(s.count("TakePipelines(dev, p, "), 3)                  # those two, and the prepare loop's (at rest)
+        self.assertEqual(s.count("TryPipeline(dev, "), 3)                       # TakePipelines' lambda; a terrain layer's; PipelineFor (a flat terrain draw)
+        self.assertIn("  if (moved) {\n    in.has_colour_pipeline = true;\n", prepare)
+        self.assertIn("    const bool in_prepass = prepass && !p.coverage_half && key && InPrepass(*key);\n"
+                      "    if (in_prepass) depth = PrepassPipeline(dev, p.pipeline, p.alpha, &flat);\n"
+                      "    in.has_depth_pipeline = !in_prepass || depth;\n", prepare)
         # The maps: the shadow pipelines with the wind program are made by the one function, with wind_vs_, and
         # the others with vs_.
         self.assertEqual(re.findall(r"CreateShadowPipeline\(dev, (\w+), cull\)", s), ["wind_vs_", "vs_"])
@@ -297,8 +329,9 @@ class OnePass(unittest.TestCase):
         s = self.source
         prepare = pass_function(s, "PrepareWind")
         self.assertEqual(prepare.count("DecideClayWind("), 1)
-        at_return = prepare.index("  if (verdict != ClayWind::kDrawn) {\n    if (verdict != ClayWind::kNone) ++st.wind_rest[size_t(verdict)];\n    return;\n  }\n")
-        for field in ("  p.wind = wind;\n", "  p.wind_words = words;\n", "  p.wind_slot = slot;\n", "  p.pipeline = colour;\n", "  p.bounds = GrowBounds("):
+        at_return = prepare.index("    if (verdict != ClayWind::kNone) ++st.wind_rest[size_t(verdict)];\n    return;\n  }\n")
+        # (its pipelines are TakePipelines': the wind program's exactly when `moved`, test_one_vertex_program_for_every_pass)
+        for field in ("  p.wind = wind;\n", "  p.wind_words = words;\n", "  p.wind_slot = slot;\n", "  p.bounds = GrowBounds("):
             self.assertEqual(prepare.count(field), 1, field)
             self.assertGreater(prepare.index(field), at_return, field)
         shadows = pass_function(s, "PrepareShadows")
@@ -328,9 +361,13 @@ class OnePass(unittest.TestCase):
         self.assertEqual(render.count("PrepareWind("), 1)
         self.assertIn("  if (wind_on_) {\n    const bool prepass = DecideClayMask(mask_in).mask == ClayMask::kDrawn;\n"
                       "    for (Prepared& p : prepared_) {\n"
-                      "      // (a late coverage record drawn at half is not in the pre-pass: it needs no wind pipeline there)\n"
-                      "      if (p.pipeline && !p.terrain) PrepareWind(dev, *p.r, WindOf(scene, *p.r), prepass && !p.coverage_half, p, st);\n",
+                      "      // (the records the prepare loop left for here: those with wind inputs, none of them a terrain record)\n"
+                      "      if (p.pending) PrepareWind(dev, *p.r, WindOf(scene, *p.r), prepass, p, st);\n",
                       render)
+        # a record is left for PrepareWind only in a frame with the wind; in every other its pipelines are asked in
+        # the prepare loop, at rest, as before
+        self.assertIn("    p.pending = wind_on_ && WindOf(scene, r) != nullptr;\n    if (!p.pending) TakePipelines(dev, p, false, st);\n", render)
+        self.assertEqual(s.count("p.pending = "), 2)        # that, and TakePipelines' reset
         self.assertIn("      if (wind_on_) {\n        const capture::WindInputs* wind = ShadowWindOf(scene, c, r);\n", pass_function(s, "PrepareShadows"))
         # the cache's wind buffers, the program and a wind slot are asked for in these functions alone
         self.assertEqual(s.count("geometry_.WindWords("), 1)

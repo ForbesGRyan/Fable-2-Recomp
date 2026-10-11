@@ -110,12 +110,17 @@ class ClayPass {
   // other record is drawn at rest by the clay vertex shader in every pass, as always, counted by
   // reason (ClayStats::wind_rest; the Wind line). With it off nothing of the wind is made, read,
   // bound or drawn.
-  // `coverage` (fable2_native_coverage; clay_logic.h, "Coverage"): a late coverage record that the
-  // frame draws with its texture is drawn once, at its own place in the colour pass, by the half
-  // program blended at one half, and is left out of the depth pre-pass; the sky step is drawn before
-  // the frame's first such record when its own place lies after it (ClayStats::coverage_*; the
-  // Coverage line). With it off nothing of the coverage is made, bound or drawn, and the colour
-  // pass's order is the one of before.
+  // `coverage` (fable2_native_coverage; clay_logic.h, "Coverage"): a coverage record that the frame
+  // draws with its texture is drawn by its parts, each by its own program: the pixels with one covered
+  // sample by the half program in two steps (their depth, then their colour blended at one half without
+  // a depth write: ledger ruling 60), the pixels with both by the full program. A LATE record (the tree
+  // between the eye and the hero) has the half part alone, at its own place, and is in no depth
+  // pre-pass; an EARLY record (a tree dissolving by distance) has its full part in place, its half
+  // part with the other early records' in a tail before the first blend (or in place when it lies
+  // beyond the tail), and keeps today's pre-pass draw. The sky step is drawn before the frame's first
+  // blend of a coverage record when its own place lies after it (PlanCoverageOrder;
+  // ClayStats::coverage_*; the Coverage line). With it off nothing of the coverage is made, bound or
+  // drawn, and the colour pass's order is the one of before.
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
               bool textured, ClayLight light, bool shadows, bool fog, bool wind, bool coverage, const ClayPostRequest& post, ClayStats& st,
               TextureStats& tst);
@@ -200,6 +205,14 @@ class ClayPass {
     uint32_t vertex_count = 0, index_count = 0, sampler = 0;
     float uv_fix[2] = {1.0f, 1.0f};
     nrhi::Pipeline* pipeline = nullptr;  // by the record's render state; nullptr: not drawn
+    // The record's own key (DecideDrawState) and the coverage parts it is to be drawn by (`parts`; kNone: today's
+    // record), from which TakePipelines asks its pipelines. `coverage_wanted`: it is a coverage record whose
+    // parts have not been refused (one that then finds no pipeline is counted once). `pending`: its pipelines
+    // are not asked yet: a record with wind inputs in a frame with the wind, between the prepare loop and
+    // PrepareWind (nothing between reads them). Scene records that are no terrain records alone.
+    PipelineKey key;
+    CoveragePlan parts = CoveragePlan::kNone;
+    bool coverage_wanted = false, pending = false;
     // The record's pipeline of the depth pre-pass (PrepassKey of its colour pipeline's key); nullptr:
     // the record writes no depth, the frame has no pre-pass, or no such pipeline could be made.
     nrhi::Pipeline* prepass = nullptr;
@@ -426,7 +439,7 @@ class ClayPass {
   // The pre-pass pipeline of a colour pipeline (PrepassKey), from the pre-pass's own cache; nullptr
   // when the colour pipeline is not one of the cache or does not write depth, or on a failure.
   nrhi::Pipeline* PrepassPipeline(nrhi::Device* dev, nrhi::Pipeline* colour, const ClayAlpha& alpha, bool* flat);
-  // The key of a pipeline of the colour pass's cache; nullptr for any other pointer.
+  // The key of a pipeline of the colour pass's two caches; nullptr for any other pointer.
   const PipelineKey* KeyOf(nrhi::Pipeline* pipeline) const;
   // The game's rotation tile as a 32 x 32 R8G8 texture: read from guest memory and checked every
   // frame (TextureCache::ReadRotationTile), uploaded when its bytes change. nullptr: it could not
@@ -436,9 +449,18 @@ class ClayPass {
   // `depth_only`: a pipeline of the pre-pass (ps_ by the key's kind are the colour shaders,
   // depth_ps_ their depth-only forms).
   nrhi::Pipeline* CreatePipeline(nrhi::Device* dev, const PipelineKey& key, bool depth_only = false);
-  // The cached pipeline of `key`, created on first use; nullptr when the cache
-  // is full or the pipeline could not be created.
+  // The cached pipeline of `key`, created on first use; nullptr when its cache
+  // is full or the pipeline could not be created. The ordinary cache for a key
+  // without `wind` and `coverage`, the variants' cache for every other
+  // (clay_logic.h, VariantKey); a cache's first refusal is logged.
   nrhi::Pipeline* TryPipeline(nrhi::Device* dev, const PipelineKey& key);
+  // The pipelines of a scene record that is no terrain record, from p.key and p.parts (clay_logic.h,
+  // TakeRecordPipelines: with `sway` the wind program's first, the rest pipelines only when those are
+  // refused): sets p.pipeline, p.coverage_tail, p.coverage_depth, p.coverage_half and p.coverage_place.
+  // True: every one is the wind program's. A record that finds no pipeline of its own state is counted
+  // in st.pipeline_overflow and takes the default pipeline of its kind, or none when its state blends
+  // (DefaultPipelineServes: it is then not drawn).
+  bool TakePipelines(nrhi::Device* dev, Prepared& p, bool sway, ClayStats& st);
   // TryPipeline, or else (counted in st.pipeline_overflow) `fallback`, by
   // default the default pipeline of the key's `textured`.
   nrhi::Pipeline* PipelineFor(nrhi::Device* dev, const PipelineKey& key, ClayStats& st,
@@ -505,7 +527,9 @@ class ClayPass {
   // PrepareWind: one prepared scene record's verdict (DecideClayWind, once, for every pass), and for
   // a moved record its fields of Prepared, its wind pipelines and its grown box; `prepass`: the
   // frame is to have a depth pre-pass, so a depth-writing record needs the wind's pre-pass pipeline
-  // too. Called after the shadows' objects are known and before FinishTerrain.
+  // too. It also asks the record's pipelines (TakePipelines: the prepare loop left them for here,
+  // Prepared::pending), the wind program's first. Called for the pending records alone, after the
+  // shadows' objects are known and before FinishTerrain.
   bool EnsureWindShader(nrhi::Device* dev);
   nrhi::Pipeline* CreateShadowPipeline(nrhi::Device* dev, nrhi::Shader* vs, capture::Cull cull);
   nrhi::Pipeline* ShadowWindPipeline(nrhi::Device* dev, capture::Cull cull);
@@ -546,8 +570,9 @@ class ClayPass {
   std::vector<WindBlock> wind_blocks_;
   uint32_t wind_new_slots_ = 0;
   uint32_t wind_logged_ = 0xFFFFFFFFu, wind_log_lines_ = 0;
-  // The coverage's half pixel program (EnsureCoverageShader), null until a frame has a late coverage
-  // record: the pixel shader of every pipeline whose key has `coverage` 1. coverage_items_,
+  // The coverage's half pixel program (EnsureCoverageShader), null until a frame has a coverage record
+  // (late or early) that is to be drawn by its parts: the pixel shader of every pipeline whose key has
+  // `coverage` 1 (a half part's colour step and its depth step). coverage_items_,
   // coverage_records_: the frame's prepared records for PlanCoverageOrder and CoverageDepthPlace.
   // coverage_logged_, coverage_log_lines_: the Coverage line's last logged form.
   nrhi::Shader* coverage_half_ps_ = nullptr;
@@ -561,9 +586,21 @@ class ClayPass {
   // The pipeline cache: pipelines_[i] draws pipeline_keys_[i] (nullptr: its
   // creation failed). Slots 0 to 3 are the default pipelines of `textured` 0
   // to 3, slot 4 that of a flat terrain draw (TerrainFlatDefaultKey; Ensure).
-  // At most kMaxClayPipelines, never evicted within a run.
+  // At most kMaxClayPipelines, never evicted within a run. It holds the keys
+  // without `wind` and `coverage` alone: what it held before the two switches.
   std::vector<PipelineKey> pipeline_keys_;
   std::vector<nrhi::Pipeline*> pipelines_;
+  // The wind's and the coverage's own cache (clay_logic.h, VariantKey): variant_pipelines_[i] draws
+  // variant_keys_[i] (nullptr: its creation failed), at most kMaxClayVariantPipelines, never evicted
+  // within a run; empty with both switches off. variant_refused_: the keys it refused in this Render
+  // (ClayStats::pipeline_refused). pipeline_refusal_logged_: a cache's first refusal was logged (0 the
+  // ordinary cache, 1 this one). pipelines_logged_, pipelines_log_lines_: the count the "pipelines
+  // changed" line last named (written with the wind or the coverage on alone).
+  std::vector<PipelineKey> variant_keys_;
+  std::vector<nrhi::Pipeline*> variant_pipelines_;
+  uint32_t variant_refused_ = 0;
+  bool pipeline_refusal_logged_[2] = {};
+  uint32_t pipelines_logged_ = 0xFFFFFFFFu, pipelines_log_lines_ = 0;
   // The three targets, created and destroyed together (Ensure, DestroyObjects):
   // linear_ is what the draws render into (with depth_), color_ what the output
   // mapping writes from it at the end of each Render. linear_view_ is the

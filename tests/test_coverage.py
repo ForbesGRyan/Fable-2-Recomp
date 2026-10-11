@@ -182,32 +182,33 @@ class SwitchOff(unittest.TestCase):
 
     def test_nothing_of_the_coverage_without_the_switch(self):
         s = self.source
-        # the half program and a half key are asked for in one place, inside the switch's block of the prepare loop
+        # the programs are asked for in one place, inside the switch's block of the prepare loop, and a record has
+        # a plan (Prepared::parts: the parts it is drawn by) only there; without a plan TakeRecordPipelines asks for its own key alone
+        # (executed: test_clay_logic.cpp, case 768)
         self.assertEqual(s.count("EnsureCoverageShader(dev)"), 1)
-        self.assertEqual(s.count("CoverageHalfKey("), 1)
-        self.assertEqual(s.count("CoverageFullKey("), 1)
         a = s.index("    if (coverage) {\n      ClayCoverageInputs cin;")
         b = s.index("    if (d.alpha_tested) ++st.alpha_tested;", a)
         block = s[a:b]
-        self.assertIn("EnsureCoverageShader(dev)", block)
-        self.assertIn("CoverageHalfKey(d.key)", block)
-        self.assertIn("p.coverage_half = true;", block)
-        self.assertEqual(s.count("p.coverage_half = true;"), 1)
-        # an early record's parts are set in the same block and nowhere else (plan Task 14)
-        self.assertIn("CoverageFullKey(d.key)", block)
-        self.assertIn("p.coverage_tail = half;", block)
-        self.assertIn("p.coverage_place = false;", block)
-        self.assertEqual(s.count("p.coverage_tail = half;"), 1)
-        self.assertEqual(s.count("p.coverage_place = false;"), 1)
-        self.assertEqual(s.count("p.coverage_tail = "), 2)             # here, and the wind's moved one in PrepareWind
-        # the half part's depth step (ledger ruling 60): its key asked in the same block, with the colour step's; a
-        # record without it is not a coverage record (today's record); drawn before each of the three places a half
-        # part's colour is drawn, and nowhere else
-        self.assertEqual(s.count("CoverageHalfDepthKey("), 1)
-        self.assertIn("        if (half) half_depth = TryPipeline(dev, CoverageHalfDepthKey(d.key));\n", block)
-        self.assertIn("      cin.has_pipeline = half != nullptr && half_depth != nullptr && (!early || !cin.has_full || full != nullptr);\n", block)
-        self.assertIn("      if (verdict == ClayCoverage::kDrawn) p.coverage_depth = half_depth;\n", block)
-        self.assertEqual(s.count("p.coverage_depth = "), 2)            # here, and the wind's moved one in PrepareWind
+        self.assertIn("      if (verdict == ClayCoverage::kDrawn) {\n        p.coverage_wanted = true;\n"
+                      "        if (EnsureCoverageShader(dev)) p.parts = CoveragePlanOf(cin.kind, cin.has_full);\n      }\n", block)
+        self.assertEqual(s.count("p.parts = "), 2)                      # there, and TakePipelines' reset to none
+        self.assertEqual(s.count("p.coverage_wanted = "), 2)
+        # the pass names no coverage key itself: the keys of a record's parts are clay_logic.h's RecordPipelineKeys
+        for word in ("CoverageHalfKey(", "CoverageFullKey(", "CoverageHalfDepthKey("):
+            self.assertEqual(s.count(word), 0, word)
+        logic_text = (ROOT / "src" / "native" / "render" / "clay_logic.h").read_text(encoding="utf-8")
+        self.assertIn("  keys.place = plan == CoveragePlan::kLate ? CoverageHalfKey(own) : plan == CoveragePlan::kEarlyFull ? CoverageFullKey(own) : own;\n"
+                      "  if (plan != CoveragePlan::kNone) {\n    keys.depth = CoverageHalfDepthKey(own);\n    keys.has_depth = true;\n  }\n", logic_text)
+        # a record's parts are set in one place, from what was granted: the late record's half part, an early
+        # record's (plan Task 14), and the half part's depth step (ledger ruling 60) with every plan; a record
+        # without the step's pipeline has no plan at all (all or nothing: case 768)
+        take = s[s.index("bool ClayPass::TakePipelines("):s.index("nrhi::Pipeline* ClayPass::PipelineFor(")]
+        self.assertIn("  p.pipeline = got.place;\n  p.coverage_tail = got.tail;\n  p.coverage_depth = got.depth;\n"
+                      "  p.coverage_half = got.plan == CoveragePlan::kLate;\n  p.coverage_place = got.plan != CoveragePlan::kEarlyHalf;\n", take)
+        for field in ("p.coverage_tail = ", "p.coverage_depth = ", "p.coverage_half = ", "p.coverage_place = "):
+            self.assertEqual(s.count(field), 1, field)
+        self.assertIn("  if (p.coverage_wanted && got.plan == CoveragePlan::kNone) {\n    ++st.coverage_rest[size_t(ClayCoverage::kPipeline)];\n", take)
+        # the depth step is drawn before each of the three places a half part's colour is drawn, and nowhere else
         self.assertEqual(s.count("half_depth_step("), 3)
         self.assertEqual(s.count("auto half_depth_step = [&](const Prepared& q) {\n    if (!q.coverage_depth) return;\n"), 1)
         self.assertIn("      if (!q.coverage_tail) continue;\n      half_depth_step(q);\n      cmd->SetPipeline(q.coverage_tail);\n", s)
@@ -229,20 +230,32 @@ class SwitchOff(unittest.TestCase):
         c = s.index("  size_t sky_at = sky_order.place;\n")
         d = s.index("  for (size_t index = 0; index < prepared_.size(); ++index) {", c)
         self.assertIn("  if (coverage) {\n    coverage_items_.clear();", s[c:d])
-        self.assertEqual(s[c:d].count("sky_at = "), 2)
+        self.assertEqual(s[c:d].count("sky_at = "), 3)              # (the third: the order handed to ColourStepsDue)
         # the tail: no tail unless the switch's block names one; drawn in two places (at its index, after the last record)
         self.assertIn("  size_t tail_at = kNoCoverageTail;\n", s[c:d])
-        self.assertEqual(s[c:d].count("tail_at = "), 2)
+        self.assertEqual(s[c:d].count("tail_at = "), 3)
         self.assertEqual(s.count("draw_tail("), 2)
-        self.assertIn("    if (tail_at == index) {\n      if (sky_drawn && index == sky_at) {\n        draw_sky();\n        sky_done = true;\n      }\n"
-                      "      draw_tail(index);\n    }\n    if (sun_depth_early && !sun_depth_taken && SunDepthBefore(", s)
+        # What is due before each record and after the last is clay_logic.h's ColourStepsDue and ColourStepsAfter
+        # (executed: test_clay_logic.cpp, case 769, which walks this loop's statements over both index spaces and
+        # every arrangement of up to five records); held here: the loop hands the function the prepared place and
+        # the record's place in FrameScene::draws, each where it belongs, and does what it says in its order.
+        self.assertIn("  colour_order.sky_drawn = sky_drawn;\n  colour_order.sky_at = sky_at;\n  colour_order.tail_at = tail_at;\n"
+                      "  colour_order.depth_early = sun_depth_early;\n  colour_order.depth = sun_place;\n", s[c:d])
+        self.assertIn("    const ColourDue due = ColourStepsDue(colour_order, index, size_t(p.r - scene.draws.data()), sky_done, sun_depth_taken);\n"
+                      "    // The early tail, before the layer's depth is taken; the sky step first when it is due here.\n"
+                      "    if (due.tail) {\n      if (due.sky_first) {\n        draw_sky();\n        sky_done = true;\n      }\n"
+                      "      draw_tail(index);\n    }\n    if (due.layer_depth) {\n", s)
+        self.assertEqual(s.count("ColourStepsDue("), 1)
+        self.assertEqual(s.count("sun_depth_taken = true;"), 1)
         self.assertEqual(s.count("draw_sky();"), 3)
-        self.assertIn("if (sky_drawn && index == sky_at && !sky_done) draw_sky();", s)
+        self.assertIn("    if (due.sky) draw_sky();\n    if (!p.pipeline) continue;", s)
+        self.assertIn("  const ColourDue after = ColourStepsAfter(colour_order, prepared_.size());\n  if (after.sky) draw_sky();\n", s)
+        self.assertIn("  if (!left_out && after.tail) draw_tail(prepared_.size());\n", s)
+        self.assertEqual(s.count("SunDepthBefore("), 0)             # (the loop no longer asks it itself)
         # a record without coverage parts is drawn as before: one in-place draw, behind a flag that is true for it
         self.assertIn("    if (p.coverage_place) {\n      if (p.pipeline != bound) {\n        cmd->SetPipeline(p.pipeline);\n        bound = p.pipeline;\n      }\n"
                       "      DrawPrepared(cmd, p, color, false, mask_bound, &light_mode, &draw_fog, nullptr);\n    }\n", s)
         self.assertIn("const bool half_here = p.coverage_tail && !CoverageHalfInTail(CoverageKind::kEarly, index, tail_at);", s)
-        self.assertIn("if (sky_drawn && sky_at >= prepared_.size()) draw_sky();", s)
         # the log's line only with the switch
         self.assertIn("  if (coverage) {\n    const uint32_t form = ", s)
 
@@ -258,7 +271,9 @@ class SwitchOff(unittest.TestCase):
                       "    return p.coverage_half ? CoverageKind::kLate : p.coverage_tail ? CoverageKind::kEarly : CoverageKind::kNone;\n  };\n", s)
         # the line's form does not hold the sky's move (it flips frame to frame in a held view and would spend the lines)
         self.assertNotIn("(st.coverage_sky_moved ? 8u : 0u)", s)
-        self.assertIn("PrepareWind(dev, *p.r, WindOf(scene, *p.r), prepass && !p.coverage_half, p, st);", s)
+        self.assertIn("    const bool in_prepass = prepass && !p.coverage_half && key && InPrepass(*key);\n", s)
+        # ... and on the Sky line it is a record that writes depth (its depth step does: final review, M2)
+        self.assertIn("      item.depth_write = (key && InPrepass(*key)) || p.coverage_half;\n", s)
         # for SkyPlace a half record is the opaque record it is in the game's state
         self.assertIn("      item.blend = key && key->blend != 0 && !p.coverage_half;\n", s)
 

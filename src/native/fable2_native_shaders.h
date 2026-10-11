@@ -398,14 +398,137 @@ cbuffer Object : register(b1) {
   float4 o_leaf;                                 // a leaf: x vertex c50.w (the wrap of the front light), y 1 / c7.w;
                                                  // the draw's fog: w the form (0 the ground form, 1 the trees', 2
                                                  // none), z the trees' scale (vertex c8.x)
+#ifdef CLAY_WIND
+  float4 o_wind_reg[3];                          // the wind vertex program alone (kClayWindVs): a tree's vertex c15,
+                                                 // c16, c17; an instanced plant's (c10.x, c25.x, c26.x, c26.y),
+                                                 // (c21.xyz, c7.x + c7.y), (c22.xyz, 0)
+  float4 o_wind_lit[7];                          // the family's literals by slot (render::ClayWindConstants)
+#endif
 };
 )hlsl"
 
-inline constexpr const char* kClayVs = FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL FABLE2_CLAY_OBJECT_HLSL R"hlsl(
+#define FABLE2_CLAY_VS_HLSL FABLE2_CLAY_DRAW_HLSL FABLE2_CLAY_LIGHT_HLSL FABLE2_CLAY_OBJECT_HLSL R"hlsl(
 StructuredBuffer<float4> positions : register(t0);
 StructuredBuffer<uint> indices : register(t1);
 StructuredBuffer<float2> uvs : register(t2);
+#ifdef CLAY_WIND
+// The wind (clay_logic.h, "Native wind"; docs/native-renderer/lighting-formulas.md, "Wind"): only under
+// CLAY_WIND, which kClayWindVs alone defines. The per-vertex wind words at t9 (render/wind_decode.h: a trunk
+// vertex 4 floats, a leaf vertex 10, an instanced plant's flat position 2) and the draw's wind constants in the
+// tail of cbuffer Object. The three functions are light_formulas.wind_plant, wind_trunk (wind_tree_terms,
+// wind_tree_offset) and wind_leaf (wind_leaf_lift) term for term, in single precision in the reference's order
+// of operations and marked precise (ledger ruling 35); their C++ mirrors are WindPlantMirror, WindTrunkMirror
+// and WindLeafMirror. A literal is read by its slot's name and no number of the table stands here as text: the
+// names below are light_formulas.WIND_LITERAL_ORDER in its order (W_: a tree's 28, of which a trunk has the
+// first 18; P_: a plant's 7), which tests/test_wind_literals.py holds name by name.
+StructuredBuffer<float> wind_words : register(t9);
+#define W_half o_wind_lit[0].x
+#define W_base o_wind_lit[0].y
+#define W_rate1 o_wind_lit[0].z
+#define W_rate2 o_wind_lit[0].w
+#define W_two_pi o_wind_lit[1].x
+#define W_quarter o_wind_lit[1].y
+#define W_lean o_wind_lit[1].z
+#define W_gust o_wind_lit[1].w
+#define W_phase_x o_wind_lit[2].x
+#define W_phase_y o_wind_lit[2].y
+#define W_lo o_wind_lit[2].z
+#define W_amp o_wind_lit[2].w
+#define W_along o_wind_lit[3].x
+#define W_across o_wind_lit[3].y
+#define W_rate0 o_wind_lit[3].z
+#define W_zero o_wind_lit[3].w
+#define W_sel_zero o_wind_lit[4].x
+#define W_sel_one o_wind_lit[4].y
+#define W_hundred o_wind_lit[4].z
+#define W_slack o_wind_lit[4].w
+#define W_phase_f o_wind_lit[5].x
+#define W_flutter_x o_wind_lit[5].y
+#define W_flutter_y o_wind_lit[5].z
+#define W_one o_wind_lit[5].w
+#define W_back o_wind_lit[6].x
+#define W_push_gust o_wind_lit[6].y
+#define W_lift_gust o_wind_lit[6].z
+#define W_rate_f o_wind_lit[6].w
+#define P_lo o_wind_lit[0].x
+#define P_two_pi o_wind_lit[0].y
+#define P_inv_two_pi o_wind_lit[0].z
+#define P_gain o_wind_lit[0].w
+#define P_height o_wind_lit[1].x
+#define P_half o_wind_lit[1].y
+#define P_unit o_wind_lit[1].z
+float WindFrac(float x) { return x - floor(x); }
+// A phase as the tree shaders wrap it, in [-pi, pi): its sine is sin(2 pi q).
+float WindPhase(float q) { return WindFrac(WindFrac(q) + W_half) * W_two_pi + W_lo; }
+// An instanced plant: o_wind_reg = (c10.x, c25.x, c26.x, c26.y), (c21.xyz, c7.x + c7.y), (c22.xyz, 0); `seed` A3 + B3
+// of the vertex's copy, `z` the mesh vertex's third coordinate. A vertex at or below its root stands.
+float3 WindPlant(float3 p, float seed, float z) {
+  precise float f = WindFrac(o_wind_reg[1].w + seed);
+  precise float theta = 1.0 - o_wind_reg[0].x * o_wind_reg[0].y * (f * P_gain + 1.0) + f;
+  theta = WindFrac(theta * P_inv_two_pi + P_half) * P_two_pi + P_lo;
+  precise float s = saturate(P_height * z) * cos(theta);
+  precise float3 moved = p + s * (o_wind_reg[1].xyz * o_wind_reg[0].z + o_wind_reg[2].xyz * o_wind_reg[0].w);
+  return moved;
+}
+// What the wind adds to a trunk vertex and to a leaf's pivot: o_wind_reg = c15, c16, c17; `w` = (b, a, d, c),
+// the four weights in the fetch's source order.
+float3 WindTreeOffset(float4 w) {
+  float3 c15 = o_wind_reg[0].xyz;
+  float4 c16 = o_wind_reg[1];
+  float4 c17 = o_wind_reg[2];
+  precise float t = c15.x;
+  precise float g = c17.w * W_gust;
+  precise float s0 = sin(WindPhase(t * W_rate0));
+  precise float s1 = sin(WindPhase(w.x * W_rate0 + (w.z * c16.x + ((c16.y + W_rate1) * t + g))));
+  precise float s2 = sin(WindPhase(w.z * c16.x + ((c16.y + W_rate2) * t + g)));
+  precise float dd = w.z * c17.z * w.z;
+  precise float along = dd * W_along * (W_amp * s1 * (abs(W_amp * s0) * W_quarter + W_base) + c17.z * W_lean);
+  precise float across = dd * W_across * s2;
+  precise float s3 = sin(WindPhase(t * W_phase_y + w.x));
+  precise float turn = c16.z * t + g;
+  precise float s4 = sin(WindPhase((turn + W_phase_x) * w.w + w.x));
+  precise float s5 = sin(WindPhase((turn + W_phase_y) * w.w + w.x));
+  precise float scale = (W_amp * s3 + W_half) * w.y * (W_half * c17.z) * c15.z;
+  precise float u = W_amp * s4 * scale;
+  precise float v = W_amp * s5 * scale;
+  precise float3 off = float3(along * c17.x - across * c17.y + u, along * c17.y + across * c17.x + v,
+                              -(along * along) * W_quarter - (u * u + v * v) * W_half);
+  return off;
+}
+float3 WindTrunk(float3 p, float4 w) {
+  precise float3 moved = p + WindTreeOffset(w);
+  return moved;
+}
+// A leaf: its pivot `q` sways as a trunk vertex does, and the vertex keeps its distance from it while the third
+// coordinate of its direction is lifted by the flutter (`v`: its three values, source x, y, z). Where the moved
+// offset has zero squared length in this precision (a vertex at its pivot whose lift is 0) the position is the
+// moved pivot, and nothing is divided by that length (ledger ruling 36).
+float3 WindLeaf(float3 p, float3 q, float4 w, float3 v) {
+  float4 c15 = o_wind_reg[0];
+  float4 c16 = o_wind_reg[1];
+  float4 c17 = o_wind_reg[2];
+  precise float3 pivot = q + WindTreeOffset(w);
+  precise float3 d = p - q;
+  precise float len = sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+  precise float t = c15.x;
+  precise float g = c17.w * W_gust;
+  precise float clock = t + c17.w * W_rate_f;
+  precise float s6 = sin(WindPhase(w.x * W_rate_f + (((c16.y + W_rate1) * t + g) + c16.x * w.z + W_phase_f)));
+  precise float s7 = sin(WindPhase((clock * W_flutter_x + v.z) + W_hundred * v.x));
+  precise float turn = WindFrac(clock * W_flutter_y + v.y);
+  precise float s8 = sin(WindFrac((turn + turn) * W_half + W_half) * W_two_pi + W_lo);
+  precise float k = (-(W_amp * s6) > 0.0) ? W_back * s6 : W_amp * s6;
+  precise float push = W_amp * s7 * max(len + W_slack, 0.0) * c16.w;
+  precise float lift = c15.w * (abs(k) * W_amp * s8) * k;
+  d.z += push * (c17.z * W_push_gust + W_one) + lift * (c17.z * W_lift_gust + W_one);
+  precise float turned2 = d.x * d.x + d.y * d.y + d.z * d.z;
+  precise float3 moved = pivot;
+  [branch] if (turned2 > 0.0) moved = pivot + d / sqrt(turned2) * len;
+  return moved;
+}
+#else
 StructuredBuffer<float2> terrain_normals : register(t9);
+#endif
 StructuredBuffer<float3> normals : register(t10);
 StructuredBuffer<uint> colours : register(t11);          // a stream colour, a probe set, or the colour of a plant's copy
 StructuredBuffer<float4> probe_or_bend : register(t12);  // a probe object's or leaf's weights, or a plant's bend inputs (up axis, height)
@@ -424,6 +547,32 @@ VsOut main(uint vid : SV_VertexID) {
   float4 p = in_range ? positions[v] : float4(0, 0, 0, 0);
   float4 c = layout == 0 ? float4(dot(r0, p), dot(r1, p), dot(r2, p), dot(r3, p))
                          : p.x * r0 + p.y * r1 + p.z * r2 + p.w * r3;
+#ifdef CLAY_WIND
+  // The wind: the position that goes through the rows is the moved one, for a vertex the draw names (below
+  // vertex_count: the wind words hold one run for every such vertex, and are read nowhere else) of a draw whose
+  // light_mode has a wind family (bits 12 and 13: 1 a trunk, 2 a leaf, 3 an instanced plant). The cut below, the
+  // world position handed on and every light input stay those of the position at rest.
+  uint wind_family = (light_mode >> 12) & 3;
+  [branch] if (in_range && wind_family != 0) {
+    precise float3 moved = p.xyz;
+    [branch] if (wind_family == 1) {
+      uint at = uint(v) * 4;
+      moved = WindTrunk(p.xyz, float4(wind_words[at], wind_words[at + 1], wind_words[at + 2], wind_words[at + 3]));
+    } else {
+      [branch] if (wind_family == 2) {
+        uint at = uint(v) * 10;
+        moved = WindLeaf(p.xyz, float3(wind_words[at], wind_words[at + 1], wind_words[at + 2]),
+                         float4(wind_words[at + 3], wind_words[at + 4], wind_words[at + 5], wind_words[at + 6]),
+                         float3(wind_words[at + 7], wind_words[at + 8], wind_words[at + 9]));
+      } else {
+        uint at = uint(v) * 2;
+        moved = WindPlant(p.xyz, wind_words[at], wind_words[at + 1]);
+      }
+    }
+    float4 m = float4(moved, p.w);
+    c = layout == 0 ? float4(dot(r0, m), dot(r1, m), dot(r2, m), dot(r3, m)) : m.x * r0 + m.y * r1 + m.z * r2 + m.w * r3;
+  }
+#endif
   float3 to_eye = cut.xyz - p.xyz;
   if (dot(to_eye, to_eye) > cut.w) c = asfloat(uint4(0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000));
   o.pos = c;
@@ -438,12 +587,14 @@ VsOut main(uint vid : SV_VertexID) {
   o.vcolour = float3(0, 0, 0);
   o.bend = float4(0, 0, 0, 0);
   bool has_light = in_range && uint(v) < light_count;
+#ifndef CLAY_WIND
   [branch] if ((light_mode & 1) && has_light) {
     // The terrain normal as the game's vertex shaders form it, not normalised (the pixel shader does).
     float2 t = terrain_normals[v];
     o.normal = float3(t, sqrt(abs(1.0 - dot(t, t))));
     if (light_mode & 4) o.axis = AmbientAxis(o.normal, f_axis);
   }
+#endif
   // (82: the object bit, the instance bit and the leaf bit. An object or trunk has the first alone.)
   [branch] if ((light_mode & 82) == 2 && has_light) {
     // The object's normal as the game's vertex shader exports it: (R n) * c7.w, not normalised.
@@ -506,7 +657,19 @@ VsOut main(uint vid : SV_VertexID) {
   }
   return o;
 }
-)hlsl";
+)hlsl"
+inline constexpr const char* kClayVs = FABLE2_CLAY_VS_HLSL;
+// The wind vertex program (clay_logic.h, "Native wind"): the clay vertex shader's own text under CLAY_WIND, in
+// which t9 is the draw's wind words (a wind record is never a terrain record: the terrain block is not
+// compiled), cbuffer Object ends in the wind's constants (448 bytes: kClayWindObjectFields), and the position
+// that goes through the rows is moved by the family's function. The pass draws a record with it only together
+// with the record's wind words, its wind constants and light_mode's wind bits, in every pass that draws the
+// record (colour, depth pre-pass, shadow map). Without the define every program is the one it was (the shader
+// test holds the compiled bytes of all nine clay programs to those of before the wind).
+inline constexpr const char* kClayWindVs = "#define CLAY_WIND 1\n" FABLE2_CLAY_VS_HLSL;
+// cbuffer Object's tail under CLAY_WIND (render::ClayWindConstants at render::kClayWindOffset).
+inline constexpr ClayBufferField kClayWindObjectFields[] = {{"o_wind_reg", 288, 48}, {"o_wind_lit", 336, 112}};
+inline constexpr unsigned kClayWindObjectSize = 448;
 
 // The colour programs of the pixel shaders that draw the scene define CLAY_FOG: the fog's tail of
 // cbuffer Frame and the fog's functions (the depth-only programs do not, and are the programs without fog).

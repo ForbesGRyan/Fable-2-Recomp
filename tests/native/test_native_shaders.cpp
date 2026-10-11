@@ -604,7 +604,7 @@ static bool ReadsFrameBeyondPost(const std::string& listing) {
 // light path has to be made here as well, on purpose. Six pieces:
 //   kPinLight        the shared light block: cbuffer Frame and every light function, light_normalize to
 //                    clay_lit, the plants' and the leaves' among them (in all four shaders that light);
-//   kPinVsMain       the vertex shader's whole main (position, coordinates, the terrain normal, the
+//   kPinVsMain       the vertex shader's whole main (position, the wind's block under CLAY_WIND, coordinates, the terrain normal, the
 //                    object's normal, the vector of t, the stream colour and the probe colour; an
 //                    instanced plant's normal, bend and colour; a leaf's normal, ambient and two light
 //                    scalars);
@@ -792,6 +792,32 @@ static const char kPinVsMain[] = R"pin(VsOut main(uint vid : SV_VertexID) {
   float4 p = in_range ? positions[v] : float4(0, 0, 0, 0);
   float4 c = layout == 0 ? float4(dot(r0, p), dot(r1, p), dot(r2, p), dot(r3, p))
                          : p.x * r0 + p.y * r1 + p.z * r2 + p.w * r3;
+#ifdef CLAY_WIND
+  // The wind: the position that goes through the rows is the moved one, for a vertex the draw names (below
+  // vertex_count: the wind words hold one run for every such vertex, and are read nowhere else) of a draw whose
+  // light_mode has a wind family (bits 12 and 13: 1 a trunk, 2 a leaf, 3 an instanced plant). The cut below, the
+  // world position handed on and every light input stay those of the position at rest.
+  uint wind_family = (light_mode >> 12) & 3;
+  [branch] if (in_range && wind_family != 0) {
+    precise float3 moved = p.xyz;
+    [branch] if (wind_family == 1) {
+      uint at = uint(v) * 4;
+      moved = WindTrunk(p.xyz, float4(wind_words[at], wind_words[at + 1], wind_words[at + 2], wind_words[at + 3]));
+    } else {
+      [branch] if (wind_family == 2) {
+        uint at = uint(v) * 10;
+        moved = WindLeaf(p.xyz, float3(wind_words[at], wind_words[at + 1], wind_words[at + 2]),
+                         float4(wind_words[at + 3], wind_words[at + 4], wind_words[at + 5], wind_words[at + 6]),
+                         float3(wind_words[at + 7], wind_words[at + 8], wind_words[at + 9]));
+      } else {
+        uint at = uint(v) * 2;
+        moved = WindPlant(p.xyz, wind_words[at], wind_words[at + 1]);
+      }
+    }
+    float4 m = float4(moved, p.w);
+    c = layout == 0 ? float4(dot(r0, m), dot(r1, m), dot(r2, m), dot(r3, m)) : m.x * r0 + m.y * r1 + m.z * r2 + m.w * r3;
+  }
+#endif
   float3 to_eye = cut.xyz - p.xyz;
   if (dot(to_eye, to_eye) > cut.w) c = asfloat(uint4(0x7FC00000, 0x7FC00000, 0x7FC00000, 0x7FC00000));
   o.pos = c;
@@ -806,12 +832,14 @@ static const char kPinVsMain[] = R"pin(VsOut main(uint vid : SV_VertexID) {
   o.vcolour = float3(0, 0, 0);
   o.bend = float4(0, 0, 0, 0);
   bool has_light = in_range && uint(v) < light_count;
+#ifndef CLAY_WIND
   [branch] if ((light_mode & 1) && has_light) {
     // The terrain normal as the game's vertex shaders form it, not normalised (the pixel shader does).
     float2 t = terrain_normals[v];
     o.normal = float3(t, sqrt(abs(1.0 - dot(t, t))));
     if (light_mode & 4) o.axis = AmbientAxis(o.normal, f_axis);
   }
+#endif
   // (82: the object bit, the instance bit and the leaf bit. An object or trunk has the first alone.)
   [branch] if ((light_mode & 82) == 2 && has_light) {
     // The object's normal as the game's vertex shader exports it: (R n) * c7.w, not normalised.
@@ -1094,6 +1122,61 @@ static std::string Changed(const char* src, const char* before, const char* afte
 // 0 when the pinned pieces are in their shaders; else the number of the first that is not: 1 the vertex
 // shader's main, 2 the textured shader's, 3 the terrain shaders' common functions, 4 the layer shader's
 // main, 5 the far shader's, 6 the shared light block (in any of the four).
+// The FNV-1a 64 of the bytes `src` compiles to with the runtime's flags (0), and their number in `size`; 0
+// when it does not compile.
+static uint64_t CodeHash(const char* name, const char* src, const char* target, size_t* size) {
+  ID3DBlob* code = nullptr;
+  ID3DBlob* errors = nullptr;
+  uint64_t h = 0;
+  *size = 0;
+  if (SUCCEEDED(D3DCompile(src, strlen(src), name, nullptr, nullptr, "main", target, 0, 0, &code, &errors)) && code) {
+    h = 0xCBF29CE484222325ull;
+    const auto* b = static_cast<const unsigned char*>(code->GetBufferPointer());
+    *size = code->GetBufferSize();
+    for (size_t i = 0; i < *size; ++i) h = (h ^ b[i]) * 0x100000001B3ull;
+  }
+  if (code) code->Release();
+  if (errors) errors->Release();
+  return h;
+}
+
+// The numbers of nested `if` blocks around each instruction `op` (the line's first word) of a listing, in
+// the listing's order, as text ("0,3": two, the second inside three blocks; "": none).
+static std::string OpDepths(const std::string& listing, const char* op) {
+  const size_t n = strlen(op);
+  std::string depths;
+  int depth = 0;
+  size_t at = 0;
+  while (at < listing.size()) {
+    size_t end = listing.find('\n', at);
+    if (end == std::string::npos) end = listing.size();
+    const size_t first = listing.find_first_not_of(" \t", at);
+    if (first < end && listing[first] != '/') {
+      const std::string line = listing.substr(first, end - first);
+      if (line.compare(0, 3, "if_") == 0) ++depth;
+      if (line.compare(0, 5, "endif") == 0) --depth;
+      if (line.compare(0, n, op) == 0 && line.size() > n && line[n] == ' ') depths += (depths.empty() ? "" : ",") + std::to_string(depth);
+    }
+    at = end + 1;
+  }
+  return depths;
+}
+
+// Case 52's failure: the line of the check that failed, and the case's number.
+static int WindCaseFails(int line) {
+  std::cerr << "the wind vertex program: the check at line " << line << " failed\n";
+  return 52;
+}
+
+// How many structured-buffer loads from register t<reg> a listing has.
+static int LoadCount(const std::string& listing, int reg) {
+  const std::string depths = LoadDepths(listing, reg);
+  if (depths.empty()) return 0;
+  int n = 1;
+  for (char c : depths) n += c == ',';
+  return n;
+}
+
 static int PinsMissing(const char* vs, const char* textured, const char* layer, const char* far_ps) {
   if (!strstr(vs, kPinVsMain)) return 1;
   if (!strstr(textured, kPinTexturedMain)) return 2;
@@ -2952,7 +3035,8 @@ int main() {
       // light text has the fog's tail of the frame's block and the fog's functions under it, with
       // names that do nothing in its place otherwise)
       if (strstr(p.colour, "#define CLAY_DEPTH_ONLY") || Count(p.colour, "#ifdef CLAY_DEPTH_ONLY") != 1 || Count(p.colour, "#else") != 2 ||
-          Count(p.colour, "#endif") != 4 || Count(p.colour, "#ifdef CLAY_FOG") != 2 || Count(p.colour, "#ifndef CLAY_DEPTH_ONLY") != 1 ||
+          Count(p.colour, "#endif") != (i == 0 ? 5 : 4) || Count(p.colour, "#ifdef CLAY_WIND") != (i == 0 ? 1 : 0) ||  // (the object block's wind tail: the textured shader's text has the block; case 52 holds its compiled bytes to those of before)
+          Count(p.colour, "#ifdef CLAY_FOG") != 2 || Count(p.colour, "#ifndef CLAY_DEPTH_ONLY") != 1 ||
           Count(p.colour, "#define CLAY_FOG 1") != 1 || strstr(p.colour, "#ifndef CLAY_DEPTH_ONLY") != p.colour) return 192;
       if (!Compile(p.name, p.depth, "ps_5_0")) return 192;
       if (BindingsMismatch(p.name, p.depth, "ps_5_0", false) != 0 || DrawLayoutMismatch(p.name, p.depth, "ps_5_0") != 0) return 193;
@@ -4814,9 +4898,180 @@ int main() {
     }
     std::cout << "scene dump: the depth step's one load, its level's four rules in the compiled program, no other program's text touched\n";
   }
+  // 52 (a free number below 256): the wind vertex program (sub-project 11, plan Task 10; clay_logic.h, "Native wind").
+  {
+    using namespace fable2::native::render;
+    // (a) Without CLAY_WIND every clay program compiles to the bytes it compiled to before the wind: the hashes
+    // (FNV-1a 64 of the whole compiled blob, the runtime's flags) and sizes recorded at commit 21be803, the commit
+    // before the task, by out/tests/foliage-task10/baseline_hashes.cpp with this compiler. The last line is a
+    // program of no shader of the pass: where IT compiles to other bytes the compiler is another one, the
+    // recorded hashes say nothing and the comparison is not made (said aloud; the text's own rule, that
+    // everything of the wind stands between #ifdef CLAY_WIND and its #else or #endif, is held below either way).
+    const struct {
+      const char* name;
+      const char* src;
+      const char* target;
+      uint64_t hash;
+      size_t size;
+    } before[] = {
+        {"clay_vs", kClayVs, "vs_5_0", 0xC1D649CF4B9205C4ull, 10200},
+        {"clay_ps", kClayPs, "ps_5_0", 0xA7ECF4E6B3AACD13ull, 8052},
+        {"clay_textured_ps", kClayTexturedPs, "ps_5_0", 0x0A1DC9F23AF13290ull, 23936},
+        {"clay_terrain_layer_ps", kClayTerrainLayerPs, "ps_5_0", 0x6642A40C9496D997ull, 16452},
+        {"clay_terrain_far_ps", kClayTerrainFarPs, "ps_5_0", 0xBE457649660BC0AAull, 13324},
+        {"clay_textured_depth_ps", kClayTexturedDepthPs, "ps_5_0", 0xF057CCDD7BE1C5C7ull, 6016},
+        {"clay_terrain_layer_depth_ps", kClayTerrainLayerDepthPs, "ps_5_0", 0x277FB8D3A19E5FC8ull, 5484},
+        {"clay_terrain_far_depth_ps", kClayTerrainFarDepthPs, "ps_5_0", 0x1DB48924B7D66149ull, 2580},
+        {"clay_shadow_ps", kClayShadowPs, "ps_5_0", 0x2AEE57793156E0D9ull, 3920},
+        {"canary", "float4 main(float4 p : SV_Position) : SV_Target { return p * 0.25 + 1.0; }", "ps_5_0", 0x144FCFF10FDFCCA2ull, 532},
+    };
+    size_t canary_size = 0;
+    const auto& canary = before[std::size(before) - 1];
+    const bool same_compiler = CodeHash(canary.name, canary.src, canary.target, &canary_size) == canary.hash && canary_size == canary.size;
+    if (!same_compiler) {
+      std::cout << "wind: NOT JUDGED: this compiler is not the one the clay programs' bytes of before the wind were recorded with\n";
+    } else {
+      for (size_t i = 0; i + 1 < std::size(before); ++i) {
+        size_t size = 0;
+        const uint64_t hash = CodeHash(before[i].name, before[i].src, before[i].target, &size);
+        if (hash != before[i].hash || size != before[i].size) {
+          std::cerr << before[i].name << " without CLAY_WIND is not the program of before the wind: " << size << " bytes, hash " << std::hex
+                    << hash << std::dec << "\n";
+          return WindCaseFails(__LINE__);
+        }
+      }
+      // (control: the comparison sees one changed operand)
+      size_t size = 0;
+      const std::string other = Changed(kClayVs, "c.w * 0.01", "c.w * 0.02");
+      if (other.empty() || CodeHash("clay_vs_other", other.c_str(), "vs_5_0", &size) == before[0].hash) return WindCaseFails(__LINE__);
+    }
+    // (the text's rule: the define's name stands in the vertex shader's text and the object block's alone, and
+    // the wind's names nowhere outside the two; the other clay programs do not hold the vertex text at all)
+    for (const char* src : {kClayPs, kClayTerrainLayerPs, kClayTerrainFarPs, kClayShadowPs, kClayTexturedDepthPs}) {
+      for (const char* word : {"wind_words", "WindPlant", "WindLeaf", "WindTrunk", "wind_family"}) {
+        if (strstr(src, word)) return WindCaseFails(__LINE__);
+      }
+    }
+    if (Count(kClayVs, "#ifdef CLAY_WIND") != 3 || Count(kClayVs, "#ifndef CLAY_WIND") != 1 || Count(kClayTexturedPs, "CLAY_WIND") != 1 ||
+        Count(kClayPs, "CLAY_WIND") != 0 || strncmp(kClayWindVs, "#define CLAY_WIND 1\n", 20) != 0 || strcmp(kClayWindVs + 20, kClayVs) != 0 ||
+        strstr(kClayVs, "#define CLAY_WIND")) return WindCaseFails(__LINE__);
+
+    // (b) The wind program compiles; t9 is a buffer of 4-byte elements (the rest program's: 8); cbuffer Object is
+    // 448 bytes, the wind's registers at 288 and its literals at 336 over seven rows, behind the fields every
+    // program has; cbuffer Draw as ever; and it binds nothing the pass's layout has no parameter for.
+    if (!Compile("clay_wind_vs", kClayWindVs, "vs_5_0")) return WindCaseFails(__LINE__);
+    const std::string rest = Disassembly("clay_vs", kClayVs, "vs_5_0"), wind = Disassembly("clay_wind_vs", kClayWindVs, "vs_5_0");
+    if (rest.empty() || wind.empty()) return WindCaseFails(__LINE__);
+    if (!HasLineWith(wind, "dcl_resource_structured", "t9, 4") || HasLineWith(wind, "dcl_resource_structured", "t9, 8") ||
+        !HasLineWith(rest, "dcl_resource_structured", "t9, 8") || HasLineWith(rest, "dcl_resource_structured", "t9, 4")) {
+      std::cerr << "t9: the wind program's is not a buffer of floats, or the rest program's not of float2\n";
+      return WindCaseFails(__LINE__);
+    }
+    std::vector<ClayBufferField> fields(std::begin(kClayObjectFields), std::end(kClayObjectFields));
+    fields.insert(fields.end(), std::begin(kClayWindObjectFields), std::end(kClayWindObjectFields));
+    static_assert(kClayWindObjectSize == 448 && kClayWindObjectSize == kClayWindOffset + sizeof(ClayWindConstants) &&
+                  kClayWindObjectSize <= kClayObjectSlotBytes && kClayWindObjectFields[0].offset == kClayWindOffset &&
+                  kClayWindObjectFields[0].bytes == sizeof(ClayWindConstants::reg) &&
+                  kClayWindObjectFields[1].offset == kClayWindOffset + offsetof(ClayWindConstants, lit) &&
+                  kClayWindObjectFields[1].bytes == sizeof(ClayWindConstants::lit));
+    if (int at = BufferLayoutMismatch("clay_wind_vs", kClayWindVs, "vs_5_0", "Object", fields.data(), unsigned(fields.size()), kClayWindObjectSize)) {
+      std::cerr << "the wind program's cbuffer Object: mismatch " << at << "\n";
+      return WindCaseFails(__LINE__);
+    }
+    // (and every other program's Object is the 288 bytes it was)
+    if (BufferLayoutMismatch("clay_vs", kClayVs, "vs_5_0", "Object", kClayObjectFields, unsigned(std::size(kClayObjectFields)), 288)) return WindCaseFails(__LINE__);
+    if (BindingsMismatch("clay_wind_vs", kClayWindVs, "vs_5_0", true) || DrawLayoutMismatch("clay_wind_vs", kClayWindVs, "vs_5_0")) return WindCaseFails(__LINE__);
+    unsigned declared = DeclaredRegisters(wind, 1);
+    if (declared != kClayWindObjectSize / 16) {
+      std::cerr << "the wind program declares " << declared << " registers of cbuffer Object\n";
+      return WindCaseFails(__LINE__);
+    }
+
+    // (c) Every load from t9 lies inside the wind's block: under a test that holds the vertex's bound (v below
+    // vertex_count: word 2 of Draw's register 4) and light_mode's bits 12 and 13 (word 1 of register 8), and
+    // inside the family's own test: four loads a trunk, ten a leaf, two a plant.
+    if (!strstr(kClayWindVs, "  uint wind_family = (light_mode >> 12) & 3;\n  [branch] if (in_range && wind_family != 0) {\n") ||
+        !strstr(kClayWindVs, "    [branch] if (wind_family == 1) {\n      uint at = uint(v) * 4;\n") ||
+        !strstr(kClayWindVs, "      [branch] if (wind_family == 2) {\n        uint at = uint(v) * 10;\n") ||
+        !strstr(kClayWindVs, "      } else {\n        uint at = uint(v) * 2;\n")) return WindCaseFails(__LINE__);
+    if (BufferLoadGuard(wind, 9) != 1 || LoadCount(wind, 9) != 16 || InnerLoadDepth(wind, 9) < 2 || !HasLineWith(wind, "ult", "cb0[4].z") ||
+        !HasLineWith(wind, "ubfe", "cb0[8].y")) {
+      std::cerr << "the wind program's loads from t9: " << LoadDepths(wind, 9) << "\n" << Code(wind);
+      return WindCaseFails(__LINE__);
+    }
+    // (the light's buffers as in the rest program: guarded, at the same depths)
+    if (LoadDepths(wind, 10) != LoadDepths(rest, 10) || LoadDepths(wind, 11) != LoadDepths(rest, 11) || LoadDepths(wind, 12) != LoadDepths(rest, 12) ||
+        BufferLoadGuard(wind, 10) != 1 || BufferLoadGuard(wind, 11) != 1 || BufferLoadGuard(wind, 12) != 1) return WindCaseFails(__LINE__);
+    // On the program a draw runs, the mode fixed: without a wind family nothing is loaded from t9, whatever the
+    // light's bits; with one, exactly the family's words.
+    for (unsigned mode = 0; mode < kLightModeCount; ++mode) {
+      const std::string listing = Disassembly("clay_wind_vs_rest_mode", WithLightMode(kClayWindVs, mode).c_str(), "vs_5_0");
+      if (listing.empty() || ReadsResource(listing, 9)) {
+        std::cerr << "the wind program with light_mode " << mode << " (no wind family) reads t9\n";
+        return WindCaseFails(__LINE__);
+      }
+    }
+    const int words[4] = {0, 4, 10, 2};
+    for (unsigned family = 1; family < 4; ++family) {
+      for (unsigned light : {0u, 14u, 22u, 54u, 78u}) {
+        const unsigned mode = light | (family << kLightModeWindShift);
+        const std::string listing = Disassembly("clay_wind_vs_mode", WithLightMode(kClayWindVs, mode).c_str(), "vs_5_0");
+        if (listing.empty() || LoadCount(listing, 9) != words[family] || BufferLoadGuard(listing, 9) != 1 || !HasLineWith(listing, "ult", "cb0[4].z") ||
+            ReadsResource(listing, 10) != (light != 0)) {
+          std::cerr << "the wind program with light_mode " << mode << ": " << LoadCount(listing, 9) << " loads from t9\n";
+          return WindCaseFails(__LINE__);
+        }
+      }
+    }
+    static_assert(kLightModeWindShift == 12 && kLightModeWindMask == 0x3000u && LightModeWind(fable2::native::capture::WindFamily::kTrunk) == 1u << 12 &&
+                  LightModeWind(fable2::native::capture::WindFamily::kLeaf) == 2u << 12 && LightModeWind(fable2::native::capture::WindFamily::kPlant) == 3u << 12 &&
+                  WindWordsPerVertex(fable2::native::capture::WindFamily::kTrunk) == 4 && WindWordsPerVertex(fable2::native::capture::WindFamily::kLeaf) == 10 &&
+                  WindWordsPerVertex(fable2::native::capture::WindFamily::kPlant) == 2);
+    // Controls: a word read before the block, and a block without the vertex's bound, are seen.
+    {
+      const std::string early = Changed(kClayWindVs, "  o.world = p.xyz;\n", "  o.world = p.xyz + wind_words[uint(v)];\n");  // (into an output no block writes)
+      const std::string unbound = Changed(kClayWindVs, "  [branch] if (in_range && wind_family != 0) {\n", "  [branch] if (wind_family != 0) {\n");
+      const std::string early_l = Disassembly("clay_wind_vs_early", early.c_str(), "vs_5_0"), unbound_l = Disassembly("clay_wind_vs_unbound", unbound.c_str(), "vs_5_0");
+      if (early.empty() || unbound.empty() || early_l.empty() || unbound_l.empty() || BufferLoadGuard(early_l, 9) != 0 || Code(unbound_l) == Code(wind)) return WindCaseFails(__LINE__);
+      // (with the family fixed and no bound the block's test is gone: the loads lie in fewer blocks)
+      const std::string bound_fixed = Disassembly("clay_wind_vs_mode_bound", WithLightMode(kClayWindVs, 1u << 12).c_str(), "vs_5_0");
+      const std::string unbound_fixed = Disassembly("clay_wind_vs_mode_unbound", WithLightMode(unbound.c_str(), 1u << 12).c_str(), "vs_5_0");
+      if (bound_fixed.empty() || unbound_fixed.empty() || InnerLoadDepth(bound_fixed, 9) != 1 || InnerLoadDepth(unbound_fixed, 9) != 0) {
+        std::cerr << "the vertex's bound around the wind words: depth " << InnerLoadDepth(bound_fixed, 9) << " with it, " << InnerLoadDepth(unbound_fixed, 9) << " without\n";
+        return WindCaseFails(__LINE__);
+      }
+    }
+
+    // (d) Ledger ruling 36: a leaf's one division (by the length of its moved offset) lies inside the test of
+    // that offset's squared length, a block deeper than the leaf's own; without the test it lies in the leaf's
+    // block. The program's other division is the rest program's (the picture coordinate), outside every block.
+    if (!strstr(kClayWindVs, "  precise float3 moved = pivot;\n  [branch] if (turned2 > 0.0) moved = pivot + d / sqrt(turned2) * len;\n  return moved;\n")) return WindCaseFails(__LINE__);
+    {
+      const std::string leaf = Disassembly("clay_wind_vs_leaf", WithLightMode(kClayWindVs, 2u << 12).c_str(), "vs_5_0");
+      const std::string bare_src = Changed(kClayWindVs, "  [branch] if (turned2 > 0.0) moved = pivot + d / sqrt(turned2) * len;\n", "  moved = pivot + d / sqrt(turned2) * len;\n");
+      const std::string bare = Disassembly("clay_wind_vs_leaf_bare", WithLightMode(bare_src.c_str(), 2u << 12).c_str(), "vs_5_0");
+      if (leaf.empty() || bare_src.empty() || bare.empty() || OpDepths(leaf, "div") != "2,0" || OpDepths(bare, "div") != "1,0" ||
+          OpDepths(Disassembly("clay_vs_mode0", WithLightMode(kClayVs, 0).c_str(), "vs_5_0"), "div") != "0") {
+        std::cerr << "a leaf's division: depths " << OpDepths(leaf, "div") << " (without the test " << OpDepths(bare, "div") << ")\n" << Code(leaf);
+        return WindCaseFails(__LINE__);
+      }
+      // (the test is of the squared length against zero: a less-than with the literal 0 right before the block)
+      if (!HasLineWith(leaf, "lt", "l(0.000000)")) return WindCaseFails(__LINE__);
+    }
+
+    // (e) Ledger ruling 35: the wind's arithmetic is marked precise in the compiled program (the compiler may
+    // not reorder or contract it); the rest program has no such mark.
+    if (Count(wind.c_str(), "[precise") < 100 || Count(rest.c_str(), "[precise") != 0) {
+      std::cerr << "precise instructions: " << Count(wind.c_str(), "[precise") << " in the wind program, " << Count(rest.c_str(), "[precise") << " in the rest program\n";
+      return WindCaseFails(__LINE__);
+    }
+    if (LoopInstructions(wind) != 0) return WindCaseFails(__LINE__);
+    std::cout << "wind: without the define the nine clay programs' bytes of before; t9 a buffer of floats, 16 loads, each in the family's block under the vertex's bound; "
+              << Count(wind.c_str(), "[precise") << " precise instructions; a leaf's division behind the squared length's test\n";
+  }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads; the base map's gamma sign: the curve, the record's word read by the lit terrain programs alone; the quad step: the block at the table's offsets in both stages, the six vertices through the game's matrix, the two kinds' statements, one texture under four samplers, the alpha test's discard, the compiled clamp; the sun layer: the blocks at their tables' offsets, the depth step's one bounded load written as depth, the reduction's one sample, the radial blur's fourteen bounded loads, the four kinds' statements and the occluder's form, the writes' own rounding, no other program's text touched; the previous-frame blend: with the share 0 the composite of before, the blended form behind the share's test with one bounded load of the previous picture; the scene's clouds: the block at the quad block's offsets, the corner's position passed on, the statements of the reference, the alpha test's discard, the base level's texel step, the compiled clamp, no other program's text touched\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads; the base map's gamma sign: the curve, the record's word read by the lit terrain programs alone; the quad step: the block at the table's offsets in both stages, the six vertices through the game's matrix, the two kinds' statements, one texture under four samplers, the alpha test's discard, the compiled clamp; the sun layer: the blocks at their tables' offsets, the depth step's one bounded load written as depth, the reduction's one sample, the radial blur's fourteen bounded loads, the four kinds' statements and the occluder's form, the writes' own rounding, no other program's text touched; the previous-frame blend: with the share 0 the composite of before, the blended form behind the share's test with one bounded load of the previous picture; the scene's clouds: the block at the quad block's offsets, the corner's position passed on, the statements of the reference, the alpha test's discard, the base level's texel step, the compiled clamp, no other program's text touched; the wind vertex program: without its define the nine clay programs' bytes of before the wind, t9 a buffer of floats loaded only for a vertex the draw names of a draw with a wind family, the wind's constants at 288 and 336 of a 448-byte block, a leaf's division behind the test of the squared length, the three functions marked precise\n";
   return 0;
 }

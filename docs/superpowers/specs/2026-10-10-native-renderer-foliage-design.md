@@ -4,7 +4,13 @@ Status: **phase 11a (wind) built and validated by stills and by the native depth
 criterion 9's cost (no timing evidence yet) and criterion 8's fourth part (no pair of runs of the two commits at one width)** (verdicts with
 each criterion and in FM section 18, "Validation (11a)"; the switch stays off by default); **phase 11b (coverage) built and validated on stills, 2026-10-11, with its cost left open: criteria 10 and 11 met, 12 not met as written and met in
 direction (ledger ruling 56), 13 met by a substituted baseline, 14 met but for the cost; the fern is not coverage (ruling 57); a late tree's order
-against blended records is a limit with a user check (ruling 55) (FM section 18, "Validation (11b)", "Limits (11b)"; plan Tasks 12 to 15)**; phases 11b and 11c: design, 2026-10-10 (branch `native-renderer-foliage`). Plan:
+against blended records is a limit with a user check (ruling 55) (FM section 18, "Validation (11b)", "Limits (11b)"; plan Tasks 12 to 15)**; **phase 11c (the tree occluder's redraw, the darkness trace, the mend of the half blend) built and validated on stills and stored
+scenes, 2026-10-11: criterion 15 not met as written and met against the level a fetch takes (ledger ruling 62), 16 met, 17 not met as
+written, 18 met but for the cost and the picture against master's binary; sub-project 10's criterion 19 met on the oracle feed and NOT
+met in the game ("sun" 0.67 to 0.78, "beams left" 0.87 to 1.10, "beams right" 0.95 to 1.15 and, across a sweeping shaft, 1.35 and 1.77);
+the cost of every phase and criterion 8's fourth part are not judged, the window not having stood on the usual monitor (ledger rulings
+49 and 65); every switch stays off by default (FM section 18, "Validation (11c)", "Limits (11c)", "Follow-ups (11)"; plan Tasks 16 to
+18)**. **Sub-project closed 2026-10-11**, the closing table of all 19 criteria at the end of this file (branch `native-renderer-foliage`). Plan:
 `docs/superpowers/plans/2026-10-10-native-renderer-foliage.md`. Research:
 `.superpowers/sdd/foliage-research.md` (untracked; its scripts and outputs in
 `out/native-evidence/foliage/research/`). Ledger:
@@ -613,6 +619,9 @@ threshold set here without a measured one before it (ruling 20).
    **Verdict (plan Task 11): the first three parts met** (shader test case 52; `DecideClayWind`
    off; run 2's frame rows `"wind":"off"`, no member, no wind line); **the fourth not judged** (no
    pair of runs of the two commits at one width).
+   **Closing (plan Task 18): the fourth part stays not judged: the window was not on the usual monitor** (ledger ruling 65). The
+   closing run with every switch at its default (log 645) holds no line of the wind, the coverage, the tree occluder, the scene dump or
+   the post; its shots are 1296 wide and the one run of master's binary with that plan 1942 wide: an indication only (FM section 18, "Validation (11c)").
 9. *Cost and errors.* On a quiet machine at shot width 1942, wind on: every steady 150-frame
    native window at 30.0 fps or more at the bridge, none below 29.2 at the third spot; the
    capture median stated beside the off-run's (a difference under a third of a millisecond is
@@ -622,6 +631,10 @@ threshold set here without a measured one before it (ruling 20).
    **Verdict (plan Task 11): cost not judged** (no run of the phase is timing evidence: 1296 wide
    or with read-back, a user present; to be repeated at width 1942, wind on and off); **errors
    met** (log 604: 0 `d3d ERROR` lines in 240 s on the software adapter, warning id 1328 only).
+   **Closing (plan Task 18): cost not judged: the window was not on the usual monitor** (ledger ruling 65); the third spot was not
+   run. An indication at width 1296, uncapped, not evidence: steady native windows at the bridge 28.8 to 29.6 fps with sun, wind and
+   coverage against 28.8 to 30.0 with the sun alone (mean frame 34.24 against 33.71 ms; capture median 1.99 against 1.94 ms): by the
+   letter both fail the bound, the off run too, which says the bound is not readable on that monitor (FM section 18, "Validation (11c)").
 
 **11b, coverage**
 
@@ -684,6 +697,7 @@ threshold set here without a measured one before it (ruling 20).
     **Verdict (plan Task 15): off met** (the programs' bytes: shader case 53; the pass's text; six off-runs
     without a line of it); **errors met** (logs 615 and 620: 0 `d3d ERROR` in 240 s each on the software
     adapter, warning id 1328 alone); **cost not judged** (no timing evidence: 1296 wide, a user present).
+    **Closing (plan Task 18): cost not judged: the window** (as criterion 9).
 
 **11c, the tree occluder, the darkness, criterion 19**
 
@@ -693,12 +707,20 @@ threshold set here without a measured one before it (ruling 20).
     texels the native redraw alone closes are at most 15% of the replay's count; with a sun-off
     run the redraw draws nothing (the Sun line). The texture level that fits best is reported
     (open question 7).
+    **Verdict (plan Tasks 16 to 18; ledger ruling 62): not met as written; met against the level a fetch takes.** Against the base level
+    the native redraw holds 46.8 to 52.9% of the replay's texels; against the replay that takes each triangle's own level, 95.9 to 97.2%
+    with 4.8 to 5.7% alone (the closing run: 96.33%, 5.13%); with the wind off 60.5 to 61.6% (a twin is redrawn where the scene draws it);
+    with the sun off nothing is drawn. No single stored level fits.
 16. *The darkness trace (no precedent).* `foliage_trace.py trace` on the paired frame gives, for
     "sun" and the three other regions, native over game per class; the verdict is "assigned"
     when the named classes reproduce the region's ratio within 0.05 in logarithm (unclassified
     pixels hold no more than that) and every class outside 0.85 to 1.18 is named with its cause
     or as open. **What the criterion promises
     is the table and the names, not that the remainder is gone.**
+    **Verdict (plan Tasks 17 and 18): met.** Every region assigned in both paired frames. After the mend of the half draw (ledger ruling
+    60), by class over the picture: late tree over sky 0.986, late tree over closed 0.856, leaf 0.881, open sky 0.951, trunk and wood
+    1.028, the picture 0.957. Named: the late tree drawn whole (coverage) and then blended once per card (mended). Open: leaf, open sky at
+    foliage edges, late tree over closed pixels. No fault of an existing formula was found; the frame's own leaf rows were not checked.
 17. *Sub-project 10's criterion 19, judged again.* Sunward, sun on, wind on, coverage on, three
     brackets, native over the emulated shot of the same run: "sun", "beams left", "beams right"
     (and the root, reported). **Not promised to lie in 0.75 to 1.25** (ruling 4). What can fail:
@@ -708,13 +730,25 @@ threshold set here without a measured one before it (ruling 20).
     and the remainder at "sun" (measured over the game's) is stated with the trace's classes.
     The verdict of criterion 19 itself is recorded as it falls, and with it the recommendation
     for the default of `--fable2_native_sun`.
+    **Verdict (plan Task 18): not met as written.** The prediction was not blind (run G's shots of the same switches were known) and
+    its first layer factor was a count of six texels (0.500); with the second (0.813, the whole layer's open texels) the held view reads
+    inside 0.20 at "sun" (0.67 to 0.78 against 0.61 to 0.75), "beams left" (0.87 to 1.10 against 1.04 to 1.12) and the root (0.90 to 1.25
+    against 1.00 to 1.12) and outside at "beams right" (0.95 to 1.15, and 1.35, 1.77 at one second, against 0.79 to 0.87). **Sub-project
+    10's criterion 19: met on the oracle feed (unchanged to the third decimal), NOT met in the game** ("sun" under 0.75 in three of six
+    figures; "beams right" over at one second; "beams left" inside, where it was over). The remainder at "sun": criterion 16's open
+    classes. The default of `--fable2_native_sun` stays off (FM section 18, "Validation (11c)", "The sweeping shaft", "The defaults").
 18. Criteria 8 and 9 again for 11c's builds (`--fable2_native_sun=off`: no twin list read, no
     redraw; the dump's switch off: no target, program or copy).
+    **Verdict (plan Task 18): off met** (program bytes; logs 633, 639, 645: no tree line with the sun off; logs 635, 645: no dump line
+    without its switch); **errors met with a reservation** (logs 629, 635 clean on the software adapter; the redraw's rest pipeline ran on
+    the real adapter alone); **cost not judged: the window**.
 
 **All phases**
 
 19. *Evidence rule.* Every number names its file; inference is marked; the research's labels are
     kept where its facts are repeated; a criterion not met as written is said to be not met.
+    **Verdict (plan Task 18): followed**, with what the closing task says against itself (criterion 17's prediction; "ruling 5 closed"
+    corrected).
 
 ## Limits known now
 
@@ -920,7 +954,46 @@ tree occluder (11c)" to "The half blend, once: in the game")**
   mend (run E): sun 0.739, root 0.755; after it the game's scene of that framing is in no evidence (the
   read-back run did not reach it): about 0.79 and 0.97 by an estimate from two runs. Classes of 13 has two
   more than the plan's six (late tree over closed, plant).
-- **Ruling 5's question is closed**: no existing light formula is at fault (the leaf formula's check passes);
-  the one fault found was the half draw, mended. Open, to the roadmap: the leaf class at 0.88, open sky at
-  edges at 0.95, a native beam at "beams right" the game's picture does not show.
-- Criteria 17 to 19 and the cost are Task 18's.
+- **Ruling 5's question** (corrected after the review of plan Tasks 16 and 17, Important 1): **no fault of an existing
+  formula was found**: the leaf formula's check passes on made inputs; the frame's own leaf rows were not checked
+  (the tool has no mode for them); the leaf class stays open at 0.88 (0.79 to 0.81 at the root and "beams right").
+  The one fault found was the half draw, mended. Open, to the roadmap: the leaf class, open sky at edges at 0.95,
+  and the native layer's shaft, which is wider than "a beam at beams right": 2 to 4.6 times the game's at "beam far
+  right", sweeping with the sun's place (ledger ruling 64: sub-project 10's layer's open item).
+
+**Plan Task 18, the closing (ledger rulings 63 to 65; FM section 18, "Validation (11c)", "Limits (11c)", "Follow-ups (11)")**
+
+- **Eight closing runs** on binary `63A4B6A3FD5BCE43` (logs 640 to 647), every shot 1296 wide. Not made of the plan's list:
+  the third spot, the trees.
+- **Criterion 17's prediction** was written after run G's shots of the same switches were known, and its first layer
+  factor (the open texels inside the "sun" rectangle) was three texels over six. Both predictions are printed.
+- **The "before" picture on this binary is not sub-project 10's**: the redraw has no switch (ruling 16), so the sun alone
+  closes the layer behind a tree still solid in the scene ("sun" 0.45 to 0.55, root 0.42 to 0.78).
+- **The game's own shafts differ between two runs at one second** (emulated shots at 59 s: 2.4 times at "beam far left").
+- **Open questions**: each with what became of it in FM section 18, "Validation (11c)". **Limits known now**: draw order under coverage:
+  FM "Limits (11b)" 1, 2 and "Limits (11c)" 6; edges at fade 1, the light at rest, the push, `2D40`, towns: stand; the
+  clock: stands; "alpha exactly 1": criterion 15; shadow maps: stands; the reference's layer factor: open, and now seen as
+  the sweeping shaft; one save, late morning: stands.
+- **Review of plan Tasks 16 and 17, the Minors recorded as limits**: the tail's order of depth and colour steps, the two
+  steps' depth equality measured on one card, the rest pipeline never under the debug layer (FM "Limits (11c)" 6 to 8).
+
+**The closing table of all 19 criteria**
+
+| # | Verdict |
+|---|---|
+| 1, 2, 3, 10, 11, 16 | met |
+| 4 | not judged as written; met inside its recorded deviation |
+| 5 | met as amended (ledger rulings 24, 25) |
+| 6 | not decidable as written; met by a substituted measure (rulings 27, 29), the amplitude on the native depth (ruling 51) |
+| 7 | met as written; the measure cannot fail for its reason |
+| 8 | parts 1 to 3 met; part 4 not judged: the window |
+| 9 | errors met; cost not judged: the window; the third spot not run |
+| 12 | not met as written, met in direction (ruling 56) |
+| 13 | met by a substituted baseline |
+| 14 | off met, errors met; cost not judged: the window |
+| 15 | not met as written; met against the level a fetch takes (ruling 62) |
+| 17 | not met as written; sub-project 10's criterion 19: met on the oracle feed, NOT met in the game |
+| 18 | off met; errors met with a reservation; cost and the picture against master's binary not judged: the window |
+| 19 | followed |
+
+Figures and files: FM section 18, "Validation (11c)", "The closing table".

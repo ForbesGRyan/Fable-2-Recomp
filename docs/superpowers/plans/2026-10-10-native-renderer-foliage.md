@@ -1327,6 +1327,13 @@ due at that index, after the tail.
 
 ### Task 15: Validation and documents (11b)
 
+*As executed (annotated by Task 18, 2026-10-11; the list below is the plan as written):* the runs were not made on a
+quiet machine at width 1942 (the window stood on the other monitor: no timing evidence in the sub-project). The user
+checks named 83 and 84 below were appended as **85 and 86** (83 and 84 were taken by phase 11a), with 87 and 88 beside
+them. Checks 66 and 72 were reworded and FM 1898 and 2414 item 5 marked by Task 18. Task 14's "full depth-only program"
+for an early record's pre-pass was not built: an early record keeps today's pre-pass draw (spec, implementation notes).
+`lighting-formulas.md` was not changed by this task or by Task 18 (no formula changed).
+
 - [ ] Runs by the controller on a quiet machine, shot width 1942, no agent beside them: BRIDGE
       and THIRD with POST, each with COV and without; SUNWARD with POST, SUN, WIND, COV.
 - [ ] Criteria 10 to 14 with evidence and exact verdicts; the default stays off (ruling 22) with
@@ -1460,6 +1467,12 @@ class Trace(unittest.TestCase):
       a separate commit for the mend).
 
 ### Task 18: Validation and documents (11c); criterion 19 again; closing
+
+*As executed (2026-10-11; the list below is the plan as written):* eight closing runs by the controller, every shot 1296
+wide, so no timing verdict (ledger ruling 65); the third spot and the trees were not run. The prediction of criterion
+17 was written before the closing shots and was not blind. The frame map's new sections are "Validation (11c)",
+"Limits (11c)" and "Follow-ups (11)". The user checks named 85 and 86 below were appended as **89 and 90**, with 91 (the
+cost) and 92 (everything off; the defaults); the roadmap's line reads "User checks 40 to 92".
 
 - [ ] Runs by the controller on a quiet machine, shot width 1942, no agent beside them: SUNWARD
       with POST, SUN, WIND, COV and with POST, SUN alone (three brackets each; the emulated

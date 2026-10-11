@@ -629,6 +629,14 @@ float bits); in `vs-transforms.json` each entered shader's `"wind": {"family", "
 generator and its test against a made JSON); `position_check.py` replays a wind entry's position
 with its formula and prints `wind: p50 / p99 / max pixel` against the microcode's `oPos`.
 
+**As built (ledger rulings 30 to 33; Tasks 8 to 10 consume this, not the paragraph above):**
+`wind_leaf(p, q, w4, v3, c15, c16, c17, lit)` with `v3` the THREE values of fetch 5 (source x, y,
+z); `wind_reach_leaf(w4_max, length_max, c15, c16, c17, lit)`; the `"wind"` member also has
+`"role"`, `"lit_at"` (name to `"c253.x"`) and `"evidence"`; `wind_table.inc` is committed (X-macro
+lines `FABLE2_WIND`, `FABLE2_WIND_LITERAL`); the leaf pins' lines carry three flutter values, and
+the last made leaf line is the vertex at its pivot with the lift exactly 0 (ledger ruling 36);
+`position_check.py --wind` judges the vertices in view (spec criterion 4, "As judged").
+
 - [ ] Tests first: with the pivot at the vertex (`q == p`) and with `w4` and `v2` zero the
       position is the pivot's own (the direction has no length to turn); `|position - q'|` equals
       `|p - q|` within 1e-5 for 400 made inputs (instr 98: the length is kept); the reach bound;
@@ -660,7 +668,9 @@ inputs".
 `ResolveLightStream`; `FillLightInputs` (3282) as the pattern; `FrameBuilder::Add` (line 494),
 `AddShadow` (580); Task 7's `wind_table.inc`.
 
-**Interfaces (produce exactly):**
+**Interfaces (produce exactly; amended after Tasks 5 to 7 to ledger rulings 26, 28, 30, 31 and
+33, each amended line marked; the names of the amended lines are those of `wind_inputs.h` as
+Task 8 committed it, commit 4f2f4de):**
 
 ```cpp
 // wind_inputs.h, namespace fable2::native::capture
@@ -668,7 +678,9 @@ enum class WindFamily : uint8_t { kNone = 0, kTrunk = 1, kLeaf = 2, kPlant = 3, 
 enum class WindReason : uint8_t { kNone, kOff, kNoEntry, kRegisterUnread, kRegisterNotFinite, kRegisterRange,
                                   kLiteral, kElement, kStream, kInstance, kOverLimit, kCount };
 const char* WindReasonName(WindReason r);   // "none", "off", "no-entry", "register-unread", ... "over-limit"
-inline constexpr uint32_t kWindRegisters = 5, kWindLiterals = 5, kWindElements = 3;
+inline constexpr uint32_t kWindRegisters = 5, kWindLiterals = 28, kWindElements = 3;   // ruling 31: literal SLOTS; was 5 registers
+constexpr uint32_t WindLiteralCount(WindFamily f);   // ruling 31: trunk 18, leaf 28, plant 7 (light_formulas.WIND_LITERAL_ORDER), else 0
+inline constexpr uint32_t kWindLiteralFirst = 248, kWindLiteralRegisters = 8;   // ruling 31: the registers a table may name a literal at
 inline constexpr uint8_t kWindNoRegister = 0xFF;
 enum : uint32_t { kWindPivot = 0, kWindWeights = 1, kWindFlutter = 2 };   // WindSpec::element, WindInputs::element
 struct WindSpec {                       // one row of wind_table.inc
@@ -676,12 +688,22 @@ struct WindSpec {                       // one row of wind_table.inc
   WindFamily family;
   bool caster;
   uint8_t reg[kWindRegisters];          // trees: 15, 16, 17, none, none; plants: 10, 21, 22, 25, 26
-  uint8_t lit_reg[kWindLiterals];       // the shader's literal registers the formula reads; kWindNoRegister: none
-  float lit[kWindLiterals][4];          // their values, all four components
+  // Ruling 31: one entry a literal SLOT (its place in the family's order), not a register: the register and
+  // the component this shader's own table holds it at, and its bits. A slot past lit_count: kWindNoRegister, 0, 0.
+  // (Was: lit_reg[5], float lit[5][4].)
+  uint8_t lit_count;                    // WindLiteralCount(family)
+  uint8_t lit_reg[kWindLiterals];
+  uint8_t lit_comp[kWindLiterals];
+  uint32_t lit_bits[kWindLiterals];
   LightFetchSpec element[kWindElements];   // fetch -1: the family has none there
-  uint8_t source[kWindElements];        // LightElement::source of each
-  uint8_t source_count[kWindElements];  // 3 (the pivot), 4 (the weights), 2 (the flutter)
+  uint8_t source_count[kWindElements];  // 3 (the pivot), 4 (the weights), 3 (the flutter: ruling 30; was 2); 0: none
 };
+// Ruling 33: the table is read through the X-macro lines of wind_table.inc (FABLE2_WIND, FABLE2_WIND_LITERAL),
+// whose forms change only through gen_transform_table.py; a static assert holds the table well formed (every
+// slot of the family named exactly once, by a register of the window and a component).
+// Ruling 31: the shader object's own table against the row, each literal alone: `bits[r][c]` is component c of
+// register kWindLiteralFirst + r, bit r * 4 + c of `have` says the object's table holds that dword.
+bool WindLiteralsMatch(const WindSpec& spec, const uint32_t (*bits)[4], uint32_t have);
 const WindSpec* FindWind(uint64_t vs_hash);
 struct WindInputs {
   WindFamily family = WindFamily::kNone;
@@ -693,14 +715,16 @@ struct WindInputs {
 static_assert(sizeof(WindInputs) == 132, "WindInputs grew or shrank: one entry a wind draw is copied on the guest thread");
 struct WindDraw {
   const WindSpec* spec = nullptr;
-  bool literals_match = false;          // the shader object's own literal table equals spec->lit, bit for bit
+  bool literals_match = false;          // WindLiteralsMatch on the shader object's own literal table (ruling 31)
   RegisterView vs_regs;
   const std::vector<VertexFetch>* fetches = nullptr;
   LightStream stream[kWindElements];
   int64_t max_vertex = -1;              // DrawShaders::max_vertex
   bool instanced = false;               // DrawInputs::instances.active
 };
-bool WindRegisterInBounds(WindFamily family, uint32_t slot, const float v[4]);   // the spec's Design 5 bounds
+// The spec's Design 5 bounds as amended: c25.x in [0, 64] (ruling 26: zero inside), |c17.xy| <= 16 (ruling 28).
+// They are a table of lines that a Python test holds against wind_check.REGISTER_BOUNDS (review of Tasks 5 to 7).
+bool WindRegisterInBounds(WindFamily family, uint32_t slot, const float v[4]);
 WindReason MakeWindInputs(const WindDraw& d, WindInputs* out);
 
 // draw_record.h: after `skip`, in the tail padding
@@ -715,6 +739,9 @@ is not `kWindNoRegister` read (`kRegisterUnread`), finite (`kRegisterNotFinite`)
 table names found by `LightFetch`, in a format `LightElementBytes` knows, inside its vertex
 (`kElement`), its stream resolved and holding `max_vertex` (`max_vertex >= 0` and
 `(max_vertex + 1) * stride <= vb.size`: `kStream`), and not `instanced` (`kInstance`).
+A plant with `c25.x` = 0 and `c26` = 0 has inputs: its formula moves nothing (ledger ruling 26).
+`WindInputs` does not carry the literals and stays 132 bytes: they are the row's, which the
+capture has held against the shader object's own table (ledger ruling 31).
 
 `FrameScene` gains `std::vector<capture::WindInputs> wind`, `shadow_wind[2]`, `bool wind_records`,
 `uint32_t wind_family[size_t(capture::WindFamily::kCount)]`,
@@ -727,8 +754,9 @@ are appended and the record gets the index; an array at 65,535 entries gives `kO
 other record gets `kNoSideIndex` whatever index it came with.
 
 In `capture.cpp`: `VsInfo` gains `const WindSpec* wind` and `bool wind_literals` (set once in
-`FillShader` / at the first lookup of the object: the object's literal registers read and compared
-with the row's); `g_wind_wanted`, `g_wind_frame` latched with the records at the frame boundary
+`FillShader` / at the first lookup of the object: the object's literal table read over
+`c248..c255` and held against the row literal by literal, at the row's register and component:
+ledger ruling 31); `g_wind_wanted`, `g_wind_frame` latched with the records at the frame boundary
 (as the fog's); `FillWindInputs(uint32_t device, const DeviceSnapshot& dev, const VsInfo* vs, bool
 instanced, int64_t max_vertex, WindInputs* out)` called in `RecordDraw` beside `FillLightInputs`
 (for a draw that is not skipped and whose shader has a row) and in `ObserveShadowDraw` for a
@@ -822,10 +850,12 @@ int main() {
   // the bounds themselves (spec Design 5): the captured values inside, four times them outside or at the edge
   const float c15[4] = {63.1964f, 0.63f, 0.72f, 0.32f}, c17[4] = {0.4816f, -0.4636f, 2.0f, 126.637f};
   if (!WindRegisterInBounds(WindFamily::kTrunk, 0, c15) || !WindRegisterInBounds(WindFamily::kLeaf, 2, c17)) return 30;
-  const float gust[4] = {8.5f, 0.0f, 2.0f, 126.0f};
+  const float first_frame[4] = {12.5f, 0.0f, 2.0f, 126.0f};       // ledger ruling 28: the world's first frame; inside
+  if (!WindRegisterInBounds(WindFamily::kTrunk, 2, first_frame)) return 31;
+  const float gust[4] = {16.5f, 0.0f, 2.0f, 126.0f};              // ledger ruling 28: the bound is 16 (was 8, with 8.5 here)
   if (WindRegisterInBounds(WindFamily::kTrunk, 2, gust)) return 31;
   const float c25_zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-  if (WindRegisterInBounds(WindFamily::kPlant, 3, c25_zero)) return 32;   // c25.x in (0, 64]
+  if (!WindRegisterInBounds(WindFamily::kPlant, 3, c25_zero)) return 32;   // ledger ruling 26: c25.x in [0, 64], zero inside (was outside)
   return 0;
 }
 ```
@@ -858,29 +888,47 @@ words".
 reads a `LightElement`); `capture::InstanceIndex`, `capture::DecodePositions`
 (`ExpandInstanceBend`, `normal_decode.h` line 738, is the pattern); `PositionBounds`.
 
-**Produces:**
+**Produces (amended to ledger rulings 30 and 32, each amended line marked; the names of the
+amended lines are those of the Task 9 implementer's `wind_decode.h` and `geometry_cache.h` as they
+stood uncommitted on 2026-10-10: where the committed files differ, the requirement in the comment
+binds, not the name):**
 
 ```cpp
 // wind_decode.h, namespace fable2::native::render
-constexpr uint32_t WindWordsPerVertex(capture::WindFamily f) {   // trunk 4, leaf 9, plant 2, else 0
-  return f == capture::WindFamily::kTrunk ? 4u : f == capture::WindFamily::kLeaf ? 9u : f == capture::WindFamily::kPlant ? 2u : 0u;
+constexpr uint32_t WindWordsPerVertex(capture::WindFamily f) {   // trunk 4, leaf 10 (ruling 30; was 9), plant 2, else 0
+  return f == capture::WindFamily::kTrunk ? 4u : f == capture::WindFamily::kLeaf ? 10u : f == capture::WindFamily::kPlant ? 2u : 0u;
 }
 // The words a draw of `count` vertices reads; 0 when the product does not fit 32 bits.
 constexpr uint32_t WindWordsNeeded(capture::WindFamily f, uint32_t count);
-enum class WindBuild : uint8_t { kNone, kElement, kStream, kValue };
-// A tree's words, `count` vertices: a trunk (w.x, w.y, w.z, w.w); a leaf (q.x, q.y, q.z, w.x, w.y, w.z, w.w, v.x, v.y),
-// each value as the fetch reads it (the element's format, sign, normalisation, endian and source components).
+enum class WindBuild : uint8_t { kNone, kElement, kStream, kValue };   // the builder may add a reason of its own (the cache's upload)
+// Ruling 32: what a tree mesh's words say about how far the wind can move its vertices, taken while the words
+// are built: the largest of the four weights over the vertices built (light_formulas.wind_reach_tree's w4_max)
+// and, for a leaf, the largest |P - Q| (wind_reach_leaf's length_max; 0 for a trunk). A plant has none.
+struct WindExtent { float weight_max = 0.0f; float length_max = 0.0f; };
+// A tree's words, `count` vertices: a trunk (w.x, w.y, w.z, w.w); a leaf (q.x, q.y, q.z, w.x, w.y, w.z, w.w, v.x, v.y, v.z)
+// (ruling 30: ten words, the flutter's source x, y, z; was nine), each value as the fetch reads it (the
+// element's format, sign, normalisation, endian and source components). Ruling 32: a leaf's builder also
+// takes the vertices' decoded positions P (for |P - Q|) and gives the extent.
 WindBuild BuildTreeWindWords(const capture::WindInputs& wind, const uint8_t* const streams[capture::kWindElements],
-                             const size_t sizes[capture::kWindElements], uint32_t count, float* out);
+                             const size_t sizes[capture::kWindElements], const capture::Float4* positions, uint32_t count,
+                             float* out, WindExtent* extent);
 // A plant's words, one pair a flat position: (A3 + B3 of its copy, z of its mesh vertex).
 WindBuild ExpandPlantWindWords(const capture::Float4* mesh, uint32_t mesh_count, const uint8_t* rows, size_t rows_size,
                                const capture::InstanceSet& s, uint32_t flat_count, float* out);
 // clay_logic.h
 PositionBounds GrowBounds(const PositionBounds& box, float reach);   // xyz by reach; invalid stays invalid; a reach that is no number: invalid
 // GeometryCache
+// Ruling 32: the cache keeps the extent with the buffer and gives it with the buffer (a cached buffer too).
 nrhi::Buffer* WindWords(nrhi::Device* dev, const capture::DrawRecord& r, const capture::WindInputs& wind, uint32_t need,
-                        ClayStats& st, WindBuild* why, uint32_t* count);
+                        ClayStats& st, WindBuild* why, uint32_t* count, WindExtent* extent = nullptr);
 ```
+
+Requirements behind the amended lines (ledger ruling 32; review of Tasks 5 to 7, item 4): the
+extent is over the vertices the words were built for, never over fewer; a length or a weight that
+is no number gives no buffer (`kValue`); the extent of a cached buffer is the one it was built
+with; Task 10's reach reads it from here and from nowhere else. Measured over whole leaf streams
+of captures `182130` and `182313`: `|P - Q|` up to 19.3 and 19.9 units (not the 12.4 of frame-map
+section 12), so a test of the extent on a made stream should reach a length of that order.
 
 All or nothing: a value that is not finite, a stream that holds fewer than `count` vertices, a
 copy past the instance stream: no buffer. Keys `WindKey` (the elements and the streams' content
@@ -891,7 +939,9 @@ have it) with their test in `test_geometry_cache_index.cpp`.
       read through a made element gives the twelve values `byte / 255` in the element's source
       order (and the other order under another `source`); a made half4 pivot; `count` one past
       the stream is `kStream`; an element of an unknown format is `kElement`; a half that is a NaN
-      is `kValue` and nothing is written past the failing vertex's start; a plant with two copies
+      is `kValue` and nothing is written past the failing vertex's start; a leaf's ten words a
+      vertex with the flutter's three values in source order x, y, z, and its extent (the largest
+      weight, the largest `|P - Q|`: ledger rulings 30 and 32); a plant with two copies
       of a three-vertex mesh gives `(A3 + B3, z)` per flat position with each copy's own sum;
       `WindWordsNeeded(kLeaf, 0x20000000u) == 0`. `test_clay_logic.cpp`: `GrowBounds` (the box
       wider by exactly the reach in x, y, z, w unchanged; an invalid box; a NaN reach).
@@ -913,15 +963,22 @@ have it) with their test in `test_geometry_cache_index.cpp`.
 `ClayObjectSlotOffset`, `ClayConstantBufferBytes`, `PipelineKey`, `CreatePipeline`,
 `PrepassPipeline`, `EnsureShadowObjects`, `DrawPrepared`, `DrawShadows`, `PrepassBeyondReach`.
 
-**Produces** (`clay_logic.h`, section "Native wind"):
+**Produces** (`clay_logic.h`, section "Native wind"; amended after Tasks 5 to 7 to ledger
+rulings 30 to 32, 35 and 36, each amended line marked. Nothing of this task is built yet: where a
+line below names something Task 9 has not committed (`WindExtent`), the requirement in its
+comment binds, not the name):
 
 ```cpp
 inline constexpr uint32_t kLightModeWindShift = 12, kLightModeWindMask = 3u << kLightModeWindShift;   // a WindFamily
 struct ClayWindConstants {
   float reg[3][4];   // trees: c15, c16, c17. plants: (c10.x, c25.x, c26.x, c26.y), (c21.xyz, c7.x + c7.y), (c22.xyz, 0)
-  float lit[5][4];   // WindSpec::lit
+  // Ruling 31: the family's literals by SLOT, slot k at lit[k / 4][k % 4] (light_formulas.WIND_LITERAL_ORDER: 28
+  // for a leaf, 18 for a trunk, 7 for a plant; a slot the family does not have is zero), each the bits of the
+  // row's literal of that slot. (Was: float lit[5][4], whole registers.)
+  float lit[7][4];
 };
-static_assert(sizeof(ClayWindConstants) == 128 && sizeof(ClayObjectConstants) + sizeof(ClayWindConstants) <= kClayObjectSlotBytes);
+// Ruling 31: 3 + 7 rows = 160 bytes (was 128); 288 + 160 = 448 <= 512.
+static_assert(sizeof(ClayWindConstants) == 160 && sizeof(ClayObjectConstants) + sizeof(ClayWindConstants) <= kClayObjectSlotBytes);
 inline constexpr uint32_t kClayWindOffset = 288;   // == sizeof(ClayObjectConstants): the tail of cbuffer Object
 ClayWindConstants MakeClayWindConstants(const capture::WindInputs& wind, const capture::WindSpec& spec, const capture::DrawRecord& r);
 enum class ClayWind : uint8_t { kOff, kNone, kBuffer, kPipeline, kSlot, kDrawn, kCount };
@@ -929,14 +986,46 @@ struct ClayWindInputs { bool on, has_inputs, terrain, has_words, has_colour_pipe
 constexpr ClayWind DecideClayWind(const ClayWindInputs& in);
 void WindPlantMirror(const float p[3], float seed, float z, const ClayWindConstants& c, float out[3]);
 void WindTrunkMirror(const float p[3], const float w[4], const ClayWindConstants& c, float out[3]);
-void WindLeafMirror(const float p[3], const float q[3], const float w[4], const float v[2], const ClayWindConstants& c, float out[3]);
-float WindReach(const capture::WindInputs& wind, const capture::WindSpec& spec);   // a number >= 0; infinite or NaN inputs: +inf
+// Ruling 30: v is the flutter's THREE values (source x, y, z of fetch 5); was v[2].
+// Ruling 36: where the moved offset D' has zero length in this function's own (single) precision, out is the
+// moved pivot Q'; nothing is divided by that length.
+void WindLeafMirror(const float p[3], const float q[3], const float w[4], const float v[3], const ClayWindConstants& c, float out[3]);
+// Ruling 32: the reach of a tree needs the mesh's extent, which no register holds: the largest weight
+// (wind_reach_tree's w4_max) and, for a leaf, the largest |P - Q| (wind_reach_leaf's length_max), as Task 9's
+// cache gives them with the wind words. Written here with Task 9's struct; two float arguments serve as well.
+// (Was: WindReach(wind, spec), which cannot bound a leaf.) A plant's reach reads its registers alone.
+float WindReach(const capture::WindInputs& wind, const capture::WindSpec& spec, const WindExtent& extent);   // a number >= 0; infinite or NaN inputs: +inf
 ```
+
+**Arithmetic of the three mirrors and of the three HLSL functions (ledger ruling 35):** single
+precision throughout, in the reference's order of operations (`light_formulas.wind_plant`,
+`wind_tree_terms` / `wind_tree_offset`, `wind_leaf_lift` / `wind_leaf`, term for term as they are
+written there), the HLSL marked `precise`; the clock is not carried in double and no phase is
+reduced before it is narrowed. A mirror is held to each pinned position of `wind_pins.py` within
+**2e-5** of a unit (the pins are the double reference rounded to single; a single-precision
+evaluation is within 7e-6 of them at the captured clocks: `Pins.test_a_single_precision_evaluation_is_near`);
+the test says that the bound is ruling 35's. No pin is made at another clock.
+
+**The zero-length rule (ledger ruling 36):** `WindLeafMirror` and the HLSL `WindLeaf` return the
+moved pivot `Q'` where `dot(D', D')` computed in their own precision is 0, and divide nowhere
+else by a length that can be 0. Held by: the made leaf pin at its pivot with `c15.w` = 0 and
+`c16.w` = 0 (the last made line of `// wind leaf pins`: the position is `Q'`, finite); a mutation
+that removes the guard from the mirror must fail that pin (the result is then no number); and a
+test of the vertex program's guard (the compiled program on that pin where the shader test can
+execute it, else the method of case (c) below: the division lies inside a conditional on the
+squared length).
+
+**Literal slots (ledger ruling 31; review of Tasks 5 to 7, item 1):** the mirrors and the HLSL
+index the constants' literals by slot, and a slot's name is its place in
+`light_formulas.WIND_LITERAL_ORDER[family]` (a leaf's first 18 are a trunk's). A hand-copied
+index can drift where two literals have one value (`flutter_y` and `one` are both 1.0, which no
+pin tells apart): `tests/test_wind_literals.py` holds every index the HLSL and the mirrors use to
+that order by name.
 
 `PipelineKey` gains `uint8_t wind = 0` (1: the wind vertex program). `shaders::kClayWindVs` =
 `"#define CLAY_WIND 1\n"` + the clay vertex shader's text, in which under `CLAY_WIND` alone: `t9`
 is `StructuredBuffer<float> wind_words` and the terrain block is not compiled; `cbuffer Object`
-ends in `float4 o_wind_reg[3]; float4 o_wind_lit[5];` (the object macro's tail under the same
+ends in `float4 o_wind_reg[3]; float4 o_wind_lit[7];` (seven rows: ledger ruling 31; was 5; the object macro's tail under the same
 `#ifdef`, so that no other program's text changes); the functions `WindPlant`, `WindTrunk`,
 `WindLeaf` (each `precise`, each the reference term for term); and after the cut's test on the
 position at rest, inside `[branch] if (in_range && family != 0)` with `family = (light_mode >>
@@ -997,12 +1086,21 @@ leaf b, plant c), casters M | at rest: {reason: n}` and `Wind: off`.
 #include "wind_pins.inc"   // CHECK(730..): each pinned line of wind_pins.py against the three mirrors and WindReach
 ```
 
+      (Amended: a mirror agrees with a pin within 2e-5 of a unit, ledger ruling 35; a leaf line
+      has three flutter values, ruling 30; a reach line gives the largest weight and the largest
+      `|P - Q|` that `WindReach` takes, ruling 32, at the lengths 0, 1.48 and 19.91, the median
+      and the largest over the captures' whole leaf streams; the leaf lines include the vertex at
+      its pivot with no lift, ruling 36. `MakeClayWindConstants` fills `lit` from the row's
+      literal bits by slot, ruling 31: the made `spec` above then needs its literals, or the
+      table's row of a plant shader is used instead of `capture::WindSpec spec{}`.)
+
       `tests/native/test_native_shaders.cpp`: (a) with `CLAY_WIND` undefined every clay program
       (the vertex shader, the four colour programs, the three depth-only ones, the shadow
       program) compiles to the bytes it compiled to before this task (the baseline's hashes are
       recorded by the test's first step in the task, from the commit before; the pattern of case
       253); (b) `kClayWindVs` compiles; its reflection has `t9` as a buffer of 4-byte elements,
-      `cbuffer Object` of 416 bytes with `o_wind_reg` at 288 and `o_wind_lit` at 336, and no
+      `cbuffer Object` of 448 bytes (ledger ruling 31; was 416) with `o_wind_reg` at 288 and
+      `o_wind_lit` at 336 over seven rows, and no
       resource the clay layout does not bind for the vertex stage; (c) in its compiled text every
       load from `t9` lies inside a conditional block whose condition reads `light_mode`'s bits 12
       and 13 and a comparison with `vertex_count` (the method of the 128-value light buffer
@@ -1014,7 +1112,10 @@ leaf b, plant c), casters M | at rest: {reason: n}` and `Wind: off`.
       key without `wind`.
 - [ ] Mutation checks, alone, on scratch copies: `c16` for `c15` in `WindTrunkMirror`; the
       weights' bytes exchanged in `WindLeafMirror`; `cos` for `sin` in one phase; the plant's
-      `0.1` gain taken as `1`: each must fail a pin of `wind_pins.inc`.
+      `0.1` gain taken as `1`; the zero-length guard taken out of `WindLeafMirror` (ledger ruling
+      36); the flutter's source x left out of `WindLeafMirror` (ledger ruling 30: the made leaf
+      line with the hundredfold byte neither 0 nor 255 must catch it): each must fail a pin of
+      `wind_pins.inc`.
 - [ ] Shader text, the pass, the F3 line. Suites; build.
 - [ ] NEEDS_RUN: WARP with POST, WIND; WARP-SUN with POST, SUN, WIND; then STAND with POST,
       WIND and STAND with POST; BRIDGE, THIRD and SUNWARD with POST, WIND, DUMP, READBACK; BRIDGE

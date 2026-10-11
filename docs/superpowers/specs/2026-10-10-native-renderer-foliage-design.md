@@ -221,15 +221,27 @@ W/2 x H/2, made only for a diagnostic.
    that does not reach agreement gets no wind entry and is drawn at rest, named.
 5. **Wind inputs as side data** (ruling 7). A generated table (`wind_table.inc`, from a `"wind"`
    member of the twelve entries of `vs-transforms.json`) names per shader: the family, the vertex
-   registers, the shader's literal registers with their values, and the vertex elements (fetch,
-   format, offset, source components). At a draw whose vertex shader has a row, in a frame with
+   registers, each literal the family's formula reads, and the vertex elements (fetch, format,
+   offset, source components). **A literal is held by its slot, its place in the family's order**
+   (`light_formulas.WIND_LITERAL_ORDER`: 7 slots for a plant, 18 for a trunk, 28 for a leaf, whose
+   first 18 are the trunk's), with the register and the component at which this shader's own
+   table holds it and its bits: the shaders of one family hold the same numbers at different
+   registers and components, so whole registers cannot feed one function (ledger ruling 31; as
+   first written: "the shader's literal registers with their values", five registers). The table
+   is X-macro lines, `FABLE2_WIND` a shader and `FABLE2_WIND_LITERAL` a literal, written by the
+   generator alone (ledger ruling 33). At a draw whose vertex shader has a row, in a frame with
    the wind wanted, the capture reads the registers (`ReadBankRegisters`) and resolves the
    elements' streams, and `MakeWindInputs` validates: every register read and finite and inside
    its bound (trees: `|c15.x|` <= 1e7, `c15.yzw` in [0, 4], `c16` components in [-4, 4],
-   `|c17.xy|` <= 8, `c17.z` in [0, 16], `|c17.w|` <= 2e7; plants: `|c10.x|` <= 1e7, `c21.xyz` in
-   [-4, 4], `c22.xyz` in [-8, 8], `c25.x` in (0, 64], `c26.xy` in [0, 4]: about four times the
-   largest value captured); the shader object's own literal table equal to the row's values bit
-   for bit (checked once a shader object); each element the table's fetch, in a format a reader
+   `|c17.xy|` <= 16 (ledger ruling 28: 12.5 occurs in the world's first frame after loading; as
+   first written 8), `c17.z` in [0, 16], `|c17.w|` <= 2e7; plants: `|c10.x|` <= 1e7, `c21.xyz` in
+   [-4, 4], `c22.xyz` in [-8, 8], `c25.x` in [0, 64] (ledger ruling 26: a draw with `c25.x` = 0
+   and `c26` = 0 has inputs and is drawn at rest by its own formula, not counted out of range; as
+   first written (0, 64]), `c26.xy` in [0, 4]: about four times the largest value captured; the
+   native bounds are held against `wind_check.REGISTER_BOUNDS` by a test); the shader object's
+   own literal table holding every literal of the row at the row's register and component, bit
+   for bit, each literal alone (ledger ruling 31; checked once a shader object; what else the
+   object's table holds is not asked: the plants' `c255.xyz` are no numbers); each element the table's fetch, in a format a reader
    decodes, inside its vertex, its stream holding the draw's largest vertex; a plant's instance
    set active. The result, `WindInputs` (132 bytes), goes into a side array of the frame
    (`FrameScene::wind`; `shadow_wind[2]` for the casters) and the record gets its index in
@@ -238,15 +250,30 @@ W/2 x H/2, made only for a diagnostic.
    counted by reason and by vertex shader.
 6. **Vertex elements in the geometry cache.** One buffer of 32-bit float words a wind mesh,
    mesh-intrinsic (no constant in it, so the wind rebuilds nothing): a trunk vertex 4 words (the
-   four values of fetch 4 as the fetch reads them), a leaf vertex 9 (the pivot's three
-   coordinates, the four of fetch 4, the two of fetch 5), a plant's flat position 2 (the copy's
+   four values of fetch 4 as the fetch reads them), a leaf vertex **10** (the pivot's three
+   coordinates, the four of fetch 4, the three of fetch 5: source x, y, z; ledger ruling 30: the
+   formula closes on every captured vertex only with the third, source x, which enters a
+   hundredfold; as first written 9 words and two values), a plant's flat position 2 (the copy's
    `A3 + B3`, and the mesh vertex's `z`). All or nothing per buffer; a value that is no number
    gives no buffer. Keyed like the other light buffers (the element, the stream's content).
+   **While a tree's words are built the mesh's extent is taken** (ledger ruling 32): the largest
+   of the weights and, for a leaf, the largest `|P - Q|` over the vertices built; it is kept with
+   the buffer and is what the reach of Design 8 is bounded from.
 7. **One wind vertex program** (ruling 8): the clay vertex shader's own text compiled with
    `CLAY_WIND`, in which `t9` is the wind words (a wind record is never a terrain record), the
-   object block at `b1` has a tail of 128 bytes (`ClayWindConstants`: three registers and five
-   literals) and the position is moved by the family's function before the rows; the family is
-   two bits of `light_mode`. Every pass that draws a record with wind inputs draws it with this
+   object block at `b1` has a tail of **160 bytes** (`ClayWindConstants`: three rows of registers
+   and seven rows of literals, the 28 slots of Design 5 in the family's order, a family with
+   fewer leaving the rest zero; 288 + 160 = 448 bytes with the object block, inside the 512-byte
+   slot; ledger ruling 31; as first written 128 bytes, five literals) and the position is moved
+   by the family's function before the rows; the family is two bits of `light_mode`. **The wind
+   function and its C++ mirror compute in single precision, in the reference's order of
+   operations, marked `precise`**; the clock is not carried in double, and a mirror is pinned at
+   the captured clocks with a tolerance of 2e-5 of a unit (ledger ruling 35: the clock arrives
+   as a single-precision guest register and the game's own picture has the same loss).
+   **Where a leaf's moved offset has zero length in the program's own precision the function
+   and the mirror return the moved pivot `Q'`** and do not divide (ledger ruling 36: the
+   console's product with a zero factor gives that, IEEE arithmetic no number; three such
+   vertices are in each capture's drawn leaf meshes). Every pass that draws a record with wind inputs draws it with this
    one compiled program: the colour pass, the pre-pass, both shadow maps, and in 11c the tree
    occluder. So the pre-pass and the colour pass cannot disagree by a rounding: it is the same
    program on the same bytes (the wind function is marked `precise` all the same). A wind record
@@ -258,7 +285,9 @@ W/2 x H/2, made only for a diagnostic.
    rest (a few hundredths of a unit: ruling 21, a stated approximation; the game lights the moved
    position). The fog and the shadow mask follow by themselves (per pixel, from the depth). The
    box of a wind buffer's positions grows by the record's reach (`WindReach`, an upper bound
-   proved with the formula) wherever a box decides something (the pre-pass's reach rule,
+   proved with the formula; a tree's is bounded from its mesh's extent of Design 6, a leaf's
+   from the mesh's largest `|P - Q|`, which no register holds: ledger ruling 32) wherever a box
+   decides something (the pre-pass's reach rule,
    `PrepassBeyondReach`). The plants' push is not drawn (ruling 10).
 9. **A record at rest is today's record.** With the wind's switch off nothing is read, no wind
    buffer or program is made and every compiled program is today's, instruction for instruction
@@ -331,6 +360,8 @@ W/2 x H/2, made only for a diagnostic.
 - A wind buffer is read only for a vertex below the count it was built with, inside a `[branch]`
   the family bits open (a buffer bound by address has no bounds check).
 - A wind record is moved in every pass or in none (Design 9).
+- No wind position is no number by the wind's own arithmetic: a leaf's zero-length offset gives
+  the moved pivot (Design 7; ledger ruling 36).
 - The scene dump writes only whole planes of the logical size, each value finite or written as 0
   with a count in the file's head; a frame other than the one asked for is named as such.
 - With a switch off nothing of its phase is reached: no register read, no table lookup beyond the
@@ -387,7 +418,8 @@ recommended option.
    against each shader object's own literal table at capture; a mismatch draws the record at rest
    — why: three leaf shaders hold the same numbers in other registers, the plants' five differ in
    arrangement, and a literal table is not part of the microcode's hash — cost if wrong: 80 bytes
-   of constants a wind draw that could have been text.
+   of constants a wind draw that could have been text. (Ledger ruling 31: the literals are held
+   and compared one by one by slot, and the constants are seven rows, 112 bytes.)
 10. Ruling: the plants' push away from characters is out; the four shaders that have sway and push
     get the sway alone, and `36B5` (push only) gets no wind entry — why: the push points are not
     identified (FM 1043) and are a separate input set — cost if wrong: grass does not part about
@@ -467,6 +499,12 @@ threshold set here without a measured one before it (ruling 20).
    `oPos` within `1e-4 * max(1, |oPos|)` in every component on 2,000 of 2,000 made inputs; and
    `wind_check.py rows` on every wind draw row of captures `120435`, `120714`, `121036` (at least
    64 vertices a draw, all of a smaller one) on every vertex. `2D40` on made inputs alone, said.
+   *As judged (plan Tasks 5 to 7):* on captures `182130`, `182313` and `121036`: the first two,
+   made in plan Task 4 with whole index files and the casters' own streams, stand in for
+   `120435` and `120714` (the same two spots); `2D40` has three rows in `182130` (frame 8) and
+   is judged on them and on made inputs. The formulas are those of ledger ruling 30 (a leaf
+   reads three values of fetch 5) and the literals those of ruling 31. Result: met, 24,000 of
+   24,000 made draws and 464,600 of 464,600 vertices of 7,377 rows (Implementation notes).
    Each of these mutations of a formula must fail the check: `c16` for `c15`; two bytes of fetch 4
    exchanged; the sign of the wind's direction; a literal changed by 1%. (Tool; a reduced count in
    `tests/test_wind_formulas.py`.)
@@ -483,6 +521,22 @@ threshold set here without a measured one before it (ruling 20).
 4. *Positions through the table.* `position_check.py` with the wind terms: over every wind draw
    of the three captures the entry's position against the microcode's `oPos`, 99th percentile
    below 0.05 pixel of 1120 x 720, and none above 0.5.
+   *As judged, a deviation (plan Task 7; review of Tasks 5 to 7, I2 and M2):* **not judged as
+   written.** "Every wind draw" has no pixel for a vertex off the picture or behind the eye
+   (the near plants stand at the camera's feet, where x / w has no bound: 1e-5 units read as 5
+   pixels). So: the bound in pixels is judged on the vertices the microcode puts **inside the
+   clip volume**; a vertex **outside** it is held to `1e-4 * max(1, |oPos|)` in clip space
+   (criterion 1's bound) instead; a vertex both sides cut is counted and not judged; a shader
+   with rows and no vertex in view in a capture is "not judged" there and is not counted as met.
+   Counts over captures `182130`, `182313`, `121036` (each row's first 512 indices, up to 64
+   vertices a row): 245,565 vertices judged in pixels (largest 99th percentile 5.72e-4 pixel,
+   `FC4F` in `121036`; largest single difference 7.5e-4), 165,739 judged in clip space alone
+   (largest relative difference 8.5e-6), 53,296 beyond the cut on both sides; shaders with a
+   vertex in view met 10 of 10, 10 of 10 and 8 of 8, with `FC4F` and `48D3` not judged in
+   `182130` (no vertex in view) and judged in the other two; every one of the twelve is judged in
+   at least one capture. What the deviation leaves open: for a vertex near the eye the
+   clip-space bound allows more than 0.5 pixel in principle (1e-4 units over a small w); the
+   largest measured difference is about a twelfth of that bound.
 5. *Against the game's depth, one frame (no precedent; amended by the ledger's rulings 24 and
    25, 2026-10-10).* The replay is sampled at the place fitted on the capture's own unmoving
    draws (ruling 25). The criterion is judged one-sidedly, on visible pixels: a pixel the replay calls
@@ -620,8 +674,8 @@ threshold set here without a measured one before it (ruling 20).
    look worse than a still tree: then the family pair is switched together (plan Task 7's rule).
 5. A wind record with a wind pre-pass pipeline but a rest colour pipeline would open holes over
    every tree: Design 9's all-or-none rule and criterion 7.
-6. The geometry cache grows (a leaf mesh by 36 bytes a vertex: up to 0.52 MB for the largest
-   mesh seen, 14,334 vertices); the plants' flat words by 8 bytes a flat position.
+6. The geometry cache grows (a leaf mesh by 40 bytes a vertex, ten words: up to 0.57 MB for
+   the largest mesh seen, 14,334 vertices; ledger ruling 30; as first written 36 bytes, 0.52 MB); the plants' flat words by 8 bytes a flat position.
 7. The stored scene's depth copy is a new use of the depth target (a sampled depth packed by a
    step): one more software-adapter run, and only the diagnostic reaches it.
 8. Every run is likely `RUN UNCHECKED` (the user at the machine); timing needs a quiet machine at
@@ -645,10 +699,33 @@ section 18, "Discovery runs"; figures and files there):
   the late draws are in the pre-pass bins. Open question 7: not settled (base level alone in a
   capture). Open question 10: `2D40` is in capture `182130`, frame 8.
 - **Design 5's bound of `c25.x`, (0, 64], does not hold on the plant caster**: `A8A5` rows with
-  `c25.x` = 0 and `c26` = 0 (no sway) occur at the bridge, 4 to 5 a frame. To be ruled before
-  plan Task 8 (zero admitted, or those rows counted at rest).
+  `c25.x` = 0 and `c26` = 0 (no sway) occur at the bridge, 4 to 5 a frame. Ruled (ledger ruling
+  26): zero is admitted; Design 5 is amended above. Ledger ruling 28 widens `|c17.xy|` to 16.
 - **Criterion 6's precondition does not hold as written** at a camera that provably stands (the
   capture's eye and rows are bit-equal over eight frames): the emulated `D` outside the mask is
   9 to 12% (characters, water, the leaves' shadows, the moving sun); in a still box it is 0.9 to
   1.3%. To be ruled: the still boxes of `docs/native-renderer/foliage-regions.json` as the
-  control.
+  control. (Ruled since: ledger rulings 27 and 29; criterion 6's text above is not amended by
+  this note.)
+
+From plan Tasks 5 to 7 and their review (`docs/native-renderer/lighting-formulas.md`, "Wind";
+figures and files there). The design above is amended in place, each passage marked with the
+ledger ruling's number:
+
+- **Ruling 30** (Design 6, risk 6): a leaf vertex carries 10 wind words, three values of fetch 5.
+- **Ruling 31** (Design 5, Design 7, this spec's ruling 9): literals per slot in the family's
+  order, 28 slots for a leaf, each checked alone at capture; the constants block 160 bytes, 448
+  with the object block.
+- **Ruling 32** (Design 6, Design 8): a leaf's reach from the mesh's largest `|P - Q|`, taken
+  when the wind words are built. Measured over whole leaf streams: 19.3 and 19.9 units at most,
+  1.48 at the median.
+- **Ruling 33** (Design 5): the table is X-macro lines, reshaped only through the generator.
+- **Rulings 26 and 28** (Design 5): the bounds of `c25.x` and `|c17.xy|`.
+- **Ruling 35** (Design 7): single precision in the reference's order, `precise`, pinned at
+  captured clocks with tolerance 2e-5. Horizon (the review's measurement): the difference from
+  the double reference is about 0.1% of the sway at 4 h of session and about 1% at two days;
+  the game's own picture loses the same.
+- **Ruling 36** (Design 7, fail-closed rules): the zero-length rule of a leaf.
+- **Criterion 1** is judged on captures `182130`, `182313`, `121036`: met. **Criterion 2**: met,
+  every identity exact (0.0). **Criterion 4** is not judged as written: its deviation and counts
+  are with the criterion; inside that deviation every shader is met.

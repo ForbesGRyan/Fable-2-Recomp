@@ -987,6 +987,29 @@ bool ExposureReadbackWanted() {
   return on;
 }
 
+// fable2_native_impostors is `on`: the application seeds the pictures' bases from it once (OnPostSetup), with
+// the renderer installed or not. The list is the SDK's and is not touched again while the game runs.
+bool ImpostorReadbackWanted() { return CurrentImpostors() == capture::ImpostorMode::kOn; }
+
+namespace {
+std::atomic<bool> g_impostor_pictures_seeded{false};
+}  // namespace
+
+void NoteImpostorPicturesSeeded() { g_impostor_pictures_seeded.store(true, std::memory_order_release); }
+
+bool ImpostorPicturesAvailable() {
+  static std::atomic<int> decided{-1};
+  int v = decided.load(std::memory_order_acquire);
+  if (v < 0) {
+    v = g_impostor_pictures_seeded.load(std::memory_order_acquire) || rex::cvar::GetFlagByName("readback_resolve") == "full" ? 1 : 0;
+    decided.store(v, std::memory_order_release);
+    REXLOG_INFO("[native] impostor pictures: {} (the read-back list {} seeded with the fourteen bases; readback_resolve {})",
+                v ? "available" : "not available: every record is \"picture: base\"",
+                g_impostor_pictures_seeded.load(std::memory_order_acquire) ? "was" : "was not", rex::cvar::GetFlagByName("readback_resolve"));
+  }
+  return v == 1;
+}
+
 std::string StatusText() {
   if (!g_installed.load(std::memory_order_acquire)) return {};
   // No native drawing in off/pattern view: never show stale clay stats.

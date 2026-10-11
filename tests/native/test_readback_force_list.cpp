@@ -96,6 +96,58 @@ int main() {
     if (SdkMatch(*c.list, kEven + 0xFFFFu) != (c.exposure ? kEven : 0u)) return 80 + n;
   }
 
-  std::cout << "PASS: forced read-back list (hero and dog, exposure: four lists under the SDK's rule)\n";
+  // The impostors' pictures (sub-project 12, plan Task 12; the plan's returns 20 to 31 are 120 to 131 here: this
+  // file's cases above already return 21 to 84). Review Focus 4: without the third input, and with it false,
+  // today's lists.
+  if (ForceReadbackList(true, false) != "0x12704000" || ForceReadbackList(true, false, false) != "0x12704000") return 120;
+  if (ForceReadbackList(true, true, false) != "0x12704000,0x1A385000,0x1A34F000") return 121;
+  if (ForceReadbackList(false, true, false) != "0x1A385000,0x1A34F000") return 122;
+  if (!ForceReadbackList(false, false, false).empty() || !ForceReadbackList(false, false).empty()) return 123;
+  const std::string fourteen = "0x12704000,0x1272F000,0x1275A000,0x12785000,0x127B0000,0x127DB000,0x12806000,"
+                               "0x12831000,0x1285C000,0x12887000,0x128B2000,0x128DD000,0x12908000,0x12933000";
+  if (ForceReadbackList(true, false, true) != fourteen) return 124;        // the hero's entry is impostor 0's: once
+  if (ForceReadbackList(false, false, true) != fourteen) return 125;       // without the hero's fix the base is listed all the same
+  if (ForceReadbackList(true, true, true) != "0x12704000,0x1A385000,0x1A34F000" + fourteen.substr(10)) return 126;
+  if (ForceReadbackList(false, true, true) != "0x1A385000,0x1A34F000," + fourteen) return 127;
+  for (uint32_t n = 0; n < kImpostorPictures; ++n) {
+    const uint32_t base = ImpostorPictureBase(n), level = base + kImpostorLevelOffset;
+    if (n + 1 < kImpostorPictures && ImpostorPictureBase(n + 1) - base < kForceReadbackWindow) return 128;
+    for (uint32_t m = 0; m < kImpostorPictures; ++m) {
+      const uint32_t entry = ImpostorPictureBase(m);
+      if (level >= entry && level - entry < kForceReadbackWindow) return 129;       // a level address inside a window
+    }
+    for (uint32_t lum : kLuminanceResolveBases) {
+      if (base >= lum ? base - lum < kForceReadbackWindow : lum - base < kForceReadbackWindow) return 130;
+    }
+  }
+  if (ImpostorPictureBase(13) != 0x12933000u) return 131;
+  // The seeding's log lines: nothing added without the pictures (criterion 13 holds an off-run's line to log 657's).
+  if (std::string(ForceReadbackSeedSuffix(false)) != "" || std::string(ForceReadbackSeedSuffix(true)) != ", fable2_native_impostors=on") return 140;
+  // Every combination under the SDK's rule: the entries read whole, the hero's and the exposure's resolves forced
+  // exactly as without the pictures (plus the hero's base as impostor 0's), each picture's base forced by its own
+  // entry, and no picture's stored levels (base + 0x20000), the byte before a base or the first byte after a window.
+  for (int mask = 0; mask < 8; ++mask) {
+    const bool dog = (mask & 1) != 0, exposure = (mask & 2) != 0, pictures = (mask & 4) != 0;
+    const std::string list = ForceReadbackList(dog, exposure, pictures);
+    int entries = -1;
+    bool clean = false;
+    SdkMatch(list, 0, &entries, &clean);
+    const int want = (pictures ? int(kImpostorPictures) : dog ? 1 : 0) + (exposure ? 2 : 0);
+    if (entries != want || !clean) { std::cerr << "mask " << mask << ": entries " << entries << "\n"; return 132; }
+    if (SdkMatch(list, kDog) != (dog || pictures ? kDog : 0u)) return 133;
+    if (SdkMatch(list, kOdd) != (exposure ? kOdd : 0u) || SdkMatch(list, kEven) != (exposure ? kEven : 0u)) return 134;
+    for (uint32_t n = 1; n < kImpostorPictures; ++n) {
+      const uint32_t base = ImpostorPictureBase(n);
+      if (SdkMatch(list, base) != (pictures ? base : 0u)) return 135;
+      if (SdkMatch(list, base + 0xFFFFu) != (pictures ? base : 0u)) return 136;
+      if (SdkMatch(list, base - 1) != 0 || SdkMatch(list, base + 0x10000u) != 0) return 137;
+    }
+    for (uint32_t n = 0; n < kImpostorPictures; ++n)
+      if (SdkMatch(list, ImpostorPictureBase(n) + kImpostorLevelOffset) != 0) return 138;
+    for (uint32_t other : {0x12CFD000u, 0x12D33000u, 0x12D9F000u, 0x1ECFF000u, 0u, 0xFFFFFFFFu, ImpostorPictureBase(14)})
+      if (SdkMatch(list, other) != 0) return 139;
+  }
+
+  std::cout << "PASS: forced read-back list (hero and dog, exposure, the impostors' pictures: eight lists under the SDK's rule)\n";
   return 0;
 }

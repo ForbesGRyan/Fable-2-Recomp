@@ -53,6 +53,16 @@ void SetGammaRampReader(bool (*reader)(void* user, uint32_t out_rgb10[256][3], u
 // (src/core/readback_force_list.h).
 bool ExposureReadbackWanted();
 
+// --fable2_native_impostors is `on` (the far woods' pictures; frame-map section 19, "The read-back
+// list"). Like the exposure's: independent of Install; the application asks once, in OnPostSetup, and
+// seeds the fourteen picture bases into the SDK's forced read-back list. NoteImpostorPicturesSeeded:
+// the application says that it did (never when the list was given by hand or refused).
+// ImpostorPicturesAvailable: the list was seeded with the pictures, or --readback_resolve is full;
+// decided at its first call and kept (the pass asks; otherwise a record is "picture: base").
+bool ImpostorReadbackWanted();
+void NoteImpostorPicturesSeeded();
+bool ImpostorPicturesAvailable();
+
 // F3 status lines from the clay pass (empty while the renderer is not
 // installed). Thread-safe copy.
 std::string StatusText();

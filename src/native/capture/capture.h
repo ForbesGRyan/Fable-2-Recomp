@@ -52,6 +52,13 @@ void SetSunWanted(bool wanted);
 // frame with records. Without it no wind register, literal table or stream is read, a draw costs
 // one branch, and a frame's scene says so (FrameScene::wind_records false).
 void SetWindWanted(bool wanted);
+// The consumer's impostor switch (the native view on and fable2_native_impostors: off, flat or on;
+// impostor_record.h). Set and latched like SetShadowsWanted, and it has an effect only in a frame
+// with records. With kOff nothing of the far woods' BeginVertices calls is read, no record, array or
+// buffer is made, and a frame's scene says so (FrameScene::impostor_mode kOff). kFlat and kOn capture
+// alike: the calls of vertex shader 129F with pixel shader 4B1D in the main scene become
+// FrameScene::impostors with their words, each whole or missing with a counted reason.
+void SetImpostorsWanted(ImpostorMode mode);
 // Starts a discovery capture of `frames` guest frames (1..100000) sampling every `every`th
 // draw (1..64) at the next guest frame, into a new file, like FABLE2_NATIVE_DISCOVERY
 // after its delay. Callable from any thread. Returns false, with a log line, when the

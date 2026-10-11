@@ -40,6 +40,7 @@
 #include "draw_record.h"
 #include "fog_block.h"
 #include "guest_read.h"
+#include "impostor_record.h"
 #include "light_block.h"
 #include "main_scene.h"
 #include "material.h"
@@ -155,6 +156,23 @@ std::atomic<bool> g_post_frame{false};
 // frame being built is read for them. Latched like the post block's word, and only with it.
 std::atomic<bool> g_sun_wanted{false};
 std::atomic<bool> g_quads_frame{false};
+// The consumer's impostor switch (SetImpostorsWanted: the native view on and fable2_native_impostors
+// not off; an ImpostorMode as a byte), and the value latched for the current guest frame with
+// g_records_frame: not off only in a frame with records. With it off nothing of the far woods'
+// calls is read: a BeginVertices call in the main scene costs one load of this word and a branch on
+// the path that counts it "unsupported-prim", and a draw that makes a record costs nothing.
+std::atomic<uint8_t> g_impostors_wanted{0};
+std::atomic<uint8_t> g_impostors_frame{0};
+// Who wants the pixel bool word's last writer followed (OnGpuLoadShaders, and a draw's entry for the
+// builder's flush): a discovery capture (kFollowDiscovery: set and cleared with g_discovery_active,
+// for the rows' "pbool_load") and the impostors (kFollowImpostors: set at the frame's latch while
+// g_impostors_frame is not off; an impostor call is refused when bool b129 is set in that word).
+// One word, so that the two places test what they tested before the impostors existed: one load.
+inline constexpr uint8_t kFollowDiscovery = 1, kFollowImpostors = 2;
+std::atomic<uint8_t> g_pbool_follow{0};
+// Counts the times the impostors' following began: what was followed in an earlier stretch says
+// nothing about the GPU's word now (FollowedBoolWord::epoch).
+std::atomic<uint32_t> g_impostor_epoch{0};
 std::atomic<bool> g_failed{false};
 std::atomic<uint64_t> g_swaps{0};      // guest frames since start (while enabled)
 std::atomic<int> g_frames_written{0};  // discovery frames completed
@@ -212,6 +230,12 @@ uint32_t g_quad_frames = 0;
 uint32_t g_quad_set_missing[size_t(QuadSetReason::kCount)] = {};
 uint32_t g_quad_radial_frames = 0;
 QuadSetReason g_quad_last_reason = QuadSetReason::kOff;
+// The same for the impostor records: frames with them wanted since the last line, those of them in
+// which a call gave no record or a record was taken out ("impostor-record"), and those calls by
+// reason. OnSwap thread only.
+uint32_t g_impostor_frames = 0;
+uint32_t g_impostor_refused_frames = 0;
+uint32_t g_impostor_refused[size_t(ImpostorReason::kCount)] = {};
 uint32_t g_quad_change_lines = 0;
 constexpr uint32_t kQuadChangeLines = 16;
 
@@ -888,6 +912,18 @@ thread_local uint32_t t_draw_device = 0;
 // this thread put it on the GPU (light_block.h, BoolWordWriters). Rows carry
 // the word as "pbool_load" beside the device's shadow "pbool".
 thread_local BoolWordWriters t_gpu_pbool;
+// The same word for the impostors (g_pbool_follow, kFollowImpostors), followed at a lower price than
+// the rows' evidence: at a GpuLoadShaders call the engine's word is read and the call is ASSUMED to
+// have uploaded it (the exact model reads both shaders' records at every load to know); who uses the
+// word holds the assumption to the facts for the one load that matters (ImpostorBoolWord). A
+// builder's flush is exact as it is. `epoch`: g_impostor_epoch when it was written.
+struct FollowedBoolWord {
+  bool known = false;
+  bool by_flush = false;  // the last writer was a draw builder's flush of the device's shadow
+  uint32_t word = 0;
+  uint32_t epoch = 0;
+};
+constinit thread_local FollowedBoolWord t_impostor_pbool;
 // The bool shadow was pending when this thread's current draw hook was entered
 // (discovery only): the builder then flushes it.
 thread_local bool t_bool_flush_pending = false;
@@ -1331,16 +1367,26 @@ void OnGpuLoadShaders(const LastArgs& a) {
   uint32_t flags = 0;
   t_gpu_ps = ps;
   t_gpu_vs = {};
-  const bool discovery = g_discovery_active.load(std::memory_order_relaxed);
+  // (one load, as before the impostors: g_pbool_follow's discovery bit is g_discovery_active's twin)
+  const uint8_t follow = g_pbool_follow.load(std::memory_order_relaxed);
+  const bool discovery = (follow & kFollowDiscovery) != 0;
   if (!discovery) t_gpu_pbool.Forget();
   if (!vs || !ReadVirtualBe32(vs + xdk::kVsHeaderOffset, &flags)) {
     t_gpu_pbool.Forget();
+    if (follow & kFollowImpostors) t_impostor_pbool = FollowedBoolWord{};
     return;
   }
   t_gpu_vs.obj = vs;
   // 0x822219BC..0x822219C8: the variant flag applies only without a pixel
   // shader; 0x82221A10 forces variant 0 otherwise.
   t_gpu_vs.variant = (!ps && (flags & xdk::kVsVariantFlagMask)) ? 1 : 0;
+  if (!follow) return;
+  if (follow & kFollowImpostors) {
+    // The engine's word as it is at this load: what the load uploads if it uploads (FollowedBoolWord).
+    uint32_t word = 0;
+    const bool read = ReadVirtualBe32(xdk::kEngineFlowConstantsAddress + xdk::kEnginePsBoolWordOffset, &word);
+    t_impostor_pbool = FollowedBoolWord{read, false, read ? word : 0u, g_impostor_epoch.load(std::memory_order_relaxed)};
+  }
   if (!discovery) return;
   // The flow constants are uploaded only when one of the two shaders uses them
   // (0x82221ADC `or. r26,r20,r4`); otherwise the GPU keeps its bool words.
@@ -2716,7 +2762,7 @@ void WriteVertsRow(uint32_t id, const LastArgs& args, uint32_t device, const Dev
 
 // Discovery only. The "vertsdata" row of this thread's last in-scene "verts" row, if one is
 // pending: the storage whole, as the game filled it after the builder returned. "n" and "frame"
-// are the "verts" row's; "storage" its address, "want" the bytes asked for (VertsDataBytes: the
+// are the "verts" row's, "at" the capture frame in which the bytes were read; "storage" its address, "want" the bytes asked for (VertsDataBytes: the
 // device's storage_dwords * 4, at most kMaxVertsDataBytes), "read" whether they could be read
 // and "bytes" their hex in guest order (left out when they could not). The bytes are read when
 // this thread enters its next hooked draw, whole or not at all (ReadVirtual checks the range
@@ -2730,8 +2776,10 @@ void FlushPendingVerts() {
   std::lock_guard<std::mutex> lock(g_mutex);
   if (!g_file || pending.capture != g_capture_serial) return;  // the row's capture is over
   char buf[160];
-  std::snprintf(buf, sizeof(buf), "{\"kind\":\"vertsdata\",\"frame\":%d,\"n\":%u,\"storage\":\"0x%08X\",\"want\":%u",
-                pending.frame, pending.row, pending.storage, pending.want);
+  // ("at": the capture frame being written when the storage is read; a row whose "at" is not its "frame" was
+  // read after a frame's end, and its bytes may be another draw's: review of phase 12a, Minor 4)
+  std::snprintf(buf, sizeof(buf), "{\"kind\":\"vertsdata\",\"frame\":%d,\"n\":%u,\"at\":%d,\"storage\":\"0x%08X\",\"want\":%u",
+                pending.frame, pending.row, g_frames_written.load(std::memory_order_relaxed) + 1, pending.storage, pending.want);
   std::string row = buf;
   if (const uint8_t* p = ReadVirtual(pending.storage, pending.want)) {
     row += ",\"read\":true,\"bytes\":\"";
@@ -4482,6 +4530,12 @@ struct PendingQuad {
   uint32_t blend = 0, depth = 0, colour_mask = 0, colour_control = 0, alpha_ref = 0, vport_z_scale = 0, vte_cntl = 0;
 };
 constinit thread_local PendingQuad t_pending_quad;
+// What this thread has yet to read when it enters its next hooked draw: bit kPendingQuad with
+// t_pending_quad.valid, bit kPendingImpostor with a pending impostor call (t_pending_impostor).
+// The one word a draw's entry tests (OnXdkCall), where it tested t_pending_quad.valid before the
+// impostors existed: a draw's entry executes nothing new for them.
+inline constexpr uint8_t kPendingQuad = 1, kPendingImpostor = 2;
+constinit thread_local uint8_t t_pending_draws = 0;
 
 // Quad records that were not handed to their frame: the frame was over when the storage was read
 // (the frame's recheck under the lock), or another furniture call came before the read. Counted
@@ -4656,6 +4710,7 @@ void ObserveQuadDraw(const LastArgs& a, uint32_t device, bool in_scene) {
   if (t_pending_quad.valid) g_quad_dropped.fetch_add(1, std::memory_order_relaxed);
   t_pending_quad = q;
   t_pending_quad.valid = true;
+  t_pending_draws |= kPendingQuad;
 }
 
 // The record of this thread's pending furniture call, now that the game has filled its storage:
@@ -4667,6 +4722,7 @@ void ObserveQuadDraw(const LastArgs& a, uint32_t device, bool in_scene) {
 void FlushPendingQuad() {
   const PendingQuad q = t_pending_quad;
   t_pending_quad.valid = false;
+  t_pending_draws &= uint8_t(~kPendingQuad);
   if (!q.valid || !q.entry) return;
   constexpr uint32_t kVertexBytes = kQuadVertices * kQuadStride, kIndexBytes = 2 * uint32_t(std::size(kQuadIndices));
   QuadRecordReason why = QuadRecordReason::kUnread;
@@ -4759,6 +4815,298 @@ void ObserveLayerOccluder(const LastArgs& a, uint32_t device) {
   g_builder.LayerOccluderSeen(read ? &record : nullptr);
 }
 
+// --- The impostor records (frame-map section 19, "Impostor records"; impostor_record.h) ---------
+// Read only in a frame with records and with the impostors wanted (g_impostors_frame), at outermost
+// D3DDevice_BeginVertices calls inside the main scene: the far woods' quad lists. No draw record is
+// made or changed for them; the call stays counted "unsupported-prim" by RecordDraw as before.
+
+// The registers of a record are the bank's at any hooked draw: no buffer load names one of the
+// table's vertex or pixel registers (light_block.h, kBufferLoadRanges).
+constexpr bool ImpostorRegistersAreBankOnly() {
+  for (uint8_t reg : kImpostorVsRegister) {
+    if (IsBufferLoadRegister(kVertexBank, reg)) return false;
+  }
+  for (uint8_t reg : kImpostorPsRegister) {
+    if (IsBufferLoadRegister(kPixelBank, reg)) return false;
+  }
+  return true;
+}
+static_assert(ImpostorRegistersAreBankOnly(), "an impostor's register is loaded from a constant buffer");
+static_assert(kImpostorWordEndian <= 3 && kMaxImpostorQuads * 8u <= kMaxVertsDataBytes,
+              "an impostor draw's words are more than a discovery row keeps of a storage");
+
+// A call of the pair that this thread has read and whose storage it has yet to read: the game fills
+// the quads' words after the builder returns, so they are read when this thread enters its next
+// hooked draw (FlushPendingImpostor), as discovery's "vertsdata" rows are and at the same moment.
+// `call` is also where a call is read into (ObserveImpostorCall), pending or not: bit
+// kPendingImpostor of t_pending_draws says whether it is pending. `seq`: the DrawRecord::seq the
+// call was counted under; `frame`: g_light_tries_frame of the call.
+struct PendingImpostor {
+  ImpostorCall call;
+  uint32_t seq = 0;
+  uint32_t frame = 0;
+};
+constinit thread_local PendingImpostor t_pending_impostor;
+// What ObserveImpostorCall made of this thread's current BeginVertices call, for RecordDraw's
+// locked part (TakeImpostorCall), which sets it back to kNone.
+//   kNone:   not a call of the pair (another pixel shader, or none): nothing was read beyond the
+//            device's snapshot and the shader's lookup;
+//   kCall:   the pair's pixel shader: t_pending_impostor.call was filled as far as it could be read;
+//   kUntold: the pixel shader could not be told. It may have been an impostor's: counted as a call
+//            without a record ("unread"), at most kMaxImpostorUntold a frame.
+enum class ImpostorLook : uint8_t { kNone, kCall, kUntold };
+constinit thread_local ImpostorLook t_impostor_look = ImpostorLook::kNone;
+constexpr uint32_t kMaxImpostorUntold = 8;
+struct ImpostorFrame {
+  uint32_t frame = 0;
+  uint32_t untold = 0;
+};
+constinit thread_local ImpostorFrame t_impostor_frame;
+// Impostor records that were not handed to their frame: the frame was over when the storage was
+// read (the frame's recheck under the lock), or another call came before the read. Counted for the
+// log line since its last print; the frame they belonged to counts the call "pending".
+std::atomic<uint32_t> g_impostor_dropped{0};
+
+// Whether a shader object's own literal table is the impostor table's (impostor_record.h,
+// ImpostorLiteralsMatch): kind 0 the vertex shader (layout kVsLayout), 1 the pixel shader
+// (kPsLayout, whose table numbers pixel register c as 256 + c). Guest reads, all bounded, as
+// ReadWindLiterals makes them: the table's head, at most kMaxLiteralGuardRuns entries, and of each
+// run that reaches c248..c255 at most the dwords up to c255.w. `*read` false: the table could not be
+// read whole (nothing is concluded). A table that loads one of the registers the formulas read from
+// the device's bank is not the pair's shader either: false.
+bool ReadImpostorLiterals(const UcodeLayout& l, uint32_t kind, uint32_t obj, uint32_t variant, bool* read) {
+  *read = false;
+  const uint32_t table_first = kind == 0 ? 0u : 256u;
+  uint32_t table_off = 0, base = 0, size = 0;
+  const uint32_t header = obj + l.header_offset;
+  if (!obj || !ReadVirtualBe32(header + xdk::kShaderLiteralTableField + 8 * variant, &table_off) ||
+      !ReadVirtualBe32(obj + 4 * l.base_dword, &base)) {
+    return false;
+  }
+  uint32_t bits[kWindLiteralRegisters][4] = {};
+  uint32_t have = 0;
+  static_assert(kWindLiteralFirst == 248 && kWindLiteralRegisters == 8, "ImpostorLiteralsMatch reads the window c248..c255");
+  if (table_off != 0) {
+    const uint32_t table = header + table_off;
+    if (!ReadVirtualBe32(table + xdk::kLiteralTableSizeOffset, &size) || size > 8 * kMaxLiteralGuardRuns) return false;
+    const uint8_t* entries = size ? ReadVirtual(table + xdk::kLiteralTableEntriesOffset, size) : nullptr;
+    if (size && !entries) return false;
+    xdk::LiteralRun runs[kMaxLiteralGuardRuns];
+    const uint32_t n = xdk::ParseLiteralRuns(entries, size, runs, kMaxLiteralGuardRuns);
+    for (uint32_t i = 0; i < n; ++i) {
+      if (runs[i].first_register < table_first || runs[i].first_register - table_first >= 256) continue;  // (not this bank's numbering)
+      const uint32_t first = runs[i].first_register - table_first;
+      const uint32_t dwords = WindLiteralRunDwords(first, runs[i].dwords);
+      if (dwords == 0) continue;  // (a run that does not reach the window)
+      const uint8_t* values = ReadPhysical(xdk::GpuAddress(base + runs[i].offset), 4 * dwords);
+      if (!values) return false;
+      AddWindLiteralRun(first, dwords, values, bits, &have);
+    }
+    *read = true;
+    for (uint32_t i = 0; i < n; ++i) {
+      if (runs[i].first_register < table_first || runs[i].first_register - table_first >= 256) continue;
+      const uint32_t first = runs[i].first_register - table_first, count = (uint32_t(runs[i].dwords) + 3) / 4;
+      if (kind == 0) {
+        for (uint8_t reg : kImpostorVsRegister) {
+          if (reg >= first && reg - first < count) return false;
+        }
+      } else {
+        for (uint8_t reg : kImpostorPsRegister) {
+          if (reg >= first && reg - first < count) return false;
+        }
+      }
+    }
+  }
+  *read = true;
+  return ImpostorLiteralsMatch(kind, bits, have);
+}
+
+// This thread's verdict on the pair's two literal tables, asked once for a pair of objects in a
+// frame (an object reused at the same address with another table does not keep an old verdict
+// beyond the frame); a table that could not be read leaves none.
+struct ImpostorLiteralVerdict {
+  bool valid = false, match = false;
+  uint32_t vs = 0, variant = 0, ps = 0, frame = 0;
+};
+constinit thread_local ImpostorLiteralVerdict t_impostor_literals;
+
+// The pixel bool word as its last writer left it on the GPU at the draw this thread is capturing,
+// which runs vertex shader `vc` and pixel shader `ps_obj` (frame-map section 14, "The bool word":
+// the device's shadow is NOT that word; in every captured 129F row the shadow is 0x100 and the
+// GPU's word 0x110). False when it cannot be said, and the call is then refused ("unread"):
+//   - nothing was followed since the impostors' following began (FollowedBoolWord::epoch);
+//   - the last writer was a GpuLoadShaders call that is not known to have uploaded the word. It is
+//     known to when it loaded THIS draw's pair (the draw runs the GPU-owned shaders of the thread's
+//     last GpuLoadShaders call: ChooseVs, ChoosePs) and one of the two uses flow constants
+//     (UsesFlowConstants; 4B1D tests b129, so it does): such a load uploads the engine's word
+//     whatever came before it. A draw through the device's own shader fields (no captured 129F row
+//     is one: "gpu_load" in 116 of 116) is refused.
+// A builder's flush after the load (this call's own included: OnXdkReturn) is the last writer as it is.
+bool ImpostorBoolWord(const VsChoice& vc, uint32_t ps_obj, uint32_t* word) {
+  const FollowedBoolWord& w = t_impostor_pbool;
+  if (!w.known || w.epoch != g_impostor_epoch.load(std::memory_order_relaxed)) return false;
+  if (!w.by_flush) {
+    if (!vc.gpu_owned || t_gpu_vs.obj != vc.obj || t_gpu_vs.variant != vc.variant || t_gpu_ps != ps_obj) return false;
+    bool vs_ok = false, ps_ok = false;
+    const bool uploads = UsesFlowConstants(kVsLayout, vc.obj, vc.variant, &vs_ok) | UsesFlowConstants(kPsLayout, ps_obj, 0, &ps_ok);
+    if (!vs_ok || !ps_ok || !uploads) return false;
+  }
+  *word = w.word;
+  return true;
+}
+
+// One outermost BeginVertices call inside the main scene in a frame with the impostors wanted, at
+// the hook's return and before the scene's mutex is taken. Which call it is, is told by the pixel
+// shader the draw runs (ChoosePs; its microcode hash through LookupPs, cached per object): any other
+// call, the two shadow-mask rectangles among them, costs the device's snapshot and that lookup and
+// nothing more. For a call of 4B1D everything of the record but the words is read here, where the
+// discovery rows read it too, into t_pending_impostor.call: the vertex shader's hash (a call with
+// another vertex shader is read no further: "shader"), the two literal tables' verdict, the
+// builder's arguments, the device's storage fields, the table's fourteen vertex registers from the
+// bank and five pixel registers through ReadPixelConstant (which refuses a literal), tf0 and the
+// vertex slots 16 and 17, the fetch constant the builder wrote for the storage (the last
+// kVertsFetchHeader packet among the command dwords that end at the builder's own write pointer,
+// copied before it is looked at: the device's shadow of the slot is another draw's), the state
+// words and the pixel bool word's last writer. `read` says whether all of it could be read;
+// CheckImpostorCall judges it (TakeImpostorCall). Nothing here is followed as an address but the
+// two shader objects, the bank and the command tail, each through the bounded readers.
+ImpostorLook ObserveImpostorCall(const LastArgs& a, uint32_t device) {
+  DeviceSnapshot dev;
+  uint32_t ps_obj = 0;
+  const bool have_dev = ReadDevice(device, &dev);
+  if (have_dev && !ChoosePs(dev, &ps_obj)) return ImpostorLook::kNone;  // (a draw without a pixel shader is no impostor)
+  const PsInfo* ps = have_dev ? LookupPs(ps_obj) : nullptr;
+  if (!ps) {
+    ImpostorFrame& f = t_impostor_frame;
+    const uint32_t frame = g_light_tries_frame.load(std::memory_order_relaxed);
+    if (f.frame != frame) f = ImpostorFrame{frame, 0};
+    if (f.untold >= kMaxImpostorUntold) return ImpostorLook::kNone;
+    ++f.untold;
+    return ImpostorLook::kUntold;
+  }
+  const uint64_t ps_hash = ps->hash;  // (`ps` is the cache's entry: not held across the reads below)
+  if (ps_hash != kImpostorPs) return ImpostorLook::kNone;
+  // (a call still pending here was never read: its frame counts it "pending")
+  if (t_pending_draws & kPendingImpostor) {
+    t_pending_draws &= uint8_t(~kPendingImpostor);
+    g_impostor_dropped.fetch_add(1, std::memory_order_relaxed);
+  }
+  ImpostorCall& c = t_pending_impostor.call;
+  c = ImpostorCall{};
+  c.ps_hash = ps_hash;
+  c.prim = a.r[1] & 0x3F;
+  c.count = a.r[2];
+  c.stride = a.r[3];
+  VsChoice vc;
+  const VsInfo* vs = ChooseVs(dev, &vc) ? LookupVs(vc) : nullptr;
+  if (!vs) return ImpostorLook::kCall;  // ("unread")
+  c.vs_hash = vs->hash;
+  if (c.vs_hash != kImpostorVs) {
+    c.read = true;  // (what the "shader" rule judges was read; nothing more is)
+    return ImpostorLook::kCall;
+  }
+  bool read = true;
+  // The two literal tables, once a pair of objects and frame.
+  {
+    ImpostorLiteralVerdict& v = t_impostor_literals;
+    const uint32_t frame = g_light_tries_frame.load(std::memory_order_relaxed);
+    if (!v.valid || v.vs != vc.obj || v.variant != vc.variant || v.ps != ps_obj || v.frame != frame) {
+      bool vs_read = false, ps_read = false;
+      const bool vs_match = ReadImpostorLiterals(kVsLayout, 0, vc.obj, vc.variant, &vs_read);
+      const bool ps_match = vs_read && ReadImpostorLiterals(kPsLayout, 1, ps_obj, 0, &ps_read);
+      v = ImpostorLiteralVerdict{vs_read && ps_read, vs_match && ps_match, vc.obj, vc.variant, ps_obj, frame};
+    }
+    read = v.valid;
+    c.literals_match = v.valid && v.match;
+  }
+  read = read && ReadVirtualBe32(device + xdk::kDeviceBeginVerticesStorageOffset, &c.storage) &&
+         ReadVirtualBe32(device + xdk::kDeviceBeginVerticesDwordsOffset, &c.storage_dwords);
+  const uint32_t bank = VertexBank(device);
+  for (uint32_t i = 0; read && i < kImpostorVsRegisters; ++i) {
+    const uint8_t* p = bank ? ReadVirtual(bank + 16 * uint32_t(kImpostorVsRegister[i]), 16) : nullptr;
+    read = p != nullptr;
+    for (uint32_t k = 0; read && k < 4; ++k) {
+      const uint32_t bits = LoadBe32(p + 4 * k);
+      std::memcpy(&c.vs[i][k], &bits, sizeof(bits));
+    }
+  }
+  for (uint32_t i = 0; read && i < kImpostorPsRegisters; ++i) read = ReadPixelConstant(kImpostorPsRegister[i], c.ps[i]);
+  read = read && ReadTextureFetch(device, 0, c.fetch) && ReadTextureFetch(device, 16, c.fog_fetch[0]) &&
+         ReadTextureFetch(device, 17, c.fog_fetch[1]);
+  if (read) {
+    uint32_t write = 0, fc[6] = {};
+    constexpr uint32_t kTailBytes = 4 * kVertsCmdTailDwords;
+    const uint8_t* tail = ReadVirtualBe32(device + xdk::kDeviceBeginVerticesWriteOffset, &write) && (write & 3) == 0 && write >= kTailBytes
+                              ? ReadVirtual(write + 4 - kTailBytes, kTailBytes)
+                              : nullptr;
+    uint8_t copy[kTailBytes];
+    if (tail) std::memcpy(copy, tail, kTailBytes);
+    read = tail && FindFetchPacket(copy, kVertsCmdTailDwords, kVertsFetchHeader, fc);
+    c.vfetch[0] = fc[4];
+    c.vfetch[1] = fc[5];
+  }
+  if (read) {
+    ReadStateWords(device, &c.state);
+    read = c.state.read;
+  }
+  read = read && ImpostorBoolWord(vc, ps_obj, &c.pbool);
+  c.read = read;
+  return ImpostorLook::kCall;
+}
+
+// RecordDraw's locked part for a BeginVertices call in a frame with the impostors wanted (the
+// caller holds g_scene_mutex and has found the main scene open): what ObserveImpostorCall made of
+// the call is counted in the frame (FrameBuilder::ImpostorSeen), refused there at once when a rule
+// of CheckImpostorCall fails, and otherwise left pending for this thread's next hooked draw with
+// `seq`, the DrawRecord::seq the call was counted under, and the frame's number.
+void TakeImpostorCall(uint32_t seq) {
+  const ImpostorLook look = t_impostor_look;
+  t_impostor_look = ImpostorLook::kNone;
+  if (look == ImpostorLook::kNone) return;
+  g_builder.ImpostorSeen();
+  const ImpostorReason why = look == ImpostorLook::kUntold ? ImpostorReason::kUnread : CheckImpostorCall(t_pending_impostor.call);
+  if (why != ImpostorReason::kNone) {
+    g_builder.AddImpostor(ImpostorRecord{}, nullptr, why);
+    return;
+  }
+  t_pending_impostor.seq = seq;
+  t_pending_impostor.frame = g_light_tries_frame.load(std::memory_order_relaxed);
+  t_pending_draws |= kPendingImpostor;
+}
+
+// The record of this thread's pending impostor call, now that the game has filled its storage: the
+// quads' words, 8 bytes a quad from the storage's start (the first half of what the call reserved:
+// a quad list of 4 * quads vertices at 4 bytes each; the shader's fetch reads element `quad` at a
+// stride of 8, and the second half is stale bytes), read whole or not at all (ReadVirtual checks
+// the range against the guest's page tables; at most 8 * kMaxImpostorQuads bytes by ImpostorQuads)
+// and copied before they are judged, so that what MakeImpostorRecord accepts is what the frame
+// holds. The two buffers are this thread's, allocated at its first pending call: never with the
+// switch off. Handed to the builder under the scene's mutex after the frame's recheck; a record of
+// a frame that ended is dropped and counted, and that frame, which was told of the call, counts it
+// "pending" (FrameBuilder::Finish).
+void FlushPendingImpostor() {
+  t_pending_draws &= uint8_t(~kPendingImpostor);
+  const PendingImpostor& p = t_pending_impostor;
+  static thread_local std::vector<uint8_t> bytes;
+  static thread_local std::vector<float> words;
+  const uint32_t quads = ImpostorQuads(p.call.count);
+  ImpostorReason why = ImpostorReason::kUnread;
+  ImpostorRecord record{};
+  const uint8_t* v = quads && p.call.storage ? ReadVirtual(p.call.storage, 8 * quads) : nullptr;
+  if (v) {
+    bytes.assign(v, v + size_t(8) * quads);
+    words.resize(size_t(4) * quads);
+    record = MakeImpostorRecord(p.call, bytes.data(), bytes.size(), words.data(), &why);
+    record.place = p.seq;
+  }
+  std::lock_guard<std::mutex> lock(g_scene_mutex);
+  if (p.frame != g_light_tries_frame.load(std::memory_order_relaxed)) {
+    g_impostor_dropped.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  g_builder.AddImpostor(record, words.data(), why);
+}
+
 // One outermost guest draw inside the main scene, as a DrawRecord in the frame.
 // Draw-argument mapping (frame-map section 8): DrawIndexedVertices r4 prim, r5
 // base vertex, r6 start index, r7 index count; DrawVertices r4 prim, r5 start
@@ -4795,6 +5143,9 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
       in.count = a.r[4];
       extra = FillTerrainInputs(device, 0, in.count, true, in, &shaders);
     }
+  } else if (id == kHook_D3DDevice_BeginVertices && g_impostors_frame.load(std::memory_order_relaxed) != 0) {
+    // The far woods' impostors (a draw that makes a record never reaches this branch).
+    t_impostor_look = ObserveImpostorCall(a, device);
   }
   if (IsSupportedPrim(in.prim)) extra = FillDrawInputs(device, in, &shaders);
   FillMaterial(device, shaders, in);
@@ -4871,7 +5222,10 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
     }
   }
   std::lock_guard<std::mutex> lock(g_scene_mutex);
-  if (!g_builder.InMainScene()) return;
+  if (!g_builder.InMainScene()) {
+    t_impostor_look = ImpostorLook::kNone;  // (a call the scene no longer holds is no call of the frame)
+    return;
+  }
   if (block_tried) {
     if (block.valid) {
       g_builder.SetLight(block);
@@ -4884,7 +5238,11 @@ void RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   // A capture-side reason (garbage count, bad index memory) replaces
   // AssembleRecord's, which only sees the inputs filled before it.
   r.skip = ResolveSkip(r.skip, extra);
-  if (r.skip == SkipReason::kUnsupportedPrim && id < kMaxHookIds) ++g_unsupported_by_hook[id];
+  if (r.skip == SkipReason::kUnsupportedPrim && id < kMaxHookIds) {
+    ++g_unsupported_by_hook[id];  // (an impostor call too, as before: spec ruling 10)
+    // The impostor call of this draw, if it is one: counted in the frame under the seq its record has.
+    if (id == kHook_D3DDevice_BeginVertices && g_impostors_frame.load(std::memory_order_relaxed) != 0) TakeImpostorCall(r.seq);
+  }
   // A terrain draw's inputs, a lit draw's light inputs and a swaying draw's wind inputs go to the
   // frame's side arrays, not into the record.
   g_builder.Add(r, TerrainInputsOf(in), light_reason == LightReason::kNone ? &light : nullptr, light_reason, wind, wind_reason);
@@ -5266,6 +5624,77 @@ void AppendFrameWind(std::string& row, const render::FrameScene& sc) {
   row += "}";
 }
 
+// Discovery evidence, in the frame row of a frame with records: the frame's impostor records as the
+// scene carries them. "impostors":"off" for a frame in which they were not wanted (nothing was read);
+// else {"impostors":{"mode","seen","taken","quads","reason":{ImpostorReasonName: n, ...},"records":
+// [{"place","ps","vs","quads","first","pbool","vs_regs","ps_regs","fetch","fog_fetch","vfetch","depth",
+// "blend","colour_control","mask","surface","alpha_ref","words"}]}}. "vs_regs" (56 floats: the table's
+// fourteen registers), "ps_regs" (20), "alpha_ref" and "words" (four a quad: x, y, z, s) are the floats'
+// bits, eight hex digits each; "fetch" tf0's six dwords, "fog_fetch" those of the vertex slots 16 and
+// 17, "vfetch" the packet's pair. Zero counts are left out of "reason".
+// tools/xdk_sigmatch/impostor_check.py (records) holds each record against the same frame's "verts" and
+// "vertsdata" rows bit for bit (spec criterion 2).
+void AppendFrameImpostors(std::string& row, const render::FrameScene& sc) {
+  if (sc.impostor_mode == ImpostorMode::kOff) {
+    row += ",\"impostors\":\"off\"";
+    return;
+  }
+  char buf[224];
+  auto bits = [&](const char* key, const float* v, size_t n) {
+    row += ",\"";
+    row += key;
+    row += "\":\"";
+    for (size_t i = 0; i < n; ++i) {
+      uint32_t word;
+      std::memcpy(&word, &v[i], sizeof(word));
+      std::snprintf(buf, sizeof(buf), "%08X", word);
+      row += buf;
+    }
+    row += "\"";
+  };
+  std::snprintf(buf, sizeof(buf), ",\"impostors\":{\"mode\":\"%s\",\"seen\":%u,\"taken\":%u,\"quads\":%u,\"reason\":{",
+                ImpostorModeName(sc.impostor_mode), sc.impostor_seen, sc.impostor_taken, sc.impostor_quads);
+  row += buf;
+  bool first = true;
+  for (size_t i = 1; i < size_t(ImpostorReason::kCount); ++i) {
+    if (!sc.impostor_refused[i]) continue;
+    std::snprintf(buf, sizeof(buf), "%s\"%s\":%u", first ? "" : ",", ImpostorReasonName(ImpostorReason(i)), sc.impostor_refused[i]);
+    row += buf;
+    first = false;
+  }
+  row += "},\"records\":[";
+  for (size_t i = 0; i < sc.impostors.size() && i < kMaxImpostorRecords; ++i) {
+    const ImpostorRecord& r = sc.impostors[i];
+    // (a record's words lie inside the scene's array by FrameBuilder::AddImpostor; held again here)
+    if (uint64_t(r.first_quad) + r.quads > sc.impostor_words.size() / 4) break;
+    std::snprintf(buf, sizeof(buf),
+                  "%s{\"place\":%u,\"ps\":\"0x%016llX\",\"vs\":\"0x%016llX\",\"quads\":%u,\"first\":%u,\"pbool\":\"0x%08X\"",
+                  i ? "," : "", r.place, static_cast<unsigned long long>(r.ps_hash), static_cast<unsigned long long>(r.vs_hash),
+                  r.quads, r.first_quad, r.pbool);
+    row += buf;
+    bits("vs_regs", &r.vs[0][0], 4 * kImpostorVsRegisters);
+    bits("ps_regs", &r.ps[0][0], 4 * kImpostorPsRegisters);
+    row += ",\"fetch\":";
+    row += HexDwords(r.fetch, 6);
+    row += ",\"fog_fetch\":[";
+    row += HexDwords(r.fog_fetch[0], 6);
+    row += ",";
+    row += HexDwords(r.fog_fetch[1], 6);
+    row += "],\"vfetch\":";
+    row += HexDwords(r.vfetch, 2);
+    uint32_t ref;
+    std::memcpy(&ref, &r.alpha_ref, sizeof(ref));
+    std::snprintf(buf, sizeof(buf),
+                  ",\"depth\":\"0x%08X\",\"blend\":\"0x%08X\",\"colour_control\":\"0x%08X\",\"mask\":%u,\"surface\":\"0x%08X\","
+                  "\"alpha_ref\":\"0x%08X\"",
+                  r.depth, r.blend, r.colour_control, r.colour_mask, r.surface_info, ref);
+    row += buf;
+    bits("words", sc.impostor_words.data() + size_t(4) * r.first_quad, size_t(4) * r.quads);
+    row += "}";
+  }
+  row += "]}";
+}
+
 // Ends the frame's bracket and, with the renderer on, finishes the frame's
 // scene (`swap` = guest frame number) with its capture time from `timer`,
 // then latches whether the next frame builds records. With `write`
@@ -5315,6 +5744,17 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
       g_wind_frame.store(wind, std::memory_order_relaxed);
       if (wind) g_wind_generation.fetch_add(1, std::memory_order_relaxed);  // (the literal verdicts are asked again)
       g_builder.WindOn(wind);
+      // The impostor records, only in a frame with records; and with them the following of the
+      // pixel bool word's last writer, which begins anew each time they come on (g_impostor_epoch).
+      const ImpostorMode impostors = records ? ImpostorMode(g_impostors_wanted.load(std::memory_order_relaxed)) : ImpostorMode::kOff;
+      const uint8_t impostors_before = g_impostors_frame.exchange(uint8_t(impostors), std::memory_order_relaxed);
+      if (impostors != ImpostorMode::kOff && impostors_before == 0) {
+        g_impostor_epoch.fetch_add(1, std::memory_order_relaxed);
+        g_pbool_follow.fetch_or(kFollowImpostors, std::memory_order_relaxed);
+      } else if (impostors == ImpostorMode::kOff && impostors_before != 0) {
+        g_pbool_follow.fetch_and(uint8_t(~kFollowImpostors), std::memory_order_relaxed);
+      }
+      g_builder.ImpostorsOn(impostors);
       // The next frame reads its own light block (and its own shadow state: CurrentShadowFrame).
       g_light_tries_frame.fetch_add(1, std::memory_order_relaxed);
     }
@@ -5353,6 +5793,7 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
     AppendFramePost(row, *done->scene);
     AppendFrameQuads(row, *done->scene);
     AppendFrameWind(row, *done->scene);
+    AppendFrameImpostors(row, *done->scene);
   }
   row += "}\n";
   std::fputs(row.c_str(), g_file);
@@ -5516,6 +5957,15 @@ void PublishScene(const FinishedScene& done) {
     ++g_post_frames;
     if (!sc.post.valid && sc.post_reason < PostBlockReason::kCount) ++g_post_block_missing[size_t(sc.post_reason)];
     if (sc.post.valid && sc.post_age != 0) ++g_post_kept_frames;
+  }
+  if (sc.records && sc.impostor_mode != ImpostorMode::kOff) {
+    ++g_impostor_frames;
+    bool refused = false;
+    for (size_t i = 1; i < size_t(ImpostorReason::kCount); ++i) {
+      g_impostor_refused[i] += sc.impostor_refused[i];
+      refused = refused || sc.impostor_refused[i] != 0;
+    }
+    if (refused) ++g_impostor_refused_frames;
   }
   if (sc.records && sc.quad_records) {
     ++g_quad_frames;
@@ -5722,6 +6172,23 @@ void PublishScene(const FinishedScene& done) {
     // the casters with inputs, the records at rest by reason and by vertex shader). No line without
     // the wind: a run with the switch off has the log of before.
     if (sc.wind_records) REXSYS_INFO("[native] capture: frame {} wind: {}", sc.frame, render::WindLine(sc));
+    // impostors: this frame's impostor calls, the records held and their quads; in how many of the
+    // frames with the impostors wanted since the last line a call gave no record or a record was
+    // taken out (impostor-record), those calls by reason over these frames, and the records dropped
+    // at a frame's end. No line without the impostors: a run with the switch off has the log of before.
+    if (sc.impostor_mode != ImpostorMode::kOff || g_impostor_frames) {
+      std::string refused;
+      for (size_t i = 1; i < size_t(ImpostorReason::kCount); ++i) {
+        if (!g_impostor_refused[i]) continue;
+        std::snprintf(buf, sizeof(buf), "%s%s: %u", refused.empty() ? "" : ", ", ImpostorReasonName(ImpostorReason(i)), g_impostor_refused[i]);
+        refused += buf;
+      }
+      REXSYS_INFO("[native] capture: frame {} impostors: seen {}, taken {}, quads {} | {} in {} of {} frames {{{}}} | dropped {}",
+                  sc.frame, sc.impostor_seen, sc.impostor_taken, sc.impostor_quads, kImpostorRecordReason, g_impostor_refused_frames,
+                  g_impostor_frames, refused, g_impostor_dropped.exchange(0, std::memory_order_relaxed));
+    }
+    g_impostor_frames = g_impostor_refused_frames = 0;
+    std::fill(std::begin(g_impostor_refused), std::end(g_impostor_refused), 0u);
   }
   LogShaderBreakdown(sc);
 }
@@ -5737,6 +6204,7 @@ void SetMemory(rex::memory::Memory* memory) {
   GuestMemory() = memory;
   g_render.store(REXCVAR_GET(fable2_native_render), std::memory_order_relaxed);
   g_discovery_active.store(FramesRequested() > 0, std::memory_order_relaxed);
+  if (FramesRequested() > 0) g_pbool_follow.fetch_or(kFollowDiscovery, std::memory_order_relaxed);
   const bool enabled = REXCVAR_GET(fable2_native_render) || FramesRequested() > 0;
   if (enabled) CalibrateTicks();  // before the hooks see g_enabled
   g_enabled.store(enabled, std::memory_order_release);
@@ -5761,6 +6229,7 @@ bool ArmDiscoveryNow(uint32_t frames, uint32_t every) {
     REXSYS_WARN("[native-discovery] refused: a capture is still running or pending");
     return false;
   }
+  g_pbool_follow.fetch_or(kFollowDiscovery, std::memory_order_relaxed);
   g_runtime_request.store((uint64_t(frames) << 16) | every);
   REXSYS_INFO("[native-discovery] capture requested: {} frames, every {}", frames, every);
   return true;
@@ -5792,6 +6261,10 @@ void SetSunWanted(bool wanted) {
 
 void SetWindWanted(bool wanted) {
   g_wind_wanted.store(wanted, std::memory_order_relaxed);
+}
+
+void SetImpostorsWanted(ImpostorMode mode) {
+  g_impostors_wanted.store(uint8_t(mode), std::memory_order_relaxed);
 }
 
 // --- Post discovery (frame-map section 17, "Discovery"): resolves and the post buffers' memory ---
@@ -5966,15 +6439,19 @@ void OnXdkCall(uint32_t id, PPCContext& ctx, uint8_t*) {
     if (nested) g_nested_draws.fetch_add(1, std::memory_order_relaxed);
     // The storage of this thread's last furniture quad, filled by the game since (timed: it reads
     // and takes the scene's mutex; without a pending quad this is one thread-local test).
-    if (t_pending_quad.valid) {
+    // The same word holds this thread's pending impostor call (kPendingImpostor): its quads' words.
+    if (t_pending_draws) {
       CaptureTimer timer;
-      FlushPendingQuad();
+      if (t_pending_draws & kPendingQuad) FlushPendingQuad();
+      if (t_pending_draws & kPendingImpostor) FlushPendingImpostor();
     }
     // Discovery evidence (t_gpu_pbool): whether this builder will flush the bool shadow.
     // A pointer of an earlier entry must not outlive it (a capture that ended between the clear
     // routine's entry and its return, and a later one armed inside a later call).
     if (id == kHook_DrawIndx2_821EF988 && !nested) t_stream.entry_valid = false;
-    if (g_discovery_active.load(std::memory_order_relaxed)) {
+    // (g_pbool_follow: a discovery capture, or the impostors, which need the same word's last writer;
+    // what else this block does is discovery's and is held by its own flags)
+    if (g_pbool_follow.load(std::memory_order_relaxed)) {
       uint32_t pending = 0;
       t_bool_flush_pending = ReadVirtualBe32(ctx.r3.u32 + xdk::kDeviceBoolPendingOffset, &pending) &&
                              (pending & xdk::kDeviceBoolPendingMaskHi) != 0;
@@ -6038,6 +6515,9 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
     uint32_t shadow = 0;
     const bool shadow_read = ReadVirtualBe32(device + xdk::kDevicePsBoolConstantsOffset, &shadow);
     t_gpu_pbool.OnBuilderFlush(shadow_read, shadow);
+    if (g_pbool_follow.load(std::memory_order_relaxed) & kFollowImpostors) {
+      t_impostor_pbool = FollowedBoolWord{shadow_read, true, shadow_read ? shadow : 0u, g_impostor_epoch.load(std::memory_order_relaxed)};
+    }
   }
   // Records: only the outermost draw of a nested call chain, so geometry is
   // never captured twice, and only for a frame a consumer wants records for;
@@ -6118,6 +6598,7 @@ void OnSwap() {
       if (!g_file && !OpenLog()) {
         g_runtime_capture.store(false, std::memory_order_relaxed);
         g_discovery_active.store(false, std::memory_order_relaxed);
+        g_pbool_follow.fetch_and(uint8_t(~kFollowDiscovery), std::memory_order_relaxed);
         return;
       }
     }
@@ -6142,6 +6623,7 @@ void OnSwap() {
     g_armed.store(false);
     g_runtime_capture.store(false, std::memory_order_relaxed);
     g_discovery_active.store(false, std::memory_order_relaxed);
+    g_pbool_follow.fetch_and(uint8_t(~kFollowDiscovery), std::memory_order_relaxed);
     if (g_file) {
       std::fclose(g_file);
       g_file = nullptr;

@@ -156,7 +156,8 @@ class CheckDiscoveryTests(unittest.TestCase):
 
     def test_verts_rows_have_their_data(self):
         verts = {"kind": "verts", "frame": 1, "n": 7, "in_scene": True, "count": 8, "storage_dwords": 8,
-                 "bank": [0.0] * 1024, "vfetch": {"shadow": ["0x00000000"] * 6, "packet": None}}
+                 "storage": "0xFF762700",
+                 "bank": [0.0] * 1024, "vfetch": {"shadow": ["0x00000000"] * 6, "packet": ["0x00000001", "0x00000000"] * 2 + ["0x1F763703", "0x10000022"]}}
         data = {"kind": "vertsdata", "frame": 1, "n": 7, "want": 32, "read": True, "bytes": "00" * 32}
         self.assertEqual(cd.check_verts_data([verts, data]), (1, []))
         short = dict(data, bytes="00" * 31)
@@ -173,7 +174,8 @@ class CheckDiscoveryTests(unittest.TestCase):
 
     def test_verts_data_more(self):
         verts = {"kind": "verts", "frame": 1, "n": 7, "in_scene": True, "count": 8, "storage_dwords": 8,
-                 "bank": [0.0] * 1024, "vfetch": {"shadow": ["0x00000000"] * 6, "packet": None}}
+                 "storage": "0xFF762700",
+                 "bank": [0.0] * 1024, "vfetch": {"shadow": ["0x00000000"] * 6, "packet": ["0x00000001", "0x00000000"] * 2 + ["0x1F763703", "0x10000022"]}}
         data = {"kind": "vertsdata", "frame": 1, "n": 7, "want": 32, "read": True, "bytes": "00" * 32}
         # A capture from before the storage was kept: no in-scene row has a number and no data row exists.
         old = dict(verts)
@@ -184,12 +186,24 @@ class CheckDiscoveryTests(unittest.TestCase):
         self.assertEqual(len(cd.check_verts_data([verts, data, dict(data, n=8)])[1]), 1)
         # The same number in another frame is another row.
         self.assertEqual(len(cd.check_verts_data([verts, dict(data, frame=2)])[1]), 2)
-        # No fetch constant; a shadow that is not six dwords; bytes that are no hex.
+        # The builder's packet must name the storage (review of phase 12a, Minor 1c): the shadow is not asked for.
+        self.assertEqual(cd.check_verts_data([dict(verts, vfetch={"shadow": None, "packet": verts["vfetch"]["packet"]}), data]), (1, []))
+        for packet in (["0x00000001", "0x00000000"] * 2 + ["0x1F764703", "0x10000022"],        # another address
+                       ["0x00000001", "0x00000000"] * 2 + ["0x1F763702", "0x10000022"],        # not a vertex buffer
+                       ["0x00000001", "0x00000000"] * 2 + ["0x1F763703", "0x10000032"],        # another size
+                       ["0x1F763703", "0x10000022"]):                                          # not six dwords
+            self.assertEqual(cd.check_verts_data([dict(verts, vfetch={"shadow": ["0x00000000"] * 6, "packet": packet}), data])[1],
+                             ["frame 1 verts 7: the builder's packet does not name the storage"])
+        self.assertTrue(cd.packet_names_storage(dict(verts, storage="0x4A120000", vfetch={"packet": ["0x0"] * 4 + ["0x0A120003", "0x00000020"]})))
+        # A data row says in which frame it was read: after its own frame's end is a problem; an older row has no "at".
+        self.assertEqual(cd.check_verts_data([verts, dict(data, at=1)]), (1, []))
+        self.assertEqual(cd.check_verts_data([verts, dict(data, at=2)])[1], ["frame 1 verts 7: the storage was read in frame 2: after its frame's end"])
+        # No fetch constant; a packet that is none; bytes that are no hex.
         self.assertEqual(len(cd.check_verts_data([{k: v for k, v in verts.items() if k != "vfetch"}, data])[1]), 1)
         self.assertEqual(len(cd.check_verts_data([dict(verts, vfetch={"shadow": None, "packet": None}), data])[1]), 1)
         self.assertEqual(len(cd.check_verts_data([verts, dict(data, bytes="0G" * 32)])[1]), 1)
         # A storage past the cap has no data row and is said so; an empty one has none and is no problem.
-        big = dict(verts, storage_dwords=16385)
+        big = dict(verts, storage_dwords=16385, vfetch={"packet": ["0x0"] * 4 + ["0x1F763703", "0x10010006"]})
         self.assertEqual(cd.check_verts_data([big]), (1, ["frame 1 verts 7: the storage is 65540 bytes, over the cap: not kept"]))
         self.assertEqual(cd.check_verts_data([dict(verts, storage_dwords=0)]), (1, []))
         # A row without the device's storage fields has no data row and is said so.
@@ -201,12 +215,22 @@ class CheckDiscoveryTests(unittest.TestCase):
             (d / "g.log").write_text(LOG)
             rows = [draw() for _ in range(20)]
             rows.append({"kind": "verts", "frame": 1, "n": 1, "in_scene": True, "count": 8, "storage_dwords": 8,
-                         "bank": [0.0] * 1024, "vfetch": {"shadow": ["0x00000000"] * 6, "packet": None}})
+                         "storage": "0xFF762700", "bank": [0.0] * 1024,
+                         "vfetch": {"shadow": ["0x00000000"] * 6, "packet": ["0x00000001", "0x00000000"] * 2 + ["0x1F763703", "0x10000022"]}})
             (d / "x.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
             self.assertEqual(cd.main([str(d / "x.jsonl"), str(d / "g.log")]), 1)
             rows.append({"kind": "vertsdata", "frame": 1, "n": 1, "want": 32, "read": True, "bytes": "00" * 32})
             (d / "x.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
             self.assertEqual(cd.main([str(d / "x.jsonl"), str(d / "g.log")]), 0)
+            # Review of phase 12a, Minor 1: a run without [vbind] lines. The default still fails (no draw was
+            # checked: the bound of 20 is not relaxed); --rows-only runs the capture's own checks and says so.
+            (d / "empty.log").write_text("nothing logged\n")
+            self.assertEqual(cd.main([str(d / "x.jsonl"), str(d / "empty.log")]), 1)
+            self.assertEqual(cd.main(["--rows-only", str(d / "x.jsonl")]), 0)
+            self.assertEqual(cd.main(["--rows-only", str(d / "x.jsonl"), str(d / "empty.log")]), 0)
+            rows.pop()                                                   # the storage's row gone: a structural problem
+            (d / "x.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+            self.assertEqual(cd.main(["--rows-only", str(d / "x.jsonl")]), 1)
 
     def test_cli_fails_on_a_missing_index_file(self):
         with tempfile.TemporaryDirectory() as d:

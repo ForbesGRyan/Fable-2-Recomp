@@ -373,6 +373,9 @@ int main() {
   // not grow for them. What a caster needs beyond the record is its twin entry, ShadowCaster.
   {
     static_assert(sizeof(DrawRecord) == 616);
+    // (sub-project 12 adds nothing to it: an impostor call makes no draw record and changes none; its record is
+    // capture::ImpostorRecord, in a block of the scene's own: spec ruling 10)
+    static_assert(sizeof(DrawRecord) == 616, "sub-project 12 adds nothing to it");
     if (sizeof(ShadowCaster) != 12) return 120;
     const ShadowCaster c;
     if (c.kind != CasterKind::kOpaque || c.biased || c.bias_scale != 0.0f || c.bias_offset != 0.0f) return 121;

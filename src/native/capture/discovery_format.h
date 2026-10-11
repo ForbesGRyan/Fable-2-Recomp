@@ -250,8 +250,10 @@ inline constexpr uint32_t kVertsCmdTailDwords = 96;      // the command dwords a
 inline constexpr uint32_t kMaxVertsDataBytes = 64u << 10;
 // The six dwords that follow the LAST `header` among `dwords` big-endian command dwords at `be`;
 // false (out untouched) when there is none with six dwords after it. Every dword is looked at as
-// a header (a data dword that equals it counts too: the reader holds the result to the device's
-// own shadow of the slot).
+// a header (a data dword that equals it counts too). What guards the result is the reader's
+// comparison of its last pair with the call's own storage fields (address, type, endian and size:
+// impostor_record.h, CheckImpostorCall; impostor_check.py, storage_fetch), NOT the device's shadow
+// of the slot, which names the storage in no captured row (plan Task 3).
 inline bool FindFetchPacket(const uint8_t* be, size_t dwords, uint32_t header, uint32_t out[6]) {
   if (!be || dwords < 7) return false;
   auto at = [be](size_t i) {

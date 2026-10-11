@@ -1,6 +1,7 @@
 """tools/xdk_sigmatch/gen_impostor_table.py (distant trees, plan Task 6): the far woods' impostor table as X-macro
 lines, what it refuses, and that the committed src/native/capture/impostor_table.inc is the generator's output."""
 import copy
+import math
 import re
 import struct
 import sys
@@ -25,7 +26,7 @@ def made():
     return {"vs": "00000000000000AB", "ps": "00000000000000CD", "reg": (46, 8), "ps_reg": (12,),
             "vs_lit": {255: (0.0, 1.0, -1.0, 4.0)}, "ps_lit": {255: (0.0, 1.0, 0.1, 0.5)},
             "word_source": (1, 0, 3, 2), "word_endian": 2,
-            "bounds": {("vs", 8): [(-1.0, 1.0)] * 4, ("vs", 46): [(-2.0, 2.0)] * 4, ("ps", 12): [(0.0, 4096.0)] * 4},
+            "bounds": {("vs", 8): [(-1.0, 1.0)] * 4, ("vs", 46): [(-2.0, 2.0), None, (-2.0, 2.0), None], ("ps", 12): [(0.0, 4096.0)] * 4},
             "size_max": 64.0, "b129": 2}
 
 
@@ -46,7 +47,9 @@ class Generate(unittest.TestCase):
         self.assertEqual(body.count("FABLE2_IMPOSTOR_ENDIAN(2)"), 1)
         self.assertIn("FABLE2_IMPOSTOR_BOUND(0, 8, 0, 0xBF800000u, 0x3F800000u)", body)
         self.assertIn("FABLE2_IMPOSTOR_BOUND(1, 12, 3, 0x00000000u, 0x45800000u)", body)
-        self.assertEqual(sum(line.startswith("FABLE2_IMPOSTOR_BOUND") for line in body), 12)            # four a register
+        self.assertEqual(sum(line.startswith("FABLE2_IMPOSTOR_BOUND") for line in body), 10)            # one a component that is read
+        self.assertIn("FABLE2_IMPOSTOR_BOUND(0, 46, 2, 0xC0000000u, 0x40000000u)", body)
+        self.assertFalse(any(line.startswith("FABLE2_IMPOSTOR_BOUND(0, 46, 1,") or line.startswith("FABLE2_IMPOSTOR_BOUND(0, 46, 3,") for line in body))
         self.assertEqual(body.count("FABLE2_IMPOSTOR_SIZE_MAX(0x42800000u)"), 1)
         self.assertEqual(body[-1], "FABLE2_IMPOSTOR_B129(0x00000002u)")
         kinds = [re.match(r"FABLE2_IMPOSTOR_([A-Z0-9_]+)\(", line).group(1) for line in body]
@@ -69,6 +72,7 @@ class Generate(unittest.TestCase):
         self.refused(lambda e: e.__setitem__("word_endian", 4), "endian")
         self.refused(lambda e: e.__setitem__("reg", (8, 250)), "below 248")
         self.refused(lambda e: e["bounds"].pop(("vs", 46)), "no bound")
+        self.refused(lambda e: e["bounds"].__setitem__(("vs", 46), [None] * 4), "none of whose components is read")
         self.refused(lambda e: e["bounds"].__setitem__(("vs", 46), [(-2.0, 2.0)] * 3), "four")
         self.refused(lambda e: e["bounds"].__setitem__(("vs", 46), [(-2.0, float("nan"))] * 4), "no number")
         self.refused(lambda e: e["bounds"].__setitem__(("vs", 99), [(-2.0, 2.0)] * 4), "not a register of the table")
@@ -98,11 +102,69 @@ class Generate(unittest.TestCase):
         self.assertEqual(e["bounds"][("ps", 20)][3], (gen.ABOVE_ZERO, 64.0))
         self.assertEqual(e["bounds"][("vs", 72)][0], (-1e7, 1e7))
         self.assertEqual(e["bounds"][("vs", 47)][0], (-1e6, 1e6))
-        # and every captured value lies inside its bound (the five discovery captures' spans, t6_bounds.txt)
+        # and every captured value of a component that is read lies inside its bound (the five discovery captures'
+        # spans, t6_bounds.txt); a component no formula reads has none (ledger ruling 34)
         for key, span in gen.CAPTURED.items():
-            for (lo, hi), (blo, bhi) in zip(span, e["bounds"][key]):
-                self.assertTrue(blo <= lo <= hi <= bhi, (key, lo, hi, blo, bhi))
+            for i, ((lo, hi), b) in enumerate(zip(span, e["bounds"][key])):
+                self.assertEqual(b is not None, i in gen.READ[key], (key, i))
+                if b is not None:
+                    self.assertTrue(b[0] <= lo <= hi <= b[1], (key, lo, hi, b))
+        self.assertEqual(set(gen.READ), set(e["bounds"]))
+        for key in (("vs", 8), ("vs", 111), ("ps", 12), ("ps", 20), ("ps", 29), ("ps", 31)):
+            self.assertIn(None, e["bounds"][key], key)
+        self.assertIsNone(e["bounds"][("vs", 111)][1])              # the sky's path height: 1,900 at the bridge, unread here
+        # c8's bound is the raise's alone (four times 0.9555), not four times an unread component's
+        self.assertAlmostEqual(e["bounds"][("vs", 8)][2][1], 4.0 * 0.955497861, places=5)
         self.assertTrue(gen.CAPTURED_SIZE[1] < e["size_max"] <= 4.0 * gen.CAPTURED_SIZE[1])
+
+    def test_read_is_what_the_formulas_read(self):
+        """READ against the three functions: a component is in it exactly when changing that component alone
+        changes what a formula returns (position: every corner of a captured quad; fog; pixel)."""
+        import impostor_pins as pins
+        f = pins.from_bits
+        corner, word, regs = pins.CAPTURED[0]
+        word = [f(b) for b in word]
+        base = {reg: [f(b) for b in regs[i]] for i, reg in enumerate(lf.IMPOSTOR_SHADER["reg"])}
+        base[46][2] = 0.25                                           # (no captured lying axis has a third component)
+        base[111][2] = 0.01                                          # (the near blend not yet whole at this tree)
+        # (the fog's axis half along the view to this tree, so that the angle's coordinate is not at a clamp)
+        to = [word[n] - base[47][n] for n in range(3)]
+        base[110] = [0.5 * x / math.sqrt(sum(y * y for y in to)) for x in to] + [0.0]
+        tf16 = lambda s: [0.9 - 0.1 * s, 0.8 - 0.1 * s, 0.7 - 0.1 * s]            # noqa: E731
+        tf17 = lambda a, t: [0.3 + 0.2 * a + 0.1 * t, 0.4 + 0.2 * a, 0.5 + 0.2 * a]         # noqa: E731
+
+        def vertex(c):
+            out = []
+            for k in range(4):
+                p = lf.impostor_position(k, word, c)
+                out += list(p["pos"]) + list(p["place"]) + list(p["uv"])
+                o2, o3 = lf.impostor_fog(p["place"], c[47][:3], c[110], c[111], tf16, tf17)
+                out += list(o2) + list(o3)
+            return out
+
+        for reg in lf.IMPOSTOR_SHADER["reg"]:
+            for i in range(4):
+                changed = {r: list(v) for r, v in base.items()}
+                changed[reg][i] = changed[reg][i] * 1.25 + 0.125
+                self.assertEqual(vertex(changed) != vertex(base), i in gen.READ[("vs", reg)], ("vs", reg, i))
+
+        ps = {12: [f(b) for b in pins.PIXEL_C12], 19: [f(b) for b in pins.PIXEL_C19], 20: [0.006, 0.07, 0.09, f(pins.PIXEL_C20W)],
+              29: [f(b) for b in pins.PIXEL_C29], 31: [f(pins.PIXEL_C31X), 0.0, 0.0, 0.0]}
+
+        def pixel(c):
+            out = []
+            for distance in (40.0, 53.0, 300.0):                     # the light falling, the dissolve, far
+                place = [ps[19][n] + distance * pins.PIXEL_RAY[n] for n in range(3)]
+                d = lf.impostor_distance(place, c[19][:3])
+                colour, alpha = lf.impostor_pixel((0.129, 0.2581, 0.0323, 1.0), d, c[12], c[29], c[31][0])
+                out += lf.impostor_out(colour, (0.9, 0.8, 0.7), (0.01, 0.02, 0.03), c[20][3]) + [alpha]
+            return out
+
+        for reg in lf.IMPOSTOR_SHADER["ps_reg"]:
+            for i in range(4):
+                changed = {r: list(v) for r, v in ps.items()}
+                changed[reg][i] = changed[reg][i] * 1.25 + 0.125
+                self.assertEqual(pixel(changed) != pixel(ps), i in gen.READ[("ps", reg)], ("ps", reg, i))
 
     def test_check_names_a_stale_file(self):
         import tempfile

@@ -485,6 +485,8 @@ int main() {
     // 8,192 texels a fetch constant can name, a missing output; the last texel of a linear level one byte short.
     out.assign(3, 9);
     if (Decode1555Level(src.data(), src.size(), 256, 256, 128, true, 1, &out) || !out.empty()) return 175;
+    // (a size no source of this length can hold is refused before the image is allocated: review of phase 12a, Minor 5)
+    if (Decode1555Level(src.data(), src.size(), 8192, 8192, 8192, true, 1, &out) || !out.empty()) return 175;
     if (Decode1555Level(src.data(), src.size(), 8193, 1, 8224, true, 1, &out) || Decode1555Level(src.data(), src.size(), 256, 256, 256, true, 1, nullptr)) return 176;
     if (!Decode1555Level(lin.data(), 3 * 512 + 8, 4, 4, 256, false, 0, &out) || Decode1555Level(lin.data(), 3 * 512 + 7, 4, 4, 256, false, 0, &out) || !out.empty()) return 177;
   }

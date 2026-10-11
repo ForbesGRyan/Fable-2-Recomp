@@ -19,6 +19,10 @@ inputs; the captured rows are plan Task 6's).
                                             quad, and each position mutation (each must fail on the capture)
   identities <capture>...                   what the rows' registers and tables equal in their frame (reported)
   bounds <capture>...                       the smallest and largest of every register component and of the size
+  records <capture>...                      plan Task 8, criterion 2: every impostor record of every frame row
+                                            ("impostors", written with --fable2_native_impostors=flat or on) against
+                                            its "verts" and "vertsdata" rows bit for bit; seen, taken and quads
+                                            against the frame's 129F rows; no reason counted
 Each exits 1 on any failure (words, places and rows also when the capture has no such row with its storage).
 
 What `rows` shows and what it does not. Both sides take the SAME captured registers and bytes: it shows that the
@@ -742,13 +746,30 @@ def gpu_address(cpu_virtual):
     return (cpu_virtual & 0x1FFFFFFF) + (((cpu_virtual >> 20) + 0x200) & 0x1000)
 
 
+STORAGE_PAD = 0x04      # dword 1's bits 26 to 31 in every captured packet: bit 28 of the dword (0x10000000)
+
+
+def storage_pair(storage, dwords, endian=None):
+    """The vertex fetch constant the builder writes for a storage of `dwords` dwords at guest address `storage`,
+    as the captures have it (116 of 116 in-scene 129F rows of the five discovery captures of 2026-10-11; review of
+    phase 12a, I1): (gpu_address(storage) | 3, (dwords << 2) | 0x10000000 | endian). By the GPU's layout of a
+    vertex fetch constant (the SDK's xenos.h, xe_gpu_vertex_fetch_t) dword 0 is the type (bits 0 to 1; 3: a vertex
+    buffer) and the address (bits 2 to 31), dword 1 the endian (bits 0 to 1), the size in words (bits 2 to 25) and
+    six bits of padding (26 to 31), of which the game sets bit 28: what it means is not established, and nothing
+    the GPU fetches depends on it. D1's first row: 0xFF762700, 224 -> (0x1F763703, 0x10000382)."""
+    endian = lf.IMPOSTOR_SHADER["word_endian"] if endian is None else endian
+    return (gpu_address(storage) | 3, (dwords << 2) | (STORAGE_PAD << 26) | endian)
+
+
 def storage_fetch(row):
     """Which of a "verts" row's two vertex fetch constants names the row's storage: {"shadow": bool or None,
-    "packet": bool or None, "endian": the naming pair's endian or None}. A constant (six dwords: fetch slot 31's
-    three pairs) names the storage when its LAST pair (vertex fetch constant 95, the one BeginVertices writes) has
-    the address gpu_address(storage), type 3 and the size storage_dwords; None for a constant the row does not
-    have."""
-    out = {"shadow": None, "packet": None, "endian": None}
+    "packet": bool or None, "endian": the naming pair's endian or None, "pad": its dword 1's bits 26 to 31 or
+    None}. A constant (six dwords: fetch slot 31's three pairs) names the storage when its LAST pair (vertex fetch
+    constant 95, the one BeginVertices writes) has, field by field (storage_pair's layout), the type 3, the address
+    gpu_address(storage) and the size storage_dwords; None for a constant the row does not have. The endian and
+    the padding bits are reported, not required here: `words` and check_records hold them (the table's endian; the
+    pair as storage_pair gives it)."""
+    out = {"shadow": None, "packet": None, "endian": None, "pad": None}
     try:
         storage, dwords = int(row["storage"], 16), int(row["storage_dwords"])
     except (KeyError, TypeError, ValueError):
@@ -761,6 +782,7 @@ def storage_fetch(row):
         out[name] = (a & 0xFFFFFFFC) == gpu_address(storage) and (a & 3) == 3 and (b >> 2) & 0xFFFFFF == dwords
         if out[name]:
             out["endian"] = b & 3
+            out["pad"] = b >> 26
     return out
 
 
@@ -860,11 +882,16 @@ def cmd_words(args, say=print):
     named = Counter()
     for row, _ in pairs:
         s = storage_fetch(row)
-        named["shadow %s, packet %s, endian %s" % (s["shadow"], s["packet"], s["endian"])] += 1
+        named["shadow %s, packet %s, endian %s, padding bits 0x%02X" % (s["shadow"], s["packet"], s["endian"], s["pad"] or 0)] += 1
         if s["endian"] is not None and s["endian"] != table[0]:
             code = 1
+        # the packet whole, as the capture's record must find it (storage_pair: bit 28 of the size dword is set)
+        six = (row.get("vfetch") or {}).get("packet")
+        if s["packet"] and tuple(int(x, 16) for x in six[4:6]) != storage_pair(int(row["storage"], 16), int(row["storage_dwords"])):
+            code = 1
+            say("  line %s: the packet's pair %s %s is not storage_pair's" % (row.get("line"), six[4], six[5]))
     for text, n in sorted(named.items()):
-        say("  the fetch constant that names the storage (address gpu_address(storage), type 3, size storage_dwords): %s: %d rows" % (text, n))
+        say("  the fetch constant that names the storage (type 3, address gpu_address(storage), size storage_dwords): %s: %d rows" % (text, n))
     return 1 if code or held[table] != quads else 0
 
 
@@ -1217,6 +1244,161 @@ def cmd_bounds(args, say=print):
 
 # --- command line -------------------------------------------------------------------------------------------------
 
+# --- the capture's impostor records against the rows (plan Task 8; spec criterion 2) ------------------------------
+
+RECORD_STATE = (("depth", "2200"), ("blend", "2201"), ("colour_control", "2202"), ("alpha_ref", "210E"))
+
+
+def _float_bits(x):
+    """Eight hex digits of a float as single precision; None for a value a row prints as null (no number)."""
+    return None if x is None or x != x else "%08X" % struct.unpack("<I", struct.pack("<f", x))[0]
+
+
+def _same_floats(got, want):
+    """A record's floats (hex, eight digits each) against a list of wanted bit patterns (None: any value that is
+    no number, whose bits a row's nine-digit print does not carry)."""
+    if len(got) != 8 * len(want):
+        return False
+    for i, w in enumerate(want):
+        g = got[8 * i:8 * i + 8].upper()
+        if w is None:
+            v = int(g, 16)
+            if (v & 0x7F800000) != 0x7F800000 or (v & 0x007FFFFF) == 0:
+                return False
+        elif g != w:
+            return False
+    return True
+
+
+def record_of_row(row, data):
+    """What the capture's record of an in-scene 129F "verts" row must hold, member by member as the frame row
+    writes it (capture.cpp, AppendFrameImpostors), from the row and its "vertsdata" row alone. The registers are
+    the row's bank (nine digits a float, which is every bit of a single) and "pfull"; the words the storage's
+    first eight bytes a quad through quad_words (the table's order and endian); "pbool" the word as its last
+    writer left it ("pbool_load"), not the device's shadow. ValueError when the row lacks a member."""
+    try:
+        bank = row["bank"]
+        if len(bank) < 1024:
+            raise ValueError("no whole vertex bank")
+        vs_regs = [_float_bits(x) for reg in lf.IMPOSTOR_SHADER["reg"] for x in bank[4 * reg:4 * reg + 4]]
+        pfull = row["pfull"]
+        ps_regs = []
+        for reg in lf.IMPOSTOR_SHADER["ps_reg"]:
+            text = pfull[32 * reg:32 * reg + 32]
+            if len(text) != 32 or "-" in text:
+                raise ValueError("pixel c%d is not in the row" % reg)
+            ps_regs += [text[8 * i:8 * i + 8].upper() for i in range(4)]
+        words = [_float_bits(x) for w in quad_words(row, data) for x in w]
+        tf, rs = row["tf"], row["rs"]
+        return {
+            "ps": int(row["ps_hash"], 16), "vs": int(cr.vs_hash(row), 16), "quads": int(row["count"]) // 4,
+            "pbool": int(row["pbool_load"], 16), "vs_regs": vs_regs, "ps_regs": ps_regs,
+            "fetch": [int(x, 16) for x in tf["0"]], "fog_fetch": [[int(x, 16) for x in tf["16"]], [int(x, 16) for x in tf["17"]]],
+            "vfetch": [int(x, 16) for x in row["vfetch"]["packet"][4:6]],
+            "depth": int(rs["2200"], 16), "blend": int(rs["2201"], 16), "colour_control": int(rs["2202"], 16),
+            "mask": int(rs["2104"], 16) & 0xF, "surface": int(row["surface_info"], 16), "alpha_ref": int(rs["210E"], 16),
+            "words": words,
+        }
+    except (KeyError, TypeError, IndexError) as e:
+        raise ValueError("the row lacks %s" % e) from None
+
+
+def _record_differences(record, want):
+    """The members of a frame row's record that are not `want`'s (record_of_row), by name."""
+    out = []
+
+    def number(v):
+        return int(v, 16) if isinstance(v, str) else v
+
+    for key in ("ps", "vs", "quads", "pbool", "depth", "blend", "colour_control", "mask", "surface", "alpha_ref"):
+        if key not in record or number(record[key]) != want[key]:
+            out.append(key)
+    for key in ("fetch", "vfetch"):
+        if [number(x) for x in record.get(key) or []] != want[key]:
+            out.append(key)
+    if [[number(x) for x in six] for six in record.get("fog_fetch") or []] != want["fog_fetch"]:
+        out.append("fog_fetch")
+    for key in ("vs_regs", "ps_regs", "words"):
+        if not _same_floats(record.get(key) or "", want[key]):
+            out.append(key)
+    return out
+
+
+def check_records(path):
+    """(frames, records, problems) of a capture made with the impostors' switch at flat or on: every record of
+    every frame row's "impostors" against the frame's in-scene 129F "verts" rows and their "vertsdata" rows.
+    Per frame: "seen" is the number of those rows; "taken" equals "seen" and the records' number; "quads" the
+    rows' quads; no reason is counted; the records are in the rows' order with ascending places and their words
+    lie one after another from quad 0; every member of a record equals the row's, bit for bit (record_of_row).
+    A frame whose row says "off", or has no "impostors" at all, is a problem: the capture was not made with the
+    switch on. Each difference is one problem."""
+    by_frame = {}
+    for row, data in impostor_rows(path):
+        by_frame.setdefault(row.get("frame"), []).append((row, data))
+    frames, records, problems = 0, 0, []
+    for frame in cr.rows(path, kinds=("frame",)):
+        n = frame.get("frame")
+        where = "frame %s" % n
+        block = frame.get("impostors")
+        if not isinstance(block, dict):
+            problems.append("%s: no impostor records (%r): the switch was off" % (where, block))
+            continue
+        frames += 1
+        rows = by_frame.get(n, [])
+        if block.get("seen") != len(rows):
+            problems.append("%s: seen %s, the frame has %d 129F rows" % (where, block.get("seen"), len(rows)))
+        got = block.get("records") or []
+        if block.get("taken") != len(got) or block.get("taken") != block.get("seen"):
+            problems.append("%s: taken %s of seen %s with %d records" % (where, block.get("taken"), block.get("seen"), len(got)))
+        want_quads = sum(int(r["count"]) // 4 for r, _ in rows)
+        if block.get("quads") != want_quads:
+            problems.append("%s: quads %s, the rows have %d" % (where, block.get("quads"), want_quads))
+        if block.get("reason"):
+            problems.append("%s: reasons counted: %s" % (where, ", ".join("%s: %s" % kv for kv in sorted(block["reason"].items()))))
+        first, place = 0, -1
+        for i, record in enumerate(got):
+            records += 1
+            at = "%s record %d" % (where, i)
+            if record.get("first") != first:
+                problems.append("%s: its words begin at quad %s, not %d" % (at, record.get("first"), first))
+            first += record.get("quads") or 0
+            if not isinstance(record.get("place"), int) or record["place"] <= place:
+                problems.append("%s: its place %s is not after the record before it (%d)" % (at, record.get("place"), place))
+            else:
+                place = record["place"]
+            if i >= len(rows):
+                problems.append("%s: no 129F row is left for it" % at)
+                continue
+            row, data = rows[i]
+            if data is None or not data.get("read"):
+                problems.append("%s: its row (line %s) has no storage that was read" % (at, row.get("line")))
+                continue
+            try:
+                want = record_of_row(row, data)
+            except ValueError as e:
+                problems.append("%s: its row (line %s): %s" % (at, row.get("line"), e))
+                continue
+            for key in _record_differences(record, want):
+                problems.append("%s: \"%s\" is not its row's (line %s)" % (at, key, row.get("line")))
+    return frames, records, problems
+
+
+def cmd_records(args, say=print):
+    failed = 0
+    for capture in args.capture:
+        path = cr.find_capture(capture)
+        frames, records, problems = check_records(path)
+        say("%s: %d frames with impostor records, %d records, %d problems" % (path.name, frames, records, len(problems)))
+        for line in problems[:40]:
+            say("  " + line)
+        if len(problems) > 40:
+            say("  ... and %d more" % (len(problems) - 40))
+        if problems or frames == 0 or records == 0:
+            failed += 1
+    say("every record equals its rows bit for bit" if not failed else "%d captures FAILED" % failed)
+    return 1 if failed else 0
+
+
 def _position_line(r):
     return ("position %d / %d; corners %s; above %d, below %d; powered %d, tilted %d; degenerate %s; worst relative error %.3e"
             % (r.trials - r.failed, r.trials, " ".join(str(n) for n in r.corners), r.above, r.below, r.powered, r.tilted,
@@ -1394,7 +1576,7 @@ def main(argv=None, say=print):
     p = sub.add_parser("places")
     p.add_argument("capture")
     p.set_defaults(run=cmd_places)
-    for name, run in (("rows", cmd_rows), ("identities", cmd_identities), ("bounds", cmd_bounds)):
+    for name, run in (("rows", cmd_rows), ("identities", cmd_identities), ("bounds", cmd_bounds), ("records", cmd_records)):
         p = sub.add_parser(name)
         p.add_argument("capture", nargs="+")
         p.set_defaults(run=run)

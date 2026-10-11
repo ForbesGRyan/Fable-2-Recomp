@@ -613,13 +613,23 @@ class CapturedRows(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as folder:
             row = json.loads(made_capture(folder).read_text().splitlines()[0])
-            self.assertEqual(impostor_check.storage_fetch(row), {"shadow": False, "packet": True, "endian": 2})
+            self.assertEqual(impostor_check.storage_fetch(row), {"shadow": False, "packet": True, "endian": 2, "pad": 4})
             row = json.loads(made_capture(folder, shadow_names=True).read_text().splitlines()[0])
-            self.assertEqual(impostor_check.storage_fetch(row), {"shadow": True, "packet": False, "endian": 2})
+            self.assertEqual(impostor_check.storage_fetch(row), {"shadow": True, "packet": False, "endian": 2, "pad": 4})
             row["storage_dwords"] = 12                     # another size: neither names it
-            self.assertEqual(impostor_check.storage_fetch(row), {"shadow": False, "packet": False, "endian": None})
+            self.assertEqual(impostor_check.storage_fetch(row), {"shadow": False, "packet": False, "endian": None, "pad": None})
             row["vfetch"] = {"shadow": None, "packet": None}
-            self.assertEqual(impostor_check.storage_fetch(row), {"shadow": None, "packet": None, "endian": None})
+            self.assertEqual(impostor_check.storage_fetch(row), {"shadow": None, "packet": None, "endian": None, "pad": None})
+
+    def test_the_builders_pair_is_the_captured_one(self):
+        # Review of phase 12a, I1: D1's first 129F row (storage 0xFF762700, 224 dwords) has the packet pair
+        # 0x1F763703, 0x10000382: the size dword is (dwords << 2) | 0x10000002, not "| 2".
+        self.assertEqual(impostor_check.storage_pair(0xFF762700, 224), (0x1F763703, 0x10000382))
+        self.assertNotEqual(impostor_check.storage_pair(0xFF762700, 224)[1], (224 << 2) | 2)
+        self.assertEqual(impostor_check.storage_pair(0x4A120000, 12, endian=1), (0x0A120003, 0x10000031))
+        row = {"storage": "0xFF762700", "storage_dwords": 224,
+               "vfetch": {"shadow": None, "packet": ["0x00000001", "0x00000000", "0x00000001", "0x00000000", "0x1F763703", "0x10000382"]}}
+        self.assertEqual(impostor_check.storage_fetch(row), {"shadow": None, "packet": True, "endian": 2, "pad": 4})
 
     def test_the_census_counts_every_endian_and_order(self):
         import tempfile
@@ -640,7 +650,7 @@ class CapturedRows(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             said = []
             self.assertEqual(impostor_check.main(["words", str(made_capture(folder)), "--quiet"], say=said.append), 0)
-            self.assertTrue(any("shadow False, packet True, endian 2: 1 rows" in line for line in said), said)
+            self.assertTrue(any("shadow False, packet True, endian 2, padding bits 0x04: 1 rows" in line for line in said), said)
             said = []
             self.assertEqual(impostor_check.main(["words", str(made_capture(folder, size=2000.0)), "--quiet"], say=said.append), 1)
 
@@ -759,6 +769,107 @@ class Pins(unittest.TestCase):
         if not seen:
             self.skipTest("none of the four discovery captures is in the logs folder")
 
+
+def made_record_capture(folder, change=None):
+    """made_capture's frame with what a product run adds (plan Task 8): the row's fetch constants and state words,
+    and the frame row's "impostors" as capture.cpp writes it for that row. `change(block)`: applied to the block."""
+    import json
+    path = made_capture(folder)
+    verts, data, frame = [json.loads(line) for line in path.read_text().splitlines()]
+    verts["tf"] = {"0": ["0x8200D802", "0x12704043", "0x001FE0FF", "0x00A80C14", "0x000000C3", "0x12724A18"],
+                   "16": ["0x02004802", "0x1FAB4086", "0x000000FF", "0x00A80D10", "0x00000003", "0x00000018"],
+                   "17": ["0x00804802", "0x1FAB509A", "0x0000003F", "0x00A80C14", "0x00000003", "0x00000018"]}
+    verts["rs"] = {"2104": "0x0000000F", "210E": "0x3F008081", "2200": "0x00708766", "2201": "0x00010001", "2202": "0xAA00001C"}
+    verts["surface_info"] = "0x11810460"
+    want = impostor_check.record_of_row(verts, data)
+    record = {"place": 1059, "ps": "0x%016X" % want["ps"], "vs": "0x%016X" % want["vs"], "quads": want["quads"], "first": 0,
+              "pbool": "0x%08X" % want["pbool"], "vs_regs": "".join(want["vs_regs"]), "ps_regs": "".join(want["ps_regs"]),
+              "fetch": ["0x%08X" % x for x in want["fetch"]], "fog_fetch": [["0x%08X" % x for x in six] for six in want["fog_fetch"]],
+              "vfetch": ["0x%08X" % x for x in want["vfetch"]], "depth": "0x%08X" % want["depth"], "blend": "0x%08X" % want["blend"],
+              "colour_control": "0x%08X" % want["colour_control"], "mask": want["mask"], "surface": "0x%08X" % want["surface"],
+              "alpha_ref": "0x%08X" % want["alpha_ref"], "words": "".join(want["words"])}
+    frame["impostors"] = {"mode": "flat", "seen": 1, "taken": 1, "quads": 2, "reason": {}, "records": [record]}
+    if change:
+        change(frame["impostors"])
+    path.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in (verts, data, frame)), encoding="utf-8")
+    return path
+
+
+def _flip(text, digit):
+    """`text` (hex) with one bit of hex digit `digit` changed."""
+    return text[:digit] + "%X" % (int(text[digit], 16) ^ 1) + text[digit + 1:]
+
+
+class Records(unittest.TestCase):
+    """Plan Task 8, criterion 2: a frame row's impostor records against the frame's rows, bit for bit."""
+
+    def problems(self, change=None):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            return impostor_check.check_records(made_record_capture(folder, change))
+
+    def test_a_record_that_is_its_row_has_no_problem(self):
+        self.assertEqual(self.problems(), (1, 1, []))
+
+    def test_the_record_holds_the_last_writers_bool_word_and_the_packet(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            record = json.loads(made_record_capture(folder).read_text().splitlines()[2])["impostors"]["records"][0]
+        self.assertEqual(record["pbool"], "0x00000110")                                    # "pbool_load", not the shadow's 0x100
+        self.assertEqual(record["vfetch"], ["0x1F763703", "0x10000022"])                   # the packet's pair, bit 28 and all
+        self.assertEqual(record["words"][:32], "4300E00042F3400041F8C000416FA000")         # x, y, z, s of the first quad
+        self.assertEqual(len(record["vs_regs"]), 8 * 56)
+        self.assertEqual(len(record["ps_regs"]), 8 * 20)
+
+    def test_one_difference_is_one_problem(self):
+        def one(change, word):
+            frames, records, problems = self.problems(change)
+            self.assertEqual(len(problems), 1, problems)
+            self.assertIn(word, problems[0])
+
+        one(lambda b: b["records"][0].__setitem__("vs_regs", _flip(b["records"][0]["vs_regs"], 8 * 9 + 7)), '"vs_regs"')    # one register bit
+        one(lambda b: b["records"][0].__setitem__("ps_regs", _flip(b["records"][0]["ps_regs"], 3)), '"ps_regs"')
+        one(lambda b: b["records"][0].__setitem__("words", _flip(b["records"][0]["words"], 8 * 5 + 7)), '"words"')         # one word bit
+        one(lambda b: b["records"][0].__setitem__("quads", 3), '"quads"')                                                   # the quad count
+        one(lambda b: b.__setitem__("quads", 3), "quads 3")
+        one(lambda b: b.__setitem__("reason", {"quad": 1}), "reasons counted: quad: 1")
+        one(lambda b: b["records"][0].__setitem__("pbool", "0x00000100"), '"pbool"')                                        # the device's shadow
+        one(lambda b: b["records"][0].__setitem__("vfetch", ["0x1F763703", "0x00000022"]), '"vfetch"')                      # the pair without bit 28
+        one(lambda b: b["records"][0].__setitem__("alpha_ref", "0x3F000000"), '"alpha_ref"')
+        one(lambda b: b["records"][0]["fog_fetch"].reverse(), '"fog_fetch"')
+        one(lambda b: b["records"][0].__setitem__("first", 1), "begin at quad 1")
+        one(lambda b: b["records"][0].__setitem__("surface", "0x00000000"), '"surface"')
+
+    def test_seen_is_the_frames_rows(self):
+        frames, records, problems = self.problems(lambda b: b.__setitem__("seen", 3))
+        self.assertEqual(len(problems), 2)                              # seen is not the rows', and taken is not seen
+        self.assertIn("seen 3, the frame has 1 129F rows", problems[0])
+
+    def test_a_frame_without_records_is_said(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            path = made_record_capture(folder)
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            rows[2]["impostors"] = "off"
+            path.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows), encoding="utf-8")
+            frames, records, problems = impostor_check.check_records(path)
+            self.assertEqual((frames, records, len(problems)), (0, 0, 1))
+            self.assertIn("the switch was off", problems[0])
+            said = []
+            self.assertEqual(impostor_check.main(["records", str(path)], say=said.append), 1)
+            self.assertEqual(said[-1], "1 captures FAILED")
+            said = []
+            self.assertEqual(impostor_check.main(["records", str(made_record_capture(folder))], say=said.append), 0)
+            self.assertEqual(said[-1], "every record equals its rows bit for bit")
+
+    def test_a_component_that_is_no_number_is_held_as_no_number(self):
+        # (ledger ruling 34: an unread component is carried whatever it holds; a row prints it as null)
+        self.assertTrue(impostor_check._same_floats("7FC000003F800000", [None, "3F800000"]))
+        self.assertFalse(impostor_check._same_floats("7F8000003F800000", [None, "3F800000"]))      # an infinity is a number's bits
+        self.assertFalse(impostor_check._same_floats("3F8000003F800000", [None, "3F800000"]))
+        self.assertFalse(impostor_check._same_floats("7FC00000", [None, "3F800000"]))
 
 if __name__ == "__main__":
     unittest.main()

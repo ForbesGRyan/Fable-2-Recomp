@@ -1808,6 +1808,135 @@ static int WindTests(const capture::DrawRecord& r) {
   return 0;
 }
 
+// Impostor records (distant trees, plan Task 8): a draw whole or not there; the set is not all-or-none.
+static int ImpostorTests() {
+  auto record = [](uint32_t quads) {
+    capture::ImpostorRecord r{};
+    r.ps_hash = capture::kImpostorPs;
+    r.vs_hash = capture::kImpostorVs;
+    r.quads = quads;
+    return r;
+  };
+  std::vector<float> words(4 * capture::kMaxImpostorQuads, 1.5f);
+  for (size_t i = 0; i < words.size(); ++i) words[i] = float(i);       // (so that a record's words can be told from another's)
+  render::FrameBuilder b;
+  b.Open();
+  b.ImpostorSeen();                                               // the mode is off: nothing
+  b.AddImpostor(record(2), words.data(), capture::ImpostorReason::kNone);
+  auto s = b.Finish(1);
+  if (s->impostor_mode != capture::ImpostorMode::kOff || s->impostor_seen != 0 || !s->impostors.empty() || !s->impostor_words.empty()) return 200;
+  if (s->impostor_words.capacity() != 0 || s->impostors.capacity() != 0 || render::ImpostorLine(*s) != "off") return 200;   // no memory with the switch off
+  b.ImpostorsOn(capture::ImpostorMode::kFlat);
+  b.Open();
+  for (uint32_t i = 0; i < 3; ++i) b.ImpostorSeen();
+  b.AddImpostor(record(2), words.data(), capture::ImpostorReason::kNone);
+  b.AddImpostor(capture::ImpostorRecord{}, nullptr, capture::ImpostorReason::kQuad);   // one model refused: the others stand
+  b.AddImpostor(record(5), words.data() + 40, capture::ImpostorReason::kNone);
+  s = b.Finish(2);
+  if (s->impostor_mode != capture::ImpostorMode::kFlat || s->impostor_seen != 3 || s->impostor_taken != 2 || s->impostor_quads != 7) return 201;
+  if (s->impostors.size() != 2 || s->impostors[0].first_quad != 0 || s->impostors[1].first_quad != 2 || s->impostor_words.size() != 28) return 202;
+  if (s->impostor_words[0] != 0.0f || s->impostor_words[7] != 7.0f || s->impostor_words[8] != 40.0f || s->impostor_words[27] != 59.0f) return 202;
+  if (s->impostor_refused[size_t(capture::ImpostorReason::kQuad)] != 1 || s->impostor_refused[size_t(capture::ImpostorReason::kPending)] != 0) return 203;
+  if (render::ImpostorLine(*s) != "seen 3, taken 2, quads 7 | impostor-record {quad: 1}") return 203;
+  b.Open();                                                       // the 33rd draw
+  for (uint32_t i = 0; i < 33; ++i) { b.ImpostorSeen(); b.AddImpostor(record(1), words.data(), capture::ImpostorReason::kNone); }
+  s = b.Finish(3);
+  if (s->impostors.size() != 32 || s->impostor_quads != 32 || s->impostor_refused[size_t(capture::ImpostorReason::kOverLimit)] != 1) return 204;
+  b.Open();                                                       // a draw whose quads do not fit: that draw whole, the next still taken
+  b.ImpostorSeen(); b.AddImpostor(record(4000), words.data(), capture::ImpostorReason::kNone);
+  b.ImpostorSeen(); b.AddImpostor(record(97), words.data(), capture::ImpostorReason::kNone);
+  b.ImpostorSeen(); b.AddImpostor(record(96), words.data(), capture::ImpostorReason::kNone);
+  b.ImpostorSeen(); b.AddImpostor(record(1), words.data(), capture::ImpostorReason::kNone);          // the block is full now
+  b.ImpostorSeen(); b.AddImpostor(record(0xFFFFFFFFu), words.data(), capture::ImpostorReason::kNone);   // (no 32-bit wrap)
+  s = b.Finish(4);
+  if (s->impostors.size() != 2 || s->impostor_quads != 4096 || s->impostors[1].quads != 96 || s->impostors[1].first_quad != 4000) return 205;
+  if (s->impostor_words.size() != 4 * 4096 || s->impostor_refused[size_t(capture::ImpostorReason::kOverLimit)] != 3) return 206;
+  b.Open();                                                       // an invalid record offered as good, a reason that is no reason
+  b.ImpostorSeen(); b.AddImpostor(capture::ImpostorRecord{}, words.data(), capture::ImpostorReason::kNone);
+  b.ImpostorSeen(); b.AddImpostor(record(1), nullptr, capture::ImpostorReason::kNone);
+  b.ImpostorSeen(); b.AddImpostor(capture::ImpostorRecord{}, nullptr, capture::ImpostorReason::kCount);
+  b.ImpostorSeen(); b.AddImpostor(record(0), words.data(), capture::ImpostorReason::kNone);
+  s = b.Finish(5);
+  if (!s->impostors.empty() || s->impostor_refused[size_t(capture::ImpostorReason::kUnread)] != 4 || s->impostor_taken != 0) return 207;
+  b.Open();                                                       // a record's place is kept as given
+  capture::ImpostorRecord placed = record(1);
+  placed.place = 1059;
+  b.ImpostorSeen(); b.AddImpostor(placed, words.data(), capture::ImpostorReason::kNone);
+  s = b.Finish(6);
+  if (s->impostors.size() != 1 || s->impostors[0].place != 1059) return 208;
+  if (s->impostor_refused[size_t(capture::ImpostorReason::kFogTable)] != 0) return 209;   // a frame without a fog block keeps its records
+  b.Open();                                                       // a call whose record never came (Review Focus 5)
+  b.ImpostorSeen(); b.ImpostorSeen();
+  b.AddImpostor(record(1), words.data(), capture::ImpostorReason::kNone);
+  s = b.Finish(7);
+  if (s->impostor_seen != 2 || s->impostor_taken != 1 || s->impostor_refused[size_t(capture::ImpostorReason::kPending)] != 1) return 210;
+  b.Open();                                                       // nothing of one frame in the next
+  s = b.Finish(8);
+  if (s->impostor_seen != 0 || !s->impostors.empty() || !s->impostor_words.empty() || s->impostor_refused[size_t(capture::ImpostorReason::kPending)] != 0) return 211;
+  if (render::ImpostorLine(*s) != "seen 0, taken 0, quads 0 | impostor-record {}") return 211;
+  {
+    // The `fog-table` rule (FrameBuilder::Finish): of three records, the two whose fog is the frame's stay,
+    // each with its own words at its new place; the one between them is counted and nothing of it is kept.
+    capture::FogBlock block{};
+    block.valid = true;
+    block.axis[0] = 0.25f; block.axis[1] = 0.5f; block.axis[2] = 0.75f;
+    block.range[0] = 12.0f; block.range[1] = 1900.0f; block.range[2] = 0.05f; block.range[3] = 0.002f;
+    capture::FogSource source;
+    source.base[0] = 0x1A100000u;                                 // tf4
+    source.base[1] = 0x1A200000u;                                 // tf5
+    auto fogged = [&](uint32_t quads, bool own) {
+      capture::ImpostorRecord r = record(quads);
+      std::memcpy(r.vs[capture::kImpC110], block.axis, 12);
+      r.vs[capture::kImpC111][0] = 12.0f; r.vs[capture::kImpC111][2] = 0.05f; r.vs[capture::kImpC111][3] = 0.002f;
+      r.fog_fetch[0][1] = (own ? source.base[1] : 0x1A300000u) | 0x1Eu;   // slot 16: tf5, or another table
+      r.fog_fetch[1][1] = source.base[0] | 0x1Eu;                         // slot 17: tf4
+      return r;
+    };
+    b.FogOn(true);
+    b.Open();
+    b.SetFog(block, source);
+    for (uint32_t i = 0; i < 3; ++i) b.ImpostorSeen();
+    b.AddImpostor(fogged(2, true), words.data(), capture::ImpostorReason::kNone);
+    b.AddImpostor(fogged(3, false), words.data() + 100, capture::ImpostorReason::kNone);
+    b.AddImpostor(fogged(4, true), words.data() + 200, capture::ImpostorReason::kNone);
+    s = b.Finish(9);
+    if (!s->fog.valid || s->impostor_seen != 3 || s->impostor_taken != 2 || s->impostors.size() != 2 || s->impostor_quads != 6) return 212;
+    if (s->impostor_refused[size_t(capture::ImpostorReason::kFogTable)] != 1 || s->impostors[0].quads != 2 || s->impostors[1].quads != 4 ||
+        s->impostors[1].first_quad != 2 || s->impostor_words.size() != 24 || s->impostor_words[7] != 7.0f || s->impostor_words[8] != 200.0f ||
+        s->impostor_words[23] != 215.0f) return 212;
+    // The same three in a frame whose fog is on and has no block: all stay (the pass draws that frame unfogged).
+    b.Open();
+    for (uint32_t i = 0; i < 3; ++i) b.ImpostorSeen();
+    b.AddImpostor(fogged(2, true), words.data(), capture::ImpostorReason::kNone);
+    b.AddImpostor(fogged(3, false), words.data() + 100, capture::ImpostorReason::kNone);
+    b.AddImpostor(fogged(4, true), words.data() + 200, capture::ImpostorReason::kNone);
+    s = b.Finish(10);
+    if (s->fog.valid || s->impostor_taken != 3 || s->impostor_quads != 9 || s->impostor_refused[size_t(capture::ImpostorReason::kFogTable)] != 0) return 213;
+    // All three matching: nothing taken out, the counts whole.
+    b.Open();
+    b.SetFog(block, source);
+    b.ImpostorSeen(); b.AddImpostor(fogged(2, true), words.data(), capture::ImpostorReason::kNone);
+    b.ImpostorSeen(); b.AddImpostor(fogged(4, true), words.data() + 200, capture::ImpostorReason::kNone);
+    s = b.Finish(11);
+    if (s->impostor_taken != 2 || s->impostor_quads != 6 || s->impostors[1].first_quad != 2 || s->impostor_words[8] != 200.0f ||
+        s->impostor_refused[size_t(capture::ImpostorReason::kFogTable)] != 0) return 214;
+  }
+  // Switched off at a frame boundary: that frame's scene says off and holds nothing, whatever was offered.
+  b.Open();
+  b.ImpostorSeen(); b.AddImpostor(record(1), words.data(), capture::ImpostorReason::kNone);
+  b.ImpostorSeen(); b.AddImpostor(capture::ImpostorRecord{}, nullptr, capture::ImpostorReason::kQuad);
+  b.ImpostorSeen();
+  b.ImpostorsOn(capture::ImpostorMode::kOff);
+  s = b.Finish(12);
+  if (s->impostor_mode != capture::ImpostorMode::kOff || !s->impostors.empty() || s->impostor_seen != 0 || s->impostor_taken != 0) return 215;
+  b.ImpostorsOn(capture::ImpostorMode::kOn);
+  b.Open();
+  s = b.Finish(13);
+  if (s->impostor_mode != capture::ImpostorMode::kOn || !s->impostors.empty() || s->impostor_seen != 0) return 216;
+  for (uint32_t n : s->impostor_refused) if (n != 0) return 216;   // nothing of the frame before
+  return 0;
+}
+
 int main() {
   auto r = capture::AssembleRecord(Good(), 7);
   if (r.skip != SkipReason::kNone || r.seq != 7 || r.rows[0] != 1.0f || r.rows[15] != 16.0f) return 1;
@@ -2417,6 +2546,8 @@ int main() {
         row.find("\"unreferenced\":1") == std::string::npos) return 160;
   }
 
+  if (const int failed = ImpostorTests()) return failed;
+
   render::ScenePublisher pub;
   if (pub.Latest()) return 18;
   pub.Publish(s);
@@ -2424,6 +2555,6 @@ int main() {
   if (pub.Latest()->frame != 43) return 19;
   std::cout << "PASS: draw record, frame builder, terrain side array, light side array and block, buffer reuse, "
                "pool under threads, shadow lists and block, fog and sky blocks, post block, quad records, wind side arrays, "
-               "publisher\n";
+               "impostor records, publisher\n";
   return 0;
 }

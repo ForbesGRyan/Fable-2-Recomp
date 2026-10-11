@@ -113,6 +113,16 @@ REXCVAR_DEFINE_STRING(fable2_native_wind, "off", "Fable2",
                       "view draws those records moved as the game's vertex shader moves them, in colour, depth and shadow "
                       "(F3: the Wind line); off (or false, 0; the default) = none of it is read, made or drawn. Frame map "
                       "section 18.");
+REXCVAR_DEFINE_STRING(fable2_native_impostors, "off", "Fable2",
+                      "Native impostors (sub-project 12: the far woods; frame map section 19): flat = with a composite "
+                      "view the capture also reads the game's impostor draws (one quad a far tree, vertex shader 129F "
+                      "with pixel shader 4B1D through BeginVertices in the main scene: its registers, fetch constants, "
+                      "state words and the quads' words) into a bounded block of the frame, at most 32 draws and 4,096 "
+                      "quads, a draw whole or missing with a counted reason (the capture log's impostors line); they "
+                      "are meant to be drawn as quads of one flat colour. on (or true, 1) = the game's own pictures, "
+                      "which this build does not have: it captures as flat does and draws no impostor (each record "
+                      "counted \"picture: unread\"). off (or false, 0; the default) = none of it is read, made or "
+                      "drawn, and the log has the one line \"impostors: off\".");
 REXCVAR_DEFINE_STRING(fable2_native_coverage, "off", "Fable2",
                       "Native coverage (sub-project 11, phase 11b; default off until the user's checks: frame map section "
                       "18, \"Validation (11b)\"): on (or true, 1) = the native view "
@@ -411,6 +421,19 @@ bool CurrentWind() {
                 render::kClaySwitchWords);
   }
   return on;
+}
+
+// fable2_native_impostors: off, flat or on (capture::ParseImpostorMode); anything else is off, with one
+// warning that names the words. The capture reads the far woods' calls with it, in a frame with records.
+capture::ImpostorMode CurrentImpostors() {
+  static std::atomic<bool> warned{false};
+  bool recognized = true;
+  const capture::ImpostorMode mode = capture::ParseImpostorMode(REXCVAR_GET(fable2_native_impostors), &recognized);
+  if (!recognized && !warned.exchange(true)) {
+    REXLOG_WARN("[native] unknown fable2_native_impostors '{}', using off (accepted: {})", REXCVAR_GET(fable2_native_impostors),
+                capture::kImpostorSwitchWords);
+  }
+  return mode;
 }
 
 // fable2_native_coverage: read like the sun's switch; anything else is off, with one warning that names
@@ -1013,6 +1036,18 @@ void Install(rex::memory::Memory* memory) {
     REXLOG_INFO("[native] coverage: on (fable2_native_coverage; the native view draws a coverage record's half-covered pixels at one half "
                 "over what lies behind: a late record's in its place, an early record's in a tail after the opaque records)");
   }
+  // The impostors' line always (spec criterion 13 names the off line). `on` is the pictures by read-back, which
+  // this build does not have (the ledger's ruling 31: phase 12c was not entered): it captures as `flat` does and
+  // draws no impostor (ruling 23).
+  {
+    const capture::ImpostorMode impostors = CurrentImpostors();
+    if (impostors == capture::ImpostorMode::kOn) {
+      REXLOG_INFO("[native] impostors: on (no pictures in this build: nothing is drawn) (fable2_native_impostors; the far woods' "
+                  "draws are captured as with flat and every record is counted \"picture: unread\")");
+    } else {
+      REXLOG_INFO("[native] impostors: {} (fable2_native_impostors)", capture::ImpostorModeName(impostors));
+    }
+  }
   // (a diagnostic: its line only when it is on, so that a normal run's log is the one of before)
   if (CurrentSceneDump()) {
     REXLOG_INFO("[native] scene dump: on (fable2_native_scene_dump; each discovery capture made in a native view writes the native "
@@ -1091,6 +1126,8 @@ void PollFrame() {
   capture::SetSunWanted(SunRecordsWanted(PostWanted(wanted), CurrentSun()));
   // (the wind's word like the others: before the records' when switching on, after it when switching off)
   capture::SetWindWanted(wanted && CurrentWind());
+  // (and the impostors' word: off without a composite view)
+  capture::SetImpostorsWanted(wanted ? CurrentImpostors() : capture::ImpostorMode::kOff);
   if (wanted) capture::SetRecordsWanted(true);
   rex::graphics::RequestNativeGuestOutputPostProcess(wanted);
 }

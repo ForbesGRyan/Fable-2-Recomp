@@ -10,7 +10,8 @@ plan Task 6): what the capture's record of a far-woods draw (vertex shader 129F,
                                                                    element's four halves, in the order the GPU reads
                                                                    them after the swap by the endian below
   FABLE2_IMPOSTOR_ENDIAN(e)                                        the storage's vertex fetch endian (2: 8-in-32)
-  FABLE2_IMPOSTOR_BOUND(bank, reg, component, lo_bits, hi_bits)    lo <= value <= hi, four lines a register
+  FABLE2_IMPOSTOR_BOUND(bank, reg, component, lo_bits, hi_bits)    lo <= value <= hi: one line for every component
+                                                                   a formula READS, none for the others
   FABLE2_IMPOSTOR_SIZE_MAX(bits)                                   a quad's size is in (0, this]
   FABLE2_IMPOSTOR_B129(mask)                                       the pixel bool word's bit that is bool b129
 
@@ -30,9 +31,17 @@ smallest positive single (bits 0x00000001): a value passes when lo <= value <= h
 place of the world takes outside these bounds makes a record that is refused and counted (`register`, `quad`),
 never one that is drawn wrong.
 
+Only what a formula reads is bounded (ledger ruling 34, after the review of phase 12a, I2). READ below names
+the components impostor_position, impostor_fog and the pixel formulas read (the Tasks 4-5 report's list;
+tests/test_gen_impostor_table.py holds it to the three functions by changing one component at a time). A
+component no formula reads has no line: the record carries it and nothing judges it, not even for being a
+number. The five captures were all made within ten units of one place at one time of day, and say nothing about
+what such a component (the sky's path height in c111.y, c12.x, c29.z, ...) holds elsewhere; a bound on it could
+only remove every far tree for a value the picture does not depend on.
+
 A table is refused (ValueError) rather than written loosely: a hash is 16 hex digits and not zero; a register is
-below 248 and named once a bank; every register has four bounds and every bound belongs to a register; a bound is
-two numbers with the low at most the high; the word's sources are 0 to 3, each once; the endian is 0 to 3; a
+below 248 and named once a bank; every register has four bounds (None for a component that is not read) of which
+at least one is a bound, and every bound belongs to a register; a bound is two numbers with the low at most the high; the word's sources are 0 to 3, each once; the endian is 0 to 3; a
 literal register has four values; the size's bound is a positive number; b129's mask is one bit.
 
 usage: gen_impostor_table.py [--out src/native/capture/impostor_table.inc]     write the file
@@ -91,6 +100,19 @@ WHOLE = {("vs", 47): PLACE, ("ps", 19): PLACE,
          ("vs", 115): MATRIX, ("vs", 116): MATRIX, ("vs", 117): MATRIX}
 
 
+# The components a formula reads (0 to 3 for x to w); every other component of the table's registers is carried
+# and never judged (ruling 34). Position: c8.z, c46.xyz, c47.z, c72..c75, c113, c114.xy, c115..c117. Fog: c47.xyz,
+# c110.xyz, c111.x, .z, .w. Pixel: c12.y, .w, c19.xyz, c20.w, c29.x, .y, c31.x.
+ALL = (0, 1, 2, 3)
+READ = {
+    ("vs", 8): (2,), ("vs", 46): (0, 1, 2), ("vs", 47): (0, 1, 2),
+    ("vs", 72): ALL, ("vs", 73): ALL, ("vs", 74): ALL, ("vs", 75): ALL,
+    ("vs", 110): (0, 1, 2), ("vs", 111): (0, 2, 3), ("vs", 113): ALL, ("vs", 114): (0, 1),
+    ("vs", 115): ALL, ("vs", 116): ALL, ("vs", 117): ALL,
+    ("ps", 12): (1, 3), ("ps", 19): (0, 1, 2), ("ps", 20): (3,), ("ps", 29): (0, 1), ("ps", 31): (0,),
+}
+
+
 def f32(x):
     return struct.unpack("<f", struct.pack("<f", x))[0]
 
@@ -107,10 +129,11 @@ def entry(shader=None):
         if key in WHOLE:
             rule = [(-WHOLE[key], WHOLE[key])] * 4
         else:
-            reach = f32(FACTOR * max(max(abs(lo), abs(hi)) for lo, hi in span))
+            # (the largest magnitude over the components that are READ: an unread one gives no bound to another)
+            reach = f32(FACTOR * max(max(abs(span[i][0]), abs(span[i][1])) for i in READ[key]))
             rule = [(-reach, reach)] * 4
         own = SPEC.get(key, [None] * 4)
-        bounds[key] = [own[i] if own[i] is not None else rule[i] for i in range(4)]
+        bounds[key] = [(own[i] if own[i] is not None else rule[i]) if i in READ[key] else None for i in range(4)]
     return {"vs": s["vs"], "ps": s["ps"], "reg": tuple(s["reg"]), "ps_reg": tuple(s["ps_reg"]),
             "vs_lit": dict(s["vs_lit"]), "ps_lit": dict(s["ps_lit"]),
             "word_source": tuple(s["word_source"]), "word_endian": s["word_endian"],
@@ -167,7 +190,12 @@ def generate(e):
                 raise ValueError("%s register c%d has no bound" % (bank, reg))
             if len(span) != 4:
                 raise ValueError("%s register c%d: a register has four bounds" % (bank, reg))
-            for i, (lo, hi) in enumerate(span):
+            if all(b is None for b in span):
+                raise ValueError("%s register c%d has no bound: a register none of whose components is read" % (bank, reg))
+            for i, b in enumerate(span):
+                if b is None:           # not read: carried, never judged
+                    continue
+                lo, hi = b
                 if not (isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and math.isfinite(lo) and math.isfinite(hi)):
                     raise ValueError("%s register c%d component %d: a bound that is no number" % (bank, reg, i))
                 if lo > hi:

@@ -394,6 +394,11 @@ inline bool Decode1555Level(const uint8_t* src, size_t src_size, uint32_t width,
   out_rgba->clear();
   if (!src || width == 0 || height == 0 || width > 8192 || height > 8192 || pitch_texels < width) return false;
   const uint64_t row_pitch_bytes = uint64_t((pitch_texels + 31) & ~31u) * 2;
+  // Before anything is allocated (review of phase 12a, Minor 5): the image's texels are that many distinct
+  // two-byte places of the source in either layout, so a source smaller than them cannot hold it. (The exact
+  // bound is each texel's own, below; without this a constant naming 8,192 x 8,192 over a short source would
+  // allocate 268 MB and then fail.)
+  if (uint64_t(width) * height * 2 > src_size) return false;
   std::vector<uint8_t> out(size_t(width) * height * 4);
   for (uint32_t y = 0; y < height; ++y) {
     for (uint32_t x = 0; x < width; ++x) {

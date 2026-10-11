@@ -16,6 +16,7 @@
 
 #include "../capture/draw_record.h"
 #include "../capture/fog_block.h"
+#include "../capture/impostor_record.h"
 #include "../capture/light_block.h"
 #include "../capture/post_block.h"
 #include "../capture/quad_record.h"
@@ -191,6 +192,21 @@ struct FrameScene {
   // The quads were wanted this frame (the native view, the light, the post chain and the sun's
   // switch on at the frame's begin).
   bool quad_records = false;
+  // The frame's impostor records (impostor_record.h; frame-map section 19, "Impostor records"): the far
+  // woods' quad lists, a bounded block of the scene's own (at most capture::kMaxImpostorRecords records
+  // and capture::kMaxImpostorQuads quads; both arrays empty, without memory, in a frame that has none).
+  // impostor_words: four floats a quad (x, y, z, s), a record's at [4 * first_quad, 4 * (first_quad +
+  // quads)). Unlike the quad records' set this one is NOT all-or-none (spec ruling 9): every record
+  // here is whole and usable by itself, and a call that gave none is one tree model missing.
+  // impostor_mode: the switch as latched for this frame; kOff: nothing was read and every count is 0.
+  // impostor_seen: the frame's calls of the pair (and calls whose pixel shader could not be told);
+  // impostor_taken, impostor_quads: the records held and their quads; impostor_refused: the calls
+  // that gave none and the records taken out again, by reason (capture::ImpostorReason).
+  std::vector<capture::ImpostorRecord> impostors;
+  std::vector<float> impostor_words;
+  capture::ImpostorMode impostor_mode = capture::ImpostorMode::kOff;
+  uint32_t impostor_seen = 0, impostor_taken = 0, impostor_quads = 0;
+  uint32_t impostor_refused[size_t(capture::ImpostorReason::kCount)] = {};
   // The drawable records with light inputs by family (index: LightFamily), how
   // many of them are a family's two- or four-light form, the records without
   // inputs by reason (index: LightReason), and the pixel shaders of those,
@@ -467,6 +483,27 @@ inline std::string PostLine(const FrameScene& scene) {
                   scene.post_tries);
   }
   return buf;
+}
+
+// The frame's impostor records as the log and the overlay write them: "off" for a frame in which
+// they were not wanted, else "seen S, taken T, quads Q | impostor-record {reason: n, ...}" (the
+// calls of the pair, the records held, their quads, and the calls without a record by reason; the
+// braces are empty when every call gave one).
+inline std::string ImpostorLine(const FrameScene& scene) {
+  if (scene.impostor_mode == capture::ImpostorMode::kOff) return "off";
+  char buf[96];
+  std::snprintf(buf, sizeof(buf), "seen %u, taken %u, quads %u | %s {", scene.impostor_seen, scene.impostor_taken,
+                scene.impostor_quads, capture::kImpostorRecordReason);
+  std::string line = buf;
+  bool first = true;
+  for (size_t i = 1; i < size_t(capture::ImpostorReason::kCount); ++i) {
+    if (!scene.impostor_refused[i]) continue;
+    std::snprintf(buf, sizeof(buf), "%s%s: %u", first ? "" : ", ", capture::ImpostorReasonName(capture::ImpostorReason(i)),
+                  scene.impostor_refused[i]);
+    line += buf;
+    first = false;
+  }
+  return line + "}";
 }
 
 // The frame's quad records as the log writes them after "quads: ":
@@ -892,6 +929,46 @@ class FrameBuilder {
     ++quad_taken_;
   }
 
+  // --- The impostor records (FrameScene::impostors) ---
+  // The switch as it holds from now on (the capture sets it at a frame boundary). kOff: every call
+  // below does nothing, nothing is allocated, and the frame's scene says kOff.
+  void ImpostorsOn(capture::ImpostorMode mode) { impostor_mode_ = mode; }
+  // A call of the impostors' pair in the frame's main scene. Its storage is filled by the game after
+  // the builder returns, so its record comes later (AddImpostor), when the drawing thread enters its
+  // next hooked draw; a call that is refused at once is handed over at once. Counted here so that a
+  // frame which ends before a record arrived knows it lacks one ("pending").
+  void ImpostorSeen() {
+    if (impostor_mode_ != capture::ImpostorMode::kOff) ++impostor_seen_;
+  }
+  // The record of a call counted by ImpostorSeen with its words (4 * record.quads floats), or its
+  // refusal. A reason other than kNone is counted (one that is no reason's name as "unread"); a
+  // record that is not valid, has no quads or comes without words, offered as good, is "unread".
+  // A valid record past kMaxImpostorRecords, or one whose quads do not fit below kMaxImpostorQuads,
+  // is "over-limit" and nothing of it is kept: that draw whole, the frame's other draws stand (spec
+  // ruling 9). Otherwise it is appended with its first_quad and its words. Nothing invalid is stored.
+  void AddImpostor(const capture::ImpostorRecord& record, const float* words, capture::ImpostorReason why) {
+    if (impostor_mode_ == capture::ImpostorMode::kOff) return;
+    ++impostor_answered_;
+    if (why != capture::ImpostorReason::kNone) {
+      ++impostor_refused_[size_t(why < capture::ImpostorReason::kCount ? why : capture::ImpostorReason::kUnread)];
+      return;
+    }
+    if (!capture::ImpostorRecordValid(record) || record.quads == 0 || !words) {
+      ++impostor_refused_[size_t(capture::ImpostorReason::kUnread)];
+      return;
+    }
+    // (written so that no sum of counts wraps: impostor_quads_ never exceeds the bound)
+    if (impostors_.size() >= capture::kMaxImpostorRecords || record.quads > capture::kMaxImpostorQuads - impostor_quads_) {
+      ++impostor_refused_[size_t(capture::ImpostorReason::kOverLimit)];
+      return;
+    }
+    if (impostors_.empty()) impostors_.reserve(capture::kMaxImpostorRecords);
+    impostors_.push_back(record);
+    impostors_.back().first_quad = impostor_quads_;
+    impostor_words_.insert(impostor_words_.end(), words, words + size_t(4) * record.quads);
+    impostor_quads_ += record.quads;
+  }
+
   // Frees the spare buffers (any thread; scenes that die later bring theirs).
   void ReleaseSpares() { pool_->Release(); }
   size_t spare_count() const { return pool_->size(); }
@@ -1090,6 +1167,48 @@ class FrameBuilder {
     quad_seen_ = quad_taken_ = quad_over_ = 0;
     std::fill(std::begin(quad_kinds_), std::end(quad_kinds_), 0u);
     std::fill(std::begin(quad_refused_), std::end(quad_refused_), 0u);
+    // The impostor records: every record that is whole, each with its words; the counts. Calls seen
+    // that gave neither a record nor a refusal are "pending". Then the `fog-table` rule, here because
+    // the frame's fog block and its tables' addresses are both in hand only now (s->fog, set above): in
+    // a frame whose fog block is valid a record whose fog is not the frame's is taken out and counted
+    // (capture::ImpostorFogMatches); a frame without a valid block keeps its records (the pass draws
+    // that whole frame unfogged, and the impostors with it). The next frame starts with none of it.
+    s->impostor_mode = impostor_mode_;
+    if (impostor_mode_ != capture::ImpostorMode::kOff) {
+      if (impostor_seen_ > impostor_answered_) {
+        impostor_refused_[size_t(capture::ImpostorReason::kPending)] += impostor_seen_ - impostor_answered_;
+      }
+      bool all = true;
+      if (s->fog.valid) {
+        for (const capture::ImpostorRecord& r : impostors_) all = all && capture::ImpostorFogMatches(r, s->fog, s->fog_source.base);
+      }
+      if (all) {
+        // (the builder's two arrays become the scene's; the next frame with impostors allocates its own)
+        s->impostors = std::move(impostors_);
+        s->impostor_words = std::move(impostor_words_);
+        s->impostor_quads = impostor_quads_;
+      } else {
+        for (const capture::ImpostorRecord& r : impostors_) {
+          if (!capture::ImpostorFogMatches(r, s->fog, s->fog_source.base)) {
+            ++impostor_refused_[size_t(capture::ImpostorReason::kFogTable)];
+            continue;
+          }
+          const float* words = impostor_words_.data() + size_t(4) * r.first_quad;
+          s->impostors.push_back(r);
+          s->impostors.back().first_quad = s->impostor_quads;
+          s->impostor_words.insert(s->impostor_words.end(), words, words + size_t(4) * r.quads);
+          s->impostor_quads += r.quads;
+        }
+      }
+      s->impostor_seen = impostor_seen_;
+      s->impostor_taken = uint32_t(s->impostors.size());
+      std::copy(std::begin(impostor_refused_), std::end(impostor_refused_), std::begin(s->impostor_refused));
+    }
+    // (also when the switch went off inside the frame: nothing counted before reaches a later frame)
+    std::fill(std::begin(impostor_refused_), std::end(impostor_refused_), 0u);
+    impostors_.clear();
+    impostor_words_.clear();
+    impostor_seen_ = impostor_answered_ = impostor_quads_ = 0;
     if (!draws_.empty() || !terrain_.empty() || !lights_.empty() || !shadow_draws_[0].empty() || !shadow_draws_[1].empty()) {
       const size_t shadows[2] = {shadow_draws_[0].size(), shadow_draws_[1].size()};
       const size_t records = draws_.size(), patches = terrain_.size(), lit = lights_.size(), swaying = wind_.size();
@@ -1232,6 +1351,14 @@ class FrameBuilder {
   uint32_t quad_over_ = 0;
   uint32_t quad_kinds_[size_t(capture::PostQuadKind::kCount)] = {};
   uint32_t quad_refused_[size_t(capture::QuadRecordReason::kCount)] = {};
+  // The impostor records of the frame so far (FrameScene::impostors) and their words; impostor_seen_
+  // calls were counted, impostor_answered_ of them gave a record or a refusal. Empty, without
+  // memory, while the switch is off.
+  capture::ImpostorMode impostor_mode_ = capture::ImpostorMode::kOff;
+  std::vector<capture::ImpostorRecord> impostors_;
+  std::vector<float> impostor_words_;
+  uint32_t impostor_seen_ = 0, impostor_answered_ = 0, impostor_quads_ = 0;
+  uint32_t impostor_refused_[size_t(capture::ImpostorReason::kCount)] = {};
   // The sun layer's tree occluders of the frame so far (FrameScene::layer_depth_place).
   uint32_t layer_occluders_ = 0;
   uint32_t layer_occluders_failed_ = 0;

@@ -446,6 +446,65 @@ int main() {
     b = FcArgs{}; b.format = 3; b.pitch = 128; MakeFc(b, q);
     if (DumpFetch(q, &keep, &dfi) || keep.width != 77) return 159;
   }
+  // --- Decode1555Level (plan Task 7): 16-bit texels, tiled, 8-in-16, alpha in bit 15 ---
+  {
+    std::vector<uint8_t> src(131072, 0);
+    auto put = [&](uint32_t offset, uint16_t word) { src[offset] = uint8_t(word >> 8); src[offset + 1] = uint8_t(word); };   // guest order: high byte first
+    put(0, 0x8000 | 31);                    // (0, 0): alpha, the low field full
+    put(2, 31 << 5);                        // (1, 0): the middle field, no alpha
+    put(16, 0x8000 | (31 << 10));           // (0, 1): the high field
+    put(64, 0x8000 | (16 << 5) | 1);        // (8, 0): rounding: 16 -> 132, 1 -> 8
+    put(130942, 0xFFFF);                    // (255, 255)
+    std::vector<uint8_t> out;
+    if (!Decode1555Level(src.data(), src.size(), 256, 256, 256, true, 1, &out) || out.size() != 256u * 256u * 4u) return 160;
+    auto px = [&](uint32_t x, uint32_t y) { return &out[(size_t(y) * 256 + x) * 4]; };
+    const uint32_t lo = k1555LowFieldChannel, hi = 2 - k1555LowFieldChannel;
+    if (lo != 0 && lo != 2) return 161;
+    if (px(0, 0)[lo] != 255 || px(0, 0)[1] != 0 || px(0, 0)[hi] != 0 || px(0, 0)[3] != 255) return 162;
+    if (px(1, 0)[lo] != 0 || px(1, 0)[1] != 255 || px(1, 0)[hi] != 0 || px(1, 0)[3] != 0) return 163;
+    if (px(0, 1)[lo] != 0 || px(0, 1)[1] != 0 || px(0, 1)[hi] != 255 || px(0, 1)[3] != 255) return 164;
+    if (px(8, 0)[lo] != 8 || px(8, 0)[1] != 132 || px(8, 0)[hi] != 0) return 165;
+    if (px(255, 255)[0] != 255 || px(255, 255)[1] != 255 || px(255, 255)[2] != 255 || px(255, 255)[3] != 255) return 166;
+    if (px(2, 0)[0] != 0 || px(2, 0)[3] != 0) return 167;                               // an untouched texel
+    if (Decode1555Level(src.data(), 130943, 256, 256, 256, true, 1, &out) || !out.empty()) return 168;   // one byte short: nothing
+    if (Decode1555Level(nullptr, 131072, 256, 256, 256, true, 1, &out) || Decode1555Level(src.data(), src.size(), 0, 256, 256, true, 1, &out)) return 169;
+    // linear, as stored (endian 0: the low byte first): texel (x, y) at y * 512 + 2 * x for a pitch of 256
+    std::vector<uint8_t> lin(4 * 512, 0);
+    lin[512 * 1 + 2 * 3] = 31;              // (3, 1): the low field
+    lin[512 * 1 + 2 * 3 + 1] = 0x80;        // and alpha
+    if (!Decode1555Level(lin.data(), lin.size(), 4, 4, 256, false, 0, &out) || out.size() != 64) return 170;
+    if (out[(1 * 4 + 3) * 4 + lo] != 255 || out[(1 * 4 + 3) * 4 + 3] != 255 || out[0] != 0) return 171;
+    // The field order is the SDK's (frame-map section 19, "The pictures' format": its load shader moves bits 0 to
+    // 4 of the swapped word into the host format's red): the low field is channel 0.
+    if (k1555LowFieldChannel != 0) return 172;
+    // Only endian 1 exchanges the two bytes of a texel, as in that shader: 2 and 3 (32-bit swaps) read it as stored.
+    if (!Decode1555Level(lin.data(), lin.size(), 4, 4, 256, false, 2, &out) || out[(1 * 4 + 3) * 4 + lo] != 255 || out[(1 * 4 + 3) * 4 + 3] != 255) return 173;
+    if (!Decode1555Level(lin.data(), lin.size(), 4, 4, 256, false, 1, &out) || out[(1 * 4 + 3) * 4 + lo] != 0 || out[(1 * 4 + 3) * 4 + 3] != 0 ||
+        out[(1 * 4 + 3) * 4 + 1] != 230 || out[(1 * 4 + 3) * 4 + hi] != 58) return 174;   // the word 0x1F80: no alpha, low 0, middle 28, high 7
+    // Fail closed: a pitch below the width (no fetch constant the decoders take has one), an image beyond the
+    // 8,192 texels a fetch constant can name, a missing output; the last texel of a linear level one byte short.
+    out.assign(3, 9);
+    if (Decode1555Level(src.data(), src.size(), 256, 256, 128, true, 1, &out) || !out.empty()) return 175;
+    if (Decode1555Level(src.data(), src.size(), 8193, 1, 8224, true, 1, &out) || Decode1555Level(src.data(), src.size(), 256, 256, 256, true, 1, nullptr)) return 176;
+    if (!Decode1555Level(lin.data(), 3 * 512 + 8, 4, 4, 256, false, 0, &out) || Decode1555Level(lin.data(), 3 * 512 + 7, 4, 4, 256, false, 0, &out) || !out.empty()) return 177;
+  }
+  // --- DumpWrittenAtRow: an impostor's picture is written at the row of the draw that shows it, nowhere else ---
+  {
+    FcArgs a;
+    a.format = 3; a.w = 256; a.h = 256; a.pitch = 256; a.endian = 1; a.base = 0x12704000; a.mip = 0x12724000; a.mip_max = 3;
+    uint32_t p[6];
+    MakeFc(a, p);
+    if (DumpWrittenAtRow(p, false) || !DumpWrittenAtRow(p, true)) return 190;   // the copy passes that make its levels sample it first
+    a.format = 29;                                                              // every other texture: at any row, as before
+    MakeFc(a, p);
+    if (!DumpWrittenAtRow(p, false) || !DumpWrittenAtRow(p, true)) return 191;
+    a.format = 3; a.dim = 0;                                                    // a 1D table of format 3 is no picture
+    MakeFc(a, p);
+    if (!DumpWrittenAtRow(p, false)) return 192;
+    a = FcArgs{}; a.format = 3; a.type = 0;                                     // no texture: DumpTexture's own rules refuse it
+    MakeFc(a, p);
+    if (!DumpWrittenAtRow(p, false)) return 193;
+  }
   // --- k_DXN (format 49): two BC4 blocks per 4 x 4 block, the terrain's normal map (tf17) ---
   // The same blocks and numbers as test_decode_dxn of tests/test_terrain_replay.py.
   {
@@ -679,6 +738,36 @@ int main() {
       if (!o || std::fwrite(xy.data(), sizeof(float), xy.size(), o) != xy.size()) return 114;
       std::fclose(o);
       std::printf("tf17 dump decoded: %ux%u, wrote %s\n", w, h, outp.c_str());
+    }
+  }
+  // FABLE2_1555_BIN + ".cpp.rgba" for tests/test_impostor_pictures.py's real-dump test (as FABLE2_TF17_BIN above):
+  // a dumped base level of an impostor's picture (format 3) and its six fetch dwords in FABLE2_1555_FC, decoded by
+  // the constant's own width, height, pitch, tiling and endian.
+  {
+    const char* bin = std::getenv("FABLE2_1555_BIN");
+    const char* fcs = std::getenv("FABLE2_1555_FC");
+    if (!bin || !fcs) {
+      std::printf("SKIPPED: real format-3 dump test (set FABLE2_1555_BIN and FABLE2_1555_FC after a discovery capture)\n");
+    } else {
+      uint32_t rfc[6] = {};
+      if (std::sscanf(fcs, "%x,%x,%x,%x,%x,%x", &rfc[0], &rfc[1], &rfc[2], &rfc[3], &rfc[4], &rfc[5]) != 6) return 180;
+      TextureFetch pt;
+      TexFormatInfo pfi;
+      if ((rfc[1] & 0x3F) != 3 || !DumpFetch(rfc, &pt, &pfi)) return 181;
+      std::FILE* f = std::fopen(bin, "rb");
+      if (!f) return 182;
+      std::vector<uint8_t> bytes;
+      uint8_t chunk[65536];
+      for (size_t n; (n = std::fread(chunk, 1, sizeof(chunk), f)) > 0;) bytes.insert(bytes.end(), chunk, chunk + n);
+      std::fclose(f);
+      std::vector<uint8_t> rgba;
+      if (!Decode1555Level(bytes.data(), bytes.size(), pt.width, pt.height, pt.pitch_texels, pt.tiled, pt.endian, &rgba) ||
+          rgba.size() != size_t(pt.width) * pt.height * 4) return 183;
+      const std::string outp = std::string(bin) + ".cpp.rgba";
+      std::FILE* o = std::fopen(outp.c_str(), "wb");
+      if (!o || std::fwrite(rgba.data(), 1, rgba.size(), o) != rgba.size()) return 184;
+      std::fclose(o);
+      std::printf("format-3 dump decoded: %ux%u, wrote %s\n", pt.width, pt.height, outp.c_str());
     }
   }
   return 0;

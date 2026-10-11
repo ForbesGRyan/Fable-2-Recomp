@@ -243,6 +243,18 @@ inline bool DumpKeyedByContent(const uint32_t fc[6]) {
   return format == 29 || format == 22 || format == 23 || format == 3 || PostBufferBase(fc[1] & 0xFFFFF000u);
 }
 
+// Whether a discovery dump writes a texture at the row being written. An impostor's picture (a 2D
+// texture of format 3) is written only at the row of the draw that shows it, an in-scene "verts"
+// row (`scene_verts_row`): the game's copy passes that make the picture's lower levels sample its
+// base first (capture native_discovery_20261011_074119: three "indx" rows a picture, slot 13,
+// before the impostor's own row), and a base written at their row would stand beside levels that
+// are not yet this picture's. At the impostor's row the base and its levels are read at one
+// moment, the one at which a product would read them. Every other texture: at any row.
+inline bool DumpWrittenAtRow(const uint32_t fc[6], bool scene_verts_row) {
+  const bool picture = (fc[0] & 3) == 2 && ((fc[5] >> 9) & 3) == 1 && (fc[1] & 0x3F) == 3;
+  return scene_verts_row || !picture;
+}
+
 // A 2D fetch constant of any format DumpFormatInfo has, as DecodeTextureFetch reads one (the same
 // fields from the same bits); `out->format` is TexFormatFromXenos's (kUnsupported for a format the
 // renderer does not decode) and `*fi` the format's block layout. False, with `out` and `fi`
@@ -355,6 +367,49 @@ inline bool DecodeDxt3aLevel(const uint8_t* src, size_t src_size, uint32_t width
     }
   }
   *out_r8 = std::move(out);
+  return true;
+}
+
+// k_1_5_5_5 (Xenos format 3: the pictures of the far woods' impostors, frame-map section 19, "The pictures'
+// format") -> RGBA8, width * height * 4 bytes row-major. NOT entered in TexFormatFromXenos (spec ruling 14): no
+// record's material and no texture of the cache is made from it; its one caller is the impostor step. A texel is
+// 16 bits at TiledOffset2D(x, y, pitch_texels, 1), or linear at y * ((pitch_texels + 31) & ~31) * 2 + x * 2 (the
+// SDK's base level rule); after the GPU's endian swap (endian 1 exchanges the two bytes; any other value reads
+// them as stored, as the SDK's load shader does): alpha in bit 15, three 5-bit fields below it, each field
+// v -> (v * 255 + 15) / 31 (255 * v / 31 rounded to nearest), alpha 0 or 255.
+// k1555LowFieldChannel: the output channel of bits 0 to 4 (0 red, 2 blue; the middle field is green). It is 0 by
+// the SDK's own reading [code]: its load shader for this format (texture_load_r5g5b5a1_b5g5r5a1_cs, disassembled:
+// out/native-evidence/distant-trees/t7_load_shader_disasm.txt) moves bits 0 to 4 of the swapped word to bits 10
+// to 14 of the host's B5G5R5A1 word, which are that format's red, and bits 10 to 14 to its blue; and its resolve
+// (resolve_full_16bpp_cs, case 3) writes red + 32 * green + 1024 * blue + 32768 * alpha. The channels are the
+// texture's, before the fetch constant's swizzle (TextureFetch::swizzle), which the sampler applies as for any
+// texture: the impostors' fetch names (2, 1, 0, 3) in the captures so far, so the shader's red is channel 2.
+// False, with out_rgba left empty, for a null source or output, an empty image, one above the 8,192 texels a
+// fetch constant can name, a pitch below the width, or a texel outside src_size (nothing is read past it). One
+// level: a caller gives a lower level's own bytes, size and pitch.
+inline constexpr uint32_t k1555LowFieldChannel = 0;
+inline bool Decode1555Level(const uint8_t* src, size_t src_size, uint32_t width, uint32_t height,
+                            uint32_t pitch_texels, bool tiled, uint32_t endian, std::vector<uint8_t>* out_rgba) {
+  if (!out_rgba) return false;
+  out_rgba->clear();
+  if (!src || width == 0 || height == 0 || width > 8192 || height > 8192 || pitch_texels < width) return false;
+  const uint64_t row_pitch_bytes = uint64_t((pitch_texels + 31) & ~31u) * 2;
+  std::vector<uint8_t> out(size_t(width) * height * 4);
+  for (uint32_t y = 0; y < height; ++y) {
+    for (uint32_t x = 0; x < width; ++x) {
+      const uint64_t o = tiled ? uint64_t(uint32_t(capture::TiledOffset2D(int32_t(x), int32_t(y), pitch_texels, 1)))
+                               : uint64_t(y) * row_pitch_bytes + uint64_t(x) * 2;
+      if (o + 2 > src_size) return false;
+      const uint32_t word = endian == 1 ? uint32_t(src[o + 1]) | (uint32_t(src[o]) << 8)
+                                        : uint32_t(src[o]) | (uint32_t(src[o + 1]) << 8);
+      uint8_t* p = &out[(size_t(y) * width + x) * 4];
+      p[k1555LowFieldChannel] = uint8_t(((word & 31) * 255 + 15) / 31);
+      p[1] = uint8_t((((word >> 5) & 31) * 255 + 15) / 31);
+      p[2 - k1555LowFieldChannel] = uint8_t((((word >> 10) & 31) * 255 + 15) / 31);
+      p[3] = (word & 0x8000) ? 255 : 0;
+    }
+  }
+  *out_rgba = std::move(out);
   return true;
 }
 

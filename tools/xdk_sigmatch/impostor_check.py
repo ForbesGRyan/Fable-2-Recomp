@@ -9,9 +9,22 @@ inputs; the captured rows are plan Task 6's).
                                             which bit bool b129 is
   trace --instr N [--seed S] [--trial T]    the interpreter's registers after instruction N of 129F for a made
                                             draw (the transcription's oracle, register by register)
-  words <capture>                           the quad words of every in-scene 129F "verts" row with its storage
+  words <capture> [--quiet]                 the quad words of every in-scene 129F "verts" row with its storage; the
+                                            census of every endian and order (plan Task 3, open question 2); which
+                                            of the row's two fetch constants names the storage
   places <capture>                          the raised place (o0) of every such quad
-Each exits 1 on any failure (words and places also when the capture has no such row with its storage).
+  rows <capture>...                         plan Task 6, criterion 1's second half: every quad and corner of every
+                                            such row through the microcode and through impostor_position (the row's
+                                            own bank, literals and storage), the fog pair, the pixel shader once a
+                                            quad, and each position mutation (each must fail on the capture)
+  identities <capture>...                   what the rows' registers and tables equal in their frame (reported)
+  bounds <capture>...                       the smallest and largest of every register component and of the size
+Each exits 1 on any failure (words, places and rows also when the capture has no such row with its storage).
+
+What `rows` shows and what it does not. Both sides take the SAME captured registers and bytes: it shows that the
+formula is the microcode on the game's own values (and how far the single-precision reference lies from the double
+one there: ledger ruling 26), not that the bytes were read at the right moment or in the right order; that is the
+rasterising replay's (foliage_replay.py impostors: the quads against the game's own depth).
 
 What one position trial is. A draw is the vertex shader's microcode, a constant bank, the storage's bytes (one
 half4 a quad) and a vertex index. The microcode runs for that index and gives oPos, o0 and o1. Beside it, from
@@ -77,11 +90,12 @@ picture's; and of the fog (FOG_MUTATIONS, through check_fog) "one_minus" the (1 
 factor put in (the trees' vertex_fog).
 """
 import argparse
+import itertools
 import math
 import random
 import struct
 import sys
-from collections import namedtuple
+from collections import Counter, namedtuple
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -166,7 +180,7 @@ def quad_words(verts_row, data_row, source=None, endian=None):
     reversed, 3 the halves of each dword exchanged); the element's four source components are then the dword's
     low half, its high half, the next dword's low and high half, read little-endian. `source`: for each of r6's
     four components the source component it takes (the fetch's swizzle). Defaults: light_formulas.IMPOSTOR_SHADER's
-    (PROVISIONAL until plan Task 3). ValueError: the storage was not read, is no hex, is shorter than the quads
+    (fixed by plan Task 3: endian 2, order (1, 0, 3, 2)). ValueError: the storage was not read, is no hex, is shorter than the quads
     need, the count is no whole number of quads, or the order or endian is none."""
     source = tuple(lf.IMPOSTOR_SHADER["word_source"] if source is None else source)
     endian = lf.IMPOSTOR_SHADER["word_endian"] if endian is None else endian
@@ -722,6 +736,77 @@ def row_registers(row):
     return {reg: [math.nan if x is None else f32(x) for x in bank[4 * reg:4 * reg + 4]] for reg in lf.IMPOSTOR_SHADER["reg"]}
 
 
+def gpu_address(cpu_virtual):
+    """The GPU's physical address of a guest virtual one (src/native/capture/xdk_layout.h, GpuAddress: the
+    0xE0000000 view of 4 KB pages lies 0x1000 above its address's low 29 bits)."""
+    return (cpu_virtual & 0x1FFFFFFF) + (((cpu_virtual >> 20) + 0x200) & 0x1000)
+
+
+def storage_fetch(row):
+    """Which of a "verts" row's two vertex fetch constants names the row's storage: {"shadow": bool or None,
+    "packet": bool or None, "endian": the naming pair's endian or None}. A constant (six dwords: fetch slot 31's
+    three pairs) names the storage when its LAST pair (vertex fetch constant 95, the one BeginVertices writes) has
+    the address gpu_address(storage), type 3 and the size storage_dwords; None for a constant the row does not
+    have."""
+    out = {"shadow": None, "packet": None, "endian": None}
+    try:
+        storage, dwords = int(row["storage"], 16), int(row["storage_dwords"])
+    except (KeyError, TypeError, ValueError):
+        return out
+    for name in ("shadow", "packet"):
+        six = (row.get("vfetch") or {}).get(name)
+        if not six or len(six) != 6:
+            continue
+        a, b = int(six[4], 16), int(six[5], 16)
+        out[name] = (a & 0xFFFFFFFC) == gpu_address(storage) and (a & 3) == 3 and (b >> 2) & 0xFFFFFF == dwords
+        if out[name]:
+            out["endian"] = b & 3
+    return out
+
+
+def pixel_register(row, reg):
+    """Pixel register `reg` of a row as four floats from its "pfull" (the registers' bits, 32 hex digits each), or
+    None when the row does not have it."""
+    text = (row.get("pfull") or "")[32 * reg:32 * reg + 32]
+    if len(text) < 32 or "-" in text:
+        return None
+    try:
+        return list(struct.unpack(">4f", bytes.fromhex(text)))
+    except ValueError:
+        return None
+
+
+def row_eye(row):
+    """The frame's eye at a row: pixel c19, or vertex c47 for a row without its pixel registers."""
+    c19 = pixel_register(row, 19)
+    return c19[:3] if c19 is not None else row_registers(row)[47][:3]
+
+
+WORD_SIZE_MAX, WORD_REACH = 1000.0, 10000.0     # plan Task 3: a size in (0, 1000], a place within 10,000 units of the eye
+ORDERS = tuple(itertools.permutations(range(4)))
+
+
+def word_plausible(word, eye):
+    """Plan Task 3's rule for one decoded quad: four finite values, a size in (0, WORD_SIZE_MAX], a place within
+    WORD_REACH of the eye."""
+    return (all(math.isfinite(x) for x in word) and 0.0 < word[3] <= WORD_SIZE_MAX
+            and math.sqrt(sum((word[k] - eye[k]) ** 2 for k in range(3))) <= WORD_REACH)
+
+
+def word_census(pairs):
+    """(quads, {(endian, order): the quads that decode plausibly}) over the rows of `pairs` ([(verts row, its
+    vertsdata row)]) for every endian 0 to 3 and every order of the four halves. ValueError as quad_words."""
+    held, quads = {(e, o): 0 for e in _SWAPS for o in ORDERS}, 0
+    for row, data in pairs:
+        eye = row_eye(row)
+        quads += int(row["count"]) // 4
+        for e in _SWAPS:
+            plain = quad_words(row, data, source=(0, 1, 2, 3), endian=e)
+            for o in ORDERS:
+                held[(e, o)] += sum(1 for w in plain if word_plausible(tuple(w[s] for s in o), eye))
+    return quads, held
+
+
 def _capture_quads(capture, say, each):
     """Calls each(row, words) for every impostor row of a capture that has its storage; returns the exit code."""
     path = cr.find_capture(capture)
@@ -744,13 +829,43 @@ def _capture_quads(capture, say, each):
 
 
 def cmd_words(args, say=print):
+    """The quads' words by the table's order and endian, then plan Task 3's census (open question 2): how many
+    quads decode plausibly under each endian and order, and where the fetch constant that names the storage is.
+    Exit 1 when a row's storage is not read, a word of the table's decoding is no number or not plausible, or a
+    row's naming constant has another endian than the table's."""
     def each(where, row, words):
         say("%s: %d quads" % (where, len(words)))
+        eye = row_eye(row)
         for q, w in enumerate(words):
-            say("  %4d  %s" % (q, "  ".join("% .9g" % x for x in w)))
-            if not all(math.isfinite(x) for x in w):
-                raise ValueError("quad %d holds a value that is no number" % q)
-    return _capture_quads(args.capture, say, each)
+            if not getattr(args, "quiet", False):
+                say("  %4d  %s" % (q, "  ".join("% .9g" % x for x in w)))
+            if not word_plausible(w, eye):
+                raise ValueError("quad %d does not decode to a finite place within %g of the eye with a size in (0, %g]: %s" % (
+                    q, WORD_REACH, WORD_SIZE_MAX, w))
+    code = _capture_quads(args.capture, say, each)
+    pairs = [(r, d) for r, d in impostor_rows(cr.find_capture(args.capture)) if d is not None and d.get("read")]
+    if not pairs:
+        return 1
+    quads, held = word_census(pairs)
+    whole = sorted(k for k, n in held.items() if n == quads)
+    table = (lf.IMPOSTOR_SHADER["word_endian"], tuple(lf.IMPOSTOR_SHADER["word_source"]))
+    say("the census: %d quads; of the %d (endian, order) pairs %d decode EVERY quad plausibly (finite, a size in (0, %g], "
+        "a place within %g of the eye)%s" % (quads, len(held), len(whole), WORD_SIZE_MAX, WORD_REACH,
+                                           "" if len(whole) == 1 else ": the rule does not single one out"))
+    for e in sorted(_SWAPS):
+        mine = [o for (ee, o) in whole if ee == e]
+        say("  endian %d: %d orders hold every quad; the most any order holds: %d of %d" % (
+            e, len(mine), max(held[(e, o)] for o in ORDERS), quads))
+    say("  the table's (endian %d, order %s): %d of %d" % (table[0], table[1], held[table], quads))
+    named = Counter()
+    for row, _ in pairs:
+        s = storage_fetch(row)
+        named["shadow %s, packet %s, endian %s" % (s["shadow"], s["packet"], s["endian"])] += 1
+        if s["endian"] is not None and s["endian"] != table[0]:
+            code = 1
+    for text, n in sorted(named.items()):
+        say("  the fetch constant that names the storage (address gpu_address(storage), type 3, size storage_dwords): %s: %d rows" % (text, n))
+    return 1 if code or held[table] != quads else 0
 
 
 def cmd_places(args, say=print):
@@ -762,6 +877,342 @@ def cmd_places(args, say=print):
             distance = math.sqrt(sum((c[47][k] - place[k]) ** 2 for k in range(3)))
             say("  %4d  %s   size %.9g   from the eye %.6g" % (q, "  ".join("% .9g" % x for x in place), w[3], distance))
     return _capture_quads(args.capture, say, each)
+
+
+# --- the formulas against captured rows (plan Task 6) ---------------------------------------------------------------
+
+SINGLE_TOLERANCE = 1e-4     # ledger ruling 26: criterion 1's bound for a single-precision mirror, against impostor_position(single=True)
+ROW_MUTATIONS = POSITION_MUTATIONS
+
+# rows; quads; corners compared; corners that disagree; rows whose storage was not read; the largest relative error of
+# the position (double formula against the microcode); the largest distance of the single-precision reference from
+# the double one, of max(1, |oPos|); the first failure's text; corners above / below by instr 31; corners with both
+# powers on numbers; the fog: corners compared, that disagree, with the tables fetched, the largest error; the
+# pixel: quads compared, that disagree, the largest error, by the dissolve (absent, dissolving, whole); the
+# registers the two machines read (sets).
+RowsResult = namedtuple("RowsResult", "rows quads corners failed unread worst single first_failure above below powered "
+                                      "fog fog_failed fogged fog_worst pixels pixel_failed pixel_worst absent dissolving whole "
+                                      "vs_used ps_used")
+
+
+def row_literals(row, kind="vs"):
+    """{register: [4]} of a row's own shader literals ("vs_lit" / "ps_lit": blocks of 16 floats from a register;
+    the pixel shader's are numbered from 256)."""
+    out = {}
+    for block in row.get(kind + "_lit") or []:
+        first = int(block["reg"]) - (256 if kind == "ps" else 0)
+        values = block["v"]
+        for i in range(len(values) // 4):
+            out[first + i] = [f32(x) for x in values[4 * i:4 * i + 4]]
+    return out
+
+
+def row_bank(row):
+    """{register: [4]} of a row's whole vertex bank with the shader's own literals laid over it (the bank's literal
+    registers are another draw's)."""
+    bank = row.get("bank") or []
+    if len(bank) < 4 * 256:
+        raise ValueError("the row has no whole vertex bank (%d floats)" % len(bank))
+    c = {reg: [math.nan if x is None else f32(x) for x in bank[4 * reg:4 * reg + 4]] for reg in range(256)}
+    c.update(row_literals(row, "vs"))
+    return c
+
+
+def row_pixel_bank(row):
+    """{register: [4]} of a row's pixel registers ("pfull") with the pixel shader's own literals laid over them; a
+    register the row does not have is left out."""
+    c = {}
+    for reg in range(256):
+        v = pixel_register(row, reg)
+        if v is not None:
+            c[reg] = v
+    c.update(row_literals(row, "ps"))
+    return c
+
+
+def frame_tables(path):
+    """{frame: (tf16, tf17)} from a capture's frame rows: the fog block's two tables as the frame row prints them
+    ("transmit": tf5's texels, "scatter": tf4's; three floats a texel), tf16 = tf5 and tf17(a, t) = tf4(a) (the
+    identity `identities` holds per row). A frame without them has no entry."""
+    out = {}
+    for r in cr.rows(path, kinds=("frame",)):
+        fog = r.get("fog") or {}
+        t, s = fog.get("transmit") or [], fog.get("scatter") or []
+        if len(t) >= 3 and len(s) >= 3 and len(t) % 3 == 0 and len(s) % 3 == 0:
+            tf5 = lf.table_1d([t[i:i + 3] for i in range(0, len(t), 3)])
+            tf4 = lf.table_1d([s[i:i + 3] for i in range(0, len(s), 3)])
+            out[r.get("frame")] = (tf5, lambda a, _t, tf4=tf4: tf4(a))
+    return out
+
+
+def _mutated(mutation, k, word, c):
+    """(corner, word, registers) of one of ROW_MUTATIONS applied on the formula's side."""
+    c = {reg: list(v) for reg, v in c.items()}
+    if mutation == "rows":
+        c[115] = list(c[116])
+    elif mutation == "components":
+        word = (word[1], word[0], word[2], word[3])
+    elif mutation == "sign":
+        word = (word[0], word[1], word[2], -word[3])
+    elif mutation == "corners":
+        k = {0: 1, 1: 0, 2: 3, 3: 2}[k]
+    elif mutation == "exponent":
+        c[114][1] *= 1.01
+    elif mutation == "raise":
+        c[8][2] = 0.0
+    elif mutation == "matrix":
+        c[72], c[73] = c[73], c[72]
+    return k, word, c
+
+
+def _nine(out):
+    return list(out["pos"]) + list(out["place"]) + list(out["uv"])
+
+
+def check_rows(path, mutations=(), dumps=DUMPS, pixel=True, cache=None):
+    """Every quad and corner of every in-scene 129F row of a capture: the row's own "bank" (its literals from the
+    row's "vs_lit") and "vertsdata" through the microcode and through impostor_position, criterion 1's bound
+    (TOLERANCE of max(1, |value|), every component of oPos, o0, o1); the microcode's o2 and o3 against impostor_fog
+    with the frame's tables; and once a quad the pixel shader (the row's pixel registers and "ps_lit", the bools of
+    the row's "pbool_load", the interpolators the vertex microcode gave for that corner, a made smooth picture)
+    against impostor_out(impostor_pixel). Returns (RowsResult, {mutation: corners that disagree}): each mutation is
+    applied on the formula's side and compared with the same microcode outputs."""
+    text, ptext = _text(dumps), _text(dumps, PS, "frag")
+    tables = frame_tables(path)
+    pairs = impostor_rows(path)
+    quads = corners = failed = unread = above = below = powered = 0
+    fog = fog_failed = fogged = pixels = pixel_failed = absent = dissolving = whole = 0
+    worst = single = fog_worst = pixel_worst = 0.0
+    first, vs_used, ps_used = None, set(), set()
+    caught = {m: 0 for m in mutations}
+    for row, data in pairs:
+        where = "frame %s line %s" % (row.get("frame"), row.get("line"))
+        try:
+            if data is None:
+                raise ValueError("no \"vertsdata\" row")
+            words = quad_words(row, data)
+            consts = row_bank(row)
+        except ValueError as e:
+            unread += 1
+            first = first or "%s: NOT READ: %s" % (where, e)
+            continue
+        c = {reg: consts[reg] for reg in lf.IMPOSTOR_SHADER["reg"]}
+        storage = bytes.fromhex(data["bytes"])
+        tf16, tf17 = tables.get(row.get("frame"), (None, None))
+        pconsts = row_pixel_bank(row) if pixel else None
+        bools = {128 + b for b in range(32) if int(row.get("pbool_load", "0x0"), 16) >> b & 1}
+        rng = random.Random("impostor-rows/%s" % row.get("line"))
+        picture = _smooth(rng, 4)
+        quads += len(words)
+        for q, word in enumerate(words):
+            for k in range(4):
+                case = Case(text, consts, storage, 4 * q + k, tf16, tf17)
+                out, m = run_microcode(case)
+                vs_used |= m.used_consts
+                got = [float(x) for x in out["oPos"]] + [float(x) for x in out["o0"][:3]] + [float(x) for x in out["o1"][:2]]
+                ref = lf.impostor_position(k, word, c)
+                ok, error = _compare(got, _nine(ref), TOLERANCE)
+                corners += 1
+                worst = max(worst, error)
+                one = lf.impostor_position(k, word, c, single=True)["pos"]
+                single = max([single] + [abs(a - b) / max(1.0, abs(a)) for a, b in zip(ref["pos"], one) if a == a and b == b])
+                up = m.r[2][3] == 1.0
+                above += up
+                below += not up
+                ev, eh = m.r[8][0], m.r[8][1]
+                powered += math.isfinite(ev) and math.isfinite(eh) and ev > 0.0 and eh > 0.0
+                if not ok:
+                    failed += 1
+                    first = first or "%s quad %d corner %d: relative error %.3e; microcode %s, formula %s" % (where, q, k, error, got, _nine(ref))
+                for name in mutations:
+                    mk, mword, mc = _mutated(name, k, word, c)
+                    caught[name] += not _compare(got, _nine(lf.impostor_position(mk, mword, mc)), TOLERANCE)[0]
+                if tf16 is not None:
+                    factor, add = lf.impostor_fog(ref["place"], c[47][:3], c[110], c[111], tf16, tf17)
+                    fok, ferror = _compare([float(x) for x in out["o2"][:3]] + [float(x) for x in out["o3"][:3]],
+                                           list(factor) + list(add), PIXEL_TOLERANCE)
+                    fog += 1
+                    fogged += bool(m.fetches)
+                    fog_worst = max(fog_worst, ferror)
+                    if not fok:
+                        fog_failed += 1
+                        first = first or "%s quad %d corner %d: the fog: relative error %.3e" % (where, q, k, ferror)
+                if pixel and k == q % 4:
+                    regs = {0: [float(x) for x in out["o0"]], 1: [float(x) for x in out["o1"]],
+                            2: [float(x) for x in out["o2"]], 3: [float(x) for x in out["o3"]]}
+                    pcase = PixelCase(ptext, pconsts, regs, picture, 0.0, True)
+                    pout, pm = run_pixel(pcase, bools=bools)
+                    ps_used |= pm.used_consts
+                    want = formula_pixel(pcase)
+                    pok, perror = _compare([float(x) for x in pout["oC0"]], want, PIXEL_TOLERANCE)
+                    pok = pok and [f[1] for f in pm.fetches] == [0]
+                    d = lf.impostor_distance(regs[0][:3], pconsts[19][:3])
+                    past = (d - pconsts[29][0]) * pconsts[29][1]
+                    absent += past <= 0.0
+                    dissolving += 0.0 < past < 1.0
+                    whole += past >= 1.0
+                    pixels += 1
+                    pixel_worst = max(pixel_worst, perror)
+                    if not pok:
+                        pixel_failed += 1
+                        first = first or "%s quad %d: the pixel: relative error %.3e; microcode %s, formula %s" % (where, q, perror, list(pout["oC0"]), want)
+    result = RowsResult(len(pairs), quads, corners, failed, unread, worst, single, first, above, below, powered,
+                        fog, fog_failed, fogged, fog_worst, pixels, pixel_failed, pixel_worst, absent, dissolving, whole,
+                        frozenset(vs_used), frozenset(ps_used))
+    return result, caught
+
+
+def rows_problems(r, caught):
+    """What makes a run of check_rows fail, as texts: a row not read, a corner, fog pair or pixel that disagrees,
+    nothing compared, a mutation that no corner catches."""
+    out = []
+    if r.unread:
+        out.append("%d rows without their storage or their bank" % r.unread)
+    if not r.corners:
+        out.append("no corner was compared")
+    if r.failed or r.fog_failed or r.pixel_failed:
+        out.append("%d corners, %d fog pairs, %d pixels disagree; the first: %s" % (r.failed, r.fog_failed, r.pixel_failed, r.first_failure))
+    elif r.first_failure:
+        out.append(r.first_failure)
+    out.extend("mutation %s is NOT CAUGHT" % name for name, n in caught.items() if n == 0)
+    return out
+
+
+def cmd_rows(args, say=print):
+    bad = 0
+    for capture in args.capture:
+        path = cr.find_capture(capture)
+        r, caught = check_rows(path, ROW_MUTATIONS, args.dumps)
+        problems = rows_problems(r, caught)
+        say("%s: %d rows of %s, %d quads, %d corners: %d agree (bound %g of max(1, |value|), oPos, o0, o1); worst relative "
+            "error %.3e; above %d, below %d; both powers on numbers %d%s" % (
+                path.name, r.rows, VS[:4], r.quads, r.corners, r.corners - r.failed, TOLERANCE, r.worst, r.above, r.below,
+                r.powered, ": OK" if not problems else ": FAILED"))
+        say("  the single-precision reference (ruling 26) against the double one on these registers: at most %.3e of "
+            "max(1, |oPos|) (bound for a mirror %g)" % (r.single, SINGLE_TOLERANCE))
+        say("  the fog (o2, o3 against impostor_fog at the raised place, the frame's tables): %d of %d corners agree, the "
+            "tables fetched at %d; worst %.3e" % (r.fog - r.fog_failed, r.fog, r.fogged, r.fog_worst))
+        say("  the pixel shader, once a quad (the row's pixel registers, bools of \"pbool_load\", the vertex microcode's own "
+            "interpolators, a made picture): %d of %d agree; absent %d, dissolving %d, whole %d; worst %.3e" % (
+                r.pixels - r.pixel_failed, r.pixels, r.absent, r.dissolving, r.whole, r.pixel_worst))
+        say("  registers read: vertex %s; pixel %s" % (" ".join("c%d" % x for x in sorted(r.vs_used)), " ".join("c%d" % x for x in sorted(r.ps_used))))
+        for name in ROW_MUTATIONS:
+            say("  mutation %-10s: %d of %d corners disagree%s" % (name, caught[name], r.corners, "" if caught[name] else ": NOT CAUGHT"))
+        for text in problems:
+            say("  " + text)
+        bad += bool(problems)
+    say("all agree" if not bad else "%d captures FAILED" % bad)
+    return 1 if bad else 0
+
+
+def _bits(values):
+    return [struct.unpack("<I", struct.pack("<f", x))[0] for x in values]
+
+
+def _scene_rows(path, frame):
+    return cr.rows(path, kinds=("draw", "tess", "indx", "verts", "frame"), frame=frame, drop=("ptiles", "pbank_diff", "positions", "device_dwords", "idx"))
+
+
+def identities(path):
+    """Plan Task 6, open questions 5 and 7, per in-scene 129F row: [(name, rows that hold, rows, the largest
+    difference or a note)]."""
+    pairs = impostor_rows(path)
+    frames = sorted({r.get("frame") for r, _ in pairs})
+    names = ("c72..c75 times the rows c115..c117 (and 0 0 0 1) equal the scene's view-projection c0..c3 of the frame's first world-space (tess) row, within 1e-5 of the row's largest entry",
+             "vertex c47.xyz bit-equal to pixel c19.xyz",
+             "vertex slot 16 is the frame's tf5 and slot 17 its tf4, by base address and content",
+             "c110.xyz and c111 bit-equal to the frame's fog c66 and c67 (pixel c66 / c67 of the frame row)",
+             "pixel c31.x times a pixel c20.w of the frame's rows at pitch 320 outside the scene (the pictures' own renders among them) is 1 within 1e-5",
+             "pixel c31.x times the row's own c20.w is 1 within 1e-5")
+    held, worst, note = [0] * len(names), [0.0] * len(names), [""] * len(names)
+    total = 0
+    for frame in frames:
+        rows = _scene_rows(path, frame)
+        frame_row = next((r for r in rows if r.get("kind") == "frame"), {})
+        fog = frame_row.get("fog") or {}
+        tess = next((r for r in rows if r.get("kind") == "tess" and r.get("in_scene") and all("c%d" % i in (r.get("consts") or {}) for i in range(4))), None)
+        render_scale = [pixel_register(r, 20) for r in rows if r.get("kind") in ("draw", "indx") and not r.get("in_scene")
+                        and int(r.get("surface_info", "0x0"), 16) & 0x3FFF == 320]
+        render_scale = sorted({round(v[3], 6) for v in render_scale if v is not None})
+        note[4] = "c20.w of the rows at pitch 320: %s" % (", ".join("%g" % v for v in render_scale[:6]) or "none read")
+        for row, _ in pairs:
+            if row.get("frame") != frame:
+                continue
+            total += 1
+            c = row_registers(row)
+            view = [c[115], c[116], c[117], [0.0, 0.0, 0.0, 1.0]]
+            if tess is not None:
+                product = [[sum(c[72 + i][k] * view[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+                scale = max(abs(x) for i in range(4) for x in tess["consts"]["c%d" % i])
+                diff = max(abs(product[i][j] - tess["consts"]["c%d" % i][j]) for i in range(4) for j in range(4)) / scale
+                worst[0] = max(worst[0], diff)
+                held[0] += diff <= 1e-5
+            c19, c20, c31 = pixel_register(row, 19), pixel_register(row, 20), pixel_register(row, 31)
+            if c19 is not None:
+                held[1] += _bits(c[47][:3]) == _bits(c19[:3])
+                worst[1] = max(worst[1], max(abs(a - b) for a, b in zip(c[47][:3], c19[:3])))
+            tf, tfc = row.get("tf") or {}, row.get("tfc") or {}
+            if "16" in tf and "17" in tf:
+                b16, b17 = int(tf["16"][1], 16) & 0xFFFFF000, int(tf["17"][1], 16) & 0xFFFFF000
+                held[2] += ((fog.get("tf5") or {}).get("base") == "0x%08X" % b16 and (fog.get("tf4") or {}).get("base") == "0x%08X" % b17
+                            and (fog.get("tf5") or {}).get("content") == tfc.get("16") and (fog.get("tf4") or {}).get("content") == tfc.get("17"))
+            if fog.get("c66") and fog.get("c67"):
+                held[3] += _bits(c[110][:3]) == _bits(fog["c66"][:3]) and _bits(c[111]) == _bits(fog["c67"])
+                worst[3] = max(worst[3], max(abs(a - f32(b)) for a, b in zip(c[110][:3] + c[111], list(fog["c66"][:3]) + list(fog["c67"]))))
+            if c31 is not None and c20 is not None:
+                if render_scale:
+                    diff = min(abs(c31[0] * v - 1.0) for v in render_scale)
+                    worst[4] = max(worst[4], diff)
+                    held[4] += diff <= 1e-5
+                diff = abs(c31[0] * c20[3] - 1.0)
+                worst[5] = max(worst[5], diff)
+                held[5] += diff <= 1e-5
+    return [(names[i], held[i], total, worst[i], note[i]) for i in range(len(names))]
+
+
+def cmd_identities(args, say=print):
+    """Reported, not a check: what does not hold is carried per draw as read."""
+    for capture in args.capture:
+        path = cr.find_capture(capture)
+        say("%s:" % path.name)
+        for name, held, total, worst, note in identities(path):
+            say("  holds in %d of %d rows (largest difference %.3e%s): %s" % (held, total, worst, "; " + note if note else "", name))
+    return 0
+
+
+def bounds(paths):
+    """Over the in-scene 129F rows of the captures given: {("vs" | "ps", register): [(lo, hi) per component]},
+    the size's (lo, hi), the rows and quads counted."""
+    out, size, rows, quads = {}, [math.inf, -math.inf], 0, 0
+    for path in paths:
+        for row, data in impostor_rows(path):
+            rows += 1
+            c = row_registers(row)
+            regs = [(("vs", reg), c[reg]) for reg in lf.IMPOSTOR_SHADER["reg"]]
+            regs += [(("ps", reg), pixel_register(row, reg)) for reg in lf.IMPOSTOR_SHADER["ps_reg"]]
+            for key, v in regs:
+                if v is None:
+                    continue
+                span = out.setdefault(key, [[math.inf, -math.inf] for _ in range(4)])
+                for i in range(4):
+                    span[i][0], span[i][1] = min(span[i][0], v[i]), max(span[i][1], v[i])
+            if data is not None and data.get("read"):
+                for w in quad_words(row, data):
+                    quads += 1
+                    size[0], size[1] = min(size[0], w[3]), max(size[1], w[3])
+    return out, tuple(size), rows, quads
+
+
+def cmd_bounds(args, say=print):
+    paths = [cr.find_capture(c) for c in args.capture]
+    spans, size, rows, quads = bounds(paths)
+    say("%d rows, %d quads of %s" % (rows, quads, ", ".join(p.name for p in paths)))
+    for (bank, reg), span in sorted(spans.items(), key=lambda kv: (kv[0][0] != "vs", kv[0][1])):
+        largest = max(max(abs(lo), abs(hi)) for lo, hi in span)
+        say("  %s c%-3d %s   largest magnitude %.9g, four times it %.9g" % (
+            "vertex" if bank == "vs" else "pixel ", reg, "  ".join("[%.9g, %.9g]" % (lo, hi) for lo, hi in span), largest, 4.0 * largest))
+    say("  the size: [%.9g, %.9g], four times the largest %.9g" % (size[0], size[1], 4.0 * size[1]))
+    return 0 if rows else 1
 
 
 # --- command line -------------------------------------------------------------------------------------------------
@@ -938,12 +1389,17 @@ def main(argv=None, say=print):
     p.set_defaults(run=cmd_trace)
     p = sub.add_parser("words")
     p.add_argument("capture")
+    p.add_argument("--quiet", action="store_true", help="the census without the words")
     p.set_defaults(run=cmd_words)
     p = sub.add_parser("places")
     p.add_argument("capture")
     p.set_defaults(run=cmd_places)
+    for name, run in (("rows", cmd_rows), ("identities", cmd_identities), ("bounds", cmd_bounds)):
+        p = sub.add_parser(name)
+        p.add_argument("capture", nargs="+")
+        p.set_defaults(run=run)
     args = ap.parse_args(argv)
-    if args.command in ("formulas", "pixel", "trace") and not args.dumps.is_dir():
+    if args.command in ("formulas", "pixel", "trace", "rows") and not args.dumps.is_dir():
         say("no shader dumps at %s (made by fable_2.exe --dump_shaders=<dir>)" % args.dumps)
         return 1
     return args.run(args, say)

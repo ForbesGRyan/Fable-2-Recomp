@@ -11,6 +11,8 @@ game's depth copy of the same frame.
   foliage_replay.py mask           <capture> <frame> --out <npy> [--cache DIR]
   foliage_replay.py motion         <mask npy> <shot a> <shot b> ... [--box name=x0,y0,x1,y1]
   foliage_replay.py occluder       <capture> <frame> [--origin 0.0] [--level 0] [--out <npy>] [--cache DIR]
+  foliage_replay.py impostors      <capture> <frame> [--scale S] [--no-raise] [--exchange] [--band LO HI]
+                                                     [--place X Y] [--cache DIR]
 
 <capture> is a path or the end of a capture's name in the logs folder (120714).
 
@@ -1533,6 +1535,346 @@ def cmd_occluder(args, say=print):
 
 # --- the selftest --------------------------------------------------------------------------------------------
 
+# --- the far woods' impostors (distant trees, plan Task 6; spec criterion 3) -----------------------------------
+#
+# A quad list of vertex shader 129F / pixel shader 4B1D: one quad a tree, its four corners from
+# light_formulas.impostor_position, two triangles (corners 0 1 2 and 0 2 3). What is kept of a quad's pixels is
+# the STATE's rule on the pixel shader's alpha: the picture's alpha (tf0: bilinear in a level, linear between two
+# levels, clamped; the fetch constant's filters) times the tree's dissolve (impostor_pixel: one value a tree),
+# the alpha test "greater" against the row's reference, alpha-to-mask with the offsets of the row's colour
+# control. The cover is taken at the stored depth's sampling place, the alpha at the pixel's centre (the pixel's
+# integral position: module text), as a pixel shader that runs once a pixel gives it.
+#
+# The level (`quad_level`): the picture's texels a pixel along each screen axis, from the quad's own corners (the
+# coordinate is taken as affine over the quad, which a camera-turned quad is but for its perspective); the level
+# is log2 of the larger, held to 0 .. the last stored level. That is the rule a host GPU applies per pixel, taken
+# once a quad: an approximation, and the base-level figure is printed beside it for that reason.
+
+IMPOSTOR_TRIS = ((0, 1, 2), (0, 2, 3))
+# clip [4 * quads, 6]: position, then the picture's coordinate; dissolve [quads]; levels: the picture's levels, each
+# [h, w, 4] in 0..1 with alpha last, the base first; ref: the alpha reference; word: the colour control (0x2202);
+# ident: the draw's mark in the raster (not 0).
+ImpostorDraw = namedtuple("ImpostorDraw", "clip dissolve levels ref word ident")
+# depth, ident [h, w] (as `raster`), quad (the quad of the draw that gave the pixel), one (kept with one sample of
+# two), level ({ident: [the level of each quad]}); the same four with every alpha read at the base level.
+ImpostorPicture = namedtuple("ImpostorPicture", "depth ident quad one level base_depth base_ident base_quad base_one")
+
+
+def impostor_cover(alpha, parity, ref, word):
+    """(first, second): whether a pixel's first and second sample is kept, for the alpha `alpha` [n], the pixels'
+    parity ((x & 1) * 2 + (y & 1)), the alpha reference and a colour control word of a two-sample target: bit 3
+    the test (function 4, "greater": anything else raises Unreadable), bit 4 alpha-to-mask with the offsets of
+    bits 24 to 31 (alpha >= 0.5 - o / 8 and alpha >= 1 - o / 8: alpha_cover's thresholds)."""
+    alpha = np.asarray(alpha, dtype=np.float64)
+    keep = np.ones(len(alpha), dtype=bool)
+    if word & 8:
+        if word & 7 != 4:
+            raise Unreadable("alpha function %d, not 4 (greater)" % (word & 7))
+        keep = alpha > ref
+    if not word & 0x10:
+        return keep, keep.copy()
+    o = ((word >> 24) >> (2 * np.asarray(parity, dtype=np.int64))) & 3
+    return keep & (alpha >= 0.5 - o / 8.0), keep & (alpha >= 1.0 - o / 8.0)
+
+
+def quad_level(xy, uv, texels, top=None):
+    """(level, slope) of a quad: xy [4, 2] its corners in window pixels, uv [4, 2] the picture's coordinate at
+    them, `texels` the base level's edge. slope [2, 2] is d(u, v) / d(x, y) of the affine fit over the four
+    corners; the level is log2 of the larger of the two screen axes' texel steps, at least 0 and at most `top`.
+    A quad without area, or with a corner that is no number, has level 0 and no slope."""
+    xy, uv = np.asarray(xy, dtype=np.float64), np.asarray(uv, dtype=np.float64)
+    zero = np.zeros((2, 2))
+    if not (np.isfinite(xy).all() and np.isfinite(uv).all()):
+        return 0.0, zero
+    m = np.concatenate([xy, np.ones((len(xy), 1))], axis=1)
+    solution, _, rank, _ = np.linalg.lstsq(m, uv, rcond=None)
+    if rank < 3:
+        return 0.0, zero
+    slope = solution[:2].T                                  # [[du/dx, du/dy], [dv/dx, dv/dy]]
+    step = max(float(np.hypot(slope[0, 0], slope[1, 0])), float(np.hypot(slope[0, 1], slope[1, 1]))) * texels
+    level = math.log2(step) if step > 1.0 else 0.0
+    return (min(level, float(top)) if top is not None else level), slope
+
+
+def _bilinear(image, uv):
+    """An image [h, w, c] at coordinates uv [n, 2], bilinear, clamped to the edge; a coordinate that is no number
+    reads 0."""
+    h, w = image.shape[:2]
+    ok = np.isfinite(uv).all(1) & (np.abs(uv) < 1e6).all(1)
+    x = np.where(ok, uv[:, 0], 0.0) * w - 0.5
+    y = np.where(ok, uv[:, 1], 0.0) * h - 0.5
+    x0, y0 = np.floor(x), np.floor(y)
+    fx, fy = (x - x0)[:, None], (y - y0)[:, None]
+    x0, y0 = x0.astype(np.int64), y0.astype(np.int64)
+    xa, xb = np.clip(x0, 0, w - 1), np.clip(x0 + 1, 0, w - 1)
+    ya, yb = np.clip(y0, 0, h - 1), np.clip(y0 + 1, 0, h - 1)
+    top = image[ya, xa] * (1.0 - fx) + image[ya, xb] * fx
+    bottom = image[yb, xa] * (1.0 - fx) + image[yb, xb] * fx
+    return np.where(ok[:, None], top * (1.0 - fy) + bottom * fy, 0.0)
+
+
+def picture_sample(levels, uv, level):
+    """The picture at uv [n, 2] and a level (a number, held to 0 .. the last of `levels`): bilinear in the two
+    levels about it and linear between them. [n, c]."""
+    uv = np.asarray(uv, dtype=np.float64).reshape(-1, 2)
+    level = min(max(float(level), 0.0), float(len(levels) - 1))
+    low = int(math.floor(level))
+    part = level - low
+    out = _bilinear(np.asarray(levels[low], dtype=np.float64), uv)
+    if part > 0.0 and low + 1 < len(levels):
+        out = out * (1.0 - part) + _bilinear(np.asarray(levels[low + 1], dtype=np.float64), uv) * part
+    return out
+
+
+def impostor_fragments(draw, size=SIZE, origin=0.0):
+    """Yields (quad, level, ys, xs, depth, uv at the pixel's centre) for every quad of an ImpostorDraw that covers
+    a sampling place."""
+    clip = np.asarray(draw.clip, dtype=np.float64)
+    quads = len(clip) // 4
+    ox, oy = _origin(origin)
+    x, y, _, _ = window(clip[:, :4], size)
+    edge = np.asarray(draw.levels[0]).shape[1]
+    for q in range(quads):
+        corners = clip[4 * q:4 * q + 4]
+        if not np.isfinite(corners).all():
+            continue
+        level, slope = quad_level(np.stack([x[4 * q:4 * q + 4], y[4 * q:4 * q + 4]], 1), corners[:, 4:6], edge, top=len(draw.levels) - 1)
+        for _, ys, xs, depth, uv in fragments(corners, IMPOSTOR_TRIS, size, origin):
+            yield q, level, ys, xs, depth, uv - (slope @ np.array([ox, oy]))[None, :]
+
+
+def impostor_raster(draws, size=SIZE, origin=0.0):
+    """ImpostorPicture of a frame's ImpostorDraws, in order: the nearest KEPT fragment a pixel (an equal depth goes
+    to the later one), once with each quad's alpha at the level its fetch takes and once at the base level."""
+    shape = (size[1], size[0])
+    depth = [np.full(shape, np.inf), np.full(shape, np.inf)]
+    ident = [np.zeros(shape, dtype=np.int32), np.zeros(shape, dtype=np.int32)]
+    quad = [np.full(shape, -1, dtype=np.int32), np.full(shape, -1, dtype=np.int32)]
+    one = [np.zeros(shape, dtype=bool), np.zeros(shape, dtype=bool)]
+    levels = {}
+    for draw in draws:
+        if int(draw.ident) == 0:
+            raise ValueError("ident 0 means nothing drawn")
+        dissolve = np.asarray(draw.dissolve, dtype=np.float64)
+        mine = levels.setdefault(int(draw.ident), [0.0] * (len(np.asarray(draw.clip)) // 4))
+        for q, level, ys, xs, d, uv in impostor_fragments(draw, size, origin):
+            mine[q] = level
+            parity = (xs & 1) * 2 + (ys & 1)
+            for which, at in ((0, level), (1, 0.0)):
+                alpha = picture_sample(draw.levels, uv, at)[:, -1] * dissolve[q]
+                first, second = impostor_cover(alpha, parity, draw.ref, draw.word)
+                keep = first & (d <= depth[which][ys, xs])
+                ky, kx = ys[keep], xs[keep]
+                depth[which][ky, kx] = d[keep]
+                ident[which][ky, kx] = draw.ident
+                quad[which][ky, kx] = q
+                one[which][ky, kx] = ~second[keep]
+    return ImpostorPicture(depth[0], ident[0], quad[0], one[0], levels, depth[1], ident[1], quad[1], one[1])
+
+
+IMPOSTOR_CONTROLS = ("scale", "no_raise", "exchange")
+IMPOSTOR_DROP = 10.0        # criterion 3: each control's share must fall by at least this many points
+
+
+def impostor_draws(path, frame_number, capture_dir, scale=1.0, no_raise=False, exchange=False, band=None):
+    """([ImpostorDraw], [per draw: {"row", "words", "d", "place", "registers"}], problems) of a frame's in-scene
+    129F rows, each with its storage, its registers and its picture with the stored levels. `scale` multiplies
+    every quad's size; `no_raise` takes c8.z as 0; `exchange` exchanges the word's first two components (three
+    controls: the replay must fall under each); `band` (lo, hi) keeps the quads whose distance from the eye lies
+    in it. A row without its storage or its picture is a problem and gives no draw."""
+    import impostor_check as ic
+    import impostor_pictures as ip
+    import light_formulas as lf
+    rows = ip.read_rows(path)
+    pictures = dict(ip.frame_pictures(rows, frame_number))
+    draws, infos, problems = [], [], []
+    for n, (row, data) in enumerate((r, d) for r, d in ic.impostor_rows(path) if r.get("frame") == frame_number):
+        where = "line %s" % row.get("line")
+        try:
+            if data is None:
+                raise ValueError("no \"vertsdata\" row")
+            words = ic.quad_words(row, data)
+            c = ic.row_registers(row)
+            texture = pictures.get(row.get("n"))
+            if texture is None:
+                raise ValueError("no texture row holds the picture the draw sampled")
+            count = 1 + len((texture.get("mips") or {}).get("levels", []))
+            levels = [ip.picture(capture_dir, texture, k).astype(np.float64) / 255.0 for k in range(count)]
+        except ValueError as e:
+            problems.append("%s: %s" % (where, e))
+            continue
+        c12, c19, c29, c31 = (ic.pixel_register(row, reg) for reg in (12, 19, 29, 31))
+        if None in (c12, c19, c29, c31):
+            problems.append("%s: no pixel registers" % where)
+            continue
+        if no_raise:
+            c = dict(c)
+            c[8] = [c[8][0], c[8][1], 0.0, c[8][3]]
+        clip, dissolve, ds, places, kept_words = [], [], [], [], []
+        for word in words:
+            true_place = lf.impostor_position(0, word, ic.row_registers(row))["place"]
+            d = lf.impostor_distance(true_place, c19[:3])
+            if band is not None and not band[0] <= d <= band[1]:
+                continue
+            w = (word[1], word[0], word[2], word[3]) if exchange else word
+            w = (w[0], w[1], w[2], w[3] * scale)
+            for k in range(4):
+                out = lf.impostor_position(k, w, c)
+                clip.append(list(out["pos"]) + list(out["uv"]))
+            dissolve.append(lf.impostor_pixel([0.0, 0.0, 0.0, 1.0], d, c12, c29, c31[0])[1])
+            ds.append(d)
+            places.append(true_place)
+            kept_words.append(word)
+        rs = row.get("rs") or {}
+        ref = struct.unpack(">f", struct.pack(">I", int(rs.get("210E", "0x0"), 16)))[0]
+        draws.append(ImpostorDraw(np.array(clip, dtype=np.float64).reshape(-1, 6), np.array(dissolve), levels, ref,
+                                  int(rs.get("2202", "0x0"), 16), n + 1))
+        infos.append({"row": row, "words": kept_words, "d": ds, "place": places, "registers": c, "texture": texture})
+    return draws, infos, problems
+
+
+def impostor_colour(fr, pic, draws, infos, say):
+    """The game's own picture against the pixel formula, a channel at a time (the pictures' red and blue order on
+    real texels): over the judged pixels that hold the stored depth, were kept with both samples and lie inside
+    the picture (alpha at least 0.99 at the fetch's level), the game's scene colour against
+    impostor_out(impostor_pixel(the picture's texel)) with the texel's channels taken through the fetch constant's
+    swizzle and, beside it, as the texture holds them."""
+    import foliage_trace as ft
+    import impostor_check as ic
+    import impostor_pictures as ip
+    import light_formulas as lf
+    try:
+        game, _ = ft.game_scene(fr.path, fr.number)
+    except Unreadable as e:
+        say("  the game's scene colour: not read (%s)" % e)
+        return
+    tables = ic.frame_tables(fr.path).get(fr.number)
+    if tables is None:
+        say("  the game's scene colour: the frame row has no fog tables")
+        return
+    within = np.abs(fr.depth - stored_depth(pic.depth, fr.zscale, fr.zoffset)) <= FIXED_TOLERANCE
+    got, want = [], {"swizzled": [], "as stored": []}
+    for draw, info in zip(draws, infos):
+        row, c = info["row"], info["registers"]
+        c12, c19, c20, c29, c31 = (ic.pixel_register(row, reg) for reg in (12, 19, 20, 29, 31))
+        swz = ip.swizzle(row["tf"]["0"])
+        sel = (pic.ident == draw.ident) & within & ~pic.one
+        for q, level, ys, xs, _, uv in impostor_fragments(draw, SIZE, fr.place):
+            mine = sel[ys, xs] & (pic.quad[ys, xs] == q)
+            if not mine.any():
+                continue
+            texel = picture_sample(draw.levels, uv[mine], level)
+            inside = texel[:, 3] >= 0.99
+            if not inside.any():
+                continue
+            o2, o3 = lf.impostor_fog(info["place"][q], c[47][:3], c[110], c[111], tables[0], tables[1])
+            for name, order in (("swizzled", swz[:3]), ("as stored", (0, 1, 2))):
+                for t in texel[inside]:
+                    colour, _ = lf.impostor_pixel([t[order[0]], t[order[1]], t[order[2]], t[3]], info["d"][q], c12, c29, c31[0])
+                    want[name].append(lf.impostor_out(colour, o2, o3, c20[3]))
+            got.append(game[ys[mine][inside], xs[mine][inside]])
+    if not got:
+        say("  the game's scene colour: no pixel to compare")
+        return
+    got = np.concatenate(got)
+    say("  the game's scene colour against the pixel formula, %d pixels (judged within, both samples, the picture's alpha at "
+        "least 0.99); game mean (r, g, b) %s" % (len(got), "  ".join("%.4f" % v for v in got.mean(0))))
+    for name in ("swizzled", "as stored"):
+        w = np.array(want[name])
+        ratio = got.mean(0) / w.mean(0)
+        err = np.median(np.abs(got - w) / np.maximum(w, 1e-6), axis=0)
+        say("    the picture %-9s: formula mean %s; game / formula %s; median relative difference a pixel %s" % (
+            name, "  ".join("%.4f" % v for v in w.mean(0)), "  ".join("%.3f" % v for v in ratio), "  ".join("%.3f" % v for v in err)))
+
+
+def impostor_verdict(share, controls, judged, judged_min=JUDGED_MIN):
+    """(met, text) of criterion 3: `share` the judged share in percent, `controls` {name: share in percent; no
+    number when the control has no judged pixel}."""
+    if judged < judged_min:
+        return False, "not decidable (%d judged pixels, fewer than %d)" % (judged, judged_min)
+    # a control without a judged pixel (its quads left the picture) has fallen to nothing
+    weak = [name for name, s in controls.items() if share - (0.0 if s != s else s) < IMPOSTOR_DROP]
+    if weak:
+        return False, "the measure does not discriminate: the control%s %s fall%s by less than %g points" % (
+            "s" if len(weak) > 1 else "", ", ".join(weak), "" if len(weak) > 1 else "s", IMPOSTOR_DROP)
+    if share < 100.0 * SHARE_MIN:
+        return False, "not met (%.2f%% of the judged pixels within, below %.0f%%)" % (share, 100.0 * SHARE_MIN)
+    return True, "met (%.2f%% of %d judged pixels within; every control falls by at least %g points)" % (share, judged, IMPOSTOR_DROP)
+
+
+def cmd_impostors(args, say=print):
+    path = cr.find_capture(args.capture)
+    fr = load_frame(path, args.frame)
+    _head(fr, say)
+    if _undecidable(fr, say):
+        return 1
+    if args.place:
+        fr.place = (float(args.place[0]), float(args.place[1]))
+        say("  the sampling place of the stored depth: GIVEN (%g, %g), not fitted on this capture's unmoving draws" % fr.place)
+    else:
+        fr.place = sample_place(fr, replay_rows(fr, fr.rows_before_copy(), load_table(), cache=args.cache), say)
+    band = tuple(args.band) if args.band else None
+
+    def run(label, **control):
+        draws, infos, problems = impostor_draws(path, args.frame, path.parent, band=band, **control)
+        pic = impostor_raster(draws, SIZE, fr.place)
+        out = {}
+        for name, depth, ident, one in (("level", pic.depth, pic.ident, pic.one), ("base", pic.base_depth, pic.base_ident, pic.base_one)):
+            ids = [d.ident for d in draws]
+            a = agreement(fr.depth, depth, ident, ids, FIXED_TOLERANCE, _relation_name(fr))
+            kept = int((ident > 0).sum())
+            out[name] = (a, kept, int(one.sum()))
+        a, kept, ones = out["level"]
+        b, bkept, bones = out["base"]
+        say("  %-22s %4d quads in %2d draws: kept pixels %6d, hidden %6d, judged %6d, within %6.2f%% of the judged (%6.2f%% of "
+            "all); one sample of two %5.2f%% of the kept | alpha at the base level: judged %6d, within %6.2f%%, one sample %5.2f%%" % (
+                label, sum(len(i["words"]) for i in infos), len(draws), kept, a.nearer, a.judged,
+                100.0 * a.share_judged if a.judged else math.nan, 100.0 * a.share if a.pixels else math.nan,
+                100.0 * ones / kept if kept else math.nan, b.judged, 100.0 * b.share_judged if b.judged else math.nan,
+                100.0 * bones / bkept if bkept else math.nan))
+        return draws, infos, problems, pic, a
+
+    lines = [r["line"] for r, _ in __import__("impostor_check").impostor_rows(path) if r.get("frame") == args.frame]
+    say("the far woods' quads: %d rows of 129F in the frame, %d before the depth copy (line %s); the alpha test and the "
+        "alpha-to-mask are the rows' own state; judged against the stored depth within %.2e, one-sided on visible pixels" % (
+            len(lines), sum(1 for n in lines if n < fr.copy_line), fr.copy_line, FIXED_TOLERANCE))
+    control = {}
+    if args.scale != 1.0:
+        control["scale"] = args.scale
+    if args.no_raise:
+        control["no_raise"] = True
+    if args.exchange:
+        control["exchange"] = True
+    draws, infos, problems, pic, a = run("the quads%s" % ("" if not control else " (%s)" % ", ".join(sorted(control))), **control)
+    for text in problems:
+        say("  NOT REPLAYED: %s" % text)
+    late = sum(1 for n in lines if n >= fr.copy_line)
+    if late:
+        say("  NOT A RESULT: %d rows lie after the depth copy" % late)
+    if band is not None:
+        near = sum(1 for i in infos for d in i["d"] if d < 50.0)
+        mine = [(d.ident, q) for d, i in zip(draws, infos) for q, dist in enumerate(i["d"]) if dist < 50.0]
+        judged_near = sum(int(((pic.ident == ident) & (pic.quad == q)).sum()) for ident, q in mine)
+        say("  the band %g to %g units: %d quads below 50 units among them, kept pixels of those %d" % (band[0], band[1], near, judged_near))
+    if control or band is not None:
+        return 1 if problems or late else 0
+    for draw, info in zip(draws, infos):
+        mine = agreement(fr.depth, pic.depth, pic.ident, [draw.ident], FIXED_TOLERANCE, _relation_name(fr))
+        kept = int((pic.ident == draw.ident).sum())
+        say("    line %6d %4d quads, d %6.1f to %6.1f, levels %.2f to %.2f: kept %6d, hidden %6d, judged %6d, within %6.2f%%; one sample %5.2f%%" % (
+            info["row"]["line"], len(info["words"]), min(info["d"]), max(info["d"]), min(pic.level[draw.ident]),
+            max(pic.level[draw.ident]), kept, mine.nearer, mine.judged, 100.0 * mine.share_judged if mine.judged else math.nan,
+            100.0 * int((pic.one & (pic.ident == draw.ident)).sum()) / kept if kept else math.nan))
+    shares = {}
+    for name, kw in (("scale", {"scale": 1.1}), ("no_raise", {"no_raise": True}), ("exchange", {"exchange": True})):
+        shares[name] = run("control %s%s" % (name, " x 1.1" if name == "scale" else ""), **kw)[4]
+    impostor_colour(fr, pic, draws, infos, say)
+    share = 100.0 * a.share_judged if a.judged else math.nan
+    met, text = impostor_verdict(share, {n: (100.0 * s.share_judged if s.judged else math.nan) for n, s in shares.items()}, a.judged)
+    say("criterion 3: %s" % text)
+    return 0 if met and not problems and not late else 1
+
+
 def selftest(say=print):
     """The rasteriser's rules on triangles with known answers; returns the failures."""
     tri = np.array([[0, 1, 2]])
@@ -1568,7 +1910,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("selftest")
-    for name in ("fit", "depth-relation", "wind", "pixels", "mask", "occluder"):
+    for name in ("fit", "depth-relation", "wind", "pixels", "mask", "occluder", "impostors"):
         p = sub.add_parser(name)
         p.add_argument("capture")
         p.add_argument("frame", type=int)
@@ -1578,6 +1920,13 @@ def main(argv=None):
             p.add_argument("--spot", help="a spot of post-regions.json: counts by its regions too")
         if name == "mask":
             p.add_argument("--out", required=True)
+        if name == "impostors":
+            p.add_argument("--scale", type=float, default=1.0, help="a control: every quad's size times this")
+            p.add_argument("--no-raise", action="store_true", help="a control: the raise (c8.z) left out")
+            p.add_argument("--exchange", action="store_true", help="a control: the word's first two components exchanged")
+            p.add_argument("--band", type=float, nargs=2, metavar=("LO", "HI"), help="only the quads this far from the eye")
+            p.add_argument("--place", type=float, nargs=2, metavar=("X", "Y"), help="the stored depth's sampling place, given "
+                           "instead of fitted (the fit replays every unmoving draw before the depth copy)")
         if name == "occluder":
             p.add_argument("--origin", type=float, default=0.0, help="the one-sample layer's sampling place (not measured)")
             p.add_argument("--out", help="the closed texels, a numpy file")
@@ -1592,7 +1941,7 @@ def main(argv=None):
         if args.cmd == "selftest":
             return 1 if selftest() else 0
         return {"fit": cmd_fit, "depth-relation": cmd_depth_relation, "wind": cmd_wind, "pixels": cmd_pixels, "mask": cmd_mask,
-                "motion": cmd_motion, "occluder": cmd_occluder}[args.cmd](args)
+                "motion": cmd_motion, "occluder": cmd_occluder, "impostors": cmd_impostors}[args.cmd](args)
     except (Unreadable, OSError) as e:
         print("cannot be read: %s" % e, file=sys.stderr)
         return 2

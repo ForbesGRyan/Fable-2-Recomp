@@ -517,5 +517,248 @@ class PixelAgainstMicrocode(unittest.TestCase):
         self.assertTrue(any(line.startswith("bool b129 is bit 1") for line in said), said)
 
 
+def made_capture(folder, read=True, size=14.9765625, shadow_names=False):
+    """A capture of one frame with one in-scene 129F row of two quads, its storage and the frame's fog tables."""
+    import json
+    words = [(128.875, 121.625, 31.09375, size), (183.75, 322.75, 45.03125, 12.96875)]     # two quads of capture D1
+    bank = [0.0] * 1024
+    c = consts({8: [0.01, 0.02, 0.9, 0.0], 46: [0.8, 0.6, 0.0, 0.0], 47: [80.0, 150.0, 50.0, 0.0],
+                72: [0.977, 0.0, 0.0, 0.0], 73: [0.0, 1.737, 0.0, 0.0], 74: [0.0, 0.0, 1.00002, -0.100002], 75: [0.0, 0.0, 1.0, 0.0],
+                110: [-0.8, 0.1, 0.59, 0.0], 111: [19.0, 1900.0, 1.0, 0.0005], 113: [1.0, 0.02, 0.01, 0.98], 114: [1.5, 2.0, 0.0, 0.0],
+                115: [0.6, -0.8, 0.0, 70.0], 116: [0.14, 0.1, 0.98, -76.0], 117: [0.79, 0.59, -0.18, -140.0]})
+    for reg, v in c.items():
+        bank[4 * reg:4 * reg + 4] = v
+    pix = {12: [20.0, 35.0, 2.0, 0.47], 19: [80.0, 150.0, 50.0, 1.0], 20: [0.005, 0.07, 0.09, 9.0], 29: [48.0, 0.125, 998.4, 25.6],
+           31: [0.365, 0.0, 0.0, 0.0]}
+    pfull = "".join(struct.pack(">4f", *pix.get(reg, [0.0] * 4)).hex().upper() for reg in range(256))
+    storage = b"".join(struct.pack(">4e", *w) for w in words) + bytes(16)     # as the game fills it (big-endian halves x, y, z, s); the second half unused
+    address = 0xFF762700
+    names = ["0x%08X" % (impostor_check.gpu_address(address) | 3), "0x%08X" % (0x10000000 | 8 << 2 | 2)]
+    other = ["0x1B14FC03", "0x10000A02"]
+    lit = lf.IMPOSTOR_SHADER["vs_lit"]
+    plit = lf.IMPOSTOR_SHADER["ps_lit"]
+    verts = {"kind": "verts", "frame": 1, "prim": 13, "count": 8, "in_scene": True, "pbool": "0x00000100", "pbool_load": "0x00000110",
+             "storage": "0x%08X" % address, "storage_dwords": 8, "n": 5,
+             "vfetch": {"shadow": ["0x1", "0x0", "0x1", "0x0"] + (names if shadow_names else other),
+                        "packet": ["0x1", "0x0", "0x1", "0x0"] + (other if shadow_names else names)},
+             "ps_hash": "0x" + lf.IMPOSTOR_SHADER["ps"], "pfull": pfull,
+             "ps_lit": [{"reg": 508, "v": [0.0] * 12 + list(plit[255])}],
+             "vs": {"hash": "0x" + lf.IMPOSTOR_SHADER["vs"]}, "vs_lit": [{"reg": 252, "v": [0.0] * 8 + list(lit[254]) + list(lit[255])}],
+             "bank": bank}
+    data = {"kind": "vertsdata", "frame": 1, "n": 5, "storage": verts["storage"], "want": 32, "read": read}
+    if read:
+        data["bytes"] = storage.hex().upper()
+    frame = {"kind": "frame", "frame": 1, "fog": {"transmit": [0.9 - 0.002 * (i // 3) for i in range(768)],
+                                                  "scatter": [0.3 + 0.001 * (i // 3) for i in range(192)]}}
+    path = Path(folder) / "native_discovery_made.jsonl"
+    path.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in (verts, data, frame)), encoding="utf-8")
+    return path
+
+
+@unittest.skipUnless(DUMPS.is_dir(), NO_DUMPS)
+class CapturedRows(unittest.TestCase):
+    """Plan Tasks 3 and 6: the readers of a capture's 129F rows and the formulas on a row's own registers."""
+
+    def run_rows(self, **made):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            path = made_capture(folder, **made)
+            return impostor_check.check_rows(path, impostor_check.ROW_MUTATIONS, DUMPS), path
+
+    def test_four_corners_a_quad_are_counted_and_agree(self):
+        (r, caught), _ = self.run_rows()
+        self.assertEqual((r.rows, r.quads, r.corners, r.failed, r.unread), (1, 2, 8, 0, 0))
+        self.assertEqual((r.fog, r.fog_failed, r.fogged), (8, 0, 8))
+        self.assertEqual((r.pixels, r.pixel_failed), (2, 0))
+        self.assertLess(r.worst, 1e-9)
+        self.assertLess(r.single, impostor_check.SINGLE_TOLERANCE)
+        self.assertEqual(r.above + r.below, 8)
+        self.assertEqual(set(r.vs_used) - set(range(248, 256)), set(lf.IMPOSTOR_SHADER["reg"]))
+        self.assertEqual(set(r.ps_used) - set(range(248, 256)), set(lf.IMPOSTOR_SHADER["ps_reg"]))
+        self.assertEqual(impostor_check.rows_problems(r, caught), [])
+        for name in impostor_check.ROW_MUTATIONS:
+            self.assertGreater(caught[name], 0, name)
+
+    def test_an_unread_storage_is_counted_and_fails_the_run(self):
+        (r, caught), _ = self.run_rows(read=False)
+        self.assertEqual((r.rows, r.unread, r.corners), (1, 1, 0))
+        problems = impostor_check.rows_problems(r, caught)
+        self.assertTrue(any("without their storage" in p for p in problems), problems)
+        self.assertTrue(any("no corner was compared" in p for p in problems), problems)
+
+    def test_a_mutation_nobody_catches_fails_the_run(self):
+        (r, _), _ = self.run_rows()
+        self.assertEqual(impostor_check.rows_problems(r, {"raise": 0}), ["mutation raise is NOT CAUGHT"])
+
+    def test_the_rows_command(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            said = []
+            self.assertEqual(impostor_check.main(["--dumps", str(DUMPS), "rows", str(made_capture(folder))], say=said.append), 0)
+            self.assertEqual(said[-1], "all agree")
+            self.assertIn("8 corners: 8 agree", said[0])
+            said = []
+            self.assertEqual(impostor_check.main(["--dumps", str(DUMPS), "rows", str(made_capture(folder, read=False))], say=said.append), 1)
+            self.assertEqual(said[-1], "1 captures FAILED")
+
+    def test_the_gpu_address_is_the_layouts(self):
+        # src/native/capture/xdk_layout.h, GpuAddress: the 0xE0000000 view lies 0x1000 above its low 29 bits.
+        self.assertEqual(impostor_check.gpu_address(0xFF762700), 0x1F763700)
+        self.assertEqual(impostor_check.gpu_address(0xE0000000), 0x00001000)
+        self.assertEqual(impostor_check.gpu_address(0xA1234560), 0x01234560)
+        self.assertEqual(impostor_check.gpu_address(0xDFFFFFFC), 0x1FFFFFFC)
+
+    def test_which_fetch_constant_names_the_storage(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            row = json.loads(made_capture(folder).read_text().splitlines()[0])
+            self.assertEqual(impostor_check.storage_fetch(row), {"shadow": False, "packet": True, "endian": 2})
+            row = json.loads(made_capture(folder, shadow_names=True).read_text().splitlines()[0])
+            self.assertEqual(impostor_check.storage_fetch(row), {"shadow": True, "packet": False, "endian": 2})
+            row["storage_dwords"] = 12                     # another size: neither names it
+            self.assertEqual(impostor_check.storage_fetch(row), {"shadow": False, "packet": False, "endian": None})
+            row["vfetch"] = {"shadow": None, "packet": None}
+            self.assertEqual(impostor_check.storage_fetch(row), {"shadow": None, "packet": None, "endian": None})
+
+    def test_the_census_counts_every_endian_and_order(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            pairs = impostor_check.impostor_rows(made_capture(folder))
+            quads, held = impostor_check.word_census(pairs)
+            self.assertEqual((quads, len(held)), (2, 96))
+            self.assertEqual(held[(2, (1, 0, 3, 2))], 2)
+            self.assertEqual(held[(0, (1, 0, 3, 2))], 0)           # bytes not swapped: halves that are no plausible quad
+            # the rule alone does not single the order out (every component is a plausible place and size here):
+            self.assertGreater(sum(1 for n in held.values() if n == 2), 1)
+            # a size of 2,000 units is not plausible where the table puts the size
+            pairs = impostor_check.impostor_rows(made_capture(folder, size=2000.0))
+            self.assertEqual(impostor_check.word_census(pairs)[1][(2, (1, 0, 3, 2))], 1)
+
+    def test_the_words_command_names_the_packet(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            said = []
+            self.assertEqual(impostor_check.main(["words", str(made_capture(folder)), "--quiet"], say=said.append), 0)
+            self.assertTrue(any("shadow False, packet True, endian 2: 1 rows" in line for line in said), said)
+            said = []
+            self.assertEqual(impostor_check.main(["words", str(made_capture(folder, size=2000.0)), "--quiet"], say=said.append), 1)
+
+    def test_identities_and_bounds_of_a_made_row(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            path = made_capture(folder)
+            found = {name.split(" ")[0] + " " + name.split(" ")[1]: (held, total) for name, held, total, _, _ in impostor_check.identities(path)}
+            self.assertEqual(found["vertex c47.xyz"], (1, 1))
+            self.assertEqual(found["pixel c31.x"], (0, 1))                 # 0.365 * 9 is not 1 (two names share the key: the last)
+            spans, size, rows, quads = impostor_check.bounds([path])
+            self.assertEqual((rows, quads, size), (1, 2, (12.96875, 14.9765625)))
+            self.assertEqual(spans[("vs", 8)][2], [impostor_check.f32(0.9)] * 2)
+            self.assertEqual(spans[("ps", 29)][0], [48.0, 48.0])
+
+
+@unittest.skipUnless(DUMPS.is_dir(), NO_DUMPS)
+class Pins(unittest.TestCase):
+    """tools/xdk_sigmatch/impostor_pins.py (plan Task 6): the mirrors' pins come from the reference alone and are
+    held here to the microcode."""
+
+    @classmethod
+    def setUpClass(cls):
+        import impostor_pins
+        cls.pins = impostor_pins
+
+    def test_three_sections_and_their_lines(self):
+        lines = self.pins.lines()
+        heads = [i for i, line in enumerate(lines) if line.startswith("// ")]
+        self.assertEqual([lines[i][3:lines[i].index(":")] for i in heads], ["impostor position pins", "impostor pixel pins", "impostor fog pins"])
+        self.assertEqual((heads[1] - heads[0] - 1, heads[2] - heads[1] - 1, len(lines) - heads[2] - 1),
+                         (len(self.pins.CAPTURED) + len(self.pins.MADE), len(self.pins.PIXEL), len(self.pins.FOG)))
+        self.assertEqual(len(self.pins.CAPTURED), 10)
+        for line in lines:
+            if not line.startswith("// "):
+                self.assertRegex(line, r"^    \{[0-9A-Fa-fxu{}, ]+\},(  // (captured|made))?$")
+        inc = self.pins.inc_lines()
+        self.assertEqual([line for line in inc if line.startswith("#ifdef")],
+                         ["#ifdef FABLE2_IMPOSTOR_PINS_POSITION", "#ifdef FABLE2_IMPOSTOR_PINS_PIXEL", "#ifdef FABLE2_IMPOSTOR_PINS_FOG"])
+        self.assertEqual(sum(line == "#endif" for line in inc), 3)
+        self.assertEqual([line for line in inc if not line.startswith(("#", "// Generated", "// The pins", "// FABLE2"))], lines)
+
+    def test_every_position_pin_is_the_microcodes_within_the_bound(self):
+        text = impostor_check._text(DUMPS)
+        corners, sides, worst = set(), set(), 0.0
+        for row in self.pins.CAPTURED + self.pins.MADE:
+            (corner, word, regs), (pos, place, uv) = self.pins.position_pin(row)
+            consts = {reg: [0.0] * 4 for reg in range(256)}
+            consts.update({reg: list(regs[i]) for i, reg in enumerate(lf.IMPOSTOR_SHADER["reg"])})
+            consts.update(impostor_check._literal_registers("vs"))
+            case = impostor_check.Case(text, consts, struct.pack(">4e", *word), corner, lambda s: [1.0] * 3, lambda a, t: [0.0] * 3)
+            out, m = impostor_check.run_microcode(case)
+            got = [float(x) for x in out["oPos"]] + [float(x) for x in out["o0"][:3]] + [float(x) for x in out["o1"][:2]]
+            ok, error = impostor_check._compare(got, list(pos) + list(place) + list(uv), impostor_check.SINGLE_TOLERANCE)
+            self.assertTrue(ok, (row[0], error))
+            worst = max(worst, error)
+            corners.add(corner)
+            sides.add(m.r[2][3] == 1.0)
+            for v in pos + place + uv:                                  # a single: its own rounding
+                self.assertEqual(v, impostor_check.f32(v))
+        self.assertEqual((corners, sides), ({0, 1, 2, 3}, {True, False}))
+        # the pins are the single-precision reference (ruling 26), not the double one rounded: they differ somewhere
+        differ = 0
+        for row in self.pins.CAPTURED + self.pins.MADE:
+            (corner, word, regs), (pos, _, _) = self.pins.position_pin(row)
+            c = {reg: list(regs[i]) for i, reg in enumerate(lf.IMPOSTOR_SHADER["reg"])}
+            differ += tuple(impostor_check.f32(v) for v in lf.impostor_position(corner, word, c)["pos"]) != tuple(pos)
+        self.assertGreater(differ, 0)
+
+    def test_the_pixel_pins_cross_the_test_and_the_mask(self):
+        ptext = impostor_check._text(DUMPS, impostor_check.PS, "frag")
+        alphas = []
+        for row in self.pins.PIXEL:
+            (texel, place, eye, c12, c29, c31x, o2, o3, c20w), (d, rgb, alpha) = self.pins.pixel_pin(row)
+            consts = {reg: [0.0] * 4 for reg in range(256)}
+            consts.update({12: list(c12), 19: list(eye) + [1.0], 20: [0.0, 0.0, 0.0, c20w], 29: list(c29), 31: [c31x, 0.0, 0.0, 0.0]})
+            consts.update(impostor_check._literal_registers("ps"))
+            regs = {0: list(place) + [0.0], 1: [0.25, 0.75, 0.0, 0.0], 2: list(o2) + [0.0], 3: list(o3) + [0.0]}
+            case = impostor_check.PixelCase(ptext, consts, regs, lambda u, v, texel=texel: list(texel), d, True)
+            out, _ = impostor_check.run_pixel(case, bools={132, 136})
+            ok, _ = impostor_check._compare([float(x) for x in out["oC0"]], list(rgb) + [alpha], impostor_check.PIXEL_TOLERANCE)
+            self.assertTrue(ok, row)
+            alphas.append(alpha)
+        ref = 128.0 / 255.0
+        self.assertEqual([a > ref for a in alphas], [False, False, False, False, True, True, True, True, False])
+        self.assertEqual([a >= 0.75 for a in alphas], [False, False, False, False, False, True, True, True, False])
+        self.assertAlmostEqual(alphas[3], 0.5, delta=1e-5)             # 52 units: a half is not above the reference
+        self.assertLess(alphas[3], ref)
+
+    def test_the_fog_pins_begin_at_the_start(self):
+        runs = []
+        for row in self.pins.FOG:
+            (place, eye, c110, c111, transmit, scatter), (ran, coords, o2, o3) = self.pins.fog_pin(row)
+            runs.append(ran)
+            if ran:
+                self.assertEqual(tuple(o2), tuple(transmit))
+                for i in range(3):
+                    self.assertAlmostEqual(o3[i], (1.0 - transmit[i]) * scatter[i], delta=1e-12)
+                self.assertTrue(0.0 <= coords[0] <= 1.0 and coords[1] > 0.0 and 0.0 <= coords[2] <= 1.0)
+            else:
+                self.assertEqual((tuple(o2), tuple(o3), tuple(coords)), ((1.0, 1.0, 1.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)))
+        self.assertEqual(runs, [False, False, True, True, True, True])
+
+    def test_the_captured_pins_are_the_captures_rows(self):
+        import capture_replay
+        seen = 0
+        for (stamp, frame, place, quad), (corner, word, regs) in zip(self.pins.CAPTURED_ROWS, self.pins.CAPTURED):
+            path = capture_replay.LOGS / ("native_discovery_20261011_%s.jsonl" % stamp)
+            if not path.is_file():
+                continue
+            row, data = [(r, d) for r, d in impostor_check.impostor_rows(path) if r["frame"] == frame][place]
+            self.assertEqual(tuple(self.pins.bits(v) for v in impostor_check.quad_words(row, data)[quad]), tuple(word))
+            c = impostor_check.row_registers(row)
+            self.assertEqual(tuple(tuple(self.pins.bits(v) for v in c[reg]) for reg in lf.IMPOSTOR_SHADER["reg"]), tuple(regs))
+            seen += 1
+        if not seen:
+            self.skipTest("none of the four discovery captures is in the logs folder")
+
+
 if __name__ == "__main__":
     unittest.main()

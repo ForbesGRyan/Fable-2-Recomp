@@ -876,6 +876,117 @@ class OccluderCover(unittest.TestCase):
             fr.level_plane(planes, 2)
 
 
+class Impostors(unittest.TestCase):
+    """The far woods' quads (distant trees, plan Task 6): the picture's level, its alpha at a pixel's centre, the
+    state's alpha test and alpha-to-mask, the nearest kept fragment."""
+
+    SIZE = (64, 64)
+
+    @staticmethod
+    def quad(x0, y0, x1, y1, z=0.5, size=(64, 64)):
+        """clip [4, 6] (position, then the picture's coordinate) of a quad over window pixels x0..x1, y0..y1."""
+        def ndc(x, y):
+            return [x / size[0] * 2.0 - 1.0, 1.0 - y / size[1] * 2.0, z, 1.0]
+        return np.array([ndc(x0, y0) + [0.0, 0.0], ndc(x1, y0) + [1.0, 0.0], ndc(x1, y1) + [1.0, 1.0], ndc(x0, y1) + [0.0, 1.0]])
+
+    @staticmethod
+    def left_half():
+        p = np.zeros((4, 4, 4))
+        p[:, :2, 3] = 1.0
+        p[..., :3] = 0.5
+        return [p]
+
+    def test_the_left_half_of_the_picture_is_kept_and_none_of_the_right(self):
+        draws = [fr.ImpostorDraw(self.quad(16, 16, 24, 24), np.array([1.0]), self.left_half(), 128.0 / 255.0, 0xAA00001C, 1)]
+        pic = fr.impostor_raster(draws, self.SIZE, 0.0)
+        ys, xs = np.nonzero(pic.ident)
+        self.assertEqual((ys.min(), ys.max(), xs.min(), xs.max()), (16, 23, 16, 19))       # u = 0 .. 0.375: alpha 1
+        self.assertEqual(len(ys), 8 * 4)
+        self.assertFalse(pic.one.any())                                                    # alpha 1: both samples
+        self.assertTrue((pic.depth[16:24, 16:20] == 0.5).all() and np.isinf(pic.depth[16:24, 20:24]).all())
+        self.assertEqual(pic.level, {1: [0.0]})                                              # 4 texels over 8 pixels: the base
+
+    def test_the_cover_is_at_the_sampling_place_and_the_alpha_at_the_pixels_centre(self):
+        # sampled a quarter pixel up and left: pixel 16's sample (15.75) is outside the quad and pixel 24's (23.75)
+        # inside; the alpha is still read at the integral position: columns 17 to 19 have alpha 1, column 20 a half
+        # (not above the reference), column 24 none. An alpha read at the sample would keep column 20 (0.625).
+        draws = [fr.ImpostorDraw(self.quad(16, 16, 24, 24), np.array([1.0]), self.left_half(), 128.0 / 255.0, 0xAA00001C, 1)]
+        pic = fr.impostor_raster(draws, self.SIZE, (-0.25, -0.25))
+        ys, xs = np.nonzero(pic.ident)
+        self.assertEqual((ys.min(), ys.max(), xs.min(), xs.max(), len(ys)), (17, 24, 17, 19, 8 * 3))
+
+    def test_the_dissolve_gives_one_sample_of_two_then_both(self):
+        whole = np.ones((4, 4, 4))
+        for dissolve, kept, one in ((0.5, 0, 0), (0.625, 64, 64), (0.75, 64, 0), (0.875, 64, 0), (0.24, 0, 0)):
+            draws = [fr.ImpostorDraw(self.quad(16, 16, 24, 24), np.array([dissolve]), [whole], 128.0 / 255.0, 0xAA00001C, 1)]
+            pic = fr.impostor_raster(draws, self.SIZE, 0.0)
+            self.assertEqual((int((pic.ident > 0).sum()), int(pic.one.sum())), (kept, one), dissolve)
+        # without the alpha test (reference 0) a quarter is enough for the first sample: the mask's own threshold
+        draws = [fr.ImpostorDraw(self.quad(16, 16, 24, 24), np.array([0.3]), [whole], 0.0, 0xAA00001C, 1)]
+        self.assertEqual(int(fr.impostor_raster(draws, self.SIZE, 0.0).one.sum()), 64)
+
+    def test_the_level_of_a_quad_that_covers_64_pixels_of_256_texels_is_2(self):
+        q = self.quad(100, 40, 164, 104, size=(1120, 720))
+        x, y, _, _ = fr.window(q[:, :4], (1120, 720))
+        lod, slope = fr.quad_level(np.stack([x, y], 1), q[:, 4:6], 256)
+        self.assertAlmostEqual(lod, 2.0, places=9)
+        np.testing.assert_allclose(slope, [[1.0 / 64, 0.0], [0.0, 1.0 / 64]], atol=1e-12)
+        self.assertEqual(fr.quad_level(np.stack([x, y], 1) * 4.0, q[:, 4:6], 256)[0], 0.0)      # magnified: the base
+        self.assertEqual(fr.quad_level(np.stack([x, y], 1), q[:, 4:6], 256, top=1)[0], 1.0)     # no level below the last
+        self.assertEqual(fr.quad_level(np.zeros((4, 2)), q[:, 4:6], 256)[0], 0.0)               # no area: the base
+
+    def test_the_alpha_is_read_at_the_level_the_fetch_takes(self):
+        # level 0 all covered, level 1 all clear: a quad at level 1 keeps nothing, at level 0.25 alpha 0.75 (both samples)
+        levels = [np.ones((8, 8, 4)), np.zeros((4, 4, 4))]
+        far = [fr.ImpostorDraw(self.quad(16, 16, 20, 20), np.array([1.0]), levels, 128.0 / 255.0, 0xAA00001C, 1)]     # 2 texels a pixel
+        pic = fr.impostor_raster(far, self.SIZE, 0.0)
+        self.assertEqual(int((pic.ident > 0).sum()), 0)
+        self.assertEqual(int((pic.base_ident > 0).sum()), 16)                              # the base-level figure beside
+        np.testing.assert_allclose(fr.picture_sample(levels, np.array([[0.5, 0.5]]), 0.25)[0], [0.75] * 4)
+        np.testing.assert_allclose(fr.picture_sample(levels, np.array([[0.5, 0.5]]), 7.0)[0], [0.0] * 4)   # clamped to the last
+
+    def test_the_nearer_kept_fragment_wins_and_a_dropped_one_hides_nothing(self):
+        whole = np.ones((4, 4, 4))
+        back = fr.ImpostorDraw(self.quad(16, 16, 24, 24, z=0.6), np.array([1.0]), [whole], 0.5, 0xAA00001C, 1)
+        front = fr.ImpostorDraw(self.quad(20, 16, 28, 24, z=0.4), np.array([1.0]), [whole], 0.5, 0xAA00001C, 2)
+        gone = fr.ImpostorDraw(self.quad(16, 16, 28, 24, z=0.1), np.array([0.2]), [whole], 0.5, 0xAA00001C, 3)
+        pic = fr.impostor_raster([back, front, gone], self.SIZE, 0.0)
+        self.assertEqual(sorted(set(pic.ident[18].tolist())), [0, 1, 2])
+        self.assertTrue((pic.ident[18, 16:20] == 1).all() and (pic.ident[18, 20:28] == 2).all())
+        pic = fr.impostor_raster([front, back], self.SIZE, 0.0)                             # the nearer one drawn first stays
+        self.assertTrue((pic.ident[18, 16:20] == 1).all() and (pic.ident[18, 20:28] == 2).all())
+        with self.assertRaises(ValueError):
+            fr.impostor_raster([fr.ImpostorDraw(self.quad(0, 0, 4, 4), np.array([1.0]), [whole], 0.5, 0xAA00001C, 0)], self.SIZE, 0.0)
+
+    def test_the_cover_is_the_rows_rule(self):
+        # the same thresholds as alpha_cover (the emulator's): offsets 0xAA -> 0.25 and 0.75
+        alpha = np.array([0.2, 0.3, 0.6, 0.8])
+        first, second = fr.impostor_cover(alpha, np.zeros(4, dtype=np.int64), 0.5, 0xAA00001C)
+        self.assertEqual((first.tolist(), second.tolist()), ([False, False, True, True], [False, False, False, True]))
+        first, second = fr.impostor_cover(alpha, np.zeros(4, dtype=np.int64), 0.5, 0x0000000C)     # the test alone
+        self.assertEqual(first.tolist(), [False, False, True, True])
+        self.assertEqual(second.tolist(), first.tolist())
+        with self.assertRaises(fr.Unreadable):
+            fr.impostor_cover(alpha, np.zeros(4, dtype=np.int64), 0.5, 0xAA00001A)                 # another function
+
+
+class ImpostorVerdict(unittest.TestCase):
+    def test_met_only_with_the_share_and_every_control_fallen(self):
+        nan = float("nan")
+        self.assertTrue(fr.impostor_verdict(98.9, {"scale": 52.0, "no_raise": 26.0, "exchange": 0.1}, 52578)[0])
+        self.assertTrue(fr.impostor_verdict(98.9, {"scale": 52.0, "exchange": nan}, 4788)[0])       # no judged pixel: fallen
+        met, text = fr.impostor_verdict(98.9, {"scale": 92.0, "no_raise": 26.0}, 52578)
+        self.assertFalse(met)
+        self.assertIn("does not discriminate: the control scale falls", text)
+        met, text = fr.impostor_verdict(94.9, {"scale": 52.0}, 52578)
+        self.assertFalse(met)
+        self.assertIn("not met", text)
+        met, text = fr.impostor_verdict(99.9, {"scale": 52.0}, 999)
+        self.assertFalse(met)
+        self.assertIn("not decidable", text)
+        self.assertTrue(fr.impostor_verdict(95.0, {"scale": 85.0}, 1000)[0])                        # the bounds themselves
+
+
 class DepthCopy(unittest.TestCase):
     def test_the_copy_is_the_last_write_of_0x2318_with_source_4_inside_the_scene(self):
         def gap(line, words):

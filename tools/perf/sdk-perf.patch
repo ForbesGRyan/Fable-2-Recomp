@@ -209,20 +209,24 @@ index 7f1eb7f..68277b7 100644
    D3D12_RECT* ClearDepthStencilViewAllocatedRects(D3D12_CPU_DESCRIPTOR_HANDLE depth_stencil_view,
                                                    D3D12_CLEAR_FLAGS clear_flags, FLOAT depth,
 diff --git a/include/rex/ui/imgui_dialog.h b/include/rex/ui/imgui_dialog.h
-index a7ab6b3..4ab2397 100644
+index a7ab6b3..346748b 100644
 --- a/include/rex/ui/imgui_dialog.h
 +++ b/include/rex/ui/imgui_dialog.h
-@@ -51,6 +51,10 @@ class ImGuiDialog {
-   virtual void OnShow() {}
+@@ -52,6 +52,14 @@ class ImGuiDialog {
    virtual void OnClose() {}
    virtual void OnDraw(ImGuiIO& io) { (void)io; }
+ 
++ public:
 +  // True when the dialog is animating or showing something and the UI must be
 +  // repainted at every UI tick; false lets the presenter paint only when the
 +  // guest produces a frame (an idle dialog costs no host presents then).
 +  virtual bool WantsContinuousRepaint() const { return true; }
- 
++
++ protected:
++
   private:
    ImGuiDrawer* imgui_drawer_ = nullptr;
+   bool has_close_pending_ = false;
 diff --git a/include/rex/ui/overlay/achievement_toast.h b/include/rex/ui/overlay/achievement_toast.h
 index 7642601..3f884bf 100644
 --- a/include/rex/ui/overlay/achievement_toast.h

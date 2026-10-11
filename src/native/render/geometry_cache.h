@@ -165,8 +165,9 @@ class GeometryCache {
   // the vertices the buffer holds: a reader takes words only for a vertex below it. `extent`
   // (optional) receives a tree mesh's extent, the reach's inputs that no register holds (ledger
   // ruling 32; zero for a plant). Counts itself in `st` (wind_words, wind_words_bytes, wind_build).
-  // Reads are bounded by the streams' sizes. Nothing calls this yet: the pass binds the buffer in
-  // plan Task 10.
+  // Reads are bounded by the streams' sizes. What is read, in which order, and the count:
+  // PlanWindWords; the words: BuildWindWords (clay_logic.h). The pass binds the buffer at t9 for a
+  // record it draws moved (ClayPass::WindWordsFor).
   nrhi::Buffer* WindWords(nrhi::Device* dev, const capture::DrawRecord& r, const capture::WindInputs& wind, uint32_t need,
                           ClayStats& st, WindBuild* why, uint32_t* count, WindExtent* extent = nullptr);
 

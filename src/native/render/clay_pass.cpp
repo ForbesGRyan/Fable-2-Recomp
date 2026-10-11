@@ -181,6 +181,7 @@ void ClayPass::DestroyObjects() {
   if (device_) {
     for (nrhi::Pipeline* p : pipelines_) device_->DestroyDeferred(p);
     device_->DestroyDeferred(vs_);
+    device_->DestroyDeferred(wind_vs_);  // (after its pipelines: those above, the pre-pass's and the maps')
     for (nrhi::Shader* ps : ps_) device_->DestroyDeferred(ps);
     device_->DestroyDeferred(map_pipeline_);
     device_->DestroyDeferred(map_vs_);
@@ -200,6 +201,8 @@ void ClayPass::DestroyObjects() {
   pipeline_keys_.clear();
   pipelines_.clear();
   vs_ = nullptr;
+  wind_vs_ = nullptr;
+  wind_vs_failed_ = false;
   for (nrhi::Shader*& ps : ps_) ps = nullptr;
   map_pipeline_ = nullptr;
   map_vs_ = map_ps_ = nullptr;
@@ -218,7 +221,10 @@ void ClayPass::DestroyObjects() {
 nrhi::Pipeline* ClayPass::CreatePipeline(nrhi::Device* dev, const PipelineKey& key, bool depth_only) {
   nrhi::GraphicsPipelineDesc pipe;
   pipe.layout = layout_;
-  pipe.vs = vs_;
+  // A key with `wind` is drawn by the wind vertex program and no other key is (PrepareWind makes
+  // such keys, after EnsureWindShader; without the program there is no pipeline).
+  if (key.wind && !wind_vs_) return nullptr;
+  pipe.vs = key.wind ? wind_vs_ : vs_;
   const uint8_t kind = key.textured < kClayPixelShaders ? key.textured : 0;
   // (the pre-pass: the kind's depth-only form; flat clay discards nothing and keeps its shader)
   pipe.ps = depth_only && depth_ps_[kind] ? depth_ps_[kind] : ps_[kind];
@@ -291,6 +297,8 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     pipeline_keys_.clear();
     pipelines_.clear();
     vs_ = nullptr;
+    wind_vs_ = nullptr;
+    wind_vs_failed_ = false;
     for (nrhi::Shader*& ps : ps_) ps = nullptr;
     map_pipeline_ = nullptr;
     map_vs_ = map_ps_ = nullptr;
@@ -890,6 +898,12 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
     for (size_t i = 0; i < object_constants_.size(); ++i) {
       std::memcpy(slots + ClayObjectSlotOffset(object_slot0_, i), &object_constants_[i], sizeof(ClayObjectConstants));
     }
+    // The wind's constants, behind the object block of their record's large slot (the buffer was
+    // sized with every entry of object_constants_, the wind records' own slots among them).
+    for (const WindBlock& b : wind_blocks_) {
+      if (b.slot >= object_constants_.size()) continue;
+      std::memcpy(slots + ClayObjectSlotOffset(object_slot0_, b.slot) + kClayWindOffset, &b.constants, sizeof(ClayWindConstants));
+    }
   }
 }
 
@@ -965,6 +979,31 @@ void ClayPass::PrepareShadows(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScen
         continue;
       }
       p.constants = MakeShadowConstants(r, vertex_count, uv, d.textured, sampler, d.alpha, d.bias);
+      // The caster's wind (the scene's, exactly: the game's casters sway with the scene shaders'
+      // formula): decided once, here, for its one pass. Moved only with everything; else at rest
+      // with the pipeline and constants above, counted.
+      if (wind_on_) {
+        const capture::WindInputs* wind = ShadowWindOf(scene, c, r);
+        const capture::WindSpec* spec = wind && wind->spec < capture::kWindSpecCount ? &capture::kWindSpecs[wind->spec] : nullptr;
+        ClayWindInputs in{};
+        in.on = true;
+        in.has_inputs = spec && spec->family == wind->family && wind->family != capture::WindFamily::kNone;
+        nrhi::Buffer* words = in.has_inputs ? WindWordsFor(dev, r, *wind, vertex_count, gst, nullptr) : nullptr;
+        in.has_words = words != nullptr;
+        nrhi::Pipeline* moved = in.has_words && EnsureWindShader(dev) ? ShadowWindPipeline(dev, d.cull) : nullptr;
+        in.has_colour_pipeline = in.has_depth_pipeline = moved != nullptr;   // (a caster has one pass)
+        uint32_t slot = 0;
+        in.has_slot = moved && TakeWindSlot(MakeClayWindConstants(*wind, *spec, r), -1, nullptr, &slot);
+        const ClayWind verdict = DecideClayWind(in);
+        if (verdict == ClayWind::kDrawn) {
+          p.pipeline = moved;
+          p.wind_words = words;
+          p.wind_slot = slot;
+          p.constants.light_mode = LightModeWind(wind->family);
+        } else if (verdict != ClayWind::kNone) {
+          ++st.wind_rest[size_t(verdict)];
+        }
+      }
       shadow_prepared_[c].push_back(p);
     }
   }
@@ -972,6 +1011,123 @@ void ClayPass::PrepareShadows(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScen
   st.decode_ms += gst.decode_ms;
   st.uploads += gst.uploads;
   st.hits += gst.hits;
+  // (the casters' wind words: counted by the cache itself, in gst)
+  st.wind_words += gst.wind_words;
+  st.wind_words_bytes += gst.wind_words_bytes;
+  for (size_t i = 0; i < size_t(WindBuild::kCount); ++i) st.wind_build[i] += gst.wind_build[i];
+}
+
+bool ClayPass::EnsureWindShader(nrhi::Device* dev) {
+  if (wind_vs_) return true;
+  if (wind_vs_failed_ || !ready_ || dev != device_) return false;
+  nrhi::ShaderDesc vs;
+  vs.stage = nrhi::ShaderStage::kVertex;
+  vs.name = "fable2_clay_wind_vs";
+  vs.hlsl_source = shaders::kClayWindVs;
+  vs.entry_point = "main";
+  wind_vs_ = dev->CreateShader(vs);
+  if (!wind_vs_) {
+    wind_vs_failed_ = true;
+    REXLOG_ERROR("[native] clay: wind vertex shader compile failed: every wind record is drawn at rest (wind: pipeline) until the pass "
+                 "is rebuilt or the game is restarted");
+    return false;
+  }
+  REXLOG_INFO("[native] clay: wind vertex program compiled (wind words at t9, the wind's {} bytes of constants at byte {} of a record's "
+              "{}-byte slot at b1)", sizeof(ClayWindConstants), kClayWindOffset, kClayObjectSlotBytes);
+  return true;
+}
+
+nrhi::Pipeline* ClayPass::ShadowWindPipeline(nrhi::Device* dev, capture::Cull cull) {
+  const size_t slot = ShadowPipelineSlot(cull);
+  if (shadow_wind_pipelines_[slot]) return shadow_wind_pipelines_[slot];
+  if (shadow_wind_failed_[slot] || !wind_vs_ || !shadow_ps_) return nullptr;
+  shadow_wind_pipelines_[slot] = CreateShadowPipeline(dev, wind_vs_, cull);
+  if (!shadow_wind_pipelines_[slot]) {
+    shadow_wind_failed_[slot] = true;
+    REXLOG_ERROR("[native] clay: shadow pipeline creation failed for the wind program (its casters are drawn at rest: wind: pipeline)");
+  }
+  return shadow_wind_pipelines_[slot];
+}
+
+nrhi::Buffer* ClayPass::WindWordsFor(nrhi::Device* dev, const capture::DrawRecord& r, const capture::WindInputs& wind,
+                                     uint32_t vertex_count, ClayStats& st, WindExtent* extent) {
+  // The wind program reads a vertex's words for every vertex below the draw's vertex_count (its
+  // only bound: a buffer bound by address has none), so the buffer must hold that many.
+  WindBuild why = WindBuild::kStream;
+  uint32_t count = 0;
+  nrhi::Buffer* words = vertex_count ? geometry_.WindWords(dev, r, wind, vertex_count, st, &why, &count, extent) : nullptr;
+  return words && count >= vertex_count ? words : nullptr;
+}
+
+bool ClayPass::TakeWindSlot(const ClayWindConstants& constants, int64_t own, const ClayObjectConstants* head, uint32_t* slot) {
+  if (!ClayWindConstantsFinite(constants)) return false;
+  if (own >= 0 && uint64_t(own) < object_constants_.size()) {
+    *slot = uint32_t(own);
+  } else {
+    if (wind_new_slots_ >= kClayWindSlotsMax) return false;
+    ++wind_new_slots_;
+    *slot = uint32_t(object_constants_.size());
+    object_constants_.push_back(head ? *head : ClayObjectConstants{});
+  }
+  wind_blocks_.push_back({*slot, constants});
+  return true;
+}
+
+void ClayPass::PrepareWind(nrhi::Device* dev, const capture::DrawRecord& r, const capture::WindInputs* wind, bool prepass, Prepared& p,
+                           ClayStats& st) {
+  // Everything the record needs, asked in DecideClayWind's order, each only when what is before it
+  // is there; the verdict is taken once and holds for the colour pass and the pre-pass alike.
+  const capture::WindSpec* spec = wind && wind->spec < capture::kWindSpecCount ? &capture::kWindSpecs[wind->spec] : nullptr;
+  ClayWindInputs in{};
+  in.on = true;
+  in.has_inputs = spec && spec->family == wind->family && wind->family != capture::WindFamily::kNone;
+  in.terrain = p.terrain;
+  WindExtent extent;
+  nrhi::Buffer* words = in.has_inputs && !in.terrain ? WindWordsFor(dev, r, *wind, p.vertex_count, st, &extent) : nullptr;
+  in.has_words = words != nullptr;
+  nrhi::Pipeline* colour = nullptr;
+  nrhi::Pipeline* depth = nullptr;
+  bool flat = false;
+  if (in.has_words && EnsureWindShader(dev)) {
+    if (const PipelineKey* key = KeyOf(p.pipeline)) {
+      PipelineKey moved = *key;  // (a copy: the cache's keys may move when one is added)
+      moved.wind = 1;
+      colour = TryPipeline(dev, moved);
+      in.has_colour_pipeline = colour != nullptr;
+      // The pre-pass draws a depth-writing record: with the wind program too, or the record is at rest.
+      const bool in_prepass = prepass && InPrepass(moved);
+      if (colour && in_prepass) depth = PrepassPipeline(dev, colour, p.alpha, &flat);
+      in.has_depth_pipeline = colour && (!in_prepass || depth);
+    }
+  }
+  ClayWindConstants constants{};
+  uint32_t slot = 0;
+  if (in.has_colour_pipeline && in.has_depth_pipeline) {
+    constants = MakeClayWindConstants(*wind, *spec, r);
+    // A lit object, trunk or leaf has a large slot (PrepareLight); a lit plant's block is copied to
+    // the head of a new one (its small slot stays unused this frame); an unlit record's head is zeros.
+    const bool lit_plant = p.lit && p.light && p.light->kind == capture::LightVertexKind::kInstance;
+    const bool own = p.lit && p.light && !lit_plant;
+    const ClayObjectConstants* head = lit_plant && p.slot < plant_constants_.size() ? &plant_constants_[p.slot] : nullptr;
+    in.has_slot = TakeWindSlot(constants, own ? int64_t(p.slot) : -1, head, &slot);
+  }
+  const ClayWind verdict = DecideClayWind(in);
+  if (verdict != ClayWind::kDrawn) {
+    if (verdict != ClayWind::kNone) ++st.wind_rest[size_t(verdict)];
+    return;
+  }
+  p.wind = wind;
+  p.wind_words = words;
+  p.wind_slot = slot;
+  p.pipeline = colour;
+  // The record's box wherever a box decides something (the pre-pass's reach rule), grown by how far
+  // the wind can move a vertex: never a record culled for where it stands at rest.
+  p.bounds = GrowBounds(p.bounds, ClayWindReach(wind->family, constants, extent));
+}
+
+void ClayPass::BindWind(nrhi::Cmd* cmd, nrhi::Buffer* words, uint32_t slot) {
+  cmd->SetBufferSrv(kParamTerrainNormals, words, 0);  // (t9: the wind program's wind words)
+  cmd->SetConstantBuffer(kParamTerrainConstants, terrain_cb_, ClayObjectSlotOffset(object_slot0_, slot));
 }
 
 void ClayPass::DrawShadows(nrhi::Cmd* cmd, ClayStats& st) {
@@ -1029,6 +1185,12 @@ void ClayPass::DrawShadows(nrhi::Cmd* cmd, ClayStats& st) {
         for (uint32_t i = 0; i < kClayLightBufferCount; ++i) cmd->SetBufferSrv(kClayLightBufferParam0 + i, p.positions, 0);
         light_bound = true;
       }
+      // A caster drawn moved: its own wind words at t9 and its slot at b1, at its draw (a later
+      // caster at rest runs the clay vertex shader with light_mode 0, which loads from neither).
+      if (p.wind_words) {
+        BindWind(cmd, p.wind_words, p.wind_slot);
+        ++st.wind_casters;
+      }
       cmd->Draw(p.index_count, 0);
       ++st.shadow_drawn[c];
     }
@@ -1049,7 +1211,9 @@ void ClayPass::DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, 
     // indices. No coordinates (t2 gets the positions, as for every draw without them), no albedo
     // (the white pair, which the flat shader does not read), no light.
     const float uv[4] = {1.0f, 1.0f, 0.0f, 0.0f};
-    const ClayConstants constants = MakeClayConstants(r, p.vertex_count, ClayColorValue(color, r), uv, false, 0, ClayAlpha{}, 0, 0);
+    // (a wind record: the family in light_mode's wind bits, for the wind program its pipeline has)
+    const uint32_t flat_mode = p.wind ? LightModeWind(p.wind->family) : 0u;
+    const ClayConstants constants = MakeClayConstants(r, p.vertex_count, ClayColorValue(color, r), uv, false, 0, ClayAlpha{}, flat_mode, 0);
     cmd->SetRootConstants(kParamConstants, kConstantCount, &constants, 0);
     cmd->SetBufferSrv(kParamPositions, p.positions, 0);
     cmd->SetBufferSrv(kParamIndices, p.indices, 0);
@@ -1059,7 +1223,8 @@ void ClayPass::DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, 
       for (uint32_t i = 0; i < kClayLightBufferCount; ++i) cmd->SetBufferSrv(kClayLightBufferParam0 + i, p.positions, 0);
       if (light_bound) *light_bound = true;
     }
-    if (light_mode_out) *light_mode_out = 0;
+    if (p.wind) BindWind(cmd, p.wind_words, p.wind_slot);
+    if (light_mode_out) *light_mode_out = flat_mode;
     cmd->Draw(p.index_count, 0);
     return;
   }
@@ -1102,6 +1267,9 @@ void ClayPass::DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, 
     fog_scale = DrawFogScale(draw_fog, p.fog_light ? p.fog_light->tree_fog : capture::kTreeFogNone, frame_.exposure);
     if (fog_out) *fog_out = draw_fog;
   }
+  // A record drawn moved: its family in the wind bits, in the colour pass and in the pre-pass alike
+  // (its pipeline of either is the wind program's). No other draw has them.
+  if (p.wind) light_mode |= LightModeWind(p.wind->family);
   if (light_mode_out) *light_mode_out = light_mode;
   float uv[4] = {1.0f, 1.0f, 0.0f, 0.0f};
   if (has_albedo) {
@@ -1169,7 +1337,12 @@ void ClayPass::DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, 
     cmd->SetBufferSrv(kClayLightBufferParam0 + i, own ? own : p.positions, offset);
   }
   if (depth_only && light_bound) *light_bound = true;
-  if (light_mode & kLightModeObject) {
+  if (p.wind) {
+    // A record drawn moved: its wind words at t9 (after the light's four, whatever they bound
+    // there: a wind record is no terrain record) and its large slot at b1, whose head is its light's
+    // block (a lit plant's too) and whose tail the wind's constants.
+    BindWind(cmd, p.wind_words, p.wind_slot);
+  } else if (light_mode & kLightModeObject) {
     // The draw's slot at b1: a plant's small one among the small slots, an object's, trunk's or
     // leaf's large one behind them.
     const uint64_t at = (light_mode & kLightModeInstance) ? ClaySmallSlotOffset(uint64_t(plant_slot0_) + p.slot)
@@ -1254,6 +1427,8 @@ nrhi::TextureView* ClayPass::UpdateRotation(nrhi::Cmd* cmd, nrhi::Device* dev) {
 
 void ClayPass::ForgetShadowObjects() {
   for (nrhi::Pipeline*& p : shadow_pipelines_) p = nullptr;
+  for (nrhi::Pipeline*& p : shadow_wind_pipelines_) p = nullptr;
+  for (bool& failed : shadow_wind_failed_) failed = false;
   shadow_ps_ = nullptr;
   for (size_t c = 0; c < 2; ++c) {
     shadow_view_[c] = nullptr;
@@ -1279,6 +1454,7 @@ void ClayPass::ForgetShadowObjects() {
 void ClayPass::DestroyShadowObjects() {
   if (device_) {
     for (nrhi::Pipeline* p : shadow_pipelines_) device_->DestroyDeferred(p);
+    for (nrhi::Pipeline* p : shadow_wind_pipelines_) device_->DestroyDeferred(p);
     device_->DestroyDeferred(shadow_ps_);
     for (size_t c = 0; c < 2; ++c) {
       device_->DestroyDeferred(shadow_view_[c]);
@@ -1295,6 +1471,23 @@ void ClayPass::DestroyShadowObjects() {
     device_->DestroyDeferred(rotation_);
   }
   ForgetShadowObjects();
+}
+
+// A depth-only pipeline of the maps for one cull mode and one vertex program (the clay vertex
+// shader, or the wind program for the casters drawn moved): no colour target, the maps' depth
+// function with write. The same state for both programs.
+nrhi::Pipeline* ClayPass::CreateShadowPipeline(nrhi::Device* dev, nrhi::Shader* vs, capture::Cull cull) {
+  nrhi::GraphicsPipelineDesc pipe;
+  pipe.layout = layout_;
+  pipe.vs = vs;
+  pipe.ps = shadow_ps_;
+  pipe.rtv_format = nrhi::Format::kUnknown;
+  pipe.dsv_format = nrhi::Format::kD32_FLOAT;
+  pipe.depth.test_enable = true;
+  pipe.depth.write_enable = true;
+  pipe.depth.func = ToCompare(uint8_t(kShadowMapCompare));
+  pipe.cull = ToCull(uint8_t(cull));
+  return dev->CreateGraphicsPipeline(pipe);
 }
 
 bool ClayPass::EnsureShadowObjects(nrhi::Device* dev) {
@@ -1323,17 +1516,7 @@ bool ClayPass::EnsureShadowObjects(nrhi::Device* dev) {
   if (!shadow_ps_) return fail("shadow pixel shader compile");
   static constexpr capture::Cull kCulls[kShadowPipelines] = {capture::Cull::kNone, capture::Cull::kFront, capture::Cull::kBack};
   for (capture::Cull cull : kCulls) {
-    nrhi::GraphicsPipelineDesc pipe;
-    pipe.layout = layout_;
-    pipe.vs = vs_;
-    pipe.ps = shadow_ps_;
-    pipe.rtv_format = nrhi::Format::kUnknown;
-    pipe.dsv_format = nrhi::Format::kD32_FLOAT;
-    pipe.depth.test_enable = true;
-    pipe.depth.write_enable = true;
-    pipe.depth.func = ToCompare(uint8_t(kShadowMapCompare));
-    pipe.cull = ToCull(uint8_t(cull));
-    nrhi::Pipeline* pipeline = dev->CreateGraphicsPipeline(pipe);
+    nrhi::Pipeline* pipeline = CreateShadowPipeline(dev, vs_, cull);
     if (!pipeline) return fail("shadow pipeline creation");
     shadow_pipelines_[ShadowPipelineSlot(cull)] = pipeline;
   }
@@ -2500,9 +2683,22 @@ bool ClayPass::TakeSceneDump(nrhi::Device* dev, std::vector<uint8_t>* file) {
 }
 
 void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
-                      bool textured, ClayLight light, bool shadows, bool fog, const ClayPostRequest& post, ClayStats& st,
+                      bool textured, ClayLight light, bool shadows, bool fog, bool wind, const ClayPostRequest& post, ClayStats& st,
                       TextureStats& tst) {
   if (!ready_ || dev != device_) return;
+  // The frame's wind: the switch as it is now, in a scene that was captured with it (a scene of
+  // before the switch has no wind inputs: its records are at rest). Without both, nothing below
+  // asks for a wind buffer, the wind program, a wind key or a wind slot.
+  st.wind_switch = wind;
+  st.wind_scene = scene.wind_records;
+  wind_on_ = wind && scene.wind_records;
+  wind_blocks_.clear();
+  wind_new_slots_ = 0;
+  if (wind_on_) {
+    for (size_t i = size_t(capture::WindReason::kNoEntry) + 1; i < size_t(capture::WindReason::kCount); ++i) {
+      st.wind_capture_rest[i] = scene.wind_reason[i] + scene.shadow_wind_reason[i];
+    }
+  }
   // A latched texture cache (RHI failure) resolves nothing: skip the UV decode
   // too, and report the latch on F3.
   textured = textured && !textures_.latched();
@@ -2700,6 +2896,17 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   }
   if (DecideClayMask(mask_in).mask == ClayMask::kDrawn) mask_in.objects = EnsureShadowObjects(dev);
   PrepareShadows(cmd, dev, scene, ClayMapsDrawn(DecideClayMask(mask_in).mask), st, tst);
+  // The scene records' wind, each decided once for the colour pass and the pre-pass (PrepareWind):
+  // here, where it is known whether the frame is to have a pre-pass (the mask's verdict can only
+  // still fall for want of the frame's constant buffer, and then nothing is drawn at all) and the
+  // pre-pass's depth-only shaders exist, and before FinishTerrain sizes and fills the buffer with
+  // the wind records' slots.
+  if (wind_on_) {
+    const bool prepass = DecideClayMask(mask_in).mask == ClayMask::kDrawn;
+    for (Prepared& p : prepared_) {
+      if (p.pipeline && !p.terrain) PrepareWind(dev, *p.r, WindOf(scene, *p.r), prepass, p, st);
+    }
+  }
   // "Shadow: on": the switch, or a scene that holds shadow records all the same.
   st.shadow_switch = shadows || scene.shadow_records;
   FinishTerrain(dev, textured, st, tst);
@@ -3483,6 +3690,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     DrawFog draw_fog = DrawFog::kNone;
     DrawPrepared(cmd, p, color, false, mask_bound, &light_mode, &draw_fog, nullptr);
     ++st.drawn;
+    if (p.wind) ++st.wind_moved[size_t(p.wind->family)];
     // Its fog in a fogged frame, for the Fog line: an unlit draw's form or why it has none, and a
     // lit draw that is not fogged because its game shader has no fog.
     CountDrawFog(draw_fog, st);
@@ -3516,6 +3724,23 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
                 "{} trees without a scale, {} not in the fog table; lit draws not fogged {}",
                 scene.frame, st.fog_unlit, st.fog_unlit_alpha, st.fog_unlit_tree, st.fog_unlit_tree_none, st.fog_unlit_none,
                 st.fog_lit_none);
+  }
+  // A line when the Wind line's form changes (the wind coming on or going, the first moved records,
+  // a reason for records at rest appearing or going): the 300-frame line may never come on a slow
+  // adapter. With the switch off nothing is written.
+  if (wind) {
+    uint32_t form = (wind_on_ ? 1u : 0u) | (st.wind_casters ? 2u : 0u);
+    for (size_t i = 0; i < size_t(capture::WindFamily::kCount); ++i) form |= st.wind_moved[i] ? 4u << i : 0u;
+    for (size_t i = 0; i < size_t(ClayWind::kCount); ++i) form |= st.wind_rest[i] ? 0x100u << i : 0u;
+    for (size_t i = 0; i < size_t(capture::WindReason::kCount); ++i) form |= st.wind_capture_rest[i] ? 0x10000u << i : 0u;
+    constexpr uint32_t kWindLogLines = 16;
+    if (form != wind_logged_ && wind_log_lines_ < kWindLogLines) {
+      wind_logged_ = form;
+      ++wind_log_lines_;
+      REXLOG_INFO("[native] clay: wind changed at scene frame {}: {} | wind slots {} ({} new), wind words {} buffers{}", scene.frame,
+                  FormatWindText(st), wind_blocks_.size(), wind_new_slots_, st.wind_words,
+                  wind_log_lines_ == kWindLogLines ? " (last such line)" : "");
+    }
   }
   // (no blended record: the sky after the last record. A frame without a record has no view, so no
   // fog and no sky: the sky is never drawn alone.)

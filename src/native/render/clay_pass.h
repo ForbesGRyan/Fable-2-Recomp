@@ -103,8 +103,15 @@ class ClayPass {
   // sun layer is drawn from the set's layer records and feeds the bright pass (ClaySun; st says which
   // and why, "sun-layer"); in every other frame the bright pass's sun flag is 0 and nothing of the layer
   // is made, bound or drawn.
+  // `wind` (fable2_native_wind; clay_logic.h, "Native wind"): in a scene captured with the wind, a
+  // record that has wind inputs, wind words for every vertex it draws, the wind program's pipelines
+  // of its state and a slot for its wind constants is drawn moved, by the one wind vertex program, in
+  // every pass that draws it (the colour pass and the pre-pass; a shadow record in its map); every
+  // other record is drawn at rest by the clay vertex shader in every pass, as always, counted by
+  // reason (ClayStats::wind_rest; the Wind line). With it off nothing of the wind is made, read,
+  // bound or drawn.
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
-              bool textured, ClayLight light, bool shadows, bool fog, const ClayPostRequest& post, ClayStats& st,
+              bool textured, ClayLight light, bool shadows, bool fog, bool wind, const ClayPostRequest& post, ClayStats& st,
               TextureStats& tst);
   // The mapped target (display values, 8 bits): what the composite views
   // sample. Left in kPixelShaderResource after Render, and written by the same
@@ -190,7 +197,16 @@ class ClayPass {
     // The record's pipeline of the depth pre-pass (PrepassKey of its colour pipeline's key); nullptr:
     // the record writes no depth, the frame has no pre-pass, or no such pipeline could be made.
     nrhi::Pipeline* prepass = nullptr;
-    PositionBounds bounds;      // the box of its position buffer (GeometryCache::Positions)
+    PositionBounds bounds;      // the box of its position buffer (GeometryCache::Positions); a wind record's: grown by its reach
+    // The wind of a record that is drawn moved (PrepareWind: the verdict ClayWind::kDrawn; null
+    // otherwise, and then nothing below is read): its inputs, its wind words (bound at t9 in the
+    // colour pass and the pre-pass) and its large slot of the frame's constant buffer, entry
+    // `wind_slot` of object_constants_ (a lit object's, trunk's or leaf's own; one of its own for a
+    // lit plant, whose head is the plant's block, and for an unlit record), with the wind's constants
+    // at kClayWindOffset. Its `pipeline` and `prepass` are then the wind program's.
+    const capture::WindInputs* wind = nullptr;
+    nrhi::Buffer* wind_words = nullptr;
+    uint32_t wind_slot = 0;
     bool prepass_culled = false;  // left out of the pre-pass: wholly beyond the mask's reach
     bool prepass_flat = false;  // its pre-pass draw is the flat kind's (PrepassKey with the record's alpha)
     ClayAlpha alpha;
@@ -268,6 +284,11 @@ class ClayPass {
     uint32_t index_count = 0;
     uint64_t vs_hash = 0;
     ClayConstants constants;
+    // A caster drawn moved (PrepareShadows; null: at rest): its wind words (t9) and its large slot
+    // (b1) with the wind's constants; `pipeline` is then the wind program's and `constants` has the
+    // family in light_mode's wind bits.
+    nrhi::Buffer* wind_words = nullptr;
+    uint32_t wind_slot = 0;
   };
   // A texture resolved for a terrain layer this frame (many layers share a few).
   struct TerrainTexture {
@@ -451,6 +472,28 @@ class ClayPass {
   // plant_constants_ (an instanced plant).
   void PrepareLight(nrhi::Device* dev, const capture::DrawRecord& r, const capture::LightInputs& light, Prepared& p,
                     ClayStats& st);
+  // The wind (clay_logic.h, "Native wind"). EnsureWindShader: the wind vertex program, compiled on
+  // the first frame with a wind record (never with the switch off); false when it could not be made,
+  // now or before (not tried again until the pass is rebuilt; one log line): every wind record is
+  // then at rest ("pipeline"). ShadowWindPipeline: the maps' depth-only pipeline of a cull mode with
+  // the wind program (CreateShadowPipeline: the same state as shadow_pipelines_), made on first use.
+  // WindWordsFor: a record's wind words when they hold every vertex it draws (`vertex_count`), with
+  // the mesh's extent; null otherwise. TakeWindSlot: the record's large slot with its wind constants
+  // (`own`: the large slot it has already, or -1 for a new one whose head is `head`, zeros without
+  // one); false when the constants are not all numbers or no new slot is left (kClayWindSlotsMax).
+  // PrepareWind: one prepared scene record's verdict (DecideClayWind, once, for every pass), and for
+  // a moved record its fields of Prepared, its wind pipelines and its grown box; `prepass`: the
+  // frame is to have a depth pre-pass, so a depth-writing record needs the wind's pre-pass pipeline
+  // too. Called after the shadows' objects are known and before FinishTerrain.
+  bool EnsureWindShader(nrhi::Device* dev);
+  nrhi::Pipeline* CreateShadowPipeline(nrhi::Device* dev, nrhi::Shader* vs, capture::Cull cull);
+  nrhi::Pipeline* ShadowWindPipeline(nrhi::Device* dev, capture::Cull cull);
+  nrhi::Buffer* WindWordsFor(nrhi::Device* dev, const capture::DrawRecord& r, const capture::WindInputs& wind, uint32_t vertex_count,
+                             ClayStats& st, WindExtent* extent);
+  bool TakeWindSlot(const ClayWindConstants& constants, int64_t own, const ClayObjectConstants* head, uint32_t* slot);
+  void PrepareWind(nrhi::Device* dev, const capture::DrawRecord& r, const capture::WindInputs* wind, bool prepass, Prepared& p,
+                   ClayStats& st);
+  void BindWind(nrhi::Cmd* cmd, nrhi::Buffer* words, uint32_t slot);
   // The texture behind a fetch constant, through the texture cache; with `memo`
   // looked up once per frame (terrain_textures_).
   nrhi::TextureView* ResolveTerrainTexture(nrhi::Cmd* cmd, nrhi::Device* dev, const uint32_t fetch[6], bool memo,
@@ -462,6 +505,21 @@ class ClayPass {
   uint64_t targets_generation_ = 0;
   nrhi::BindingLayout* layout_ = nullptr;  // the RHI has no layout destruction
   nrhi::Shader* vs_ = nullptr;
+  // The wind vertex program (shaders::kClayWindVs; EnsureWindShader), null until a frame has a wind
+  // record: the vertex shader of every pipeline whose key has `wind`, and of shadow_wind_pipelines_.
+  // wind_vs_failed_: making it failed once. wind_on_: this Render draws the wind (the switch and a
+  // scene captured with it). wind_blocks_: the frame's wind constants, each with its large slot
+  // (entry of object_constants_); wind_new_slots_: the large slots the frame's wind records took
+  // beyond the lit objects' own. wind_logged_, wind_log_lines_: the Wind line's last logged form.
+  nrhi::Shader* wind_vs_ = nullptr;
+  bool wind_vs_failed_ = false, wind_on_ = false;
+  struct WindBlock {
+    uint32_t slot = 0;
+    ClayWindConstants constants{};
+  };
+  std::vector<WindBlock> wind_blocks_;
+  uint32_t wind_new_slots_ = 0;
+  uint32_t wind_logged_ = 0xFFFFFFFFu, wind_log_lines_ = 0;
   // By PipelineKey::textured: kClayPs, kClayTexturedPs, kClayTerrainLayerPs, kClayTerrainFarPs.
   nrhi::Shader* ps_[kClayPixelShaders] = {};
   // The pipeline cache: pipelines_[i] draws pipeline_keys_[i] (nullptr: its
@@ -488,6 +546,10 @@ class ClayPass {
   nrhi::TextureView* shadow_view_[2] = {};
   nrhi::Shader* shadow_ps_ = nullptr;
   nrhi::Pipeline* shadow_pipelines_[kShadowPipelines] = {};
+  // ... and the same three with the wind program, each made at its first wind caster
+  // (ShadowWindPipeline; shadow_wind_failed_: its creation failed once).
+  nrhi::Pipeline* shadow_wind_pipelines_[kShadowPipelines] = {};
+  bool shadow_wind_failed_[kShadowPipelines] = {};
   bool shadow_wanted_ = false, shadow_drawn_ = false;
   std::vector<ShadowPrepared> shadow_prepared_[2];
   // The rest of the shadows' objects (EnsureShadowObjects). shadow_objects_: they exist;

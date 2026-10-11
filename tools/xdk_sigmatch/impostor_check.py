@@ -1330,11 +1330,26 @@ def check_records(path):
     Per frame: "seen" is the number of those rows; "taken" equals "seen" and the records' number; "quads" the
     rows' quads; no reason is counted; the records are in the rows' order with ascending places and their words
     lie one after another from quad 0; every member of a record equals the row's, bit for bit (record_of_row).
+    A record's place (the number its call was counted under among the scene's hooked calls, which is where the
+    pass draws the step) is held to the rows too (review of Tasks 8 and 9, Minor 1): with T the frame's typed
+    in-scene rows ("draw", "tess", "indx", "verts") before the record's own row, in file order, and U the
+    scene's calls that have no row (the frame row's "in_bracket" less all its typed in-scene rows), the place
+    lies in [T, T + U]. (Where among the typed rows the U calls without a row lie is in no row; 4 a frame in
+    the captures of 2026-10-11, all before the impostors.)
     A frame whose row says "off", or has no "impostors" at all, is a problem: the capture was not made with the
     switch on. Each difference is one problem."""
     by_frame = {}
     for row, data in impostor_rows(path):
         by_frame.setdefault(row.get("frame"), []).append((row, data))
+    # (frame: [the typed in-scene rows before each in-scene 129F row], and the number of all its typed in-scene rows)
+    before, typed = {}, {}
+    for row in cr.rows(path, kinds=("draw", "tess", "indx", "verts")):
+        if row.get("in_scene") is not True:
+            continue
+        n = row.get("frame")
+        if row.get("kind") == "verts" and cr.vs_hash(row) == VS:
+            before.setdefault(n, []).append(typed.get(n, 0))
+        typed[n] = typed.get(n, 0) + 1
     frames, records, problems = 0, 0, []
     for frame in cr.rows(path, kinds=("frame",)):
         n = frame.get("frame")
@@ -1370,6 +1385,12 @@ def check_records(path):
                 problems.append("%s: no 129F row is left for it" % at)
                 continue
             row, data = rows[i]
+            calls = frame.get("in_bracket")
+            if not isinstance(calls, int) or calls < typed.get(n, 0):
+                problems.append("%s: the frame row's \"in_bracket\" (%r) does not bound its place" % (at, calls))
+            elif isinstance(record.get("place"), int) and not before[n][i] <= record["place"] <= before[n][i] + calls - typed[n]:
+                problems.append("%s: its place %d is not among the scene's calls where its row lies (%d typed rows before it, %d calls "
+                                "without a row)" % (at, record["place"], before[n][i], calls - typed[n]))
             if data is None or not data.get("read"):
                 problems.append("%s: its row (line %s) has no storage that was read" % (at, row.get("line")))
                 continue

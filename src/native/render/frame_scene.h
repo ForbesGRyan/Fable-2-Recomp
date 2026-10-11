@@ -962,7 +962,13 @@ class FrameBuilder {
       ++impostor_refused_[size_t(capture::ImpostorReason::kOverLimit)];
       return;
     }
-    if (impostors_.empty()) impostors_.reserve(capture::kMaxImpostorRecords);
+    if (impostors_.empty()) {
+      impostors_.reserve(capture::kMaxImpostorRecords);
+      // (the words once a frame, for as many as the last frame with impostors held: the array is moved into
+      // the scene at the frame's end, and grown record by record it would be allocated several times a frame
+      // under the scene's mutex; review of Tasks 8 and 9, Minor 2)
+      impostor_words_.reserve(std::max(impostor_words_last_, size_t(4) * record.quads));
+    }
     impostors_.push_back(record);
     impostors_.back().first_quad = impostor_quads_;
     impostor_words_.insert(impostor_words_.end(), words, words + size_t(4) * record.quads);
@@ -1204,6 +1210,7 @@ class FrameBuilder {
       s->impostor_taken = uint32_t(s->impostors.size());
       std::copy(std::begin(impostor_refused_), std::end(impostor_refused_), std::begin(s->impostor_refused));
     }
+    if (impostor_quads_) impostor_words_last_ = size_t(4) * impostor_quads_;
     // (also when the switch went off inside the frame: nothing counted before reaches a later frame)
     std::fill(std::begin(impostor_refused_), std::end(impostor_refused_), 0u);
     impostors_.clear();
@@ -1358,6 +1365,7 @@ class FrameBuilder {
   std::vector<capture::ImpostorRecord> impostors_;
   std::vector<float> impostor_words_;
   uint32_t impostor_seen_ = 0, impostor_answered_ = 0, impostor_quads_ = 0;
+  size_t impostor_words_last_ = 0;  // the floats of the last frame that had impostors: what the next one reserves at once
   uint32_t impostor_refused_[size_t(capture::ImpostorReason::kCount)] = {};
   // The sun layer's tree occluders of the frame so far (FrameScene::layer_depth_place).
   uint32_t layer_occluders_ = 0;

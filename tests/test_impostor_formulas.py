@@ -789,6 +789,7 @@ def made_record_capture(folder, change=None):
               "colour_control": "0x%08X" % want["colour_control"], "mask": want["mask"], "surface": "0x%08X" % want["surface"],
               "alpha_ref": "0x%08X" % want["alpha_ref"], "words": "".join(want["words"])}
     frame["impostors"] = {"mode": "flat", "seen": 1, "taken": 1, "quads": 2, "reason": {}, "records": [record]}
+    frame["in_bracket"] = 1060          # the scene's hooked calls: this one typed in-scene row and 1,059 without a row
     if change:
         change(frame["impostors"])
     path.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in (verts, data, frame)), encoding="utf-8")
@@ -840,6 +841,26 @@ class Records(unittest.TestCase):
         one(lambda b: b["records"][0]["fog_fetch"].reverse(), '"fog_fetch"')
         one(lambda b: b["records"][0].__setitem__("first", 1), "begin at quad 1")
         one(lambda b: b["records"][0].__setitem__("surface", "0x00000000"), '"surface"')
+
+    def test_a_place_is_held_to_the_rows(self):
+        # review of Tasks 8 and 9, Minor 1: 100 added to every place of a frame went unreported
+        import json
+        import tempfile
+        self.assertEqual(self.problems(lambda b: b["records"][0].__setitem__("place", 0))[2], [])          # the first of the scene's calls
+        frames, records, problems = self.problems(lambda b: b["records"][0].__setitem__("place", 1060))
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("its place 1060 is not among the scene's calls where its row lies (0 typed rows before it, 1059 calls without a row)", problems[0])
+        with tempfile.TemporaryDirectory() as folder:
+            path = made_record_capture(folder)
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            for calls in (None, 0):
+                rows[2].pop("in_bracket", None)
+                if calls is not None:
+                    rows[2]["in_bracket"] = calls
+                path.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows), encoding="utf-8")
+                problems = impostor_check.check_records(path)[2]
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn('"in_bracket"', problems[0])
 
     def test_seen_is_the_frames_rows(self):
         frames, records, problems = self.problems(lambda b: b.__setitem__("seen", 3))

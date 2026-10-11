@@ -1130,6 +1130,7 @@ void ClayPass::PrepareWind(nrhi::Device* dev, const capture::DrawRecord& r, cons
   nrhi::Pipeline* colour = nullptr;
   nrhi::Pipeline* depth = nullptr;
   nrhi::Pipeline* tail = nullptr;
+  nrhi::Pipeline* depth_step = nullptr;
   bool flat = false;
   if (in.has_words && EnsureWindShader(dev)) {
     if (const PipelineKey* key = KeyOf(p.pipeline)) {
@@ -1143,6 +1144,14 @@ void ClayPass::PrepareWind(nrhi::Device* dev, const capture::DrawRecord& r, cons
         half_moved.wind = 1;
         tail = half_key ? TryPipeline(dev, half_moved) : nullptr;
         if (!tail) colour = nullptr;
+      }
+      // (a coverage record's half part has a depth step: moved too, or the record is at rest)
+      if (colour && p.coverage_depth) {
+        const PipelineKey* step_key = KeyOf(p.coverage_depth);
+        PipelineKey step_moved = step_key ? *step_key : PipelineKey{};
+        step_moved.wind = 1;
+        depth_step = step_key ? TryPipeline(dev, step_moved) : nullptr;
+        if (!depth_step) colour = nullptr;
       }
       in.has_colour_pipeline = colour != nullptr;
       // The pre-pass draws a depth-writing record: with the wind program too, or the record is at rest.
@@ -1172,6 +1181,7 @@ void ClayPass::PrepareWind(nrhi::Device* dev, const capture::DrawRecord& r, cons
   p.wind_slot = slot;
   p.pipeline = colour;
   if (p.coverage_tail) p.coverage_tail = tail;
+  if (p.coverage_depth) p.coverage_depth = depth_step;
   // The record's box wherever a box decides something (the pre-pass's reach rule), grown by how far
   // the wind can move a vertex: never a record culled for where it stands at rest.
   p.bounds = GrowBounds(p.bounds, ClayWindReach(wind->family, constants, extent));
@@ -2929,16 +2939,20 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       cin.drawable = CoverageDrawable(d);
       cin.has_full = CoverageHasFull(rs.alpha_to_mask_offsets, r.material.alpha_scale);
       nrhi::Pipeline* half = nullptr;
+      nrhi::Pipeline* half_depth = nullptr;
       nrhi::Pipeline* full = nullptr;
       const bool early = cin.kind == CoverageKind::kEarly;
       const bool wanted = cin.kind != CoverageKind::kNone && cin.drawable && (early || !cin.has_full);
       if (wanted && EnsureCoverageShader(dev)) {
         half = TryPipeline(dev, CoverageHalfKey(d.key));
+        // (the half part's depth step, ruling 60: asked with its colour step; without it the record is today's)
+        if (half) half_depth = TryPipeline(dev, CoverageHalfDepthKey(d.key));
         // (an early record's fully covered pixels: the full program, asked only when its scale admits any)
         if (half && early && cin.has_full) full = TryPipeline(dev, CoverageFullKey(d.key));
       }
-      cin.has_pipeline = half != nullptr && (!early || !cin.has_full || full != nullptr);
+      cin.has_pipeline = half != nullptr && half_depth != nullptr && (!early || !cin.has_full || full != nullptr);
       const ClayCoverage verdict = DecideClayCoverage(cin);
+      if (verdict == ClayCoverage::kDrawn) p.coverage_depth = half_depth;
       if (verdict == ClayCoverage::kDrawn && early) {
         p.coverage_tail = half;
         if (full) {
@@ -3902,10 +3916,20 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // The tail: the half-covered pixels of every early record before `end`, in the records' order, each by
   // its half pipeline with its own bindings (DrawPrepared), blended at one half with the record's depth
   // test and write.
+  // The depth step of a half part (ruling 60; clay_logic.h, CoverageHalfDepthKey), right before its colour step:
+  // the record's own bindings, the half program with no colour written, the record's depth test and write.
+  auto half_depth_step = [&](const Prepared& q) {
+    if (!q.coverage_depth) return;
+    cmd->SetPipeline(q.coverage_depth);
+    bound = q.coverage_depth;
+    DrawPrepared(cmd, q, color, false, mask_bound, nullptr, nullptr, nullptr);
+    ++st.coverage_depth_steps;
+  };
   auto draw_tail = [&](size_t end) {
     for (size_t i = 0; i < end && i < prepared_.size(); ++i) {
       const Prepared& q = prepared_[i];
       if (!q.coverage_tail) continue;
+      half_depth_step(q);
       cmd->SetPipeline(q.coverage_tail);
       bound = q.coverage_tail;
       uint32_t tail_mode = 0;
@@ -3947,6 +3971,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     const capture::DrawRecord& r = *p.r;
     uint32_t light_mode = 0;
     DrawFog draw_fog = DrawFog::kNone;
+    // (a late coverage record's half part: its depth step first, then its colour step as the record's one draw)
+    if (p.coverage_half) half_depth_step(p);
     // (an early coverage record without a fully covered pixel has no draw in its place)
     if (p.coverage_place) {
       if (p.pipeline != bound) {
@@ -3959,6 +3985,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     // pixels here, in its own place, as a late record's.
     const bool half_here = p.coverage_tail && !CoverageHalfInTail(CoverageKind::kEarly, index, tail_at);
     if (half_here) {
+      half_depth_step(p);
       cmd->SetPipeline(p.coverage_tail);
       bound = p.coverage_tail;
       uint32_t half_mode = 0;
@@ -4036,9 +4063,9 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       coverage_logged_ = form;
       ++coverage_log_lines_;
       REXLOG_INFO("[native] clay: coverage changed at scene frame {}: {} | first late record at {} of {} prepared records, the sky's place {}, "
-                  "drawn at {}, layer depth place {}, the early tail {}{}{}",
+                  "drawn at {}, layer depth place {}, the early tail {}, half parts in two steps {} (depth, then colour without a depth write){}{}",
                   scene.frame, FormatCoverageText(st), coverage_first, prepared_.size(), sky_order.place, sky_at, coverage_depth_place,
-                  tail_at == kNoCoverageTail ? std::string("none") : "before record " + std::to_string(tail_at),
+                  tail_at == kNoCoverageTail ? std::string("none") : "before record " + std::to_string(tail_at), st.coverage_depth_steps,
                   sky_drawn ? "" : " (no sky step in this frame)", coverage_log_lines_ == kCoverageLogLines ? " (last such line)" : "");
     }
   }

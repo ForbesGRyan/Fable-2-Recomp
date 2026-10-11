@@ -276,8 +276,11 @@ class OnePass(unittest.TestCase):
         # A key gets the wind's field in one place: a moved record's, in PrepareWind, after the program exists.
         # (two since plan Task 14: an early coverage record's second colour pipeline, its half one, is moved with it)
         prepare = pass_function(s, "PrepareWind")
-        self.assertEqual(len(re.findall(r"\.wind = 1;", s)), 2)
-        self.assertEqual(len(re.findall(r"\.wind = 1;", prepare)), 2)
+        # (three since ruling 60: a coverage record's half part has a depth step, moved with it too)
+        self.assertEqual(len(re.findall(r"\.wind = 1;", s)), 3)
+        self.assertEqual(len(re.findall(r"\.wind = 1;", prepare)), 3)
+        self.assertIn("        depth_step = step_key ? TryPipeline(dev, step_moved) : nullptr;\n        if (!depth_step) colour = nullptr;\n", prepare)
+        self.assertIn("  if (p.coverage_depth) p.coverage_depth = depth_step;\n", prepare)
         self.assertIn("        tail = half_key ? TryPipeline(dev, half_moved) : nullptr;\n        if (!tail) colour = nullptr;\n", prepare)
         self.assertIn("  if (in.has_words && EnsureWindShader(dev)) {\n    if (const PipelineKey* key = KeyOf(p.pipeline)) {\n"
                       "      PipelineKey moved = *key;  // (a copy: the cache's keys may move when one is added)\n"

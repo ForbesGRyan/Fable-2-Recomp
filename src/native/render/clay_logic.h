@@ -596,6 +596,8 @@ struct ClayStats {
   // else wrote depth; moved, they are drawn over it).
   bool coverage_switch = false, coverage_sky_moved = false;
   uint32_t coverage_late = 0, coverage_early = 0, coverage_tail_draws = 0;
+  // The half parts' depth steps drawn this frame (ruling 60: one before each half part's colour step).
+  uint32_t coverage_depth_steps = 0;
   uint32_t coverage_rest[size_t(ClayCoverage::kCount)] = {};
   uint32_t coverage_sky_over = 0, coverage_sky_over_no_depth = 0;
   uint32_t light_rotation[size_t(RotationKind::kCount)] = {};
@@ -1847,10 +1849,32 @@ inline bool CoverageDrawable(const DrawState& d) {
   return !d.skip && d.key.textured == 1 && d.key.blend == 0 && d.key.coverage == 0 && d.key.depth_test != 0 && d.key.depth_write != 0 &&
          (d.alpha.mode & need) == need && ((d.alpha.mode >> kAlphaToMaskSamplesShift) & 3u) == 1u;
 }
-// The colour-pass key of a coverage record's half-covered pixels: the record's key with the half program and
-// the half blend. The target has no alpha channel; the alpha's factors keep what is there.
+// The half part is drawn in TWO STEPS (ledger ruling 60), in the place the one draw had. A record's leaf cards lie
+// behind one another, and one draw that tests, writes and blends at once blends every card that is nearer than
+// all before it: a pixel under three such cards kept an eighth of what lay behind where the game keeps one half
+// (one sample of two, whatever the cards; measured: frame-map section 18, "The half blend, once"). So:
+//   1. its depth (CoverageHalfDepthKey): the half program, no colour, no blend, the record's depth test and write.
+//      After it the depth holds the nearest half fragment at every pixel one passed: exactly what the one draw left;
+//   2. its colour (CoverageHalfKey): the half program, the half blend, the depth test less-or-equal, NO depth
+//      write: against the depth step 1 left no fragment of the record is nearer, so the test passes exactly the
+//      fragments AT that depth (the RHI has no "equal"; here less-or-equal is it): the nearest card, once.
+// Both steps run the same vertex program on the same constants and buffers (with the wind both are the wind
+// program's or the record rests), so step 2's depth is step 1's bit for bit.
+// The key of the half part's depth step: the record's key with the half program and no colour written.
+constexpr PipelineKey CoverageHalfDepthKey(PipelineKey k) {
+  k.coverage = 1;
+  k.blend = 0;
+  k.color_mask = 0;
+  return k;
+}
+// The key of the half part's colour step: the record's key with the half program, the half blend, the depth test
+// less-or-equal (whatever the record's own: a "less" would pass nothing against the record's own depth) and no
+// depth write. The target has no alpha channel; the alpha's factors keep what is there.
 constexpr PipelineKey CoverageHalfKey(PipelineKey k) {
   k.coverage = 1;
+  k.depth_test = 1;
+  k.depth_write = 0;
+  k.depth_func = uint8_t(capture::Compare::kLessEqual);
   k.blend = 1;
   k.src = uint8_t(capture::Factor::kSrcAlpha);
   k.dst = uint8_t(capture::Factor::kInvSrcAlpha);

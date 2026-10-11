@@ -224,6 +224,10 @@ class ClayPass {
     // order) and is not drawn in the colour pass. Its pre-pass draw is today's. With the wind, both are the
     // wind program's.
     nrhi::Pipeline* coverage_tail = nullptr;
+    // The depth step of a coverage record's half part (CoverageHalfDepthKey; ledger ruling 60), drawn right before
+    // its colour step wherever that is drawn (a late record's `pipeline`, an early record's `coverage_tail`); set
+    // for every drawn coverage record and for no other. With the wind, the wind program's.
+    nrhi::Pipeline* coverage_depth = nullptr;
     bool coverage_place = true;
     bool prepass_flat = false;  // its pre-pass draw is the flat kind's (PrepassKey with the record's alpha)
     ClayAlpha alpha;

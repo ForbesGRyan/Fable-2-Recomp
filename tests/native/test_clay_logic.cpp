@@ -2534,9 +2534,75 @@ static void CoverageTests() {
     want.src_alpha = uint8_t(capture::Factor::kZero);
     want.dst_alpha = uint8_t(capture::Factor::kOne);
     want.op_alpha = uint8_t(capture::BlendOp::kAdd);
+    // (ruling 60: the half part's colour is its second step: tested less-or-equal against the depth its first step
+    // wrote, where nothing of the record is nearer, and no write)
+    want.depth_test = 1;
+    want.depth_write = 0;
+    want.depth_func = uint8_t(capture::Compare::kLessEqual);
     CHECK(750, half == want && !(half == d.key));
-    CHECK(750, half.textured == 1 && half.depth_test == d.key.depth_test && half.depth_write == 1 && half.depth_func == d.key.depth_func &&
-                   half.cull == d.key.cull && half.color_mask == d.key.color_mask && half.wind == 0 && InPrepass(half));
+    CHECK(750, half.textured == 1 && half.depth_test == 1 && half.depth_write == 0 && half.depth_func == uint8_t(capture::Compare::kLessEqual) &&
+                   half.cull == d.key.cull && half.color_mask == d.key.color_mask && half.wind == 0 && !InPrepass(half));
+    // 765: the half part's first step, its depth: the half program, no colour, no blend, the record's own depth test
+    // and write.
+    {
+      const PipelineKey depth = CoverageHalfDepthKey(d.key);
+      PipelineKey dwant = d.key;
+      dwant.coverage = 1;
+      dwant.color_mask = 0;
+      CHECK(765, depth == dwant && depth.blend == 0 && depth.depth_test == 1 && depth.depth_write == 1 && depth.depth_func == d.key.depth_func &&
+                     depth.cull == d.key.cull && !(depth == half) && !(depth == d.key) && !(depth == CoverageFullKey(d.key)));
+      PipelineKey moved = d.key;
+      moved.wind = 1;
+      CHECK(765, CoverageHalfDepthKey(moved).wind == 1 && !(CoverageHalfDepthKey(moved) == depth));
+      // The two steps on one pixel, for every order of three cards (and of two at one depth): the depth step leaves
+      // the nearest card's depth, which is what ONE draw with test and write leaves (today's end depth), and the
+      // colour step blends exactly the cards AT that depth: one, whatever the order. The single draw of before
+      // (test and write and blend at once) blended once for every card nearer than all before it.
+      auto passes = [](uint8_t func, float z, float stored) {
+        switch (capture::Compare(func)) {
+          case capture::Compare::kAlways: return true;
+          case capture::Compare::kLess: return z < stored;
+          case capture::Compare::kLessEqual: return z <= stored;
+          case capture::Compare::kEqual: return z == stored;
+          default: return false;
+        }
+      };
+      CHECK(765, capture::Compare(depth.depth_func) == capture::Compare::kLess || capture::Compare(depth.depth_func) == capture::Compare::kLessEqual);
+      const float cards[3] = {0.25f, 0.5f, 0.75f};
+      const int orders[6][3] = {{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
+      int most_before = 0;
+      for (const auto& order : orders) {
+        for (float start : {1.0f, 0.6f, 0.1f}) {      // (the depth before the record: nothing, something between, something in front)
+          float stored = start;
+          for (int i : order) {
+            if (passes(depth.depth_func, cards[i], stored) && depth.depth_write) stored = cards[i];
+          }
+          int blends = 0;
+          for (int i : order) {
+            if (passes(half.depth_func, cards[i], stored)) ++blends;
+            CHECK(765, half.depth_write == 0);
+          }
+          float single = start;
+          int before = 0;
+          for (int i : order) {
+            if (passes(d.key.depth_func, cards[i], single)) {
+              single = cards[i];
+              ++before;
+            }
+          }
+          most_before = before > most_before ? before : most_before;
+          CHECK(765, stored == single);                                   // the end depth is the single draw's
+          CHECK(765, blends == (start > cards[0] ? 1 : 0));              // once where a card is in front of what was there; else never
+        }
+      }
+      // (a record whose own test is "less": the colour step is still less-or-equal, or nothing would pass its own depth)
+      PipelineKey strict = d.key;
+      strict.depth_func = uint8_t(capture::Compare::kLess);
+      CHECK(765, CoverageHalfKey(strict).depth_func == uint8_t(capture::Compare::kLessEqual) &&
+                     CoverageHalfDepthKey(strict).depth_func == uint8_t(capture::Compare::kLess));
+      CHECK(765, most_before == 3);                                       // (the fault this replaces: three blends at {2, 1, 0})
+    }
+
     PipelineKey wind = d.key;
     wind.wind = 1;
     CHECK(750, CoverageHalfKey(wind).wind == 1 && CoverageHalfKey(wind).coverage == 1 && !(CoverageHalfKey(wind) == half));

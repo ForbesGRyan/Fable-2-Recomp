@@ -200,6 +200,24 @@ class SwitchOff(unittest.TestCase):
         self.assertEqual(s.count("p.coverage_tail = half;"), 1)
         self.assertEqual(s.count("p.coverage_place = false;"), 1)
         self.assertEqual(s.count("p.coverage_tail = "), 2)             # here, and the wind's moved one in PrepareWind
+        # the half part's depth step (ledger ruling 60): its key asked in the same block, with the colour step's; a
+        # record without it is not a coverage record (today's record); drawn before each of the three places a half
+        # part's colour is drawn, and nowhere else
+        self.assertEqual(s.count("CoverageHalfDepthKey("), 1)
+        self.assertIn("        if (half) half_depth = TryPipeline(dev, CoverageHalfDepthKey(d.key));\n", block)
+        self.assertIn("      cin.has_pipeline = half != nullptr && half_depth != nullptr && (!early || !cin.has_full || full != nullptr);\n", block)
+        self.assertIn("      if (verdict == ClayCoverage::kDrawn) p.coverage_depth = half_depth;\n", block)
+        self.assertEqual(s.count("p.coverage_depth = "), 2)            # here, and the wind's moved one in PrepareWind
+        self.assertEqual(s.count("half_depth_step("), 3)
+        self.assertEqual(s.count("auto half_depth_step = [&](const Prepared& q) {\n    if (!q.coverage_depth) return;\n"), 1)
+        self.assertIn("      if (!q.coverage_tail) continue;\n      half_depth_step(q);\n      cmd->SetPipeline(q.coverage_tail);\n", s)
+        self.assertIn("    if (p.coverage_half) half_depth_step(p);\n", s)
+        self.assertIn("    if (half_here) {\n      half_depth_step(p);\n      cmd->SetPipeline(p.coverage_tail);\n", s)
+        # the colour step writes no depth and is tested less-or-equal (the RHI has no "equal"); the depth step no colour
+        logic = (ROOT / "src" / "native" / "render" / "clay_logic.h").read_text(encoding="utf-8")
+        self.assertIn("constexpr PipelineKey CoverageHalfKey(PipelineKey k) {\n  k.coverage = 1;\n  k.depth_test = 1;\n  k.depth_write = 0;\n"
+                      "  k.depth_func = uint8_t(capture::Compare::kLessEqual);\n  k.blend = 1;\n", logic)
+        self.assertIn("constexpr PipelineKey CoverageHalfDepthKey(PipelineKey k) {\n  k.coverage = 1;\n  k.blend = 0;\n  k.color_mask = 0;\n  return k;\n}\n", logic)
         # a coverage pixel shader goes into a pipeline only for a key with the member
         self.assertIn("  if (key.coverage) {\n"
                       "    nrhi::Shader* const part = key.coverage == 1 ? coverage_half_ps_ : key.coverage == 2 ? coverage_full_ps_ : nullptr;\n"

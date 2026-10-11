@@ -15,6 +15,7 @@ Measured at the bridge (save Hero000), standing, native view off, `REX_VSYNC=0`,
 | the defaults, plain launch, 160 to 200 s (logs 018, 021) | **110 to 114** | 8.5 to 8.7 ms, p90 9.0 to 9.4, p99 13.1 to 14.6, max 13 to 17 | 6.2 ms | 7.5 ms |
 | the defaults with FABLE2_THREAD_PLACE=off (log 020) | 80 | 12.5 ms | 9.5 ms | |
 | + the idle toast without continuous repaint (log 023, 160 s) | **129** | **7.65 ms, p90 8.4 to 8.7, p99 9.1 to 10.3, max under 11.6** | 6.2 ms | 7.6 ms (p90 8.4) |
+| confirmation, plain launch, 200 s, 76 windows (log 025) | **128.6 to 132.9** | **7.5 ms, p90 8.0 to 8.9, p99 8.7 to 11.2, max 9.0 to 12.8** | 7.1 ms | |
 
 The game's own render thread needs 5.1 ms a frame in this configuration; it spends the rest in
 the swap waiting for the GPU-emulation thread.
@@ -73,8 +74,10 @@ to a conclusion).
 
 ## How to run and measure
 
-Since commit 7425ff2 every lever is the default: a plain launch with `REX_VSYNC=0` (the
-uncapped launcher) is the fast configuration. To measure:
+Since commit 7425ff2 every lever is the default, and since e821f2f a plain launch is also
+uncapped (`[perf] uncapped_frame_rate = true` in fable2_config.toml seeds
+`guest_vblank_pacing=false`; without it the `vsync` cvar holds the game at 30 fps, as seen in
+log 024). To measure:
 
 ```
 tools\drive_game.ps1 -BootSave Hero000 -Total 100 -Env @{REX_VSYNC="0"; FABLE2_GUEST_WORK_LOG="1"; FABLE2_HITCH_MS="12"}

@@ -2,10 +2,9 @@
 
 Status: **phase 11a (wind) built and validated by stills and by the native depth, 2026-10-11, with two parts left open by ledger ruling 49:
 criterion 9's cost (no timing evidence yet) and criterion 8's fourth part (no pair of runs of the two commits at one width)** (verdicts with
-each criterion and in FM section 18, "Validation (11a)"; the switch stays off by default); **phase 11b: the rules built; the late draws built and run (criteria 10 and 11 met for them, criterion 12 not decidable as written
-and shown by a substituted measure); the fading draws built and run (criterion 13 met by a substituted baseline; criterion 12 measured in the held sunward view: above the model's band at
-"sun"; criterion 11's layer depth for the early records not judged); a flicker behind a late tree is possible in principle and measured at 0 pixels
-in one view (FM "Native coverage: the fading draws' runs"); the fern is not explained by coverage (plan Tasks 12 to 14)**; phases 11b and 11c: design, 2026-10-10 (branch `native-renderer-foliage`). Plan:
+each criterion and in FM section 18, "Validation (11a)"; the switch stays off by default); **phase 11b (coverage) built and validated on stills, 2026-10-11, with its cost left open: criteria 10 and 11 met, 12 not met as written and met in
+direction (ledger ruling 56), 13 met by a substituted baseline, 14 met but for the cost; the fern is not coverage (ruling 57); a late tree's order
+against blended records is a limit with a user check (ruling 55) (FM section 18, "Validation (11b)", "Limits (11b)"; plan Tasks 12 to 15)**; phases 11b and 11c: design, 2026-10-10 (branch `native-renderer-foliage`). Plan:
 `docs/superpowers/plans/2026-10-10-native-renderer-foliage.md`. Research:
 `.superpowers/sdd/foliage-research.md` (untracked; its scripts and outputs in
 `out/native-evidence/foliage/research/`). Ledger:
@@ -644,6 +643,9 @@ threshold set here without a measured one before it (ruling 20).
     **Verdict (plan Task 13): met for the late records** (the plan function's cases; run D's layer depth
     holds the late tree's own depth on 0.02% of its cover; 0 holes in four scene files). The early records'
     part is plan Task 14's, not yet run.
+    **Verdict (plan Task 15): met.** The early records: the layer's depth before the occluders holds their
+    first-sample cover on 100.00% (7,662 of 7,662 pixels the layer's texels are taken from; bound 95%) and
+    the late tree's on 0.03 to 0.08% (run H); the same without coverage (run I).
 12. *In the game, the late draws (no precedent for the band).* Sunward, sun off, post and bloom
     on, coverage on against off (two runs of one plan whose emulated shots agree within 0.97 to
     1.03 per region; three brackets; no shot within 3 s of a view switch): native on over native
@@ -667,6 +669,7 @@ threshold set here without a measured one before it (ruling 20).
     agree within 0.999 to 1.007). The change is larger than the model's, towards the game in every region
     (native over emulated at "sun" 0.33 -> 0.47 to 0.49, at the root 0.19 to 0.21 -> 0.47 to 0.48) and past
     it in none; the model's frame had the tree on 27% of "sun", this view has it on 58.7%.
+    **Recorded (ledger ruling 56): not met as written, met in direction.**
 13. *In the game, the fading draws.* The same pair with the `87` draws built, against the late
     draws alone: per region between 0.97 and the model's upper bound times 1.03 (model B over C:
     "sun" 1.25, "beams left" 1.05, "beams right" 1.13, "beam root" 1.02), and the replay's pixel
@@ -678,6 +681,9 @@ threshold set here without a measured one before it (ruling 20).
     "beams right" 1.014, "beam root" 1.004 (no fading pixel in the three). None darkens.
 14. Criteria 8 and 9 again for `--fable2_native_coverage` (off: 11a's picture and programs; cost;
     the software-adapter run).
+    **Verdict (plan Task 15): off met** (the programs' bytes: shader case 53; the pass's text; six off-runs
+    without a line of it); **errors met** (logs 615 and 620: 0 `d3d ERROR` in 240 s each on the software
+    adapter, warning id 1328 alone); **cost not judged** (no timing evidence: 1296 wide, a user present).
 
 **11c, the tree occluder, the darkness, criterion 19**
 
@@ -873,3 +879,18 @@ coverage: the first runs", "Native coverage: the fading draws", "Stored mip leve
   level; not the half to two thirds a box filter suggests), the native cover already is the rule's on the
   stored levels (99.3%), and at one half the fern's mean would be 8% lighter, where the game's is darker.
   The third case is not built (FM "The fern on its stored mip levels").
+
+From plan Task 15 (FM section 18, "Validation (11b)", "Limits (11b)"):
+
+- **Ledger ruling 55**: a blended record without depth write behind a late tree, shown at half or hidden by the
+  game's frame-to-frame order, is a limit with a user check (88), not rebuilt: 0 pixels in the one view
+  measured; drawing the tree's half after such records would be wrong for those in front of it (38 pixels in
+  the same view).
+- **Ledger ruling 56**: criterion 12 is recorded as not met as written, met in direction.
+- **Ledger ruling 57**: the fern's look at rest is not coverage; the third case (a family B draw at fade 1) is
+  not built; a limit and a roadmap item.
+- **The four combinations of the wind's and the coverage's switch** have each drawn in the game (runs F, C, G,
+  B); none was judged for cost.
+- **What the closing runs owe phase 11b**: cost at width 1942 with the window on the usual monitor (wind and
+  coverage on against off). No verdict needs a repeat with full read-back; the game's scene under the late
+  tree (criterion 12 like for like) comes with 11c's trace.

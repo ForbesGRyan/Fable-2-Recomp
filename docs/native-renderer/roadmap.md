@@ -44,6 +44,12 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
 - The one startup crash with `--fable2_exposure_readback=on` (log 575; points at the boot-save
   trigger, inference).
 - Why the reference's sun-layer factor is 1.4 to 1.7 times the game's at the beam root.
+- **The fern's look at rest** (and likely other lit plants under alpha-to-mask): natively broad and light,
+  in the game dark and toothed. Not the wind, not the geometry, and not part coverage (on its stored mip
+  levels a quarter of its pixels have one sample of two, its cover already is the game's first-sample
+  rule, and at half it would be lighter: `frame-map.md`, "The fern on its stored mip levels"). Left:
+  the lit plant's light, and the level the game's own fetch takes (needs a capture with read-back and
+  the mip files, at the bridge).
 
 ## Open with the user
 

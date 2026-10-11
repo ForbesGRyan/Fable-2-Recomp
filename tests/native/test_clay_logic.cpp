@@ -11897,6 +11897,17 @@ int main() {
   std::thread(WindWordTests).join();
   std::thread(NativeWindTests).join();
   std::thread(CoverageTests).join();
+  // Native impostors: the flat colour (distant-trees plan Task 7's last step). The mean of the covered texels of
+  // capture D1's fourteen pictures as the fetch gives it to the shader, through the swizzle (2, 1, 0, 3): the
+  // texture's own channels are the same three in the other order (a blue-green, not a leaf's colour).
+  {
+    CHECK(790, std::size(kImpostorFlatColour) == 3);
+    CHECK(791, kImpostorFlatColour[0] == 0.145376f && kImpostorFlatColour[1] == 0.250169f && kImpostorFlatColour[2] == 0.050493f);
+    CHECK(792, kImpostorFlatColour[1] > kImpostorFlatColour[0] && kImpostorFlatColour[0] > kImpostorFlatColour[2]);   // green, red, blue
+    CHECK(793, kImpostorFlatSwizzle == 0x60Au);    // tf0's dword 3, bits 1 to 12, in every 129F row of D1 to D4b
+    auto byte = [](float v) { return int(v * 255.0f + 0.5f); };
+    CHECK(794, byte(kImpostorFlatColour[0]) == 37 && byte(kImpostorFlatColour[1]) == 64 && byte(kImpostorFlatColour[2]) == 13);
+  }
   std::thread(SunTreeTests).join();
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "

@@ -255,5 +255,41 @@ class Capture(unittest.TestCase):
         self.assertEqual(ip.main(["compare", bin_path, fcs]), 0)
 
 
+class FlatColour(unittest.TestCase):
+    """The literal of src/native/render/clay_logic.h (plan Task 7's last step): the mean of capture D1's covered
+    texels as the fetch gives it to the shader."""
+
+    D1 = ROOT / "out" / "native-evidence" / "distant-trees" / "native_discovery_20261011_155547.jsonl"
+
+    def literal(self):
+        import re
+        text = (ROOT / "src" / "native" / "render" / "clay_logic.h").read_text(encoding="utf-8")
+        m = re.search(r"kImpostorFlatColour\[3\] = \{([0-9.]+)f, ([0-9.]+)f, ([0-9.]+)f\};", text)
+        self.assertIsNotNone(m, "no kImpostorFlatColour literal")
+        s = re.search(r"kImpostorFlatSwizzle = 0x([0-9A-Fa-f]+)u;", text)
+        self.assertIsNotNone(s, "no kImpostorFlatSwizzle literal")
+        return tuple(float(x) for x in m.groups()), int(s.group(1), 16)
+
+    def test_the_literal_is_the_swizzled_triple(self):
+        colour, field = self.literal()
+        self.assertEqual(colour, (0.145376, 0.250169, 0.050493))
+        self.assertEqual(field, (FC[3] >> 1) & 0xFFF)
+        self.assertEqual(ip.swizzle(FC), (2, 1, 0, 3))
+        self.assertEqual(ip.swizzled((0.050493, 0.250169, 0.145376), ip.swizzle(FC)), colour)
+
+    def test_the_literal_is_the_capture_s_mean(self):
+        if not self.D1.is_file():
+            self.skipTest("capture D1 is not in out/native-evidence/distant-trees")
+        rows = ip.read_rows(self.D1)
+        draws = ip.frame_pictures(rows, 1)
+        self.assertEqual(len(draws), 14)
+        pictures = [ip._level_fields(self.D1.parent, t, 0)[0] for _, t in draws]
+        m, count = ip.mean(pictures)
+        self.assertEqual(count, 172125)
+        colour, _ = self.literal()
+        for got, want in zip(ip.swizzled(m, ip.swizzle(draws[0][1]["fc"])), colour):
+            self.assertAlmostEqual(got, want, delta=5e-7)
+
+
 if __name__ == "__main__":
     unittest.main()

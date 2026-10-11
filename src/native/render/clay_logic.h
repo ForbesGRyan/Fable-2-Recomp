@@ -7002,6 +7002,22 @@ inline bool PrepassBeyondReach(const float m[4][4], const PositionBounds& box, c
   return (w_min - w_eye) / std::sqrt(length2) >= reach;
 }
 
+// --- Native impostors (frame-map section 19; sub-project 12; plan Task 9 fills this section) ---
+//
+// The flat colour of the far woods' quads while the switch is at `flat` (spec ruling 6): the mean of the texels
+// with the alpha bit set over the fourteen pictures of capture native_discovery_20261011_155547 (D1, the bridge),
+// frame 1, in the pictures' stored units 0 to 1:
+//   python tools/xdk_sigmatch/impostor_pictures.py mean native_discovery_20261011_155547.jsonl 1
+//   -> 14 pictures, 172,125 of 917,504 texels covered; the texture's channels (red = bits 0 to 4 of the swapped
+//      word) 0.050493 0.250169 0.145376; as the fetch gives it to the shader 0.145376 0.250169 0.050493
+//   (out/native-evidence/distant-trees/t7_mean_d1.txt; frame 2: 0.145336 0.250308 0.050491 of 172,022 texels).
+// The literal is the SECOND triple: red, green, blue as pixel shader 4B1D receives them, after the fetch
+// constant's swizzle (2, 1, 0, 3) (tf0's dword 3 = 0x00A80C14, bits 1 to 12 = kImpostorFlatSwizzle, in every 129F
+// row of the five discovery captures). A 1 x 1 picture made of it is sampled WITHOUT a swizzle; a picture decoded
+// by Decode1555Level holds the texture's channels and needs the swizzle applied (its red and blue exchanged).
+inline constexpr float kImpostorFlatColour[3] = {0.145376f, 0.250169f, 0.050493f};
+inline constexpr uint32_t kImpostorFlatSwizzle = 0x60Au;   // x <- 2, y <- 1, z <- 0, w <- 3 (three bits a component)
+
 // --- Native wind (frame-map section 18, "Native wind"; docs/native-renderer/lighting-formulas.md, "Wind") ---
 //
 // The game sways its trunks, leaves and instanced plants in the vertex shader. The pass draws a

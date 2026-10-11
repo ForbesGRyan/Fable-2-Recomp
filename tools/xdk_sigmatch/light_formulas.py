@@ -1782,9 +1782,12 @@ def coverage_has_full(offsets, scale):
 # every row of out/native-evidence/distant-trees/impostor_consts.txt); "vs_lit_at" / "ps_lit_at" name the
 # components the formulas read and where each lies. c254.w of the vertex shader is not read; c255.x and c255.w
 # of the pixel shader are read only under bool b129.
-# "word_source" / "word_endian": how register r6 follows from the storage's bytes (impostor_check.quad_words):
-# PROVISIONAL until a capture holds a draw's fetch constant (plan Task 3); read from `vfetch_full r6.yxwz` and the
-# endian every other captured stream has.
+# "word_source" / "word_endian": how register r6 follows from the storage's bytes (impostor_check.quad_words).
+# As fixed by plan Task 3 on the five discovery captures of 2026-10-11 (frame-map section 19, "Discovery
+# captures"): the draw's own fetch constant (the builder's packet) has endian 2 in all 116 rows, the shader's
+# fetch has the swizzle yxwz (the rows' "fetches": swz 1217), and the replay against the game's depth falls from
+# 99% to 0.1% with the first two components exchanged. Together: a quad's eight bytes are four big-endian half
+# floats x, y, z, s in that order.
 IMPOSTOR_SHADER = {
     "vs": "129F7F2793DA9084", "ps": "4B1D3E6E8E58D3AC",
     "reg": (8, 46, 47, 72, 73, 74, 75, 110, 111, 113, 114, 115, 116, 117),

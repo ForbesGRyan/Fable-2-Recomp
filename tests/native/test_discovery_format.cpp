@@ -209,6 +209,25 @@ int main() {
     // A draw without indices names no file, also of a small buffer.
     if (IndexDumpRange(37444, 5, 0, false, cap).bytes != 0 || IndexDumpRange(37444, 5, 0, false, cap).whole) return 74;
   }
+  // 75 to 79: the stored mip levels of a texture row (ledger ruling 54): the member's text, and what gives none.
+  {
+    using namespace fable2::native::capture;
+    MipLevelRow levels[3] = {{1, 0, 256, 128, 128, 0, 0}, {2, 8192, 256, 64, 64, 0, 0}, {5, 12288, 256, 8, 8, 4, 0}};
+    const std::string m = FormatMipsMember("native_tex_x/14030000_0000000000000001_mips.bin", 0x14038000u, 16384, true, levels, 3);
+    if (m != ",\"mips\":{\"file\":\"native_tex_x/14030000_0000000000000001_mips.bin\",\"phys\":\"0x14038000\",\"bytes\":16384,\"tiled\":true,"
+             "\"levels\":[{\"level\":1,\"offset\":0,\"pitch\":256,\"w\":128,\"h\":128,\"x\":0,\"y\":0},"
+             "{\"level\":2,\"offset\":8192,\"pitch\":256,\"w\":64,\"h\":64,\"x\":0,\"y\":0},"
+             "{\"level\":5,\"offset\":12288,\"pitch\":256,\"w\":8,\"h\":8,\"x\":4,\"y\":0}]}") return 75;
+    if (FormatMipsMember("f", 0x1000, 64, false, levels, 1).find("\"tiled\":false,\"levels\":[{\"level\":1,") == std::string::npos) return 76;
+    // no level, no bytes, no file name: no member (the row is the one of before)
+    if (!FormatMipsMember("f", 0x1000, 64, false, levels, 0).empty() || !FormatMipsMember("f", 0x1000, 0, false, levels, 1).empty() ||
+        !FormatMipsMember("", 0x1000, 64, false, levels, 1).empty() || !FormatMipsMember(nullptr, 0x1000, 64, false, levels, 1).empty()) return 77;
+    // The bytes a dump may take: whole or none, inside the texture's cap and the capture's budget.
+    if (!MipDumpAllowed(4096, 0, 8u << 20, 256ull << 20) || MipDumpAllowed(0, 0, 8u << 20, 256ull << 20) ||
+        MipDumpAllowed((8u << 20) + 1, 0, 8u << 20, 256ull << 20) || !MipDumpAllowed(8u << 20, 0, 8u << 20, 256ull << 20) ||
+        MipDumpAllowed(4096, (256ull << 20) - 4095, 8u << 20, 256ull << 20) || !MipDumpAllowed(4096, (256ull << 20) - 4096, 8u << 20, 256ull << 20)) return 78;
+    if (MipDumpAllowed(0xFFFFFFFFFFFFFFFFull, 1, 8u << 20, 256ull << 20)) return 79;   // (no wrap)
+  }
   std::cout << "PASS: discovery format\n";
   return 0;
 }

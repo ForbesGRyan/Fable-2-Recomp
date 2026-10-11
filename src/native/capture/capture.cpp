@@ -305,6 +305,7 @@ uint32_t g_tex_count = 0;
 std::set<std::tuple<uint32_t, uint64_t, uint64_t>> g_tex_content_seen;
 uint32_t g_tex_content_count = 0;
 uint64_t g_tex_content_bytes = 0;
+uint64_t g_tex_mip_bytes = 0;  // the capture's mip files together (DumpTextureMips)
 // Discovery stream dumps (caller holds g_mutex): the capture's dump folder, the
 // content hashes already dumped per (address, size), files and bytes written.
 std::filesystem::path g_geo_dir;
@@ -1689,6 +1690,65 @@ constexpr uint32_t kMaxUnsupported1DTexelBytes = 16;
 constexpr uint32_t kMaxContentTextures = 1024;
 constexpr uint64_t kMaxContentTextureBytes = 512ull << 20;
 
+// Discovery only (caller holds g_mutex with g_file open; called by DumpTexture alone, once a texture, for a 2D
+// texture the renderer decodes): the guest bytes of the texture's stored mip levels, whole, to
+// <BASE>_<IDENTITY16>_mips.bin, and the texture row's "mips" member that names each level's place in the file
+// (discovery_format.h, FormatMipsMember). The levels' layout is the SDK's (GetGuestTextureLayout), read as the
+// texture cache reads it (render::TextureCache::BuildPlan: levels at or past the packed level live in the
+// packed tail, at the block offset GetPackedMipOffset gives). Whole or nothing: no mip address, a layout that
+// fails, a region over kMaxTextureBytes, bytes that cannot be read, or a capture over kMaxMipDumpBytes give no
+// file and no member. Nothing of this runs outside an armed capture.
+constexpr uint64_t kMaxMipDumpBytes = 256ull << 20;
+constexpr uint32_t kMaxMipDumpLevels = 16;
+
+std::string DumpTextureMips(const render::TextureFetch& t, uint32_t base, uint64_t identity) {
+  namespace texture_util = rex::graphics::texture_util;
+  namespace xenos = rex::graphics::xenos;
+  if (g_tex_dir.empty() || !t.mip_phys || t.format == render::TexFormat::kDxt3a) return {};
+  const uint32_t levels = std::min(render::LevelCount(t), kMaxMipDumpLevels);
+  if (levels < 2) return {};
+  const render::TexFormatInfo fi = render::FormatInfo(t.format);
+  const xenos::TextureFormat format = xenos::TextureFormat(t.xenos_format);
+  const texture_util::TextureGuestLayout layout = texture_util::GetGuestTextureLayout(
+      xenos::DataDimension::k2DOrStacked, t.pitch_texels >> 5, t.width, t.height, 1, t.tiled, format, t.packed_mips, true, levels - 1);
+  const bool has_packed = layout.packed_level != UINT32_MAX;
+  MipLevelRow rows[kMaxMipDumpLevels];
+  size_t count = 0;
+  uint64_t extent = 0;
+  for (uint32_t lv = 1; lv < levels; ++lv) {
+    const bool packed = has_packed && lv >= layout.packed_level;
+    const uint32_t storage_level = packed ? layout.packed_level : lv;
+    const auto& s = layout.mips[storage_level];
+    if (!s.row_pitch_bytes || !s.x_extent_blocks || !s.y_extent_blocks) return {};  // (a layout that fails: no file)
+    MipLevelRow& row = rows[count++];
+    row.level = lv;
+    row.offset = layout.mip_offsets_bytes[storage_level];
+    row.row_pitch_bytes = s.row_pitch_bytes;
+    row.width = render::LevelExtent(t.width, lv);
+    row.height = render::LevelExtent(t.height, lv);
+    if (packed) {
+      uint32_t z = 0;
+      texture_util::GetPackedMipOffset(t.width, t.height, 1, format, lv, row.x_blocks, row.y_blocks, z);
+    }
+    const uint64_t bytes = t.tiled ? texture_util::GetTiledAddressUpperBound2D(s.x_extent_blocks, s.y_extent_blocks,
+                                                                               s.row_pitch_bytes >> fi.bpb_log2, fi.bpb_log2)
+                                   : uint64_t(s.row_pitch_bytes) * (s.y_extent_blocks - 1) + uint64_t(s.x_extent_blocks) * fi.bytes_per_block;
+    extent = std::max(extent, uint64_t(row.offset) + bytes);
+  }
+  if (!MipDumpAllowed(extent, g_tex_mip_bytes, kMaxTextureBytes, kMaxMipDumpBytes)) return {};
+  const uint8_t* src = ReadPhysical(t.mip_phys, uint32_t(extent));
+  if (!src) return {};
+  char name[72];
+  std::snprintf(name, sizeof(name), "%08X_%016llX_mips.bin", base, static_cast<unsigned long long>(identity));
+  std::FILE* f = std::fopen((g_tex_dir / name).string().c_str(), "wb");
+  if (!f) return {};
+  const bool ok = std::fwrite(src, 1, size_t(extent), f) == size_t(extent);
+  std::fclose(f);
+  if (!ok) return {};
+  g_tex_mip_bytes += extent;
+  return FormatMipsMember((g_tex_dir.filename().string() + "/" + name).c_str(), t.mip_phys, extent, t.tiled, rows, count);
+}
+
 uint64_t DumpTexture(const uint32_t fc[6]) {
   const bool by_content = render::DumpKeyedByContent(fc);
   if (g_tex_dir.empty() || (by_content ? g_tex_content_count >= kMaxContentTextures : g_tex_count >= kMaxTextures)) {
@@ -1771,6 +1831,8 @@ uint64_t DumpTexture(const uint32_t fc[6]) {
     row += buf;
   } else {
     ++g_tex_count;
+    // (the stored mip levels of a 2D texture the renderer decodes, beside its base level; after the folder exists)
+    if (!is_1d && err == render::FetchError::kNone) row += DumpTextureMips(t, base, identity);
   }
   row += ",\"fc\":";
   row += HexDwords(fc, 6);
@@ -5164,6 +5226,7 @@ bool OpenLog() {
     g_tex_content_seen.clear();
     g_tex_content_count = 0;
     g_tex_content_bytes = 0;
+    g_tex_mip_bytes = 0;
     g_geo_dir = dir / ("native_geo_" + stamp);
     g_geo_seen.clear();
     g_geo_count = 0;

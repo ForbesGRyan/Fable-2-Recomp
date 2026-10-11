@@ -158,10 +158,31 @@ def decode_rgba(data, fc):
     pitch_blocks = max(pitch // block, wb)
     # Linear base level (SDK GetGuestTextureLayout): fetch pitch aligned to 32 blocks, no 256-byte padding.
     row_pitch = ((pitch_blocks + 31) & ~31) * bpb
+    return w, h, _decode_blocks(data, fmt, endian, w, h, pitch_blocks, row_pitch, tiled)
+
+
+def _format_blocks(fmt):
+    """(texels a block side, bytes a block, log2 of the bytes) of a format decode_rgba reads."""
+    if fmt == 6:
+        return 1, 4, 2
+    if fmt == 18:
+        return 4, 8, 3
+    if fmt in (19, 20):
+        return 4, 16, 4
+    raise ValueError(f"format {fmt}")
+
+
+def _decode_blocks(data, fmt, endian, w, h, pitch_blocks, row_pitch, tiled, x0=0, y0=0, offset=0):
+    """RGBA bytes of a w x h level whose blocks lie in `data` from byte `offset`, block (bx, by) at block
+    (x0 + bx, y0 + by) of its storage: tiled addressing with `pitch_blocks`, or linear rows of `row_pitch` bytes.
+    Data past the end reads as zero."""
+    block, bpb, log2 = _format_blocks(fmt)
+    wb, hb = (w + block - 1) // block, (h + block - 1) // block
     out = bytearray(w * h * 4)
     for by in range(hb):
         for bx in range(wb):
-            o = tiled_offset_2d(bx, by, pitch_blocks, log2) if tiled else by * row_pitch + bx * bpb
+            sx, sy = x0 + bx, y0 + by
+            o = offset + (tiled_offset_2d(sx, sy, pitch_blocks, log2) if tiled else sy * row_pitch + sx * bpb)
             raw = data[o:o + bpb]
             raw = _swap(raw + bytes(bpb - len(raw)), endian)
             if fmt == 6:
@@ -175,7 +196,27 @@ def decode_rgba(data, fc):
                 x, y = bx * block + (i % block), by * block + (i // block)
                 if x < w and y < h:
                     out[(y * w + x) * 4:(y * w + x) * 4 + 4] = bytes(t)
-    return w, h, bytes(out)
+    return bytes(out)
+
+
+def decode_mip_levels(data, fc, mips):
+    """The stored mip levels of a texture row's "mips" member (the discovery capture's dump of the guest bytes at
+    the fetch constant's mip address; src/native/capture/discovery_format.h, FormatMipsMember): a list of
+    (level, width, height, RGBA bytes), in the member's order. `data`: the mips file's bytes; `fc`: the row's
+    fetch constant (format and endian). A level whose place lies outside the file raises ValueError: the dump is
+    whole or absent, so that is a damaged capture, not a short one."""
+    fmt = fc[1] & 0x3F
+    endian = (fc[1] >> 6) & 3
+    block, bpb, log2 = _format_blocks(fmt)
+    tiled = bool(mips.get("tiled"))
+    out = []
+    for lv in mips.get("levels") or []:
+        w, h, pitch = int(lv["w"]), int(lv["h"]), int(lv["pitch"])
+        if w < 1 or h < 1 or pitch < bpb or int(lv["offset"]) >= len(data):
+            raise ValueError("mip level %s lies outside its file" % lv.get("level"))
+        out.append((int(lv["level"]), w, h, _decode_blocks(data, fmt, endian, w, h, pitch >> log2, pitch, tiled,
+                                                         int(lv.get("x", 0)), int(lv.get("y", 0)), int(lv["offset"]))))
+    return out
 
 
 def write_png(path, w, h, rgba, max_edge=256):

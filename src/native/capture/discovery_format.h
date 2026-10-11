@@ -209,4 +209,37 @@ inline IndexDump IndexDumpRange(uint32_t ib_size, uint32_t start, uint32_t count
   if (bytes > cap) return none;
   return IndexDump{uint32_t(first), uint32_t(bytes), false};
 }
+// The stored mip levels of a texture (discovery only; ledger ruling 54: whether a minified alpha-to-mask plant
+// has half-covered pixels inside its cut-out can only be measured on the levels the fetch really reads). The
+// guest bytes at the fetch constant's mip address, whole, go to a file beside the base level's; the texture
+// row names it with each level's place in it: `level`, the byte `offset` of its storage level in the file,
+// that level's row `pitch` in bytes (linear rows; tiled addressing takes pitch / bytes-per-block blocks), the
+// level's own size in texels (`w`, `h`) and, for a level in the packed tail, its block offset (`x`, `y`)
+// inside the tail's storage level.
+struct MipLevelRow {
+  uint32_t level = 0, offset = 0, row_pitch_bytes = 0, width = 0, height = 0, x_blocks = 0, y_blocks = 0;
+};
+// The row's member, with its leading comma; empty (the row is the one of before) without a file name, bytes or
+// a level.
+inline std::string FormatMipsMember(const char* file, uint32_t phys, uint64_t bytes, bool tiled, const MipLevelRow* levels, size_t count) {
+  if (!file || !file[0] || bytes == 0 || count == 0 || !levels) return {};
+  char buf[192];
+  std::string m = ",\"mips\":{\"file\":\"";
+  m += file;
+  std::snprintf(buf, sizeof(buf), "\",\"phys\":\"0x%08X\",\"bytes\":%llu,\"tiled\":%s,\"levels\":[", phys, static_cast<unsigned long long>(bytes),
+                tiled ? "true" : "false");
+  m += buf;
+  for (size_t i = 0; i < count; ++i) {
+    const MipLevelRow& l = levels[i];
+    std::snprintf(buf, sizeof(buf), "%s{\"level\":%u,\"offset\":%u,\"pitch\":%u,\"w\":%u,\"h\":%u,\"x\":%u,\"y\":%u}", i ? "," : "", l.level, l.offset,
+                  l.row_pitch_bytes, l.width, l.height, l.x_blocks, l.y_blocks);
+    m += buf;
+  }
+  return m + "]}";
+}
+// Whether a mip region of `bytes` may be dumped: whole or not at all, at most `cap` bytes a texture and
+// `budget` bytes a capture (`used`: the capture's mip bytes so far).
+inline bool MipDumpAllowed(uint64_t bytes, uint64_t used, uint64_t cap, uint64_t budget) {
+  return bytes != 0 && bytes <= cap && used <= budget && bytes <= budget - used;
+}
 }  // namespace fable2::native::capture

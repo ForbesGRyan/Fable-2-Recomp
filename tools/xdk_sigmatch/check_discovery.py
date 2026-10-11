@@ -105,6 +105,46 @@ def check_index_files(rows, base_dir):
     return named, problems
 
 
+def check_mip_files(rows, base_dir):
+    """(texture rows that name a mips file, problems): the file is there with the row's byte count; the levels
+    are numbered upward from 1, each of the size the base level's halves to and with its place inside the file
+    (ledger ruling 54; discovery_format.h, FormatMipsMember)."""
+    named, problems = 0, []
+    for r in rows:
+        mips = r.get("mips") if r.get("kind") == "texture" else None
+        if not mips:
+            continue
+        named += 1
+        where = "texture %s" % r.get("file")
+        path = os.path.join(base_dir, str(mips.get("file", "")).replace("/", os.sep))
+        if not os.path.isfile(path):
+            problems.append("%s: mips file %s is missing" % (where, mips.get("file")))
+            continue
+        size = os.path.getsize(path)
+        if size != mips.get("bytes") or size == 0:
+            problems.append("%s: mips file has %d bytes, the row says %s" % (where, size, mips.get("bytes")))
+        fc = [int(x, 16) for x in r.get("fc") or []]
+        if len(fc) != 6:
+            problems.append("%s: no fetch constant" % where)
+            continue
+        w, h = (fc[2] & 0x1FFF) + 1, ((fc[2] >> 13) & 0x1FFF) + 1
+        last = 0
+        levels = mips.get("levels") or []
+        if not levels:
+            problems.append("%s: a mips member without a level" % where)
+        for lv in levels:
+            n = lv.get("level", 0)
+            if n <= last or n < 1 or n > 15:
+                problems.append("%s: level %s after %s" % (where, n, last))
+                break
+            last = n
+            if (lv.get("w"), lv.get("h")) != (max(1, w >> n), max(1, h >> n)):
+                problems.append("%s: level %d is %s x %s of a %d x %d texture" % (where, n, lv.get("w"), lv.get("h"), w, h))
+            if not (0 <= lv.get("offset", -1) < size) or lv.get("pitch", 0) <= 0:
+                problems.append("%s: level %d lies outside its file" % (where, n))
+    return named, problems
+
+
 def check_scene_frames(rows):
     """(seen, problems) over "frame" rows: "scene_frame" (the scene published at the row's swap)
     is above 0 and rises from row to row. A row without it published no scene (an older capture,
@@ -159,9 +199,12 @@ def main(argv=None):
     if named or seen or file_problems or frame_problems:
         print(f"{named} draw rows name an index file, {len(file_problems)} problems; "
               f"{seen} frame rows have a scene_frame, {len(frame_problems)} problems")
-    for line in (file_problems + frame_problems)[:20]:
+    with_mips, mip_problems = check_mip_files(rows, os.path.dirname(os.path.abspath(a.discovery)))
+    if with_mips or mip_problems:
+        print(f"{with_mips} texture rows name a mips file, {len(mip_problems)} problems")
+    for line in (file_problems + frame_problems + mip_problems)[:20]:
         print("  " + line)
-    return 0 if checked >= 20 and matched == checked and not file_problems and not frame_problems else 1
+    return 0 if checked >= 20 and matched == checked and not file_problems and not frame_problems and not mip_problems else 1
 
 
 if __name__ == "__main__":

@@ -1251,6 +1251,127 @@ inline uint32_t InstanceMeshCount(uint32_t stream_count, const capture::Instance
   return std::min(stream_count, uint32_t(s.count));
 }
 
+// What GeometryCache::WindWords does before anything is read from the guest or uploaded, as pure
+// functions (review of plan Tasks 8 and 9, Important 2: the order of the ranges against the
+// elements, a leaf's count, the `need` rule and the record's kind are held by tests here; the
+// cache keeps the reads, the lookup, the upload and the insert).
+//
+// PlanWindWords: the guest ranges a record's wind words are built from, in the order the cache
+// reads and hashes them, which of them is which, and the count. A tree: one range an element the
+// family reads, in the elements' order (a leaf: pivot, weights, flutter; a trunk: weights), then a
+// leaf's position stream (the record's own: its extent is measured against it). A plant: the
+// mesh's position stream, then the instance rows. count: the vertices the buffer holds (a tree:
+// what every element's stream and, for a leaf, the positions hold whole; a plant: its flat
+// positions); mesh_count: a plant's mesh vertices; words: count times the family's words.
+// why, with no range, count or words: kElement for a family that is none, a record that is not
+// the family's kind (a plant without its instance set, a tree with one, a skinned record) and an
+// element no reader decodes as the family's; kStream for a plant without a mesh vertex or rows or
+// with more flat positions than the capture's cap, for `need` 0, for fewer vertices than `need`
+// and for more words than 32 bits count.
+struct WindRange {
+  uint32_t addr = 0, size = 0;
+};
+inline constexpr uint32_t kWindRanges = capture::kWindElements + 1;
+struct WindWordsPlan {
+  WindBuild why = WindBuild::kElement;
+  bool plant = false, leaf = false;
+  WindRange range[kWindRanges];
+  uint32_t range_count = 0;
+  int8_t element_range[capture::kWindElements] = {-1, -1, -1};  // element e's stream among `range`; -1: not read
+  int8_t position_range = -1;  // a leaf's positions, a plant's mesh; -1: a trunk
+  int8_t rows_range = -1;      // a plant's instance rows
+  uint32_t count = 0, mesh_count = 0, words = 0;
+};
+inline WindWordsPlan PlanWindWords(const capture::DrawRecord& r, const capture::WindInputs& wind, uint32_t need) {
+  auto refused = [](WindBuild why) {
+    WindWordsPlan none;
+    none.why = why;
+    return none;
+  };
+  WindWordsPlan plan;
+  const capture::WindFamily family = wind.family;
+  plan.plant = family == capture::WindFamily::kPlant;
+  plan.leaf = family == capture::WindFamily::kLeaf;
+  if (!plan.plant && !plan.leaf && family != capture::WindFamily::kTrunk) return refused(WindBuild::kElement);
+  // A plant is an instanced record and a tree is not; no wind mesh is skinned.
+  const capture::InstanceSet& s = r.instances;
+  if (plan.plant != s.active || r.skin.active) return refused(WindBuild::kElement);
+  if (plan.plant) {
+    plan.mesh_count = InstanceMeshCount(PositionCount(r.vb.size, r.pos), s);
+    // The capture caps flat_count (InstanceRangeSkip); nothing larger is built.
+    if (plan.mesh_count == 0 || s.rows_size == 0 || s.flat_count > capture::kMaxDrawCount) return refused(WindBuild::kStream);
+    plan.count = s.flat_count;
+    plan.position_range = int8_t(plan.range_count);
+    plan.range[plan.range_count++] = {r.vb.phys_addr, r.vb.size};
+    plan.rows_range = int8_t(plan.range_count);
+    plan.range[plan.range_count++] = {s.rows_addr, s.rows_size};
+  } else {
+    for (uint32_t e = 0; e < capture::kWindElements; ++e) {
+      if (!wind_detail::Reads(family, e)) continue;
+      if (!wind_detail::Supported(wind.element[e], e)) return refused(WindBuild::kElement);
+      plan.element_range[e] = int8_t(plan.range_count);
+      plan.range[plan.range_count++] = {wind.element[e].vb.phys_addr, wind.element[e].vb.size};
+    }
+    plan.count = TreeWindVertices(wind);
+    if (plan.leaf) {
+      plan.count = std::min(plan.count, PositionCount(r.vb.size, r.pos));
+      plan.position_range = int8_t(plan.range_count);
+      plan.range[plan.range_count++] = {r.vb.phys_addr, r.vb.size};
+    }
+  }
+  plan.words = WindWordsNeeded(family, plan.count);
+  if (need == 0 || plan.count < need || plan.words == 0) return refused(WindBuild::kStream);
+  plan.why = WindBuild::kNone;
+  return plan;
+}
+
+// The words of a plan (plan.words floats into `out`) from the bytes of its ranges: data[i] the
+// bytes of plan.range[i], range[i].size of them. A tree: each element from its own range
+// (BuildTreeWindWords), a leaf's positions decoded from the position range into `positions` (a
+// scratch vector) for the extent; `extent` receives the mesh's extent. A plant: `plant_mesh`, the
+// mesh's decoded positions (plan.mesh_count of them, decoded from the position range by the
+// caller, which has them memoised), and the rows' range (ExpandPlantWindWords); its extent is
+// zero. kNone, or with nothing usable in `out`: the plan's own reason; kStream without a range's
+// bytes, `out`, a plant's mesh or a leaf's scratch vector, and for positions that do not decode;
+// and what the two builders give.
+inline WindBuild BuildWindWords(const WindWordsPlan& plan, const capture::DrawRecord& r, const capture::WindInputs& wind,
+                                const uint8_t* const data[kWindRanges], const capture::Float4* plant_mesh,
+                                std::vector<capture::Float4>* positions, float* out, WindExtent* extent) {
+  if (extent) *extent = WindExtent{};
+  if (plan.why != WindBuild::kNone) return plan.why;
+  if (!data || !out || plan.range_count > kWindRanges) return WindBuild::kStream;
+  for (uint32_t i = 0; i < plan.range_count; ++i) {
+    if (!data[i]) return WindBuild::kStream;
+  }
+  if (plan.plant) {
+    if (!plant_mesh || plan.rows_range < 0) return WindBuild::kStream;
+    return ExpandPlantWindWords(plant_mesh, plan.mesh_count, data[plan.rows_range], plan.range[plan.rows_range].size, r.instances,
+                                plan.count, out);
+  }
+  const uint8_t* streams[capture::kWindElements] = {};
+  size_t sizes[capture::kWindElements] = {};
+  for (uint32_t e = 0; e < capture::kWindElements; ++e) {
+    const int8_t at = plan.element_range[e];
+    if (at < 0) continue;
+    streams[e] = data[at];
+    sizes[e] = plan.range[at].size;
+  }
+  const capture::Float4* decoded = nullptr;
+  if (plan.leaf) {
+    if (!positions || plan.position_range < 0) return WindBuild::kStream;
+    positions->resize(plan.count);
+    if (!capture::DecodePositions(data[plan.position_range], plan.range[plan.position_range].size, r.pos, 0, plan.count, positions->data())) {
+      return WindBuild::kStream;
+    }
+    decoded = positions->data();
+  }
+  return BuildTreeWindWords(wind, streams, sizes, decoded, plan.count, out, extent);
+}
+
+// Whether a cached buffer of `entry_count` vertices serves a draw that names `need` (the cache
+// then hands out the entry's own count and its stored extent, never the asker's).
+constexpr bool WindWordsServe(uint32_t entry_count, uint32_t need) { return need != 0 && entry_count >= need; }
+
 // UVs in a stream of `vb_size` bytes: every vertex whose UV element (both
 // elements when u and v sit apart) lies fully inside the stream.
 inline uint32_t UvCount(uint32_t vb_size, const capture::UvLayout& l) {

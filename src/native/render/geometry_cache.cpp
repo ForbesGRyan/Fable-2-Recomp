@@ -863,62 +863,31 @@ nrhi::Buffer* GeometryCache::WindWords(nrhi::Device* dev, const capture::DrawRec
     st.wind_words_bytes += e.bytes;
     return e.buffer;
   };
-  const capture::WindFamily family = wind.family;
-  const bool plant = family == capture::WindFamily::kPlant;
-  const bool leaf = family == capture::WindFamily::kLeaf;
-  if (!plant && !leaf && family != capture::WindFamily::kTrunk) return refused(WindBuild::kElement);
-  // A plant is an instanced record and a tree is not; no wind mesh is skinned.
-  const capture::InstanceSet& s = r.instances;
-  if (plant != s.active || r.skin.active) return refused(WindBuild::kElement);
-
-  // What is read, and how many vertices the buffer holds.
-  struct Range {
-    uint32_t addr = 0, size = 0;
-    const uint8_t* data = nullptr;
-  };
-  Range ranges[capture::kWindElements + 1];  // a tree: its elements' streams and, for a leaf, the positions'; a plant: mesh, rows
-  size_t range_count = 0;
-  uint32_t count = 0, mesh_count = 0;
-  if (plant) {
-    mesh_count = InstanceMeshCount(PositionCount(r.vb.size, r.pos), s);
-    // The capture caps flat_count (InstanceRangeSkip); nothing larger is built.
-    if (mesh_count == 0 || s.rows_size == 0 || s.flat_count > capture::kMaxDrawCount) return refused(WindBuild::kStream);
-    count = s.flat_count;
-    ranges[range_count++] = {r.vb.phys_addr, r.vb.size};
-    ranges[range_count++] = {s.rows_addr, s.rows_size};
-  } else {
-    for (uint32_t e = 0; e < capture::kWindElements; ++e) {
-      if (!wind_detail::Reads(family, e)) continue;
-      if (!wind_detail::Supported(wind.element[e], e)) return refused(WindBuild::kElement);
-      ranges[range_count++] = {wind.element[e].vb.phys_addr, wind.element[e].vb.size};
-    }
-    count = TreeWindVertices(wind);
-    if (leaf) {
-      count = std::min(count, PositionCount(r.vb.size, r.pos));
-      ranges[range_count++] = {r.vb.phys_addr, r.vb.size};
-    }
-  }
-  const uint32_t words = WindWordsNeeded(family, count);
-  if (need == 0 || count < need || words == 0) return refused(WindBuild::kStream);
+  // What is read, which range is which, and how many vertices the buffer holds: PlanWindWords
+  // (clay_logic.h; its tests hold the order of the ranges against the elements).
+  const WindWordsPlan plan = PlanWindWords(r, wind, need);
+  if (plan.why != WindBuild::kNone) return refused(plan.why);
+  const uint32_t count = plan.count, words = plan.words;
 
   const auto t0 = Clock::now();
+  const uint8_t* data[kWindRanges] = {};
   uint64_t hash = 0;
-  for (size_t i = 0; i < range_count; ++i) {
-    Range& range = ranges[i];
-    range.data = capture::ReadPhysical(range.addr, range.size);
-    if (!range.data) {
+  for (uint32_t i = 0; i < plan.range_count; ++i) {
+    const WindRange& range = plan.range[i];
+    data[i] = capture::ReadPhysical(range.addr, range.size);
+    if (!data[i]) {
       st.hash_ms += Ms(t0, Clock::now());
       return refused(WindBuild::kStream);
     }
     // (in order: the same stream at two places of the list is not the same list)
-    hash = hash * kSecondStreamMix + FrameHash(range.addr, range.size, range.data);
+    hash = hash * kSecondStreamMix + FrameHash(range.addr, range.size, data[i]);
   }
   const GeoKey key = WindKey(r, wind);
   const LookupResult found = index_.Lookup(key, hash);
   const auto t1 = Clock::now();
   st.hash_ms += Ms(t0, t1);
   if (found.hit) {
-    if (auto it = entries_.find(found.id); it != entries_.end() && it->second.count >= need) {
+    if (auto it = entries_.find(found.id); it != entries_.end() && WindWordsServe(it->second.count, need)) {
       ++st.hits;
       return served(it->second);
     }
@@ -926,29 +895,12 @@ nrhi::Buffer* GeometryCache::WindWords(nrhi::Device* dev, const capture::DrawRec
   // All or nothing: one value that is no number in a vertex the words cover, and the mesh has no buffer.
   wind_words_.resize(words);
   WindExtent extent;
-  WindBuild built = WindBuild::kStream;
-  if (plant) {
-    const capture::Float4* decoded = MeshPositions(r, ranges[0].data, FrameHash(ranges[0].addr, ranges[0].size, ranges[0].data), mesh_count);
-    if (decoded) built = ExpandPlantWindWords(decoded, mesh_count, ranges[1].data, s.rows_size, s, count, wind_words_.data());
-  } else {
-    const uint8_t* streams[capture::kWindElements] = {};
-    size_t sizes[capture::kWindElements] = {};
-    size_t next = 0;
-    for (uint32_t e = 0; e < capture::kWindElements; ++e) {
-      if (!wind_detail::Reads(family, e)) continue;
-      streams[e] = ranges[next].data;
-      sizes[e] = ranges[next].size;
-      ++next;
-    }
-    bool have_positions = !leaf;
-    if (leaf) {
-      positions_.resize(count);
-      have_positions = capture::DecodePositions(ranges[next].data, ranges[next].size, r.pos, 0, count, positions_.data());
-    }
-    if (have_positions) {
-      built = BuildTreeWindWords(wind, streams, sizes, leaf ? positions_.data() : nullptr, count, wind_words_.data(), &extent);
-    }
+  const capture::Float4* plant_mesh = nullptr;
+  if (plan.plant) {
+    const WindRange& mesh = plan.range[plan.position_range];
+    plant_mesh = MeshPositions(r, data[plan.position_range], FrameHash(mesh.addr, mesh.size, data[plan.position_range]), plan.mesh_count);
   }
+  WindBuild built = BuildWindWords(plan, r, wind, data, plant_mesh, &positions_, wind_words_.data(), &extent);
   nrhi::Buffer* buffer = nullptr;
   uint64_t alloc = 0;
   if (built == WindBuild::kNone) {

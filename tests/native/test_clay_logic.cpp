@@ -1743,6 +1743,215 @@ static void WindWordTests() {
     only.wind_build[size_t(WindBuild::kElement)] = 4;
     CHECK(686, FormatStatusText(s, only, nullptr).find(" | wind words: 0 records, 0.0 MB, refused {element: 4}\n") != std::string::npos);
   }
+  // 687-689: PlanWindWords and BuildWindWords (review of plan Tasks 8 and 9, Important 2): what
+  // GeometryCache::WindWords does before its upload. A leaf whose three elements and positions lie in
+  // four streams of different content, strides and sizes: a range taken for another element's shows.
+  {
+    auto bytes = [](size_t n, uint32_t mul, uint32_t add, bool halves) {
+      std::vector<uint8_t> s(n);
+      // (halves: every byte in 0x38..0x43, so that a 16-bit value is a finite half in either byte order)
+      for (size_t i = 0; i < n; ++i) s[i] = halves ? uint8_t(0x38 + (i * mul + add) % 12) : uint8_t(i * mul + add);
+      return s;
+    };
+    const std::vector<uint8_t> pivots = bytes(8 * 9, 7, 1, true), weights = bytes(4 * 12, 13, 5, false),
+                               flutter = bytes(12 * 10, 29, 11, false), points = bytes(8 * 11, 5, 3, true);
+    auto element = [](uint32_t addr, uint32_t size, uint16_t offset, uint16_t stride, uint8_t format, uint8_t source, uint8_t count) {
+      capture::LightElement e;
+      e.vb = {addr, size};
+      e.offset_bytes = offset;
+      e.stride_bytes = stride;
+      e.format = format;
+      e.source = source;
+      e.source_count = count;
+      e.flags = uint8_t((format == 6 ? capture::kLightElementNormalized : capture::kLightElementSigned) | (2u << capture::kLightElementEndianShift));
+      return e;
+    };
+    capture::DrawRecord r = BaseRecord();
+    r.pos.format = capture::PosFormat::kHalf4;
+    r.pos.stride_bytes = 8;
+    r.pos.offset_bytes = 0;
+    r.pos.swap16 = true;
+    r.vb = {0x400000, uint32_t(points.size())};
+    WindInputs leaf;
+    leaf.family = WindFamily::kLeaf;
+    leaf.element[capture::kWindPivot] = element(0x100000, uint32_t(pivots.size()), 0, 8, 32, 0x31, 3);
+    leaf.element[capture::kWindWeights] = element(0x200000, uint32_t(weights.size()), 0, 4, 6, 0xE4, 4);
+    leaf.element[capture::kWindFlutter] = element(0x300000, uint32_t(flutter.size()), 4, 12, 6, 0x24, 3);
+    const WindWordsPlan plan = PlanWindWords(r, leaf, 9);
+    CHECK(687, plan.why == WindBuild::kNone && plan.leaf && !plan.plant && plan.range_count == 4 && plan.count == 9 && plan.words == 90 &&
+                   plan.mesh_count == 0);
+    CHECK(687, plan.element_range[capture::kWindPivot] == 0 && plan.element_range[capture::kWindWeights] == 1 &&
+                   plan.element_range[capture::kWindFlutter] == 2 && plan.position_range == 3 && plan.rows_range == -1);
+    CHECK(687, plan.range[0].addr == 0x100000 && plan.range[0].size == pivots.size() && plan.range[1].addr == 0x200000 &&
+                   plan.range[1].size == weights.size() && plan.range[2].addr == 0x300000 && plan.range[2].size == flutter.size() &&
+                   plan.range[3].addr == 0x400000 && plan.range[3].size == points.size());
+    // The count is the smallest of what the three elements and the positions hold whole (9 pivots, 12
+    // weights, 10 flutter values, 11 positions); each in turn the smallest.
+    {
+      capture::DrawRecord q = r;
+      q.vb.size = 8 * 5;
+      CHECK(687, PlanWindWords(q, leaf, 1).count == 5 && PlanWindWords(q, leaf, 5).why == WindBuild::kNone &&
+                     PlanWindWords(q, leaf, 6).why == WindBuild::kStream);
+      WindInputs b = leaf;
+      b.element[capture::kWindWeights].vb.size = 4 * 3;
+      CHECK(687, PlanWindWords(r, b, 1).count == 3);
+      b = leaf;
+      b.element[capture::kWindFlutter].vb.size = 12 * 2 + 8;   // (two whole vertices and the third's element)
+      CHECK(687, PlanWindWords(r, b, 1).count == 3);
+      b.element[capture::kWindFlutter].vb.size = 12 * 2 + 7;
+      CHECK(687, PlanWindWords(r, b, 1).count == 2);
+    }
+    // The need: none asked, and more than the buffer would hold, give nothing (no range, no count).
+    for (uint32_t need : {0u, 10u, 0xFFFFFFFFu}) {
+      const WindWordsPlan none = PlanWindWords(r, leaf, need);
+      CHECK(687, none.why == WindBuild::kStream && none.range_count == 0 && none.count == 0 && none.words == 0);
+    }
+    // The record's kind and the elements.
+    {
+      capture::DrawRecord q = r;
+      q.instances.active = true;
+      CHECK(687, PlanWindWords(q, leaf, 1).why == WindBuild::kElement);
+      q = r;
+      q.skin.active = true;
+      CHECK(687, PlanWindWords(q, leaf, 1).why == WindBuild::kElement);
+      WindInputs b = leaf;
+      b.family = WindFamily::kNone;
+      CHECK(687, PlanWindWords(r, b, 1).why == WindBuild::kElement && PlanWindWords(r, b, 1).range_count == 0);
+      b = leaf;
+      b.element[capture::kWindFlutter].format = 32;
+      CHECK(687, PlanWindWords(r, b, 1).why == WindBuild::kElement);
+      b = leaf;
+      b.family = WindFamily::kPlant;
+      CHECK(687, PlanWindWords(r, b, 1).why == WindBuild::kElement);   // (a plant without its instance set)
+    }
+    // A trunk: its weights alone, and no positions.
+    WindInputs trunk = leaf;
+    trunk.family = WindFamily::kTrunk;
+    const WindWordsPlan tp = PlanWindWords(r, trunk, 12);
+    CHECK(687, tp.why == WindBuild::kNone && !tp.leaf && tp.range_count == 1 && tp.count == 12 && tp.words == 48 &&
+                   tp.element_range[capture::kWindPivot] == -1 && tp.element_range[capture::kWindWeights] == 0 &&
+                   tp.element_range[capture::kWindFlutter] == -1 && tp.position_range == -1 && tp.range[0].addr == 0x200000);
+    // The words: each element from its own range, the extent against the record's own positions. The
+    // reference is BuildTreeWindWords (test_wind_decode.cpp holds it) given the streams by hand.
+    const uint8_t* const data[kWindRanges] = {pivots.data(), weights.data(), flutter.data(), points.data()};
+    std::vector<capture::Float4> scratch;
+    std::vector<float> got(plan.words, -7.0f), want(plan.words, -9.0f);
+    WindExtent got_extent, want_extent;
+    CHECK(688, BuildWindWords(plan, r, leaf, data, nullptr, &scratch, got.data(), &got_extent) == WindBuild::kNone);
+    {
+      std::vector<capture::Float4> decoded(9);
+      CHECK(688, capture::DecodePositions(points.data(), points.size(), r.pos, 0, 9, decoded.data()));
+      const uint8_t* const streams[capture::kWindElements] = {pivots.data(), weights.data(), flutter.data()};
+      const size_t sizes[capture::kWindElements] = {pivots.size(), weights.size(), flutter.size()};
+      CHECK(688, BuildTreeWindWords(leaf, streams, sizes, decoded.data(), 9, want.data(), &want_extent) == WindBuild::kNone);
+    }
+    CHECK(688, got == want && got_extent.weight_max == want_extent.weight_max && got_extent.length_max == want_extent.length_max &&
+                   got_extent.length_max > 0.0f && got_extent.weight_max > 0.5f && scratch.size() == 9);
+    // (the three streams differ where the words are taken: a vertex's weights are not its flutter values,
+    // and every exchange of two ranges gives other words or another extent)
+    CHECK(688, got[3] != got[7] || got[4] != got[8]);
+    for (int a = 0; a < 4; ++a) {
+      for (int b = a + 1; b < 4; ++b) {
+        const uint8_t* swapped[kWindRanges] = {data[0], data[1], data[2], data[3]};
+        std::swap(swapped[a], swapped[b]);
+        WindWordsPlan sized = plan;   // (the sizes go with the bytes: nothing is read past a stream)
+        std::swap(sized.range[a].size, sized.range[b].size);
+        std::vector<float> other(plan.words, -7.0f);
+        WindExtent other_extent;
+        std::vector<capture::Float4> s2;
+        const WindBuild built = BuildWindWords(sized, r, leaf, swapped, nullptr, &s2, other.data(), &other_extent);
+        CHECK(688, built != WindBuild::kNone || other != want || other_extent.length_max != want_extent.length_max);
+      }
+    }
+    // A trunk's words are the weights' four, from the weights' range.
+    {
+      const uint8_t* const one[kWindRanges] = {weights.data()};
+      std::vector<float> words(tp.words, -7.0f);
+      WindExtent extent;
+      CHECK(688, BuildWindWords(tp, r, trunk, one, nullptr, nullptr, words.data(), &extent) == WindBuild::kNone);
+      bool same = true;
+      for (uint32_t v = 0; v < 9; ++v) {
+        for (int k = 0; k < 4; ++k) same = same && words[size_t(v) * 4 + k] == got[size_t(v) * 10 + 3 + k];
+      }
+      CHECK(688, same && extent.length_max == 0.0f && extent.weight_max >= got_extent.weight_max);
+    }
+    // Nothing without a range's bytes, an output, a leaf's scratch vector, or a plan.
+    {
+      std::vector<float> words(plan.words);
+      const uint8_t* const hole[kWindRanges] = {pivots.data(), weights.data(), nullptr, points.data()};
+      CHECK(688, BuildWindWords(plan, r, leaf, hole, nullptr, &scratch, words.data(), nullptr) == WindBuild::kStream &&
+                     BuildWindWords(plan, r, leaf, nullptr, nullptr, &scratch, words.data(), nullptr) == WindBuild::kStream &&
+                     BuildWindWords(plan, r, leaf, data, nullptr, &scratch, nullptr, nullptr) == WindBuild::kStream &&
+                     BuildWindWords(plan, r, leaf, data, nullptr, nullptr, words.data(), nullptr) == WindBuild::kStream);
+      WindExtent stale{3.0f, 4.0f};
+      CHECK(688, BuildWindWords(PlanWindWords(r, leaf, 10), r, leaf, data, nullptr, &scratch, words.data(), &stale) == WindBuild::kStream &&
+                     stale.weight_max == 0.0f && stale.length_max == 0.0f);
+    }
+    // A plant: the mesh's stream, then the rows; the words from the rows' range and the decoded mesh.
+    {
+      const capture::Float4 mesh[3] = {{0.0f, 0.0f, 0.125f, 1.0f}, {1.0f, 0.0f, 0.5f, 1.0f}, {0.0f, 1.0f, 0.875f, 1.0f}};
+      const uint32_t stride = 48;
+      std::vector<uint8_t> rows(2 * stride, 0);
+      auto put = [&](size_t at, float f) {
+        uint32_t u;
+        std::memcpy(&u, &f, 4);
+        for (int k = 0; k < 4; ++k) rows[at + size_t(k)] = uint8_t(u >> (24 - 8 * k));
+      };
+      const float a3[2] = {10.0f, 1.5f}, b3[2] = {20.0f, -4.0f};
+      for (int copy = 0; copy < 2; ++copy) {
+        put(size_t(copy) * stride + 12, a3[copy]);
+        put(size_t(copy) * stride + 28, b3[copy]);
+        put(size_t(copy) * stride, 1.0f);
+      }
+      capture::DrawRecord i = BaseRecord();   // (its stream: 1600 bytes of float3 at stride 16, 100 vertices)
+      capture::InstanceSet& s = i.instances;
+      s.active = true;
+      s.rows_addr = 0x5000;
+      s.rows_size = uint32_t(rows.size());
+      for (int k = 0; k < 3; ++k) {
+        s.rows[k].format = capture::PosFormat::kFloat4;
+        s.rows[k].offset_bytes = 16u * uint32_t(k);
+        s.rows[k].stride_bytes = stride;
+      }
+      s.count = 3.0f;
+      s.inv_count = 1.0f / 3.0f;
+      s.bias = 0.5f;
+      s.flat_count = 6;
+      WindInputs plant;
+      plant.family = WindFamily::kPlant;
+      const WindWordsPlan pp = PlanWindWords(i, plant, 6);
+      CHECK(689, pp.why == WindBuild::kNone && pp.plant && pp.range_count == 2 && pp.position_range == 0 && pp.rows_range == 1 &&
+                     pp.range[0].addr == i.vb.phys_addr && pp.range[0].size == i.vb.size && pp.range[1].addr == 0x5000 &&
+                     pp.range[1].size == rows.size() && pp.count == 6 && pp.mesh_count == 3 && pp.words == 12 &&
+                     pp.element_range[0] == -1 && pp.element_range[1] == -1 && pp.element_range[2] == -1);
+      CHECK(689, PlanWindWords(i, plant, 7).why == WindBuild::kStream && PlanWindWords(i, leaf, 1).why == WindBuild::kElement);
+      capture::DrawRecord q = i;
+      q.instances.rows_size = 0;
+      CHECK(689, PlanWindWords(q, plant, 6).why == WindBuild::kStream);
+      q = i;
+      q.instances.flat_count = capture::kMaxDrawCount + 1;
+      CHECK(689, PlanWindWords(q, plant, 6).why == WindBuild::kStream);
+      q = i;
+      q.instances.count = 0.0f;
+      CHECK(689, PlanWindWords(q, plant, 6).why == WindBuild::kStream);
+      const std::vector<uint8_t> unused(i.vb.size, 0xEE);   // (the mesh's bytes: the caller decodes them)
+      const uint8_t* const two[kWindRanges] = {unused.data(), rows.data()};
+      float out[12];
+      for (float& f : out) f = -7.0f;
+      CHECK(689, BuildWindWords(pp, i, plant, two, mesh, nullptr, out, nullptr) == WindBuild::kNone);
+      for (int n = 0; n < 6; ++n) {
+        CHECK(689, out[2 * n] == a3[n / 3] + b3[n / 3] && out[2 * n + 1] == mesh[n % 3].z);
+      }
+      // (the rows read from the mesh's range, or without the decoded mesh: not these words)
+      const uint8_t* const swapped[kWindRanges] = {rows.data(), unused.data()};
+      float other[12] = {};
+      const WindBuild built = BuildWindWords(pp, i, plant, swapped, mesh, nullptr, other, nullptr);
+      CHECK(689, built != WindBuild::kNone || std::memcmp(other, out, sizeof(out)) != 0);
+      CHECK(689, BuildWindWords(pp, i, plant, two, nullptr, nullptr, other, nullptr) == WindBuild::kStream);
+    }
+    // A cached buffer serves a draw that names no more vertices than it holds.
+    static_assert(WindWordsServe(9, 9) && WindWordsServe(9, 1) && !WindWordsServe(9, 10) && !WindWordsServe(9, 0) && !WindWordsServe(0, 0));
+  }
 }
 
 // 720-739: native wind (foliage sub-project, plan Task 10; clay_logic.h, "Native wind").

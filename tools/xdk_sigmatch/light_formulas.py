@@ -1766,3 +1766,194 @@ def coverage_has_full(offsets, scale):
     """Whether any pixel of a draw whose alpha is at most `scale` can have both samples covered."""
     most = max((int(offsets) >> (2 * index)) & 3 for index in range(4))
     return scale >= 1.0 - 0.125 * most
+
+
+# --- The far woods' impostors (sub-project 12) -------------------------------------------------------------------
+# One camera-turned quad a tree: vertex shader 129F7F2793DA9084 (81 instructions, numbered 10 to 90) and pixel
+# shader 4B1D3E6E8E58D3AC, drawn through BeginVertices as quad lists (.superpowers/sdd/distant-trees-research.md). The functions below
+# are transcriptions of the microcode, checked against it by impostor_check.py on made inputs (plan Tasks 4 and 5)
+# and, once a capture holds a draw's storage, on captured rows (plan Task 6);
+# docs/native-renderer/lighting-formulas.md, "The impostors", has the instruction numbers register by register.
+#
+# "reg": the fourteen vertex registers the shader reads beside its literals (ucode_eval's own list on a made
+# draw: impostor_check.used_registers), in the record's order. "vs_lit" / "ps_lit": the literal registers as the
+# GPU held them (frame-map section 12, "Literals": c254 and c255 of the vertex shader; the pixel shader's c255 in
+# every row of out/native-evidence/distant-trees/impostor_consts.txt); "vs_lit_at" / "ps_lit_at" name the
+# components the formulas read and where each lies. c254.w of the vertex shader is not read; c255.x and c255.w
+# of the pixel shader are read only under bool b129.
+# "word_source" / "word_endian": how register r6 follows from the storage's bytes (impostor_check.quad_words):
+# PROVISIONAL until a capture holds a draw's fetch constant (plan Task 3); read from `vfetch_full r6.yxwz` and the
+# endian every other captured stream has.
+IMPOSTOR_SHADER = {
+    "vs": "129F7F2793DA9084", "ps": "4B1D3E6E8E58D3AC",
+    "reg": (8, 46, 47, 72, 73, 74, 75, 110, 111, 113, 114, 115, 116, 117),
+    "ps_reg": (12, 19, 20, 29, 31),
+    "vs_lit": {254: (0.5, 0.25, 2.0, 0.0), 255: (0.0, 1.0, -1.0, 4.0)},
+    "ps_lit": {255: (0.0, 1.0, 0.1, 0.5)},
+    "vs_lit_at": {"half": (254, 0), "quarter": (254, 1), "two": (254, 2),
+                  "zero": (255, 0), "one": (255, 1), "minus_one": (255, 2), "four": (255, 3)},
+    "ps_lit_at": {"one": (255, 1), "tenth": (255, 2)},
+    "word_source": (1, 0, 3, 2), "word_endian": 2,
+}
+
+
+def impostor_literals(kind="vs"):
+    """{name: value} of the literals a shader of IMPOSTOR_SHADER reads ("vs" or "ps"), from its table."""
+    table = IMPOSTOR_SHADER[kind + "_lit"]
+    return {name: table[reg][comp] for name, (reg, comp) in IMPOSTOR_SHADER[kind + "_lit_at"].items()}
+
+
+def _imp_same(x):
+    return x
+
+
+def _imp_single(x):
+    """x rounded to single precision; what does not fit is an infinity."""
+    if x != x or x in (math.inf, -math.inf):
+        return x
+    try:
+        return struct.unpack("<f", struct.pack("<f", x))[0]
+    except OverflowError:
+        return math.copysign(math.inf, x)
+
+
+def _imp_mul(x, y):
+    """A product as the console makes it: a zero factor gives +0 whatever the other factor is (also an
+    infinity, also no number). ucode_eval's zero_product; the SDK's interpreter and translators say the same."""
+    return x * y if x and y else 0.0
+
+
+def _imp_log2(x):
+    """The microcode's log: base 2; -infinity of 0; no number of a negative or of no number."""
+    if x != x:
+        return x
+    if x == 0.0:
+        return -math.inf
+    if x < 0.0:
+        return math.nan
+    return math.log2(x)
+
+
+def _imp_exp2(x):
+    """The microcode's exp: 2 to the x; 0 of -infinity; infinity where it does not fit."""
+    if x == -math.inf:
+        return 0.0
+    try:
+        return 2.0 ** x
+    except OverflowError:
+        return math.inf
+
+
+def impostor_corner(i, lit=None):
+    """(quad, k) of vertex i: quad = trunc((i + 0.5) * 0.25), k = i - 4 * quad (instr 10, 11, 19 and 21; the
+    fetch of instr 12 takes the quad's word at the same number before it is truncated: it floors). With the
+    table's literals k is 0, 1, 2 or 3."""
+    lit = lit or impostor_literals("vs")
+    scaled = (i + lit["half"]) * lit["quarter"]
+    quad = float(math.floor(scaled)) if scaled >= 0.0 else -float(math.floor(-scaled))
+    k = _imp_mul(-quad, lit["four"]) + i
+    return int(quad), (int(k) if k == int(k) else k)
+
+
+def impostor_position(k, word, c, lit=None, single=False):
+    """k: the corner, 0 to 3. word: (x, y, z, s), the fetch's result as register r6 holds it after instr 12.
+    c: {register: [4 floats]} for IMPOSTOR_SHADER["reg"]. Returns {"pos": oPos (4), "place": o0 (3), "uv": o1 (2)}.
+    A value the microcode makes no number is no number here (the zero under the log, the zero under the
+    reciprocal: what ucode_eval returns).
+
+    With P = (x, y, z + s * c8.z), the raised place (instr 17, 29), a = c46.xyz and V the 3 x 4 matrix whose rows
+    are c115, c116, c117 (the view: its first row is the screen's right, instr 69):
+        top = P + (0, 0, s),  bottom = P - (0, 0, s)                   the upright axis (instr 18, 19, 22, 26)
+        fore = P + s * a,     back = P - s * a                         the lying axis (15, 16, 18, 20, 22 to 27)
+        ev = (c114.x * |V1(top) - V1(bottom)|) ^ c114.y                the upright axis's extent in the view's
+        eh = |V1(fore) - V1(back)| ^ c114.y                            second row, and the lying one's (39 to 46)
+        wv = ev / (ev + eh),  wh = eh / (ev + eh)                      (47, 48, 50)
+        above = P.z > c47.z                                            (31, 53: strictly)
+        the picture's top edge (k = 1, 2):     Q = wv * V(top) + wh * V(back if above else fore)       (54 to 63)
+        the picture's bottom edge (k = 0, 3):  Q = wv * V(bottom) + wh * V(fore if above else back)    (64 to 66)
+        Q.x += -s (k = 0, 1) or +s (k = 2, 3)                          (67, 69)
+        oPos = rows c72..c75 . (Q, 1)                                  (71 to 76)
+        o0 = P;  o1 = (u * c113.x + c113.y, v * c113.w + c113.z), (u, v) = (0, 1), (0, 0), (1, 0), (1, 1)
+    a ^ b is 2 ^ (b * log2 a), with log2 0 = -infinity and 2 ^ -infinity = 0: an axis with no extent has no
+    weight. Where BOTH have none (a quad of no size; a view whose second row has no part of either axis) the
+    reciprocal of instr 48 is infinite and the weights are 0 * infinity, which is +0 by the console's product
+    rule (IEEE: no number): Q is then (-s or +s, 0, 0) and the corners lie at the view's origin.
+    The fourth factor of instr 73 to 76 is `|Q.x| >= 0` (71): 1, or 0 where Q.x is no number.
+    Every sum and product is made in the microcode's order (the extents are differences of whole dot products,
+    not 2 s times a row). `lit`: the literals by name (default: the table's). `single`: the registers, the word
+    and every operation's result rounded to single precision, as the console computes; without it the
+    arithmetic is double precision on the inputs given."""
+    lit = lit or impostor_literals("vs")
+    r = _imp_single if single else _imp_same
+    zero, one, two, minus_one = lit["zero"], lit["one"], lit["two"], lit["minus_one"]
+
+    def m(x, y):
+        return r(_imp_mul(x, y))
+
+    def ad(x, y):
+        return r(x + y)
+
+    X, Y, Z, S = (r(float(v)) for v in word)
+    c = {reg: [r(float(v)) for v in c[reg]] for reg in IMPOSTOR_SHADER["reg"]}
+    a, r115, r116, r117 = c[46], c[115], c[116], c[117]
+    lift = m(S, c[8][2])                                    # 17
+    # The four points (instr 15 to 27). The raise is added before the place's height in every one of them.
+    fore = (ad(m(S, a[0]), X), ad(m(S, a[1]), Y), ad(ad(m(S, a[2]), lift), Z))
+    back = (ad(m(-S, a[0]), X), ad(m(a[1], -S), Y), ad(ad(m(a[2], -S), lift), Z))
+    top_z = ad(ad(lift, S), Z)
+    bottom_z = ad(ad(lift, -S), Z)
+    place = (X, Y, ad(Z, lift))                             # 29: r6.z
+    # The corner (23 to 25, 33, 43): r2.x = u, r2.z = "the picture's top edge", r2.y = v.
+    not_one = float(k != one)
+    is_two = float(k == two)
+    edge = one if not_one == 0.0 else is_two
+    u = zero if k == 0 else not_one
+    upper = zero if k == 0 else edge
+    v = ad(-upper, one)
+    # The rows on the points, sum by sum (13, 14, 28 to 53).
+    xy115 = ad(ad(m(X, r115[0]), m(Y, r115[1])), zero)      # 14
+    xy116 = ad(ad(m(X, r116[0]), m(Y, r116[1])), zero)      # 13
+    xy117 = ad(m(X, r117[0]), m(Y, r117[1]))                # 30, 47
+    top = (ad(ad(xy115, m(top_z, r115[2])), r115[3]),                               # 28, 29, 46
+           ad(r116[3], ad(m(top_z, r116[2]), xy116)),                               # 32, 35, 37
+           ad(ad(m(top_z, r117[2]), xy117), r117[3]))                               # 51, 52
+    bottom = (ad(ad(xy115, m(bottom_z, r115[2])), r115[3]),                         # 36, 38, 48
+              ad(r116[3], ad(xy116, m(bottom_z, r116[2]))),                         # 34, 35, 36
+              ad(r117[3], ad(m(r117[2], bottom_z), xy117)))                         # 31, 50, 52
+    fore_v = (ad(ad(ad(m(fore[0], r115[0]), m(fore[1], r115[1])), m(fore[2], r115[2])), r115[3]),      # 36, 38, 45, 48
+              ad(ad(m(fore[2], r116[2]), ad(m(fore[0], r116[0]), m(fore[1], r116[1]))), r116[3]),      # 32, 34, 35, 39, 41
+              ad(ad(m(fore[2], r117[2]), ad(m(r117[0], fore[0]), m(r117[1], fore[1]))), r117[3]))      # 32, 44, 47, 51, 53
+
+    def dp3(row):                                           # 37, 40, 49: r9.yzx . row.zyx
+        return ad(ad(ad(0.0, m(back[2], row[2])), m(back[1], row[1])), m(back[0], row[0]))
+
+    back_v = (ad(dp3(r115), r115[3]), ad(dp3(r116), r116[3]), ad(dp3(r117), r117[3]))                 # 46, 41, 53
+    # The two weights (39 to 50).
+    upright = abs(ad(top[1], -bottom[1]))                   # 39, 40
+    lying = abs(ad(fore_v[1], -back_v[1]))                  # 42, 43
+    ev = r(_imp_exp2(m(r(_imp_log2(abs(m(c[114][0], upright)))), c[114][1])))       # 41, 42, 44, 45
+    eh = r(_imp_exp2(m(r(_imp_log2(lying)), c[114][1])))                            # 43, 44, 46
+    total = ad(ev, eh)
+    inverse = math.inf if total == 0.0 else r(1.0 / total)  # 48
+    wv, wh = m(ev, inverse), m(eh, inverse)                 # 50
+    above = place[2] > c[47][2]                             # 31, 53
+    if upper == one:                                        # 58, 59: the picture's top edge
+        end, side = top, (back_v if above else fore_v)      # 54 to 57, 60
+        q = [ad(m(wv, end[0]), m(wh, side[0])),             # 61, 62
+             ad(m(wh, side[1]), m(wv, end[1])),             # 63
+             ad(m(wh, side[2]), m(wv, end[2]))]
+    else:
+        end, side = bottom, (fore_v if above else back_v)
+        q = [ad(m(wv, end[0]), m(wh, side[0])),             # 64, 65
+             ad(m(wh, side[1]), m(wv, end[1])),             # 66
+             ad(m(wh, side[2]), m(wv, end[2]))]
+    q[0] = ad(m(ad(m(u, two), minus_one), S), q[0])         # 67, 69
+    w = float(abs(q[0]) >= 0.0)                             # 71: 0 where q[0] is no number
+    # 72: the selectors are the literals 0 and 1 (cndeq picks its second operand where the first is 0).
+    vx = q[0] if zero == 0 else q[2]
+    vz = q[0] if one == 0 else q[2]
+    vy = q[0] if one == 0 else q[1]
+    pos = [ad(ad(ad(ad(0.0, m(c[row][2], vz)), m(c[row][1], vy)), m(c[row][0], vx)), m(c[row][3], w))
+           for row in (72, 73, 74, 75)]                     # 75, 73, 74, 76
+    uv = (ad(m(u, c[113][0]), c[113][1]), ad(m(v, c[113][3]), c[113][2]))           # 68
+    return {"pos": pos, "place": place, "uv": uv}

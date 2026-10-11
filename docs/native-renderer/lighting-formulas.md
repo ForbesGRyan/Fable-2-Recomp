@@ -1293,3 +1293,115 @@ A draw whose alpha is at most `scale` has a fully covered pixel only if `scale >
 ### What stands on inference
 
 That the console's hardware covers samples as the emulator does (the emulator is the oracle of every picture this renderer is compared with). Which of the console's two samples is "the first": the emulator's top sample; the game's depth copy holds the sample at (-0.25, -0.25) of the pixel (measured, plan Task 4), and whether that is the console's convention or the emulator's read-back is not known.
+
+## The impostors
+
+Native renderer sub-project 12 (distant trees), phase 12a, plan Tasks 4 and 5, 2026-10-11. The far woods' impostors as closed formulas, each checked against its microcode: vertex shader `129F7F2793DA9084` (81 instructions, numbered 10 to 90) and pixel shader `4B1D3E6E8E58D3AC`. Nothing here was run in the game, and **no capture yet holds a `129F` draw's storage or its vertex registers** (a `"verts"` row of the captures in hand has `c0` of the bank and no bytes): everything below is closed on made inputs and on the shader dumps alone. The captured rows are plan Task 6's.
+
+### Result
+
+| What | Function of `light_formulas.py` | State |
+|---|---|---|
+| The corner of a vertex | `impostor_corner(i)` | closed with the position |
+| `oPos`, `o0`, `o1` of `129F` | `impostor_position(k, word, c)` | closed on made inputs: 2,000 of 2,000 made draws, largest relative difference 1.5e-13; seven mutations and four literals each fail; no captured row yet |
+
+(`impostor_check.py formulas`, seed 1: `out/native-evidence/distant-trees/t4_formulas.txt`. The bound is spec criterion 1's, `1e-4 * max(1, |value|)` in every component of `oPos`, `o0` and `o1`; the two sides are the same arithmetic in double precision, which a test holds below 1e-9.)
+
+### The position: what `129F` computes
+
+`word` = (x, y, z, s) is register `r6` after the fetch of instruction 12: one half4 a quad, the tree's place and its size. `c` are the fourteen vertex registers `IMPOSTOR_SHADER["reg"]`: `c8`, `c46`, `c47`, `c72..c75`, `c110`, `c111`, `c113..c117` (the interpreter's own list on made draws with the fog begun: `test_the_registers_are_the_interpreters`; the position reads all but `c110` and `c111`, and of `c47` only z). Literals: `c254` = (0.5, 0.25, 2, 0), `c255` = (0, 1, -1, 4) (frame-map section 12, "Literals").
+
+With `P = (x, y, z + s * c8.z)` the **raised place**, `a = c46.xyz`, and `V` the 3 x 4 matrix whose rows are `c115`, `c116`, `c117` (`V(p)` = the three rows on `(p, 1)`; `V1`, `V2`, `V3` its components):
+
+    top  = P + (0, 0, s)        bottom = P - (0, 0, s)          the upright axis
+    fore = P + s * a            back   = P - s * a              the lying axis
+    ev = (c114.x * |V2(top) - V2(bottom)|) ^ c114.y             the upright axis's extent in V's second row
+    eh = |V2(fore) - V2(back)| ^ c114.y                         the lying axis's
+    wv = ev / (ev + eh)         wh = eh / (ev + eh)
+    above = P.z > c47.z                                         strictly; the raised height against the eye's
+    the picture's top edge (corners 1, 2):     Q = wv * V(top)    + wh * V(back if above else fore)
+    the picture's bottom edge (corners 0, 3):  Q = wv * V(bottom) + wh * V(fore if above else back)
+    Q.x += -s (corners 0, 1) or +s (corners 2, 3)
+    oPos = (c72 . (Q, f), c73 . (Q, f), c74 . (Q, f), c75 . (Q, f)),  f = 1 (0 where Q.x is no number)
+    o0 = P                                                      the same at all four corners
+    o1 = (u * c113.x + c113.y, v * c113.w + c113.z),  (u, v) = (0, 1), (0, 0), (1, 0), (1, 1) at corners 0 to 3
+
+`a ^ b` is `2 ^ (b * log2 a)` with `log2 0` = -infinity and `2 ^ -infinity` = 0. In words: the quad's sideways axis is the first axis of `V`'s space, of half-length `s`; its other axis is a blend of the world's vertical and of the lying axis `c46`, weighted by how long each shows in `V`'s second row, the weights sharpened by the exponent `c114.y` and the vertical's favoured by `c114.x`. A camera that looks level sees an upright quad (`eh` = 0), one that looks straight down sees the quad lying along `c46`, its top end away from or towards the camera by whether the tree is above the eye (the tests `test_a_level_camera_sees_an_upright_quad`, `test_a_camera_looking_down_sees_the_quad_lying_along_c46`, `test_below_the_eye_the_lying_quad_is_turned_end_for_end`, `test_between_the_two_the_weights_are_the_powers_of_the_two_extents`, `test_the_size_goes_sideways_in_the_view_not_in_the_world` hold each sentence by hand-written numbers). What `V` and `c72..c75` are in the game (a view matrix and a projection, by the form) is **inference**: their values are in no capture; `Q` is in `V`'s space, so `c72..c75` cannot be the scene's whole view-projection `c0..c3` unless `V` is the identity (plan Task 6's identity is then `c0..c3` = `c72..c75` after `V`, not `c72..c75` alone).
+
+Instruction by instruction (`+` is the co-issued scalar operation; "prev" is the previous scalar result, which `muls_prev` and `adds_prev` read; `lift` = `s * c8.z`):
+
+| Instr | Register | Holds |
+|---|---|---|
+| 10, 11 | `r0.z`, `r0.y` | `i + 0.5`, `(i + 0.5) * 0.25`: the fetch's index |
+| 12 | `r6` | the quad's word (x, y, z, s): `vfetch_full r6.yxwz`, the index floored by the fetch |
+| 13, 14 | `r11.w`, `r10.w` | `x * c116.x + y * c116.y`, `x * c115.x + y * c115.y` (`dp2add` with the literal 0) |
+| 15, 16 | `r4.x`; `r3.x`, `r2.w` | `-s * a.x`; `s * a.z`, `-s * a.y` (prev = `-s`) |
+| 17 | `r1.w` | `lift` |
+| 18 | `r2.x`, `r3.y` | `lift + s`, `-s * a.z` |
+| 19 | `r4.z`, `r0.y` | `lift - s`; the quad's number, `trunc((i + 0.5) * 0.25)` |
+| 20 | `r4.y`, `r4.w` | `s * a.y`, `s * a.x` (prev = `lift`) |
+| 21 | `r1.z` | the corner `k = i - 4 * quad` |
+| 22 | `r0`; `r2.y` | (`back.x`, `bottom.z`, `fore.y`, `fore.x`); `s * a.z + lift` |
+| 23, 24, 25 | `r1.x`, `r1.y`; `r2.z` | `k != 1`; `k == 1 or k == 2`; `-s * a.z + lift` |
+| 26 | `r4` | (`back.z`, `back.y`, `top.z`, `fore.z`): each is the unraised z plus a term that holds `lift` |
+| 27 | `r9.xyz` | (`back.x`, `back.z`, `back.y`) |
+| 28 | `r3.x`, `r3.z` | `top.z * c115.z`, `fore.z * c115.z` |
+| 29 | `r5.y`; `r6.z` | `x c115.x + y c115.y + top.z c115.z`; **`z + lift`: the raise** (from here `r6` is `P`) |
+| 30 | `r8.z`, `r8.w`; `r0.x` | `x * c117.x`, `y * c117.y`; `bottom.z` |
+| 31 | `r2.w`; `r7.x` | `above` (`sgt`, on the raised z); `c117.z * bottom.z` |
+| 32 | `r4.x`, `r4.y`; `r7.z` | `top.z * c116.z`, `fore.z * c116.z`; `c117.x * fore.x` |
+| 33 | `r2.x`, `r2.z` | `u` (0, 0, 1, 1); "the picture's top edge" (0, 1, 1, 0) |
+| 34, 35 | `r1.x`, `r1.y`; `r0.x` | `V2(bottom)` and `fore.x c116.x + fore.y c116.y`, each without its offset; `V2(top)` without it |
+| 36, 37 | `r3.x`, `r5.x`, `r5.z` | `V2(bottom)`, `V2(top)`; `back . c115.xyz` (`dp3`, in the order z, y, x) |
+| 38, 39 | `r3.y`, `r3.w`; `r1.z`, `r1.x` | `V1(bottom)` and `fore.x c115.x + fore.y c115.y`, without offsets; `V2(top) - V2(bottom)`, `V2(fore)` without its offset |
+| 40, 41 | `r1.y`, `r1.x`, `r1.z` | `c114.x * |V2(top) - V2(bottom)|` (prev = the absolute value); `V2(fore)`, `V2(back)` |
+| 42, 43 | `r1.y`, `r1.w`; `r2.y` | `log2` of the first; `log2 |V2(fore) - V2(back)|`; `v = 1 - top edge` |
+| 44, 45, 46 | `r8.x`, `r8.y`; `r7.w` | `ev`, `eh` (`exp` of the logs times `c114.y`); `c117.y * fore.y` |
+| 45, 46, 48 | `r3.z`, `r3.w`; `r4.x`, `r4.y` | `V1(bottom)`, `V1(fore)`; `V1(top)`, `V1(back)` |
+| 47, 48 | `r5.y`, `r5.z`, `r5.w`; `r0.x` | `x c117.x + y c117.y`, `ev + eh`, `fore.x c117.x + fore.y c117.y`; `1 / (ev + eh)` |
+| 49, 50 | `r7.y`; `r0.y`, `r0.z` | `back . c117.xyz`; `wv`, `wh` |
+| 50 to 53 | `r3.y`, `r5.y`, `r1.y`, `r1.w` | `V3(bottom)`, `V3(top)`, `V3(fore)`, `V3(back)` |
+| 53 to 57 | `p0`; `r1`, `r3.w`, `r5.w` | `above`: `r1` = (`V2`, `V3` of fore, of back), `r3.w` = `V1(fore)`, `r5.w` = `V1(back)`; not above: fore and back exchanged in all three |
+| 58 to 63 | `r0.xyz` | the top edge: `Q` = `wv * V(top) + wh * V(r5.w, r1.zw)` |
+| 64 to 66 | `r0.xyz` | the bottom edge: `Q` = `wv * V(bottom) + wh * V(r3.w, r1.xy)` |
+| 67, 69 | `r0.w`, `r0.x` | `2 u - 1`; `Q.x + (2 u - 1) * s` |
+| 68 | `r2.xy` | `o1` |
+| 70, 71 | `r1.xyz`, `r0.w`; `r4.w` | `c47 - P` and its square (the fog's: below); `|Q.x| >= 0` |
+| 72 to 76 | `r4.xyz`, `r3` | (`Q.x`, `Q.z`, `Q.y`); `oPos`, each row as `row.z Q.z + row.y Q.y + row.x Q.x + row.w f` |
+| 86 to 88 | `oPos`, `o1`, `o0` | `r3`, `r2.xy`, `r6.xyz` |
+
+Every sum and product of `impostor_position` is made in the microcode's order (the extents are differences of whole dot products, not `2 s` times a row), which is why the two sides agree to 1.5e-13 and not merely inside the bound.
+
+**Where the plan's and the spec's reading differ from the interpreter:** nowhere in the three tests "written from the reading" (the raise, the picture's corners, `w` = 1 under unit rows): all three pass as written. Three statements of the documents are sharpened: (1) the spec's "two candidate points chosen by the corner (15 to 27)": instructions 15 to 27 build four points (top, bottom, fore, back) for every corner; the corner chooses only at 58 to 66, and the height comparison at 53 to 57. (2) The research's "`oPos` = the corner (x, y, z, 1) through `c72..c75`": the fourth factor is `|Q.x| >= 0` (71), which is 0 where `Q.x` is no number; under rows whose first three entries are 0 such a corner has `oPos.w` = +0, not "no number" (`test_a_corner_that_is_no_number_has_no_fourth_factor`). (3) The plan's made input "`c46` a unit horizontal vector": the microcode reads `c46.z` (16, 18, 22, 24, 26), so half of the made draws give it a third component; with a horizontal `c46` alone those terms would be unchecked.
+
+### The degenerate points, and the console's product rule
+
+The formula returns what `ucode_eval` returns, with the console's rule that a product with a zero factor is +0 whatever the other factor is (`zero_product`; the SDK's interpreter and translators say the same):
+
+- **A quad of no size, or a view whose second row has no part of either axis**: both extents are 0, both powers `2 ^ -infinity` = 0, the reciprocal of their sum is infinite and the weights are `0 * infinity` = **+0 by the console's rule** (IEEE: no number). `Q` is then (-s or +s, 0, 0): the corners lie at the origin of `V`'s space. An IEEE interpreter disagrees in exactly these trials (100 of 2,000: the made kinds `size0` and `flat`) and in no other. Nothing is drawn of such a quad either way; **a native mirror must reproduce the rule or guard `ev + eh == 0`** (it would otherwise hand the rasteriser a position that is no number where the reference has a point, which is harmless on screen but fails a pin).
+- **One axis without extent** (`level`, `down`): its power is 0, the other weight 1; no rule is needed.
+- **A size or place that is no number** (`nan`), **an infinite size** (`inf`): `oPos` is no number wherever a row's entry is not 0; `o0` holds the no-number or the infinity.
+- **`c114.y` = 0** (`still`): both powers are 1 and both weights one half, also for an axis without extent (`0 * -infinity` is +0 by the rule).
+
+### The check
+
+`tools/xdk_sigmatch/impostor_check.py` (its module text has the method; `tests/test_impostor_formulas.py` runs a reduced count).
+
+- **One trial** is a draw (the microcode, a constant bank, the storage's bytes, one half4 a quad) and a vertex index. The microcode gives `oPos`, `o0`, `o1`; its fetch decodes through `capture_replay.element` and the shader's own swizzle. Beside it, from the same bytes and registers, `quad_words` decodes the word (a second decoder: the order and endian of `IMPOSTOR_SHADER`), `impostor_corner` gives the corner and `impostor_position` the outputs. `test_the_check_compares_the_machines_outputs_with_the_formulas` holds that the two sides are two computations.
+- **Made draws**: the ranges are the constants at the module's head (the plan's, with `c46.z` in half of the trials and the eye's height about the raised place); seven trials in forty are the degenerate kinds above. Literal registers hold only the table.
+- **Floors** (a check that cannot fail is no check): each corner 500 of 2,000; above 995, below 1,005; both powers positive numbers in 1,700; both weights inside (0.02, 0.98) in 1,273.
+- **Mutations that must fail** (`POSITION_MUTATIONS`, of 400 made draws): `rows` (`c116` for `c115`) 360; `components` (the word's first two exchanged) 400; `sign` (the size's) 385; `corners` (0 with 1, 2 with 3) 400; `exponent` (`c114.y` by 1%) 173; `raise` (left out) 389; `matrix` (`c72` and `c73` exchanged) 380.
+- **Every literal is where the table says**: `two` (`c254.z`), `one` (`c255.y`), `minus_one` (`c255.z`), `four` (`c255.w`), each changed by 1% in the formula alone, fails 187, 399, 326 and 285 of 400; changed in the formula and at its place in the microcode's constants the two agree again in 400 of 400. `half`, `quarter` (the fetch's index: a 1% change does not move a floor) and `zero` cannot be held this way; their values are the table's.
+- **Mutations of the tools themselves** (a scratch copy, sixteen changes of `light_formulas.py` and `impostor_check.py`, `out/native-evidence/distant-trees/t4_mutations.txt`): fifteen turn at least one test red; the sixteenth (the reciprocal of 0 made "no number") changes no result, because both weights are then products with a zero factor.
+- `trace --instr N` prints the interpreter's registers after an instruction for a made draw.
+
+### Single precision
+
+Both sides of the check compute in double precision on single-precision inputs (the word's on half-precision ones). `impostor_position(..., single=True)` rounds every register, the word and every operation's result to single precision, in the same order: what a single-precision mirror would compute. On the made draws that are not degenerate (1,650) it lies from the double reference by a median of 2.0e-7, a 99th percentile of 8.8e-6 and at most **1.76e-4** of `max(1, |oPos|)` (seed 1; 2.46e-4 with seed 7): the largest are draws whose rows `c72..c75` have entries up to 200 on places up to 2,000 units, where a clip coordinate is a small difference of large products. So **criterion 1's bound of 1e-4 holds between the formula and the microcode, not between a single-precision mirror and the double reference on inputs of this size**; plan Task 9's pins need either the single-precision reference (`single=True`) as their source or a tolerance stated from the captured registers' sizes. Reported, not a check.
+
+### What stands on inference, and what is not checked
+
+1. **No captured row.** The word's order and endian (`word_source` (1, 0, 3, 2), `word_endian` 2: register `r6` is then the four big-endian halves in the order they lie in memory) are read from `vfetch_full r6.yxwz` and from the endian every other captured stream has; plan Task 3's captures settle them, plan Task 6's `rows` holds them.
+2. What the registers mean (`c46` the lying axis, `V` a view, `c72..c75` a projection, `c114` the blend's exponent and gain, `c8.z` the raise) is read from the form; no value of any of the fourteen is in a capture.
+3. That `ucode_eval` is the console, the product rule included, as for every formula of this document.
+4. The fetch's index rounding: the dump has no `RoundIndex`, so the index is floored; with the literals 0.5 and 0.25 the index of vertex `i` is `i / 4 + 0.125`, never nearer than 0.125 to a whole number.

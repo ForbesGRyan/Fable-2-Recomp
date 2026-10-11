@@ -315,6 +315,9 @@ std::set<std::tuple<uint32_t, uint64_t, uint64_t>> g_tex_content_seen;
 uint32_t g_tex_content_count = 0;
 uint64_t g_tex_content_bytes = 0;
 uint64_t g_tex_mip_bytes = 0;  // the capture's mip files together (DumpTextureMips)
+// Under g_mutex: the row being written is an in-scene "verts" row (WriteVertsRow sets it around its
+// texture fetches): the one row at which an impostor's picture is written (render::DumpWrittenAtRow).
+bool g_tex_scene_verts_row = false;
 // Discovery stream dumps (caller holds g_mutex): the capture's dump folder, the
 // content hashes already dumped per (address, size), files and bytes written.
 std::filesystem::path g_geo_dir;
@@ -1812,6 +1815,9 @@ uint64_t DumpTexture(const uint32_t fc[6]) {
     src = ReadPhysical(base, uint32_t(bytes));
     if (!src) return 0;
     content = XXH3_64bits(src, size_t(bytes));
+    // An impostor's picture is hashed at every row that names it (the row's "tfc") and written, with its
+    // levels, at its own draw's row alone: base and levels of one moment.
+    if (!render::DumpWrittenAtRow(fc, g_tex_scene_verts_row)) return content;
     // Marked as dumped only once its file is written (below): a failed write is tried again at
     // the next row that names the content.
     if (g_tex_content_seen.count({base, identity, content})) return content;
@@ -2663,7 +2669,9 @@ void WriteVertsRow(uint32_t id, const LastArgs& args, uint32_t device, const Dev
     row += "}";
   }
   AppendPs(row, dev);
+  g_tex_scene_verts_row = in_scene;  // (an impostor's picture and its levels are written at this row: DumpTexture)
   AppendTextureFetches(row, device, dev);
+  g_tex_scene_verts_row = false;
   AppendPixelConstants(row, device);
   AppendPixelRegisters(row, device);
   {

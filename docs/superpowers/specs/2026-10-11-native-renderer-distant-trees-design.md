@@ -5,9 +5,15 @@ Status: **design, 2026-10-11; nothing built, nothing run.** Branch `native-rende
 scripts and outputs in `out/native-evidence/distant-trees/`, "DT" below). Ledger:
 `.superpowers/sdd/2026-10-11-native-renderer-distant-trees/progress.md` (rulings 1 to 4 are the
 controller's and are not reopened here; where this design finds something that bears on one of
-them it says so under "Decisions that are not this design's"). Plan: to be written from this file.
+them it says so under "Decisions that are not this design's"). Plan:
+`docs/superpowers/plans/2026-10-11-native-renderer-distant-trees.md`.
 Game launches wait for the user's leave (ledger ruling 4): every part below says whether it needs a
 run.
+
+**Amended 2026-10-11 for the controller's rulings 21 and 22** (ledger): ruling 21 strikes the
+impostors' pre-pass draw; ruling 22 orders the work in phases (the shared work first; the pictures
+by read-back last, and only if the cost pair passes its bound; otherwise the sub-project closes at
+`flat`). Each amended passage is marked "(ruling 21)" or "(ruling 22)"; nothing else was changed.
 
 Every fact carries the research's label or names what it was read from: **[measured]** printed by
 a named script from a capture, a stored scene, a shot or a log; **[microcode]** read from
@@ -27,7 +33,13 @@ the game's brightness and the native sun layer's depth holds the woods. Behind
 In ledger ruling 1's shape: option A of R 6.2, its flat-colour step C first; the pictures by forced
 read-back of the game's textures if the read-back passes the cost bound of Design 3, which is the
 first run made; option B (the pictures rendered natively) is the stated fallback and is not
-designed here.
+designed here. *(Ruling 22)*: the work is done in three phases: 12a (discovery, the formulas, the
+decoder; no renderer change), 12b (the capture's side block, the switch, the draw in `flat`, its
+validation), 12c (the pictures by read-back: Design 12 and the half part of Design 10), and 12c
+is entered only if run COST passes its bound. If COST fails or is twice not decidable the
+sub-project closes at `flat` with the capture and the formulas, and the pictures rendered natively
+(option B) become the next roadmap item; no SDK change and no `--readback_resolve=fast` are made
+by this sub-project.
 
 **Non-goals**: the pictures rendered natively (option B: Design 13); water, the far lake's cube,
 the reflection views (roadmap 3); shadow correctness (roadmap 4; ledger ruling 2); the cubes at
@@ -119,7 +131,8 @@ any other time of day, region, town or interior; the near differences of R 5.4; 
   the depth again after the mask step, a record wholly beyond the mask's reach is left out of the
   pre-pass (`PrepassBeyondReach`), and the reach is `c12.y + 10` = 45 units, inside the 50 units
   below which no impostor pixel exists. R 6.1's risk "must write the same depth in both passes"
-  does not arise.
+  does not arise. *(Ruling 21)*: for the same reason the impostors have no pre-pass draw at all
+  (Design 9).
 - *The RHI can draw this without a change [code: `rex/graphics/native_rhi.h`]*: vertices by
   `SV_VertexID`, a buffer bound by address (`SetBufferSrv`), `kR8G8B8A8_UNORM` textures with mip
   levels, `CopyBufferToTexture` per level. It has no 1-5-5-5 format: the picture is decoded on
@@ -151,7 +164,9 @@ any other time of day, region, town or interior; the near differences of R 5.4; 
 ## Design
 
 In the order work is done. Parts 1, 4, 5 and the decoder of part 12 need no game run; the first
-runs are COST (part 3) and the captures D1 and D2 (part 2).
+runs are COST (part 3) and the captures D1 and D2 (part 2). *(Ruling 22)*: the phases are 12a =
+parts 1 to 5 and the decoder of part 12; 12b = parts 6 to 9, the first sample's rule of part 10
+and part 11; 12c = part 12 and the half part of part 10, entered only if run COST passes.
 
 1. **Discovery additions** (capture only, armed captures only; the pass draws nothing new).
    - A `"verts"` row **inside the main scene** gains what a draw row has: the whole vertex bank
@@ -211,10 +226,19 @@ runs are COST (part 3) and the captures D1 and D2 (part 2).
      bridge's regions (hero's shirt, the dog, the four far regions): criterion 16.
    - *Reported, not deciding*: one run with `--readback_resolve=fast` (the SDK's delayed read of
      every resolve), which would be another way to the same bytes and changes how the whole game
-     is run: a decision that is not this design's.
+     is run: a decision that is not this design's. *(Ruling 22)*: this run is not made by
+     this sub-project.
    - **Passes**: Design 12 is built. **Fails**: Design 12 is not built; the sub-project ends
      with the impostors in flat colour (the switch's value `flat`), the decoder as a tested
      tool, and the pictures as the fallback's work (Design 13).
+   - *(Ruling 22)*: the run is made first among the runs, and its verdict is the entry
+     condition of phase 12c and of nothing else: phases 12a and 12b are built whatever it says.
+     "Fails" includes "twice not decidable": the sub-project then closes at `flat` and option B
+     is the roadmap's next item. Until phase 12c is built, and for good if it is not, the
+     switch's value `on` captures as `flat` does and draws no impostor: every record is counted
+     `picture: unread` (no flat quad stands in for a picture: Design 12), no read-back is asked
+     for, and one log line at install says so. Neither an SDK change nor
+     `--readback_resolve=fast` is tried by this sub-project.
 4. **The position formula** (no run for its first part). `impostor_position` in
    `tools/xdk_sigmatch/light_formulas.py`, transcribed from `129F`'s 81 instructions and held to
    the microcode by `tools/xdk_sigmatch/impostor_check.py` with `ucode_eval.py` as the oracle,
@@ -357,12 +381,13 @@ runs are COST (part 3) and the captures D1 and D2 (part 2).
      before the sky step, before every blend, before the coverage's tail and before the sun
      layer's depth is taken. A pure function gives the place, under test with
      `PlanCoverageOrder`'s arrangements.
-   - *Pre-pass* (ledger ruling 1 names it; ruling 12): a model's draw is in the depth pre-pass
-     under the pre-pass's own reach rule, by a depth-only form of the same programs (the same
-     position, the same discards). A draw whose quads all lie beyond the mask's reach is left
-     out and counted, as every such record is. By the constants that is nearly every draw (no
-     impostor pixel exists below 50 units, the reach is 45), so the depth-only pipeline is made
-     on the first frame that needs it; D3's view is where it is expected to run.
+   - *Pre-pass*: **struck (ruling 21)**. The impostors are drawn in the colour pass alone: no
+     depth-only form of the programs, no depth-only pipeline, no reach test and no counter for
+     it. The pre-pass's depth has one reader, the shadow mask, whose reach ends at 45 units,
+     and no impostor pixel exists below 50. Cost if wrong (the ledger's): an impostor inside
+     the mask's reach would not shade the mask. *(As designed before the ruling: a model's draw
+     in the depth pre-pass under the pre-pass's own reach rule, by a depth-only form of the same
+     programs, left out and counted when all its quads lie beyond the reach; ruling 12.)*
    - *Shadows*: the impostors cast none (no `129F` row in a shadow pass) and read no mask (the
      pixel formula has the mean term `c12.w`). No shadow-map draw.
    - *The sun layer's depth*: nothing is added for it. The layer's depth is the scene's, taken
@@ -402,7 +427,10 @@ runs are COST (part 3) and the captures D1 and D2 (part 2).
     scalars, fog and depth. Whole quads: no tree shapes. It is what positions, depth, the
     counters and the debug layer are first judged on, and what the sub-project ends with if the
     read-back fails its bound.
-12. **The pictures** (the switch at `on`; built only if run COST passes).
+12. **The pictures** (the switch at `on`; built only if run COST passes). *(Ruling 22)*: this
+    part, with the half part of Design 10, is phase 12c, the last of the sub-project; its entry
+    condition is run COST's verdict "passes", written in the ledger before its first task
+    starts.
     - *The read-back*: `ForceReadbackList` (`src/core/readback_force_list.h`) gains a third
       argument and, with it, the fourteen bases `0x12704000 + n * 0x2B000` (the first is the
       hero's entry: not listed twice), with static asserts that no window reaches a
@@ -465,7 +493,7 @@ runs are COST (part 3) and the captures D1 and D2 (part 2).
     | D1 to D4 | Design 2: discovery captures, the switch off |
     | V-BRIDGE, V-THIRD | the view of D1 / D2 under `--readback_resolve=full` with the scene dump on and a capture: the switch `off`, `flat`, `on`, and `on` with the coverage and the wind; at the bridge once more with the sun's switch on, impostors off and on |
     | V-BAND, V-SUN | the views of D3 / D4, the same way, off and on |
-    | WARP | the software adapter under the debug layer, 240 s: `flat`; `on` with the coverage; D3's view |
+    | WARP | the software adapter under the debug layer, 240 s: `flat`; `on` with the coverage (phase 12c). *(Ruling 21)*: the run in D3's view is struck with the depth-only form it was for |
     | OFF | every switch at its default, the plan of log 657 |
     | TIME | criterion 15's six bridge runs and the third spot's pair, no read-back but the switch's own |
 
@@ -526,7 +554,7 @@ wait for the user's leave. From 5 on they are this design's, each on the recomme
   left out by it in nearly every frame - why: ledger ruling 1 names the pre-pass, and the rule
   already exists; the mask's value beyond 45 units does not depend on depth - cost if wrong: a
   depth-only pipeline that seldom runs (D3's view and a software-adapter run there are its
-  executions). Whether to drop it is put to the controller below.
+  executions). Whether to drop it is put to the controller below. **Struck by ruling 21.**
 - Ruling 13: with the coverage's switch off an impostor pixel is kept iff the game's first
   sample is covered, drawn whole; with it on, the half-covered pixels are drawn at half in the
   early tail, every model's depth step before any colour step - why: a minified one-bit picture
@@ -560,6 +588,19 @@ wait for the user's leave. From 5 on they are this design's, each on the recomme
 - Ruling 20: a draw with bool `b129` set is refused - why: the ground-fog block is 42
   instructions no capture exercises - cost if wrong: in a place with ground fog the far woods
   are missing, counted.
+- Ruling 21 (the controller's; ledger): the pre-pass draw of the impostors is struck - why: the
+  shadow mask's reach ends at 45 units and no impostor pixel exists below 50, so it has no
+  reader; one pipeline and one source of mismatch fewer - cost if wrong: an impostor inside the
+  mask's reach would not shade the mask; the dissolve says none exists. It replaces ruling 12.
+- Ruling 22 (the controller's; ledger): the plan is written for the shared work first
+  (discovery, formulas, decoder, capture, the flat step and its validation) with the pictures
+  by read-back as a last phase that starts only if the COST pair passes its bound; if COST
+  fails or is twice not decidable, the sub-project closes at `flat` plus the capture and the
+  formulas, and native pictures (option B) become the next roadmap item; no SDK change and no
+  `--readback_resolve=fast` by this sub-project - why: the prior says the pair may well fail
+  (2.4 to 13 ms a forced resolve seen before), and the shared work is the same either way -
+  cost if wrong: the far woods stay flat mean-coloured quads for a sub-project; that still
+  closes the depth and the brightness gap.
 
 ## Success criteria
 
@@ -659,8 +700,9 @@ of them or "not decidable".
     240 s on the software adapter under the debug layer at the bridge, 0 `d3d ERROR` lines,
     warnings listed by id; **and the log shows the step drew** (`Impostors: ... drawn 14`) and
     the shot shows quads or trees on the ranges (viewed), so that the programs shaded pixels.
-    One such run for `flat`, one for `on` with the coverage on, one in D3's view for the
-    depth-only form. The software adapter's pictures are not judged (the read-back texture at
+    One such run for `flat`, one for `on` with the coverage on (phase 12c: ruling 22). *(Ruling
+    21)*: the third run, in D3's view for the depth-only form, is struck with that form. The
+    software adapter's pictures are not judged (the read-back texture at
     `0x12704000` is the flat red dog there). **Decided by**: runs WARP.
 15. *Cost.* Shot width 1942, each run made alone, the head's uncapped default stated in the
     report, one session, the bridge: `off`, `flat`, `on` (with the coverage and the wind on in
@@ -736,8 +778,11 @@ now has a named neighbour (the picture resolved every frame at its address), not
   ruling 1), or a change in the SDK (a forced read-back that does not wait, or one address in N
   frames), or running the game under `--readback_resolve=fast`: the first is ruled; the other
   two change the SDK or how the game is run, and are the controller's and the user's.
+  **Decided (ruling 22)**: the sub-project closes at `flat`; option B is the next roadmap item;
+  the other two are not tried by this sub-project.
 - **The pre-pass draw** (ruling 12): ledger ruling 1 names it; by the mask's reach it has no
-  reader in nearly every frame. Kept as ruled; the controller may strike it.
+  reader in nearly every frame. Kept as ruled; the controller may strike it. **Decided (ruling
+  21)**: struck.
 - **The half part under the coverage's switch** (ruling 13) if open question 8's share is small.
 - **The default of `--fable2_native_impostors`**, and that the value `on` adds thirteen entries
   to a start-up list of the SDK: the user's, after validation; off until then.

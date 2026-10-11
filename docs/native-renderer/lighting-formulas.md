@@ -1075,8 +1075,10 @@ Native renderer sub-project 11 (foliage), phase 11a, plan Tasks 5 to 7, 2026-10-
 | Plant | `FC4F2EF6930768BE` (near) | scene | `wind_plant` | closed: 2,000 of 2,000, the push loop at 0; 69 rows, 4,416 of 4,416 |
 | Plant | `33C00226C154C1F2` (near) | scene | `wind_plant` | closed: 2,000 of 2,000, the push loop at 0; 48 rows, 3,072 of 3,072 |
 | Plant | `A8A5B2A89F70336A` | shadow caster | `wind_plant` | closed: 2,000 of 2,000; 279 rows of its own streams (two captures), 17,856 of 17,856, of which 2,305 are beyond the cut |
+| Trunk | `475EC9F795E5EDBB` (trunks, branches) | scene | `wind_trunk` (`wind_tree_offset`, `wind_tree_terms`) | closed: 2,000 of 2,000; 1,464 rows, 92,128 of 92,128 |
+| Trunk | `FBD39C64463E180B` | shadow caster | `wind_trunk` | closed: 2,000 of 2,000; 1,110 rows of its own streams, 69,968 of 69,968 |
 
-(`wind_check.py formulas` and `rows`; the bound is spec criterion 1's, `1e-4 * max(1, |oPos|)` in every component; the largest relative difference on made draws is 1.4e-14 and on capture rows 1.4e-14: the two sides are the same arithmetic in double precision. `WIND_SHADERS` has the hashes with family, role, registers, literal places and elements.) `36B543CECAE5C781` (the push alone) and `6AD4108C3FF07966` (nothing) have no row. The trunks and the leaves are plan Tasks 6 and 7.
+(`wind_check.py formulas` and `rows`; the bound is spec criterion 1's, `1e-4 * max(1, |oPos|)` in every component; the largest relative difference on made draws is 1.4e-14 and on capture rows 1.4e-14: the two sides are the same arithmetic in double precision. `WIND_SHADERS` has the hashes with family, role, registers, literal places and elements.) `36B543CECAE5C781` (the push alone) and `6AD4108C3FF07966` (nothing) have no row. The leaves are plan Task 7; until they are entered a tree would sway under a still crown, so nothing is to draw a trunk's wind without them (spec risk 4).
 
 ### The plants' formula
 
@@ -1097,6 +1099,50 @@ p'    = p + h * cos(theta) * (c26.x * c21 + c26.y * c22)   51 to 58
 - With `c26` = 0 the plant stands. The bridge's caster rows with `c25.x` = 0 have `c26` = 0 (ledger ruling 26: the bound of `c25.x` is [0, 64]).
 - The four near shaders then push `xy` away from up to four points in a loop over integer constant `i0` (`c[56 + a0]` on). The push is not drawn (spec ruling 10) and not in the formula; the check runs the loop 0 times and says so.
 
+### The trunks' formula
+
+`wind_trunk(p, w4, c15, c16, c17, lit)` = `p + wind_tree_offset(w4, c15, c16, c17, lit)`: instr 17 to 58 of `475E` build the offset that instr 65 adds to the fetched position (`FBD3`: 8 to 50, added at 51). The research had the block's structure only ("42 instructions with co-issued scalar ops"; spec risk 4); it closes. It was transcribed register by register with the interpreter as the oracle at each step (`wind_check.py trace 475E --instr N`; `TrunkAgainstMicrocode.test_trace_gives_the_transcriptions_steps` holds two of the steps) and then folded.
+
+`p` is the fetched position read as `yxw1` (the tree's own frame: `c0..c3` hold the tree's place). `w4` = (b, a, d, c) is the 8_8_8_8 of dword 7 in the fetch's **source** order x, y, z, w: the shader's register holds it as `yxwz` in `475E` and in `FBD3` alike, the capture's swizzle word for it is 1217 in both. With `t = c15.x` (the clock plus the tree's own phase), `g = c17.w * gust` (`c17.w` is twice the clock) and `s(q)` the sine of the wrapped phase `frac(frac(q) + half) * two_pi + lo`, that is `sin(2 pi q)`:
+
+```
+s0 = s(rate0 * t)                                                        17, 18, 22 to 27
+s1 = s(rate0 * b + d * c16.x + (c16.y + rate1) * t + g)                  17 to 26
+s2 = s(d * c16.x + (c16.y + rate2) * t + g)                              17 to 28
+along  = d^2 * c17.z * along * (amp * s1 * (|amp * s0| * quarter + base) + c17.z * lean)     26 to 31
+across = d^2 * c17.z * across * s2                                                           26 to 31
+s3 = s(phase_y * t + b)                                                  35 to 41, 46
+s4 = s((c16.z * t + g + phase_x) * c + b)                                40 to 48
+s5 = s((c16.z * t + g + phase_y) * c + b)                                40 to 49
+S  = (amp * s3 + half) * a * (half * c17.z) * c15.z                      50 to 54
+u  = amp * s4 * S,   v = amp * s5 * S                                    50, 55
+x = along * c17.x - across * c17.y + u                                   32 to 37, 58
+y = along * c17.y + across * c17.x + v
+z = -quarter * along^2 - half * (u^2 + v^2)                              38, 40, 49, 56, 57
+```
+
+- Two motions. `along` and `across` are the sway of the whole tree along the wind's direction `c17.xy` (the direction in the tree's own frame, per instance) and across it, growing with the square of `d` (the vertex's height weight): a slow sine (`rate1`, 0.035 a second, with the instance's `c16.y`) under a slower envelope (`rate0`), about a constant lean `c17.z * lean`. `u` and `v` are a branch's own wobble, scaled by `a`, with a phase that `b` and `c` set: without `b` and `c` its phase is 0 and it is still.
+- The drop of `z` is second order: it keeps a swaying branch near its length (the research's reading of instr 56, 57; instr 38, 40 and 49 are the same for the sway).
+- A vertex whose four values are zero stands, exactly. `c16.w` (-1 in every trunk row), `c15.y` and `c15.w` are not read.
+- The selects at instr 32 and 34 take `c17.xy` and its quarter turn because the literals `c253.z` and `c253.w` are 0 and 1; `c254.w` (0) is added at instr 56 and is the third component of the vector at 32. The formula is the microcode with those three at 0, 1, 0 (`WIND_STRUCTURE`: `sel_zero`, `sel_one`, `zero`); the rows hold them so that an object with another table is not drawn with it.
+- `wind_reach_tree(w4_max, c15, c16, c17, lit)` bounds the offset's length with every sine at 1 for a mesh whose four values are at most `w4_max`: 0.57 units for the bridge's registers with `w4_max` = 1 (`wind_pins.py`); a sweep of the clock reaches more than a quarter of the bound (`Trunk.test_the_offset_never_leaves_its_reach`).
+
+| Name | Value | `475E` | `FBD3` | | Name | Value | `475E` | `FBD3` |
+|---|---|---|---|---|---|---|---|---|
+| `half` | 0.5 | `c251.x` | `c251.x` | | `phase_y` | 0.11 | `c254.y` | `c254.y` |
+| `base` | 0.7 | `c251.y` | `c254.w` | | `lo` | -pi | `c254.z` | `c254.z` |
+| `rate1` | 0.035 | `c252.x` | `c252.x` | | `amp` | 0.3849 | `c255.x` | `c255.x` |
+| `rate2` | 0.472 | `c252.y` | `c252.y` | | `along` | 0.3 | `c255.y` | `c255.y` |
+| `two_pi` | 2 pi | `c252.z` | `c252.z` | | `across` | 0.019245 | `c255.z` | `c255.z` |
+| `quarter` | 0.25 | `c252.w` | `c252.w` | | `rate0` | 0.1 | `c255.w` | `c255.w` |
+| `lean` | 0.04 | `c253.x` | `c253.x` | | `zero` | 0 | `c254.w` | `c253.z` |
+| `gust` | 0.025 | `c253.y` | `c253.y` | | `sel_zero` | 0 | `c253.z` | `c253.z` |
+| `phase_x` | 0.23 | `c254.x` | `c254.x` | | `sel_one` | 1 | `c253.w` | `c253.w` |
+
+The caster keeps 0.7 where the scene shader has its 0 (`c254.w`) and takes its zero from `c253.z`. The element: `("weights", fetch, 6, 7, "xyzw", 4)`, fetch ordinal 4 in `475E` and 1 in `FBD3` (`TrunkAgainstMicrocode.test_the_elements_are_the_dumps_fetches`).
+
+**Checked** as the plants are ("The check"): made draws with `c15..c17` inside Design 5's bounds and their edges (a clock up to 1e7, `c17.w` up to 2e7), the position's halves and the four bytes over their ranges, one draw in 25 without weights: 2,000 of 2,000 for both shaders (worst relative difference 4.9e-15; 1,587 and 1,616 moved). Capture rows: `475E`: 1,464 rows of the three captures (the main scene's and the reflection views'), 92,128 of 92,128 vertices, 64,350 moved; `FBD3` on its own streams (two captures): 1,110 rows, 69,968 of 69,968, 38,144 moved; worst relative difference 3.4e-15. Identity: `FBD3` on `475E`'s streams and bank: 1,176 main-scene rows, 18,816 vertices, largest difference **0.0** (the scene shader's `oPos` is up to 0.44 to 0.54 from rest in them); the same on made draws (`test_the_caster_is_the_scene_shader_on_made_inputs`). Mutations, each failing 114 to 162 of 200 made trials: `c16` for `c15`, the first two values of fetch 4 exchanged, the sign of `c17.xy`, `amp` changed by 1%; and each of the fifteen numeric literals, in both shaders, changed by 1% alone is caught and changed together with its place in the microcode's constants agrees again.
+
 ### The literals are data
 
 The shaders of one family hold the same numbers in other registers and components, so a formula takes them by name (`lit`) and `WIND_SHADERS[hash]["lit_at"]` says where each shader holds each (spec ruling 9). `WIND_LITERALS[family]` has the single-precision values, `WIND_LITERAL_ORDER[family]` the names in the order the generated table and the native constants keep them. The plants':
@@ -1111,7 +1157,7 @@ The shaders of one family hold the same numbers in other registers and component
 | `half` | 0.5 | `c254.z` | `c254.w` | `c254.z` | `c254.z` | `c254.z` |
 | `unit` | 1 | `c254.y` | `c254.y` | `c254.y` | `c254.y` | `c254.y` |
 
-`unit` is structure (`WIND_STRUCTURE`): the 1 of the phase is also the `w` the shader gives its position (instr 25), so the formula has it as the number 1 and the row keeps it only so that a shader object whose table differs there is not drawn with the formula. `half` is also the bias of the instancing index (the entry's `"bias"`). The other five are the formula's alone.
+`unit` is structure (`WIND_STRUCTURE`): the 1 of the phase is also the `w` the shader gives its position (instr 25), so the formula has it as the number 1 and the row keeps it only so that a shader object whose table differs there is not drawn with the formula. `half` is also the bias of the instancing index (the entry's `"bias"`). The other five are the formula's alone. The trunks' table is with their formula above.
 
 ### The check
 

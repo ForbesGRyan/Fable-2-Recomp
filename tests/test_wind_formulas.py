@@ -215,5 +215,146 @@ class OnACapture(unittest.TestCase):
         self.assertTrue(any("A8A5" in line and "8123" in line for line in lines), lines)
 
 
+
+TRUNK, TRUNK_CASTER = "475EC9F795E5EDBB", "FBD39C64463E180B"
+# A trunk's registers at the bridge (capture native_discovery_20261010_182130, a 475E row; R A2).
+C15, C16, C17 = (59.7342339, 0.63, 0.72, 0.32), (0.012, 0.06, 0.4, -1.0), (-0.660901546, -0.63156563, 2.0, 111.802376)
+
+
+def made_tree(i):
+    """The i-th made tree input: (p, w4, c15, c16, c17), the registers inside the spec's Design 5 bounds."""
+    w4 = tuple(((i * k) % 256) / 255.0 for k in (7, 13, 29, 31))
+    p = (3.0 + 0.1 * i, -7.0 + 0.03 * i, 1.0 + 0.01 * i)
+    c15 = (50.0 + 0.37 * i, 0.63, 0.5 + (i % 9) * 0.4, (i % 5) * 0.3)
+    c16 = (0.012 + 0.001 * (i % 7), 0.06, 0.4, -1.0 + 0.3 * (i % 8))
+    c17 = (math.cos(0.1 * i) * (0.3 + 0.02 * (i % 100)), math.sin(0.1 * i) * (0.3 + 0.02 * (i % 100)), (i % 17) * 1.0,
+           100.0 + 0.74 * i)
+    return p, w4, c15, c16, c17
+
+
+class Trunk(unittest.TestCase):
+    def lit(self):
+        return lf.WIND_SHADERS[TRUNK]["lit"]
+
+    def test_a_vertex_without_weights_stands(self):
+        """R A1: the four values of fetch 4 scale the whole offset."""
+        p = (10.0, 20.0, 3.0)
+        self.assertEqual(lf.wind_trunk(p, (0.0, 0.0, 0.0, 0.0), C15, C16, C17, self.lit()), p)
+        self.assertNotEqual(lf.wind_trunk(p, (0.5, 0.5, 0.5, 0.5), C15, C16, C17, self.lit()), p)
+        # the two halves of the offset each have their own byte: d (source z) the tree's sway, a (source y) the
+        # wobble, whose phase is b and c times a clock (with neither it is 0 and its sine is 0)
+        self.assertNotEqual(lf.wind_trunk(p, (0.0, 0.0, 0.5, 0.0), C15, C16, C17, self.lit()), p)
+        self.assertNotEqual(lf.wind_trunk(p, (0.25, 0.5, 0.0, 0.0), C15, C16, C17, self.lit()), p)
+        self.assertNotEqual(lf.wind_trunk(p, (0.0, 0.5, 0.0, 0.5), C15, C16, C17, self.lit()), p)
+        self.assertEqual(lf.wind_trunk(p, (0.0, 0.5, 0.0, 0.0), C15, C16, C17, self.lit()), p)
+        self.assertEqual(lf.wind_trunk(p, (0.5, 0.0, 0.0, 0.5), C15, C16, C17, self.lit()), p)
+
+    def test_the_offset_never_leaves_its_reach(self):
+        moved = 0
+        for i in range(400):
+            p, w4, c15, c16, c17 = made_tree(i)
+            got = lf.wind_trunk(p, w4, c15, c16, c17, self.lit())
+            dist = math.sqrt(sum((g - x) ** 2 for g, x in zip(got, p)))
+            reach = lf.wind_reach_tree(max(w4), c15, c16, c17, self.lit())
+            self.assertLessEqual(dist, reach * (1.0 + 1e-6), i)
+            moved += dist > 1e-3
+        self.assertGreater(moved, 300)
+        self.assertEqual(lf.wind_reach_tree(0.0, C15, C16, C17, self.lit()), 0.0)
+        # the bound is not a slack one: within four times the largest offset found over a sweep of the clock
+        far = 0.0
+        for i in range(4000):
+            c15 = (0.013 * i,) + C15[1:]
+            off = lf.wind_tree_offset((1.0, 1.0, 1.0, 1.0), c15, C16, (C17[0], C17[1], C17[2], 2 * c15[0]), self.lit())
+            far = max(far, math.sqrt(sum(x * x for x in off)))
+        self.assertLess(lf.wind_reach_tree(1.0, C15, C16, C17, self.lit()), 4.0 * far)
+
+    def test_the_closed_form_written_out(self):
+        """The reading of 475E's instr 17 to 58 with the shader's numbers written as decimals: the sway along
+        and across the wind, the branch's wobble, and the drop of z that instr 56 and 57 (and 40, 49) give."""
+        def s(q):
+            return math.sin(2.0 * math.pi * q)
+
+        k = f32                 # the shader holds its numbers in single precision
+        for i in (1, 17, 123, 311):
+            p, (b, a, d, c), c15, c16, c17 = made_tree(i)
+            t, g = c15[0], c17[3] * k(0.025)
+            s0 = s(k(0.1) * t)
+            s1 = s(k(0.1) * b + d * c16[0] + (c16[1] + k(0.035)) * t + g)
+            s2 = s(d * c16[0] + (c16[1] + k(0.472)) * t + g)
+            along = d * d * c17[2] * k(0.3) * (k(0.3849) * s1 * (0.25 * abs(k(0.3849) * s0) + k(0.7)) + k(0.04) * c17[2])
+            across = d * d * c17[2] * k(0.019245) * s2
+            scale = (k(0.3849) * s(k(0.11) * t + b) + 0.5) * a * 0.5 * c17[2] * c15[2]
+            u = k(0.3849) * s((c16[2] * t + g + k(0.23)) * c + b) * scale
+            v = k(0.3849) * s((c16[2] * t + g + k(0.11)) * c + b) * scale
+            want = (p[0] + along * c17[0] - across * c17[1] + u, p[1] + along * c17[1] + across * c17[0] + v,
+                    p[2] - 0.25 * along * along - 0.5 * (u * u + v * v))
+            got = lf.wind_trunk(p, (b, a, d, c), c15, c16, c17, self.lit())
+            for x, w in zip(got, want):
+                self.assertAlmostEqual(x, w, delta=2e-5 * max(1.0, abs(w)))
+            # the relation itself, on the function's own terms: exact
+            al, ac, uu, vv = lf.wind_tree_terms((b, a, d, c), c15, c16, c17, self.lit())
+            off = lf.wind_tree_offset((b, a, d, c), c15, c16, c17, self.lit())
+            flat = (off[0] - uu, off[1] - vv)                       # the sway's part of the horizontal offset
+            self.assertAlmostEqual(flat[0] ** 2 + flat[1] ** 2, (al * al + ac * ac) * (c17[0] ** 2 + c17[1] ** 2), delta=1e-9)
+            self.assertAlmostEqual(off[2], -0.25 * al * al - 0.5 * (uu * uu + vv * vv), delta=1e-12)
+            self.assertLessEqual(off[2], 0.0)
+
+    def test_what_the_trunk_does_not_read(self):
+        p, w4 = (1.0, 2.0, 3.0), (0.2, 0.4, 0.6, 0.8)
+        base = lf.wind_trunk(p, w4, C15, C16, C17, self.lit())
+        self.assertEqual(lf.wind_trunk(p, w4, C15, C16[:3] + (0.035,), C17, self.lit()), base)       # c16.w: the leaves'
+        self.assertEqual(lf.wind_trunk(p, w4, (C15[0], 9.0, C15[2], 9.0), C16, C17, self.lit()), base)   # c15.y, c15.w
+        self.assertNotEqual(lf.wind_trunk(p, w4, (C15[0], C15[1], 0.5, C15[3]), C16, C17, self.lit()), base)
+
+    def test_the_rows(self):
+        scene, caster = lf.WIND_SHADERS[TRUNK], lf.WIND_SHADERS[TRUNK_CASTER]
+        self.assertEqual((scene["family"], scene["role"], caster["family"], caster["role"]), ("trunk", "scene", "trunk", "caster"))
+        self.assertEqual(scene["reg"], (15, 16, 17))
+        self.assertEqual(scene["lit_reg"], (251, 252, 253, 254, 255))
+        self.assertEqual(scene["elements"], (("weights", 4, 6, 7, "xyzw", 4),))
+        self.assertEqual(caster["elements"], (("weights", 1, 6, 7, "xyzw", 4),))
+        self.assertEqual(scene["lit"], caster["lit"])
+        self.assertNotEqual(scene["lit_at"], caster["lit_at"])          # the caster keeps 0.7 in another register
+
+
+@unittest.skipUnless(DUMPS.is_dir(), NO_DUMPS)
+class TrunkAgainstMicrocode(unittest.TestCase):
+    def test_the_elements_are_the_dumps_fetches(self):
+        for hash_, row in lf.WIND_SHADERS.items():
+            fetches = wind_check.dump_fetches(wind_check._text(hash_, DUMPS))
+            for name, fetch, fmt, offset, source, count in row["elements"]:
+                self.assertEqual(fetches[fetch], (95, fmt, offset), (hash_, name))
+                self.assertEqual(len(source), count)
+
+    def test_trace_gives_the_transcriptions_steps(self):
+        """475E: instr 31 holds the sway's two amplitudes in r8.xy, instr 58 the offset in r5 (z, y, x)."""
+        case = wind_check.made_case(TRUNK, seed=3, trial=2, dumps=DUMPS)
+        ins = wind_check.formula_inputs(case)
+        c = case.consts
+        along, across, u, v = lf.wind_tree_terms(ins["weights"], c[15], c[16], c[17], case.row["lit"])
+        r = wind_check.trace(case, 31)
+        self.assertAlmostEqual(r[8][0], along, delta=1e-9 * max(1.0, abs(along)))
+        self.assertAlmostEqual(r[8][1], across, delta=1e-9 * max(1.0, abs(across)))
+        off = lf.wind_tree_offset(ins["weights"], c[15], c[16], c[17], case.row["lit"])
+        r = wind_check.trace(case, 58)
+        for got, want in zip((r[5][2], r[5][1], r[5][0]), off):
+            self.assertAlmostEqual(got, want, delta=1e-9 * max(1.0, abs(want)))
+
+    def test_the_caster_is_the_scene_shader_on_made_inputs(self):
+        """Criterion 2's identity without a capture: FBD3 on 475E's made draws, exact."""
+        text = wind_check._text(TRUNK_CASTER, DUMPS)
+        moved = 0
+        for k in range(60):
+            case = wind_check.made_case(TRUNK, seed=7, trial=k, dumps=DUMPS)
+            a, m = wind_check.run_microcode(case)
+            other = wind_check._as_other(case, TRUNK_CASTER, case.consts, DUMPS)
+            self.assertEqual(other.text, text)
+            b = wind_check.run_microcode(other)[0]
+            self.assertEqual(max(abs(x - y) for x, y in zip(a["oPos"], b["oPos"])), 0.0, k)
+            rest = wind_check.project(case.consts, wind_check.formula_inputs(case, m)["p"])
+            moved += max(abs(x - y) for x, y in zip(a["oPos"], rest)) > 1e-3
+        self.assertGreater(moved, 40)
+
+
 if __name__ == "__main__":
     unittest.main()

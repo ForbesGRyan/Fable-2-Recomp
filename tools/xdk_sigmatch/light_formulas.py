@@ -1530,3 +1530,100 @@ def wind_plant(p, z, a3, b3, c7xy, c10x, c21, c22, c25x, c26xy, lit):
 def wind_reach_plant(c21, c22, c26xy):      # an upper bound of |offset|: |c26x c21 + c26y c22|
     """The largest distance wind_plant moves a vertex: h and the cosine are at most 1."""
     return math.sqrt(sum((c21[k] * c26xy[0] + c22[k] * c26xy[1]) ** 2 for k in range(3)))
+
+
+# --- the trees: trunks and branches (plan Task 6) ---------------------------------------------------------------
+
+WIND_LITERAL_ORDER["trunk"] = ("half", "base", "rate1", "rate2", "two_pi", "quarter", "lean", "gust", "phase_x",
+                               "phase_y", "lo", "amp", "along", "across", "rate0", "zero", "sel_zero", "sel_one")
+WIND_LITERALS["trunk"] = dict(zip(WIND_LITERAL_ORDER["trunk"], (_wind_f32(v) for v in (
+    0.5, 0.7, 0.035, 0.472, 2.0 * math.pi, 0.25, 0.04, 0.025, 0.23, 0.11, -math.pi, 0.3849, 0.3, 0.019245, 0.1,
+    0.0, 0.0, 1.0))))
+WIND_REGISTERS["trunk"] = (15, 16, 17)
+# The one element a trunk's wind reads besides the position: the 8_8_8_8 of dword 7, its four values in the
+# fetch's SOURCE order (x to w, before the destination swizzle, which differs between the two shaders' registers
+# and not between what they compute). (name, fetch ordinal, Xenos format, offset in dwords, source, count)
+_TRUNK_WEIGHTS = ("weights", 6, 7, "xyzw", 4)
+WIND_SHADERS.update({
+    "475EC9F795E5EDBB": _wind_row(
+        "trunk", "scene", "half=251.x base=251.y rate1=252.x rate2=252.y two_pi=252.z quarter=252.w lean=253.x "
+        "gust=253.y phase_x=254.x phase_y=254.y lo=254.z amp=255.x along=255.y across=255.z rate0=255.w zero=254.w "
+        "sel_zero=253.z sel_one=253.w", elements=(_TRUNK_WEIGHTS[:1] + (4,) + _TRUNK_WEIGHTS[1:],)),
+    "FBD39C64463E180B": _wind_row(
+        "trunk", "caster", "half=251.x base=254.w rate1=252.x rate2=252.y two_pi=252.z quarter=252.w lean=253.x "
+        "gust=253.y phase_x=254.x phase_y=254.y lo=254.z amp=255.x along=255.y across=255.z rate0=255.w zero=253.z "
+        "sel_zero=253.z sel_one=253.w", elements=(_TRUNK_WEIGHTS[:1] + (1,) + _TRUNK_WEIGHTS[1:],)),
+})
+
+
+def _wind_phase(q, lit):
+    """A phase as the tree shaders wrap it, in [-pi, pi): its sine is sin(2 pi q)."""
+    return _wind_frac(_wind_frac(q) + lit["half"]) * lit["two_pi"] + lit["lo"]
+
+
+def wind_tree_terms(w4, c15, c16, c17, lit):
+    """(along, across, u, v): the four amplitudes wind_tree_offset is made of. `w4` = (b, a, d, c): the four
+    values of the 8_8_8_8 element in the fetch's source order.
+
+    With t = c15.x (the tree's clock: seconds plus the tree's own phase), g = c17.w * gust (c17.w: twice the
+    clock) and s(q) = sin of the wrapped phase 2 pi q (instruction numbers of 475E):
+        s0 = s(rate0 * t)                                                        17, 18, 22 to 27
+        s1 = s(rate0 * b + d * c16.x + (c16.y + rate1) * t + g)                  17 to 26
+        s2 = s(d * c16.x + (c16.y + rate2) * t + g)                              17 to 28
+        along  = d^2 * c17.z * along * (amp * s1 * (|amp * s0| * quarter + base) + c17.z * lean)     26 to 31
+        across = d^2 * c17.z * across * s2                                                           26 to 31
+        s3 = s(phase_y * t + b)                                                  35 to 41, 46
+        s4 = s((c16.z * t + g + phase_x) * c + b)                                40 to 48
+        s5 = s((c16.z * t + g + phase_y) * c + b)                                40 to 49
+        S  = (amp * s3 + half) * a * (half * c17.z) * c15.z                      50 to 54
+        u  = amp * s4 * S,  v = amp * s5 * S                                     50, 55
+    along and across are the sway of the whole tree along the wind's direction c17.xy and across it, growing
+    with the square of d; u and v are a branch's own wobble, scaled by a."""
+    b, a, d, c = w4
+    t = c15[0]
+    g = c17[3] * lit["gust"]
+    s0 = math.sin(_wind_phase(t * lit["rate0"], lit))
+    s1 = math.sin(_wind_phase(b * lit["rate0"] + (d * c16[0] + ((c16[1] + lit["rate1"]) * t + g)), lit))
+    s2 = math.sin(_wind_phase(d * c16[0] + ((c16[1] + lit["rate2"]) * t + g), lit))
+    dd = d * c17[2] * d
+    along = dd * lit["along"] * (lit["amp"] * s1 * (abs(lit["amp"] * s0) * lit["quarter"] + lit["base"]) + c17[2] * lit["lean"])
+    across = dd * lit["across"] * s2
+    s3 = math.sin(_wind_phase(t * lit["phase_y"] + b, lit))
+    turn = c16[2] * t + g
+    s4 = math.sin(_wind_phase((turn + lit["phase_x"]) * c + b, lit))
+    s5 = math.sin(_wind_phase((turn + lit["phase_y"]) * c + b, lit))
+    scale = (lit["amp"] * s3 + lit["half"]) * a * (lit["half"] * c17[2]) * c15[2]
+    return along, across, lit["amp"] * s4 * scale, lit["amp"] * s5 * scale
+
+
+def wind_tree_offset(w4, c15, c16, c17, lit):
+    """What the wind adds to a trunk vertex, and to a leaf's pivot (the two families hold one block):
+        x = along * c17.x - across * c17.y + u                                   32 to 37, 58
+        y = along * c17.y + across * c17.x + v
+        z = -quarter * along^2 - half * (u^2 + v^2)                              38, 40, 49, 56, 57
+    The drop of z is the second-order term that keeps a swaying branch near its length."""
+    along, across, u, v = wind_tree_terms(w4, c15, c16, c17, lit)
+    return (along * c17[0] - across * c17[1] + u, along * c17[1] + across * c17[0] + v,
+            -(along * along) * lit["quarter"] - (u * u + v * v) * lit["half"])
+
+
+def wind_trunk(p, w4, c15, c16, c17, lit):
+    """The position 475E's instr 65 makes (FBD3: instr 51): p + wind_tree_offset. `p` the fetched position read
+    as yxw1, `w4` the four values of fetch 4 in the fetch's source order, `lit` the named literals of the
+    shader's c251..c255. A vertex whose four values are zero stands. c16.w and c15.y, c15.w are not read."""
+    off = wind_tree_offset(w4, c15, c16, c17, lit)
+    return tuple(p[k] + off[k] for k in range(3))
+
+
+def wind_reach_tree(w4_max, c15, c16, c17, lit):
+    """An upper bound of |wind_tree_offset| for a mesh whose four values are at most `w4_max` each (1 when
+    they are not known), each sine taken as 1."""
+    w = abs(w4_max)
+    dd = w * w * abs(c17[2])
+    along = dd * abs(lit["along"]) * (abs(lit["amp"]) * (abs(lit["amp"]) * abs(lit["quarter"]) + abs(lit["base"]))
+                                      + abs(c17[2] * lit["lean"]))
+    across = dd * abs(lit["across"])
+    wobble = abs(lit["amp"]) * (abs(lit["amp"]) + abs(lit["half"])) * w * abs(lit["half"] * c17[2]) * abs(c15[2])
+    flat = math.hypot(c17[0], c17[1]) * math.hypot(along, across) + math.sqrt(2.0) * wobble
+    drop = abs(lit["quarter"]) * along * along + abs(lit["half"]) * 2.0 * wobble * wobble
+    return math.hypot(flat, drop)

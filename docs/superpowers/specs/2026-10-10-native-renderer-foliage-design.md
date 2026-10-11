@@ -1,7 +1,9 @@
 # Native renderer sub-project 11: foliage (wind, part coverage, the tree occluder)
 
-Status: **phase 11a (wind) built and validated, 2026-10-11** (verdicts with each criterion and in FM section 18, "Validation (11a)"; the
-switch stays off by default); phases 11b and 11c: design, 2026-10-10 (branch `native-renderer-foliage`). Plan:
+Status: **phase 11a (wind) built and validated by stills and by the native depth, 2026-10-11, with two parts left open by ledger ruling 49:
+criterion 9's cost (no timing evidence yet) and criterion 8's fourth part (no pair of runs of the two commits at one width)** (verdicts with
+each criterion and in FM section 18, "Validation (11a)"; the switch stays off by default); **phase 11b: the rules and the late draws built,
+not yet run in the game (plan Tasks 12 and 13)**; phases 11b and 11c: design, 2026-10-10 (branch `native-renderer-foliage`). Plan:
 `docs/superpowers/plans/2026-10-10-native-renderer-foliage.md`. Research:
 `.superpowers/sdd/foliage-research.md` (untracked; its scripts and outputs in
 `out/native-evidence/foliage/research/`). Ledger:
@@ -588,6 +590,12 @@ threshold set here without a measured one before it (ruling 20).
    points. Outside the mask on is 0.2 to 1.9 points above off (the 1 point as first written is not
    met on the later pairs). Shots 1296 wide, read-back runs at 2 to 5 frames a second, `RUN
    UNCHECKED`: FM section 18, "Validation (11a)".
+   *What that verdict covers (ledger ruling 51):* the stills show that the foliage moves and that two runs
+   repeat; `D` saturates, and half the game's amplitude would pass its bound. The amplitude rests on the
+   native depth of the stored scenes against the replay: the fern's draw at 1.00 to 1.02 of the way from
+   rest to the wind position, trunks 99 to 100%, leaves 60.5% with the wind against 2.4% at rest, `48D3`
+   57.7% against 10.6% on 5,448 pixels, `33C0` 40% against 0.9% on 388, each reversed on the wind-off
+   control (FM section 18, "Validation (11a)", the family table).
 7. *No depth-test loss.* In a stored native scene with the wind on and the shadows on: the pixels
    whose depth is nearer than the clear depth and whose colour is the clear colour are at most
    0.01% of the picture, and not more than in the dump of the same run pattern with the wind off
@@ -729,8 +737,10 @@ section 18, "Discovery runs"; figures and files there):
   100.00% with the wind against 18.08% and 61.43% at rest). Whether the quarter pixel is the
   console's first sample or this emulator's read-back convention is not known: it matters for
   Design 10's first-sample rule (plan Task 12).
-- Open question 1: the clock is seconds of real time, one unit a second, from the process's
-  start, unclamped (two runs agree to 10 ms). Open question 2: the direction turns in steps of 2
+- Open question 1: the clock is seconds of real time, one unit a second, unclamped; **its origin
+  varies by run** (1.70 to 4.06 s after the log's first line over the runs of plan Task 4; the
+  captures "at 88 s" of Task 11's session read 86.80, 86.88 and 86.96), so "from the process's start,
+  two runs agree to 10 ms", as first written here, is withdrawn. Open question 2: the direction turns in steps of 2
   to 3.5 degrees inside 17 to 28 degrees of azimuth in 17 s of clock; the strength is constant.
   Open question 3: the pixel counts exist. Open question 4: yes. Open question 6: the fading and
   the late draws are in the pre-pass bins. Open question 7: not settled (base level alone in a
@@ -766,3 +776,36 @@ ledger ruling's number:
 - **Criterion 1** is judged on captures `182130`, `182313`, `121036`: met. **Criterion 2**: met,
   every identity exact (0.0). **Criterion 4** is not judged as written: its deviation and counts
   are with the criterion; inside that deviation every shader is met.
+
+From plan Tasks 8 to 11 and their reviews (FM section 18, "Wind inputs", "Wind words", "Native
+wind", "Validation (11a)", "Limits (11a)"; figures and files there):
+
+- **Design 5 as built** (Tasks 8 and 9): `WindInputs` is 132 bytes with the 28 literals in the
+  table's row; `DrawRecord` stays 616 bytes with `wind_index` at byte 614; the registers are read
+  by `ReadConstantRegisters`; the clock travels as the register's bits. Criterion 3 is judged on
+  the record's STORED entry (ledger ruling 40: an armed capture writes the scene's entries into its
+  frame row), not on the re-read at the draw alone.
+- **Design 6 as built** (Task 9; ledger ruling 40): everything of the wind words before the upload
+  is a pure function (`PlanWindWords`, `BuildWindWords`) under test; the mesh's extent
+  (`WindExtent`: the largest weight and the largest `|P - Q|`) is taken while the words are built.
+- **Design 7 as built** (Task 10): one program, `kClayWindVs`, for the colour pass, the pre-pass and
+  both shadow maps; `PipelineKey` gained `wind` (14 bytes); the scene's records are decided in a
+  loop of their own after the shadows are prepared; an unlit record, a lit plant and a caster take a
+  new large slot (at most 4,096 a frame; at the cap the casters are served first); the literal
+  verdict of a shader object is asked again once a frame; F3 has a `Wind:` line. The program's text
+  is held to the reference by value (`tests/test_wind_hlsl.py`: 32 pins and 1,200 made inputs;
+  ledger ruling 44), since no earlier test saw a wrong component or sign in it.
+- **Ledger ruling 48**: a plant's seed is summed in another association than the game's (a phase of
+  about 1e-3 radian); logged as a limit, not fixed.
+- **Ledger rulings 41, 45, 46**: phase 11a was validated on binary `9EE2090F124FC916`, built before
+  the merge of the frame-time work, because the head did not build then; the head builds since
+  commit `a227629` (plan Task 13's first step: binary `3D66CE8A74D4871F`, both suites passing).
+- **Ledger ruling 47**: validation runs carry `--mouse_look=false`. With it the sunward plan's look
+  did not finish rising before the shots at 2 to 5 frames a second (run 5 of Task 11).
+- **Criterion 6** (ledger rulings 27, 29, 51): its text above is not amended; its verdict is by the
+  substituted measure, and what that measure covers is said with the criterion.
+- **Ledger ruling 49**: criterion 9's cost and criterion 8's fourth part stay open until the
+  sub-project's closing runs at width 1942.
+- **The fern** (ledger rulings 43, 44; review of Task 11): no code fix, on the native depth; the
+  account of the shots by the sway's phase is consistent with them and not shown; its look at rest
+  is a limit older than the wind (FM "Limits (11a)" 8).

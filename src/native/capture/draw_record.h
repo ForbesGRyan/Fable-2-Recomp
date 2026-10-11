@@ -119,14 +119,23 @@ struct DrawRecord {
   // DecodeRenderState turns them into the state the native pass draws with.
   StateWords state_words;
   SkipReason skip = SkipReason::kNone;
+  // The draw's wind inputs (wind_inputs.h, WindInputs) are entry `wind_index` of
+  // the frame's FrameScene::wind (a scene record) or FrameScene::shadow_wind of
+  // its cascade (a shadow record), read through WindOf / ShadowWindOf
+  // (frame_scene.h); kNoSideIndex: the draw has none (the wind off, a shader
+  // that does not sway, an input that could not be read) and is drawn at rest.
+  // Set by FrameBuilder::Add and ::AddShadow. It lies in what was the record's
+  // tail padding (foliage spec ruling 7).
+  uint16_t wind_index = kNoSideIndex;
 };
 
 // 1,064 bytes with the terrain inputs (452) in every record; a frame has about
 // 950 records at the bridge and each is copied into the frame on the guest
 // thread. Measured, so that a field added here is noticed: inputs that only
 // some draws have belong in a side array (the terrain inputs, the light
-// inputs: an index of 16 bits each).
+// inputs, the wind inputs: an index of 16 bits each).
 static_assert(sizeof(DrawRecord) == 616, "DrawRecord grew or shrank: see the comment above");
+static_assert(offsetof(DrawRecord, wind_index) == 614, "DrawRecord::wind_index is not in the tail padding: see the comment above");
 
 // --- The sun layer's depth place (frame-map section 17, "The layer's depth place"; controller ruling 39) ---
 // The game copies its scene's depth in the middle of the scene and starts its sun layer's depth from that

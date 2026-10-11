@@ -47,6 +47,11 @@ void SetPostWanted(bool wanted);
 // Without it no call of the indexed builder is looked at for a furniture quad, nothing of one is
 // read, and a frame's scene says so (FrameScene::quad_records false).
 void SetSunWanted(bool wanted);
+// Whether the consumer also wants the draws' wind inputs (the native view and the wind's switch
+// on: fable2_native_wind). Set and latched like SetShadowsWanted, and it has an effect only in a
+// frame with records. Without it no wind register, literal table or stream is read, a draw costs
+// one branch, and a frame's scene says so (FrameScene::wind_records false).
+void SetWindWanted(bool wanted);
 // Starts a discovery capture of `frames` guest frames (1..100000) sampling every `every`th
 // draw (1..64) at the next guest frame, into a new file, like FABLE2_NATIVE_DISCOVERY
 // after its delay. Callable from any thread. Returns false, with a log line, when the

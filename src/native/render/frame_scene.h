@@ -21,6 +21,7 @@
 #include "../capture/quad_record.h"
 #include "../capture/shader_tally.h"
 #include "../capture/shadow_block.h"
+#include "../capture/wind_inputs.h"
 
 namespace fable2::native::render {
 
@@ -187,6 +188,25 @@ struct FrameScene {
   uint32_t light_multi = 0;
   uint32_t light_reason[size_t(capture::LightReason::kCount)] = {};
   std::vector<std::pair<uint64_t, uint32_t>> light_unknown_ps;
+  // The wind inputs (wind_inputs.h; foliage sub-project, frame-map section 18, "Wind inputs").
+  // Side array of `draws`: the inputs of its records whose vertex shader sways and whose inputs
+  // passed capture::MakeWindInputs, each at its record's wind_index (WindOf). shadow_wind[c]: the
+  // same for shadow_draws[c] (ShadowWindOf): a caster's index names its own cascade's array, never
+  // `wind`. Built, handed over and left alone like `lights`. Empty, without memory, in a frame
+  // without the wind.
+  std::vector<capture::WindInputs> wind;
+  std::vector<capture::WindInputs> shadow_wind[2];
+  // The wind was wanted this frame (the native view and the wind's switch on at the frame's
+  // begin). False: nothing was looked up or read, no record has an index and every count below is 0.
+  bool wind_records = false;
+  // The scene's drawable records with wind inputs by family (index: WindFamily), every drawable
+  // record of the scene by reason (index: WindReason; kNone: it has inputs; kNoEntry: its shader
+  // does not sway), the shadow records of both passes by reason, and the records of either kind
+  // that are at rest for another reason than kNoEntry per (vertex shader hash, the reason as the kind).
+  uint32_t wind_family[size_t(capture::WindFamily::kCount)] = {};
+  uint32_t wind_reason[size_t(capture::WindReason::kCount)] = {};
+  uint32_t shadow_wind_reason[size_t(capture::WindReason::kCount)] = {};
+  capture::ShaderTally<kSkippedTallySize> wind_rest_by_vs;
   uint32_t captured = 0;
   uint32_t skipped[size_t(capture::SkipReason::kCount)] = {};
   // Skipped draws per (vertex shader hash, skip reason as the kind), for the
@@ -218,6 +238,54 @@ inline const capture::TerrainPatch* TerrainOf(const FrameScene& scene, const cap
 inline const capture::LightInputs* LightOf(const FrameScene& scene, const capture::DrawRecord& r) {
   if (r.light_index == capture::kNoSideIndex || r.light_index >= scene.lights.size()) return nullptr;
   return &scene.lights[r.light_index];
+}
+
+// The wind inputs of record `r` of `scene.draws`, with TerrainOf's rules: null for a record
+// without inputs (drawn at rest) and for an index the scene's array does not hold.
+inline const capture::WindInputs* WindOf(const FrameScene& scene, const capture::DrawRecord& r) {
+  if (r.wind_index == capture::kNoSideIndex || r.wind_index >= scene.wind.size()) return nullptr;
+  return &scene.wind[r.wind_index];
+}
+
+// The same for record `r` of `scene.shadow_draws[cascade]`; null for a cascade that is none.
+inline const capture::WindInputs* ShadowWindOf(const FrameScene& scene, size_t cascade, const capture::DrawRecord& r) {
+  if (cascade >= 2 || r.wind_index == capture::kNoSideIndex || r.wind_index >= scene.shadow_wind[cascade].size()) return nullptr;
+  return &scene.shadow_wind[cascade][r.wind_index];
+}
+
+// The frame's wind capture as the log writes it after "wind: ":
+//   trunk a, leaf b, plant c, casters d | at rest {reason: n, ...} | by vs {0xHASH(reason): n, ...}
+// a, b, c: the scene's records with wind inputs by family; d: the shadow records of both passes with
+// inputs; "at rest": the records of either kind whose shader has a row but that have no inputs, by
+// reason (a record whose shader has no row, "no-entry", is every other record and is not listed);
+// "by vs": those by vertex shader. "off" for a frame in which the wind was not wanted.
+inline std::string WindLine(const FrameScene& scene) {
+  if (!scene.wind_records) return "off";
+  char buf[96];
+  std::snprintf(buf, sizeof(buf), "trunk %u, leaf %u, plant %u, casters %zu | at rest {",
+                scene.wind_family[size_t(capture::WindFamily::kTrunk)], scene.wind_family[size_t(capture::WindFamily::kLeaf)],
+                scene.wind_family[size_t(capture::WindFamily::kPlant)], scene.shadow_wind[0].size() + scene.shadow_wind[1].size());
+  std::string out = buf, by_vs;
+  bool first = true;
+  capture::ShaderTally<kSkippedTallySize>::Entry top[kSkippedTallySize];
+  for (size_t i = size_t(capture::WindReason::kNoEntry) + 1; i < size_t(capture::WindReason::kCount); ++i) {
+    const uint32_t n = scene.wind_reason[i] + scene.shadow_wind_reason[i];
+    if (n) {
+      std::snprintf(buf, sizeof(buf), "%s%s: %u", first ? "" : ", ", capture::WindReasonName(capture::WindReason(i)), n);
+      out += buf;
+      first = false;
+    }
+    const size_t shaders = scene.wind_rest_by_vs.Top(uint8_t(i), top, kSkippedTallySize);
+    for (size_t k = 0; k < shaders; ++k) {
+      std::snprintf(buf, sizeof(buf), "%s0x%016llX(%s): %u", by_vs.empty() ? "" : ", ",
+                    static_cast<unsigned long long>(top[k].hash), capture::WindReasonName(capture::WindReason(i)), top[k].count);
+      by_vs += buf;
+    }
+  }
+  out += "} | by vs {";
+  out += by_vs;
+  out += "}";
+  return out;
 }
 
 // "name: n" pairs of one pass's skipped shadow draws by reason.
@@ -424,11 +492,14 @@ class SceneBufferPool {
     std::vector<capture::LightInputs> lights;
     std::vector<capture::DrawRecord> shadow_draws[2];
     std::vector<capture::ShadowCaster> shadow_casters[2];
+    std::vector<capture::WindInputs> wind;            // (without memory unless a frame had the wind)
+    std::vector<capture::WindInputs> shadow_wind[2];
 
     bool HasMemory() const {
       return draws.capacity() != 0 || terrain.capacity() != 0 || lights.capacity() != 0 ||
              shadow_draws[0].capacity() != 0 || shadow_draws[1].capacity() != 0 ||
-             shadow_casters[0].capacity() != 0 || shadow_casters[1].capacity() != 0;
+             shadow_casters[0].capacity() != 0 || shadow_casters[1].capacity() != 0 || wind.capacity() != 0 ||
+             shadow_wind[0].capacity() != 0 || shadow_wind[1].capacity() != 0;
     }
   };
 
@@ -491,9 +562,16 @@ class FrameBuilder {
   // The light array holds kNoSideIndex entries too; a lit record past that is
   // kept without inputs and counted light-unknown (the light never removes a
   // draw; a terrain record cannot be drawn without its patch, this can).
+  // `wind`: the draw's wind inputs (capture::MakeWindInputs), null for a draw
+  // without them, and then `wind_reason` says why. Only with the wind on
+  // (WindOn): a drawable record's inputs are copied to the frame's wind array
+  // and the record gets their index; a record without them is counted by its
+  // reason (TakeWind). With the wind off both are ignored, nothing is counted,
+  // and every record leaves with kNoSideIndex whatever index it came with.
   void Add(const capture::DrawRecord& r, const capture::TerrainPatch* terrain = nullptr,
            const capture::LightInputs* light = nullptr,
-           capture::LightReason light_reason = capture::LightReason::kLightUnknown) {
+           capture::LightReason light_reason = capture::LightReason::kLightUnknown,
+           const capture::WindInputs* wind = nullptr, capture::WindReason wind_reason = capture::WindReason::kOff) {
     if (!open_) return;
     ++captured_;
     capture::SkipReason skip = r.skip;
@@ -518,9 +596,13 @@ class FrameBuilder {
         light_index = uint16_t(lights_.size());
         lights_.push_back(*light);
       }
+      // (the wind inputs before the record too; one branch with the wind off)
+      const uint16_t wind_index =
+          wind_on_ ? TakeWind(wind_, wind, wind_reason, r.vs_hash, wind_reason_, wind_family_) : capture::kNoSideIndex;
       draws_.push_back(r);
       draws_.back().terrain_index = index;
       draws_.back().light_index = light_index;
+      draws_.back().wind_index = wind_index;
       if (lit) {
         ++light_family_[size_t(light->family)];
         light_multi_ += light->multi ? 1 : 0;
@@ -577,8 +659,12 @@ class FrameBuilder {
   // frame's proof. A list holds kMaxShadowRecords: a record past that is
   // counted over-limit, like any skipped draw by reason and vertex shader, and
   // nothing of a skipped draw is kept. Returns whether the record was appended.
+  // `wind`, `wind_reason`: as Add's, for an appended record; its index names
+  // the cascade's own wind array (FrameScene::shadow_wind), and its reason is
+  // counted with the casters'.
   bool AddShadow(size_t cascade, const capture::DrawRecord& r, const capture::ShadowCaster& caster, uint8_t skip = 0,
-                 const float (*pass_matrix)[4] = nullptr) {
+                 const float (*pass_matrix)[4] = nullptr, const capture::WindInputs* wind = nullptr,
+                 capture::WindReason wind_reason = capture::WindReason::kOff) {
     if (!shadows_on_ || cascade >= 2) return false;
     uint8_t code = skip != 0 ? skip : uint8_t(r.skip);
     if (code >= capture::kShadowSkipCount) code = uint8_t(capture::SkipReason::kBadMemory);
@@ -594,11 +680,14 @@ class FrameBuilder {
     std::vector<capture::ShadowCaster>& casters = shadow_casters_[cascade];
     if (draws.size() == draws.capacity()) draws.reserve(ShadowCapacity(draws.size() + 1));
     if (casters.size() == casters.capacity()) casters.reserve(ShadowCapacity(casters.size() + 1));
+    const uint16_t wind_index =
+        wind_on_ ? TakeWind(shadow_wind_[cascade], wind, wind_reason, r.vs_hash, shadow_wind_reason_, nullptr) : capture::kNoSideIndex;
     casters.push_back(caster);
     draws.push_back(r);
     draws.back().seq = uint32_t(draws.size() - 1);
     draws.back().terrain_index = capture::kNoSideIndex;
     draws.back().light_index = capture::kNoSideIndex;
+    draws.back().wind_index = wind_index;
     capture::ShadowPassProof& proof = shadow_proof_[cascade];
     proof.bias.Add(caster.biased, caster.bias_scale, caster.bias_offset);
     if (pass_matrix && !proof.have_matrix) {
@@ -622,6 +711,12 @@ class FrameBuilder {
     if (shadows_on_ && registers.valid && !shadow_registers_.valid) shadow_registers_ = registers;
   }
   bool HasShadowRegisters() const { return shadow_registers_.valid; }
+
+  // --- The wind inputs (FrameScene::wind, ::shadow_wind) ---
+  // Whether wind inputs are taken from now on (the capture sets it at a frame
+  // boundary). Off: Add and AddShadow ignore theirs, and the frame's scene has
+  // none (FrameScene::wind_records false).
+  void WindOn(bool on) { wind_on_ = on; }
 
   // --- The fog and sky blocks (FrameScene::fog, ::sky) ---
   // Whether the fog and the sky are read from now on (the capture sets it at a
@@ -767,9 +862,11 @@ class FrameBuilder {
         back.draws = std::move(scene->draws);
         back.terrain = std::move(scene->terrain);
         back.lights = std::move(scene->lights);
+        back.wind = std::move(scene->wind);
         for (size_t c = 0; c < 2; ++c) {
           back.shadow_draws[c] = std::move(scene->shadow_draws[c]);
           back.shadow_casters[c] = std::move(scene->shadow_casters[c]);
+          back.shadow_wind[c] = std::move(scene->shadow_wind[c]);
         }
         p->Return(std::move(back));
       }
@@ -820,6 +917,19 @@ class FrameBuilder {
     shadow_skipped_by_vs_.Clear();
     shadow_extra_ = 0;
     shadow_passes_ = 0;
+    // The wind inputs' counts (the arrays move with the records, below); the next frame starts
+    // with none. With the wind off nothing was counted and nothing is copied.
+    s->wind_records = wind_on_;
+    if (wind_on_) {
+      std::copy(std::begin(wind_family_), std::end(wind_family_), std::begin(s->wind_family));
+      std::fill(std::begin(wind_family_), std::end(wind_family_), 0u);
+      std::copy(std::begin(wind_reason_), std::end(wind_reason_), std::begin(s->wind_reason));
+      std::fill(std::begin(wind_reason_), std::end(wind_reason_), 0u);
+      std::copy(std::begin(shadow_wind_reason_), std::end(shadow_wind_reason_), std::begin(s->shadow_wind_reason));
+      std::fill(std::begin(shadow_wind_reason_), std::end(shadow_wind_reason_), 0u);
+      s->wind_rest_by_vs = wind_rest_by_vs_;
+      wind_rest_by_vs_.Clear();
+    }
     // The fog and sky blocks: the frame's, or the reason it has none; the next
     // frame starts with neither.
     s->fog_records = fog_on_;
@@ -918,29 +1028,38 @@ class FrameBuilder {
     std::fill(std::begin(quad_refused_), std::end(quad_refused_), 0u);
     if (!draws_.empty() || !terrain_.empty() || !lights_.empty() || !shadow_draws_[0].empty() || !shadow_draws_[1].empty()) {
       const size_t shadows[2] = {shadow_draws_[0].size(), shadow_draws_[1].size()};
-      const size_t records = draws_.size(), patches = terrain_.size(), lit = lights_.size();
+      const size_t records = draws_.size(), patches = terrain_.size(), lit = lights_.size(), swaying = wind_.size();
+      const size_t shadow_swaying[2] = {shadow_wind_[0].size(), shadow_wind_[1].size()};
       s->draws = std::move(draws_);
       s->terrain = std::move(terrain_);
       s->lights = std::move(lights_);
+      s->wind = std::move(wind_);
       SceneBufferPool::Buffers next = pool_->Take();
       draws_ = std::move(next.draws);
       terrain_ = std::move(next.terrain);
       lights_ = std::move(next.lights);
+      wind_ = std::move(next.wind);
       draws_.clear();
       terrain_.clear();
       lights_.clear();
+      wind_.clear();
       ReserveWithSlack(draws_, records);
       ReserveWithSlack(terrain_, patches);
       ReserveWithSlack(lights_, lit);
+      ReserveWithSlack(wind_, swaying);  // (0 without the wind: nothing is allocated)
       for (size_t c = 0; c < 2; ++c) {
         s->shadow_draws[c] = std::move(shadow_draws_[c]);
         s->shadow_casters[c] = std::move(shadow_casters_[c]);
+        s->shadow_wind[c] = std::move(shadow_wind_[c]);
         shadow_draws_[c] = std::move(next.shadow_draws[c]);
         shadow_casters_[c] = std::move(next.shadow_casters[c]);
+        shadow_wind_[c] = std::move(next.shadow_wind[c]);
         shadow_draws_[c].clear();
         shadow_casters_[c].clear();
+        shadow_wind_[c].clear();
         if (shadow_draws_[c].capacity() < shadows[c]) shadow_draws_[c].reserve(ShadowCapacity(shadows[c]));
         if (shadow_casters_[c].capacity() < shadows[c]) shadow_casters_[c].reserve(ShadowCapacity(shadows[c]));
+        ReserveWithSlack(shadow_wind_[c], shadow_swaying[c]);
       }
     }
     captured_ = 0;
@@ -960,6 +1079,34 @@ class FrameBuilder {
   // The capacity a shadow list is given when it needs room for `n` entries:
   // half as much again, as above, but never more than a list may hold.
   static size_t ShadowCapacity(size_t n) { return std::min(n + n / 2 + 8, kMaxShadowRecords); }
+
+  // The wind index of a record that is about to be appended (only called with the wind on).
+  // Valid inputs (a family) are appended to `list` and their index returned, counted kNone and, for
+  // a scene record (`family` not null), by family. An index is 16 bits and kNoSideIndex means none,
+  // so a list holds at most kNoSideIndex entries: a record past that is kept without inputs and
+  // counted over-limit (the wind never removes a draw). A record without valid inputs is counted by
+  // `why` (no-entry when the caller gave none) and returns kNoSideIndex. A record at rest for
+  // another reason than no-entry is also counted by its vertex shader.
+  uint16_t TakeWind(std::vector<capture::WindInputs>& list, const capture::WindInputs* wind, capture::WindReason why,
+                    uint64_t vs_hash, uint32_t* by_reason, uint32_t* family) {
+    const bool valid = wind && wind->family != capture::WindFamily::kNone &&
+                       size_t(wind->family) < size_t(capture::WindFamily::kCount);
+    if (valid && list.size() < capture::kNoSideIndex) {
+      const uint16_t index = uint16_t(list.size());
+      list.push_back(*wind);
+      ++by_reason[size_t(capture::WindReason::kNone)];
+      if (family) ++family[size_t(wind->family)];
+      return index;
+    }
+    capture::WindReason reason = capture::WindReason::kOverLimit;
+    if (!valid) {
+      const bool given = why != capture::WindReason::kNone && size_t(why) < size_t(capture::WindReason::kCount);
+      reason = given ? why : capture::WindReason::kNoEntry;
+    }
+    ++by_reason[size_t(reason)];
+    if (reason != capture::WindReason::kNoEntry) wind_rest_by_vs_.Add(vs_hash, uint8_t(reason));
+    return capture::kNoSideIndex;
+  }
 
   bool open_ = false;
   uint32_t captured_ = 0;
@@ -986,6 +1133,14 @@ class FrameBuilder {
   capture::ShaderTally<kSkippedTallySize> shadow_skipped_by_vs_;
   uint32_t shadow_extra_ = 0;
   uint32_t shadow_passes_ = 0;
+  // The wind inputs of the frame so far (FrameScene::wind, ::shadow_wind).
+  bool wind_on_ = false;
+  std::vector<capture::WindInputs> wind_;            // side array of draws_
+  std::vector<capture::WindInputs> shadow_wind_[2];  // side arrays of shadow_draws_
+  uint32_t wind_family_[size_t(capture::WindFamily::kCount)] = {};
+  uint32_t wind_reason_[size_t(capture::WindReason::kCount)] = {};
+  uint32_t shadow_wind_reason_[size_t(capture::WindReason::kCount)] = {};
+  capture::ShaderTally<kSkippedTallySize> wind_rest_by_vs_;
   // The fog and sky blocks of the frame so far (FrameScene::fog, ::sky).
   bool fog_on_ = false;
   capture::FogBlock fog_{};

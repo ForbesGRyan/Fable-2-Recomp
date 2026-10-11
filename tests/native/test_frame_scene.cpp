@@ -1451,6 +1451,294 @@ static int QuadTests(const capture::DrawRecord& r) {
   return 0;
 }
 
+// The wind side arrays (FrameScene::wind, ::shadow_wind; foliage plan Task 8). `r`: a drawable
+// record. Returns 0 or the number of the case that failed (151 to 156: the plan's cases).
+static int WindTests(const capture::DrawRecord& r) {
+  using capture::kNoSideIndex;
+  using capture::WindFamily;
+  using capture::WindInputs;
+  using capture::WindReason;
+  using render::ShadowWindOf;
+  using render::WindOf;
+  const capture::LightReason kUnlit = capture::LightReason::kLightUnknown;
+  auto inputs = [](WindFamily family, float mark) {
+    WindInputs w;
+    w.family = family;
+    w.spec = 3;
+    w.reg[0][0] = mark;
+    return w;
+  };
+  const WindInputs trunk = inputs(WindFamily::kTrunk, 1.0f), leaf = inputs(WindFamily::kLeaf, 2.0f),
+                   plant = inputs(WindFamily::kPlant, 3.0f), none{};
+  capture::DrawRecord plain = r;
+  plain.vs_hash = 0x475E;
+  capture::ShadowCaster caster;
+  // 151: with the wind on, a drawable record's valid inputs are appended and the record gets their index.
+  {
+    render::FrameBuilder b;
+    b.WindOn(true);
+    b.Add(plain, nullptr, nullptr, kUnlit, &trunk, WindReason::kNone);  // outside the bracket: ignored
+    b.Open();
+    b.Add(plain, nullptr, nullptr, kUnlit, &trunk, WindReason::kNone);
+    b.Add(plain, nullptr, nullptr, kUnlit, &leaf, WindReason::kNone);
+    auto f = b.Finish(1);
+    if (!f->wind_records || f->draws.size() != 2 || f->wind.size() != 2) return 151;
+    if (f->draws[0].wind_index != 0 || f->draws[1].wind_index != 1) return 151;
+    const WindInputs* w0 = WindOf(*f, f->draws[0]);
+    const WindInputs* w1 = WindOf(*f, f->draws[1]);
+    if (!w0 || !w1 || w0 != &f->wind[0] || w0->reg[0][0] != 1.0f || w1->family != WindFamily::kLeaf || w1->reg[0][0] != 2.0f) return 151;
+    if (f->wind_family[size_t(WindFamily::kTrunk)] != 1 || f->wind_family[size_t(WindFamily::kLeaf)] != 1 ||
+        f->wind_family[size_t(WindFamily::kPlant)] != 0 || f->wind_reason[size_t(WindReason::kNone)] != 2) {
+      return 151;
+    }
+    // (the next frame starts with none of it)
+    b.Open();
+    b.Add(plain, nullptr, nullptr, kUnlit, &plant, WindReason::kNone);
+    auto g = b.Finish(2);
+    if (g->wind.size() != 1 || g->draws[0].wind_index != 0 || g->wind_family[size_t(WindFamily::kTrunk)] != 0 ||
+        g->wind_family[size_t(WindFamily::kPlant)] != 1 || g->wind_reason[size_t(WindReason::kNone)] != 1) {
+      return 151;
+    }
+    if (f->wind.size() != 2 || WindOf(*f, f->draws[1])->reg[0][0] != 2.0f) return 151;  // (the first scene is left alone)
+  }
+  // 152: with the wind off, with inputs of no family, or for a skipped record: no index and no entry.
+  {
+    render::FrameBuilder b;
+    b.Open();
+    b.Add(plain, nullptr, nullptr, kUnlit, &trunk, WindReason::kNone);   // the wind off
+    b.Add(plain);
+    auto f = b.Finish(1);
+    if (f->wind_records || f->draws.size() != 2 || !f->wind.empty() || f->wind.capacity() != 0) return 152;
+    if (f->draws[0].wind_index != kNoSideIndex || f->draws[1].wind_index != kNoSideIndex || WindOf(*f, f->draws[0])) return 152;
+    for (uint32_t n : f->wind_family) if (n) return 152;
+    for (uint32_t n : f->wind_reason) if (n) return 152;       // (off: nothing is counted, not even "off")
+    for (uint32_t n : f->shadow_wind_reason) if (n) return 152;
+    if (f->wind_rest_by_vs.size() != 0) return 152;
+    b.WindOn(true);
+    b.Open();
+    b.Add(plain, nullptr, nullptr, kUnlit, &none, WindReason::kNone);    // inputs of no family
+    WindInputs odd = trunk;
+    odd.family = WindFamily::kCount;
+    b.Add(plain, nullptr, nullptr, kUnlit, &odd, WindReason::kNone);     // ... of a family that is none
+    capture::DrawRecord gone = plain;
+    gone.skip = SkipReason::kBadIndex;
+    b.Add(gone, nullptr, nullptr, kUnlit, &trunk, WindReason::kNone);    // a skipped record
+    b.Add(plain, nullptr, nullptr, kUnlit, nullptr, WindReason::kNoEntry);
+    b.Add(plain, nullptr, nullptr, kUnlit, nullptr, WindReason::kRegisterRange);
+    b.Add(plain, nullptr, nullptr, kUnlit, &trunk, WindReason::kRegisterRange);  // inputs win over a reason
+    auto g = b.Finish(2);
+    if (!g->wind_records || g->draws.size() != 5 || g->wind.size() != 1) return 152;
+    for (size_t i = 0; i < 4; ++i) {
+      if (g->draws[i].wind_index != kNoSideIndex || WindOf(*g, g->draws[i])) return 152;
+    }
+    if (g->draws[4].wind_index != 0) return 152;
+    // Each drawable record is counted once: with inputs, or by its reason (inputs that are none
+    // and no reason: no-entry).
+    if (g->wind_reason[size_t(WindReason::kNone)] != 1 || g->wind_reason[size_t(WindReason::kNoEntry)] != 3 ||
+        g->wind_reason[size_t(WindReason::kRegisterRange)] != 1 || g->wind_family[size_t(WindFamily::kTrunk)] != 1) {
+      return 152;
+    }
+    uint32_t total = 0;
+    for (uint32_t n : g->wind_reason) total += n;
+    if (total != g->draws.size()) return 152;
+    // A record at rest for a reason other than "no row" is named by its vertex shader.
+    capture::ShaderTally<render::kSkippedTallySize>::Entry top[4];
+    if (g->wind_rest_by_vs.Top(uint8_t(WindReason::kRegisterRange), top, 4) != 1 || top[0].hash != 0x475E || top[0].count != 1) return 152;
+    if (g->wind_rest_by_vs.Total(uint8_t(WindReason::kNoEntry)) != 0 || g->wind_rest_by_vs.size() != 1) return 152;
+    // (the next frame's tally by vertex shader starts empty)
+    b.Open();
+    b.Add(plain, nullptr, nullptr, kUnlit, &trunk, WindReason::kNone);
+    auto g2 = b.Finish(3);
+    if (g2->wind_rest_by_vs.size() != 0 || g2->wind_reason[size_t(WindReason::kRegisterRange)] != 0) return 152;
+    // Switched off again at a boundary: the next frame has none.
+    b.WindOn(false);
+    b.Open();
+    b.Add(plain, nullptr, nullptr, kUnlit, &trunk, WindReason::kNone);
+    auto h = b.Finish(3);
+    if (h->wind_records || !h->wind.empty() || h->draws[0].wind_index != kNoSideIndex || h->wind_reason[size_t(WindReason::kNone)] != 0) return 152;
+  }
+  // 153: a record that comes with an index the frame did not give leaves without it.
+  {
+    capture::DrawRecord stale = plain;
+    stale.wind_index = 7;
+    for (bool on : {false, true}) {
+      render::FrameBuilder b;
+      b.WindOn(on);
+      b.Open();
+      for (int i = 0; i < 9; ++i) b.Add(plain, nullptr, nullptr, kUnlit, &trunk, WindReason::kNone);
+      b.Add(stale);
+      b.Add(stale, nullptr, nullptr, kUnlit, nullptr, WindReason::kNoEntry);
+      b.ShadowsOn(true);
+      if (!b.AddShadow(0, stale, caster)) return 153;
+      auto f = b.Finish(1);
+      if (f->draws[9].wind_index != kNoSideIndex || f->draws[10].wind_index != kNoSideIndex) return 153;
+      if (WindOf(*f, f->draws[9]) || f->shadow_draws[0][0].wind_index != kNoSideIndex || ShadowWindOf(*f, 0, f->shadow_draws[0][0])) return 153;
+      if (f->wind.size() != (on ? 9u : 0u)) return 153;
+    }
+  }
+  // 154: a shadow record's index names its cascade's list, not the scene's.
+  {
+    render::FrameBuilder b;
+    b.WindOn(true);
+    b.ShadowsOn(true);
+    if (!b.AddShadow(1, plain, caster, 0, nullptr, &leaf, WindReason::kNone)) return 154;
+    if (!b.AddShadow(0, plain, caster, 0, nullptr, &plant, WindReason::kNone)) return 154;
+    if (!b.AddShadow(1, plain, caster, 0, nullptr, nullptr, WindReason::kLiteral)) return 154;
+    if (!b.AddShadow(1, plain, caster, 0, nullptr, &trunk, WindReason::kNone)) return 154;
+    if (b.AddShadow(1, plain, caster, uint8_t(capture::ShadowSkip::kNoCaster), nullptr, &trunk, WindReason::kNone)) return 154;  // not recorded: no entry
+    if (b.AddShadow(2, plain, caster, 0, nullptr, &trunk, WindReason::kNone)) return 154;
+    b.Open();
+    b.Add(plain, nullptr, nullptr, kUnlit, &trunk, WindReason::kNone);
+    auto f = b.Finish(1);
+    if (f->wind.size() != 1 || f->shadow_wind[0].size() != 1 || f->shadow_wind[1].size() != 2) return 154;
+    if (f->shadow_draws[0][0].wind_index != 0 || f->shadow_draws[1][0].wind_index != 0 ||
+        f->shadow_draws[1][1].wind_index != kNoSideIndex || f->shadow_draws[1][2].wind_index != 1) {
+      return 154;
+    }
+    const WindInputs* near0 = ShadowWindOf(*f, 0, f->shadow_draws[0][0]);
+    const WindInputs* far0 = ShadowWindOf(*f, 1, f->shadow_draws[1][0]);
+    const WindInputs* far2 = ShadowWindOf(*f, 1, f->shadow_draws[1][2]);
+    if (!near0 || near0->family != WindFamily::kPlant || !far0 || far0->family != WindFamily::kLeaf || !far2 ||
+        far2->family != WindFamily::kTrunk || ShadowWindOf(*f, 1, f->shadow_draws[1][1])) {
+      return 154;
+    }
+    if (WindOf(*f, f->draws[0])->family != WindFamily::kTrunk) return 154;
+    if (ShadowWindOf(*f, 2, f->shadow_draws[1][0]) || ShadowWindOf(*f, 0, f->shadow_draws[1][2])) return 154;  // no such cascade; past the near list
+    // The casters' counts are their own: the scene's say one trunk.
+    if (f->wind_reason[size_t(WindReason::kNone)] != 1 || f->shadow_wind_reason[size_t(WindReason::kNone)] != 3 ||
+        f->shadow_wind_reason[size_t(WindReason::kLiteral)] != 1 || f->wind_family[size_t(WindFamily::kLeaf)] != 0) {
+      return 154;
+    }
+    if (f->wind_rest_by_vs.Total(uint8_t(WindReason::kLiteral)) != 1) return 154;
+    // The log's text (render::WindLine): the scene's records by family, the casters with inputs,
+    // the records at rest by reason (the scene's and the casters' together; "no-entry" is every
+    // other record and is not listed) and by vertex shader.
+    if (render::WindLine(*f) != "trunk 1, leaf 0, plant 0, casters 3 | at rest {literal: 1} | by vs {0x000000000000475E(literal): 1}") {
+      std::cout << render::WindLine(*f) << "\n";
+      return 159;
+    }
+    {
+      render::FrameBuilder l;
+      l.WindOn(true);
+      l.ShadowsOn(true);
+      l.Open();
+      capture::DrawRecord bush = plain;
+      bush.vs_hash = 0x8123;
+      l.Add(plain, nullptr, nullptr, kUnlit, &leaf, WindReason::kNone);
+      l.Add(bush, nullptr, nullptr, kUnlit, &plant, WindReason::kNone);
+      l.Add(bush, nullptr, nullptr, kUnlit, &plant, WindReason::kNone);
+      l.Add(plain, nullptr, nullptr, kUnlit, nullptr, WindReason::kNoEntry);
+      l.Add(bush, nullptr, nullptr, kUnlit, nullptr, WindReason::kRegisterRange);
+      l.Add(bush, nullptr, nullptr, kUnlit, nullptr, WindReason::kRegisterRange);
+      l.Add(plain, nullptr, nullptr, kUnlit, nullptr, WindReason::kStream);
+      l.AddShadow(0, bush, caster, 0, nullptr, nullptr, WindReason::kRegisterRange);
+      auto s = l.Finish(1);
+      if (render::WindLine(*s) != "trunk 0, leaf 1, plant 2, casters 0 | at rest {register-range: 3, stream: 1} | by vs "
+                                  "{0x0000000000008123(register-range): 3, 0x000000000000475E(stream): 1}") {
+        std::cout << render::WindLine(*s) << "\n";
+        return 159;
+      }
+      render::FrameBuilder quiet;
+      quiet.WindOn(true);
+      quiet.Open();
+      quiet.Add(plain, nullptr, nullptr, kUnlit, nullptr, WindReason::kNoEntry);
+      if (render::WindLine(*quiet.Finish(1)) != "trunk 0, leaf 0, plant 0, casters 0 | at rest {} | by vs {}") return 159;
+      render::FrameBuilder off;
+      off.Open();
+      off.Add(plain);
+      if (render::WindLine(*off.Finish(1)) != "off") return 159;
+    }
+    // (the next frame's casters start with no count and no entry)
+    b.AddShadow(1, plain, caster, 0, nullptr, &leaf, WindReason::kNone);
+    auto f2 = b.Finish(2);
+    if (f2->shadow_wind[1].size() != 1 || f2->shadow_wind[0].size() != 0 || f2->shadow_draws[1][0].wind_index != 0 ||
+        f2->shadow_wind_reason[size_t(WindReason::kNone)] != 1 || f2->shadow_wind_reason[size_t(WindReason::kLiteral)] != 0) {
+      return 154;
+    }
+    // With the shadows off no caster entry is made, whatever the wind says.
+    render::FrameBuilder c;
+    c.WindOn(true);
+    if (c.AddShadow(0, plain, caster, 0, nullptr, &leaf, WindReason::kNone)) return 154;
+    auto g = c.Finish(1);
+    if (!g->shadow_wind[0].empty() || g->shadow_wind_reason[size_t(WindReason::kNone)] != 0) return 154;
+  }
+  // 155: the array holds kNoSideIndex entries; the next record is kept, without inputs, counted over-limit.
+  {
+    render::FrameBuilder b;
+    b.WindOn(true);
+    b.Open();
+    for (uint32_t i = 0; i < uint32_t(kNoSideIndex) + 2; ++i) {
+      WindInputs w = trunk;
+      w.reg[1][0] = float(i);
+      b.Add(plain, nullptr, nullptr, kUnlit, &w, WindReason::kNone);
+    }
+    auto f = b.Finish(1);
+    if (f->draws.size() != size_t(kNoSideIndex) + 2 || f->wind.size() != kNoSideIndex) return 155;
+    if (f->draws[kNoSideIndex - 1].wind_index != kNoSideIndex - 1 || f->draws[kNoSideIndex].wind_index != kNoSideIndex ||
+        f->draws[size_t(kNoSideIndex) + 1].wind_index != kNoSideIndex) {
+      return 155;
+    }
+    if (WindOf(*f, f->draws[kNoSideIndex - 1])->reg[1][0] != float(kNoSideIndex - 1) || WindOf(*f, f->draws[kNoSideIndex])) return 155;
+    if (f->wind_reason[size_t(WindReason::kOverLimit)] != 2 || f->wind_reason[size_t(WindReason::kNone)] != kNoSideIndex ||
+        f->wind_family[size_t(WindFamily::kTrunk)] != kNoSideIndex) {
+      return 155;
+    }
+    if (f->wind_rest_by_vs.Total(uint8_t(WindReason::kOverLimit)) != 2) return 155;
+  }
+  // 156: WindOf is null for an index at or past the array (a record of another scene), never a read past its end.
+  {
+    render::FrameBuilder b;
+    b.WindOn(true);
+    b.Open();
+    b.Add(plain, nullptr, nullptr, kUnlit, &trunk, WindReason::kNone);
+    auto f = b.Finish(1);
+    capture::DrawRecord other = f->draws[0];
+    other.wind_index = 1;
+    if (WindOf(*f, other)) return 156;
+    other.wind_index = 0xFFFE;
+    if (WindOf(*f, other) || ShadowWindOf(*f, 0, other) || ShadowWindOf(*f, 1, other)) return 156;
+    other.wind_index = 0;
+    if (WindOf(*f, other) != &f->wind[0] || ShadowWindOf(*f, 0, other)) return 156;   // (the near list is empty)
+    render::FrameScene empty;
+    if (WindOf(empty, other) || empty.wind_records) return 156;
+  }
+  // The buffers circulate with the records' (SceneBufferPool): a scene's wind arrays come back to
+  // the builder when the scene dies, and a frame without wind holds no memory for them.
+  {
+    render::FrameBuilder b;
+    b.WindOn(true);
+    b.ShadowsOn(true);
+    b.Open();
+    for (int i = 0; i < 40; ++i) b.Add(plain, nullptr, nullptr, kUnlit, &trunk, WindReason::kNone);
+    b.AddShadow(0, plain, caster, 0, nullptr, &trunk, WindReason::kNone);
+    auto f = b.Finish(1);
+    const WindInputs* first = f->wind.data();
+    const WindInputs* first_shadow = f->shadow_wind[0].data();
+    f.reset();
+    if (b.spare_count() != 1) return 157;
+    b.Open();
+    b.Add(plain, nullptr, nullptr, kUnlit, &trunk, WindReason::kNone);
+    auto g = b.Finish(2);   // (the builder takes the spare set for the frame after this one)
+    b.Open();
+    b.Add(plain, nullptr, nullptr, kUnlit, &leaf, WindReason::kNone);
+    b.AddShadow(0, plain, caster, 0, nullptr, &leaf, WindReason::kNone);
+    auto h = b.Finish(3);
+    if (h->wind.data() != first || h->wind.size() != 1 || h->wind[0].family != WindFamily::kLeaf) return 157;
+    if (h->shadow_wind[0].data() != first_shadow || h->shadow_wind[0].size() != 1) return 157;
+    render::FrameBuilder off;
+    off.ShadowsOn(true);
+    for (int frame = 0; frame < 3; ++frame) {
+      off.Open();
+      off.Add(plain);
+      off.AddShadow(0, plain, caster);
+      auto s = off.Finish(uint64_t(frame));
+      if (s->wind.capacity() != 0 || s->shadow_wind[0].capacity() != 0 || s->shadow_wind[1].capacity() != 0) return 158;
+    }
+  }
+  static_assert(sizeof(capture::WindInputs) == 132);
+  return 0;
+}
+
 int main() {
   auto r = capture::AssembleRecord(Good(), 7);
   if (r.skip != SkipReason::kNone || r.seq != 7 || r.rows[0] != 1.0f || r.rows[15] != 16.0f) return 1;
@@ -1998,6 +2286,10 @@ int main() {
     std::cout << "FAIL: quad records case " << code << "\n";
     return 133;
   }
+  if (const int code = WindTests(r)) {
+    std::cout << "FAIL: wind side arrays case " << code << "\n";
+    return code;
+  }
 
   render::ScenePublisher pub;
   if (pub.Latest()) return 18;
@@ -2005,6 +2297,7 @@ int main() {
   pub.Publish(s2);
   if (pub.Latest()->frame != 43) return 19;
   std::cout << "PASS: draw record, frame builder, terrain side array, light side array and block, buffer reuse, "
-               "pool under threads, shadow lists and block, fog and sky blocks, post block, quad records, publisher\n";
+               "pool under threads, shadow lists and block, fog and sky blocks, post block, quad records, wind side arrays, "
+               "publisher\n";
   return 0;
 }

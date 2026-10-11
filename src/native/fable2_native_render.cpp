@@ -102,6 +102,13 @@ REXCVAR_DEFINE_STRING(fable2_native_sun, "off", "Fable2",
                       "of it is read or drawn: the picture of fable2_native_post and fable2_native_bloom alone. Off by default "
                       "because towards the sun the native picture is not yet the game's (the native scene is too dark there): "
                       "frame map section 17, \"Validation (10c)\".");
+REXCVAR_DEFINE_STRING(fable2_native_wind, "off", "Fable2",
+                      "Native wind (sub-project 11, phase 11a; in the making): on (or true, 1) = with a composite view "
+                      "the capture also reads the wind inputs of the draws whose vertex shader sways (trunks, leaves, "
+                      "instanced plants and their shadow casters: three to five vertex registers a draw, the shader's "
+                      "literal table once, a tree's vertex elements) into a side array of the frame; nothing is drawn "
+                      "with them yet, the picture is the one without; off (or false, 0; the default) = none of it is "
+                      "read. Frame map section 18.");
 REXCVAR_DEFINE_STRING(fable2_native_scene_dump, "off", "Fable2",
                       "Diagnostic of the native renderer (frame map section 18, \"Stored native scene\"): on (or true, 1) = "
                       "each discovery capture made while the native picture is drawn also writes the native scene of its "
@@ -377,6 +384,19 @@ bool CurrentSun() {
   const bool on = render::ParseClayLight(REXCVAR_GET(fable2_native_sun), &recognized) == render::ClayLight::kOn;
   if (!recognized && !warned.exchange(true)) {
     REXLOG_WARN("[native] unknown fable2_native_sun '{}', using off (accepted: {})", REXCVAR_GET(fable2_native_sun),
+                render::kClaySwitchWords);
+  }
+  return on;
+}
+
+// fable2_native_wind: read like the sun's switch; anything else is off, with one warning that names
+// the words. The capture reads the draws' wind inputs with it, in a frame with records.
+bool CurrentWind() {
+  static std::atomic<bool> warned{false};
+  bool recognized = true;
+  const bool on = render::ParseClayLight(REXCVAR_GET(fable2_native_wind), &recognized) == render::ClayLight::kOn;
+  if (!recognized && !warned.exchange(true)) {
+    REXLOG_WARN("[native] unknown fable2_native_wind '{}', using off (accepted: {})", REXCVAR_GET(fable2_native_wind),
                 render::kClaySwitchWords);
   }
   return on;
@@ -955,6 +975,11 @@ void Install(rex::memory::Memory* memory) {
   REXLOG_INFO("[native] sun: {} (fable2_native_sun; on: with the post block the frame's quad records, the game's sky "
               "furniture and sun-layer quads, and the radial blur's registers are read)",
               CurrentSun() ? "on" : "off");
+  // (off by default and in the making: its line only when it is on, so that a normal run's log is the one of before)
+  if (CurrentWind()) {
+    REXLOG_INFO("[native] wind: on (fable2_native_wind; the wind inputs of the draws whose vertex shader sways are read in a "
+                "frame with records; nothing is drawn with them yet)");
+  }
   // (a diagnostic: its line only when it is on, so that a normal run's log is the one of before)
   if (CurrentSceneDump()) {
     REXLOG_INFO("[native] scene dump: on (fable2_native_scene_dump; each discovery capture made in a native view writes the native "
@@ -1031,6 +1056,8 @@ void PollFrame() {
   capture::SetFogWanted(FogWanted(wanted));
   capture::SetPostWanted(PostWanted(wanted));
   capture::SetSunWanted(SunRecordsWanted(PostWanted(wanted), CurrentSun()));
+  // (the wind's word like the others: before the records' when switching on, after it when switching off)
+  capture::SetWindWanted(wanted && CurrentWind());
   if (wanted) capture::SetRecordsWanted(true);
   rex::graphics::RequestNativeGuestOutputPostProcess(wanted);
 }

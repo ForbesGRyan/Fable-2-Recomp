@@ -8,6 +8,10 @@ own vertex microcode (ucode_eval): the foliage sub-project, plan Tasks 5 to 7, s
                                                       on its twin's
   trace <hash> --instr N [--seed S] [--trial T]       the interpreter's registers after instruction N for a made
                                                       input (the transcription's oracle, register by register)
+  inputs <capture> ... [--off]                        the capture's wind inputs (plan Task 8, criterion 3): each
+                                                      wind draw row's "wind" member against the same row's bank,
+                                                      fetches and streams; --off: a capture made with the switch
+                                                      off must say so and hold no member
 Each exits 1 on any failure.
 
 What one trial is. A draw is a shader's microcode, a constant bank and vertex streams (bytes): made, or a
@@ -46,6 +50,7 @@ changed by 1% (MUTATED_LITERAL; ("literal", name) names another). `shift=(name, 
 formula AND at its place in the microcode's constants: the two must then agree again.
 """
 import argparse
+import json
 import math
 import random
 import struct
@@ -682,6 +687,249 @@ def check_identities(capture_path, frames=None, per_pair=None, per_draw=16, dump
     return lines, bad
 
 
+# --- the capture's wind inputs (plan Task 8; spec criterion 3) ---------------------------------------------------
+
+# capture::WindReasonName, in WindReason's order (tests/test_wind_inputs.py holds the header to it).
+WIND_REASONS = ("none", "off", "no-entry", "register-unread", "register-not-finite", "register-range", "literal",
+                "element", "stream", "instance", "over-limit")
+REASON_SHARE = 0.01         # criterion 3: no reason but "no-entry" in more than this share of the wind draws
+TABLE = cr.REPO / "src" / "native" / "capture" / "wind_table.inc"
+_ELEMENT_BYTES = {6: 4, 32: 8}      # capture::LightElementBytes of the two formats a wind element has
+_PROBLEMS_KEPT = 40
+
+
+def table_order(path=TABLE):
+    """The hashes of wind_table.inc's FABLE2_WIND lines in the file's order: a row's place is WindInputs::spec."""
+    out = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if line.startswith("FABLE2_WIND(0x"):
+            out.append(line[len("FABLE2_WIND(0x"):line.index("ull")].upper())
+    return out
+
+
+def _hex_bits(x):
+    return "%08X" % struct.unpack("<I", struct.pack("<f", x))[0]
+
+
+def _row_literals(row):
+    """({(register, component): value}, {registers named}) of a row's "vs_lit" (the shader object's own literal
+    table: runs of values from a first register on; a later run over an earlier one), or None when the capture
+    could not read the table."""
+    runs = row.get("vs_lit")
+    if runs is None:
+        return None
+    values, named = {}, set()
+    for run in runs:
+        for k, v in enumerate(run["v"]):
+            reg = run["reg"] + k // 4
+            named.add(reg)
+            values[(reg, k % 4)] = math.nan if v is None else v
+    return values, named
+
+
+def _max_vertex(row):
+    """DrawShaders::max_vertex of a row's draw: its largest index plus the base vertex, or its last vertex; -1
+    when it is not known."""
+    ib = row.get("ib")
+    if ib:
+        base = int(ib.get("base_vertex", row.get("base_vertex", 0)))
+        base -= 1 << 32 if base >= 1 << 31 else 0
+        return int(ib["max_index"]) + base if int(ib.get("max_index", -1)) >= 0 else -1
+    args = [int(a, 16) for a in row.get("args") or []]
+    return args[1] + args[2] - 1 if len(args) >= 3 and args[2] else -1
+
+
+def expected_inputs(row, order=None):
+    """What capture::MakeWindInputs must give for a draw row, from the row's own evidence and through nothing of
+    the capture's wind code: the row's "wind" member as the capture writes it ({"reason": "none", "family",
+    "spec", "reg": the registers' bits, and a tree's elements}, or {"reason", "family"}); {"reason": "no-entry"}
+    for a shader without a row of WIND_SHADERS. The rules and their order are wind_inputs.h's."""
+    h = cr.vs_hash(row)
+    if h not in lf.WIND_SHADERS:
+        return {"reason": "no-entry"}
+    spec = lf.WIND_SHADERS[h]
+    family = spec["family"]
+
+    def refused(reason):
+        return {"reason": reason, "family": family}
+
+    literals = _row_literals(row)
+    if literals is None:
+        return refused("literal")
+    values, named = literals
+    if any(reg in named for reg in spec["reg"]):
+        return refused("literal")
+    for name, place in spec["lit_at"].items():
+        if place not in values or _bits(f32(values[place])) != _bits(spec["lit"][name]):
+            return refused("literal")
+    bank = row.get("bank")
+    if not bank:
+        return refused("register-unread")
+    words = []
+    for reg in spec["reg"]:
+        v = bank[4 * reg:4 * reg + 4]
+        if len(v) != 4:
+            return refused("register-unread")
+        if any(x is None or not math.isfinite(x) for x in v):
+            return refused("register-not-finite")
+        v = [f32(x) for x in v]
+        for comp in range(4):
+            lo, hi = REGISTER_BOUNDS[family].get((reg, comp), (-math.inf, math.inf))
+            if not lo <= v[comp] <= hi:
+                return refused("register-range")
+        words.extend(_hex_bits(x) for x in v)
+    words.extend(["00000000"] * (20 - len(words)))
+    out = {"reason": "none", "family": family, "spec": (order or table_order()).index(h), "reg": "".join(words)}
+    if family == "plant":
+        return out if row.get("ib") else refused("instance")
+    fetches = row.get("fetches") or []
+    max_vertex = _max_vertex(row)
+    for name, fetch, fmt, offset, source, count in spec["elements"]:
+        f = fetches[fetch] if 0 <= fetch < len(fetches) else None
+        if not f or f.get("fmt") != fmt or f.get("off") != offset:
+            return refused("element")
+        stride = int(f.get("stride", 0))
+        if fmt not in _ELEMENT_BYTES or stride == 0 or stride > 255 or offset * 4 + _ELEMENT_BYTES[fmt] > stride * 4:
+            return refused("element")
+        delivered = {(int(f.get("swz", 0)) >> (3 * c)) & 7 for c in range(4)}
+        if len(source) != count or len(set(source)) != count or any(_COMP.index(ch) not in delivered for ch in source):
+            return refused("element")
+        stream = next((s for s in row.get("streams") or [] if s.get("slot") == f.get("slot")), None)
+        if not stream or int(stream.get("endian", 0)) > 3 or int(stream["size"]) < stride * 4:
+            return refused("stream")
+        if max_vertex < 0 or (max_vertex + 1) * stride * 4 > int(stream["size"]):
+            return refused("stream")
+        out[name] = {"phys": int(stream["phys"]), "size": int(stream["size"]), "off": offset * 4, "stride": stride * 4,
+                     "fmt": fmt, "src": source,
+                     "flags": (1 if f.get("signed") else 0) | (2 if f.get("norm") else 0) | (int(stream.get("endian", 0)) << 2)}
+    return out
+
+
+# rows: the capture's wind draw rows; compared: those with a "wind" member in a frame with the wind on; agree:
+# those of them whose member is what the row's own evidence gives; reasons: the members' reasons; predicted: expected_inputs' reasons for every wind draw row; frames_on / frames_off: frame
+# rows whose "wind" is an object / "off"; off_clean: an off capture that holds no member; frames: the frame rows'
+# own counts, for the report; ok: something was compared and nothing disagrees.
+InputsResult = namedtuple("InputsResult", "rows compared agree problems problem_count reasons predicted frames_on frames_off "
+                                          "off_clean frames ok")
+
+
+def _frame_problems(frame, wind):
+    """What a frame row's own wind counts must satisfy."""
+    out = []
+    family, reason, caster = wind.get("family") or {}, wind.get("reason") or {}, wind.get("caster_reason") or {}
+    records, casters = int(wind.get("records", -1)), int(wind.get("casters", -1))
+    if records != sum(int(v) for v in family.values()):
+        out.append("frame %d: \"records\" %d is not the sum of \"family\" %s" % (frame, records, family))
+    if records != int(reason.get("none", 0)):
+        out.append("frame %d: \"records\" %d is not \"reason\".none %s" % (frame, records, reason.get("none", 0)))
+    if casters != int(caster.get("none", 0)):
+        out.append("frame %d: \"casters\" %d is not \"caster_reason\".none %s" % (frame, casters, caster.get("none", 0)))
+    for name in set(reason) | set(caster):
+        if name not in WIND_REASONS:
+            out.append("frame %d: unknown reason %r" % (frame, name))
+    at_rest = {n: int(reason.get(n, 0)) + int(caster.get(n, 0)) for n in WIND_REASONS if n not in ("none", "no-entry")}
+    wind_draws = max(records, 0) + max(casters, 0) + sum(at_rest.values())
+    for name, n in at_rest.items():
+        if n > REASON_SHARE * wind_draws:
+            out.append("frame %d: the frame's records count \"%s\" %d times in %d wind draws: more than 1%%" % (
+                frame, name, n, wind_draws))
+    return out
+
+
+def check_inputs(capture_path):
+    """A capture's wind inputs against its own rows (criterion 3): InputsResult."""
+    path = cr.find_capture(str(capture_path))
+    order = table_order()
+    state, frames = {}, {}
+    problems, problem_count = [], 0
+
+    def problem(text):
+        nonlocal problem_count
+        problem_count += 1
+        if len(problems) < _PROBLEMS_KEPT:
+            problems.append(text)
+
+    for r in cr.rows(path, kinds=("frame",)):
+        wind = r.get("wind")
+        state[r["frame"]] = "off" if wind == "off" else "on" if isinstance(wind, dict) else None
+        if isinstance(wind, dict):
+            frames[r["frame"]] = wind
+            for text in _frame_problems(r["frame"], wind):
+                problem(text)
+    rows = compared = agree = members_off = 0
+    reasons, predicted = {}, {}
+    for frame in sorted(state):
+        for r in cr.rows(path, kinds=("draw",), frame=frame):
+            h = cr.vs_hash(r)
+            member = r.get("wind")
+            where = "line %d (%s, frame %d)" % (r["line"], h[:4] or "no shader", frame)
+            if h not in lf.WIND_SHADERS:
+                if member is not None:
+                    problem("%s: a \"wind\" member on a draw whose shader has no row" % where)
+                continue
+            rows += 1
+            want = expected_inputs(r, order)
+            predicted[want["reason"]] = predicted.get(want["reason"], 0) + 1
+            if state[frame] != "on":
+                if member is not None:
+                    members_off += 1
+                    problem("%s: a \"wind\" member in a frame whose row says %s" % (
+                        where, "off" if state[frame] == "off" else "nothing of the wind"))
+                continue
+            if member is None:
+                problem("%s: no \"wind\" member on a wind draw in a frame with the wind on" % where)
+                continue
+            compared += 1
+            reasons[member.get("reason")] = reasons.get(member.get("reason"), 0) + 1
+            differ = [key for key in sorted(set(want) | set(member)) if want.get(key) != member.get(key)]
+            agree += not differ
+            for key in differ:
+                problem("%s: \"%s\" is %r, the row's own evidence gives %r" % (where, key, member.get(key), want.get(key)))
+    for name, n in sorted(reasons.items()):
+        if name != "none" and n > REASON_SHARE * compared:
+            problem("reason \"%s\" in %d of %d wind draws: more than 1%%" % (name, n, compared))
+    frames_on = sum(1 for v in state.values() if v == "on")
+    frames_off = sum(1 for v in state.values() if v == "off")
+    return InputsResult(rows, compared, agree, problems, problem_count, reasons, predicted, frames_on, frames_off,
+                        frames_off > 0 and frames_on == 0 and members_off == 0, frames,
+                        frames_on > 0 and compared > 0 and problem_count == 0)
+
+
+def cmd_inputs(args, say=print):
+    bad = 0
+    for capture in args.capture:
+        path = cr.find_capture(capture)
+        r = check_inputs(path)
+        say("%s: %d wind draw rows; frames with the wind on %d, off %d" % (path.name, r.rows, r.frames_on, r.frames_off))
+        say("  what the rows' own evidence gives (bank, literal table, fetches, streams): %s" % (
+            ", ".join("%s %d" % kv for kv in sorted(r.predicted.items())) or "no wind draw row"))
+        for frame, wind in sorted(r.frames.items()):
+            say("  frame %d: records %s (%s), casters %s; by reason %s; casters by reason %s" % (
+                frame, wind.get("records"), ", ".join("%s %s" % kv for kv in sorted((wind.get("family") or {}).items())),
+                wind.get("casters"), json.dumps(wind.get("reason"), sort_keys=True),
+                json.dumps(wind.get("caster_reason"), sort_keys=True)))
+        if r.compared:
+            say("  %d of %d compared rows agree with their own bank, fetches and streams; the members' reasons: %s" % (
+                r.agree, r.compared, ", ".join("%s %d" % kv for kv in sorted(r.reasons.items()))))
+        for text in r.problems:
+            say("  PROBLEM: " + text)
+        if r.problem_count > len(r.problems):
+            say("  ... and %d more" % (r.problem_count - len(r.problems)))
+        if args.off:
+            ok = r.off_clean and r.problem_count == 0
+            say("  off capture: %s" % ("every frame row says \"wind\":\"off\" and no row has a member: OK" if ok else "FAILED"))
+        elif not r.compared and not r.problem_count:
+            ok = False
+            say("  NOT A RESULT: no wind draw row lies in a frame whose row has wind counts (%s)" % (
+                "the capture was made with the switch off" if r.frames_off else
+                "a capture from before plan Task 8, or made without the renderer's records"))
+        else:
+            ok = r.ok
+            say("  " + ("OK" if ok else "FAILED"))
+        bad += not ok
+    return 1 if bad else 0
+
+
 # --- command line ---------------------------------------------------------------------------------------------
 
 def _result_line(name, r):
@@ -764,7 +1012,7 @@ def cmd_trace(args, say=print):
     return 0
 
 
-def main(argv=None):
+def main(argv=None, say=print):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dumps", type=Path, default=DUMPS)
     sub = ap.add_subparsers(dest="command", required=True)
@@ -790,11 +1038,15 @@ def main(argv=None):
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--trial", type=int, default=2)
     p.set_defaults(run=cmd_trace)
+    p = sub.add_parser("inputs")
+    p.add_argument("capture", nargs="+")
+    p.add_argument("--off", action="store_true", help="the capture was made with the switch off: it must say so")
+    p.set_defaults(run=cmd_inputs)
     args = ap.parse_args(argv)
-    if not args.dumps.is_dir():
-        print("no shader dumps at %s (made by fable_2.exe --dump_shaders=<dir>)" % args.dumps)
+    if args.command != "inputs" and not args.dumps.is_dir():      # (the inputs' check reads no microcode)
+        say("no shader dumps at %s (made by fable_2.exe --dump_shaders=<dir>)" % args.dumps)
         return 1
-    return args.run(args)
+    return args.run(args, say)
 
 
 if __name__ == "__main__":

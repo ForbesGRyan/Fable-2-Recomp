@@ -332,6 +332,22 @@ int main() {
     return 109;
   }
   if (DrawRecord{}.light_index != kNoSideIndex || AssembleRecord(Good(), 0).light_index != kNoSideIndex) return 110;
+  // The third side index (the wind inputs, FrameScene::wind and ::shadow_wind; foliage spec ruling
+  // 7) lies in the record's tail padding, after `skip`: the record is still 616 bytes, and no
+  // record holds a wind index until the frame gives it one.
+  if (sizeof(DrawRecord) != 616 || offsetof(DrawRecord, wind_index) != 614 || sizeof(DrawRecord{}.wind_index) != 2 ||
+      offsetof(DrawRecord, wind_index) <= offsetof(DrawRecord, skip)) {
+    std::printf("FAIL: sizeof(DrawRecord) = %zu, wind_index at %zu, skip at %zu\n", sizeof(DrawRecord),
+                offsetof(DrawRecord, wind_index), offsetof(DrawRecord, skip));
+    return 150;
+  }
+  if (DrawRecord{}.wind_index != kNoSideIndex || AssembleRecord(Good(), 0).wind_index != kNoSideIndex) return 150;
+  {
+    // (also an instanced record and a skipped one)
+    DrawInputs t = Good();
+    t.have_pos = false;
+    if (AssembleRecord(t, 0).skip == SkipReason::kNone || AssembleRecord(t, 0).wind_index != kNoSideIndex) return 150;
+  }
   {
     DrawInputs t = Good();
     t.prim = kPrimQuadPatch; t.terrain_shader = true; t.indexed = false;

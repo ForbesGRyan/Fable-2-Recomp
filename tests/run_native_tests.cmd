@@ -82,6 +82,8 @@ clang++ -std=c++23 -fsanitize=float-cast-overflow -fsanitize-trap=float-cast-ove
 "%OUT%\instance_expand.exe" || exit /b 1
 clang++ -std=c++23 -fsanitize=float-cast-overflow -fsanitize-trap=float-cast-overflow "%~dp0native\test_draw_record.cpp" -o "%OUT%\draw_record.exe" || exit /b 1
 "%OUT%\draw_record.exe" || exit /b 1
+clang++ -std=c++23 "%~dp0native\test_wind_inputs.cpp" -o "%OUT%\wind_inputs.exe" || exit /b 1
+"%OUT%\wind_inputs.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_light_block.cpp" -o "%OUT%\light_block.exe" || exit /b 1
 "%OUT%\light_block.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_shadow_block.cpp" -o "%OUT%\shadow_block.exe" || exit /b 1

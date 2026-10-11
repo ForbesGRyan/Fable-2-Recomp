@@ -313,7 +313,9 @@ class OnePass(unittest.TestCase):
         self.assertIn("  wind_on_ = wind && scene.wind_records;\n", render)
         self.assertEqual(render.count("PrepareWind("), 1)
         self.assertIn("  if (wind_on_) {\n    const bool prepass = DecideClayMask(mask_in).mask == ClayMask::kDrawn;\n"
-                      "    for (Prepared& p : prepared_) {\n      if (p.pipeline && !p.terrain) PrepareWind(dev, *p.r, WindOf(scene, *p.r), prepass, p, st);\n",
+                      "    for (Prepared& p : prepared_) {\n"
+                      "      // (a late coverage record drawn at half is not in the pre-pass: it needs no wind pipeline there)\n"
+                      "      if (p.pipeline && !p.terrain) PrepareWind(dev, *p.r, WindOf(scene, *p.r), prepass && !p.coverage_half, p, st);\n",
                       render)
         self.assertIn("      if (wind_on_) {\n        const capture::WindInputs* wind = ShadowWindOf(scene, c, r);\n", pass_function(s, "PrepareShadows"))
         # the cache's wind buffers, the program and a wind slot are asked for in these functions alone

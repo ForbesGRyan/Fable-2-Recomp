@@ -733,6 +733,9 @@ bool alpha_passes(float a, float ref, uint func) {
   return true;
 }
 float3 clay_linear(float3 d) { d = saturate(d); return d * d; }
+#ifdef CLAY_COVERAGE
+#define main clay_textured
+#endif
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1, float3 world : TEXCOORD2,
             float3 normal : TEXCOORD3, float3 axis : TEXCOORD4, float3 vcolour : TEXCOORD5,
             float4 bend : TEXCOORD6) : SV_Target {
@@ -761,6 +764,15 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
       float per_offset = samples == 1 ? 0.125 : samples == 2 ? 0.0625 : 0.25;
       if (!(a >= mask_base - offset * per_offset)) discard;
     }
+#ifdef CLAY_COVERAGE
+    {
+      uint2 cp = uint2(pos.xy);
+      uint cindex = ((cp.x & 1) << 1) | (cp.y & 1);
+      float t0 = 0.5 - float((alpha_mode >> (16 + 2 * cindex)) & 3) * 0.125;
+      int covered = (a >= t0 ? 1 : 0) + (a >= t0 + 0.5 ? 1 : 0);
+      if ((alpha_mode & 0x100) == 0 || ((alpha_mode >> 24) & 3) != 1 || covered != 1) discard;
+    }
+#endif
 #ifdef CLAY_DEPTH_ONLY
     return float4(0.0, 0.0, 0.0, 0.0);
 #else
@@ -816,9 +828,27 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
   if (light_mode & 128) return float4(FogUnlit(clay_linear(base * (0.35 + 0.65 * facet)) * f_post, FogCoords(pos), 1.0), 1.0);
   return float4(clay_linear(base * (0.35 + 0.65 * facet)) * f_post, 1.0);
 }
+#ifdef CLAY_COVERAGE
+#undef main
+float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1, float3 world : TEXCOORD2,
+            float3 normal : TEXCOORD3, float3 axis : TEXCOORD4, float3 vcolour : TEXCOORD5,
+            float4 bend : TEXCOORD6) : SV_Target {
+  return float4(clay_textured(pos, ndc, uv, world, normal, axis, vcolour, bend).rgb, 0.5);
+}
+#endif
 )hlsl"
 inline constexpr const char* kClayTexturedPs = FABLE2_CLAY_TEXTURED_HLSL;
 inline constexpr const char* kClayTexturedDepthPs = "#define CLAY_DEPTH_ONLY 1\n" FABLE2_CLAY_TEXTURED_HLSL;
+// The half program of a coverage record (clay_logic.h, "Coverage"; sub-project 11, phase 11b): the textured
+// shader's own text under CLAY_COVERAGE, in which, after the alpha test and today's alpha-to-mask discard, a pixel
+// is kept only where exactly ONE of the scene's two samples is covered (t0 = 0.5 - offset / 8 the first sample's
+// threshold, t0 + 0.5 the second's: covered = (a >= t0) + (a >= t0 + 0.5), CoveredSamples), and only under
+// alpha-to-mask on two samples (anything else is discarded: the pass gives this program to no other draw), and
+// the output's alpha is the constant one half whatever path made the colour (the entry is a wrapper about the
+// text's own main). The pass blends it source alpha over inverse source alpha: the game's resolve of one covered
+// sample of two. Without the define the text compiles to the programs it compiled to before (the shader test
+// holds the bytes of the colour and the depth-only program).
+inline constexpr const char* kClayTexturedHalfPs = "#define CLAY_COVERAGE 1\n" FABLE2_CLAY_TEXTURED_HLSL;
 
 // Terrain material of the clay pass (frame-map section 13, "Terrain", "Native
 // terrain material"; the reference is tools/xdk_sigmatch/terrain_replay.py,

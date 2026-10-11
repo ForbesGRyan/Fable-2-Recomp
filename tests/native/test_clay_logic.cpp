@@ -2503,6 +2503,146 @@ static void CoverageTests() {
     static_assert(PlanCoverageOrder(nullptr, 0, 0, 0).tail == kNoCoverageTail);
     static_assert(CoveredSamples(0xAA, 0, 0, 0.5f) == 1 && !CoverageHasFull(0xAA, 0.5f));
   }
+  // 750 to 759: the pass's part (plan Task 13: the late records).
+  // 750: a late record's half key: the record's own key with the half program, blended by a constant half (source
+  // alpha over inverse source alpha), its depth test, depth write, depth function, cull, colour mask and wind kept.
+  {
+    const capture::DrawRecord late = CoverageRecord(kCoveragePs[0], 0.5f);
+    capture::RenderState rs = CoverageState(0xAA);
+    rs.cull = capture::Cull::kBack;
+    rs.depth_func = capture::Compare::kLessEqual;
+    const DrawState d = DecideDrawState(rs, late.material, 1, false);
+    CHECK(750, CoverageDrawable(d) && d.key.coverage == 0 && d.key.blend == 0);
+    const PipelineKey half = CoverageHalfKey(d.key);
+    PipelineKey want = d.key;
+    want.coverage = 1;
+    want.blend = 1;
+    want.src = uint8_t(capture::Factor::kSrcAlpha);
+    want.dst = uint8_t(capture::Factor::kInvSrcAlpha);
+    want.op = uint8_t(capture::BlendOp::kAdd);
+    want.src_alpha = uint8_t(capture::Factor::kZero);
+    want.dst_alpha = uint8_t(capture::Factor::kOne);
+    want.op_alpha = uint8_t(capture::BlendOp::kAdd);
+    CHECK(750, half == want && !(half == d.key));
+    CHECK(750, half.textured == 1 && half.depth_test == d.key.depth_test && half.depth_write == 1 && half.depth_func == d.key.depth_func &&
+                   half.cull == d.key.cull && half.color_mask == d.key.color_mask && half.wind == 0 && InPrepass(half));
+    PipelineKey wind = d.key;
+    wind.wind = 1;
+    CHECK(750, CoverageHalfKey(wind).wind == 1 && CoverageHalfKey(wind).coverage == 1 && !(CoverageHalfKey(wind) == half));
+    // (the RHI can express the half blend: the two factors and the operation are among those its enums hold)
+    CHECK(750, RhiFactor(capture::Factor(half.src)) && RhiFactor(capture::Factor(half.dst)) && RhiFactor(capture::Factor(half.src_alpha)) &&
+                   RhiFactor(capture::Factor(half.dst_alpha)) && RhiBlendOp(capture::BlendOp(half.op)));
+    // 751: a record at scale 1 is no coverage record and keeps today's key bit for bit, the switch on or off; the
+    // key's new member is 0 in every key DecideDrawState and MakePipelineKey make.
+    const capture::DrawRecord whole = CoverageRecord(kCoveragePs[0], 1.0f);
+    CHECK(751, CoverageOf(true, whole, rs) == CoverageKind::kNone && CoverageOf(false, late, rs) == CoverageKind::kNone);
+    const DrawState dw = DecideDrawState(rs, whole.material, 1, false);
+    PipelineKey plain = MakePipelineKey(rs, 1);
+    CHECK(751, dw.key == plain && dw.key.coverage == 0 && PipelineKey{}.coverage == 0 && sizeof(PipelineKey) == 15);
+    CHECK(751, PrepassKey(half).coverage == 0 && PrepassKey(d.key) == PrepassKey(dw.key));   // (no pre-pass key has the member)
+    // 752: what is drawable as a half draw: the record drawn with its texture, its alpha the albedo's, under
+    // alpha-to-mask on two samples, opaque, with depth test and write.
+    CHECK(752, !CoverageDrawable(DecideDrawState(rs, late.material, 0, false)));              // flat clay: no texture this frame
+    {
+      capture::RenderState other = rs;
+      other.alpha_to_mask_samples = 0;
+      CHECK(752, !CoverageDrawable(DecideDrawState(other, late.material, 1, false)));
+      other = rs;
+      other.alpha_to_mask = false;
+      CHECK(752, !CoverageDrawable(DecideDrawState(other, late.material, 1, false)));
+      other = rs;
+      other.depth_write = false;
+      CHECK(752, !CoverageDrawable(DecideDrawState(other, late.material, 1, false)));
+      other = rs;
+      other.blend = true;
+      other.src = capture::Factor::kSrcAlpha;
+      other.dst = capture::Factor::kInvSrcAlpha;
+      CHECK(752, !CoverageDrawable(DecideDrawState(other, late.material, 1, false)));
+      other = rs;
+      other.valid = false;
+      CHECK(752, !CoverageDrawable(DecideDrawState(other, late.material, 1, false)));
+      capture::Material one = late.material;
+      one.alpha.source = capture::AlphaSource::kOne;
+      CHECK(752, !CoverageDrawable(DecideDrawState(rs, one, 1, false)));
+      CHECK(752, !CoverageDrawable(DecideDrawState(rs, late.material, kTexturedTerrainLayer, false)));
+      // (each condition alone, on a state made by hand: the decoder never gives these, the rule holds all the same)
+      DrawState hand = d;
+      hand.key.textured = 0;
+      CHECK(752, !CoverageDrawable(hand));
+      hand = d;
+      hand.alpha.mode &= ~kAlphaToMask;
+      CHECK(752, !CoverageDrawable(hand));
+      hand = d;
+      hand.alpha.mode &= ~kAlphaFromAlbedo;
+      CHECK(752, !CoverageDrawable(hand));
+      hand = d;
+      hand.key.coverage = 1;
+      CHECK(752, !CoverageDrawable(hand));
+      hand = d;
+      hand.skip = true;
+      CHECK(752, !CoverageDrawable(hand));
+      hand = d;
+      hand.key.depth_test = 0;
+      CHECK(752, !CoverageDrawable(hand));
+    }
+  }
+  // 753: the verdict, one chain: off; no late record (an early one is Task 14's and is today's record here); not
+  // drawable; a late record that could have fully covered pixels (today's record until the full program exists);
+  // no pipeline; drawn. Drawn only with everything, and never with the switch off.
+  for (uint32_t bits = 0; bits < 16; ++bits) {
+    for (CoverageKind kind : {CoverageKind::kNone, CoverageKind::kEarly, CoverageKind::kLate}) {
+      const ClayCoverageInputs in{(bits & 1u) != 0, kind, (bits & 2u) != 0, (bits & 4u) != 0, (bits & 8u) != 0};
+      const ClayCoverage c = DecideClayCoverage(in);
+      const bool all = in.on && kind == CoverageKind::kLate && in.drawable && !in.has_full && in.has_pipeline;
+      CHECK(753, (c == ClayCoverage::kDrawn) == all);
+      CHECK(753, in.on || c == ClayCoverage::kOff);
+      if (in.on && kind == CoverageKind::kLate && in.drawable) {
+        CHECK(753, c == (in.has_full ? ClayCoverage::kFull : in.has_pipeline ? ClayCoverage::kDrawn : ClayCoverage::kPipeline));
+      } else if (in.on) {
+        CHECK(753, c == ClayCoverage::kNone);
+      }
+    }
+  }
+  CHECK(753, std::string(ClayCoverageName(ClayCoverage::kPipeline)) == "pipeline" && std::string(ClayCoverageName(ClayCoverage::kFull)) == "full" &&
+                 std::string(kCoverageReason) == "coverage");
+  // 754: the Coverage line.
+  {
+    ClayStats st;
+    CHECK(754, FormatCoverageText(st) == "Coverage: off");
+    st.coverage_switch = true;
+    CHECK(754, FormatCoverageText(st) == "Coverage: on, late 0, early 0 | not drawn: {}");
+    st.coverage_late = 3;
+    CHECK(754, FormatCoverageText(st) == "Coverage: on, late 3, early 0 | not drawn: {}");
+    st.coverage_rest[size_t(ClayCoverage::kPipeline)] = 2;
+    st.coverage_rest[size_t(ClayCoverage::kNone)] = 900;     // (not a reason: a record that is no coverage record)
+    CHECK(754, FormatCoverageText(st) == "Coverage: on, late 3, early 0 | not drawn: {coverage: pipeline 2}");
+    st.coverage_rest[size_t(ClayCoverage::kFull)] = 1;
+    CHECK(754, FormatCoverageText(st) == "Coverage: on, late 3, early 0 | not drawn: {coverage: full 1, coverage: pipeline 2}");
+    st.coverage_sky_moved = true;
+    st.coverage_sky_over = 5;
+    st.coverage_sky_over_no_depth = 1;
+    CHECK(754, FormatCoverageText(st) == "Coverage: on, late 3, early 0 | not drawn: {coverage: full 1, coverage: pipeline 2} | "
+                                         "the sky step moved before the first late record, over 5 records (1 without depth write)");
+  }
+  // 755: the frame's depth place among the prepared records, for PlanCoverageOrder: the first prepared record at or
+  // beyond the plan's record; the count when the layer's depth is not taken among the records.
+  {
+    const uint32_t records[5] = {2, 5, 9, 9, 14};   // (FrameScene::draws indices of the prepared records, ascending)
+    SunDepthPlace plan;
+    CHECK(755, CoverageDepthPlace(plan, false, records, 5) == 5 && CoverageDepthPlace(plan, true, records, 5) == 5);
+    plan.usable = true;
+    plan.record = 9;
+    CHECK(755, CoverageDepthPlace(plan, true, records, 5) == 2 && CoverageDepthPlace(plan, false, records, 5) == 5);
+    plan.record = 0;
+    CHECK(755, CoverageDepthPlace(plan, true, records, 5) == 0);
+    plan.record = 6;
+    CHECK(755, CoverageDepthPlace(plan, true, records, 5) == 2);
+    plan.record = 15;
+    CHECK(755, CoverageDepthPlace(plan, true, records, 5) == 5 && CoverageDepthPlace(plan, true, nullptr, 0) == 0);
+    plan.record = capture::kNoDepthPlace;
+    CHECK(755, CoverageDepthPlace(plan, true, records, 5) == 5);
+    for (size_t i = 0; i < 5; ++i) CHECK(755, (i >= CoverageDepthPlace({true, 9}, true, records, 5)) == SunDepthBefore({true, 9}, records[i]));
+  }
 }
 
 int main() {
@@ -4757,8 +4897,9 @@ int main() {
                    "depth D32_FLOAT 3.1 MB");
     // The linear format is one for every pipeline of the pass, so the key has no field for it: the
     // same keys, and the same number of pipelines, as with the 8-bit target.
-    // (14 since the wind's field: foliage plan Task 10; 0 in every key of a frame without the wind)
-    CHECK(414, sizeof(PipelineKey) == 14 && PipelineKey{}.wind == 0);
+    // (14 since the wind's field: foliage plan Task 10; 0 in every key of a frame without the wind. 15 since the
+    // coverage's: plan Task 13; 0 in every key of a frame without a coverage record)
+    CHECK(414, sizeof(PipelineKey) == 15 && PipelineKey{}.wind == 0 && PipelineKey{}.coverage == 0);
   }
 
   // 420-489: the light (frame-map section 14, "Native light").
@@ -11178,7 +11319,9 @@ int main() {
                "the mirror against the reference's numbers, nothing that is no number, the plan, the verdict and the Clouds line; "
                "wind words: the box grown by the reach, the words' keys, the Geometry line; native wind: the verdict all or "
                "none, the constants' packing and literal slots, the three mirrors against the reference's numbers within "
-               "2e-5 (single precision), a leaf at its pivot, the reach never below the reference's, the keys, the Wind line\n";
+               "2e-5 (single precision), a leaf at its pivot, the reach never below the reference's, the keys, the Wind line; "
+               "coverage: the covered samples against the emulator's thresholds and today's set, the coverage record, the "
+               "colour pass's order for every arrangement of up to six records, the half key, the verdict, the Coverage line\n";
 
   return 0;
 }

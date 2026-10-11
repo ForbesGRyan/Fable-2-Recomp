@@ -443,6 +443,25 @@ constexpr const char* ClayWindName(ClayWind w) {
     default: return "?";
   }
 }
+// What the pass does about one record's coverage ("Coverage" below; DecideClayCoverage; the Coverage line).
+// kOff: fable2_native_coverage is off: nothing of the coverage is made and every record is today's. kNone:
+// no late coverage record that is drawn with its texture (CoverageOf, CoverageDrawable): today's record,
+// and no reason. kFull: a late record whose scale lets a pixel have both samples covered; the half program
+// alone would leave those pixels out, so it is today's record until the full program exists (plan Task 14).
+// kPipeline: the half pipeline of its state could not be made: today's record, in both passes. kDrawn: its
+// half-covered pixels at one half over what the target holds, at its own place; not in the pre-pass.
+inline constexpr const char* kCoverageReason = "coverage";
+enum class ClayCoverage : uint8_t { kOff, kNone, kFull, kPipeline, kDrawn, kCount };
+constexpr const char* ClayCoverageName(ClayCoverage c) {
+  switch (c) {
+    case ClayCoverage::kOff: return "off";
+    case ClayCoverage::kNone: return "none";
+    case ClayCoverage::kFull: return "full";
+    case ClayCoverage::kPipeline: return "pipeline";
+    case ClayCoverage::kDrawn: return "drawn";
+    default: return "?";
+  }
+}
 // The pass's frame counts of the sun layer, by verdict: one frame added. Counted: every frame with the
 // sun's switch on, which is every verdict but kOff.
 struct ClaySunFrames {
@@ -544,6 +563,18 @@ struct ClayStats {
   uint32_t wind_casters = 0;
   uint32_t wind_rest[size_t(ClayWind::kCount)] = {};
   uint32_t wind_capture_rest[size_t(capture::WindReason::kCount)] = {};
+  // The coverage as drawn ("Coverage" below; the Coverage line). coverage_switch: fable2_native_coverage as
+  // the Render read it. coverage_late: the late records drawn at half (counted at the colour draw);
+  // coverage_early: the early ones (none until plan Task 14). coverage_rest: coverage records drawn as
+  // today's, by the pass's reason (index: ClayCoverage; kFull, kPipeline), counted when they are prepared.
+  // coverage_sky_moved: the sky step was drawn before the frame's first late record, earlier than its own
+  // place (SkyPlace); coverage_sky_over: the drawn records between the two places, which are now drawn after
+  // the sky step, the moon and the clouds; coverage_sky_over_no_depth: those of them that write no depth
+  // (today the sky covers them where nothing else wrote depth; moved, they are drawn over it).
+  bool coverage_switch = false, coverage_sky_moved = false;
+  uint32_t coverage_late = 0, coverage_early = 0;
+  uint32_t coverage_rest[size_t(ClayCoverage::kCount)] = {};
+  uint32_t coverage_sky_over = 0, coverage_sky_over_no_depth = 0;
   uint32_t light_rotation[size_t(RotationKind::kCount)] = {};
   capture::ShaderTally<32> light_rotation_by_vs;
   // The light as drawn ("Native light" below; the Light line). light_switch:
@@ -1442,8 +1473,13 @@ struct PipelineKey {
   uint8_t depth_test = 1, depth_write = 1, depth_func = 1;   // Compare values
   uint8_t cull = 0;          // Cull values
   uint8_t wind = 0;          // 1: the wind vertex program ("Native wind" below); 0: the clay vertex shader, as always
+  // 1: the half program of a coverage record ("Coverage" below: the pixels with one sample of two, blended at one
+  // half); 0: the kind's own pixel shader, as always. (2, the full program, is plan Task 14's.) Only CoverageHalfKey
+  // sets it; no pre-pass key has it.
+  uint8_t coverage = 0;
   bool operator==(const PipelineKey&) const = default;
 };
+static_assert(sizeof(PipelineKey) == 15);
 
 // The game's depth function on a depth buffer of the other direction.
 inline capture::Compare MirrorCompare(capture::Compare f) {
@@ -1755,6 +1791,53 @@ constexpr CoverageOrder PlanCoverageOrder(const CoverageItem* items, size_t coun
   size_t sky = sky_place < first_late ? sky_place : first_late;
   sky = tail < sky ? tail : sky;
   return {sky, tail};
+}
+
+// Native coverage, the late records (plan Task 13). A late record that the frame draws with its texture is
+// drawn ONCE in the colour pass, at its own place, by the half program (shaders::kClayTexturedHalfPs: it keeps
+// the pixels with exactly one covered sample and writes the constant alpha one half) blended source alpha over
+// inverse source alpha with the record's own depth test and depth write; and it is left out of the depth
+// pre-pass, where a coverage record writes its fully covered pixels alone and a late record has none
+// (!CoverageHasFull). So its end depth is today's (every pixel its first sample covers), the layer's depth and
+// the depth place are untouched, and what lies behind it shows through at one half: the game's resolve of two
+// samples for everything drawn before it. The shadow mask is not rebuilt (ruling 15): a half-covered pixel's
+// sun term takes the mask of what lies behind it. All or nothing a record: one that cannot have its half
+// pipeline is today's record in both passes.
+// Whether a record's draw state is one the half program can stand in for: drawn with its texture (not flat
+// clay, not terrain), its alpha an albedo component, alpha-to-mask under two samples, no blend, depth test and
+// depth write. (CoverageOf asks the same of the captured record; this asks it of what the frame draws.)
+inline bool CoverageDrawable(const DrawState& d) {
+  const uint32_t need = kAlphaToMask | kAlphaFromAlbedo;
+  return !d.skip && d.key.textured == 1 && d.key.blend == 0 && d.key.coverage == 0 && d.key.depth_test != 0 && d.key.depth_write != 0 &&
+         (d.alpha.mode & need) == need && ((d.alpha.mode >> kAlphaToMaskSamplesShift) & 3u) == 1u;
+}
+// The colour-pass key of a coverage record's half-covered pixels: the record's key with the half program and
+// the half blend. The target has no alpha channel; the alpha's factors keep what is there.
+constexpr PipelineKey CoverageHalfKey(PipelineKey k) {
+  k.coverage = 1;
+  k.blend = 1;
+  k.src = uint8_t(capture::Factor::kSrcAlpha);
+  k.dst = uint8_t(capture::Factor::kInvSrcAlpha);
+  k.op = uint8_t(capture::BlendOp::kAdd);
+  k.src_alpha = uint8_t(capture::Factor::kZero);
+  k.dst_alpha = uint8_t(capture::Factor::kOne);
+  k.op_alpha = uint8_t(capture::BlendOp::kAdd);
+  return k;
+}
+// The pass's decision about one record, one chain. `kind`: CoverageOf. `drawable`: CoverageDrawable of the
+// frame's draw state. `has_full`: CoverageHasFull of its offsets and scale. `has_pipeline`: the half program
+// and the half pipeline of its key exist (asked last, only for a record that would be drawn with them).
+struct ClayCoverageInputs {
+  bool on = false;
+  CoverageKind kind = CoverageKind::kNone;
+  bool drawable = false, has_full = false, has_pipeline = false;
+};
+constexpr ClayCoverage DecideClayCoverage(const ClayCoverageInputs& in) {
+  if (!in.on) return ClayCoverage::kOff;
+  if (in.kind != CoverageKind::kLate || !in.drawable) return ClayCoverage::kNone;  // (an early record: plan Task 14)
+  if (in.has_full) return ClayCoverage::kFull;
+  if (!in.has_pipeline) return ClayCoverage::kPipeline;
+  return ClayCoverage::kDrawn;
 }
 
 // Root constants, laid out as the clay HLSL cbuffer (36 dwords).
@@ -5225,6 +5308,17 @@ constexpr SunDepthPlace PlanSunDepthPlace(uint32_t occluders, uint32_t failed, u
 constexpr bool SunDepthBefore(const SunDepthPlace& plan, size_t index) {
   return plan.usable && plan.record != capture::kNoDepthPlace && index >= plan.record;
 }
+// PlanCoverageOrder's `depth_place`: the index, among the frame's prepared records, of the first one before
+// which the layer's depth is taken (SunDepthBefore of its index in FrameScene::draws; `records`: those
+// indices, in the frame's order); `count` when the depth is not taken among the records (`early` false: no
+// drawn layer, the feed, or a frame without a place) or no prepared record lies at or beyond the place.
+constexpr size_t CoverageDepthPlace(const SunDepthPlace& plan, bool early, const uint32_t* records, size_t count) {
+  if (!early) return count;
+  for (size_t i = 0; i < count; ++i) {
+    if (SunDepthBefore(plan, records[i])) return i;
+  }
+  return count;
+}
 
 struct ClaySunInputs {
   bool sun = false, furniture = false, bloom = false, radial = false, quads = false, drawable = false, objects = false, textures = false;
@@ -6889,6 +6983,31 @@ inline std::string FormatWindText(const ClayStats& st) {
   }
   for (ClayWind w : {ClayWind::kBuffer, ClayWind::kPipeline, ClayWind::kSlot}) add(ClayWindName(w), st.wind_rest[size_t(w)]);
   return text + "}";
+}
+
+// The log's and F3's Coverage line. "Coverage: off" with the switch off. With it on: the late records drawn at
+// half, the early ones (none until plan Task 14), the coverage records drawn as today's by reason, and, in a
+// frame whose sky step was moved before its first late record, over how many drawn records it moved.
+inline std::string FormatCoverageText(const ClayStats& st) {
+  if (!st.coverage_switch) return "Coverage: off";
+  char buf[192];
+  std::snprintf(buf, sizeof(buf), "Coverage: on, late %u, early %u | not drawn: {", st.coverage_late, st.coverage_early);
+  std::string text = buf;
+  bool first = true;
+  for (ClayCoverage c : {ClayCoverage::kFull, ClayCoverage::kPipeline}) {
+    const uint32_t n = st.coverage_rest[size_t(c)];
+    if (!n) continue;
+    std::snprintf(buf, sizeof(buf), "%s%s: %s %u", first ? "" : ", ", kCoverageReason, ClayCoverageName(c), n);
+    text += buf;
+    first = false;
+  }
+  text += "}";
+  if (st.coverage_sky_moved) {
+    std::snprintf(buf, sizeof(buf), " | the sky step moved before the first late record, over %u records (%u without depth write)",
+                  st.coverage_sky_over, st.coverage_sky_over_no_depth);
+    text += buf;
+  }
+  return text;
 }
 
 // The log line of the maps, written when the pass's targets are created.

@@ -903,6 +903,9 @@ static const char kPinVsMain[] = R"pin(VsOut main(uint vid : SV_VertexID) {
   return o;
 })pin";
 static const char kPinTexturedMain[] = R"pin(float3 clay_linear(float3 d) { d = saturate(d); return d * d; }
+#ifdef CLAY_COVERAGE
+#define main clay_textured
+#endif
 float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1, float3 world : TEXCOORD2,
             float3 normal : TEXCOORD3, float3 axis : TEXCOORD4, float3 vcolour : TEXCOORD5,
             float4 bend : TEXCOORD6) : SV_Target {
@@ -931,6 +934,15 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
       float per_offset = samples == 1 ? 0.125 : samples == 2 ? 0.0625 : 0.25;
       if (!(a >= mask_base - offset * per_offset)) discard;
     }
+#ifdef CLAY_COVERAGE
+    {
+      uint2 cp = uint2(pos.xy);
+      uint cindex = ((cp.x & 1) << 1) | (cp.y & 1);
+      float t0 = 0.5 - float((alpha_mode >> (16 + 2 * cindex)) & 3) * 0.125;
+      int covered = (a >= t0 ? 1 : 0) + (a >= t0 + 0.5 ? 1 : 0);
+      if ((alpha_mode & 0x100) == 0 || ((alpha_mode >> 24) & 3) != 1 || covered != 1) discard;
+    }
+#endif
 #ifdef CLAY_DEPTH_ONLY
     return float4(0.0, 0.0, 0.0, 0.0);
 #else
@@ -985,7 +997,15 @@ float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOO
   if (light_mode & 1024) return float4(FogUnlitTree(clay_linear(base * (0.35 + 0.65 * facet)) * f_post, FogCoords(pos), asfloat(pad2)), 1.0);
   if (light_mode & 128) return float4(FogUnlit(clay_linear(base * (0.35 + 0.65 * facet)) * f_post, FogCoords(pos), 1.0), 1.0);
   return float4(clay_linear(base * (0.35 + 0.65 * facet)) * f_post, 1.0);
-})pin";
+}
+#ifdef CLAY_COVERAGE
+#undef main
+float4 main(float4 pos : SV_Position, float3 ndc : TEXCOORD0, float2 uv : TEXCOORD1, float3 world : TEXCOORD2,
+            float3 normal : TEXCOORD3, float3 axis : TEXCOORD4, float3 vcolour : TEXCOORD5,
+            float4 bend : TEXCOORD6) : SV_Target {
+  return float4(clay_textured(pos, ndc, uv, world, normal, axis, vcolour, bend).rgb, 0.5);
+}
+#endif)pin";
 static const char kPinTerrainCommon[] = R"pin(float4 sample_colour(float2 at) {
   if (t_colour_sampler == 0) return t_colour.Sample(s_point_wrap, at);
   if (t_colour_sampler == 1) return t_colour.Sample(s_linear_wrap, at);
@@ -3035,7 +3055,8 @@ int main() {
       // light text has the fog's tail of the frame's block and the fog's functions under it, with
       // names that do nothing in its place otherwise)
       if (strstr(p.colour, "#define CLAY_DEPTH_ONLY") || Count(p.colour, "#ifdef CLAY_DEPTH_ONLY") != 1 || Count(p.colour, "#else") != 2 ||
-          Count(p.colour, "#endif") != (i == 0 ? 5 : 4) || Count(p.colour, "#ifdef CLAY_WIND") != (i == 0 ? 1 : 0) ||  // (the object block's wind tail: the textured shader's text has the block; case 52 holds its compiled bytes to those of before)
+          Count(p.colour, "#endif") != (i == 0 ? 8 : 4) || Count(p.colour, "#ifdef CLAY_WIND") != (i == 0 ? 1 : 0) ||  // (the object block's wind tail: the textured shader's text has the block; case 52 holds its compiled bytes to those of before)
+          Count(p.colour, "#ifdef CLAY_COVERAGE") != (i == 0 ? 3 : 0) ||  // (the half program's three blocks, each with its #endif: the textured shader's text alone; case 53 holds the compiled bytes to those of before)
           Count(p.colour, "#ifdef CLAY_FOG") != 2 || Count(p.colour, "#ifndef CLAY_DEPTH_ONLY") != 1 ||
           Count(p.colour, "#define CLAY_FOG 1") != 1 || strstr(p.colour, "#ifndef CLAY_DEPTH_ONLY") != p.colour) return 192;
       if (!Compile(p.name, p.depth, "ps_5_0")) return 192;
@@ -5069,9 +5090,149 @@ int main() {
     std::cout << "wind: without the define the nine clay programs' bytes of before; t9 a buffer of floats, 16 loads, each in the family's block under the vertex's bound; "
               << Count(wind.c_str(), "[precise") << " precise instructions; a leaf's division behind the squared length's test\n";
   }
+  // 53 (a free number below 256): the half program of a coverage record (sub-project 11, plan Task 13; clay_logic.h,
+  // "Coverage").
+  {
+    using namespace fable2::native::render;
+    const auto fails = [](int line) {
+      std::cerr << "the coverage half program: the check at line " << line << " failed\n";
+      return 53;
+    };
+    // (a) Without CLAY_COVERAGE the textured colour program and its depth-only form compile to the bytes they
+    // compiled to before the coverage (and before the wind: case 52's records of commit 21be803, this compiler's;
+    // the canary says whether this compiler is that one).
+    {
+      size_t size = 0;
+      const bool same_compiler = CodeHash("canary", "float4 main(float4 p : SV_Position) : SV_Target { return p * 0.25 + 1.0; }", "ps_5_0", &size) ==
+                                     0x144FCFF10FDFCCA2ull && size == 532;
+      if (!same_compiler) {
+        std::cout << "coverage: NOT JUDGED: this compiler is not the one the textured programs' bytes of before were recorded with\n";
+      } else {
+        if (CodeHash("clay_textured_ps", kClayTexturedPs, "ps_5_0", &size) != 0x0A1DC9F23AF13290ull || size != 23936) return fails(__LINE__);
+        if (CodeHash("clay_textured_depth_ps", kClayTexturedDepthPs, "ps_5_0", &size) != 0xF057CCDD7BE1C5C7ull || size != 6016) return fails(__LINE__);
+        // (control: the half program is another program)
+        if (CodeHash("clay_textured_half_ps", kClayTexturedHalfPs, "ps_5_0", &size) == 0x0A1DC9F23AF13290ull || size == 0) return fails(__LINE__);
+      }
+    }
+    // The text's rule: everything of the coverage stands between #ifdef CLAY_COVERAGE and its #endif, three times
+    // in the textured text (the entry's other name, the kept set, the entry); the half program is the define and
+    // that text; no other program's text names the define or the count.
+    if (Count(kClayTexturedPs, "#ifdef CLAY_COVERAGE\n") != 3 || Count(kClayTexturedPs, "CLAY_COVERAGE") != 3 || strstr(kClayTexturedPs, "#define CLAY_COVERAGE") ||
+        strncmp(kClayTexturedHalfPs, "#define CLAY_COVERAGE 1\n", 24) != 0 || strcmp(kClayTexturedHalfPs + 24, kClayTexturedPs) != 0 ||
+        Count(kClayTexturedPs, "covered") != 2 || Count(kClayTexturedPs, "clay_textured") != 2) return fails(__LINE__);
+    for (const char* src : {kClayVs, kClayWindVs, kClayPs, kClayTerrainLayerPs, kClayTerrainFarPs, kClayTerrainLayerDepthPs, kClayTerrainFarDepthPs, kClayShadowPs,
+                            kClaySkyPs, kClayMaskPs, kClayQuadPs, kClayCloudPs}) {
+      if (strstr(src, "CLAY_COVERAGE") || strstr(src, "int covered") || strstr(src, "clay_textured")) return fails(__LINE__);
+    }
+    // (b) The half program compiles, binds what the textured program binds and reads the draw's constants where
+    // ClayConstants holds them.
+    if (!Compile("clay_textured_half_ps", kClayTexturedHalfPs, "ps_5_0")) return fails(__LINE__);
+    if (BindingsMismatch("clay_textured_half_ps", kClayTexturedHalfPs, "ps_5_0", false) || DrawLayoutMismatch("clay_textured_half_ps", kClayTexturedHalfPs, "ps_5_0")) return fails(__LINE__);
+    const std::string whole = Disassembly("clay_textured_ps", kClayTexturedPs, "ps_5_0"), half = Disassembly("clay_textured_half_ps", kClayTexturedHalfPs, "ps_5_0");
+    if (whole.empty() || half.empty() || Code(whole) == Code(half)) return fails(__LINE__);
+    // (c) Its output's alpha is the constant one half on every path, and the textured program's never is: every
+    // write of o0.w in the half program is the literal, there is at least one, and the colour program has none.
+    {
+      int writes = 0, halves = 0;
+      size_t at = 0;
+      while (at < half.size()) {
+        size_t end = half.find('\n', at);
+        if (end == std::string::npos) end = half.size();
+        const std::string line = half.substr(at, end - at);
+        const size_t o = line.find(" o0."), first = line.find_first_not_of(" \t");
+        // (an instruction, not a comment or a declaration, whose destination's mask holds w)
+        if (o != std::string::npos && first != std::string::npos && line[first] != '/' && line.compare(first, 4, "dcl_") != 0 &&
+            line.find(',', o) != std::string::npos && line.find('w', o) < line.find(',', o)) {
+          ++writes;
+          if (line.find("mov o0.w, l(0.500000)") != std::string::npos) ++halves;
+        }
+        at = end + 1;
+      }
+      if (writes == 0 || writes != halves || HasLineWith(whole, "mov", "o0.w, l(0.500000)")) {
+        std::cerr << "the half program's alpha: " << writes << " writes of o0.w, " << halves << " of them the literal one half\n" << Code(half);
+        return fails(__LINE__);
+      }
+      const std::string one = Changed(kClayTexturedHalfPs, "bend).rgb, 0.5);", "bend).rgb, 1.0);");
+      if (one.empty() || HasLineWith(Disassembly("clay_textured_half_one", one.c_str(), "ps_5_0"), "mov", "o0.w, l(0.500000)")) return fails(__LINE__);
+    }
+    // (d) The kept set, evaluated: the coverage block's own text (cut out of the half program) compiled with the
+    // alpha, the mode and the pixel as literals discards always or never, and it discards exactly where
+    // CoveredSamples is not 1: for four offset bytes, the four parities and the alphas about both thresholds.
+    // Under anything but alpha-to-mask on two samples it discards whatever the alpha.
+    {
+      const char* begin = strstr(kClayTexturedHalfPs, "#ifdef CLAY_COVERAGE\n    {\n");
+      const char* end = begin ? strstr(begin, "    }\n#endif\n") : nullptr;
+      if (!begin || !end) return fails(__LINE__);
+      const std::string block(begin + strlen("#ifdef CLAY_COVERAGE\n"), end + strlen("    }\n"));
+      if (block.find("float t0 = 0.5 - float((alpha_mode >> (16 + 2 * cindex)) & 3) * 0.125;") == std::string::npos ||
+          block.find("int covered = (a >= t0 ? 1 : 0) + (a >= t0 + 0.5 ? 1 : 0);") == std::string::npos ||
+          block.find("if ((alpha_mode & 0x100) == 0 || ((alpha_mode >> 24) & 3) != 1 || covered != 1) discard;") == std::string::npos ||
+          block.find("uint cindex = ((cp.x & 1) << 1) | (cp.y & 1);") == std::string::npos) return fails(__LINE__);
+      // (the block stands after the alpha test and today's alpha-to-mask discard and before any colour)
+      const char* mask = strstr(kClayTexturedHalfPs, "if (!(a >= mask_base - offset * per_offset)) discard;");
+      const char* lit = strstr(kClayTexturedHalfPs, "    if (light_mode & 4) {");
+      if (!mask || !lit || !(mask < begin && begin < lit)) return fails(__LINE__);
+      const auto discards = [&](const std::string& text, uint32_t mode, uint32_t x, uint32_t y, float a, bool* ok) {
+        char head[320];
+        std::snprintf(head, sizeof(head),
+                      "float4 main(float4 p0 : SV_Position) : SV_Target {\n  static const uint alpha_mode = %uu;\n  static const float a = %.9g;\n"
+                      "  static const float4 pos = float4(%u.5, %u.5, 0.0, 1.0);\n",
+                      mode, double(a), x, y);
+        const std::string listing = Disassembly("coverage_block", (std::string(head) + text + "  return float4(p0.xy, 0.0, 1.0);\n}\n").c_str(), "ps_5_0");
+        *ok = *ok && !listing.empty();
+        return listing.find("discard") != std::string::npos;
+      };
+      bool ok = true;
+      int kept = 0, dropped = 0;
+      for (const uint32_t offsets : {0x87u, 0xAAu, 0x1Bu, 0xE4u}) {
+        for (uint32_t parity = 0; parity < 4; ++parity) {
+          const uint32_t x = 6 + (parity >> 1), y = 10 + (parity & 1u);
+          const float t0 = 0.5f - 0.125f * float((offsets >> (2 * parity)) & 3u);
+          for (const float a : {std::nextafter(t0, -1.0f), t0, std::nextafter(t0 + 0.5f, -1.0f), t0 + 0.5f, 0.0f, 2.0f, t0 + 0.25f}) {
+            const uint32_t mode = 0x110u | (3u << 5) | (offsets << 16) | (1u << 24);
+            const bool gone = discards(block, mode, x, y, a, &ok);
+            if (!ok || gone != (CoveredSamples(uint8_t(offsets), x, y, a) != 1u)) {
+              std::cerr << "the half program's kept set: offsets " << std::hex << offsets << std::dec << " pixel (" << x << ", " << y << ") alpha " << a << ": "
+                        << (gone ? "discarded" : "kept") << ", covered samples " << CoveredSamples(uint8_t(offsets), x, y, a) << "\n";
+              return fails(__LINE__);
+            }
+            ++(gone ? dropped : kept);
+            // (not two samples, or no alpha-to-mask: nothing is kept)
+            if (!discards(block, mode & ~(3u << 24), x, y, a, &ok) || !discards(block, (mode & ~(3u << 24)) | (2u << 24), x, y, a, &ok) ||
+                !discards(block, mode & ~0x100u, x, y, a, &ok) || !ok) return fails(__LINE__);
+          }
+        }
+      }
+      if (kept < 32 || dropped < 64) return fails(__LINE__);   // (both verdicts occur: 3 of 7 alphas a parity are kept)
+      // Controls: a block that keeps the fully covered pixels, one whose second threshold is a quarter above the
+      // first, and one with "greater" for "at least" each disagree with CoveredSamples somewhere on the same inputs.
+      for (const auto& change : {std::pair<const char*, const char*>{"covered != 1) discard;", "covered != 2) discard;"},
+                                 std::pair<const char*, const char*>{"(a >= t0 + 0.5 ? 1 : 0)", "(a >= t0 + 0.25 ? 1 : 0)"},
+                                 std::pair<const char*, const char*>{"int covered = (a >= t0 ? 1 : 0)", "int covered = (a > t0 ? 1 : 0)"},
+                                 std::pair<const char*, const char*>{"& 3) * 0.125;", "& 3) * 0.25;"},
+                                 std::pair<const char*, const char*>{"((cp.x & 1) << 1) | (cp.y & 1)", "((cp.y & 1) << 1) | (cp.x & 1)"}}) {
+        const std::string other = Changed(block.c_str(), change.first, change.second);
+        if (other.empty()) return fails(__LINE__);
+        int differs = 0;
+        for (uint32_t parity = 0; parity < 4; ++parity) {
+          const uint32_t x = 6 + (parity >> 1), y = 10 + (parity & 1u);
+          const float t0 = 0.5f - 0.125f * float((0x87u >> (2 * parity)) & 3u);
+          for (const float a : {std::nextafter(t0, -1.0f), t0, std::nextafter(t0 + 0.5f, -1.0f), t0 + 0.5f, t0 + 0.25f}) {
+            differs += discards(other, 0x110u | (3u << 5) | (0x87u << 16) | (1u << 24), x, y, a, &ok) != (CoveredSamples(0x87, x, y, a) != 1u);
+          }
+        }
+        if (!ok || differs == 0) {
+          std::cerr << "the control \"" << change.second << "\" is not seen\n";
+          return fails(__LINE__);
+        }
+      }
+      std::cout << "coverage: without the define the textured programs' bytes of before; the half program keeps the pixels with one covered sample of two ("
+                << kept << " kept, " << dropped << " discarded of " << kept + dropped << " evaluated), nothing under another sample count, and writes the alpha one half\n";
+    }
+  }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads; the base map's gamma sign: the curve, the record's word read by the lit terrain programs alone; the quad step: the block at the table's offsets in both stages, the six vertices through the game's matrix, the two kinds' statements, one texture under four samplers, the alpha test's discard, the compiled clamp; the sun layer: the blocks at their tables' offsets, the depth step's one bounded load written as depth, the reduction's one sample, the radial blur's fourteen bounded loads, the four kinds' statements and the occluder's form, the writes' own rounding, no other program's text touched; the previous-frame blend: with the share 0 the composite of before, the blended form behind the share's test with one bounded load of the previous picture; the scene's clouds: the block at the quad block's offsets, the corner's position passed on, the statements of the reference, the alpha test's discard, the base level's texel step, the compiled clamp, no other program's text touched; the wind vertex program: without its define the nine clay programs' bytes of before the wind, t9 a buffer of floats loaded only for a vertex the draw names of a draw with a wind family, the wind's constants at 288 and 336 of a 448-byte block, a leaf's division behind the test of the squared length, the three functions marked precise\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads; the base map's gamma sign: the curve, the record's word read by the lit terrain programs alone; the quad step: the block at the table's offsets in both stages, the six vertices through the game's matrix, the two kinds' statements, one texture under four samplers, the alpha test's discard, the compiled clamp; the sun layer: the blocks at their tables' offsets, the depth step's one bounded load written as depth, the reduction's one sample, the radial blur's fourteen bounded loads, the four kinds' statements and the occluder's form, the writes' own rounding, no other program's text touched; the previous-frame blend: with the share 0 the composite of before, the blended form behind the share's test with one bounded load of the previous picture; the scene's clouds: the block at the quad block's offsets, the corner's position passed on, the statements of the reference, the alpha test's discard, the base level's texel step, the compiled clamp, no other program's text touched; the wind vertex program: without its define the nine clay programs' bytes of before the wind, t9 a buffer of floats loaded only for a vertex the draw names of a draw with a wind family, the wind's constants at 288 and 336 of a 448-byte block, a leaf's division behind the test of the squared length, the three functions marked precise; the coverage half program: without its define the textured programs' bytes of before, the pixels with one covered sample of two kept and no other, the alpha one half\n";
   return 0;
 }

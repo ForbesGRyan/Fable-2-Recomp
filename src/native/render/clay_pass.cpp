@@ -182,6 +182,7 @@ void ClayPass::DestroyObjects() {
     for (nrhi::Pipeline* p : pipelines_) device_->DestroyDeferred(p);
     device_->DestroyDeferred(vs_);
     device_->DestroyDeferred(wind_vs_);  // (after its pipelines: those above, the pre-pass's and the maps')
+    device_->DestroyDeferred(coverage_half_ps_);  // (after its pipelines: among those above)
     for (nrhi::Shader* ps : ps_) device_->DestroyDeferred(ps);
     device_->DestroyDeferred(map_pipeline_);
     device_->DestroyDeferred(map_vs_);
@@ -202,6 +203,7 @@ void ClayPass::DestroyObjects() {
   pipelines_.clear();
   vs_ = nullptr;
   wind_vs_ = nullptr;
+  coverage_half_ps_ = nullptr;
   for (nrhi::Shader*& ps : ps_) ps = nullptr;
   map_pipeline_ = nullptr;
   map_vs_ = map_ps_ = nullptr;
@@ -228,6 +230,12 @@ nrhi::Pipeline* ClayPass::CreatePipeline(nrhi::Device* dev, const PipelineKey& k
   // (the pre-pass: the kind's depth-only form; flat clay discards nothing and keeps its shader)
   pipe.ps = depth_only && depth_ps_[kind] ? depth_ps_[kind] : ps_[kind];
   if (depth_only && kind != 0 && !depth_ps_[kind]) return nullptr;
+  // A key with `coverage` is drawn by the half program and no other key is: a textured colour key
+  // alone (CoverageHalfKey, after EnsureCoverageShader; anything else has no pipeline).
+  if (key.coverage) {
+    if (key.coverage != 1 || kind != 1 || depth_only || !coverage_half_ps_) return nullptr;
+    pipe.ps = coverage_half_ps_;
+  }
   pipe.rtv_format = kLinearFormat;
   pipe.dsv_format = nrhi::Format::kD32_FLOAT;
   pipe.blend.enable = key.blend != 0;
@@ -298,6 +306,8 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     vs_ = nullptr;
     wind_vs_ = nullptr;
     wind_vs_failed_ = false;  // (another device: its wind program is tried anew)
+    coverage_half_ps_ = nullptr;
+    coverage_half_failed_ = false;  // (and the coverage's half program)
     for (nrhi::Shader*& ps : ps_) ps = nullptr;
     map_pipeline_ = nullptr;
     map_vs_ = map_ps_ = nullptr;
@@ -352,6 +362,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     oracle_failed_ = false;  // (and the oracle feed)
     oracle_sun_failed_ = false;
     wind_vs_failed_ = false;  // (and the wind vertex program)
+    coverage_half_failed_ = false;  // (and the coverage's half program)
   }
   ready_ = false;
 
@@ -1034,6 +1045,26 @@ bool ClayPass::EnsureWindShader(nrhi::Device* dev) {
   }
   REXLOG_INFO("[native] clay: wind vertex program compiled (wind words at t9, the wind's {} bytes of constants at byte {} of a record's "
               "{}-byte slot at b1)", sizeof(ClayWindConstants), kClayWindOffset, kClayObjectSlotBytes);
+  return true;
+}
+
+bool ClayPass::EnsureCoverageShader(nrhi::Device* dev) {
+  if (coverage_half_ps_) return true;
+  if (coverage_half_failed_ || !ready_ || dev != device_) return false;
+  nrhi::ShaderDesc ps;
+  ps.stage = nrhi::ShaderStage::kPixel;
+  ps.name = "fable2_clay_textured_half_ps";
+  ps.hlsl_source = shaders::kClayTexturedHalfPs;
+  ps.entry_point = "main";
+  coverage_half_ps_ = dev->CreateShader(ps);
+  if (!coverage_half_ps_) {
+    coverage_half_failed_ = true;
+    REXLOG_ERROR("[native] clay: coverage half program compile failed: every late coverage record is drawn whole, as before "
+                 "(coverage: pipeline), until the pass is rebuilt or the game is restarted");
+    return false;
+  }
+  REXLOG_INFO("[native] clay: coverage half program compiled (a late record's pixels with one covered sample of two, at one half over what "
+              "the target holds)");
   return true;
 }
 
@@ -2683,9 +2714,12 @@ bool ClayPass::TakeSceneDump(nrhi::Device* dev, std::vector<uint8_t>* file) {
 }
 
 void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
-                      bool textured, ClayLight light, bool shadows, bool fog, bool wind, const ClayPostRequest& post, ClayStats& st,
+                      bool textured, ClayLight light, bool shadows, bool fog, bool wind, bool coverage, const ClayPostRequest& post, ClayStats& st,
                       TextureStats& tst) {
   if (!ready_ || dev != device_) return;
+  // The frame's coverage: the switch as it is now. Without it nothing below asks for the half
+  // program or a half key, and the colour pass's order is SkyPlace's.
+  st.coverage_switch = coverage;
   // The frame's wind: the switch as it is now, in a scene that was captured with it (a scene of
   // before the switch has no wind inputs: its records are at rest). Without both, nothing below
   // asks for a wind buffer, the wind program, a wind key or a wind slot.
@@ -2817,6 +2851,27 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     }
     p.alpha = d.alpha;
     p.pipeline = PipelineFor(dev, d.key, st);
+    // A late coverage record (DecideClayCoverage: one chain, the half pipeline asked last): its half
+    // pipeline in place of its own, or today's record with the reason counted.
+    if (coverage) {
+      ClayCoverageInputs cin;
+      cin.on = true;
+      cin.kind = CoverageOf(true, r, rs);
+      cin.drawable = CoverageDrawable(d);
+      cin.has_full = CoverageHasFull(rs.alpha_to_mask_offsets, r.material.alpha_scale);
+      nrhi::Pipeline* half = nullptr;
+      if (cin.kind == CoverageKind::kLate && cin.drawable && !cin.has_full && EnsureCoverageShader(dev)) {
+        half = TryPipeline(dev, CoverageHalfKey(d.key));
+      }
+      cin.has_pipeline = half != nullptr;
+      const ClayCoverage verdict = DecideClayCoverage(cin);
+      if (verdict == ClayCoverage::kDrawn) {
+        p.pipeline = half;
+        p.coverage_half = true;
+      } else if (verdict == ClayCoverage::kFull || verdict == ClayCoverage::kPipeline) {
+        ++st.coverage_rest[size_t(verdict)];
+      }
+    }
     if (d.alpha_tested) ++st.alpha_tested;
     if (d.blended) ++st.blended;
     if (d.state_invalid) ++st.state_invalid;
@@ -2904,7 +2959,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   if (wind_on_) {
     const bool prepass = DecideClayMask(mask_in).mask == ClayMask::kDrawn;
     for (Prepared& p : prepared_) {
-      if (p.pipeline && !p.terrain) PrepareWind(dev, *p.r, WindOf(scene, *p.r), prepass, p, st);
+      // (a late coverage record drawn at half is not in the pre-pass: it needs no wind pipeline there)
+      if (p.pipeline && !p.terrain) PrepareWind(dev, *p.r, WindOf(scene, *p.r), prepass && !p.coverage_half, p, st);
     }
   }
   // "Shadow: on": the switch, or a scene that holds shadow records all the same.
@@ -3083,7 +3139,9 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       const PipelineKey* key = p.pipeline ? KeyOf(p.pipeline) : nullptr;
       item.drawn = p.pipeline != nullptr;
       item.terrain = p.terrain;
-      item.blend = key && key->blend != 0;
+      // (a coverage record's half key blends, but the record is the opaque one it is in the game's
+      // state: the sky's own place is today's, and PlanCoverageOrder moves the step before it)
+      item.blend = key && key->blend != 0 && !p.coverage_half;
       item.depth_write = key && InPrepass(*key);
       sky_order_.push_back(item);
     }
@@ -3434,6 +3492,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       if (!p.pipeline) continue;
       const PipelineKey* key = KeyOf(p.pipeline);
       if (!key || !InPrepass(*key)) continue;
+      // (a late coverage record drawn at half has no fully covered pixel: nothing of it in the pre-pass)
+      if (p.coverage_half) continue;
       float m[4][4];
       RecordMatrix(*p.r, m);
       if (PrepassBeyondReach(m, p.bounds, mask_view_proj, frame_.eye, scene.shadow.split, key->depth_func)) {
@@ -3522,7 +3582,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       if (!p.pipeline) continue;
       if (!p.prepass) {
         // (a record that writes no depth has no pre-pass pipeline and is no skip)
-        if (p.prepass_culled) continue;
+        if (p.prepass_culled || p.coverage_half) continue;
         if (const PipelineKey* key = KeyOf(p.pipeline); key && InPrepass(*key)) ++st.prepass_skipped;
         continue;
       }
@@ -3661,6 +3721,35 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   };
   const bool sun_depth_early = sun == ClaySun::kDrawn && !oracle_sun && post_frame && terrain_cb_ != nullptr &&
                                sun_place.record != capture::kNoDepthPlace;
+  // Where the sky step is drawn: its own place, or, in a frame with late coverage records, before
+  // the first of them when that comes earlier (PlanCoverageOrder: a half-covered pixel is blended
+  // over what the target holds, so the sky must be there first). With the switch off, and in every
+  // frame without such a record, this is sky_order.place and the loop is the one of before.
+  size_t sky_at = sky_order.place;
+  size_t coverage_first = prepared_.size(), coverage_depth_place = prepared_.size();
+  if (coverage) {
+    coverage_items_.clear();
+    coverage_records_.clear();
+    for (const Prepared& p : prepared_) {
+      const PipelineKey* key = p.pipeline ? KeyOf(p.pipeline) : nullptr;
+      if (p.coverage_half && coverage_first == prepared_.size()) coverage_first = coverage_items_.size();
+      coverage_items_.push_back({p.coverage_half ? CoverageKind::kLate : CoverageKind::kNone, key && key->blend != 0 && !p.terrain && !p.coverage_half});
+      coverage_records_.push_back(uint32_t(p.r - scene.draws.data()));
+    }
+    coverage_depth_place = CoverageDepthPlace(sun_place, sun_depth_early, coverage_records_.data(), coverage_records_.size());
+    if (sky_drawn) {
+      sky_at = PlanCoverageOrder(coverage_items_.data(), coverage_items_.size(), sky_order.place, coverage_depth_place).sky;
+      if (sky_at < sky_order.place) {
+        st.coverage_sky_moved = true;
+        for (size_t i = sky_at; i < sky_order.place && i < prepared_.size(); ++i) {
+          const PipelineKey* key = prepared_[i].pipeline ? KeyOf(prepared_[i].pipeline) : nullptr;
+          if (!key) continue;
+          ++st.coverage_sky_over;
+          if (!InPrepass(*key)) ++st.coverage_sky_over_no_depth;
+        }
+      }
+    }
+  }
   for (size_t index = 0; index < prepared_.size(); ++index) {
     const Prepared& p = prepared_[index];
     if (left_out) break;        // (no constant buffer: nothing is drawn)
@@ -3679,7 +3768,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       bound = nullptr;
       sun_depth_taken = true;
     }
-    if (sky_drawn && index == sky_order.place) draw_sky();
+    if (sky_drawn && index == sky_at) draw_sky();
     if (!p.pipeline) continue;  // a terrain record that is not drawn (FinishTerrain)
     const capture::DrawRecord& r = *p.r;
     if (p.pipeline != bound) {
@@ -3691,6 +3780,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     DrawPrepared(cmd, p, color, false, mask_bound, &light_mode, &draw_fog, nullptr);
     ++st.drawn;
     if (p.wind) ++st.wind_moved[size_t(p.wind->family)];
+    if (p.coverage_half) ++st.coverage_late;
     // Its fog in a fogged frame, for the Fog line: an unlit draw's form or why it has none, and a
     // lit draw that is not fogged because its game shader has no fog.
     CountDrawFog(draw_fog, st);
@@ -3737,14 +3827,30 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     if (form != wind_logged_ && wind_log_lines_ < kWindLogLines) {
       wind_logged_ = form;
       ++wind_log_lines_;
-      REXLOG_INFO("[native] clay: wind changed at scene frame {}: {} | wind slots {} ({} new), wind words {} buffers{}", scene.frame,
+      REXLOG_INFO("[native] clay: wind changed at scene frame {}: {} | wind slots {} ({} new), wind words served to {} records{}", scene.frame,
                   FormatWindText(st), wind_blocks_.size(), wind_new_slots_, st.wind_words,
                   wind_log_lines_ == kWindLogLines ? " (last such line)" : "");
     }
   }
+  // A line when the Coverage line's form changes (the first late record drawn at half, a reason
+  // appearing or going, the sky step moving): the 300-frame line may never come on a slow adapter.
+  // With the switch off nothing is written.
+  if (coverage) {
+    const uint32_t form = (st.coverage_late ? 1u : 0u) | (st.coverage_rest[size_t(ClayCoverage::kFull)] ? 2u : 0u) |
+                          (st.coverage_rest[size_t(ClayCoverage::kPipeline)] ? 4u : 0u) | (st.coverage_sky_moved ? 8u : 0u);
+    constexpr uint32_t kCoverageLogLines = 16;
+    if (form != coverage_logged_ && coverage_log_lines_ < kCoverageLogLines) {
+      coverage_logged_ = form;
+      ++coverage_log_lines_;
+      REXLOG_INFO("[native] clay: coverage changed at scene frame {}: {} | first late record at {} of {} prepared records, the sky's place {}, "
+                  "drawn at {}, layer depth place {}{}{}",
+                  scene.frame, FormatCoverageText(st), coverage_first, prepared_.size(), sky_order.place, sky_at, coverage_depth_place,
+                  sky_drawn ? "" : " (no sky step in this frame)", coverage_log_lines_ == kCoverageLogLines ? " (last such line)" : "");
+    }
+  }
   // (no blended record: the sky after the last record. A frame without a record has no view, so no
   // fog and no sky: the sky is never drawn alone.)
-  if (sky_drawn && sky_order.place >= prepared_.size()) draw_sky();
+  if (sky_drawn && sky_at >= prepared_.size()) draw_sky();
   // The glare, after the last record (the game's last draws of its scene): added, without a depth test.
   if (sky_drawn) draw_quads(ClayQuadPlace::kAfterRecords);
   // A line when the furniture's verdict changes (the first frame with furniture; a frame that lost it

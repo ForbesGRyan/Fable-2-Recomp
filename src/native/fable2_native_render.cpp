@@ -110,6 +110,13 @@ REXCVAR_DEFINE_STRING(fable2_native_wind, "off", "Fable2",
                       "view draws those records moved as the game's vertex shader moves them, in colour, depth and shadow "
                       "(F3: the Wind line); off (or false, 0; the default) = none of it is read, made or drawn. Frame map "
                       "section 18.");
+REXCVAR_DEFINE_STRING(fable2_native_coverage, "off", "Fable2",
+                      "Native coverage (sub-project 11, phase 11b; not yet validated): on (or true, 1) = the native view "
+                      "draws a tree that fades between the eye and the hero (a late draw under alpha-to-mask, at fade one "
+                      "half) as the game's two samples resolve it, its pixels at one half over what lies behind, and "
+                      "leaves it out of the shadow mask's depth pre-pass (F3: the Coverage line); off (or false, 0; the "
+                      "default) = it is drawn whole, as before, and nothing of the coverage is made or drawn. Frame map "
+                      "section 18.");
 REXCVAR_DEFINE_STRING(fable2_native_scene_dump, "off", "Fable2",
                       "Diagnostic of the native renderer (frame map section 18, \"Stored native scene\"): on (or true, 1) = "
                       "each discovery capture made while the native picture is drawn also writes the native scene of its "
@@ -398,6 +405,19 @@ bool CurrentWind() {
   const bool on = render::ParseClayLight(REXCVAR_GET(fable2_native_wind), &recognized) == render::ClayLight::kOn;
   if (!recognized && !warned.exchange(true)) {
     REXLOG_WARN("[native] unknown fable2_native_wind '{}', using off (accepted: {})", REXCVAR_GET(fable2_native_wind),
+                render::kClaySwitchWords);
+  }
+  return on;
+}
+
+// fable2_native_coverage: read like the sun's switch; anything else is off, with one warning that names
+// the words. The pass alone reads it: the capture reads nothing more for it.
+bool CurrentCoverage() {
+  static std::atomic<bool> warned{false};
+  bool recognized = true;
+  const bool on = render::ParseClayLight(REXCVAR_GET(fable2_native_coverage), &recognized) == render::ClayLight::kOn;
+  if (!recognized && !warned.exchange(true)) {
+    REXLOG_WARN("[native] unknown fable2_native_coverage '{}', using off (accepted: {})", REXCVAR_GET(fable2_native_coverage),
                 render::kClaySwitchWords);
   }
   return on;
@@ -711,12 +731,12 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
       g_clay->RequestSceneDump(first);
     }
   }
-  g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), CurrentFog(), CurrentWind(), post,
+  g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), CurrentFog(), CurrentWind(), CurrentCoverage(), post,
                  st, tst);
   g_shadows_usable.store(g_clay->shadows_usable(), std::memory_order_relaxed);
   SetStatus(render::FormatStatusText(*scene, st, textures ? &tst : nullptr) + "\n" +
             render::FormatLightDrawnText(st) + "\n" + render::FormatShadowText(st) + "\n" + render::FormatFogText(st) + "\n" +
-            render::FormatSkyText(st) + "\n" + render::FormatPostText(st) + "\n" + render::FormatFurnitureText(st) + "\n" + render::FormatSunText(st) + "\n" + render::FormatCloudText(st) + "\n" + render::FormatWindText(st));
+            render::FormatSkyText(st) + "\n" + render::FormatPostText(st) + "\n" + render::FormatFurnitureText(st) + "\n" + render::FormatSunText(st) + "\n" + render::FormatCloudText(st) + "\n" + render::FormatWindText(st) + "\n" + render::FormatCoverageText(st));
   const double cpu_ms = st.hash_ms + st.decode_ms + st.record_ms + tst.decode_ms;
   const uint32_t pending = tst.status[size_t(capture::MaterialStatus::kTexturePending)];
   if (textures && (tst.uploads || pending)) {
@@ -777,6 +797,8 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
     // The wind: the records and casters drawn moved, and those with a wind shader drawn at rest by reason. Only
     // with the switch on: with it off the log is the one of before the wind.
     if (st.wind_switch) REXLOG_INFO("[native] clay: {}", render::FormatWindText(st));
+    // The coverage likewise: only with the switch on.
+    if (st.coverage_switch) REXLOG_INFO("[native] clay: {}", render::FormatCoverageText(st));
     if (const std::string by_vs = render::FormatShadowSkippedByVs(st); !by_vs.empty()) {
       REXLOG_INFO("[native] clay: shadow draws skipped by vs {{{}}}", by_vs);
     }
@@ -983,6 +1005,10 @@ void Install(rex::memory::Memory* memory) {
   if (CurrentWind()) {
     REXLOG_INFO("[native] wind: on (fable2_native_wind; the wind inputs of the draws whose vertex shader sways are read in a "
                 "frame with records, and the native view draws those records moved)");
+  }
+  if (CurrentCoverage()) {
+    REXLOG_INFO("[native] coverage: on (fable2_native_coverage; the native view draws a late coverage record's half-covered pixels at one "
+                "half over what lies behind, and leaves it out of the depth pre-pass)");
   }
   // (a diagnostic: its line only when it is on, so that a normal run's log is the one of before)
   if (CurrentSceneDump()) {

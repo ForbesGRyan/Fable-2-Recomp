@@ -163,5 +163,68 @@ class Mirror(unittest.TestCase):
             self.assertRegex(table, r"FABLE2_PS_ALPHA\(0x%sull, 1, 0, 3, 107, 63, " % h)
 
 
+class SwitchOff(unittest.TestCase):
+    """Plan Task 13, Review Focus 5: no test compiles clay_pass.cpp, so the text is held. Everything the pass does
+    for the coverage is behind the Render's `coverage` word; with it off the sky step's place is SkyPlace's."""
+
+    def setUp(self):
+        self.source = (ROOT / "src" / "native" / "render" / "clay_pass.cpp").read_text(encoding="utf-8")
+        self.front = (ROOT / "src" / "native" / "fable2_native_render.cpp").read_text(encoding="utf-8")
+
+    def test_the_switch_is_off_by_default_and_read_by_the_pass_alone(self):
+        self.assertRegex(self.front, r'REXCVAR_DEFINE_STRING\(fable2_native_coverage, "off", "Fable2",')
+        self.assertEqual(self.front.count("CurrentCoverage()"), 3)      # its definition, the Render's argument, the start line
+        self.assertIn("CurrentFog(), CurrentWind(), CurrentCoverage(), post,", self.front)
+        self.assertIn('if (st.coverage_switch) REXLOG_INFO("[native] clay: {}", render::FormatCoverageText(st));', self.front)
+        capture = (ROOT / "src" / "native" / "capture" / "capture.cpp").read_text(encoding="utf-8")
+        for word in ("fable2_native_coverage", "CoverageOf", "CoveredSamples", "kCoveragePs"):   # the capture reads nothing for it
+            self.assertNotIn(word, capture)
+
+    def test_nothing_of_the_coverage_without_the_switch(self):
+        s = self.source
+        # the half program and a half key are asked for in one place, inside the switch's block of the prepare loop
+        self.assertEqual(s.count("EnsureCoverageShader(dev)"), 1)
+        self.assertEqual(s.count("CoverageHalfKey("), 1)
+        a = s.index("    if (coverage) {\n      ClayCoverageInputs cin;")
+        b = s.index("    if (d.alpha_tested) ++st.alpha_tested;", a)
+        block = s[a:b]
+        self.assertIn("EnsureCoverageShader(dev)", block)
+        self.assertIn("CoverageHalfKey(d.key)", block)
+        self.assertIn("p.coverage_half = true;", block)
+        self.assertEqual(s.count("p.coverage_half = true;"), 1)
+        # the half pixel shader goes into a pipeline only for a key with the member
+        self.assertEqual(s.count("pipe.ps = coverage_half_ps_;"), 1)
+        self.assertIn("  if (key.coverage) {\n    if (key.coverage != 1 || kind != 1 || depth_only || !coverage_half_ps_) return nullptr;\n"
+                      "    pipe.ps = coverage_half_ps_;\n  }\n", s)
+        # the sky step's place: SkyPlace's unless the switch's block moves it; PlanCoverageOrder is asked nowhere else
+        self.assertIn("  size_t sky_at = sky_order.place;\n", s)
+        self.assertEqual(s.count("PlanCoverageOrder("), 1)
+        c = s.index("  size_t sky_at = sky_order.place;\n")
+        d = s.index("  for (size_t index = 0; index < prepared_.size(); ++index) {", c)
+        self.assertIn("  if (coverage) {\n    coverage_items_.clear();", s[c:d])
+        self.assertEqual(s[c:d].count("sky_at = "), 2)
+        self.assertEqual(s.count("draw_sky();"), 2)
+        self.assertIn("if (sky_drawn && index == sky_at) draw_sky();", s)
+        self.assertIn("if (sky_drawn && sky_at >= prepared_.size()) draw_sky();", s)
+        # the log's line only with the switch
+        self.assertIn("  if (coverage) {\n    const uint32_t form = ", s)
+
+    def test_a_half_record_is_in_no_prepass_and_no_prepass_count(self):
+        s = self.source
+        self.assertIn("      if (!key || !InPrepass(*key)) continue;\n"
+                      "      // (a late coverage record drawn at half has no fully covered pixel: nothing of it in the pre-pass)\n"
+                      "      if (p.coverage_half) continue;\n", s)
+        self.assertIn("        if (p.prepass_culled || p.coverage_half) continue;\n", s)
+        self.assertIn("PrepareWind(dev, *p.r, WindOf(scene, *p.r), prepass && !p.coverage_half, p, st);", s)
+        # for SkyPlace a half record is the opaque record it is in the game's state
+        self.assertIn("      item.blend = key && key->blend != 0 && !p.coverage_half;\n", s)
+
+    def test_the_retry_and_the_release_know_the_half_program(self):
+        s = self.source
+        self.assertEqual(s.count("coverage_half_failed_ = false;"), 2)      # another device, and the F6 retry
+        self.assertEqual(s.count("coverage_half_ps_ = nullptr;"), 2)       # the release, and another device
+        self.assertEqual(s.count("device_->DestroyDeferred(coverage_half_ps_);"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

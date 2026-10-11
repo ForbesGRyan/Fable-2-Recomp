@@ -253,6 +253,47 @@ inline const capture::WindInputs* ShadowWindOf(const FrameScene& scene, size_t c
   return &scene.shadow_wind[cascade][r.wind_index];
 }
 
+// The scene's STORED wind entries, as an armed discovery capture's frame row writes them inside its
+// "wind" object (review of plan Tasks 8 and 9, Important 1: what the pass will draw from, not the
+// capture's re-read at the draw): ,"entries":[...],"caster_entries":[[...],[...]],"unreferenced":n.
+// One object a record that has an entry, in the records' order, found by the record's OWN
+// wind_index in its own side array (WindOf / ShadowWindOf): {"seq","vs":"0x<hash>","family", and
+// capture::AppendWindEntryFields}. "caster_entries": the two shadow passes' records likewise.
+// "unreferenced": entries of the three arrays that no record names. tools/xdk_sigmatch/
+// wind_check.py (inputs) holds each against a draw row's "wind" member of the same shader.
+inline void AppendWindEntries(std::string& row, const FrameScene& scene) {
+  size_t referenced = 0;
+  auto list = [&](const std::vector<capture::DrawRecord>& draws, const std::vector<capture::WindInputs>& wind) {
+    std::vector<bool> named(wind.size(), false);
+    row += "[";
+    bool first = true;
+    char buf[96];
+    for (const capture::DrawRecord& r : draws) {
+      if (r.wind_index == capture::kNoSideIndex || r.wind_index >= wind.size()) continue;
+      const capture::WindInputs& w = wind[r.wind_index];
+      named[r.wind_index] = true;
+      std::snprintf(buf, sizeof(buf), "%s{\"seq\":%u,\"vs\":\"0x%016llX\",\"family\":\"%s\",", first ? "" : ",", unsigned(r.seq),
+                    static_cast<unsigned long long>(r.vs_hash), capture::WindFamilyName(w.family));
+      row += buf;
+      capture::AppendWindEntryFields(row, w);
+      row += "}";
+      first = false;
+    }
+    row += "]";
+    for (bool n : named) referenced += n ? 1 : 0;
+  };
+  row += ",\"entries\":";
+  list(scene.draws, scene.wind);
+  row += ",\"caster_entries\":[";
+  list(scene.shadow_draws[0], scene.shadow_wind[0]);
+  row += ",";
+  list(scene.shadow_draws[1], scene.shadow_wind[1]);
+  char buf[48];
+  std::snprintf(buf, sizeof(buf), "],\"unreferenced\":%zu",
+                scene.wind.size() + scene.shadow_wind[0].size() + scene.shadow_wind[1].size() - referenced);
+  row += buf;
+}
+
 // The frame's wind capture as the log writes it after "wind: ":
 //   trunk a, leaf b, plant c, casters d | at rest {reason: n, ...} | by vs {0xHASH(reason): n, ...}
 // a, b, c: the scene's records with wind inputs by family; d: the shadow records of both passes with

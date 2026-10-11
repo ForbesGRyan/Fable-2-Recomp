@@ -133,6 +133,8 @@ std::atomic<bool> g_fog_frame{false};
 // no literal table, no stream is resolved, and a draw costs one branch.
 std::atomic<bool> g_wind_wanted{false};
 std::atomic<bool> g_wind_frame{false};
+// A count of the frames with the wind: a shader object's literal verdict is one frame's (WindLiteralVerdict).
+std::atomic<uint32_t> g_wind_generation{0};
 // The consumer also wants the frame's post block (SetPostWanted: the native
 // view, the light and the post chain on), latched like the shadows' and set
 // only in a frame with records. With it clear no hooked draw outside the main
@@ -2789,7 +2791,6 @@ void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
 // until the microcode the GPU runs changes (object path: microcode address,
 // size or patched-declaration id; immediate path: the copy's hash), so
 // steady-state draws do not re-hash microcode.
-enum : uint8_t { kWindLiteralsUnknown = 0, kWindLiteralsMatch = 1, kWindLiteralsDiffer = 2 };
 struct VsInfo {
   bool immediate = false;
   uint32_t variant = 0;
@@ -2831,11 +2832,12 @@ struct VsInfo {
   // table lookup of the cache's own, like the others; nothing of the wind is read for it.
   const WindSpec* wind = nullptr;
   // Whether the object's own literal table is the row's (ReadWindLiterals): asked at the object's
-  // first draw in a frame with the wind wanted, and then kept with the entry (FillWindInputs);
-  // kWindLiteralsUnknown until then, and while the table cannot be read. `obj`: the shader object
-  // the entry was made for (the cache's key).
+  // first draw in each frame with the wind wanted, and kept with the entry for that frame alone
+  // (FillWindInputs; wind_inputs.h, WindLiteralVerdict: an object reused at the same address with
+  // the same microcode and another table does not keep an old verdict); unknown until then, and
+  // while the table cannot be read. `obj`: the shader object the entry was made for (the cache's key).
   uint32_t obj = 0;
-  mutable uint8_t wind_literals = kWindLiteralsUnknown;
+  mutable WindLiteralVerdict wind_literals;
 };
 thread_local std::unordered_map<uint32_t, VsInfo> t_vs_cache;
 
@@ -2872,7 +2874,7 @@ const VsInfo* LookupVs(const VsChoice& c) {
       // (the wind's literal table is the object's, by variant: another variant's is asked for again)
       if (e.variant != c.variant) {
         e.variant = c.variant;
-        e.wind_literals = kWindLiteralsUnknown;
+        e.wind_literals = WindLiteralVerdict{};
       }
       return &e;
     }
@@ -3425,7 +3427,7 @@ thread_local float t_wind_bank[1024];
 // The wind inputs of a draw (wind_inputs.h, MakeWindInputs; frame-map section 18, "Wind inputs"):
 // called only in a frame with the wind wanted. A draw whose vertex shader has no wind row costs the
 // pointer its cache entry already holds and reads nothing. For one that has a row, guest reads, all
-// bounded: once a shader object its literal table (ReadWindLiterals), then per draw the row's
+// bounded: once a shader object and frame its literal table (ReadWindLiterals), then per draw the row's
 // registers from the device's vertex bank (three for a tree, five for a plant; one register a
 // read) and the vertex buffer objects behind a tree's elements (one to three; the same stream in
 // every row captured). Anything unread or refused gives a reason and default inputs: the draw is
@@ -3436,12 +3438,13 @@ WindReason FillWindInputs(uint32_t device, const DeviceSnapshot& dev, const VsIn
   WindDraw d;
   d.spec = vs ? vs->wind : nullptr;
   if (!d.spec) return MakeWindInputs(d, out);  // no row: nothing is read
-  if (vs->wind_literals == kWindLiteralsUnknown) {
+  const uint32_t generation = g_wind_generation.load(std::memory_order_relaxed);
+  if (WindLiteralsAsk(vs->wind_literals, generation)) {
     bool read = false;
     const bool match = ReadWindLiterals(vs->obj, vs->variant, *d.spec, &read);
-    if (read) vs->wind_literals = match ? kWindLiteralsMatch : kWindLiteralsDiffer;
+    WindLiteralsAnswer(&vs->wind_literals, generation, read, match);
   }
-  d.literals_match = vs->wind_literals == kWindLiteralsMatch;
+  d.literals_match = vs->wind_literals.state == kWindLiteralsMatch;
   if (!d.literals_match) return MakeWindInputs(d, out);  // not the row's shader: nothing more is read
   d.fetches = &vs->fetches;
   d.instanced = instanced;
@@ -3486,26 +3489,8 @@ void AppendWindInputs(std::string& row, uint32_t device, const DeviceSnapshot& d
                 WindFamilyName(vs->wind->family));
   row += buf;
   if (reason == WindReason::kNone) {
-    std::snprintf(buf, sizeof(buf), ",\"spec\":%u,\"reg\":\"", unsigned(w.spec));
-    row += buf;
-    for (uint32_t i = 0; i < kWindRegisters * 4; ++i) {
-      uint32_t word;
-      std::memcpy(&word, &w.reg[i / 4][i % 4], sizeof(word));
-      std::snprintf(buf, sizeof(buf), "%08X", word);
-      row += buf;
-    }
-    row += "\"";
-    const char* names[kWindElements] = {"pivot", "weights", "flutter"};
-    for (uint32_t e = 0; e < kWindElements; ++e) {
-      const LightElement& el = w.element[e];
-      if (el.stride_bytes == 0) continue;
-      char src[5] = {};
-      for (uint32_t i = 0; i < el.source_count && i < 4; ++i) src[i] = "xyzw"[LightSourceComponent(el, i)];
-      std::snprintf(buf, sizeof(buf),
-                    ",\"%s\":{\"phys\":%u,\"size\":%u,\"off\":%u,\"stride\":%u,\"fmt\":%u,\"src\":\"%s\",\"flags\":%u}", names[e],
-                    el.vb.phys_addr, el.vb.size, el.offset_bytes, el.stride_bytes, el.format, src, el.flags);
-      row += buf;
-    }
+    row += ",";
+    AppendWindEntryFields(row, w);  // (wind_inputs.h: the text the frame row's stored entries have too)
   }
   row += "}";
 }
@@ -5034,7 +5019,7 @@ void AppendFrameWind(std::string& row, const render::FrameScene& sc) {
     row += ",\"wind\":\"off\"";
     return;
   }
-  char buf[96];
+  char buf[128];
   std::snprintf(buf, sizeof(buf), ",\"wind\":{\"records\":%zu,\"casters\":%zu,\"family\":{\"trunk\":%u,\"leaf\":%u,\"plant\":%u}",
                 sc.wind.size(), sc.shadow_wind[0].size() + sc.shadow_wind[1].size(), sc.wind_family[size_t(WindFamily::kTrunk)],
                 sc.wind_family[size_t(WindFamily::kLeaf)], sc.wind_family[size_t(WindFamily::kPlant)]);
@@ -5054,6 +5039,10 @@ void AppendFrameWind(std::string& row, const render::FrameScene& sc) {
   };
   reasons("reason", sc.wind_reason);
   reasons("caster_reason", sc.shadow_wind_reason);
+  // The scene's stored entries themselves (frame_scene.h, AppendWindEntries: "entries",
+  // "caster_entries", "unreferenced"): what the records' wind_index names in the side arrays, which
+  // is what the pass draws from. wind_check.py (inputs) holds each against a draw row's member.
+  render::AppendWindEntries(row, sc);
   row += "}";
 }
 
@@ -5104,6 +5093,7 @@ void EndMainSceneFrame(bool write, int frame, uint64_t swap, SwapTimer& timer,
       // The wind inputs, only in a frame with records.
       const bool wind = records && g_wind_wanted.load(std::memory_order_relaxed);
       g_wind_frame.store(wind, std::memory_order_relaxed);
+      if (wind) g_wind_generation.fetch_add(1, std::memory_order_relaxed);  // (the literal verdicts are asked again)
       g_builder.WindOn(wind);
       // The next frame reads its own light block (and its own shadow state: CurrentShadowFrame).
       g_light_tries_frame.fetch_add(1, std::memory_order_relaxed);

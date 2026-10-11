@@ -345,6 +345,154 @@ class Inputs(unittest.TestCase):
             self.assertEqual(wc.main(["inputs", "--off", str(good)], say=out.append), 1)
 
 
+def entry_of(row, seq):
+    """A stored entry as the capture writes it for a record whose draw is `row` (a row with its member)."""
+    e = {"seq": seq, "vs": row["vs_hash"]}
+    e.update({k: v for k, v in row["wind"].items() if k != "reason"})
+    return e
+
+
+class Entries(unittest.TestCase):
+    """The scenes' stored entries (review of Tasks 8 and 9, Important 1): the frame row's "entries" and
+    "caster_entries" against the draw rows' members. What passes, and every way it must fail."""
+
+    def run_on(self, rows):
+        with tempfile.TemporaryDirectory() as tmp:
+            return wc.check_inputs(write_capture(tmp, rows))
+
+    def good(self, n=2):
+        rows = []
+        for i, h in enumerate((TRUNK, LEAF, GRASS, LEAF_CASTER) * n):
+            row = made_row(h, line=i)
+            row["bank"][4 * lf.WIND_SHADERS[h]["reg"][0]] = f32(60.0 + i)      # (each draw its own clock: no two entries alike)
+            row["in_scene"] = h != LEAF_CASTER
+            rows.append(with_member(row))
+        scene = [r for r in rows if r["in_scene"]]
+        casters = [r for r in rows if not r["in_scene"]]
+        wind = {"records": len(scene), "casters": len(casters), "family": {"trunk": n, "leaf": n, "plant": n},
+                "reason": {"none": len(scene), "no-entry": 50}, "caster_reason": {"none": len(casters)},
+                "entries": [entry_of(r, 100 + i) for i, r in enumerate(scene)],
+                "caster_entries": [[entry_of(r, 7 + i) for i, r in enumerate(casters[:1])],
+                                   [entry_of(r, 9 + i) for i, r in enumerate(casters[1:])]],
+                "unreferenced": 0}
+        return rows + [frame_row(1, wind)]
+
+    def test_entries_that_are_the_rows(self):
+        r = self.run_on(self.good())
+        self.assertEqual(r.problems, [])
+        self.assertEqual((r.entries, r.entries_matched, r.frames_entries, r.frames_on), (8, 8, 1, 1))
+        self.assertTrue(r.ok)
+
+    def test_one_bit_of_a_stored_register(self):
+        rows = self.good()
+        reg = rows[-1]["wind"]["entries"][2]["reg"]
+        rows[-1]["wind"]["entries"][2]["reg"] = reg[:7] + ("0" if reg[7] != "0" else "1") + reg[8:]
+        r = self.run_on(rows)
+        self.assertFalse(r.ok)
+        self.assertEqual((r.entries, r.entries_matched), (8, 7))
+        self.assertTrue(any("stored scene entry (seq 102" in p for p in r.problems), r.problems)
+
+    def test_an_entry_of_another_records_values(self):
+        # Two records' entries exchanged: the multiset is the same, and so it must be: an entry is held by A row of
+        # its shader. But an entry given another SHADER's values is seen.
+        rows = self.good()
+        entries = rows[-1]["wind"]["entries"]
+        entries[0]["reg"], entries[3]["reg"] = entries[3]["reg"], entries[0]["reg"]       # two trunks: still each a row's
+        self.assertTrue(self.run_on(rows).ok)
+        rows = self.good()
+        entries = rows[-1]["wind"]["entries"]
+        entries[0]["vs"], entries[1]["vs"] = entries[1]["vs"], entries[0]["vs"]           # a trunk's values under the leaf's shader
+        r = self.run_on(rows)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.entries_matched, 6)
+
+    def test_an_entry_written_twice(self):
+        rows = self.good()
+        wind = rows[-1]["wind"]
+        wind["entries"][3] = copy.deepcopy(wind["entries"][0])      # one row cannot serve two entries
+        r = self.run_on(rows)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.entries_matched, 7)
+
+    def test_an_element_of_a_stored_entry(self):
+        rows = self.good()
+        rows[-1]["wind"]["entries"][1]["pivot"]["off"] = 24
+        self.assertFalse(self.run_on(rows).ok)
+        rows = self.good()
+        del rows[-1]["wind"]["entries"][1]["flutter"]
+        self.assertFalse(self.run_on(rows).ok)
+        rows = self.good()
+        rows[-1]["wind"]["entries"][0]["spec"] += 1
+        self.assertFalse(self.run_on(rows).ok)
+
+    def test_a_caster_entry_is_held_by_a_row_outside_the_scene(self):
+        rows = self.good()
+        wind = rows[-1]["wind"]
+        reg = wind["caster_entries"][0][0]["reg"]
+        wind["caster_entries"][0][0]["reg"] = reg[:-1] + ("1" if reg[-1] != "1" else "2")
+        r = self.run_on(rows)
+        self.assertFalse(r.ok)
+        self.assertTrue(any("stored caster entry" in p and "out-of-scene" in p for p in r.problems))
+        # a scene entry is not served by a row outside the scene, nor a caster's by one inside it
+        rows = self.good()
+        for row in rows[:-1]:
+            row["in_scene"] = not row["in_scene"]
+        r = self.run_on(rows)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.entries_matched, 0)
+
+    def test_the_counts_and_the_unreferenced(self):
+        rows = self.good()
+        rows[-1]["wind"]["entries"].pop()                           # a record without its stored entry
+        r = self.run_on(rows)
+        self.assertFalse(r.ok)
+        self.assertTrue(any("5 stored entries, \"records\" says 6" in p for p in r.problems))
+        rows = self.good()
+        rows[-1]["wind"]["caster_entries"][1] = []
+        self.assertFalse(self.run_on(rows).ok)
+        rows = self.good()
+        rows[-1]["wind"]["unreferenced"] = 2                        # entries of a side array that no record names
+        r = self.run_on(rows)
+        self.assertFalse(r.ok)
+        self.assertTrue(any("named by no record" in p for p in r.problems))
+        rows = self.good()
+        del rows[-1]["wind"]["unreferenced"]
+        self.assertFalse(self.run_on(rows).ok)
+        rows = self.good()
+        rows[-1]["wind"]["entries"] = "none"
+        self.assertFalse(self.run_on(rows).ok)
+
+    def test_a_capture_without_entries_is_not_judged(self):
+        rows = self.good()
+        for key in ("entries", "caster_entries", "unreferenced"):
+            del rows[-1]["wind"][key]
+        r = self.run_on(rows)
+        self.assertTrue(r.ok)                                       # (the members' check stands as it did)
+        self.assertEqual((r.entries, r.frames_entries), (0, 0))
+        with tempfile.TemporaryDirectory() as tmp:
+            out = []
+            old = write_capture(tmp, rows)
+            self.assertEqual(wc.main(["inputs", str(old)], say=out.append), 0)
+            self.assertTrue(any("stored entries: NOT JUDGED" in line for line in out))
+            self.assertEqual(wc.main(["inputs", "--entries", str(old)], say=out.append), 1)
+            new = write_capture(tmp, self.good(), "native_discovery_20990101_000003.jsonl")
+            out.clear()
+            self.assertEqual(wc.main(["inputs", "--entries", str(new)], say=out.append), 0)
+            self.assertTrue(any("8 of 8 are held by a draw row" in line for line in out), out)
+
+    def test_the_entrys_text_is_the_members(self):
+        """The capture writes a member and an entry with one function (capture::AppendWindEntryFields), and a
+        record's entry with its seq, shader and family before it (render::AppendWindEntries), found by the record's
+        own wind_index."""
+        capture = (ROOT / "src" / "native" / "capture" / "capture.cpp").read_bytes().decode("utf-8").replace("\r\n", "\n")
+        scene = (ROOT / "src" / "native" / "render" / "frame_scene.h").read_bytes().decode("utf-8").replace("\r\n", "\n")
+        self.assertEqual(capture.count("AppendWindEntryFields(row, w);"), 1)
+        self.assertEqual(capture.count("render::AppendWindEntries(row, sc);"), 1)
+        self.assertEqual(scene.count("capture::AppendWindEntryFields(row, w);"), 1)
+        self.assertIn(r'"%s{\"seq\":%u,\"vs\":\"0x%016llX\",\"family\":\"%s\","', scene)
+        self.assertIn("const capture::WindInputs& w = wind[r.wind_index];", scene)
+
+
 @unittest.skipUnless(CAPTURE.is_file(), f"no capture {CAPTURE.name}")
 class RealRows(unittest.TestCase):
     def test_the_games_rows_would_all_have_inputs(self):

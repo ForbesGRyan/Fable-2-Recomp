@@ -370,7 +370,70 @@ int main() {
     if (!WindLiteralsMatch(*grass, g.bits, g.have)) return 55;
     if (WindLiteralsMatch(*FindWind(0xB636821F95DC9D8Eull), g.bits, g.have)) return 55;   // B636 holds them elsewhere
   }
+  // --- the cached verdict of a shader object's literal table (review of Tasks 8 and 9, Minor 1): asked at the
+  // object's first wind draw, kept for the rest of that frame, and asked again in the next: an object reused at
+  // the same address with the same microcode and another table does not keep the old verdict past the frame ---
+  {
+    WindLiteralVerdict v;
+    if (!WindLiteralsAsk(v, 5) || !WindLiteralsAsk(v, 0)) return 56;          // never asked: asked
+    WindLiteralsAnswer(&v, 5, true, true);
+    if (v.state != kWindLiteralsMatch || WindLiteralsAsk(v, 5)) return 56;   // kept for the frame
+    if (!WindLiteralsAsk(v, 6)) return 56;                                    // the next frame: asked again
+    WindLiteralsAnswer(&v, 6, true, false);                                   // (another table behind the same object)
+    if (v.state != kWindLiteralsDiffer || WindLiteralsAsk(v, 6) || !WindLiteralsAsk(v, 7)) return 56;
+    // A table that cannot be read leaves no verdict, an older one least of all, and is asked for again at the next draw.
+    WindLiteralsAnswer(&v, 7, false, true);
+    if (v.state != kWindLiteralsUnknown || !WindLiteralsAsk(v, 7)) return 56;
+    WindLiteralsAnswer(&v, 7, true, true);
+    if (v.state != kWindLiteralsMatch || WindLiteralsAsk(v, 7)) return 56;
+    // (the generation wraps: a verdict of 2^32 frames ago is asked again all the same, or is this frame's)
+    WindLiteralsAnswer(&v, 0xFFFFFFFFu, true, true);
+    if (WindLiteralsAsk(v, 0xFFFFFFFFu) || !WindLiteralsAsk(v, 0)) return 56;
+    WindLiteralsAnswer(nullptr, 1, true, true);
+  }
+  // --- an entry as a discovery row writes it (the draw row's "wind" member and the frame row's stored entries:
+  // one text for both) ---
+  {
+    WindInputs w;
+    w.family = WindFamily::kLeaf;
+    w.spec = 6;
+    for (uint32_t i = 0; i < kWindRegisters * 4; ++i) w.reg[i / 4][i % 4] = i < 12 ? 1.0f + float(i) : 0.0f;
+    w.element[kWindPivot].vb = {479176256u, 41472u};
+    w.element[kWindPivot].offset_bytes = 20;
+    w.element[kWindPivot].stride_bytes = 36;
+    w.element[kWindPivot].format = 32;
+    w.element[kWindPivot].source = 0x31;
+    w.element[kWindPivot].source_count = 3;
+    w.element[kWindPivot].flags = 9;
+    w.element[kWindWeights] = w.element[kWindPivot];
+    w.element[kWindWeights].offset_bytes = 28;
+    w.element[kWindWeights].format = 6;
+    w.element[kWindWeights].source = 0xE4;
+    w.element[kWindWeights].source_count = 4;
+    w.element[kWindWeights].flags = 10;
+    std::string row = "{";
+    AppendWindEntryFields(row, w);
+    row += "}";
+    const std::string want =
+        "{\"spec\":6,\"reg\":\"3F80000040000000404000004080000040A0000040C0000040E00000410000004110000041200000413000004140000" + std::string(1, '0') +
+        std::string(64, '0') + "\","
+        "\"pivot\":{\"phys\":479176256,\"size\":41472,\"off\":20,\"stride\":36,\"fmt\":32,\"src\":\"yxw\",\"flags\":9},"
+        "\"weights\":{\"phys\":479176256,\"size\":41472,\"off\":28,\"stride\":36,\"fmt\":6,\"src\":\"xyzw\",\"flags\":10}}";
+    if (row != want) {
+      std::puts(row.c_str());
+      return 57;
+    }
+    // (a plant: its registers alone; the bits, not a rounded number)
+    WindInputs p;
+    p.family = WindFamily::kPlant;
+    p.spec = 0;
+    const uint32_t bits = 0x427F8BDAu;
+    std::memcpy(&p.reg[0][0], &bits, 4);
+    row.clear();
+    AppendWindEntryFields(row, p);
+    if (row.rfind("\"spec\":0,\"reg\":\"427F8BDA00000000", 0) != 0 || row.size() != 16 + 160 + 1 || row.find("pivot") != std::string::npos) return 57;
+  }
   static_assert(sizeof(WindInputs) == 132);
-  std::puts("PASS: wind table, wind inputs and their refusals, register bounds, literals each alone");
+  std::puts("PASS: wind table, wind inputs and their refusals, register bounds, literals each alone, the literal verdict a frame, an entry's row text");
   return 0;
 }

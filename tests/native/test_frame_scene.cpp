@@ -2291,6 +2291,63 @@ int main() {
     return code;
   }
 
+  // 160: the stored wind entries as an armed capture's frame row writes them (review of Tasks 8 and 9, Important
+  // 1): per record its entry of the side array, by the record's own wind_index; a caster's from its cascade's
+  // array; and the entries no record names.
+  {
+    render::FrameScene sc;
+    sc.wind_records = true;
+    capture::WindInputs a, b, c;
+    a.family = capture::WindFamily::kPlant;
+    a.spec = 0;
+    a.reg[0][0] = 1.0f;
+    b.family = capture::WindFamily::kTrunk;
+    b.spec = 6;
+    b.reg[0][0] = 2.0f;
+    c.family = capture::WindFamily::kPlant;
+    c.spec = 5;
+    c.reg[0][0] = 3.0f;
+    sc.wind = {a, b, c};             // (c: an entry no record names)
+    sc.shadow_wind[1] = {b};
+    capture::DrawRecord r0, r1, r2, r3;
+    r0.seq = 10;
+    r0.vs_hash = 0x1111111111111111ull;
+    r0.wind_index = 1;               // (not in the array's order: the record's index decides)
+    r1.seq = 11;
+    r1.vs_hash = 0x2222222222222222ull;   // (no inputs)
+    r2.seq = 12;
+    r2.vs_hash = 0x3333333333333333ull;
+    r2.wind_index = 0;
+    r3.seq = 13;
+    r3.vs_hash = 0x4444444444444444ull;
+    r3.wind_index = 7;               // (past the array: no entry)
+    sc.draws = {r0, r1, r2, r3};
+    capture::DrawRecord s0;
+    s0.seq = 3;
+    s0.vs_hash = 0x5555555555555555ull;
+    s0.wind_index = 0;
+    sc.shadow_draws[0] = {s0};       // (its cascade's array is empty: no entry)
+    sc.shadow_draws[1] = {s0};
+    std::string row;
+    render::AppendWindEntries(row, sc);
+    const std::string zeros(152, '0');
+    const std::string want =
+        ",\"entries\":[{\"seq\":10,\"vs\":\"0x1111111111111111\",\"family\":\"trunk\",\"spec\":6,\"reg\":\"40000000" + zeros + "\"},"
+        "{\"seq\":12,\"vs\":\"0x3333333333333333\",\"family\":\"plant\",\"spec\":0,\"reg\":\"3F800000" + zeros + "\"}],"
+        "\"caster_entries\":[[],[{\"seq\":3,\"vs\":\"0x5555555555555555\",\"family\":\"trunk\",\"spec\":6,\"reg\":\"40000000" + zeros + "\"}]],"
+        "\"unreferenced\":1";
+    if (row != want) {
+      std::puts(row.c_str());
+      return 160;
+    }
+    // (an index two records name is one entry written twice and none unreferenced for it)
+    sc.draws[1].wind_index = 1;
+    row.clear();
+    render::AppendWindEntries(row, sc);
+    if (row.find("\"seq\":11,\"vs\":\"0x2222222222222222\",\"family\":\"trunk\"") == std::string::npos ||
+        row.find("\"unreferenced\":1") == std::string::npos) return 160;
+  }
+
   render::ScenePublisher pub;
   if (pub.Latest()) return 18;
   pub.Publish(s);

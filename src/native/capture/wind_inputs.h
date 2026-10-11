@@ -17,6 +17,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <string>
 #include <vector>
 
 #include "material.h"
@@ -352,6 +355,58 @@ inline bool WindRegisterInBounds(WindFamily family, uint32_t slot, const float v
     if (!(v[b.comp] >= b.lo && v[b.comp] <= b.hi)) return false;
   }
   return true;
+}
+
+// What a discovery row writes of wind inputs, without braces: "spec", "reg" (the five registers'
+// bits, eight hex digits a word, zeros where the family has none) and each element the family has
+// as "pivot" / "weights" / "flutter": {"phys","size","off","stride","fmt","src","flags"} ("src" the
+// element's source components in the reader's order). One text for a draw row's "wind" member (the
+// capture's re-read at the draw) and for the frame row's stored entries (what the scene's side
+// array holds), so that tools/xdk_sigmatch/wind_check.py compares the two key for key.
+inline void AppendWindEntryFields(std::string& row, const WindInputs& w) {
+  char buf[192];
+  std::snprintf(buf, sizeof(buf), "\"spec\":%u,\"reg\":\"", unsigned(w.spec));
+  row += buf;
+  for (uint32_t i = 0; i < kWindRegisters * 4; ++i) {
+    uint32_t word;
+    std::memcpy(&word, &w.reg[i / 4][i % 4], sizeof(word));
+    std::snprintf(buf, sizeof(buf), "%08X", word);
+    row += buf;
+  }
+  row += "\"";
+  const char* names[kWindElements] = {"pivot", "weights", "flutter"};
+  for (uint32_t e = 0; e < kWindElements; ++e) {
+    const LightElement& el = w.element[e];
+    if (el.stride_bytes == 0) continue;
+    char src[5] = {};
+    for (uint32_t i = 0; i < el.source_count && i < 4; ++i) src[i] = "xyzw"[LightSourceComponent(el, i)];
+    std::snprintf(buf, sizeof(buf), ",\"%s\":{\"phys\":%u,\"size\":%u,\"off\":%u,\"stride\":%u,\"fmt\":%u,\"src\":\"%s\",\"flags\":%u}",
+                  names[e], el.vb.phys_addr, el.vb.size, el.offset_bytes, el.stride_bytes, el.format, src, el.flags);
+    row += buf;
+  }
+}
+
+// The capture's cached verdict on a shader object's own literal table (WindLiteralsMatch), with
+// the frame it was reached in: asked at the object's first wind draw of a frame, kept for that
+// frame, and asked again in the next (review of plan Tasks 8 and 9, Minor 1: an object freed and
+// reused at the same address, with the same microcode address, size and patch id but another
+// literal table, must not keep the old verdict for long; the table is not part of the microcode's
+// hash: spec ruling 9). `generation`: a count of the frames with the wind.
+enum : uint8_t { kWindLiteralsUnknown = 0, kWindLiteralsMatch = 1, kWindLiteralsDiffer = 2 };
+struct WindLiteralVerdict {
+  uint8_t state = kWindLiteralsUnknown;
+  uint32_t generation = 0;
+};
+// Whether the table is to be read now: no verdict yet, or one of another frame.
+constexpr bool WindLiteralsAsk(const WindLiteralVerdict& v, uint32_t generation) {
+  return v.state == kWindLiteralsUnknown || v.generation != generation;
+}
+// The reading's result: `read` false (the table could not be read whole) leaves NO verdict, an
+// older frame's least of all, and the next draw asks again.
+inline void WindLiteralsAnswer(WindLiteralVerdict* v, uint32_t generation, bool read, bool match) {
+  if (!v) return;
+  v->state = !read ? kWindLiteralsUnknown : match ? kWindLiteralsMatch : kWindLiteralsDiffer;
+  v->generation = generation;
 }
 
 // The wind inputs of a draw. On kNone `*out` is complete; otherwise `*out` is left default (no

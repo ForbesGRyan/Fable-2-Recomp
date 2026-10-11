@@ -8,10 +8,14 @@ own vertex microcode (ucode_eval): the foliage sub-project, plan Tasks 5 to 7, s
                                                       on its twin's
   trace <hash> --instr N [--seed S] [--trial T]       the interpreter's registers after instruction N for a made
                                                       input (the transcription's oracle, register by register)
-  inputs <capture> ... [--off]                        the capture's wind inputs (plan Task 8, criterion 3): each
+  inputs <capture> ... [--off] [--entries]            the capture's wind inputs (plan Task 8, criterion 3): each
                                                       wind draw row's "wind" member against the same row's bank,
-                                                      fetches and streams; --off: a capture made with the switch
-                                                      off must say so and hold no member
+                                                      fetches and streams, and each STORED entry of the frame's
+                                                      scene (the frame row's "entries": what a record's
+                                                      wind_index names) against a member row of its shader;
+                                                      --off: a capture made with the switch off must say so and
+                                                      hold no member; --entries: a capture without stored
+                                                      entries fails instead of being passed unjudged
 Each exits 1 on any failure.
 
 What one trial is. A draw is a shader's microcode, a constant bank and vertex streams (bytes): made, or a
@@ -809,8 +813,49 @@ def expected_inputs(row, order=None):
 # those of them whose member is what the row's own evidence gives; reasons: the members' reasons; predicted: expected_inputs' reasons for every wind draw row; frames_on / frames_off: frame
 # rows whose "wind" is an object / "off"; off_clean: an off capture that holds no member; frames: the frame rows'
 # own counts, for the report; ok: something was compared and nothing disagrees.
+# entries / entries_matched: the STORED entries of the frames' scenes (the frame rows' "entries" and
+# "caster_entries": what the records' wind_index names in the side arrays) and those of them that a draw row's
+# member of the same shader holds value for value (review of plan Tasks 8 and 9, Important 1); frames_entries: the
+# frames with the wind on whose row has them (a capture from before the review's fix has none: not judged).
 InputsResult = namedtuple("InputsResult", "rows compared agree problems problem_count reasons predicted frames_on frames_off "
-                                          "off_clean frames ok")
+                                          "off_clean frames ok entries entries_matched frames_entries")
+
+
+def _entry_key(vs, fields):
+    """What a stored entry and a draw row's member must have in common: the shader, and every field of the inputs
+    (spec, the registers' bits, each element) as one canonical text."""
+    return vs.upper(), json.dumps({k: v for k, v in fields.items() if k not in ("reason", "seq", "vs")}, sort_keys=True)
+
+
+def _entries_problems(frame, wind, scene_rows, other_rows):
+    """A frame's stored entries against its draw rows' members: (problems, entries, matched). `scene_rows`,
+    `other_rows`: {key: count} of the members of reason "none" on the frame's draw rows in the main scene and
+    outside it. Each scene entry must be held by a member row in the scene of the same shader with the same
+    values, each caster entry by one outside it, a row serving one entry; the counts must be the frame row's own;
+    no entry of a side array may be one that no record names."""
+    out = []
+    entries, casters = wind.get("entries"), wind.get("caster_entries")
+    if not isinstance(entries, list) or not isinstance(casters, list):
+        return ["frame %d: \"entries\" or \"caster_entries\" is no list" % frame], 0, 0
+    caster_list = [e for cascade in casters for e in cascade]
+    if len(entries) != int(wind.get("records", -1)):
+        out.append("frame %d: %d stored entries, \"records\" says %s" % (frame, len(entries), wind.get("records")))
+    if len(caster_list) != int(wind.get("casters", -1)):
+        out.append("frame %d: %d stored caster entries, \"casters\" says %s" % (frame, len(caster_list), wind.get("casters")))
+    if int(wind.get("unreferenced", -1)) != 0:
+        out.append("frame %d: %s entries of the side arrays are named by no record" % (frame, wind.get("unreferenced")))
+    matched = 0
+    for name, group, rows in (("scene", entries, scene_rows), ("caster", caster_list, other_rows)):
+        left = dict(rows)
+        for e in group:
+            key = _entry_key(str(e.get("vs", ""))[2:], e)
+            if left.get(key, 0) > 0:
+                left[key] -= 1
+                matched += 1
+            else:
+                out.append("frame %d: a stored %s entry (seq %s, %s, spec %s) has no %s member row with its values" % (
+                    frame, name, e.get("seq"), key[0][:4], e.get("spec"), "in-scene" if name == "scene" else "out-of-scene"))
+    return out, len(entries) + len(caster_list), matched
 
 
 def _frame_problems(frame, wind):
@@ -857,9 +902,15 @@ def check_inputs(capture_path):
             for text in _frame_problems(r["frame"], wind):
                 problem(text)
     rows = compared = agree = members_off = 0
+    entries = entries_matched = frames_entries = 0
     reasons, predicted = {}, {}
     for frame in sorted(state):
+        scene_rows, other_rows = {}, {}
         for r in cr.rows(path, kinds=("draw",), frame=frame):
+            if isinstance(r.get("wind"), dict) and r["wind"].get("reason") == "none":
+                members = scene_rows if r.get("in_scene") else other_rows
+                key = _entry_key(cr.vs_hash(r), r["wind"])
+                members[key] = members.get(key, 0) + 1
             h = cr.vs_hash(r)
             member = r.get("wind")
             where = "line %d (%s, frame %d)" % (r["line"], h[:4] or "no shader", frame)
@@ -885,6 +936,15 @@ def check_inputs(capture_path):
             agree += not differ
             for key in differ:
                 problem("%s: \"%s\" is %r, the row's own evidence gives %r" % (where, key, member.get(key), want.get(key)))
+        # The frame's stored entries against the members just read (after the rows: a member is first held to its
+        # own row's evidence, above, and then the stored entry to the member).
+        if state[frame] == "on" and "entries" in frames[frame]:
+            frames_entries += 1
+            texts, n, matched = _entries_problems(frame, frames[frame], scene_rows, other_rows)
+            entries += n
+            entries_matched += matched
+            for text in texts:
+                problem(text)
     for name, n in sorted(reasons.items()):
         if name != "none" and n > REASON_SHARE * compared:
             problem("reason \"%s\" in %d of %d wind draws: more than 1%%" % (name, n, compared))
@@ -892,7 +952,7 @@ def check_inputs(capture_path):
     frames_off = sum(1 for v in state.values() if v == "off")
     return InputsResult(rows, compared, agree, problems, problem_count, reasons, predicted, frames_on, frames_off,
                         frames_off > 0 and frames_on == 0 and members_off == 0, frames,
-                        frames_on > 0 and compared > 0 and problem_count == 0)
+                        frames_on > 0 and compared > 0 and problem_count == 0, entries, entries_matched, frames_entries)
 
 
 def cmd_inputs(args, say=print):
@@ -911,10 +971,23 @@ def cmd_inputs(args, say=print):
         if r.compared:
             say("  %d of %d compared rows agree with their own bank, fetches and streams; the members' reasons: %s" % (
                 r.agree, r.compared, ", ".join("%s %d" % kv for kv in sorted(r.reasons.items()))))
+        entries_judged = r.frames_on > 0 and r.frames_entries == r.frames_on
+        if r.frames_on:
+            if entries_judged:
+                say("  stored entries (what the records' wind_index names in the scene's side arrays): %d of %d are held by "
+                    "a draw row's member of the same shader, value for value, in %d frames" % (
+                        r.entries_matched, r.entries, r.frames_entries))
+            else:
+                say("  stored entries: NOT JUDGED: %d of %d frames with the wind on have none in their row (a capture from "
+                    "before the review's fix)" % (r.frames_on - r.frames_entries, r.frames_on))
         for text in r.problems:
             say("  PROBLEM: " + text)
         if r.problem_count > len(r.problems):
             say("  ... and %d more" % (r.problem_count - len(r.problems)))
+        if getattr(args, "entries", False) and not args.off and not (entries_judged and r.entries > 0):
+            say("  FAILED: --entries asks for the stored entries, and the capture has none to judge")
+            bad += 1
+            continue
         if args.off:
             ok = r.off_clean and r.problem_count == 0
             say("  off capture: %s" % ("every frame row says \"wind\":\"off\" and no row has a member: OK" if ok else "FAILED"))
@@ -1041,6 +1114,9 @@ def main(argv=None, say=print):
     p = sub.add_parser("inputs")
     p.add_argument("capture", nargs="+")
     p.add_argument("--off", action="store_true", help="the capture was made with the switch off: it must say so")
+    p.add_argument("--entries", action="store_true",
+                   help="the capture must hold the scenes' stored wind entries in every frame with the wind on (a capture "
+                        "from before the review's fix has none and then fails here instead of being passed unjudged)")
     p.set_defaults(run=cmd_inputs)
     args = ap.parse_args(argv)
     if args.command != "inputs" and not args.dumps.is_dir():      # (the inputs' check reads no microcode)

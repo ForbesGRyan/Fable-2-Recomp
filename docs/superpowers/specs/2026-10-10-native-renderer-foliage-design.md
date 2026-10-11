@@ -185,12 +185,12 @@ capture holds.
 | 2 | whether `c17.xy`, `c21`, `c26` gust beyond the slow turn seen | Task 4, run CLOCK and the captures of run STAND | the register bounds of Design 5 stand on the spots measured; a value outside them draws the record at rest, counted |
 | 3 | pixels of the fading and the late draws | Task 4, the rasterising replay on a capture with whole index buffers | footprints stay the proxy, said |
 | 4 | whether the rasterising replay agrees with the game's depth copy at all (the research's vertex test did not: 36 of 1,293) | Task 4: the replay on draws that do not move, against the depth copy | criterion 5 is "not decidable"; wind stands on criteria 1 to 4, 6 and the user checks |
-| 5 | whether a camera stands still enough at the bridge for a frame-to-frame figure | Task 4, run STAND (emulated pairs outside the wind mask) | criterion 6 is "not decidable"; user checks 79 and 80 decide |
+| 5 | whether a camera stands still enough at the bridge for a frame-to-frame figure | Task 4, run STAND (emulated pairs outside the wind mask) | criterion 6 is "not decidable"; user checks 81 to 84 decide |
 | 6 | whether the game's fading and late draws are in its depth pre-pass (their bin mask), so that its shadow mask holds them | Task 12, from the rows' `"bin_mask_lo"` of the Task 4 captures | Design 11's limit stands as written |
-| 7 | the texture level the game's `F1EB` fetch takes and the textures' stored levels | Task 4 (the stored mip chain in the capture, if the dump path reaches it); Task 16's kept-set figure | the native fetch stays the pre-pass program's own; criterion 14's figure is reported |
+| 7 | the texture level the game's `F1EB` fetch takes and the textures' stored levels | Task 4 (the stored mip chain in the capture, if the dump path reaches it); Task 16's kept-set figure | the native fetch stays the pre-pass program's own; criterion 15's figure is reported |
 | 8 | what the remainder at "sun" is (R B7) | Task 17, run PAIR-SUN: the stored native scene beside the game's | named "not assigned", a roadmap item |
 | 9 | the sign of the change at the beams' root with the sun on (R risk 2) | Task 18's runs | reported as it falls |
-| 10 | `2D40` in a capture; wind shaders of towns and interiors; the plants' push points | no run of this sub-project; user check 86 | `2D40` is held by the formula check on made inputs alone, said |
+| 10 | `2D40` in a capture; wind shaders of towns and interiors; the plants' push points | no run of this sub-project; user check 90 | `2D40` is held by the formula check on made inputs alone, said |
 
 ## Design
 
@@ -313,6 +313,9 @@ W/2 x H/2, made only for a diagnostic.
     `covered = (alpha >= t0) + (alpha >= t0 + 0.5)` with `t0` the first sample's threshold
     (`CoveredSamples`). Every other record keeps today's rule, a draw at fade 1 among them (its
     half-covered pixels are edge texels alone: a limit until MSAA).
+    (Measured since on one plant's stored mip levels: 24.0% of its held pixels have one sample of two, so
+    "edge texels alone" does not hold for a minified plant; the case is not built, and the half blend would
+    not explain that plant's look: Implementation notes, ledger rulings 54 and 57.)
 11. **Two draws a coverage record, and their places** (ruling 14). A coverage record's fully
     covered pixels (`covered` = 2) are drawn in place, opaque, with depth, as today. Its
     half-covered pixels (`covered` = 1) are drawn by a second program that keeps those alone and
@@ -331,6 +334,12 @@ W/2 x H/2, made only for a diagnostic.
     place show the nearer at half over the scene, not a quarter each; the shadow mask, made from
     the pre-pass's depth, gives a half-covered pixel the sun's shadow of what lies behind it (open
     question 6 says whether the game does the same).
+    **Amended as built** (Implementation notes, "From plan Tasks 12 to 14" and "Design 11 amended
+    (ruling 60)"): the half-covered pixels are drawn in two steps, their depth and then their colour
+    without a depth write, so that a record's nearest card blends once; an early record keeps today's
+    pre-pass draw (the first sample's pixels) and a late record is in no pre-pass; the mask's limit above
+    then holds for late records alone; a late record whose scale would admit fully covered pixels is
+    today's record.
 12. **The tree occluder's redraw** (11c; under `--fable2_native_sun`, no switch of its own:
     ruling 16). The frame keeps every twin's index (at most 16), not the smallest alone. After the
     layer's depth is taken and the cloud occluders are drawn into it, each twin record is drawn
@@ -364,8 +373,9 @@ W/2 x H/2, made only for a diagnostic.
   check and a bound; an element is followed only for the fetch the table names. Reason strings,
   counted in the frame's scene and on the F3 text: `wind {off, no-entry, register-unread,
   register-not-finite, register-range, literal, element, stream, instance, over-limit}`; in the
-  pass `wind {buffer, pipeline, slot}`; `coverage {pipeline}`; on the Sun line
-  `tree occluders drawn K of N`.
+  pass `wind {buffer, pipeline, slot}`; `coverage {full, pipeline}`; on the Sun line
+  `tree occluders drawn K of N` and, when some were not, `not drawn {state, alpha, texture, record,
+  pipeline}` (as built: Implementation notes).
 - A side array holds at most 65,535 entries; a record past that has no wind inputs, counted.
 - A wind buffer is read only for a vertex below the count it was built with, inside a `[branch]`
   the family bits open (a buffer bound by address has no bounds check).
@@ -457,6 +467,8 @@ recommended option.
     two more draws for 16 to 37 records a frame; the mask's limit of Design 11; if the order
     cannot be built inside the colour pass's present structure, plan Task 13's first step says so
     before any code and the phase falls back to the late records alone.
+    (As built: three draws at most, full, half depth, half colour; an early record's pre-pass is
+    today's: Implementation notes.)
 15. Ruling: the shadow mask is not rebuilt for half-covered pixels — why: it would need the first
     sample's depth and the fully covered depth at once, a second depth target for one term of a
     fading tree's light — cost if wrong: a fading tree's half-covered leaves take the ground's
@@ -680,7 +692,8 @@ threshold set here without a measured one before it (ruling 20).
     and 2.57 against 1.30 to 2.05; the linear scene 1.926 is inside); **met at "beams left"** (1.095; 1.11,
     1.13); **"beams right" at the bound** (1.084; 1.13, 1.14). The precondition is met (the emulated shots
     agree within 0.999 to 1.007). The change is larger than the model's, towards the game in every region
-    (native over emulated at "sun" 0.33 -> 0.47 to 0.49, at the root 0.19 to 0.21 -> 0.47 to 0.48) and past
+    (native over emulated, with the sun's switch off, so not like for like with the later sun-on figures: at
+    "sun" 0.33 -> 0.47 to 0.49, at the root 0.19 to 0.21 -> 0.47 to 0.48) and past
     it in none; the model's frame had the tree on 27% of "sun", this view has it on 58.7%.
     **Recorded (ledger ruling 56): not met as written, met in direction.**
 13. *In the game, the fading draws.* The same pair with the `87` draws built, against the late
@@ -694,8 +707,9 @@ threshold set here without a measured one before it (ruling 20).
     "beams right" 1.014, "beam root" 1.004 (no fading pixel in the three). None darkens.
 14. Criteria 8 and 9 again for `--fable2_native_coverage` (off: 11a's picture and programs; cost;
     the software-adapter run).
-    **Verdict (plan Task 15): off met** (the programs' bytes: shader case 53; the pass's text; six off-runs
-    without a line of it); **errors met** (logs 615 and 620: 0 `d3d ERROR` in 240 s each on the software
+    **Verdict (plan Task 15): off met in the programs and the logs; the picture against 11a's not judged (no
+    pair of runs at one width, as criterion 8's fourth part)** (the programs' bytes: shader case 53; the pass's
+    text; six off-runs without a line of it); **errors met** (logs 615 and 620: 0 `d3d ERROR` in 240 s each on the software
     adapter, warning id 1328 alone); **cost not judged** (no timing evidence: 1296 wide, a user present).
     **Closing (plan Task 18): cost not judged: the window** (as criterion 9).
 
@@ -810,7 +824,8 @@ section 18, "Discovery runs"; figures and files there):
   to 3.5 degrees inside 17 to 28 degrees of azimuth in 17 s of clock; the strength is constant.
   Open question 3: the pixel counts exist. Open question 4: yes. Open question 6: the fading and
   the late draws are in the pre-pass bins. Open question 7: not settled (base level alone in a
-  capture). Open question 10: `2D40` is in capture `182130`, frame 8.
+  capture; as written at Task 4. Since: the stored mip levels are in a capture from ledger ruling 54 on, and
+  the answer is in frame map section 18, "What became of the spec's open questions", 7). Open question 10: `2D40` is in capture `182130`, frame 8.
 - **Design 5's bound of `c25.x`, (0, 64], does not hold on the plant caster**: `A8A5` rows with
   `c25.x` = 0 and `c26` = 0 (no sway) occur at the bridge, 4 to 5 a frame. Ruled (ledger ruling
   26): zero is admitted; Design 5 is amended above. Ledger ruling 28 widens `|c17.xy|` to 16.
@@ -866,6 +881,8 @@ wind", "Validation (11a)", "Limits (11a)"; figures and files there):
 - **Ledger rulings 41, 45, 46**: phase 11a was validated on binary `9EE2090F124FC916`, built before
   the merge of the frame-time work, because the head did not build then; the head builds since
   commit `a227629` (plan Task 13's first step: binary `3D66CE8A74D4871F`, both suites passing).
+  Phases 11b and 11c and the closing ran on builds after that merge, with its defaults (uncapped
+  frame rate, thread placement): frame map section 18's first paragraph.
 - **Ledger ruling 47**: validation runs carry `--mouse_look=false`. With it the sunward plan's look
   did not finish rising before the shots at 2 to 5 frames a second (run 5 of Task 11).
 - **Criterion 6** (ledger rulings 27, 29, 51): its text above is not amended; its verdict is by the
@@ -952,7 +969,7 @@ tree occluder (11c)" to "The half blend, once: in the game")**
   native over game, by class over the picture after the mend: late tree over sky 0.986, late tree over closed
   0.856, leaf 0.881, open sky 0.951, trunk and wood 1.028, the picture 0.957. In the held framing before the
   mend (run E): sun 0.739, root 0.755; after it the game's scene of that framing is in no evidence (the
-  read-back run did not reach it): about 0.79 and 0.97 by an estimate from two runs. Classes of 13 has two
+  read-back run did not reach it): about 0.79 and 0.97 by an estimate from two runs. Design 13's classes are two
   more than the plan's six (late tree over closed, plant).
 - **Ruling 5's question** (corrected after the review of plan Tasks 16 and 17, Important 1): **no fault of an existing
   formula was found**: the leaf formula's check passes on made inputs; the frame's own leaf rows were not checked
@@ -990,10 +1007,20 @@ tree occluder (11c)" to "The half blend, once: in the game")**
 | 9 | errors met; cost not judged: the window; the third spot not run |
 | 12 | not met as written, met in direction (ruling 56) |
 | 13 | met by a substituted baseline |
-| 14 | off met, errors met; cost not judged: the window |
+| 14 | off met (programs and logs; the picture not judged); errors met; cost not judged: the window |
 | 15 | not met as written; met against the level a fetch takes (ruling 62) |
 | 17 | not met as written; sub-project 10's criterion 19: met on the oracle feed, NOT met in the game |
 | 18 | off met; errors met with a reservation; cost and the picture against master's binary not judged: the window |
 | 19 | followed |
 
 Figures and files: FM section 18, "Validation (11c)", "The closing table".
+
+**The fix wave after the whole-branch reviews (ledger ruling 67).** The colour pass has two pipeline caches since:
+the ordinary 64 keys, and 448 keys for the keys of the wind and the coverage (seven variants of a state), neither
+evicted; a record with wind inputs asks the wind program's pipelines first and makes no rest pipeline when it is
+drawn moved; past a bound a record is at rest or whole (a variant), or has the default pipeline, or is left out
+when its state blends (an ordinary key), counted and logged once. The colour loop's steps before each record are
+an executed test. No shader text changed (shader cases 52 and 53 stand); `DrawRecord` is 616 bytes. Not shown: a
+full cache in a run; the five closing software-adapter runs (the wind and the coverage alone at defaults, with
+the shadows, the fog or the textures off, and the sun on with the wind off) are recorded in the ledger when
+made. FM section 18, "The fix wave", "Limits (11c)" 13 to 17.

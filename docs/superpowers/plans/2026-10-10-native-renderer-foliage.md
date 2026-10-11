@@ -1132,6 +1132,12 @@ leaf b, plant c), casters M | at rest: {reason: n}` and `Wind: off`.
 
 ### Task 11: Validation and documents (11a)
 
+*As executed (annotated at the close, 2026-10-11; the list below is the plan as written):* no run was made on
+a quiet machine at width 1942 (no timing evidence: ledger rulings 49, 65); the TREES run was not made; the
+phase was validated on binary `9EE2090F124FC916`, built before the merge of the frame-time work (ledger
+ruling 45). The user checks named 79 to 82 below were appended as **81 to 84** (79 and 80 are the
+performance session's).
+
 - [ ] Runs by the controller on a quiet machine, shot width 1942, no agent beside them: BRIDGE
       and THIRD with POST, each with WIND and without (timing: criterion 9); STAND with POST,
       WIND and without (if Task 10's pair was not a like-for-like pair); TREES with POST, WIND.
@@ -1348,6 +1354,11 @@ for an early record's pre-pass was not built: an early record keeps today's pre-
 - [ ] Commit "Coverage validation (11b): the criteria's verdicts". Then the phase's review.
 
 ## Phase 11c: the tree occluder, the darkness, criterion 19
+
+*Not in this plan:* the mend of the half blend (ledger ruling 60, commits `5f66094`, `b37b77d`, `ab3e53f`;
+spec implementation notes, "Design 11 amended": a coverage record's half part is two draws, its depth and
+then its colour, so the Architecture's "two draws" above is three at most), and the fix wave after the
+whole-branch reviews (ledger ruling 67; frame map section 18, "The fix wave").
 
 ### Task 16: The tree occluder's redraw
 

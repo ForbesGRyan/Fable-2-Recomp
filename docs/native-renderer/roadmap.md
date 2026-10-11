@@ -12,9 +12,12 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
    - *Achieved*: the game's wind on trunks, leaves, bushes and grass in the colour pass, the pre-pass and
      the shadow maps (`--fable2_native_wind`); part-covered foliage, a see-through tree between the eye and
      the hero and trees dissolving by distance (`--fable2_native_coverage`); the tree occluder's redraw in
-     the sun layer (under `--fable2_native_sun`); the darkness about the sun traced to the late tree drawn
-     whole and mended. Towards the sun with all three on: 0.67 to 0.78 of the game's at the sun (0.59 to
-     0.76 before), 0.87 to 1.10 at "beams left" (1.23 to 1.35 before).
+     the sun layer (under `--fable2_native_sun`); the darkness about the sun traced in its larger part to the
+     late tree drawn whole; that part mended (the scene is still at about 0.79 there, an estimate). Towards the
+     sun with all three on: 0.67 to 0.78 of the game's at the sun (0.59 to 0.76 before), 0.87 to 1.10 at
+     "beams left" (1.23 to 1.35 before), 0.95 to 1.15 at "beams right" and 1.35, 1.77 at one second of three.
+     (One run, log 643, shots 1296 wide, `RUN UNCHECKED`; the figures "before" are another session's, binary
+     and window width: `frame-map.md`, "Validation (11c)".)
    - *Not achieved*: sub-project 10's criterion 19 is still not met in the game (the sun region under in
      half its figures; a shaft of the native layer several times the game's: below); **the cost of the
      three switches is not measured** (the game window stood on the other monitor in every run); nobody
@@ -24,7 +27,8 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
      shader (`frame-map.md`, "Wind and displacement"); the native programs take the wind terms as
      zero.
    - Coverage: foliage the game shows part-covered (alpha-to-mask while fading) is drawn solid
-     natively. Leading candidate for the native scene being 0.30 of the game's near the sun.
+     natively. Leading candidate for the native scene being 0.30 of the game's near the sun. (As written;
+     the research corrected the figure: not like for like, about 0.50.)
    - The sun layer's tree-occluder redraw (`F1EB`), not built in sub-project 10.
    - Afterwards: judge spec criterion 19 of sub-project 10 again in the game, and with it the
      default of `--fable2_native_sun`.
@@ -39,8 +43,11 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
    - Near shadowed ground possibly too dark (palisade dirt 0.67 to 0.70).
    - Shadowed ground beyond 100 units 11 to 19% over.
 5. **MSAA / supersampling**
-   - Targets are kept resolution-independent for it. Settles the scene's half-pixel offset
-     (the game samples at integral pixel centres; unmeasured natively) on the way.
+   - Targets are kept resolution-independent for it. Settles the scene's sampling place on the
+     way: the game's depth copy holds its sample a quarter pixel up and left of the pixel's integral
+     position, and the native picture is the game's sampled a quarter pixel down and right
+     (`frame-map.md` section 18, "The rasterising replay", "The darkness about the sun"); whether that
+     is the console's first sample or the emulator's read-back is not known.
 6. **Presentation: HUD, menus, loading screens, cutscenes**
    - The long-term goal: leave the emulated GPU. The sun switch has never run in a town, an
      interior, a menu, a loading screen or a cutscene.
@@ -56,6 +63,12 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
 - The one startup crash with `--fable2_exposure_readback=on` (log 575; points at the boot-save
   trigger, inference).
 - Why the reference's sun-layer factor is 1.4 to 1.7 times the game's at the beam root.
+- The four copies of one switch reader in `fable2_native_render.cpp` (`CurrentSun`, `CurrentWind`,
+  `CurrentCoverage`, `CurrentSceneDump`): one function taking the value and the name (final code review of
+  sub-project 11, Minor 8).
+- The mip dump repeats the texture cache's level layout loop (`capture.cpp`, `DumpTextureMips`, against
+  `texture_cache.cpp`): one function that returns the level rows, used by both, so that a change of the
+  cache's rule for packed levels reaches the dump (Minor 9).
 - **The fern's look at rest** (and likely other lit plants under alpha-to-mask): natively broad and light,
   in the game dark and toothed. Not the wind, not the geometry, and not part coverage (on its stored mip
   levels a quarter of its pixels have one sample of two, its cover already is the game's first-sample
@@ -63,11 +76,11 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
   the lit plant's light, and the level the game's own fetch takes (needs a capture with read-back and
   the mip files, at the bridge).
 
-### Follow-ups of sub-project 11 (`frame-map.md` section 18, "Limits (11c)", "Follow-ups (11)")
+### Follow-ups of sub-project 11 (`frame-map.md` section 18, "Limits (11a)", "Limits (11b)", "Limits (11c)", "Follow-ups (11)")
 
 - **The cost of wind, coverage and the redraw: unmeasured.** Two runs at the bridge and two at the third
-  spot with the window on the usual monitor (user check 91). Indication at the wrong window size: about
-  half a millisecond a frame for wind and coverage together.
+  spot with the window on the usual monitor (user check 91). Indication at the wrong window size (logs 646,
+  647; not timing evidence): about half a millisecond a frame for wind and coverage together.
 - **The native sun layer's sweeping shaft** (ledger ruling 64; an open item of sub-project 10's layer, with
   "why the reference's sun-layer factor is 1.4 to 1.7 times the game's" above): a shaft across the bridge's
   planks 2 to 4.6 times the game's at "beam far right" and 1.35 to 1.77 at "beams right" at moments, moving
@@ -95,6 +108,14 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
   identities), but no measurement in the game separates it (the sun moves); user check 83.
 - **A software-adapter run with the wind off**: the redraw's and the half part's rest pipelines have run on
   the real adapter alone. And the two steps' depth equality is measured on one graphics card.
+- **The default configuration of the wind and the coverage has not been drawn** (post and bloom off; the
+  shadows off; the fog off; the textures off): the fix wave's five software-adapter runs (ledger ruling 67;
+  `frame-map.md`, "The fix wave", "Limits (11c)" 13). Not to be made the default before the ledger has them.
+- **A long session with the wind and the coverage on**, through several regions: the colour pass's two
+  pipeline caches are bounded (64 ordinary keys, 448 of the wind and the coverage) and never evicted; no
+  run has reached a bound, and what happens there is held by tests of the pure rules alone. The log's
+  `pipelines changed` lines show the use. With it: one F6 retry and one device loss with both switches on
+  (complete by reading, never exercised).
 - **The fern's look at rest**: the entry above.
 
 ## Open with the user

@@ -230,10 +230,16 @@ class SwitchOff(unittest.TestCase):
 
     def test_a_half_record_is_in_no_prepass_and_no_prepass_count(self):
         s = self.source
+        # (the rule is clay_logic.h's CoverageInPrepass, asked of the record's kind in both loops: review of Tasks 12 to 14, M3)
         self.assertIn("      if (!key || !InPrepass(*key)) continue;\n"
-                      "      // (a late coverage record drawn at half has no fully covered pixel: nothing of it in the pre-pass)\n"
-                      "      if (p.coverage_half) continue;\n", s)
-        self.assertIn("        if (p.prepass_culled || p.coverage_half) continue;\n", s)
+                      "      // (a late coverage record is in no pre-pass; an early one as it is today: CoverageInPrepass)\n"
+                      "      if (!CoverageInPrepass(coverage_kind(p))) continue;\n", s)
+        self.assertIn("        if (p.prepass_culled || !CoverageInPrepass(coverage_kind(p))) continue;\n", s)
+        self.assertEqual(s.count("CoverageInPrepass(coverage_kind(p))"), 2)
+        self.assertIn("  auto coverage_kind = [](const Prepared& p) {\n"
+                      "    return p.coverage_half ? CoverageKind::kLate : p.coverage_tail ? CoverageKind::kEarly : CoverageKind::kNone;\n  };\n", s)
+        # the line's form does not hold the sky's move (it flips frame to frame in a held view and would spend the lines)
+        self.assertNotIn("(st.coverage_sky_moved ? 8u : 0u)", s)
         self.assertIn("PrepareWind(dev, *p.r, WindOf(scene, *p.r), prepass && !p.coverage_half, p, st);", s)
         # for SkyPlace a half record is the opaque record it is in the game's state
         self.assertIn("      item.blend = key && key->blend != 0 && !p.coverage_half;\n", s)

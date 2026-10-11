@@ -2501,6 +2501,17 @@ static void CoverageTests() {
     const CoverageOrder o = PlanCoverageOrder(early, 3, 3, 1);
     CHECK(746, o.tail == 1 && o.sky == 1);                                         // the depth place bounds the tail, the tail the sky
     static_assert(PlanCoverageOrder(nullptr, 0, 0, 0).tail == kNoCoverageTail);
+    // 747: an item's `blends` bounds the sky's place whatever place the caller names (review of Tasks 12 to 14, M3:
+    // the member was carried and not read): with a coverage record in the frame neither the sky step nor the tail
+    // lies after the first blended record; without one the caller's place stands untouched.
+    {
+      const CoverageItem mixed[4] = {{CoverageKind::kEarly, false}, {CoverageKind::kNone, false}, {CoverageKind::kNone, true}, {CoverageKind::kLate, false}};
+      const CoverageOrder late_place = PlanCoverageOrder(mixed, 4, 4, 4);       // (a place beyond the blended record at 2)
+      CHECK(747, late_place.sky == 2 && late_place.tail == 2);
+      CHECK(747, PlanCoverageOrder(mixed, 4, 2, 4).sky == 2 && PlanCoverageOrder(mixed, 4, 1, 4).sky == 1 && PlanCoverageOrder(mixed, 4, 1, 4).tail == 1);
+      const CoverageItem plain[3] = {{CoverageKind::kNone, false}, {CoverageKind::kNone, true}, {CoverageKind::kNone, false}};
+      CHECK(747, PlanCoverageOrder(plain, 3, 3, 3).sky == 3 && PlanCoverageOrder(plain, 3, 3, 3).tail == kNoCoverageTail);
+    }
     static_assert(CoveredSamples(0xAA, 0, 0, 0.5f) == 1 && !CoverageHasFull(0xAA, 0.5f));
   }
   // 750 to 759: the pass's part (plan Task 13: the late records).

@@ -1790,6 +1790,14 @@ constexpr CoverageOrder PlanCoverageOrder(const CoverageItem* items, size_t coun
     if (items[i].kind == CoverageKind::kEarly) first_early = i;
   }
   if (first_late == count && first_early == count) return {sky_place, kNoCoverageTail};
+  // (the first blended record bounds the sky's place whatever the caller names: no blend of a frame with coverage
+  // records lies before the sky step)
+  for (size_t i = 0; i < count && i < sky_place; ++i) {
+    if (items[i].blends) {
+      sky_place = i;
+      break;
+    }
+  }
   size_t bound = sky_place < depth_place ? sky_place : depth_place;
   bound = first_late < bound ? first_late : bound;
   const size_t tail = first_early < bound ? bound : kNoCoverageTail;

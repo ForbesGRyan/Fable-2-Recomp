@@ -3509,6 +3509,10 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // drawn for exactly these frames). Everything else is the white mask, by reason (ClayMask). What
   // a drawn mask needs is made here, before any target is bound: the rotation tile may be uploaded
   // and the pre-pass's pipelines made.
+  // A prepared record's coverage kind, as the frame draws it (kNone: today's record).
+  auto coverage_kind = [](const Prepared& p) {
+    return p.coverage_half ? CoverageKind::kLate : p.coverage_tail ? CoverageKind::kEarly : CoverageKind::kNone;
+  };
   mask_drawn_ = false;
   const ClayMask mask = mask_decision.mask;
   bool mask_rotated = false;
@@ -3525,8 +3529,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       if (!p.pipeline) continue;
       const PipelineKey* key = KeyOf(p.pipeline);
       if (!key || !InPrepass(*key)) continue;
-      // (a late coverage record drawn at half has no fully covered pixel: nothing of it in the pre-pass)
-      if (p.coverage_half) continue;
+      // (a late coverage record is in no pre-pass; an early one as it is today: CoverageInPrepass)
+      if (!CoverageInPrepass(coverage_kind(p))) continue;
       float m[4][4];
       RecordMatrix(*p.r, m);
       if (PrepassBeyondReach(m, p.bounds, mask_view_proj, frame_.eye, scene.shadow.split, key->depth_func)) {
@@ -3615,7 +3619,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       if (!p.pipeline) continue;
       if (!p.prepass) {
         // (a record that writes no depth has no pre-pass pipeline and is no skip)
-        if (p.prepass_culled || p.coverage_half) continue;
+        if (p.prepass_culled || !CoverageInPrepass(coverage_kind(p))) continue;
         if (const PipelineKey* key = KeyOf(p.pipeline); key && InPrepass(*key)) ++st.prepass_skipped;
         continue;
       }
@@ -3768,8 +3772,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     for (const Prepared& p : prepared_) {
       const PipelineKey* key = p.pipeline ? KeyOf(p.pipeline) : nullptr;
       if (p.coverage_half && coverage_first == prepared_.size()) coverage_first = coverage_items_.size();
-      const CoverageKind kind = p.coverage_half ? CoverageKind::kLate : p.coverage_tail ? CoverageKind::kEarly : CoverageKind::kNone;
-      coverage_items_.push_back({kind, key && key->blend != 0 && !p.terrain && !p.coverage_half});
+      coverage_items_.push_back({coverage_kind(p), key && key->blend != 0 && !p.terrain && !p.coverage_half});
       coverage_records_.push_back(uint32_t(p.r - scene.draws.data()));
     }
     coverage_depth_place = CoverageDepthPlace(sun_place, sun_depth_early, coverage_records_.data(), coverage_records_.size());
@@ -3914,12 +3917,14 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
                   wind_log_lines_ == kWindLogLines ? " (last such line)" : "");
     }
   }
-  // A line when the Coverage line's form changes (the first late record drawn at half, a reason
-  // appearing or going, the sky step moving): the 300-frame line may never come on a slow adapter.
+  // A line when the Coverage line's form changes (the first late record drawn at half, the early
+  // records, a reason appearing or going): the 300-frame line may never come on a slow adapter. The
+  // sky step's move is no part of the form: the late record's place among the game's blended records
+  // changes from frame to frame (log 623: twelve of the sixteen lines went on it); the line still says it.
   // With the switch off nothing is written.
   if (coverage) {
     const uint32_t form = (st.coverage_late ? 1u : 0u) | (st.coverage_rest[size_t(ClayCoverage::kFull)] ? 2u : 0u) |
-                          (st.coverage_rest[size_t(ClayCoverage::kPipeline)] ? 4u : 0u) | (st.coverage_sky_moved ? 8u : 0u) |
+                          (st.coverage_rest[size_t(ClayCoverage::kPipeline)] ? 4u : 0u) |
                           (st.coverage_early ? 16u : 0u) | (st.coverage_tail_draws ? 32u : 0u) | (tail_at == kNoCoverageTail ? 0u : 64u);
     constexpr uint32_t kCoverageLogLines = 16;
     if (form != coverage_logged_ && coverage_log_lines_ < kCoverageLogLines) {

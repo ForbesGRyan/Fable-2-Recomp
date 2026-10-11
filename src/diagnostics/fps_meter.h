@@ -133,6 +133,7 @@ struct CpWindows {
       gpu_busy_ms{300}, gpu_timed{300};
   uint64_t last_gpu_frame = 0;
   bool acquired = false;
+  bool queue_present = false;  // the SDK carries the submission-queue figures (patched SDK)
 };
 inline CpWindows& cp_windows() {
   static CpWindows w;
@@ -149,11 +150,48 @@ inline double hitch_threshold_ms() {
   return v;
 }
 
+// The submission-queue and GPU-time figures exist only in an SDK built with
+// tools/perf/sdk-perf.patch (the async submit worker and its timestamps). The
+// probe below reads them when the SDK's EmulatedFrameStats has them and leaves
+// zeros otherwise, so this header compiles against the unpatched SDK too; the
+// "cp queue" and "gpu" lines are then not logged (see poll()).
+struct QueueStats {
+  uint32_t submissions = 0;
+  uint64_t submit_ns = 0;
+  uint32_t fence_waits = 0;
+  uint64_t fence_wait_ns = 0;
+  uint32_t tile_mappings = 0;
+  uint32_t primary_buffer_ends = 0;
+  uint64_t gpu_busy_ns = 0;
+  uint32_t gpu_timed_submissions = 0;
+  bool present = false;  // true when the SDK carries these fields
+};
+
+template <typename Stats>
+inline QueueStats queue_stats(const Stats& gpu) {
+  QueueStats q;
+  if constexpr (requires { gpu.submissions; gpu.submit_ns; gpu.fence_waits; gpu.fence_wait_ns;
+                          gpu.tile_mappings; gpu.primary_buffer_ends; gpu.gpu_busy_ns;
+                          gpu.gpu_timed_submissions; }) {
+    q.submissions = gpu.submissions;
+    q.submit_ns = gpu.submit_ns;
+    q.fence_waits = gpu.fence_waits;
+    q.fence_wait_ns = gpu.fence_wait_ns;
+    q.tile_mappings = gpu.tile_mappings;
+    q.primary_buffer_ends = gpu.primary_buffer_ends;
+    q.gpu_busy_ns = gpu.gpu_busy_ns;
+    q.gpu_timed_submissions = gpu.gpu_timed_submissions;
+    q.present = true;
+  }
+  return q;
+}
+
 inline void log_hitch(const rex::graphics::EmulatedFrameStats& gpu) {
   const auto& raw = fable2::guest_frame_rate::raw();
   const double frame_ms = double(raw.frame_us.load(std::memory_order_relaxed)) / 1000.0;
   const double threshold = hitch_threshold_ms();
   if (threshold <= 0 || frame_ms < threshold || frame_ms > 1000.0) return;
+  const QueueStats q = queue_stats(gpu);
   REXSYS_INFO(
       "[frame] hitch {:.1f} ms (swap {:.1f}, wait {:.1f}): gpu frame {} draws {} (cpu {:.1f} ms) "
       "resolves {} ({:.1f} ms) cp busy {:.1f} present {:.1f} idle {:.1f} submissions {} fence waits "
@@ -162,8 +200,8 @@ inline void log_hitch(const rex::graphics::EmulatedFrameStats& gpu) {
       double(raw.wait_us.load(std::memory_order_relaxed)) / 1000.0, gpu.frame, gpu.draws,
       double(gpu.draw_cpu_ns) / 1e6, gpu.copies, double(gpu.copy_cpu_ns) / 1e6,
       double(gpu.cp_busy_ns) / 1e6, double(gpu.cp_present_ns) / 1e6, double(gpu.cp_idle_ns) / 1e6,
-      gpu.submissions, gpu.fence_waits, double(gpu.fence_wait_ns) / 1e6, gpu.tile_mappings,
-      double(gpu.gpu_busy_ns) / 1e6);
+      q.submissions, q.fence_waits, double(q.fence_wait_ns) / 1e6, q.tile_mappings,
+      double(q.gpu_busy_ns) / 1e6);
 }
 
 inline void sample_cp() {
@@ -187,18 +225,20 @@ inline void sample_cp() {
   c.copies.Add(double(gpu.copies));
   c.copy_cpu_ms.Add(double(gpu.copy_cpu_ns) / 1e6);
   c.interval_ms.Add(double(gpu.swap_interval_ns) / 1e6);
-  c.submissions.Add(double(gpu.submissions));
-  c.submit_ms.Add(double(gpu.submit_ns) / 1e6);
-  c.fence_waits.Add(double(gpu.fence_waits));
-  c.fence_ms.Add(double(gpu.fence_wait_ns) / 1e6);
-  c.tile_mappings.Add(double(gpu.tile_mappings));
-  c.kicks.Add(double(gpu.primary_buffer_ends));
+  const QueueStats q = queue_stats(gpu);
+  c.queue_present = q.present;
+  c.submissions.Add(double(q.submissions));
+  c.submit_ms.Add(double(q.submit_ns) / 1e6);
+  c.fence_waits.Add(double(q.fence_waits));
+  c.fence_ms.Add(double(q.fence_wait_ns) / 1e6);
+  c.tile_mappings.Add(double(q.tile_mappings));
+  c.kicks.Add(double(q.primary_buffer_ends));
   c.tiles.Add(double(gpu.tiles));
   c.pred_draws.Add(double(gpu.predicated_draws));
   c.pred_skips.Add(double(gpu.predicated_skips));
   c.bin_selects.Add(double(gpu.bin_select_writes));
-  c.gpu_busy_ms.Add(double(gpu.gpu_busy_ns) / 1e6);
-  c.gpu_timed.Add(double(gpu.gpu_timed_submissions));
+  c.gpu_busy_ms.Add(double(q.gpu_busy_ns) / 1e6);
+  c.gpu_timed.Add(double(q.gpu_timed_submissions));
 }
 
 inline void poll() {
@@ -222,7 +262,7 @@ inline void poll() {
           c.busy_ms.size(), c.interval_ms.Median(), c.busy_ms.Median(), c.busy_ms.Percentile(0.9),
           c.busy_ms.Max(), c.wait_reg_ms.Median(), c.idle_ms.Median(), c.present_ms.Median(),
           c.draws.Median(), c.draw_cpu_ms.Median(), c.copies.Median(), c.copy_cpu_ms.Median());
-      REXSYS_INFO(
+      if (c.queue_present) REXSYS_INFO(
           "[frame] cp queue: submissions median {:.0f} (max {:.0f}) in {:.2f} ms (p90 {:.2f}), "
           "fence waits median {:.0f} (max {:.0f}) blocked {:.2f} ms (p90 {:.2f}, max {:.2f}), "
           "tile mappings median {:.0f} (max {:.0f}), ring kicks median {:.0f}",

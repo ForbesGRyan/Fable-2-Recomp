@@ -14,6 +14,7 @@ Measured at the bridge (save Hero000), standing, native view off, `REX_VSYNC=0`,
 | + one submission a frame (on flush) (logs 014 to 016) | **97 to 115** | **8.5 to 8.7 ms** | 6.2 ms (p90 6.5) | 7.5 ms (p90 7.8) |
 | the defaults, plain launch, 160 to 200 s (logs 018, 021) | **110 to 114** | 8.5 to 8.7 ms, p90 9.0 to 9.4, p99 13.1 to 14.6, max 13 to 17 | 6.2 ms | 7.5 ms |
 | the defaults with FABLE2_THREAD_PLACE=off (log 020) | 80 | 12.5 ms | 9.5 ms | |
+| + the idle toast without continuous repaint (log 023, 160 s) | **129** | **7.65 ms, p90 8.4 to 8.7, p99 9.1 to 10.3, max under 11.6** | 6.2 ms | 7.6 ms (p90 8.4) |
 
 The game's own render thread needs 5.1 ms a frame in this configuration; it spends the rest in
 the swap waiting for the GPU-emulation thread.
@@ -63,8 +64,8 @@ default off until merged; the app-side ones are environment variables.
    priority (both default on; a small gain at the tail: p99 13.1 to 13.4 against 13.4 to 16.7).
 7. The idle achievement toast no longer asks for a UI repaint at every 240 Hz tick
    (`ImGuiDialog::WantsContinuousRepaint`), so the main thread presents only with the guest's
-   frames: fewer `Present` calls holding the queue mutex the worker's execute waits on. Measured
-   in batch 10 (pending when this was written).
+   frames: fewer `Present` calls holding the queue mutex the worker's execute waits on. This
+   removed the 13 ms tail: 129 fps with p99 under 10.3 ms (log 023).
 
 Experiments that did not pay: `--d3d12_submit_on_primary_buffer_end=false` alone (moves the cost
 into the swap), `--d3d12_tiled_shared_memory=false` (slower), `FABLE2_LIMITER_YIELD` (not measured
@@ -100,12 +101,13 @@ the CMake manifest step ran for minutes.
 
 ## Open
 
-- Stability: the 1% tail sits at 13.1 to 13.5 ms (p90 9.0 to 9.4). The hitch lines (logs 019,
-  021) show the long frames come in bursts of 0.1 to 0.5 s, about 7% of frames at 12 to 14 ms,
-  with the guest's swap wait +4.4 ms and the CP +1.7 ms, GPU unchanged: the worker's one
-  execute waiting behind the main thread's `Present` on the shared queue. Thread isolation did
-  not change it; the idle-toast repaint change (lever 7) is the first answer, a presenter queue
-  of its own the full one.
+- Stability: solved for the bridge by lever 7 (p99 9.1 to 10.3 ms). The history: the hitch lines
+  (logs 019, 021) showed the 13 ms frames in bursts of 0.1 to 0.5 s, about 7% of frames, with the
+  guest's swap wait +4.4 ms and the CP +1.7 ms, GPU unchanged: the worker's one execute waiting
+  behind the main thread's `Present` on the shared queue; thread isolation did not change it, the
+  end of the 240 Hz UI repaint did. A presenter queue of its own would also free the swap flush.
+- The next limits: the GPU at 7.6 ms (p90 8.4) and the guest render thread at 7.0 ms of work a
+  frame set the 7.65 ms frame together; the GPU-emulation thread (6.2 ms) is no longer first.
 - Other places: only the bridge is measured. The third spot and a town have more draws.
 - The GPU at 7.5 ms is now within 1.2 ms of the frame: the tile replay (3,300 of 3,780 draws)
   is the lever that cuts the emulation thread, the worker and the GPU at once (`--dump_pm4_frame`

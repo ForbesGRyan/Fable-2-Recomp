@@ -1,9 +1,10 @@
 # Native renderer sub-project 12: distant trees (the far woods' impostors)
 
 Status: **built through `flat` to `on` and validated on 2026-10-11 (default `off`); not closed: the
-fix wave is made and run (criterion 15's timing pair is to be made again on its binary); the closing
-follows. Verdicts: "Implementation notes and verdicts" at the end; record: frame map section 19,
-"Validation (12)", "Validation (12), after the fix wave", "Limits (12)".** The text below is the design as written
+fix wave and the closing fix are made and run; open: criterion 15 on the closing binary, which needs a
+session with the window at width 1942. Verdicts: "Implementation notes and verdicts" at the end; record:
+frame map section 19, "Validation (12)", "Validation (12), after the fix wave", "Validation (12), the
+closing fix", "Limits (12)".** The text below is the design as written
 (2026-10-11, before anything was built or run) with its marked amendments. Branch `native-renderer-distant-trees`
 (from master `d03f0be`). Research: `.superpowers/sdd/distant-trees-research.md` (untracked; its
 scripts and outputs in `out/native-evidence/distant-trees/`, "DT" below). Ledger:
@@ -875,4 +876,18 @@ Written by the validation (plan Tasks 16 and 11). The record with every number a
 | 14 | `on` with the coverage on: met by the named substitute (the feed) on the software adapter, clean on the graphics card | 0 errors, id 1328 alone, `Impostors: on (feed), drawn 14 of 14`; graphics card 14 of 14 with Coverage and Sun lines |
 | 15 | `on`: **not judged on this binary** (the +2.327 ms is the binary's of before; the full hash adds about 0.2 ms of CPU time a frame, and the margin was 0.17 ms): the timing pair is to be made again | the pictures' CPU time 1.27 ms against 1.05 to 1.10 ms |
 
-**Open** (frame map "Limits (12)"; user checks 93 to 98): the moving picture; other regions, towns, times of day; criterion 15 on the present binary; the dissolve band; the 60 Hz floor under the cost figure; the half part (ledger ruling 48: it stays out; the figures are inside their bands with the coverage on as well).
+**After the closing fix** (ledger rulings 52 to 55; binary `18F70BB5A714FC19`, commit `4c6de88`; runs of logs 699 to 708, `RUN UNCHECKED`; the window had moved, so the shots are 2904 and 1944 wide and nothing of the session is timing evidence; frame map section 19, "Validation (12), the closing fix").
+
+- **Design 6's bounds, as built** (they deviate from the letter above: "c12.w in [0, 4]", "the others from D1 and D2 times four", "a size outside (0, the bound D1 and D2 give times four]"). The bounds on the components a formula reads are sanity bounds by kind, fitted to no capture: a place or distance within 1e6, a matrix term within 1e7, a scale (a factor, a direction's part, an exponent, a reciprocal range) within 65,536, a quad's size in (0, 4096]; the pixel shader's distances `c12.y`, `c29.x` in [0, 4096], `c29.y` in (0, 4], `c31.x` and `c20.w` in (0, 64] as written, and `c12.w` in [0, 64]. Why: "four times one place's values" refused a valid fog that merely differs (a range starting beyond 81.6 units), and the fog's registers are already held bit-equal to the frame's validated block.
+- **Design 12's read-back, as built**: the pictures are used only in the read-back modes that bring each frame's own bytes, `none` with the fourteen bases forced, and `full`; in `fast` and `some` nothing is drawn and each record is counted `picture: mode` (a reason beside the spec's strings).
+- **The picture's hash** reads every byte in eight lanes (2.8 microseconds a picture); the reuse of an unchanged picture is a pure rule with a table.
+
+| # | Verdict | In short |
+|---|---|---|
+| 13 | list and log lines met again (logs 706, 707); the picture not decidable on shots of another client size | the verdict of log 697 stands for the picture |
+| 14 | the reuse of an unchanged picture clean under the debug layer (log 699, a one-set feed) | 0 errors, id 1328 alone; first upload at scene frame 282, every picture reused from 283 |
+| 15 | **not judged on the closing binary** (ledger ruling 55) | on the other monitor `on` took the bridge from 37 to 99 ms a frame: that monitor's read-back, about 4 ms a forced resolve |
+| - | the default configuration (render and impostors alone), which the criteria do not name | `on`: 14 of 14; far woods over their ground 1.013 of the game's by a substituted measure (bound of the implementer's 0.92 to 1.08); `flat`: 14 of 14 |
+| - | `on` with `--readback_resolve=some` | not available, said, nothing drawn |
+
+**Open** (frame map "Limits (12)"; user checks 93 to 98): criterion 15 at width 1942; `fast` and a hand-given list never run; the moving picture; other regions, towns, times of day; criterion 15 on the present binary; the dissolve band; the 60 Hz floor under the cost figure; the half part (ledger ruling 48: it stays out; the figures are inside their bands with the coverage on as well).

@@ -19,6 +19,11 @@ HERODOG_READBACK plus two A/B toggles give the real picture:
    - **A 256×256, fmt=3, packed-mips texture**, resolved **every frame** (128 KB mip0, hash changes
      per frame → dynamic). It is the texture actually **bound + sampled** (HERODOG_FETCH: sampler
      slots 13 & 0, `base=0x12704000 mip=0x12724000 max=3 packed=1 tiled=1`).
+     **Note, 2026-10-12 (native renderer sub-project 12):** this texture is identified. It is the
+     picture of the far woods' first tree model ("impostor 0"): the game renders one 256×256
+     fmt=3 picture a tree model every frame, fourteen of them at `0x12704000 + n * 0x2B000`,
+     and draws its distant trees as camera-turned quads that sample them
+     (`docs/native-renderer/frame-map.md`, section 19).
 3. **A/B: skip the 512×512 chain → dog is PITCH BLACK.** ⇒ The 512×512 5-mip chain **is** the
    dog's texture.
 4. **A/B: skip the 256×256 every-frame resolve → dog is STILL "multiple textures"** (the original

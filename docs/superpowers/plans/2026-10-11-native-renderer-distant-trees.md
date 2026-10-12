@@ -88,6 +88,9 @@ scripts and outputs are in `out/native-evidence/distant-trees/`, "DT" below). "F
     `impostor-record {unread, shader, literal, storage, quad, register, scale, state, fetch,
     ground-fog, fog-table, over-limit, pending}`; in the pass `impostors not drawn {pipeline,
     slot, buffer, scale, picture: base, picture: unread, picture: content, picture: upload}`.
+    *(As executed)*: two reasons were added beside these strings: `place` (the pass: a frame
+    whose impostor places are not one run draws none; Task 10) and `picture: mode` (a read-back
+    mode that brings old bytes, `fast` or `some`; the closing fix, ledger ruling 54).
   - At most 32 draws and 4,096 quads a frame; a draw past either is not drawn, whole.
   - A quad's words are read only for a quad below the draw's count, inside a branch (a buffer
     bound by address has no bounds check).
@@ -114,7 +117,8 @@ scripts and outputs are in `out/native-evidence/distant-trees/`, "DT" below). "F
   before-and-after figure pairs an off-run and an on-run of one session, one binary and one plan
   (spec ruling 16).
 - New switch: `--fable2_native_impostors` = `off` (default; also `false`, `0`), `flat`, `on`
-  (also `true`, `1`). New reason strings: those of the fail-closed rules above, exactly.
+  (also `true`, `1`). New reason strings: those of the fail-closed rules above, exactly. *(As executed: and
+  `place` and `picture: mode`, marked there.)*
 
 **The workspace's rule files** (`.superpowers/sdd/2026-10-11-native-renderer-distant-trees/`:
 `global-constraints.md`, `implementer-rules.md`, `reviewer-rules.md`) were copied from an earlier
@@ -244,7 +248,7 @@ own first commit.**
 | `sizeof(ImpostorRecord)` | 440. **As fixed by Tasks 3 and 6**: fourteen and five registers stand, so 440 stands; `vfetch[2]` holds the builder's pair (`GpuAddress(storage) \| 3`, `(storage_dwords << 2) \| 0x10000002`: **corrected after the review of phase 12a, I1**; any hold of the packet is on its fields, type, address, endian and size, never on the dword), not the device's shadow. **As recomputed by Task 8**: 440 stands (16 + 16 + 224 + 80 + 24 + 48 + 8 + 20 + 4) | Task 6's report (registers), Task 3's (the fetch constant's source) | Task 8 |
 | the half4's component order and the fetch's endian (`kImpostorWordSource`, `kImpostorWordEndian`) | (1, 0, 3, 2), endian 2 [inferred from `vfetch_full r6.yxwz`]. **As fixed by Task 3**: so [measured: the packet's endian is 2 and the rows' `"fetches"` swizzle is yxwz in 116 of 116 rows of D1 to D4b]; a quad is four big-endian halves x, y, z, s, **at an 8-byte stride from the storage's start: the first half of the storage** (the call reserves 16 bytes a quad; this line read "the first 8 of the 16 bytes the call reserves a quad", which is not a 16-byte stride: at 16, 723 of D1's 1,856 quads are not plausible; review of phase 12a, Minor 3). The plan's census does not single the order out (36 to 48 of 96 pairs pass); the replay with the first two exchanged does (99% to 0.07%) | Task 3 (open question 2), held by Task 6's `rows` | Tasks 6, 8 |
 | where the vertex fetch constant is read (the device's shadow of fetch slot 31, or the builder's packet) | the shadow. **As fixed by Task 3: NOT the shadow.** The device's shadow of fetch slot 31 names the storage in 0 of 116 rows; the builder's command packet (`FindFetchPacket`, `kVertsFetchHeader`) does in 116 of 116: last pair `xdk::GpuAddress(storage) \| 3` and `(storage_dwords << 2) \| 0x10000002` (**corrected after the review of phase 12a, I1**: bit 28 is set in every row; meaning not established). **As built by Task 8**: the record holds the packet's own pair and `CheckImpostorCall` compares its fields (type 3, address, endian 2, size) with the call's storage fields, the padding bits 26 to 31 left out. The record forms the pair from the call's own storage fields (device + `0x3488`, + `0x3490`) and may hold the packet to it | Task 3 | Task 8 |
-| the bounds of `MakeImpostorRecord`'s `quad` and `register` rules that the spec leaves to D1 and D2 (size; `c8`, `c46`, `c47`, `c110`, `c111`, `c113..c117`) | four times the largest magnitude in D1 and D2. **As fixed by Task 6**: `src/native/capture/impostor_table.inc` (`gen_impostor_table.py`): four times the largest magnitude of a register over D1, D2, D3T, D4a, D4b (`c8` 3.822, `c46` 3.998, `c110` 3.325, `c111` 7,600, `c113` 4, `c114` 8; **as amended by Task 8 under ledger ruling 34**: only the components a formula reads have a bound, a register's reach is four times the largest magnitude of its READ components (`c111` 81.6), and an unread component is carried and never judged), the eye within 1e6, the matrix rows within 1e7, the size in (0, 65.5625], the spec's pixel bounds | Task 6 (`impostor_check.py bounds`) | Task 8 |
+| the bounds of `MakeImpostorRecord`'s `quad` and `register` rules that the spec leaves to D1 and D2 (size; `c8`, `c46`, `c47`, `c110`, `c111`, `c113..c117`) | four times the largest magnitude in D1 and D2. **As fixed by Task 6**: `src/native/capture/impostor_table.inc` (`gen_impostor_table.py`): four times the largest magnitude of a register over D1, D2, D3T, D4a, D4b (`c8` 3.822, `c46` 3.998, `c110` 3.325, `c111` 7,600, `c113` 4, `c114` 8; **as amended by Task 8 under ledger ruling 34**: only the components a formula reads have a bound, a register's reach is four times the largest magnitude of its READ components (`c111` 81.6), and an unread component is carried and never judged), the eye within 1e6, the matrix rows within 1e7, the size in (0, 65.5625], the spec's pixel bounds. **As rebuilt by the closing fix (ledger ruling 54)**: sanity bounds by kind, fitted to no capture: a place or distance within 1e6, a matrix term within 1e7, a scale, direction's part, exponent or reciprocal range within 65,536, the size in (0, 4096], pixel `c12.w` in [0, 64]; "four times one place's values" refused a region whose fog range starts beyond 81.6 units | Task 6 (`impostor_check.py bounds`) | Task 8 |
 | which bit of the pixel bool word is `b129` | bit 1 (`0x00000002`). **As fixed by Task 5**: bit 1 (`light_formulas.IMPOSTOR_B129`), from the SDK's bool layout (bit `N & 31` of register `0x4900 + (N >> 5)`: `interpreter.cpp`) and `ucode_eval`'s numbering; clear in the captured word `0x00000100`. The rows' `"pbool"` is the device's shadow, which FM section 12 ("The bool word") refutes as the GPU's value: Task 8 tests the word the GPU is given | Task 5 | Task 8 |
 | the alpha test's reference at a `129F` draw | unknown; carried in the record and applied (`alpha > ref`). **As fixed by Task 3**: `0x3F008081` = 128 / 255 in 116 of 116 rows (still carried and applied); with it a whole-alpha tree is absent below 52.02 units, not 50 | Task 3 | Tasks 6, 9 |
 | `sizeof(ClayImpostorConstants)`, the slots a draw takes | 336 bytes, 2 slots. **As fixed by Task 6**: the components read are those of the Tasks 4-5 report (nothing a captured row adds or removes); the byte count was not recomputed by Task 6: Task 9 holds it by its own static assert. **As recomputed by Task 9**: 336 bytes (224 + 80 + 16 + 16), 2 slots a record, 64 a frame; `first_quad` at 304, `alpha_ref` at 320 | Task 6 (which components the formula reads) | Tasks 9, 10 |
@@ -252,8 +256,8 @@ own first commit.**
 | the shader test's case numbers | 260 to 263. **As fixed by Task 10**: one case, 54 (the file's "free number below 256"), parts (a) to (h) | Task 10 | Task 10 |
 | the flat colour (`kImpostorFlatColour`) | none: a literal that Task 7 writes with its source file. **As fixed by Task 7**: `kImpostorFlatColour` = {0.145376, 0.250169, 0.050493} in `clay_logic.h`, the mean of D1's 172,125 covered texels AS THE SHADER RECEIVES IT (through the fetch's swizzle (2, 1, 0, 3)); a 1 x 1 picture of it is sampled without a swizzle | Task 7 (its D1 step) | Task 10 |
 | the format-3 field order (which five bits are red) | red in bits 0 to 4 after the 8-in-16 swap [inferred from the SDK's name `R5G5B5A1ToB5G5R5A1`]. **As fixed by Task 7**: so [code: the SDK's load shader, disassembled; measured: the game's scene colour is the pixel formula's within 0.3% a channel with the texel through the swizzle and 13% off in red without]; these are the texture's channels, before the fetch's swizzle, which is (2, 1, 0, 3) (`0x60A`) in every row: `kImpostorSwizzle` of Task 8 is `0x60A`, not 0 | Task 7 | Tasks 13, 14 |
-| the level rule's alpha threshold, the content rule's two bounds | none. **As fixed by Task 13**: a level from the level above, each five-bit field the mean of all four parents' (a half up), a texel covered when 3 of its 4 parents are (`kImpostorLevelAlphaCount` = 3): the game's alpha on every texel and its colour within 2 on every covered texel of 56 pictures' three levels (`t13_levels.txt`); `kImpostorRingClearMin` = 944 (trees 1,017 to 1,020, noise at most 868), `kImpostorCoverMin` = 1,024 and `kImpostorCoverMax` = 25,800 (trees 4,356 to 18,613; empty 0; dense noise 32,995 and more), fitted on 374 whole bases of eighteen captures (`t13_content.txt`); capture `054648`'s dumps are half pictures and could not be measured: the `one` runs of the cost sessions stand in for it | Task 13 (fitted to D1 and D2) | Task 14 |
-| the share of impostor pixels with one sample of two (open question 8) | unknown. **As fixed by Task 6**: 20.5% of the kept pixels at the bridge and 17.9% at the third spot (9.3% and 12.5% with the alpha at the base level) | Task 6 | Task 15 (below 5% the controller may strike it) |
+| the level rule's alpha threshold, the content rule's two bounds | none. **As fixed by Task 13**: a level from the level above, each five-bit field the mean of all four parents' (a half up), a texel covered when 3 of its 4 parents are (`kImpostorLevelAlphaCount` = 3): the game's alpha on every texel and its colour within 2 on every covered texel of 56 pictures' three levels (`t13_levels.txt`); `kImpostorRingClearMin` = 944 (trees 1,017 to 1,020, noise at most 868), `kImpostorCoverMin` = 1,024 and `kImpostorCoverMax` = 25,800 (trees 4,356 to 18,613; empty 0; dense noise 32,995 and more), fitted on 374 whole bases of eighteen captures (`t13_content.txt`); capture `054648`'s dumps are half pictures and could not be measured: the `one` runs of the cost sessions stand in for it. **As changed by the fix wave (ledger ruling 45)**: `kImpostorCoverMin` = 1 and no upper bound; the ring bound alone tells a picture from noise (the 374 surveyed bases keep their verdicts) | Task 13 (fitted to D1 and D2) | Task 14 |
+| the share of impostor pixels with one sample of two (open question 8) | unknown. **As fixed by Task 6**: 20.5% of the kept pixels at the bridge and 17.9% at the third spot (9.3% and 12.5% with the alpha at the base level). **Task 15 was not built (ledger rulings 35, 46, 48).** | Task 6 | Task 15 (below 5% the controller may strike it) |
 
 ## Where this plan departs from the spec's letter, and why
 
@@ -453,6 +457,13 @@ Rows (inside the discovery gate; nothing a record or the pass reads changes):
 *No run in this task: Task 3 makes its captures.*
 
 ### Task 2: The cost pair (run COST): the first run, and phase 12c's entry condition
+
+> **As executed**: four sessions. Logs 658 to 661 at width 1296: no timing evidence (ruling 29).
+> Log 667: stopped after one run, 1296 wide. Logs 671 to 674 at width 1942: not decidable (a
+> disturbed `one` run). Logs 678 to 681 at width 1942: **passes** (1.810 ms, bound 2.0). Ruling
+> 31 closed the sub-project at `flat` between the second and the third; rulings 40 and 41
+> withdrew it. FM section 19, the three "The cost pair" subsections. All runs the controller's,
+> `RUN UNCHECKED`. Phases 12a and 12b (Tasks 3 to 10) went on while its verdict was open.
 
 **No code.** It needs no task before it and no new binary: all four runs on **one** binary, the
 branch's head as built or Task 1's build, its SHA-256's first 16 digits recorded before and
@@ -1706,6 +1717,15 @@ constexpr size_t PlanImpostorPlace(const uint32_t* seqs, size_t count, uint32_t 
 
 ### Task 10: The impostor step: programs and the pass, in `flat`
 
+> **As executed**: the quads' words are a region of the frame's constant buffer, not a buffer
+> of the pass's own (the provisional table's line); the shader test has one case, 54, with parts
+> (a) to (h); the vertex program ends in a finite test and a fixed clipped position (ledger
+> rulings 27 and 37, over this task's "a position that is no number") and touches no register
+> component that no formula reads (ruling 38); a frame without light draws no impostor (`scale`);
+> a frame whose impostor places are not one run draws none (`place`, a reason beside the spec's
+> strings). Runs, the controller's: log 675 (software adapter, debug layer), then logs 676 and
+> 677 (binary `E2612A903C15DBCA`). Seen, `flat` is filled rectangles over the far ranges.
+
 **Files:** `src/native/fable2_native_shaders.h`, `src/native/render/clay_pass.cpp` / `.h`,
 `src/native/render/clay_logic.h` (`ClayStats`, `FormatImpostorText`),
 `src/native/fable2_native_render.cpp` (`Render`'s argument, the F3 text, the log line),
@@ -1820,6 +1840,11 @@ struct ImpostorVsOut {
 
 ### Task 11: Validation of `flat` (12b) and its documents
 
+> **As executed**: not run as written; ledger ruling 40 shrank it to what Task 16 does not
+> repeat, and Task 16's validation carries it. There is no "Validation (12b)" and no "Limits
+> (12b)" in the frame map: what was judged of `flat` is in "The impostor step", "Validation (12)"
+> (criteria 2, 7, 14) and "Limits (12)". `flat` has no timing run.
+
 **Files:** frame map section 19 ("Validation (12b)", "Limits (12b)"), the spec (status and
 "Implementation notes"), `out/native-evidence/distant-trees/` (scripts and outputs, untracked).
 
@@ -1884,6 +1909,12 @@ stays as Task 8 left it (it draws nothing and says so), and the pictures rendere
 `src/core`; a pure header and Python); Tasks 14, 15 and 16 follow in order.
 
 ### Task 12: The read-back list, seeded behind the switch
+
+> **As executed**: entered after the fourth cost session passed (ledger ruling 41). As first
+> built `on` seeded the fourteen bases whatever the renderer's switch; since the fix wave only
+> with the native renderer on (ruling 47; log 698), with the seeded line's suffix saying which.
+> A list given by hand that forces the fourteen bases counts as having the pictures. The runs
+> `t12_on`, `t12_off` were not made under those names: Task 14's runs carry them.
 
 **Files:** `src/core/readback_force_list.h`, `src/core/fable_2_app.h`,
 `src/native/fable2_native_render.cpp` / `.h` (`ImpostorReadbackWanted`),
@@ -1958,6 +1989,12 @@ inside its parentheses (criterion 13 holds an off-run's line against log 657's).
       the switch".
 
 ### Task 13: The native levels and the content rule (pure; fitted to D1 and D2)
+
+> **As executed**: the level rule is "from the level above, the mean of all four parents,
+> covered when three of four are" (the plan's provisional count 2 fits worse); the content rule
+> was fitted on 374 bases of eighteen captures, not on D1 and D2 alone, and its cover bounds
+> (1,024 to 25,800) were dropped in the fix wave (ledger ruling 45): the ring bound and one
+> covered texel remain.
 
 **Files:** `src/native/render/impostor_picture.h` (new, pure),
 `tests/native/test_impostor_picture.cpp` (new; two lines in the runner),
@@ -2072,6 +2109,15 @@ int main() {
 
 ### Task 14: The pictures in the pass (`on`)
 
+> **As executed**: one texture a base (14), not a record; the hash is a whole-picture hash of
+> the pass's own, not `SampleHash` (fix wave, closing fix; it is not collision-resistant against
+> made inputs: FM "Limits (12)", point 8); availability takes the read-back mode (`picture:
+> mode`); a diagnostic feed `--fable2_native_impostor_feed` was added for the software adapter,
+> whose read-back is empty (rulings 42, 43: the first three software-adapter runs, logs 682 to
+> 684, drew no picture); the list is seeded only with the native renderer on (ruling 47); the
+> reuse of an unchanged picture became a pure rule with a table in the closing fix and ran once,
+> on the software adapter with a one-set feed (log 699).
+
 **Files:** `src/native/render/clay_pass.cpp` / `.h`, `src/native/render/clay_logic.h`
 (`ClayStats`, the text), `src/native/render/scene_dump.h` (the pictures' file),
 `src/native/fable2_native_render.cpp` (the availability, the dump's writer, the install line),
@@ -2140,6 +2186,10 @@ level) as the pattern; `DecideImpostorPicture` (Task 9); `WriteSceneDump`
 
 ### Task 15: The half part under the coverage's switch
 
+> **Not built** (ledger rulings 35, 46, 48): the share was 17.9 to 20.5%, above the 5% under
+> which the plan would strike it; it stays out because every figure is inside its band with the
+> pictures on. A follow-up.
+
 **The controller may strike this task** (spec ruling 13) if Task 6's share of impostor pixels
 with one sample of two is below 5%: then `on` keeps the first sample's rule under either value
 of `--fable2_native_coverage`, the frame map says so, and Task 16 reports criterion 8 beside
@@ -2181,6 +2231,18 @@ is written down: where a fading mesh's half part and an impostor's meet (trees b
       tail".
 
 ### Task 16: Validation of `on` (12c) and its documents
+
+> **As executed**: in three steps on three binaries, none with the run names written here. The
+> validation proper (`t14_*`, logs 685 to 693, binary `363564F4A5FAD9C6`) had no pair with the
+> coverage and the wind on, no sun pair, no defaults run: criteria 8, 12 and 13 were left open
+> and criterion 15 read "met" (+2.327 ms). The fix wave (`fw_*`, logs 694 to 698,
+> `AC3D3E10E4949CE8`) made those runs: 8 met as written, 12 as ledger ruling 50 judges it, 13 by
+> a named measure. The closing fix (`cf_*`, logs 699 to 708, `18F70BB5A714FC19`) ran the default
+> configuration, `flat` again, `--readback_resolve=some` and the reuse; its timing session stood
+> on the other monitor, so **criterion 15 is not judged on the closing binary**. Never made: the
+> `flat` timing runs, the third spot's pairs, the band's pairs with full read-back, D4's.
+> The frame map's subsections are "Validation (12)", "after the fix wave", "the closing fix"
+> and "closing"; user checks 93 to 98 were appended here and 99 at the closing.
 
 **Files:** frame map section 19 ("Validation (12c)", "Limits (12c)"), the spec's notes,
 evidence scripts (untracked).
@@ -2232,6 +2294,24 @@ evidence scripts (untracked).
 ## Closing
 
 ### Task 17: Documents, the closing table, the whole-branch reviews
+
+> **As executed** (ledger rulings 51, 54, 56, 57): the order was the reviews first, then the
+> documents. The whole-branch code review (step 14) read `37c99f6` and led to the closing fix
+> `4c6de88` and its runs; the documents review (step 15) read `0d37311` and a short code review
+> read the closing fix; this closing then mended their findings and wrote the steps below, in
+> one documents commit after a comment-only source commit (`33e3a1f`: the picture hash's claim).
+> Step by step: 1 the spec: status, the final table, the open questions and the limits known
+> beforehand, the marks at criteria and designs. 2 this plan: these paragraphs. 3 and 4 the
+> frame map: "Validation (12), closing", "Limits (12)", "Follow-ups (12)"; the earlier
+> statements marked where they stand (the literal table's row of `129F` has nothing stale).
+> 5 `lighting-formulas.md`: three pointers and one rewording in the impostors' part. 6 README:
+> the switch's row. 7 user checks: 93 to 98 were written by the validation with other subjects
+> than this step lists (the tree line, popping, swimming, a fast turn, another region, the cost
+> and the beams); 94 and 98 corrected in place, 99 appended. 8 the roadmap: item 2 ticked, a
+> follow-ups block; the pictures by a route without read-back are a follow-up to be decided at
+> the start of the water sub-project, not "the next item". 9 one line in the frame map. 10 the
+> dated note. 11 a dated line in each research file (untracked). 12 the ledger is the
+> controller's. 16: no figure changed after the reviews; no build.
 
 Made whether the sub-project closes at `on` or at `flat`. Every step below is a checkbox of its
 own, and the task's report quotes the list with each box's commit or "nothing to change:

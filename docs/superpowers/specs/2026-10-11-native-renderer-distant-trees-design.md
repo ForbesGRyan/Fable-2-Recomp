@@ -1,10 +1,11 @@
 # Native renderer sub-project 12: distant trees (the far woods' impostors)
 
-Status: **built through `flat` to `on` and validated on 2026-10-11 (default `off`); not closed: the
-fix wave and the closing fix are made and run; open: criterion 15 on the closing binary, which needs a
-session with the window at width 1942. Verdicts: "Implementation notes and verdicts" at the end; record:
-frame map section 19, "Validation (12)", "Validation (12), after the fix wave", "Validation (12), the
-closing fix", "Limits (12)".** The text below is the design as written
+Status: **closed on 2026-10-12 (ledger ruling 57): built through `flat` to `on`, validated on
+2026-10-11, default `off`. One criterion is open at the closing: criterion 15 (the cost) is not judged on
+the closing binary `18F70BB5A714FC19`; it needs a session with the window at width 1942 (user check 99).
+The final state of the seventeen criteria is the one table "Final state" under "Implementation notes and
+verdicts" at the end; record: frame map section 19, "Validation (12), closing", "Limits (12)",
+"Follow-ups (12)".** The text below is the design as written
 (2026-10-11, before anything was built or run) with its marked amendments. Branch `native-renderer-distant-trees`
 (from master `d03f0be`). Research: `.superpowers/sdd/distant-trees-research.md` (untracked; its
 scripts and outputs in `out/native-evidence/distant-trees/`, "DT" below). Ledger:
@@ -19,6 +20,11 @@ run.
 impostors' pre-pass draw; ruling 22 orders the work in phases (the shared work first; the pictures
 by read-back last, and only if the cost pair passes its bound; otherwise the sub-project closes at
 `flat`). Each amended passage is marked "(ruling 21)" or "(ruling 22)"; nothing else was changed.
+*(At the closing, 2026-10-12)*: that sentence held when it was written. Since then the ledger's later
+rulings are marked where they bear, as "(Ledger ruling N)": 26 and 50 at criteria 1 and 12; 27 and 37
+at the fail-closed rules; 31, 40 and 41 at Design 3 and Design 12; 34 and 54 at Design 6; 35, 46 and 48
+at Design 10; 45, 47 and 54 at Designs 7 and 12; and the five criteria whose reference turned out wrong
+are marked at the criterion ("After validation"). The design's own words are left as written.
 
 Every fact carries the research's label or names what it was read from: **[measured]** printed by
 a named script from a capture, a stored scene, a shot or a log; **[microcode]** read from
@@ -244,6 +250,13 @@ and part 11; 12c = part 12 and the half part of part 10, entered only if run COS
      `picture: unread` (no flat quad stands in for a picture: Design 12), no read-back is asked
      for, and one log line at install says so. Neither an SDK change nor
      `--readback_resolve=fast` is tried by this sub-project.
+   - *(Ledger rulings 31, 40 and 41)*: what happened. Two sessions with the window on the other
+     monitor were no timing evidence (53.5 ms a frame there, as an indication), and ruling 31
+     closed the sub-project at `flat`. The third session, on the usual monitor, was not decidable
+     (a disturbed `one` run). The fourth **passed**: 1.810 ms against 2.0, lowest steady
+     `fourteen` window 40.0 fps. Ruling 31 was withdrawn and Design 12 was built: the value `on`
+     draws the pictures, and "`on` captures as `flat` does and draws no impostor" held only for
+     the builds in between.
 4. **The position formula** (no run for its first part). `impostor_position` in
    `tools/xdk_sigmatch/light_formulas.py`, transcribed from `129F`'s 81 instructions and held to
    the microcode by `tools/xdk_sigmatch/impostor_check.py` with `ucode_eval.py` as the oracle,
@@ -345,6 +358,13 @@ and part 11; 12c = part 12 and the half part of part 10, entered only if run COS
      captured swizzle, no gamma sign, highest level 3); `ground-fog` (bool `b129` set);
      `fog-table` (the vertex slots are not the frame's fog tables); `over-limit` (the 33rd draw,
      or a draw whose quads do not fit: that draw whole); `pending`.
+   - *(Ledger rulings 34 and 54)*: **the bounds as built are not these.** Only the components a
+     formula reads are judged (ruling 34); and since the closing fix (ruling 54) they are sanity
+     bounds by kind, fitted to no capture: a place or distance within 1e6, a matrix term within
+     1e7, a scale within 65,536, the size in (0, 4096], `c12.w` in [0, 64]. "D1 and D2 times
+     four" refused a region whose fog range starts beyond 81.6 units. Also as built: fourteen
+     vertex registers, not thirteen; the record is 440 bytes; the fetch constant is the builder's
+     packet ("Implementation notes and verdicts").
    - **A draw is whole or not there; the frame's set is not all-or-none** (ruling 9): a refused
      draw is one tree model missing, which is today's picture for that model.
    - *Evidence a capture carries*: the frame row's `"impostors"`: `on`, `seen`, `taken`,
@@ -359,7 +379,9 @@ and part 11; 12c = part 12 and the half part of part 10, entered only if run COS
    for), `on` (also true, 1: the pictures; asks for the read-back at start-up). With `off`:
    nothing is read, no record, array, object, slot or program is made, the frame's slot plan is
    today's byte for byte, the read-back list is today's, and every compiled program of the pass
-   equals today's.
+   equals today's. *(Ledger ruling 47)*: `on` asks for the read-back only with the native
+   renderer on as well. *(Ledger ruling 54)*: and it draws only where the read-back mode brings
+   each frame's own bytes, `none` and `full` (Design 12).
 8. **The native draw: one step with its own layout and programs** (ruling 11; the furniture's
    quad step is the pattern: FM "Scene furniture").
    - *Layout*: the model's constants at `b0` (the record's registers and state: one slot of the
@@ -381,6 +403,8 @@ and part 11; 12c = part 12 and the half part of part 10, entered only if run COS
      depth word read under the reversed range as the other records' is.
    - *Not drawn, counted on the Impostors line and F3*: `pipeline`, `slot`, `buffer`, `scale`,
      `picture` (Design 12). An RHI failure turns the step off for the run, not the pass.
+     *(As built)*: two reasons beside these strings: `place` (a frame whose impostor places are
+     not one run draws none) and `picture: mode` (ledger ruling 54).
 9. **Its place in the frame.**
    - *Colour pass*: the step is drawn at the records' place: before the first drawn record at
      or beyond the smallest `place` of the frame's impostor records, which is where the game
@@ -428,6 +452,14 @@ and part 11; 12c = part 12 and the half part of part 10, entered only if run COS
       where the game shows the nearer at half over the background (sub-project 11's limit of
       two records at one pixel, unchanged).
     - Built last of the draw's parts, after open question 8's figure is known.
+    - *(Ledger rulings 35, 46 and 48)*: **the part "with it on, and the pictures on" was not
+      built.** Ruling 35 left it out while the sub-project stood at `flat`; ruling 46 re-grounded
+      that when the pictures came; ruling 48 closed it: the share is 17.9 to 20.5% of the kept
+      pixels, yet every region and tree-pixel figure is inside its band with the pictures on
+      (0.985 to 1.022). An impostor pixel is kept whole iff the first sample is covered, with the
+      coverage switch on or off. A follow-up on the roadmap. And the alpha test's reference
+      (128 / 255) puts the first impostor pixel at 52.02 units, not 50: for "trees between 50 and
+      54 units" read 52.02 and 54.
 11. **Step C: flat colour** (the switch at `flat`; the first thing drawn). The picture is a
     1 x 1 texture of one colour with alpha 1: the mean of the covered texels of D1's fourteen
     pictures, in the picture's own stored units, a literal with its source file named (ruling
@@ -438,7 +470,8 @@ and part 11; 12c = part 12 and the half part of part 10, entered only if run COS
 12. **The pictures** (the switch at `on`; built only if run COST passes). *(Ruling 22)*: this
     part, with the half part of Design 10, is phase 12c, the last of the sub-project; its entry
     condition is run COST's verdict "passes", written in the ledger before its first task
-    starts.
+    starts. *(Ledger rulings 31 and 41)*: entered on the fourth cost session's "passes"; the half
+    part of Design 10 stayed out (ruling 48).
     - *The read-back*: `ForceReadbackList` (`src/core/readback_force_list.h`) gains a third
       argument and, with it, the fourteen bases `0x12704000 + n * 0x2B000` (the first is the
       hero's entry: not listed twice), with static asserts that no window reaches a
@@ -446,10 +479,14 @@ and part 11; 12c = part 12 and the half part of part 10, entered only if run COS
       (base + `0x20000`) lies in a window. Seeded once in `OnPostSetup`, under the conditions
       the exposure's switch has (a list given by hand wins). **The list is not rewritten while
       the game runs** (ruling 7): the SDK reads the string at every resolve on its own thread.
-      No SDK change.
+      No SDK change. *(Ledger ruling 47)*: the pictures' bases are seeded only when the native
+      renderer is on as well; with it off the forced resolves would be paid for nothing.
     - *Which pictures can be had*: a record whose `tf0` base is one of the seeded fourteen, in
       a run in which the list was seeded (or `--readback_resolve` is `full`). Any other:
-      `picture: base`, not drawn.
+      `picture: base`, not drawn. *(Ledger ruling 54)*: availability takes the read-back mode
+      and is asked every frame: `none` with the fourteen bases forced (seeded, or in a list given
+      by hand), or `full`. In `fast` and `some`, which bring old bytes, nothing is read or drawn
+      and every record is `picture: mode`.
     - *The decoder* (`Decode1555Level` in `texture_decode.h`, pure, beside `DecodeDxt3aLevel`;
       **not** entered in `TexFormatFromXenos`, so that no record's material changes: ruling
       14): 16-bit texels at `TiledOffset2D(x, y, pitch, 1)`, the 8-in-16 swap, then alpha in
@@ -470,7 +507,10 @@ and part 11; 12c = part 12 and the half part of part 10, entered only if run COS
       frame, for each record that can have a picture: a bounded physical read of the base
       level, `SampleHash` of it, and only if it changed: decode, levels, upload (349 KB a
       picture; at most fourteen a frame captured). The sampler is the one `SamplerIndex` names
-      for the fetch.
+      for the fetch. *(As built)*: one texture a base (fourteen), not a record; the hash is a
+      whole-picture hash of the pass's own, every byte in eight lanes, not `SampleHash` (ledger
+      rulings 52 and 54). It is not collision-resistant against made inputs (frame map "Limits
+      (12)", point 8).
     - *Absent or stale* (ruling 7): a picture is used only if its bytes were read whole,
       decoded, and pass the content rule: of the base level's outermost ring of 1,020 texels at
       least a share **to be fixed from D1 and D2** has alpha 0, and the covered share of the
@@ -479,7 +519,10 @@ and part 11; 12c = part 12 and the half part of part 10, entered only if run COS
       (`picture: unread`, `content`, `base`, `upload`): never a flat quad in its place, which
       would write depth and colour where the game has neither. A picture that is whole but old
       cannot be told from a current one: nothing in the product sees the game's resolve.
-      Criterion 6 measures the age in a capture; a limit otherwise.
+      Criterion 6 measures the age in a capture; a limit otherwise. *(Ledger ruling 45)*: the
+      content rule as built keeps the ring bound (at least 944 of 1,020 clear) and asks only for
+      one covered texel. The cover's bounds (1,024 to 25,800, as first built) were dropped: they
+      refused nothing that the ring does not, and would have removed another region's trees.
     - *The cost*: the read-back's is run COST's; the decode and upload are measured as `on`
       against `flat` (criterion 15). If that part alone breaks the bound, the first remedy is a
       budget of pictures refreshed a frame (ruling 17), not the fallback.
@@ -625,6 +668,8 @@ of them or "not decidable".
    bounds of Designs 4 and 5; every mutation listed there fails. `rows`: every quad and corner of
    every `129F` row. **Reference**: the microcode dumps (exist) and `ucode_eval.py`.
    **Decided by**: no run for the made inputs; D1 and D2 for the rows.
+   *(Ledger ruling 26)*: the native mirror and its pins are held to the single-precision
+   reference; the double reference stays the formula's check against the microcode.
 2. *Records.* In every frame of a capture at the bridge and the third spot with the switch on:
    each record equals its `"verts"` and `"vertsdata"` rows bit for bit (`impostor_check.py
    records`); `seen` = `taken` = the frame's `129F` rows (14 and 14 expected), `quads` = their
@@ -659,6 +704,9 @@ of them or "not decidable".
    than that tenth *(no precedent; a quarter pixel between the two pictures' sampling places is
    expected to hold about half of it)*. **Reference**: 48,051 pixels on CAP `182313` (read); the
    baseline is the off-run's. **Decided by**: V-BRIDGE, V-THIRD, in `flat` and in `on`.
+   *(After validation)*: the reference's expectation was wrong: the quarter pixel holds more than
+   the whole tenth, not half of it. Not met as written; met by a named substitute (one pixel of
+   tolerance). The bound was not moved.
 8. *The far regions, linear scene before post.* With the pictures, the coverage and the wind on,
    native over game, mean linear luminance: far mountains left, centre, right and far rock
    below the ridge each within **0.93 to 1.07** (expected before: 1.336, 1.151, 1.117, 1.108),
@@ -675,6 +723,9 @@ of them or "not decidable".
    distance in both pictures, and "far peak", "island in the lake" and "sky above the ridge",
    stay within 0.99 to 1.01 and move by at most 0.005 from the off-run. **Reference**: 0.993 to
    1.002, 0.995, 0.997, 0.995 (read). **Decided by**: V-BRIDGE.
+   *(After validation)*: the reference's pixel set changes with the trees (it grows two to five
+   times in the on-run). The band is met; "at most 0.005" is not met as written in three regions
+   and is met on the pixels shared by both runs (at most -0.0046).
 10. *After post, on shots.* `region_compare.py`, native over the mean of the two emulated shots
     about it: the four bridge regions and the third spot's two within 0.90 to 1.12 *(no
     precedent)*. A region whose emulated pair drifts by more than 5% is "not decidable" on
@@ -699,6 +750,10 @@ of them or "not decidable".
     stored scene's layer depth (both exist as kinds: FM "Stored native scene" for the native
     plane, `post_sun_layer.py layers` for the game's layer 1); no frame in hand has been read
     this way, so the 500 texels are not known to exist; for the second none in hand (R 5.3). **Decided by**: V-BRIDGE with the sun on; D4 and V-SUN.
+    *(Ledger ruling 50)*: the off-side bound ("at most 10% with them off") cannot hold: the
+    native depth is closed on 88.4% of those texels by the ground behind the missing trees.
+    Recorded as wrong, not bent; the first part is judged on the on-side alone (99.3% of 12,099
+    texels).
 13. *Off is today's picture.* With the switch off: every compiled program of the pass equals
     the program of the commit before the first product commit, byte for byte (shader test); the
     slot plan and the read-back list are today's for every input (tests; the log's `seeded
@@ -707,6 +762,9 @@ of them or "not decidable".
     against log 657 (`k18b_defaults`, the same plan, 1942 wide) in the bridge's 24 regions:
     each within the emulated pair's range, the two regions of moving leaf shadow that
     sub-project 11's closing named left out beforehand. **Decided by**: tests; run OFF.
+    *(After validation)*: "within the emulated pair's range" cannot tell two runs of one binary
+    apart (10 of 22 regions inside a range that is nearly a point); the picture is judged by a
+    named measure (21 of 22 regions within 0.02 of 1 against `k18b_defaults`, log 697).
 14. *Errors.* Before any real-GPU run of a build that changes bindings, targets or shader text:
     240 s on the software adapter under the debug layer at the bridge, 0 `d3d ERROR` lines,
     warnings listed by id; **and the log shows the step drew** (`Impostors: ... drawn 14`) and
@@ -715,6 +773,9 @@ of them or "not decidable".
     21)*: the third run, in D3's view for the depth-only form, is struck with that form. The
     software adapter's pictures are not judged (the read-back texture at
     `0x12704000` is the flat red dog there). **Decided by**: runs WARP.
+    *(Ledger ruling 43)*: on the software adapter the forced read-back leaves every picture
+    empty, so the run for `on` is made with a diagnostic feed of a capture's pictures and counts
+    as the clean run; the game's own pictures are not decidable there.
 15. *Cost.* Shot width 1942, each run made alone, the head's uncapped default stated in the
     report, one session, the bridge: `off`, `flat`, `on` (with the coverage and the wind on in
     all three) each twice in mirrored order. No steady 150-frame native window below 30.0 fps
@@ -724,9 +785,14 @@ of them or "not decidable".
     (a difference under a third of a millisecond is "not decidable": sub-project 10's ruling
     42). The third spot: one pair, reported. **Reference**: logs 654 to 657 (FM "After the fix
     wave": 37.4 fps the lowest window, mean frame 19.36 to 21.66 ms). **Decided by**: runs TIME.
+    *(At the closing; ledger rulings 55 and 56)*: `on` was met on binary `363564F4A5FAD9C6`
+    (+2.327 ms) and is **not judged on the closing binary**, two binaries later; `flat` has no
+    timing run.
 16. *The emulated picture under the read-back.* The emulated shots of the runs with fourteen
     addresses against those with one: the hero's shirt, the dog and the four far regions within
     the range the two runs of one configuration span. **Decided by**: run COST.
+    *(After validation)*: the two runs of one configuration agree to three digits, so their range
+    is nearly a point; not met to the letter, unchanged by eye.
 17. *Evidence rule.* Every number names its file; inference is marked; a run made with a user
     at the machine is labelled `RUN UNCHECKED`; a criterion not met as written is said to be
     not met.
@@ -826,11 +892,63 @@ Found while checking it for this design; none changes its conclusion.
 
 ## Implementation notes and verdicts (2026-10-11, after validation)
 
-Written by the validation (plan Tasks 16 and 11). The record with every number and file is frame map section 19, "Validation (12)" and "Limits (12)"; the ledger has the rulings (21 to 47). The text above is the design as written and amended; where the build or a capture differs, this section says so.
+Written by the validation (plan Tasks 16 and 11). The record with every number and file is frame map section 19, "Validation (12)" and "Limits (12)"; the ledger has the rulings (21 to 57). The text above is the design as written and amended; where the build or a capture differs, this section says so.
+
+**Final state (closing, 2026-10-12; ledger ruling 57; closing binary `18F70BB5A714FC19` unless said).** One table for the seventeen criteria; the three tables further down are kept in the order they were written, and where they differ from this one, this one stands. Runs, files and every number: frame map section 19, "Validation (12), closing".
+
+| # | Final verdict | In short |
+|---|---|---|
+| 1 | met (by ledger ruling 26's reference for the native mirror) | made inputs and all 18,976 captured corners |
+| 2 | met | bit for bit in `flat` and `on`; 14 / 14 / 928, 14 / 14 / 1,076, 10 / 10 / 139 |
+| 3 | met | 98.99% and 98.82% (bound 95%) |
+| 4 | met | 56 of 56 dumps through both decoders |
+| 5 | met | 100.00% alpha, 100.00% colour |
+| 6 | met | every picture the paired frame's own on 100.00% of its texels (38 of 38, 14 of 14, 14 of 14) |
+| 7 | **not met as written** (13.2% against a tenth; +5,746 against +4,858); met by a named substitute (one pixel of tolerance: 158 left, no rise) | **reference wrong** (the quarter pixel's share) |
+| 8 | **met as written** (binary `AC3D3E10E4949CE8`; pictures, coverage and wind on) | far regions 0.989, 0.992, 0.986, 0.986 (off 1.332, 1.151, 1.118, 1.105); gap pixels 1.009 (off 1.432) |
+| 9 | band met; the 0.005 **not met as written** in three regions; met by a named substitute | **reference wrong** (its pixel set changes with the trees); on shared pixels at most -0.0046 |
+| 10 | bridge **not decidable on shots**; third spot met | the emulated pair drifts 5.9 to 10.1% at the bridge; 0.979 and 0.969 at the third spot |
+| 11 | first part **not decidable** (519 judged pixels); second part **not judged as written** (a substitute reported) | no view of this save has enough trees in the band |
+| 12 | first part **met as ledger ruling 50 judges it** (99.3% of 12,099 texels); second part **not decidable** (no D4) | **reference wrong** (its off-side bound): recorded, not bent |
+| 13 | programs, list, log lines, frame rows met; the picture **met by a named measure** on log 697 (`AC3D3E10E4949CE8`), not decidable on the closing binary's 1944-wide shots | **reference wrong** ("within the emulated pair's range" cannot tell) |
+| 14 | `flat` met; `on` **met by a named substitute** (the feed) on the software adapter, clean on the graphics card; the game's own pictures not decidable on that adapter | 0 errors, id 1328 alone, 14 of 14; the reuse of an unchanged picture clean (log 699) |
+| 15 | `on`: met on binary `363564F4A5FAD9C6` (+2.327 ms, bound 2.5, the off-runs at the display's rate), **not judged on the closing binary** (two binaries later; needs a session at width 1942: user check 99); `flat`: not judged (no run); the third spot's pair not made | on the other monitor `on` costs about 61 ms a frame (27 to 10 fps) |
+| 16 | **not met to the letter**; unchanged by eye | **reference wrong** (the two runs' range is nearly a point) |
+| 17 | kept | |
+
+**What became of the open questions.**
+
+| | Outcome |
+|---|---|
+| 1 | passes, on the fourth session (1.810 ms against 2.0 on the usual monitor; ledger rulings 31, 40, 41); on the other monitor the same list costs 53 to 61 ms a frame |
+| 2 | settled by D1 to D4b: a quad is four big-endian halves x, y, z, s at an 8-byte stride from the storage's start (its first half); endian 2, order (1, 0, 3, 2); the fetch constant is the builder's packet, not the device's shadow |
+| 3 | the values are in `lighting-formulas.md` ("The formulas on the captures' own rows"); fourteen registers, not thirteen. Which of them a constant-buffer load can name is not shown by a row (`"vfull"` is in none); none lies in a range of the load table as it stands [code] |
+| 4 | closed: 2,000 of 2,000 made inputs and every captured corner (criterion 1) |
+| 5 | each identity holds in 116 of 116 rows |
+| 6 | dumped whole with their levels; a level is the mean of the four parents of the level above, covered when three of four are (criterion 5: 100.00%) |
+| 7 | `c31.x` times a `c20.w` of the frame's rows at pitch 320 is 1 within 1.4e-7 in 116 of 116 rows; not with the row's own `c20.w` |
+| 8 | 20.5% at the bridge, 17.9% at the third spot: above the 5% under which the half part could be struck; it was left out on other grounds (ledger rulings 35, 46, 48) |
+| 9 | the trees' view (D3T): seven quads in 46 to 58 units, 519 judged pixels: criterion 11's first part not decidable |
+| 10 | no such view was found: neither sun view qualifies as D4 (gap masks of 363 and 23 pixels); criterion 12's second part not decidable |
+| 11 | in the five views of this place: the same fourteen addresses and fetch shape; 14 draws at the bridge and the third spot, 10 elsewhere. Another region is unseen |
+| 12 | not settled: a limit |
+
+**What the runs showed of the limits known beforehand.**
+- *The pictures are the emulated GPU's*: stands. "Read back one or two frames old" did not occur: every picture judged was the paired frame's own (criterion 6).
+- *Half of the tree models have no scene draw*: stands (it bears on the pictures rendered natively, not on this work).
+- *One save, late morning, three spots*: stands; two sun views were added, of the same place.
+- *The unidentified pairs, the sprites and particles*: stand.
+- *The ground-fog block*: `b129` is clear in every record; the refusal never fired.
+- *Five-bit colour and one-bit alpha; the native levels a fitted rule*: the rule gives the game's alpha on 100.00% of texels.
+- *Half-covered pixels*: whole with the coverage on as well (no half part).
+- *A whole but old picture cannot be told from a current one*: stands. And the picture's hash, which decides whether a texture is refreshed, is not collision-resistant against made inputs (frame map "Limits (12)", point 8).
+- *The fetch's border*: stands (ring clear 1,017 to 1,020 of 1,020 in the 296 trees surveyed; the SDK's native RHI has no border mode).
+- *The quarter pixel*: it shows as criterion 7's miss, silhouettes about a pixel off.
+- *The pool is shared with the dog's texture*: the hero and the dog are whole in every shot viewed; what else lies at the fourteen addresses elsewhere is not known.
 
 **What was built other than designed.**
 - The sub-project went through `flat` to `on`: the cost pair passed on its fourth session (1.810 ms against 2.0; ledger rulings 31, 40, 41), so Design 12 was built. `flat` stays as a diagnostic value.
-- No pre-pass draw (ruling 21). **No half part** (ledger ruling 35, re-grounded by 46): Design 10's "with it on, and the pictures on" is not built; an impostor pixel is kept whole iff the game's first sample is covered, with the coverage switch on or off.
+- No pre-pass draw (ruling 21). **No half part** (ledger ruling 35, re-grounded by 46 and closed by 48): Design 10's "with it on, and the pictures on" is not built; an impostor pixel is kept whole iff the game's first sample is covered, with the coverage switch on or off.
 - The alpha reference is 128 / 255 in every row, so a whole-alpha tree is absent below 52.02 units, not 50 ("What is known", the dissolve).
 - The vertex registers are fourteen; the fetch constant is the builder's packet, not the device's shadow; the swizzle field is `0x60A`; the bool word tested is the last writer's (Task 3).
 - A position that is no number never reaches the rasteriser (rulings 27, 37); unread register components are never touched (38); bounds judge only components a formula reads (34).
@@ -839,7 +957,7 @@ Written by the validation (plan Tasks 16 and 11). The record with every number a
 - A diagnostic feed (`--fable2_native_impostor_feed`) that the design does not have: the software adapter's read-back leaves every picture empty (ruling 43).
 - Until the fix wave the value `on` seeded the read-back list with the native renderer off too; since it, only with the renderer on (ledger ruling 47; log 698).
 
-**Verdicts** (no bound was changed after the runs; every run `RUN UNCHECKED`, shots 1942 wide, binary `363564F4A5FAD9C6` unless said).
+**Verdicts** (the first of three tables, in the order they were written; **its rows 8, 12, 13 and 15 are superseded below, after the fix wave and the closing fix; the final state is the table "Final state" above**; no bound was changed after the runs; every run `RUN UNCHECKED`, shots 1942 wide, binary `363564F4A5FAD9C6` unless said).
 
 | # | Verdict | In short |
 |---|---|---|
@@ -861,7 +979,7 @@ Written by the validation (plan Tasks 16 and 11). The record with every number a
 | 16 | **not met to the letter**; unchanged by eye | far regions within 0.34%, shirt 2.47%, dog 3.80% outside a range that is nearly a point |
 | 17 | kept | |
 
-**Where a criterion's reference turned out wrong**: 7 (the quarter pixel's share), 9 (its pixel set), 12 (its off-side bound), 13 and 16 ("within the range the two runs span" when the two runs agree to three digits). Each is stated beside its letter; none was re-bounded.
+**Where a criterion's reference turned out wrong**: 7 (the quarter pixel's share), 9 (its pixel set), 12 (its off-side bound), 13 and 16 ("within the range the two runs span" when the two runs agree to three digits). Each is marked at its criterion above and in the tables here; none was re-bounded.
 
 **After the fix wave** (ledger rulings 45, 47 to 50; binary `AC3D3E10E4949CE8`, commit `37c99f6`; runs of logs 694 to 698, `RUN UNCHECKED`, shots 1942 wide; frame map section 19, "Validation (12), after the fix wave"). What changed in the build: the content rule keeps its ring bound and asks only for one covered texel (the cover's bounds are gone; the 374 surveyed bases keep their verdicts); the read-back list is seeded with the pictures only when the native renderer is on as well; a list given by hand that holds the fourteen bases counts as having the pictures; a feed run is marked in the first-upload line, the Impostors line and the pictures file; the picture's hash reads every byte. No shader text, pipeline state, binding or sampler changed. The verdicts that the table above left open or that the new pair repeats:
 
@@ -890,4 +1008,4 @@ Written by the validation (plan Tasks 16 and 11). The record with every number a
 | - | the default configuration (render and impostors alone), which the criteria do not name | `on`: 14 of 14; far woods over their ground 1.013 of the game's by a substituted measure (bound of the implementer's 0.92 to 1.08); `flat`: 14 of 14 |
 | - | `on` with `--readback_resolve=some` | not available, said, nothing drawn |
 
-**Open** (frame map "Limits (12)"; user checks 93 to 98): criterion 15 at width 1942; `fast` and a hand-given list never run; the moving picture; other regions, towns, times of day; criterion 15 on the present binary; the dissolve band; the 60 Hz floor under the cost figure; the half part (ledger ruling 48: it stays out; the figures are inside their bands with the coverage on as well).
+**Open at the closing** (frame map "Limits (12)", "Follow-ups (12)"; `docs/native-renderer/roadmap.md`, item 2 and its follow-ups; user checks 93 to 100): criterion 15 on the closing binary, at width 1942 (user check 99), and the 60 Hz floor under the cost figure; the pictures by a route without read-back; `fast` and a hand-given list never run; the moving picture; other regions, towns, times of day; the dissolve band; the half part (ledger ruling 48: it stays out; the figures are inside their bands with the coverage on as well).

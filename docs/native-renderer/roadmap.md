@@ -34,14 +34,42 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
    - The sun layer's tree-occluder redraw (`F1EB`), not built in sub-project 10.
    - Afterwards: judge spec criterion 19 of sub-project 10 again in the game, and with it the
      default of `--fable2_native_sun`.
-2. **Missing scene content: distant trees**
+2. **Missing scene content: distant trees** (sub-project 12, **done 2026-10-12**, behind
+   `--fable2_native_impostors=on`, default off; `frame-map.md` section 19, "Validation (12), closing",
+   "Limits (12)", "Follow-ups (12)")
+   - *Achieved*: the far woods stand in the native view, one camera-turned quad a tree by the game's own
+     vertex formula, cut out and coloured by the game's own picture of each tree model (read back from the
+     emulated GPU), dissolved, lit and fogged as the game does, written into the native depth. In the linear
+     scene before post, native over game, with the pictures, the coverage and the wind on: the far ranges from
+     1.33 / 1.15 / 1.12 / 1.11 to 0.989 / 0.992 / 0.986 / 0.986 of the game's; the tree pixels from 1.43 to
+     1.009; the far pixels where the game is nearer than the native depth from 48,584 to 6,406 (158 with one
+     pixel of tolerance); the sun layer's depth closed on 99.3% of the far-wood texels (88.4% without). (One
+     pair at the bridge, logs 695 and 696, shots 1942 wide, `RUN UNCHECKED`.) 0 errors under the graphics debug
+     layer (the software adapter, the pictures by a diagnostic feed); every program of before at its bytes
+     with the switch off.
+   - *Not achieved*: **the cost is not judged on the closing binary** (criterion 15: +2.327 ms a frame at the
+     bridge against a bound of 2.5, measured two binaries earlier on the usual monitor; with the window on the
+     other monitor the same switch costs about 61 ms a frame, 27 to 10 fps); the pictures are still the
+     emulated GPU's, by read-back, and **one region's** (fourteen addresses: elsewhere the far woods are
+     missing, counted `picture: base`); no half part (a pixel the game covers by half is drawn whole);
+     silhouettes differ from the game's by about a pixel (criterion 7 not met as written; so are 9's 0.005
+     and 16; the references of 7, 9, 12, 13 and 16 turned out wrong); the bridge after post, the dissolve
+     band and the beams across far woods are not decidable on this save (criteria 10, 11, 12's second part);
+     nobody has judged the moving picture; the switch stays off by default. `flat` (filled rectangles) and
+     the pictures' feed are diagnostics.
+   - *The cubes at depth 20.0024* are identified and leave this item: the lake's level in the sun layer's
+     depth; nothing to build while the lake's meshes are drawn with depth (ledger ruling 2).
+   - What follows is the item as it was written before the work:
    - Far wooded ranges are 1.15 to 1.55 of the game's (no distant trees drawn natively); beams
      pass where the game's far woods stand.
-   - The cubes at depth 20.0024, unidentified.
 3. **Water**
+   - **First, at its start: decide the route by which the native view gets pictures the game renders,
+     without read-back** (follow-up of sub-project 12, below): the reflection views have the same problem
+     as the far woods' pictures.
    - The lake is a placeholder; the far lake's cube is missing from the native depth; reflection
      views (`D72F` at pitch 280) and far water (`D1CC`) are not read.
-4. **Shadow correctness** (folded into 2 or 3 where it fits)
+4. **Shadow correctness** (folded into 2 or 3 where it fits; not folded into 2: sub-project 12 found
+   nothing of it that the impostors share)
    - Near shadowed ground possibly too dark (palisade dirt 0.67 to 0.70).
    - Shadowed ground beyond 100 units 11 to 19% over.
 5. **MSAA / supersampling**
@@ -126,6 +154,49 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
   (complete by reading, never exercised).
 - **The fern's look at rest**: the entry above.
 
+### Follow-ups of sub-project 12 (`frame-map.md` section 19, "Limits (12)", "Follow-ups (12)")
+
+- **Criterion 15 on the closing binary**: the timing session at width 1942, four runs, each alone (user
+  check 99). The last judged figure, +2.327 ms against a bound of 2.5, is two binaries old, and its off-runs
+  stood at the display's 60 Hz.
+- **The pictures by a route without read-back.** The forced read-back costs about 1.8 ms a frame plus
+  about 1 ms of decode, levels and upload on the usual monitor, and about 61 ms a frame on the other one
+  (cause in the emulator's presentation or read-back path, not found). Two routes: share the emulator's GPU
+  texture with the native view, or render the pictures natively (the research's option B; with item 6).
+  **To be decided at the start of the water sub-project (item 3)**, where the reflection views have the same
+  problem. The small step before either: decode and make the levels on the GPU.
+- **The half part for impostors** (ledger ruling 48): a pixel the game covers in one sample of two is drawn
+  whole (about one kept pixel in five of a far tree; a tree steps in at once between 52.02 and 54 units).
+  The rule and its tests exist; the draw needs the coverage tail's order and a software-adapter run.
+- **The silhouettes' displacement of about a pixel** (criterion 7): with item 5, the scene's sampling place.
+- **Other regions' picture addresses**: the fourteen bases were measured in the starting valley; where the
+  pool lies elsewhere, how many models, towns, times of day (user check 97).
+- **The content rule**: its ring bound (944 of 1,020 texels clear) comes from fourteen tree models at one
+  place; a model that touches its picture's edge is refused, and a whole texture of another kind at one of
+  the bases would be drawn.
+- **The picture-edge address mode**: the game clamps to a border colour, the native sampler to the edge
+  texel; needs a border sampler mode in the SDK's native RHI.
+- **The picture hash's lane step and its test**: certain pairs of bits in neighbouring blocks of one lane
+  cancel (at worst a kept picture that differs in low bits of two texels); a second rotation and product in
+  the step, with the pair (34, 63) as a test case, at the next build of `impostor_picture.h` (ledger ruling
+  57). The present test tries only the same bit in both words and does not hold what it names.
+- **Refusal paths and the reuse never exercised on a graphics card**: but for `picture: mode` in the one
+  run made for it (log 708), no refusal reason of the capture or of the pictures has fired there; the reuse of an unchanged picture ran on the software adapter with a
+  one-set feed alone; one F6 retry and one device loss with the switch on (complete by reading).
+- **`fast` and a hand-given list unrun** with `on` (`--readback_resolve=fast`; a
+  `readback_resolve_force_addresses` given by hand that holds the fourteen bases); a mode changed in a
+  running game.
+- **The 9,000-line test `main`**: `test_clay_logic`'s `main` is one function with a frame of 995,768 bytes
+  and runs on a 16 MB stack since the closing fix; its body moved into functions by section.
+- **The two unidentified families** `43ED` / `7F65` and `7D1C` / `983E`: undrawn.
+- **The lake placeholder**: item 3.
+- **The software adapter's empty forced read-back, and its flat red dog** (the entry of sub-project 11
+  above now has a named neighbour: on that adapter every tree picture reads as zeros, so `on` draws no far
+  tree there and the pictures' path runs under the debug layer only through the diagnostic feed).
+- Kept: the ground-fog block of the impostor's pixel shader (`b129`; a draw with it set is refused); a
+  timing run of `flat` and the third spot's pair; the register bounds the spec left narrow (the dissolve's
+  rate, the pixel distances); a discovery capture keeps the pictures of its first 32 frames only.
+
 ## Open with the user
 
 - Push of the local commits on `master`.
@@ -133,4 +204,7 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
   both on; kept off until the user says so).
 - Defaults of `--fable2_native_wind` and `--fable2_native_coverage` (recommended on once user checks 81
   to 88 are done: the cost at the bridge is judged; kept off until the user says so); `--fable2_native_sun` stays off.
-- User checks 40 to 92 in `user-checks.md`.
+- Default of `--fable2_native_impostors` (off; not recommended on before criterion 15 is judged on the
+  closing binary and user checks 93 to 98 are done; the value `on` adds thirteen entries to a start-up list
+  of the SDK and its cost depends on the monitor).
+- User checks 40 to 100 in `user-checks.md`.

@@ -2699,7 +2699,9 @@ static void WaterTests() {
     CHECK(842, SkyRayBasis(m, main_basis) && std::fabs(main_basis[0][2] + b1[0][2]) <= 1e-5f);   // the main view's centre ray, mirrored
   }
   CHECK(841, std::size(kView) == 3);
-  // 843: the verdict, one reason at a time and in the enum's order; the dead draw is left out iff the water is drawn
+  // 843: the verdict, one reason at a time and in the decision's order (kWaterDecisionOrder: the enum's, but `view`
+  // before `plane`: a record whose draw record, layout or rows fail has no height, and its own reason is said
+  // before the meshes' flatness is judged: ledger ruling 46, I1); the dead draw is left out iff the water is drawn
   {
     ClayWaterInputs good;
     good.on = good.light = true;
@@ -2715,8 +2717,8 @@ static void WaterTests() {
         {[](ClayWaterInputs& i) { i.light = false; }, ClayWater::kLight, true},
         {[](ClayWaterInputs& i) { i.opaque_dead = false; }, ClayWater::kOpaqueLive, true},
         {[](ClayWaterInputs& i) { i.opaque = 11; }, ClayWater::kPair, true},
-        {[](ClayWaterInputs& i) { i.planes = false; }, ClayWater::kPlane, false},
         {[](ClayWaterInputs& i) { i.view = false; }, ClayWater::kView, false},
+        {[](ClayWaterInputs& i) { i.planes = false; }, ClayWater::kPlane, false},
         {[](ClayWaterInputs& i) { i.targets = false; }, ClayWater::kReflection, false},
         {[](ClayWaterInputs& i) { i.textures = false; }, ClayWater::kTexture, false},
         {[](ClayWaterInputs& i) { i.order = false; }, ClayWater::kOrder, false},
@@ -2724,6 +2726,39 @@ static void WaterTests() {
         {[](ClayWaterInputs& i) { i.slots = false; }, ClayWater::kSlot, false},
         {[](ClayWaterInputs& i) { i.scale = false; }, ClayWater::kScale, true},
     };
+    // (the table IS the decision's order: every reason once, in kWaterDecisionOrder's place)
+    CHECK(843, std::size(kChain) == std::size(kWaterDecisionOrder));
+    for (size_t a = 0; a < std::size(kChain); ++a) CHECK(843, kChain[a].want == kWaterDecisionOrder[a]);
+    {
+      bool seen[size_t(ClayWater::kCount)] = {};
+      for (ClayWater w : kWaterDecisionOrder) {
+        CHECK(843, w != ClayWater::kDrawn && size_t(w) < size_t(ClayWater::kCount) && !seen[size_t(w)]);
+        seen[size_t(w)] = true;
+      }
+    }
+    // The pass's own case (clay_pass.cpp: a record without a draw record of its place, with another layout or
+    // with rows that are not the frame's is never asked for its positions, so PlanWaterTargets sees no height and
+    // answers kPlane): both inputs fall together, and the reason is the record's own.
+    {
+      ClayWaterInputs in = good;
+      in.view = false;
+      in.planes = false;
+      in.targets = false;
+      CHECK(843, DecideClayWater(in) == ClayWater::kView);
+      in.view = true;
+      CHECK(843, DecideClayWater(in) == ClayWater::kPlane);
+    }
+    // More surface records than the step holds (review Minor 2; the capture's cap makes it unreachable): the
+    // scene's own verdict is `slot`, never `drawn` with nothing prepared.
+    {
+      CHECK(843, WaterRecordsFit(0) && WaterRecordsFit(capture::kMaxWaterRecords) && !WaterRecordsFit(capture::kMaxWaterRecords + 1));
+      ClayWaterInputs in = good;
+      in.surface = in.opaque = capture::kMaxWaterRecords + 1;
+      in.fits = WaterRecordsFit(in.surface);
+      CHECK(843, DecideClayWater(in) == ClayWater::kSlot && WaterSceneVerdict(in) == ClayWater::kSlot);
+      in.objects = false;                      // (an earlier reason still decides)
+      CHECK(843, DecideClayWater(in) == ClayWater::kPipeline);
+    }
     for (size_t a = 0; a < std::size(kChain); ++a) {
       ClayWaterInputs in = good;
       kChain[a].breaks(in);

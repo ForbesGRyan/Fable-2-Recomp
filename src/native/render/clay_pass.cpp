@@ -1018,7 +1018,7 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
   // The lit plants' small slots follow the terrain's, and the lit objects' and trunks' slots
   // (kClayObjectSlotBytes each) follow the small slots that are in use: the frame's block's,
   // the terrain's, the plants', the mask's and the sky's (PlanClayFrameSlots: its object0 is at most
-  // ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size(), impostor_step_slots_), the count the buffer was
+  // ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size(), impostor_step_slots_, water_step_slots_), the count the buffer was
   // sized with, because no more terrain records are drawn with their material than there are).
   const ClayFrameSlotPlan plan = PlanClayFrameSlots(slot - kClayFrameTerrainSlot0, uint32_t(plant_constants_.size()), impostor_step_slots_, water_step_slots_);
   water_slots_ = plan;  // the water step's (Render writes a drawn record's constants, the targets' and the second frame block)
@@ -3799,7 +3799,9 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     std::sort(water_surface_seqs_.begin(), water_surface_seqs_.end());
     std::sort(water_dead_seqs_.begin(), water_dead_seqs_.end());
     water_in.light = frame_.light_on != 0;
-    water_scene = WaterSceneVerdict(water_in) == ClayWater::kDrawn && water_surfaces_.size() == water_in.surface;
+    // (a scene with more surface records than the step holds is `slot`, by the rule: nothing of it is prepared)
+    water_in.fits = WaterRecordsFit(water_in.surface);
+    water_scene = WaterSceneVerdict(water_in) == ClayWater::kDrawn;
     if (water_scene) water_step_slots_ = kClayWaterStepSlots;
     water_clock(begin);
   }
@@ -4264,6 +4266,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       const capture::WaterRecord& rec = *s.record;
       records[i] = &rec;
       s.draw = WaterDrawIndex(scene.draws.data(), scene.draws.size(), rec.place);
+      // (`view` is the reason of a record that fails here; it then has no height, PlanWaterTargets says kPlane, and
+      // the rule judges `view` first: kWaterDecisionOrder)
       if (s.draw == ~size_t(0)) {  // (no draw record of that place among the drawable ones)
         water_in.view = false;
         continue;

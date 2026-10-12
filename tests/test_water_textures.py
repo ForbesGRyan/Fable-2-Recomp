@@ -241,6 +241,31 @@ class Fetch(unittest.TestCase):
         p = wt.describe(PICTURE_FC)
         self.assertEqual((p["format"], p["width"], p["height"], p["endian"], p["swizzle"], p["base"]), (6, 256, 256, 2, (2, 1, 0, 3), 0x13401000))
 
+    def test_a_normal_map_with_a_lod_bias_is_refused_by_its_own_name(self):
+        """The review of Tasks 11 and 12, Minor 3 (ledger ruling 46): the native surface hands the GPU the coordinates'
+        derivatives as they are; a constant with a LOD bias (dword 4 bits 12 to 21) would be drawn a level off, so it is
+        not the water's. The mask is sampled at level 0: its bias is not judged. The same cases as
+        tests/native/test_texture_decode.cpp, 260."""
+        def with_bits(fc, dword, bits):
+            words = [int(v, 16) if isinstance(v, str) else int(v) for v in fc]
+            words[dword] |= bits
+            return words
+        self.assertEqual(wt.describe(NORMAL_FC)["lod_bias"], 0.0)          # the captured constant has none
+        for bias in (1, 32, 0x1FF, 0x200, 0x3FF):                           # 1/32, +1, the largest, -16, -1/32
+            with self.assertRaises(ValueError) as e:
+                wt.fetch(with_bits(NORMAL_FC, 4, bias << 12), "dxn")
+            self.assertIn("lod-bias", str(e.exception))
+            wt.fetch(with_bits(MASK_FC, 4, bias << 12), "k8")
+        wt.fetch(with_bits(NORMAL_FC, 4, 0xFFF), "dxn")                     # the bits below the field
+        wt.fetch(with_bits(NORMAL_FC, 4, 0xFFC00000), "dxn")                # and above it
+        with self.assertRaises(ValueError) as e:                           # a sign is said first
+            wt.fetch(with_bits(with_bits(NORMAL_FC, 0, 1 << 2), 4, 32 << 12), "dxn")
+        self.assertIn("sign", str(e.exception))
+        text = (ROOT / "src" / "native" / "render" / "texture_decode.h").read_text(encoding="utf-8")
+        self.assertIn("constexpr uint32_t WaterFetchLodBias(const uint32_t fc[6]) { return (fc[4] >> 12) & 0x3FFu; }", text)
+        self.assertIn("  if (kind == WaterDecode::kDxn && WaterFetchLodBias(fc) != 0) return FetchError::kLodBias;\n", text)
+        self.assertIn('{"none", "not-texture", "not-2d", "format", "size", "sign", "lod-bias"};', text)
+
     def test_the_limits_are_the_cpp_headers(self):
         text = (ROOT / "src" / "native" / "render" / "texture_decode.h").read_text(encoding="utf-8")
         self.assertIn("inline constexpr uint32_t kXenosK8 = 2, kXenosDxn = 49;", text)

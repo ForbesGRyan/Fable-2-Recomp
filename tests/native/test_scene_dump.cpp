@@ -440,6 +440,67 @@ int main() {
       if (PackSceneDump(w, hgt, 9, 8, kSceneDumpPreWater, 2.5f, only, &one) || !one.empty()) return 113;
     }
   }
+  // 114: THE LAYOUT'S PIN (ledger ruling 46): tests/water_made.py writes the made stored scenes that
+  // tools/xdk_sigmatch/water_replay.py `main` is tested on; its writer and this one must write one layout. Both pack
+  // the same made planes (water_made.pinned_dump: a 4 x 2 scene with every flag, the layer's planes and two targets)
+  // and hold the FNV-1a hash of the file; tests/test_water_replay.py holds that this text has its number.
+  {
+    const uint32_t w = 4, hgt = 2, pitch = 40, tpitch = 1280;                  // (pitches longer than a row: only the picture's bytes count)
+    auto words = [&](uint32_t first) {
+      std::vector<uint8_t> rows(size_t(pitch) * hgt, 0xEE);
+      for (uint32_t k = 0; k < w * hgt; ++k) {
+        const uint32_t i = first + k;
+        const uint32_t word = ((i * 37u + 5u) % 0x7C0u) | (((i * 101u + 64u) % 0x7C0u) << 11) | (((i * 53u + 33u) % 0x3E0u) << 22);
+        std::memcpy(rows.data() + size_t(k / w) * pitch + 4 * (k % w), &word, 4);
+      }
+      return rows;
+    };
+    auto levels = [&](uint32_t width, uint32_t height, uint32_t row_pitch, auto level) {
+      std::vector<uint8_t> rows(size_t(row_pitch) * height, 0xEE);
+      for (uint32_t k = 0; k < width * height; ++k) PutLevel(rows.data() + size_t(k / width) * row_pitch + 4 * (k % width), level(k) & 0xFFFFFFu);
+      return rows;
+    };
+    const std::vector<uint8_t> linear = words(0), after = words(8);
+    const std::vector<uint8_t> depth = levels(w, hgt, pitch, [](uint32_t i) { return i * 1234567u + 89u; });
+    const std::vector<uint8_t> pre = levels(w, hgt, pitch, [](uint32_t i) { return i * 7654321u + 3u; });
+    const std::vector<uint8_t> l0 = levels(w / 2, hgt / 2, 24, [](uint32_t j) { return j * 4099u + 1u; });
+    const std::vector<uint8_t> l1 = levels(w / 2, hgt / 2, 24, [](uint32_t j) { return j * 4099u + 17u + 1u; });
+    std::vector<uint8_t> t0(size_t(tpitch) * 256, 0xEE), t1(size_t(tpitch) * 256, 0xEE);
+    for (uint32_t j = 0; j < 262144u; ++j) {
+      t0[size_t(j / 1024) * tpitch + j % 1024] = uint8_t((j * 31u + (j >> 8)) & 0xFFu);
+      t1[size_t(j / 1024) * tpitch + j % 1024] = uint8_t((j * 31u + 7u + (j >> 8)) & 0xFFu);
+    }
+    SceneDumpPlanes planes;
+    planes.linear = linear.data();
+    planes.depth = depth.data();
+    planes.linear_pitch = planes.depth_pitch = pitch;
+    planes.layer[0] = l0.data();
+    planes.layer[1] = l1.data();
+    planes.layer_pitch = 24;
+    planes.pre_water = pre.data();
+    planes.pre_water_pitch = pitch;
+    planes.water = after.data();
+    planes.water_pitch = pitch;
+    planes.target_count = 2;
+    planes.target[0] = t0.data();
+    planes.target[1] = t1.data();
+    planes.target_pitch = tpitch;
+    planes.target_base[0] = 0x13401000u;
+    planes.target_base[1] = 0x13501000u;
+    planes.target_height[0] = 20.1024f;
+    planes.target_height[1] = 40.0f;
+    const uint32_t every = kSceneDumpPost | kSceneDumpLayer | kSceneDumpPrepass | kSceneDumpPreWater | kSceneDumpTargets | kSceneDumpWater;
+    std::vector<uint8_t> file;
+    if (every != 63u || !PackSceneDump(w, hgt, 77, 76, every, 7.5f, planes, &file)) return 114;
+    if (file.size() != 48 + 8 * 16 + 2 * 2 * 4 + 8 * 4 + 8 * 12 + 4 + 2 * (8 + 262144)) return 114;
+    if (Word(file, 40) != 0) return 114;                                       // (no value of the made planes is counted bad)
+    uint64_t hash = 0xCBF29CE484222325ull;
+    for (uint8_t b : file) hash = (hash ^ b) * 0x100000001B3ull;
+    if (hash != 0xBFBEAEE52E6818BFull) {
+      std::cout << "the layout's pin: this writer's file hashes to 0x" << std::hex << hash << std::dec << "\n";
+      return 114;
+    }
+  }
   std::cout << "PASS: scene dump\n";
   return 0;
 }

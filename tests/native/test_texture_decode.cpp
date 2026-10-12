@@ -990,6 +990,27 @@ int main() {
         q[0] = (q[0] & ~(0x1FFu << 22)) | (128u << 22);
         if (WaterTextureFetch(q, WaterDecode::kDxn, &t) != FetchError::kNone || t.width != 4096) return 256;
       }
+      // The review of Tasks 11 and 12, Minor 3 (ledger ruling 46): the normal map's two fetches take the level the
+      // GPU computes from the coordinates' derivatives, where the emulator multiplies those by 2 ^ (the constant's
+      // LOD bias / 32) first (dword 4 bits 12 to 21, signed). The surface's program applies no bias, so a map
+      // whose constant has one would be drawn a level off: refused with its own name. The mask is sampled at
+      // level 0 and its bias is not judged. The captured constant's field is 0.
+      {
+        if (((map[4] >> 12) & 0x3FFu) != 0) return 260;
+        for (uint32_t bias : {1u, 32u, 0x1FFu, 0x200u, 0x3FFu}) {                         // 1/32, +1, the largest, -16, -1/32
+          if (WaterTextureFetch(with(map, 4, bias << 12), WaterDecode::kDxn, &keep) != FetchError::kLodBias || keep.width != 77) return 260;
+          if (WaterTextureFetch(with(mask, 4, bias << 12), WaterDecode::kK8, &t) != FetchError::kNone) return 260;
+        }
+        // (the bits beside the field are not it: the levels below, the two above)
+        if (WaterTextureFetch(with(map, 4, 0xFFFu), WaterDecode::kDxn, &t) != FetchError::kNone) return 260;
+        if (WaterTextureFetch(with(map, 4, 0xFFC00000u), WaterDecode::kDxn, &t) != FetchError::kNone) return 260;
+        // (a sign is said before a bias: an old case keeps its name)
+        std::memcpy(q, map, sizeof(q));
+        q[0] |= 1u << 2;
+        q[4] |= 32u << 12;
+        if (WaterTextureFetch(q, WaterDecode::kDxn, &keep) != FetchError::kSign) return 260;
+        if (std::string(FetchErrorName(FetchError::kLodBias)) != "lod-bias") return 260;
+      }
       // (the size and the format are judged first, as before: a refusal's name does not change for an old case)
       if (WaterTextureFetch(with(mask, 1, 49u), WaterDecode::kK8, &keep) != FetchError::kFormat) return 253;
       if (std::string(FetchErrorName(FetchError::kSign)) != "sign") return 253;

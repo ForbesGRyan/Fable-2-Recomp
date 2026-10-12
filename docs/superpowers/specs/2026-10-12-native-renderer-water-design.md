@@ -355,7 +355,8 @@ but for the discovery runs themselves; parts 4 to 8 and 10 are phase 13b; part 9
      `WaterOpaqueDead(c141)` is false: `min(c141.x, c141.x - c141.y) >= 1e-6` and both magnitudes at
      most 4, in single precision); `pair` (the frame's `opaque` and `surface` records are not the same
      number); `plane` (a mesh that is not flat: Design 7); `view` (the records' rows are not the
-     frame's one view-projection); `reflection` (no usable target: Design 7); `texture` (a mask or
+     frame's one view-projection; JUDGED BEFORE `plane`, ledger ruling 46: a record that fails it
+     has no height); `reflection` (no usable target: Design 7); `texture` (a mask or
      the normal map is not ready or was refused: Design 6); `order` (Design 8); `pipeline`; `slot`; `scale` (a record's
      `c20.w` is not the frame's output scale within a thousandth, as the impostors' rule has it).
    - **Only with the verdict `drawn`** are the frame's `F6D9` records left out of the colour pass and

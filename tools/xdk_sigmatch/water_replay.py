@@ -64,7 +64,11 @@ order of the textures, the picture's orientation and channel order, the moment t
         targets (flag 16; plan Task 11): each target against the capture's picture of the same base: criterion 5's two
         measures (the colour on the game's sky texels within 0.95 to 1.05 a channel; the first row with content
         within one of the derived horizon's); and that the targets of one frame are equal texel for texel (in this
-        phase each holds the mirrored sky alone, which does not depend on the water's level).
+        phase each holds the mirrored sky alone, which does not depend on the water's level). A REAL-GPU CHECK: the
+        colour is held to the game's own pictures, which the software adapter's read-back leaves empty. Where a
+        picture of the game is empty or not read the command says so, compares what needs none (the height, the
+        first row against the derived horizon, the targets' equality) and ends "NOT DECIDED on this pair" with exit
+        1; it does not read "not met" for that.
   cover <capture> <scene.f2ns> [--frame 1]     criterion 7: the native water pixels (those whose last depth is nearer
         than the stored plane of the depth before the water step, flag 8) against the replay's kept pixels on the
         game's depth copy: each side's share farther than one pixel from the other (bound 2% each); and the bed: on
@@ -76,17 +80,28 @@ order of the textures, the picture's orientation and channel order, the moment t
         decidable"; the same of the off-run's pair on the same pixels (the distance before); and, reported and not
         bound, the far-shore pixels (the judged pixels that are not sky-sampling), the whole footprint and its
         luminance percentiles.
-  main <capture> <scene.f2ns> [--frame 1] [--levels mean|stored]   THE SURFACE PROGRAM'S MAIN BY VALUE (ledger ruling 44,
-        after the review of Tasks 4 to 15, I2: nothing else holds the main's fetches, lookup, fog and scale). The
-        replay fed THE SAME PICTURES THE PASS USED, the stored scene's own reflection targets in the game's pictures'
-        place (`replay(pictures=)`), against the stored scene's water plane (flag 32: the linear target right after
-        the water step), per pixel, on the judged pixels (kept, alpha 0.99 or more) MORE THAN 3 PIXELS FROM THE JUDGED
+  main <capture> <scene.f2ns> [--frame 1] [--levels mean|stored] [--place X Y]   THE SURFACE PROGRAM'S MAIN BY VALUE
+        (ledger ruling 44, after the review of Tasks 4 to 15, I2: nothing else holds the main's fetches, lookup, fog
+        and scale; as amended by ruling 46, after the review of Tasks 11 and 12, I2 and I3). The replay fed THE PASS'S
+        OWN INPUTS against the stored scene's water plane (flag 32: the linear target right after the water step):
+        the stored scene's reflection targets in the game's pictures' place (`replay(pictures=)`), zero in slot 14's,
+        the stored exposure as the output scale, and THE DEPTH TEST AND THE JUDGED SET FROM THE STORED SCENE'S OWN
+        DEPTH BEFORE THE WATER STEP (flag 8), sampled at the native pixel centre. NOTHING OF THE GAME'S READ-BACK IS
+        READ (no depth copy, no scene, no picture of the game): the command runs on the software adapter's pair as
+        on a real GPU's. Per pixel, on the judged pixels (kept, alpha 0.99 or more) MORE THAN 3 PIXELS FROM THE JUDGED
         SET'S EDGE. The bound, stated before any run: the ratio of the means, native over replay, within 0.99 to 1.01
         a channel; the median of the per-pixel luminance ratio within 0.99 to 1.01; and its 5th to 95th percentile
-        span no wider than the replay-against-game's own, 0.95 to 1.08. In phase 13b the targets hold the mirrored
-        sky alone; in phase 13c sky, terrain and blur: the command is the same. What it cannot see: the bed under the
-        surface (at most 1% of a judged pixel, and 0.3% in open water: the replay blends over black), and the
-        normal map's stored levels where the capture has none (`--levels mean` stands in for the GPU's own filter
+        span no wider than the replay-against-game's own, 0.95 to 1.08. THE NUMBER FORMAT: the plane is R11G11B10
+        float (6 bits of mantissa in red and green: steps of 1.6%; 5 in blue: 3.1%), and an exact replay against a
+        target that truncates reads about 0.985 in blue with a right program. So the replay, held to the program's
+        own clamp (31.875), is brought to the format with BOTH roundings (to nearest, toward zero); the three bounds
+        are printed for each and for the replay as it is, AND THE BOUND IS APPLIED TO THE ROUNDING THAT LIES NEARER
+        THE STORED PLANE (the smaller mean absolute difference on the judged interior), which the verdict line
+        names. Which rounding either adapter applies is not established: the line is how it is learnt. In phase 13b
+        the targets hold the mirrored sky alone; in phase 13c sky, terrain and blur: the command is the same. What it
+        cannot see: the bed under the surface (at most 1% of a judged pixel, and 0.3% in open water: the replay
+        blends over black), the blend's own second rounding (the pass blends over a bed already in the format), and
+        the normal map's stored levels where the capture has none (`--levels mean` stands in for the GPU's own filter
         over the stored ones; a capture of this binary has them: `--levels stored`).
 Each prints its inputs' names and exits 1 when a bound it states is missed or its inputs are not there.
 
@@ -143,6 +158,67 @@ NEAR_UNITS = 20.0               # criterion 11
 DECIDING_BASE = 0x13501000      # one resolve a frame (spec criterion 4); 0x13401000 is open question 4's
 LUMA = (0.2125, 0.7154, 0.0721)
 VARIANTS = (("as the constant reads it", False, False), ("flip", True, False), ("swap-rb", False, True), ("flip and swap-rb", True, True))
+# `main` (ledger ruling 46): the pass's own inputs and the stored plane's number format.
+TARGET_MANTISSA = (6, 6, 5)     # the linear target is R11G11B10 float (clay_pass.cpp kLinearFormat; scene_dump.h DecodeR11G11B10)
+ROUNDINGS = ("nearest", "toward zero")      # the two ways an adapter may bring a float to that format; which one is not established
+PASS_MAX = 31.875               # the surface program's own clamp of what it writes (fable2_native_shaders.h, kClayWaterPs)
+PASS_PLACE = (0.5, 0.5)         # where the native rasteriser samples a pixel: D3D's pixel centre
+DEPTH_LEVELS = 16777215.0       # scene_dump.h: a stored depth is one of 16777216 levels, 0 the near plane
+
+
+def unsigned_float(bits, mantissa_bits):
+    """render::DecodeUnsignedFloat: the value of an unsigned float of a 5-bit exponent over `mantissa_bits` of mantissa
+    (exponent 0 a denormal, 2^-14 * m / 2^bits; 31 an infinity or no number; else 2^(e - 15) * (1 + m / 2^bits))."""
+    mantissa, exponent = bits & ((1 << mantissa_bits) - 1), (bits >> mantissa_bits) & 31
+    fraction = mantissa / float(1 << mantissa_bits)
+    if exponent == 0:
+        return math.ldexp(fraction, -14)
+    if exponent == 31:
+        return math.nan if mantissa else math.inf
+    return math.ldexp(1.0 + fraction, exponent - 15)
+
+
+def r11g11b10(word):
+    """render::DecodeR11G11B10: (red, green, blue) of a texel's word of the linear target."""
+    return (unsigned_float(word & 0x7FF, 6), unsigned_float((word >> 11) & 0x7FF, 6), unsigned_float(word >> 22, 5))
+
+
+def quantise_channel(values, mantissa_bits, rounding):
+    """`values` (an array) as an unsigned float of `mantissa_bits` holds them: each brought to a value the format has,
+    the nearest (a half to the even mantissa) or the next toward zero. Between 2^e and 2^(e + 1) the format's step is
+    2^(e - mantissa_bits), and below 2^-14 it is the denormals' 2^(-14 - mantissa_bits). A value that is not above 0
+    or is no number gives 0 (the format has no sign); one above the largest finite value gives that value (the
+    surface's program writes nothing above PASS_MAX, so the format's infinity is never asked for)."""
+    if rounding not in ROUNDINGS:
+        raise ValueError("the rounding is one of %s, not %r" % (ROUNDINGS, rounding))
+    v = np.asarray(values, dtype=np.float64)
+    top = 2.0 ** 15 * (2.0 - 2.0 ** -mantissa_bits)
+    out = np.zeros(v.shape)
+    pos = v > 0.0                                                # (false for a value that is no number)
+    x = np.minimum(v[pos], top)
+    exponent = np.maximum(np.frexp(x)[1] - 1, -14)               # x = f * 2^E with f in [0.5, 1): the binade is E - 1
+    step = np.ldexp(1.0, exponent - mantissa_bits)
+    steps = x / step                                             # exact: a division by a power of two
+    out[pos] = np.minimum((np.rint(steps) if rounding == "nearest" else np.floor(steps)) * step, top)
+    return out
+
+
+def quantise(rgb, rounding):
+    """A colour array [..., 3] as the linear target holds it (TARGET_MANTISSA a channel): quantise_channel of each."""
+    a = np.asarray(rgb, dtype=np.float64)
+    return np.stack([quantise_channel(a[..., k], TARGET_MANTISSA[k], rounding) for k in range(3)], axis=-1)
+
+
+def no_near(u, v):
+    """Slot 14 as the native surface has it: zero (spec ruling 21; kClayWaterPs gives WaterMix float3(0, 0, 0))."""
+    return (0.0, 0.0, 0.0)
+
+
+def pass_depth(levels):
+    """A stored native depth plane (levels: 0 the near plane, 16777215 the far plane and the cleared depth, z / w
+    under the frame's view-projection) as the depth `replay` tests against: the game's reversed form, 1 - z / w, so
+    that the rows' own "greater" is the pass's "less" on the plane as stored."""
+    return 1.0 - np.asarray(levels, dtype=np.float64) / DEPTH_LEVELS
 
 
 def reference_of(word):
@@ -242,11 +318,16 @@ def _plane_xy(M, h, px, py, size):
 
 
 def replay(path, frame, flip=False, swap_rb=False, glint=True, levels="mean", decode="exact", place=(0.0, 0.0), depth=None,
-           zscale=-1.0, zoffset=1.0, dumps=wc.DUMPS, pictures=None):
+           zscale=-1.0, zoffset=1.0, dumps=wc.DUMPS, pictures=None, near=None, out_scale=None):
     """The frame's A17D rows as the game's formula draws them (module text, `scene`): Replay. `depth`: the game's
     depth copy [h, w] as stored (None: no depth test); `place`: the sampling place, offsets from the integral
     position. `pictures`: {slot-13 base: a picture [h, w, 3] of floats in the shader's red, green, blue} that takes
-    the dump's place for the rows of that base, under the same addressing (plan Task 15: the replayed views)."""
+    the dump's place for the rows of that base, under the same addressing (plan Task 15: the replayed views).
+    THE PASS'S OWN INPUTS (`main`, ledger ruling 46): `near`: f(u, v) -> rgb in slot 14's place (no_near: the native
+    surface's zero); with it and `pictures` the capture's own dumps of slots 13 and 14 are NOT READ (the software
+    adapter's read-back leaves them empty, and a capture may hold none), and a row whose base has no picture is
+    not replayed, said. `out_scale`: the frame's output scale in the place of each row's c20.w (the pass writes
+    its own: the game's in a post frame, the fixed exposure otherwise), so the colour is in the stored plane's unit."""
     import foliage_replay as fp
     capture = wc.read_capture(path)
     textures = wc.RowTextures(capture)
@@ -264,10 +345,11 @@ def replay(path, frame, flip=False, swap_rb=False, glint=True, levels="mean", de
     fates = {"killed": 0, "skipped": 0, "shaded": 0}
     problems, notes, hidden, done = [], [], 0, 0
     level_sum = level_count = 0.0
+    own = pictures is not None and near is not None             # the pass's own pictures: the capture's are not read
     for row in rows:
         where = "line %s" % row.get("line")
         try:
-            setup = wc.RowSetup(capture, textures, row, text)
+            setup = wc.RowSetup(capture, textures, row, text, pictures=not own)
             maps, nf, note = normal_levels(textures, wc._fc(row, 2), levels, decode)
             plane = wc.row_height(textures.dir, row)
         except (cr.Unreadable, ValueError) as e:
@@ -288,8 +370,15 @@ def replay(path, frame, flip=False, swap_rb=False, glint=True, levels="mean", de
         if control & 8 and control & 7 != 4:
             problems.append("%s: NOT REPLAYED: alpha function %d, not 4 (greater)" % (where, control & 7))
             continue
-        done += 1
         slot13 = wc._fc(row, 13)[1] & 0xFFFFF000
+        if own and slot13 not in pictures:
+            problems.append("%s: NOT REPLAYED: no target of the row's slot-13 base %08X among the pictures given" % (where, slot13))
+            continue
+        done += 1
+        consts = setup.consts
+        if out_scale is not None:
+            consts = dict(consts)
+            consts[20] = list(consts[20][:3]) + [float(out_scale)]
         bools = set(setup.bools) if glint else set(setup.bools) - {136}
         M = np.array([setup.vbank[reg] for reg in (0, 1, 2, 3)], dtype=np.float64)
         clip = []
@@ -331,10 +420,10 @@ def replay(path, frame, flip=False, swap_rb=False, glint=True, levels="mean", de
                 la = level(gx * c117[0], gy * c117[1], hx * c117[0], hy * c117[1], nf)
                 lb = level(gx * c118[0], gy * c118[1], hx * c118[0], hy * c118[1], nf)
                 at = iter((la, lb))
-                tex = {"normal": lambda u, v: sample_levels(maps, u, v, next(at), nf["clamp"]), 13: picture, 14: setup.near,
+                tex = {"normal": lambda u, v: sample_levels(maps, u, v, next(at), nf["clamp"]), 13: picture, 14: near or setup.near,
                        8: wc._no_shadow, "tf4": setup.tf4, "tf5": setup.tf5}
                 try:
-                    out = lf.water_pixel((x, y), P, coord[:2], coord[2:], m, setup.consts, tex, bools=bools, lit=setup.lit)
+                    out = lf.water_pixel((x, y), P, coord[:2], coord[2:], m, consts, tex, bools=bools, lit=setup.lit)
                 except cr.Unreadable as e:
                     problems.append("%s: NOT REPLAYED: %s" % (where, e))
                     break
@@ -1466,14 +1555,17 @@ def cover_measure(native, kept, reach=1):
 def main_measure(native, replayed, judged, edge=MAIN_EDGE):
     """`main`'s measure: native and replayed [h, w, 3] in one unit, judged [h, w]. On the judged pixels more than
     `edge` pixels from the judged set's edge: {"pixels", "ratio" (native over replay, the means' a channel), "median",
-    "p5", "p95" (of the per-pixel luminance ratio), "missed" (the bounds missed, by name), "verdict"}. Pixels whose
-    replayed luminance is not above 0 are left out of the percentiles and counted ("dark")."""
+    "p5", "p95" (of the per-pixel luminance ratio), "missed" (the bounds missed, by name), "verdict", "distance" (the
+    mean over those pixels and the three channels of |native - replayed|: how near the two lie, for main_rounded)}.
+    Pixels whose replayed luminance is not above 0 are left out of the percentiles and counted ("dark")."""
     inner = _shrink(np.asarray(judged, dtype=bool), edge)
     n = int(inner.sum())
-    out = {"pixels": n, "ratio": (math.nan,) * 3, "median": math.nan, "p5": math.nan, "p95": math.nan, "dark": 0, "missed": [], "verdict": "not decidable"}
+    out = {"pixels": n, "ratio": (math.nan,) * 3, "median": math.nan, "p5": math.nan, "p95": math.nan, "dark": 0, "missed": [], "verdict": "not decidable",
+           "distance": math.nan}
     if not n:
         return out
     a, b = np.asarray(native, dtype=np.float64)[inner], np.asarray(replayed, dtype=np.float64)[inner]
+    out["distance"] = float(np.abs(a - b).mean())
     means = b.mean(0)
     out["ratio"] = tuple(float(x / y) if y > 0 else math.nan for x, y in zip(a.mean(0), means))
     la, lb = luminance(a), luminance(b)
@@ -1489,6 +1581,28 @@ def main_measure(native, replayed, judged, edge=MAIN_EDGE):
     if not (out["p5"] == out["p5"] and out["p5"] >= MAIN_SPAN[0] and out["p95"] <= MAIN_SPAN[1]):
         out["missed"].append("the 5th to 95th percentile span")
     out["verdict"] = "met" if not out["missed"] else "not met as written"
+    return out
+
+
+def main_rounded(native, replayed, judged, edge=MAIN_EDGE):
+    """`main`'s measure against a plane of the linear target's number format (ledger ruling 46; the review of Tasks 11
+    and 12, I3). The stored plane holds 6 bits of mantissa in red and green and 5 in blue; an exact replay against a
+    target that truncates reads about 0.992 in red and green and 0.985 in blue, outside ruling 44's 0.99 to 1.01 with
+    a right program. Which rounding an adapter applies when it writes the format is not established, so BOTH are
+    computed: {"nearest": main_measure against quantise(replayed, "nearest"), "toward zero": likewise, "exact": against
+    the replay as it is (reported, not bound), "nearer": the rounding whose replay lies nearer the plane (the smaller
+    "distance"; "nearest" on a tie; None without a judged interior), "tie": the two distances are equal, "verdict":
+    the nearer rounding's (ruling 44's bound is applied to that one and to no other)}. `native` and `replayed` in the
+    plane's own unit (replay(out_scale=)), `replayed` already held to the program's clamp."""
+    out = {name: main_measure(native, quantise(replayed, name), judged, edge) for name in ROUNDINGS}
+    out["exact"] = main_measure(native, replayed, judged, edge)
+    a, b = (out[name]["distance"] for name in ROUNDINGS)
+    if a != a or b != b:
+        out.update(nearer=None, tie=False, verdict="not decidable")
+        return out
+    out["nearer"] = ROUNDINGS[0] if a <= b else ROUNDINGS[1]
+    out["tie"] = a == b
+    out["verdict"] = out[out["nearer"]]["verdict"]
     return out
 
 
@@ -1526,9 +1640,10 @@ def targets_equal(water):
     return bool(pictures) and all(np.array_equal(pictures[0], p) for p in pictures[1:])
 
 
-def _stored(args, say, need=()):
+def _stored(args, say, need=(), game=True):
     """(head, native scene, native levels, the water's part, the factor that brings the native colour to the game's
-    scale) of the stored scene, or None with the reason said. `need`: the water's planes the command cannot do without."""
+    scale) of the stored scene, or None with the reason said. `need`: the water's planes the command cannot do without.
+    `game=False`: the factor is None and nothing of the game's read-back is asked for (`main`, `targets`)."""
     import foliage_trace as ft
     path = cr.find_capture(str(args.capture))
     head, nscene, nlev, _ = ft.read_dump(args.dump)
@@ -1545,12 +1660,14 @@ def _stored(args, say, need=()):
         if (not water["targets"]) if name == "targets" else water[name] is None:
             say("NOT COMPARED: the stored scene has no %s (its frame's water was not drawn, or the binary is of before the water)" % name)
             return None
+    if not game:
+        return head, nscene, nlev, water, None
     scale = (ft.game_scene(path, args.frame)[1] / head["exposure"]) if head["exposure"] else 1.0
     return head, nscene, nlev, water, scale
 
 
 def cmd_targets(args, say=print):
-    got = _stored(args, say, need=("targets",))
+    got = _stored(args, say, need=("targets",), game=False)
     if got is None:
         return 1
     head, _, _, water, _ = got
@@ -1561,7 +1678,7 @@ def cmd_targets(args, say=print):
     by_base = {}
     for row in rows:
         by_base.setdefault(wc._fc(row, 13)[1] & 0xFFFFF000, row)
-    bad = 0
+    bad = empty = 0
     for base, height, rgba in water["targets"]:
         native = np.asarray(rgba, dtype=np.float64)[..., :3] / 255.0
         row = by_base.get(int(base))
@@ -1570,23 +1687,44 @@ def cmd_targets(args, say=print):
             bad += 1
             continue
         fc = wc._fc(row, 13)
-        image, f = textures.image(fc)
-        game = image[..., list(f["swizzle"][:3])]
+        f = textures.fields(fc)
+        # The game's own picture of the base: read back by the emulator. THE SOFTWARE ADAPTER'S READ-BACK LEAVES IT
+        # EMPTY (sub-project 12's ledger: every base 131,072 zero bytes), and a capture may hold no dump of it: the
+        # colour is then not compared and the pair decides nothing about it (ledger ruling 46).
+        try:
+            image, _ = textures.image(fc)
+            game = image[..., list(f["swizzle"][:3])]
+            why = None if float(game.max()) > 0.0 else "is EMPTY"
+        except (cr.Unreadable, OSError) as e:
+            game, why = None, "is NOT READ, taken as EMPTY (%s)" % e
         M = np.array(row["bank"][0:16], dtype=np.float64).reshape(4, 4)
         mesh = wc.row_height(textures.dir, row)
-        horizon = horizon_row(view_rows(M, ic.pixel_register(row, 31)[:2], mesh), f["height"])
+        view = view_rows(M, ic.pixel_register(row, 31)[:2], mesh)
+        horizon = horizon_row(view, native.shape[0])           # in the target's own rows (the game's picture has as many: 256)
         first = first_content_row(native)
+        ok_row = abs(first - math.ceil(horizon - 0.5)) <= 1.0
+        ok_height = mesh is not None and abs(float(height) - float(mesh)) <= 1e-3
+        head_text = "  target %08X: height %.6g (the mesh's %s): %s; the first row with content %.1f against the derived horizon %.2f: %s; " % (
+            base, height, "%.6g" % mesh if mesh is not None else "not flat", "equal" if ok_height else "NOT EQUAL", first, horizon,
+            "in place" if ok_row else "OUT OF PLACE")
+        tail_text = "; alpha set on %.1f%% of its texels" % (100.0 * float((np.asarray(rgba)[..., 3] > 0).mean()))
+        if why is not None:
+            empty += 1
+            say(head_text + "the capture's picture of this base %s: the colour is LEFT UNCOMPARED (the software adapter's read-back leaves "
+                "the game's pictures empty; the colour against the game's picture is a real-GPU check)" % why + tail_text)
+            bad += not (ok_row and ok_height)
+            continue
+        if game.shape[:2] != native.shape[:2]:
+            say(head_text + "the capture's picture of this base is %d x %d, the target %d x %d: NOT COMPARED" % (
+                game.shape[1], game.shape[0], native.shape[1], native.shape[0]) + tail_text)
+            bad += 1
+            continue
         sel = sky_texels(game, horizon)
         n = int(sel.sum())
         ratio = native[sel].mean(0) / game[sel].mean(0) if n else np.full(3, np.nan)
         ok_colour = n > 0 and all(SKY_BAND[0] <= v <= SKY_BAND[1] for v in ratio)
-        ok_row = abs(first - math.ceil(horizon - 0.5)) <= 1.0
-        ok_height = mesh is not None and abs(float(height) - float(mesh)) <= 1e-3
-        say("  target %08X: height %.6g (the mesh's %s): %s; the first row with content %.1f against the derived horizon %.2f: %s; %d of the "
-            "game's sky texels, native / game %s: %s; alpha set on %.1f%% of its texels" % (
-                base, height, "%.6g" % mesh if mesh is not None else "not flat", "equal" if ok_height else "NOT EQUAL", first, horizon,
-                "met" if ok_row else "NOT MET", n, " ".join("%.3f" % v for v in ratio), "met" if ok_colour else "NOT MET",
-                100.0 * float((np.asarray(rgba)[..., 3] > 0).mean())))
+        say(head_text + "%d of the game's sky texels, native / game %s: %s" % (n, " ".join("%.3f" % v for v in ratio), "met" if ok_colour else "NOT MET") +
+            tail_text)
         bad += not (ok_colour and ok_row and ok_height)
     equal = targets_equal(water)
     say("  the %d targets are %s texel for texel" % (len(water["targets"]), "equal" if equal else "NOT EQUAL"))
@@ -1594,6 +1732,12 @@ def cmd_targets(args, say=print):
     if missing:
         say("  bases the frame's rows sample and the stored scene has no target of: %s" % " ".join("%08X" % b for b in missing))
     ok = not bad and equal and not missing
+    if empty:
+        # (no verdict on the criterion: its colour part was not compared. Exit 1: an input is not there.)
+        say("criterion 10 (13b): NOT DECIDED on this pair: %d of %d of the game's pictures are empty or not read, as on the software adapter; "
+            "the targets' colour against the game's pictures is a real-GPU check (run this command on a real-GPU pair); what needs no picture "
+            "of the game: %s" % (empty, len(water["targets"]), "met" if ok else "FAULT (a line above says which)"))
+        return 1
     say("criterion 10 (13b): %s" % ("met" if ok else "not met as written"))
     return 0 if ok else 1
 
@@ -1717,37 +1861,59 @@ def cmd_colour(args, say=print):
 
 
 def cmd_main(args, say=print):
-    path, fr, game, place = _inputs(args.capture, args.frame, args.place, say)
-    if fr is None:
-        return 1
-    stored = _stored(args, say, need=("targets", "water"))
+    # Everything here is the stored scene's and the capture's rows': NOTHING OF THE GAME'S READ-BACK (no depth copy, no
+    # scene 0x199E0000, no picture of the game), so the software adapter's pair carries the check (ledger ruling 46).
+    path = cr.find_capture(str(args.capture))
+    stored = _stored(args, say, need=("targets", "water", "pre_water"), game=False)
     if stored is None:
         return 1
-    head, nscene, nlev, water, scale = stored
+    head, nscene, nlev, water, _ = stored
+    exposure = float(head["exposure"])
+    if not exposure > 0.0:
+        say("NOT COMPARED: the stored scene's exposure is %g" % exposure)
+        return 1
+    rows = [x for x in wc.water_rows(path) if x.get("frame") == args.frame and wc.row_kind(x) == "surface"]
+    own = sorted({float(ic.pixel_register(x, 20)[3]) for x in rows if ic.pixel_register(x, 20) is not None})
+    post = bool(int(head["flags"]) & 1)
+    say("  the output scale is the stored scene's exposure %.9g (%s); the frame's %d surface rows have c20.w %s%s" % (
+        exposure, "a post frame: the game's scale" if post else "no post: the pass's fixed exposure", len(rows),
+        " ".join("%.9g" % v for v in own) or "(none read)",
+        "; A ROW'S c20.w IS NOT THE EXPOSURE WITHIN A THOUSANDTH (the pass's scale rule would have refused the frame)"
+        if post and any(abs(v - exposure) > 1e-3 * max(exposure, 1.0) for v in own) else ""))
+    place = tuple(args.place) if args.place is not None else PASS_PLACE
+    say("  the depth test and the judged set: the stored scene's own depth before the water step (the rows' own function on it), sampled at "
+        "(%g, %g)%s; slot 14 is zero, as the native surface has it" % (place[0], place[1], "" if args.place is not None else ", the native pixel centre"))
     pictures = target_pictures(water)
-    r = replay(path, args.frame, levels=args.levels, place=place, depth=fr.depth, zscale=fr.zscale, zoffset=fr.zoffset, pictures=pictures)
+    r = replay(path, args.frame, levels=args.levels, place=place, depth=pass_depth(water["pre_water"]), pictures=pictures, near=no_near,
+               out_scale=exposure)
     for text in r.problems + r.notes:
         say("  " + text)
-    bases = sorted(int(b) for b in np.unique(r.base[r.kept]))
-    missing = [b for b in bases if b not in pictures]
-    say("  the replay fed the stored scene's own targets in the game's pictures' place: %s%s" % (
-        " ".join("%08X" % b for b in sorted(pictures)), "; NO TARGET for the sampled bases %s (their pixels are not judged)" %
-        " ".join("%08X" % b for b in missing) if missing else ""))
-    native = water["water"][..., :3].astype(np.float64) * scale
+    say("  the replay fed the stored scene's own targets in the game's pictures' place: %s; rows replayed %d of %d; kept %d (killed %d, "
+        "skipped %d, hidden by the stored depth %d)" % (" ".join("%08X" % b for b in sorted(pictures)), r.rows, len(rows), int(r.kept.sum()),
+                                                         r.fates["killed"], r.fates["skipped"], r.hidden))
+    native = np.asarray(water["water"], dtype=np.float64)[..., :3]
     if native.shape[:2] != r.kept.shape:
         say("NOT COMPARED: the stored plane is %d x %d" % (native.shape[1], native.shape[0]))
         return 1
     judged = r.kept & (r.alpha >= JUDGED_ALPHA)
-    for b in missing:
-        judged &= r.base != b
-    m = main_measure(native, r.colour, judged)
+    replayed = np.clip(r.colour, 0.0, PASS_MAX)               # the program's own clamp of what it writes
+    m = main_rounded(native, replayed, judged)
     say("  judged pixels %d, of which %d lie more than %d pixels from the judged set's edge (%d of them with no replayed light)" % (
-        int(judged.sum()), m["pixels"], MAIN_EDGE, m["dark"]))
-    say("  the stored scene after the water step over the replay: red %.4f green %.4f blue %.4f; per-pixel luminance ratio: 5th %.4f, "
-        "median %.4f, 95th %.4f" % (*m["ratio"], m["p5"], m["median"], m["p95"]))
+        int(judged.sum()), m["exact"]["pixels"], MAIN_EDGE, m["exact"]["dark"]))
+    say("  the stored scene after the water step over the replay, the replay brought to the plane's number format (R11G11B10 float: %d bits "
+        "of mantissa in red and green, %d in blue) with each rounding:" % (TARGET_MANTISSA[0], TARGET_MANTISSA[2]))
+    for name, label in ((ROUNDINGS[0], "rounded %s:" % ROUNDINGS[0]), (ROUNDINGS[1], "rounded %s:" % ROUNDINGS[1]),
+                        ("exact", "not rounded (reported, not bound):")):
+        x = m[name]
+        say("    %-34s red %.4f green %.4f blue %.4f; per-pixel luminance ratio: 5th %.4f, median %.4f, 95th %.4f; mean distance %.3g: %s%s" % (
+            label, *x["ratio"], x["p5"], x["median"], x["p95"], x["distance"], x["verdict"],
+            " (misses %s)" % ", ".join(x["missed"]) if x["missed"] else ""))
+    nearer = m["nearer"]
+    missed = m[nearer]["missed"] if nearer else []
     say("the surface program's main by value (the ratio of the means and the median within %.2f to %.2f, the 5th to 95th percentile inside "
-        "%.2f to %.2f): %s%s" % (MAIN_BAND[0], MAIN_BAND[1], MAIN_SPAN[0], MAIN_SPAN[1], m["verdict"],
-                                 " (misses %s)" % ", ".join(m["missed"]) if m["missed"] else ""))
+        "%.2f to %.2f), applied to the rounding that lies nearer the stored plane (%s%s): %s%s" % (
+            MAIN_BAND[0], MAIN_BAND[1], MAIN_SPAN[0], MAIN_SPAN[1], nearer or "none: no judged interior",
+            "; the two lie equally near" if m["tie"] else "", m["verdict"], " (misses %s)" % ", ".join(missed) if missed else ""))
     return 0 if m["verdict"] == "met" and not r.problems else 1
 
 

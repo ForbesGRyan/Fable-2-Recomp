@@ -204,3 +204,85 @@ def records_capture(folder, places=(5, 900), change=None, **kw):
         change(rows, frame["water"])
     path.write_text("".join(_json(r) + "\n" for r in rows), encoding="utf-8", newline="\n")
     return path
+
+
+# --- a made stored native scene (src/native/render/scene_dump.h; ledger ruling 46: water_replay.py main on made dumps) -
+
+DUMP_POST, DUMP_LAYER, DUMP_PREPASS, DUMP_PRE_WATER, DUMP_TARGETS, DUMP_WATER = 1, 2, 4, 8, 16, 32
+DUMP_TARGET_SIZE = 256
+
+
+def scene_dump(width, height, flags, scene, depth, exposure=1.0, scene_frame=7, asked_frame=7, layers=(), pre_water=None, water=None,
+               targets=(), bad_values=0):
+    """The bytes of a stored native scene as render::PackSceneDump writes it (version 2 iff a flag above 4): the head,
+    the linear target [h, w, 3] as floats, the depth [h, w] as levels, with DUMP_LAYER the two layer planes
+    [h / 2, w / 2], with DUMP_PRE_WATER the depth before the water step, with DUMP_WATER the linear target after it,
+    with DUMP_TARGETS the count and each target's (base, height, rgba [256, 256, 4] bytes). A plane whose flag is not
+    set must not be given, and the other way round: this writer makes whole files only. HELD TO THE PASS'S WRITER by
+    DUMP_LAYOUT_PIN (below): tests/native/test_scene_dump.cpp packs the same made planes with PackSceneDump and holds
+    the same number."""
+    import numpy as np
+    if bool(flags & DUMP_LAYER) != (len(layers) == 2) or bool(flags & DUMP_PRE_WATER) != (pre_water is not None) or \
+            bool(flags & DUMP_WATER) != (water is not None) or bool(flags & DUMP_TARGETS) != bool(targets) or len(targets) > 4:
+        raise ValueError("the planes given are not the flags'")
+    version = 2 if flags & (DUMP_PRE_WATER | DUMP_TARGETS | DUMP_WATER) else 1
+    out = [struct.pack("<4sIIIQQIfII", b"F2NS", version, width, height, scene_frame, asked_frame, flags, exposure, bad_values, 0)]
+
+    def floats(plane):
+        a = np.asarray(plane, dtype="<f4")
+        if a.shape != (height, width, 3):
+            raise ValueError("a colour plane of %s" % (a.shape,))
+        return a.tobytes()
+
+    def levels(plane, w, h):
+        a = np.asarray(plane, dtype="<u4")
+        if a.shape != (h, w):
+            raise ValueError("a depth plane of %s" % (a.shape,))
+        return a.tobytes()
+
+    out += [floats(scene), levels(depth, width, height)]
+    out += [levels(p, width // 2, height // 2) for p in layers]
+    if pre_water is not None:
+        out.append(levels(pre_water, width, height))
+    if water is not None:
+        out.append(floats(water))
+    if targets:
+        out.append(struct.pack("<I", len(targets)))
+        for base, level, rgba in targets:
+            a = np.asarray(rgba, dtype=np.uint8)
+            if a.shape != (DUMP_TARGET_SIZE, DUMP_TARGET_SIZE, 4):
+                raise ValueError("a target of %s" % (a.shape,))
+            out.append(struct.pack("<If", base, level) + a.tobytes())
+    return b"".join(out)
+
+
+# The layout's pin: FNV-1a (64 bits) of the file of pinned_dump(), a 4 x 2 scene with every flag and two targets, made
+# here by scene_dump and in tests/native/test_scene_dump.cpp (case 114) by render::PackSceneDump from the same made
+# planes. Each side holds this number, and tests/test_water_replay.py holds that the C++ test's text has it.
+DUMP_LAYOUT_PIN = 0xBFBEAEE52E6818BF
+
+
+def pinned_words(first):
+    """The eight R11G11B10 words of a made 4 x 2 colour plane (no exponent of 31), texel i = first + its index."""
+    return [((i * 37 + 5) % 0x7C0) | (((i * 101 + 64) % 0x7C0) << 11) | (((i * 53 + 33) % 0x3E0) << 22) for i in range(first, first + 8)]
+
+
+def fnv1a64(data):
+    h = 0xCBF29CE484222325
+    for b in data:
+        h = ((h ^ b) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def pinned_dump(decode):
+    """The pinned file. `decode(word)`: the three floats of an R11G11B10 word (water_replay.r11g11b10)."""
+    import numpy as np
+    colour = lambda first: np.array([decode(w) for w in pinned_words(first)], dtype=np.float32).reshape(2, 4, 3)
+    depth = np.array([(i * 1234567 + 89) & 0xFFFFFF for i in range(8)], dtype=np.uint32).reshape(2, 4)
+    pre = np.array([(i * 7654321 + 3) & 0xFFFFFF for i in range(8)], dtype=np.uint32).reshape(2, 4)
+    layers = [np.array([(j * 4099 + k * 17 + 1) & 0xFFFFFF for j in range(2)], dtype=np.uint32).reshape(1, 2) for k in range(2)]
+    j = np.arange(DUMP_TARGET_SIZE * DUMP_TARGET_SIZE * 4, dtype=np.int64)
+    targets = [(base, level, ((j * 31 + k * 7 + (j >> 8)) & 0xFF).astype(np.uint8).reshape(DUMP_TARGET_SIZE, DUMP_TARGET_SIZE, 4))
+               for k, (base, level) in enumerate(((0x13401000, 20.1024), (0x13501000, 40.0)))]
+    return scene_dump(4, 2, 63, colour(0), depth, exposure=7.5, scene_frame=77, asked_frame=76, layers=layers, pre_water=pre,
+                      water=colour(8), targets=targets)

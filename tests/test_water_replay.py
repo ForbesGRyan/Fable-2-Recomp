@@ -447,5 +447,291 @@ class StoredScene(unittest.TestCase):
         self.assertFalse(wr.targets_equal({"targets": []}))
 
 
+class TargetFormat(unittest.TestCase):
+    """The stored plane's number format (ledger ruling 46, the review of Tasks 11 and 12, I3): the linear target is
+    R11G11B10 float, 6 bits of mantissa in red and green and 5 in blue under a 5-bit exponent, no sign."""
+
+    def test_the_format_is_the_pass_s(self):
+        self.assertEqual((wr.TARGET_MANTISSA, wr.ROUNDINGS, wr.PASS_MAX), ((6, 6, 5), ("nearest", "toward zero"), 31.875))
+        dump = (ROOT / "src" / "native" / "render" / "scene_dump.h").read_text(encoding="utf-8")
+        self.assertIn("  out[0] = DecodeUnsignedFloat(word & 0x7FFu, 6);\n  out[1] = DecodeUnsignedFloat((word >> 11) & 0x7FFu, 6);\n"
+                      "  out[2] = DecodeUnsignedFloat(word >> 22, 5);\n", dump)
+        self.assertIn("  if (exponent == 0) return std::ldexp(fraction, -14);\n", dump)
+        self.assertIn("  return std::ldexp(1.0f + fraction, int(exponent) - 15);\n", dump)
+        pass_text = (ROOT / "src" / "native" / "render" / "clay_pass.cpp").read_text(encoding="utf-8")
+        self.assertIn("constexpr nrhi::Format kLinearFormat = nrhi::Format::kR11G11B10_FLOAT;", pass_text)
+        shaders = (ROOT / "src" / "native" / "fable2_native_shaders.h").read_text(encoding="utf-8")
+        self.assertIn("  v = (v > 0.0) ? min(v, 31.875) : float3(0.0, 0.0, 0.0);\n  return float4(v, alpha);\n", shaders)   # the surface's own clamp
+        # the decode's twin, by hand
+        self.assertEqual(wr.unsigned_float(15 << 6, 6), 1.0)
+        self.assertEqual(wr.unsigned_float((15 << 6) | 1, 6), 1.0 + 1.0 / 64.0)
+        self.assertEqual(wr.unsigned_float((16 << 5) | 16, 5), 3.0)
+        self.assertEqual(wr.unsigned_float(1, 6), 2.0 ** -14 / 64.0)                 # a denormal
+        self.assertEqual(wr.unsigned_float(31 << 6, 6), math.inf)
+        self.assertTrue(math.isnan(wr.unsigned_float((31 << 5) | 1, 5)))
+        self.assertEqual(wr.r11g11b10((15 << 6) | ((14 << 6) << 11) | ((16 << 5) << 22)), (1.0, 0.5, 2.0))
+
+    def test_every_value_the_format_holds_is_kept_and_what_lies_between_goes_to_its_neighbours(self):
+        for bits in (6, 5):
+            held = np.array([wr.unsigned_float(k, bits) for k in range(31 << bits)])
+            self.assertTrue((np.diff(held) > 0).all())
+            for rounding in wr.ROUNDINGS:
+                self.assertTrue(np.array_equal(wr.quantise_channel(held, bits, rounding), held), (bits, rounding))
+            a, b = held[:-1], held[1:]
+            quarter, three = a + 0.25 * (b - a), a + 0.75 * (b - a)
+            self.assertTrue(np.array_equal(wr.quantise_channel(quarter, bits, "toward zero"), a))
+            self.assertTrue(np.array_equal(wr.quantise_channel(three, bits, "toward zero"), a))
+            self.assertTrue(np.array_equal(wr.quantise_channel(quarter, bits, "nearest"), a))
+            self.assertTrue(np.array_equal(wr.quantise_channel(three, bits, "nearest"), b))
+            # a half goes to the even neighbour
+            half = wr.quantise_channel(0.5 * (a + b), bits, "nearest")
+            even = np.where(np.arange(len(a)) % 2 == 0, a, b)
+            self.assertTrue(np.array_equal(half, even))
+            # what the format does not hold: nothing below 0, no number; the largest value above it
+            top = held[-1]
+            self.assertEqual(top, 2.0 ** 15 * (2.0 - 2.0 ** -bits))
+            for rounding in wr.ROUNDINGS:
+                got = wr.quantise_channel(np.array([-1.0, 0.0, math.nan, 1e9, math.inf, top * 1.001]), bits, rounding)
+                self.assertEqual(got.tolist(), [0.0, 0.0, 0.0, top, top, top])
+
+    def test_blue_has_half_the_steps_of_red_and_green(self):
+        got = wr.quantise(np.array([[1.02, 1.02, 1.02], [0.3, 0.3, 0.3]]), "toward zero")
+        self.assertEqual(got[0].tolist(), [1.015625, 1.015625, 1.0])
+        self.assertEqual(got[1].tolist(), [0.296875, 0.296875, 0.296875])
+        got = wr.quantise(np.array([[1.02, 1.02, 1.02], [0.3, 0.3, 0.3]]), "nearest")
+        self.assertEqual(got[0].tolist(), [1.015625, 1.015625, 1.03125])
+        self.assertEqual(got[1].tolist(), [0.30078125, 0.30078125, 0.296875])
+        with self.assertRaises(ValueError):
+            wr.quantise(np.zeros((2, 3)), "up")
+
+
+class Rounded(unittest.TestCase):
+    """Ruling 44's bound on the replay brought to the stored plane's format, both roundings computed, the bound applied
+    to the one that lies nearer the plane (ledger ruling 46, I3)."""
+
+    def frame(self):
+        judged = np.zeros((40, 60), dtype=bool)
+        judged[10:30, 10:50] = True
+        rng = np.random.default_rng(5)
+        replayed = np.zeros((40, 60, 3))
+        replayed[judged] = 0.26 + 0.11 * rng.random((int(judged.sum()), 3))     # one binade: steps of 1 / 256 (red, green), 1 / 128 (blue)
+        return judged, replayed
+
+    def test_a_plane_that_truncates_is_met_by_the_truncated_replay_and_missed_by_the_exact_one(self):
+        judged, replayed = self.frame()
+        plane = wr.quantise(replayed, "toward zero")
+        m = wr.main_rounded(plane, replayed, judged)
+        self.assertEqual(m["nearer"], "toward zero")
+        self.assertEqual((m["toward zero"]["verdict"], m["toward zero"]["distance"]), ("met", 0.0))
+        self.assertTrue(all(v == 1.0 for v in m["toward zero"]["ratio"]))
+        self.assertGreater(m["nearest"]["distance"], 0.0)
+        # the review's failure: the exact replay against a truncating target reads about 0.985 in blue against 0.99
+        self.assertEqual(m["exact"]["verdict"], "not met as written")
+        self.assertIn("the ratio of the means", m["exact"]["missed"])
+        self.assertTrue(0.98 < m["exact"]["ratio"][2] < 0.99 and 0.99 < m["exact"]["ratio"][0] < 1.0)
+        self.assertEqual(m["verdict"], "met")                           # the bound is the nearer rounding's
+
+    def test_a_plane_that_rounds_to_nearest_names_that_rounding(self):
+        judged, replayed = self.frame()
+        plane = wr.quantise(replayed, "nearest")
+        m = wr.main_rounded(plane, replayed, judged)
+        self.assertEqual((m["nearer"], m["verdict"], m["nearest"]["distance"]), ("nearest", "met", 0.0))
+        self.assertGreater(m["toward zero"]["distance"], 0.0)
+        self.assertTrue(m["toward zero"]["ratio"][2] > 1.01)             # the truncated replay lies below such a plane
+        self.assertEqual(m["toward zero"]["verdict"], "not met as written")
+
+    def test_a_wrong_program_is_missed_under_either_rounding(self):
+        judged, replayed = self.frame()
+        for rounding in wr.ROUNDINGS:
+            wrong = wr.quantise(replayed * [1.0, 1.0, 1.04], rounding)
+            m = wr.main_rounded(wrong, replayed, judged)
+            self.assertEqual(m["verdict"], "not met as written", rounding)
+            self.assertIn("the ratio of the means", m[m["nearer"]]["missed"])
+            self.assertEqual(m["nearest"]["verdict"], "not met as written")
+            self.assertEqual(m["toward zero"]["verdict"], "not met as written")
+
+    def test_no_interior_names_no_rounding(self):
+        _, replayed = self.frame()
+        m = wr.main_rounded(replayed, replayed, np.zeros((40, 60), dtype=bool))
+        self.assertEqual((m["nearer"], m["verdict"]), (None, "not decidable"))
+
+    def test_a_tie_is_said_as_one(self):
+        judged, _ = self.frame()
+        held = np.zeros((40, 60, 3)) + [0.25, 0.5, 1.0]                # values the format holds: both roundings give them
+        m = wr.main_rounded(held, held, judged)
+        self.assertEqual((m["nearer"], m["verdict"], m["tie"]), ("nearest", "met", True))
+
+
+EXPOSURE = 2.22                                                       # render::kLitExposure: a frame without post
+TARGET_BASE = 0x13401000
+
+
+def made_target():
+    y, x = np.mgrid[0:256, 0:256]
+    return np.stack([60 + y // 2, 90 + x // 4, 200 - y // 3, np.full_like(x, 255)], axis=-1).astype(np.uint8)
+
+
+def made_pair(folder, rounding="toward zero", change=None, flags=8 | 16 | 32, hide=True):
+    """A made capture and the stored scene the pass would write of it: one target, the depth before the water step (far,
+    with a bar nearer than the lake over its upper ten rows), and the scene after the step as the replay fed the
+    same target gives it at the frame's exposure, brought to the target's format with `rounding`. `change(plane)`:
+    makes one thing wrong. Returns (capture path, dump path, the replay)."""
+    folder = Path(folder)
+    path = made(folder)
+    target = made_target()
+    pre = np.full((720, 1120), 16777215, dtype=np.uint32)
+    if hide:
+        pre[350:360, :] = 16777215 // 4                               # z / w 0.25: nearer than the quad's 0.5
+    r = wr.replay(path, 1, place=wr.PASS_PLACE, depth=wr.pass_depth(pre), pictures={TARGET_BASE: target[..., :3] / 255.0},
+                  near=wr.no_near, out_scale=EXPOSURE)
+    plane = wr.quantise(np.clip(r.colour, 0.0, wr.PASS_MAX), rounding).astype(np.float32)
+    if hide:
+        plane[350:360, 540:580] = 9.0                                 # what stands in front of the lake there
+    if change:
+        change(plane)
+    dump = folder / "native_scene_made.f2ns"
+    dump.write_bytes(water_made.scene_dump(
+        1120, 720, flags, plane, pre, exposure=EXPOSURE, scene_frame=7, asked_frame=7,
+        pre_water=pre if flags & 8 else None, water=plane if flags & 32 else None, targets=[(TARGET_BASE, 20.0, target)] if flags & 16 else ()))
+    return path, dump, r
+
+
+class MainOnMadeDumps(unittest.TestCase):
+    """`main` on a made capture and a made stored scene (ledger ruling 46, the review of Tasks 11 and 12, I2): the
+    depth test and the judged set are the stored scene's own depth before the water step, the pictures the stored
+    targets, the scale the stored exposure. The made capture has no depth copy and no scene of the game."""
+
+    def run_main(self, *args, **kw):
+        said = []
+        with tempfile.TemporaryDirectory() as folder:
+            path, dump, r = made_pair(folder, *args, **kw)
+            code = wr.main(["main", str(path), str(dump)], say=said.append)
+        return code, said, r
+
+    def test_it_needs_nothing_of_the_game_and_names_the_rounding(self):
+        for rounding in wr.ROUNDINGS:
+            code, said, r = self.run_main(rounding)
+            text = "\n".join(said)
+            self.assertEqual(code, 0, text)
+            self.assertNotIn("NOT READ", text)
+            self.assertNotIn("NOT COMPARED", text)
+            self.assertIn("applied to the rounding that lies nearer the stored plane (%s): met" % rounding, said[-1])
+            for name in wr.ROUNDINGS:
+                self.assertTrue(any(("rounded %s:" % name) in line for line in said), name)
+            self.assertTrue(any("not rounded (reported, not bound)" in line for line in said))
+            # the judged set is the stored depth's: ten rows of the lake stand behind the bar
+            self.assertEqual(int(r.kept.sum()), 20 * 10)
+            self.assertEqual(r.hidden, 40 * 10)
+            self.assertEqual(int((r.kept & (r.alpha >= wr.JUDGED_ALPHA)).sum()), 15 * 10)      # (the mask at the pixel centres: fifteen columns)
+            self.assertTrue(any("judged pixels 150, of which 36 lie more than 3 pixels" in line for line in said), text)
+            self.assertTrue(any("hidden by the stored depth 400" in line for line in said), text)
+
+    def test_a_wrong_surface_is_not_met(self):
+        def blue(plane):
+            plane[..., 2] *= 1.04
+        code, said, _ = self.run_main("toward zero", change=blue)
+        self.assertEqual(code, 1)
+        self.assertIn("not met as written", said[-1])
+        self.assertIn("the ratio of the means", said[-1])
+
+    def test_without_the_depth_before_the_step_nothing_is_compared(self):
+        code, said, _ = self.run_main("toward zero", flags=16 | 32, hide=False)
+        self.assertEqual(code, 1)
+        self.assertTrue(any("NOT COMPARED" in line and "pre_water" in line for line in said), "\n".join(said))
+
+    def test_the_replay_at_the_pass_s_scale_and_without_slot_14(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = made(folder)
+            pictures = {TARGET_BASE: made_target()[..., :3] / 255.0}
+            own = wr.replay(path, 1, place=(0.0, 0.0), pictures=pictures)
+            scaled = wr.replay(path, 1, place=(0.0, 0.0), pictures=pictures, near=wr.no_near, out_scale=EXPOSURE)
+            # (the made slot 14 is empty, so only the scale differs: c20.w is the last factor)
+            c20w = water_made.PIXEL[20][3]
+            self.assertTrue(np.allclose(scaled.colour[own.kept], own.colour[own.kept] * (EXPOSURE / c20w), rtol=1e-6, atol=0.0))
+            self.assertTrue(np.array_equal(scaled.kept, own.kept))
+            # with the pass's inputs the capture's own dumps of slots 13 and 14 are not read at all
+            (Path(folder) / "tex" / "picture.bin").unlink()
+            (Path(folder) / "tex" / "near.bin").unlink()
+            wr.wc._captures.clear()
+            again = wr.replay(path, 1, place=(0.0, 0.0), pictures=pictures, near=wr.no_near, out_scale=EXPOSURE)
+            self.assertEqual(again.problems, [])
+            self.assertTrue(np.array_equal(again.colour, scaled.colour))
+            # and a row whose base has no target is not replayed, said
+            none = wr.replay(path, 1, place=(0.0, 0.0), pictures={TARGET_BASE + 0x1000: pictures[TARGET_BASE]}, near=wr.no_near, out_scale=EXPOSURE)
+            self.assertEqual(int(none.kept.sum()), 0)
+            self.assertTrue(any("no target" in p for p in none.problems))
+        self.assertEqual(wr.no_near(0.3, 0.7), (0.0, 0.0, 0.0))
+        self.assertEqual(wr.PASS_PLACE, (0.5, 0.5))
+        levels = np.array([[0, 16777215, 16777215 // 4]], dtype=np.uint32)
+        self.assertEqual(wr.pass_depth(levels).tolist(), [[1.0, 0.0, 1.0 - (16777215 // 4) / 16777215.0]])
+
+
+class TargetsOnTheSoftwareAdapter(unittest.TestCase):
+    """`targets` holds the native targets against the game's own pictures: a real-GPU check. On the software adapter the
+    read-back leaves the game's pictures empty (sub-project 12's ledger): the command says so and judges only what
+    needs no game picture; it never reads "not met" for that (ledger ruling 46, I2)."""
+
+    def run_targets(self, picture):
+        said = []
+        M = camera(math.radians(10.0))
+        with tempfile.TemporaryDirectory() as folder:
+            path = made(folder, matrix=M, picture=picture)
+            M32 = np.array(water_made.bank(M, {})[:16]).reshape(4, 4)
+            view = wr.view_rows(M32, water_made.PIXEL[31][:2], water_made.HEIGHT)
+            sky = wr.sky_picture(view, Sky.BLOCK, lambda a: (0.3, 0.4, 0.5))
+            target = np.concatenate([sky, np.full((256, 256, 1), 255, dtype=np.uint8)], axis=-1)
+            dump = Path(folder) / "native_scene_made.f2ns"
+            dump.write_bytes(water_made.scene_dump(4, 2, 16, np.zeros((2, 4, 3)), np.zeros((2, 4)), targets=[(TARGET_BASE, water_made.HEIGHT, target)]))
+            code = wr.main(["targets", str(path), str(dump)], say=said.append)
+        return code, said
+
+    def test_empty_pictures_are_said_and_not_read_as_not_met(self):
+        code, said = self.run_targets(bytes(64))
+        text = "\n".join(said)
+        self.assertEqual(code, 1)
+        self.assertTrue(any("EMPTY" in line and "real-GPU" in line for line in said), text)
+        self.assertTrue(said[-1].startswith("criterion 10 (13b): NOT DECIDED on this pair"), text)
+        self.assertIn("what needs no picture of the game: met", said[-1])
+        self.assertNotIn("not met", text.lower())
+
+    def test_a_picture_with_content_is_compared(self):
+        """(The made capture's picture is 4 x 4, which no target can be held to: said, and a verdict all the same.)"""
+        code, said = self.run_targets(None)
+        text = "\n".join(said)
+        self.assertEqual(code, 1)
+        self.assertNotIn("EMPTY", text)
+        self.assertNotIn("NOT DECIDED", text)
+        self.assertTrue(any("is 4 x 4, the target 256 x 256: NOT COMPARED" in line for line in said), text)
+        self.assertEqual(said[-1], "criterion 10 (13b): not met as written")
+
+
+class MadeDumpLayout(unittest.TestCase):
+    def test_the_made_dump_writer_writes_the_pass_s_layout(self):
+        """The made dumps of the tests above are written by tests/water_made.py, the real ones by render::PackSceneDump:
+        both pack the same made planes (a 4 x 2 scene with every flag and two targets) and hold one number."""
+        import foliage_trace as ft
+        data = water_made.pinned_dump(wr.r11g11b10)
+        self.assertEqual(len(data), 48 + 8 * 16 + 2 * 2 * 4 + 8 * 4 + 8 * 12 + 4 + 2 * (8 + 262144))
+        self.assertNotEqual(water_made.DUMP_LAYOUT_PIN, 0)
+        self.assertEqual(water_made.fnv1a64(data), water_made.DUMP_LAYOUT_PIN)
+        text = (ROOT / "tests" / "native" / "test_scene_dump.cpp").read_text(encoding="utf-8")
+        self.assertIn("0x%016Xull" % water_made.DUMP_LAYOUT_PIN, text)
+        self.assertEqual(water_made.fnv1a64(b""), 0xCBF29CE484222325)
+        self.assertEqual(water_made.fnv1a64(b"a"), 0xAF63DC4C8601EC8C)                      # the published test vector
+        with tempfile.TemporaryDirectory() as folder:
+            p = Path(folder) / "pinned.f2ns"
+            p.write_bytes(data)
+            head, scene, depth, layers = ft.read_dump(p)
+            water = ft.read_dump_water(p)
+        self.assertEqual((head["version"], head["flags"], head["scene_frame"], head["asked_frame"]), (2, 63, 77, 76))
+        self.assertEqual(scene[0, 0].tolist(), [float(np.float32(v)) for v in wr.r11g11b10(water_made.pinned_words(0)[0])])
+        self.assertEqual(water["water"][1, 3].tolist(), [float(np.float32(v)) for v in wr.r11g11b10(water_made.pinned_words(8)[7])])
+        self.assertEqual(int(water["pre_water"][0, 1]), (7654321 + 3) & 0xFFFFFF)
+        self.assertEqual([b for b, _, _ in water["targets"]], [0x13401000, 0x13501000])
+        self.assertEqual(int(layers[1][0, 1]), 4099 + 17 + 1)
+        with self.assertRaises(ValueError):
+            water_made.scene_dump(4, 2, 8, np.zeros((2, 4, 3)), np.zeros((2, 4)))           # a flag without its plane
+
+
 if __name__ == "__main__":
     unittest.main()

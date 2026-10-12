@@ -496,7 +496,8 @@ inline void CountClaySunFrame(ClaySun s, ClaySunFrames& n) {
 }
 
 // The water's verdict for a frame ("Native water" below; frame-map section 20; spec Design 5): kDrawn, or the first
-// reason in this order (DecideClayWater). Declared here because ClayStats carries it.
+// reason DecideClayWater finds, in kWaterDecisionOrder (this order, but `view` before `plane`). Declared here
+// because ClayStats carries it.
 enum class ClayWater : uint8_t { kDrawn, kOff, kNoRecords, kLight, kOpaqueLive, kPair, kPlane, kView, kReflection, kTexture,
                                  kOrder, kPipeline, kSlot, kScale, kCount };
 inline const char* ClayWaterName(ClayWater w) {
@@ -7655,13 +7656,14 @@ inline WaterTargetPlan PlanWaterTargets(const capture::WaterRecord* const* surfa
   return plan;
 }
 
-// The frame's verdict (spec Design 5): kDrawn, or the first reason in the enum's order.
+// The frame's verdict (spec Design 5): kDrawn, or the first reason in the decision's order (kWaterDecisionOrder,
+// below: the enum's, but `view` before `plane`).
 struct ClayWaterInputs {
   bool on = false;                     // the switch now, in a scene captured with it
   uint32_t surface = 0, opaque = 0;    // the scene's records by kind (0 and 0: the scene's block is empty)
   bool light = false;                  // the frame is lit: the linear target's meaning
   bool opaque_dead = true;             // WaterOpaqueDead of every opaque record's c141
-  bool planes = true;                  // PlanWaterTargets did not say kPlane
+  bool planes = true;                  // PlanWaterTargets did not say kPlane (judged after `view`: a record that fails that has no height)
   bool view = true;                    // every record's draw has the frame's one view-projection, row layout kDot
   bool targets = true;                 // PlanWaterTargets did not say kReflection, and the frame's sky is drawn with its constants
   bool objects_targets = true;         // the targets and the mirrored sky's objects exist
@@ -7669,21 +7671,38 @@ struct ClayWaterInputs {
   bool order = true;                   // PlanWaterPlace: usable, and the surface records' places one run (WaterPlacesOneRun)
   bool objects = true;                 // the surface step's layout, programs and pipelines exist
   bool slots = true;                   // the frame's buffer exists and holds the step's slots
+  bool fits = true;                    // WaterRecordsFit(surface): the step holds every surface record of the scene
   bool scale = true;                   // every record's c20.w is the frame's output scale within a thousandth
 };
+// Whether the step holds a scene's surface records (one prepared surface, two slots, a record): at most
+// capture::kMaxWaterRecords. The capture takes no more (its frame is whole or empty), so a scene beyond it is not
+// reachable; the verdict of one is `slot` all the same, never `drawn` with nothing prepared (the review of Tasks 11
+// and 12, Minor 2).
+constexpr bool WaterRecordsFit(uint32_t surface) { return surface <= capture::kMaxWaterRecords; }
+// THE DECISION'S ORDER (DecideClayWater: the first of these whose input is missing is the frame's reason). The
+// enum's order but for one pair: `view` is judged BEFORE `plane` (ledger ruling 46; the review of Tasks 11 and 12,
+// I1). A surface record whose draw record is not found, whose layout is not kDot or whose rows are not the frame's
+// view-projection is never asked for its positions, so it has no height and PlanWaterTargets answers kPlane for
+// it: with `plane` first the log named the mesh's flatness where the cause was the record lookup or the matrix.
+// A frame reads `plane` only when every record passed the view's three checks.
+inline constexpr ClayWater kWaterDecisionOrder[] = {ClayWater::kOff,        ClayWater::kNoRecords, ClayWater::kLight,   ClayWater::kOpaqueLive,
+                                                    ClayWater::kPair,       ClayWater::kView,      ClayWater::kPlane,   ClayWater::kReflection,
+                                                    ClayWater::kTexture,    ClayWater::kOrder,     ClayWater::kPipeline, ClayWater::kSlot,
+                                                    ClayWater::kScale};
+static_assert(sizeof(kWaterDecisionOrder) / sizeof(kWaterDecisionOrder[0]) == size_t(ClayWater::kCount) - 1);
 constexpr ClayWater DecideClayWater(const ClayWaterInputs& in) {
   if (!in.on) return ClayWater::kOff;
   if (in.surface == 0) return ClayWater::kNoRecords;
   if (!in.light) return ClayWater::kLight;
   if (!in.opaque_dead) return ClayWater::kOpaqueLive;
   if (in.surface != in.opaque) return ClayWater::kPair;
+  if (!in.view) return ClayWater::kView;      // (before `plane`: kWaterDecisionOrder)
   if (!in.planes) return ClayWater::kPlane;
-  if (!in.view) return ClayWater::kView;
   if (!in.targets || !in.objects_targets) return ClayWater::kReflection;
   if (!in.textures) return ClayWater::kTexture;
   if (!in.order) return ClayWater::kOrder;
   if (!in.objects) return ClayWater::kPipeline;
-  if (!in.slots) return ClayWater::kSlot;
+  if (!in.slots || !in.fits) return ClayWater::kSlot;
   if (!in.scale) return ClayWater::kScale;
   return ClayWater::kDrawn;
 }
@@ -7695,7 +7714,7 @@ constexpr bool WaterLeavesOut(ClayWater verdict, capture::WaterKind kind) {
   return kind == capture::WaterKind::kOpaque && verdict == ClayWater::kDrawn;
 }
 // What the head of Render can say before the frame's buffer is sized (the scene's own rules: the switch, the
-// records, the light, the dead draw, the pairs, the scale): the verdict with every later input true. The step's
+// records, the light, the dead draw, the pairs, their number, the scale): the verdict with every later input true. The step's
 // slots are reserved iff this is kDrawn; every other frame's slot plan is the one of before, slot for slot.
 constexpr ClayWater WaterSceneVerdict(const ClayWaterInputs& in) {
   ClayWaterInputs scene;
@@ -7704,6 +7723,7 @@ constexpr ClayWater WaterSceneVerdict(const ClayWaterInputs& in) {
   scene.opaque = in.opaque;
   scene.light = in.light;
   scene.opaque_dead = in.opaque_dead;
+  scene.fits = in.fits;
   scene.scale = in.scale;
   return DecideClayWater(scene);
 }

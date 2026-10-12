@@ -177,7 +177,9 @@ def fetch(fc, kind):
     texture_util, sign = (dword 0 >> (2 + 2 * swizzle)) & 3; a constant selector, 4 or 5, has no sign; the sign of
     a channel no delivered component names is not judged), the integer number format (dword 3 bit 0) or an
     exponent adjust other than 0. That is what makes a mask's sample a number in
-    [0, 1], which the dead draw's proof needs (water_check.py `dead`)."""
+    [0, 1], which the dead draw's proof needs (water_check.py `dead`). And, for the normal map alone (the review of
+    Tasks 11 and 12, Minor 3: FetchError::kLodBias), a LOD bias other than 0 (dword 4 bits 12 to 21): the native
+    surface applies none and would draw such a map a level off; the mask is sampled at level 0."""
     if kind not in FETCH_LIMIT:
         raise ValueError("the kind is k8 or dxn, not %r" % (kind,))
     f = describe(fc)
@@ -197,6 +199,8 @@ def fetch(fc, kind):
         raise ValueError("the number format is integer, not fraction")
     if f["exp_adjust"]:
         raise ValueError("an exponent adjust of %d" % (f["exp_adjust"] - 64 if f["exp_adjust"] & 0x20 else f["exp_adjust"]))
+    if kind == "dxn" and (_words(fc)[4] >> 12) & 0x3FF:
+        raise ValueError("a LOD bias of %g levels (lod-bias): the surface's program applies none" % f["lod_bias"])
     return f
 
 

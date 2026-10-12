@@ -361,7 +361,7 @@ class ImpostorPassText(unittest.TestCase):
         self.assertIn("ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size(), impostor_step_slots_, water_step_slots_)", s)
         self.assertIn("PlanClayFrameSlots(slot - kClayFrameTerrainSlot0, uint32_t(plant_constants_.size()), impostor_step_slots_, water_step_slots_);", s)
         self.assertEqual(s.count("PlanClayFrameSlots("), 1)
-        self.assertEqual(s.count("ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size(), impostor_step_slots_"), 2)   # (the call and its comment)
+        self.assertEqual(s.count("ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size(), impostor_step_slots_, water_step_slots_)"), 2)   # (the call and its comment, whole)
         self.assertEqual(s.count("ClayFrameSmallSlots("), 2)
 
     def test_the_step_is_drawn_in_the_colour_pass_alone(self):

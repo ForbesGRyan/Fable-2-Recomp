@@ -1249,7 +1249,9 @@ class RowSetup:
     """What one water row gives every pixel of it: the kind, the pixel registers with the row's literals, the
     literal names, the bools of the row's BOOL_MEMBER, the vertex bank, the mesh and the four samplers."""
 
-    def __init__(self, capture, textures, row, text):
+    def __init__(self, capture, textures, row, text, pictures=True):
+        """`pictures=False`: the dumps of slots 13 and 14 are not read (`mirror` and `near` are None): a caller that
+        feeds its own pictures in their place (water_replay.py main: the native pass's targets, and zero)."""
         self.row, self.kind, self.text = row, row_kind(row), text
         self.consts = ic.row_pixel_bank(row)
         self.vbank = ic.row_bank(row)
@@ -1258,8 +1260,8 @@ class RowSetup:
         self.positions, self.pairs, self.triangles = row_mesh(textures.dir, row)
         self.mask = textures.sampler(_fc(row, 1), 1)
         self.normal = textures.sampler(_fc(row, 2), 2)
-        self.mirror = textures.sampler(_fc(row, 13), 3)
-        self.near = textures.sampler(_fc(row, 14), 3)
+        self.mirror = textures.sampler(_fc(row, 13), 3) if pictures else None
+        self.near = textures.sampler(_fc(row, 14), 3) if pictures else None
         tables = row_tables(capture, row.get("frame"))
         if tables is None:
             raise cr.Unreadable("the frame row has no fog tables")

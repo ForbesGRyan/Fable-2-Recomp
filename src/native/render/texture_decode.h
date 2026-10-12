@@ -48,9 +48,10 @@ inline TexFormatInfo FormatInfo(TexFormat f) {
 }
 
 // kSign: WaterTextureFetch's alone (a constant that does not deliver unsigned fractions); DecodeTextureFetch never answers it.
-enum class FetchError : uint8_t { kNone, kNotTexture, kNot2D, kFormat, kSize, kSign };
+// kLodBias: WaterTextureFetch's alone too (a normal map whose constant has a LOD bias).
+enum class FetchError : uint8_t { kNone, kNotTexture, kNot2D, kFormat, kSize, kSign, kLodBias };
 inline const char* FetchErrorName(FetchError e) {
-  static constexpr const char* kNames[] = {"none", "not-texture", "not-2d", "format", "size", "sign"};
+  static constexpr const char* kNames[] = {"none", "not-texture", "not-2d", "format", "size", "sign", "lod-bias"};
   return size_t(e) < sizeof(kNames) / sizeof(kNames[0]) ? kNames[size_t(e)] : "?";
 }
 
@@ -651,7 +652,13 @@ enum class WaterDecode : uint8_t { kK8, kDxn };
 // what makes a mask's sample a number in [0, 1], which the dead draw's proof stands on (clay_logic.h,
 // WaterOpaqueDead; tools/xdk_sigmatch/water_textures.py, fetch, is the twin). `out` is untouched unless the
 // answer is kNone.
+// And kLodBias (the review of Tasks 11 and 12, Minor 3; ledger ruling 46) for a NORMAL MAP whose constant has a LOD
+// bias (dword 4 bits 12 to 21, signed, in 1 / 32 of a level): the emulator multiplies the coordinates' derivatives
+// by 2 ^ bias before the host computes the level; the surface's program hands the GPU the derivatives as they are
+// (SampleGrad), so such a map would be drawn a level off. The captured constant's field is 0. The mask is sampled
+// at level 0 by the program and its bias is not judged. Said after kSign.
 inline constexpr uint32_t kWaterFetchMaxSide = 8192;
+constexpr uint32_t WaterFetchLodBias(const uint32_t fc[6]) { return (fc[4] >> 12) & 0x3FFu; }
 // Whether the first `components` shader components of a fetch constant (x, y, ...) are each delivered as an
 // unsigned fraction as far as the sign fields say: the sign of the source channel its swizzle names is 0.
 constexpr bool FetchComponentsUnsigned(const uint32_t fc[6], uint32_t components) {
@@ -689,6 +696,7 @@ inline FetchError WaterTextureFetch(const uint32_t fc[6], WaterDecode kind, Text
   if (t.width > kWaterFetchMaxSide || t.height > kWaterFetchMaxSide) return FetchError::kSize;
   const uint32_t delivered = kind == WaterDecode::kK8 ? 1u : 2u;   // x; x and y
   if (!FetchComponentsUnsigned(fc, delivered) || (fc[3] & 1u) != 0 || ((fc[3] >> 13) & 0x3Fu) != 0) return FetchError::kSign;
+  if (kind == WaterDecode::kDxn && WaterFetchLodBias(fc) != 0) return FetchError::kLodBias;
   *out = t;
   return FetchError::kNone;
 }

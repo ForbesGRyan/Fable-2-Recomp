@@ -1512,7 +1512,7 @@ Each of the seven position mutations fails on every capture (`rows`, `components
 
 ## Water (sub-project 13)
 
-Native renderer sub-project 13 (water), phase 13a, plan Task 2, 2026-10-12. The lake's surface as closed formulas, each checked against its microcode: vertex shader `BEAD84BD72072E0E` (17 instructions, numbered 3 to 19) and the alpha path of pixel shaders `A17D8AEC3A817D45` (the surface) and `F6D98C7B4D98438B` (the opaque twin; the two dumps differ in instruction 14 alone). Nothing here was run in the game and no captured row was read: the rows are plan Task 4's.
+Native renderer sub-project 13 (water), phase 13a, plan Tasks 2 and 3, 2026-10-12. The lake's surface as closed formulas, each checked against its microcode: vertex shader `BEAD84BD72072E0E` (17 instructions, numbered 3 to 19) and pixel shaders `A17D8AEC3A817D45` (the surface, 80 instructions numbered 10 to 89) and `F6D98C7B4D98438B` (the opaque twin; the two dumps differ in instruction 14 alone). Nothing here was run in the game and no captured row was read: the rows are plan Task 4's.
 
 ### Result
 
@@ -1522,8 +1522,10 @@ Native renderer sub-project 13 (water), phase 13a, plan Task 2, 2026-10-12. The 
 | The alpha of `A17D` and `F6D9` | `water_alpha(m, c141)` | closed on made inputs: 2,000 of 2,000 made pixels for each shader, largest difference 0 (the same three operations); three mutations each fail |
 | What becomes of a pixel: killed, skipped, shaded | `water_kept(alpha, c141, kind)` | closed with the alpha; every fate reached: `A17D` 605 killed, 830 skipped, 565 shaded; `F6D9` 1,395, 221, 384 |
 | `F6D9` draws nothing | `water_opaque_dead(c141)` | part (a) of criterion 2, on the microcode: 2,000 of 2,000 made pixels killed at the masks 0, 1 and their own, 500 of them at the margin itself; 256 of 256 levels of a `k_8` mask with the captured `c141`; the control not killed in 500 of 500 ("The dead draw" below: what it assumes) |
+| `oC0` of `A17D` | `water_pixel(q, P, coord_a, coord_b, m, c, tex, bools)` and its parts `water_normal`, `water_lookup`, `water_shadow_at`, `water_base`, `water_mix`, `water_sun`, `water_fog` | closed on made inputs: 2,000 of 2,000 made pixels (283 killed, 256 skipped, 1,461 shaded), largest relative difference 6.3e-14, every fetch's coordinates included; sixteen mutations and five literals each fail; the glint's sign and the saturated mix factor settled on the interpreter's registers |
+| What the shaders read | `WATER_SHADER["vs_read"]`, `["ps_in"]`, `["ps_read"]`, `["ps_read_under"]`, `["ps_slots"]`; `water_check.UNREAD` | the interpreter's own account, one component changed at a time ("What the shaders read" below) |
 
-(`water_check.py formulas`, `dead` and `used`, seed 1: `out/native-evidence/water/t2_formulas.txt`, `t2_dead.txt`, `t2_used.txt`. The bounds are spec Design 2's: `1e-5 * max(1, |value|)` in every component of the vertex outputs, 1e-6 for the alpha. Both sides are the same arithmetic in double precision on inputs rounded to single precision, which is why they agree to rounding; it is the mutations that show the bounds can tell.)
+(`water_check.py formulas`, `dead` and `used`, seed 1: `out/native-evidence/water/t2_formulas.txt`, `t2_dead.txt`, `t2_used.txt` for plan Task 2 and `t3_formulas.txt`, `t3_used.txt`, `t3_settle.txt` for plan Task 3. Both sides are the same arithmetic in double precision on inputs rounded to single precision, which is why they agree to rounding; since plan Task 3 every compared number is held to `1e-9 * max(1, |value|)`, far inside spec Design 2's bounds ("The check of the pixel" below), and it is the mutations that show a bound can tell.)
 
 ### The vertex shader `BEAD`
 
@@ -1533,7 +1535,7 @@ With `p` the fetched position (instr 3: `vf0`, three floats at dword 0 of a vert
 |---|---|---|
 | 5 to 8 | `oPos.x = c0 . (p, 1)`, `.y` with `c1`, `.z` with `c2`, `.w` with `c3`; each row's four products summed in the order z, x, y, w | `pos`: nothing is added to the position (no waves, no time) |
 | 9 | a vertex fetch of slot 16 (the shore mask) at `pair` | not in the formula: its value reaches `o3.z` alone |
-| 10, 16, 18, 19 | `o0.w = sat(c113.x + c255.x - (c9.z - p.z) / |c9 - p|)` | not in the formula: neither pixel shader reads `o0.w` |
+| 10, 16, 18, 19 | `o0.w = sat(c113.x + c255.x - (c9.z - p.z) / length(c9 - p))` | not in the formula: neither pixel shader reads `o0.w` |
 | 11 | `o0.xyz = p` | `place` |
 | 12 | `o1.xy = p.xy * c117.xy + c115.xy` | `coord[0:2]` |
 | 13 | `o1.zw = p.xy * c118.xy + c116.xy` | `coord[2:4]` |
@@ -1551,7 +1553,7 @@ The height `p.z` reaches no coordinate. The registers the formula takes are `c0`
 | 12 | `ramp = sat(-(1 - m) * c141.y + c141.x)` | |
 | 13 | `alpha = 1 - ramp`, kept in `r4.w` to the end (instr 89 writes it out) | `water_alpha` |
 | 14 | `A17D`: `flag = (alpha == 1)`; `F6D9`: `flag = (1 > alpha)`; beside it `r3.w = sat(max(c131.x, c131.x))` (the mix factor of the pixel, plan Task 3) | `water_kept`: `kind` "surface" or "opaque" |
-| 15 | the predicate = `flag != 0`; `r2.xyz = (-|P.x| > 0)`, which is 0 whatever `P.x` holds | |
+| 15 | the predicate = `flag != 0`; `r2.xyz = (-abs(P.x) > 0)`, which is 0 whatever `P.x` holds | |
 | 16 | under the predicate: `kill_gt c254.x, c255.y`, the literals' 0 > -1: the pixel is discarded | "killed" |
 | 17 | `flag2 = (alpha > c141.w)` | |
 | 18 | `setp_ne_push`: the predicate of everything to instr 76 = `flag2 != 0` (and the literal `c254.x` being 0); `r2.w` = 0 where it holds, else 1 (instr 77 asks for it again) | "shaded", else "skipped" |
@@ -1582,6 +1584,80 @@ Mutations, each of which must make trials disagree (`tests/test_water_formulas.p
 
 One departure from the plan's made inputs, said here because a reader of the plan would look for it: the plan draws the threshold `c141.w` at or above 1 in 15 of 100 trials of one family of three. `F6D9` then "skips" (alpha exactly 1 under a threshold of 1 or more) in about 2.5% of the trials, below the tenth the test asks of every fate. The share is 40 of 100 in two families; no formula changed.
 
+### The pixel of `A17D` (plan Task 3)
+
+A shaded pixel (alpha above `c141.w`) runs instr 19 to 89. The interpolators are `P` = `o0.xyz` (the place), `o1` (the two coordinates), `o3.xy` (the mask's coordinate) and `q`, the position register `r4`, of which the magnitude is read. Literals: `c254` = (0, 2, 0, 0), `c255` = (0.5, -1, 1, -2). Block by block:
+
+| Instr | What it makes | Function |
+|---|---|---|
+| 19, 20 | `a` = slot 2 at `o1.xy`, `b` = slot 2 at `o1.zw`: the first two components the fetch delivers | the callback `tex["normal"]` |
+| 24, 25 | `s = (2a - 1) + (2b - 1)`, two components | `water_normal` |
+| 33 to 39 | `z = sqrt(abs(1 - dot(2a - 1, 2a - 1))) + sqrt(abs(1 - dot(2b - 1, 2b - 1)))` | `water_normal` |
+| 27, 35, 36, 40 to 43 | `N = n * rsq(abs(n . n))` with `n = (s.x / 2, s.y / 2, (c128.x / 2) * z)`; the squares summed in the order z, x, y | `water_normal` |
+| 21 to 23, 26 to 28 | `u = (abs(q.x) * c0.z + c0.x - 1/2) * c31.x + 1/2`, `v = (abs(q.y) * c0.w + c0.y - 1/2) * c31.y + 1/2` | `water_lookup` (`water_screen` is `(abs(q.x) * c0.z, abs(q.y) * c0.w)`) |
+| 21, 26, 29, 30 | slot 13 at `(u + (c129.x / 2) * s.x, v + (c129.y / 2) * s.y)`; slot 14 at `(u + (s.x / 2) * c130.x, v + (s.y / 2) * c130.y)`: the sum `s`, not the unit normal | `water_lookup` |
+| 31, 32 | the two fetches, three components each (`tfetch2D r3.xyz_, r7.yx, tf13`: the register holds (v, u) and the fetch reads (u, v)) | `tex[13]`, `tex[14]` |
+| 37, 38, 41, 42, 51 | `E = c19 - P`; `d = sqrt(abs(E . E))`; `V = E * rsq(abs(E . E))` | `water_base` |
+| 44 to 46 | `F = sat(1 - V . N + c116.x)` | `water_base` |
+| 39, 40, 43 to 47 | `base = (c126 - c127) * F + c127` | `water_base` |
+| 34 | the shadow factor `k` = 1 (`maxs r1.w, c255.zz`) | `water_pixel` |
+| 48 to 50 (bool `b137`) | `k = tf8 * c139.x + c139.y`, slot 8 read at `(abs(q.x) * c0.z + c0.x, abs(q.y) * c0.w + c0.y)`: the screen place itself, without the scale about the centre and without the normal | `water_shadow_at`, `tex[8]` |
+| 14 | `share = sat(max(c131.x, c131.x))` | `water_mix` |
+| 51 | `t = sat(F + c117.x)` | `water_mix` |
+| 54, 55 | `far = (r13 * k - base) * share + base` | `water_mix` |
+| 52, 53, 56, 57 | `near = ((r13 * k - r14) * t + (r14 - base)) * share + base`: the factor `k` is on slot 13 alone | `water_mix` |
+| 58, 59 | `w = sat(c140.x * d)`; `colour = w * (far - near) + near` | `water_mix` |
+| 60 to 65 (bool `b136`) | `N2 = n2 * rsq(abs(n2 . n2))` with `n2 = (N.x, N.y, c136.x * N.z)` | `water_sun` |
+| 66, 67 | `2 (N2 . L)` with `L = -c142` (`c142` is not normalised) | `water_sun` |
+| 68 | `W = L - 2 (N2 . L) N2`, which is `-R` for `R = 2 (N2 . L) N2 - L` | `water_sun` |
+| 69 | `cosine = sat(-(V . W))` = `sat(+(V . R))` | `water_sun` |
+| 70 to 72 | `power = exp2(c138.x * log2(cosine))` | `water_sun` |
+| 72 to 75 | `colour += (c143.x * c137.x * power, c137.x * power * c143.y, c137.x * power * c143.z)` | `water_sun` |
+| 76, 77 | the fog begins where `d - c67.x > 0` (and only for a shaded pixel: `r2.w` of instr 18) | `water_fog` |
+| 78 to 87 | `a = sat(-V . c66)`, `s = c67.w * (d - c67.x)`, `t = sat(c67.z * (d - c67.x))`; `S` = slot 4 at `a`, `T` = slot 5 at `s`; `Fg = c68 + t * (S - c68)`; `colour += c28.x * (colour * T + (1 - T) * c28.y * Fg - colour)` | `water_fog` (= `light_formulas.fog`: `test_the_fog_block_is_the_plain_form`, and `fog_check.py` as before) |
+| 88, 89 | `oC0 = (colour * c20.w, alpha)` | `water_pixel` |
+
+`F6D9` runs the same instructions on the pixels it keeps (alpha exactly 1): `water_pixel(..., kind="opaque")`.
+
+**The two readings the plan left to the machine** (`out/native-evidence/water/t3_settle.txt`, the interpreter's registers after each instruction of a made pixel):
+1. *The glint's sign: the plan's reading stands, the spec's does not.* After instr 68 the registers hold `L - 2 (N2 . L) N2` (to the last digit of the hand value), and instr 69 gives 0 where `+(V . R)` is -0.736 and `-(V . R)` is +0.736. The cosine is `sat(+(V . R))` with `R = 2 (N2 . L) N2 - L`, `L = -c142`: the eye sees the glint where it stands in the mirror direction of the light. The spec's `sat(-(V . R))` (Design 2, "Sun") is wrong. The mutation "`c142` with the other sign" fails in 127 of 400 trials; `test_the_sign_of_the_glint_in_the_microcode` holds the machine's own colour to it.
+2. *The mix factor is saturated: the plan's reading stands.* Instr 14 `maxs_sat r3.w, c131.xx` gives 0.5, 1, 1 and 0 for `c131.x` = 0.5, 1, 7 and -2. The spec's bare `c131.x` (Design 2, "Mix") differs above 1 and below 0; 0.5 in every captured row.
+
+**What else the interpreter shows that the spec's and the plan's reading did not say** (none contradicts a formula of the plan; each is now in a function and under the check):
+- The shadow factor of `b137` is read at the screen place itself, `(|q| * c0.zw + c0.xy)` (instr 48, 49), and multiplies slot 13's colour alone, not slot 14's (instr 53, 54).
+- `c142` is not normalised by the shader (instr 66 to 68): a longer `c142` gives a larger cosine.
+- The lookup's distortion uses the sum `s` of the two samples (instr 26, 29), as the spec says; the base colour and the glint use the unit normal.
+- The magnitude of the position register is taken (instr 22: `r_abs[4]`); its signs reach nothing.
+- A skipped pixel leaves with a colour of exactly 0 and its alpha (instr 15, 77, 88, 89); the output's alpha is never touched by the fog or the scale.
+- Spec's point 6 of "What the research has differently" holds: `c128.x` multiplies the third component before the normalisation (instr 36, 40), and with 0.3 the normal tilts further (`test_the_factor_c128x_shrinks_the_third_component_and_so_tilts_the_normal`). Point 7 holds in each part: the second normal with `c136.x` (instr 60 to 65), `c0.xy` in the lookup (instr 21 to 23, 27) and again at the shadow fetch (48), the position register, and that the vertex shader's mask fetch, `o0.w` and `o2` reach neither pixel shader (the interpolators' account above).
+
+### What the shaders read
+
+By the interpreter alone (`water_check.read_components`, `read_interpolators`; `t3_used.txt`): each component of each register the dump uses is changed in turn on 64 shaded pixels with both bools set and the fog begun (and on 16 pixels of the alpha check, where a change of `c141` moves the fate), and it counts as read when the kill, `oC0` or any fetch's slot or coordinates differ in any of them.
+
+- Both pixel shaders use 24 registers beside their literals: `c0`, `c19`, `c20`, `c28`, `c31`, `c66`, `c67`, `c68`, `c116`, `c117`, `c126` to `c131`, `c136` to `c143` (`WATER_SHADER["ps_reg"]`).
+- Read, 50 components (`WATER_SHADER["ps_read"]`): `c0.xyzw`, `c19.xyz`, `c20.w`, `c28.xy`, `c31.xy`, `c66.xyz`, `c67.xzw`, `c68.xyz`, `c116.x`, `c117.x`, `c126.xyz`, `c127.xyz`, `c128.x`, `c129.xy`, `c130.xy`, `c131.x`, `c136.x`, `c137.x`, `c138.x`, `c139.xy`, `c140.x`, `c141.xyw`, `c142.xyz`, `c143.xyz`: the plan's list, component for component.
+- Not read, 46 components (`water_check.UNREAD`): `c19.w`, `c20.xyz`, `c28.zw`, `c31.zw`, `c66.w`, `c67.y`, `c68.w`, `c116.yzw`, `c117.yzw`, `c126.w`, `c127.w`, `c128.yzw`, `c129.zw`, `c130.zw`, `c131.yzw`, `c136.yzw`, `c137.yzw`, `c138.yzw`, `c139.zw`, `c140.yzw`, `c141.z`, `c142.w`, `c143.w`. They hold garbage in the captures (`c129.z` is no number, `c139.w` and `c140.w` are 1.9e29): `water_pixel` touches none (`test_no_unread_component_reaches_the_pixel` makes them all no number), and no later mirror or HLSL may.
+- Under a bool alone (`WATER_SHADER["ps_read_under"]`): with `b136` clear `c136`, `c137`, `c138`, `c142`, `c143` are no longer read; with `b137` clear `c139` is not.
+- Slots, in the order fetched (`WATER_SHADER["ps_slots"]`): 1 (the mask), 2 twice (the normal map), 13, 14, 8 under `b137`, 4 and 5 beyond the fog's start.
+- Interpolators: `r0.xyz`, `r1.xyzw`, `r3.xy`, `r4.xy` (`WATER_SHADER["ps_in"]`).
+
+### The degenerate points, and the console's product rule
+
+The formulas multiply as the console does (a zero factor gives +0 whatever the other factor is: `ucode_eval`'s `zero_product`, `_imp_mul`). Three points depend on it, each made in 50 of 2,000 trials: a flat normal with `c128.x` = 0 (`N` = 0 * infinity = 0); a pixel at the eye (`V` = 0); a power `c138.x` of 0 on a cosine of 0 (0 * -infinity = 0, so the power is 1 and the sun term is the whole `c137.x * c143`). Without the rule in the interpreter 147 of 2,000 trials disagree, every one of them among those 150 (48, 49 and 50 of the three kinds; in three the no-number passes through a saturate, which gives 0, and the colour comes out the same). An HLSL program computes by IEEE: a native shader must write these three guards itself, or the record's rule must keep `c128.x` and `c138.x` away from 0 (plan Tasks 7, 9 and 12).
+
+### Single precision
+
+Every function takes `single=True`: the inputs it reads and every operation's result rounded to single precision, a multiply-add as a rounded product and a rounded sum. That is the reference a native mirror is pinned to (sub-project 12's ledger ruling 26); the double form is what is checked against the microcode. On the made pixels that are shaded and not degenerate the single form lies from the double one, in `|difference| / max(1, |colour|)`: without the sun term (513 pixels) median 1.7e-7, 99th percentile 1.8e-5, largest 2.5e-4; with it (799 pixels) median 2.2e-7, 99th percentile 1.3e-5, largest 5.1e-5. Reported, not a check: a single-precision mirror held to the DOUBLE reference at 1e-5 would fail on about one made pixel in a hundred. Whether the console fuses its multiply-add is not known; the reference does not.
+
+### The check of the pixel
+
+2,000 of 2,000 made pixels agree (`t3_formulas.txt`): 283 killed, 256 skipped, 1,461 shaded; of the shaded 907 with the sun term (its cosine above 0 in 697, the term above 1% of the colour in 455), 342 with the shadow factor, 762 near and 699 far of the range `1 / c140.x`, 862 fogged; the largest relative difference of a colour 6.3e-14. Compared in every trial: the fate, the alpha, the colour, the order of the fetched slots and every fetch's coordinates (the two lookups, the shadow mask's place, the two fog coordinates) against the formula's. `pixel_floors` holds the counts to floors (each fate, each bool in both states, each side of the range and of the fog's start at a tenth of the trials; the cosine above 0 in a third of the sun trials).
+
+The bound is `1e-9 * max(1, |value|)` for every compared number, not the spec's `1e-5 * max(1, |value|)` (and 1e-3 relative with `b136` set, 1e-6 for the alpha): both sides are the same double arithmetic, and with the spec's bounds the mutation of the power went unseen in 384 of 400 trials (16 failed; 38 with the bound as it is now on the same made inputs, 81 once the made suns were aimed at the surface's own mirror direction). The tighter bound implies the spec's wherever a colour is above 1e-6.
+
+The sixteen mutations, each of which must fail (of 400 trials; about 297 of them are shaded): `c126` and `c127` exchanged 268; the lookup scaled about 0 297; `c130` for `c129` at slot 13 261; both lookups at (v, u) 297; `c128.x` left out 199; `c116.x` with the other sign 201; `c131.x` left out 268; the blend's ends exchanged 188; `c140.x` by 1% 89; slot 14 left out of the near branch 94; `c136.x` left out 99; `c138.x` by 1% 81; `c142` with the other sign 127; `c137.x` left out 122; `c28.x` left out 171; `c20.w` left out 297. A mutant is `water_pixel` itself on a changed input (a register, or a texture read at another place), so it is a mutant of the function that is checked. The literals are held by their place: `half`, `one`, `two`, `minus_one`, `minus_two` each changed by 1% in the formula alone fail (297, 344, 297, 168, 297 of 400) and changed in the formula and at their place in the machine's constants agree again (0); `zero` cannot be scaled.
+
 ### What stands on inference, and what is not checked
 
 - That `ucode_eval` is the console (it is the repo's reading of the SDK's `ucode.h`; double precision; no denormal flush). [inferred]
@@ -1589,3 +1665,6 @@ One departure from the plan's made inputs, said here because a reader of the pla
 - The bits of `b136` and `b137` in the pixel bool word (`0x100`, `0x200`: bit `N & 31`, as `IMPOSTOR_B129`): by the SDK's layout; plan Task 4 reads both bool members of every row. [inferred]
 - Which component of the mask's and the normal map's texel the fetch delivers first: the formulas take "the first component" and "the first two"; what the fetch constants of slots 1 and 2 make of the stored texel is plan Task 5's. [unknown here]
 - The captured rows: nothing in this part was held to one. Plan Task 4. [not run]
+- The block under bool `b137` (the shadow factor, `c139`, slot 8) is closed on made inputs alone: the one captured row read for the made ranges has the bit clear (`pbool_load` `0x00000110` in `out/native-evidence/water/b_water_d1_f1.txt`), so no captured row will exercise it unless plan Task 4 finds one. [microcode only]
+- The centres of the made ranges are the registers of one row of one capture (`b_water_d1_f1.txt`; `c129.xy` reads 0.4208 there, where the plan's text has 0.84); the bounds over the six captures are plan Task 4's. [measured on one row]
+- Whether the console fuses a multiply-add; the single-precision reference does not. [unknown]

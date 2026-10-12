@@ -2048,6 +2048,12 @@ def impostor_fog(place, eye, c110, c111, tf16, tf17):
 # two scrolling coordinates), r3 = o3 (the mask's coordinate) and r4, the register the pixel's position is
 # generated into (its magnitude is read; the SDK gives the position rounded down: dxbc_translator.cpp, the
 # OpRoundNI of in_reg_ps_position_); r2 = o2 is read by neither.
+# "ps_reg": the pixel registers a formula reads, ascending.
+# "ps_read": {register: the components} a change of which moves the pixel (water_check.read_components("ps"): the
+# interpreter's own account, one component changed at a time over 64 made pixels); every other component of these
+# registers is garbage in the captures (c129.z is no number, c139.w is 1.9e29) and must never be touched.
+# "ps_read_under": the registers read only under a bool: b136 (the sun's glint) and b137 (the screen shadow mask
+# on the reflection). "ps_slots": the fetch slots by what they hold.
 # "ps_lit": the pixel shaders' literal registers as the GPU held them (fog_check.WATER_LITERALS: 24 draws each of
 # frame 1116 of gpu_shadow_bridge2.log); "ps_lit_at" names the components the formulas read and where each lies
 # (c254.z and c254.w are not read). The vertex shader's literal reaches no output a pixel shader reads.
@@ -2060,7 +2066,13 @@ WATER_SHADER = {
                 115: (0, 1), 116: (0, 1), 117: (0, 1), 118: (0, 1)},
     "ps_in": {0: (0, 1, 2), 1: (0, 1, 2, 3), 3: (0, 1), 4: (0, 1)},
     "ps_reg": (0, 19, 20, 28, 31, 66, 67, 68, 116, 117, 126, 127, 128, 129, 130, 131,
-               136, 137, 138, 139, 140, 141, 142, 143),           # PROVISIONAL: plan Task 3
+               136, 137, 138, 139, 140, 141, 142, 143),
+    "ps_read": {0: (0, 1, 2, 3), 19: (0, 1, 2), 20: (3,), 28: (0, 1), 31: (0, 1), 66: (0, 1, 2), 67: (0, 2, 3),
+                68: (0, 1, 2), 116: (0,), 117: (0,), 126: (0, 1, 2), 127: (0, 1, 2), 128: (0,), 129: (0, 1),
+                130: (0, 1), 131: (0,), 136: (0,), 137: (0,), 138: (0,), 139: (0, 1), 140: (0,), 141: (0, 1, 3),
+                142: (0, 1, 2), 143: (0, 1, 2)},
+    "ps_read_under": {136: (136, 137, 138, 142, 143), 137: (139,)},
+    "ps_slots": {"mask": 1, "normal": 2, "reflection": 13, "near": 14, "shadow": 8, "scatter": 4, "transmittance": 5},
     "ps_lit": {254: (0.0, 2.0, 0.0, 0.0), 255: (0.5, -1.0, 1.0, -2.0)},
     "ps_lit_at": {"zero": (254, 0), "two": (254, 1),
                   "half": (255, 0), "minus_one": (255, 1), "one": (255, 2), "minus_two": (255, 3)},
@@ -2072,6 +2084,13 @@ def water_literals():
     """{name: value} of the literals the two pixel shaders read, from WATER_SHADER's table."""
     table = WATER_SHADER["ps_lit"]
     return {name: table[reg][comp] for name, (reg, comp) in WATER_SHADER["ps_lit_at"].items()}
+
+
+def water_bools(word):
+    """The bools the pixel formula knows (136: the sun's glint; 137: the screen shadow mask on the reflection) that
+    a pixel bool word (b128..b159) has set, as water_pixel's `bools`. The bits are WATER_SHADER's: PROVISIONAL
+    until plan Task 4."""
+    return tuple(n for n in (136, 137) if word & WATER_SHADER["b%d" % n])
 
 
 def _water_ops(single):
@@ -2156,3 +2175,202 @@ def water_opaque_dead(c141, margin=1e-6):
     if abs(x) > 4.0 or abs(y) > 4.0:
         return False
     return min(x, x - y) >= margin
+
+
+# The pixel of A17D (instr 19 to 89; plan Task 3). Every function follows the microcode's own order of operations;
+# products follow the console's rule (a zero factor gives +0: _imp_mul), which decides the three degenerate points
+# water_check.py makes: a flat normal with c128.x = 0 (N = 0 * infinity = 0), a pixel at the eye (V = 0) and a
+# power of 0 on a cosine of 0 (0 * -infinity = 0: the glint is then the sun's whole colour).
+
+def water_normal(a, b, c128x, lit=None, single=False):
+    """a, b: slot 2's two channels at coord.xy and coord.zw (instr 19, 20: the first two components the fetch
+    delivers). Returns (s, N):
+        s = (2a - 1) + (2b - 1)                                               instr 24, 25
+        z = sqrt|1 - |2a - 1|^2| + sqrt|1 - |2b - 1|^2|                       instr 33 to 39
+        N = normalize(s.x / 2, s.y / 2, (c128x / 2) * z)                      instr 27, 36, 40 to 43
+    The normalisation is x * rsq|x . x|, the squares summed in the order z, x, y."""
+    lit = lit or water_literals()
+    r, m, ad = _water_ops(single)
+    two, half, one, minus_one, minus_two = lit["two"], lit["half"], lit["one"], lit["minus_one"], lit["minus_two"]
+    ax, ay, bx, by = r(float(a[0])), r(float(a[1])), r(float(b[0])), r(float(b[1]))
+    s = [ad(m(ax, two), ad(m(bx, two), minus_two)), ad(m(ay, two), ad(m(by, two), minus_two))]       # 24, 25
+    hx, hy = m(s[0], half), m(s[1], half)                                        # 27
+    sq = [m(v, v) for v in (ad(m(ay, two), minus_one), ad(m(by, two), minus_one),
+                            ad(m(ax, two), minus_one), ad(m(bx, two), minus_one))]                  # 33, 34
+    za = r(_water_sqrt(abs(ad(-ad(sq[2], sq[0]), one))))                         # 35 to 37: the first sample's
+    zb = r(_water_sqrt(abs(ad(-ad(sq[3], sq[1]), one))))                         # 35, 36, 38: the second's
+    nz = m(m(half, r(float(c128x))), ad(za, zb))                                 # 35, 36, 39, 40
+    inverse = r(_water_rsq(abs(ad(ad(ad(0.0, m(nz, nz)), m(hx, hx)), m(hy, hy)))))       # 41, 42
+    return s, [m(hx, inverse), m(hy, inverse), m(nz, inverse)]                   # 43
+
+
+def water_screen(q, c0, single=False):
+    """(x, y) = (|q.x| * c0.z, |q.y| * c0.w): the pixel's place on the screen, 0 to 1 (instr 22). q: the pixel's
+    integral position as the position register holds it (the magnitude is taken: its signs carry other things)."""
+    r, m, _ = _water_ops(single)
+    return m(abs(r(float(q[0]))), r(float(c0[2]))), m(abs(r(float(q[1]))), r(float(c0[3])))
+
+
+def water_lookup(q, s, c0, c31, c129, c130, lit=None, single=False):
+    """q: the pixel's integral position (the position register's magnitude). s: water_normal's sum. Returns
+    ((u13, v13), (u14, v14)):
+        u = (q.x * c0.z + c0.x - 1/2) * c31.x + 1/2;  v = (q.y * c0.w + c0.y - 1/2) * c31.y + 1/2     instr 21 to 28
+        slot 13 at (u + s.x * c129.x / 2, v + s.y * c129.y / 2); slot 14 the same with c130           instr 26, 29, 30
+    The halves are taken as (c129 / 2) * s for slot 13 and as (s / 2) * c130 for slot 14, as the microcode does."""
+    lit = lit or water_literals()
+    r, m, ad = _water_ops(single)
+    half = lit["half"]
+    sx, sy = water_screen(q, c0, single)                                         # 22
+    u = ad(m(ad(ad(-half, r(float(c0[0]))), sx), r(float(c31[0]))), half)        # 21 to 23, 28
+    v = ad(m(ad(r(float(c0[1])), ad(-half, sy)), r(float(c31[1]))), half)        # 26 to 28
+    at13 = (ad(u, m(m(r(float(c129[0])), half), s[0])), ad(v, m(m(r(float(c129[1])), half), s[1])))  # 21, 26, 30
+    at14 = (ad(u, m(m(s[0], half), r(float(c130[0])))), ad(v, m(m(s[1], half), r(float(c130[1])))))  # 27, 29, 30
+    return at13, at14
+
+
+def water_shadow_at(q, c0, single=False):
+    """Where slot 8 (the screen shadow mask) is read under bool b137: (q.x * c0.z + c0.x, q.y * c0.w + c0.y)
+    (instr 48, 49): the screen place without the scale about the centre and without the normal."""
+    r, _, ad = _water_ops(single)
+    sx, sy = water_screen(q, c0, single)
+    return ad(sx, r(float(c0[0]))), ad(sy, r(float(c0[1])))
+
+
+def water_base(P, eye, N, c116x, c126, c127, lit=None, single=False):
+    """(base, F, V, d): V = normalize(eye - P); d = |eye - P|; F = sat(1 - V . N + c116x);
+    base = c127 + (c126 - c127) * F                                           instr 37 to 47, 51
+    P: interpolator o0.xyz. eye: pixel c19.xyz. At the eye itself V is (0, 0, 0) (0 * infinity, the console's
+    product)."""
+    lit = lit or water_literals()
+    r, m, ad = _water_ops(single)
+    one = lit["one"]
+    e = [ad(-r(float(P[i])), r(float(eye[i]))) for i in range(3)]                # 37
+    d2 = ad(ad(ad(0.0, m(e[2], e[2])), m(e[0], e[0])), m(e[1], e[1]))            # 38
+    inverse = r(_water_rsq(abs(d2)))                                             # 41
+    V = [m(e[i], inverse) for i in range(3)]                                     # 42
+    cosine = ad(ad(ad(0.0, m(V[2], N[2])), m(V[0], N[0])), m(V[1], N[1]))        # 44
+    F = r(_imp_sat(ad(ad(-cosine, one), r(float(c116x)))))                       # 45, 46
+    base = [ad(m(ad(-r(float(c127[i])), r(float(c126[i]))), F), r(float(c127[i]))) for i in range(3)]       # 39 to 47
+    return base, F, V, r(_water_sqrt(abs(d2)))                                   # 51 (the scalar operation)
+
+
+def water_mix(base, r, near14, F, d, c117x, c131x, c140x, single=False):
+    """far = base + (r - base) * sat(c131x); near = base + (lerp(near14, r, sat(F + c117x)) - base) * sat(c131x);
+    colour = lerp(near, far, sat(c140x * d))                                  instr 14, 51 to 59
+    r: slot 13's colour, already times the shadow factor (1 without bool b137). near14: slot 14's colour."""
+    rnd, m, ad = _water_ops(single)
+    share = rnd(_imp_sat(max(rnd(float(c131x)), rnd(float(c131x)))))            # 14 (the scalar operation)
+    t = rnd(_imp_sat(ad(F, rnd(float(c117x)))))                                  # 51
+    w = rnd(_imp_sat(m(rnd(float(c140x)), d)))                                   # 58 (the scalar operation)
+    out = []
+    for i in range(3):
+        far = ad(m(ad(r[i], -base[i]), share), base[i])                          # 54, 55
+        near = ad(m(ad(m(ad(r[i], -near14[i]), t), ad(-base[i], near14[i])), share), base[i])       # 52, 53, 56, 57
+        out.append(ad(m(w, ad(far, -near)), near))                               # 58, 59
+    return out
+
+
+def water_sun(N, V, c136x, c137x, c138x, c142, c143, lit=None, single=False):
+    """The sun's glint (instr 60 to 75, under bool b136), three floats:
+        N2 = normalize(N.x, N.y, c136x * N.z);  L = -c142;  R = 2 (N2 . L) N2 - L
+        the term = exp2(c138x * log2(sat(V . R))) * c137x * c143.xyz
+    As fixed by plan Task 3 on the microcode: the cosine is sat(+(V . R)) (instr 68 forms L - 2 (N2 . L) N2 = -R
+    and instr 69 takes sat(-(V . that))); c142 is not normalised. log2 0 is -infinity and 2 ^ -infinity is 0: a
+    surface turned away has no glint (with a power of 0 the console's product gives 0 * -infinity = 0 and the term is
+    the whole c137x * c143)."""
+    lit = lit or water_literals()
+    r, m, ad = _water_ops(single)
+    c142 = [r(float(v)) for v in c142[:3]]
+    c143 = [r(float(v)) for v in c143[:3]]
+    c137x = r(float(c137x))
+    z2 = m(r(float(c136x)), N[2])                                                # 60
+    n2 = ad(m(z2, z2), ad(ad(m(N[0], N[0]), m(N[1], N[1])), lit["zero"]))        # 61, 62
+    inverse = r(_water_rsq(abs(n2)))                                             # 63
+    N2 = [m(N[0], inverse), m(N[1], inverse), m(z2, inverse)]                    # 64, 65
+    twice = ad(ad(ad(0.0, m(N2[2], -c142[2])), m(N2[0], -c142[0])), m(N2[1], -c142[1]))              # 66
+    twice = ad(twice, twice)                                                     # 67
+    W = [ad(m(-N2[i], twice), -c142[i]) for i in range(3)]                       # 68: L - 2 (N2 . L) N2
+    cosine = r(_imp_sat(ad(ad(ad(0.0, m(-V[2], W[2])), m(-V[0], W[0])), m(-V[1], W[1]))))            # 69
+    power = r(_imp_exp2(m(r(float(c138x)), r(_imp_log2(cosine)))))               # 70 to 72
+    scaled = m(c137x, power)                                                     # 73 (the scalar operation)
+    return [m(m(c143[0], c137x), power), m(scaled, c143[1]), m(scaled, c143[2])]  # 72 to 74
+
+
+def water_fog(C, V, d, c28, c66, c67, c68, tf4, tf5, lit=None, single=False):
+    """The fog block of A17D (instr 76 to 87) on the colour C, from the unit view vector and the distance the
+    pixel already has (water_base's V and d). Returns (C', (a, s) or None): the fogged colour and the two table
+    coordinates, None before the start (d - c67.x not above 0: no table is read, C unchanged). It is
+    light_formulas.fog in the microcode's own order (tests/test_water_formulas.py holds the two equal):
+        a = sat(-V . c66);  s = c67.w * (d - c67.x);  t = sat(c67.z * (d - c67.x))
+        S = tf4(a);  T = tf5(s);  F = c68 + t * (S - c68);  C' = C + c28.x * (C * T + (1 - T) * c28.y * F - C)"""
+    lit = lit or water_literals()
+    r, m, ad = _water_ops(single)
+    one = lit["one"]
+    past = ad(-r(float(c67[0])), d)                                              # 76
+    if not past > 0.0:                                                           # 77
+        return list(C), None
+    c66 = [r(float(v)) for v in c66[:3]]
+    c68 = [r(float(v)) for v in c68[:3]]
+    a = r(_imp_sat(ad(ad(ad(0.0, m(-V[2], c66[2])), m(-V[0], c66[0])), m(-V[1], c66[1]))))           # 78
+    s = m(r(float(c67[3])), past)                                                # 78 (the scalar operation)
+    S = [r(float(v)) for v in tf4(a)[:3]]                                        # 79
+    T = [r(float(v)) for v in tf5(s)[:3]]                                        # 80
+    t = r(_imp_sat(m(r(float(c67[2])), past)))                                   # 82 (the scalar operation)
+    amount, scatter = r(float(c28[0])), r(float(c28[1]))
+    out = []
+    for i in range(3):
+        F = ad(m(t, ad(S[i], -c68[i])), c68[i])                                  # 82, 83
+        G = ad(m(m(ad(-T[i], one), scatter), F), -C[i])                          # 81, 84, 85
+        G = ad(m(T[i], C[i]), G)                                                 # 86
+        out.append(ad(m(G, amount), C[i]))                                       # 87
+    return out, (a, s)
+
+
+def water_pixel(q, P, coord_a, coord_b, m, c, tex, bools=(136,), kind="surface", lit=None, single=False):
+    """The whole pixel of A17D (kind "surface"; "opaque" is F6D9, which differs in the kill alone) from its
+    interpolators: q (the pixel's integral position), P (o0.xyz), coord_a and coord_b (o1.xy and o1.zw), m (the
+    mask's sample, slot 1 at o3.xy), and the registers. c: {register: [4 floats]} for WATER_SHADER["ps_reg"]; only
+    the components of WATER_SHADER["ps_read"] are touched. tex: {"normal": f(u, v) -> (x, y), 13: f(u, v) -> rgb,
+    14: f(u, v) -> rgb, 8: f(u, v) -> float, "tf4": f(a) -> rgb, "tf5": f(s) -> rgb}; a callback is called only where
+    the microcode fetches (8 only with 137 in `bools`, the tables only beyond the fog's start), in its order.
+    Returns {"fate": "killed" | "skipped" | "shaded", "alpha": alpha, "colour": rgb (after fog and c20.w),
+    "glint": the sun term's share of the colour before fog (the sum of its three channels over the colour's; 0
+    without it), "lookup": (u13, v13)} and, for a shaded pixel, what lies between: "lookup14", "shadow_at" (None
+    without b137), "sum", "normal", "base", "fresnel", "view", "distance", "sun" (the term; zeros without b136),
+    "before_fog", "fog_at" ((a, s), None before the start). With 137 in `bools` the reflection is multiplied by
+    tex[8] * c139.x + c139.y (instr 48 to 50); with 136 the sun term is added. A killed pixel has no colour (zeros
+    here); a skipped one is 0 * c20.w."""
+    lit = lit or water_literals()
+    r, mul, ad = _water_ops(single)
+    alpha = water_alpha(m, c[141], lit, single)
+    fate = water_kept(alpha, c[141], kind, lit)
+    scale = r(float(c[20][3]))
+    out = {"fate": fate, "alpha": alpha, "colour": [0.0, 0.0, 0.0], "glint": 0.0, "lookup": None}
+    if fate == "killed":
+        return out
+    if fate == "skipped":
+        out["colour"] = [mul(0.0, scale)] * 3                                    # 15, 88
+        return out
+    a = tex["normal"](coord_a[0], coord_a[1])                                    # 19
+    b = tex["normal"](coord_b[0], coord_b[1])                                    # 20
+    s, N = water_normal(a, b, c[128][0], lit, single)
+    at13, at14 = water_lookup(q, s, c[0], c[31], c[129], c[130], lit, single)
+    mirror = [r(float(v)) for v in tex[13](at13[0], at13[1])[:3]]                # 31
+    near14 = [r(float(v)) for v in tex[14](at14[0], at14[1])[:3]]                # 32
+    base, F, V, d = water_base(P, c[19], N, c[116][0], c[126], c[127], lit, single)
+    factor, shadow_at = lit["one"], None                                         # 34 (the scalar operation)
+    if 137 in bools:
+        shadow_at = water_shadow_at(q, c[0], single)                             # 48
+        factor = ad(mul(r(float(tex[8](shadow_at[0], shadow_at[1]))), r(float(c[139][0]))), r(float(c[139][1])))   # 49, 50
+    colour = water_mix(base, [mul(v, factor) for v in mirror], near14, F, d, c[117][0], c[131][0], c[140][0], single)
+    sun = [0.0, 0.0, 0.0]
+    if 136 in bools:
+        sun = water_sun(N, V, c[136][0], c[137][0], c[138][0], c[142], c[143], lit, single)
+        colour = [ad(colour[i], sun[i]) for i in range(3)]                       # 75
+        total = colour[0] + colour[1] + colour[2]
+        out["glint"] = (sun[0] + sun[1] + sun[2]) / total if total > 0.0 and math.isfinite(total) else 0.0
+    fogged, fog_at = water_fog(colour, V, d, c[28], c[66], c[67], c[68], tex["tf4"], tex["tf5"], lit, single)
+    out.update({"colour": [mul(v, scale) for v in fogged],                       # 88
+                "lookup": at13, "lookup14": at14, "shadow_at": shadow_at, "sum": s, "normal": N, "base": base,
+                "fresnel": F, "view": V, "distance": d, "sun": sun, "before_fog": colour, "fog_at": fog_at})
+    return out

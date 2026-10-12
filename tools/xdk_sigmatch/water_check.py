@@ -1,15 +1,16 @@
-"""The machine check of the lake's surface (light_formulas.water_vertex, water_alpha, water_kept, water_opaque_dead
-and, by plan Task 3, the pixel) against the game's own microcode (ucode_eval): vertex shader BEAD84BD72072E0E and
+"""The machine check of the lake's surface (light_formulas.water_vertex, water_alpha, water_kept, water_opaque_dead,
+water_pixel and its parts) against the game's own microcode (ucode_eval): vertex shader BEAD84BD72072E0E and
 pixel shaders A17D8AEC3A817D45 (the surface) and F6D98C7B4D98438B (the opaque twin). The water sub-project, plan
 Tasks 2 and 3, spec criteria 1 (its first half: made inputs; the captured rows are plan Task 4's) and 2 part (a).
 
-  formulas [--trials 2000] [--seed 1]       the vertex shader, the alpha and the fate of both pixel shaders on made
-                                            inputs, and each mutation (each must fail)
+  formulas [--trials 2000] [--seed 1]       the vertex shader, the alpha and the fate of both pixel shaders and the
+                                            whole pixel of A17D on made inputs; each mutation (each must fail); each
+                                            literal held at its place; the floors a run must reach to count
   dead [--trials 2000] [--seed 1]           criterion 2 part (a): F6D9 kills every made pixel whose c141 satisfies
                                             light_formulas.water_opaque_dead, whatever the mask holds; the control
   used                                      the constant registers each of the three dumps reads (the interpreter's
-                                            own list), the components of them that reach an output a pixel shader
-                                            reads, and the interpolator components either pixel shader reads
+                                            own list), the components that reach an output (one component changed at
+                                            a time), and the interpolator components either pixel shader reads
   trace <hash> --instr N [--seed S] [--trial T]   the interpreter's registers after instruction N of one of the
                                             three shaders for a made input (the transcription's oracle)
 Each exits 1 on any failure.
@@ -19,8 +20,8 @@ What a check is, and why it is not circular. One side is the dump's text run by 
 through nothing of the interpreter's (the vertex is decoded from the bytes by struct, not by the machine's fetch).
 The formulas were written from the dump by hand; nothing of them was fitted to the interpreter's output. Both
 sides are double precision on inputs rounded to single precision (as the game holds them), so a correct
-transcription agrees to rounding (the worst differences are printed); the spec's bounds are far wider, and it is
-the mutations that show a bound can still tell: each changes one term of the formula and must make trials disagree.
+transcription agrees to rounding (the worst differences are printed), and it is the mutations that show a bound
+can tell: each changes one term of the formula and must make trials disagree.
 
 The vertex check (check_vertex). A made draw is a vertex buffer of 1 to 64 vertices of 20 bytes (a position of
 three big-endian floats, then the 32_32_FLOAT pair, as the dump's two fetches read them: stride 5 dwords, the pair
@@ -53,6 +54,41 @@ rounded twice and fused, and must give an alpha below 1 ("single_killed"). All 2
 with the captured c141 ("levels"). The control: every fourth trial once more with c141.x - c141.y <= 0 and a mask
 of 0, which must NOT be killed. What this shows and what it assumes is in docs/native-renderer/lighting-formulas.md,
 "Water: the dead draw".
+
+The pixel check (check_pixel), A17D with the console's product rule (ucode_eval's zero_product). A made pixel is
+the shader's text, 248 registers, the five interpolators (o0 the place, o1 the two coordinates, o2 unread, o3 the
+mask's coordinate, r4 the position with random signs), the bools and seven textures as smooth callables (so that a
+fetch at another place shows); the sampler hands the machine the texture's value in the components the fetch takes
+and 7777 in the others. Compared: the fate; the alpha within ALPHA_TOLERANCE; the colour within PIXEL_TOLERANCE *
+max(1, |value|) (1e-9, with b136 clear or set: far inside the spec's 1e-5 and 1e-3, see the constants); the order
+of the fetched slots; and every fetch's coordinates with the formula's (the mask, the two normal fetches, slots 13
+and 14, slot 8 under b137, the two fog tables) within COORD_TOLERANCE.
+Made inputs: every register component a formula reads from half to twice its captured value (the constants at
+this file's head; c131.x above 1 in a tenth of the trials; c138.x in [1, 256], below 8 in four of ten; c117.x in
+[-0.6, 0.6]; c0.xy 0 in half of the trials and within 0.02 otherwise); EVERY OTHER COMPONENT of those registers
+1e21 to 1e22 with either sign; the fate drawn first (15 killed, 15 skipped, 70 shaded of 100) and c141 and the
+mask made for it (the captured c141 in half of the shaded and skipped); b136 set in six of ten, b137 in a quarter;
+the distance below 1 / c140.x in half of the trials and up to fifteen times it otherwise; the fog's start before
+the pixel in six of ten; the two normal samples anywhere in [0, 1]^2, (0.5, 0.5) every 20th trial; the sun within
+0.05 or 0.3 of the direction the pixel's surface mirrors into the eye in six of ten trials and anywhere otherwise
+(c142 times 0.9 to 1.05: it is not normalised; the aim takes the normal from light_formulas.water_normal, which
+shapes the inputs alone: see _mirrored). Three trials of 40 are degenerate (PIXEL_KINDS): "flat_zero" a flat normal with c128.x = 0 (the
+normal is 0 * infinity), "at_eye" a pixel at the eye (the view vector is 0 * infinity), "power_zero" c138.x = 0
+with the sun below a level surface (0 * -infinity): the console's product gives 0 in each, an IEEE machine no number
+(check_pixel(zero_product=False): it must disagree in such trials and in no other; it does not disagree in all of
+them, because a saturate takes no number back to 0 and the colour can then be the same).
+Counted beside agreement (a check that cannot fail is no check): the three fates; of the shaded: with the sun
+term, with the shadow factor, near (the machine's own sat(c140.x * d) below 1) and far, fogged (the machine fetched
+the tables), lit (the glint's cosine above 0) and glinting (the sun term above 1% of the colour); the degenerate
+kinds. pixel_floors() names what a run
+must reach.
+PIXEL_MUTATIONS, each of which must fail: "base" c126 and c127 exchanged; "centre" the lookup scaled about 0
+instead of the centre; "distort" c130 for c129 at slot 13; "lookup_axes" both lookups at (v, u); "flatten" c128.x
+left out; "bias" c116.x with the other sign; "mix" c131.x left out (1); "near_far" the blend's two ends exchanged;
+"range" c140.x changed by 1%; "slot14" left out of the near branch; "second_normal" c136.x left out; "power"
+c138.x changed by 1%; "sun_sign" c142 with the other sign; "sun_scale" c137.x left out; "fog" c28.x left out;
+"exposure" c20.w left out. ("literal", name) changes one literal by 1% in the formula alone; `shift=(name,
+factor)` scales it in the formula AND at its place in the machine's constants: the two must then agree again.
 """
 import argparse
 import math
@@ -72,8 +108,13 @@ DUMPS = cr.DUMPS
 VS, PS, PS_OPAQUE = lf.WATER_SHADER["vs"], lf.WATER_SHADER["ps"], lf.WATER_SHADER["ps_opaque"]
 PIXEL_HASH = {"surface": PS, "opaque": PS_OPAQUE}
 
-VERTEX_TOLERANCE = 1e-5     # spec Design 2: |value - formula| <= 1e-5 * max(1, |value|), every component
-ALPHA_TOLERANCE = 1e-6      # the alpha
+# The bounds. Spec Design 2 asks 1e-5 * max(1, |value|) of the vertex outputs and of the colour with b136 clear, 1e-3
+# relative of the colour with b136 set and 1e-6 of the alpha. Both sides are the same double arithmetic, so the
+# check holds 1e-9 instead (plan Task 3: with the spec's bounds a 1% change of the glint's power went unseen in 384
+# of 400 trials); it implies the spec's bounds wherever a colour is above 1e-6.
+VERTEX_TOLERANCE = 1e-9     # |value - formula| <= 1e-9 * max(1, |value|), every component of the vertex outputs
+ALPHA_TOLERANCE = 1e-9      # the alpha
+PIXEL_TOLERANCE = 1e-9      # the colour, with b136 clear or set: 1e-9 * max(1, |value|)
 COORD_TOLERANCE = 1e-9      # a fetch's coordinates against the formula's
 
 # The made vertex (module text).
@@ -98,6 +139,13 @@ C117X = (-0.6, 0.6)         # captured: -0.420816
 POWER_SMALL, POWER_LARGE = (1.0, 8.0), (8.0, 256.0)
 JUNK = 7777.0               # what the sampler puts in a component the fetch does not take
 ALPHA_MUTATIONS = ("ramp", "mask", "comparison")
+PIXEL_KINDS = {7: "flat_zero", 19: "at_eye", 31: "power_zero"}      # by trial % 40
+PIXEL_MUTATIONS = ("base", "centre", "distort", "lookup_axes", "flatten", "bias", "mix", "near_far", "range", "slot14",
+                   "second_normal", "power", "sun_sign", "sun_scale", "fog", "exposure")
+HELD_LITERALS = ("half", "one", "two", "minus_one", "minus_two")    # "zero" cannot be scaled
+# {register: the components no formula reads}, from light_formulas.WATER_SHADER["ps_read"], which
+# read_components("ps") holds to the interpreter's own account (tests/test_water_formulas.py).
+UNREAD = {reg: tuple(k for k in range(4) if k not in lf.WATER_SHADER["ps_read"][reg]) for reg in lf.WATER_SHADER["ps_reg"]}
 
 # trials; those that disagree; the largest relative error; the first failure's text (None).
 Result = namedtuple("Result", "trials failed worst first_failure")
@@ -106,6 +154,12 @@ AlphaResult = namedtuple("AlphaResult", "trials failed killed skipped shaded wor
 # trials; those the machine killed at all three masks; controls not killed; controls; trials whose alpha is below 1
 # in single precision too; trials at the margin; the k_8 levels killed with the captured c141 (of 256).
 DeadResult = namedtuple("DeadResult", "trials killed control_kept controls single_killed at_margin levels")
+# trials; those that disagree; by the machine's fate: killed, skipped, shaded; of the shaded: with the sun term
+# (b136), with the shadow factor (b137), near, far, fogged; the largest relative error of the colour; the first
+# failure's text (None); of the shaded: the sun term above 1% of the colour; the trials of each degenerate kind; the
+# failed trials by kind ("" for a trial that is not degenerate); of the shaded: the sun term above 0.
+PixelResult = namedtuple("PixelResult", "trials failed killed skipped shaded sun shadow near far fogged worst first_failure "
+                                        "glinting kinds failed_kinds lit")
 
 
 def f32(x):
@@ -128,9 +182,8 @@ def _unit(rng):
             return [x / n for x in v]
 
 
-def _compare(got, want, tolerance, relative=False):
-    """(agree, the largest error of the components that are numbers on both sides). The error is
-    |got - want| / max(1, |got|), or with `relative` |got - want| / the larger magnitude."""
+def _compare(got, want, tolerance):
+    """(agree, the largest error, |got - want| / max(1, |got|), of the components that are numbers on both sides)."""
     ok, worst = True, 0.0
     for g, w in zip(got, want):
         if g != g or w != w:
@@ -140,7 +193,7 @@ def _compare(got, want, tolerance, relative=False):
         elif math.isinf(g) or math.isinf(w):
             ok = False
         else:
-            error = abs(g - w) / (max(abs(g), abs(w)) if relative else max(1.0, abs(g)))
+            error = abs(g - w) / max(1.0, abs(g))
             worst = max(worst, error)
             ok = ok and error <= tolerance
     return ok, worst
@@ -279,6 +332,16 @@ def _around(rng, value):
     return f32(value * rng.uniform(0.5, 2.0))
 
 
+def _mirrored(view, normal, coords, c128x, c136x):
+    """The direction a made pixel's surface mirrors into the eye: `view` reflected about the sun's second normal.
+    It only AIMS a made sun (through light_formulas.water_normal: a wrong normal there would aim the made suns
+    badly, and every trial would still be compared with the machine)."""
+    _, n = lf.water_normal(normal(coords[0], coords[1]), normal(coords[2], coords[3]), c128x)
+    n2 = lf.normalize([n[0], n[1], c136x * n[2]])
+    twice = 2.0 * lf.dot(n2, view)
+    return [twice * n2[k] - view[k] for k in range(3)]
+
+
 def _base_pixel(rng, text, kind):
     """A made pixel but for its mask sample and c141: every register a formula reads about its captured value,
     every other component of those registers garbage, every other register random."""
@@ -320,18 +383,12 @@ def _base_pixel(rng, text, kind):
     start = distance * rng.uniform(0.1, 0.9) if rng.random() < 0.6 else distance + rng.uniform(1.0, 50.0)
     slope = rng.uniform(0.001, 0.02) if rng.random() < 0.5 else rng.uniform(0.02, 1.0)
     c[67][0], c[67][2], c[67][3] = f32(start), f32(slope), f32(rng.uniform(0.0005, 0.01))
-    # The sun: towards the eye's mirror direction about a level surface in six trials of ten (so that the power
-    # of the cosine is not 0 everywhere), anywhere otherwise; c142 points FROM the sun and is not a unit vector.
+    # The sun: in six trials of ten near the direction that the surface mirrors into the eye (so that the power of
+    # the cosine is not 0 nearly everywhere), anywhere otherwise; it is aimed below, once the normal map is made.
     view = [(eye[k] - place[k]) / distance for k in range(3)] if distance > 0.0 else [0.0, 0.0, 1.0]
-    if rng.random() < 0.6:
-        spread = rng.choice((0.05, 0.3))
-        light = [-view[0] + rng.uniform(-spread, spread), -view[1] + rng.uniform(-spread, spread), view[2] + rng.uniform(-spread, spread)]
-        n = math.sqrt(sum(x * x for x in light)) or 1.0
-        light = [x / n for x in light]
-    else:
-        light = _unit(rng)
+    aim = [rng.uniform(-s, s) for s in [rng.choice((0.05, 0.3))] * 3] if rng.random() < 0.6 else None
+    light = _unit(rng) if aim is None else None
     length = rng.uniform(0.9, 1.05)
-    c[142][:3] = [f32(-x * length) for x in light]
     bools = set()
     if rng.random() < 0.6:
         bools.add(136)
@@ -348,6 +405,11 @@ def _base_pixel(rng, text, kind):
     wave2, mirror, near14, shadow1 = _wave(rng, 2, 0.0, 1.0), _wave(rng, 3, 0.0, 1.5), _wave(rng, 3, 0.0, 1.5), _wave(rng, 1, 0.0, 1.0)
     tf4 = lf.table_1d([[rng.uniform(0.05, 3.0) for _ in range(3)] for _ in range(64)])
     tf5 = lf.table_1d([[rng.random() for _ in range(3)] for _ in range(256)])
+    if light is None:
+        light = [mirrored + off for mirrored, off in zip(_mirrored(view, wave2, regs[1], c[128][0], c[136][0]), aim)]
+        n = math.sqrt(sum(x * x for x in light)) or 1.0
+        light = [x / n for x in light]
+    c[142][:3] = [f32(-x * length) for x in light]      # c142 points FROM the sun and is not a unit vector
     return PixelCase(text, kind, c, regs, bools, 0.0, None, lambda u, v: tuple(wave2(u, v)), mirror, near14,
                      lambda u, v: shadow1(u, v)[0], tf4, tf5, distance)
 
@@ -524,6 +586,256 @@ def check_dead(trials=2000, seed=1, dumps=DUMPS):
     return DeadResult(trials, killed, control_kept, controls, single_killed, at_margin, levels)
 
 
+# --- the pixel ----------------------------------------------------------------------------------------------------
+
+def _for_fate(rng, fate, kind, m):
+    """A c141 that gives the made pixel `fate` under shader `kind` with the mask sample m (module text)."""
+    y = rng.uniform(0.4, 3.0)
+    lit = fate == ("killed" if kind == "opaque" else "shaded") or (kind == "surface" and fate == "skipped")
+    if lit:                                     # the ramp above 0: alpha below 1
+        ramp = rng.uniform(0.02, 0.9) if fate != "skipped" or rng.random() < 0.5 else rng.uniform(0.9, 1.5)
+        alpha = 1.0 - min(ramp, 1.0)
+        if fate == "skipped":
+            threshold = min(alpha + rng.uniform(0.0, 0.2), 1.2)
+        else:
+            threshold = alpha * rng.uniform(0.0, 0.95)
+    else:                                       # the ramp at or below 0: alpha 1
+        ramp = -rng.uniform(0.0, 0.5)
+        threshold = rng.uniform(1.0, 1.2) if fate == "skipped" else rng.uniform(0.0, 0.95)
+    return [ramp + (1.0 - m) * y, y, 0.0, threshold]
+
+
+def made_pixel(seed=1, trial=0, dumps=DUMPS, text=None, kind="surface"):
+    """The made pixel of one trial of the pixel check (deterministic in seed and trial; module text)."""
+    rng = random.Random("water-pixel/%d/%d" % (seed, trial))
+    case = _base_pixel(rng, text if text is not None else _text(dumps, PIXEL_HASH[kind]), kind)
+    label = PIXEL_KINDS.get(trial % 40, "")
+    draw = rng.random()
+    fate = "shaded" if label or draw < 0.7 else "killed" if draw < 0.85 else "skipped"
+    captured = kind == "surface" and fate != "killed" and rng.random() < 0.5
+    if captured:            # the captured ramp: alpha above the threshold for a mask below 0.47, 0 from 0.5015
+        m = f32(rng.uniform(0.0, 0.47) if fate == "shaded" else rng.uniform(0.502, 1.0))
+        c141 = list(CAPTURED_C141)
+    else:
+        m = _mask_sample(rng, trial)
+        c141 = _for_fate(rng, fate, kind, m)
+    _set_mask(case, m, c141)
+    flat = (0.5, 0.5)
+    if trial % 20 == 3 or label in ("flat_zero", "power_zero"):
+        case.normal = lambda u, v: flat
+    if label == "flat_zero":
+        case.consts[128][0] = 0.0
+    elif label == "at_eye":
+        case.regs[0][:3] = case.consts[19][:3]
+        case.distance = 0.0
+    elif label == "power_zero":
+        case.bools = case.bools | {136}
+        case.consts[138][0] = 0.0
+        case.consts[142][:3] = [0.0, 0.0, f32(rng.uniform(0.9, 1.05))]         # the sun below a level surface: the cosine is 0
+    case.label = label
+    return case
+
+
+def _case_inputs(case, consts=None):
+    c = consts or case.consts
+    return (case.regs[4][:2], case.regs[0][:3], case.regs[1][:2], case.regs[1][2:4],
+            {reg: list(c[reg]) for reg in lf.WATER_SHADER["ps_reg"]})
+
+
+def formula_pixel(case, mutation=None, lit=None, consts=None):
+    """light_formulas.water_pixel for the case (its whole result). `mutation`: one of PIXEL_MUTATIONS or
+    ("literal", name); a mutant is the same function on changed inputs (a register, a texture read elsewhere),
+    so that it is a mutant of the formula that is checked."""
+    q, P, coord_a, coord_b, c = _case_inputs(case, consts)
+    lit = dict(lit or lf.water_literals())
+    tex = case.tex()
+    moved = None
+    if isinstance(mutation, tuple):
+        lit[mutation[1]] *= 1.01
+    elif mutation == "base":
+        c[126], c[127] = c[127], c[126]
+    elif mutation == "centre":                  # (x * c31) in the place of ((x - 1/2) * c31 + 1/2)
+        dx, dy = 0.5 * c[31][0] - 0.5, 0.5 * c[31][1] - 0.5
+        moved = lambda u, v: (u + dx, v + dy)                                   # noqa: E731
+    elif mutation == "distort":
+        c[129] = c[130]
+    elif mutation == "lookup_axes":
+        moved = lambda u, v: (v, u)                                             # noqa: E731
+    elif mutation == "flatten":
+        c[128][0] = 1.0
+    elif mutation == "bias":
+        c[116][0] = -c[116][0]
+    elif mutation == "mix":
+        c[131][0] = 1.0
+    elif mutation == "near_far":                # the blend's weight w for 1 - w
+        first = lf.water_pixel(q, P, coord_a, coord_b, case.m, c, tex, bools=case.bools, kind=case.kind, lit=lit)
+        if first["fate"] == "shaded" and first["distance"] > 0.0:
+            w = lf.sat(c[140][0] * first["distance"])
+            c[140][0] = (1.0 - w) / first["distance"]
+    elif mutation == "range":
+        c[140][0] *= 1.01
+    elif mutation == "slot14":                  # the near branch's own blend at 1: slot 13 alone
+        c[117][0] = 1e9
+    elif mutation == "second_normal":
+        c[136][0] = 1.0
+    elif mutation == "power":
+        c[138][0] *= 1.01
+    elif mutation == "sun_sign":
+        c[142] = [-x for x in c[142]]
+    elif mutation == "sun_scale":
+        c[137][0] = 1.0
+    elif mutation == "fog":
+        c[28][0] = 1.0
+    elif mutation == "exposure":
+        c[20][3] = 1.0
+    if moved is not None:
+        tex[13] = lambda u, v, f=tex[13]: f(*moved(u, v))                       # noqa: E731
+        tex[14] = lambda u, v, f=tex[14]: f(*moved(u, v))                       # noqa: E731
+    out = lf.water_pixel(q, P, coord_a, coord_b, case.m, c, tex, bools=case.bools, kind=case.kind, lit=lit)
+    if moved is not None and out["fate"] == "shaded":
+        out["lookup"], out["lookup14"] = moved(*out["lookup"]), moved(*out["lookup14"])
+    return out
+
+
+def _shifted(consts, lit, shift):
+    """(constants, literals) with literal `shift[0]` scaled by `shift[1]` at its place and by its name."""
+    name, factor = shift
+    reg, comp = lf.WATER_SHADER["ps_lit_at"][name]
+    consts = dict(consts)
+    consts[reg] = list(consts[reg])
+    consts[reg][comp] *= factor
+    lit = dict(lit)
+    lit[name] *= factor
+    return consts, lit
+
+
+def expected_fetches(case, want):
+    """[(slot, coordinates)] the machine must have fetched, in order, for the formula's result `want`."""
+    out = [(1, tuple(case.regs[3][:2]))]
+    if want["fate"] != "shaded":
+        return out
+    out += [(2, tuple(case.regs[1][:2])), (2, tuple(case.regs[1][2:4])), (13, tuple(want["lookup"])), (14, tuple(want["lookup14"]))]
+    if want["shadow_at"] is not None:
+        out.append((8, tuple(want["shadow_at"])))
+    if want["fog_at"] is not None:
+        out += [(4, (want["fog_at"][0],)), (5, (want["fog_at"][1],))]
+    return out
+
+
+def _same_fetches(machine, expected):
+    got = [(f[1], f[2]) for f in machine.fetches]
+    if [g[0] for g in got] != [e[0] for e in expected]:
+        return False
+    return all(_compare(g[1], e[1], COORD_TOLERANCE)[0] for g, e in zip(got, expected))
+
+
+PixelTrial = namedtuple("PixelTrial", "ok error fate got want machine")
+
+
+def evaluate_pixel(case, mutation=None, shift=None, zero_product=True):
+    """One trial: PixelTrial(agree, the colour's largest relative error, the machine's fate, the machine's oC0, the
+    formula's result, the machine)."""
+    consts, lit = case.consts, lf.water_literals()
+    if shift is not None:
+        consts, lit = _shifted(consts, lit, shift)
+    out, m = run_pixel(case, consts=consts, zero_product=zero_product)
+    fate = machine_fate(m)
+    got = [float(x) for x in out["oC0"]]
+    want = formula_pixel(case, mutation, lit, consts)
+    ok, error = fate == want["fate"], 0.0
+    if ok and fate == "killed":                 # a killed pixel has no output; the kill precedes every other fetch
+        ok = m.fetches[0][1:] == (1, tuple(case.regs[3][:2]))
+    elif ok:
+        ok = _same_fetches(m, expected_fetches(case, want)) and abs(got[3] - want["alpha"]) <= ALPHA_TOLERANCE
+        if fate == "skipped":
+            ok = ok and got[:3] == [0.0, 0.0, 0.0] == list(want["colour"])
+        else:
+            same, error = _compare(got[:3], want["colour"], PIXEL_TOLERANCE)
+            ok = ok and same
+    return PixelTrial(ok, error, fate, got, want, m)
+
+
+def check_pixel(trials=2000, seed=1, mutation=None, dumps=DUMPS, shift=None, zero_product=True):
+    """`trials` made pixels of A17D against water_pixel: PixelResult (module text)."""
+    _check_mutation(mutation, PIXEL_MUTATIONS, lf.WATER_SHADER["ps_lit_at"])
+    text = _text(dumps, PS)
+    counts = {"killed": 0, "skipped": 0, "shaded": 0}
+    failed = sun = shadow = near = far = fogged = glinting = lit = 0
+    worst, first, kinds, failed_kinds = 0.0, None, {}, {}
+    for k in range(trials):
+        case = made_pixel(seed, k, text=text)
+        t = evaluate_pixel(case, mutation, shift, zero_product)
+        counts[t.fate] += 1
+        worst = max(worst, t.error)
+        if case.label:
+            kinds[case.label] = kinds.get(case.label, 0) + 1
+        if t.fate == "shaded":
+            sun += 136 in case.bools
+            shadow += 137 in case.bools
+            weight = t.machine.r[1][3]          # instr 58: sat(c140.x * d); nothing writes r1.w after it
+            near += weight < 1.0
+            far += weight == 1.0
+            fogged += any(f[1] == 4 for f in t.machine.fetches)
+            glinting += t.want["glint"] > 0.01
+            lit += 136 in case.bools and t.want["fate"] == "shaded" and max(t.want["sun"]) > 0.0
+        if not t.ok:
+            failed += 1
+            failed_kinds[case.label] = failed_kinds.get(case.label, 0) + 1
+            first = first or "trial %d (seed %d%s, bools %s, %.6g units): relative error %.3e; the machine %s with %s, the formula %s with %s alpha %r" % (
+                k, seed, ", " + case.label if case.label else "", sorted(case.bools), case.distance, t.error, t.fate, t.got,
+                t.want["fate"], t.want["colour"], t.want["alpha"])
+    return PixelResult(trials, failed, counts["killed"], counts["skipped"], counts["shaded"], sun, shadow, near, far, fogged,
+                       worst, first, glinting, kinds, failed_kinds, lit)
+
+
+def pixel_floors(r):
+    """The floors a run of check_pixel must reach to count (review focus 1), as problems (texts)."""
+    out = []
+    tenth = r.trials // 10
+    if min(r.killed, r.skipped, r.shaded) < tenth:
+        out.append("a fate has fewer than a tenth of the trials")
+    if min(r.sun, r.shaded - r.sun) < tenth:
+        out.append("bool b136 is set, or clear, in fewer than a tenth of the trials among the shaded")
+    if r.shadow < max(1, r.trials // 20) or r.shaded - r.shadow < tenth:
+        out.append("bool b137 is set in fewer than a twentieth, or clear in fewer than a tenth")
+    if min(r.near, r.far) < tenth:
+        out.append("a side of the range 1 / c140.x has fewer than a tenth of the trials")
+    if min(r.fogged, r.shaded - r.fogged) < tenth:
+        out.append("a side of the fog's start has fewer than a tenth of the trials")
+    if 3 * r.lit < r.sun:
+        out.append("the glint's cosine is above 0 in fewer than a third of the trials with the sun term")
+    if r.glinting < r.trials // 20:
+        out.append("the sun term is above 1% of the colour in fewer than a twentieth of the trials")
+    return out
+
+
+def single_gap(trials=2000, seed=1, dumps=DUMPS):
+    """How far water_pixel in single precision lies from the double reference on the made pixels that are shaded
+    and not degenerate: {with the sun term (bool): (pixels, the median, the 99th percentile, the largest)} of the
+    colour's largest difference, |single - double| / max(1, |double|). Reported, not a check: it says what bound a
+    single-precision mirror pinned to the DOUBLE reference would need (the mirror is pinned to the single one)."""
+    text = _text(dumps, PS)
+    gaps = {False: [], True: []}
+    for k in range(trials):
+        case = made_pixel(seed, k, text=text)
+        if case.label:
+            continue
+        q, P, coord_a, coord_b, c = _case_inputs(case)
+        double = lf.water_pixel(q, P, coord_a, coord_b, case.m, c, case.tex(), bools=case.bools)
+        if double["fate"] != "shaded":
+            continue
+        single = lf.water_pixel(q, P, coord_a, coord_b, case.m, c, case.tex(), bools=case.bools, single=True)
+        if single["fate"] != "shaded":
+            continue
+        gaps[136 in case.bools].append(max(abs(x - y) / max(1.0, abs(x)) for x, y in zip(double["colour"], single["colour"])))
+    out = {}
+    for key, g in gaps.items():
+        g.sort()
+        n = len(g)
+        out[key] = (n, g[n // 2], g[min(n - 1, int(n * 0.99))], g[-1]) if n else (0, 0.0, 0.0, 0.0)
+    return out
+
+
 # --- what the shaders read ----------------------------------------------------------------------------------------
 
 def used_registers(which="vs", seed=1, trials=8, dumps=DUMPS):
@@ -555,8 +867,9 @@ def read_components(which="vs", seed=1, cases=None, dumps=DUMPS, bools=None):
     each register the shader uses is changed in turn (x * 1.5 + 0.37) on made inputs, and it counts as read when
     any output differs in any of them. "vs": the outputs a pixel shader reads (oPos, o0.xyz, o1, o3.xy) over
     `cases` made draws (default 8). "ps" / "ps_opaque": the kill, oC0 and every fetch's slot and coordinates over
-    `cases` shaded pixels (default 64) with both bools set and the fog begun (`bools`: another set). The literal
-    registers are left out."""
+    `cases` shaded pixels (default 64) with both bools set and the fog begun (`bools`: another set) and over 16
+    pixels of the alpha check (where a change of c141 moves the fate: on F6D9's shaded pixels the ramp is saturated
+    and only c141.x shows). The literal registers are left out."""
     if which == "vs":
         text = _text(dumps, VS)
         made = [made_vertex(seed, t, text=text) for t in range(cases or 8)]
@@ -567,6 +880,7 @@ def read_components(which="vs", seed=1, cases=None, dumps=DUMPS, bools=None):
         kind = {"ps": "surface", "ps_opaque": "opaque"}[which]
         text = _text(dumps, PIXEL_HASH[kind])
         made = [shaded_case(seed, t, text=text, kind=kind) for t in range(cases or 64)]
+        made += [made_alpha(seed, t, text=text, kind=kind) for t in range(16)]      # the fates: c141 past a saturated ramp
 
         def account(case, consts):
             out, m = run_pixel(case, consts=consts, bools=bools)
@@ -647,6 +961,42 @@ def cmd_formulas(args, say=print):
             m = check_alpha(min(args.trials, 400), args.seed, mutation=name, kind=kind, dumps=args.dumps)
             bad += m.failed == 0
             say("  mutation %-13s: %d of %d trials disagree%s" % (name, m.failed, m.trials, "" if m.failed else ": NOT CAUGHT"))
+    say("pixel shader %s against light_formulas.water_pixel: %d made pixels, seed %d; the colour within %g * max(1, "
+        "|value|) with b136 clear or set (the spec: 1e-5 and, with it set, 1e-3 relative); the alpha within %g; every "
+        "fetch's slot and coordinates within %g" % (PS, args.trials, args.seed, PIXEL_TOLERANCE, ALPHA_TOLERANCE, COORD_TOLERANCE))
+    r = check_pixel(args.trials, args.seed, dumps=args.dumps)
+    problems = pixel_floors(r) + (["first failure: %s" % r.first_failure] if r.failed else [])
+    say("pixel %d / %d; killed %d, skipped %d, shaded %d; of the shaded: with the sun term %d (its cosine above 0 in %d, "
+        "the term above 1%% of the colour in %d), with the shadow factor %d, near %d, far %d, fogged %d; degenerate %s; "
+        "worst relative error %.3e%s" % (
+            r.trials - r.failed, r.trials, r.killed, r.skipped, r.shaded, r.sun, r.lit, r.glinting, r.shadow, r.near, r.far, r.fogged,
+            ", ".join("%s %d" % kv for kv in sorted(r.kinds.items())) or "none", r.worst, ": OK" if not problems else ": FAILED"))
+    for text in problems:
+        say("  " + text)
+    bad += bool(problems)
+    ieee = check_pixel(args.trials, args.seed, dumps=args.dumps, zero_product=False)
+    elsewhere = ieee.failed_kinds.get("", 0)
+    bad += elsewhere > 0 or ieee.failed == 0
+    say("without the console's product rule in the interpreter: %d of %d disagree, %d of them outside the %d trials of a "
+        "degenerate kind (%s; a saturate takes some of an IEEE machine's no-numbers back to 0)%s" % (
+            ieee.failed, ieee.trials, elsewhere, sum(ieee.kinds.values()),
+            ", ".join("%s %d of %d" % (kind, ieee.failed_kinds.get(kind, 0), n) for kind, n in sorted(ieee.kinds.items())),
+            "" if not elsewhere and ieee.failed else ": FAILED"))
+    for sun, (n, median, p99, largest) in sorted(single_gap(args.trials, args.seed, args.dumps).items()):
+        say("single precision against the double reference (reported, not a check), %d shaded pixels %s the sun term: "
+            "median %.2e, 99th percentile %.2e, largest %.2e of max(1, |colour|)" % (n, "with" if sun else "without", median, p99, largest))
+    for name in PIXEL_MUTATIONS:
+        m = check_pixel(min(args.trials, 400), args.seed, mutation=name, dumps=args.dumps)
+        bad += m.failed == 0
+        say("  mutation %-13s: %d of %d trials disagree%s" % (name, m.failed, m.trials, "" if m.failed else ": NOT CAUGHT"))
+    for name in HELD_LITERALS:
+        alone = check_pixel(min(args.trials, 400), args.seed, mutation=("literal", name), dumps=args.dumps)
+        both = check_pixel(min(args.trials, 400), args.seed, shift=(name, 1.01), dumps=args.dumps)
+        ok = alone.failed > 0 and both.failed == 0
+        bad += not ok
+        reg, comp = lf.WATER_SHADER["ps_lit_at"][name]
+        say("  literal %-9s (c%d.%s) by 1%%: in the formula alone %d of %d disagree; in the formula and at its place %d%s" % (
+            name, reg, "xyzw"[comp], alone.failed, alone.trials, both.failed, "" if ok else ": NOT HELD"))
     say("all agree" if not bad else "%d checks FAILED" % bad)
     return 1 if bad else 0
 
@@ -693,6 +1043,18 @@ def cmd_used(args, say=print):
         ok = read == lf.WATER_SHADER["ps_in"]
         bad += not ok
         say("interpolator components %s (%s) reads: %s%s" % (PIXEL_HASH[kind], kind, _named(read, "r"), "" if ok else ": NOT THE TABLE'S"))
+    for which, hash_ in (("ps", PS), ("ps_opaque", PS_OPAQUE)):
+        read = read_components(which, dumps=args.dumps)
+        ok = read == lf.WATER_SHADER["ps_read"]
+        bad += not ok
+        say("pixel components %s reads (64 shaded pixels, both bools set): %s%s" % (hash_, _named(read), "" if ok else ": NOT THE TABLE'S"))
+    for bool_, registers in sorted(lf.WATER_SHADER["ps_read_under"].items()):
+        read = read_components("ps", dumps=args.dumps, bools={136, 137} - {bool_})
+        gone = sorted(set(lf.WATER_SHADER["ps_read"]) - set(read))
+        ok = gone == sorted(registers)
+        bad += not ok
+        say("with bool b%d clear the registers no longer read: c%s%s" % (bool_, ", c".join(str(r) for r in gone), "" if ok else ": NOT THE TABLE'S"))
+    say("components no formula reads (water_check.UNREAD): %s" % _named({r: k for r, k in UNREAD.items() if k}))
     say("as the tables say" if not bad else "%d checks FAILED" % bad)
     return 1 if bad else 0
 

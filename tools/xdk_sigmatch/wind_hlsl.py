@@ -16,7 +16,14 @@ the loads of the words from t9 in the vertex main (held by text in tests/test_wi
 The translation is not the wind's alone: `translate` and `region` take the two strings a text stands between and
 the functions it must hold, and `Region` compiles any such text and runs it in a caller's environment. The far
 woods' impostor programs are held the same way (distant trees, plan Task 10: tests/test_impostor_hlsl.py; the
-strings are IMPOSTOR_VERTEX and IMPOSTOR_PIXEL below).
+strings are IMPOSTOR_VERTEX and IMPOSTOR_PIXEL below), and so are the water step's (the water sub-project, plan
+Task 7: tests/test_water_hlsl.py; WATER_VERTEX and WATER_PIXEL), for which the translation gained: a conditional
+`return (c) ? a : b;`; a check of every call against the names a caller allows (`known`: the text's own functions,
+WATER_INTRINSICS and the callbacks the caller names, so that `normalize`, `mul`, `pow`, `clip` and a sampler
+nobody supplied stop the translation instead of failing somewhere in a run); and `water_env`, the intrinsics the
+water text may call, of a number or a Vec, computed as an IEEE machine computes them (rsqrt of 0 is infinite, log2
+of 0 minus infinite, 0 times infinite no number: the console's zero product is the TEXT's to write, ledger ruling
+34, and a text without its guards must show as wrong).
 
   wind_hlsl.py [<fable2_native_shaders.h>]     prints the translated program
 """
@@ -35,6 +42,17 @@ IMPOSTOR_VERTEX = ("// IMPOSTOR VERTEX TEXT BEGIN\n", "// IMPOSTOR VERTEX TEXT E
                    ("ImpostorPlace", "ImpostorCoord", "ImpostorPosition", "ImpostorFogCoords", "ImpostorFogFactor", "ImpostorFogAdd"))
 IMPOSTOR_PIXEL = ("// IMPOSTOR PIXEL TEXT BEGIN\n", "// IMPOSTOR PIXEL TEXT END\n",
                   ("ImpostorDistance", "ImpostorPixel", "ImpostorKeep", "ImpostorOut"))
+# The water step's two texts (shaders::kClayWaterVs, kClayWaterPs: plan Task 12 writes them). WaterView (the unit view
+# vector and the distance: one of the three guarded reciprocal square roots) and WaterFinite (1 when a colour and
+# its alpha are numbers: the main discards otherwise) are beyond the plan's list (ledger ruling 34).
+WATER_VERTEX = ("// WATER VERTEX TEXT BEGIN\n", "// WATER VERTEX TEXT END\n", ("WaterCoords",))
+WATER_PIXEL = ("// WATER PIXEL TEXT BEGIN\n", "// WATER PIXEL TEXT END\n",
+               ("WaterAlpha", "WaterNormalSum", "WaterNormal", "WaterLookup", "WaterView", "WaterFresnel", "WaterBase", "WaterMix", "WaterSun",
+                "WaterFinite"))
+# What the water text may call beside its own functions. NOT normalize (the text writes the reference's own
+# x * rsqrt(x . x) with its guard), not pow (the power is exp2 of a product, guarded), not mul or clip.
+WATER_INTRINSICS = ("saturate", "sqrt", "abs", "rsqrt", "dot", "lerp", "exp2", "log2", "max", "min")
+_PYTHON_WORDS = ("if", "else", "and", "or", "not", "return", "def")
 
 
 class Untranslated(ValueError):
@@ -117,7 +135,57 @@ def wind_text(header_text):
     return region(header_text)
 
 
-def translate(header_text, begin=BEGIN, end=END, functions=FUNCTIONS):
+def _each(f):
+    return lambda x: Vec(*[f(v) for v in x.values]) if isinstance(x, Vec) else f(float(x))
+
+
+def _ieee_sqrt(x):
+    return math.sqrt(x) if x >= 0.0 else math.nan
+
+
+def _ieee_rsqrt(x):
+    if x != x or x < 0.0:
+        return math.nan
+    return math.inf if x == 0.0 else 1.0 / math.sqrt(x)
+
+
+def _ieee_log2(x):
+    if x != x or x < 0.0:
+        return math.nan
+    return -math.inf if x == 0.0 else math.log2(x) if x != math.inf else math.inf
+
+
+def _ieee_exp2(x):
+    if x != x:
+        return math.nan
+    try:
+        return 2.0 ** x
+    except OverflowError:
+        return math.inf
+
+
+def _d3d_saturate(x):
+    return min(max(x, 0.0), 1.0) if x == x else 0.0
+
+
+def _dot(a, b):
+    if not (isinstance(a, Vec) and isinstance(b, Vec)) or len(a.values) != len(b.values):
+        raise ValueError("dot of two vectors of one size")
+    return sum(x * y for x, y in zip(a.values, b.values))
+
+
+def _lerp(a, b, t):
+    return a + (b - a) * t
+
+
+def water_env():
+    """The intrinsics of WATER_INTRINSICS as a Region's environment: each of a number or of a Vec, component by
+    component, in IEEE arithmetic (module text); saturate is Direct3D's (no number gives 0)."""
+    return {"saturate": _each(_d3d_saturate), "sqrt": _each(_ieee_sqrt), "abs": _each(abs), "rsqrt": _each(_ieee_rsqrt), "dot": _dot,
+            "lerp": _lerp, "exp2": _each(_ieee_exp2), "log2": _each(_ieee_log2), "max": max, "min": min}
+
+
+def translate(header_text, begin=BEGIN, end=END, functions=FUNCTIONS, known=None):
     """(Python source, {a define's name: the place it names}) of the text between `begin` and `end` (the wind's
     by default). Rules, a line each: a comment is dropped; `#define NAME block[r].c` (or `block[r]`) names a
     place in a constant block (a literal's slot `o_wind_lit[r].c`, a register row `i_vs[r]`) and the name is
@@ -125,8 +193,10 @@ def translate(header_text, begin=BEGIN, end=END, functions=FUNCTIONS):
     line ends in `}`); `}` closes it or a block; `precise` and a declaration's type are dropped;
     `[branch] if (c) x = y;` is an if, `[branch] if (c) {` an if whose statements are the lines indented under
     it; `x = (c) ? a : b;` is a conditional; `&&` and `||` are `and` and `or`; `float2(`, `float3(` and
-    `float4(` build a Vec. Anything left that still reads as HLSL raises Untranslated, and so does a text
-    without one of `functions`."""
+    `float4(` build a Vec; `return (c) ? a : b;` is a conditional return. Anything left that still reads as HLSL
+    raises Untranslated, and so does a text without one of `functions`. `known` (a tuple of names; None asks
+    nothing): every call in the text must then be of one of them, of a function of the text or the building of a
+    Vec, or Untranslated names it."""
     defines, out = {}, []
     for raw in region(header_text, begin, end).split("\n"):
         line = raw.split("//")[0].rstrip()
@@ -165,6 +235,9 @@ def translate(header_text, begin=BEGIN, end=END, functions=FUNCTIONS):
         m = re.fullmatch(r"(\s*\w+ = )\((.*)\) \? (.*) : (.*);", line)
         if m:
             line = "%s(%s) if (%s) else (%s)" % (m.group(1), m.group(3), m.group(2), m.group(4))
+        m = re.fullmatch(r"(\s*)return \((.*)\) \? (.*) : (.*);", line)
+        if m:
+            line = "%sreturn (%s) if (%s) else (%s)" % (m.group(1), m.group(3), m.group(2), m.group(4))
         line = re.sub(r"\bfloat[234]\(", "Vec(", line)
         out.append(line.rstrip(";"))
     code = "\n".join(out)
@@ -176,6 +249,11 @@ def translate(header_text, begin=BEGIN, end=END, functions=FUNCTIONS):
     for name in functions:
         if "def %s(" % name not in code:
             raise Untranslated("no function %s in the text" % name)
+    if known is not None:
+        allowed = set(known) | set(re.findall(r"^def (\w+)\(", code, re.M)) | {"Vec"} | set(_PYTHON_WORDS)
+        for name in re.findall(r"\b([A-Za-z_]\w*)\(", code):
+            if name not in allowed:
+                raise Untranslated("a call of `%s`, which no rule knows" % name)
     return code, defines
 
 
@@ -184,8 +262,8 @@ class Region:
     its functions with `env`'s names for everything the text does not define itself: the constant blocks (lists
     of Vec, numbers), the intrinsics it calls and the functions of other texts. `Vec` and `saturate` are given."""
 
-    def __init__(self, header_text, begin, end, functions):
-        self.source, self.defines = translate(header_text, begin, end, functions)
+    def __init__(self, header_text, begin, end, functions, known=None):
+        self.source, self.defines = translate(header_text, begin, end, functions, known)
         self.code = compile(self.source, "<a text of fable2_native_shaders.h>", "exec")
 
     def functions(self, env):

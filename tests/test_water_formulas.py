@@ -638,7 +638,7 @@ class Pins(unittest.TestCase):
         whole = [water_check.f32(c[137][0] * c[143][k]) for k in range(3)]
         for got, want in zip(made["power_zero"][1][8], whole):
             self.assertAlmostEqual(got, want, places=6)
-        self.assertEqual(made["second_flat"][1][8], (0.0, 0.0, 0.0))  # N2 = 0: no direction mirrors the sun
+        self.assertEqual(made["second_flat"][1][8], (0.0, 0.0, 0.0))  # N2 = 0: the cosine is sat(V . c142), 0 with the eye above and the sun too
         self.assertEqual(made["flat_zero"][1][5], (0.0, 0.0, 0.0))    # N = 0 * infinity = 0
         self.assertEqual(made["at_eye"][1][7], 0.0)
 

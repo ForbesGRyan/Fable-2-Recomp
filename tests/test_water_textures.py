@@ -170,6 +170,33 @@ class Fetch(unittest.TestCase):
             wt.fetch(cube, "dxn")
         with self.assertRaises(ValueError):
             wt.fetch(NORMAL_FC, "other")
+
+    def test_a_signed_biased_or_exponent_adjusted_constant_is_refused(self):
+        """Ledger ruling 33 (the review of Tasks 1 to 5, I1): the dead draw's proof needs the mask's sample to be a
+        number in [0, 1]; a fetch constant that delivers it signed, biased, as an integer or with an exponent adjust
+        is not the water's."""
+        def changed(fc, dword, clear, bits):
+            words = [int(v, 16) if isinstance(v, str) else int(v) for v in fc]
+            words[dword] = (words[dword] & ~clear) | bits
+            return words
+        for kind, fc, delivered in (("k8", MASK_FC, 1), ("dxn", NORMAL_FC, 2)):
+            wt.fetch(fc, kind)                                    # the captured constant is inside the rule
+            for component in range(delivered):
+                for sign in (1, 2, 3):                            # signed, unsigned biased, gamma
+                    with self.assertRaises(ValueError) as e:
+                        wt.fetch(changed(fc, 0, 3 << (2 + 2 * component), sign << (2 + 2 * component)), kind)
+                    self.assertIn("sign", str(e.exception))
+            with self.assertRaises(ValueError) as e:
+                wt.fetch(changed(fc, 3, 0x3F << 13, 1 << 13), kind)       # an exponent adjust of 1
+            self.assertIn("exponent", str(e.exception))
+            with self.assertRaises(ValueError) as e:
+                wt.fetch(changed(fc, 3, 0x3F << 13, 0x3F << 13), kind)    # of -1
+            self.assertIn("exponent", str(e.exception))
+            with self.assertRaises(ValueError) as e:
+                wt.fetch(changed(fc, 3, 1, 1), kind)                      # the integer number format
+            self.assertIn("number format", str(e.exception))
+            # a sign of a component the shader is not given (the mask's w is the constant 1) is not judged
+            wt.fetch(changed(fc, 0, 3 << 8, 1 << 8), kind)
         # any constant, whatever its format: the fields a census prints
         p = wt.describe(PICTURE_FC)
         self.assertEqual((p["format"], p["width"], p["height"], p["endian"], p["swizzle"], p["base"]), (6, 256, 256, 2, (2, 1, 0, 3), 0x13401000))

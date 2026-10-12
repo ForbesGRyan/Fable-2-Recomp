@@ -4,6 +4,7 @@ shaders A17D8AEC3A817D45 (the surface) and F6D98C7B4D98438B (the dead opaque twi
 sub-project, plan Tasks 2 and 3, spec criteria 1 (its first half: made inputs; the captured rows are plan Task 4's)
 and 2 part (a)."""
 import math
+import struct
 import sys
 import unittest
 from pathlib import Path
@@ -362,6 +363,8 @@ class PixelMicrocode(unittest.TestCase):
         self.assertGreaterEqual(min(r.fogged, r.shaded - r.fogged), fifth // 2)  # both sides of the fog's start
         self.assertEqual(water_check.pixel_floors(r), [])
         self.assertEqual(set(r.kinds), set(water_check.PIXEL_KINDS.values()))
+        # (ledger ruling 34; the review of Tasks 1 to 5, I2) the zero-product points are four
+        self.assertEqual(sorted(water_check.PIXEL_KINDS.values()), ["at_eye", "flat_zero", "power_zero", "second_flat"])
 
     def test_each_pixel_mutation_fails(self):
         self.assertEqual(len(water_check.PIXEL_MUTATIONS), 16)
@@ -428,6 +431,278 @@ class PixelMicrocode(unittest.TestCase):
         s = lf.WATER_SHADER["ps_slots"]
         self.assertEqual(slots, [s["mask"], s["normal"], s["normal"], s["reflection"], s["near"], s["shadow"],
                                  s["scatter"], s["transmittance"]])
+
+
+# --- the formulas against captured rows (plan Task 4): on a made capture (tests/water_made.py) ---------------------
+
+import tempfile  # noqa: E402
+
+import numpy as np  # noqa: E402
+
+import water_made  # noqa: E402
+
+
+def mirrored(matrix, factor, height):
+    mirror = np.eye(4)
+    mirror[2, 2], mirror[2, 3] = -1.0, 2.0 * height
+    return (np.diag([factor[0], factor[1], 1.0, 1.0]) @ np.array(matrix, dtype=np.float64) @ mirror).tolist()
+
+
+@unittest.skipUnless(HAVE, NO_DUMPS)
+class CapturedRows(unittest.TestCase):
+    def made(self, folder, **kw):
+        return water_made.capture(folder, **kw)
+
+    def test_a_made_row_has_200_positions_and_no_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            r = water_check.check_rows(self.made(folder))
+        self.assertEqual((r.rows, r.surface_rows, r.opaque_rows), (1, 1, 0))
+        self.assertEqual(r.positions, 200)
+        self.assertEqual((r.failed, r.vertex_failed, r.not_finite, r.unread), (0, 0, 0, 0), r.first_failure)
+        self.assertEqual(r.vertices, 4)
+        self.assertEqual(water_check.rows_problems(r), [])
+        # the made mask's two texels make both fates of a surface pixel that is not killed
+        self.assertGreater(r.fates["surface"]["shaded"], 20)
+        self.assertGreater(r.fates["surface"]["skipped"], 20)
+        self.assertEqual(r.fates["surface"]["killed"], 0)
+        self.assertLessEqual(r.worst, water_check.PIXEL_TOLERANCE)
+
+    def test_the_opaque_twin_is_killed_at_every_position(self):
+        with tempfile.TemporaryDirectory() as folder:
+            r = water_check.check_rows(self.made(folder, opaque=True))
+        self.assertEqual((r.rows, r.surface_rows, r.opaque_rows, r.positions, r.failed), (2, 1, 1, 400, 0), r.first_failure)
+        self.assertEqual(r.fates["opaque"], {"killed": 200, "skipped": 0, "shaded": 0})
+
+    def test_a_read_component_that_is_no_number_is_counted_and_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as folder:
+            bad = list(water_made.PIXEL[128])
+            bad[0] = math.nan
+            path = self.made(folder, pixel={128: bad})
+            r = water_check.check_rows(path)
+            self.assertEqual(r.not_finite, 1)
+            self.assertTrue(any("not finite" in text and "c128.x" in text for text in water_check.rows_problems(r)))
+            self.assertEqual(water_check.main(["rows", str(path)], say=lambda *a: None), 1)
+
+    def test_an_unread_component_that_is_no_number_passes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            pixel = {reg: [math.nan if k in water_check.UNREAD[reg] else v for k, v in enumerate(water_made.PIXEL[reg])]
+                     for reg in water_made.PIXEL}
+            vertex = {reg: [v[0], v[1], math.nan, math.nan] for reg, v in water_made.VERTEX.items()}
+            path = self.made(folder, pixel=pixel, vertex=vertex)
+            r = water_check.check_rows(path)
+            self.assertEqual((r.positions, r.failed, r.vertex_failed, r.not_finite), (200, 0, 0, 0), r.first_failure)
+
+    def test_the_row_mutations_fail_on_the_made_row(self):
+        with tempfile.TemporaryDirectory() as folder:
+            r = water_check.check_rows(self.made(folder))
+        for name in water_check.VERTEX_MUTATIONS + water_check.ALPHA_MUTATIONS:
+            self.assertGreater(r.caught[name], 0, name)
+        # what the made row cannot show is named with what stands in its way, never passed over
+        blind = water_check.rows_blind(r)
+        for name in water_check.PIXEL_MUTATIONS:
+            self.assertTrue(r.caught[name] > 0 or name in blind, name)
+        self.assertIn("distort", blind)                         # the made c129.xy and c130.xy are equal, as the captured
+        self.assertGreater(r.caught["base"], 0)
+        self.assertGreater(r.caught["exposure"], 0)
+
+    def test_the_views_are_the_mirrored_camera_and_each_mutation_fails(self):
+        self.assertEqual(water_check.VIEW_MUTATIONS, ("factor", "plane", "height"))
+        matrix = ([0.49, -0.84, 0.0, 92.6], [0.27, 0.15, 1.71, -132.0], [0.85, 0.49, -0.18, -138.9], [0.85, 0.49, -0.18, -138.8])
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.made(folder, matrix=matrix, views=[mirrored(matrix, (2.0 / 3.0, 2.0 / 3.0), water_made.HEIGHT)])
+            views = water_check.check_views(path)
+            self.assertEqual(len(views), 1)
+            v = views[0]
+            self.assertEqual((v.frame, v.view, v.base, v.rows), (1, 1, 0x13401000, 3))
+            self.assertAlmostEqual(v.height, 20.0)
+            self.assertLessEqual(v.worst, 1e-6)
+            self.assertTrue(v.ok)
+            self.assertEqual(v.caught, {"factor": True, "plane": True, "height": True})
+            self.assertEqual(water_check.main(["views", str(path)], say=lambda *a: None), 0)
+            # a view that is not the mirror of the main camera is refused
+            wrong = self.made(Path(folder) / "wrong", matrix=matrix, views=[mirrored(matrix, (2.0 / 3.0, 2.0 / 3.0), 20.5)])
+            self.assertFalse(water_check.check_views(wrong)[0].ok)
+            self.assertEqual(water_check.main(["views", str(wrong)], say=lambda *a: None), 1)
+
+    def test_the_dead_draw_on_rows_and_masks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            good = water_check.check_dead_rows(self.made(Path(folder) / "a", opaque=True))
+            self.assertEqual((good.rows, good.dead, good.masks, good.ones), (1, 1, 1, 0))
+            self.assertAlmostEqual(good.largest, 1.0 - 0.003, places=6)
+            self.assertEqual(good.problems, [])
+            pixel = {141: (2.0, 2.0, water_made.GARBAGE, 0.0)}
+            path = self.made(Path(folder) / "b", opaque=True, pixel=pixel)
+            bad = water_check.check_dead_rows(path)
+            self.assertEqual((bad.rows, bad.dead, bad.ones), (1, 0, 1))        # the mask's one texel of 0 has alpha 1
+            self.assertEqual(bad.largest, 1.0)
+            self.assertEqual(water_check.main(["dead", str(path)], say=lambda *a: None), 1)
+
+    def test_the_bools_states_and_bounds_of_the_made_rows(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.made(folder, opaque=True)
+            words = water_check.bool_words(path)
+            self.assertEqual(words, {("surface", 0x100, 0x110): 1, ("opaque", 0x100, 0x110): 1})
+            states = water_check.state_words(path)
+            self.assertEqual(states[("surface", "2201")], {0x07060706: 1})
+            self.assertEqual(states[("opaque", "2200")], {0x00708766: 1})
+            spans, rows = water_check.row_bounds([path])
+            self.assertEqual(rows, 2)
+            self.assertEqual(spans[("ps", 141)][0], (water_check.f32(2.003), water_check.f32(2.003)))
+            self.assertIsNone(spans[("ps", 141)][2])                # an unread component has no span
+            self.assertEqual(water_check.bounds_outside(spans), [])
+            for name in ("bools", "states", "bounds"):
+                self.assertEqual(water_check.main([name, str(path)], say=lambda *a: None), 0, name)
+
+
+
+# --- the pins (plan Task 4): tools/xdk_sigmatch/water_pins.py --------------------------------------------------------
+
+class Pins(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import water_pins
+        cls.pins = water_pins
+
+    def sections(self):
+        out, name = {}, None
+        for line in self.pins.lines():
+            if line.startswith("// "):
+                name = line[3:line.index(":")]
+                out[name] = []
+            else:
+                out[name].append(line)
+        return out
+
+    def test_the_five_sections_and_their_lines(self):
+        s = self.sections()
+        self.assertEqual(list(s), ["water vertex pins", "water alpha pins", "water pixel pins", "water view pins", "water dead pins"])
+        self.assertGreaterEqual(sum(len(v) for v in s.values()), 24)
+        self.assertEqual(len(s["water view pins"]), 3)
+        self.assertGreaterEqual(len(s["water pixel pins"]), 16)
+        for lines in s.values():
+            for line in lines:
+                self.assertRegex(line, r"^    \{.*\},(  // .*)?$")
+        inc = self.pins.inc_lines()
+        self.assertEqual(sum(line.startswith("#ifdef FABLE2_WATER_PINS_") for line in inc), 5)
+        self.assertEqual(sum(line == "#endif" for line in inc), 5)
+        self.assertEqual([line for line in inc if not line.startswith("#") and not line.startswith("// Generated") and not line.startswith("// The pins")
+                          and not line.startswith("// FABLE2")], self.pins.lines())
+
+    def test_a_line_is_the_single_precision_reference(self):
+        p = self.pins
+        differs = 0
+        for item in p.CAPTURED_PIXELS:
+            (q, P, coord, m, c, word, a, b, r13, r14, shadow, scatter, transmit), result = p.pixel_pin(item)
+            for single in (True, False):
+                samples = iter((a, b))
+                tex = {"normal": lambda u, v: next(samples), 13: lambda u, v: r13, 14: lambda u, v: r14, 8: lambda u, v: shadow,
+                       "tf4": lambda x: scatter, "tf5": lambda x: transmit}
+                out = lf.water_pixel(q, P, coord[:2], coord[2:], m, c, tex, bools=lf.water_bools(word), single=single)
+                if single:
+                    self.assertEqual(tuple(out["colour"]), result[2])
+                    self.assertTrue(all(x == water_check.f32(x) for x in out["colour"]))        # made of singles
+                else:
+                    differs += tuple(out["colour"]) != result[2]
+                    for x, y in zip(out["colour"], result[2]):
+                        self.assertAlmostEqual(x, y, delta=1e-4 * max(1.0, abs(x)))
+        self.assertGreater(differs, 0)                                # the double reference is another number
+
+    def test_the_made_pixels_reach_what_the_captured_do_not(self):
+        p = self.pins
+        self.assertEqual(len(p.MADE_PIXELS), len(p.MADE_KINDS))
+        self.assertEqual(p.MADE_KINDS[-4:], ("flat_zero", "at_eye", "power_zero", "second_flat"))     # ledger ruling 34: four points
+        made = {kind: p.pixel_pin(item) for kind, item in zip(p.MADE_KINDS, p.MADE_PIXELS)}
+        for kind, (inputs, result) in made.items():
+            fate, alpha, colour, at13, at14, normal, fresnel, distance, sun, fog_at = result
+            self.assertTrue(all(math.isfinite(v) for v in (alpha, fresnel, distance) + colour + sun), kind)
+        reach = 1.0 / made["near"][0][4][140][0]
+        self.assertLess(made["near"][1][7], reach)                    # within the range: slot 14 counts
+        self.assertGreater(made["shadow"][1][7], reach)
+        self.assertTrue(made["shadow"][0][5] & lf.WATER_SHADER["b137"])
+        self.assertEqual(made["skipped"][1][0], 1)
+        self.assertEqual(made["skipped"][1][2], (0.0, 0.0, 0.0))
+        self.assertEqual(made["killed"][1][0], 0)
+        self.assertEqual(made["before the fog"][1][9], (0.0, 0.0))
+        self.assertNotEqual(made["shadow"][1][9], (0.0, 0.0))        # 150 units: past the start
+        # the glint whole: the sun term is most of the pixel
+        colour, sun, scale = made["glint"][1][2], made["glint"][1][8], made["glint"][0][4][20][3]
+        self.assertGreater(sum(sun) * scale, 0.5 * sum(colour))
+        # every captured pixel is shaded and far; one of each row glints or not as the row has it
+        for item in p.CAPTURED_PIXELS:
+            inputs, result = p.pixel_pin(item)
+            self.assertEqual(result[0], 2)
+            self.assertGreater(result[7], 1.0 / inputs[4][140][0])
+        # at the four points the reference is the console's value, and an IEEE machine's would be another: the shadow
+        # of the sun's whole colour at a power of 0
+        c = made["power_zero"][0][4]
+        whole = [water_check.f32(c[137][0] * c[143][k]) for k in range(3)]
+        for got, want in zip(made["power_zero"][1][8], whole):
+            self.assertAlmostEqual(got, want, places=6)
+        self.assertEqual(made["second_flat"][1][8], (0.0, 0.0, 0.0))  # N2 = 0: no direction mirrors the sun
+        self.assertEqual(made["flat_zero"][1][5], (0.0, 0.0, 0.0))    # N = 0 * infinity = 0
+        self.assertEqual(made["at_eye"][1][7], 0.0)
+
+    def test_the_two_thresholds_are_two_things(self):
+        p = self.pins
+        results = [p.alpha_pin(item) for item in p.ALPHA]
+        self.assertIn((1, 1), [(fate, drawn) for _, (_, fate, drawn) in results])       # colour 0 with its alpha, and drawn
+        self.assertIn((2, 0), [(fate, drawn) for _, (_, fate, drawn) in results])       # shaded, and not drawn
+        self.assertIn((2, 1), [(fate, drawn) for _, (_, fate, drawn) in results])
+        self.assertIn((0, 0), [(fate, drawn) for _, (_, fate, drawn) in results])
+        self.assertEqual({kind for (_, _, _, kind), _ in results}, {0, 1})
+        # the captured pair: c141.w is 15 / 255 as a single, the state's reference one unit above it
+        self.assertEqual(p.CAPTURED_C141[3], struct.unpack("<I", struct.pack("<f", 15.0 / 255.0))[0])
+        self.assertEqual(p.REFERENCE, p.CAPTURED_C141[3] + 1)
+        open_water = results[0][1]
+        self.assertAlmostEqual(open_water[0], 0.997, places=5)
+        self.assertEqual(open_water[1:], (2, 1))
+
+    def test_the_dead_lines_stand_at_the_margin(self):
+        p = self.pins
+        results = [p.dead_pin(item) for item in p.DEAD]
+        self.assertEqual(results[0][1], 1)                                              # the captured c141
+        for y in (0.0, 2.0, -1.5):
+            x = water_check.dead_margin_x(water_check.f32(y))
+            below = struct.unpack("<f", struct.pack("<I", struct.unpack("<I", struct.pack("<f", x))[0] - 1))[0]
+            self.assertIn(((x, water_check.f32(y), 0.0, 0.0), 1), results, y)
+            self.assertIn(((below, water_check.f32(y), 0.0, 0.0), 0), results, y)
+        self.assertGreaterEqual(sum(dead for _, dead in results), 5)
+        self.assertGreaterEqual(sum(1 - dead for _, dead in results), 7)
+        self.assertTrue(any(c141[0] != c141[0] for c141, dead in results if not dead))     # no number is not dead
+        for c141, dead in results:
+            self.assertEqual(bool(dead), lf.water_opaque_dead(c141))
+
+    def test_the_view_lines_are_the_derived_rows(self):
+        p = self.pins
+        for item in p.CAPTURED_VIEWS:
+            (M, c31, h), rows = p.view_pin(item)
+            want = water_check.water_view_rows(np.array(M).reshape(4, 4), c31, h).reshape(-1)
+            self.assertEqual(rows, tuple(water_check.f32(float(x)) for x in want))
+            self.assertAlmostEqual(c31[0], 2.0 / 3.0, places=6)
+
+    def test_the_captured_rows_are_the_captures(self):
+        p = self.pins
+        import capture_replay as cr
+        import impostor_check as ic
+        seen = 0
+        for index, (name, frame, place, word, vertex, pixel) in enumerate(p.CAPTURED_ROWS):
+            try:
+                path = cr.find_capture(name)
+            except cr.Unreadable:
+                continue
+            rows = [r for r in water_check.water_rows(path) if r.get("frame") == frame and water_check.row_kind(r) == "surface"]
+            row = rows[place]
+            seen += 1
+            self.assertEqual(int(row["pbool_load"], 16), word)
+            bank = ic.row_bank(row)
+            for i, reg in enumerate(p.VS_REG):
+                self.assertEqual(tuple(p.bits(v) if v == v else None for v in bank[reg]), tuple(b if p.from_bits(b) == p.from_bits(b) else None for b in vertex[i]), reg)
+            for i, reg in enumerate(p.PS_REG):
+                text = row["pfull"][32 * reg:32 * reg + 32]
+                self.assertEqual(tuple(int(text[8 * k:8 * k + 8], 16) for k in range(4)), tuple(pixel[i]), reg)
+        if not seen:
+            self.skipTest("none of the four captures is here")
+
 
 
 if __name__ == "__main__":

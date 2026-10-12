@@ -1,0 +1,156 @@
+"""A made discovery capture of the lake's surface for the tests of water_check.py (`rows`, `dead`, `views`) and of
+water_replay.py (the water sub-project, plan Tasks 4 and 6): one flat quad of two triangles drawn by vertex shader
+BEAD84BD72072E0E with pixel shader A17D8AEC3A817D45 (and, if asked, by the opaque twin F6D98C7B4D98438B before it),
+its vertex and index dumps, a shore mask, a normal map of one block, a reflection picture, an empty slot 14, the
+frame's two fog tables, and, if asked, the rows of one reflection view. Every row has the members the readers take
+from a real capture's rows and no other. Not a test file: tests/test_water_formulas.py and tests/test_water_replay.py
+import it."""
+import json
+import struct
+from pathlib import Path
+
+VS, PS, PS_OPAQUE = "BEAD84BD72072E0E", "A17D8AEC3A817D45", "F6D98C7B4D98438B"
+SIZE = (1120, 720)
+GARBAGE = 1.5e22                                # what a component no formula reads holds
+# The view-projection of the made scene: the picture's x is the world's x / 100, its y the world's y / 100, the
+# depth 0.5 everywhere, w = 1. The quad lies level at HEIGHT with the eye EYE straight above it.
+M = ([0.01, 0.0, 0.0, 0.0], [0.0, 0.01, 0.0, 0.0], [0.0, 0.0, 0.0, 0.5], [0.0, 0.0, 0.0, 1.0])
+HEIGHT = 20.0
+EYE = (0.0, 0.0, 200.0)
+STATE = {"surface": {"2200": "0x00708746", "2201": "0x07060706"}, "opaque": {"2200": "0x00708766", "2201": "0x00010001"}}
+PIXEL = {0: (0.0, 0.0, 1.0 / 1120.0, 1.0 / 720.0), 19: EYE + (GARBAGE,), 20: (GARBAGE, GARBAGE, GARBAGE, 9.15686417),
+         28: (1.0, 1.0, GARBAGE, GARBAGE), 31: (2.0 / 3.0, 2.0 / 3.0, GARBAGE, GARBAGE),
+         66: (-0.83130461, 0.0904366747, 0.548410416, GARBAGE), 67: (19.0682278, GARBAGE, 1.0, 0.000500000024),
+         68: (0.266010404, 0.398030013, 0.5, GARBAGE), 116: (0.104081, GARBAGE, GARBAGE, GARBAGE),
+         117: (-0.420816, GARBAGE, GARBAGE, GARBAGE), 126: (0.027451, 0.0745098, 0.0431373, GARBAGE),
+         127: (0.0588235, 0.129412, 0.121569, GARBAGE), 128: (0.3, GARBAGE, GARBAGE, GARBAGE),
+         129: (0.420816, 0.420816, GARBAGE, GARBAGE), 130: (0.420816, 0.420816, GARBAGE, GARBAGE),
+         131: (0.5, GARBAGE, GARBAGE, GARBAGE), 136: (0.279184, GARBAGE, GARBAGE, GARBAGE),
+         137: (0.5, GARBAGE, GARBAGE, GARBAGE), 138: (128.0, GARBAGE, GARBAGE, GARBAGE),
+         139: (0.8, 0.2, GARBAGE, GARBAGE), 140: (0.05, GARBAGE, GARBAGE, GARBAGE),
+         141: (2.003, 2.0, GARBAGE, 0.0588235), 142: (-0.1, 0.05, -0.99, GARBAGE), 143: (1.0, 0.84, 0.41, GARBAGE)}
+VERTEX = {115: (1.0365, 1.1775, GARBAGE, GARBAGE), 116: (-2.3504, 1.0095, GARBAGE, GARBAGE),
+          117: (0.08, 0.08, GARBAGE, GARBAGE), 118: (0.06, 0.06, GARBAGE, GARBAGE)}
+LITERALS = [0.0] * 8 + [0.0, 2.0, 0.0, 0.0, 0.5, -1.0, 1.0, -2.0]      # c252 to c255 of both pixel shaders
+
+
+def fc(fmt, width, height, base, tiled=False, endian=0, swizzle=(0, 1, 2, 3), clamp=(0, 0), pitch=32, levels=False):
+    """A texture fetch constant (six dwords as the rows print them): a 2D texture of Xenos format `fmt` with
+    linear filters."""
+    d0 = 2 | (clamp[0] << 10) | (clamp[1] << 13) | ((pitch >> 5) << 22) | (int(bool(tiled)) << 31)
+    d1 = fmt | (endian << 6) | (base & 0xFFFFF000)
+    d2 = (width - 1) | ((height - 1) << 13)
+    d3 = sum(s << (1 + 3 * i) for i, s in enumerate(swizzle)) | (1 << 19) | (1 << 21) | (1 << 23)
+    d4 = (8 << 6) if levels else 0
+    d5 = (1 << 9) | ((base + 0x10000) & 0xFFFFF000 if levels else 0)
+    return ["0x%08X" % (v & 0xFFFFFFFF) for v in (d0, d1, d2, d3, d4, d5)]
+
+
+def pfull(registers):
+    """256 registers as a row's "pfull": the bits of each float, 32 hex digits a register; a register that is not
+    named holds zeros."""
+    out = []
+    for reg in range(256):
+        out.append(struct.pack(">4f", *registers.get(reg, (0.0, 0.0, 0.0, 0.0))).hex().upper())
+    return "".join(out)
+
+
+def bank(view_projection, registers):
+    values = [0.0] * 1024
+    for i, row in enumerate(view_projection):
+        values[4 * i:4 * i + 4] = row
+    for reg, v in registers.items():
+        values[4 * reg:4 * reg + 4] = v
+    return [struct.unpack("<f", struct.pack("<f", x))[0] for x in values]
+
+
+def _json(row):
+    def clean(x):
+        if isinstance(x, float) and x != x:
+            return None
+        if isinstance(x, list):
+            return [clean(v) for v in x]
+        if isinstance(x, dict):
+            return {k: clean(v) for k, v in x.items()}
+        return x
+    return json.dumps(clean(row), separators=(",", ":"))
+
+
+def water_row(kind, frame=1, pixel=None, vertex=None, matrix=M, tf=None, pbool="0x00000100", pbool_load="0x00000110",
+              stream="geo/quad.bin", index="geo/quad_index.bin", count=6):
+    """A "draw" row of the made quad by A17D (kind "surface") or F6D9 ("opaque")."""
+    registers = dict(PIXEL)
+    registers.update(pixel or {})
+    vregisters = dict(VERTEX)
+    vregisters.update(vertex or {})
+    rs = {"2104": "0x0000000F", "210E": "0x3D70F0F2", "2202": "0x0000000C", "2205": "0x00018006", "2113": "0xBF800000", "2114": "0x3F800000"}
+    rs.update(STATE[kind])
+    return {"kind": "draw", "frame": frame, "args": ["0x00000004", "0x00000000", "0x00000000", "0x%08X" % count],
+            "viewport": list(SIZE), "in_scene": True, "vbool": "0x00000000", "pbool": pbool, "rs": rs,
+            "surface_info": "0x11810460",
+            "ib": {"index32": False, "endian": 1, "start": 0, "count": count, "file": index, "file_offset": 0, "file_bytes": 2 * count},
+            "ps_hash": "0x" + (PS if kind == "surface" else PS_OPAQUE), "tf": tf, "pfull": pfull(registers),
+            "pbool_load": pbool_load, "ps_lit": [{"reg": 508, "v": LITERALS}],
+            "vs_lit": [{"reg": 252, "v": [0.0] * 12 + [1.0, 0.0, 0.0, 0.0]}], "vs_hash": "0x" + VS,
+            "fetches": [{"i": 0, "slot": 95, "off": 0, "stride": 5}, {"i": 1, "slot": 95, "off": 3, "stride": 5}],
+            "streams": [{"slot": 95, "endian": 2, "file": stream}], "bank": bank(matrix, vregisters)}
+
+
+def view_rows(matrix, frame=1, rows=3):
+    """The rows of one reflection view (surface pitch 280), each with the view's c0..c3, and the resolve after it."""
+    out = [{"kind": "draw", "frame": frame, "in_scene": False, "surface_info": "0x04020118",
+            "bank": bank(matrix, {})[:64]} for _ in range(rows)]
+    return out + [{"kind": "resolve", "frame": frame, "n": 1}]
+
+
+def capture(folder, mask=(0, 255), pixel=None, vertex=None, opaque=False, views=(), picture=None, picture_size=(4, 4),
+            quad=((-50.0, -30.0), (50.0, 30.0)), frame_fog=True, extra=(), mask_size=None, matrix=M):
+    """Writes a made capture into `folder` and returns the path of its .jsonl. `mask`: the shore mask's bytes, a row
+    of texels (`mask_size` (width, height) for more than one row); `pixel` / `vertex`: registers that replace the
+    made ones; `opaque`: the F6D9 row before the A17D row; `views`: matrices, one reflection view each, before the
+    scene; `picture`: slot 13's texels as bytes (r, g, b, a a texel; default a ramp); `quad`: the mesh's two
+    corners; `extra`: rows written after the water's."""
+    folder = Path(folder)
+    (folder / "geo").mkdir(parents=True, exist_ok=True)
+    (folder / "tex").mkdir(parents=True, exist_ok=True)
+    (x0, y0), (x1, y1) = quad
+    vertices = [(x0, y0, HEIGHT, 0.0, 0.0), (x1, y0, HEIGHT, 1.0, 0.0), (x1, y1, HEIGHT, 1.0, 1.0), (x0, y1, HEIGHT, 0.0, 1.0)]
+    (folder / "geo" / "quad.bin").write_bytes(b"".join(struct.pack(">5f", *v) for v in vertices))
+    (folder / "geo" / "quad_index.bin").write_bytes(struct.pack(">6H", 0, 1, 2, 0, 2, 3))
+    mask = bytes(mask)
+    mw, mh = mask_size or (len(mask), 1)
+    stored = bytearray(32 * mh)                                 # linear rows of the pitch (32 texels)
+    for y in range(mh):
+        stored[32 * y:32 * y + mw] = mask[mw * y:mw * (y + 1)]
+    (folder / "tex" / "mask.bin").write_bytes(bytes(stored))
+    # one block of the normal map: x from 0x90 down to 0x70, y from 0x88 down to 0x78, each texel its own index
+    (folder / "tex" / "normal.bin").write_bytes(bytes([0x90, 0x70, 0x88, 0xC6, 0xFA, 0x88, 0xC6, 0xFA,
+                                                        0x88, 0x78, 0x53, 0x97, 0x2E, 0x53, 0x97, 0x2E]))
+    pw, ph = picture_size
+    if picture is None:
+        picture = bytes((37 * i + 11 * k) % 200 + 20 for i in range(pw * ph) for k in range(4))
+    rows = bytearray(32 * 4 * ph)
+    for y in range(ph):
+        rows[128 * y:128 * y + 4 * pw] = picture[4 * pw * y:4 * pw * (y + 1)]
+    (folder / "tex" / "picture.bin").write_bytes(bytes(rows))
+    (folder / "tex" / "near.bin").write_bytes(bytes(len(rows)))
+    tf = {"1": fc(2, mw, mh, 0x1BD03000, clamp=(2, 2), swizzle=(0, 0, 0, 5)), "2": fc(49, 4, 4, 0x14D40000),
+          "13": fc(6, pw, ph, 0x13401000), "14": fc(6, pw, ph, 0x13441000), "16": fc(2, mw, mh, 0x1BD03000, clamp=(2, 2), swizzle=(0, 0, 0, 5))}
+    out = [{"kind": "texture", "file": "tex/mask.bin", "bytes": len(stored), "fc": tf["1"]},
+           {"kind": "texture", "file": "tex/normal.bin", "bytes": 16, "fc": tf["2"]},
+           {"kind": "texture", "file": "tex/picture.bin", "bytes": len(rows), "fc": tf["13"]},
+           {"kind": "texture", "file": "tex/near.bin", "bytes": len(rows), "fc": tf["14"]}]
+    for matrix_ in views:
+        out += view_rows(matrix_)
+    if opaque:
+        out.append(water_row("opaque", pixel=pixel, vertex=vertex, tf=tf, matrix=matrix))
+    out.append(water_row("surface", pixel=pixel, vertex=vertex, tf=tf, matrix=matrix))
+    out += list(extra)
+    frame = {"kind": "frame", "frame": 1, "scene_frame": 7, "light": {"eye": list(EYE)}}
+    if frame_fog:
+        frame["fog"] = {"transmit": [0.9 - 0.002 * (i // 3) for i in range(3 * 256)],
+                        "scatter": [0.3 + 0.004 * (i // 3) + 0.1 * (i % 3) for i in range(3 * 64)]}
+    out.append(frame)
+    path = folder / "native_discovery_made.jsonl"
+    path.write_text("".join(_json(r) + "\n" for r in out), encoding="utf-8", newline="\n")
+    return path

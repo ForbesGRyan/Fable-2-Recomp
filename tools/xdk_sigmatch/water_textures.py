@@ -154,7 +154,12 @@ def describe(fc):
 def fetch(fc, kind):
     """render::WaterTextureFetch: the fields of a 2D fetch constant of the kind's format ("k8": the shore mask,
     "dxn": the normal map). ValueError where the C++ answers anything but kNone: no texture, not 2D, another
-    format, no base, a pitch below the width, a mask above 256 x 256 or a normal map above 1,024 x 1,024."""
+    format, no base, a pitch below the width, a mask above 256 x 256 or a normal map above 1,024 x 1,024; and
+    (ledger ruling 33, after the review of Tasks 1 to 5, I1: the C++ side is the next builder's) a constant that
+    does not deliver its components as unsigned fractions: a sign field other than 0 (1 signed, 2 unsigned biased,
+    3 gamma) on a component the shader is given (x for the mask, x and y for the normal map), the integer number
+    format (dword 3 bit 0) or an exponent adjust other than 0. That is what makes a mask's sample a number in
+    [0, 1], which the dead draw's proof needs (water_check.py `dead`)."""
     if kind not in FETCH_LIMIT:
         raise ValueError("the kind is k8 or dxn, not %r" % (kind,))
     f = describe(fc)
@@ -166,6 +171,13 @@ def fetch(fc, kind):
         raise ValueError("no base, or a pitch below the width")
     if f["width"] > FETCH_LIMIT[kind] or f["height"] > FETCH_LIMIT[kind]:
         raise ValueError("%d x %d is above the %s's limit of %d" % (f["width"], f["height"], kind, FETCH_LIMIT[kind]))
+    delivered = 1 if kind == "k8" else 2
+    if any(f["sign"][:delivered]):
+        raise ValueError("the sign fields %s do not deliver an unsigned %s" % (f["sign"], "mask" if kind == "k8" else "normal map"))
+    if _words(fc)[3] & 1:
+        raise ValueError("the number format is integer, not fraction")
+    if f["exp_adjust"]:
+        raise ValueError("an exponent adjust of %d" % (f["exp_adjust"] - 64 if f["exp_adjust"] & 0x20 else f["exp_adjust"]))
     return f
 
 

@@ -1,12 +1,15 @@
 # Native renderer sub-project 13: water (the lake's surface with a native reflection)
 
-Status: **design, 2026-10-12; nothing built, nothing run in the game.** Branch
+Status: **design, 2026-10-12; nothing built, nothing run in the game. Amended 2026-10-12 for ledger
+rulings 26 (the `D1CC` cubes are not drawn: their design, ruling 22 and their part of criteria 6, 13
+and 16 are struck, each passage marked "ledger ruling 26") and 27 (the surface tests and writes depth:
+ruling 14 stands).** Branch
 `native-renderer-water` (from master `ce61f2d`). Research: `.superpowers/sdd/water-research.md`
 (untracked; its scripts and outputs in `out/native-evidence/water/`, "WE" below: `b_*`). Ledger:
 `.superpowers/sdd/2026-10-12-native-renderer-water/progress.md` (rulings 1 to 8 are the controller's
 and are not reopened here; where this design finds something that bears on one of them it says so
 under "Decisions that are not this design's"). Plan:
-`docs/superpowers/plans/2026-10-12-native-renderer-water.md` (to be written). Game launches wait for
+`docs/superpowers/plans/2026-10-12-native-renderer-water.md`. Game launches wait for
 the user's leave (ledger ruling 7): every part below says whether it needs a run.
 
 Every fact carries the research's label or names what it was read from: **[measured]** printed by a
@@ -24,15 +27,15 @@ The lake's surface stands in the native view as the game draws it: the blended d
 base colour by fresnel, the sun's glint, fog, exposure, the shore masks' alpha), late in the frame over
 the real lake bed, with the reflection taken from a **native** 256 x 256 target that the pass renders
 itself: first the sky, then the far terrain. The dead opaque twin `F6D98C7B4D98438B`, which today is
-the flat-clay placeholder, is no longer drawn. The `D1CC6DC28244C55A` cubes go into the native sun
-layer's depth. Behind `--fable2_native_water` (ledger ruling 5), default off. No read-back, no SDK
-change (ledger rulings 1 and 2).
+the flat-clay placeholder, is no longer drawn. *(Struck by ledger ruling 26: "The `D1CC6DC28244C55A`
+cubes go into the native sun layer's depth." The cubes are not drawn.)* Behind `--fable2_native_water`
+(ledger ruling 5), default off. No read-back, no SDK change (ledger rulings 1 and 2).
 
 The work is done in three phases (ruling 9): **13a** (no game: the discovery additions, the formulas
 and their machine checks, the offline replays on the captures in hand, the decoders), **13b** (the
-capture's side block, the switch, the surface, the reflection target with the sky, the cubes, their
-validation), **13c** (the far terrain in the reflection target; entered only on the conditions of
-Design 9).
+capture's side block, the switch, the surface, the reflection target with the sky, their validation;
+the cubes struck by ledger ruling 26), **13c** (the far terrain in the reflection target; entered
+only on the conditions of Design 9).
 
 **Non-goals**: the far lake `5763211D63BBFA3D` / `2B091BD0C45A7454` (ledger ruling 4); the game's
 picture through an SDK copy interface (ledger ruling 2); objects, flares and the pair `6954` / `A4A9`
@@ -112,7 +115,8 @@ research has differently"):
   twin stands at 946 to 952 of the bridge's rows, after the `A17D` rows (FM line 6730: "11 or 12
   `A17D` rows with depth write lie between"). A native `A17D` that writes depth as the game's does
   therefore puts the surface (20.1024) into the native layer's depth, where the game's layer has its
-  cubes (20.0024) over the bed. R B4 point 4 and ledger ruling 3 assume the bed there.
+  cubes (20.0024) over the bed. R B4 point 4 and ledger ruling 3 assume the bed there. *(Ledger
+  ruling 26 withdrew ruling 3 on this ground; ledger ruling 27 confirms the depth write.)*
 - *The stored scene's depth is the end of the frame's [code: `scene_dump.h`; `clay_pass.cpp` line
   4778]*. R's "4.4% of footprint pixels agree with the game's depth copy" compares the game's copy,
   taken before `A17D`, with the native depth after the last draw. Once the native water writes depth
@@ -339,7 +343,8 @@ but for the discovery runs themselves; parts 4 to 8 and 10 are phase 13b; part 9
      bit.
    - *Log*: `[native] water: off|on` at install; every 300 frames `[native] capture: frame N water:
      seen S (opaque O), taken T | water-record in F of W frames {reason: n}`.
-   - *The cubes' capture* is Design 8's; *the views' capture* is Design 9's (phase 13c).
+   - *The views' capture* is Design 9's (phase 13c). *(Struck by ledger ruling 26: "The cubes'
+     capture is Design 8's.")*
 5. **The switch, and the rule that removes the dead draw.** `--fable2_native_water` = `off` (default;
    also false, 0) or `on` (also true, 1). With `off`: nothing is read beyond the one branch of Design
    4, no record, target, texture, slot or program is made, the frame's slot plan is today's byte for
@@ -426,6 +431,8 @@ but for the discovery runs themselves; parts 4 to 8 and 10 are phase 13b; part 9
      written** (the game's function 4 under the reversed range is the RHI's "less"; `F6D9`'s 6 was
      "less or equal"). The dispatch for this design speaks of a "depth test without write as the
      game's"; the state word has the write bit set (`0x00708746`), and ruling 14 follows the word.
+     *(Ledger ruling 27: so ruled. The surface tests and writes depth; the dispatch's text was
+     wrong.)*
    - *Its place in the colour pass*: before the first drawn record at or beyond the smallest `place`
      of the frame's `surface` records, after the steps already due at that index. The water's
      place counts as a blended record's does for the two rules that order the frame: the sky's place
@@ -459,29 +466,18 @@ but for the discovery runs themselves; parts 4 to 8 and 10 are phase 13b; part 9
      water's surface at 20.1024 where a mesh's alpha passes the test, where the game's holds the cube
      at 20.0024 over the bed: 0.1 unit apart, at 120 to 250 units. That is what today's dead draw
      gives as well.
-   - *The `D1CC` cubes into the layer's depth* (ledger ruling 3; ruling 22). Recognised at the return
-     of an outermost `DrawIndx:82217EE8` call outside the main scene whose vertex shader's microcode
-     hash is `D1CC...`, **with no pixel shader** (today such a call is dropped unread:
-     `capture.cpp` lines 4601 and 4634), on a target of half the scene's pitch (`QuadTargetMatches`:
-     no pitch is a number), with 8 vertices and 30 indices, colour mask 0, depth tested and written;
-     in a frame with the water wanted. A cube record carries `c0..c3`, `c9`, `c117`, `c119.x` and the
-     shader's literal `c254`, held to its literal table; the eight vertices' words and thirty indices
-     are read one hooked draw late, as the quads' storage is, and must equal the fixed table of the
-     captures in hand (the plan's first step of this part prints it from their `"indxdata"` rows).
-     At most **4 a frame** (three in every capture). The set is whole or empty (`cube`: `unread`,
-     `shader`, `literal`, `shape`, `register`, `over-limit`, `pending`).
-     *The draw*: `kClaySunCubeVs` = `post_cube_position` (to which `post_check.py` holds `D1CC`
-     today; the translator test holds the HLSL to it), depth only, less-or-equal with write, the
-     layer's viewport, **after the cloud occluders and before the tree occluders**, which is the
-     game's order (FM line 6523); among depth-only draws the order changes no texel.
-     *Without them*: an empty set does not turn the layer off: it is today's layer, counted on the
-     Sun line. The cubes are drawn whenever the switch is on and the layer is drawn, whatever the
-     water's verdict: they are what gives the layer the lake's level in a frame whose surface is not
-     drawn, along the shore where the mask discards the surface, and beyond the meshes (the far
-     lake's floor at 18.4716).
+   - *The `D1CC` cubes into the layer's depth*: **struck by ledger ruling 26 (which withdraws
+     ledger ruling 3).** The passage designed a cube record (recognised by the vertex shader's hash
+     on a draw without a pixel shader at the layer's target, at most 4 a frame, whole or empty, with
+     the reasons `cube {...}`), a depth-only program `kClaySunCubeVs` drawn after the cloud occluders,
+     and their drawing whatever the water's verdict. None of it is built: where the water is drawn
+     the layer's depth holds the surface (the paragraph above), and where it is not drawn the frame
+     is today's (ruling 11), whose dead draw writes the surface's depth. No cube is captured, no
+     program is added to the sun layer, and the Sun line is unchanged.
    - *Not drawn, counted on the Water line and F3*: the verdict's reasons. An RHI failure turns the
      step off for the run, not the pass. Line: `Water: drawn D of T, targets K, opaque left out O |
-     not drawn {reason: frames}`; the Sun line gains `cubes C of S`.
+     not drawn {reason: frames}`. *(Struck by ledger ruling 26: "the Sun line gains `cubes C of
+     S`".)*
 9. **The reflection target, phase 2: the far terrain (phase 13c).**
    - *Entry conditions*, written in the ledger before its first task: phase 13b's criteria 6 to 8
      are judged; open question 6 is closed (what `6954` / `A4A9` draws, and its share of the game's
@@ -551,11 +547,12 @@ but for the discovery runs themselves; parts 4 to 8 and 10 are phase 13b; part 9
   the frame's scene, on F3 and in the log: `water-record {unread, shader, literal, fetch-list,
   register, scale, state, fetch, shadow-term, fog, over-limit}`; the frame's verdict `{off,
   no-records, light, opaque-live, pair, plane, view, reflection, texture, order, pipeline, slot,
-  scale}`; `cube {unread, shader, literal, shape, register, over-limit, pending}`; in phase 13c
-  `reflection: terrain`.
+  scale}`; in phase 13c `reflection: terrain`. *(Struck by ledger ruling 26: the reasons `cube
+  {unread, shader, literal, shape, register, over-limit, pending}`.)*
 - The frame's water is whole or it is today's picture, record for record. The dead draw is left out
   only in a frame whose water is drawn.
-- At most 64 water records, 4 targets, 4 cubes, 256 reflection draws and 8 views a frame.
+- At most 64 water records, 4 targets, 256 reflection draws and 8 views a frame. *(Struck by
+  ledger ruling 26: "4 cubes".)*
 - The surface is drawn by the formula, with a target that holds at least the sky, or not at all: no
   flat colour, no empty picture, no sky colour "along the ray" in the fetch's place.
 - A target's terrain is the game's own view's, whole, under the derived camera, or the target is the
@@ -566,9 +563,12 @@ but for the discovery runs themselves; parts 4 to 8 and 10 are phase 13b; part 9
 ## Rulings
 
 Rulings 1 to 8 are the controller's (ledger): 1 the scope and the native target, sky first, far
-terrain second; 2 no SDK change; 3 the cubes; 4 the far lake later; 5 the switch; 6 shadow correctness
-stays out; 7 game launches wait for the user's leave; 8 the other monitor's swap is not pursued. From
-9 on they are this design's, each on the recommended option.
+terrain second; 2 no SDK change; 3 the cubes (**withdrawn by ledger ruling 26**); 4 the far lake
+later; 5 the switch; 6 shadow correctness stays out; 7 game launches wait for the user's leave; 8 the
+other monitor's swap is not pursued. From 9 on they are this design's, each on the recommended
+option. Ledger rulings 26 to 28 were made on this design: 26 the cubes are not drawn (ruling 22 below
+falls); 27 the surface tests and writes depth (ruling 14 below stands); 28 phase 13a starts with the
+plan, and entry into phase 13c is ruled after phase 13b's validation.
 
 - Ruling 9: three phases, 13a without the game, 13b the surface with the sky, 13c the far terrain
   under the entry conditions of Design 9 - why: ledger ruling 7 leaves only work without the game for
@@ -598,7 +598,7 @@ stays out; 7 game launches wait for the user's leave; 8 the other monitor's swap
   against the surface; moving the layer's depth before the water would reopen sub-project 11's order
   of tail, sky and late records for 0.1 unit of height - cost if wrong: the native layer's depth at
   the lake is the surface's, 0.1 unit above the game's cube; and the stored scene's last depth is the
-  surface, which is why criterion 7 has a plane of its own.
+  surface, which is why criterion 7 has a plane of its own. **Confirmed by ledger ruling 27.**
 - Ruling 15: the mirrored camera is derived natively from the main view-projection, the draw's
   `c31.xy` and the mesh's height; it is not read from the game's reflection passes - why: it equals
   the game's rows within 1e-6 in 16 of 16 views; phase 13b then captures nothing outside the main
@@ -631,12 +631,9 @@ stays out; 7 game launches wait for the user's leave; 8 the other monitor's swap
   term reads the game's screen mask - cost if wrong: within 20 units of water the surface is darker
   than the game's wherever the game does fill slot 14 (W3 says); a region with `b137` set keeps the
   placeholder.
-- Ruling 22: the cubes are recognised by the vertex shader's hash on a draw without a pixel shader at
-  the layer's target, held to a fixed shape, drawn after the cloud occluders, all or none among
-  themselves; without them the layer is today's; they are drawn under the water's switch whatever the
-  water's verdict - why: ledger ruling 3; and with ruling 14 they are what covers the frames and the
-  pixels in which the surface is not drawn - cost if wrong: three depth-only draws a frame that
-  change few texels at the bridge (criterion 13 says how few).
+- Ruling 22: **struck by ledger ruling 26.** It ruled how the cubes were recognised, held to a
+  shape and drawn under the water's switch whatever the water's verdict, on the ground of ledger
+  ruling 3, which ledger ruling 26 withdraws: the cubes are not drawn.
 - Ruling 23: the stored scene gains the depth before the water and the reflection targets, in dump
   runs only - why: no plane in hand can be held to the game's depth copy or to the game's picture
   once the water writes depth - cost if wrong: a file format's second version.
@@ -691,8 +688,9 @@ at 20.1024") is the placeholder's and does not exist in an on-run. Criteria 9 an
    criterion 9). **Decided by**: no run.
 6. *Records.* In every frame of a capture at the bridge and the third spot with the switch on: each
    water record equals its `"draw"` row bit for bit (`water_check.py records`); `seen` = `taken` =
-   the frame's `BEAD` rows (24 and 22 expected); no reason occurs; the cube records equal their
-   `"indx"` rows (3 and 3). `sizeof(DrawRecord)` is 616 (static assert). **Reference**: the row
+   the frame's `BEAD` rows (24 and 22 expected); no reason occurs. *(Struck by ledger ruling 26:
+   "the cube records equal their `"indx"` rows (3 and 3)".)* `sizeof(DrawRecord)` is 616 (static
+   assert). **Reference**: the row
    counts of R B1 (`WE/b_survey_*.txt`). **Decided by**: V-BRIDGE, V-THIRD.
 7. *Cover, and the bed's depth.* In the on-run's stored scene, "water pixels" are those whose last
    depth is nearer than the plane taken before the water. (a) *Cover*: against the replay's kept
@@ -745,13 +743,13 @@ at 20.1024") is the placeholder's and does not exist in an on-run. Criteria 9 an
     lies at the lake's level (a height between 19.95 and 20.15) on at least **95%** with the water
     on *(no precedent)*. **No off-side bound is set**: with the water off the dead draw closes the
     same texels (sub-project 12's criterion 12 was written with an off-side bound that could not
-    hold). What the cubes add is read where the surface is not drawn: the texels over pixels whose
-    bed is below 20.0024 in the game's depth copy and which are no water pixel: closed at the cube's
-    level on at least 90% with the switch on, reported with it off; fewer than 200 such texels: "not
-    decidable" for the cubes, and their draw stands on criterion 6 and on the translator test.
-    **Reference**: the game's layer depth as the depth copy with the cubes of `post_cube_point`
-    (both exist); `FM` "Stored native scene" for the native plane. **Decided by**: V-BRIDGE with the
-    sun on.
+    hold). *(Struck by ledger ruling 26: the second part, "What the cubes add is read where the
+    surface is not drawn ... closed at the cube's level on at least 90% with the switch on ...
+    fewer than 200 such texels: not decidable for the cubes". No cube is drawn; the texels over
+    pixels that are no water pixel are reported for both runs and not bound.)* **Reference**: the
+    game's layer depth as the depth copy with the cubes of `post_cube_point` (both exist; the game's
+    side still has its cubes); `FM` "Stored native scene" for the native plane. **Decided by**:
+    V-BRIDGE with the sun on.
 14. *The land beside the water, and the pools.* Off-run against on-run of one session, on pixels
     that are no water pixel in the on-run and no placeholder pixel in the off-run: the land within 3
     pixels of the water, the regions "island in the lake" and "far peak" of
@@ -773,8 +771,8 @@ at 20.1024") is the placeholder's and does not exist in an on-run. Criteria 9 an
 16. *Errors.* Before any real-GPU run of a build that changes bindings, targets or shader text: 240
     s on the software adapter under the debug layer at the bridge with the switch on and the sun,
     the coverage and the wind on: 0 `d3d ERROR` lines, warnings listed by id; **and the log shows
-    the step drew** (`Water: drawn 12 of 12, targets 4`, `cubes 3 of 3`) and the shot shows the lake
-    (viewed), so that the programs shaded pixels. Once for phase 13b's build, once for 13c's.
+    the step drew** (`Water: drawn 12 of 12, targets 4`; *struck by ledger ruling 26: "`cubes 3 of
+    3`"*) and the shot shows the lake (viewed), so that the programs shaded pixels. Once for phase 13b's build, once for 13c's.
     Nothing here depends on read-back, so the adapter's empty read-back (sub-project 12's ruling 43)
     does not stand in the way and no feed is needed. **Decided by**: runs WARP.
 17. *Cost.* Shot width 1942, **the window on the usual monitor** (on the other one every frame is a
@@ -849,8 +847,8 @@ monitor experiments (ledger ruling 8).
    clay; the counters show it, a still picture does not.
 5. The water's place meets sub-project 11's order of sky, tail and late records; a frame arranged
    otherwise is today's (`order`), and how often that happens is known only from a run.
-6. The cubes may change almost no texel at the bridge (criterion 13's second part "not decidable"):
-   ledger ruling 3's work would then stand on tests alone.
+6. *(Struck by ledger ruling 26: the risk that the cubes change almost no texel at the bridge. They
+   are not drawn.)*
 7. W3 and W4 may not exist from this save: criteria 11 and 12 read "not decidable".
 8. Every run is likely `RUN UNCHECKED`; timing needs the usual monitor and a quiet machine.
 
@@ -863,9 +861,12 @@ monitor experiments (ledger ruling 8).
   hold for a surface that writes depth as the game's does. The cubes are designed in as ruled; what
   they then buy is the level where and when the surface is not drawn. The controller may keep them,
   strike them, or ask instead for the layer's depth to be taken before the water (ruling 14 advises
-  against that).
+  against that). **Decided by ledger ruling 26: struck.** The cubes are not drawn; the layer's depth
+  place is not moved.
 - **The dispatch's "depth test without write"**: the state word has the write bit; ruling 14 follows
-  the word. If the controller wants no write, criteria 7 and 13 change with it.
+  the word. If the controller wants no write, criteria 7 and 13 change with it. **Decided by ledger
+  ruling 27: the surface tests and writes depth;** criteria 7 and 13 stand as written (13 without its
+  struck second part).
 - **Entry into phase 13c**, and the blur for all or for none if open question 7 does not settle.
 - **The default of `--fable2_native_water`**: the user's, after validation; off until then.
 - **The SDK's copy interface B2** and the monitor experiments (ledger rulings 2 and 8): the user's.

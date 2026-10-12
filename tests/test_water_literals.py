@@ -208,7 +208,7 @@ class Record(unittest.TestCase):
         self.assertEqual(fill.count("g_water_frame"), 1)
         self.assertEqual(fill.count("ObserveWaterDraw"), 1)
         # one record made, in RecordDraw, behind the draw's own material status and then the thread's byte
-        record = _function(c, "uint32_t RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {")
+        record = _function(c, "uint32_t RecordDraw(uint32_t id, const LastArgs& a, uint32_t device")
         self.assertEqual(c.count("MakeWaterRecord("), 1)
         self.assertIn("if (in.material.status == MaterialStatus::kNoAlbedo && t_water_kind != WaterKind::kNone) {\n"
                       "    water_kind = t_water_kind;\n    t_water_kind = WaterKind::kNone;\n"
@@ -233,6 +233,44 @@ class Record(unittest.TestCase):
         head = observe[:observe.index("t_water_kind = kind;")]
         self.assertIn("if (kind == WaterKind::kNone) return;", head)
         self.assertNotIn("Read", head.split("{", 1)[1])
+
+    def test_water_draw_origin_covers_geometry_and_is_rechecked_before_scene_mutation(self):
+        # The origin must precede geometry reads, not merely ObserveWaterDraw's later registers.
+        c = self.CAPTURE
+        observer = _function(c, "void ObserveReflectionDraw(")
+        self.assertLess(observer.index("const uint32_t epoch = g_light_tries_frame.load("), observer.index("ReadVirtualBe32("))
+        self.assertLess(observer.index("t_reflection.frame = epoch;"), observer.index("ReadVirtualBe32("))
+        handoff = c[c.index("  if (records) t_ps_loads.Observe(in_scene);"):]
+        branch = ("  if (records && g_water_frame.load(std::memory_order_relaxed)) {\n"
+                  "    ObserveReflectionDraw(id, args, device, in_scene);\n"
+                  "    water_frame = t_reflection.frame;\n"
+                  "    water_origin = &water_frame;\n  }")
+        self.assertIn("const uint32_t* water_origin = nullptr;", handoff)
+        self.assertIn(branch, handoff)
+        self.assertLess(handoff.index(branch), handoff.index("RecordDraw(id, args, device, water_origin);"))
+        # A null origin is important: a swap may turn water on between this branch and FillMaterial.
+        record = _function(c, "uint32_t RecordDraw(uint32_t id, const LastArgs& a, uint32_t device, const uint32_t* water_origin) {")
+        guard = ("  if (water_kind != WaterKind::kNone &&\n"
+                 "      (!water_origin || *water_origin != g_light_tries_frame.load(std::memory_order_relaxed) ||\n"
+                 "       !g_water_frame.load(std::memory_order_relaxed))) return kNoRecordSeq;")
+        self.assertIn(guard, record)
+        self.assertLess(record.index("std::lock_guard<std::mutex> lock(g_scene_mutex);"), record.index(guard))
+        self.assertLess(record.index("if (!g_builder.InMainScene())"), record.index(guard))
+        for mutation in ("g_builder.SetLight(", "g_builder.CountLightTry(", "g_builder.NextSeq()",
+                         "g_builder.WaterSeen(", "g_builder.AddWater(", "g_builder.Add("):
+            self.assertLess(record.index(guard), record.index(mutation), mutation)
+        # No new frame/water atomic read before the locked guard on the off path.
+        self.assertNotIn("water_origin", record[record.index("DrawInputs in;"):record.index(guard)])
+        self.assertEqual(record.count("g_water_frame.load("), 1)
+
+    def test_water_switch_help_describes_the_implemented_picture(self):
+        render = _source("fable2_native_render.cpp")
+        help_text = render[render.index('REXCVAR_DEFINE_STRING(fable2_native_water,'):render.index('REXCVAR_DEFINE_STRING(fable2_native_coverage,')]
+        for claim in ("blended lake surface", "tests and writes depth", "256 x 256 reflection targets",
+                      "sky", "far terrain", "blur", "whole frame", "sky alone", "off (or false, 0; the default)"):
+            self.assertIn(claim, help_text)
+        for stale in ("THIS BUILD", "CAPTURES ONLY", "next builds", "changes no", "picture yet"):
+            self.assertNotIn(stale, help_text)
 
     def test_the_frame_row_is_written_from_the_scenes_stored_records(self):
         """Not from a second read at the draw (sub-project 11's gap, sub-project 12's review of Tasks 8 and 9)."""

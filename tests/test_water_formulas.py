@@ -353,6 +353,24 @@ class Pixel(unittest.TestCase):
                                         kind="opaque")["fate"], "killed")
 
 
+class PixelCoverage(unittest.TestCase):
+    def result(self, **change):
+        r = water_check.PixelResult(*([0] * len(water_check.PixelResult._fields)))
+        r = r._replace(trials=100, killed=15, skipped=15, shaded=70, sun=35, shadow=15,
+                       near=35, far=35, fogged=35, lit=35, glinting=10)
+        return r._replace(**change)
+
+    def test_fifteen_percent_on_either_range_or_fog_side_is_refused(self):
+        for change in (dict(near=15, far=55), dict(near=55, far=15), dict(fogged=15), dict(fogged=55)):
+            with self.subTest(change=change):
+                self.assertTrue(water_check.pixel_floors(self.result(**change)))
+
+    def test_twenty_percent_boundary_on_either_range_or_fog_side_passes(self):
+        for change in (dict(near=20, far=50), dict(near=50, far=20), dict(fogged=20), dict(fogged=50)):
+            with self.subTest(change=change):
+                self.assertEqual(water_check.pixel_floors(self.result(**change)), [])
+
+
 @unittest.skipUnless(HAVE, NO_DUMPS)
 class PixelMicrocode(unittest.TestCase):
     TRIALS = 200
@@ -364,8 +382,8 @@ class PixelMicrocode(unittest.TestCase):
         self.assertGreaterEqual(min(r.killed, r.skipped, r.shaded), tenth)       # (Review Focus 1: every branch is reached)
         self.assertGreaterEqual(min(r.sun, r.shaded - r.sun), tenth)             # b136 in both states among the shaded
         self.assertGreaterEqual(r.shadow, 1)                                     # b137 set somewhere
-        self.assertGreaterEqual(min(r.near, r.far), fifth // 2)                  # both sides of 1 / c140.x
-        self.assertGreaterEqual(min(r.fogged, r.shaded - r.fogged), fifth // 2)  # both sides of the fog's start
+        self.assertGreaterEqual(min(r.near, r.far), fifth)                      # both sides of 1 / c140.x
+        self.assertGreaterEqual(min(r.fogged, r.shaded - r.fogged), fifth)       # both sides of the fog's start
         self.assertEqual(water_check.pixel_floors(r), [])
         self.assertEqual(set(r.kinds), set(water_check.PIXEL_KINDS.values()))
         # (ledger ruling 34; the review of Tasks 1 to 5, I2) the zero-product points are four

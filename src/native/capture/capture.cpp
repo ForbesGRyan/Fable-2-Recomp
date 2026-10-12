@@ -5498,7 +5498,7 @@ void ObserveWaterDraw(uint32_t device, const DrawShaders& shaders, uint32_t ps_o
 // recorded as unsupported (prim 0).
 // Returns the DrawRecord::seq the draw was recorded under (kNoRecordSeq when the scene no longer held it):
 // discovery writes it into the draw's row.
-uint32_t RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
+uint32_t RecordDraw(uint32_t id, const LastArgs& a, uint32_t device, const uint32_t* water_origin) {
   DrawInputs in;
   in.func_id = id;
   SkipReason extra = SkipReason::kNone;
@@ -5622,6 +5622,12 @@ uint32_t RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
     t_impostor_look = ImpostorLook::kNone;  // (a call the scene no longer holds is no call of the frame)
     return kNoRecordSeq;
   }
+  // The reflection observer saved this draw's epoch before its geometry reads.
+  // Swap advances it under this same mutex: neither half of an old water draw
+  // may enter the next frame, including a swap that turns the water switch on.
+  if (water_kind != WaterKind::kNone &&
+      (!water_origin || *water_origin != g_light_tries_frame.load(std::memory_order_relaxed) ||
+       !g_water_frame.load(std::memory_order_relaxed))) return kNoRecordSeq;
   if (block_tried) {
     if (block.valid) {
       g_builder.SetLight(block);
@@ -7092,10 +7098,16 @@ void OnXdkReturn(uint32_t id, PPCContext&, uint8_t*) {
   // its uploads are followed: with records here, with discovery below (no
   // instruction is added to a draw that neither reads).
   if (records) t_ps_loads.Observe(in_scene);
-  if (records && g_water_frame.load(std::memory_order_relaxed)) ObserveReflectionDraw(id, args, device, in_scene);
+  uint32_t water_frame = 0;
+  const uint32_t* water_origin = nullptr;
+  if (records && g_water_frame.load(std::memory_order_relaxed)) {
+    ObserveReflectionDraw(id, args, device, in_scene);
+    water_frame = t_reflection.frame;
+    water_origin = &water_frame;
+  }
   uint32_t seq = kNoRecordSeq;
   if (in_scene && records) {
-    seq = RecordDraw(id, args, device);
+    seq = RecordDraw(id, args, device, water_origin);
   } else if (records) {
     // Outside the scene, in a frame with shadow records: the two shadow passes.
     if (g_shadows_frame.load(std::memory_order_relaxed)) ObserveShadowDraw(id, args, device);

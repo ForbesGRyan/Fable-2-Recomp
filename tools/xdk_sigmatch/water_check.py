@@ -107,7 +107,8 @@ them, because a saturate takes no number back to 0 and the colour can then be th
 Counted beside agreement (a check that cannot fail is no check): the three fates; of the shaded: with the sun
 term, with the shadow factor, near (the machine's own sat(c140.x * d) below 1) and far, fogged (the machine fetched
 the tables), lit (the glint's cosine above 0) and glinting (the sun term above 1% of the colour); the degenerate
-kinds. pixel_floors() names what a run
+kinds. Both sides of the near/far range and fog start must each reach a fifth of all trials.
+pixel_floors() names what a run
 must reach.
 PIXEL_MUTATIONS, each of which must fail: "base" c126 and c127 exchanged; "centre" the lookup scaled about 0
 instead of the centre; "distort" c130 for c129 at slot 13; "lookup_axes" both lookups at (v, u); "flatten" c128.x
@@ -830,16 +831,17 @@ def pixel_floors(r):
     """The floors a run of check_pixel must reach to count (review focus 1), as problems (texts)."""
     out = []
     tenth = r.trials // 10
+    fifth = r.trials // 5
     if min(r.killed, r.skipped, r.shaded) < tenth:
         out.append("a fate has fewer than a tenth of the trials")
     if min(r.sun, r.shaded - r.sun) < tenth:
         out.append("bool b136 is set, or clear, in fewer than a tenth of the trials among the shaded")
     if r.shadow < max(1, r.trials // 20) or r.shaded - r.shadow < tenth:
         out.append("bool b137 is set in fewer than a twentieth, or clear in fewer than a tenth")
-    if min(r.near, r.far) < tenth:
-        out.append("a side of the range 1 / c140.x has fewer than a tenth of the trials")
-    if min(r.fogged, r.shaded - r.fogged) < tenth:
-        out.append("a side of the fog's start has fewer than a tenth of the trials")
+    if min(r.near, r.far) < fifth:
+        out.append("a side of the range 1 / c140.x has fewer than a fifth of the trials")
+    if min(r.fogged, r.shaded - r.fogged) < fifth:
+        out.append("a side of the fog's start has fewer than a fifth of the trials")
     if 3 * r.lit < r.sun:
         out.append("the glint's cosine is above 0 in fewer than a third of the trials with the sun term")
     if r.glinting < r.trials // 20:

@@ -153,15 +153,15 @@ REXCVAR_DEFINE_STRING(fable2_native_impostor_feed, "", "Fable2",
                       "pictures file (.f2np) written beside a scene dump carries a flag that impostor_pictures.py used "
                       "prints. A file that is missing or refused: one log line, and nothing changes.");
 REXCVAR_DEFINE_STRING(fable2_native_water, "off", "Fable2",
-                      "Native water (sub-project 13: the lake's surface; frame map section 20): on (or true, 1) = with a "
-                      "composite view the capture also reads the lake's draws (vertex shader BEAD with pixel shader A17D, "
-                      "the blended surface, or F6D9, its opaque twin that draws nothing in the game) into a side block of "
-                      "the frame: at most 64 records of both, each linked to its draw record, the frame's water whole or "
-                      "empty with counted reasons (the capture log's water line; \"water-record {...}\"). THIS BUILD "
-                      "CAPTURES ONLY: the native view draws the frame as with the switch off (the surface step and its "
-                      "reflection targets come with the next builds of the sub-project), so the switch changes no "
-                      "picture yet. off (or false, 0; the default) = none of it is read or made, and the log has the one "
-                      "line \"water: off\".");
+                      "Native water (sub-project 13: the lake's surface; frame map section 20): on (or true, 1) = the "
+                      "native view draws the blended lake surface by its own formulas, tests and writes depth, and "
+                      "uses its own 256 x 256 reflection targets: sky and far terrain from the game's captured views, "
+                      "with the captured blur where present. A reflection view is whole or sky alone. The whole frame "
+                      "keeps its previous draws if any surface input is refused; only a drawn surface leaves out its "
+                      "dead opaque twin. At most 64 records of both lake shaders, with counted refusal reasons (F3 and "
+                      "the capture log's water line; \"water-record {...}\"). off (or false, 0; the default) = none of "
+                      "the water records, targets or programs are made or drawn, and the log has the one line "
+                      "\"water: off\".");
 REXCVAR_DEFINE_STRING(fable2_native_coverage, "off", "Fable2",
                       "Native coverage (sub-project 11, phase 11b; default off until the user's checks: frame map section "
                       "18, \"Validation (11b)\"): on (or true, 1) = the native view "

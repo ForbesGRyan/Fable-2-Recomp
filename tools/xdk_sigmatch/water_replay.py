@@ -60,7 +60,7 @@ order of the textures, the picture's orientation and channel order, the moment t
         (the frame's last blurred view), the sharp replay against it and the blur on the game's own pair. --water:
         the replayed pictures through `scene` in the game's pictures' place: the game's own, the mirrored sky alone,
         sky and far terrain sharp, sky and far terrain blurred as the game blurs.
-  targets <capture> <scene.f2ns> [--frame 1]   criterion 10's part of phase 13b, on the stored scene's reflection
+  targets <capture> <scene.f2ns> [--frame 1] [--silhouette]   criterion 10's part of phase 13b, on the stored scene's reflection
         targets (flag 16; plan Task 11): each target against the capture's picture of the same base: criterion 5's two
         measures (the colour on the game's sky texels within 0.95 to 1.05 a channel; the first row with content
         within one of the derived horizon's); and that the targets of one frame are equal texel for texel (in this
@@ -74,7 +74,12 @@ order of the textures, the picture's orientation and channel order, the moment t
         game's depth copy: each side's share farther than one pixel from the other (bound 2% each); and the bed: on
         the native water pixels, the depth before the water step within 1% of the game's depth copy, as distances
         from the eye (bound 80%).
-  colour <capture> <scene.f2ns> [<off capture> <off scene.f2ns>] [--frame 1]   criterion 8: on the replay's judged
+  targets --silhouette: criterion 10 after 13c. Independent own-frame/view sky (the captured seven-tap blur where
+        flagged); every nonblack texel at least 8/255 from sky, including black-cap boundaries. Both directions
+        >=85% within a square radius of one texel, common-content RGB means .85–1.15. No erosion/horizon mask.
+        Terrain fallback count must be attributed to the paired renderer log/F3; it is not in stored target pixels.
+
+  colour <capture> <scene.f2ns> [<off capture> <off scene.f2ns>] [--frame 1] [--all]   criterion 8: on the replay's judged
         pixels whose lookup samples the sky (`lookup`'s set), the stored native scene over the game's scene a
         channel (0.92 to 1.08) and the hue's difference (6 degrees), with at least 5,000 such pixels or "not
         decidable"; the same of the off-run's pair on the same pixels (the distance before); and, reported and not
@@ -98,6 +103,8 @@ order of the textures, the picture's orientation and channel order, the moment t
         are printed for each and for the replay as it is, AND THE BOUND IS APPLIED TO THE ROUNDING THAT LIES NEARER
         THE STORED PLANE (the smaller mean absolute difference on the judged interior), which the verdict line
         names. Which rounding either adapter applies is not established: the line is how it is learnt. In phase 13b
+        --all instead decides criterion 9 on every kept pixel (minimum one), including low alpha and shore: RGB
+        means .92–1.08, hue within six degrees, luminance P5/50/95 ratios .93–1.07; no off-distance requirement.
         the targets hold the mirrored sky alone; in phase 13c sky, terrain and blur: the command is the same. What it
         cannot see: the bed under the surface (at most 1% of a judged pixel, and 0.3% in open water: the replay
         blends over black), the blend's own second rounding (the pass blends over a bed already in the format), and
@@ -1628,6 +1635,53 @@ def colour_verdict(m, least=JUDGED_MIN):
     return "met" if ok else "not met as written"
 
 
+def all_colour_measure(native, game, kept):
+    """Criterion 9 on every kept pixel; no alpha/sky restriction or minimum beyond one pixel."""
+    a, g, sel = np.asarray(native), np.asarray(game), np.asarray(kept, dtype=bool)
+    invalid = {"pixels": int(sel.sum()), "ratio": (math.nan,) * 3, "hue": math.nan,
+               "p": ((math.nan,) * 3,) * 2, "percentile_ratio": (math.nan,) * 3,
+               "missed": [], "verdict": "not decidable"}
+    if a.shape != g.shape or a.ndim != 3 or a.shape[-1] != 3 or a.shape[:2] != sel.shape:
+        return dict(invalid, reason="picture/set dimensions differ")
+    if not sel.any():
+        return dict(invalid, reason="no kept water pixels")
+    if not np.isfinite(a[sel]).all() or not np.isfinite(g[sel]).all() or (a[sel] < 0).any() or (g[sel] < 0).any():
+        return dict(invalid, reason="nonfinite or negative selected colour")
+    m = colour_measure(a, g, sel)
+    if not all(v > 0 for v in g[sel].mean(0)) or not all(v > 0 for v in m["p"][0]):
+        return dict(invalid, reason="zero game channel mean or luminance percentile")
+    ratios = tuple(x / y for x, y in zip(m["p"][1], m["p"][0]))
+    missed = []
+    if not all(0.92 <= v <= 1.08 for v in m["ratio"]):
+        missed.append("RGB means")
+    if not abs(m["hue"]) <= 6.0:
+        missed.append("hue")
+    if not all(0.93 <= v <= 1.07 for v in ratios):
+        missed.append("luminance percentiles")
+    return dict(m, percentile_ratio=ratios, missed=missed, verdict="not met as written" if missed else "met", reason="")
+
+
+def silhouette_measure(native, game, sky):
+    """Ruling 55: independent own-view sky, 8/255 sky distance, exact black excluded; no erosion.
+    Square radius-one neighbours in both directions, RGB means on exact common content texels."""
+    a, g, s = (np.asarray(p, dtype=np.float64) for p in (native, game, sky))
+    invalid = {"game_pixels": 0, "native_pixels": 0, "both": 0, "game_near": math.nan,
+               "native_near": math.nan, "ratio": (math.nan,) * 3, "verdict": "not decidable"}
+    if a.shape != g.shape or a.shape != s.shape or a.ndim != 3 or a.shape[-1] != 3:
+        return dict(invalid, reason="target/sky dimensions differ")
+    if not all(np.isfinite(p).all() and not (p < 0).any() for p in (a, g, s)):
+        return dict(invalid, reason="nonfinite or negative target/sky")
+    ag = (np.abs(a - s).max(-1) >= SILHOUETTE) & (a.max(-1) > 0)
+    gg = (np.abs(g - s).max(-1) >= SILHOUETTE) & (g.max(-1) > 0)
+    both = ag & gg
+    n = int(both.sum())
+    ratio = a[both].mean(0) / g[both].mean(0) if n and (g[both].mean(0) > 0).all() else np.full(3, np.nan)
+    forward, reverse = near_share(gg, ag), near_share(ag, gg)
+    ok = forward >= 0.85 and reverse >= 0.85 and all(0.85 <= v <= 1.15 for v in ratio)
+    return dict(game_pixels=int(gg.sum()), native_pixels=int(ag.sum()), both=n, game_near=forward,
+                native_near=reverse, ratio=tuple(ratio), verdict="met" if ok else "not met as written", reason="")
+
+
 def target_pictures(water):
     """{base: the target's red, green and blue as floats in 0..1 [256, 256, 3]} of a stored scene's water part
     (foliage_trace.read_dump_water): what the pass's surface draws sampled, in the shader's own channel order."""
@@ -1666,7 +1720,78 @@ def _stored(args, say, need=(), game=True):
     return head, nscene, nlev, water, scale
 
 
+def cmd_target_silhouette(args, say=print):
+    got = _stored(args, say, need=("targets",), game=False)
+    if got is None:
+        return 1
+    _, _, _, water, _ = got
+    path = cr.find_capture(str(args.capture))
+    cap = wc.read_capture(path, args.frame)
+    textures = wc.RowTextures(cap)
+    rows = [r for r in cap["water"] if r.get("frame") == args.frame and wc.row_kind(r) == "surface"]
+    by_base = {wc._fc(r, 13)[1] & 0xFFFFF000: r for r in rows}
+    bases, views = sorted(by_base), read_views(path, args.frame)
+    if len(views) != len(bases) or not bases:
+        say("criterion 10 (13c): not decidable (view/base count differs or no bases)")
+        return 1
+    block, tf4, tf13, tf14, note = _sky_inputs(path, args.frame)
+    say("  independent own-frame/view sky: %s" % note)
+    # A missing texture term may stand in for older replay diagnostics; it cannot decide acceptance here.
+    if tf13 is None or tf14 is None:
+        say("criterion 10 (13c): not decidable (sky texture term missing)")
+        return 1
+    say("  R55 classifier: max RGB distance from own sky >=8/255; exact black excluded; no horizon mask/erosion; "
+        "square radius-one/8-neighbour distance, RGB means on exact common content")
+    targets = target_pictures(water)
+    if set(targets) != set(bases) or len(targets) != len(water["targets"]):
+        say("criterion 10 (13c): not decidable (stored target bases differ or duplicate)")
+        return 1
+    bad, unknown = 0, 0
+    for base, view in zip(bases, views):
+        try:
+            matrix = np.asarray(view.matrix, dtype=np.float64)
+            if matrix.shape != (4, 4):
+                raise cr.Unreadable("own-view matrix missing or not 4x4")
+            # SkyRayBasis reads only xyz of rows 0,1,3. Do not judge unread row2/w garbage.
+            basis = matrix[[0, 1, 3], :3]
+            if not np.isfinite(basis).all():
+                raise cr.Unreadable("own-view sky basis nonfinite")
+            scale = np.abs(basis).max()
+            if not scale > 0 or np.linalg.det(basis / scale) == 0:
+                raise cr.Unreadable("own-view sky basis degenerate")
+            with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+                rays = view_rays(matrix, VIEW_SIZE)
+            if not np.isfinite(rays).all() or not (np.abs(rays).max(-1) > 0).all():
+                raise cr.Unreadable("own-view sky rays nonfinite or zero")
+            game = _picture_of(textures, wc._fc(by_base[base], 13))
+            native = targets[base]
+            sky = sky_picture(view.matrix, block, tf4, tf13, tf14, VIEW_SIZE).astype(np.float64) / 255.0
+            if view.blur is not None:
+                offsets, weight = blur_taps(view.blur)
+                sky = eight_bits(view_blur(sky, offsets, weight))
+            m = silhouette_measure(native, game, sky)
+            if not np.any(game):
+                m.update(verdict="not decidable", reason="game picture empty")
+        except (cr.Unreadable, OSError, ValueError) as e:
+            say("  base %08X: not decidable (%s)" % (base, e))
+            unknown += 1
+            continue
+        say("  base %08X view %d %s: content game %d native %d; within one texel game %.4f%% native %.4f%%; "
+            "exact common %d, native/game RGB %s: %s%s" % (
+                base, view.index, "blurred" if view.blur is not None else "sharp", m["game_pixels"], m["native_pixels"],
+                100 * m["game_near"], 100 * m["native_near"], m["both"], " ".join("%.6f" % v for v in m["ratio"]),
+                m["verdict"], " (%s)" % m["reason"] if m["reason"] else ""))
+        bad += m["verdict"] == "not met as written"
+        unknown += m["verdict"] == "not decidable"
+    say("  reflection: terrain fallback count is a renderer log/F3 figure (not stored in target pixels); report paired run's count")
+    verdict = "not met as written" if bad else "not decidable" if unknown else "met"
+    say("criterion 10 (13c; both directions >=85%%, common RGB .85–1.15): %s" % verdict)
+    return 0 if verdict == "met" else 1
+
+
 def cmd_targets(args, say=print):
+    if getattr(args, "silhouette", False):
+        return cmd_target_silhouette(args, say)
     got = _stored(args, say, need=("targets",), game=False)
     if got is None:
         return 1
@@ -1825,6 +1950,22 @@ def cmd_colour(args, say=print):
     if got is None:
         return 1
     path, fr, game, r, head, native, nlev, water, scale = got
+    if getattr(args, "all", False):
+        if game is None:
+            say("criterion 9: not decidable (the capture holds no scene)")
+            return 1
+        if r.problems:
+            say("criterion 9: not decidable (incomplete replay: %s)" % "; ".join(r.problems))
+            return 1
+        m = all_colour_measure(native, game, r.kept)
+        say("  ALL kept water pixels %d (no alpha/sky filter; minimum 1): native / game RGB %s, hue %+.3f degrees" % (
+            m["pixels"], " ".join("%.6f" % v for v in m["ratio"]), m["hue"]))
+        say("  luminance P5/50/95: game %s native %s; ratios %s" % (
+            " ".join("%.6f" % v for v in m["p"][0]), " ".join("%.6f" % v for v in m["p"][1]),
+            " ".join("%.6f" % v for v in m["percentile_ratio"])))
+        say("criterion 9 (RGB .92–1.08, hue <=6 degrees, luminance percentile ratios .93–1.07): %s%s" % (
+            m["verdict"], " (%s)" % (m["reason"] or ", ".join(m["missed"])) if m["reason"] or m["missed"] else ""))
+        return 0 if m["verdict"] == "met" else 1
     if game is None:
         say("criterion 8: not decidable (the capture holds no scene)")
         return 1
@@ -1957,8 +2098,11 @@ def main(argv=None, say=print):
         p = common(sub.add_parser(name))
         p.add_argument("dump")
         if name == "colour":
+            p.add_argument("--all", action="store_true", help="criterion 9: every kept water pixel")
             p.add_argument("off_capture", nargs="?")
             p.add_argument("off_dump", nargs="?")
+        if name == "targets":
+            p.add_argument("--silhouette", action="store_true", help="criterion 10 after 13c: all non-sky/non-black texels")
         p.add_argument("--frame", type=int, default=1)
         if name == "main":
             p.add_argument("--levels", choices=("mean", "stored"), default="mean")

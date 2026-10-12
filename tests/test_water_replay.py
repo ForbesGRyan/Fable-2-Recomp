@@ -802,5 +802,129 @@ class MadeDumpLayout(unittest.TestCase):
             water_made.scene_dump(4, 2, 8, np.zeros((2, 4, 3)), np.zeros((2, 4)))           # a flag without its plane
 
 
+class Phase13cMeasures(unittest.TestCase):
+    def lake(self):
+        game = np.linspace(0.1, 1.0, 120).reshape(10, 12, 1) * np.array([0.6, 0.8, 1.0])
+        return game, np.ones(game.shape[:2], dtype=bool)
+
+    def test_all_colour_scale_and_percentiles(self):
+        game, kept = self.lake()
+        self.assertEqual(wr.all_colour_measure(game * 1.05, game, kept)["verdict"], "met")
+        self.assertEqual(wr.all_colour_measure(game * 1.2, game, kept)["verdict"], "not met as written")
+        flat = np.broadcast_to(game.mean((0, 1)), game.shape)
+        m = wr.all_colour_measure(flat, game, kept)
+        self.assertTrue(np.allclose(m["ratio"], 1.0))
+        self.assertEqual(m["verdict"], "not met as written")
+        self.assertIn("luminance percentiles", m["missed"])
+
+    def test_all_colour_no_floor_and_invalid_values(self):
+        game, kept = self.lake()
+        kept[:] = False
+        kept[0, 0] = True
+        self.assertEqual(wr.all_colour_measure(game, game, kept)["verdict"], "met")
+        for native, ref, mask in ((game, game, kept & False), (game, game * 0, kept),
+                                  (game * math.nan, game, kept), (game * math.inf, game, kept)):
+            self.assertEqual(wr.all_colour_measure(native, ref, mask)["verdict"], "not decidable")
+
+    def targets(self, shift=0):
+        sky = np.zeros((32, 32, 3)) + [0.5, 0.6, 0.7]
+        game, native = sky.copy(), sky.copy()
+        game[8:24, 10:18] = [0.1, 0.2, 0.3]
+        native[8:24, 10 + shift:18 + shift] = [0.1, 0.2, 0.3]
+        return native, game, sky
+
+    def test_silhouette_shift_and_sky_controls(self):
+        self.assertEqual(wr.silhouette_measure(*self.targets(1))["verdict"], "met")
+        self.assertEqual(wr.silhouette_measure(*self.targets(3))["verdict"], "not met as written")
+        native, game, sky = self.targets()
+        m = wr.silhouette_measure(sky, game, sky)
+        self.assertEqual(m["game_near"], 0.0)
+        self.assertEqual(m["verdict"], "not met as written")
+        native[0:5, 0:5] = [0.1, 0.2, 0.3]
+        m = wr.silhouette_measure(native, game, sky)
+        self.assertLess(m["native_near"], 0.85)
+        self.assertEqual(m["verdict"], "not met as written")
+
+    def test_silhouette_black_cap_boundary_and_overlap_colour(self):
+        sky = np.zeros((8, 8, 3)) + 0.5
+        sky[:4] = 0
+        game, native = sky.copy(), sky.copy()
+        game[3, :4] = 0.2
+        native[3, :4] = 0.2
+        m = wr.silhouette_measure(native, game, sky)
+        self.assertEqual((m["game_pixels"], m["native_pixels"], m["both"]), (4, 4, 4))
+        self.assertEqual(m["verdict"], "met")
+        native[3, :4] *= 1.2
+        self.assertEqual(wr.silhouette_measure(native, game, sky)["verdict"], "not met as written")
+        native[3, :4] = 0
+        self.assertEqual(wr.silhouette_measure(native, game, sky)["native_pixels"], 0)
+        self.assertEqual(wr.silhouette_measure(game, game * math.nan, sky)["verdict"], "not decidable")
+
+    def test_colour_all_cli_keeps_low_alpha_and_never_reads_sky_subset(self):
+        game, kept = self.lake()
+        r = mock.Mock(kept=kept, alpha=np.zeros(kept.shape), problems=[])
+        got = (None, None, game, r, {}, game * 1.05, None, {}, 1.0)
+        said = []
+        with mock.patch.object(wr, "_native_planes", return_value=got), mock.patch.object(wr, "_sky_sampling", side_effect=AssertionError):
+            code = wr.main(["colour", "made", "made", "--all"], say=said.append)
+        self.assertEqual(code, 0, "\n".join(said))
+        self.assertIn("120", "\n".join(said))
+        self.assertIn("criterion 9", said[-1])
+
+    def test_targets_silhouette_cli_uses_each_own_view_and_blur(self):
+        sky = np.zeros((32, 32, 3)) + 128 / 255
+        game = sky.copy()
+        game[8:24, 10:18] = 51 / 255
+        row = {"frame": 1}
+        first_matrix = np.asarray(camera(math.radians(10)))
+        first_matrix[2, :] = math.nan
+        first_matrix[:, 3] = math.nan  # SkyRayBasis reads neither row2 nor w; garbage here is allowed.
+        views = [wr.View(1, [], first_matrix, [0, 0, 0], None),
+                 wr.View(2, [], np.asarray(camera(math.radians(10))) * 2, [0, 0, 0], {"line": 1})]
+        other = dict(row, base=TARGET_BASE + 4096)
+        row["base"] = TARGET_BASE
+        rgba = np.concatenate([np.rint(game * 255), np.zeros((32, 32, 1))], -1).astype(np.uint8)
+        water = {"targets": [(r["base"], 20.0, rgba) for r in (row, other)]}
+        said = []
+        with mock.patch.object(wr, "_stored", return_value=({}, None, None, water, None)), \
+             mock.patch.object(wr.cr, "find_capture", return_value=Path("made")), \
+             mock.patch.object(wr.wc, "read_capture", return_value={"water": [row, other]}), \
+             mock.patch.object(wr.wc, "RowTextures"), mock.patch.object(wr.wc, "row_kind", return_value="surface"), \
+             mock.patch.object(wr.wc, "_fc", side_effect=lambda r, slot: (0, r["base"])), \
+             mock.patch.object(wr, "read_views", return_value=views), \
+             mock.patch.object(wr, "_sky_inputs", return_value=({}, None, object(), object(), "made sky")), \
+             mock.patch.object(wr, "_picture_of", return_value=game), \
+             mock.patch.object(wr, "sky_picture", return_value=np.rint(sky * 255)) as derive, \
+             mock.patch.object(wr, "blur_taps", return_value=([(0, 0)] * 7, 1 / 7)), \
+             mock.patch.object(wr, "view_blur", side_effect=lambda s, offsets, weight: s) as blur:
+            code = wr.main(["targets", "made", "made", "--silhouette"], say=said.append)
+        self.assertEqual(code, 0, "\n".join(said))
+        self.assertEqual(derive.call_count, 2)
+        self.assertTrue(np.array_equal(derive.call_args_list[1].args[0], views[1].matrix))
+        self.assertEqual(blur.call_count, 1)
+        self.assertIn("criterion 10 (13c", said[-1])
+        self.assertNotIn("NOT EQUAL", "\n".join(said))
+
+    def test_silhouette_cli_invalid_view_cannot_turn_sky_into_content(self):
+        # Real sky_picture previously made all black from NaN/zero rays, falsely accepting identical sky pictures.
+        row = {"frame": 1}
+        rgba = np.full((256, 256, 4), 128, dtype=np.uint8)
+        water = {"targets": [(TARGET_BASE, 20, rgba)]}
+        for matrix in (np.full((4, 4), math.nan), np.zeros((4, 4)), np.ones((4, 4)), None, np.eye(3)):
+            said = []
+            with mock.patch.object(wr, "_stored", return_value=({}, None, None, water, None)), \
+                 mock.patch.object(wr.cr, "find_capture", return_value=Path("made")), \
+                 mock.patch.object(wr.wc, "read_capture", return_value={"water": [row]}), \
+                 mock.patch.object(wr.wc, "RowTextures"), mock.patch.object(wr.wc, "row_kind", return_value="surface"), \
+                 mock.patch.object(wr.wc, "_fc", return_value=(0, TARGET_BASE)), \
+                 mock.patch.object(wr, "read_views", return_value=[wr.View(1, [], matrix, [0, 0, 0], None)]), \
+                 mock.patch.object(wr, "_sky_inputs", return_value=(Sky.BLOCK, lambda a: (0.3, 0.4, 0.5),
+                                                                    lambda u, v: (0, 0, 0), lambda u, v: (0, 0, 0), "made")), \
+                 mock.patch.object(wr, "_picture_of", return_value=rgba[..., :3] / 255):
+                code = wr.main(["targets", "made", "made", "--silhouette"], say=said.append)
+            self.assertEqual(code, 1, "\n".join(said))
+            self.assertIn("not decidable", said[-1])
+
+
 if __name__ == "__main__":
     unittest.main()

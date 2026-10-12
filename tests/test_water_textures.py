@@ -162,8 +162,11 @@ class Fetch(unittest.TestCase):
         big = list(MASK_FC)
         big[2] = "0x%08X" % (511 | (511 << 13))
         big[0] = "0x%08X" % (2 | (16 << 22) | (1 << 31))
+        self.assertEqual(wt.fetch(big, "k8")["width"], 512)       # (ledger ruling 42: no size a 2D constant can name is too large)
+        short = list(MASK_FC)
+        short[0] = "0x%08X" % (2 | (1 << 22) | (1 << 31))         # a pitch of 32 texels under a width of 64
         with self.assertRaises(ValueError):
-            wt.fetch(big, "k8")                                   # above 256 x 256
+            wt.fetch(short, "k8")
         cube = list(NORMAL_FC)
         cube[5] = "0x14D50E18"
         with self.assertRaises(ValueError):
@@ -213,6 +216,27 @@ class Fetch(unittest.TestCase):
             self.assertIn("number format", str(e.exception))
             # a sign of a component the shader is not given (the mask's w is the constant 1) is not judged
             wt.fetch(changed(fc, 0, 3 << 8, 1 << 8), kind)
+        # Ledger ruling 41 (the review of Tasks 4 to 15, I1; the reviewer's probe): the sign is the source channel's
+        # that the swizzle names. The mask's x from channel 1 with channel 1 biased, the map's x from channel 2 with
+        # channel 2 biased: refused. The same swizzle with the sign on channel 0, which no delivered component reads:
+        # the water's.
+        def moved(fc, component, channel, sign_channel, sign):
+            words = changed(fc, 3, 7 << (1 + 3 * component), channel << (1 + 3 * component))
+            return changed(words, 0, 3 << (2 + 2 * sign_channel), sign << (2 + 2 * sign_channel))
+        for sign in (1, 2, 3):
+            for kind, bad, good in (("k8", moved(MASK_FC, 0, 1, 1, sign), moved(MASK_FC, 0, 1, 0, sign)),
+                                    ("dxn", moved(NORMAL_FC, 0, 2, 2, sign), moved(NORMAL_FC, 0, 2, 0, sign)),
+                                    ("dxn", moved(NORMAL_FC, 1, 3, 3, sign), moved(NORMAL_FC, 1, 3, 2, sign))):
+                with self.assertRaises(ValueError) as e:
+                    wt.fetch(bad, kind)
+                self.assertIn("sign", str(e.exception))
+                wt.fetch(good, kind)
+            # a constant selector has no sign: x the constant 1 with every channel's sign set
+            words = changed(MASK_FC, 3, 7 << 1, 5 << 1)
+            wt.fetch(changed(words, 0, 0xFF << 2, (sign | sign << 2 | sign << 4 | sign << 6) << 2), "k8")
+        self.assertTrue(wt.components_unsigned(PICTURE_FC, 3))
+        self.assertFalse(wt.components_unsigned(changed(PICTURE_FC, 0, 3 << 6, 3 << 6), 3))       # gamma on channel 2, which red reads
+        self.assertTrue(wt.components_unsigned(changed(PICTURE_FC, 0, 3 << 8, 3 << 8), 3))        # on alpha's channel
         # any constant, whatever its format: the fields a census prints
         p = wt.describe(PICTURE_FC)
         self.assertEqual((p["format"], p["width"], p["height"], p["endian"], p["swizzle"], p["base"]), (6, 256, 256, 2, (2, 1, 0, 3), 0x13401000))
@@ -220,8 +244,18 @@ class Fetch(unittest.TestCase):
     def test_the_limits_are_the_cpp_headers(self):
         text = (ROOT / "src" / "native" / "render" / "texture_decode.h").read_text(encoding="utf-8")
         self.assertIn("inline constexpr uint32_t kXenosK8 = 2, kXenosDxn = 49;", text)
-        self.assertIn("const uint32_t limit = kind == WaterDecode::kK8 ? 256u : 1024u;", text)
-        self.assertEqual((wt.XENOS_K8, wt.XENOS_DXN, wt.FETCH_LIMIT), (2, 49, {"k8": 256, "dxn": 1024}))
+        # (ledger ruling 42: the size's bound is what a 2D constant can name, for both kinds)
+        self.assertIn("inline constexpr uint32_t kWaterFetchMaxSide = 8192;", text)
+        self.assertIn("if (t.width > kWaterFetchMaxSide || t.height > kWaterFetchMaxSide) return FetchError::kSize;", text)
+        self.assertNotIn("? 256u : 1024u", text)
+        self.assertEqual((wt.XENOS_K8, wt.XENOS_DXN, wt.FETCH_LIMIT, wt.MAX_EDGE), (2, 49, {"k8": 8192, "dxn": 8192}, 8192))
+        larger = [int(v, 16) if isinstance(v, str) else int(v) for v in MASK_FC]
+        larger[2] = 511 | (511 << 13)
+        larger[0] = (larger[0] & ~(0x1FF << 22)) | (16 << 22)
+        self.assertEqual((wt.fetch(larger, "k8")["width"], wt.fetch(larger, "k8")["height"]), (512, 512))
+        # (and the sign rule's text is the channel's that the swizzle names)
+        self.assertIn("const uint32_t channel = (fc[3] >> (1 + 3 * i)) & 7u;", text)
+        self.assertIn("if (channel <= 3 && ((fc[0] >> (2 + 2 * channel)) & 3u) != 0) return false;", text)
         self.assertIn("for (size_t i = 0; i < xy.size(); ++i) out[i] = uint8_t(xy[i] * 255.0f + 0.5f);", text)
 
 

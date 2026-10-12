@@ -47,6 +47,11 @@ WaterDraw Good(WaterKind kind = WaterKind::kSurface) {
   fc(d.fetch[kWatNormal], 49, 256, 0x14D40000u, 0x80000002u);
   fc(d.fetch[kWatPicture], 6, 256, 0x13401000u, 0x80000002u);
   fc(d.fetch[kWatNear], 6, 256, 0x13441000u, 0x80000002u);
+  // (the swizzles of the captured constants, dword 3 bits 1 to 12: the mask (0, 0, 0, 5), the map (0, 1, 2, 3), the
+  // pictures (2, 1, 0, 3); the sign rule goes by the channel a component's swizzle names: ledger ruling 41)
+  d.fetch[kWatMask][3] = 5u << 10;
+  d.fetch[kWatNormal][3] = (1u << 4) | (2u << 7) | (3u << 10);
+  d.fetch[kWatPicture][3] = d.fetch[kWatNear][3] = (2u << 1) | (1u << 4) | (3u << 10);
   d.fog_base[0] = 0x1A500000u; d.fog_base[1] = 0x1A501000u;
   return d;
 }
@@ -140,9 +145,14 @@ int main() {
   { WaterDraw d = Good(); d.ps[kWatP31][0] = 0.0f; if (!refused(d, WaterReason::kRegister)) return 25; }
   { WaterDraw d = Good(); d.ps[kWatP31][1] = 4.5f; if (!refused(d, WaterReason::kRegister)) return 25; }
   { WaterDraw d = Good(); d.ps[kWatP31][1] = 4.0f; if (refused(d, WaterReason::kRegister)) return 25; }
-  { WaterDraw d = Good(); d.ps[kWatP131][0] = 65.0f; if (!refused(d, WaterReason::kRegister)) return 26; }
-  { WaterDraw d = Good(); d.ps[kWatP131][0] = -0.5f; if (!refused(d, WaterReason::kRegister)) return 26; }
+  // (ledger ruling 42, the review of Tasks 4 to 15, I3: c131.x has its kind's bound alone. The formula saturates
+  // it: a negative value is valid and means no reflection, a large one the whole picture. Garbage is still refused.)
+  { WaterDraw d = Good(); d.ps[kWatP131][0] = 65.0f; if (refused(d, WaterReason::kRegister)) return 26; }
+  { WaterDraw d = Good(); d.ps[kWatP131][0] = -0.5f; if (refused(d, WaterReason::kRegister)) return 26; }
   { WaterDraw d = Good(); d.ps[kWatP131][0] = 0.0f; if (refused(d, WaterReason::kRegister)) return 26; }
+  { WaterDraw d = Good(); d.ps[kWatP131][0] = 1e9f; if (!refused(d, WaterReason::kRegister)) return 26; }
+  { WaterDraw d = Good(); d.ps[kWatP131][0] = -1e9f; if (!refused(d, WaterReason::kRegister)) return 26; }
+  { WaterDraw d = Good(); d.ps[kWatP131][0] = std::numeric_limits<float>::quiet_NaN(); if (!refused(d, WaterReason::kRegister)) return 26; }
   { WaterDraw d = Good(); d.ps[kWatP141][3] = 1.5f; if (!refused(d, WaterReason::kRegister)) return 27; }
   { WaterDraw d = Good(); d.ps[kWatP0][2] = 1.0f / 1280.0f; if (!refused(d, WaterReason::kRegister)) return 28; }   // not 1 / the scene's width
   { WaterDraw d = Good(); d.ps[kWatP0][3] = 1.0f / 721.0f; if (!refused(d, WaterReason::kRegister)) return 28; }
@@ -207,14 +217,76 @@ int main() {
   { WaterDraw d = Good(); d.fetch[kWatNormal][0] |= 1u << 4; if (!refused(d, WaterReason::kFetch)) return 46; }    // the map's y signed
   { WaterDraw d = Good(); d.fetch[kWatPicture][0] |= 3u << 4; if (!refused(d, WaterReason::kFetch)) return 47; }   // gamma on green
   { WaterDraw d = Good(); d.fetch[kWatPicture][0] |= 3u << 8; if (refused(d, WaterReason::kFetch)) return 47; }    // (alpha: not a colour of the lookup)
+  // (ledger ruling 42) What the log's one line a reason says of a refused draw: the shaders, the bool word, and the
+  // value: the first component outside its bound, the scale, the first refused slot's constant.
+  {
+    WaterDraw d = Good();
+    d.ps[kWatP127][1] = 1e9f;
+    const std::string reg = DescribeWaterRefusal(d, State(WaterKind::kSurface), WaterReason::kRegister, 1120, 720);
+    if (reg.find("vs BEAD84BD72072E0E ps A17D8AEC3A817D45 pbool 00000100") != 0 || reg.find("pixel c127.y = 1e+09 (4E6E6B28), outside its kind's bound") == std::string::npos) return 51;
+    d = Good();
+    d.vs[kWatV116][0] = std::numeric_limits<float>::infinity();
+    if (DescribeWaterRefusal(d, State(WaterKind::kSurface), WaterReason::kRegister, 1120, 720).find("vertex c116.x = inf") == std::string::npos) return 51;
+    d = Good();
+    d.ps[kWatP31][1] = 4.5f;
+    if (DescribeWaterRefusal(d, State(WaterKind::kSurface), WaterReason::kRegister, 1120, 720).find("pixel c31.y = 4.5 (40900000), not in (0, 4]") == std::string::npos) return 51;
+    d = Good();
+    d.ps[kWatP0][2] = 1.0f / 1280.0f;
+    if (DescribeWaterRefusal(d, State(WaterKind::kSurface), WaterReason::kRegister, 1120, 720).find("not the reciprocal of the scene's size 1120 x 720") == std::string::npos) return 51;
+    d = Good();
+    d.ps[kWatP20][3] = 64.5f;
+    if (DescribeWaterRefusal(d, State(WaterKind::kSurface), WaterReason::kScale, 1120, 720).find("pixel c20.w = 64.5 (42810000), not in (0, 64]") == std::string::npos) return 51;
+    d = Good();
+    d.fetch[kWatNormal][0] |= 2u << 4;                                              // the map's y biased
+    const std::string fetch = DescribeWaterRefusal(d, State(WaterKind::kSurface), WaterReason::kFetch, 1120, 720);
+    if (fetch.find(": slot 2 = ") == std::string::npos || fetch.find(", sign") == std::string::npos) return 51;
+    d = Good();
+    d.fetch[kWatPicture][2] = 127u | (127u << 13);
+    if (DescribeWaterRefusal(d, State(WaterKind::kSurface), WaterReason::kFetch, 1120, 720).find(": slot 13 = ") == std::string::npos) return 51;
+    if (DescribeWaterRefusal(Good(), State(WaterKind::kOpaque), WaterReason::kState, 1120, 720).find(": state words depth ") == std::string::npos) return 51;
+    d = Good();
+    d.pbool_known = false;
+    if (DescribeWaterRefusal(d, State(WaterKind::kSurface), WaterReason::kUnread, 1120, 720).find("the bool word's last writer is not known") == std::string::npos) return 51;
+  }
   // (ledger ruling 34) c128.x, c136.x and c138.x strictly above 0: the console's zero-product points give no record
   { WaterDraw d = Good(); d.ps[kWatP128][0] = 0.0f; if (!refused(d, WaterReason::kRegister)) return 48; }
   { WaterDraw d = Good(); d.ps[kWatP136][0] = 0.0f; if (!refused(d, WaterReason::kRegister)) return 48; }
   { WaterDraw d = Good(); d.ps[kWatP138][0] = 0.0f; if (!refused(d, WaterReason::kRegister)) return 48; }
   { WaterDraw d = Good(); d.ps[kWatP138][0] = -2.0f; if (!refused(d, WaterReason::kRegister)) return 48; }
   { WaterDraw d = Good(); d.ps[kWatP128][0] = 1.0f / 131072.0f; if (!refused(d, WaterReason::kRegister)) return 48; }
-  { WaterDraw d = Good(); d.ps[kWatP128][0] = 65.0f; if (!refused(d, WaterReason::kRegister)) return 48; }
-  { WaterDraw d = Good(); d.ps[kWatP136][0] = 65.0f; if (!refused(d, WaterReason::kRegister)) return 48; }
+  // (ledger ruling 42: their upper bound is the kind's 65,536, not 64)
+  { WaterDraw d = Good(); d.ps[kWatP128][0] = 200.0f; if (refused(d, WaterReason::kRegister)) return 48; }
+  { WaterDraw d = Good(); d.ps[kWatP136][0] = 65536.0f; if (refused(d, WaterReason::kRegister)) return 48; }
+  { WaterDraw d = Good(); d.ps[kWatP128][0] = 65537.0f; if (!refused(d, WaterReason::kRegister)) return 48; }
+  { WaterDraw d = Good(); d.ps[kWatP136][0] = 1e9f; if (!refused(d, WaterReason::kRegister)) return 48; }
+  // A made record of another region passes whole: a larger mask (512 x 512) and normal map (2,048 x 2,048), no
+  // reflection (c131.x below 0), a flatter normal (c128.x = 200), other colours and factors.
+  {
+    WaterDraw d = Good();
+    d.fetch[kWatMask][2] = 511u | (511u << 13);
+    d.fetch[kWatMask][0] = (d.fetch[kWatMask][0] & ~(0x1FFu << 22)) | (16u << 22);
+    d.fetch[kWatNormal][2] = 2047u | (2047u << 13);
+    d.fetch[kWatNormal][0] = (d.fetch[kWatNormal][0] & ~(0x1FFu << 22)) | (64u << 22);
+    d.ps[kWatP131][0] = -0.5f;
+    d.ps[kWatP128][0] = 200.0f;
+    d.ps[kWatP136][0] = 90.0f;
+    d.ps[kWatP138][0] = 2048.0f;
+    d.ps[kWatP19][0] = 5000.0f;
+    WaterReason w = WaterReason::kCount;
+    const WaterRecord rec = MakeWaterRecord(d, State(WaterKind::kSurface), kWaterSceneWidth, kWaterSceneHeight, &w);
+    if (w != WaterReason::kNone || !WaterRecordValid(rec) || rec.ps[kWatP131][0] != -0.5f || rec.ps[kWatP128][0] != 200.0f) return 49;
+  }
+  // (ledger ruling 41, I1) the picture's three colours by the channels its swizzle names: a gamma sign on a
+  // channel a colour reads is refused wherever the swizzle puts it; on a channel no colour reads it is not judged.
+  {
+    WaterDraw d = Good();
+    uint32_t* fc = d.fetch[kWatPicture];
+    fc[3] = (fc[3] & ~0xFFEu) | (3u << 1) | (3u << 4) | (3u << 7) | (0u << 10);   // x, y, z from channel 3; w from channel 0
+    fc[0] = (fc[0] & ~(0xFFu << 2)) | (3u << 8);                                  // gamma on channel 3
+    if (!refused(d, WaterReason::kFetch)) return 50;
+    fc[0] = (fc[0] & ~(0xFFu << 2)) | (3u << 2) | (3u << 4) | (3u << 6);          // on the three channels no colour reads
+    if (refused(d, WaterReason::kFetch)) return 50;
+  }
   { WaterDraw d = Good(); d.ps[kWatP128][0] = 1.0f / 65536.0f; d.ps[kWatP136][0] = 64.0f; if (refused(d, WaterReason::kRegister)) return 48; }
   // a draw with b136 clear does not read the sun's registers: whatever they hold, it is a record
   {

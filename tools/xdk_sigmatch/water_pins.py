@@ -265,6 +265,13 @@ MADE_PIXELS = (
     # near colour out would meet every pin
     _pixel(0, (300.0, 500.0), (_EYE[0] + 15.6, _EYE[1] + 11.7, _EYE[2]), (7.25, 13.5, 2.75, 10.0), 0.0, (0.52, 0.47), (0.49, 0.55),
            _SKY, (0.0, 0.0, 0.0), 1.0, _S, _T),
+    # a tilted pair of normal samples at which the ORDER of the three squares under the normal's length decides the
+    # normal's bits in single precision (the microcode sums z, x, y: ((0 + z) + x) + y; x + (y + z), (x + y) + z,
+    # (z + y) + x and (y + z) + x each give another normal here): on every other line the orders agree bit for bit,
+    # and a mirror that summed them otherwise met every pin (review of Tasks 4 to 15, Minor 7; found by
+    # out/tests/w1112/find_order_pin.py)
+    _pixel(0, (640.0, 360.0), (_EYE[0] + 90.0, _EYE[1] + 120.0, 20.10241), (15.4, 23.3, 5.2, 17.6), 0.0, (0.503, 0.649), (0.445, 0.539),
+           _SKY, (0.0, 0.0, 0.0), 1.0, _S, _T),
     # the four points of the console's zero product (ledger ruling 34): a record's rule keeps c128.x, c136.x and c138.x
     # above 0, so a mirror never meets three of these in a drawn frame; they pin what the reference IS there
     _pixel(0, (640.0, 360.0), (_EYE[0] + 90.0, _EYE[1] + 120.0, 20.10241), (15.4, 23.3, 5.2, 17.6), 0.0, (0.5, 0.5), (0.5, 0.5),
@@ -276,7 +283,8 @@ MADE_PIXELS = (
     _pixel(0, (640.0, 360.0), (_EYE[0] + 90.0, _EYE[1] + 120.0, 20.10241), (15.4, 23.3, 5.2, 17.6), 0.0, (0.5, 0.5), (0.5, 0.5),
            _SKY, (0.0, 0.0, 0.0), 1.0, _S, _T, over={136: (0.0, 0.0, 0.0, 0.0)}),                      # second_flat: N2 = 0
 )
-MADE_KINDS = ("near", "shadow", "glint", "before the fog", "skipped", "killed", "part_fog", "fog_edge", "flat_zero", "at_eye", "power_zero", "second_flat")
+MADE_KINDS = ("near", "shadow", "glint", "before the fog", "skipped", "killed", "part_fog", "fog_edge", "normal_order", "flat_zero", "at_eye", "power_zero",
+              "second_flat")
 
 # The dead lines: c141 as bit patterns (module text).
 DEAD = (

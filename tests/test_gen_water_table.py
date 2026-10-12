@@ -132,6 +132,16 @@ class Generate(unittest.TestCase):
                     changed = {k: list(v) for k, v in far.items()}
                     changed[(bank, reg)][i] = bad
                     self.assertEqual(gen.outside(e, changed), [((bank, reg), i)] if i in comps else [], (bank, reg, i, bad))
+        # Ledger ruling 42 (the review of Tasks 4 to 15, I3): another region's record, with what the spec's named
+        # bounds of before refused and the formula takes, is inside every bound; the C++ rule names none of the
+        # three registers beyond the table's kinds.
+        other = gen.other_region()
+        self.assertEqual(gen.outside(e, other), [])
+        self.assertEqual((other[("ps", 131)][0], other[("ps", 128)][0], other[("ps", 136)][0]), (-0.5, 200.0, 90.0))
+        self.assertEqual((e["kind"][131], e["kind"][128], e["kind"][136]), (2, 3, 3))
+        header = (ROOT / "src" / "native" / "capture" / "water_record.h").read_text(encoding="utf-8")
+        self.assertNotIn("kWaterShareMax", header)
+        self.assertNotIn("ps[kWatP131][0] >= 0.0f", header)
         # the three zero-product registers: 0, a negative and a denormal are refused, the floor itself is not
         for reg in (128, 136, 138):
             for value, refused in ((0.0, True), (-0.0, True), (-1.0, True), (1e-30, True), (1.0 / 65536.0, False), (65536.0, False)):

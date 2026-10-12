@@ -815,11 +815,18 @@ int main() {
     if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kFormat) return 235;
     a.w = 512; a.h = 512; a.pitch = 512;
     MakeFc(a, p);
-    if (WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kSize) return 236;        // above 256 x 256
-    a.w = 256; a.h = 256; a.pitch = 256;                                                    // (the limit itself holds; one side over does not)
+    // (ledger ruling 42: no size a 2D constant can name is refused for being large; the largest is 8,192 a side)
+    if (WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kNone || t.width != 512) return 236;
+    a.w = 256; a.h = 256; a.pitch = 256;
     MakeFc(a, p);
     if (WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kNone) return 236;
     a.w = 8; a.h = 257; a.pitch = 32;
+    MakeFc(a, p);
+    if (WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kNone || t.height != 257) return 236;
+    a.w = 8192; a.h = 8192; a.pitch = 8192;
+    MakeFc(a, p);
+    if (WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kNone || t.width != 8192 || t.height != 8192) return 236;
+    a.w = 64; a.h = 64; a.pitch = 32;                                                       // (a pitch below the width is still no texture of the water)
     MakeFc(a, p);
     if (WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kSize) return 236;
     a.format = kXenosDxn; a.w = 256; a.h = 256; a.pitch = 256; a.base = 0x14D40000; a.mip = 0x14D50000; a.mip_max = 8;
@@ -829,7 +836,7 @@ int main() {
         WaterTextureFetch(p, WaterDecode::kK8, &t) != FetchError::kFormat) return 237;
     a.w = 2048; a.h = 2048; a.pitch = 2048;
     MakeFc(a, p);
-    if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kSize) return 238;
+    if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kNone || t.width != 2048) return 238;      // (ruling 42)
     a.w = 1024; a.h = 1024; a.pitch = 1024;
     MakeFc(a, p);
     if (WaterTextureFetch(p, WaterDecode::kDxn, &t) != FetchError::kNone) return 238;
@@ -875,6 +882,45 @@ int main() {
       for (uint32_t adjust : {1u, 0x20u, 0x3Fu}) {                                          // +1, -32, -1
         if (WaterTextureFetch(with(mask, 3, adjust << 13), WaterDecode::kK8, &keep) != FetchError::kSign ||
             WaterTextureFetch(with(map, 3, adjust << 13), WaterDecode::kDxn, &keep) != FetchError::kSign || keep.width != 77) return 252;
+      }
+      // Ledger ruling 41 (the review of Tasks 4 to 15, I1): the sign is the SOURCE CHANNEL's that the component's
+      // swizzle names, as the SDK takes it (texture_util: sign = (dword 0 >> (2 + 2 * swizzle)) & 3); a constant
+      // selector (4, 5) has none. The reviewer's two constants: the mask's x from channel 1 with channel 1 biased,
+      // the map's x from channel 2 with channel 2 biased, are refused; the sign of a channel no delivered
+      // component names is not judged, channel 0's among them.
+      {
+        auto moved = [&](const uint32_t* from, uint32_t component, uint32_t channel, uint32_t sign_channel, uint32_t sign) {
+          std::memcpy(q, from, sizeof(q));
+          q[3] = (q[3] & ~(7u << (1 + 3 * component))) | (channel << (1 + 3 * component));
+          q[0] = (q[0] & ~(3u << (2 + 2 * sign_channel))) | (sign << (2 + 2 * sign_channel));
+          return q;
+        };
+        for (uint32_t sign = 1; sign <= 3; ++sign) {
+          if (WaterTextureFetch(moved(mask, 0, 1, 1, sign), WaterDecode::kK8, &keep) != FetchError::kSign || keep.width != 77) return 254;
+          if (WaterTextureFetch(moved(map, 0, 2, 2, sign), WaterDecode::kDxn, &keep) != FetchError::kSign) return 254;
+          if (WaterTextureFetch(moved(map, 1, 3, 3, sign), WaterDecode::kDxn, &keep) != FetchError::kSign || keep.width != 77) return 254;
+          // (x from channel 1: channel 0's sign is no delivered component's)
+          if (WaterTextureFetch(moved(mask, 0, 1, 0, sign), WaterDecode::kK8, &t) != FetchError::kNone || t.swizzle[0] != 1) return 255;
+          if (WaterTextureFetch(moved(map, 0, 2, 0, sign), WaterDecode::kDxn, &t) != FetchError::kNone) return 255;
+          // (a constant selector has no sign: x the constant 1, every channel's sign set)
+          std::memcpy(q, mask, sizeof(q));
+          q[3] = (q[3] & ~(7u << 1)) | (5u << 1);
+          q[0] |= (sign << 2) | (sign << 4) | (sign << 6) | (sign << 8);
+          if (WaterTextureFetch(q, WaterDecode::kK8, &t) != FetchError::kNone) return 255;
+        }
+      }
+      // Ledger ruling 42 (I3): the size is bounded by what a 2D fetch constant can name (8,192 a side:
+      // kWaterFetchMaxSide), not by a multiple of one region's textures: a 512 x 512 mask and a 4,096 x 4,096
+      // normal map are the water's.
+      {
+        std::memcpy(q, mask, sizeof(q));
+        q[2] = 511u | (511u << 13);
+        q[0] = (q[0] & ~(0x1FFu << 22)) | (16u << 22);
+        if (kWaterFetchMaxSide != 8192u || WaterTextureFetch(q, WaterDecode::kK8, &t) != FetchError::kNone || t.width != 512 || t.height != 512) return 256;
+        std::memcpy(q, map, sizeof(q));
+        q[2] = 4095u | (4095u << 13);
+        q[0] = (q[0] & ~(0x1FFu << 22)) | (128u << 22);
+        if (WaterTextureFetch(q, WaterDecode::kDxn, &t) != FetchError::kNone || t.width != 4096) return 256;
       }
       // (the size and the format are judged first, as before: a refusal's name does not change for an old case)
       if (WaterTextureFetch(with(mask, 1, 49u), WaterDecode::kK8, &keep) != FetchError::kFormat) return 253;

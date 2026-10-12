@@ -5208,6 +5208,27 @@ static_assert(WaterRegistersAreBankOnly(), "a water vertex register is loaded fr
 // runs, with t_water_draw filled as far as it could be read.
 constinit thread_local WaterKind t_water_kind = WaterKind::kNone;
 constinit thread_local WaterDraw t_water_draw;
+// The record RecordDraw makes of it: written on the water's path alone (review of Tasks 4 to 15, Minor 1: a
+// local of RecordDraw was 584 bytes zeroed at every recorded draw, switch on or off).
+constinit thread_local WaterRecord t_water_record{};
+
+// A reason that empties a frame's water is said AT ONCE, the first time it occurs in the run, with the draw's
+// shaders and the value that was refused (ledger ruling 42): the periodic line counts it, and a region whose
+// water is refused in every frame would otherwise show only as a count. One line a reason; never without the
+// switch (nothing calls this then).
+std::atomic<uint32_t> g_water_refusal_said{0};
+bool FirstWaterRefusal(WaterReason why) {
+  if (why == WaterReason::kNone || why >= WaterReason::kCount) return false;
+  const uint32_t bit = 1u << uint32_t(why);
+  if (g_water_refusal_said.load(std::memory_order_relaxed) & bit) return false;
+  return (g_water_refusal_said.fetch_or(bit, std::memory_order_relaxed) & bit) == 0;
+}
+void NoteWaterRefusal(WaterReason why, const WaterDraw& d, const StateWords& state) {
+  if (!FirstWaterRefusal(why)) return;
+  REXSYS_WARN("[native] capture: water: the first draw refused for \"{}\" ({}): {} | this frame's water is not drawn (the frame is the "
+              "picture of before the water); later ones are counted in the periodic line",
+              WaterReasonName(why), kWaterRecordReason, DescribeWaterRefusal(d, state, why, kWaterSceneWidth, kWaterSceneHeight));
+}
 
 // Whether a pixel shader object's own literal table is the water table's (water_record.h,
 // WaterLiteralsMatch; kPsLayout, whose table numbers pixel register c as 256 + c). Guest reads, all
@@ -5412,12 +5433,12 @@ uint32_t RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   // draw also loads one thread-local byte. The kind is taken and set back at once, so that no later
   // draw can meet it.
   WaterKind water_kind = WaterKind::kNone;
-  WaterRecord water_record{};
   WaterReason water_why = WaterReason::kNone;
   if (in.material.status == MaterialStatus::kNoAlbedo && t_water_kind != WaterKind::kNone) {
     water_kind = t_water_kind;
     t_water_kind = WaterKind::kNone;
-    water_record = MakeWaterRecord(t_water_draw, in.state_words, kWaterSceneWidth, kWaterSceneHeight, &water_why);
+    t_water_record = MakeWaterRecord(t_water_draw, in.state_words, kWaterSceneWidth, kWaterSceneHeight, &water_why);
+    NoteWaterRefusal(water_why, t_water_draw, in.state_words);
   }
   // HasColourPass is proved only for draws of the tiled main scene (xdk_layout.h);
   // RecordDraw is reached only for those (OnDraw: in_scene) and the bracket is
@@ -5517,11 +5538,12 @@ uint32_t RecordDraw(uint32_t id, const LastArgs& a, uint32_t device) {
   if (water_kind != WaterKind::kNone) {
     g_builder.WaterSeen(water_kind);
     if (water_why == WaterReason::kNone && r.skip != SkipReason::kNone) {
-      water_record = WaterRecord{};
+      t_water_record = WaterRecord{};
       water_why = WaterReason::kUnread;
+      NoteWaterRefusal(water_why, t_water_draw, in.state_words);
     }
-    water_record.place = water_why == WaterReason::kNone ? r.seq : 0u;
-    g_builder.AddWater(water_record, water_why);
+    t_water_record.place = water_why == WaterReason::kNone ? r.seq : 0u;
+    g_builder.AddWater(t_water_record, water_why);
   }
   // A terrain draw's inputs, a lit draw's light inputs and a swaying draw's wind inputs go to the
   // frame's side arrays, not into the record.
@@ -6323,6 +6345,16 @@ void PublishScene(const FinishedScene& done) {
     for (size_t i = 1; i < size_t(WaterReason::kCount); ++i) {
       g_water_refused[i] += sc.water_refused[i];
       refused = refused || sc.water_refused[i] != 0;
+      // The frame's own reasons, which no single draw has (a record whose fog is not the frame's block, the
+      // 65th record, a draw seen and never answered): said at once like a draw's (NoteWaterRefusal), the first
+      // time each occurs in the run, if no draw said it before.
+      if (sc.water_refused[i] != 0 && FirstWaterRefusal(WaterReason(i))) {
+        REXSYS_WARN("[native] capture: water: the first frame refused for \"{}\" ({}): frame {}, {} of its {} draws of the pair "
+                    "(surface {}, opaque {}), {} records held; the frame's fog block {} | this frame's water is not drawn (the "
+                    "frame is the picture of before the water); later ones are counted in the periodic line",
+                    WaterReasonName(WaterReason(i)), kWaterRecordReason, sc.frame, sc.water_refused[i], sc.water_seen[0] + sc.water_seen[1],
+                    sc.water_seen[0], sc.water_seen[1], sc.water_evidence.size(), sc.fog.valid ? "is valid" : "is not valid");
+      }
     }
     if (refused) ++g_water_refused_frames;
   }

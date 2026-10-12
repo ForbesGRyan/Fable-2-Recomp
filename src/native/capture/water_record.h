@@ -25,7 +25,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <string>
 
 #include "../render/texture_decode.h"
 #include "fog_block.h"
@@ -197,10 +199,14 @@ inline constexpr uint32_t kWaterSceneWidth = 1120, kWaterSceneHeight = 720;
 inline constexpr float kWaterPlaceMax = 1e6f, kWaterMatrixMax = 1e7f, kWaterFactorMax = 65536.0f;
 inline constexpr float kWaterFactorMin = 1.0f / 65536.0f;                          // kind 3: strictly above 0 (ledger ruling 34)
 inline constexpr uint32_t kWaterVsKind = 2;                                        // the vertex registers' kind (the table has no column for it)
-// The spec's named bounds: c31.xy in (0, kWaterViewFactorMax]; c131.x in [0, kWaterShareMax]; c128.x and c136.x
-// at most kWaterShareMax (and, by their kind, at least kWaterFactorMin); c141.w in [0, 1]; c0.zw the reciprocal
+// The named bounds, each with a meaning of its own: c31.xy in (0, kWaterViewFactorMax] (the mirrored camera's two
+// factors); c141.w in [0, 1] (a threshold on an alpha); c0.zw the reciprocal
 // of the scene's size within kWaterTexelTolerance, relative; c20.w in (0, kWaterScaleMax].
-inline constexpr float kWaterViewFactorMax = 4.0f, kWaterShareMax = 64.0f, kWaterScaleMax = 64.0f, kWaterTexelTolerance = 1e-6f;
+// (Ledger ruling 42 of sub-project 13, after the review of Tasks 4 to 15, I3: c131.x, c128.x and c136.x have
+// their KIND's bound alone. The spec's "c131.x in [0, 64]" and "c128.x, c136.x at most 64" refused values the
+// formula takes: it saturates c131.x, so a negative one is valid and means no reflection; and 64 was a multiple of
+// one region's values. A bound may refuse only garbage: one refused record costs the frame its whole lake.)
+inline constexpr float kWaterViewFactorMax = 4.0f, kWaterScaleMax = 64.0f, kWaterTexelTolerance = 1e-6f;
 
 enum class WaterKind : uint8_t { kNone, kSurface, kOpaque };                       // A17D; F6D9
 inline const char* WaterKindName(WaterKind k) { return k == WaterKind::kSurface ? "surface" : k == WaterKind::kOpaque ? "opaque" : "none"; }
@@ -325,17 +331,18 @@ constexpr bool PsRegisterRead(uint32_t index, uint32_t pbool) {
   return index != kWatP139;
 }
 // A 2D k_8_8_8_8 picture of 256 x 256 with a base, its three colour components delivered as unsigned fractions
-// (no sign field, gamma among them; the fraction number format; no exponent adjust).
+// (no sign field, gamma among them, on the channel each colour's swizzle names: render::FetchComponentsUnsigned,
+// ledger ruling 41; the fraction number format; no exponent adjust).
 inline bool PictureFetch(const uint32_t fc[6]) {
-  return render::WaterPictureFetch(fc) && (fc[1] & 0xFFFFF000u) != 0 && ((fc[0] >> 2) & 0x3Fu) == 0 && (fc[3] & 1u) == 0 &&
+  return render::WaterPictureFetch(fc) && (fc[1] & 0xFFFFF000u) != 0 && render::FetchComponentsUnsigned(fc, 3) && (fc[3] & 1u) == 0 &&
          ((fc[3] >> 13) & 0x3Fu) == 0;
 }
 }  // namespace water_detail
 
 // The `register` rule's bounds on a draw's registers, but for the two that need more than the registers (c0.zw
 // against the scene's size; c20.w, which is `scale`): every component A FORMULA READS with the bool word `pbool`
-// a number inside its kind's bound, and the named bounds (c31.xy in (0, 4]; c131.x in [0, 64]; c128.x and, under
-// b136, c136.x at most 64; c141.w in [0, 1]). Nothing else is looked at. One function, so that the pass judges a
+// a number inside its kind's bound (c131.x within 65,536; c128.x and, under b136, c136.x in [1 / 65,536,
+// 65,536]), and the named bounds (c31.xy in (0, 4]; c141.w in [0, 1]). Nothing else is looked at. One function, so that the pass judges a
 // record again by the very rule the capture took it by (render::MakeClayWaterConstants).
 inline bool WaterRegistersBounded(const float vs[kWaterVsRegisters][4], const float ps[kWaterPsRegisters][4], uint32_t pbool) {
   for (uint32_t i = 0; i < kWaterVsRegisters; ++i) {
@@ -353,9 +360,6 @@ inline bool WaterRegistersBounded(const float vs[kWaterVsRegisters][4], const fl
   }
   const float* c31 = ps[kWatP31];
   if (!(c31[0] > 0.0f && c31[0] <= kWaterViewFactorMax && c31[1] > 0.0f && c31[1] <= kWaterViewFactorMax)) return false;
-  if (!(ps[kWatP131][0] >= 0.0f && ps[kWatP131][0] <= kWaterShareMax)) return false;
-  if (!(ps[kWatP128][0] <= kWaterShareMax)) return false;
-  if ((pbool & kWaterB136) && !(ps[kWatP136][0] <= kWaterShareMax)) return false;
   return ps[kWatP141][3] >= 0.0f && ps[kWatP141][3] <= 1.0f;
 }
 // c20.w, the output scale: in (0, 64] (false for no number).
@@ -366,8 +370,7 @@ constexpr bool WaterScaleBounded(float c20w) { return c20w > 0.0f && c20w <= kWa
 //   - the pair (kShader);
 //   - the pixel shader's own literal table (kLiteral);
 //   - one stream of 5 dwords with the position at 0 and the pair at 3 in their formats (kFetchList);
-//   - every component A FORMULA READS a number inside its kind's bound; c31.xy in (0, 4]; c131.x in [0, 64];
-//     c128.x and c136.x at most 64; c141.w in [0, 1]; c0.zw the reciprocal of the scene's size within 1e-6
+//   - every component A FORMULA READS a number inside its kind's bound; c31.xy in (0, 4]; c141.w in [0, 1]; c0.zw the reciprocal of the scene's size within 1e-6
 //     relative (kRegister). A component no formula reads is never looked at, not even for being a number, and
 //     neither is a register that is read only under a bool the draw has clear (c139 never: below). c20.w is
 //     judged apart: in (0, 64] (kScale);
@@ -377,8 +380,8 @@ constexpr bool WaterScaleBounded(float c20w) { return c20w > 0.0f && c20w <= kWa
 //     the depth function 4 ("greater") and the colour blend source alpha, inverse source alpha, add; for the
 //     opaque twin the depth function 6 ("greater or equal") and no blend: the fields of the measured words
 //     0x00708746 / 0x07060706 and 0x00708766 / 0x00010001, both with colour control 0x0000000C (kState);
-//   - slot 1 a mask (render::WaterTextureFetch, kK8: a 2D k_8 texture of at most 256 x 256 delivered as an
-//     unsigned fraction, ledger ruling 33); slot 2 a normal map (kDxn: at most 1,024 x 1,024, likewise); slot 13 a
+//   - slot 1 a mask (render::WaterTextureFetch, kK8: a 2D k_8 texture delivered as an unsigned fraction, ledger
+//     rulings 33 and 41; any size a 2D constant can name, ruling 42); slot 2 a normal map (kDxn: likewise); slot 13 a
 //     2D k_8_8_8_8 picture of 256 x 256 with a base and without a sign, gamma among them. Slot 14 is no texture
 //     of the native draw (spec ruling 21) and is not judged (kFetch);
 //   - bool b137 clear (kShadowTerm).
@@ -422,6 +425,91 @@ inline WaterReason CheckWaterDraw(const WaterDraw& d, const StateWords& state, u
   }
   if (d.pbool & kWaterB137) return WaterReason::kShadowTerm;
   return WaterReason::kNone;
+}
+
+// What a refused draw was refused FOR, as text for the log's one line a reason (ledger ruling 42: a reason that
+// empties a frame's water is said at once, with the draw's shaders and the value, not only counted): `why` is
+// CheckWaterDraw's answer for this draw. The shaders' hashes and the bool word always; then by reason the first
+// register component outside its bound with its value and bits ("register"), c20.w ("scale"), the state words
+// ("state"), the first refused slot's constant ("fetch"), the stream's shape ("fetch-list"). Nothing is judged
+// here that CheckWaterDraw does not judge: the same rules are asked again, in its order.
+inline std::string DescribeWaterRefusal(const WaterDraw& d, const StateWords& state, WaterReason why, uint32_t scene_width, uint32_t scene_height) {
+  char buf[256];
+  std::snprintf(buf, sizeof(buf), "vs %016llX ps %016llX pbool %08X", static_cast<unsigned long long>(d.vs_hash),
+                static_cast<unsigned long long>(d.ps_hash), d.pbool);
+  std::string text = buf;
+  auto component = [&](const char* bank, uint32_t reg, uint32_t k, float v, const char* rule) {
+    uint32_t bits;
+    std::memcpy(&bits, &v, sizeof(bits));
+    std::snprintf(buf, sizeof(buf), ": %s c%u.%c = %g (%08X), %s", bank, reg, "xyzw"[k & 3], double(v), bits, rule);
+    text += buf;
+  };
+  switch (why) {
+    case WaterReason::kRegister: {
+      for (uint32_t i = 0; i < kWaterVsRegisters; ++i) {
+        for (uint32_t k = 0; k < 4; ++k) {
+          if (((kWaterVsRead[i] >> k) & 1u) && !water_detail::Bounded(kWaterVsKind, d.vs[i][k])) {
+            component("vertex", kWaterVsRegister[i], k, d.vs[i][k], "outside its kind's bound");
+            return text;
+          }
+        }
+      }
+      for (uint32_t i = 0; i < kWaterPsRegisters; ++i) {
+        if (!water_detail::PsRegisterRead(i, d.pbool)) continue;
+        for (uint32_t k = 0; k < 4; ++k) {
+          if (i == kWatP20 && k == 3) continue;
+          if (((kWaterPsRead[i] >> k) & 1u) && !water_detail::Bounded(kWaterPsKind[i], d.ps[i][k])) {
+            component("pixel", kWaterPsRegister[i], k, d.ps[i][k], "outside its kind's bound");
+            return text;
+          }
+        }
+      }
+      for (uint32_t k = 0; k < 2; ++k) {
+        if (!(d.ps[kWatP31][k] > 0.0f && d.ps[kWatP31][k] <= kWaterViewFactorMax)) {
+          component("pixel", 31, k, d.ps[kWatP31][k], "not in (0, 4]");
+          return text;
+        }
+      }
+      if (!(d.ps[kWatP141][3] >= 0.0f && d.ps[kWatP141][3] <= 1.0f)) {
+        component("pixel", 141, 3, d.ps[kWatP141][3], "not in [0, 1]");
+        return text;
+      }
+      std::snprintf(buf, sizeof(buf), ": pixel c0.zw = (%g, %g), not the reciprocal of the scene's size %u x %u", double(d.ps[kWatP0][2]),
+                    double(d.ps[kWatP0][3]), scene_width, scene_height);
+      return text + buf;
+    }
+    case WaterReason::kScale:
+      component("pixel", 20, 3, d.ps[kWatP20][3], "not in (0, 64]");
+      return text;
+    case WaterReason::kState:
+      std::snprintf(buf, sizeof(buf), ": state words depth %08X blend %08X colour control %08X alpha ref %08X colour mask %08X cull %08X z scale %08X%s",
+                    state.depth_control, state.blend_control, state.color_control, state.alpha_ref, state.color_mask, state.su_sc_mode,
+                    state.vport_z_scale, state.read ? "" : " (not read)");
+      return text + buf;
+    case WaterReason::kFetch: {
+      render::TextureFetch unused;
+      const bool mask = render::WaterTextureFetch(d.fetch[kWatMask], render::WaterDecode::kK8, &unused) == render::FetchError::kNone;
+      const bool normal = render::WaterTextureFetch(d.fetch[kWatNormal], render::WaterDecode::kDxn, &unused) == render::FetchError::kNone;
+      const uint32_t at = !mask ? kWatMask : !normal ? kWatNormal : kWatPicture;
+      const uint32_t* fc = d.fetch[at];
+      const char* rule = at == kWatPicture ? "not a 256 x 256 k_8_8_8_8 picture delivered unsigned"
+                                           : render::FetchErrorName(render::WaterTextureFetch(fc, at == kWatMask ? render::WaterDecode::kK8 : render::WaterDecode::kDxn, &unused));
+      std::snprintf(buf, sizeof(buf), ": slot %u = %08X %08X %08X %08X %08X %08X, %s", kWaterFetchSlot[at], fc[0], fc[1], fc[2], fc[3], fc[4], fc[5], rule);
+      return text + buf;
+    }
+    case WaterReason::kFetchList:
+      std::snprintf(buf, sizeof(buf), ": %u streams, stride %u dwords, position format %u at %u, pair format %u at %u", d.streams, d.stride_dwords,
+                    d.position_format, d.position_offset, d.pair_format, d.pair_offset);
+      return text + buf;
+    case WaterReason::kUnread:
+      std::snprintf(buf, sizeof(buf), ": %s", !d.read ? "the draw could not be read whole" : !state.read ? "the state words could not be read"
+                                                : !d.pbool_known ? "the bool word's last writer is not known" : "its draw record was skipped");
+      return text + buf;
+    case WaterReason::kLiteral: return text + ": the pixel shader's own literal table is not the table's";
+    case WaterReason::kShader: return text + ": not the pair's vertex shader";
+    case WaterReason::kShadowTerm: return text + ": bool b137 is set";
+    default: return text;
+  }
 }
 
 // The record of a draw: CheckWaterDraw, then the copy (whole registers, unread components as they are). No

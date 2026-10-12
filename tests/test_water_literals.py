@@ -184,7 +184,9 @@ class Record(unittest.TestCase):
         would refuse a draw for garbage nobody uses)."""
         body = _function(self.HEADER, "inline WaterReason CheckWaterDraw(") + _function(self.HEADER, "inline bool WaterRegistersBounded(")
         named = {(int(reg), int(k)) for reg, k in re.findall(r"\bps\[kWatP(\d+)\]\[(\d)\]", body)}
-        self.assertEqual(named, {(128, 0), (131, 0), (136, 0), (141, 3), (0, 2), (0, 3), (20, 3)})
+        # (ledger ruling 42: c131.x, c128.x and c136.x have their kind's bound alone and are named by no rule)
+        self.assertEqual(named, {(141, 3), (0, 2), (0, 3), (20, 3)})
+        self.assertNotIn("kWaterShareMax", self.HEADER)
         for reg, k in named:
             self.assertIn(k, S["ps_read"][reg], (reg, k))
         self.assertIn("const float* c31 = ps[kWatP31];", body)
@@ -210,7 +212,16 @@ class Record(unittest.TestCase):
         self.assertEqual(c.count("MakeWaterRecord("), 1)
         self.assertIn("if (in.material.status == MaterialStatus::kNoAlbedo && t_water_kind != WaterKind::kNone) {\n"
                       "    water_kind = t_water_kind;\n    t_water_kind = WaterKind::kNone;\n"
-                      "    water_record = MakeWaterRecord(t_water_draw, in.state_words, kWaterSceneWidth, kWaterSceneHeight, &water_why);\n  }", record)
+                      "    t_water_record = MakeWaterRecord(t_water_draw, in.state_words, kWaterSceneWidth, kWaterSceneHeight, &water_why);\n"
+                      "    NoteWaterRefusal(water_why, t_water_draw, in.state_words);\n  }", record)
+        # (review of Tasks 4 to 15, Minor 1: no record is constructed or zeroed outside the water's path; the one a
+        # draw of the pair makes is a thread-local)
+        self.assertNotIn("WaterRecord water_record", record)
+        self.assertEqual(len(re.findall(r"\bWaterRecord\b", record)), 1)             # `t_water_record = WaterRecord{};` on the skipped path
+        self.assertIn("constinit thread_local WaterRecord t_water_record{};", c)
+        # (ledger ruling 42: a reason that empties a frame is said at once, the first time, by a line of its own)
+        self.assertEqual(c.count("FirstWaterRefusal("), 3)                             # its definition, the draw's line, the frame's
+        self.assertIn("DescribeWaterRefusal(d, state, why, kWaterSceneWidth, kWaterSceneHeight)", c)
         self.assertEqual(record.count("t_water_kind"), 3)
         self.assertEqual(record.count("g_builder.AddWater("), 1)
         self.assertIn("  if (water_kind != WaterKind::kNone) {\n    g_builder.WaterSeen(water_kind);", record)

@@ -32,9 +32,13 @@ kind: what "garbage" means for the register's read components; a SANITY bound, f
      each stands at a point where the console's zero product decides the pixel (0 * infinity = 0) and an IEEE
      program computes another colour or no number; below 0 the power is infinite on a cosine of 0. The floor
      1 / 65,536 is far above underflow and far below any value a water has (0.279 is the smallest captured).
-A component that is no number or infinite is outside every bound. The spec's narrower rules with a meaning of their
-own (c31.xy in (0, 4]; c131.x in [0, 64]; c128.x and c136.x at most 64; c141.w in [0, 1]; c20.w in (0, 64]; c0.zw
-the reciprocal of the scene's size) are capture::MakeWaterRecord's (plan Task 9) and are not this table's.
+A component that is no number or infinite is outside every bound. The rules with a meaning of their own (c31.xy in
+(0, 4]; c141.w in [0, 1]; c20.w in (0, 64]; c0.zw the reciprocal of the scene's size) are capture::MakeWaterRecord's
+(plan Task 9) and are not this table's. THE TABLE'S KINDS ARE THE ONLY BOUNDS of c131.x, c128.x and c136.x (ledger
+ruling 42, after the review of Tasks 4 to 15, I3): the spec's "c131.x in [0, 64]" and "c128.x, c136.x at most 64"
+refused values the formula takes (it saturates c131.x: a negative one means no reflection) and were multiples of
+one region's values; a bound that refuses more than garbage costs a region its whole lake. other_region() is such
+a region's record, which the tests hold inside every bound here and through capture::MakeWaterRecord.
 
 Two thresholds, kept apart (the review's note for later tasks): c141.w (a register of this table) decides "shaded"
 against "colour 0 with its alpha" inside the pixel shader; the state's alpha reference (register 0x210E, not in
@@ -182,6 +186,16 @@ def far_region():
          ("ps", 137): [4.0, 0.0, 0.0, 0.0], ("ps", 138): [2048.0, 0.0, 0.0, 0.0], ("ps", 139): [0.5, 0.5, 0.0, 0.0],
          ("ps", 140): [0.002, 0.0, 0.0, 0.0], ("ps", 141): [3.5, 1.25, 0.0, 0.25], ("ps", 142): [0.6, 0.0, -0.8, 0.0],
          ("ps", 143): [8.0, 6.0, 3.0, 0.0]}
+    return r
+
+
+def other_region():
+    """far_region with what the spec's named bounds of before refused and the formula takes (ledger ruling 42): no
+    reflection (c131.x below 0), a much flatter normal (c128.x = 200), a second normal's factor of 90."""
+    r = far_region()
+    r[("ps", 131)] = [-0.5, 0.0, 0.0, 0.0]
+    r[("ps", 128)] = [200.0, 0.0, 0.0, 0.0]
+    r[("ps", 136)] = [90.0, 0.0, 0.0, 0.0]
     return r
 
 

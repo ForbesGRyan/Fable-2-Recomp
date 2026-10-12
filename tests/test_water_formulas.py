@@ -617,6 +617,34 @@ class Pins(unittest.TestCase):
         self.assertEqual(len(p.MADE_PIXELS), len(p.MADE_KINDS))
         self.assertEqual(p.MADE_KINDS[-4:], ("flat_zero", "at_eye", "power_zero", "second_flat"))     # ledger ruling 34: four points
         made = {kind: p.pixel_pin(item) for kind, item in zip(p.MADE_KINDS, p.MADE_PIXELS)}
+        # (review of Tasks 4 to 15, Minor 7) "normal_order": the one line at which the order of the three squares
+        # under the normal's length decides the normal's bits; every other order of the sum gives another normal
+        # there, and on no other shaded line does any of them.
+        import numpy as np
+        def normals(inputs):
+            q, P, coord, m, c, word, a, b = inputs[:8]
+            f = np.float32
+            sx, sy = f(a[0]) * f(2) + (f(b[0]) * f(2) + f(-2)), f(a[1]) * f(2) + (f(b[1]) * f(2) + f(-2))
+            za = np.sqrt(np.abs(-((f(a[0]) * f(2) + f(-1)) ** 2 + (f(a[1]) * f(2) + f(-1)) ** 2) + f(1)), dtype=np.float32)
+            zb = np.sqrt(np.abs(-((f(b[0]) * f(2) + f(-1)) ** 2 + (f(b[1]) * f(2) + f(-1)) ** 2) + f(1)), dtype=np.float32)
+            nx, ny, nz = sx * f(0.5), sy * f(0.5), (f(0.5) * f(c[128][0])) * (za + zb)
+            x, y, z = nx * nx, ny * ny, nz * nz
+            def unit(total):
+                inv = f(1.0 / np.sqrt(np.float64(np.abs(total)))) if total != 0 else f(0)
+                return (float(nx * inv), float(ny * inv), float(nz * inv))
+            return unit(((f(0) + z) + x) + y), [unit(x + (y + z)), unit((x + y) + z), unit((z + y) + x), unit((y + z) + x)]
+        inputs, result = made["normal_order"]
+        own, others = normals(inputs)
+        self.assertEqual(result[0], 2)
+        self.assertEqual(tuple(result[5]), own)                       # the reference's order is z, x, y
+        for other in others:
+            self.assertNotEqual(other, own)
+        for kind, (inputs, result) in made.items():
+            if kind == "normal_order" or result[0] != 2 or kind in ("flat_zero",):
+                continue
+            own, others = normals(inputs)
+            self.assertEqual(tuple(result[5]), own, kind)
+            self.assertIn(own, others, kind)                          # (some other order gives the same bits: the line cannot tell)
         for kind, (inputs, result) in made.items():
             fate, alpha, colour, at13, at14, normal, fresnel, distance, sun, fog_at = result
             self.assertTrue(all(math.isfinite(v) for v in (alpha, fresnel, distance) + colour + sun), kind)

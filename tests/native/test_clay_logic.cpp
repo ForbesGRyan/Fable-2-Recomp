@@ -3067,7 +3067,7 @@ static void WaterTests() {
               << ", the furthest " << g_worst_ulps << " units in the last place\n";
     // (the lines reach what they are for: shaded pixels with and without fog, a glint, the near branch with a picture at slot 14)
     std::cout << "water pixel lines: shaded " << shaded << ", fogged " << fogged << ", with a glint " << glints << ", with a picture at slot 14 " << near_lines << "\n";
-    CHECK(851, std::size(kPixel) == 20 && lines == 19 && shadow == 1 && power_zero == 1 && shaded == 17 && fogged == 14 && glints == 3 && near_lines == 3);
+    CHECK(851, std::size(kPixel) == 21 && lines == 20 && shadow == 1 && power_zero == 1 && shaded == 18 && fogged == 15 && glints == 3 && near_lines == 3);
     // (the registers no captured row tells apart are told apart by a made line: a fog partly applied, c28.xy other
     // than (1, 1), and a slot-13 distortion unlike slot 14's, c129.xy unlike c130.xy; and one line stands just past
     // the fog's start, where the blend from the near colour to the in-scatter table is not yet 1)

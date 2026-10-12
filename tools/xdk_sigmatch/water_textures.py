@@ -38,8 +38,10 @@ import impostor_pictures as ip   # tiled_offsets (held to the scalar port by its
 
 WATER_VS = "BEAD84BD72072E0E"                 # texture_decode.h, kWaterVsHash
 XENOS_K8, XENOS_DXN = 2, 49                   # texture_decode.h, kXenosK8, kXenosDxn
-FETCH_LIMIT = {"k8": 256, "dxn": 1024}        # WaterTextureFetch's kSize rule
 MAX_EDGE = 8192                               # what a fetch constant can name
+# WaterTextureFetch's kSize rule (kWaterFetchMaxSide): what a 2D constant can name, for both kinds (ledger ruling 42:
+# the caps of before, 256 and 1,024, were four times one region's textures and would have refused another region's).
+FETCH_LIMIT = {"k8": MAX_EDGE, "dxn": MAX_EDGE}
 FILTERS = ("point", "linear", "basemap", "fetch-const")
 
 
@@ -154,14 +156,27 @@ def describe(fc):
             "exp_adjust": (fc[3] >> 13) & 0x3F}
 
 
+def components_unsigned(fc, components):
+    """render::FetchComponentsUnsigned: whether the first `components` shader components of a fetch constant are each
+    delivered unsigned as far as the sign fields say: the sign of the source channel its swizzle names is 0."""
+    words = _words(fc)
+    for i in range(min(components, 4)):
+        channel = (words[3] >> (1 + 3 * i)) & 7
+        if channel <= 3 and (words[0] >> (2 + 2 * channel)) & 3:
+            return False
+    return True
+
+
 def fetch(fc, kind):
     """render::WaterTextureFetch: the fields of a 2D fetch constant of the kind's format ("k8": the shore mask,
     "dxn": the normal map). ValueError where the C++ answers anything but kNone: no texture, not 2D, another
-    format, no base, a pitch below the width, a mask above 256 x 256 or a normal map above 1,024 x 1,024; and
-    (ledger ruling 33, after the review of Tasks 1 to 5, I1: the C++ side is the next builder's) a constant that
-    does not deliver its components as unsigned fractions: a sign field other than 0 (1 signed, 2 unsigned biased,
-    3 gamma) on a component the shader is given (x for the mask, x and y for the normal map), the integer number
-    format (dword 3 bit 0) or an exponent adjust other than 0. That is what makes a mask's sample a number in
+    format, no base, a pitch below the width, a side above what a 2D constant can name (8,192: ledger ruling 42);
+    and (ledger rulings 33 and 41) a constant that does not deliver its components as unsigned fractions: a sign
+    field other than 0 (1 signed, 2 unsigned biased, 3 gamma) on the SOURCE CHANNEL that the swizzle of a component
+    the shader is given names (x for the mask, x and y for the normal map; the SDK takes a component's sign so:
+    texture_util, sign = (dword 0 >> (2 + 2 * swizzle)) & 3; a constant selector, 4 or 5, has no sign; the sign of
+    a channel no delivered component names is not judged), the integer number format (dword 3 bit 0) or an
+    exponent adjust other than 0. That is what makes a mask's sample a number in
     [0, 1], which the dead draw's proof needs (water_check.py `dead`)."""
     if kind not in FETCH_LIMIT:
         raise ValueError("the kind is k8 or dxn, not %r" % (kind,))
@@ -175,8 +190,9 @@ def fetch(fc, kind):
     if f["width"] > FETCH_LIMIT[kind] or f["height"] > FETCH_LIMIT[kind]:
         raise ValueError("%d x %d is above the %s's limit of %d" % (f["width"], f["height"], kind, FETCH_LIMIT[kind]))
     delivered = 1 if kind == "k8" else 2
-    if any(f["sign"][:delivered]):
-        raise ValueError("the sign fields %s do not deliver an unsigned %s" % (f["sign"], "mask" if kind == "k8" else "normal map"))
+    if not components_unsigned(fc, delivered):
+        raise ValueError("the sign fields %s under the swizzle %s do not deliver an unsigned %s" %
+                         (f["sign"], f["swizzle"], "mask" if kind == "k8" else "normal map"))
     if _words(fc)[3] & 1:
         raise ValueError("the number format is integer, not fraction")
     if f["exp_adjust"]:

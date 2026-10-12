@@ -638,15 +638,29 @@ inline bool DecodeDxnLevelRg8(const uint8_t* src, size_t src_size, uint32_t widt
 enum class WaterDecode : uint8_t { kK8, kDxn };
 // A 2D fetch constant of the kind's format, as DecodeTextureFetch reads one (the same fields from the same
 // bits); out->format stays kUnsupported and out->xenos_format is the kind's. kFormat for any other format,
-// kNotTexture / kNot2D / kSize as DecodeTextureFetch; and kSize for a mask above 256 x 256 or a normal map
-// above 1,024 x 1,024 (the capture's `fetch` rule again: the lake's masks are at most 64 x 64 and its normal
-// map 256 x 256 in every capture so far). And kSign (ledger ruling 33 of sub-project 13) for a constant that does
-// not deliver its components to the shader as unsigned fractions: a sign field (dword 0 bits 2 to 9, two bits a
-// component: 0 unsigned, 1 signed, 2 unsigned biased, 3 gamma) other than 0 on a DELIVERED component (x for the
-// mask, x and y for the normal map; the others are not judged), the integer number format (dword 3 bit 0) or an
-// exponent adjust other than 0 (dword 3 bits 13 to 18). That is what makes a mask's sample a number in [0, 1],
-// which the dead draw's proof stands on (clay_logic.h, WaterOpaqueDead; tools/xdk_sigmatch/water_textures.py,
-// fetch, is the twin). `out` is untouched unless the answer is kNone.
+// kNotTexture / kNot2D / kSize as DecodeTextureFetch; and kSize for a side above kWaterFetchMaxSide, which is what
+// a 2D fetch constant's 13-bit size fields can name at all (ledger ruling 42 of sub-project 13: the bound refuses
+// nothing a region's water could have; the caps of before, 256 and 1,024, were four times one region's textures.
+// What bounds the bytes read and uploaded is the texture cache's region limit and each decoder's own source
+// check). And kSign (ledger rulings 33 and 41) for a constant that does not deliver its components to the shader
+// as unsigned fractions: a sign field (dword 0 bits 2 to 9, two bits a SOURCE CHANNEL: 0 unsigned, 1 signed, 2
+// unsigned biased, 3 gamma) other than 0 on the channel a DELIVERED component's swizzle names (x for the mask, x
+// and y for the normal map; the SDK takes a component's sign so: texture_util, sign = (dword 0 >> (2 + 2 *
+// swizzle)) & 3; a constant selector, 4 or 5, has no sign; a channel no delivered component names is not judged),
+// the integer number format (dword 3 bit 0) or an exponent adjust other than 0 (dword 3 bits 13 to 18). That is
+// what makes a mask's sample a number in [0, 1], which the dead draw's proof stands on (clay_logic.h,
+// WaterOpaqueDead; tools/xdk_sigmatch/water_textures.py, fetch, is the twin). `out` is untouched unless the
+// answer is kNone.
+inline constexpr uint32_t kWaterFetchMaxSide = 8192;
+// Whether the first `components` shader components of a fetch constant (x, y, ...) are each delivered as an
+// unsigned fraction as far as the sign fields say: the sign of the source channel its swizzle names is 0.
+constexpr bool FetchComponentsUnsigned(const uint32_t fc[6], uint32_t components) {
+  for (uint32_t i = 0; i < components && i < 4; ++i) {
+    const uint32_t channel = (fc[3] >> (1 + 3 * i)) & 7u;
+    if (channel <= 3 && ((fc[0] >> (2 + 2 * channel)) & 3u) != 0) return false;
+  }
+  return true;
+}
 inline FetchError WaterTextureFetch(const uint32_t fc[6], WaterDecode kind, TextureFetch* out) {
   if ((fc[0] & 3) != 2) return FetchError::kNotTexture;
   if (((fc[5] >> 9) & 3) != 1) return FetchError::kNot2D;
@@ -672,10 +686,9 @@ inline FetchError WaterTextureFetch(const uint32_t fc[6], WaterDecode kind, Text
   t.clamp_y = uint8_t((fc[0] >> 13) & 7);
   t.linear_filter = ((fc[3] >> 19) & 3) == 1;
   if (t.base_phys == 0 || t.pitch_texels < t.width) return FetchError::kSize;
-  const uint32_t limit = kind == WaterDecode::kK8 ? 256u : 1024u;
-  if (t.width > limit || t.height > limit) return FetchError::kSize;
-  const uint32_t delivered_signs = kind == WaterDecode::kK8 ? 0x3u : 0xFu;   // x; x and y
-  if (((fc[0] >> 2) & delivered_signs) != 0 || (fc[3] & 1u) != 0 || ((fc[3] >> 13) & 0x3Fu) != 0) return FetchError::kSign;
+  if (t.width > kWaterFetchMaxSide || t.height > kWaterFetchMaxSide) return FetchError::kSize;
+  const uint32_t delivered = kind == WaterDecode::kK8 ? 1u : 2u;   // x; x and y
+  if (!FetchComponentsUnsigned(fc, delivered) || (fc[3] & 1u) != 0 || ((fc[3] >> 13) & 0x3Fu) != 0) return FetchError::kSign;
   *out = t;
   return FetchError::kNone;
 }

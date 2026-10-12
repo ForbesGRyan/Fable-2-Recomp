@@ -11,8 +11,9 @@ tests/test_water_formulas.py reads them again from the capture when it is there.
 CAPTURED_PIXELS: vertices of those rows' meshes and pixels inside them (one of the row's largest glint, one of its
 middle) with the texels the capture's dumps give at the pixel's fetches. MADE_*: what the captured rows do not
 reach (the near branch with a picture at slot 14, the shadow factor under b137, a sun mirrored into the eye, a
-pixel before the fog's start, land, and the four points at which the console's zero product decides the pixel:
-ledger ruling 34). Every number is a single-precision bit pattern, as the renderer holds it.
+pixel before the fog's start, land, a fog partly applied with a slot-13 distortion unlike slot 14's, a pixel just
+past the fog's start, and the four
+points at which the console's zero product decides the pixel: ledger ruling 34). Every number is a single-precision bit pattern, as the renderer holds it.
 
 What a line pins (sub-project 12's ledger ruling 26): the SINGLE-PRECISION reference, `single=True`: the inputs read
 and every operation's result rounded to single precision in the reference's order, a multiply-add as a rounded
@@ -254,6 +255,16 @@ MADE_PIXELS = (
            _SKY, (0.0, 0.0, 0.0), 1.0, _S, _T),
     _pixel(0, (640.0, 360.0), (_EYE[0] + 90.0, _EYE[1] + 120.0, 20.10241), (15.4, 23.3, 5.2, 17.6), 0.5, (0.5, 0.5), (0.5, 0.5),
            _SKY, (0.0, 0.0, 0.0), 1.0, _S, _T, over={141: (0.5, 1.0, 0.0, 0.0588235)}),
+    # a fog partly applied and a distortion of slot 13 unlike slot 14's: c28.xy are (1, 1) and c129.xy equal c130.xy
+    # in every captured row, so without this line a mirror that left c28.x or c28.y out, or took c130 at slot 13,
+    # would meet every pin (plan Task 10's mutation run found both)
+    _pixel(0, (640.0, 360.0), (_EYE[0] + 90.0, _EYE[1] + 120.0, 20.10241), (15.4, 23.3, 5.2, 17.6), 0.0, (0.52, 0.47), (0.49, 0.55),
+           _SKY, (0.0, 0.0, 0.0), 1.0, _S, _T, over={28: (0.5, 0.75, 0.0, 0.0), 129: (0.3, 0.6, 0.0, 0.0), 130: (0.7, 0.2, 0.0, 0.0)}),
+    # just past the fog's start (19.5 units against 19.07): the blend from c68 to the in-scatter table is 0.43 here
+    # and 1 on every other fogged line (c67.z is 1 and the lake is far), so without this line a mirror that left the
+    # near colour out would meet every pin
+    _pixel(0, (300.0, 500.0), (_EYE[0] + 15.6, _EYE[1] + 11.7, _EYE[2]), (7.25, 13.5, 2.75, 10.0), 0.0, (0.52, 0.47), (0.49, 0.55),
+           _SKY, (0.0, 0.0, 0.0), 1.0, _S, _T),
     # the four points of the console's zero product (ledger ruling 34): a record's rule keeps c128.x, c136.x and c138.x
     # above 0, so a mirror never meets three of these in a drawn frame; they pin what the reference IS there
     _pixel(0, (640.0, 360.0), (_EYE[0] + 90.0, _EYE[1] + 120.0, 20.10241), (15.4, 23.3, 5.2, 17.6), 0.0, (0.5, 0.5), (0.5, 0.5),
@@ -265,7 +276,7 @@ MADE_PIXELS = (
     _pixel(0, (640.0, 360.0), (_EYE[0] + 90.0, _EYE[1] + 120.0, 20.10241), (15.4, 23.3, 5.2, 17.6), 0.0, (0.5, 0.5), (0.5, 0.5),
            _SKY, (0.0, 0.0, 0.0), 1.0, _S, _T, over={136: (0.0, 0.0, 0.0, 0.0)}),                      # second_flat: N2 = 0
 )
-MADE_KINDS = ("near", "shadow", "glint", "before the fog", "skipped", "killed", "flat_zero", "at_eye", "power_zero", "second_flat")
+MADE_KINDS = ("near", "shadow", "glint", "before the fog", "skipped", "killed", "part_fog", "fog_edge", "flat_zero", "at_eye", "power_zero", "second_flat")
 
 # The dead lines: c141 as bit patterns (module text).
 DEAD = (

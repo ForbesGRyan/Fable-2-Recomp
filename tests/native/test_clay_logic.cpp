@@ -2516,6 +2516,798 @@ static void ImpostorTests() {
   }
 }
 
+// 838-859: native water (sub-project 13, plan Task 10; clay_logic.h, "Native water"). The pins are
+// tools/xdk_sigmatch/water_pins.py's (tests/native/water_pins.inc): the Python reference alone, never a mirror.
+namespace water_pins {
+struct Vertex {
+  uint32_t p[3], pair[2], reg[8][4], pos[4], place[3], coord[4], mask[2];
+};
+struct Alpha {
+  uint32_t m, c141[4], ref, kind, alpha, fate, drawn;
+};
+struct Pixel {
+  uint32_t q[2], P[3], coord[4], m, reg[24][4], word, a[2], b[2], r13[3], r14[3], shadow, scatter[3], transmit[3];
+  uint32_t fate, alpha, colour[3], at13[2], at14[2], normal[3], fresnel, distance, sun[3], fog_at[2];
+};
+struct View {
+  uint32_t m[16], c31[2], h, want[16];
+};
+struct Dead {
+  uint32_t c141[4], dead;
+};
+static const Vertex kVertex[] = {
+#define FABLE2_WATER_PINS_VERTEX
+#include "water_pins.inc"
+#undef FABLE2_WATER_PINS_VERTEX
+};
+static const Alpha kAlpha[] = {
+#define FABLE2_WATER_PINS_ALPHA
+#include "water_pins.inc"
+#undef FABLE2_WATER_PINS_ALPHA
+};
+static const Pixel kPixel[] = {
+#define FABLE2_WATER_PINS_PIXEL
+#include "water_pins.inc"
+#undef FABLE2_WATER_PINS_PIXEL
+};
+static const View kView[] = {
+#define FABLE2_WATER_PINS_VIEW
+#include "water_pins.inc"
+#undef FABLE2_WATER_PINS_VIEW
+};
+static const Dead kDead[] = {
+#define FABLE2_WATER_PINS_DEAD
+#include "water_pins.inc"
+#undef FABLE2_WATER_PINS_DEAD
+};
+static float F(uint32_t bits) {
+  float f;
+  std::memcpy(&f, &bits, 4);
+  return f;
+}
+static uint32_t B(float f) {
+  uint32_t u;
+  std::memcpy(&u, &f, 4);
+  return u;
+}
+// A mirror's value against its pin: the bits, and how far apart two values are in units in the last place (the
+// largest over a run is printed; +0 and -0 are 0 apart).
+static uint32_t g_worst_ulps = 0;
+static bool Same(float got, uint32_t want_bits) {
+  const uint32_t g = B(got);
+  if (g == want_bits || ((g | want_bits) << 1) == 0) return true;
+  const int64_t a = (g & 0x80000000u) ? -int64_t(g & 0x7FFFFFFFu) : int64_t(g), b = (want_bits & 0x80000000u) ? -int64_t(want_bits & 0x7FFFFFFFu) : int64_t(want_bits);
+  const uint64_t apart = uint64_t(a > b ? a - b : b - a);
+  if (!(got == got) || apart > 0xFFFFFFFFull) {
+    g_worst_ulps = 0xFFFFFFFFu;
+  } else if (uint32_t(apart) > g_worst_ulps) {
+    g_worst_ulps = uint32_t(apart);
+  }
+  return false;
+}
+// The constants and the frame's fog of a pixel pin's 24 registers, as the pass would hand them to the program.
+static ClayWaterConstants Constants(const Pixel& p, ClayFogConstants* fog) {
+  ClayWaterConstants c{};
+  for (uint32_t i = 0; i < kClayWaterPsRegisters; ++i) {
+    for (int k = 0; k < 4; ++k) c.ps[i][k] = F(p.reg[kClayWaterPsFrom[i]][k]);
+  }
+  c.out_scale = F(p.reg[capture::kWatP20][3]);
+  c.alpha_ref = F(p.reg[capture::kWatP141][3]);
+  c.sun_on = (p.word & capture::kWaterB136) ? 1u : 0u;
+  c.fog_on = 1;
+  ClayFogConstants f{};
+  for (int i = 0; i < 3; ++i) {
+    f.axis[i] = F(p.reg[capture::kWatP66][i]);
+    f.near_colour[i] = F(p.reg[capture::kWatP68][i]);
+  }
+  f.on = 1;
+  f.start = F(p.reg[capture::kWatP67][0]);
+  f.slope = F(p.reg[capture::kWatP67][2]);
+  f.scale = F(p.reg[capture::kWatP67][3]);
+  f.amount = F(p.reg[capture::kWatP28][0]);
+  f.scatter = F(p.reg[capture::kWatP28][1]);
+  *fog = f;
+  return c;
+}
+static WaterPixelIn Input(const Pixel& p) {
+  WaterPixelIn in{};
+  for (int i = 0; i < 2; ++i) {
+    in.q[i] = F(p.q[i]);
+    in.a[i] = F(p.a[i]);
+    in.b[i] = F(p.b[i]);
+  }
+  for (int i = 0; i < 3; ++i) {
+    in.place[i] = F(p.P[i]);
+    in.picture[i] = F(p.r13[i]);
+    in.slot14[i] = F(p.r14[i]);
+    in.scatter[i] = F(p.scatter[i]);
+    in.transmit[i] = F(p.transmit[i]);
+  }
+  in.m = F(p.m);
+  return in;
+}
+}  // namespace water_pins
+
+static void WaterTests() {
+  using namespace water_pins;
+  const float kNan = std::numeric_limits<float>::quiet_NaN();
+  CHECK(838, std::string(ClayWaterName(ClayWater::kDrawn)) == "drawn" && std::string(ClayWaterName(ClayWater::kOpaqueLive)) == "opaque-live" &&
+                 std::string(ClayWaterName(ClayWater::kNoRecords)) == "no-records" && size_t(ClayWater::kCount) == 14);
+  {
+    static constexpr const char* kNames[] = {"drawn", "off", "no-records", "light", "opaque-live", "pair", "plane", "view", "reflection", "texture",
+                                             "order", "pipeline", "slot", "scale"};
+    for (size_t i = 0; i < size_t(ClayWater::kCount); ++i) CHECK(838, std::string(ClayWaterName(ClayWater(i))) == kNames[i]);
+    CHECK(838, std::string(ClayWaterName(ClayWater::kCount)) == "?" && ClayStats{}.water == ClayWater::kOff);
+  }
+  // 840: the dead draw at its margin (Review Focus 2). The difference and the comparison in double on the singles.
+  {
+    const float captured[4] = {2.003f, 2.0f, 0.0015f, 0.0588f};
+    CHECK(840, WaterOpaqueDead(captured));
+    const float at_margin[4] = {float(2.0 + 4.0 * kWaterDeadMargin), 2.0f, 0.0f, 0.0f};  // (2 + 1e-6 is not a single: the step at 2 is 2.4e-7)
+    const float below[4] = {std::nextafter(2.0f, 3.0f), 2.0f, 0.0f, 0.0f};               // 2.4e-7 above: below the margin
+    const float equal[4] = {2.0f, 2.0f, 0.0f, 0.0f}, land[4] = {0.0f, -1.0f, 0.0f, 0.0f}, large[4] = {5.0f, 1.0f, 0.0f, 0.0f};
+    const float nan[4] = {kNan, 2.0f, 0.0f, 0.0f};
+    CHECK(840, WaterOpaqueDead(at_margin) && !WaterOpaqueDead(below) && !WaterOpaqueDead(equal) && !WaterOpaqueDead(land) && !WaterOpaqueDead(large) &&
+                   !WaterOpaqueDead(nan) && !WaterOpaqueDead(nullptr));
+    const float garbage_w[4] = {2.003f, 2.0f, 1e29f, kNan};                               // c141.z and .w are not the rule's
+    CHECK(840, WaterOpaqueDead(garbage_w));
+    // the single nearest 1e-6 lies BELOW the margin: a single-precision margin would call it dead
+    const float single_margin[4] = {1e-6f, 0.0f, 0.0f, 0.0f}, least[4] = {std::nextafter(1e-6f, 1.0f), 0.0f, 0.0f, 0.0f};
+    CHECK(840, !WaterOpaqueDead(single_margin) && WaterOpaqueDead(least) && B(1e-6f) == 0x358637BDu);
+    uint32_t dead = 0;
+    for (const Dead& d : kDead) {
+      const float c141[4] = {F(d.c141[0]), F(d.c141[1]), F(d.c141[2]), F(d.c141[3])};
+      CHECK(840, WaterOpaqueDead(c141) == (d.dead != 0));
+      dead += d.dead;
+    }
+    CHECK(840, std::size(kDead) == 14 && dead == 5);                                      // (lines on both sides)
+  }
+  // 841: the mirrored camera at the pins (M, c31.xy, h, the sixteen floats): bit for bit, and what it refuses
+  for (const View& pin : kView) {
+    float m[4][4], got[4][4];
+    for (int i = 0; i < 16; ++i) m[i / 4][i % 4] = F(pin.m[i]);
+    const float c31x = F(pin.c31[0]), c31y = F(pin.c31[1]), h = F(pin.h);
+    CHECK(841, WaterViewRows(m, c31x, c31y, h, got));
+    for (int i = 0; i < 16; ++i) CHECK(841, B(got[i / 4][i % 4]) == pin.want[i]);
+    float moved[4][4], other[4][4];
+    CHECK(841, WaterViewRows(m, c31x, c31y, h + 0.01f, moved) && std::memcmp(moved, got, sizeof(got)) != 0);
+    CHECK(841, WaterViewRows(m, 1.0f, 1.0f, h, other) && std::memcmp(other, got, sizeof(got)) != 0);
+    float keep[4][4] = {{7.0f}};
+    CHECK(841, !WaterViewRows(m, 0.0f, c31y, h, keep) && !WaterViewRows(m, c31x, 4.5f, h, keep) && !WaterViewRows(m, c31x, c31y, 2e6f, keep) &&
+                   !WaterViewRows(m, kNan, c31y, h, keep) && !WaterViewRows(m, c31x, c31y, kNan, keep) && !WaterViewRows(nullptr, c31x, c31y, h, keep) &&
+                   keep[0][0] == 7.0f);
+    float bad[4][4];
+    std::memcpy(bad, m, sizeof(bad));
+    bad[2][1] = kNan;
+    CHECK(841, !WaterViewRows(bad, c31x, c31y, h, keep) && keep[0][0] == 7.0f);
+    // a point's place under the mirrored camera is its mirror image's under the main one, scaled by c31.xy
+    {
+      const double p[3] = {120.0, 260.0, double(h) + 7.5}, q[3] = {120.0, 260.0, double(h) - 7.5};
+      for (int i = 0; i < 4; ++i) {
+        const double mirrored = double(got[i][0]) * p[0] + double(got[i][1]) * p[1] + double(got[i][2]) * p[2] + double(got[i][3]);
+        const double main = (i == 0 ? double(c31x) : i == 1 ? double(c31y) : 1.0) *
+                            (double(m[i][0]) * q[0] + double(m[i][1]) * q[1] + double(m[i][2]) * q[2] + double(m[i][3]));
+        CHECK(841, std::fabs(mirrored - main) <= 1e-3 * std::max(1.0, std::fabs(main)));
+      }
+    }
+    // 842: the sky's rays do not depend on the height (two bodies' targets are equal in phase 13b), and the
+    // picture's centre looks up
+    float b1[3][3], b2[3][3];
+    CHECK(842, SkyRayBasis(got, b1) && SkyRayBasis(moved, b2) && std::memcmp(b1, b2, sizeof(b1)) == 0);
+    CHECK(842, b1[0][2] > 0.0f);
+    float main_basis[3][3];
+    CHECK(842, SkyRayBasis(m, main_basis) && std::fabs(main_basis[0][2] + b1[0][2]) <= 1e-5f);   // the main view's centre ray, mirrored
+  }
+  CHECK(841, std::size(kView) == 3);
+  // 843: the verdict, one reason at a time and in the enum's order; the dead draw is left out iff the water is drawn
+  {
+    ClayWaterInputs good;
+    good.on = good.light = true;
+    good.surface = good.opaque = 12;
+    CHECK(843, DecideClayWater(good) == ClayWater::kDrawn && WaterSceneVerdict(good) == ClayWater::kDrawn);
+    struct {
+      void (*breaks)(ClayWaterInputs&);
+      ClayWater want;
+      bool scene;
+    } const kChain[] = {
+        {[](ClayWaterInputs& i) { i.on = false; }, ClayWater::kOff, true},
+        {[](ClayWaterInputs& i) { i.surface = 0; i.opaque = 0; }, ClayWater::kNoRecords, true},
+        {[](ClayWaterInputs& i) { i.light = false; }, ClayWater::kLight, true},
+        {[](ClayWaterInputs& i) { i.opaque_dead = false; }, ClayWater::kOpaqueLive, true},
+        {[](ClayWaterInputs& i) { i.opaque = 11; }, ClayWater::kPair, true},
+        {[](ClayWaterInputs& i) { i.planes = false; }, ClayWater::kPlane, false},
+        {[](ClayWaterInputs& i) { i.view = false; }, ClayWater::kView, false},
+        {[](ClayWaterInputs& i) { i.targets = false; }, ClayWater::kReflection, false},
+        {[](ClayWaterInputs& i) { i.textures = false; }, ClayWater::kTexture, false},
+        {[](ClayWaterInputs& i) { i.order = false; }, ClayWater::kOrder, false},
+        {[](ClayWaterInputs& i) { i.objects = false; }, ClayWater::kPipeline, false},
+        {[](ClayWaterInputs& i) { i.slots = false; }, ClayWater::kSlot, false},
+        {[](ClayWaterInputs& i) { i.scale = false; }, ClayWater::kScale, true},
+    };
+    for (size_t a = 0; a < std::size(kChain); ++a) {
+      ClayWaterInputs in = good;
+      kChain[a].breaks(in);
+      CHECK(843, DecideClayWater(in) == kChain[a].want);
+      CHECK(843, (WaterSceneVerdict(in) == kChain[a].want) == kChain[a].scene && (kChain[a].scene || WaterSceneVerdict(in) == ClayWater::kDrawn));
+      for (size_t b = a + 1; b < std::size(kChain); ++b) {      // two things wrong: the earlier decides
+        ClayWaterInputs both = in;
+        kChain[b].breaks(both);
+        CHECK(843, DecideClayWater(both) == kChain[a].want);
+      }
+    }
+    { ClayWaterInputs in = good; in.objects_targets = false; CHECK(843, DecideClayWater(in) == ClayWater::kReflection); }
+    { ClayWaterInputs in = good; in.surface = 13; CHECK(843, DecideClayWater(in) == ClayWater::kPair); }       // (an opaque twin missing, either way)
+    { ClayWaterInputs in = good; in.surface = 0; CHECK(843, DecideClayWater(in) == ClayWater::kNoRecords); }   // (opaque records alone are no water)
+    CHECK(843, DecideClayWater(ClayWaterInputs{}) == ClayWater::kOff);
+    for (size_t v = 0; v < size_t(ClayWater::kCount); ++v) {
+      CHECK(843, WaterLeavesOut(ClayWater(v), capture::WaterKind::kOpaque) == (ClayWater(v) == ClayWater::kDrawn));
+      CHECK(843, WaterLeavesOut(ClayWater(v), capture::WaterKind::kSurface));
+      CHECK(843, !WaterLeavesOut(ClayWater(v), capture::WaterKind::kNone));
+    }
+  }
+  // 844: the record's constants
+  {
+    capture::WaterRecord r{};
+    r.ps_hash = capture::kWaterPs;
+    r.vs_hash = capture::kWaterVs;
+    r.kind = uint32_t(capture::WaterKind::kSurface);
+    r.place = 1628;
+    r.pbool = 0x110;
+    for (auto& reg : r.vs) for (float& v : reg) v = kNan;                    // every component starts as garbage
+    for (auto& reg : r.ps) for (float& v : reg) v = kNan;
+    auto set = [](float* reg, std::initializer_list<float> v) { int i = 0; for (float x : v) reg[i++] = x; };
+    set(r.vs[capture::kWatV115], {1.0365f, 1.1775f}); set(r.vs[capture::kWatV116], {-2.3504f, 1.0095f});
+    set(r.vs[capture::kWatV117], {0.08f, 0.08f});     set(r.vs[capture::kWatV118], {0.06f, 0.06f});
+    set(r.ps[capture::kWatP0], {0.0f, 0.0f, 1.0f / 1120.0f, 1.0f / 720.0f});
+    set(r.ps[capture::kWatP19], {82.07f, 157.34f, 50.17f});
+    r.ps[capture::kWatP20][3] = 8.58f;
+    set(r.ps[capture::kWatP28], {1.0f, 1.0f});
+    set(r.ps[capture::kWatP31], {0.666667f, 0.666667f});
+    set(r.ps[capture::kWatP66], {-0.83f, 0.09f, 0.55f});
+    r.ps[capture::kWatP67][0] = 19.07f; r.ps[capture::kWatP67][2] = 1.0f; r.ps[capture::kWatP67][3] = 0.0005f;
+    set(r.ps[capture::kWatP68], {0.1f, 0.2f, 0.3f});
+    r.ps[capture::kWatP116][0] = 0.104081f; r.ps[capture::kWatP117][0] = 0.0f;
+    set(r.ps[capture::kWatP126], {0.027f, 0.075f, 0.043f}); set(r.ps[capture::kWatP127], {0.059f, 0.129f, 0.122f});
+    r.ps[capture::kWatP128][0] = 0.3f;
+    set(r.ps[capture::kWatP129], {0.84f, 0.84f}); set(r.ps[capture::kWatP130], {0.84f, 0.84f});
+    r.ps[capture::kWatP131][0] = 0.5f; r.ps[capture::kWatP136][0] = 0.279f; r.ps[capture::kWatP137][0] = 0.5f; r.ps[capture::kWatP138][0] = 128.0f;
+    r.ps[capture::kWatP140][0] = 0.05f;
+    r.ps[capture::kWatP141][0] = 2.003f; r.ps[capture::kWatP141][1] = 2.0f; r.ps[capture::kWatP141][3] = F(0x3D70F0F1u);
+    set(r.ps[capture::kWatP142], {0.5f, -0.5f, -0.7071f}); set(r.ps[capture::kWatP143], {1.0f, 0.9f, 0.8f});
+    capture::DrawRecord draw = BaseRecord();
+    draw.seq = 1628;
+    draw.layout = capture::TransformLayout::kDot;
+    for (int i = 0; i < 16; ++i) draw.rows[i] = 0.25f * float(i) - 1.0f;
+    const uint32_t samplers[3] = {3, 1, 1};
+    const uint32_t swizzle = 0u | (0u << 3) | (1u << 6);
+    const float reference = F(0x3D70F0F2u);
+    ClayWaterConstants c{};
+    CHECK(844, MakeClayWaterConstants(r, draw, reference, 8.58f, true, samplers, swizzle, &c));
+    static_assert(sizeof(ClayWaterConstants) == 448 && offsetof(ClayWaterConstants, alpha_ref) == 416 && offsetof(ClayWaterConstants, swizzle) == 444 &&
+                  kClayWaterPsRegisters == 18);
+    CHECK(844, std::memcmp(c.rows, draw.rows, 64) == 0 && std::memcmp(c.vs, r.vs, 64) == 0 && B(c.alpha_ref) == 0x3D70F0F2u && c.out_scale == 8.58f &&
+                   c.sun_on == 1 && c.fog_on == 1 && c.sampler_mask == 3 && c.sampler_normal == 1 && c.sampler_picture == 1 && c.swizzle == swizzle);
+    // every carried register is the record's, bit for bit, the components no formula reads among them; and the
+    // two thresholds are two numbers (c141.w is one unit below the state's reference)
+    static constexpr uint8_t kWant[18] = {0, 19, 31, 116, 117, 126, 127, 128, 129, 130, 131, 136, 137, 138, 140, 141, 142, 143};
+    for (uint32_t i = 0; i < kClayWaterPsRegisters; ++i) {
+      CHECK(844, capture::kWaterPsRegister[kClayWaterPsFrom[i]] == kWant[i]);
+      CHECK(844, std::memcmp(c.ps[i], r.ps[kClayWaterPsFrom[i]], 16) == 0);
+    }
+    CHECK(844, B(c.ps[kCwP129][2]) == B(kNan) && B(c.ps[kCwP141][3]) == 0x3D70F0F1u && B(c.ps[kCwP141][3]) != B(c.alpha_ref));
+    CHECK(844, c.ps[kCwP19][2] == 50.17f && c.ps[kCwP140][0] == 0.05f && c.ps[kCwP143][1] == 0.9f && c.ps[kCwP0][3] == 1.0f / 720.0f);
+    const ClayWaterConstants same = c;
+    auto refused = [&](const capture::WaterRecord& rec, const capture::DrawRecord& d, float ref, float scale, const uint32_t* s, uint32_t swz) {
+      return !MakeClayWaterConstants(rec, d, ref, scale, true, s, swz, &c) && std::memcmp(&same, &c, sizeof(c)) == 0;   // `out` untouched
+    };
+    capture::WaterRecord bad = r;
+    bad.ps[capture::kWatP126][1] = kNan;                                     // a read component that is no number
+    CHECK(844, refused(bad, draw, reference, 8.58f, samplers, swizzle));
+    CHECK(844, refused(r, draw, reference, 0.0f, samplers, swizzle) && refused(r, draw, reference, 64.5f, samplers, swizzle));   // the scale
+    CHECK(844, refused(r, draw, 1.5f, 8.58f, samplers, swizzle) && refused(r, draw, kNan, 8.58f, samplers, swizzle));           // the reference
+    bad = r; bad.ps[capture::kWatP138][0] = 0.0f;                            // (ledger ruling 34) a power of 0 never reaches the program
+    CHECK(844, refused(bad, draw, reference, 8.58f, samplers, swizzle));
+    bad = r; bad.ps[capture::kWatP128][0] = 0.0f;
+    CHECK(844, refused(bad, draw, reference, 8.58f, samplers, swizzle));
+    bad = r; bad.kind = uint32_t(capture::WaterKind::kOpaque);               // the dead twin has no constants
+    CHECK(844, refused(bad, draw, reference, 8.58f, samplers, swizzle));
+    CHECK(844, refused(capture::WaterRecord{}, draw, reference, 8.58f, samplers, swizzle));
+    capture::DrawRecord other = draw;
+    other.seq = 1629;                                                        // not the draw the record names
+    CHECK(844, refused(r, other, reference, 8.58f, samplers, swizzle));
+    other = draw; other.layout = capture::TransformLayout::kCombine;
+    CHECK(844, refused(r, other, reference, 8.58f, samplers, swizzle));
+    other = draw; other.rows[5] = std::numeric_limits<float>::infinity();
+    CHECK(844, refused(r, other, reference, 8.58f, samplers, swizzle));
+    const uint32_t no_sampler[3] = {3, 4, 1};
+    CHECK(844, refused(r, draw, reference, 8.58f, no_sampler, swizzle) && refused(r, draw, reference, 8.58f, nullptr, swizzle));
+    CHECK(844, refused(r, draw, reference, 8.58f, samplers, 6u) && refused(r, draw, reference, 8.58f, samplers, 7u << 6) &&
+                   refused(r, draw, reference, 8.58f, samplers, 1u << 9) && WaterSwizzleUsable(5u | (5u << 3) | (5u << 6)));
+    // a record without the sun's bool carries its sun registers as they are, numbers or not, and says so
+    bad = r;
+    bad.pbool = 0x010;
+    for (uint32_t i : {uint32_t(capture::kWatP136), uint32_t(capture::kWatP137), uint32_t(capture::kWatP138), uint32_t(capture::kWatP142), uint32_t(capture::kWatP143)}) {
+      for (float& v : bad.ps[i]) v = kNan;
+    }
+    CHECK(844, MakeClayWaterConstants(bad, draw, reference, 8.58f, false, samplers, swizzle, &c) && c.sun_on == 0 && c.fog_on == 0 &&
+                   B(c.ps[kCwP138][0]) == B(kNan));
+    // ... and the mirror of such a record reads none of them: its colour is a number
+    WaterPixelIn in{};
+    in.q[0] = 400.0f; in.q[1] = 300.0f;
+    in.place[0] = 140.0f; in.place[1] = 250.0f; in.place[2] = 20.1024f;
+    in.a[0] = 0.52f; in.a[1] = 0.47f; in.b[0] = 0.49f; in.b[1] = 0.55f;
+    in.m = 0.0f;
+    in.picture[0] = 0.17f; in.picture[1] = 0.21f; in.picture[2] = 0.33f;
+    for (int i = 0; i < 3; ++i) { in.scatter[i] = 0.3f; in.transmit[i] = 0.6f; }
+    ClayFogConstants fog{};
+    float rgb[3] = {-1.0f, -1.0f, -1.0f}, alpha = 0.0f;
+    bool kept = false;
+    WaterPixelMirror(in, c, fog, rgb, &alpha, &kept);
+    CHECK(844, kept && std::isfinite(rgb[0]) && rgb[0] > 0.0f && rgb[1] > 0.0f && rgb[2] > 0.0f && alpha > 0.99f && alpha < 1.0f);
+    // the same pixel with the sun's bool and a register that is no number: the colour is no number, and it is DISCARDED
+    c.sun_on = 1;
+    WaterPixelMirror(in, c, fog, rgb, &alpha, &kept);
+    CHECK(844, !kept && rgb[0] == 0.0f && rgb[1] == 0.0f && rgb[2] == 0.0f);
+    // a skipped pixel that passes the state's test is drawn with colour 0 at its alpha; one below the reference is not drawn
+    CHECK(844, MakeClayWaterConstants(r, draw, 0.01f, 8.58f, false, samplers, swizzle, &c));
+    in.m = 121.0f / 255.0f;                                                  // at the shore: alpha 0.049, below c141.w
+    WaterPixelMirror(in, c, fog, rgb, &alpha, &kept);
+    CHECK(844, kept && rgb[0] == 0.0f && rgb[1] == 0.0f && rgb[2] == 0.0f && alpha > 0.01f && alpha < c.ps[kCwP141][3]);
+    c.alpha_ref = 0.05f;
+    WaterPixelMirror(in, c, fog, rgb, &alpha, &kept);
+    CHECK(844, !kept);
+    in.m = 0.5f;                                                             // the surface's kill: an alpha of exactly 1
+    c.ps[kCwP141][0] = 0.5f; c.ps[kCwP141][1] = 1.0f;
+    WaterPixelMirror(in, c, fog, rgb, &alpha, &kept);
+    CHECK(844, !kept && alpha == 1.0f);
+  }
+  // 845: the slot plan with no water slots is the plan of before, written out; with them the objects move behind
+  for (uint32_t t : {0u, 1u, 37u, 300u}) for (uint32_t p : {0u, 5u}) for (uint32_t i : {0u, kClayImpostorStepSlots}) {
+    const ClayFrameSlotPlan was = PlanClayFrameSlots(t, p, i), now = PlanClayFrameSlots(t, p, i, 0);
+    CHECK(845, now.plant0 == kClayFrameTerrainSlot0 + t && now.mask == now.plant0 + p && now.sky == now.mask + 1 && now.post == now.sky + 1 &&
+                   now.quad0 == now.post + kClayPostSlots && now.impostor0 == now.quad0 + kClayQuadFrameSlots && now.object0 == now.impostor0 + i &&
+                   now.object0 == was.object0 && now.water0 == now.object0);
+    const ClayFrameSlotPlan with = PlanClayFrameSlots(t, p, i, kClayWaterStepSlots);
+    CHECK(845, with.water0 == now.object0 && with.object0 == now.object0 + kClayWaterStepSlots && with.impostor0 == now.impostor0 &&
+                   with.plant0 == now.plant0 && with.mask == now.mask && with.sky == now.sky && with.post == now.post && with.quad0 == now.quad0);
+    CHECK(845, ClayFrameSmallSlots(t, p, i, 0) == ClayFrameSmallSlots(t, p, i) &&
+                   ClayFrameSmallSlots(t, p, i, kClayWaterStepSlots) == ClayFrameSmallSlots(t, p, i) + kClayWaterStepSlots);
+    CHECK(845, ClayFrameSmallSlots(t, p, i, kClayWaterStepSlots) >= with.object0);
+    // within the step: the records' constants, the targets' sky constants, the second frame block; none past the objects
+    CHECK(845, ClayWaterRecordSlot(with, 0) == with.water0 && ClayWaterRecordSlot(with, 63) == with.water0 + 126 &&
+                   ClayWaterTargetSlot(with, 0) == with.water0 + 128 && ClayWaterTargetSlot(with, 3) == with.water0 + 131 &&
+                   ClayWaterFrameSlot(with) == with.water0 + 132 && ClayWaterFrameSlot(with) + kClayFrameSlots == with.object0);
+  }
+  CHECK(845, kClayWaterSlots == 2 && kClayWaterStepSlots == 2 * capture::kMaxWaterRecords + kMaxWaterTargets + kClayFrameSlots && kClayWaterStepSlots == 153);
+  // 846 to 848: the step's place (Review Focus 5). The bridge's shape: opaque records, the first surface place
+  // at seq 1628, a blended group behind it.
+  {
+    const uint32_t seqs[] = {10, 20, 700, 1115, 1641, 1642, 1649};
+    WaterPlace w = PlanWaterPlace(seqs, std::size(seqs), 1628, true, 4, kNoCoverageTail);
+    CHECK(846, w.usable && w.at == 4);                                         // before the first record at or beyond the place; the sky at the same index
+    w = PlanWaterPlace(seqs, std::size(seqs), 1628, true, 2, 3);
+    CHECK(846, w.usable && w.at == 4);                                         // the sky and the tail earlier: fine
+    w = PlanWaterPlace(seqs, std::size(seqs), 1641, true, 4, 4);
+    CHECK(846, w.usable && w.at == 4);                                         // (a record AT the place is the one the step stands before)
+    w = PlanWaterPlace(seqs, std::size(seqs), 1628, true, 5, kNoCoverageTail);
+    CHECK(847, !w.usable && w.at == 4);                                        // the sky would come after the water: order
+    w = PlanWaterPlace(seqs, std::size(seqs), 1628, true, 4, 6);
+    CHECK(847, !w.usable);                                                     // the tail would
+    w = PlanWaterPlace(seqs, std::size(seqs), 1628, false, 0, kNoCoverageTail);
+    CHECK(847, w.usable && w.at == 4);                                         // (a frame without a sky is `reflection` before it is `order`; the rule itself does not ask)
+    w = PlanWaterPlace(seqs, std::size(seqs), 1628, false, 6, kNoCoverageTail);
+    CHECK(847, w.usable);                                                      // (a sky that is not drawn has no place to hold)
+    w = PlanWaterPlace(seqs, std::size(seqs), 5000, true, 7, kNoCoverageTail);
+    CHECK(848, w.usable && w.at == std::size(seqs));                           // after the last record
+    w = PlanWaterPlace(nullptr, 0, 5, true, 0, kNoCoverageTail);
+    CHECK(848, w.usable && w.at == 0);
+    ColourOrder order;
+    order.sky_drawn = true; order.sky_at = 4; order.water_at = 4;
+    const ColourDue due = ColourStepsDue(order, 4, 900, false, false);
+    CHECK(848, due.sky && due.water && !ColourStepsDue(order, 3, 800, false, false).water && !ColourStepsDue(ColourOrder{}, 4, 900, false, false).water);
+    order.water_at = std::size(seqs);
+    CHECK(848, ColourStepsAfter(order, std::size(seqs)).water && !ColourStepsAfter(ColourOrder{}, std::size(seqs)).water &&
+                   !ColourStepsDue(order, 4, 900, false, false).water);
+    CHECK(848, ColourOrder{}.water_at == ~size_t(0) && !ColourDue{}.water && !ColourDue{}.depth_after_water);
+    // 858: the sun layer's depth. Taken before the water step it would hold the lake's bed with the dead draw gone:
+    // such a frame is `order`; at the same index the water is drawn first and the depth taken after it.
+    w = PlanWaterPlace(seqs, std::size(seqs), 1628, true, 4, kNoCoverageTail, 3);
+    CHECK(858, !w.usable && w.at == 4);                                        // the depth before the water
+    w = PlanWaterPlace(seqs, std::size(seqs), 1628, true, 4, kNoCoverageTail, 4);
+    CHECK(858, w.usable);                                                      // at the same index: after it (below)
+    w = PlanWaterPlace(seqs, std::size(seqs), 1628, true, 4, kNoCoverageTail, 6);
+    CHECK(858, w.usable);
+    w = PlanWaterPlace(seqs, std::size(seqs), 1628, true, 4, kNoCoverageTail, std::size(seqs));
+    CHECK(858, w.usable);                                                      // not among the records, or after the last
+    ColourOrder both;
+    both.sky_drawn = true; both.sky_at = 4; both.water_at = 4;
+    both.depth_early = true;
+    both.depth.usable = true; both.depth.record = 900;
+    ColourDue at = ColourStepsDue(both, 4, 900, false, false);
+    CHECK(858, at.sky && at.water && at.layer_depth && at.depth_after_water);
+    at = ColourStepsDue(both, 4, 900, false, true);                            // the depth already taken: nothing to move
+    CHECK(858, at.water && !at.layer_depth && !at.depth_after_water);
+    both.water_at = 5;
+    at = ColourStepsDue(both, 4, 900, false, false);                           // the depth alone at this index: today's order
+    CHECK(858, at.layer_depth && !at.water && !at.depth_after_water);
+    // the run: no drawn record between the first and the last surface place
+    CHECK(858, WaterPlacesOneRun(seqs, std::size(seqs), 1628, 1639) && !WaterPlacesOneRun(seqs, std::size(seqs), 1628, 1642) &&
+                   WaterPlacesOneRun(seqs, std::size(seqs), 1628, 1628) && !WaterPlacesOneRun(seqs, std::size(seqs), 1639, 1628));
+  }
+  // 849: the targets
+  {
+    capture::WaterRecord rec[6] = {};
+    const capture::WaterRecord* ptr[6];
+    WaterHeight hs[6];
+    const uint32_t bases[6] = {0x13501000u, 0x13401000u, 0x13401000u, 0x13581000u, 0x13481000u, 0x13501000u};
+    const float heights[6] = {20.1024f, 20.1024f, 20.1024f, 40.0f, 40.474f, 20.1024f};
+    for (int i = 0; i < 6; ++i) { rec[i].ps_hash = 1; rec[i].fetch[capture::kWatPicture][1] = bases[i] | 0x86u; ptr[i] = &rec[i]; hs[i] = {true, heights[i]}; }
+    uint8_t target_of[6] = {};
+    WaterTargetPlan plan = PlanWaterTargets(ptr, hs, 6, target_of);
+    CHECK(849, plan.ok && plan.why == ClayWater::kDrawn && plan.count == 4 && plan.base[0] == 0x13401000u && plan.base[1] == 0x13481000u &&
+                   plan.base[2] == 0x13501000u && plan.base[3] == 0x13581000u && plan.height[0] == 20.1024f && plan.height[1] == 40.474f &&
+                   plan.height[2] == 20.1024f && plan.height[3] == 40.0f);
+    CHECK(849, target_of[0] == 2 && target_of[1] == 0 && target_of[2] == 0 && target_of[3] == 3 && target_of[4] == 1 && target_of[5] == 2);
+    CHECK(849, WaterPictureBase(rec[0]) == 0x13501000u);                       // (the format and endian bits are not the base)
+    hs[2] = {true, 20.1030f};                                                  // within the flatness: one body
+    CHECK(849, PlanWaterTargets(ptr, hs, 6, target_of).ok);
+    hs[2] = {true, 20.2f};
+    CHECK(849, !PlanWaterTargets(ptr, hs, 6, target_of).ok && PlanWaterTargets(ptr, hs, 6, target_of).why == ClayWater::kPlane);   // two heights on one base
+    hs[2] = {false, 0.0f};
+    CHECK(849, !PlanWaterTargets(ptr, hs, 6, target_of).ok && PlanWaterTargets(ptr, hs, 6, target_of).why == ClayWater::kPlane);  // a mesh that is not flat
+    hs[2] = {true, kNan};
+    CHECK(849, PlanWaterTargets(ptr, hs, 6, target_of).why == ClayWater::kPlane);
+    hs[2] = {true, 20.1024f};
+    capture::WaterRecord fifth = rec[0];
+    fifth.fetch[capture::kWatPicture][1] = 0x13601000u | 6u;
+    ptr[5] = &fifth;
+    plan = PlanWaterTargets(ptr, hs, 6, target_of);
+    CHECK(849, !plan.ok && plan.why == ClayWater::kReflection && plan.count == 0);   // a fifth base
+    hs[1] = {false, 0.0f};                                                     // both wrong: the plane decides (the enum's order)
+    CHECK(849, PlanWaterTargets(ptr, hs, 6, target_of).why == ClayWater::kPlane);
+    hs[1] = {true, 20.1024f};
+    ptr[5] = &rec[5];
+    CHECK(849, !PlanWaterTargets(nullptr, hs, 6, target_of).ok && !PlanWaterTargets(ptr, nullptr, 6, target_of).ok && !PlanWaterTargets(ptr, hs, 6, nullptr).ok &&
+                   !PlanWaterTargets(ptr, hs, capture::kMaxWaterRecords + 1, target_of).ok);
+    plan = PlanWaterTargets(ptr, hs, 0, target_of);
+    CHECK(849, plan.ok && plan.count == 0);                                    // (no surface record: nothing to plan; the verdict is no-records)
+    plan = PlanWaterTargets(ptr, hs, 1, target_of);
+    CHECK(849, plan.ok && plan.count == 1 && plan.base[0] == 0x13501000u && target_of[0] == 0);
+    static_assert(kMaxWaterTargets == 4 && kWaterTargetSize == 256);
+  }
+  // 850: a mesh's height
+  {
+    PositionBounds box;
+    box.valid = true; box.lo[2] = 20.1024f; box.hi[2] = 20.1024f;
+    CHECK(850, WaterMeshHeight(box).valid && WaterMeshHeight(box).h == 20.1024f);
+    box.hi[2] = 20.1030f;
+    CHECK(850, WaterMeshHeight(box).valid && WaterMeshHeight(box).h == 20.1024f);   // within 1e-3
+    box.hi[2] = 20.1040f;
+    CHECK(850, !WaterMeshHeight(box).valid);
+    box.hi[2] = 20.1024f; box.valid = false;
+    CHECK(850, !WaterMeshHeight(box).valid && WaterMeshHeight(box).h == 0.0f);
+    box.valid = true; box.hi[2] = kNan;
+    CHECK(850, !WaterMeshHeight(box).valid);
+    box.hi[2] = 20.0f;                                                         // (a box that is no box)
+    CHECK(850, !WaterMeshHeight(box).valid);
+  }
+  // 851: the mirrors at every line of the pins (the single-precision reference: ledger ruling 26 of sub-project 12)
+  {
+    g_worst_ulps = 0;
+    uint32_t apart = 0;
+    for (const Vertex& v : kVertex) {
+      ClayWaterConstants c{};
+      for (int i = 0; i < 4; ++i) for (int k = 0; k < 4; ++k) { c.rows[i][k] = F(v.reg[i][k]); c.vs[i][k] = F(v.reg[4 + i][k]); }
+      const float p[3] = {F(v.p[0]), F(v.p[1]), F(v.p[2])};
+      float pos[4], coord[4];
+      WaterPositionMirror(p, c, pos);
+      WaterCoordsMirror(p, c, coord);
+      for (int i = 0; i < 4; ++i) apart += !Same(pos[i], v.pos[i]) + !Same(coord[i], v.coord[i]);
+      CHECK(851, v.place[0] == v.p[0] && v.place[1] == v.p[1] && v.place[2] == v.p[2] && v.mask[0] == v.pair[0] && v.mask[1] == v.pair[1]);
+    }
+    CHECK(851, std::size(kVertex) == 10 && apart == 0);
+    uint32_t fates[3] = {}, twins = 0, drawn_unshaded = 0, shaded_undrawn = 0;
+    for (const Alpha& a : kAlpha) {
+      ClayWaterConstants c{};
+      for (int k = 0; k < 4; ++k) c.ps[kCwP141][k] = F(a.c141[k]);
+      c.alpha_ref = F(a.ref);
+      const float alpha = WaterAlphaMirror(F(a.m), c);
+      CHECK(851, Same(alpha, a.alpha));
+      if (a.kind != 0) {                                                       // the opaque twin: the same alpha, killed below 1
+        CHECK(851, (a.fate == 0) == (alpha < 1.0f));
+        ++twins;
+        continue;
+      }
+      const WaterFate fate = WaterFateMirror(alpha, c);
+      CHECK(851, uint32_t(fate) == a.fate && WaterDrawn(fate, alpha, c) == (a.drawn != 0));
+      ++fates[a.fate];
+      drawn_unshaded += fate == WaterFate::kSkipped && a.drawn != 0;
+      shaded_undrawn += fate == WaterFate::kShaded && a.drawn == 0;
+    }
+    // (every fate; and the two thresholds told apart: a pixel skipped and drawn, a pixel shaded and not drawn)
+    CHECK(851, std::size(kAlpha) == 12 && twins == 3 && fates[0] >= 1 && fates[1] >= 2 && fates[2] >= 3 && drawn_unshaded == 1 && shaded_undrawn == 1);
+    uint32_t lines = 0, shadow = 0, power_zero = 0, shaded = 0, fogged = 0, glints = 0, near_lines = 0;
+    apart = 0;
+    for (const Pixel& p : kPixel) {
+      if (p.word & capture::kWaterB137) {                                      // the shadow factor: such a draw gives no record; the mirror has no c139
+        ++shadow;
+        continue;
+      }
+      ClayFogConstants fog{};
+      const ClayWaterConstants c = Constants(p, &fog);
+      const WaterPixelIn in = Input(p);
+      const WaterPixelValues got = WaterPixelCore(in, c, fog);
+      ++lines;
+      CHECK(851, uint32_t(got.fate) == p.fate && Same(got.alpha, p.alpha));
+      // The one point the guards give up (the header's contract): a power of exactly 0 on a cosine of 0, where the
+      // console's product makes the glint the sun's whole colour and the mirror, as the HLSL, 0. No record has it.
+      const bool zero_power = p.reg[capture::kWatP138][0] == 0u && p.fate == 2;
+      if (zero_power) {
+        ++power_zero;
+        CHECK(851, got.sun[0] == 0.0f && got.sun[1] == 0.0f && got.sun[2] == 0.0f && F(p.sun[0]) > 0.1f && F(p.sun[1]) > 0.1f);
+      } else {
+        for (int i = 0; i < 3; ++i) apart += !Same(got.colour[i], p.colour[i]) + !Same(got.sun[i], p.sun[i]);
+      }
+      for (int i = 0; i < 2; ++i) apart += !Same(got.lookup[i], p.at13[i]) + !Same(got.lookup_near[i], p.at14[i]);
+      for (int i = 0; i < 3; ++i) apart += !Same(got.normal[i], p.normal[i]);
+      apart += !Same(got.fresnel, p.fresnel) + !Same(got.distance, p.distance) + !Same(got.fog_a, p.fog_at[0]) + !Same(got.fog_s, p.fog_at[1]);
+      shaded += got.fate == WaterFate::kShaded;
+      fogged += got.fogged;
+      glints += got.sun[0] > 1e-3f;
+      near_lines += got.fate == WaterFate::kShaded && (in.slot14[0] != 0.0f);
+      // what the program writes is the colour clamped, and the pixel is kept by the state's test
+      float rgb[3], alpha = 0.0f;
+      bool kept = false;
+      WaterPixelMirror(in, c, fog, rgb, &alpha, &kept);
+      CHECK(851, alpha == got.alpha && kept == (got.fate != WaterFate::kKilled && got.alpha > c.alpha_ref));
+      for (int i = 0; i < 3; ++i) CHECK(851, rgb[i] == (got.colour[i] > 0.0f ? std::min(got.colour[i], kPostSceneMax) : 0.0f));
+    }
+    std::cout << "water pins: " << std::size(kVertex) << " vertex, " << std::size(kAlpha) << " alpha, " << lines << " pixel lines (" << shadow
+              << " left out: bool b137), " << std::size(kView) << " views, " << std::size(kDead) << " dead; values not bit-equal to the pin: " << apart
+              << ", the furthest " << g_worst_ulps << " units in the last place\n";
+    // (the lines reach what they are for: shaded pixels with and without fog, a glint, the near branch with a picture at slot 14)
+    std::cout << "water pixel lines: shaded " << shaded << ", fogged " << fogged << ", with a glint " << glints << ", with a picture at slot 14 " << near_lines << "\n";
+    CHECK(851, std::size(kPixel) == 20 && lines == 19 && shadow == 1 && power_zero == 1 && shaded == 17 && fogged == 14 && glints == 3 && near_lines == 3);
+    // (the registers no captured row tells apart are told apart by a made line: a fog partly applied, c28.xy other
+    // than (1, 1), and a slot-13 distortion unlike slot 14's, c129.xy unlike c130.xy; and one line stands just past
+    // the fog's start, where the blend from the near colour to the in-scatter table is not yet 1)
+    uint32_t part_fog = 0, distorted = 0, fog_edge = 0;
+    for (const Pixel& p : kPixel) {
+      const float past = F(p.distance) - F(p.reg[capture::kWatP67][0]);
+      fog_edge += p.fate == 2 && p.fog_at[1] != 0u && past * F(p.reg[capture::kWatP67][2]) < 1.0f;
+      part_fog += F(p.reg[capture::kWatP28][0]) != 1.0f && F(p.reg[capture::kWatP28][1]) != 1.0f && p.fate == 2 && p.fog_at[1] != 0u;
+      distorted += (p.reg[capture::kWatP129][0] != p.reg[capture::kWatP130][0] || p.reg[capture::kWatP129][1] != p.reg[capture::kWatP130][1]) && p.fate == 2;
+    }
+    CHECK(851, part_fog == 1 && distorted == 1 && fog_edge == 1);
+    CHECK(851, apart == 0);                                                    // bit for bit, under this compiler; the bound otherwise is 4 units
+    CHECK(851, g_worst_ulps <= 4);
+  }
+  // 852: the Water line and the second frame block
+  {
+    ClayStats st;
+    CHECK(852, FormatWaterText(st) == "Water: off");
+    st.water = ClayWater::kDrawn;
+    st.water_seen = st.water_drawn = st.water_left_out = 12;
+    st.water_targets = 4;
+    CHECK(852, FormatWaterText(st) == "Water: drawn 12 of 12, targets 4, opaque left out 12 | not drawn {} | water-record {}");
+    // (off is the verdict's word, not a count's: a frame with the switch on and no water in sight is not "off")
+    ClayStats none;
+    none.water = ClayWater::kNoRecords;
+    none.water_frames[size_t(ClayWater::kNoRecords)] = 7;
+    CHECK(852, FormatWaterText(none) == "Water: drawn 0 of 0, targets 0, opaque left out 0 | not drawn {no-records: 7 frames} | water-record {}");
+    st.water = ClayWater::kReflection;
+    st.water_drawn = st.water_left_out = st.water_targets = 0;
+    st.water_frames[size_t(ClayWater::kDrawn)] = 500;                          // (drawn and off frames are not "not drawn")
+    st.water_frames[size_t(ClayWater::kOff)] = 9;
+    st.water_frames[size_t(ClayWater::kReflection)] = 3;
+    st.water_frames[size_t(ClayWater::kOrder)] = 1;
+    st.water_capture[size_t(capture::WaterReason::kRegister)] = 1;
+    st.water_capture[size_t(capture::WaterReason::kFog)] = 24;
+    CHECK(852, FormatWaterText(st) ==
+                   "Water: drawn 0 of 12, targets 0, opaque left out 0 | not drawn {reflection: 3 frames, order: 1 frames} | water-record {register: 1, fog: 24}");
+    ClayFrameConstants frame{};
+    uint8_t bytes[sizeof(frame)];
+    for (size_t i = 0; i < sizeof(frame); ++i) bytes[i] = uint8_t(37 * i + 11);
+    std::memcpy(&frame, bytes, sizeof(frame));
+    frame.exposure = 8.58f;
+    frame.mask_du = 1.0f / 1120.0f;
+    frame.mask_dv = 1.0f / 720.0f;
+    ClayFrameConstants block = WaterFrameBlock(frame);
+    CHECK(852, block.exposure == 1.0f && block.mask_du == 1.0f / 256.0f && block.mask_dv == 1.0f / 256.0f);
+    block.exposure = frame.exposure;
+    block.mask_du = frame.mask_du;
+    block.mask_dv = frame.mask_dv;
+    CHECK(852, std::memcmp(&block, &frame, sizeof(frame)) == 0);               // every other field the frame's, bit for bit
+  }
+  // 853: the draw record a water record names; the scale's rule
+  {
+    capture::DrawRecord draws[5];
+    const uint32_t seq[5] = {2, 3, 700, 1628, 1629};
+    for (int i = 0; i < 5; ++i) draws[i].seq = seq[i];
+    CHECK(853, WaterDrawIndex(draws, 5, 2) == 0 && WaterDrawIndex(draws, 5, 700) == 2 && WaterDrawIndex(draws, 5, 1628) == 3 && WaterDrawIndex(draws, 5, 1629) == 4);
+    CHECK(853, WaterDrawIndex(draws, 5, 0) == ~size_t(0) && WaterDrawIndex(draws, 5, 4) == ~size_t(0) && WaterDrawIndex(draws, 5, 1630) == ~size_t(0) &&
+                   WaterDrawIndex(draws, 0, 2) == ~size_t(0) && WaterDrawIndex(nullptr, 5, 2) == ~size_t(0) && WaterDrawIndex(draws, 4, 1629) == ~size_t(0));
+    CHECK(853, WaterScaleMatches(8.58f, 8.58f) && WaterScaleMatches(8.58f, 8.585f) && !WaterScaleMatches(8.58f, 8.60f) && !WaterScaleMatches(8.58f, 1.0f) &&
+                   WaterScaleMatches(0.5f, 0.5005f) && !WaterScaleMatches(0.5f, 0.502f) && !WaterScaleMatches(kNan, 8.58f) && !WaterScaleMatches(8.58f, kNan) &&
+                   !WaterScaleMatches(0.0f, 0.0f) && !WaterScaleMatches(70.0f, 70.0f));
+  }
+  // 854 (phase 13c): view k fills target k, the k-th smallest base; any other number of views: none
+  {
+    WaterTargetPlan plan;
+    plan.ok = true;
+    plan.count = 4;
+    uint8_t of[kMaxReflectionViews];
+    CHECK(854, PlanWaterViews(4, plan, of) && of[0] == 0 && of[1] == 1 && of[2] == 2 && of[3] == 3 && of[4] == kNoWaterTarget && of[7] == kNoWaterTarget);
+    CHECK(854, !PlanWaterViews(3, plan, of) && of[0] == kNoWaterTarget && of[2] == kNoWaterTarget);    // fewer views than targets
+    CHECK(854, !PlanWaterViews(5, plan, of) && of[0] == kNoWaterTarget && of[4] == kNoWaterTarget);    // more
+    CHECK(854, !PlanWaterViews(0, plan, of) && !PlanWaterViews(4, plan, nullptr));
+    plan.count = 2;
+    CHECK(854, PlanWaterViews(2, plan, of) && of[0] == 0 && of[1] == 1 && of[2] == kNoWaterTarget);
+    plan.ok = false;
+    CHECK(854, !PlanWaterViews(2, plan, of) && of[0] == kNoWaterTarget);
+    plan.ok = true;
+    plan.count = 0;
+    CHECK(854, !PlanWaterViews(0, plan, of));
+    static_assert(kMaxReflectionViews == 8 && kMaxWaterTargets <= kMaxReflectionViews);
+  }
+  // 855 (phase 13c): the cull is the view record's own word, and why
+  {
+    const uint32_t kMain = 0x00218002u, kViewWord = 0x00218006u;               // 358 of 358 captured view rows; the main scene's far terrain
+    const WaterViewCull main_cull = ReflectionViewCull(kMain), view_cull = ReflectionViewCull(kViewWord);
+    CHECK(855, main_cull.valid && main_cull.cull == capture::Cull::kBack && !main_cull.front_cw && view_cull.valid &&
+                   view_cull.cull == capture::Cull::kBack && view_cull.front_cw);
+    CHECK(855, !ReflectionViewCull(0x00218003u).valid && ReflectionViewCull(0x00218000u).cull == capture::Cull::kNone &&
+                   ReflectionViewCull(0x00218001u).cull == capture::Cull::kFront);
+    // (the same fields DecodeRenderState gives the pipeline's key)
+    capture::StateWords words{};
+    words.read = true;
+    words.su_sc_mode = kViewWord;
+    const capture::RenderState decoded = capture::DecodeRenderState(words);
+    CHECK(855, decoded.valid && decoded.cull == view_cull.cull && decoded.front_cw == view_cull.front_cw);
+    CHECK(855, WaterTriangleDrawn(view_cull, true) && !WaterTriangleDrawn(view_cull, false) && !WaterTriangleDrawn(main_cull, true) &&
+                   WaterTriangleDrawn(main_cull, false) && WaterTriangleDrawn(ReflectionViewCull(0), true) && WaterTriangleDrawn(ReflectionViewCull(0), false) &&
+                   !WaterTriangleDrawn(WaterViewCull{}, true) && WaterTriangleDrawn(ReflectionViewCull(1), true) != WaterTriangleDrawn(ReflectionViewCull(2), true));
+    const View& pin = kView[0];                                                // the bridge: capture 155547, whose first water row's eye is c19 below
+    float m[4][4], mirrored[4][4];
+    for (int i = 0; i < 16; ++i) m[i / 4][i % 4] = F(pin.m[i]);
+    const float h = F(pin.h);
+    CHECK(855, WaterViewRows(m, F(pin.c31[0]), F(pin.c31[1]), h, mirrored));
+    CHECK(855, ViewHandedness(m) != 0 && ViewHandedness(mirrored) == -ViewHandedness(m));
+    {
+      // rows 0, 1 and 3 (the depth row is not asked): x right, y up, w along z is one hand; w against z the other
+      float rows[4][4] = {{1.0f, 0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f, 0.0f}, {7.0f, -3.0f, 0.5f, 2.0f}, {0.0f, 0.0f, 1.0f, 0.0f}};
+      const int hand = ViewHandedness(rows);
+      rows[2][0] = -7.0f; rows[2][2] = -0.5f;
+      CHECK(855, hand == 1 && ViewHandedness(rows) == hand);
+      rows[3][2] = -1.0f;
+      CHECK(855, ViewHandedness(rows) == -hand);
+      rows[3][2] = 0.0f;
+      CHECK(855, ViewHandedness(rows) == 0 && ViewHandedness(nullptr) == 0);
+      rows[3][2] = kNan;
+      CHECK(855, ViewHandedness(rows) == 0);
+    }
+    CHECK(855, WaterViewCullConsistent(kMain, m, kViewWord, mirrored) && !WaterViewCullConsistent(kMain, m, kMain, mirrored) &&
+                   !WaterViewCullConsistent(kMain, m, kViewWord, m) && WaterViewCullConsistent(kMain, m, kMain, m) &&
+                   !WaterViewCullConsistent(kMain, m, 0x00218005u, mirrored) && !WaterViewCullConsistent(0x00218003u, m, kViewWord, mirrored) &&
+                   !WaterViewCullConsistent(kMain, nullptr, kViewWord, mirrored));
+    // In the world: a level triangle of ground, counter-clockwise seen from above, shows an eye its upper side iff
+    // the eye is above it (water_replay.facing). The main scene's word draws what the main eye sees from above:
+    // that fixes this test's screen convention. Then, under the mirrored camera, the VIEW's word draws exactly the
+    // side the mirrored eye faces, and the main scene's word the other one.
+    const Pixel& row = kPixel[0];
+    const double eye[3] = {double(F(row.reg[capture::kWatP19][0])), double(F(row.reg[capture::kWatP19][1])), double(F(row.reg[capture::kWatP19][2]))};
+    const double mirrored_eye_z = 2.0 * double(h) - eye[2];
+    auto clockwise = [](const float rows[4][4], const double tri[3][3]) {
+      double s[3][2];
+      for (int k = 0; k < 3; ++k) {
+        double clip[4];
+        for (int i = 0; i < 4; ++i) clip[i] = double(rows[i][0]) * tri[k][0] + double(rows[i][1]) * tri[k][1] + double(rows[i][2]) * tri[k][2] + double(rows[i][3]);
+        s[k][0] = clip[0] / clip[3];
+        s[k][1] = clip[1] / clip[3];
+      }
+      return (s[1][0] - s[0][0]) * (s[2][1] - s[0][1]) - (s[1][1] - s[0][1]) * (s[2][0] - s[0][0]) < 0.0;
+    };
+    const double px = double(F(row.P[0])), py = double(F(row.P[1]));
+    uint32_t sides[2] = {};
+    for (const double z : {mirrored_eye_z - 4.0, mirrored_eye_z + 4.0}) {      // ground the mirrored eye sees from above, and from below
+      const double tri[3][3] = {{px, py, z}, {px + 2.0, py, z}, {px, py + 2.0, z}};
+      const double image[3][3] = {{px, py, 2.0 * double(h) - z}, {px + 2.0, py, 2.0 * double(h) - z}, {px, py + 2.0, 2.0 * double(h) - z}};
+      const bool faces_main = eye[2] > z, faces_mirrored = mirrored_eye_z > z;
+      // (the triangle and its mirror image are in front of both cameras: their w is above 0)
+      for (const float (*rows)[4] : {m, mirrored}) {
+        for (int k = 0; k < 3; ++k) CHECK(855, double(rows[3][0]) * tri[k][0] + double(rows[3][1]) * tri[k][1] + double(rows[3][2]) * tri[k][2] + double(rows[3][3]) > 1.0);
+      }
+      const bool flip = WaterTriangleDrawn(main_cull, clockwise(m, tri)) != faces_main;            // this test's screen convention
+      CHECK(855, WaterTriangleDrawn(view_cull, clockwise(mirrored, tri) != flip) == faces_mirrored);
+      CHECK(855, WaterTriangleDrawn(main_cull, clockwise(mirrored, tri) != flip) != faces_mirrored);   // the main scene's word: the wrong side
+      // (and the mirrored camera shows the triangle where the main one shows its image, the winding turned)
+      CHECK(855, clockwise(mirrored, tri) == clockwise(m, image));
+      ++sides[faces_mirrored ? 1 : 0];
+    }
+    CHECK(855, sides[0] == 1 && sides[1] == 1 && eye[2] > mirrored_eye_z + 4.0);
+  }
+  // 856 (phase 13c): the clip at the water's plane; and the mirrored sky's clip at the horizon (plan Task 11)
+  {
+    CHECK(856, WaterClipDistance(20.2f, 20.1024f) > 0.0f && WaterClipDistance(20.1024f, 20.1024f) == 0.0f && WaterClipDistance(20.0f, 20.1024f) < 0.0f &&
+                   !(WaterClipDistance(kNan, 20.1024f) >= 0.0f));
+    // the horizon's row in a target, from the derived camera alone: where the ray's third component is 0 down the
+    // picture's middle column. The game's own pictures begin at rows 100 to 103 at the bridge and 89 to 91 at the
+    // third spot (out/native-evidence/water/t6_sky_*.txt: derived 101.3 and 89.2).
+    const double want[2] = {101.3, 89.2};
+    for (int v = 0; v < 2; ++v) {
+      const View& pin = kView[v];
+      float m[4][4], mirrored[4][4], basis[3][3];
+      for (int i = 0; i < 16; ++i) m[i / 4][i % 4] = F(pin.m[i]);
+      CHECK(856, WaterViewRows(m, F(pin.c31[0]), F(pin.c31[1]), F(pin.h), mirrored) && SkyRayBasis(mirrored, basis));
+      const double y0 = -double(basis[0][2]) / double(basis[2][2]);
+      const double row = (1.0 - y0) * 0.5 * double(kWaterTargetSize);
+      std::cout << "water target " << v << ": the horizon at row " << row << " (derived by the replay: " << want[v] << ")\n";
+      CHECK(856, std::fabs(row - want[v]) <= 0.5);
+      // above the horizon's row (smaller rows) the mirrored view looks below the water: clipped; below it: the sky
+      CHECK(856, WaterSkyClipDistance(basis, 0.0f, float(y0 + 0.05)) < 0.0f && WaterSkyClipDistance(basis, 0.0f, float(y0 - 0.05)) > 0.0f);
+      CHECK(856, WaterSkyClipDistance(basis, 0.0f, 0.0f) == basis[0][2] && WaterSkyClipDistance(basis, 1.0f, 0.0f) == basis[0][2] + basis[1][2]);
+    }
+  }
+  // 857 (phase 13c): the blur: seven equal taps about the pixel's INTEGRAL position
+  {
+    float reg[kWaterBlurTaps][4];
+    for (uint32_t k = 0; k < kWaterBlurTaps; ++k) {
+      reg[k][0] = kWaterBlurTexels[k][0] / 256.0f;
+      reg[k][1] = kWaterBlurTexels[k][1] / 256.0f;
+      reg[k][2] = kNan;                                                        // (z and w of the row's registers: not read, not carried)
+      reg[k][3] = 1e29f;
+    }
+    WaterBlurConstants c{};
+    CHECK(857, MakeWaterBlurConstants(reg, kWaterBlurWeight, &c) && c.weight == kWaterBlurWeight && c.inv_size == 1.0f / 256.0f && c.offset[1][0] == 2.0f / 256.0f &&
+                   c.offset[3][2] == 0.0f && c.offset[3][3] == 0.0f && c.pad[0] == 0.0f);
+    static_assert(sizeof(WaterBlurConstants) == 128 && kWaterBlurTaps == 7);
+    CHECK(857, B(kWaterBlurWeight) == B(1.0f / 7.0f));
+    // the hexagon: six taps at radius 2 texels about the centre
+    for (uint32_t k = 1; k < kWaterBlurTaps; ++k) {
+      CHECK(857, std::fabs(std::hypot(kWaterBlurTexels[k][0], kWaterBlurTexels[k][1]) - 2.0f) <= 1e-6f);
+    }
+    CHECK(857, kWaterBlurTexels[0][0] == 0.0f && kWaterBlurTexels[0][1] == 0.0f);
+    float uv[2];
+    WaterBlurCoord(10.5f, 20.5f, c, uv);                                       // SV_Position of pixel (10, 20)
+    CHECK(857, uv[0] == 10.0f / 256.0f && uv[1] == 20.0f / 256.0f);
+    // a picture that is linear in its coordinate: the seven taps' mean is the value at the centre they stand about
+    uint32_t calls = 0;
+    float first[2] = {};
+    auto linear = [&](float u, float v, float rgb[3]) {
+      if (calls++ == 0) { first[0] = u; first[1] = v; }
+      rgb[0] = u; rgb[1] = v; rgb[2] = u + 2.0f * v;
+    };
+    float out[4] = {9.0f, 9.0f, 9.0f, 9.0f};
+    WaterBlurMirror(10.5f, 20.5f, c, linear, out);
+    CHECK(857, calls == 7 && out[3] == 0.0f);
+    CHECK(857, std::fabs(out[0] - 10.0f / 256.0f) <= 1e-6f && std::fabs(out[1] - 20.0f / 256.0f) <= 1e-6f && std::fabs(out[2] - 50.0f / 256.0f) <= 1e-6f);
+    CHECK(857, std::fabs(out[0] - 10.5f / 256.0f) > 1e-3f);                    // (the texel's centre would be half a texel off)
+    CHECK(857, first[0] == uv[0] + c.offset[1][0] && first[1] == uv[1] + c.offset[1][1]);   // the microcode's order: c117 first
+    // a tap that is no number counts as 0; the weight is the row's
+    calls = 0;
+    auto holed = [&](float, float, float rgb[3]) {
+      const bool hole = calls++ == 3;
+      rgb[0] = hole ? kNan : 0.7f; rgb[1] = hole ? std::numeric_limits<float>::infinity() : 0.7f; rgb[2] = 0.7f;
+    };
+    WaterBlurMirror(0.5f, 0.5f, c, holed, out);
+    CHECK(857, std::fabs(out[0] - 0.6f) <= 1e-6f && std::fabs(out[1] - 0.6f) <= 1e-6f && std::fabs(out[2] - 0.7f) <= 1e-6f);
+    WaterBlurConstants half = c;
+    half.weight = 0.5f;
+    calls = 0;
+    WaterBlurMirror(10.5f, 20.5f, half, linear, out);
+    CHECK(857, std::fabs(out[0] - 3.5f * 10.0f / 256.0f) <= 1e-6f);
+    const WaterBlurConstants same = c;
+    float bad[kWaterBlurTaps][4];
+    std::memcpy(bad, reg, sizeof(bad));
+    bad[4][1] = kNan;
+    CHECK(857, !MakeWaterBlurConstants(bad, kWaterBlurWeight, &c) && std::memcmp(&c, &same, sizeof(c)) == 0);
+    bad[4][1] = 1.5f;
+    CHECK(857, !MakeWaterBlurConstants(bad, kWaterBlurWeight, &c) && !MakeWaterBlurConstants(reg, 0.0f, &c) && !MakeWaterBlurConstants(reg, 1.5f, &c) &&
+                   !MakeWaterBlurConstants(reg, kNan, &c) && !MakeWaterBlurConstants(nullptr, kWaterBlurWeight, &c) && !MakeWaterBlurConstants(reg, kWaterBlurWeight, nullptr) &&
+                   std::memcmp(&c, &same, sizeof(c)) == 0);
+  }
+}
+
 // 720-739: native wind (foliage sub-project, plan Task 10; clay_logic.h, "Native wind").
 namespace wind_pins {
 struct Plant {
@@ -12472,6 +13264,7 @@ int main() {
   }
   std::thread(SunTreeTests).join();
   ImpostorTests();
+  WaterTests();
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "

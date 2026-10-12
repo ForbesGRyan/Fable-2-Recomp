@@ -495,6 +495,17 @@ inline void CountClaySunFrame(ClaySun s, ClaySunFrames& n) {
   ++n.by[size_t(s)];
 }
 
+// The water's verdict for a frame ("Native water" below; frame-map section 20; spec Design 5): kDrawn, or the first
+// reason in this order (DecideClayWater). Declared here because ClayStats carries it.
+enum class ClayWater : uint8_t { kDrawn, kOff, kNoRecords, kLight, kOpaqueLive, kPair, kPlane, kView, kReflection, kTexture,
+                                 kOrder, kPipeline, kSlot, kScale, kCount };
+inline const char* ClayWaterName(ClayWater w) {
+  static constexpr const char* kNames[] = {"drawn", "off", "no-records", "light", "opaque-live", "pair", "plane", "view", "reflection",
+                                           "texture", "order", "pipeline", "slot", "scale"};
+  static_assert(sizeof(kNames) / sizeof(kNames[0]) == size_t(ClayWater::kCount));
+  return w < ClayWater::kCount ? kNames[size_t(w)] : "?";
+}
+
 struct ClayStats {
   uint32_t drawn = 0, skipped_bad_index = 0, uploads = 0, hits = 0;
   uint64_t resident_bytes = 0;
@@ -624,6 +635,18 @@ struct ClayStats {
   // (the CPU time of reading, hashing, decoding and staging them this frame, for the log)
   double impostor_picture_ms = 0.0;
   uint32_t impostor_capture[size_t(capture::ImpostorReason::kCount)] = {};
+  // The water as drawn ("Native water" below; the Water line). water: the frame's verdict (kOff: the switch off,
+  // or a scene captured without it; every count is then 0). water_seen: the game's surface draws in the frame
+  // (FrameScene::water_seen[0]); water_drawn: the surface records the step drew; water_targets: the reflection
+  // targets it drew them with; water_left_out: the opaque twins left out of the pre-pass and the colour pass
+  // (only in a drawn frame); water_frames: the frames since the start by verdict; water_capture: the draws that
+  // gave no record, by the capture's reason (index: capture::WaterReason; FrameScene::water_refused); water_ms:
+  // the step's own CPU time this frame, for the log.
+  ClayWater water = ClayWater::kOff;
+  uint32_t water_seen = 0, water_drawn = 0, water_targets = 0, water_left_out = 0;
+  uint32_t water_frames[size_t(ClayWater::kCount)] = {};
+  uint32_t water_capture[size_t(capture::WaterReason::kCount)] = {};
+  double water_ms = 0.0;
   uint32_t light_rotation[size_t(RotationKind::kCount)] = {};
   capture::ShaderTally<32> light_rotation_by_vs;
   // The light as drawn ("Native light" below; the Light line). light_switch:
@@ -5562,6 +5585,9 @@ struct ColourOrder {
   // Where the impostor step is drawn: before the prepared record at this index (PlanImpostorPlace; at or beyond
   // the count: after the last); ~size_t(0): the frame has no impostor step.
   size_t impostors_at = ~size_t(0);
+  // Where the water step is drawn: before the prepared record at this index (PlanWaterPlace; at or beyond the
+  // count: after the last); ~size_t(0): the frame's water is not drawn.
+  size_t water_at = ~size_t(0);
 };
 // What is due right before the prepared record at `index`, whose place in FrameScene::draws is `record`, in this
 // order: the tail (with the sky step first when it is due at the same record: `sky_first`), the layer's depth,
@@ -5569,9 +5595,15 @@ struct ColourOrder {
 // `depth_taken`: the layer's depth was taken at an earlier record.
 // `impostors`: the impostor step, due first of an index's steps (it is opaque and writes depth: PlanImpostorPlace
 // puts it at or before the sky step, the tail and the layer's depth).
+// `water`: the water step, due LAST of an index's steps: after the tail and after the sky step (the game draws the
+// sky, the moon and the clouds before the water; the step blends and writes depth). `depth_after_water`: the
+// layer's depth and the water are due at the same index; the loop then takes the depth AFTER the water (and so
+// after the sky step, which writes no depth), not before the sky as in every other frame: the game's layer sees
+// the lake's level, and with the dead draw left out the surface is what holds it in the native depth.
 struct ColourDue {
   bool sky_first = false, tail = false, layer_depth = false, sky = false;
   bool impostors = false;
+  bool water = false, depth_after_water = false;
 };
 constexpr ColourDue ColourStepsDue(const ColourOrder& order, size_t index, size_t record, bool sky_done, bool depth_taken) {
   ColourDue due;
@@ -5581,6 +5613,8 @@ constexpr ColourDue ColourStepsDue(const ColourOrder& order, size_t index, size_
   due.layer_depth = order.depth_early && !depth_taken && SunDepthBefore(order.depth, record);
   due.sky = sky_here && !due.sky_first;
   due.impostors = order.impostors_at == index;
+  due.water = order.water_at == index;
+  due.depth_after_water = due.water && due.layer_depth;
   return due;
 }
 // After the last of `count` prepared records: the sky step of a frame without a blended record, then a tail
@@ -5590,6 +5624,8 @@ constexpr ColourDue ColourStepsAfter(const ColourOrder& order, size_t count) {
   due.sky = order.sky_drawn && order.sky_at >= count;
   due.tail = order.tail_at != kNoCoverageTail && order.tail_at >= count;
   due.impostors = order.impostors_at != ~size_t(0) && order.impostors_at >= count;
+  // (after the sky and the tail)
+  due.water = order.water_at != ~size_t(0) && order.water_at >= count;
   return due;
 }
 
@@ -5814,12 +5850,16 @@ constexpr uint64_t ClayConstantBufferBytes(uint64_t small_slots, uint64_t object
 // `impostor_slots`: the small slots of the impostor step's constants, after the quads' (kClayImpostorFrameSlots in a
 // frame with the impostors' switch not off: record i's at impostor0 + kClayImpostorSlots * i; 0, the default, in
 // every other frame, whose plan is then the one of before the impostors, slot for slot).
+// `water_slots`: the small slots of the water step, after the impostors' (kClayWaterStepSlots in a frame whose
+// water's scene verdict is drawn: "Native water" below; 0, the default, in every other frame, whose plan is then
+// the one of before the water, slot for slot).
 inline constexpr uint32_t kClayFrameTerrainSlot0 = kClayFrameSlots;
 struct ClayFrameSlotPlan {
   uint32_t plant0 = 0, mask = 0, sky = 0, post = 0, quad0 = 0, object0 = 0;
   uint32_t impostor0 = 0;
+  uint32_t water0 = 0;
 };
-constexpr ClayFrameSlotPlan PlanClayFrameSlots(uint32_t terrain_drawn, uint32_t plants, uint32_t impostor_slots = 0) {
+constexpr ClayFrameSlotPlan PlanClayFrameSlots(uint32_t terrain_drawn, uint32_t plants, uint32_t impostor_slots = 0, uint32_t water_slots = 0) {
   ClayFrameSlotPlan p;
   p.plant0 = kClayFrameTerrainSlot0 + terrain_drawn;
   p.mask = p.plant0 + plants;
@@ -5827,14 +5867,15 @@ constexpr ClayFrameSlotPlan PlanClayFrameSlots(uint32_t terrain_drawn, uint32_t 
   p.post = p.sky + 1;
   p.quad0 = p.post + kClayPostSlots;
   p.impostor0 = p.quad0 + kClayQuadFrameSlots;
-  p.object0 = p.impostor0 + impostor_slots;
+  p.water0 = p.impostor0 + impostor_slots;
+  p.object0 = p.water0 + water_slots;
   return p;
 }
 // The small slots the buffer is sized with, before it is known which terrain records are drawn with
 // their material: every terrain record counts, so the plan of any number of them drawn fits
 // (PlanClayFrameSlots(drawn, plants).object0 <= this for drawn <= terrain_records).
-constexpr uint64_t ClayFrameSmallSlots(uint64_t terrain_records, uint64_t plants, uint64_t impostor_slots = 0) {
-  return uint64_t(kClayFrameTerrainSlot0) + terrain_records + plants + 2 + kClayPostSlots + kClayQuadFrameSlots + impostor_slots;
+constexpr uint64_t ClayFrameSmallSlots(uint64_t terrain_records, uint64_t plants, uint64_t impostor_slots = 0, uint64_t water_slots = 0) {
+  return uint64_t(kClayFrameTerrainSlot0) + terrain_records + plants + 2 + kClayPostSlots + kClayQuadFrameSlots + impostor_slots + water_slots;
 }
 
 // ClayTerrainConstants::flags: the far colour is multiplied by sat(d2 * fade[0] + fade[1]) (the
@@ -7469,6 +7510,725 @@ constexpr uint64_t ImpostorStepForm(const ClayStats& st) {
   for (uint32_t n : st.impostor_skip) mix(n);
   for (uint32_t n : st.impostor_capture) mix(n);
   return h;
+}
+
+// --- Native water (frame-map section 20; sub-project 13; plan Task 10 fills this section) ---
+// The lake's surface: the game's blended draw BEAD / A17D by its own formulas, late in the frame over the real
+// lake bed, with the reflection taken from native 256 x 256 targets; the opaque twin F6D9, which draws nothing in
+// the game, left out in a frame whose water is drawn and only there. This section is the draw's rules and mirrors
+// (pure: no binding, target or shader text is in it). The formulas are light_formulas.water_vertex, water_alpha,
+// water_kept, water_pixel and its parts (docs/native-renderer/lighting-formulas.md, "Water"); the mirrors below
+// are pinned to their single-precision form by tests/native/water_pins.inc (tools/xdk_sigmatch/water_pins.py).
+// ClayWater, the frame's verdict, is declared before ClayStats (which carries it).
+
+// The dead draw (spec ruling 12): F6D9 kills every pixel, whatever the mask holds, when the saturate's argument is
+// positive at both ends of the mask: min(c141.x, c141.x - c141.y) >= 1e-6 with |c141.x|, |c141.y| <= 4
+// (light_formulas.water_opaque_dead). The difference and the comparisons are made in DOUBLE on the single inputs
+// (the difference of two singles of that size is exact in double), against the double 1e-6: the single nearest
+// 1e-6 is BELOW it (0x358637BD), so a single-precision margin would pass a c141 the reference refuses. False for a
+// value that is no number or infinite. c141.z and c141.w are not part of it. It holds for every mask in [0, 1],
+// which the record's fetch rule guarantees (render::WaterTextureFetch, ledger ruling 33).
+inline constexpr double kWaterDeadMargin = 1e-6;
+inline constexpr double kWaterDeadReach = 4.0;
+constexpr bool WaterOpaqueDead(const float c141[4]) {
+  if (!c141) return false;
+  const double x = double(c141[0]), y = double(c141[1]);
+  if (!(x >= -kWaterDeadReach && x <= kWaterDeadReach && y >= -kWaterDeadReach && y <= kWaterDeadReach)) return false;   // (false for no number)
+  const double end = x - y;
+  return (x < end ? x : end) >= kWaterDeadMargin;
+}
+
+// The mirrored camera (spec ruling 15): diag(c31x, c31y, 1, 1) * M * Mirror(h), with M the frame's view-projection
+// (rows . (p, 1)) and Mirror(h) the reflection in the plane z = h: a row (a, b, c, d) becomes
+// f * (a, b, -c, d + 2 h c), f the row's factor (c31x, c31y, 1, 1). Computed in double from the singles, each entry
+// rounded once (water_check.water_view_rows; the game's own view rows equal it within 1.4e-6 in 32 of 32 views).
+// False, `out` untouched, for a value that is no number, a factor outside (0, 4], a height beyond 1e6 or a result
+// that does not fit.
+inline bool WaterViewRows(const float view_proj[4][4], float c31x, float c31y, float h, float out[4][4]) {
+#pragma clang fp contract(off)
+  if (!view_proj || !out) return false;
+  if (!(c31x > 0.0f && c31x <= capture::kWaterViewFactorMax && c31y > 0.0f && c31y <= capture::kWaterViewFactorMax)) return false;
+  if (!(std::fabs(h) <= capture::kWaterPlaceMax)) return false;
+  float rows[4][4];
+  for (int i = 0; i < 4; ++i) {
+    const double f = i == 0 ? double(c31x) : i == 1 ? double(c31y) : 1.0;
+    const double a = double(view_proj[i][0]), b = double(view_proj[i][1]), c = double(view_proj[i][2]), d = double(view_proj[i][3]);
+    const double twice = 2.0 * double(h);
+    const double lifted = twice * c;
+    const double moved = d + lifted;
+    rows[i][0] = float(f * a);
+    rows[i][1] = float(f * b);
+    rows[i][2] = float(f * -c);
+    rows[i][3] = float(f * moved);
+    for (int j = 0; j < 4; ++j) {
+      if (!std::isfinite(rows[i][j])) return false;   // (also an entry that is no number)
+    }
+  }
+  std::memcpy(out, rows, sizeof(rows));
+  return true;
+}
+
+// A mesh's height from the box of its positions (GeometryCache: computed once a buffer): valid iff the box is
+// valid and hi[2] - lo[2] <= 1e-3 (which implies the spec's "every vertex within 1e-3 of the first"); h is lo[2].
+inline constexpr float kWaterFlatness = 1e-3f;
+struct WaterHeight {
+  bool valid = false;
+  float h = 0.0f;
+};
+constexpr WaterHeight WaterMeshHeight(const PositionBounds& b) {
+  if (!b.valid || !(b.hi[2] - b.lo[2] <= kWaterFlatness) || !(b.hi[2] >= b.lo[2])) return WaterHeight{};
+  return WaterHeight{true, b.lo[2]};
+}
+
+// The targets (spec ruling 16): one for each distinct slot-13 base of the frame's surface records, ascending, at
+// most kMaxWaterTargets. target_of[i]: record i's target. ok false with `why`: kPlane (a mesh that is not flat, or
+// two heights on one base more than kWaterFlatness apart), else kReflection (a fifth base; no records' array).
+// THE ORDER IS THE RULE OF PHASE 13C TOO: the game renders its k-th reflection view of a frame into the picture at
+// the k-th smallest slot-13 base (10 of 10 frames by the resolves' destinations, 32 of 32 views by the heights:
+// plan Task 15), so target k is the k-th view's (PlanWaterViews).
+inline constexpr uint32_t kMaxWaterTargets = 4, kWaterTargetSize = 256;
+struct WaterTargetPlan {
+  bool ok = false;
+  ClayWater why = ClayWater::kDrawn;
+  uint32_t count = 0, base[kMaxWaterTargets] = {};
+  float height[kMaxWaterTargets] = {};
+};
+constexpr uint32_t WaterPictureBase(const capture::WaterRecord& r) { return r.fetch[capture::kWatPicture][1] & 0xFFFFF000u; }
+inline WaterTargetPlan PlanWaterTargets(const capture::WaterRecord* const* surface, const WaterHeight* heights, size_t count, uint8_t* target_of) {
+  WaterTargetPlan plan;
+  plan.why = ClayWater::kReflection;
+  if (count == 0) {
+    plan.ok = true;
+    plan.why = ClayWater::kDrawn;
+    return plan;
+  }
+  if (!surface || !heights || !target_of || count > capture::kMaxWaterRecords) return plan;
+  bool flat = true, fits = true;
+  uint32_t n = 0, base[kMaxWaterTargets] = {};
+  float height[kMaxWaterTargets] = {};
+  for (size_t i = 0; i < count; ++i) {
+    if (!surface[i]) return plan;
+    if (!heights[i].valid) {
+      flat = false;
+      continue;
+    }
+    const uint32_t b = WaterPictureBase(*surface[i]);
+    uint32_t k = 0;
+    while (k < n && base[k] != b) ++k;
+    if (k == n) {
+      if (n == kMaxWaterTargets) {
+        fits = false;
+        continue;
+      }
+      base[n] = b;
+      height[n] = heights[i].h;
+      ++n;
+    } else if (!(std::fabs(heights[i].h - height[k]) <= kWaterFlatness)) {
+      flat = false;
+    }
+  }
+  if (!flat) {
+    plan.why = ClayWater::kPlane;
+    return plan;
+  }
+  if (!fits) return plan;
+  // ascending by base (at most four: an insertion sort)
+  for (uint32_t i = 1; i < n; ++i) {
+    for (uint32_t j = i; j > 0 && base[j] < base[j - 1]; --j) {
+      std::swap(base[j], base[j - 1]);
+      std::swap(height[j], height[j - 1]);
+    }
+  }
+  for (size_t i = 0; i < count; ++i) {
+    const uint32_t b = WaterPictureBase(*surface[i]);
+    uint32_t k = 0;
+    while (k < n && base[k] != b) ++k;
+    target_of[i] = uint8_t(k);
+  }
+  plan.ok = true;
+  plan.why = ClayWater::kDrawn;
+  plan.count = n;
+  for (uint32_t k = 0; k < n; ++k) {
+    plan.base[k] = base[k];
+    plan.height[k] = height[k];
+  }
+  return plan;
+}
+
+// The frame's verdict (spec Design 5): kDrawn, or the first reason in the enum's order.
+struct ClayWaterInputs {
+  bool on = false;                     // the switch now, in a scene captured with it
+  uint32_t surface = 0, opaque = 0;    // the scene's records by kind (0 and 0: the scene's block is empty)
+  bool light = false;                  // the frame is lit: the linear target's meaning
+  bool opaque_dead = true;             // WaterOpaqueDead of every opaque record's c141
+  bool planes = true;                  // PlanWaterTargets did not say kPlane
+  bool view = true;                    // every record's draw has the frame's one view-projection, row layout kDot
+  bool targets = true;                 // PlanWaterTargets did not say kReflection, and the frame's sky is drawn with its constants
+  bool objects_targets = true;         // the targets and the mirrored sky's objects exist
+  bool textures = true;                // every mask and the normal map resolved, every pair buffer made
+  bool order = true;                   // PlanWaterPlace: usable, and the surface records' places one run (WaterPlacesOneRun)
+  bool objects = true;                 // the surface step's layout, programs and pipelines exist
+  bool slots = true;                   // the frame's buffer exists and holds the step's slots
+  bool scale = true;                   // every record's c20.w is the frame's output scale within a thousandth
+};
+constexpr ClayWater DecideClayWater(const ClayWaterInputs& in) {
+  if (!in.on) return ClayWater::kOff;
+  if (in.surface == 0) return ClayWater::kNoRecords;
+  if (!in.light) return ClayWater::kLight;
+  if (!in.opaque_dead) return ClayWater::kOpaqueLive;
+  if (in.surface != in.opaque) return ClayWater::kPair;
+  if (!in.planes) return ClayWater::kPlane;
+  if (!in.view) return ClayWater::kView;
+  if (!in.targets || !in.objects_targets) return ClayWater::kReflection;
+  if (!in.textures) return ClayWater::kTexture;
+  if (!in.order) return ClayWater::kOrder;
+  if (!in.objects) return ClayWater::kPipeline;
+  if (!in.slots) return ClayWater::kSlot;
+  if (!in.scale) return ClayWater::kScale;
+  return ClayWater::kDrawn;
+}
+// Whether a record of `kind` is left out of the pre-pass and the colour pass (drawn by the water step, or not at
+// all): an opaque record ONLY with the verdict kDrawn (the dead draw is removed only together with the surface
+// that replaces it: spec ruling 11); a surface record always (today it is blend-unknown and not drawn).
+constexpr bool WaterLeavesOut(ClayWater verdict, capture::WaterKind kind) {
+  if (kind == capture::WaterKind::kSurface) return true;
+  return kind == capture::WaterKind::kOpaque && verdict == ClayWater::kDrawn;
+}
+// What the head of Render can say before the frame's buffer is sized (the scene's own rules: the switch, the
+// records, the light, the dead draw, the pairs, the scale): the verdict with every later input true. The step's
+// slots are reserved iff this is kDrawn; every other frame's slot plan is the one of before, slot for slot.
+constexpr ClayWater WaterSceneVerdict(const ClayWaterInputs& in) {
+  ClayWaterInputs scene;
+  scene.on = in.on;
+  scene.surface = in.surface;
+  scene.opaque = in.opaque;
+  scene.light = in.light;
+  scene.opaque_dead = in.opaque_dead;
+  scene.scale = in.scale;
+  return DecideClayWater(scene);
+}
+// The scale rule's tolerance (as the impostors' has it): a record's c20.w against the frame's output scale.
+inline constexpr float kWaterScaleTolerance = 1e-3f;
+constexpr bool WaterScaleMatches(float c20w, float out_scale) {
+  const float d = c20w - out_scale;
+  return capture::WaterScaleBounded(c20w) && capture::WaterScaleBounded(out_scale) &&
+         (d < 0.0f ? -d : d) <= kWaterScaleTolerance * (out_scale > 1.0f ? out_scale : 1.0f);
+}
+
+// The draw record a water record names: the index in `draws` (FrameScene::draws, which holds the frame's DRAWABLE
+// records in ascending DrawRecord::seq: a skipped draw has a number and no record) of the record whose seq is
+// `place`; ~size_t(0) when none has it. A binary search.
+constexpr size_t WaterDrawIndex(const capture::DrawRecord* draws, size_t count, uint32_t place) {
+  size_t lo = 0, hi = draws ? count : 0;
+  while (lo < hi) {
+    const size_t mid = lo + (hi - lo) / 2;
+    if (draws[mid].seq < place) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return draws && lo < count && draws[lo].seq == place ? lo : ~size_t(0);
+}
+
+// Where the step is drawn: before the prepared record at `at` (count: after the last), after the steps already due
+// at that index. `seqs`: the prepared records' DrawRecord::seq in the frame's order, the dead draws left out;
+// `place`: the smallest place of the frame's surface records. usable iff
+//   - the sky step (`sky_at`, with `sky_drawn`) lies at or before `at`: the game draws the sky, the moon and the
+//     clouds before the water, and a sky drawn after it would pass its depth test over the surface;
+//   - the early records' tail (`tail_at`; kNoCoverageTail: none) lies at or before `at`;
+//   - the sun layer's depth (`depth_at`: the index among the prepared records before which it is taken,
+//     CoverageDepthPlace; at or beyond `count`, or the default: not among them, or after the last) is NOT taken
+//     before `at`. With the dead draw left out, a layer's depth taken before the water step holds the lake's bed
+//     where the game's holds the surface's cube, and the beams would pass through the lake; in the captures the
+//     place stands after the water's rows (spec Design 8). At the same index the loop draws the water first
+//     (ColourDue::depth_after_water).
+// A frame in which any of the three fails is `order`, and today's.
+struct WaterPlace {
+  bool usable = false;
+  size_t at = 0;
+};
+constexpr WaterPlace PlanWaterPlace(const uint32_t* seqs, size_t count, uint32_t place, bool sky_drawn, size_t sky_at, size_t tail_at,
+                                    size_t depth_at = ~size_t(0)) {
+  WaterPlace w;
+  w.at = count;
+  for (size_t i = 0; seqs && i < count; ++i) {
+    if (seqs[i] >= place) {
+      w.at = i;
+      break;
+    }
+  }
+  w.usable = (!sky_drawn || sky_at <= w.at) && (tail_at == kNoCoverageTail || tail_at <= w.at) && depth_at >= w.at;
+  return w;
+}
+// Whether the frame's surface records lie in one run among the records the pass draws: no drawn record's seq lies
+// strictly between the smallest and the largest place (`first`, `last`). PlanWaterPlace gives ONE place; with a
+// drawn record between two runs the second run would be drawn before a record the game draws it after, and the
+// water blends and writes depth. Such a frame is `order`. (Twelve consecutive places in every captured frame.)
+constexpr bool WaterPlacesOneRun(const uint32_t* seqs, size_t count, uint32_t first, uint32_t last) {
+  return ImpostorPlacesOneRun(seqs, count, first, last);
+}
+
+// The record's constants (cbuffer Water of shaders::kClayWaterVs and kClayWaterPs, register b0 of the step's
+// layout; shaders::kClayWaterFields is its layout: plan Task 12). What the pixel program reads beyond them is the
+// frame's block at b2: the fog's tables and registers (c28, c66, c67, c68, held to the record's by the capture's
+// `fog` rule) and nothing else of the record's 24 registers: c20.w is `out_scale`, and c139 is read by no record.
+// Eighteen of the record's registers (the plan counted seventeen; its own list names these eighteen).
+inline constexpr uint32_t kClayWaterPsRegisters = 18;
+enum : uint32_t { kCwP0, kCwP19, kCwP31, kCwP116, kCwP117, kCwP126, kCwP127, kCwP128, kCwP129, kCwP130, kCwP131, kCwP136, kCwP137,
+                  kCwP138, kCwP140, kCwP141, kCwP142, kCwP143 };
+// Which of the record's registers each is (capture::kWatP...).
+inline constexpr uint8_t kClayWaterPsFrom[kClayWaterPsRegisters] = {
+    capture::kWatP0,   capture::kWatP19,  capture::kWatP31,  capture::kWatP116, capture::kWatP117, capture::kWatP126,
+    capture::kWatP127, capture::kWatP128, capture::kWatP129, capture::kWatP130, capture::kWatP131, capture::kWatP136,
+    capture::kWatP137, capture::kWatP138, capture::kWatP140, capture::kWatP141, capture::kWatP142, capture::kWatP143};
+struct ClayWaterConstants {
+  float rows[4][4];                     // the draw record's rows (layout kDot)
+  float vs[4][4];                       // c115..c118
+  float ps[kClayWaterPsRegisters][4];   // unread components as the game left them: the program names every register by component
+  float alpha_ref, out_scale;           // the draw's alpha reference (the state's, not c141.w); the frame's output scale
+  uint32_t sun_on, fog_on;              // bool b136; the frame's fog
+  uint32_t sampler_mask, sampler_normal, sampler_picture;   // static samplers (SamplerIndex of each fetch)
+  uint32_t swizzle;                     // the mask's channel in bits 0 to 2, the normal's x in 3 to 5, its y in 6 to 8 (0 to 3 a channel, 4: 0, 5: 1)
+};
+// 64 + 64 + 288 + 16 + 16 (recomputed by plan Task 10 from what is carried: the plan's 432 had 17 registers).
+static_assert(sizeof(ClayWaterConstants) == 448 && offsetof(ClayWaterConstants, vs) == 64 && offsetof(ClayWaterConstants, ps) == 128 &&
+              offsetof(ClayWaterConstants, alpha_ref) == 416 && offsetof(ClayWaterConstants, sun_on) == 424 &&
+              offsetof(ClayWaterConstants, sampler_mask) == 432 && offsetof(ClayWaterConstants, swizzle) == 444);
+inline constexpr uint32_t kClayWaterSlots = (sizeof(ClayWaterConstants) + kClayTerrainSlotBytes - 1) / kClayTerrainSlotBytes;   // 2
+// The step's small slots in the frame's constant buffer, taken only in a frame whose scene verdict is kDrawn
+// (PlanClayFrameSlots' and ClayFrameSmallSlots' `water_slots`): record i's constants at water0 + kClayWaterSlots *
+// i; target k's sky constants at water0 + kClayWaterSlots * kMaxWaterRecords + k; the second frame block
+// (WaterFrameBlock) at the next kClayFrameSlots slots.
+inline constexpr uint32_t kClayWaterStepSlots = kClayWaterSlots * capture::kMaxWaterRecords + kMaxWaterTargets + kClayFrameSlots;
+static_assert(kClayWaterSlots == 2 && kClayWaterStepSlots == 153);
+constexpr uint32_t ClayWaterRecordSlot(const ClayFrameSlotPlan& plan, uint32_t i) { return plan.water0 + kClayWaterSlots * i; }
+constexpr uint32_t ClayWaterTargetSlot(const ClayFrameSlotPlan& plan, uint32_t k) {
+  return plan.water0 + kClayWaterSlots * capture::kMaxWaterRecords + k;
+}
+constexpr uint32_t ClayWaterFrameSlot(const ClayFrameSlotPlan& plan) {
+  return plan.water0 + kClayWaterSlots * capture::kMaxWaterRecords + kMaxWaterTargets;
+}
+// A field of the swizzle word: 0 to 3 a channel of the texel, 4 the constant 0, 5 the constant 1.
+constexpr bool WaterSwizzleUsable(uint32_t swizzle) {
+  return swizzle < (1u << 9) && (swizzle & 7u) <= 5u && ((swizzle >> 3) & 7u) <= 5u && ((swizzle >> 6) & 7u) <= 5u;
+}
+// The constants of a surface record. False, `out` untouched, unless: the record is a valid surface record and
+// `draw` is the draw record it names (its seq the record's place) with the row layout kDot and rows that are
+// numbers within a matrix term's bound; the registers pass the capture's own rule again (capture::
+// WaterRegistersBounded: nothing reaches a shader on the strength of the capture's rule alone; so c128.x, c136.x
+// and c138.x are above 0 here, which the program's power relies on); the scale is in (0, 64] and the alpha
+// reference a number in [0, 1]; the samplers are static samplers (0 to 3) and the swizzle's fields 0 to 5.
+// Components no formula reads are carried bit for bit. `alpha_ref`: the draw's own (DrawRecord::state_words).
+inline bool MakeClayWaterConstants(const capture::WaterRecord& r, const capture::DrawRecord& draw, float alpha_ref, float out_scale,
+                                   bool fog_on, const uint32_t samplers[3], uint32_t swizzle, ClayWaterConstants* out) {
+  if (!out || !samplers || !capture::WaterRecordValid(r) || r.kind != uint32_t(capture::WaterKind::kSurface)) return false;
+  if (draw.seq != r.place || draw.layout != capture::TransformLayout::kDot) return false;
+  for (float v : draw.rows) {
+    if (!(std::fabs(v) <= capture::kWaterMatrixMax)) return false;   // (false for no number)
+  }
+  if (!capture::WaterRegistersBounded(r.vs, r.ps, r.pbool)) return false;
+  if (!capture::WaterScaleBounded(out_scale) || !(alpha_ref >= 0.0f && alpha_ref <= 1.0f)) return false;
+  if (samplers[0] > 3 || samplers[1] > 3 || samplers[2] > 3 || !WaterSwizzleUsable(swizzle)) return false;
+  ClayWaterConstants c{};
+  std::memcpy(c.rows, draw.rows, sizeof(c.rows));
+  std::memcpy(c.vs, r.vs, sizeof(c.vs));
+  for (uint32_t i = 0; i < kClayWaterPsRegisters; ++i) std::memcpy(c.ps[i], r.ps[kClayWaterPsFrom[i]], sizeof(c.ps[i]));
+  c.alpha_ref = alpha_ref;
+  c.out_scale = out_scale;
+  c.sun_on = (r.pbool & capture::kWaterB136) != 0 ? 1u : 0u;
+  c.fog_on = fog_on ? 1u : 0u;
+  c.sampler_mask = samplers[0];
+  c.sampler_normal = samplers[1];
+  c.sampler_picture = samplers[2];
+  c.swizzle = swizzle;
+  *out = c;
+  return true;
+}
+// The second frame block (spec Design 7): the frame's with the exposure 1 and 1 / the target's size, under which
+// the sky's own pixel program draws a target (the game's views are drawn at c20.w = 1). Every other field is the
+// frame's bit for bit.
+inline ClayFrameConstants WaterFrameBlock(const ClayFrameConstants& frame) {
+  ClayFrameConstants block = frame;
+  block.exposure = 1.0f;
+  block.mask_du = block.mask_dv = 1.0f / float(kWaterTargetSize);
+  return block;
+}
+
+// The mirrors' literals: the pixel shaders' own c254 and c255 (water_table.inc).
+namespace water_detail {
+constexpr uint32_t LiteralBits(uint32_t reg, uint32_t comp) {
+  for (const capture::WaterTable::Literal& l : capture::kWaterTable.literal) {
+    if (l.reg == reg) return l.bits[comp];
+  }
+  return 0xFFFFFFFFu;
+}
+}  // namespace water_detail
+inline constexpr float kWaterTwo = 2.0f, kWaterHalf = 0.5f, kWaterOne = 1.0f, kWaterMinusOne = -1.0f, kWaterMinusTwo = -2.0f;
+static_assert(water_detail::LiteralBits(254, 0) == 0u && water_detail::LiteralBits(254, 1) == 0x40000000u &&
+              water_detail::LiteralBits(255, 0) == 0x3F000000u && water_detail::LiteralBits(255, 1) == 0xBF800000u &&
+              water_detail::LiteralBits(255, 2) == 0x3F800000u && water_detail::LiteralBits(255, 3) == 0xC0000000u,
+              "the mirrors' literals are not the table's");
+
+// What becomes of a pixel of the surface (light_formulas.water_kept, kind "surface").
+enum class WaterFate : uint8_t { kKilled, kSkipped, kShaded };
+// Everything the pixel formula makes on its way (the pins hold each): what a shaded pixel has; zeros otherwise.
+struct WaterPixelValues {
+  WaterFate fate = WaterFate::kKilled;
+  float alpha = 0.0f;
+  float colour[3] = {};       // after the fog and the output scale, before the write's clamp
+  float lookup[2] = {};       // slot 13's coordinates
+  float lookup_near[2] = {};  // slot 14's
+  float normal[3] = {};
+  float fresnel = 0.0f, distance = 0.0f;
+  float sun[3] = {};
+  bool fogged = false;
+  float fog_a = 0.0f, fog_s = 0.0f;   // the in-scatter table's and the transmittance table's coordinates
+};
+// What the surface's pixel is given: q the pixel's integral position (the floor of SV_Position.xy), place and the
+// two scrolling coordinates from the vertex, a and b the normal map's two samples (x, y each), m the mask's
+// sample, picture the body's target at the lookup, slot14 that slot's texel (ZERO in the native draw: spec ruling 21),
+// scatter and transmit the frame's two fog tables at the pixel's coordinates.
+struct WaterPixelIn {
+  float q[2], place[3], a[2], b[2], m, picture[3];
+  float scatter[3], transmit[3];
+  float slot14[3] = {0.0f, 0.0f, 0.0f};
+};
+
+// WATER MIRRORS BEGIN (tests/test_water_literals.py reads the text between the two markers)
+// Single precision, in the reference's order of operations (light_formulas.water_*, single=True, term for term;
+// the HLSL's stand-in, tests/test_water_hlsl.py FIXTURE, is the same text). Contraction off: a fused multiply-add
+// is not the console's rounded product and rounded sum.
+// THE CONSOLE'S ZERO PRODUCT (a zero factor gives +0 whatever the other is) decides four points, and IEEE
+// arithmetic has no such rule (ledger ruling 34). It is WRITTEN OUT here as in the HLSL:
+//   - at the three reciprocal square roots (the normal, the view vector, the sun's second normal): a sum of squares
+//     of exactly 0 gives the factor 0, so the vector is 0 as the console's 0 * infinity is, not "no number";
+//   - at the power: a cosine of 0 gives 0, whatever the power. That is the console's value for every power above
+//     0; at a power of exactly 0 the console gives 1 and this text 0, and no record has a power of 0
+//     (capture::WaterRegistersBounded keeps c128.x, c136.x and c138.x above 0: MakeClayWaterConstants).
+// A register is read by component, and only the components a formula reads: an unread one may be no number.
+namespace water_detail {
+inline float Sat(float x) { return x != x ? 0.0f : (x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x)); }   // (no number gives 0)
+inline float Rsq(float x) { return x == 0.0f ? 0.0f : float(1.0 / std::sqrt(double(x))); }          // the guard: 0 of 0
+inline float Sqrt(float x) { return float(std::sqrt(double(x))); }
+}  // namespace water_detail
+
+// oPos = (c0 . (p, 1), ..., c3 . (p, 1)), a row's four products summed in the microcode's order (z, x, y, w):
+// light_formulas.water_vertex's "pos".
+inline void WaterPositionMirror(const float p[3], const ClayWaterConstants& c, float pos[4]) {
+#pragma clang fp contract(off)
+  for (int i = 0; i < 4; ++i) {
+    const float* row = c.rows[i];
+    pos[i] = (((0.0f + row[2] * p[2]) + row[0] * p[0]) + row[1] * p[1]) + row[3] * kWaterOne;
+  }
+}
+// o1: the two scrolling coordinates of the normal map (water_vertex's "coord").
+inline void WaterCoordsMirror(const float p[3], const ClayWaterConstants& c, float coord[4]) {
+#pragma clang fp contract(off)
+  const float* c115 = c.vs[capture::kWatV115];
+  const float* c116 = c.vs[capture::kWatV116];
+  const float* c117 = c.vs[capture::kWatV117];
+  const float* c118 = c.vs[capture::kWatV118];
+  coord[0] = p[0] * c117[0] + c115[0];
+  coord[1] = p[1] * c117[1] + c115[1];
+  coord[2] = p[0] * c118[0] + c116[0];
+  coord[3] = p[1] * c118[1] + c116[1];
+}
+// alpha = 1 - sat(c141.x - (1 - m) * c141.y) (water_alpha).
+inline float WaterAlphaMirror(float m, const ClayWaterConstants& c) {
+#pragma clang fp contract(off)
+  const float* c141 = c.ps[kCwP141];
+  const float inverse = kWaterOne + (-m);
+  const float ramp = water_detail::Sat((-inverse) * c141[1] + c141[0]);
+  return kWaterOne + (-ramp);
+}
+// The surface's fate: killed at an alpha of exactly 1; else skipped (colour 0 with its alpha) unless the alpha is
+// above c141.w (water_kept). c141.w is the SHADER's threshold; whether the pixel is drawn at all is the state's
+// alpha test against the draw's reference (WaterDrawn): two numbers, one unit in the last place apart in every
+// captured row.
+inline WaterFate WaterFateMirror(float alpha, const ClayWaterConstants& c) {
+  if (alpha == kWaterOne) return WaterFate::kKilled;
+  return alpha > c.ps[kCwP141][3] ? WaterFate::kShaded : WaterFate::kSkipped;
+}
+// Whether the state's alpha test ("greater" than the draw's reference) draws a pixel that was not killed.
+inline bool WaterDrawn(WaterFate fate, float alpha, const ClayWaterConstants& c) { return fate != WaterFate::kKilled && alpha > c.alpha_ref; }
+
+inline WaterPixelValues WaterPixelCore(const WaterPixelIn& in, const ClayWaterConstants& c, const ClayFogConstants& fog) {
+#pragma clang fp contract(off)
+  using water_detail::Rsq;
+  using water_detail::Sat;
+  using water_detail::Sqrt;
+  WaterPixelValues out;
+  out.alpha = WaterAlphaMirror(in.m, c);
+  out.fate = WaterFateMirror(out.alpha, c);
+  if (out.fate != WaterFate::kShaded) return out;   // (a skipped pixel's colour is 0 times the scale)
+  const float* c0 = c.ps[kCwP0];
+  const float* eye = c.ps[kCwP19];
+  const float* c31 = c.ps[kCwP31];
+  const float* c126 = c.ps[kCwP126];
+  const float* c127 = c.ps[kCwP127];
+  const float* c129 = c.ps[kCwP129];
+  const float* c130 = c.ps[kCwP130];
+  // The normal: s = (2a - 1) + (2b - 1); N = normalize(s / 2, (c128.x / 2) * (the two samples' own third components)).
+  const float sx = in.a[0] * kWaterTwo + (in.b[0] * kWaterTwo + kWaterMinusTwo);
+  const float sy = in.a[1] * kWaterTwo + (in.b[1] * kWaterTwo + kWaterMinusTwo);
+  const float dax = in.a[0] * kWaterTwo + kWaterMinusOne, day = in.a[1] * kWaterTwo + kWaterMinusOne;
+  const float dbx = in.b[0] * kWaterTwo + kWaterMinusOne, dby = in.b[1] * kWaterTwo + kWaterMinusOne;
+  const float za = Sqrt(std::fabs(-(dax * dax + day * day) + kWaterOne));
+  const float zb = Sqrt(std::fabs(-(dbx * dbx + dby * dby) + kWaterOne));
+  const float nx = sx * kWaterHalf, ny = sy * kWaterHalf;
+  const float nz = (kWaterHalf * c.ps[kCwP128][0]) * (za + zb);
+  const float n_inv = Rsq(std::fabs(((0.0f + nz * nz) + nx * nx) + ny * ny));
+  const float N[3] = {nx * n_inv, ny * n_inv, nz * n_inv};
+  // The lookups: the pixel's screen place scaled about the centre by c31.xy, moved by the normal.
+  const float px = std::fabs(in.q[0]) * c0[2], py = std::fabs(in.q[1]) * c0[3];
+  const float u = ((-kWaterHalf + c0[0]) + px) * c31[0] + kWaterHalf;
+  const float v = (c0[1] + (-kWaterHalf + py)) * c31[1] + kWaterHalf;
+  out.lookup[0] = u + (c129[0] * kWaterHalf) * sx;
+  out.lookup[1] = v + (c129[1] * kWaterHalf) * sy;
+  out.lookup_near[0] = u + (sx * kWaterHalf) * c130[0];
+  out.lookup_near[1] = v + (sy * kWaterHalf) * c130[1];
+  // The view vector, the distance, the fresnel factor and the base colour.
+  const float ex = -in.place[0] + eye[0], ey = -in.place[1] + eye[1], ez = -in.place[2] + eye[2];
+  const float dd = std::fabs(((0.0f + ez * ez) + ex * ex) + ey * ey);
+  const float e_inv = Rsq(dd);
+  const float V[3] = {ex * e_inv, ey * e_inv, ez * e_inv};
+  const float d = Sqrt(dd);
+  const float cosine = ((0.0f + V[2] * N[2]) + V[0] * N[0]) + V[1] * N[1];
+  const float F = Sat((-cosine + kWaterOne) + c.ps[kCwP116][0]);
+  // The mix: beyond 1 / c140.x the base and the picture by sat(c131.x); nearer, slot 14 comes in.
+  const float share = Sat(c.ps[kCwP131][0]);
+  const float t = Sat(F + c.ps[kCwP117][0]);
+  const float w = Sat(c.ps[kCwP140][0] * d);
+  float colour[3];
+  for (int i = 0; i < 3; ++i) {
+    const float base = (-c127[i] + c126[i]) * F + c127[i];
+    const float r = in.picture[i] * kWaterOne;   // (the shadow factor of bool b137: 1; such a draw gives no record)
+    const float beyond = (r + (-base)) * share + base;
+    const float within = ((r + (-in.slot14[i])) * t + (-base + in.slot14[i])) * share + base;
+    colour[i] = w * (beyond + (-within)) + within;
+  }
+  // The sun's glint, under bool b136: nothing of c136, c137, c138, c142, c143 is touched without it.
+  if (c.sun_on) {
+    const float* c142 = c.ps[kCwP142];
+    const float* c143 = c.ps[kCwP143];
+    const float c137x = c.ps[kCwP137][0];
+    const float z2 = c.ps[kCwP136][0] * N[2];
+    const float n2_inv = Rsq(std::fabs(z2 * z2 + ((N[0] * N[0] + N[1] * N[1]) + 0.0f)));
+    const float n2[3] = {N[0] * n2_inv, N[1] * n2_inv, z2 * n2_inv};
+    const float once = ((0.0f + n2[2] * (-c142[2])) + n2[0] * (-c142[0])) + n2[1] * (-c142[1]);
+    const float twice = once + once;
+    const float W[3] = {(-n2[0]) * twice + (-c142[0]), (-n2[1]) * twice + (-c142[1]), (-n2[2]) * twice + (-c142[2])};
+    const float glint = Sat(((0.0f + (-V[2]) * W[2]) + (-V[0]) * W[0]) + (-V[1]) * W[1]);
+    float power = 0.0f;
+    if (glint > 0.0f) {   // the guard: 0 on a cosine of 0
+      const float log = float(std::log2(double(glint)));
+      power = float(std::exp2(double(c.ps[kCwP138][0] * log)));
+    }
+    const float scaled = c137x * power;
+    out.sun[0] = (c143[0] * c137x) * power;
+    out.sun[1] = scaled * c143[1];
+    out.sun[2] = scaled * c143[2];
+    for (int i = 0; i < 3; ++i) colour[i] = colour[i] + out.sun[i];
+  }
+  // The fog (light_formulas.water_fog: the ground form in the microcode's own order), from the view vector and the
+  // distance the pixel has: beyond the start alone, and only in a fogged frame.
+  if (c.fog_on && fog.on) {
+    const float past = -fog.start + d;
+    if (past > 0.0f) {
+      out.fogged = true;
+      out.fog_a = Sat(((0.0f + (-V[2]) * fog.axis[2]) + (-V[0]) * fog.axis[0]) + (-V[1]) * fog.axis[1]);
+      out.fog_s = fog.scale * past;
+      const float blend = Sat(fog.slope * past);
+      for (int i = 0; i < 3; ++i) {
+        const float S = in.scatter[i], T = in.transmit[i];
+        const float haze = blend * (S + (-fog.near_colour[i])) + fog.near_colour[i];
+        float G = ((-T + kWaterOne) * fog.scatter) * haze + (-colour[i]);
+        G = T * colour[i] + G;
+        colour[i] = G * fog.amount + colour[i];
+      }
+    }
+  }
+  for (int i = 0; i < 3; ++i) {
+    out.colour[i] = colour[i] * c.out_scale;
+    out.normal[i] = N[i];
+  }
+  out.fresnel = F;
+  out.distance = d;
+  return out;
+}
+// What the program writes: `out` the colour as the lit draws write the linear target ((v > 0) ? min(v,
+// kPostSceneMax) : 0 a channel), `alpha` the output's, `kept` whether the pixel is drawn: not killed, the state's
+// alpha test passed (alpha > the draw's reference), and the colour and the alpha all finite. A pixel whose colour
+// or alpha is no number is DISCARDED (ledger ruling 34: the draw is blended, and a no-number clamped to 0 would be
+// a black pixel at alpha 0.997). A skipped pixel that passes the state's test is drawn with colour 0 at its alpha,
+// as in the game.
+inline void WaterPixelMirror(const WaterPixelIn& in, const ClayWaterConstants& c, const ClayFogConstants& fog, float out[3], float* alpha, bool* kept) {
+  const WaterPixelValues p = WaterPixelCore(in, c, fog);
+  const bool finite = std::isfinite(p.colour[0]) && std::isfinite(p.colour[1]) && std::isfinite(p.colour[2]) && std::isfinite(p.alpha);
+  for (int i = 0; i < 3; ++i) {
+    const float v = p.colour[i];
+    out[i] = finite && v > 0.0f ? (v < kPostSceneMax ? v : kPostSceneMax) : 0.0f;
+  }
+  if (alpha) *alpha = p.alpha;
+  if (kept) *kept = finite && WaterDrawn(p.fate, p.alpha, c);
+}
+// WATER MIRRORS END
+
+// --- Phase 13c's rules (plan Task 15 found them; Tasks 16 and 17 wire them) ---
+// 1. Which view fills which target. The game's k-th reflection view of a frame is the picture at the k-th
+// smallest slot-13 base, which is target k of PlanWaterTargets. With as many views as targets, view k is target
+// k's; with more or fewer nothing can be said and every target holds the sky alone (`target_of_view` all
+// kNoWaterTarget, false). At most kMaxReflectionViews views a frame (spec ruling 19).
+inline constexpr uint32_t kMaxReflectionViews = 8;
+inline constexpr uint8_t kNoWaterTarget = 0xFF;
+constexpr bool PlanWaterViews(uint32_t views, const WaterTargetPlan& plan, uint8_t target_of_view[kMaxReflectionViews]) {
+  const bool tied = plan.ok && plan.count != 0 && views == plan.count;
+  for (uint32_t k = 0; target_of_view && k < kMaxReflectionViews; ++k) target_of_view[k] = tied && k < views ? uint8_t(k) : kNoWaterTarget;
+  return tied && target_of_view != nullptr;
+}
+// 2. The cull. A view's far terrain is drawn with the cull of THE VIEW RECORD'S OWN word (PA_SU_SC_MODE_CNTL,
+// register 0x2205: bit 0 cull front, bit 1 cull back, bit 2 "clockwise faces are front"): 0x00218006 in 358 of
+// 358 captured view rows, where the main scene's far terrain has 0x00218002. The mirror turns the handedness, so
+// the game turns the winding: what a view draws of the ground is its upper side as the mirrored eye sees it. With
+// the main scene's word instead the third spot's first view has 23,675 silhouette texels for the game's 2,327
+// (a hill seen from below over half the picture). Not valid: both cull bits (as DecodeRenderState has it).
+struct WaterViewCull {
+  bool valid = false;
+  capture::Cull cull = capture::Cull::kNone;
+  bool front_cw = false;
+};
+constexpr WaterViewCull ReflectionViewCull(uint32_t su_sc_mode) {
+  const bool front = (su_sc_mode & 1u) != 0, back = (su_sc_mode & 2u) != 0;
+  if (front && back) return WaterViewCull{};
+  return WaterViewCull{true, front ? capture::Cull::kFront : back ? capture::Cull::kBack : capture::Cull::kNone, (su_sc_mode & 4u) != 0};
+}
+// Whether a triangle that is clockwise on the screen (`clockwise`, in whatever screen convention the caller keeps
+// for every camera) is drawn under a cull: a front face is one whose winding is the word's.
+constexpr bool WaterTriangleDrawn(const WaterViewCull& cull, bool clockwise) {
+  if (!cull.valid) return false;
+  const bool front = clockwise == cull.front_cw;
+  return cull.cull == capture::Cull::kNone || (cull.cull == capture::Cull::kBack ? front : !front);
+}
+// The handedness of a camera's rows: the sign of the determinant of rows 0, 1 and 3 over (x, y, z). The mirrored
+// camera's is the main camera's turned (WaterViewRows negates one column and scales by positive factors), which is
+// why its winding is. 0 for rows that are not independent or not numbers.
+inline int ViewHandedness(const float rows[4][4]) {
+  if (!rows) return 0;
+  const double a[3] = {double(rows[0][0]), double(rows[0][1]), double(rows[0][2])};
+  const double b[3] = {double(rows[1][0]), double(rows[1][1]), double(rows[1][2])};
+  const double w[3] = {double(rows[3][0]), double(rows[3][1]), double(rows[3][2])};
+  const double det = w[0] * (a[1] * b[2] - a[2] * b[1]) + w[1] * (a[2] * b[0] - a[0] * b[2]) + w[2] * (a[0] * b[1] - a[1] * b[0]);
+  return det > 0.0 ? 1 : det < 0.0 ? -1 : 0;
+}
+// Whether a view record's cull is the main scene's far terrain's with the winding turned exactly as its camera
+// turns the handedness: the same cull, and "clockwise is front" differing iff the two cameras' handedness does.
+// A view whose word is anything else is not the mirror the targets assume (its target then holds the sky alone).
+inline bool WaterViewCullConsistent(uint32_t main_word, const float main_rows[4][4], uint32_t view_word, const float view_rows[4][4]) {
+  const WaterViewCull m = ReflectionViewCull(main_word), v = ReflectionViewCull(view_word);
+  const int hm = ViewHandedness(main_rows), hv = ViewHandedness(view_rows);
+  if (!m.valid || !v.valid || hm == 0 || hv == 0) return false;
+  return m.cull == v.cull && (m.front_cw != v.front_cw) == (hm != hv);
+}
+// 3. The clip at the water's plane. A view draws nothing below the plane z = h of its target: the far terrain's
+// mirrored vertex program writes the world position's z - h as SV_ClipDistance0 (without the cut the bridge's
+// second view has 1,145 silhouette texels for the game's 548). Kept iff the distance is at least 0.
+constexpr float WaterClipDistance(float world_z, float h) { return world_z - h; }
+// And the mirrored sky's (plan Task 11, shaders::kSkyMirrorVs): the third component of the pixel's ray,
+// ray0.z + X * rayx.z + Y * rayy.z with (X, Y) the vertex's clip position: the half of a target below the horizon
+// is not drawn and stays 0, as in the game's pictures. The ray is linear in (X, Y), so the clip is exact.
+inline float WaterSkyClipDistance(const float basis[3][3], float X, float Y) {
+#pragma clang fp contract(off)
+  return basis[0][2] + X * basis[1][2] + Y * basis[2][2];
+}
+// 4. The blur (pixel shader F186D27249B462F8 after vertex shader B2D99AC2C7FB40D6: the game blurs some views).
+// One pass of SEVEN EQUAL TAPS: oC0.rgb = weight * the sum over k of the sharp picture at (u, v) + offset[k], alpha
+// 0; the offsets are the xy of the blur row's c116 to c122 (captured: the centre and a hexagon of radius 2 / 256)
+// and the weight its literal c255.x (1 / 7). (u, v) IS THE PIXEL'S INTEGRAL POSITION over the target's size, not
+// the texel's centre: with it the game's own sharp and blurred pair agree within 1 of 255 at every texel (mean
+// 0.031 to 0.045); at the centre the mean is 0.32 to 0.46. The taps are added in the microcode's order (c117,
+// c116, c118 to c122); a tap that is not finite counts as 0 (light_formulas.water_blur7).
+inline constexpr uint32_t kWaterBlurTaps = 7;
+inline constexpr uint8_t kWaterBlurOrder[kWaterBlurTaps] = {1, 0, 2, 3, 4, 5, 6};
+// What the captured rows hold, in texels of the 256 x 256 picture, and the weight (light_formulas.
+// WATER_BLUR_TEXELS, WATER_BLUR_WEIGHT): for tests; a native blur takes the offsets from the view's own row.
+inline constexpr float kWaterBlurTexels[kWaterBlurTaps][2] = {{0.0f, 0.0f},         {2.0f, 0.0f},          {1.0f, 1.7320508f}, {-1.0f, 1.7320508f},
+                                                              {-2.0f, 0.0f},        {-1.0f, -1.7320508f}, {1.0f, -1.7320508f}};
+inline constexpr float kWaterBlurWeight = 0.142857149f;
+struct WaterBlurConstants {
+  float offset[kWaterBlurTaps][4];   // c116..c122: the xy are the tap's offset in the picture's coordinate; z and w are 0 here
+  float weight, inv_size;            // the literal c255.x; 1 / the target's size
+  float pad[2];
+};
+static_assert(sizeof(WaterBlurConstants) == 128);
+// The blur's constants from the row's seven registers (whole, as captured: only their xy are read) and its
+// literal. False, `out` untouched, for an offset that is no number or beyond one picture in either direction, or a
+// weight that is not in (0, 1].
+inline bool MakeWaterBlurConstants(const float registers[kWaterBlurTaps][4], float weight, WaterBlurConstants* out) {
+  if (!registers || !out || !(weight > 0.0f && weight <= 1.0f)) return false;
+  WaterBlurConstants c{};
+  for (uint32_t k = 0; k < kWaterBlurTaps; ++k) {
+    if (!(std::fabs(registers[k][0]) <= 1.0f) || !(std::fabs(registers[k][1]) <= 1.0f)) return false;   // (false for no number)
+    c.offset[k][0] = registers[k][0];
+    c.offset[k][1] = registers[k][1];
+  }
+  c.weight = weight;
+  c.inv_size = 1.0f / float(kWaterTargetSize);
+  *out = c;
+  return true;
+}
+// The coordinate a pixel of the blur reads about: its integral position (the floor of SV_Position.xy) over the size.
+inline void WaterBlurCoord(float pixel_x, float pixel_y, const WaterBlurConstants& c, float uv[2]) {
+  uv[0] = std::floor(pixel_x) * c.inv_size;
+  uv[1] = std::floor(pixel_y) * c.inv_size;
+}
+// The blurred colour of the pixel at (pixel_x, pixel_y): `sample(u, v, rgb)` reads the sharp picture with a linear
+// filter. In double, as the reference is; `out` is rgb and alpha 0.
+template <typename Sample>
+inline void WaterBlurMirror(float pixel_x, float pixel_y, const WaterBlurConstants& c, Sample&& sample, float out[4]) {
+  float uv[2];
+  WaterBlurCoord(pixel_x, pixel_y, c, uv);
+  double sum[3] = {0.0, 0.0, 0.0};
+  for (uint32_t i = 0; i < kWaterBlurTaps; ++i) {
+    const uint32_t k = kWaterBlurOrder[i];
+    float rgb[3] = {0.0f, 0.0f, 0.0f};
+    sample(uv[0] + c.offset[k][0], uv[1] + c.offset[k][1], rgb);
+    for (int j = 0; j < 3; ++j) sum[j] += std::isfinite(rgb[j]) ? double(rgb[j]) : 0.0;
+  }
+  for (int j = 0; j < 3; ++j) {
+    const double v = sum[j] * double(c.weight);
+    out[j] = std::isfinite(v) ? float(v) : 0.0f;
+  }
+  out[3] = 0.0f;
+}
+
+// The log's and F3's Water line. "Water: off" with the verdict off. Else the surface records the step drew of the
+// game's surface draws seen, the targets, the dead draws left out, the frames since the start that were not drawn
+// by the verdict's reason, and the draws that gave no record by the capture's.
+inline std::string FormatWaterText(const ClayStats& st) {
+  if (st.water == ClayWater::kOff) return "Water: off";
+  char buf[160];
+  std::snprintf(buf, sizeof(buf), "Water: drawn %u of %u, targets %u, opaque left out %u | not drawn {", st.water_drawn, st.water_seen,
+                st.water_targets, st.water_left_out);
+  std::string text = buf;
+  bool first = true;
+  for (size_t i = 0; i < size_t(ClayWater::kCount); ++i) {
+    if (ClayWater(i) == ClayWater::kDrawn || ClayWater(i) == ClayWater::kOff || !st.water_frames[i]) continue;
+    std::snprintf(buf, sizeof(buf), "%s%s: %u frames", first ? "" : ", ", ClayWaterName(ClayWater(i)), st.water_frames[i]);
+    text += buf;
+    first = false;
+  }
+  text += "} | ";
+  text += capture::kWaterRecordReason;
+  text += " {";
+  first = true;
+  for (size_t i = size_t(capture::WaterReason::kNone) + 1; i < size_t(capture::WaterReason::kCount); ++i) {
+    if (!st.water_capture[i]) continue;
+    std::snprintf(buf, sizeof(buf), "%s%s: %u", first ? "" : ", ", capture::WaterReasonName(capture::WaterReason(i)), st.water_capture[i]);
+    text += buf;
+    first = false;
+  }
+  return text + "}";
 }
 
 // --- Native wind (frame-map section 18, "Native wind"; docs/native-renderer/lighting-formulas.md, "Wind") ---

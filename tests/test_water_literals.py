@@ -249,6 +249,142 @@ class Record(unittest.TestCase):
         self.assertIn('REXLOG_INFO("[native] water: {} (fable2_native_water)", CurrentWater() ? "on" : "off");', render)
 
 
+class Mirrors(unittest.TestCase):
+    """The C++ side of plan Task 10: the mirrors and the constant block of src/native/render/clay_logic.h against
+    the reference's registers, components and numbers (the values are tests/native/test_clay_logic.cpp's, at the
+    pins)."""
+    LOGIC = _source("render", "clay_logic.h")
+    REGION = LOGIC[LOGIC.index("// WATER MIRRORS BEGIN"):LOGIC.index("// WATER MIRRORS END")]
+    # the block carries the record's registers but for those the frame's block holds (the fog's), the output scale
+    # and the one register no record reads
+    CARRIED = tuple(reg for reg in S["ps_reg"] if reg not in (20, 28, 66, 67, 68, 139))
+
+    def test_the_block_carries_eighteen_registers_in_the_tables_order(self):
+        names = re.search(r"enum : uint32_t \{ (kCwP[^}]*?) \};", self.LOGIC, re.S).group(1)
+        self.assertEqual(tuple(int(n[4:]) for n in re.findall(r"kCwP\d+", names)), self.CARRIED)
+        source = re.search(r"kClayWaterPsFrom\[kClayWaterPsRegisters\] = \{(.*?)\};", self.LOGIC, re.S).group(1)
+        self.assertEqual(tuple(int(n) for n in re.findall(r"capture::kWatP(\d+)", source)), self.CARRIED)
+        self.assertEqual(len(self.CARRIED), 18)
+        self.assertIn("inline constexpr uint32_t kClayWaterPsRegisters = 18;", self.LOGIC)
+        # 64 (the rows) + 64 (c115 to c118) + 16 a register + 16 + 16: two small slots a record
+        size = 64 + 16 * len(S["reg"]) + 16 * len(self.CARRIED) + 16 + 16
+        self.assertEqual(size, 448)
+        self.assertIn("static_assert(sizeof(ClayWaterConstants) == %d &&" % size, self.LOGIC)
+        self.assertIn("static_assert(kClayWaterSlots == %d && kClayWaterStepSlots == %d);" % ((size + 255) // 256, 2 * 64 + 4 + 21), self.LOGIC)
+        # the registers under b137 alone are not in the block; those under b136 are, and the mirror asks the bool first
+        self.assertFalse(set(S["ps_read_under"][137]) & set(self.CARRIED))
+        self.assertTrue(set(S["ps_read_under"][136]) <= set(self.CARRIED))
+        core = self.REGION[self.REGION.index("inline WaterPixelValues WaterPixelCore("):]
+        sun = core[core.index("if (c.sun_on) {"):core.index("// The fog (light_formulas.water_fog")]
+        before = core[:core.index("if (c.sun_on) {")] + core[core.index("// The fog (light_formulas.water_fog"):]
+        for reg in S["ps_read_under"][136]:
+            self.assertIn("kCwP%d]" % reg, sun, reg)
+            self.assertNotIn("kCwP%d]" % reg, before, reg)
+
+    def test_a_mirror_reads_only_the_components_a_formula_reads(self):
+        """A register is read by component: `c.ps[kCwP<reg>][k]`, or through a pointer named c<reg> (`eye` is c19)
+        with a digit; a loop's index reaches x, y and z, which the register must then all be read in."""
+        code = "\n".join(line.split("//")[0] for line in self.REGION.split("\n"))
+        alias = dict((name, int(reg)) for name, reg in re.findall(r"const float\* (c\d+|eye) = c\.ps\[kCwP(\d+)\];", code))
+        self.assertEqual(alias.get("eye"), 19)
+        seen = set()
+        for reg, k in re.findall(r"c\.ps\[kCwP(\d+)\]\[(\d)\]", code):
+            seen.add((int(reg), int(k)))
+        for name, k in re.findall(r"(?<![\w.])(c\d+|eye)\[(\d)\]", code):
+            if name in alias:
+                seen.add((alias[name], int(k)))
+        for name in set(re.findall(r"(?<![\w.])(c\d+|eye)\[i\]", code)):
+            if name in alias:
+                seen |= {(alias[name], 0), (alias[name], 1), (alias[name], 2)}
+        # (the vertex registers are pointers into c.vs, named like pixel registers of the same number: told apart by
+        # what the pointer was made from)
+        coords = self.REGION[self.REGION.index("inline void WaterCoordsMirror("):self.REGION.index("inline float WaterAlphaMirror(")]
+        self.assertEqual(sorted(int(reg) for reg in re.findall(r"const float\* c(\d+) = c\.vs\[capture::kWatV\1\];", coords)), sorted(S["reg"]))
+        vertex = {(int(reg), int(k)) for reg, k in re.findall(r"(?<![\w.])c(\d+)\[(\d)\]", coords)}
+        self.assertEqual(vertex, {(reg, k) for reg in S["reg"] for k in S["vs_read"][reg]})
+        want ={(reg, k) for reg in self.CARRIED for k in S["ps_read"][reg]}
+        self.assertEqual(seen, want, (sorted(seen - want), sorted(want - seen)))
+        # the fog's registers and the scale are the frame's and the block's own fields, never the record's
+        for field in ("fog.start", "fog.slope", "fog.scale", "fog.amount", "fog.scatter", "fog.axis[", "fog.near_colour[", "c.out_scale"):
+            self.assertIn(field, code, field)
+        self.assertNotIn("fog.inv", code)
+
+    def test_a_number_in_a_mirror_is_a_literal_of_the_shader(self):
+        allowed = {abs(v) for v in lf.water_literals().values()}
+        code = "\n".join(line.split("//")[0] for line in self.REGION.split("\n"))
+        for number in re.findall(NUMBER, code):
+            self.assertIn(abs(float(number.rstrip("f"))), allowed, number)
+        for name, value in (("kWaterTwo", "two"), ("kWaterHalf", "half"), ("kWaterOne", "one"), ("kWaterMinusOne", "minus_one"), ("kWaterMinusTwo", "minus_two")):
+            got = re.search(r"\b%s = ([-+0-9.]+)f" % name, self.LOGIC).group(1)
+            self.assertEqual(float(got), lf.water_literals()[value], name)
+        self.assertIn('"the mirrors\' literals are not the table\'s");', self.LOGIC)
+
+    def test_the_mirrors_are_single_precision_without_contraction(self):
+        for head in ("inline void WaterPositionMirror(", "inline void WaterCoordsMirror(", "inline float WaterAlphaMirror(",
+                     "inline WaterPixelValues WaterPixelCore("):
+            body = self.REGION[self.REGION.index(head):]
+            self.assertTrue(body[body.index("{") + 1:].lstrip("\n").startswith("#pragma clang fp contract(off)"), head)
+        self.assertNotIn("std::pow", self.REGION)
+        self.assertNotIn("std::fma", self.REGION)
+
+    def test_the_guards_of_ruling_34_are_written_out(self):
+        """The console's zero product at the three reciprocal square roots and the power, as the HLSL has them
+        (tests/test_water_hlsl.py, FIXTURE), and the discard of a pixel that is no number."""
+        self.assertIn("inline float Rsq(float x) { return x == 0.0f ? 0.0f : float(1.0 / std::sqrt(double(x))); }", self.REGION)
+        core = self.REGION[self.REGION.index("inline WaterPixelValues WaterPixelCore("):]
+        self.assertEqual(len(re.findall(r"= Rsq\(", core)), 3)                      # the normal, the view vector, the second normal
+        self.assertIn("if (glint > 0.0f) {", core)
+        self.assertEqual(hlsl.FIXTURE.count("== 0.0) ? 0.0 : rsqrt("), 3)
+        self.assertIn("(cosine > 0.0) ? exp2(c138x * log2(cosine)) : 0.0", hlsl.FIXTURE)
+        mirror = self.REGION[self.REGION.index("inline void WaterPixelMirror("):]
+        self.assertIn("if (kept) *kept = finite && WaterDrawn(p.fate, p.alpha, c);", mirror)
+        # and the block is not made of a record whose three registers are not above 0
+        make = _function(self.LOGIC, "inline bool MakeClayWaterConstants(")
+        self.assertIn("if (!capture::WaterRegistersBounded(r.vs, r.ps, r.pbool)) return false;", make)
+
+    def test_the_dead_draws_margin_is_the_references_in_double(self):
+        import inspect
+        self.assertEqual(inspect.signature(lf.water_opaque_dead).parameters["margin"].default, 1e-6)
+        self.assertIn("inline constexpr double kWaterDeadMargin = 1e-6;", self.LOGIC)
+        self.assertIn("inline constexpr double kWaterDeadReach = 4.0;", self.LOGIC)
+        self.assertEqual(struct.unpack("<I", struct.pack("<f", 1e-6))[0], 0x358637BD)       # the single nearest 1e-6 ...
+        self.assertLess(struct.unpack("<f", struct.pack("<I", 0x358637BD))[0], 1e-6)       # ... lies below it
+        self.assertFalse(lf.water_opaque_dead((struct.unpack("<f", struct.pack("<I", 0x358637BD))[0], 0.0, 0.0, 0.0)))
+        self.assertTrue(lf.water_opaque_dead((struct.unpack("<f", struct.pack("<I", 0x358637BE))[0], 0.0, 0.0, 0.0)))
+
+    def test_the_blurs_taps_weight_and_order_are_the_references(self):
+        texels = re.search(r"kWaterBlurTexels\[kWaterBlurTaps\]\[2\] = \{(.*?)\};", self.LOGIC, re.S).group(1)
+        got = [float(v.rstrip("f")) for v in re.findall(r"[-+]?\d+\.\d+f", texels)]
+        self.assertEqual(got, [v for pair in lf.WATER_BLUR_TEXELS for v in pair])
+        self.assertIn("inline constexpr float kWaterBlurWeight = %sf;" % repr(lf.WATER_BLUR_WEIGHT), self.LOGIC)
+        self.assertIn("inline constexpr uint8_t kWaterBlurOrder[kWaterBlurTaps] = {1, 0, 2, 3, 4, 5, 6};", self.LOGIC)
+        self.assertEqual(len(lf.WATER_BLUR_SHADER["offsets"]), 7)
+        # the reference adds the taps in that order, and a linear picture's blur is its value at the place read
+        order = []
+        out = lf.water_blur7(lambda u, v: (order.append((u, v)), (u, v, 0.0))[1], 0.25, 0.5,
+                             [(x / 256.0, y / 256.0) for x, y in lf.WATER_BLUR_TEXELS], lf.WATER_BLUR_WEIGHT)
+        self.assertEqual(order[0], (0.25 + 2.0 / 256.0, 0.5))
+        self.assertEqual(order[1], (0.25, 0.5))
+        self.assertAlmostEqual(out[0], 0.25, places=6)
+        self.assertAlmostEqual(out[1], 0.5, places=6)
+        self.assertEqual(out[3], 0.0)
+
+    def test_the_views_cull_words_are_the_captured(self):
+        """Plan Task 15: 0x2205 is 0x00218006 in every view's 7DDA row and 0x00218002 in the main scene's: the same
+        cull (bit 1: back) with "clockwise is front" (bit 2) turned."""
+        view, main = 0x00218006, 0x00218002
+        self.assertEqual((view & 3, main & 3), (2, 2))
+        self.assertEqual((view >> 2 & 1, main >> 2 & 1), (1, 0))
+        test = (ROOT / "tests" / "native" / "test_clay_logic.cpp").read_text(encoding="utf-8")
+        self.assertIn("const uint32_t kMain = 0x00218002u, kViewWord = 0x00218006u;", test)
+        self.assertIn("back ? capture::Cull::kBack : capture::Cull::kNone, (su_sc_mode & 4u) != 0};", self.LOGIC)
+
+    def test_the_verdicts_names_are_the_specs_in_its_order(self):
+        names = re.search(r"static constexpr const char\* kNames\[\] = \{([^}]*)\};", _function(self.LOGIC, "inline const char* ClayWaterName(")).group(1)
+        self.assertEqual(re.findall(r'"([^"]+)"', names), ["drawn", "off", "no-records", "light", "opaque-live", "pair", "plane", "view", "reflection",
+                                                          "texture", "order", "pipeline", "slot", "scale"])
+
+
 class Text(unittest.TestCase):
     """The stand-in text today, the header's own from plan Task 12 on (no skip: the fixture is always held)."""
 

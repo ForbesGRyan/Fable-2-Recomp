@@ -16,6 +16,11 @@ import light_formulas as lf  # noqa: E402
 import water_check  # noqa: E402
 
 DUMPS = ROOT / "out" / "shader_dump"
+
+
+def water_check_bits(x):
+    """A float's single-precision bits (the pins' registers are bit patterns)."""
+    return struct.unpack("<I", struct.pack("<f", x))[0]
 NO_DUMPS = f"no shader dumps at {DUMPS} (made by fable_2.exe --dump_shaders=<dir>)"
 HAVE = (DUMPS / "shader_A17D8AEC3A817D45.ucode.frag").exists()
 C141 = (2.003, 2.0, 0.0015, 0.0588)        # every captured row (R B1)
@@ -623,6 +628,39 @@ class Pins(unittest.TestCase):
         self.assertEqual(made["skipped"][1][2], (0.0, 0.0, 0.0))
         self.assertEqual(made["killed"][1][0], 0)
         self.assertEqual(made["before the fog"][1][9], (0.0, 0.0))
+        # the fog partly applied, and c129 unlike c130: the one line on which those three registers can be told
+        inputs, result = made["part_fog"]
+        c = inputs[4]
+        self.assertEqual((c[28][0], c[28][1]), (0.5, 0.75))
+        self.assertNotEqual(tuple(c[129][:2]), tuple(c[130][:2]))
+        self.assertEqual(result[0], 2)
+        self.assertNotEqual(result[9], (0.0, 0.0))                   # past the fog's start
+        self.assertNotEqual(result[3], result[4])                    # the two lookups differ
+        # just past the fog's start: the near blend sat(c67.z * (d - c67.x)) lies strictly between 0 and 1 on this line alone
+        blends = {}
+        for kind, (inputs_, result_) in made.items():
+            if result_[0] == 2 and result_[9] != (0.0, 0.0):
+                blends[kind] = inputs_[4][67][2] * (result_[7] - inputs_[4][67][0])
+        self.assertTrue(0.2 < blends["fog_edge"] < 0.8, blends["fog_edge"])
+        self.assertTrue(all(v >= 1.0 for kind, v in blends.items() if kind != "fog_edge"), blends)
+        for item_ in p.CAPTURED_PIXELS:
+            inputs_, result_ = p.pixel_pin(item_)
+            self.assertGreaterEqual(inputs_[4][67][2] * (result_[7] - inputs_[4][67][0]), 1.0)
+        for other in p.CAPTURED_PIXELS + tuple(item for kind, item in zip(p.MADE_KINDS, p.MADE_PIXELS) if kind != "part_fog"):
+            registers = p.pixel_inputs(other)[4]
+            self.assertEqual((registers[28][0], registers[28][1]), (1.0, 1.0))
+            self.assertEqual(tuple(registers[129][:2]), tuple(registers[130][:2]))
+        # ... and the pin moves with each of them (the same pixel with the captured values is another colour)
+        item = [it for kind, it in zip(p.MADE_KINDS, p.MADE_PIXELS) if kind == "part_fog"][0]
+        for reg, values in ((28, (1.0, 0.75, 0.0, 0.0)), (28, (0.5, 1.0, 0.0, 0.0))):
+            over = dict(item[12])
+            over[reg] = tuple(water_check_bits(v) for v in values)
+            changed = item[:12] + (over, item[13])
+            self.assertNotEqual(p.pixel_pin(changed)[1][2], result[2], (reg, values))
+        over = dict(item[12])
+        over[129] = item[12][130]
+        changed = item[:12] + (over, item[13])
+        self.assertNotEqual(p.pixel_pin(changed)[1][3], result[3])
         self.assertNotEqual(made["shadow"][1][9], (0.0, 0.0))        # 150 units: past the start
         # the glint whole: the sun term is most of the pixel
         colour, sun, scale = made["glint"][1][2], made["glint"][1][8], made["glint"][0][4][20][3]

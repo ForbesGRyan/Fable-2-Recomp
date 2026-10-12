@@ -117,6 +117,52 @@ inline ImpostorPictureStats MeasureImpostorPicture(const uint8_t* base_rgba, siz
   }
   return s;
 }
+// The diagnostic feed (fable2_native_impostor_feed; frame-map section 19, "The pictures' feed"): a file of one or
+// two sets of picture bases as a discovery capture dumped them (tools/xdk_sigmatch/impostor_pictures.py `feed`),
+// which the pass reads IN PLACE OF GUEST MEMORY. It exists because the software adapter's forced read-back
+// leaves every picture's base empty (131,072 zero bytes: capture 204721), so that the pictures' textures, views,
+// uploads and draws could not run under the debug layer otherwise. The file: u32 magic "F2PF", u32 version 1,
+// u32 sets (1 or 2), u32 pictures (1 to `count`), then, set after set, for each picture u32 base, u32 0 and its
+// kImpostorBaseBytes bytes; every set has the same bases in the same order.
+inline constexpr size_t kImpostorFeedBaseBytes = size_t(256) * 256 * 2;
+inline constexpr uint32_t kImpostorFeedMagic = 0x46503246u, kImpostorFeedVersion = 1, kImpostorFeedSets = 2, kImpostorFeedPictures = 14;
+struct ImpostorFeed {
+  uint32_t sets = 0, pictures = 0;
+  const uint8_t* bytes[kImpostorFeedSets][kImpostorFeedPictures] = {};   // [set][which of the fourteen]: into the file, or null
+};
+// False, with `feed` empty, unless the file is exactly what its head asks for, each base is one of the `count`
+// bases first + n * step, none twice, and every reserved word is 0. `count` at most kImpostorFeedPictures.
+inline bool ParseImpostorFeed(const uint8_t* file, size_t bytes, uint32_t first, uint32_t step, uint32_t count, ImpostorFeed* feed) {
+  if (!feed) return false;
+  *feed = ImpostorFeed{};
+  if (!file || bytes < 16 || count > kImpostorFeedPictures || step == 0) return false;
+  uint32_t head[4];
+  std::memcpy(head, file, 16);
+  const uint32_t sets = head[2], pictures = head[3];
+  if (head[0] != kImpostorFeedMagic || head[1] != kImpostorFeedVersion || sets < 1 || sets > kImpostorFeedSets || pictures < 1 || pictures > count) return false;
+  const size_t one = 8 + kImpostorFeedBaseBytes;
+  if (bytes != 16 + size_t(sets) * pictures * one) return false;
+  ImpostorFeed f;
+  for (uint32_t s = 0; s < sets; ++s) {
+    for (uint32_t i = 0; i < pictures; ++i) {
+      const uint8_t* at = file + 16 + (size_t(s) * pictures + i) * one;
+      uint32_t word[2];
+      std::memcpy(word, at, 8);
+      if (word[1] != 0 || word[0] < first || (word[0] - first) % step != 0 || (word[0] - first) / step >= count) return false;
+      const uint32_t n = (word[0] - first) / step;
+      if (f.bytes[s][n]) return false;
+      f.bytes[s][n] = at + 8;
+    }
+  }
+  for (uint32_t n = 0; n < kImpostorFeedPictures; ++n) {   // (the same bases in every set)
+    if (sets == 2 && (f.bytes[0][n] != nullptr) != (f.bytes[1][n] != nullptr)) return false;
+  }
+  f.sets = sets;
+  f.pictures = pictures;
+  *feed = f;
+  return true;
+}
+
 // MeasureImpostorPicture's ring_clear alone (the pass has the covered count from its decoder): the ring's 1,020
 // texels and no other. 0 for a size that is not the base's, or no bytes.
 inline uint32_t ImpostorRingClear(const uint8_t* base_rgba, size_t bytes) {
@@ -144,6 +190,7 @@ constexpr bool ImpostorPictureUsable(const ImpostorPictureStats& s) {
 // layout says which texels each run holds, made once from capture::TiledOffset2D and refused (`ok` false) unless
 // every texel of the level lies where that function puts it.
 inline constexpr size_t kImpostorBaseBytes = size_t(kImpostorPictureSize) * kImpostorPictureSize * 2;   // 131,072
+static_assert(kImpostorBaseBytes == kImpostorFeedBaseBytes);
 struct ImpostorPictureLayout {
   bool ok = false;
   uint16_t run_texel[8192] = {};   // the texel index (y * 256 + x) of the first texel of the run at byte 16 * r

@@ -208,6 +208,11 @@ class ClayPass {
   // list was seeded with the fourteen bases, or the read-back is full). The caller says so before a Render in
   // `on`; without it every record is "picture: base".
   void SetImpostorPicturesAvailable(bool available) { impostor_pictures_available_ = available; }
+  // The diagnostic feed (fable2_native_impostor_feed; impostor_picture.h): with one, a base the feed holds is read
+  // from the feed's set of this Render (the sets in turn, a Render each) IN PLACE OF GUEST MEMORY, whatever the
+  // run's read-back; everything after the read is the product's path. Null (the default): no feed. The caller
+  // keeps the feed and its file alive.
+  void SetImpostorPictureFeed(const ImpostorFeed* feed) { impostor_feed_ = feed; }
   // The file's head of the dump last taken, and the counts, for the caller's log line.
   const SceneDumpHeader& scene_dump_head() const { return scene_dump_head_; }
   const SceneDumpCounts& scene_dump_counts() const { return scene_dump_counts_; }
@@ -811,6 +816,8 @@ class ClayPass {
   };
   ImpostorPictureTexture impostor_pictures_[14];
   bool impostor_pictures_available_ = false;
+  const ImpostorFeed* impostor_feed_ = nullptr;
+  uint32_t impostor_refusals_logged_ = 0;   // (one line for the first refusal of each kind: a bit an ImpostorPicture)
   uint64_t impostor_picture_serial_ = 0;
   // This frame's uploads: the staging buffer (one of a fixed size, pooled by submission like the frame's
   // constant buffer: written here, read by the copies of this Render's command list), mapped while the

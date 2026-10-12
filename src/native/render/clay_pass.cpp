@@ -2186,12 +2186,34 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
                                               ClayStats& st) {
   *picture = 0;
   *sampler = 0;
-  if (!impostor_pictures_available_) return ImpostorPicture::kBase;
+  // One line for the first refusal of each kind, with what was judged: a run then says why nothing was drawn.
+  auto refusal = [&](ImpostorPicture state, uint32_t base, const char* what, uint32_t ring, uint32_t covered, uint64_t hash) {
+    const uint32_t bit = 1u << uint32_t(state);
+    if (impostor_refusals_logged_ & bit) return;
+    impostor_refusals_logged_ |= bit;
+    REXLOG_INFO("[native] clay: impostor pictures: first \"{}\": base 0x{:08X}: {} (ring clear {} of {}, bound at least {}; covered {}, bound {} to "
+                "{}; hash 0x{:016X}; pictures {}, feed {}); logged once a kind",
+                ClayImpostorSkipName(DecideImpostorPicture(capture::ImpostorMode::kOn, state)), base, what, ring, kImpostorRingTexels,
+                kImpostorRingClearMin, covered, kImpostorCoverMin, kImpostorCoverMax, hash,
+                impostor_pictures_available_ ? "available" : "not available", impostor_feed_ ? "on" : "off");
+  };
   TextureFetch t;
   TexFormatInfo fi;
-  if (!DumpFetch(r.fetch, &t, &fi)) return ImpostorPicture::kBase;
+  if (!DumpFetch(r.fetch, &t, &fi)) {
+    refusal(ImpostorPicture::kBase, r.fetch[1] & 0xFFFFF000u, "its fetch constant is no 2D texture's", 0, 0, 0);
+    return ImpostorPicture::kBase;
+  }
   const int n = ImpostorPictureSlot(t.base_phys, fable2::kImpostorPictureBase, fable2::kImpostorPictureStep, fable2::kImpostorPictures);
-  if (n < 0) return ImpostorPicture::kBase;
+  if (n < 0) {
+    refusal(ImpostorPicture::kBase, t.base_phys, "not one of the read-back list's fourteen bases", 0, 0, 0);
+    return ImpostorPicture::kBase;
+  }
+  // (the diagnostic feed's bytes for this base, this Render: in place of guest memory)
+  const uint8_t* fed = impostor_feed_ && impostor_feed_->sets ? impostor_feed_->bytes[impostor_picture_serial_ % impostor_feed_->sets][n] : nullptr;
+  if (!fed && !impostor_pictures_available_) {
+    refusal(ImpostorPicture::kBase, t.base_phys, "the run does not read the pictures back (the list was not seeded with them and the read-back is not full)", 0, 0, 0);
+    return ImpostorPicture::kBase;
+  }
   *picture = uint32_t(n);
   *sampler = SamplerIndex(t);
   ImpostorPictureTexture& p = impostor_pictures_[n];
@@ -2200,39 +2222,47 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
   // if its fetch names another swizzle than the view was made with: the capture holds every record to one)
   if (p.judged == impostor_picture_serial_) return p.state == ImpostorPicture::kUsable && p.swizzle != swizzle ? ImpostorPicture::kUpload : p.state;
   p.judged = impostor_picture_serial_;
-  auto verdict = [&](ImpostorPicture state) {
+  uint32_t ring = 0, covered = 0;
+  uint64_t hash = 0;
+  auto verdict = [&](ImpostorPicture state, const char* what = "") {
     p.state = state;
+    if (state != ImpostorPicture::kUsable) refusal(state, t.base_phys, what, ring, covered, hash);
     return state;
   };
-  if (t.xenos_format != 3 || t.width != kImpostorPictureSize || t.height != kImpostorPictureSize) return verdict(ImpostorPicture::kUnread);
-  const uint8_t* guest = capture::ReadPhysical(t.base_phys, uint32_t(kImpostorBaseBytes));
-  if (!guest) return verdict(ImpostorPicture::kUnread);
+  if (t.xenos_format != 3 || t.width != kImpostorPictureSize || t.height != kImpostorPictureSize) {
+    return verdict(ImpostorPicture::kUnread, "not a 256 x 256 texture of format 3");
+  }
+  const uint8_t* guest = fed ? fed : capture::ReadPhysical(t.base_phys, uint32_t(kImpostorBaseBytes));
+  if (!guest) return verdict(ImpostorPicture::kUnread, "its 131,072 bytes are not readable guest memory");
   // Copied before it is judged: the bytes are the guest's, and what is hashed, decoded and uploaded is this copy.
   impostor_guest_.resize(kImpostorBaseBytes);
   std::memcpy(impostor_guest_.data(), guest, kImpostorBaseBytes);
-  const uint64_t hash = SampleHash(impostor_guest_.data(), uint32_t(kImpostorBaseBytes));
+  hash = SampleHash(impostor_guest_.data(), uint32_t(kImpostorBaseBytes));
   if (p.filled && p.texture && p.view && p.hash == hash && p.swizzle == swizzle) {
     ++st.impostor_pictures;
     return verdict(ImpostorPicture::kUsable);
   }
   const size_t rgba_bytes = size_t(kImpostorPictureSize) * kImpostorPictureSize * 4;
-  uint32_t covered = 0;
   if (t.tiled && t.endian == 1 && t.pitch_texels == kImpostorPictureSize) {
     impostor_decoded_.resize(rgba_bytes);
-    if (!DecodeImpostorBase(impostor_guest_.data(), kImpostorBaseBytes, impostor_decoded_.data(), &covered)) return verdict(ImpostorPicture::kUnread);
+    if (!DecodeImpostorBase(impostor_guest_.data(), kImpostorBaseBytes, impostor_decoded_.data(), &covered)) {
+      return verdict(ImpostorPicture::kUnread, "the decoder refused it");
+    }
   } else {
     // (another layout than every captured picture's: the reference decoder, a texel at a time)
     if (!Decode1555Level(impostor_guest_.data(), kImpostorBaseBytes, t.width, t.height, t.pitch_texels, t.tiled, t.endian, &impostor_decoded_) ||
         impostor_decoded_.size() != rgba_bytes) {
-      return verdict(ImpostorPicture::kUnread);
+      return verdict(ImpostorPicture::kUnread, "the decoder refused it");
     }
     covered = MeasureImpostorPicture(impostor_decoded_.data(), rgba_bytes).covered;
   }
   ImpostorPictureStats stats;
-  stats.ring_clear = ImpostorRingClear(impostor_decoded_.data(), rgba_bytes);
+  stats.ring_clear = ring = ImpostorRingClear(impostor_decoded_.data(), rgba_bytes);
   stats.covered = covered;
-  if (!ImpostorPictureUsable(stats)) return verdict(ImpostorPicture::kContent);
-  if (!MakeImpostorLevels(impostor_decoded_.data(), rgba_bytes, impostor_levels_)) return verdict(ImpostorPicture::kUnread);
+  if (!ImpostorPictureUsable(stats)) {
+    return verdict(ImpostorPicture::kContent, covered == 0 ? "the base is empty: no texel has the alpha bit" : "not a tree's picture by the content rule");
+  }
+  if (!MakeImpostorLevels(impostor_decoded_.data(), rgba_bytes, impostor_levels_)) return verdict(ImpostorPicture::kUnread, "no levels");
   // The texture and its view (once a base; the view again for another swizzle), and this frame's staging buffer.
   if (!p.texture) {
     nrhi::TextureDesc td;
@@ -2244,7 +2274,7 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
     p.texture = dev->CreateTexture(td);
     p.shader_state = false;
     p.filled = false;
-    if (!p.texture) return verdict(ImpostorPicture::kUpload);
+    if (!p.texture) return verdict(ImpostorPicture::kUpload, "its texture could not be made");
   }
   if (!p.view || p.swizzle != swizzle) {
     if (p.view) dev->DestroyDeferred(p.view);
@@ -2256,7 +2286,7 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
     for (int i = 0; i < 4; ++i) vd.swizzle[i] = ImpostorViewSwizzle(t.swizzle[i]);
     p.view = dev->CreateTextureView(p.texture, vd);
     p.swizzle = swizzle;
-    if (!p.view) return verdict(ImpostorPicture::kUpload);
+    if (!p.view) return verdict(ImpostorPicture::kUpload, "its view could not be made");
   }
   if (!impostor_staging_) {
     if (auto reused = impostor_staging_pool_.Take(kImpostorStagingBytes, dev->CompletedSubmission())) {
@@ -2274,7 +2304,9 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
       impostor_staging_ = nullptr;
     }
   }
-  if (!impostor_staging_mapped_ || impostor_upload_count_ >= fable2::kImpostorPictures) return verdict(ImpostorPicture::kUpload);
+  if (!impostor_staging_mapped_ || impostor_upload_count_ >= fable2::kImpostorPictures) {
+    return verdict(ImpostorPicture::kUpload, "no staging buffer for this frame's uploads");
+  }
   uint8_t* stage = impostor_staging_mapped_ + size_t(impostor_upload_count_) * kImpostorStageBytes;
   std::memcpy(stage + kImpostorStageOffset[0], impostor_decoded_.data(), rgba_bytes);
   std::memcpy(stage + kImpostorStageOffset[1], impostor_levels_[0].data(), impostor_levels_[0].size());

@@ -368,7 +368,7 @@ class ImpostorPassText(unittest.TestCase):
     def test_the_front_end_hands_the_switch_on_and_writes_the_line(self):
         # its definition, the Render's argument, the install line, the capture's; and (plan Tasks 12 and 14) the
         # read-back list's question at start-up and the pictures' availability before a Render in `on`
-        self.assertEqual(self.front.count("CurrentImpostors()"), 6)
+        self.assertEqual(self.front.count("CurrentImpostors()"), 7)       # (and the diagnostic feed's loader, which reads its file only in `on`)
         self.assertIn("bool ImpostorReadbackWanted() { return CurrentImpostors() == capture::ImpostorMode::kOn; }", self.front)
         self.assertIn("  if (CurrentImpostors() == capture::ImpostorMode::kOn) g_clay->SetImpostorPicturesAvailable(ImpostorPicturesAvailable());\n", self.front)
         self.assertIn('render::FormatCoverageText(st) + "\\n" + render::FormatImpostorText(st));', self.front)

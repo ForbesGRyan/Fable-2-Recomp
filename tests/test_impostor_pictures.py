@@ -506,5 +506,27 @@ class Used(unittest.TestCase):
             self.assertEqual(result["pictures"][0]["equal"], {1: 1.0, 2: 65535 / 65536})
 
 
+class Feed(unittest.TestCase):
+    """`feed`: a capture's dumped bases as the file of the pass's diagnostic feed (render::ParseImpostorFeed)."""
+
+    def test_the_file_of_a_made_capture(self):
+        import struct
+        with tempfile.TemporaryDirectory() as d:
+            d = Used().make(d)
+            self.assertEqual(ip.main(["feed", str(d / "c.jsonl"), str(d / "out.f2pf")]), 0)
+            data = (d / "out.f2pf").read_bytes()
+            self.assertEqual(struct.unpack_from("<IIII", data, 0), (0x46503246, 1, 2, 1))        # "F2PF", two sets, one picture
+            self.assertEqual(len(data), 16 + 2 * (8 + 131072))
+            self.assertEqual(struct.unpack_from("<II", data, 16), (0x12704000, 0))
+            self.assertEqual(data[24:24 + 131072], (d / "native_tex_x" / "12704000_AA.bin").read_bytes())
+            second = 16 + 8 + 131072
+            self.assertEqual(struct.unpack_from("<II", data, second), (0x12704000, 0))
+            self.assertEqual(data[second + 8:], (d / "native_tex_x" / "12704000_AA_EE.bin").read_bytes())
+            self.assertEqual(ip.main(["feed", str(d / "c.jsonl"), str(d / "one.f2pf"), "--frames", "2"]), 0)
+            self.assertEqual(struct.unpack_from("<IIII", (d / "one.f2pf").read_bytes(), 0), (0x46503246, 1, 1, 1))
+            self.assertEqual(ip.main(["feed", str(d / "c.jsonl"), str(d / "none.f2pf"), "--frames", "7"]), 1)   # no such frame: no file
+            self.assertFalse((d / "none.f2pf").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

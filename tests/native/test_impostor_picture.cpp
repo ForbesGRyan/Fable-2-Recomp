@@ -171,6 +171,60 @@ int main() {
     }
   }
 
+  // The diagnostic feed's file (fable2_native_impostor_feed; tools/xdk_sigmatch/impostor_pictures.py `feed`): one
+  // or two sets of a capture's dumped bases, which the pass reads in place of guest memory.
+  {
+    const uint32_t first = 0x12704000u, step = 0x2B000u, count = 14;
+    auto make = [&](uint32_t sets, const std::vector<uint32_t>& bases) {
+      std::vector<uint8_t> f(16);
+      const uint32_t head[4] = {kImpostorFeedMagic, 1u, sets, uint32_t(bases.size())};
+      std::memcpy(f.data(), head, 16);
+      for (uint32_t s = 0; s < sets; ++s) {
+        for (uint32_t base : bases) {
+          const uint32_t one[2] = {base, 0u};
+          const size_t at = f.size();
+          f.resize(at + 8 + kImpostorBaseBytes, uint8_t(1 + s + ((base - first) / step) * 2));
+          std::memcpy(f.data() + at, one, 8);
+        }
+      }
+      return f;
+    };
+    std::vector<uint8_t> f = make(2, {first, first + 3 * step, first + 13 * step});
+    ImpostorFeed feed;
+    if (!ParseImpostorFeed(f.data(), f.size(), first, step, count, &feed) || feed.sets != 2 || feed.pictures != 3) return 70;
+    if (!feed.bytes[0][0] || !feed.bytes[1][3] || !feed.bytes[1][13] || feed.bytes[0][1] || feed.bytes[1][12]) return 71;
+    if (feed.bytes[0][0][0] != 1 || feed.bytes[1][0][kImpostorBaseBytes - 1] != 2 || feed.bytes[0][3][5] != 7 || feed.bytes[1][13][9] != 28) return 72;
+    if (kImpostorFeedMagic != 0x46503246u || f[0] != 'F' || f[1] != '2' || f[2] != 'P' || f[3] != 'F') return 73;
+    // Refused, the feed left empty: a byte short or long, another magic or version, no set or three, fifteen
+    // pictures, a base that is none of the fourteen, a base twice, a reserved word.
+    auto refused = [&](const std::vector<uint8_t>& bad) {
+      ImpostorFeed g;
+      g.sets = 9;
+      return !ParseImpostorFeed(bad.data(), bad.size(), first, step, count, &g) && g.sets == 0 && g.pictures == 0 && !g.bytes[0][0];
+    };
+    std::vector<uint8_t> bad = f;
+    bad.pop_back();
+    if (!refused(bad)) return 74;
+    bad = f;
+    bad.push_back(0);
+    if (!refused(bad)) return 75;
+    bad = f;
+    bad[3] = 'S';
+    if (!refused(bad)) return 76;
+    bad = f;
+    bad[4] = 2;
+    if (!refused(bad)) return 77;
+    if (!refused(make(0, {first})) || !refused(make(3, {first}))) return 78;
+    std::vector<uint32_t> fifteen;
+    for (uint32_t i = 0; i < 15; ++i) fifteen.push_back(first + i * step);
+    if (!refused(make(1, fifteen)) || !refused(make(1, {first + 0x1000u})) || !refused(make(1, {first, first}))) return 79;
+    bad = f;
+    bad[16 + 4] = 1;
+    if (!refused(bad) || !refused(std::vector<uint8_t>(15)) || ParseImpostorFeed(nullptr, f.size(), first, step, count, &feed)) return 80;
+    f = make(1, {first + step});
+    if (!ParseImpostorFeed(f.data(), f.size(), first, step, count, &feed) || feed.sets != 1 || feed.pictures != 1 || !feed.bytes[0][1] || feed.bytes[1][1]) return 81;
+  }
+
   const char* bin = std::getenv("FABLE2_1555_BIN");
   if (!bin) {
     std::printf("SKIPPED: real picture levels (set FABLE2_1555_BIN after tests/native/test_texture_decode.cpp wrote its .cpp.rgba)\n");

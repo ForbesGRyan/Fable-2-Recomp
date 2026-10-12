@@ -26,6 +26,9 @@ channel 2.
   impostor_pictures.py used <native_scene_<stamp>.f2np> <capture.jsonl>
       the pictures the native pass used in a dumped frame against the capture's dumps of the same bases: the share
       of equal texels against each frame of the capture, and which frame each picture is (spec criterion 6)
+  impostor_pictures.py feed <capture.jsonl> <out.f2pf> [--frames F [F]]
+      the capture's dumped bases as the file of the pass's diagnostic feed (--fable2_native_impostor_feed): one
+      set a frame, at most two; the native view then draws these pictures in place of what guest memory holds
   impostor_pictures.py compare <bin> <fc>
       a dumped base level through decode_1555 against the C++ test's <bin>.cpp.rgba (FABLE2_1555_BIN /
       FABLE2_1555_FC of tests/native/test_texture_decode.cpp); <fc>: the six dwords as hex, comma-separated
@@ -575,6 +578,43 @@ def used_cli(f2np, capture, out=sys.stdout):
     return 0 if result["pictures"] and held == len(result["pictures"]) else 1
 
 
+# --- The diagnostic feed's file (render::ParseImpostorFeed; fable2_native_impostor_feed) ---
+FEED_MAGIC = 0x46503246      # "F2PF"
+
+
+def feed_cli(capture, out_path, frames=None, out=sys.stdout):
+    """The whole dumped bases of a capture's impostor draws as a feed file: one set a frame (at most two), each
+    set the same bases in ascending order. No file unless every chosen frame has a whole dump of every base."""
+    capture = Path(capture)
+    rows = read_rows(capture)
+    numbers = frames or sorted({r.get("frame") for r in rows if r.get("kind") == "verts" and r.get("in_scene")
+                                and IMPOSTOR_VS in str((r.get("vs") or {}).get("hash", "")).upper()})[:2]
+    sets = []
+    for n in numbers:
+        one = {}
+        for _, tex in frame_pictures(rows, n):
+            if tex is None:
+                continue
+            data = (capture.parent / tex["file"]).read_bytes()
+            if len(data) == PICTURE_SIZE * PICTURE_SIZE * 2:
+                one[fetch(tex["fc"])["base"]] = data
+        sets.append(one)
+    if not sets or not sets[0] or len(sets) > 2 or any(sorted(s) != sorted(sets[0]) for s in sets):
+        print("%s: frames %s do not hold the same whole bases (%s): no file" % (capture.stem, numbers, [len(s) for s in sets]), file=out)
+        return 1
+    bases = sorted(sets[0])
+    body = struct.pack("<IIII", FEED_MAGIC, 1, len(sets), len(bases))
+    for one in sets:
+        for base in bases:
+            body += struct.pack("<II", base, 0) + one[base]
+    Path(out_path).write_bytes(body)
+    for i, one in enumerate(sets):
+        stats = [content_stats(fields_1555(one[b], 256, 256, 256, True, 1)) for b in bases]
+        print("set %d (frame %s): %d bases, %d usable by the content rule" % (i, numbers[i], len(bases), sum(picture_usable(*s) for s in stats)), file=out)
+    print("wrote %s (%d bytes: %d sets of %d pictures)" % (Path(out_path).as_posix(), len(body), len(sets), len(bases)), file=out)
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -592,10 +632,16 @@ def main(argv=None):
     lv.add_argument("captures", nargs="+")
     ct = sub.add_parser("content")
     ct.add_argument("captures", nargs="+")
+    fd = sub.add_parser("feed")
+    fd.add_argument("capture")
+    fd.add_argument("out")
+    fd.add_argument("--frames", type=int, nargs="+")
     u = sub.add_parser("used")
     u.add_argument("f2np")
     u.add_argument("capture")
     a = ap.parse_args(argv)
+    if a.cmd == "feed":
+        return feed_cli(a.capture, a.out, a.frames)
     if a.cmd == "used":
         return used_cli(a.f2np, a.capture)
     if a.cmd == "levels":

@@ -27,6 +27,7 @@
 #include "d3d_messages.h"
 #include "fable2_native_shaders.h"
 #include "native_render_state.h"
+#include "../core/readback_force_list.h"
 #include "post_oracle.h"
 
 REXCVAR_DEFINE_BOOL(fable2_native_render, false, "Fable2",
@@ -126,6 +127,15 @@ REXCVAR_DEFINE_STRING(fable2_native_impostors, "off", "Fable2",
                       "picture is not drawn (counted \"picture: base, unread, content or upload\"), never a flat "
                       "quad. off (or false, 0; the default) = none of it is read, made or drawn, and the log has "
                       "the one line \"impostors: off\".");
+REXCVAR_DEFINE_STRING(fable2_native_impostor_feed, "", "Fable2",
+                      "Diagnostic of the native impostors' pictures (frame map section 19, \"The pictures' feed\"): a file. "
+                      "Empty (the default): nothing. Set, with fable2_native_impostors=on: the file (written by "
+                      "tools/xdk_sigmatch/impostor_pictures.py feed from a discovery capture: one or two sets of the "
+                      "pictures' bases as that capture dumped them) is read once at startup; if it is valid, the native "
+                      "view takes each picture the file holds from the file, the sets in turn a frame each, IN PLACE OF "
+                      "GUEST MEMORY: the far trees then show that capture's pictures, not the running game's. For the "
+                      "software adapter, whose forced read-back leaves the pictures empty. A file that is missing or "
+                      "refused: one log line, and nothing changes.");
 REXCVAR_DEFINE_STRING(fable2_native_coverage, "off", "Fable2",
                       "Native coverage (sub-project 11, phase 11b; default off until the user's checks: frame map section "
                       "18, \"Validation (11b)\"): on (or true, 1) = the native view "
@@ -465,6 +475,50 @@ bool CurrentSceneDump() {
   return on;
 }
 
+// fable2_native_impostor_feed: the file, read whole and parsed (game thread, once, in Install; only with the
+// impostors' switch at `on`). Anything missing or refused leaves the feed off, with one line.
+std::vector<uint8_t> g_impostor_feed_bytes;
+render::ImpostorFeed g_impostor_feed;
+bool g_impostor_feed_valid = false;
+void LoadImpostorFeed() {
+  const std::string path = REXCVAR_GET(fable2_native_impostor_feed);
+  if (path.empty()) return;
+  if (CurrentImpostors() != capture::ImpostorMode::kOn) {
+    REXLOG_WARN("[native] impostor feed: {} is not read: fable2_native_impostors is not on", path);
+    return;
+  }
+  // (bounded: a file of two sets of fourteen is 3.7 MB; nothing larger than 8 MB is read)
+  constexpr size_t kMaxBytes = size_t(8) << 20;
+  std::FILE* fp = std::fopen(path.c_str(), "rb");
+  const char* why = fp ? nullptr : "could not be opened";
+  if (fp) {
+    uint8_t buf[65536];
+    for (size_t n; (n = std::fread(buf, 1, sizeof(buf), fp)) > 0;) {
+      if (g_impostor_feed_bytes.size() + n > kMaxBytes) {
+        why = "is larger than 8 MB";
+        break;
+      }
+      g_impostor_feed_bytes.insert(g_impostor_feed_bytes.end(), buf, buf + n);
+    }
+    if (!why && std::ferror(fp)) why = "could not be read to its end";
+    std::fclose(fp);
+  }
+  if (!why && !render::ParseImpostorFeed(g_impostor_feed_bytes.data(), g_impostor_feed_bytes.size(), fable2::kImpostorPictureBase,
+                                         fable2::kImpostorPictureStep, fable2::kImpostorPictures, &g_impostor_feed)) {
+    why = "is not a feed file (its head, its size, a base that is none of the fourteen or twice)";
+  }
+  if (why) {
+    g_impostor_feed_bytes = {};
+    g_impostor_feed = render::ImpostorFeed{};
+    REXLOG_WARN("[native] impostor feed: {} {}; the feed is off", path, why);
+    return;
+  }
+  g_impostor_feed_valid = true;
+  REXLOG_WARN("[native] impostor feed: ON, A DIAGNOSTIC: {}: {} sets of {} pictures; the native view draws each of these bases from this "
+              "file, the sets in turn a frame each, IN PLACE OF GUEST MEMORY: the far trees are that capture's pictures, not the "
+              "running game's (fable2_native_impostor_feed)", path, g_impostor_feed.sets, g_impostor_feed.pictures);
+}
+
 // fable2_native_post_oracle: the two files of the prefix, read whole and parsed (game thread, once).
 // Anything missing or refused leaves the feed off, with one line that names the file and the fault.
 void LoadOracle() {
@@ -777,6 +831,7 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   }
   // (the pictures' availability is decided once, at the first frame drawn with the switch at `on`)
   if (CurrentImpostors() == capture::ImpostorMode::kOn) g_clay->SetImpostorPicturesAvailable(ImpostorPicturesAvailable());
+  if (g_impostor_feed_valid) g_clay->SetImpostorPictureFeed(&g_impostor_feed);   // (a diagnostic: never without its switch)
   g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), CurrentFog(), CurrentWind(), CurrentCoverage(),
                  CurrentImpostors(), post, st, tst);
   g_shadows_usable.store(g_clay->shadows_usable(), std::memory_order_relaxed);
@@ -1055,6 +1110,7 @@ void Install(rex::memory::Memory* memory) {
   }
   g_view.store(ParseViewCvar(), std::memory_order_relaxed);
   LoadOracle();  // (before the callbacks exist: the feed is never written again)
+  LoadImpostorFeed();  // (likewise)
   rex::graphics::SetNativeGuestOutputRenderer(&RenderCallback, nullptr);
   rex::graphics::SetNativeGuestOutputPostProcessor(&OverlayCallback, nullptr);
   g_installed.store(true, std::memory_order_release);

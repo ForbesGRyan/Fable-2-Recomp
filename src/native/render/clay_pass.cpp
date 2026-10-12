@@ -436,6 +436,7 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     ForgetWaterTargets();
     water_targets_failed_ = false;  // (another device: the water's targets and step are tried anew)
     water_sky_layout_ = nullptr;
+    water_blur_layout_ = nullptr;
     ForgetWaterObjects();
     water_objects_failed_ = false;
     water_layout_ = nullptr;
@@ -1373,7 +1374,7 @@ void ClayPass::DrawShadows(nrhi::Cmd* cmd, ClayStats& st) {
 }
 
 void ClayPass::DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, bool depth_only, nrhi::TextureView* mask,
-                            uint32_t* light_mode_out, DrawFog* fog_out, bool* light_bound) {
+                            uint32_t* light_mode_out, DrawFog* fog_out, bool* light_bound, const float* reflection_height) {
   const capture::DrawRecord& r = *p.r;
   if (fog_out) *fog_out = DrawFog::kNone;
   if (depth_only && p.prepass_flat) {
@@ -1456,7 +1457,7 @@ void ClayPass::DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, 
   }
   ClayConstants constants = MakeClayConstants(r, p.vertex_count, ClayColorValue(color, r),
                                               uv, has_uvs, p.sampler, p.alpha, light_mode, light_count);
-  constants.pad2 = FloatBits(fog_scale);  // (0 but for an unlit tree's draw: kLightModeUnlitFogTree)
+  constants.pad2 = FloatBits(reflection_height ? *reflection_height : fog_scale);  // (0 but for an unlit tree's draw: kLightModeUnlitFogTree)
   cmd->SetRootConstants(kParamConstants, kConstantCount, &constants, 0);
   cmd->SetBufferSrv(kParamPositions, p.positions, 0);
   cmd->SetBufferSrv(kParamIndices, p.indices, 0);
@@ -2510,6 +2511,12 @@ bool ClayPass::EnsureImpostorObjects(nrhi::Device* dev) {
 void ClayPass::ForgetWaterTargets() {
   sky_mirror_vs_ = nullptr;
   sky_mirror_pipeline_ = nullptr;
+  water_terrain_vs_ = water_blur_ps_ = nullptr;
+  water_blur_pipeline_ = nullptr;
+  water_terrain_keys_.clear(); water_terrain_pipelines_.clear();
+  for (auto& list : water_reflection_) list.clear();
+  std::fill(std::begin(water_reflection_usable_), std::end(water_reflection_usable_), false);
+  std::fill(std::begin(water_reflection_blurred_), std::end(water_reflection_blurred_), false);
   for (uint32_t k = 0; k < kMaxWaterTargets; ++k) {
     water_target_[k] = nullptr;
     water_target_view_[k] = nullptr;
@@ -2522,6 +2529,10 @@ void ClayPass::ForgetWaterTargets() {
 
 void ClayPass::DestroyWaterTargets() {
   if (device_) {
+    device_->DestroyDeferred(water_blur_pipeline_);
+    device_->DestroyDeferred(water_blur_ps_);
+    device_->DestroyDeferred(water_terrain_vs_);
+    for (nrhi::Pipeline* p : water_terrain_pipelines_) device_->DestroyDeferred(p);
     device_->DestroyDeferred(sky_mirror_pipeline_);
     device_->DestroyDeferred(sky_mirror_vs_);
     for (uint32_t k = 0; k < kMaxWaterTargets; ++k) {
@@ -2619,6 +2630,33 @@ bool ClayPass::EnsureWaterTargets(nrhi::Device* dev) {
   pipe.cull = nrhi::CullMode::kNone;
   sky_mirror_pipeline_ = dev->CreateGraphicsPipeline(pipe);
   if (!sky_mirror_pipeline_) return fail("mirrored sky pipeline creation");
+  // The terrain uses the clay binding layout and its unchanged far pixel shader, into UNORM.
+  sd.stage = nrhi::ShaderStage::kVertex;
+  sd.name = "fable2_water_terrain_vs"; sd.hlsl_source = shaders::kClayTerrainMirrorVs;
+  water_terrain_vs_ = dev->CreateShader(sd);
+  sd.stage = nrhi::ShaderStage::kPixel;
+  sd.name = "fable2_water_blur_ps"; sd.hlsl_source = shaders::kClayWaterBlurPs;
+  water_blur_ps_ = dev->CreateShader(sd);
+  if (!water_terrain_vs_ || !water_blur_ps_) return fail("water terrain or blur shader compile");
+  if (!water_blur_layout_) {
+    nrhi::BindingLayoutDesc desc;
+    desc.params[0].kind = nrhi::BindingParamKind::kConstantBuffer;
+    desc.params[0].shader_register = 0; desc.params[0].count = 1; desc.params[0].visibility = nrhi::Visibility::kPixel;
+    desc.params[1].kind = nrhi::BindingParamKind::kTextureTable;
+    desc.params[1].shader_register = 0; desc.params[1].count = 1; desc.params[1].visibility = nrhi::Visibility::kPixel;
+    desc.param_count = 2; desc.allow_input_layout = false;
+    desc.static_samplers[0].shader_register = 0;
+    desc.static_samplers[0].filter = nrhi::Filter::kLinear;
+    desc.static_samplers[0].address = nrhi::AddressMode::kClamp;
+    desc.static_sampler_count = 1;
+    water_blur_layout_ = dev->CreateBindingLayout(desc);
+    if (!water_blur_layout_) return fail("water blur binding layout creation");
+  }
+  pipe = nrhi::GraphicsPipelineDesc{};
+  pipe.layout = water_blur_layout_; pipe.vs = sky_vs_; pipe.ps = water_blur_ps_;
+  pipe.rtv_format = kWaterTargetFormat; pipe.cull = nrhi::CullMode::kNone;
+  water_blur_pipeline_ = dev->CreateGraphicsPipeline(pipe);
+  if (!water_blur_pipeline_) return fail("water blur pipeline creation");
   water_targets_ = true;
   REXLOG_INFO("[native] clay: water targets ready ({} of {} x {} R8G8B8A8_UNORM with one D32_FLOAT depth and one scratch picture, {:.2f} MB "
               "together; the mirrored sky: the sky step's pixel program behind a vertex program with one clip distance, tested "
@@ -2629,26 +2667,127 @@ bool ClayPass::EnsureWaterTargets(nrhi::Device* dev) {
   return true;
 }
 
-void ClayPass::DrawWaterTargets(nrhi::Cmd* cmd, uint32_t count, nrhi::TextureView* const* sky_views) {
+void ClayPass::PrepareWaterReflection(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene,
+                                      const WaterTargetPlan& plan, const float rows[kMaxWaterTargets][4][4], ClayStats& st) {
+  for (auto& list : water_reflection_) list.clear();
+  std::fill(std::begin(water_reflection_usable_), std::end(water_reflection_usable_), false);
+  std::fill(std::begin(water_reflection_blurred_), std::end(water_reflection_blurred_), false);
+  const auto mapped = PlanReflectionViews(scene.reflection_views.data(), uint32_t(scene.reflection_views.size()), plan);
+  if (!mapped.ok || scene.reflection_refused || scene.reflection_draws.size() > capture::kMaxReflectionDraws ||
+      scene.reflection_views.back().first + scene.reflection_views.back().count != scene.reflection_draws.size() ||
+      scene.reflection_terrain.size() != scene.reflection_draws.size() || scene.reflection_lights.size() != scene.reflection_draws.size()) {
+    st.water_terrain_refused = plan.count;
+    return;
+  }
+  for (uint32_t k = 0; k < plan.count; ++k) {
+    const auto& view = scene.reflection_views[mapped.view[k]];
+    bool usable = view.first <= scene.reflection_draws.size() && view.count <= scene.reflection_draws.size() - view.first;
+    const auto* records = usable && view.count ? scene.reflection_draws.data() + view.first : nullptr;
+    usable = usable && ReflectionViewUsable(records, view.count, rows[k]);
+    ClayFrameConstants target{};
+    usable = usable && WaterReflectionFrameBlock(frame_, rows[k], plan.height[k], &target);
+    WaterBlurConstants blur{};
+    if (usable && view.blurred) {
+      float registers[kWaterBlurTaps][4] = {};
+      for (uint32_t i = 0; i < kWaterBlurTaps; ++i) std::memcpy(registers[i], view.offsets[i], 2 * sizeof(float));
+      usable = MakeWaterBlurConstants(registers, view.weight, &blur);
+    }
+    ClayStats scratch; TextureStats textures;
+    for (uint32_t i = 0; usable && i < view.count; ++i) {
+      const uint32_t index = view.first + i;
+      const auto& r = scene.reflection_draws[index];
+      if (r.terrain_index >= scene.reflection_terrain.size() || r.light_index >= scene.reflection_lights.size() ||
+          r.material.kind != capture::MaterialKind::kTerrainFar || r.material.ps_hash != capture::kReflectionTerrainPs) { usable = false; break; }
+      const auto& terrain = scene.reflection_terrain[r.terrain_index];
+      const auto& light = scene.reflection_lights[r.light_index];
+      PrepareTerrain(cmd, dev, r, terrain, &light, true, scratch, textures);
+      Prepared p = prepared_.back(); prepared_.pop_back();
+      const auto item = terrain_items_.back(); terrain_items_.pop_back();
+      p.textured = kTexturedTerrainFar;
+      p.slot = ClayWaterReflectionSlot(water_slots_, index);
+      ClayTerrainConstants c = MakeClayTerrainConstants(terrain.material, r.material.kind, p.uv_fix, p.sampler, p.weight_sampler | 1u);
+      p.lit = item.usable && item.light && p.light && p.base && p.normals &&
+              SetClayTerrainLight(c, terrain.material, light, p.base_fix, p.base_sampler);
+      usable = p.positions && p.indices && p.uvs && p.albedo && p.lit && r.state_words.read &&
+               TerrainStateUsable(capture::DecodeRenderState(r.state_words));
+      if (!usable) break;
+      const DrawState state = DecideDrawState(capture::DecodeRenderState(r.state_words), r.material, p.textured, false);
+      p.alpha = state.alpha;
+      const PipelineKey key = state.key;
+      size_t at = 0;
+      while (at < water_terrain_keys_.size() && !(water_terrain_keys_[at] == key)) ++at;
+      if (at == water_terrain_keys_.size()) {
+        if (water_terrain_keys_.size() >= capture::kMaxReflectionDraws) { usable = false; break; }
+        nrhi::GraphicsPipelineDesc pipe;
+        pipe.layout = layout_; pipe.vs = water_terrain_vs_; pipe.ps = ps_[kTexturedTerrainFar];
+        pipe.rtv_format = kWaterTargetFormat; pipe.dsv_format = nrhi::Format::kD32_FLOAT;
+        pipe.blend.enable = key.blend != 0;
+        pipe.blend.src = ToFactor(key.src); pipe.blend.dst = ToFactor(key.dst); pipe.blend.op = ToBlendOp(key.op);
+        pipe.blend.src_alpha = ToFactor(key.src_alpha); pipe.blend.dst_alpha = ToFactor(key.dst_alpha); pipe.blend.op_alpha = ToBlendOp(key.op_alpha);
+        pipe.blend.write_mask = key.color_mask;
+        pipe.depth.test_enable = key.depth_test != 0; pipe.depth.write_enable = key.depth_write != 0;
+        pipe.depth.func = ToCompare(key.depth_func); pipe.cull = ToCull(key.cull);
+        p.pipeline = dev->CreateGraphicsPipeline(pipe);
+        water_terrain_keys_.push_back(key); water_terrain_pipelines_.push_back(p.pipeline);
+      } else {
+        p.pipeline = water_terrain_pipelines_[at];
+      }
+      usable = p.pipeline != nullptr;
+      if (!usable) break;
+      std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(p.slot), &c, sizeof(c));
+      water_reflection_[k].push_back(p);
+    }
+    if (!usable) { water_reflection_[k].clear(); ++st.water_terrain_refused; continue; }
+    std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(ClayWaterFrameSlot(water_slots_, k)), &target, sizeof(target));
+    if (view.blurred) std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(ClayWaterTargetSlot(water_slots_, k)) + 128, &blur, sizeof(blur));
+    water_reflection_usable_[k] = true; water_reflection_blurred_[k] = view.blurred != 0;
+    ++st.water_terrain;
+  }
+}
+
+void ClayPass::DrawWaterTargets(nrhi::Cmd* cmd, const WaterTargetPlan& plan, nrhi::TextureView* const* sky_views) {
+  const uint32_t count = plan.count;
   if (!water_targets_ || !terrain_cb_ || !sky_views || count == 0 || count > kMaxWaterTargets) return;
-  const float kNone[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  const float kNone[4] = {};
   cmd->Barrier(water_target_depth_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kDepthWrite);
   for (uint32_t k = 0; k < count; ++k) {
-    cmd->Barrier(water_target_[k], nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
+    const bool blurred = water_reflection_blurred_[k];
+    nrhi::Texture* sharp = blurred ? water_blur_ : water_target_[k];
+    cmd->Barrier(sharp, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
     cmd->FlushBarriers();
-    cmd->SetRenderTargets(water_target_[k], water_target_depth_);
-    cmd->ClearRenderTarget(water_target_[k], kNone);
+    cmd->SetRenderTargets(sharp, water_target_depth_);
+    cmd->ClearRenderTarget(sharp, kNone);
     cmd->ClearDepth(water_target_depth_, 1.0f);
     cmd->SetViewport({0.0f, 0.0f, float(kWaterTargetSize), float(kWaterTargetSize), 0.0f, 1.0f});
     cmd->SetScissor({0, 0, int32_t(kWaterTargetSize), int32_t(kWaterTargetSize)});
     cmd->SetBindingLayout(water_sky_layout_);
     cmd->SetPipeline(sky_mirror_pipeline_);
-    cmd->SetConstantBuffer(kSkyParamFrame, terrain_cb_, ClaySmallSlotOffset(ClayWaterFrameSlot(water_slots_)));
+    cmd->SetConstantBuffer(kSkyParamFrame, terrain_cb_, ClaySmallSlotOffset(ClayWaterFrameSlot(water_slots_, k)));
     cmd->SetConstantBuffer(kSkyParamConstants, terrain_cb_, ClaySmallSlotOffset(ClayWaterTargetSlot(water_slots_, k)));
     cmd->SetTextures(kSkyParamTextures, sky_views, kSkyTableSize);
     cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
     cmd->Draw(3, 0);
-    cmd->Barrier(water_target_[k], nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
+    if (water_reflection_usable_[k]) {
+      cmd->ClearDepth(water_target_depth_, 1.0f);
+      cmd->SetBindingLayout(layout_);
+      cmd->SetConstantBuffer(kParamFrameConstants, terrain_cb_, ClaySmallSlotOffset(ClayWaterFrameSlot(water_slots_, k)));
+      cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+      for (const Prepared& p : water_reflection_[k]) {
+        cmd->SetPipeline(p.pipeline);
+        DrawPrepared(cmd, p, ClayColor::kClay, false, white_view_, nullptr, nullptr, nullptr, &plan.height[k]);
+      }
+    }
+    cmd->Barrier(sharp, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
+    if (blurred) {
+      cmd->Barrier(water_target_[k], nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
+      cmd->FlushBarriers();
+      cmd->SetRenderTargets(water_target_[k], nullptr);
+      cmd->SetBindingLayout(water_blur_layout_); cmd->SetPipeline(water_blur_pipeline_);
+      cmd->SetConstantBuffer(0, terrain_cb_, ClaySmallSlotOffset(ClayWaterTargetSlot(water_slots_, k)));
+      nrhi::TextureView* const texture[] = {water_blur_view_}; cmd->SetTextures(1, texture, 1);
+      cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList); cmd->Draw(3, 0);
+      cmd->Barrier(water_target_[k], nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
+    }
   }
   cmd->Barrier(water_target_depth_, nrhi::ResourceState::kDepthWrite, nrhi::ResourceState::kPixelShaderResource);
   cmd->FlushBarriers();
@@ -4252,6 +4391,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // slot, and the second frame block (WaterFrameBlock: exposure 1, 1 / the target's size) in its slots. A frame
   // whose sky is not drawn has no usable target (`reflection`): the surface is never drawn with an empty picture.
   WaterTargetPlan water_plan;
+  float water_target_rows[kMaxWaterTargets][4][4] = {};
   bool water_state = true;
   if (water_scene) {
     const auto begin = std::chrono::steady_clock::now();
@@ -4347,6 +4487,9 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
           water_in.targets = false;
           break;
         }
+        std::memcpy(water_target_rows[k], rows, sizeof(rows));
+        const ClayFrameConstants second = WaterFrameBlock(frame_);
+        std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(ClayWaterFrameSlot(water_slots_, k)), &second, sizeof(second));
         // (the sky's two textures as the main sky has them this frame: bound or not, their samplers and scales)
         constants.textures = sky_constants.textures;
         std::memcpy(constants.fix13, sky_constants.fix13, sizeof(constants.fix13));
@@ -4355,8 +4498,6 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
         constants.sampler14 = sky_constants.sampler14;
         std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(ClayWaterTargetSlot(water_slots_, k)), &constants, sizeof(constants));
       }
-      const ClayFrameConstants second = WaterFrameBlock(frame_);
-      std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(ClayWaterFrameSlot(water_slots_)), &second, sizeof(second));
     }
     water_clock(begin);
   }
@@ -4944,7 +5085,12 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   DrawShadows(cmd, st);
   // The water's reflection targets, only in a frame whose water is drawn: each cleared and filled with the
   // mirrored sky, and resting again before anything of the scene is bound.
-  if (water_drawn) DrawWaterTargets(cmd, water_plan.count, sky_views);
+  if (water_drawn) {
+    const auto begin = std::chrono::steady_clock::now();
+    PrepareWaterReflection(cmd, dev, scene, water_plan, water_target_rows, st);
+    DrawWaterTargets(cmd, water_plan, sky_views);
+    water_clock(begin);
+  }
   cmd->Barrier(linear_, nrhi::ResourceState::kPixelShaderResource,
                nrhi::ResourceState::kRenderTarget);
   cmd->Barrier(depth_, nrhi::ResourceState::kPixelShaderResource,
@@ -5512,7 +5658,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     for (size_t i = 0; i < size_t(ClayWater::kCount); ++i) st.water_frames[i] = water_frames_[i];
     st.water_ms = water_ms;
     const uint64_t form = uint64_t(at) | (uint64_t(st.water_drawn & 0xFFu) << 8) | (uint64_t(st.water_seen & 0xFFu) << 16) |
-                          (uint64_t(st.water_left_out & 0xFFu) << 24) | (uint64_t(st.water_targets & 0xFu) << 32);
+                          (uint64_t(st.water_left_out & 0xFFu) << 24) | (uint64_t(st.water_targets & 0xFu) << 32) | (uint64_t(st.water_terrain & 0xFu) << 36) |
+                          (uint64_t(st.water_terrain_refused & 0xFu) << 40);
     constexpr uint32_t kWaterLogLines = 16;
     const bool first_of_reason = water_verdict != ClayWater::kDrawn && (water_said_ & (1u << at)) == 0;
     if ((form != water_logged_ && water_log_lines_ < kWaterLogLines) || first_of_reason) {

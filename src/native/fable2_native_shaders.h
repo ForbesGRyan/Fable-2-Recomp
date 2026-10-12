@@ -1,5 +1,8 @@
 #pragma once
 
+#include <array>
+#include <string_view>
+
 // HLSL (SM 5.0) for the native renderer plumbing tests, compiled at runtime
 // by the D3D12 RHI (D3DCompile). Entry point "main" for all shaders.
 
@@ -659,6 +662,65 @@ VsOut main(uint vid : SV_VertexID) {
 }
 )hlsl"
 inline constexpr const char* kClayVs = FABLE2_CLAY_VS_HLSL;
+// A separate compile-time text: the existing vertex source is untouched byte for byte.
+// Only the mirrored pipeline consumes the two inserted lines and pad2 as its plane height.
+inline constexpr auto kClayTerrainMirrorText = [] {
+  constexpr std::string_view source = kClayVs;
+  constexpr std::string_view declaration = "  float above : SV_ClipDistance0;\n";
+  constexpr std::string_view store = "  o.above = p.z - asfloat(pad2);\n";
+  constexpr size_t a = source.find("};\nVsOut main");
+  constexpr size_t b = source.find("  // An object's normal");
+  static_assert(a != std::string_view::npos && b != std::string_view::npos);
+  std::array<char, source.size() + declaration.size() + store.size() + 1> text{};
+  size_t n = 0;
+  for (size_t i = 0; i < source.size(); ++i) {
+    if (i == a) for (char c : declaration) text[n++] = c;
+    if (i == b) for (char c : store) text[n++] = c;
+    text[n++] = source[i];
+  }
+  return text;
+}();
+inline constexpr const char* kClayTerrainMirrorVs = kClayTerrainMirrorText.data();
+
+// The game's F186 seven-tap reflection blur. The sky constants occupy the first 128 bytes of the
+// same target slot; this block's read fields occupy the remaining 128 bytes. No extra slot is taken.
+inline constexpr const char* kClayWaterBlurPs = R"hlsl(
+cbuffer WaterBlur : register(b0) {
+  float4 b_sky_unused[8];
+  float4 b_offset[7];
+  float b_weight; float b_inv_size; float2 b_pad;
+};
+Texture2D water_sharp : register(t0);
+SamplerState s_linear_clamp : register(s0);
+// WATER BLUR TEXT BEGIN
+float3 WaterBlurFinite(float3 value) {
+  float x = (abs(value.x) <= 3.402823466e38) ? value.x : 0.0;
+  float y = (abs(value.y) <= 3.402823466e38) ? value.y : 0.0;
+  float z = (abs(value.z) <= 3.402823466e38) ? value.z : 0.0;
+  return float3(x, y, z);
+}
+float4 WaterBlurSum(float3 a, float3 b, float3 c, float3 d, float3 e, float3 f, float3 g, float weight) {
+  precise float3 sum = WaterBlurFinite(b) + WaterBlurFinite(a);
+  sum = sum + WaterBlurFinite(c);
+  sum = sum + WaterBlurFinite(d);
+  sum = sum + WaterBlurFinite(e);
+  sum = sum + WaterBlurFinite(f);
+  sum = sum + WaterBlurFinite(g);
+  return float4(sum * weight, 0.0);
+}
+// WATER BLUR TEXT END
+float4 main(float4 pos : SV_Position) : SV_Target {
+  precise float2 uv = floor(pos.xy) * b_inv_size;
+  float3 a = water_sharp.SampleLevel(s_linear_clamp, uv + b_offset[0].xy, 0).rgb;
+  float3 b = water_sharp.SampleLevel(s_linear_clamp, uv + b_offset[1].xy, 0).rgb;
+  float3 c = water_sharp.SampleLevel(s_linear_clamp, uv + b_offset[2].xy, 0).rgb;
+  float3 d = water_sharp.SampleLevel(s_linear_clamp, uv + b_offset[3].xy, 0).rgb;
+  float3 e = water_sharp.SampleLevel(s_linear_clamp, uv + b_offset[4].xy, 0).rgb;
+  float3 f = water_sharp.SampleLevel(s_linear_clamp, uv + b_offset[5].xy, 0).rgb;
+  float3 g = water_sharp.SampleLevel(s_linear_clamp, uv + b_offset[6].xy, 0).rgb;
+  return WaterBlurSum(a, b, c, d, e, f, g, b_weight);
+}
+)hlsl";
 // The wind vertex program (clay_logic.h, "Native wind"): the clay vertex shader's own text under CLAY_WIND, in
 // which t9 is the draw's wind words (a wind record is never a terrain record: the terrain block is not
 // compiled), cbuffer Object ends in the wind's constants (448 bytes: kClayWindObjectFields), and the position

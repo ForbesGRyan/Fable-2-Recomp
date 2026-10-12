@@ -282,7 +282,8 @@ class Mirrors(unittest.TestCase):
         size = 64 + 16 * len(S["reg"]) + 16 * len(self.CARRIED) + 16 + 16 + 16
         self.assertEqual(size, 464)
         self.assertIn("static_assert(sizeof(ClayWaterConstants) == %d &&" % size, self.LOGIC)
-        self.assertIn("static_assert(kClayWaterSlots == %d && kClayWaterStepSlots == %d);" % ((size + 255) // 256, 2 * 64 + 4 + 21), self.LOGIC)
+        # Two surface slots per record, four target slots, four own frame blocks and 256 reflection records (Task 17).
+        self.assertIn("static_assert(kClayWaterSlots == %d && kClayWaterStepSlots == %d);" % ((size + 255) // 256, 2 * 64 + 4 + 4 * 21 + 256), self.LOGIC)
         # the registers under b137 alone are not in the block; those under b136 are, and the mirror asks the bool first
         self.assertFalse(set(S["ps_read_under"][137]) & set(self.CARRIED))
         self.assertTrue(set(S["ps_read_under"][136]) <= set(self.CARRIED))

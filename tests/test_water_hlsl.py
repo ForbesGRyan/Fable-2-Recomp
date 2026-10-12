@@ -646,5 +646,36 @@ class Tripwire(unittest.TestCase):
             self.assertEqual(TheText.__unittest_skip_why__, NO_TEXT)
 
 
+class ReflectionBlurText(unittest.TestCase):
+    def evaluate(self, text, samples, weight):
+        functions = wind_hlsl.Region(text, "// WATER BLUR TEXT BEGIN", "// WATER BLUR TEXT END",
+                                    ("WaterBlurFinite", "WaterBlurSum"), known=("abs",)).functions(wind_hlsl.water_env())
+        result = functions["WaterBlurSum"](*(Vec(*v) for v in samples), weight)
+        return [result.x, result.y, result.z, result.w]
+
+    def test_reference_and_three_mutants(self):
+        samples = [[0.03 * k, 0.1 + 0.02 * k, 0.9 - 0.04 * k] for k in range(7)]
+        samples[3][1] = math.nan
+        offsets = [(k, 0) for k in range(7)]
+        expected = lf.water_blur7(lambda u, v: samples[int(u)], 0, 0, offsets, 1.0 / 7)
+        actual = self.evaluate(HEADER, samples, 1.0 / 7)
+        for a, b in zip(actual, expected): self.assertAlmostEqual(a, b, places=12)
+        mutants = (("sum = sum + WaterBlurFinite(c);", "sum = sum + WaterBlurFinite(b);"),
+                   ("return float4(sum * weight, 0.0);", "return float4(sum * (weight * 0.9), 0.0);"),
+                   ("sum = sum + WaterBlurFinite(g);", "sum = sum + WaterBlurFinite(g) * 2.0;"))
+        for before, after in mutants:
+            self.assertIn(before, HEADER)
+            other = self.evaluate(HEADER.replace(before, after), samples, 1.0 / 7)
+            self.assertGreater(max(abs(a-b) for a,b in zip(other, expected)), 1e-4)
+
+    def test_coordinate_and_own_tap_order(self):
+        start = HEADER.index('inline constexpr const char* kClayWaterBlurPs')
+        text = HEADER[start:HEADER.index(')hlsl";', start)]
+        self.assertIn('floor(pos.xy) * b_inv_size', text)
+        taps = re.findall(r'water_sharp.SampleLevel\(s_linear_clamp, uv \+ b_offset\[(\d)\].xy, 0\).rgb', text)
+        self.assertEqual(taps, ['0','1','2','3','4','5','6'])
+        self.assertIn('b_weight', text)
+
+
 if __name__ == "__main__":
     unittest.main()

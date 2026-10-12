@@ -644,6 +644,7 @@ struct ClayStats {
   // gave no record, by the capture's reason (index: capture::WaterReason; FrameScene::water_refused); water_ms:
   // the step's own CPU time this frame, for the log.
   ClayWater water = ClayWater::kOff;
+  uint32_t water_terrain = 0, water_terrain_refused = 0;
   uint32_t water_seen = 0, water_drawn = 0, water_targets = 0, water_left_out = 0;
   uint32_t water_frames[size_t(ClayWater::kCount)] = {};
   uint32_t water_capture[size_t(capture::WaterReason::kCount)] = {};
@@ -7826,16 +7827,19 @@ static_assert(sizeof(ClayWaterConstants) == 464 && offsetof(ClayWaterConstants, 
 inline constexpr uint32_t kClayWaterSlots = (sizeof(ClayWaterConstants) + kClayTerrainSlotBytes - 1) / kClayTerrainSlotBytes;   // 2
 // The step's small slots in the frame's constant buffer, taken only in a frame whose scene verdict is kDrawn
 // (PlanClayFrameSlots' and ClayFrameSmallSlots' `water_slots`): record i's constants at water0 + kClayWaterSlots *
-// i; target k's sky constants at water0 + kClayWaterSlots * kMaxWaterRecords + k; the second frame block
-// (WaterFrameBlock) at the next kClayFrameSlots slots.
-inline constexpr uint32_t kClayWaterStepSlots = kClayWaterSlots * capture::kMaxWaterRecords + kMaxWaterTargets + kClayFrameSlots;
-static_assert(kClayWaterSlots == 2 && kClayWaterStepSlots == 153);
+// i; target k's sky and blur constants in one slot after the records; four target frame blocks
+// at the next 4 * kClayFrameSlots slots; then one slot per reflection terrain record (at most256).
+inline constexpr uint32_t kClayWaterStepSlots = kClayWaterSlots * capture::kMaxWaterRecords + kMaxWaterTargets + kMaxWaterTargets * kClayFrameSlots + capture::kMaxReflectionDraws;
+static_assert(kClayWaterSlots == 2 && kClayWaterStepSlots == 472);
 constexpr uint32_t ClayWaterRecordSlot(const ClayFrameSlotPlan& plan, uint32_t i) { return plan.water0 + kClayWaterSlots * i; }
 constexpr uint32_t ClayWaterTargetSlot(const ClayFrameSlotPlan& plan, uint32_t k) {
   return plan.water0 + kClayWaterSlots * capture::kMaxWaterRecords + k;
 }
-constexpr uint32_t ClayWaterFrameSlot(const ClayFrameSlotPlan& plan) {
-  return plan.water0 + kClayWaterSlots * capture::kMaxWaterRecords + kMaxWaterTargets;
+constexpr uint32_t ClayWaterFrameSlot(const ClayFrameSlotPlan& plan, uint32_t k = 0) {
+  return plan.water0 + kClayWaterSlots * capture::kMaxWaterRecords + kMaxWaterTargets + k * kClayFrameSlots;
+}
+constexpr uint32_t ClayWaterReflectionSlot(const ClayFrameSlotPlan& plan, uint32_t i) {
+  return ClayWaterFrameSlot(plan, kMaxWaterTargets) + i;
 }
 // A field of the swizzle word: 0 to 3 a channel of the texel, 4 the constant 0, 5 the constant 1.
 constexpr bool WaterSwizzleUsable(uint32_t swizzle) {
@@ -8154,6 +8158,42 @@ constexpr bool PlanWaterViews(uint32_t views, const WaterTargetPlan& plan, uint8
   for (uint32_t k = 0; target_of_view && k < kMaxReflectionViews; ++k) target_of_view[k] = tied && k < views ? uint8_t(k) : kNoWaterTarget;
   return tied && target_of_view != nullptr;
 }
+struct ReflectionViewPlan {
+  bool ok = false;
+  uint8_t view[kMaxWaterTargets] = {kNoWaterTarget, kNoWaterTarget, kNoWaterTarget, kNoWaterTarget};
+};
+inline ReflectionViewPlan PlanReflectionViews(const capture::ReflectionView* views, uint32_t count, const WaterTargetPlan& plan) {
+  ReflectionViewPlan out;
+  if (!views || !plan.ok || plan.count == 0 || count != plan.count || count > kMaxWaterTargets) return out;
+  uint32_t end = 0;
+  for (uint32_t k = 0; k < count; ++k) {
+    if (views[k].first != end || views[k].count > capture::kMaxReflectionDraws - end || views[k].blurred > 1) return out;
+    end += views[k].count;
+  }
+  out.ok = true;
+  for (uint32_t k = 0; k < count; ++k) out.view[k] = uint8_t(k);
+  return out;
+}
+inline bool ReflectionViewUsable(const capture::DrawRecord* records, uint32_t count, const float want[4][4]) {
+  if (!want || count > capture::kMaxReflectionDraws || (count && !records)) return false;
+  if (!ViewMatricesAgree(want, want, 1e-5f)) return false;
+  for (uint32_t i = 0; i < count; ++i) {
+    float rows[4][4]; RecordMatrix(records[i], rows);
+    if (!ViewMatricesAgree(want, rows, 1e-5f)) return false;
+  }
+  return true;
+}
+// Each target's fog reconstructs its mirrored world position from that target's own matrix.
+inline bool WaterReflectionFrameBlock(const ClayFrameConstants& frame, const float rows[4][4], float height, ClayFrameConstants* out) {
+  if (!out || !rows || !(std::fabs(height) <= capture::kWaterPlaceMax) || !frame.eye_on) return false;
+  ClayFrameConstants block = WaterFrameBlock(frame);
+  if (!InvertMatrix4(rows, block.inv_view_proj)) return false;
+  for (int i = 0; i < 3; ++i) if (!(std::fabs(frame.eye[i]) <= capture::kWaterPlaceMax)) return false;
+  block.eye[2] = float(2.0 * double(height) - double(frame.eye[2]));
+  if (!(std::fabs(block.eye[2]) <= capture::kWaterPlaceMax)) return false;
+  *out = block;
+  return true;
+}
 // 2. The cull. A view's far terrain is drawn with the cull of THE VIEW RECORD'S OWN word (PA_SU_SC_MODE_CNTL,
 // register 0x2205: bit 0 cull front, bit 1 cull back, bit 2 "clockwise faces are front"): 0x00218006 in 358 of
 // 358 captured view rows, where the main scene's far terrain has 0x00218002. The mirror turns the handedness, so
@@ -8275,8 +8315,8 @@ inline void WaterBlurMirror(float pixel_x, float pixel_y, const WaterBlurConstan
 inline std::string FormatWaterText(const ClayStats& st) {
   if (st.water == ClayWater::kOff) return "Water: off";
   char buf[160];
-  std::snprintf(buf, sizeof(buf), "Water: drawn %u of %u, targets %u, opaque left out %u | not drawn {", st.water_drawn, st.water_seen,
-                st.water_targets, st.water_left_out);
+  std::snprintf(buf, sizeof(buf), "Water: drawn %u of %u, targets %u (terrain %u), opaque left out %u | not drawn {", st.water_drawn, st.water_seen,
+                st.water_targets, st.water_terrain, st.water_left_out);
   std::string text = buf;
   bool first = true;
   for (size_t i = 0; i < size_t(ClayWater::kCount); ++i) {
@@ -8295,7 +8335,9 @@ inline std::string FormatWaterText(const ClayStats& st) {
     text += buf;
     first = false;
   }
-  return text + "}";
+  text += "}";
+  if (st.water_terrain_refused) text += " | reflection: terrain " + std::to_string(st.water_terrain_refused);
+  return text;
 }
 
 // --- Native wind (frame-map section 18, "Native wind"; docs/native-renderer/lighting-formulas.md, "Wind") ---

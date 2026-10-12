@@ -2628,6 +2628,49 @@ static WaterPixelIn Input(const Pixel& p) {
 }
 }  // namespace water_pins
 
+static void ReflectionTargetTests() {
+  capture::ReflectionView views[5]{};
+  WaterTargetPlan plan{}; plan.ok = true; plan.count = 4;
+  for (uint32_t i = 0; i < 5; ++i) { views[i].first = i * 2; views[i].count = 2; }
+  const auto tied = PlanReflectionViews(views, 4, plan);
+  CHECK(859, tied.ok && tied.view[0] == 0 && tied.view[3] == 3);
+  CHECK(859, !PlanReflectionViews(views, 3, plan).ok && !PlanReflectionViews(views, 5, plan).ok &&
+                 !PlanReflectionViews(nullptr, 4, plan).ok);
+  views[2].first = 3;
+  CHECK(859, !PlanReflectionViews(views, 4, plan).ok);
+  capture::DrawRecord records[2]{};
+  const auto& pin = water_pins::kView[0];
+  float main_rows[4][4], captured_rows[4][4], other_height_rows[4][4];
+  for (int i = 0; i < 16; ++i) {
+    main_rows[i / 4][i % 4] = water_pins::F(pin.m[i]);
+    captured_rows[i / 4][i % 4] = water_pins::F(pin.want[i]);
+  }
+  for (auto& r : records) { r.layout = capture::TransformLayout::kDot; std::memcpy(r.rows, captured_rows, sizeof(captured_rows)); }
+  CHECK(860, ReflectionViewUsable(records, 2, captured_rows));
+  records[1].rows[0] *= 1.001f;
+  CHECK(860, !ReflectionViewUsable(records, 2, captured_rows));
+  CHECK(860, WaterViewRows(main_rows, water_pins::F(pin.c31[0]), water_pins::F(pin.c31[1]),
+                          water_pins::F(pin.h) + 1.0f, other_height_rows));
+  std::memcpy(records[1].rows, other_height_rows, sizeof(other_height_rows));
+  CHECK(860, !ReflectionViewUsable(records, 2, captured_rows));
+  std::memcpy(records[1].rows, captured_rows, sizeof(captured_rows));
+  records[1].rows[5] = std::numeric_limits<float>::quiet_NaN();
+  CHECK(860, !ReflectionViewUsable(records, 2, captured_rows) && !ReflectionViewUsable(nullptr, 2, captured_rows) &&
+                 ReflectionViewUsable(nullptr, 0, captured_rows));
+  float rows[4][4] = {{2, 0, 0, 4}, {0, 3, 0, 5}, {0, 0, 4, 6}, {0, 0, 1, 0}};
+  const auto slots = PlanClayFrameSlots(7, 2, 0, kClayWaterStepSlots);
+  CHECK(861, kClayWaterStepSlots == 472 && ClayWaterFrameSlot(slots, 3) + kClayFrameSlots == ClayWaterReflectionSlot(slots, 0) &&
+                 ClayWaterReflectionSlot(slots, 255) + 1 == slots.water0 + kClayWaterStepSlots);
+  CHECK(861, PlanClayFrameSlots(7, 2).object0 == PlanClayFrameSlots(7, 2, 0, 0).object0);
+  ClayFrameConstants frame{}; frame.eye_on = 1; frame.eye[0] = 7; frame.eye[1] = 8; frame.eye[2] = 11;
+  ClayFrameConstants target{};
+  CHECK(862, WaterReflectionFrameBlock(frame, rows, 5.0f, &target) && target.exposure == 1 && target.mask_du == 1.0f/256 &&
+                 target.eye[0] == 7 && target.eye[1] == 8 && target.eye[2] == -1);
+  float native[4][4]; std::memcpy(native, rows, sizeof(rows));
+  float inverse[4][4]; CHECK(862, InvertMatrix4(native, inverse) && std::memcmp(inverse, target.inv_view_proj, sizeof(inverse)) == 0);
+  CHECK(862, !WaterReflectionFrameBlock(frame, rows, std::numeric_limits<float>::quiet_NaN(), &target));
+}
+
 static void WaterTests() {
   using namespace water_pins;
   const float kNan = std::numeric_limits<float>::quiet_NaN();
@@ -2968,9 +3011,9 @@ static void WaterTests() {
     // within the step: the records' constants, the targets' sky constants, the second frame block; none past the objects
     CHECK(845, ClayWaterRecordSlot(with, 0) == with.water0 && ClayWaterRecordSlot(with, 63) == with.water0 + 126 &&
                    ClayWaterTargetSlot(with, 0) == with.water0 + 128 && ClayWaterTargetSlot(with, 3) == with.water0 + 131 &&
-                   ClayWaterFrameSlot(with) == with.water0 + 132 && ClayWaterFrameSlot(with) + kClayFrameSlots == with.object0);
+                   ClayWaterFrameSlot(with) == with.water0 + 132 && ClayWaterReflectionSlot(with, 256) == with.object0);
   }
-  CHECK(845, kClayWaterSlots == 2 && kClayWaterStepSlots == 2 * capture::kMaxWaterRecords + kMaxWaterTargets + kClayFrameSlots && kClayWaterStepSlots == 153);
+  CHECK(845, kClayWaterSlots == 2 && kClayWaterStepSlots == 2 * capture::kMaxWaterRecords + kMaxWaterTargets + 4 * kClayFrameSlots + 256 && kClayWaterStepSlots == 472);
   // 846 to 848: the step's place (Review Focus 5). The bridge's shape: opaque records, the first surface place
   // at seq 1628, a blended group behind it.
   {
@@ -3181,12 +3224,12 @@ static void WaterTests() {
     st.water = ClayWater::kDrawn;
     st.water_seen = st.water_drawn = st.water_left_out = 12;
     st.water_targets = 4;
-    CHECK(852, FormatWaterText(st) == "Water: drawn 12 of 12, targets 4, opaque left out 12 | not drawn {} | water-record {}");
+    CHECK(852, FormatWaterText(st) == "Water: drawn 12 of 12, targets 4 (terrain 0), opaque left out 12 | not drawn {} | water-record {}");
     // (off is the verdict's word, not a count's: a frame with the switch on and no water in sight is not "off")
     ClayStats none;
     none.water = ClayWater::kNoRecords;
     none.water_frames[size_t(ClayWater::kNoRecords)] = 7;
-    CHECK(852, FormatWaterText(none) == "Water: drawn 0 of 0, targets 0, opaque left out 0 | not drawn {no-records: 7 frames} | water-record {}");
+    CHECK(852, FormatWaterText(none) == "Water: drawn 0 of 0, targets 0 (terrain 0), opaque left out 0 | not drawn {no-records: 7 frames} | water-record {}");
     st.water = ClayWater::kReflection;
     st.water_drawn = st.water_left_out = st.water_targets = 0;
     st.water_frames[size_t(ClayWater::kDrawn)] = 500;                          // (drawn and off frames are not "not drawn")
@@ -3196,7 +3239,7 @@ static void WaterTests() {
     st.water_capture[size_t(capture::WaterReason::kRegister)] = 1;
     st.water_capture[size_t(capture::WaterReason::kFog)] = 24;
     CHECK(852, FormatWaterText(st) ==
-                   "Water: drawn 0 of 12, targets 0, opaque left out 0 | not drawn {reflection: 3 frames, order: 1 frames} | water-record {register: 1, fog: 24}");
+                   "Water: drawn 0 of 12, targets 0 (terrain 0), opaque left out 0 | not drawn {reflection: 3 frames, order: 1 frames} | water-record {register: 1, fog: 24}");
     ClayFrameConstants frame{};
     uint8_t bytes[sizeof(frame)];
     for (size_t i = 0; i < sizeof(frame); ++i) bytes[i] = uint8_t(37 * i + 11);
@@ -13357,6 +13400,7 @@ int main() {
   std::thread(SunTreeTests).join();
   ImpostorTests();
   WaterTests();
+  ReflectionTargetTests();
   if (g_fail) return g_fail;
   std::cout << "PASS: clay color, keys, vertex counts, index ranges, constants, status text, "
                "uv keys, texture text, instanced keys, pipeline keys and slots, draw state, alpha constants, "

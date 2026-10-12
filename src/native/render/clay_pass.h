@@ -469,7 +469,9 @@ class ClayPass {
   bool EnsureWaterTargets(nrhi::Device* dev);
   void DestroyWaterTargets();
   void ForgetWaterTargets();
-  void DrawWaterTargets(nrhi::Cmd* cmd, uint32_t count, nrhi::TextureView* const* sky_views);
+  void PrepareWaterReflection(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, const WaterTargetPlan& plan,
+                              const float rows[kMaxWaterTargets][4][4], ClayStats& st);
+  void DrawWaterTargets(nrhi::Cmd* cmd, const WaterTargetPlan& plan, nrhi::TextureView* const* sky_views);
   // The surface step (plan Task 12; frame-map section 20, "The water step"): its own layout (a record's constants,
   // kClayWaterSlots small slots of the frame's constant buffer, at b0 for both stages; the frame's block at b2 for
   // the pixel stage, whose fog it reads; the record's positions, indices and mask coordinates as buffers at t3,
@@ -603,7 +605,7 @@ class ClayPass {
   // the mask (white). `mask`: what the colour draw binds as the screen mask. `fog_out`: the fog of
   // the colour draw (DrawFogOf; kNone for a pre-pass draw).
   void DrawPrepared(nrhi::Cmd* cmd, const Prepared& p, ClayColor color, bool depth_only, nrhi::TextureView* mask,
-                    uint32_t* light_mode_out, DrawFog* fog_out, bool* light_bound);
+                    uint32_t* light_mode_out, DrawFog* fog_out, bool* light_bound, const float* reflection_height = nullptr);
   // The light's vertex inputs of a textured mesh record with light inputs:
   // its normals and the other buffers of its vertex kind (a colour stream's
   // colours, the probe weights and sets, an instance set's colours and bend
@@ -906,6 +908,15 @@ class ClayPass {
   nrhi::BindingLayout* water_sky_layout_ = nullptr;  // the RHI has no layout destruction
   nrhi::Shader* sky_mirror_vs_ = nullptr;
   nrhi::Pipeline* sky_mirror_pipeline_ = nullptr;
+  nrhi::Shader* water_terrain_vs_ = nullptr;
+  nrhi::Shader* water_blur_ps_ = nullptr;
+  nrhi::BindingLayout* water_blur_layout_ = nullptr;
+  nrhi::Pipeline* water_blur_pipeline_ = nullptr;
+  std::vector<PipelineKey> water_terrain_keys_;
+  std::vector<nrhi::Pipeline*> water_terrain_pipelines_;
+  std::vector<Prepared> water_reflection_[kMaxWaterTargets];
+  bool water_reflection_usable_[kMaxWaterTargets] = {};
+  bool water_reflection_blurred_[kMaxWaterTargets] = {};
   nrhi::Texture* water_target_[kMaxWaterTargets] = {};
   nrhi::TextureView* water_target_view_[kMaxWaterTargets] = {};
   nrhi::Texture* water_target_depth_ = nullptr;

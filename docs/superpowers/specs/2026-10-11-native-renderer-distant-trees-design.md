@@ -1,8 +1,9 @@
 # Native renderer sub-project 12: distant trees (the far woods' impostors)
 
 Status: **built through `flat` to `on` and validated on 2026-10-11 (default `off`); not closed: the
-fix wave and the closing follow. Verdicts: "Implementation notes and verdicts" at the end; record:
-frame map section 19, "Validation (12)", "Limits (12)".** The text below is the design as written
+fix wave is made and run (criterion 15's timing pair is to be made again on its binary); the closing
+follows. Verdicts: "Implementation notes and verdicts" at the end; record: frame map section 19,
+"Validation (12)", "Validation (12), after the fix wave", "Limits (12)".** The text below is the design as written
 (2026-10-11, before anything was built or run) with its marked amendments. Branch `native-renderer-distant-trees`
 (from master `d03f0be`). Research: `.superpowers/sdd/distant-trees-research.md` (untracked; its
 scripts and outputs in `out/native-evidence/distant-trees/`, "DT" below). Ledger:
@@ -833,9 +834,9 @@ Written by the validation (plan Tasks 16 and 11). The record with every number a
 - The vertex registers are fourteen; the fetch constant is the builder's packet, not the device's shadow; the swizzle field is `0x60A`; the bool word tested is the last writer's (Task 3).
 - A position that is no number never reaches the rasteriser (rulings 27, 37); unread register components are never touched (38); bounds judge only components a formula reads (34).
 - One picture texture a base (14), not a record (32); a decoder of the pass's own beside `Decode1555Level`; the levels' rule is "the mean of four parents, covered when 3 of 4 are" (criterion 5: 100.00% and 100.00%).
-- The content rule, as it ran in every validation run: ring clear at least 944 of 1,020 and 1,024 to 25,800 covered texels (its cover bounds are to be loosened: ledger ruling 45).
+- The content rule, as it ran in every validation run before the fix wave: ring clear at least 944 of 1,020 and 1,024 to 25,800 covered texels. Since the fix wave: the ring bound and at least one covered texel (ledger ruling 45).
 - A diagnostic feed (`--fable2_native_impostor_feed`) that the design does not have: the software adapter's read-back leaves every picture empty (ruling 43).
-- The value `on` seeds the read-back list with the native renderer off too (to be mended: ledger ruling 47).
+- Until the fix wave the value `on` seeded the read-back list with the native renderer off too; since it, only with the renderer on (ledger ruling 47; log 698).
 
 **Verdicts** (no bound was changed after the runs; every run `RUN UNCHECKED`, shots 1942 wide, binary `363564F4A5FAD9C6` unless said).
 
@@ -861,4 +862,17 @@ Written by the validation (plan Tasks 16 and 11). The record with every number a
 
 **Where a criterion's reference turned out wrong**: 7 (the quarter pixel's share), 9 (its pixel set), 12 (its off-side bound), 13 and 16 ("within the range the two runs span" when the two runs agree to three digits). Each is stated beside its letter; none was re-bounded.
 
-**Open** (frame map "Limits (12)"; user checks 93 to 98): the moving picture; other regions, towns, times of day; criterion 8 with coverage and wind on; criterion 12; the dissolve band; the 60 Hz floor under the cost figure; whether the half part is built (ledger ruling 46: the figures are inside their bands).
+**After the fix wave** (ledger rulings 45, 47 to 50; binary `AC3D3E10E4949CE8`, commit `37c99f6`; runs of logs 694 to 698, `RUN UNCHECKED`, shots 1942 wide; frame map section 19, "Validation (12), after the fix wave"). What changed in the build: the content rule keeps its ring bound and asks only for one covered texel (the cover's bounds are gone; the 374 surveyed bases keep their verdicts); the read-back list is seeded with the pictures only when the native renderer is on as well; a list given by hand that holds the fourteen bases counts as having the pictures; a feed run is marked in the first-upload line, the Impostors line and the pictures file; the picture's hash reads every byte. No shader text, pipeline state, binding or sampler changed. The verdicts that the table above left open or that the new pair repeats:
+
+| # | Verdict | In short |
+|---|---|---|
+| 6 | met again | 14 of 14 pictures equal to the paired frame's dump on 100.00% |
+| 7 | **not met as written**, as before; met by the named substitute | 13.2% (bound a tenth), +5,746 (bound +4,858); with one pixel of tolerance 158 remain and no rise |
+| 8 | **met as written** (pictures, coverage and wind on) | regions 0.986 to 0.992 (off 1.105 to 1.332; band 0.93 to 1.07); gap pixels 1.009, channels 0.997 to 1.022 (off 1.432; band 0.92 to 1.08) |
+| 9 | band met; the 0.005 **not met as written** in three regions, as before; met by the named substitute | on pixels shared by both runs at most -0.0046 |
+| 12 | first part **met as ledger ruling 50 judges it**; the reference's off-side bound is recorded as wrong, not bent; second part not decidable | the stored native layer depth is closed on 99.3% of 12,099 far-wood texels with the impostors on (bound 90%), on 88.4% with them off (the spec asked at most 10%: the ground behind the missing trees closes it) |
+| 13 | **met on its named run by a named measure** | one `impostors: off` line, the seeded line log 657's, 21 of 22 regions within 0.02 of 1 against `k18b_defaults` (the far regions 1.000 to 1.001; the railing post cap 1.289); the letter's "within the emulated pair's range" cannot tell (10 of 22 inside a range that is nearly a point) |
+| 14 | `on` with the coverage on: met by the named substitute (the feed) on the software adapter, clean on the graphics card | 0 errors, id 1328 alone, `Impostors: on (feed), drawn 14 of 14`; graphics card 14 of 14 with Coverage and Sun lines |
+| 15 | `on`: **not judged on this binary** (the +2.327 ms is the binary's of before; the full hash adds about 0.2 ms of CPU time a frame, and the margin was 0.17 ms): the timing pair is to be made again | the pictures' CPU time 1.27 ms against 1.05 to 1.10 ms |
+
+**Open** (frame map "Limits (12)"; user checks 93 to 98): the moving picture; other regions, towns, times of day; criterion 15 on the present binary; the dissolve band; the 60 Hz floor under the cost figure; the half part (ledger ruling 48: it stays out; the figures are inside their bands with the coverage on as well).

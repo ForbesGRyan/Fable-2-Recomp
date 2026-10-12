@@ -47,6 +47,7 @@
 
 #include <rex/graphics/native_rhi.h>
 
+#include "../../core/readback_force_list.h"
 #include "clay_logic.h"
 #include "frame_scene.h"
 #include "geometry_cache.h"
@@ -128,7 +129,7 @@ class ClayPass {
   // vertices a quad, the position by the game's formula, one flat colour, the game's dissolve, light scalars
   // and per-tree fog, depth-tested and depth-written. No pre-pass draw, no shadow-map draw. With `on` (frame-map,
   // "The pictures in the pass") each record is drawn with the game's own picture of its tree model, read from
-  // guest memory this frame (SetImpostorPicturesAvailable; ReadImpostorPicture), and a record without a usable
+  // guest memory this frame (SetImpostorReadback; ReadImpostorPicture), and a record without a usable
   // picture is not drawn and counted by its reason: never a flat quad in a picture's place. With `off` nothing
   // of the step is made, bound, reserved or drawn, and the frame's slot plan is the one of before.
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
@@ -204,10 +205,12 @@ class ClayPass {
   // from a Render whose mode was `on`): true once a dump, with `file` the bytes of native_scene_<stamp>.f2np;
   // false in every other call, and for a dump of a frame drawn without the pictures.
   bool TakeImpostorPictures(std::vector<uint8_t>* file);
-  // Whether the run has the pictures in guest memory (fable2::native::ImpostorPicturesAvailable: the read-back
-  // list, seeded or given by hand, forces the fourteen bases, or the read-back is full). The caller says so before a Render in
-  // `on`; without it every record is "picture: base".
-  void SetImpostorPicturesAvailable(bool available) { impostor_pictures_available_ = available; }
+  // Whether the run brings each frame's own pictures to guest memory (fable2::ImpostorReadback,
+  // readback_force_list.h: the read-back mode none with a list, seeded or given by hand, that forces the fourteen
+  // bases, or the mode full). The caller says so before every Render in `on`. Not available for want of the list:
+  // every record is "picture: base"; for a mode that brings pictures a frame old (fast) or frozen (some): every
+  // record is "picture: mode". Nothing is read or drawn either way, and a texture made earlier is not shown.
+  void SetImpostorReadback(fable2::ImpostorReadback readback) { impostor_readback_ = readback; }
   // The diagnostic feed (fable2_native_impostor_feed; impostor_picture.h): with one, a base the feed holds is read
   // from the feed's set of this Render (the sets in turn, a Render each) IN PLACE OF GUEST MEMORY, whatever the
   // run's read-back; everything after the read is the product's path. Null (the default): no feed. The caller
@@ -419,11 +422,14 @@ class ClayPass {
   // the picture a record samples, this Render: its tf0 is one of the read-back list's fourteen bases in a run
   // that has them (else kBase); the base level's 131,072 bytes read whole from guest memory and COPIED before
   // anything is judged (else kUnread); the copy's ImpostorPictureHash (every byte) against the one the picture's
-  // texture was made from: equal means the texture is used as it is; else decoded (DecodeImpostorBase, or Decode1555Level for
-  // another layout; false: kUnread), held to the content rule (ImpostorPictureUsable; false: kContent), its
-  // three levels made (MakeImpostorLevels) and the four levels staged for upload in this frame's staging buffer
-  // (a texture, its view or the buffer missing: kUpload). A base is judged once a Render, however many records
-  // name it. `*picture`: which of the fourteen; `*sampler`: the static sampler of the record's fetch.
+  // texture was made from: equal, behind a view of the same swizzle, means the texture is used as it is
+  // (PlanImpostorPicture, impostor_picture.h: the reuse); else decoded (DecodeImpostorBase, or Decode1555Level for
+  // another layout, which the capture's fetch rule does not let through; false: kUnread), held to the content rule
+  // (ImpostorPictureUsable; false: kContent), its three levels made (MakeImpostorLevels) and the four levels staged
+  // for upload in this frame's staging buffer (a texture, its view or the buffer missing: kUpload;
+  // CommitImpostorPicture says what is held afterwards). A base is judged once a Render, however many records
+  // name it. In a run whose read-back mode brings old pictures: kMode, before anything is read.
+  // `*picture`: which of the fourteen; `*sampler`: the static sampler of the record's fetch.
   ImpostorPicture ReadImpostorPicture(nrhi::Device* dev, const capture::ImpostorRecord& r, uint32_t* picture, uint32_t* sampler, ClayStats& st);
   void DestroyImpostorPictures();
   void ForgetImpostorPictures();
@@ -802,21 +808,21 @@ class ClayPass {
   // The pictures (`on`): one texture a base of the read-back list, 256 x 256 R8G8B8A8_UNORM with four levels,
   // owned by the pass and outside the texture cache (whose dynamic rule would refuse a texture that changes
   // every frame); made on the first frame that has a usable picture for it, never in `off` or `flat`. `view`:
-  // with the swizzle of the fetch it was made for (`swizzle`: the fetch's field). `hash`: ImpostorPictureHash of the guest
-  // bytes the texture holds (`filled`). `base`: the base level as uploaded, kept for the pictures' dump.
-  // `judged`, `state`: the Render that last judged it (impostor_picture_serial_) and what it found.
+  // with the swizzle of the fetch it was made for. `held`: the bookkeeping (impostor_picture.h,
+  // ImpostorPictureHeld: whether the two are made, the view's swizzle, the ImpostorPictureHash of the guest bytes
+  // the texture holds, whether it is filled and in the shader-resource state), changed only through
+  // CommitImpostorPicture and ImpostorPictureUploaded. `base`: the base level as uploaded, kept for the pictures'
+  // dump. `judged`, `state`: the Render that last judged it (impostor_picture_serial_) and what it found.
   struct ImpostorPictureTexture {
     nrhi::Texture* texture = nullptr;
     nrhi::TextureView* view = nullptr;
-    uint32_t swizzle = 0;
-    uint64_t hash = 0;
-    bool filled = false, shader_state = false;
+    ImpostorPictureHeld held;
     uint64_t judged = 0;
     ImpostorPicture state = ImpostorPicture::kNone;
     std::vector<uint8_t> base;
   };
   ImpostorPictureTexture impostor_pictures_[14];
-  bool impostor_pictures_available_ = false;
+  fable2::ImpostorReadback impostor_readback_ = fable2::ImpostorReadback::kNoList;
   const ImpostorFeed* impostor_feed_ = nullptr;
   uint32_t impostor_refusals_logged_ = 0;   // (one line for the first refusal of each kind: a bit an ImpostorPicture)
   uint64_t impostor_picture_serial_ = 0;
@@ -831,6 +837,7 @@ class ClayPass {
   uint32_t impostor_uploads_[14] = {};
   uint32_t impostor_upload_count_ = 0;
   bool impostor_first_upload_logged_ = false;
+  bool impostor_first_reuse_logged_ = false;   // (one line for the first frame drawn from textures as they are)
   std::vector<uint8_t> impostor_guest_, impostor_decoded_, impostor_levels_[3];   // (scratch)
   // The pictures' file of the dump last started in `on` (TakeImpostorPictures), and the frame it is of.
   std::vector<uint8_t> impostor_dump_file_;

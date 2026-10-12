@@ -665,6 +665,26 @@ class CapturedRows(unittest.TestCase):
             self.assertEqual((rows, quads, size), (1, 2, (12.96875, 14.9765625)))
             self.assertEqual(spans[("vs", 8)][2], [impostor_check.f32(0.9)] * 2)
             self.assertEqual(spans[("ps", 29)][0], [48.0, 48.0])
+            # (ledger ruling 54) the command holds what it found to the table's sanity bounds: a made row is inside,
+            # and the command says so and exits 0
+            self.assertEqual(impostor_check.bounds_outside(spans, size), [])
+            said = []
+            self.assertEqual(impostor_check.main(["bounds", str(path)], say=said.append), 0)
+            self.assertTrue(any("every read component and the size inside the table's bounds" in line for line in said), said)
+            self.assertFalse(any("four times" in line for line in said), said)
+            # a span that reaches outside its bound is named, by register and component: a fog range's start beyond
+            # a place's reach, a raise beyond a scale's, a size beyond the size's; an unread component is not judged
+            wide = {key: [list(s) for s in span] for key, span in spans.items()}
+            wide[("vs", 111)][0][1] = 2.0e6
+            wide[("vs", 8)][2][0] = -70000.0
+            wide[("vs", 111)][1][1] = 1.0e30                                # c111.y: not read
+            self.assertEqual(impostor_check.bounds_outside(wide, (size[0], 5000.0)), ["vertex c8.z", "vertex c111.x", "the size"])
+            self.assertEqual(impostor_check.bounds_outside(spans, (0.0, size[1])), ["the size"])       # a quad of no size
+            far = dict(wide)
+            far[("vs", 111)] = [[200.0, 200.0], [0.0, 9000.0], [1.0, 1.0], [0.0001, 0.0002]]          # a region whose fog starts at 200 units
+            far[("vs", 8)] = spans[("vs", 8)]
+            far[("vs", 47)] = [[5000.0, 5000.0], [-5000.0, -5000.0], [300.0, 300.0], [0.0, 0.0]]
+            self.assertEqual(impostor_check.bounds_outside(far, size), [])
 
 
 @unittest.skipUnless(DUMPS.is_dir(), NO_DUMPS)

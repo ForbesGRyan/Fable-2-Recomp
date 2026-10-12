@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <string>
 
+#include "../core/readback_force_list.h"
 #include "native_render_state.h"
 
 namespace rex::memory {
@@ -58,14 +59,16 @@ bool ExposureReadbackWanted();
 // --fable2_native_render (ledger ruling 47: the native view is the pictures' only reader); the
 // application asks both once, in OnPostSetup, and seeds the fourteen picture bases into the SDK's
 // forced read-back list when the second holds. NoteImpostorPicturesSeeded: the application says that
-// it did (never when the list was given by hand or refused). ImpostorPicturesAvailable: the list, seeded
-// or given by hand, forces each of the fourteen bases (ForceListHasImpostorPictures), or
-// --readback_resolve is full; decided at its first call and kept (the pass asks; otherwise a record is
-// "picture: base").
+// it did (never when the list was given by hand or refused; it only words the log's line).
+// CurrentImpostorReadback: whether the run brings each frame's own pictures to guest memory, from the
+// SDK's switches as they stand (fable2::DecideImpostorReadback): --readback_resolve none with a list,
+// seeded or given by hand, that forces each of the fourteen bases, or full; in fast and some the
+// pictures are a frame old or frozen and none is drawn ("picture: mode"); without the list "picture:
+// base". The renderer asks before every frame drawn in `on` and logs each change.
 bool ImpostorSwitchOn();
 bool ImpostorReadbackWanted();
 void NoteImpostorPicturesSeeded();
-bool ImpostorPicturesAvailable();
+fable2::ImpostorReadback CurrentImpostorReadback();
 
 // F3 status lines from the clay pass (empty while the renderer is not
 // installed). Thread-safe copy.

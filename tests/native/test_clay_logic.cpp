@@ -2119,7 +2119,7 @@ static void ImpostorTests() {
     CHECK(814, !due);
   }
   // Review Focus 5: in `on` nothing but a usable picture is drawn; never a flat quad in a picture's place.
-  for (uint32_t p = 0; p <= uint32_t(ImpostorPicture::kUpload); ++p) {
+  for (uint32_t p = 0; p <= uint32_t(ImpostorPicture::kMode); ++p) {
     const ImpostorPicture picture = ImpostorPicture(p);
     CHECK(815, DecideImpostorPicture(capture::ImpostorMode::kFlat, picture) == ClayImpostorSkip::kNone);
     CHECK(815, (DecideImpostorPicture(capture::ImpostorMode::kOn, picture) == ClayImpostorSkip::kNone) == (picture == ImpostorPicture::kUsable));
@@ -2130,6 +2130,11 @@ static void ImpostorTests() {
                  DecideImpostorPicture(capture::ImpostorMode::kOn, ImpostorPicture::kBase) == ClayImpostorSkip::kPictureBase &&
                  DecideImpostorPicture(capture::ImpostorMode::kOn, ImpostorPicture::kContent) == ClayImpostorSkip::kPictureContent &&
                  DecideImpostorPicture(capture::ImpostorMode::kOn, ImpostorPicture::kUpload) == ClayImpostorSkip::kPictureUpload);
+  // (ledger ruling 54: a read-back mode whose pictures are a frame old or frozen has a reason of its own, last of the pictures')
+  CHECK(815, DecideImpostorPicture(capture::ImpostorMode::kOn, ImpostorPicture::kMode) == ClayImpostorSkip::kPictureMode &&
+                 std::string(ClayImpostorSkipName(ClayImpostorSkip::kPictureMode)) == "picture: mode" &&
+                 uint32_t(ImpostorPicture::kMode) == uint32_t(ImpostorPicture::kUpload) + 1 &&
+                 uint32_t(ClayImpostorSkip::kPictureMode) == uint32_t(ClayImpostorSkip::kPictureUpload) + 1);
   CHECK(815, std::string(ClayImpostorSkipName(ClayImpostorSkip::kPictureUnread)) == "picture: unread" &&
                  std::string(ClayImpostorSkipName(ClayImpostorSkip::kPictureBase)) == "picture: base" &&
                  std::string(ClayImpostorSkipName(ClayImpostorSkip::kPictureContent)) == "picture: content" &&
@@ -2414,6 +2419,12 @@ static void ImpostorTests() {
     on.impostor_skip[size_t(ClayImpostorSkip::kPictureUnread)] = 14;
     CHECK(834, FormatImpostorText(on) ==
                    "Impostors: on, drawn 0 of 14 (0 quads), pictures 0 (refreshed 0) | not drawn {picture: unread: 14} | impostor-record {}");
+    // (a read-back mode that brings old pictures: every record by the mode's own name, after the other pictures' reasons)
+    on.impostor_skip[size_t(ClayImpostorSkip::kPictureUnread)] = 0;
+    on.impostor_skip[size_t(ClayImpostorSkip::kPictureMode)] = 13;
+    on.impostor_skip[size_t(ClayImpostorSkip::kPictureBase)] = 1;
+    CHECK(834, FormatImpostorText(on) ==
+                   "Impostors: on, drawn 0 of 14 (0 quads), pictures 0 (refreshed 0) | not drawn {picture: base: 1, picture: mode: 13} | impostor-record {}");
     // The pictures (plan Task 14; the plan's CHECK 819 is 837 here: 819 was taken). `on` names the pictures the
     // frame's records could use and those decoded and uploaded this frame; `flat` and `off` have the text of before.
     {
@@ -2501,7 +2512,7 @@ static void ImpostorTests() {
     CHECK(835, !ImpostorPlacesOneRun(seqs, std::size(seqs), 0, 0xFFFFFFFFu));
     CHECK(835, ImpostorPlacesOneRun(seqs, std::size(seqs), 430, 430) && ImpostorPlacesOneRun(nullptr, 0, 1, 99) && ImpostorPlacesOneRun(seqs, 0, 1, 99));
     CHECK(835, !ImpostorPlacesOneRun(seqs, std::size(seqs), 439, 426));       // (the ends exchanged: no run)
-    CHECK(835, std::string(ClayImpostorSkipName(ClayImpostorSkip::kPlace)) == "place" && size_t(ClayImpostorSkip::kCount) == 10);
+    CHECK(835, std::string(ClayImpostorSkipName(ClayImpostorSkip::kPlace)) == "place" && size_t(ClayImpostorSkip::kCount) == 11);
   }
 }
 

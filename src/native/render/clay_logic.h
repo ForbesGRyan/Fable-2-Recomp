@@ -7075,13 +7075,15 @@ static_assert(kClayImpostorSlots == 2 && kClayImpostorFrameSlots == 64);
 
 // Which pixels a draw shades (spec ruling 13; `covered`: CoveredSamples under the draw's offsets 0xAA, the game's
 // two samples; `alpha_test`: alpha > the draw's reference).
-//   kImpostorKeepFirst: the alpha test passed and the first sample is covered. With --fable2_native_coverage off,
-//                       and always in `flat`: the pixel is drawn whole, with depth, and the native depth is the
-//                       game's first sample's, which is what its depth copy holds.
+//   kImpostorKeepFirst: the alpha test passed and the first sample is covered. What the step draws, in `flat`
+//                       and in `on`, under either value of --fable2_native_coverage: the pixel is drawn whole,
+//                       with depth, and the native depth is the game's first sample's, which is what its depth
+//                       copy holds.
 //   kImpostorKeepFull:  both samples (the part drawn in place under the coverage's switch).
 //   kImpostorKeepHalf:  exactly one (the part the coverage's tail would draw at one half).
-// Full and half part the first set. No step that draws the half part exists in this sub-project (it is closed at
-// `flat`: ledger ruling 31; what that costs is in frame-map section 19, "The draw's rules").
+// Full and half part the first set. No step that draws the half part exists in this sub-project (ledger ruling
+// 48: with the game's pictures drawn, every tree-pixel and far-region figure is inside its band without it; what
+// that costs is in frame-map section 19, "The draw's rules" and "Limits (12)").
 enum : uint32_t { kImpostorKeepFirst = 1, kImpostorKeepFull = 2, kImpostorKeepHalf = 3 };
 constexpr bool ImpostorKept(uint32_t kept, bool alpha_test, uint32_t covered) {
   if (!alpha_test) return false;
@@ -7093,16 +7095,18 @@ inline constexpr uint8_t kImpostorMaskOffsets = 0xAA;   // RB_COLORCONTROL bits 
 // kPlace (ledger ruling 38's companion, review of Tasks 8 and 9, Minor 4; not among the spec's strings): the frame's
 // impostor records do not lie in one run among the drawn records (ImpostorPlacesOneRun), so no one place is the
 // game's for all of them: none is drawn.
+// kPictureMode (ledger ruling 54): the run's read-back mode brings pictures that are a frame old or frozen
+// (fable2::ImpostorReadback, readback_force_list.h): none is drawn, each record counted by this name.
 enum class ClayImpostorSkip : uint8_t { kNone, kPipeline, kSlot, kBuffer, kScale, kPictureBase, kPictureUnread,
-                                        kPictureContent, kPictureUpload, kPlace, kCount };
+                                        kPictureContent, kPictureUpload, kPictureMode, kPlace, kCount };
 constexpr const char* ClayImpostorSkipName(ClayImpostorSkip s) {
   constexpr const char* kNames[] = {"none", "pipeline", "slot", "buffer", "scale", "picture: base",
-                                    "picture: unread", "picture: content", "picture: upload", "place"};
+                                    "picture: unread", "picture: content", "picture: upload", "picture: mode", "place"};
   static_assert(sizeof(kNames) / sizeof(kNames[0]) == size_t(ClayImpostorSkip::kCount));
   return s < ClayImpostorSkip::kCount ? kNames[size_t(s)] : "?";
 }
 // What is known of a record's picture. kNone: no picture at all (nothing was read for it).
-enum class ImpostorPicture : uint8_t { kNone, kUsable, kBase, kUnread, kContent, kUpload };
+enum class ImpostorPicture : uint8_t { kNone, kUsable, kBase, kUnread, kContent, kUpload, kMode };
 // flat: drawn with the flat texture whatever the picture's state. on: drawn only with a usable picture; anything
 // else is its reason, and no picture at all is "picture: unread": never a flat quad in a picture's place, which
 // would put depth and colour where the game has neither. off: never asked; "pipeline".
@@ -7122,6 +7126,7 @@ constexpr ClayImpostorSkip DecideImpostorPicture(capture::ImpostorMode mode, Imp
     case ImpostorPicture::kBase: return ClayImpostorSkip::kPictureBase;
     case ImpostorPicture::kContent: return ClayImpostorSkip::kPictureContent;
     case ImpostorPicture::kUpload: return ClayImpostorSkip::kPictureUpload;
+    case ImpostorPicture::kMode: return ClayImpostorSkip::kPictureMode;
     default: return ClayImpostorSkip::kPictureUnread;
   }
 }

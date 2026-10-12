@@ -45,7 +45,10 @@ clang++ -std=c++23 "%~dp0native\test_shader_tally.cpp" -o "%OUT%\shader_tally.ex
 clang++ -std=c++23 "%~dp0native\test_geometry_cache_index.cpp" -o "%OUT%\geometry_cache_index.exe" || exit /b 1
 "%OUT%\geometry_cache_index.exe" || exit /b 1
 rem InstanceMeshCount must not cast a NaN or out-of-range count (trap as above).
-clang++ -std=c++23 -fsanitize=float-cast-overflow -fsanitize-trap=float-cast-overflow "%~dp0native\test_clay_logic.cpp" -o "%OUT%\clay_logic.exe" || exit /b 1
+rem A 16 MiB stack: this test's main is one function whose frame is 995,768 bytes built without
+rem optimisation (clang 22, -Wframe-larger-than), of the default 1 MiB; on a failing path the test
+rem then died after its FAIL line (0xC00000FD, 0xC0000005) instead of returning the case's number.
+clang++ -std=c++23 -fsanitize=float-cast-overflow -fsanitize-trap=float-cast-overflow -Wl,/STACK:16777216 "%~dp0native\test_clay_logic.cpp" -o "%OUT%\clay_logic.exe" || exit /b 1
 "%OUT%\clay_logic.exe" || exit /b 1
 clang++ -std=c++23 "%~dp0native\test_discovery_format.cpp" -o "%OUT%\discovery_format.exe" || exit /b 1
 "%OUT%\discovery_format.exe" || exit /b 1

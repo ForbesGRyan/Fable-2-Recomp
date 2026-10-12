@@ -1,4 +1,4 @@
-"""light_formulas.IMPOSTOR_SHADER and the captured bounds -> src/native/capture/impostor_table.inc (distant trees,
+"""light_formulas.IMPOSTOR_SHADER and its sanity bounds -> src/native/capture/impostor_table.inc (distant trees,
 plan Task 6): what the capture's record of a far-woods draw (vertex shader 129F, pixel shader 4B1D) is held to.
 
   FABLE2_IMPOSTOR_SHADERS(vs, ps)                                  the pair's hashes
@@ -20,16 +20,32 @@ s in that order (measured: every 129F row of the five discovery captures of 2026
 own fetch constant has endian 2, the shader's fetch has the swizzle yxwz, and the replay against the game's depth
 falls from 99% to 0.1% with the first two exchanged: frame-map section 19).
 
-The bounds (ledger: the plan's provisional table). The spec's own stand where it gives them: pixel c29.y in
-(0, 4], c29.x and c12.y in [0, 4096], c12.w in [0, 4], c31.x and c20.w in (0, 64], the matrix rows (vertex
-c72..c75, c115..c117) within 1e7, a place (the eye: vertex c47, pixel c19) within 1e6. Every other register is
-held, in each of its four components, to plus and minus FOUR TIMES THE LARGEST MAGNITUDE any of its components
-has in the in-scene 129F rows of the five discovery captures D1, D2, D3T, D4a, D4b (CAPTURED below, from
-`impostor_check.py bounds 155547 155731 155929 160104 160251`: out/native-evidence/distant-trees/t6_bounds.txt);
-the size's bound is four times the largest captured size. "(0, x]" is written with the low bound ABOVE_ZERO, the
-smallest positive single (bits 0x00000001): a value passes when lo <= value <= hi. A register whose value another
-place of the world takes outside these bounds makes a record that is refused and counted (`register`, `quad`),
-never one that is drawn wrong.
+The bounds are SANITY bounds (ledger ruling 54, after the review of the whole branch, I2): they refuse what is no
+value of its kind at all (no number, an infinity, a magnitude no world coordinate, fog range or scale could
+have) and nothing else. None is fitted to the captures any more: the five discovery captures were all made within
+ten units of one place at one time of day, and "four times the largest magnitude seen there", which the bounds
+of before were, refused a region whose fog range starts beyond 81.6 units for a fog that is valid and merely
+different (every far tree missing, `register`). By the kind of each component a formula reads (KIND below):
+
+  a place or a distance, in world units    within 1e6 (PLACE)     the eye (vertex c47.xyz, pixel c19.xyz), the fog
+                                                                  range's start (vertex c111.x)
+  a matrix term                            within 1e7 (MATRIX)    vertex c72..c75 (the projection), c115..c117 (the view)
+  a scale: a factor, a direction's part,   within 65,536 (SCALE)  the raise (c8.z), the lying axis (c46.xyz), the
+  an exponent, a reciprocal range                                 fog's axis, blend and reciprocal range (c110.xyz,
+                                                                  c111.z, .w), the picture's coordinate scale and
+                                                                  offset (c113), the extent's factor and exponent
+                                                                  (c114.xy)
+  a quad's size                            in (0, 4096] (SIZE)    the word's fourth half
+
+and where the spec gives a bound with a meaning of its own, that one (SPEC below): the pixel shader's distances
+c12.y and c29.x in [0, 4096], the dissolve's rate c29.y in (0, 4], and the light's three scales c12.w in [0, 64],
+c31.x and c20.w in (0, 64] (c12.w was [0, 4]: eight times the one value seen; it is a light scale as the other
+two are). The truth of the fog's registers is not this table's: FrameBuilder::Finish holds c110.xyz and c111.x,
+.z, .w bit-equal to the frame's own validated fog block (capture::ImpostorFogMatches, the `fog-table` rule), and
+this table only keeps garbage out of a frame that has no such block. "(0, x]" is written with the low bound
+ABOVE_ZERO, the smallest positive single (bits 0x00000001): a value passes when lo <= value <= hi. CAPTURED below
+(from `impostor_check.py bounds 155547 155731 155929 160104 160251`: out/native-evidence/distant-trees/
+t6_bounds.txt) is kept as what the tests and that command hold the table to: every captured value lies inside.
 
 Only what a formula reads is bounded (ledger ruling 34, after the review of phase 12a, I2). READ below names
 the components impostor_position, impostor_fog and the pixel formulas read (the Tasks 4-5 report's list;
@@ -62,7 +78,7 @@ OUT = Path(__file__).resolve().parents[2] / "src" / "native" / "capture" / "impo
 _HASH = re.compile(r"[0-9A-Fa-f]{16}")
 BANKS = {"vs": 0, "ps": 1}
 ABOVE_ZERO = struct.unpack("<f", struct.pack("<I", 1))[0]       # the smallest positive single: the low bound of "(0, x]"
-MATRIX, PLACE, FACTOR = 1e7, 1e6, 4.0
+MATRIX, PLACE, SCALE, SIZE = 1e7, 1e6, 65536.0, 4096.0
 
 # The smallest and largest of every component over the 116 in-scene 129F rows (4,744 quads) of the five discovery
 # captures (t6_bounds.txt, nine digits as printed).
@@ -90,14 +106,31 @@ CAPTURED = {
 CAPTURED_SIZE = (0.377441406, 16.390625)
 # The spec's own bounds, a component at a time (None: the register's rule).
 SPEC = {
-    ("ps", 12): [None, (0.0, 4096.0), None, (0.0, 4.0)],
+    ("ps", 12): [None, (0.0, 4096.0), None, (0.0, 64.0)],
     ("ps", 20): [None, None, None, (ABOVE_ZERO, 64.0)],
     ("ps", 29): [(0.0, 4096.0), (ABOVE_ZERO, 4.0), None, None],
     ("ps", 31): [(ABOVE_ZERO, 64.0), None, None, None],
 }
-WHOLE = {("vs", 47): PLACE, ("ps", 19): PLACE,
-         ("vs", 72): MATRIX, ("vs", 73): MATRIX, ("vs", 74): MATRIX, ("vs", 75): MATRIX,
-         ("vs", 115): MATRIX, ("vs", 116): MATRIX, ("vs", 117): MATRIX}
+# The kind of every component a formula reads (None: not read; a component SPEC bounds has its kind all the same,
+# the spec's bound being the narrower statement): what "garbage" means for it.
+_P, _M, _S = "place", "matrix", "scale"
+KIND = {
+    ("vs", 8): [None, None, _S, None],          # the raise: lift = size * c8.z
+    ("vs", 46): [_S, _S, _S, None],             # the lying axis, a direction
+    ("vs", 47): [_P, _P, _P, None],             # the eye
+    ("vs", 72): [_M] * 4, ("vs", 73): [_M] * 4, ("vs", 74): [_M] * 4, ("vs", 75): [_M] * 4,
+    ("vs", 110): [_S, _S, _S, None],            # the fog's axis, a direction
+    ("vs", 111): [_P, None, _S, _S],            # the fog range's start (a distance), its blend, its reciprocal range
+    ("vs", 113): [_S] * 4,                      # the picture's coordinate scale and offset
+    ("vs", 114): [_S, _S, None, None],          # the extent's factor and exponent
+    ("vs", 115): [_M] * 4, ("vs", 116): [_M] * 4, ("vs", 117): [_M] * 4,
+    ("ps", 12): [None, _P, None, _S],           # the light's fall: its start (a distance), its far scale
+    ("ps", 19): [_P, _P, _P, None],             # the eye
+    ("ps", 20): [None, None, None, _S],         # the output scale
+    ("ps", 29): [_P, _S, None, None],           # the dissolve: its start (a distance), its rate
+    ("ps", 31): [_S, None, None, None],         # the colour's scale
+}
+REACH = {_P: PLACE, _M: MATRIX, _S: SCALE}
 
 
 # The components a formula reads (0 to 3 for x to w); every other component of the table's registers is carried
@@ -125,19 +158,52 @@ def entry(shader=None):
     """The table's entry: light_formulas.IMPOSTOR_SHADER with the bounds (module text) and b129's mask."""
     s = dict(shader or lf.IMPOSTOR_SHADER)
     bounds = {}
-    for key, span in CAPTURED.items():
-        if key in WHOLE:
-            rule = [(-WHOLE[key], WHOLE[key])] * 4
-        else:
-            # (the largest magnitude over the components that are READ: an unread one gives no bound to another)
-            reach = f32(FACTOR * max(max(abs(span[i][0]), abs(span[i][1])) for i in READ[key]))
-            rule = [(-reach, reach)] * 4
+    for key in CAPTURED:
+        if [k is not None for k in KIND[key]] != [i in READ[key] for i in range(4)]:
+            raise ValueError("%s c%d: KIND names other components than READ" % key)
         own = SPEC.get(key, [None] * 4)
-        bounds[key] = [(own[i] if own[i] is not None else rule[i]) if i in READ[key] else None for i in range(4)]
+        # (the spec's bound where it gives one; else the component's kind, plus and minus its reach)
+        bounds[key] = [(own[i] if own[i] is not None else (-REACH[KIND[key][i]], REACH[KIND[key][i]])) if i in READ[key] else None
+                       for i in range(4)]
     return {"vs": s["vs"], "ps": s["ps"], "reg": tuple(s["reg"]), "ps_reg": tuple(s["ps_reg"]),
             "vs_lit": dict(s["vs_lit"]), "ps_lit": dict(s["ps_lit"]),
             "word_source": tuple(s["word_source"]), "word_endian": s["word_endian"],
-            "bounds": bounds, "size_max": f32(FACTOR * CAPTURED_SIZE[1]), "b129": lf.IMPOSTOR_B129}
+            "bounds": bounds, "size_max": SIZE, "b129": lf.IMPOSTOR_B129}
+
+
+def outside(e, registers):
+    """The (key, component) pairs of `registers` ({("vs" | "ps", register): four values}) that lie outside the
+    entry's bounds, as capture::detail::ImpostorBounded judges a component (no number is outside; a component
+    without a bound is never judged). The values are taken in single precision, as a record holds them."""
+    out = []
+    for key, values in sorted(registers.items(), key=lambda kv: (kv[0][0] != "vs", kv[0][1])):
+        for i, b in enumerate(e["bounds"][key]):
+            if b is None:
+                continue
+            v = values[i]
+            v = f32(v) if math.isfinite(v) and abs(v) < 3.4e38 else v
+            if not (f32(b[0]) <= v <= f32(b[1])):
+                out.append((key, i))
+    return out
+
+
+def far_region():
+    """A made region far from the bridge, for the tests (review of the whole branch, I2): the registers of a
+    captured row's middle with the eye at a world position of (5000, -5000, 300), a fog range that starts at 200
+    units and ends 6,000 further, a dissolve that starts at 300 units, other scales and a wider view."""
+    r = {key: [0.5 * (lo + hi) for lo, hi in span] for key, span in CAPTURED.items()}
+    r[("vs", 47)] = [5000.0, -5000.0, 300.0, 0.0]
+    r[("ps", 19)] = [5000.0, -5000.0, 300.0, 1.0]
+    r[("vs", 111)] = [200.0, 6500.0, 1.0, 1.0 / 6000.0]
+    r[("vs", 110)] = [0.6, -0.64, 0.48, 0.0]
+    r[("vs", 115)] = [0.6, 0.8, 0.0, 1000.0]
+    r[("vs", 116)] = [-0.3, 0.2, 0.93, -579.0]
+    r[("vs", 117)] = [0.74, -0.56, 0.37, -6611.0]
+    r[("vs", 8)] = [0.0, 0.0, 1.6, 0.0]
+    r[("vs", 114)] = [3.0, 4.0, 0.0, 0.0]
+    r[("ps", 12)] = [20.0, 250.0, 2.0, 2.5]
+    r[("ps", 29)] = [300.0, 0.02, 998.4, 25.6]
+    return r
 
 
 def _hash(text, what):

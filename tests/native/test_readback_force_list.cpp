@@ -206,7 +206,68 @@ int main() {
       if (SdkMatch(list, other) != 0) return 139;
   }
 
+  // The read-back mode (review of the whole branch, I1; ledger ruling 54). The SDK's effective mode, against this
+  // file's copy of CommandProcessor::GetReadbackResolveMode and ParseReadbackResolveMode (thirdparty/rexglue-sdk/
+  // src/graphics/command_processor.cpp, lines 108 to 119 and 191 to 201 when this was written): the shared switch's
+  // word, and the legacy --d3d12_readback_resolve only while the shared switch is at its default "none".
+  {
+    const auto sdk_mode = [](const std::string& word, bool legacy) {
+      const ReadbackMode shared = word == "fast" ? ReadbackMode::kFast : word == "some" ? ReadbackMode::kSome : word == "full" ? ReadbackMode::kFull : ReadbackMode::kNone;
+      const bool overrides = shared != ReadbackMode::kNone || word != "none";   // (HasNonDefaultValue: the value is not the default's)
+      return overrides ? shared : legacy ? ReadbackMode::kFast : ReadbackMode::kNone;
+    };
+    for (const char* word : {"none", "fast", "some", "full", "", "FULL", "on"}) {
+      for (bool legacy : {false, true}) {
+        if (EffectiveReadbackMode(word, legacy) != sdk_mode(word, legacy)) { std::cerr << "mode '" << word << "' legacy " << legacy << "\n"; return 160; }
+      }
+    }
+    static_assert(EffectiveReadbackMode("none", false) == ReadbackMode::kNone && EffectiveReadbackMode("none", true) == ReadbackMode::kFast &&
+                  EffectiveReadbackMode("full", true) == ReadbackMode::kFull && EffectiveReadbackMode("some", true) == ReadbackMode::kSome &&
+                  EffectiveReadbackMode("fast", false) == ReadbackMode::kFast);
+    // The table: the pictures are in guest memory, each frame's own, when the mode is "none" and the list forces
+    // the fourteen bases (a forced resolve waits for the GPU and copies its own bytes), or the mode is "full"
+    // (every resolve does); in "fast" every picture is the previous resolve's, in "some" the first one's for the
+    // whole run, whatever the list holds: not available, each by its own name.
+    struct Row { ReadbackMode mode; bool list; ImpostorReadback want; bool available; const char* reason; };
+    const Row rows[] = {
+        {ReadbackMode::kNone, true, ImpostorReadback::kListed, true, "picture: base"},
+        {ReadbackMode::kNone, false, ImpostorReadback::kNoList, false, "picture: base"},
+        {ReadbackMode::kFull, true, ImpostorReadback::kFull, true, "picture: base"},
+        {ReadbackMode::kFull, false, ImpostorReadback::kFull, true, "picture: base"},
+        {ReadbackMode::kFast, true, ImpostorReadback::kModeFast, false, "picture: mode"},
+        {ReadbackMode::kFast, false, ImpostorReadback::kModeFast, false, "picture: mode"},
+        {ReadbackMode::kSome, true, ImpostorReadback::kModeSome, false, "picture: mode"},
+        {ReadbackMode::kSome, false, ImpostorReadback::kModeSome, false, "picture: mode"},
+    };
+    for (const Row& r : rows) {
+      const ImpostorReadback got = DecideImpostorReadback(r.mode, r.list);
+      if (got != r.want || ImpostorReadbackAvailable(got) != r.available) { std::cerr << "mode " << int(r.mode) << " list " << r.list << "\n"; return 161; }
+      // (a mode's refusal is told from a missing list: the pass counts the first "picture: mode", the second "picture: base")
+      if (ImpostorReadbackByMode(got) != (std::string(r.reason) == "picture: mode" && !r.available)) return 162;
+    }
+    // The words of the one log line and of the install line: each names its mode, and the two refusals by mode say
+    // what the far trees would have been.
+    const std::string listed = ImpostorReadbackWhy(ImpostorReadback::kListed), full = ImpostorReadbackWhy(ImpostorReadback::kFull),
+                      nolist = ImpostorReadbackWhy(ImpostorReadback::kNoList), fast = ImpostorReadbackWhy(ImpostorReadback::kModeFast),
+                      some = ImpostorReadbackWhy(ImpostorReadback::kModeSome);
+    if (listed.rfind("available: ", 0) != 0 || full.rfind("available: ", 0) != 0) return 163;
+    if (nolist.rfind("NOT available: ", 0) != 0 || fast.rfind("NOT available: ", 0) != 0 || some.rfind("NOT available: ", 0) != 0) return 164;
+    if (listed.find("readback_resolve none") == std::string::npos || full.find("readback_resolve full") == std::string::npos ||
+        nolist.find("readback_resolve none") == std::string::npos || fast.find("readback_resolve fast") == std::string::npos ||
+        some.find("readback_resolve some") == std::string::npos) return 165;
+    if (fast.find("a frame old") == std::string::npos || some.find("first") == std::string::npos ||
+        fast.find("picture: mode") == std::string::npos || some.find("picture: mode") == std::string::npos ||
+        nolist.find("picture: base") == std::string::npos) return 166;
+    // From the switches' words in one step, as the renderer asks: the mode's word, the legacy switch, the list.
+    if (DecideImpostorReadback(EffectiveReadbackMode("none", false), ForceListHasImpostorPictures(fourteen)) != ImpostorReadback::kListed ||
+        DecideImpostorReadback(EffectiveReadbackMode("none", true), ForceListHasImpostorPictures(fourteen)) != ImpostorReadback::kModeFast ||
+        DecideImpostorReadback(EffectiveReadbackMode("some", false), ForceListHasImpostorPictures(fourteen)) != ImpostorReadback::kModeSome ||
+        DecideImpostorReadback(EffectiveReadbackMode("full", false), ForceListHasImpostorPictures("")) != ImpostorReadback::kFull ||
+        DecideImpostorReadback(EffectiveReadbackMode("none", false), ForceListHasImpostorPictures("0x12704000")) != ImpostorReadback::kNoList) return 167;
+  }
+
   std::cout << "PASS: forced read-back list (hero and dog, exposure, the impostors' pictures: eight lists under the SDK's rule; the pictures "
-               "only with the switch on and the native renderer on, sixteen combinations; a list given by hand)\n";
+               "only with the switch on and the native renderer on, sixteen combinations; a list given by hand; the pictures' availability "
+               "by read-back mode, eight rows)\n";
   return 0;
 }

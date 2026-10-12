@@ -7,6 +7,8 @@
 #include "../../src/native/render/impostor_picture.h"
 #include "../../src/native/render/texture_decode.h"
 #include "../../src/native/render/texture_residency.h"
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -310,6 +312,180 @@ int main() {
     if (ImpostorPictureHash(bytes.data(), 13) == h13) return 121;
     bytes[8] ^= 0x10;
     if (ImpostorPictureHash(zeros.data(), 5) == ImpostorPictureHash(zeros.data(), 6) || ImpostorPictureHash(zeros.data(), 13) == ImpostorPictureHash(zeros.data(), 16)) return 122;
+    // The cheap whole-picture hash (ledger rulings 52 and 54): eight lanes of eight bytes a block of 64, so that
+    // eight words are mixed side by side. Every byte still counts: each byte of the first and last two blocks and
+    // of a block in the middle, each of the eight bits of one byte, and so a byte of every lane.
+    for (size_t at = 0; at < bytes.size(); at = at == 127 ? 65536 : at == 65536 + 63 ? bytes.size() - 128 : at + 1) {
+      bytes[at] ^= 0x01;
+      if (ImpostorPictureHash(bytes.data(), bytes.size()) == h0) return 123;
+      bytes[at] ^= 0x01;
+    }
+    for (int bit = 0; bit < 8; ++bit) {
+      bytes[70001] ^= uint8_t(1u << bit);
+      if (ImpostorPictureHash(bytes.data(), bytes.size()) == h0) return 124;
+      bytes[70001] ^= uint8_t(1u << bit);
+    }
+    // What a hash of lanes could lose: the same bit changed in two words of ONE lane (64 bytes apart and further),
+    // the word's top bit too; two lanes' words exchanged; two whole blocks exchanged.
+    for (uint8_t bit : {uint8_t(0x04), uint8_t(0x80)}) {
+      for (size_t apart : {size_t(64), size_t(128), size_t(64) * 2047}) {
+        bytes[7] ^= bit;
+        bytes[7 + apart] ^= bit;
+        if (ImpostorPictureHash(bytes.data(), bytes.size()) == h0) return 125;
+        bytes[7] ^= bit;
+        bytes[7 + apart] ^= bit;
+      }
+    }
+    {
+      std::vector<uint8_t> moved = bytes;
+      for (size_t k = 0; k < 8; ++k) std::swap(moved[4096 + k], moved[4096 + 8 + k]);            // lanes 0 and 1 of one block
+      if (std::memcmp(moved.data(), bytes.data(), bytes.size()) == 0 || ImpostorPictureHash(moved.data(), moved.size()) == h0) return 126;
+      moved = bytes;
+      for (size_t k = 0; k < 64; ++k) std::swap(moved[8192 + k], moved[8192 + 64 + k]);          // two blocks
+      if (std::memcmp(moved.data(), bytes.data(), bytes.size()) == 0 || ImpostorPictureHash(moved.data(), moved.size()) == h0) return 127;
+    }
+    // Every length from 0 to 200 gives another hash than every other (blocks, whole words after them, a partial
+    // word), over zeros and over the made bytes.
+    for (const std::vector<uint8_t>* v : {&zeros, &bytes}) {
+      std::vector<uint64_t> seen;
+      for (size_t len = 0; len <= 200; ++len) {
+        const uint64_t h = ImpostorPictureHash(v->data(), len);
+        for (uint64_t s : seen) if (s == h) return 128;
+        seen.push_back(h);
+      }
+    }
+    // The function itself, by three values of the made bytes (a pictures' file carries a picture's hash, and a
+    // change of the mixing that the properties above do not see is still a change): whole, 77 bytes, none.
+    if (h0 != 0x9BD96C5AB79F9BE6ull || ImpostorPictureHash(bytes.data(), 77) != 0xFCBF198B5C602ABDull ||
+        ImpostorPictureHash(bytes.data(), 0) != 0x7AF4D8F85ABF6391ull) return 144;
+    // And each byte of a range that ends inside a block counts (the tail's words and its last partial word).
+    for (size_t len : {size_t(64 + 8), size_t(64 + 13), size_t(127), size_t(190)}) {
+      const uint64_t whole = ImpostorPictureHash(bytes.data(), len);
+      for (size_t at = 0; at < len; ++at) {
+        bytes[at] ^= 0x20;
+        if (ImpostorPictureHash(bytes.data(), len) == whole) return 129;
+        bytes[at] ^= 0x20;
+      }
+    }
+  }
+
+  // The texture's bookkeeping (review of the whole branch, question 7: the most dangerous thing held only by text
+  // pins): what the pass holds of a base's texture, and what it does with this frame's picture.
+  {
+    const uint32_t sA = 0x60A, sB = 0x688;
+    ImpostorPictureHeld none;
+    if (none.texture || none.view || none.filled || none.shader_state) return 130;
+    // The table: held -> the plan for (hash, swizzle).
+    struct PlanRow { ImpostorPictureHeld held; uint64_t hash; uint32_t swizzle; bool reuse, make_texture, make_view; };
+    const ImpostorPictureHeld full{true, true, true, true, sA, 11};
+    const PlanRow plans[] = {
+        {none, 11, sA, false, true, true},                                         // nothing yet: a texture and its view
+        {full, 11, sA, true, false, false},                                        // an unchanged picture: reused
+        {full, 12, sA, false, false, false},                                       // a changed picture: refreshed into the texture there
+        {full, 11, sB, false, false, true},                                        // another swizzle: the view again, and the picture staged again
+        {{true, true, false, false, sA, 11}, 11, sA, false, false, false},         // made but never filled (its upload failed): not reused
+        {{true, true, true, false, sA, 11}, 11, sA, false, false, false},          // staged but its upload never ran: not reused
+        {{true, false, true, true, sA, 11}, 11, sA, false, false, true},           // its view could not be made: not reused, the view again
+        {{false, false, true, true, sA, 11}, 11, sA, false, true, true},           // no texture, whatever the rest says
+        {{false, true, false, false, sA, 0}, 0, sA, false, true, true},
+        {{true, true, false, true, sA, 11}, 11, sA, false, false, false},          // (no history gives this: each of the four is asked all the same)
+        {full, 0, sA, false, false, false},                                        // (a hash of 0 is a hash like another)
+        {{true, true, true, true, sA, 0}, 0, sA, true, false, false},
+    };
+    for (const PlanRow& r : plans) {
+      const ImpostorPicturePlan p = PlanImpostorPicture(r.held, r.hash, r.swizzle);
+      if (p.reuse != r.reuse || p.make_texture != r.make_texture || p.make_view != r.make_view) return 131;
+    }
+    // The outcome: what is held afterwards and what happened, for what the device gave.
+    struct CommitRow { ImpostorPictureHeld held; uint64_t hash; uint32_t swizzle; bool texture_ok, view_ok, staged; ImpostorPictureStep step; ImpostorPictureHeld after; };
+    const CommitRow commits[] = {
+        {none, 11, sA, true, true, true, ImpostorPictureStep::kStaged, {true, true, true, false, sA, 11}},
+        {none, 11, sA, false, true, true, ImpostorPictureStep::kNoTexture, {false, false, false, false, 0, 0}},
+        {none, 11, sA, true, false, true, ImpostorPictureStep::kNoView, {true, false, false, false, sA, 0}},
+        {none, 11, sA, true, true, false, ImpostorPictureStep::kNoStaging, {true, true, false, false, sA, 0}},
+        {full, 11, sA, true, true, true, ImpostorPictureStep::kReuse, full},
+        {full, 11, sA, false, false, false, ImpostorPictureStep::kReuse, full},                       // (a reuse asks the device for nothing)
+        {full, 12, sA, true, true, true, ImpostorPictureStep::kStaged, {true, true, true, true, sA, 12}},
+        {full, 12, sA, true, true, false, ImpostorPictureStep::kNoStaging, full},                     // the texture keeps the picture it has, and its hash
+        {full, 11, sB, true, true, true, ImpostorPictureStep::kStaged, {true, true, true, true, sB, 11}},
+        {full, 11, sB, true, false, true, ImpostorPictureStep::kNoView, {true, false, true, true, sB, 11}},
+        {full, 12, sB, true, true, false, ImpostorPictureStep::kNoStaging, {true, true, true, true, sB, 11}},
+        // (a new texture is empty and in the state it was made in, whatever was held of the one before)
+        {{false, false, true, true, sA, 11}, 12, sA, true, true, false, ImpostorPictureStep::kNoStaging, {true, true, false, false, sA, 0}},
+        {{false, true, true, true, sB, 11}, 11, sA, true, false, true, ImpostorPictureStep::kNoView, {true, false, false, false, sA, 0}},
+    };
+    for (const CommitRow& r : commits) {
+      const ImpostorPictureOutcome o = CommitImpostorPicture(r.held, PlanImpostorPicture(r.held, r.hash, r.swizzle), r.hash, r.swizzle, r.texture_ok, r.view_ok, r.staged);
+      const ImpostorPictureHeld& a = o.held;
+      if (o.step != r.step) return 132;
+      if (a.texture != r.after.texture || a.view != r.after.view || a.filled != r.after.filled || a.shader_state != r.after.shader_state ||
+          a.swizzle != r.after.swizzle || a.hash != r.after.hash) return 133;
+    }
+    if (!ImpostorPictureStepUsable(ImpostorPictureStep::kReuse) || !ImpostorPictureStepUsable(ImpostorPictureStep::kStaged) ||
+        ImpostorPictureStepUsable(ImpostorPictureStep::kNoTexture) || ImpostorPictureStepUsable(ImpostorPictureStep::kNoView) ||
+        ImpostorPictureStepUsable(ImpostorPictureStep::kNoStaging)) return 134;
+    // The upload block's barrier: from the shader-resource state only for a texture that was uploaded before.
+    if (ImpostorPictureUploadFromShaderState(none) || !ImpostorPictureUploadFromShaderState(full) || !ImpostorPictureUploaded(none).shader_state ||
+        ImpostorPictureUploaded(full).hash != 11) return 135;
+    // Every history of four frames over two pictures, two swizzles, a content refusal and each of the device's
+    // three failures (64 kinds of frame: 16,777,216 histories), against a model of the device's texture: what it
+    // holds, the state it is in, its view's swizzle. In every frame: a record is called usable only when the
+    // texture, after this frame's uploads, holds exactly this frame's picture, in the shader-resource state, behind
+    // a view of the record's swizzle; a barrier is never asked from a state the texture is not in; an unchanged
+    // picture behind the same view is never staged again, and a changed one is never reused.
+    struct Model { bool texture = false, view = false, shader = false, has = false; uint64_t content = 0; uint32_t view_swizzle = 0; };
+    uint64_t histories = 0, reused = 0, staged_count = 0, refused = 0;
+    for (uint32_t code = 0; code < 64u * 64u * 64u * 64u; ++code) {
+      ImpostorPictureHeld held;
+      Model m;
+      for (uint32_t f = 0; f < 4; ++f) {
+        const uint32_t k = (code >> (6 * f)) & 63u;
+        const uint64_t hash = 11 + (k & 1u);
+        const uint32_t swizzle = (k & 2u) ? sB : sA;
+        const bool content_ok = (k & 4u) == 0, texture_ok = (k & 8u) == 0, view_ok = (k & 16u) == 0, staging_ok = (k & 32u) == 0;
+        const ImpostorPicturePlan plan = PlanImpostorPicture(held, hash, swizzle);
+        bool usable = false;
+        if (plan.reuse) {
+          usable = true;
+          ++reused;
+          if (!m.has || hash != m.content) return 136;                             // (a changed picture reused)
+        } else if (!content_ok) {
+          ++refused;                                                               // (the pass returns before anything is made: nothing held changes)
+        } else {
+          // (an unchanged picture behind the same view, uploaded: it must have been reused)
+          if (m.texture && m.has && m.shader && m.content == hash && m.view && m.view_swizzle == swizzle) return 137;
+          bool have_texture = true, have_view = true;
+          if (plan.make_texture) {
+            m = Model{};
+            m.texture = have_texture = texture_ok;
+          }
+          if (have_texture && plan.make_view) {
+            m.view = have_view = view_ok;
+            m.view_swizzle = swizzle;
+          }
+          const bool stage = have_texture && have_view && staging_ok;
+          const ImpostorPictureOutcome o = CommitImpostorPicture(held, plan, hash, swizzle, have_texture, have_view, stage);
+          held = o.held;
+          const bool staged = o.step == ImpostorPictureStep::kStaged;
+          usable = ImpostorPictureStepUsable(o.step);
+          if (staged != stage || usable != staged) return 138;
+          if (staged) {
+            ++staged_count;
+            // (the upload block, later in the same Render)
+            if (ImpostorPictureUploadFromShaderState(held) != m.shader) return 139;   // (a barrier from a state the texture is not in)
+            m.shader = true;
+            m.has = true;
+            m.content = hash;
+            held = ImpostorPictureUploaded(held);
+          }
+        }
+        if (held.texture != m.texture || (held.texture && held.view != m.view) || (held.texture && held.shader_state != m.shader)) return 140;
+        if (usable && !(m.texture && m.view && m.shader && m.has && m.content == hash && m.view_swizzle == swizzle)) return 141;
+        if (held.filled && !(m.has && m.content == held.hash)) return 142;         // (the hash held is the hash of what the texture holds)
+      }
+      ++histories;
+    }
+    if (histories != 16777216ull || reused == 0 || staged_count == 0 || refused == 0) return 143;
   }
 
   // The diagnostic feed's file (fable2_native_impostor_feed; tools/xdk_sigmatch/impostor_pictures.py `feed`): one
@@ -392,6 +568,49 @@ int main() {
     std::printf("picture levels made: wrote %s (ring clear %u, covered %u, %s)\n", outp.c_str(), st.ring_clear, st.covered,
                 ImpostorPictureUsable(st) ? "usable" : "refused");
   }
-  std::printf("PASS: impostor pictures (the native levels' rule; the content rule: a clear ring and not empty, the survey's 374 verdicts; the picture's hash)\n");
+  // Tool mode: what a picture's hash costs (FABLE2_HASH_BENCH set; meaningful only in a build with optimisation:
+  // the suite's own build has none). The hash of before the closing fix is kept here for the comparison.
+  if (std::getenv("FABLE2_HASH_BENCH")) {
+    const auto before = [](const uint8_t* data, size_t size) {
+      constexpr uint64_t kP1 = 0x9E3779B185EBCA87ull, kP2 = 0xC2B2AE3D27D4EB4Full, kP4 = 0x85EBCA77C2B2AE63ull;
+      uint64_t h = 1469598103934665603ull ^ uint64_t(size);
+      for (size_t i = 0; i + 8 <= size; i += 8) {
+        uint64_t w;
+        std::memcpy(&w, data + i, 8);
+        w *= kP2;
+        w = (w << 31) | (w >> 33);
+        w *= kP1;
+        h ^= w;
+        h = ((h << 27) | (h >> 37)) * kP1 + kP4;
+      }
+      return h;
+    };
+    std::vector<std::vector<uint8_t>> pictures(14, std::vector<uint8_t>(kImpostorBaseBytes));
+    uint32_t seed = 12345;
+    for (auto& p : pictures) for (uint8_t& b : p) { seed = seed * 1664525u + 1013904223u; b = uint8_t(seed >> 24); }
+    volatile uint64_t sink = 0;
+    const auto measure = [&](auto&& hash) {
+      double best = 1e30, sum = 0.0;
+      const int rounds = 400;                                                      // (400 frames of fourteen pictures: the best and the mean)
+      for (int round = 0; round < rounds; ++round) {
+        const auto t0 = std::chrono::steady_clock::now();
+        for (const auto& p : pictures) sink = sink ^ hash(p.data(), p.size());
+        const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+        best = std::min(best, us);
+        sum += us;
+      }
+      return std::pair<double, double>(best / 14.0, sum / rounds / 14.0);
+    };
+    const auto sampled = measure([](const uint8_t* d, size_t n) { return SampleHash(d, uint32_t(n)); });
+    const auto old_us = measure(before);
+    const auto now_us = measure([](const uint8_t* d, size_t n) { return ImpostorPictureHash(d, n); });
+    std::printf("hash bench, a picture of %zu bytes, best and mean of 400 frames of fourteen, microseconds a picture: ImpostorPictureHash %.2f "
+                "and %.2f (fourteen: %.3f ms); the hash of before (one chain of words) %.2f and %.2f (fourteen: %.3f ms); the sampled hash "
+                "%.2f and %.2f\n",
+                kImpostorBaseBytes, now_us.first, now_us.second, now_us.second * 14.0 / 1000.0, old_us.first, old_us.second,
+                old_us.second * 14.0 / 1000.0, sampled.first, sampled.second);
+  }
+  std::printf("PASS: impostor pictures (the native levels' rule; the content rule: a clear ring and not empty, the survey's 374 verdicts; the picture's "
+              "hash, every byte in eight lanes; the texture's bookkeeping: the plan, the outcome and 16,777,216 histories against a model)\n");
   return 0;
 }

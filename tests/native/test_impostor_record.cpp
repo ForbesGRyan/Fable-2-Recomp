@@ -78,7 +78,7 @@ int main() {
   if (kImpostorVsRegisters != 14 || kImpostorPsRegisters != 5 || kImpostorVsRegister[kImpC8] != 8 || kImpostorVsRegister[kImpC117] != 117 ||
       kImpostorVsRegister[kImpC110] != 110 || kImpostorPsRegister[kImpP12] != 12 || kImpostorPsRegister[kImpP31] != 31) return 40;
   if (kImpostorWordSource[0] != 1 || kImpostorWordSource[1] != 0 || kImpostorWordSource[2] != 3 || kImpostorWordSource[3] != 2 ||
-      kImpostorWordEndian != 2 || kImpostorSwizzle != 0x60Au || kImpostorB129 != 2u || kImpostorSizeMax != 65.5625f) return 41;
+      kImpostorWordEndian != 2 || kImpostorSwizzle != 0x60Au || kImpostorB129 != 2u || kImpostorSizeMax != 4096.0f) return 41;       // (a quad's size: a sanity bound, ledger ruling 54)
 
   // The call's rules, each alone, in their order.
   if (CheckImpostorCall(Good(3)) != ImpostorReason::kNone) return 10;
@@ -105,8 +105,60 @@ int main() {
   { ImpostorCall c = Good(3); c.ps[kImpP29][1] = 0.0f; if (CheckImpostorCall(c) != ImpostorReason::kRegister) return 16; }   // c29.y in (0, 4]
   { ImpostorCall c = Good(3); c.ps[kImpP31][0] = 65.0f; if (CheckImpostorCall(c) != ImpostorReason::kRegister) return 16; }  // c31.x in (0, 64]
   { ImpostorCall c = Good(3); c.vs[kImpC72][0] = 2e7f; if (CheckImpostorCall(c) != ImpostorReason::kRegister) return 16; }   // a matrix row beyond 1e7
-  { ImpostorCall c = Good(3); c.ps[kImpP12][3] = 4.5f; if (CheckImpostorCall(c) != ImpostorReason::kRegister) return 16; }   // c12.w in [0, 4]
-  { ImpostorCall c = Good(3); c.vs[kImpC8][2] = -4.0f; if (CheckImpostorCall(c) != ImpostorReason::kRegister) return 16; }   // the raise beyond four times the captures'
+  { ImpostorCall c = Good(3); c.ps[kImpP12][3] = 64.5f; if (CheckImpostorCall(c) != ImpostorReason::kRegister) return 16; }  // c12.w in [0, 64]
+  { ImpostorCall c = Good(3); c.ps[kImpP12][3] = -0.5f; if (CheckImpostorCall(c) != ImpostorReason::kRegister) return 16; }
+  { ImpostorCall c = Good(3); c.vs[kImpC8][2] = -70000.0f; if (CheckImpostorCall(c) != ImpostorReason::kRegister) return 16; }   // the raise beyond a scale's reach
+  // The bounds are sanity bounds by kind (review of the whole branch, I2; ledger ruling 54): what they were fitted
+  // to before (four times one place's values) no longer refuses a call. Each of these was `register`.
+  { ImpostorCall c = Good(3); c.ps[kImpP12][3] = 4.5f; if (CheckImpostorCall(c) != ImpostorReason::kNone) return 50; }
+  { ImpostorCall c = Good(3); c.vs[kImpC8][2] = -4.0f; if (CheckImpostorCall(c) != ImpostorReason::kNone) return 50; }
+  { ImpostorCall c = Good(3); c.vs[kImpC111][0] = 81.6f; if (CheckImpostorCall(c) != ImpostorReason::kNone) return 50; }      // a fog range starting beyond 81.565
+  // A made far-away region: the eye at a world position of (5000, -5000, 300), a fog range that starts at 200 units
+  // and ends 6,000 further, a dissolve that starts at 300, other scales and a view with a large translation.
+  auto far = [] {
+    ImpostorCall c = Good(3);
+    const float c8[4] = {0.0f, 0.0f, 1.6f, 0.0f}, c47[4] = {5000.0f, -5000.0f, 300.0f, 0.0f}, c110[4] = {0.6f, -0.64f, 0.48f, 0.0f},
+                c111[4] = {200.0f, 6500.0f, 1.0f, 1.0f / 6000.0f}, c114[4] = {3.0f, 4.0f, 0.0f, 0.0f}, c115[4] = {0.6f, 0.8f, 0.0f, 1000.0f},
+                c116[4] = {-0.3f, 0.2f, 0.93f, -579.0f}, c117[4] = {0.74f, -0.56f, 0.37f, -6611.0f};
+    std::memcpy(c.vs[kImpC8], c8, 16); std::memcpy(c.vs[kImpC47], c47, 16); std::memcpy(c.vs[kImpC110], c110, 16);
+    std::memcpy(c.vs[kImpC111], c111, 16); std::memcpy(c.vs[kImpC114], c114, 16); std::memcpy(c.vs[kImpC115], c115, 16);
+    std::memcpy(c.vs[kImpC116], c116, 16); std::memcpy(c.vs[kImpC117], c117, 16);
+    const float c12[4] = {20.0f, 250.0f, 2.0f, 2.5f}, c19[4] = {5000.0f, -5000.0f, 300.0f, 1.0f}, c29[4] = {300.0f, 0.02f, 998.4f, 25.6f};
+    std::memcpy(c.ps[kImpP12], c12, 16); std::memcpy(c.ps[kImpP19], c19, 16); std::memcpy(c.ps[kImpP29], c29, 16);
+    return c;
+  };
+  if (CheckImpostorCall(far()) != ImpostorReason::kNone) return 51;
+  // ... and garbage in any component a formula reads refuses it all the same: no number, an infinity, a magnitude no
+  // value of its kind has (beyond every bound of the table).
+  for (uint32_t kind = 0; kind < 2; ++kind) {
+    for (uint32_t i = 0; i < (kind == 0 ? kImpostorVsRegisters : kImpostorPsRegisters); ++i) {
+      for (uint32_t k = 0; k < 4; ++k) {
+        if (!detail::ImpostorComponentRead(kind, i, k)) continue;
+        for (float bad : {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity(), 1e20f, -1e20f, 3.0e38f}) {
+          ImpostorCall c = far();
+          (kind == 0 ? c.vs[i][k] : c.ps[i][k]) = bad;
+          const ImpostorReason want = (kind == 1 && i == kImpP20 && k == 3) ? ImpostorReason::kScale : ImpostorReason::kRegister;
+          if (CheckImpostorCall(c) != want) return 52;
+        }
+      }
+    }
+  }
+  // The kinds' reaches, at their edges: a place or distance within 1e6, a scale within 65,536, a matrix term within 1e7.
+  { ImpostorCall c = far(); c.vs[kImpC111][0] = 1.0e6f; c.vs[kImpC47][1] = -1.0e6f; c.vs[kImpC8][2] = 65536.0f; c.vs[kImpC113][1] = -65536.0f;
+    c.vs[kImpC114][1] = 65536.0f; c.vs[kImpC110][0] = -65536.0f; c.vs[kImpC46][2] = 65536.0f; c.vs[kImpC117][3] = -1.0e7f;
+    if (CheckImpostorCall(c) != ImpostorReason::kNone) return 53; }
+  for (int k = 0; k < 8; ++k) {
+    ImpostorCall c = far();
+    if (k == 0) c.vs[kImpC111][0] = 1.0001e6f;
+    if (k == 1) c.vs[kImpC47][1] = -1.0001e6f;
+    if (k == 2) c.vs[kImpC8][2] = 65537.0f;
+    if (k == 3) c.vs[kImpC113][1] = -65537.0f;
+    if (k == 4) c.vs[kImpC114][1] = 65537.0f;
+    if (k == 5) c.vs[kImpC110][0] = -65537.0f;
+    if (k == 6) c.vs[kImpC46][2] = 65537.0f;
+    if (k == 7) c.vs[kImpC117][3] = -1.0001e7f;
+    if (CheckImpostorCall(c) != ImpostorReason::kRegister) return 54;
+  }
   for (float w : {0.0f, 64.5f, -1.0f, std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
     ImpostorCall c = Good(3);
     c.ps[kImpP20][3] = w;
@@ -137,7 +189,7 @@ int main() {
     }
     if (read != (kind == 0 ? 47u : 9u)) return 45;   // 56 - 9 vertex components, 20 - 11 pixel ones (the Tasks 4-5 report's list)
   }
-  { ImpostorCall c = Good(3); c.ps[kImpP20][3] = 0.0f; c.vs[kImpC8][2] = 99.0f;                    // register before scale
+  { ImpostorCall c = Good(3); c.ps[kImpP20][3] = 0.0f; c.vs[kImpC8][2] = 99000.0f;                // register before scale
     if (CheckImpostorCall(c) != ImpostorReason::kRegister) return 17; }
   for (int k = 0; k < 13; ++k) {
     ImpostorCall c = Good(3);

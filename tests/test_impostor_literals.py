@@ -316,6 +316,37 @@ class ImpostorPassText(unittest.TestCase):
         # the picture's hash is of every byte of the copy (review of Tasks 10 to 14, Minor 5): never the sampled one
         self.assertNotIn("SampleHash(", reader)
         self.assertIn("  hash = ImpostorPictureHash(impostor_guest_.data(), kImpostorBaseBytes);\n", reader)
+        # (ledger ruling 54) the texture's bookkeeping is the pure rule's (impostor_picture.h, with its table): the
+        # reader asks the plan after the hash and hands what the device gave to the outcome; nothing in the pass
+        # writes a held field but through the pure functions and the two pointers' truth
+        self.assertIn("  const ImpostorPicturePlan plan = PlanImpostorPicture(p.held, hash, swizzle);\n  if (plan.reuse) {\n"
+                      "    ++st.impostor_pictures;\n    return verdict(ImpostorPicture::kUsable);\n  }\n", reader)
+        self.assertGreater(reader.index("PlanImpostorPicture(p.held, hash, swizzle)"), reader.index("ImpostorPictureHash("))
+        self.assertLess(reader.index("if (plan.reuse) {"), reader.index("DecodeImpostorBase("))            # an unchanged picture is not decoded
+        self.assertIn("  const ImpostorPictureOutcome outcome = CommitImpostorPicture(p.held, plan, hash, swizzle, texture_made, view_made, staged);\n"
+                      "  p.held = outcome.held;\n", reader)
+        self.assertLess(reader.index("ImpostorPictureUsable(stats)"), reader.index("CommitImpostorPicture("))   # a refused picture changes nothing held
+        self.assertLess(reader.index("CommitImpostorPicture("), reader.index("impostor_uploads_[impostor_upload_count_++]"))
+        self.assertEqual(s.count("PlanImpostorPicture("), 1)
+        self.assertEqual(s.count("CommitImpostorPicture("), 1)
+        for field in ("filled", "shader_state", "hash", "swizzle"):
+            self.assertEqual(re.findall(r"held\.%s\s*=[^=]" % field, s), [], field)
+        self.assertEqual(re.findall(r"\bp\.(filled|shader_state|hash|swizzle)\b", s), [])                    # (the fields of before are gone)
+        self.assertEqual(sorted(re.findall(r"p\.held = [^;]+;", s)),
+                         ["p.held = ImpostorPictureHeld{};", "p.held = ImpostorPictureUploaded(p.held);", "p.held = outcome.held;"])
+        self.assertIn("        if (ImpostorPictureUploadFromShaderState(p.held)) cmd->Barrier(p.texture, nrhi::ResourceState::kPixelShaderResource, "
+                      "nrhi::ResourceState::kCopyDest);\n", s)
+        self.assertIn("        cmd->Barrier(p.texture, nrhi::ResourceState::kCopyDest, nrhi::ResourceState::kPixelShaderResource);\n"
+                      "        p.held = ImpostorPictureUploaded(p.held);\n", s)
+        # the first frame drawn from textures as they are says so, once (the closing runs read it: the reuse ran)
+        self.assertEqual(s.count("first frame with every picture reused, scene frame {}"), 1)
+        self.assertIn("        if (!impostor_first_reuse_logged_ && st.impostor_pictures > 0 && st.impostor_refreshed == 0) {\n"
+                      "          impostor_first_reuse_logged_ = true;\n", block)
+        # a read-back mode that brings old pictures is refused by its own name before a byte of guest memory is read
+        self.assertIn("    if (fable2::ImpostorReadbackByMode(impostor_readback_)) {\n", reader)
+        self.assertLess(reader.index("return ImpostorPicture::kMode;"), reader.index("capture::ReadPhysical("))
+        self.assertLess(reader.index("return ImpostorPicture::kMode;"), reader.index("ImpostorPicturePlan plan"))
+        self.assertEqual(s.count("ImpostorPicture::kMode"), 2)
         # the first refusal's line names the content rule's bounds as they are (ledger ruling 45): no upper cover bound
         self.assertNotIn("kImpostorCoverMax", s)
         self.assertIn("(ring clear {} of {}, bound at least {}; covered {}, bound at least {} and no upper bound; hash 0x{:016X}; pictures {}, feed {})", reader)
@@ -363,7 +394,7 @@ class ImpostorPassText(unittest.TestCase):
         self.assertEqual(s.count("impostor_flat_view_;"), 1)
         self.assertIn("        nrhi::TextureView* view = with_picture ? impostor_pictures_[impostor_picture[i]].view : impostor_flat_view_;\n", s)
         self.assertLess(s.index("if (impostor_pictures_on && !with_picture) continue;"), s.index("MakeClayImpostorConstants("))
-        self.assertEqual(s.count("kImpostorKeepFull") + s.count("kImpostorKeepHalf"), 0)       # the first sample's set alone (rulings 13 and 35)
+        self.assertEqual(s.count("kImpostorKeepFull") + s.count("kImpostorKeepHalf"), 0)       # the first sample's set alone (rulings 13 and 48)
         self.assertIn("    } else if (!ImpostorPlacesOneRun(impostor_seqs_.data(), impostor_seqs_.size(), first_place, last_place)) {\n"
                       "      all = ClayImpostorSkip::kPlace;\n", s)
         self.assertIn("        if (i >= records || !ImpostorWordsHeld(r, word_floats)) {\n", s)
@@ -389,7 +420,12 @@ class ImpostorPassText(unittest.TestCase):
     def test_the_front_end_hands_the_switch_on_and_writes_the_line(self):
         # its definition, the Render's argument, the install line, the capture's; and (plan Tasks 12 and 14) the
         # read-back list's question at start-up and the pictures' availability before a Render in `on`
-        self.assertEqual(self.front.count("CurrentImpostors()"), 7)       # (and the diagnostic feed's loader, which reads its file only in `on`)
+        # (and the diagnostic feed's loader, which reads its file only in `on`; the frame reads the switch once:
+        # review of the whole branch, Minor 2)
+        self.assertEqual(self.front.count("CurrentImpostors()"), 6)
+        self.assertIn("  const capture::ImpostorMode impostors = CurrentImpostors();\n"
+                      "  if (impostors == capture::ImpostorMode::kOn) g_clay->SetImpostorReadback(FrameImpostorReadback());\n", self.front)
+        self.assertIn("CurrentCoverage(),\n                 impostors, post, st, tst);", self.front)
         # (ledger ruling 47) the list is asked for the pictures only with the switch at `on` AND the native renderer on
         self.assertIn("bool ImpostorSwitchOn() { return CurrentImpostors() == capture::ImpostorMode::kOn; }", self.front)
         self.assertIn("bool ImpostorReadbackWanted() { return fable2::ImpostorPicturesInList(REXCVAR_GET(fable2_native_render), ImpostorSwitchOn()); }", self.front)
@@ -401,7 +437,17 @@ class ImpostorPassText(unittest.TestCase):
         self.assertEqual(app.count("fable2::ForceReadbackList(cfg.hero_dog_texture_readback, exposure, impostors)"), 1)
         # a list given by hand that holds the fourteen bases has the pictures (review Minor 3)
         self.assertIn('fable2::ForceListHasImpostorPictures(rex::cvar::GetFlagByName("readback_resolve_force_addresses"))', self.front)
-        self.assertIn("  if (CurrentImpostors() == capture::ImpostorMode::kOn) g_clay->SetImpostorPicturesAvailable(ImpostorPicturesAvailable());\n", self.front)
+        # (ledger ruling 54) the availability is the pure rule's, from the read-back MODE too, asked before every
+        # Render in `on`; the install line names it
+        self.assertNotIn("SetImpostorPicturesAvailable", self.front)
+        self.assertNotIn('== "full"', self.front)
+        self.assertEqual(self.front.count("fable2::DecideImpostorReadback("), 2)
+        self.assertEqual(self.front.count('fable2::EffectiveReadbackMode('), 2)
+        self.assertIn('fable2::EffectiveReadbackMode(rex::cvar::GetFlagByName("readback_resolve"), rex::cvar::GetFlagByName("d3d12_readback_resolve") == "true")', self.front)
+        self.assertIn('"the pictures: {}",\n                  fable2::ImpostorReadbackWhy(CurrentImpostorReadback()));', self.front)
+        self.assertIn('REXLOG_INFO("[native] impostor pictures: {} (the read-back list {}; --readback_resolve \'{}\', --d3d12_readback_resolve {}){}",', self.front)
+        # the lines of `off` and `flat` are the ones of before
+        self.assertIn('      REXLOG_INFO("[native] impostors: {} (fable2_native_impostors)", capture::ImpostorModeName(impostors));\n', self.front)
         self.assertIn('render::FormatCoverageText(st) + "\\n" + render::FormatImpostorText(st));', self.front)
         # the log's line: with the pictures their CPU time beside it, otherwise the line of before; none with the mode off
         self.assertIn('    } else if (st.impostor_mode != capture::ImpostorMode::kOff) {\n      REXLOG_INFO("[native] clay: {}", render::FormatImpostorText(st));\n', self.front)
@@ -409,6 +455,65 @@ class ImpostorPassText(unittest.TestCase):
                       'render::FormatImpostorText(st), st.impostor_picture_ms);\n', self.front)
         # the list is asked for once, at start-up, and never written by the renderer
         self.assertNotIn("SetFlagByName(\"readback_resolve", self.front)
+
+
+SDK = ROOT / "thirdparty" / "rexglue-sdk" / "src" / "graphics"
+
+
+@unittest.skipUnless((SDK / "d3d12" / "command_processor.cpp").is_file(), "the SDK's source is not in this checkout (thirdparty/rexglue-sdk)")
+class ReadbackRuleSource(unittest.TestCase):
+    """src/core/readback_force_list.h states the SDK's read-back rules from a reading of its source, and its native
+    test holds the header to the test's own copy (review of the whole branch, question 6: a change of the SDK leaves
+    both copies green). These pins are the lines read: when an SDK update changes one, this test says so, and the
+    header's rule (ForceListForces, EffectiveReadbackMode, DecideImpostorReadback) is read against the new text."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.shared = (SDK / "command_processor.cpp").read_text(encoding="utf-8").replace("\r\n", "\n")
+        cls.d3d12 = (SDK / "d3d12" / "command_processor.cpp").read_text(encoding="utf-8").replace("\r\n", "\n")
+        cls.header = _text("src/core/readback_force_list.h")
+
+    def test_the_lists_window(self):
+        self.assertEqual(self.shared.count("  constexpr uint32_t kForceReadbackWindow = 1u << 16;"), 1)
+        self.assertEqual(self.shared.count("      if (base >= a && base - a < kForceReadbackWindow) {"), 1)
+        self.assertIn("inline constexpr uint32_t kForceReadbackWindow = 1u << 16;", self.header)
+        self.assertIn("      if (base >= a && base - a < kForceReadbackWindow) return true;", self.header)
+
+    def test_the_four_modes_and_the_legacy_switch(self):
+        s = self.shared
+        self.assertIn('    .allowed({"none", "fast", "some", "full"})', s)
+        self.assertIn('ReadbackResolveMode ParseReadbackResolveMode(std::string_view value) {\n  if (value == "fast") {\n'
+                      '    return ReadbackResolveMode::kFast;\n  }\n  if (value == "some") {\n    return ReadbackResolveMode::kSome;\n  }\n'
+                      '  if (value == "full") {\n    return ReadbackResolveMode::kFull;\n  }\n  return ReadbackResolveMode::kDisabled;\n}', s)
+        self.assertIn("  ReadbackResolveMode shared_mode = ParseReadbackResolveMode(REXCVAR_GET(readback_resolve));\n"
+                      "  bool shared_mode_overrides_legacy = shared_mode != ReadbackResolveMode::kDisabled ||\n"
+                      '                                      rex::cvar::HasNonDefaultValue("readback_resolve");\n'
+                      "  if (shared_mode_overrides_legacy) {\n    return shared_mode;\n  }\n"
+                      "  return legacy_readback_resolve_enabled ? ReadbackResolveMode::kFast\n"
+                      "                                         : ReadbackResolveMode::kDisabled;", s)
+        self.assertIn('REXCVAR_DEFINE_STRING(readback_resolve, "none", "GPU",', s)          # the default the legacy switch waits for
+
+    def test_what_a_resolve_does_in_each_mode(self):
+        d = self.d3d12
+        # only in "none" does the list choose the path; every other mode takes the read-back path for every resolve
+        self.assertIn("  ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(d3d12_readback_resolve));\n"
+                      "  if (readback_mode == ReadbackResolveMode::kDisabled &&\n"
+                      "      !ShouldForceReadbackResolve(register_file_->values[XE_GPU_REG_RB_COPY_DEST_BASE])) {\n", d)
+        # fast and some read the OTHER buffer (the previous resolve of the address) without waiting; none and full wait
+        self.assertIn("  bool use_delayed_sync =\n"
+                      "      readback_mode == ReadbackResolveMode::kFast || readback_mode == ReadbackResolveMode::kSome;\n"
+                      "  uint32_t read_index = write_index;\n  if (use_delayed_sync) {\n    read_index = 1 - write_index;\n"
+                      "  } else if (!AwaitAllQueueOperationsCompletion()) {\n    return true;\n  }\n", d)
+        # some copies only when there is no previous buffer: the first resolve of an address
+        self.assertIn("  bool should_copy = (readback_mode == ReadbackResolveMode::kSome) ? is_cache_miss : true;\n", d)
+        self.assertEqual(d.count("ReadbackResolveMode::kSome"), 2)
+        self.assertEqual(d.count("ReadbackResolveMode::kFast"), 1)
+        self.assertEqual(d.count("ReadbackResolveMode::kFull"), 0)                           # full is "not disabled, not delayed"
+        # and the header's rule names the two modes that are refused and the two that are not
+        h = self.header
+        self.assertIn("    case ReadbackMode::kFull: return ImpostorReadback::kFull;\n    case ReadbackMode::kFast: return ImpostorReadback::kModeFast;\n"
+                      "    case ReadbackMode::kSome: return ImpostorReadback::kModeSome;\n"
+                      "    default: return list_forces_fourteen ? ImpostorReadback::kListed : ImpostorReadback::kNoList;\n", h)
 
 
 if __name__ == "__main__":

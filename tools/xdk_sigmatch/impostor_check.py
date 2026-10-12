@@ -18,7 +18,9 @@ inputs; the captured rows are plan Task 6's).
                                             own bank, literals and storage), the fog pair, the pixel shader once a
                                             quad, and each position mutation (each must fail on the capture)
   identities <capture>...                   what the rows' registers and tables equal in their frame (reported)
-  bounds <capture>...                       the smallest and largest of every register component and of the size
+  bounds <capture>...                       the smallest and largest of every register component and of the size,
+                                            each held to the table's sanity bound (gen_impostor_table.py: exit 1
+                                            when a component a formula reads, or the size, lies outside)
   records <capture>...                      plan Task 8, criterion 2: every impostor record of every frame row
                                             ("impostors", written with --fable2_native_impostors=flat or on) against
                                             its "verts" and "vertsdata" rows bit for bit; seen, taken and quads
@@ -1230,16 +1232,43 @@ def bounds(paths):
     return out, tuple(size), rows, quads
 
 
+def bounds_outside(spans, size):
+    """The names ("vertex c111.x", "pixel c29.y", "the size") of what `bounds` found outside the table's sanity
+    bounds (gen_impostor_table.entry: a component no formula reads has none and is not judged; the size is in
+    (0, the table's])."""
+    import gen_impostor_table as gen
+    e = gen.entry()
+    out = []
+    for (bank, reg), span in sorted(spans.items(), key=lambda kv: (kv[0][0] != "vs", kv[0][1])):
+        for i, b in enumerate(e["bounds"][(bank, reg)]):
+            if b is not None and not (f32(b[0]) <= span[i][0] <= span[i][1] <= f32(b[1])):
+                out.append("%s c%d.%s" % ("vertex" if bank == "vs" else "pixel", reg, "xyzw"[i]))
+    if not (0.0 < size[0] <= size[1] <= f32(e["size_max"])):
+        out.append("the size")
+    return out
+
+
 def cmd_bounds(args, say=print):
+    import gen_impostor_table as gen
     paths = [cr.find_capture(c) for c in args.capture]
     spans, size, rows, quads = bounds(paths)
     say("%d rows, %d quads of %s" % (rows, quads, ", ".join(p.name for p in paths)))
+    e = gen.entry()
     for (bank, reg), span in sorted(spans.items(), key=lambda kv: (kv[0][0] != "vs", kv[0][1])):
-        largest = max(max(abs(lo), abs(hi)) for lo, hi in span)
-        say("  %s c%-3d %s   largest magnitude %.9g, four times it %.9g" % (
-            "vertex" if bank == "vs" else "pixel ", reg, "  ".join("[%.9g, %.9g]" % (lo, hi) for lo, hi in span), largest, 4.0 * largest))
-    say("  the size: [%.9g, %.9g], four times the largest %.9g" % (size[0], size[1], 4.0 * size[1]))
-    return 0 if rows else 1
+        say("  %s c%-3d %s" % ("vertex" if bank == "vs" else "pixel ", reg, "  ".join("[%.9g, %.9g]" % (lo, hi) for lo, hi in span)))
+        say("              the table's bound: %s" % "  ".join(
+            "not read" if b is None else "[%.9g, %.9g] (%s the largest magnitude)" % (
+                b[0], b[1], "%.0f times" % (max(abs(b[0]), abs(b[1])) / max(abs(lo), abs(hi))) if max(abs(lo), abs(hi)) > 0 else "0 is")
+            for b, (lo, hi) in zip(e["bounds"][(bank, reg)], span)))
+    say("  the size: [%.9g, %.9g]; the table's bound (0, %.9g]" % (size[0], size[1], e["size_max"]))
+    out = bounds_outside(spans, size) if rows else []
+    if out:
+        say("OUTSIDE the table's bounds: %s" % ", ".join(out))
+    elif rows:
+        say("every read component and the size inside the table's bounds (sanity bounds by kind: a place or distance within %g, "
+            "a matrix term within %g, a scale within %g, a size in (0, %g]; the spec's own where it gives one)" % (
+                gen.PLACE, gen.MATRIX, gen.SCALE, gen.SIZE))
+    return 0 if rows and not out else 1
 
 
 # --- command line -------------------------------------------------------------------------------------------------

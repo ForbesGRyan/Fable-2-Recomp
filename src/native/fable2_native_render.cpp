@@ -126,14 +126,20 @@ REXCVAR_DEFINE_STRING(fable2_native_impostors, "off", "Fable2",
                       "readback_resolve_force_addresses gains their bases, 0x12704000 and thirteen more 0x2B000 apart; "
                       "the first is the hero and dog entry and is listed even with hero_dog_texture_readback=false), "
                       "and the native view decodes and uploads each picture that changed; a record without a usable "
-                      "picture is not drawn (counted \"picture: base, unread, content or upload\"), never a flat "
+                      "picture is not drawn (counted \"picture: base, unread, content, upload or mode\"), never a flat "
                       "quad. Cost of on, measured at one place: about 2.3 ms a frame over off (the forced read-backs "
                       "about 1.8 ms, in the emulated view too; decode and upload about 1 ms of CPU time). The fourteen "
                       "addresses were measured in one save at two places: elsewhere the game may keep its pictures at "
-                      "other addresses, and then no far tree is drawn. A --readback_resolve_force_addresses given by "
+                      "other addresses, and then no far tree is drawn. on works with --readback_resolve=none (the "
+                      "default) and with full. With fast (also --d3d12_readback_resolve=true) every picture in guest "
+                      "memory is a frame old, with some it stays its first frame's for the whole run: no far tree is "
+                      "drawn there, every record is \"picture: mode\", and the log says so once. A "
+                      "--readback_resolve_force_addresses given by "
                       "hand is not seeded: the pictures are then used only if that list holds all fourteen bases (or "
                       "--readback_resolve=full); otherwise every record is \"picture: base\". With fable2_native_render "
-                      "off the list is not seeded with them. off (or false, 0; the default) = none of it is read, made "
+                      "off the list is not seeded with them. The list is seeded at start-up alone: the switch turned "
+                      "on in a running game gets no picture. The pictures are drawn whatever fable2_native_textures and "
+                      "the clay colour say. off (or false, 0; the default) = none of it is read, made "
                       "or drawn, and the log has the one line \"impostors: off\".");
 REXCVAR_DEFINE_STRING(fable2_native_impostor_feed, "", "Fable2",
                       "Diagnostic of the native impostors' pictures (frame map section 19, \"The pictures' feed\"): a file. "
@@ -446,6 +452,9 @@ bool CurrentWind() {
   return on;
 }
 
+// (the frame's verdict on the pictures' read-back: defined with the read-back's other functions, below)
+fable2::ImpostorReadback FrameImpostorReadback();
+
 // fable2_native_impostors: off, flat or on (capture::ParseImpostorMode); anything else is off, with one
 // warning that names the words. The capture reads the far woods' calls with it, in a frame with records.
 capture::ImpostorMode CurrentImpostors() {
@@ -630,8 +639,11 @@ void WriteSceneDump(nrhi::Device* device) {
   if (fp) std::fclose(fp);
   const render::SceneDumpHeader& head = g_clay->scene_dump_head();
   // The impostors' pictures of that frame (fable2_native_impostors=on alone): the same name with .f2np.
+  // (taken whatever came of the scene's file: pictures kept for a dump whose file failed would otherwise be
+  // written beside the next dump, another frame's)
   std::vector<uint8_t> pictures;
-  if (ok && g_clay->TakeImpostorPictures(&pictures)) {
+  const bool have_pictures = g_clay->TakeImpostorPictures(&pictures);
+  if (ok && have_pictures) {
     std::filesystem::path beside = full;
     beside.replace_extension(L".f2np");
     std::FILE* pp = _wfopen(beside.c_str(), L"wb");
@@ -839,11 +851,13 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
       g_clay->RequestSceneDump(first);
     }
   }
-  // (the pictures' availability is decided once, at the first frame drawn with the switch at `on`)
-  if (CurrentImpostors() == capture::ImpostorMode::kOn) g_clay->SetImpostorPicturesAvailable(ImpostorPicturesAvailable());
+  // (the switch read once a frame; the pictures' availability asked before every Render in `on`: the read-back's
+  // switches are the SDK's and can change while the game runs)
+  const capture::ImpostorMode impostors = CurrentImpostors();
+  if (impostors == capture::ImpostorMode::kOn) g_clay->SetImpostorReadback(FrameImpostorReadback());
   if (g_impostor_feed_valid) g_clay->SetImpostorPictureFeed(&g_impostor_feed);   // (a diagnostic: never without its switch)
   g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), CurrentFog(), CurrentWind(), CurrentCoverage(),
-                 CurrentImpostors(), post, st, tst);
+                 impostors, post, st, tst);
   g_shadows_usable.store(g_clay->shadows_usable(), std::memory_order_relaxed);
   SetStatus(render::FormatStatusText(*scene, st, textures ? &tst : nullptr) + "\n" +
             render::FormatLightDrawnText(st) + "\n" + render::FormatShadowText(st) + "\n" + render::FormatFogText(st) + "\n" +
@@ -1089,23 +1103,46 @@ std::atomic<bool> g_impostor_pictures_seeded{false};
 
 void NoteImpostorPicturesSeeded() { g_impostor_pictures_seeded.store(true, std::memory_order_release); }
 
-bool ImpostorPicturesAvailable() {
-  static std::atomic<int> decided{-1};
-  int v = decided.load(std::memory_order_acquire);
-  if (v < 0) {
-    // (a list given by hand that forces each of the fourteen bases has the pictures as a seeded one has)
-    const bool seeded = g_impostor_pictures_seeded.load(std::memory_order_acquire);
-    const bool by_hand = !seeded && fable2::ForceListHasImpostorPictures(rex::cvar::GetFlagByName("readback_resolve_force_addresses"));
-    v = seeded || by_hand || rex::cvar::GetFlagByName("readback_resolve") == "full" ? 1 : 0;
-    decided.store(v, std::memory_order_release);
-    REXLOG_INFO("[native] impostor pictures: {} (the read-back list {}; readback_resolve {})",
-                v ? "available" : "not available: every record is \"picture: base\"",
-                seeded ? "was seeded with the fourteen bases" : by_hand ? "was given by hand and holds the fourteen bases"
-                                                                         : "was not seeded with the fourteen bases and does not hold them",
-                rex::cvar::GetFlagByName("readback_resolve"));
-  }
-  return v == 1;
+// From the SDK's three switches as they stand (fable2::DecideImpostorReadback, readback_force_list.h: the pure
+// rule and its table): the read-back mode (--readback_resolve, and the legacy --d3d12_readback_resolve while the
+// first is at its default) and whether the list, seeded or given by hand, forces each of the fourteen bases.
+fable2::ImpostorReadback CurrentImpostorReadback() {
+  const fable2::ReadbackMode mode =
+      fable2::EffectiveReadbackMode(rex::cvar::GetFlagByName("readback_resolve"), rex::cvar::GetFlagByName("d3d12_readback_resolve") == "true");
+  return fable2::DecideImpostorReadback(mode, fable2::ForceListHasImpostorPictures(rex::cvar::GetFlagByName("readback_resolve_force_addresses")));
 }
+
+namespace {
+// The frame's verdict (command-processor thread alone). The three switches are read each frame (they are the
+// SDK's hot-reload switches); the list is parsed again only when its text changed. One log line for the first
+// verdict and one for each change, at most eight a run.
+fable2::ImpostorReadback FrameImpostorReadback() {
+  static std::string list_text;
+  static bool list_holds = false, list_known = false;
+  static int logged = -1;
+  static uint32_t lines = 0;
+  std::string list = rex::cvar::GetFlagByName("readback_resolve_force_addresses");
+  if (!list_known || list != list_text) {
+    list_holds = fable2::ForceListHasImpostorPictures(list);
+    list_text = std::move(list);
+    list_known = true;
+  }
+  const std::string word = rex::cvar::GetFlagByName("readback_resolve");
+  const bool legacy = rex::cvar::GetFlagByName("d3d12_readback_resolve") == "true";
+  const fable2::ImpostorReadback r = fable2::DecideImpostorReadback(fable2::EffectiveReadbackMode(word, legacy), list_holds);
+  if (int(r) != logged && lines < 8) {
+    logged = int(r);
+    ++lines;
+    const bool seeded = g_impostor_pictures_seeded.load(std::memory_order_acquire);
+    REXLOG_INFO("[native] impostor pictures: {} (the read-back list {}; --readback_resolve '{}', --d3d12_readback_resolve {}){}",
+                fable2::ImpostorReadbackWhy(r),
+                list_holds ? (seeded ? "was seeded with the fourteen bases" : "was given by hand and holds the fourteen bases")
+                           : "does not hold the fourteen bases",
+                word, legacy, lines == 8 ? "; no further line of this kind" : "");
+  }
+  return r;
+}
+}  // namespace
 
 std::string StatusText() {
   if (!g_installed.load(std::memory_order_acquire)) return {};
@@ -1165,9 +1202,13 @@ void Install(rex::memory::Memory* memory) {
   {
     const capture::ImpostorMode impostors = CurrentImpostors();
     if (impostors == capture::ImpostorMode::kOn) {
+      // (with the pictures' availability as the read-back's switches stand now: the application seeded its list
+      // before Install)
       REXLOG_INFO("[native] impostors: on (fable2_native_impostors; the far woods' draws are captured as with flat and each is drawn "
                   "with the game's own picture of its tree model, read back to guest memory by the seeded list of fourteen bases; a "
-                  "record without a usable picture is not drawn and is counted \"picture: base, unread, content or upload\")");
+                  "record without a usable picture is not drawn and is counted \"picture: base, unread, content, upload or mode\"); "
+                  "the pictures: {}",
+                  fable2::ImpostorReadbackWhy(CurrentImpostorReadback()));
     } else {
       REXLOG_INFO("[native] impostors: {} (fable2_native_impostors)", capture::ImpostorModeName(impostors));
     }

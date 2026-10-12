@@ -151,8 +151,9 @@ inline uint32_t TiledUpperBound2D(uint32_t right, uint32_t bottom, uint32_t pitc
 // k_16_16_16_16_EXPAND (29: the scene colour before post, 8 bytes a texel) and
 // k_24_8 / k_24_8_FLOAT (22, 23: depth), and k_1_5_5_5 (3: the pictures of the far
 // woods' impostors, frame-map section 19; 2 bytes a texel). False for any other
-// format. The product reaches this only for k_DXN (terrain_patch.h,
-// DecodeNormalMap).
+// format. The product reaches this for k_DXN (terrain_patch.h,
+// DecodeNormalMap) and, through DumpFetch, for k_1_5_5_5 (the impostors'
+// pictures: ClayPass::ReadImpostorPicture).
 inline bool DumpFormatInfo(uint32_t xenos_format, TexFormatInfo* fi) {
   if (xenos_format == 24 || xenos_format == 3) {
     *fi = {1, 2, 1};
@@ -255,12 +256,65 @@ inline bool DumpWrittenAtRow(const uint32_t fc[6], bool scene_verts_row) {
   return scene_verts_row || !picture;
 }
 
+// The budgets of a discovery capture's content-kept files (DumpKeyedByContent), by kind. A 1D table
+// counts against the file count alone (it is 1.5 KB in practice), a 2D target against the same file
+// count and the targets' bytes, and an impostor's picture (a 2D texture of format 3: fourteen a
+// frame) against a file count and a byte budget OF ITS OWN: counted with the others, the pictures
+// used up the 1,024 files in about 68 frames, and no fog table was dumped after that, with no
+// impostor switch on (review of the whole branch, Minor 7). The pictures' budget is 32 frames of
+// fourteen whole bases.
+enum class ContentDumpKind : uint8_t { kTable, kTarget, kPicture };
+// For a constant DumpKeyedByContent takes: a 1D texture is a table whatever its format.
+inline ContentDumpKind ContentDumpKindOf(const uint32_t fc[6]) {
+  if (Is1DFetch(fc)) return ContentDumpKind::kTable;
+  return ((fc[5] >> 9) & 3) == 1 && (fc[1] & 0x3F) == 3 ? ContentDumpKind::kPicture : ContentDumpKind::kTarget;
+}
+struct ContentDumpUse {
+  uint32_t files = 0;           // tables and targets written
+  uint64_t bytes = 0;           // the targets' bytes
+  uint32_t picture_files = 0;   // pictures written
+  uint64_t picture_bytes = 0;
+};
+struct ContentDumpLimits {
+  uint32_t files;
+  uint64_t bytes;
+  uint32_t picture_files;
+  uint64_t picture_bytes;
+};
+inline constexpr ContentDumpLimits kContentDumpLimits = {1024, 512ull << 20, 448, 448ull * 131072ull};
+// Whether a file of this kind may still be written (asked before the texture's bytes are known).
+constexpr bool ContentDumpFileRoom(ContentDumpKind kind, const ContentDumpUse& use, const ContentDumpLimits& lim) {
+  return kind == ContentDumpKind::kPicture ? use.picture_files < lim.picture_files : use.files < lim.files;
+}
+// Whether `bytes` of this kind may be written: room for the file, some bytes, and (a target, a picture) room in
+// the kind's byte budget. No sum wraps.
+constexpr bool ContentDumpHasRoom(ContentDumpKind kind, uint64_t bytes, const ContentDumpUse& use, const ContentDumpLimits& lim) {
+  if (bytes == 0 || !ContentDumpFileRoom(kind, use, lim)) return false;
+  if (kind == ContentDumpKind::kTable) return true;
+  const uint64_t used = kind == ContentDumpKind::kPicture ? use.picture_bytes : use.bytes;
+  const uint64_t budget = kind == ContentDumpKind::kPicture ? lim.picture_bytes : lim.bytes;
+  return used <= budget && bytes <= budget - used;
+}
+// The use after a file of `bytes` of this kind was written.
+constexpr ContentDumpUse ContentDumpCounted(ContentDumpKind kind, uint64_t bytes, ContentDumpUse use) {
+  if (kind == ContentDumpKind::kPicture) {
+    ++use.picture_files;
+    use.picture_bytes += bytes;
+  } else {
+    ++use.files;
+    if (kind == ContentDumpKind::kTarget) use.bytes += bytes;
+  }
+  return use;
+}
+
 // A 2D fetch constant of any format DumpFormatInfo has, as DecodeTextureFetch reads one (the same
 // fields from the same bits); `out->format` is TexFormatFromXenos's (kUnsupported for a format the
 // renderer does not decode) and `*fi` the format's block layout. False, with `out` and `fi`
 // untouched, as DecodeTextureFetch is for a constant that is no 2D texture, has no base or a pitch
-// below its width, and for a format without a layout. Discovery only: no record, material or
-// texture of the pass is made from it.
+// below its width, and for a format without a layout. Discovery, and since sub-project 12 the
+// pass's read of an impostor's picture (ClayPass::ReadImpostorPicture: the fetch of a record the
+// capture already held to format 3, 256 x 256, tiled); no record or material is made from it, and
+// no texture of the texture cache.
 inline bool DumpFetch(const uint32_t fc[6], TextureFetch* out, TexFormatInfo* fi) {
   if ((fc[0] & 3) != 2 || ((fc[5] >> 9) & 3) != 1) return false;
   TexFormatInfo info;

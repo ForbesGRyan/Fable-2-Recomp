@@ -190,32 +190,118 @@ constexpr bool ImpostorPictureUsable(const ImpostorPictureStats& s) {
 
 // A hash of EVERY byte of a picture's base as it lies in guest memory (the pass asks it whether the picture
 // changed since its texture was made; the texture cache's SampleHash reads 4,096 of these 131,072 bytes, and a
-// change between its ranges would leave a picture stale). Eight bytes at a time through the round of XXH64, as
-// SampleHash mixes its words: a change of any one byte changes the hash, and one bit changed in two words does
-// not cancel. A last partial word is padded with zeros; the size is part of the hash. No bytes: the seed.
+// change between its ranges would leave a picture stale). Cheap (ledger rulings 52 and 54: fourteen pictures are
+// hashed every frame): the bytes go in blocks of 64 into EIGHT LANES, one word of eight bytes a lane, so that the
+// eight words of a block are mixed side by side and no word waits for the one before it (the hash of before was
+// one chain of 16,384 dependent steps; measured in tests/native/test_impostor_picture.cpp's tool mode, with
+// optimisation: frame-map section 19, "The pictures in the pass"). A lane's step, lane = rotl(lane ^ word, 29) *
+// kP1, is a bijection of the word for a given lane and of the lane for a given word, the lanes start apart, each
+// lane is folded into the result by a bijection of its own, and the size is part of the hash: so a change
+// confined to ONE word (any one byte, any bits of it) always changes the hash, two lanes or two blocks exchanged
+// give another hash, and a change spread over several words goes unseen only as two 64-bit hashes collide. The
+// rotation carries a word's top bit down before the product, so that the same bit changed in two words of a lane
+// does not cancel. The bytes after the last whole block are padded with zeros to one more block. No bytes: the
+// seed. Not a hash against an adversary: the bytes are the game's own pictures.
 inline uint64_t ImpostorPictureHash(const uint8_t* data, size_t size) {
-  constexpr uint64_t kP1 = 0x9E3779B185EBCA87ull, kP2 = 0xC2B2AE3D27D4EB4Full, kP4 = 0x85EBCA77C2B2AE63ull;
-  uint64_t h = 1469598103934665603ull;
-  if (!data) return h;
-  h ^= uint64_t(size);
-  auto word = [&](uint64_t w) {
-    w *= kP2;
-    w = (w << 31) | (w >> 33);
-    w *= kP1;
-    h ^= w;
-    h = ((h << 27) | (h >> 37)) * kP1 + kP4;
+  constexpr uint64_t kP1 = 0x9E3779B185EBCA87ull, kP2 = 0xC2B2AE3D27D4EB4Full, kP3 = 0x165667B19E3779F9ull, kP4 = 0x85EBCA77C2B2AE63ull;
+  constexpr uint64_t kSeed = 1469598103934665603ull;
+  if (!data) return kSeed;
+  uint64_t lane[8];
+  for (uint64_t k = 0; k < 8; ++k) lane[k] = kSeed + (k + 1) * kP2;
+  auto block = [&](const uint8_t* at) {
+    uint64_t w[8];
+    std::memcpy(w, at, 64);
+    for (int k = 0; k < 8; ++k) {
+      const uint64_t v = lane[k] ^ w[k];
+      lane[k] = ((v << 29) | (v >> 35)) * kP1;
+    }
   };
   size_t i = 0;
-  for (; i + 8 <= size; i += 8) {
-    uint64_t w;
-    std::memcpy(&w, data + i, 8);
-    word(w);
-  }
+  for (; i + 64 <= size; i += 64) block(data + i);
   if (i < size) {
-    uint64_t w = 0;
-    std::memcpy(&w, data + i, size - i);
-    word(w);
+    uint8_t last[64] = {};
+    std::memcpy(last, data + i, size - i);
+    block(last);
   }
+  uint64_t h = kSeed ^ uint64_t(size);
+  for (int k = 0; k < 8; ++k) {
+    uint64_t v = lane[k] * kP2;
+    v = ((v << 31) | (v >> 33)) * kP1;
+    h ^= v;
+    h = ((h << 27) | (h >> 37)) * kP1 + kP4;
+  }
+  h ^= h >> 33;
+  h *= kP2;
+  h ^= h >> 29;
+  h *= kP3;
+  h ^= h >> 32;
+  return h;
+}
+
+// The bookkeeping of one base's texture (the pass's ClayPass::ImpostorPictureTexture::held), lifted out of the
+// pass so that a table can hold it (review of the whole branch, question 7): a mistake here draws a stale or a
+// never-written texture. What the pass holds:
+//   texture, view: made (the view for `swizzle`, the fetch's field it was made with);
+//   filled:        the texture's four levels hold, or are staged to hold by the upload block of this very Render,
+//                  the picture whose guest bytes hash to `hash`;
+//   shader_state:  the texture was uploaded at least once and is in the shader-resource state; else it is in the
+//                  copy-destination state it was made in.
+struct ImpostorPictureHeld {
+  bool texture = false, view = false, filled = false, shader_state = false;
+  uint32_t swizzle = 0;
+  uint64_t hash = 0;
+};
+// What to do with this frame's picture of a base (its guest bytes hash to `hash`, its record's fetch names
+// `swizzle`). reuse: the texture holds exactly this picture behind a view of this swizzle and was uploaded: it is
+// drawn as it is, nothing decoded, staged or copied. Otherwise the picture is decoded, judged and staged anew (a
+// CHANGED picture is never reused), after a texture (make_texture) and a view (make_view: none yet, or one of
+// another swizzle) where they are missing.
+struct ImpostorPicturePlan { bool reuse = false, make_texture = false, make_view = false; };
+constexpr ImpostorPicturePlan PlanImpostorPicture(const ImpostorPictureHeld& h, uint64_t hash, uint32_t swizzle) {
+  ImpostorPicturePlan p;
+  p.reuse = h.texture && h.view && h.filled && h.shader_state && h.hash == hash && h.swizzle == swizzle;
+  if (p.reuse) return p;
+  p.make_texture = !h.texture;
+  p.make_view = p.make_texture || !h.view || h.swizzle != swizzle;
+  return p;
+}
+// What came of a plan. kReuse, kStaged: the record has a usable picture. The others: it has none ("picture:
+// upload"), for the texture, the view or this frame's staging buffer.
+enum class ImpostorPictureStep : uint8_t { kReuse, kStaged, kNoTexture, kNoView, kNoStaging };
+constexpr bool ImpostorPictureStepUsable(ImpostorPictureStep s) { return s == ImpostorPictureStep::kReuse || s == ImpostorPictureStep::kStaged; }
+struct ImpostorPictureOutcome {
+  ImpostorPictureHeld held;
+  ImpostorPictureStep step = ImpostorPictureStep::kNoTexture;
+};
+// What is held after the pass carried a plan out. `texture_made`, `view_made`: whether the device gave what the
+// plan asked for (read only where the plan asked); `staged`: whether the picture's four levels were written to
+// this frame's staging buffer. A new texture is empty, in the copy-destination state and without a view; a view
+// is of the swizzle asked for, made or not; the hash becomes this picture's only when it was staged, so that a
+// texture whose refresh failed keeps the picture it has and the hash of it. (A picture the content rule refuses
+// never comes here: nothing held changes.)
+constexpr ImpostorPictureOutcome CommitImpostorPicture(ImpostorPictureHeld h, const ImpostorPicturePlan& plan, uint64_t hash, uint32_t swizzle,
+                                                       bool texture_made, bool view_made, bool staged) {
+  if (plan.reuse) return {h, ImpostorPictureStep::kReuse};
+  if (plan.make_texture) {
+    h = ImpostorPictureHeld{};
+    h.texture = texture_made;
+    if (!texture_made) return {h, ImpostorPictureStep::kNoTexture};
+  }
+  if (plan.make_view) {
+    h.view = view_made;
+    h.swizzle = swizzle;
+    if (!view_made) return {h, ImpostorPictureStep::kNoView};
+  }
+  if (!staged) return {h, ImpostorPictureStep::kNoStaging};
+  h.hash = hash;
+  h.filled = true;
+  return {h, ImpostorPictureStep::kStaged};
+}
+// The upload block, for a staged picture: whether its texture must first leave the shader-resource state (it was
+// uploaded before), and what is held once its four levels are copied and it is back in that state.
+constexpr bool ImpostorPictureUploadFromShaderState(const ImpostorPictureHeld& h) { return h.shader_state; }
+constexpr ImpostorPictureHeld ImpostorPictureUploaded(ImpostorPictureHeld h) {
+  h.shader_state = true;
   return h;
 }
 

@@ -97,11 +97,50 @@ class Generate(unittest.TestCase):
         self.assertEqual(e["bounds"][("ps", 29)][1], (gen.ABOVE_ZERO, 4.0))
         self.assertEqual(e["bounds"][("ps", 29)][0], (0.0, 4096.0))
         self.assertEqual(e["bounds"][("ps", 12)][1], (0.0, 4096.0))
-        self.assertEqual(e["bounds"][("ps", 12)][3], (0.0, 4.0))
+        self.assertEqual(e["bounds"][("ps", 12)][3], (0.0, 64.0))             # a light scale, as c31.x and c20.w (ledger ruling 54)
         self.assertEqual(e["bounds"][("ps", 31)][0], (gen.ABOVE_ZERO, 64.0))
         self.assertEqual(e["bounds"][("ps", 20)][3], (gen.ABOVE_ZERO, 64.0))
         self.assertEqual(e["bounds"][("vs", 72)][0], (-1e7, 1e7))
         self.assertEqual(e["bounds"][("vs", 47)][0], (-1e6, 1e6))
+        # (ledger ruling 54) no bound is fitted to the captures any more: a component that is read has its kind's
+        # sanity bound, which refuses only what is no value of that kind at all
+        self.assertEqual((gen.PLACE, gen.MATRIX, gen.SCALE, gen.SIZE), (1e6, 1e7, 65536.0, 4096.0))
+        self.assertFalse(hasattr(gen, "FACTOR"))
+        for key, comps in gen.READ.items():
+            for i in comps:
+                b = e["bounds"][key][i]
+                if key in gen.SPEC and gen.SPEC[key][i] is not None:
+                    self.assertEqual(b, gen.SPEC[key][i], (key, i))
+                else:
+                    reach = {"place": gen.PLACE, "matrix": gen.MATRIX, "scale": gen.SCALE}[gen.KIND[key][i]]
+                    self.assertEqual(b, (-reach, reach), (key, i))
+        self.assertEqual(set(gen.KIND), set(gen.READ))
+        for key, kinds in gen.KIND.items():
+            self.assertEqual([k is not None for k in kinds], [i in gen.READ[key] for i in range(4)], key)
+        # the kinds, component by component: places and distances, matrix terms, scales (factors, directions,
+        # exponents, reciprocal ranges)
+        self.assertEqual(gen.KIND[("vs", 8)], [None, None, "scale", None])              # the raise
+        self.assertEqual(gen.KIND[("vs", 46)], ["scale", "scale", "scale", None])       # the lying axis, a direction
+        self.assertEqual(gen.KIND[("vs", 47)], ["place", "place", "place", None])       # the eye
+        self.assertEqual(gen.KIND[("vs", 110)], ["scale", "scale", "scale", None])      # the fog's axis, a direction
+        self.assertEqual(gen.KIND[("vs", 111)], ["place", None, "scale", "scale"])      # the fog's start, a distance; its blend and reciprocal range
+        self.assertEqual(gen.KIND[("vs", 113)], ["scale"] * 4)                          # the picture's coordinate scale and offset
+        self.assertEqual(gen.KIND[("vs", 114)], ["scale", "scale", None, None])         # the extent's factor and exponent
+        for reg in (72, 73, 74, 75, 115, 116, 117):
+            self.assertEqual(gen.KIND[("vs", reg)], ["matrix"] * 4)
+        self.assertEqual(gen.KIND[("ps", 19)], ["place", "place", "place", None])
+        self.assertEqual(e["bounds"][("vs", 111)][0], (-1e6, 1e6))
+        self.assertEqual(e["bounds"][("vs", 111)][3], (-65536.0, 65536.0))
+        self.assertEqual(e["bounds"][("vs", 8)][2], (-65536.0, 65536.0))
+        # every bound is at least a hundred times the largest magnitude the five captures hold, but for the three
+        # the spec gives with a meaning of their own (the light's scales, the dissolve's rate)
+        narrow = {("ps", 12): (3,), ("ps", 20): (3,), ("ps", 29): (1,)}
+        for key, span in gen.CAPTURED.items():
+            for i in gen.READ[key]:
+                lo, hi = e["bounds"][key][i]
+                largest = max(abs(span[i][0]), abs(span[i][1]))
+                if i not in narrow.get(key, ()):
+                    self.assertGreaterEqual(max(abs(lo), abs(hi)), 80.0 * largest, (key, i))
         # and every captured value of a component that is read lies inside its bound (the five discovery captures'
         # spans, t6_bounds.txt); a component no formula reads has none (ledger ruling 34)
         for key, span in gen.CAPTURED.items():
@@ -113,9 +152,33 @@ class Generate(unittest.TestCase):
         for key in (("vs", 8), ("vs", 111), ("ps", 12), ("ps", 20), ("ps", 29), ("ps", 31)):
             self.assertIn(None, e["bounds"][key], key)
         self.assertIsNone(e["bounds"][("vs", 111)][1])              # the sky's path height: 1,900 at the bridge, unread here
-        # c8's bound is the raise's alone (four times 0.9555), not four times an unread component's
-        self.assertAlmostEqual(e["bounds"][("vs", 8)][2][1], 4.0 * 0.955497861, places=5)
-        self.assertTrue(gen.CAPTURED_SIZE[1] < e["size_max"] <= 4.0 * gen.CAPTURED_SIZE[1])
+        self.assertEqual(e["size_max"], 4096.0)                     # a quad's size: a distance, as the spec's pixel distances
+        self.assertGreaterEqual(e["size_max"], 100.0 * gen.CAPTURED_SIZE[1])
+
+    def test_a_made_far_away_region_passes_and_garbage_does_not(self):
+        """Review of the whole branch, I2 (ledger ruling 54): a region whose fog range starts at 200 units, seen from a
+        world position of 5,000, with other scales than the bridge's, is inside every bound; a component that is no
+        number, infinite or of a magnitude no value of its kind has is outside."""
+        e = gen.entry()
+        far = gen.far_region()
+        self.assertEqual(far[("vs", 111)][0], 200.0)                 # the fog range's start (81.565 was the bound)
+        self.assertEqual(far[("vs", 47)][:3], [5000.0, -5000.0, 300.0])
+        self.assertEqual(far[("ps", 19)][:3], [5000.0, -5000.0, 300.0])
+        self.assertEqual(gen.outside(e, far), [])
+        self.assertEqual(gen.outside(e, {key: [0.5 * (lo + hi) for lo, hi in span] for key, span in gen.CAPTURED.items()}), [])
+        for key, comps in gen.READ.items():
+            for i in comps:
+                for bad in (float("nan"), float("inf"), float("-inf"), 1e20, -1e20, 3.0e38):
+                    changed = {k: list(v) for k, v in far.items()}
+                    changed[key][i] = bad
+                    self.assertEqual(gen.outside(e, changed), [(key, i)], (key, i, bad))
+            for i in range(4):
+                if i not in comps:                                   # an unread component is never judged (ruling 34)
+                    changed = {k: list(v) for k, v in far.items()}
+                    changed[key][i] = float("nan")
+                    self.assertEqual(gen.outside(e, changed), [], (key, i))
+        # the bounds of before would have refused this region for its fog alone
+        self.assertGreater(far[("vs", 111)][0], 4.0 * gen.CAPTURED[("vs", 111)][0][1])
 
     def test_read_is_what_the_formulas_read(self):
         """READ against the three functions: a component is in it exactly when changing that component alone

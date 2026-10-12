@@ -58,6 +58,9 @@ void SetWindWanted(bool wanted);
 // buffer is made, and a frame's scene says so (FrameScene::impostor_mode kOff). kFlat and kOn capture
 // alike: the calls of vertex shader 129F with pixel shader 4B1D in the main scene become
 // FrameScene::impostors with their words, each whole or missing with a counted reason.
+// With kFlat or kOn and no discovery capture, every hooked draw also reads the device's pending bool
+// word and tests two thread-local flags (the pending "indx" and "verts" rows of a discovery capture,
+// never set without one): the pixel bool word's last writer is followed for the impostors' b129 rule.
 void SetImpostorsWanted(ImpostorMode mode);
 // Starts a discovery capture of `frames` guest frames (1..100000) sampling every `every`th
 // draw (1..64) at the next guest frame, into a new file, like FABLE2_NATIVE_DISCOVERY

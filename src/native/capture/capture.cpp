@@ -332,12 +332,12 @@ std::FILE* g_file = nullptr;
 std::filesystem::path g_tex_dir;
 std::set<std::pair<uint32_t, uint64_t>> g_tex_seen;
 uint32_t g_tex_count = 0;
-// The same for the textures kept once per content (render::DumpKeyedByContent: 1D tables and the
-// game's own targets): the (base address, identity, content hash) triples already dumped, the
-// files and the bytes written.
+// The same for the textures kept once per content (render::DumpKeyedByContent: 1D tables, the
+// game's own targets and the impostors' pictures): the (base address, identity, content hash)
+// triples already dumped, the files and the bytes written by kind (render::ContentDumpUse: the
+// pictures have a count and a byte budget of their own).
 std::set<std::tuple<uint32_t, uint64_t, uint64_t>> g_tex_content_seen;
-uint32_t g_tex_content_count = 0;
-uint64_t g_tex_content_bytes = 0;
+render::ContentDumpUse g_tex_content_use;
 uint64_t g_tex_mip_bytes = 0;  // the capture's mip files together (DumpTextureMips)
 // Under g_mutex: the row being written is an in-scene "verts" row (WriteVertsRow sets it around its
 // texture fetches): the one row at which an impostor's picture is written (render::DumpWrittenAtRow).
@@ -1737,16 +1737,16 @@ void AppendPs(std::string& row, const DeviceSnapshot& dev) {
 // row that carries the frame and the content hash ("frame", "content"; "dim":1 for a 1D
 // texture), written before the row of the draw that sampled it. Such a texture is read and hashed
 // at every row that names it. Bounded apart from the others, so that a long capture's tables
-// cannot use up the ordinary textures' files: kMaxContentTextures files, and kMaxContentTextureBytes
-// for the 2D targets (a 1D table does not count against the bytes). Returns the content hash of such a texture as it is at this moment (also when that
+// cannot use up the ordinary textures' files, and by kind (render::kContentDumpLimits, texture_decode.h):
+// 1,024 files for the tables and the 2D targets, 512 MB for the targets (a 1D table does not count
+// against the bytes), and for the impostors' pictures (format 3, fourteen a frame) 448 files and their
+// bytes of their own, so that a long capture's pictures cannot starve the fog tables. Returns the content hash of such a texture as it is at this moment (also when that
 // content was dumped before or its file could not be written), for the row's "tfc"; 0 for any
 // other texture and when the bytes were not read.
 constexpr uint32_t kMaxTextures = 768;
 constexpr uint32_t kMaxTextureBytes = 8u << 20;
 constexpr uint32_t kMaxUnsupportedBytes = 64u << 10;
 constexpr uint32_t kMaxUnsupported1DTexelBytes = 16;
-constexpr uint32_t kMaxContentTextures = 1024;
-constexpr uint64_t kMaxContentTextureBytes = 512ull << 20;
 
 // Discovery only (caller holds g_mutex with g_file open; called by DumpTexture alone, once a texture, for a 2D
 // texture the renderer decodes, and once a content for a 2D texture of format 3, the impostors' pictures of
@@ -1818,7 +1818,10 @@ std::string DumpTextureMips(const render::TextureFetch& t, const render::TexForm
 
 uint64_t DumpTexture(const uint32_t fc[6]) {
   const bool by_content = render::DumpKeyedByContent(fc);
-  if (g_tex_dir.empty() || (by_content ? g_tex_content_count >= kMaxContentTextures : g_tex_count >= kMaxTextures)) {
+  // (which of the content-kept budgets it counts against; read only for a texture kept by content)
+  const render::ContentDumpKind content_kind = render::ContentDumpKindOf(fc);
+  if (g_tex_dir.empty() ||
+      (by_content ? !render::ContentDumpFileRoom(content_kind, g_tex_content_use, render::kContentDumpLimits) : g_tex_count >= kMaxTextures)) {
     return 0;
   }
   render::TextureFetch t;
@@ -1855,9 +1858,10 @@ uint64_t DumpTexture(const uint32_t fc[6]) {
   uint64_t content = 0;
   char name[64];
   if (by_content) {
-    // The byte budget is the targets': a 1D table (at most kMaxTextureBytes, in practice 1.5 KB) is
-    // bounded by the file count alone, so a long capture's targets cannot starve the tables.
-    if (bytes == 0 || (!is_1d && g_tex_content_bytes + bytes > kMaxContentTextureBytes)) return 0;
+    // A 1D table (at most kMaxTextureBytes, in practice 1.5 KB) is bounded by the file count alone, so a long
+    // capture's targets cannot starve the tables by their bytes; the pictures have their own files and bytes,
+    // so they cannot starve them by their number (render::ContentDumpHasRoom).
+    if (!render::ContentDumpHasRoom(content_kind, bytes, g_tex_content_use, render::kContentDumpLimits)) return 0;
     src = ReadPhysical(base, uint32_t(bytes));
     if (!src) return 0;
     content = XXH3_64bits(src, size_t(bytes));
@@ -1893,8 +1897,7 @@ uint64_t DumpTexture(const uint32_t fc[6]) {
   if (by_content) {
     g_tex_content_seen.insert({base, identity, content});
     g_tex_seen.insert({base, identity});
-    ++g_tex_content_count;
-    if (!is_1d) g_tex_content_bytes += bytes;
+    g_tex_content_use = render::ContentDumpCounted(content_kind, bytes, g_tex_content_use);
     std::snprintf(buf, sizeof(buf), ",\"frame\":%d,\"content\":\"0x%016llX\"%s",
                   g_frames_written.load(std::memory_order_relaxed) + 1, static_cast<unsigned long long>(content),
                   is_1d ? ",\"dim\":1" : "");
@@ -5823,8 +5826,7 @@ bool OpenLog() {
     g_tex_seen.clear();
     g_tex_count = 0;
     g_tex_content_seen.clear();
-    g_tex_content_count = 0;
-    g_tex_content_bytes = 0;
+    g_tex_content_use = render::ContentDumpUse{};
     g_tex_mip_bytes = 0;
     g_geo_dir = dir / ("native_geo_" + stamp);
     g_geo_seen.clear();

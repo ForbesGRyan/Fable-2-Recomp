@@ -132,4 +132,71 @@ inline bool ForceListHasImpostorPictures(std::string_view spec) {
   return true;
 }
 
+// The read-back mode and the pictures (review of the whole branch, I1; ledger ruling 54). The SDK has four modes
+// (--readback_resolve; D3D12CommandProcessor::IssueCopy and IssueCopy_ReadbackResolvePath, thirdparty/rexglue-sdk/
+// src/graphics/d3d12/command_processor.cpp). What a resolve of one of the fourteen bases does in each:
+//   none (the default): only a resolve the list forces takes the read-back path, and there it waits for the GPU to
+//         finish everything queued and copies THIS resolve's bytes into guest memory: the frame's own picture.
+//         A base the list does not force is not copied at all.
+//   full: every resolve takes that path, waits and copies its own bytes: the frame's own picture, list or not.
+//   fast: every resolve takes the path, the list changes nothing, and nothing waits: guest memory gets the buffer
+//         of the PREVIOUS resolve of the same address and length (the first resolve of an address alone waits and
+//         copies itself). Every picture is a frame old.
+//   some: as fast, but guest memory is written only when there is no previous buffer: the FIRST resolve of an
+//         address. Every picture stays its first frame's for the whole run.
+// The legacy --d3d12_readback_resolve=true means fast while --readback_resolve is at its default.
+// So the pictures are each frame's own in `none` with the fourteen bases forced, and in `full`. In `fast` and
+// `some` they are whole pictures that pass the content rule and are old or frozen, which nothing downstream can
+// tell: the native view draws none there, and says why.
+enum class ReadbackMode : uint8_t { kNone, kFast, kSome, kFull };
+// The SDK's effective mode from its two switches' values (CommandProcessor::GetReadbackResolveMode with
+// ParseReadbackResolveMode, graphics/command_processor.cpp): the shared switch's word, another word than the four
+// being none; the legacy switch counts only while the shared one holds its default, the word "none".
+constexpr ReadbackMode EffectiveReadbackMode(std::string_view readback_resolve, bool legacy_d3d12_readback_resolve) {
+  if (readback_resolve == "fast") return ReadbackMode::kFast;
+  if (readback_resolve == "some") return ReadbackMode::kSome;
+  if (readback_resolve == "full") return ReadbackMode::kFull;
+  return readback_resolve == "none" && legacy_d3d12_readback_resolve ? ReadbackMode::kFast : ReadbackMode::kNone;
+}
+// Whether the run brings each frame's own pictures to guest memory, and if not, why.
+enum class ImpostorReadback : uint8_t {
+  kListed,     // none, the list forces the fourteen bases: available
+  kFull,       // full: available, whatever the list holds
+  kNoList,     // none, and the list does not force all fourteen: not available ("picture: base")
+  kModeFast,   // fast: a frame old, not available ("picture: mode")
+  kModeSome,   // some: the first frame's, not available ("picture: mode")
+};
+// `list_forces_fourteen`: ForceListHasImpostorPictures of the list as it stands (seeded or given by hand).
+constexpr ImpostorReadback DecideImpostorReadback(ReadbackMode mode, bool list_forces_fourteen) {
+  switch (mode) {
+    case ReadbackMode::kFull: return ImpostorReadback::kFull;
+    case ReadbackMode::kFast: return ImpostorReadback::kModeFast;
+    case ReadbackMode::kSome: return ImpostorReadback::kModeSome;
+    default: return list_forces_fourteen ? ImpostorReadback::kListed : ImpostorReadback::kNoList;
+  }
+}
+constexpr bool ImpostorReadbackAvailable(ImpostorReadback r) { return r == ImpostorReadback::kListed || r == ImpostorReadback::kFull; }
+// Not available because of the mode (the pass counts such a record "picture: mode"; a missing list "picture: base").
+constexpr bool ImpostorReadbackByMode(ImpostorReadback r) { return r == ImpostorReadback::kModeFast || r == ImpostorReadback::kModeSome; }
+// The words of the log's line and of the install line.
+constexpr const char* ImpostorReadbackWhy(ImpostorReadback r) {
+  switch (r) {
+    case ImpostorReadback::kListed:
+      return "available: readback_resolve none and the read-back list forces the fourteen bases (each forced resolve waits for the GPU and "
+             "copies its own bytes: the frame's own pictures)";
+    case ImpostorReadback::kFull:
+      return "available: readback_resolve full (every resolve waits for the GPU and copies its own bytes: the frame's own pictures)";
+    case ImpostorReadback::kNoList:
+      return "NOT available: readback_resolve none and the read-back list does not force the fourteen bases; no far tree is drawn, every "
+             "record is \"picture: base\"";
+    case ImpostorReadback::kModeFast:
+      return "NOT available: readback_resolve fast (also what --d3d12_readback_resolve=true means) copies the PREVIOUS resolve's bytes: "
+             "every picture would be a frame old; no far tree is drawn, every record is \"picture: mode\" (use readback_resolve none or full)";
+    case ImpostorReadback::kModeSome:
+      return "NOT available: readback_resolve some copies only the first resolve of an address: every picture would stay its first "
+             "frame's for the whole run; no far tree is drawn, every record is \"picture: mode\" (use readback_resolve none or full)";
+  }
+  return "?";
+}
+
 }  // namespace fable2

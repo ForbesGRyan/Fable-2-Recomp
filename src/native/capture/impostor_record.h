@@ -37,9 +37,11 @@
 namespace fable2::native::capture {
 
 // --fable2_native_impostors (spec ruling 5). kOff: nothing of this file is reached. kFlat: the
-// records are captured and drawn with one flat colour. kOn: the pictures by read-back, which this
-// build does not have (ledger ruling 31: phase 12c is not entered): the records are captured as
-// in kFlat and nothing is drawn, each record counted "picture: unread" (ledger ruling 23).
+// records are captured and drawn with one flat colour. kOn: the records are captured as in kFlat
+// and each is drawn with the game's own picture of its tree model, read back to guest memory
+// (phase 12c, entered by ledger ruling 41); a record without a usable picture is not drawn and is
+// counted by its picture's reason (render::DecideImpostorPicture), never drawn flat. The read-back
+// list is seeded at start-up alone: the switch turned on in a running game gets no picture.
 enum class ImpostorMode : uint8_t { kOff, kFlat, kOn };
 inline constexpr const char* kImpostorSwitchWords = "off, false, 0, flat, on, true, 1";
 // The switch's word. Anything else: kOff, with `*recognized` false (the caller warns once).
@@ -64,7 +66,8 @@ enum : uint32_t { kImpC8, kImpC46, kImpC47, kImpC72, kImpC73, kImpC74, kImpC75, 
 enum : uint32_t { kImpP12, kImpP19, kImpP20, kImpP29, kImpP31 };
 
 // impostor_table.inc (tools/xdk_sigmatch/gen_impostor_table.py, from light_formulas.IMPOSTOR_SHADER
-// and the captures' bounds), read in one pass. A count runs on past its array, so that a table with
+// and its sanity bounds by kind: a place or distance within 1e6, a matrix term within 1e7, a scale
+// within 65,536, the spec's own where it gives one; ledger ruling 54), read in one pass. A count runs on past its array, so that a table with
 // too many lines fails the static assert below instead of being cut short.
 struct ImpostorTable {
   uint64_t vs = 0, ps = 0;
@@ -214,7 +217,7 @@ static_assert(kImpostorPsRegister[kImpP12] == 12 && kImpostorPsRegister[kImpP19]
 inline constexpr uint8_t kImpostorWordSource[4] = {kImpostorTable.word_source[0], kImpostorTable.word_source[1],
                                                    kImpostorTable.word_source[2], kImpostorTable.word_source[3]};
 inline constexpr uint32_t kImpostorWordEndian = kImpostorTable.endian;
-inline constexpr float kImpostorSizeMax = kImpostorTable.size_max;      // a quad's s: four times the captures' largest
+inline constexpr float kImpostorSizeMax = kImpostorTable.size_max;      // a quad's s: (0, 4096], a sanity bound (the captures' largest is 16.4)
 inline constexpr uint32_t kImpostorB129 = kImpostorTable.b129;          // the ground-fog bool's bit of the pixel bool word
 inline constexpr float kImpostorPlaceMax = 1e6f;                        // a quad's place
 // tf0's dword 0 in every captured row: a tiled 2D fetch, pitch 256, clamp 6 / 6, no sign field.
@@ -235,7 +238,7 @@ enum class ImpostorReason : uint8_t {
   kLiteral,    // a shader object's own literal table is not the table's, or loads a register the formulas read from the bank
   kStorage,    // the builder's arguments, the device's storage fields or the packet's fetch constant are not a quad list's
   kQuad,       // a quad's word is no number, its place beyond kImpostorPlaceMax or its size outside (0, kImpostorSizeMax]
-  kRegister,   // a register's component is no number or outside the table's bound
+  kRegister,   // a register's component is no number or outside the table's bound (a sanity bound: garbage alone)
   kScale,      // c20.w outside (0, 64]
   kState,      // the state words are not the captured draw's
   kFetch,      // tf0 is not the picture's fetch
@@ -315,7 +318,8 @@ inline bool ImpostorLiteralsMatch(uint32_t kind, const uint32_t (*bits)[4], uint
 
 namespace detail {
 // A register's component inside the table's bound (false for no number). A component the table has no bound
-// for is one no formula reads: whatever it holds, it is not judged (ledger ruling 34).
+// for is one no formula reads: whatever it holds, it is not judged (ledger ruling 34). The bounds are sanity
+// bounds by kind (ledger ruling 54): they refuse garbage, not a region whose values differ from the captures'.
 inline bool ImpostorBounded(uint32_t kind, uint32_t index, uint32_t comp, float v) {
   if (!kImpostorTable.bound_seen[kind][index][comp]) return true;
   return v >= kImpostorTable.bound_low[kind][index][comp] && v <= kImpostorTable.bound_high[kind][index][comp];
@@ -441,7 +445,9 @@ inline ImpostorRecord MakeImpostorRecord(const ImpostorCall& c, const uint8_t* b
 // block and its tables' addresses are both in hand: plan contradiction 5): its slot 16 at the frame's tf5 and its
 // slot 17 at the frame's tf4 by base address (`table_base`: FogSource::base, [0] tf4's and [1] tf5's; an address
 // of 0 is no table), c110.xyz bit-equal to the block's axis, c111.x, .z, .w bit-equal to the block's range (c111.y
-// is the sky's path height, which the impostor's fog does not read). False for an invalid block.
+// is the sky's path height, which the impostor's fog does not read). False for an invalid block. This rule, not
+// the table's bound, is what holds the fog's registers to their truth: the block has its own validation, on which
+// every lit record of the frame relies, and the table only keeps garbage out (ledger ruling 54).
 inline bool ImpostorFogMatches(const ImpostorRecord& r, const FogBlock& block, const uint32_t table_base[2]) {
   if (!block.valid || !table_base || table_base[0] == 0 || table_base[1] == 0) return false;
   if ((r.fog_fetch[0][1] & 0xFFFFF000u) != table_base[1] || (r.fog_fetch[1][1] & 0xFFFFF000u) != table_base[0]) return false;

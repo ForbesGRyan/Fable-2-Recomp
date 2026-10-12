@@ -2151,8 +2151,7 @@ void ClayPass::ForgetImpostorPictures() {
   for (ImpostorPictureTexture& p : impostor_pictures_) {
     p.texture = nullptr;
     p.view = nullptr;
-    p.filled = p.shader_state = false;
-    p.hash = 0;
+    p.held = ImpostorPictureHeld{};
     p.judged = 0;
     p.state = ImpostorPicture::kNone;
   }
@@ -2196,7 +2195,7 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
                 "; logged once a kind",
                 ClayImpostorSkipName(DecideImpostorPicture(capture::ImpostorMode::kOn, state)), base, what, ring, kImpostorRingTexels,
                 kImpostorRingClearMin, covered, kImpostorCoverMin, hash,
-                impostor_pictures_available_ ? "available" : "not available", impostor_feed_ ? "on" : "off");
+                fable2::ImpostorReadbackAvailable(impostor_readback_) ? "available" : "not available", impostor_feed_ ? "on" : "off");
   };
   TextureFetch t;
   TexFormatInfo fi;
@@ -2211,7 +2210,13 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
   }
   // (the diagnostic feed's bytes for this base, this Render: in place of guest memory)
   const uint8_t* fed = impostor_feed_ && impostor_feed_->sets ? impostor_feed_->bytes[impostor_picture_serial_ % impostor_feed_->sets][n] : nullptr;
-  if (!fed && !impostor_pictures_available_) {
+  if (!fed && !fable2::ImpostorReadbackAvailable(impostor_readback_)) {
+    // (the mode's refusal by its own name: the pictures in guest memory there are whole and old, and nothing after
+    // this point could tell; a texture made while the pictures were available is not shown either)
+    if (fable2::ImpostorReadbackByMode(impostor_readback_)) {
+      refusal(ImpostorPicture::kMode, t.base_phys, fable2::ImpostorReadbackWhy(impostor_readback_), 0, 0, 0);
+      return ImpostorPicture::kMode;
+    }
     refusal(ImpostorPicture::kBase, t.base_phys, "the run does not read the pictures back (the read-back list does not hold their fourteen bases and the read-back is not full)", 0, 0, 0);
     return ImpostorPicture::kBase;
   }
@@ -2221,7 +2226,7 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
   const uint32_t swizzle = (r.fetch[3] >> 1) & 0xFFFu;
   // (a base is judged once a Render; a second record of the same base takes the first's verdict, and is refused
   // if its fetch names another swizzle than the view was made with: the capture holds every record to one)
-  if (p.judged == impostor_picture_serial_) return p.state == ImpostorPicture::kUsable && p.swizzle != swizzle ? ImpostorPicture::kUpload : p.state;
+  if (p.judged == impostor_picture_serial_) return p.state == ImpostorPicture::kUsable && p.held.swizzle != swizzle ? ImpostorPicture::kUpload : p.state;
   p.judged = impostor_picture_serial_;
   uint32_t ring = 0, covered = 0;
   uint64_t hash = 0;
@@ -2230,6 +2235,8 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
     if (state != ImpostorPicture::kUsable) refusal(state, t.base_phys, what, ring, covered, hash);
     return state;
   };
+  // (cannot be: capture::CheckImpostorCall holds every record's tf0 to format 3 and 256 x 256; kept as a guard of
+  // the sizes the copy below relies on)
   if (t.xenos_format != 3 || t.width != kImpostorPictureSize || t.height != kImpostorPictureSize) {
     return verdict(ImpostorPicture::kUnread, "not a 256 x 256 texture of format 3");
   }
@@ -2240,7 +2247,12 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
   std::memcpy(impostor_guest_.data(), guest, kImpostorBaseBytes);
   // (every byte: a change anywhere in the base is a change of the picture)
   hash = ImpostorPictureHash(impostor_guest_.data(), kImpostorBaseBytes);
-  if (p.filled && p.texture && p.view && p.hash == hash && p.swizzle == swizzle) {
+  // What to do with it (impostor_picture.h: the texture's bookkeeping, a pure rule with its table): an unchanged
+  // picture behind the same view is used as it is; a changed one is decoded, judged and staged anew.
+  p.held.texture = p.texture != nullptr;   // (the pointers are the truth of what is made)
+  p.held.view = p.view != nullptr;
+  const ImpostorPicturePlan plan = PlanImpostorPicture(p.held, hash, swizzle);
+  if (plan.reuse) {
     ++st.impostor_pictures;
     return verdict(ImpostorPicture::kUsable);
   }
@@ -2251,7 +2263,8 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
       return verdict(ImpostorPicture::kUnread, "the decoder refused it");
     }
   } else {
-    // (another layout than every captured picture's: the reference decoder, a texel at a time)
+    // (another layout than every captured picture's: the reference decoder, a texel at a time; not reached while
+    // capture::CheckImpostorCall holds tf0's first dword to kImpostorFetch0 and its endian to 1)
     if (!Decode1555Level(impostor_guest_.data(), kImpostorBaseBytes, t.width, t.height, t.pitch_texels, t.tiled, t.endian, &impostor_decoded_) ||
         impostor_decoded_.size() != rgba_bytes) {
       return verdict(ImpostorPicture::kUnread, "the decoder refused it");
@@ -2265,8 +2278,12 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
     return verdict(ImpostorPicture::kContent, covered == 0 ? "the base is empty: no texel has the alpha bit" : "no picture by the content rule: its ring is not clear");
   }
   if (!MakeImpostorLevels(impostor_decoded_.data(), rgba_bytes, impostor_levels_)) return verdict(ImpostorPicture::kUnread, "no levels");
-  // The texture and its view (once a base; the view again for another swizzle), and this frame's staging buffer.
-  if (!p.texture) {
+  // The texture and its view (once a base; the view again for another swizzle), and this frame's staging buffer,
+  // as the plan asks; what is held afterwards is CommitImpostorPicture's, whatever the device gave.
+  bool texture_made = true, view_made = true, staged = false;
+  if (plan.make_texture) {
+    if (p.view) dev->DestroyDeferred(p.view);   // (cannot be: no view without its texture)
+    p.view = nullptr;
     nrhi::TextureDesc td;
     td.kind = nrhi::TextureKind::k2D;
     td.width = td.height = kImpostorPictureSize;
@@ -2274,11 +2291,9 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
     td.format = nrhi::Format::kR8G8B8A8_UNORM;
     td.initial_state = nrhi::ResourceState::kCopyDest;
     p.texture = dev->CreateTexture(td);
-    p.shader_state = false;
-    p.filled = false;
-    if (!p.texture) return verdict(ImpostorPicture::kUpload, "its texture could not be made");
+    texture_made = p.texture != nullptr;
   }
-  if (!p.view || p.swizzle != swizzle) {
+  if (texture_made && plan.make_view) {
     if (p.view) dev->DestroyDeferred(p.view);
     nrhi::TextureViewDesc vd;
     vd.dimension = nrhi::ViewDimension::k2D;
@@ -2287,10 +2302,9 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
     vd.mip_levels = ~0u;
     for (int i = 0; i < 4; ++i) vd.swizzle[i] = ImpostorViewSwizzle(t.swizzle[i]);
     p.view = dev->CreateTextureView(p.texture, vd);
-    p.swizzle = swizzle;
-    if (!p.view) return verdict(ImpostorPicture::kUpload, "its view could not be made");
+    view_made = p.view != nullptr;
   }
-  if (!impostor_staging_) {
+  if (texture_made && view_made && !impostor_staging_) {
     if (auto reused = impostor_staging_pool_.Take(kImpostorStagingBytes, dev->CompletedSubmission())) {
       impostor_staging_ = *reused;
     } else {
@@ -2306,8 +2320,14 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
       impostor_staging_ = nullptr;
     }
   }
-  if (!impostor_staging_mapped_ || impostor_upload_count_ >= fable2::kImpostorPictures) {
-    return verdict(ImpostorPicture::kUpload, "no staging buffer for this frame's uploads");
+  staged = texture_made && view_made && impostor_staging_mapped_ && impostor_upload_count_ < fable2::kImpostorPictures;
+  const ImpostorPictureOutcome outcome = CommitImpostorPicture(p.held, plan, hash, swizzle, texture_made, view_made, staged);
+  p.held = outcome.held;
+  switch (outcome.step) {
+    case ImpostorPictureStep::kStaged: break;
+    case ImpostorPictureStep::kNoTexture: return verdict(ImpostorPicture::kUpload, "its texture could not be made");
+    case ImpostorPictureStep::kNoView: return verdict(ImpostorPicture::kUpload, "its view could not be made");
+    default: return verdict(ImpostorPicture::kUpload, "no staging buffer for this frame's uploads");
   }
   uint8_t* stage = impostor_staging_mapped_ + size_t(impostor_upload_count_) * kImpostorStageBytes;
   std::memcpy(stage + kImpostorStageOffset[0], impostor_decoded_.data(), rgba_bytes);
@@ -2318,8 +2338,6 @@ ImpostorPicture ClayPass::ReadImpostorPicture(nrhi::Device* dev, const capture::
   }
   impostor_uploads_[impostor_upload_count_++] = uint32_t(n);
   p.base.swap(impostor_decoded_);
-  p.hash = hash;
-  p.filled = true;
   ++st.impostor_pictures;
   ++st.impostor_refreshed;
   return verdict(ImpostorPicture::kUsable);
@@ -3226,6 +3244,15 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
         }
         st.impostor_picture_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pictures_begin).count();
         drawable = impostor_usable_count;
+        // (one line for the first frame whose pictures are all unchanged: its records are drawn from the textures as
+        // they are, nothing decoded, staged or copied. A run that never says this refreshed a picture every frame.)
+        if (!impostor_first_reuse_logged_ && st.impostor_pictures > 0 && st.impostor_refreshed == 0) {
+          impostor_first_reuse_logged_ = true;
+          REXLOG_INFO("[native] clay: impostor pictures: first frame with every picture reused, scene frame {}: {} pictures unchanged since "
+                      "their upload (the hash of every byte), none decoded or uploaded (refreshed 0), {} of {} records with a usable picture{}",
+                      scene.frame, st.impostor_pictures, impostor_usable_count, scene.impostors.size(),
+                      st.impostor_feed ? "; the pictures are the feed's file's" : "");
+        }
       } else {
         const ClayImpostorSkip picture = DecideImpostorPicture(impostor_mode, ImpostorPicture::kNone);
         if (picture != ClayImpostorSkip::kNone) {
@@ -4088,7 +4115,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     if (impostor_upload_count_) {
       for (uint32_t u = 0; u < impostor_upload_count_; ++u) {
         ImpostorPictureTexture& p = impostor_pictures_[impostor_uploads_[u]];
-        if (p.shader_state) cmd->Barrier(p.texture, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kCopyDest);
+        if (ImpostorPictureUploadFromShaderState(p.held)) cmd->Barrier(p.texture, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kCopyDest);
       }
       cmd->FlushBarriers();
       for (uint32_t u = 0; u < impostor_upload_count_; ++u) {
@@ -4098,7 +4125,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
                                    kImpostorStagePitch[lv], kImpostorPictureSize >> lv, kImpostorPictureSize >> lv, 1);
         }
         cmd->Barrier(p.texture, nrhi::ResourceState::kCopyDest, nrhi::ResourceState::kPixelShaderResource);
-        p.shader_state = true;
+        p.held = ImpostorPictureUploaded(p.held);
       }
       cmd->FlushBarriers();
       if (!impostor_first_upload_logged_) {
@@ -4442,8 +4469,9 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   colour_order.tail_at = tail_at;
   colour_order.depth_early = sun_depth_early;
   colour_order.depth = sun_place;
-  // The impostor step (clay_logic.h, "Native impostors"): only in a frame whose mode is `flat`, with records and
-  // the step's objects (impostor_step, decided at the head of this Render, where its slots were reserved). Each
+  // The impostor step (clay_logic.h, "Native impostors"): only in a frame whose mode is `flat` or `on`, with
+  // records (in `on`: at least one with a usable picture) and the step's objects (impostor_step, decided at the
+  // head of this Render, where its slots were reserved). Each
   // record is drawn whole or not at all, by the first rule that fails: no frame buffer ("slot"); the frame's
   // records not in one run among the drawn records ("place": none is drawn); its words not inside the scene's
   // array ("buffer"); its constants refused ("scale": a register outside its bound, or its c20.w not the
@@ -4495,7 +4523,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
           continue;
         }
         // (the kept set: the first sample's, drawn whole, under either value of the coverage's switch: ledger
-        // rulings 13 and 35; the sampler: the record's fetch's with its picture, the flat texel's otherwise)
+        // rulings 13 and 48; the sampler: the record's fetch's with its picture, the flat texel's otherwise)
         if (!MakeClayImpostorConstants(r, out_scale, post_frame, fog_on, kImpostorKeepFirst, with_picture ? impostor_sampler[i] : 0u, &constants)) {
           ++st.impostor_skip[size_t(ClayImpostorSkip::kScale)];
           continue;
@@ -4537,7 +4565,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       const capture::ImpostorRecord& r = scene.impostors[impostor_draws[i].record];
       const ImpostorPictureTexture& p = impostor_pictures_[impostor_picture[impostor_draws[i].record]];
       if (p.base.size() != kImpostorPictureBytes) continue;
-      impostor_dump_entries[impostor_dump_count++] = ImpostorPictureEntry{{r.fetch[1] & 0xFFFFF000u, r.place, p.hash}, p.base.data()};
+      impostor_dump_entries[impostor_dump_count++] = ImpostorPictureEntry{{r.fetch[1] & 0xFFFFF000u, r.place, p.held.hash}, p.base.data()};
     }
   }
   auto draw_impostors = [&] {

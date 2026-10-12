@@ -507,6 +507,91 @@ int main() {
     MakeFc(a, p);
     if (!DumpWrittenAtRow(p, false)) return 193;
   }
+  // --- The content-kept files' budgets (review of the whole branch, Minor 7; ledger ruling 54): the impostors'
+  // pictures, fourteen a frame, have a count and a byte budget of their own, so that a long capture's pictures
+  // cannot use up the files of the 1D fog tables or the bytes of the game's targets ---
+  {
+    FcArgs a;
+    a.format = 3; a.w = 256; a.h = 256; a.pitch = 256; a.endian = 1; a.base = 0x12704000; a.mip = 0x12724000; a.mip_max = 3;
+    uint32_t picture[6], table[6], target[6];
+    MakeFc(a, picture);
+    a = FcArgs{}; a.format = 26; a.dim = 0; a.w = 256; a.h = 1; a.base = 0x1A001000;
+    MakeFc(a, table);
+    a = FcArgs{}; a.format = 29; a.w = 1280; a.h = 720; a.pitch = 1280; a.base = 0x1B000000;
+    MakeFc(a, target);
+    if (ContentDumpKindOf(picture) != ContentDumpKind::kPicture || ContentDumpKindOf(table) != ContentDumpKind::kTable ||
+        ContentDumpKindOf(target) != ContentDumpKind::kTarget) return 194;
+    a = FcArgs{}; a.format = 3; a.dim = 0; a.w = 256; a.h = 1; a.base = 0x1A001000;      // a 1D table of format 3 is a table
+    MakeFc(a, table);
+    if (ContentDumpKindOf(table) != ContentDumpKind::kTable || !Is1DFetch(table)) return 194;
+    static_assert(kContentDumpLimits.files == 1024 && kContentDumpLimits.bytes == (512ull << 20));   // the budgets of before, for tables and targets
+    static_assert(kContentDumpLimits.picture_files == 448 && kContentDumpLimits.picture_bytes == 448ull * 131072ull);   // 32 frames of fourteen
+    const ContentDumpLimits& lim = kContentDumpLimits;
+    // A long armed capture: every frame fourteen pictures, two fog tables and a scene colour target, each asked
+    // and counted as DumpTexture does. The tables are written in every one of 300 frames (before: none after the
+    // 68th frame, 1,024 / 15), the pictures stop at their own count, and the targets at their own bytes.
+    ContentDumpUse use;
+    uint32_t tables = 0, pictures = 0, targets = 0, first_frame_without_table = 0, first_frame_without_picture = 0;
+    const uint64_t target_bytes = 1280ull * 720ull * 8ull;
+    for (uint32_t frame = 1; frame <= 300; ++frame) {
+      uint32_t frame_tables = 0, frame_pictures = 0;
+      for (int i = 0; i < 14; ++i) {
+        if (!ContentDumpHasRoom(ContentDumpKind::kPicture, 131072, use, lim)) continue;
+        use = ContentDumpCounted(ContentDumpKind::kPicture, 131072, use);
+        ++pictures;
+        ++frame_pictures;
+      }
+      for (int i = 0; i < 2; ++i) {
+        if (!ContentDumpHasRoom(ContentDumpKind::kTable, 1536, use, lim)) continue;
+        use = ContentDumpCounted(ContentDumpKind::kTable, 1536, use);
+        ++tables;
+        ++frame_tables;
+      }
+      if (ContentDumpHasRoom(ContentDumpKind::kTarget, target_bytes, use, lim)) {
+        use = ContentDumpCounted(ContentDumpKind::kTarget, target_bytes, use);
+        ++targets;
+      }
+      if (frame_tables != 2 && !first_frame_without_table) first_frame_without_table = frame;
+      if (frame_pictures != 14 && !first_frame_without_picture) first_frame_without_picture = frame;
+    }
+    if (tables != 600 || first_frame_without_table != 0) return 195;                       // every frame's tables
+    if (pictures != 448 || first_frame_without_picture != 33) return 196;                  // 32 whole frames of pictures
+    if (targets != 72 || uint64_t(targets) * target_bytes > lim.bytes || uint64_t(targets + 1) * target_bytes <= lim.bytes) return 197;   // the targets' bytes alone
+    if (use.files != 672 || use.picture_files != 448 || use.picture_bytes != 448ull * 131072ull || use.bytes != 72ull * target_bytes) return 198;
+    // Each budget's edges; a table counts against no byte budget; no sum wraps.
+    ContentDumpUse u;
+    u.files = lim.files - 1;
+    if (!ContentDumpHasRoom(ContentDumpKind::kTable, 1536, u, lim) || !ContentDumpHasRoom(ContentDumpKind::kTarget, 4096, u, lim)) return 199;
+    u.files = lim.files;
+    if (ContentDumpHasRoom(ContentDumpKind::kTable, 1536, u, lim) || ContentDumpHasRoom(ContentDumpKind::kTarget, 4096, u, lim)) return 199;
+    if (!ContentDumpHasRoom(ContentDumpKind::kPicture, 131072, u, lim)) return 200;       // the tables' and targets' files full: the pictures go on
+    u = ContentDumpUse{};
+    u.picture_files = lim.picture_files;
+    if (ContentDumpHasRoom(ContentDumpKind::kPicture, 131072, u, lim) || !ContentDumpHasRoom(ContentDumpKind::kTable, 1536, u, lim) ||
+        !ContentDumpHasRoom(ContentDumpKind::kTarget, 4096, u, lim)) return 201;          // the pictures full: the others go on
+    u = ContentDumpUse{};
+    u.picture_bytes = lim.picture_bytes - 131071;
+    if (ContentDumpHasRoom(ContentDumpKind::kPicture, 131072, u, lim)) return 202;
+    u.picture_bytes = lim.picture_bytes - 131072;
+    if (!ContentDumpHasRoom(ContentDumpKind::kPicture, 131072, u, lim)) return 202;
+    u = ContentDumpUse{};
+    u.bytes = lim.bytes;
+    if (ContentDumpHasRoom(ContentDumpKind::kTarget, 1, u, lim) || !ContentDumpHasRoom(ContentDumpKind::kTable, 8u << 20, u, lim) ||
+        !ContentDumpHasRoom(ContentDumpKind::kPicture, 131072, u, lim)) return 203;
+    if (ContentDumpHasRoom(ContentDumpKind::kTarget, 0xFFFFFFFFFFFFFFFFull, ContentDumpUse{0, 1, 0, 0}, lim) ||
+        ContentDumpHasRoom(ContentDumpKind::kPicture, 0xFFFFFFFFFFFFFFFFull, ContentDumpUse{0, 0, 0, 1}, lim)) return 204;   // (no wrap)
+    if (ContentDumpHasRoom(ContentDumpKind::kTarget, 0, ContentDumpUse{}, lim) || ContentDumpHasRoom(ContentDumpKind::kPicture, 0, ContentDumpUse{}, lim) ||
+        ContentDumpHasRoom(ContentDumpKind::kTable, 0, ContentDumpUse{}, lim)) return 205;                                   // (no bytes: nothing to write)
+    // The file count alone (asked before a texture's bytes are known).
+    u = ContentDumpUse{};
+    u.files = lim.files;
+    if (ContentDumpFileRoom(ContentDumpKind::kTable, u, lim) || ContentDumpFileRoom(ContentDumpKind::kTarget, u, lim) ||
+        !ContentDumpFileRoom(ContentDumpKind::kPicture, u, lim)) return 206;
+    u = ContentDumpUse{};
+    u.picture_files = lim.picture_files;
+    if (!ContentDumpFileRoom(ContentDumpKind::kTable, u, lim) || !ContentDumpFileRoom(ContentDumpKind::kTarget, u, lim) ||
+        ContentDumpFileRoom(ContentDumpKind::kPicture, u, lim)) return 206;
+  }
   // --- k_DXN (format 49): two BC4 blocks per 4 x 4 block, the terrain's normal map (tf17) ---
   // The same blocks and numbers as test_decode_dxn of tests/test_terrain_replay.py.
   {

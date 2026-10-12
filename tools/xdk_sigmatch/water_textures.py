@@ -73,14 +73,15 @@ def _swap(blocks, endian):
     return blocks
 
 
-def _bc4_bytes(blk):
+def _bc4_bytes(blk, rounded=True):
     """The sixteen values of each 8-byte BC4 block of `blk` [n, 8] as bytes [n, 16], rounded to nearest the way
-    the C++ does it: render::Bc4Value's single-precision value, / 255, * 255 + 0.5, truncated."""
+    the C++ does it: render::Bc4Value's single-precision value, / 255, * 255 + 0.5, truncated. `rounded=False`: the
+    palette entries themselves, 0 to 255 and not whole (float32 [n, 16]): what a host BC5 fetch reads."""
     a0, a1 = blk[:, 0].astype(np.int64), blk[:, 1].astype(np.int64)
     bits = np.zeros(len(blk), dtype=np.int64)
     for b in range(6):
         bits |= blk[:, 2 + b].astype(np.int64) << (8 * b)
-    out = np.zeros((len(blk), 16), dtype=np.uint8)
+    out = np.zeros((len(blk), 16), dtype=np.uint8 if rounded else np.float32)
     seven, five, full, half = np.float32(7), np.float32(5), np.float32(255), np.float32(0.5)
     many = a0 > a1
     for i in range(16):
@@ -90,12 +91,14 @@ def _bc4_bytes(blk):
         tail = np.where(k == 6, np.float32(0), full)
         v = np.where(k == 0, a0.astype(np.float32), np.where(k == 1, a1.astype(np.float32),
                      np.where(many, v7, np.where(k < 6, v5, tail)))).astype(np.float32)
-        out[:, i] = ((v / full) * full + half).astype(np.float32).astype(np.uint8)
+        out[:, i] = ((v / full) * full + half).astype(np.float32).astype(np.uint8) if rounded else v
     return out
 
 
-def decode_dxn_rg8(data, width, height, pitch_blocks, tiled, endian, origin=(0, 0)):
+def decode_dxn_rg8(data, width, height, pitch_blocks, tiled, endian, origin=(0, 0), rounded=True):
     """render::DecodeDxnLevelRg8: a k_DXN level -> uint8 [y, x, 2] (x, y), each palette entry rounded to nearest.
+    `rounded=False`: float32 [y, x, 2] of the palette entries as they are (0 to 255, not whole): ledger ruling 32, the
+    normal map is sampled by the GPU as BC5, and the 8-bit decode is the reference of tests and replays only.
     `pitch_blocks`: the level's pitch in 4 x 4 blocks (at least its width in blocks); blocks tiled at
     TiledOffset2D(bx, by, pitch, 4) or linear in rows of the pitch aligned to 32 blocks, 16 bytes each.
     `origin`: the level's block offset inside a packed tail (the C++ caller lifts such a level out with
@@ -116,8 +119,8 @@ def decode_dxn_rg8(data, width, height, pitch_blocks, tiled, endian, origin=(0, 
         raise ValueError("a block lies outside the %d bytes given" % len(data))
     raw = np.frombuffer(bytes(data), dtype=np.uint8)
     blocks = _swap(raw[(off.reshape(-1, 1) + np.arange(16, dtype=np.int64)).reshape(-1)].reshape(-1, 16), int(endian))
-    xs = _bc4_bytes(blocks[:, 0:8]).reshape(hb, wb, 4, 4)
-    ys = _bc4_bytes(blocks[:, 8:16]).reshape(hb, wb, 4, 4)
+    xs = _bc4_bytes(blocks[:, 0:8], rounded).reshape(hb, wb, 4, 4)
+    ys = _bc4_bytes(blocks[:, 8:16], rounded).reshape(hb, wb, 4, 4)
     both = np.stack([xs, ys], axis=-1)                          # [by, bx, row, column, 2]
     return np.ascontiguousarray(both.transpose(0, 2, 1, 3, 4).reshape(hb * 4, wb * 4, 2)[:height, :width])
 
@@ -192,20 +195,23 @@ def mask(capture_dir, texture_row):
     return decode_k8(_file(capture_dir, texture_row["file"]), f["width"], f["height"], f["pitch"], f["tiled"])
 
 
-def normal(capture_dir, texture_row, level):
-    """Level `level` of the dumped normal map (a "texture" row of format 49) as uint8 [y, x, 2]: 0 from the base
+def normal(capture_dir, texture_row, level, rounded=True):
+    """Level `level` of the dumped normal map (a "texture" row of format 49) as uint8 [y, x, 2] (float32, the
+    palette entries unrounded, with rounded=False): 0 from the base
     level's file, a higher one from the row's "mips" (a capture made since water discovery: frame-map section 20).
     ValueError for another texture, a level the row does not name (mean_levels stands in for the stored levels
     of a capture without them) or a dump that does not hold it."""
     f = fetch(texture_row["fc"], "dxn")
     if level == 0:
-        return decode_dxn_rg8(_file(capture_dir, texture_row["file"]), f["width"], f["height"], f["pitch"] // 4, f["tiled"], f["endian"])
+        return decode_dxn_rg8(_file(capture_dir, texture_row["file"]), f["width"], f["height"], f["pitch"] // 4, f["tiled"], f["endian"],
+                              rounded=rounded)
     mips = texture_row.get("mips") or {}
     row = next((lv for lv in mips.get("levels") or [] if lv.get("level") == level), None)
     if row is None:
         raise ValueError("the capture holds no stored level %d of the normal map" % level)
     data = _file(capture_dir, mips["file"])[int(row["offset"]):]
-    return decode_dxn_rg8(data, row["w"], row["h"], int(row["pitch"]) // 16, bool(mips.get("tiled")), f["endian"], origin=(row["x"], row["y"]))
+    return decode_dxn_rg8(data, row["w"], row["h"], int(row["pitch"]) // 16, bool(mips.get("tiled")), f["endian"], origin=(row["x"], row["y"]),
+                          rounded=rounded)
 
 
 def mean_levels(base):

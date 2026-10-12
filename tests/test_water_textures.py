@@ -171,6 +171,22 @@ class Fetch(unittest.TestCase):
         with self.assertRaises(ValueError):
             wt.fetch(NORMAL_FC, "other")
 
+    def test_the_unrounded_values_round_to_the_bytes(self):
+        """Ledger ruling 32: the game's fetch reads BC5 palette entries that are not rounded to 8 bits; the replay
+        samples those (rounded=False) and the 8-bit decode stays the reference of the tests."""
+        block = bytes([200, 13, 0x88, 0xC6, 0xFA, 0x88, 0xC6, 0xFA, 13, 200, 0x53, 0x97, 0x2E, 0x53, 0x97, 0x2E])
+        whole = wt.decode_dxn_rg8(block, 4, 4, 1, False, 0)
+        exact = wt.decode_dxn_rg8(block, 4, 4, 1, False, 0, rounded=False)
+        self.assertEqual(whole.dtype, np.uint8)
+        self.assertEqual(exact.shape, (4, 4, 2))
+        self.assertTrue(np.issubdtype(exact.dtype, np.floating))
+        self.assertTrue((np.floor(exact + 0.5).astype(np.uint8) == whole).all())
+        self.assertGreater(int((exact != whole).sum()), 8)            # most palette entries are not whole steps
+        self.assertLessEqual(float(np.abs(exact - whole).max()), 0.5)
+        # the two end values are whole in both
+        self.assertIn(200.0, exact[..., 0].reshape(-1).tolist())
+        self.assertIn(13.0, exact[..., 0].reshape(-1).tolist())
+
     def test_a_signed_biased_or_exponent_adjusted_constant_is_refused(self):
         """Ledger ruling 33 (the review of Tasks 1 to 5, I1): the dead draw's proof needs the mask's sample to be a
         number in [0, 1]; a fetch constant that delivers it signed, biased, as an integer or with an exponent adjust

@@ -1,6 +1,9 @@
 # Native renderer sub-project 12: distant trees (the far woods' impostors)
 
-Status: **design, 2026-10-11; nothing built, nothing run.** Branch `native-renderer-distant-trees`
+Status: **built through `flat` to `on` and validated on 2026-10-11 (default `off`); not closed: the
+fix wave and the closing follow. Verdicts: "Implementation notes and verdicts" at the end; record:
+frame map section 19, "Validation (12)", "Limits (12)".** The text below is the design as written
+(2026-10-11, before anything was built or run) with its marked amendments. Branch `native-renderer-distant-trees`
 (from master `d03f0be`). Research: `.superpowers/sdd/distant-trees-research.md` (untracked; its
 scripts and outputs in `out/native-evidence/distant-trees/`, "DT" below). Ledger:
 `.superpowers/sdd/2026-10-11-native-renderer-distant-trees/progress.md` (rulings 1 to 4 are the
@@ -818,3 +821,44 @@ Found while checking it for this design; none changes its conclusion.
 9. "Which half is filled is unknown" (R 6.1): what the shader reads is fixed by its fetch (two
    dwords a quad from the fetch constant's base); what the game writes beyond it does not
    matter. Still to be seen in D1.
+
+## Implementation notes and verdicts (2026-10-11, after validation)
+
+Written by the validation (plan Tasks 16 and 11). The record with every number and file is frame map section 19, "Validation (12)" and "Limits (12)"; the ledger has the rulings (21 to 47). The text above is the design as written and amended; where the build or a capture differs, this section says so.
+
+**What was built other than designed.**
+- The sub-project went through `flat` to `on`: the cost pair passed on its fourth session (1.810 ms against 2.0; ledger rulings 31, 40, 41), so Design 12 was built. `flat` stays as a diagnostic value.
+- No pre-pass draw (ruling 21). **No half part** (ledger ruling 35, re-grounded by 46): Design 10's "with it on, and the pictures on" is not built; an impostor pixel is kept whole iff the game's first sample is covered, with the coverage switch on or off.
+- The alpha reference is 128 / 255 in every row, so a whole-alpha tree is absent below 52.02 units, not 50 ("What is known", the dissolve).
+- The vertex registers are fourteen; the fetch constant is the builder's packet, not the device's shadow; the swizzle field is `0x60A`; the bool word tested is the last writer's (Task 3).
+- A position that is no number never reaches the rasteriser (rulings 27, 37); unread register components are never touched (38); bounds judge only components a formula reads (34).
+- One picture texture a base (14), not a record (32); a decoder of the pass's own beside `Decode1555Level`; the levels' rule is "the mean of four parents, covered when 3 of 4 are" (criterion 5: 100.00% and 100.00%).
+- The content rule, as it ran in every validation run: ring clear at least 944 of 1,020 and 1,024 to 25,800 covered texels (its cover bounds are to be loosened: ledger ruling 45).
+- A diagnostic feed (`--fable2_native_impostor_feed`) that the design does not have: the software adapter's read-back leaves every picture empty (ruling 43).
+- The value `on` seeds the read-back list with the native renderer off too (to be mended: ledger ruling 47).
+
+**Verdicts** (no bound was changed after the runs; every run `RUN UNCHECKED`, shots 1942 wide, binary `363564F4A5FAD9C6` unless said).
+
+| # | Verdict | In short |
+|---|---|---|
+| 1 | met | made inputs and every captured corner |
+| 2 | met | bit for bit in `flat` and `on`; 14 / 14 / 928, 14 / 14 / 1,076, 10 / 10 / 139 |
+| 3 | met | 98.99% and 98.82% (bound 95%) |
+| 4 | met | 56 of 56 dumps through both decoders |
+| 5 | met | 100.00% alpha, 100.00% colour |
+| 6 | met | 38 of 38 pictures equal to the paired frame's dump on 100.00% of texels: none was a frame old |
+| 7 | **not met as written**; met by a named substitute | first count 13.2% of the off-run's (bound a tenth), second count +5,610 (bound +4,809); the remainder is silhouette: 169 pixels with one pixel of tolerance, and no rise. The expectation "a quarter pixel holds about half of the tenth" was wrong: it holds more than all of it |
+| 8 | **not judged as written** (no dump run with coverage and wind on); coverage off: inside every band | regions 0.985 to 0.992 (off 1.105 to 1.331); gap pixels 1.008, channels 0.997 to 1.021 (off 1.430) |
+| 9 | band met; the 0.005 **not met as written** in three regions; met by a named substitute | the reference's pixel set changes with the trees; on pixels shared by both runs at most -0.0044 |
+| 10 | **not decidable on shots** at the bridge (the emulated pair drifts 5.9 to 10.1%); the third spot met | bridge 0.972 to 0.979; third spot 0.979 and 0.969 |
+| 11 | first part **not decidable** (519 judged pixels); second part **not judged as written** | a substitute against D3T's game depth: 22.8% of the off-run's count in 40 to 80 units |
+| 12 | **not judged** (no run with the sun on and a dump); **its reference is wrong** | "at most 10% closed with them off" cannot hold: the native depth holds ground behind 88% of the gap texels |
+| 13 | programs, list, lines, rows met; the picture **not judged on its named run** | a substitute against log 654: far regions 0.999 to 1.000; the criterion's own measure cannot tell two runs of one binary apart |
+| 14 | `flat` met; `on` met by a named substitute (the feed) | 0 errors, id 1328 alone, 14 of 14 drawn; the run had the coverage off |
+| 15 | `on` **met as written** (+2.327 ms against 2.5; lowest window 47.6 fps), the off-runs at the display's rate; `flat` **not judged** (no run) | the uncapped default; the third spot's pair not made |
+| 16 | **not met to the letter**; unchanged by eye | far regions within 0.34%, shirt 2.47%, dog 3.80% outside a range that is nearly a point |
+| 17 | kept | |
+
+**Where a criterion's reference turned out wrong**: 7 (the quarter pixel's share), 9 (its pixel set), 12 (its off-side bound), 13 and 16 ("within the range the two runs span" when the two runs agree to three digits). Each is stated beside its letter; none was re-bounded.
+
+**Open** (frame map "Limits (12)"; user checks 93 to 98): the moving picture; other regions, towns, times of day; criterion 8 with coverage and wind on; criterion 12; the dissolve band; the 60 Hz floor under the cost figure; whether the half part is built (ledger ruling 46: the figures are inside their bands).

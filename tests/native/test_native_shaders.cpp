@@ -1213,6 +1213,32 @@ static int PinsMissing(const char* vs, const char* textured, const char* layer, 
   return 0;
 }
 
+// The compiled shader's output (`output`) or input signature as text: "<semantic><index>@<register>" for each
+// parameter, in the signature's order, joined by ';'. "?" when the shader does not compile or reflect.
+static std::string Signature(const char* name, const char* src, const char* target, bool output) {
+  ID3DBlob* code = nullptr;
+  ID3DBlob* errors = nullptr;
+  HRESULT hr = D3DCompile(src, strlen(src), name, nullptr, nullptr, "main", target, 0, 0, &code, &errors);
+  if (errors) errors->Release();
+  if (FAILED(hr) || !code) return "?";
+  ID3D11ShaderReflection* refl = nullptr;
+  std::string text = "?";
+  D3D11_SHADER_DESC sd{};
+  if (SUCCEEDED(D3DReflect(code->GetBufferPointer(), code->GetBufferSize(), IID_ID3D11ShaderReflection,
+                           reinterpret_cast<void**>(&refl))) && refl && SUCCEEDED(refl->GetDesc(&sd))) {
+    text.clear();
+    const unsigned count = output ? sd.OutputParameters : sd.InputParameters;
+    for (unsigned i = 0; i < count; ++i) {
+      D3D11_SIGNATURE_PARAMETER_DESC pd{};
+      if (FAILED(output ? refl->GetOutputParameterDesc(i, &pd) : refl->GetInputParameterDesc(i, &pd)) || !pd.SemanticName) continue;
+      text += (text.empty() ? "" : ";") + std::string(pd.SemanticName) + std::to_string(pd.SemanticIndex) + "@" + std::to_string(pd.Register);
+    }
+  }
+  if (refl) refl->Release();
+  code->Release();
+  return text;
+}
+
 // 0 when every resource the compiled shader binds has a parameter of the pass's layout (kClayBindings in
 // clay_logic.h) of its kind, at its register, visible to its stage: a constant buffer a kConstants or
 // kConstantBuffer entry at its b register, a structured buffer a kBuffer entry at its t register, a
@@ -5590,9 +5616,329 @@ int main() {
               << Count(vs.c_str(), "[precise") << " precise instructions, none a multiply-add; the position written once, behind three tests, and refused on three paths; "
               << "no unread register component an operand; the pixel program's one discard and its clamp\n";
   }
+  // 55 (the next free number below 256): the water's programs (sub-project 13, plan Tasks 11 and 12; clay_logic.h,
+  // "Native water"). Parts (a) to (c): the mirrored sky's vertex program (plan Task 11); (d) to (g): the surface
+  // step's two programs (plan Task 12).
+  {
+    using namespace fable2::native::render;
+    const auto fails = [](int line) {
+      std::cerr << "the water's programs: the check at line " << line << " failed\n";
+      return 55;
+    };
+    // (a) With the water's header every program the header had before (case 54's list and the impostors' two)
+    // compiles to the bytes it compiled to before: the hashes (FNV-1a 64 of the whole compiled blob, the runtime's
+    // flags) and sizes recorded at commit f87e556, the commit before the task, by out/tests/w1112/baseline_hashes.cpp
+    // with this compiler (out/tests/w1112/baseline_hashes_f87e556.txt). The canary is a program of no shader of
+    // the pass: where IT compiles to other bytes the compiler is another one and the comparison is not made (said
+    // aloud).
+    const struct {
+      const char* name;
+      const char* src;
+      const char* target;
+      uint64_t hash;
+      size_t size;
+    } before[] = {
+        {"kFullscreenVs", kFullscreenVs, "vs_5_0", 0x2CA6AC1051441F86ull, 736},
+        {"kPatternPs", kPatternPs, "ps_5_0", 0x335F8BDAD9F39207ull, 1036},
+        {"kGridPs", kGridPs, "ps_5_0", 0xA7462A7107F0D99Eull, 784},
+        {"kClayVs", kClayVs, "vs_5_0", 0xC1D649CF4B9205C4ull, 10200},
+        {"kClayWindVs", kClayWindVs, "vs_5_0", 0x28D8FB586A9C2B79ull, 19168},
+        {"kClayPs", kClayPs, "ps_5_0", 0xA7ECF4E6B3AACD13ull, 8052},
+        {"kClayTexturedPs", kClayTexturedPs, "ps_5_0", 0x0A1DC9F23AF13290ull, 23936},
+        {"kClayTexturedDepthPs", kClayTexturedDepthPs, "ps_5_0", 0xF057CCDD7BE1C5C7ull, 6016},
+        {"kClayTexturedHalfPs", kClayTexturedHalfPs, "ps_5_0", 0xF2EC866E7560C7AAull, 23912},
+        {"kClayTexturedFullPs", kClayTexturedFullPs, "ps_5_0", 0xC6A183D761A3549Aull, 24236},
+        {"kClayTerrainLayerPs", kClayTerrainLayerPs, "ps_5_0", 0x6642A40C9496D997ull, 16452},
+        {"kClayTerrainLayerDepthPs", kClayTerrainLayerDepthPs, "ps_5_0", 0x277FB8D3A19E5FC8ull, 5484},
+        {"kClayTerrainFarPs", kClayTerrainFarPs, "ps_5_0", 0xBE457649660BC0AAull, 13324},
+        {"kClayTerrainFarDepthPs", kClayTerrainFarDepthPs, "ps_5_0", 0x1DB48924B7D66149ull, 2580},
+        {"kClayShadowPs", kClayShadowPs, "ps_5_0", 0x2AEE57793156E0D9ull, 3920},
+        {"kSkyVs", kSkyVs, "vs_5_0", 0x1261ACAA62F3AF95ull, 668},
+        {"kClaySkyPs", kClaySkyPs, "ps_5_0", 0xDD2C6D7B5E83AE48ull, 7012},
+        {"kClayMaskPs", kClayMaskPs, "ps_5_0", 0x849E900311D40504ull, 12476},
+        {"kOutputMapPs", kOutputMapPs, "ps_5_0", 0x70D413120D3278B1ull, 1072},
+        {"kClayPostCompositePs", kClayPostCompositePs, "ps_5_0", 0x3A946A88248D92DEull, 5692},
+        {"kClayPostRampPs", kClayPostRampPs, "ps_5_0", 0x886207A6760B671Eull, 2636},
+        {"kClayPostDownsamplePs", kClayPostDownsamplePs, "ps_5_0", 0x2640F5A69768BEC0ull, 3272},
+        {"kClayPostBrightPs", kClayPostBrightPs, "ps_5_0", 0x3E3403312A4C0A60ull, 3232},
+        {"kClayPostBlurPs", kClayPostBlurPs, "ps_5_0", 0x617918EC27AFC1C0ull, 5044},
+        {"kClaySunDepthPs", kClaySunDepthPs, "ps_5_0", 0xA944A42941179B46ull, 1224},
+        {"kClaySunReducePs", kClaySunReducePs, "ps_5_0", 0xD17DC100F159B17Bull, 1480},
+        {"kClaySunRadialPs", kClaySunRadialPs, "ps_5_0", 0x57A3562FECD4C5AEull, 3348},
+        {"kClayQuadVs", kClayQuadVs, "vs_5_0", 0xFDE8EBFB2126299Cull, 1808},
+        {"kClayQuadPs", kClayQuadPs, "ps_5_0", 0xC31B1079E4B34EE1ull, 2700},
+        {"kClaySunQuadVs", kClaySunQuadVs, "vs_5_0", 0x826600476B3BB40Full, 1868},
+        {"kClaySunQuadPs", kClaySunQuadPs, "ps_5_0", 0xFF2027E04208858Bull, 3280},
+        {"kClaySunOccluderPs", kClaySunOccluderPs, "ps_5_0", 0x0D63EC9EEF64EA99ull, 2680},
+        {"kClayCloudVs", kClayCloudVs, "vs_5_0", 0x0B9DFEAB41354376ull, 1872},
+        {"kClayCloudPs", kClayCloudPs, "ps_5_0", 0xB141BBE8050CD462ull, 5804},
+        {"kCompositePs", kCompositePs, "ps_5_0", 0x19D6BE7E821E13DAull, 1148},
+        {"kShadowViewPs", kShadowViewPs, "ps_5_0", 0x709681412917DA48ull, 3364},
+        {"kClayDepthPackPs", kClayDepthPackPs, "ps_5_0", 0xF95B335D4903FCCDull, 1100},
+        {"kClayImpostorVs", kClayImpostorVs, "vs_5_0", 0x39D9EE9A01798C33ull, 9240},
+        {"kClayImpostorPs", kClayImpostorPs, "ps_5_0", 0xF4892CA24ACE1320ull, 3168},
+        {"canary", "float4 main(float4 p : SV_Position) : SV_Target { return p * 0.25 + 1.0; }", "ps_5_0", 0x144FCFF10FDFCCA2ull, 532},
+    };
+    size_t canary_size = 0;
+    const auto& canary = before[std::size(before) - 1];
+    const bool same_compiler = CodeHash(canary.name, canary.src, canary.target, &canary_size) == canary.hash && canary_size == canary.size;
+    if (std::size(before) != 40) return fails(__LINE__);   // (37 of case 54's list, the impostors' two, the canary)
+    if (!same_compiler) {
+      std::cout << "water: NOT JUDGED: this compiler is not the one the programs' bytes of before the water were recorded with\n";
+    } else {
+      for (size_t i = 0; i + 1 < std::size(before); ++i) {
+        size_t size = 0;
+        const uint64_t hash = CodeHash(before[i].name, before[i].src, before[i].target, &size);
+        if (hash != before[i].hash || size != before[i].size) {
+          std::cerr << before[i].name << " is not the program of before the water: " << size << " bytes, hash " << std::hex << hash << std::dec << "\n";
+          return fails(__LINE__);
+        }
+      }
+      // (control: the comparison sees one changed operand of the sky's pixel program, which the targets are drawn by)
+      size_t size = 0;
+      const std::string other = Changed(kClaySkyPs, "sky * f_exposure", "sky * f_exposure * 1.01");
+      if (other.empty() || CodeHash("clay_sky_other", other.c_str(), "ps_5_0", &size) == 0xDD2C6D7B5E83AE48ull) return fails(__LINE__);
+    }
+    // (the text's rule: no program of before names anything of the water)
+    for (size_t i = 0; i + 1 < std::size(before); ++i) {
+      for (const char* word : {"water", "Water", "WATER", "w_vs", "w_ps", "SkyMirror", "SV_ClipDistance"}) {
+        if (strstr(before[i].src, word)) return fails(__LINE__);
+      }
+    }
+
+    // (b) kSkyMirrorVs compiles. One clip-distance output beside the position; cbuffer Sky at b0 with kClaySkyPs's
+    // fields, of which it reads the three third components of the ray's basis and nothing else; its position is
+    // kSkyVs's, instruction for instruction.
+    const char* m = kSkyMirrorVs;
+    if (!Compile("sky_mirror_vs", m, "vs_5_0")) return fails(__LINE__);
+    const unsigned sky_fields = unsigned(std::size(kClaySkyFields));
+    if (int at = BufferLayoutMismatch("sky_mirror_vs", m, "vs_5_0", "Sky", kClaySkyFields, sky_fields, sizeof(ClaySkyConstants))) {
+      std::cerr << "the mirrored sky's cbuffer Sky: mismatch " << at << "\n";
+      return fails(__LINE__);
+    }
+    const std::string mirror = Disassembly("sky_mirror_vs", m, "vs_5_0"), plain = Disassembly("sky_vs", kSkyVs, "vs_5_0");
+    if (mirror.empty() || plain.empty() || BindPoint("sky_mirror_vs", m, "vs_5_0", "Sky") != 0) return fails(__LINE__);
+    if (Count(mirror.c_str(), "clip_distance") != 1 || !HasLineWith(mirror, "dcl_output_siv", "o1.x, clip_distance") ||
+        !HasLineWith(mirror, "dcl_output_siv", "o0.xyzw, position") || Count(mirror.c_str(), "dcl_output") != 2 ||
+        Count(mirror.c_str(), "dcl_constantbuffer") != 1 || DeclaredRegisters(mirror, 0) != 3 || mirror.find("dcl_resource") != std::string::npos ||
+        mirror.find("dcl_sampler") != std::string::npos) {
+      std::cerr << "the mirrored sky's declarations\n" << Code(mirror);
+      return fails(__LINE__);
+    }
+    for (const char* reg : {"cb0[0]", "cb0[1]", "cb0[2]"}) {
+      if (!ReadsComponent(mirror, reg, 'z') || ReadsComponent(mirror, reg, 'x') || ReadsComponent(mirror, reg, 'y') || ReadsComponent(mirror, reg, 'w')) {
+        return fails(__LINE__);
+      }
+    }
+    // (the position: the same instructions with the same literals, and the far depth of the pass's convention)
+    for (const char* line : {"bfi r0.x, l(1), l(1), v0.x, l(0)", "and r0.z, v0.x, l(2)", "utof r0.xy, r0.xzxx",
+                             "l(2.000000, -2.000000, 0.000000, 0.000000), l(-1.000000, 1.000000, 0.000000, 0.000000)",
+                             "mov o0.zw, l(0,0,1.000000,1.000000)"}) {
+      if (Count(plain.c_str(), line) != 1 || Count(mirror.c_str(), line) != 1) return fails(__LINE__);
+    }
+    if (!strstr(m, "  o.pos = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 1.0, 1.0);\n") ||
+        !strstr(kSkyVs, "  return float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 1.0, 1.0);\n") ||
+        !strstr(m, "  o.above = s_ray0.z + o.pos.x * s_rayx.z + o.pos.y * s_rayy.z;\n")) return fails(__LINE__);
+    {
+      // (the clip distance is the mirror's own rule, WaterSkyClipDistance, at the triangle's three corners; control:
+      // a text that took another component is seen)
+      const float basis[3][3] = {{0.25f, -0.5f, 0.125f}, {1.5f, 0.75f, -0.375f}, {-0.625f, 2.0f, 0.875f}};
+      if (WaterSkyClipDistance(basis, -1.0f, 1.0f) != 0.125f + 0.375f + 0.875f || WaterSkyClipDistance(basis, 3.0f, 1.0f) != 0.125f - 1.125f + 0.875f ||
+          WaterSkyClipDistance(basis, -1.0f, -3.0f) != 0.125f + 0.375f - 2.625f) return fails(__LINE__);
+      const std::string wrong = Changed(m, "s_ray0.z + o.pos.x * s_rayx.z", "s_ray0.y + o.pos.x * s_rayx.z");
+      const std::string wrong_l = Disassembly("sky_mirror_wrong", wrong.c_str(), "vs_5_0");
+      if (wrong.empty() || wrong_l.empty() || !ReadsComponent(wrong_l, "cb0[0]", 'y')) return fails(__LINE__);
+    }
+
+    // (c) With kClaySkyPs: the pixel program is that string itself (nothing is compiled anew for the targets), it
+    // takes SV_Position alone, at the register the mirrored program writes it to, and binds nothing the targets'
+    // layout does not: cbuffer Sky at b0 (both stages there), the frame's block at b2, two textures, four samplers.
+    const std::string out_sig = Signature("sky_mirror_vs", m, "vs_5_0", true), in_sig = Signature("clay_sky_ps", kClaySkyPs, "ps_5_0", false);
+    if (out_sig != "SV_Position0@0;SV_ClipDistance0@1" || in_sig != "SV_Position0@0" ||
+        Signature("sky_vs", kSkyVs, "vs_5_0", true) != "SV_Position0@0") {
+      std::cerr << "the mirrored sky's signatures: out \"" << out_sig << "\", the pixel program's in \"" << in_sig << "\"\n";
+      return fails(__LINE__);
+    }
+    if (BindPoint("clay_sky_ps", kClaySkyPs, "ps_5_0", "Sky") != 0 || BindPoint("clay_sky_ps", kClaySkyPs, "ps_5_0", "Frame") != 2 ||
+        BindPoint("clay_sky_ps", kClaySkyPs, "ps_5_0", "sky13") != 0 || BindPoint("clay_sky_ps", kClaySkyPs, "ps_5_0", "sky14") != 1) return fails(__LINE__);
+    std::cout << "water: the " << std::size(before) - 1 << " programs of before compile to their bytes of before; the mirrored sky's vertex program: "
+              << "kSkyVs's position, one clip distance from the three third components of the ray's basis, cbuffer Sky at the table's offsets, "
+              << "the sky's own pixel program after it\n";
+    // (d) The surface step's two programs compile. Cbuffer Water: ClayWaterConstants, field for field, 464 bytes at
+    // b0 of both stages; the record's three buffers at t3, t4, t5 of the vertex program alone; the mask, the normal
+    // map and the target at t0, t1, t2 of the pixel program alone, with the four samplers and the frame's block
+    // (whole: the fog's tail) at b2.
+    const char* wv = kClayWaterVs;
+    const char* wp = kClayWaterPs;
+    if (!Compile("clay_water_vs", wv, "vs_5_0") || !Compile("clay_water_ps", wp, "ps_5_0")) return fails(__LINE__);
+    if (strncmp(wp, "#define CLAY_FOG 1\n", 19) != 0 || Count(wp, "cbuffer Frame : register(b2)") != 1 || Count(wv, "cbuffer Water : register(b0)") != 1 ||
+        Count(wp, "cbuffer Water : register(b0)") != 1 || Count(wv, "cbuffer Frame") != 0) return fails(__LINE__);
+    static_assert(kClayWaterSize == sizeof(ClayWaterConstants) && kClayWaterSize == 464);
+    static_assert(offsetof(ClayWaterConstants, rows) == 0 && offsetof(ClayWaterConstants, vs) == 64 && offsetof(ClayWaterConstants, ps) == 128 &&
+                  offsetof(ClayWaterConstants, alpha_ref) == 416 && offsetof(ClayWaterConstants, out_scale) == 420 && offsetof(ClayWaterConstants, sun_on) == 424 &&
+                  offsetof(ClayWaterConstants, fog_on) == 428 && offsetof(ClayWaterConstants, sampler_mask) == 432 &&
+                  offsetof(ClayWaterConstants, sampler_normal) == 436 && offsetof(ClayWaterConstants, sampler_picture) == 440 &&
+                  offsetof(ClayWaterConstants, swizzle) == 444 && offsetof(ClayWaterConstants, base_vertex) == 448 &&
+                  offsetof(ClayWaterConstants, vertex_count) == 452 && offsetof(ClayWaterConstants, pad) == 456 && kClayWaterPsRegisters == 18);
+    const unsigned water_fields = unsigned(std::size(kClayWaterFields));
+    if (water_fields != 14 || kClayWaterFields[3].offset != 416 || strcmp(kClayWaterFields[3].name, "w_alpha_ref") != 0 ||
+        kClayWaterFields[10].offset != 444 || strcmp(kClayWaterFields[10].name, "w_swizzle") != 0 || kClayWaterFields[2].bytes != 18 * 16) return fails(__LINE__);
+    if (int at = BufferLayoutMismatch("clay_water_vs", wv, "vs_5_0", "Water", kClayWaterFields, water_fields, kClayWaterSize)) {
+      std::cerr << "the water vertex program's cbuffer Water: mismatch " << at << "\n";
+      return fails(__LINE__);
+    }
+    if (int at = BufferLayoutMismatch("clay_water_ps", wp, "ps_5_0", "Water", kClayWaterFields, water_fields, kClayWaterSize)) {
+      std::cerr << "the water pixel program's cbuffer Water: mismatch " << at << "\n";
+      return fails(__LINE__);
+    }
+    {
+      // (control: two fields exchanged are seen)
+      const std::string swapped = Changed(wp, "float w_alpha_ref; float w_out_scale;", "float w_out_scale; float w_alpha_ref;");
+      if (swapped.empty() || BufferLayoutMismatch("swapped_water_ps", swapped.c_str(), "ps_5_0", "Water", kClayWaterFields, water_fields, kClayWaterSize) < 10) return fails(__LINE__);
+    }
+    const std::string wvs = Disassembly("clay_water_vs", wv, "vs_5_0"), wps = Disassembly("clay_water_ps", wp, "ps_5_0");
+    if (wvs.empty() || wps.empty()) return fails(__LINE__);
+    if (BindPoint("clay_water_vs", wv, "vs_5_0", "Water") != 0 || BindPoint("clay_water_ps", wp, "ps_5_0", "Water") != 0 ||
+        BindPoint("clay_water_ps", wp, "ps_5_0", "Frame") != 2 || BindPoint("clay_water_vs", wv, "vs_5_0", "Frame") != -1 ||
+        BindPoint("clay_water_vs", wv, "vs_5_0", "water_positions") != 3 || BindPoint("clay_water_vs", wv, "vs_5_0", "water_indices") != 4 ||
+        BindPoint("clay_water_vs", wv, "vs_5_0", "water_pairs") != 5 || BindPoint("clay_water_ps", wp, "ps_5_0", "water_mask") != 0 ||
+        BindPoint("clay_water_ps", wp, "ps_5_0", "water_normal") != 1 || BindPoint("clay_water_ps", wp, "ps_5_0", "water_picture") != 2 ||
+        BindPoint("clay_water_ps", wp, "ps_5_0", "w_point_wrap") != 0 || BindPoint("clay_water_ps", wp, "ps_5_0", "w_linear_wrap") != 1 ||
+        BindPoint("clay_water_ps", wp, "ps_5_0", "w_point_clamp") != 2 || BindPoint("clay_water_ps", wp, "ps_5_0", "w_linear_clamp") != 3) return fails(__LINE__);
+    bool water_dynamic = false;
+    if (!HasLineWith(wvs, "dcl_resource_structured", "t3, 16") || !HasLineWith(wvs, "dcl_resource_structured", "t4, 4") ||
+        !HasLineWith(wvs, "dcl_resource_structured", "t5, 8") || DeclaredRegisters(wvs, 0) != kClayWaterSize / 16 ||
+        DeclaredRegisters(wps, 0) != 28 || DeclaredRegisters(wps, 2, &water_dynamic) != kClayFrameSize / 16 || !water_dynamic) {
+      std::cerr << "the water programs' declarations\n" << Code(wvs);
+      return fails(__LINE__);
+    }
+    // (the vertex program: the vertex through the index buffer and the base vertex, held to the count; the position
+    // the record's four rows by dot product, as the clay vertex program forms a kDot record's; the coordinates by
+    // the four vertex registers' x and y)
+    if (!strstr(wv, "  int v = int(water_indices[vid]) + w_base_vertex;\n  bool in_range = v >= 0 && uint(v) < w_vertex_count;\n") ||
+        !strstr(wv, "  o.pos = float4(dot(w_rows[0], p), dot(w_rows[1], p), dot(w_rows[2], p), dot(w_rows[3], p));\n") ||
+        !strstr(kClayVs, "  float4 c = layout == 0 ? float4(dot(r0, p), dot(r1, p), dot(r2, p), dot(r3, p))") ||
+        !HasLineWith(wvs, "dp4", "o0.x, cb0[0].xyzw") || !HasLineWith(wvs, "dp4", "o0.w, cb0[3].xyzw") || !HasLineWith(wvs, "iadd", "cb0[28].x") ||
+        !HasLineWith(wvs, "ult", "cb0[28].y") || Signature("clay_water_vs", wv, "vs_5_0", true) != "SV_Position0@0;TEXCOORD0@1;TEXCOORD1@2;TEXCOORD2@3" ||
+        Signature("clay_water_ps", wp, "ps_5_0", false) != "SV_Position0@0;TEXCOORD0@1;TEXCOORD1@2;TEXCOORD2@3") {
+      std::cerr << "the water vertex program\n" << Code(wvs);
+      return fails(__LINE__);
+    }
+
+    // (e) NO COMPONENT THAT NO FORMULA READS IS AN OPERAND of the compiled programs (plan, Review Focus 3): for every
+    // register of the block and every component the table marks unread ReadsComponent is false; and every
+    // component it marks read is an operand, but c130's two (slot 14's lookup, which the native draw does not make:
+    // spec ruling 21). The vertex registers' x and y are read and their z and w are not.
+    {
+      int unread = 0, read = 0;
+      for (uint32_t i = 0; i < kClayWaterPsRegisters; ++i) {
+        const uint32_t from = kClayWaterPsFrom[i];
+        const uint32_t reg = fable2::native::capture::kWaterPsRegister[from];
+        const uint32_t mask = fable2::native::capture::kWaterPsRead[from];
+        const std::string operand = "cb0[" + std::to_string(8 + i) + "]";
+        for (uint32_t k = 0; k < 4; ++k) {
+          const bool reads = ReadsComponent(wps, operand.c_str(), "xyzw"[k]);
+          const bool marked = ((mask >> k) & 1u) != 0;
+          if (!marked || reg == 130) {
+            if (reads) {
+              std::cerr << "the water pixel program reads c" << reg << "." << "xyzw"[k] << ", which no formula of the native draw reads\n";
+              return fails(__LINE__);
+            }
+            ++unread;
+          } else {
+            if (!reads) {
+              std::cerr << "the water pixel program does not read c" << reg << "." << "xyzw"[k] << "\n" << Code(wps);
+              return fails(__LINE__);
+            }
+            ++read;
+          }
+        }
+      }
+      // (18 registers: 34 components read, 38 not, of which c130's two are the table's and not the native draw's)
+      if (read != 34 || unread != 38) {
+        std::cerr << "the water pixel program: " << read << " components read, " << unread << " not\n";
+        return fails(__LINE__);
+      }
+      for (uint32_t i = 0; i < 4; ++i) {
+        const std::string operand = "cb0[" + std::to_string(4 + i) + "]";
+        if (!ReadsComponent(wvs, operand.c_str(), 'x') || !ReadsComponent(wvs, operand.c_str(), 'y') || ReadsComponent(wvs, operand.c_str(), 'z') ||
+            ReadsComponent(wvs, operand.c_str(), 'w')) return fails(__LINE__);
+      }
+      // (control: an unread component as an operand is seen; and the registers under the sun's bool are read
+      // inside its block alone: the program without the bool's test reads them all the same, so the test is what
+      // keeps them out of a record that has the bool clear)
+      const std::string whole = Changed(wp, "WaterView(i.place, W_C19.xyz)", "WaterView(i.place, W_C19.xyw)");
+      const std::string whole_l = Disassembly("clay_water_ps_whole", whole.c_str(), "ps_5_0");
+      if (whole.empty() || whole_l.empty() || !ReadsComponent(whole_l, "cb0[9]", 'w') || ReadsComponent(wps, "cb0[9]", 'w')) return fails(__LINE__);
+      const size_t sun_test = Code(wps).find("if_nz cb0[26].z");
+      const size_t sun_first = Code(wps).find("cb0[19].x");                       // c136.x
+      if (sun_test == std::string::npos || sun_first == std::string::npos || sun_first < sun_test || !strstr(wp, "    [branch] if (w_sun_on != 0) colour = colour + WaterSun(")) {
+        return fails(__LINE__);
+      }
+    }
+
+    // (f) Neither program declares a resource the step's layout does not bind: the vertex program b0 and the three
+    // buffers, no texture and no sampler; the pixel program b0, b2, the three textures and the four samplers, no
+    // buffer. The pixel program writes one target with its alpha and no depth; it discards twice (the state's
+    // test with the kill, and a colour or alpha that is no number: the comparison with 3e38 is in the compiled
+    // code, not folded away); every sample has an explicit level or explicit derivatives, each behind its
+    // sampler's test (one sample a fetch); no loop.
+    if (Count(wvs.c_str(), "dcl_constantbuffer") != 1 || Count(wvs.c_str(), "dcl_resource") != 3 || Count(wvs.c_str(), "dcl_sampler") != 0 ||
+        Count(wps.c_str(), "dcl_constantbuffer") != 2 || Count(wps.c_str(), "dcl_resource") != 3 || Count(wps.c_str(), "dcl_resource_texture2d") != 3 ||
+        Count(wps.c_str(), "dcl_sampler") != 4 || Count(wps.c_str(), "dcl_output") != 1 || !HasLineWith(wps, "dcl_output", "o0.xyzw") ||
+        wps.find("oDepth") != std::string::npos || LoopInstructions(wps) != 0 || LoopInstructions(wvs) != 0) {
+      std::cerr << "the water programs' resources\n" << Code(wps);
+      return fails(__LINE__);
+    }
+    if (Count(wps.c_str(), "discard") != 2 || !HasLineWith(wps, "lt", "l(300000000549775575777803994281145270272.000000)") ||
+        Count(wps.c_str(), "sample_l") != 8 || Count(wps.c_str(), "sample_d") != 8 || Count(wps.c_str(), "sample_indexable") != 0 ||
+        Count(wps.c_str(), "sample_b") != 0 || !HasOp(wps, "deriv_rtx_coarse") || !HasOp(wps, "round_ni") ||
+        !HasLineWith(wps, "min", "31.875000, 31.875000, 31.875000") || !HasLineWith(wps, "mov", "o0.w, r0.x") ||
+        !strstr(wp, "  if (WaterFinite(v, alpha) == 0.0) discard;\n  v = (v > 0.0) ? min(v, 31.875) : float3(0.0, 0.0, 0.0);\n  return float4(v, alpha);\n") ||
+        !strstr(wp, "    float4 at = WaterLookup(floor(i.pos.xy), s, W_C0, W_C31, W_C129, W_C130);\n    float3 r = water_level0(water_picture, w_sampler_picture, at.xy).rgb;\n") ||
+        !strstr(wp, "    colour = WaterMix(WaterBase(F, W_C126, W_C127), r, float3(0.0, 0.0, 0.0), F, view.w, W_C117P.x, W_C131.x, W_C140.x);\n")) {
+      std::cerr << "the water pixel program\n" << Code(wps);
+      return fails(__LINE__);
+    }
+    static_assert(kPostSceneMax == 31.875f);
+    {
+      // Controls: without the no-number rule one discard is left and the comparison is gone; a picture read at slot
+      // 14's coordinates makes c130 an operand; a position without its floor has no rounding.
+      const std::string unchecked = Changed(wp, "  if (WaterFinite(v, alpha) == 0.0) discard;\n", "");
+      const std::string unchecked_l = Disassembly("clay_water_ps_unchecked", unchecked.c_str(), "ps_5_0");
+      const std::string near_at = Changed(wp, "water_level0(water_picture, w_sampler_picture, at.xy).rgb", "water_level0(water_picture, w_sampler_picture, at.zw).rgb");
+      const std::string near_l = Disassembly("clay_water_ps_near", near_at.c_str(), "ps_5_0");
+      const std::string unfloored = Changed(wp, "WaterLookup(floor(i.pos.xy), s,", "WaterLookup(i.pos.xy, s,");
+      const std::string unfloored_l = Disassembly("clay_water_ps_unfloored", unfloored.c_str(), "ps_5_0");
+      if (unchecked.empty() || unchecked_l.empty() || Count(unchecked_l.c_str(), "discard") != 1 ||
+          HasLineWith(unchecked_l, "lt", "l(300000000549775575777803994281145270272.000000)") || near_at.empty() || near_l.empty() ||
+          !ReadsComponent(near_l, "cb0[17]", 'x') || ReadsComponent(wps, "cb0[17]", 'x') || unfloored.empty() || unfloored_l.empty() ||
+          HasOp(unfloored_l, "round_ni")) return fails(__LINE__);
+    }
+
+    // (g) Part (a) again with this task's header: it ran above against the header as it stands now, the water's two
+    // programs in it; and the mirrored sky's vertex program is at the bytes plan Task 11 gave it.
+    if (same_compiler) {
+      size_t size = 0;
+      const uint64_t hash = CodeHash("kSkyMirrorVs", kSkyMirrorVs, "vs_5_0", &size);
+      if (hash != 0x99C5C8CB945716E5ull || size != 1804) {
+        std::cerr << "kSkyMirrorVs is not the program of plan Task 11: " << size << " bytes, hash " << std::hex << hash << std::dec << "\n";
+        return fails(__LINE__);
+      }
+    }
+    for (size_t i = 0; i + 1 < std::size(before); ++i) {
+      for (const char* word : {"w_rows", "water_mask", "water_positions", "WaterFate"}) {
+        if (strstr(before[i].src, word)) return fails(__LINE__);
+      }
+    }
+    std::cout << "water: the surface step's programs: cbuffer Water 464 bytes at the table's offsets in both stages; the vertex through the index "
+              << "buffer, the position by the record's rows; 34 register components read and 38 not, none of the unread an operand; two "
+              << "discards (the state's test with the kill; a colour that is no number), eight samples at level 0 and eight with their own "
+              << "derivatives, one a fetch behind its sampler's test; one target with its alpha, no depth output\n";
+  }
   // Negative control: broken HLSL must fail (proves the harness reports errors).
   if (Compile("broken_ps", "float4 main() : SV_Target { return undefined_symbol; }", "ps_5_0"))
     return 4;
-  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads; the base map's gamma sign: the curve, the record's word read by the lit terrain programs alone; the quad step: the block at the table's offsets in both stages, the six vertices through the game's matrix, the two kinds' statements, one texture under four samplers, the alpha test's discard, the compiled clamp; the sun layer: the blocks at their tables' offsets, the depth step's one bounded load written as depth, the reduction's one sample, the radial blur's fourteen bounded loads, the four kinds' statements and the occluder's form, the writes' own rounding, no other program's text touched; the previous-frame blend: with the share 0 the composite of before, the blended form behind the share's test with one bounded load of the previous picture; the scene's clouds: the block at the quad block's offsets, the corner's position passed on, the statements of the reference, the alpha test's discard, the base level's texel step, the compiled clamp, no other program's text touched; the wind vertex program: without its define the nine clay programs' bytes of before the wind, t9 a buffer of floats loaded only for a vertex the draw names of a draw with a wind family, the wind's constants at 288 and 336 of a 448-byte block, a leaf's division behind the test of the squared length, the three functions marked precise; the coverage half program: without its define the textured programs' bytes of before, the pixels with one covered sample of two kept and no other, the alpha one half; the impostor programs: every program of before at its bytes of before, the block at ClayImpostorConstants' offsets, the quad words loaded once behind the record's count, the position precise and never without a number, no unread register component read\n";
+  std::cout << "PASS: fullscreen VS, pattern PS, grid PS, clay VS/PS/textured PS, composite PS compile; alpha fields declared, alpha test discards; terrain layer and far PS compile, discard, constants at the table's offsets; steep-ground block; draw constants at ClayConstants' offsets in all five clay shaders; linear outputs, output mapping; light functions, lit paths, plant paths, leaf paths, light blocks at their tables' offsets and registers, every light_mode's compiled program in both stages; shadow map PS (depth only, bias, alpha test, one-sample alpha-to-mask), shadow view PS; the screen mask in the lit shaders, the pre-pass's depth-only forms, the mask shader (constants, loads, arithmetic, taps); the fog: in the colour programs of the four shaders that draw the scene, fog off the program without fog at every light_mode, the tables read behind a test, the compiled clamps; the sky step: the far-depth triangle, the bindings and constants, the compiled guards, the arithmetic and its literals; the unlit draws' fog: with the frame's flag 0 the unlit program at every light_mode, the compiled guards and bounds, the statements, an unlit tree's form; a lit draw without fog: the lit program without the fog; broken shader rejected; the unlit word: with it 1 every program is the one before it, the lit programs untouched, one multiply in an unlit one; the post steps: the block and the step's words at the tables' offsets, the composite's statements, its guards and the nearest texel in the compiled code, the ramp's index, the writes' own rounding, with the bloom's flag 0 the programs of before but for that rounding; the bloom: the downsample's four samples, the bright pass's guards and the sun's layers behind their flag, the blur's thirteen clamped loads; the base map's gamma sign: the curve, the record's word read by the lit terrain programs alone; the quad step: the block at the table's offsets in both stages, the six vertices through the game's matrix, the two kinds' statements, one texture under four samplers, the alpha test's discard, the compiled clamp; the sun layer: the blocks at their tables' offsets, the depth step's one bounded load written as depth, the reduction's one sample, the radial blur's fourteen bounded loads, the four kinds' statements and the occluder's form, the writes' own rounding, no other program's text touched; the previous-frame blend: with the share 0 the composite of before, the blended form behind the share's test with one bounded load of the previous picture; the scene's clouds: the block at the quad block's offsets, the corner's position passed on, the statements of the reference, the alpha test's discard, the base level's texel step, the compiled clamp, no other program's text touched; the wind vertex program: without its define the nine clay programs' bytes of before the wind, t9 a buffer of floats loaded only for a vertex the draw names of a draw with a wind family, the wind's constants at 288 and 336 of a 448-byte block, a leaf's division behind the test of the squared length, the three functions marked precise; the coverage half program: without its define the textured programs' bytes of before, the pixels with one covered sample of two kept and no other, the alpha one half; the impostor programs: every program of before at its bytes of before, the block at ClayImpostorConstants' offsets, the quad words loaded once behind the record's count, the position precise and never without a number, no unread register component read; the water: every program of before at its bytes of before, the mirrored sky's vertex program (kSkyVs's position, one clip distance), the surface step's programs (the block at ClayWaterConstants' offsets, no unread register component read, two discards, every sample with its own level or derivatives)\n";
   return 0;
 }

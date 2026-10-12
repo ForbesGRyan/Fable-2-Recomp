@@ -132,8 +132,19 @@ class ClayPass {
   // guest memory this frame (SetImpostorReadback; ReadImpostorPicture), and a record without a usable
   // picture is not drawn and counted by its reason: never a flat quad in a picture's place. With `off` nothing
   // of the step is made, bound, reserved or drawn, and the frame's slot plan is the one of before.
+  // `water` (fable2_native_water; clay_logic.h, "Native water"; frame-map section 20, "The water step"): in a
+  // scene captured with the switch whose water records are whole, the lake's surface records (A17D) are drawn by
+  // one step of its own layout and programs in the colour pass, at the first surface record's place, after the
+  // sky step, the moon and the clouds: the game's formula with its shore mask, its normal map and a native
+  // reflection target of the record's own water body, which the pass fills first with the mirrored sky
+  // (DrawWaterTargets); blended, depth-tested and depth-written; and the opaque twin's records (F6D9: dead in the
+  // game, flat clay here before) are left out of the pre-pass and the colour pass. ALL OF IT OR NOTHING: a frame
+  // that cannot have its water whole (DecideClayWater: the first thing missing decides) is the picture of before,
+  // record for record, counted by its reason (ClayStats::water; the Water line). No pre-pass draw and no
+  // shadow-map draw of the surface. With the switch off nothing of it is made, bound, reserved or drawn, and the
+  // frame's slot plan is the one of before.
   void Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
-              bool textured, ClayLight light, bool shadows, bool fog, bool wind, bool coverage, capture::ImpostorMode impostors,
+              bool textured, ClayLight light, bool shadows, bool fog, bool wind, bool coverage, capture::ImpostorMode impostors, bool water,
               const ClayPostRequest& post, ClayStats& st, TextureStats& tst);
   // The mapped target (display values, 8 bits): what the composite views
   // sample. Left in kPixelShaderResource after Render, and written by the same
@@ -254,6 +265,10 @@ class ClayPass {
     nrhi::Buffer* wind_words = nullptr;
     uint32_t wind_slot = 0;
     bool prepass_culled = false;  // left out of the pre-pass: wholly beyond the mask's reach
+    // The record is the lake's opaque twin (F6D9) of a frame whose scene verdict is drawn (clay_logic.h, "Native
+    // water"): prepared as every record, and left out of the pre-pass and the colour pass ONLY when the frame's
+    // final verdict is drawn (WaterLeavesOut). False with fable2_native_water off, always.
+    bool water_dead = false;
     // A late coverage record drawn at half (DecideClayCoverage: kDrawn): `pipeline` is its half
     // pipeline (CoverageHalfKey; with the wind program when it is moved), and it has no pre-pass draw.
     bool coverage_half = false;
@@ -433,6 +448,42 @@ class ClayPass {
   ImpostorPicture ReadImpostorPicture(nrhi::Device* dev, const capture::ImpostorRecord& r, uint32_t* picture, uint32_t* sampler, ClayStats& st);
   void DestroyImpostorPictures();
   void ForgetImpostorPictures();
+  // The water's reflection targets (clay_logic.h, "Native water"; frame-map section 20, "The reflection targets";
+  // sub-project 13, plan Task 11): kMaxWaterTargets pictures of kWaterTargetSize squared, R8G8B8A8_UNORM, each a
+  // render target and a shader resource (and a copy source, for the stored scene) that rests in
+  // kPixelShaderResource; one D32_FLOAT depth target of the same size, bound and cleared with each of them (the
+  // mirrored sky tests less-or-equal against it at the far depth and writes none: the views' far terrain of phase
+  // 13c is drawn into the same pair before it); one more picture, water_blur_, the scratch of phase 13c's blur (a
+  // blurred view is drawn sharp into it and blurred into its target; nothing writes or reads it before that
+  // phase); the targets' layout (the sky step's parameters, with cbuffer Sky at b0 for BOTH stages: the sky step's
+  // own layout shows it to the pixel stage alone and is not changed); the mirrored sky's vertex program and its
+  // pipeline with the sky step's own pixel program object. EnsureWaterTargets makes them on the first frame whose
+  // water would otherwise be drawn (the sky step's objects exist then), NEVER with fable2_native_water off; false
+  // when they could not be made, now or before: then they are not tried again until the pass is rebuilt (one log
+  // line), every frame's water is `reflection`, and the pass and the renderer go on. Destroyed with the pass's
+  // other objects, before the sky step's (whose pixel program the pipeline is made of).
+  // DrawWaterTargets: `count` targets, each cleared to 0 and drawn by the mirrored sky from its own slot of
+  // constants (ClayWaterTargetSlot) under the second frame block (ClayWaterFrameSlot: the frame's with the exposure
+  // 1 and 1 / the target's size), with the sky's two textures as the main sky has them; each a target only for
+  // its own draw. Before any of the scene's targets is bound.
+  bool EnsureWaterTargets(nrhi::Device* dev);
+  void DestroyWaterTargets();
+  void ForgetWaterTargets();
+  void DrawWaterTargets(nrhi::Cmd* cmd, uint32_t count, nrhi::TextureView* const* sky_views);
+  // The surface step (plan Task 12; frame-map section 20, "The water step"): its own layout (a record's constants,
+  // kClayWaterSlots small slots of the frame's constant buffer, at b0 for both stages; the frame's block at b2 for
+  // the pixel stage, whose fog it reads; the record's positions, indices and mask coordinates as buffers at t3,
+  // t4 and t5 of the vertex stage; the mask, the normal map and the body's target as a table at t0 to t2 of the
+  // pixel stage; the four static samplers), its two programs and one pipeline a cull mode (the colour pass's
+  // targets, blended source alpha over inverse source alpha, the depth tested "less" and WRITTEN: the game's
+  // "greater" with the write under its reversed range, ledger ruling 27), outside the pipeline cache.
+  // EnsureWaterObjects makes them on the first frame whose water would otherwise be drawn, NEVER with the switch
+  // off; false when they could not be made, now or before (not tried again until the pass is rebuilt; one log
+  // line): every frame's water is then `pipeline` and the frame is the picture of before. Destroyed with the
+  // pass's other objects.
+  bool EnsureWaterObjects(nrhi::Device* dev);
+  void DestroyWaterObjects();
+  void ForgetWaterObjects();
   // What the scene's clouds alone need (clay_logic.h, "Native clouds"): two programs and one pipeline under
   // the quad step's layout. EnsureCloudObjects makes them on the first frame that draws clouds (the quad
   // step's objects exist then); false when they could not be made, now or before: then no frame has clouds
@@ -844,6 +895,49 @@ class ClayPass {
   uint64_t impostor_dump_frame_ = 0;
   bool impostor_dump_ready_ = false;
   std::vector<uint32_t> impostor_seqs_, impostor_place_seqs_;  // (scratch: the drawn records' and the prepared records' seq)
+  // The water (EnsureWaterTargets, EnsureWaterObjects; nothing of it is made with the switch off).
+  // water_step_slots_: the small slots this Render's FinishTerrain takes for the step (kClayWaterStepSlots iff the
+  // frame's scene verdict is drawn; 0 in every other frame, whose slot plan is then the one of before);
+  // water_slots_: the frame's plan, from which the records', the targets' and the second frame block's slots are
+  // taken. water_surfaces_: the frame's surface records as the step draws them; water_surface_seqs_ and
+  // water_dead_seqs_: the places of the frame's two kinds, ascending. What the pass last logged (a line when the
+  // Water line's form changes, at most 16), its frame counts by verdict, and the reasons it has said once.
+  bool water_targets_ = false, water_targets_failed_ = false;
+  nrhi::BindingLayout* water_sky_layout_ = nullptr;  // the RHI has no layout destruction
+  nrhi::Shader* sky_mirror_vs_ = nullptr;
+  nrhi::Pipeline* sky_mirror_pipeline_ = nullptr;
+  nrhi::Texture* water_target_[kMaxWaterTargets] = {};
+  nrhi::TextureView* water_target_view_[kMaxWaterTargets] = {};
+  nrhi::Texture* water_target_depth_ = nullptr;
+  nrhi::Texture* water_blur_ = nullptr;
+  nrhi::TextureView* water_blur_view_ = nullptr;
+  bool water_objects_ = false, water_objects_failed_ = false;
+  nrhi::BindingLayout* water_layout_ = nullptr;  // the RHI has no layout destruction
+  nrhi::Shader* water_vs_ = nullptr;
+  nrhi::Shader* water_ps_ = nullptr;
+  nrhi::Pipeline* water_pipelines_[3] = {};   // by capture::Cull, in the pass's window space
+  uint32_t water_step_slots_ = 0;
+  ClayFrameSlotPlan water_slots_{};
+  struct WaterSurface {
+    const capture::WaterRecord* record = nullptr;
+    size_t draw = ~size_t(0);                 // its draw record's place in FrameScene::draws
+    nrhi::Buffer* positions = nullptr;
+    nrhi::Buffer* indices = nullptr;
+    nrhi::Buffer* pair = nullptr;             // the mask's coordinates, one float2 a vertex
+    uint32_t vertex_count = 0, index_count = 0;
+    nrhi::TextureView* mask = nullptr;
+    nrhi::TextureView* normal = nullptr;
+    uint32_t samplers[3] = {};                // the mask's, the normal map's, the picture's
+    uint32_t swizzle = 0;
+    WaterSurfaceState state;
+    uint8_t target = 0;
+  };
+  std::vector<WaterSurface> water_surfaces_;
+  std::vector<uint32_t> water_surface_seqs_, water_dead_seqs_, water_place_seqs_, water_run_seqs_, water_records_;   // (the last three: scratch)
+  uint32_t water_frames_[size_t(ClayWater::kCount)] = {};
+  uint64_t water_logged_ = ~uint64_t(0);
+  uint32_t water_log_lines_ = 0;
+  uint32_t water_said_ = 0;                   // (one line for the first frame of each verdict that is not drawn: a bit a ClayWater)
   nrhi::BindingLayout* quad_layout_ = nullptr;  // the RHI has no layout destruction
   nrhi::Shader* quad_vs_ = nullptr;
   nrhi::Shader* quad_ps_ = nullptr;
@@ -950,6 +1044,20 @@ class ClayPass {
   bool scene_dump_objects_ = false;
   nrhi::Buffer* scene_dump_buffer_[4] = {};
   uint32_t scene_dump_layer_planes_ = 0;
+  // The water's planes of a dump (scene_dump.h, version 2; only in the frame of a dump whose water is drawn):
+  // the read-back buffers of the depth before the water step (through the depth step into dump_depth_, which the
+  // dump's own depth takes again later in the same command list), of the linear target right after the step, and
+  // one for the frame's reflection targets (target k's rows from k * 256 rows on); how many targets were copied,
+  // with their bases and heights. WaterDumpBefore and WaterDumpAfter interrupt the colour pass around the water
+  // step as the layer's depth copy does (the caller binds its targets again); CopyWaterTargets is called with the
+  // targets resting. A buffer that cannot be made leaves its plane out of the file, counted and logged.
+  nrhi::Buffer* scene_dump_water_buffer_[3] = {};   // 0 the depth before, 1 the colour after, 2 the targets
+  uint32_t scene_dump_targets_ = 0;
+  uint32_t scene_dump_target_base_[kMaxWaterTargets] = {};
+  float scene_dump_target_height_[kMaxWaterTargets] = {};
+  bool WaterDumpBefore(nrhi::Cmd* cmd, nrhi::Device* dev);
+  bool WaterDumpAfter(nrhi::Cmd* cmd, nrhi::Device* dev);
+  void CopyWaterTargets(nrhi::Cmd* cmd, nrhi::Device* dev, const WaterTargetPlan& plan);
   uint64_t scene_dump_submission_ = 0;
   nrhi::BindingLayout* map_layout_ = nullptr;  // the RHI has no layout destruction
   nrhi::Shader* map_vs_ = nullptr;

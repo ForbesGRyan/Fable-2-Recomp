@@ -44,11 +44,14 @@ IMPOSTOR_PIXEL = ("// IMPOSTOR PIXEL TEXT BEGIN\n", "// IMPOSTOR PIXEL TEXT END\
                   ("ImpostorDistance", "ImpostorPixel", "ImpostorKeep", "ImpostorOut"))
 # The water step's two texts (shaders::kClayWaterVs, kClayWaterPs: plan Task 12 writes them). WaterView (the unit view
 # vector and the distance: one of the three guarded reciprocal square roots) and WaterFinite (1 when a colour and
-# its alpha are numbers: the main discards otherwise) are beyond the plan's list (ledger ruling 34).
+# its alpha are numbers: the main discards otherwise) are beyond the plan's list (ledger ruling 34). WaterFate (the
+# pixel's two answers by its two thresholds: shaded against colour 0 by c141.w, drawn against not by the state's
+# alpha reference) is in the text so that the decision is held BY VALUE and not by the presence of two names
+# (ledger ruling 43, after the review of Tasks 4 to 15, I4).
 WATER_VERTEX = ("// WATER VERTEX TEXT BEGIN\n", "// WATER VERTEX TEXT END\n", ("WaterCoords",))
 WATER_PIXEL = ("// WATER PIXEL TEXT BEGIN\n", "// WATER PIXEL TEXT END\n",
-               ("WaterAlpha", "WaterNormalSum", "WaterNormal", "WaterLookup", "WaterView", "WaterFresnel", "WaterBase", "WaterMix", "WaterSun",
-                "WaterFinite"))
+               ("WaterAlpha", "WaterFate", "WaterNormalSum", "WaterNormal", "WaterLookup", "WaterView", "WaterFresnel", "WaterBase", "WaterMix",
+                "WaterSun", "WaterFinite"))
 # What the water text may call beside its own functions. NOT normalize (the text writes the reference's own
 # x * rsqrt(x . x) with its guard), not pow (the power is exp2 of a product, guarded), not mul or clip.
 WATER_INTRINSICS = ("saturate", "sqrt", "abs", "rsqrt", "dot", "lerp", "exp2", "log2", "max", "min")

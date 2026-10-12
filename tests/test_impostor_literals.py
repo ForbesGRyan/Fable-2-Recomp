@@ -357,10 +357,11 @@ class ImpostorPassText(unittest.TestCase):
         self.assertEqual(s.count("  if (impostor_step) {\n"), 1)
         self.assertEqual(s.count("    if (!impostor_draw_count) return;\n"), 1)
         # the frame's buffer and plan take the step's slots from the one member, 0 in every other frame
-        self.assertIn("ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size(), impostor_step_slots_)", s)
-        self.assertIn("PlanClayFrameSlots(slot - kClayFrameTerrainSlot0, uint32_t(plant_constants_.size()), impostor_step_slots_);", s)
+        # (since the water, sub-project 13: the water step's slots follow in both calls, 0 in every frame without it)
+        self.assertIn("ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size(), impostor_step_slots_, water_step_slots_)", s)
+        self.assertIn("PlanClayFrameSlots(slot - kClayFrameTerrainSlot0, uint32_t(plant_constants_.size()), impostor_step_slots_, water_step_slots_);", s)
         self.assertEqual(s.count("PlanClayFrameSlots("), 1)
-        self.assertEqual(s.count("ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size(), impostor_step_slots_)"), 2)   # (the call and its comment)
+        self.assertEqual(s.count("ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size(), impostor_step_slots_"), 2)   # (the call and its comment)
         self.assertEqual(s.count("ClayFrameSmallSlots("), 2)
 
     def test_the_step_is_drawn_in_the_colour_pass_alone(self):
@@ -399,7 +400,7 @@ class ImpostorPassText(unittest.TestCase):
                       "      all = ClayImpostorSkip::kPlace;\n", s)
         self.assertIn("        if (i >= records || !ImpostorWordsHeld(r, word_floats)) {\n", s)
         # one pipeline: depth test less-or-equal with the depth write, no blend, no cull
-        made = s[s.index("bool ClayPass::EnsureImpostorObjects("):s.index("void ClayPass::ForgetCloudObjects()")]
+        made = s[s.index("bool ClayPass::EnsureImpostorObjects("):s.index("// --- The water (clay_logic.h, \"Native water\"; frame-map section 20)")]
         self.assertEqual(made.count("CreateGraphicsPipeline("), 1)
         for line in ("  pipe.cull = nrhi::CullMode::kNone;\n", "  pipe.blend.enable = false;\n", "  pipe.depth.test_enable = true;\n",
                      "  pipe.depth.write_enable = true;\n", "  pipe.depth.func = nrhi::CompareFunc::kLessEqual;\n"):
@@ -425,7 +426,7 @@ class ImpostorPassText(unittest.TestCase):
         self.assertEqual(self.front.count("CurrentImpostors()"), 6)
         self.assertIn("  const capture::ImpostorMode impostors = CurrentImpostors();\n"
                       "  if (impostors == capture::ImpostorMode::kOn) g_clay->SetImpostorReadback(FrameImpostorReadback());\n", self.front)
-        self.assertIn("CurrentCoverage(),\n                 impostors, post, st, tst);", self.front)
+        self.assertIn("CurrentCoverage(),\n                 impostors, water, post, st, tst);", self.front)
         # (ledger ruling 47) the list is asked for the pictures only with the switch at `on` AND the native renderer on
         self.assertIn("bool ImpostorSwitchOn() { return CurrentImpostors() == capture::ImpostorMode::kOn; }", self.front)
         self.assertIn("bool ImpostorReadbackWanted() { return fable2::ImpostorPicturesInList(REXCVAR_GET(fable2_native_render), ImpostorSwitchOn()); }", self.front)
@@ -448,7 +449,8 @@ class ImpostorPassText(unittest.TestCase):
         self.assertIn('REXLOG_INFO("[native] impostor pictures: {} (the read-back list {}; --readback_resolve \'{}\', --d3d12_readback_resolve {}){}",', self.front)
         # the lines of `off` and `flat` are the ones of before
         self.assertIn('      REXLOG_INFO("[native] impostors: {} (fable2_native_impostors)", capture::ImpostorModeName(impostors));\n', self.front)
-        self.assertIn('render::FormatCoverageText(st) + "\\n" + render::FormatImpostorText(st));', self.front)
+        # (the water's line follows the impostors' since sub-project 13)
+        self.assertIn('render::FormatCoverageText(st) + "\\n" + render::FormatImpostorText(st) + "\\n" + render::FormatWaterText(st));', self.front)
         # the log's line: with the pictures their CPU time beside it, otherwise the line of before; none with the mode off
         self.assertIn('    } else if (st.impostor_mode != capture::ImpostorMode::kOff) {\n      REXLOG_INFO("[native] clay: {}", render::FormatImpostorText(st));\n', self.front)
         self.assertIn('    if (st.impostor_mode == capture::ImpostorMode::kOn) {\n      REXLOG_INFO("[native] clay: {} | the pictures\' CPU time this frame {:.3f} ms", '

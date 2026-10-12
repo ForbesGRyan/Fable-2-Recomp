@@ -74,6 +74,28 @@ nrhi::Swizzle ImpostorViewSwizzle(uint8_t s) {
 }
 static_assert(kQuadTableSize <= nrhi::kMaxTextureTableSize && kClayQuadSlots * kClayTerrainSlotBytes >= sizeof(ClayQuadConstants) &&
               std::size(capture::kQuadIndices) == 6);
+// The water (clay_logic.h, "Native water"). The reflection targets' format: the game's resolved picture's, 8 bits
+// (its saturation is the game's own). The targets' layout has the sky step's parameters (kSkyParam...), with the
+// step's constants visible to both stages. The surface step's layout: a record's constants at b0 (both stages),
+// the frame's block at b2 (the pixel stage: the fog), the record's positions, indices and mask coordinates as
+// buffers at t3, t4, t5 of the vertex stage, and a table of three textures at t0 of the pixel stage (the mask,
+// the normal map, the body's target).
+constexpr nrhi::Format kWaterTargetFormat = nrhi::Format::kR8G8B8A8_UNORM;
+constexpr uint32_t kWaterParamConstants = 0, kWaterParamFrame = 1, kWaterParamPositions = 2, kWaterParamIndices = 3, kWaterParamPair = 4,
+                   kWaterParamTextures = 5, kWaterTableSize = 3;
+static_assert(sizeof(ClayWaterConstants) == shaders::kClayWaterSize && kClayWaterSlots * kClayTerrainSlotBytes >= sizeof(ClayWaterConstants) &&
+              kWaterTableSize <= nrhi::kMaxTextureTableSize);
+// The scene's size a water record's c0.zw was held to at the capture is the pass's logical size: the lookup's
+// screen place is the pixel's own.
+static_assert(capture::kWaterSceneWidth == ClayPass::kWidth && capture::kWaterSceneHeight == ClayPass::kHeight,
+              "the water records' scene size is not the clay target's");
+// The stored scene's targets are the water's, and a file with every plane fits the file's bound.
+static_assert(kSceneDumpTargetSize == kWaterTargetSize && kSceneDumpMaxTargets == kMaxWaterTargets &&
+              OracleDumpPitch(kWaterTargetSize) % nrhi::kRowPitchAlignment == 0 && OracleDumpPitch(kWaterTargetSize) >= kWaterTargetSize * 4);
+static_assert(SceneDumpBytes(ClayPass::kWidth, ClayPass::kHeight, kSceneDumpKnownFlags, kMaxWaterTargets) != 0 &&
+              SceneDumpBytes(ClayPass::kWidth, ClayPass::kHeight, kSceneDumpKnownFlags, kMaxWaterTargets) <= (32ull << 20));
+// A water pipeline's slot: the cull, in the pass's window space.
+constexpr size_t WaterPipelineSlot(capture::Cull cull) { return cull == capture::Cull::kFront ? 1 : cull == capture::Cull::kBack ? 2 : 0; }
 // The oracle feed (post_oracle.h): its scene is the pass's logical size, as a texture of four halves a
 // texel whose rows, and the read-back rows of the mapped target, lie at the RHI's row pitch.
 constexpr nrhi::Format kOracleFormat = nrhi::Format::kR16G16B16A16_FLOAT;
@@ -202,6 +224,8 @@ nrhi::CullMode ToCull(uint8_t c) {
 
 void ClayPass::DestroyObjects() {
   DestroyShadowObjects();  // (first: its view of depth_ and its pipelines of vs_ and layout_)
+  DestroyWaterTargets();  // (before the sky step's objects: its pipeline is made of the sky's pixel program)
+  DestroyWaterObjects();
   DestroySkyObjects();
   DestroySunObjects();  // (before the quad step's and the post steps' layouts' other users, and its view of depth_)
   DestroyCloudObjects();  // (before the quad step's layout's other users)
@@ -409,6 +433,12 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     ForgetSkyObjects();
     sky_objects_failed_ = false;
     sky_layout_ = nullptr;
+    ForgetWaterTargets();
+    water_targets_failed_ = false;  // (another device: the water's targets and step are tried anew)
+    water_sky_layout_ = nullptr;
+    ForgetWaterObjects();
+    water_objects_failed_ = false;
+    water_layout_ = nullptr;
     ForgetPostObjects();
     post_objects_failed_ = false;  // (another device: its post steps are tried anew)
     post_layout_ = nullptr;
@@ -443,6 +473,8 @@ bool ClayPass::Ensure(nrhi::Device* dev) {
     // and F6 does not come here for it: those stay off until this path, another device or a restart.)
     shadow_objects_failed_ = false;
     sky_objects_failed_ = false;  // (the sky's objects likewise)
+    water_targets_failed_ = false;  // (and the water's targets and its step)
+    water_objects_failed_ = false;
     post_objects_failed_ = false;  // (and the post steps')
     bloom_objects_failed_ = false;  // (and the bloom's)
     quad_objects_failed_ = false;  // (and the quad step's)
@@ -861,7 +893,9 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
     // slots of those that are drawn with their material)
     // (impostor_step_slots_: the impostor step's constants and quad words, only in a frame that draws the step;
     // 0 in every other frame, and then the size and the plan below are the ones of before)
-    const uint64_t bytes = ClayConstantBufferBytes(ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size(), impostor_step_slots_),
+    // (water_step_slots_: the water step's, only in a frame whose water's scene verdict is drawn; 0 in every other
+    // frame, and then the size and the plan below are the ones of before)
+    const uint64_t bytes = ClayConstantBufferBytes(ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size(), impostor_step_slots_, water_step_slots_),
                                                    object_constants_.size());
     if (auto reused = terrain_pool_.Take(bytes, dev->CompletedSubmission())) {
       terrain_cb_ = *reused;
@@ -986,7 +1020,8 @@ void ClayPass::FinishTerrain(nrhi::Device* dev, bool textured, ClayStats& st, Te
   // the terrain's, the plants', the mask's and the sky's (PlanClayFrameSlots: its object0 is at most
   // ClayFrameSmallSlots(terrain_items_.size(), plant_constants_.size(), impostor_step_slots_), the count the buffer was
   // sized with, because no more terrain records are drawn with their material than there are).
-  const ClayFrameSlotPlan plan = PlanClayFrameSlots(slot - kClayFrameTerrainSlot0, uint32_t(plant_constants_.size()), impostor_step_slots_);
+  const ClayFrameSlotPlan plan = PlanClayFrameSlots(slot - kClayFrameTerrainSlot0, uint32_t(plant_constants_.size()), impostor_step_slots_, water_step_slots_);
+  water_slots_ = plan;  // the water step's (Render writes a drawn record's constants, the targets' and the second frame block)
   impostor_slot0_ = plan.impostor0;  // the impostor step's (Render writes a drawn record's constants and the frame's quad words)
   impostor_words_slot_ = ClayImpostorWordsSlot(plan);
   plant_slot0_ = plan.plant0;
@@ -2469,6 +2504,253 @@ bool ClayPass::EnsureImpostorObjects(nrhi::Device* dev) {
   return true;
 }
 
+// --- The water (clay_logic.h, "Native water"; frame-map section 20) -----------------------------------------------
+// Nothing below is reached with fable2_native_water off.
+
+void ClayPass::ForgetWaterTargets() {
+  sky_mirror_vs_ = nullptr;
+  sky_mirror_pipeline_ = nullptr;
+  for (uint32_t k = 0; k < kMaxWaterTargets; ++k) {
+    water_target_[k] = nullptr;
+    water_target_view_[k] = nullptr;
+  }
+  water_target_depth_ = nullptr;
+  water_blur_ = nullptr;
+  water_blur_view_ = nullptr;
+  water_targets_ = false;
+}
+
+void ClayPass::DestroyWaterTargets() {
+  if (device_) {
+    device_->DestroyDeferred(sky_mirror_pipeline_);
+    device_->DestroyDeferred(sky_mirror_vs_);
+    for (uint32_t k = 0; k < kMaxWaterTargets; ++k) {
+      device_->DestroyDeferred(water_target_view_[k]);
+      device_->DestroyDeferred(water_target_[k]);
+    }
+    device_->DestroyDeferred(water_target_depth_);
+    device_->DestroyDeferred(water_blur_view_);
+    device_->DestroyDeferred(water_blur_);
+  }
+  ForgetWaterTargets();
+}
+
+bool ClayPass::EnsureWaterTargets(nrhi::Device* dev) {
+  if (water_targets_) return true;
+  // (the targets are drawn by the sky step's own pixel program: only a frame with a drawn sky asks, and the
+  // step's objects exist then)
+  if (water_targets_failed_ || !ready_ || dev != device_ || !sky_objects_ || !sky_ps_) return false;
+  auto fail = [&](const char* what) {
+    REXLOG_ERROR("[native] clay: {} failed: the water's reflection targets are off until the pass is rebuilt (another device, or an F6 "
+                 "retry after a failure of the renderer) or the game is restarted; every frame's water is counted \"{}\" and the frame "
+                 "is the picture of before the water (logged once)", what, ClayWaterName(ClayWater::kReflection));
+    DestroyWaterTargets();
+    water_targets_failed_ = true;
+    return false;
+  };
+  // The targets' layout: the sky step's three parameters, with the step's constants (cbuffer Sky, b0) visible to
+  // both stages (the mirrored vertex program reads the ray's basis for its clip distance; the sky step's own
+  // layout shows them to the pixel stage alone and stays as it is), and the clay layout's four static samplers.
+  if (!water_sky_layout_) {
+    nrhi::BindingLayoutDesc desc;
+    desc.params[kSkyParamFrame].kind = nrhi::BindingParamKind::kConstantBuffer;
+    desc.params[kSkyParamFrame].shader_register = 2;
+    desc.params[kSkyParamFrame].count = 1;
+    desc.params[kSkyParamFrame].visibility = nrhi::Visibility::kPixel;
+    desc.params[kSkyParamConstants].kind = nrhi::BindingParamKind::kConstantBuffer;
+    desc.params[kSkyParamConstants].shader_register = 0;
+    desc.params[kSkyParamConstants].count = 1;
+    desc.params[kSkyParamConstants].visibility = nrhi::Visibility::kAll;
+    desc.params[kSkyParamTextures].kind = nrhi::BindingParamKind::kTextureTable;
+    desc.params[kSkyParamTextures].shader_register = 0;
+    desc.params[kSkyParamTextures].count = kSkyTableSize;
+    desc.params[kSkyParamTextures].visibility = nrhi::Visibility::kPixel;
+    desc.param_count = 3;
+    static_assert(kClayStaticSamplers == 4);
+    for (uint32_t i = 0; i < 4; ++i) {
+      desc.static_samplers[i].shader_register = i;
+      desc.static_samplers[i].filter = (i & 1) ? nrhi::Filter::kLinear : nrhi::Filter::kPoint;
+      desc.static_samplers[i].address = (i & 2) ? nrhi::AddressMode::kClamp : nrhi::AddressMode::kWrap;
+    }
+    desc.static_sampler_count = 4;
+    desc.allow_input_layout = false;
+    water_sky_layout_ = dev->CreateBindingLayout(desc);
+    if (!water_sky_layout_) return fail("water target binding layout creation");
+  }
+  nrhi::ShaderDesc sd;
+  sd.entry_point = "main";
+  sd.stage = nrhi::ShaderStage::kVertex;
+  sd.name = "fable2_sky_mirror_vs";
+  sd.hlsl_source = shaders::kSkyMirrorVs;
+  sky_mirror_vs_ = dev->CreateShader(sd);
+  if (!sky_mirror_vs_) return fail("mirrored sky shader compile");
+  // The targets: their contents are undefined until a frame whose water is drawn writes them, and no draw reads
+  // one in a frame that did not write it. The depth is never sampled.
+  nrhi::TextureDesc td;
+  td.width = td.height = kWaterTargetSize;
+  td.format = kWaterTargetFormat;
+  td.usage = nrhi::kTextureUsageRenderTarget | nrhi::kTextureUsageCopySource;
+  td.initial_state = nrhi::ResourceState::kPixelShaderResource;
+  for (uint32_t k = 0; k < kMaxWaterTargets; ++k) {
+    water_target_[k] = dev->CreateTexture(td);
+    water_target_view_[k] = water_target_[k] ? dev->CreateTextureView(water_target_[k], nrhi::TextureViewDesc{}) : nullptr;
+    if (!water_target_[k] || !water_target_view_[k]) return fail("water target creation");
+  }
+  td.usage = nrhi::kTextureUsageRenderTarget;
+  water_blur_ = dev->CreateTexture(td);
+  water_blur_view_ = water_blur_ ? dev->CreateTextureView(water_blur_, nrhi::TextureViewDesc{}) : nullptr;
+  td.format = nrhi::Format::kD32_FLOAT;
+  td.usage = nrhi::kTextureUsageDepthStencil;
+  td.clear_depth = 1.0f;
+  water_target_depth_ = dev->CreateTexture(td);
+  if (!water_blur_ || !water_blur_view_ || !water_target_depth_) return fail("water target creation");
+  // One triangle at the far depth, as the sky step's: tested less-or-equal against the target's own depth (the
+  // clear value in this phase; in phase 13c what the view's far terrain wrote), no depth write, no blend, no
+  // cull. The clip distance is the vertex program's output: the pipeline has nothing to say about it.
+  nrhi::GraphicsPipelineDesc pipe;
+  pipe.layout = water_sky_layout_;
+  pipe.vs = sky_mirror_vs_;
+  pipe.ps = sky_ps_;
+  pipe.rtv_format = kWaterTargetFormat;
+  pipe.dsv_format = nrhi::Format::kD32_FLOAT;
+  pipe.depth.test_enable = true;
+  pipe.depth.write_enable = false;
+  pipe.depth.func = nrhi::CompareFunc::kLessEqual;
+  pipe.cull = nrhi::CullMode::kNone;
+  sky_mirror_pipeline_ = dev->CreateGraphicsPipeline(pipe);
+  if (!sky_mirror_pipeline_) return fail("mirrored sky pipeline creation");
+  water_targets_ = true;
+  REXLOG_INFO("[native] clay: water targets ready ({} of {} x {} R8G8B8A8_UNORM with one D32_FLOAT depth and one scratch picture, {:.2f} MB "
+              "together; the mirrored sky: the sky step's pixel program behind a vertex program with one clip distance, tested "
+              "less-or-equal at the far depth, no depth write, no blend; its layout: b2 the second frame block, b0 {} bytes of "
+              "constants for both stages, t0 and t1 the sky textures)",
+              kMaxWaterTargets, kWaterTargetSize, kWaterTargetSize,
+              double((kMaxWaterTargets + 2) * ClayTargetBytes(kWaterTargetSize, kWaterTargetSize, 4)) / (1024.0 * 1024.0), sizeof(ClaySkyConstants));
+  return true;
+}
+
+void ClayPass::DrawWaterTargets(nrhi::Cmd* cmd, uint32_t count, nrhi::TextureView* const* sky_views) {
+  if (!water_targets_ || !terrain_cb_ || !sky_views || count == 0 || count > kMaxWaterTargets) return;
+  const float kNone[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  cmd->Barrier(water_target_depth_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kDepthWrite);
+  for (uint32_t k = 0; k < count; ++k) {
+    cmd->Barrier(water_target_[k], nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kRenderTarget);
+    cmd->FlushBarriers();
+    cmd->SetRenderTargets(water_target_[k], water_target_depth_);
+    cmd->ClearRenderTarget(water_target_[k], kNone);
+    cmd->ClearDepth(water_target_depth_, 1.0f);
+    cmd->SetViewport({0.0f, 0.0f, float(kWaterTargetSize), float(kWaterTargetSize), 0.0f, 1.0f});
+    cmd->SetScissor({0, 0, int32_t(kWaterTargetSize), int32_t(kWaterTargetSize)});
+    cmd->SetBindingLayout(water_sky_layout_);
+    cmd->SetPipeline(sky_mirror_pipeline_);
+    cmd->SetConstantBuffer(kSkyParamFrame, terrain_cb_, ClaySmallSlotOffset(ClayWaterFrameSlot(water_slots_)));
+    cmd->SetConstantBuffer(kSkyParamConstants, terrain_cb_, ClaySmallSlotOffset(ClayWaterTargetSlot(water_slots_, k)));
+    cmd->SetTextures(kSkyParamTextures, sky_views, kSkyTableSize);
+    cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+    cmd->Draw(3, 0);
+    cmd->Barrier(water_target_[k], nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kPixelShaderResource);
+  }
+  cmd->Barrier(water_target_depth_, nrhi::ResourceState::kDepthWrite, nrhi::ResourceState::kPixelShaderResource);
+  cmd->FlushBarriers();
+}
+
+void ClayPass::ForgetWaterObjects() {
+  water_vs_ = water_ps_ = nullptr;
+  for (nrhi::Pipeline*& p : water_pipelines_) p = nullptr;
+  water_objects_ = false;
+}
+
+void ClayPass::DestroyWaterObjects() {
+  if (device_) {
+    for (nrhi::Pipeline* p : water_pipelines_) device_->DestroyDeferred(p);
+    device_->DestroyDeferred(water_vs_);
+    device_->DestroyDeferred(water_ps_);
+  }
+  ForgetWaterObjects();
+}
+
+bool ClayPass::EnsureWaterObjects(nrhi::Device* dev) {
+  if (water_objects_) return true;
+  if (water_objects_failed_ || !ready_ || dev != device_) return false;
+  auto fail = [&](const char* what) {
+    REXLOG_ERROR("[native] clay: {} failed: the water's surface step is off until the pass is rebuilt (another device, or an F6 retry "
+                 "after a failure of the renderer) or the game is restarted; every frame's water is counted \"{}\" and the frame is "
+                 "the picture of before the water (logged once)", what, ClayWaterName(ClayWater::kPipeline));
+    DestroyWaterObjects();
+    water_objects_failed_ = true;
+    return false;
+  };
+  if (!water_layout_) {
+    nrhi::BindingLayoutDesc desc;
+    desc.params[kWaterParamConstants].kind = nrhi::BindingParamKind::kConstantBuffer;
+    desc.params[kWaterParamConstants].shader_register = 0;
+    desc.params[kWaterParamConstants].count = 1;
+    desc.params[kWaterParamConstants].visibility = nrhi::Visibility::kAll;
+    desc.params[kWaterParamFrame].kind = nrhi::BindingParamKind::kConstantBuffer;
+    desc.params[kWaterParamFrame].shader_register = 2;
+    desc.params[kWaterParamFrame].count = 1;
+    desc.params[kWaterParamFrame].visibility = nrhi::Visibility::kPixel;
+    for (uint32_t i = 0; i < 3; ++i) {
+      desc.params[kWaterParamPositions + i].kind = nrhi::BindingParamKind::kBufferSrv;
+      desc.params[kWaterParamPositions + i].shader_register = 3 + i;
+      desc.params[kWaterParamPositions + i].count = 1;
+      desc.params[kWaterParamPositions + i].visibility = nrhi::Visibility::kVertex;
+    }
+    desc.params[kWaterParamTextures].kind = nrhi::BindingParamKind::kTextureTable;
+    desc.params[kWaterParamTextures].shader_register = 0;
+    desc.params[kWaterParamTextures].count = kWaterTableSize;
+    desc.params[kWaterParamTextures].visibility = nrhi::Visibility::kPixel;
+    desc.param_count = 6;
+    static_assert(kClayStaticSamplers == 4 && kWaterParamIndices == kWaterParamPositions + 1 && kWaterParamPair == kWaterParamPositions + 2);
+    for (uint32_t i = 0; i < 4; ++i) {
+      desc.static_samplers[i].shader_register = i;
+      desc.static_samplers[i].filter = (i & 1) ? nrhi::Filter::kLinear : nrhi::Filter::kPoint;
+      desc.static_samplers[i].address = (i & 2) ? nrhi::AddressMode::kClamp : nrhi::AddressMode::kWrap;
+    }
+    desc.static_sampler_count = 4;
+    desc.allow_input_layout = false;
+    water_layout_ = dev->CreateBindingLayout(desc);
+    if (!water_layout_) return fail("water binding layout creation");
+  }
+  nrhi::ShaderDesc sd;
+  sd.entry_point = "main";
+  sd.stage = nrhi::ShaderStage::kVertex;
+  sd.name = "fable2_clay_water_vs";
+  sd.hlsl_source = shaders::kClayWaterVs;
+  water_vs_ = dev->CreateShader(sd);
+  sd.stage = nrhi::ShaderStage::kPixel;
+  sd.name = "fable2_clay_water_ps";
+  sd.hlsl_source = shaders::kClayWaterPs;
+  water_ps_ = dev->CreateShader(sd);
+  if (!water_vs_ || !water_ps_) return fail("water shader compile");
+  // One pipeline a cull mode, into the colour pass's targets: source alpha over inverse source alpha, the depth
+  // tested "less" against what the pass has written and WRITTEN (the game's "greater" with the write under its
+  // reversed range: the state word 0x00708746, ledger ruling 27; the one state WaterSurfaceStateOf lets through).
+  nrhi::GraphicsPipelineDesc pipe;
+  pipe.layout = water_layout_;
+  pipe.vs = water_vs_;
+  pipe.ps = water_ps_;
+  pipe.rtv_format = kLinearFormat;
+  pipe.dsv_format = nrhi::Format::kD32_FLOAT;
+  pipe.blend.enable = true;
+  pipe.blend.src = pipe.blend.src_alpha = nrhi::BlendFactor::kSrcAlpha;
+  pipe.blend.dst = pipe.blend.dst_alpha = nrhi::BlendFactor::kInvSrcAlpha;
+  pipe.depth.test_enable = true;
+  pipe.depth.write_enable = true;
+  pipe.depth.func = nrhi::CompareFunc::kLess;
+  for (const capture::Cull cull : {capture::Cull::kNone, capture::Cull::kFront, capture::Cull::kBack}) {
+    pipe.cull = ToCull(uint8_t(cull));
+    water_pipelines_[WaterPipelineSlot(cull)] = dev->CreateGraphicsPipeline(pipe);
+    if (!water_pipelines_[WaterPipelineSlot(cull)]) return fail("water pipeline creation");
+  }
+  water_objects_ = true;
+  REXLOG_INFO("[native] clay: water step ready (a mesh by its own index buffer, the position by the record's rows; blended by the alpha, "
+              "depth test less with the depth write, one pipeline a cull mode; its own layout: b0 {} bytes of constants in {} slots a "
+              "record, b2 the frame's block, t3 to t5 the positions, the indices and the mask's coordinates, t0 to t2 the mask, the "
+              "normal map and the record's reflection target)", sizeof(ClayWaterConstants), kClayWaterSlots);
+  return true;
+}
+
 void ClayPass::ForgetCloudObjects() {
   cloud_vs_ = cloud_ps_ = nullptr;
   cloud_pipeline_ = nullptr;
@@ -2961,6 +3243,100 @@ void ClayPass::ReleaseSceneDumpBuffers() {
     b = nullptr;
   }
   scene_dump_layer_planes_ = 0;
+  for (nrhi::Buffer*& b : scene_dump_water_buffer_) {  // (the water's planes: null but in a dump of a frame whose water was drawn)
+    if (device_) device_->DestroyDeferred(b);
+    b = nullptr;
+  }
+  scene_dump_targets_ = 0;
+}
+
+// The water's planes of a stored scene (scene_dump.h, version 2; frame-map section 20). Each is copied only in the
+// frame of a dump whose water is drawn, and a plane whose buffer or view cannot be made is left out of the file,
+// counted and logged; the scene's own dump goes on.
+// WaterDumpBefore: the scene's depth as it stands right before the water step, through the depth step into
+// dump_depth_ and from there into a read-back buffer. The colour pass is interrupted for it: the depth is a shader
+// resource for the step alone. True: the caller binds the scene's targets again.
+bool ClayPass::WaterDumpBefore(nrhi::Cmd* cmd, nrhi::Device* dev) {
+  if (!scene_dump_objects_ || scene_dump_water_buffer_[0]) return false;
+  nrhi::BufferDesc bd;
+  bd.size = uint64_t(OracleDumpPitch(kWidth)) * kHeight;
+  bd.heap = nrhi::HeapKind::kReadback;
+  nrhi::Buffer* const buffer = dev->CreateBuffer(bd);
+  nrhi::TextureView* const view = buffer ? dev->CreateTextureView(depth_, nrhi::TextureViewDesc{}) : nullptr;
+  if (!buffer || !view) {
+    dev->DestroyDeferred(view);
+    dev->DestroyDeferred(buffer);
+    CountSceneDumpFault(SceneDumpFault::kBuffer, scene_dump_counts_);
+    REXLOG_ERROR("[native] clay: scene dump: refused ({}): the read-back buffer or the view of the depth before the water step could not "
+                 "be made; the file is written without that plane", SceneDumpFaultName(SceneDumpFault::kBuffer));
+    return false;
+  }
+  cmd->Barrier(depth_, nrhi::ResourceState::kDepthWrite, nrhi::ResourceState::kPixelShaderResource);
+  cmd->FlushBarriers();
+  DepthPackStep(cmd, dev, view, dump_depth_, kWidth, kHeight, buffer);
+  cmd->Barrier(depth_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kDepthWrite);
+  cmd->FlushBarriers();
+  scene_dump_water_buffer_[0] = buffer;
+  return true;
+}
+
+// WaterDumpAfter: the linear target as it stands right after the water step (the surface as the step wrote it,
+// before any later record), copied into a read-back buffer. The target is a copy source for the copy alone. True:
+// the caller binds the scene's targets again.
+bool ClayPass::WaterDumpAfter(nrhi::Cmd* cmd, nrhi::Device* dev) {
+  if (!scene_dump_objects_ || scene_dump_water_buffer_[1]) return false;
+  nrhi::BufferDesc bd;
+  bd.size = uint64_t(OracleDumpPitch(kWidth)) * kHeight;
+  bd.heap = nrhi::HeapKind::kReadback;
+  nrhi::Buffer* const buffer = dev->CreateBuffer(bd);
+  if (!buffer) {
+    CountSceneDumpFault(SceneDumpFault::kBuffer, scene_dump_counts_);
+    REXLOG_ERROR("[native] clay: scene dump: refused ({}): the read-back buffer of the scene after the water step could not be made; "
+                 "the file is written without that plane", SceneDumpFaultName(SceneDumpFault::kBuffer));
+    return false;
+  }
+  cmd->Barrier(linear_, nrhi::ResourceState::kRenderTarget, nrhi::ResourceState::kCopySource);
+  cmd->FlushBarriers();
+  cmd->CopyTextureToBuffer(buffer, 0, OracleDumpPitch(kWidth), linear_, 0, kWidth, kHeight);
+  cmd->Barrier(linear_, nrhi::ResourceState::kCopySource, nrhi::ResourceState::kRenderTarget);
+  cmd->FlushBarriers();
+  scene_dump_water_buffer_[1] = buffer;
+  return true;
+}
+
+// CopyWaterTargets: the frame's reflection targets, resting in kPixelShaderResource, into one read-back buffer
+// (target k's rows from k * kWaterTargetSize rows on), with their bases and heights for the file.
+void ClayPass::CopyWaterTargets(nrhi::Cmd* cmd, nrhi::Device* dev, const WaterTargetPlan& plan) {
+  if (scene_dump_state_ != SceneDumpState::kPending || !water_targets_ || scene_dump_water_buffer_[2] || !plan.ok || plan.count == 0 ||
+      plan.count > kMaxWaterTargets) {
+    return;
+  }
+  const uint32_t pitch = OracleDumpPitch(kWaterTargetSize);
+  nrhi::BufferDesc bd;
+  bd.size = uint64_t(pitch) * kWaterTargetSize * plan.count;
+  bd.heap = nrhi::HeapKind::kReadback;
+  nrhi::Buffer* const buffer = dev->CreateBuffer(bd);
+  if (!buffer) {
+    CountSceneDumpFault(SceneDumpFault::kBuffer, scene_dump_counts_);
+    REXLOG_ERROR("[native] clay: scene dump: refused ({}): the read-back buffer of the reflection targets could not be made; the file is "
+                 "written without them", SceneDumpFaultName(SceneDumpFault::kBuffer));
+    return;
+  }
+  for (uint32_t k = 0; k < plan.count; ++k) {
+    cmd->Barrier(water_target_[k], nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kCopySource);
+    cmd->FlushBarriers();
+    cmd->CopyTextureToBuffer(buffer, uint64_t(k) * pitch * kWaterTargetSize, pitch, water_target_[k], 0, kWaterTargetSize, kWaterTargetSize);
+    cmd->Barrier(water_target_[k], nrhi::ResourceState::kCopySource, nrhi::ResourceState::kPixelShaderResource);
+    cmd->FlushBarriers();
+    scene_dump_target_base_[k] = plan.base[k];
+    scene_dump_target_height_[k] = plan.height[k];
+  }
+  scene_dump_water_buffer_[2] = buffer;
+  scene_dump_targets_ = plan.count;
+  scene_dump_submission_ = dev->CurrentSubmission();
+  REXLOG_INFO("[native] clay: scene dump: the water's planes of scene frame {}: the depth before the step {}, the scene after it {}, {} "
+              "reflection targets", scene_dump_head_.scene_frame, scene_dump_water_buffer_[0] ? "copied" : "missing",
+              scene_dump_water_buffer_[1] ? "copied" : "missing", plan.count);
 }
 
 void ClayPass::ForgetSceneDumpObjects() {
@@ -2970,6 +3346,8 @@ void ClayPass::ForgetSceneDumpObjects() {
   for (nrhi::Texture*& t : dump_layer_) t = nullptr;
   scene_dump_objects_ = false;
   for (nrhi::Buffer*& b : scene_dump_buffer_) b = nullptr;
+  for (nrhi::Buffer*& b : scene_dump_water_buffer_) b = nullptr;
+  scene_dump_targets_ = 0;
   scene_dump_layer_planes_ = 0;
   // (copies that were pending are gone with their buffers: counted, and no file comes of them; a request
   // that still waits for its Render is served by the rebuilt pass)
@@ -2988,6 +3366,7 @@ void ClayPass::DestroySceneDumpObjects() {
     device_->DestroyDeferred(dump_depth_);
     for (nrhi::Texture* t : dump_layer_) device_->DestroyDeferred(t);
     for (nrhi::Buffer* b : scene_dump_buffer_) device_->DestroyDeferred(b);
+    for (nrhi::Buffer* b : scene_dump_water_buffer_) device_->DestroyDeferred(b);
   }
   ForgetSceneDumpObjects();
 }
@@ -3172,6 +3551,16 @@ bool ClayPass::TakeSceneDump(nrhi::Device* dev, std::vector<uint8_t>* file) {
     if (mapped[i]) dev->InvalidateForRead(scene_dump_buffer_[i], 0, uint64_t(OracleDumpPitch(width)) * height);
     ok = ok && mapped[i] != nullptr;
   }
+  // The water's planes (version 2): each buffer that was made and can be read gives its plane and its flag; one
+  // that cannot be read is left out, and the file is the scene's all the same.
+  const uint8_t* water_mapped[3] = {};
+  for (size_t i = 0; i < 3 && ok; ++i) {
+    if (!scene_dump_water_buffer_[i]) continue;
+    const uint32_t width = i < 2 ? kWidth : kWaterTargetSize;
+    const uint64_t rows = i < 2 ? kHeight : uint64_t(kWaterTargetSize) * scene_dump_targets_;
+    water_mapped[i] = static_cast<const uint8_t*>(dev->Map(scene_dump_water_buffer_[i]));
+    if (water_mapped[i]) dev->InvalidateForRead(scene_dump_water_buffer_[i], 0, uint64_t(OracleDumpPitch(width)) * rows);
+  }
   if (ok) {
     SceneDumpPlanes planes;
     planes.linear = mapped[0];
@@ -3180,12 +3569,36 @@ bool ClayPass::TakeSceneDump(nrhi::Device* dev, std::vector<uint8_t>* file) {
     planes.layer[0] = mapped[2];
     planes.layer[1] = mapped[3];
     planes.layer_pitch = OracleDumpPitch(kSunLayerWidth);
+    uint32_t water_flags = 0;
+    if (water_mapped[0]) {
+      planes.pre_water = water_mapped[0];
+      planes.pre_water_pitch = OracleDumpPitch(kWidth);
+      water_flags |= kSceneDumpPreWater;
+    }
+    if (water_mapped[1]) {
+      planes.water = water_mapped[1];
+      planes.water_pitch = OracleDumpPitch(kWidth);
+      water_flags |= kSceneDumpWater;
+    }
+    if (water_mapped[2] && scene_dump_targets_ != 0 && scene_dump_targets_ <= kMaxWaterTargets) {
+      planes.target_count = scene_dump_targets_;
+      planes.target_pitch = OracleDumpPitch(kWaterTargetSize);
+      for (uint32_t k = 0; k < scene_dump_targets_; ++k) {
+        planes.target[k] = water_mapped[2] + size_t(k) * planes.target_pitch * kWaterTargetSize;
+        planes.target_base[k] = scene_dump_target_base_[k];
+        planes.target_height[k] = scene_dump_target_height_[k];
+      }
+      water_flags |= kSceneDumpTargets;
+    }
     const SceneDumpHeader& h = scene_dump_head_;
-    ok = PackSceneDump(kWidth, kHeight, h.scene_frame, h.asked_frame, (h.flags & ~kSceneDumpLayer) | (layer ? kSceneDumpLayer : 0u), h.exposure,
-                       planes, file);
+    ok = PackSceneDump(kWidth, kHeight, h.scene_frame, h.asked_frame,
+                       (h.flags & ~(kSceneDumpLayer | kSceneDumpVersion2Flags)) | (layer ? kSceneDumpLayer : 0u) | water_flags, h.exposure, planes, file);
   }
   for (size_t i = 0; i < count; ++i) {
     if (mapped[i]) dev->Unmap(scene_dump_buffer_[i]);
+  }
+  for (size_t i = 0; i < 3; ++i) {
+    if (water_mapped[i]) dev->Unmap(scene_dump_water_buffer_[i]);
   }
   if (!ok) {
     file->clear();
@@ -3200,7 +3613,7 @@ bool ClayPass::TakeSceneDump(nrhi::Device* dev, std::vector<uint8_t>* file) {
 }
 
 void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene, ClayColor color,
-                      bool textured, ClayLight light, bool shadows, bool fog, bool wind, bool coverage, capture::ImpostorMode impostors,
+                      bool textured, ClayLight light, bool shadows, bool fog, bool wind, bool coverage, capture::ImpostorMode impostors, bool water,
                       const ClayPostRequest& post, ClayStats& st, TextureStats& tst) {
   if (!ready_ || dev != device_) return;
   // The frame's impostors: the switch as it is now, in a scene captured with it (ClayImpostorMode). Off: nothing
@@ -3336,6 +3749,65 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     if (!post_in.block) post_fault = ClayPostFault::kWords;
   }
   const bool post_words = DecideClayPost(post_in).post == ClayPost::kDrawn;  // (the frame's two words are a post frame's)
+  // The frame's water (clay_logic.h, "Native water"; frame-map section 20, "The water step"): the switch as it is
+  // now, in a scene captured with it. Off: nothing below makes an object, reserves a slot, resolves a texture,
+  // binds or draws anything of the water, no record is marked, and the frame's slot plan is the one of before.
+  // Here the scene's own rules (WaterSceneVerdict: the records by kind, the frame's light, every opaque twin dead
+  // by its own c141, the pairs whole, each record's c20.w against the frame's output scale): only a frame that
+  // passes them reserves the step's slots, before FinishTerrain sizes the frame's buffer. The rest of the verdict
+  // (the meshes, the view, the textures, the sky and the targets, the place, the objects) is made once those are
+  // known, before any target is bound; the frame's water is drawn whole or the frame is the picture of before.
+  double water_ms = 0.0;
+  auto water_clock = [&](const std::chrono::steady_clock::time_point& from) {
+    water_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - from).count();
+  };
+  ClayWaterInputs water_in;
+  water_in.on = water && scene.water_on;
+  water_step_slots_ = 0;
+  bool water_scene = false;
+  uint32_t water_first_place = 0xFFFFFFFFu, water_last_place = 0;
+  if (water_in.on) {
+    const auto begin = std::chrono::steady_clock::now();
+    water_surfaces_.clear();
+    water_surface_seqs_.clear();
+    water_dead_seqs_.clear();
+    st.water_seen = scene.water_seen[0];
+    for (size_t i = 0; i < size_t(capture::WaterReason::kCount); ++i) st.water_capture[i] = scene.water_refused[i];
+    // (the output scale: the lit draws' exposure, which in a post frame is the game's c20.w and must then be each
+    // record's own; in a frame without post it is the pass's fixed exposure, as for every lit draw, and a record's
+    // c20.w is held to its bound alone)
+    water_in.scale = capture::WaterScaleBounded(frame_.exposure);
+    for (const capture::WaterRecord& r : scene.water) {
+      const float c20w = r.ps[capture::kWatP20][3];
+      water_in.scale = water_in.scale && (post_words ? WaterScaleMatches(c20w, frame_.exposure) : capture::WaterScaleBounded(c20w));
+      if (r.kind == uint32_t(capture::WaterKind::kSurface)) {
+        ++water_in.surface;
+        if (water_surfaces_.size() < capture::kMaxWaterRecords) {
+          WaterSurface s;
+          s.record = &r;
+          water_surfaces_.push_back(s);
+          water_surface_seqs_.push_back(r.place);
+          water_first_place = std::min(water_first_place, r.place);
+          water_last_place = std::max(water_last_place, r.place);
+        }
+      } else if (r.kind == uint32_t(capture::WaterKind::kOpaque)) {
+        ++water_in.opaque;
+        water_in.opaque_dead = water_in.opaque_dead && WaterOpaqueDead(r.ps[capture::kWatP141]);
+        water_dead_seqs_.push_back(r.place);
+      }
+    }
+    std::sort(water_surface_seqs_.begin(), water_surface_seqs_.end());
+    std::sort(water_dead_seqs_.begin(), water_dead_seqs_.end());
+    water_in.light = frame_.light_on != 0;
+    water_scene = WaterSceneVerdict(water_in) == ClayWater::kDrawn && water_surfaces_.size() == water_in.surface;
+    if (water_scene) water_step_slots_ = kClayWaterStepSlots;
+    water_clock(begin);
+  }
+  // (the lake's records of such a frame are counted alpha-unknown and blend-unknown only if the frame's water is
+  // then not drawn: held here until the final verdict. A surface record that the loop below does not leave out
+  // would be drawn twice: such a frame is `order`.)
+  uint32_t water_held_blend = 0, water_held_alpha = 0;
+  bool water_stray = false;
   // With the light off no light input is asked of the geometry cache: every record is prepared as
   // one without light inputs (its light buffers null, its light_mode without an object bit, the
   // positions at t9 to t12 at its draw; a steep layer's terrain normals are the material's and
@@ -3367,7 +3839,17 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     }
     const capture::RenderState rs = capture::DecodeRenderState(r.state_words);
     const bool may_texture = textured && r.material.status == capture::MaterialStatus::kTextured;
+    // (which of the lake's two kinds the record is, in a frame whose water's scene verdict is drawn; none otherwise)
+    const capture::WaterKind water_kind =
+        !water_scene ? capture::WaterKind::kNone
+        : std::binary_search(water_surface_seqs_.begin(), water_surface_seqs_.end(), r.seq) ? capture::WaterKind::kSurface
+        : std::binary_search(water_dead_seqs_.begin(), water_dead_seqs_.end(), r.seq) ? capture::WaterKind::kOpaque
+                                                                                      : capture::WaterKind::kNone;
     auto leave_out = [&] {
+      if (water_kind == capture::WaterKind::kSurface) {  // (the water step's record: counted by the final verdict)
+        ++water_held_blend;
+        return;
+      }
       ++st.blend_unknown;
       st.unknown_by_ps.Add(r.material.ps_hash, kTallyBlendUnknown);
     };
@@ -3432,9 +3914,17 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     if (d.blended) ++st.blended;
     if (d.state_invalid) ++st.state_invalid;
     if (d.alpha_unknown) {
-      ++st.alpha_unknown;
-      st.unknown_by_ps.Add(r.material.ps_hash, kTallyAlphaUnknown);
+      if (water_kind == capture::WaterKind::kOpaque) {  // (the dead draw: counted by the final verdict)
+        ++water_held_alpha;
+      } else {
+        ++st.alpha_unknown;
+        st.unknown_by_ps.Add(r.material.ps_hash, kTallyAlphaUnknown);
+      }
     }
+    // The lake's opaque twin is prepared as every record and marked: it is left out of the pre-pass and the colour
+    // pass only when the frame's water is then drawn (WaterLeavesOut).
+    p.water_dead = water_kind == capture::WaterKind::kOpaque;
+    if (water_kind == capture::WaterKind::kSurface) water_stray = true;
     // A record drawn with its texture and with light inputs: its normals and colours (the light
     // is of the material; a record that stays flat clay has none; none with the light off). The
     // inputs are kept for the record's fog whether or not it is lit (an unlit trunk's or leaf's
@@ -3745,6 +4235,125 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
                 "c67.y {:.3f}{}",
                 scene.frame, FormatSkyText(st), sky_order.place, prepared_.size(), sky_constants.c31x, sky_constants.c46x,
                 sky_constants.c47x, sky_constants.c67y, sky_log_lines_ == kSkyLogLines ? " (last such line)" : "");
+  }
+  // The water's surface records, each prepared for the step (only in a frame whose scene verdict is drawn; before
+  // any target is bound: a texture's upload records a copy): its draw record by its place; the state the step
+  // draws it with, from that record's own words; its positions with their box (the mesh's height: WaterMeshHeight),
+  // its indices (whose range the geometry cache holds to the positions), its mask's coordinates (the record's own
+  // vertex stream read as a pair of floats at byte 12 of a 20-byte vertex: GeometryCache::Uvs with the pair's
+  // layout); its rows against the frame's one view-projection; its mask and the normal map through the texture
+  // cache's water path, with their samplers and the channels the program picks; the sampler of its picture's
+  // fetch. Whatever is missing sets the input its reason names; nothing is drawn of a frame with one missing.
+  // Then the targets: one for each slot-13 base of the frame, ascending (PlanWaterTargets), each with its sky
+  // constants under the mirrored camera of its own water body (WaterViewRows of the frame's view-projection, the
+  // body's c31.xy and height; SkyRayBasis; the sky block's constants; the main sky's textures as they are) in its
+  // slot, and the second frame block (WaterFrameBlock: exposure 1, 1 / the target's size) in its slots. A frame
+  // whose sky is not drawn has no usable target (`reflection`): the surface is never drawn with an empty picture.
+  WaterTargetPlan water_plan;
+  bool water_state = true;
+  if (water_scene) {
+    const auto begin = std::chrono::steady_clock::now();
+    const capture::WaterRecord* records[capture::kMaxWaterRecords] = {};
+    WaterHeight heights[capture::kMaxWaterRecords] = {};
+    uint8_t target_of[capture::kMaxWaterRecords] = {};
+    const bool have_view = frame_view();
+    water_in.view = have_view;
+    const size_t count = water_surfaces_.size();
+    for (size_t i = 0; i < count; ++i) {
+      WaterSurface& s = water_surfaces_[i];
+      const capture::WaterRecord& rec = *s.record;
+      records[i] = &rec;
+      s.draw = WaterDrawIndex(scene.draws.data(), scene.draws.size(), rec.place);
+      if (s.draw == ~size_t(0)) {  // (no draw record of that place among the drawable ones)
+        water_in.view = false;
+        continue;
+      }
+      const capture::DrawRecord& r = scene.draws[s.draw];
+      s.state = WaterSurfaceStateOf(r.state_words);
+      water_state = water_state && s.state.usable;
+      float m[4][4];
+      RecordMatrix(r, m);
+      if (r.layout != capture::TransformLayout::kDot || r.terrain_index != capture::kNoSideIndex || r.instances.active || r.skin.active ||
+          !have_view || !ViewMatricesAgree(mask_view_proj, m, kFrameViewTolerance)) {
+        water_in.view = false;
+        continue;
+      }
+      PositionBounds bounds;
+      uint32_t buffer_vertices = 0;
+      s.positions = geometry_.Positions(dev, r, nullptr, &buffer_vertices, st, &bounds);
+      if (s.positions) {
+        heights[i] = WaterMeshHeight(bounds);
+        s.vertex_count = DrawVertexCount(buffer_vertices, RecordVertexCount(r, nullptr));
+        s.indices = geometry_.Indices(dev, r, nullptr, s.vertex_count, &s.index_count, st);
+        if (r.pos.stride_bytes == capture::kWaterStrideDwords * 4) {
+          capture::DrawRecord pair = r;
+          pair.material.uv_vb = r.vb;
+          pair.material.uv = capture::UvLayout{};
+          pair.material.uv.format = capture::UvFormat::kFloat2;
+          pair.material.uv.offset_bytes = capture::kWaterPairOffsetDwords * 4;
+          pair.material.uv.stride_bytes = capture::kWaterStrideDwords * 4;
+          pair.material.uv.fetch_slot = r.pos.fetch_slot;
+          s.pair = geometry_.Uvs(dev, pair, s.vertex_count, st);
+        }
+      }
+      capture::MaterialStatus status = capture::MaterialStatus::kTextureBad;
+      s.mask = textures_.ResolveWater(cmd, dev, rec.fetch[capture::kWatMask], WaterDecode::kK8, &s.samplers[0], &status, tst);
+      s.normal = textures_.ResolveWater(cmd, dev, rec.fetch[capture::kWatNormal], WaterDecode::kDxn, &s.samplers[1], &status, tst);
+      TextureFetch mask_fetch, normal_fetch, picture_fetch;
+      if (!s.indices || !s.pair || !s.index_count || !s.mask || !s.normal ||
+          WaterTextureFetch(rec.fetch[capture::kWatMask], WaterDecode::kK8, &mask_fetch) != FetchError::kNone ||
+          WaterTextureFetch(rec.fetch[capture::kWatNormal], WaterDecode::kDxn, &normal_fetch) != FetchError::kNone) {
+        water_in.textures = false;
+      } else {
+        s.swizzle = WaterSwizzleWord(mask_fetch, normal_fetch);
+      }
+      if (DecodeTextureFetch(rec.fetch[capture::kWatPicture], &picture_fetch) != FetchError::kNone) {
+        water_in.targets = false;  // (no fetch of a picture: nothing says how the target is sampled)
+      } else {
+        s.samplers[2] = SamplerIndex(picture_fetch);
+      }
+    }
+    water_plan = PlanWaterTargets(records, heights, count, target_of);
+    if (!water_plan.ok) {
+      if (water_plan.why == ClayWater::kPlane) {
+        water_in.planes = false;
+      } else {
+        water_in.targets = false;
+      }
+    }
+    const bool sky_ready = sky_decision.sky == ClaySky::kDrawn && terrain_cb_mapped_ != nullptr && water_step_slots_ == kClayWaterStepSlots && have_view;
+    if (!sky_ready || water_plan.count == 0) water_in.targets = false;
+    if (water_plan.ok && sky_ready) {
+      for (size_t i = 0; i < count; ++i) water_surfaces_[i].target = target_of[i];
+      for (uint32_t k = 0; k < water_plan.count; ++k) {
+        // (the body's c31.xy: every record of the base has the same two, bit for bit, or the base has no camera)
+        const float* c31 = nullptr;
+        bool one = true;
+        for (size_t i = 0; i < count; ++i) {
+          if (target_of[i] != k) continue;
+          const float* own = records[i]->ps[capture::kWatP31];
+          if (!c31) c31 = own;
+          one = one && std::memcmp(own, c31, 2 * sizeof(float)) == 0;
+        }
+        float rows[4][4], basis[3][3];
+        ClaySkyConstants constants{};
+        if (!c31 || !one || !WaterViewRows(mask_view_proj, c31[0], c31[1], water_plan.height[k], rows) || !SkyRayBasis(rows, basis) ||
+            !MakeClaySkyConstants(scene.fog, scene.sky, basis, &constants)) {
+          water_in.targets = false;
+          break;
+        }
+        // (the sky's two textures as the main sky has them this frame: bound or not, their samplers and scales)
+        constants.textures = sky_constants.textures;
+        std::memcpy(constants.fix13, sky_constants.fix13, sizeof(constants.fix13));
+        std::memcpy(constants.fix14, sky_constants.fix14, sizeof(constants.fix14));
+        constants.sampler13 = sky_constants.sampler13;
+        constants.sampler14 = sky_constants.sampler14;
+        std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(ClayWaterTargetSlot(water_slots_, k)), &constants, sizeof(constants));
+      }
+      const ClayFrameConstants second = WaterFrameBlock(frame_);
+      std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(ClayWaterFrameSlot(water_slots_)), &second, sizeof(second));
+    }
+    water_clock(begin);
   }
   // The scene's furniture, decided the same way (DecideClayFurniture: the first thing missing decides):
   // the sun's switch as it is now, a post frame, a drawn sky (the moon's place is behind it; the frame
@@ -4146,15 +4755,143 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     impostor_upload_count_ = 0;
   }
 
+  // What the colour pass's order needs, computed here, before any target is bound (the water's place and verdict
+  // are made of it; none of it records a command): the records left out for want of the frame's buffer, whether
+  // the sky step is drawn, whether the layer's depth is taken among the records, and the coverage's order.
+  // A prepared record's coverage kind, as the frame draws it (kNone: today's record).
+  auto coverage_kind = [](const Prepared& p) {
+    return p.coverage_half ? CoverageKind::kLate : p.coverage_tail ? CoverageKind::kEarly : CoverageKind::kNone;
+  };
+  // Without the frame's constant buffer neither b1 nor b2 can be bound, and then no record is
+  // drawn: the frame is the cleared target, mapped below as always (the native view shows the
+  // clear colour, not a stale frame).
+  const uint32_t drawable = uint32_t(std::count_if(prepared_.begin(), prepared_.end(),
+                                                    [](const Prepared& p) { return p.pipeline != nullptr; }));
+  const uint32_t left_out = ClayRecordsWithoutConstants(drawable, terrain_cb_ != nullptr);
+  if (left_out) {
+    st.skipped_other += left_out;
+    if (!no_constants_logged_) {
+      no_constants_logged_ = true;
+      REXLOG_ERROR("[native] clay: the frame's constant buffer could not be made: {} records not drawn "
+                   "(the clay frame is empty; logged once)", left_out);
+    }
+  }
+  const bool sky_drawn = sky_decision.sky == ClaySky::kDrawn && !left_out && terrain_cb_ != nullptr;
+  const bool sun_depth_early = sun == ClaySun::kDrawn && !oracle_sun && post_frame && terrain_cb_ != nullptr &&
+                               sun_place.record != capture::kNoDepthPlace;
+  // Where the sky step and the early records' tail are drawn (PlanCoverageOrder: a half-covered pixel
+  // is blended over what the target holds, so the sky must be there first, and the tail lies before
+  // the layer's depth is taken, before the first late record and before the first blended record).
+  // With the switch off, and in every frame without a coverage record, the sky's place is
+  // sky_order.place, there is no tail, and the loop is the one of before.
+  size_t sky_at = sky_order.place;
+  size_t tail_at = kNoCoverageTail;
+  size_t coverage_first = prepared_.size(), coverage_depth_place = prepared_.size();
+  if (coverage) {
+    coverage_items_.clear();
+    coverage_records_.clear();
+    for (const Prepared& p : prepared_) {
+      const PipelineKey* key = p.pipeline ? KeyOf(p.pipeline) : nullptr;
+      if (p.coverage_half && coverage_first == prepared_.size()) coverage_first = coverage_items_.size();
+      coverage_items_.push_back({coverage_kind(p), key && key->blend != 0 && !p.terrain && !p.coverage_half});
+      coverage_records_.push_back(uint32_t(p.r - scene.draws.data()));
+    }
+    coverage_depth_place = CoverageDepthPlace(sun_place, sun_depth_early, coverage_records_.data(), coverage_records_.size());
+    // (the sky's place of a frame without a sky step: after the last record, so that it bounds nothing)
+    const CoverageOrder order = PlanCoverageOrder(coverage_items_.data(), coverage_items_.size(), sky_drawn ? sky_order.place : prepared_.size(),
+                                                  coverage_depth_place);
+    tail_at = order.tail;
+    if (sky_drawn) {
+      sky_at = order.sky;
+      if (sky_at < sky_order.place) {
+        st.coverage_sky_moved = true;
+        for (size_t i = sky_at; i < sky_order.place && i < prepared_.size(); ++i) {
+          const PipelineKey* key = prepared_[i].pipeline ? KeyOf(prepared_[i].pipeline) : nullptr;
+          // (the coverage records themselves are what the step moved for: not counted)
+          if (!key || prepared_[i].coverage_half || prepared_[i].coverage_tail) continue;
+          ++st.coverage_sky_over;
+          if (!InPrepass(*key)) ++st.coverage_sky_over_no_depth;
+        }
+      }
+    }
+  }
+  // The water's final verdict (DecideClayWater: the first thing missing decides), here, before any target is
+  // bound: the frame's light and its buffer with the step's slots; the place among the records (PlanWaterPlace:
+  // before the first prepared record at or beyond the first surface record's place, with the sky step and the
+  // early tail at or before it and the layer's depth not before it; the surface records one run among the drawn
+  // records); the targets and the step's objects, asked last so that nothing is made for a frame that cannot use
+  // them; and each record's constants in its two slots. ONLY WITH `drawn` are the opaque twins left out of the
+  // pre-pass and the colour pass, the targets drawn and the step due; with any other verdict the frame is the
+  // picture of before, record for record, and the reason is counted.
+  size_t water_at = ~size_t(0);
+  ClayWater water_verdict = DecideClayWater(water_in);
+  if (water_scene) {
+    const auto begin = std::chrono::steady_clock::now();
+    water_in.light = frame_.light_on != 0;
+    water_in.slots = terrain_cb_mapped_ != nullptr && terrain_cb_ != nullptr && water_step_slots_ == kClayWaterStepSlots && !left_out;
+    water_in.targets = water_in.targets && sky_drawn;
+    const float out_scale = frame_.light_on ? frame_.exposure : 0.0f;
+    water_in.scale = capture::WaterScaleBounded(out_scale);
+    for (const WaterSurface& s : water_surfaces_) {
+      const float c20w = s.record->ps[capture::kWatP20][3];
+      water_in.scale = water_in.scale && (post_frame ? WaterScaleMatches(c20w, out_scale) : capture::WaterScaleBounded(c20w));
+    }
+    // (the places: every prepared record's, index for index, for the place; the drawn ones' without the dead
+    // draws, which a drawn frame leaves out, for the run; the prepared records' places in FrameScene::draws for
+    // the layer's depth, as the coverage's order has it)
+    water_place_seqs_.clear();
+    water_run_seqs_.clear();
+    water_records_.clear();
+    for (const Prepared& p : prepared_) {
+      water_place_seqs_.push_back(p.r->seq);
+      water_records_.push_back(uint32_t(p.r - scene.draws.data()));
+      if (p.pipeline && !p.water_dead) water_run_seqs_.push_back(p.r->seq);
+    }
+    const size_t depth_at = CoverageDepthPlace(sun_place, sun_depth_early, water_records_.data(), water_records_.size());
+    const WaterPlace place = PlanWaterPlace(water_place_seqs_.data(), water_place_seqs_.size(), water_first_place, sky_drawn, sky_at, tail_at, depth_at);
+    water_in.order = place.usable && !water_stray &&
+                     WaterPlacesOneRun(water_run_seqs_.data(), water_run_seqs_.size(), water_first_place, water_last_place);
+    // (a record whose state is not the one the step's pipelines have: `pipeline`)
+    water_in.objects = water_state && !water_objects_failed_;
+    water_in.objects_targets = !water_targets_failed_;
+    if (DecideClayWater(water_in) == ClayWater::kDrawn) water_in.objects_targets = EnsureWaterTargets(dev);
+    if (DecideClayWater(water_in) == ClayWater::kDrawn) water_in.objects = EnsureWaterObjects(dev);
+    if (DecideClayWater(water_in) == ClayWater::kDrawn) {
+      // Each record's constants into its two slots (MakeClayWaterConstants judges the record again: its registers
+      // by the capture's own rule, its draw's rows, the scale, the state's reference, the samplers). One refused
+      // and the frame's water is not drawn (`scale`).
+      const bool fog_on = frame_.fog.on != 0;
+      for (size_t i = 0; i < water_surfaces_.size(); ++i) {
+        const WaterSurface& s = water_surfaces_[i];
+        ClayWaterConstants constants{};
+        if (s.draw >= scene.draws.size() || s.target >= water_plan.count || !water_pipelines_[WaterPipelineSlot(s.state.cull)] ||
+            !MakeClayWaterConstants(*s.record, scene.draws[s.draw], s.state.alpha_ref, out_scale, fog_on, s.samplers, s.swizzle, s.vertex_count,
+                                    &constants)) {
+          water_in.scale = false;
+          break;
+        }
+        std::memcpy(terrain_cb_mapped_ + ClaySmallSlotOffset(ClayWaterRecordSlot(water_slots_, uint32_t(i))), &constants, sizeof(constants));
+      }
+    }
+    water_verdict = DecideClayWater(water_in);
+    if (water_verdict == ClayWater::kDrawn) water_at = place.at;
+    water_clock(begin);
+  }
+  const bool water_drawn = water_verdict == ClayWater::kDrawn;
+  if (!water_drawn) {
+    // (the frame is the picture of before: the lake's records are counted as they were before the water)
+    st.blend_unknown += water_held_blend;
+    st.alpha_unknown += water_held_alpha;
+    for (uint32_t i = 0; i < water_held_blend; ++i) st.unknown_by_ps.Add(capture::kWaterPs, kTallyBlendUnknown);
+    for (uint32_t i = 0; i < water_held_alpha; ++i) st.unknown_by_ps.Add(capture::kWaterOpaquePs, kTallyAlphaUnknown);
+  }
+  st.water = water_verdict;
+  if (water_drawn) st.water_targets = water_plan.count;
   // The frame's mask: drawn only for a lit frame of its own valid block which has one inverse
   // view-projection, an eye and the frame's constant buffer (mask_decision, above; the maps are
   // drawn for exactly these frames). Everything else is the white mask, by reason (ClayMask). What
   // a drawn mask needs is made here, before any target is bound: the rotation tile may be uploaded
   // and the pre-pass's pipelines made.
-  // A prepared record's coverage kind, as the frame draws it (kNone: today's record).
-  auto coverage_kind = [](const Prepared& p) {
-    return p.coverage_half ? CoverageKind::kLate : p.coverage_tail ? CoverageKind::kEarly : CoverageKind::kNone;
-  };
   mask_drawn_ = false;
   const ClayMask mask = mask_decision.mask;
   bool mask_rotated = false;
@@ -4169,6 +4906,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     // counted (PrepassBeyondReach: the mask is the same without it).
     for (Prepared& p : prepared_) {
       if (!p.pipeline) continue;
+      if (water_drawn && p.water_dead) continue;  // (the lake's dead draw of a frame whose water is drawn: in no pass)
       const PipelineKey* key = KeyOf(p.pipeline);
       if (!key || !InPrepass(*key)) continue;
       // (a late coverage record is in no pre-pass; an early one as it is today: CoverageInPrepass)
@@ -4199,25 +4937,14 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // kPixelShaderResource before anything of the scene is bound. (Prepared only for a frame whose
   // mask was to be drawn; a frame that then got no constant buffer draws none: DrawShadows.)
   DrawShadows(cmd, st);
+  // The water's reflection targets, only in a frame whose water is drawn: each cleared and filled with the
+  // mirrored sky, and resting again before anything of the scene is bound.
+  if (water_drawn) DrawWaterTargets(cmd, water_plan.count, sky_views);
   cmd->Barrier(linear_, nrhi::ResourceState::kPixelShaderResource,
                nrhi::ResourceState::kRenderTarget);
   cmd->Barrier(depth_, nrhi::ResourceState::kPixelShaderResource,
                nrhi::ResourceState::kDepthWrite);
   cmd->FlushBarriers();
-  // Without the frame's constant buffer neither b1 nor b2 can be bound, and then no record is
-  // drawn: the frame is the cleared target, mapped below as always (the native view shows the
-  // clear colour, not a stale frame).
-  const uint32_t drawable = uint32_t(std::count_if(prepared_.begin(), prepared_.end(),
-                                                    [](const Prepared& p) { return p.pipeline != nullptr; }));
-  const uint32_t left_out = ClayRecordsWithoutConstants(drawable, terrain_cb_ != nullptr);
-  if (left_out) {
-    st.skipped_other += left_out;
-    if (!no_constants_logged_) {
-      no_constants_logged_ = true;
-      REXLOG_ERROR("[native] clay: the frame's constant buffer could not be made: {} records not drawn "
-                   "(the clay frame is empty; logged once)", left_out);
-    }
-  }
   // The scene's targets and the bindings every clay draw of the frame has. (SetBindingLayout
   // resets them, so this is done again after the mask step, which has a layout of its own.)
   // (bind_scene alone: after the sky step, which has a layout of its own too and draws into the
@@ -4259,6 +4986,7 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     bool light_bound = false;
     for (const Prepared& p : prepared_) {
       if (!p.pipeline) continue;
+      if (water_drawn && p.water_dead) continue;  // (left out with the colour pass: the mask sees the lake's bed, as the game's)
       if (!p.prepass) {
         // (a record that writes no depth has no pre-pass pipeline and is no skip)
         if (p.prepass_culled || !CoverageInPrepass(coverage_kind(p))) continue;
@@ -4315,7 +5043,6 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // (no shader reads the depth here: the mask step's read of it ended before this pass's clear),
   // and passes only where that depth is still the clear value. Then the clay layout again, with
   // the frame's bindings; every draw binds its own.
-  const bool sky_drawn = sky_decision.sky == ClaySky::kDrawn && !left_out && terrain_cb_ != nullptr;
   // The frame's furniture quads of one place (quad_draws: only a frame whose furniture is drawn has
   // any, and such a frame has a drawn sky and its constant buffer): each with the pipeline of its
   // state, its two slots of constants and its texture, six vertices from its record. Into the colour
@@ -4398,44 +5125,6 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
     cmd->Draw(3, 0);
   };
-  const bool sun_depth_early = sun == ClaySun::kDrawn && !oracle_sun && post_frame && terrain_cb_ != nullptr &&
-                               sun_place.record != capture::kNoDepthPlace;
-  // Where the sky step and the early records' tail are drawn (PlanCoverageOrder: a half-covered pixel
-  // is blended over what the target holds, so the sky must be there first, and the tail lies before
-  // the layer's depth is taken, before the first late record and before the first blended record).
-  // With the switch off, and in every frame without a coverage record, the sky's place is
-  // sky_order.place, there is no tail, and the loop is the one of before.
-  size_t sky_at = sky_order.place;
-  size_t tail_at = kNoCoverageTail;
-  size_t coverage_first = prepared_.size(), coverage_depth_place = prepared_.size();
-  if (coverage) {
-    coverage_items_.clear();
-    coverage_records_.clear();
-    for (const Prepared& p : prepared_) {
-      const PipelineKey* key = p.pipeline ? KeyOf(p.pipeline) : nullptr;
-      if (p.coverage_half && coverage_first == prepared_.size()) coverage_first = coverage_items_.size();
-      coverage_items_.push_back({coverage_kind(p), key && key->blend != 0 && !p.terrain && !p.coverage_half});
-      coverage_records_.push_back(uint32_t(p.r - scene.draws.data()));
-    }
-    coverage_depth_place = CoverageDepthPlace(sun_place, sun_depth_early, coverage_records_.data(), coverage_records_.size());
-    // (the sky's place of a frame without a sky step: after the last record, so that it bounds nothing)
-    const CoverageOrder order = PlanCoverageOrder(coverage_items_.data(), coverage_items_.size(), sky_drawn ? sky_order.place : prepared_.size(),
-                                                  coverage_depth_place);
-    tail_at = order.tail;
-    if (sky_drawn) {
-      sky_at = order.sky;
-      if (sky_at < sky_order.place) {
-        st.coverage_sky_moved = true;
-        for (size_t i = sky_at; i < sky_order.place && i < prepared_.size(); ++i) {
-          const PipelineKey* key = prepared_[i].pipeline ? KeyOf(prepared_[i].pipeline) : nullptr;
-          // (the coverage records themselves are what the step moved for: not counted)
-          if (!key || prepared_[i].coverage_half || prepared_[i].coverage_tail) continue;
-          ++st.coverage_sky_over;
-          if (!InPrepass(*key)) ++st.coverage_sky_over_no_depth;
-        }
-      }
-    }
-  }
   // The tail: the half-covered pixels of every early record before `end`, in the records' order, each by
   // its half pipeline with its own bindings (DrawPrepared), in the half part's two steps: its depth, then its
   // colour blended at one half without a depth write.
@@ -4557,6 +5246,51 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
     }
   }
   colour_order.impostors_at = impostor_at;
+  colour_order.water_at = water_at;
+  // The water step (only in a frame whose verdict is drawn: its objects exist, the targets were drawn, every
+  // record's constants are in its slots): the step's layout with the frame's block, and for each surface record its
+  // pipeline by its own cull, its constants, its three buffers and its three textures (the mask, the normal map,
+  // THE TARGET OF ITS OWN BASE), drawn by its own index buffer. Then the clay layout again. In the frame of a
+  // stored scene the colour pass is interrupted before and after the step for the dump's two planes (the depth
+  // before the water, the linear target after it), as it is for the layer's depth.
+  const bool water_dumping = water_drawn && scene_dump_state_ == SceneDumpState::kAsked && SceneDumpDue(scene_dump_asked_, scene.frame) &&
+                             EnsureSceneDumpObjects(dev);
+  bool water_done = false;
+  auto draw_water = [&] {
+    if (!water_drawn || water_done || left_out) return;
+    water_done = true;
+    const auto begin = std::chrono::steady_clock::now();
+    auto scene_targets = [&] {
+      cmd->SetRenderTargets(linear_, depth_);
+      cmd->SetViewport({0.0f, 0.0f, float(kWidth), float(kHeight), 0.0f, 1.0f});
+      cmd->SetScissor({0, 0, int32_t(kWidth), int32_t(kHeight)});
+    };
+    if (water_dumping && WaterDumpBefore(cmd, dev)) scene_targets();
+    cmd->SetBindingLayout(water_layout_);
+    cmd->SetPrimitiveTopology(nrhi::PrimitiveTopology::kTriangleList);
+    cmd->SetConstantBuffer(kWaterParamFrame, terrain_cb_, 0);
+    nrhi::Pipeline* water_bound = nullptr;
+    for (size_t i = 0; i < water_surfaces_.size(); ++i) {
+      const WaterSurface& s = water_surfaces_[i];
+      nrhi::Pipeline* const pipeline = water_pipelines_[WaterPipelineSlot(s.state.cull)];
+      if (pipeline != water_bound) {
+        cmd->SetPipeline(pipeline);
+        water_bound = pipeline;
+      }
+      cmd->SetConstantBuffer(kWaterParamConstants, terrain_cb_, ClaySmallSlotOffset(ClayWaterRecordSlot(water_slots_, uint32_t(i))));
+      cmd->SetBufferSrv(kWaterParamPositions, s.positions, 0);
+      cmd->SetBufferSrv(kWaterParamIndices, s.indices, 0);
+      cmd->SetBufferSrv(kWaterParamPair, s.pair, 0);
+      nrhi::TextureView* const views[kWaterTableSize] = {s.mask, s.normal, water_target_view_[s.target]};
+      cmd->SetTextures(kWaterParamTextures, views, kWaterTableSize);
+      cmd->Draw(s.index_count, 0);
+      ++st.water_drawn;
+    }
+    if (water_dumping && WaterDumpAfter(cmd, dev)) scene_targets();
+    bind_scene();
+    bound = nullptr;
+    water_clock(begin);
+  };
   // (the pictures of the records the step draws, kept for the pictures' file should this frame be dumped)
   ImpostorPictureEntry impostor_dump_entries[capture::kMaxImpostorRecords];
   uint32_t impostor_dump_count = 0;
@@ -4606,7 +5340,10 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       }
       draw_tail(index);
     }
-    if (due.layer_depth) {
+    // (the layer's depth: here, or, when the water step is due at this same record, after it: the layer must see the
+    // lake's surface, which with the dead draw left out only the step writes; ColourDue::depth_after_water. The
+    // sky step between the two writes no depth.)
+    auto layer_depth = [&] {
       cmd->Barrier(depth_, nrhi::ResourceState::kDepthWrite, nrhi::ResourceState::kPixelShaderResource);
       cmd->Barrier(sun_depth_, nrhi::ResourceState::kPixelShaderResource, nrhi::ResourceState::kDepthWrite);
       cmd->FlushBarriers();
@@ -4620,9 +5357,18 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
       bind_scene();
       bound = nullptr;
       sun_depth_taken = true;
-    }
+    };
+    if (due.layer_depth && !due.depth_after_water) layer_depth();
     if (due.sky) draw_sky();
+    // The water step, last of this record's steps: after the tail and after the sky, the moon and the clouds.
+    if (due.water) draw_water();
+    if (due.depth_after_water) layer_depth();
     if (!p.pipeline) continue;  // a terrain record that is not drawn (FinishTerrain)
+    // The lake's dead draw (F6D9) of a frame whose water is drawn: left out, counted.
+    if (water_drawn && p.water_dead) {
+      ++st.water_left_out;
+      continue;
+    }
     const capture::DrawRecord& r = *p.r;
     uint32_t light_mode = 0;
     DrawFog draw_fog = DrawFog::kNone;
@@ -4732,6 +5478,8 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   // (a tail after the last record: a frame with early records and no blended record, late record or depth
   // place; after the sky step, which its blends lie over)
   if (!left_out && after.tail) draw_tail(prepared_.size());
+  // (the water step of a frame whose place lies after the last record: after the sky step and the tail)
+  if (!left_out && after.water) draw_water();
   // The glare, after the last record (the game's last draws of its scene): added, without a depth test.
   if (sky_drawn) draw_quads(ClayQuadPlace::kAfterRecords);
   // A line when the Impostors line's counts change (the first frame with the step drawn, a reason appearing or
@@ -4747,6 +5495,35 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
                   scene.frame, FormatImpostorText(st),
                   impostor_at == ~size_t(0) ? std::string("not drawn") : "before record " + std::to_string(impostor_at), prepared_.size(),
                   scene.impostors.size(), impostor_log_lines_ == kImpostorLogLines ? " (last such line)" : "");
+    }
+  }
+  // The Water line: the frames by verdict since the pass was made (every frame with the switch on), the step's CPU
+  // time, a line when the line's form changes (the verdict, what was drawn: at most 16), and one line for the
+  // first frame of each reason the water was not drawn for, whatever became of the sixteen. With the switch off
+  // nothing is counted or written.
+  if (water) {
+    const size_t at = size_t(water_verdict) < size_t(ClayWater::kCount) ? size_t(water_verdict) : size_t(ClayWater::kOff);
+    ++water_frames_[at];
+    for (size_t i = 0; i < size_t(ClayWater::kCount); ++i) st.water_frames[i] = water_frames_[i];
+    st.water_ms = water_ms;
+    const uint64_t form = uint64_t(at) | (uint64_t(st.water_drawn & 0xFFu) << 8) | (uint64_t(st.water_seen & 0xFFu) << 16) |
+                          (uint64_t(st.water_left_out & 0xFFu) << 24) | (uint64_t(st.water_targets & 0xFu) << 32);
+    constexpr uint32_t kWaterLogLines = 16;
+    const bool first_of_reason = water_verdict != ClayWater::kDrawn && (water_said_ & (1u << at)) == 0;
+    if ((form != water_logged_ && water_log_lines_ < kWaterLogLines) || first_of_reason) {
+      const bool counted = form != water_logged_ && water_log_lines_ < kWaterLogLines;
+      if (counted) ++water_log_lines_;
+      water_logged_ = form;
+      water_said_ |= 1u << at;
+      REXLOG_INFO("[native] clay: water changed at scene frame {}: {} | verdict {}{}, records {} surface and {} opaque, the step {} of {} "
+                  "prepared records (first surface place {}), output scale {:.4f} ({}), targets' bases {:08X} {:08X} {:08X} {:08X} at heights "
+                  "{:.4f} {:.4f} {:.4f} {:.4f}, the step's CPU time {:.3f} ms{}",
+                  scene.frame, FormatWaterText(st), ClayWaterName(water_verdict), first_of_reason ? " (the first frame not drawn for this reason)" : "",
+                  water_in.surface, water_in.opaque, water_at == ~size_t(0) ? std::string("not drawn") : "before record " + std::to_string(water_at),
+                  prepared_.size(), water_first_place, frame_.light_on ? frame_.exposure : 0.0f,
+                  post_frame ? "a post frame: the game's c20.w" : "no post: the pass's fixed exposure", water_plan.base[0], water_plan.base[1],
+                  water_plan.base[2], water_plan.base[3], water_plan.height[0], water_plan.height[1], water_plan.height[2], water_plan.height[3],
+                  water_ms, counted && water_log_lines_ == kWaterLogLines ? " (last such line but for a reason's first frame)" : "");
     }
   }
   // A line when the furniture's verdict changes (the first frame with furniture; a frame that lost it
@@ -4783,6 +5560,9 @@ void ClayPass::Render(nrhi::Cmd* cmd, nrhi::Device* dev, const FrameScene& scene
   bool scene_dumping = false;
   if (scene_dump_state_ == SceneDumpState::kAsked && SceneDumpDue(scene_dump_asked_, scene.frame)) {
     scene_dumping = BeginSceneDump(cmd, dev, scene, (post_frame ? kSceneDumpPost : 0u) | (mask == ClayMask::kDrawn ? kSceneDumpPrepass : 0u));
+    // (the water's planes of a frame whose water was drawn: the two the step's interruptions copied, and the
+    // frame's reflection targets, copied here while they rest)
+    if (scene_dumping && water_drawn && water_done) CopyWaterTargets(cmd, dev, water_plan);
   }
   // The pictures' file (criterion 6): when this Render has just started a scene dump of this very frame, in `on`, the
   // pictures its step drew, as they were uploaded. (A diagnostic: never reached without the scene dump's switch.)

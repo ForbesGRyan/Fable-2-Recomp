@@ -1167,6 +1167,37 @@ float4 main(uint id : SV_VertexID) : SV_Position {
 }
 )hlsl";
 
+// The mirrored sky's vertex program (render/clay_pass.cpp, the water's reflection targets; clay_logic.h, "Native
+// water", WaterSkyClipDistance; sub-project 13, plan Task 11): kSkyVs's triangle and position, and as
+// SV_ClipDistance0 the third component of the pixel's view ray, s_ray0.z + X * s_rayx.z + Y * s_rayy.z with (X, Y)
+// the vertex's own clip position. The ray is linear in (X, Y), so the cut along the horizon is exact: the half of
+// a target below the mirrored camera's horizon is not drawn and keeps the clear value 0, as in the game's own
+// reflection pictures. Drawn with kClaySkyPs, whose text is not changed: it declares that program's cbuffer Sky at
+// b0 (the same fields; it reads the three third components and nothing else), which the targets' layout binds for
+// both stages. Never made, bound or drawn with fable2_native_water off.
+inline constexpr const char* kSkyMirrorVs = R"hlsl(
+cbuffer Sky : register(b0) {
+  float3 s_ray0; float s_c31x;
+  float3 s_rayx; float s_c46x;
+  float3 s_rayy; float s_c47x;
+  float3 s_ext1; float s_c67y;
+  float3 s_ext2; uint s_textures;
+  float2 s_fix13; float2 s_fix14;
+  uint s_sampler13; uint s_sampler14; float2 s_pad;
+};
+struct SkyMirrorOut {
+  float4 pos : SV_Position;
+  float above : SV_ClipDistance0;   // the ray's third component: kept at 0 or above
+};
+SkyMirrorOut main(uint id : SV_VertexID) {
+  SkyMirrorOut o;
+  float2 uv = float2((id << 1) & 2, id & 2);
+  o.pos = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 1.0, 1.0);
+  o.above = s_ray0.z + o.pos.x * s_rayx.z + o.pos.y * s_rayy.z;
+  return o;
+}
+)hlsl";
+
 // The sky's pixel shader: the game's 0xF7601FBE485936FD (light_formulas.py: sky, sky_latlong, sky_paths,
 // sky_extinction; docs/native-renderer/lighting-formulas.md, "The sky") term for term; SkyMirror,
 // SkyLatLong, SkyPaths, SkyExtinction and SkyPixelRay in clay_logic.h are the mirrors, held to the
@@ -1500,6 +1531,264 @@ float4 main(ImpostorVsOut i) : SV_Target {
 }
 )hlsl";
 
+// The water's surface step (render/clay_pass.cpp; clay_logic.h, "Native water"; sub-project 13, plan Task 12;
+// frame-map section 20, "The water step"): the lake's blended draw (the game's vertex shader BEAD84BD72072E0E with
+// pixel shader A17D8AEC3A817D45), drawn again from the frame's water records in the colour pass. Two programs of
+// their own, neither made, bound or drawn with fable2_native_water off, and no other program's text changed for
+// them. Their own layout: cbuffer Water at b0 for both stages (render::ClayWaterConstants, two small slots of the
+// frame's constant buffer a record; kClayWaterFields is its layout), the frame's block at b2 with the fog's tail
+// (the pixel program: the fog's registers and its two tables), the record's positions, indices and mask
+// coordinates as buffers at t3, t4, t5 of the vertex stage (bound by address: NO bounds check; the pass holds the
+// draw's index range to the buffers on the CPU, as for every clay draw), the shore mask, the normal map and the
+// record's reflection target at t0, t1, t2 of the pixel stage, the four static samplers.
+//   The vertex program (light_formulas.water_vertex; WaterPositionMirror, WaterCoordsMirror): a vertex by
+//     SV_VertexID through the draw's index buffer and base vertex, as the clay vertex program pulls one; the
+//     position by the record's rows as that program forms a kDot record's (the same four dot products: the surface
+//     lies at the depth the clay draw of the same mesh has); o0 the place, o1 the normal map's two scrolling
+//     coordinates (WaterCoords), o3 the mask's coordinate.
+//   The pixel program (light_formulas.water_alpha, water_kept, water_pixel and its parts; WaterPixelMirror): the
+//     functions between the two markers ARE the reference written as HLSL, in its order of operations, every local
+//     marked `precise`; tests/test_water_hlsl.py translates them line by line and holds them to the reference by
+//     value. A register is handed to a function whole and read BY COMPONENT, and only the components a formula
+//     reads (ledger rulings 34 and 38 of sub-project 12: the others reach the block as the game left them, numbers
+//     or not, and IEEE arithmetic has no zero-product rule). THE CONSOLE'S ZERO PRODUCT IS WRITTEN OUT (ledger
+//     ruling 34 of sub-project 13): the three reciprocal square roots give 0 for a sum of squares of exactly 0,
+//     and the power gives 0 on a cosine of 0. The main: the mask's sample (level 0) by its fetch's static sampler
+//     and the channel w_swizzle names; alpha = WaterAlpha; WaterFate gives the pixel's two answers, which are TWO
+//     thresholds: shaded (not killed, alpha above c141.w: the shader's own; else the colour is 0) and drawn (not
+//     killed, alpha above w_alpha_ref: the state's alpha test; else discarded). A killed pixel (alpha exactly 1)
+//     is discarded. For a shaded pixel: the normal map's two samples at the two coordinates with their own screen
+//     derivatives (the level the host computes over the stored levels), the normal, the lookup at q = the floor of
+//     the pixel's position, the record's own reflection target at slot 13's coordinates (level 0), ZERO for slot
+//     14 (spec ruling 21), the base colour by fresnel, the mix, with w_sun_on the sun's glint, and with w_fog_on in
+//     a fogged frame the ground form of the fog from the pixel's own view vector and distance by the frame's
+//     tables (FogForm, unchanged). Out: colour * w_out_scale, each channel (v > 0) ? min(v, 31.875) : 0, with the
+//     pixel's alpha for the blend; a colour or alpha that is no number is DISCARDED, not clamped (WaterFinite: the
+//     draw is blended, and a black pixel at alpha 0.997 would be worse than the bed). The depth test and write and
+//     the blend are the pipeline's.
+inline constexpr ClayBufferField kClayWaterFields[] = {
+    {"w_rows", 0, 64},          {"w_vs", 64, 64},           {"w_ps", 128, 288},          {"w_alpha_ref", 416, 4},
+    {"w_out_scale", 420, 4},    {"w_sun_on", 424, 4},       {"w_fog_on", 428, 4},        {"w_sampler_mask", 432, 4},
+    {"w_sampler_normal", 436, 4}, {"w_sampler_picture", 440, 4}, {"w_swizzle", 444, 4},  {"w_base_vertex", 448, 4},
+    {"w_vertex_count", 452, 4}, {"w_pad", 456, 8},
+};
+inline constexpr unsigned kClayWaterSize = 464;
+
+#define FABLE2_CLAY_WATER_HLSL R"hlsl(
+cbuffer Water : register(b0) {
+  float4 w_rows[4];       // the draw record's rows (layout kDot)
+  float4 w_vs[4];         // vertex c115, c116, c117, c118
+  float4 w_ps[18];        // pixel c0, c19, c31, c116, c117, c126..c131, c136, c137, c138, c140, c141, c142, c143: the order of render::ClayWaterConstants' list
+  float w_alpha_ref; float w_out_scale; uint w_sun_on; uint w_fog_on;   // the state's alpha reference; the output scale; bool b136; 1: the frame's fog is on
+  uint w_sampler_mask; uint w_sampler_normal; uint w_sampler_picture; uint w_swizzle;   // static samplers; the host channels of the mask, the normal's x and y
+  int w_base_vertex; uint w_vertex_count; uint2 w_pad;   // the draw's base vertex; the vertices its position buffer holds
+};
+struct WaterVsOut {
+  float4 pos : SV_Position;
+  float3 place : TEXCOORD0;      // o0.xyz
+  float4 coord : TEXCOORD1;      // o1
+  float2 mask : TEXCOORD2;       // o3.xy
+};
+)hlsl"
+
+inline constexpr const char* kClayWaterVs = FABLE2_CLAY_WATER_HLSL R"hlsl(
+StructuredBuffer<float4> water_positions : register(t3);   // bound by address: no bounds check
+StructuredBuffer<uint> water_indices : register(t4);
+StructuredBuffer<float2> water_pairs : register(t5);
+#define W_C115 w_vs[0]
+#define W_C116 w_vs[1]
+#define W_C117 w_vs[2]
+#define W_C118 w_vs[3]
+// WATER VERTEX TEXT BEGIN
+float4 WaterCoords(float3 p, float4 c115, float4 c116, float4 c117, float4 c118) {
+  return float4(p.x * c117.x + c115.x, p.y * c117.y + c115.y, p.x * c118.x + c116.x, p.y * c118.y + c116.y);
+}
+// WATER VERTEX TEXT END
+WaterVsOut main(uint vid : SV_VertexID) {
+  WaterVsOut o;
+  int v = int(water_indices[vid]) + w_base_vertex;
+  bool in_range = v >= 0 && uint(v) < w_vertex_count;
+  float4 p = in_range ? water_positions[v] : float4(0, 0, 0, 0);
+  o.pos = float4(dot(w_rows[0], p), dot(w_rows[1], p), dot(w_rows[2], p), dot(w_rows[3], p));
+  o.place = p.xyz;
+  o.coord = WaterCoords(p.xyz, W_C115, W_C116, W_C117, W_C118);
+  o.mask = in_range ? water_pairs[v] : float2(0, 0);
+  return o;
+}
+)hlsl";
+
+inline constexpr const char* kClayWaterPs = "#define CLAY_FOG 1\n" FABLE2_CLAY_LIGHT_HLSL FABLE2_CLAY_WATER_HLSL R"hlsl(
+Texture2D<float4> water_mask : register(t0);      // R8: the shore mask (slot 1)
+Texture2D<float4> water_normal : register(t1);    // BC5 with its stored levels: the normal map (slot 2)
+Texture2D<float4> water_picture : register(t2);   // the record's own reflection target (slot 13); slot 14 is zero
+SamplerState w_point_wrap : register(s0);
+SamplerState w_linear_wrap : register(s1);
+SamplerState w_point_clamp : register(s2);
+SamplerState w_linear_clamp : register(s3);
+#define W_C0 w_ps[0]
+#define W_C19 w_ps[1]
+#define W_C31 w_ps[2]
+#define W_C116P w_ps[3]
+#define W_C117P w_ps[4]
+#define W_C126 w_ps[5]
+#define W_C127 w_ps[6]
+#define W_C128 w_ps[7]
+#define W_C129 w_ps[8]
+#define W_C130 w_ps[9]
+#define W_C131 w_ps[10]
+#define W_C136 w_ps[11]
+#define W_C137 w_ps[12]
+#define W_C138 w_ps[13]
+#define W_C140 w_ps[14]
+#define W_C141 w_ps[15]
+#define W_C142 w_ps[16]
+#define W_C143 w_ps[17]
+// WATER PIXEL TEXT BEGIN
+float WaterAlpha(float m, float4 c141) {
+  precise float ramp = saturate(-(1.0 - m) * c141.y + c141.x);
+  return 1.0 - ramp;
+}
+float2 WaterFate(float alpha, float c141w, float alpha_ref) {
+  precise float alive = (alpha == 1.0) ? 0.0 : 1.0;
+  precise float shaded = (alpha > c141w) ? alive : 0.0;
+  precise float drawn = (alpha > alpha_ref) ? alive : 0.0;
+  return float2(shaded, drawn);
+}
+float2 WaterNormalSum(float2 a, float2 b) {
+  return a * 2.0 + (b * 2.0 + -2.0);
+}
+float3 WaterNormal(float2 s, float2 a, float2 b, float c128x) {
+  precise float2 da = a * 2.0 + -1.0;
+  precise float2 db = b * 2.0 + -1.0;
+  precise float za = sqrt(abs(-(da.x * da.x + da.y * da.y) + 1.0));
+  precise float zb = sqrt(abs(-(db.x * db.x + db.y * db.y) + 1.0));
+  precise float3 n = float3(s.x * 0.5, s.y * 0.5, (0.5 * c128x) * (za + zb));
+  precise float nn = abs((n.z * n.z + n.x * n.x) + n.y * n.y);
+  precise float inv = (nn == 0.0) ? 0.0 : rsqrt(nn);
+  return n * inv;
+}
+float4 WaterLookup(float2 q, float2 s, float4 c0, float4 c31, float4 c129, float4 c130) {
+  precise float sx = abs(q.x) * c0.z;
+  precise float sy = abs(q.y) * c0.w;
+  precise float u = ((-0.5 + c0.x) + sx) * c31.x + 0.5;
+  precise float v = (c0.y + (-0.5 + sy)) * c31.y + 0.5;
+  return float4(u + (c129.x * 0.5) * s.x, v + (c129.y * 0.5) * s.y, u + (s.x * 0.5) * c130.x, v + (s.y * 0.5) * c130.y);
+}
+float4 WaterView(float3 P, float3 eye) {
+  precise float3 e = -P + eye;
+  precise float dd = abs((e.z * e.z + e.x * e.x) + e.y * e.y);
+  precise float inv = (dd == 0.0) ? 0.0 : rsqrt(dd);
+  return float4(e * inv, sqrt(dd));
+}
+float WaterFresnel(float3 V, float3 N, float c116x) {
+  precise float cosine = (V.z * N.z + V.x * N.x) + V.y * N.y;
+  return saturate((-cosine + 1.0) + c116x);
+}
+float3 WaterBase(float F, float4 c126, float4 c127) {
+  return (-c127.xyz + c126.xyz) * F + c127.xyz;
+}
+float3 WaterMix(float3 base, float3 r, float3 near14, float F, float d, float c117x, float c131x, float c140x) {
+  precise float share = saturate(c131x);
+  precise float t = saturate(F + c117x);
+  precise float w = saturate(c140x * d);
+  precise float3 beyond = (r - base) * share + base;
+  precise float3 within = ((r - near14) * t + (-base + near14)) * share + base;
+  return w * (beyond - within) + within;
+}
+float3 WaterSun(float3 N, float3 V, float c136x, float c137x, float c138x, float4 c142, float4 c143) {
+  precise float z2 = c136x * N.z;
+  precise float nn = abs(z2 * z2 + ((N.x * N.x + N.y * N.y) + 0.0));
+  precise float inv = (nn == 0.0) ? 0.0 : rsqrt(nn);
+  precise float3 n2 = float3(N.x * inv, N.y * inv, z2 * inv);
+  precise float twice = (n2.z * -c142.z + n2.x * -c142.x) + n2.y * -c142.y;
+  precise float both = twice + twice;
+  precise float3 w = -n2 * both + -c142.xyz;
+  precise float cosine = saturate((-V.z * w.z + -V.x * w.x) + -V.y * w.y);
+  precise float power = (cosine > 0.0) ? exp2(c138x * log2(cosine)) : 0.0;
+  precise float scaled = c137x * power;
+  return float3((c143.x * c137x) * power, scaled * c143.y, scaled * c143.z);
+}
+float WaterFinite(float3 colour, float alpha) {
+  precise float sum = (abs(colour.x) + abs(colour.y)) + (abs(colour.z) + abs(alpha));
+  return (sum < 3.0e38) ? 1.0 : 0.0;
+}
+// WATER PIXEL TEXT END
+float4 water_level0(Texture2D<float4> t, uint index, float2 at) {
+  float4 c;
+  [branch] if (index == 0) {
+    c = t.SampleLevel(w_point_wrap, at, 0);
+  } else {
+    [branch] if (index == 1) {
+      c = t.SampleLevel(w_linear_wrap, at, 0);
+    } else {
+      [branch] if (index == 2) {
+        c = t.SampleLevel(w_point_clamp, at, 0);
+      } else {
+        c = t.SampleLevel(w_linear_clamp, at, 0);
+      }
+    }
+  }
+  return c;
+}
+float4 water_levels(Texture2D<float4> t, uint index, float2 at, float2 dx, float2 dy) {
+  float4 c;
+  [branch] if (index == 0) {
+    c = t.SampleGrad(w_point_wrap, at, dx, dy);
+  } else {
+    [branch] if (index == 1) {
+      c = t.SampleGrad(w_linear_wrap, at, dx, dy);
+    } else {
+      [branch] if (index == 2) {
+        c = t.SampleGrad(w_point_clamp, at, dx, dy);
+      } else {
+        c = t.SampleGrad(w_linear_clamp, at, dx, dy);
+      }
+    }
+  }
+  return c;
+}
+float water_channel(float4 t, uint selector) {
+  return (selector == 0) ? t.x : (selector == 1) ? t.y : (selector == 2) ? t.z : (selector == 3) ? t.w : (selector == 5) ? 1.0 : 0.0;
+}
+float4 main(WaterVsOut i) : SV_Target {
+  float2 ax = ddx(i.coord.xy);
+  float2 ay = ddy(i.coord.xy);
+  float2 bx = ddx(i.coord.zw);
+  float2 by = ddy(i.coord.zw);
+  float m = water_channel(water_level0(water_mask, w_sampler_mask, i.mask), w_swizzle & 7u);
+  float alpha = WaterAlpha(m, W_C141);
+  float2 fate = WaterFate(alpha, W_C141.w, w_alpha_ref);
+  if (fate.y == 0.0) discard;
+  float3 colour = float3(0.0, 0.0, 0.0);
+  [branch] if (fate.x != 0.0) {
+    float4 ta = water_levels(water_normal, w_sampler_normal, i.coord.xy, ax, ay);
+    float4 tb = water_levels(water_normal, w_sampler_normal, i.coord.zw, bx, by);
+    float2 a = float2(water_channel(ta, (w_swizzle >> 3) & 7u), water_channel(ta, (w_swizzle >> 6) & 7u));
+    float2 b = float2(water_channel(tb, (w_swizzle >> 3) & 7u), water_channel(tb, (w_swizzle >> 6) & 7u));
+    float2 s = WaterNormalSum(a, b);
+    float3 N = WaterNormal(s, a, b, W_C128.x);
+    float4 at = WaterLookup(floor(i.pos.xy), s, W_C0, W_C31, W_C129, W_C130);
+    float3 r = water_level0(water_picture, w_sampler_picture, at.xy).rgb;
+    float4 view = WaterView(i.place, W_C19.xyz);
+    float F = WaterFresnel(view.xyz, N, W_C116P.x);
+    colour = WaterMix(WaterBase(F, W_C126, W_C127), r, float3(0.0, 0.0, 0.0), F, view.w, W_C117P.x, W_C131.x, W_C140.x);
+    [branch] if (w_sun_on != 0) colour = colour + WaterSun(N, view.xyz, W_C136.x, W_C137.x, W_C138.x, W_C142, W_C143);
+    FogPoint p;
+    float past = view.w - f_fog_start;
+    p.fogged = w_fog_on != 0 && f_fog_on != 0 && past > 0.0;
+    p.a = saturate(-dot(view.xyz, f_fog_axis));
+    p.s = f_fog_scale * past;
+    p.t = saturate(f_fog_slope * past);
+    colour = FogForm(colour, p, 1.0, 0.0);
+  }
+  float3 v = colour * w_out_scale;
+  if (WaterFinite(v, alpha) == 0.0) discard;
+  v = (v > 0.0) ? min(v, 31.875) : float3(0.0, 0.0, 0.0);
+  return float4(v, alpha);
+}
+)hlsl";
+
+#undef FABLE2_CLAY_WATER_HLSL
 #undef FABLE2_CLAY_IMPOSTOR_HLSL
 #undef FABLE2_CLAY_TERRAIN_FAR_HLSL
 #undef FABLE2_CLAY_TERRAIN_LAYER_HLSL

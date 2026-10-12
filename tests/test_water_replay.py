@@ -348,5 +348,104 @@ class ViewPictures(unittest.TestCase):
         self.assertGreater(float((grey.colour[own.kept] - dark.colour[own.kept]).max()), 0.0)
 
 
+class StoredScene(unittest.TestCase):
+    """The measures of the stored native scene's water (plan Tasks 11 and 12; ledger ruling 44), on made arrays."""
+
+    def frame(self):
+        judged = np.zeros((40, 60), dtype=bool)
+        judged[10:30, 10:50] = True                                  # a lake of 40 x 20 pixels
+        rng = np.random.default_rng(3)
+        replayed = np.zeros((40, 60, 3))
+        replayed[judged] = 0.2 + 0.1 * rng.random((int(judged.sum()), 3))
+        return judged, replayed
+
+    def test_the_main_by_value_holds_the_interior_and_sees_a_wrong_program(self):
+        judged, replayed = self.frame()
+        self.assertEqual((wr.MAIN_BAND, wr.MAIN_SPAN, wr.MAIN_EDGE), ((0.99, 1.01), (0.95, 1.08), 3))
+        m = wr.main_measure(replayed.copy(), replayed, judged)
+        self.assertEqual((m["pixels"], m["verdict"], m["missed"]), (34 * 14, "met", []))     # more than 3 pixels inside: 34 x 14
+        self.assertTrue(all(abs(v - 1.0) < 1e-12 for v in m["ratio"]) and m["median"] == 1.0)
+        # the edge band is not judged: garbage there changes nothing
+        wrong = replayed.copy()
+        wrong[10:13, 10:50] = 5.0
+        wrong[5, 5] = 9.0
+        self.assertEqual(wr.main_measure(wrong, replayed, judged)["verdict"], "met")
+        # a main that is 2% off in one channel (a wrong scale, a picture read elsewhere) misses the ratio of the means
+        off = replayed.copy()
+        off[..., 2] *= 1.02
+        m = wr.main_measure(off, replayed, judged)
+        self.assertEqual(m["verdict"], "not met as written")
+        self.assertIn("the ratio of the means", m["missed"])
+        # one whose mean is right and whose pixels are scattered (a lookup with another distortion) misses the span
+        scattered = replayed.copy()
+        k = np.arange(judged.sum()) % 2 == 0
+        vals = scattered[judged]
+        vals[k] *= 1.12
+        vals[~k] *= 0.88
+        scattered[judged] = vals
+        m = wr.main_measure(scattered, replayed, judged)
+        self.assertEqual(m["verdict"], "not met as written")
+        self.assertIn("the 5th to 95th percentile span", m["missed"])
+        # a lake without an interior, and no judged pixel at all: not decidable, never met
+        thin = np.zeros((40, 60), dtype=bool)
+        thin[10:14, 10:50] = True
+        self.assertEqual(wr.main_measure(replayed, replayed, thin)["verdict"], "not decidable")
+        self.assertEqual(wr.main_measure(replayed, replayed, np.zeros((40, 60), dtype=bool))["pixels"], 0)
+
+    def test_the_cover_s_two_shares(self):
+        judged, _ = self.frame()
+        self.assertEqual(wr.cover_measure(judged, judged)["verdict"], "met")
+        shifted = np.roll(judged, 1, axis=1)                          # one pixel aside: within reach
+        m = wr.cover_measure(shifted, judged)
+        self.assertEqual((m["native"], m["replay"], m["verdict"]), (0.0, 0.0, "met"))
+        hole = judged.copy()
+        hole[15:25, 20:40] = False                                    # a hole to the bed in the middle of the lake
+        m = wr.cover_measure(hole, judged)
+        self.assertEqual(m["native"], 0.0)
+        self.assertAlmostEqual(m["replay"], (8 * 18) / 800.0)         # the hole's pixels farther than one pixel from its rim
+        self.assertEqual(m["verdict"], "not met as written")
+        spill = judged.copy()
+        spill[2:8, 2:20] = True                                       # native water where the game has none
+        m = wr.cover_measure(spill, judged)
+        self.assertGreater(m["native"], wr.COVER_FAR)
+        self.assertEqual(m["verdict"], "not met as written")
+        self.assertEqual(wr.cover_measure(np.zeros_like(judged), judged)["verdict"], "not decidable")
+        self.assertEqual(wr.far_share(judged, np.zeros_like(judged)), 1.0)
+
+    def test_criterion_8_s_figures_and_verdict(self):
+        judged, replayed = self.frame()
+        game = replayed * [0.4, 0.8, 1.6]                             # a blue lake: its hue is a hue
+        m = wr.colour_measure(game * [1.05, 1.0, 0.95], game, judged)
+        self.assertEqual(m["pixels"], 800)
+        for got, want in zip(m["ratio"], (1.05, 1.0, 0.95)):
+            self.assertAlmostEqual(got, want)
+        self.assertLess(abs(m["hue"]), wr.HUE_BOUND)
+        self.assertEqual(wr.colour_verdict(m, least=500), "met")
+        self.assertEqual(wr.colour_verdict(m), "not decidable")       # 800 pixels are below the criterion's 5,000
+        red = wr.colour_measure(game * [1.35, 1.0, 0.85], game, judged)       # the placeholder's gap of before
+        self.assertEqual(wr.colour_verdict(red, least=500), "not met as written")
+        # every channel inside the band and the hue turned by 20 degrees: not met by the hue alone
+        flat = np.zeros((40, 60, 3)) + [0.30, 0.30, 0.20]
+        turned = wr.colour_measure(np.zeros((40, 60, 3)) + [0.32, 0.28, 0.20], flat, judged)
+        self.assertTrue(all(wr.COLOUR_BAND[0] <= v <= wr.COLOUR_BAND[1] for v in turned["ratio"]))
+        self.assertAlmostEqual(turned["hue"], -20.0)
+        self.assertEqual(wr.colour_verdict(turned, least=500), "not met as written")
+        self.assertEqual(wr.colour_measure(game, game, np.zeros_like(judged))["pixels"], 0)
+
+    def test_the_targets_as_pictures_and_their_equality(self):
+        a = (np.arange(256 * 256 * 4) % 251).astype(np.uint8).reshape(256, 256, 4)
+        b = a.copy()
+        b[..., 3] = 7                                                 # the alpha is no part of what a draw samples
+        water = {"targets": [(0x13401000, 20.1, a), (0x13501000, 40.0, b)], "pre_water": None, "water": None}
+        pictures = wr.target_pictures(water)
+        self.assertEqual(sorted(pictures), [0x13401000, 0x13501000])
+        self.assertEqual(pictures[0x13401000].shape, (256, 256, 3))
+        self.assertAlmostEqual(float(pictures[0x13401000][0, 1, 0]), float(a[0, 1, 0]) / 255.0)
+        self.assertTrue(wr.targets_equal(water))
+        b[100, 100, 1] ^= 1
+        self.assertFalse(wr.targets_equal(water))
+        self.assertFalse(wr.targets_equal({"targets": []}))
+
+
 if __name__ == "__main__":
     unittest.main()

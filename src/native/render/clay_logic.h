@@ -7790,11 +7790,19 @@ struct ClayWaterConstants {
   uint32_t sun_on, fog_on;              // bool b136; the frame's fog
   uint32_t sampler_mask, sampler_normal, sampler_picture;   // static samplers (SamplerIndex of each fetch)
   uint32_t swizzle;                     // the mask's channel in bits 0 to 2, the normal's x in 3 to 5, its y in 6 to 8 (0 to 3 a channel, 4: 0, 5: 1)
+  // The draw's own base vertex and the vertices its position buffer holds (plan Task 12: the vertex program pulls
+  // a vertex by SV_VertexID through the draw's index buffer, as the clay vertex program does, and needs both;
+  // plan Task 10's block had left them out). Its index range was held to them on the CPU (GeometryCache::Indices).
+  int32_t base_vertex;
+  uint32_t vertex_count;
+  uint32_t pad[2];
 };
-// 64 + 64 + 288 + 16 + 16 (recomputed by plan Task 10 from what is carried: the plan's 432 had 17 registers).
-static_assert(sizeof(ClayWaterConstants) == 448 && offsetof(ClayWaterConstants, vs) == 64 && offsetof(ClayWaterConstants, ps) == 128 &&
+// 64 + 64 + 288 + 16 + 16 (recomputed by plan Task 10 from what is carried: the plan's 432 had 17 registers), and
+// 16 for the draw's base vertex and vertex count (plan Task 12): 464 bytes, two small slots as before.
+static_assert(sizeof(ClayWaterConstants) == 464 && offsetof(ClayWaterConstants, vs) == 64 && offsetof(ClayWaterConstants, ps) == 128 &&
               offsetof(ClayWaterConstants, alpha_ref) == 416 && offsetof(ClayWaterConstants, sun_on) == 424 &&
-              offsetof(ClayWaterConstants, sampler_mask) == 432 && offsetof(ClayWaterConstants, swizzle) == 444);
+              offsetof(ClayWaterConstants, sampler_mask) == 432 && offsetof(ClayWaterConstants, swizzle) == 444 &&
+              offsetof(ClayWaterConstants, base_vertex) == 448 && offsetof(ClayWaterConstants, vertex_count) == 452);
 inline constexpr uint32_t kClayWaterSlots = (sizeof(ClayWaterConstants) + kClayTerrainSlotBytes - 1) / kClayTerrainSlotBytes;   // 2
 // The step's small slots in the frame's constant buffer, taken only in a frame whose scene verdict is kDrawn
 // (PlanClayFrameSlots' and ClayFrameSmallSlots' `water_slots`): record i's constants at water0 + kClayWaterSlots *
@@ -7813,17 +7821,54 @@ constexpr uint32_t ClayWaterFrameSlot(const ClayFrameSlotPlan& plan) {
 constexpr bool WaterSwizzleUsable(uint32_t swizzle) {
   return swizzle < (1u << 9) && (swizzle & 7u) <= 5u && ((swizzle >> 3) & 7u) <= 5u && ((swizzle >> 6) & 7u) <= 5u;
 }
+// The swizzle word of a record's two textures as the pass uploads them (TextureCache::ResolveWater: the mask as
+// R8, the normal map as BC5, views without a swizzle): the HOST channel of the first component the mask's fetch
+// delivers and of the first two the normal map's does (the components the microcode reads: light_formulas.
+// water_alpha, water_normal), by WaterHostChannel. With the captured constants ((0, 0, 0, 5) and (0, 1, 2, 3)):
+// red; red and green.
+constexpr uint32_t WaterSwizzleWord(const TextureFetch& mask, const TextureFetch& normal) {
+  return WaterHostChannel(WaterDecode::kK8, mask.swizzle[0]) | (WaterHostChannel(WaterDecode::kDxn, normal.swizzle[0]) << 3) |
+         (WaterHostChannel(WaterDecode::kDxn, normal.swizzle[1]) << 6);
+}
+// The state a surface record is drawn with, from its draw's own state words: the capture's `state` rule asked
+// again (nothing reaches a pipeline on the strength of the capture's rule alone): valid, blended source alpha over
+// inverse source alpha by addition, the depth tested "greater" and written under the reversed range (the RHI's
+// "less" in the pass's convention: ledger ruling 27), four colour channels, the alpha test "greater" with a
+// reference in [0, 1], no alpha-to-mask. `cull`: the record's own, in the pass's window space (ClayCull), which
+// picks the step's pipeline; `alpha_ref`: the state's reference (not c141.w). usable false: the frame's water is
+// not drawn (`pipeline`: the step has no pipeline of another state).
+struct WaterSurfaceState {
+  bool usable = false;
+  capture::Cull cull = capture::Cull::kNone;
+  float alpha_ref = 0.0f;
+};
+inline WaterSurfaceState WaterSurfaceStateOf(const capture::StateWords& words) {
+  const capture::RenderState s = capture::DecodeRenderState(words);
+  WaterSurfaceState out;
+  if (!words.read || !s.valid || !s.depth_test || !s.depth_write || !s.depth_reversed || s.depth_func != capture::Compare::kGreater ||
+      s.color_mask != 0xF || !s.alpha_test || s.alpha_func != capture::Compare::kGreater || !(s.alpha_ref >= 0.0f && s.alpha_ref <= 1.0f) ||
+      s.alpha_to_mask || !s.blend || s.src != capture::Factor::kSrcAlpha || s.dst != capture::Factor::kInvSrcAlpha ||
+      s.op != capture::BlendOp::kAdd) {
+    return out;
+  }
+  out.usable = true;
+  out.cull = ClayCull(s.cull, s.front_cw);
+  out.alpha_ref = s.alpha_ref;
+  return out;
+}
 // The constants of a surface record. False, `out` untouched, unless: the record is a valid surface record and
 // `draw` is the draw record it names (its seq the record's place) with the row layout kDot and rows that are
 // numbers within a matrix term's bound; the registers pass the capture's own rule again (capture::
 // WaterRegistersBounded: nothing reaches a shader on the strength of the capture's rule alone; so c128.x, c136.x
 // and c138.x are above 0 here, which the program's power relies on); the scale is in (0, 64] and the alpha
-// reference a number in [0, 1]; the samplers are static samplers (0 to 3) and the swizzle's fields 0 to 5.
+// reference a number in [0, 1]; the samplers are static samplers (0 to 3) and the swizzle's fields 0 to 5; and
+// `vertex_count`, the vertices the draw's position buffer holds, is above 0 and at most capture::kMaxDrawCount.
 // Components no formula reads are carried bit for bit. `alpha_ref`: the draw's own (DrawRecord::state_words).
 inline bool MakeClayWaterConstants(const capture::WaterRecord& r, const capture::DrawRecord& draw, float alpha_ref, float out_scale,
-                                   bool fog_on, const uint32_t samplers[3], uint32_t swizzle, ClayWaterConstants* out) {
+                                   bool fog_on, const uint32_t samplers[3], uint32_t swizzle, uint32_t vertex_count, ClayWaterConstants* out) {
   if (!out || !samplers || !capture::WaterRecordValid(r) || r.kind != uint32_t(capture::WaterKind::kSurface)) return false;
   if (draw.seq != r.place || draw.layout != capture::TransformLayout::kDot) return false;
+  if (vertex_count == 0 || vertex_count > capture::kMaxDrawCount) return false;
   for (float v : draw.rows) {
     if (!(std::fabs(v) <= capture::kWaterMatrixMax)) return false;   // (false for no number)
   }
@@ -7842,6 +7887,8 @@ inline bool MakeClayWaterConstants(const capture::WaterRecord& r, const capture:
   c.sampler_normal = samplers[1];
   c.sampler_picture = samplers[2];
   c.swizzle = swizzle;
+  c.base_vertex = draw.base_vertex;
+  c.vertex_count = vertex_count;
   *out = c;
   return true;
 }

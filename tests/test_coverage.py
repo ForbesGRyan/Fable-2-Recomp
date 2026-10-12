@@ -174,7 +174,7 @@ class SwitchOff(unittest.TestCase):
     def test_the_switch_is_off_by_default_and_read_by_the_pass_alone(self):
         self.assertRegex(self.front, r'REXCVAR_DEFINE_STRING\(fable2_native_coverage, "off", "Fable2",')
         self.assertEqual(self.front.count("CurrentCoverage()"), 3)      # its definition, the Render's argument, the start line
-        self.assertIn("CurrentFog(), CurrentWind(), CurrentCoverage(),\n                 impostors, post, st, tst);", self.front)
+        self.assertIn("CurrentFog(), CurrentWind(), CurrentCoverage(),\n                 impostors, water, post, st, tst);", self.front)
         self.assertIn('if (st.coverage_switch) REXLOG_INFO("[native] clay: {}", render::FormatCoverageText(st));', self.front)
         capture = (ROOT / "src" / "native" / "capture" / "capture.cpp").read_text(encoding="utf-8")
         for word in ("fable2_native_coverage", "CoverageOf", "CoveredSamples", "kCoveragePs"):   # the capture reads nothing for it
@@ -247,11 +247,17 @@ class SwitchOff(unittest.TestCase):
                       "    if (due.impostors) draw_impostors();\n"
                       "    // The early tail, before the layer's depth is taken; the sky step first when it is due here.\n"
                       "    if (due.tail) {\n      if (due.sky_first) {\n        draw_sky();\n        sky_done = true;\n      }\n"
-                      "      draw_tail(index);\n    }\n    if (due.layer_depth) {\n", s)
+                      "      draw_tail(index);\n    }\n", s)
+        # (the water, sub-project 13, plan Task 12: the layer's depth is taken here, or after the water step when both
+        # are due at one record; the water is the last of a record's steps; with its switch off `due.water` and
+        # `due.depth_after_water` are never set and the order is the one of before)
+        self.assertIn("    if (due.layer_depth && !due.depth_after_water) layer_depth();\n    if (due.sky) draw_sky();\n", s)
+        self.assertIn("    if (due.water) draw_water();\n    if (due.depth_after_water) layer_depth();\n    if (!p.pipeline) continue;", s)
+        self.assertEqual(s.count("layer_depth();"), 2)
         self.assertEqual(s.count("ColourStepsDue("), 1)
         self.assertEqual(s.count("sun_depth_taken = true;"), 1)
         self.assertEqual(s.count("draw_sky();"), 3)
-        self.assertIn("    if (due.sky) draw_sky();\n    if (!p.pipeline) continue;", s)
+        self.assertIn("    if (due.sky) draw_sky();\n    // The water step, last of this record's steps: after the tail and after the sky, the moon and the clouds.\n", s)
         self.assertIn("  const ColourDue after = ColourStepsAfter(colour_order, prepared_.size());\n"
                       "  // (the impostor step of a frame whose place lies after the last record: before the sky step)\n"
                       "  if (!left_out && after.impostors) draw_impostors();\n  if (after.sky) draw_sky();\n", s)

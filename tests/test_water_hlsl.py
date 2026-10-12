@@ -8,10 +8,10 @@ light_formulas (water_vertex, water_alpha, water_normal, water_lookup, water_bas
 inputs in which every register component differs and EVERY COMPONENT NO FORMULA READS IS NO NUMBER
 (water_check.UNREAD), and at the inputs of the pins (water_pins.py).
 
-TODAY THE HEADER HAS NO WATER TEXT. So that the frame can fail today, every rule and helper is held on FIXTURE, a
-text inside this file that is the reference written as HLSL (class `Rules`); the same checks of the header's own
-text are class `TheText`, which SKIPS, with a message that names plan Task 12, while the header has no water
-region. How the skip is kept from staying unnoticed:
+SINCE PLAN TASK 12 THE HEADER HAS THE WATER TEXT and class `TheText` RUNS (the suite's skip count is the one of
+before the frame). Every rule and helper is also held on FIXTURE, a text inside this file that is the reference
+written as HLSL (class `Rules`), which is how the frame could fail before the text existed; `TheText` skipped then,
+with a message that names plan Task 12. How a skip is kept from staying unnoticed, should the regions ever go:
   1. `Tripwire.test_a_water_program_without_its_text_fails` does not skip: the moment the header names the water
      step's programs (kClayWaterVs or kClayWaterPs) without both marked regions, it FAILS.
   2. `Tripwire.test_what_is_skipped_is_known` holds the list of TheText's tests and the reason's wording, so that the
@@ -56,7 +56,7 @@ MADE = 200              # made inputs
 TOLERANCE = 1e-9        # of max(1, |value|): double against double, the same order of operations
 PIN_BOUND = 1e-4        # the double text against the single-precision pins
 MUTANT_FLOOR = 1e-4     # a changed text must leave the reference by at least this (of max(1, |value|)) somewhere
-NAMES = ("coord", "alpha", "sum", "normal", "lookup", "view", "fresnel", "base", "mix", "sun")
+NAMES = ("coord", "alpha", "fate", "sum", "normal", "lookup", "view", "fresnel", "base", "mix", "sun")
 CALLBACKS = ()          # the texts' functions take texels, not samplers; a main's sample is a callback (Rules holds the rule)
 
 # The reference written as HLSL: what plan Task 12's text may start from. Every function of WATER_VERTEX and
@@ -70,6 +70,12 @@ float4 WaterCoords(float3 p, float4 c115, float4 c116, float4 c117, float4 c118)
 float WaterAlpha(float m, float4 c141) {
   precise float ramp = saturate(-(1.0 - m) * c141.y + c141.x);
   return 1.0 - ramp;
+}
+float2 WaterFate(float alpha, float c141w, float alpha_ref) {
+  precise float alive = (alpha == 1.0) ? 0.0 : 1.0;
+  precise float shaded = (alpha > c141w) ? alive : 0.0;
+  precise float drawn = (alpha > alpha_ref) ? alive : 0.0;
+  return float2(shaded, drawn);
 }
 float2 WaterNormalSum(float2 a, float2 b) {
   return a * 2.0 + (b * 2.0 + -2.0);
@@ -126,8 +132,8 @@ float3 WaterSun(float3 N, float3 V, float c136x, float c137x, float c138x, float
   return float3((c143.x * c137x) * power, scaled * c143.y, scaled * c143.z);
 }
 float WaterFinite(float3 colour, float alpha) {
-  precise float sum = (colour.x + colour.y) + (colour.z + alpha);
-  return ((sum - sum) == 0.0) ? 1.0 : 0.0;
+  precise float sum = (abs(colour.x) + abs(colour.y)) + (abs(colour.z) + abs(alpha));
+  return (sum < 3.0e38) ? 1.0 : 0.0;
 }
 // WATER PIXEL TEXT END
 '''
@@ -154,9 +160,17 @@ FIXTURE_MUTANTS = (
     ("c142 with the other sign", "precise float3 w = -n2 * both + -c142.xyz;", "precise float3 w = n2 * both + c142.xyz;", ("sun",)),
     ("c137.x left out", "precise float scaled = c137x * power;", "precise float scaled = power;", ("sun",)),
     ("the mix factor not saturated", "precise float share = saturate(c131x);", "precise float share = c131x;", ("mix",)),
+    # (ledger ruling 43) the two thresholds folded into one, either way; the kill left out; the kill by the opaque twin's rule
+    ("drawn by c141.w, not by the state's reference", "precise float drawn = (alpha > alpha_ref) ? alive : 0.0;",
+     "precise float drawn = (alpha > c141w) ? alive : 0.0;", ("fate",)),
+    ("shaded by the state's reference, not by c141.w", "precise float shaded = (alpha > c141w) ? alive : 0.0;",
+     "precise float shaded = (alpha > alpha_ref) ? alive : 0.0;", ("fate",)),
+    ("the kill at an alpha of 1 left out", "precise float alive = (alpha == 1.0) ? 0.0 : 1.0;", "precise float alive = 1.0;", ("fate",)),
 )
-# The header's wrong texts: empty until plan Task 12 writes the text.
-MUTANTS = ()
+# The header's wrong texts (plan Task 12): each site stands exactly once in the WHOLE header and breaks the comparison
+# it names. The fixture's own, since the header's text is the fixture's but for WaterFinite (review of Tasks 4 to
+# 15, Minor 4: every wrong fixture is applied to the header too).
+MUTANTS = FIXTURE_MUTANTS
 
 HEADER = (ROOT / "src" / "native" / "fable2_native_shaders.h").read_text(encoding="utf-8")
 HAS_TEXT = wind_hlsl.WATER_VERTEX[0] in HEADER and wind_hlsl.WATER_PIXEL[0] in HEADER
@@ -173,9 +187,12 @@ class Case:
     normal samples, mask sample, two picture texels, the registers ({register: [4]}; a component no formula reads
     is no number), and what it is ("" or the name of a degenerate kind)."""
 
-    def __init__(self, name, p, q, P, a, b, m, r13, r14, vertex, pixel, label=""):
+    def __init__(self, name, p, q, P, a, b, m, r13, r14, vertex, pixel, label="", alpha_ref=None):
         (self.name, self.p, self.q, self.P, self.a, self.b, self.m, self.r13, self.r14, self.vertex, self.pixel, self.label) = (
             name, p, q, P, a, b, m, r13, r14, vertex, pixel, label)
+        # the state's alpha reference: a number of its own, on either side of c141.w (a made case: three quarters or
+        # five quarters of it by the case's parity; the pins: the pin's)
+        self.alpha_ref = alpha_ref
 
 
 def cases(n=MADE, seed=1):
@@ -191,7 +208,8 @@ def cases(n=MADE, seed=1):
         coords = made.regs[1]
         a, b = made.normal(coords[0], coords[1]), made.normal(coords[2], coords[3])
         out.append(Case("made %d%s" % (k, " (%s)" % made.label if made.label else ""), made.regs[0][:3], made.regs[4][:2], made.regs[0][:3],
-                        a, b, made.m, made.mirror(0.3 + 0.01 * k, 0.6)[:3], made.near14(0.7, 0.2 + 0.01 * k)[:3], vertex, pixel, made.label))
+                        a, b, made.m, made.mirror(0.3 + 0.01 * k, 0.6)[:3], made.near14(0.7, 0.2 + 0.01 * k)[:3], vertex, pixel, made.label,
+                        alpha_ref=pixel[141][3] * (0.75 if k % 2 else 1.25)))
     return out
 
 
@@ -237,11 +255,23 @@ def evaluate(vertex, pixel, case):
     sun = pixel["WaterSun"](normal, view.xyz, c[136][0], c[137][0], c[138][0], reg[142], reg[143])
     alpha = pixel["WaterAlpha"](case.m, reg[141])
     out = {"coord": vertex["WaterCoords"](Vec(*case.p), *[Vec(*v[r]) for r in lf.WATER_SHADER["reg"]]),
-           "alpha": alpha, "sum": s, "normal": normal,
+           "alpha": alpha, "fate": pixel["WaterFate"](alpha, c[141][3], _reference_alpha(case)), "sum": s, "normal": normal,
            "lookup": pixel["WaterLookup"](Vec(*case.q), s, reg[0], reg[31], reg[129], reg[130]),
            "view": view, "fresnel": fresnel, "base": base, "mix": mix, "sun": sun,
            "finite": pixel["WaterFinite"](mix + sun, alpha)}
     return {name: _flat(x) for name, x in out.items()}
+
+
+def _reference_alpha(case):
+    return case.pixel[141][3] if case.alpha_ref is None else case.alpha_ref
+
+
+def fate_reference(alpha, c141, alpha_ref):
+    """(shaded, drawn) as 0 or 1 from the reference: shaded by light_formulas.water_kept (not killed, alpha above
+    c141.w: the shader's own threshold; else the colour is 0); drawn when not killed and alpha above the state's alpha
+    reference (the alpha test, function "greater": water_pins.alpha_pin's rule)."""
+    fate = lf.water_kept(alpha, c141, "surface")
+    return [1.0 if fate == "shaded" else 0.0, 1.0 if fate != "killed" and alpha > alpha_ref else 0.0]
 
 
 def reference(case):
@@ -255,7 +285,8 @@ def reference(case):
     rows = {reg: [0.0] * 4 for reg in (0, 1, 2, 3)}             # the position's rows are the main's, not a function's
     rows.update(case.vertex)
     out = {"coord": lf.water_vertex(case.p, (0.0, 0.0), rows)["coord"],
-           "alpha": lf.water_alpha(case.m, c[141]), "sum": s, "normal": normal, "lookup": list(at13) + list(at14),
+           "alpha": lf.water_alpha(case.m, c[141]), "fate": fate_reference(lf.water_alpha(case.m, c[141]), c[141], _reference_alpha(case)),
+           "sum": s, "normal": normal, "lookup": list(at13) + list(at14),
            "view": list(view) + [d], "fresnel": fresnel, "base": base, "mix": mix, "sun": sun, "finite": 1.0}
     return {name: _flat(x) for name, x in out.items()}
 
@@ -378,7 +409,7 @@ class Rules(unittest.TestCase):
     def test_the_markers_and_the_functions(self):
         self.assertEqual(wind_hlsl.WATER_VERTEX, ("// WATER VERTEX TEXT BEGIN\n", "// WATER VERTEX TEXT END\n", ("WaterCoords",)))
         self.assertEqual(wind_hlsl.WATER_PIXEL[:2], ("// WATER PIXEL TEXT BEGIN\n", "// WATER PIXEL TEXT END\n"))
-        self.assertEqual(wind_hlsl.WATER_PIXEL[2], ("WaterAlpha", "WaterNormalSum", "WaterNormal", "WaterLookup", "WaterView", "WaterFresnel",
+        self.assertEqual(wind_hlsl.WATER_PIXEL[2], ("WaterAlpha", "WaterFate", "WaterNormalSum", "WaterNormal", "WaterLookup", "WaterView", "WaterFresnel",
                                                     "WaterBase", "WaterMix", "WaterSun", "WaterFinite"))
 
     def test_the_fixture_is_the_reference_at_made_inputs(self):
@@ -545,12 +576,50 @@ class TheText(unittest.TestCase):
         self.assertRegex(main, r"if \(WaterFinite\([^;]*\) == 0\.0\) discard;")
 
     def test_the_two_thresholds_are_the_main_s(self):
-        """c141.w decides shaded against colour 0; the state's alpha reference decides drawn against not: the main has
-        both and does not fold them (the review's note for later tasks)."""
-        start = HEADER.index("kClayWaterPs")
-        main = HEADER[start:start + 20000]
-        self.assertRegex(main, r"c141\.w|C141\.w")
-        self.assertRegex(main, r"alpha_ref")
+        """c141.w decides shaded against colour 0; the state's alpha reference decides drawn against not. Held BY VALUE
+        (ledger ruling 43, after the review of Tasks 4 to 15, I4: the test of before asked only that both names occur
+        somewhere after the program's name, which a declaration or a comment satisfies): the text's WaterFate at
+        every surface line of the pins' alpha section gives the pin's two answers, among them the line that is
+        skipped and drawn and the line that is shaded and not drawn; the main takes its two decisions from that
+        function's two components and from nothing else; and a text that folds the two thresholds, either way,
+        fails at those lines."""
+        def answers(pixel):
+            out, seen = [], set()
+            for item in water_pins.ALPHA:
+                (m, c141, reference, kind), (alpha, fate, drawn) = water_pins.alpha_pin(item)
+                if kind != 0:
+                    continue                                          # (the opaque twin has no native program)
+                got = pixel["WaterFate"](alpha, c141[3], reference).values
+                out.append((got, [1.0 if fate == 2 else 0.0, float(drawn)]))
+                seen.add((fate, drawn))
+            return out, seen
+        own, seen = answers(self.pixel)
+        self.assertGreaterEqual(len(own), 8)
+        for got, want in own:
+            self.assertEqual(got, want)
+        self.assertIn((1, 1), seen)                                   # skipped by c141.w (colour 0) and DRAWN by the state's test
+        self.assertIn((2, 0), seen)                                   # shaded by c141.w and NOT drawn
+        self.assertIn((0, 0), seen)                                   # killed at an alpha of exactly 1
+        for name, old, new, breaks in MUTANTS:
+            if breaks != ("fate",):
+                continue
+            self.assertEqual(HEADER.count(old), 1, name)
+            _, pixel = programs(HEADER.replace(old, new))
+            self.assertTrue(any(got != want for got, want in answers(pixel)[0]), name)
+        self.assertEqual(len([m for m in MUTANTS if m[3] == ("fate",)]), 3)
+        # The main: one call of the function with c141.w and the state's reference as its two thresholds; the discard
+        # by its second answer, the colour's block by its first; neither threshold is compared anywhere else.
+        start = HEADER.index("float4 main(WaterVsOut i) : SV_Target {")
+        main = "\n".join(line.split("//")[0] for line in HEADER[start:HEADER.index(')hlsl"', start)].split("\n"))
+        self.assertEqual(main.count("  float2 fate = WaterFate(alpha, W_C141.w, w_alpha_ref);\n"), 1)
+        self.assertEqual(main.count("  if (fate.y == 0.0) discard;\n"), 1)
+        self.assertEqual(main.count("  [branch] if (fate.x != 0.0) {\n"), 1)
+        self.assertEqual(main.count("w_alpha_ref"), 1)
+        self.assertEqual(main.count("W_C141.w"), 1)
+        self.assertEqual(main.count("fate."), 2)
+        self.assertEqual(main.count("discard"), 2)                    # the state's test and the no-number rule
+        self.assertLess(main.index("if (fate.y == 0.0) discard;"), main.index("[branch] if (fate.x != 0.0) {"))
+        self.assertEqual(HEADER.count("w_alpha_ref"), 4)              # the table, the block, the text above the programs, and the main's one use
 
 
 class Tripwire(unittest.TestCase):

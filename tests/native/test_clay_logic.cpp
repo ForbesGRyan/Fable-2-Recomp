@@ -2782,9 +2782,66 @@ static void WaterTests() {
     const uint32_t swizzle = 0u | (0u << 3) | (1u << 6);
     const float reference = F(0x3D70F0F2u);
     ClayWaterConstants c{};
-    CHECK(844, MakeClayWaterConstants(r, draw, reference, 8.58f, true, samplers, swizzle, &c));
-    static_assert(sizeof(ClayWaterConstants) == 448 && offsetof(ClayWaterConstants, alpha_ref) == 416 && offsetof(ClayWaterConstants, swizzle) == 444 &&
-                  kClayWaterPsRegisters == 18);
+    CHECK(844, MakeClayWaterConstants(r, draw, reference, 8.58f, true, samplers, swizzle, 289, &c));
+    static_assert(sizeof(ClayWaterConstants) == 464 && offsetof(ClayWaterConstants, alpha_ref) == 416 && offsetof(ClayWaterConstants, swizzle) == 444 &&
+                  offsetof(ClayWaterConstants, base_vertex) == 448 && offsetof(ClayWaterConstants, vertex_count) == 452 && kClayWaterPsRegisters == 18);
+    // (plan Task 12: the draw's base vertex and the vertices its buffer holds, for the vertex program's pull)
+    draw.base_vertex = -7;
+    CHECK(844, MakeClayWaterConstants(r, draw, reference, 8.58f, true, samplers, swizzle, 289, &c) && c.base_vertex == -7 && c.vertex_count == 289 &&
+                   c.pad[0] == 0 && c.pad[1] == 0);
+    {
+      ClayWaterConstants keep = c;
+      CHECK(844, !MakeClayWaterConstants(r, draw, reference, 8.58f, true, samplers, swizzle, 0, &c) && std::memcmp(&keep, &c, sizeof(c)) == 0);
+      CHECK(844, !MakeClayWaterConstants(r, draw, reference, 8.58f, true, samplers, swizzle, capture::kMaxDrawCount + 1, &c));
+    }
+    // The swizzle word from the two fetches as the pass uploads the textures (WaterHostChannel): the captured
+    // constants give red for the mask and red, green for the map; a map whose y comes from channel 2 or 3 still
+    // reads the host's green; a constant selector stays a constant.
+    {
+      TextureFetch mask, map;
+      mask.swizzle[0] = 0; mask.swizzle[1] = 0; mask.swizzle[2] = 0; mask.swizzle[3] = 5;
+      CHECK(844, WaterSwizzleWord(mask, map) == (0u | (0u << 3) | (1u << 6)) && WaterSwizzleUsable(WaterSwizzleWord(mask, map)));
+      mask.swizzle[0] = 3;
+      map.swizzle[0] = 2; map.swizzle[1] = 0;
+      CHECK(844, WaterSwizzleWord(mask, map) == (0u | (1u << 3) | (0u << 6)));
+      mask.swizzle[0] = 5;
+      map.swizzle[0] = 4; map.swizzle[1] = 5;
+      CHECK(844, WaterSwizzleWord(mask, map) == (5u | (4u << 3) | (5u << 6)) && WaterSwizzleUsable(WaterSwizzleWord(mask, map)));
+    }
+    // The surface's state from its draw's own words, judged again by the pass: the captured words of A17D (depth
+    // 0x00708746, blend 0x07060706, colour control 0x0000000C, cull 0x00018006, the reference 0x3D70F0F2) are
+    // usable, with the reference the state's and the cull the record's in the pass's window space; the opaque
+    // twin's words, a state without the depth write, another blend, no alpha test: not usable.
+    {
+      capture::StateWords words;
+      words.read = true;
+      words.depth_control = 0x00708746u;
+      words.blend_control = 0x07060706u;
+      words.color_control = 0x0000000Cu;
+      words.su_sc_mode = 0x00018006u;
+      words.color_mask = 0xFu;
+      words.alpha_ref = 0x3D70F0F2u;
+      words.vport_z_scale = 0xBF800000u;
+      words.vte_cntl = 0x10u;
+      const capture::RenderState decoded = capture::DecodeRenderState(words);
+      const WaterSurfaceState s = WaterSurfaceStateOf(words);
+      CHECK(844, decoded.valid && decoded.depth_reversed && s.usable && B(s.alpha_ref) == 0x3D70F0F2u && s.cull == ClayCull(decoded.cull, decoded.front_cw));
+      capture::StateWords other = words;
+      other.depth_control = 0x00708766u;                                     // the opaque twin's function
+      CHECK(844, !WaterSurfaceStateOf(other).usable);
+      other = words; other.blend_control = 0x00010001u;
+      CHECK(844, !WaterSurfaceStateOf(other).usable);
+      other = words; other.depth_control = 0x00708742u;                      // no depth write
+      CHECK(844, !WaterSurfaceStateOf(other).usable);
+      other = words; other.color_control = 0x00000004u;                      // no alpha test
+      CHECK(844, !WaterSurfaceStateOf(other).usable);
+      other = words; other.read = false;
+      CHECK(844, !WaterSurfaceStateOf(other).usable);
+      other = words; other.alpha_ref = 0x40000000u;                          // a reference of 2
+      CHECK(844, !WaterSurfaceStateOf(other).usable);
+      other = words; other.vport_z_scale = 0x3F800000u;                      // not the reversed range
+      CHECK(844, !WaterSurfaceStateOf(other).usable);
+    }
     CHECK(844, std::memcmp(c.rows, draw.rows, 64) == 0 && std::memcmp(c.vs, r.vs, 64) == 0 && B(c.alpha_ref) == 0x3D70F0F2u && c.out_scale == 8.58f &&
                    c.sun_on == 1 && c.fog_on == 1 && c.sampler_mask == 3 && c.sampler_normal == 1 && c.sampler_picture == 1 && c.swizzle == swizzle);
     // every carried register is the record's, bit for bit, the components no formula reads among them; and the
@@ -2798,7 +2855,7 @@ static void WaterTests() {
     CHECK(844, c.ps[kCwP19][2] == 50.17f && c.ps[kCwP140][0] == 0.05f && c.ps[kCwP143][1] == 0.9f && c.ps[kCwP0][3] == 1.0f / 720.0f);
     const ClayWaterConstants same = c;
     auto refused = [&](const capture::WaterRecord& rec, const capture::DrawRecord& d, float ref, float scale, const uint32_t* s, uint32_t swz) {
-      return !MakeClayWaterConstants(rec, d, ref, scale, true, s, swz, &c) && std::memcmp(&same, &c, sizeof(c)) == 0;   // `out` untouched
+      return !MakeClayWaterConstants(rec, d, ref, scale, true, s, swz, 289, &c) && std::memcmp(&same, &c, sizeof(c)) == 0;   // `out` untouched
     };
     capture::WaterRecord bad = r;
     bad.ps[capture::kWatP126][1] = kNan;                                     // a read component that is no number
@@ -2829,7 +2886,7 @@ static void WaterTests() {
     for (uint32_t i : {uint32_t(capture::kWatP136), uint32_t(capture::kWatP137), uint32_t(capture::kWatP138), uint32_t(capture::kWatP142), uint32_t(capture::kWatP143)}) {
       for (float& v : bad.ps[i]) v = kNan;
     }
-    CHECK(844, MakeClayWaterConstants(bad, draw, reference, 8.58f, false, samplers, swizzle, &c) && c.sun_on == 0 && c.fog_on == 0 &&
+    CHECK(844, MakeClayWaterConstants(bad, draw, reference, 8.58f, false, samplers, swizzle, 289, &c) && c.sun_on == 0 && c.fog_on == 0 &&
                    B(c.ps[kCwP138][0]) == B(kNan));
     // ... and the mirror of such a record reads none of them: its colour is a number
     WaterPixelIn in{};
@@ -2849,7 +2906,7 @@ static void WaterTests() {
     WaterPixelMirror(in, c, fog, rgb, &alpha, &kept);
     CHECK(844, !kept && rgb[0] == 0.0f && rgb[1] == 0.0f && rgb[2] == 0.0f);
     // a skipped pixel that passes the state's test is drawn with colour 0 at its alpha; one below the reference is not drawn
-    CHECK(844, MakeClayWaterConstants(r, draw, 0.01f, 8.58f, false, samplers, swizzle, &c));
+    CHECK(844, MakeClayWaterConstants(r, draw, 0.01f, 8.58f, false, samplers, swizzle, 289, &c));
     in.m = 121.0f / 255.0f;                                                  // at the shore: alpha 0.049, below c141.w
     WaterPixelMirror(in, c, fog, rgb, &alpha, &kept);
     CHECK(844, kept && rgb[0] == 0.0f && rgb[1] == 0.0f && rgb[2] == 0.0f && alpha > 0.01f && alpha < c.ps[kCwP141][3]);

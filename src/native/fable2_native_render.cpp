@@ -879,12 +879,14 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
   const capture::ImpostorMode impostors = CurrentImpostors();
   if (impostors == capture::ImpostorMode::kOn) g_clay->SetImpostorReadback(FrameImpostorReadback());
   if (g_impostor_feed_valid) g_clay->SetImpostorPictureFeed(&g_impostor_feed);   // (a diagnostic: never without its switch)
+  // (the water's switch, read once a frame: off, nothing of the water is reached in the pass)
+  const bool water = CurrentWater();
   g_clay->Render(ctx.cmd, ctx.device, *scene, CurrentClayColor(), textures, CurrentClayLight(), CurrentShadows(), CurrentFog(), CurrentWind(), CurrentCoverage(),
-                 impostors, post, st, tst);
+                 impostors, water, post, st, tst);
   g_shadows_usable.store(g_clay->shadows_usable(), std::memory_order_relaxed);
   SetStatus(render::FormatStatusText(*scene, st, textures ? &tst : nullptr) + "\n" +
             render::FormatLightDrawnText(st) + "\n" + render::FormatShadowText(st) + "\n" + render::FormatFogText(st) + "\n" +
-            render::FormatSkyText(st) + "\n" + render::FormatPostText(st) + "\n" + render::FormatFurnitureText(st) + "\n" + render::FormatSunText(st) + "\n" + render::FormatCloudText(st) + "\n" + render::FormatWindText(st) + "\n" + render::FormatCoverageText(st) + "\n" + render::FormatImpostorText(st));
+            render::FormatSkyText(st) + "\n" + render::FormatPostText(st) + "\n" + render::FormatFurnitureText(st) + "\n" + render::FormatSunText(st) + "\n" + render::FormatCloudText(st) + "\n" + render::FormatWindText(st) + "\n" + render::FormatCoverageText(st) + "\n" + render::FormatImpostorText(st) + "\n" + render::FormatWaterText(st));
   const double cpu_ms = st.hash_ms + st.decode_ms + st.record_ms + tst.decode_ms;
   const uint32_t pending = tst.status[size_t(capture::MaterialStatus::kTexturePending)];
   if (textures && (tst.uploads || pending)) {
@@ -954,6 +956,9 @@ bool RenderClay(const NativeGuestOutputRenderContext& ctx) {
     } else if (st.impostor_mode != capture::ImpostorMode::kOff) {
       REXLOG_INFO("[native] clay: {}", render::FormatImpostorText(st));
     }
+    // The water likewise: only with the switch on (the surface records drawn, the targets, the dead draws left out,
+    // the frames not drawn by reason, the draws without a record by the capture's reason).
+    if (water) REXLOG_INFO("[native] clay: {} | the step's CPU time this frame {:.3f} ms", render::FormatWaterText(st), st.water_ms);
     if (const std::string by_vs = render::FormatShadowSkippedByVs(st); !by_vs.empty()) {
       REXLOG_INFO("[native] clay: shadow draws skipped by vs {{{}}}", by_vs);
     }

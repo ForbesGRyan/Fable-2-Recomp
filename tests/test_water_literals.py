@@ -277,9 +277,10 @@ class Mirrors(unittest.TestCase):
         self.assertEqual(tuple(int(n) for n in re.findall(r"capture::kWatP(\d+)", source)), self.CARRIED)
         self.assertEqual(len(self.CARRIED), 18)
         self.assertIn("inline constexpr uint32_t kClayWaterPsRegisters = 18;", self.LOGIC)
-        # 64 (the rows) + 64 (c115 to c118) + 16 a register + 16 + 16: two small slots a record
-        size = 64 + 16 * len(S["reg"]) + 16 * len(self.CARRIED) + 16 + 16
-        self.assertEqual(size, 448)
+        # 64 (the rows) + 64 (c115 to c118) + 16 a register + 16 + 16, and 16 for the draw's base vertex and vertex
+        # count (plan Task 12): two small slots a record
+        size = 64 + 16 * len(S["reg"]) + 16 * len(self.CARRIED) + 16 + 16 + 16
+        self.assertEqual(size, 464)
         self.assertIn("static_assert(sizeof(ClayWaterConstants) == %d &&" % size, self.LOGIC)
         self.assertIn("static_assert(kClayWaterSlots == %d && kClayWaterStepSlots == %d);" % ((size + 255) // 256, 2 * 64 + 4 + 21), self.LOGIC)
         # the registers under b137 alone are not in the block; those under b136 are, and the mirror asks the bool first
@@ -411,7 +412,12 @@ class Text(unittest.TestCase):
             for begin, end, _ in (wind_hlsl.WATER_VERTEX, wind_hlsl.WATER_PIXEL):
                 code = "\n".join(line.split("//")[0] for line in wind_hlsl.region(text, begin, end).split("\n"))
                 for number in re.findall(NUMBER, code):
+                    if number == "3.0e38":
+                        continue                                      # WaterFinite's bound: the pass's own, no literal of the game's
                     self.assertIn(abs(float(number.rstrip("f"))), allowed, (name, number))
+                # (that bound stands once, in WaterFinite, and nowhere else in the two texts)
+                self.assertEqual(code.count("3.0e38"), 1 if begin == wind_hlsl.WATER_PIXEL[0] else 0, name)
+                self.assertTrue(begin != wind_hlsl.WATER_PIXEL[0] or "  return (sum < 3.0e38) ? 1.0 : 0.0;" in code, name)
 
     def test_the_functions_take_the_registers_the_reference_reads(self):
         """A register named in a function's arguments (cNNN, or cNNNx for a component) is one of the table's, and
@@ -425,6 +431,57 @@ class Text(unittest.TestCase):
             # the fog's registers, the exposure, the eye (passed as a place) and the shadow factor are the main's
             mains = {19, 20, 28, 66, 67, 68, 139}
             self.assertEqual(named, (set(S["reg"]) | set(S["ps_reg"])) - mains, name)
+
+
+class Programs(unittest.TestCase):
+    """The HLSL side of plan Task 12: cbuffer Water's fields and the registers' names in the two programs against
+    render::ClayWaterConstants and the table's order."""
+    HEADER = hlsl.HEADER
+    LOGIC = _source("render", "clay_logic.h")
+    CARRIED = Mirrors.CARRIED
+
+    def test_the_block_s_fields_are_the_struct_s(self):
+        fields = re.search(r"inline constexpr ClayBufferField kClayWaterFields\[\] = \{(.*?)\n\};", self.HEADER, re.S).group(1)
+        got = [(name, int(offset), int(size)) for name, offset, size in re.findall(r'\{"(\w+)", (\d+), (\d+)\}', fields)]
+        want = [("w_rows", 0, 64), ("w_vs", 64, 16 * len(S["reg"])), ("w_ps", 128, 16 * len(self.CARRIED)), ("w_alpha_ref", 416, 4),
+                ("w_out_scale", 420, 4), ("w_sun_on", 424, 4), ("w_fog_on", 428, 4), ("w_sampler_mask", 432, 4), ("w_sampler_normal", 436, 4),
+                ("w_sampler_picture", 440, 4), ("w_swizzle", 444, 4), ("w_base_vertex", 448, 4), ("w_vertex_count", 452, 4), ("w_pad", 456, 8)]
+        self.assertEqual(got, want)
+        self.assertIn("inline constexpr unsigned kClayWaterSize = 464;", self.HEADER)
+        self.assertIn("static_assert(sizeof(ClayWaterConstants) == 464 &&", self.LOGIC)
+        # the struct's members in the same order (their names without the prefix)
+        struct = self.LOGIC[self.LOGIC.index("struct ClayWaterConstants {"):self.LOGIC.index("static_assert(sizeof(ClayWaterConstants) == 464")]
+        order = [struct.index(name) for name in ("float rows[4][4]", "float vs[4][4]", "float ps[kClayWaterPsRegisters][4]", "float alpha_ref, out_scale",
+                                                 "uint32_t sun_on, fog_on", "uint32_t sampler_mask, sampler_normal, sampler_picture", "uint32_t swizzle",
+                                                 "int32_t base_vertex", "uint32_t vertex_count", "uint32_t pad[2]")]
+        self.assertEqual(order, sorted(order))
+        block = self.HEADER[self.HEADER.index("cbuffer Water : register(b0) {"):self.HEADER.index("struct WaterVsOut {")]
+        code = " ".join(line.split("//")[0] for line in block.split("\n"))
+        self.assertEqual(re.findall(r"\b(w_\w+)\b", code), ["w_rows", "w_vs", "w_ps", "w_alpha_ref", "w_out_scale", "w_sun_on", "w_fog_on", "w_sampler_mask",
+                                                            "w_sampler_normal", "w_sampler_picture", "w_swizzle", "w_base_vertex", "w_vertex_count", "w_pad"])
+        self.assertIn("float4 w_ps[%d];" % len(self.CARRIED), block)
+        self.assertIn("float4 w_vs[%d];" % len(S["reg"]), block)
+
+    def test_a_register_s_name_is_its_place_in_the_block(self):
+        vertex = re.findall(r"^#define W_C(\d+) w_vs\[(\d+)\]$", self.HEADER, re.M)
+        self.assertEqual([(int(reg), int(i)) for reg, i in vertex], [(reg, i) for i, reg in enumerate(S["reg"])])
+        pixel = re.findall(r"^#define W_C(\d+)P? w_ps\[(\d+)\]$", self.HEADER, re.M)
+        self.assertEqual([(int(reg), int(i)) for reg, i in pixel], [(reg, i) for i, reg in enumerate(self.CARRIED)])
+        # (c116 and c117 are also vertex registers: the pixel's carry a P)
+        self.assertIn("#define W_C116P w_ps[3]\n#define W_C117P w_ps[4]\n", self.HEADER)
+        self.assertEqual(len(re.findall(r"^#define W_C", self.HEADER, re.M)), len(S["reg"]) + len(self.CARRIED))
+        # the mains name a register only through these names, and the block's rows nowhere else but the position
+        for program, end in (("kClayWaterVs", "WaterVsOut main(uint vid : SV_VertexID) {"), ("kClayWaterPs", "float4 main(WaterVsOut i) : SV_Target {")):
+            start = self.HEADER.index(end)
+            main = self.HEADER[start:self.HEADER.index(')hlsl"', start)]
+            self.assertEqual(re.findall(r"w_(?:vs|ps)\[", main), [], program)
+        start = self.HEADER.index("float4 main(WaterVsOut i) : SV_Target {")
+        main = self.HEADER[start:self.HEADER.index(')hlsl"', start)]
+        named = {int(reg) for reg in re.findall(r"\bW_C(\d+)P?\b", main)}
+        # (the fog's registers and the output scale are the frame's block's and the block's own word; c139 is read by no record)
+        self.assertEqual(named, set(self.CARRIED))
+        self.assertEqual(len(re.findall(r"\bW_C19\.xyz\b", main)), 1)
+        self.assertNotIn("W_C19,", main)                              # the eye is handed over by component: c19.w is not read
 
 
 if __name__ == "__main__":

@@ -44,7 +44,8 @@ class SkyLiterals(unittest.TestCase):
         cls.logic = _text("src/native/render/clay_logic.h")
         cls.logic_test = _text("tests/native/test_clay_logic.cpp")
         shaders = _text("src/native/fable2_native_shaders.h")
-        cls.sky_ps = shaders[shaders.index("inline constexpr const char* kClaySkyPs"):shaders.index("#undef FABLE2_CLAY_TERRAIN_FAR_HLSL")]
+        # (to the sky program's own end: the impostor step's and the water step's programs follow it before the #undef block)
+        cls.sky_ps = shaders[shaders.index("inline constexpr const char* kClaySkyPs"):shaders.index("// The impostor step (render/clay_pass.cpp;")]
         cls.sky_vs = _one(r"inline constexpr const char\* kSkyVs = R\"hlsl\((.*?)\)hlsl\";", shaders, "kSkyVs")
         cls.lines = sky_pins.lines()
 

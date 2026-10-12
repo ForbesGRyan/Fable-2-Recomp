@@ -69,7 +69,10 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
    - Far wooded ranges are 1.15 to 1.55 of the game's (no distant trees drawn natively); beams
      pass where the game's far woods stand.
 3. [x] **Water** (sub-project13, **implementation and validation done2026-10-12**;
-   initial closing commit and two fresh whole-branch reviews pending;
+   initial closing commit `ac6fd20` and fresh documents approval complete;
+   product/runtime and whole-branch code approval224c92b complete; C18evidence met;
+   final fresh whole-branch documents reassessment APPROVED/all findings closed;
+   closing prose wave finalized with concerns;
    `frame-map.md` section20, "Validation (13c)", "Limits (13)", "Follow-ups (13)")
    - *Achieved*: a native blended/depth-writing lake, with dead opaque twins removed only
      for a whole replacement surface; native mirrored sky plus the guest's own far-terrain
@@ -85,7 +88,15 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
      .948298/.995727/.992886bridge,.968218/.995434/.996679third meet the bounds.
      Sets18428/20830before versus18433/20824after are not a common-set delta.
      `t13_*_colour_given_place.txt`, `t18_*_colour_all.txt`; stills do not judge motion.
-   - *Cost*:13c alone on the restored usual monitor, all20shots1942wide, uncapped,
+   - *Cost after the review fix wave*:new DD2D executable/source224c92b, R61 logs750–753,
+     alone on the usual display inventoried every run7680x2160/144DPI150%, uncapped,
+     all agents idle; all20shots1942x1136 viewed.69steady windows18/17/17/17,
+     off17.798088/on17.515294ms, delta-.282794ms; repeats.766176/.017647ms,
+     minimum43.6fps. Frame-cost/floor bounds met; negative delta is no acceleration
+     proof. Capture+.1645ms not decidable below1/3ms; CPUmedian.078ms separate.
+     `t19_timing.json`; all69raw windows independently recomputed. Initial driver
+     BOM-decoding rejection retained; decoding alone fixed, raw/windows/rules unchanged.
+   - *Historical cost on4554*:13c alone on the restored usual monitor, all20shots1942wide, uncapped,
      off/on/on/off,68steady windows, minimum47.6fps; frame delta-.004117647ms meets+.5ms,
      repetitions.42/.118824ms meet1.0ms. This tiny negative nominal delta is not acceleration
      proof. Capture+.1675ms is not decidable below1/3ms resolution; Water CPUmedian.077ms
@@ -102,7 +113,18 @@ Limits and follow-ups named here are described in `frame-map.md`, section 17, "L
      lacks5000pixels; C11near/C12glint lack qualifying views after bounded searches.
      C15old image is not decidable from EXPO/config/width mismatch; C17capture increment
      is not decidable. All these remain named alongside the met measures.
-   - *Evidence limits*:fresh Task18 source/runtime review approved; runtime4554F15C,
+   - *Current closing gates*:source/test fix224c92b, native41PASS/releaseDD2D exit0,
+     Python1899tests570.771sOK7skips; fresh documents approval complete. The epoch
+     callsite/help/one-fifth near/far/fog floor fixes leave formulas/SDK source/
+     shaders/targets/bindings unchanged. Final paired/default-off confirmation complete:
+     92water/214reflection rows bit equal,12/12bridge and11/11third with4terrain targets/
+     no fallback;750–7580errors/warnings/known freeze NOT SEEN and39viewed1942shots.
+     No new colour/silhouette/pool acceptance or motion proof. Final whole-branch code
+     review APPROVED at224c92b/all three findings resolved; C18evidence rule MET.
+     Final fresh whole-branch documents reassessment APPROVED/all findings closed;
+     closing prose wave finalized with concerns. Release includes original
+     user wind edits outside the water commits; quantitative runs explicitly select windoff.
+   - *Historical evidence limits*:fresh Task18 source/runtime review approved; runtime4554F15C,
      source/test9e6096f. WARP debug gates have0errors/drawn/viewed lake;1328warnings and
      unattributed dump1008warning remain. Bridge/WARP lack aggregate guest windows,
      whole-run freeze NOT EXCLUDED; later third/timing/defaults have actual guest windows

@@ -1532,8 +1532,19 @@ world.z-height clipping while old program byte pins remain equal. Static/debug
 run evidence is in frame-map section20, "The targets' terrain" and "Validation
 (13c)": final Task18 whole-lake colour meets its bounds, all eight target
 game-to-native silhouette shares miss85%. Fresh source/runtime review approves
-those scoped verdicts; whole-branch closing reviews remain pending. No motion claim follows from formula
-checks or still shots.
+those scoped verdicts on the historical4554 executable. Initial Task19 commit
+ac6fd20/initial documents approval and final whole-branch code approval224c92b
+are complete. C18evidence rule MET; final fresh documents reassessment APPROVED,
+all findings closed. Closing prose finalized with concerns. Final paired/
+default-off confirmation passes92water/214reflection records bit-for-bit,
+four terrain targets each/no terrain fallback. No new colour/silhouette/pool
+acceptance remeasurement or motion/interleaving proof follows. Source
+fix224c92b has native41PASS/releaseDD2D/full Python1899tests570.771sOK7skips;
+new own-artifact timing meets frame-cost/floor (69windows,min43.6fps,
+delta-.282794ms), capture+.1645ms not decidable. Historical4554 acceptance is
+not remeasured by this timing. Ruling59 strengthens formula
+coverage floors below without changing formulas or the original census. No
+motion claim follows from formula checks or still shots.
 
 Task 8 continuation now repeats the game-scene replay with all nine actual
 normal levels and each frame's own picture content: ruling35's all-judged-pixel
@@ -1685,7 +1696,7 @@ Every function takes `single=True`: the inputs it reads and every operation's re
 
 ### The check of the pixel
 
-2,000 of 2,000 made pixels agree (`t3_formulas.txt`): 283 killed, 256 skipped, 1,461 shaded; of the shaded 907 with the sun term (its cosine above 0 in 697, the term above 1% of the colour in 455), 342 with the shadow factor, 762 near and 699 far of the range `1 / c140.x`, 862 fogged; the largest relative difference of a colour 6.3e-14. Compared in every trial: the fate, the alpha, the colour, the order of the fetched slots and every fetch's coordinates (the two lookups, the shadow mask's place, the two fog coordinates) against the formula's. `pixel_floors` holds the counts to floors (each fate, each bool in both states, each side of the range and of the fog's start at a tenth of the trials; the cosine above 0 in a third of the sun trials).
+2,000 of 2,000 made pixels agree (`t3_formulas.txt`): 283 killed, 256 skipped, 1,461 shaded; of the shaded 907 with the sun term (its cosine above 0 in 697, the term above 1% of the colour in 455), 342 with the shadow factor, 762 near and 699 far of the range `1 / c140.x`, 862 fogged; the largest relative difference of a colour 6.3e-14. Compared in every trial: the fate, the alpha, the colour, the order of the fetched slots and every fetch's coordinates (the two lookups, the shadow mask's place, the two fog coordinates) against the formula's. After Task19's ruling59 fix, `pixel_floors` requires each near/far and fogged/unfogged side at one fifth of the trials, matching Review Focus1; unchanged floors are each fate and each b136 state one tenth, b137-set one twentieth (at least1), b137-clear one tenth, glint above1% one twentieth, and positive cosine one third of sun trials (ruling63 corrects earlier shorthand). Independent15%-reject/20%-pass cases cover all four sides. This original census already meets the400 floor: near762/far699, fogged862/unfogged599. The census, formulas and acceptance tolerances are unchanged.
 
 The bound is `1e-9 * max(1, |value|)` for every compared number, not the spec's `1e-5 * max(1, |value|)` (and 1e-3 relative with `b136` set, 1e-6 for the alpha): both sides are the same double arithmetic, and with the spec's bounds the mutation of the power went unseen in 384 of 400 trials (16 failed; 38 with the bound as it is now on the same made inputs, 81 once the made suns were aimed at the surface's own mirror direction). The tighter bound implies the spec's wherever a colour is above 1e-6.
 

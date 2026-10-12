@@ -1,14 +1,17 @@
 # Native renderer sub-project 13: water (the lake's surface with a native reflection)
 
-Status: **execution complete with concerns, 2026-10-12; phase13a formulas,
+Status: **closed with concerns, 2026-10-12; phase13a formulas,
 phase13b surface/sky and mandatory13c own far-terrain/blur built and run.
 Fresh Task18 source/runtime review approved; tool/test commit9e6096f. Whole-lake
 colour, records, cover/bed, sun-layer depth, common land, debug gates and13c
 frame-cost/floor pass their stated measures. Target silhouettes and pools are
 not met as written; original tiny-base replay, sky subset, near/glint views,
 old-image control and capture increment remain not decidable. Six sky-horizon
-misses remain. Task19 initial closing commit and two fresh whole-branch reviews
-are pending, with criterion18 closing gate pending. Water stays off by default.**
+misses remain. Task19 initial closing commit `ac6fd20` and fresh documents
+approval and final whole-branch code approval at224c92b are complete;
+criterion18 evidence rule is met. Final fresh whole-branch documents
+reassessment APPROVED, all findings closed; closing prose wave finalized
+for publication. Water stays off by default.**
 Ledger rulings 26 (the `D1CC` cubes are not drawn:
 their design, ruling 22 and their part of criteria 6, 13 and 16 are struck, each
 passage marked "ledger ruling 26") and 27 (the surface tests and writes depth:
@@ -174,8 +177,10 @@ research has differently"):
 
 **Execution reconciliation, 2026-10-12 (Task 19 preparation).** The original
 questions above are retained. Tasks16–18 capture/static/quantitative gates are
-complete with the named misses; fresh Task18 review approves. Task19 closing
-commit and whole-branch reviews remain pending; this table claims no such approval.
+complete with the named misses; fresh Task18 review approves. Task19 initial
+commit, initial fresh documents approval and final whole-branch code approval
+at224c92b are complete. Final fresh documents reassessment APPROVED; closing
+wave finalized with concerns and no remaining review finding.
 
 | Question | What became of it | Evidence and remaining limit |
 |---|---|---|
@@ -853,7 +858,9 @@ and missed bounds are separately named. Final Task18 measurements/review:
 `task18-report.md`, `task18-controller-report.md`, `review-task18.md`;
 tool/test commit9e6096f, runtime unchanged from Task17's4554F15C SHA. Earlier
 reports and all `tN_*` evidence below are in the water ledger/evidence folders.
-Whole-branch closing approvals are still pending.
+Initial Task19 commit/docs review and final whole-branch code approval at224c92b
+are complete. Final fresh documents reassessment APPROVED; closing prose
+wave finalized for publication with concerns.
 
 | Criterion | Executed verdict | Evidence and practical limit |
 |---|---|---|
@@ -873,8 +880,8 @@ Whole-branch closing approvals are still pending.
 | 14, land/pools | common land met; pools **not met as written** | `t18_*_land.json`:bridge changes-.000203806/-.000360667/+.000062067/+.000248211,third+.000464624/-.000356498 within.005. Pool off/on:bridge1.029566/1.055547 and1.036011/1.041345;third1.043455/1.048152 and1.214655/1.162564. Each misses.97–1.03 on at least one side. |
 | 15, off invariants/control | source/log/flags/count parts met; old image not decidable | Task17 native41PASS/39old byte pins/off slots; Python1895pass. `t18_off_flags.txt`:741/747water off/no records,741/747/749no Water-step lines. Defaults749State12/27; third747initial11/26 with transient12/27 from other families; bridge741State rows absent. `t18_off_control.json`:EXPO/config/width mismatch, no old launch/resize/numeric acceptance. |
 | 16, error/drawn/lake gates | met in prescribed parts |13b711/712 and13c739/740,240s WARP debug before corresponding hardware,0errors/lake drawn and viewed. Warnings1328both,1008in13cdump retained;319/320dump unpaired. No timing or uninterrupted motion inferred. |
-| 17, cost/floor |13c frame cost/floor met; capture increment not decidable | `t18_timing.json`:68steady windows,min47.6fps,off17.932941/on17.928824ms,delta-.004117647;repeat.42/.118824<=1. All20shots1942wide, usual restored monitor, solo/uncapped. Capture+.1675<1/3ms not decidable; CPUmedian.077ms separately.13b floor40.6met/costnotdecidable due off-repeat2.0214ms. |
-| 18, evidence/closing | execution evidence documented; closing gates pending | Each number names evidence, inference and RUN UNCHECKED are retained. Bridge/WARP whole-freeze NOT EXCLUDED; third/timing/defaults actual guest windows/no known signature seen. Initial Task19 closing commit and two fresh whole-branch reviews still pending; no approval claimed. |
+| 17, cost/floor | frame cost/floor met on historical4554 and new DD2D; capture increment not decidable | R61 `t19_timing.json`:69steady windows,min43.6fps,off17.798088235294/on17.515294117647ms,delta-.282794117647;repeat.766176470588/.017647058824<=1. All20shots1942x1136 root-viewed, usual display inventoried each run,solo/all agents idle/uncapped. Capture+.1645<1/3ms not decidable; CPUmedian.078ms separately; no acceleration claim. Historical4554 `t18_timing.json`:68windows,min47.6fps,delta-.004117647,capture+.1675notdecidable.13b floor40.6met/costnotdecidable due off-repeat2.0214ms. |
+| 18, evidence/closing | **met, evidence rule** | Each number names evidence, inference and RUN UNCHECKED are retained. Bridge/WARP whole-freeze NOT EXCLUDED; third/timing/defaults actual guest windows/no known signature seen. Initial Task19 commit ac6fd20 and fresh documents approval complete. Final whole-branch code review APPROVED at224c92b, all three findings resolved/no remaining code findings; Source224c92b/native41PASS/releaseDD2D/Python1899pass/new timing complete; Final paired/default-off confirmation complete92water/214reflection; Final fresh whole-branch documents reassessment APPROVED, all findings closed; closing prose wave finalized with concerns. |
 
 User checks (from 101, in `docs/native-renderer/user-checks.md`): the lake in motion, native against
 emulated (the scroll, the glint's sparkle); the shoreline on a walk along the water; the far shore's
@@ -886,7 +893,9 @@ region and at another time of day.
 **Plan departures reconciled, 2026-10-12 (Task 19 preparation).** All thirteen
 numbered departures in the plan are accounted for below. “Stood” describes the
 executed route through Task18, with each measured miss retained above. Whole-
-branch closing approvals are pending; execution review approval is distinct.
+branch code approval at224c92b and final fresh documents reassessment are
+APPROVED; all findings closed. Initial commit/docs approval are distinct from
+execution approval; closing prose wave finalized with concerns.
 
 | Departure | Stood or changed | As executed |
 |---|---|---|
@@ -1002,7 +1011,8 @@ maxRGB distance>=8/255 and exact nonblack, no horizon mask/erosion, all boundary
 and native-only content, square one-texel comparison both directions and means
 on exact common content. The tolerance is disclosed, not tuned to results.
 Evidence: `task17-report.md`, `task17-runtime-report.md`, `review-task17.md`,
-`t17_*`; the final eighteen-criterion table is above, whole-branch closing pending.
+`t17_*`; final eighteen-criterion table is above, code approval complete,
+final fresh documents reassessment APPROVED; closing prose wave finalized.
 
 **Superseding rulings56/57, 2026-10-12.** Fresh Task18 review closes the
 invalid-sky-reference issue before actual acceptance: consumed own-view
@@ -1017,7 +1027,65 @@ All20timing shots are1942wide and viewed; uncapped pacing/guest windows audited.
 Third's6/7 and defaults'8 actual guest windows supersede no missing-window
 assumption for those runs; earlier bridge/WARP caveats remain. Final Task18
 measurements and fresh source/runtime review are approved, tool/test9e6096f.
-Whole-branch closing reviews remain pending; those approvals are not inferred.
+Initial Task19 closing commit `ac6fd20` precedes the two fresh whole-branch
+reviews. Documents review approves with no Critical/Important findings; its
+local report-status Minor is corrected. Code review's epoch-admission Important
+and water-help/coverage-floor Minors are fixed tests-first under rulings58–60.
+The scene epoch is saved before guest reads on every observer path; stale or
+missing origins reject both ordinary and water records under the scene mutex,
+before any frame bookkeeping. The actual production callsite is tested; no
+concurrent scene-swap reproduction is claimed. Water help describes the built
+surface/own terrain/blur/fallback. Each near/far/fog side now requires one fifth
+of trials, with independent15%-reject/20%-pass boundaries. Unchanged floors:
+each fate and each b136 state one tenth, b137-set one twentieth (at least1),
+b137-clear one tenth, glint above1% one twentieth, positive cosine one third
+of sun trials. Ruling63 corrects earlier shorthand; the original2000-trial
+census/acceptance remain unchanged.
+
+Native41PASS (`t19_epoch_native_full.txt`), final release exit0
+(`t19_epoch_release_result.json`) and full Python1899tests570.771s,
+OK7skips/exit0 (`t19_epoch_python_full_final.txt`, ResourceWarning retained)
+are complete. Source/test five-path fix commit is `224c92b`, excluding original
+user wind edits. The release was built in the shared tree containing those
+edits; quantitative runs explicitly select windoff. No exact clean-HEAD build
+attribution is claimed. The new executable is
+`DD2DFF3EBE6C8B49A6775F688FAC42B002866E7AD51DCA6445985AB4AB9D26D9`;
+`t19_epoch_runtime_hashes.json` owns the newly relinked DLL hashes. SDK source,
+shader text, targets and bindings are unchanged. Fresh code review explicitly
+retains historical WARP739/740 applicability; those runs are not attributed to
+DD2D. All4554 acceptance and timing figures above retain their historical
+attribution. R61 new-artifact timing logs750–753 meet C17frame cost/floor:
+69steady windows18/17/17/17, off17.798088/on17.515294ms, delta-.282794ms,
+repeats.766176/.017647ms, minimum43.6fps; no acceleration claim. All20shots
+1942x1136 are root-viewed, usual display7680x2160/144DPI150% inventoried every
+run, uncapped logged, each run alone with all agents idle. Guest windows
+14/14/14/13 show no known freeze signature. Water CPU median.078ms both,
+ranges.077–.101/.077–.100; capture1.895/2.0595ms, delta.1645ms not decidable
+below1/3ms resolution. UTF16LE-BOM decoding alone corrected the driver's
+initial false rejection; raw files/thresholds/windows are unchanged, first
+result retained as `t19_timing_before_driver_decoding.*`. Fresh code reviewer
+independently recomputed raw timing and agrees. Final whole-branch code review
+APPROVED at224c92b, all I1/M1/M2 resolved/no remaining findings. Final fresh
+whole-branch documents reassessment APPROVED, all findings closed; closing
+prose wave finalized for publication.
+The earlier Python wrapper lost its verdict
+and proves neither a pass nor a test failure. Criterion18 evidence rule is MET;
+both fresh whole-branch reviews APPROVED. Closing prose wave finalized for publication.
+Final-build paired/default-off confirmation is now
+complete:750–758 same DD2D/new DLLs,0errors/warnings, actual guest windows
+14/14/14/13 timing,7/6bridge,7/7third,8defaults show known freeze NOT SEEN.
+All39shots1942x1136 root-viewed. Water92/92/reflection214/214 bit equal;
+12/12bridge and11/11third,4targets/4terrain each, no terrain fallback,
+texture3 warmup refusals retained. Exactscene1737/1832 target sheets viewed;
+discovery324bridge each/332third each passes, bindings unlogged/NOT verified.
+Default flag absent758 has one off startup line/no Water draw/State12/27;
+old-image parity remains not decidable. Controller helper's invalid OFF-to-ON
+checker inputs were retained then corrected, no product/threshold change/retry
+launch. No new C9/C10/C14 numerical acceptance or actual concurrent-interleaving/
+motion/input-absence proof. Final whole-branch code review APPROVED at224c92b;
+C18evidence rule MET. Final fresh documents reassessment APPROVED; closing
+prose wave finalized for publication;
+`task19-controller-report.md` owns exact provenance/artifacts.
 
 ## Limits known beforehand
 

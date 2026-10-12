@@ -9205,8 +9205,80 @@ All drivers remain RUN UNCHECKED; no uninterrupted motion/input-absence claim.
 | 15, off source/log/flags/counts | met in these parts | `t18_off_flags.txt`:741/747both frames water off/no records;741/747/749zero Water-step/on lines. Defaults749State12/27; third747initial11/26, transient12/27 from other families; bridge741aggregate State absent. Task17 native41PASS/39old-byte pins/off-slot arithmetic and final Python1895pass carry exact attribution; no hidden resource-inspection claim. |
 | 15, old off image | **not decidable** | `t18_off_control.json`: old706/defaults749 differ EXPO;742on control also changes Post/Bloom; screenshots1944x1139/1942x1136/1296x759. Baseline6961942wide has incompatible all-features config. No resize, old-executable launch or numeric image acceptance. |
 | 16, debug/drawn/lake gate | met in prescribed parts | Task17 WARP739/740,240s each:0D3Derrors,12/12surfaces,4terrain targets,225s lake shots viewed before hardware. Warnings1328both/1008dump retained, no aggregate guest windows; dump319/320unpaired excluded from target metrics. |
-| 17, frame cost/floor | met for13c; capture increment not decidable | R57 restored usual7680x2160/144DPI150% display. Solo timing743–746,68steady150-frame windows, minimum47.6fps; off17.932941/on17.928824ms, delta-.004117647ms; repeats.42/.118824ms. Bounds30fps,+.5ms,repeat<=1.0met. Pooled capture1.879/2.0465ms, delta+.1675<1/3ms resolution: not decidable. Water CPU median.077ms, ranges.076–.080/.077–.079, separate instantaneous steps. |
-| 18, closing evidence/reviews | pending closing gates | Every execution verdict retains source/run/inference and RUN UNCHECKED limits. Task19 initial closing commit and two fresh whole-branch reviews are pending; no approval of those gates is claimed here. |
+| 17, frame cost/floor | met on historical4554 and new DD2D; capture increment not decidable | R61 `t19_timing.json`:logs750–753,69steady windows18/17/17/17,min43.6fps; off17.798088235294/on17.515294117647ms,delta-.282794117647ms; repeats.766176470588/.017647058824ms. Usual display inventoried each run, all20shots1942x1136 root-viewed, solo/all agents idle/uncapped. Bounds30fps,+.5ms,repeat<=1met; no acceleration claim. Capture1.895/2.0595ms,+.1645<1/3ms resolution:not decidable. CPUmedian.078ms separately. Historical4554/R57:68windows,min47.6fps,delta-.004117647ms,capture+.1675notdecidable. |
+| 18, closing evidence/reviews | **met, evidence rule** | Every execution verdict retains source/run/inference and RUN UNCHECKED limits. Initial Task19 commit ac6fd20 and fresh documents approval complete. Final whole-branch code review APPROVED at224c92b, all three findings resolved/no remaining code findings; Source224c92b/native41PASS/releaseDD2D/Python1899pass/new timing complete; Final paired/default-off confirmation complete92water/214reflection; Final fresh whole-branch documents reassessment APPROVED, all findings closed; closing prose wave finalized with concerns. |
+
+**Task19 fix wave, current gates (rulings58–61).** Fresh code review
+found an epoch-admission Important and water-help/coverage-floor Minors; all
+are fixed tests-first and source-reassessed. The observer saves its epoch
+before the first guest read on every path, and RecordDraw rejects stale or
+missing origins for both ordinary and water records under the scene mutex,
+before light/sequence/water bookkeeping. The actual callsite is tested; no
+concurrent scene-swap reproduction is claimed. Help now describes the built
+native surface/own terrain/blur/fallback/default-off. Each near/far and fogged/
+unfogged side must cover one fifth of formula trials. Unchanged floors: each
+fate/each b136 state one tenth, b137-set one twentieth (at least1), b137-clear
+one tenth, glint above1% one twentieth, positive cosine one third of sun trials.
+Ruling63 corrects earlier shorthand; original2000-trial census/acceptance unchanged.
+
+Native41PASS, final release exit0 and full Python1899tests570.771s,
+OK7skips/exit0 (ResourceWarning retained) are complete. Five source/test paths
+are committed `224c92b`, with original user wind excluded. Release was built
+in the shared tree containing those edits; quantitative runs select windoff.
+No exact clean-HEAD build attribution is claimed. New executable SHA256
+`DD2DFF3EBE6C8B49A6775F688FAC42B002866E7AD51DCA6445985AB4AB9D26D9`
+and newly relinked DLL hashes are in `t19_epoch_runtime_hashes.json`. SDK
+source, shader text, targets and bindings remain unchanged; fresh code review
+explicitly retains historical WARP739/740 applicability, without claiming a
+DD2D WARP run. All4554 measurements above remain historical. R61 DD2D timing
+logs750–753, batch59145, was each run alone with all agents idle, uncapped
+logged, usual display7680x2160/144DPI150% inventoried every run. All20shots
+1942x1136 are root-viewed (sheet plus full on1-57/off2-60); aggregate guest
+windows14/14/14/13 show no known freeze signature.69steady windows18/17/17/17:
+off17.798088/on17.515294ms, delta-.282794ms, repeats.766176/.017647ms,
+minimum43.6fps; C17frame cost/floor MET without acceleration proof. CPUmedian
+.078ms both, ranges.077–.101/.077–.100; capture1.895/2.0595ms, delta.1645ms
+not decidable below1/3ms resolution. Initial UTF8 decoding of UTF16LE-BOM
+driver files caused a false rejection; ignored helpers decode BOM only, with
+raw files/windows/thresholds unchanged and original result retained as
+`t19_timing_before_driver_decoding.*`. Independent fresh raw recomputation agrees.
+Final DD2D capture/default-off confirmation is complete, logs754–758, with
+the same EXE/DLL hashes as750–753. Bridge754off capture161624 scenes1764/1765
+native161627;755on capture161756 scenes1737/1738 native161758. Exactscene1737
+four-target sheet viewed. Third756off capture161949 scenes2095/2096 native161951;
+757on capture162126 scenes1832/1833 native162129. Exactscene1832 four-target
+sheet viewed. Water92/92 (48bridge+44third) and independent reflection214/214
+(110+104) match each capture's own rows bit-for-bit, four views each frame,
+blur1/1/0/0bridge and1/0/0/0third. Drawn12/12bridge,11/11third; each has4targets/
+4terrain, zero terrain fallback. Startup texture3 warmup refusals are retained.
+Four rows-only discovery checks pass324bridge each/332third each,0problems;
+vertex bindings unlogged and NOT verified. `t19_epoch_records.txt`,
+`t19_epoch_reflection.txt`, four `t19_<run>_discovery.txt`,
+`t19_epoch_runtime_checks.json` and `t19_epoch_static_audit.txt` own the evidence.
+
+Default-off758, water flag absent, BASE/windoff/EXPO,70s: one off startup line,
+no Water draw/target activity, State alpha12(F6D9)/blend27(A17D12+014F15),
+8guest windows and3viewed shots. Old706 EXPO/config/width parity remains not
+decidable. All nine new logs750–758 have0errors/warnings; known freeze signature
+NOT SEEN with guest windows14/14/14/13 timing,7/6bridge,7/7third,8defaults.
+All39shots1942x1136 were root-viewed in four sheets plus two full timing shots;
+both exact on-scene four-target sheets also viewed. Every driver remains
+RUN UNCHECKED; payload/static endpoint evidence does not verify continuous
+motion, operator-input absence or an actual concurrent swap interleaving.
+All8targets retain broad shoreline placement and missing objects/edge/colour
+differences; no new C9/C10/C14 numerical acceptance remeasurement is claimed.
+The initial controller helper correctly refused OFF inputs sent to the ON-record
+checker; ON inputs already passed. Retained
+`t19_epoch_records_including_off_inputs.txt`; corrected helper asserts OFF state
+then checks only ON, all final checks exit0, no product/threshold change or retry
+launch. `task19-controller-report.md` owns provenance. Product/runtime gates
+are complete. Final whole-branch code review APPROVED at224c92b, all I1/M1/M2
+resolved/no remaining findings. Final fresh whole-branch documents reassessment
+APPROVED/all findings closed. C18evidence rule MET; closed with concerns,
+closing prose wave finalized for publication.
+The failed Python wrapper lost the verdict and proves neither a pass nor a
+test failure. Fresh documents review approves with no Critical/Important
+findings; its local report-status Minor is corrected.
 
 C9's actual game/native luminance P5/50/95 is bridge
 1.341029/1.692726/1.921381 versus1.271694/1.685492/1.907713; third

@@ -902,8 +902,8 @@ class PixelMicrocode(unittest.TestCase):
         self.assertGreaterEqual(min(r.killed, r.skipped, r.shaded), tenth)       # (Review Focus 1: every branch is reached)
         self.assertGreaterEqual(min(r.sun, r.shaded - r.sun), tenth)             # b136 in both states among the shaded
         self.assertGreaterEqual(r.shadow, 1)                                     # b137 set somewhere
-        self.assertGreaterEqual(min(r.near, r.far), fifth // 2)                  # both sides of 1 / c140.x
-        self.assertGreaterEqual(min(r.fogged, r.shaded - r.fogged), fifth // 2)  # both sides of the fog's start
+        self.assertGreaterEqual(min(r.near, r.far), fifth)                  # both sides of 1 / c140.x
+        self.assertGreaterEqual(min(r.fogged, r.shaded - r.fogged), fifth)  # both sides of the fog's start
 
     def test_each_pixel_mutation_fails(self):
         for m in water_check.PIXEL_MUTATIONS:
@@ -3028,7 +3028,9 @@ C17restored timing68steady windows,min47.6fps;off17.932941/on17.928824ms,
 delta-.004117647; repeats.42/.118824ms:frame cost/floor met. Capture+.1675ms
 below1/3ms resolution not decidable; Water CPUmedian.077ms separate. Tiny
 negative nominal delta is not acceleration proof. Earlier C4original-base/C5
-horizon/C8/C11/C12 caveats persist. Task19 closing commit/reviews remain pending.
+horizon/C8/C11/C12 caveats persist. Initial Task19 commit ac6fd20 and documents
+approval and final whole-branch code approval at224c92b are complete;
+final fresh documents reassessment APPROVED; closing prose wave finalized with concerns.
 
 **Files:** frame map section 20 ("Validation (13c)", "Limits (13)"), the spec,
 `tools/xdk_sigmatch/water_replay.py` (`colour --all`, `targets --silhouette`),
@@ -3084,10 +3086,75 @@ Checks101–106 append without renumbering1–100; original user wind hunks rema
 exact in README/frame-map/check34. JSON schemas remain unchanged/no_albedo.
 Research's ten corrections and B4point4ruling26 remain dated. Task18 source/
 runtime review is approved, not a substitute for Task19's two fresh whole-branch
-reviews. Initial seven-doc closing commit precedes those reviews; commit hash,
-review facts and any document-only fix-wave follow-up are controller-owned and
-still pending in this handoff. No redundant product rebuild/tests for prose-only
-corrections; source/binding/target changes would follow the plan's own gates.
+reviews. Initial seven-doc closing commit `ac6fd20` preceded both fresh reviews.
+The documents review approves with no Critical/Important findings; its local
+report-status Minor is corrected. The code review found an epoch-admission
+Important and water-help/coverage-floor Minors. Rulings58–60 govern their
+tests-first fixes and new-artifact gates. Source224c92b/offline suites/new timing
+and runtime are complete; final whole-branch code review APPROVED at224c92b,
+all I1/M1/M2 resolved/no remaining code findings. C18evidence rule MET; final
+fresh whole-branch documents reassessment APPROVED, all findings closed;
+closing prose wave finalized for publication with concerns.
+
+**As executed (Task19 fix wave, current gates).** The observer saves the
+scene epoch before its first guest read on every path; RecordDraw admits both
+the ordinary and water records together under the scene mutex before light,
+sequence or water bookkeeping. Missing/stale origins reject both records,
+including an OFF-to-ON race. The production-callsite regression went red then
+green; no actual concurrent scene-swap reproduction is claimed. The water CVAR
+help now describes the blended/depth-writing native surface, own terrain/blur,
+whole-frame fallback and default-off behavior. Formula coverage now requires
+each near/far and fogged/unfogged side at one fifth, matching Review Focus1;
+unchanged floors are each fate and each b136 state one tenth, b137-set one
+twentieth (at least1), b137-clear one tenth, glint above1% one twentieth, and
+positive cosine one third of sun trials (ruling63 corrects earlier shorthand).
+Independent15%-reject/20%-pass cases cover all four sides. The original
+2000-trial census already exceeds the new400 floor and is unchanged. The two
+example assertions above are corrected from `fifth // 2` to `fifth`.
+
+Native41PASS, final release exit0 and full Python1899tests in570.771s,
+OK7skips/exit0 with ResourceWarning retained, are recorded. Source/test fix
+commit `224c92b` covers five exact paths and excludes original user wind edits;
+the release was built in the shared tree containing those edits, with windoff
+explicit in quantitative runs. No exact clean-HEAD build attribution is claimed.
+New executable SHA256
+`DD2DFF3EBE6C8B49A6775F688FAC42B002866E7AD51DCA6445985AB4AB9D26D9`
+is not the historical4554 measured binary. SDK source, shader text, targets and
+bindings are unchanged; the fresh code review explicitly retains historical
+WARP739/740 applicability, without claiming a DD2D WARP run. R61 isolated
+usual-display timing logs750–753 are complete:69steady windows18/17/17/17,
+off17.798088/on17.515294ms, delta-.282794ms, repeats.766176/.017647ms,
+minimum43.6fps; C17frame-cost/floor MET without an acceleration claim. All20shots
+1942x1136 were root-viewed, display7680x2160/144DPI150% inventoried each run,
+uncapped logged, all agents idle and each run alone. Aggregate guest windows
+14/14/14/13: known freeze NOT SEEN. Water CPU median.078ms both, ranges
+.077–.101/.077–.100; capture1.895/2.0595ms, delta.1645ms NOT DECIDABLE below
+1/3ms resolution. Initial UTF8 decoding of UTF16LE-BOM driver files falsely
+rejected strings; ignored helpers now decode the BOM only, keeping raw files/
+windows/rules unchanged and retaining the first result as
+`t19_timing_before_driver_decoding.*`. Fresh code review's independent raw
+recomputation agrees. Final whole-branch code review APPROVED at224c92b;
+final fresh documents reassessment APPROVED; closing prose finalized. The earlier Python
+wrapper lost its summary/exit verdict; it proves neither a pass nor a test
+failure. Pure prose reconciliation needs no redundant product suites.
+
+Final-build confirmation is complete: logs754–758, same DD2D/new DLLs as timing,
+all nine logs0errors/warnings and known freeze NOT SEEN with actual guest
+windows14/14/14/13 timing,7/6bridge,7/7third,8defaults. All39shots1942x1136
+root-viewed; bridge on scene1737 and third on1832 exact four-target sheets
+viewed. Water92/92 and reflection214/214 bit equal; surface12/12bridge and
+11/11third,4targets/4terrain each, no terrain fallback, texture3 warmup
+refusals retained. Discovery324bridge each/332third each passes, bindings
+unlogged/NOT verified. Default water flag absent758 has one startup off line,
+no Water draw/target activity, State12/27; old-image parity remains not
+decidable. Controller helper initially sent OFF inputs to the ON checker,
+which correctly refused them; corrected input selection/explicit OFF assertion
+passes without product/threshold change or retry launch. No new C9/C10/C14
+numerical acceptance, motion/input-absence or actual swap-interleaving proof.
+Final whole-branch code review APPROVED at224c92b; C18evidence rule MET.
+Final fresh whole-branch documents reassessment APPROVED, all findings closed;
+closing prose wave finalized for publication with concerns;
+`task19-controller-report.md` owns exact pairs and all raw artifact names.
 
 Made whether the sub-project closes at phase 13c, at phase 13b or at the capture. **Every step
 below is a numbered checkbox of its own, and the task's report quotes the list with each box's

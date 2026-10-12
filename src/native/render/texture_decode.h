@@ -693,6 +693,53 @@ inline FetchError WaterTextureFetch(const uint32_t fc[6], WaterDecode kind, Text
   return FetchError::kNone;
 }
 
+// The water's two textures on the GPU (TextureCache::ResolveWater; plan Task 11; ledger ruling 32). The guest's
+// block layout of a kind (what a level is untiled by): one byte a texel for the mask; 4 x 4 blocks of 16 bytes for
+// the normal map.
+constexpr TexFormatInfo WaterGuestFormat(WaterDecode kind) { return kind == WaterDecode::kK8 ? TexFormatInfo{1, 1, 0} : TexFormatInfo{4, 16, 4}; }
+// One stored level of the normal map as the rows of a host BC5 level: the guest's 16-byte blocks untiled and
+// byte-swapped by the constant's endian (UntileLevel), NOTHING DECODED: after the swap a block is the BC4 block of
+// x and then that of y, which is BC5's red and green (the SDK presents k_DXN so: DecodeDxnTexel's text). The GPU
+// then samples what the emulator's GPU samples, the palette entries as fractions and its own filter over the
+// stored levels, where an 8-bit decode rounds 57.6% of the map's values (the review of Tasks 1 to 5, I3). False
+// as UntileLevel.
+inline bool WaterDxnUploadLevel(const uint8_t* src, size_t src_size, const LevelLayout& l, bool tiled, uint32_t endian, uint8_t* dst,
+                                uint32_t dst_row_pitch) {
+  return UntileLevel(src, src_size, l, WaterGuestFormat(WaterDecode::kDxn), tiled, endian, dst, dst_row_pitch);
+}
+// What a GPU reads of a host BC5 level's rows (`row_pitch` bytes a row of blocks): width * height pairs (red,
+// green), row-major, each the block's palette entry as a fraction (Bc4Value / 255; red the block's first eight
+// bytes, green its last). The reference the tests hold WaterDxnUploadLevel to: its values must be
+// DecodeDxnLevel's of the guest bytes, float for float. False, with out_xy left empty, for a null argument, an
+// empty level or a pitch below a row's blocks.
+inline bool DecodeBc5Rows(const uint8_t* rows, uint32_t row_pitch, uint32_t width, uint32_t height, std::vector<float>* out_xy) {
+  if (!out_xy) return false;
+  out_xy->clear();
+  const uint32_t wb = (width + 3) / 4;
+  if (!rows || width == 0 || height == 0 || row_pitch / 16 < wb) return false;
+  std::vector<float> out(size_t(width) * height * 2);
+  for (uint32_t y = 0; y < height; ++y) {
+    for (uint32_t x = 0; x < width; ++x) {
+      const uint8_t* blk = rows + size_t(y / 4) * row_pitch + size_t(x / 4) * 16;
+      const uint32_t i = (y & 3) * 4 + (x & 3);
+      out[(size_t(y) * width + x) * 2] = Bc4Value(blk, i) / 255.0f;
+      out[(size_t(y) * width + x) * 2 + 1] = Bc4Value(blk + 8, i) / 255.0f;
+    }
+  }
+  *out_xy = std::move(out);
+  return true;
+}
+// The channel of the HOST texture a shader component of a water texture reads, from the fetch constant's
+// swizzle: 0 to 3 a channel of the sampled texel, 4 the constant 0, 5 the constant 1 (a field of
+// ClayWaterConstants::swizzle; the program picks the channel, the view has no swizzle). The mask is uploaded as
+// R8: the Xenos replicates a one-channel format's component (the SDK's host swizzle of k_8 is RRRR), so every
+// source channel is the texel's red. The normal map is uploaded as BC5: the SDK's host swizzle of k_DXN is RGGG,
+// so source channel 0 is red and every other green.
+constexpr uint32_t WaterHostChannel(WaterDecode kind, uint8_t selector) {
+  if (selector > 3) return selector == 5 ? 5u : 4u;
+  return kind == WaterDecode::kK8 ? 0u : (selector == 0 ? 0u : 1u);
+}
+
 inline bool IsMirror(uint8_t clamp) { return clamp == 1 || clamp == 3 || clamp == 5 || clamp == 7; }
 
 // Static sampler s<i>: bit 0 linear (else point), bit 1 clamp (else wrap).

@@ -12,6 +12,15 @@
 //     and the cleared depth);
 //   with kSceneDumpLayer two planes of (width / 2) * (height / 2) u32: the sun layer's depth
 //     before and after the tree occluders, as levels.
+// Version 2 (sub-project 13, the water; frame-map section 20): A FILE IS VERSION 2 IFF IT HAS A FLAG ABOVE 4,
+// and a file without one is version 1, byte for byte the file of before. After every plane of before, in
+// this order:
+//   with kSceneDumpPreWater width * height u32: the scene's depth taken just before the water step, as levels;
+//   with kSceneDumpWater width * height * 3 f32: the linear target taken right after the water step (the
+//     surface as the step wrote it, before any later record: what a replay of the surface is held to);
+//   with kSceneDumpTargets u32 count (1 to kSceneDumpMaxTargets), then for each of the frame's reflection
+//     targets u32 base (the slot-13 base its records name), f32 height (its water's level) and
+//     256 * 256 * 4 bytes: red, green, blue, alpha, rows from the top.
 // scene_frame is the frame number of the scene the Render drew (a discovery frame row's
 // "scene_frame"); asked_frame the one that was asked for (they differ when the Render that served
 // the request had a later scene). A value of the linear target that is not finite is written as 0
@@ -22,12 +31,21 @@
 #include <cstring>
 #include <vector>
 namespace fable2::native::render {
-inline constexpr uint32_t kSceneDumpMagic = 0x534E3246u, kSceneDumpVersion = 1;
+inline constexpr uint32_t kSceneDumpMagic = 0x534E3246u, kSceneDumpVersion = 1, kSceneDumpVersion2 = 2;
 // kSceneDumpPost: the frame was a post frame (its exposure is the game's scale of that frame;
 // otherwise the fixed one). kSceneDumpLayer: the sun layer was drawn; its two planes follow.
 // kSceneDumpPrepass: the frame's shadow mask, with its depth pre-pass, was drawn.
 inline constexpr uint32_t kSceneDumpPost = 1u, kSceneDumpLayer = 2u, kSceneDumpPrepass = 4u;
-inline constexpr uint32_t kSceneDumpKnownFlags = kSceneDumpPost | kSceneDumpLayer | kSceneDumpPrepass;
+// The water's (version 2): kSceneDumpPreWater: the depth before the water step follows; kSceneDumpWater: the
+// linear target after it; kSceneDumpTargets: the frame's reflection targets. Only a frame whose water is drawn
+// has any of them.
+inline constexpr uint32_t kSceneDumpPreWater = 8u, kSceneDumpTargets = 16u, kSceneDumpWater = 32u;
+inline constexpr uint32_t kSceneDumpVersion2Flags = kSceneDumpPreWater | kSceneDumpTargets | kSceneDumpWater;
+inline constexpr uint32_t kSceneDumpKnownFlags = kSceneDumpPost | kSceneDumpLayer | kSceneDumpPrepass | kSceneDumpVersion2Flags;
+inline constexpr uint32_t kSceneDumpTargetSize = 256, kSceneDumpMaxTargets = 4;   // render::kWaterTargetSize, kMaxWaterTargets
+inline constexpr uint64_t kSceneDumpTargetBytes = uint64_t(kSceneDumpTargetSize) * kSceneDumpTargetSize * 4;
+// The version a file with `flags` has.
+constexpr uint32_t SceneDumpVersionOf(uint32_t flags) { return (flags & kSceneDumpVersion2Flags) != 0 ? kSceneDumpVersion2 : kSceneDumpVersion; }
 // The bounds: a side of the picture, and the files of one run (a request past it is refused and
 // counted, "over-limit": AskSceneDump).
 inline constexpr uint32_t kSceneDumpMaxSide = 8192;
@@ -72,27 +90,75 @@ inline float DepthFromLevel24(uint32_t level) {
   return float(level < 16777215u ? level : 16777215u) / 16777215.0f;
 }
 
-// The bytes of a file of `width` x `height` with `flags`; 0 for sizes or flags a file cannot have
-// (a side of 0 or above kSceneDumpMaxSide, an unknown flag, an odd side with the layer's planes).
-inline constexpr uint64_t SceneDumpBytes(uint32_t width, uint32_t height, uint32_t flags) {
+// The bytes of a file of `width` x `height` with `flags` and `targets` reflection targets; 0 for sizes or
+// flags a file cannot have (a side of 0 or above kSceneDumpMaxSide, an unknown flag, an odd side with the
+// layer's planes; kSceneDumpTargets without 1 to kSceneDumpMaxTargets targets, or targets without the flag).
+// SceneDumpWaterOffset: where the water's part begins (the bytes of the planes of before).
+inline constexpr uint64_t SceneDumpWaterOffset(uint32_t width, uint32_t height, uint32_t flags) {
+  const uint64_t texels = uint64_t(width) * height;
+  return sizeof(SceneDumpHeader) + texels * 16 + ((flags & kSceneDumpLayer) != 0 ? 2 * (uint64_t(width / 2) * (height / 2)) * 4 : 0);
+}
+inline constexpr uint64_t SceneDumpBytes(uint32_t width, uint32_t height, uint32_t flags, uint32_t targets = 0) {
   if (width == 0 || height == 0 || width > kSceneDumpMaxSide || height > kSceneDumpMaxSide) return 0;
   if ((flags & ~kSceneDumpKnownFlags) != 0) return 0;
   const bool layer = (flags & kSceneDumpLayer) != 0;
   if (layer && ((width | height) & 1u) != 0) return 0;
+  const bool with_targets = (flags & kSceneDumpTargets) != 0;
+  if (with_targets ? (targets == 0 || targets > kSceneDumpMaxTargets) : targets != 0) return 0;
   const uint64_t texels = uint64_t(width) * height;
-  return sizeof(SceneDumpHeader) + texels * 16 + (layer ? 2 * (uint64_t(width / 2) * (height / 2)) * 4 : 0);
+  return SceneDumpWaterOffset(width, height, flags) + ((flags & kSceneDumpPreWater) != 0 ? texels * 4 : 0) +
+         ((flags & kSceneDumpWater) != 0 ? texels * 12 : 0) + (with_targets ? 4 + targets * (8 + kSceneDumpTargetBytes) : 0);
 }
 
-// The head of a file of `bytes` bytes, if it is one: the magic, the version, sizes and flags a
-// file can have, the reserved word 0, and exactly the bytes its head asks for.
-inline bool ParseSceneDump(const uint8_t* file, size_t bytes, SceneDumpHeader* head) {
+// Where the water's part of a parsed file lies, as offsets into the file (0: the file has none of that plane),
+// and its targets' heads.
+struct SceneDumpWater {
+  uint64_t pre_water = 0;                       // width * height u32
+  uint64_t water = 0;                           // width * height * 3 f32
+  uint32_t target_count = 0;
+  uint32_t target_base[kSceneDumpMaxTargets] = {};
+  float target_height[kSceneDumpMaxTargets] = {};
+  uint64_t target[kSceneDumpMaxTargets] = {};   // kSceneDumpTargetBytes each
+};
+
+// The head of a file of `bytes` bytes, if it is one: the magic, the version ITS FLAGS ASK FOR (1 without a
+// flag above 4, 2 with one: a version-1 head with such a flag and a version-2 head without one are no files),
+// sizes and flags a file can have, the reserved word 0, a targets' count of 1 to kSceneDumpMaxTargets where
+// the flag is set, and exactly the bytes its head (and that count) ask for. `water` (optional): where the
+// water's part lies; all zero for a version-1 file. Nothing is written on a refusal.
+inline bool ParseSceneDump(const uint8_t* file, size_t bytes, SceneDumpHeader* head, SceneDumpWater* water = nullptr) {
   if (!file || !head || bytes < sizeof(SceneDumpHeader)) return false;
   SceneDumpHeader h;
   std::memcpy(&h, file, sizeof(h));
-  if (h.magic != kSceneDumpMagic || h.version != kSceneDumpVersion || h.reserved != 0) return false;
-  const uint64_t want = SceneDumpBytes(h.width, h.height, h.flags);
+  if (h.magic != kSceneDumpMagic || h.reserved != 0) return false;
+  if (h.width == 0 || h.height == 0 || h.width > kSceneDumpMaxSide || h.height > kSceneDumpMaxSide || (h.flags & ~kSceneDumpKnownFlags) != 0) return false;
+  if (h.version != SceneDumpVersionOf(h.flags)) return false;
+  SceneDumpWater w;
+  const uint64_t texels = uint64_t(h.width) * h.height;
+  uint64_t at = SceneDumpWaterOffset(h.width, h.height, h.flags);
+  if ((h.flags & kSceneDumpPreWater) != 0) {
+    w.pre_water = at;
+    at += texels * 4;
+  }
+  if ((h.flags & kSceneDumpWater) != 0) {
+    w.water = at;
+    at += texels * 12;
+  }
+  if ((h.flags & kSceneDumpTargets) != 0) {
+    if (at > bytes || bytes - at < 4) return false;
+    std::memcpy(&w.target_count, file + at, 4);
+    if (w.target_count == 0 || w.target_count > kSceneDumpMaxTargets) return false;
+  }
+  const uint64_t want = SceneDumpBytes(h.width, h.height, h.flags, w.target_count);
   if (want == 0 || want != bytes) return false;
+  for (uint32_t k = 0; k < w.target_count; ++k) {
+    const uint64_t one = at + 4 + k * (8 + kSceneDumpTargetBytes);
+    std::memcpy(&w.target_base[k], file + one, 4);
+    std::memcpy(&w.target_height[k], file + one + 4, 4);
+    w.target[k] = one + 8;
+  }
   *head = h;
+  if (water) *water = w;
   return true;
 }
 
@@ -107,6 +173,18 @@ struct SceneDumpPlanes {
   uint32_t depth_pitch = 0;
   const uint8_t* layer[2] = {};
   uint32_t layer_pitch = 0;
+  // The water's (version 2; each read only with its flag): the depth step's target of the depth before the water
+  // step (as `depth`); the linear target's words after it (as `linear`); and the frame's reflection targets,
+  // R8G8B8A8 rows of `target_pitch` bytes, with their bases and heights.
+  const uint8_t* pre_water = nullptr;
+  uint32_t pre_water_pitch = 0;
+  const uint8_t* water = nullptr;
+  uint32_t water_pitch = 0;
+  uint32_t target_count = 0;
+  const uint8_t* target[kSceneDumpMaxTargets] = {};
+  uint32_t target_pitch = 0;
+  uint32_t target_base[kSceneDumpMaxTargets] = {};
+  float target_height[kSceneDumpMaxTargets] = {};
 };
 // The file. False, with `file` empty, for sizes or flags a file cannot have, a plane that is
 // missing or a pitch shorter than a row: a file is whole or not written. Only the picture's bytes
@@ -116,30 +194,44 @@ inline bool PackSceneDump(uint32_t width, uint32_t height, uint64_t scene_frame,
                           const SceneDumpPlanes& planes, std::vector<uint8_t>* file) {
   if (!file) return false;
   file->clear();
-  const uint64_t bytes = SceneDumpBytes(width, height, flags);
+  const bool with_targets = (flags & kSceneDumpTargets) != 0;
+  const uint64_t bytes = SceneDumpBytes(width, height, flags, with_targets ? planes.target_count : 0);
   const bool layer = (flags & kSceneDumpLayer) != 0;
   if (bytes == 0 || !planes.linear || !planes.depth || planes.linear_pitch / 4 < width || planes.depth_pitch / 4 < width) return false;
   if (layer && (!planes.layer[0] || !planes.layer[1] || planes.layer_pitch / 4 < width / 2)) return false;
+  // (the water's planes: each asked for by its flag is there, whole; targets without their flag are no file)
+  if (!with_targets && planes.target_count != 0) return false;
+  if ((flags & kSceneDumpPreWater) != 0 && (!planes.pre_water || planes.pre_water_pitch / 4 < width)) return false;
+  if ((flags & kSceneDumpWater) != 0 && (!planes.water || planes.water_pitch / 4 < width)) return false;
+  if (with_targets) {
+    if (planes.target_pitch / 4 < kSceneDumpTargetSize) return false;
+    for (uint32_t k = 0; k < planes.target_count; ++k) {
+      if (!planes.target[k]) return false;
+    }
+  }
   file->resize(size_t(bytes));
   uint8_t* out = file->data() + sizeof(SceneDumpHeader);
   uint32_t bad = 0;
-  for (uint32_t y = 0; y < height; ++y) {
-    const uint8_t* row = planes.linear + size_t(y) * planes.linear_pitch;
-    for (uint32_t x = 0; x < width; ++x) {
-      uint32_t word;
-      std::memcpy(&word, row + 4 * size_t(x), 4);
-      float c[3];
-      DecodeR11G11B10(word, c);
-      for (float& v : c) {
-        if (!std::isfinite(v)) {
-          v = 0.0f;
-          ++bad;
+  auto floats = [&](const uint8_t* rows, uint32_t pitch) {
+    for (uint32_t y = 0; y < height; ++y) {
+      const uint8_t* row = rows + size_t(y) * pitch;
+      for (uint32_t x = 0; x < width; ++x) {
+        uint32_t word;
+        std::memcpy(&word, row + 4 * size_t(x), 4);
+        float c[3];
+        DecodeR11G11B10(word, c);
+        for (float& v : c) {
+          if (!std::isfinite(v)) {
+            v = 0.0f;
+            ++bad;
+          }
         }
+        std::memcpy(out, c, 12);
+        out += 12;
       }
-      std::memcpy(out, c, 12);
-      out += 12;
     }
-  }
+  };
+  floats(planes.linear, planes.linear_pitch);
   auto levels = [&](const uint8_t* rows, uint32_t pitch, uint32_t w, uint32_t h) {
     for (uint32_t y = 0; y < h; ++y) {
       const uint8_t* row = rows + size_t(y) * pitch;
@@ -156,7 +248,22 @@ inline bool PackSceneDump(uint32_t width, uint32_t height, uint64_t scene_frame,
     levels(planes.layer[0], planes.layer_pitch, width / 2, height / 2);
     levels(planes.layer[1], planes.layer_pitch, width / 2, height / 2);
   }
-  SceneDumpHeader head{kSceneDumpMagic, kSceneDumpVersion, width, height, scene_frame, asked_frame, flags,
+  if ((flags & kSceneDumpPreWater) != 0) levels(planes.pre_water, planes.pre_water_pitch, width, height);
+  if ((flags & kSceneDumpWater) != 0) floats(planes.water, planes.water_pitch);   // (a value that is no number: 0, counted with the scene's)
+  if (with_targets) {
+    std::memcpy(out, &planes.target_count, 4);
+    out += 4;
+    for (uint32_t k = 0; k < planes.target_count; ++k) {
+      std::memcpy(out, &planes.target_base[k], 4);
+      std::memcpy(out + 4, &planes.target_height[k], 4);
+      out += 8;
+      for (uint32_t y = 0; y < kSceneDumpTargetSize; ++y) {
+        std::memcpy(out, planes.target[k] + size_t(y) * planes.target_pitch, size_t(kSceneDumpTargetSize) * 4);
+        out += size_t(kSceneDumpTargetSize) * 4;
+      }
+    }
+  }
+  SceneDumpHeader head{kSceneDumpMagic, SceneDumpVersionOf(flags), width, height, scene_frame, asked_frame, flags,
                        std::isfinite(exposure) ? exposure : 0.0f, bad, 0};
   std::memcpy(file->data(), &head, sizeof(head));
   return true;

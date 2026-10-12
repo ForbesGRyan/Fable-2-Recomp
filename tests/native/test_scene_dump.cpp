@@ -118,7 +118,7 @@ int main() {
     bad = good;
     bad.width = kSceneDumpMaxSide + 1;
     if (!refused(bad, 64) || SceneDumpBytes(kSceneDumpMaxSide + 1, 2, 0) != 0 || SceneDumpBytes(0, 2, 0) != 0 ||
-        SceneDumpBytes(5, 2, kSceneDumpLayer) != 0 || SceneDumpBytes(4, 2, 8) != 0) return 33;
+        SceneDumpBytes(5, 2, kSceneDumpLayer) != 0 || SceneDumpBytes(4, 2, 64) != 0) return 33;
     if (SceneDumpBytes(1120, 720, kSceneDumpLayer) != 48ull + 1120ull * 720 * 16 + 2ull * 560 * 360 * 4) return 34;
     // (a file one byte longer is not this file)
     f.push_back(0);
@@ -275,6 +275,170 @@ int main() {
     if (!PackImpostorPictures(9, many.data(), 32, &file) || file.size() != 24 + 32 * (16 + n)) return 96;
     if (!PackImpostorPictures(9, nullptr, 0, &file) || file.size() != 24 || !ParseImpostorPictures(file.data(), file.size(), &head, &heads, &pictures) ||
         head.count != 0 || head.scene_frame != 9 || !heads.empty()) return 97;
+  }
+  // The water's planes (sub-project 13, plan Tasks 11 and 12): flag 16, the frame's reflection targets (1 to 4
+  // pictures of 256 x 256 RGBA8 with their bases and heights) after every plane of before. A file with a flag above
+  // 4 is version 2; a file without one is version 1 and the file of before, byte for byte.
+  {
+    const uint64_t today = 48ull + 1120ull * 720 * 16;
+    // 110: the sizes.
+    if (kSceneDumpTargets != 16u || kSceneDumpPreWater != 8u || kSceneDumpVersion != 1u || kSceneDumpVersion2 != 2u ||
+        kSceneDumpTargetSize != 256u || kSceneDumpMaxTargets != 4u) return 110;
+    if (SceneDumpBytes(1120, 720, kSceneDumpPost) != today || SceneDumpBytes(1120, 720, kSceneDumpPost, 0) != today) return 110;
+    if (SceneDumpBytes(1120, 720, kSceneDumpPost | kSceneDumpTargets, 4) != today + 4 + 4 * (8 + 262144ull)) return 110;
+    if (SceneDumpBytes(1120, 720, kSceneDumpTargets, 1) != today + 4 + 8 + 262144ull) return 110;
+    if (SceneDumpBytes(1120, 720, kSceneDumpTargets, 0) != 0 || SceneDumpBytes(1120, 720, kSceneDumpTargets, 5) != 0 ||
+        SceneDumpBytes(1120, 720, kSceneDumpTargets) != 0) return 110;
+    if (SceneDumpBytes(1120, 720, kSceneDumpPost, 1) != 0) return 110;            // targets without their flag
+    if (SceneDumpBytes(1120, 720, 64u) != 0 || SceneDumpBytes(1120, 720, 64u | kSceneDumpTargets, 2) != 0) return 110;   // a flag no version knows
+    if (SceneDumpVersionOf(0) != 1 || SceneDumpVersionOf(7) != 1 || SceneDumpVersionOf(kSceneDumpTargets) != 2 ||
+        SceneDumpVersionOf(kSceneDumpPreWater) != 2 || SceneDumpVersionOf(7 | kSceneDumpTargets) != 2) return 110;
+
+    // 111: a packed file with two targets parses as version 2 with its bases, heights and bytes in place; a file
+    // without a new flag is version 1 and byte for byte the file of before (packed by the old argument list).
+    const uint32_t w = 4, hgt = 2, pitch = 32, tpitch = 1280;
+    std::vector<uint8_t> linear(pitch * hgt, 0), depth(pitch * hgt, 0);
+    for (size_t i = 0; i < depth.size(); i += 4) PutLevel(depth.data() + i, uint32_t(1000 + i));
+    for (size_t i = 0; i < linear.size(); i += 4) {
+      const uint32_t word = (15u << 6) | uint32_t(i);
+      std::memcpy(linear.data() + i, &word, 4);
+    }
+    SceneDumpPlanes old_planes;
+    old_planes.linear = linear.data();
+    old_planes.depth = depth.data();
+    old_planes.linear_pitch = old_planes.depth_pitch = pitch;
+    std::vector<uint8_t> before, same, two;
+    if (!PackSceneDump(w, hgt, 9, 8, kSceneDumpPost, 2.5f, old_planes, &before) || before.size() != 48 + w * hgt * 16) return 111;
+    if (Word(before, 4) != 1) return 111;
+    // (two targets in one read-back buffer, rows of tpitch bytes, the second directly after the first's 256 rows)
+    std::vector<uint8_t> rows(size_t(tpitch) * 256 * 2, 0xEE);
+    for (uint32_t k = 0; k < 2; ++k) {
+      for (uint32_t y = 0; y < 256; ++y) {
+        for (uint32_t x = 0; x < 256 * 4; ++x) rows[(size_t(k) * 256 + y) * tpitch + x] = uint8_t(k * 101 + y * 3 + x * 7);
+      }
+    }
+    SceneDumpPlanes planes = old_planes;
+    planes.target_count = 0;
+    if (!PackSceneDump(w, hgt, 9, 8, kSceneDumpPost, 2.5f, planes, &same) || same != before) return 111;
+    planes.target_count = 2;
+    planes.target_pitch = tpitch;
+    planes.target[0] = rows.data();
+    planes.target[1] = rows.data() + size_t(tpitch) * 256;
+    planes.target_base[0] = 0x13401000u;
+    planes.target_base[1] = 0x13501000u;
+    planes.target_height[0] = 20.1024f;
+    planes.target_height[1] = 40.0f;
+    if (!PackSceneDump(w, hgt, 9, 8, kSceneDumpPost | kSceneDumpTargets, 2.5f, planes, &two)) return 111;
+    const size_t at = before.size();
+    if (two.size() != at + 4 + 2 * (8 + 262144) || two.size() != SceneDumpBytes(w, hgt, kSceneDumpPost | kSceneDumpTargets, 2)) return 111;
+    if (Word(two, 4) != 2 || Word(two, 32) != (kSceneDumpPost | kSceneDumpTargets)) return 111;
+    // (everything of before is in place: the head but for the version and the flags, and every plane)
+    if (std::memcmp(two.data(), before.data(), 4) != 0 || std::memcmp(two.data() + 8, before.data() + 8, 24) != 0 ||
+        std::memcmp(two.data() + 36, before.data() + 36, at - 36) != 0) return 111;
+    if (Word(two, at) != 2 || Word(two, at + 4) != 0x13401000u || Float(two, at + 8) != 20.1024f) return 111;
+    const size_t second = at + 4 + 8 + 262144;
+    if (Word(two, second) != 0x13501000u || Float(two, second + 4) != 40.0f) return 111;
+    for (uint32_t k = 0; k < 2; ++k) {
+      const size_t bytes = at + 4 + 8 + size_t(k) * (8 + 262144);
+      for (uint32_t y = 0; y < 256; ++y) {
+        if (std::memcmp(two.data() + bytes + size_t(y) * 1024, rows.data() + (size_t(k) * 256 + y) * tpitch, 1024) != 0) return 111;
+      }
+    }
+    SceneDumpHeader head{};
+    SceneDumpWater water;
+    if (!ParseSceneDump(two.data(), two.size(), &head, &water) || head.version != 2 || head.flags != (kSceneDumpPost | kSceneDumpTargets) ||
+        head.scene_frame != 9 || head.asked_frame != 8) return 111;
+    if (water.pre_water != 0 || water.target_count != 2 || water.target_base[0] != 0x13401000u || water.target_base[1] != 0x13501000u ||
+        water.target_height[0] != 20.1024f || water.target_height[1] != 40.0f || water.target[0] != at + 12 || water.target[1] != second + 8) return 111;
+    if (!ParseSceneDump(two.data(), two.size(), &head)) return 111;                // (a reader without the water's part)
+    if (!ParseSceneDump(before.data(), before.size(), &head, &water) || head.version != 1 || water.target_count != 0 || water.pre_water != 0) return 111;
+
+    // 112: what is not parsed: a version-1 head with flag 16, a version-2 head without a new flag, a short file, a
+    // count of 0 or 5, a file one byte longer. And what is not packed: a missing target, a short pitch, a count
+    // without the flag and the flag without a count.
+    std::vector<uint8_t> bad = two;
+    bad[4] = 1;
+    if (ParseSceneDump(bad.data(), bad.size(), &head, &water)) return 112;
+    bad = before;
+    bad[4] = 2;
+    if (ParseSceneDump(bad.data(), bad.size(), &head, &water)) return 112;
+    if (ParseSceneDump(two.data(), two.size() - 1, &head, &water) || ParseSceneDump(two.data(), at + 3, &head, &water) ||
+        ParseSceneDump(two.data(), at, &head, &water)) return 112;
+    bad = two;
+    bad[at] = 0;
+    if (ParseSceneDump(bad.data(), bad.size(), &head, &water)) return 112;
+    bad[at] = 5;
+    if (ParseSceneDump(bad.data(), bad.size(), &head, &water)) return 112;
+    bad[at] = 1;                                                                    // (the bytes are two targets')
+    if (ParseSceneDump(bad.data(), bad.size(), &head, &water)) return 112;
+    bad = two;
+    bad.push_back(0);
+    if (ParseSceneDump(bad.data(), bad.size(), &head, &water)) return 112;
+    std::vector<uint8_t> none;
+    SceneDumpPlanes missing = planes;
+    missing.target[1] = nullptr;
+    if (PackSceneDump(w, hgt, 9, 8, kSceneDumpPost | kSceneDumpTargets, 2.5f, missing, &none) || !none.empty()) return 112;
+    missing = planes;
+    missing.target_pitch = 1020;
+    if (PackSceneDump(w, hgt, 9, 8, kSceneDumpPost | kSceneDumpTargets, 2.5f, missing, &none) || !none.empty()) return 112;
+    if (PackSceneDump(w, hgt, 9, 8, kSceneDumpPost, 2.5f, planes, &none) || !none.empty()) return 112;                  // a count without the flag
+    missing = planes;
+    missing.target_count = 0;
+    if (PackSceneDump(w, hgt, 9, 8, kSceneDumpPost | kSceneDumpTargets, 2.5f, missing, &none) || !none.empty()) return 112;
+    missing.target_count = 5;
+    if (PackSceneDump(w, hgt, 9, 8, kSceneDumpPost | kSceneDumpTargets, 2.5f, missing, &none) || !none.empty()) return 112;
+    // 113: flag 8 adds one plane of width * height * 4 bytes (the depth before the water step, as levels) and flag
+    // 32 one of width * height * 12 (the linear target after it); each makes the file version 2; they stand after
+    // the planes of before and before the targets, the depth first.
+    if (kSceneDumpWater != 32u || SceneDumpBytes(1120, 720, kSceneDumpPreWater) != today + 1120ull * 720 * 4 ||
+        SceneDumpBytes(1120, 720, kSceneDumpWater) != today + 1120ull * 720 * 12 ||
+        SceneDumpBytes(1120, 720, kSceneDumpPreWater | kSceneDumpWater | kSceneDumpTargets, 2) != today + 1120ull * 720 * 16 + 4 + 2 * (8 + 262144ull) ||
+        SceneDumpVersionOf(kSceneDumpWater) != 2) return 113;
+    // (the pass's file with everything: the layer's planes, the three of the water, four targets)
+    if (SceneDumpBytes(1120, 720, 63u, 4) == 0 || SceneDumpBytes(1120, 720, 63u, 4) > (32ull << 20)) return 113;
+    {
+      std::vector<uint8_t> pre(pitch * hgt, 0), after(pitch * hgt, 0), all;
+      for (size_t i = 0; i < pre.size(); i += 4) PutLevel(pre.data() + i, uint32_t(70000 + i));
+      for (size_t i = 0; i < after.size(); i += 4) {
+        const uint32_t word = (16u << 6) | uint32_t(i);                             // red 2 and a little: another picture than `linear`
+        std::memcpy(after.data() + i, &word, 4);
+      }
+      SceneDumpPlanes full = planes;
+      full.pre_water = pre.data();
+      full.water = after.data();
+      full.pre_water_pitch = full.water_pitch = pitch;
+      const uint32_t flags = kSceneDumpPost | kSceneDumpPreWater | kSceneDumpWater | kSceneDumpTargets;
+      if (!PackSceneDump(w, hgt, 9, 8, flags, 2.5f, full, &all) || all.size() != SceneDumpBytes(w, hgt, flags, 2)) return 113;
+      SceneDumpHeader h3{};
+      SceneDumpWater w3;
+      if (!ParseSceneDump(all.data(), all.size(), &h3, &w3) || h3.version != 2 || h3.flags != flags) return 113;
+      if (w3.pre_water != at || w3.water != at + w * hgt * 4 || w3.target_count != 2 || w3.target[0] != at + w * hgt * 16 + 12) return 113;
+      for (uint32_t i = 0; i < w * hgt; ++i) {
+        const uint32_t x = i % w, y = i / w;
+        if (Word(all, size_t(w3.pre_water) + 4 * i) != 70000 + y * pitch + 4 * x) return 113;
+      }
+      if (Float(all, size_t(w3.water)) != 2.0f || Float(all, 48) != 1.0f) return 113;                    // the plane after the step; the scene itself
+      if (std::memcmp(all.data() + w3.target[1], two.data() + second + 8, 262144) != 0) return 113;
+      // flag 8 alone, flag 32 alone: each a version-2 file with its one plane
+      std::vector<uint8_t> one;
+      SceneDumpPlanes only = old_planes;
+      only.pre_water = pre.data();
+      only.pre_water_pitch = pitch;
+      if (!PackSceneDump(w, hgt, 9, 8, kSceneDumpPreWater, 2.5f, only, &one) || one.size() != at + w * hgt * 4 || Word(one, 4) != 2 ||
+          !ParseSceneDump(one.data(), one.size(), &h3, &w3) || w3.pre_water != at || w3.water != 0 || w3.target_count != 0) return 113;
+      only = old_planes;
+      only.water = after.data();
+      only.water_pitch = pitch;
+      if (!PackSceneDump(w, hgt, 9, 8, kSceneDumpWater, 2.5f, only, &one) || one.size() != at + w * hgt * 12 ||
+          !ParseSceneDump(one.data(), one.size(), &h3, &w3) || w3.water != at || w3.pre_water != 0) return 113;
+      // a plane asked for and missing, or with a short pitch: no file
+      only.water = nullptr;
+      if (PackSceneDump(w, hgt, 9, 8, kSceneDumpWater, 2.5f, only, &one) || !one.empty()) return 113;
+      only = old_planes;
+      only.pre_water = pre.data();
+      only.pre_water_pitch = 12;
+      if (PackSceneDump(w, hgt, 9, 8, kSceneDumpPreWater, 2.5f, only, &one) || !one.empty()) return 113;
+    }
   }
   std::cout << "PASS: scene dump\n";
   return 0;

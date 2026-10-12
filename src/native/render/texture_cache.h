@@ -43,6 +43,16 @@ class TextureCache {
   nrhi::TextureView* Resolve(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::Material& m,
                              uint32_t* sampler, float* uv_fix, capture::MaterialStatus* status,
                              TextureStats& st);
+  // The lake's two textures (sub-project 13, plan Task 11; clay_logic.h, "Native water"): the shore mask of a
+  // water record's slot 1 (`kind` kK8: one level, uploaded as R8 through DecodeK8Level) or the normal map of its
+  // slot 2 (kDxn: every stored level, uploaded as BC5 blocks through WaterDxnUploadLevel: untiled and byte-swapped,
+  // nothing decoded; ledger ruling 32). The constant is judged by render::WaterTextureFetch, the capture's own
+  // rule again, before its address is followed; residency, the per-frame sample hash, the upload budget and the
+  // dynamic rule are Resolve's own, under a key of its own kind. The view has no swizzle: the surface's program
+  // picks the channels (WaterHostChannel). Neither format is one Resolve takes (TexFormatFromXenos is not
+  // changed), and nothing but the water step calls this: with fable2_native_water off it is never reached.
+  nrhi::TextureView* ResolveWater(nrhi::Cmd* cmd, nrhi::Device* dev, const uint32_t fetch[6], WaterDecode kind, uint32_t* sampler,
+                                  capture::MaterialStatus* status, TextureStats& st);
   // The rotation tile of the game's shadow mask (texture_decode.h, kRotationTilePhys), read from
   // guest memory as the mask's shader samples it: 32 x 32 texels of two bytes (x, y). False, with
   // `out` untouched, when the memory cannot be read or its bytes are not the tile (a texel that is
@@ -85,11 +95,16 @@ class TextureCache {
   nrhi::TextureView* ResolveImpl(nrhi::Cmd* cmd, nrhi::Device* dev, const capture::Material& m,
                                  uint32_t* sampler, float* uv_fix, capture::MaterialStatus* status,
                                  TextureStats& st);
-  static bool BuildPlan(const TextureFetch& t, Plan* plan);
+  // What ResolveImpl does once the constant is decoded (`t`), for an albedo (`water` null: every step as before the
+  // water) or a water texture (`water`: its kind, which gives the block layout, the level count, the key's kind,
+  // the host format and the decode).
+  nrhi::TextureView* ResolveFetch(nrhi::Cmd* cmd, nrhi::Device* dev, const uint32_t fetch[6], const TextureFetch& t, const WaterDecode* water,
+                                  uint32_t* sampler, float* uv_fix, capture::MaterialStatus* status, TextureStats& st);
+  static bool BuildPlan(const TextureFetch& t, const TexFormatInfo& fi, uint32_t levels, Plan* plan);
   nrhi::TextureView* Upload(nrhi::Cmd* cmd, nrhi::Device* dev, const TextureFetch& t,
                             const Plan& plan, const uint8_t* base, const uint8_t* mips,
                             const GeoKey& key, uint64_t hash, float* uv_fix,
-                            capture::MaterialStatus* status);
+                            capture::MaterialStatus* status, const WaterDecode* water);
   nrhi::Texture* TakeRetired(nrhi::Device* dev, const nrhi::TextureDesc& desc, uint64_t bytes);
   void Retire(nrhi::Device* dev, nrhi::Texture* tex, uint64_t bytes);
   void Latch(const char* what);

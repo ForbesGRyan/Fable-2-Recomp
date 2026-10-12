@@ -126,8 +126,60 @@ class Dump(unittest.TestCase):
             # not know: refused.
             for bad in (self.file(4, 2, 7, scene, depth, (before,)), self.file(4, 2, 5, scene, depth) + b"\0\0\0\0",
                         self.file(4, 2, 7, scene, depth, (before, after, after)),
-                        b"F2NX" + self.file(4, 2, 5, scene, depth)[4:], self.file(4, 2, 8, scene, depth)):
+                        b"F2NX" + self.file(4, 2, 5, scene, depth)[4:], self.file(4, 2, 8, scene, depth), self.file(4, 2, 64, scene, depth)):
 
+                p.write_bytes(bad)
+                with self.assertRaises(ValueError):
+                    ft.read_dump(p)
+
+    def test_the_water_s_planes_of_a_version_2_file(self):
+        """Sub-project 13 (plan Tasks 11 and 12; ledger ruling 44): flag 8 the scene's depth just before the water step,
+        flag 32 the linear target right after it, flag 16 the frame's reflection targets; a file with any of them is
+        version 2, and every reader of before reads its four results from it as from a version-1 file."""
+        scene = np.arange(4 * 2 * 3, dtype=np.float32).reshape(2, 4, 3)
+        depth = np.arange(8, dtype=np.uint32).reshape(2, 4)
+        pre = depth + 100
+        after = scene * 2
+        targets = [(0x13401000, 20.1024, (np.arange(256 * 256 * 4) % 251).astype(np.uint8)), (0x13501000, 40.0, (np.arange(256 * 256 * 4) % 241).astype(np.uint8))]
+        def v2(flags, parts, count=None):
+            head = struct.pack("<4sIIIQQIfII", b"F2NS", 2, 4, 2, 77, 76, flags, 7.5, 0, 0)
+            body = head + scene.astype("<f4").tobytes() + depth.astype("<u4").tobytes()
+            if flags & 8:
+                body += pre.astype("<u4").tobytes()
+            if flags & 32:
+                body += after.astype("<f4").tobytes()
+            if flags & 16:
+                body += struct.pack("<I", len(parts) if count is None else count)
+                for base, height, rgba in parts:
+                    body += struct.pack("<If", base, height) + rgba.tobytes()
+            return body
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "a.f2ns"
+            p.write_bytes(self.file(4, 2, 5, scene, depth))
+            self.assertEqual(ft.read_dump_water(p), {"pre_water": None, "water": None, "targets": []})
+            self.assertEqual(ft.read_dump(p)[0]["version"], 1)
+            p.write_bytes(v2(1 | 8 | 16 | 32, targets))
+            head, s, z, layers = ft.read_dump(p)
+            self.assertEqual((head["version"], head["flags"]), (2, 57))
+            self.assertTrue(np.array_equal(s, scene) and np.array_equal(z, depth) and layers is None)
+            water = ft.read_dump_water(p)
+            self.assertTrue(np.array_equal(water["pre_water"], pre) and np.array_equal(water["water"], after))
+            self.assertEqual([(b, round(float(hgt), 4)) for b, hgt, _ in water["targets"]], [(0x13401000, 20.1024), (0x13501000, 40.0)])
+            self.assertEqual(water["targets"][0][2].shape, (256, 256, 4))
+            self.assertTrue(np.array_equal(water["targets"][1][2].reshape(-1), targets[1][2]))
+            p.write_bytes(v2(16, targets[:1]))
+            water = ft.read_dump_water(p)
+            self.assertTrue(water["pre_water"] is None and water["water"] is None and len(water["targets"]) == 1)
+            p.write_bytes(v2(8, []))
+            self.assertTrue(np.array_equal(ft.read_dump_water(p)["pre_water"], pre))
+            # Refused: a version-1 head with a new flag, a version-2 head without one, a count of 0 or 5, a short or a
+            # long file.
+            one = bytearray(v2(16, targets))
+            one[4] = 1
+            two = bytearray(self.file(4, 2, 5, scene, depth))
+            two[4] = 2
+            for bad in (bytes(one), bytes(two), v2(16, targets, count=0), v2(16, targets, count=5), v2(16, targets)[:-1], v2(16, targets) + b"\0",
+                        v2(8 | 16, targets)[:48 + 8 * 16 + 8 * 4 + 2]):
                 p.write_bytes(bad)
                 with self.assertRaises(ValueError):
                     ft.read_dump(p)

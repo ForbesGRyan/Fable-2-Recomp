@@ -141,10 +141,9 @@ nrhi::Texture* TextureCache::TakeRetired(nrhi::Device* dev, const nrhi::TextureD
 // layouts. Levels at or past the packed level live in the packed tail stored
 // like the packed level (layout.base for level 0 when the whole texture is a
 // tail, mips[packed] otherwise), at the block offset GetPackedMipOffset gives.
-bool TextureCache::BuildPlan(const TextureFetch& t, Plan* plan) {
-  const TexFormatInfo fi = FormatInfo(t.format);
-  // k_DXT3A is decoded on the CPU, base level only (the terrain weight map has no mips in use).
-  const uint32_t levels = t.format == TexFormat::kDxt3a ? 1u : std::min(LevelCount(t), kMaxLevels);
+// (`fi`, `levels`: the guest's block layout and the levels to plan; ResolveFetch gives an albedo's as before the
+// water: FormatInfo of its format, and one level for k_DXT3A.)
+bool TextureCache::BuildPlan(const TextureFetch& t, const TexFormatInfo& fi, uint32_t levels, Plan* plan) {
   const xenos::TextureFormat format = xenos::TextureFormat(t.xenos_format);
   const texture_util::TextureGuestLayout layout = texture_util::GetGuestTextureLayout(
       xenos::DataDimension::k2DOrStacked, t.pitch_texels >> 5, t.width, t.height, 1, t.tiled, format,
@@ -242,13 +241,59 @@ nrhi::TextureView* TextureCache::ResolveImpl(nrhi::Cmd* cmd, nrhi::Device* dev,
     case FetchError::kNot2D: return fail(MaterialStatus::kFormatUnsupported);
     default: return fail(MaterialStatus::kTextureBad);
   }
+  return ResolveFetch(cmd, dev, m.fetch, t, nullptr, sampler, uv_fix, status, st);
+}
 
+nrhi::TextureView* TextureCache::ResolveWater(nrhi::Cmd* cmd, nrhi::Device* dev, const uint32_t fetch[6], WaterDecode kind,
+                                              uint32_t* sampler, MaterialStatus* status, TextureStats& st) {
+  const auto t0 = Clock::now();
+  nrhi::TextureView* view = nullptr;
+  TextureFetch t;
+  if (latched_) {
+    *status = MaterialStatus::kTextureBad;
+  } else {
+    switch (WaterTextureFetch(fetch, kind, &t)) {
+      case FetchError::kNone: {
+        float uv_fix[2] = {1.0f, 1.0f};   // (the mask is R8 at its own size; the map's host size is whole blocks: below)
+        view = ResolveFetch(cmd, dev, fetch, t, &kind, sampler, uv_fix, status, st);
+        // A map that is not a whole number of blocks would need the host scale the albedo's coordinates get; the
+        // surface's program has none (its coordinates are the game's): such a map is not the water's.
+        if (view && (uv_fix[0] != 1.0f || uv_fix[1] != 1.0f)) {
+          view = nullptr;
+          *status = MaterialStatus::kFormatUnsupported;
+        }
+        break;
+      }
+      case FetchError::kFormat:
+      case FetchError::kNot2D: *status = MaterialStatus::kFormatUnsupported; break;
+      default: *status = MaterialStatus::kTextureBad; break;
+    }
+  }
+  st.decode_ms += Ms(t0, Clock::now());
+  st.resident = uint32_t(entries_.size());
+  st.resident_bytes = index_.resident_bytes();
+  return view;
+}
+
+nrhi::TextureView* TextureCache::ResolveFetch(nrhi::Cmd* cmd, nrhi::Device* dev, const uint32_t fetch[6], const TextureFetch& t,
+                                              const WaterDecode* water, uint32_t* sampler, float* uv_fix, MaterialStatus* status,
+                                              TextureStats& st) {
+  auto fail = [status](MaterialStatus s) -> nrhi::TextureView* {
+    *status = s;
+    return nullptr;
+  };
   Plan plan;
-  if (!BuildPlan(t, &plan)) return fail(MaterialStatus::kTextureBad);
+  // k_DXT3A is decoded on the CPU, base level only (the terrain weight map has no mips in use). A water texture:
+  // the mask one level (k_8 has none in use), the normal map every stored level.
+  const TexFormatInfo fi = water ? WaterGuestFormat(*water) : FormatInfo(t.format);
+  const uint32_t levels = water ? (*water == WaterDecode::kK8 ? 1u : std::min(LevelCount(t), kMaxLevels))
+                                : (t.format == TexFormat::kDxt3a ? 1u : std::min(LevelCount(t), kMaxLevels));
+  if (!BuildPlan(t, fi, levels, &plan)) return fail(MaterialStatus::kTextureBad);
   if (plan.base_only) ++st.base_only;
 
+  // (kind 2: an albedo, as before; 3: a water texture, whose formats no albedo has)
   const GeoKey key{t.base_phys, plan.base_extent, t.xenos_format | (t.width << 8),
-                   uint32_t(TextureIdentity(m.fetch)), 2};
+                   uint32_t(TextureIdentity(fetch)), uint8_t(water ? 3 : 2)};
 
   // Guest bytes, bounds-checked against the physical heap. An unreadable mip
   // region falls back to the base level only (like a failed mip layout).
@@ -294,7 +339,7 @@ nrhi::TextureView* TextureCache::ResolveImpl(nrhi::Cmd* cmd, nrhi::Device* dev,
     if (!base && !read()) return fail(MaterialStatus::kTextureBad);
     const uint64_t guest_bytes = uint64_t(plan.base_extent) + plan.mip_extent;
     if (!upload_.TryTake(guest_bytes)) return fail(MaterialStatus::kTexturePending);
-    view = Upload(cmd, dev, t, plan, base, mips, key, state.sample_hash, uv_fix, status);
+    view = Upload(cmd, dev, t, plan, base, mips, key, state.sample_hash, uv_fix, status, water);
     if (!view) {
       // Upload set *status. A decode failure is not retried (nor charged to
       // the upload budget again) until the contents change; RHI failures latch.
@@ -305,6 +350,11 @@ nrhi::TextureView* TextureCache::ResolveImpl(nrhi::Cmd* cmd, nrhi::Device* dev,
     st.upload_bytes += guest_bytes;
   }
 
+  // A water texture whose stored levels could not all be had (the mip layout failed, or the mip region cannot be
+  // read) is not the water's: the surface's two fetches of the normal map stand at level 4 to 5, and a map sampled
+  // at its base alone sparkles (the review of Tasks 4 to 15: correlation 0.62 against 0.86). An albedo keeps its
+  // base level, as before.
+  if (water && plan.base_only && levels > 1) return fail(MaterialStatus::kTextureBad);
   *sampler = SamplerIndex(t);
   if (IsMirror(t.clamp_x) || IsMirror(t.clamp_y)) ++st.mirror;
   *status = MaterialStatus::kTextured;
@@ -314,10 +364,12 @@ nrhi::TextureView* TextureCache::ResolveImpl(nrhi::Cmd* cmd, nrhi::Device* dev,
 nrhi::TextureView* TextureCache::Upload(nrhi::Cmd* cmd, nrhi::Device* dev, const TextureFetch& t,
                                         const Plan& plan, const uint8_t* base, const uint8_t* mips,
                                         const GeoKey& key, uint64_t hash, float* uv_fix,
-                                        MaterialStatus* status) {
-  const TexFormatInfo fi = FormatInfo(t.format);
+                                        MaterialStatus* status, const WaterDecode* water) {
+  const TexFormatInfo fi = water ? WaterGuestFormat(*water) : FormatInfo(t.format);
   // k_DXT3A uploads as R8 (1 byte per texel, no 4 x 4 alignment); everything else as its guest block format.
+  // (the water's: the mask as R8 through DecodeK8Level, the normal map as BC5, its guest blocks untiled)
   const bool r8 = t.format == TexFormat::kDxt3a;
+  const bool k8 = water && *water == WaterDecode::kK8;
   const TexFormatInfo hf = r8 ? TexFormatInfo{1, 1, 0} : fi;
   const uint32_t host_w = (t.width + hf.block - 1) / hf.block * hf.block;
   const uint32_t host_h = (t.height + hf.block - 1) / hf.block * hf.block;
@@ -353,7 +405,19 @@ nrhi::TextureView* TextureCache::Upload(nrhi::Cmd* cmd, nrhi::Device* dev, const
     }
     if (r8_image_.capacity() > (32u << 20)) r8_image_ = {};
   }
-  for (uint32_t lv = 0; lv < plan.levels && !r8; ++lv) {
+  if (k8) {
+    // The shore mask: its one level by the constant's own pitch and tiling (DecodeK8Level: a source smaller than
+    // a texel's place is refused and read nowhere out of range), then its rows into the staging rows.
+    if (!DecodeK8Level(base, plan.base_extent, t.width, t.height, t.pitch_texels, t.tiled, &r8_image_)) {
+      *status = MaterialStatus::kTextureBad;
+      return nullptr;
+    }
+    for (uint32_t y = 0; y < t.height; ++y) {
+      std::memcpy(scratch_.data() + host[0].offset + size_t(y) * host[0].row_pitch, r8_image_.data() + size_t(y) * t.width, t.width);
+    }
+    if (r8_image_.capacity() > (32u << 20)) r8_image_ = {};
+  }
+  for (uint32_t lv = 0; lv < plan.levels && !r8 && !k8; ++lv) {
     LevelLayout l = plan.src[lv].layout;
     l.width_blocks = std::min(l.width_blocks, host[lv].blocks_w);
     l.height_blocks = std::min(l.height_blocks, host[lv].blocks_h);
@@ -391,7 +455,7 @@ nrhi::TextureView* TextureCache::Upload(nrhi::Cmd* cmd, nrhi::Device* dev, const
   desc.width = host_w;
   desc.height = host_h;
   desc.mip_levels = plan.levels;
-  desc.format = HostFormat(t.format);
+  desc.format = water ? (k8 ? nrhi::Format::kR8_UNORM : nrhi::Format::kBC5_UNORM) : HostFormat(t.format);
   desc.initial_state = nrhi::ResourceState::kCopyDest;
   nrhi::Texture* tex = TakeRetired(dev, desc, tex_bytes);
   const bool reused = tex != nullptr;
@@ -406,7 +470,8 @@ nrhi::TextureView* TextureCache::Upload(nrhi::Cmd* cmd, nrhi::Device* dev, const
   vd.format = nrhi::Format::kUnknown;
   vd.base_mip = 0;
   vd.mip_levels = ~0u;
-  for (int i = 0; i < 4; ++i) vd.swizzle[i] = r8 ? HostSwizzleR8(t.swizzle[i]) : HostSwizzle(t.swizzle[i]);
+  // (a water texture's view has no swizzle: the surface's program picks the channels, WaterHostChannel)
+  for (int i = 0; i < 4 && !water; ++i) vd.swizzle[i] = r8 ? HostSwizzleR8(t.swizzle[i]) : HostSwizzle(t.swizzle[i]);
   nrhi::TextureView* view = dev->CreateTextureView(tex, vd);
   if (!view) {
     dev->DestroyDeferred(staging);

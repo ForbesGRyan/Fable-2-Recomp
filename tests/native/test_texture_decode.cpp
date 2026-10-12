@@ -774,6 +774,65 @@ int main() {
       // (the texels are row-major inside the block: texel (1, 0) is index 1, texel (0, 1) index 4)
       if (rg[2 * 1] != 61 || rg[2 * 4] != (2 * (4u * 200 + 3 * 61) + 7) / 14) return 240;
     }
+    // The normal map as the pass uploads it (ledger ruling 32; plan Task 11): WaterDxnUploadLevel makes the rows of a
+    // host BC5 level from the guest's blocks, nothing decoded, and what a GPU reads of those rows (DecodeBc5Rows:
+    // red the block's first eight bytes, green its last, the palette entries as fractions) is DecodeDxnLevel's
+    // float decode of the guest bytes, float for float: for a tiled level with the 8-in-16 swap whose blocks hold
+    // both palettes and every index, and for a level inside a packed tail.
+    {
+      const uint32_t w = 16, h = 8, pitch = 32;
+      std::vector<uint8_t> guest(TiledUpperBound2D(w / 4, h / 4, pitch, 4), 0);
+      uint32_t seed = 12345;
+      auto next = [&] { seed = seed * 1664525u + 1013904223u; return uint8_t(seed >> 24); };
+      for (uint32_t by = 0; by < h / 4; ++by) {
+        for (uint32_t bx = 0; bx < w / 4; ++bx) {
+          uint8_t b[16];
+          for (uint8_t& v : b) v = next();
+          if ((bx + by) & 1) std::swap(b[0], b[1]);                                   // both palettes (a0 above a1 and not) in each channel
+          CopySwapped(guest.data() + size_t(uint32_t(fable2::native::capture::TiledOffset2D(int32_t(bx), int32_t(by), pitch, 4))), b, 16, 1);
+        }
+      }
+      LevelLayout l;
+      l.pitch_blocks = pitch; l.width_blocks = w / 4; l.height_blocks = h / 4;
+      const uint32_t row = UploadRowPitch(l.width_blocks, 16);
+      std::vector<uint8_t> rows(size_t(row) * l.height_blocks, 0xEE);
+      std::vector<float> host, want;
+      if (WaterGuestFormat(WaterDecode::kDxn).block != 4 || WaterGuestFormat(WaterDecode::kDxn).bytes_per_block != 16 ||
+          WaterGuestFormat(WaterDecode::kDxn).bpb_log2 != 4 || WaterGuestFormat(WaterDecode::kK8).block != 1 ||
+          WaterGuestFormat(WaterDecode::kK8).bytes_per_block != 1 || WaterGuestFormat(WaterDecode::kK8).bpb_log2 != 0) return 257;
+      if (!WaterDxnUploadLevel(guest.data(), guest.size(), l, true, 1, rows.data(), row)) return 257;
+      if (!DecodeBc5Rows(rows.data(), row, w, h, &host) || !DecodeDxnLevel(guest.data(), guest.size(), w, h, pitch, true, 1, &want)) return 257;
+      if (host.size() != size_t(w) * h * 2 || host != want) return 257;
+      bool fractions = false;
+      for (float v : host) fractions = fractions || (v * 255.0f != std::floor(v * 255.0f));
+      if (!fractions) return 257;                                                     // (a palette entry that is no whole 8-bit step is among them)
+      // Controls: without the swap, and with the two channels' blocks exchanged, the GPU would read another map.
+      std::vector<uint8_t> unswapped(rows.size(), 0);
+      std::vector<float> other;
+      if (!UntileLevel(guest.data(), guest.size(), l, WaterGuestFormat(WaterDecode::kDxn), true, 0, unswapped.data(), row) ||
+          !DecodeBc5Rows(unswapped.data(), row, w, h, &other) || other == want) return 257;
+      std::vector<uint8_t> exchanged = rows;
+      for (size_t at = 0; at + 16 <= exchanged.size(); at += 16) std::swap_ranges(exchanged.begin() + at, exchanged.begin() + at + 8, exchanged.begin() + at + 8);
+      if (!DecodeBc5Rows(exchanged.data(), row, w, h, &other) || other == want) return 257;
+      // A level that reaches beyond the source is refused whole; a null argument and an empty level decode nothing.
+      LevelLayout beyond = l;
+      beyond.width_blocks = 64;
+      std::vector<uint8_t> wide(size_t(UploadRowPitch(64, 16)) * l.height_blocks, 0);
+      if (WaterDxnUploadLevel(guest.data(), guest.size(), beyond, true, 1, wide.data(), UploadRowPitch(64, 16))) return 257;
+      if (DecodeBc5Rows(rows.data(), row, w, h, nullptr) || DecodeBc5Rows(nullptr, row, w, h, &other) || !other.empty() ||
+          DecodeBc5Rows(rows.data(), 48, w, h, &other) || DecodeBc5Rows(rows.data(), row, 0, h, &other)) return 257;
+    }
+    // The host channel a shader component reads (the program picks it; the views have no swizzle): the mask's R8
+    // gives its one byte for every source channel, the map's BC5 red for channel 0 and green for the others (the
+    // SDK's host swizzles RRRR and RGGG); a constant selector stays a constant.
+    {
+      for (uint8_t s = 0; s < 4; ++s) {
+        if (WaterHostChannel(WaterDecode::kK8, s) != 0 || WaterHostChannel(WaterDecode::kDxn, s) != (s == 0 ? 0u : 1u)) return 258;
+      }
+      for (const WaterDecode kind : {WaterDecode::kK8, WaterDecode::kDxn}) {
+        if (WaterHostChannel(kind, 4) != 4 || WaterHostChannel(kind, 5) != 5 || WaterHostChannel(kind, 6) != 4 || WaterHostChannel(kind, 7) != 4) return 258;
+      }
+    }
     // A stored level inside a packed tail, as a cache reads one: UntileLevel lifts the level's blocks out of the
     // tail (tiled, endian swapped, at its block origin) into linear rows, and the decoder reads those rows with
     // the level's own width as the pitch, linear, endian 0.
@@ -796,6 +855,15 @@ int main() {
       std::vector<uint8_t> rows(size_t(row) * l.height_blocks, 0);
       if (!UntileLevel(tail.data(), tail.size(), l, fi, true, 1, rows.data(), row)) return 241;
       if (!DecodeDxnLevelRg8(rows.data(), rows.size(), 8, 8, l.width_blocks, false, 0, &rg) || rg.size() != 128) return 241;
+      {
+        // (the same level as the pass uploads it: the host rows' values are the 8-bit decode's before its rounding)
+        std::vector<uint8_t> up(rows.size(), 0);
+        std::vector<float> host;
+        if (!WaterDxnUploadLevel(tail.data(), tail.size(), l, true, 1, up.data(), row) || up != rows || !DecodeBc5Rows(up.data(), row, 8, 8, &host)) return 241;
+        for (size_t i = 0; i < host.size(); ++i) {
+          if (uint8_t(host[i] * 255.0f + 0.5f) != rg[i]) return 241;
+        }
+      }
       for (uint32_t y = 0; y < 8; ++y) {
         for (uint32_t x = 0; x < 8; ++x) {
           if (rg[2 * (y * 8 + x)] != 10 + 20 * (x / 4) + 40 * (y / 4) || rg[2 * (y * 8 + x) + 1] != 200 - 3 * (x / 4) - 5 * (y / 4)) return 241;
@@ -1251,6 +1319,28 @@ int main() {
     const bool ok = k8 ? DecodeK8Level(bytes.data(), bytes.size(), wt.width, wt.height, wt.pitch_texels, wt.tiled, &decoded)
                        : DecodeDxnLevelRg8(bytes.data(), bytes.size(), wt.width, wt.height, wt.pitch_texels / 4, wt.tiled, wt.endian, &decoded);
     if (!ok || decoded.size() != size_t(wt.width) * wt.height * (k8 ? 1 : 2)) return 247;
+    if (!k8) {
+      // The real map's base level as the pass uploads it (ledger ruling 32): the BC5 rows a GPU reads are the float
+      // decode of the dump, float for float, and rounded to nearest they are the bytes written below.
+      LevelLayout l;
+      l.pitch_blocks = wt.pitch_texels / 4;
+      l.row_pitch_bytes = ((l.pitch_blocks + 31) & ~31u) * 16;
+      l.width_blocks = (wt.width + 3) / 4;
+      l.height_blocks = (wt.height + 3) / 4;
+      const uint32_t row = UploadRowPitch(l.width_blocks, 16);
+      std::vector<uint8_t> rows(size_t(row) * l.height_blocks, 0);
+      std::vector<float> host, want;
+      if (!WaterDxnUploadLevel(bytes.data(), bytes.size(), l, wt.tiled, wt.endian, rows.data(), row) ||
+          !DecodeBc5Rows(rows.data(), row, wt.width, wt.height, &host) ||
+          !DecodeDxnLevel(bytes.data(), bytes.size(), wt.width, wt.height, wt.pitch_texels / 4, wt.tiled, wt.endian, &want) || host != want) return 259;
+      size_t fractions = 0;
+      for (size_t i = 0; i < host.size(); ++i) {
+        if (uint8_t(host[i] * 255.0f + 0.5f) != decoded[i]) return 259;
+        fractions += host[i] * 255.0f != std::floor(host[i] * 255.0f);
+      }
+      std::printf("water normal map as uploaded (BC5 blocks, untiled, endian %u): %zu values equal to the float decode, float for float; %zu of them (%.1f%%) no whole 8-bit step\n",
+                  wt.endian, host.size(), fractions, 100.0 * double(fractions) / double(host.size()));
+    }
     const std::string outp = std::string(bin) + (k8 ? ".cpp.r8" : ".cpp.rg8");
     std::FILE* o = std::fopen(outp.c_str(), "wb");
     if (!o || std::fwrite(decoded.data(), 1, decoded.size(), o) != decoded.size()) return 248;

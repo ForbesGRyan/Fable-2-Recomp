@@ -96,20 +96,41 @@ Unreadable = cr.Unreadable
 
 # --- the stored native scene ---------------------------------------------------------------------------------
 
-def read_dump(path):
-    """(head, scene [h, w, 3] float32, depth [h, w] uint32 levels, layers): a stored native scene. layers: None, or
-    the sun layer's depth before and after the tree occluders, two planes [h / 2, w / 2] of levels (0 the near
-    plane, 16777215 the far plane and the cleared depth). ValueError for anything that is not a whole file."""
+DUMP_PRE_WATER, DUMP_TARGETS, DUMP_WATER = 8, 16, 32     # scene_dump.h: kSceneDumpPreWater, kSceneDumpTargets, kSceneDumpWater
+DUMP_TARGET_SIZE = 256
+
+
+def _read_dump(path):
+    """(head, scene, depth, layers, water) of a stored native scene of either version (scene_dump.h: a file is version
+    2 iff it has a flag above 4). water: {"pre_water": None or the scene's depth taken just before the water step,
+    [h, w] levels; "water": None or the linear target taken right after the water step, [h, w, 3] float32;
+    "targets": [(base, height, rgba [256, 256, 4] uint8)], the frame's reflection targets, rows from the top}."""
     data = Path(path).read_bytes()
     if len(data) < 48:
         raise ValueError("%s: not a stored native scene" % path)
     magic, version, w, h, scene_frame, asked, flags, exposure, bad, reserved = struct.unpack_from("<4sIIIQQIfII", data, 0)
-    if magic != b"F2NS" or version != 1 or reserved != 0 or flags & ~7 or not (0 < w <= 8192 and 0 < h <= 8192):
+    new_flags = flags & (DUMP_PRE_WATER | DUMP_TARGETS | DUMP_WATER)
+    if magic != b"F2NS" or version != (2 if new_flags else 1) or reserved != 0 or flags & ~63 or not (0 < w <= 8192 and 0 < h <= 8192):
         raise ValueError("%s: not a stored native scene" % path)
     n = w * h
     layer = bool(flags & 2)
-    want = 48 + n * 16 + (2 * (w // 2) * (h // 2) * 4 if layer else 0)
-    if len(data) != want or (layer and (w | h) & 1):
+    if layer and (w | h) & 1:
+        raise ValueError("%s: a layer's planes with an odd size" % path)
+    at = 48 + n * 16 + (2 * (w // 2) * (h // 2) * 4 if layer else 0)
+    pre_at = at
+    at += n * 4 if flags & DUMP_PRE_WATER else 0
+    water_at = at
+    at += n * 12 if flags & DUMP_WATER else 0
+    count = 0
+    if flags & DUMP_TARGETS:
+        if len(data) < at + 4:
+            raise ValueError("%s: %d bytes, too short for its targets' count" % (path, len(data)))
+        count = struct.unpack_from("<I", data, at)[0]
+        if not 1 <= count <= 4:
+            raise ValueError("%s: %d reflection targets" % (path, count))
+    texels = DUMP_TARGET_SIZE * DUMP_TARGET_SIZE * 4
+    want = at + (4 + count * (8 + texels) if flags & DUMP_TARGETS else 0)
+    if len(data) != want:
         raise ValueError("%s: %d bytes, the head asks for %d" % (path, len(data), want))
     scene = np.frombuffer(data, dtype="<f4", count=n * 3, offset=48).reshape(h, w, 3)
     depth = np.frombuffer(data, dtype="<u4", count=n, offset=48 + n * 12).reshape(h, w)
@@ -117,9 +138,32 @@ def read_dump(path):
     if layer:
         m = (w // 2) * (h // 2)
         layers = [np.frombuffer(data, dtype="<u4", count=m, offset=48 + n * 16 + i * m * 4).reshape(h // 2, w // 2) for i in range(2)]
+    water = {"pre_water": None, "water": None, "targets": []}
+    if flags & DUMP_PRE_WATER:
+        water["pre_water"] = np.frombuffer(data, dtype="<u4", count=n, offset=pre_at).reshape(h, w)
+    if flags & DUMP_WATER:
+        water["water"] = np.frombuffer(data, dtype="<f4", count=n * 3, offset=water_at).reshape(h, w, 3)
+    for k in range(count):
+        o = at + 4 + k * (8 + texels)
+        base, height = struct.unpack_from("<If", data, o)
+        water["targets"].append((base, height, np.frombuffer(data, dtype=np.uint8, count=texels, offset=o + 8).reshape(DUMP_TARGET_SIZE, DUMP_TARGET_SIZE, 4)))
     head = {"width": w, "height": h, "scene_frame": scene_frame, "asked_frame": asked, "flags": flags, "exposure": exposure,
-            "bad_values": bad}
-    return head, scene, depth, layers
+            "bad_values": bad, "version": version}
+    return head, scene, depth, layers, water
+
+
+def read_dump(path):
+    """(head, scene [h, w, 3] float32, depth [h, w] uint32 levels, layers): a stored native scene, of either version.
+    layers: None, or the sun layer's depth before and after the tree occluders, two planes [h / 2, w / 2] of levels
+    (0 the near plane, 16777215 the far plane and the cleared depth). ValueError for anything that is not a whole
+    file. The water's planes of a version-2 file: read_dump_water."""
+    return _read_dump(path)[:4]
+
+
+def read_dump_water(path):
+    """The water's part of a stored native scene (sub-project 13): {"pre_water", "water", "targets"} as _read_dump has
+    them; a version-1 file has none of them (None, None, [])."""
+    return _read_dump(path)[4]
 
 
 def holes_arrays(scene, depth, clear=CLEAR):

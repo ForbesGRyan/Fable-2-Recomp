@@ -342,6 +342,12 @@ uint64_t g_tex_mip_bytes = 0;  // the capture's mip files together (DumpTextureM
 // Under g_mutex: the row being written is an in-scene "verts" row (WriteVertsRow sets it around its
 // texture fetches): the one row at which an impostor's picture is written (render::DumpWrittenAtRow).
 bool g_tex_scene_verts_row = false;
+// Under g_mutex: the row being written is a water row, a row whose vertex shader is the lake's
+// (render::kWaterVsHash; AppendTextureFetches sets it around its texture fetches and clears it): the one
+// kind of row at which a reflection picture is kept by content and the normal map's stored levels are
+// dumped (render::DumpKeyedByContentAt, render::DumpMipsAt; frame-map section 20). Read by DumpTexture
+// alone, which runs only inside an armed capture.
+bool g_tex_water_row = false;
 // Discovery stream dumps (caller holds g_mutex): the capture's dump folder, the
 // content hashes already dumped per (address, size), files and bytes written.
 std::filesystem::path g_geo_dir;
@@ -1743,6 +1749,12 @@ void AppendPs(std::string& row, const DeviceSnapshot& dev) {
 // bytes of their own, so that a long capture's pictures cannot starve the fog tables. Returns the content hash of such a texture as it is at this moment (also when that
 // content was dumped before or its file could not be written), for the row's "tfc"; 0 for any
 // other texture and when the bytes were not read.
+// Water discovery (frame-map section 20): `slot` is the fetch slot the constant was read from. At a water row
+// (g_tex_water_row) a reflection picture at slot 13 or 14 (a 2D k_8_8_8_8 texture of 256 x 256, which the
+// constant alone keeps once an address) is kept by content too, against a third pair of budgets (256 files and
+// their bytes: render::ContentDumpKind::kReflection), and the normal map at slot 2 (k_DXN, which the renderer
+// does not decode) gets its stored levels beside its base as a decoded texture does. At any other row and slot
+// every texture is dumped as before.
 constexpr uint32_t kMaxTextures = 768;
 constexpr uint32_t kMaxTextureBytes = 8u << 20;
 constexpr uint32_t kMaxUnsupportedBytes = 64u << 10;
@@ -1816,10 +1828,11 @@ std::string DumpTextureMips(const render::TextureFetch& t, const render::TexForm
   return FormatMipsMember((g_tex_dir.filename().string() + "/" + name).c_str(), t.mip_phys, extent, t.tiled, rows, count);
 }
 
-uint64_t DumpTexture(const uint32_t fc[6]) {
-  const bool by_content = render::DumpKeyedByContent(fc);
-  // (which of the content-kept budgets it counts against; read only for a texture kept by content)
-  const render::ContentDumpKind content_kind = render::ContentDumpKindOf(fc);
+uint64_t DumpTexture(const uint32_t fc[6], uint32_t slot) {
+  const bool by_content = render::DumpKeyedByContentAt(fc, g_tex_water_row, slot);
+  // (which of the content-kept budgets it counts against; read only for a texture kept by content. A constant
+  // taken by its row and slot alone is a reflection picture)
+  const render::ContentDumpKind content_kind = render::ContentDumpKindOf(fc, by_content && !render::DumpKeyedByContent(fc));
   if (g_tex_dir.empty() ||
       (by_content ? !render::ContentDumpFileRoom(content_kind, g_tex_content_use, render::kContentDumpLimits) : g_tex_count >= kMaxTextures)) {
     return 0;
@@ -1911,8 +1924,18 @@ uint64_t DumpTexture(const uint32_t fc[6]) {
     }
   } else {
     ++g_tex_count;
-    // (the stored mip levels of a 2D texture the renderer decodes, beside its base level; after the folder exists)
-    if (!is_1d && err == render::FetchError::kNone) row += DumpTextureMips(t, render::FormatInfo(t.format), base, identity, 0);
+    // (the stored mip levels of a 2D texture the renderer decodes, beside its base level; after the folder exists.
+    // The lake's normal map, k_DXN at slot 2 of a water row, is not decoded and gets them too: its constant read
+    // by DumpFetch, as an impostor's picture's is above, and the levels' layout by the format's own blocks)
+    if (!is_1d && render::DumpMipsAt(fc, err == render::FetchError::kNone, g_tex_water_row, slot)) {
+      render::TextureFetch normal;
+      render::TexFormatInfo normal_fi;
+      if (err == render::FetchError::kNone) {
+        row += DumpTextureMips(t, render::FormatInfo(t.format), base, identity, 0);
+      } else if (render::DumpFetch(fc, &normal, &normal_fi)) {
+        row += DumpTextureMips(normal, normal_fi, base, identity, 0);
+      }
+    }
   }
   row += ",\"fc\":";
   row += HexDwords(fc, 6);
@@ -1947,11 +1970,16 @@ void AppendTextureFetches(std::string& row, uint32_t device, const DeviceSnapsho
   }
   char buf[32];
   VsChoice vc;
+  // Whether this is a water row (frame-map section 20): the hash of the microcode the draw runs, as the rows
+  // print it (the immediate load's for a patched copy), is the lake's vertex shader's. False when the shader
+  // cannot be told.
+  bool water_row = false;
   if (ChooseVs(dev, &vc)) {
     // The object's own microcode, also on the immediate path: the patched copy the GPU runs then
     // differs from it only in vertex fetch dwords (WriteDrawRow, "template_diff"), so both name
     // the same texture slots, and the immediate load's state is not touched from here.
     const UcodeRef u = ReadVsUcode(vc.obj, vc.variant);
+    water_row = (vc.immediate ? (t_vs_load.usable ? t_vs_load.hash : 0) : (u.ok ? u.hash : 0)) == render::kWaterVsHash;
     if (u.ok) {
       const std::vector<uint32_t> vs_slots = TextureFetchSlots(u.dwords.data(), u.dwords.size());
       row += ",\"vs_tex_slots\":[";
@@ -1966,6 +1994,7 @@ void AppendTextureFetches(std::string& row, uint32_t device, const DeviceSnapsho
   row += ",\"tf\":{";
   bool first = true;
   std::string contents;
+  g_tex_water_row = water_row;  // (for DumpTexture, this row's slots alone: cleared below)
   for (uint32_t slot : slots) {
     if (slot >= 32) continue;
     const uint32_t at =
@@ -1974,13 +2003,14 @@ void AppendTextureFetches(std::string& row, uint32_t device, const DeviceSnapsho
     uint32_t v[6] = {};
     if (p) {
       for (int i = 0; i < 6; ++i) v[i] = LoadBe32(p + 4 * i);
-      AppendTextureContent(contents, slot, DumpTexture(v));
+      AppendTextureContent(contents, slot, DumpTexture(v, slot));
     }
     std::snprintf(buf, sizeof(buf), "%s\"%u\":", first ? "" : ",", slot);
     row += buf;
     row += p ? HexDwords(v, 6) : "null";
     first = false;
   }
+  g_tex_water_row = false;
   row += "},\"tfc\":{";
   row += contents;
   row += "}";
@@ -2190,20 +2220,32 @@ void AppendRenderState(std::string& row, uint32_t device,
 // scissor (0x200E, 0x200F), from the device's register shadows. A register the device has no
 // shadow for (DeviceRegShadowOffset gives 0: 0x2080 to 0x2082 as the layout stands) or whose
 // shadow cannot be read is left out; no member for any other draw.
-inline constexpr uint32_t kImpostorRenderPitch = 320;
+// Water discovery (frame-map section 20): a row outside the scene at surface pitch 280, a
+// reflection view of the lake, carries the member too, on every decoded kind (`draw_row` false:
+// an "indx" or a "tess" row, which has it at that pitch alone, so that a row at pitch 320 keeps
+// the members it had), and with the clip registers after the viewport's (kClipRegisters:
+// PA_CL_CLIP_CNTL and the six user clip planes; the planes have no shadow as the layout stands
+// and are left out). Reads: the surface word and each shadowed register, one big-endian word
+// each through ReadVirtualBe32, which gives a word whole or nothing.
 inline constexpr uint32_t kViewportRegisters[] = {0x210F, 0x2110, 0x2111, 0x2112, 0x2113, 0x2114,
                                                   0x2080, 0x2081, 0x2082, 0x200E, 0x200F};
-void AppendPictureViewport(std::string& row, uint32_t device) {
+void AppendPictureViewport(std::string& row, uint32_t device, bool draw_row = true) {
   uint32_t surface = 0;
-  if (!device || !ReadVirtualBe32(device + xdk::kDeviceSurfaceInfoOffset, &surface) ||
-      (surface & 0x3FFF) != kImpostorRenderPitch) {
-    return;
-  }
-  row += ",\"vp\":{";
-  row += RegisterWords(kViewportRegisters, std::size(kViewportRegisters), [device](uint32_t reg, uint32_t* word) {
+  if (!device || !ReadVirtualBe32(device + xdk::kDeviceSurfaceInfoOffset, &surface) || !PictureViewportPitch(surface)) return;
+  const bool view = ReflectionViewPitch(surface);
+  if (!view && !draw_row) return;
+  auto shadow = [device](uint32_t reg, uint32_t* word) {
     const uint32_t at = xdk::DeviceRegShadowOffset(reg);
     return at && ReadVirtualBe32(device + at, word);
-  });
+  };
+  row += ",\"vp\":{";
+  const std::string viewport = RegisterWords(kViewportRegisters, std::size(kViewportRegisters), shadow);
+  row += viewport;
+  if (view) {
+    const std::string clip = RegisterWords(kClipRegisters, std::size(kClipRegisters), shadow);
+    if (!viewport.empty() && !clip.empty()) row += ",";
+    row += clip;
+  }
   row += "}";
 }
 
@@ -2836,6 +2878,7 @@ void WriteIndxRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
     row += buf;
   }
   AppendRenderState(row, device, xdk::kDeviceBeginVerticesWriteOffset);
+  if (!in_scene) AppendPictureViewport(row, device, false);  // (a reflection view's row: frame-map section 20)
   const uint32_t n = ++g_indx_rows;
   uint32_t vstorage = 0, vdwords = 0, istorage = 0, idwords = 0, returned = 0;
   const bool fields = ReadVirtualBe32(device + xdk::kDeviceBeginVerticesStorageOffset, &vstorage) &&
@@ -2966,6 +3009,7 @@ void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
                 args.r[2], args.r[3], args.r[4], device, in_scene ? "true" : "false");
   row += buf;
   AppendRenderState(row, device);
+  if (!in_scene) AppendPictureViewport(row, device, false);  // (a reflection view's row: frame-map section 20)
   VsChoice vc;
   const bool vc_ok = ChooseVs(dev, &vc);
   if (vc_ok) {
@@ -3028,7 +3072,7 @@ void WriteTessRow(uint32_t id, const LastArgs& args, uint32_t device, const Devi
     uint32_t v[6] = {};
     if (p) {
       for (int i = 0; i < 6; ++i) v[i] = LoadBe32(p + 4 * i);
-      AppendTextureContent(contents, t, DumpTexture(v));
+      AppendTextureContent(contents, t, DumpTexture(v, t));  // (a tess row is no water row: g_tex_water_row is false here)
     }
     std::snprintf(buf, sizeof(buf), "%s\"%u\":", first ? "" : ",", t);
     first = false;

@@ -271,4 +271,17 @@ inline uint32_t VertsDataBytes(uint32_t storage_dwords, uint32_t cap) {
   const uint64_t bytes = uint64_t(storage_dwords) * 4;
   return bytes <= cap ? uint32_t(bytes) : 0;
 }
+// Water discovery (frame-map section 20). The surface pitches whose out-of-scene rows carry "vp": 320 (an
+// impostor's picture, frame-map section 19) and 280 (a reflection view of the lake; RB_SURFACE_INFO
+// 0x04020118 in every view row of the captures of 2026-10-11).
+constexpr bool ReflectionViewPitch(uint32_t surface_info) { return (surface_info & 0x3FFF) == 280; }
+constexpr bool PictureViewportPitch(uint32_t surface_info) { return (surface_info & 0x3FFF) == 320 || ReflectionViewPitch(surface_info); }
+// What a row at pitch 280 asks for beyond the viewport's registers: PA_CL_CLIP_CNTL (0x2204) and the six user
+// clip planes (PA_CL_UCP_0_X .. PA_CL_UCP_5_W, 0x2388 to 0x239F), with which the game would cut a reflection
+// view at the water's plane. A register the device has no shadow for is left out of the row (RegisterWords):
+// as the layout stands (xdk_layout.h, DeviceRegShadowOffset) that is every clip plane, so a row carries
+// 0x2204 alone of these. The planes are listed so that a row gains them the day a shadow is found, and so
+// that the list says what was looked for.
+inline constexpr uint32_t kClipRegisters[] = {0x2204, 0x2388, 0x2389, 0x238A, 0x238B, 0x238C, 0x238D, 0x238E, 0x238F, 0x2390, 0x2391, 0x2392, 0x2393,
+                                              0x2394, 0x2395, 0x2396, 0x2397, 0x2398, 0x2399, 0x239A, 0x239B, 0x239C, 0x239D, 0x239E, 0x239F};
 }  // namespace fable2::native::capture

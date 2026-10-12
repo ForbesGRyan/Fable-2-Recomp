@@ -12,6 +12,12 @@ match). Exit code 0 when at least 20 draws were checked and all matched.
 Foliage discovery (frame-map section 18): every index file a "draw" row's "ib" names
 must exist beside the capture with the row's "file_bytes" and hold the draw's range,
 and the "frame" rows' "scene_frame" must rise; a problem with either fails the check.
+
+Water discovery (frame-map section 20): the rows of the lake's draws must name the content of
+the reflection pictures they sampled, with a texture row of that content before them, the
+normal map's texture row its stored levels, and the reflection views' rows "vp"
+(check_water_rows); a problem fails the check. A capture made before those members were
+written therefore fails here: it is told apart by its problems, which name them.
 """
 import argparse
 import json
@@ -249,6 +255,100 @@ def check_verts_data(rows):
     return checked, problems
 
 
+WATER_VS = "BEAD84BD72072E0E"   # texture_decode.h, kWaterVsHash: the lake's vertex shader
+VIEW_PITCH = 280                # discovery_format.h, ReflectionViewPitch: a reflection view's surface pitch
+
+
+def _fetch_words(fc):
+    """The six dwords of a row's fetch constant as numbers, or None."""
+    try:
+        words = [int(x, 16) for x in fc]
+    except (TypeError, ValueError):
+        return None
+    return words if len(words) == 6 else None
+
+
+def _water_picture(fc):
+    """texture_decode.h, WaterPictureFetch: a 2D k_8_8_8_8 texture of 256 x 256."""
+    return ((fc[0] & 3) == 2 and ((fc[5] >> 9) & 3) == 1 and (fc[1] & 0x3F) == 6 and (fc[2] & 0x1FFF) == 255
+            and ((fc[2] >> 13) & 0x1FFF) == 255)
+
+
+def _normal_map(fc):
+    """A 2D k_DXN texture with a mip address (texture_decode.h, DumpMipsAt: slot 2 of a water row)."""
+    return (fc[0] & 3) == 2 and ((fc[5] >> 9) & 3) == 1 and (fc[1] & 0x3F) == 49 and (fc[5] & 0xFFFFF000) != 0
+
+
+def _hash_of(text):
+    try:
+        return int(text, 16)
+    except (TypeError, ValueError):
+        return None
+
+
+def check_water_rows(rows):
+    """(checked, problems) over the water rows and the reflection views' rows (frame-map section 20).
+
+    A water row is a "draw" row whose vertex shader is the lake's (WATER_VS). For each of its slots 13 and 14
+    that holds a reflection picture (_water_picture), its "tfc" names the content the draw sampled, and a
+    "texture" row with that content and the slot's base address stands before it in the capture (a content is
+    written once, at the first row that samples it: a later frame's row names it again). Its slot 2, where it
+    holds the normal map (_normal_map), has a "texture" row before it whose "mips" names the stored levels;
+    a map without them is a problem once a base. A view's row is a "draw", "indx" or "tess" row outside the
+    scene at surface pitch 280: it carries "vp" (the viewport's registers and those of the clip registers the
+    device shadows). A capture made before these members were written fails on each of them: that is what the
+    check is for."""
+    checked, problems = 0, []
+    contents = {}     # content hash -> the bases a texture row carried it at, so far
+    levels = {}       # the base of a k_DXN texture row so far -> whether one of its rows has "mips"
+    said = set()
+    for r in rows:
+        kind = r.get("kind")
+        if kind == "texture":
+            fc = _fetch_words(r.get("fc"))
+            if fc is None:
+                continue
+            base = fc[1] & 0xFFFFF000
+            content = _hash_of(r.get("content"))
+            if content is not None:
+                contents.setdefault(content, set()).add(base)
+            if (fc[1] & 0x3F) == 49:
+                levels[base] = levels.get(base, False) or bool((r.get("mips") or {}).get("levels"))
+            continue
+        if kind in ("draw", "indx", "tess") and r.get("in_scene") is False:
+            surface = _hash_of(r.get("surface_info"))
+            if surface is not None and (surface & 0x3FFF) == VIEW_PITCH:
+                checked += 1
+                if not isinstance(r.get("vp"), dict):
+                    problems.append("frame %s: a %s row of a reflection view (pitch 280) has no \"vp\"" % (r.get("frame"), kind))
+        shader = r.get("vs_hash") or (r.get("vs") or {}).get("hash") or ""
+        if kind != "draw" or not str(shader).upper().endswith(WATER_VS):
+            continue
+        checked += 1
+        where = "frame %s water row (ps %s)" % (r.get("frame"), r.get("ps_hash"))
+        tf, tfc = r.get("tf") or {}, r.get("tfc") or {}
+        for slot in ("13", "14"):
+            fc = _fetch_words(tf.get(slot))
+            if fc is None or not _water_picture(fc):
+                continue
+            base = fc[1] & 0xFFFFF000
+            content = _hash_of(tfc.get(slot))
+            if content is None:
+                problems.append("%s: slot %s (0x%08X) names no content" % (where, slot, base))
+            elif content not in contents:
+                problems.append("%s: slot %s's content %s was never written" % (where, slot, tfc.get(slot)))
+            elif base not in contents[content]:
+                problems.append("%s: slot %s's content %s was written for another base, not 0x%08X" % (where, slot, tfc.get(slot), base))
+        fc = _fetch_words(tf.get("2"))
+        if fc is not None and _normal_map(fc):
+            base = fc[1] & 0xFFFFF000
+            if not levels.get(base) and base not in said:
+                said.add(base)
+                problems.append("%s: the normal map 0x%08X %s" % (
+                    where, base, "was dumped without its stored levels" if base in levels else "was not dumped"))
+    return checked, problems
+
+
 def read_rows(lines):
     """JSON rows; a partial last line (capture cut off by closing the game) is dropped."""
     lines = [l for l in lines if l.strip()]
@@ -298,9 +398,12 @@ def main(argv=None):
     with_data, verts_problems = check_verts_data(rows)
     if with_data or verts_problems:
         print(f"{with_data} in-scene verts rows checked for their storage, {len(verts_problems)} problems")
-    for line in (file_problems + frame_problems + mip_problems + verts_problems)[:20]:
+    water, water_problems = check_water_rows(rows)
+    if water or water_problems:
+        print(f"water rows: {water} checked, {len(water_problems)} problems")
+    for line in (file_problems + frame_problems + mip_problems + verts_problems + water_problems)[:20]:
         print("  " + line)
-    structural = not file_problems and not frame_problems and not mip_problems and not verts_problems
+    structural = not file_problems and not frame_problems and not mip_problems and not verts_problems and not water_problems
     if a.rows_only:
         # (asked for by name, never by default: the bound of 20 checked draws below is not relaxed)
         print("vertex bindings: NOT checked (--rows-only): %d logged shaders, %d draws matched of %d" % (len(vbind), matched, checked))

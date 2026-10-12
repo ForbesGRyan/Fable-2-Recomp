@@ -150,10 +150,14 @@ class CheckMipFiles(unittest.TestCase):
         for key in ("mips", "file", "phys", "bytes", "tiled", "levels", "level", "offset", "pitch", "w", "h", "x", "y"):
             self.assertIn('\\"%s\\":' % key, text)
         capture = (ROOT / "src" / "native" / "capture" / "capture.cpp").read_text(encoding="utf-8")
-        # its definition and DumpTexture's two calls: a texture the renderer decodes, once an address, and (distant
-        # trees, frame-map section 19) a 2D texture of format 3, once a content, with that format's own layout
-        self.assertEqual(capture.count("DumpTextureMips("), 3)
-        self.assertIn("    if (!is_1d && err == render::FetchError::kNone) row += DumpTextureMips(t, render::FormatInfo(t.format), base, identity, 0);", capture)
+        # its definition and DumpTexture's three calls: a texture the renderer decodes, once an address; (distant
+        # trees, frame-map section 19) a 2D texture of format 3, once a content, with that format's own layout; and
+        # (water, frame-map section 20) the lake's normal map, k_DXN at slot 2 of a water row, once an address
+        self.assertEqual(capture.count("DumpTextureMips("), 4)
+        self.assertIn("    if (!is_1d && render::DumpMipsAt(fc, err == render::FetchError::kNone, g_tex_water_row, slot)) {", capture)
+        self.assertIn("        row += DumpTextureMips(t, render::FormatInfo(t.format), base, identity, 0);", capture)
+        self.assertIn("      } else if (render::DumpFetch(fc, &normal, &normal_fi)) {", capture)
+        self.assertIn("        row += DumpTextureMips(normal, normal_fi, base, identity, 0);", capture)
         self.assertIn("    if (!is_1d && (fc[1] & 0x3F) == 3 && render::DumpFetch(fc, &picture, &picture_fi)) {", capture)
         self.assertIn("      row += DumpTextureMips(picture, picture_fi, base, identity, content);", capture)
         self.assertIn("  if (g_tex_dir.empty() || !t.mip_phys || t.format == render::TexFormat::kDxt3a || fi.bytes_per_block == 0) return {};", capture)

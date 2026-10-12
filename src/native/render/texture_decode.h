@@ -244,6 +244,29 @@ inline bool DumpKeyedByContent(const uint32_t fc[6]) {
   return format == 29 || format == 22 || format == 23 || format == 3 || PostBufferBase(fc[1] & 0xFFFFF000u);
 }
 
+// Water discovery (frame-map section 20). The lake's vertex shader: a discovery row whose vertex shader this is
+// is a "water row" (both of its pixel shaders, the blended A17D8AEC3A817D45 and the dead F6D98C7B4D98438B).
+inline constexpr uint64_t kWaterVsHash = 0xBEAD84BD72072E0Eull;
+// A reflection picture as a water draw samples it: a 2D k_8_8_8_8 texture of 256 x 256, by the constant alone.
+inline bool WaterPictureFetch(const uint32_t fc[6]) {
+  return (fc[0] & 3) == 2 && ((fc[5] >> 9) & 3) == 1 && (fc[1] & 0x3F) == 6 && (fc[2] & 0x1FFF) == 255 && ((fc[2] >> 13) & 0x1FFF) == 255;
+}
+// Whether a discovery dump keeps the texture at `slot` of a row once per content: DumpKeyedByContent(fc) as
+// before, or slot 13 or 14 of a water row (`water_row`: the row's vertex shader is kWaterVsHash) holding a
+// WaterPictureFetch. The game renders those pictures again every frame (frame-map section 20). A k_8_8_8_8
+// texture is one the renderer decodes and is kept once an address by the constant alone; the row and the slot
+// are what tell these apart, so no other texture's dump changes (the same picture sampled by another row, the
+// 128 x 128 passes at the same addresses and the views' blur keep the rule they had).
+inline bool DumpKeyedByContentAt(const uint32_t fc[6], bool water_row, uint32_t slot) {
+  return DumpKeyedByContent(fc) || (water_row && (slot == 13 || slot == 14) && WaterPictureFetch(fc));
+}
+// Whether the stored levels of a texture kept once an address are dumped beside its base: `decoded` (a format
+// the renderer decodes: as before), or slot 2 of a water row holding a 2D k_DXN texture (the lake's normal map,
+// whose stored levels the surface's two fetches read).
+inline bool DumpMipsAt(const uint32_t fc[6], bool decoded, bool water_row, uint32_t slot) {
+  return decoded || (water_row && slot == 2 && (fc[0] & 3) == 2 && ((fc[5] >> 9) & 3) == 1 && (fc[1] & 0x3F) == 49);
+}
+
 // Whether a discovery dump writes a texture at the row being written. An impostor's picture (a 2D
 // texture of format 3) is written only at the row of the draw that shows it, an in-scene "verts"
 // row (`scene_verts_row`): the game's copy passes that make the picture's lower levels sample its
@@ -262,10 +285,15 @@ inline bool DumpWrittenAtRow(const uint32_t fc[6], bool scene_verts_row) {
 // frame) against a file count and a byte budget OF ITS OWN: counted with the others, the pictures
 // used up the 1,024 files in about 68 frames, and no fog table was dumped after that, with no
 // impostor switch on (review of the whole branch, Minor 7). The pictures' budget is 32 frames of
-// fourteen whole bases.
-enum class ContentDumpKind : uint8_t { kTable, kTarget, kPicture };
-// For a constant DumpKeyedByContent takes: a 1D texture is a table whatever its format.
-inline ContentDumpKind ContentDumpKindOf(const uint32_t fc[6]) {
+// fourteen whole bases. The lake's reflection pictures (DumpKeyedByContentAt's own: slots 13 and 14
+// of a water row, 262,144 bytes each, at most eight a frame) have a third pair of budgets, so that
+// they starve neither the tables nor the impostors' pictures: 32 frames of eight.
+enum class ContentDumpKind : uint8_t { kTable, kTarget, kPicture, kReflection };
+// For a constant DumpKeyedByContent takes: a 1D texture is a table whatever its format. `reflection`:
+// DumpKeyedByContentAt took the constant by its row and slot and DumpKeyedByContent did not (it is
+// then no table and no picture).
+inline ContentDumpKind ContentDumpKindOf(const uint32_t fc[6], bool reflection = false) {
+  if (reflection) return ContentDumpKind::kReflection;
   if (Is1DFetch(fc)) return ContentDumpKind::kTable;
   return ((fc[5] >> 9) & 3) == 1 && (fc[1] & 0x3F) == 3 ? ContentDumpKind::kPicture : ContentDumpKind::kTarget;
 }
@@ -274,30 +302,38 @@ struct ContentDumpUse {
   uint64_t bytes = 0;           // the targets' bytes
   uint32_t picture_files = 0;   // pictures written
   uint64_t picture_bytes = 0;
+  uint32_t reflection_files = 0;   // the lake's reflection pictures written
+  uint64_t reflection_bytes = 0;
 };
 struct ContentDumpLimits {
   uint32_t files;
   uint64_t bytes;
   uint32_t picture_files;
   uint64_t picture_bytes;
+  uint32_t reflection_files;
+  uint64_t reflection_bytes;
 };
-inline constexpr ContentDumpLimits kContentDumpLimits = {1024, 512ull << 20, 448, 448ull * 131072ull};
+inline constexpr ContentDumpLimits kContentDumpLimits = {1024, 512ull << 20, 448, 448ull * 131072ull, 256, 256ull * 262144ull};
 // Whether a file of this kind may still be written (asked before the texture's bytes are known).
 constexpr bool ContentDumpFileRoom(ContentDumpKind kind, const ContentDumpUse& use, const ContentDumpLimits& lim) {
+  if (kind == ContentDumpKind::kReflection) return use.reflection_files < lim.reflection_files;
   return kind == ContentDumpKind::kPicture ? use.picture_files < lim.picture_files : use.files < lim.files;
 }
-// Whether `bytes` of this kind may be written: room for the file, some bytes, and (a target, a picture) room in
-// the kind's byte budget. No sum wraps.
+// Whether `bytes` of this kind may be written: room for the file, some bytes, and (a target, a picture, a
+// reflection) room in the kind's byte budget. No sum wraps.
 constexpr bool ContentDumpHasRoom(ContentDumpKind kind, uint64_t bytes, const ContentDumpUse& use, const ContentDumpLimits& lim) {
   if (bytes == 0 || !ContentDumpFileRoom(kind, use, lim)) return false;
   if (kind == ContentDumpKind::kTable) return true;
-  const uint64_t used = kind == ContentDumpKind::kPicture ? use.picture_bytes : use.bytes;
-  const uint64_t budget = kind == ContentDumpKind::kPicture ? lim.picture_bytes : lim.bytes;
+  const uint64_t used = kind == ContentDumpKind::kReflection ? use.reflection_bytes : kind == ContentDumpKind::kPicture ? use.picture_bytes : use.bytes;
+  const uint64_t budget = kind == ContentDumpKind::kReflection ? lim.reflection_bytes : kind == ContentDumpKind::kPicture ? lim.picture_bytes : lim.bytes;
   return used <= budget && bytes <= budget - used;
 }
 // The use after a file of `bytes` of this kind was written.
 constexpr ContentDumpUse ContentDumpCounted(ContentDumpKind kind, uint64_t bytes, ContentDumpUse use) {
-  if (kind == ContentDumpKind::kPicture) {
+  if (kind == ContentDumpKind::kReflection) {
+    ++use.reflection_files;
+    use.reflection_bytes += bytes;
+  } else if (kind == ContentDumpKind::kPicture) {
     ++use.picture_files;
     use.picture_bytes += bytes;
   } else {

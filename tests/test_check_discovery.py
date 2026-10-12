@@ -245,6 +245,87 @@ class CheckDiscoveryTests(unittest.TestCase):
             (d / "native_geo_x" / "a.bin").write_bytes(bytes(12))
             self.assertEqual(cd.main([str(d / "x.jsonl"), str(d / "g.log")]), 0)
 
+    # Water discovery (frame-map section 20): the rows of the lake's draws name the reflection pictures they
+    # sampled by content, and the rows of the reflection views (outside the scene, surface pitch 280) carry "vp".
+    def _water(self):
+        tf = {"1": ["0x00000002"] * 6, "2": ["0x00000002"] * 6,
+              "13": ["0x82000002", "0x13401086", "0x001FE0FF", "0x00000000", "0x00000000", "0x00000200"],
+              "14": ["0x82000002", "0x13441086", "0x001FE0FF", "0x00000000", "0x00000000", "0x00000200"]}
+        draw = {"kind": "draw", "frame": 1, "in_scene": True, "vs_hash": "0xBEAD84BD72072E0E", "ps_hash": "0xA17D8AEC3A817D45",
+                "tf": tf, "tfc": {"13": "0x00000000000000AA", "14": "0x00000000000000BB"}}
+        tex13 = {"kind": "texture", "frame": 1, "content": "0x00000000000000AA", "bytes": 262144, "fc": tf["13"]}
+        tex14 = {"kind": "texture", "frame": 1, "content": "0x00000000000000BB", "bytes": 262144, "fc": tf["14"]}
+        view = {"kind": "draw", "frame": 1, "in_scene": False, "surface_info": "0x04020118", "vp": {"210F": "0x3F800000"}}
+        return draw, tex13, tex14, view
+
+    def test_water_rows_name_their_pictures(self):
+        draw, tex13, tex14, view = self._water()
+        self.assertEqual(cd.check_water_rows([tex13, tex14, view, draw]), (2, []))        # one water row, one view row
+        self.assertEqual(len(cd.check_water_rows([tex14, view, draw])[1]), 1)              # slot 13's content was never written
+        self.assertEqual(len(cd.check_water_rows([tex13, tex14, view, dict(draw, tfc={})])[1]), 2)   # the row names no content
+        other = dict(tex13, fc=tex14["fc"])
+        self.assertEqual(len(cd.check_water_rows([other, tex14, view, draw])[1]), 1)       # the content belongs to another base
+        self.assertEqual(len(cd.check_water_rows([tex13, tex14, {k: v for k, v in view.items() if k != "vp"}, draw])[1]), 1)
+        scene = dict(view, in_scene=True)
+        scene.pop("vp")
+        self.assertEqual(cd.check_water_rows([tex13, tex14, scene, draw]), (1, []))        # a row of the scene has no "vp"
+        frame2 = dict(draw, frame=2)
+        self.assertEqual(len(cd.check_water_rows([tex13, tex14, view, draw, frame2])[1]), 0)   # the same content in frame 2: written once
+        self.assertEqual(cd.check_water_rows([]), (0, []))
+
+    def test_water_rows_more(self):
+        draw, tex13, tex14, view = self._water()
+        # a content's row must stand BEFORE the row that names it (the capture writes it so)
+        self.assertEqual(len(cd.check_water_rows([tex14, view, draw, tex13])[1]), 1)
+        # the views' rows of the other two kinds; a row at another pitch is none of the check's
+        for kind in ("indx", "tess"):
+            self.assertEqual(cd.check_water_rows([dict(view, kind=kind)]), (1, []))
+            self.assertEqual(len(cd.check_water_rows([{k: v for k, v in dict(view, kind=kind).items() if k != "vp"}])[1]), 1)
+        self.assertEqual(cd.check_water_rows([dict(view, surface_info="0x00000140")]), (0, []))
+        self.assertEqual(cd.check_water_rows([{"kind": "verts", "in_scene": False, "surface_info": "0x04020118"}]), (0, []))
+        # the shader named as the other rows name it ("vs": {"hash"}); another shader's row is not checked
+        nested = {k: v for k, v in draw.items() if k != "vs_hash"}
+        nested["vs"] = {"hash": "0xBEAD84BD72072E0E"}
+        self.assertEqual(cd.check_water_rows([tex13, tex14, dict(nested, tfc={})])[0], 1)
+        self.assertEqual(len(cd.check_water_rows([tex13, tex14, dict(nested, tfc={})])[1]), 2)
+        self.assertEqual(cd.check_water_rows([dict(draw, vs_hash="0x00000000000000AB", tfc={})]), (0, []))
+        # a slot that holds no reflection picture (the 128 x 128 pass at the same base) asks for nothing
+        small = dict(draw, tf=dict(draw["tf"], **{"13": ["0x81000002", "0x13401086", "0x000FE07F", "0x0", "0x0", "0x00000200"]}),
+                     tfc={"14": "0x00000000000000BB"})
+        self.assertEqual(cd.check_water_rows([tex14, small]), (1, []))
+        # the normal map (slot 2, a 2D k_DXN texture with a mip address): its texture row names its stored levels
+        nm = ["0x82000002", "0x14D40071", "0x001FE0FF", "0x00A80D10", "0x00000203", "0x14D50A18"]
+        with_nm = dict(draw, tf=dict(draw["tf"], **{"2": nm}))
+        tex_nm = {"kind": "texture", "bytes": 65536, "fc": nm, "mips": {"file": "x_mips.bin", "bytes": 4, "levels": [{"level": 1}]}}
+        self.assertEqual(cd.check_water_rows([tex13, tex14, tex_nm, with_nm]), (1, []))
+        bare = {k: v for k, v in tex_nm.items() if k != "mips"}
+        self.assertEqual(len(cd.check_water_rows([tex13, tex14, bare, with_nm])[1]), 1)   # dumped without its levels
+        self.assertEqual(len(cd.check_water_rows([tex13, tex14, with_nm])[1]), 1)         # not dumped at all
+        self.assertEqual(len(cd.check_water_rows([tex13, tex14, bare, with_nm, dict(with_nm, frame=2)])[1]), 1)   # said once a base
+
+    def test_cli_prints_and_fails_on_water_problems(self):
+        import contextlib
+        import io
+        draw, tex13, tex14, view = self._water()
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "x.jsonl").write_text("\n".join(json.dumps(r) for r in [tex13, tex14, view, draw]) + "\n")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(cd.main(["--rows-only", str(d / "x.jsonl")]), 0)
+            self.assertIn("water rows: 2 checked, 0 problems", out.getvalue())
+            (d / "x.jsonl").write_text("\n".join(json.dumps(r) for r in [tex14, view, draw]) + "\n")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(cd.main(["--rows-only", str(d / "x.jsonl")]), 1)
+            self.assertIn("water rows: 2 checked, 1 problems", out.getvalue())
+            # a capture without a water row or a view's row prints no water line
+            (d / "x.jsonl").write_text(json.dumps({"kind": "frame", "frame": 1}) + "\n")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(cd.main(["--rows-only", str(d / "x.jsonl")]), 0)
+            self.assertNotIn("water rows", out.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

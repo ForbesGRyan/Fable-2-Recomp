@@ -264,6 +264,20 @@ int main() {
     if (!FindFetchPacket(tail, 8, kVertsFetchHeader, keep) || keep[5] != 0xABCD0007u || keep[0] != 0) return 89;
     if (kVertsFetchHeader != 0x000548BAu || kVertsCmdTailDwords != 96 || kMaxVertsDataBytes != 65536u) return 89;
   }
+  // Water discovery (frame-map section 20): the surface pitches whose out-of-scene rows carry "vp", and the
+  // registers a row at pitch 280 (a reflection view) asks for beyond the viewport's.
+  {
+    using namespace fable2::native::capture;
+    if (!PictureViewportPitch(0x04020118u) || !PictureViewportPitch(0x00000140u)) return 90;   // the views' word (pitch 280); 320
+    if (PictureViewportPitch(0x11810460u) || PictureViewportPitch(0) || PictureViewportPitch(0x01180000u)) return 90;   // the scene's (1120); the pitch field alone
+    if (!ReflectionViewPitch(0x04020118u) || ReflectionViewPitch(0x00000140u) || ReflectionViewPitch(0x11810460u) || ReflectionViewPitch(0)) return 90;
+    const size_t n = sizeof(kClipRegisters) / sizeof(kClipRegisters[0]);
+    if (n != 25 || kClipRegisters[0] != 0x2204u) return 91;
+    for (size_t i = 1; i < n; ++i) {
+      if (kClipRegisters[i] <= kClipRegisters[i - 1] || kClipRegisters[i] != 0x2388u + uint32_t(i - 1)) return 91;
+    }
+    if (kClipRegisters[n - 1] != 0x239Fu) return 91;
+  }
   std::cout << "PASS: discovery format\n";
   return 0;
 }

@@ -592,6 +592,78 @@ int main() {
     if (!ContentDumpFileRoom(ContentDumpKind::kTable, u, lim) || !ContentDumpFileRoom(ContentDumpKind::kTarget, u, lim) ||
         ContentDumpFileRoom(ContentDumpKind::kPicture, u, lim)) return 206;
   }
+  // --- Water discovery (plan Task 1): the reflection pictures by content, the normal map's levels ---
+  {
+    FcArgs a;
+    a.format = 6; a.w = 256; a.h = 256; a.pitch = 256; a.endian = 2; a.base = 0x13401000; a.mip = 0;
+    a.mip_max = 0; a.packed = false; a.clamp_x = 0; a.clamp_y = 0;
+    uint32_t p[6];
+    MakeFc(a, p);
+    if (DumpKeyedByContent(p)) return 210;                                       // by its constant alone: once an address, as before
+    if (!WaterPictureFetch(p)) return 211;
+    if (!DumpKeyedByContentAt(p, true, 13) || !DumpKeyedByContentAt(p, true, 14)) return 212;
+    if (DumpKeyedByContentAt(p, false, 13) || DumpKeyedByContentAt(p, true, 0) || DumpKeyedByContentAt(p, true, 2)) return 213;   // another row, another slot
+    if (ContentDumpKindOf(p, true) != ContentDumpKind::kReflection || ContentDumpKindOf(p) != ContentDumpKind::kTarget) return 214;
+    a.w = 128; a.h = 128; a.pitch = 128;                                         // the 128 x 128 passes before the views: not a picture
+    MakeFc(a, p);
+    if (WaterPictureFetch(p) || DumpKeyedByContentAt(p, true, 13)) return 215;
+    a.w = 256; a.h = 256; a.pitch = 256; a.format = 3;                           // an impostor's picture keeps its own rule and kind
+    MakeFc(a, p);
+    if (!DumpKeyedByContentAt(p, false, 0) || ContentDumpKindOf(p) != ContentDumpKind::kPicture || WaterPictureFetch(p)) return 216;
+    // (a constant the old rule takes keeps its kind at a water row's slot 13 too: `reflection` is only for the new rule's own)
+    if (!DumpKeyedByContentAt(p, true, 13) || WaterPictureFetch(p)) return 216;
+    // the reflection budget is its own: full, it refuses a reflection and nothing else; the others full, it still has room
+    ContentDumpUse use;
+    use.reflection_files = kContentDumpLimits.reflection_files;
+    if (ContentDumpFileRoom(ContentDumpKind::kReflection, use, kContentDumpLimits) ||
+        !ContentDumpFileRoom(ContentDumpKind::kTable, use, kContentDumpLimits) ||
+        !ContentDumpFileRoom(ContentDumpKind::kPicture, use, kContentDumpLimits)) return 217;
+    if (ContentDumpHasRoom(ContentDumpKind::kReflection, 262144, use, kContentDumpLimits) ||
+        !ContentDumpHasRoom(ContentDumpKind::kTarget, 262144, use, kContentDumpLimits) ||
+        !ContentDumpHasRoom(ContentDumpKind::kPicture, 131072, use, kContentDumpLimits)) return 217;
+    use = ContentDumpUse{};
+    use.files = kContentDumpLimits.files;
+    use.picture_files = kContentDumpLimits.picture_files;
+    use.bytes = kContentDumpLimits.bytes;
+    use.picture_bytes = kContentDumpLimits.picture_bytes;
+    if (!ContentDumpHasRoom(ContentDumpKind::kReflection, 262144, use, kContentDumpLimits)) return 218;
+    // the reflection bytes' edge, and no wrap
+    use = ContentDumpUse{};
+    use.reflection_bytes = kContentDumpLimits.reflection_bytes - 262143;
+    if (ContentDumpHasRoom(ContentDumpKind::kReflection, 262144, use, kContentDumpLimits)) return 218;
+    use.reflection_bytes = kContentDumpLimits.reflection_bytes - 262144;
+    if (!ContentDumpHasRoom(ContentDumpKind::kReflection, 262144, use, kContentDumpLimits) ||
+        ContentDumpHasRoom(ContentDumpKind::kReflection, 0xFFFFFFFFFFFFFFFFull, use, kContentDumpLimits) ||
+        ContentDumpHasRoom(ContentDumpKind::kReflection, 0, ContentDumpUse{}, kContentDumpLimits)) return 218;
+    use = ContentDumpCounted(ContentDumpKind::kReflection, 262144, ContentDumpUse{});
+    if (use.reflection_files != 1 || use.reflection_bytes != 262144 || use.files != 0 || use.bytes != 0 || use.picture_files != 0) return 219;
+    // (the other kinds count nothing against the reflections)
+    use = ContentDumpCounted(ContentDumpKind::kTarget, 4096, ContentDumpCounted(ContentDumpKind::kPicture, 131072, ContentDumpUse{}));
+    if (use.reflection_files != 0 || use.reflection_bytes != 0 || use.files != 1 || use.picture_files != 1) return 219;
+    if (kContentDumpLimits.reflection_files != 256 || kContentDumpLimits.reflection_bytes != 256ull * 262144ull) return 207;
+    // (the budgets of sub-project 12 stand)
+    if (kContentDumpLimits.files != 1024 || kContentDumpLimits.bytes != (512ull << 20) || kContentDumpLimits.picture_files != 448 ||
+        kContentDumpLimits.picture_bytes != 448ull * 131072ull) return 207;
+    // the normal map's levels: slot 2 of a water row alone
+    a.format = 49; a.mip = 0x14D50000; a.mip_max = 8; a.base = 0x14D40000;
+    MakeFc(a, p);
+    if (!DumpMipsAt(p, false, true, 2) || DumpMipsAt(p, false, false, 2) || DumpMipsAt(p, false, true, 1)) return 208;
+    if (!DumpMipsAt(p, true, false, 0)) return 209;                              // a decoded texture: as before, whatever the row
+    a.format = 24;                                                               // (another undecoded format at the slot: no levels)
+    MakeFc(a, p);
+    if (DumpMipsAt(p, false, true, 2)) return 208;
+    a.format = 49; a.dim = 3;                                                    // (not a 2D texture)
+    MakeFc(a, p);
+    if (DumpMipsAt(p, false, true, 2)) return 208;
+    // The captured constants themselves (CAP 155547, a water row's slots 13, 14 and 2; the 128 x 128 pass at the same base)
+    const uint32_t cap13[6] = {0x82000002u, 0x13401086u, 0x001FE0FFu, 0x00A80C14u, 0x00000003u, 0x00000218u};
+    const uint32_t cap14[6] = {0x82000002u, 0x13441086u, 0x001FE0FFu, 0x00A80C14u, 0x00000003u, 0x00000218u};
+    const uint32_t cap2[6] = {0x82000002u, 0x14D40071u, 0x001FE0FFu, 0x00A80D10u, 0x00000203u, 0x14D50A18u};
+    const uint32_t cap128[6] = {0x81000002u, 0x13401086u, 0x000FE07Fu, 0x00A80C14u, 0x00000003u, 0x00000218u};
+    if (!DumpKeyedByContentAt(cap13, true, 13) || !DumpKeyedByContentAt(cap14, true, 14) || DumpKeyedByContent(cap13) ||
+        DumpKeyedByContentAt(cap128, true, 13) || DumpKeyedByContentAt(cap2, true, 2)) return 209;
+    if (!DumpMipsAt(cap2, false, true, 2) || DumpMipsAt(cap13, false, true, 13)) return 209;
+  }
   // --- k_DXN (format 49): two BC4 blocks per 4 x 4 block, the terrain's normal map (tf17) ---
   // The same blocks and numbers as test_decode_dxn of tests/test_terrain_replay.py.
   {

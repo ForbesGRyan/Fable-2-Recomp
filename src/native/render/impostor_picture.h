@@ -196,12 +196,22 @@ constexpr bool ImpostorPictureUsable(const ImpostorPictureStats& s) {
 // one chain of 16,384 dependent steps; measured in tests/native/test_impostor_picture.cpp's tool mode, with
 // optimisation: frame-map section 19, "The pictures in the pass"). A lane's step, lane = rotl(lane ^ word, 29) *
 // kP1, is a bijection of the word for a given lane and of the lane for a given word, the lanes start apart, each
-// lane is folded into the result by a bijection of its own, and the size is part of the hash: so a change
-// confined to ONE word (any one byte, any bits of it) always changes the hash, two lanes or two blocks exchanged
-// give another hash, and a change spread over several words goes unseen only as two 64-bit hashes collide. The
-// rotation carries a word's top bit down before the product, so that the same bit changed in two words of a lane
-// does not cancel. The bytes after the last whole block are padded with zeros to one more block. No bytes: the
-// seed. Not a hash against an adversary: the bytes are the game's own pictures.
+// lane is folded into the result by a bijection of its own, and the size is part of the hash: so every byte
+// contributes, and a change confined to ONE word (any one byte, any bits of it) always changes the hash. No more
+// is claimed (corrected after the review of the closing fix, I-A; the sentence here said that a change spread
+// over several words goes unseen only as two 64-bit hashes collide, which is false). The product carries a
+// difference upwards only, so a difference that the rotation puts at bit 63 leaves the step as bit 63 alone,
+// whatever the data: certain pairs of bits in NEIGHBOURING BLOCKS OF ONE LANE cancel. Bit 34 of a word changed
+// together with bit 63 of the same lane's word in the next block (64 bytes on) gives the same hash always; bit 33
+// with the next word's bit 62, and bit 32 with its bit 61, in some pictures. The rotation only moved the weak bit
+// from 63 to 34 (the same bit changed in two words of a lane does not cancel; the test tries that pairing alone).
+// So the hash is NOT collision-resistant against made inputs. What that can cost in the game: at worst a picture
+// that differs from the one uploaded in low bits of two texels is taken as unchanged and the earlier picture is
+// kept until the next change (a word is four big-endian 16-bit texels; a change of the size the captures show,
+// about 1.2% of the texels in all eight lanes, cannot cancel so). A second rotation and product in the step would
+// close it; that changes every hash and the pinned values, and waits for the next build of this header (ledger
+// ruling 57). The bytes after the last whole block are padded with zeros to one more block. No bytes: the seed.
+// Not a hash against an adversary: the bytes are the game's own pictures.
 inline uint64_t ImpostorPictureHash(const uint8_t* data, size_t size) {
   constexpr uint64_t kP1 = 0x9E3779B185EBCA87ull, kP2 = 0xC2B2AE3D27D4EB4Full, kP3 = 0x165667B19E3779F9ull, kP4 = 0x85EBCA77C2B2AE63ull;
   constexpr uint64_t kSeed = 1469598103934665603ull;
